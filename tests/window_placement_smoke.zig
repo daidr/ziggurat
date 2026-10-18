@@ -91,7 +91,12 @@ const Probe = struct {
                 if (!state.visible) return;
                 if (builtin.os.tag == .linux and gtk_widget_get_mapped(self.window.nativeHandle().?) == 0) return;
                 self.topology = try p.refresh(self.window);
-                try self.tracker.confirmNormal(self.window, &self.topology);
+                // A newly mapped toolkit window can report client bounds that
+                // trail the window manager's configure; wait for the next event.
+                self.tracker.confirmNormal(self.window, &self.topology) catch |err| {
+                    if (err == error.GeometryPending) return;
+                    return err;
+                };
                 var offscreen = try self.tracker.snapshot();
                 offscreen.display = try p.Key.init("disconnected-display");
                 offscreen.normal.position = .{ .x = 1000000, .y = -1000000 };
