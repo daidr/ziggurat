@@ -61,6 +61,8 @@ try {
     Assert-Rejected @('publish', $manifest, $public, $identity, $target, '0.0.0.0', $zip, $root)
     if ([IO.File]::ReadAllText((Join-Path $root 'user-data.txt')) -cne 'keep') { throw 'Publication changed application data.' }
     if ((Get-FileHash -LiteralPath $tool).Hash -cne $originalHash) { throw 'Original executable changed.' }
+    # The last native call above is an expected rejection; do not leak its exit code to the caller.
+    $global:LASTEXITCODE = 0
     Write-Output 'Update package smoke passed: signed metadata, real deflated package, tamper/downgrade rejection, immutable publication and actual new executable launch.'
 } finally {
     $resolvedTemporary = [IO.Path]::GetFullPath($temporary)
