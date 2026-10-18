@@ -116,7 +116,7 @@ pub const Phase = enum { normalize, target, fit, geometry, mode, complete, cance
 /// state events. Waiting never arms a timer or pumps messages. Errors may follow
 /// already accepted native steps; phase/plan remain available for inspection.
 pub const Restorer = struct {
-    const max_refits = 2;
+    const max_refits = 8;
     window: z.Window,
     thread: std.Thread.Id,
     saved: State,
@@ -232,7 +232,7 @@ pub const Restorer = struct {
                         // further geometry event arrives for a client that
                         // already matches; fit again against current insets.
                         const settled = try model.resolveOn(self.saved, &self.topology, self.display_index, current.metrics, self.constraints);
-                        if (!contained or !std.meta.eql(settled.bounds, desired)) {
+                        if (!std.meta.eql(settled.bounds, desired)) {
                             self.refits += 1;
                             self.phase = .fit;
                             continue;

@@ -306,6 +306,7 @@ fn run(allocator: std.mem.Allocator, require_wm: bool) !void {
     }
     if (probe.watchdog.expired.load(.acquire)) {
         std.debug.print("placement stage {s}, restorer phase {s}: timed out\n", .{ @tagName(probe.stage), @tagName(probe.restorer.phase) });
+        std.debug.print("placement plan {any}, refits {d}\n", .{ probe.restorer.plan, probe.restorer.refits });
         return error.WindowPlacementTimeout;
     }
     try std.testing.expectEqual(Stage.done, probe.stage);
