@@ -1106,7 +1106,8 @@ pub fn build(b: *std.Build) void {
     }
     if (accessibility) {
         if (target.result.os.tag != .windows) @panic("UI Automation requires Windows");
-        _ = native_support.add(b, ui, "ui-accessibility-native", "src/ui/accessibility.c", &.{"-std=c11"}, target, optimize);
+        // An archive member is linked only by programs that reference UIA.
+        _ = native_support.addArchive(b, ui, "ui-accessibility-native", "src/ui/accessibility.c", &.{"-std=c11"}, target, optimize);
         ui.linkSystemLibrary("uiautomationcore", .{});
         ui.linkSystemLibrary("oleaut32", .{});
     }
@@ -1324,6 +1325,7 @@ pub fn build(b: *std.Build) void {
             native.addIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
             native.addIncludePath(b.path("src/webview/include"));
         }
+        addWindowsProfileNative(b, view, "webview", sdk, target, optimize);
         view.linkSystemLibrary("ole32", .{});
         view.linkSystemLibrary("shlwapi", .{});
         view.linkSystemLibrary("urlmon", .{});
@@ -1359,6 +1361,7 @@ pub fn build(b: *std.Build) void {
             native.addIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
             native.addIncludePath(b.path("src/webview/include"));
         }
+        addWindowsProfileNative(b, credentials_view, "credential-probe", sdk, target, optimize);
         for ([_][]const u8{ "ole32", "shlwapi", "urlmon", "oleaut32", "crypt32" }) |library| credentials_view.linkSystemLibrary(library, .{});
         const credentials_smoke = b.addExecutable(.{ .name = "smoke-request-credentials", .root_module = b.createModule(.{
             .root_source_file = b.path("tests/windows_request_credentials_smoke.zig"),
@@ -1404,6 +1407,7 @@ pub fn build(b: *std.Build) void {
             native.addIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
             native.addIncludePath(b.path("src/webview/include"));
         }
+        addWindowsProfileNative(b, initializers_view, "initializer-probe", sdk, target, optimize);
         for ([_][]const u8{ "ole32", "shlwapi", "urlmon", "oleaut32", "crypt32" }) |library| initializers_view.linkSystemLibrary(library, .{});
         const initializers_smoke = b.addExecutable(.{ .name = "smoke-document-initializers", .root_module = b.createModule(.{
             .root_source_file = b.path("tests/windows_document_initializers_smoke.zig"),
@@ -1475,6 +1479,7 @@ pub fn build(b: *std.Build) void {
         _ = native_support.add(b, page_authorization.root_module, "page-authorization-stream-native", "src/file_stream/windows_core.c", &.{"-std=c11"}, target, optimize);
         page_authorization.root_module.addIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
         page_authorization.root_module.addIncludePath(b.path("src/webview/include"));
+        addWindowsProfileNative(b, page_authorization.root_module, "page-authorization", sdk, target, optimize);
         for ([_][]const u8{ "user32", "ole32", "shlwapi", "gdi32", "urlmon", "oleaut32" }) |library| page_authorization.root_module.linkSystemLibrary(library, .{});
         check.dependOn(&page_authorization.step);
         const page_authorization_run = b.addRunArtifact(page_authorization);
@@ -1497,6 +1502,7 @@ pub fn build(b: *std.Build) void {
         _ = native_support.add(b, initializer_native.root_module, "initializer-stream-native", "src/file_stream/windows_core.c", &.{"-std=c11"}, target, optimize);
         initializer_native.root_module.addIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
         initializer_native.root_module.addIncludePath(b.path("src/webview/include"));
+        addWindowsProfileNative(b, initializer_native.root_module, "initializer-native", sdk, target, optimize);
         for ([_][]const u8{ "user32", "ole32", "shlwapi", "gdi32", "urlmon", "oleaut32" }) |library| initializer_native.root_module.linkSystemLibrary(library, .{});
         check.dependOn(&initializer_native.step);
         initializer_native_run = b.addRunArtifact(initializer_native);
@@ -1958,7 +1964,8 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&gaussian_tests.step);
     test_step.dependOn(&run_gaussian_tests.step);
     b.step("test-gaussian", "Verify bounded composed-image Gaussian preparation, worker handoff and resource leases").dependOn(&run_gaussian_tests.step);
-    const profile_storage_module = b.createModule(.{ .root_source_file = b.path("src/webview/profile_storage.zig"), .target = target, .optimize = optimize });
+    const profile_storage_module = b.createModule(.{ .root_source_file = b.path("src/webview/profile_storage.zig"), .target = target, .optimize = optimize, .link_libc = target.result.os.tag == .windows });
+    if (target.result.os.tag == .windows) addWindowsProfileStorageNative(b, profile_storage_module, "profile-storage-test", target, optimize);
     const profile_storage_tests = b.addTest(.{ .root_module = profile_storage_module });
     const run_profile_storage_tests = b.addRunArtifact(profile_storage_tests);
     check.dependOn(&profile_storage_tests.step);
@@ -2242,6 +2249,24 @@ fn addWebNativeBoundarySmoke(b: *std.Build, target: std.Build.ResolvedTarget, op
     run.step.dependOn(&b.top_level_steps.get("webview-runtime").?.step);
     if (b.args) |args| run.addArgs(args);
     b.step(name, "Verify synchronous SDK completion cannot borrow pointer ingress").dependOn(&run.step);
+}
+
+/// The WebView2 adapter references the owned Profile lifetime, storage and
+/// session objects. Every module that compiles or includes the adapter links
+/// them once, together with their security and certificate libraries.
+fn addWindowsProfileNative(b: *std.Build, owner: *std.Build.Module, prefix: []const u8, sdk: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    const native = native_support.add(b, owner, b.fmt("{s}-windows_profile.c", .{prefix}), "src/webview/windows_profile.c", &.{"-std=c11"}, target, optimize);
+    native.addIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
+    native.addIncludePath(b.path("src/webview/include"));
+    owner.linkSystemLibrary("crypt32", .{});
+    addWindowsProfileStorageNative(b, owner, prefix, target, optimize);
+}
+
+/// Profile storage preparation and process lifetime need no WebView2 SDK.
+fn addWindowsProfileStorageNative(b: *std.Build, owner: *std.Build.Module, prefix: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    for ([_][]const u8{ "windows_profile_lifetime.c", "windows_profile_storage.c" }) |file|
+        _ = native_support.add(b, owner, b.fmt("{s}-{s}", .{ prefix, file }), b.fmt("src/webview/{s}", .{file}), &.{"-std=c11"}, target, optimize);
+    owner.linkSystemLibrary("advapi32", .{});
 }
 
 fn addSmoke(b: *std.Build, name: []const u8, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) void {

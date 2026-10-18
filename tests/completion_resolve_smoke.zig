@@ -112,7 +112,17 @@ const Host = struct {
     }
     fn post(self: *@This(), event: Ev) !void {
         self.event = event;
-        try self.app.post(.{ .context = self, .call = delivered });
+        // Case 4 deliberately leaves the owner queue full of no-op tasks when
+        // it hands the next command to this worker. Full transfers nothing, so
+        // the worker backs off until the owner drains them; Closed still ends.
+        while (true) {
+            self.app.post(.{ .context = self, .call = delivered }) catch |err| {
+                if (err != error.Full) return err;
+                std.Thread.sleep(std.time.ns_per_ms);
+                continue;
+            };
+            return;
+        }
     }
     fn delivered(ptr: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(ptr));

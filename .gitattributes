@@ -1,0 +1,11 @@
+# Keep checked-out sources byte-identical on every platform: `zig fmt --check`
+# rejects CRLF, and fixtures, digests and embedded files are compared exactly.
+* text=auto eol=lf
+
+*.bmp binary
+*.gif binary
+*.ico binary
+*.jpg binary
+*.png binary
+*.rgba binary
+*.webp binary
