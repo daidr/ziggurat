@@ -116,6 +116,7 @@ pub const Phase = enum { normalize, target, fit, geometry, mode, complete, cance
 /// state events. Waiting never arms a timer or pumps messages. Errors may follow
 /// already accepted native steps; phase/plan remain available for inspection.
 pub const Restorer = struct {
+    const max_refits = 2;
     window: z.Window,
     thread: std.Thread.Id,
     saved: State,
@@ -132,6 +133,7 @@ pub const Restorer = struct {
     maximize_sent: bool = false,
     fullscreen_sent: bool = false,
     topmost_sent: bool = false,
+    refits: u8 = 0,
     pub fn init(window: z.Window, saved: State, topology: Topology, constraints: Constraints) !Restorer {
         try owner(window, window.app.owner);
         const scope = window.beginCallback() orelse return error.Closed;
@@ -221,7 +223,22 @@ pub const Restorer = struct {
                     const desired = self.plan.?.bounds;
                     const work = self.topology.monitors[self.display_index].work;
                     const frame = current.frame;
-                    if (observed.position == null or observed.width != desired.width or observed.height != desired.height or observed.position.?.x != desired.position.x or observed.position.?.y != desired.position.y or !std.meta.eql(current.observed, desired) or frame.x < work.x or frame.y < work.y or frame.right() > work.right() or frame.bottom() > work.bottom()) return if (state.visible) .waiting else .needs_show;
+                    const landed = observed.position != null and observed.width == desired.width and observed.height == desired.height and observed.position.?.x == desired.position.x and observed.position.?.y == desired.position.y and std.meta.eql(current.observed, desired);
+                    const contained = frame.x >= work.x and frame.y >= work.y and frame.right() <= work.right() and frame.bottom() <= work.bottom();
+                    if (landed and self.refits < max_refits) {
+                        // Frame insets observed while a mode change settles can
+                        // differ from the final decorations, so a plan fitted
+                        // against them is wrong once the client lands. No
+                        // further geometry event arrives for a client that
+                        // already matches; fit again against current insets.
+                        const settled = try model.resolveOn(self.saved, &self.topology, self.display_index, current.metrics, self.constraints);
+                        if (!contained or !std.meta.eql(settled.bounds, desired)) {
+                            self.refits += 1;
+                            self.phase = .fit;
+                            continue;
+                        }
+                    }
+                    if (!landed or !contained) return if (state.visible) .waiting else .needs_show;
                     self.phase = .mode;
                 },
                 .mode => {

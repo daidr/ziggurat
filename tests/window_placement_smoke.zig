@@ -223,11 +223,24 @@ const Watchdog = struct {
     fn run(self: *@This()) void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        while (!self.done) self.condition.timedWait(&self.mutex, 15 * std.time.ns_per_s) catch {
-            self.expired.store(true, .release);
-            self.app.post(.{ .context = self, .call = timeout }) catch {};
-            return;
+        // A settled window manager change does not always produce another
+        // geometry event, so re-drive the probe periodically until it finishes.
+        var waited: u64 = 0;
+        while (!self.done) self.condition.timedWait(&self.mutex, nudge_interval) catch {
+            waited += nudge_interval;
+            if (waited >= 15 * std.time.ns_per_s) {
+                self.expired.store(true, .release);
+                self.app.post(.{ .context = self, .call = timeout }) catch {};
+                return;
+            }
+            self.app.post(.{ .context = self, .call = nudge }) catch {};
         };
+    }
+    const nudge_interval = 250 * std.time.ns_per_ms;
+    fn nudge(ptr: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        const probe: *Probe = @fieldParentPtr("watchdog", self);
+        if (probe.failure == null and !probe.posted) probe.drive();
     }
     fn timeout(ptr: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
@@ -291,7 +304,10 @@ fn run(allocator: std.mem.Allocator, require_wm: bool) !void {
         std.debug.print("placement stage {s}: {}\n", .{ @tagName(probe.stage), err });
         return err;
     }
-    if (probe.watchdog.expired.load(.acquire)) return error.WindowPlacementTimeout;
+    if (probe.watchdog.expired.load(.acquire)) {
+        std.debug.print("placement stage {s}, restorer phase {s}: timed out\n", .{ @tagName(probe.stage), @tagName(probe.restorer.phase) });
+        return error.WindowPlacementTimeout;
+    }
     try std.testing.expectEqual(Stage.done, probe.stage);
     try std.testing.expectEqual(@as(usize, 2), probe.closed);
     try std.testing.expectEqual(@as(usize, 0), app.resourceStats().allocated_records);
