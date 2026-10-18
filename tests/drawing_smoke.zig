@@ -115,7 +115,7 @@ fn software(paint_context: *anyopaque, window: ?*anyopaque) !void {
         invalid.size.scale = 1e30;
         try std.testing.expectError(error.InvalidGeometry, renderer.begin(invalid));
         try std.testing.expect(renderer.hasSurface());
-        const malformed = [_]commands.Command{ .{ .push_clip = .{ .x = 1, .y = 1, .width = 10, .height = 10 } }, .{ .shape = .{ .bounds = .{ .x = 0, .y = 0, .width = 20, .height = 20 }, .color = Color.rgb(0), .radius = std.math.nan(f32) } } };
+        const malformed = [_]commands.Command{ .{ .push_clip = .{ .x = 1, .y = 1, .width = 10, .height = 10 } }, .{ .shape = .{ .bounds = .{ .x = 0, .y = 0, .width = 20, .height = 20 }, .color = Color.rgb(0), .radius = std.math.nan(f32) } }, .pop_clip };
         try std.testing.expectError(error.InvalidGeometry, renderer.replay(&malformed, ""));
         try renderer.replay(buffer.commands(), buffer.textBytes());
         try check(SoftwareReader{ .renderer = &renderer, .scale = scale });
