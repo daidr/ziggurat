@@ -1,7 +1,10 @@
 name: native checks
 
 on:
+  # Pull requests already run every check on their head; a branch push would
+  # start a second, identical run.
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:
