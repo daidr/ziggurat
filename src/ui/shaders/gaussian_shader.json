@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "sdk": "10.0.26100.0",
+  "compiler_version": "10.0.26100.6901 (WinBuild.160101.0800)",
+  "compiler_sha256": "d4b03c57cb0eae13723d0d6e717a7281aa077a07665505efde32c203799a09b0",
+  "source_sha256": "719622bb1f69b63a4ac8afa1863b6843d7cbaef1a2b25bdcbd24d3da54c5c752",
+  "flags": [
+    "/Ges",
+    "/Gis",
+    "/O3"
+  ],
+  "stages": [
+    {
+      "stage": "vertex",
+      "profile": "vs_4_0",
+      "bytecode_bytes": 568,
+      "bytecode_sha256": "1147dbb2cb2840f8bcd7e5d92e4c01b3ba94b0db9e35339749643f00ff7ebb13"
+    },
+    {
+      "stage": "pixel",
+      "profile": "ps_4_0",
+      "bytecode_bytes": 1944,
+      "bytecode_sha256": "cb21ff0dc4ffecb54a0761449987099ede02f22d7c9f90f355be5fda57af8f79"
+    }
+  ]
+}

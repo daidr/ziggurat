@@ -1,0 +1,2277 @@
+const std = @import("std");
+const packaging = @import("build_support/packaging.zig");
+const native_support = @import("build_support/native.zig");
+
+pub fn build(b: *std.Build) void {
+    b.installFile("LICENSE", "share/ziggurat/LICENSE");
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const web = b.option(bool, "webview", "Build the optional system WebView (Windows SDK or Linux WebKitGTK)") orelse false;
+    const https_resources_enabled = b.option(bool, "https-resources", "Build the optional HTTPS resource transport on Windows or Linux") orelse false;
+    const gpu = b.option(bool, "gpu", "Build the optional D3D11 renderer with GDI fallback") orelse false;
+    const webp = b.option(bool, "webp", "Build the optional pinned WebP decoder (fetch source first)") orelse false;
+    const accessibility = b.option(bool, "accessibility", "Build the optional Windows UI Automation bridge") orelse false;
+    const check = b.step("check", "Compile selected examples and tests without running them");
+    const test_step = b.step("test", "Run invariant tests without opening windows");
+    var view_tests: ?*std.Build.Step.Compile = null;
+    var webkit_file_run: ?*std.Build.Step.Run = null;
+    var initializer_native_run: ?*std.Build.Step.Run = null;
+    const pointer_classifier = b.createModule(.{
+        .root_source_file = b.path("src/platform/pointer_clicks.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const classifier_tests = b.addTest(.{ .root_module = pointer_classifier });
+    check.dependOn(&classifier_tests.step);
+    const run_classifier_tests = b.addRunArtifact(classifier_tests);
+    test_step.dependOn(&run_classifier_tests.step);
+    b.step("test-pointer-classifier", "Run clock-free pointer timing, distance and wrap contracts").dependOn(&run_classifier_tests.step);
+    const core = b.addModule("ziggurat", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "pointer_classifier", .module = pointer_classifier }},
+    });
+    const ipc = b.addModule("ziggurat_ipc", .{ .root_source_file = b.path("src/ipc/root.zig"), .target = target, .optimize = optimize });
+    const webview_runtime = b.addModule("ziggurat_webview_runtime", .{ .root_source_file = b.path("src/webview_runtime/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    if (target.result.os.tag == .windows) webview_runtime.linkSystemLibrary("ole32", .{});
+    if (target.result.os.tag == .linux) webview_runtime.linkSystemLibrary("dl", .{ .use_pkg_config = .no });
+    const runtime_tests = b.addTest(.{ .root_module = webview_runtime });
+    check.dependOn(&runtime_tests.step);
+    const run_runtime_tests = b.addRunArtifact(runtime_tests);
+    b.step("test-webview-runtime", "Verify explicit worker runtime discovery contracts without a page").dependOn(&run_runtime_tests.step);
+    if (target.result.os.tag == .linux) {
+        // Explicit test-only ICU dependency; ordinary libraries/test/check do
+        // not require system ICU headers or its word dictionary data.
+        const word_units = b.addExecutable(.{ .name = "test-document-word-units", .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }) });
+        word_units.root_module.addCSourceFile(.{ .file = b.path("tests/document_accessibility_words.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        word_units.root_module.linkSystemLibrary("icu-i18n", .{ .use_pkg_config = .force });
+        b.step("test-document-word-units", "Run independent system ICU word and grapheme boundary corpora").dependOn(&b.addRunArtifact(word_units).step);
+    }
+    if (target.result.os.tag == .windows) {
+        const runtime_smoke = b.addExecutable(.{ .name = "smoke-webview-runtime", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/webview_runtime_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "ziggurat_webview_runtime", .module = webview_runtime }},
+        }) });
+        check.dependOn(&runtime_smoke.step);
+        b.step("build-smoke-webview-runtime", "Build standalone engine discovery harness; run with an explicit loader DLL path").dependOn(&b.addInstallArtifact(runtime_smoke, .{}).step);
+    }
+    if (target.result.os.tag == .linux) {
+        // A no-GTK harness: only explicit test DSOs are loaded by this target.
+        // A real SDK path is an optional caller argument, never a default probe.
+        const runtime_smoke = b.addExecutable(.{ .name = "smoke-webview-runtime-linux", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/webview_runtime_linux_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "ziggurat_webview_runtime", .module = webview_runtime }},
+            .link_libc = true,
+        }) });
+        runtime_smoke.root_module.linkSystemLibrary("dl", .{ .use_pkg_config = .no });
+        check.dependOn(&runtime_smoke.step);
+        const runtime_run = b.addRunArtifact(runtime_smoke);
+        const runtime_build = b.step("build-smoke-webview-runtime-linux", "Build worker discovery and four explicit test-only DSOs without GTK");
+        runtime_build.dependOn(&b.addInstallArtifact(runtime_smoke, .{}).step);
+        for ([_]?[]const u8{ null, "RUNTIME_FIXTURE_OMIT_MAJOR", "RUNTIME_FIXTURE_OMIT_MINOR", "RUNTIME_FIXTURE_OMIT_MICRO" }, 0..) |omit, i| {
+            const fixture = b.addLibrary(.{ .name = b.fmt("runtime-discovery-fixture-{d}", .{i}), .linkage = .dynamic, .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }) });
+            const flags: []const []const u8 = if (omit) |define| &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-fPIC", b.fmt("-D{s}", .{define}) } else &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-fPIC" };
+            fixture.root_module.addCSourceFile(.{ .file = b.path("tests/webview_runtime_linux_fixture.c"), .flags = flags });
+            runtime_run.addArtifactArg(fixture);
+            runtime_build.dependOn(&b.addInstallArtifact(fixture, .{}).step);
+        }
+        // The dependency has a unique SONAME and stays only in the build
+        // cache. Pass its file directly, rather than linkLibrary (which adds
+        // a search path), so this consumer has a controlled unresolved need.
+        const runtime_dependency = b.addLibrary(.{ .name = "ziggurat-runtime-missingdependency", .version = .{ .major = 0, .minor = 0, .patch = 0 }, .linkage = .dynamic, .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }) });
+        runtime_dependency.root_module.addCSourceFile(.{ .file = b.path("tests/webview_runtime_linux_dependency.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-fPIC" } });
+        const runtime_consumer = b.addLibrary(.{ .name = "runtime-discovery-needs-dependency", .linkage = .dynamic, .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }) });
+        runtime_consumer.root_module.addCSourceFile(.{ .file = b.path("tests/webview_runtime_linux_dependency.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-fPIC", "-DRUNTIME_FIXTURE_NEEDS_DEPENDENCY" } });
+        runtime_consumer.each_lib_rpath = false;
+        runtime_consumer.root_module.addObjectFile(runtime_dependency.getEmittedBin());
+        runtime_run.addArg("--failed-load");
+        runtime_run.addArtifactArg(runtime_consumer);
+        runtime_build.dependOn(&b.addInstallArtifact(runtime_consumer, .{}).step);
+        if (b.args) |args| runtime_run.addArgs(args);
+        b.step("smoke-webview-runtime-linux", "Run explicit worker and test-DSO discovery contracts; optional real DSO path follows --").dependOn(&runtime_run.step);
+        const runtime_oracle = b.addExecutable(.{ .name = "webview-runtime-linux-oracle", .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }) });
+        runtime_oracle.root_module.addCSourceFile(.{ .file = b.path("tests/webview_runtime_linux_oracle.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        runtime_oracle.root_module.linkSystemLibrary("dl", .{ .use_pkg_config = .no });
+        runtime_oracle.root_module.linkSystemLibrary("pthread", .{ .use_pkg_config = .no });
+        b.step("build-webview-runtime-linux-oracle", "Build the independent no-display worker version oracle; run with an explicit DSO path").dependOn(&b.addInstallArtifact(runtime_oracle, .{}).step);
+    }
+    const window_placement = b.addModule("ziggurat_window_placement", .{ .root_source_file = b.path("src/window_placement/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }}, .link_libc = true });
+    if (target.result.os.tag == .windows) window_placement.linkSystemLibrary("user32", .{});
+    if (target.result.os.tag == .linux) {
+        const native = native_support.add(b, window_placement, "window-placement-native", "src/window_placement/native_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        window_placement.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+    }
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux) addSmoke(b, "smoke-window-placement", "tests/window_placement_smoke.zig", target, optimize, &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_window_placement", .module = window_placement } });
+    const resource_stream = b.addModule("ziggurat_resource_stream", .{ .root_source_file = b.path("src/resource_stream/root.zig"), .target = target, .optimize = optimize });
+    const http_response = b.addModule("ziggurat_http_response", .{ .root_source_file = b.path("src/http_response/root.zig"), .target = target, .optimize = optimize });
+    const tls_pem = b.createModule(.{ .root_source_file = b.path("src/tls_pem/root.zig"), .target = target, .optimize = optimize });
+    const file_stream = b.addModule("ziggurat_file_stream", .{ .root_source_file = b.path("src/file_stream/root.zig"), .target = target, .optimize = optimize });
+    if (target.result.os.tag == .windows) {
+        file_stream.link_libc = true;
+        _ = native_support.add(b, file_stream, "file-stream-core-native", "src/file_stream/windows_core.c", &.{"-std=c11"}, target, optimize);
+        _ = native_support.add(b, file_stream, "file-stream-file-native", "src/file_stream/windows_file.c", &.{"-std=c11"}, target, optimize);
+        file_stream.linkSystemLibrary("kernel32", .{});
+    }
+    if (target.result.os.tag == .linux) {
+        file_stream.link_libc = true;
+        const native = native_support.add(b, file_stream, "file-stream-native", "src/file_stream/linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native.linkSystemLibrary("gio-unix-2.0", .{ .use_pkg_config = .force });
+        file_stream.linkSystemLibrary("gio-unix-2.0", .{ .use_pkg_config = .force });
+    }
+    const native_stream = b.addModule("ziggurat_native_stream", .{
+        .root_source_file = b.path("src/native_stream/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "ziggurat_file_stream", .module = file_stream }},
+    });
+    const https_resources = b.addModule("ziggurat_https_resources", .{ .root_source_file = b.path("src/https_resources/root.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_http_response", .module = http_response },
+        .{ .name = "ziggurat_file_stream", .module = file_stream },
+        .{ .name = "ziggurat_tls_pem", .module = tls_pem },
+    } });
+    const https_resources_options = b.addOptions();
+    https_resources_options.addOption(bool, "enabled", https_resources_enabled);
+    https_resources.addOptions("ziggurat_https_resources_options", https_resources_options);
+    if (https_resources_enabled and target.result.os.tag == .windows)
+        @import("build_support/windows_https.zig").add(b, https_resources, target, optimize);
+    if (https_resources_enabled and target.result.os.tag == .linux) {
+        https_resources.link_libc = true;
+        const native = native_support.add(b, https_resources, "https-resources-native", "src/https_resources/linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        const transport_native = native_support.add(b, https_resources, "https-transport-native", "src/https_resources/transport_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        for ([_][]const u8{ "libsoup-3.0", "gio-unix-2.0" }) |library| {
+            native.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+            transport_native.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+            https_resources.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+        }
+        const smoke = b.addExecutable(.{ .name = "smoke-https-resources", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/https_resources_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_https_resources", .module = https_resources } },
+            .link_libc = true,
+        }) });
+        const host_native = native_support.add(b, smoke.root_module, "https-resources-test-host", "tests/https_resources_host.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        for ([_][]const u8{ "libsoup-3.0", "gio-unix-2.0" }) |library| {
+            host_native.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+            smoke.root_module.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+        }
+        smoke.root_module.linkSystemLibrary("curl", .{ .use_pkg_config = .no });
+        smoke.root_module.linkSystemLibrary("pthread", .{ .use_pkg_config = .no });
+        check.dependOn(&smoke.step);
+        const install_smoke = b.addInstallArtifact(smoke, .{});
+        b.step("check-https-resources-smoke", "Link and copy host-owned HTTPS integration checks without starting them").dependOn(&install_smoke.step);
+        const run_smoke = b.addSystemCommand(&.{b.getInstallPath(.bin, "smoke-https-resources")});
+        run_smoke.step.dependOn(&install_smoke.step);
+        b.step("smoke-https-resources", "Verify explicit HTTPS resource ownership, authentication and shutdown").dependOn(&run_smoke.step);
+        // Fault-injected implementations stay in this separate test process;
+        // consumers never link these copies alongside production file state.
+        const native_tests = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/https_resources_native.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }) });
+        for ([_][]const u8{ "tests/https_resources_native.c", "src/https_resources/linux.c", "src/file_stream/linux.c" }, 0..) |file, index| {
+            const unit = native_support.add(b, native_tests.root_module, b.fmt("https-resource-fault-{d}", .{index}), file, &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZHR_TESTING", "-DZWK_FILE_TESTING" }, target, optimize);
+            for ([_][]const u8{ "libsoup-3.0", "gio-unix-2.0" }) |library| unit.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+        }
+        for ([_][]const u8{ "libsoup-3.0", "gio-unix-2.0" }) |library| native_tests.root_module.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+        for ([_][]const u8{ "curl", "pthread" }) |library| native_tests.root_module.linkSystemLibrary(library, .{ .use_pkg_config = .no });
+        check.dependOn(&native_tests.step);
+        b.step("test-https-resources-native", "Verify real TLS failure paths and shared physical request capacity").dependOn(&b.addRunArtifact(native_tests).step);
+        const transport_tests = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/https_transport_native.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }) });
+        for ([_][]const u8{ "tests/https_transport_native.c", "src/https_resources/transport_linux.c" }, 0..) |file, index| {
+            const unit = native_support.add(b, transport_tests.root_module, b.fmt("https-transport-fault-{d}", .{index}), file, &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZHT_TESTING" }, target, optimize);
+            for ([_][]const u8{ "libsoup-3.0", "gio-unix-2.0" }) |library| unit.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+        }
+        for ([_][]const u8{ "libsoup-3.0", "gio-unix-2.0" }) |library| transport_tests.root_module.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+        check.dependOn(&transport_tests.step);
+        b.step("test-https-transport-native", "Verify explicit TLS listener ownership, sealing and independent native references").dependOn(&b.addRunArtifact(transport_tests).step);
+    }
+    const file_stream_tests = b.addTest(.{ .root_module = file_stream });
+    const run_file_stream_tests = b.addRunArtifact(file_stream_tests);
+    check.dependOn(&file_stream_tests.step);
+    b.step("test-file-stream", "Verify consumer-neutral file preparation, cancellation and ownership contracts").dependOn(&run_file_stream_tests.step);
+    const native_stream_tests = b.addTest(.{ .root_module = native_stream });
+    const run_native_stream_tests = b.addRunArtifact(native_stream_tests);
+    check.dependOn(&native_stream_tests.step);
+    test_step.dependOn(&run_native_stream_tests.step);
+    b.step("test-native-stream", "Verify generated byte-source bounds, cold capability and linear ownership").dependOn(&run_native_stream_tests.step);
+    if (target.result.os.tag == .linux) {
+        // Private module instances contain declarations only. This process
+        // links one fault-enabled channel implementation, never production C.
+        const fixture_file_stream = b.createModule(.{
+            .root_source_file = b.path("src/file_stream/root.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const fixture_native_stream = b.createModule(.{
+            .root_source_file = b.path("src/native_stream/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "ziggurat_file_stream", .module = fixture_file_stream }},
+        });
+        const native_tests = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/native_stream_native.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "ziggurat_native_stream", .module = fixture_native_stream },
+                .{ .name = "ziggurat_file_stream", .module = fixture_file_stream },
+            },
+        }) });
+        for ([_][]const u8{ "tests/native_stream_native.c", "src/file_stream/linux.c" }, 0..) |file, index| {
+            const unit = native_support.add(b, native_tests.root_module, b.fmt("generated-stream-fault-{d}", .{index}), file, &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZWK_FILE_TESTING" }, target, optimize);
+            unit.linkSystemLibrary("gio-unix-2.0", .{ .use_pkg_config = .force });
+        }
+        native_tests.root_module.linkSystemLibrary("gio-unix-2.0", .{ .use_pkg_config = .force });
+        native_tests.root_module.linkSystemLibrary("pthread", .{ .use_pkg_config = .no });
+        check.dependOn(&native_tests.step);
+        b.step("test-native-stream-native", "Verify generated channel admission, backpressure, terminal state and physical ownership").dependOn(&b.addRunArtifact(native_tests).step);
+    }
+    const animation = b.addModule("ziggurat_animation", .{ .root_source_file = b.path("src/animation/root.zig"), .target = target, .optimize = optimize });
+    const wake = b.addModule("ziggurat_wake", .{ .root_source_file = b.path("src/wake/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
+        wake.link_libc = true;
+        const native = native_support.add(b, wake, "wake-native", "src/wake/native.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        if (target.result.os.tag == .linux) {
+            native.linkSystemLibrary("glib-2.0", .{ .use_pkg_config = .force });
+            wake.linkSystemLibrary("glib-2.0", .{ .use_pkg_config = .force });
+        }
+        addSmoke(b, "smoke-wake", "tests/wake_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_wake", .module = wake },
+            .{ .name = "ziggurat_animation", .module = animation },
+        });
+    }
+    const update = b.addModule("ziggurat_update", .{ .root_source_file = b.path("src/update/root.zig"), .target = target, .optimize = optimize });
+    const assets = b.addModule("ziggurat_assets", .{ .root_source_file = b.path("src/assets/root.zig"), .target = target, .optimize = optimize });
+    const extensions = b.addModule("ziggurat_extensions", .{ .root_source_file = b.path("src/extensions/root.zig"), .target = target, .optimize = optimize });
+    const drawing_resources = b.addModule("ziggurat_drawing_resources", .{ .root_source_file = b.path("src/drawing_resources.zig"), .target = target, .optimize = optimize });
+    const vector = b.addModule("ziggurat_vector", .{ .root_source_file = b.path("src/vector/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_drawing_resources", .module = drawing_resources }} });
+    const svg = b.addModule("ziggurat_svg", .{ .root_source_file = b.path("src/svg/root.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat_vector", .module = vector }, .{ .name = "ziggurat_drawing_resources", .module = drawing_resources },
+    } });
+    const shadows = b.addModule("ziggurat_shadows", .{ .root_source_file = b.path("src/ui/shadow_resource.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_drawing_resources", .module = drawing_resources }} });
+    const gaussian = b.addModule("ziggurat_gaussian", .{ .root_source_file = b.path("src/ui/gaussian_resource.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_drawing_resources", .module = drawing_resources }} });
+    const document = b.addModule("ziggurat_document", .{ .root_source_file = b.path("src/document/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
+    const document_diff = b.addModule("ziggurat_document_diff", .{ .root_source_file = b.path("src/document_diff/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_document", .module = document }} });
+    const document_diff_benchmark = b.addExecutable(.{ .name = "benchmark-document-diff", .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/document_diff_benchmark.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{ .{ .name = "ziggurat_document", .module = document }, .{ .name = "ziggurat_document_diff", .module = document_diff } },
+    }) });
+    b.step("benchmark-document-diff", "Measure bounded snapshot comparison without a UI loop").dependOn(&b.addRunArtifact(document_diff_benchmark).step);
+    const code_editor = b.addModule("ziggurat_code_editor", .{ .root_source_file = b.path("src/code_editor/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_document", .module = document }} });
+    const language_protocol = b.addModule("ziggurat_language_protocol", .{ .root_source_file = b.path("src/language_protocol/root.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat_document", .module = document },
+        .{ .name = "ziggurat_code_editor", .module = code_editor },
+        .{ .name = "ziggurat", .module = core },
+    } });
+    const protocol_server = b.addExecutable(.{ .name = "language-protocol-fixture", .root_module = b.createModule(.{ .root_source_file = b.path("tests/language_protocol_server.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_language_protocol", .module = language_protocol }} }) });
+    const protocol_smoke = b.addExecutable(.{ .name = "smoke-language-protocol", .root_module = b.createModule(.{ .root_source_file = b.path("tests/language_protocol_smoke.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_document", .module = document },
+        .{ .name = "ziggurat_code_editor", .module = code_editor },
+        .{ .name = "ziggurat_language_protocol", .module = language_protocol },
+    } }) });
+    addResources(b, protocol_smoke);
+    check.dependOn(&protocol_smoke.step);
+    check.dependOn(&protocol_server.step);
+    const protocol_run = b.addRunArtifact(protocol_smoke);
+    protocol_run.addArtifactArg(protocol_server);
+    b.step("smoke-language-protocol", "Verify an explicit worker child process and versioned language protocol delivery").dependOn(&protocol_run.step);
+    const shutdown_server = b.addExecutable(.{ .name = "language-protocol-shutdown-fixture", .root_module = b.createModule(.{ .root_source_file = b.path("tests/language_protocol_shutdown_server.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_language_protocol", .module = language_protocol }} }) });
+    const shutdown_smoke = b.addExecutable(.{ .name = "smoke-language-protocol-shutdown", .root_module = b.createModule(.{ .root_source_file = b.path("tests/language_protocol_shutdown_smoke.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_document", .module = document },
+        .{ .name = "ziggurat_code_editor", .module = code_editor },
+        .{ .name = "ziggurat_language_protocol", .module = language_protocol },
+    } }) });
+    addResources(b, shutdown_smoke);
+    check.dependOn(&shutdown_smoke.step);
+    check.dependOn(&shutdown_server.step);
+    const shutdown_run = b.addRunArtifact(shutdown_smoke);
+    shutdown_run.addArtifactArg(shutdown_server);
+    b.step("smoke-language-protocol-shutdown", "Verify explicit worker shutdown, response-only service and child termination").dependOn(&shutdown_run.step);
+    const vector_benchmark = b.addExecutable(.{ .name = "benchmark-vector", .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/vector_benchmark.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "ziggurat_vector", .module = vector }},
+    }) });
+    b.step("benchmark-vector", "Measure explicit path coverage preparation costs").dependOn(&b.addRunArtifact(vector_benchmark).step);
+    if (target.result.os.tag == .linux) {
+        const sampler = b.createModule(.{
+            .root_source_file = b.path("src/ui/transform_composite.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "ziggurat_drawing_resources", .module = drawing_resources }},
+        });
+        const affine_benchmark = b.addExecutable(.{ .name = "benchmark-affine-cairo", .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/benchmark_affine_cairo.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "sampler", .module = sampler }},
+        }) });
+        affine_benchmark.addCSourceFile(.{ .file = b.path("tools/benchmark_affine_cairo.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        affine_benchmark.root_module.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .force });
+        affine_benchmark.root_module.linkSystemLibrary("m", .{});
+        const affine_run = b.addRunArtifact(affine_benchmark);
+        if (b.args) |args| affine_run.addArgs(args);
+        b.step("benchmark-affine-cairo", "Measure segmented software affine completion against a test-only native baseline").dependOn(&affine_run.step);
+    }
+    const caret = b.addModule("ziggurat_caret", .{ .root_source_file = b.path("src/document_editor/caret.zig"), .target = target, .optimize = optimize });
+    const text_layout = b.addModule("ziggurat_text_layout", .{ .root_source_file = b.path("src/ui/text_layout.zig"), .target = target, .optimize = optimize });
+    text_layout.addImport("ziggurat_drawing_resources", drawing_resources);
+    const text_outlines = b.addModule("ziggurat_text_outlines", .{ .root_source_file = b.path("src/text_outlines/root.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat_text_layout", .module = text_layout },
+        .{ .name = "ziggurat_vector", .module = vector },
+    } });
+    const svg_text = b.addModule("ziggurat_svg_text", .{ .root_source_file = b.path("src/svg_text/root.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat_svg", .module = svg },
+        .{ .name = "ziggurat_text_layout", .module = text_layout },
+        .{ .name = "ziggurat_text_outlines", .module = text_outlines },
+    } });
+    const images = b.addModule("ziggurat_images", .{ .root_source_file = b.path("src/images/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_drawing_resources", .module = drawing_resources }} });
+    const image_options = b.addOptions();
+    image_options.addOption(bool, "webp", webp);
+    images.addOptions("ziggurat_image_options", image_options);
+    if (webp) {
+        if (target.result.os.tag != .windows and target.result.os.tag != .linux) @panic("WebP worker is currently supported on Windows/Linux only");
+        @import("build_support/webp.zig").add(b, images, target, optimize);
+    }
+    const image_drawing = b.addModule("ziggurat_image_drawing", .{ .root_source_file = b.path("src/ui/image_resource.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat_images", .module = images }, .{ .name = "ziggurat_drawing_resources", .module = drawing_resources },
+    } });
+    if (target.result.os.tag == .windows) {
+        _ = native_support.add(b, images, "images-native", "src/images/windows.c", &.{"-std=c11"}, target, optimize);
+        for ([_][]const u8{ "windowscodecs", "ole32", "uuid" }) |library| images.linkSystemLibrary(library, .{});
+        images.link_libc = true;
+    }
+    if (target.result.os.tag == .linux) {
+        const native = native_support.add(b, images, "images-native", "src/images/linux.c", &.{"-std=c11"}, target, optimize);
+        native.linkSystemLibrary("gdk-pixbuf-2.0", .{ .use_pkg_config = .force });
+        images.linkSystemLibrary("gdk-pixbuf-2.0", .{ .use_pkg_config = .force });
+        images.link_libc = true;
+    }
+    if (target.result.os.tag == .windows) {
+        _ = native_support.add(b, text_layout, "text-layout-native", "src/ui/text_layout_windows.c", &.{"-std=c11"}, target, optimize);
+        text_layout.linkSystemLibrary("dwrite", .{});
+        text_layout.linkSystemLibrary("gdi32", .{});
+        text_layout.link_libc = true;
+    }
+    if (target.result.os.tag == .linux) {
+        const native = native_support.add(b, text_layout, "text-layout-native", "src/ui/text_layout_linux.c", &.{"-std=c11"}, target, optimize);
+        native.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .force });
+        text_layout.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .force });
+        text_layout.link_libc = true;
+    }
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
+        addSmoke(b, "smoke-text-word-costs", "tests/text_word_costs.zig", target, optimize, &.{.{ .name = "ziggurat_text_layout", .module = text_layout }});
+        const word_helper = b.addExecutable(.{ .name = "test-text-words-helper", .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }) });
+        word_helper.root_module.addCSourceFile(.{ .file = b.path("tests/text_words_helper_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        const run_word_helper = b.addRunArtifact(word_helper);
+        test_step.dependOn(&run_word_helper.step);
+        check.dependOn(&word_helper.step);
+        b.step("test-text-words-helper", "Verify the bounded lexical/nonword partition writer").dependOn(&run_word_helper.step);
+        const word_smoke = b.addExecutable(.{ .name = "smoke-text-words", .root_module = b.createModule(.{ .root_source_file = b.path("tests/text_words_smoke.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "ziggurat_text_layout", .module = text_layout }} }) });
+        word_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/text_words_oracle.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        if (target.result.os.tag == .linux) word_smoke.root_module.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .force });
+        const install_word_smoke = b.addInstallArtifact(word_smoke, .{});
+        const run_word_smoke = b.addRunArtifact(word_smoke);
+        run_word_smoke.step.dependOn(&install_word_smoke.step);
+        check.dependOn(&word_smoke.step);
+        b.step("build-smoke-text-words", "Build the independent system word-range oracle").dependOn(&install_word_smoke.step);
+        b.step("smoke-text-words", "Verify word ranges against independent ICU/Pango segmentation").dependOn(&run_word_smoke.step);
+        const word_fault_layout = b.createModule(.{ .root_source_file = b.path("src/ui/text_layout.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "ziggurat_drawing_resources", .module = drawing_resources }} });
+        if (target.result.os.tag == .windows) {
+            _ = native_support.add(b, word_fault_layout, "text-layout-word-fault-native", "src/ui/text_layout_windows.c", &.{ "-std=c11", "-DZTL_WORD_TESTING" }, target, optimize);
+            word_fault_layout.linkSystemLibrary("dwrite", .{});
+            word_fault_layout.linkSystemLibrary("gdi32", .{});
+        } else {
+            const native = native_support.add(b, word_fault_layout, "text-layout-word-fault-native", "src/ui/text_layout_linux.c", &.{ "-std=c11", "-DZTL_WORD_TESTING" }, target, optimize);
+            native.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .force });
+            word_fault_layout.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .force });
+        }
+        const word_fault_smoke = b.addExecutable(.{ .name = "smoke-text-words-fault", .root_module = b.createModule(.{ .root_source_file = b.path("tests/text_words_fault_smoke.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "ziggurat_text_layout", .module = word_fault_layout }} }) });
+        const install_word_fault = b.addInstallArtifact(word_fault_smoke, .{});
+        const run_word_fault = b.addRunArtifact(word_fault_smoke);
+        run_word_fault.step.dependOn(&install_word_fault.step);
+        check.dependOn(&word_fault_smoke.step);
+        b.step("build-smoke-text-words-fault", "Build the isolated word preparation fault adapter").dependOn(&install_word_fault.step);
+        b.step("smoke-text-words-fault", "Verify explicit word capability failures and query call boundaries").dependOn(&run_word_fault.step);
+        addSmoke(b, "smoke-window-registry", "tests/window_registry_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-accessibility-host", "tests/accessibility_host_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-composition", "tests/composition_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-app-stop", "tests/app_stop_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-document", "tests/document_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_document", .module = document },
+        });
+        addSmoke(b, "smoke-text-layout", "tests/text_layout_smoke.zig", target, optimize, &.{.{ .name = "ziggurat_text_layout", .module = text_layout }});
+        addSmoke(b, "smoke-text-outlines", "tests/text_outlines_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+            .{ .name = "ziggurat_vector", .module = vector },
+            .{ .name = "ziggurat_text_outlines", .module = text_outlines },
+        });
+        const text_clusters = b.addExecutable(.{ .name = "smoke-text-clusters", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/text_clusters_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "ziggurat_text_layout", .module = text_layout },
+                .{ .name = "ziggurat_text_outlines", .module = text_outlines },
+                .{ .name = "ziggurat_vector", .module = vector },
+            },
+        }) });
+        text_clusters.addCSourceFile(.{ .file = b.path("tests/text_clusters_oracle.c"), .flags = &.{"-std=c11"} });
+        if (target.result.os.tag == .linux) text_clusters.root_module.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .force });
+        addResources(b, text_clusters);
+        check.dependOn(&text_clusters.step);
+        b.step("smoke-text-clusters", "Verify optional owning glyph and source cluster outline mapping").dependOn(&b.addRunArtifact(text_clusters).step);
+        const text_cells = b.addExecutable(.{ .name = "smoke-text-cells", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/text_cells_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "ziggurat_text_layout", .module = text_layout },
+                .{ .name = "ziggurat_text_outlines", .module = text_outlines },
+            },
+        }) });
+        text_cells.addCSourceFile(.{ .file = b.path("tests/text_cells_native.c"), .flags = &.{"-std=c11"} });
+        if (target.result.os.tag == .linux) text_cells.root_module.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .force });
+        addResources(b, text_cells);
+        check.dependOn(&text_cells.step);
+        b.step("smoke-text-cells", "Verify optional full glyph cells against independent system font metrics").dependOn(&b.addRunArtifact(text_cells).step);
+        addSmoke(b, "smoke-images", "tests/images_smoke.zig", target, optimize, &.{.{ .name = "ziggurat_images", .module = images }});
+        addSmoke(b, "smoke-image-prepare", "tests/image_prepare_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat_images", .module = images }, .{ .name = "ziggurat_image_drawing", .module = image_drawing },
+        });
+    }
+    const system = b.addModule("ziggurat_system", .{ .root_source_file = b.path("src/system/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
+        addSmoke(b, "smoke-shell", "tests/system_shell_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
+    }
+    if (target.result.os.tag == .windows) {
+        system.linkSystemLibrary("shell32", .{});
+        system.linkSystemLibrary("user32", .{});
+        system.linkSystemLibrary("gdi32", .{});
+        _ = native_support.add(b, system, "system-picker-native", "src/system/picker.c", &.{"-std=c11"}, target, optimize);
+        system.link_libc = true;
+    }
+    if (target.result.os.tag == .windows) {
+        core.linkSystemLibrary("user32", .{});
+        core.linkSystemLibrary("ole32", .{});
+        core.linkSystemLibrary("imm32", .{});
+        core.link_libc = true;
+    }
+    if (target.result.os.tag == .linux) {
+        const native = native_support.add(b, core, "core-native", "src/platform/linux.c", &.{"-std=c11"}, target, optimize);
+        native.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        native.linkSystemLibrary("x11", .{ .use_pkg_config = .force });
+        core.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        core.linkSystemLibrary("x11", .{ .use_pkg_config = .force });
+        core.link_libc = true;
+        const accessibility_host_test = b.addExecutable(.{ .name = "test-linux-accessibility-host", .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }) });
+        accessibility_host_test.root_module.addCSourceFile(.{ .file = b.path("tests/linux_accessibility_host_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-deprecated-declarations" } });
+        accessibility_host_test.root_module.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        accessibility_host_test.root_module.linkSystemLibrary("x11", .{ .use_pkg_config = .force });
+        check.dependOn(&accessibility_host_test.step);
+        b.step("test-linux-accessibility-host", "Verify generic GTK child host ownership, reentry and retirement").dependOn(&b.addRunArtifact(accessibility_host_test).step);
+        const accessibility_position_test = b.addExecutable(.{ .name = "test-linux-accessibility-position", .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }) });
+        accessibility_position_test.root_module.addCSourceFile(.{ .file = b.path("tests/linux_accessibility_position_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-deprecated-declarations" } });
+        accessibility_position_test.root_module.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        accessibility_position_test.root_module.linkSystemLibrary("x11", .{ .use_pkg_config = .force });
+        check.dependOn(&accessibility_position_test.step);
+        b.step("test-linux-accessibility-position", "Verify original GTK area coordinate snapshots and retired-token refusal").dependOn(&b.addRunArtifact(accessibility_position_test).step);
+        const pointer_gtk_test = b.addExecutable(.{ .name = "test-pointer-gtk", .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }) });
+        pointer_gtk_test.root_module.addCSourceFile(.{ .file = b.path("tests/linux_pointer_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-deprecated-declarations" } });
+        pointer_gtk_test.root_module.addIncludePath(b.path("src/platform"));
+        pointer_gtk_test.root_module.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        pointer_gtk_test.root_module.linkSystemLibrary("x11", .{ .use_pkg_config = .force });
+        check.dependOn(&pointer_gtk_test.step);
+        b.step("test-pointer-gtk", "Verify native GTK pointer facts, pairing and callback continuation authority").dependOn(&b.addRunArtifact(pointer_gtk_test).step);
+    }
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
+        const damage = b.addExecutable(.{ .name = "smoke-damage", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/damage_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "ziggurat", .module = core }},
+        }) });
+        if (target.result.os.tag == .linux) {
+            damage.addCSourceFile(.{ .file = b.path("tests/damage_linux.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-deprecated-declarations" } });
+            damage.root_module.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        }
+        addResources(b, damage);
+        check.dependOn(&damage.step);
+        b.step("smoke-damage", "Verify native update regions for explicit DIP damage").dependOn(&b.addRunArtifact(damage).step);
+    }
+    const ui = b.addModule("ziggurat_ui", .{
+        .root_source_file = b.path("src/ui/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "pointer_classifier", .module = pointer_classifier } },
+    });
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
+        addSmoke(b, "smoke-affine-renderer", "tests/affine_renderer_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+        });
+        addSmoke(b, "smoke-affine-ui", if (target.result.os.tag == .windows) "tests/affine_ui_smoke.zig" else "tests/linux_affine_ui_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-theme", "tests/theme_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-animation-ui", "tests/animation_ui_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_animation", .module = animation },
+            .{ .name = "ziggurat_wake", .module = wake },
+        });
+        addSmoke(b, "smoke-svg-text", "tests/svg_text_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_svg", .module = svg },
+            .{ .name = "ziggurat_svg_text", .module = svg_text },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+            .{ .name = "ziggurat_text_outlines", .module = text_outlines },
+            .{ .name = "ziggurat_vector", .module = vector },
+        });
+    }
+    const ui_options = b.addOptions();
+    ui.addImport("ziggurat_drawing_resources", drawing_resources);
+    const shaped_editor = b.addModule("ziggurat_shaped_editor", .{ .root_source_file = b.path("src/ui/shaped_editor.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_ui", .module = ui },
+        .{ .name = "ziggurat_text_layout", .module = text_layout },
+        .{ .name = "ziggurat_caret", .module = caret },
+    } });
+    const virtual_list = b.addModule("ziggurat_virtual_list", .{ .root_source_file = b.path("src/ui/virtual_list.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui } } });
+    if (target.result.os.tag == .windows and accessibility) {
+        const list_smoke = b.addExecutable(.{ .name = "smoke-virtual-list-control", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/virtual_list_control_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "ziggurat", .module = core },
+                .{ .name = "ziggurat_ui", .module = ui },
+                .{ .name = "ziggurat_virtual_list", .module = virtual_list },
+            },
+        }) });
+        _ = native_support.add(b, list_smoke.root_module, "virtual-list-control-client", "tests/virtual_list_control_client.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        for ([_][]const u8{ "ole32", "oleaut32", "uiautomationcore", "uuid" }) |library| list_smoke.root_module.linkSystemLibrary(library, .{});
+        addResources(b, list_smoke);
+        check.dependOn(&list_smoke.step);
+        const install = b.addInstallArtifact(list_smoke, .{});
+        b.step("build-smoke-virtual-list-control", "Build the isolated native complete-list UI Automation fixture").dependOn(&install.step);
+        const run = b.addSystemCommand(&.{b.getInstallPath(.bin, "smoke-virtual-list-control.exe")});
+        run.step.dependOn(&install.step);
+        b.step("smoke-virtual-list-control", "Verify native complete-list selection, offscreen rows and captured action retirement").dependOn(&run.step);
+    } else if (target.result.os.tag == .linux) {
+        addSmoke(b, "smoke-virtual-list-control", "tests/virtual_list_control_linux_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_virtual_list", .module = virtual_list },
+        });
+    }
+    const prepared_hit = b.createModule(.{ .root_source_file = b.path("src/document_editor/prepared_hit.zig"), .target = target, .optimize = optimize });
+    const prepared_hit_tests = b.addTest(.{ .root_module = prepared_hit });
+    const run_prepared_hit_tests = b.addRunArtifact(prepared_hit_tests);
+    check.dependOn(&prepared_hit_tests.step);
+    test_step.dependOn(&run_prepared_hit_tests.step);
+    b.step("test-prepared-hit", "Verify the shared immutable Prepared hit routing kernel").dependOn(&run_prepared_hit_tests.step);
+    const document_editor = b.addModule("ziggurat_document_editor", .{ .root_source_file = b.path("src/document_editor/root.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat", .module = core },                         .{ .name = "ziggurat_document", .module = document },
+        .{ .name = "ziggurat_ui", .module = ui },                        .{ .name = "ziggurat_text_layout", .module = text_layout },
+        .{ .name = "ziggurat_caret", .module = caret },                  .{ .name = "ziggurat_prepared_hit", .module = prepared_hit },
+        .{ .name = "pointer_classifier", .module = pointer_classifier },
+    } });
+    const document_accessibility = b.addModule("ziggurat_document_accessibility", .{ .root_source_file = b.path("src/document_accessibility/root.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_document", .module = document },
+        .{ .name = "ziggurat_document_editor", .module = document_editor },
+        .{ .name = "ziggurat_ui", .module = ui },
+    } });
+    const prepared_hit_abi: ?*std.Build.Step.Compile = if (target.result.os.tag == .windows or target.result.os.tag == .linux)
+        b.addObject(.{ .name = "document-prepared-hit-abi", .root_module = b.createModule(.{ .root_source_file = b.path("src/document_accessibility/prepared_hit_abi.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "ziggurat_prepared_hit", .module = prepared_hit }} }) })
+    else
+        null;
+    if (prepared_hit_abi) |object| document_accessibility.addObject(object);
+    if (target.result.os.tag == .linux) {
+        document_accessibility.link_libc = true;
+        for ([_][]const u8{ "linux_ledger.c", "linux_store.c", "linux_provider.c" }) |file| {
+            const native = native_support.add(b, document_accessibility, b.fmt("document-accessibility-{s}", .{file}), b.fmt("src/document_accessibility/{s}", .{file}), &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+            native.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        }
+        document_accessibility.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        const accessibility_client = b.addExecutable(.{ .name = "document-accessibility-atspi-client", .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }) });
+        accessibility_client.root_module.addCSourceFile(.{ .file = b.path("tests/document_accessibility_atspi_client.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        accessibility_client.root_module.linkSystemLibrary("atspi-2", .{ .use_pkg_config = .force });
+        accessibility_client.root_module.linkSystemLibrary("gobject-2.0", .{ .use_pkg_config = .force });
+        check.dependOn(&accessibility_client.step);
+        b.step("build-document-accessibility-atspi-client", "Build the separate-process AT-SPI document oracle").dependOn(&b.addInstallArtifact(accessibility_client, .{}).step);
+        const accessibility_owner = b.addExecutable(.{ .name = "test-document-accessibility-linux-owner", .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }) });
+        accessibility_owner.root_module.addObject(prepared_hit_abi.?);
+        accessibility_owner.root_module.addCSourceFiles(.{ .files = &.{ "tests/document_accessibility_linux_owner.c", "src/document_accessibility/linux_ledger.c", "src/document_accessibility/linux_store.c", "src/document_accessibility/linux_provider.c" }, .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-deprecated-declarations", "-DZDA_LINUX_TESTING" } });
+        accessibility_owner.root_module.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        accessibility_owner.root_module.linkSystemLibrary("x11", .{ .use_pkg_config = .force });
+        check.dependOn(&accessibility_owner.step);
+        b.step("test-document-accessibility-linux-owner", "Verify Linux document provider C ownership, budgets, notifications and late references").dependOn(&b.addRunArtifact(accessibility_owner).step);
+        addSmoke(b, "smoke-document-accessibility-linux", "tests/document_accessibility_linux_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_document", .module = document },
+            .{ .name = "ziggurat_document_editor", .module = document_editor },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_document_accessibility", .module = document_accessibility },
+        });
+    }
+    if (target.result.os.tag == .windows) {
+        document_accessibility.link_libc = true;
+        for ([_][]const u8{ "native_ledger.c", "native_store.c", "native_windows.c" }) |file| {
+            _ = native_support.add(b, document_accessibility, b.fmt("document-accessibility-{s}", .{file}), b.fmt("src/document_accessibility/{s}", .{file}), &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        }
+        for ([_][]const u8{ "ole32", "oleaut32", "uiautomationcore", "user32" }) |library| document_accessibility.linkSystemLibrary(library, .{});
+        const accessibility_smoke = b.addExecutable(.{ .name = "smoke-document-accessibility", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/document_accessibility_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "ziggurat", .module = core },
+                .{ .name = "ziggurat_ui", .module = ui },
+                .{ .name = "ziggurat_text_layout", .module = text_layout },
+                .{ .name = "ziggurat_document", .module = document },
+                .{ .name = "ziggurat_document_editor", .module = document_editor },
+                .{ .name = "ziggurat_document_accessibility", .module = document_accessibility },
+            },
+        }) });
+        accessibility_smoke.addCSourceFile(.{ .file = b.path("tests/document_accessibility_client.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        addResources(b, accessibility_smoke);
+        check.dependOn(&accessibility_smoke.step);
+        b.step("smoke-document-accessibility", "Verify complete-document native UIA and main-thread action/lifetime boundaries").dependOn(&b.addRunArtifact(accessibility_smoke).step);
+        b.step("build-smoke-document-accessibility", "Build the native document UIA renderer matrix fixture").dependOn(&b.addInstallArtifact(accessibility_smoke, .{}).step);
+        // Only this executable includes the deterministic final-release hook.
+        // It owns one isolated C implementation and never imports ordinary DA.
+        const point_latch = b.addExecutable(.{ .name = "smoke-document-point-latch", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/document_accessibility_point_latch.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "ziggurat", .module = core }},
+        }) });
+        for ([_][]const u8{ "native_ledger.c", "native_store.c", "native_windows.c" }) |file| {
+            _ = native_support.add(b, point_latch.root_module, b.fmt("document-point-latch-{s}", .{file}), b.fmt("src/document_accessibility/{s}", .{file}), &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZDA_POINT_TESTING" }, target, optimize);
+        }
+        const point_latch_probe = native_support.add(b, point_latch.root_module, "document-point-latch-probe", "tests/document_accessibility_point_latch.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZDA_POINT_TESTING" }, target, optimize);
+        point_latch_probe.addIncludePath(b.path("src/document_accessibility"));
+        point_latch.root_module.addObject(prepared_hit_abi.?);
+        for ([_][]const u8{ "ole32", "oleaut32", "uiautomationcore", "user32" }) |library| point_latch.root_module.linkSystemLibrary(library, .{});
+        addResources(b, point_latch);
+        check.dependOn(&point_latch.step);
+        b.step("build-smoke-document-point-latch", "Build the isolated UIA final-release oracle").dependOn(&b.addInstallArtifact(point_latch, .{}).step);
+        b.step("smoke-document-point-latch", "Verify UIA final-release currentness with the normal main-thread FIFO").dependOn(&b.addRunArtifact(point_latch).step);
+        const provider_tests = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/document_accessibility_provider.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "ziggurat_document_accessibility", .module = document_accessibility }},
+        }) });
+        const provider_probe = native_support.add(b, provider_tests.root_module, "document-provider-probe", "tests/document_accessibility_provider_probe.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        provider_probe.addIncludePath(b.path("src/document_accessibility"));
+        check.dependOn(&provider_tests.step);
+        b.step("smoke-document-provider", "Verify native UIA packet identity, foreign release and provider ownership").dependOn(&b.addRunArtifact(provider_tests).step);
+    }
+    const document_diff_view = b.addModule("ziggurat_document_diff_view", .{ .root_source_file = b.path("src/document_diff_view/root.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_document", .module = document },
+        .{ .name = "ziggurat_document_diff", .module = document_diff },
+        .{ .name = "ziggurat_document_editor", .module = document_editor },
+        .{ .name = "ziggurat_ui", .module = ui },
+        .{ .name = "ziggurat_text_layout", .module = text_layout },
+    } });
+    const document_diff_accessibility = b.addModule("ziggurat_document_diff_accessibility", .{ .root_source_file = b.path("src/document_diff_accessibility/root.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_ui", .module = ui },
+        .{ .name = "ziggurat_document", .module = document },
+        .{ .name = "ziggurat_document_diff_view", .module = document_diff_view },
+        .{ .name = "ziggurat_document_accessibility", .module = document_accessibility },
+    } });
+    if (target.result.os.tag == .windows) {
+        const smoke_diff_accessibility = b.addExecutable(.{ .name = "smoke-document-diff-accessibility", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/document_diff_accessibility_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "ziggurat", .module = core },
+                .{ .name = "ziggurat_ui", .module = ui },
+                .{ .name = "ziggurat_document", .module = document },
+                .{ .name = "ziggurat_document_editor", .module = document_editor },
+                .{ .name = "ziggurat_text_layout", .module = text_layout },
+                .{ .name = "ziggurat_document_diff", .module = document_diff },
+                .{ .name = "ziggurat_document_diff_view", .module = document_diff_view },
+                .{ .name = "ziggurat_document_accessibility", .module = document_accessibility },
+                .{ .name = "ziggurat_document_diff_accessibility", .module = document_diff_accessibility },
+            },
+        }) });
+        for ([_][]const u8{ "tests/document_diff_accessibility_client.c", "tests/document_accessibility_client.c" }) |file| smoke_diff_accessibility.addCSourceFile(.{ .file = b.path(file), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        addResources(b, smoke_diff_accessibility);
+        check.dependOn(&smoke_diff_accessibility.step);
+        b.step("smoke-document-diff-accessibility", "Verify paired editable document text, presentation epochs and owner actions with real UIA").dependOn(&b.addRunArtifact(smoke_diff_accessibility).step);
+    }
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
+        for ([_]struct { name: []const u8, source: []const u8, description: []const u8 }{
+            .{ .name = "smoke-affine-document-diff", .source = "tests/document_diff_affine_smoke.zig", .description = "Verify shared committed affine coordinates for editable diff input and native geometry" },
+            .{ .name = "smoke-affine-diff-controls", .source = "tests/document_diff_affine_controls_smoke.zig", .description = "Verify atomic affine diff text and typed controls with native geometry and actions" },
+        }) |fixture| {
+            const smoke_affine_diff = b.addExecutable(.{ .name = fixture.name, .root_module = b.createModule(.{
+                .root_source_file = b.path(fixture.source),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "ziggurat", .module = core },
+                    .{ .name = "ziggurat_ui", .module = ui },
+                    .{ .name = "ziggurat_document", .module = document },
+                    .{ .name = "ziggurat_document_editor", .module = document_editor },
+                    .{ .name = "ziggurat_text_layout", .module = text_layout },
+                    .{ .name = "ziggurat_document_diff", .module = document_diff },
+                    .{ .name = "ziggurat_document_diff_view", .module = document_diff_view },
+                    .{ .name = "ziggurat_document_accessibility", .module = document_accessibility },
+                    .{ .name = "ziggurat_document_diff_accessibility", .module = document_diff_accessibility },
+                },
+            }) });
+            if (target.result.os.tag == .windows) for ([_][]const u8{ "tests/document_diff_accessibility_client.c", "tests/document_accessibility_client.c" }) |file| smoke_affine_diff.addCSourceFile(.{ .file = b.path(file), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+            if (target.result.os.tag == .windows and std.mem.eql(u8, fixture.name, "smoke-affine-diff-controls")) smoke_affine_diff.addCSourceFile(.{ .file = b.path("tests/document_diff_affine_controls_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+            addResources(b, smoke_affine_diff);
+            check.dependOn(&smoke_affine_diff.step);
+            const install = b.addInstallArtifact(smoke_affine_diff, .{});
+            b.step(b.fmt("build-{s}", .{fixture.name}), "Build an affine diff integration executable without running it").dependOn(&install.step);
+            b.step(fixture.name, fixture.description).dependOn(&b.addRunArtifact(smoke_affine_diff).step);
+        }
+    }
+    code_editor.addImport("ziggurat", core);
+    code_editor.addImport("ziggurat_document_editor", document_editor);
+    code_editor.addImport("ziggurat_ui", ui);
+    code_editor.addImport("ziggurat_text_layout", text_layout);
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
+        addSmoke(b, "smoke-document-geometry", "tests/document_accessibility_geometry_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+            .{ .name = "ziggurat_document", .module = document },
+            .{ .name = "ziggurat_document_editor", .module = document_editor },
+        });
+        addSmoke(b, "smoke-affine-document", "tests/affine_document_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+            .{ .name = "ziggurat_document", .module = document },
+            .{ .name = "ziggurat_document_editor", .module = document_editor },
+            .{ .name = "ziggurat_code_editor", .module = code_editor },
+        });
+        addSmoke(b, "smoke-editor-line-backgrounds", "tests/editor_line_background_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+            .{ .name = "ziggurat_document", .module = document },
+            .{ .name = "ziggurat_document_editor", .module = document_editor },
+        });
+        addSmoke(b, "smoke-editor-range-markers", "tests/editor_range_markers_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+            .{ .name = "ziggurat_document", .module = document },
+            .{ .name = "ziggurat_document_editor", .module = document_editor },
+        });
+        addSmoke(b, "smoke-editor-pre-input", "tests/editor_pre_input_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+            .{ .name = "ziggurat_document", .module = document },
+            .{ .name = "ziggurat_document_editor", .module = document_editor },
+        });
+        addSmoke(b, "smoke-snippets", "tests/snippets_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+            .{ .name = "ziggurat_document", .module = document },
+            .{ .name = "ziggurat_document_editor", .module = document_editor },
+            .{ .name = "ziggurat_code_editor", .module = code_editor },
+        });
+        const resolve_smoke = b.addExecutable(.{ .name = "smoke-completion-resolve", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/completion_resolve_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "ziggurat", .module = core },
+                .{ .name = "ziggurat_ui", .module = ui },
+                .{ .name = "ziggurat_text_layout", .module = text_layout },
+                .{ .name = "ziggurat_document", .module = document },
+                .{ .name = "ziggurat_document_editor", .module = document_editor },
+                .{ .name = "ziggurat_code_editor", .module = code_editor },
+                .{ .name = "ziggurat_language_protocol", .module = language_protocol },
+            },
+        }) });
+        addResources(b, resolve_smoke);
+        check.dependOn(&resolve_smoke.step);
+        const resolve_run = b.addRunArtifact(resolve_smoke);
+        resolve_run.addArtifactArg(protocol_server);
+        b.step("smoke-completion-resolve", "Verify explicit completion enrichment with a real worker child and unchanged edit transactions").dependOn(&resolve_run.step);
+    }
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
+        const code_editor_benchmark = b.addExecutable(.{ .name = "benchmark-code-editor", .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/code_editor_benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "ziggurat", .module = core },
+                .{ .name = "ziggurat_document", .module = document },
+                .{ .name = "ziggurat_document_editor", .module = document_editor },
+                .{ .name = "ziggurat_code_editor", .module = code_editor },
+                .{ .name = "ziggurat_ui", .module = ui },
+                .{ .name = "ziggurat_text_layout", .module = text_layout },
+            },
+        }) });
+        addResources(b, code_editor_benchmark);
+        b.step("benchmark-code-editor", "Measure explicit selection updates with retained diagnostics").dependOn(&b.addRunArtifact(code_editor_benchmark).step);
+        const diff_view_benchmark = b.addExecutable(.{ .name = "benchmark-document-diff-view", .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/document_diff_view_benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "ziggurat", .module = core },
+                .{ .name = "ziggurat_document", .module = document },
+                .{ .name = "ziggurat_document_diff", .module = document_diff },
+                .{ .name = "ziggurat_document_editor", .module = document_editor },
+                .{ .name = "ziggurat_document_diff_view", .module = document_diff_view },
+                .{ .name = "ziggurat_ui", .module = ui },
+                .{ .name = "ziggurat_text_layout", .module = text_layout },
+            },
+        }) });
+        addResources(b, diff_view_benchmark);
+        b.step("benchmark-document-diff-view", "Measure bounded diff viewport preparation and warm updates").dependOn(&b.addRunArtifact(diff_view_benchmark).step);
+    }
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
+        const shaped_imports: []const std.Build.Module.Import = &.{
+            .{ .name = "ziggurat", .module = core },                    .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_text_layout", .module = text_layout }, .{ .name = "ziggurat_shaped_editor", .module = shaped_editor },
+        };
+        addSmoke(b, "smoke-shaped-editor", "tests/shaped_editor_smoke.zig", target, optimize, shaped_imports);
+        addSmoke(b, "smoke-text-input-mode", "tests/text_input_mode_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+        });
+        addSmoke(b, "smoke-text-layout-capture", "tests/text_layout_capture_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+            .{ .name = "ziggurat_shaped_editor", .module = shaped_editor },
+        });
+        addSmoke(b, "smoke-shaped-editor-native", "tests/shaped_editor_native_smoke.zig", target, optimize, shaped_imports);
+        addSmoke(b, "smoke-document-editor", "tests/document_editor_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },                            .{ .name = "ziggurat_document", .module = document },
+            .{ .name = "ziggurat_ui", .module = ui },                           .{ .name = "ziggurat_text_layout", .module = text_layout },
+            .{ .name = "ziggurat_document_editor", .module = document_editor },
+        });
+        addSmoke(b, "smoke-document-pointer-selection", "tests/document_pointer_selection_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_document", .module = document },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+            .{ .name = "ziggurat_document_editor", .module = document_editor },
+        });
+        addSmoke(b, "smoke-document-fields", "tests/document_fields_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_document", .module = document },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+            .{ .name = "ziggurat_document_editor", .module = document_editor },
+        });
+        addSmoke(b, "smoke-gaussian-scope", "tests/gaussian_scope_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-editor-caret", "tests/editor_caret_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+            .{ .name = "ziggurat_shaped_editor", .module = shaped_editor },
+            .{ .name = "ziggurat_document", .module = document },
+            .{ .name = "ziggurat_document_editor", .module = document_editor },
+        });
+        addSmoke(b, "smoke-code-editor", "tests/code_editor_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_document", .module = document },
+            .{ .name = "ziggurat_document_editor", .module = document_editor },
+            .{ .name = "ziggurat_code_editor", .module = code_editor },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+        });
+        addSmoke(b, "smoke-completion-details", "tests/completion_details_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+            .{ .name = "ziggurat_document", .module = document },
+            .{ .name = "ziggurat_document_editor", .module = document_editor },
+            .{ .name = "ziggurat_code_editor", .module = code_editor },
+        });
+        addSmoke(b, "smoke-document-diff-view", "tests/document_diff_view_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_document", .module = document },
+            .{ .name = "ziggurat_document_diff", .module = document_diff },
+            .{ .name = "ziggurat_document_editor", .module = document_editor },
+            .{ .name = "ziggurat_document_diff_view", .module = document_diff_view },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+        });
+        addSmoke(b, "smoke-diff-caret", "tests/document_diff_caret_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+            .{ .name = "ziggurat_document", .module = document },
+            .{ .name = "ziggurat_document_editor", .module = document_editor },
+            .{ .name = "ziggurat_document_diff", .module = document_diff },
+            .{ .name = "ziggurat_document_diff_view", .module = document_diff_view },
+        });
+        addSmoke(b, "smoke-diff-commands", "tests/document_diff_commands_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+            .{ .name = "ziggurat_document", .module = document },
+            .{ .name = "ziggurat_document_editor", .module = document_editor },
+            .{ .name = "ziggurat_document_diff", .module = document_diff },
+            .{ .name = "ziggurat_document_diff_view", .module = document_diff_view },
+        });
+        addSmoke(b, "smoke-diff-find", "tests/document_diff_find_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+            .{ .name = "ziggurat_document", .module = document },
+            .{ .name = "ziggurat_document_editor", .module = document_editor },
+            .{ .name = "ziggurat_document_diff", .module = document_diff },
+            .{ .name = "ziggurat_document_diff_view", .module = document_diff_view },
+        });
+        addSmoke(b, "smoke-text-client", "tests/text_client_smoke.zig", target, optimize, shaped_imports);
+        addSmoke(b, "smoke-affine-text-binding", "tests/affine_text_binding_smoke.zig", target, optimize, shaped_imports);
+        addSmoke(b, "smoke-gradient-analytic", "tests/gradient_analytic_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-conic-gradients", if (target.result.os.tag == .linux) "tests/linux_conic_gradient_smoke.zig" else "tests/conic_gradient_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-gradient-interpolation", if (target.result.os.tag == .linux) "tests/linux_gradient_interpolation_smoke.zig" else "tests/gradient_interpolation_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-gradient-spread", "tests/gradient_spread_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-composition-ui", "tests/composition_ui_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-coverage", "tests/coverage_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_shadows", .module = shadows }, .{ .name = "ziggurat_vector", .module = vector },
+        });
+        addSmoke(b, "smoke-gradient-coverage", "tests/gradient_coverage_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui }, .{ .name = "ziggurat_vector", .module = vector },
+        });
+        addSmoke(b, "smoke-svg", "tests/svg_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui }, .{ .name = "ziggurat_svg", .module = svg },
+        });
+        addSmoke(b, "smoke-layers", "tests/layers_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui }, .{ .name = "ziggurat_text_layout", .module = text_layout },
+        });
+        addSmoke(b, "smoke-offscreen", "tests/offscreen_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui }, .{ .name = "ziggurat_text_layout", .module = text_layout },
+        });
+        const gaussian_smoke = b.addExecutable(.{ .name = "smoke-gaussian", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/gaussian_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui }, .{ .name = "ziggurat_gaussian", .module = gaussian } },
+        }) });
+        addResources(b, gaussian_smoke);
+        check.dependOn(&gaussian_smoke.step);
+        b.step("check-gaussian-smoke", "Compile composed-image Gaussian checks without starting native graphics").dependOn(&gaussian_smoke.step);
+        const install_gaussian = b.addInstallArtifact(gaussian_smoke, .{});
+        const run_gaussian = b.addSystemCommand(&.{b.getInstallPath(.bin, b.fmt("smoke-gaussian{s}", .{if (target.result.os.tag == .windows) ".exe" else ""}))});
+        run_gaussian.step.dependOn(&install_gaussian.step);
+        b.step("smoke-gaussian", "Verify composed subtree filtering, image replay and resource lifetime").dependOn(&run_gaussian.step);
+        const shadow_benchmark = b.addExecutable(.{ .name = "benchmark-shadows", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/shadow_benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui }, .{ .name = "ziggurat_shadows", .module = shadows } },
+        }) });
+        addResources(b, shadow_benchmark);
+        b.step("benchmark-shadows", "Measure explicit shadow preparation, upload and warm replay costs").dependOn(&b.addRunArtifact(shadow_benchmark).step);
+        const layers_benchmark = b.addExecutable(.{ .name = "benchmark-layers", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/layers_benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui } },
+        }) });
+        addResources(b, layers_benchmark);
+        b.step("benchmark-layers", "Measure explicit transparent workspace and group replay costs").dependOn(&b.addRunArtifact(layers_benchmark).step);
+        addSmoke(b, "smoke-virtual-list", "tests/virtual_list_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui }, .{ .name = "ziggurat_virtual_list", .module = virtual_list },
+        });
+        addSmoke(b, "smoke-text-drawing", "tests/text_layout_drawing_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui }, .{ .name = "ziggurat_text_layout", .module = text_layout },
+        });
+        addSmoke(b, "smoke-image-drawing", "tests/image_drawing_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },          .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_images", .module = images }, .{ .name = "ziggurat_image_drawing", .module = image_drawing },
+        });
+        addSmoke(b, "smoke-svg-image", "tests/svg_image_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },                        .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_svg", .module = svg },                     .{ .name = "ziggurat_images", .module = images },
+            .{ .name = "ziggurat_image_drawing", .module = image_drawing },
+        });
+        addSmoke(b, "smoke-image-update", "tests/image_update_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },          .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_images", .module = images }, .{ .name = "ziggurat_image_drawing", .module = image_drawing },
+        });
+    }
+    ui_options.addOption(bool, "gpu", gpu);
+    if (target.result.os.tag == .linux) {
+        const gradient_benchmark = b.addExecutable(.{ .name = "benchmark-gradients", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/gradient_benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui } },
+        }) });
+        gradient_benchmark.root_module.addCSourceFile(.{ .file = b.path("tests/cairo_gradient_native_probe.c"), .flags = &.{"-std=c11"} });
+        gradient_benchmark.root_module.linkSystemLibrary("cairo", .{ .use_pkg_config = .force });
+        gradient_benchmark.root_module.link_libc = true;
+        const run = b.addRunArtifact(gradient_benchmark);
+        if (b.args) |args| run.addArgs(args);
+        b.step("benchmark-gradients", "Measure explicit software gradient replay costs").dependOn(&run.step);
+    }
+    ui_options.addOption(bool, "accessibility", accessibility);
+    ui.addOptions("ziggurat_ui_options", ui_options);
+    if (gpu) {
+        if (target.result.os.tag != .windows) @panic("D3D11 requires Windows");
+        _ = native_support.add(b, ui, "ui-d3d11-native", "src/ui/d3d11.c", &.{"-std=c11"}, target, optimize);
+        _ = native_support.addArchive(b, ui, "ui-gradient-interpolation-native", "src/ui/gradient_interpolation.c", &.{"-std=c11"}, target, optimize);
+        _ = native_support.addArchive(b, ui, "ui-gaussian-native", "src/ui/gaussian_gpu.c", &.{"-std=c11"}, target, optimize);
+        for ([_][]const u8{ "d3d11", "dxgi", "d2d1", "dwrite", "user32" }) |library| ui.linkSystemLibrary(library, .{});
+        for ([_][]const u8{ "default", "prepare" }) |kind| {
+            const probe = b.addExecutable(.{ .name = b.fmt("gradient-program-{s}-link", .{kind}), .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("tests/gradient_program_{s}_link.zig", .{kind})),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "ziggurat_ui", .module = ui }},
+            }) });
+            addResources(b, probe);
+            const install_probe = b.addInstallArtifact(probe, .{});
+            check.dependOn(&install_probe.step);
+            b.step(b.fmt("check-gradient-program-{s}-link", .{kind}), "Link and copy the isolated interpolation archive probe without running it").dependOn(&install_probe.step);
+        }
+        const program_smoke = b.addExecutable(.{ .name = "smoke-gradient-program", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/gradient_program_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui } },
+        }) });
+        _ = native_support.add(b, program_smoke.root_module, "gradient-program-native-probe", "tests/gradient_program_native_probe.c", &.{"-std=c11"}, target, optimize);
+        addResources(b, program_smoke);
+        check.dependOn(&program_smoke.step);
+        const install_program_smoke = b.addInstallArtifact(program_smoke, .{});
+        b.step("check-gradient-program-smoke", "Link and copy interpolation program integration checks without starting graphics").dependOn(&install_program_smoke.step);
+        const run_program_smoke = b.addSystemCommand(&.{b.getInstallPath(.bin, "smoke-gradient-program.exe")});
+        run_program_smoke.step.dependOn(&install_program_smoke.step);
+        b.step("smoke-gradient-program", "Verify explicitly prepared interpolation programs, rollback and resource ownership").dependOn(&run_program_smoke.step);
+    }
+    if (accessibility) {
+        if (target.result.os.tag != .windows) @panic("UI Automation requires Windows");
+        _ = native_support.add(b, ui, "ui-accessibility-native", "src/ui/accessibility.c", &.{"-std=c11"}, target, optimize);
+        ui.linkSystemLibrary("uiautomationcore", .{});
+        ui.linkSystemLibrary("oleaut32", .{});
+    }
+    if (target.result.os.tag == .windows) {
+        ui.linkSystemLibrary("gdi32", .{});
+        ui.link_libc = true;
+    }
+    if (target.result.os.tag == .linux) {
+        const native = native_support.add(b, ui, "ui-cairo-native", "src/ui/linux.c", &.{"-std=c11"}, target, optimize);
+        native.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .force });
+        ui.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .force });
+        ui.link_libc = true;
+        const content_host = b.addExecutable(.{ .name = "smoke-content-host", .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }) });
+        content_host.addCSourceFile(.{ .file = b.path("tests/linux_content_smoke.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        content_host.linkSystemLibrary("gtk+-3.0");
+        content_host.linkSystemLibrary("x11");
+        check.dependOn(&content_host.step);
+        b.step("smoke-content-host", "Run private GTK content ownership and input reparenting checks").dependOn(&b.addRunArtifact(content_host).step);
+        addExample(b, "counter", "examples/counter.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-linux", "tests/linux_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addLinuxPointerCoreSmoke(b, check, core, target, optimize);
+        addSmoke(b, "smoke-window-state", "tests/window_state_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-window-relationships", "tests/window_relationship_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-key-input", "tests/key_input_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-window-chrome", "tests/window_chrome_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-drawing", "tests/drawing_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-gradients", "tests/gradients_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-widgets", "tests/linux_widgets_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-widget-ranges", "tests/linux_widget_ranges_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        const benchmark = b.addExecutable(.{ .name = "benchmark", .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/benchmark_linux.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui } },
+        }) });
+        check.dependOn(&benchmark.step);
+        const benchmark_install = b.addInstallArtifact(benchmark, .{});
+        const benchmark_run = b.addSystemCommand(&.{b.getInstallPath(.bin, "benchmark")});
+        benchmark_run.step.dependOn(&benchmark_install.step);
+        if (b.args) |args| benchmark_run.addArgs(args);
+        b.step("benchmark", "Run measured GTK/Cairo submission and idle workload").dependOn(&benchmark_run.step);
+    }
+    if (target.result.os.tag == .windows) {
+        addExample(b, "counter", "examples/counter.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke", "tests/native_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-widgets", "tests/widgets_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-widget-ranges", "tests/widget_ranges_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-lifecycle", "tests/lifecycle_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-pointer-press", "tests/pointer_press_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-pointer-focus", "tests/pointer_focus_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addPointerCostSmoke(b, target, optimize, core);
+        addSmoke(b, "smoke-window-state", "tests/window_state_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-window-relationships", "tests/window_relationship_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-key-input", "tests/key_input_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-window-chrome", "tests/window_chrome_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-drawing", "tests/drawing_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-gradients", "tests/gradients_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        const icon_module = b.createModule(.{ .root_source_file = b.path("src/platform/windows_icons.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        icon_module.linkSystemLibrary("user32", .{});
+        icon_module.linkSystemLibrary("gdi32", .{});
+        addSmoke(b, "smoke-packaging", "tests/packaging_smoke.zig", target, optimize, &.{.{ .name = "ziggurat_windows_icons", .module = icon_module }});
+        addSmoke(b, "smoke-diagnostics", "tests/diagnostics_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-waitables", "tests/waitables_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-native-reentry", "tests/native_reentry_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-ime-cancel", "tests/ime_cancel_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },                    .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_document", .module = document },       .{ .name = "ziggurat_document_editor", .module = document_editor },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+        });
+        addSmoke(b, "smoke-cleanup", "tests/cleanup_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-system", "tests/system_native_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        addSmoke(b, "smoke-system-events", "tests/system_events_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        addSmoke(b, "smoke-picker", "tests/system_picker_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        addSmoke(b, "smoke-editor", "tests/editor_native_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-editor-routing", "tests/editor_routing_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        const picker_probe = b.createModule(.{ .root_source_file = b.path("src/system/picker.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
+        addSmoke(b, "smoke-picker-result", "tests/picker_result_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "picker_api", .module = picker_probe },
+        });
+        if (accessibility) {
+            addSmoke(b, "smoke-pointer-accessibility", "tests/pointer_accessibility_smoke.zig", target, optimize, &.{
+                .{ .name = "ziggurat", .module = core },
+                .{ .name = "ziggurat_ui", .module = ui },
+            });
+            addSmoke(b, "smoke-accessibility", "tests/accessibility_smoke.zig", target, optimize, &.{
+                .{ .name = "ziggurat", .module = core },
+                .{ .name = "ziggurat_ui", .module = ui },
+            });
+            addSmoke(b, "smoke-ui-config", "tests/ui_config_smoke.zig", target, optimize, &.{
+                .{ .name = "ziggurat", .module = core },
+                .{ .name = "ziggurat_ui", .module = ui },
+            });
+        }
+        const benchmark = b.addExecutable(.{ .name = "benchmark", .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/benchmark_windows.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui } },
+        }) });
+        addResources(b, benchmark);
+        check.dependOn(&benchmark.step);
+        const benchmark_install = b.addInstallArtifact(benchmark, .{});
+        const benchmark_run = b.addSystemCommand(&.{b.getInstallPath(.bin, "benchmark.exe")});
+        benchmark_run.step.dependOn(&benchmark_install.step);
+        if (b.args) |args| benchmark_run.addArgs(args);
+        b.step("benchmark", "Run measured paint submission, input, idle CPU and memory workload").dependOn(&benchmark_run.step);
+        if (gpu) {
+            const domain_benchmark = b.addExecutable(.{ .name = "benchmark-gpu-domain", .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/gpu_domain_benchmark.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui } },
+            }) });
+            addResources(b, domain_benchmark);
+            check.dependOn(&domain_benchmark.step);
+            const domain_benchmark_run = b.addRunArtifact(domain_benchmark);
+            if (b.args) |args| domain_benchmark_run.addArgs(args);
+            b.step("benchmark-gpu-domain", "Measure explicit shared and isolated device domains across hidden windows").dependOn(&domain_benchmark_run.step);
+            addSmoke(b, "smoke-gpu-offscreen", "tests/gpu_offscreen_smoke.zig", target, optimize, &.{
+                .{ .name = "ziggurat", .module = core },
+                .{ .name = "ziggurat_ui", .module = ui },
+                .{ .name = "ziggurat_text_layout", .module = text_layout },
+            });
+            addSmoke(b, "smoke-gpu-domain", "tests/gpu_domain_smoke.zig", target, optimize, &.{
+                .{ .name = "ziggurat", .module = core },
+                .{ .name = "ziggurat_ui", .module = ui },
+            });
+            addSmoke(b, "smoke-gpu", "tests/gpu_smoke.zig", target, optimize, &.{
+                .{ .name = "ziggurat", .module = core },
+                .{ .name = "ziggurat_ui", .module = ui },
+            });
+            addSmoke(b, "smoke-gpu-fallback", "tests/gpu_fallback_smoke.zig", target, optimize, &.{
+                .{ .name = "ziggurat", .module = core },
+                .{ .name = "ziggurat_ui", .module = ui },
+            });
+        }
+    }
+    if (web and target.result.os.tag != .windows and target.result.os.tag != .linux)
+        @panic("WebView currently requires Windows x86_64 or Linux GTK3");
+    if (web and target.result.os.tag == .windows) {
+        if (target.result.cpu.arch != .x86_64)
+            @panic("The first WebView2 backend supports Windows x86_64 only");
+        const sdk = b.option([]const u8, "webview2-sdk", "Path to the extracted WebView2 SDK") orelse ".deps/webview2";
+        const view = b.addModule("ziggurat_webview", .{
+            .root_source_file = b.path("src/webview/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_file_stream", .module = file_stream }, .{ .name = "ziggurat_http_response", .module = http_response } },
+            .link_libc = true,
+        });
+        view.addImport("ziggurat_tls_pem", tls_pem);
+        for ([_][]const u8{ "webview2.c", "page_host.c" }) |file| {
+            const native = native_support.add(b, view, b.fmt("webview-{s}", .{file}), b.fmt("src/webview/{s}", .{file}), &.{"-std=c11"}, target, optimize);
+            native.addIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
+            native.addIncludePath(b.path("src/webview/include"));
+        }
+        view.linkSystemLibrary("ole32", .{});
+        view.linkSystemLibrary("shlwapi", .{});
+        view.linkSystemLibrary("urlmon", .{});
+        view.linkSystemLibrary("oleaut32", .{});
+        const producer = b.addModule("ziggurat_webview_producer", .{
+            .root_source_file = b.path("src/resource_stream/web.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "ziggurat", .module = core },
+                .{ .name = "ziggurat_webview", .module = view },
+                .{ .name = "ziggurat_ipc", .module = ipc },
+                .{ .name = "ziggurat_resource_stream", .module = resource_stream },
+            },
+        });
+        view_tests = b.addTest(.{ .root_module = view });
+        const web_runtime = b.step("webview-runtime", "Install the optional WebView2 loader and SDK license");
+        web_runtime.dependOn(&b.addInstallFileWithDir(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/x64/WebView2Loader.dll" })), .bin, "WebView2Loader.dll").step);
+        web_runtime.dependOn(&b.addInstallFileWithDir(sourcePath(b, b.pathJoin(&.{ sdk, "LICENSE.txt" })), .bin, "WebView2-SDK-LICENSE.txt").step);
+        b.getInstallStep().dependOn(web_runtime);
+        // Test-only certificate oracle compiles the real adapter in isolation.
+        // Production View never links this fixture or a TLS exception entry.
+        const credentials_view = b.createModule(.{
+            .root_source_file = b.path("src/webview/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_file_stream", .module = file_stream }, .{ .name = "ziggurat_http_response", .module = http_response } },
+            .link_libc = true,
+        });
+        credentials_view.addImport("ziggurat_tls_pem", tls_pem);
+        for ([_][]const u8{ "tests/windows_request_credentials_adapter.c", "src/webview/page_host.c" }) |file| {
+            const native = native_support.add(b, credentials_view, b.fmt("credential-probe-{s}", .{std.fs.path.stem(file)}), file, &.{"-std=c11"}, target, optimize);
+            native.addIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
+            native.addIncludePath(b.path("src/webview/include"));
+        }
+        for ([_][]const u8{ "ole32", "shlwapi", "urlmon", "oleaut32", "crypt32" }) |library| credentials_view.linkSystemLibrary(library, .{});
+        const credentials_smoke = b.addExecutable(.{ .name = "smoke-request-credentials", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/windows_request_credentials_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = credentials_view } },
+        }) });
+        check.dependOn(&credentials_smoke.step);
+        const credentials_install = b.addInstallArtifact(credentials_smoke, .{});
+        const credentials_build = b.step("build-smoke-request-credentials", "Build the isolated HTTPS credential Runtime oracle; run with its explicit Python host");
+        credentials_build.dependOn(&credentials_install.step);
+        credentials_build.dependOn(web_runtime);
+        if (https_resources_enabled) {
+            const producer_smoke = b.addExecutable(.{ .name = "smoke-https-producer", .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/windows_https_producer_smoke.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "ziggurat", .module = core },
+                    .{ .name = "ziggurat_webview", .module = credentials_view },
+                    .{ .name = "ziggurat_https_resources", .module = https_resources },
+                    .{ .name = "ziggurat_native_stream", .module = native_stream },
+                },
+            }) });
+            check.dependOn(&producer_smoke.step);
+            const producer_install = b.addInstallArtifact(producer_smoke, .{});
+            const producer_build = b.step("build-smoke-https-producer", "Build explicit Windows HTTPS producer checks; run with the Python host");
+            producer_build.dependOn(&producer_install.step);
+            producer_build.dependOn(web_runtime);
+        }
+        // Keep the initializer callback interception and certificate oracle in
+        // their own test module; the production adapter is not linked twice.
+        const initializers_view = b.createModule(.{
+            .root_source_file = b.path("src/webview/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_file_stream", .module = file_stream }, .{ .name = "ziggurat_http_response", .module = http_response } },
+            .link_libc = true,
+        });
+        initializers_view.addImport("ziggurat_tls_pem", tls_pem);
+        for ([_][]const u8{ "tests/windows_document_initializers_adapter.c", "src/webview/page_host.c" }) |file| {
+            const native = native_support.add(b, initializers_view, b.fmt("initializer-probe-{s}", .{std.fs.path.stem(file)}), file, &.{"-std=c11"}, target, optimize);
+            native.addIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
+            native.addIncludePath(b.path("src/webview/include"));
+        }
+        for ([_][]const u8{ "ole32", "shlwapi", "urlmon", "oleaut32", "crypt32" }) |library| initializers_view.linkSystemLibrary(library, .{});
+        const initializers_smoke = b.addExecutable(.{ .name = "smoke-document-initializers", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/windows_document_initializers_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = initializers_view } },
+        }) });
+        check.dependOn(&initializers_smoke.step);
+        const initializers_install = b.addInstallArtifact(initializers_smoke, .{});
+        const initializers_build = b.step("build-smoke-document-initializers", "Build the isolated initializer Runtime oracle; run with its explicit Python host");
+        initializers_build.dependOn(&initializers_install.step);
+        initializers_build.dependOn(web_runtime);
+        addExample(b, "web-counter", "examples/web_counter.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addExample(b, "rectangular-pages", "examples/rectangular_pages.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview", "tests/webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addWebNativeBoundarySmoke(b, target, optimize, core, view);
+        addSmoke(b, "smoke-resource-file", "tests/file_response_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-scheme", "tests/scheme_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-permission", "tests/permission_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-download", "tests/download_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-browser-policy", "tests/policy_store_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-composition-webview", "tests/composition_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-page-session", "tests/page_session_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-page", "tests/page_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        const page_authorization = b.addExecutable(.{ .name = "smoke-page-authorization", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/page_authorization_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }) });
+        page_authorization.root_module.addCSourceFile(.{ .file = b.path("tests/page_authorization_smoke.c"), .flags = &.{"-std=c11"} });
+        page_authorization.root_module.addCSourceFile(.{ .file = b.path("src/webview/page_host.c"), .flags = &.{"-std=c11"} });
+        _ = native_support.add(b, page_authorization.root_module, "page-authorization-stream-native", "src/file_stream/windows_core.c", &.{"-std=c11"}, target, optimize);
+        page_authorization.root_module.addIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
+        page_authorization.root_module.addIncludePath(b.path("src/webview/include"));
+        for ([_][]const u8{ "user32", "ole32", "shlwapi", "gdi32", "urlmon", "oleaut32" }) |library| page_authorization.root_module.linkSystemLibrary(library, .{});
+        check.dependOn(&page_authorization.step);
+        const page_authorization_run = b.addRunArtifact(page_authorization);
+        b.step("smoke-page-authorization", "Check page authorization through native callback ABI without a Runtime").dependOn(&page_authorization_run.step);
+        const remote_origins = b.addExecutable(.{ .name = "test-remote-origin", .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }) });
+        remote_origins.root_module.addCSourceFile(.{ .file = b.path("tests/remote_origin_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        remote_origins.root_module.addSystemIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
+        remote_origins.root_module.addIncludePath(b.path("src/webview/include"));
+        for ([_][]const u8{ "ole32", "oleaut32", "urlmon" }) |library| remote_origins.root_module.linkSystemLibrary(library, .{});
+        check.dependOn(&remote_origins.step);
+        b.step("test-remote-origin", "Run native canonical remote origin and loopback policy regressions").dependOn(&b.addRunArtifact(remote_origins).step);
+        const initializer_native = b.addExecutable(.{ .name = "test-document-initializers-native", .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }) });
+        // The regression includes the actual adapter once and supplies its own
+        // bounded SDK double. It does not create a browser or open a window.
+        initializer_native.root_module.addCSourceFile(.{ .file = b.path("tests/document_initializers_native_test.c"), .flags = &.{"-std=c11"} });
+        _ = native_support.add(b, initializer_native.root_module, "initializer-stream-native", "src/file_stream/windows_core.c", &.{"-std=c11"}, target, optimize);
+        initializer_native.root_module.addIncludePath(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/include" })));
+        initializer_native.root_module.addIncludePath(b.path("src/webview/include"));
+        for ([_][]const u8{ "user32", "ole32", "shlwapi", "gdi32", "urlmon", "oleaut32" }) |library| initializer_native.root_module.linkSystemLibrary(library, .{});
+        check.dependOn(&initializer_native.step);
+        initializer_native_run = b.addRunArtifact(initializer_native);
+        b.step("test-document-initializers-native", "Run native document initializer mutation and lifetime contracts without a Runtime").dependOn(&initializer_native_run.?.step);
+        const page_host_test = b.addExecutable(.{ .name = "smoke-page-host", .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }) });
+        page_host_test.root_module.addCSourceFile(.{ .file = b.path("tests/page_host_smoke.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        page_host_test.root_module.linkSystemLibrary("user32", .{});
+        check.dependOn(&page_host_test.step);
+        b.step("smoke-page-host", "Check native page subtree ownership and rollback without a Runtime").dependOn(&b.addRunArtifact(page_host_test).step);
+        addSmoke(b, "smoke-webview-policy", "tests/webview_policy_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-page-remote", "tests/remote_page_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-script", "tests/script_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-browser-tools", "tests/browser_tools_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-request-policy", "tests/request_policy_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-resource-async", "tests/resource_async_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-assets", "tests/assets_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+            .{ .name = "ziggurat_assets", .module = assets },
+        });
+        const bundle = b.addSystemCommand(&.{ "bun", "build" });
+        bundle.addFileArg(b.path("tests/ipc_page.ts"));
+        bundle.addFileInput(b.path("tests/ipc_fixture.ts"));
+        bundle.addArgs(&.{ "--target", "browser", "--format", "iife", "--outfile" });
+        const page_script = bundle.addOutputFileArg("ipc-page.js");
+        const page_module = b.createModule(.{ .root_source_file = page_script });
+        const counter_service = b.createModule(.{ .root_source_file = b.path("examples/counter_service.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_ipc", .module = ipc }} });
+        addSmoke(b, "smoke-ipc", "tests/ipc_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+            .{ .name = "ziggurat_ipc", .module = ipc },
+            .{ .name = "counter_service", .module = counter_service },
+            .{ .name = "ipc_page", .module = page_module },
+        });
+        const producer_bundle = b.addSystemCommand(&.{ "bun", "build" });
+        producer_bundle.addFileArg(b.path("tests/resource_producer_page.ts"));
+        producer_bundle.addFileInput(b.path("tests/resource_producer_fixture.ts"));
+        producer_bundle.addFileInput(b.path("src/resource_stream/client.ts"));
+        producer_bundle.addArgs(&.{ "--target", "browser", "--format", "iife", "--outfile" });
+        const producer_script = producer_bundle.addOutputFileArg("producer-page.js");
+        const producer_page = b.createModule(.{ .root_source_file = producer_script });
+        addSmoke(b, "smoke-resource-producer", "tests/resource_producer_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+            .{ .name = "ziggurat_ipc", .module = ipc },
+            .{ .name = "ziggurat_webview_producer", .module = producer },
+            .{ .name = "producer_page", .module = producer_page },
+        });
+    }
+    if (web and target.result.os.tag == .linux) {
+        const view = b.addModule("ziggurat_webview", .{
+            .root_source_file = b.path("src/webview/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_file_stream", .module = file_stream }, .{ .name = "ziggurat_http_response", .module = http_response } },
+            .link_libc = true,
+        });
+        view.addImport("ziggurat_tls_pem", tls_pem);
+        for ([_][]const u8{ "webkit_native.c", "webkit_profile.c", "webkit_cookies.c" }) |file| {
+            const native = native_support.add(b, view, b.fmt("webview-{s}", .{file}), b.fmt("src/webview/{s}", .{file}), &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+            native.linkSystemLibrary("gio-unix-2.0", .{ .use_pkg_config = .force });
+            native.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        }
+        view.linkSystemLibrary("gio-unix-2.0", .{ .use_pkg_config = .force });
+        const test_file_stream = b.createModule(.{ .root_source_file = b.path("src/file_stream/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        const test_file_native = native_support.add(b, test_file_stream, "file-stream-native-test", "src/file_stream/linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZWK_FILE_TESTING" }, target, optimize);
+        test_file_native.linkSystemLibrary("gio-unix-2.0", .{ .use_pkg_config = .force });
+        test_file_stream.linkSystemLibrary("gio-unix-2.0", .{ .use_pkg_config = .force });
+        const file_response_module = b.createModule(.{ .root_source_file = b.path("src/webview/file_responses.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat_file_stream", .module = test_file_stream }, .{ .name = "ziggurat_http_response", .module = http_response } } });
+        const file_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/webkit_file_test.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "file_responses", .module = file_response_module }, .{ .name = "ziggurat_file_stream", .module = test_file_stream } } }) });
+        const file_test_helper = native_support.add(b, file_tests.root_module, "file-stream-test-helper", "tests/webkit_file_test.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZWK_FILE_TESTING" }, target, optimize);
+        file_test_helper.linkSystemLibrary("gio-unix-2.0", .{ .use_pkg_config = .force });
+        file_tests.root_module.linkSystemLibrary("gio-unix-2.0", .{ .use_pkg_config = .force });
+        check.dependOn(&file_tests.step);
+        webkit_file_run = b.addRunArtifact(file_tests);
+        b.step("test-webkit-file", "Verify explicit file pumps, socket readiness, cancellation and physical lifetime without a browser").dependOn(&webkit_file_run.?.step);
+        const profile_module = b.createModule(.{ .root_source_file = b.path("src/webview/profile.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_tls_pem", .module = tls_pem }} });
+        const profile_tests = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/profile_owner_linux.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "profile", .module = profile_module }},
+        }) });
+        const profile_native = native_support.add(b, profile_tests.root_module, "webkit-profile-native-test", "src/webview/webkit_profile.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZWK_PROFILE_TESTING" }, target, optimize);
+        profile_native.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        profile_tests.addCSourceFile(.{ .file = b.path("tests/webkit_profile_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZWK_PROFILE_TESTING" } });
+        profile_tests.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        check.dependOn(&profile_tests.step);
+        b.step("test-webkit-profile", "Verify private profile manager ownership, native finalization and exclusive storage without a page").dependOn(&b.addRunArtifact(profile_tests).step);
+        const profile_tls_owner_tests = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/profile_tls_owner_linux.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "profile", .module = profile_module }},
+        }) });
+        const profile_tls_native = native_support.add(b, profile_tls_owner_tests.root_module, "webkit-profile-tls-native-test", "src/webview/webkit_profile.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZWK_PROFILE_TESTING" }, target, optimize);
+        profile_tls_native.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        profile_tls_owner_tests.addCSourceFile(.{ .file = b.path("tests/webkit_profile_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZWK_PROFILE_TESTING" } });
+        profile_tls_owner_tests.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        check.dependOn(&profile_tls_owner_tests.step);
+        b.step("test-webkit-profile-tls", "Verify frozen TLS profile construction, allocation failure and late native ownership without a page").dependOn(&b.addRunArtifact(profile_tls_owner_tests).step);
+        const cookies_owner_tests = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/cookie_owner_linux.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "profile", .module = profile_module }},
+        }) });
+        const cookies_profile_native = native_support.add(b, cookies_owner_tests.root_module, "cookies-profile-native-test", "src/webview/webkit_profile.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        cookies_profile_native.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        const cookies_native = native_support.add(b, cookies_owner_tests.root_module, "cookies-native-test", "src/webview/webkit_cookies.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZWK_COOKIES_TESTING" }, target, optimize);
+        cookies_native.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        cookies_owner_tests.addCSourceFile(.{ .file = b.path("tests/webkit_cookies_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZWK_COOKIES_TESTING" } });
+        cookies_owner_tests.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        check.dependOn(&cookies_owner_tests.step);
+        b.step("test-webkit-cookies", "Verify native cookie allocation failure, acceptance and task finalization without a page").dependOn(&b.addRunArtifact(cookies_owner_tests).step);
+        view.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        const request_extension = b.addLibrary(.{ .name = "ziggurat-request-policy", .linkage = .dynamic, .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }) });
+        request_extension.root_module.addCSourceFile(.{ .file = b.path("src/webview/webkit_request_extension.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        request_extension.root_module.linkSystemLibrary("webkit2gtk-web-extension-4.1", .{ .use_pkg_config = .force });
+        const install_extension = b.addInstallArtifact(request_extension, .{});
+        b.step("webview-request-extension", "Install the optional WebProcess request policy adapter for explicit deployment").dependOn(&install_extension.step);
+        check.dependOn(&request_extension.step);
+        view_tests = b.addTest(.{ .root_module = view });
+        _ = b.step("webview-runtime", "Use the installed WebKitGTK 4.1 runtime");
+        addWebNativeBoundarySmoke(b, target, optimize, core, view);
+        addSmoke(b, "smoke-webview-linux", "tests/linux_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-dynamic-linux", "tests/linux_dynamic_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        const capture_smoke = b.addExecutable(.{ .name = "smoke-webview-capture-linux", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/linux_capture_webview_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view } },
+        }) });
+        capture_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/webkit_capture_fixture.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        capture_smoke.root_module.linkSystemLibrary("cairo", .{ .use_pkg_config = .force });
+        check.dependOn(&capture_smoke.step);
+        b.step("smoke-webview-capture-linux", "Verify bounded native PNG capture, independent pixel data and request ownership").dependOn(&b.addRunArtifact(capture_smoke).step);
+        const capture_owner_tests = b.addExecutable(.{ .name = "test-webkit-capture", .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }) });
+        capture_owner_tests.root_module.addCSourceFile(.{ .file = b.path("tests/webkit_capture_owner_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        capture_owner_tests.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        check.dependOn(&capture_owner_tests.step);
+        b.step("test-webkit-capture", "Verify native capture allocation, cancellation and task finalization ownership").dependOn(&b.addRunArtifact(capture_owner_tests).step);
+        const find_owner_tests = b.addExecutable(.{ .name = "test-webkit-find", .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }) });
+        find_owner_tests.root_module.addCSourceFile(.{ .file = b.path("tests/webkit_find_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        find_owner_tests.root_module.linkSystemLibrary("gobject-2.0", .{ .use_pkg_config = .force });
+        check.dependOn(&find_owner_tests.step);
+        const find_owner_run = b.addRunArtifact(find_owner_tests);
+        test_step.dependOn(&find_owner_run.step);
+        b.step("test-webkit-find", "Verify single native Find command, logical cancellation and physical ownership").dependOn(&find_owner_run.step);
+        const find_smoke = b.addExecutable(.{ .name = "smoke-find", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/linux_find_webview_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view } },
+        }) });
+        find_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/webkit_find_fixture.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        find_smoke.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        check.dependOn(&find_smoke.step);
+        const install_find_smoke = b.addInstallArtifact(find_smoke, .{});
+        b.step("build-smoke-find", "Install the native Find ownership and lifecycle integration probe").dependOn(&install_find_smoke.step);
+        const find_smoke_run = b.addRunArtifact(find_smoke);
+        if (b.args) |args| find_smoke_run.addArgs(args);
+        b.step("smoke-find", "Verify native Find request ordering, cancellation and lifecycle").dependOn(&find_smoke_run.step);
+        const initializers_smoke = b.addExecutable(.{ .name = "smoke-webview-initializers-linux", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/linux_document_initializers_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view } },
+        }) });
+        initializers_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/initializer_https_fixture.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        initializers_smoke.root_module.linkSystemLibrary("libsoup-3.0", .{ .use_pkg_config = .force });
+        check.dependOn(&initializers_smoke.step);
+        const initializers_run = b.addRunArtifact(initializers_smoke);
+        initializers_run.step.dependOn(&install_extension.step);
+        initializers_run.setEnvironmentVariable("ZIGGURAT_REQUEST_POLICY_EXTENSION", b.pathFromRoot(b.getInstallPath(.lib, "")));
+        b.step("smoke-webview-initializers-linux", "Verify trusted future-document initializers and owned bootstrap replacement").dependOn(&initializers_run.step);
+        const initializers_owner_tests = b.addExecutable(.{ .name = "test-webkit-initializers", .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }) });
+        initializers_owner_tests.root_module.addCSourceFile(.{ .file = b.path("tests/webkit_initializers_owner_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        initializers_owner_tests.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        check.dependOn(&initializers_owner_tests.step);
+        b.step("test-webkit-initializers", "Verify prepared native initializer ownership and synchronous replacement transactions").dependOn(&b.addRunArtifact(initializers_owner_tests).step);
+        addSmoke(b, "smoke-webview-navigation-linux", "tests/linux_navigation_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        const regions_smoke = b.addExecutable(.{ .name = "smoke-webview-regions-linux", .root_module = b.createModule(.{ .root_source_file = b.path("tests/linux_regions_webview_smoke.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view } } }) });
+        regions_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/linux_regions_webview_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        regions_smoke.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        check.dependOn(&regions_smoke.step);
+        b.step("smoke-webview-regions-linux", "Verify independent rectangular WebKit children, geometry and close lifetime").dependOn(&b.addRunArtifact(regions_smoke).step);
+        const session_smoke = b.addExecutable(.{ .name = "smoke-webview-session-linux", .root_module = b.createModule(.{ .root_source_file = b.path("tests/linux_session_webview_smoke.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view } } }) });
+        session_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/webkit_remote_fixture.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        session_smoke.root_module.linkSystemLibrary("libsoup-3.0", .{ .use_pkg_config = .force });
+        check.dependOn(&session_smoke.step);
+        const session_run = b.addRunArtifact(session_smoke);
+        session_run.step.dependOn(&install_extension.step);
+        session_run.setEnvironmentVariable("ZIGGURAT_REQUEST_POLICY_EXTENSION", b.pathFromRoot(b.getInstallPath(.lib, "")));
+        b.step("smoke-webview-session-linux", "Verify parked and rehosted page ownership, pending work and shutdown").dependOn(&session_run.step);
+        const remote_smoke = b.addExecutable(.{ .name = "smoke-webview-remote-linux", .root_module = b.createModule(.{ .root_source_file = b.path("tests/linux_remote_webview_smoke.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view } } }) });
+        remote_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/webkit_remote_fixture.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        remote_smoke.root_module.linkSystemLibrary("libsoup-3.0", .{ .use_pkg_config = .force });
+        check.dependOn(&remote_smoke.step);
+        const remote_run = b.addRunArtifact(remote_smoke);
+        remote_run.step.dependOn(&install_extension.step);
+        remote_run.setEnvironmentVariable("ZIGGURAT_REQUEST_POLICY_EXTENSION", b.pathFromRoot(b.getInstallPath(.lib, "")));
+        b.step("smoke-webview-remote-linux", "Run isolated loopback remote View policy and lifetime checks").dependOn(&remote_run.step);
+        const profile_smoke = b.addExecutable(.{ .name = "smoke-webview-profile-linux", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/linux_profile_webview_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view } },
+        }) });
+        check.dependOn(&profile_smoke.step);
+        const profile_run = b.addRunArtifact(profile_smoke);
+        profile_run.step.dependOn(&install_extension.step);
+        profile_run.setEnvironmentVariable("ZIGGURAT_REQUEST_POLICY_EXTENSION", b.pathFromRoot(b.getInstallPath(.lib, "")));
+        b.step("smoke-webview-profile-linux", "Verify explicit persistent profile ownership, admission and first-request restoration").dependOn(&profile_run.step);
+        const cookies_smoke = b.addExecutable(.{ .name = "smoke-webview-cookies-linux", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/linux_cookie_store_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view } },
+        }) });
+        check.dependOn(&cookies_smoke.step);
+        const cookies_run = b.addRunArtifact(cookies_smoke);
+        cookies_run.step.dependOn(&install_extension.step);
+        cookies_run.setEnvironmentVariable("ZIGGURAT_REQUEST_POLICY_EXTENSION", b.pathFromRoot(b.getInstallPath(.lib, "")));
+        b.step("smoke-webview-cookies-linux", "Verify independent profile cookie operations, bounded ownership and shutdown").dependOn(&cookies_run.step);
+        const https_smoke = b.addExecutable(.{ .name = "smoke-webview-https-linux", .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/linux_profile_https_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view } },
+        }) });
+        const https_fixture = native_support.add(b, https_smoke.root_module, "profile-https-fixture", "tests/profile_https_fixture.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        https_fixture.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        https_smoke.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        check.dependOn(&https_smoke.step);
+        const https_run = b.addRunArtifact(https_smoke);
+        https_run.step.dependOn(&install_extension.step);
+        https_run.setEnvironmentVariable("ZIGGURAT_REQUEST_POLICY_EXTENSION", b.pathFromRoot(b.getInstallPath(.lib, "")));
+        b.step("smoke-webview-https-linux", "Verify frozen profile trust and policy for a host-owned loopback HTTPS service").dependOn(&https_run.step);
+        if (https_resources_enabled) {
+            const pages_smoke = b.addExecutable(.{ .name = "smoke-https-pages", .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/linux_https_page_resources_smoke.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view }, .{ .name = "ziggurat_https_resources", .module = https_resources }, .{ .name = "ziggurat_native_stream", .module = native_stream } },
+            }) });
+            const pages_host = native_support.add(b, pages_smoke.root_module, "https-page-resources-host", "tests/https_page_resources_host.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+            for ([_][]const u8{ "libsoup-3.0", "gio-unix-2.0" }) |library| {
+                pages_host.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+                pages_smoke.root_module.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+            }
+            check.dependOn(&pages_smoke.step);
+            const pages_run = b.addRunArtifact(pages_smoke);
+            pages_run.step.dependOn(&install_extension.step);
+            pages_run.setEnvironmentVariable("ZIGGURAT_REQUEST_POLICY_EXTENSION", b.pathFromRoot(b.getInstallPath(.lib, "")));
+            b.step("smoke-https-pages", "Verify WebKit credentials and host HTTPS memory and file resources together").dependOn(&pages_run.step);
+        }
+    }
+    const tests = b.addTest(.{ .root_module = core });
+    const webkit_remote_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/webview/webkit_remote.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_http_response", .module = http_response }} }) });
+    check.dependOn(&webkit_remote_tests.step);
+    const run_webkit_remote = b.addRunArtifact(webkit_remote_tests);
+    b.step("test-webkit-remote", "Run remote origin policy and owned native descriptor invariants").dependOn(&run_webkit_remote.step);
+    const ipc_host = b.createModule(.{ .root_source_file = b.path("src/ipc/root.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
+    const resource_stream_host = b.createModule(.{ .root_source_file = b.path("src/resource_stream/root.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
+    const service_source = b.option([]const u8, "ipc-service", "Zig source exporting a Service type for TypeScript generation") orelse "examples/counter_service.zig";
+    const service = b.createModule(.{ .root_source_file = sourcePath(b, service_source), .target = b.graph.host, .optimize = .ReleaseSafe, .imports = &.{ .{ .name = "ziggurat_ipc", .module = ipc_host }, .{ .name = "ziggurat_resource_stream", .module = resource_stream_host } } });
+    const generator = b.addExecutable(.{ .name = "ipc-client-generator", .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/ipc_client.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+        .imports = &.{ .{ .name = "ziggurat_ipc", .module = ipc_host }, .{ .name = "service", .module = service } },
+    }) });
+    const generated = b.addRunArtifact(generator);
+    const client_source = generated.addOutputFileArg("client.ts");
+    const install_client = b.addInstallFileWithDir(client_source, .prefix, "share/ziggurat/client.ts");
+    b.step("ipc-client", "Generate the versioned TypeScript client from Zig service types").dependOn(&install_client.step);
+    const ipc_tests = b.addTest(.{ .root_module = ipc });
+    const ipc_fixture = b.createModule(.{ .root_source_file = b.path("src/ipc/fixture.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ipc", .module = ipc }} });
+    const ipc_fixture_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/ipc_fixture_check.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{ .{ .name = "ipc", .module = ipc }, .{ .name = "fixture", .module = ipc_fixture } },
+    }) });
+    const update_tests = b.addTest(.{ .root_module = update });
+    const producer_service = b.createModule(.{ .root_source_file = b.path("tests/resource_producer_service.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat_ipc", .module = ipc }, .{ .name = "ziggurat_resource_stream", .module = resource_stream } } });
+    const producer_fixture_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/resource_producer_fixture_check.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{ .{ .name = "ziggurat_ipc", .module = ipc }, .{ .name = "producer_service", .module = producer_service } },
+    }) });
+    const asset_tests = b.addTest(.{ .root_module = assets });
+    const extension_tests = b.addTest(.{ .root_module = extensions });
+    const vector_tests = b.addTest(.{ .root_module = vector });
+    const svg_tests = b.addTest(.{ .root_module = svg });
+    const shadow_tests = b.addTest(.{ .root_module = shadows });
+    const document_tests = b.addTest(.{ .root_module = document });
+    const document_diff_tests = b.addTest(.{ .root_module = document_diff });
+    const document_diff_view_tests = b.addTest(.{ .root_module = document_diff_view });
+    const code_editor_tests = b.addTest(.{ .root_module = code_editor });
+    const resource_stream_tests = b.addTest(.{ .root_module = resource_stream });
+    const animation_tests = b.addTest(.{ .root_module = animation });
+    const producer_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/resource_stream/bridge.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ipc", .module = ipc },
+            .{ .name = "ziggurat_resource_stream", .module = resource_stream },
+        },
+    }) });
+    const shell_test_module = b.createModule(.{ .root_source_file = b.path("src/system/shell.zig"), .target = target, .optimize = optimize, .link_libc = target.result.os.tag == .windows or target.result.os.tag == .linux });
+    if (target.result.os.tag == .windows) {
+        for ([_][]const u8{ "user32", "gdi32", "shell32", "ole32" }) |library| shell_test_module.linkSystemLibrary(library, .{});
+    }
+    const shell_tests = b.addTest(.{ .root_module = shell_test_module });
+    const system_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/system_capabilities.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_system", .module = system } },
+    }) });
+    const update_tool = b.addExecutable(.{ .name = "ziggurat-update", .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/update.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "ziggurat_update", .module = update }},
+    }) });
+    addResources(b, update_tool);
+    const install_update = b.addInstallArtifact(update_tool, .{});
+    b.step("update-tool", "Build the optional signed-update tool").dependOn(&install_update.step);
+    check.dependOn(&update_tool.step);
+    const assets_host = b.createModule(.{ .root_source_file = b.path("src/assets/root.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
+    const asset_generator = b.addExecutable(.{ .name = "web-assets-generator", .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/web_assets.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+        .imports = &.{.{ .name = "ziggurat_assets", .module = assets_host }},
+    }) });
+    const asset_input = b.option([]const u8, "web-assets", "Built frontend directory to embed") orelse "tests/assets_fixture";
+    const asset_entry = b.option([]const u8, "web-entry", "Embedded frontend entry URL path") orelse "/index.html";
+    const generate_assets = b.addRunArtifact(asset_generator);
+    generate_assets.addDirectoryArg(sourcePath(b, asset_input));
+    const asset_output = generate_assets.addOutputDirectoryArg("web-assets");
+    generate_assets.addArg(asset_entry);
+    const install_assets = b.addInstallDirectory(.{ .source_dir = asset_output, .install_dir = .prefix, .install_subdir = "share/ziggurat/web-assets" });
+    b.step("web-assets", "Embed a built frontend as content-addressed Zig resources").dependOn(&install_assets.step);
+    const embedded = b.createModule(.{ .root_source_file = asset_output.path(b, "assets.zig"), .target = target, .optimize = optimize });
+    const embed_probe = b.addExecutable(.{ .name = "assets-embed-probe", .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/assets_embed_probe.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "web_assets", .module = embedded }},
+    }) });
+    const packaging_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("build_support/packaging.zig"), .target = target, .optimize = optimize }) });
+    const platform_probe = b.addExecutable(.{
+        .name = "platform-check",
+        .root_module = b.createModule(.{ .root_source_file = b.path("tests/platform_check.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} }),
+    });
+    check.dependOn(&platform_probe.step);
+    check.dependOn(&tests.step);
+    check.dependOn(&ipc_tests.step);
+    check.dependOn(&ipc_fixture_tests.step);
+    check.dependOn(&producer_fixture_tests.step);
+    check.dependOn(&update_tests.step);
+    check.dependOn(&asset_tests.step);
+    check.dependOn(&extension_tests.step);
+    check.dependOn(&vector_tests.step);
+    check.dependOn(&svg_tests.step);
+    check.dependOn(&shadow_tests.step);
+    check.dependOn(&document_tests.step);
+    check.dependOn(&document_diff_tests.step);
+    check.dependOn(&document_diff_view_tests.step);
+    check.dependOn(&code_editor_tests.step);
+    check.dependOn(&resource_stream_tests.step);
+    check.dependOn(&animation_tests.step);
+    check.dependOn(&producer_tests.step);
+    check.dependOn(&shell_tests.step);
+    check.dependOn(&system_tests.step);
+    check.dependOn(&embed_probe.step);
+    check.dependOn(&packaging_tests.step);
+    const run_tests = b.addRunArtifact(tests);
+    b.step("test-core", "Run core lifecycle and composition invariant tests").dependOn(&run_tests.step);
+    test_step.dependOn(&run_runtime_tests.step);
+    test_step.dependOn(&run_file_stream_tests.step);
+    const https_resources_tests = b.addTest(.{ .root_module = https_resources });
+    const run_https_resources_tests = b.addRunArtifact(https_resources_tests);
+    check.dependOn(&https_resources_tests.step);
+    test_step.dependOn(&run_https_resources_tests.step);
+    b.step("test-https-resources", "Verify optional HTTPS resource admission, limits and cold capability rejection").dependOn(&run_https_resources_tests.step);
+    const site_routes_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/https_resources/site_routes.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "ziggurat_http_response", .module = http_response }},
+    }) });
+    const run_site_routes_tests = b.addRunArtifact(site_routes_tests);
+    check.dependOn(&site_routes_tests.step);
+    test_step.dependOn(&run_site_routes_tests.step);
+    b.step("test-https-site-routes", "Run owned HTTPS route, static response and explicit header policy contracts").dependOn(&run_site_routes_tests.step);
+    const http_response_tests = b.addTest(.{ .root_module = http_response });
+    const run_http_response_tests = b.addRunArtifact(http_response_tests);
+    check.dependOn(&http_response_tests.step);
+    test_step.dependOn(&run_http_response_tests.step);
+    b.step("test-http-response", "Verify shared HTTP response validation and owned metadata without a browser or server").dependOn(&run_http_response_tests.step);
+    const caret_tests = b.addTest(.{ .root_module = caret });
+    const run_caret_tests = b.addRunArtifact(caret_tests);
+    check.dependOn(&caret_tests.step);
+    test_step.dependOn(&run_caret_tests.step);
+    b.step("test-caret", "Verify bounded visual caret geometry independently of shaping and native rendering").dependOn(&run_caret_tests.step);
+    const gaussian_tests = b.addTest(.{ .root_module = gaussian });
+    const run_gaussian_tests = b.addRunArtifact(gaussian_tests);
+    check.dependOn(&gaussian_tests.step);
+    test_step.dependOn(&run_gaussian_tests.step);
+    b.step("test-gaussian", "Verify bounded composed-image Gaussian preparation, worker handoff and resource leases").dependOn(&run_gaussian_tests.step);
+    const profile_storage_module = b.createModule(.{ .root_source_file = b.path("src/webview/profile_storage.zig"), .target = target, .optimize = optimize });
+    const profile_storage_tests = b.addTest(.{ .root_module = profile_storage_module });
+    const run_profile_storage_tests = b.addRunArtifact(profile_storage_tests);
+    check.dependOn(&profile_storage_tests.step);
+    test_step.dependOn(&run_profile_storage_tests.step);
+    b.step("test-profile-storage", "Verify private profile preparation metadata, handoff and ownership without an engine").dependOn(&run_profile_storage_tests.step);
+    const profile_tls_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/webview/profile_tls_policy.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_tls_pem", .module = tls_pem }} }) });
+    const run_profile_tls_tests = b.addRunArtifact(profile_tls_tests);
+    check.dependOn(&profile_tls_tests.step);
+    test_step.dependOn(&run_profile_tls_tests.step);
+    b.step("test-profile-tls", "Verify bounded certificate-only profile policy without TLS or an engine").dependOn(&run_profile_tls_tests.step);
+    const pem_tests = b.addTest(.{ .root_module = tls_pem });
+    const run_pem_tests = b.addRunArtifact(pem_tests);
+    check.dependOn(&pem_tests.step);
+    test_step.dependOn(&run_pem_tests.step);
+    b.step("test-tls-pem", "Verify bounded shared certificate and private-key framing without native TLS").dependOn(&run_pem_tests.step);
+    const cookies_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/webview/cookies.zig"), .target = target, .optimize = optimize }) });
+    const run_cookies_tests = b.addRunArtifact(cookies_tests);
+    check.dependOn(&cookies_tests.step);
+    test_step.dependOn(&run_cookies_tests.step);
+    b.step("test-cookies", "Verify cookie identity, owned result batches and bounded operation tokens without an engine").dependOn(&run_cookies_tests.step);
+    if (target.result.os.tag == .linux) {
+        const file_tests = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/profile_storage_linux.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "profile_storage", .module = profile_storage_module }},
+        }) });
+        check.dependOn(&file_tests.step);
+        b.step("test-profile-storage-files", "Verify opt-in Linux profile locks, private paths and physical descriptor lifetime").dependOn(&b.addRunArtifact(file_tests).step);
+    }
+    if (webkit_file_run) |run| test_step.dependOn(&run.step);
+    if (initializer_native_run) |run| test_step.dependOn(&run.step);
+    const language_protocol_tests = b.addTest(.{ .root_module = language_protocol });
+    const run_language_protocol_tests = b.addRunArtifact(language_protocol_tests);
+    check.dependOn(&language_protocol_tests.step);
+    test_step.dependOn(&run_language_protocol_tests.step);
+    b.step("test-language-protocol", "Verify bounded framing, versioned synchronization and explicit language client ownership").dependOn(&run_language_protocol_tests.step);
+    const window_placement_tests = b.addTest(.{ .root_module = window_placement });
+    const run_window_placement_tests = b.addRunArtifact(window_placement_tests);
+    check.dependOn(&window_placement_tests.step);
+    test_step.dependOn(&run_window_placement_tests.step);
+    b.step("test-window-placement", "Run monitor placement, versioned encoding and explicit worker storage invariants").dependOn(&run_window_placement_tests.step);
+    test_step.dependOn(&run_webkit_remote.step);
+    const snippets_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/code_editor/snippet.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_document", .module = document },
+            .{ .name = "ziggurat_document_editor", .module = document_editor },
+        },
+    }) });
+    check.dependOn(&snippets_tests.step);
+    b.step("test-snippets", "Run bounded snippet parsing and document session invariants").dependOn(&b.addRunArtifact(snippets_tests).step);
+    const document_accessibility_tests = b.addTest(.{ .root_module = document_accessibility });
+    const run_document_accessibility_tests = b.addRunArtifact(document_accessibility_tests);
+    test_step.dependOn(&run_document_accessibility_tests.step);
+    check.dependOn(&document_accessibility_tests.step);
+    b.step("test-document-accessibility", "Run complete document text snapshot and ownership invariants").dependOn(&run_document_accessibility_tests.step);
+    const diff_accessibility_tests = b.addTest(.{ .root_module = document_diff_accessibility });
+    const run_diff_accessibility_tests = b.addRunArtifact(diff_accessibility_tests);
+    test_step.dependOn(&run_diff_accessibility_tests.step);
+    check.dependOn(&diff_accessibility_tests.step);
+    b.step("test-document-diff-accessibility", "Verify optional paired document accessibility ownership and presentation gates").dependOn(&run_diff_accessibility_tests.step);
+    inline for (.{
+        .{ "test-affine", "affine", "src/ui/affine.zig", "tests/ui_affine.zig" },
+        .{ "test-affine-state", "affine_state", "src/ui/affine_state.zig", "tests/ui_affine_state.zig" },
+    }) |entry| {
+        const math_module = b.createModule(.{ .root_source_file = b.path(entry[2]), .target = target, .optimize = optimize });
+        const math_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(entry[3]), .target = target, .optimize = optimize, .imports = &.{.{ .name = entry[1], .module = math_module }} }) });
+        const run_math_tests = b.addRunArtifact(math_tests);
+        test_step.dependOn(&run_math_tests.step);
+        check.dependOn(&math_tests.step);
+        b.step(entry[0], "Run pure coordinate and committed-frame geometry invariants").dependOn(&run_math_tests.step);
+    }
+    const run_code_editor_tests = b.addRunArtifact(code_editor_tests);
+    test_step.dependOn(&run_code_editor_tests.step);
+    b.step("test-code-editor", "Run revisioned editor services and ownership tests").dependOn(&run_code_editor_tests.step);
+    const run_resource_stream_tests = b.addRunArtifact(resource_stream_tests);
+    test_step.dependOn(&run_resource_stream_tests.step);
+    b.step("test-resource-stream", "Run bounded byte producer, protocol credit and ownership tests").dependOn(&run_resource_stream_tests.step);
+    const run_animation_tests = b.addRunArtifact(animation_tests);
+    test_step.dependOn(&run_animation_tests.step);
+    b.step("test-animation", "Run explicit-clock motion, timeline and wake invariant tests").dependOn(&run_animation_tests.step);
+    const run_producer_tests = b.addRunArtifact(producer_tests);
+    test_step.dependOn(&run_producer_tests.step);
+    const producer_test_step = b.step("test-resource-producer", "Run page producer bridge ownership, schema and reentry tests without a Runtime");
+    producer_test_step.dependOn(&run_producer_tests.step);
+    const run_producer_fixture_tests = b.addRunArtifact(producer_fixture_tests);
+    test_step.dependOn(&run_producer_fixture_tests.step);
+    producer_test_step.dependOn(&run_producer_fixture_tests.step);
+    const initializer_test_step = b.step("test-document-initializers", "Run owned document initializer and replacement responsibility contracts without a Runtime");
+    for ([_][]const u8{ "src/webview/document_initializers.zig", "src/webview/initializer_transaction.zig" }) |source| {
+        const initializer_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = target, .optimize = optimize }) });
+        const run_initializer_tests = b.addRunArtifact(initializer_tests);
+        test_step.dependOn(&run_initializer_tests.step);
+        check.dependOn(&initializer_tests.step);
+        initializer_test_step.dependOn(&run_initializer_tests.step);
+    }
+    const initializer_source = b.createModule(.{ .root_source_file = b.path("src/webview/document_initializers.zig"), .target = target, .optimize = optimize });
+    const initializer_emitter = b.addExecutable(.{ .name = "initializer-semantics-source", .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/document_initializers_emit.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "ziggurat_document_initializers", .module = initializer_source }},
+    }) });
+    check.dependOn(&initializer_emitter.step);
+    const initializer_emitter_install = b.addInstallArtifact(initializer_emitter, .{});
+    b.step("build-initializer-semantics-emitter", "Build the pure encoded initializer source for the explicit JavaScript VM oracle").dependOn(&initializer_emitter_install.step);
+    if (view_tests) |selected| {
+        check.dependOn(&selected.step);
+        const run_view_tests = b.addRunArtifact(selected);
+        test_step.dependOn(&run_view_tests.step);
+        b.step("test-webview", "Run page policies, requests and session ownership tests").dependOn(&run_view_tests.step);
+    }
+    test_step.dependOn(&run_tests.step);
+    const run_ipc_tests = b.addRunArtifact(ipc_tests);
+    test_step.dependOn(&run_ipc_tests.step);
+    b.step("test-ipc", "Run typed protocol, event and allocator reentry tests").dependOn(&run_ipc_tests.step);
+    test_step.dependOn(&b.addRunArtifact(ipc_fixture_tests).step);
+    test_step.dependOn(&b.addRunArtifact(update_tests).step);
+    test_step.dependOn(&b.addRunArtifact(asset_tests).step);
+    test_step.dependOn(&b.addRunArtifact(extension_tests).step);
+    const run_vector_tests = b.addRunArtifact(vector_tests);
+    test_step.dependOn(&run_vector_tests.step);
+    b.step("test-vector", "Run bounded path geometry and coverage tests").dependOn(&run_vector_tests.step);
+    const run_svg_tests = b.addRunArtifact(svg_tests);
+    test_step.dependOn(&run_svg_tests.step);
+    b.step("test-svg", "Run bounded SVG document and rendering tests").dependOn(&run_svg_tests.step);
+    test_step.dependOn(&b.addRunArtifact(shadow_tests).step);
+    const run_document_tests = b.addRunArtifact(document_tests);
+    test_step.dependOn(&run_document_tests.step);
+    b.step("test-document", "Run indexed document and snapshot invariant tests").dependOn(&run_document_tests.step);
+    const run_document_diff_tests = b.addRunArtifact(document_diff_tests);
+    test_step.dependOn(&run_document_diff_tests.step);
+    b.step("test-document-diff", "Run bounded snapshot comparison and minimal edit invariants").dependOn(&run_document_diff_tests.step);
+    const run_document_diff_view_tests = b.addRunArtifact(document_diff_view_tests);
+    test_step.dependOn(&run_document_diff_view_tests.step);
+    b.step("test-document-diff-view", "Run paired snapshot delivery and aligned diff view invariants").dependOn(&run_document_diff_view_tests.step);
+    test_step.dependOn(&b.addRunArtifact(shell_tests).step);
+    test_step.dependOn(&b.addRunArtifact(system_tests).step);
+    test_step.dependOn(&b.addRunArtifact(embed_probe).step);
+    test_step.dependOn(&b.addRunArtifact(packaging_tests).step);
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
+        const ui_tests = b.addTest(.{ .root_module = ui });
+        check.dependOn(&ui_tests.step);
+        const run_ui_tests = b.addRunArtifact(ui_tests);
+        test_step.dependOn(&run_ui_tests.step);
+        b.step("test-ui", "Run UI frame, geometry, widgets and theme contracts").dependOn(&run_ui_tests.step);
+        const pointer_controls_tests = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/pointer_clicks_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui } },
+        }) });
+        check.dependOn(&pointer_controls_tests.step);
+        const run_pointer_controls_tests = b.addRunArtifact(pointer_controls_tests);
+        test_step.dependOn(&run_pointer_controls_tests.step);
+        b.step("test-ui-pointer-clicks", "Run registered pointer controls, frame authority and lifetime contracts").dependOn(&run_pointer_controls_tests.step);
+        addSmoke(b, "smoke-pointer-clicks", "tests/pointer_clicks_smoke.zig", target, optimize, &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui } });
+        const shortcut_scopes_tests = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/shortcut_scopes_contract.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui } },
+        }) });
+        check.dependOn(&shortcut_scopes_tests.step);
+        const run_shortcut_scopes_tests = b.addRunArtifact(shortcut_scopes_tests);
+        test_step.dependOn(&run_shortcut_scopes_tests.step);
+        b.step("test-shortcut-scopes", "Run scoped key routing, front authority and bounded continuation contracts").dependOn(&run_shortcut_scopes_tests.step);
+        addSmoke(b, "smoke-shortcut-scopes", "tests/shortcut_scopes_smoke.zig", target, optimize, &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui } });
+        const text_tests = b.addTest(.{ .root_module = text_layout });
+        check.dependOn(&text_tests.step);
+        const run_text_tests = b.addRunArtifact(text_tests);
+        test_step.dependOn(&run_text_tests.step);
+        b.step("test-text-layout", "Run immutable text layout and ownership invariants").dependOn(&run_text_tests.step);
+        const drawing_tests = b.addTest(.{ .root_module = drawing_resources });
+        check.dependOn(&drawing_tests.step);
+        test_step.dependOn(&b.addRunArtifact(drawing_tests).step);
+        const image_tests = b.addTest(.{ .root_module = images });
+        check.dependOn(&image_tests.step);
+        test_step.dependOn(&b.addRunArtifact(image_tests).step);
+        const image_drawing_tests = b.addTest(.{ .root_module = image_drawing });
+        check.dependOn(&image_drawing_tests.step);
+        test_step.dependOn(&b.addRunArtifact(image_drawing_tests).step);
+        const shaped_tests = b.addTest(.{ .root_module = shaped_editor });
+        const document_editor_tests = b.addTest(.{ .root_module = document_editor });
+        check.dependOn(&document_editor_tests.step);
+        const run_document_editor_tests = b.addRunArtifact(document_editor_tests);
+        test_step.dependOn(&run_document_editor_tests.step);
+        b.step("test-document-editor", "Run indexed document editor invariant tests").dependOn(&run_document_editor_tests.step);
+        check.dependOn(&shaped_tests.step);
+        test_step.dependOn(&b.addRunArtifact(shaped_tests).step);
+        const list_tests = b.addTest(.{ .root_module = virtual_list });
+        check.dependOn(&list_tests.step);
+        const run_list_tests = b.addRunArtifact(list_tests);
+        test_step.dependOn(&run_list_tests.step);
+        b.step("test-virtual-list", "Run virtual list model and control invariant tests").dependOn(&run_list_tests.step);
+    }
+}
+
+fn sourcePath(b: *std.Build, path: []const u8) std.Build.LazyPath {
+    return if (std.fs.path.isAbsolute(path)) .{ .cwd_relative = path } else b.path(path);
+}
+
+fn addExample(b: *std.Build, name: []const u8, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) void {
+    const exe = b.addExecutable(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(path),
+            .target = target,
+            .optimize = optimize,
+            .imports = imports,
+        }),
+    });
+    addResources(b, exe);
+    b.installArtifact(exe);
+    b.top_level_steps.get("check").?.step.dependOn(&exe.step);
+    const run = b.addSystemCommand(&.{b.getInstallPath(.bin, b.fmt("{s}{s}", .{ name, if (target.result.os.tag == .windows) ".exe" else "" }))});
+    run.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run.addArgs(args);
+    b.step(b.fmt("run-{s}", .{name}), b.fmt("Run {s}", .{name})).dependOn(&run.step);
+}
+
+fn addLinuxPointerCoreSmoke(b: *std.Build, check: *std.Build.Step, core: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    const smoke = b.addExecutable(.{ .name = "smoke-pointer-core-linux", .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/linux_pointer_core_smoke.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "ziggurat", .module = core }},
+        .link_libc = true,
+    }) });
+    smoke.root_module.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+    check.dependOn(&smoke.step);
+    const install = b.addInstallArtifact(smoke, .{});
+    b.step("build-smoke-pointer-core-linux", "Build the real GTK-to-Core pointer boundary check").dependOn(&install.step);
+    const run = b.addSystemCommand(&.{b.getInstallPath(.bin, "smoke-pointer-core-linux")});
+    run.step.dependOn(&install.step);
+    b.step("smoke-pointer-core-linux", "Verify real GTK/Core pointer facts and independent callback scopes").dependOn(&run.step);
+}
+
+fn addPointerCostSmoke(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module) void {
+    const name = "smoke-pointer-cost";
+    const exe = b.addExecutable(.{ .name = name, .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/pointer_cost_smoke.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "ziggurat", .module = core }},
+    }) });
+    exe.root_module.addCSourceFile(.{ .file = b.path("tests/pointer_cost_windows.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+    addResources(b, exe);
+    b.top_level_steps.get("check").?.step.dependOn(&exe.step);
+    const install = b.addInstallArtifact(exe, .{});
+    b.step("build-" ++ name, "Build the isolated native pointer cost probe").dependOn(&install.step);
+    const run = b.addSystemCommand(&.{b.getInstallPath(.bin, name ++ ".exe")});
+    run.step.dependOn(&install.step);
+    if (b.args) |args| run.addArgs(args);
+    b.step(name, "Measure caller allocations and selected real native pointer calls").dependOn(&run.step);
+}
+
+fn addWebNativeBoundarySmoke(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module, view: *std.Build.Module) void {
+    const name = "smoke-webview-native-boundary";
+    const exe = b.addExecutable(.{ .name = name, .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/webview_native_boundary_smoke.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view } },
+    }) });
+    if (target.result.os.tag == .linux) exe.root_module.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+    addResources(b, exe);
+    b.top_level_steps.get("check").?.step.dependOn(&exe.step);
+    const install = b.addInstallArtifact(exe, .{});
+    const build_step = b.step("build-" ++ name, "Build the independent SDK callback ownership probe");
+    build_step.dependOn(&install.step);
+    build_step.dependOn(&b.top_level_steps.get("webview-runtime").?.step);
+    const run = b.addSystemCommand(&.{b.getInstallPath(.bin, b.fmt("{s}{s}", .{ name, if (target.result.os.tag == .windows) ".exe" else "" }))});
+    run.step.dependOn(&install.step);
+    run.step.dependOn(&b.top_level_steps.get("webview-runtime").?.step);
+    if (b.args) |args| run.addArgs(args);
+    b.step(name, "Verify synchronous SDK completion cannot borrow pointer ingress").dependOn(&run.step);
+}
+
+fn addSmoke(b: *std.Build, name: []const u8, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) void {
+    const exe = b.addExecutable(.{
+        .name = name,
+        .root_module = b.createModule(.{ .root_source_file = b.path(path), .target = target, .optimize = optimize, .imports = imports }),
+    });
+    addResources(b, exe);
+    const install = b.addInstallArtifact(exe, .{});
+    b.step(b.fmt("build-{s}", .{name}), "Build a hidden-window integration executable without running it").dependOn(&install.step);
+    const run = b.addSystemCommand(&.{b.getInstallPath(.bin, b.fmt("{s}{s}", .{ name, if (target.result.os.tag == .windows) ".exe" else "" }))});
+    run.step.dependOn(&install.step);
+    for (imports) |dependency| {
+        if (std.mem.eql(u8, dependency.name, "ziggurat_webview")) run.step.dependOn(&b.top_level_steps.get("webview-runtime").?.step);
+    }
+    if (b.args) |args| run.addArgs(args);
+    b.step(name, "Run integration checks with hidden windows").dependOn(&run.step);
+    b.top_level_steps.get("check").?.step.dependOn(&exe.step);
+}
+
+fn addResources(b: *std.Build, exe: *std.Build.Step.Compile) void {
+    if (exe.root_module.resolved_target.?.result.os.tag != .windows) return;
+    const special = std.mem.eql(u8, exe.name, "smoke-packaging");
+    _ = packaging.addWindowsResources(b, exe, .{
+        .metadata = .{
+            .identity = if (special) "org.ziggurat.PackagingSmoke" else b.fmt("org.ziggurat.{s}", .{exe.name}),
+            .display_name = if (special) "Ziggurat \"资源\" & packaging \\ test" else b.fmt("Ziggurat {s}", .{exe.name}),
+            .version = if (special) .{ .major = 1, .minor = 2, .patch = 3, .revision = 4 } else .{ .major = 0, .minor = 1, .patch = 0 },
+            .description = "Ziggurat desktop application",
+        },
+        .icon = b.path("assets/application.ico"),
+    }) catch |err| std.debug.panic("invalid application resources: {s}", .{@errorName(err)});
+}

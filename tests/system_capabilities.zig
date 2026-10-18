@@ -1,0 +1,41 @@
+const std = @import("std");
+const builtin = @import("builtin");
+const z = @import("ziggurat");
+const system = @import("ziggurat_system");
+fn action(_: *anyopaque, _: z.Window, _: system.Action) void {}
+fn selected(_: *anyopaque, _: z.Window, _: system.picker.Result) void {}
+test "unsupported system capabilities fail explicitly" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const app = try z.App.init(std.testing.allocator);
+    defer app.deinit();
+    const window = try app.createWindow(.{});
+    var context: u8 = 0;
+    var destination: [100]u8 = undefined;
+    var owner = system.Owner.init(&context, action);
+    try std.testing.expect(!system.capabilities.native_menu and !system.capabilities.tray and !system.capabilities.clipboard_text and !system.capabilities.async_file_dialog);
+    try std.testing.expectError(error.UnsupportedCapability, owner.attach(window));
+    try std.testing.expectError(error.UnsupportedCapability, owner.setMenu(&.{}));
+    try std.testing.expectError(error.UnsupportedCapability, owner.clearMenu());
+    try std.testing.expectError(error.UnsupportedCapability, owner.setItemState(1, true, false));
+    try std.testing.expectError(error.UnsupportedCapability, owner.setTray(.{}));
+    try std.testing.expectError(error.UnsupportedCapability, owner.clearTray());
+    try std.testing.expect(!system.capabilities.global_hotkeys and !system.capabilities.notification_area);
+    try std.testing.expectError(error.UnsupportedCapability, owner.registerHotkey(1, .{ .key = .f24 }));
+    try std.testing.expectError(error.UnsupportedCapability, owner.unregisterHotkey(1));
+    try std.testing.expectError(error.UnsupportedCapability, owner.clearHotkeys());
+    try std.testing.expectError(error.UnsupportedCapability, owner.showNotification(1, .{ .title = "Title", .body = "Body" }));
+    try std.testing.expectError(error.UnsupportedCapability, owner.clearNotification());
+    try std.testing.expectError(error.UnsupportedCapability, owner.openFile(.{}, &destination, &context, selected));
+    try std.testing.expectError(error.UnsupportedCapability, owner.saveFile(.{}, &destination, &context, selected));
+    try std.testing.expectError(error.UnsupportedCapability, owner.openFiles(.{}, &destination, &context, selected));
+    try std.testing.expectError(error.UnsupportedCapability, owner.pickFolder(.{}, &destination, &context, selected));
+    try std.testing.expectError(error.UnsupportedCapability, owner.cancelFileDialog());
+    try std.testing.expectError(error.UnsupportedCapability, system.clipboard.writeText(window, "text"));
+    try std.testing.expectError(error.UnsupportedCapability, system.clipboard.readText(window, &destination));
+    var picker: system.picker.Picker = .{};
+    try std.testing.expectError(error.UnsupportedCapability, picker.start(window, .open_file, .{}, &destination, &context, selected));
+    try std.testing.expectError(error.UnsupportedCapability, picker.cancel());
+    picker.detach();
+    try owner.detach();
+    try std.testing.expectEqual(0, system.picker.resourceCount());
+}

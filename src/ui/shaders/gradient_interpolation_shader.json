@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "sdk": "10.0.26100.0",
+  "compiler_version": "10.0.26100.6901 (WinBuild.160101.0800)",
+  "compiler_sha256": "d4b03c57cb0eae13723d0d6e717a7281aa077a07665505efde32c203799a09b0",
+  "source_sha256": "2aba242c114ced7e06056674fa5fae2b64929aceabea62b15cb27dd3b0dd82ca",
+  "included_source_sha256": "7a23280772306ef7396a9276c61f071e557fd04da72165cca31f8541f9379090",
+  "bytecode_sha256": "0e57135b9ea7c6d896cd30f49aa2059aa0218f8b328f638cd45ed11466ea142a",
+  "bytecode_bytes": 20476,
+  "flags": [
+    "/Ges",
+    "/Gis",
+    "/O3",
+    "/T",
+    "ps_4_0",
+    "/E",
+    "main"
+  ]
+}

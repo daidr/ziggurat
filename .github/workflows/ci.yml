@@ -1,0 +1,259 @@
+name: native checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      webview:
+        description: Run optional Windows and Linux system WebView checks
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        optimize: [Debug, ReleaseSafe]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install verified Zig 0.15.2
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'zig-0.15.2.zip'
+          Invoke-WebRequest 'https://ziglang.org/download/0.15.2/zig-x86_64-windows-0.15.2.zip' -OutFile $archive
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine '3a0ed1e8799a2f8ce2a6e6290a9ff22e6906f8227865911fb7ddedc3cc14cb0c') { throw 'Zig archive checksum mismatch.' }
+          Expand-Archive -LiteralPath $archive -DestinationPath $env:RUNNER_TEMP
+          $bin = Join-Path $env:RUNNER_TEMP 'zig-x86_64-windows-0.15.2'
+          if ((& (Join-Path $bin 'zig.exe') version) -cne '0.15.2') { throw 'Wrong Zig version.' }
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Format, compile, unit and native integration checks
+        run: |
+          zig fmt --check build.zig build_support src examples tests tools
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/test-native-header-cache.ps1
+          zig build test check update-tool smoke smoke-lifecycle smoke-window-registry smoke-app-stop smoke-composition smoke-composition-ui smoke-window-state smoke-window-relationships smoke-window-chrome smoke-key-input smoke-pointer-press smoke-pointer-focus smoke-pointer-clicks smoke-pointer-accessibility smoke-drawing smoke-gradients smoke-gradient-analytic smoke-conic-gradients smoke-gradient-interpolation smoke-coverage smoke-layers smoke-offscreen smoke-gaussian smoke-gaussian-scope smoke-document-fields smoke-svg smoke-svg-text smoke-svg-image smoke-text-layout smoke-text-layout-capture smoke-text-words smoke-text-words-fault smoke-text-clusters smoke-text-outlines smoke-text-cells smoke-text-drawing smoke-shaped-editor smoke-shaped-editor-native smoke-editor-caret smoke-editor-line-backgrounds smoke-editor-pre-input smoke-editor-range-markers smoke-text-input-mode smoke-text-client smoke-document smoke-document-editor smoke-code-editor smoke-document-diff-view smoke-virtual-list smoke-images smoke-image-prepare smoke-image-drawing smoke-image-update smoke-diagnostics smoke-waitables smoke-damage smoke-wake smoke-animation-ui smoke-affine-renderer smoke-affine-ui smoke-affine-document smoke-affine-text-binding smoke-affine-document-diff smoke-affine-diff-controls smoke-document-provider smoke-document-point-latch smoke-document-accessibility smoke-document-diff-accessibility smoke-document-geometry smoke-window-placement smoke-snippets smoke-native-reentry smoke-ime-cancel smoke-editor smoke-editor-routing smoke-packaging smoke-ui-config smoke-system smoke-system-events smoke-shell smoke-widgets smoke-widget-ranges smoke-theme smoke-picker smoke-picker-result smoke-cleanup -Daccessibility=true -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          zig build smoke-accessibility -Daccessibility=true -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          zig build smoke-language-protocol smoke-language-protocol-shutdown smoke-completion-resolve smoke-completion-details smoke-diff-caret smoke-diff-commands smoke-diff-find -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          zig build smoke-shortcut-scopes smoke-accessibility-host -Daccessibility=true -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Packaging and real Authenticode test certificate checks
+        run: |
+          $license = Join-Path $env:GITHUB_WORKSPACE 'LICENSE'
+          ./tests/packaging.ps1 -ExecutablePath ./zig-out/bin/smoke-packaging.exe -LicensePath $license
+          ./tests/signing.ps1 -ExecutablePath ./zig-out/bin/smoke-packaging.exe -LicensePath $license
+          ./tests/update_package_smoke.ps1
+      - name: Optional pinned WebP decoder
+        run: |
+          ./scripts/fetch-webp.ps1
+          zig build smoke-images -Dwebp=true -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
+      # Hardware GPU coverage is a separate local driver check. Hosted runner
+      # measurements below explicitly record any GPU fallback and deferred work.
+      - name: Capture reproducible benchmark evidence
+        if: matrix.optimize == 'ReleaseSafe'
+        run: ./scripts/benchmark.ps1 -Renderer gdi,warp -Repetitions 1 -OutputDirectory ./zig-out/ci-benchmarks
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: matrix.optimize == 'ReleaseSafe'
+        with:
+          name: windows-benchmark-evidence
+          path: zig-out/ci-benchmarks/*.json
+          if-no-files-found: error
+          retention-days: 7
+
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        optimize: [Debug, ReleaseSafe]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Native GTK/Pango dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libgtk-3-dev libpango1.0-dev libicu-dev pkg-config xvfb xauth openbox x11-utils libxtst6 libatspi2.0-dev at-spi2-core dbus-x11 fonts-dejavu-core fonts-noto-cjk
+      - name: Install verified Zig 0.15.2
+        run: |
+          zig_bin=$(sh scripts/fetch-zig-linux.sh)
+          printf '%s\n' "$(dirname "$zig_bin")" >> "$GITHUB_PATH"
+      - name: Format, compile, unit and native integration checks
+        env:
+          G_DEBUG: fatal-criticals
+          GDK_BACKEND: x11
+          ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}/zig-local-cache
+        run: |
+          zig fmt --check build.zig build_support src examples tests tools
+          bash scripts/test-native-header-cache.sh
+          zig build test check -Doptimize=${{ matrix.optimize }}
+          zig build smoke-webview-runtime-linux -Doptimize=${{ matrix.optimize }}
+          zig build test-document-word-units -Doptimize=${{ matrix.optimize }}
+          NO_AT_BRIDGE=1 xvfb-run -a -s '-screen 0 1280x800x24' zig build test-linux-accessibility-host test-linux-accessibility-position smoke-accessibility-host smoke-shortcut-scopes test-document-accessibility-linux-owner smoke-document-accessibility-linux -Doptimize=${{ matrix.optimize }}
+          GDK_SCALE=2 NO_AT_BRIDGE=1 xvfb-run -a -s '-screen 0 1280x800x24' zig build test-linux-accessibility-host test-linux-accessibility-position smoke-accessibility-host smoke-shortcut-scopes test-document-accessibility-linux-owner smoke-document-accessibility-linux -Doptimize=${{ matrix.optimize }}
+          GDK_SCALE=2 bash scripts/document-accessibility-atspi.sh -Doptimize=${{ matrix.optimize }}
+          bash scripts/test-profile-storage.sh -Doptimize=${{ matrix.optimize }}
+          xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-language-protocol smoke-language-protocol-shutdown smoke-completion-resolve smoke-completion-details smoke-diff-caret smoke-diff-commands smoke-diff-find -Doptimize=${{ matrix.optimize }}
+          zig build smoke-text-layout smoke-text-layout-capture smoke-text-words smoke-text-words-fault smoke-text-clusters smoke-text-outlines smoke-text-cells smoke-text-drawing smoke-shaped-editor smoke-images smoke-image-prepare smoke-image-drawing smoke-image-update smoke-shell -Doptimize=${{ matrix.optimize }}
+          xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-linux test-pointer-gtk smoke-pointer-core-linux smoke-pointer-clicks smoke-content-host smoke-damage smoke-wake smoke-animation-ui smoke-window-registry smoke-app-stop smoke-composition smoke-composition-ui smoke-key-input smoke-widgets smoke-widget-ranges smoke-theme smoke-affine-renderer smoke-affine-ui smoke-affine-document smoke-affine-text-binding smoke-affine-document-diff smoke-document-geometry smoke-snippets smoke-drawing smoke-gradients smoke-gradient-analytic smoke-conic-gradients smoke-gradient-interpolation smoke-coverage smoke-layers smoke-offscreen smoke-gaussian smoke-gaussian-scope smoke-document-fields smoke-svg smoke-svg-text smoke-svg-image smoke-shaped-editor-native smoke-editor-caret smoke-editor-line-backgrounds smoke-editor-pre-input smoke-editor-range-markers smoke-text-input-mode smoke-text-client smoke-document smoke-document-editor smoke-code-editor smoke-document-diff-view smoke-virtual-list -Doptimize=${{ matrix.optimize }}
+          GDK_SCALE=2 xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-linux test-pointer-gtk smoke-pointer-core-linux smoke-pointer-clicks smoke-content-host smoke-damage smoke-wake smoke-animation-ui smoke-window-registry smoke-app-stop smoke-composition smoke-composition-ui smoke-key-input smoke-widgets smoke-widget-ranges smoke-theme smoke-affine-renderer smoke-affine-ui smoke-affine-document smoke-affine-text-binding smoke-affine-document-diff smoke-document-geometry smoke-snippets smoke-drawing smoke-gradients smoke-gradient-analytic smoke-conic-gradients smoke-gradient-interpolation smoke-coverage smoke-layers smoke-offscreen smoke-gaussian smoke-gaussian-scope smoke-document-fields smoke-svg smoke-svg-text smoke-svg-image smoke-shaped-editor-native smoke-editor-caret smoke-editor-line-backgrounds smoke-editor-pre-input smoke-editor-range-markers smoke-text-input-mode smoke-text-client smoke-document smoke-document-editor smoke-code-editor smoke-document-diff-view smoke-virtual-list -Doptimize=${{ matrix.optimize }}
+          bash scripts/linux-window-state.sh -Doptimize=${{ matrix.optimize }}
+          GDK_SCALE=2 bash scripts/linux-window-state.sh -Doptimize=${{ matrix.optimize }}
+      - name: Optional pinned WebP decoder
+        run: |
+          sh scripts/fetch-webp.sh
+          zig build smoke-images -Dwebp=true -Doptimize=${{ matrix.optimize }}
+      - name: Optional WebKitGTK lifecycle and policy checks
+        if: github.event_name == 'workflow_dispatch' && inputs.webview
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libwebkit2gtk-4.1-dev glib-networking dbus-x11 libcurl4-openssl-dev
+          export ZIG_BIN="$(command -v zig)"
+          export P01_OPTIMIZE=${{ matrix.optimize }}
+          zig build test-https-resources -Dhttps-resources=true -Doptimize=${{ matrix.optimize }}
+          bash scripts/https-resources-probe.sh -Doptimize=${{ matrix.optimize }}
+          GDK_SCALE=2 bash scripts/https-resources-probe.sh -Doptimize=${{ matrix.optimize }}
+          bash scripts/https-resources-probe.sh --native -Doptimize=${{ matrix.optimize }}
+          P01_PROBE=zig-test bash scripts/webkit-probe.sh
+          zig build test-webkit-file -Dwebview=true -Doptimize=${{ matrix.optimize }}
+          P01_PROBE=profile-owner bash scripts/webkit-probe.sh
+          P01_PROBE=profile-zig bash scripts/webkit-probe.sh
+          GDK_SCALE=2 P01_PROBE=profile-zig bash scripts/webkit-probe.sh
+          P01_PROBE=cookies-owner bash scripts/webkit-probe.sh
+          P01_PROBE=cookies-zig bash scripts/webkit-probe.sh
+          GDK_SCALE=2 P01_PROBE=cookies-zig bash scripts/webkit-probe.sh
+          P01_OPTIMIZE=${{ matrix.optimize }} P01_PROBE=find-owner bash scripts/webkit-probe.sh
+          P01_OPTIMIZE=${{ matrix.optimize }} bash scripts/webkit-find-probe.sh all
+          P01_PROBE=capture-owner bash scripts/webkit-probe.sh
+          P01_PROBE=capture-zig bash scripts/webkit-probe.sh
+          GDK_SCALE=2 P01_PROBE=capture-zig bash scripts/webkit-probe.sh
+          P01_PROBE=initializers-owner bash scripts/webkit-probe.sh
+          P01_PROBE=initializers-zig bash scripts/webkit-probe.sh
+          GDK_SCALE=2 P01_PROBE=initializers-zig bash scripts/webkit-probe.sh
+          P01_PROBE=profile-tls-owner bash scripts/webkit-probe.sh
+          P01_PROBE=https-zig bash scripts/webkit-probe.sh
+          GDK_SCALE=2 P01_PROBE=https-zig bash scripts/webkit-probe.sh
+          GDK_SCALE=2 P01_PROBE=https-pages-zig bash scripts/webkit-probe.sh
+          P01_PROBE=contract bash scripts/webkit-probe.sh
+          P01_PROBE=backend bash scripts/webkit-probe.sh
+          P01_PROBE=local-test bash scripts/webkit-probe.sh
+          P01_PROBE=local bash scripts/webkit-probe.sh
+          P01_REQUEST_PROBE=remote-test bash scripts/webkit-request-probe.sh
+          P01_REQUEST_PROBE=strict bash scripts/webkit-request-probe.sh
+          P01_PROBE=remote bash scripts/webkit-probe.sh
+          P01_PROBE=remote-zig bash scripts/webkit-probe.sh
+          GDK_SCALE=2 P01_PROBE=remote-zig bash scripts/webkit-probe.sh
+          P01_PROBE=zig bash scripts/webkit-probe.sh
+          GDK_SCALE=2 P01_PROBE=zig bash scripts/webkit-probe.sh
+          P01_PROBE=dynamic-zig bash scripts/webkit-probe.sh
+          GDK_SCALE=2 P01_PROBE=dynamic-zig bash scripts/webkit-probe.sh
+          P01_PROBE=navigation-zig bash scripts/webkit-probe.sh
+          GDK_SCALE=2 P01_PROBE=navigation-zig bash scripts/webkit-probe.sh
+          P01_CONTENT=regions bash scripts/linux-content-probe.sh
+          P01_PROBE=regions-zig bash scripts/webkit-probe.sh
+          GDK_SCALE=2 P01_PROBE=regions-zig bash scripts/webkit-probe.sh
+          P01_PROBE=session-host bash scripts/webkit-probe.sh
+          GDK_SCALE=2 P01_PROBE=session-host bash scripts/webkit-probe.sh
+          P01_PROBE=session-zig bash scripts/webkit-probe.sh
+          GDK_SCALE=2 P01_PROBE=session-zig bash scripts/webkit-probe.sh
+      - name: Capture Cairo submission and idle evidence
+        if: matrix.optimize == 'ReleaseSafe'
+        run: |
+          mkdir -p zig-out/ci-benchmarks
+          xvfb-run -a -s '-screen 0 1280x800x24' zig build benchmark -Doptimize=ReleaseFast -- --output zig-out/ci-benchmarks/linux.json
+          sha256sum zig-out/bin/benchmark > zig-out/ci-benchmarks/benchmark.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: matrix.optimize == 'ReleaseSafe'
+        with:
+          name: linux-benchmark-evidence
+          path: zig-out/ci-benchmarks/*
+          if-no-files-found: error
+          retention-days: 7
+
+  webview:
+    if: github.event_name == 'workflow_dispatch' && inputs.webview
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install verified Zig 0.15.2 and SDK
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'zig-0.15.2.zip'
+          Invoke-WebRequest 'https://ziglang.org/download/0.15.2/zig-x86_64-windows-0.15.2.zip' -OutFile $archive
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine '3a0ed1e8799a2f8ce2a6e6290a9ff22e6906f8227865911fb7ddedc3cc14cb0c') { throw 'Zig archive checksum mismatch.' }
+          Expand-Archive -LiteralPath $archive -DestinationPath $env:RUNNER_TEMP
+          (Join-Path $env:RUNNER_TEMP 'zig-x86_64-windows-0.15.2') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          ./scripts/fetch-webview2.ps1
+      - name: Install verified Bun 1.3.5
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'bun-1.3.5.zip'
+          Invoke-WebRequest 'https://github.com/oven-sh/bun/releases/download/bun-v1.3.5/bun-windows-x64-baseline.zip' -OutFile $archive
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine 'bf447dcc3b06aba9b9706a9db46fcd65e06a4d47d31439922313825d06eb47ca') { throw 'Bun archive checksum mismatch.' }
+          Expand-Archive -LiteralPath $archive -DestinationPath $env:RUNNER_TEMP
+          $bin = Join-Path $env:RUNNER_TEMP 'bun-windows-x64-baseline'
+          if ((& (Join-Path $bin 'bun.exe') --version) -cne '1.3.5') { throw 'Wrong Bun version.' }
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Python for the isolated HTTPS wire oracle
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Real WebView2 Runtime lifecycle and policy checks
+        run: |
+          bun test tests/ipc_client.test.ts tests/ipc_events.test.ts tests/resource_stream_client.test.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # These fail when the system Runtime is unavailable; no Runtime is downloaded.
+          zig build test test-remote-origin smoke-webview smoke-composition-webview smoke-page-host smoke-page-session smoke-webview-policy smoke-page smoke-page-remote smoke-page-authorization smoke-script smoke-browser-tools smoke-request-policy smoke-resource-async smoke-resource-file smoke-scheme smoke-resource-producer smoke-permission smoke-download smoke-browser-policy smoke-ipc smoke-assets -Dwebview=true -Doptimize=ReleaseSafe --global-cache-dir .zig-cache/managed/windows-global
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Standalone engine discovery without a page
+        run: |
+          zig build test-webview-runtime build-smoke-webview-runtime -Doptimize=ReleaseSafe --global-cache-dir .zig-cache/managed/windows-global
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $loader = (Resolve-Path -LiteralPath '.deps/webview2/build/native/x64/WebView2Loader.dll').Path
+          ./zig-out/bin/smoke-webview-runtime.exe $loader
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Exact-origin HTTPS credential lifecycle and redirect checks
+        run: |
+          zig build build-smoke-request-credentials -Dwebview=true -Doptimize=ReleaseSafe --global-cache-dir .zig-cache/managed/windows-global
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B tests/windows_https_credentials_host.py --exe zig-out/bin/smoke-request-credentials.exe --cache .zig-cache/managed/windows-credentials-ci --log .validation/ci/windows-credentials.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Document-start initializer lifecycle and wire checks
+        run: |
+          zig build test-document-initializers test-document-initializers-native build-initializer-semantics-emitter build-smoke-document-initializers -Dwebview=true -Doptimize=ReleaseSafe --global-cache-dir .zig-cache/managed/windows-global
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/document_initializers_semantics.mjs zig-out/bin/initializer-semantics-source.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B tests/windows_https_initializers_host.py --exe zig-out/bin/smoke-document-initializers.exe --cache .zig-cache/managed/windows-initializers-ci --log .validation/ci/windows-initializers.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: windows-page-wire-evidence
+          path: .validation/ci/*.json
+          if-no-files-found: ignore
+          retention-days: 7

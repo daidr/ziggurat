@@ -1,0 +1,108 @@
+pub const max_menu_items = 128;
+pub const Item = struct {
+    /// Zero denotes the menu root and is reserved. Separators do not need an ID.
+    id: u64 = 0,
+    /// A submenu declared earlier in this slice; null denotes the menu bar.
+    parent: ?u64 = null,
+    kind: enum { command, submenu, separator } = .command,
+    label: []const u8 = "",
+    enabled: bool = true,
+    checked: bool = false,
+};
+pub const ScreenPoint = struct { x: i32, y: i32 };
+pub const Action = union(enum) { menu: u64, tray_activate, tray_context: ScreenPoint, hotkey: u64, notification_activated: u64 };
+pub const TrayOptions = struct {
+    /// Borrowed only by setTray. The module owns a CopyIcon result afterward.
+    /// Null selects the shared system application icon as the copy source.
+    icon: ?*anyopaque = null,
+    tooltip: []const u8 = "",
+};
+
+pub const max_hotkeys = 32;
+pub const Key = enum {
+    a,
+    b,
+    c,
+    d,
+    e,
+    f,
+    g,
+    h,
+    i,
+    j,
+    k,
+    l,
+    m,
+    n,
+    o,
+    p,
+    q,
+    r,
+    s,
+    t,
+    u,
+    v,
+    w,
+    x,
+    y,
+    z,
+    digit0,
+    digit1,
+    digit2,
+    digit3,
+    digit4,
+    digit5,
+    digit6,
+    digit7,
+    digit8,
+    digit9,
+    f1,
+    f2,
+    f3,
+    f4,
+    f5,
+    f6,
+    f7,
+    f8,
+    f9,
+    f10,
+    f11,
+    f12,
+    f13,
+    f14,
+    f15,
+    f16,
+    f17,
+    f18,
+    f19,
+    f20,
+    f21,
+    f22,
+    f23,
+    f24,
+    space,
+    enter,
+    escape,
+    tab,
+    backspace,
+    delete,
+    insert,
+    home,
+    end,
+    page_up,
+    page_down,
+    left,
+    right,
+    up,
+    down,
+};
+pub const Modifiers = struct { control: bool = false, alt: bool = false, shift: bool = false, super: bool = false };
+pub const Hotkey = struct { key: Key, modifiers: Modifiers = .{}, repeat: bool = false };
+pub const NotificationOptions = struct {
+    title: []const u8,
+    body: []const u8,
+    kind: enum { info, warning, err } = .info,
+    silent: bool = true,
+    /// Discard if the shell cannot show it immediately.
+    real_time: bool = true,
+};

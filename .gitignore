@@ -1,0 +1,6 @@
+.zig-cache/
+.validation/
+validation/
+zig-out/
+.deps/
+*.WebView2/

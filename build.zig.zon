@@ -1,0 +1,7 @@
+.{
+    .name = .ziggurat,
+    .fingerprint = 0x5865cceba1e6ca57,
+    .version = "0.1.0-dev",
+    .minimum_zig_version = "0.15.2",
+    .paths = .{ "build.zig", "build.zig.zon", "build_support", "assets", "tools", "src", "examples", "tests", "scripts", "docs", "README.md", "AGENTS.md", "LICENSE" },
+}
