@@ -194,10 +194,10 @@ B02 分项：
 | ID | 状态 | 范围 | 验收与依赖 |
 | --- | --- | --- | --- |
 | S01 | 已完成（Windows） | 全局快捷键、通知区通知 | 原生注册/冲突/注销、稳定事件 ID、Owner 关闭与诊断重入检查；Linux/macOS 见 P02/P04 |
-| S02 | 部分完成 | shell 打开 URL/文件、定位、回收站、文件图标、应用发现/启动 | S02.1 显式 worker 的 executable 启动（Windows/Linux）及 S02.4 Windows 16/32px 不透明图标已验收；URL/关联文件/定位/回收站/完整图标/应用发现继续待实现；参数/路径/编码、异步成本、系统错误和图标所有权 |
-| S03 | 待实现 | 多显示器、主题/accent/可访问性偏好、网络、电源与文件监视 | 变化订阅、取消与最后订阅者回收；无持续轮询；Windows/Linux/macOS capability |
+| S02 | 部分完成 | shell 打开 URL/文件、定位、回收站、文件图标、应用发现/启动 | S02.1 executable 启动、S02.2 URL（https/http/mailto 默认白名单）/关联文件/定位、S02.3 回收站（Windows/Linux）及 S02.4 Windows 16/32px 不透明图标已实现；完整图标（Linux/高分辨率/透明）与安装应用发现/按身份启动待实现；真实关联程序/资源管理器显示未自动验证 |
+| S03 | 部分完成 | 多显示器、主题/accent/可访问性偏好、网络、电源与文件监视 | 显示器/偏好/电源/网络快照与合并变化订阅（Windows/Linux）、粗模式文件监视（inotify/ReadDirectoryChangesW）已实现；详细文件监视（快照/rename 匹配）、Linux 电源来源变化、Wayland 显示器、portal 配色待实现；Windows 路径首次运行在 CI |
 | S04 | 待实现 | 密钥存储、登录启动、深链和文件关联 | OS 权限/用户作用域、安装与运行时分工、卸载和参数转发；依赖 W05/R01 |
-| S05 | 待实现 | 多格式剪贴板、transfer、惰性 provider、原生拖放 | 文本/HTML/图片/文件/自定义，多 item、异步请求寿命、关闭后无悬空回调；依赖 G01 |
+| S05 | 部分完成 | 多格式剪贴板、transfer、惰性 provider、原生拖放 | Board 的 text/HTML/PNG/文件/自定义事务写入、异步读取、惰性 provider、变化事件、Windows 有界占用重试及 Windows/Linux 放置目标已实现；拖动源（需模态拖动循环）未提供；真实跨进程拖放、他进程占用重试与退出渲染未自动验证 |
 | S06 | 待实现 | 异步消息对话框、上下文菜单与菜单快捷键 | 非嵌套循环、modal/focus、取消/关闭、禁用祖先、旧消息隔离；依赖 W02/U02 |
 | S07 | 待实现 | 应用身份/系统目录、任务栏或 Dock badge/progress/menu、阻止休眠 | 按平台 capability、用户作用域、原生引用/电源断言配对与最后 owner 回收；依赖 S03/P03 |
 | S08 | 部分完成（Windows窗口托盘） | 独立托盘/status item、多图标、菜单与popover锚定 | 窗口Owner单托盘/任务栏重建恢复已有；App独立多item、稳定ID/用户位置、标题与popover亮态继续；其余平台依赖 S06/P02/P04 |
@@ -1626,3 +1626,21 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - 新增语义角色 `meter` 与 `navigation`，追加在既有编号之后。Frame 提供 `meter`、`rating`、`navigation` 与 `group`。度量条只读，报告实际值与上下限，值在首选区间外时用主题新增的 `caution` 色。评分是步长为 1 的范围控件，轨道从第一个标记前半格开始，按到哪个标记就取哪个分数。Windows UIA 映射为 ProgressBar（LocalizedControlType 为 "meter"）、Slider，以及带导航地标的 Group。Linux 不声明 AT-SPI。
 - `ziggurat_view` 提供 `breadcrumbs`、`meter`、`rating`、`accordion`/`section`。面包屑在间隙中画分隔符；手风琴最多打开一节，再次激活已打开的节会关闭它。面包屑和手风琴里的控件以容器为可访问父节点。
 - 单元测试覆盖区间与参数校验、评分标记命中、语义角色与父节点，以及无窗口的分节切换和评分调整；Linux 隐藏窗口 smoke 在 1x/2x 下实测评分的原生点击。Windows smoke 用真实 UIAutomationClient 检查导航地标、度量条只读 RangeValue、评分 SetValue 与分节 ExpandCollapse。
+
+### S05.1 多格式剪贴板 Board 与放置目标
+
+- `clipboard.Board` 每个 App 一个原生连接：Windows 用私有 message-only HWND 作为 owner、更新监听、延迟渲染与重试 timer；GTK 用 CLIPBOARD selection。写入先校验全部条目并在打开剪贴板前构造原生块，失败不留部分内容；lazy offer 的 released 恰好一次。读取经调用者 Request 槽异步交付，取消/停机后无回调；GTK 同 selection 的同步应答改由 idle 交付，保持“启动调用内不回调”。
+- `drop.Target` 为窗口注册原生放置目标：Windows `IDropTarget`（嵌套 OleInitialize、subclass 在 WM_DESTROY 撤销），GTK 扩展 GtkWindow 既有 root-window target 列表并在 detach 还原。悬停 leave 总先于 drop；payload 复制到调用者 buffer，超出报告所需字节。拖动源因两平台都需要模态拖动循环而不提供。
+- Linux Xvfb 1x/2x 下 `smoke-clipboard`、`smoke-drop` 通过；Windows 路径只交叉编译。未自动验证：真实跨进程拖放、另一进程占用剪贴板时的重试、`WM_RENDERALLFORMATS` 退出渲染。见[系统工具](system.md)。
+
+### S03.1 桌面环境快照、订阅与粗模式文件监视
+
+- `system.desktop` 提供显示器、偏好、电源、网络快照和每 Watch 独立原生订阅，突发合并、stop/停机撤销后无回调；Windows 用不显示的顶层窗口接收广播，网络变化回调只 PostMessage；Linux 用 GDK/GtkSettings/GIO 信号。Linux 配色/高对比度来自主题名启发式，不读取 portal，accent 为 null。见[桌面环境](desktop-environment.md)。
+- `system.watch.Watcher` 在宿主 worker 上运行，预算在 init 分配，`changed`/`overflow`/`root_removed` 合并交付且容量不足时顺延；详细模式未实现。见[文件监视](file-watch.md)。
+- Linux 下 `smoke-desktop`（1x/2x，真实 GtkSettings 突发合并）与 `smoke-file-watch` 通过；inotify 溢出、Windows 零字节完成和真实系统主题/电源/网络变化未自动触发。
+
+### S02.2–S02.3 打开 URL/路径、定位与回收站
+
+- `shell.Worker` 新增 `openUrl`（默认只允许 https/http/mailto，`file:` 永远拒绝）、`openPath`、`reveal`（Windows SHOpenFolderAndSelectItems，Linux FileManager1.ShowItems 有界超时）与 `trash`（Windows SHFileOperationW 仅本地固定盘，Linux g_file_trash）。均在宿主 worker 阻塞执行，校验在交给处理程序之前完成。
+- `smoke-shell` 在私有 XDG 目录真实 trash 12 个 Unicode 文件，并在私有会话总线上用假 FileManager1 验证 ShowItems 与超时；不打开浏览器或用户文件。真实关联程序、资源管理器显示与回收站策略边界未自动验证。
+

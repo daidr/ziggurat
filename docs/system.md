@@ -1,6 +1,6 @@
 # 系统工具
 
-按需导入 `ziggurat_system`。当前原生菜单、托盘、文本剪贴板、异步文件选择器、全局快捷键和通知区通知仅实现 Windows；`system.capabilities` 分别报告支持状态。Linux 等目标的这些窗口扩展返回 `UnsupportedCapability`。独立的无 UI `shell.Worker` 已支持 Windows/Linux 显式程序启动，以及 Windows 有界文件图标，能力见 `system.capabilities.shell`。
+按需导入 `ziggurat_system`。当前原生菜单、托盘、同步文本剪贴板 helper、异步文件选择器、全局快捷键和通知区通知仅实现 Windows；多格式剪贴板 Board、放置目标、桌面环境快照/订阅和粗模式文件监视支持 Windows/Linux；`system.capabilities` 分别报告支持状态。Linux 等目标的这些窗口扩展返回 `UnsupportedCapability`。独立的无 UI `shell.Worker` 已支持 Windows/Linux 显式程序启动，以及 Windows 有界文件图标，能力见 `system.capabilities.shell`。
 
 ## 窗口 owner
 
@@ -47,9 +47,27 @@ try owner.setMenu(&.{
 
 这是 [NIF_INFO 通知区接口](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-notifyicondataw)，不提供现代 Toast 的 action buttons、通知历史或送达保证。调用成功只证明 Shell 接受提交；系统设置、专注模式、用户操作等决定实际展示。
 
-## 文本剪贴板
+## 剪贴板
 
-`system.clipboard.writeText(window, utf8)` 和 `readText(window, destination)` 复用原生文本适配器。读取返回写入调用者缓冲的字节数；容量不足、文本无效或剪贴板被占用时返回错误，不重试或等待。写入只在显式复制操作中分配系统内存，成功后所有权转交系统。当前仅有 UTF-8 文本 API，没有图片、拖放或延迟渲染所有权接口。
+`system.clipboard.writeText(window, utf8)` 和 `readText(window, destination)` 仍是 Windows 同步文本 helper：容量不足、文本无效或剪贴板被占用时返回错误，不重试或等待。完整剪贴板服务是 `clipboard.Board`。
+
+`try board.init(app, .{ .context, .on_changed, .render_on_stop })` 在 App owner 线程原地初始化，地址稳定到 `deinit`，必须早于 `App.deinit` 结束；初始化失败不留下需要 deinit 的状态。Board 注册 App stop 节点：停机时取消所有 pending 读取（不回调）并结束 lazy offer。不可在 Board 自己的回调中 deinit。所有调用和回调都在 owner 线程。
+
+格式为 `text`、`html`、`png`、`files` 与 `custom`，字节约定跨平台一致：text/html 为无 NUL 的 UTF-8；png 是完整 PNG 流；files 是绝对 UTF-8 路径，单个 NUL 分隔、无结尾分隔，最多 1024 项（`clipboard.paths`/`joinPaths` 辅助）；custom 为不透明字节，名称为 1–100 个可见 ASCII，作为 Windows 注册格式名和 GTK selection target。每项最多 64 MiB，一次最多 16 种格式且不可重复。
+
+`board.write(entries)` 先校验全部条目并在打开剪贴板前构造所有原生块，再在一个事务中替换内容：Windows 依次交给 `SetClipboardData`，任一失败清空而不留下部分内容；HTML 使用 CF_HTML 头和片段偏移，files 写 `CF_HDROP`（`/` 规范为 `\`），png 写注册格式 `PNG`，文本只写 `CF_UNICODETEXT`。GTK 把条目复制进原生 offer，文本发布全部文本 target，files 发布 `text/uri-list` 与 `x-special/gnome-copied-files`。eager offer 在 Board 关闭后继续以自身副本服务，直到其他 owner 取代；进程退出后数据是否保留取决于桌面剪贴板管理器。Windows 剪贴板被其他进程打开时 write 返回 `ClipboardBusy` 并在 `last_error` 保留原生码；是否以及何时重试由调用者显式安排。
+
+`board.offer(provider, formats)` 只宣布格式，读取方请求时才在 owner 线程调用 `provider.render(context, format, sink)`；`sink.set(bytes)` 按同一约定校验并立即复制，每次 render 只能 set 一次，失败或未 set 时该读取方得不到此格式。`released` 在 offer 结束时恰好调用一次：其他 owner 接管、write/offer/revoke 取代或 Board 停止；provider context 必须保持到 released 返回。Windows 使用 Board 私有 message-only HWND 处理 `WM_RENDERFORMAT`/`WM_DESTROYCLIPBOARD`；`render_on_stop = true`（默认）时停止阶段经 `WM_RENDERALLFORMATS` 渲染仍宣布的格式，使数据在进程退出后保留，false 则清空自己仍拥有的 offer。GTK 的 lazy offer 在 Board 关闭时清除，不在停机时调用阻塞的 `gtk_clipboard_store`。`revoke()` 幂等；Windows 剪贴板正被占用时无法清空，宣布的格式此后读取为空。
+
+读取全部异步：`board.read(&request, format, destination, context, on_result, options)` 与 `board.formats(&request, context, on_result)`。Request 是调用者持有的槽，pending 期间地址稳定；结果从不在启动调用内到达，回调前槽已恢复 idle，可在回调中复用。`request.cancel()`、Board deinit 与 App stop 立即释放槽和 destination，之后不再回调。Result 为 `data`（借用 destination）、`formats`（text/html/png/files 是否可用）、`unavailable`、`capacity_exceeded: usize`（不写入任何字节）或 `failed { err, code }`。Windows 用一次 `OpenClipboard` 会话读完所有就绪请求，关闭剪贴板后才按请求顺序回调；被其他进程占用时用 Board HWND 的原生 timer 做至多 `attempts`（默认 4、上限 16）次、间隔 `interval_ms` 的有界重试，耗尽后报告 `ClipboardBusy` 和原生码，不 sleep、不嵌套消息循环。外来 HGLOBAL 可能含分配器填充：text/html 截到终止符、png 截到 IEND，custom 按 `GlobalSize` 原样返回。GTK 使用异步 request API；本进程自己拥有 selection 时 GTK 同步应答，结果被复制后由 idle source 交付。HTML 可能是带 BOM 的 UTF-16，会转为 UTF-8；png 无 `image/png` 时经 GdkPixbuf 转成 PNG；files 只返回本地 `file:` URI，非 UTF-8 路径报告 `ClipboardMalformed`。
+
+`on_changed` 报告任意 owner 变化（包括本 Board 的写入），不附带内容：Windows 使用 `AddClipboardFormatListener`，GTK 使用 `owner-change`。`clipboard.resourceCount()` 统计 Linux 仍存活的 Board/offer/read 原生记录，包括取消后等待 GTK 回调的请求。
+
+## 拖放
+
+`system.drop.Target` 为一个窗口注册原生放置目标：`.{ .context, .on_drop, .on_hover, .kinds, .buffer }` 后 `try target.attach(window)`，地址和 context 保持到 `detach` 或窗口 `on_closed`。kinds 选择 files 和/或 text；`on_hover(context, window, Hover)` 返回是否接受，null 表示接受所提供的已选种类。每段悬停以 enter/over 开始、以 leave 结束，leave 也先于 `on_drop`（GTK 本身如此，Windows 显式对齐）。坐标为客户区 DIP。Drop 的 payload 为 files（剪贴板相同的 NUL 分隔约定）或 text，只在 on_drop 期间借用调用者 buffer；更大的 payload 报告 `capacity_exceeded` 所需字节，不部分发布。接受时报告 copy 效果。
+
+Windows 在 attach 时嵌套 `OleInitialize` 并 `RegisterDragDrop` 一个引用计数的原生 `IDropTarget`，使用 `CF_HDROP`/`CF_UNICODETEXT`；窗口 subclass 在 `WM_DESTROY` 撤销注册，晚到的 OLE 引用只访问已经脱离 Zig 的原生记录。GTK 在顶层 GtkWindow 上扩展其既有的 root-window 放置 target 列表（detach 时还原），解析 `text/uri-list` 的本地路径和文本；内容区坐标扣除客户端装饰。WebView 等原生子控件可能自己处理落在它们上面的拖放。`detach()` 幂等；窗口关闭后 detach 只释放 Target 的原生引用。不提供拖动源：两平台启动原生拖动都需要模态拖动循环或嵌套分发，违反无嵌套事件循环规则，`capabilities.drop.drag_source` 为 false。
 
 ## 异步文件选择器
 
@@ -136,3 +154,7 @@ S02 当前仍为部分实现：Windows/Linux 已提供 `launchExecutable`、`ope
 在 `dbus-run-session` 等提供 `DBUS_SESSION_BUS_ADDRESS` 的环境中，若总线上没有 FileManager1，smoke 先断言 `reveal` 返回 `FileManagerUnavailable`，再由测试自身在该总线上以不排队方式占有 `org.freedesktop.FileManager1`（已有真实文件管理器时跳过，不替换它），验证 13 次 `ShowItems` 恰好收到一个可还原为原路径的 `file://` URI、首轮后描述符持平，以及 200 ms 超时返回 `RevealTimedOut`。没有会话总线时只做参数检查。
 
 **未自动验证：**真实浏览器/邮件客户端/关联程序打开 URL 或文件、Windows `reveal` 的真实资源管理器显示、真实 Linux 文件管理器的 ShowItems 行为、Windows 非固定盘与回收站被禁用或超容量时的系统处理；Windows 路径目前只在 Linux 上交叉编译，尚未在本次修改后于 Windows 运行。测试不改变默认应用关联，不评价图标或文件管理器视觉质量。
+
+`zig build smoke-clipboard` 在一个 App 内用真实系统剪贴板写入 text/html/png/custom/files 五种格式，再异步查询格式并逐一读回比较（Unicode 与 surrogate 文本、CF_HTML/`text/html` 片段、PNG 流、路径列表；Windows custom 只比较前缀，因为 GlobalSize 可含填充），覆盖容量不足报告所需字节、缺失格式、重复启动拒绝、取消后无回调、lazy offer 只在读取时渲染且每次只能 set 一次、eager 写入与 revoke 各释放 provider 一次、revoke 后读取为空，以及 App 停机时 pending 读取无回调且 live offer 被释放；另做 12 轮 Board 创建/写入/读取/销毁。Linux 最后检查只剩最后一次 eager offer 的原生记录。测试不模拟另一进程占用剪贴板，Windows 有界重试与 `WM_RENDERALLFORMATS` 退出渲染尚未自动验证。
+
+`zig build smoke-drop` 12 轮验证放置目标的真实原生注册（Windows OLE 窗口属性、GTK target 列表标记）、重复 attach 拒绝、detach 幂等与重新 attach、窗口销毁时注册在原生销毁前撤销且之后不再回调；悬停接受/拒绝与 payload 复制/容量报告通过 adapter 入口驱动。**尚未自动执行真实跨进程拖放**，OLE `DragEnter/Drop` 与 GTK `drag-motion/drag-data-received` 的完整链路仍需人工或原生注入验证。Linux 上述 smoke 在 Xvfb 1x/2x 运行；Windows 路径本次只在 Linux 上交叉编译，首次运行在 CI。
