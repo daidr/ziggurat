@@ -476,15 +476,15 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
 pub fn snapshot(allocator: std.mem.Allocator, dir: std.fs.Dir, roots: []const []const u8) !u64 {
     var hasher = std.hash.Wyhash.init(0);
     for (roots) |root| {
-        if (dir.statFile(root)) |stat| {
-            if (stat.kind == .file) {
-                hasher.update(root);
-                hasher.update(std.mem.asBytes(&stat.size));
-                hasher.update(std.mem.asBytes(&stat.mtime));
-                continue;
-            }
-        } else |_| continue;
-        var tree = dir.openDir(root, .{ .iterate = true }) catch continue;
+        // Open as a directory first: on Windows statFile fails for directories.
+        var tree = dir.openDir(root, .{ .iterate = true }) catch {
+            const stat = dir.statFile(root) catch continue;
+            if (stat.kind != .file) continue;
+            hasher.update(root);
+            hasher.update(std.mem.asBytes(&stat.size));
+            hasher.update(std.mem.asBytes(&stat.mtime));
+            continue;
+        };
         defer tree.close();
         var walker = try tree.walk(allocator);
         defer walker.deinit();
