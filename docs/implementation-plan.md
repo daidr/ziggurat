@@ -248,10 +248,10 @@ P01 的 Linux HTTPS 本地来源分两片实施。首片由宿主提供已运行
 
 | ID | 状态 | 范围 | 验收与依赖 |
 | --- | --- | --- | --- |
-| L01 | 待实现 | catalog、locale、ICU message/plural、数字/日期与 RTL | 编译期校验/有界格式化、locale fallback、复数规则、双向布局与 pseudolocale |
+| L01 | 部分完成 | catalog、locale、ICU message/plural、数字/日期与 RTL | 已有纯 Zig `ziggurat_i18n`：编译期/加载期校验、无分配格式化、locale fallback 与协商、约 50 种语言复数规则、数字/日期、pseudolocale 与方向查询，见[本地化](i18n.md)；控件双向布局、时区数据、货币数据与完整 CLDR 覆盖待实现 |
 | A01 | 待实现 | 音频解码、内存音效与流式播放 | WAV/MP3/Vorbis、seek/音量/pan/速度/loop、无实时线程分配、设备切换与关闭 |
 | E01 | 已完成 | 插件注册与显式初始化/关闭依赖 | 固定容量应用级依赖图、全图预检、失败逆序回滚、取消/重入/线程；Windows/Linux 运行及独立 review 通过 |
-| E02 | 待实现 | Fetch 与 WebSocket | 显式 transport/worker、取消/背压/大小限制、TLS/断线、类型化客户端；依赖 E01/I01 |
+| E02 | 首片完成 | Fetch 与 WebSocket | 显式 transport/worker、取消/背压/大小限制、TLS/断线、类型化客户端；依赖 E01/I01 |
 | E03 | 待实现 | SQLite | 连接/事务/游标所有权、取消/线程约束、打包依赖；依赖 E01 |
 | E04 | 待实现 | PTY 与终端视图 | 子进程/终端解析、输入/resize/流控/退出和回收；依赖 E01/T01/G01 |
 | E05 | 待实现 | game loop、camera、gamepad 与材质扩展 | 显式启停时钟、输入热插拔、帧/功耗预算与平台能力；依赖 E01/G02 |
@@ -273,12 +273,12 @@ E04的解析/协议识别、原生PTY和人工交互分别验收；剪贴板格�
 
 | ID | 状态 | 范围 | 验收与依赖 |
 | --- | --- | --- | --- |
-| R01 | 待实现 | Windows 安装/卸载器与文件关联 | 用户/机器作用域、静默安装、升级/回滚/卸载用户数据、真实签名 |
-| R02 | 待实现 | Linux desktop/deb/安装脚本、macOS app/DMG/公证 | 权限/图标/依赖/卸载、签名与 stapling；依赖 P02/P04 |
-| R03 | 待实现 | 更新检查/下载/进度/取消、提示 UI 与重启 | 重用现有验签发布；feed 版本/网络错误/部分文件/运行 EXE与退出否决；依赖 I01/U06 |
-| R04 | 待实现 | 增量更新、失败全量回退、版本保留/回滚/密钥轮换 | 签名覆盖来源目标、大小限制、故障注入、旧客户端升级；依赖 R03 |
-| R05 | 待实现 | GitHub/S3 发布、增量生成与发布清单 | 显式凭据和发布动作、幂等重试/资产一致性；私钥不进入工程；依赖 R04 |
-| R06 | 待实现 | 统一 init/dev/build/doctor CLI 与模板 | 原生/Web/混合模板、前端与原生 watch、诊断、可复现构建；依赖 H02/R01 |
+| R01 | 部分完成（R01.1 单文件安装/启动/卸载程序） | Windows 安装/卸载器与文件关联 | 用户/机器作用域、静默安装、升级/回滚/卸载用户数据、真实签名 |
+| R02 | 部分完成（R02.1 Linux desktop 条目、deb 与用户/系统范围安装；macOS 不在本轮范围） | Linux desktop/deb/安装脚本、macOS app/DMG/公证 | 权限/图标/依赖/卸载、签名与 stapling；依赖 P02/P04 |
+| R03 | 部分完成（R03.1 发布索引检查、可续传下载、进度/取消与关闭后启动） | 更新检查/下载/进度/取消、提示 UI 与重启 | 重用现有验签发布；feed 版本/网络错误/部分文件/运行 EXE与退出否决；依赖 I01/U06 |
+| R04 | 部分完成（R04.1 签名增量、全量回退、保留/回滚/清理与密钥背书） | 增量更新、失败全量回退、版本保留/回滚/密钥轮换 | 签名覆盖来源目标、大小限制、故障注入、旧客户端升级；依赖 R03 |
+| R05 | 部分完成（R05.1 静态发布目录、增量生成与幂等索引） | GitHub/S3 发布、增量生成与发布清单 | 显式凭据和发布动作、幂等重试/资产一致性；私钥不进入工程；依赖 R04 |
+| R06 | 部分完成（R06.1 init/dev/build/package/doctor 与三种模板） | 统一 init/dev/build/doctor CLI 与模板 | 原生/Web/混合模板、前端与原生 watch、诊断、可复现构建；依赖 H02/R01 |
 | V01 | 待实现 | 多窗口文档、自绘大列表、Web 与混合应用示例 | 覆盖完整业务流程、失败/取消/退出路径；示例不能替代模块测试 |
 | V02 | 待实现 | 长期内存/多窗口/GPU/冷启动/输入到显示基线 | 可复现硬件/驱动/系统与统计口径，资源随并发峰值而非历史次数增长 |
 | V03 | 待实现 | 原生交互、输入法与屏幕阅读器验收 | 与隐藏窗口检查分开；需要真实平台与明确的交互验证，不由单测推定 |
@@ -1657,6 +1657,30 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - `system.Tray` 属于 App：每项有自己的隐藏顶层窗口、复制图标和 App 停止登记，可同时存在多个；重新 show 使用新原生 ID，旧回调不会命中。可选 GUID 让系统记住用户摆放位置。
 - `Tray.popupMenu(request, items, .icon)` 用系统报告的图标矩形锚定并避开遮挡，取不到时用指针；打开前取得前台以便外部点击关闭。任务栏重建时重新添加图标。
 - Windows smoke 实际向 Shell 添加两项，验证事件、旧 ID 隔离、原地更新、锚定菜单选择、任务栏重建、显式移除与 App 停止回收。标题与 popover 亮态没有 Windows 对应，Linux/macOS 托盘继续待实现。见[系统工具](system.md)。
+
+### R01.1/R02.1 单文件安装程序、启动器、卸载与 deb
+
+- `ziggurat-setup` 存根按自身内容充当安装程序、启动器或卸载器；`ziggurat package setup` 把更新包和安装配置追加为单文件安装程序，Windows 签名后的证书表在读取时跳过。安装复用更新发布事务（stage 校验、原子 marker、保留归档），写入启动器、卸载器和 `install.json`，支持 `--silent`、用户/机器范围与 `--dir`。同版本即修复，旧版本拒绝，首次安装失败删除已写内容，升级失败回滚到原版本。
+- Windows：开始菜单快捷方式（IShellLinkW）与 HKCU/HKLM 卸载项（显示名、版本、发布者、位置、图标、静默卸载命令、大小）；卸载器从临时副本完成删除。Linux：desktop 条目（Exec 引号与字符串转义）、可选 hicolor 图标、`bin` 链接。卸载保留用户数据，`--purge` 删除。`ziggurat package deb` 写出确定性的 deb（未压缩 tar 成员、md5sums、相对 `/usr/bin` 链接、依赖默认 GTK/Pango，`--webview` 加入 WebKitGTK/libsoup，菜单/图标缓存刷新）。
+- 单元测试覆盖载荷定位（含构造的 PE 证书表）、desktop 转义与拒绝、deb 确定性和路径/控制字段注入拒绝。本地 Linux 用真实安装程序在私有 HOME 完成安装、经链接启动并检查参数、升级、拒绝降级、卸载保留数据与 purge；deb 经 dpkg-deb 检查后实际 `dpkg -i`、运行、`dpkg -r`。Windows 交叉编译通过；`tests/setup_smoke.ps1` 已接入 CI，Windows 运行结果以 CI 为准，本地未运行。未实现：图形向导、关闭运行中的应用、文件关联注册（等待系统集成工作提供注册函数）、真实证书签名后的安装程序验证、macOS app/DMG/公证。见[打包](packaging.md)。
+
+### R03.1/R04.1/R05.1 更新检查、下载、增量与发布目录
+
+- `feed.check` 读取逐条签名的发布索引，选出本 identity/target 最新完整版本和匹配已安装归档的增量；本 target 条目验签失败使整个检查失败。`download.fetch` 续传到调用者文件，取消保留前缀，完整但摘要错误时截断；`http.Source` 基于调用者的 `std.http.Client` 用 Range 续传。`launch.spawnDetached` 在 `App.run` 返回后启动新版本，退出仍经 `requestQuit` 的否决。
+- 增量补丁为复制/插入指令流，签名清单绑定来源版本与归档摘要、补丁和结果摘要；应用时校验补丁字节、复制边界和结果摘要，失败由调用者回退完整归档。`publishZip` 可保留归档，`retention` 提供列表、逐文件校验后的回滚与保留当前及更新版本的清理。`Manifest.endorsement` 让旧密钥背书新密钥，`additional_public_keys` 支持过渡期；背书不链式、不支持吊销。
+- `ziggurat-update` 新增 `pack`（任意平台的确定性包）、`endorse`、`release`（完整归档、增量、清单与 feed.json；重跑不变，冲突资产返回 `AssetConflict`）、`check`/`fetch`（优先增量、失败回退）、`rollback`、`prune`。
+- 测试覆盖补丁重建与畸形拒绝、增量/背书绑定与伪造、索引选择与篡改和全部分配失败、取消/短响应续传与无 Range 重来、回环 HTTP 的 206/200，以及安装→增量升级（损坏补丁回退）→完整升级→回滚（篡改阻止）→清理的完整流程；工具在本地完成 keygen/pack/release 两次幂等与冲突拒绝、check 选中增量。未实现：更新提示界面组件、GitHub/S3 上传（需发布者凭据，工具只生成静态目录）、密钥吊销、真实服务器与旧客户端跨版本演练。见[更新](updates.md)。
+
+### R06.1 init/dev/build/package/doctor
+
+- `ziggurat init` 生成依赖本框架检出的 native（声明式视图）、web（WebView 页面）和 hybrid（原生视图窗口与页面窗口共享状态）项目；框架 `build.zig` 新增公开的 `addApplicationResources` 供应用嵌入 Windows 资源。`dev` 构建后以子进程运行应用，轮询源码变化后重建重启，可带前端监视命令；`build` 默认 ReleaseSafe，`--package` 生成确定性的更新包；`doctor` 报告 Zig 版本、Linux pkg-config 依赖与显示、Windows WebView2 SDK/Runtime 版本和项目文件。
+- 单元测试覆盖模板渲染、名称/identity 清理、非空目录与缺失框架。本地 Linux 三种模板均对本仓库实际构建并在 Xvfb 中运行 8 秒无错误（未做页面内容或视觉检查），`dev` 修改后重建且只保留一个应用进程，`build --package` 两次摘要一致。Windows 只完成交叉编译。未实现：模板外的前端工程脚手架、类型化 IPC 模板、远程依赖引用。见[ziggurat 命令](cli.md)。
+
+### E02.1 Fetch 与 WebSocket 客户端
+
+- 新增纯 Zig `ziggurat_net`，不导入核心、不创建线程。`fetch`/`stream`/`fetchJson` 在宿主 worker 上执行 HTTP(S) 请求：任意方法与 body、逐跳重定向（credentials 跨 origin 丢弃）、gzip/deflate 解码、解码后 body/头部/重定向/URL 上限，`stream` 以调用者 Writer 施加 TCP 背压。`Cancel` 绑定已建立连接的 socket，取消时 shutdown，被取消的传输不报告成功；连接与 TLS 握手期间的取消在其返回后生效。
+- `WebSocket` 由单一 worker 独占连接两个方向（同一 TLS 会话不并发读写），任意线程 `send`/`ping`/`close`/`cancel`/`resumeReading`；预分配发送队列满返回 `Full`，handler 返回 `pause` 停止读 socket。分片重组、UTF-8、掩码/保留位/控制帧/关闭码校验与 1002/1007/1009 关闭、自动 pong、关闭握手、子协议协商。HTTPS/WSS 复用调用者 `std.http.Client` 的 TLS、系统 CA 与代理。
+- 单元测试用回环服务覆盖以上路径，Linux ReleaseSafe/Debug 各连续运行 1000/300 次（含 CPU 压力）无失败；`scripts/net-tls-probe.sh` 用临时 localhost 证书实测 HTTPS、100 KB WSS 回显和不受信证书拒绝。Windows 单元测试交叉编译通过，运行结果以 CI 为准。未实现：压缩扩展、非 CONNECT HTTP 代理上的 WebSocket、内置超时与自动重连、连接/握手阶段的即时取消、公网与代理环境验证。见[Fetch 与 WebSocket](net.md)。
 
 ### W03.3 Windows 系统框架材质
 

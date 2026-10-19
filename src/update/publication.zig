@@ -1,7 +1,14 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const update = @import("root.zig");
-pub const Limits = struct { max_files: usize = 128, max_expanded_bytes: u64 = 512 * 1024 * 1024, max_inventory_bytes: usize = 65536 };
+pub const Limits = struct {
+    max_files: usize = 128,
+    max_expanded_bytes: u64 = 512 * 1024 * 1024,
+    max_inventory_bytes: usize = 65536,
+    /// Keep the authenticated archive as archives/<release>.zip so a later
+    /// delta update can rebuild the next archive from it.
+    retain_archive: bool = false,
+};
 const Payload = struct { path: []const u8, bytes: u64, sha256: []const u8 };
 const Package = struct { schema_version: u16, identity: []const u8, version: []const u8, target: []const u8, executable: []const u8, files: []const Payload };
 const Marker = struct { format: u16 = 1, identity: []const u8, target: []const u8, version: update.Version, release: []const u8, executable: []const u8 };
@@ -73,13 +80,17 @@ fn verifyExistingRelease(existing: std.fs.Dir, candidate: std.fs.Dir, names: []c
 /// publish current.json. Existing releases survive failed publication and rollback.
 /// Call on an application-managed worker when disk I/O would block the UI.
 pub fn publishZip(allocator: std.mem.Allocator, root: std.fs.Dir, archive: std.fs.File, verified: *const update.Verified, limits: Limits) !Published {
+    return publishAuthenticated(allocator, root, archive, verified.manifest, limits);
+}
+
+/// Publish an archive whose identity, version, size and digest the caller
+/// authenticated by other means, such as an installer that carries its own
+/// code signature and an embedded digest. The Ed25519 signature in
+/// `manifest` is not checked here; every other rule of `publishZip` applies.
+pub fn publishAuthenticated(allocator: std.mem.Allocator, root: std.fs.Dir, archive: std.fs.File, manifest: update.Manifest, limits: Limits) !Published {
     if (limits.max_files == 0 or limits.max_files > 128) return error.InvalidLimits;
-    const manifest = verified.manifest;
-    var lock = root.createFile("update.lock", .{ .read = true, .truncate = false, .lock = .exclusive, .lock_nonblocking = true }) catch |err| {
-        if (err == error.WouldBlock) return error.UpdateInProgress;
-        return err;
-    };
-    defer lock.close();
+    var held = try lock(root);
+    defer held.close();
     // An older running release cannot overwrite a newer already-published one.
     if (readCurrent(allocator, root, manifest.identity, manifest.target)) |current| {
         if (manifest.version.order(current.version) != .gt) return error.AlreadyPublished;
@@ -175,14 +186,9 @@ pub fn publishZip(allocator: std.mem.Allocator, root: std.fs.Dir, archive: std.f
     result.release_len = release_name.len;
     @memcpy(result.executable_storage[0..metadata.executable.len], metadata.executable);
     result.executable_len = metadata.executable.len;
-    const marker = try std.json.Stringify.valueAlloc(allocator, Marker{ .identity = manifest.identity, .target = manifest.target, .version = manifest.version, .release = release_name, .executable = metadata.executable }, .{ .whitespace = .indent_2 });
-    defer allocator.free(marker);
     var marker_buffer: [4096]u8 = undefined;
-    var atomic = try root.atomicFile("current.json", .{ .write_buffer = &marker_buffer });
+    var atomic = try prepareMarker(allocator, root, &marker_buffer, .{ .identity = manifest.identity, .target = manifest.target, .version = manifest.version, .release = release_name, .executable = metadata.executable });
     defer atomic.deinit();
-    try atomic.file_writer.interface.writeAll(marker);
-    try atomic.flush();
-    try atomic.file_writer.file.sync();
     // A crash may leave a complete release without publishing its marker. Reuse
     // it only after comparing its exact file set and bytes to this verified stage.
     if (releases.openDir(release_name, .{ .iterate = true, .no_follow = true })) |existing| {
@@ -193,8 +199,79 @@ pub fn publishZip(allocator: std.mem.Allocator, root: std.fs.Dir, archive: std.f
         if (err != error.FileNotFound) return err;
         try std.fs.rename(temporary, "payload", releases, release_name);
     }
+    if (limits.retain_archive) try retain(root, temporary, release_name, manifest);
     try atomic.renameIntoPlace();
     return result;
+}
+
+fn retain(root: std.fs.Dir, temporary: std.fs.Dir, release_name: []const u8, manifest: update.Manifest) !void {
+    var archives = try root.makeOpenPath("archives", .{ .no_follow = true });
+    defer archives.close();
+    var name_buffer: [264]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buffer, "{s}.zip", .{release_name});
+    if (archives.openFile(name, .{})) |existing| {
+        defer existing.close();
+        // A retry after interruption may find the retained copy; keep it only if exact.
+        hashFile(existing, manifest.bytes, manifest.sha256) catch {
+            try archives.deleteFile(name);
+            try std.fs.rename(temporary, "archive.zip", archives, name);
+        };
+    } else |err| {
+        if (err != error.FileNotFound) return err;
+        try std.fs.rename(temporary, "archive.zip", archives, name);
+    }
+}
+
+pub const MarkerFields = struct { identity: []const u8, target: []const u8, version: update.Version, release: []const u8, executable: []const u8 };
+
+/// Write a synced replacement marker; the caller publishes it with
+/// `renameIntoPlace` while holding update.lock.
+pub fn prepareMarker(allocator: std.mem.Allocator, root: std.fs.Dir, buffer: []u8, fields: MarkerFields) !std.fs.AtomicFile {
+    const marker = try std.json.Stringify.valueAlloc(allocator, Marker{ .identity = fields.identity, .target = fields.target, .version = fields.version, .release = fields.release, .executable = fields.executable }, .{ .whitespace = .indent_2 });
+    defer allocator.free(marker);
+    var atomic = try root.atomicFile("current.json", .{ .write_buffer = buffer });
+    errdefer atomic.deinit();
+    try atomic.file_writer.interface.writeAll(marker);
+    try atomic.flush();
+    try atomic.file_writer.file.sync();
+    return atomic;
+}
+
+/// Take the publication lock shared with `publishZip`.
+pub fn lock(root: std.fs.Dir) !std.fs.File {
+    return root.createFile("update.lock", .{ .read = true, .truncate = false, .lock = .exclusive, .lock_nonblocking = true }) catch |err| {
+        if (err == error.WouldBlock) return error.UpdateInProgress;
+        return err;
+    };
+}
+
+/// Check every payload file of a published release against its package.json.
+pub fn verifyRelease(allocator: std.mem.Allocator, release: std.fs.Dir, identity: []const u8, target: []const u8, version: update.Version, limits: Limits) ![]u8 {
+    const package_bytes = try release.readFileAlloc(allocator, "package.json", limits.max_inventory_bytes);
+    defer allocator.free(package_bytes);
+    const package = std.json.parseFromSlice(Package, allocator, package_bytes, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        return error.InvalidInventory;
+    };
+    defer package.deinit();
+    const metadata = package.value;
+    var version_buffer: [32]u8 = undefined;
+    const text = try std.fmt.bufPrint(&version_buffer, "{d}.{d}.{d}.{d}", .{ version.major, version.minor, version.patch, version.revision });
+    if (metadata.schema_version != 1 or !std.mem.eql(u8, metadata.identity, identity) or !std.mem.eql(u8, metadata.target, target) or !std.mem.eql(u8, metadata.version, text)) return error.PackageIdentityMismatch;
+    try validateFilename(metadata.executable);
+    var found_executable = false;
+    for (metadata.files) |payload| {
+        try validateFilename(payload.path);
+        if (payload.sha256.len != 64) return error.InvalidEncoding;
+        var digest: [32]u8 = undefined;
+        _ = std.fmt.hexToBytes(&digest, payload.sha256) catch return error.InvalidEncoding;
+        var file = try release.openFile(payload.path, .{});
+        defer file.close();
+        try hashFile(file, payload.bytes, digest);
+        if (std.mem.eql(u8, payload.path, metadata.executable)) found_executable = true;
+    }
+    if (!found_executable) return error.MissingExecutable;
+    return allocator.dupe(u8, metadata.executable);
 }
 
 /// Resolve only inside the managed release namespace. The application owns and
