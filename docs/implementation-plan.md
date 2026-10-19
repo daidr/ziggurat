@@ -47,7 +47,7 @@
 | U05 | 待实现 | combobox、autocomplete、search、token field | popup 所有权、输入法、筛选取消、键盘与焦点恢复；依赖 U02.2/T02/W02 |
 | U06 | 部分完成（U06.1 声明式视图的 tabs/toolbar/比例 split） | tabs、sidebar、toolbar、split、tooltip、toast | 生命周期、遮挡/命中、延迟唤醒撤销与可访问性；split 的 DIP 偏好、RTL、折叠与 sidebar/tooltip/toast 继续；基础依赖 U02.1/G02，popup scope另依赖U02.2 |
 | U07 | 待实现 | calendar、date/time、color picker | locale/范围/键盘/可访问性；依赖 L01/U05 |
-| U08 | 部分完成（U08.1 link、badge、segmented、disclosure） | badge、avatar、link、meter、rating、segmented、accordion、breadcrumbs 与导航按钮 | 稳定身份、分组/展开/链接动作、键盘和语义；不把静态文字/矩形算成完整控件；avatar、meter、rating、多段 accordion、breadcrumbs 与导航按钮继续；基础依赖 U02.1/G01 |
+| U08 | 部分完成（U08.1 link、badge、segmented、disclosure；U08.2 meter、rating、breadcrumbs、accordion） | badge、avatar、link、meter、rating、segmented、accordion、breadcrumbs 与导航按钮 | 稳定身份、分组/展开/链接动作、键盘和语义；不把静态文字/矩形算成完整控件；avatar 与导航按钮继续；基础依赖 U02.1/G01 |
 | U09 | 待实现 | chart 的数值/分类/时间尺度、axes、marks、stacking 与 selection | 极值/空数据/大数据、按需绘制、布局与键盘/辅助说明；依赖 G01/T01/L01 |
 | U10 | 待实现 | form、field/fieldset、验证提示与自定义控件契约 | 标签关联、禁用继承、错误语义、测量/绘制/输入/快照事务；依赖 U02.1/U03.2/T02/T06 |
 | G01 | 部分完成 | 圆角、描边、渐变、阴影、透明度、图片与 SVG/path | RGBA/圆角/内描边、图片驻留/同尺寸更新、严格渐变、圆角阴影/path、有界分组和独立软件/GPU离屏已验收；完整 SVG 继续实施；三后端同一语义与明确资源上限 |
@@ -1620,3 +1620,9 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - 新增语义角色 `link` 与 `disclosure`，追加在既有编号之后。Frame 提供 `link`、`segment` 与 `disclosure`：分段复用单选分组，链接与折叠区复用按钮激活；三者都参与 Tab 焦点。Windows UIA 映射为 Hyperlink/Invoke、RadioButton/SelectionItem 与 Button/ExpandCollapse，ExpandCollapse 在状态已符合时不产生动作。Linux 不声明 AT-SPI。
 - `ziggurat_view` 提供 `link`、`badge`、`segmented`/`segment` 与 `disclosure`。徽标只是带背景的静态文字，不计为控件，也不产生语义节点；单个 `disclosure` 不等于多段 accordion。
 - 单元测试覆盖分组、方向键选择、激活和语义；Linux 隐藏窗口 smoke 在 1x/2x 下实测分段、链接和折叠区的原生点击。Windows smoke 用真实 UIAutomationClient 检查分段选择、链接 Invoke 与折叠区 ExpandCollapse。见[声明式视图](view.md)。
+
+### U08.2 度量条、评分、面包屑与手风琴
+
+- 新增语义角色 `meter` 与 `navigation`，追加在既有编号之后。Frame 提供 `meter`、`rating`、`navigation` 与 `group`。度量条只读，报告实际值与上下限，值在首选区间外时用主题新增的 `caution` 色。评分是步长为 1 的范围控件，轨道从第一个标记前半格开始，按到哪个标记就取哪个分数。Windows UIA 映射为 ProgressBar（LocalizedControlType 为 "meter"）、Slider，以及带导航地标的 Group。Linux 不声明 AT-SPI。
+- `ziggurat_view` 提供 `breadcrumbs`、`meter`、`rating`、`accordion`/`section`。面包屑在间隙中画分隔符；手风琴最多打开一节，再次激活已打开的节会关闭它。面包屑和手风琴里的控件以容器为可访问父节点。
+- 单元测试覆盖区间与参数校验、评分标记命中、语义角色与父节点，以及无窗口的分节切换和评分调整；Linux 隐藏窗口 smoke 在 1x/2x 下实测评分的原生点击。Windows smoke 用真实 UIAutomationClient 检查导航地标、度量条只读 RangeValue、评分 SetValue 与分节 ExpandCollapse。

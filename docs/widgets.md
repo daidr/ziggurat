@@ -69,6 +69,9 @@ UI 的 `on_input` 先收到一次 `.key_input`；若未消费，已有编辑键�
 | Segment | RadioButton / SelectionItem，分组用 `radioGroup` |
 | Link | Hyperlink / Invoke |
 | Disclosure | Button / ExpandCollapse，checked 即展开 |
+| Meter | ProgressBar / 只读 RangeValue，实际值与上下限，LocalizedControlType 为 "meter" |
+| Rating | Slider / 可写 RangeValue，0..标记数，步长 1 |
+| Navigation | Group，LandmarkType 为 Navigation，子控件以 `semantic_parent` 挂在其下 |
 
 Radio 的 `AddToSelection` 在已有其他选中项时拒绝操作；`RemoveFromSelection` 不取消已选项。`Select` 已选项时不重复产生动作。禁用动作返回 `ElementNotEnabled`。UIA 动作经现有 owner 线程入口调度，状态在下一次成功绘制后发布；不在 provider 中保存另一份业务状态。节点移除或窗口关闭后，独立原生 provider 的属性与动作返回 `ElementNotAvailable`；COM 接口集合保持创建时的身份，原先支持的 `QueryInterface` 仍成功并正确增加引用。UIAutomationClient 可缓存只读元数据，因此关闭后的 Progress SetValue 仍可能直接得到 `InvalidOperation`。
 

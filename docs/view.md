@@ -83,6 +83,15 @@ Host 在每帧绘制后记录可见的滚动容器（最多 `max_scroll_regions`
 
 启用 `-Daccessibility=true` 时，Windows UIA 把链接映射为 Hyperlink / Invoke，分段为 RadioButton / SelectionItem（分组为 Group / Selection），折叠区为 Button / ExpandCollapse（已展开时 Expand、已折叠时 Collapse 不重复产生动作）。
 
+### 面包屑、度量条、评分与手风琴
+
+- `breadcrumbs(style)` 与 `end` 配对，开始一行通往当前页的链接，`Style.name` 是导航区域的可访问名称。相邻项之间的间隙中央画一个淡色斜杠，`Style.gap` 为 0 时间隙取 16 DIP。当前页通常是末尾的普通文本，和其他文本一样不产生语义节点。其中的控件把导航区域作为可访问父节点。
+- `meter(value, range, bands, style)` 是只读度量条，例如已用存储；`Style.name` 是可访问名称。它报告值本身，而不是完成比例。`bands` 的 `low`/`high` 是首选区间，值在区间外时用主题的 `caution` 色填充。区间超出 `range` 或 `low > high` 返回 `InvalidRange`，值被夹回 `range`。
+- `rating(&score, count, style)` 绑定一个 `u8` 分数，范围 0..`count`，`count` 为 1..`ui.widgets.max_rating`（10），否则返回 `InvalidRange`。按下或拖过第 k 个标记会把分数设为 k，方向键增减 1，Home 清零，End 设为满分；返回分数是否改变。标记画成圆点，已得分的用强调色填充。语义上它是步长为 1 的滑块。
+- `accordion(style)` 与 `end` 配对，开始一列分节，`Style.name` 是分组的可访问名称。`section(T, &open, option, label, style)` 绑定一个 `?T`：激活未打开的节会打开它并关闭原来打开的节，激活已打开的节会把 `open` 设为 null；返回值是否改变。分节标题与 `disclosure` 外观相同，在 `accordion` 之外调用返回 `NotContainer`。应用在每个标题后按 `open` 构建内容，这些内容也挂在分组下。
+
+启用 `-Daccessibility=true` 时，Windows UIA 把面包屑映射为带导航地标（LandmarkType = Navigation）的 Group，度量条为 ProgressBar / 只读 RangeValue（报告实际值与上下限，LocalizedControlType 为 "meter"），评分为 Slider / 可写 RangeValue，手风琴为 Group，分节为 Button / ExpandCollapse。
+
 ## 文本测量
 
 `Frame.label` 使用固定的 16px 单行字体。`Options.measurer` 决定文本节点与控件标签的宽度。默认的 `Measurer.estimate` 是保守估计（窄字符 9 DIP，宽字符 16 DIP，行高 24），不调用原生字体；需要精确宽度时，应用可以提供基于 `ziggurat_text_layout` 的测量回调。测量回调在 paint 中调用，应自行缓存，避免在常规绘制路径分配。
@@ -138,4 +147,4 @@ Harness 不经过 `ui.Context`，把嵌入叶子当作不可交互的节点，�
 
 ## 当前范围
 
-已提供列、行、网格、纵向滚动容器、标签页、分栏、工具栏、分段控件、折叠区、链接、徽标、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子和（通过 `ziggurat_view_text`）可编辑文本字段。分栏只接受比例偏好，没有 DIP 偏好、从右到左布局和折叠；工具栏没有溢出菜单。没有悬停状态、虚拟列表和动画；需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。
+已提供列、行、网格、纵向滚动容器、标签页、分栏、工具栏、分段控件、折叠区、手风琴、面包屑、链接、徽标、度量条、评分、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子和（通过 `ziggurat_view_text`）可编辑文本字段。分栏只接受比例偏好，没有 DIP 偏好、从右到左布局和折叠；工具栏没有溢出菜单。没有悬停状态、虚拟列表和动画；需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。

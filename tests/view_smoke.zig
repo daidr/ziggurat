@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const view = @import("ziggurat_view");
+const ui = @import("ziggurat_ui");
 const c = if (builtin.os.tag == .windows) @cImport({
     @cDefine("WIN32_LEAN_AND_MEAN", "1");
     @cDefine("NO_STRICT", "1");
@@ -20,7 +21,7 @@ const ScrollEvent = extern struct { kind: c_int, window: ?*anyopaque, send_event
 const ButtonEvent = extern struct { kind: c_int, window: ?*anyopaque, send_event: i8, time: u32, x: f64, y: f64, axes: ?*anyopaque, state: c_uint, button: c_uint, device: ?*anyopaque, x_root: f64, y_root: f64 };
 
 const width = 360;
-const height = 720;
+const height = 800;
 
 const Native = struct {
     fn paint(window: z.Window) void {
@@ -94,6 +95,7 @@ const State = struct {
     zoom: enum { small, large } = .small,
     more: bool = false,
     opened: usize = 0,
+    score: u8 = 0,
     fn build(self: *State, v: *view.View) anyerror!void {
         try v.textf("Count: {d}", .{self.count}, .{});
         try v.toolbar(.{ .gap = 8, .name = "Actions" });
@@ -134,6 +136,10 @@ const State = struct {
         try v.end();
         _ = try v.disclosure(&self.more, "More", .{});
         if (self.more) try v.text("Extra", .{});
+        try v.row(.{ .gap = 8, .alignment = .center });
+        _ = try v.rating(&self.score, 5, .{ .name = "Score" });
+        try v.meter(3, .{ .minimum = 0, .maximum = 4 }, .{}, .{ .name = "Level", .grow = 1 });
+        try v.end();
     }
     const columns = [_]view.Track{ view.Track.fixed(80), view.Track.fraction(1) };
 };
@@ -254,6 +260,15 @@ fn run(allocator: std.mem.Allocator) !void {
     try std.testing.expect((try find(&host, .disclosure, 0)).checked);
     try std.testing.expectEqualStrings("Extra", (try find(&host, .text, state.rows + 3)).text);
 
+    // Pressing a rating mark sets the score to that mark.
+    const rating = try find(&host, .rating, 0);
+    try std.testing.expect(rating.bounds.y + rating.bounds.height <= height);
+    const fourth = ui.widgets.ratingMark(rating.bounds, 5, 3);
+    Native.click(window, .{ .x = fourth.x + 2, .y = fourth.y, .width = 0, .height = fourth.height });
+    try std.testing.expectEqual(@as(u8, 4), state.score);
+    try paint(&host, window);
+    try std.testing.expectEqual(@as(f64, 4), (try find(&host, .rating, 0)).value);
+
     _ = try window.destroy();
     try app.dispatch();
     try std.testing.expect(host.context.window == null);
@@ -265,5 +280,5 @@ pub fn main() !void {
     try run(gpa.allocator());
     if (builtin.os.tag == .windows) try @import("view_uia.zig").run(gpa.allocator());
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure and keyed identity passed\n", .{});
+    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter and keyed identity passed\n", .{});
 }

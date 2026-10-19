@@ -26,7 +26,7 @@
 #define READ_ONLY 4
 #define OFFSCREEN 8
 #define CHECKED 16
-enum { ROLE_WINDOW, ROLE_GROUP, ROLE_BUTTON, ROLE_TEXT, ROLE_TEXT_BOX, ROLE_CHECKBOX, ROLE_RADIO, ROLE_SWITCH, ROLE_PROGRESS, ROLE_RADIO_GROUP, ROLE_SLIDER, ROLE_STEPPER, ROLE_LIST, ROLE_TAB_LIST, ROLE_TAB, ROLE_TOOLBAR, ROLE_SPLITTER, ROLE_LINK, ROLE_DISCLOSURE };
+enum { ROLE_WINDOW, ROLE_GROUP, ROLE_BUTTON, ROLE_TEXT, ROLE_TEXT_BOX, ROLE_CHECKBOX, ROLE_RADIO, ROLE_SWITCH, ROLE_PROGRESS, ROLE_RADIO_GROUP, ROLE_SLIDER, ROLE_STEPPER, ROLE_LIST, ROLE_TAB_LIST, ROLE_TAB, ROLE_TOOLBAR, ROLE_SPLITTER, ROLE_LINK, ROLE_DISCLOSURE, ROLE_METER, ROLE_NAVIGATION };
 enum { PATTERN_INVOKE = 1, PATTERN_VALUE = 2, PATTERN_TEXT = 4, PATTERN_TOGGLE = 8, PATTERN_SELECTION_ITEM = 16, PATTERN_SELECTION = 32, PATTERN_RANGE_VALUE = 64, PATTERN_COLLECTION = 128, PATTERN_EXPAND_COLLAPSE = 256 };
 
 typedef struct Node {
@@ -208,7 +208,9 @@ static BOOL item_role(uint32_t role) { return role == ROLE_RADIO || role == ROLE
 static BOOL chooser_role(uint32_t role) { return role == ROLE_RADIO_GROUP || role == ROLE_TAB_LIST; }
 static BOOL invoke_role(uint32_t role) { return role == ROLE_BUTTON || role == ROLE_LINK; }
 static BOOL actionable(uint32_t role) { return invoke_role(role) || item_role(role) || toggle_role(role) || role == ROLE_DISCLOSURE; }
-static BOOL range_role(uint32_t role) { return role == ROLE_PROGRESS || role == ROLE_SLIDER || role == ROLE_STEPPER || role == ROLE_SPLITTER; }
+/* Progress and meters report a value no client may set. */
+static BOOL fixed_range(uint32_t role) { return role == ROLE_PROGRESS || role == ROLE_METER; }
+static BOOL range_role(uint32_t role) { return fixed_range(role) || role == ROLE_SLIDER || role == ROLE_STEPPER || role == ROLE_SPLITTER; }
 static BOOL focusable(uint32_t role) { return actionable(role) || role == ROLE_TEXT_BOX || role == ROLE_SLIDER || role == ROLE_STEPPER || role == ROLE_SPLITTER || role == ROLE_LIST; }
 static uint32_t patterns_for_role(uint32_t role) {
     if (invoke_role(role)) return PATTERN_INVOKE;
@@ -277,7 +279,7 @@ static HRESULT request_registered(State *s, uint64_t id, uint32_t kind, const WC
         ReleaseSRWLockExclusive(&s->lock); return UIA_E_NOTSUPPORTED;
     }
     if (kind == 3 && (n->flags & READ_ONLY)) { ReleaseSRWLockExclusive(&s->lock); return UIA_E_INVALIDOPERATION; }
-    if (kind == 5 && (n->role == ROLE_PROGRESS || (n->flags & READ_ONLY))) { ReleaseSRWLockExclusive(&s->lock); return UIA_E_INVALIDOPERATION; }
+    if (kind == 5 && (fixed_range(n->role) || (n->flags & READ_ONLY))) { ReleaseSRWLockExclusive(&s->lock); return UIA_E_INVALIDOPERATION; }
     if (kind == 5 && (!isfinite(number) || number < n->range_minimum || number > n->range_maximum)) { ReleaseSRWLockExclusive(&s->lock); return E_INVALIDARG; }
     uint32_t length = 0;
     if (kind == 3) {
@@ -360,7 +362,7 @@ int zua_take_action(Action *a, ActionView *out) {
         const CollectionRowRequest *row = store ? &store->requests[a - s->actions] : NULL;
         if (!binding || !row || n->role != ROLE_LIST || row->kind < 1 || row->kind > 5 || row->reserved || !collection_binding_accepts(binding, row->authority)) available = FALSE;
     }
-    if (available && a->kind == 5 && ((n->flags & READ_ONLY) || n->role == ROLE_PROGRESS || a->number < n->range_minimum || a->number > n->range_maximum)) available = FALSE;
+    if (available && a->kind == 5 && ((n->flags & READ_ONLY) || fixed_range(n->role) || a->number < n->range_minimum || a->number > n->range_maximum)) available = FALSE;
     if (available) *out = (ActionView){ s->context, a->kind, a->id, a->value, a->value_len, a->start, a->end, a->number, captured };
     ReleaseSRWLockShared(&s->lock);
     return available;
@@ -444,6 +446,8 @@ static int control_type(uint32_t role) {
         case ROLE_SPLITTER: return UIA_ThumbControlTypeId;
         case ROLE_LINK: return UIA_HyperlinkControlTypeId;
         case ROLE_DISCLOSURE: return UIA_ButtonControlTypeId;
+        case ROLE_METER: return UIA_ProgressBarControlTypeId;
+        case ROLE_NAVIGATION: return UIA_GroupControlTypeId;
         default: return UIA_EditControlTypeId;
     }
 }
@@ -467,6 +471,11 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
             out->vt = VT_BSTR; out->bstrVal = SysAllocString(id_text); if (!out->bstrVal) hr = E_OUTOFMEMORY; break;
         }
         case UIA_ControlTypePropertyId: out->vt = VT_I4; out->lVal = control_type(n->role); break;
+        case UIA_LocalizedControlTypePropertyId:
+            /* A meter shares the progress bar control type but is not progress. */
+            if (n->role == ROLE_METER) { out->vt = VT_BSTR; out->bstrVal = SysAllocString(L"meter"); if (!out->bstrVal) hr = E_OUTOFMEMORY; }
+            break;
+        case UIA_LandmarkTypePropertyId: if (n->role == ROLE_NAVIGATION) { out->vt = VT_I4; out->lVal = UIA_NavigationLandmarkTypeId; } break;
         case UIA_IsEnabledPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & ENABLED) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_HasKeyboardFocusPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & FOCUSED) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsKeyboardFocusablePropertyId: out->vt = VT_BOOL; out->boolVal = focusable(n->role) && (n->flags & ENABLED) && n->width > 0 && n->height > 0 ? VARIANT_TRUE : VARIANT_FALSE; break;
@@ -486,7 +495,7 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
         case UIA_SelectionCanSelectMultiplePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_LIST ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_SelectionIsSelectionRequiredPropertyId: out->vt = VT_BOOL; out->boolVal = VARIANT_FALSE; break;
         case UIA_IsRangeValuePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = range_role(n->role) ? VARIANT_TRUE : VARIANT_FALSE; break;
-        case UIA_RangeValueIsReadOnlyPropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_PROGRESS || (n->flags & READ_ONLY) ? VARIANT_TRUE : VARIANT_FALSE; break;
+        case UIA_RangeValueIsReadOnlyPropertyId: out->vt = VT_BOOL; out->boolVal = fixed_range(n->role) || (n->flags & READ_ONLY) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_RangeValueValuePropertyId: out->vt = VT_R8; out->dblVal = n->range_value; break;
         case UIA_RangeValueMinimumPropertyId: out->vt = VT_R8; out->dblVal = n->range_minimum; break;
         case UIA_RangeValueMaximumPropertyId: out->vt = VT_R8; out->dblVal = n->range_maximum; break;
@@ -734,7 +743,7 @@ static HRESULT STDMETHODCALLTYPE range_value_get(IRangeValueProvider *iface, dou
 }
 static HRESULT STDMETHODCALLTYPE range_value_readonly(IRangeValueProvider *iface, WINBOOL *out) {
     if (!out) return E_POINTER; Provider *p = range_value_self(iface); Node n;
-    HRESULT hr = read_provider_node(p, &n); if (SUCCEEDED(hr)) *out = n.role == ROLE_PROGRESS || (n.flags & READ_ONLY); return hr;
+    HRESULT hr = read_provider_node(p, &n); if (SUCCEEDED(hr)) *out = fixed_range(n.role) || (n.flags & READ_ONLY); return hr;
 }
 static HRESULT range_value_metadata(IRangeValueProvider *iface, double *out, int field) {
     if (!out) return E_POINTER; Provider *p = range_value_self(iface); Node n;
