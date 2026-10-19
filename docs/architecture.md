@@ -34,6 +34,7 @@ flowchart TD
     Host --> Vector[ziggurat_vector]
     Host --> Shadows[ziggurat_shadows]
     Host --> Animation[ziggurat_animation]
+    Host --> I18n[ziggurat_i18n]
     Host --> Wake[ziggurat_wake]
     Host --> Placement[ziggurat_window_placement]
     Host --> LanguageProtocol[ziggurat_language_protocol]
