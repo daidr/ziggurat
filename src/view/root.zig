@@ -85,7 +85,21 @@ pub const Measurer = struct {
     }
 };
 
-pub const Kind = enum { column, row, radio_group, scroll, grid, text, spacer, button, checkbox, radio, toggle_switch, progress, slider, stepper };
+pub const Kind = enum { column, row, radio_group, scroll, grid, text, spacer, button, checkbox, radio, toggle_switch, progress, slider, stepper, embed };
+
+/// A leaf that measures, places and paints itself, for content the view
+/// layer does not model, such as an editable text field. The context must
+/// stay valid while any pass that emits it runs.
+pub const Embed = struct {
+    context: *anyopaque,
+    /// Content size for the current theme; called during arrange.
+    measure: *const fn (*anyopaque, Theme) layout.Measurement,
+    /// Final window bounds and stable node id after each arranged frame. It
+    /// runs inside paint, so it must not prepare, allocate or block; defer
+    /// such work to the input phase.
+    place: ?*const fn (*anyopaque, u64, Rect) void = null,
+    paint: *const fn (*anyopaque, *ui.Frame, u64, Rect) anyerror!void,
+};
 
 pub const Node = struct {
     kind: Kind,
@@ -101,6 +115,7 @@ pub const Node = struct {
     scroll: ?*ScrollModel = null,
     /// Column tracks of a grid, borrowed until the pass is arranged.
     tracks: []const Track = &.{},
+    embed: ?Embed = null,
     parent: u32 = none,
     first_child: u32 = none,
     last_child: u32 = none,
@@ -382,6 +397,12 @@ pub const View = struct {
         return self.ranged(.stepper, value, range, style);
     }
 
+    /// Add a self-describing leaf; see `Embed`.
+    pub fn embed(self: *View, content: Embed, style: Style) Error!void {
+        const node = try self.append(.embed, style);
+        node.embed = content;
+    }
+
     /// Validate balance after the build function returns.
     pub fn finish(self: *View) Error!void {
         if (self.depth != 1) return error.UnbalancedContainer;
@@ -389,6 +410,7 @@ pub const View = struct {
     }
 
     fn intrinsic(node: *const Node, theme: Theme, measurer: Measurer) layout.Measurement {
+        if (node.embed) |content| return content.measure(content.context, theme);
         const metrics = theme.metrics;
         const text_size = if (node.text.len > 0) measurer.measure(measurer.context, node.text) else Size{ .width = 0, .height = Measurer.line_height };
         const size: Size = switch (node.kind) {
@@ -400,7 +422,7 @@ pub const View = struct {
             .progress => .{ .width = 160, .height = 12 },
             .slider => .{ .width = 200, .height = metrics.thumb_size + 2 * metrics.content_inset },
             .stepper => .{ .width = 4 * (Measurer.line_height + metrics.content_inset), .height = Measurer.line_height + metrics.content_inset },
-            .column, .row, .radio_group, .scroll, .grid => unreachable,
+            .column, .row, .radio_group, .scroll, .grid, .embed => unreachable,
         };
         const minimum: Size = switch (node.kind) {
             .progress, .slider, .spacer => .{ .width = 0, .height = size.height },
@@ -587,6 +609,10 @@ pub const View = struct {
                 .progress => try target.progress(node.id, bounds, node.fraction, control),
                 .slider => try target.slider(node.id, bounds, node.value, node.range, .{ .control = control }),
                 .stepper => try target.stepper(node.id, bounds, node.value, node.range, control),
+                .embed => {
+                    const content = node.embed.?;
+                    if (@TypeOf(target) == *ui.Frame) try content.paint(content.context, target, node.id, bounds) else try target.embedded(node.id, bounds);
+                },
             }
         }
         while (clip_depth > 0) {
@@ -737,6 +763,10 @@ pub const Host = struct {
         try self.pass(null);
         try self.view.arrange(frame.sourceBounds(), theme, self.options.measurer);
         try self.view.paint(frame);
+        for (self.view.nodes()) |*node| {
+            const content = node.embed orelse continue;
+            if (content.place) |place| place(content.context, node.id, node.bounds);
+        }
         self.scroll_region_count = 0;
         for (self.view.nodes()) |*node| {
             if (node.kind != .scroll or self.scroll_region_count == max_scroll_regions) continue;
@@ -803,6 +833,9 @@ const Recorder = struct {
     }
     pub fn stepper(self: *Recorder, id: u64, bounds: Rect, _: f64, _: Range, _: ui.widgets.Options) !void {
         self.push(.stepper, id, bounds, false);
+    }
+    pub fn embedded(self: *Recorder, id: u64, bounds: Rect) !void {
+        self.push(.embed, id, bounds, false);
     }
 };
 
@@ -980,6 +1013,34 @@ test "capacity and balance failures are reported" {
 
 test {
     _ = @import("harness.zig");
+}
+
+test "embedded leaves measure themselves and paint in order" {
+    const Box = struct {
+        fn measure(_: *anyopaque, _: Theme) layout.Measurement {
+            return .{ .minimum = .{ .width = 40, .height = 20 }, .preferred = .{ .width = 120, .height = 30 } };
+        }
+        fn paint(_: *anyopaque, _: *ui.Frame, _: u64, _: Rect) anyerror!void {}
+    };
+    var context: u8 = 0;
+    const box: Embed = .{ .context = &context, .measure = Box.measure, .paint = Box.paint };
+    var storage: Storage(8, 64) = .{};
+    var view = View.init(storage.buffers());
+    view.reset(.{}, null);
+    try view.row(.{ .gap = 4 });
+    try view.embed(box, .{});
+    try view.embed(box, .{ .grow = 1 });
+    try view.end();
+    try view.finish();
+    try view.arrange(.{ .x = 0, .y = 0, .width = 300, .height = 100 }, .{}, .{});
+    const nodes = view.nodes();
+    try std.testing.expectEqual(@as(f32, 120), nodes[2].bounds.width);
+    try std.testing.expectEqual(@as(f32, 30), nodes[2].bounds.height);
+    try std.testing.expectEqual(@as(f32, 300 - 124), nodes[3].bounds.width);
+    var recorder: Recorder = .{};
+    try view.paint(&recorder);
+    try std.testing.expectEqual(@as(usize, 2), recorder.len);
+    try std.testing.expectEqual(nodes[3].id, recorder.calls[1].id);
 }
 
 test "estimate measures wide codepoints wider" {

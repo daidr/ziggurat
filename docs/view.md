@@ -72,6 +72,28 @@ Host 在每帧绘制后记录可见的滚动容器（最多 `max_scroll_regions`
 
 `view.Storage(nodes, text_bytes)` 是调用者拥有的固定存储，提供节点、文本副本、布局项与矩形缓冲。`text`、控件标签都会复制进存储，`textf` 直接格式化进存储，因此构建函数可以传入临时缓冲。超出容量返回 `TooManyNodes`、`TextFull`、`TooManyItems` 或 `NestingTooDeep`，容器不配对返回 `UnbalancedContainer`；绘制中的这些错误使本帧失败并保留上一帧。底层 Frame 的每帧上限（128 个控件、2048 条命令等）同样适用。
 
+## 嵌入与文本输入
+
+`embed(content, style)` 加入一个自己测量、放置和绘制的叶子，用于视图层不建模的内容。`Embed` 提供：
+
+- `measure(context, theme)`：返回最小与首选尺寸，在排列时调用。
+- `place(context, id, bounds)`（可选）：每个成功的帧排列后调用一次，告知稳定的节点 ID 和窗口坐标边界。它在 paint 内运行，不能准备、分配或阻塞，需要的工作要推迟到输入阶段。
+- `paint(context, frame, id, bounds)`：在绘制顺序中的位置录制内容。
+
+`ziggurat_view_text` 用它提供可编辑文本字段。应用持有 `ziggurat_document_editor.Field` 及其 Document 和 Engine，并在 Host attach 后调用一次 `host.context.prepareTextFields(allocator, .{})`：
+
+```zig
+const text = @import("ziggurat_view_text");
+
+var field = text.TextField.init(editor, &host, .{ .font = .{ .size = 16 } }, .{ .name = "名称" });
+// 在构建函数中：
+try v.embed(field.embed(), .{ .grow = 1, .key = 7 });
+```
+
+字段的边界变化时（第一次出现、窗口尺寸或布局改变），`place` 只记录新边界并向 App 投递一个任务；该任务在绘制之外调用 `Field.prepare`，第一次还会以节点 ID `attach` 到 Host 的 Context，然后使窗口失效。在准备完成之前，字段沿用上一次准备时的位置绘制，因此焦点和命中与文本保持一致，最多滞后一帧。键盘、输入法、剪贴板、焦点切换和 text_box 语义都由 Field 与 Context 处理，视图层不转发这些输入。
+
+TextField 与 Field 的地址必须保持稳定。节点 ID 用于注册，所以当前面的兄弟节点可能变化时要给它 `Style.key`；ID 改变会记录 `TextFieldIdChanged` 而不是静默重新注册。关闭时先调用 `field.detach()` 停止推迟的工作，再按 Field 的规则 `close`。投递或准备的失败记录在 `last_error`。
+
 ## 无窗口测试
 
 `view.Harness` 不创建窗口，直接运行与 Host 相同的构建、排列和事件遍。测试用它按查询找控件、模拟激活，再检查应用状态和视图树：
@@ -93,8 +115,8 @@ try h.change(.{ .kind = .slider }, .{ .steps = 2 });
 - `write(writer)` 输出缩进的树大纲（种类、文本、名称、选中或数值、禁用、取整后的边界），适合与期望文本比较。
 - `Config` 提供窗口边界、主题和 `Options`（根样式与测量回调），`resize` 改变边界并重新渲染。
 
-Harness 不经过 `ui.Context`，不验证原生命中、焦点、键盘导航或可访问性，也不推进时间；这些仍由隐藏窗口 smoke 和原生检查覆盖。
+Harness 不经过 `ui.Context`，把嵌入叶子当作不可交互的节点，不验证原生命中、焦点、键盘导航或可访问性，也不推进时间；这些仍由隐藏窗口 smoke 和原生检查覆盖。
 
 ## 当前范围
 
-已提供列、行、网格、纵向滚动容器、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块和步进器。没有悬停状态、文本输入、虚拟列表和动画；需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。
+已提供列、行、网格、纵向滚动容器、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子和（通过 `ziggurat_view_text`）可编辑文本字段。没有悬停状态、虚拟列表和动画；需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。
