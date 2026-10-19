@@ -247,6 +247,13 @@ static void script_done(void *data,uint64_t token,int status,int32_t code,const 
         EXPECT(s,zwk_user_agent(s->view,"Ziggurat isolated integration",NULL)==ZWK_OK);
         char *agent=NULL; EXPECT(s,zwk_user_agent(s->view,NULL,&agent)==ZWK_OK);
         EXPECT(s,agent && !strcmp(agent,"Ziggurat isolated integration")); zwk_string_free(agent);
+        int enabled=1,visible=1; EXPECT(s,zwk_devtools(s->view,0,&enabled,&visible)==ZWK_OK && !enabled && !visible);
+        EXPECT(s,zwk_devtools(s->view,3,NULL,NULL)==ZWK_DEVTOOLS_DISABLED && zwk_devtools(s->view,4,NULL,NULL)==ZWK_INVALID);
+        uint32_t shown=0; zwk_devtools_counts(&shown); EXPECT(s,shown==0);
+        EXPECT(s,zwk_devtools(s->view,1,NULL,NULL)==ZWK_OK && zwk_devtools(s->view,3,&enabled,&visible)==ZWK_OK && enabled && visible);
+        zwk_devtools_counts(&shown); EXPECT(s,shown==1);
+        EXPECT(s,zwk_devtools(s->view,2,&enabled,&visible)==ZWK_OK && !enabled && !visible);
+        zwk_devtools_counts(&shown); EXPECT(s,shown==0);
         EXPECT(s,zwk_post(s->view,"pong")==ZWK_OK);
     } else fail(s,"cancelled evaluation delivered business callback");
     g_free(text);

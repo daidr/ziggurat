@@ -129,6 +129,9 @@ pub fn capabilities(record: *core.WindowRecord) core.WindowCapabilities {
     const flags = zlg_window_capabilities(record.native.native.?);
     return .{ .client_position = flags & 1 != 0, .fullscreen = flags & 2 != 0, .always_on_top = flags & 4 != 0, .owned_windows = true, .modal_windows = true, .custom_decoration = flags & 8 != 0, .native_move_resize = flags & 16 != 0, .system_menu = flags & 32 != 0 };
 }
+pub fn setBackdrop(_: *core.WindowRecord, _: core.WindowBackdrop) !void {
+    return error.UnsupportedCapability;
+}
 pub fn startMove(record: *core.WindowRecord) !void {
     try checkUpdate(zlg_window_interaction(record.native.native.?, -1));
 }

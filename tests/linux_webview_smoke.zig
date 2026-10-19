@@ -87,8 +87,25 @@ const Probe = struct {
             if (!std.mem.eql(u8, agent, "Ziggurat Linux smoke")) return self.fail(error.WrongUserAgent);
             var fault = std.testing.FailingAllocator.init(self.view.allocator, .{ .fail_index = 0 });
             std.testing.expectError(error.OutOfMemory, self.view.userAgent(fault.allocator())) catch |err| return self.fail(err);
+            self.devTools() catch |err| return self.fail(err);
             _ = self.view.evaluateJS("throw new Error('controlled failure')", .{}, .{ .context = self, .complete = scriptError }) catch |err| self.fail(err);
         } else self.fail(error.DuplicateCompletion);
+    }
+    fn devTools(self: *@This()) !void {
+        try std.testing.expect(!(try self.view.devToolsEnabled()));
+        try std.testing.expectError(error.DevToolsDisabled, self.view.openDevTools());
+        try self.view.setDevToolsEnabled(true);
+        try std.testing.expect(try self.view.devToolsEnabled());
+        try self.view.openDevTools();
+        try self.view.openDevTools();
+        try std.testing.expectEqual(@as(u32, 1), web.devToolsResourceCount());
+        try self.view.setDevToolsEnabled(false);
+        try std.testing.expectEqual(@as(u32, 0), web.devToolsResourceCount());
+        try std.testing.expectError(error.DevToolsDisabled, self.view.openDevTools());
+        // Left shown on purpose: detach must close the engine-owned inspector.
+        try self.view.setDevToolsEnabled(true);
+        try self.view.openDevTools();
+        try std.testing.expectEqual(@as(u32, 1), web.devToolsResourceCount());
     }
     fn scriptError(ptr: *anyopaque, result: web.ScriptResult) void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
@@ -238,10 +255,15 @@ fn reloadAndRecover(allocator: std.mem.Allocator, recover_process: bool) !void {
             self.calls += 1;
             if (self.calls == 1) {
                 if (!std.mem.eql(u8, value.json, "7")) return self.fail(error.BadInitialScript);
+                self.view.setDevToolsEnabled(true) catch |err| return self.fail(err);
+                self.view.openDevTools() catch |err| return self.fail(err);
                 if (!self.recovering) return self.view.reload(self.options()) catch |err| self.fail(err);
                 @import("linux_webview_process.zig").stop(self.window) catch |err| self.fail(err);
             } else if (self.calls == 2) {
                 if (!std.mem.eql(u8, value.json, "\"undefined\"")) return self.fail(error.OldDocumentSurvived);
+                // recover keeps the explicit override; reload applies new Options.
+                const enabled = self.view.devToolsEnabled() catch |err| return self.fail(err);
+                if (enabled != self.recovering or web.devToolsResourceCount() != 0) return self.fail(error.WrongDevToolsReplacement);
                 std.testing.expectError(error.StalePage, self.view.postFor(self.old.?, "old generation")) catch |err| return self.fail(err);
                 _ = self.window.destroy() catch |err| return self.fail(err);
                 self.app.quit();
@@ -269,6 +291,7 @@ pub fn main() !void {
     try closeBeforeReady(allocator.allocator());
     try run(allocator.allocator(), false);
     try run(allocator.allocator(), true);
+    try std.testing.expectEqual(@as(u32, 0), web.devToolsResourceCount());
     try reloadAndRecover(allocator.allocator(), false);
     try reloadAndRecover(allocator.allocator(), true);
     try @import("linux_custom_webview_smoke.zig").runAll(allocator.allocator());
@@ -290,5 +313,5 @@ pub fn main() !void {
     try std.testing.expectEqualDeep(web.custom_local.ResourceCounts{ .budgets = 0, .streams = 0, .body_bytes = 0 }, web.customLocalResourceCounts());
     // App's dispatcher/main-loop/context remain until its explicit deinit.
     try std.testing.expect(zlg_resource_count() == 4);
-    std.debug.print("Linux WebView: OOM/early-free, 4 Apps, IPC/scripts/GLib errors/deadline/raw-close/reload/recover, native resources=0\n", .{});
+    std.debug.print("Linux WebView: OOM/early-free, 4 Apps, IPC/scripts/GLib errors/DevTools/deadline/raw-close/reload/recover, native resources=0\n", .{});
 }

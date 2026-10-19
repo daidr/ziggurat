@@ -32,8 +32,8 @@
 | --- | --- | --- | --- |
 | W01 | 已完成（Windows/X11） | DIP 客户区尺寸、明确坐标系的屏幕位置、全屏进入/退出、置顶 | 普通/max/min 还原、外部 WM、状态事件、失败/重入/关闭；Wayland 能力失败已验，全屏运行未验 |
 | W02 | 已完成（Windows/X11） | 拥有/瞬态窗口、模态窗口、关闭及焦点策略 | 父关闭传播、整树模态输入策略、取消与异常回滚；独立顶层窗口，不嵌套事件循环或替代 H02 内嵌内容；依赖 W01 |
-| W03 | 部分完成（Windows/X11） | 无边框、自定义标题栏、原生拖动/缩放、透明与材质 | W03.1 装饰/命中/原生交互已验收；透明与材质继续待实现；DPI/最大化/系统菜单；依赖 W01 |
-| W04 | 部分完成（Windows/X11） | 窗口枚举/查找、焦点、显示器约束与状态持久化 | 运行期枚举/查找、显式显示器快照、离屏恢复及版本化 worker 存储已验；原生变化订阅、物理混合 DPI/热插拔与其他平台继续，不在 paint 访问磁盘 |
+| W03 | 部分完成（Windows/X11） | 无边框、自定义标题栏、原生拖动/缩放、透明与材质 | W03.1 装饰/命中/原生交互已验收；W03.3 Windows 系统框架材质已实现（运行验证见记录）；W03.2 客户区透明、Linux/Wayland 材质继续待实现；DPI/最大化/系统菜单；依赖 W01 |
+| W04 | 部分完成（Windows/X11） | 窗口枚举/查找、焦点、显示器约束与状态持久化 | 运行期枚举/查找、显式显示器快照、离屏恢复及版本化 worker 存储已验；原生变化订阅待 S03 显示器订阅合入后接入，物理混合 DPI/热插拔与其他平台继续，不在 paint 访问磁盘 |
 | W05 | 待实现 | 应用激活、单实例与参数转发 | OS 锁与显式 IPC；启动竞争、旧实例关闭、恶意/超长参数和用户隔离 |
 
 ## 布局、控件与绘制
@@ -159,8 +159,8 @@ T07 负责可选字体注册与发现，不扩大T01已验收布局范围：有�
 | I01 | 已完成 | 类型化事件、订阅/退订、显式广播、TS 生成 | 纯 Zig/生成 TS；真实 Windows WebView 闭环；session/重入/部分失败/旧客户端兼容检查通过 |
 | I02 | 已完成 | 编译期服务调度与显式 caller 上下文 | 签名/错误类型校验、拥有的 Reply/Work、OOM 编码重试不重复业务副作用、真实 WebView 调度 |
 | B01 | 部分完成（Windows/Linux） | page 导航、远程/文件资源策略、历史、标题/加载状态 | B01.1 本地页面与 B01.2 远程/显式文件快照已验收；methods/headers、私有文件按需读取与原生 scheme 由 B05.1–B05.3 验收，未开放 file:// 目录；导航中关闭/重定向/失败和 IPC 绑定 |
-| B02 | 部分完成（Windows/Linux） | 异步 JS 求值、zoom、user agent、devtools、用户注入脚本 | B02.1既有Windows操作及B02.2两平台文档起始主frame初始化器/有序替换首片已验；其他时机/frame/world及Linux更广操作继续，未做人眼工具窗展示验收；依赖 B01 |
-| B03 | 部分完成（Windows/Linux） | cookie/data store、find、截图、打印/PDF | Windows View Cookie/Profile清理、原生find、预算PNG、异步PDF，以及Linux独立CookieStore的URL/显式授权全量查询、写入/快照删除/身份删除/非空完整替换/清Cookie、原生PNG和有界substring Find/显式unknown状态已分项验收；整词/高亮关闭等不支持选项明确拒绝，Linux PDF及系统打印机输出继续，无页面Windows CookieStore仍明确不支持；依赖 B02 |
+| B02 | 部分完成（Windows/Linux） | 异步 JS 求值、zoom、user agent、devtools、用户注入脚本 | B02.1既有Windows操作及B02.2两平台文档起始主frame初始化器/有序替换首片已验；Linux DevTools 开关/独立 inspector 已验，两平台 B02.1 属性操作对齐；其他时机/frame/world继续，未做人眼工具窗展示验收；依赖 B01 |
+| B03 | 部分完成（Windows/Linux） | cookie/data store、find、截图、打印/PDF | Windows View Cookie/Profile清理、原生find、预算PNG、异步PDF，以及Linux独立CookieStore的URL/显式授权全量查询、写入/快照删除/身份删除/非空完整替换/清Cookie、原生PNG、整体数据清理和有界substring Find/显式unknown状态已分项验收；整词/高亮关闭等不支持选项明确拒绝，Linux PDF及系统打印机输出继续，无页面Windows CookieStore仍明确不支持；依赖 B02 |
 | B04 | 已完成（Windows，宿主显式策略） | 下载管理、权限决策与持久策略 | B04.1 有界下载/临时权限与 B04.2 版本化宿主规则已验收；宿主负责规则执行与 worker I/O，合作取消不等于硬磁盘配额；依赖 B01/I01 |
 | B05 | 部分完成（Windows/Linux） | 自定义协议、请求/响应与资源流 | Windows B05.1–B05.4及Linux有界custom读取/头授权、异步资源/文件泵、HTTP Range/准备文件响应、独立TLS站点、两平台已知长producer已分项验收；Windows实际HTTPS/browser链使用测试证书例外，生产Profile级pin待实现；Linux custom写请求受实际Origin缺失限制，opaque scheme及更广策略继续；不在UI线程磁盘等待；依赖 B01/I01 |
 | H01 | 已完成（Windows/Linux 页面与区域） | page/viewport 与窗口分离、多份内容生命周期 | H01.1 组合所有者/UI backdrop/矩形页面与H01.2独立PageSession/跨宿主DOM/App停机接线已验收；更广Linux页面策略及其他平台归P01/P04；依赖 W02/B01 |
@@ -182,7 +182,7 @@ B02 分项：
 
 | 子项 | 状态 | 验收范围 |
 | --- | --- | --- |
-| B02.1 | 已完成（Windows） | 既有异步JS、zoom、user agent与devtools；有界双层请求/结果、取消/超时/导航/detach、单槽完成重入与属性恢复 |
+| B02.1 | 已完成（Windows/Linux） | 既有异步JS、zoom、user agent与devtools（Linux DevTools 为独立 inspector 顶层窗口）；有界双层请求/结果、取消/超时/导航/detach、单槽完成重入与属性恢复 |
 | B02.2 | 部分完成（Windows/Linux 首片） | document-start/top-frame/page-world 的拥有型可信初始化函数体、精确 HTTPS 来源和有序整批替换已通过独立原生验收；初始安装完成才允许导航，失败保旧、旧 ID/关闭/reload/取消回收均验证。Linux提交表示本地future-document manager已安装，不承诺WebProcess ACK或当前文档执行；其他时机/frame/world继续 |
 
 当前细分实施顺序：B01.1 本地页面导航、历史、元数据与代数 → B01.2 远程/文件来源和只读资源策略 → B02 页面操作 → H01 内容生命周期分离；写 method、headers 与流通过 B05 的显式协议推进。本地 Runtime 验证不代替远程策略验证，也不将 URL 参数或网络访问隐藏加入默认可信来源。
@@ -1697,4 +1697,16 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - 新增纯 Zig `ziggurat_net`，不导入核心、不创建线程。`fetch`/`stream`/`fetchJson` 在宿主 worker 上执行 HTTP(S) 请求：任意方法与 body、逐跳重定向（credentials 跨 origin 丢弃）、gzip/deflate 解码、解码后 body/头部/重定向/URL 上限，`stream` 以调用者 Writer 施加 TCP 背压。`Cancel` 绑定已建立连接的 socket，取消时 shutdown，被取消的传输不报告成功；连接与 TLS 握手期间的取消在其返回后生效。
 - `WebSocket` 由单一 worker 独占连接两个方向（同一 TLS 会话不并发读写），任意线程 `send`/`ping`/`close`/`cancel`/`resumeReading`；预分配发送队列满返回 `Full`，handler 返回 `pause` 停止读 socket。分片重组、UTF-8、掩码/保留位/控制帧/关闭码校验与 1002/1007/1009 关闭、自动 pong、关闭握手、子协议协商。HTTPS/WSS 复用调用者 `std.http.Client` 的 TLS、系统 CA 与代理。
 - 单元测试用回环服务覆盖以上路径，Linux ReleaseSafe/Debug 各连续运行 1000/300 次（含 CPU 压力）无失败；`scripts/net-tls-probe.sh` 用临时 localhost 证书实测 HTTPS、100 KB WSS 回显和不受信证书拒绝。Windows 单元测试交叉编译通过，运行结果以 CI 为准。未实现：压缩扩展、非 CONNECT HTTP 代理上的 WebSocket、内置超时与自动重连、连接/握手阶段的即时取消、公网与代理环境验证。见[Fetch 与 WebSocket](net.md)。
+
+### W03.3 Windows 系统框架材质
+
+- `Window.setBackdrop(.system/.none/.mica/.acrylic/.mica_alt)` 经 DWM system backdrop 属性在主线程同步提交；`backdrop_material` 只在 `.system` 装饰且系统版本不低于 Windows 11 build 22621 时为 true，版本由 RtlGetVersion 每进程读取一次。不支持时在原生调用前返回 `UnsupportedCapability`，原生拒绝为 `WindowUpdateFailed` 并保留 HRESULT 诊断；选择不由框架保存。
+- 材质只覆盖系统标题栏/边框；客户区仍不透明，`transparent` 保持 false，W03.2 需渲染器预乘 alpha 输出后另行实现。Linux/Wayland 报告不支持。
+- 测试后端单测覆盖能力门禁、Busy、失败不改状态与关闭后 `Closed`；`smoke-window-chrome` 在 Windows 比对独立读取的版本与能力，支持时提交五种材质并在 DWM 允许时读回原值。本地已通过 Linux 原生检查与 Windows 交叉编译；Windows 运行结果以 CI 为准，不建立视觉效果结论。
+
+### B02/B03 Linux DevTools 与整体数据清理
+
+- Linux 接受 `devtools_enabled` 与 `setDevToolsEnabled/devToolsEnabled/openDevTools`，映射 WebKit developer extras；inspector 是引擎拥有的独立顶层窗口，拒绝停靠进 Content host。禁用、detach、reload/recover 替换与关闭同步关闭已显示 inspector，`devToolsResourceCount()` 回到 0；网页上下文菜单仍被拒绝。
+- Linux `clearBrowsingData(.entire_profile)` 对 View 自己的数据管理器清除全部类型与时间范围，持久 Profile 下影响共用者。它复用截图的显式 budget、每 View 与进程物理上限及 GTask 结果寿命，不要求当前文档、不预留 PNG 容量；新增独立 `clear_browsing_data` 能力位，`browser_tools` 仍为 false。
+- 本地 Linux（Xvfb、WebKitGTK 4.1）Debug 通过 `smoke-webview-linux`、`P01_PROBE=backend`、`smoke-webview-cookies-linux`、`smoke-webview-capture-linux`、`test-webkit-capture` 与 `test-webview`：DevTools 默认关闭/禁用拒绝/显示/重复/禁用关闭/recover 保留/reload 清除，清理后 Store 查询为空、新文档无旧 Cookie 与 localStorage，取消恰好一次，原生计数归零。Linux PDF、无页面 Windows CookieStore 与 Linux View Cookie 工具保持原状态。
 
