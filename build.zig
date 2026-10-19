@@ -108,6 +108,7 @@ pub fn build(b: *std.Build) void {
         window_placement.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
     }
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) addSmoke(b, "smoke-window-placement", "tests/window_placement_smoke.zig", target, optimize, &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_window_placement", .module = window_placement } });
+    const document_app = b.addModule("ziggurat_document_app", .{ .root_source_file = b.path("src/document_app/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
     const resource_stream = b.addModule("ziggurat_resource_stream", .{ .root_source_file = b.path("src/resource_stream/root.zig"), .target = target, .optimize = optimize });
     const http_response = b.addModule("ziggurat_http_response", .{ .root_source_file = b.path("src/http_response/root.zig"), .target = target, .optimize = optimize });
     const tls_pem = b.createModule(.{ .root_source_file = b.path("src/tls_pem/root.zig"), .target = target, .optimize = optimize });
@@ -2116,6 +2117,11 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&window_placement_tests.step);
     test_step.dependOn(&run_window_placement_tests.step);
     b.step("test-window-placement", "Run monitor placement, versioned encoding and explicit worker storage invariants").dependOn(&run_window_placement_tests.step);
+    const document_app_tests = b.addTest(.{ .root_module = document_app });
+    const run_document_app_tests = b.addRunArtifact(document_app_tests);
+    check.dependOn(&document_app_tests.step);
+    test_step.dependOn(&run_document_app_tests.step);
+    b.step("test-document-app", "Run document identity, close preflight, atomic save, autosave and recovery invariants").dependOn(&run_document_app_tests.step);
     test_step.dependOn(&run_webkit_remote.step);
     const snippets_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/code_editor/snippet.zig"),

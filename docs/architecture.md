@@ -36,6 +36,7 @@ flowchart TD
     Host --> Animation[ziggurat_animation]
     Host --> Wake[ziggurat_wake]
     Host --> Placement[ziggurat_window_placement]
+    Host --> DocumentApp[ziggurat_document_app]
     Host --> LanguageProtocol[ziggurat_language_protocol]
     Host --> Producer[ziggurat_webview_producer]
     Host --> ResourceStream[ziggurat_resource_stream]
@@ -47,6 +48,7 @@ flowchart TD
     Host --> Gaussian[ziggurat_gaussian]
     Wake --> Core
     Placement --> Core
+    DocumentApp --> Core
     LanguageProtocol --> Core
     LanguageProtocol --> Document
     LanguageProtocol --> CodeEditor
