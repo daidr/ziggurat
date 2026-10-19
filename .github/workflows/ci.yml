@@ -72,6 +72,11 @@ jobs:
         run: |
           ./scripts/fetch-webp.ps1
           zig build smoke-images -Dwebp=true -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
+      - name: Optional pinned SQLite amalgamation
+        run: |
+          python scripts/fetch-sqlite.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          zig build test-sqlite -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
       # Hardware GPU coverage is a separate local driver check. Hosted runner
       # measurements below explicitly record any GPU fallback and deferred work.
       - name: Capture reproducible benchmark evidence
@@ -137,6 +142,10 @@ jobs:
         run: |
           sh scripts/fetch-webp.sh
           zig build smoke-images -Dwebp=true -Doptimize=${{ matrix.optimize }}
+      - name: Optional pinned SQLite amalgamation
+        run: |
+          python3 scripts/fetch-sqlite.py
+          zig build test-sqlite -Doptimize=${{ matrix.optimize }}
       - name: Optional WebKitGTK lifecycle and policy checks
         if: github.event_name == 'workflow_dispatch' && inputs.webview
         run: |
