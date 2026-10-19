@@ -339,8 +339,11 @@ pub const Registry = struct {
             slot.snapshot = null;
         }
         if (!clean) slot.dirty_since = slot.last_edit;
-        const retry = if (clean) slot.pending_close else null;
-        if (clean) slot.pending_close = null;
+        var retry: ?z.CloseReason = null;
+        if (clean) {
+            retry = slot.pending_close;
+            slot.pending_close = null;
+        }
         self.notify(slot);
         return .{ .clean = clean, .retry_close = retry, .obsolete_snapshot = obsolete };
     }
