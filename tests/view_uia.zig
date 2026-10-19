@@ -1,6 +1,8 @@
 //! Windows UI Automation check for declarative tabs, toolbars, splits,
 //! segments, links, disclosures, breadcrumbs, meters, ratings and
-//! accordions, list boxes, plus form fields and fieldsets, read and driven by a real client on a worker thread.
+//! accordions, list boxes, form fields and fieldsets, plus combo boxes,
+//! search regions, tooltips, avatars and toasts, read and driven by a real
+//! client on a worker thread.
 const std = @import("std");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
@@ -41,9 +43,20 @@ const State = struct {
     terms: bool = false,
     font: usize = 0,
     fonts: view.ScrollModel = .{},
+    face: usize = 0,
+    back: usize = 0,
+    notices: view.Toasts(1) = .{},
     fn build(self: *State, v: *view.View) anyerror!void {
+        try v.search(.{ .name = "Find" });
+        try v.comboBox(faces[self.face], .{ .name = "Typeface" });
+        for (faces, 0..) |face, i| _ = try v.comboOption(usize, &self.face, i, face, .{});
+        try v.end();
+        if (try v.navButton(.back, .{})) self.back += 1;
+        try v.avatar("Ada Lovelace", null, .{});
+        try v.end();
         try v.toolbar(.{ .gap = 8, .name = "Actions" });
         if (try v.button("Save", .{})) self.saved += 1;
+        try v.tooltip("Save the document");
         try v.end();
         try v.tabs(.{ .name = "Sections" });
         _ = try v.tab(@TypeOf(self.section), &self.section, .general, "General", .{});
@@ -84,7 +97,9 @@ const State = struct {
         try v.end();
         try v.end();
         try v.end();
+        _ = try v.toasts(&self.notices, .{});
     }
+    const faces = [_][]const u8{ "Roman", "Italic" };
 };
 
 const Client = struct {
@@ -378,6 +393,55 @@ const Client = struct {
         try self.synchronize();
         try check(option.?.lpVtbl.*.get_CurrentIsSelected.?(option.?, &selected));
         try std.testing.expect(selected != 0);
+
+        // A combo box reports its value read-only and opens its list through
+        // ExpandCollapse, inside a search landmark.
+        const typeface = try find(elements.?, c.UIA_ComboBoxControlTypeId, "Typeface");
+        defer release(typeface);
+        const find_region = try parentOf(walker.?, typeface);
+        defer release(find_region);
+        try std.testing.expect(try named(find_region, "Find"));
+        landmark = try property(find_region, c.UIA_LandmarkTypePropertyId);
+        try std.testing.expectEqual(@as(c_long, c.UIA_SearchLandmarkTypeId), landmark.unnamed_0.unnamed_0.unnamed_0.lVal);
+        _ = c.VariantClear(&landmark);
+        var current: ?*c.IUIAutomationValuePattern = null;
+        try check(typeface.lpVtbl.*.GetCurrentPatternAs.?(typeface, c.UIA_ValuePatternId, &c.IID_IUIAutomationValuePattern, @ptrCast(&current)));
+        defer release(current.?);
+        try check(current.?.lpVtbl.*.get_CurrentIsReadOnly.?(current.?, &read_only));
+        try std.testing.expect(read_only != 0);
+        try expectText(typeface, c.UIA_ValueValuePropertyId, "Roman");
+        var dropdown: ?*c.IUIAutomationExpandCollapsePattern = null;
+        try check(typeface.lpVtbl.*.GetCurrentPatternAs.?(typeface, c.UIA_ExpandCollapsePatternId, &c.IID_IUIAutomationExpandCollapsePattern, @ptrCast(&dropdown)));
+        defer release(dropdown.?);
+        try check(dropdown.?.lpVtbl.*.Expand.?(dropdown.?));
+        try self.synchronize();
+        try check(dropdown.?.lpVtbl.*.get_CurrentExpandCollapseState.?(dropdown.?, &expansion));
+        try std.testing.expectEqual(@as(c.enum_ExpandCollapseState, c.ExpandCollapseState_Expanded), expansion);
+        try check(dropdown.?.lpVtbl.*.Collapse.?(dropdown.?));
+        try self.synchronize();
+        try check(dropdown.?.lpVtbl.*.get_CurrentExpandCollapseState.?(dropdown.?, &expansion));
+        try std.testing.expectEqual(@as(c.enum_ExpandCollapseState, c.ExpandCollapseState_Collapsed), expansion);
+
+        // Navigation buttons invoke, avatars are images and a tooltip is
+        // its control's help text.
+        const back = try find(elements.?, c.UIA_ButtonControlTypeId, "Back");
+        defer release(back);
+        var step: ?*c.IUIAutomationInvokePattern = null;
+        try check(back.lpVtbl.*.GetCurrentPatternAs.?(back, c.UIA_InvokePatternId, &c.IID_IUIAutomationInvokePattern, @ptrCast(&step)));
+        defer release(step.?);
+        try check(step.?.lpVtbl.*.Invoke.?(step.?));
+        const portrait = try find(elements.?, c.UIA_ImageControlTypeId, "Ada Lovelace");
+        release(portrait);
+        try expectText(save, c.UIA_HelpTextPropertyId, "Save the document");
+        try self.synchronize();
+
+        // A toast is a polite live region named by its message.
+        const notice = try find(elements.?, c.UIA_GroupControlTypeId, "Draft saved");
+        defer release(notice);
+        var live = try property(notice, c.UIA_LiveSettingPropertyId);
+        try std.testing.expectEqual(@as(c.VARTYPE, c.VT_I4), live.unnamed_0.unnamed_0.vt);
+        try std.testing.expectEqual(@as(c_long, c.Polite), live.unnamed_0.unnamed_0.unnamed_0.lVal);
+        _ = c.VariantClear(&live);
     }
     fn expectFlag(element: *c.IUIAutomationElement, id: c.PROPERTYID, expected: bool) !void {
         var value = try property(element, id);
@@ -399,10 +463,11 @@ pub fn run(allocator: std.mem.Allocator) !void {
     const app = try z.App.init(allocator);
     defer app.deinit();
     var state: State = .{};
+    _ = try state.notices.show("Draft saved", .{ .duration = 0 });
     var storage: view.Storage(64, 768) = .{};
     var host = view.Host.init(&state, State.build, storage.buffers(), .{});
     host.context.render_mode = .gdi;
-    const window = try app.createWindow(.{ .width = 360, .height = 880 });
+    const window = try app.createWindow(.{ .width = 360, .height = 940 });
     try host.attach(window);
     paint(window);
     if (host.last_error) |err| return err;
@@ -427,7 +492,9 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(.reviews, state.open.?);
     try std.testing.expect(state.terms);
     try std.testing.expectEqual(@as(usize, 1), state.font);
+    try std.testing.expectEqual(@as(usize, 1), state.back);
+    try std.testing.expectEqual(@as(usize, 0), state.face);
     try app.dispatch();
     try std.testing.expect(host.context.window == null);
-    std.debug.print("view UIA smoke passed: real client tab list/tab selection, toolbar parent, splitter RangeValue, segment selection, link invoke, disclosure ExpandCollapse, navigation landmark, read-only meter, rating RangeValue, accordion sections, form field help/validity and list box selection\n", .{});
+    std.debug.print("view UIA smoke passed: real client tab list/tab selection, toolbar parent, splitter RangeValue, segment selection, link invoke, disclosure ExpandCollapse, navigation landmark, read-only meter, rating RangeValue, accordion sections, form field help/validity, list box selection, combo box Value/ExpandCollapse, search landmark, navigation button, image and tooltip help text\n", .{});
 }

@@ -114,6 +114,52 @@ Host 在每帧绘制后记录可见的滚动容器（最多 `max_scroll_regions`
 
 启用 `-Daccessibility=true` 时，Windows UIA 把说明映射为 HelpText，错误映射为 IsDataValidForForm = false，必填映射为 IsRequiredForForm，字段集映射为 Group。
 
+### 组合框与建议列表
+
+- `comboBox(current, style)` 与 `end` 配对：先加入一个显示 `current`（当前选项的标签）的字段，再开始它的选项列表，用 `comboOption(T, &selected, value, label, style)` 构建选项。选项每一遍都参与构建和测量，但只在列表打开时放置和绘制；在列表之外调用 `comboOption` 返回 `NotContainer`。名称取 `Style.name`，在 `field` 里没有名称时取字段标签。
+- 激活组合框、或在它有焦点时按 Down/Up 打开列表，当前选项预先高亮。打开时方向键与 Home/End 只移动高亮，焦点仍在组合框上；Enter 或 Space 选中高亮项，Escape、列表外的按下、Tab 或选中都会关闭列表，焦点回到组合框（Tab 随后照常移动焦点）。列表外的按下只关闭列表，不会同时激活下面的控件。
+- `suggestions(style)` 与 `end` 配对，为刚加入的节点（通常是文本输入）开始一个建议列表，`suggestion(label, style)` 加入一条建议，选中的那一遍返回 true，应用在这个分支里把它写回输入。输入或某条建议有焦点、且至少有一条建议时列表打开；Down/Up/Home/End 移动高亮而不移动焦点，Enter 选中高亮项。选中或 Escape 后列表保持关闭，直到建议标签发生变化（例如继续输入）或再次按 Down；焦点离开时关闭。
+- 同一时间最多打开一个列表。列表画在其余内容之上，宽度至少与锚点相同，最高 280 DIP，默认在锚点下方，下方放不下而上方空间更大时翻到上方，并始终夹在窗口内；超出高度的选项被裁剪。选项较多时把它们放进列表里的 `scroll` 容器，高亮项会以最小位移滚入可见区。
+- 搜索输入可以放在 `search(style)` 里：它与 `end` 配对，开始一行（`Style.gap` 为 0 时取 8 DIP），作为以 `Style.name` 命名的搜索区域，其中的控件以它为可访问父节点。
+
+```zig
+try v.search(.{ .name = "查找城市" });
+try v.embed(query.embed(), .{ .grow = 1, .key = 1 });
+try v.suggestions(.{ .name = "城市" });
+for (cities) |city| if (std.mem.startsWith(u8, city, prefix)) {
+    if (try v.suggestion(city, .{ .key = view.key(city) })) choose(city);
+};
+try v.end();
+try v.end();
+```
+
+启用 `-Daccessibility=true` 时，Windows UIA 把组合框映射为 ComboBox / ExpandCollapse / 只读 Value（值为当前标签），打开的列表为其子节点 List，选项为 ListItem；搜索区域为带搜索地标（LandmarkType = Search）的 Group。
+
+### 提示、通知、导航按钮与头像
+
+- `tooltip(text)` 给刚加入的节点（在组合框选项列表 `end` 之后则是组合框）加提示。指针停在控件上或控件持有焦点超过 `Options.tooltip_delay`（默认 500 ms）后，提示出现在控件下方（下方放不下时在上方），悬停优先于焦点。按下或 Escape 会隐藏它，直到指针或焦点移到另一个控件；窗口失去焦点时也会隐藏。提示文字同时作为控件的可访问说明（已有字段说明时保留字段说明）。没有前一个节点时返回 `NotContainer`。
+- `view.Toasts(capacity)` 是应用持有的固定消息队列：`show(message, .{ .action, .duration })` 复制文本并返回 id，队列满时先移除最早的消息，文本过长返回 `TextTooLong`；`dismiss(id)` 移除一条。`toasts(&queue, style)` 把队列画成窗口底部居中的一叠消息，每条带可选的动作按钮和名为 "Dismiss" 的关闭按钮。时长从第一次显示的那一遍开始计算，0 表示一直显示；动作按钮移除消息并让 `toasts` 返回它的 id 一次。每条消息是礼貌型（Polite）实时区域，出现时由读屏播报。
+- `navButton(direction, style)` 是画着朝 `direction`（back/forward/up/down）的箭头的方形按钮，激活的那一遍返回 true；名称取 `Style.name`，默认是英文的 "Back"/"Forward"/"Up"/"Down"。
+- `avatar(name, picture, style)` 显示 `picture`（`ImageView`，按 cover 裁剪）或 `name` 前两个词的首字母，圆底颜色取 `Style.background`，否则由名称稳定派生。默认 32 DIP 见方，不接收输入，作为以 `name` 命名的图像暴露。
+
+### 时间与唤醒
+
+每一遍都有一个时间，`View.time()` 读取，单位纳秒；默认来自 Host 第一次构建时启动的单调计时器，`Options.clock` 可以换成应用自己的时钟。构建函数可以调用 `wakeAt(deadline)` 要求在某一时刻再运行一遍，提示延迟和通知时长也用它。一遍中最早的请求生效，没有请求就不会再唤醒。
+
+Host 本身不持有计时器，只在 paint 之后投递一个任务，把最早的期限交给 `Host.setScheduler` 设置的调度器。`ziggurat_view_timer` 提供基于 `ziggurat_wake.OneShot` 的调度器：
+
+```zig
+const view_timer = @import("ziggurat_view_timer");
+
+var timer = view_timer.Timer.init(&host);
+try host.attach(window);
+try timer.attach(app, allocator);
+// 关闭窗口或 App 之前：
+try timer.close();
+```
+
+它为最早期限装定一次性计时器，期限变化时取消旧的，到期后让窗口失效重绘。没有期限时不装定，空闲窗口不做任何工作，也没有持续重绘的计时器。没有调度器时，提示和通知仍然正确，只是要等下一次因其他原因发生的重绘才会更新。
+
 ## 文本测量
 
 `Frame.label` 使用固定的 16px 单行字体。`Options.measurer` 决定文本节点与控件标签的宽度。默认的 `Measurer.estimate` 是保守估计（窄字符 9 DIP，宽字符 16 DIP，行高 24），不调用原生字体；需要精确宽度时，应用可以提供基于 `ziggurat_text_layout` 的测量回调。测量回调在 paint 中调用，应自行缓存，避免在常规绘制路径分配。
@@ -178,8 +224,10 @@ _ = try h.key(.{ .key = .down });
 try std.testing.expectEqualStrings("Sans", h.focused().?.text);
 ```
 
-Harness 把嵌入叶子当作不可交互的节点，不验证原生命中、文本输入、可访问性或指针捕获，也不推进时间；这些仍由隐藏窗口 smoke 和原生检查覆盖。
+- 时间与浮层：`advance(ns)` 推进测试时钟并重新渲染，`deadline()` 返回上一遍请求的唤醒时刻；`hover(query)`、`hoverAt(x, y)` 与 `leave()` 移动或移走指针，`tooltip()` 返回当前显示的提示文字；`focus(query)` 直接给节点焦点。`key` 先把按键交给打开的列表或显示的提示，`clickAt` 先让按下经过列表与提示的处理，`at` 先查浮在上面的列表和通知。`write` 的大纲带出列表的打开/关闭、高亮项与提示文字。
+
+Harness 把嵌入叶子当作不可交互的节点，不验证原生命中、文本输入、可访问性或指针捕获；这些仍由隐藏窗口 smoke 和原生检查覆盖。
 
 ## 当前范围
 
-已提供列、行、网格、纵向滚动容器、标签页、分栏、工具栏、分段控件、折叠区、手风琴、面包屑、列表框、表单字段与字段集、链接、徽标、度量条、评分、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子和（通过 `ziggurat_view_text`）可编辑文本字段。分栏只接受比例偏好，没有 DIP 偏好、从右到左布局和折叠；工具栏没有溢出菜单。没有悬停状态、虚拟列表、多选列表和动画；需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。
+已提供列、行、网格、纵向滚动容器、标签页、分栏、工具栏、分段控件、折叠区、手风琴、面包屑、列表框、组合框、建议列表、搜索区域、表单字段与字段集、链接、徽标、度量条、评分、导航按钮、头像、提示、通知、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子和（通过 `ziggurat_view_text`）可编辑文本字段。分栏只接受比例偏好，没有 DIP 偏好、从右到左布局和折叠；工具栏没有溢出菜单。组合框不可编辑、不按输入筛选；建议列表的筛选由应用完成；悬停只用于提示，控件本身没有悬停外观；通知没有进出动画。没有虚拟列表、多选列表、标记输入框和动画；需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。Linux 没有普通控件的 AT-SPI 层，上述可访问性只在 Windows UIA 上提供。

@@ -4,7 +4,8 @@
 //! resulting state and tree. Nothing here touches native code or allocates.
 //! With `attachInput`, each render is also recorded into a windowless
 //! ui.Context so keys replay through the same focus, Tab, arrow and
-//! activation logic that a window uses.
+//! activation logic that a window uses. Time is frozen unless a test
+//! advances it, so tooltips and toasts are checked without sleeping.
 const std = @import("std");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
@@ -53,14 +54,38 @@ pub const Harness = struct {
     frames: usize = 0,
     /// Windowless Context whose input state receives each rendered frame.
     input: ?*ui.Context = null,
+    /// The test's clock in nanoseconds; it moves only with `advance`.
+    clock: u64 = 0,
+    /// Focus given by `focus` when no input Context is attached.
+    focus_id: ?u64 = null,
 
     pub fn init(state: anytype, comptime build: fn (@TypeOf(state), *View) anyerror!void, buffers: view.Buffers, config: Config) Harness {
-        return .{ .view = View.init(buffers), .build = view.Build.bind(state, build), .config = config };
+        var built = View.init(buffers);
+        built.tooltip_delay = config.options.tooltip_delay;
+        return .{ .view = built, .build = view.Build.bind(state, build), .config = config };
+    }
+
+    fn run(self: *Harness, event: ?Event) anyerror!void {
+        self.view.now = self.clock;
+        self.view.focus = self.focusId();
+        try self.build.run(&self.view, self.config.options.root, event);
+    }
+    fn focusId(self: *const Harness) ?u64 {
+        if (self.input) |context| return context.input_state.focused;
+        return self.focus_id;
+    }
+    fn setFocus(self: *Harness, id: ?u64) void {
+        if (self.input) |context| context.input_state.setFocused(id) else self.focus_id = id;
+    }
+    fn restoreFocus(self: *Harness) void {
+        const id = self.view.restore orelse return;
+        self.view.restore = null;
+        self.setFocus(id);
     }
 
     /// Build and arrange the current state, as a paint would.
     pub fn render(self: *Harness) anyerror!void {
-        try self.build.run(&self.view, self.config.options.root, null);
+        try self.run(null);
         try self.view.arrange(self.config.bounds, self.config.theme, self.config.options.measurer);
         if (self.input) |context| try self.record(context);
         self.frames += 1;
@@ -92,10 +117,50 @@ pub const Harness = struct {
 
     /// The node holding keyboard focus after the last render, if any.
     pub fn focused(self: *const Harness) ?*const Node {
-        const context = self.input orelse return null;
-        const id = context.input_state.focused orelse return null;
+        const id = self.focusId() orelse return null;
         for (self.view.nodes()) |*node| if (node.id == id) return node;
         return null;
+    }
+
+    /// Give the matching node keyboard focus, as a press or Tab would,
+    /// then render. Embedded leaves such as text fields can take it too.
+    pub fn focus(self: *Harness, query: Query) anyerror!void {
+        const node = try self.find(query);
+        try self.check(node);
+        self.setFocus(node.id);
+        try self.render();
+    }
+
+    /// Move the test clock forward and render, as a timer wake would.
+    pub fn advance(self: *Harness, nanoseconds: u64) anyerror!void {
+        self.clock += nanoseconds;
+        try self.render();
+    }
+
+    /// Rest the pointer on the matching node, then render.
+    pub fn hover(self: *Harness, query: Query) anyerror!void {
+        const node = try self.find(query);
+        const rect = self.visible(node) orelse return error.Hidden;
+        try self.hoverAt(rect.x + rect.width / 2, rect.y + rect.height / 2);
+    }
+    /// Move the pointer to a point, or away from every control with null,
+    /// as Host does, then render.
+    pub fn hoverAt(self: *Harness, x: f32, y: f32) anyerror!void {
+        _ = self.view.hoverAt(.{ .x = x, .y = y });
+        try self.render();
+    }
+    pub fn leave(self: *Harness) anyerror!void {
+        _ = self.view.hoverAt(null);
+        try self.render();
+    }
+    /// The tooltip text the last render shows, if any.
+    pub fn tooltip(self: *const Harness) ?[]const u8 {
+        if (self.view.tip_index == std.math.maxInt(u32)) return null;
+        return self.view.nodes()[self.view.tip_index].tooltip;
+    }
+    /// The earliest pass time the last render asked to run again at.
+    pub fn deadline(self: *const Harness) ?u64 {
+        return self.view.wake;
     }
 
     /// Replay one key press in the order a window routes it to controls:
@@ -104,6 +169,17 @@ pub const Harness = struct {
     /// and returns whether a control handled the key. Needs `attachInput`.
     pub fn key(self: *Harness, input: z.KeyInput) anyerror!bool {
         const context = self.input orelse return error.NoInput;
+        self.view.focus = self.focusId();
+        switch (self.view.routeKey(input)) {
+            .ignored => {},
+            .handled => {
+                self.restoreFocus();
+                try self.render();
+                return true;
+            },
+            .pass => self.restoreFocus(),
+            .deliver => |event| return self.deliverKey(event),
+        }
         const state = &context.input_state;
         const mods = input.modifiers;
         const plain = !mods.control and !mods.alt and !mods.super;
@@ -181,17 +257,26 @@ pub const Harness = struct {
     }
 
     /// The last painted interactive node under `point`, honouring clips.
+    /// Popups and toasts are painted after the tree, so they are hit first.
     pub fn at(self: *const Harness, x: f32, y: f32) ?*const Node {
         const all = self.view.nodes();
-        var index = all.len;
-        while (index > 0) {
-            index -= 1;
-            const node = &all[index];
-            if (!interactive(node.kind)) continue;
-            const rect = self.visible(node) orelse continue;
-            if (contains(rect, x, y)) return node;
+        inline for (.{ true, false }) |over| {
+            var index = all.len;
+            while (index > 0) {
+                index -= 1;
+                const node = &all[index];
+                if (!interactive(node.kind) or self.floating(node) != over) continue;
+                const rect = self.visible(node) orelse continue;
+                if (contains(rect, x, y)) return node;
+            }
         }
         return null;
+    }
+    fn floating(self: *const Harness, node: *const Node) bool {
+        const all = self.view.nodes();
+        var parent = node.parent;
+        while (parent < all.len) : (parent = all[parent].parent) if (all[parent].floats()) return true;
+        return false;
     }
 
     /// Activate the matching button, link, checkbox, switch, radio, segment,
@@ -200,9 +285,19 @@ pub const Harness = struct {
         try self.activate(try self.find(query));
     }
 
-    /// Activate whatever interactive node lies under the point, then render.
+    /// Press and release at a point, as Host routes it: an open popup or a
+    /// shown tooltip sees the press first, then the interactive node under
+    /// the point is activated. Renders.
     pub fn clickAt(self: *Harness, x: f32, y: f32) anyerror!void {
-        try self.activate(self.at(x, y) orelse return error.NotFound);
+        switch (self.view.pointerDown(.{ .x = x, .y = y })) {
+            .consumed => return self.render(),
+            .changed, .ignored => {},
+        }
+        const node = self.at(x, y) orelse {
+            try self.render();
+            return error.NotFound;
+        };
+        try self.activate(node);
     }
 
     /// Apply a value change to the matching slider, stepper, rating or
@@ -243,10 +338,12 @@ pub const Harness = struct {
 
     fn activate(self: *Harness, node: *const Node) anyerror!void {
         switch (node.kind) {
-            .button, .link, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure => {},
+            .button, .link, .nav_button, .combo_box, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure => {},
             else => return error.NotActivatable,
         }
         try self.check(node);
+        // A press focuses the control it lands on, as in a window.
+        self.setFocus(node.id);
         try self.deliver(.{ .action = node.id });
     }
 
@@ -256,10 +353,11 @@ pub const Harness = struct {
     }
 
     fn deliver(self: *Harness, event: Event) anyerror!void {
-        try self.build.run(&self.view, self.config.options.root, event);
+        try self.run(event);
         // The node came from the last render; a build that no longer emits it
         // means the test is acting on a stale tree.
         if (!self.view.consumed) return error.Stale;
+        self.restoreFocus();
         try self.render();
     }
 
@@ -277,23 +375,30 @@ pub const Harness = struct {
             if (node.style.name.len > 0) try writer.print(" name=\"{s}\"", .{node.style.name});
             switch (node.kind) {
                 .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure => try writer.writeAll(if (node.checked) " on" else " off"),
+                .combo_box, .popup => try writer.writeAll(if (node.checked) " open" else " closed"),
                 .progress => try writer.print(" {d:.2}", .{node.fraction}),
                 .slider, .stepper, .rating, .meter, .split => try writer.print(" {d}", .{node.value}),
                 .scroll => if (node.scroll) |model| try writer.print(" offset={d}", .{round(model.offset.y)}),
                 else => {},
             }
+            if (node.highlighted) try writer.writeAll(" highlighted");
+            if (node.tooltip.len > 0) try writer.print(" tooltip=\"{s}\"", .{node.tooltip});
             if (node.invalid) try writer.writeAll(" invalid");
             if (node.required) try writer.writeAll(" required");
             if (!node.style.enabled) try writer.writeAll(" disabled");
             const b = node.bounds;
             try writer.print(" @{d},{d} {d}x{d}\n", .{ round(b.x), round(b.y), round(b.width), round(b.height) });
         }
+        if (self.tooltip()) |text| {
+            const b = self.view.tip_rect;
+            try writer.print("tooltip \"{s}\" @{d},{d} {d}x{d}\n", .{ text, round(b.x), round(b.y), round(b.width), round(b.height) });
+        }
     }
 };
 
 fn interactive(kind: Kind) bool {
     return switch (kind) {
-        .button, .link, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .slider, .stepper, .rating => true,
+        .button, .link, .nav_button, .combo_box, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .slider, .stepper, .rating => true,
         else => false,
     };
 }
@@ -897,4 +1002,361 @@ test "arrow keys move a list box selection and reveal it" {
     try std.testing.expectEqual(@as(usize, 3), state.chosen);
     try std.testing.expectEqualStrings("Display", h.focused().?.text);
     try std.testing.expectEqual(@as(f32, 20), state.list.offset.y);
+}
+
+const Hints = struct {
+    saved: usize = 0,
+    fn build(self: *Hints, v: *View) anyerror!void {
+        try v.row(.{ .gap = 8 });
+        if (try v.button("Save", .{})) self.saved += 1;
+        try v.tooltip("Save the document");
+        _ = try v.button("Open", .{});
+        try v.end();
+    }
+};
+
+test "tooltips appear after the hover delay and hide on press, Escape or leaving" {
+    var storage: view.Storage(16, 256) = .{};
+    var state: Hints = .{};
+    var h = Harness.init(&state, Hints.build, storage.buffers(), .{ .options = .{ .tooltip_delay = 100 } });
+    try h.render();
+    try std.testing.expectEqual(@as(?u64, null), h.deadline());
+    try h.hover(.{ .text = "Save" });
+    try std.testing.expect(h.tooltip() == null);
+    try std.testing.expectEqual(@as(?u64, 100), h.deadline());
+    try h.advance(99);
+    try std.testing.expect(h.tooltip() == null);
+    try h.advance(1);
+    try std.testing.expectEqualStrings("Save the document", h.tooltip().?);
+    try std.testing.expectEqual(@as(?u64, null), h.deadline());
+    // The tooltip sits below its control and stays inside the window.
+    const save = try h.find(.{ .text = "Save" });
+    try std.testing.expect(h.view.tip_rect.y >= save.bounds.y + save.bounds.height);
+    try std.testing.expect(h.view.tip_rect.x >= 0 and h.view.tip_rect.x + h.view.tip_rect.width <= 640);
+
+    try h.leave();
+    try std.testing.expect(h.tooltip() == null);
+
+    // A press hides it for as long as the same control keeps it.
+    try h.hover(.{ .text = "Save" });
+    try h.clickAt(save.bounds.x + 4, save.bounds.y + 4);
+    try std.testing.expectEqual(@as(usize, 1), state.saved);
+    try h.advance(1000);
+    try std.testing.expect(h.tooltip() == null);
+    try std.testing.expectEqual(@as(?u64, null), h.deadline());
+
+    // Keyboard focus shows it too, and Escape hides it.
+    var keyboard_storage: view.Storage(16, 256) = .{};
+    h = Harness.init(&state, Hints.build, keyboard_storage.buffers(), .{ .options = .{ .tooltip_delay = 100 } });
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    _ = try h.key(.{ .key = .tab });
+    try std.testing.expectEqualStrings("Save", h.focused().?.text);
+    try h.advance(100);
+    try std.testing.expect(h.tooltip() != null);
+    try std.testing.expect(try h.key(.{ .key = .escape }));
+    try std.testing.expect(h.tooltip() == null);
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try h.write(&writer);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "button \"Save\" tooltip=\"Save the document\"") != null);
+
+    var empty: view.Storage(4, 32) = .{};
+    var v = View.init(empty.buffers());
+    v.reset(.{}, null);
+    try std.testing.expectError(error.NotContainer, v.tooltip("Nothing to describe"));
+}
+
+const Notices = struct {
+    queue: view.Toasts(3) = .{},
+    undone: usize = 0,
+    fn build(self: *Notices, v: *View) anyerror!void {
+        if (try v.button("Delete", .{})) _ = try self.queue.show("Deleted 3 files", .{ .action = "Undo", .duration = 1000 });
+        if (try v.toasts(&self.queue, .{})) |_| self.undone += 1;
+    }
+};
+
+test "toasts stack over the bottom edge, expire, act and dismiss" {
+    var storage: view.Storage(32, 512) = .{};
+    var state: Notices = .{};
+    var h = Harness.init(&state, Notices.build, storage.buffers(), .{});
+    try h.render();
+    try std.testing.expectEqual(@as(usize, 0), h.count(.{ .kind = .toast }));
+    try h.click(.{ .text = "Delete" });
+    try std.testing.expectEqual(@as(usize, 1), h.count(.{ .kind = .toast }));
+    const toast = try h.find(.{ .kind = .toast });
+    try std.testing.expectEqualStrings("Deleted 3 files", toast.text);
+    try std.testing.expectApproxEqAbs(@as(f32, 480 - view.toast_margin), toast.bounds.y + toast.bounds.height, 0.01);
+    try std.testing.expectEqual(@as(?u64, 1000), h.deadline());
+    // Shown time counts from the first pass that showed the message.
+    try h.advance(999);
+    try std.testing.expectEqual(@as(usize, 1), h.count(.{ .kind = .toast }));
+    try h.advance(1);
+    try std.testing.expectEqual(@as(usize, 0), h.count(.{ .kind = .toast }));
+    try std.testing.expectEqual(@as(?u64, null), h.deadline());
+
+    try h.click(.{ .text = "Delete" });
+    try h.click(.{ .text = "Undo" });
+    try std.testing.expectEqual(@as(usize, 1), state.undone);
+    try std.testing.expectEqual(@as(usize, 0), state.queue.len);
+    try h.click(.{ .text = "Delete" });
+    try h.click(.{ .name = "Dismiss" });
+    try std.testing.expectEqual(@as(usize, 1), state.undone);
+    try std.testing.expectEqual(@as(usize, 0), h.count(.{ .kind = .toast }));
+
+    // A full queue drops its oldest message.
+    for (0..4) |_| try h.click(.{ .text = "Delete" });
+    try std.testing.expectEqual(@as(usize, 3), state.queue.len);
+    try std.testing.expectEqual(@as(u64, 5), state.queue.items()[0].id);
+    try std.testing.expect(state.queue.dismiss(5));
+    try std.testing.expect(!state.queue.dismiss(5));
+    try std.testing.expectError(error.TextTooLong, state.queue.show("x" ** (view.max_toast_message + 1), .{}));
+    var persistent: view.Toasts(1) = .{};
+    _ = try persistent.show("Offline", .{ .duration = 0 });
+    try std.testing.expectEqual(@as(u64, 0), persistent.items()[0].duration);
+}
+
+const Picker = struct {
+    names: [4][]const u8 = .{ "Serif", "Sans", "Mono", "Display" },
+    font: usize = 1,
+    changes: usize = 0,
+    at_bottom: bool = false,
+    fn build(self: *Picker, v: *View) anyerror!void {
+        if (self.at_bottom) try v.spacer(.{});
+        try v.comboBox(self.names[self.font], .{ .name = "Font", .width = 160 });
+        for (self.names, 0..) |name, i| if (try v.comboOption(usize, &self.font, i, name, .{ .key = i })) {
+            self.changes += 1;
+        };
+        try v.end();
+        try v.tooltip("Typeface");
+        _ = try v.button("Apply", .{});
+    }
+};
+
+test "combo boxes open a list, move a highlight and restore focus when closed" {
+    var storage: view.Storage(32, 256) = .{};
+    var state: Picker = .{};
+    var h = Harness.init(&state, Picker.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    const combo = try h.find(.{ .kind = .combo_box });
+    try std.testing.expectEqualStrings("Sans", combo.text);
+    try std.testing.expectEqualStrings("Typeface", combo.tooltip);
+    try std.testing.expect(!combo.checked);
+    try std.testing.expectError(error.Hidden, h.click(.{ .text = "Mono" }));
+
+    // Activation opens the list below the field over the button; the
+    // chosen option starts highlighted.
+    try h.click(.{ .kind = .combo_box });
+    try std.testing.expect((try h.find(.{ .kind = .combo_box })).checked);
+    const list = try h.find(.{ .kind = .popup });
+    const field = try h.find(.{ .kind = .combo_box });
+    try std.testing.expect(list.checked);
+    try std.testing.expectEqual(field.bounds.y + field.bounds.height + view.popup_gap, list.bounds.y);
+    try std.testing.expect(list.bounds.width >= field.bounds.width);
+    try std.testing.expect((try h.find(.{ .text = "Sans", .kind = .list_item })).highlighted);
+    const apply = try h.find(.{ .text = "Apply" });
+    // The list covers the button below it.
+    try std.testing.expectEqual(Kind.list_item, h.at(apply.bounds.x + 4, apply.bounds.y + 4).?.kind);
+
+    // Arrows move the highlight without choosing; Enter picks it and the
+    // list closes with focus on the combo box.
+    try std.testing.expect(try h.key(.{ .key = .down }));
+    try std.testing.expect((try h.find(.{ .text = "Mono" })).highlighted);
+    try std.testing.expectEqual(@as(usize, 1), state.font);
+    try std.testing.expect(try h.key(.{ .key = .end }));
+    try std.testing.expect(try h.key(.{ .key = .down }));
+    try std.testing.expect((try h.find(.{ .text = "Serif" })).highlighted);
+    try std.testing.expect(try h.key(.{ .key = .enter }));
+    try std.testing.expectEqual(@as(usize, 0), state.font);
+    try std.testing.expectEqual(@as(usize, 1), state.changes);
+    try std.testing.expect(!(try h.find(.{ .kind = .popup })).checked);
+    try std.testing.expectEqual(Kind.combo_box, h.focused().?.kind);
+
+    // Down opens a focused, closed combo box; Escape closes it unchanged.
+    try std.testing.expect(try h.key(.{ .key = .down }));
+    try std.testing.expect((try h.find(.{ .kind = .popup })).checked);
+    try std.testing.expect(try h.key(.{ .key = .escape }));
+    try std.testing.expect(!(try h.find(.{ .kind = .popup })).checked);
+    try std.testing.expectEqual(@as(usize, 0), state.font);
+
+    // Clicking an option picks it and returns focus to the combo box.
+    try h.click(.{ .kind = .combo_box });
+    try h.click(.{ .text = "Display" });
+    try std.testing.expectEqual(@as(usize, 3), state.font);
+    try std.testing.expectEqual(Kind.combo_box, h.focused().?.kind);
+    try std.testing.expectEqualStrings("Display", (try h.find(.{ .kind = .combo_box })).text);
+
+    // A press outside the list closes it and is consumed.
+    try h.click(.{ .kind = .combo_box });
+    try h.clickAt(600, 400);
+    try std.testing.expect(!(try h.find(.{ .kind = .popup })).checked);
+
+    // Near the bottom edge the list opens above the field.
+    state.at_bottom = true;
+    try h.render();
+    try h.click(.{ .kind = .combo_box });
+    const above = try h.find(.{ .kind = .popup });
+    const bottom_field = try h.find(.{ .kind = .combo_box });
+    try std.testing.expectEqual(bottom_field.bounds.y - view.popup_gap, above.bounds.y + above.bounds.height);
+    try std.testing.expect(above.bounds.y >= 0);
+    // Tab closes it and moves on from the combo box.
+    try std.testing.expect(try h.key(.{ .key = .tab }));
+    try std.testing.expect(!(try h.find(.{ .kind = .popup })).checked);
+    try std.testing.expectEqualStrings("Apply", h.focused().?.text);
+
+    var loose: view.Storage(4, 32) = .{};
+    var v = View.init(loose.buffers());
+    v.reset(.{}, null);
+    var chosen: u8 = 0;
+    try std.testing.expectError(error.NotContainer, v.comboOption(u8, &chosen, 1, "x", .{}));
+    try std.testing.expectError(error.NotContainer, v.suggestions(.{}));
+}
+
+const Cities = struct {
+    all: [5][]const u8 = .{ "Berlin", "Bern", "Bergen", "Boston", "Lima" },
+    query: []const u8 = "Ber",
+    picked: ?[]const u8 = null,
+    fn build(self: *Cities, v: *View) anyerror!void {
+        // A focusable control stands in for the text field an application
+        // would embed.
+        _ = try v.button(self.query, .{ .key = 1 });
+        try v.suggestions(.{ .name = "Cities" });
+        for (self.all) |city| if (std.mem.startsWith(u8, city, self.query)) {
+            if (try v.suggestion(city, .{ .key = view.key(city) })) {
+                self.picked = city;
+                self.query = city;
+            }
+        };
+        try v.end();
+        _ = try v.button("Go", .{});
+    }
+};
+
+test "suggestions follow focus, highlight without moving it and stay closed after a pick" {
+    var storage: view.Storage(32, 256) = .{};
+    var state: Cities = .{};
+    var h = Harness.init(&state, Cities.build, storage.buffers(), .{});
+    try h.render();
+    try std.testing.expect(!(try h.find(.{ .kind = .popup })).checked);
+    try h.focus(.{ .key = 1 });
+    const list = try h.find(.{ .kind = .popup });
+    try std.testing.expect(list.checked);
+    try std.testing.expectEqual(@as(usize, 3), h.count(.{ .kind = .list_item }));
+    try std.testing.expect(h.visible(try h.find(.{ .text = "Bergen" })) != null);
+
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    const input_id = (try h.find(.{ .key = 1 })).id;
+    try h.attachInput(&context);
+    context.input_state.setFocused(input_id);
+    try h.render();
+    // Down highlights the first suggestion; focus stays on the input.
+    try std.testing.expect(try h.key(.{ .key = .down }));
+    try std.testing.expect((try h.find(.{ .text = "Berlin" })).highlighted);
+    try std.testing.expect((try h.find(.{ .text = "Berlin" })).checked);
+    try std.testing.expectEqual(input_id, h.focused().?.id);
+    try std.testing.expect(try h.key(.{ .key = .up }));
+    try std.testing.expect((try h.find(.{ .text = "Bergen" })).highlighted);
+    try std.testing.expect(try h.key(.{ .key = .enter }));
+    try std.testing.expectEqualStrings("Bergen", state.picked.?);
+    // The pick closes the list over the labels it produced.
+    try std.testing.expect(!(try h.find(.{ .kind = .popup })).checked);
+    try h.render();
+    try std.testing.expect(!(try h.find(.{ .kind = .popup })).checked);
+    try std.testing.expectEqual(input_id, h.focused().?.id);
+
+    // Typing changes the labels and reopens it; Escape closes it until then.
+    state.query = "B";
+    try h.render();
+    try std.testing.expect((try h.find(.{ .kind = .popup })).checked);
+    try std.testing.expect(try h.key(.{ .key = .escape }));
+    try std.testing.expect(!(try h.find(.{ .kind = .popup })).checked);
+    // Down reopens it.
+    try std.testing.expect(try h.key(.{ .key = .down }));
+    try std.testing.expect((try h.find(.{ .kind = .popup })).checked);
+    // A pointer pick returns focus to the input.
+    try h.click(.{ .text = "Boston" });
+    try std.testing.expectEqualStrings("Boston", state.query);
+    try std.testing.expectEqual(input_id, h.focused().?.id);
+    // Focus elsewhere closes it.
+    state.query = "Be";
+    context.input_state.setFocused((try h.find(.{ .text = "Go" })).id);
+    try h.render();
+    try std.testing.expect(!(try h.find(.{ .kind = .popup })).checked);
+}
+
+const Profile = struct {
+    page: usize = 1,
+    fn build(self: *Profile, v: *View) anyerror!void {
+        try v.row(.{ .gap = 8, .alignment = .center });
+        if (try v.navButton(.back, .{ .enabled = self.page > 0 })) self.page -= 1;
+        if (try v.navButton(.forward, .{ .name = "Next page" })) self.page += 1;
+        try v.avatar("Ada Lovelace", null, .{});
+        try v.avatar("Grace Hopper", null, .{ .width = 48, .height = 48, .background = 0x2e7d4f });
+        try v.end();
+        try v.search(.{ .name = "Find" });
+        try v.text("query", .{ .grow = 1 });
+        _ = try v.button("Clear", .{});
+        try v.end();
+    }
+};
+
+test "navigation buttons step pages, avatars and search regions describe themselves" {
+    var storage: view.Storage(16, 256) = .{};
+    var state: Profile = .{};
+    var h = Harness.init(&state, Profile.build, storage.buffers(), .{});
+    try h.render();
+    try h.click(.{ .text = "Back" });
+    try std.testing.expectEqual(@as(usize, 0), state.page);
+    try std.testing.expectError(error.Disabled, h.click(.{ .text = "Back" }));
+    try h.click(.{ .text = "Next page" });
+    try std.testing.expectEqual(@as(usize, 1), state.page);
+    const back = try h.find(.{ .text = "Back" });
+    try std.testing.expectEqual(back.bounds.width, back.bounds.height);
+    const ada = try h.find(.{ .text = "Ada Lovelace" });
+    try std.testing.expectEqual(@as(f32, 32), ada.bounds.width);
+    try std.testing.expectEqual(@as(f32, 48), (try h.find(.{ .text = "Grace Hopper" })).bounds.height);
+    try std.testing.expectError(error.NotActivatable, h.click(.{ .text = "Ada Lovelace" }));
+    const region = try h.find(.{ .kind = .search });
+    try std.testing.expectEqual(region.id, (try h.find(.{ .text = "Clear" })).semantic_parent);
+    try std.testing.expectEqual(@as(f32, 8), (try h.find(.{ .text = "Clear" })).bounds.x - ((try h.find(.{ .text = "query" })).bounds.x + (try h.find(.{ .text = "query" })).bounds.width));
+}
+
+const LongPicker = struct {
+    size: usize = 0,
+    list: view.ScrollModel = .{},
+    fn build(self: *LongPicker, v: *View) anyerror!void {
+        var labels: [12][8]u8 = undefined;
+        try v.comboBox(try std.fmt.bufPrint(&labels[self.size], "{d} pt", .{8 + self.size}), .{ .name = "Size" });
+        try v.scroll(&self.list, .{ .height = 120, .self_align = .stretch });
+        for (&labels, 0..) |*label, i| _ = try v.comboOption(usize, &self.size, i, try std.fmt.bufPrint(label, "{d} pt", .{8 + i}), .{ .key = i + 1 });
+        try v.end();
+        try v.end();
+    }
+};
+
+test "a scroll inside a combo box list keeps the highlight in view" {
+    var storage: view.Storage(32, 512) = .{};
+    var state: LongPicker = .{};
+    var h = Harness.init(&state, LongPicker.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    try h.click(.{ .kind = .combo_box });
+    try std.testing.expect((try h.find(.{ .kind = .popup })).checked);
+    // A press in the window padding, outside the list, closes it.
+    try h.clickAt(1, 1);
+    try std.testing.expect(!(try h.find(.{ .kind = .popup })).checked);
+    try h.click(.{ .kind = .combo_box });
+    try std.testing.expect(h.visible(try h.find(.{ .key = 12 })) == null);
+    try std.testing.expect(try h.key(.{ .key = .end }));
+    try std.testing.expect((try h.find(.{ .key = 12 })).highlighted);
+    try std.testing.expect(h.visible(try h.find(.{ .key = 12 })) != null);
+    try std.testing.expect(state.list.offset.y > 0);
+    try std.testing.expect(try h.key(.{ .key = .enter }));
+    try std.testing.expectEqual(@as(usize, 11), state.size);
+    try std.testing.expectEqualStrings("19 pt", (try h.find(.{ .kind = .combo_box })).text);
 }

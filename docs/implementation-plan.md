@@ -44,10 +44,10 @@
 | U02 | 部分完成（Windows/Linux） | slider、双端范围、步进控件、焦点导航、快捷键与多击 | U02.1、U02.2嵌套scope/显式Escape续交、U02.3原生时序入口与显式注册主按钮多击、普通及committed Space下单文档词/逻辑行选择已分项验；更广未消费键续交、折叠/投影视图的编辑器选择及其他控件多击继续；直接键入数字归 T02；依赖 U01 |
 | U03 | 已完成（纯布局合同，Windows/Linux） | grid 与可组合约束布局 | U03.1 grid/span/对齐/自动放置/隐式轨道及U03.2弹性百分比上限、内容/显式minimum优先级、数值基线与未知父尺寸测量已验；失败输出事务、硬界与overflow明确；分隔拖动归U06 |
 | U04 | 部分完成（Windows/Linux） | 虚拟 list、table、tree/outline、grid view | U04.1 可变行高列表/可见回放/稳定 ID 锚点已实现；U04.2 声明式视图的单选列表框（非虚拟）已实现；完整列表语义及 table/tree/grid view 继续待实现；基础依赖 U02.1/T01 |
-| U05 | 待实现 | combobox、autocomplete、search、token field | popup 所有权、输入法、筛选取消、键盘与焦点恢复；依赖 U02.2/T02/W02 |
-| U06 | 部分完成（U06.1 声明式视图的 tabs/toolbar/比例 split） | tabs、sidebar、toolbar、split、tooltip、toast | 生命周期、遮挡/命中、延迟唤醒撤销与可访问性；split 的 DIP 偏好、RTL、折叠与 sidebar/tooltip/toast 继续；基础依赖 U02.1/G02，popup scope另依赖U02.2 |
+| U05 | 部分完成（U05.1 声明式视图的只读组合框、建议列表与搜索区域） | combobox、autocomplete、search、token field | popup 所有权、输入法、筛选取消、键盘与焦点恢复；可编辑组合框、输入法组合期间的建议处理与 token field 继续；依赖 U02.2/T02/W02 |
+| U06 | 部分完成（U06.1 声明式视图的 tabs/toolbar/比例 split；U06.2 tooltip、toast 与一次性唤醒） | tabs、sidebar、toolbar、split、tooltip、toast | 生命周期、遮挡/命中、延迟唤醒撤销与可访问性；split 的 DIP 偏好、RTL、折叠与 sidebar、toast 动画继续；基础依赖 U02.1/G02，popup scope另依赖U02.2 |
 | U07 | 待实现 | calendar、date/time、color picker | locale/范围/键盘/可访问性；依赖 L01/U05 |
-| U08 | 部分完成（U08.1 link、badge、segmented、disclosure；U08.2 meter、rating、breadcrumbs、accordion） | badge、avatar、link、meter、rating、segmented、accordion、breadcrumbs 与导航按钮 | 稳定身份、分组/展开/链接动作、键盘和语义；不把静态文字/矩形算成完整控件；avatar 与导航按钮继续；基础依赖 U02.1/G01 |
+| U08 | 已完成（U08.1 link、badge、segmented、disclosure；U08.2 meter、rating、breadcrumbs、accordion；U08.3 avatar 与导航按钮，Windows UIA） | badge、avatar、link、meter、rating、segmented、accordion、breadcrumbs 与导航按钮 | 稳定身份、分组/展开/链接动作、键盘和语义；不把静态文字/矩形算成完整控件；Linux AT-SPI 不在本行范围；基础依赖 U02.1/G01 |
 | U09 | 待实现 | chart 的数值/分类/时间尺度、axes、marks、stacking 与 selection | 极值/空数据/大数据、按需绘制、布局与键盘/辅助说明；依赖 G01/T01/L01 |
 | U10 | 部分完成（U10.1 声明式视图的 field/fieldset、说明与验证状态、禁用继承） | form、field/fieldset、验证提示与自定义控件契约 | 标签关联、禁用继承、错误语义、测量/绘制/输入/快照事务；form 提交与焦点跳到首个错误、自定义控件契约继续；依赖 U02.1/U03.2/T02/T06 |
 | G01 | 部分完成 | 圆角、描边、渐变、阴影、透明度、图片与 SVG/path | RGBA/圆角/内描边、图片驻留/同尺寸更新、严格渐变、圆角阴影/path、有界分组和独立软件/GPU离屏已验收；完整 SVG 继续实施；三后端同一语义与明确资源上限 |
@@ -1643,6 +1643,13 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - 新增语义角色 `meter` 与 `navigation`，追加在既有编号之后。Frame 提供 `meter`、`rating`、`navigation` 与 `group`。度量条只读，报告实际值与上下限，值在首选区间外时用主题新增的 `caution` 色。评分是步长为 1 的范围控件，轨道从第一个标记前半格开始，按到哪个标记就取哪个分数。Windows UIA 映射为 ProgressBar（LocalizedControlType 为 "meter"）、Slider，以及带导航地标的 Group。Linux 不声明 AT-SPI。
 - `ziggurat_view` 提供 `breadcrumbs`、`meter`、`rating`、`accordion`/`section`。面包屑在间隙中画分隔符；手风琴最多打开一节，再次激活已打开的节会关闭它。面包屑和手风琴里的控件以容器为可访问父节点。
 - 单元测试覆盖区间与参数校验、评分标记命中、语义角色与父节点，以及无窗口的分节切换和评分调整；Linux 隐藏窗口 smoke 在 1x/2x 下实测评分的原生点击。Windows smoke 用真实 UIAutomationClient 检查导航地标、度量条只读 RangeValue、评分 SetValue 与分节 ExpandCollapse。
+
+### U05.1/U06.2/U08.3 组合框、建议列表、提示、通知、导航按钮与头像
+
+- 新增语义角色 `combo_box`、`tooltip`、`status`、`search`、`image`，追加在既有编号之后。Frame 提供 `comboBox`、`popupList`、`navButton`、`avatar`、`tooltip`、`status` 与 `search`。Windows UIA 映射为 ComboBox / ExpandCollapse / 只读 Value、ToolTip、Polite 实时区域的 Group（出现时引发 LiveRegionChanged）、带搜索地标的 Group 与 Image；Value 只在文本框上可写。Linux 不声明 AT-SPI。
+- `ziggurat_view` 的 View 持有唯一一个打开的列表：组合框由激活或方向键打开，建议列表跟随锚点焦点；高亮是虚拟的，焦点留在锚点上，选中或 Escape 后焦点回到锚点。建议列表在选中或 Escape 后保持关闭，直到标签变化。列表外的按下关闭列表，组合框列表还会吞掉这次按下。列表、通知与提示在主树之后按顺序绘制并优先命中，不受祖先裁剪。
+- 每一遍带有时间，构建通过 `wakeAt` 请求下一遍。Host 只在 paint 之后投递任务，把最早期限交给调度器；`ziggurat_view_timer` 用 `ziggurat_wake.OneShot` 实现调度，期限变化时取消旧装定，没有期限时不装定，不引入持续重绘计时器。
+- 无窗口测试覆盖提示的延迟、按下/Escape/离开隐藏与焦点触发，通知的到期、动作、关闭与满队列淘汰，组合框的打开、方向键、Enter/Escape/Tab/外部按下、选项点击、靠近底边时向上翻转与列表内滚动，建议列表的焦点打开、高亮、选中后关闭与重新打开，导航按钮、头像与搜索区域，以及浮层绘制顺序和 Frame 语义角色。Linux 隐藏窗口 smoke 在 1x/2x 下实测组合框列表的原生点击选择、导航按钮点击，以及通知经真实一次性计时器到期后窗口回到无期限的空闲状态。Windows smoke 用真实 UIAutomationClient 检查组合框 Value/ExpandCollapse、搜索地标、导航按钮 Invoke、Image、提示作为 HelpText 与通知的 LiveSetting。实时区域事件只在有客户端监听时引发，读屏实际播报、视觉质量与动画未验收。见[声明式视图](view.md)。
 
 ### S06.1 上下文菜单、异步消息框与菜单快捷键
 

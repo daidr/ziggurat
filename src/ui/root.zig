@@ -3469,6 +3469,39 @@ pub const Frame = struct {
         if (id == accessibility.root_id) return error.ReservedControlId;
         try self.semantic(.{ .id = id, .parent = parent, .role = .group, .name = name, .bounds = bounds });
     }
+    /// A field showing the current choice `text` that opens a list of
+    /// options; `expanded` is whether that list is open. Activation should
+    /// open or close it. Named by `options.name`.
+    pub fn comboBox(self: *Frame, id: u64, bounds: Rect, text: []const u8, expanded: bool, options: widgets.Options) !void {
+        try widgets.emit(self, .combo_box, id, bounds, text, expanded, 0, options);
+    }
+    /// The list a combo box or text input opens, drawn over other content;
+    /// its options name this id as their `radio_group`.
+    pub fn popupList(self: *Frame, id: u64, bounds: Rect, name: []const u8, parent: u64) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.semantic(.{ .id = id, .parent = parent, .role = .list_box, .name = name, .bounds = bounds });
+    }
+    /// A button with a chevron along `direction`, such as Back or Forward.
+    pub fn navButton(self: *Frame, id: u64, bounds: Rect, direction: widgets.NavDirection, name: []const u8, options: widgets.Options) !void {
+        try widgets.emitNavButton(self, id, bounds, direction, name, options);
+    }
+    pub fn avatar(self: *Frame, id: u64, bounds: Rect, name: []const u8, options: widgets.AvatarOptions) !void {
+        try widgets.emitAvatar(self, id, bounds, name, options);
+    }
+    pub fn tooltip(self: *Frame, id: u64, bounds: Rect, text: []const u8) !void {
+        try widgets.emitTooltip(self, id, bounds, text);
+    }
+    /// A transient status message, such as a toast; its contents follow.
+    /// Announced politely to accessibility clients when it first appears.
+    pub fn status(self: *Frame, id: u64, bounds: Rect, name: []const u8, parent: u64) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.semantic(.{ .id = id, .parent = parent, .role = .status, .name = name, .bounds = bounds });
+    }
+    /// A named search region holding a query input and its controls.
+    pub fn search(self: *Frame, id: u64, bounds: Rect, name: []const u8, parent: u64) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.semantic(.{ .id = id, .parent = parent, .role = .search, .name = name, .bounds = bounds });
+    }
     pub fn meter(self: *Frame, id: u64, bounds: Rect, value: f64, spec: Range, options: widgets.MeterOptions) !void {
         try widgets.emitMeter(self, id, bounds, value, spec, options);
     }
@@ -3985,6 +4018,48 @@ test "meters report values, ratings snap to marks and regions nest" {
         try std.testing.expectEqual(accessibility.Role.slider, nodes[5].role);
         try std.testing.expectEqual(@as(?u64, 30), nodes[5].parent);
         try std.testing.expectEqual(@as(f64, 5), nodes[5].range_maximum);
+    }
+}
+
+test "combo boxes, tooltips, status, search and avatars publish their roles" {
+    const Dummy = struct {
+        fn draw(_: *anyopaque, _: *Frame) void {}
+        fn action(_: *anyopaque, _: u64) void {}
+    };
+    var dummy: u8 = 0;
+    var context = Context.init(&dummy, Dummy.draw, Dummy.action);
+    if (build_options.accessibility) {
+        context.attached_semantics_enabled = true;
+        try context.semantic_tree.reset("Controls", .{ .x = 0, .y = 0, .width = 300, .height = 300 });
+    }
+    var frame: Frame = .{ .context = &context, .size = .{ .width = 300, .height = 300, .scale = 1 } };
+    try frame.search(10, .{ .x = 0, .y = 0, .width = 300, .height = 40 }, "Find", accessibility.root_id);
+    try frame.comboBox(11, .{ .x = 0, .y = 0, .width = 160, .height = 32 }, "Sans", true, .{ .name = "Font", .semantic_parent = 10 });
+    try frame.popupList(12, .{ .x = 0, .y = 36, .width = 160, .height = 64 }, "Font", 11);
+    try frame.listItem(13, .{ .x = 0, .y = 36, .width = 160, .height = 32 }, "Serif", false, .{ .semantic_parent = 12, .radio_group = 12 });
+    try frame.navButton(20, .{ .x = 0, .y = 120, .width = 32, .height = 32 }, .back, "Back", .{});
+    try frame.avatar(21, .{ .x = 40, .y = 120, .width = 32, .height = 32 }, "Ada Lovelace", .{});
+    try frame.status(22, .{ .x = 0, .y = 200, .width = 200, .height = 40 }, "Saved", accessibility.root_id);
+    try frame.tooltip(23, .{ .x = 0, .y = 160, .width = 100, .height = 24 }, "Go back");
+    // The combo box and navigation button take presses like buttons.
+    context.input_state.down(.{ .x = 10, .y = 10 });
+    try std.testing.expectEqual(@as(?u64, 11), context.input_state.active);
+    context.input_state.cancelPress();
+    context.input_state.down(.{ .x = 10, .y = 130 });
+    try std.testing.expectEqual(@as(?u64, 20), context.input_state.active);
+    context.input_state.cancelPress();
+    if (build_options.accessibility) {
+        const nodes = context.semantic_tree.entries[0..context.semantic_tree.len];
+        const expected = [_]accessibility.Role{ .search, .combo_box, .list_box, .list_item, .button, .image, .status, .tooltip };
+        for (expected, nodes[1..][0..expected.len]) |role, node| try std.testing.expectEqual(role, node.role);
+        const text = context.semantic_tree.storage[0..];
+        try std.testing.expectEqualStrings("Font", text[nodes[2].name_start..][0..nodes[2].name_len]);
+        try std.testing.expectEqualStrings("Sans", text[nodes[2].value_start..][0..nodes[2].value_len]);
+        try std.testing.expect(nodes[2].checked and nodes[2].read_only);
+        try std.testing.expectEqual(@as(?u64, 10), nodes[2].parent);
+        try std.testing.expectEqual(@as(?u64, 11), nodes[3].parent);
+        try std.testing.expectEqualStrings("Ada Lovelace", text[nodes[6].name_start..][0..nodes[6].name_len]);
+        try std.testing.expectEqualStrings("Go back", text[nodes[8].name_start..][0..nodes[8].name_len]);
     }
 }
 

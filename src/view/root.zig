@@ -20,10 +20,26 @@ pub const Point = layout.Point;
 pub const ScrollModel = ui.scroll.ScrollModel;
 pub const Track = ui.grid.Track;
 pub const MeterBands = ui.widgets.MeterBands;
+pub const NavDirection = ui.widgets.NavDirection;
+pub const ImageView = ui.drawing.ImageView;
 
 pub const Error = error{ InvalidField, TooManyNodes, TextFull, NestingTooDeep, UnbalancedContainer, NotContainer, Busy, InvalidRange, InvalidValue, InvalidText, InvalidSplit } || layout.Error;
 
 pub const max_depth = 32;
+/// Options of the open popup that keyboard navigation can reach.
+pub const max_popup_items = 64;
+/// Controls with a tooltip that hover can find in one frame.
+pub const max_tooltips = 32;
+/// Combo boxes and suggestion inputs that keys can open in one frame.
+pub const max_popup_anchors = 16;
+/// Tallest a popup list grows before it clips, in DIP.
+pub const max_popup_height: f32 = 280;
+/// Space between a popup or tooltip and its anchor, in DIP.
+pub const popup_gap: f32 = 4;
+/// Distance of the toast stack from the window's bottom edge, in DIP.
+pub const toast_margin: f32 = 16;
+/// Popups and toast stacks painted over the tree in one frame.
+const max_floating = 4;
 /// Scroll containers Host can route wheel input to in one frame.
 pub const max_scroll_regions = 16;
 /// Thickness of a split's draggable divider, in DIP.
@@ -90,6 +106,71 @@ pub const Annotation = struct {
     required: bool = false,
 };
 
+pub const ToastOptions = struct {
+    /// Label of an action button, such as "Undo"; empty for none.
+    action: []const u8 = "",
+    /// How long the message stays, counted from the first pass that shows
+    /// it; 0 keeps it until dismissed.
+    duration: u64 = 4 * std.time.ns_per_s,
+};
+/// Longest toast message and action label, in bytes.
+pub const max_toast_message = 256;
+pub const max_toast_action = 32;
+
+/// Fixed queue of transient messages, owned by the application at a stable
+/// address and shown with `View.toasts`. It copies the text it is given.
+pub fn Toasts(comptime capacity: usize) type {
+    if (capacity == 0) @compileError("a toast queue needs room for one message");
+    return struct {
+        const Self = @This();
+        pub const Entry = struct {
+            id: u64,
+            message: [max_toast_message]u8 = undefined,
+            message_len: usize = 0,
+            action: [max_toast_action]u8 = undefined,
+            action_len: usize = 0,
+            duration: u64,
+            /// The pass time it was first shown at, or null before that.
+            shown: ?u64 = null,
+        };
+        entries: [capacity]Entry = undefined,
+        len: usize = 0,
+        next_id: u64 = 1,
+
+        /// Queue a message and return its id; when the queue is full, the
+        /// oldest message leaves first.
+        pub fn show(self: *Self, message: []const u8, options: ToastOptions) error{ InvalidText, TextTooLong }!u64 {
+            if (!std.unicode.utf8ValidateSlice(message) or !std.unicode.utf8ValidateSlice(options.action)) return error.InvalidText;
+            if (message.len > max_toast_message or options.action.len > max_toast_action) return error.TextTooLong;
+            if (self.len == capacity) self.removeAt(0);
+            const id = self.next_id;
+            self.next_id += 1;
+            const entry = &self.entries[self.len];
+            entry.* = .{ .id = id, .message_len = message.len, .action_len = options.action.len, .duration = options.duration };
+            @memcpy(entry.message[0..message.len], message);
+            @memcpy(entry.action[0..options.action.len], options.action);
+            self.len += 1;
+            return id;
+        }
+        /// Remove the message with `id`; false when it is already gone.
+        pub fn dismiss(self: *Self, id: u64) bool {
+            for (self.entries[0..self.len], 0..) |entry, index| if (entry.id == id) {
+                self.removeAt(index);
+                return true;
+            };
+            return false;
+        }
+        pub fn removeAt(self: *Self, index: usize) void {
+            std.debug.assert(index < self.len);
+            std.mem.copyForwards(Entry, self.entries[index .. self.len - 1], self.entries[index + 1 .. self.len]);
+            self.len -= 1;
+        }
+        pub fn items(self: *const Self) []const Entry {
+            return self.entries[0..self.len];
+        }
+    };
+}
+
 /// Derive a stable key from text, for example a list item's identifier.
 pub fn key(text: []const u8) u64 {
     return std.hash.Wyhash.hash(0x6b65_79, text);
@@ -111,7 +192,7 @@ pub const Measurer = struct {
     }
 };
 
-pub const Kind = enum { column, row, radio_group, segmented, tab_list, list_box, toolbar, breadcrumbs, accordion, field, fieldset, split, scroll, grid, text, note, badge, spacer, button, link, checkbox, radio, segment, tab, list_item, disclosure, toggle_switch, progress, meter, slider, stepper, rating, embed };
+pub const Kind = enum { column, row, radio_group, segmented, tab_list, list_box, toolbar, breadcrumbs, accordion, field, fieldset, split, scroll, grid, search, popup, toasts, toast, text, note, badge, spacer, button, link, nav_button, combo_box, checkbox, radio, segment, tab, list_item, disclosure, toggle_switch, progress, meter, slider, stepper, rating, avatar, embed };
 
 /// A leaf that measures, places and paints itself, for content the view
 /// layer does not model, such as an editable text field. The context must
@@ -159,6 +240,16 @@ pub const Node = struct {
     /// Column tracks of a grid, borrowed until the pass is arranged.
     tracks: []const Track = &.{},
     embed: ?Embed = null,
+    /// Hint shown on hover or focus, and announced as the description.
+    tooltip: []const u8 = "",
+    /// The node a popup opens from, its previous sibling.
+    anchor: u32 = none,
+    /// A popup's option labels, to tell when suggestions change.
+    signature: u64 = 0,
+    /// The popup option keyboard navigation has reached.
+    highlighted: bool = false,
+    direction: NavDirection = .back,
+    image: ?ImageView = null,
     parent: u32 = none,
     first_child: u32 = none,
     last_child: u32 = none,
@@ -173,13 +264,17 @@ pub const Node = struct {
 
     pub fn isContainer(self: *const Node) bool {
         return switch (self.kind) {
-            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid => true,
+            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .toasts, .toast => true,
             else => false,
         };
     }
     /// True when the node clips its descendants to its bounds.
     pub fn clips(self: *const Node) bool {
-        return self.kind == .scroll or (self.style.clip and self.isContainer());
+        return self.kind == .scroll or self.kind == .popup or (self.style.clip and self.isContainer());
+    }
+    /// True for a popup or toast stack, placed over the flow instead of in it.
+    pub fn floats(self: *const Node) bool {
+        return self.kind == .popup or self.kind == .toasts;
     }
 };
 
@@ -212,6 +307,66 @@ pub const Event = union(enum) {
     scroll: struct { id: u64, delta: Point },
 };
 
+/// Which popup is open and what keyboard navigation reached in it. It
+/// belongs to the View and outlives passes; at most one popup is open.
+pub const PopupState = struct {
+    /// Combo box whose list the user opened.
+    open: ?u64 = null,
+    /// Option drawn as the keyboard choice; Enter picks it.
+    highlight: ?u64 = null,
+    /// Input whose suggestions were closed by Escape or a pick. They stay
+    /// closed until their labels change or focus leaves them.
+    dismissed: ?u64 = null,
+    dismissed_signature: u64 = 0,
+    /// Input whose suggestions were just picked; the next pass records the
+    /// labels the pick produced, so they do not reopen the list.
+    settle: ?u64 = null,
+};
+
+/// Hover and timing of the tooltip, kept by the View across passes.
+pub const TooltipState = struct {
+    /// Control under the pointer that has a tooltip.
+    hover: ?u64 = null,
+    /// Control whose tooltip is pending or shown, from hover or focus.
+    target: ?u64 = null,
+    /// When `target` was reached, in the View's clock.
+    since: u64 = 0,
+    /// Hidden by a press or Escape until the target changes.
+    dismissed: bool = false,
+};
+
+/// Geometry of the last arranged pass that input routing needs between
+/// passes, when node bounds are no longer current.
+pub const Overlay = struct {
+    pub const Popup = struct { id: u64, anchor: u64, combo: bool, rect: Rect, anchor_rect: Rect, signature: u64 };
+    pub const Region = struct { id: u64, rect: Rect };
+    pub const Anchor = struct { id: u64, combo: bool };
+    popup: ?Popup = null,
+    /// Enabled options of the open popup, in build order.
+    items: [max_popup_items]Region = undefined,
+    item_count: usize = 0,
+    /// Visible controls with a tooltip, in paint order.
+    tips: [max_tooltips]Region = undefined,
+    tip_count: usize = 0,
+    /// Enabled combo boxes and suggestion inputs.
+    anchors: [max_popup_anchors]Anchor = undefined,
+    anchor_count: usize = 0,
+};
+
+/// What `View.routeKey` did with a key press.
+pub const KeyRoute = union(enum) {
+    /// Not a popup or tooltip key; route it normally.
+    ignored,
+    /// Consumed; the popup or tooltip changed.
+    handled,
+    /// The popup closed; route the key normally too, such as Tab.
+    pass,
+    /// Run a pass delivering this event, such as picking the highlight.
+    deliver: Event,
+};
+/// What `View.pointerDown` did with a press.
+pub const PointerRoute = enum { ignored, changed, consumed };
+
 /// The description of one tree. Build passes run either to deliver a single
 /// input event to the widget that owns its id, or to produce a frame.
 pub const View = struct {
@@ -225,6 +380,26 @@ pub const View = struct {
     /// A list item selected by input, revealed by the next `arrange`. It
     /// outlives `reset` so an event pass can hand it to the render pass.
     reveal: ?u64 = null,
+    /// Monotonic time of this pass in nanoseconds, set by the host before
+    /// each pass. Only differences are meaningful.
+    now: u64 = 0,
+    /// The earliest time a build asked to run again, or null; see `wakeAt`.
+    wake: ?u64 = null,
+    /// Keyboard focus at the start of this pass, set by the host.
+    focus: ?u64 = null,
+    /// A control the host should focus after this pass, such as a combo box
+    /// whose list just closed.
+    restore: ?u64 = null,
+    /// Hover or focus time before a tooltip appears, in nanoseconds.
+    tooltip_delay: u64 = 500 * std.time.ns_per_ms,
+    popup: PopupState = .{},
+    tip: TooltipState = .{},
+    overlay: Overlay = .{},
+    /// Node whose tooltip this pass shows, and where after arrange.
+    tip_index: u32 = none,
+    tip_rect: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    /// A suggestion was picked in this pass.
+    picked: bool = false,
 
     pub fn init(buffers: Buffers) View {
         return .{ .buffers = buffers };
@@ -238,6 +413,10 @@ pub const View = struct {
         self.stack[0] = 0;
         self.event = event;
         self.consumed = false;
+        self.wake = null;
+        self.restore = null;
+        self.picked = false;
+        self.tip_index = none;
         self.buffers.nodes[0] = .{ .kind = .column, .id = root_seed, .style = root_style, .end = 1 };
     }
 
@@ -253,10 +432,15 @@ pub const View = struct {
     pub fn visible(self: *const View, node: *const Node) ?Rect {
         const all = self.nodes();
         var rect = node.bounds;
-        var parent = node.parent;
+        if (node.kind == .popup and !node.checked) return null;
+        // Popups and toasts are drawn over the flow, so the clips of their
+        // own ancestors do not apply to them.
+        var parent = if (node.floats()) none else node.parent;
         while (parent < all.len) : (parent = all[parent].parent) {
             const ancestor = &all[parent];
+            if (ancestor.kind == .popup and !ancestor.checked) return null;
             if (ancestor.clips()) rect = intersect(rect, ancestor.bounds) orelse return null;
+            if (ancestor.floats()) break;
         }
         if (!(rect.width > 0 and rect.height > 0)) return null;
         return rect;
@@ -285,7 +469,7 @@ pub const View = struct {
         var effective = style;
         effective.enabled = style.enabled and parent.style.enabled;
         self.buffers.nodes[index] = .{ .kind = kind, .id = self.identity(parent, kind, style), .style = effective, .parent = parent_index, .end = index + 1, .semantic_parent = switch (parent.kind) {
-            .toolbar, .breadcrumbs, .accordion, .fieldset => parent.id,
+            .toolbar, .breadcrumbs, .accordion, .fieldset, .search, .toast => parent.id,
             else => parent.semantic_parent,
         }, .field = if (parent.kind == .field) parent_index else parent.field };
         if (parent.last_child == none) parent.first_child = index else self.buffers.nodes[parent.last_child].next_sibling = index;
@@ -322,6 +506,10 @@ pub const View = struct {
     }
     fn open(self: *View, kind: Kind, style: Style) Error!*Node {
         if (self.depth > max_depth) return error.NestingTooDeep;
+        // A popup or toast stack cannot open inside another one.
+        if (kind == .popup or kind == .toasts) for (self.stack[1..self.depth]) |index| {
+            if (self.buffers.nodes[index].floats()) return error.NotContainer;
+        };
         const node = try self.append(kind, style);
         self.stack[self.depth] = @intCast(node - self.buffers.nodes.ptr);
         self.depth += 1;
@@ -339,6 +527,7 @@ pub const View = struct {
         const index = self.stack[self.depth];
         const node = &self.buffers.nodes[index];
         if (node.kind == .split and node.child_count != 2) return error.InvalidSplit;
+        if (node.kind == .popup) self.settlePopup(index);
         if (node.kind == .field) {
             // Only the label precedes the content.
             if (node.child_count < 2) return error.InvalidField;
@@ -641,6 +830,407 @@ pub const View = struct {
         return self.ranged(.stepper, value, range, style);
     }
 
+    /// The time of this pass in nanoseconds, from the host's monotonic clock.
+    pub fn time(self: *const View) u64 {
+        return self.now;
+    }
+    /// Ask for another pass at `deadline`, in the same clock as `time`. The
+    /// earliest request of a pass wins; a host with a timer repaints then.
+    pub fn wakeAt(self: *View, deadline: u64) void {
+        self.wake = if (self.wake) |current| @min(current, deadline) else deadline;
+    }
+
+    /// Give the node just added a tooltip: `text` appears near it after the
+    /// pointer rests on it or it holds focus for `Options.tooltip_delay`,
+    /// and is announced as its description. A press or Escape hides it until
+    /// the pointer or focus moves to another control. After `comboBox` and
+    /// its options, it describes the combo box.
+    pub fn tooltip(self: *View, value: []const u8) Error!void {
+        if (self.depth == 0) return error.UnbalancedContainer;
+        const parent = &self.buffers.nodes[self.stack[self.depth - 1]];
+        if (parent.last_child == none) return error.NotContainer;
+        var target = &self.buffers.nodes[parent.last_child];
+        if (target.kind == .popup) target = &self.buffers.nodes[target.anchor];
+        target.tooltip = try self.copy(value);
+    }
+
+    /// A button with a chevron pointing along `direction`, such as Back or
+    /// Forward in a page history. `Style.name` names it; the default is the
+    /// direction in English. True once for the pass that delivers its
+    /// activation.
+    pub fn navButton(self: *View, direction: NavDirection, style: Style) Error!bool {
+        const node = try self.append(.nav_button, style);
+        node.direction = direction;
+        node.text = try self.copy(if (style.name.len > 0) style.name else switch (direction) {
+            .back => "Back",
+            .forward => "Forward",
+            .up => "Up",
+            .down => "Down",
+        });
+        return self.take(node.id) != null;
+    }
+
+    /// A person or entity as a picture, or as the initials of `name` on a
+    /// disk colored by `Style.background` or derived from the name. It is
+    /// 32 DIP square unless `Style.width`/`height` say otherwise, takes no
+    /// input and is announced as an image named `name`.
+    pub fn avatar(self: *View, name: []const u8, picture: ?ImageView, style: Style) Error!void {
+        const node = try self.append(.avatar, style);
+        node.text = try self.copy(name);
+        node.image = picture;
+    }
+
+    /// Starts a row holding a search input and its controls, announced as a
+    /// search region named by `Style.name`. A gap of 8 DIP applies unless
+    /// `Style.gap` is set. Close it with `end`.
+    pub fn search(self: *View, style: Style) Error!void {
+        var value = style;
+        if (value.gap == 0) value.gap = 8;
+        _ = try self.open(.search, value);
+    }
+
+    /// A field showing `current`, the label of the chosen option, that opens
+    /// a list of options below it, or above when there is more room there.
+    /// Build the options with `comboOption`, then close the list with `end`; they
+    /// are measured every pass but only placed and drawn while it is open.
+    /// Activation, Down or Up opens the list. While open, arrows and
+    /// Home/End move the highlight, Enter or Space picks it, and Escape, a
+    /// press outside or a pick closes it with focus back on the combo box.
+    /// Named by `Style.name` or an enclosing field's label.
+    pub fn comboBox(self: *View, current: []const u8, style: Style) Error!void {
+        const anchor = try self.append(.combo_box, style);
+        anchor.text = try self.copy(current);
+        const id = anchor.id;
+        const anchor_index: u32 = @intCast(anchor - self.buffers.nodes.ptr);
+        if (self.take(id) != null and anchor.style.enabled) {
+            const was_open = if (self.popup.open) |owner| owner == id else false;
+            self.popup.open = if (was_open) null else id;
+            self.popup.highlight = null;
+            if (was_open) self.restore = id;
+        }
+        const list = try self.open(.popup, .{ .padding = Insets.all(4), .name = style.name });
+        list.anchor = anchor_index;
+    }
+    /// An option of the open `comboBox` list: activation selects `value`,
+    /// closes the list and returns focus to the combo box. True when the
+    /// selection changed.
+    pub fn comboOption(self: *View, comptime T: type, selected: *T, value: T, label: []const u8, style: Style) Error!bool {
+        const list = self.enclosingPopup() orelse return error.NotContainer;
+        const anchor = &self.buffers.nodes[list.anchor];
+        if (anchor.kind != .combo_box) return error.NotContainer;
+        const anchor_id = anchor.id;
+        const node = try self.popupItem(list, label, style);
+        var changed = false;
+        if (self.take(node.id) != null) {
+            changed = !std.meta.eql(selected.*, value);
+            selected.* = value;
+            self.popup.open = null;
+            self.popup.highlight = null;
+            self.restore = anchor_id;
+        }
+        node.checked = std.meta.eql(selected.*, value);
+        return changed;
+    }
+
+    /// Starts a list of suggestions for the node just added, usually a
+    /// text input. The list opens below it while it or one of the
+    /// suggestions has focus and at least one is built with `suggestion`;
+    /// close it with `end`. Down, Up and Home/End move the highlight without
+    /// moving focus, Enter picks the highlight, and Escape closes the list
+    /// until its labels change. Named by `Style.name`.
+    pub fn suggestions(self: *View, style: Style) Error!void {
+        if (self.depth == 0) return error.UnbalancedContainer;
+        const parent = &self.buffers.nodes[self.stack[self.depth - 1]];
+        if (parent.last_child == none or self.buffers.nodes[parent.last_child].floats()) return error.NotContainer;
+        const anchor_index = parent.last_child;
+        var value = style;
+        if (value.padding.top == 0 and value.padding.bottom == 0 and value.padding.left == 0 and value.padding.right == 0) value.padding = Insets.all(4);
+        const list = try self.open(.popup, value);
+        list.anchor = anchor_index;
+    }
+    /// One suggestion. True once for the pass that picks it, by pointer or
+    /// by Enter on the highlight; apply it to the input in that branch. The
+    /// list then closes and focus returns to the input.
+    pub fn suggestion(self: *View, label: []const u8, style: Style) Error!bool {
+        const list = self.enclosingPopup() orelse return error.NotContainer;
+        const anchor = &self.buffers.nodes[list.anchor];
+        if (anchor.kind == .combo_box) return error.NotContainer;
+        const anchor_id = anchor.id;
+        const node = try self.popupItem(list, label, style);
+        if (self.take(node.id) == null) return false;
+        self.popup.highlight = null;
+        self.popup.settle = anchor_id;
+        self.picked = true;
+        self.restore = anchor_id;
+        return true;
+    }
+    fn enclosingPopup(self: *const View) ?*Node {
+        var depth = self.depth;
+        while (depth > 1) {
+            depth -= 1;
+            const node = &self.buffers.nodes[self.stack[depth]];
+            if (node.kind == .popup) return node;
+        }
+        return null;
+    }
+    fn popupItem(self: *View, list: *const Node, label: []const u8, style: Style) Error!*Node {
+        const group = list.id;
+        const node = try self.append(.list_item, style);
+        node.text = try self.copy(label);
+        node.radio_group = group;
+        node.highlighted = if (self.popup.highlight) |id| id == node.id else false;
+        return node;
+    }
+    /// Decide whether the popup closed at `index` is open, once its options
+    /// are known, and keep the highlight on one of them.
+    fn settlePopup(self: *View, index: u32) void {
+        const all = self.buffers.nodes[0..self.len];
+        const list = &all[index];
+        const anchor = &all[list.anchor];
+        const combo = anchor.kind == .combo_box;
+        const options_slice = all[index + 1 ..];
+        var hasher = std.hash.Wyhash.init(anchor.id);
+        var count: usize = 0;
+        var selected: ?u64 = null;
+        var focus_inside = if (self.focus) |id| id == anchor.id else false;
+        var highlight_inside = false;
+        for (options_slice) |*entry| {
+            if (entry.kind != .list_item) continue;
+            hasher.update(entry.text);
+            hasher.update("\x00");
+            count += 1;
+            if (entry.checked and combo) selected = selected orelse entry.id;
+            if (self.focus) |id| if (id == entry.id) {
+                focus_inside = true;
+            };
+            if (self.popup.highlight) |id| if (id == entry.id) {
+                highlight_inside = true;
+            };
+        }
+        list.signature = hasher.final();
+        const enabled = anchor.style.enabled;
+        const shown = if (combo) blk: {
+            const owner = self.popup.open orelse break :blk false;
+            if (owner != anchor.id) break :blk false;
+            if (!enabled) self.popup.open = null;
+            break :blk enabled;
+        } else blk: {
+            if (self.popup.settle) |owner| if (owner == anchor.id) {
+                // A pick closes the list over the labels it produces, which
+                // the next pass sees.
+                self.popup.dismissed = anchor.id;
+                self.popup.dismissed_signature = list.signature;
+                if (!self.picked) self.popup.settle = null;
+            };
+            if (!focus_inside) {
+                if (self.popup.dismissed) |owner| if (owner == anchor.id) {
+                    if (self.popup.settle == null) self.popup.dismissed = null;
+                };
+                break :blk false;
+            }
+            if (self.popup.dismissed) |owner| if (owner == anchor.id) {
+                if (self.popup.dismissed_signature == list.signature) break :blk false;
+                self.popup.dismissed = null;
+            };
+            break :blk enabled and count > 0;
+        };
+        list.checked = shown;
+        if (combo) anchor.checked = shown;
+        if (!shown) {
+            if (highlight_inside) self.popup.highlight = null;
+            return;
+        }
+        if (!highlight_inside) self.popup.highlight = selected;
+        for (options_slice) |*entry| {
+            if (entry.kind != .list_item) continue;
+            entry.highlighted = if (self.popup.highlight) |id| id == entry.id else false;
+            // A suggestion has no chosen value; the highlight is its selection.
+            if (!combo) entry.checked = entry.highlighted;
+        }
+    }
+
+    /// Starts the stack of `queue`'s messages, drawn over the window's
+    /// bottom edge, newest last. Each message disappears after its duration,
+    /// counted from the first pass that shows it, or when its close button
+    /// is activated; its action button removes it and returns its id once.
+    /// `queue` is a pointer to a `Toasts` value the application owns.
+    pub fn toasts(self: *View, queue: anytype, style: Style) Error!?u64 {
+        var value = style;
+        if (value.gap == 0) value.gap = 8;
+        _ = try self.open(.toasts, value);
+        var acted: ?u64 = null;
+        var index: usize = 0;
+        while (index < queue.len) {
+            const entry = &queue.entries[index];
+            const shown = entry.shown orelse blk: {
+                entry.shown = self.now;
+                break :blk self.now;
+            };
+            if (entry.duration != 0) {
+                const deadline = shown +| entry.duration;
+                if (self.now >= deadline) {
+                    queue.removeAt(index);
+                    continue;
+                }
+                self.wakeAt(deadline);
+            }
+            const message = entry.message[0..entry.message_len];
+            const action = entry.action[0..entry.action_len];
+            const panel = try self.open(.toast, .{ .key = entry.id, .gap = 8, .padding = .{ .left = 12, .right = 4, .top = 4, .bottom = 4 }, .alignment = .center });
+            panel.text = try self.copy(message);
+            try self.text(message, .{ .grow = 1, .shrink = 1 });
+            var remove = false;
+            if (action.len > 0) if (try self.button(action, .{})) {
+                acted = entry.id;
+                remove = true;
+            };
+            if (try self.button("×", .{ .name = "Dismiss" })) remove = true;
+            try self.end();
+            if (remove) queue.removeAt(index) else index += 1;
+        }
+        try self.end();
+        return acted;
+    }
+
+    /// Route a key to the open popup or the shown tooltip before normal
+    /// focus handling, from the overlay of the last arranged pass. Call it
+    /// with `focus` current. The host delivers any returned event and then
+    /// focuses `restore`.
+    pub fn routeKey(self: *View, input: z.KeyInput) KeyRoute {
+        const mods = input.modifiers;
+        const plain = !mods.control and !mods.alt and !mods.super and !mods.shift;
+        if (self.overlay.popup) |list| {
+            switch (input.key) {
+                .escape => if (plain) {
+                    self.closePopup(list, true);
+                    return .handled;
+                },
+                .down, .up, .home, .end => if (plain) {
+                    self.moveHighlight(input.key);
+                    return .handled;
+                },
+                .enter, .space => if (plain and (input.key == .enter or list.combo)) {
+                    if (input.repeat) return .handled;
+                    if (self.popup.highlight) |id| return .{ .deliver = .{ .action = id } };
+                    if (!list.combo) return .ignored;
+                    self.closePopup(list, true);
+                    return .handled;
+                },
+                .tab => if (!mods.control and !mods.alt and !mods.super) {
+                    self.closePopup(list, list.combo);
+                    return .pass;
+                },
+                else => {},
+            }
+            return .ignored;
+        }
+        if (self.focus) |focused| for (self.overlay.anchors[0..self.overlay.anchor_count]) |anchor| {
+            if (anchor.id != focused) continue;
+            const arrow = input.key == .down or input.key == .up;
+            if (anchor.combo and arrow and !mods.control and !mods.super and !mods.shift) return .{ .deliver = .{ .action = focused } };
+            // Down reopens suggestions that Escape closed.
+            if (!anchor.combo and input.key == .down and plain) if (self.popup.dismissed) |owner| if (owner == focused) {
+                self.popup.dismissed = null;
+                self.popup.settle = null;
+                return .handled;
+            };
+        };
+        if (input.key == .escape and plain and self.tip_index != none) {
+            self.tip.dismissed = true;
+            self.tip_index = none;
+            return .handled;
+        }
+        return .ignored;
+    }
+    fn closePopup(self: *View, list: Overlay.Popup, restore: bool) void {
+        if (list.combo) self.popup.open = null else {
+            self.popup.dismissed = list.anchor;
+            self.popup.dismissed_signature = list.signature;
+        }
+        self.popup.highlight = null;
+        self.overlay.popup = null;
+        if (restore) self.restore = list.anchor;
+    }
+    fn moveHighlight(self: *View, key_code: z.KeyCode) void {
+        const items = self.overlay.items[0..self.overlay.item_count];
+        if (items.len == 0) return;
+        var current: ?usize = null;
+        if (self.popup.highlight) |id| for (items, 0..) |region, i| {
+            if (region.id == id) current = i;
+        };
+        const next: usize = switch (key_code) {
+            .home => 0,
+            .end => items.len - 1,
+            .down => if (current) |i| (i + 1) % items.len else 0,
+            else => if (current) |i| (i + items.len - 1) % items.len else items.len - 1,
+        };
+        self.popup.highlight = items[next].id;
+        self.reveal = items[next].id;
+    }
+
+    /// Route a primary press before normal input: it hides a shown tooltip,
+    /// and outside the open popup it closes the popup. A press outside a
+    /// combo box list is consumed, as is one on the list between options.
+    pub fn pointerDown(self: *View, point: Point) PointerRoute {
+        var result: PointerRoute = .ignored;
+        if (self.tip.target != null and !self.tip.dismissed) {
+            self.tip.dismissed = true;
+            if (self.tip_index != none) result = .changed;
+        }
+        const list = self.overlay.popup orelse return result;
+        if (contains(list.rect, point)) {
+            for (self.overlay.items[0..self.overlay.item_count]) |region| if (contains(region.rect, point)) return result;
+            return .consumed;
+        }
+        if (contains(list.anchor_rect, point)) return result;
+        self.closePopup(list, false);
+        return if (list.combo) .consumed else .changed;
+    }
+
+    /// Record the pointer position, or null when it left the window, for
+    /// tooltips; true when the control under it changed and the window
+    /// should repaint.
+    pub fn hoverAt(self: *View, point: ?Point) bool {
+        var target: ?u64 = null;
+        if (point) |at| find: {
+            if (self.overlay.popup) |list| if (contains(list.rect, at)) break :find;
+            var index = self.overlay.tip_count;
+            while (index > 0) {
+                index -= 1;
+                const region = self.overlay.tips[index];
+                if (contains(region.rect, at)) {
+                    target = region.id;
+                    break;
+                }
+            }
+        }
+        if (std.meta.eql(target, self.tip.hover)) return false;
+        self.tip.hover = target;
+        return true;
+    }
+
+    /// Choose the tooltip this pass shows, from hover first and then focus,
+    /// and ask for a pass when its delay ends.
+    fn settleTooltip(self: *View) void {
+        const all = self.buffers.nodes[0..self.len];
+        var candidate: u32 = none;
+        inline for (.{ self.tip.hover, self.focus }) |wanted| if (candidate == none) if (wanted) |id| {
+            for (all, 0..) |*node, i| if (node.id == id and node.tooltip.len > 0) {
+                candidate = @intCast(i);
+                break;
+            };
+        };
+        const target: ?u64 = if (candidate == none) null else all[candidate].id;
+        if (!std.meta.eql(target, self.tip.target)) {
+            self.tip.target = target;
+            self.tip.since = self.now;
+            self.tip.dismissed = false;
+        }
+        if (candidate == none or self.tip.dismissed) return;
+        const due = self.tip.since +| self.tooltip_delay;
+        if (self.now >= due) self.tip_index = candidate else self.wakeAt(due);
+    }
+
     /// Add a self-describing leaf; see `Embed`.
     pub fn embed(self: *View, content: Embed, style: Style) Error!void {
         const node = try self.append(.embed, style);
@@ -651,6 +1241,14 @@ pub const View = struct {
     pub fn finish(self: *View) Error!void {
         if (self.depth != 1) return error.UnbalancedContainer;
         self.buffers.nodes[0].end = self.len;
+        // A combo box that is no longer built cannot keep its list open.
+        if (self.popup.open) |owner| {
+            const present = for (self.buffers.nodes[0..self.len]) |*node| {
+                if (node.id == owner and node.kind == .combo_box) break true;
+            } else false;
+            if (!present) self.popup.open = null;
+        }
+        self.settleTooltip();
     }
 
     fn intrinsic(node: *const Node, theme: Theme, measurer: Measurer) layout.Measurement {
@@ -662,6 +1260,12 @@ pub const View = struct {
             .spacer => .{},
             .list_item => .{ .width = text_size.width + 2 * metrics.content_inset, .height = text_size.height + metrics.content_inset },
             .button, .tab, .segment => .{ .width = text_size.width + 2 * (metrics.content_inset + 8), .height = @max(text_size.height, metrics.indicator_size) + 2 * metrics.content_inset },
+            .nav_button => blk: {
+                const side = @max(Measurer.line_height, metrics.indicator_size) + 2 * metrics.content_inset;
+                break :blk .{ .width = side, .height = side };
+            },
+            .combo_box => .{ .width = @max(120, text_size.width + 3 * metrics.content_inset + metrics.indicator_size), .height = @max(text_size.height, metrics.indicator_size) + 2 * metrics.content_inset },
+            .avatar => .{ .width = 32, .height = 32 },
             .link => .{ .width = text_size.width + 2 * metrics.content_inset, .height = text_size.height + 2 * metrics.content_inset },
             .badge => .{ .width = text_size.width + 2 * (metrics.content_inset + 4), .height = text_size.height + metrics.content_inset },
             .disclosure => .{ .width = metrics.indicator_size + metrics.label_gap + text_size.width, .height = @max(text_size.height, metrics.indicator_size) + metrics.content_inset },
@@ -671,7 +1275,7 @@ pub const View = struct {
             .rating => .{ .width = @as(f32, @floatCast(node.range.maximum)) * Measurer.line_height, .height = Measurer.line_height + metrics.content_inset },
             .slider => .{ .width = 200, .height = metrics.thumb_size + 2 * metrics.content_inset },
             .stepper => .{ .width = 4 * (Measurer.line_height + metrics.content_inset), .height = Measurer.line_height + metrics.content_inset },
-            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .embed => unreachable,
+            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .toasts, .toast, .embed => unreachable,
         };
         const minimum: Size = switch (node.kind) {
             .progress, .meter, .slider, .spacer => .{ .width = 0, .height = size.height },
@@ -682,7 +1286,7 @@ pub const View = struct {
 
     fn options(node: *const Node) layout.Options {
         const axis: Axis = switch (node.kind) {
-            .row, .segmented, .tab_list, .toolbar, .breadcrumbs => .row,
+            .row, .segmented, .tab_list, .toolbar, .breadcrumbs, .search, .toast => .row,
             .split => node.axis,
             else => .column,
         };
@@ -698,6 +1302,7 @@ pub const View = struct {
         var i: usize = 0;
         while (child != none) : (child = self.buffers.nodes[child].next_sibling) {
             const node = &self.buffers.nodes[child];
+            if (node.floats()) continue;
             const value = items[i];
             out[i] = .{
                 .column_span = .{ .count = @max(1, node.style.column_span) },
@@ -759,7 +1364,10 @@ pub const View = struct {
         var child = parent.first_child;
         var at = start;
         while (child != none) : (child = self.buffers.nodes[child].next_sibling) {
-            self.buffers.items[at] = item(&self.buffers.nodes[child]);
+            const node = &self.buffers.nodes[child];
+            // Popups and toast stacks take no room in the flow.
+            if (node.floats()) continue;
+            self.buffers.items[at] = item(node);
             at += 1;
         }
         cursor.* = at;
@@ -793,9 +1401,56 @@ pub const View = struct {
         }
         all[0].bounds = bounds;
         try self.place();
-        const id = self.reveal orelse return;
-        self.reveal = null;
-        if (try self.revealNode(id)) try self.place();
+        if (self.reveal) |id| {
+            self.reveal = null;
+            if (try self.revealNode(id)) try self.place();
+        }
+        self.record(measurer);
+    }
+
+    /// Keep what input routing needs from this arrangement, and place the
+    /// tooltip.
+    fn record(self: *View, measurer: Measurer) void {
+        const all = self.buffers.nodes[0..self.len];
+        const overlay = &self.overlay;
+        overlay.popup = null;
+        overlay.item_count = 0;
+        overlay.tip_count = 0;
+        overlay.anchor_count = 0;
+        for (all, 0..) |*node, index| {
+            if (node.kind == .popup) {
+                const anchor = &all[node.anchor];
+                if (anchor.style.enabled and overlay.anchor_count < max_popup_anchors) {
+                    overlay.anchors[overlay.anchor_count] = .{ .id = anchor.id, .combo = anchor.kind == .combo_box };
+                    overlay.anchor_count += 1;
+                }
+                if (!node.checked or overlay.popup != null) continue;
+                overlay.popup = .{ .id = node.id, .anchor = anchor.id, .combo = anchor.kind == .combo_box, .rect = node.bounds, .anchor_rect = self.visible(anchor) orelse anchor.bounds, .signature = node.signature };
+                for (all[index + 1 .. node.end]) |*entry| {
+                    if (entry.kind != .list_item or !entry.style.enabled or overlay.item_count == max_popup_items) continue;
+                    overlay.items[overlay.item_count] = .{ .id = entry.id, .rect = self.visible(entry) orelse .{ .x = 0, .y = 0, .width = 0, .height = 0 } };
+                    overlay.item_count += 1;
+                }
+            }
+            if (node.tooltip.len > 0 and overlay.tip_count < max_tooltips) if (self.visible(node)) |rect| {
+                overlay.tips[overlay.tip_count] = .{ .id = node.id, .rect = rect };
+                overlay.tip_count += 1;
+            };
+        }
+        if (self.tip_index == none) return;
+        const anchor = self.visible(&all[self.tip_index]) orelse {
+            self.tip_index = none;
+            return;
+        };
+        const root_bounds = all[0].bounds;
+        const text_size = measurer.measure(measurer.context, all[self.tip_index].tooltip);
+        const pad = ui.widgets.tooltip_inset;
+        const width = @min(text_size.width + 2 * pad, root_bounds.width);
+        const height = text_size.height + 2 * pad;
+        const below = anchor.y + anchor.height + popup_gap;
+        const y = if (below + height > root_bounds.y + root_bounds.height and anchor.y - popup_gap - height >= root_bounds.y) anchor.y - popup_gap - height else below;
+        const x = std.math.clamp(anchor.x, root_bounds.x, @max(root_bounds.x, root_bounds.x + root_bounds.width - width));
+        self.tip_rect = .{ .x = x, .y = y, .width = width, .height = height };
     }
 
     /// Scroll every scroll container around the node with `id` so it is in
@@ -821,7 +1476,14 @@ pub const View = struct {
     fn place(self: *View) Error!void {
         const all = self.buffers.nodes[0..self.len];
         var cursor: usize = 0;
-        for (all) |*node| {
+        var index: usize = 0;
+        while (index < all.len) : (index += 1) {
+            const node = &all[index];
+            // A closed popup's options keep no place.
+            if (node.kind == .popup and !node.checked) {
+                index = node.end - 1;
+                continue;
+            }
             if (!node.isContainer() or node.child_count == 0) continue;
             const start = cursor;
             const items = try self.childItems(node, &cursor);
@@ -846,10 +1508,44 @@ pub const View = struct {
             var child = node.first_child;
             var i: usize = 0;
             while (child != none) : (child = all[child].next_sibling) {
+                if (all[child].floats()) continue;
                 all[child].bounds = rects[i];
                 i += 1;
             }
+            // Floating children go over the flow once their anchors are placed.
+            child = node.first_child;
+            while (child != none) : (child = all[child].next_sibling) {
+                if (all[child].floats()) all[child].bounds = self.floatingBounds(&all[child]);
+            }
         }
+    }
+
+    /// A popup below its anchor, or above when there is more room there,
+    /// within the window; a toast stack centred over the bottom edge.
+    fn floatingBounds(self: *const View, node: *const Node) Rect {
+        const root_bounds = self.buffers.nodes[0].bounds;
+        const preferred = node.measured.preferred;
+        if (node.kind == .toasts) {
+            const width = @min(@max(preferred.width, 280), @max(0, root_bounds.width - 2 * toast_margin));
+            const height = @min(preferred.height, @max(0, root_bounds.height - 2 * toast_margin));
+            return .{ .x = root_bounds.x + (root_bounds.width - width) / 2, .y = root_bounds.y + @max(0, root_bounds.height - toast_margin - height), .width = width, .height = height };
+        }
+        const anchor = self.buffers.nodes[node.anchor].bounds;
+        if (!node.checked) return .{ .x = anchor.x, .y = anchor.y + anchor.height, .width = 0, .height = 0 };
+        const width = @min(@max(anchor.width, preferred.width), root_bounds.width);
+        const below = root_bounds.y + root_bounds.height - (anchor.y + anchor.height + popup_gap);
+        const above = anchor.y - popup_gap - root_bounds.y;
+        var height = @min(preferred.height, max_popup_height);
+        var y: f32 = undefined;
+        if (height > below and above > below) {
+            height = @min(height, @max(0, above));
+            y = anchor.y - popup_gap - height;
+        } else {
+            height = @min(height, @max(0, below));
+            y = anchor.y + anchor.height + popup_gap;
+        }
+        const x = std.math.clamp(anchor.x, root_bounds.x, @max(root_bounds.x, root_bounds.x + root_bounds.width - width));
+        return .{ .x = x, .y = y, .width = width, .height = height };
     }
 
     /// Both panes fill the cross axis; the first takes `value` of the length
@@ -872,17 +1568,62 @@ pub const View = struct {
     }
 
     /// Record the arranged tree. `target` is a ui.Frame or any value with the
-    /// same recording methods.
+    /// same recording methods. Popups and toasts are drawn after the tree,
+    /// so they cover it and take input first, and the tooltip last.
     pub fn paint(self: *const View, target: anytype) !void {
         const all = self.buffers.nodes[0..self.len];
         const theme = target.currentTheme();
+        var floating: [max_floating]u32 = undefined;
+        var floating_len: usize = 0;
+        try self.paintRange(target, theme, 0, all.len, &floating, &floating_len);
+        for (floating[0..floating_len]) |index| {
+            const node = &all[index];
+            const bounds = node.bounds;
+            if (node.kind == .popup) {
+                const anchor = &all[node.anchor];
+                const name = if (node.style.name.len > 0) node.style.name else anchor.style.name;
+                target.roundedRect(bounds, 4, ui.Color.rgb(theme.palette.border));
+                target.roundedRect(inset(bounds, theme.metrics.border / 2), 4, ui.Color.rgb(theme.palette.inset));
+                // A combo box owns its list; a text input's list stays at the
+                // root because the input may publish its semantics later.
+                try target.popupList(node.id, bounds, name, if (anchor.kind == .combo_box) anchor.id else ui.accessibility.root_id);
+            }
+            if (node.child_count == 0) continue;
+            try target.pushClip(bounds);
+            // Nothing floats inside a floating node; `open` refuses it.
+            var nested: [max_floating]u32 = undefined;
+            var nested_len: usize = 0;
+            try self.paintRange(target, theme, index + 1, node.end, &nested, &nested_len);
+            try target.popClip();
+        }
+        if (self.tip_index != none) {
+            const node = &all[self.tip_index];
+            try target.tooltip(tooltipId(node.id), self.tip_rect, node.tooltip);
+        }
+    }
+
+    /// Paint nodes `start..stop` in order, skipping floating subtrees, whose
+    /// indices are added to `floating` when they are shown.
+    fn paintRange(self: *const View, target: anytype, theme: Theme, start: usize, stop: usize, floating: *[max_floating]u32, floating_len: *usize) !void {
+        const all = self.buffers.nodes[0..self.len];
         var clips: [max_depth + 1]u32 = undefined;
         var clip_depth: usize = 0;
-        for (all, 0..) |*node, at| {
+        var at = start;
+        while (at < stop) {
             while (clip_depth > 0 and all[clips[clip_depth - 1]].end <= at) {
                 clip_depth -= 1;
                 try target.popClip();
                 paintScrollIndicator(&all[clips[clip_depth]], target, theme);
+            }
+            const node = &all[at];
+            if (node.floats()) {
+                if (node.kind != .popup or node.checked) {
+                    if (floating_len.* == max_floating) return error.TooManyItems;
+                    floating[floating_len.*] = @intCast(at);
+                    floating_len.* += 1;
+                }
+                at = node.end;
+                continue;
             }
             const bounds = node.bounds;
             const style = node.style;
@@ -892,8 +1633,9 @@ pub const View = struct {
             control.invalid = annotation.invalid;
             control.required = annotation.required;
             if (control.name.len == 0) control.name = annotation.name;
+            if (control.description.len == 0) control.description = node.tooltip;
             switch (node.kind) {
-                .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid => {
+                .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .toasts, .toast => {
                     switch (node.kind) {
                         .radio_group, .segmented => try target.radioGroup(node.id, bounds, style.name),
                         .list_box => try target.listBox(node.id, bounds, style.name),
@@ -902,9 +1644,15 @@ pub const View = struct {
                         .breadcrumbs => try target.navigation(node.id, bounds, style.name, node.semantic_parent),
                         .accordion => try target.group(node.id, bounds, style.name, node.semantic_parent),
                         .fieldset => try target.group(node.id, bounds, node.text, node.semantic_parent),
+                        .search => try target.search(node.id, bounds, style.name, node.semantic_parent),
+                        .toast => {
+                            try target.status(node.id, bounds, node.text, node.semantic_parent);
+                            target.roundedRect(bounds, 6, ui.Color.rgb(theme.palette.border));
+                            target.roundedRect(inset(bounds, theme.metrics.border / 2), 6, ui.Color.rgb(style.background orelse theme.palette.control));
+                        },
                         else => {},
                     }
-                    if (style.background) |color| target.roundedRect(bounds, style.radius, ui.Color.rgb(color));
+                    if (node.kind != .toast) if (style.background) |color| target.roundedRect(bounds, style.radius, ui.Color.rgb(color));
                     if (style.border) |color| target.strokeRect(bounds, style.radius, style.border_width, ui.Color.rgb(color));
                     if (node.kind == .breadcrumbs) self.paintSeparators(node, target, theme);
                     if (node.kind == .split) {
@@ -923,6 +1671,9 @@ pub const View = struct {
                 .spacer => {},
                 .button => try target.buttonWithOptions(node.id, bounds, node.text, control),
                 .link => try target.link(node.id, bounds, node.text, control),
+                .nav_button => try target.navButton(node.id, bounds, node.direction, node.text, control),
+                .combo_box => try target.comboBox(node.id, bounds, node.text, node.checked, control),
+                .avatar => try target.avatar(node.id, bounds, node.text, .{ .image = node.image, .color = style.background, .semantic_parent = node.semantic_parent }),
                 .badge => {
                     const pad = theme.metrics.content_inset + 4;
                     target.roundedRect(bounds, bounds.height / 2, ui.Color.rgb(style.background orelse theme.palette.accent));
@@ -944,6 +1695,7 @@ pub const View = struct {
                     var item_options = control;
                     item_options.radio_group = node.radio_group;
                     try target.listItem(node.id, bounds, node.text, node.checked, item_options);
+                    if (node.highlighted) target.strokeRect(bounds, 0, theme.metrics.border, ui.Color.rgb(if (node.checked) theme.palette.on_accent else theme.palette.focus));
                 },
                 .tab => {
                     var tab_options = control;
@@ -962,6 +1714,7 @@ pub const View = struct {
                     if (@TypeOf(target) == *ui.Frame) try content.paint(content.context, target, node.id, bounds) else try target.embedded(node.id, bounds);
                 },
             }
+            at += 1;
         }
         while (clip_depth > 0) {
             clip_depth -= 1;
@@ -1027,6 +1780,18 @@ pub const Build = struct {
     }
 };
 
+/// The semantic id of the tooltip shown for the control `id`.
+pub fn tooltipId(id: u64) u64 {
+    const value = std.hash.Wyhash.hash(id, "tooltip");
+    return if (value == 0) 1 else value;
+}
+fn inset(rect: Rect, amount: f32) Rect {
+    return .{ .x = rect.x + amount, .y = rect.y + amount, .width = @max(0, rect.width - 2 * amount), .height = @max(0, rect.height - 2 * amount) };
+}
+fn contains(rect: Rect, point: Point) bool {
+    return point.x >= rect.x and point.y >= rect.y and point.x < rect.x + rect.width and point.y < rect.y + rect.height;
+}
+
 fn intersect(a: Rect, b: Rect) ?Rect {
     const x0 = @max(a.x, b.x);
     const y0 = @max(a.y, b.y);
@@ -1039,12 +1804,31 @@ fn intersect(a: Rect, b: Rect) ?Rect {
 pub const Harness = @import("harness.zig").Harness;
 pub const Query = @import("harness.zig").Query;
 
+/// A monotonic time source in nanoseconds; only differences matter.
+pub const Clock = struct {
+    context: ?*anyopaque = null,
+    now: *const fn (?*anyopaque) u64,
+};
+
+/// Arms a timer for the earliest deadline a build asked for, in the Host
+/// clock, or cancels it for null; `now` is the current time. It runs as a
+/// posted task after paint. `ziggurat_view_timer` provides one.
+pub const Scheduler = struct {
+    context: *anyopaque,
+    schedule: *const fn (context: *anyopaque, deadline: ?u64, now: u64) void,
+};
+
 pub const Options = struct {
     /// Style of the implicit root column, which fills the window.
     root: Style = .{ .padding = Insets.all(24), .gap = 12, .alignment = .start },
     /// Window background; defaults to the theme background.
     background: ?u32 = null,
     measurer: Measurer = .{},
+    /// Hover or focus time before a tooltip appears, in nanoseconds.
+    tooltip_delay: u64 = 500 * std.time.ns_per_ms,
+    /// The time passes see; the default is a monotonic timer started at the
+    /// Host's first pass.
+    clock: ?Clock = null,
 };
 
 /// Owns the ui.Context for one window. Keep Host at a stable address from
@@ -1061,14 +1845,40 @@ pub const Host = struct {
     /// Visible scroll containers of the last frame, in paint order.
     scroll_regions: [max_scroll_regions]struct { id: u64, bounds: Rect } = undefined,
     scroll_region_count: usize = 0,
+    timer: ?std.time.Timer = null,
+    scheduler: ?Scheduler = null,
+    /// The deadline last handed to the scheduler.
+    scheduled: ?u64 = null,
+    schedule_queued: bool = false,
 
     pub fn init(state: anytype, comptime build: fn (@TypeOf(state), *View) anyerror!void, buffers: Buffers, options: Options) Host {
+        var view = View.init(buffers);
+        view.tooltip_delay = options.tooltip_delay;
         return .{
             .context = ui.Context.init(undefined, draw, onAction),
-            .view = View.init(buffers),
+            .view = view,
             .build = Build.bind(state, build),
             .options = options,
         };
+    }
+
+    /// The time the next pass will see, in nanoseconds.
+    pub fn time(self: *Host) u64 {
+        if (self.options.clock) |clock| return clock.now(clock.context);
+        if (self.timer == null) self.timer = std.time.Timer.start() catch return 0;
+        return self.timer.?.read();
+    }
+    /// Install or remove the timer that serves the build's deadlines; the
+    /// next frame hands it the current one.
+    pub fn setScheduler(self: *Host, scheduler: ?Scheduler) void {
+        self.scheduler = scheduler;
+        self.scheduled = null;
+        if (self.context.window) |window| window.invalidate();
+    }
+    /// Called by the scheduler when the deadline it was given has passed.
+    pub fn wakeFired(self: *Host) void {
+        self.scheduled = null;
+        if (self.context.window) |window| window.invalidate();
     }
 
     pub fn attach(self: *Host, window: z.Window) !void {
@@ -1085,6 +1895,8 @@ pub const Host = struct {
         if (self.building) return error.Busy;
         self.building = true;
         defer self.building = false;
+        self.view.now = self.time();
+        self.view.focus = self.context.input_state.focused;
         try self.build.run(&self.view, self.options.root, event);
     }
 
@@ -1092,6 +1904,21 @@ pub const Host = struct {
         self.pass(event) catch |err| {
             self.last_error = err;
         };
+        self.restoreFocus();
+    }
+    /// Return focus where the last pass or route asked, such as to a combo
+    /// box whose list closed.
+    fn restoreFocus(self: *Host) void {
+        const id = self.view.restore orelse return;
+        self.view.restore = null;
+        if (self.context.input_state.focused == id) return;
+        self.context.focusControl(id) catch |err| switch (err) {
+            error.NotAttached => self.context.input_state.setFocused(id),
+            else => self.last_error = err,
+        };
+    }
+    fn invalidate(self: *Host) void {
+        if (self.context.window) |window| window.invalidate();
     }
     fn onAction(ptr: *anyopaque, id: u64) void {
         const self: *Host = @ptrCast(@alignCast(ptr));
@@ -1101,10 +1928,61 @@ pub const Host = struct {
         const self: *Host = @ptrCast(@alignCast(ptr));
         self.deliver(.{ .value = .{ .id = id, .change = change } });
     }
-    /// Route a wheel event to the innermost visible scroll container under it.
+    /// Route popup, tooltip and toast input before the Context, and a wheel
+    /// event to the innermost visible scroll container under it.
     fn onInput(ptr: *anyopaque, _: *ui.Context, event: z.Event) bool {
         const self: *Host = @ptrCast(@alignCast(ptr));
-        if (event != .wheel) return false;
+        if (self.building) return false;
+        switch (event) {
+            .pointer_move => |point| {
+                if (self.view.hoverAt(.{ .x = point.x, .y = point.y })) self.invalidate();
+                return false;
+            },
+            .pointer_down => |press| {
+                if (press.button != .primary) return false;
+                switch (self.view.pointerDown(.{ .x = press.position.x, .y = press.position.y })) {
+                    .ignored => return false,
+                    .changed => {
+                        self.invalidate();
+                        return false;
+                    },
+                    .consumed => {
+                        self.invalidate();
+                        return true;
+                    },
+                }
+            },
+            .focus => |focused| {
+                // A window that loses focus leaves no tooltip behind.
+                if (!focused and self.view.hoverAt(null)) self.invalidate();
+                return false;
+            },
+            .key_input => |input| {
+                self.view.focus = self.context.input_state.focused;
+                switch (self.view.routeKey(input)) {
+                    .ignored => return false,
+                    // A consumed key bypasses the Context, so repaint here
+                    // for the moved highlight or closed list.
+                    .handled => {
+                        self.restoreFocus();
+                        self.invalidate();
+                        return true;
+                    },
+                    .pass => {
+                        self.restoreFocus();
+                        self.invalidate();
+                        return false;
+                    },
+                    .deliver => |value| {
+                        self.deliver(value);
+                        self.invalidate();
+                        return true;
+                    },
+                }
+            },
+            .wheel => {},
+            else => return false,
+        }
         const wheel = event.wheel;
         var index = self.scroll_region_count;
         while (index > 0) {
@@ -1137,6 +2015,7 @@ pub const Host = struct {
             const content = node.embed orelse continue;
             if (content.place) |place| place(content.context, node.id, node.bounds);
         }
+        self.requestWake();
         self.scroll_region_count = 0;
         for (self.view.nodes()) |*node| {
             if (node.kind != .scroll or self.scroll_region_count == max_scroll_regions) continue;
@@ -1144,6 +2023,25 @@ pub const Host = struct {
             self.scroll_regions[self.scroll_region_count] = .{ .id = node.id, .bounds = bounds };
             self.scroll_region_count += 1;
         }
+    }
+
+    /// Hand a changed deadline to the scheduler after this paint.
+    fn requestWake(self: *Host) void {
+        if (self.scheduler == null or self.schedule_queued or std.meta.eql(self.view.wake, self.scheduled)) return;
+        const window = self.context.window orelse return;
+        window.app.post(.{ .context = self, .call = scheduleTask }) catch |err| {
+            self.last_error = self.last_error orelse err;
+            return;
+        };
+        self.schedule_queued = true;
+    }
+    fn scheduleTask(ptr: *anyopaque) void {
+        const self: *Host = @ptrCast(@alignCast(ptr));
+        self.schedule_queued = false;
+        const scheduler = self.scheduler orelse return;
+        if (self.context.window == null or std.meta.eql(self.view.wake, self.scheduled)) return;
+        self.scheduled = self.view.wake;
+        scheduler.schedule(scheduler.context, self.view.wake, self.time());
     }
 };
 
@@ -1155,6 +2053,7 @@ const Recorder = struct {
     max_clip_depth: usize = 0,
     fills: usize = 0,
     chooser: u64 = 0,
+    tooltip_id: u64 = 0,
     fn push(self: *Recorder, kind: Kind, id: u64, bounds: Rect, checked: bool) void {
         self.calls[self.len] = .{ .kind = kind, .id = id, .bounds = bounds, .checked = checked };
         self.len += 1;
@@ -1248,6 +2147,29 @@ const Recorder = struct {
     }
     pub fn embedded(self: *Recorder, id: u64, bounds: Rect) !void {
         self.push(.embed, id, bounds, false);
+    }
+    pub fn comboBox(self: *Recorder, id: u64, bounds: Rect, _: []const u8, expanded: bool, _: ui.widgets.Options) !void {
+        self.push(.combo_box, id, bounds, expanded);
+    }
+    pub fn popupList(self: *Recorder, id: u64, bounds: Rect, _: []const u8, _: u64) !void {
+        self.chooser = id;
+        self.push(.popup, id, bounds, false);
+    }
+    pub fn navButton(self: *Recorder, id: u64, bounds: Rect, _: NavDirection, _: []const u8, _: ui.widgets.Options) !void {
+        self.push(.nav_button, id, bounds, false);
+    }
+    pub fn avatar(self: *Recorder, id: u64, bounds: Rect, _: []const u8, _: ui.widgets.AvatarOptions) !void {
+        self.push(.avatar, id, bounds, false);
+    }
+    pub fn tooltip(self: *Recorder, id: u64, bounds: Rect, _: []const u8) !void {
+        self.tooltip_id = id;
+        self.push(.text, id, bounds, false);
+    }
+    pub fn status(self: *Recorder, id: u64, bounds: Rect, _: []const u8, _: u64) !void {
+        self.push(.toast, id, bounds, false);
+    }
+    pub fn search(self: *Recorder, id: u64, bounds: Rect, _: []const u8, _: u64) !void {
+        self.push(.search, id, bounds, false);
     }
 };
 
@@ -1460,4 +2382,60 @@ test "estimate measures wide codepoints wider" {
     const wide = Measurer.estimate(null, "计数");
     try std.testing.expect(wide.width > narrow.width);
     try std.testing.expectEqual(Measurer.line_height, wide.height);
+}
+
+test "open lists and toasts paint after the tree and tooltips paint last" {
+    var storage: Storage(32, 512) = .{};
+    var view = View.init(storage.buffers());
+    var queue: Toasts(2) = .{};
+    _ = try queue.show("Saved", .{});
+    var pass: u8 = 0;
+    while (pass < 2) : (pass += 1) {
+        view.reset(.{}, null);
+        view.now = 1000;
+        try view.comboBox("Sans", .{ .name = "Font" });
+        var font: u8 = 1;
+        _ = try view.comboOption(u8, &font, 0, "Serif", .{});
+        _ = try view.comboOption(u8, &font, 1, "Sans", .{});
+        try view.end();
+        try view.tooltip("Typeface");
+        _ = try view.button("Apply", .{});
+        _ = try view.toasts(&queue, .{});
+        // Open the list and focus the combo box for the second pass.
+        view.popup.open = view.nodes()[1].id;
+        view.focus = view.nodes()[1].id;
+        try view.finish();
+    }
+    try std.testing.expectEqual(@as(?u64, 1000 + view.tooltip_delay), view.wake);
+    view.now += view.tooltip_delay;
+    view.reset(.{}, null);
+    // Rebuild once more at the later time so the tooltip shows.
+    try view.comboBox("Sans", .{ .name = "Font" });
+    var font: u8 = 1;
+    _ = try view.comboOption(u8, &font, 0, "Serif", .{});
+    _ = try view.comboOption(u8, &font, 1, "Sans", .{});
+    try view.end();
+    try view.tooltip("Typeface");
+    _ = try view.button("Apply", .{});
+    _ = try view.toasts(&queue, .{});
+    view.focus = view.nodes()[1].id;
+    try view.finish();
+    try view.arrange(.{ .x = 0, .y = 0, .width = 640, .height = 480 }, .{}, .{});
+    var recorder: Recorder = .{};
+    try view.paint(&recorder);
+    const calls = recorder.calls[0..recorder.len];
+    try std.testing.expectEqual(Kind.combo_box, calls[0].kind);
+    try std.testing.expect(calls[0].checked);
+    try std.testing.expectEqual(Kind.button, calls[1].kind);
+    var popup_at: ?usize = null;
+    var toast_at: ?usize = null;
+    for (calls, 0..) |call, i| switch (call.kind) {
+        .popup => popup_at = i,
+        .toast => toast_at = i,
+        else => {},
+    };
+    try std.testing.expect(popup_at.? > 1 and toast_at.? > popup_at.?);
+    try std.testing.expectEqual(tooltipId(view.nodes()[1].id), recorder.tooltip_id);
+    try std.testing.expectEqual(Kind.text, calls[calls.len - 1].kind);
+    try std.testing.expectEqual(@as(usize, 0), recorder.clip_depth);
 }
