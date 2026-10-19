@@ -91,7 +91,12 @@ const Probe = struct {
                 if (!state.visible) return;
                 if (builtin.os.tag == .linux and gtk_widget_get_mapped(self.window.nativeHandle().?) == 0) return;
                 self.topology = try p.refresh(self.window);
-                try self.tracker.confirmNormal(self.window, &self.topology);
+                // A newly mapped toolkit window can report client bounds that
+                // trail the window manager's configure; wait for the next event.
+                self.tracker.confirmNormal(self.window, &self.topology) catch |err| {
+                    if (err == error.GeometryPending) return;
+                    return err;
+                };
                 var offscreen = try self.tracker.snapshot();
                 offscreen.display = try p.Key.init("disconnected-display");
                 offscreen.normal.position = .{ .x = 1000000, .y = -1000000 };
@@ -218,11 +223,24 @@ const Watchdog = struct {
     fn run(self: *@This()) void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        while (!self.done) self.condition.timedWait(&self.mutex, 15 * std.time.ns_per_s) catch {
-            self.expired.store(true, .release);
-            self.app.post(.{ .context = self, .call = timeout }) catch {};
-            return;
+        // A settled window manager change does not always produce another
+        // geometry event, so re-drive the probe periodically until it finishes.
+        var waited: u64 = 0;
+        while (!self.done) self.condition.timedWait(&self.mutex, nudge_interval) catch {
+            waited += nudge_interval;
+            if (waited >= 15 * std.time.ns_per_s) {
+                self.expired.store(true, .release);
+                self.app.post(.{ .context = self, .call = timeout }) catch {};
+                return;
+            }
+            self.app.post(.{ .context = self, .call = nudge }) catch {};
         };
+    }
+    const nudge_interval = 250 * std.time.ns_per_ms;
+    fn nudge(ptr: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        const probe: *Probe = @fieldParentPtr("watchdog", self);
+        if (probe.failure == null and !probe.posted) probe.drive();
     }
     fn timeout(ptr: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
@@ -286,7 +304,11 @@ fn run(allocator: std.mem.Allocator, require_wm: bool) !void {
         std.debug.print("placement stage {s}: {}\n", .{ @tagName(probe.stage), err });
         return err;
     }
-    if (probe.watchdog.expired.load(.acquire)) return error.WindowPlacementTimeout;
+    if (probe.watchdog.expired.load(.acquire)) {
+        std.debug.print("placement stage {s}, restorer phase {s}: timed out\n", .{ @tagName(probe.stage), @tagName(probe.restorer.phase) });
+        std.debug.print("placement plan {any}, refits {d}\n", .{ probe.restorer.plan, probe.restorer.refits });
+        return error.WindowPlacementTimeout;
+    }
     try std.testing.expectEqual(Stage.done, probe.stage);
     try std.testing.expectEqual(@as(usize, 2), probe.closed);
     try std.testing.expectEqual(@as(usize, 0), app.resourceStats().allocated_records);

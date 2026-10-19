@@ -16,8 +16,18 @@ const Host = struct {
     flags: *Flags,
     raw: bool,
     armed: bool = false,
+    shown: bool = false,
+    geometry_pending: bool = false,
     fn event(ptr: *anyopaque, window: z.Window, value: z.Event) void {
         const self: *Host = @ptrCast(@alignCast(ptr));
+        if (self.geometry_pending and (value == .resize or value == .window_position or value == .window_state)) {
+            self.geometry_pending = false;
+            window.app.post(.{ .context = self, .call = start }) catch |err| {
+                self.flags.failure = err;
+                window.app.quit();
+            };
+            return;
+        }
         if (value != .resize or !self.armed) return;
         self.armed = false;
         const flags = self.flags;
@@ -46,6 +56,12 @@ const Host = struct {
     fn start(ptr: *anyopaque) void {
         const self: *Host = @ptrCast(@alignCast(ptr));
         self.prepare() catch |err| {
+            // The toolkit's client bounds can trail the window manager's
+            // configure after mapping; retry on the next geometry event.
+            if (err == error.GeometryPending) {
+                self.geometry_pending = true;
+                return;
+            }
             self.flags.failure = err;
             self.window.app.quit();
             return;
@@ -60,7 +76,8 @@ const Host = struct {
         flags.in_advance = false;
     }
     fn prepare(self: *Host) !void {
-        try self.window.perform(.show);
+        if (!self.shown) try self.window.perform(.show);
+        self.shown = true;
         const topology = try p.refresh(self.window);
         var tracker = p.Tracker.init();
         try tracker.confirmNormal(self.window, &topology);

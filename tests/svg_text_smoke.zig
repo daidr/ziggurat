@@ -135,7 +135,10 @@ fn positionedOracle(allocator: std.mem.Allocator, actual_source: []const u8, ora
     for ([_]Mode{ .pixel, .sample_color }) |mode| for ([_]f32{ 1, 1.5, 2 }) |scale| {
         const provider = try svg_text.Provider.create(allocator, std.Thread.getCurrentId(), .{});
         defer provider.close() catch unreachable;
-        const options: svg.PrepareOptions = .{ .main_thread = std.Thread.getCurrentId(), .width = @intFromFloat(128 * scale), .height = @intFromFloat(48 * scale), .compositing = mode, .text_provider = try provider.interface() };
+        // Bitmap-only color emoji fonts are traced per pixel; the upper
+        // explicit path limit keeps both documents within budget.
+        const limits: svg.PrepareLimits = .{ .path = .{ .commands = 65536, .bytes = 16 * 1024 * 1024 } };
+        const options: svg.PrepareOptions = .{ .main_thread = std.Thread.getCurrentId(), .width = @intFromFloat(128 * scale), .height = @intFromFloat(48 * scale), .compositing = mode, .text_provider = try provider.interface(), .limits = limits };
         const actual = try actual_document.prepare(allocator, options);
         defer actual.close() catch unreachable;
         try std.testing.expectEqual(expected_requests, (try actual.stats()).text_requests);

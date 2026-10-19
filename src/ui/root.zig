@@ -62,6 +62,12 @@ pub const ShortcutScopesStats = struct {
     post_accepted: bool = false,
     last_error: ?anyerror = null,
 };
+comptime {
+    // The native UIA object is linked whenever accessibility is enabled and
+    // always references the collection row-bounds export, even in programs
+    // that never attach a Bridge or prepare a collection.
+    if (build_options.accessibility) _ = &accessibility.virtual_lists.enableMath;
+}
 pub const capabilities = .{
     .gpu = build_options.gpu,
     .accessibility = build_options.accessibility,

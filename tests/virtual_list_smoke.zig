@@ -257,7 +257,9 @@ fn cycle(allocator: std.mem.Allocator) !void {
     try app.dispatch();
     try std.testing.expect(state.list == null and state.ui_context.window == null);
     try std.testing.expectEqual(@as(usize, 0), app.resourceStats().allocated_records);
-    try std.testing.expectEqual(@as(usize, 7), state.diagnostics);
+    // One per failing mode. The callback-closed frame is discarded silently:
+    // closure in progress is not a paint failure.
+    try std.testing.expectEqual(@as(usize, 6), state.diagnostics);
 }
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;

@@ -166,7 +166,7 @@ const Host = struct {
     }
     fn diagnostic(ptr: *anyopaque, value: z.diagnostics.Diagnostic) void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
-        if (self.case == .rejected and value.operation == .paint and value.err == @as(?anyerror, error.InvalidShortcutFrame)) self.diagnostics += 1 else {
+        if (self.case == .rejected and value.operation == .paint and if (value.err) |err| err == error.InvalidShortcutFrame else false) self.diagnostics += 1 else {
             self.failure = value.err orelse error.UnexpectedDiagnostic;
             std.debug.print("scope native diagnostic: {any}\n", .{value});
         }
