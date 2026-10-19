@@ -198,9 +198,9 @@ B02 分项：
 | S03 | 待实现 | 多显示器、主题/accent/可访问性偏好、网络、电源与文件监视 | 变化订阅、取消与最后订阅者回收；无持续轮询；Windows/Linux/macOS capability |
 | S04 | 待实现 | 密钥存储、登录启动、深链和文件关联 | OS 权限/用户作用域、安装与运行时分工、卸载和参数转发；依赖 W05/R01 |
 | S05 | 待实现 | 多格式剪贴板、transfer、惰性 provider、原生拖放 | 文本/HTML/图片/文件/自定义，多 item、异步请求寿命、关闭后无悬空回调；依赖 G01 |
-| S06 | 待实现 | 异步消息对话框、上下文菜单与菜单快捷键 | 非嵌套循环、modal/focus、取消/关闭、禁用祖先、旧消息隔离；依赖 W02/U02 |
+| S06 | 部分完成（Windows/Linux） | 异步消息对话框、上下文菜单与菜单快捷键 | S06.1 两平台上下文菜单与异步消息框、Windows 菜单栏快捷键已验；非嵌套循环（Windows 菜单在私有安全点进入系统菜单循环）、取消/关闭、禁用祖先、旧消息隔离分别验证；Linux 菜单栏与快捷键分发、物理输入与视觉验收继续；依赖 W02/U02 |
 | S07 | 待实现 | 应用身份/系统目录、任务栏或 Dock badge/progress/menu、阻止休眠 | 按平台 capability、用户作用域、原生引用/电源断言配对与最后 owner 回收；依赖 S03/P03 |
-| S08 | 部分完成（Windows窗口托盘） | 独立托盘/status item、多图标、菜单与popover锚定 | 窗口Owner单托盘/任务栏重建恢复已有；App独立多item、稳定ID/用户位置、标题与popover亮态继续；其余平台依赖 S06/P02/P04 |
+| S08 | 部分完成（Windows） | 独立托盘/status item、多图标、菜单与popover锚定 | 窗口Owner单托盘/任务栏重建恢复，及 S08.1 App 独立多 item、可选稳定 GUID、锚定托盘菜单、App 停止回收已验；标题与popover亮态（无 Windows 对应）、Linux/macOS 继续；其余平台依赖 P02/P04 |
 | D01 | 待实现 | document 模型、每文件窗口与最近文档 | 文档身份/重复打开、保存/另存、dirty/关闭/quit 预检；依赖 W02/S02 |
 | D02 | 待实现 | 自动保存、外部修改、冲突检测与崩溃恢复 | 原子保存、版本戳/恢复副本、后台 I/O、丢失与权限错误；依赖 D01 |
 | D03 | 待实现 | Jump List/最近文档平台集成与文档菜单 | 隐私/删除失效项、菜单状态与多窗口；依赖 D01/S04 |
@@ -1626,3 +1626,17 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - 新增语义角色 `meter` 与 `navigation`，追加在既有编号之后。Frame 提供 `meter`、`rating`、`navigation` 与 `group`。度量条只读，报告实际值与上下限，值在首选区间外时用主题新增的 `caution` 色。评分是步长为 1 的范围控件，轨道从第一个标记前半格开始，按到哪个标记就取哪个分数。Windows UIA 映射为 ProgressBar（LocalizedControlType 为 "meter"）、Slider，以及带导航地标的 Group。Linux 不声明 AT-SPI。
 - `ziggurat_view` 提供 `breadcrumbs`、`meter`、`rating`、`accordion`/`section`。面包屑在间隙中画分隔符；手风琴最多打开一节，再次激活已打开的节会关闭它。面包屑和手风琴里的控件以容器为可访问父节点。
 - 单元测试覆盖区间与参数校验、评分标记命中、语义角色与父节点，以及无窗口的分节切换和评分调整；Linux 隐藏窗口 smoke 在 1x/2x 下实测评分的原生点击。Windows smoke 用真实 UIAutomationClient 检查导航地标、度量条只读 RangeValue、评分 SetValue 与分节 ExpandCollapse。
+
+### S06.1 上下文菜单、异步消息框与菜单快捷键
+
+- `system.menus` 统一校验菜单栏、上下文菜单和托盘菜单：ID、父项顺序、标签、禁用祖先及快捷键（command 项、不重复、普通键须带 Control/Alt/Super）。`&` 助记符在 GTK 上转为 `_`。
+- `Owner.popupMenu(request, items, anchor)` 调用即返回，每个被接受的请求只以 `Action.popup` 完成一次，取消为 null，detach/关闭不回调，只报告启用且祖先启用的命令。Windows 把请求投递到私有隐藏窗口，在主循环分发时才进入 `TrackPopupMenuEx` 的系统菜单循环（与原生移动/缩放相同），已有菜单或移动循环时直接以 null 完成；detach 先切断隐藏窗口的回指，迟到返回的循环只释放自己的菜单。Linux 用 `gtk_menu_popup_at_rect`，在一次性 idle 中报告。
+- `Owner.showMessage(request, options)` 1–3 个按钮，结果为按钮 ID、dismissed 或 failed。Windows 用 `MessageDialog` 异步接口，与文件选择器相同只触发独立事件并由 App 单次原生等待在主线程读取；Linux 用 `response` 信号的模态 `GtkMessageDialog`，不调用 `gtk_dialog_run`。
+- Windows 菜单栏快捷键在 Content `key_input` 未消费的键上分发 `Action.menu`，忽略自动重复与 AltGr。Linux 没有菜单栏，快捷键只显示在上下文菜单中。
+- 纯单元测试覆盖结构/快捷键/助记符/消息参数校验；Linux 隐藏窗口 smoke 在 Xvfb 1x/2x 下实测 GTK 菜单根项/嵌套项/禁用祖先/取消/detach 与消息框按钮/关闭/取消/窗口销毁，原生链接计数归零。Windows smoke 覆盖真实系统菜单循环内的键盘选择、取消、detach、菜单栏快捷键规则与 MessageDialog 异步取消。选择由原生激活接口或消息注入完成，不代表物理输入、人工点击或视觉质量已验收。见[系统工具](system.md)。
+
+### S08.1 独立托盘与锚定菜单
+
+- `system.Tray` 属于 App：每项有自己的隐藏顶层窗口、复制图标和 App 停止登记，可同时存在多个；重新 show 使用新原生 ID，旧回调不会命中。可选 GUID 让系统记住用户摆放位置。
+- `Tray.popupMenu(request, items, .icon)` 用系统报告的图标矩形锚定并避开遮挡，取不到时用指针；打开前取得前台以便外部点击关闭。任务栏重建时重新添加图标。
+- Windows smoke 实际向 Shell 添加两项，验证事件、旧 ID 隔离、原地更新、锚定菜单选择、任务栏重建、显式移除与 App 停止回收。标题与 popover 亮态没有 Windows 对应，Linux/macOS 托盘继续待实现。见[系统工具](system.md)。

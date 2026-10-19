@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const z = @import("ziggurat");
 const system = @import("ziggurat_system");
 fn action(_: *anyopaque, _: z.Window, _: system.Action) void {}
+fn trayAction(_: *anyopaque, _: *system.Tray, _: system.TrayAction) void {}
 fn selected(_: *anyopaque, _: z.Window, _: system.picker.Result) void {}
 test "unsupported system capabilities fail explicitly" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
@@ -30,6 +31,14 @@ test "unsupported system capabilities fail explicitly" {
     try std.testing.expectError(error.UnsupportedCapability, owner.openFiles(.{}, &destination, &context, selected));
     try std.testing.expectError(error.UnsupportedCapability, owner.pickFolder(.{}, &destination, &context, selected));
     try std.testing.expectError(error.UnsupportedCapability, owner.cancelFileDialog());
+    try std.testing.expectError(error.UnsupportedCapability, owner.popupMenu(1, &.{.{ .id = 1, .label = "Item" }}, .pointer));
+    try std.testing.expectError(error.UnsupportedCapability, owner.cancelPopup());
+    try std.testing.expectError(error.UnsupportedCapability, owner.showMessage(1, .{ .message = "Text", .buttons = &.{.{ .id = 1, .label = "OK" }} }));
+    try std.testing.expectError(error.UnsupportedCapability, owner.cancelMessage());
+    var tray = system.Tray.init(&context, trayAction);
+    try std.testing.expectError(error.UnsupportedCapability, tray.show(app, .{}));
+    try std.testing.expectError(error.UnsupportedCapability, tray.popupMenu(1, &.{.{ .id = 1, .label = "Item" }}, .icon));
+    try tray.remove();
     try std.testing.expectError(error.UnsupportedCapability, system.clipboard.writeText(window, "text"));
     try std.testing.expectError(error.UnsupportedCapability, system.clipboard.readText(window, &destination));
     var picker: system.picker.Picker = .{};

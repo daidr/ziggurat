@@ -43,6 +43,18 @@ pub const Owner = struct {
     pub fn clearNotification(_: *Owner) !void {
         return error.UnsupportedCapability;
     }
+    pub fn popupMenu(_: *Owner, _: u64, _: []const types.Item, _: types.Anchor) !void {
+        return error.UnsupportedCapability;
+    }
+    pub fn cancelPopup(_: *Owner) !void {
+        return error.UnsupportedCapability;
+    }
+    pub fn showMessage(_: *Owner, _: u64, _: types.MessageOptions) !void {
+        return error.UnsupportedCapability;
+    }
+    pub fn cancelMessage(_: *Owner) !void {
+        return error.UnsupportedCapability;
+    }
     pub fn openFile(_: *Owner, _: picker.Options, _: []u8, _: *anyopaque, _: picker.Callback) !void {
         return error.UnsupportedCapability;
     }
@@ -58,4 +70,21 @@ pub const Owner = struct {
     pub fn pickFolder(_: *Owner, _: picker.Options, _: []u8, _: *anyopaque, _: picker.Callback) !void {
         return error.UnsupportedCapability;
     }
+};
+
+pub const Tray = struct {
+    context: *anyopaque,
+    on_action: *const fn (*anyopaque, *Tray, types.TrayAction) void,
+    pub fn init(context: *anyopaque, on_action: *const fn (*anyopaque, *Tray, types.TrayAction) void) Tray {
+        return .{ .context = context, .on_action = on_action };
+    }
+    pub fn show(_: *Tray, app: *z.App, _: types.TrayItemOptions) !void {
+        app.assertOwner();
+        return error.UnsupportedCapability;
+    }
+    pub fn remove(_: *Tray) !void {}
+    pub fn popupMenu(_: *Tray, _: u64, _: []const types.Item, _: types.TrayAnchor) !void {
+        return error.UnsupportedCapability;
+    }
+    pub fn cancelPopup(_: *Tray) void {}
 };
