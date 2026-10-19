@@ -12,6 +12,11 @@ pub const Owner = if (builtin.os.tag == .windows) @import("windows.zig").Owner e
 pub const clipboard = @import("clipboard.zig");
 pub const picker = @import("picker.zig");
 pub const shell = @import("shell.zig");
+pub const identity = @import("identity.zig");
+pub const instance = @import("instance.zig");
+pub const integration = @import("integration.zig");
+pub const power = @import("power.zig");
+pub const taskbar = @import("taskbar.zig");
 pub const capabilities = .{
     .native_menu = builtin.os.tag == .windows,
     .tray = builtin.os.tag == .windows,
@@ -20,4 +25,16 @@ pub const capabilities = .{
     .global_hotkeys = builtin.os.tag == .windows,
     .notification_area = builtin.os.tag == .windows,
     .shell = shell.capabilities,
+    .identity = identity.capabilities,
+    .instance = instance.capabilities,
+    .integration = integration.capabilities,
+    .power = power.capabilities,
+    .taskbar = taskbar.capabilities,
 };
+
+test {
+    _ = identity;
+    _ = instance;
+    _ = integration;
+    _ = power;
+}

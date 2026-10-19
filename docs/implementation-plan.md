@@ -34,7 +34,7 @@
 | W02 | 已完成（Windows/X11） | 拥有/瞬态窗口、模态窗口、关闭及焦点策略 | 父关闭传播、整树模态输入策略、取消与异常回滚；独立顶层窗口，不嵌套事件循环或替代 H02 内嵌内容；依赖 W01 |
 | W03 | 部分完成（Windows/X11） | 无边框、自定义标题栏、原生拖动/缩放、透明与材质 | W03.1 装饰/命中/原生交互已验收；透明与材质继续待实现；DPI/最大化/系统菜单；依赖 W01 |
 | W04 | 部分完成（Windows/X11） | 窗口枚举/查找、焦点、显示器约束与状态持久化 | 运行期枚举/查找、显式显示器快照、离屏恢复及版本化 worker 存储已验；原生变化订阅、物理混合 DPI/热插拔与其他平台继续，不在 paint 访问磁盘 |
-| W05 | 待实现 | 应用激活、单实例与参数转发 | OS 锁与显式 IPC；启动竞争、旧实例关闭、恶意/超长参数和用户隔离 |
+| W05 | 部分完成（Linux 已验；Windows 已编译，待原生运行） | 应用激活、单实例与参数转发 | OS 锁与显式 IPC；启动竞争、旧实例关闭、恶意/超长参数和用户隔离；W05.1 `system.instance` 已有 per-user 锁、显式 worker 接收、有界帧与拒绝、停止和崩溃回收，激活由宿主经 `App.post` 执行，见[单实例与系统集成](os-integration.md) |
 
 ## 布局、控件与绘制
 
@@ -196,10 +196,10 @@ B02 分项：
 | S01 | 已完成（Windows） | 全局快捷键、通知区通知 | 原生注册/冲突/注销、稳定事件 ID、Owner 关闭与诊断重入检查；Linux/macOS 见 P02/P04 |
 | S02 | 部分完成 | shell 打开 URL/文件、定位、回收站、文件图标、应用发现/启动 | S02.1 显式 worker 的 executable 启动（Windows/Linux）及 S02.4 Windows 16/32px 不透明图标已验收；URL/关联文件/定位/回收站/完整图标/应用发现继续待实现；参数/路径/编码、异步成本、系统错误和图标所有权 |
 | S03 | 待实现 | 多显示器、主题/accent/可访问性偏好、网络、电源与文件监视 | 变化订阅、取消与最后订阅者回收；无持续轮询；Windows/Linux/macOS capability |
-| S04 | 待实现 | 密钥存储、登录启动、深链和文件关联 | OS 权限/用户作用域、安装与运行时分工、卸载和参数转发；依赖 W05/R01 |
+| S04 | 部分完成（登录启动、深链、文件关联：Linux 已验，Windows 已编译待原生运行） | 密钥存储、登录启动、深链和文件关联 | OS 权限/用户作用域、安装与运行时分工、卸载和参数转发；依赖 W05/R01；S04.1 `system.integration` 按用户注册/卸载并供安装程序调用；密钥存储继续待实现 |
 | S05 | 待实现 | 多格式剪贴板、transfer、惰性 provider、原生拖放 | 文本/HTML/图片/文件/自定义，多 item、异步请求寿命、关闭后无悬空回调；依赖 G01 |
 | S06 | 待实现 | 异步消息对话框、上下文菜单与菜单快捷键 | 非嵌套循环、modal/focus、取消/关闭、禁用祖先、旧消息隔离；依赖 W02/U02 |
-| S07 | 待实现 | 应用身份/系统目录、任务栏或 Dock badge/progress/menu、阻止休眠 | 按平台 capability、用户作用域、原生引用/电源断言配对与最后 owner 回收；依赖 S03/P03 |
+| S07 | 部分完成（Linux 已验；Windows 已编译待原生运行） | 应用身份/系统目录、任务栏或 Dock badge/progress/menu、阻止休眠 | 按平台 capability、用户作用域、原生引用/电源断言配对与最后 owner 回收；依赖 S03/P03；S07.1 身份、目录、任务栏进度/叠加图标/launcher 计数与提醒、休眠断言已实现；任务栏/Dock 菜单与 macOS 继续 |
 | S08 | 部分完成（Windows窗口托盘） | 独立托盘/status item、多图标、菜单与popover锚定 | 窗口Owner单托盘/任务栏重建恢复已有；App独立多item、稳定ID/用户位置、标题与popover亮态继续；其余平台依赖 S06/P02/P04 |
 | D01 | 待实现 | document 模型、每文件窗口与最近文档 | 文档身份/重复打开、保存/另存、dirty/关闭/quit 预检；依赖 W02/S02 |
 | D02 | 待实现 | 自动保存、外部修改、冲突检测与崩溃恢复 | 原子保存、版本戳/恢复副本、后台 I/O、丢失与权限错误；依赖 D01 |
@@ -1643,3 +1643,12 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - 新增语义角色 `meter` 与 `navigation`，追加在既有编号之后。Frame 提供 `meter`、`rating`、`navigation` 与 `group`。度量条只读，报告实际值与上下限，值在首选区间外时用主题新增的 `caution` 色。评分是步长为 1 的范围控件，轨道从第一个标记前半格开始，按到哪个标记就取哪个分数。Windows UIA 映射为 ProgressBar（LocalizedControlType 为 "meter"）、Slider，以及带导航地标的 Group。Linux 不声明 AT-SPI。
 - `ziggurat_view` 提供 `breadcrumbs`、`meter`、`rating`、`accordion`/`section`。面包屑在间隙中画分隔符；手风琴最多打开一节，再次激活已打开的节会关闭它。面包屑和手风琴里的控件以容器为可访问父节点。
 - 单元测试覆盖区间与参数校验、评分标记命中、语义角色与父节点，以及无窗口的分节切换和评分调整；Linux 隐藏窗口 smoke 在 1x/2x 下实测评分的原生点击。Windows smoke 用真实 UIAutomationClient 检查导航地标、度量条只读 RangeValue、评分 SetValue 与分节 ExpandCollapse。
+
+### W05.1、S04.1、S07.1 单实例与系统集成
+
+- `system.identity` 定义贯穿锁、desktop ID、AppUserModelID 和处理程序的应用 ID 规则，在 App.init 前设置进程身份，并把 Windows Known Folder 与 Linux XDG/user-dirs 目录写入调用者缓冲；未配置的 Linux 用户目录明确返回 `DirectoryUnavailable`。
+- `system.instance` 以 Linux 运行目录 flock + Unix socket、Windows 每用户每会话 named pipe（仅当前用户 DACL、首实例标志、双向 SID 核对）实现单实例。接收在宿主创建的 worker 上阻塞，可跨线程停止；消息完整校验后才确认，帧上限 128 参数/单项 16 KiB/合计 64 KiB，畸形、超长、停滞与外来用户对端被拒而 listener 继续服务。primary 退出时旧 secondary 得到 `PrimaryUnavailable`，`claimOrForward` 有界重试。激活由宿主复制消息后经 `App.post` 决定。
+- `system.integration` 按用户写入/卸载登录项、URL scheme 与文件关联，供安装程序调用：Windows 为 HKCU Run/Classes 与带所有者标记的 ProgID，不绕过受保护的用户选择；Linux 为 autostart、desktop entry、MIME package 与只改本 ID 条目的 mimeapps.list，原子写入并可刷新缓存。`localPath` 解码转发的 file URL。
+- `system.power.Assertion` 为每个 owner 持有独立 Windows 电源请求或 logind inhibitor 描述符，release 幂等；`system.taskbar` 提供 Windows ITaskbarList3 进度/叠加图标与 Linux launcher entry 进度/计数/提醒，capability 如实报告 Windows 无非打包数字 badge。
+- Linux Debug 与 ReleaseSafe 在私有 session bus（兼作 system bus）与 Xvfb 下实际运行 `smoke-os-integration`：8 个并发与最大长度参数的真实子进程转发、三类恶意对端、旧 primary 停止、被杀 primary 回收、12 轮资源持平与开放运行目录拒绝；隔离 XDG 根中由 GIO 独立解析并真正启动注册的 scheme 与文件类型，参数经单实例送达，卸载后无关 mimeapps 行保留；logind 替身核对 12 轮 Inhibit 参数与描述符关闭，独立订阅者核对 launcher 信号。`test-system-integration` 10/10。Windows 目标 Debug/ReleaseSafe 交叉编译通过，同一 smoke 已加入 Windows CI，原生运行结果尚未记录，故 Windows 不标完成。
+- 密钥存储、任务栏/Dock 菜单（D03）和 macOS 不在本片；dock 实际显示、真实 logind 策略与 Windows 设置中的默认应用对话框未经人工验证。见[单实例与系统集成](os-integration.md)。

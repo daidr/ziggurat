@@ -1,6 +1,6 @@
 # 系统工具
 
-按需导入 `ziggurat_system`。当前原生菜单、托盘、文本剪贴板、异步文件选择器、全局快捷键和通知区通知仅实现 Windows；`system.capabilities` 分别报告支持状态。Linux 等目标的这些窗口扩展返回 `UnsupportedCapability`。独立的无 UI `shell.Worker` 已支持 Windows/Linux 显式程序启动，以及 Windows 有界文件图标，能力见 `system.capabilities.shell`。
+按需导入 `ziggurat_system`。应用身份、系统目录、单实例与参数转发、登录启动、URL scheme/文件关联、阻止休眠和任务栏状态见 [单实例与系统集成](os-integration.md)。当前原生菜单、托盘、文本剪贴板、异步文件选择器、全局快捷键和通知区通知仅实现 Windows；`system.capabilities` 分别报告支持状态。Linux 等目标的这些窗口扩展返回 `UnsupportedCapability`。独立的无 UI `shell.Worker` 已支持 Windows/Linux 显式程序启动，以及 Windows 有界文件图标，能力见 `system.capabilities.shell`。
 
 ## 窗口 owner
 
