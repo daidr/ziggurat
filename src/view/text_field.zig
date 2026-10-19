@@ -18,6 +18,9 @@ pub const Options = struct {
     width: f32 = 200,
     /// Visible lines, used to size a multiline field.
     lines: u32 = 1,
+    /// Draw the field's border and background. Turn it off inside an
+    /// editable combo box or token field, which draw their own.
+    frame: bool = true,
 };
 
 /// Keep TextField at a stable address while the view emits it and until
@@ -46,7 +49,7 @@ pub const TextField = struct {
     /// The leaf to emit from a build function with `View.embed`. Give it a
     /// `Style.key` when siblings before it can change, so its id stays put.
     pub fn embed(self: *TextField) view.Embed {
-        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .annotate = annotate };
+        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .annotate = annotate, .status = status };
     }
 
     /// Stop deferred work before the Field is closed. Closing the Field is
@@ -115,6 +118,16 @@ pub const TextField = struct {
         window.invalidate();
     }
 
+    /// Composition and emptiness from the Field's document; a document
+    /// that cannot answer reports neither.
+    fn status(ptr: *anyopaque) view.EmbedStatus {
+        const self: *TextField = @ptrCast(@alignCast(ptr));
+        const document = self.field.document;
+        const composing = if (document.composition()) |value| value != null else |_| false;
+        const empty = if (document.byteLength()) |length| length == 0 else |_| false;
+        return .{ .composing = composing, .empty = empty and !composing };
+    }
+
     fn annotate(ptr: *anyopaque, annotation: view.Annotation) void {
         const self: *TextField = @ptrCast(@alignCast(ptr));
         self.annotation = annotation;
@@ -127,8 +140,8 @@ pub const TextField = struct {
         const box = self.prepared orelse bounds;
         const focused = self.attached and frame.context.input_state.focused == self.id;
         const enabled = self.field.options.policy.enabled;
-        frame.roundedRect(box, 3, ui.Color.rgb(if (focused) theme.palette.focus else if (enabled) theme.palette.border else theme.palette.disabled_border));
-        frame.roundedRect(.{ .x = box.x + theme.metrics.border, .y = box.y + theme.metrics.border, .width = @max(0, box.width - 2 * theme.metrics.border), .height = @max(0, box.height - 2 * theme.metrics.border) }, 2, ui.Color.rgb(theme.palette.field));
+        if (self.options.frame) frame.roundedRect(box, 3, ui.Color.rgb(if (focused) theme.palette.focus else if (enabled) theme.palette.border else theme.palette.disabled_border));
+        if (self.options.frame) frame.roundedRect(.{ .x = box.x + theme.metrics.border, .y = box.y + theme.metrics.border, .width = @max(0, box.width - 2 * theme.metrics.border), .height = @max(0, box.height - 2 * theme.metrics.border) }, 2, ui.Color.rgb(theme.palette.field));
         if (!self.attached) return;
         const about = self.annotation;
         self.annotation = .{};

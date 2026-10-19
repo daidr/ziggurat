@@ -14,7 +14,7 @@ const c = if (builtin.os.tag == .windows) @cImport({
 pub const max_nodes = 128;
 pub const text_capacity = 32768;
 pub const root_id: u64 = 0;
-pub const Role = enum(u32) { window, group, button, text, text_box, checkbox, radio, toggle_switch, progress, radio_group, slider, stepper, list, tab_list, tab, toolbar, splitter, link, disclosure, meter, navigation, list_box, list_item, combo_box, tooltip, status, search, image };
+pub const Role = enum(u32) { window, group, button, text, text_box, checkbox, radio, toggle_switch, progress, radio_group, slider, stepper, list, tab_list, tab, toolbar, splitter, link, disclosure, meter, navigation, list_box, list_item, combo_box, tooltip, status, search, image, tree, tree_item, table, table_header, column_header, table_row, token_field, token };
 pub const Node = struct {
     id: u64,
     parent: ?u64 = root_id,
@@ -32,6 +32,10 @@ pub const Node = struct {
     invalid: bool = false,
     /// A form cannot be submitted without a value.
     required: bool = false,
+    /// A tree or table whose items can be selected together.
+    multiple: bool = false,
+    /// Whether a tree item's children are shown; null for a leaf.
+    expanded: ?bool = null,
     range_value: f64 = 0,
     range_minimum: f64 = 0,
     range_maximum: f64 = 100,
@@ -57,6 +61,8 @@ const Entry = struct {
     checked: bool,
     invalid: bool,
     required: bool,
+    multiple: bool,
+    expanded: ?bool,
     range_value: f64,
     range_minimum: f64,
     range_maximum: f64,
@@ -140,7 +146,7 @@ pub const Tree = struct {
             const description = text[used..][0..entry.description_len];
             @memcpy(description, self.storage[entry.description_start..][0..entry.description_len]);
             used += description.len;
-            nodes[written] = .{ .id = entry.id, .parent = entry.parent, .role = entry.role, .name = name, .value = value, .description = description, .bounds = entry.bounds, .enabled = entry.enabled, .focused = entry.focused, .read_only = entry.read_only, .checked = entry.checked, .invalid = entry.invalid, .required = entry.required, .range_value = entry.range_value, .range_minimum = entry.range_minimum, .range_maximum = entry.range_maximum, .range_small_change = entry.range_small_change, .range_large_change = entry.range_large_change, .selection_start = entry.selection_start, .selection_end = entry.selection_end };
+            nodes[written] = .{ .id = entry.id, .parent = entry.parent, .role = entry.role, .name = name, .value = value, .description = description, .bounds = entry.bounds, .enabled = entry.enabled, .focused = entry.focused, .read_only = entry.read_only, .checked = entry.checked, .invalid = entry.invalid, .required = entry.required, .multiple = entry.multiple, .expanded = entry.expanded, .range_value = entry.range_value, .range_minimum = entry.range_minimum, .range_maximum = entry.range_maximum, .range_small_change = entry.range_small_change, .range_large_change = entry.range_large_change, .selection_start = entry.selection_start, .selection_end = entry.selection_end };
             written += 1;
         };
         return nodes[0..written];
@@ -194,6 +200,8 @@ pub const Tree = struct {
             .checked = node.checked,
             .invalid = node.invalid,
             .required = node.required,
+            .multiple = node.multiple,
+            .expanded = node.expanded,
             .range_value = node.range_value,
             .range_minimum = node.range_minimum,
             .range_maximum = node.range_maximum,
@@ -477,7 +485,7 @@ pub const Bridge = struct {
                 .id = entry.id,
                 .parent = entry.parent orelse root_id,
                 .role = @intFromEnum(entry.role),
-                .flags = @as(u32, @intFromBool(entry.enabled and enabled)) | (@as(u32, @intFromBool(entry.focused and focused)) << 1) | (@as(u32, @intFromBool(entry.read_only)) << 2) | (@as(u32, @intFromBool(!visible or entry.bounds.width == 0 or entry.bounds.height == 0)) << 3) | (@as(u32, @intFromBool(entry.checked)) << 4) | (@as(u32, @intFromBool(entry.invalid)) << 5) | (@as(u32, @intFromBool(entry.required)) << 6),
+                .flags = @as(u32, @intFromBool(entry.enabled and enabled)) | (@as(u32, @intFromBool(entry.focused and focused)) << 1) | (@as(u32, @intFromBool(entry.read_only)) << 2) | (@as(u32, @intFromBool(!visible or entry.bounds.width == 0 or entry.bounds.height == 0)) << 3) | (@as(u32, @intFromBool(entry.checked)) << 4) | (@as(u32, @intFromBool(entry.invalid)) << 5) | (@as(u32, @intFromBool(entry.required)) << 6) | (@as(u32, @intFromBool(entry.multiple)) << 7) | (@as(u32, @intFromBool(entry.expanded != null)) << 8) | (@as(u32, @intFromBool(entry.expanded orelse false)) << 9),
                 .name_start = @intCast(name_start),
                 .name_len = @intCast(name_len),
                 .value_start = @intCast(value_start),

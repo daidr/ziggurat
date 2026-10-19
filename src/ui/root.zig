@@ -3502,6 +3502,56 @@ pub const Frame = struct {
         if (id == accessibility.root_id) return error.ReservedControlId;
         try self.semantic(.{ .id = id, .parent = parent, .role = .search, .name = name, .bounds = bounds });
     }
+    /// A tree of rows; `multiple` lets several be selected at once. Its rows
+    /// name this id as their `radio_group`.
+    pub fn treeView(self: *Frame, id: u64, bounds: Rect, name: []const u8, multiple: bool, parent: u64) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.semantic(.{ .id = id, .parent = parent, .role = .tree, .name = name, .bounds = bounds, .multiple = multiple });
+    }
+    /// One tree row. Its semantic parent is the tree or the row it is
+    /// nested under; `options.expanded` is null for a leaf.
+    pub fn treeItem(self: *Frame, id: u64, bounds: Rect, text: []const u8, options: widgets.RowOptions) !void {
+        if (options.control.radio_group == null) return error.MissingGroup;
+        try widgets.emitTreeItem(self, id, bounds, text, options);
+    }
+    /// A table of rows under a header row; `multiple` lets several rows be
+    /// selected at once. Its rows name this id as their `radio_group`.
+    pub fn dataTable(self: *Frame, id: u64, bounds: Rect, name: []const u8, multiple: bool, parent: u64) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.semantic(.{ .id = id, .parent = parent, .role = .table, .name = name, .bounds = bounds, .multiple = multiple });
+    }
+    /// The row of column headers at the top of a table.
+    pub fn tableHeader(self: *Frame, id: u64, bounds: Rect, parent: u64) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.semantic(.{ .id = id, .parent = parent, .role = .table_header, .name = "", .bounds = bounds });
+    }
+    /// A column title that sorts on activation when `sortable`; `sort` is
+    /// the column's current direction, or null when another column sorts.
+    pub fn columnHeader(self: *Frame, id: u64, bounds: Rect, title: []const u8, sort: ?widgets.SortDirection, sortable: bool, options: widgets.Options) !void {
+        try widgets.emitColumnHeader(self, id, bounds, title, sort, sortable, options);
+    }
+    /// The background and semantics of one table row; record its cells after it.
+    pub fn tableRow(self: *Frame, id: u64, bounds: Rect, name: []const u8, options: widgets.RowOptions) !void {
+        if (options.control.radio_group == null) return error.MissingGroup;
+        try widgets.emitTableRow(self, id, bounds, name, options);
+    }
+    /// A text input that collects tokens; its tokens and input follow.
+    pub fn tokenField(self: *Frame, id: u64, bounds: Rect, name: []const u8, parent: u64) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.semantic(.{ .id = id, .parent = parent, .role = .token_field, .name = name, .bounds = bounds });
+    }
+    pub fn tokenItem(self: *Frame, id: u64, remove_id: u64, bounds: Rect, text: []const u8, options: widgets.TokenOptions) !void {
+        try widgets.emitToken(self, id, remove_id, bounds, text, options);
+    }
+    /// An editable combo box around a text input that follows: `value` is
+    /// the input's text and `expanded` whether its list is open.
+    pub fn comboField(self: *Frame, id: u64, bounds: Rect, value: []const u8, expanded: bool, options: widgets.Options) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.semantic(.{ .id = id, .parent = options.semantic_parent, .role = .combo_box, .name = options.name, .value = value, .description = options.description, .invalid = options.invalid, .required = options.required, .bounds = bounds, .enabled = options.enabled, .checked = expanded, .read_only = true });
+    }
+    pub fn comboToggle(self: *Frame, id: u64, bounds: Rect, expanded: bool, options: widgets.Options) !void {
+        try widgets.emitComboToggle(self, id, bounds, expanded, options);
+    }
     pub fn meter(self: *Frame, id: u64, bounds: Rect, value: f64, spec: Range, options: widgets.MeterOptions) !void {
         try widgets.emitMeter(self, id, bounds, value, spec, options);
     }
@@ -4060,6 +4110,55 @@ test "combo boxes, tooltips, status, search and avatars publish their roles" {
         try std.testing.expectEqual(@as(?u64, 11), nodes[3].parent);
         try std.testing.expectEqualStrings("Ada Lovelace", text[nodes[6].name_start..][0..nodes[6].name_len]);
         try std.testing.expectEqualStrings("Go back", text[nodes[8].name_start..][0..nodes[8].name_len]);
+    }
+}
+
+test "trees, tables and token fields publish their roles and states" {
+    const Dummy = struct {
+        fn draw(_: *anyopaque, _: *Frame) void {}
+        fn action(_: *anyopaque, _: u64) void {}
+    };
+    var dummy: u8 = 0;
+    var context = Context.init(&dummy, Dummy.draw, Dummy.action);
+    if (build_options.accessibility) {
+        context.attached_semantics_enabled = true;
+        try context.semantic_tree.reset("Collections", .{ .x = 0, .y = 0, .width = 300, .height = 300 });
+    }
+    var frame: Frame = .{ .context = &context, .size = .{ .width = 300, .height = 300, .scale = 1 } };
+    const row: Rect = .{ .x = 0, .y = 0, .width = 200, .height = 24 };
+    try frame.treeView(1, .{ .x = 0, .y = 0, .width = 200, .height = 48 }, "Files", true, accessibility.root_id);
+    try frame.treeItem(2, row, "src", .{ .control = .{ .semantic_parent = 1, .radio_group = 1 }, .selected = true, .cursor = true, .multiple = true, .expanded = true });
+    try frame.treeItem(3, .{ .x = 0, .y = 24, .width = 200, .height = 24 }, "main.zig", .{ .control = .{ .semantic_parent = 2, .radio_group = 1 }, .multiple = true, .level = 1 });
+    try frame.dataTable(4, .{ .x = 0, .y = 60, .width = 200, .height = 60 }, "Parts", false, accessibility.root_id);
+    try frame.tableHeader(5, .{ .x = 0, .y = 60, .width = 200, .height = 30 }, 4);
+    try frame.columnHeader(6, .{ .x = 0, .y = 60, .width = 100, .height = 30 }, "Name", .descending, true, .{ .semantic_parent = 5 });
+    try frame.columnHeader(7, .{ .x = 100, .y = 60, .width = 100, .height = 30 }, "Note", null, false, .{ .semantic_parent = 5 });
+    try frame.tableRow(8, .{ .x = 0, .y = 90, .width = 200, .height = 30 }, "Bolts", .{ .control = .{ .semantic_parent = 4, .radio_group = 4 }, .cursor = true });
+    try frame.tokenField(9, .{ .x = 0, .y = 130, .width = 200, .height = 30 }, "Tags", accessibility.root_id);
+    try frame.tokenItem(10, 11, .{ .x = 0, .y = 130, .width = 80, .height = 30 }, "zig", .{ .control = .{ .semantic_parent = 9, .radio_group = 9 } });
+    // The sortable header takes presses; the other one does not.
+    context.input_state.down(.{ .x = 10, .y = 70 });
+    try std.testing.expectEqual(@as(?u64, 6), context.input_state.active);
+    context.input_state.cancelPress();
+    context.input_state.down(.{ .x = 150, .y = 70 });
+    try std.testing.expectEqual(@as(?u64, null), context.input_state.active);
+    context.input_state.cancelPress();
+    // The end of a token is its remove button.
+    context.input_state.down(.{ .x = 78, .y = 140 });
+    try std.testing.expectEqual(@as(?u64, 11), context.input_state.active);
+    context.input_state.cancelPress();
+    if (build_options.accessibility) {
+        const nodes = context.semantic_tree.entries[0..context.semantic_tree.len];
+        const expected = [_]accessibility.Role{ .tree, .tree_item, .tree_item, .table, .table_header, .column_header, .column_header, .table_row, .token_field, .token, .button };
+        for (expected, nodes[1..][0..expected.len]) |role, node| try std.testing.expectEqual(role, node.role);
+        try std.testing.expect(nodes[1].multiple and !nodes[4].multiple);
+        try std.testing.expect(nodes[2].checked and nodes[2].expanded.?);
+        try std.testing.expectEqual(@as(?bool, null), nodes[3].expanded);
+        try std.testing.expectEqual(@as(?u64, 2), nodes[3].parent);
+        const text = context.semantic_tree.storage[0..];
+        try std.testing.expectEqualStrings("descending", text[nodes[6].value_start..][0..nodes[6].value_len]);
+        try std.testing.expectEqual(@as(usize, 0), nodes[7].value_len);
+        try std.testing.expectEqual(@as(?u64, 10), nodes[11].parent);
     }
 }
 
