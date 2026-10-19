@@ -250,6 +250,11 @@ pub fn build(b: *std.Build) void {
     const run_i18n_tests = b.addRunArtifact(i18n_tests);
     test_step.dependOn(&run_i18n_tests.step);
     b.step("test-i18n", "Run locale fallback, catalog, plural, number, date and pseudolocale tests").dependOn(&run_i18n_tests.step);
+    // Optional: needs `python scripts/fetch-sqlite.py`, so it stays out of `test` and `check`.
+    const sqlite = b.addModule("ziggurat_sqlite", .{ .root_source_file = b.path("src/sqlite/root.zig"), .target = target, .optimize = optimize });
+    @import("build_support/sqlite.zig").add(b, sqlite, target, optimize);
+    const sqlite_tests = b.addTest(.{ .root_module = sqlite });
+    b.step("test-sqlite", "Run SQLite connection, binding, row, transaction, migration and thread tests (fetch source first)").dependOn(&b.addRunArtifact(sqlite_tests).step);
     const wake = b.addModule("ziggurat_wake", .{ .root_source_file = b.path("src/wake/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
         wake.link_libc = true;
