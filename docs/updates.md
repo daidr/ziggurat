@@ -1,6 +1,6 @@
 # 签名更新与版本发布
 
-`ziggurat_update` 是可选的纯 Zig 模块。它负责签名元数据、限长流校验、ZIP 清单核验和版本目录发布。网络请求、界面、退出确认、重新启动和旧版本保留由应用负责。磁盘操作会阻塞，应用应放在自行管理的工作线程中，通过 `App.post` 返回结果。
+`ziggurat_update` 是可选的纯 Zig 模块。它负责签名元数据、发布索引、限长流校验、可续传下载、增量补丁、ZIP 清单核验、版本目录发布、保留与回滚。何时检查、提示界面、退出确认和重新启动的时机由应用决定；模块提供在关闭完成后启动新版本的函数。网络与磁盘操作都会阻塞，应用应放在自行管理的工作线程中，通过 `App.post` 返回结果；模块不创建线程。
 
 ## 信任与格式
 
@@ -30,6 +30,22 @@ root/
 
 `readCurrent` 返回受约束的相对路径与版本，供宿主启动器选择版本。marker 所在目录由应用保护，它本身不是抵御本地目录篡改的认证边界。原子文件切换不等于对所有文件系统的断电持久性保证。更新器不会自动终止正在运行的程序，也不覆盖 Windows 正在运行的 EXE。
 
+## 发布索引、增量与密钥轮换
+
+`feed.check(allocator, bytes, policy, installed)` 读取最多 1 MiB 的发布索引 `feed.json`：`releases` 是逐条签名的完整清单，`deltas` 是逐条签名的增量清单。索引本身不签名，客户端只对选中的条目逐一验签；策略的版本下限拒绝重放的旧条目。索引可以扣留新版本，不能让客户端接受伪造版本。它选出本 identity/target 中最新的完整版本；本 target 的条目验签失败时整个检查失败，而不是静默退回较旧版本。返回的清单各自拥有存储，用完调用 `deinit`。
+
+增量清单绑定 identity、target、来源版本与来源归档的大小和 SHA-256、补丁 URL/大小/SHA-256，以及结果归档的大小和 SHA-256。签名输入同样是固定版本的规范格式。只有当前版本、保留的已安装归档摘要和结果摘要都与完整清单一致时才会选中增量；其他构建的同版本来源被跳过而不是报错。`delta.applyVerified` 先按签名校验补丁字节，再从保留归档重建完整归档，复制范围按声明的来源大小检查，结果不超过签名大小，最后比对结果摘要。任何失败都由调用者丢弃输出并下载完整归档。补丁格式是简单的复制/插入指令流，由发布工具在内存中生成；它不是通用二进制差分格式。
+
+`Manifest.endorsement` 支持密钥轮换：受信任的旧密钥对新公钥签署 `ziggurat-key-v1` 声明（绑定 identity），新密钥签署的版本附带该声明，旧客户端据此接受。声明不可链式传递，也不提供吊销；新版本应用把新公钥放进自己的 `Policy`，过渡期可用 `additional_public_keys` 同时信任两把密钥。
+
+## 下载、保留与回滚
+
+`download.fetch(manifest, source, partial, &control)` 把传输写入调用者的部分文件。已有前缀先重新计算摘要再续传；来源不支持续传时从零开始。`Control.cancel` 可在任意线程调用，取消保留部分文件供下次续传；完整但摘要错误的文件会被截断。进度在 worker 上回调，UI 宿主用 `App.post` 转交，`Full` 时丢弃中间值即可。`http.Source` 基于调用者持有的 `std.http.Client`，用 `Range` 续传，200 响应即从头开始；HTTPS 证书使用该客户端的系统 CA。`http.get` 读取有上限的小文档，如发布索引。模块不创建线程。
+
+`publishZip` 的 `retain_archive` 把验证过的归档保留为 `archives/<release>.zip`，供下一次增量使用。`retention.currentArchive` 打开并重新计算当前版本保留归档的摘要。`retention.rollback` 在更新锁内逐个文件对照该版本的 package.json 重新校验，再原子切换 `current.json`；回滚是宿主的明确决定，之后的检查仍会提供较新版本，是否跳过由宿主决定。`retention.prune(keep)` 删除最新 `keep` 个之外的旧版本及其归档，当前版本和比它新的版本始终保留；旧版本可能仍在运行时不要清理。
+
+`launch.currentExecutable` 解析当前版本可执行文件的绝对路径。`launch.spawnDetached` 在 `App.run` 返回、旧进程的窗口和回调都结束之后启动新版本：先用 `requestQuit` 走正常的退出否决，再在关闭完成后启动，更新器自身不终止任何进程。
+
 ## 命令行工具
 
 ```powershell
@@ -37,20 +53,31 @@ zig build update-tool -Doptimize=ReleaseSafe
 zig-out/bin/ziggurat-update.exe --help
 ```
 
-工具提供 `keygen`、`sign`、`verify`、`publish` 和 `current`。私钥输入是含 32 个原始字节的 seed 文件，不放到命令行参数或分发包中；公钥文件同样是 32 个原始字节。`keygen` 独占创建文件；POSIX 私钥权限为 0600，Windows 使用调用者目录继承的 ACL，签名目录应预先受到保护。`sign` 不覆盖已有清单。
-
 ```text
 ziggurat-update keygen PRIVATE_SEED_FILE PUBLIC_KEY_FILE
-ziggurat-update sign ZIP MANIFEST PRIVATE_SEED_FILE ID TARGET 1.2.3.0 HTTPS_URL
+ziggurat-update sign ZIP MANIFEST PRIVATE_SEED_FILE ID TARGET 1.2.3.0 HTTPS_URL [ENDORSEMENT]
 ziggurat-update verify MANIFEST PUBLIC_KEY_FILE ID TARGET 1.2.2.0
 ziggurat-update publish MANIFEST PUBLIC_KEY_FILE ID TARGET 1.2.2.0 ZIP ROOT
 ziggurat-update current ROOT ID TARGET
+ziggurat-update pack OUTPUT_ZIP NAME ID TARGET VERSION EXECUTABLE FILE...
+ziggurat-update endorse TRUSTED_SEED_FILE NEW_PUBLIC_KEY_FILE ID ENDORSEMENT
+ziggurat-update release DIR ID TARGET VERSION ZIP PRIVATE_SEED_FILE BASE_HTTPS_URL [--endorsement FILE] [--from OLD_ZIP OLD_VERSION]...
+ziggurat-update check FEED PUBLIC_KEY_FILE ID TARGET ROOT
+ziggurat-update fetch FEED PUBLIC_KEY_FILE ID TARGET ROOT
+ziggurat-update rollback ROOT ID TARGET VERSION
+ziggurat-update prune ROOT ID TARGET KEEP
 ```
 
-不要从更新服务器下载公钥后直接信任它；应用的公钥来自受信任的初始分发。此模块不提供密钥轮换协议、增量补丁或自动回滚策略。
+私钥输入是含 32 个原始字节的 seed 文件，不放到命令行参数或分发包中；公钥文件同样是 32 个原始字节。`keygen` 独占创建文件；POSIX 私钥权限为 0600，Windows 使用调用者目录继承的 ACL，签名目录应预先受到保护。`sign` 不覆盖已有清单。
+
+`pack` 在任何平台生成更新包：排序的存储式 ZIP、固定时间戳和 package.json 清单，同一组输入得到同一字节。`release` 把完整归档、签名清单、对每个 `--from` 生成的补丁及其签名清单写入静态发布目录，再从目录中该 identity 的全部清单重建 `feed.json`。Ed25519 签名是确定性的，同样输入重跑不会改变已有文件；同名但内容不同的资产返回 `AssetConflict`，不覆盖。补丁不足完整归档 90% 时才会生成。上传由发布者用自己的凭据把该目录同步到任意静态 HTTPS 主机；本工具不保存或读取任何上传凭据。
+
+`check` 和 `fetch` 接受 https:// 索引或本地文件。`fetch` 优先下载增量并从保留归档重建，失败时回退完整归档，然后发布并保留归档。
+
+不要从更新服务器下载公钥后直接信任它；应用的公钥来自受信任的初始分发。此模块不提供密钥吊销或自动回滚策略。
 
 ## 验证
 
-`zig build test` 覆盖签名字段篡改、目标/版本/容量、流短读/超长/摘要失败、所有分配失败位置、实际文件锁、ZIP 路径与清单拒绝、原子 marker 之前的中断恢复，以及 staging 清理。
+`zig build test` 覆盖签名字段篡改、目标/版本/容量、流短读/超长/摘要失败、所有分配失败位置、实际文件锁、ZIP 路径与清单拒绝、原子 marker 之前的中断恢复，以及 staging 清理。新增部分覆盖补丁对平移/修改/截断/无关输入的重建与畸形补丁拒绝；增量清单对来源、结果和轮换密钥的绑定，伪造或错 identity 的背书；索引选择、条目篡改与结果不一致的拒绝及全部分配失败；取消后续传、短响应续传、无 Range 重来、前缀损坏与超长；本机回环 HTTP 服务上的 Range 与 200 两种响应；以及从安装、增量升级（损坏补丁回退）、完整升级、回滚（篡改阻止）到清理的完整流程。这些测试不访问外部网络。
 
 Windows 上执行 `tests/update_package_smoke.ps1`，会临时生成密钥和仅用于测试的许可文本，调用真实 packager 生成 deflate ZIP，签名、验证并发布它，再运行新版本目录中的工具程序。它还检查错误目标、降级、元数据/归档篡改、重复发布、原程序与用户数据不变，最后删除精确的测试临时目录。测试文本不授予项目许可证。

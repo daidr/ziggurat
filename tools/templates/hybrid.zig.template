@@ -1,0 +1,120 @@
+const std = @import("std");
+const builtin = @import("builtin");
+const z = @import("ziggurat");
+const web = @import("ziggurat_webview");
+const view = @import("ziggurat_view");
+const html = @embedFile("index.html");
+
+/// One state, two kinds of content: a native view window and a page window.
+const State = struct {
+    count: usize = 0,
+    page: ?*web.View = null,
+    native: ?z.Window = null,
+
+    fn build(self: *State, v: *view.View) anyerror!void {
+        try v.text("@@NAME@@ (native)", .{});
+        try v.textf("Count: {d}", .{self.count}, .{});
+        if (try v.button("+1 from native", .{})) {
+            self.count +%= 1;
+            self.publish();
+        }
+    }
+
+    fn publish(self: *State) void {
+        const page = self.page orelse return;
+        var buffer: [32]u8 = undefined;
+        const text = std.fmt.bufPrint(&buffer, "{d}", .{self.count}) catch unreachable;
+        // Before the page is ready, the next page message brings it up to date.
+        page.post(text) catch |err| if (err != error.NotReady) std.log.err("post: {s}", .{@errorName(err)});
+    }
+
+    fn event(ptr: *anyopaque, page: *web.View, ev: web.Event) void {
+        const self: *State = @ptrCast(@alignCast(ptr));
+        switch (ev) {
+            .message => |message| {
+                if (!std.mem.eql(u8, message, "increment")) return;
+                self.count +%= 1;
+                self.publish();
+                if (self.native) |window| window.invalidate();
+            },
+            .process_failed => page.window.?.app.quit(),
+            .failed => {
+                std.log.err("the system WebView failed to initialize", .{});
+                page.window.?.app.quit();
+            },
+            else => {},
+        }
+    }
+};
+
+/// Linux page storage is prepared on a worker, then adopted on the main thread.
+const Preparation = struct {
+    allocator: std.mem.Allocator,
+    main: std.Thread.Id,
+    path: []const u8,
+    value: ?web.profile_storage.Prepared = null,
+    failure: ?anyerror = null,
+    fn worker(self: *Preparation) void {
+        self.value = web.profile_storage.Prepared.prepare(self.allocator, self.main, self.path, .{}) catch |err| {
+            self.failure = err;
+            return;
+        };
+        self.value.?.handoff() catch |err| {
+            self.failure = err;
+        };
+    }
+};
+
+fn dataDirectory(allocator: std.mem.Allocator) ![]u8 {
+    if (builtin.os.tag == .windows) {
+        const local = try std.process.getEnvVarOwned(allocator, "LOCALAPPDATA");
+        defer allocator.free(local);
+        return std.fs.path.join(allocator, &.{ local, "@@ID@@", "WebView" });
+    }
+    const base = std.process.getEnvVarOwned(allocator, "XDG_DATA_HOME") catch blk: {
+        const home = try std.process.getEnvVarOwned(allocator, "HOME");
+        defer allocator.free(home);
+        break :blk try std.fs.path.join(allocator, &.{ home, ".local", "share" });
+    };
+    defer allocator.free(base);
+    return std.fs.path.join(allocator, &.{ base, "@@ID@@", "webview" });
+}
+
+pub fn main() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    const folder = try dataDirectory(allocator);
+    defer allocator.free(folder);
+    var state: State = .{};
+    var page = web.View.init(allocator, &state, State.event);
+    state.page = &page;
+    var storage: view.Storage(64, 2048) = .{};
+    var host = view.Host.init(&state, State.build, storage.buffers(), .{});
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    const native = try app.createWindow(.{ .title = "@@NAME@@" });
+    try host.attach(native);
+    state.native = native;
+    native.show();
+    const window = try app.createWindow(.{ .title = "@@NAME@@ page" });
+    if (builtin.os.tag == .linux) {
+        // Storage creates the private profile directory itself (mode 0700).
+        try std.fs.cwd().makePath(std.fs.path.dirname(folder).?);
+        var preparation: Preparation = .{ .allocator = allocator, .main = app.owner, .path = folder };
+        // Startup only: no window has been shown and no event loop runs yet.
+        (try std.Thread.spawn(.{}, Preparation.worker, .{&preparation})).join();
+        if (preparation.failure) |err| return err;
+        try preparation.value.?.adopt();
+        defer preparation.value.?.close() catch {};
+        const profile = try web.Profile.create(allocator, app, &preparation.value.?, .{});
+        defer profile.close() catch {};
+        try page.attach(window, .{ .html = html, .profile = profile });
+        window.show();
+        try app.run();
+    } else {
+        try page.attach(window, .{ .html = html, .user_data_folder = folder });
+        window.show();
+        try app.run();
+    }
+}

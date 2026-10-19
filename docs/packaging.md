@@ -33,3 +33,29 @@ pwsh -NoProfile -File scripts/package.ps1 -Name MyTool `
 可用 `-TimestampServer` 显式选择 HTTPS 时间戳服务。默认必须通过系统信任验证；签名不能赋予程序未获得的分发许可。`-AllowUntrustedTestCertificate` 只用于测试，精确接受未受信任根的测试证书并把报告标记为 test_only，不把其他签名错误当成成功，不修改受信任根存储。
 
 `tests/signing.ps1` 实际生成一天有效的测试代码签名证书，验证 store/PFX 两条路径、严格生产拒绝、ZIP 中的签名与摘要、修改映射代码后的 HashMismatch，以及原文件不变；finally 删除该测试证书和临时私钥。更新通道的 Ed25519 签名属于另一层，见 [更新模块](updates.md)。
+
+## 安装程序、启动器与卸载
+
+`zig build setup-stub` 生成 `ziggurat-setup`，它按自身内容决定角色。`ziggurat package setup --zip PACKAGE` 把更新包、安装配置和带 SHA-256 的尾部追加到存根之后，得到一个单文件安装程序；Windows 产物应在追加后再做 Authenticode 签名，存根按 PE 证书目录跳过证书表（单元测试使用构造的 PE 头，尚未用真实签名的安装程序验证）。追加的摘要只用于拒绝截断或损坏，真实性来自代码签名。
+
+```text
+SETUP [--silent] [--scope user|machine] [--dir PATH]
+uninstall [--silent] [--purge]
+```
+
+| | 用户范围（默认） | 机器范围 |
+| --- | --- | --- |
+| Windows 根目录 | `%LOCALAPPDATA%\Programs\<identity>` | `%ProgramFiles%\<identity>`，需管理员 |
+| Windows 集成 | 开始菜单快捷方式、HKCU 卸载项 | ProgramData 开始菜单、HKLM 卸载项 |
+| Linux 根目录 | `$XDG_DATA_HOME/<identity>/install` | `/opt/<identity>`，需 root |
+| Linux 集成 | `applications/<identity>.desktop`、可选 hicolor 图标、`~/.local/bin` 链接 | `/usr/share` 与 `/usr/local/bin` |
+
+安装复用更新发布事务：包内容先复制到私有 stage 并校验摘要与清单，再原子切换 `current.json`，并保留归档供以后的增量更新。根目录同时放入启动器（存根副本，以应用可执行文件命名）、`uninstall` 和 `install.json`。启动器读取 `current.json` 启动当前版本并转发参数：Linux 直接替换进程，Windows 分离启动后立即退出，以免占用自身文件。同版本重新运行等于修复启动器和集成；更旧版本返回 `NewerVersionInstalled`；首次安装失败会删除根目录和已写的集成，升级在发布后失败会回滚到原版本。卸载删除集成和根目录，保留 `LOCALAPPDATA`（Linux 为 `$XDG_DATA_HOME`）下 `<identity>` 的用户数据，`--purge` 一并删除（Windows 还删除 `APPDATA\<identity>`）。Windows 卸载器先把自己复制到 `%TEMP%`，等原进程退出后再删除安装目录，临时副本在允许时登记为重启后删除。
+
+用户范围安装的目录由当前用户写入，应用内更新可以直接发布到该根目录。机器范围和 deb 安装的目录对普通用户只读，应通过新的安装程序或系统包管理器升级。安装程序是命令行程序，没有图形向导，不关闭正在运行的应用。启动器带有存根自己的资源（Windows 图标与版本信息），快捷方式图标因此也来自存根。文件关联不在本工具内注册。
+
+`tests/setup_smoke.sh`（Linux）和 `tests/setup_smoke.ps1`（Windows）在私有 HOME 或重定向的 `LOCALAPPDATA`/`APPDATA` 中用真实安装程序完成安装、经启动器运行并检查参数、升级、拒绝降级、卸载保留用户数据和 `--purge`。Windows 脚本另检查 HKCU 卸载项和快捷方式目标，唯一的共享状态是测试 identity 的卸载项，结束时再次删除。
+
+## Debian 包
+
+`ziggurat package deb --zip PACKAGE --maintainer "NAME <EMAIL>"` 写出 Linux 更新包对应的 `.deb`：文件位于 `/usr/lib/<executable>/`，`/usr/bin/<executable>` 是相对链接，另有 desktop 条目、`/usr/share/doc/<executable>/copyright`（来自包内 LICENSE.txt）和可选 `--icon` PNG。控制文件包含 Installed-Size 与 md5sums；默认依赖 GTK 3 与 Pango，`--webview` 加入 WebKitGTK 4.1 与 libsoup 3，`--depends` 可完全替换。postinst/postrm 在工具存在时刷新菜单与图标缓存，失败不阻止安装。成员是未压缩的 tar，时间戳取 `SOURCE_DATE_EPOCH`（默认 0），同样输入得到同样字节。包未签名；仓库签名属于发布者的 APT 仓库配置。Linux 冒烟检查用 `dpkg-deb` 核对控制信息与内容，在有无密码 root 的环境中再实际安装、运行并移除。

@@ -47,12 +47,14 @@ WSL 应将 Zig 本地缓存放在 Linux 文件系统，见 `scripts/linux-check.
 | `ziggurat_https_resources` | 回环 HTTPS Transport、受检 Site/Endpoint、显式认证、Ticket 与文件背压 | 显式 `-Dhttps-resources=true`；Linux libsoup/GIO，Windows worker/Winsock/固定 TLS1.2；生产自签名 Profile pin 待实现 |
 | `ziggurat_webview_runtime` | [显式 worker 的无页面引擎发现](docs/webview-runtime.md)、版本与分阶段原生错误 | 独立可选模块；Windows 首片，显式 loader 路径；不创建 App、Profile 或页面 |
 | `ziggurat_webview_producer` | 当前 PageId 上的应用字节流、拥有回复重试与显式生产者交付 | 可选 Windows WebView2 + IPC；不替换 fetch 或授予来源权限 |
+| `ziggurat_i18n` | 语言标签与回退/协商、校验后的消息 catalog、plural/select 消息、复数规则、数字/百分比/日期格式化、伪本地化与 RTL 方向 | 纯 Zig、显式分配；内置数据只覆盖列出的语言 |
 | `ziggurat_animation` | 显式时钟的 tween/spring、固定容量时间线、播放头与下一次唤醒请求 | 纯 Zig、无分配/线程/timer |
 | `ziggurat_wake` | 主线程单次截止唤醒、代数取消与 App 停止回收 | Windows waitable timer；Linux GLib Source；独立按需导入 |
 | `ziggurat_window_placement` | 显式显示器快照、离屏约束恢复与版本化状态存储 | Windows/X11；宿主事件推进，磁盘 I/O 由显式 worker 执行 |
 | `ziggurat_assets` | 显式磁盘快照、目录通知、构建期内容寻址嵌入 | 快照/嵌入可移植；目录通知为 Windows |
 | `ziggurat_system` | 系统菜单、托盘、文本剪贴板、异步选择器、全局快捷键、通知区通知、显式 Shell worker | 窗口设施/图标为 Windows；executable 启动为 Windows/Linux |
 | `ziggurat_update` | Ed25519 元数据、限长流校验、ZIP 清单和版本目录发布 | 纯 Zig + OS 文件系统 |
+| `ziggurat_net` | [Fetch 与 WebSocket 客户端](docs/net.md)：显式 worker、取消、发送队列与读取暂停背压、大小上限、JSON 解码 | 纯 Zig；HTTPS/WSS 复用调用者 `std.http.Client` 的 TLS、系统 CA 与代理 |
 | `ziggurat_extensions` | 显式插件依赖、初始化、失败回滚与逆序关闭 | 纯 Zig、固定容量，无隐式服务或线程 |
 | `ziggurat_text_layout` | 独立拥有的系统 shaping、字素/坐标、双向/换行、caret 与选区查询 | DirectWrite + 系统 ICU；Pango；可选导入 |
 | `ziggurat_text_outlines` | 从已有系统 Layout 显式导出独立单色 Path，可选真实 glyph/cluster 映射与完整字形单元 | 可选 text_layout + vector；默认批量轮廓不请求映射，同一布局不另 shaping |
@@ -119,14 +121,14 @@ Ziggurat 使用 [MIT 许可证](LICENSE)。源码包包含 LICENSE，构建安�
 
 - [架构](docs/architecture.md)、[设计原则](docs/philosophy.md)、[路线图](docs/roadmap.md)、[完整实施计划](docs/implementation-plan.md)
 - [窗口状态与关系](docs/windows.md)、[内容组合](docs/composition.md)、[布局](docs/layout.md)、[声明式视图](docs/view.md)、[基础控件](docs/widgets.md)、[虚拟列表](docs/virtual-list.md)、[基础绘制](docs/drawing.md)、[透明分组](docs/layers.md)、[离屏快照](docs/offscreen.md)、[路径资源](docs/vector.md)、[SVG 文档](docs/svg.md)、[系统文本布局](docs/text-layout.md)、[编辑器桥接](docs/editor.md)、[索引文档](docs/document.md)、[文档视图](docs/document-editor.md)、[编辑前输入门](docs/editor-pre-input.md)、[区间标记](docs/editor-range-markers.md)、[原生文本上下文](docs/text-input.md)、[窗口输入模式](docs/text-input-mode.md)、[图片解码](docs/images.md)、[图片绘制](docs/image-drawing.md)
-- [错误诊断](docs/diagnostics.md)、[图标与打包](docs/packaging.md)
+- [错误诊断](docs/diagnostics.md)、[图标、打包与安装程序](docs/packaging.md)
 - [应用资源与停止](docs/application-resources.md)、[代码编辑服务](docs/code-editor.md)、[Snippet 会话](docs/snippets.md)、[完整文档辅助功能](docs/document-accessibility.md)、[快照差异](docs/document-diff.md)、[双栏比较](docs/document-diff-view.md)
 - [窗口位置恢复](docs/window-placement.md)、[语言协议](docs/language-protocol.md)
 - [Diff 文档辅助功能](docs/document-diff-accessibility.md)、[SVG 文字排版](docs/svg-text.md)
 - [IPC](docs/ipc.md)、[应用字节流](docs/resource-stream.md)、[页面导航](docs/pages.md)、[文档初始化器](docs/document-initializers.md)、[独立 Cookie 存储](docs/cookie-store.md)、[Web 资源工具](docs/web-assets.md)、[系统设施](docs/system.md)、[单实例与系统集成](docs/os-integration.md)
-- [签名更新](docs/updates.md)、[性能与复现实验](docs/performance.md)
+- [签名更新](docs/updates.md)、[Fetch 与 WebSocket](docs/net.md)、[ziggurat 命令](docs/cli.md)、[性能与复现实验](docs/performance.md)
 - [扩展生命周期](docs/extensions.md)
-- [显式时钟动画](docs/animation.md)、[单次唤醒](docs/wake.md)、[系统文字轮廓](docs/text-outlines.md)
+- [本地化](docs/i18n.md)、[显式时钟动画](docs/animation.md)、[单次唤醒](docs/wake.md)、[系统文字轮廓](docs/text-outlines.md)
 - [仿射坐标与输入](docs/affine.md)、[仿射栅格合成](docs/affine-rendering.md)、[多窗口设备域测量](docs/gpu-performance.md)
 - [局部失效](docs/invalidation.md)
 - [构建缓存与 WSL 容量](docs/build-cache.md)

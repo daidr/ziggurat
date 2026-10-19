@@ -198,9 +198,9 @@ B02 分项：
 | S03 | 待实现 | 多显示器、主题/accent/可访问性偏好、网络、电源与文件监视 | 变化订阅、取消与最后订阅者回收；无持续轮询；Windows/Linux/macOS capability |
 | S04 | 部分完成（登录启动、深链、文件关联：Linux 已验，Windows 已编译待原生运行） | 密钥存储、登录启动、深链和文件关联 | OS 权限/用户作用域、安装与运行时分工、卸载和参数转发；依赖 W05/R01；S04.1 `system.integration` 按用户注册/卸载并供安装程序调用；密钥存储继续待实现 |
 | S05 | 待实现 | 多格式剪贴板、transfer、惰性 provider、原生拖放 | 文本/HTML/图片/文件/自定义，多 item、异步请求寿命、关闭后无悬空回调；依赖 G01 |
-| S06 | 待实现 | 异步消息对话框、上下文菜单与菜单快捷键 | 非嵌套循环、modal/focus、取消/关闭、禁用祖先、旧消息隔离；依赖 W02/U02 |
+| S06 | 部分完成（Windows/Linux） | 异步消息对话框、上下文菜单与菜单快捷键 | S06.1 两平台上下文菜单与异步消息框、Windows 菜单栏快捷键已验；非嵌套循环（Windows 菜单在私有安全点进入系统菜单循环）、取消/关闭、禁用祖先、旧消息隔离分别验证；Linux 菜单栏与快捷键分发、物理输入与视觉验收继续；依赖 W02/U02 |
 | S07 | 部分完成（Linux 已验；Windows 已编译待原生运行） | 应用身份/系统目录、任务栏或 Dock badge/progress/menu、阻止休眠 | 按平台 capability、用户作用域、原生引用/电源断言配对与最后 owner 回收；依赖 S03/P03；S07.1 身份、目录、任务栏进度/叠加图标/launcher 计数与提醒、休眠断言已实现；任务栏/Dock 菜单与 macOS 继续 |
-| S08 | 部分完成（Windows窗口托盘） | 独立托盘/status item、多图标、菜单与popover锚定 | 窗口Owner单托盘/任务栏重建恢复已有；App独立多item、稳定ID/用户位置、标题与popover亮态继续；其余平台依赖 S06/P02/P04 |
+| S08 | 部分完成（Windows） | 独立托盘/status item、多图标、菜单与popover锚定 | 窗口Owner单托盘/任务栏重建恢复，及 S08.1 App 独立多 item、可选稳定 GUID、锚定托盘菜单、App 停止回收已验；标题与popover亮态（无 Windows 对应）、Linux/macOS 继续；其余平台依赖 P02/P04 |
 | D01 | 待实现 | document 模型、每文件窗口与最近文档 | 文档身份/重复打开、保存/另存、dirty/关闭/quit 预检；依赖 W02/S02 |
 | D02 | 待实现 | 自动保存、外部修改、冲突检测与崩溃恢复 | 原子保存、版本戳/恢复副本、后台 I/O、丢失与权限错误；依赖 D01 |
 | D03 | 待实现 | Jump List/最近文档平台集成与文档菜单 | 隐私/删除失效项、菜单状态与多窗口；依赖 D01/S04 |
@@ -248,10 +248,10 @@ P01 的 Linux HTTPS 本地来源分两片实施。首片由宿主提供已运行
 
 | ID | 状态 | 范围 | 验收与依赖 |
 | --- | --- | --- | --- |
-| L01 | 待实现 | catalog、locale、ICU message/plural、数字/日期与 RTL | 编译期校验/有界格式化、locale fallback、复数规则、双向布局与 pseudolocale |
+| L01 | 部分完成 | catalog、locale、ICU message/plural、数字/日期与 RTL | 已有纯 Zig `ziggurat_i18n`：编译期/加载期校验、无分配格式化、locale fallback 与协商、约 50 种语言复数规则、数字/日期、pseudolocale 与方向查询，见[本地化](i18n.md)；控件双向布局、时区数据、货币数据与完整 CLDR 覆盖待实现 |
 | A01 | 待实现 | 音频解码、内存音效与流式播放 | WAV/MP3/Vorbis、seek/音量/pan/速度/loop、无实时线程分配、设备切换与关闭 |
 | E01 | 已完成 | 插件注册与显式初始化/关闭依赖 | 固定容量应用级依赖图、全图预检、失败逆序回滚、取消/重入/线程；Windows/Linux 运行及独立 review 通过 |
-| E02 | 待实现 | Fetch 与 WebSocket | 显式 transport/worker、取消/背压/大小限制、TLS/断线、类型化客户端；依赖 E01/I01 |
+| E02 | 首片完成 | Fetch 与 WebSocket | 显式 transport/worker、取消/背压/大小限制、TLS/断线、类型化客户端；依赖 E01/I01 |
 | E03 | 待实现 | SQLite | 连接/事务/游标所有权、取消/线程约束、打包依赖；依赖 E01 |
 | E04 | 待实现 | PTY 与终端视图 | 子进程/终端解析、输入/resize/流控/退出和回收；依赖 E01/T01/G01 |
 | E05 | 待实现 | game loop、camera、gamepad 与材质扩展 | 显式启停时钟、输入热插拔、帧/功耗预算与平台能力；依赖 E01/G02 |
@@ -273,12 +273,12 @@ E04的解析/协议识别、原生PTY和人工交互分别验收；剪贴板格�
 
 | ID | 状态 | 范围 | 验收与依赖 |
 | --- | --- | --- | --- |
-| R01 | 待实现 | Windows 安装/卸载器与文件关联 | 用户/机器作用域、静默安装、升级/回滚/卸载用户数据、真实签名 |
-| R02 | 待实现 | Linux desktop/deb/安装脚本、macOS app/DMG/公证 | 权限/图标/依赖/卸载、签名与 stapling；依赖 P02/P04 |
-| R03 | 待实现 | 更新检查/下载/进度/取消、提示 UI 与重启 | 重用现有验签发布；feed 版本/网络错误/部分文件/运行 EXE与退出否决；依赖 I01/U06 |
-| R04 | 待实现 | 增量更新、失败全量回退、版本保留/回滚/密钥轮换 | 签名覆盖来源目标、大小限制、故障注入、旧客户端升级；依赖 R03 |
-| R05 | 待实现 | GitHub/S3 发布、增量生成与发布清单 | 显式凭据和发布动作、幂等重试/资产一致性；私钥不进入工程；依赖 R04 |
-| R06 | 待实现 | 统一 init/dev/build/doctor CLI 与模板 | 原生/Web/混合模板、前端与原生 watch、诊断、可复现构建；依赖 H02/R01 |
+| R01 | 部分完成（R01.1 单文件安装/启动/卸载程序） | Windows 安装/卸载器与文件关联 | 用户/机器作用域、静默安装、升级/回滚/卸载用户数据、真实签名 |
+| R02 | 部分完成（R02.1 Linux desktop 条目、deb 与用户/系统范围安装；macOS 不在本轮范围） | Linux desktop/deb/安装脚本、macOS app/DMG/公证 | 权限/图标/依赖/卸载、签名与 stapling；依赖 P02/P04 |
+| R03 | 部分完成（R03.1 发布索引检查、可续传下载、进度/取消与关闭后启动） | 更新检查/下载/进度/取消、提示 UI 与重启 | 重用现有验签发布；feed 版本/网络错误/部分文件/运行 EXE与退出否决；依赖 I01/U06 |
+| R04 | 部分完成（R04.1 签名增量、全量回退、保留/回滚/清理与密钥背书） | 增量更新、失败全量回退、版本保留/回滚/密钥轮换 | 签名覆盖来源目标、大小限制、故障注入、旧客户端升级；依赖 R03 |
+| R05 | 部分完成（R05.1 静态发布目录、增量生成与幂等索引） | GitHub/S3 发布、增量生成与发布清单 | 显式凭据和发布动作、幂等重试/资产一致性；私钥不进入工程；依赖 R04 |
+| R06 | 部分完成（R06.1 init/dev/build/package/doctor 与三种模板） | 统一 init/dev/build/doctor CLI 与模板 | 原生/Web/混合模板、前端与原生 watch、诊断、可复现构建；依赖 H02/R01 |
 | V01 | 待实现 | 多窗口文档、自绘大列表、Web 与混合应用示例 | 覆盖完整业务流程、失败/取消/退出路径；示例不能替代模块测试 |
 | V02 | 待实现 | 长期内存/多窗口/GPU/冷启动/输入到显示基线 | 可复现硬件/驱动/系统与统计口径，资源随并发峰值而非历史次数增长 |
 | V03 | 待实现 | 原生交互、输入法与屏幕阅读器验收 | 与隐藏窗口检查分开；需要真实平台与明确的交互验证，不由单测推定 |
@@ -1643,6 +1643,44 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - 新增语义角色 `meter` 与 `navigation`，追加在既有编号之后。Frame 提供 `meter`、`rating`、`navigation` 与 `group`。度量条只读，报告实际值与上下限，值在首选区间外时用主题新增的 `caution` 色。评分是步长为 1 的范围控件，轨道从第一个标记前半格开始，按到哪个标记就取哪个分数。Windows UIA 映射为 ProgressBar（LocalizedControlType 为 "meter"）、Slider，以及带导航地标的 Group。Linux 不声明 AT-SPI。
 - `ziggurat_view` 提供 `breadcrumbs`、`meter`、`rating`、`accordion`/`section`。面包屑在间隙中画分隔符；手风琴最多打开一节，再次激活已打开的节会关闭它。面包屑和手风琴里的控件以容器为可访问父节点。
 - 单元测试覆盖区间与参数校验、评分标记命中、语义角色与父节点，以及无窗口的分节切换和评分调整；Linux 隐藏窗口 smoke 在 1x/2x 下实测评分的原生点击。Windows smoke 用真实 UIAutomationClient 检查导航地标、度量条只读 RangeValue、评分 SetValue 与分节 ExpandCollapse。
+
+### S06.1 上下文菜单、异步消息框与菜单快捷键
+
+- `system.menus` 统一校验菜单栏、上下文菜单和托盘菜单：ID、父项顺序、标签、禁用祖先及快捷键（command 项、不重复、普通键须带 Control/Alt/Super）。`&` 助记符在 GTK 上转为 `_`。
+- `Owner.popupMenu(request, items, anchor)` 调用即返回，每个被接受的请求只以 `Action.popup` 完成一次，取消为 null，detach/关闭不回调，只报告启用且祖先启用的命令。Windows 把请求投递到私有隐藏窗口，在主循环分发时才进入 `TrackPopupMenuEx` 的系统菜单循环（与原生移动/缩放相同），已有菜单或移动循环时直接以 null 完成；detach 先切断隐藏窗口的回指，迟到返回的循环只释放自己的菜单。Linux 用 `gtk_menu_popup_at_rect`，在一次性 idle 中报告。
+- `Owner.showMessage(request, options)` 1–3 个按钮，结果为按钮 ID、dismissed 或 failed。Windows 用 `MessageDialog` 异步接口，与文件选择器相同只触发独立事件并由 App 单次原生等待在主线程读取；Linux 用 `response` 信号的模态 `GtkMessageDialog`，不调用 `gtk_dialog_run`。
+- Windows 菜单栏快捷键在 Content `key_input` 未消费的键上分发 `Action.menu`，忽略自动重复与 AltGr。Linux 没有菜单栏，快捷键只显示在上下文菜单中。
+- 纯单元测试覆盖结构/快捷键/助记符/消息参数校验；Linux 隐藏窗口 smoke 在 Xvfb 1x/2x 下实测 GTK 菜单根项/嵌套项/禁用祖先/取消/detach 与消息框按钮/关闭/取消/窗口销毁，原生链接计数归零。Windows smoke 覆盖真实系统菜单循环内的键盘选择、取消、detach、菜单栏快捷键规则与 MessageDialog 异步取消。选择由原生激活接口或消息注入完成，不代表物理输入、人工点击或视觉质量已验收。见[系统工具](system.md)。
+
+### S08.1 独立托盘与锚定菜单
+
+- `system.Tray` 属于 App：每项有自己的隐藏顶层窗口、复制图标和 App 停止登记，可同时存在多个；重新 show 使用新原生 ID，旧回调不会命中。可选 GUID 让系统记住用户摆放位置。
+- `Tray.popupMenu(request, items, .icon)` 用系统报告的图标矩形锚定并避开遮挡，取不到时用指针；打开前取得前台以便外部点击关闭。任务栏重建时重新添加图标。
+- Windows smoke 实际向 Shell 添加两项，验证事件、旧 ID 隔离、原地更新、锚定菜单选择、任务栏重建、显式移除与 App 停止回收。标题与 popover 亮态没有 Windows 对应，Linux/macOS 托盘继续待实现。见[系统工具](system.md)。
+
+### R01.1/R02.1 单文件安装程序、启动器、卸载与 deb
+
+- `ziggurat-setup` 存根按自身内容充当安装程序、启动器或卸载器；`ziggurat package setup` 把更新包和安装配置追加为单文件安装程序，Windows 签名后的证书表在读取时跳过。安装复用更新发布事务（stage 校验、原子 marker、保留归档），写入启动器、卸载器和 `install.json`，支持 `--silent`、用户/机器范围与 `--dir`。同版本即修复，旧版本拒绝，首次安装失败删除已写内容，升级失败回滚到原版本。
+- Windows：开始菜单快捷方式（IShellLinkW）与 HKCU/HKLM 卸载项（显示名、版本、发布者、位置、图标、静默卸载命令、大小）；卸载器从临时副本完成删除。Linux：desktop 条目（Exec 引号与字符串转义）、可选 hicolor 图标、`bin` 链接。卸载保留用户数据，`--purge` 删除。`ziggurat package deb` 写出确定性的 deb（未压缩 tar 成员、md5sums、相对 `/usr/bin` 链接、依赖默认 GTK/Pango，`--webview` 加入 WebKitGTK/libsoup，菜单/图标缓存刷新）。
+- 单元测试覆盖载荷定位（含构造的 PE 证书表）、desktop 转义与拒绝、deb 确定性和路径/控制字段注入拒绝。本地 Linux 用真实安装程序在私有 HOME 完成安装、经链接启动并检查参数、升级、拒绝降级、卸载保留数据与 purge；deb 经 dpkg-deb 检查后实际 `dpkg -i`、运行、`dpkg -r`。Windows 交叉编译通过；`tests/setup_smoke.ps1` 已接入 CI，Windows 运行结果以 CI 为准，本地未运行。未实现：图形向导、关闭运行中的应用、文件关联注册（等待系统集成工作提供注册函数）、真实证书签名后的安装程序验证、macOS app/DMG/公证。见[打包](packaging.md)。
+
+### R03.1/R04.1/R05.1 更新检查、下载、增量与发布目录
+
+- `feed.check` 读取逐条签名的发布索引，选出本 identity/target 最新完整版本和匹配已安装归档的增量；本 target 条目验签失败使整个检查失败。`download.fetch` 续传到调用者文件，取消保留前缀，完整但摘要错误时截断；`http.Source` 基于调用者的 `std.http.Client` 用 Range 续传。`launch.spawnDetached` 在 `App.run` 返回后启动新版本，退出仍经 `requestQuit` 的否决。
+- 增量补丁为复制/插入指令流，签名清单绑定来源版本与归档摘要、补丁和结果摘要；应用时校验补丁字节、复制边界和结果摘要，失败由调用者回退完整归档。`publishZip` 可保留归档，`retention` 提供列表、逐文件校验后的回滚与保留当前及更新版本的清理。`Manifest.endorsement` 让旧密钥背书新密钥，`additional_public_keys` 支持过渡期；背书不链式、不支持吊销。
+- `ziggurat-update` 新增 `pack`（任意平台的确定性包）、`endorse`、`release`（完整归档、增量、清单与 feed.json；重跑不变，冲突资产返回 `AssetConflict`）、`check`/`fetch`（优先增量、失败回退）、`rollback`、`prune`。
+- 测试覆盖补丁重建与畸形拒绝、增量/背书绑定与伪造、索引选择与篡改和全部分配失败、取消/短响应续传与无 Range 重来、回环 HTTP 的 206/200，以及安装→增量升级（损坏补丁回退）→完整升级→回滚（篡改阻止）→清理的完整流程；工具在本地完成 keygen/pack/release 两次幂等与冲突拒绝、check 选中增量。未实现：更新提示界面组件、GitHub/S3 上传（需发布者凭据，工具只生成静态目录）、密钥吊销、真实服务器与旧客户端跨版本演练。见[更新](updates.md)。
+
+### R06.1 init/dev/build/package/doctor
+
+- `ziggurat init` 生成依赖本框架检出的 native（声明式视图）、web（WebView 页面）和 hybrid（原生视图窗口与页面窗口共享状态）项目；框架 `build.zig` 新增公开的 `addApplicationResources` 供应用嵌入 Windows 资源。`dev` 构建后以子进程运行应用，轮询源码变化后重建重启，可带前端监视命令；`build` 默认 ReleaseSafe，`--package` 生成确定性的更新包；`doctor` 报告 Zig 版本、Linux pkg-config 依赖与显示、Windows WebView2 SDK/Runtime 版本和项目文件。
+- 单元测试覆盖模板渲染、名称/identity 清理、非空目录与缺失框架。本地 Linux 三种模板均对本仓库实际构建并在 Xvfb 中运行 8 秒无错误（未做页面内容或视觉检查），`dev` 修改后重建且只保留一个应用进程，`build --package` 两次摘要一致。Windows 只完成交叉编译。未实现：模板外的前端工程脚手架、类型化 IPC 模板、远程依赖引用。见[ziggurat 命令](cli.md)。
+
+### E02.1 Fetch 与 WebSocket 客户端
+
+- 新增纯 Zig `ziggurat_net`，不导入核心、不创建线程。`fetch`/`stream`/`fetchJson` 在宿主 worker 上执行 HTTP(S) 请求：任意方法与 body、逐跳重定向（credentials 跨 origin 丢弃）、gzip/deflate 解码、解码后 body/头部/重定向/URL 上限，`stream` 以调用者 Writer 施加 TCP 背压。`Cancel` 绑定已建立连接的 socket，取消时 shutdown，被取消的传输不报告成功；连接与 TLS 握手期间的取消在其返回后生效。
+- `WebSocket` 由单一 worker 独占连接两个方向（同一 TLS 会话不并发读写），任意线程 `send`/`ping`/`close`/`cancel`/`resumeReading`；预分配发送队列满返回 `Full`，handler 返回 `pause` 停止读 socket。分片重组、UTF-8、掩码/保留位/控制帧/关闭码校验与 1002/1007/1009 关闭、自动 pong、关闭握手、子协议协商。HTTPS/WSS 复用调用者 `std.http.Client` 的 TLS、系统 CA 与代理。
+- 单元测试用回环服务覆盖以上路径，Linux ReleaseSafe/Debug 各连续运行 1000/300 次（含 CPU 压力）无失败；`scripts/net-tls-probe.sh` 用临时 localhost 证书实测 HTTPS、100 KB WSS 回显和不受信证书拒绝。Windows 单元测试交叉编译通过，运行结果以 CI 为准。未实现：压缩扩展、非 CONNECT HTTP 代理上的 WebSocket、内置超时与自动重连、连接/握手阶段的即时取消、公网与代理环境验证。见[Fetch 与 WebSocket](net.md)。
 
 ### W05.1、S04.1、S07.1 单实例与系统集成
 

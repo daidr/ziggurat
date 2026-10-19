@@ -1,5 +1,5 @@
 const std = @import("std");
-const packaging = @import("build_support/packaging.zig");
+pub const packaging = @import("build_support/packaging.zig");
 const native_support = @import("build_support/native.zig");
 
 pub fn build(b: *std.Build) void {
@@ -243,6 +243,12 @@ pub fn build(b: *std.Build) void {
         b.step("test-native-stream-native", "Verify generated channel admission, backpressure, terminal state and physical ownership").dependOn(&b.addRunArtifact(native_tests).step);
     }
     const animation = b.addModule("ziggurat_animation", .{ .root_source_file = b.path("src/animation/root.zig"), .target = target, .optimize = optimize });
+    const i18n = b.addModule("ziggurat_i18n", .{ .root_source_file = b.path("src/i18n/root.zig"), .target = target, .optimize = optimize });
+    const i18n_tests = b.addTest(.{ .root_module = i18n });
+    check.dependOn(&i18n_tests.step);
+    const run_i18n_tests = b.addRunArtifact(i18n_tests);
+    test_step.dependOn(&run_i18n_tests.step);
+    b.step("test-i18n", "Run locale fallback, catalog, plural, number, date and pseudolocale tests").dependOn(&run_i18n_tests.step);
     const wake = b.addModule("ziggurat_wake", .{ .root_source_file = b.path("src/wake/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
         wake.link_libc = true;
@@ -258,6 +264,7 @@ pub fn build(b: *std.Build) void {
         });
     }
     const update = b.addModule("ziggurat_update", .{ .root_source_file = b.path("src/update/root.zig"), .target = target, .optimize = optimize });
+    const net = b.addModule("ziggurat_net", .{ .root_source_file = b.path("src/net/root.zig"), .target = target, .optimize = optimize });
     const assets = b.addModule("ziggurat_assets", .{ .root_source_file = b.path("src/assets/root.zig"), .target = target, .optimize = optimize });
     const extensions = b.addModule("ziggurat_extensions", .{ .root_source_file = b.path("src/extensions/root.zig"), .target = target, .optimize = optimize });
     const drawing_resources = b.addModule("ziggurat_drawing_resources", .{ .root_source_file = b.path("src/drawing_resources.zig"), .target = target, .optimize = optimize });
@@ -475,6 +482,21 @@ pub fn build(b: *std.Build) void {
         system.linkSystemLibrary("user32", .{});
         system.linkSystemLibrary("gdi32", .{});
         _ = native_support.add(b, system, "system-picker-native", "src/system/picker.c", &.{"-std=c11"}, target, optimize);
+        _ = native_support.add(b, system, "system-message-native", "src/system/message.c", &.{"-std=c11"}, target, optimize);
+        system.link_libc = true;
+    }
+    if (target.result.os.tag == .linux) addSmoke(b, "smoke-system-menus", "tests/system_menus_linux_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_system", .module = system },
+    });
+    if (target.result.os.tag == .windows) addSmoke(b, "smoke-system-menus", "tests/system_menus_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_system", .module = system },
+    });
+    if (target.result.os.tag == .linux) {
+        const native = native_support.add(b, system, "system-linux-native", "src/system/linux_system.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        system.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
         system.link_libc = true;
     }
     addSystemIntegrationNative(b, system, target, optimize);
@@ -1880,6 +1902,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{ .{ .name = "ipc", .module = ipc }, .{ .name = "fixture", .module = ipc_fixture } },
     }) });
     const update_tests = b.addTest(.{ .root_module = update });
+    const net_tests = b.addTest(.{ .root_module = net });
     const producer_service = b.createModule(.{ .root_source_file = b.path("tests/resource_producer_service.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat_ipc", .module = ipc }, .{ .name = "ziggurat_resource_stream", .module = resource_stream } } });
     const producer_fixture_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/resource_producer_fixture_check.zig"),
@@ -1913,6 +1936,7 @@ pub fn build(b: *std.Build) void {
         for ([_][]const u8{ "user32", "gdi32", "shell32", "ole32" }) |library| shell_test_module.linkSystemLibrary(library, .{});
     }
     const shell_tests = b.addTest(.{ .root_module = shell_test_module });
+    const menu_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/system/menus.zig"), .target = target, .optimize = optimize }) });
     const system_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/system_capabilities.zig"),
         .target = target,
@@ -1929,6 +1953,68 @@ pub fn build(b: *std.Build) void {
     const install_update = b.addInstallArtifact(update_tool, .{});
     b.step("update-tool", "Build the optional signed-update tool").dependOn(&install_update.step);
     check.dependOn(&update_tool.step);
+    const setup_format_module = b.createModule(.{ .root_source_file = b.path("tools/setup_format.zig"), .target = target, .optimize = optimize });
+    const deb_module = b.createModule(.{ .root_source_file = b.path("tools/deb.zig"), .target = target, .optimize = optimize });
+    const setup_module = b.createModule(.{
+        .root_source_file = b.path("tools/setup.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{ .{ .name = "ziggurat_update", .module = update }, .{ .name = "setup_format", .module = setup_format_module } },
+        .link_libc = target.result.os.tag == .windows,
+    });
+    if (target.result.os.tag == .windows) {
+        setup_module.addCSourceFile(.{ .file = b.path("tools/setup_windows.c"), .flags = &.{"-std=c11"} });
+        for ([_][]const u8{ "ole32", "shell32", "advapi32", "uuid" }) |library| setup_module.linkSystemLibrary(library, .{});
+    }
+    const setup_stub = b.addExecutable(.{ .name = "ziggurat-setup", .root_module = setup_module });
+    addResources(b, setup_stub);
+    const install_setup_stub = b.addInstallArtifact(setup_stub, .{});
+    b.step("setup-stub", "Build the self-extracting setup, launcher and uninstaller stub").dependOn(&install_setup_stub.step);
+    check.dependOn(&setup_stub.step);
+    for ([_]*std.Build.Module{ setup_format_module, deb_module }) |module| {
+        const module_tests = b.addTest(.{ .root_module = module });
+        check.dependOn(&module_tests.step);
+        test_step.dependOn(&b.addRunArtifact(module_tests).step);
+    }
+    // Setup smoke inputs: two fixture versions plus the stub and tools.
+    const setup_smoke = b.step("build-setup-smoke", "Build fixtures for tests/setup_smoke.{ps1,sh}");
+    for ([_][]const u8{ "1.0.0", "1.1.0" }) |fixture_version| {
+        const fixture_options = b.addOptions();
+        fixture_options.addOption([]const u8, "version", fixture_version);
+        const fixture = b.addExecutable(.{ .name = b.fmt("setup-fixture-{s}", .{fixture_version}), .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/setup_fixture_app.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "setup_fixture_options", .module = fixture_options.createModule() }},
+        }) });
+        check.dependOn(&fixture.step);
+        setup_smoke.dependOn(&b.addInstallArtifact(fixture, .{}).step);
+    }
+    setup_smoke.dependOn(&install_setup_stub.step);
+    setup_smoke.dependOn(&install_update.step);
+    const cli_options = b.addOptions();
+    cli_options.addOption([]const u8, "framework_root", b.build_root.path orelse ".");
+    const cli_module = b.createModule(.{
+        .root_source_file = b.path("tools/cli.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ziggurat_update", .module = update },
+            .{ .name = "cli_options", .module = cli_options.createModule() },
+            .{ .name = "setup_format", .module = setup_format_module },
+            .{ .name = "deb", .module = deb_module },
+        },
+    });
+    const cli = b.addExecutable(.{ .name = "ziggurat", .root_module = cli_module });
+    addResources(b, cli);
+    const cli_step = b.step("cli", "Build the ziggurat init/dev/build/package/doctor command and its setup stub");
+    cli_step.dependOn(&b.addInstallArtifact(cli, .{}).step);
+    cli_step.dependOn(&install_setup_stub.step);
+    setup_smoke.dependOn(&b.addInstallArtifact(cli, .{}).step);
+    check.dependOn(&cli.step);
+    const cli_tests = b.addTest(.{ .root_module = cli_module });
+    check.dependOn(&cli_tests.step);
+    test_step.dependOn(&b.addRunArtifact(cli_tests).step);
     const assets_host = b.createModule(.{ .root_source_file = b.path("src/assets/root.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
     const asset_generator = b.addExecutable(.{ .name = "web-assets-generator", .root_module = b.createModule(.{
         .root_source_file = b.path("tools/web_assets.zig"),
@@ -1962,6 +2048,7 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&ipc_fixture_tests.step);
     check.dependOn(&producer_fixture_tests.step);
     check.dependOn(&update_tests.step);
+    check.dependOn(&net_tests.step);
     check.dependOn(&asset_tests.step);
     check.dependOn(&extension_tests.step);
     check.dependOn(&vector_tests.step);
@@ -1975,6 +2062,7 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&animation_tests.step);
     check.dependOn(&producer_tests.step);
     check.dependOn(&shell_tests.step);
+    check.dependOn(&menu_tests.step);
     check.dependOn(&system_tests.step);
     check.dependOn(&system_unit_tests.step);
     check.dependOn(&embed_probe.step);
@@ -2137,6 +2225,17 @@ pub fn build(b: *std.Build) void {
     b.step("test-ipc", "Run typed protocol, event and allocator reentry tests").dependOn(&run_ipc_tests.step);
     test_step.dependOn(&b.addRunArtifact(ipc_fixture_tests).step);
     test_step.dependOn(&b.addRunArtifact(update_tests).step);
+    const run_net_tests = b.addRunArtifact(net_tests);
+    test_step.dependOn(&run_net_tests.step);
+    b.step("test-net", "Run fetch and WebSocket client tests against local servers").dependOn(&run_net_tests.step);
+    const net_tls_probe = b.addExecutable(.{ .name = "net-tls-probe", .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/net_tls_probe.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "ziggurat_net", .module = net }},
+    }) });
+    check.dependOn(&net_tls_probe.step);
+    b.step("install-net-tls-probe", "Install the real TLS fetch/WebSocket probe; run it with scripts/net-tls-probe.sh").dependOn(&b.addInstallArtifact(net_tls_probe, .{}).step);
     test_step.dependOn(&b.addRunArtifact(asset_tests).step);
     test_step.dependOn(&b.addRunArtifact(extension_tests).step);
     const run_vector_tests = b.addRunArtifact(vector_tests);
@@ -2156,6 +2255,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_document_diff_view_tests.step);
     b.step("test-document-diff-view", "Run paired snapshot delivery and aligned diff view invariants").dependOn(&run_document_diff_view_tests.step);
     test_step.dependOn(&b.addRunArtifact(shell_tests).step);
+    test_step.dependOn(&b.addRunArtifact(menu_tests).step);
     test_step.dependOn(&b.addRunArtifact(system_tests).step);
     const run_system_unit_tests = b.addRunArtifact(system_unit_tests);
     test_step.dependOn(&run_system_unit_tests.step);
@@ -2362,6 +2462,13 @@ fn addSmoke(b: *std.Build, name: []const u8, path: []const u8, target: std.Build
     if (b.args) |args| run.addArgs(args);
     b.step(name, "Run integration checks with hidden windows").dependOn(&run.step);
     b.top_level_steps.get("check").?.step.dependOn(&exe.step);
+}
+
+/// For applications that depend on this package: embed the Windows manifest,
+/// version resource and icon. Other targets need no resources.
+pub fn addApplicationResources(b: *std.Build, exe: *std.Build.Step.Compile, dependency: *std.Build.Dependency, metadata: packaging.Metadata) void {
+    if (exe.root_module.resolved_target.?.result.os.tag != .windows) return;
+    _ = packaging.addWindowsResources(b, exe, .{ .metadata = metadata, .icon = dependency.path("assets/application.ico") }) catch |err| std.debug.panic("invalid application resources: {s}", .{@errorName(err)});
 }
 
 fn addResources(b: *std.Build, exe: *std.Build.Step.Compile) void {

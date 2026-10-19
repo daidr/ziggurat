@@ -1,0 +1,10 @@
+.{
+    .name = .@@PACKAGE@@,
+    .version = "0.1.0",
+    .fingerprint = @@FINGERPRINT@@,
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{
+        .ziggurat = .{ .path = "@@FRAMEWORK@@" },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "ziggurat.json" },
+}
