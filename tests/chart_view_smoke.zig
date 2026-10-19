@@ -119,7 +119,8 @@ fn run(allocator: std.mem.Allocator) !void {
     try std.testing.expect(!figure.queued);
     try std.testing.expectEqual(identity, chart_storage.slots[1].prepared.?.identity);
     const stats = try host.context.coverageStats();
-    try std.testing.expect(stats.software.resident_entries >= 5 and stats.software.draws > 0);
+    // GDI draws masks directly and keeps none resident, so count requests.
+    try std.testing.expect(stats.software.upload_requests >= 5 and stats.software.draws > 0);
 
     // New data prepares the line and area again; the slices keep theirs.
     // Dropping the pie releases its masks.
