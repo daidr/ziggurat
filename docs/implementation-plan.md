@@ -248,10 +248,10 @@ P01 的 Linux HTTPS 本地来源分两片实施。首片由宿主提供已运行
 
 | ID | 状态 | 范围 | 验收与依赖 |
 | --- | --- | --- | --- |
-| L01 | 待实现 | catalog、locale、ICU message/plural、数字/日期与 RTL | 编译期校验/有界格式化、locale fallback、复数规则、双向布局与 pseudolocale |
+| L01 | 部分完成 | catalog、locale、ICU message/plural、数字/日期与 RTL | 已有纯 Zig `ziggurat_i18n`：编译期/加载期校验、无分配格式化、locale fallback 与协商、约 50 种语言复数规则、数字/日期、pseudolocale 与方向查询，见[本地化](i18n.md)；控件双向布局、时区数据、货币数据与完整 CLDR 覆盖待实现 |
 | A01 | 待实现 | 音频解码、内存音效与流式播放 | WAV/MP3/Vorbis、seek/音量/pan/速度/loop、无实时线程分配、设备切换与关闭 |
 | E01 | 已完成 | 插件注册与显式初始化/关闭依赖 | 固定容量应用级依赖图、全图预检、失败逆序回滚、取消/重入/线程；Windows/Linux 运行及独立 review 通过 |
-| E02 | 待实现 | Fetch 与 WebSocket | 显式 transport/worker、取消/背压/大小限制、TLS/断线、类型化客户端；依赖 E01/I01 |
+| E02 | 首片完成 | Fetch 与 WebSocket | 显式 transport/worker、取消/背压/大小限制、TLS/断线、类型化客户端；依赖 E01/I01 |
 | E03 | 待实现 | SQLite | 连接/事务/游标所有权、取消/线程约束、打包依赖；依赖 E01 |
 | E04 | 待实现 | PTY 与终端视图 | 子进程/终端解析、输入/resize/流控/退出和回收；依赖 E01/T01/G01 |
 | E05 | 待实现 | game loop、camera、gamepad 与材质扩展 | 显式启停时钟、输入热插拔、帧/功耗预算与平台能力；依赖 E01/G02 |
@@ -1675,3 +1675,10 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 
 - `ziggurat init` 生成依赖本框架检出的 native（声明式视图）、web（WebView 页面）和 hybrid（原生视图窗口与页面窗口共享状态）项目；框架 `build.zig` 新增公开的 `addApplicationResources` 供应用嵌入 Windows 资源。`dev` 构建后以子进程运行应用，轮询源码变化后重建重启，可带前端监视命令；`build` 默认 ReleaseSafe，`--package` 生成确定性的更新包；`doctor` 报告 Zig 版本、Linux pkg-config 依赖与显示、Windows WebView2 SDK/Runtime 版本和项目文件。
 - 单元测试覆盖模板渲染、名称/identity 清理、非空目录与缺失框架。本地 Linux 三种模板均对本仓库实际构建并在 Xvfb 中运行 8 秒无错误（未做页面内容或视觉检查），`dev` 修改后重建且只保留一个应用进程，`build --package` 两次摘要一致。Windows 只完成交叉编译。未实现：模板外的前端工程脚手架、类型化 IPC 模板、远程依赖引用。见[ziggurat 命令](cli.md)。
+
+### E02.1 Fetch 与 WebSocket 客户端
+
+- 新增纯 Zig `ziggurat_net`，不导入核心、不创建线程。`fetch`/`stream`/`fetchJson` 在宿主 worker 上执行 HTTP(S) 请求：任意方法与 body、逐跳重定向（credentials 跨 origin 丢弃）、gzip/deflate 解码、解码后 body/头部/重定向/URL 上限，`stream` 以调用者 Writer 施加 TCP 背压。`Cancel` 绑定已建立连接的 socket，取消时 shutdown，被取消的传输不报告成功；连接与 TLS 握手期间的取消在其返回后生效。
+- `WebSocket` 由单一 worker 独占连接两个方向（同一 TLS 会话不并发读写），任意线程 `send`/`ping`/`close`/`cancel`/`resumeReading`；预分配发送队列满返回 `Full`，handler 返回 `pause` 停止读 socket。分片重组、UTF-8、掩码/保留位/控制帧/关闭码校验与 1002/1007/1009 关闭、自动 pong、关闭握手、子协议协商。HTTPS/WSS 复用调用者 `std.http.Client` 的 TLS、系统 CA 与代理。
+- 单元测试用回环服务覆盖以上路径，Linux ReleaseSafe/Debug 各连续运行 1000/300 次（含 CPU 压力）无失败；`scripts/net-tls-probe.sh` 用临时 localhost 证书实测 HTTPS、100 KB WSS 回显和不受信证书拒绝。Windows 单元测试交叉编译通过，运行结果以 CI 为准。未实现：压缩扩展、非 CONNECT HTTP 代理上的 WebSocket、内置超时与自动重连、连接/握手阶段的即时取消、公网与代理环境验证。见[Fetch 与 WebSocket](net.md)。
+

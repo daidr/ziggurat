@@ -13,6 +13,7 @@ flowchart TD
     Host --> IPC[ziggurat_ipc]
     Host --> System[ziggurat_system]
     Host --> Update[ziggurat_update]
+    Host --> Net[ziggurat_net]
     Host --> Assets[ziggurat_assets]
     Host --> Extensions[ziggurat_extensions]
     Host --> Text[ziggurat_text_layout]
@@ -34,6 +35,7 @@ flowchart TD
     Host --> Vector[ziggurat_vector]
     Host --> Shadows[ziggurat_shadows]
     Host --> Animation[ziggurat_animation]
+    Host --> I18n[ziggurat_i18n]
     Host --> Wake[ziggurat_wake]
     Host --> Placement[ziggurat_window_placement]
     Host --> DocumentApp[ziggurat_document_app]
@@ -46,6 +48,7 @@ flowchart TD
     Host --> HTTPSResources[ziggurat_https_resources]
     Host --> Caret[ziggurat_caret]
     Host --> Gaussian[ziggurat_gaussian]
+    Net --> NetTLS[调用者 std.http.Client / TLS / 系统 CA]
     Wake --> Core
     Placement --> Core
     DocumentApp --> Core
