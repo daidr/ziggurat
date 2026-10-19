@@ -457,7 +457,10 @@ pub fn main() !void {
     try run(gpa.allocator());
     try runCollections(gpa.allocator());
     try runTimer(gpa.allocator());
-    if (builtin.os.tag == .windows) try @import("view_uia.zig").run(gpa.allocator());
+    if (builtin.os.tag == .windows) {
+        try @import("view_uia.zig").run(gpa.allocator());
+        try @import("view_uia.zig").runCollections(gpa.allocator());
+    }
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
     std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, timed toast expiry and keyed identity passed\n", .{});
 }

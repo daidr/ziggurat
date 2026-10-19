@@ -591,8 +591,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(usize, 0), state.face);
     try app.dispatch();
     try std.testing.expect(host.context.window == null);
-    try runCollections(allocator);
-    std.debug.print("view UIA smoke passed: real client tab list/tab selection, toolbar parent, splitter RangeValue, segment selection, link invoke, disclosure ExpandCollapse, navigation landmark, read-only meter, rating RangeValue, accordion sections, form field help/validity, list box selection, combo box Value/ExpandCollapse, search landmark, navigation button, image and tooltip help text, tree ExpandCollapse/selection, data grid header sort and multiple row selection, token field items\n", .{});
+    std.debug.print("view UIA smoke passed: real client tab list/tab selection, toolbar parent, splitter RangeValue, segment selection, link invoke, disclosure ExpandCollapse, navigation landmark, read-only meter, rating RangeValue, accordion sections, form field help/validity, list box selection, combo box Value/ExpandCollapse, search landmark, navigation button, image and tooltip help text\n", .{});
 }
 
 const Collections = struct {
@@ -629,7 +628,9 @@ const Collections = struct {
     }
 };
 
-fn runCollections(allocator: std.mem.Allocator) !void {
+/// Trees, tables and token fields, on their own App after `run`.
+pub fn runCollections(allocator: std.mem.Allocator) !void {
+    if (!ui.capabilities.accessibility) return;
     const app = try z.App.init(allocator);
     defer app.deinit();
     var state: Collections = .{};
@@ -660,4 +661,5 @@ fn runCollections(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqualSlices(u64, &.{ 1, 3 }, state.table.items());
     try app.dispatch();
     try std.testing.expect(host.context.window == null);
+    std.debug.print("view UIA collections passed: tree ExpandCollapse/LeafNode/selection, data grid header Invoke/ItemStatus and multiple row selection, token field items\n", .{});
 }
