@@ -248,7 +248,7 @@ P01 的 Linux HTTPS 本地来源分两片实施。首片由宿主提供已运行
 
 | ID | 状态 | 范围 | 验收与依赖 |
 | --- | --- | --- | --- |
-| L01 | 待实现 | catalog、locale、ICU message/plural、数字/日期与 RTL | 编译期校验/有界格式化、locale fallback、复数规则、双向布局与 pseudolocale |
+| L01 | 部分完成 | catalog、locale、ICU message/plural、数字/日期与 RTL | 已有纯 Zig `ziggurat_i18n`：编译期/加载期校验、无分配格式化、locale fallback 与协商、约 50 种语言复数规则、数字/日期、pseudolocale 与方向查询，见[本地化](i18n.md)；控件双向布局、时区数据、货币数据与完整 CLDR 覆盖待实现 |
 | A01 | 待实现 | 音频解码、内存音效与流式播放 | WAV/MP3/Vorbis、seek/音量/pan/速度/loop、无实时线程分配、设备切换与关闭 |
 | E01 | 已完成 | 插件注册与显式初始化/关闭依赖 | 固定容量应用级依赖图、全图预检、失败逆序回滚、取消/重入/线程；Windows/Linux 运行及独立 review 通过 |
 | E02 | 待实现 | Fetch 与 WebSocket | 显式 transport/worker、取消/背压/大小限制、TLS/断线、类型化客户端；依赖 E01/I01 |
