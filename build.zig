@@ -256,6 +256,11 @@ pub fn build(b: *std.Build) void {
     const run_markdown_tests = b.addRunArtifact(markdown_tests);
     test_step.dependOn(&run_markdown_tests.step);
     b.step("test-markdown", "Run CommonMark block, inline, table, task list and HTML output tests").dependOn(&run_markdown_tests.step);
+    // Optional: needs `python scripts/fetch-sqlite.py`, so it stays out of `test` and `check`.
+    const sqlite = b.addModule("ziggurat_sqlite", .{ .root_source_file = b.path("src/sqlite/root.zig"), .target = target, .optimize = optimize });
+    @import("build_support/sqlite.zig").add(b, sqlite, target, optimize);
+    const sqlite_tests = b.addTest(.{ .root_module = sqlite });
+    b.step("test-sqlite", "Run SQLite connection, binding, row, transaction, migration and thread tests (fetch source first)").dependOn(&b.addRunArtifact(sqlite_tests).step);
     const wake = b.addModule("ziggurat_wake", .{ .root_source_file = b.path("src/wake/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
         wake.link_libc = true;
@@ -525,6 +530,7 @@ pub fn build(b: *std.Build) void {
         core.linkSystemLibrary("user32", .{});
         core.linkSystemLibrary("ole32", .{});
         core.linkSystemLibrary("imm32", .{});
+        core.linkSystemLibrary("dwmapi", .{});
         core.link_libc = true;
     }
     if (target.result.os.tag == .linux) {
@@ -2175,6 +2181,15 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_document_app_tests.step);
     b.step("test-document-app", "Run document identity, close preflight, atomic save, autosave and recovery invariants").dependOn(&run_document_app_tests.step);
     test_step.dependOn(&run_webkit_remote.step);
+    const audio = b.addModule("ziggurat_audio", .{ .root_source_file = b.path("src/audio/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
+    if (target.result.os.tag == .linux) audio.link_libc = true;
+    if (target.result.os.tag == .windows) audio.linkSystemLibrary("ole32", .{});
+    const audio_tests = b.addTest(.{ .root_module = audio });
+    const run_audio_tests = b.addRunArtifact(audio_tests);
+    check.dependOn(&audio_tests.step);
+    test_step.dependOn(&run_audio_tests.step);
+    b.step("test-audio", "Run WAV/FLAC decoding, mixing, player, stream, notification and test-backend output invariants").dependOn(&run_audio_tests.step);
+    addSmoke(b, "smoke-audio", "tests/audio_smoke.zig", target, optimize, &.{.{ .name = "ziggurat_audio", .module = audio }});
     const snippets_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/code_editor/snippet.zig"),
         .target = target,
