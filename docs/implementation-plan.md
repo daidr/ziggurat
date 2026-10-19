@@ -45,9 +45,9 @@
 | U03 | 已完成（纯布局合同，Windows/Linux） | grid 与可组合约束布局 | U03.1 grid/span/对齐/自动放置/隐式轨道及U03.2弹性百分比上限、内容/显式minimum优先级、数值基线与未知父尺寸测量已验；失败输出事务、硬界与overflow明确；分隔拖动归U06 |
 | U04 | 部分完成（Windows/Linux） | 虚拟 list、table、tree/outline、grid view | U04.1 可变行高列表/可见回放/稳定 ID 锚点已实现；完整列表语义及 table/tree/grid view 继续待实现；基础依赖 U02.1/T01 |
 | U05 | 待实现 | combobox、autocomplete、search、token field | popup 所有权、输入法、筛选取消、键盘与焦点恢复；依赖 U02.2/T02/W02 |
-| U06 | 待实现 | tabs、sidebar、toolbar、split、tooltip、toast | 生命周期、遮挡/命中、延迟唤醒撤销与可访问性；基础依赖 U02.1/G02，popup scope另依赖U02.2 |
+| U06 | 部分完成（U06.1 声明式视图的 tabs/toolbar/比例 split） | tabs、sidebar、toolbar、split、tooltip、toast | 生命周期、遮挡/命中、延迟唤醒撤销与可访问性；split 的 DIP 偏好、RTL、折叠与 sidebar/tooltip/toast 继续；基础依赖 U02.1/G02，popup scope另依赖U02.2 |
 | U07 | 待实现 | calendar、date/time、color picker | locale/范围/键盘/可访问性；依赖 L01/U05 |
-| U08 | 待实现 | badge、avatar、link、meter、rating、segmented、accordion、breadcrumbs 与导航按钮 | 稳定身份、分组/展开/链接动作、键盘和语义；不把静态文字/矩形算成完整控件；基础依赖 U02.1/G01 |
+| U08 | 部分完成（U08.1 link、badge、segmented、disclosure） | badge、avatar、link、meter、rating、segmented、accordion、breadcrumbs 与导航按钮 | 稳定身份、分组/展开/链接动作、键盘和语义；不把静态文字/矩形算成完整控件；avatar、meter、rating、多段 accordion、breadcrumbs 与导航按钮继续；基础依赖 U02.1/G01 |
 | U09 | 待实现 | chart 的数值/分类/时间尺度、axes、marks、stacking 与 selection | 极值/空数据/大数据、按需绘制、布局与键盘/辅助说明；依赖 G01/T01/L01 |
 | U10 | 待实现 | form、field/fieldset、验证提示与自定义控件契约 | 标签关联、禁用继承、错误语义、测量/绘制/输入/快照事务；依赖 U02.1/U03.2/T02/T06 |
 | G01 | 部分完成 | 圆角、描边、渐变、阴影、透明度、图片与 SVG/path | RGBA/圆角/内描边、图片驻留/同尺寸更新、严格渐变、圆角阴影/path、有界分组和独立软件/GPU离屏已验收；完整 SVG 继续实施；三后端同一语义与明确资源上限 |
@@ -1607,3 +1607,16 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - `view.Harness` 复用 Host 的构建、排列与单事件遍，不创建窗口也不分配；按种类、文本、名称和键查询节点，按查询或坐标激活控件并对滑块应用 `ValueChange`，每次成功事件后重新渲染。禁用、被裁剪遮住、种类不符和事件未被消费分别返回明确错误，不静默成功。
 - `write` 输出取整边界的树大纲，供测试做文本比较。Host 与 Harness 共用同一 `Build` 绑定，Host 行为不变。
 - 范围只限声明式视图：不经过 `ui.Context`，不覆盖原生命中、焦点、键盘、可访问性和测试时钟；V05 其余部分（统一测试时钟、原生输入注入、inspector）继续待实现。见[声明式视图](view.md)。
+
+### U06.1 标签页、工具栏与比例分栏
+
+- 新增语义角色 `tab_list`、`tab`、`toolbar`、`splitter`，追加在既有编号之后。Frame 提供 `tabList`/`tab`/`toolbar`/`splitter`：标签复用单选分组的命中、Tab 停靠点和方向键选择；分隔条复用范围控件的捕获拖动与键盘步进，上下分栏向下增大，拖动轨道只覆盖上下限之间，指针始终对着分隔条中心。
+- Windows UIA 映射为 Tab/Selection、TabItem/SelectionItem、ToolBar 与 Thumb/RangeValue，选择与 Radio 共用同一套单选规则。Linux 没有普通控件的 AT-SPI 层，本片不声明 Linux 可访问性。
+- `ziggurat_view` 提供 `tabs`/`tab`、`toolbar`（叶子控件以工具栏为可访问父节点）和 `split(axis, &fraction, limits, style)`（恰好两个子节点，比例在 0..1 的上下限内）。Harness 可以点击标签、调整分栏并读取分隔条矩形。
+- 单元测试覆盖分组、重复选择、语义父子与范围、纵向分隔条的指针和方向键；Linux 隐藏窗口 smoke 在 1x/2x 下实测标签点击与分隔条捕获拖动。Windows smoke 另用真实 MTA UIAutomationClient 检查控件类型、工具栏父节点、标签选择与分隔条 RangeValue 读写。DIP 偏好、窗口不足时的显式约束、RTL、折叠、sidebar、tooltip 和 toast 继续待实现，见[声明式视图](view.md)。
+
+### U08.1 链接、徽标、分段控件与折叠区
+
+- 新增语义角色 `link` 与 `disclosure`，追加在既有编号之后。Frame 提供 `link`、`segment` 与 `disclosure`：分段复用单选分组，链接与折叠区复用按钮激活；三者都参与 Tab 焦点。Windows UIA 映射为 Hyperlink/Invoke、RadioButton/SelectionItem 与 Button/ExpandCollapse，ExpandCollapse 在状态已符合时不产生动作。Linux 不声明 AT-SPI。
+- `ziggurat_view` 提供 `link`、`badge`、`segmented`/`segment` 与 `disclosure`。徽标只是带背景的静态文字，不计为控件，也不产生语义节点；单个 `disclosure` 不等于多段 accordion。
+- 单元测试覆盖分组、方向键选择、激活和语义；Linux 隐藏窗口 smoke 在 1x/2x 下实测分段、链接和折叠区的原生点击。Windows smoke 用真实 UIAutomationClient 检查分段选择、链接 Invoke 与折叠区 ExpandCollapse。见[声明式视图](view.md)。

@@ -25,7 +25,8 @@ pub const RangeSliderOptions = struct {
     high: Options = .{},
     vertical: bool = false,
 };
-pub const Kind = enum { button, checkbox, radio, toggle_switch, progress };
+pub const SplitterOptions = struct { control: Options = .{}, vertical: bool = false };
+pub const Kind = enum { button, checkbox, radio, toggle_switch, progress, tab, segment, link, disclosure };
 const Snapshot = struct {
     hits: usize,
     commands: usize,
@@ -71,6 +72,26 @@ fn inset(bounds: layout.Rect, amount: f32) layout.Rect {
 fn fill(frame: anytype, bounds: layout.Rect, color: u32) !void {
     try frame.context.command_buffer.fill(absolute(frame, bounds), color);
 }
+fn outline(frame: anytype, bounds: layout.Rect, width: f32, color: u32) !void {
+    const w = @min(width, @min(bounds.width, bounds.height) / 2);
+    try fill(frame, .{ .x = bounds.x, .y = bounds.y, .width = bounds.width, .height = w }, color);
+    try fill(frame, .{ .x = bounds.x, .y = bounds.y + bounds.height - w, .width = bounds.width, .height = w }, color);
+    try fill(frame, .{ .x = bounds.x, .y = bounds.y + w, .width = w, .height = @max(0, bounds.height - 2 * w) }, color);
+    try fill(frame, .{ .x = bounds.x + bounds.width - w, .y = bounds.y + w, .width = w, .height = @max(0, bounds.height - 2 * w) }, color);
+}
+/// A filled triangle pointing right, or down when `down`, from bounded strips.
+fn triangle(frame: anytype, bounds: layout.Rect, down: bool, color: u32) !void {
+    const strips = 6;
+    for (0..strips) |i| {
+        const t = @as(f32, @floatFromInt(i)) / strips;
+        const shrink = 0.5 * t;
+        if (down) {
+            try fill(frame, .{ .x = bounds.x + bounds.width * shrink, .y = bounds.y + bounds.height * t, .width = bounds.width * (1 - 2 * shrink), .height = bounds.height / strips }, color);
+        } else {
+            try fill(frame, .{ .x = bounds.x + bounds.width * t, .y = bounds.y + bounds.height * shrink, .width = bounds.width / strips, .height = bounds.height * (1 - 2 * shrink) }, color);
+        }
+    }
+}
 fn disk(frame: anytype, bounds: layout.Rect, color: u32) !void {
     // Seven bounded strips avoid a separate backend-specific drawing primitive.
     const edges = [_]f32{ 0.28, 0.12, 0.03, 0, 0.03, 0.12, 0.28 };
@@ -103,18 +124,23 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
     const absolute_bounds = absolute(frame, bounds);
     const visible = if (frame.clipBounds()) |clip| layout.intersect(absolute_bounds, clip) else absolute_bounds;
     const interactive = kind != .progress;
-    try frame.addControl(id, bounds, .{ .enabled = options.enabled, .focusable = interactive, .pointer_enabled = interactive, .radio_group = if (kind == .radio) options.radio_group else null, .selected = checked, .shortcut = options.shortcut });
+    const chooses = kind == .radio or kind == .tab or kind == .segment;
+    try frame.addControl(id, bounds, .{ .enabled = options.enabled, .focusable = interactive, .pointer_enabled = interactive, .radio_group = if (chooses) options.radio_group else null, .selected = checked, .shortcut = options.shortcut });
     const focus = interactive and options.enabled and visible.width > 0 and visible.height > 0 and context.input_state.focused == id;
     const amount = std.math.clamp(fraction, 0, 1);
     try frame.semantic(.{
         .id = id,
-        .parent = if (kind == .radio) options.radio_group orelse options.semantic_parent else options.semantic_parent,
+        .parent = if (chooses) options.radio_group orelse options.semantic_parent else options.semantic_parent,
         .role = switch (kind) {
             .button => .button,
             .checkbox => .checkbox,
             .radio => .radio,
             .toggle_switch => .toggle_switch,
             .progress => .progress,
+            .tab => .tab,
+            .segment => .radio,
+            .link => .link,
+            .disclosure => .disclosure,
         },
         .name = if (kind == .progress) options.name else text,
         .bounds = bounds,
@@ -141,6 +167,37 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
             const inside = inset(bounds, metrics.border);
             try fill(frame, inside, colors.trough);
             try fill(frame, .{ .x = inside.x, .y = inside.y, .width = inside.width * amount, .height = inside.height }, accent);
+        },
+        .segment => {
+            // Segments are joined buttons; the selected one is filled with the accent.
+            try fill(frame, bounds, border);
+            try fill(frame, inset(bounds, metrics.border), if (checked) accent else if (options.enabled and context.input_state.active == id) colors.pressed else colors.control);
+            try context.command_buffer.text(absolute(frame, inset(bounds, metrics.content_inset)), text, if (checked and options.enabled) colors.on_accent else foreground);
+        },
+        .link => {
+            const color: u32 = if (options.enabled) colors.accent else colors.disabled_text;
+            const label = inset(bounds, metrics.content_inset);
+            try context.command_buffer.text(absolute(frame, label), text, color);
+            try fill(frame, .{ .x = label.x, .y = label.y + label.height - metrics.border, .width = label.width, .height = metrics.border }, color);
+            if (focus) try outline(frame, bounds, metrics.border, colors.focus);
+        },
+        .disclosure => {
+            const side = @min(@min(bounds.height, bounds.width), metrics.indicator_size);
+            const mark: layout.Rect = .{ .x = bounds.x, .y = bounds.y + (bounds.height - side) / 2, .width = side, .height = side };
+            try triangle(frame, inset(mark, side / 4), checked, foreground);
+            const label_x = @min(bounds.width, side + metrics.label_gap);
+            try context.command_buffer.text(absolute(frame, .{ .x = bounds.x + label_x, .y = bounds.y, .width = bounds.width - label_x, .height = bounds.height }), text, foreground);
+            if (focus) try outline(frame, bounds, metrics.border, colors.focus);
+        },
+        .tab => {
+            // The selected tab carries an accent bar along its bottom edge.
+            if (checked) try fill(frame, bounds, colors.control);
+            if (focus) try outline(frame, bounds, metrics.border, colors.focus);
+            if (checked) {
+                const bar = @min(bounds.height, 2 * metrics.border + 1);
+                try fill(frame, .{ .x = bounds.x, .y = bounds.y + bounds.height - bar, .width = bounds.width, .height = bar }, accent);
+            }
+            try context.command_buffer.text(absolute(frame, inset(bounds, metrics.content_inset)), text, foreground);
         },
         else => {
             const side = @min(@min(bounds.height, bounds.width), metrics.indicator_size);
@@ -200,13 +257,18 @@ fn paintTrack(frame: anytype, bounds: layout.Rect, track: layout.Rect, vertical:
         try fill(frame, .{ .x = sliderPosition(track, false, from), .y = track.y - width / 2, .width = track.width * (to - from), .height = width }, if (enabled) colors.accent else colors.disabled_accent);
     }
 }
-fn rangeRecord(frame: anytype, id: u64, bounds: layout.Rect, hit_bounds: layout.Rect, track: layout.Rect, value: f64, spec: Range, minimum: f64, maximum: f64, name: []const u8, options: Options, vertical: bool, stepper: bool) !void {
+fn rangeRecord(frame: anytype, id: u64, bounds: layout.Rect, hit_bounds: layout.Rect, track: layout.Rect, value: f64, spec: Range, minimum: f64, maximum: f64, name: []const u8, options: Options, vertical: bool, role: access.Role) !void {
+    const stepper = role == .stepper;
     if (id == access.root_id) return error.ReservedControlId;
     if (!layout.validRect(bounds) or !layout.validRect(absolute(frame, bounds))) return error.InvalidGeometry;
     const width = @min(bounds.width / 4, bounds.height);
-    try frame.addControl(id, hit_bounds, .{ .enabled = options.enabled, .focus_rect = bounds, .range = .{ .spec = spec, .track = track, .vertical = vertical, .kind = if (stepper) .stepper else .slider, .step_buttons = if (stepper) .{ .decrement = .{ .x = bounds.x, .y = bounds.y, .width = width, .height = bounds.height }, .increment = .{ .x = bounds.x + bounds.width - width, .y = bounds.y, .width = width, .height = bounds.height } } else null }, .shortcut = options.shortcut });
+    try frame.addControl(id, hit_bounds, .{ .enabled = options.enabled, .focus_rect = bounds, .range = .{ .spec = spec, .track = track, .vertical = vertical, .kind = switch (role) {
+        .stepper => .stepper,
+        .splitter => .splitter,
+        else => .slider,
+    }, .step_buttons = if (stepper) .{ .decrement = .{ .x = bounds.x, .y = bounds.y, .width = width, .height = bounds.height }, .increment = .{ .x = bounds.x + bounds.width - width, .y = bounds.y, .width = width, .height = bounds.height } } else null }, .shortcut = options.shortcut });
     const visible = visibleBounds(frame, bounds);
-    try frame.semantic(.{ .id = id, .parent = options.semantic_parent, .role = if (stepper) .stepper else .slider, .name = name, .bounds = bounds, .enabled = options.enabled, .focused = options.enabled and visible.width > 0 and visible.height > 0 and frame.context.input_state.focused == id, .range_value = value, .range_minimum = minimum, .range_maximum = maximum, .range_small_change = spec.smallChange(), .range_large_change = spec.largeChange() });
+    try frame.semantic(.{ .id = id, .parent = options.semantic_parent, .role = role, .name = name, .bounds = bounds, .enabled = options.enabled, .focused = options.enabled and visible.width > 0 and visible.height > 0 and frame.context.input_state.focused == id, .range_value = value, .range_minimum = minimum, .range_maximum = maximum, .range_small_change = spec.smallChange(), .range_large_change = spec.largeChange() });
 }
 pub fn emitSlider(frame: anytype, id: u64, bounds: layout.Rect, value: f64, spec: Range, options: RangeOptions) !void {
     if (frame.context.on_value == null) return error.MissingValueHandler;
@@ -215,7 +277,7 @@ pub fn emitSlider(frame: anytype, id: u64, bounds: layout.Rect, value: f64, spec
     const snapshot = Snapshot.init(frame);
     errdefer snapshot.restore(frame);
     const track = sliderTrack(bounds, options.vertical, frame.currentTheme().metrics.thumb_size);
-    try rangeRecord(frame, id, bounds, bounds, track, value, spec, spec.minimum, spec.maximum, options.control.name, options.control, options.vertical, false);
+    try rangeRecord(frame, id, bounds, bounds, track, value, spec, spec.minimum, spec.maximum, options.control.name, options.control, options.vertical, .slider);
     const amount = valueFraction(spec, value);
     try paintTrack(frame, bounds, track, options.vertical, 0, amount, options.control.enabled);
     try paintThumb(frame, bounds, track, options.vertical, amount, options.control.enabled, frame.context.input_state.focused == id);
@@ -241,8 +303,8 @@ pub fn emitRangeSlider(frame: anytype, ids: RangeSliderIds, bounds: layout.Rect,
     var high_options = options.high;
     low_options.semantic_parent = ids.group;
     high_options.semantic_parent = ids.group;
-    try rangeRecord(frame, ids.low, bounds, low_hit, track, values.low, spec, spec.minimum, values.high, options.low_name, low_options, options.vertical, false);
-    try rangeRecord(frame, ids.high, bounds, high_hit, track, values.high, spec, values.low, spec.maximum, options.high_name, high_options, options.vertical, false);
+    try rangeRecord(frame, ids.low, bounds, low_hit, track, values.low, spec, spec.minimum, values.high, options.low_name, low_options, options.vertical, .slider);
+    try rangeRecord(frame, ids.high, bounds, high_hit, track, values.high, spec, values.low, spec.maximum, options.high_name, high_options, options.vertical, .slider);
     try paintTrack(frame, bounds, track, options.vertical, low, high, options.low.enabled or options.high.enabled);
     try paintThumb(frame, bounds, track, options.vertical, low, options.low.enabled, frame.context.input_state.focused == ids.low);
     try paintThumb(frame, bounds, track, options.vertical, high, options.high.enabled, frame.context.input_state.focused == ids.high);
@@ -253,7 +315,7 @@ pub fn emitStepper(frame: anytype, id: u64, bounds: layout.Rect, value: f64, spe
     try spec.validateValue(value);
     const snapshot = Snapshot.init(frame);
     errdefer snapshot.restore(frame);
-    try rangeRecord(frame, id, bounds, bounds, bounds, value, spec, spec.minimum, spec.maximum, options.name, options, false, true);
+    try rangeRecord(frame, id, bounds, bounds, bounds, value, spec, spec.minimum, spec.maximum, options.name, options, false, .stepper);
     const style = frame.currentTheme();
     const colors = style.palette;
     try fill(frame, bounds, if (frame.context.input_state.focused == id and options.enabled) colors.focus else colors.disabled_border);
@@ -265,4 +327,31 @@ pub fn emitStepper(frame: anytype, id: u64, bounds: layout.Rect, value: f64, spe
     var storage: [64]u8 = undefined;
     const text = std.fmt.bufPrint(&storage, "{d}", .{value}) catch try std.fmt.bufPrint(&storage, "{e}", .{value});
     try frame.context.command_buffer.text(absolute(frame, .{ .x = bounds.x + width, .y = bounds.y, .width = @max(0, bounds.width - 2 * width), .height = bounds.height }), text, color);
+}
+
+/// A draggable divider between two panes of `bounds`. `value` is the first
+/// pane's share of the length left after the divider, within `spec`, which
+/// lies in 0..1; `divider` is the strip that takes pointer input.
+/// A vertical splitter divides top from bottom and grows downward.
+pub fn emitSplitter(frame: anytype, id: u64, bounds: layout.Rect, divider: layout.Rect, value: f64, spec: Range, options: SplitterOptions) !void {
+    if (frame.context.on_value == null) return error.MissingValueHandler;
+    try spec.validate();
+    if (spec.minimum < 0 or spec.maximum > 1) return error.InvalidRange;
+    try spec.validateValue(value);
+    if (!layout.validRect(bounds) or !layout.validRect(absolute(frame, bounds))) return error.InvalidGeometry;
+    const snapshot = Snapshot.init(frame);
+    errdefer snapshot.restore(frame);
+    // The track spans the divider centre's positions from the minimum to
+    // the maximum share, so a drag keeps the divider under the pointer.
+    const extent = @max(0, if (options.vertical) bounds.height - divider.height else bounds.width - divider.width);
+    const start = extent * @as(f32, @floatCast(spec.minimum));
+    const length = extent * @as(f32, @floatCast(spec.maximum - spec.minimum));
+    const track: layout.Rect = if (options.vertical) .{ .x = bounds.x + bounds.width / 2, .y = bounds.y + divider.height / 2 + start, .width = 0, .height = length } else .{ .x = bounds.x + divider.width / 2 + start, .y = bounds.y + bounds.height / 2, .width = length, .height = 0 };
+    try rangeRecord(frame, id, divider, divider, track, value, spec, spec.minimum, spec.maximum, options.control.name, options.control, options.vertical, .splitter);
+    const style = frame.currentTheme();
+    const colors = style.palette;
+    const focused = options.control.enabled and frame.context.input_state.focused == id;
+    const line = if (focused) 2 * style.metrics.border else style.metrics.border;
+    const color: u32 = if (!options.control.enabled) colors.disabled_border else if (focused) colors.focus else colors.border;
+    try fill(frame, if (options.vertical) .{ .x = divider.x, .y = divider.y + (divider.height - line) / 2, .width = divider.width, .height = @min(line, divider.height) } else .{ .x = divider.x + (divider.width - line) / 2, .y = divider.y, .width = @min(line, divider.width), .height = divider.height }, color);
 }

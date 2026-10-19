@@ -548,6 +548,7 @@ pub fn build(b: *std.Build) void {
         });
         addSmoke(b, "smoke-view", "tests/view_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
             .{ .name = "ziggurat_view", .module = declarative_view },
         });
         addSmoke(b, "smoke-animation-ui", "tests/animation_ui_smoke.zig", target, optimize, &.{
@@ -614,6 +615,21 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_caret", .module = caret },                  .{ .name = "ziggurat_prepared_hit", .module = prepared_hit },
         .{ .name = "pointer_classifier", .module = pointer_classifier },
     } });
+    const view_text = b.addModule("ziggurat_view_text", .{ .root_source_file = b.path("src/view/text_field.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
+        .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_document_editor", .module = document_editor },
+    } });
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
+        addSmoke(b, "smoke-view-text", "tests/view_text_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_document", .module = document },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+            .{ .name = "ziggurat_document_editor", .module = document_editor },
+            .{ .name = "ziggurat_view", .module = declarative_view },
+            .{ .name = "ziggurat_view_text", .module = view_text },
+        });
+    }
     const document_accessibility = b.addModule("ziggurat_document_accessibility", .{ .root_source_file = b.path("src/document_accessibility/root.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat", .module = core },
         .{ .name = "ziggurat_document", .module = document },

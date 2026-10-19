@@ -37,6 +37,10 @@ Slider 按下即定位，拖动期间保留原 ID，移出轨道仍更新并截�
 
 相对动作保留方向：正次数不减小当前有效值，负次数不增大，零次数原样保留，包括应用赋值或双端截断产生的非步点值。一步从非步点到该方向的下一步点；一页先加实际 `page_step` 再按步长量化，结果受上述方向限制，因此过小的一页可以不改变当前值。
 
+`tabList`/`tab` 与 `radioGroup`/`radio` 共用分组规则：每个 `tab` 以 `Options.radio_group` 指向标签列表 ID（缺省返回 `MissingGroup`），同组只能有一个选中项，共享 Tab 停靠点与方向键选择。`toolbar` 只记录语义组。`splitter(id, bounds, divider, value, spec, options)` 在 `divider` 条上接收指针，`value` 是第一栏占 `bounds` 去掉分隔条后长度的比例，`spec` 必须在 0..1 内；拖动轨道只覆盖 `spec` 上下限之间的位置，指针始终对着分隔条中心。`SplitterOptions.vertical` 为上下分栏，向下与方向键 Down 增大。
+
+`segment` 是首尾相接的按钮式单选，同样以 `radio_group` 指向 `radioGroup`。`link` 激活方式与按钮相同，不处理 URL。`disclosure` 的 `expanded` 由应用持有，激活应翻转它；UIA 的 Expand/Collapse 在状态已符合时不产生动作。
+
 Stepper 是数值显示与左右减/加按钮，不提供直接文本编辑或按住自动重复。中心点击仅聚焦；按钮必须在同一方向区域内按下、释放，跨区域释放取消。键盘与 Slider 使用相同步进规则。应用可以选择不同的业务更新策略，UIA 与指针均走同一个 `on_value`。
 
 快捷键通过 `Options.shortcut = .{ .key = .s, .modifiers = .{ .control = true } }` 显式绑定，支持完整 `z.KeyCode` 与 Shift/Control/Alt/Super 组合，默认忽略重复。默认平面注册不允许相同组合重复绑定，禁用/不可见项不匹配。显式 `Context.prepareShortcutScopes` 可启用[嵌套快捷键范围](shortcut-scopes.md)，在同一个成功输入 front 内允许父子覆盖及不同 sibling 的绑定，保留同 scope 歧义检查。普通控件触发同一 `on_action`，数值控件的快捷键只聚焦该控件。原生内容通过可选 `Content.key_input` 提前消费 keydown；未安装该入口时保留旧事件和文本路径。
@@ -58,6 +62,13 @@ UI 的 `on_input` 先收到一次 `.key_input`；若未消费，已有编辑键�
 | Progress | ProgressBar / 只读 RangeValue，0..100 |
 | Slider / 双端的每一端 | Slider / 可写 RangeValue，当前值、动态上下界与步长 |
 | Stepper | Spinner / 可写 RangeValue，不声明文本 Value 模式 |
+| TabList | Tab / Selection，单选 |
+| Tab | TabItem / SelectionItem，规则与 Radio 相同 |
+| Toolbar | ToolBar，子控件以 `semantic_parent` 挂在其下 |
+| Splitter | Thumb / 可写 RangeValue，值为第一栏比例 |
+| Segment | RadioButton / SelectionItem，分组用 `radioGroup` |
+| Link | Hyperlink / Invoke |
+| Disclosure | Button / ExpandCollapse，checked 即展开 |
 
 Radio 的 `AddToSelection` 在已有其他选中项时拒绝操作；`RemoveFromSelection` 不取消已选项。`Select` 已选项时不重复产生动作。禁用动作返回 `ElementNotEnabled`。UIA 动作经现有 owner 线程入口调度，状态在下一次成功绘制后发布；不在 provider 中保存另一份业务状态。节点移除或窗口关闭后，独立原生 provider 的属性与动作返回 `ElementNotAvailable`；COM 接口集合保持创建时的身份，原先支持的 `QueryInterface` 仍成功并正确增加引用。UIAutomationClient 可缓存只读元数据，因此关闭后的 Progress SetValue 仍可能直接得到 `InvalidOperation`。
 

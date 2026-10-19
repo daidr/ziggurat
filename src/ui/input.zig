@@ -83,7 +83,7 @@ pub const Range = struct {
 };
 pub const ValueAction = struct { id: u64, change: ValueChange };
 pub const StepButtons = struct { decrement: Rect, increment: Rect };
-pub const RangeHit = struct { spec: Range, track: Rect, vertical: bool = false, kind: enum { slider, stepper } = .slider, step_buttons: ?StepButtons = null };
+pub const RangeHit = struct { spec: Range, track: Rect, vertical: bool = false, kind: enum { slider, stepper, splitter } = .slider, step_buttons: ?StepButtons = null };
 pub const Chord = struct { key: z.KeyCode, modifiers: z.KeyModifiers = .{}, allow_repeat: bool = false };
 pub const Options = struct {
     enabled: bool = true,
@@ -757,7 +757,9 @@ pub const Input = struct {
         }
         const extent = if (range.vertical) range.track.height else range.track.width;
         if (extent <= 0) return null;
-        const coordinate = if (range.vertical) 1 - (local.y - range.track.y) / extent else (local.x - range.track.x) / extent;
+        // A vertical slider grows upward; a vertical splitter grows downward with its first pane.
+        const along = if (range.vertical) (local.y - range.track.y) / extent else (local.x - range.track.x) / extent;
+        const coordinate = if (range.vertical and range.kind != .splitter) 1 - along else along;
         if (!std.math.isFinite(coordinate)) return null;
         const value = range.spec.normalize(range.spec.minimum + std.math.clamp(coordinate, 0, 1) * (range.spec.maximum - range.spec.minimum)) catch return null;
         if (self.drag_last == value) return null;
@@ -770,9 +772,13 @@ pub const Input = struct {
         const index = self.indexOf(id) orelse return null;
         const item = self.hits[index];
         if (!self.eligible(item, index) or item.options.range == null) return null;
+        const range = item.options.range.?;
+        const downward = range.kind == .splitter and range.vertical;
         const change: ValueChange = switch (key.key) {
-            .left, .down => .{ .steps = -1 },
-            .right, .up => .{ .steps = 1 },
+            .left => .{ .steps = -1 },
+            .right => .{ .steps = 1 },
+            .down => .{ .steps = if (downward) 1 else -1 },
+            .up => .{ .steps = if (downward) -1 else 1 },
             .page_down => .{ .pages = -1 },
             .page_up => .{ .pages = 1 },
             .home => .minimum,
@@ -971,6 +977,20 @@ test "range pointer capture clamps outside and stepper requires same explicit bu
     try state.addWithOptions(2, bounds, .{ .enabled = false });
     state.commitFrame();
     try std.testing.expect(state.active == null and state.pressed_step == null);
+}
+
+test "vertical splitters grow downward for pointer and arrow keys" {
+    var state: Input = .{};
+    const strip: Rect = .{ .x = 0, .y = 48, .width = 100, .height = 4 };
+    const spec: Range = .{ .minimum = 0, .maximum = 1, .step = 0.25 };
+    try state.addWithOptions(1, strip, .{ .range = .{ .spec = spec, .track = .{ .x = 50, .y = 0, .width = 0, .height = 100 }, .vertical = true, .kind = .splitter } });
+    state.down(.{ .x = 50, .y = 50 });
+    try std.testing.expectEqual(@as(f64, 0.5), state.pointerValue(.{ .x = 50, .y = 50 }, .down).?.change.set);
+    try std.testing.expectEqual(@as(f64, 0.75), state.pointerValue(.{ .x = 50, .y = 74 }, .move).?.change.set);
+    _ = state.pointerValue(.{ .x = 50, .y = 74 }, .up);
+    state.setFocused(1);
+    try std.testing.expectEqual(@as(i32, 1), state.rangeKey(.{ .key = .down }).?.change.steps);
+    try std.testing.expectEqual(@as(i32, -1), state.rangeKey(.{ .key = .up }).?.change.steps);
 }
 
 test "reverse tab and shortcuts use committed enabled identities" {

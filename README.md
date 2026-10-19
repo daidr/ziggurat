@@ -68,6 +68,7 @@ WSL 应将 Zig 本地缓存放在 Linux 文件系统，见 `scripts/linux-check.
 | `ziggurat_document_diff_view` | 同一文档对的版本化交付、可编辑双栏/统一视图、行内标记、导航与原子 revert | 显式依赖 Document/Adapter/UI/系统布局；上下文折叠和完整可访问语义继续实施 |
 | `ziggurat_document_diff_accessibility` | 可编辑 Diff 双源全文、真实删除行几何与同根有界辅助控件 | 可选 Windows UIA；复用原 Document/Adapter 与唯一 Diff 协调者 |
 | `ziggurat_view` | 从应用状态构建视图树、弹性布局、绑定值的控件与即时输入交付 | 单向依赖 UI；调用者提供固定存储，不分配 |
+| `ziggurat_view_text` | 声明式视图中的可编辑文本字段，包装应用持有的 Document Field | 依赖视图与文档编辑器；准备在绘制后的投递任务中进行 |
 | `ziggurat_virtual_list` | 稳定行 ID、可变高度索引、滚动锚点与有界可见回放 | 单向依赖 UI；完整虚拟控件集继续按计划实施 |
 | `ziggurat_images` | 有界 PNG/JPEG/BMP/首帧 GIF、可选 WebP、EXIF 与独占像素交接 | 系统 WIC/GdkPixbuf；有界 LZW；可选固定源码 WebP |
 | `ziggurat_image_drawing` | 不可变预乘像素、裁切与 mip 准备；显式上传、同尺寸更新和有界驻留 | 独立依赖图片与绘制资源；GDI/Cairo/D2D 回放 |
