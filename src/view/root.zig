@@ -21,7 +21,7 @@ pub const ScrollModel = ui.scroll.ScrollModel;
 pub const Track = ui.grid.Track;
 pub const MeterBands = ui.widgets.MeterBands;
 
-pub const Error = error{ TooManyNodes, TextFull, NestingTooDeep, UnbalancedContainer, NotContainer, Busy, InvalidRange, InvalidValue, InvalidText, InvalidSplit } || layout.Error;
+pub const Error = error{ InvalidField, TooManyNodes, TextFull, NestingTooDeep, UnbalancedContainer, NotContainer, Busy, InvalidRange, InvalidValue, InvalidText, InvalidSplit } || layout.Error;
 
 pub const max_depth = 32;
 /// Scroll containers Host can route wheel input to in one frame.
@@ -62,9 +62,32 @@ pub const Style = struct {
     radius: f32 = 0,
     /// Text color for text nodes; widgets use the theme palette.
     color: ?u32 = null,
+    /// False disables the node; on a container it also disables every
+    /// descendant.
     enabled: bool = true,
-    /// Accessible name for a progress indicator, which has no visible label.
+    /// Accessible name for a control without a visible label, such as a
+    /// progress indicator, or for a named container.
     name: []const u8 = "",
+};
+
+/// The label, help and error of a form field; see `View.field`.
+pub const Field = struct {
+    /// Hint drawn below the content and announced with its controls.
+    help: []const u8 = "",
+    /// Validation message; while set it replaces the help, is drawn in the
+    /// caution color and marks the controls invalid.
+    @"error": ?[]const u8 = null,
+    /// Marks the label and the controls as needing a value.
+    required: bool = false,
+};
+
+/// How a form field describes an embedded leaf to accessibility clients.
+pub const Annotation = struct {
+    /// The field's label, for a leaf without a name of its own.
+    name: []const u8 = "",
+    description: []const u8 = "",
+    invalid: bool = false,
+    required: bool = false,
 };
 
 /// Derive a stable key from text, for example a list item's identifier.
@@ -88,7 +111,7 @@ pub const Measurer = struct {
     }
 };
 
-pub const Kind = enum { column, row, radio_group, segmented, tab_list, toolbar, breadcrumbs, accordion, split, scroll, grid, text, badge, spacer, button, link, checkbox, radio, segment, tab, disclosure, toggle_switch, progress, meter, slider, stepper, rating, embed };
+pub const Kind = enum { column, row, radio_group, segmented, tab_list, toolbar, breadcrumbs, accordion, field, fieldset, split, scroll, grid, text, note, badge, spacer, button, link, checkbox, radio, segment, tab, disclosure, toggle_switch, progress, meter, slider, stepper, rating, embed };
 
 /// A leaf that measures, places and paints itself, for content the view
 /// layer does not model, such as an editable text field. The context must
@@ -102,6 +125,9 @@ pub const Embed = struct {
     /// such work to the input phase.
     place: ?*const fn (*anyopaque, u64, Rect) void = null,
     paint: *const fn (*anyopaque, *ui.Frame, u64, Rect) anyerror!void,
+    /// The enclosing form field's description, or an empty one outside a
+    /// field; called just before each `paint` under the same rules.
+    annotate: ?*const fn (*anyopaque, Annotation) void = null,
 };
 
 pub const Node = struct {
@@ -115,6 +141,13 @@ pub const Node = struct {
     range: Range = .{ .minimum = 0, .maximum = 1 },
     /// Preferred band of a meter.
     bands: MeterBands = .{},
+    /// A field's help or error text, which a note displays.
+    note: []const u8 = "",
+    /// A field with an error, or a note showing one.
+    invalid: bool = false,
+    required: bool = false,
+    /// Index of the nearest enclosing form field.
+    field: u32 = none,
     radio_group: ?u64 = null,
     /// Nearest enclosing toolbar, breadcrumb trail or accordion, the
     /// accessible parent of the controls inside it.
@@ -140,7 +173,7 @@ pub const Node = struct {
 
     pub fn isContainer(self: *const Node) bool {
         return switch (self.kind) {
-            .column, .row, .radio_group, .segmented, .tab_list, .toolbar, .breadcrumbs, .accordion, .split, .scroll, .grid => true,
+            .column, .row, .radio_group, .segmented, .tab_list, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid => true,
             else => false,
         };
     }
@@ -246,10 +279,12 @@ pub const View = struct {
         const parent = &self.buffers.nodes[parent_index];
         if (parent.child_count >= layout.max_items) return error.TooManyItems;
         const index = self.len;
-        self.buffers.nodes[index] = .{ .kind = kind, .id = self.identity(parent, kind, style), .style = style, .parent = parent_index, .end = index + 1, .semantic_parent = switch (parent.kind) {
-            .toolbar, .breadcrumbs, .accordion => parent.id,
+        var effective = style;
+        effective.enabled = style.enabled and parent.style.enabled;
+        self.buffers.nodes[index] = .{ .kind = kind, .id = self.identity(parent, kind, style), .style = effective, .parent = parent_index, .end = index + 1, .semantic_parent = switch (parent.kind) {
+            .toolbar, .breadcrumbs, .accordion, .fieldset => parent.id,
             else => parent.semantic_parent,
-        } };
+        }, .field = if (parent.kind == .field) parent_index else parent.field };
         if (parent.last_child == none) parent.first_child = index else self.buffers.nodes[parent.last_child].next_sibling = index;
         parent.last_child = index;
         parent.child_count += 1;
@@ -301,6 +336,15 @@ pub const View = struct {
         const index = self.stack[self.depth];
         const node = &self.buffers.nodes[index];
         if (node.kind == .split and node.child_count != 2) return error.InvalidSplit;
+        if (node.kind == .field) {
+            // Only the label precedes the content.
+            if (node.child_count < 2) return error.InvalidField;
+            if (node.note.len > 0) {
+                const note = try self.append(.note, .{});
+                note.text = node.note;
+                note.invalid = node.invalid;
+            }
+        }
         node.end = self.len;
     }
 
@@ -443,6 +487,38 @@ pub const View = struct {
         node.checked = if (open_section.*) |current| std.meta.eql(current, option) else false;
         return changed;
     }
+    /// Starts a labelled form field: the label, then the content built
+    /// before `end`, then the error or help text from `info`. Controls inside
+    /// announce that text as their description, are marked invalid while
+    /// there is an error and take the label as their name when they have no
+    /// name of their own. The content needs at least one node.
+    pub fn field(self: *View, label: []const u8, info: Field, style: Style) Error!void {
+        var value = style;
+        if (value.gap == 0) value.gap = 4;
+        const node = try self.open(.field, value);
+        node.text = try self.copy(label);
+        node.required = info.required;
+        if (info.@"error") |message| {
+            node.note = try self.copy(message);
+            node.invalid = true;
+        } else if (info.help.len > 0) node.note = try self.copy(info.help);
+        const caption = try self.append(.text, .{});
+        // The marker follows the label in the same storage, so both are one slice.
+        const start = self.text_len;
+        _ = try self.copy(label);
+        if (info.required) _ = try self.copy(" *");
+        caption.text = self.buffers.text[start..self.text_len];
+    }
+    /// Starts a column of related fields under a visible legend, announced
+    /// as a group named by it. `Style.enabled = false` disables everything
+    /// inside. Close it with `end`.
+    pub fn fieldset(self: *View, legend: []const u8, style: Style) Error!void {
+        var value = style;
+        if (value.gap == 0) value.gap = 8;
+        const node = try self.open(.fieldset, value);
+        node.text = try self.copy(legend);
+        if (legend.len > 0) try self.text(legend, .{});
+    }
     /// Starts two panes along `axis` separated by a draggable divider. The
     /// first pane takes `fraction` of the length, kept within `limits`, which
     /// must lie in 0..1; pointer drags, arrow keys and accessibility clients
@@ -565,7 +641,7 @@ pub const View = struct {
         const metrics = theme.metrics;
         const text_size = if (node.text.len > 0) measurer.measure(measurer.context, node.text) else Size{ .width = 0, .height = Measurer.line_height };
         const size: Size = switch (node.kind) {
-            .text => text_size,
+            .text, .note => text_size,
             .spacer => .{},
             .button, .tab, .segment => .{ .width = text_size.width + 2 * (metrics.content_inset + 8), .height = @max(text_size.height, metrics.indicator_size) + 2 * metrics.content_inset },
             .link => .{ .width = text_size.width + 2 * metrics.content_inset, .height = text_size.height + 2 * metrics.content_inset },
@@ -577,7 +653,7 @@ pub const View = struct {
             .rating => .{ .width = @as(f32, @floatCast(node.range.maximum)) * Measurer.line_height, .height = Measurer.line_height + metrics.content_inset },
             .slider => .{ .width = 200, .height = metrics.thumb_size + 2 * metrics.content_inset },
             .stepper => .{ .width = 4 * (Measurer.line_height + metrics.content_inset), .height = Measurer.line_height + metrics.content_inset },
-            .column, .row, .radio_group, .segmented, .tab_list, .toolbar, .breadcrumbs, .accordion, .split, .scroll, .grid, .embed => unreachable,
+            .column, .row, .radio_group, .segmented, .tab_list, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .embed => unreachable,
         };
         const minimum: Size = switch (node.kind) {
             .progress, .meter, .slider, .spacer => .{ .width = 0, .height = size.height },
@@ -764,15 +840,21 @@ pub const View = struct {
             }
             const bounds = node.bounds;
             const style = node.style;
-            const control: ui.widgets.Options = .{ .enabled = style.enabled, .name = style.name, .semantic_parent = node.semantic_parent };
+            var control: ui.widgets.Options = .{ .enabled = style.enabled, .name = style.name, .semantic_parent = node.semantic_parent };
+            const annotation = self.annotationOf(node);
+            control.description = annotation.description;
+            control.invalid = annotation.invalid;
+            control.required = annotation.required;
+            if (control.name.len == 0) control.name = annotation.name;
             switch (node.kind) {
-                .column, .row, .radio_group, .segmented, .tab_list, .toolbar, .breadcrumbs, .accordion, .split, .scroll, .grid => {
+                .column, .row, .radio_group, .segmented, .tab_list, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid => {
                     switch (node.kind) {
                         .radio_group, .segmented => try target.radioGroup(node.id, bounds, style.name),
                         .tab_list => try target.tabList(node.id, bounds, style.name),
                         .toolbar => try target.toolbar(node.id, bounds, style.name),
                         .breadcrumbs => try target.navigation(node.id, bounds, style.name, node.semantic_parent),
                         .accordion => try target.group(node.id, bounds, style.name, node.semantic_parent),
+                        .fieldset => try target.group(node.id, bounds, node.text, node.semantic_parent),
                         else => {},
                     }
                     if (style.background) |color| target.roundedRect(bounds, style.radius, ui.Color.rgb(color));
@@ -790,6 +872,7 @@ pub const View = struct {
                     }
                 },
                 .text => target.label(bounds, node.text, style.color orelse if (style.enabled) theme.palette.text else theme.palette.disabled_text),
+                .note => target.label(bounds, node.text, if (node.invalid) theme.palette.caution else theme.palette.disabled_text),
                 .spacer => {},
                 .button => try target.buttonWithOptions(node.id, bounds, node.text, control),
                 .link => try target.link(node.id, bounds, node.text, control),
@@ -823,6 +906,7 @@ pub const View = struct {
                 .stepper => try target.stepper(node.id, bounds, node.value, node.range, control),
                 .embed => {
                     const content = node.embed.?;
+                    if (content.annotate) |annotate| annotate(content.context, annotation);
                     if (@TypeOf(target) == *ui.Frame) try content.paint(content.context, target, node.id, bounds) else try target.embedded(node.id, bounds);
                 },
             }
@@ -832,6 +916,14 @@ pub const View = struct {
             try target.popClip();
             paintScrollIndicator(&all[clips[clip_depth]], target, theme);
         }
+    }
+
+    /// What the enclosing field adds to a control's semantics; empty outside
+    /// a field and for the field's own label and note.
+    fn annotationOf(self: *const View, node: *const Node) Annotation {
+        if (node.field == none or node.kind == .text or node.kind == .note) return .{};
+        const owner = &self.buffers.nodes[node.field];
+        return .{ .name = owner.text, .description = owner.note, .invalid = owner.invalid, .required = owner.required };
     }
 
     /// A muted slash centred in each gap between breadcrumb items.

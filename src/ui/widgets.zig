@@ -14,6 +14,13 @@ pub const Options = struct {
     /// Accessible name for a progress indicator, which has no visible label.
     name: []const u8 = "",
     shortcut: ?Chord = null,
+    /// Help or error text announced with the control, such as a form
+    /// field's hint; it is not drawn.
+    description: []const u8 = "",
+    /// The value fails the application's validation.
+    invalid: bool = false,
+    /// A form needs a value before it can be submitted.
+    required: bool = false,
 };
 pub const RangeOptions = struct { control: Options = .{}, vertical: bool = false };
 pub const RangeSliderIds = struct { group: u64, low: u64, high: u64 };
@@ -159,10 +166,13 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
             .disclosure => .disclosure,
         },
         .name = if (kind == .progress) options.name else text,
+        .description = options.description,
         .bounds = bounds,
         .enabled = options.enabled,
         .focused = focus,
         .checked = checked,
+        .invalid = options.invalid,
+        .required = options.required,
         .read_only = kind == .progress,
         .range_value = amount * 100,
     });
@@ -284,7 +294,7 @@ fn rangeRecord(frame: anytype, id: u64, bounds: layout.Rect, hit_bounds: layout.
         else => .slider,
     }, .step_buttons = if (stepper) .{ .decrement = .{ .x = bounds.x, .y = bounds.y, .width = width, .height = bounds.height }, .increment = .{ .x = bounds.x + bounds.width - width, .y = bounds.y, .width = width, .height = bounds.height } } else null }, .shortcut = options.shortcut });
     const visible = visibleBounds(frame, bounds);
-    try frame.semantic(.{ .id = id, .parent = options.semantic_parent, .role = role, .name = name, .bounds = bounds, .enabled = options.enabled, .focused = options.enabled and visible.width > 0 and visible.height > 0 and frame.context.input_state.focused == id, .range_value = value, .range_minimum = minimum, .range_maximum = maximum, .range_small_change = spec.smallChange(), .range_large_change = spec.largeChange() });
+    try frame.semantic(.{ .id = id, .parent = options.semantic_parent, .role = role, .name = name, .description = options.description, .invalid = options.invalid, .required = options.required, .bounds = bounds, .enabled = options.enabled, .focused = options.enabled and visible.width > 0 and visible.height > 0 and frame.context.input_state.focused == id, .range_value = value, .range_minimum = minimum, .range_maximum = maximum, .range_small_change = spec.smallChange(), .range_large_change = spec.largeChange() });
 }
 pub fn emitSlider(frame: anytype, id: u64, bounds: layout.Rect, value: f64, spec: Range, options: RangeOptions) !void {
     if (frame.context.on_value == null) return error.MissingValueHandler;
@@ -382,7 +392,7 @@ pub fn emitMeter(frame: anytype, id: u64, bounds: layout.Rect, value: f64, spec:
     if (!layout.validRect(bounds) or !layout.validRect(absolute(frame, bounds))) return error.InvalidGeometry;
     const snapshot = Snapshot.init(frame);
     errdefer snapshot.restore(frame);
-    try frame.semantic(.{ .id = id, .parent = options.control.semantic_parent, .role = .meter, .name = options.control.name, .bounds = bounds, .enabled = options.control.enabled, .read_only = true, .range_value = value, .range_minimum = spec.minimum, .range_maximum = spec.maximum });
+    try frame.semantic(.{ .id = id, .parent = options.control.semantic_parent, .role = .meter, .name = options.control.name, .description = options.control.description, .bounds = bounds, .enabled = options.control.enabled, .read_only = true, .range_value = value, .range_minimum = spec.minimum, .range_maximum = spec.maximum });
     const style = frame.currentTheme();
     const colors = style.palette;
     try fill(frame, bounds, if (options.control.enabled) colors.border else colors.disabled_border);

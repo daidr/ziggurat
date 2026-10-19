@@ -49,7 +49,7 @@
 | U07 | 待实现 | calendar、date/time、color picker | locale/范围/键盘/可访问性；依赖 L01/U05 |
 | U08 | 部分完成（U08.1 link、badge、segmented、disclosure；U08.2 meter、rating、breadcrumbs、accordion） | badge、avatar、link、meter、rating、segmented、accordion、breadcrumbs 与导航按钮 | 稳定身份、分组/展开/链接动作、键盘和语义；不把静态文字/矩形算成完整控件；avatar 与导航按钮继续；基础依赖 U02.1/G01 |
 | U09 | 待实现 | chart 的数值/分类/时间尺度、axes、marks、stacking 与 selection | 极值/空数据/大数据、按需绘制、布局与键盘/辅助说明；依赖 G01/T01/L01 |
-| U10 | 待实现 | form、field/fieldset、验证提示与自定义控件契约 | 标签关联、禁用继承、错误语义、测量/绘制/输入/快照事务；依赖 U02.1/U03.2/T02/T06 |
+| U10 | 部分完成（U10.1 声明式视图的 field/fieldset、说明与验证状态、禁用继承） | form、field/fieldset、验证提示与自定义控件契约 | 标签关联、禁用继承、错误语义、测量/绘制/输入/快照事务；form 提交与焦点跳到首个错误、自定义控件契约继续；依赖 U02.1/U03.2/T02/T06 |
 | G01 | 部分完成 | 圆角、描边、渐变、阴影、透明度、图片与 SVG/path | RGBA/圆角/内描边、图片驻留/同尺寸更新、严格渐变、圆角阴影/path、有界分组和独立软件/GPU离屏已验收；完整 SVG 继续实施；三后端同一语义与明确资源上限 |
 | G02 | 进行中 | theme、动画时间线、spring、变换与局部失效 | 显式动画/有限重复、基础控件主题、Windows/Linux单次唤醒/局部失效、仿射栅格scope/同帧坐标、通用GPU精度预检/整帧后备、共享软件采样及单Document保留坐标桥已验；过滤变换性能、折叠/投影编辑器输入与更广失效复用继续；依赖 G01 |
 | G03 | 进行中 | 共享 GPU 资源、文本/图片缓存与多窗口性能 | 显式DeviceDomain/纹理寿命与预算先行；按测量决定缓存容量与淘汰；设备丢失、跨窗口关闭和显存/内存基线；依赖 G01/V02 |
@@ -1620,6 +1620,12 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - 新增语义角色 `link` 与 `disclosure`，追加在既有编号之后。Frame 提供 `link`、`segment` 与 `disclosure`：分段复用单选分组，链接与折叠区复用按钮激活；三者都参与 Tab 焦点。Windows UIA 映射为 Hyperlink/Invoke、RadioButton/SelectionItem 与 Button/ExpandCollapse，ExpandCollapse 在状态已符合时不产生动作。Linux 不声明 AT-SPI。
 - `ziggurat_view` 提供 `link`、`badge`、`segmented`/`segment` 与 `disclosure`。徽标只是带背景的静态文字，不计为控件，也不产生语义节点；单个 `disclosure` 不等于多段 accordion。
 - 单元测试覆盖分组、方向键选择、激活和语义；Linux 隐藏窗口 smoke 在 1x/2x 下实测分段、链接和折叠区的原生点击。Windows smoke 用真实 UIAutomationClient 检查分段选择、链接 Invoke 与折叠区 ExpandCollapse。见[声明式视图](view.md)。
+
+### U10.1 表单字段与字段集
+
+- 语义节点新增 `description`、`invalid` 与 `required`。说明与名称、值一起复制进固定文本存储，导出子树时一并复制。Windows UIA 映射为 HelpText、IsDataValidForForm 与 IsRequiredForForm。`widgets.Options` 带同名字段，只进入语义，不参与绘制。
+- `ziggurat_view` 提供 `field` 与 `fieldset`。字段按标签、内容、帮助或错误的顺序排列；字段内的控件取得说明与验证状态，没有名称时以标签为名。`Embed.annotate` 把同样的信息交给嵌入叶子，`ziggurat_view_text` 的文本框据此调用 `Field.drawDescribed`。任何容器的 `enabled = false` 都会传给全部后代。
+- 单元测试覆盖语义文本导出与容量、无窗口的字段排列、错误清除与禁用继承。Windows smoke 用真实 UIAutomationClient 检查标签名称、HelpText、表单有效性和必填状态，以及字段集分组。
 
 ### U08.2 度量条、评分、面包屑与手风琴
 

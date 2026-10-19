@@ -6,6 +6,8 @@ const t = @import("ziggurat_text_layout");
 const e = @import("root.zig");
 
 pub const Policy = struct { enabled: bool = true, read_only: bool = false };
+/// Help or error text and form state announced with the text box.
+pub const Description = struct { description: []const u8 = "", invalid: bool = false, required: bool = false };
 pub const Options = struct {
     multiline: bool = false,
     accept_tab: bool = false,
@@ -133,6 +135,10 @@ pub fn Field(comptime Private: type) type {
             self.window = window;
         }
         pub fn draw(self: *Self, frame: *ui.Frame, colors: e.Colors, name: []const u8) !void {
+            return self.drawDescribed(frame, colors, name, .{});
+        }
+        /// `draw` with help or error text and form state for accessibility.
+        pub fn drawDescribed(self: *Self, frame: *ui.Frame, colors: e.Colors, name: []const u8, about: Description) !void {
             try self.enter();
             defer self.leave();
             errdefer |err| frame.failure = frame.failure orelse err;
@@ -141,7 +147,7 @@ pub fn Field(comptime Private: type) type {
             try frame.textField(token, self.bounds, self.options.policy.enabled);
             try self.adapter.draw(frame, self.bounds, colors);
             const selected = try self.document.selection();
-            try frame.semantic(.{ .id = token.key.id, .role = .text_box, .name = name, .value = self.value[0..self.value_len], .bounds = self.bounds, .enabled = self.options.policy.enabled, .read_only = self.options.policy.read_only, .focused = frame.context.input_state.focused == token.key.id, .selection_start = selected.range().start, .selection_end = selected.range().end });
+            try frame.semantic(.{ .id = token.key.id, .role = .text_box, .name = name, .value = self.value[0..self.value_len], .description = about.description, .invalid = about.invalid, .required = about.required, .bounds = self.bounds, .enabled = self.options.policy.enabled, .read_only = self.options.policy.read_only, .focused = frame.context.input_state.focused == token.key.id, .selection_start = selected.range().start, .selection_end = selected.range().end });
         }
         pub fn focus(self: *Self) !void {
             try self.enter();

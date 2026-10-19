@@ -196,6 +196,8 @@ pub const Harness = struct {
                 .scroll => if (node.scroll) |model| try writer.print(" offset={d}", .{round(model.offset.y)}),
                 else => {},
             }
+            if (node.invalid) try writer.writeAll(" invalid");
+            if (node.required) try writer.writeAll(" required");
             if (!node.style.enabled) try writer.writeAll(" disabled");
             const b = node.bounds;
             try writer.print(" @{d},{d} {d}x{d}\n", .{ round(b.x), round(b.y), round(b.width), round(b.height) });
@@ -636,4 +638,66 @@ test "accordions keep one section open; ratings, meters and breadcrumbs report s
     try std.testing.expectError(error.InvalidRange, v.rating(&score, 11, .{}));
     var section: ?u8 = null;
     try std.testing.expectError(error.NotContainer, v.section(u8, &section, 1, "Loose", .{}));
+}
+
+const Signup = struct {
+    email: f64 = 0,
+    terms: bool = false,
+    locked: bool = false,
+    submitted: usize = 0,
+
+    fn build(self: *Signup, v: *View) anyerror!void {
+        try v.fieldset("Account", .{ .enabled = !self.locked });
+        try v.field("Age", .{ .help = "Whole years", .required = true }, .{});
+        _ = try v.stepper(&self.email, .{ .minimum = 0, .maximum = 120, .step = 1 }, .{});
+        try v.end();
+        try v.field("Terms", .{ .@"error" = if (self.terms) null else "Accept to continue" }, .{});
+        _ = try v.checkbox(&self.terms, "I accept", .{});
+        try v.end();
+        try v.end();
+        if (try v.button("Submit", .{ .enabled = self.terms })) self.submitted += 1;
+    }
+};
+
+test "fields label, describe and validate their controls; fieldsets disable theirs" {
+    var storage: view.Storage(32, 256) = .{};
+    var state: Signup = .{};
+    var h = Harness.init(&state, Signup.build, storage.buffers(), .{});
+    try h.render();
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try h.write(&writer);
+    const outline = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, outline, "text \"Age *\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, outline, "note \"Whole years\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, outline, "note \"Accept to continue\" invalid") != null);
+
+    // The label sits above the control and the note below it.
+    const label = try h.find(.{ .text = "Age *" });
+    const age = try h.find(.{ .kind = .stepper });
+    const hint = try h.find(.{ .text = "Whole years" });
+    try std.testing.expect(label.bounds.y + label.bounds.height <= age.bounds.y);
+    try std.testing.expect(age.bounds.y + age.bounds.height <= hint.bounds.y);
+    const set = try h.find(.{ .kind = .fieldset });
+    try std.testing.expectEqual(set.id, age.semantic_parent);
+    try std.testing.expectEqual(@as(usize, 1), h.count(.{ .kind = .text, .text = "Account" }));
+
+    try h.click(.{ .text = "I accept" });
+    try std.testing.expectEqual(@as(usize, 0), h.count(.{ .kind = .note, .text = "Accept to continue" }));
+    try h.click(.{ .text = "Submit" });
+    try std.testing.expectEqual(@as(usize, 1), state.submitted);
+
+    // A disabled fieldset disables everything inside it.
+    state.locked = true;
+    try h.render();
+    try std.testing.expectError(error.Disabled, h.click(.{ .text = "I accept" }));
+    try std.testing.expectError(error.Disabled, h.change(.{ .kind = .stepper }, .{ .steps = 1 }));
+    try h.click(.{ .text = "Submit" });
+    try std.testing.expectEqual(@as(usize, 2), state.submitted);
+
+    var small: view.Storage(8, 64) = .{};
+    var v = View.init(small.buffers());
+    v.reset(.{}, null);
+    try v.field("Empty", .{}, .{});
+    try std.testing.expectError(error.InvalidField, v.end());
 }
