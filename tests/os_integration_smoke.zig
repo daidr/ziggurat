@@ -216,14 +216,18 @@ fn singleInstance(executable: []const u8) !void {
         try std.testing.expectEqual(words.len, message.len);
         for (words, message) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
     }
-    // Maximum-size arguments.
+    // Maximum-size arguments. A Windows command line holds at most 32767
+    // UTF-16 units, so only one maximum argument reaches the child there.
     const long = try allocator.alloc(u8, instance.max_argument_bytes);
     @memset(long, 'x');
     long[0] = 'L';
-    var long_child = try spawn(&.{ executable, "--secondary", id, long, long, long }, null);
+    const long_argv = [_][]const u8{ executable, "--secondary", id, long, long, long };
+    var long_child = try spawn(long_argv[0..if (builtin.os.tag == .windows) 4 else 6], null);
     try expectExit(&long_child, 0);
     try collector.waitMessages(children.len + 1);
-    try std.testing.expectEqualStrings(long, collector.messages.items[children.len][2]);
+    const long_message = collector.messages.items[children.len];
+    try std.testing.expectEqual(@as(usize, if (builtin.os.tag == .windows) 1 else 3), long_message.len);
+    for (long_message) |argument| try std.testing.expectEqualStrings(long, argument);
 
     // Hostile peers: malformed, oversized and stalled exchanges are refused
     // and the listener keeps serving.
