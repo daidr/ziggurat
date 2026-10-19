@@ -32,6 +32,9 @@ test "unsupported system capabilities fail explicitly" {
     try std.testing.expectError(error.UnsupportedCapability, owner.cancelFileDialog());
     try std.testing.expectError(error.UnsupportedCapability, system.clipboard.writeText(window, "text"));
     try std.testing.expectError(error.UnsupportedCapability, system.clipboard.readText(window, &destination));
+    // The test backend has no native display; Board reports that explicitly.
+    var board: system.clipboard.Board = undefined;
+    try std.testing.expectError(error.UnsupportedCapability, board.init(app, .{}));
     var picker: system.picker.Picker = .{};
     try std.testing.expectError(error.UnsupportedCapability, picker.start(window, .open_file, .{}, &destination, &context, selected));
     try std.testing.expectError(error.UnsupportedCapability, picker.cancel());

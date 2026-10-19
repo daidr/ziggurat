@@ -469,11 +469,29 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
         });
+        addSmoke(b, "smoke-clipboard", "tests/system_clipboard_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        addSmoke(b, "smoke-drop", "tests/system_drop_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
+    }
+    if (target.result.os.tag == .linux) {
+        const clipboard_native = native_support.add(b, system, "system-clipboard-native", "src/system/clipboard_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        clipboard_native.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        const drop_native = native_support.add(b, system, "system-drop-native", "src/system/drop_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        drop_native.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        system.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        system.link_libc = true;
     }
     if (target.result.os.tag == .windows) {
         system.linkSystemLibrary("shell32", .{});
         system.linkSystemLibrary("user32", .{});
         system.linkSystemLibrary("gdi32", .{});
+        system.linkSystemLibrary("ole32", .{});
+        system.linkSystemLibrary("comctl32", .{});
         _ = native_support.add(b, system, "system-picker-native", "src/system/picker.c", &.{"-std=c11"}, target, optimize);
         system.link_libc = true;
     }
@@ -1894,6 +1912,12 @@ pub fn build(b: *std.Build) void {
         for ([_][]const u8{ "user32", "gdi32", "shell32", "ole32" }) |library| shell_test_module.linkSystemLibrary(library, .{});
     }
     const shell_tests = b.addTest(.{ .root_module = shell_test_module });
+    const clipboard_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/system/clipboard.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "ziggurat", .module = core }},
+    }) });
     const system_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/system_capabilities.zig"),
         .target = target,
@@ -1957,6 +1981,7 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&producer_tests.step);
     check.dependOn(&shell_tests.step);
     check.dependOn(&system_tests.step);
+    check.dependOn(&clipboard_tests.step);
     check.dependOn(&embed_probe.step);
     check.dependOn(&packaging_tests.step);
     const run_tests = b.addRunArtifact(tests);
@@ -2137,6 +2162,7 @@ pub fn build(b: *std.Build) void {
     b.step("test-document-diff-view", "Run paired snapshot delivery and aligned diff view invariants").dependOn(&run_document_diff_view_tests.step);
     test_step.dependOn(&b.addRunArtifact(shell_tests).step);
     test_step.dependOn(&b.addRunArtifact(system_tests).step);
+    test_step.dependOn(&b.addRunArtifact(clipboard_tests).step);
     test_step.dependOn(&b.addRunArtifact(embed_probe).step);
     test_step.dependOn(&b.addRunArtifact(packaging_tests).step);
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
