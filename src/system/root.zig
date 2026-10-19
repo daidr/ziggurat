@@ -13,6 +13,7 @@ pub const clipboard = @import("clipboard.zig");
 pub const drop = @import("drop.zig");
 pub const picker = @import("picker.zig");
 pub const shell = @import("shell.zig");
+pub const desktop = @import("desktop.zig");
 pub const capabilities = .{
     .native_menu = builtin.os.tag == .windows,
     .tray = builtin.os.tag == .windows,
@@ -23,4 +24,5 @@ pub const capabilities = .{
     .global_hotkeys = builtin.os.tag == .windows,
     .notification_area = builtin.os.tag == .windows,
     .shell = shell.capabilities,
+    .desktop = desktop.capabilities,
 };

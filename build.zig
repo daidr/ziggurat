@@ -490,8 +490,14 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
         });
+        addSmoke(b, "smoke-desktop", "tests/system_desktop_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
     }
     if (target.result.os.tag == .linux) {
+        const desktop_native = native_support.add(b, system, "system-desktop-native", "src/system/desktop_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        desktop_native.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
         const clipboard_native = native_support.add(b, system, "system-clipboard-native", "src/system/clipboard_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         clipboard_native.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
         const drop_native = native_support.add(b, system, "system-drop-native", "src/system/drop_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
@@ -501,6 +507,7 @@ pub fn build(b: *std.Build) void {
     }
     if (target.result.os.tag == .windows) {
         system.linkSystemLibrary("ole32", .{});
+        system.linkSystemLibrary("advapi32", .{});
         system.linkSystemLibrary("shell32", .{});
         system.linkSystemLibrary("user32", .{});
         system.linkSystemLibrary("gdi32", .{});
@@ -2174,8 +2181,13 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_document_diff_view_tests.step);
     b.step("test-document-diff-view", "Run paired snapshot delivery and aligned diff view invariants").dependOn(&run_document_diff_view_tests.step);
     test_step.dependOn(&b.addRunArtifact(shell_tests).step);
-    test_step.dependOn(&b.addRunArtifact(system_tests).step);
-    test_step.dependOn(&b.addRunArtifact(clipboard_tests).step);
+    const run_system_tests = b.addRunArtifact(system_tests);
+    const run_clipboard_tests = b.addRunArtifact(clipboard_tests);
+    test_step.dependOn(&run_system_tests.step);
+    test_step.dependOn(&run_clipboard_tests.step);
+    const system_test_step = b.step("test-system", "Run system module capability, convention and unsupported-path tests");
+    system_test_step.dependOn(&run_system_tests.step);
+    system_test_step.dependOn(&run_clipboard_tests.step);
     test_step.dependOn(&b.addRunArtifact(embed_probe).step);
     test_step.dependOn(&b.addRunArtifact(packaging_tests).step);
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
