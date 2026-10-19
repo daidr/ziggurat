@@ -137,6 +137,7 @@ const PointerOwner = struct {
 pub const Field = @import("field.zig").Field(FieldAccess);
 pub const FieldOptions = @import("field.zig").Options;
 pub const FieldPolicy = @import("field.zig").Policy;
+pub const FieldDescription = @import("field.zig").Description;
 const FieldAccess = struct {
     pub fn parameters(adapter: *Adapter) !Parameters {
         return savedParameters(try adapter.state());

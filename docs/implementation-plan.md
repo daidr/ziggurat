@@ -43,13 +43,13 @@
 | U01 | 已完成（Windows/Linux） | checkbox、radio、switch、progress、禁用态 | 原生输入、失败帧/嵌套 paint、关闭、Windows UIA 身份及资源回收；无每帧分配 |
 | U02 | 部分完成（Windows/Linux） | slider、双端范围、步进控件、焦点导航、快捷键与多击 | U02.1、U02.2嵌套scope/显式Escape续交、U02.3原生时序入口与显式注册主按钮多击、普通及committed Space下单文档词/逻辑行选择已分项验；更广未消费键续交、折叠/投影视图的编辑器选择及其他控件多击继续；直接键入数字归 T02；依赖 U01 |
 | U03 | 已完成（纯布局合同，Windows/Linux） | grid 与可组合约束布局 | U03.1 grid/span/对齐/自动放置/隐式轨道及U03.2弹性百分比上限、内容/显式minimum优先级、数值基线与未知父尺寸测量已验；失败输出事务、硬界与overflow明确；分隔拖动归U06 |
-| U04 | 部分完成（Windows/Linux） | 虚拟 list、table、tree/outline、grid view | U04.1 可变行高列表/可见回放/稳定 ID 锚点已实现；完整列表语义及 table/tree/grid view 继续待实现；基础依赖 U02.1/T01 |
+| U04 | 部分完成（Windows/Linux） | 虚拟 list、table、tree/outline、grid view | U04.1 可变行高列表/可见回放/稳定 ID 锚点已实现；U04.2 声明式视图的单选列表框（非虚拟）已实现；完整列表语义及 table/tree/grid view 继续待实现；基础依赖 U02.1/T01 |
 | U05 | 待实现 | combobox、autocomplete、search、token field | popup 所有权、输入法、筛选取消、键盘与焦点恢复；依赖 U02.2/T02/W02 |
 | U06 | 部分完成（U06.1 声明式视图的 tabs/toolbar/比例 split） | tabs、sidebar、toolbar、split、tooltip、toast | 生命周期、遮挡/命中、延迟唤醒撤销与可访问性；split 的 DIP 偏好、RTL、折叠与 sidebar/tooltip/toast 继续；基础依赖 U02.1/G02，popup scope另依赖U02.2 |
 | U07 | 待实现 | calendar、date/time、color picker | locale/范围/键盘/可访问性；依赖 L01/U05 |
 | U08 | 部分完成（U08.1 link、badge、segmented、disclosure；U08.2 meter、rating、breadcrumbs、accordion） | badge、avatar、link、meter、rating、segmented、accordion、breadcrumbs 与导航按钮 | 稳定身份、分组/展开/链接动作、键盘和语义；不把静态文字/矩形算成完整控件；avatar 与导航按钮继续；基础依赖 U02.1/G01 |
 | U09 | 待实现 | chart 的数值/分类/时间尺度、axes、marks、stacking 与 selection | 极值/空数据/大数据、按需绘制、布局与键盘/辅助说明；依赖 G01/T01/L01 |
-| U10 | 待实现 | form、field/fieldset、验证提示与自定义控件契约 | 标签关联、禁用继承、错误语义、测量/绘制/输入/快照事务；依赖 U02.1/U03.2/T02/T06 |
+| U10 | 部分完成（U10.1 声明式视图的 field/fieldset、说明与验证状态、禁用继承） | form、field/fieldset、验证提示与自定义控件契约 | 标签关联、禁用继承、错误语义、测量/绘制/输入/快照事务；form 提交与焦点跳到首个错误、自定义控件契约继续；依赖 U02.1/U03.2/T02/T06 |
 | G01 | 部分完成 | 圆角、描边、渐变、阴影、透明度、图片与 SVG/path | RGBA/圆角/内描边、图片驻留/同尺寸更新、严格渐变、圆角阴影/path、有界分组和独立软件/GPU离屏已验收；完整 SVG 继续实施；三后端同一语义与明确资源上限 |
 | G02 | 进行中 | theme、动画时间线、spring、变换与局部失效 | 显式动画/有限重复、基础控件主题、Windows/Linux单次唤醒/局部失效、仿射栅格scope/同帧坐标、通用GPU精度预检/整帧后备、共享软件采样及单Document保留坐标桥已验；过滤变换性能、折叠/投影编辑器输入与更广失效复用继续；依赖 G01 |
 | G03 | 进行中 | 共享 GPU 资源、文本/图片缓存与多窗口性能 | 显式DeviceDomain/纹理寿命与预算先行；按测量决定缓存容量与淘汰；设备丢失、跨窗口关闭和显存/内存基线；依赖 G01/V02 |
@@ -198,9 +198,9 @@ B02 分项：
 | S03 | 待实现 | 多显示器、主题/accent/可访问性偏好、网络、电源与文件监视 | 变化订阅、取消与最后订阅者回收；无持续轮询；Windows/Linux/macOS capability |
 | S04 | 待实现 | 密钥存储、登录启动、深链和文件关联 | OS 权限/用户作用域、安装与运行时分工、卸载和参数转发；依赖 W05/R01 |
 | S05 | 待实现 | 多格式剪贴板、transfer、惰性 provider、原生拖放 | 文本/HTML/图片/文件/自定义，多 item、异步请求寿命、关闭后无悬空回调；依赖 G01 |
-| S06 | 待实现 | 异步消息对话框、上下文菜单与菜单快捷键 | 非嵌套循环、modal/focus、取消/关闭、禁用祖先、旧消息隔离；依赖 W02/U02 |
+| S06 | 部分完成（Windows/Linux） | 异步消息对话框、上下文菜单与菜单快捷键 | S06.1 两平台上下文菜单与异步消息框、Windows 菜单栏快捷键已验；非嵌套循环（Windows 菜单在私有安全点进入系统菜单循环）、取消/关闭、禁用祖先、旧消息隔离分别验证；Linux 菜单栏与快捷键分发、物理输入与视觉验收继续；依赖 W02/U02 |
 | S07 | 待实现 | 应用身份/系统目录、任务栏或 Dock badge/progress/menu、阻止休眠 | 按平台 capability、用户作用域、原生引用/电源断言配对与最后 owner 回收；依赖 S03/P03 |
-| S08 | 部分完成（Windows窗口托盘） | 独立托盘/status item、多图标、菜单与popover锚定 | 窗口Owner单托盘/任务栏重建恢复已有；App独立多item、稳定ID/用户位置、标题与popover亮态继续；其余平台依赖 S06/P02/P04 |
+| S08 | 部分完成（Windows） | 独立托盘/status item、多图标、菜单与popover锚定 | 窗口Owner单托盘/任务栏重建恢复，及 S08.1 App 独立多 item、可选稳定 GUID、锚定托盘菜单、App 停止回收已验；标题与popover亮态（无 Windows 对应）、Linux/macOS 继续；其余平台依赖 P02/P04 |
 | D01 | 待实现 | document 模型、每文件窗口与最近文档 | 文档身份/重复打开、保存/另存、dirty/关闭/quit 预检；依赖 W02/S02 |
 | D02 | 待实现 | 自动保存、外部修改、冲突检测与崩溃恢复 | 原子保存、版本戳/恢复副本、后台 I/O、丢失与权限错误；依赖 D01 |
 | D03 | 待实现 | Jump List/最近文档平台集成与文档菜单 | 隐私/删除失效项、菜单状态与多窗口；依赖 D01/S04 |
@@ -283,7 +283,7 @@ E04的解析/协议识别、原生PTY和人工交互分别验收；剪贴板格�
 | V02 | 待实现 | 长期内存/多窗口/GPU/冷启动/输入到显示基线 | 可复现硬件/驱动/系统与统计口径，资源随并发峰值而非历史次数增长 |
 | V03 | 待实现 | 原生交互、输入法与屏幕阅读器验收 | 与隐藏窗口检查分开；需要真实平台与明确的交互验证，不由单测推定 |
 | V04 | 待实现 | Windows/Linux/macOS 远端 CI 与分发演练 | 各平台运行证据、真实证书/仓库配置；编译探针不替代运行 |
-| V05 | 部分完成（V05.1 声明式视图无窗口驱动） | 无窗口交互测试、控件树/布局/绘制 inspector | 可重放输入、稳定节点、错误快照、测试/生产成本隔离；inspection 与运行中窗口关闭安全；依赖 U10/G01 |
+| V05 | 部分完成（V05.1 声明式视图无窗口驱动、V05.2 无窗口键盘回放） | 无窗口交互测试、控件树/布局/绘制 inspector | 可重放输入、稳定节点、错误快照、测试/生产成本隔离；inspection 与运行中窗口关闭安全；依赖 U10/G01 |
 | V06 | 待实现 | 可选模块的链接、启动与默认运行成本隔离 | 最小core/自绘/Web/无IPC/无文档/无本地化样例分别测量；不用的生成器、字体、日期数据、解析器和原生后端不启动或进入默认依赖；依赖 R06/V02 |
 
 V05 的测试时钟由每个测试实例显式持有，默认冻结，只由advance/step推进；复用动画已有的调用者单调时钟边界，补齐统一测试驱动，覆盖动画、deadline、tooltip、多击、编辑合并与取消。大步跳时按定义的到期顺序执行，停止后无残留唤醒；不修改生产全局时钟、不用真实sleep证明时序。原生输入注入以已处理事件/序号为完成条件，保留有界截止时间，输入hook返回与应用处理完成之间的关系必须明确。性能回归比较固定场景的帧/命令/分配/shape/采样工作计数，时间仅作为独立硬件指标。
@@ -1608,6 +1608,11 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - `write` 输出取整边界的树大纲，供测试做文本比较。Host 与 Harness 共用同一 `Build` 绑定，Host 行为不变。
 - 范围只限声明式视图：不经过 `ui.Context`，不覆盖原生命中、焦点、键盘、可访问性和测试时钟；V05 其余部分（统一测试时钟、原生输入注入、inspector）继续待实现。见[声明式视图](view.md)。
 
+### V05.2 无窗口键盘回放
+
+- `Harness.attachInput` 把每次渲染记录进测试持有、未连接窗口的 `ui.Context`，`key` 按 `Context` 处理控件按键的同一顺序调用输入状态的快捷键、Tab、范围键、分组导航、空间导航、Home/End 与激活，把结果作为动作或数值事件交给构建，再重新渲染；`focused` 返回焦点节点。
+- 无窗口测试覆盖 Tab/Shift+Tab 顺序、单选组作为单一停靠点、方向键选择、Space 激活与重复键忽略、End、滑块方向键，以及列表框方向键选中后滚入视野。不经过原生事件、文本输入焦点接收者和可访问性；统一测试时钟、原生输入注入与 inspector 继续待实现。
+
 ### U06.1 标签页、工具栏与比例分栏
 
 - 新增语义角色 `tab_list`、`tab`、`toolbar`、`splitter`，追加在既有编号之后。Frame 提供 `tabList`/`tab`/`toolbar`/`splitter`：标签复用单选分组的命中、Tab 停靠点和方向键选择；分隔条复用范围控件的捕获拖动与键盘步进，上下分栏向下增大，拖动轨道只覆盖上下限之间，指针始终对着分隔条中心。
@@ -1621,11 +1626,37 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - `ziggurat_view` 提供 `link`、`badge`、`segmented`/`segment` 与 `disclosure`。徽标只是带背景的静态文字，不计为控件，也不产生语义节点；单个 `disclosure` 不等于多段 accordion。
 - 单元测试覆盖分组、方向键选择、激活和语义；Linux 隐藏窗口 smoke 在 1x/2x 下实测分段、链接和折叠区的原生点击。Windows smoke 用真实 UIAutomationClient 检查分段选择、链接 Invoke 与折叠区 ExpandCollapse。见[声明式视图](view.md)。
 
+### U04.2 声明式视图列表框
+
+- 新增语义角色 `list_box` 与 `list_item`，追加在既有编号之后，与虚拟集合使用的 `list` 分开。Frame 提供 `listBox` 与 `listItem`，选项复用单选分组：一个 Tab 停靠点，方向键与 Home/End 移动并选中。Windows UIA 映射为 List / Selection（单选）与 ListItem / SelectionItem。Linux 不声明 AT-SPI。
+- `ziggurat_view` 提供 `listBox`/`listItem`。输入选中的选项在下一次排列时被外层滚动容器以最小位移滚入视野；选项全部参与构建，不做虚拟化。
+- 单元测试覆盖分组、方向键导航与语义；无窗口测试覆盖选中、半遮挡选项的滚入与重复选择不滚动。Windows smoke 用真实 UIAutomationClient 检查 List 的单选 Selection 与 ListItem Select。
+
+### U10.1 表单字段与字段集
+
+- 语义节点新增 `description`、`invalid` 与 `required`。说明与名称、值一起复制进固定文本存储，导出子树时一并复制。Windows UIA 映射为 HelpText、IsDataValidForForm 与 IsRequiredForForm。`widgets.Options` 带同名字段，只进入语义，不参与绘制。
+- `ziggurat_view` 提供 `field` 与 `fieldset`。字段按标签、内容、帮助或错误的顺序排列；字段内的控件取得说明与验证状态，没有名称时以标签为名。`Embed.annotate` 把同样的信息交给嵌入叶子，`ziggurat_view_text` 的文本框据此调用 `Field.drawDescribed`。任何容器的 `enabled = false` 都会传给全部后代。
+- 单元测试覆盖语义文本导出与容量、无窗口的字段排列、错误清除与禁用继承。Windows smoke 用真实 UIAutomationClient 检查标签名称、HelpText、表单有效性和必填状态，以及字段集分组。
+
 ### U08.2 度量条、评分、面包屑与手风琴
 
 - 新增语义角色 `meter` 与 `navigation`，追加在既有编号之后。Frame 提供 `meter`、`rating`、`navigation` 与 `group`。度量条只读，报告实际值与上下限，值在首选区间外时用主题新增的 `caution` 色。评分是步长为 1 的范围控件，轨道从第一个标记前半格开始，按到哪个标记就取哪个分数。Windows UIA 映射为 ProgressBar（LocalizedControlType 为 "meter"）、Slider，以及带导航地标的 Group。Linux 不声明 AT-SPI。
 - `ziggurat_view` 提供 `breadcrumbs`、`meter`、`rating`、`accordion`/`section`。面包屑在间隙中画分隔符；手风琴最多打开一节，再次激活已打开的节会关闭它。面包屑和手风琴里的控件以容器为可访问父节点。
 - 单元测试覆盖区间与参数校验、评分标记命中、语义角色与父节点，以及无窗口的分节切换和评分调整；Linux 隐藏窗口 smoke 在 1x/2x 下实测评分的原生点击。Windows smoke 用真实 UIAutomationClient 检查导航地标、度量条只读 RangeValue、评分 SetValue 与分节 ExpandCollapse。
+
+### S06.1 上下文菜单、异步消息框与菜单快捷键
+
+- `system.menus` 统一校验菜单栏、上下文菜单和托盘菜单：ID、父项顺序、标签、禁用祖先及快捷键（command 项、不重复、普通键须带 Control/Alt/Super）。`&` 助记符在 GTK 上转为 `_`。
+- `Owner.popupMenu(request, items, anchor)` 调用即返回，每个被接受的请求只以 `Action.popup` 完成一次，取消为 null，detach/关闭不回调，只报告启用且祖先启用的命令。Windows 把请求投递到私有隐藏窗口，在主循环分发时才进入 `TrackPopupMenuEx` 的系统菜单循环（与原生移动/缩放相同），已有菜单或移动循环时直接以 null 完成；detach 先切断隐藏窗口的回指，迟到返回的循环只释放自己的菜单。Linux 用 `gtk_menu_popup_at_rect`，在一次性 idle 中报告。
+- `Owner.showMessage(request, options)` 1–3 个按钮，结果为按钮 ID、dismissed 或 failed。Windows 用 `MessageDialog` 异步接口，与文件选择器相同只触发独立事件并由 App 单次原生等待在主线程读取；Linux 用 `response` 信号的模态 `GtkMessageDialog`，不调用 `gtk_dialog_run`。
+- Windows 菜单栏快捷键在 Content `key_input` 未消费的键上分发 `Action.menu`，忽略自动重复与 AltGr。Linux 没有菜单栏，快捷键只显示在上下文菜单中。
+- 纯单元测试覆盖结构/快捷键/助记符/消息参数校验；Linux 隐藏窗口 smoke 在 Xvfb 1x/2x 下实测 GTK 菜单根项/嵌套项/禁用祖先/取消/detach 与消息框按钮/关闭/取消/窗口销毁，原生链接计数归零。Windows smoke 覆盖真实系统菜单循环内的键盘选择、取消、detach、菜单栏快捷键规则与 MessageDialog 异步取消。选择由原生激活接口或消息注入完成，不代表物理输入、人工点击或视觉质量已验收。见[系统工具](system.md)。
+
+### S08.1 独立托盘与锚定菜单
+
+- `system.Tray` 属于 App：每项有自己的隐藏顶层窗口、复制图标和 App 停止登记，可同时存在多个；重新 show 使用新原生 ID，旧回调不会命中。可选 GUID 让系统记住用户摆放位置。
+- `Tray.popupMenu(request, items, .icon)` 用系统报告的图标矩形锚定并避开遮挡，取不到时用指针；打开前取得前台以便外部点击关闭。任务栏重建时重新添加图标。
+- Windows smoke 实际向 Shell 添加两项，验证事件、旧 ID 隔离、原地更新、锚定菜单选择、任务栏重建、显式移除与 App 停止回收。标题与 popover 亮态没有 Windows 对应，Linux/macOS 托盘继续待实现。见[系统工具](system.md)。
 
 ### W03.3 Windows 系统框架材质
 

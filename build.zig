@@ -475,6 +475,21 @@ pub fn build(b: *std.Build) void {
         system.linkSystemLibrary("user32", .{});
         system.linkSystemLibrary("gdi32", .{});
         _ = native_support.add(b, system, "system-picker-native", "src/system/picker.c", &.{"-std=c11"}, target, optimize);
+        _ = native_support.add(b, system, "system-message-native", "src/system/message.c", &.{"-std=c11"}, target, optimize);
+        system.link_libc = true;
+    }
+    if (target.result.os.tag == .linux) addSmoke(b, "smoke-system-menus", "tests/system_menus_linux_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_system", .module = system },
+    });
+    if (target.result.os.tag == .windows) addSmoke(b, "smoke-system-menus", "tests/system_menus_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_system", .module = system },
+    });
+    if (target.result.os.tag == .linux) {
+        const native = native_support.add(b, system, "system-linux-native", "src/system/linux_system.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        system.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
         system.link_libc = true;
     }
     if (target.result.os.tag == .windows) {
@@ -1895,6 +1910,7 @@ pub fn build(b: *std.Build) void {
         for ([_][]const u8{ "user32", "gdi32", "shell32", "ole32" }) |library| shell_test_module.linkSystemLibrary(library, .{});
     }
     const shell_tests = b.addTest(.{ .root_module = shell_test_module });
+    const menu_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/system/menus.zig"), .target = target, .optimize = optimize }) });
     const system_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/system_capabilities.zig"),
         .target = target,
@@ -1957,6 +1973,7 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&animation_tests.step);
     check.dependOn(&producer_tests.step);
     check.dependOn(&shell_tests.step);
+    check.dependOn(&menu_tests.step);
     check.dependOn(&system_tests.step);
     check.dependOn(&embed_probe.step);
     check.dependOn(&packaging_tests.step);
@@ -2137,6 +2154,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_document_diff_view_tests.step);
     b.step("test-document-diff-view", "Run paired snapshot delivery and aligned diff view invariants").dependOn(&run_document_diff_view_tests.step);
     test_step.dependOn(&b.addRunArtifact(shell_tests).step);
+    test_step.dependOn(&b.addRunArtifact(menu_tests).step);
     test_step.dependOn(&b.addRunArtifact(system_tests).step);
     test_step.dependOn(&b.addRunArtifact(embed_probe).step);
     test_step.dependOn(&b.addRunArtifact(packaging_tests).step);

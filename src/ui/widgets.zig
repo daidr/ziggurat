@@ -14,6 +14,13 @@ pub const Options = struct {
     /// Accessible name for a progress indicator, which has no visible label.
     name: []const u8 = "",
     shortcut: ?Chord = null,
+    /// Help or error text announced with the control, such as a form
+    /// field's hint; it is not drawn.
+    description: []const u8 = "",
+    /// The value fails the application's validation.
+    invalid: bool = false,
+    /// A form needs a value before it can be submitted.
+    required: bool = false,
 };
 pub const RangeOptions = struct { control: Options = .{}, vertical: bool = false };
 pub const RangeSliderIds = struct { group: u64, low: u64, high: u64 };
@@ -42,7 +49,7 @@ pub const MeterBands = struct {
 pub const MeterOptions = struct { control: Options = .{}, bands: MeterBands = .{} };
 /// Most marks a rating offers.
 pub const max_rating = 10;
-pub const Kind = enum { button, checkbox, radio, toggle_switch, progress, tab, segment, link, disclosure };
+pub const Kind = enum { button, checkbox, radio, toggle_switch, progress, tab, segment, link, disclosure, list_item };
 const Snapshot = struct {
     hits: usize,
     commands: usize,
@@ -140,7 +147,7 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
     const absolute_bounds = absolute(frame, bounds);
     const visible = if (frame.clipBounds()) |clip| layout.intersect(absolute_bounds, clip) else absolute_bounds;
     const interactive = kind != .progress;
-    const chooses = kind == .radio or kind == .tab or kind == .segment;
+    const chooses = kind == .radio or kind == .tab or kind == .segment or kind == .list_item;
     try frame.addControl(id, bounds, .{ .enabled = options.enabled, .focusable = interactive, .pointer_enabled = interactive, .radio_group = if (chooses) options.radio_group else null, .selected = checked, .shortcut = options.shortcut });
     const focus = interactive and options.enabled and visible.width > 0 and visible.height > 0 and context.input_state.focused == id;
     const amount = std.math.clamp(fraction, 0, 1);
@@ -157,12 +164,16 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
             .segment => .radio,
             .link => .link,
             .disclosure => .disclosure,
+            .list_item => .list_item,
         },
         .name = if (kind == .progress) options.name else text,
+        .description = options.description,
         .bounds = bounds,
         .enabled = options.enabled,
         .focused = focus,
         .checked = checked,
+        .invalid = options.invalid,
+        .required = options.required,
         .read_only = kind == .progress,
         .range_value = amount * 100,
     });
@@ -204,6 +215,12 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
             const label_x = @min(bounds.width, side + metrics.label_gap);
             try context.command_buffer.text(absolute(frame, .{ .x = bounds.x + label_x, .y = bounds.y, .width = bounds.width - label_x, .height = bounds.height }), text, foreground);
             if (focus) try outline(frame, bounds, metrics.border, colors.focus);
+        },
+        .list_item => {
+            // A full-width row; the selected one is filled with the accent.
+            if (checked) try fill(frame, bounds, accent) else if (options.enabled and context.input_state.active == id) try fill(frame, bounds, colors.pressed);
+            if (focus) try outline(frame, bounds, metrics.border, if (checked) colors.on_accent else colors.focus);
+            try context.command_buffer.text(absolute(frame, inset(bounds, metrics.content_inset)), text, if (checked and options.enabled) colors.on_accent else foreground);
         },
         .tab => {
             // The selected tab carries an accent bar along its bottom edge.
@@ -284,7 +301,7 @@ fn rangeRecord(frame: anytype, id: u64, bounds: layout.Rect, hit_bounds: layout.
         else => .slider,
     }, .step_buttons = if (stepper) .{ .decrement = .{ .x = bounds.x, .y = bounds.y, .width = width, .height = bounds.height }, .increment = .{ .x = bounds.x + bounds.width - width, .y = bounds.y, .width = width, .height = bounds.height } } else null }, .shortcut = options.shortcut });
     const visible = visibleBounds(frame, bounds);
-    try frame.semantic(.{ .id = id, .parent = options.semantic_parent, .role = role, .name = name, .bounds = bounds, .enabled = options.enabled, .focused = options.enabled and visible.width > 0 and visible.height > 0 and frame.context.input_state.focused == id, .range_value = value, .range_minimum = minimum, .range_maximum = maximum, .range_small_change = spec.smallChange(), .range_large_change = spec.largeChange() });
+    try frame.semantic(.{ .id = id, .parent = options.semantic_parent, .role = role, .name = name, .description = options.description, .invalid = options.invalid, .required = options.required, .bounds = bounds, .enabled = options.enabled, .focused = options.enabled and visible.width > 0 and visible.height > 0 and frame.context.input_state.focused == id, .range_value = value, .range_minimum = minimum, .range_maximum = maximum, .range_small_change = spec.smallChange(), .range_large_change = spec.largeChange() });
 }
 pub fn emitSlider(frame: anytype, id: u64, bounds: layout.Rect, value: f64, spec: Range, options: RangeOptions) !void {
     if (frame.context.on_value == null) return error.MissingValueHandler;
@@ -382,7 +399,7 @@ pub fn emitMeter(frame: anytype, id: u64, bounds: layout.Rect, value: f64, spec:
     if (!layout.validRect(bounds) or !layout.validRect(absolute(frame, bounds))) return error.InvalidGeometry;
     const snapshot = Snapshot.init(frame);
     errdefer snapshot.restore(frame);
-    try frame.semantic(.{ .id = id, .parent = options.control.semantic_parent, .role = .meter, .name = options.control.name, .bounds = bounds, .enabled = options.control.enabled, .read_only = true, .range_value = value, .range_minimum = spec.minimum, .range_maximum = spec.maximum });
+    try frame.semantic(.{ .id = id, .parent = options.control.semantic_parent, .role = .meter, .name = options.control.name, .description = options.control.description, .bounds = bounds, .enabled = options.control.enabled, .read_only = true, .range_value = value, .range_minimum = spec.minimum, .range_maximum = spec.maximum });
     const style = frame.currentTheme();
     const colors = style.palette;
     try fill(frame, bounds, if (options.control.enabled) colors.border else colors.disabled_border);
