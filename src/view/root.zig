@@ -460,6 +460,33 @@ pub const View = struct {
     }
 };
 
+/// A type-erased build function bound to its application state.
+pub const Build = struct {
+    state: *anyopaque,
+    call: *const fn (*anyopaque, *View) anyerror!void,
+
+    pub fn bind(state: anytype, comptime build: fn (@TypeOf(state), *View) anyerror!void) Build {
+        const State = @TypeOf(state);
+        const Thunk = struct {
+            fn call(ptr: *anyopaque, view: *View) anyerror!void {
+                const typed: State = @ptrCast(@alignCast(ptr));
+                return build(typed, view);
+            }
+        };
+        return .{ .state = @ptrCast(state), .call = Thunk.call };
+    }
+
+    /// Run one complete pass into `view`, optionally delivering `event`.
+    pub fn run(self: Build, view: *View, root_style: Style, event: ?Event) anyerror!void {
+        view.reset(root_style, event);
+        try self.call(self.state, view);
+        try view.finish();
+    }
+};
+
+pub const Harness = @import("harness.zig").Harness;
+pub const Query = @import("harness.zig").Query;
+
 pub const Options = struct {
     /// Style of the implicit root column, which fills the window.
     root: Style = .{ .padding = Insets.all(24), .gap = 12, .alignment = .start },
@@ -473,8 +500,7 @@ pub const Options = struct {
 pub const Host = struct {
     context: ui.Context,
     view: View,
-    state: *anyopaque,
-    build_fn: *const fn (*anyopaque, *View) anyerror!void,
+    build: Build,
     options: Options,
     building: bool = false,
     /// The first error from the most recent pass, kept for diagnostics.
@@ -482,18 +508,10 @@ pub const Host = struct {
     frames: usize = 0,
 
     pub fn init(state: anytype, comptime build: fn (@TypeOf(state), *View) anyerror!void, buffers: Buffers, options: Options) Host {
-        const State = @TypeOf(state);
-        const Thunk = struct {
-            fn call(ptr: *anyopaque, view: *View) anyerror!void {
-                const typed: State = @ptrCast(@alignCast(ptr));
-                return build(typed, view);
-            }
-        };
         return .{
             .context = ui.Context.init(undefined, draw, onAction),
             .view = View.init(buffers),
-            .state = @ptrCast(state),
-            .build_fn = Thunk.call,
+            .build = Build.bind(state, build),
             .options = options,
         };
     }
@@ -511,9 +529,7 @@ pub const Host = struct {
         if (self.building) return error.Busy;
         self.building = true;
         defer self.building = false;
-        self.view.reset(self.options.root, event);
-        try self.build_fn(self.state, &self.view);
-        try self.view.finish();
+        try self.build.run(&self.view, self.options.root, event);
     }
 
     fn deliver(self: *Host, event: Event) void {
@@ -774,6 +790,10 @@ test "capacity and balance failures are reported" {
     view.reset(.{}, null);
     for (0..max_depth) |_| try view.column(.{});
     try std.testing.expectError(error.NestingTooDeep, view.column(.{}));
+}
+
+test {
+    _ = @import("harness.zig");
 }
 
 test "estimate measures wide codepoints wider" {

@@ -62,6 +62,29 @@ Host 拥有一个 `ui.Context`，从 attach 到 Context 的 detach 回调期间�
 
 `view.Storage(nodes, text_bytes)` 是调用者拥有的固定存储，提供节点、文本副本、布局项与矩形缓冲。`text`、控件标签都会复制进存储，`textf` 直接格式化进存储，因此构建函数可以传入临时缓冲。超出容量返回 `TooManyNodes`、`TextFull`、`TooManyItems` 或 `NestingTooDeep`，容器不配对返回 `UnbalancedContainer`；绘制中的这些错误使本帧失败并保留上一帧。底层 Frame 的每帧上限（128 个控件、2048 条命令等）同样适用。
 
+## 无窗口测试
+
+`view.Harness` 不创建窗口，直接运行与 Host 相同的构建、排列和事件遍。测试用它按查询找控件、模拟激活，再检查应用状态和视图树：
+
+```zig
+var storage: view.Storage(64, 2048) = .{};
+var counter: Counter = .{};
+var h = view.Harness.init(&counter, Counter.build, storage.buffers(), .{});
+try h.render();
+try h.click(.{ .text = "加一" });
+try std.testing.expectEqual(@as(i64, 1), counter.count);
+try h.change(.{ .kind = .slider }, .{ .steps = 2 });
+```
+
+- `Query` 按 `kind`、精确的 `text`（标签或文本内容）、`name`（`Style.name`）和 `key` 匹配，所有给出的字段都必须相符。匹配多于一个返回 `Ambiguous`，用 `nth` 按构建顺序选其中之一；没有匹配返回 `NotFound`。`find` 返回节点，`count` 返回匹配数。
+- `click` 只接受按钮、复选框、开关和单选；`change` 只接受滑块，`ValueChange` 与原生输入相同。目标禁用返回 `Disabled`，被自身尺寸或任一裁剪祖先完全遮住返回 `Hidden`，种类不符返回 `NotActivatable` 或 `NotAdjustable`。
+- 事件遍若没有控件消费该事件（构建已不再产生这个节点），返回 `Stale`，不会静默忽略。成功的事件之后自动重新渲染，节点与 `frames` 反映新状态。
+- `at(x, y)` 返回该点最后绘制的可交互节点，尊重裁剪；`clickAt` 激活它。`visible(node)` 给出裁剪后的可见矩形。
+- `write(writer)` 输出缩进的树大纲（种类、文本、名称、选中或数值、禁用、取整后的边界），适合与期望文本比较。
+- `Config` 提供窗口边界、主题和 `Options`（根样式与测量回调），`resize` 改变边界并重新渲染。
+
+Harness 不经过 `ui.Context`，不验证原生命中、焦点、键盘导航或可访问性，也不推进时间；这些仍由隐藏窗口 smoke 和原生检查覆盖。
+
 ## 当前范围
 
 已提供列、行、文本、间隔、按钮、复选框、单选组、开关、确定进度和滑块。没有悬停状态、滚动容器、文本输入、网格和动画；需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。
