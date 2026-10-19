@@ -65,6 +65,9 @@ jobs:
           ./tests/packaging.ps1 -ExecutablePath ./zig-out/bin/smoke-packaging.exe -LicensePath $license
           ./tests/signing.ps1 -ExecutablePath ./zig-out/bin/smoke-packaging.exe -LicensePath $license
           ./tests/update_package_smoke.ps1
+          zig build build-setup-smoke -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/setup_smoke.ps1
       - name: Optional pinned WebP decoder
         run: |
           ./scripts/fetch-webp.ps1
@@ -123,6 +126,10 @@ jobs:
           GDK_SCALE=2 xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-linux smoke-system-menus test-pointer-gtk smoke-pointer-core-linux smoke-pointer-clicks smoke-content-host smoke-damage smoke-wake smoke-animation-ui smoke-window-registry smoke-app-stop smoke-composition smoke-composition-ui smoke-key-input smoke-widgets smoke-widget-ranges smoke-theme smoke-view smoke-view-text smoke-affine-renderer smoke-affine-ui smoke-affine-document smoke-affine-text-binding smoke-affine-document-diff smoke-document-geometry smoke-snippets smoke-drawing smoke-gradients smoke-gradient-analytic smoke-conic-gradients smoke-gradient-interpolation smoke-coverage smoke-layers smoke-offscreen smoke-gaussian smoke-gaussian-scope smoke-document-fields smoke-svg smoke-svg-text smoke-svg-image smoke-shaped-editor-native smoke-editor-caret smoke-editor-line-backgrounds smoke-editor-pre-input smoke-editor-range-markers smoke-text-input-mode smoke-text-client smoke-document smoke-document-editor smoke-code-editor smoke-document-diff-view smoke-virtual-list -Doptimize=${{ matrix.optimize }}
           bash scripts/linux-window-state.sh -Doptimize=${{ matrix.optimize }}
           GDK_SCALE=2 bash scripts/linux-window-state.sh -Doptimize=${{ matrix.optimize }}
+      - name: Setup program, launcher and Debian package checks
+        run: |
+          zig build build-setup-smoke -Doptimize=${{ matrix.optimize }}
+          sh tests/setup_smoke.sh
       - name: Optional pinned WebP decoder
         run: |
           sh scripts/fetch-webp.sh

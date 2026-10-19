@@ -1,0 +1,31 @@
+const std = @import("std");
+const z = @import("ziggurat");
+const view = @import("ziggurat_view");
+
+const State = struct {
+    count: i64 = 0,
+
+    fn build(self: *State, v: *view.View) anyerror!void {
+        try v.text("@@NAME@@", .{});
+        try v.textf("Count: {d}", .{self.count}, .{});
+        try v.row(.{ .gap = 8, .alignment = .center });
+        if (try v.button("-", .{ .width = 44 })) self.count -= 1;
+        if (try v.button("+", .{ .width = 44 })) self.count += 1;
+        if (try v.button("Reset", .{ .enabled = self.count != 0 })) self.count = 0;
+        try v.end();
+    }
+};
+
+pub fn main() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    var state: State = .{};
+    var storage: view.Storage(64, 2048) = .{};
+    var host = view.Host.init(&state, State.build, storage.buffers(), .{});
+    const app = try z.App.init(gpa.allocator());
+    defer app.deinit();
+    const window = try app.createWindow(.{ .title = "@@NAME@@" });
+    try host.attach(window);
+    window.show();
+    try app.run();
+}

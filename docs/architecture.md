@@ -232,6 +232,6 @@ Linux 的私有文件机制独立为 `ziggurat_file_stream`，只有 GIO/POSIX �
 
 ## 发布与验证边界
 
-Windows 图标、VERSIONINFO 和 DPI/asInvoker/long-path manifest 由 Zig 构建资源生成，运行时拥有并平衡图标句柄。打包、Authenticode 签名和 Ed25519 更新均为独立工具，不把证书或私钥放入应用核心。分发依赖、许可输入与系统 Runtime 前置条件见 [打包](packaging.md)；更新使用独立版本目录与原子 current marker，见 [更新](updates.md)。
+Windows 图标、VERSIONINFO 和 DPI/asInvoker/long-path manifest 由 Zig 构建资源生成，运行时拥有并平衡图标句柄。打包、Authenticode 签名、Ed25519 更新、安装程序和 `ziggurat` 命令均为独立工具，不把证书或私钥放入应用核心。分发依赖、许可输入与系统 Runtime 前置条件见 [打包](packaging.md)；更新使用独立版本目录与原子 current marker，见 [更新](updates.md)。
 
 单元测试使用测试后端验证不变量与故障注入；check 还实例化普通目标后端。Windows/Linux 原生 smoke 证明各自实际代码路径；编译探针不证明运行支持。GPU/文本有 pixel/readback 与输入消息验证，WebView 有真实页面/策略/恢复验证；隐藏或屏幕外检查不证明视觉质量。性能工具记录提交耗时和资源计数，不把同步 paint 返回等同于显示完成。验证范围与已知限制保留在 [性能](performance.md) 和 [路线图](roadmap.md)。

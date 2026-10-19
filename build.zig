@@ -1,5 +1,5 @@
 const std = @import("std");
-const packaging = @import("build_support/packaging.zig");
+pub const packaging = @import("build_support/packaging.zig");
 const native_support = @import("build_support/native.zig");
 
 pub fn build(b: *std.Build) void {
@@ -1926,6 +1926,68 @@ pub fn build(b: *std.Build) void {
     const install_update = b.addInstallArtifact(update_tool, .{});
     b.step("update-tool", "Build the optional signed-update tool").dependOn(&install_update.step);
     check.dependOn(&update_tool.step);
+    const setup_format_module = b.createModule(.{ .root_source_file = b.path("tools/setup_format.zig"), .target = target, .optimize = optimize });
+    const deb_module = b.createModule(.{ .root_source_file = b.path("tools/deb.zig"), .target = target, .optimize = optimize });
+    const setup_module = b.createModule(.{
+        .root_source_file = b.path("tools/setup.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{ .{ .name = "ziggurat_update", .module = update }, .{ .name = "setup_format", .module = setup_format_module } },
+        .link_libc = target.result.os.tag == .windows,
+    });
+    if (target.result.os.tag == .windows) {
+        setup_module.addCSourceFile(.{ .file = b.path("tools/setup_windows.c"), .flags = &.{"-std=c11"} });
+        for ([_][]const u8{ "ole32", "shell32", "advapi32", "uuid" }) |library| setup_module.linkSystemLibrary(library, .{});
+    }
+    const setup_stub = b.addExecutable(.{ .name = "ziggurat-setup", .root_module = setup_module });
+    addResources(b, setup_stub);
+    const install_setup_stub = b.addInstallArtifact(setup_stub, .{});
+    b.step("setup-stub", "Build the self-extracting setup, launcher and uninstaller stub").dependOn(&install_setup_stub.step);
+    check.dependOn(&setup_stub.step);
+    for ([_]*std.Build.Module{ setup_format_module, deb_module }) |module| {
+        const module_tests = b.addTest(.{ .root_module = module });
+        check.dependOn(&module_tests.step);
+        test_step.dependOn(&b.addRunArtifact(module_tests).step);
+    }
+    // Setup smoke inputs: two fixture versions plus the stub and tools.
+    const setup_smoke = b.step("build-setup-smoke", "Build fixtures for tests/setup_smoke.{ps1,sh}");
+    for ([_][]const u8{ "1.0.0", "1.1.0" }) |fixture_version| {
+        const fixture_options = b.addOptions();
+        fixture_options.addOption([]const u8, "version", fixture_version);
+        const fixture = b.addExecutable(.{ .name = b.fmt("setup-fixture-{s}", .{fixture_version}), .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/setup_fixture_app.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "setup_fixture_options", .module = fixture_options.createModule() }},
+        }) });
+        check.dependOn(&fixture.step);
+        setup_smoke.dependOn(&b.addInstallArtifact(fixture, .{}).step);
+    }
+    setup_smoke.dependOn(&install_setup_stub.step);
+    setup_smoke.dependOn(&install_update.step);
+    const cli_options = b.addOptions();
+    cli_options.addOption([]const u8, "framework_root", b.build_root.path orelse ".");
+    const cli_module = b.createModule(.{
+        .root_source_file = b.path("tools/cli.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ziggurat_update", .module = update },
+            .{ .name = "cli_options", .module = cli_options.createModule() },
+            .{ .name = "setup_format", .module = setup_format_module },
+            .{ .name = "deb", .module = deb_module },
+        },
+    });
+    const cli = b.addExecutable(.{ .name = "ziggurat", .root_module = cli_module });
+    addResources(b, cli);
+    const cli_step = b.step("cli", "Build the ziggurat init/dev/build/package/doctor command and its setup stub");
+    cli_step.dependOn(&b.addInstallArtifact(cli, .{}).step);
+    cli_step.dependOn(&install_setup_stub.step);
+    setup_smoke.dependOn(&b.addInstallArtifact(cli, .{}).step);
+    check.dependOn(&cli.step);
+    const cli_tests = b.addTest(.{ .root_module = cli_module });
+    check.dependOn(&cli_tests.step);
+    test_step.dependOn(&b.addRunArtifact(cli_tests).step);
     const assets_host = b.createModule(.{ .root_source_file = b.path("src/assets/root.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
     const asset_generator = b.addExecutable(.{ .name = "web-assets-generator", .root_module = b.createModule(.{
         .root_source_file = b.path("tools/web_assets.zig"),
@@ -2337,6 +2399,13 @@ fn addSmoke(b: *std.Build, name: []const u8, path: []const u8, target: std.Build
     if (b.args) |args| run.addArgs(args);
     b.step(name, "Run integration checks with hidden windows").dependOn(&run.step);
     b.top_level_steps.get("check").?.step.dependOn(&exe.step);
+}
+
+/// For applications that depend on this package: embed the Windows manifest,
+/// version resource and icon. Other targets need no resources.
+pub fn addApplicationResources(b: *std.Build, exe: *std.Build.Step.Compile, dependency: *std.Build.Dependency, metadata: packaging.Metadata) void {
+    if (exe.root_module.resolved_target.?.result.os.tag != .windows) return;
+    _ = packaging.addWindowsResources(b, exe, .{ .metadata = metadata, .icon = dependency.path("assets/application.ico") }) catch |err| std.debug.panic("invalid application resources: {s}", .{@errorName(err)});
 }
 
 fn addResources(b: *std.Build, exe: *std.Build.Step.Compile) void {
