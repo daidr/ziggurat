@@ -16,10 +16,15 @@ pub const Justify = layout.Justify;
 pub const Range = ui.Range;
 pub const ValueChange = ui.ValueChange;
 pub const Theme = ui.Theme;
+pub const Point = layout.Point;
+pub const ScrollModel = ui.scroll.ScrollModel;
+pub const Track = ui.grid.Track;
 
 pub const Error = error{ TooManyNodes, TextFull, NestingTooDeep, UnbalancedContainer, NotContainer, Busy, InvalidRange, InvalidValue, InvalidText } || layout.Error;
 
 pub const max_depth = 32;
+/// Scroll containers Host can route wheel input to in one frame.
+pub const max_scroll_regions = 16;
 const none = std.math.maxInt(u32);
 const root_seed: u64 = 0x5a1f_7c3d_9b2e_4a61;
 
@@ -28,7 +33,8 @@ const root_seed: u64 = 0x5a1f_7c3d_9b2e_4a61;
 pub const Style = struct {
     /// Stable identity for a node whose position among its siblings changes.
     key: ?u64 = null,
-    /// Child spacing and placement for containers.
+    /// Child spacing and placement for containers; a grid uses `gap` between
+    /// both rows and columns.
     gap: f32 = 0,
     padding: Insets = .{},
     alignment: Align = .stretch,
@@ -38,6 +44,8 @@ pub const Style = struct {
     grow: f32 = 0,
     shrink: f32 = 1,
     self_align: ?Align = null,
+    /// Columns a grid child spans, counted from its automatic position.
+    column_span: u8 = 1,
     width: ?f32 = null,
     height: ?f32 = null,
     min_width: f32 = 0,
@@ -77,7 +85,7 @@ pub const Measurer = struct {
     }
 };
 
-pub const Kind = enum { column, row, radio_group, text, spacer, button, checkbox, radio, toggle_switch, progress, slider };
+pub const Kind = enum { column, row, radio_group, scroll, grid, text, spacer, button, checkbox, radio, toggle_switch, progress, slider, stepper };
 
 pub const Node = struct {
     kind: Kind,
@@ -89,6 +97,10 @@ pub const Node = struct {
     value: f64 = 0,
     range: Range = .{ .minimum = 0, .maximum = 1 },
     radio_group: ?u64 = null,
+    /// Application-owned scroll state of a scroll container.
+    scroll: ?*ScrollModel = null,
+    /// Column tracks of a grid, borrowed until the pass is arranged.
+    tracks: []const Track = &.{},
     parent: u32 = none,
     first_child: u32 = none,
     last_child: u32 = none,
@@ -97,10 +109,19 @@ pub const Node = struct {
     /// One past the last descendant, in build order.
     end: u32 = 0,
     measured: layout.Measurement = .{ .minimum = .{}, .preferred = .{} },
+    /// Preferred size of a scroll container's content.
+    content: Size = .{},
     bounds: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
 
     pub fn isContainer(self: *const Node) bool {
-        return self.kind == .column or self.kind == .row or self.kind == .radio_group;
+        return switch (self.kind) {
+            .column, .row, .radio_group, .scroll, .grid => true,
+            else => false,
+        };
+    }
+    /// True when the node clips its descendants to its bounds.
+    pub fn clips(self: *const Node) bool {
+        return self.kind == .scroll or (self.style.clip and self.isContainer());
     }
 };
 
@@ -129,6 +150,8 @@ pub fn Storage(comptime node_capacity: usize, comptime text_capacity: usize) typ
 pub const Event = union(enum) {
     action: u64,
     value: struct { id: u64, change: ValueChange },
+    /// Wheel movement in DIP over a scroll container; positive y scrolls down.
+    scroll: struct { id: u64, delta: Point },
 };
 
 /// The description of one tree. Build passes run either to deliver a single
@@ -162,6 +185,20 @@ pub const View = struct {
     }
     pub fn nodes(self: *const View) []const Node {
         return self.buffers.nodes[0..self.len];
+    }
+
+    /// The part of `node` left visible by its own bounds and every clipping
+    /// ancestor after arrange, or null when none of it can be seen or hit.
+    pub fn visible(self: *const View, node: *const Node) ?Rect {
+        const all = self.nodes();
+        var rect = node.bounds;
+        var parent = node.parent;
+        while (parent < all.len) : (parent = all[parent].parent) {
+            const ancestor = &all[parent];
+            if (ancestor.clips()) rect = intersect(rect, ancestor.bounds) orelse return null;
+        }
+        if (!(rect.width > 0 and rect.height > 0)) return null;
+        return rect;
     }
 
     fn identity(self: *View, parent: *const Node, kind: Kind, style: Style) u64 {
@@ -206,6 +243,7 @@ pub const View = struct {
         const target = switch (event) {
             .action => |value| value,
             .value => |value| value.id,
+            .scroll => |value| value.id,
         };
         if (target != id) return null;
         self.event = null;
@@ -214,10 +252,14 @@ pub const View = struct {
     }
 
     pub fn begin(self: *View, axis: Axis, style: Style) Error!void {
+        _ = try self.open(if (axis == .column) .column else .row, style);
+    }
+    fn open(self: *View, kind: Kind, style: Style) Error!*Node {
         if (self.depth > max_depth) return error.NestingTooDeep;
-        const node = try self.append(if (axis == .column) .column else .row, style);
+        const node = try self.append(kind, style);
         self.stack[self.depth] = @intCast(node - self.buffers.nodes.ptr);
         self.depth += 1;
+        return node;
     }
     pub fn column(self: *View, style: Style) Error!void {
         return self.begin(.column, style);
@@ -275,10 +317,25 @@ pub const View = struct {
     /// Starts a column of mutually exclusive radios bound to one value. The
     /// group carries the accessible `name`; close it with `end`.
     pub fn radioGroup(self: *View, style: Style) Error!void {
-        if (self.depth > max_depth) return error.NestingTooDeep;
-        const node = try self.append(.radio_group, style);
-        self.stack[self.depth] = @intCast(node - self.buffers.nodes.ptr);
-        self.depth += 1;
+        _ = try self.open(.radio_group, style);
+    }
+    /// Starts a vertically scrolling column that clips its children. The
+    /// application owns `model`; wheel input over the container moves it and
+    /// arrange clamps it to the content. Close it with `end`.
+    pub fn scroll(self: *View, model: *ScrollModel, style: Style) Error!void {
+        const node = try self.open(.scroll, style);
+        node.scroll = model;
+        if (self.take(node.id)) |event| if (event == .scroll) {
+            _ = model.scrollBy(event.scroll.delta) catch return error.InvalidValue;
+        };
+    }
+    /// Starts a grid with the given column tracks. Children fill cells row by
+    /// row, each spanning `Style.column_span` columns; rows size to content.
+    /// `columns` must stay valid until the pass is arranged. Close it with `end`.
+    pub fn grid(self: *View, columns: []const Track, style: Style) Error!void {
+        if (columns.len == 0 or columns.len > ui.grid.max_tracks) return error.InvalidValue;
+        const node = try self.open(.grid, style);
+        node.tracks = columns;
     }
     /// Selects `option` on activation; true when the selection changed.
     pub fn radio(self: *View, comptime T: type, selected: *T, option: T, label: []const u8, style: Style) Error!bool {
@@ -303,8 +360,11 @@ pub const View = struct {
     }
     /// Applies pointer and keyboard changes to the bound value; true when it changed.
     pub fn slider(self: *View, value: *f64, range: Range, style: Style) Error!bool {
+        return self.ranged(.slider, value, range, style);
+    }
+    fn ranged(self: *View, kind: Kind, value: *f64, range: Range, style: Style) Error!bool {
         range.validate() catch return error.InvalidRange;
-        const node = try self.append(.slider, style);
+        const node = try self.append(kind, style);
         node.range = range;
         var changed = false;
         if (self.take(node.id)) |event| if (event == .value) {
@@ -315,6 +375,11 @@ pub const View = struct {
         value.* = std.math.clamp(value.*, range.minimum, range.maximum);
         node.value = value.*;
         return changed;
+    }
+
+    /// A value field with decrement and increment buttons; true when it changed.
+    pub fn stepper(self: *View, value: *f64, range: Range, style: Style) Error!bool {
+        return self.ranged(.stepper, value, range, style);
     }
 
     /// Validate balance after the build function returns.
@@ -334,7 +399,8 @@ pub const View = struct {
             .toggle_switch => .{ .width = metrics.indicator_size * 1.7 + metrics.label_gap + text_size.width, .height = @max(text_size.height, metrics.indicator_size) + metrics.content_inset },
             .progress => .{ .width = 160, .height = 12 },
             .slider => .{ .width = 200, .height = metrics.thumb_size + 2 * metrics.content_inset },
-            .column, .row, .radio_group => unreachable,
+            .stepper => .{ .width = 4 * (Measurer.line_height + metrics.content_inset), .height = Measurer.line_height + metrics.content_inset },
+            .column, .row, .radio_group, .scroll, .grid => unreachable,
         };
         const minimum: Size = switch (node.kind) {
             .progress, .slider, .spacer => .{ .width = 0, .height = size.height },
@@ -344,7 +410,49 @@ pub const View = struct {
     }
 
     fn options(node: *const Node) layout.Options {
-        return .{ .axis = if (node.kind == .row) .row else .column, .padding = node.style.padding, .gap = node.style.gap, .alignment = node.style.alignment, .justify = node.style.justify, .overflow = if (node.style.clip) .clip else .visible };
+        return .{ .axis = if (node.kind == .row) .row else .column, .padding = node.style.padding, .gap = node.style.gap, .alignment = node.style.alignment, .justify = node.style.justify, .overflow = if (node.clips()) .clip else .visible };
+    }
+    fn gridOptions(node: *const Node) ui.grid.AutoOptions {
+        const style = node.style;
+        return .{ .layout = .{ .padding = style.padding, .column_gap = style.gap, .row_gap = style.gap, .align_x = style.alignment, .align_y = style.alignment, .overflow = if (style.clip) .clip else .visible } };
+    }
+    /// Grid cells for the children of `parent`, from their flex items.
+    fn gridItems(self: *const View, parent: *const Node, items: []const layout.Item, out: []ui.grid.AutoItem, use_preferred_minimum: bool) []ui.grid.AutoItem {
+        var child = parent.first_child;
+        var i: usize = 0;
+        while (child != none) : (child = self.buffers.nodes[child].next_sibling) {
+            const node = &self.buffers.nodes[child];
+            const value = items[i];
+            out[i] = .{
+                .column_span = .{ .count = @max(1, node.style.column_span) },
+                .minimum = if (use_preferred_minimum) value.preferred else value.content_minimum,
+                .preferred = value.preferred,
+                .align_x = value.alignment,
+                .align_y = value.alignment,
+            };
+            i += 1;
+        }
+        return out[0..i];
+    }
+    /// A grid's content size with every cell at its minimum or preferred size.
+    fn measureGrid(self: *const View, node: *const Node, items: []const layout.Item) Error!layout.Measurement {
+        var cells: [ui.grid.max_items]ui.grid.AutoItem = undefined;
+        var rects: [ui.grid.max_items]Rect = undefined;
+        var placements: [ui.grid.max_items]ui.grid.Placement = undefined;
+        const zero: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+        var result: layout.Measurement = undefined;
+        inline for (.{ false, true }, 0..) |preferred, pass| {
+            const measured = ui.grid.computeAuto(zero, node.tracks, &.{}, self.gridItems(node, items, &cells, preferred), gridOptions(node), &rects, &placements) catch |err| return gridError(err);
+            if (pass == 0) result.minimum = measured.layout.content_size else result.preferred = measured.layout.content_size;
+        }
+        return result;
+    }
+    fn gridError(err: ui.grid.Error) Error {
+        return switch (err) {
+            error.TooManyItems, error.GridFull, error.TooManyTracks => error.TooManyItems,
+            error.OutputTooSmall => error.OutputTooSmall,
+            else => error.InvalidValue,
+        };
     }
 
     fn item(node: *const Node) layout.Item {
@@ -396,7 +504,16 @@ pub const View = struct {
             }
             var cursor: usize = 0;
             const items = try self.childItems(node, &cursor);
+            if (node.kind == .grid) {
+                node.measured = try self.measureGrid(node, items);
+                continue;
+            }
             node.measured = try layout.measure(options(node), items);
+            if (node.kind == .scroll) {
+                // The viewport may shrink to nothing; its content keeps its size.
+                node.content = node.measured.preferred;
+                node.measured.minimum.height = 0;
+            }
         }
         all[0].bounds = bounds;
         var cursor: usize = 0;
@@ -406,7 +523,21 @@ pub const View = struct {
             const items = try self.childItems(node, &cursor);
             if (self.buffers.rects.len < cursor) return error.OutputTooSmall;
             const rects = self.buffers.rects[start..cursor];
-            _ = try layout.arrange(node.bounds, options(node), items, rects);
+            switch (node.kind) {
+                .grid => {
+                    var cells: [ui.grid.max_items]ui.grid.AutoItem = undefined;
+                    var placements: [ui.grid.max_items]ui.grid.Placement = undefined;
+                    _ = ui.grid.computeAuto(node.bounds, node.tracks, &.{}, self.gridItems(node, items, &cells, false), gridOptions(node), rects, &placements) catch |err| return gridError(err);
+                },
+                .scroll => {
+                    const model = node.scroll.?;
+                    const viewport: Size = .{ .width = node.bounds.width, .height = node.bounds.height };
+                    _ = model.setSizes(viewport, .{ .width = viewport.width, .height = node.content.height }) catch return error.InvalidValue;
+                    const content: Rect = .{ .x = node.bounds.x, .y = node.bounds.y - model.offset.y, .width = viewport.width, .height = @max(viewport.height, node.content.height) };
+                    _ = try layout.arrange(content, options(node), items, rects);
+                },
+                else => _ = try layout.arrange(node.bounds, options(node), items, rects),
+            }
             var child = node.first_child;
             var i: usize = 0;
             while (child != none) : (child = all[child].next_sibling) {
@@ -427,16 +558,17 @@ pub const View = struct {
             while (clip_depth > 0 and all[clips[clip_depth - 1]].end <= at) {
                 clip_depth -= 1;
                 try target.popClip();
+                paintScrollIndicator(&all[clips[clip_depth]], target, theme);
             }
             const bounds = node.bounds;
             const style = node.style;
             const control: ui.widgets.Options = .{ .enabled = style.enabled, .name = style.name };
             switch (node.kind) {
-                .column, .row, .radio_group => {
+                .column, .row, .radio_group, .scroll, .grid => {
                     if (node.kind == .radio_group) try target.radioGroup(node.id, bounds, style.name);
                     if (style.background) |color| target.roundedRect(bounds, style.radius, ui.Color.rgb(color));
                     if (style.border) |color| target.strokeRect(bounds, style.radius, style.border_width, ui.Color.rgb(color));
-                    if (style.clip and node.child_count > 0) {
+                    if (node.clips() and node.child_count > 0) {
                         try target.pushClip(bounds);
                         clips[clip_depth] = @intCast(at);
                         clip_depth += 1;
@@ -454,11 +586,62 @@ pub const View = struct {
                 .toggle_switch => try target.toggleSwitch(node.id, bounds, node.text, node.checked, control),
                 .progress => try target.progress(node.id, bounds, node.fraction, control),
                 .slider => try target.slider(node.id, bounds, node.value, node.range, .{ .control = control }),
+                .stepper => try target.stepper(node.id, bounds, node.value, node.range, control),
             }
         }
-        while (clip_depth > 0) : (clip_depth -= 1) try target.popClip();
+        while (clip_depth > 0) {
+            clip_depth -= 1;
+            try target.popClip();
+            paintScrollIndicator(&all[clips[clip_depth]], target, theme);
+        }
+    }
+
+    /// A thin, non-interactive thumb along the right edge while content overflows.
+    fn paintScrollIndicator(node: *const Node, target: anytype, theme: Theme) void {
+        const model = node.scroll orelse return;
+        const b = node.bounds;
+        if (b.width < 8 or b.height < 8) return;
+        const track: Rect = .{ .x = b.x + b.width - 6, .y = b.y + 2, .width = 4, .height = b.height - 4 };
+        const bar = (model.scrollbar(.vertical, track, 16) catch return) orelse return;
+        target.roundedRect(bar.thumb, 2, ui.Color.rgb(theme.palette.track));
     }
 };
+
+/// A type-erased build function bound to its application state.
+pub const Build = struct {
+    state: *anyopaque,
+    call: *const fn (*anyopaque, *View) anyerror!void,
+
+    pub fn bind(state: anytype, comptime build: fn (@TypeOf(state), *View) anyerror!void) Build {
+        const State = @TypeOf(state);
+        const Thunk = struct {
+            fn call(ptr: *anyopaque, view: *View) anyerror!void {
+                const typed: State = @ptrCast(@alignCast(ptr));
+                return build(typed, view);
+            }
+        };
+        return .{ .state = @ptrCast(state), .call = Thunk.call };
+    }
+
+    /// Run one complete pass into `view`, optionally delivering `event`.
+    pub fn run(self: Build, view: *View, root_style: Style, event: ?Event) anyerror!void {
+        view.reset(root_style, event);
+        try self.call(self.state, view);
+        try view.finish();
+    }
+};
+
+fn intersect(a: Rect, b: Rect) ?Rect {
+    const x0 = @max(a.x, b.x);
+    const y0 = @max(a.y, b.y);
+    const x1 = @min(a.x + a.width, b.x + b.width);
+    const y1 = @min(a.y + a.height, b.y + b.height);
+    if (!(x1 > x0 and y1 > y0)) return null;
+    return .{ .x = x0, .y = y0, .width = x1 - x0, .height = y1 - y0 };
+}
+
+pub const Harness = @import("harness.zig").Harness;
+pub const Query = @import("harness.zig").Query;
 
 pub const Options = struct {
     /// Style of the implicit root column, which fills the window.
@@ -473,27 +656,21 @@ pub const Options = struct {
 pub const Host = struct {
     context: ui.Context,
     view: View,
-    state: *anyopaque,
-    build_fn: *const fn (*anyopaque, *View) anyerror!void,
+    build: Build,
     options: Options,
     building: bool = false,
     /// The first error from the most recent pass, kept for diagnostics.
     last_error: ?anyerror = null,
     frames: usize = 0,
+    /// Visible scroll containers of the last frame, in paint order.
+    scroll_regions: [max_scroll_regions]struct { id: u64, bounds: Rect } = undefined,
+    scroll_region_count: usize = 0,
 
     pub fn init(state: anytype, comptime build: fn (@TypeOf(state), *View) anyerror!void, buffers: Buffers, options: Options) Host {
-        const State = @TypeOf(state);
-        const Thunk = struct {
-            fn call(ptr: *anyopaque, view: *View) anyerror!void {
-                const typed: State = @ptrCast(@alignCast(ptr));
-                return build(typed, view);
-            }
-        };
         return .{
             .context = ui.Context.init(undefined, draw, onAction),
             .view = View.init(buffers),
-            .state = @ptrCast(state),
-            .build_fn = Thunk.call,
+            .build = Build.bind(state, build),
             .options = options,
         };
     }
@@ -501,6 +678,7 @@ pub const Host = struct {
     pub fn attach(self: *Host, window: z.Window) !void {
         self.context.state = self;
         self.context.on_value = onValue;
+        self.context.on_input = onInput;
         try self.context.attach(window);
     }
 
@@ -511,9 +689,7 @@ pub const Host = struct {
         if (self.building) return error.Busy;
         self.building = true;
         defer self.building = false;
-        self.view.reset(self.options.root, event);
-        try self.build_fn(self.state, &self.view);
-        try self.view.finish();
+        try self.build.run(&self.view, self.options.root, event);
     }
 
     fn deliver(self: *Host, event: Event) void {
@@ -528,6 +704,22 @@ pub const Host = struct {
     fn onValue(ptr: *anyopaque, id: u64, change: ValueChange) void {
         const self: *Host = @ptrCast(@alignCast(ptr));
         self.deliver(.{ .value = .{ .id = id, .change = change } });
+    }
+    /// Route a wheel event to the innermost visible scroll container under it.
+    fn onInput(ptr: *anyopaque, _: *ui.Context, event: z.Event) bool {
+        const self: *Host = @ptrCast(@alignCast(ptr));
+        if (event != .wheel) return false;
+        const wheel = event.wheel;
+        var index = self.scroll_region_count;
+        while (index > 0) {
+            index -= 1;
+            const region = self.scroll_regions[index];
+            const b = region.bounds;
+            if (wheel.position.x < b.x or wheel.position.y < b.y or wheel.position.x >= b.x + b.width or wheel.position.y >= b.y + b.height) continue;
+            self.deliver(.{ .scroll = .{ .id = region.id, .delta = .{ .x = wheel.delta.x, .y = wheel.delta.y } } });
+            return self.view.consumed;
+        }
+        return false;
     }
     fn draw(ptr: *anyopaque, frame: *ui.Frame) void {
         const self: *Host = @ptrCast(@alignCast(ptr));
@@ -545,6 +737,13 @@ pub const Host = struct {
         try self.pass(null);
         try self.view.arrange(frame.sourceBounds(), theme, self.options.measurer);
         try self.view.paint(frame);
+        self.scroll_region_count = 0;
+        for (self.view.nodes()) |*node| {
+            if (node.kind != .scroll or self.scroll_region_count == max_scroll_regions) continue;
+            const bounds = self.view.visible(node) orelse continue;
+            self.scroll_regions[self.scroll_region_count] = .{ .id = node.id, .bounds = bounds };
+            self.scroll_region_count += 1;
+        }
     }
 };
 
@@ -601,6 +800,9 @@ const Recorder = struct {
     }
     pub fn slider(self: *Recorder, id: u64, bounds: Rect, _: f64, _: Range, _: ui.widgets.RangeOptions) !void {
         self.push(.slider, id, bounds, false);
+    }
+    pub fn stepper(self: *Recorder, id: u64, bounds: Rect, _: f64, _: Range, _: ui.widgets.Options) !void {
+        self.push(.stepper, id, bounds, false);
     }
 };
 
@@ -774,6 +976,10 @@ test "capacity and balance failures are reported" {
     view.reset(.{}, null);
     for (0..max_depth) |_| try view.column(.{});
     try std.testing.expectError(error.NestingTooDeep, view.column(.{}));
+}
+
+test {
+    _ = @import("harness.zig");
 }
 
 test "estimate measures wide codepoints wider" {

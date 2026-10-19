@@ -16,10 +16,11 @@ extern fn gdk_event_new(c_int) ?*anyopaque;
 extern fn gdk_event_free(*anyopaque) void;
 extern fn g_object_ref(*anyopaque) *anyopaque;
 extern fn g_signal_emit_by_name(*anyopaque, [*:0]const u8, ...) void;
+const ScrollEvent = extern struct { kind: c_int, window: ?*anyopaque, send_event: i8, time: u32, x: f64, y: f64, state: c_uint, direction: c_int, device: ?*anyopaque, x_root: f64, y_root: f64, delta_x: f64, delta_y: f64, is_stop: c_uint };
 const ButtonEvent = extern struct { kind: c_int, window: ?*anyopaque, send_event: i8, time: u32, x: f64, y: f64, axes: ?*anyopaque, state: c_uint, button: c_uint, device: ?*anyopaque, x_root: f64, y_root: f64 };
 
 const width = 360;
-const height = 320;
+const height = 480;
 
 const Native = struct {
     fn paint(window: z.Window) void {
@@ -51,6 +52,27 @@ const Native = struct {
             g_signal_emit_by_name(widget, if (down) @as([*:0]const u8, "button-press-event") else @as([*:0]const u8, "button-release-event"), native, &handled);
         }
     }
+    /// One wheel notch downwards at a point, which both backends report as 48 DIP.
+    fn wheelDown(window: z.Window, x: f32, y: f32) void {
+        if (builtin.os.tag == .windows) {
+            const hwnd: c.HWND = window.nativeHandle();
+            const scale = @as(f32, @floatFromInt(c.GetDpiForWindow(hwnd))) / 96;
+            var screen: c.POINT = .{ .x = @intFromFloat(x * scale), .y = @intFromFloat(y * scale) };
+            _ = c.ClientToScreen(hwnd, &screen);
+            const px: u16 = @bitCast(@as(i16, @intCast(screen.x)));
+            const py: u16 = @bitCast(@as(i16, @intCast(screen.y)));
+            const notch: u16 = @bitCast(@as(i16, -120));
+            _ = c.SendMessageW(hwnd, c.WM_MOUSEWHEEL, @as(c.WPARAM, notch) << 16, @intCast(@as(u32, px) | (@as(u32, py) << 16)));
+        } else {
+            const widget = gtk_bin_get_child(window.nativeHandle().?).?;
+            const event = gdk_event_new(31).?;
+            defer gdk_event_free(event);
+            const native: *ScrollEvent = @ptrCast(@alignCast(event));
+            native.* = .{ .kind = 31, .window = g_object_ref(gtk_widget_get_window(widget).?), .send_event = 1, .time = 0, .x = x, .y = y, .state = 0, .direction = 1, .device = null, .x_root = 0, .y_root = 0, .delta_x = 0, .delta_y = 0, .is_stop = 0 };
+            var handled: c_int = 0;
+            g_signal_emit_by_name(widget, "scroll-event", native, &handled);
+        }
+    }
     fn click(window: z.Window, bounds: view.Rect) void {
         const x = bounds.x + bounds.width / 2;
         const y = bounds.y + bounds.height / 2;
@@ -65,6 +87,8 @@ const State = struct {
     level: f64 = 0,
     rows: usize = 2,
     mode: enum { list, grid } = .list,
+    amount: f64 = 3,
+    list: view.ScrollModel = .{},
     fn build(self: *State, v: *view.View) anyerror!void {
         try v.textf("Count: {d}", .{self.count}, .{});
         try v.row(.{ .gap = 8 });
@@ -77,10 +101,16 @@ const State = struct {
         _ = try v.radio(@TypeOf(self.mode), &self.mode, .grid, "Grid", .{});
         try v.end();
         _ = try v.slider(&self.level, .{ .minimum = 0, .maximum = 10, .step = 1 }, .{ .width = 200 });
-        try v.column(.{ .clip = true, .grow = 1, .background = 0xe5e9ed });
+        _ = try v.stepper(&self.amount, .{ .minimum = 0, .maximum = 9, .step = 1 }, .{ .name = "Amount" });
+        try v.scroll(&self.list, .{ .height = 80, .self_align = .stretch, .background = 0xe5e9ed });
         for (0..self.rows) |i| try v.textf("Row {d}", .{i}, .{ .key = i + 1 });
         try v.end();
+        try v.grid(&columns, .{ .gap = 8, .self_align = .stretch });
+        try v.text("Name", .{});
+        try v.text("Value", .{});
+        try v.end();
     }
+    const columns = [_]view.Track{ view.Track.fixed(80), view.Track.fraction(1) };
 };
 
 fn find(host: *const view.Host, kind: view.Kind, nth: usize) !view.Node {
@@ -143,6 +173,32 @@ fn run(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(last_row.id, (try find(&host, .text, 2)).id);
     try std.testing.expectEqualStrings("Row 2", (try find(&host, .text, 3)).text);
 
+    // The stepper's increment button sits at its far end.
+    const stepper = try find(&host, .stepper, 0);
+    Native.click(window, .{ .x = stepper.bounds.x + stepper.bounds.width - stepper.bounds.height / 2 - 1, .y = stepper.bounds.y, .width = 2, .height = stepper.bounds.height });
+    try std.testing.expectEqual(@as(f64, 4), state.amount);
+
+    // Wheel input over the list scrolls it immediately; elsewhere it does not.
+    // An event pass rebuilds the tree without arranging it, so paint before
+    // reading bounds again.
+    for (0..3) |_| {
+        Native.click(window, (try find(&host, .button, 1)).bounds);
+        try paint(&host, window);
+    }
+    const list = try find(&host, .scroll, 0);
+    try std.testing.expect(state.list.content.height > state.list.viewport.height);
+    Native.wheelDown(window, list.bounds.x + 10, list.bounds.y - 10);
+    try std.testing.expectEqual(@as(f32, 0), state.list.offset.y);
+    Native.wheelDown(window, list.bounds.x + 10, list.bounds.y + 10);
+    try std.testing.expect(state.list.offset.y > 0);
+    try paint(&host, window);
+    try std.testing.expectEqual(list.bounds.y - state.list.offset.y, (try find(&host, .text, 1)).bounds.y);
+    const name = try find(&host, .text, state.rows + 1);
+    const value = try find(&host, .text, state.rows + 2);
+    try std.testing.expectEqualStrings("Value", value.text);
+    try std.testing.expectEqual(name.bounds.y, value.bounds.y);
+    try std.testing.expectEqual(name.bounds.x + 88, value.bounds.x);
+
     _ = try window.destroy();
     try app.dispatch();
     try std.testing.expect(host.context.window == null);
@@ -153,5 +209,5 @@ pub fn main() !void {
     defer std.debug.assert(gpa.deinit() == .ok);
     try run(gpa.allocator());
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group and keyed identity passed\n", .{});
+    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid and keyed identity passed\n", .{});
 }
