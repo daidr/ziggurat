@@ -32,7 +32,7 @@ pub const Query = struct {
     }
 };
 
-pub const Error = error{ NotFound, Ambiguous, Disabled, Hidden, NotActivatable, NotAdjustable, Stale };
+pub const Error = error{ NotFound, Ambiguous, Disabled, Hidden, NotActivatable, NotAdjustable, NotScrollable, Stale };
 
 pub const Config = struct {
     bounds: Rect = .{ .x = 0, .y = 0, .width = 640, .height = 480 },
@@ -91,15 +91,7 @@ pub const Harness = struct {
     /// The part of `node` left visible by its own bounds and every clipping
     /// ancestor, or null when nothing of it can be seen or hit.
     pub fn visible(self: *const Harness, node: *const Node) ?Rect {
-        const all = self.view.nodes();
-        var rect = node.bounds;
-        var parent = node.parent;
-        while (parent < all.len) : (parent = all[parent].parent) {
-            const ancestor = &all[parent];
-            if (ancestor.style.clip) rect = intersect(rect, ancestor.bounds) orelse return null;
-        }
-        if (!(rect.width > 0 and rect.height > 0)) return null;
-        return rect;
+        return self.view.visible(node);
     }
 
     /// The last painted interactive node under `point`, honouring clips.
@@ -111,7 +103,7 @@ pub const Harness = struct {
             const node = &all[index];
             if (!interactive(node.kind)) continue;
             const rect = self.visible(node) orelse continue;
-            if (x >= rect.x and y >= rect.y and x < rect.x + rect.width and y < rect.y + rect.height) return node;
+            if (contains(rect, x, y)) return node;
         }
         return null;
     }
@@ -126,12 +118,36 @@ pub const Harness = struct {
         try self.activate(self.at(x, y) orelse return error.NotFound);
     }
 
-    /// Apply a value change to the matching slider, then render.
+    /// Apply a value change to the matching slider or stepper, then render.
     pub fn change(self: *Harness, query: Query, value: ValueChange) anyerror!void {
         const node = try self.find(query);
-        if (node.kind != .slider) return error.NotAdjustable;
+        if (node.kind != .slider and node.kind != .stepper) return error.NotAdjustable;
         try self.check(node);
         try self.deliver(.{ .value = .{ .id = node.id, .change = value } });
+    }
+
+    /// Scroll the matching scroll container by `delta` DIP, then render.
+    pub fn scroll(self: *Harness, query: Query, delta: view.Point) anyerror!void {
+        const node = try self.find(query);
+        if (node.kind != .scroll) return error.NotScrollable;
+        if (self.visible(node) == null) return error.Hidden;
+        try self.deliver(.{ .scroll = .{ .id = node.id, .delta = delta } });
+    }
+
+    /// Send wheel movement at a point to the innermost visible scroll
+    /// container under it, as Host does, then render.
+    pub fn wheel(self: *Harness, x: f32, y: f32, delta: view.Point) anyerror!void {
+        const all = self.view.nodes();
+        var index = all.len;
+        while (index > 0) {
+            index -= 1;
+            const node = &all[index];
+            if (node.kind != .scroll) continue;
+            const rect = self.visible(node) orelse continue;
+            if (!contains(rect, x, y)) continue;
+            return self.deliver(.{ .scroll = .{ .id = node.id, .delta = delta } });
+        }
+        return error.NotFound;
     }
 
     fn activate(self: *Harness, node: *const Node) anyerror!void {
@@ -171,7 +187,8 @@ pub const Harness = struct {
             switch (node.kind) {
                 .checkbox, .toggle_switch, .radio => try writer.writeAll(if (node.checked) " on" else " off"),
                 .progress => try writer.print(" {d:.2}", .{node.fraction}),
-                .slider => try writer.print(" {d}", .{node.value}),
+                .slider, .stepper => try writer.print(" {d}", .{node.value}),
+                .scroll => if (node.scroll) |model| try writer.print(" offset={d}", .{round(model.offset.y)}),
                 else => {},
             }
             if (!node.style.enabled) try writer.writeAll(" disabled");
@@ -183,18 +200,13 @@ pub const Harness = struct {
 
 fn interactive(kind: Kind) bool {
     return switch (kind) {
-        .button, .checkbox, .toggle_switch, .radio, .slider => true,
+        .button, .checkbox, .toggle_switch, .radio, .slider, .stepper => true,
         else => false,
     };
 }
 
-fn intersect(a: Rect, b: Rect) ?Rect {
-    const x0 = @max(a.x, b.x);
-    const y0 = @max(a.y, b.y);
-    const x1 = @min(a.x + a.width, b.x + b.width);
-    const y1 = @min(a.y + a.height, b.y + b.height);
-    if (!(x1 > x0 and y1 > y0)) return null;
-    return .{ .x = x0, .y = y0, .width = x1 - x0, .height = y1 - y0 };
+fn contains(rect: Rect, x: f32, y: f32) bool {
+    return x >= rect.x and y >= rect.y and x < rect.x + rect.width and y < rect.y + rect.height;
 }
 
 fn round(value: f32) i64 {
@@ -332,4 +344,88 @@ test "outline lists the arranged tree" {
         \\  button "Clear" @24,252 77x40
         \\
     , writer.buffered());
+}
+
+const Gallery = struct {
+    model: view.ScrollModel = .{},
+    count: f64 = 2,
+    picked: ?usize = null,
+    const columns = [_]view.Track{ view.Track.fixed(80), view.Track.fraction(1) };
+
+    fn build(self: *Gallery, v: *View) anyerror!void {
+        _ = try v.stepper(&self.count, .{ .minimum = 0, .maximum = 12, .step = 1 }, .{ .name = "Count" });
+        try v.grid(&columns, .{ .gap = 4 });
+        try v.text("Name", .{});
+        try v.text("Value", .{});
+        try v.text("Wide cell", .{ .column_span = 2 });
+        try v.end();
+        try v.scroll(&self.model, .{ .height = 100, .gap = 4 });
+        for (0..@intFromFloat(self.count)) |i| {
+            if (try v.button("Item", .{ .key = i, .height = 30 })) self.picked = i;
+        }
+        try v.end();
+    }
+};
+
+test "grids place children row by row with spans" {
+    var storage: view.Storage(32, 256) = .{};
+    var state: Gallery = .{};
+    var h = Harness.init(&state, Gallery.build, storage.buffers(), .{});
+    try h.render();
+    const name = try h.find(.{ .text = "Name" });
+    const value = try h.find(.{ .text = "Value" });
+    const wide = try h.find(.{ .text = "Wide cell" });
+    try std.testing.expectEqual(@as(f32, 80), name.bounds.width);
+    try std.testing.expectEqual(name.bounds.y, value.bounds.y);
+    try std.testing.expectEqual(name.bounds.x + 80 + 4, value.bounds.x);
+    try std.testing.expectEqual(name.bounds.x, wide.bounds.x);
+    try std.testing.expectEqual(name.bounds.y + name.bounds.height + 4, wide.bounds.y);
+    try std.testing.expectApproxEqAbs(value.bounds.x + value.bounds.width, wide.bounds.x + wide.bounds.width, 0.01);
+}
+
+test "steppers adjust bound values" {
+    var storage: view.Storage(32, 256) = .{};
+    var state: Gallery = .{};
+    var h = Harness.init(&state, Gallery.build, storage.buffers(), .{});
+    try h.render();
+    try h.change(.{ .name = "Count" }, .{ .steps = 3 });
+    try std.testing.expectEqual(@as(f64, 5), state.count);
+    try std.testing.expectEqual(@as(usize, 5), h.count(.{ .text = "Item" }));
+    try h.change(.{ .kind = .stepper }, .{ .steps = 100 });
+    try std.testing.expectEqual(@as(f64, 12), state.count);
+}
+
+test "scroll containers clip, scroll by wheel and clamp to content" {
+    var storage: view.Storage(32, 256) = .{};
+    var state: Gallery = .{ .count = 6 };
+    var h = Harness.init(&state, Gallery.build, storage.buffers(), .{});
+    try h.render();
+    const area = try h.find(.{ .kind = .scroll });
+    try std.testing.expectEqual(@as(f32, 100), area.bounds.height);
+    // Six 30 DIP items with 4 DIP gaps make 200 DIP of content.
+    try std.testing.expectEqual(@as(f32, 100), state.model.viewport.height);
+    try std.testing.expectEqual(@as(f32, 200), state.model.content.height);
+    try std.testing.expectError(error.Hidden, h.click(.{ .key = 4 }));
+
+    try h.wheel(area.bounds.x + 10, area.bounds.y + 10, .{ .x = 0, .y = 48 });
+    try std.testing.expectEqual(@as(f32, 48), state.model.offset.y);
+    const first = try h.find(.{ .key = 0 });
+    try std.testing.expectEqual(area.bounds.y - 48, first.bounds.y);
+
+    try h.scroll(.{ .kind = .scroll }, .{ .x = 0, .y = 1000 });
+    try std.testing.expectEqual(@as(f32, 100), state.model.offset.y);
+    try h.click(.{ .key = 5 });
+    try std.testing.expectEqual(@as(?usize, 5), state.picked);
+    try std.testing.expectError(error.Hidden, h.click(.{ .key = 0 }));
+
+    // Fewer items clamp the offset back into range on the next arrange:
+    // four make 132 DIP, three fit entirely in the viewport.
+    state.count = 4;
+    try h.render();
+    try std.testing.expectEqual(@as(f32, 32), state.model.offset.y);
+    state.count = 3;
+    try h.render();
+    try std.testing.expectEqual(@as(f32, 0), state.model.offset.y);
+    try std.testing.expectError(error.NotFound, h.wheel(-5, -5, .{ .x = 0, .y = 10 }));
+    try std.testing.expectError(error.NotScrollable, h.scroll(.{ .kind = .stepper }, .{ .x = 0, .y = 1 }));
 }
