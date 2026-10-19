@@ -26,8 +26,8 @@
 #define READ_ONLY 4
 #define OFFSCREEN 8
 #define CHECKED 16
-enum { ROLE_WINDOW, ROLE_GROUP, ROLE_BUTTON, ROLE_TEXT, ROLE_TEXT_BOX, ROLE_CHECKBOX, ROLE_RADIO, ROLE_SWITCH, ROLE_PROGRESS, ROLE_RADIO_GROUP, ROLE_SLIDER, ROLE_STEPPER, ROLE_LIST, ROLE_TAB_LIST, ROLE_TAB, ROLE_TOOLBAR, ROLE_SPLITTER };
-enum { PATTERN_INVOKE = 1, PATTERN_VALUE = 2, PATTERN_TEXT = 4, PATTERN_TOGGLE = 8, PATTERN_SELECTION_ITEM = 16, PATTERN_SELECTION = 32, PATTERN_RANGE_VALUE = 64, PATTERN_COLLECTION = 128 };
+enum { ROLE_WINDOW, ROLE_GROUP, ROLE_BUTTON, ROLE_TEXT, ROLE_TEXT_BOX, ROLE_CHECKBOX, ROLE_RADIO, ROLE_SWITCH, ROLE_PROGRESS, ROLE_RADIO_GROUP, ROLE_SLIDER, ROLE_STEPPER, ROLE_LIST, ROLE_TAB_LIST, ROLE_TAB, ROLE_TOOLBAR, ROLE_SPLITTER, ROLE_LINK, ROLE_DISCLOSURE };
+enum { PATTERN_INVOKE = 1, PATTERN_VALUE = 2, PATTERN_TEXT = 4, PATTERN_TOGGLE = 8, PATTERN_SELECTION_ITEM = 16, PATTERN_SELECTION = 32, PATTERN_RANGE_VALUE = 64, PATTERN_COLLECTION = 128, PATTERN_EXPAND_COLLAPSE = 256 };
 
 typedef struct Node {
     uint64_t id, parent;
@@ -101,6 +101,7 @@ struct Provider {
     ISelectionItemProvider selection_item;
     ISelectionProvider selection;
     IRangeValueProvider range_value;
+    IExpandCollapseProvider expand_collapse;
     LONG refs;
     State *state;
     uint64_t id;
@@ -205,11 +206,13 @@ static BOOL toggle_role(uint32_t role) { return role == ROLE_CHECKBOX || role ==
 /* Tabs select like radios: one selected item per chooser container. */
 static BOOL item_role(uint32_t role) { return role == ROLE_RADIO || role == ROLE_TAB; }
 static BOOL chooser_role(uint32_t role) { return role == ROLE_RADIO_GROUP || role == ROLE_TAB_LIST; }
-static BOOL actionable(uint32_t role) { return role == ROLE_BUTTON || item_role(role) || toggle_role(role); }
+static BOOL invoke_role(uint32_t role) { return role == ROLE_BUTTON || role == ROLE_LINK; }
+static BOOL actionable(uint32_t role) { return invoke_role(role) || item_role(role) || toggle_role(role) || role == ROLE_DISCLOSURE; }
 static BOOL range_role(uint32_t role) { return role == ROLE_PROGRESS || role == ROLE_SLIDER || role == ROLE_STEPPER || role == ROLE_SPLITTER; }
 static BOOL focusable(uint32_t role) { return actionable(role) || role == ROLE_TEXT_BOX || role == ROLE_SLIDER || role == ROLE_STEPPER || role == ROLE_SPLITTER || role == ROLE_LIST; }
 static uint32_t patterns_for_role(uint32_t role) {
-    if (role == ROLE_BUTTON) return PATTERN_INVOKE;
+    if (invoke_role(role)) return PATTERN_INVOKE;
+    if (role == ROLE_DISCLOSURE) return PATTERN_EXPAND_COLLAPSE;
     if (role == ROLE_TEXT_BOX) return PATTERN_VALUE | PATTERN_TEXT;
     if (toggle_role(role)) return PATTERN_TOGGLE;
     if (item_role(role)) return PATTERN_SELECTION_ITEM;
@@ -235,6 +238,7 @@ static HRESULT provider_query(Provider *p, REFIID iid, void **out) {
         else if ((p->patterns & PATTERN_SELECTION_ITEM) && IsEqualIID(iid, &IID_ISelectionItemProvider)) *out = &p->selection_item;
         else if ((p->patterns & PATTERN_SELECTION) && IsEqualIID(iid, &IID_ISelectionProvider)) *out = &p->selection;
         else if ((p->patterns & PATTERN_RANGE_VALUE) && IsEqualIID(iid, &IID_IRangeValueProvider)) *out = &p->range_value;
+        else if ((p->patterns & PATTERN_EXPAND_COLLAPSE) && IsEqualIID(iid, &IID_IExpandCollapseProvider)) *out = &p->expand_collapse;
     }
     if (!*out) return E_NOINTERFACE;
     provider_add(p);
@@ -255,6 +259,7 @@ PROVIDER_UNKNOWN(toggle, IToggleProvider, toggle)
 PROVIDER_UNKNOWN(selection_item, ISelectionItemProvider, selection_item)
 PROVIDER_UNKNOWN(selection, ISelectionProvider, selection)
 PROVIDER_UNKNOWN(range_value, IRangeValueProvider, range_value)
+PROVIDER_UNKNOWN(expand_collapse, IExpandCollapseProvider, expand_collapse)
 
 static HRESULT request_registered(State *s, uint64_t id, uint32_t kind, const WCHAR *value, uint32_t start, uint32_t end, double number, const CollectionRegistration *expected) {
     AcquireSRWLockExclusive(&s->lock);
@@ -409,7 +414,8 @@ static HRESULT STDMETHODCALLTYPE simple_pattern(IRawElementProviderSimple *iface
         if (id == UIA_ItemContainerPatternId) return collection_container_new(p, &IID_IItemContainerProvider, (void **)out);
         if (id == UIA_SelectionPatternId) return collection_container_new(p, &IID_ISelectionProvider2, (void **)out);
     }
-    if (id == UIA_InvokePatternId && n.role == ROLE_BUTTON) *out = (IUnknown *)&p->invoke;
+    if (id == UIA_InvokePatternId && invoke_role(n.role)) *out = (IUnknown *)&p->invoke;
+    if (id == UIA_ExpandCollapsePatternId && n.role == ROLE_DISCLOSURE) *out = (IUnknown *)&p->expand_collapse;
     if (id == UIA_ValuePatternId && n.role == ROLE_TEXT_BOX) *out = (IUnknown *)&p->value;
     if (id == UIA_TextPatternId && n.role == ROLE_TEXT_BOX) *out = (IUnknown *)&p->text;
     if (id == UIA_TogglePatternId && toggle_role(n.role)) *out = (IUnknown *)&p->toggle;
@@ -436,6 +442,8 @@ static int control_type(uint32_t role) {
         case ROLE_TAB: return UIA_TabItemControlTypeId;
         case ROLE_TOOLBAR: return UIA_ToolBarControlTypeId;
         case ROLE_SPLITTER: return UIA_ThumbControlTypeId;
+        case ROLE_LINK: return UIA_HyperlinkControlTypeId;
+        case ROLE_DISCLOSURE: return UIA_ButtonControlTypeId;
         default: return UIA_EditControlTypeId;
     }
 }
@@ -464,7 +472,9 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
         case UIA_IsKeyboardFocusablePropertyId: out->vt = VT_BOOL; out->boolVal = focusable(n->role) && (n->flags & ENABLED) && n->width > 0 && n->height > 0 ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsControlElementPropertyId: case UIA_IsContentElementPropertyId: out->vt = VT_BOOL; out->boolVal = VARIANT_TRUE; break;
         case UIA_IsOffscreenPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & OFFSCREEN) ? VARIANT_TRUE : VARIANT_FALSE; break;
-        case UIA_IsInvokePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_BUTTON ? VARIANT_TRUE : VARIANT_FALSE; break;
+        case UIA_IsInvokePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = invoke_role(n->role) ? VARIANT_TRUE : VARIANT_FALSE; break;
+        case UIA_IsExpandCollapsePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_DISCLOSURE ? VARIANT_TRUE : VARIANT_FALSE; break;
+        case UIA_ExpandCollapseExpandCollapseStatePropertyId: out->vt = VT_I4; out->lVal = (n->flags & CHECKED) ? ExpandCollapseState_Expanded : ExpandCollapseState_Collapsed; break;
         case UIA_IsValuePatternAvailablePropertyId: case UIA_IsTextPatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_TEXT_BOX ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_ValueIsReadOnlyPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & READ_ONLY) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsTogglePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = toggle_role(n->role) ? VARIANT_TRUE : VARIANT_FALSE; break;
@@ -643,6 +653,20 @@ static HRESULT STDMETHODCALLTYPE toggle_state(IToggleProvider *iface, enum Toggl
     HRESULT hr = read_provider_node(p, &n);
     if (SUCCEEDED(hr)) *out = (n.flags & CHECKED) ? ToggleState_On : ToggleState_Off; return hr;
 }
+/* A disclosure's checked flag is its expanded state; one activation flips it. */
+static HRESULT expand_collapse_to(IExpandCollapseProvider *iface, BOOL expanded) {
+    Provider *p = expand_collapse_self(iface); Node n;
+    HRESULT hr = read_provider_node(p, &n); if (FAILED(hr)) return hr;
+    if (!(n.flags & ENABLED)) return UIA_E_ELEMENTNOTENABLED;
+    return ((n.flags & CHECKED) != 0) == expanded ? S_OK : request(p->state, p->id, 1, NULL, 0, 0, 0);
+}
+static HRESULT STDMETHODCALLTYPE expand_collapse_expand(IExpandCollapseProvider *iface) { return expand_collapse_to(iface, TRUE); }
+static HRESULT STDMETHODCALLTYPE expand_collapse_collapse(IExpandCollapseProvider *iface) { return expand_collapse_to(iface, FALSE); }
+static HRESULT STDMETHODCALLTYPE expand_collapse_state(IExpandCollapseProvider *iface, enum ExpandCollapseState *out) {
+    if (!out) return E_POINTER; Provider *p = expand_collapse_self(iface); Node n;
+    HRESULT hr = read_provider_node(p, &n);
+    if (SUCCEEDED(hr)) *out = (n.flags & CHECKED) ? ExpandCollapseState_Expanded : ExpandCollapseState_Collapsed; return hr;
+}
 static HRESULT STDMETHODCALLTYPE selection_item_select(ISelectionItemProvider *iface) {
     Provider *p = selection_item_self(iface); Node n;
     HRESULT hr = read_provider_node(p, &n); if (FAILED(hr)) return hr;
@@ -731,12 +755,13 @@ static const IToggleProviderVtbl toggle_vtable = { toggle_query, toggle_add, tog
 static const ISelectionItemProviderVtbl selection_item_vtable = { selection_item_query, selection_item_add, selection_item_release, selection_item_select, selection_item_add_selection, selection_item_remove_selection, selection_item_selected, selection_item_container };
 static const ISelectionProviderVtbl selection_vtable = { selection_query, selection_add, selection_release, selection_get, selection_multiple, selection_multiple };
 static const IRangeValueProviderVtbl range_value_vtable = { range_value_query, range_value_add, range_value_release, range_value_set, range_value_get, range_value_readonly, range_value_max, range_value_min, range_value_large, range_value_small };
+static const IExpandCollapseProviderVtbl expand_collapse_vtable = { expand_collapse_query, expand_collapse_add, expand_collapse_release, expand_collapse_expand, expand_collapse_collapse, expand_collapse_state };
 static const ITextProviderVtbl text_vtable;
 static void provider_initialize_locked(State *s, uint64_t id, uint32_t role, Provider *p) {
     p->simple.lpVtbl = &simple_vtable; p->fragment.lpVtbl = &fragment_vtable; p->root.lpVtbl = &root_vtable;
     p->invoke.lpVtbl = &invoke_vtable; p->value.lpVtbl = &value_vtable; p->text.lpVtbl = &text_vtable;
     p->toggle.lpVtbl = &toggle_vtable; p->selection_item.lpVtbl = &selection_item_vtable;
-    p->selection.lpVtbl = &selection_vtable; p->range_value.lpVtbl = &range_value_vtable;
+    p->selection.lpVtbl = &selection_vtable; p->range_value.lpVtbl = &range_value_vtable; p->expand_collapse.lpVtbl = &expand_collapse_vtable;
     p->refs = 1; p->state = s; p->id = id;
     p->patterns = patterns_for_role(role);
     p->listed = TRUE; p->next = s->providers; if (p->next) p->next->previous = p; s->providers = p;

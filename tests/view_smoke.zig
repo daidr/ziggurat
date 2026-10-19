@@ -20,7 +20,7 @@ const ScrollEvent = extern struct { kind: c_int, window: ?*anyopaque, send_event
 const ButtonEvent = extern struct { kind: c_int, window: ?*anyopaque, send_event: i8, time: u32, x: f64, y: f64, axes: ?*anyopaque, state: c_uint, button: c_uint, device: ?*anyopaque, x_root: f64, y_root: f64 };
 
 const width = 360;
-const height = 600;
+const height = 720;
 
 const Native = struct {
     fn paint(window: z.Window) void {
@@ -91,6 +91,9 @@ const State = struct {
     list: view.ScrollModel = .{},
     section: enum { general, advanced } = .general,
     pane: f64 = 0.5,
+    zoom: enum { small, large } = .small,
+    more: bool = false,
+    opened: usize = 0,
     fn build(self: *State, v: *view.View) anyerror!void {
         try v.textf("Count: {d}", .{self.count}, .{});
         try v.toolbar(.{ .gap = 8, .name = "Actions" });
@@ -121,6 +124,16 @@ const State = struct {
         try v.column(.{ .background = 0xd5dde5 });
         try v.end();
         try v.end();
+        try v.row(.{ .gap = 8, .alignment = .center });
+        try v.segmented(.{ .name = "Zoom" });
+        _ = try v.segment(@TypeOf(self.zoom), &self.zoom, .small, "Small", .{});
+        _ = try v.segment(@TypeOf(self.zoom), &self.zoom, .large, "Large", .{});
+        try v.end();
+        try v.badge("New", .{});
+        if (try v.link("Help", .{})) self.opened += 1;
+        try v.end();
+        _ = try v.disclosure(&self.more, "More", .{});
+        if (self.more) try v.text("Extra", .{});
     }
     const columns = [_]view.Track{ view.Track.fixed(80), view.Track.fraction(1) };
 };
@@ -145,7 +158,7 @@ fn run(allocator: std.mem.Allocator) !void {
     const app = try z.App.init(allocator);
     defer app.deinit();
     var state: State = .{};
-    var storage: view.Storage(32, 512) = .{};
+    var storage: view.Storage(64, 512) = .{};
     var host = view.Host.init(&state, State.build, storage.buffers(), .{});
     host.context.render_mode = .gdi;
     const window = try app.createWindow(.{ .width = width, .height = height });
@@ -226,6 +239,21 @@ fn run(allocator: std.mem.Allocator) !void {
     const pane = try find(&host, .column, 1);
     try std.testing.expectEqual(@round((split.bounds.width - view.split_divider) * @as(f32, @floatCast(state.pane))), pane.bounds.width);
 
+    // Segments, links and disclosures activate through native clicks.
+    Native.click(window, (try find(&host, .segment, 1)).bounds);
+    try std.testing.expectEqual(.large, state.zoom);
+    try paint(&host, window);
+    Native.click(window, (try find(&host, .link, 0)).bounds);
+    try std.testing.expectEqual(@as(usize, 1), state.opened);
+    try paint(&host, window);
+    const more = try find(&host, .disclosure, 0);
+    try std.testing.expect(more.bounds.y + more.bounds.height <= height);
+    Native.click(window, more.bounds);
+    try std.testing.expect(state.more);
+    try paint(&host, window);
+    try std.testing.expect((try find(&host, .disclosure, 0)).checked);
+    try std.testing.expectEqualStrings("Extra", (try find(&host, .text, state.rows + 3)).text);
+
     _ = try window.destroy();
     try app.dispatch();
     try std.testing.expect(host.context.window == null);
@@ -237,5 +265,5 @@ pub fn main() !void {
     try run(gpa.allocator());
     if (builtin.os.tag == .windows) try @import("view_uia.zig").run(gpa.allocator());
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar and keyed identity passed\n", .{});
+    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure and keyed identity passed\n", .{});
 }

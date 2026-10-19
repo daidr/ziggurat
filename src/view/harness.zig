@@ -108,7 +108,8 @@ pub const Harness = struct {
         return null;
     }
 
-    /// Activate the matching button, checkbox, switch, radio or tab, then render.
+    /// Activate the matching button, link, checkbox, switch, radio, segment,
+    /// tab or disclosure, then render.
     pub fn click(self: *Harness, query: Query) anyerror!void {
         try self.activate(try self.find(query));
     }
@@ -155,7 +156,7 @@ pub const Harness = struct {
 
     fn activate(self: *Harness, node: *const Node) anyerror!void {
         switch (node.kind) {
-            .button, .checkbox, .toggle_switch, .radio, .tab => {},
+            .button, .link, .checkbox, .toggle_switch, .radio, .segment, .tab, .disclosure => {},
             else => return error.NotActivatable,
         }
         try self.check(node);
@@ -188,7 +189,7 @@ pub const Harness = struct {
             if (node.text.len > 0) try writer.print(" \"{s}\"", .{node.text});
             if (node.style.name.len > 0) try writer.print(" name=\"{s}\"", .{node.style.name});
             switch (node.kind) {
-                .checkbox, .toggle_switch, .radio, .tab => try writer.writeAll(if (node.checked) " on" else " off"),
+                .checkbox, .toggle_switch, .radio, .segment, .tab, .disclosure => try writer.writeAll(if (node.checked) " on" else " off"),
                 .progress => try writer.print(" {d:.2}", .{node.fraction}),
                 .slider, .stepper, .split => try writer.print(" {d}", .{node.value}),
                 .scroll => if (node.scroll) |model| try writer.print(" offset={d}", .{round(model.offset.y)}),
@@ -203,7 +204,7 @@ pub const Harness = struct {
 
 fn interactive(kind: Kind) bool {
     return switch (kind) {
-        .button, .checkbox, .toggle_switch, .radio, .tab, .slider, .stepper => true,
+        .button, .link, .checkbox, .toggle_switch, .radio, .segment, .tab, .disclosure, .slider, .stepper => true,
         else => false,
     };
 }
@@ -516,4 +517,54 @@ test "a split needs exactly two panes and limits within 0..1" {
     state.value = 0.9;
     try h.render();
     try std.testing.expectEqual(@as(f64, 0.75), state.value);
+}
+
+const Settings = struct {
+    range: enum { day, week, month } = .week,
+    advanced: bool = false,
+    opened: usize = 0,
+
+    fn build(self: *Settings, v: *View) anyerror!void {
+        try v.row(.{ .gap = 8, .alignment = .center });
+        try v.text("Inbox", .{});
+        try v.badge("3", .{});
+        try v.end();
+        try v.segmented(.{ .name = "Range" });
+        _ = try v.segment(@TypeOf(self.range), &self.range, .day, "Day", .{});
+        _ = try v.segment(@TypeOf(self.range), &self.range, .week, "Week", .{});
+        _ = try v.segment(@TypeOf(self.range), &self.range, .month, "Month", .{});
+        try v.end();
+        if (try v.disclosure(&self.advanced, "Advanced", .{})) {}
+        if (self.advanced) try v.text("Hidden option", .{});
+        if (try v.link("Open documentation", .{})) self.opened += 1;
+    }
+};
+
+test "segments select, disclosures reveal content and links activate" {
+    var storage: view.Storage(32, 256) = .{};
+    var state: Settings = .{};
+    var h = Harness.init(&state, Settings.build, storage.buffers(), .{});
+    try h.render();
+    const badge = try h.find(.{ .kind = .badge });
+    try std.testing.expectEqualStrings("3", badge.text);
+    try std.testing.expect(h.at(badge.bounds.x + 2, badge.bounds.y + 2) == null);
+    try std.testing.expectError(error.NotActivatable, h.click(.{ .kind = .badge }));
+
+    // Segments sit edge to edge in their row.
+    const day = try h.find(.{ .text = "Day" });
+    const week = try h.find(.{ .text = "Week" });
+    try std.testing.expectEqual(day.bounds.x + day.bounds.width, week.bounds.x);
+    try std.testing.expect(week.checked);
+    try h.click(.{ .text = "Month" });
+    try std.testing.expectEqual(.month, state.range);
+    try std.testing.expect(!(try h.find(.{ .text = "Week" })).checked);
+
+    try std.testing.expectEqual(@as(usize, 0), h.count(.{ .text = "Hidden option" }));
+    try h.click(.{ .kind = .disclosure });
+    try std.testing.expect(state.advanced);
+    try std.testing.expectEqual(@as(usize, 1), h.count(.{ .text = "Hidden option" }));
+    try std.testing.expect((try h.find(.{ .kind = .disclosure })).checked);
+
+    try h.click(.{ .kind = .link });
+    try std.testing.expectEqual(@as(usize, 1), state.opened);
 }

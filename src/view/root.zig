@@ -87,7 +87,7 @@ pub const Measurer = struct {
     }
 };
 
-pub const Kind = enum { column, row, radio_group, tab_list, toolbar, split, scroll, grid, text, spacer, button, checkbox, radio, tab, toggle_switch, progress, slider, stepper, embed };
+pub const Kind = enum { column, row, radio_group, segmented, tab_list, toolbar, split, scroll, grid, text, badge, spacer, button, link, checkbox, radio, segment, tab, disclosure, toggle_switch, progress, slider, stepper, embed };
 
 /// A leaf that measures, places and paints itself, for content the view
 /// layer does not model, such as an editable text field. The context must
@@ -136,7 +136,7 @@ pub const Node = struct {
 
     pub fn isContainer(self: *const Node) bool {
         return switch (self.kind) {
-            .column, .row, .radio_group, .tab_list, .toolbar, .split, .scroll, .grid => true,
+            .column, .row, .radio_group, .segmented, .tab_list, .toolbar, .split, .scroll, .grid => true,
             else => false,
         };
     }
@@ -322,6 +322,24 @@ pub const View = struct {
         node.text = try self.copy(label);
         return self.take(node.id) != null;
     }
+    /// Underlined accent text; true once for the pass that delivers its
+    /// activation. What it opens is up to the application.
+    pub fn link(self: *View, label: []const u8, style: Style) Error!bool {
+        const node = try self.append(.link, style);
+        node.text = try self.copy(label);
+        return self.take(node.id) != null;
+    }
+    /// A short status label on a rounded background (`Style.background`,
+    /// accent by default). It is static text, not a control.
+    pub fn badge(self: *View, value: []const u8, style: Style) Error!void {
+        const node = try self.append(.badge, style);
+        node.text = try self.copy(value);
+    }
+    /// A labelled expander bound to `expanded`, flipped on activation; true
+    /// when it changed. Build the content after it while `expanded` is set.
+    pub fn disclosure(self: *View, expanded: *bool, label: []const u8, style: Style) Error!bool {
+        return self.toggle(.disclosure, expanded, label, style);
+    }
     /// Toggles the bound value on activation; true when it changed.
     pub fn checkbox(self: *View, checked: *bool, label: []const u8, style: Style) Error!bool {
         return self.toggle(.checkbox, checked, label, style);
@@ -363,6 +381,15 @@ pub const View = struct {
     /// Selects `option` on activation; true when the selection changed.
     pub fn radio(self: *View, comptime T: type, selected: *T, option: T, label: []const u8, style: Style) Error!bool {
         return self.choice(.radio, .radio_group, T, selected, option, label, style);
+    }
+    /// Starts a row of joined segments bound to one value, announced as a
+    /// radio group named by `Style.name`. Close it with `end`.
+    pub fn segmented(self: *View, style: Style) Error!void {
+        _ = try self.open(.segmented, style);
+    }
+    /// Selects `option` on activation; true when the selection changed.
+    pub fn segment(self: *View, comptime T: type, selected: *T, option: T, label: []const u8, style: Style) Error!bool {
+        return self.choice(.segment, .segmented, T, selected, option, label, style);
     }
     /// Starts a row of tabs bound to one value. The list carries the
     /// accessible `name`; the application builds the selected tab's content
@@ -474,13 +501,16 @@ pub const View = struct {
         const size: Size = switch (node.kind) {
             .text => text_size,
             .spacer => .{},
-            .button, .tab => .{ .width = text_size.width + 2 * (metrics.content_inset + 8), .height = @max(text_size.height, metrics.indicator_size) + 2 * metrics.content_inset },
+            .button, .tab, .segment => .{ .width = text_size.width + 2 * (metrics.content_inset + 8), .height = @max(text_size.height, metrics.indicator_size) + 2 * metrics.content_inset },
+            .link => .{ .width = text_size.width + 2 * metrics.content_inset, .height = text_size.height + 2 * metrics.content_inset },
+            .badge => .{ .width = text_size.width + 2 * (metrics.content_inset + 4), .height = text_size.height + metrics.content_inset },
+            .disclosure => .{ .width = metrics.indicator_size + metrics.label_gap + text_size.width, .height = @max(text_size.height, metrics.indicator_size) + metrics.content_inset },
             .checkbox, .radio => .{ .width = metrics.indicator_size + metrics.label_gap + text_size.width, .height = @max(text_size.height, metrics.indicator_size) + metrics.content_inset },
             .toggle_switch => .{ .width = metrics.indicator_size * 1.7 + metrics.label_gap + text_size.width, .height = @max(text_size.height, metrics.indicator_size) + metrics.content_inset },
             .progress => .{ .width = 160, .height = 12 },
             .slider => .{ .width = 200, .height = metrics.thumb_size + 2 * metrics.content_inset },
             .stepper => .{ .width = 4 * (Measurer.line_height + metrics.content_inset), .height = Measurer.line_height + metrics.content_inset },
-            .column, .row, .radio_group, .tab_list, .toolbar, .split, .scroll, .grid, .embed => unreachable,
+            .column, .row, .radio_group, .segmented, .tab_list, .toolbar, .split, .scroll, .grid, .embed => unreachable,
         };
         const minimum: Size = switch (node.kind) {
             .progress, .slider, .spacer => .{ .width = 0, .height = size.height },
@@ -491,7 +521,7 @@ pub const View = struct {
 
     fn options(node: *const Node) layout.Options {
         const axis: Axis = switch (node.kind) {
-            .row, .tab_list, .toolbar => .row,
+            .row, .segmented, .tab_list, .toolbar => .row,
             .split => node.axis,
             else => .column,
         };
@@ -669,9 +699,9 @@ pub const View = struct {
             const style = node.style;
             const control: ui.widgets.Options = .{ .enabled = style.enabled, .name = style.name, .semantic_parent = node.semantic_parent };
             switch (node.kind) {
-                .column, .row, .radio_group, .tab_list, .toolbar, .split, .scroll, .grid => {
+                .column, .row, .radio_group, .segmented, .tab_list, .toolbar, .split, .scroll, .grid => {
                     switch (node.kind) {
-                        .radio_group => try target.radioGroup(node.id, bounds, style.name),
+                        .radio_group, .segmented => try target.radioGroup(node.id, bounds, style.name),
                         .tab_list => try target.tabList(node.id, bounds, style.name),
                         .toolbar => try target.toolbar(node.id, bounds, style.name),
                         else => {},
@@ -692,11 +722,23 @@ pub const View = struct {
                 .text => target.label(bounds, node.text, style.color orelse if (style.enabled) theme.palette.text else theme.palette.disabled_text),
                 .spacer => {},
                 .button => try target.buttonWithOptions(node.id, bounds, node.text, control),
+                .link => try target.link(node.id, bounds, node.text, control),
+                .badge => {
+                    const pad = theme.metrics.content_inset + 4;
+                    target.roundedRect(bounds, bounds.height / 2, ui.Color.rgb(style.background orelse theme.palette.accent));
+                    target.label(.{ .x = bounds.x + pad, .y = bounds.y, .width = @max(0, bounds.width - 2 * pad), .height = bounds.height }, node.text, style.color orelse theme.palette.on_accent);
+                },
+                .disclosure => try target.disclosure(node.id, bounds, node.text, node.checked, control),
                 .checkbox => try target.checkbox(node.id, bounds, node.text, node.checked, control),
                 .radio => {
                     var radio_options = control;
                     radio_options.radio_group = node.radio_group;
                     try target.radio(node.id, bounds, node.text, node.checked, radio_options);
+                },
+                .segment => {
+                    var segment_options = control;
+                    segment_options.radio_group = node.radio_group;
+                    try target.segment(node.id, bounds, node.text, node.checked, segment_options);
                 },
                 .tab => {
                     var tab_options = control;
@@ -919,6 +961,16 @@ const Recorder = struct {
     pub fn radio(self: *Recorder, id: u64, bounds: Rect, _: []const u8, checked: bool, options: ui.widgets.Options) !void {
         if (options.radio_group == null or options.radio_group.? != self.group) return error.MissingGroup;
         self.push(.radio, id, bounds, checked);
+    }
+    pub fn link(self: *Recorder, id: u64, bounds: Rect, _: []const u8, _: ui.widgets.Options) !void {
+        self.push(.link, id, bounds, false);
+    }
+    pub fn segment(self: *Recorder, id: u64, bounds: Rect, _: []const u8, checked: bool, options: ui.widgets.Options) !void {
+        if (options.radio_group == null or options.radio_group.? != self.group) return error.MissingGroup;
+        self.push(.segment, id, bounds, checked);
+    }
+    pub fn disclosure(self: *Recorder, id: u64, bounds: Rect, _: []const u8, checked: bool, _: ui.widgets.Options) !void {
+        self.push(.disclosure, id, bounds, checked);
     }
     pub fn tabList(self: *Recorder, id: u64, _: Rect, _: []const u8) !void {
         self.group = id;

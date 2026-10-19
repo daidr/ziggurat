@@ -26,7 +26,7 @@ pub const RangeSliderOptions = struct {
     vertical: bool = false,
 };
 pub const SplitterOptions = struct { control: Options = .{}, vertical: bool = false };
-pub const Kind = enum { button, checkbox, radio, toggle_switch, progress, tab };
+pub const Kind = enum { button, checkbox, radio, toggle_switch, progress, tab, segment, link, disclosure };
 const Snapshot = struct {
     hits: usize,
     commands: usize,
@@ -79,6 +79,19 @@ fn outline(frame: anytype, bounds: layout.Rect, width: f32, color: u32) !void {
     try fill(frame, .{ .x = bounds.x, .y = bounds.y + w, .width = w, .height = @max(0, bounds.height - 2 * w) }, color);
     try fill(frame, .{ .x = bounds.x + bounds.width - w, .y = bounds.y + w, .width = w, .height = @max(0, bounds.height - 2 * w) }, color);
 }
+/// A filled triangle pointing right, or down when `down`, from bounded strips.
+fn triangle(frame: anytype, bounds: layout.Rect, down: bool, color: u32) !void {
+    const strips = 6;
+    for (0..strips) |i| {
+        const t = @as(f32, @floatFromInt(i)) / strips;
+        const shrink = 0.5 * t;
+        if (down) {
+            try fill(frame, .{ .x = bounds.x + bounds.width * shrink, .y = bounds.y + bounds.height * t, .width = bounds.width * (1 - 2 * shrink), .height = bounds.height / strips }, color);
+        } else {
+            try fill(frame, .{ .x = bounds.x + bounds.width * t, .y = bounds.y + bounds.height * shrink, .width = bounds.width / strips, .height = bounds.height * (1 - 2 * shrink) }, color);
+        }
+    }
+}
 fn disk(frame: anytype, bounds: layout.Rect, color: u32) !void {
     // Seven bounded strips avoid a separate backend-specific drawing primitive.
     const edges = [_]f32{ 0.28, 0.12, 0.03, 0, 0.03, 0.12, 0.28 };
@@ -111,7 +124,7 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
     const absolute_bounds = absolute(frame, bounds);
     const visible = if (frame.clipBounds()) |clip| layout.intersect(absolute_bounds, clip) else absolute_bounds;
     const interactive = kind != .progress;
-    const chooses = kind == .radio or kind == .tab;
+    const chooses = kind == .radio or kind == .tab or kind == .segment;
     try frame.addControl(id, bounds, .{ .enabled = options.enabled, .focusable = interactive, .pointer_enabled = interactive, .radio_group = if (chooses) options.radio_group else null, .selected = checked, .shortcut = options.shortcut });
     const focus = interactive and options.enabled and visible.width > 0 and visible.height > 0 and context.input_state.focused == id;
     const amount = std.math.clamp(fraction, 0, 1);
@@ -125,6 +138,9 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
             .toggle_switch => .toggle_switch,
             .progress => .progress,
             .tab => .tab,
+            .segment => .radio,
+            .link => .link,
+            .disclosure => .disclosure,
         },
         .name = if (kind == .progress) options.name else text,
         .bounds = bounds,
@@ -151,6 +167,27 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
             const inside = inset(bounds, metrics.border);
             try fill(frame, inside, colors.trough);
             try fill(frame, .{ .x = inside.x, .y = inside.y, .width = inside.width * amount, .height = inside.height }, accent);
+        },
+        .segment => {
+            // Segments are joined buttons; the selected one is filled with the accent.
+            try fill(frame, bounds, border);
+            try fill(frame, inset(bounds, metrics.border), if (checked) accent else if (options.enabled and context.input_state.active == id) colors.pressed else colors.control);
+            try context.command_buffer.text(absolute(frame, inset(bounds, metrics.content_inset)), text, if (checked and options.enabled) colors.on_accent else foreground);
+        },
+        .link => {
+            const color: u32 = if (options.enabled) colors.accent else colors.disabled_text;
+            const label = inset(bounds, metrics.content_inset);
+            try context.command_buffer.text(absolute(frame, label), text, color);
+            try fill(frame, .{ .x = label.x, .y = label.y + label.height - metrics.border, .width = label.width, .height = metrics.border }, color);
+            if (focus) try outline(frame, bounds, metrics.border, colors.focus);
+        },
+        .disclosure => {
+            const side = @min(@min(bounds.height, bounds.width), metrics.indicator_size);
+            const mark: layout.Rect = .{ .x = bounds.x, .y = bounds.y + (bounds.height - side) / 2, .width = side, .height = side };
+            try triangle(frame, inset(mark, side / 4), checked, foreground);
+            const label_x = @min(bounds.width, side + metrics.label_gap);
+            try context.command_buffer.text(absolute(frame, .{ .x = bounds.x + label_x, .y = bounds.y, .width = bounds.width - label_x, .height = bounds.height }), text, foreground);
+            if (focus) try outline(frame, bounds, metrics.border, colors.focus);
         },
         .tab => {
             // The selected tab carries an accent bar along its bottom edge.

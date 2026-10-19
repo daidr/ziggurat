@@ -1,4 +1,5 @@
-//! Windows UI Automation check for declarative tabs, toolbars and splits,
+//! Windows UI Automation check for declarative tabs, toolbars, splits,
+//! segments, links and disclosures,
 //! read and driven by a real client on a worker thread.
 const std = @import("std");
 const z = @import("ziggurat");
@@ -31,6 +32,9 @@ const State = struct {
     section: enum { general, advanced } = .general,
     pane: f64 = 0.5,
     saved: usize = 0,
+    mode: enum { light, dark } = .light,
+    more: bool = false,
+    opened: usize = 0,
     fn build(self: *State, v: *view.View) anyerror!void {
         try v.toolbar(.{ .gap = 8, .name = "Actions" });
         if (try v.button("Save", .{})) self.saved += 1;
@@ -43,6 +47,12 @@ const State = struct {
         try v.text(if (self.section == .general) "General pane" else "Advanced pane", .{});
         try v.text("Detail", .{});
         try v.end();
+        try v.segmented(.{ .name = "Mode" });
+        _ = try v.segment(@TypeOf(self.mode), &self.mode, .light, "Light", .{});
+        _ = try v.segment(@TypeOf(self.mode), &self.mode, .dark, "Dark", .{});
+        try v.end();
+        if (try v.link("Help", .{})) self.opened += 1;
+        _ = try v.disclosure(&self.more, "More", .{});
     }
 };
 
@@ -195,6 +205,35 @@ const Client = struct {
         try self.synchronize();
         try check(range.?.lpVtbl.*.get_CurrentValue.?(range.?, &value));
         try std.testing.expectApproxEqAbs(@as(f64, 0.6), value, 1e-9);
+
+        // Segments are radios, links invoke and disclosures expand.
+        const dark = try find(elements.?, c.UIA_RadioButtonControlTypeId, "Dark");
+        defer release(dark);
+        var segment: ?*c.IUIAutomationSelectionItemPattern = null;
+        try check(dark.lpVtbl.*.GetCurrentPatternAs.?(dark, c.UIA_SelectionItemPatternId, &c.IID_IUIAutomationSelectionItemPattern, @ptrCast(&segment)));
+        defer release(segment.?);
+        try check(segment.?.lpVtbl.*.Select.?(segment.?));
+        const help = try find(elements.?, c.UIA_HyperlinkControlTypeId, "Help");
+        defer release(help);
+        var invoke: ?*c.IUIAutomationInvokePattern = null;
+        try check(help.lpVtbl.*.GetCurrentPatternAs.?(help, c.UIA_InvokePatternId, &c.IID_IUIAutomationInvokePattern, @ptrCast(&invoke)));
+        defer release(invoke.?);
+        try check(invoke.?.lpVtbl.*.Invoke.?(invoke.?));
+        const more = try find(elements.?, c.UIA_ButtonControlTypeId, "More");
+        defer release(more);
+        var expander: ?*c.IUIAutomationExpandCollapsePattern = null;
+        try check(more.lpVtbl.*.GetCurrentPatternAs.?(more, c.UIA_ExpandCollapsePatternId, &c.IID_IUIAutomationExpandCollapsePattern, @ptrCast(&expander)));
+        defer release(expander.?);
+        var expansion: c.enum_ExpandCollapseState = c.ExpandCollapseState_Expanded;
+        try check(expander.?.lpVtbl.*.get_CurrentExpandCollapseState.?(expander.?, &expansion));
+        try std.testing.expectEqual(@as(c.enum_ExpandCollapseState, c.ExpandCollapseState_Collapsed), expansion);
+        try check(expander.?.lpVtbl.*.Expand.?(expander.?));
+        try self.synchronize();
+        // Expanding an expanded disclosure changes nothing.
+        try check(expander.?.lpVtbl.*.Expand.?(expander.?));
+        try self.synchronize();
+        try check(expander.?.lpVtbl.*.get_CurrentExpandCollapseState.?(expander.?, &expansion));
+        try std.testing.expectEqual(@as(c.enum_ExpandCollapseState, c.ExpandCollapseState_Expanded), expansion);
     }
 };
 
@@ -206,7 +245,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     var storage: view.Storage(32, 512) = .{};
     var host = view.Host.init(&state, State.build, storage.buffers(), .{});
     host.context.render_mode = .gdi;
-    const window = try app.createWindow(.{ .width = 360, .height = 300 });
+    const window = try app.createWindow(.{ .width = 360, .height = 420 });
     try host.attach(window);
     paint(window);
     if (host.last_error) |err| return err;
@@ -224,7 +263,10 @@ pub fn run(allocator: std.mem.Allocator) !void {
     if (host.last_error) |err| return err;
     try std.testing.expectEqual(.advanced, state.section);
     try std.testing.expectApproxEqAbs(@as(f64, 0.6), state.pane, 1e-9);
+    try std.testing.expectEqual(.dark, state.mode);
+    try std.testing.expectEqual(@as(usize, 1), state.opened);
+    try std.testing.expect(state.more);
     try app.dispatch();
     try std.testing.expect(host.context.window == null);
-    std.debug.print("view UIA smoke passed: real client tab list/tab selection, toolbar parent and splitter RangeValue\n", .{});
+    std.debug.print("view UIA smoke passed: real client tab list/tab selection, toolbar parent, splitter RangeValue, segment selection, link invoke and disclosure ExpandCollapse\n", .{});
 }

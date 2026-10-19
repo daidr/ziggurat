@@ -3425,6 +3425,22 @@ pub const Frame = struct {
         if (options.radio_group == null) return error.MissingGroup;
         try widgets.emit(self, .tab, id, bounds, text, selected, 0, options);
     }
+    /// One segment of a segmented control, a row of joined buttons that
+    /// selects like a radio; `radio_group` names its `radioGroup`.
+    pub fn segment(self: *Frame, id: u64, bounds: Rect, text: []const u8, selected: bool, options: widgets.Options) !void {
+        if (options.radio_group == null) return error.MissingGroup;
+        try widgets.emit(self, .segment, id, bounds, text, selected, 0, options);
+    }
+    /// Underlined accent text that activates like a button. The application
+    /// decides what activation opens.
+    pub fn link(self: *Frame, id: u64, bounds: Rect, text: []const u8, options: widgets.Options) !void {
+        try widgets.emit(self, .link, id, bounds, text, false, 0, options);
+    }
+    /// A labelled expander; activation should flip the application's
+    /// `expanded` value, which also decides whether the content is drawn.
+    pub fn disclosure(self: *Frame, id: u64, bounds: Rect, text: []const u8, expanded: bool, options: widgets.Options) !void {
+        try widgets.emit(self, .disclosure, id, bounds, text, expanded, 0, options);
+    }
     /// A named group of tool controls; controls name it as `semantic_parent`.
     pub fn toolbar(self: *Frame, id: u64, bounds: Rect, name: []const u8) !void {
         if (id == accessibility.root_id) return error.ReservedControlId;
@@ -3830,6 +3846,41 @@ test "tabs select like radios inside a tab list and splitters report ranges" {
         try std.testing.expectEqual(@as(?u64, 10), nodes[2].parent);
         try std.testing.expectEqual(@as(?u64, 20), nodes[5].parent);
         try std.testing.expectEqual(@as(f64, 0.8), nodes[6].range_maximum);
+    }
+}
+
+test "segments select within a group while links and disclosures activate" {
+    const Dummy = struct {
+        fn draw(_: *anyopaque, _: *Frame) void {}
+        fn action(_: *anyopaque, _: u64) void {}
+    };
+    var dummy: u8 = 0;
+    var context = Context.init(&dummy, Dummy.draw, Dummy.action);
+    if (build_options.accessibility) {
+        context.attached_semantics_enabled = true;
+        try context.semantic_tree.reset("Controls", .{ .x = 0, .y = 0, .width = 200, .height = 200 });
+    }
+    var frame: Frame = .{ .context = &context, .size = .{ .width = 200, .height = 200, .scale = 1 } };
+    const row: Rect = .{ .x = 0, .y = 0, .width = 200, .height = 30 };
+    try frame.radioGroup(10, row, "View");
+    try frame.segment(11, .{ .x = 0, .y = 0, .width = 50, .height = 30 }, "Day", false, .{ .radio_group = 10 });
+    try frame.segment(12, .{ .x = 50, .y = 0, .width = 50, .height = 30 }, "Week", true, .{ .radio_group = 10 });
+    try std.testing.expectError(error.MissingGroup, frame.segment(13, row, "Loose", false, .{}));
+    try frame.link(20, .{ .x = 0, .y = 40, .width = 80, .height = 24 }, "Docs", .{});
+    try frame.disclosure(30, .{ .x = 0, .y = 70, .width = 120, .height = 24 }, "Details", true, .{});
+    try std.testing.expectEqual(@as(usize, 4), context.input_state.len);
+    context.input_state.tab();
+    try std.testing.expectEqual(@as(?u64, 12), context.input_state.focused);
+    try std.testing.expectEqual(@as(?u64, 11), context.input_state.navigate(.{ .key = .left }));
+    context.input_state.tab();
+    try std.testing.expectEqual(@as(?u64, 20), context.input_state.activation());
+    if (build_options.accessibility) {
+        const nodes = context.semantic_tree.entries[0..context.semantic_tree.len];
+        try std.testing.expectEqual(accessibility.Role.radio, nodes[2].role);
+        try std.testing.expectEqual(@as(?u64, 10), nodes[3].parent);
+        try std.testing.expectEqual(accessibility.Role.link, nodes[4].role);
+        try std.testing.expectEqual(accessibility.Role.disclosure, nodes[5].role);
+        try std.testing.expect(nodes[5].checked);
     }
 }
 

@@ -34,7 +34,7 @@ try host.attach(window);
 Host 拥有一个 `ui.Context`，从 attach 到 Context 的 detach 回调期间必须保持地址稳定，规则与普通 Context 相同。构建函数在两种场合运行，都在主线程：
 
 - **绘制**：每次 paint 运行一遍构建，随后测量、排列、录制。失败的帧保留上一帧，错误记录在 `host.last_error`。
-- **输入**：Context 每交付一个动作或数值变化，或滚轮落在滚动容器上，Host 立即运行一遍构建并携带该事件。拥有该 ID 的控件在这一遍中消费事件：`button` 返回 true，`checkbox`/`toggleSwitch` 翻转绑定的布尔值，`radio`/`tab` 选中自己的选项，`slider`/`stepper`/`split` 对绑定的**当前值**应用 `ValueChange`，`scroll` 移动它的模型。这一遍不录制也不排列，`host.view` 里的节点边界要到下一次绘制才更新；Context 随后照常使窗口失效。
+- **输入**：Context 每交付一个动作或数值变化，或滚轮落在滚动容器上，Host 立即运行一遍构建并携带该事件。拥有该 ID 的控件在这一遍中消费事件：`button`/`link` 返回 true，`checkbox`/`toggleSwitch`/`disclosure` 翻转绑定的布尔值，`radio`/`segment`/`tab` 选中自己的选项，`slider`/`stepper`/`split` 对绑定的**当前值**应用 `ValueChange`，`scroll` 移动它的模型。这一遍不录制也不排列，`host.view` 里的节点边界要到下一次绘制才更新；Context 随后照常使窗口失效。
 
 因此连续输入在重绘前逐个作用于状态，不会被重绘合并吞掉。事件的 ID 若已不在树中（例如上一个事件移除了该控件），这一遍不改变任何值。构建函数应只依据状态描述视图，可以重复调用；副作用放在控件返回 true 的分支里。
 
@@ -73,6 +73,15 @@ Host 在每帧绘制后记录可见的滚动容器（最多 `max_scroll_regions`
 `toolbar(style)` 与 `end` 配对，开始一行工具控件，`Style.name` 是工具栏的可访问名称。其中的叶子控件（包括嵌套行列里的）把工具栏作为可访问父节点；嵌套的单选组或标签列表仍挂在窗口根下。工具栏不改变焦点顺序，也没有溢出菜单。
 
 启用 `-Daccessibility=true` 时，Windows UIA 把标签列表映射为 Tab / Selection（单选），标签为 TabItem / SelectionItem，工具栏为 ToolBar，分隔条为 Thumb / 可写 RangeValue（值为第一栏比例，上下限即 `limits`）。Linux 没有为普通控件提供 AT-SPI 语义，这些角色同样只在 Windows 暴露。
+
+### 链接、徽标、分段控件与折叠区
+
+- `link(label, style)` 画成带下划线的强调色文字，激活方式与按钮相同，返回本遍是否被激活；打开什么由应用决定，视图层不处理 URL。
+- `badge(text, style)` 是圆角背景上的短标签，背景默认强调色（`Style.background` 可改），文字默认 `on_accent`（`Style.color` 可改）。它只是静态文字，不可交互，也和普通文本一样不产生语义节点。
+- `segmented(style)` 与 `end` 配对，开始一行首尾相接的分段，`Style.name` 是可访问名称；`segment(T, &selected, option, label, style)` 的选择规则与 `radio` 相同，选中的分段以强调色填充。语义上是单选组和单选按钮。
+- `disclosure(&expanded, label, style)` 是带三角指示的展开标签，激活时翻转 `expanded`，返回是否改变；应用在它后面按 `expanded` 构建内容。
+
+启用 `-Daccessibility=true` 时，Windows UIA 把链接映射为 Hyperlink / Invoke，分段为 RadioButton / SelectionItem（分组为 Group / Selection），折叠区为 Button / ExpandCollapse（已展开时 Expand、已折叠时 Collapse 不重复产生动作）。
 
 ## 文本测量
 
@@ -119,7 +128,7 @@ try h.change(.{ .kind = .slider }, .{ .steps = 2 });
 ```
 
 - `Query` 按 `kind`、精确的 `text`（标签或文本内容）、`name`（`Style.name`）和 `key` 匹配，所有给出的字段都必须相符。匹配多于一个返回 `Ambiguous`，用 `nth` 按构建顺序选其中之一；没有匹配返回 `NotFound`。`find` 返回节点，`count` 返回匹配数。
-- `click` 只接受按钮、复选框、开关、单选和标签；`change` 只接受滑块、步进器和分栏，`ValueChange` 与原生输入相同；`scroll(query, delta)` 只接受滚动容器，`wheel(x, y, delta)` 像 Host 一样把滚轮交给该点最内层的可见滚动容器。目标禁用返回 `Disabled`，被自身尺寸或任一裁剪祖先完全遮住返回 `Hidden`，种类不符返回 `NotActivatable` 或 `NotAdjustable`。
+- `click` 只接受按钮、链接、复选框、开关、单选、分段、标签和折叠区；`change` 只接受滑块、步进器和分栏，`ValueChange` 与原生输入相同；`scroll(query, delta)` 只接受滚动容器，`wheel(x, y, delta)` 像 Host 一样把滚轮交给该点最内层的可见滚动容器。目标禁用返回 `Disabled`，被自身尺寸或任一裁剪祖先完全遮住返回 `Hidden`，种类不符返回 `NotActivatable` 或 `NotAdjustable`。
 - 事件遍若没有控件消费该事件（构建已不再产生这个节点），返回 `Stale`，不会静默忽略。成功的事件之后自动重新渲染，节点与 `frames` 反映新状态。
 - `at(x, y)` 返回该点最后绘制的可交互节点，尊重裁剪；`clickAt` 激活它。`visible(node)` 给出裁剪后的可见矩形，`view.divider(node)` 给出分栏的分隔条矩形。
 - `write(writer)` 输出缩进的树大纲（种类、文本、名称、选中或数值、禁用、取整后的边界），适合与期望文本比较。
@@ -129,4 +138,4 @@ Harness 不经过 `ui.Context`，把嵌入叶子当作不可交互的节点，�
 
 ## 当前范围
 
-已提供列、行、网格、纵向滚动容器、标签页、分栏、工具栏、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子和（通过 `ziggurat_view_text`）可编辑文本字段。分栏只接受比例偏好，没有 DIP 偏好、从右到左布局和折叠；工具栏没有溢出菜单。没有悬停状态、虚拟列表和动画；需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。
+已提供列、行、网格、纵向滚动容器、标签页、分栏、工具栏、分段控件、折叠区、链接、徽标、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子和（通过 `ziggurat_view_text`）可编辑文本字段。分栏只接受比例偏好，没有 DIP 偏好、从右到左布局和折叠；工具栏没有溢出菜单。没有悬停状态、虚拟列表和动画；需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。
