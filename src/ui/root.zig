@@ -4052,13 +4052,14 @@ test "combo boxes, tooltips, status, search and avatars publish their roles" {
         const nodes = context.semantic_tree.entries[0..context.semantic_tree.len];
         const expected = [_]accessibility.Role{ .search, .combo_box, .list_box, .list_item, .button, .image, .status, .tooltip };
         for (expected, nodes[1..][0..expected.len]) |role, node| try std.testing.expectEqual(role, node.role);
-        try std.testing.expectEqualStrings("Font", nodes[2].name);
-        try std.testing.expectEqualStrings("Sans", nodes[2].value);
+        const text = context.semantic_tree.storage[0..];
+        try std.testing.expectEqualStrings("Font", text[nodes[2].name_start..][0..nodes[2].name_len]);
+        try std.testing.expectEqualStrings("Sans", text[nodes[2].value_start..][0..nodes[2].value_len]);
         try std.testing.expect(nodes[2].checked and nodes[2].read_only);
         try std.testing.expectEqual(@as(?u64, 10), nodes[2].parent);
         try std.testing.expectEqual(@as(?u64, 11), nodes[3].parent);
-        try std.testing.expectEqualStrings("Ada Lovelace", nodes[6].name);
-        try std.testing.expectEqualStrings("Go back", nodes[8].name);
+        try std.testing.expectEqualStrings("Ada Lovelace", text[nodes[6].name_start..][0..nodes[6].name_len]);
+        try std.testing.expectEqualStrings("Go back", text[nodes[8].name_start..][0..nodes[8].name_len]);
     }
 }
 
