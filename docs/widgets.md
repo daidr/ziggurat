@@ -71,6 +71,8 @@ UI 的 `on_input` 先收到一次 `.key_input`；若未消费，已有编辑键�
 | Disclosure | Button / ExpandCollapse，checked 即展开 |
 | Meter | ProgressBar / 只读 RangeValue，实际值与上下限，LocalizedControlType 为 "meter" |
 | Rating | Slider / 可写 RangeValue，0..标记数，步长 1 |
+| ListBox | List / Selection，单选 |
+| ListItem | ListItem / SelectionItem，规则与 Radio 相同 |
 | Navigation | Group，LandmarkType 为 Navigation，子控件以 `semantic_parent` 挂在其下 |
 
 `Options.description`、`invalid` 与 `required` 不参与绘制，只进入语义：说明映射为 HelpText，`invalid` 映射为 IsDataValidForForm = false，`required` 映射为 IsRequiredForForm。

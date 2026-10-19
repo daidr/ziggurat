@@ -28,7 +28,7 @@
 #define CHECKED 16
 #define INVALID 32
 #define REQUIRED 64
-enum { ROLE_WINDOW, ROLE_GROUP, ROLE_BUTTON, ROLE_TEXT, ROLE_TEXT_BOX, ROLE_CHECKBOX, ROLE_RADIO, ROLE_SWITCH, ROLE_PROGRESS, ROLE_RADIO_GROUP, ROLE_SLIDER, ROLE_STEPPER, ROLE_LIST, ROLE_TAB_LIST, ROLE_TAB, ROLE_TOOLBAR, ROLE_SPLITTER, ROLE_LINK, ROLE_DISCLOSURE, ROLE_METER, ROLE_NAVIGATION };
+enum { ROLE_WINDOW, ROLE_GROUP, ROLE_BUTTON, ROLE_TEXT, ROLE_TEXT_BOX, ROLE_CHECKBOX, ROLE_RADIO, ROLE_SWITCH, ROLE_PROGRESS, ROLE_RADIO_GROUP, ROLE_SLIDER, ROLE_STEPPER, ROLE_LIST, ROLE_TAB_LIST, ROLE_TAB, ROLE_TOOLBAR, ROLE_SPLITTER, ROLE_LINK, ROLE_DISCLOSURE, ROLE_METER, ROLE_NAVIGATION, ROLE_LIST_BOX, ROLE_LIST_ITEM };
 enum { PATTERN_INVOKE = 1, PATTERN_VALUE = 2, PATTERN_TEXT = 4, PATTERN_TOGGLE = 8, PATTERN_SELECTION_ITEM = 16, PATTERN_SELECTION = 32, PATTERN_RANGE_VALUE = 64, PATTERN_COLLECTION = 128, PATTERN_EXPAND_COLLAPSE = 256 };
 
 typedef struct Node {
@@ -205,9 +205,9 @@ static HRESULT provider_new(State *, uint64_t, Provider **);
 static Range *range_new(State *, uint64_t, uint32_t, uint32_t);
 static const ITextRangeProviderVtbl range_vtable;
 static BOOL toggle_role(uint32_t role) { return role == ROLE_CHECKBOX || role == ROLE_SWITCH; }
-/* Tabs select like radios: one selected item per chooser container. */
-static BOOL item_role(uint32_t role) { return role == ROLE_RADIO || role == ROLE_TAB; }
-static BOOL chooser_role(uint32_t role) { return role == ROLE_RADIO_GROUP || role == ROLE_TAB_LIST; }
+/* Tabs and list box options select like radios: one selected item per chooser container. */
+static BOOL item_role(uint32_t role) { return role == ROLE_RADIO || role == ROLE_TAB || role == ROLE_LIST_ITEM; }
+static BOOL chooser_role(uint32_t role) { return role == ROLE_RADIO_GROUP || role == ROLE_TAB_LIST || role == ROLE_LIST_BOX; }
 static BOOL invoke_role(uint32_t role) { return role == ROLE_BUTTON || role == ROLE_LINK; }
 static BOOL actionable(uint32_t role) { return invoke_role(role) || item_role(role) || toggle_role(role) || role == ROLE_DISCLOSURE; }
 /* Progress and meters report a value no client may set. */
@@ -450,6 +450,8 @@ static int control_type(uint32_t role) {
         case ROLE_DISCLOSURE: return UIA_ButtonControlTypeId;
         case ROLE_METER: return UIA_ProgressBarControlTypeId;
         case ROLE_NAVIGATION: return UIA_GroupControlTypeId;
+        case ROLE_LIST_BOX: return UIA_ListControlTypeId;
+        case ROLE_LIST_ITEM: return UIA_ListItemControlTypeId;
         default: return UIA_EditControlTypeId;
     }
 }

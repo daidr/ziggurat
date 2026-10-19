@@ -111,7 +111,7 @@ pub const Measurer = struct {
     }
 };
 
-pub const Kind = enum { column, row, radio_group, segmented, tab_list, toolbar, breadcrumbs, accordion, field, fieldset, split, scroll, grid, text, note, badge, spacer, button, link, checkbox, radio, segment, tab, disclosure, toggle_switch, progress, meter, slider, stepper, rating, embed };
+pub const Kind = enum { column, row, radio_group, segmented, tab_list, list_box, toolbar, breadcrumbs, accordion, field, fieldset, split, scroll, grid, text, note, badge, spacer, button, link, checkbox, radio, segment, tab, list_item, disclosure, toggle_switch, progress, meter, slider, stepper, rating, embed };
 
 /// A leaf that measures, places and paints itself, for content the view
 /// layer does not model, such as an editable text field. The context must
@@ -173,7 +173,7 @@ pub const Node = struct {
 
     pub fn isContainer(self: *const Node) bool {
         return switch (self.kind) {
-            .column, .row, .radio_group, .segmented, .tab_list, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid => true,
+            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid => true,
             else => false,
         };
     }
@@ -222,6 +222,9 @@ pub const View = struct {
     depth: usize = 0,
     event: ?Event = null,
     consumed: bool = false,
+    /// A list item selected by input, revealed by the next `arrange`. It
+    /// outlives `reset` so an event pass can hand it to the render pass.
+    reveal: ?u64 = null,
 
     pub fn init(buffers: Buffers) View {
         return .{ .buffers = buffers };
@@ -452,6 +455,20 @@ pub const View = struct {
     pub fn tab(self: *View, comptime T: type, selected: *T, option: T, label: []const u8, style: Style) Error!bool {
         return self.choice(.tab, .tab_list, T, selected, option, label, style);
     }
+    /// Starts a single-selection list of full-width options bound to one
+    /// value, named by `Style.name`. Put it in a `scroll` container for long
+    /// lists: an option selected by input is scrolled into view on the next
+    /// arrange. Close it with `end`.
+    pub fn listBox(self: *View, style: Style) Error!void {
+        _ = try self.open(.list_box, style);
+    }
+    /// Selects `option` on activation or arrow navigation; true when the
+    /// selection changed.
+    pub fn listItem(self: *View, comptime T: type, selected: *T, option: T, label: []const u8, style: Style) Error!bool {
+        const changed = try self.choice(.list_item, .list_box, T, selected, option, label, style);
+        if (changed) self.reveal = self.buffers.nodes[self.len - 1].id;
+        return changed;
+    }
     /// Starts a row of tool controls under one accessible `name`. Controls
     /// inside it, however deeply nested, report the toolbar as their parent.
     /// Close it with `end`.
@@ -643,6 +660,7 @@ pub const View = struct {
         const size: Size = switch (node.kind) {
             .text, .note => text_size,
             .spacer => .{},
+            .list_item => .{ .width = text_size.width + 2 * metrics.content_inset, .height = text_size.height + metrics.content_inset },
             .button, .tab, .segment => .{ .width = text_size.width + 2 * (metrics.content_inset + 8), .height = @max(text_size.height, metrics.indicator_size) + 2 * metrics.content_inset },
             .link => .{ .width = text_size.width + 2 * metrics.content_inset, .height = text_size.height + 2 * metrics.content_inset },
             .badge => .{ .width = text_size.width + 2 * (metrics.content_inset + 4), .height = text_size.height + metrics.content_inset },
@@ -653,7 +671,7 @@ pub const View = struct {
             .rating => .{ .width = @as(f32, @floatCast(node.range.maximum)) * Measurer.line_height, .height = Measurer.line_height + metrics.content_inset },
             .slider => .{ .width = 200, .height = metrics.thumb_size + 2 * metrics.content_inset },
             .stepper => .{ .width = 4 * (Measurer.line_height + metrics.content_inset), .height = Measurer.line_height + metrics.content_inset },
-            .column, .row, .radio_group, .segmented, .tab_list, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .embed => unreachable,
+            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .embed => unreachable,
         };
         const minimum: Size = switch (node.kind) {
             .progress, .meter, .slider, .spacer => .{ .width = 0, .height = size.height },
@@ -774,6 +792,34 @@ pub const View = struct {
             }
         }
         all[0].bounds = bounds;
+        try self.place();
+        const id = self.reveal orelse return;
+        self.reveal = null;
+        if (try self.revealNode(id)) try self.place();
+    }
+
+    /// Scroll every scroll container around the node with `id` so it is in
+    /// view; true when an offset changed.
+    fn revealNode(self: *View, id: u64) Error!bool {
+        const all = self.buffers.nodes[0..self.len];
+        const target = for (all) |*node| {
+            if (node.id == id) break node;
+        } else return false;
+        var moved = false;
+        var parent = target.parent;
+        while (parent < all.len) : (parent = all[parent].parent) {
+            const container = &all[parent];
+            const model = container.scroll orelse continue;
+            const top = container.bounds.y - model.offset.y;
+            const b = target.bounds;
+            moved = (model.ensureVisible(.{ .x = 0, .y = b.y - top, .width = 0, .height = b.height }) catch return error.InvalidValue) or moved;
+        }
+        return moved;
+    }
+
+    /// Place every container's children from its arranged bounds, top-down.
+    fn place(self: *View) Error!void {
+        const all = self.buffers.nodes[0..self.len];
         var cursor: usize = 0;
         for (all) |*node| {
             if (!node.isContainer() or node.child_count == 0) continue;
@@ -847,9 +893,10 @@ pub const View = struct {
             control.required = annotation.required;
             if (control.name.len == 0) control.name = annotation.name;
             switch (node.kind) {
-                .column, .row, .radio_group, .segmented, .tab_list, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid => {
+                .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid => {
                     switch (node.kind) {
                         .radio_group, .segmented => try target.radioGroup(node.id, bounds, style.name),
+                        .list_box => try target.listBox(node.id, bounds, style.name),
                         .tab_list => try target.tabList(node.id, bounds, style.name),
                         .toolbar => try target.toolbar(node.id, bounds, style.name),
                         .breadcrumbs => try target.navigation(node.id, bounds, style.name, node.semantic_parent),
@@ -892,6 +939,11 @@ pub const View = struct {
                     var segment_options = control;
                     segment_options.radio_group = node.radio_group;
                     try target.segment(node.id, bounds, node.text, node.checked, segment_options);
+                },
+                .list_item => {
+                    var item_options = control;
+                    item_options.radio_group = node.radio_group;
+                    try target.listItem(node.id, bounds, node.text, node.checked, item_options);
                 },
                 .tab => {
                     var tab_options = control;
@@ -1149,6 +1201,13 @@ const Recorder = struct {
     }
     pub fn disclosure(self: *Recorder, id: u64, bounds: Rect, _: []const u8, checked: bool, _: ui.widgets.Options) !void {
         self.push(.disclosure, id, bounds, checked);
+    }
+    pub fn listBox(self: *Recorder, id: u64, _: Rect, _: []const u8) !void {
+        self.chooser = id;
+    }
+    pub fn listItem(self: *Recorder, id: u64, bounds: Rect, _: []const u8, checked: bool, options: ui.widgets.Options) !void {
+        if (options.radio_group == null or options.radio_group.? != self.chooser) return error.MissingGroup;
+        self.push(.list_item, id, bounds, checked);
     }
     pub fn tabList(self: *Recorder, id: u64, _: Rect, _: []const u8) !void {
         self.chooser = id;

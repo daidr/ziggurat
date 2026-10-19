@@ -3446,6 +3446,18 @@ pub const Frame = struct {
         if (id == accessibility.root_id) return error.ReservedControlId;
         try self.semantic(.{ .id = id, .role = .toolbar, .name = name, .bounds = bounds });
     }
+    /// A single-selection list of options; each `listItem` names this id as
+    /// its `radio_group`.
+    pub fn listBox(self: *Frame, id: u64, bounds: Rect, name: []const u8) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.semantic(.{ .id = id, .role = .list_box, .name = name, .bounds = bounds });
+    }
+    /// One option of a list box. It shares a Tab stop and arrow navigation
+    /// with its peers, and activation selects it.
+    pub fn listItem(self: *Frame, id: u64, bounds: Rect, text: []const u8, selected: bool, options: widgets.Options) !void {
+        if (options.radio_group == null) return error.MissingGroup;
+        try widgets.emit(self, .list_item, id, bounds, text, selected, 0, options);
+    }
     /// A named navigation region, such as a breadcrumb trail; links inside
     /// name it as `semantic_parent`.
     pub fn navigation(self: *Frame, id: u64, bounds: Rect, name: []const u8, parent: u64) !void {
@@ -3898,6 +3910,36 @@ test "segments select within a group while links and disclosures activate" {
         try std.testing.expectEqual(accessibility.Role.link, nodes[4].role);
         try std.testing.expectEqual(accessibility.Role.disclosure, nodes[5].role);
         try std.testing.expect(nodes[5].checked);
+    }
+}
+
+test "list boxes keep one selected option under arrow navigation" {
+    const Dummy = struct {
+        fn draw(_: *anyopaque, _: *Frame) void {}
+        fn action(_: *anyopaque, _: u64) void {}
+    };
+    var dummy: u8 = 0;
+    var context = Context.init(&dummy, Dummy.draw, Dummy.action);
+    if (build_options.accessibility) {
+        context.attached_semantics_enabled = true;
+        try context.semantic_tree.reset("Controls", .{ .x = 0, .y = 0, .width = 200, .height = 200 });
+    }
+    var frame: Frame = .{ .context = &context, .size = .{ .width = 200, .height = 200, .scale = 1 } };
+    try frame.listBox(10, .{ .x = 0, .y = 0, .width = 200, .height = 90 }, "Fonts");
+    try frame.listItem(11, .{ .x = 0, .y = 0, .width = 200, .height = 30 }, "Serif", true, .{ .radio_group = 10 });
+    try frame.listItem(12, .{ .x = 0, .y = 30, .width = 200, .height = 30 }, "Sans", false, .{ .radio_group = 10 });
+    try frame.listItem(13, .{ .x = 0, .y = 60, .width = 200, .height = 30 }, "Mono", false, .{ .radio_group = 10 });
+    try std.testing.expectError(error.MissingGroup, frame.listItem(14, .{ .x = 0, .y = 90, .width = 200, .height = 30 }, "Loose", false, .{}));
+    context.input_state.tab();
+    try std.testing.expectEqual(@as(?u64, 11), context.input_state.focused);
+    try std.testing.expectEqual(@as(?u64, 12), context.input_state.navigate(.{ .key = .down }));
+    try std.testing.expectEqual(@as(?u64, 13), context.input_state.navigate(.{ .key = .end }));
+    if (build_options.accessibility) {
+        const nodes = context.semantic_tree.entries[0..context.semantic_tree.len];
+        try std.testing.expectEqual(accessibility.Role.list_box, nodes[1].role);
+        try std.testing.expectEqual(accessibility.Role.list_item, nodes[2].role);
+        try std.testing.expectEqual(@as(?u64, 10), nodes[3].parent);
+        try std.testing.expect(nodes[2].checked);
     }
 }
 

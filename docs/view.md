@@ -92,6 +92,14 @@ Host 在每帧绘制后记录可见的滚动容器（最多 `max_scroll_regions`
 
 启用 `-Daccessibility=true` 时，Windows UIA 把面包屑映射为带导航地标（LandmarkType = Navigation）的 Group，度量条为 ProgressBar / 只读 RangeValue（报告实际值与上下限，LocalizedControlType 为 "meter"），评分为 Slider / 可写 RangeValue，手风琴为 Group，分节为 Button / ExpandCollapse。
 
+### 列表框
+
+`listBox(style)` 与 `end` 配对，开始一列单选选项，`Style.name` 是可访问名称。`listItem(T, &selected, option, label, style)` 的选择规则与 `radio` 相同：激活或方向键移动即选中，返回选择是否改变，在 `listBox` 之外调用返回 `NotContainer`。选项是整行宽度，选中的一行以强调色填充。选项共享一个 Tab 停靠点，方向键和 Home/End 在选项间移动并选中，越过两端时回绕。
+
+长列表放进 `scroll` 容器。输入选中某个选项后，下一次排列会滚动外层所有滚动容器，用最小的位移让它完整可见。这里的选项全部参与构建和排列，不做虚拟化；大量行请直接使用 `ziggurat_ui` 的虚拟列表。
+
+启用 `-Daccessibility=true` 时，Windows UIA 把列表框映射为 List / Selection（单选），选项为 ListItem / SelectionItem。
+
 ### 表单字段
 
 `field(label, info, style)` 与 `end` 配对，开始一个纵向排列的表单字段：先是标签，然后是 `end` 之前构建的内容，最后是 `info` 中的错误或帮助。内容至少要有一个节点，否则 `end` 返回 `InvalidField`。`Style.gap` 为 0 时间距取 4 DIP。`Field` 有三个字段：
@@ -160,8 +168,18 @@ try h.change(.{ .kind = .slider }, .{ .steps = 2 });
 - `write(writer)` 输出缩进的树大纲（种类、文本、名称、选中或数值、禁用、取整后的边界），适合与期望文本比较。
 - `Config` 提供窗口边界、主题和 `Options`（根样式与测量回调），`resize` 改变边界并重新渲染。
 
-Harness 不经过 `ui.Context`，把嵌入叶子当作不可交互的节点，不验证原生命中、焦点、键盘导航或可访问性，也不推进时间；这些仍由隐藏窗口 smoke 和原生检查覆盖。
+- `attachInput(&context)` 把之后每次渲染记录进一个未连接窗口的 `ui.Context`，`key(KeyInput)` 按窗口相同的顺序路由按键：快捷键、Tab、范围键、分组方向键、空间方向键、Home/End，最后是 Enter/Space 激活。产生的动作或数值变化交给构建函数，随后重新渲染；返回值表示是否有控件处理该键。`focused()` 返回当前焦点节点。Context 由测试持有，不能已连接窗口。
+
+```zig
+var context = ui.Context.init(&dummy, draw, action);
+try h.attachInput(&context);
+_ = try h.key(.{ .key = .tab });
+_ = try h.key(.{ .key = .down });
+try std.testing.expectEqualStrings("Sans", h.focused().?.text);
+```
+
+Harness 把嵌入叶子当作不可交互的节点，不验证原生命中、文本输入、可访问性或指针捕获，也不推进时间；这些仍由隐藏窗口 smoke 和原生检查覆盖。
 
 ## 当前范围
 
-已提供列、行、网格、纵向滚动容器、标签页、分栏、工具栏、分段控件、折叠区、手风琴、面包屑、表单字段与字段集、链接、徽标、度量条、评分、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子和（通过 `ziggurat_view_text`）可编辑文本字段。分栏只接受比例偏好，没有 DIP 偏好、从右到左布局和折叠；工具栏没有溢出菜单。没有悬停状态、虚拟列表和动画；需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。
+已提供列、行、网格、纵向滚动容器、标签页、分栏、工具栏、分段控件、折叠区、手风琴、面包屑、列表框、表单字段与字段集、链接、徽标、度量条、评分、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子和（通过 `ziggurat_view_text`）可编辑文本字段。分栏只接受比例偏好，没有 DIP 偏好、从右到左布局和折叠；工具栏没有溢出菜单。没有悬停状态、虚拟列表、多选列表和动画；需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。

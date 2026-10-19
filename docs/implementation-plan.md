@@ -43,7 +43,7 @@
 | U01 | 已完成（Windows/Linux） | checkbox、radio、switch、progress、禁用态 | 原生输入、失败帧/嵌套 paint、关闭、Windows UIA 身份及资源回收；无每帧分配 |
 | U02 | 部分完成（Windows/Linux） | slider、双端范围、步进控件、焦点导航、快捷键与多击 | U02.1、U02.2嵌套scope/显式Escape续交、U02.3原生时序入口与显式注册主按钮多击、普通及committed Space下单文档词/逻辑行选择已分项验；更广未消费键续交、折叠/投影视图的编辑器选择及其他控件多击继续；直接键入数字归 T02；依赖 U01 |
 | U03 | 已完成（纯布局合同，Windows/Linux） | grid 与可组合约束布局 | U03.1 grid/span/对齐/自动放置/隐式轨道及U03.2弹性百分比上限、内容/显式minimum优先级、数值基线与未知父尺寸测量已验；失败输出事务、硬界与overflow明确；分隔拖动归U06 |
-| U04 | 部分完成（Windows/Linux） | 虚拟 list、table、tree/outline、grid view | U04.1 可变行高列表/可见回放/稳定 ID 锚点已实现；完整列表语义及 table/tree/grid view 继续待实现；基础依赖 U02.1/T01 |
+| U04 | 部分完成（Windows/Linux） | 虚拟 list、table、tree/outline、grid view | U04.1 可变行高列表/可见回放/稳定 ID 锚点已实现；U04.2 声明式视图的单选列表框（非虚拟）已实现；完整列表语义及 table/tree/grid view 继续待实现；基础依赖 U02.1/T01 |
 | U05 | 待实现 | combobox、autocomplete、search、token field | popup 所有权、输入法、筛选取消、键盘与焦点恢复；依赖 U02.2/T02/W02 |
 | U06 | 部分完成（U06.1 声明式视图的 tabs/toolbar/比例 split） | tabs、sidebar、toolbar、split、tooltip、toast | 生命周期、遮挡/命中、延迟唤醒撤销与可访问性；split 的 DIP 偏好、RTL、折叠与 sidebar/tooltip/toast 继续；基础依赖 U02.1/G02，popup scope另依赖U02.2 |
 | U07 | 待实现 | calendar、date/time、color picker | locale/范围/键盘/可访问性；依赖 L01/U05 |
@@ -283,7 +283,7 @@ E04的解析/协议识别、原生PTY和人工交互分别验收；剪贴板格�
 | V02 | 待实现 | 长期内存/多窗口/GPU/冷启动/输入到显示基线 | 可复现硬件/驱动/系统与统计口径，资源随并发峰值而非历史次数增长 |
 | V03 | 待实现 | 原生交互、输入法与屏幕阅读器验收 | 与隐藏窗口检查分开；需要真实平台与明确的交互验证，不由单测推定 |
 | V04 | 待实现 | Windows/Linux/macOS 远端 CI 与分发演练 | 各平台运行证据、真实证书/仓库配置；编译探针不替代运行 |
-| V05 | 部分完成（V05.1 声明式视图无窗口驱动） | 无窗口交互测试、控件树/布局/绘制 inspector | 可重放输入、稳定节点、错误快照、测试/生产成本隔离；inspection 与运行中窗口关闭安全；依赖 U10/G01 |
+| V05 | 部分完成（V05.1 声明式视图无窗口驱动、V05.2 无窗口键盘回放） | 无窗口交互测试、控件树/布局/绘制 inspector | 可重放输入、稳定节点、错误快照、测试/生产成本隔离；inspection 与运行中窗口关闭安全；依赖 U10/G01 |
 | V06 | 待实现 | 可选模块的链接、启动与默认运行成本隔离 | 最小core/自绘/Web/无IPC/无文档/无本地化样例分别测量；不用的生成器、字体、日期数据、解析器和原生后端不启动或进入默认依赖；依赖 R06/V02 |
 
 V05 的测试时钟由每个测试实例显式持有，默认冻结，只由advance/step推进；复用动画已有的调用者单调时钟边界，补齐统一测试驱动，覆盖动画、deadline、tooltip、多击、编辑合并与取消。大步跳时按定义的到期顺序执行，停止后无残留唤醒；不修改生产全局时钟、不用真实sleep证明时序。原生输入注入以已处理事件/序号为完成条件，保留有界截止时间，输入hook返回与应用处理完成之间的关系必须明确。性能回归比较固定场景的帧/命令/分配/shape/采样工作计数，时间仅作为独立硬件指标。
@@ -1608,6 +1608,11 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - `write` 输出取整边界的树大纲，供测试做文本比较。Host 与 Harness 共用同一 `Build` 绑定，Host 行为不变。
 - 范围只限声明式视图：不经过 `ui.Context`，不覆盖原生命中、焦点、键盘、可访问性和测试时钟；V05 其余部分（统一测试时钟、原生输入注入、inspector）继续待实现。见[声明式视图](view.md)。
 
+### V05.2 无窗口键盘回放
+
+- `Harness.attachInput` 把每次渲染记录进测试持有、未连接窗口的 `ui.Context`，`key` 按 `Context` 处理控件按键的同一顺序调用输入状态的快捷键、Tab、范围键、分组导航、空间导航、Home/End 与激活，把结果作为动作或数值事件交给构建，再重新渲染；`focused` 返回焦点节点。
+- 无窗口测试覆盖 Tab/Shift+Tab 顺序、单选组作为单一停靠点、方向键选择、Space 激活与重复键忽略、End、滑块方向键，以及列表框方向键选中后滚入视野。不经过原生事件、文本输入焦点接收者和可访问性；统一测试时钟、原生输入注入与 inspector 继续待实现。
+
 ### U06.1 标签页、工具栏与比例分栏
 
 - 新增语义角色 `tab_list`、`tab`、`toolbar`、`splitter`，追加在既有编号之后。Frame 提供 `tabList`/`tab`/`toolbar`/`splitter`：标签复用单选分组的命中、Tab 停靠点和方向键选择；分隔条复用范围控件的捕获拖动与键盘步进，上下分栏向下增大，拖动轨道只覆盖上下限之间，指针始终对着分隔条中心。
@@ -1620,6 +1625,12 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - 新增语义角色 `link` 与 `disclosure`，追加在既有编号之后。Frame 提供 `link`、`segment` 与 `disclosure`：分段复用单选分组，链接与折叠区复用按钮激活；三者都参与 Tab 焦点。Windows UIA 映射为 Hyperlink/Invoke、RadioButton/SelectionItem 与 Button/ExpandCollapse，ExpandCollapse 在状态已符合时不产生动作。Linux 不声明 AT-SPI。
 - `ziggurat_view` 提供 `link`、`badge`、`segmented`/`segment` 与 `disclosure`。徽标只是带背景的静态文字，不计为控件，也不产生语义节点；单个 `disclosure` 不等于多段 accordion。
 - 单元测试覆盖分组、方向键选择、激活和语义；Linux 隐藏窗口 smoke 在 1x/2x 下实测分段、链接和折叠区的原生点击。Windows smoke 用真实 UIAutomationClient 检查分段选择、链接 Invoke 与折叠区 ExpandCollapse。见[声明式视图](view.md)。
+
+### U04.2 声明式视图列表框
+
+- 新增语义角色 `list_box` 与 `list_item`，追加在既有编号之后，与虚拟集合使用的 `list` 分开。Frame 提供 `listBox` 与 `listItem`，选项复用单选分组：一个 Tab 停靠点，方向键与 Home/End 移动并选中。Windows UIA 映射为 List / Selection（单选）与 ListItem / SelectionItem。Linux 不声明 AT-SPI。
+- `ziggurat_view` 提供 `listBox`/`listItem`。输入选中的选项在下一次排列时被外层滚动容器以最小位移滚入视野；选项全部参与构建，不做虚拟化。
+- 单元测试覆盖分组、方向键导航与语义；无窗口测试覆盖选中、半遮挡选项的滚入与重复选择不滚动。Windows smoke 用真实 UIAutomationClient 检查 List 的单选 Selection 与 ListItem Select。
 
 ### U10.1 表单字段与字段集
 

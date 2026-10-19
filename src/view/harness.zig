@@ -2,7 +2,12 @@
 //! build, layout and event passes as Host, so tests can find controls by
 //! kind, label or key, activate them by query or point, and inspect the
 //! resulting state and tree. Nothing here touches native code or allocates.
+//! With `attachInput`, each render is also recorded into a windowless
+//! ui.Context so keys replay through the same focus, Tab, arrow and
+//! activation logic that a window uses.
 const std = @import("std");
+const z = @import("ziggurat");
+const ui = @import("ziggurat_ui");
 const view = @import("root.zig");
 
 const View = view.View;
@@ -46,6 +51,8 @@ pub const Harness = struct {
     config: Config,
     /// Completed render passes, including the one after each delivered event.
     frames: usize = 0,
+    /// Windowless Context whose input state receives each rendered frame.
+    input: ?*ui.Context = null,
 
     pub fn init(state: anytype, comptime build: fn (@TypeOf(state), *View) anyerror!void, buffers: view.Buffers, config: Config) Harness {
         return .{ .view = View.init(buffers), .build = view.Build.bind(state, build), .config = config };
@@ -55,7 +62,86 @@ pub const Harness = struct {
     pub fn render(self: *Harness) anyerror!void {
         try self.build.run(&self.view, self.config.options.root, null);
         try self.view.arrange(self.config.bounds, self.config.theme, self.config.options.measurer);
+        if (self.input) |context| try self.record(context);
         self.frames += 1;
+    }
+
+    /// Record every following render into `context`, which must not be
+    /// attached to a window and must stay valid while the harness uses it.
+    /// Its action callback is never called; keys deliver events to the
+    /// build function directly. Renders once.
+    pub fn attachInput(self: *Harness, context: *ui.Context) anyerror!void {
+        if (context.window != null) return error.Attached;
+        context.on_value = context.on_value orelse ignoreValue;
+        self.input = context;
+        try self.render();
+    }
+    fn ignoreValue(_: *anyopaque, _: u64, _: view.ValueChange) void {}
+
+    fn record(self: *Harness, context: *ui.Context) anyerror!void {
+        const b = self.config.bounds;
+        context.command_buffer.reset();
+        defer context.command_buffer.reset();
+        context.input_state.beginFrame();
+        errdefer context.input_state.cancelFrame();
+        var frame: ui.Frame = .{ .context = context, .size = .{ .width = @intFromFloat(@ceil(b.x + b.width)), .height = @intFromFloat(@ceil(b.y + b.height)), .scale = 1 } };
+        try self.view.paint(&frame);
+        if (frame.failure) |err| return err;
+        context.input_state.commitFrame();
+    }
+
+    /// The node holding keyboard focus after the last render, if any.
+    pub fn focused(self: *const Harness) ?*const Node {
+        const context = self.input orelse return null;
+        const id = context.input_state.focused orelse return null;
+        for (self.view.nodes()) |*node| if (node.id == id) return node;
+        return null;
+    }
+
+    /// Replay one key press in the order a window routes it to controls:
+    /// shortcuts, Tab, range keys, group arrows, spatial arrows, Home/End,
+    /// then Enter/Space activation. Delivers any resulting event, renders,
+    /// and returns whether a control handled the key. Needs `attachInput`.
+    pub fn key(self: *Harness, input: z.KeyInput) anyerror!bool {
+        const context = self.input orelse return error.NoInput;
+        const state = &context.input_state;
+        const mods = input.modifiers;
+        const plain = !mods.control and !mods.alt and !mods.super;
+        if (state.matchShortcut(input)) |id| {
+            if (state.get(id).?.options.range == null) return self.deliverKey(.{ .action = id });
+            state.setFocused(id);
+        } else if (input.key == .tab and plain) {
+            state.tabDirection(mods.shift);
+        } else if (state.rangeKey(input)) |action| {
+            return self.deliverKey(.{ .value = .{ .id = action.id, .change = action.change } });
+        } else if (if (editKey(input)) |edit| state.navigate(edit) else null) |id| {
+            return self.deliverKey(.{ .action = id });
+        } else if (!plain or mods.shift) {
+            return false;
+        } else if (state.spatial(input.key)) {} else if (input.key == .home or input.key == .end) {
+            state.setFocused(null);
+            state.tabDirection(input.key == .end);
+        } else if (input.key == .enter or input.key == .space) {
+            if (!input.repeat) if (state.activation()) |id| return self.deliverKey(.{ .action = id });
+        } else return false;
+        try self.render();
+        return true;
+    }
+    fn deliverKey(self: *Harness, event: Event) anyerror!bool {
+        try self.deliver(event);
+        return true;
+    }
+    fn editKey(input: z.KeyInput) ?z.EditKey {
+        const code: z.EditKeyCode = switch (input.key) {
+            .left => .left,
+            .right => .right,
+            .up => .up,
+            .down => .down,
+            .home => .home,
+            .end => .end,
+            else => return null,
+        };
+        return .{ .key = code, .shift = input.modifiers.shift, .control = input.modifiers.control };
     }
 
     pub fn resize(self: *Harness, bounds: Rect) anyerror!void {
@@ -109,7 +195,7 @@ pub const Harness = struct {
     }
 
     /// Activate the matching button, link, checkbox, switch, radio, segment,
-    /// tab or disclosure, then render.
+    /// tab, list item or disclosure, then render.
     pub fn click(self: *Harness, query: Query) anyerror!void {
         try self.activate(try self.find(query));
     }
@@ -157,7 +243,7 @@ pub const Harness = struct {
 
     fn activate(self: *Harness, node: *const Node) anyerror!void {
         switch (node.kind) {
-            .button, .link, .checkbox, .toggle_switch, .radio, .segment, .tab, .disclosure => {},
+            .button, .link, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure => {},
             else => return error.NotActivatable,
         }
         try self.check(node);
@@ -190,7 +276,7 @@ pub const Harness = struct {
             if (node.text.len > 0) try writer.print(" \"{s}\"", .{node.text});
             if (node.style.name.len > 0) try writer.print(" name=\"{s}\"", .{node.style.name});
             switch (node.kind) {
-                .checkbox, .toggle_switch, .radio, .segment, .tab, .disclosure => try writer.writeAll(if (node.checked) " on" else " off"),
+                .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure => try writer.writeAll(if (node.checked) " on" else " off"),
                 .progress => try writer.print(" {d:.2}", .{node.fraction}),
                 .slider, .stepper, .rating, .meter, .split => try writer.print(" {d}", .{node.value}),
                 .scroll => if (node.scroll) |model| try writer.print(" offset={d}", .{round(model.offset.y)}),
@@ -207,7 +293,7 @@ pub const Harness = struct {
 
 fn interactive(kind: Kind) bool {
     return switch (kind) {
-        .button, .link, .checkbox, .toggle_switch, .radio, .segment, .tab, .disclosure, .slider, .stepper, .rating => true,
+        .button, .link, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .slider, .stepper, .rating => true,
         else => false,
     };
 }
@@ -700,4 +786,115 @@ test "fields label, describe and validate their controls; fieldsets disable thei
     v.reset(.{}, null);
     try v.field("Empty", .{}, .{});
     try std.testing.expectError(error.InvalidField, v.end());
+}
+
+const Fonts = struct {
+    names: [6][]const u8 = .{ "Serif", "Sans", "Mono", "Display", "Hand", "Symbol" },
+    chosen: usize = 0,
+    list: view.ScrollModel = .{},
+
+    fn build(self: *Fonts, v: *View) anyerror!void {
+        try v.scroll(&self.list, .{ .height = 100, .self_align = .stretch });
+        try v.listBox(.{ .name = "Fonts" });
+        for (self.names, 0..) |name, i| _ = try v.listItem(usize, &self.chosen, i, name, .{ .key = i, .height = 30 });
+        try v.end();
+        try v.end();
+    }
+};
+
+test "list boxes select one option and reveal it inside a scroll container" {
+    var storage: view.Storage(16, 128) = .{};
+    var state: Fonts = .{};
+    var h = Harness.init(&state, Fonts.build, storage.buffers(), .{});
+    try h.render();
+    const list = try h.find(.{ .kind = .list_box });
+    const serif = try h.find(.{ .text = "Serif" });
+    try std.testing.expect(serif.checked);
+    try std.testing.expectEqual(list.id, serif.radio_group.?);
+    try std.testing.expectEqual(list.bounds.width, serif.bounds.width);
+    try std.testing.expectError(error.Hidden, h.click(.{ .text = "Hand" }));
+
+    // "Display" is cut off at the bottom; selecting it scrolls it fully in.
+    const area = try h.find(.{ .kind = .scroll });
+    const display = try h.find(.{ .text = "Display" });
+    try std.testing.expect(display.bounds.y + display.bounds.height > area.bounds.y + area.bounds.height);
+    try h.click(.{ .text = "Display" });
+    try std.testing.expectEqual(@as(usize, 3), state.chosen);
+    try std.testing.expectEqual(@as(f32, 20), state.list.offset.y);
+    const shown = try h.find(.{ .text = "Display" });
+    try std.testing.expect(shown.checked and !(try h.find(.{ .text = "Serif" })).checked);
+    try std.testing.expectEqual(area.bounds.y + area.bounds.height, shown.bounds.y + shown.bounds.height);
+    // Selecting the selected option changes nothing and does not scroll.
+    state.list.offset.y = 0;
+    try h.render();
+    try h.click(.{ .text = "Sans" });
+    try h.click(.{ .text = "Sans" });
+    try std.testing.expectEqual(@as(f32, 0), state.list.offset.y);
+
+    var loose: view.Storage(4, 32) = .{};
+    var v = View.init(loose.buffers());
+    v.reset(.{}, null);
+    var chosen: u8 = 0;
+    try std.testing.expectError(error.NotContainer, v.listItem(u8, &chosen, 1, "x", .{}));
+}
+
+const Windowless = struct {
+    fn draw(_: *anyopaque, _: *ui.Frame) void {}
+    fn action(_: *anyopaque, _: u64) void {}
+};
+
+test "keys replay Tab order, group arrows, range keys and activation" {
+    var storage: view.Storage(32, 512) = .{};
+    var state: Todo = .{};
+    var h = Harness.init(&state, Todo.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try std.testing.expectError(error.NoInput, h.key(.{ .key = .tab }));
+    try h.attachInput(&context);
+    try std.testing.expect(h.focused() == null);
+
+    try std.testing.expect(try h.key(.{ .key = .tab }));
+    try std.testing.expectEqualStrings("All", h.focused().?.text);
+    try std.testing.expect(try h.key(.{ .key = .tab }));
+    try std.testing.expectEqualStrings("Write", h.focused().?.text);
+    try std.testing.expect(try h.key(.{ .key = .space }));
+    try std.testing.expect(state.done[0]);
+    try std.testing.expect(try h.key(.{ .key = .space, .repeat = true }));
+    try std.testing.expect(state.done[0]);
+
+    // The radio group is one tab stop; arrows move the selection inside it.
+    try std.testing.expect(try h.key(.{ .key = .tab, .modifiers = .{ .shift = true } }));
+    try std.testing.expectEqualStrings("All", h.focused().?.text);
+    try std.testing.expect(try h.key(.{ .key = .right }));
+    try std.testing.expectEqual(.open, state.filter);
+    try std.testing.expectEqualStrings("Open", h.focused().?.text);
+    try std.testing.expect(try h.key(.{ .key = .tab }));
+    try std.testing.expectEqualStrings("Test", h.focused().?.text);
+
+    // End reaches the last enabled stop: Clear is enabled once a task is done.
+    try std.testing.expect(try h.key(.{ .key = .end }));
+    try std.testing.expectEqualStrings("Clear", h.focused().?.text);
+    try std.testing.expect(try h.key(.{ .key = .enter }));
+    try std.testing.expectEqual(@as(usize, 1), state.cleared);
+
+    try std.testing.expect(try h.key(.{ .key = .tab, .modifiers = .{ .shift = true } }));
+    try std.testing.expectEqual(Kind.slider, h.focused().?.kind);
+    try std.testing.expect(try h.key(.{ .key = .right }));
+    try std.testing.expectEqual(@as(f64, 1.5), state.zoom);
+    try std.testing.expect(!try h.key(.{ .key = .a, .modifiers = .{ .control = true } }));
+}
+
+test "arrow keys move a list box selection and reveal it" {
+    var storage: view.Storage(16, 128) = .{};
+    var state: Fonts = .{};
+    var h = Harness.init(&state, Fonts.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    try std.testing.expect(try h.key(.{ .key = .tab }));
+    try std.testing.expectEqualStrings("Serif", h.focused().?.text);
+    for (0..3) |_| try std.testing.expect(try h.key(.{ .key = .down }));
+    try std.testing.expectEqual(@as(usize, 3), state.chosen);
+    try std.testing.expectEqualStrings("Display", h.focused().?.text);
+    try std.testing.expectEqual(@as(f32, 20), state.list.offset.y);
 }

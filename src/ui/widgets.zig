@@ -49,7 +49,7 @@ pub const MeterBands = struct {
 pub const MeterOptions = struct { control: Options = .{}, bands: MeterBands = .{} };
 /// Most marks a rating offers.
 pub const max_rating = 10;
-pub const Kind = enum { button, checkbox, radio, toggle_switch, progress, tab, segment, link, disclosure };
+pub const Kind = enum { button, checkbox, radio, toggle_switch, progress, tab, segment, link, disclosure, list_item };
 const Snapshot = struct {
     hits: usize,
     commands: usize,
@@ -147,7 +147,7 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
     const absolute_bounds = absolute(frame, bounds);
     const visible = if (frame.clipBounds()) |clip| layout.intersect(absolute_bounds, clip) else absolute_bounds;
     const interactive = kind != .progress;
-    const chooses = kind == .radio or kind == .tab or kind == .segment;
+    const chooses = kind == .radio or kind == .tab or kind == .segment or kind == .list_item;
     try frame.addControl(id, bounds, .{ .enabled = options.enabled, .focusable = interactive, .pointer_enabled = interactive, .radio_group = if (chooses) options.radio_group else null, .selected = checked, .shortcut = options.shortcut });
     const focus = interactive and options.enabled and visible.width > 0 and visible.height > 0 and context.input_state.focused == id;
     const amount = std.math.clamp(fraction, 0, 1);
@@ -164,6 +164,7 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
             .segment => .radio,
             .link => .link,
             .disclosure => .disclosure,
+            .list_item => .list_item,
         },
         .name = if (kind == .progress) options.name else text,
         .description = options.description,
@@ -214,6 +215,12 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
             const label_x = @min(bounds.width, side + metrics.label_gap);
             try context.command_buffer.text(absolute(frame, .{ .x = bounds.x + label_x, .y = bounds.y, .width = bounds.width - label_x, .height = bounds.height }), text, foreground);
             if (focus) try outline(frame, bounds, metrics.border, colors.focus);
+        },
+        .list_item => {
+            // A full-width row; the selected one is filled with the accent.
+            if (checked) try fill(frame, bounds, accent) else if (options.enabled and context.input_state.active == id) try fill(frame, bounds, colors.pressed);
+            if (focus) try outline(frame, bounds, metrics.border, if (checked) colors.on_accent else colors.focus);
+            try context.command_buffer.text(absolute(frame, inset(bounds, metrics.content_inset)), text, if (checked and options.enabled) colors.on_accent else foreground);
         },
         .tab => {
             // The selected tab carries an accent bar along its bottom edge.
