@@ -306,7 +306,8 @@ pub fn main() !void {
     probe.network_watch.stop();
     try std.testing.expectEqual(probe.baseline, desktop.resourceCount());
     try std.testing.expectEqual(@as(usize, 0), desktop.resourceCount());
-    try std.testing.expectEqual(probe.gui_baseline, guiObjects());
+    // App.run destroyed the hidden window, so its USER objects are gone too.
+    try std.testing.expect(guiObjects() <= probe.gui_baseline);
     try std.testing.expectEqual(@as(usize, 0), app.resourceStats().stop_participants);
     if (builtin.os.tag == .linux) {
         const settings = gtk_settings_get_default() orelse return error.NoSettings;
