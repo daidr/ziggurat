@@ -243,6 +243,12 @@ pub fn build(b: *std.Build) void {
         b.step("test-native-stream-native", "Verify generated channel admission, backpressure, terminal state and physical ownership").dependOn(&b.addRunArtifact(native_tests).step);
     }
     const animation = b.addModule("ziggurat_animation", .{ .root_source_file = b.path("src/animation/root.zig"), .target = target, .optimize = optimize });
+    const i18n = b.addModule("ziggurat_i18n", .{ .root_source_file = b.path("src/i18n/root.zig"), .target = target, .optimize = optimize });
+    const i18n_tests = b.addTest(.{ .root_module = i18n });
+    check.dependOn(&i18n_tests.step);
+    const run_i18n_tests = b.addRunArtifact(i18n_tests);
+    test_step.dependOn(&run_i18n_tests.step);
+    b.step("test-i18n", "Run locale fallback, catalog, plural, number, date and pseudolocale tests").dependOn(&run_i18n_tests.step);
     const wake = b.addModule("ziggurat_wake", .{ .root_source_file = b.path("src/wake/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
         wake.link_libc = true;
