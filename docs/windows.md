@@ -129,9 +129,12 @@ const window = try app.createWindow(.{
 | `custom_decoration` | 支持 | 支持 | 不支持，创建非 system 装饰返回 `UnsupportedCapability` |
 | `native_move_resize` | 支持 | 由 WM 的 `_NET_WM_MOVERESIZE` 决定 | 不支持 |
 | `system_menu` | 支持 | 由 WM 的 `_GTK_SHOW_WINDOW_MENU` 决定 | 不支持 |
-| `transparent` / `backdrop_material` | 未实现，均为 false | 未实现，均为 false | 未实现，均为 false |
+| `transparent` | 未实现，false | 未实现，false | 未实现，false |
+| `backdrop_material` | `.system` 装饰且 Windows 11 build 22621 及以上 | 不支持 | 不支持 |
 
-透明窗口和背景材质是独立的未完成项。无边框能力不表示具备透明合成、模糊或背景材质。X11 无 WM 时仍可创建无边框窗口，但不能据此认为原生拖动、缩放或系统菜单可用；调用前查询每窗口的 capabilities。不支持的操作明确返回 `UnsupportedCapability`。Openbox 验证环境支持移动/缩放，未公布系统窗口菜单协议。
+`Window.setBackdrop(material)` 选择合成器在原生系统框架后绘制的材质：`.mica`、`.acrylic`、`.mica_alt`、`.none`，或 `.system` 恢复平台默认。Windows 用 DWM 的 system backdrop 窗口属性实现，在主线程同步提交；能力按进程读取一次的真实系统版本与窗口装饰判断，不支持时在任何原生调用前返回 `UnsupportedCapability`，原生拒绝返回 `WindowUpdateFailed` 并保留 HRESULT 诊断。框架不保存所选材质，也不在关闭后恢复；宿主需要跨启动保留时自己存储。材质只出现在系统标题栏/边框等非客户区，客户区仍由现有渲染器不透明绘制；`.borderless/.custom` 没有系统框架，因而报告不支持。系统可能因电源模式、透明效果设置或窗口失焦以纯色替代材质，这属于系统策略。
+
+客户区透明（`transparent`）仍未实现：它需要渲染器输出预乘 alpha 并改变整窗合成方式，不能只靠窗口属性完成。无边框能力不表示具备透明合成、模糊或背景材质。X11 无 WM 时仍可创建无边框窗口，但不能据此认为原生拖动、缩放或系统菜单可用；调用前查询每窗口的 capabilities。不支持的操作明确返回 `UnsupportedCapability`。Openbox 验证环境支持移动/缩放，未公布系统窗口菜单协议。
 
 ## 原生交互与重入
 
@@ -163,7 +166,7 @@ Linux 在隔离 Xvfb 和支持 fullscreen/above 的 WM 下运行 `zig build smok
 
 `zig build smoke-key-input` 使用隐藏原生窗口验证逻辑键/修饰/重复、AltGr 和输入法组合优先、回调关闭。Windows 另验证 direct/queue 的 consumer 与 service 次数、外部 HWND 不被当成本方记录；GTK 使用真实 IM simple 的组合流程及本机 keymap 验证 Shift 逻辑键。控件集成的 `smoke-widget-ranges` 检查消费裸字符快捷键后无额外文字、编辑器 Space/Enter 及普通文本各走一次。没有以这些检查声称覆盖全部输入法或物理键盘布局。
 
-`zig build smoke-window-chrome` 检查自定义客户区、DIP 命中/最小尺寸、最大化/全屏来回还原和命中回调中的原生销毁。Windows 在未激活 desktop 的独立子进程中实际进入移动、缩放和系统菜单循环，核对循环内投递的关闭/退出任务各执行一次，并覆盖公开手势排队及禁用、模态、失焦后的旧命令失效。子进程退出后释放 desktop，不切换用户桌面。
+`zig build smoke-window-chrome` 检查自定义客户区、DIP 命中/最小尺寸、最大化/全屏来回还原和命中回调中的原生销毁。Windows 在未激活 desktop 的独立子进程中实际进入移动、缩放和系统菜单循环，核对循环内投递的关闭/退出任务各执行一次，并覆盖公开手势排队及禁用、模态、失焦后的旧命令失效。子进程退出后释放 desktop，不切换用户桌面。同一测试比对独立读取的系统版本与 `backdrop_material`：支持时依次提交五种材质并在 DWM 允许读回时核对原值，不支持或非系统装饰时核对 `UnsupportedCapability`，关闭后返回 `Closed`。这不建立材质的视觉效果结论。
 
 Linux 在隔离 Xvfb/Openbox 下使用 `zig build smoke-window-chrome -- --require-wm`；该参数要求实际移动/缩放和全屏能力。独立输入驱动进程通过 XTest 触发真实按下，再由内容调用 `startMove/startResize`，必须同时观察到 WM 改变位置和宽高才能通过。运行此测试需要 `libXtst.so.6`，它不是框架生产依赖。测试只在专用 DISPLAY 中运行；无 WM 时不把已提交的输入当作操作完成。
 

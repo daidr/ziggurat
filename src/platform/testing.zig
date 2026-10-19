@@ -13,6 +13,7 @@ pub const WindowData = struct {
     interactions: usize = 0,
     last_resize: ?core.ResizeEdge = null,
     damage: ?core.Rect = null,
+    backdrop: core.WindowBackdrop = .system,
     fail_damage: bool = false,
     composing: bool = false,
     composition_epoch: u64 = 0,
@@ -155,6 +156,11 @@ pub fn setAlwaysOnTop(record: *core.WindowRecord, enabled: bool) !void {
     try update(record);
     record.native.state.always_on_top = enabled;
     record.native.state.always_on_top_requested = enabled;
+}
+pub fn setBackdrop(record: *core.WindowRecord, material: core.WindowBackdrop) !void {
+    if (!record.native.caps.backdrop_material) return error.UnsupportedCapability;
+    try update(record);
+    record.native.backdrop = material;
 }
 pub fn setTitle(_: *core.WindowRecord, _: []const u8) !void {}
 pub fn setTextCaret(_: *core.WindowRecord, _: core.Rect) !void {}

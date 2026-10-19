@@ -481,6 +481,7 @@ pub fn build(b: *std.Build) void {
         core.linkSystemLibrary("user32", .{});
         core.linkSystemLibrary("ole32", .{});
         core.linkSystemLibrary("imm32", .{});
+        core.linkSystemLibrary("dwmapi", .{});
         core.link_libc = true;
     }
     if (target.result.os.tag == .linux) {

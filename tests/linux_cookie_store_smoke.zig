@@ -23,6 +23,7 @@ const AllocationCounter = struct {
 };
 
 extern fn zwk_cookies_counts(*u32, *u32, *usize) void;
+extern fn zwk_capture_counts(*u32, *u32, *usize, *usize) void;
 extern fn zwk_profile_counts(*u32, *u32, *usize) void;
 extern fn g_timeout_add(c_uint, *const fn (?*anyopaque) callconv(.c) c_int, ?*anyopaque) c_uint;
 extern fn g_source_remove(c_uint) c_int;
@@ -238,6 +239,12 @@ fn drain(allocator: std.mem.Allocator) !void {
             zwk_cookies_counts(&owners, &ops, &bytes);
             if (owners != 0 or ops != 0 or bytes != 0) return 1;
             zwk_profile_counts(&owners, &ops, &bytes);
+            var budgets: u32 = 0;
+            var captures: u32 = 0;
+            var peak: usize = 0;
+            zwk_capture_counts(&budgets, &captures, &bytes, &peak);
+            if (budgets != 0 or captures != 0) return 1;
+            zwk_profile_counts(&owners, &ops, &bytes);
             if (owners != 0 or ops != 0 or bytes != 0 or web.resourceCounts().states != 0 or web.resourceCounts().handlers != 0 or web.resourceCounts().controllers != 0) return 1;
             self.timer = 0;
             self.app.quit();
@@ -283,6 +290,7 @@ pub fn main() !void {
     try @import("linux_cookie_store_delete_key.zig").run(allocator, path);
     try @import("linux_cookie_store_lifetime.zig").run(allocator, path);
     try @import("linux_cookie_store_http.zig").run(allocator, path);
+    try @import("linux_view_clear.zig").run(allocator, path);
     try drain(allocator);
     std.debug.print("CookieStore cold native: no View/Context; exact query/path/delete, independent write/clear grants, physical Full, accepted operation survives Profile close, caller Batch after App; native refs=0\n", .{});
 }

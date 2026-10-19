@@ -63,9 +63,9 @@ struct ZwkState {
     int32_t session_left,session_top,session_right,session_bottom;
     gboolean session,placement_busy,parent_destroying,session_visible;
     uint32_t policy;
-    gboolean closed, committed, failed, dom_ready, recovering,load_started;
+    gboolean closed, committed, failed, dom_ready, recovering,load_started,inspector;
 };
-static gint live_states, live_callbacks, live_views;
+static gint live_states, live_callbacks, live_views, inspectors_shown;
 static void capture_state_clear(ZwkState *);
 static void capture_cancel_all(ZwkState *);
 static void initializers_free(ZwkInitializerState *);
@@ -717,7 +717,7 @@ static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t
     g_object_ref_sink(s->view); g_atomic_int_inc(&live_views);
     retain(s); g_object_weak_ref(G_OBJECT(s->view),view_finalized,s);
     WebKitSettings *settings=webkit_web_view_get_settings(WEBKIT_WEB_VIEW(s->view));
-    webkit_settings_set_enable_developer_extras(settings,FALSE);
+    webkit_settings_set_enable_developer_extras(settings,options->developer_tools?TRUE:FALSE);
     webkit_settings_set_enable_fullscreen(settings,FALSE);
     webkit_settings_set_enable_webrtc(settings,FALSE);
     webkit_settings_set_enable_media_stream(settings,FALSE);
@@ -780,6 +780,17 @@ int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPage
 int zwk_session_create(const ZwkOptions *options,uint32_t width,uint32_t height,ZwkNotify callback,ZwkPageNotify page_callback,ZwkScriptNotify script_callback,ZwkDeadline deadline,void *owner,ZwkState **out) {
     return create(NULL,options,width,height,TRUE,callback,page_callback,script_callback,deadline,owner,out);
 }
+static gboolean inspector_attach(WebKitWebInspector *inspector,gpointer data) {
+    (void)inspector; (void)data;
+    return TRUE;
+}
+static void inspector_close(ZwkState *s,GtkWidget *view) {
+    if (!s->inspector) return;
+    WebKitWebInspector *inspector=webkit_web_view_get_inspector(WEBKIT_WEB_VIEW(view));
+    g_signal_handlers_disconnect_by_data(inspector,s);
+    webkit_web_inspector_close(inspector);
+    s->inspector=FALSE; g_atomic_int_add(&inspectors_shown,-1);
+}
 void zwk_close(ZwkState *s) {
     if (s->closed) return;
     s->closed=TRUE; s->owner=NULL;
@@ -803,7 +814,7 @@ void zwk_close(ZwkState *s) {
     ZlgRegionHost *region=s->region; s->region=NULL;
     if (region) zlg_region_detach(region);
     GtkWidget *view=s->view; s->view=NULL;
-    if (view) { gtk_widget_destroy(view); g_object_unref(view); }
+    if (view) { inspector_close(s,view); gtk_widget_destroy(view); g_object_unref(view); }
     g_clear_object(&s->manager); g_clear_object(&s->context);
     release(s);
 }
@@ -891,6 +902,28 @@ int zwk_user_agent(ZwkState *s,const char *set,char **get) {
     if (get) { const char *value=webkit_settings_get_user_agent(settings); *get=g_try_malloc(strlen(value)+1); if (!*get) return ZWK_OOM; strcpy(*get,value); }
     return ZWK_OK;
 }
+int zwk_devtools(ZwkState *s,int op,int *enabled,int *visible) {
+    if (!live(s)) return ZWK_CLOSED;
+    if (op<0 || op>3) return ZWK_INVALID;
+    WebKitSettings *settings=webkit_web_view_get_settings(WEBKIT_WEB_VIEW(s->view));
+    if (op==1) webkit_settings_set_enable_developer_extras(settings,TRUE);
+    if (op==2) { webkit_settings_set_enable_developer_extras(settings,FALSE); inspector_close(s,s->view); }
+    gboolean on=webkit_settings_get_enable_developer_extras(settings);
+    if (op==3) {
+        if (!on) return ZWK_DEVTOOLS_DISABLED;
+        WebKitWebInspector *inspector=webkit_web_view_get_inspector(WEBKIT_WEB_VIEW(s->view));
+        if (!s->inspector) {
+            g_signal_connect(inspector,"attach",G_CALLBACK(inspector_attach),s);
+            s->inspector=TRUE; g_atomic_int_inc(&inspectors_shown);
+        }
+        webkit_web_inspector_show(inspector);
+        if (!live(s)) return ZWK_CLOSED;
+    }
+    if (enabled) *enabled=on?1:0;
+    if (visible) *visible=s->inspector && webkit_web_inspector_get_web_view(webkit_web_view_get_inspector(WEBKIT_WEB_VIEW(s->view)))?1:0;
+    return ZWK_OK;
+}
+void zwk_devtools_counts(uint32_t *shown) { *shown=(uint32_t)g_atomic_int_get(&inspectors_shown); }
 void zwk_string_free(char *value) { g_free(value); }
 static gboolean deadline_ready(gpointer data) {
     ZwkState *s=data; GSource *source=s->timer; s->timer=NULL; g_source_unref(source);

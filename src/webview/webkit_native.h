@@ -58,8 +58,9 @@ typedef struct ZwkOptions {
     uint32_t region;
     ZwkProfileContext *profile_context;
     const ZwkInitializerInput *initializers;
+    uint32_t developer_tools;
 } ZwkOptions;
-enum ZwkResult { ZWK_OK=0, ZWK_CLOSED=1, ZWK_FULL=2, ZWK_OOM=3, ZWK_INVALID=4, ZWK_NATIVE_FAILED=5, ZWK_NOT_READY=6, ZWK_NAVIGATION_PENDING=7, ZWK_IPC_DENIED=8, ZWK_NO_HISTORY=9, ZWK_NAVIGATION_CANCELLED=10, ZWK_GEOMETRY_NOT_APPLIED=11, ZWK_INITIALIZER_BUDGET=12 };
+enum ZwkResult { ZWK_OK=0, ZWK_CLOSED=1, ZWK_FULL=2, ZWK_OOM=3, ZWK_INVALID=4, ZWK_NATIVE_FAILED=5, ZWK_NOT_READY=6, ZWK_NAVIGATION_PENDING=7, ZWK_IPC_DENIED=8, ZWK_NO_HISTORY=9, ZWK_NAVIGATION_CANCELLED=10, ZWK_GEOMETRY_NOT_APPLIED=11, ZWK_INITIALIZER_BUDGET=12, ZWK_DEVTOOLS_DISABLED=13 };
 enum ZwkPolicyFailure { ZWK_POLICY_MISMATCH=1, ZWK_POLICY_TIMEOUT=2, ZWK_POLICY_PREPARATION=3 };
 
 int zwk_create(void *native_window,const ZwkOptions *,ZwkNotify,ZwkPageNotify,ZwkScriptNotify,ZwkDeadline,void *,ZwkState **out);
@@ -76,6 +77,10 @@ void zwk_evaluate_cancel(ZwkState *,uint64_t);
 int zwk_post(ZwkState *,const char *);
 int zwk_zoom(ZwkState *,double *,int write);
 int zwk_user_agent(ZwkState *,const char *set,char **get);
+/* op: 0 query, 1 enable, 2 disable and close, 3 show. The inspector is a
+ * separate engine-owned toplevel; docking into the content host is refused. */
+int zwk_devtools(ZwkState *,int op,int *enabled,int *visible);
+void zwk_devtools_counts(uint32_t *shown);
 void zwk_string_free(char *);
 int zwk_deadline_arm(ZwkState *,uint64_t nanoseconds);
 void zwk_deadline_cancel(ZwkState *);
@@ -116,6 +121,8 @@ void zwk_capture_budget_close(ZwkCaptureBudget *);
 void zwk_capture_budget_release(ZwkCaptureBudget *);
 int zwk_capture_enable(ZwkState *,ZwkCaptureBudget *);
 int zwk_capture_start(ZwkState *,uint64_t);
+/* Shares the capture owner and its cancel/notify; the result has no bytes. */
+int zwk_clear_start(ZwkState *,uint64_t);
 void zwk_capture_cancel(ZwkState *,uint64_t);
 void zwk_capture_counts(uint32_t *,uint32_t *,size_t *,size_t *);
 int zwk_recovery_begin(ZwkState *);
