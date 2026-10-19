@@ -1,0 +1,29 @@
+const std = @import("std");
+const ziggurat_build = @import("ziggurat");
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const ziggurat = b.dependency("ziggurat", .{ .target = target, .optimize = optimize, .webview = @@WEB@@ });
+    const exe = b.addExecutable(.{
+        .name = "@@EXE@@",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+@@IMPORTS@@            },
+        }),
+    });
+    ziggurat_build.addApplicationResources(b, exe, ziggurat, .{
+        .identity = "@@ID@@",
+        .display_name = "@@NAME@@",
+        .version = .{ .major = 0, .minor = 1, .patch = 0 },
+    });
+    b.installArtifact(exe);
+    const run = b.addRunArtifact(exe);
+    if (b.args) |args| run.addArgs(args);
+    b.step("run", "Run @@NAME@@").dependOn(&run.step);
+    const tests = b.addTest(.{ .root_module = exe.root_module });
+    b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(tests).step);
+}

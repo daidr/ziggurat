@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>@@NAME@@</title>
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+  body { display: grid; place-items: center; min-height: 100vh; margin: 0; }
+  button { font: inherit; padding: 0.5em 1.2em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>@@NAME@@</h1>
+  <p>Count: <output id="count">0</output></p>
+  <button id="increment">+1</button>
+</main>
+<script>
+  const count = document.getElementById("count");
+  // The same message transport exists on Windows and Linux.
+  window.chrome.webview.addEventListener("message", (event) => { count.value = event.data; });
+  document.getElementById("increment").addEventListener("click", () => window.chrome.webview.postMessage("increment"));
+</script>
+</body>
+</html>
