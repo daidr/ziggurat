@@ -2159,6 +2159,15 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_document_app_tests.step);
     b.step("test-document-app", "Run document identity, close preflight, atomic save, autosave and recovery invariants").dependOn(&run_document_app_tests.step);
     test_step.dependOn(&run_webkit_remote.step);
+    const audio = b.addModule("ziggurat_audio", .{ .root_source_file = b.path("src/audio/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
+    if (target.result.os.tag == .linux) audio.link_libc = true;
+    if (target.result.os.tag == .windows) audio.linkSystemLibrary("ole32", .{});
+    const audio_tests = b.addTest(.{ .root_module = audio });
+    const run_audio_tests = b.addRunArtifact(audio_tests);
+    check.dependOn(&audio_tests.step);
+    test_step.dependOn(&run_audio_tests.step);
+    b.step("test-audio", "Run WAV/FLAC decoding, mixing, player, stream, notification and test-backend output invariants").dependOn(&run_audio_tests.step);
+    addSmoke(b, "smoke-audio", "tests/audio_smoke.zig", target, optimize, &.{.{ .name = "ziggurat_audio", .module = audio }});
     const snippets_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/code_editor/snippet.zig"),
         .target = target,
