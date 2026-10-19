@@ -3446,6 +3446,23 @@ pub const Frame = struct {
         if (id == accessibility.root_id) return error.ReservedControlId;
         try self.semantic(.{ .id = id, .role = .toolbar, .name = name, .bounds = bounds });
     }
+    /// A named navigation region, such as a breadcrumb trail; links inside
+    /// name it as `semantic_parent`.
+    pub fn navigation(self: *Frame, id: u64, bounds: Rect, name: []const u8, parent: u64) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.semantic(.{ .id = id, .parent = parent, .role = .navigation, .name = name, .bounds = bounds });
+    }
+    /// A named group of related controls, such as accordion sections.
+    pub fn group(self: *Frame, id: u64, bounds: Rect, name: []const u8, parent: u64) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.semantic(.{ .id = id, .parent = parent, .role = .group, .name = name, .bounds = bounds });
+    }
+    pub fn meter(self: *Frame, id: u64, bounds: Rect, value: f64, spec: Range, options: widgets.MeterOptions) !void {
+        try widgets.emitMeter(self, id, bounds, value, spec, options);
+    }
+    pub fn rating(self: *Frame, id: u64, bounds: Rect, value: f64, count: u8, options: widgets.Options) !void {
+        try widgets.emitRating(self, id, bounds, value, count, options);
+    }
     pub fn splitter(self: *Frame, id: u64, bounds: Rect, divider: Rect, value: f64, spec: Range, options: widgets.SplitterOptions) !void {
         try widgets.emitSplitter(self, id, bounds, divider, value, spec, options);
     }
@@ -3881,6 +3898,51 @@ test "segments select within a group while links and disclosures activate" {
         try std.testing.expectEqual(accessibility.Role.link, nodes[4].role);
         try std.testing.expectEqual(accessibility.Role.disclosure, nodes[5].role);
         try std.testing.expect(nodes[5].checked);
+    }
+}
+
+test "meters report values, ratings snap to marks and regions nest" {
+    const Dummy = struct {
+        fn draw(_: *anyopaque, _: *Frame) void {}
+        fn action(_: *anyopaque, _: u64) void {}
+        fn value(_: *anyopaque, _: u64, _: input.ValueChange) void {}
+    };
+    var dummy: u8 = 0;
+    var context = Context.init(&dummy, Dummy.draw, Dummy.action);
+    context.on_value = Dummy.value;
+    if (build_options.accessibility) {
+        context.attached_semantics_enabled = true;
+        try context.semantic_tree.reset("Controls", .{ .x = 0, .y = 0, .width = 300, .height = 200 });
+    }
+    var frame: Frame = .{ .context = &context, .size = .{ .width = 300, .height = 200, .scale = 1 } };
+    const disk_range: Range = .{ .minimum = 0, .maximum = 512 };
+    try frame.meter(10, .{ .x = 0, .y = 0, .width = 200, .height = 12 }, 480, disk_range, .{ .control = .{ .name = "Disk" }, .bands = .{ .high = 400 } });
+    try std.testing.expectError(error.InvalidRange, frame.meter(11, .{ .x = 0, .y = 0, .width = 200, .height = 12 }, 1, disk_range, .{ .bands = .{ .low = 300, .high = 200 } }));
+    try std.testing.expectError(error.InvalidValue, frame.meter(11, .{ .x = 0, .y = 0, .width = 200, .height = 12 }, 600, disk_range, .{}));
+    try frame.navigation(20, .{ .x = 0, .y = 20, .width = 300, .height = 30 }, "Breadcrumbs", accessibility.root_id);
+    try frame.link(21, .{ .x = 0, .y = 20, .width = 60, .height = 30 }, "Home", .{ .semantic_parent = 20 });
+    try frame.group(30, .{ .x = 0, .y = 60, .width = 300, .height = 30 }, "Sections", accessibility.root_id);
+    const stars: Rect = .{ .x = 0, .y = 100, .width = 150, .height = 30 };
+    try frame.rating(40, stars, 3, 5, .{ .name = "Score", .semantic_parent = 30 });
+    try std.testing.expectError(error.InvalidRange, frame.rating(41, stars, 0, 0, .{}));
+    try std.testing.expectError(error.InvalidValue, frame.rating(41, stars, 2.5, 5, .{}));
+    // Pressing the second mark's left edge or right edge still selects it.
+    const mark = widgets.ratingMark(stars, 5, 1);
+    inline for (.{ mark.x + 1, mark.x + mark.width - 1 }) |x| {
+        context.input_state.down(.{ .x = x, .y = 115 });
+        try std.testing.expectEqual(@as(f64, 2), context.input_state.pointerValue(.{ .x = x, .y = 115 }, .down).?.change.set);
+        context.input_state.cancelPress();
+    }
+    if (build_options.accessibility) {
+        const nodes = context.semantic_tree.entries[0..context.semantic_tree.len];
+        try std.testing.expectEqual(accessibility.Role.meter, nodes[1].role);
+        try std.testing.expect(nodes[1].read_only);
+        try std.testing.expectEqual(@as(f64, 512), nodes[1].range_maximum);
+        try std.testing.expectEqual(accessibility.Role.navigation, nodes[2].role);
+        try std.testing.expectEqual(@as(?u64, 20), nodes[3].parent);
+        try std.testing.expectEqual(accessibility.Role.slider, nodes[5].role);
+        try std.testing.expectEqual(@as(?u64, 30), nodes[5].parent);
+        try std.testing.expectEqual(@as(f64, 5), nodes[5].range_maximum);
     }
 }
 

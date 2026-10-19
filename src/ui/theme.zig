@@ -20,6 +20,8 @@ pub const Palette = struct {
     thumb: u32 = 0xf4f8fc,
     disabled_thumb: u32 = 0xd9dfe5,
     focused_thumb_border: u32 = 0x183b60,
+    /// Fill of a meter whose value lies outside its preferred band.
+    caution: u32 = 0xa8530f,
 };
 pub const Metrics = struct {
     border: f32 = 2,
@@ -59,6 +61,7 @@ pub const Theme = struct {
             .thumb = 0xe0edf8,
             .disabled_thumb = 0x697581,
             .focused_thumb_border = 0xb8ddff,
+            .caution = 0xf0a45c,
         } };
     }
     pub fn highContrast() Theme {

@@ -119,11 +119,12 @@ pub const Harness = struct {
         try self.activate(self.at(x, y) orelse return error.NotFound);
     }
 
-    /// Apply a value change to the matching slider, stepper or split, then render.
+    /// Apply a value change to the matching slider, stepper, rating or
+    /// split, then render.
     pub fn change(self: *Harness, query: Query, value: ValueChange) anyerror!void {
         const node = try self.find(query);
         switch (node.kind) {
-            .slider, .stepper, .split => {},
+            .slider, .stepper, .rating, .split => {},
             else => return error.NotAdjustable,
         }
         try self.check(node);
@@ -191,7 +192,7 @@ pub const Harness = struct {
             switch (node.kind) {
                 .checkbox, .toggle_switch, .radio, .segment, .tab, .disclosure => try writer.writeAll(if (node.checked) " on" else " off"),
                 .progress => try writer.print(" {d:.2}", .{node.fraction}),
-                .slider, .stepper, .split => try writer.print(" {d}", .{node.value}),
+                .slider, .stepper, .rating, .meter, .split => try writer.print(" {d}", .{node.value}),
                 .scroll => if (node.scroll) |model| try writer.print(" offset={d}", .{round(model.offset.y)}),
                 else => {},
             }
@@ -204,7 +205,7 @@ pub const Harness = struct {
 
 fn interactive(kind: Kind) bool {
     return switch (kind) {
-        .button, .link, .checkbox, .toggle_switch, .radio, .segment, .tab, .disclosure, .slider, .stepper => true,
+        .button, .link, .checkbox, .toggle_switch, .radio, .segment, .tab, .disclosure, .slider, .stepper, .rating => true,
         else => false,
     };
 }
@@ -567,4 +568,72 @@ test "segments select, disclosures reveal content and links activate" {
 
     try h.click(.{ .kind = .link });
     try std.testing.expectEqual(@as(usize, 1), state.opened);
+}
+
+const Library = struct {
+    open: ?enum { details, reviews } = .details,
+    score: u8 = 3,
+    used: f64 = 420,
+    home: usize = 0,
+
+    fn build(self: *Library, v: *View) anyerror!void {
+        try v.breadcrumbs(.{ .name = "Location" });
+        if (try v.link("Home", .{})) self.home += 1;
+        _ = try v.link("Books", .{});
+        try v.text("Dune", .{});
+        try v.end();
+        try v.meter(self.used, .{ .minimum = 0, .maximum = 512 }, .{ .high = 400 }, .{ .name = "Storage" });
+        try v.accordion(.{ .name = "About", .gap = 4 });
+        _ = try v.section(@TypeOf(self.open.?), &self.open, .details, "Details", .{});
+        if (self.open == .details) try v.text("Published 1965", .{});
+        _ = try v.section(@TypeOf(self.open.?), &self.open, .reviews, "Reviews", .{});
+        if (self.open == .reviews) _ = try v.rating(&self.score, 5, .{ .name = "Score" });
+        try v.end();
+    }
+};
+
+test "accordions keep one section open; ratings, meters and breadcrumbs report state" {
+    var storage: view.Storage(32, 256) = .{};
+    var state: Library = .{};
+    var h = Harness.init(&state, Library.build, storage.buffers(), .{});
+    try h.render();
+    const trail = try h.find(.{ .kind = .breadcrumbs });
+    const home = try h.find(.{ .text = "Home" });
+    const books = try h.find(.{ .text = "Books" });
+    try std.testing.expectEqual(trail.id, home.semantic_parent);
+    try std.testing.expectEqual(home.bounds.x + home.bounds.width + 16, books.bounds.x);
+    try h.click(.{ .text = "Home" });
+    try std.testing.expectEqual(@as(usize, 1), state.home);
+
+    const about = try h.find(.{ .kind = .accordion });
+    try std.testing.expectEqual(about.id, (try h.find(.{ .text = "Details" })).semantic_parent);
+    try std.testing.expect((try h.find(.{ .text = "Details" })).checked);
+    try std.testing.expectEqual(@as(usize, 0), h.count(.{ .kind = .rating }));
+    // Opening another section closes the open one; opening it again closes it.
+    try h.click(.{ .text = "Reviews" });
+    try std.testing.expectEqual(.reviews, state.open.?);
+    try std.testing.expectEqual(@as(usize, 0), h.count(.{ .text = "Published 1965" }));
+    try h.change(.{ .name = "Score" }, .{ .steps = 1 });
+    try std.testing.expectEqual(@as(u8, 4), state.score);
+    try h.change(.{ .name = "Score" }, .{ .steps = 9 });
+    try std.testing.expectEqual(@as(u8, 5), state.score);
+    try h.change(.{ .name = "Score" }, .minimum);
+    try std.testing.expectEqual(@as(u8, 0), state.score);
+    try h.click(.{ .text = "Reviews" });
+    try std.testing.expect(state.open == null);
+
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try h.write(&writer);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "meter name=\"Storage\" 420") != null);
+    try std.testing.expectError(error.NotAdjustable, h.change(.{ .kind = .meter }, .maximum));
+
+    var invalid: view.Storage(8, 64) = .{};
+    var v = View.init(invalid.buffers());
+    v.reset(.{}, null);
+    try std.testing.expectError(error.InvalidRange, v.meter(1, .{ .minimum = 0, .maximum = 10 }, .{ .low = 20 }, .{}));
+    var score: u8 = 0;
+    try std.testing.expectError(error.InvalidRange, v.rating(&score, 11, .{}));
+    var section: ?u8 = null;
+    try std.testing.expectError(error.NotContainer, v.section(u8, &section, 1, "Loose", .{}));
 }

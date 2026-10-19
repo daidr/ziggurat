@@ -26,6 +26,22 @@ pub const RangeSliderOptions = struct {
     vertical: bool = false,
 };
 pub const SplitterOptions = struct { control: Options = .{}, vertical: bool = false };
+/// A meter's preferred band; a value below `low` or above `high` is drawn
+/// with the caution color. Both bounds lie within the meter's range.
+pub const MeterBands = struct {
+    low: ?f64 = null,
+    high: ?f64 = null,
+    pub fn validate(self: MeterBands, spec: Range) error{InvalidRange}!void {
+        inline for (.{ self.low, self.high }) |bound| if (bound) |value| if (!std.math.isFinite(value) or value < spec.minimum or value > spec.maximum) return error.InvalidRange;
+        if (self.low != null and self.high != null and self.low.? > self.high.?) return error.InvalidRange;
+    }
+    pub fn contains(self: MeterBands, value: f64) bool {
+        return !(if (self.low) |low| value < low else false) and !(if (self.high) |high| value > high else false);
+    }
+};
+pub const MeterOptions = struct { control: Options = .{}, bands: MeterBands = .{} };
+/// Most marks a rating offers.
+pub const max_rating = 10;
 pub const Kind = enum { button, checkbox, radio, toggle_switch, progress, tab, segment, link, disclosure };
 const Snapshot = struct {
     hits: usize,
@@ -354,4 +370,58 @@ pub fn emitSplitter(frame: anytype, id: u64, bounds: layout.Rect, divider: layou
     const line = if (focused) 2 * style.metrics.border else style.metrics.border;
     const color: u32 = if (!options.control.enabled) colors.disabled_border else if (focused) colors.focus else colors.border;
     try fill(frame, if (options.vertical) .{ .x = divider.x, .y = divider.y + (divider.height - line) / 2, .width = divider.width, .height = @min(line, divider.height) } else .{ .x = divider.x + (divider.width - line) / 2, .y = divider.y, .width = @min(line, divider.width), .height = divider.height }, color);
+}
+
+/// A read-only measurement within a known range, such as disk usage. Unlike
+/// progress it reports the value itself, not completion.
+pub fn emitMeter(frame: anytype, id: u64, bounds: layout.Rect, value: f64, spec: Range, options: MeterOptions) !void {
+    if (id == access.root_id) return error.ReservedControlId;
+    try spec.validate();
+    try spec.validateValue(value);
+    try options.bands.validate(spec);
+    if (!layout.validRect(bounds) or !layout.validRect(absolute(frame, bounds))) return error.InvalidGeometry;
+    const snapshot = Snapshot.init(frame);
+    errdefer snapshot.restore(frame);
+    try frame.semantic(.{ .id = id, .parent = options.control.semantic_parent, .role = .meter, .name = options.control.name, .bounds = bounds, .enabled = options.control.enabled, .read_only = true, .range_value = value, .range_minimum = spec.minimum, .range_maximum = spec.maximum });
+    const style = frame.currentTheme();
+    const colors = style.palette;
+    try fill(frame, bounds, if (options.control.enabled) colors.border else colors.disabled_border);
+    const inside = inset(bounds, style.metrics.border);
+    try fill(frame, inside, colors.trough);
+    const color: u32 = if (!options.control.enabled) colors.disabled_accent else if (options.bands.contains(value)) colors.accent else colors.caution;
+    try fill(frame, .{ .x = inside.x, .y = inside.y, .width = inside.width * valueFraction(spec, value), .height = inside.height }, color);
+}
+
+/// Square cells of a rating with `count` marks, left to right.
+pub fn ratingMark(bounds: layout.Rect, count: u8, index: usize) layout.Rect {
+    const side = @min(bounds.height, bounds.width / @as(f32, @floatFromInt(@max(1, count))));
+    return .{ .x = bounds.x + side * @as(f32, @floatFromInt(index)), .y = bounds.y + (bounds.height - side) / 2, .width = side, .height = side };
+}
+/// A row of `count` marks for a whole-number score from 0 to `count`.
+/// Pressing or dragging over a mark sets the score to that mark; arrow keys
+/// step it and Home clears it. Announced as a slider.
+pub fn emitRating(frame: anytype, id: u64, bounds: layout.Rect, value: f64, count: u8, options: Options) !void {
+    if (frame.context.on_value == null) return error.MissingValueHandler;
+    if (count == 0 or count > max_rating) return error.InvalidRange;
+    const spec: Range = .{ .minimum = 0, .maximum = @floatFromInt(count), .step = 1 };
+    try spec.validateValue(value);
+    if (value != @round(value)) return error.InvalidValue;
+    if (!layout.validRect(bounds) or !layout.validRect(absolute(frame, bounds))) return error.InvalidGeometry;
+    const snapshot = Snapshot.init(frame);
+    errdefer snapshot.restore(frame);
+    // Mark k covers the values that round to k, so the track starts half a
+    // mark before the first one.
+    const side = ratingMark(bounds, count, 0).width;
+    const track: layout.Rect = .{ .x = bounds.x - side / 2, .y = bounds.y + bounds.height / 2, .width = side * @as(f32, @floatFromInt(count)), .height = 0 };
+    try rangeRecord(frame, id, bounds, bounds, track, value, spec, spec.minimum, spec.maximum, options.name, options, false, .slider);
+    const style = frame.currentTheme();
+    const colors = style.palette;
+    const focused = options.enabled and frame.context.input_state.focused == id;
+    for (0..count) |index| {
+        const mark = inset(ratingMark(bounds, count, index), 2);
+        const filled = @as(f64, @floatFromInt(index)) < value;
+        try disk(frame, mark, if (!options.enabled) colors.disabled_border else if (filled) colors.accent else colors.border);
+        if (!filled) try disk(frame, inset(mark, style.metrics.border), colors.inset);
+    }
+    if (focused) try outline(frame, bounds, style.metrics.border, colors.focus);
 }

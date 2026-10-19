@@ -1,6 +1,6 @@
 //! Windows UI Automation check for declarative tabs, toolbars, splits,
-//! segments, links and disclosures,
-//! read and driven by a real client on a worker thread.
+//! segments, links, disclosures, breadcrumbs, meters, ratings and
+//! accordions, read and driven by a real client on a worker thread.
 const std = @import("std");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
@@ -35,6 +35,8 @@ const State = struct {
     mode: enum { light, dark } = .light,
     more: bool = false,
     opened: usize = 0,
+    score: u8 = 2,
+    open: ?enum { details, reviews } = .details,
     fn build(self: *State, v: *view.View) anyerror!void {
         try v.toolbar(.{ .gap = 8, .name = "Actions" });
         if (try v.button("Save", .{})) self.saved += 1;
@@ -53,6 +55,16 @@ const State = struct {
         try v.end();
         if (try v.link("Help", .{})) self.opened += 1;
         _ = try v.disclosure(&self.more, "More", .{});
+        try v.breadcrumbs(.{ .name = "Location" });
+        _ = try v.link("Library", .{});
+        try v.text("Dune", .{});
+        try v.end();
+        try v.meter(420, .{ .minimum = 0, .maximum = 512 }, .{ .high = 400 }, .{ .name = "Storage" });
+        _ = try v.rating(&self.score, 5, .{ .name = "Score" });
+        try v.accordion(.{ .name = "About" });
+        _ = try v.section(@TypeOf(self.open.?), &self.open, .details, "Details", .{});
+        _ = try v.section(@TypeOf(self.open.?), &self.open, .reviews, "Reviews", .{});
+        try v.end();
     }
 };
 
@@ -129,6 +141,17 @@ const Client = struct {
             std.debug.print("view UIA element missing: {s}\n", .{name});
             return error.MissingElement;
         };
+    }
+    fn property(element: *c.IUIAutomationElement, id: c.PROPERTYID) !c.VARIANT {
+        var value: c.VARIANT = undefined;
+        try check(element.lpVtbl.*.GetCurrentPropertyValue.?(element, id, &value));
+        return value;
+    }
+    /// The element's parent; the caller releases it.
+    fn parentOf(walker: *c.IUIAutomationTreeWalker, element: *c.IUIAutomationElement) !*c.IUIAutomationElement {
+        var result: ?*c.IUIAutomationElement = null;
+        try check(walker.lpVtbl.*.GetParentElement.?(walker, element, &result));
+        return result.?;
     }
     fn parentType(walker: *c.IUIAutomationTreeWalker, element: *c.IUIAutomationElement) !c.CONTROLTYPEID {
         var parent: ?*c.IUIAutomationElement = null;
@@ -235,6 +258,68 @@ const Client = struct {
         try self.synchronize();
         try check(expander.?.lpVtbl.*.get_CurrentExpandCollapseState.?(expander.?, &expansion));
         try std.testing.expectEqual(@as(c.enum_ExpandCollapseState, c.ExpandCollapseState_Expanded), expansion);
+
+        // Breadcrumb links sit in a navigation landmark.
+        const library = try find(elements.?, c.UIA_HyperlinkControlTypeId, "Library");
+        defer release(library);
+        const trail = try parentOf(walker.?, library);
+        defer release(trail);
+        try std.testing.expect(try named(trail, "Location"));
+        var landmark = try property(trail, c.UIA_LandmarkTypePropertyId);
+        try std.testing.expectEqual(@as(c.VARTYPE, c.VT_I4), landmark.unnamed_0.unnamed_0.vt);
+        try std.testing.expectEqual(@as(c_long, c.UIA_NavigationLandmarkTypeId), landmark.unnamed_0.unnamed_0.unnamed_0.lVal);
+        _ = c.VariantClear(&landmark);
+
+        // A meter reports its own range and refuses changes.
+        const storage = try find(elements.?, c.UIA_ProgressBarControlTypeId, "Storage");
+        defer release(storage);
+        var kind = try property(storage, c.UIA_LocalizedControlTypePropertyId);
+        defer _ = c.VariantClear(&kind);
+        try std.testing.expectEqual(@as(c.VARTYPE, c.VT_BSTR), kind.unnamed_0.unnamed_0.vt);
+        const kind_text = kind.unnamed_0.unnamed_0.unnamed_0.bstrVal;
+        try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("meter"), @as([*]const u16, @ptrCast(kind_text))[0..c.SysStringLen(kind_text)]);
+        var gauge: ?*c.IUIAutomationRangeValuePattern = null;
+        try check(storage.lpVtbl.*.GetCurrentPatternAs.?(storage, c.UIA_RangeValuePatternId, &c.IID_IUIAutomationRangeValuePattern, @ptrCast(&gauge)));
+        defer release(gauge.?);
+        var read_only: c.BOOL = 0;
+        try check(gauge.?.lpVtbl.*.get_CurrentIsReadOnly.?(gauge.?, &read_only));
+        try std.testing.expect(read_only != 0);
+        try check(gauge.?.lpVtbl.*.get_CurrentValue.?(gauge.?, &value));
+        try std.testing.expectEqual(@as(f64, 420), value);
+        try check(gauge.?.lpVtbl.*.get_CurrentMaximum.?(gauge.?, &value));
+        try std.testing.expectEqual(@as(f64, 512), value);
+        try std.testing.expect(gauge.?.lpVtbl.*.SetValue.?(gauge.?, 100) < 0);
+
+        // A rating is a whole-number slider.
+        const score = try find(elements.?, c.UIA_SliderControlTypeId, "Score");
+        defer release(score);
+        var stars: ?*c.IUIAutomationRangeValuePattern = null;
+        try check(score.lpVtbl.*.GetCurrentPatternAs.?(score, c.UIA_RangeValuePatternId, &c.IID_IUIAutomationRangeValuePattern, @ptrCast(&stars)));
+        defer release(stars.?);
+        try check(stars.?.lpVtbl.*.get_CurrentMaximum.?(stars.?, &value));
+        try std.testing.expectEqual(@as(f64, 5), value);
+        try check(stars.?.lpVtbl.*.SetValue.?(stars.?, 4));
+        try self.synchronize();
+
+        // Accordion sections are expanders grouped together; expanding one
+        // closes the other.
+        const reviews = try find(elements.?, c.UIA_ButtonControlTypeId, "Reviews");
+        defer release(reviews);
+        const about = try parentOf(walker.?, reviews);
+        defer release(about);
+        try std.testing.expect(try named(about, "About"));
+        var section: ?*c.IUIAutomationExpandCollapsePattern = null;
+        try check(reviews.lpVtbl.*.GetCurrentPatternAs.?(reviews, c.UIA_ExpandCollapsePatternId, &c.IID_IUIAutomationExpandCollapsePattern, @ptrCast(&section)));
+        defer release(section.?);
+        try check(section.?.lpVtbl.*.Expand.?(section.?));
+        try self.synchronize();
+        const details = try find(elements.?, c.UIA_ButtonControlTypeId, "Details");
+        defer release(details);
+        var other: ?*c.IUIAutomationExpandCollapsePattern = null;
+        try check(details.lpVtbl.*.GetCurrentPatternAs.?(details, c.UIA_ExpandCollapsePatternId, &c.IID_IUIAutomationExpandCollapsePattern, @ptrCast(&other)));
+        defer release(other.?);
+        try check(other.?.lpVtbl.*.get_CurrentExpandCollapseState.?(other.?, &expansion));
+        try std.testing.expectEqual(@as(c.enum_ExpandCollapseState, c.ExpandCollapseState_Collapsed), expansion);
     }
 };
 
@@ -246,7 +331,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     var storage: view.Storage(32, 512) = .{};
     var host = view.Host.init(&state, State.build, storage.buffers(), .{});
     host.context.render_mode = .gdi;
-    const window = try app.createWindow(.{ .width = 360, .height = 420 });
+    const window = try app.createWindow(.{ .width = 360, .height = 640 });
     try host.attach(window);
     paint(window);
     if (host.last_error) |err| return err;
@@ -267,7 +352,9 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(.dark, state.mode);
     try std.testing.expectEqual(@as(usize, 1), state.opened);
     try std.testing.expect(state.more);
+    try std.testing.expectEqual(@as(u8, 4), state.score);
+    try std.testing.expectEqual(.reviews, state.open.?);
     try app.dispatch();
     try std.testing.expect(host.context.window == null);
-    std.debug.print("view UIA smoke passed: real client tab list/tab selection, toolbar parent, splitter RangeValue, segment selection, link invoke and disclosure ExpandCollapse\n", .{});
+    std.debug.print("view UIA smoke passed: real client tab list/tab selection, toolbar parent, splitter RangeValue, segment selection, link invoke, disclosure ExpandCollapse, navigation landmark, read-only meter, rating RangeValue and accordion sections\n", .{});
 }

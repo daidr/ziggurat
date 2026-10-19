@@ -19,6 +19,7 @@ pub const Theme = ui.Theme;
 pub const Point = layout.Point;
 pub const ScrollModel = ui.scroll.ScrollModel;
 pub const Track = ui.grid.Track;
+pub const MeterBands = ui.widgets.MeterBands;
 
 pub const Error = error{ TooManyNodes, TextFull, NestingTooDeep, UnbalancedContainer, NotContainer, Busy, InvalidRange, InvalidValue, InvalidText, InvalidSplit } || layout.Error;
 
@@ -87,7 +88,7 @@ pub const Measurer = struct {
     }
 };
 
-pub const Kind = enum { column, row, radio_group, segmented, tab_list, toolbar, split, scroll, grid, text, badge, spacer, button, link, checkbox, radio, segment, tab, disclosure, toggle_switch, progress, slider, stepper, embed };
+pub const Kind = enum { column, row, radio_group, segmented, tab_list, toolbar, breadcrumbs, accordion, split, scroll, grid, text, badge, spacer, button, link, checkbox, radio, segment, tab, disclosure, toggle_switch, progress, meter, slider, stepper, rating, embed };
 
 /// A leaf that measures, places and paints itself, for content the view
 /// layer does not model, such as an editable text field. The context must
@@ -112,8 +113,11 @@ pub const Node = struct {
     fraction: f32 = 0,
     value: f64 = 0,
     range: Range = .{ .minimum = 0, .maximum = 1 },
+    /// Preferred band of a meter.
+    bands: MeterBands = .{},
     radio_group: ?u64 = null,
-    /// Nearest enclosing toolbar, the accessible parent of leaf controls.
+    /// Nearest enclosing toolbar, breadcrumb trail or accordion, the
+    /// accessible parent of the controls inside it.
     semantic_parent: u64 = ui.accessibility.root_id,
     /// Direction a split lays out its two panes.
     axis: Axis = .column,
@@ -136,7 +140,7 @@ pub const Node = struct {
 
     pub fn isContainer(self: *const Node) bool {
         return switch (self.kind) {
-            .column, .row, .radio_group, .segmented, .tab_list, .toolbar, .split, .scroll, .grid => true,
+            .column, .row, .radio_group, .segmented, .tab_list, .toolbar, .breadcrumbs, .accordion, .split, .scroll, .grid => true,
             else => false,
         };
     }
@@ -242,7 +246,10 @@ pub const View = struct {
         const parent = &self.buffers.nodes[parent_index];
         if (parent.child_count >= layout.max_items) return error.TooManyItems;
         const index = self.len;
-        self.buffers.nodes[index] = .{ .kind = kind, .id = self.identity(parent, kind, style), .style = style, .parent = parent_index, .end = index + 1, .semantic_parent = if (parent.kind == .toolbar) parent.id else parent.semantic_parent };
+        self.buffers.nodes[index] = .{ .kind = kind, .id = self.identity(parent, kind, style), .style = style, .parent = parent_index, .end = index + 1, .semantic_parent = switch (parent.kind) {
+            .toolbar, .breadcrumbs, .accordion => parent.id,
+            else => parent.semantic_parent,
+        } };
         if (parent.last_child == none) parent.first_child = index else self.buffers.nodes[parent.last_child].next_sibling = index;
         parent.last_child = index;
         parent.child_count += 1;
@@ -407,6 +414,35 @@ pub const View = struct {
     pub fn toolbar(self: *View, style: Style) Error!void {
         _ = try self.open(.toolbar, style);
     }
+    /// Starts a row of links leading to the current page, announced as a
+    /// navigation region named by `Style.name`. A separator is drawn in the
+    /// gap between items (16 DIP unless `Style.gap` is set); the current
+    /// page is usually plain text at the end. Close it with `end`.
+    pub fn breadcrumbs(self: *View, style: Style) Error!void {
+        var value = style;
+        if (value.gap == 0) value.gap = 16;
+        _ = try self.open(.breadcrumbs, value);
+    }
+    /// Starts a column of sections of which at most one is open, grouped
+    /// under `Style.name`. Build each section's content after its header
+    /// while it is open. Close it with `end`.
+    pub fn accordion(self: *View, style: Style) Error!void {
+        _ = try self.open(.accordion, style);
+    }
+    /// An accordion header for `option`: activation opens it and closes the
+    /// open one, or closes it when it is already open. True when `open`
+    /// changed. Announced as an expander.
+    pub fn section(self: *View, comptime T: type, open_section: *?T, option: T, label: []const u8, style: Style) Error!bool {
+        const parent = &self.buffers.nodes[self.stack[self.depth - 1]];
+        if (parent.kind != .accordion) return error.NotContainer;
+        const node = try self.append(.disclosure, style);
+        node.text = try self.copy(label);
+        const selected = if (open_section.*) |current| std.meta.eql(current, option) else false;
+        const changed = self.take(node.id) != null;
+        if (changed) open_section.* = if (selected) null else option;
+        node.checked = if (open_section.*) |current| std.meta.eql(current, option) else false;
+        return changed;
+    }
     /// Starts two panes along `axis` separated by a draggable divider. The
     /// first pane takes `fraction` of the length, kept within `limits`, which
     /// must lie in 0..1; pointer drags, arrow keys and accessibility clients
@@ -458,6 +494,36 @@ pub const View = struct {
         const node = try self.append(.progress, style);
         node.fraction = std.math.clamp(fraction, 0, 1);
     }
+    /// A read-only gauge of `value` within `range`, such as storage in use,
+    /// named by `Style.name`. Values outside `bands` use the caution color.
+    pub fn meter(self: *View, value: f64, range: Range, bands: MeterBands, style: Style) Error!void {
+        range.validate() catch return error.InvalidRange;
+        bands.validate(range) catch return error.InvalidRange;
+        if (!std.math.isFinite(value)) return error.InvalidValue;
+        const node = try self.append(.meter, style);
+        node.range = range;
+        node.bands = bands;
+        node.value = std.math.clamp(value, range.minimum, range.maximum);
+    }
+    /// A score from 0 to `count` marks (at most `ui.widgets.max_rating`),
+    /// set by pointer or arrow keys and named by `Style.name`; Home clears
+    /// it. True when it changed.
+    pub fn rating(self: *View, value: *u8, count: u8, style: Style) Error!bool {
+        if (count == 0 or count > ui.widgets.max_rating) return error.InvalidRange;
+        const range: Range = .{ .minimum = 0, .maximum = @floatFromInt(count), .step = 1 };
+        const node = try self.append(.rating, style);
+        node.range = range;
+        var changed = false;
+        if (self.take(node.id)) |event| if (event == .value) {
+            const next = range.apply(@floatFromInt(value.*), event.value.change) catch return error.InvalidValue;
+            const score: u8 = @intFromFloat(@round(next));
+            changed = score != value.*;
+            value.* = score;
+        };
+        value.* = @min(value.*, count);
+        node.value = @floatFromInt(value.*);
+        return changed;
+    }
     /// Applies pointer and keyboard changes to the bound value; true when it changed.
     pub fn slider(self: *View, value: *f64, range: Range, style: Style) Error!bool {
         return self.ranged(.slider, value, range, style);
@@ -507,13 +573,14 @@ pub const View = struct {
             .disclosure => .{ .width = metrics.indicator_size + metrics.label_gap + text_size.width, .height = @max(text_size.height, metrics.indicator_size) + metrics.content_inset },
             .checkbox, .radio => .{ .width = metrics.indicator_size + metrics.label_gap + text_size.width, .height = @max(text_size.height, metrics.indicator_size) + metrics.content_inset },
             .toggle_switch => .{ .width = metrics.indicator_size * 1.7 + metrics.label_gap + text_size.width, .height = @max(text_size.height, metrics.indicator_size) + metrics.content_inset },
-            .progress => .{ .width = 160, .height = 12 },
+            .progress, .meter => .{ .width = 160, .height = 12 },
+            .rating => .{ .width = @as(f32, @floatCast(node.range.maximum)) * Measurer.line_height, .height = Measurer.line_height + metrics.content_inset },
             .slider => .{ .width = 200, .height = metrics.thumb_size + 2 * metrics.content_inset },
             .stepper => .{ .width = 4 * (Measurer.line_height + metrics.content_inset), .height = Measurer.line_height + metrics.content_inset },
-            .column, .row, .radio_group, .segmented, .tab_list, .toolbar, .split, .scroll, .grid, .embed => unreachable,
+            .column, .row, .radio_group, .segmented, .tab_list, .toolbar, .breadcrumbs, .accordion, .split, .scroll, .grid, .embed => unreachable,
         };
         const minimum: Size = switch (node.kind) {
-            .progress, .slider, .spacer => .{ .width = 0, .height = size.height },
+            .progress, .meter, .slider, .spacer => .{ .width = 0, .height = size.height },
             else => size,
         };
         return .{ .minimum = minimum, .preferred = size };
@@ -521,7 +588,7 @@ pub const View = struct {
 
     fn options(node: *const Node) layout.Options {
         const axis: Axis = switch (node.kind) {
-            .row, .segmented, .tab_list, .toolbar => .row,
+            .row, .segmented, .tab_list, .toolbar, .breadcrumbs => .row,
             .split => node.axis,
             else => .column,
         };
@@ -699,15 +766,18 @@ pub const View = struct {
             const style = node.style;
             const control: ui.widgets.Options = .{ .enabled = style.enabled, .name = style.name, .semantic_parent = node.semantic_parent };
             switch (node.kind) {
-                .column, .row, .radio_group, .segmented, .tab_list, .toolbar, .split, .scroll, .grid => {
+                .column, .row, .radio_group, .segmented, .tab_list, .toolbar, .breadcrumbs, .accordion, .split, .scroll, .grid => {
                     switch (node.kind) {
                         .radio_group, .segmented => try target.radioGroup(node.id, bounds, style.name),
                         .tab_list => try target.tabList(node.id, bounds, style.name),
                         .toolbar => try target.toolbar(node.id, bounds, style.name),
+                        .breadcrumbs => try target.navigation(node.id, bounds, style.name, node.semantic_parent),
+                        .accordion => try target.group(node.id, bounds, style.name, node.semantic_parent),
                         else => {},
                     }
                     if (style.background) |color| target.roundedRect(bounds, style.radius, ui.Color.rgb(color));
                     if (style.border) |color| target.strokeRect(bounds, style.radius, style.border_width, ui.Color.rgb(color));
+                    if (node.kind == .breadcrumbs) self.paintSeparators(node, target, theme);
                     if (node.kind == .split) {
                         const p = style.padding;
                         const area: Rect = .{ .x = bounds.x + p.left, .y = bounds.y + p.top, .width = @max(0, bounds.width - p.left - p.right), .height = @max(0, bounds.height - p.top - p.bottom) };
@@ -747,6 +817,8 @@ pub const View = struct {
                 },
                 .toggle_switch => try target.toggleSwitch(node.id, bounds, node.text, node.checked, control),
                 .progress => try target.progress(node.id, bounds, node.fraction, control),
+                .meter => try target.meter(node.id, bounds, node.value, node.range, .{ .control = control, .bands = node.bands }),
+                .rating => try target.rating(node.id, bounds, node.value, @intFromFloat(node.range.maximum), control),
                 .slider => try target.slider(node.id, bounds, node.value, node.range, .{ .control = control }),
                 .stepper => try target.stepper(node.id, bounds, node.value, node.range, control),
                 .embed => {
@@ -759,6 +831,20 @@ pub const View = struct {
             clip_depth -= 1;
             try target.popClip();
             paintScrollIndicator(&all[clips[clip_depth]], target, theme);
+        }
+    }
+
+    /// A muted slash centred in each gap between breadcrumb items.
+    fn paintSeparators(self: *const View, node: *const Node, target: anytype, theme: Theme) void {
+        var child = node.first_child;
+        while (child != none) {
+            const left = self.buffers.nodes[child].bounds;
+            child = self.buffers.nodes[child].next_sibling;
+            if (child == none) break;
+            const right = self.buffers.nodes[child].bounds;
+            const glyph = Measurer.estimate(null, "/").width;
+            const middle = (left.x + left.width + right.x) / 2;
+            target.label(.{ .x = middle - glyph / 2, .y = left.y, .width = glyph, .height = left.height }, "/", theme.palette.disabled_text);
         }
     }
 
@@ -924,7 +1010,7 @@ const Recorder = struct {
     clip_depth: usize = 0,
     max_clip_depth: usize = 0,
     fills: usize = 0,
-    group: u64 = 0,
+    chooser: u64 = 0,
     fn push(self: *Recorder, kind: Kind, id: u64, bounds: Rect, checked: bool) void {
         self.calls[self.len] = .{ .kind = kind, .id = id, .bounds = bounds, .checked = checked };
         self.len += 1;
@@ -956,31 +1042,43 @@ const Recorder = struct {
         self.push(.checkbox, id, bounds, checked);
     }
     pub fn radioGroup(self: *Recorder, id: u64, _: Rect, _: []const u8) !void {
-        self.group = id;
+        self.chooser = id;
     }
     pub fn radio(self: *Recorder, id: u64, bounds: Rect, _: []const u8, checked: bool, options: ui.widgets.Options) !void {
-        if (options.radio_group == null or options.radio_group.? != self.group) return error.MissingGroup;
+        if (options.radio_group == null or options.radio_group.? != self.chooser) return error.MissingGroup;
         self.push(.radio, id, bounds, checked);
     }
     pub fn link(self: *Recorder, id: u64, bounds: Rect, _: []const u8, _: ui.widgets.Options) !void {
         self.push(.link, id, bounds, false);
     }
     pub fn segment(self: *Recorder, id: u64, bounds: Rect, _: []const u8, checked: bool, options: ui.widgets.Options) !void {
-        if (options.radio_group == null or options.radio_group.? != self.group) return error.MissingGroup;
+        if (options.radio_group == null or options.radio_group.? != self.chooser) return error.MissingGroup;
         self.push(.segment, id, bounds, checked);
     }
     pub fn disclosure(self: *Recorder, id: u64, bounds: Rect, _: []const u8, checked: bool, _: ui.widgets.Options) !void {
         self.push(.disclosure, id, bounds, checked);
     }
     pub fn tabList(self: *Recorder, id: u64, _: Rect, _: []const u8) !void {
-        self.group = id;
+        self.chooser = id;
     }
     pub fn tab(self: *Recorder, id: u64, bounds: Rect, _: []const u8, checked: bool, options: ui.widgets.Options) !void {
-        if (options.radio_group == null or options.radio_group.? != self.group) return error.MissingGroup;
+        if (options.radio_group == null or options.radio_group.? != self.chooser) return error.MissingGroup;
         self.push(.tab, id, bounds, checked);
     }
     pub fn toolbar(self: *Recorder, id: u64, bounds: Rect, _: []const u8) !void {
         self.push(.toolbar, id, bounds, false);
+    }
+    pub fn navigation(self: *Recorder, id: u64, bounds: Rect, _: []const u8, _: u64) !void {
+        self.push(.breadcrumbs, id, bounds, false);
+    }
+    pub fn group(self: *Recorder, id: u64, bounds: Rect, _: []const u8, _: u64) !void {
+        self.push(.accordion, id, bounds, false);
+    }
+    pub fn meter(self: *Recorder, id: u64, bounds: Rect, _: f64, _: Range, _: ui.widgets.MeterOptions) !void {
+        self.push(.meter, id, bounds, false);
+    }
+    pub fn rating(self: *Recorder, id: u64, bounds: Rect, _: f64, _: u8, _: ui.widgets.Options) !void {
+        self.push(.rating, id, bounds, false);
     }
     pub fn splitter(self: *Recorder, id: u64, _: Rect, divider: Rect, _: f64, _: Range, _: ui.widgets.SplitterOptions) !void {
         self.push(.split, id, divider, false);
