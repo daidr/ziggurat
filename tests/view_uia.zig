@@ -59,6 +59,8 @@ const State = struct {
 const Client = struct {
     app: *z.App,
     window: z.Window,
+    /// Read on the owner thread; the worker never touches the Window handle.
+    hwnd: c.HWND,
     fence: c.HANDLE,
     err: ?anyerror = null,
 
@@ -143,9 +145,8 @@ const Client = struct {
         var api: ?*c.IUIAutomation = null;
         try check(c.CoCreateInstance(&c.CLSID_CUIAutomation8, null, c.CLSCTX_INPROC_SERVER, &c.IID_IUIAutomation, @ptrCast(&api)));
         defer release(api.?);
-        const hwnd: c.HWND = self.window.nativeHandle();
         var root: ?*c.IUIAutomationElement = null;
-        try check(api.?.lpVtbl.*.ElementFromHandle.?(api.?, hwnd, &root));
+        try check(api.?.lpVtbl.*.ElementFromHandle.?(api.?, self.hwnd, &root));
         defer release(root.?);
         var condition: ?*c.IUIAutomationCondition = null;
         try check(api.?.lpVtbl.*.CreateTrueCondition.?(api.?, &condition));
@@ -251,7 +252,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     if (host.last_error) |err| return err;
     const fence = c.CreateEventW(null, 1, 0, null) orelse return error.EventCreationFailed;
     defer _ = c.CloseHandle(fence);
-    var client: Client = .{ .app = app, .window = window, .fence = fence };
+    var client: Client = .{ .app = app, .window = window, .hwnd = window.nativeHandle(), .fence = fence };
     var watchdog: Watchdog = .{ .app = app };
     try watchdog.start();
     defer watchdog.stop();
