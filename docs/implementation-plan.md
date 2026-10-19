@@ -194,10 +194,10 @@ B02 分项：
 | ID | 状态 | 范围 | 验收与依赖 |
 | --- | --- | --- | --- |
 | S01 | 已完成（Windows） | 全局快捷键、通知区通知 | 原生注册/冲突/注销、稳定事件 ID、Owner 关闭与诊断重入检查；Linux/macOS 见 P02/P04 |
-| S02 | 部分完成 | shell 打开 URL/文件、定位、回收站、文件图标、应用发现/启动 | S02.1 显式 worker 的 executable 启动（Windows/Linux）及 S02.4 Windows 16/32px 不透明图标已验收；URL/关联文件/定位/回收站/完整图标/应用发现继续待实现；参数/路径/编码、异步成本、系统错误和图标所有权 |
-| S03 | 待实现 | 多显示器、主题/accent/可访问性偏好、网络、电源与文件监视 | 变化订阅、取消与最后订阅者回收；无持续轮询；Windows/Linux/macOS capability |
+| S02 | 部分完成 | shell 打开 URL/文件、定位、回收站、文件图标、应用发现/启动 | S02.1 executable 启动、S02.2 URL（https/http/mailto 默认白名单）/关联文件/定位、S02.3 回收站（Windows/Linux）及 S02.4 Windows 16/32px 不透明图标已实现；完整图标（Linux/高分辨率/透明）与安装应用发现/按身份启动待实现；真实关联程序/资源管理器显示未自动验证 |
+| S03 | 部分完成 | 多显示器、主题/accent/可访问性偏好、网络、电源与文件监视 | 显示器/偏好/电源/网络快照与合并变化订阅（Windows/Linux）、粗模式文件监视（inotify/ReadDirectoryChangesW）已实现；详细文件监视（快照/rename 匹配）、Linux 电源来源变化、Wayland 显示器、portal 配色待实现；Windows 路径首次运行在 CI |
 | S04 | 待实现 | 密钥存储、登录启动、深链和文件关联 | OS 权限/用户作用域、安装与运行时分工、卸载和参数转发；依赖 W05/R01 |
-| S05 | 待实现 | 多格式剪贴板、transfer、惰性 provider、原生拖放 | 文本/HTML/图片/文件/自定义，多 item、异步请求寿命、关闭后无悬空回调；依赖 G01 |
+| S05 | 部分完成 | 多格式剪贴板、transfer、惰性 provider、原生拖放 | Board 的 text/HTML/PNG/文件/自定义事务写入、异步读取、惰性 provider、变化事件、Windows 有界占用重试及 Windows/Linux 放置目标已实现；拖动源（需模态拖动循环）未提供；真实跨进程拖放、他进程占用重试与退出渲染未自动验证 |
 | S06 | 部分完成（Windows/Linux） | 异步消息对话框、上下文菜单与菜单快捷键 | S06.1 两平台上下文菜单与异步消息框、Windows 菜单栏快捷键已验；非嵌套循环（Windows 菜单在私有安全点进入系统菜单循环）、取消/关闭、禁用祖先、旧消息隔离分别验证；Linux 菜单栏与快捷键分发、物理输入与视觉验收继续；依赖 W02/U02 |
 | S07 | 待实现 | 应用身份/系统目录、任务栏或 Dock badge/progress/menu、阻止休眠 | 按平台 capability、用户作用域、原生引用/电源断言配对与最后 owner 回收；依赖 S03/P03 |
 | S08 | 部分完成（Windows） | 独立托盘/status item、多图标、菜单与popover锚定 | 窗口Owner单托盘/任务栏重建恢复，及 S08.1 App 独立多 item、可选稳定 GUID、锚定托盘菜单、App 停止回收已验；标题与popover亮态（无 Windows 对应）、Linux/macOS 继续；其余平台依赖 P02/P04 |
@@ -1709,4 +1709,21 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - Linux 接受 `devtools_enabled` 与 `setDevToolsEnabled/devToolsEnabled/openDevTools`，映射 WebKit developer extras；inspector 是引擎拥有的独立顶层窗口，拒绝停靠进 Content host。禁用、detach、reload/recover 替换与关闭同步关闭已显示 inspector，`devToolsResourceCount()` 回到 0；网页上下文菜单仍被拒绝。
 - Linux `clearBrowsingData(.entire_profile)` 对 View 自己的数据管理器清除全部类型与时间范围，持久 Profile 下影响共用者。它复用截图的显式 budget、每 View 与进程物理上限及 GTask 结果寿命，不要求当前文档、不预留 PNG 容量；新增独立 `clear_browsing_data` 能力位，`browser_tools` 仍为 false。
 - 本地 Linux（Xvfb、WebKitGTK 4.1）Debug 通过 `smoke-webview-linux`、`P01_PROBE=backend`、`smoke-webview-cookies-linux`、`smoke-webview-capture-linux`、`test-webkit-capture` 与 `test-webview`：DevTools 默认关闭/禁用拒绝/显示/重复/禁用关闭/recover 保留/reload 清除，清理后 Store 查询为空、新文档无旧 Cookie 与 localStorage，取消恰好一次，原生计数归零。Linux PDF、无页面 Windows CookieStore 与 Linux View Cookie 工具保持原状态。
+
+### S05.1 多格式剪贴板 Board 与放置目标
+
+- `clipboard.Board` 每个 App 一个原生连接：Windows 用私有 message-only HWND 作为 owner、更新监听、延迟渲染与重试 timer；GTK 用 CLIPBOARD selection。写入先校验全部条目并在打开剪贴板前构造原生块，失败不留部分内容；lazy offer 的 released 恰好一次。读取经调用者 Request 槽异步交付，取消/停机后无回调；GTK 同 selection 的同步应答改由 idle 交付，保持“启动调用内不回调”。
+- `drop.Target` 为窗口注册原生放置目标：Windows `IDropTarget`（嵌套 OleInitialize、subclass 在 WM_DESTROY 撤销），GTK 扩展 GtkWindow 既有 root-window target 列表并在 detach 还原。悬停 leave 总先于 drop；payload 复制到调用者 buffer，超出报告所需字节。拖动源因两平台都需要模态拖动循环而不提供。
+- Linux Xvfb 1x/2x 下 `smoke-clipboard`、`smoke-drop` 通过；Windows 路径只交叉编译。未自动验证：真实跨进程拖放、另一进程占用剪贴板时的重试、`WM_RENDERALLFORMATS` 退出渲染。见[系统工具](system.md)。
+
+### S03.1 桌面环境快照、订阅与粗模式文件监视
+
+- `system.desktop` 提供显示器、偏好、电源、网络快照和每 Watch 独立原生订阅，突发合并、stop/停机撤销后无回调；Windows 用不显示的顶层窗口接收广播，网络变化回调只 PostMessage；Linux 用 GDK/GtkSettings/GIO 信号。Linux 配色/高对比度来自主题名启发式，不读取 portal，accent 为 null。见[桌面环境](desktop-environment.md)。
+- `system.watch.Watcher` 在宿主 worker 上运行，预算在 init 分配，`changed`/`overflow`/`root_removed` 合并交付且容量不足时顺延；详细模式未实现。见[文件监视](file-watch.md)。
+- Linux 下 `smoke-desktop`（1x/2x，真实 GtkSettings 突发合并）与 `smoke-file-watch` 通过；inotify 溢出、Windows 零字节完成和真实系统主题/电源/网络变化未自动触发。
+
+### S02.2–S02.3 打开 URL/路径、定位与回收站
+
+- `shell.Worker` 新增 `openUrl`（默认只允许 https/http/mailto，`file:` 永远拒绝）、`openPath`、`reveal`（Windows SHOpenFolderAndSelectItems，Linux FileManager1.ShowItems 有界超时）与 `trash`（Windows SHFileOperationW 仅本地固定盘，Linux g_file_trash）。均在宿主 worker 阻塞执行，校验在交给处理程序之前完成。
+- `smoke-shell` 在私有 XDG 目录真实 trash 12 个 Unicode 文件，并在私有会话总线上用假 FileManager1 验证 ShowItems 与超时；不打开浏览器或用户文件。真实关联程序、资源管理器显示与回收站策略边界未自动验证。
 
