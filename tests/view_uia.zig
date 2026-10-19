@@ -1,6 +1,6 @@
 //! Windows UI Automation check for declarative tabs, toolbars, splits,
 //! segments, links, disclosures, breadcrumbs, meters, ratings and
-//! accordions, read and driven by a real client on a worker thread.
+//! accordions, list boxes, plus form fields and fieldsets, read and driven by a real client on a worker thread.
 const std = @import("std");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
@@ -37,6 +37,10 @@ const State = struct {
     opened: usize = 0,
     score: u8 = 2,
     open: ?enum { details, reviews } = .details,
+    age: f64 = 30,
+    terms: bool = false,
+    font: usize = 0,
+    fonts: view.ScrollModel = .{},
     fn build(self: *State, v: *view.View) anyerror!void {
         try v.toolbar(.{ .gap = 8, .name = "Actions" });
         if (try v.button("Save", .{})) self.saved += 1;
@@ -64,6 +68,21 @@ const State = struct {
         try v.accordion(.{ .name = "About" });
         _ = try v.section(@TypeOf(self.open.?), &self.open, .details, "Details", .{});
         _ = try v.section(@TypeOf(self.open.?), &self.open, .reviews, "Reviews", .{});
+        try v.end();
+        try v.scroll(&self.fonts, .{ .height = 60, .self_align = .stretch });
+        try v.listBox(.{ .name = "Fonts" });
+        for ([_][]const u8{ "Serif", "Sans", "Mono", "Display" }, 0..) |name, i| _ = try v.listItem(usize, &self.font, i, name, .{ .key = i });
+        try v.end();
+        try v.end();
+        try v.fieldset("Account", .{});
+        try v.row(.{ .gap = 16 });
+        try v.field("Age", .{ .help = "Whole years" }, .{});
+        _ = try v.stepper(&self.age, .{ .minimum = 0, .maximum = 120, .step = 1 }, .{});
+        try v.end();
+        try v.field("Terms", .{ .@"error" = if (self.terms) null else "Accept to continue", .required = true }, .{});
+        _ = try v.checkbox(&self.terms, "I accept", .{});
+        try v.end();
+        try v.end();
         try v.end();
     }
 };
@@ -320,6 +339,58 @@ const Client = struct {
         defer release(other.?);
         try check(other.?.lpVtbl.*.get_CurrentExpandCollapseState.?(other.?, &expansion));
         try std.testing.expectEqual(@as(c.enum_ExpandCollapseState, c.ExpandCollapseState_Collapsed), expansion);
+
+        // Field controls take the label as a missing name, announce the help
+        // or error as help text and report validity; the fieldset groups them.
+        const age = try find(elements.?, c.UIA_SpinnerControlTypeId, "Age");
+        defer release(age);
+        try expectText(age, c.UIA_HelpTextPropertyId, "Whole years");
+        const accept = try find(elements.?, c.UIA_CheckBoxControlTypeId, "I accept");
+        defer release(accept);
+        const account = try parentOf(walker.?, accept);
+        defer release(account);
+        try std.testing.expect(try named(account, "Account"));
+        try expectText(accept, c.UIA_HelpTextPropertyId, "Accept to continue");
+        try expectFlag(accept, c.UIA_IsDataValidForFormPropertyId, false);
+        try expectFlag(accept, c.UIA_IsRequiredForFormPropertyId, true);
+        var toggle: ?*c.IUIAutomationTogglePattern = null;
+        try check(accept.lpVtbl.*.GetCurrentPatternAs.?(accept, c.UIA_TogglePatternId, &c.IID_IUIAutomationTogglePattern, @ptrCast(&toggle)));
+        defer release(toggle.?);
+        try check(toggle.?.lpVtbl.*.Toggle.?(toggle.?));
+        try self.synchronize();
+        try expectFlag(accept, c.UIA_IsDataValidForFormPropertyId, true);
+
+        // A list box offers single selection over its options.
+        const fonts = try find(elements.?, c.UIA_ListControlTypeId, "Fonts");
+        defer release(fonts);
+        var choice: ?*c.IUIAutomationSelectionPattern = null;
+        try check(fonts.lpVtbl.*.GetCurrentPatternAs.?(fonts, c.UIA_SelectionPatternId, &c.IID_IUIAutomationSelectionPattern, @ptrCast(&choice)));
+        defer release(choice.?);
+        try check(choice.?.lpVtbl.*.get_CurrentCanSelectMultiple.?(choice.?, &multiple));
+        try std.testing.expectEqual(@as(c.BOOL, 0), multiple);
+        const sans = try find(elements.?, c.UIA_ListItemControlTypeId, "Sans");
+        defer release(sans);
+        try std.testing.expectEqual(@as(c.CONTROLTYPEID, c.UIA_ListControlTypeId), try parentType(walker.?, sans));
+        var option: ?*c.IUIAutomationSelectionItemPattern = null;
+        try check(sans.lpVtbl.*.GetCurrentPatternAs.?(sans, c.UIA_SelectionItemPatternId, &c.IID_IUIAutomationSelectionItemPattern, @ptrCast(&option)));
+        defer release(option.?);
+        try check(option.?.lpVtbl.*.Select.?(option.?));
+        try self.synchronize();
+        try check(option.?.lpVtbl.*.get_CurrentIsSelected.?(option.?, &selected));
+        try std.testing.expect(selected != 0);
+    }
+    fn expectFlag(element: *c.IUIAutomationElement, id: c.PROPERTYID, expected: bool) !void {
+        var value = try property(element, id);
+        defer _ = c.VariantClear(&value);
+        try std.testing.expectEqual(@as(c.VARTYPE, c.VT_BOOL), value.unnamed_0.unnamed_0.vt);
+        try std.testing.expectEqual(expected, value.unnamed_0.unnamed_0.unnamed_0.boolVal != 0);
+    }
+    fn expectText(element: *c.IUIAutomationElement, id: c.PROPERTYID, comptime expected: []const u8) !void {
+        var value = try property(element, id);
+        defer _ = c.VariantClear(&value);
+        try std.testing.expectEqual(@as(c.VARTYPE, c.VT_BSTR), value.unnamed_0.unnamed_0.vt);
+        const text = value.unnamed_0.unnamed_0.unnamed_0.bstrVal;
+        try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral(expected), @as([*]const u16, @ptrCast(text))[0..c.SysStringLen(text)]);
     }
 };
 
@@ -328,10 +399,10 @@ pub fn run(allocator: std.mem.Allocator) !void {
     const app = try z.App.init(allocator);
     defer app.deinit();
     var state: State = .{};
-    var storage: view.Storage(32, 512) = .{};
+    var storage: view.Storage(64, 768) = .{};
     var host = view.Host.init(&state, State.build, storage.buffers(), .{});
     host.context.render_mode = .gdi;
-    const window = try app.createWindow(.{ .width = 360, .height = 640 });
+    const window = try app.createWindow(.{ .width = 360, .height = 880 });
     try host.attach(window);
     paint(window);
     if (host.last_error) |err| return err;
@@ -354,7 +425,9 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try std.testing.expect(state.more);
     try std.testing.expectEqual(@as(u8, 4), state.score);
     try std.testing.expectEqual(.reviews, state.open.?);
+    try std.testing.expect(state.terms);
+    try std.testing.expectEqual(@as(usize, 1), state.font);
     try app.dispatch();
     try std.testing.expect(host.context.window == null);
-    std.debug.print("view UIA smoke passed: real client tab list/tab selection, toolbar parent, splitter RangeValue, segment selection, link invoke, disclosure ExpandCollapse, navigation landmark, read-only meter, rating RangeValue and accordion sections\n", .{});
+    std.debug.print("view UIA smoke passed: real client tab list/tab selection, toolbar parent, splitter RangeValue, segment selection, link invoke, disclosure ExpandCollapse, navigation landmark, read-only meter, rating RangeValue, accordion sections, form field help/validity and list box selection\n", .{});
 }
