@@ -23,7 +23,7 @@ const windows = builtin.os.tag == .windows;
 const linux = builtin.os.tag == .linux and !builtin.is_test;
 pub const Owner = if (windows) @import("windows.zig").Owner else if (linux) @import("linux.zig").Owner else @import("unsupported.zig").Owner;
 /// An App-level notification-area item independent of any window.
-pub const Tray = if (windows) @import("windows_tray.zig").Tray else @import("unsupported.zig").Tray;
+pub const Tray = if (windows) @import("windows_tray.zig").Tray else if (linux) @import("linux.zig").Tray else @import("unsupported.zig").Tray;
 pub const clipboard = @import("clipboard.zig");
 pub const drop = @import("drop.zig");
 pub const picker = @import("picker.zig");
@@ -33,18 +33,18 @@ pub const shell = @import("shell.zig");
 pub const desktop = @import("desktop.zig");
 pub const watch = @import("watch.zig");
 pub const capabilities = .{
-    .native_menu = windows,
-    .menu_accelerators = windows,
+    .native_menu = windows or linux,
+    .menu_accelerators = windows or linux,
     .context_menu = windows or linux,
     .message_dialog = windows or linux,
-    .tray = windows,
-    .standalone_tray = windows,
+    .tray = windows or linux,
+    .standalone_tray = windows or linux,
     .clipboard_text = windows,
     .clipboard = clipboard.capabilities,
     .drop = drop.capabilities,
-    .async_file_dialog = windows,
-    .global_hotkeys = windows,
-    .notification_area = windows,
+    .async_file_dialog = windows or linux,
+    .global_hotkeys = windows or linux,
+    .notification_area = windows or linux,
     .shell = shell.capabilities,
     .desktop = desktop.capabilities,
     .file_watch = builtin.os.tag == .windows or builtin.os.tag == .linux,

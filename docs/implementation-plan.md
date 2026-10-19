@@ -231,7 +231,7 @@ S04 的系统密钥服务需区分缺库/会话bus/服务不可用的Unsupported
 | ID | 状态 | 范围 | 验收与依赖 |
 | --- | --- | --- | --- |
 | P01 | 部分完成（Linux/X11） | Linux WebKit 后端 | GTK3 content host、ephemeral HTML、持久Profile/CookieStore、custom读取/显式头授权、worker文件流与显式FileWindow、远程策略、矩形区域、PageSession及有界原生Find已验收；创建期证书例外、exact-origin Bearer和独立Endpoint组合已验。FileWindow只选择宿主授权的字节表示；显式GET/HEAD范围准入、借用头与宿主TLS运输的206/416文件窗口已分项验收，local_site仍未开放。当前Runtime custom写请求无实际Origin而拒绝；文件响应公开组合、完整local_site、PDF/其他工具继续；依赖 B01 |
-| P02 | 待实现 | Linux 菜单、托盘、选择器、clipboard、系统服务与可访问性 | X11/Wayland/portal 差异显式化，不用假成功；依赖 S01–S06 |
+| P02 | 部分完成 | Linux 菜单、托盘、选择器、clipboard、系统服务与可访问性 | X11/Wayland/portal 差异显式化，不用假成功；依赖 S01–S06 |
 | P03 | 待实现 | macOS AppKit 窗口、主循环、输入与自绘 | 主线程/ARC 或显式 retain/release、DPI/IME/关闭资源；依赖 W01–W03/T01 |
 | P04 | 待实现 | macOS WKWebView、系统设施、可访问性与 GPU | 实际平台运行和签名权限；依赖 P03/B01/S01–S06 |
 | P05 | 待实现 | ARM64 构建/原生验证与浏览器目标 | 分别记录可编译/可运行/能力缺口；浏览器目标单独定义宿主生命周期与资源规则 |
@@ -1656,7 +1656,16 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 
 - `system.Tray` 属于 App：每项有自己的隐藏顶层窗口、复制图标和 App 停止登记，可同时存在多个；重新 show 使用新原生 ID，旧回调不会命中。可选 GUID 让系统记住用户摆放位置。
 - `Tray.popupMenu(request, items, .icon)` 用系统报告的图标矩形锚定并避开遮挡，取不到时用指针；打开前取得前台以便外部点击关闭。任务栏重建时重新添加图标。
-- Windows smoke 实际向 Shell 添加两项，验证事件、旧 ID 隔离、原地更新、锚定菜单选择、任务栏重建、显式移除与 App 停止回收。标题与 popover 亮态没有 Windows 对应，Linux/macOS 托盘继续待实现。见[系统工具](system.md)。
+- Windows smoke 实际向 Shell 添加两项，验证事件、旧 ID 隔离、原地更新、锚定菜单选择、任务栏重建、显式移除与 App 停止回收。标题与 popover 亮态没有 Windows 对应，macOS 托盘继续待实现。见[系统工具](system.md)。
+
+### P02 Linux 系统设施（部分）
+
+- 菜单栏：`GtkMenuBar` 放在平台层按需插入的纵向盒中，清除/detach 时内容回到窗口原位；快捷键只在焦点控件未消费后匹配，命令与快捷键在 idle 中报告，勾选状态由应用掌握。
+- 托盘：窗口 Owner 与独立 `Tray` 都导出 status notifier item，watcher 出现（含面板重启）时登记；无 dbusmenu，菜单由应用弹出，独立托盘在 X11 上用 1×1 锚点窗口打开。
+- 选择器：`GtkFileChooserNative`（门户或 GTK 对话框），异步 response，只接受本地 UTF-8 路径。
+- 通知：`org.freedesktop.Notifications`，默认动作激活，替换/清除撤回已显示项。
+- 全局快捷键：X11 `XGrabKey`，锁定键组合、冲突错误陷阱、松开前不重复；Wayland 明确返回 `UnsupportedCapability`。
+- 剪贴板与拖放由独立工作项实施。`smoke-system-menus` 与 `smoke-system-desktop` 覆盖上述路径，后者用私有会话总线上的替身服务。
 
 ### R01.1/R02.1 单文件安装程序、启动器、卸载与 deb
 
