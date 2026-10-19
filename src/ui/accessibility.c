@@ -26,13 +26,15 @@
 #define READ_ONLY 4
 #define OFFSCREEN 8
 #define CHECKED 16
-enum { ROLE_WINDOW, ROLE_GROUP, ROLE_BUTTON, ROLE_TEXT, ROLE_TEXT_BOX, ROLE_CHECKBOX, ROLE_RADIO, ROLE_SWITCH, ROLE_PROGRESS, ROLE_RADIO_GROUP, ROLE_SLIDER, ROLE_STEPPER, ROLE_LIST, ROLE_TAB_LIST, ROLE_TAB, ROLE_TOOLBAR, ROLE_SPLITTER, ROLE_LINK, ROLE_DISCLOSURE, ROLE_METER, ROLE_NAVIGATION };
+#define INVALID 32
+#define REQUIRED 64
+enum { ROLE_WINDOW, ROLE_GROUP, ROLE_BUTTON, ROLE_TEXT, ROLE_TEXT_BOX, ROLE_CHECKBOX, ROLE_RADIO, ROLE_SWITCH, ROLE_PROGRESS, ROLE_RADIO_GROUP, ROLE_SLIDER, ROLE_STEPPER, ROLE_LIST, ROLE_TAB_LIST, ROLE_TAB, ROLE_TOOLBAR, ROLE_SPLITTER, ROLE_LINK, ROLE_DISCLOSURE, ROLE_METER, ROLE_NAVIGATION, ROLE_LIST_BOX, ROLE_LIST_ITEM };
 enum { PATTERN_INVOKE = 1, PATTERN_VALUE = 2, PATTERN_TEXT = 4, PATTERN_TOGGLE = 8, PATTERN_SELECTION_ITEM = 16, PATTERN_SELECTION = 32, PATTERN_RANGE_VALUE = 64, PATTERN_COLLECTION = 128, PATTERN_EXPAND_COLLAPSE = 256 };
 
 typedef struct Node {
     uint64_t id, parent;
     uint32_t role, flags, name_start, name_len, value_start, value_len;
-    uint32_t selection_start, selection_end;
+    uint32_t selection_start, selection_end, description_start, description_len;
     double x, y, width, height, range_value;
     double range_minimum, range_maximum, range_small_change, range_large_change;
 } Node;
@@ -203,9 +205,9 @@ static HRESULT provider_new(State *, uint64_t, Provider **);
 static Range *range_new(State *, uint64_t, uint32_t, uint32_t);
 static const ITextRangeProviderVtbl range_vtable;
 static BOOL toggle_role(uint32_t role) { return role == ROLE_CHECKBOX || role == ROLE_SWITCH; }
-/* Tabs select like radios: one selected item per chooser container. */
-static BOOL item_role(uint32_t role) { return role == ROLE_RADIO || role == ROLE_TAB; }
-static BOOL chooser_role(uint32_t role) { return role == ROLE_RADIO_GROUP || role == ROLE_TAB_LIST; }
+/* Tabs and list box options select like radios: one selected item per chooser container. */
+static BOOL item_role(uint32_t role) { return role == ROLE_RADIO || role == ROLE_TAB || role == ROLE_LIST_ITEM; }
+static BOOL chooser_role(uint32_t role) { return role == ROLE_RADIO_GROUP || role == ROLE_TAB_LIST || role == ROLE_LIST_BOX; }
 static BOOL invoke_role(uint32_t role) { return role == ROLE_BUTTON || role == ROLE_LINK; }
 static BOOL actionable(uint32_t role) { return invoke_role(role) || item_role(role) || toggle_role(role) || role == ROLE_DISCLOSURE; }
 /* Progress and meters report a value no client may set. */
@@ -448,6 +450,8 @@ static int control_type(uint32_t role) {
         case ROLE_DISCLOSURE: return UIA_ButtonControlTypeId;
         case ROLE_METER: return UIA_ProgressBarControlTypeId;
         case ROLE_NAVIGATION: return UIA_GroupControlTypeId;
+        case ROLE_LIST_BOX: return UIA_ListControlTypeId;
+        case ROLE_LIST_ITEM: return UIA_ListItemControlTypeId;
         default: return UIA_EditControlTypeId;
     }
 }
@@ -466,6 +470,11 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
             if (!out->bstrVal) hr = E_OUTOFMEMORY;
             break;
         }
+        case UIA_HelpTextPropertyId:
+            if (n->description_len) { out->vt = VT_BSTR; out->bstrVal = SysAllocStringLen(s->text + n->description_start, n->description_len); if (!out->bstrVal) hr = E_OUTOFMEMORY; }
+            break;
+        case UIA_IsDataValidForFormPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & INVALID) ? VARIANT_FALSE : VARIANT_TRUE; break;
+        case UIA_IsRequiredForFormPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & REQUIRED) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_AutomationIdPropertyId: {
             WCHAR id_text[24]; _snwprintf(id_text, 24, L"%llu", (unsigned long long)n->id);
             out->vt = VT_BSTR; out->bstrVal = SysAllocString(id_text); if (!out->bstrVal) hr = E_OUTOFMEMORY; break;
@@ -874,7 +883,7 @@ HRESULT zua_collections_commit(State *s, Collections *candidate) {
 }
 static HRESULT publish(State *s,const Node *nodes,uint32_t count,const WCHAR *text,uint32_t length,const Geometry *geometry,const RecipientAuthority *recipients){
     if (!count || count > NODE_CAP || length > TEXT_CAP || nodes[0].id != 0) return E_INVALIDARG;
-    for (uint32_t i = 0; i < count; ++i) if (nodes[i].name_start > length || nodes[i].name_len > length - nodes[i].name_start || nodes[i].value_start > length || nodes[i].value_len > length - nodes[i].value_start || nodes[i].selection_start > nodes[i].value_len || nodes[i].selection_end > nodes[i].value_len) return E_INVALIDARG;
+    for (uint32_t i = 0; i < count; ++i) if (nodes[i].name_start > length || nodes[i].name_len > length - nodes[i].name_start || nodes[i].value_start > length || nodes[i].value_len > length - nodes[i].value_start || nodes[i].selection_start > nodes[i].value_len || nodes[i].selection_end > nodes[i].value_len || nodes[i].description_start > length || nodes[i].description_len > length - nodes[i].description_start) return E_INVALIDARG;
     if (recipients) for (uint32_t i = 0; i < count; ++i) if (!recipient_valid(&recipients[i], nodes[i].id, nodes[i].role)) return E_INVALIDARG;
     if(geometry&&!geometry_valid(geometry,count))return E_INVALIDARG;
     AcquireSRWLockExclusive(&s->lock);

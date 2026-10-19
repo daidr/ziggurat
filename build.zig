@@ -516,6 +516,21 @@ pub fn build(b: *std.Build) void {
         system.linkSystemLibrary("gdi32", .{});
         system.linkSystemLibrary("comctl32", .{});
         _ = native_support.add(b, system, "system-picker-native", "src/system/picker.c", &.{"-std=c11"}, target, optimize);
+        _ = native_support.add(b, system, "system-message-native", "src/system/message.c", &.{"-std=c11"}, target, optimize);
+        system.link_libc = true;
+    }
+    if (target.result.os.tag == .linux) addSmoke(b, "smoke-system-menus", "tests/system_menus_linux_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_system", .module = system },
+    });
+    if (target.result.os.tag == .windows) addSmoke(b, "smoke-system-menus", "tests/system_menus_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_system", .module = system },
+    });
+    if (target.result.os.tag == .linux) {
+        const native = native_support.add(b, system, "system-linux-native", "src/system/linux_system.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        system.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
         system.link_libc = true;
     }
     if (target.result.os.tag == .windows) {
@@ -1943,6 +1958,7 @@ pub fn build(b: *std.Build) void {
     }) });
     const watch_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/system/watch.zig"), .target = target, .optimize = optimize, .link_libc = target.result.os.tag == .windows }) });
     b.step("test-file-watch", "Run coarse file-watch unit tests").dependOn(&b.addRunArtifact(watch_tests).step);
+    const menu_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/system/menus.zig"), .target = target, .optimize = optimize }) });
     const system_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/system_capabilities.zig"),
         .target = target,
@@ -2006,6 +2022,7 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&producer_tests.step);
     check.dependOn(&shell_tests.step);
     check.dependOn(&watch_tests.step);
+    check.dependOn(&menu_tests.step);
     check.dependOn(&system_tests.step);
     check.dependOn(&clipboard_tests.step);
     check.dependOn(&embed_probe.step);
@@ -2189,12 +2206,13 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(shell_tests).step);
     const run_system_tests = b.addRunArtifact(system_tests);
     const run_clipboard_tests = b.addRunArtifact(clipboard_tests);
-    test_step.dependOn(&run_system_tests.step);
     test_step.dependOn(&run_clipboard_tests.step);
     const system_test_step = b.step("test-system", "Run system module capability, convention and unsupported-path tests");
     system_test_step.dependOn(&run_system_tests.step);
     system_test_step.dependOn(&run_clipboard_tests.step);
     test_step.dependOn(&b.addRunArtifact(watch_tests).step);
+    test_step.dependOn(&b.addRunArtifact(menu_tests).step);
+    test_step.dependOn(&run_system_tests.step);
     test_step.dependOn(&b.addRunArtifact(embed_probe).step);
     test_step.dependOn(&b.addRunArtifact(packaging_tests).step);
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {

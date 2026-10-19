@@ -2,6 +2,9 @@ const std = @import("std");
 const z = @import("ziggurat");
 const types = @import("types.zig");
 const picker_api = @import("picker.zig");
+const menus = @import("menus.zig");
+const native_menu = @import("windows_menu.zig");
+const message_api = @import("message.zig");
 const c = @cImport({
     @cDefine("WIN32_LEAN_AND_MEAN", "1");
     @cDefine("NO_STRICT", "1");
@@ -13,7 +16,7 @@ const c = @cImport({
 /// reused during the HWND's lifetime, so queued old messages cannot target a
 /// replacement item. No business state or callback dispatch table is global.
 pub const tray_message: u32 = c.WM_APP + 0x421;
-const Entry = struct { id: u64, command: u16, menu: c.HMENU, enabled: bool, ancestor_enabled: bool };
+const Entry = native_menu.Entry;
 const Tray = struct { id: u16, icon: c.HICON, tooltip: [128]u16 };
 const HotkeyEntry = struct { id: u64, native_id: u16, key: u32, modifiers: u32 };
 const Notification = struct { id: u64, tray: Tray };
@@ -36,6 +39,8 @@ pub const Owner = struct {
     taskbar_created: u32 = 0,
     last_error: u32 = 0,
     picker: picker_api.Picker = .{},
+    popup: native_menu.Host = .{ .context = undefined, .done = popupDone },
+    message_dialog: message_api.Message = .{},
 
     pub fn init(context: *anyopaque, on_action: *const fn (*anyopaque, z.Window, types.Action) void) Owner {
         return .{ .context = context, .on_action = on_action };
@@ -64,6 +69,8 @@ pub const Owner = struct {
         const scope = window.beginCallback() orelse return error.Closed;
         defer scope.end();
         self.picker.detach();
+        self.message_dialog.detach();
+        self.popup.detach();
         if (self.window == null) return;
         try self.clearHotkeys();
         try self.clearNotification();
@@ -198,86 +205,24 @@ pub const Owner = struct {
 
     /// Replaces the bar transactionally. Labels are copied by Win32 during this
     /// call. Native menus allocate only on explicit configuration changes.
+    /// Accelerators match keys that the window's content leaves unconsumed.
     pub fn setMenu(self: *Owner, items: []const types.Item) !void {
         const window = try self.require();
         const scope = window.beginCallback() orelse return error.Closed;
         defer scope.end();
-        if (items.len > types.max_menu_items) return error.TooManyMenuItems;
-        var command_count: usize = 0;
-        for (items, 0..) |item, index| {
-            if (item.kind != .separator) {
-                if (item.id == 0) return error.InvalidMenuId;
-                for (items[0..index]) |previous| if (previous.kind != .separator and previous.id == item.id) return error.DuplicateMenuId;
-            }
-            if (item.parent) |parent| {
-                var found = false;
-                for (items[0..index]) |previous| if (previous.kind == .submenu and previous.id == parent) {
-                    found = true;
-                    break;
-                };
-                if (!found) return error.InvalidMenuParent;
-            }
-            if (item.kind == .command) command_count += 1;
-            if (item.kind != .separator) {
-                var scratch: [256]u16 = undefined;
-                _ = try wideZ(&scratch, item.label);
-            }
-        }
-        const first_command = if (command_count == 0) @as(u16, 0) else try window.reserveNativeIds(@intCast(command_count));
-        const menu = c.CreateMenu() orelse return self.failed(error.MenuCreationFailed);
-        var owned = true;
-        defer if (owned) {
-            _ = c.DestroyMenu(menu);
-        };
-        var submenus: [types.max_menu_items]c.HMENU = @splat(null);
-        var enabled: [types.max_menu_items]bool = undefined;
+        const plan = try menus.validate(items, false);
+        const first_command = if (plan.commands == 0) @as(u16, 0) else try window.reserveNativeIds(@intCast(plan.commands));
         var entries: [types.max_menu_items]Entry = undefined;
-        var count: usize = 0;
-        var command: u32 = first_command;
-        for (items, 0..) |item, index| {
-            var parent_menu = menu;
-            enabled[index] = item.enabled;
-            if (item.parent) |parent| for (items[0..index], 0..) |previous, parent_index| {
-                if (previous.kind == .submenu and previous.id == parent) {
-                    parent_menu = submenus[parent_index].?;
-                    enabled[index] = item.enabled and enabled[parent_index];
-                    break;
-                }
-            };
-            if (item.kind == .separator) {
-                if (c.AppendMenuW(parent_menu, c.MF_SEPARATOR, 0, null) == 0) return self.failed(error.MenuCreationFailed);
-                continue;
-            }
-            var label: [256]u16 = undefined;
-            const text = try wideZ(&label, item.label);
-            const flags: c.UINT = @as(c.UINT, @intCast(c.MF_STRING)) | @as(c.UINT, @intCast(if (item.enabled) 0 else c.MF_GRAYED)) | @as(c.UINT, @intCast(if (item.checked) c.MF_CHECKED else 0));
-            if (item.kind == .submenu) {
-                const submenu = c.CreatePopupMenu() orelse return self.failed(error.MenuCreationFailed);
-                if (c.AppendMenuW(parent_menu, flags | @as(c.UINT, @intCast(c.MF_POPUP)), @intFromPtr(submenu), text.ptr) == 0) {
-                    _ = c.DestroyMenu(submenu);
-                    return self.failed(error.MenuCreationFailed);
-                }
-                submenus[index] = submenu;
-            } else {
-                if (c.AppendMenuW(parent_menu, flags, command, text.ptr) == 0) return self.failed(error.MenuCreationFailed);
-                var ancestor_enabled = true;
-                if (item.parent) |parent| for (items[0..index], 0..) |previous, parent_index| {
-                    if (previous.kind == .submenu and previous.id == parent) {
-                        ancestor_enabled = enabled[parent_index];
-                        break;
-                    }
-                };
-                entries[count] = .{ .id = item.id, .command = @intCast(command), .menu = parent_menu, .enabled = enabled[index], .ancestor_enabled = ancestor_enabled };
-                count += 1;
-                command += 1;
-            }
+        const built = native_menu.build(items, &plan, false, first_command, &entries) catch |err| return self.failed(err);
+        const menu = built.menu;
+        if (c.SetMenu(self.hwnd, menu) == 0) {
+            _ = c.DestroyMenu(menu);
+            return self.failed(error.MenuAttachFailed);
         }
-        if (c.SetMenu(self.hwnd, menu) == 0) return self.failed(error.MenuAttachFailed);
-        owned = false;
         const old = self.menu;
         self.menu = menu;
-        @memcpy(self.entries[0..count], entries[0..count]);
-        self.entry_count = count;
+        @memcpy(self.entries[0..built.count], entries[0..built.count]);
+        self.entry_count = built.count;
         if (old != null) _ = c.DestroyMenu(old);
         _ = c.DrawMenuBar(self.hwnd);
     }
@@ -308,6 +253,64 @@ pub const Owner = struct {
             return;
         };
         return error.MenuItemNotFound;
+    }
+
+    /// Opens a context menu after this call returns. The request completes
+    /// once with `Action.popup`; detach or window closure completes nothing.
+    /// One popup is pending per Owner. Labels are copied before return.
+    pub fn popupMenu(self: *Owner, request: u64, items: []const types.Item, anchor: types.Anchor) !void {
+        const window = try self.require();
+        const scope = window.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        var point: c.POINT = .{ .x = 0, .y = 0 };
+        switch (anchor) {
+            .pointer => if (c.GetCursorPos(&point) == 0) return self.failed(error.MenuStartFailed),
+            .screen => |value| point = .{ .x = value.x, .y = value.y },
+            .client => |value| {
+                if (!std.math.isFinite(value.x) or !std.math.isFinite(value.y)) return error.InvalidAnchor;
+                const dpi = c.GetDpiForWindow(self.hwnd);
+                const scale = @as(f32, @floatFromInt(if (dpi == 0) 96 else dpi)) / 96.0;
+                const x = @round(value.x * scale);
+                const y = @round(value.y * scale);
+                if (@abs(x) > 1e7 or @abs(y) > 1e7) return error.InvalidAnchor;
+                point = .{ .x = @intFromFloat(x), .y = @intFromFloat(y) };
+                if (c.ClientToScreen(self.hwnd, &point) == 0) return self.failed(error.MenuStartFailed);
+            },
+        }
+        self.popup.context = self;
+        self.popup.start(request, items, self.hwnd, .{ .x = point.x, .y = point.y }) catch |err| {
+            if (self.popup.last_error != 0) self.last_error = self.popup.last_error;
+            return err;
+        };
+    }
+    /// Closes a pending popup; its request still completes with null.
+    pub fn cancelPopup(self: *Owner) !void {
+        _ = try self.require();
+        self.popup.cancel();
+    }
+    fn popupDone(ptr: *anyopaque, request: u64, selected: ?u64) void {
+        const self: *Owner = @ptrCast(@alignCast(ptr));
+        const window = self.window orelse return;
+        const scope = window.beginCallback() orelse return;
+        defer scope.end();
+        if (window.isClosed()) return;
+        self.on_action(self.context, window, .{ .popup = .{ .request = request, .selected = selected } });
+    }
+
+    /// Shows an asynchronous message dialog and returns before it closes.
+    /// The result arrives once as `Action.message` on the main thread.
+    pub fn showMessage(self: *Owner, request: u64, options: types.MessageOptions) !void {
+        const window = try self.require();
+        try self.message_dialog.start(window, request, options, self, messageDone);
+    }
+    /// Closes a pending message; its request still completes as dismissed.
+    pub fn cancelMessage(self: *Owner) !void {
+        _ = try self.require();
+        try self.message_dialog.cancel();
+    }
+    fn messageDone(ptr: *anyopaque, window: z.Window, result: types.MessageResult) void {
+        const self: *Owner = @ptrCast(@alignCast(ptr));
+        self.on_action(self.context, window, .{ .message = result });
     }
 
     pub fn setTray(self: *Owner, options: types.TrayOptions) !void {
@@ -380,6 +383,8 @@ pub const Owner = struct {
     fn nativeDestroying(ptr: *anyopaque) void {
         const self: *Owner = @ptrCast(@alignCast(ptr));
         self.picker.detach();
+        self.message_dialog.detach();
+        self.popup.detach();
         while (self.hotkey_count != 0) {
             self.hotkey_count -= 1;
             _ = c.UnregisterHotKey(self.hwnd, self.hotkeys[self.hotkey_count].native_id);
@@ -406,6 +411,15 @@ pub const Owner = struct {
     }
     fn message(ptr: *anyopaque, window: z.Window, native_message: u32, wp: usize, lp: isize) ?isize {
         const self: *Owner = @ptrCast(@alignCast(ptr));
+        if ((native_message == c.WM_KEYDOWN or native_message == c.WM_SYSKEYDOWN) and self.entry_count != 0) {
+            const pressed = native_menu.pressed(wp, lp) orelse return null;
+            for (self.entries[0..self.entry_count]) |entry| if (entry.accelerator) |accelerator| if (menus.sameAccelerator(accelerator, pressed)) {
+                if (!entry.enabled) return null;
+                self.on_action(self.context, window, .{ .menu = entry.id });
+                return 0;
+            };
+            return null;
+        }
         if (native_message == c.WM_HOTKEY) {
             for (self.hotkeys[0..self.hotkey_count]) |entry| if (wp == entry.native_id) {
                 const bits: usize = @bitCast(lp);

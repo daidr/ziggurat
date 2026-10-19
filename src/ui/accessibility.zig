@@ -14,18 +14,24 @@ const c = if (builtin.os.tag == .windows) @cImport({
 pub const max_nodes = 128;
 pub const text_capacity = 32768;
 pub const root_id: u64 = 0;
-pub const Role = enum(u32) { window, group, button, text, text_box, checkbox, radio, toggle_switch, progress, radio_group, slider, stepper, list, tab_list, tab, toolbar, splitter, link, disclosure, meter, navigation };
+pub const Role = enum(u32) { window, group, button, text, text_box, checkbox, radio, toggle_switch, progress, radio_group, slider, stepper, list, tab_list, tab, toolbar, splitter, link, disclosure, meter, navigation, list_box, list_item };
 pub const Node = struct {
     id: u64,
     parent: ?u64 = root_id,
     role: Role,
     name: []const u8,
     value: []const u8 = "",
+    /// Help or error text that describes the control beyond its name.
+    description: []const u8 = "",
     bounds: z.Rect,
     enabled: bool = true,
     focused: bool = false,
     read_only: bool = false,
     checked: bool = false,
+    /// The value fails the application's validation.
+    invalid: bool = false,
+    /// A form cannot be submitted without a value.
+    required: bool = false,
     range_value: f64 = 0,
     range_minimum: f64 = 0,
     range_maximum: f64 = 100,
@@ -42,11 +48,15 @@ const Entry = struct {
     name_len: usize,
     value_start: usize,
     value_len: usize,
+    description_start: usize,
+    description_len: usize,
     bounds: z.Rect,
     enabled: bool,
     focused: bool,
     read_only: bool,
     checked: bool,
+    invalid: bool,
+    required: bool,
     range_value: f64,
     range_minimum: f64,
     range_maximum: f64,
@@ -70,11 +80,12 @@ pub const Tree = struct {
     pub fn validate(self: *const Tree) !void {
         if (self.len == 0 or self.len > max_nodes or self.used > self.storage.len) return error.InvalidSemanticRoot;
         for (self.entries[0..self.len], 0..) |entry, at| {
-            if (entry.name_start > self.used or entry.name_len > self.used - entry.name_start or entry.value_start > self.used or entry.value_len > self.used - entry.value_start) return error.InvalidSemanticText;
+            if (entry.name_start > self.used or entry.name_len > self.used - entry.name_start or entry.value_start > self.used or entry.value_len > self.used - entry.value_start or entry.description_start > self.used or entry.description_len > self.used - entry.description_start) return error.InvalidSemanticText;
             const name = self.storage[entry.name_start..][0..entry.name_len];
             const value = self.storage[entry.value_start..][0..entry.value_len];
-            if (!std.unicode.utf8ValidateSlice(name) or !std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
-            if (std.mem.indexOfScalar(u8, name, 0) != null or std.mem.indexOfScalar(u8, value, 0) != null) return error.EmbeddedNul;
+            const description = self.storage[entry.description_start..][0..entry.description_len];
+            if (!std.unicode.utf8ValidateSlice(name) or !std.unicode.utf8ValidateSlice(value) or !std.unicode.utf8ValidateSlice(description)) return error.InvalidUtf8;
+            if (std.mem.indexOfScalar(u8, name, 0) != null or std.mem.indexOfScalar(u8, value, 0) != null or std.mem.indexOfScalar(u8, description, 0) != null) return error.EmbeddedNul;
             if (!std.math.isFinite(entry.bounds.x) or !std.math.isFinite(entry.bounds.y) or !std.math.isFinite(entry.bounds.width) or !std.math.isFinite(entry.bounds.height) or entry.bounds.width < 0 or entry.bounds.height < 0) return error.InvalidGeometry;
             if (entry.selection_start > value.len or entry.selection_end > value.len or !boundary(value, entry.selection_start) or !boundary(value, entry.selection_end)) return error.InvalidSelection;
             if (!std.math.isFinite(entry.range_value) or !std.math.isFinite(entry.range_minimum) or !std.math.isFinite(entry.range_maximum) or entry.range_minimum > entry.range_maximum or entry.range_value < entry.range_minimum or entry.range_value > entry.range_maximum or !std.math.isFinite(entry.range_small_change) or entry.range_small_change < 0 or !std.math.isFinite(entry.range_large_change) or entry.range_large_change < 0) return error.InvalidRangeValue;
@@ -112,7 +123,7 @@ pub const Tree = struct {
             }
             if (selected[at]) {
                 count += 1;
-                bytes += entry.name_len + entry.value_len;
+                bytes += entry.name_len + entry.value_len + entry.description_len;
             }
         }
         if (!found) return error.MissingSemanticNode;
@@ -126,7 +137,10 @@ pub const Tree = struct {
             const value = text[used..][0..entry.value_len];
             @memcpy(value, self.storage[entry.value_start..][0..entry.value_len]);
             used += value.len;
-            nodes[written] = .{ .id = entry.id, .parent = entry.parent, .role = entry.role, .name = name, .value = value, .bounds = entry.bounds, .enabled = entry.enabled, .focused = entry.focused, .read_only = entry.read_only, .checked = entry.checked, .range_value = entry.range_value, .range_minimum = entry.range_minimum, .range_maximum = entry.range_maximum, .range_small_change = entry.range_small_change, .range_large_change = entry.range_large_change, .selection_start = entry.selection_start, .selection_end = entry.selection_end };
+            const description = text[used..][0..entry.description_len];
+            @memcpy(description, self.storage[entry.description_start..][0..entry.description_len]);
+            used += description.len;
+            nodes[written] = .{ .id = entry.id, .parent = entry.parent, .role = entry.role, .name = name, .value = value, .description = description, .bounds = entry.bounds, .enabled = entry.enabled, .focused = entry.focused, .read_only = entry.read_only, .checked = entry.checked, .invalid = entry.invalid, .required = entry.required, .range_value = entry.range_value, .range_minimum = entry.range_minimum, .range_maximum = entry.range_maximum, .range_small_change = entry.range_small_change, .range_large_change = entry.range_large_change, .selection_start = entry.selection_start, .selection_end = entry.selection_end };
             written += 1;
         };
         return nodes[0..written];
@@ -140,8 +154,8 @@ pub const Tree = struct {
     }
     pub fn add(self: *Tree, node: Node) !void {
         if (self.len == max_nodes) return error.TooManySemanticNodes;
-        if (!std.unicode.utf8ValidateSlice(node.name) or !std.unicode.utf8ValidateSlice(node.value)) return error.InvalidUtf8;
-        if (std.mem.indexOfScalar(u8, node.name, 0) != null or std.mem.indexOfScalar(u8, node.value, 0) != null) return error.EmbeddedNul;
+        if (!std.unicode.utf8ValidateSlice(node.name) or !std.unicode.utf8ValidateSlice(node.value) or !std.unicode.utf8ValidateSlice(node.description)) return error.InvalidUtf8;
+        if (std.mem.indexOfScalar(u8, node.name, 0) != null or std.mem.indexOfScalar(u8, node.value, 0) != null or std.mem.indexOfScalar(u8, node.description, 0) != null) return error.EmbeddedNul;
         if (!std.math.isFinite(node.bounds.x) or !std.math.isFinite(node.bounds.y) or !std.math.isFinite(node.bounds.width) or !std.math.isFinite(node.bounds.height) or node.bounds.width < 0 or node.bounds.height < 0) return error.InvalidGeometry;
         if (!std.math.isFinite(node.range_value) or !std.math.isFinite(node.range_minimum) or !std.math.isFinite(node.range_maximum) or node.range_minimum > node.range_maximum or node.range_value < node.range_minimum or node.range_value > node.range_maximum or !std.math.isFinite(node.range_small_change) or node.range_small_change < 0 or !std.math.isFinite(node.range_large_change) or node.range_large_change < 0) return error.InvalidRangeValue;
         if (node.selection_start > node.value.len or node.selection_end > node.value.len or !boundary(node.value, node.selection_start) or !boundary(node.value, node.selection_end)) return error.InvalidSelection;
@@ -157,10 +171,12 @@ pub const Tree = struct {
             if (!found) return error.MissingSemanticParent;
         }
         for (self.entries[0..self.len]) |entry| if (entry.id == node.id) return error.DuplicateSemanticId;
-        if (node.name.len > self.storage.len - self.used or node.value.len > self.storage.len - self.used - node.name.len) return error.SemanticTextCapacityExceeded;
+        if (node.name.len > self.storage.len - self.used or node.value.len > self.storage.len - self.used - node.name.len or node.description.len > self.storage.len - self.used - node.name.len - node.value.len) return error.SemanticTextCapacityExceeded;
         const start = self.used;
+        const description_start = start + node.name.len + node.value.len;
         @memcpy(self.storage[start..][0..node.name.len], node.name);
         @memcpy(self.storage[start + node.name.len ..][0..node.value.len], node.value);
+        @memcpy(self.storage[description_start..][0..node.description.len], node.description);
         self.entries[self.len] = .{
             .id = node.id,
             .parent = node.parent,
@@ -169,11 +185,15 @@ pub const Tree = struct {
             .name_len = node.name.len,
             .value_start = start + node.name.len,
             .value_len = node.value.len,
+            .description_start = description_start,
+            .description_len = node.description.len,
             .bounds = node.bounds,
             .enabled = node.enabled,
             .focused = node.focused,
             .read_only = node.read_only,
             .checked = node.checked,
+            .invalid = node.invalid,
+            .required = node.required,
             .range_value = node.range_value,
             .range_minimum = node.range_minimum,
             .range_maximum = node.range_maximum,
@@ -182,7 +202,7 @@ pub const Tree = struct {
             .selection_start = node.selection_start,
             .selection_end = node.selection_end,
         };
-        self.used += node.name.len + node.value.len;
+        self.used += node.name.len + node.value.len + node.description.len;
         self.len += 1;
     }
     pub fn addMapped(self: *Tree, node: Node, reference: affine.Ref, local_bounds: affine.Rect) !void {
@@ -200,6 +220,23 @@ pub const Tree = struct {
 };
 fn boundary(text: []const u8, index: usize) bool {
     return index <= text.len and (index == text.len or text[index] & 0xc0 != 0x80);
+}
+
+test "descriptions and form state survive export" {
+    var tree: Tree = .{};
+    const bounds: z.Rect = .{ .x = 0, .y = 0, .width = 30, .height = 20 };
+    try tree.reset("Window", bounds);
+    try tree.add(.{ .id = 4, .role = .checkbox, .name = "Terms", .description = "Required to continue", .invalid = true, .required = true, .bounds = bounds });
+    try std.testing.expectError(error.EmbeddedNul, tree.add(.{ .id = 5, .role = .button, .name = "x", .description = "a\x00b", .bounds = bounds }));
+    try tree.validate();
+    var nodes: [1]Node = undefined;
+    var text: [32]u8 = undefined;
+    const copied = try tree.exportSubtree(4, &nodes, &text);
+    try std.testing.expectEqualStrings("Terms", copied[0].name);
+    try std.testing.expectEqualStrings("Required to continue", copied[0].description);
+    try std.testing.expect(copied[0].invalid and copied[0].required);
+    var small: [10]u8 = undefined;
+    try std.testing.expectError(error.SemanticExportCapacityExceeded, tree.exportSubtree(4, &nodes, &small));
 }
 
 test "subtree export copies labels and rejects complete graph before output" {
@@ -266,6 +303,8 @@ const NativeNode = extern struct {
     value_len: u32,
     selection_start: u32,
     selection_end: u32,
+    description_start: u32,
+    description_len: u32,
     x: f64,
     y: f64,
     width: f64,
@@ -431,17 +470,22 @@ pub const Bridge = struct {
             const value = tree.storage[entry.value_start..][0..entry.value_len];
             const value_len = try std.unicode.utf8ToUtf16Le(native_text[used..], value);
             used += value_len;
+            const description_start = used;
+            const description_len = try std.unicode.utf8ToUtf16Le(native_text[used..], tree.storage[entry.description_start..][0..entry.description_len]);
+            used += description_len;
             native_nodes[index] = .{
                 .id = entry.id,
                 .parent = entry.parent orelse root_id,
                 .role = @intFromEnum(entry.role),
-                .flags = @as(u32, @intFromBool(entry.enabled and enabled)) | (@as(u32, @intFromBool(entry.focused and focused)) << 1) | (@as(u32, @intFromBool(entry.read_only)) << 2) | (@as(u32, @intFromBool(!visible or entry.bounds.width == 0 or entry.bounds.height == 0)) << 3) | (@as(u32, @intFromBool(entry.checked)) << 4),
+                .flags = @as(u32, @intFromBool(entry.enabled and enabled)) | (@as(u32, @intFromBool(entry.focused and focused)) << 1) | (@as(u32, @intFromBool(entry.read_only)) << 2) | (@as(u32, @intFromBool(!visible or entry.bounds.width == 0 or entry.bounds.height == 0)) << 3) | (@as(u32, @intFromBool(entry.checked)) << 4) | (@as(u32, @intFromBool(entry.invalid)) << 5) | (@as(u32, @intFromBool(entry.required)) << 6),
                 .name_start = @intCast(name_start),
                 .name_len = @intCast(name_len),
                 .value_start = @intCast(value_start),
                 .value_len = @intCast(value_len),
                 .selection_start = @intCast(try std.unicode.calcUtf16LeLen(value[0..entry.selection_start])),
                 .selection_end = @intCast(try std.unicode.calcUtf16LeLen(value[0..entry.selection_end])),
+                .description_start = @intCast(description_start),
+                .description_len = @intCast(description_len),
                 .x = @as(f64, entry.bounds.x) * scale + @as(f64, @floatFromInt(origin.x)),
                 .y = @as(f64, entry.bounds.y) * scale + @as(f64, @floatFromInt(origin.y)),
                 .width = @as(f64, entry.bounds.width) * scale,
