@@ -531,6 +531,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "pointer_classifier", .module = pointer_classifier } },
     });
+    const declarative_view = b.addModule("ziggurat_view", .{ .root_source_file = b.path("src/view/root.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui } } });
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
         addSmoke(b, "smoke-affine-renderer", "tests/affine_renderer_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
@@ -544,6 +545,10 @@ pub fn build(b: *std.Build) void {
         addSmoke(b, "smoke-theme", "tests/theme_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-view", "tests/view_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_view", .module = declarative_view },
         });
         addSmoke(b, "smoke-animation-ui", "tests/animation_ui_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
@@ -1134,6 +1139,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
         });
+        addExample(b, "view-counter", "examples/view_counter.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_view", .module = declarative_view },
+        });
         addSmoke(b, "smoke-linux", "tests/linux_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
@@ -1176,6 +1185,10 @@ pub fn build(b: *std.Build) void {
         addExample(b, "counter", "examples/counter.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addExample(b, "view-counter", "examples/view_counter.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_view", .module = declarative_view },
         });
         addSmoke(b, "smoke", "tests/native_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
@@ -2165,6 +2178,11 @@ pub fn build(b: *std.Build) void {
         const run_list_tests = b.addRunArtifact(list_tests);
         test_step.dependOn(&run_list_tests.step);
         b.step("test-virtual-list", "Run virtual list model and control invariant tests").dependOn(&run_list_tests.step);
+        const declarative_view_tests = b.addTest(.{ .root_module = declarative_view });
+        check.dependOn(&declarative_view_tests.step);
+        const run_declarative_view_tests = b.addRunArtifact(declarative_view_tests);
+        test_step.dependOn(&run_declarative_view_tests.step);
+        b.step("test-view", "Run declarative view build, identity and layout tests").dependOn(&run_declarative_view_tests.step);
     }
 }
 
