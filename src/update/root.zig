@@ -1,8 +1,23 @@
 const std = @import("std");
 pub const publication = @import("publication.zig");
+pub const archive = @import("archive.zig");
+pub const delta = @import("delta.zig");
+pub const feed = @import("feed.zig");
+pub const download = @import("download.zig");
+pub const retention = @import("retention.zig");
+pub const launch = @import("launch.zig");
+pub const http = @import("http.zig");
 test {
     _ = publication;
+    _ = archive;
+    _ = delta;
+    _ = feed;
+    _ = download;
+    _ = retention;
+    _ = launch;
+    _ = http;
     _ = @import("publication_test.zig");
+    _ = @import("flow_test.zig");
 }
 pub const Ed25519 = std.crypto.sign.Ed25519;
 pub const Version = struct {
@@ -26,16 +41,25 @@ pub const Manifest = struct {
     bytes: u64,
     sha256: [32]u8,
     signature: [64]u8,
+    /// Present while a release is signed by a rotated key: the trusted key
+    /// endorses the new signing key for this identity.
+    endorsement: ?Endorsement = null,
 };
+/// A trusted key's statement that `public_key` may sign releases of one identity.
+pub const Endorsement = struct { public_key: [32]u8, signature: [64]u8 };
 pub const Policy = struct {
     identity: []const u8,
     target: []const u8,
     current_version: Version,
     public_key: [32]u8,
+    /// Keys accepted alongside `public_key`, for example during a rotation.
+    additional_public_keys: []const [32]u8 = &.{},
     max_artifact_bytes: u64 = 256 * 1024 * 1024,
     max_manifest_bytes: usize = 16384,
 };
-const Wire = struct { format: u16, identity: []const u8, version: Version, target: []const u8, url: []const u8, bytes: u64, sha256: []const u8, signature: []const u8 };
+pub const EndorsementWire = struct { public_key: []const u8, signature: []const u8 };
+/// JSON form of a signed manifest. Unknown and duplicate fields are rejected.
+pub const Wire = struct { format: u16, identity: []const u8, version: Version, target: []const u8, url: []const u8, bytes: u64, sha256: []const u8, signature: []const u8, endorsement: ?EndorsementWire = null };
 pub const Verified = struct {
     parsed: std.json.Parsed(Wire),
     manifest: Manifest,
@@ -84,9 +108,68 @@ pub fn verify(manifest: Manifest, policy: Policy) !void {
     }
     var buffer: [4096]u8 = undefined;
     const payload = try signingPayload(manifest, &buffer);
-    const key = Ed25519.PublicKey.fromBytes(policy.public_key) catch return error.InvalidPublicKey;
+    const signer = try signingKey(manifest.identity, manifest.endorsement, policy);
+    const key = Ed25519.PublicKey.fromBytes(signer) catch return error.InvalidPublicKey;
     Ed25519.Signature.fromBytes(manifest.signature).verify(payload, key) catch return error.InvalidSignature;
 }
+
+fn trusted(key: [32]u8, policy: Policy) bool {
+    if (std.mem.eql(u8, &key, &policy.public_key)) return true;
+    for (policy.additional_public_keys) |other| if (std.mem.eql(u8, &key, &other)) return true;
+    return false;
+}
+
+/// The key that must have signed a manifest or delta: a trusted key, or a key
+/// endorsed by a trusted key for this identity. Endorsements do not chain.
+pub fn signingKey(identity: []const u8, endorsement: ?Endorsement, policy: Policy) ![32]u8 {
+    const statement = endorsement orelse return policy.public_key;
+    if (trusted(statement.public_key, policy)) return statement.public_key;
+    var buffer: [256]u8 = undefined;
+    const payload = try endorsementPayload(identity, statement.public_key, &buffer);
+    var keys: [17][32]u8 = undefined;
+    if (policy.additional_public_keys.len > 16) return error.TooManyKeys;
+    keys[0] = policy.public_key;
+    @memcpy(keys[1..][0..policy.additional_public_keys.len], policy.additional_public_keys);
+    for (keys[0 .. policy.additional_public_keys.len + 1]) |anchor| {
+        const key = Ed25519.PublicKey.fromBytes(anchor) catch continue;
+        Ed25519.Signature.fromBytes(statement.signature).verify(payload, key) catch continue;
+        return statement.public_key;
+    }
+    return error.UntrustedSigningKey;
+}
+
+pub fn endorsementPayload(identity: []const u8, public_key: [32]u8, buffer: []u8) ![]const u8 {
+    if (!identifier(identity)) return error.InvalidIdentity;
+    return std.fmt.bufPrint(buffer, "ziggurat-key-v1\n{s}\n{s}\n", .{ identity, std.fmt.bytesToHex(public_key, .lower) });
+}
+
+/// Sign `new_key` with the currently trusted key so existing installations
+/// accept releases signed by the new key.
+pub fn endorse(identity: []const u8, trusted_key: Ed25519.KeyPair, new_key: [32]u8) !Endorsement {
+    var buffer: [256]u8 = undefined;
+    const signature = try trusted_key.sign(try endorsementPayload(identity, new_key, &buffer), null);
+    return .{ .public_key = new_key, .signature = signature.toBytes() };
+}
+
+pub fn decodeEndorsement(wire: ?EndorsementWire) !?Endorsement {
+    const value = wire orelse return null;
+    if (value.public_key.len != 64 or value.signature.len != 128) return error.InvalidEncoding;
+    var result: Endorsement = undefined;
+    _ = std.fmt.hexToBytes(&result.public_key, value.public_key) catch return error.InvalidEncoding;
+    _ = std.fmt.hexToBytes(&result.signature, value.signature) catch return error.InvalidEncoding;
+    return result;
+}
+
+pub const EndorsementHex = struct {
+    public_key: [64]u8,
+    signature: [128]u8,
+    pub fn init(value: Endorsement) EndorsementHex {
+        return .{ .public_key = std.fmt.bytesToHex(value.public_key, .lower), .signature = std.fmt.bytesToHex(value.signature, .lower) };
+    }
+    pub fn wire(self: *const EndorsementHex) EndorsementWire {
+        return .{ .public_key = &self.public_key, .signature = &self.signature };
+    }
+};
 
 /// Owns all parsed strings. Unknown/duplicate fields and non-HTTPS URLs fail closed.
 pub fn parseAndVerify(allocator: std.mem.Allocator, bytes: []const u8, policy: Policy) !Verified {
@@ -107,6 +190,7 @@ pub fn parseAndVerify(allocator: std.mem.Allocator, bytes: []const u8, policy: P
         .bytes = wire.bytes,
         .sha256 = undefined,
         .signature = undefined,
+        .endorsement = try decodeEndorsement(wire.endorsement),
     };
     _ = std.fmt.hexToBytes(&manifest.sha256, wire.sha256) catch return error.InvalidEncoding;
     _ = std.fmt.hexToBytes(&manifest.signature, wire.signature) catch return error.InvalidEncoding;
@@ -120,6 +204,8 @@ pub fn sign(allocator: std.mem.Allocator, source: Manifest, key: Ed25519.KeyPair
     const signature = try key.sign(try signingPayload(source, &buffer), null);
     const digest_hex = std.fmt.bytesToHex(source.sha256, .lower);
     const signature_hex = std.fmt.bytesToHex(signature.toBytes(), .lower);
+    var endorsement: EndorsementHex = undefined;
+    if (source.endorsement) |value| endorsement = .init(value);
     return std.json.Stringify.valueAlloc(allocator, Wire{
         .format = 1,
         .identity = source.identity,
@@ -129,7 +215,8 @@ pub fn sign(allocator: std.mem.Allocator, source: Manifest, key: Ed25519.KeyPair
         .bytes = source.bytes,
         .sha256 = &digest_hex,
         .signature = &signature_hex,
-    }, .{ .whitespace = .indent_2 });
+        .endorsement = if (source.endorsement != null) endorsement.wire() else null,
+    }, .{ .whitespace = .indent_2, .emit_null_optional_fields = false });
 }
 
 pub const Receipt = struct { bytes: u64, sha256: [32]u8 };
