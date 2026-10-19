@@ -53,6 +53,9 @@ typedef struct NativeWindow {
     uint64_t pointer_operation;
     const ZlgPointerTicket *pointer_release;
     gboolean pointer_enabled;
+    /* Present only while a system menu bar is attached: a vertical box that
+       holds the bar above the window's ordinary child. */
+    GtkWidget *menu_box, *menu_bar;
 } NativeWindow;
 typedef struct NativeBounds { int32_t x,y; uint32_t width,height; int positioned; } NativeBounds;
 static gint active_app, resources;
@@ -196,6 +199,11 @@ static __attribute__((noinline)) void pointer_motion_enabled(NativeWindow *s, co
 
 /* Included here so the adapter can retain the private NativeWindow state
  * across GTK operations that synchronously destroy the parent. */
+static GtkContainer *root_container(NativeWindow *s) { return GTK_CONTAINER(s->menu_box?s->menu_box:s->window); }
+static void root_add(NativeWindow *s, GtkWidget *child) {
+    if (s->menu_box) gtk_box_pack_start(GTK_BOX(s->menu_box),child,TRUE,TRUE,0);
+    else gtk_container_add(GTK_CONTAINER(s->window),child);
+}
 #include "linux_content_impl.h"
 #include "linux_regions_impl.h"
 #include "linux_accessibility_host_impl.h"
@@ -354,6 +362,9 @@ static void destroyed(GtkWidget *widget, gpointer data) {
     void *owner=s->owner; s->owner=NULL;
     g_signal_handlers_disconnect_by_data(s->window,s);
     g_signal_handlers_disconnect_by_data(s->area,s);
+    g_object_set_data(G_OBJECT(s->window),"ziggurat-native-window",NULL);
+    if (s->menu_bar) { g_object_unref(s->menu_bar); s->menu_bar=NULL; }
+    if (s->menu_box) { g_object_unref(s->menu_box); s->menu_box=NULL; }
     if (gtk_widget_has_grab(s->area)) gtk_grab_remove(s->area);
     GtkIMContext *im=s->im;s->im=NULL;
     if(im){g_signal_handlers_disconnect_by_data(im,s);gtk_im_context_set_client_window(im,NULL);g_object_unref(im);}
@@ -682,6 +693,7 @@ NativeWindow *zlg_window_create_mode_host_pointer(void *owner, Emit callback, co
     gtk_window_set_modal(GTK_WINDOW(s->window),modal);
     s->area=accessibility_host?accessibility_area_new(s):gtk_drawing_area_new(); g_object_ref_sink(s->area); track(G_OBJECT(s->area));
     gtk_container_add(GTK_CONTAINER(s->window),s->area);
+    g_object_set_data(G_OBJECT(s->window),"ziggurat-native-window",s);
     gtk_widget_set_can_focus(s->area,TRUE);
     gtk_widget_add_events(s->area,GDK_BUTTON_PRESS_MASK|GDK_BUTTON_RELEASE_MASK|GDK_POINTER_MOTION_MASK|GDK_SCROLL_MASK|GDK_SMOOTH_SCROLL_MASK|GDK_FOCUS_CHANGE_MASK|GDK_KEY_PRESS_MASK|GDK_KEY_RELEASE_MASK);
     gtk_widget_add_events(s->window,GDK_PROPERTY_CHANGE_MASK);
@@ -791,6 +803,52 @@ int zlg_window_topmost(NativeWindow *s, int enabled) {
     if (enabled && !(zlg_window_capabilities(s)&4u)) return 1;
     retain(s); s->above_requested=!!enabled;
     gtk_window_set_keep_above(GTK_WINDOW(s->window),enabled);
+    int result=s->destroyed?2:0; release(s); return result;
+}
+/* Places a system menu bar above the window's child, replaces it, or removes
+   it with NULL. The window keeps its own reference while the bar is attached.
+   Moving the child re-realizes the drawing area and rebinds its input method.
+   Returns 0, 2 when the window is closing, or 3 while content is changing. */
+int zlg_window_set_menubar(GtkWidget *toplevel, GtkWidget *bar) {
+    NativeWindow *s=toplevel?g_object_get_data(G_OBJECT(toplevel),"ziggurat-native-window"):NULL;
+    if (!s || !content_live(s)) return 2;
+    if (s->content_busy) return 3;
+    if (bar==s->menu_bar) return 0;
+    retain(s);
+    if (s->menu_bar) {
+        GtkWidget *old=s->menu_bar; s->menu_bar=NULL;
+        if (gtk_widget_get_parent(old)==s->menu_box) gtk_container_remove(GTK_CONTAINER(s->menu_box),old);
+        g_object_unref(old);
+    }
+    if (!content_live(s)) goto done;
+    if (bar && s->menu_box) {
+        s->menu_bar=g_object_ref(bar);
+        gtk_box_pack_start(GTK_BOX(s->menu_box),bar,FALSE,FALSE,0);
+        gtk_box_reorder_child(GTK_BOX(s->menu_box),bar,0);
+        gtk_widget_show(bar);
+    } else if (bar || s->menu_box) {
+        GtkWidget *from=s->menu_box?s->menu_box:s->window, *child=NULL;
+        GList *children=gtk_container_get_children(GTK_CONTAINER(from));
+        if (children) child=g_object_ref(children->data);
+        g_list_free(children);
+        content_cancel_input(s);
+        if (child && content_live(s)) gtk_container_remove(GTK_CONTAINER(from),child);
+        if (bar && content_live(s)) {
+            s->menu_box=gtk_box_new(GTK_ORIENTATION_VERTICAL,0); g_object_ref_sink(s->menu_box); track(G_OBJECT(s->menu_box));
+            s->menu_bar=g_object_ref(bar);
+            gtk_box_pack_start(GTK_BOX(s->menu_box),bar,FALSE,FALSE,0);
+            gtk_container_add(GTK_CONTAINER(s->window),s->menu_box);
+            gtk_widget_show(bar); gtk_widget_show(s->menu_box);
+        } else if (s->menu_box) {
+            GtkWidget *box=s->menu_box; s->menu_box=NULL;
+            if (content_live(s)) gtk_container_remove(GTK_CONTAINER(s->window),box);
+            gtk_widget_destroy(box); g_object_unref(box);
+        }
+        if (child) { if (content_live(s) && !gtk_widget_get_parent(child)) root_add(s,child); g_object_unref(child); }
+        if (content_live(s)) gtk_widget_realize(s->area);
+        content_bind_im(s);
+    }
+done:;
     int result=s->destroyed?2:0; release(s); return result;
 }
 void zlg_window_title(NativeWindow *s, const char *title) { retain(s);gtk_window_set_title(GTK_WINDOW(s->window),title);release(s); }

@@ -65,9 +65,9 @@ static void content_restore(ZlgContentHost *host) {
     if (!content_live(s)) return;
     content_remove(s->area,host->overlay);
     if (!content_live(s)) return;
-    content_remove(host->overlay,s->window);
+    content_remove(host->overlay,GTK_WIDGET(root_container(s)));
     if (!content_live(s)) return;
-    if (!gtk_widget_get_parent(s->area)) gtk_container_add(GTK_CONTAINER(s->window),s->area);
+    if (!gtk_widget_get_parent(s->area)) root_add(s,s->area);
     if (!content_live(s)) return;
     gtk_widget_set_can_focus(s->area,host->area_can_focus);
     gtk_widget_show(s->area);
@@ -94,7 +94,7 @@ int zlg_content_attach(NativeWindow *s, void *widget, ZlgContentHost **out) {
     GtkWidget *child=widget;
     if (!GTK_IS_WIDGET(child) || g_object_is_floating(child) || child==s->area || child==s->window ||
         gtk_widget_get_parent(child) || gtk_widget_in_destruction(child) ||
-        gtk_widget_get_parent(s->area)!=s->window) return ZLG_CONTENT_INVALID;
+        gtk_widget_get_parent(s->area)!=GTK_WIDGET(root_container(s))) return ZLG_CONTENT_INVALID;
     ZlgContentHost *host=ZLG_CONTENT_ALLOC();
     if (!host) return ZLG_CONTENT_OOM;
     retain(s); g_atomic_int_inc(&content_resources);
@@ -108,9 +108,9 @@ int zlg_content_attach(NativeWindow *s, void *widget, ZlgContentHost **out) {
     if (!content_candidate_live(host)) goto closed;
     gtk_widget_set_can_focus(s->area,FALSE);
     if (!content_candidate_live(host)) goto closed;
-    gtk_container_remove(GTK_CONTAINER(s->window),s->area);
+    gtk_container_remove(root_container(s),s->area);
     if (!content_candidate_live(host)) goto closed;
-    gtk_container_add(GTK_CONTAINER(s->window),host->overlay);
+    root_add(s,host->overlay);
     if (!content_candidate_live(host)) goto closed;
     gtk_container_add(GTK_CONTAINER(host->overlay),s->area);
     if (!content_candidate_live(host)) goto closed;

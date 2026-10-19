@@ -482,6 +482,17 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat", .module = core },
         .{ .name = "ziggurat_system", .module = system },
     });
+    if (target.result.os.tag == .linux) {
+        // Needs a session bus and an X11 display: dbus-run-session -- xvfb-run.
+        const desktop_smoke = addSmokeModule(b, "smoke-system-desktop", "tests/system_desktop_linux_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        const fixture = native_support.add(b, desktop_smoke, "system-desktop-fixture", "tests/system_desktop_linux_fixture.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        fixture.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
+        desktop_smoke.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
+        desktop_smoke.linkSystemLibrary("x11", .{ .use_pkg_config = .force });
+    }
     if (target.result.os.tag == .windows) addSmoke(b, "smoke-system-menus", "tests/system_menus_smoke.zig", target, optimize, &.{
         .{ .name = "ziggurat", .module = core },
         .{ .name = "ziggurat_system", .module = system },
@@ -489,7 +500,11 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .linux) {
         const native = native_support.add(b, system, "system-linux-native", "src/system/linux_system.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         native.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        const desktop = native_support.add(b, system, "system-linux-desktop", "src/system/linux_desktop.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        desktop.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        desktop.linkSystemLibrary("x11", .{ .use_pkg_config = .force });
         system.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        system.linkSystemLibrary("x11", .{ .use_pkg_config = .force });
         system.link_libc = true;
     }
     if (target.result.os.tag == .windows) {
@@ -2384,6 +2399,11 @@ fn addWindowsProfileStorageNative(b: *std.Build, owner: *std.Build.Module, prefi
 }
 
 fn addSmoke(b: *std.Build, name: []const u8, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) void {
+    _ = addSmokeModule(b, name, path, target, optimize, imports);
+}
+
+/// Like addSmoke, returning the root module for native test fixtures.
+fn addSmokeModule(b: *std.Build, name: []const u8, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) *std.Build.Module {
     const exe = b.addExecutable(.{
         .name = name,
         .root_module = b.createModule(.{ .root_source_file = b.path(path), .target = target, .optimize = optimize, .imports = imports }),
@@ -2399,6 +2419,7 @@ fn addSmoke(b: *std.Build, name: []const u8, path: []const u8, target: std.Build
     if (b.args) |args| run.addArgs(args);
     b.step(name, "Run integration checks with hidden windows").dependOn(&run.step);
     b.top_level_steps.get("check").?.step.dependOn(&exe.step);
+    return exe.root_module;
 }
 
 /// For applications that depend on this package: embed the Windows manifest,

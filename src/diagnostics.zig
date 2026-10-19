@@ -3,7 +3,7 @@ const std = @import("std");
 pub const Severity = enum { info, warning, err };
 
 /// Identifies the code namespace, independently of the failed operation.
-pub const Domain = enum { core, win32, hresult, renderer, webview, packaging };
+pub const Domain = enum { core, win32, hresult, renderer, webview, packaging, dbus, x11 };
 
 pub const Operation = enum {
     app_init,
