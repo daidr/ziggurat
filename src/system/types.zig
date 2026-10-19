@@ -56,6 +56,13 @@ pub const TrayItemOptions = struct {
     /// Borrowed only by show(). Null copies the shared system application icon.
     icon: ?*anyopaque = null,
     tooltip: []const u8 = "",
+    /// Text beside the icon where the panel shows one, such as Linux
+    /// indicator panels. The Windows notification area shows only icons, so
+    /// it validates the title and otherwise ignores it.
+    title: []const u8 = "",
+    /// The item's own menu, copied during show(), as setMenu() takes it.
+    /// Null keeps the current menu; an empty slice removes it.
+    menu: ?[]const Item = null,
     /// Optional stable identity, written in the identifier's text byte order.
     /// The shell then remembers the user's placement across runs; it binds
     /// the identity to this executable path, so another path fails to add it.
@@ -64,7 +71,8 @@ pub const TrayItemOptions = struct {
 /// `icon` opens beside the item where the shell reports its rectangle and at
 /// the pointer otherwise.
 pub const TrayAnchor = union(enum) { icon, pointer, screen: ScreenPoint };
-pub const TrayAction = union(enum) { activate, context: ScreenPoint, popup: PopupResult };
+/// `menu` reports an enabled command of the item's own menu (setMenu).
+pub const TrayAction = union(enum) { activate, context: ScreenPoint, popup: PopupResult, menu: u64 };
 
 pub const max_hotkeys = 32;
 pub const Key = enum {

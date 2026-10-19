@@ -2010,7 +2010,7 @@ pub fn build(b: *std.Build) void {
     });
     const cli = b.addExecutable(.{ .name = "ziggurat", .root_module = cli_module });
     addResources(b, cli);
-    const cli_step = b.step("cli", "Build the ziggurat init/dev/build/package/doctor command and its setup stub");
+    const cli_step = b.step("cli", "Build the ziggurat init/dev/build/package/publish/doctor command and its setup stub");
     cli_step.dependOn(&b.addInstallArtifact(cli, .{}).step);
     cli_step.dependOn(&install_setup_stub.step);
     setup_smoke.dependOn(&b.addInstallArtifact(cli, .{}).step);
@@ -2152,6 +2152,17 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&document_app_tests.step);
     test_step.dependOn(&run_document_app_tests.step);
     b.step("test-document-app", "Run document identity, close preflight, atomic save, autosave and recovery invariants").dependOn(&run_document_app_tests.step);
+    const updater = b.addModule("ziggurat_updater", .{ .root_source_file = b.path("src/updater/root.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_view", .module = declarative_view },
+        .{ .name = "ziggurat_update", .module = update },
+        .{ .name = "ziggurat_wake", .module = wake },
+    } });
+    const updater_tests = b.addTest(.{ .root_module = updater });
+    const run_updater_tests = b.addRunArtifact(updater_tests);
+    check.dependOn(&updater_tests.step);
+    test_step.dependOn(&run_updater_tests.step);
+    b.step("test-updater", "Run update window sessions, choices, texts and feed backend tests").dependOn(&run_updater_tests.step);
     test_step.dependOn(&run_webkit_remote.step);
     const snippets_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/code_editor/snippet.zig"),

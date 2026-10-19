@@ -11,7 +11,12 @@ pub const Wire = struct {
     identity: []const u8,
     releases: []const update.Wire,
     deltas: []const delta.Wire = &.{},
+    /// Release notes by version, shown before installing. Unsigned, like the
+    /// rest of the index: display text only, never acted on.
+    notes: []const Note = &.{},
 };
+pub const Note = struct { version: update.Version, text: []const u8 };
+pub const max_notes_bytes = 64 * 1024;
 
 pub const max_feed_bytes = 1024 * 1024;
 
@@ -103,9 +108,31 @@ fn reverify(comptime W: type, comptime V: type, allocator: std.mem.Allocator, en
     return delta.parseAndVerify(allocator, json, policy, extra);
 }
 
+/// The notes the feed lists for `version`, or an empty string. Caller frees.
+pub fn notesFor(allocator: std.mem.Allocator, bytes: []const u8, version: update.Version) ![]u8 {
+    if (bytes.len > max_feed_bytes) return error.FeedTooLarge;
+    const parsed = std.json.parseFromSlice(Wire, allocator, bytes, .{ .allocate = .alloc_always, .duplicate_field_behavior = .@"error" }) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        return error.InvalidFeed;
+    };
+    defer parsed.deinit();
+    for (parsed.value.notes) |note| {
+        if (note.version.order(version) != .eq) continue;
+        if (note.text.len > max_notes_bytes or !std.unicode.utf8ValidateSlice(note.text)) return error.InvalidNotes;
+        return allocator.dupe(u8, note.text);
+    }
+    return allocator.dupe(u8, "");
+}
+
 /// Build feed JSON from already signed manifest documents. Entries are kept in
 /// the given order; each document is parsed strictly but not re-signed.
 pub fn build(allocator: std.mem.Allocator, identity: []const u8, releases: []const []const u8, deltas: []const []const u8) ![]u8 {
+    return buildWithNotes(allocator, identity, releases, deltas, &.{});
+}
+
+/// `build` with release notes by version.
+pub fn buildWithNotes(allocator: std.mem.Allocator, identity: []const u8, releases: []const []const u8, deltas: []const []const u8, notes: []const Note) ![]u8 {
+    for (notes) |note| if (note.text.len > max_notes_bytes or !std.unicode.utf8ValidateSlice(note.text)) return error.InvalidNotes;
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -119,7 +146,7 @@ pub fn build(allocator: std.mem.Allocator, identity: []const u8, releases: []con
         out.* = std.json.parseFromSliceLeaky(delta.Wire, scratch, text, .{ .duplicate_field_behavior = .@"error" }) catch return error.InvalidManifest;
         if (!std.mem.eql(u8, out.identity, identity)) return error.WrongIdentity;
     }
-    return std.json.Stringify.valueAlloc(allocator, Wire{ .format = 1, .identity = identity, .releases = full, .deltas = patches }, .{ .whitespace = .indent_2, .emit_null_optional_fields = false });
+    return std.json.Stringify.valueAlloc(allocator, Wire{ .format = 1, .identity = identity, .releases = full, .deltas = patches, .notes = notes }, .{ .whitespace = .indent_2, .emit_null_optional_fields = false });
 }
 
 test "feed selects the newest verified release and a matching delta" {
@@ -171,6 +198,28 @@ test "feed selects the newest verified release and a matching delta" {
     const at = std.mem.indexOf(u8, tampered, "\"bytes\": 102").?;
     tampered[at + 11] = '3';
     try std.testing.expectError(error.InvalidSignature, check(allocator, tampered, policy, null));
+}
+
+test "feeds carry release notes by version" {
+    const allocator = std.testing.allocator;
+    const key = try update.Ed25519.KeyPair.generateDeterministic(@splat(13));
+    const identity = "org.ziggurat.Feed";
+    const v2: update.Version = .{ .major = 2, .minor = 0, .patch = 0 };
+    const full = try update.sign(allocator, .{ .identity = identity, .target = "linux-x86_64", .version = v2, .url = "https://example.invalid/a.zip", .bytes = 5, .sha256 = @splat(3), .signature = undefined }, key);
+    defer allocator.free(full);
+    const json = try buildWithNotes(allocator, identity, &.{full}, &.{}, &.{.{ .version = v2, .text = "修复了崩溃\n\nFaster start" }});
+    defer allocator.free(json);
+    const notes = try notesFor(allocator, json, v2);
+    defer allocator.free(notes);
+    try std.testing.expectEqualStrings("修复了崩溃\n\nFaster start", notes);
+    const none = try notesFor(allocator, json, .{ .major = 3, .minor = 0, .patch = 0 });
+    defer allocator.free(none);
+    try std.testing.expectEqualStrings("", none);
+    // The notes do not disturb the signed check.
+    const result = try check(allocator, json, .{ .identity = identity, .target = "linux-x86_64", .current_version = .{ .major = 1, .minor = 0, .patch = 0 }, .public_key = key.public_key.toBytes() }, null);
+    defer result.deinit();
+    try std.testing.expectEqual(v2, result.available.full.manifest.version);
+    try std.testing.expectError(error.InvalidNotes, buildWithNotes(allocator, identity, &.{full}, &.{}, &.{.{ .version = v2, .text = "\xff" }}));
 }
 
 test "feed check frees all allocations at every failure" {

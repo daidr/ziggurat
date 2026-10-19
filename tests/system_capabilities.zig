@@ -38,6 +38,7 @@ test "unsupported system capabilities fail explicitly" {
     var tray = system.Tray.init(&context, trayAction);
     try std.testing.expectError(error.UnsupportedCapability, tray.show(app, .{}));
     try std.testing.expectError(error.UnsupportedCapability, tray.popupMenu(1, &.{.{ .id = 1, .label = "Item" }}, .icon));
+    try std.testing.expectError(error.UnsupportedCapability, tray.setMenu(&.{.{ .id = 1, .label = "Item" }}));
     try tray.remove();
     try std.testing.expectError(error.UnsupportedCapability, system.clipboard.writeText(window, "text"));
     try std.testing.expectError(error.UnsupportedCapability, system.clipboard.readText(window, &destination));
