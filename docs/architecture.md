@@ -22,6 +22,7 @@ flowchart TD
     Host --> ImageDrawing[ziggurat_image_drawing]
     Host --> Editor[ziggurat_shaped_editor]
     Host --> List[ziggurat_virtual_list]
+    Host --> View[ziggurat_view]
     Host --> Document[ziggurat_document]
     Host --> DocumentEditor[ziggurat_document_editor]
     Host --> DocumentAccessibility[ziggurat_document_accessibility]
@@ -75,6 +76,7 @@ flowchart TD
     Editor --> Caret
     DocumentEditor --> Caret
     List --> UI
+    View --> UI
     Document --> Core
     Vector --> Resources
     Shadows --> Resources

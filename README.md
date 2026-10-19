@@ -67,6 +67,7 @@ WSL 应将 Zig 本地缓存放在 Linux 文件系统，见 `scripts/linux-check.
 | `ziggurat_document_diff` | 两份 Reader 的精确行差异与拥有型 Hunk | 纯 Zig，仅依赖 Document；显式内存/工作/编辑距离预算 |
 | `ziggurat_document_diff_view` | 同一文档对的版本化交付、可编辑双栏/统一视图、行内标记、导航与原子 revert | 显式依赖 Document/Adapter/UI/系统布局；上下文折叠和完整可访问语义继续实施 |
 | `ziggurat_document_diff_accessibility` | 可编辑 Diff 双源全文、真实删除行几何与同根有界辅助控件 | 可选 Windows UIA；复用原 Document/Adapter 与唯一 Diff 协调者 |
+| `ziggurat_view` | 从应用状态构建视图树、弹性布局、绑定值的控件与即时输入交付 | 单向依赖 UI；调用者提供固定存储，不分配 |
 | `ziggurat_virtual_list` | 稳定行 ID、可变高度索引、滚动锚点与有界可见回放 | 单向依赖 UI；完整虚拟控件集继续按计划实施 |
 | `ziggurat_images` | 有界 PNG/JPEG/BMP/首帧 GIF、可选 WebP、EXIF 与独占像素交接 | 系统 WIC/GdkPixbuf；有界 LZW；可选固定源码 WebP |
 | `ziggurat_image_drawing` | 不可变预乘像素、裁切与 mip 准备；显式上传、同尺寸更新和有界驻留 | 独立依赖图片与绘制资源；GDI/Cairo/D2D 回放 |
@@ -96,7 +97,7 @@ zig build test check -Dwebview=true -Dgpu=true -Daccessibility=true
 zig build test-file-stream test-http-response test-caret test-gaussian
 zig build smoke smoke-lifecycle smoke-diagnostics smoke-packaging smoke-waitables smoke-wake smoke-native-reentry smoke-ime-cancel smoke-cleanup smoke-editor smoke-editor-routing
 zig build smoke-system smoke-system-events smoke-shell smoke-picker smoke-picker-result
-zig build smoke-widgets smoke-widget-ranges -Daccessibility=true
+zig build smoke-widgets smoke-widget-ranges smoke-view -Daccessibility=true
 zig build smoke-window-registry smoke-app-stop smoke-composition smoke-window-state smoke-window-relationships smoke-window-chrome smoke-key-input smoke-damage
 zig build smoke-drawing smoke-gradients smoke-gpu smoke-gpu-fallback smoke-gpu-domain smoke-gpu-offscreen -Dgpu=true
 zig build smoke-accessibility smoke-ui-config smoke-composition-ui -Daccessibility=true
@@ -116,7 +117,7 @@ Linux 上使用 `zig build test check smoke-linux`，包括 GTK 生命周期、�
 Ziggurat 使用 [MIT 许可证](LICENSE)。源码包包含 LICENSE，构建安装到 `share/ziggurat/LICENSE`。打包本仓库示例时传入 `-LicensePath LICENSE`；下游应用仍显式提供自己的许可文件。签名、更新和基准工具见以下文档。
 
 - [架构](docs/architecture.md)、[设计原则](docs/philosophy.md)、[路线图](docs/roadmap.md)、[完整实施计划](docs/implementation-plan.md)
-- [窗口状态与关系](docs/windows.md)、[内容组合](docs/composition.md)、[布局](docs/layout.md)、[基础控件](docs/widgets.md)、[虚拟列表](docs/virtual-list.md)、[基础绘制](docs/drawing.md)、[透明分组](docs/layers.md)、[离屏快照](docs/offscreen.md)、[路径资源](docs/vector.md)、[SVG 文档](docs/svg.md)、[系统文本布局](docs/text-layout.md)、[编辑器桥接](docs/editor.md)、[索引文档](docs/document.md)、[文档视图](docs/document-editor.md)、[编辑前输入门](docs/editor-pre-input.md)、[区间标记](docs/editor-range-markers.md)、[原生文本上下文](docs/text-input.md)、[窗口输入模式](docs/text-input-mode.md)、[图片解码](docs/images.md)、[图片绘制](docs/image-drawing.md)
+- [窗口状态与关系](docs/windows.md)、[内容组合](docs/composition.md)、[布局](docs/layout.md)、[声明式视图](docs/view.md)、[基础控件](docs/widgets.md)、[虚拟列表](docs/virtual-list.md)、[基础绘制](docs/drawing.md)、[透明分组](docs/layers.md)、[离屏快照](docs/offscreen.md)、[路径资源](docs/vector.md)、[SVG 文档](docs/svg.md)、[系统文本布局](docs/text-layout.md)、[编辑器桥接](docs/editor.md)、[索引文档](docs/document.md)、[文档视图](docs/document-editor.md)、[编辑前输入门](docs/editor-pre-input.md)、[区间标记](docs/editor-range-markers.md)、[原生文本上下文](docs/text-input.md)、[窗口输入模式](docs/text-input-mode.md)、[图片解码](docs/images.md)、[图片绘制](docs/image-drawing.md)
 - [错误诊断](docs/diagnostics.md)、[图标与打包](docs/packaging.md)
 - [应用资源与停止](docs/application-resources.md)、[代码编辑服务](docs/code-editor.md)、[Snippet 会话](docs/snippets.md)、[完整文档辅助功能](docs/document-accessibility.md)、[快照差异](docs/document-diff.md)、[双栏比较](docs/document-diff-view.md)
 - [窗口位置恢复](docs/window-placement.md)、[语言协议](docs/language-protocol.md)
