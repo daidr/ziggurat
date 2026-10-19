@@ -2,7 +2,7 @@
 
 Ziggurat 是以 Zig 为中心的桌面应用框架。小内核管理窗口、生命周期和主线程调度，自绘 UI、系统 WebView、类型化 IPC、系统设施和更新工具按需导入。工具链固定为 **Zig 0.15.2**，API 仍处于早期演进阶段。
 
-Windows x86_64 已实现 Win32/GDI、可选 D3D11/DirectWrite、WebView2、UI Automation、系统菜单、托盘、剪贴板、异步文件选择、全局快捷键与通知区通知。Linux 已通过 GTK3/GLib/Cairo/Pango 的真实桌面运行检查，可选 WebKitGTK 已验收显式 ephemeral HTML、独立持久 Profile、custom 本地资源/文件流、远程来源策略、矩形区域及可跨宿主保留 DOM 的离窗会话。各模块公开实际 capability；macOS 运行后端、完整 Linux 页面策略和完整控件库继续按计划实施。
+Windows x86_64 已实现 Win32/GDI、可选 D3D11/DirectWrite、WebView2、UI Automation、系统菜单、托盘、剪贴板、异步文件选择、全局快捷键与通知区通知。Linux 已通过 GTK3/GLib/Cairo/Pango 的真实桌面运行检查，系统菜单栏、托盘、文件选择器、通知和 X11 全局快捷键已有 Linux 实现，可选 WebKitGTK 已验收显式 ephemeral HTML、独立持久 Profile、custom 本地资源/文件流、远程来源策略、矩形区域及可跨宿主保留 DOM 的离窗会话。各模块公开实际 capability；macOS 运行后端、完整 Linux 页面策略和完整控件库继续按计划实施。
 
 ## 运行
 
@@ -52,7 +52,7 @@ WSL 应将 Zig 本地缓存放在 Linux 文件系统，见 `scripts/linux-check.
 | `ziggurat_wake` | 主线程单次截止唤醒、代数取消与 App 停止回收 | Windows waitable timer；Linux GLib Source；独立按需导入 |
 | `ziggurat_window_placement` | 显式显示器快照、离屏约束恢复与版本化状态存储 | Windows/X11；宿主事件推进，磁盘 I/O 由显式 worker 执行 |
 | `ziggurat_assets` | 显式磁盘快照、目录通知、构建期内容寻址嵌入 | 快照/嵌入可移植；目录通知为 Windows |
-| `ziggurat_system` | 系统菜单、托盘、文本剪贴板、异步选择器、全局快捷键、通知区通知、显式 Shell worker | 窗口设施/图标为 Windows；executable 启动为 Windows/Linux |
+| `ziggurat_system` | 系统菜单、托盘、文本剪贴板、异步选择器、全局快捷键、通知区通知、显式 Shell worker | 菜单、托盘、选择器、通知为 Windows/Linux（Linux 托盘与通知需会话总线，全局快捷键仅 X11）；剪贴板与文件图标为 Windows；executable 启动为 Windows/Linux |
 | `ziggurat_update` | Ed25519 元数据、限长流校验、ZIP 清单和版本目录发布 | 纯 Zig + OS 文件系统 |
 | `ziggurat_net` | [Fetch 与 WebSocket 客户端](docs/net.md)：显式 worker、取消、发送队列与读取暂停背压、大小上限、JSON 解码 | 纯 Zig；HTTPS/WSS 复用调用者 `std.http.Client` 的 TLS、系统 CA 与代理 |
 | `ziggurat_extensions` | 显式插件依赖、初始化、失败回滚与逆序关闭 | 纯 Zig、固定容量，无隐式服务或线程 |

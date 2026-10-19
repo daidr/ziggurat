@@ -25,7 +25,7 @@
 - 基础 Editor 保留 Unicode scalar 与逻辑行接口；可选系统 Layout、ShapedEditor 和 DocumentEditor 已实现字素、bidi、软换行、视觉 caret 与同一正文的准备绘制/原生文本桥接。TSF、成熟字段与真实语言引擎继续按 T02 验收。
 - 基础控件 UIA 保留其有界逻辑范围；可选文档与 Diff 辅助模块已验证完整文本、同一 Prepared 点定位、真实空 caret 和有界 owner 动作。完整语言单位、其他平台语义及屏幕阅读器兼容性继续按 T06/V03 验收。
 - 文件选择器已验证四类原生启动、取消和关闭，尚未自动操作对话框完成选择/保存确认。真实 IME 语言引擎输入和视觉质量同样需要单独的交互验证。
-- Linux 已有原生窗口、自绘、IM 和可选 WebKitGTK 的可信 HTML、持久 Profile、CookieStore、custom/远程资源策略与 PageSession；菜单、托盘、选择器和剪贴板扩展继续按 P02 实施。Windows/Linux 已有唯一 Content Owner 的矩形页面区域与跨宿主 DOM；任意遮挡和完整混合输入仍属 H02/H03。macOS 尚无运行后端。
+- Linux 已有原生窗口、自绘、IM 和可选 WebKitGTK 的可信 HTML、持久 Profile、CookieStore、custom/远程资源策略与 PageSession；菜单栏与快捷键分发、托盘（status notifier item）、文件选择器、通知和 X11 全局快捷键已实现；剪贴板扩展继续按 P02 实施。Windows/Linux 已有唯一 Content Owner 的矩形页面区域与跨宿主 DOM；任意遮挡和完整混合输入仍属 H02/H03。macOS 尚无运行后端。
 - CI 配置与本地等价检查不等于远端 CI 已运行。性能计时是宿主首次 paint、CPU 提交、同步动作和每轮至少 30 秒空闲区间，不是输入到屏幕延迟、长期空闲零 CPU 或产品启动承诺。
 - 更新模块提供验签、流校验和版本发布，网络、重启、保留策略、密钥轮换和增量更新由宿主或后续模块负责。项目已选择 MIT，源码与分发使用根目录 LICENSE；测试 fixture 保持仅用于测试。
 
