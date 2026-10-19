@@ -40,7 +40,7 @@ const Probe = struct {
             },
             .tray_activate => self.tray_actions += 1,
             .tray_context => |point| self.tray_point = point,
-            .hotkey, .notification_activated => {},
+            .hotkey, .notification_activated, .popup, .message => {},
         }
     }
     fn event(_: *anyopaque, _: z.Window, _: z.Event) void {}

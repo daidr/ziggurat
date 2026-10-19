@@ -10,7 +10,8 @@ const view = @import("ziggurat_view");
 const editing = @import("ziggurat_document_editor");
 
 pub const Options = struct {
-    /// Accessible name of the text box.
+    /// Accessible name of the text box; when empty inside a view field,
+    /// the field's label.
     name: []const u8 = "",
     colors: editing.Colors = .{},
     /// Preferred width before the parent's flex layout applies.
@@ -34,6 +35,9 @@ pub const TextField = struct {
     attached: bool = false,
     /// The first error from deferred preparation or attach, for diagnostics.
     last_error: ?anyerror = null,
+    /// What an enclosing form field adds for the paint that follows; its
+    /// strings borrow the view's storage for that paint only.
+    annotation: view.Annotation = .{},
 
     pub fn init(field: *editing.Field, host: *view.Host, parameters: editing.Parameters, options: Options) TextField {
         return .{ .field = field, .host = host, .parameters = parameters, .options = options };
@@ -42,7 +46,7 @@ pub const TextField = struct {
     /// The leaf to emit from a build function with `View.embed`. Give it a
     /// `Style.key` when siblings before it can change, so its id stays put.
     pub fn embed(self: *TextField) view.Embed {
-        return .{ .context = self, .measure = measure, .place = place, .paint = paint };
+        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .annotate = annotate };
     }
 
     /// Stop deferred work before the Field is closed. Closing the Field is
@@ -111,6 +115,10 @@ pub const TextField = struct {
         window.invalidate();
     }
 
+    fn annotate(ptr: *anyopaque, annotation: view.Annotation) void {
+        const self: *TextField = @ptrCast(@alignCast(ptr));
+        self.annotation = annotation;
+    }
     fn paint(ptr: *anyopaque, frame: *ui.Frame, _: u64, bounds: view.Rect) anyerror!void {
         const self: *TextField = @ptrCast(@alignCast(ptr));
         const theme = frame.currentTheme();
@@ -122,6 +130,8 @@ pub const TextField = struct {
         frame.roundedRect(box, 3, ui.Color.rgb(if (focused) theme.palette.focus else if (enabled) theme.palette.border else theme.palette.disabled_border));
         frame.roundedRect(.{ .x = box.x + theme.metrics.border, .y = box.y + theme.metrics.border, .width = @max(0, box.width - 2 * theme.metrics.border), .height = @max(0, box.height - 2 * theme.metrics.border) }, 2, ui.Color.rgb(theme.palette.field));
         if (!self.attached) return;
-        try self.field.draw(frame, self.options.colors, self.options.name);
+        const about = self.annotation;
+        self.annotation = .{};
+        try self.field.drawDescribed(frame, self.options.colors, if (self.options.name.len > 0) self.options.name else about.name, .{ .description = about.description, .invalid = about.invalid, .required = about.required });
     }
 };
