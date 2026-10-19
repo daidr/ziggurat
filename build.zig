@@ -469,6 +469,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
         });
+        addSmoke(b, "smoke-file-watch", "tests/system_watch_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat_system", .module = system },
+        });
     }
     if (target.result.os.tag == .windows) {
         system.linkSystemLibrary("shell32", .{});
@@ -1859,6 +1862,8 @@ pub fn build(b: *std.Build) void {
         for ([_][]const u8{ "user32", "gdi32", "shell32", "ole32" }) |library| shell_test_module.linkSystemLibrary(library, .{});
     }
     const shell_tests = b.addTest(.{ .root_module = shell_test_module });
+    const watch_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/system/watch.zig"), .target = target, .optimize = optimize, .link_libc = target.result.os.tag == .windows }) });
+    b.step("test-file-watch", "Run coarse file-watch unit tests").dependOn(&b.addRunArtifact(watch_tests).step);
     const system_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/system_capabilities.zig"),
         .target = target,
@@ -1921,6 +1926,7 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&animation_tests.step);
     check.dependOn(&producer_tests.step);
     check.dependOn(&shell_tests.step);
+    check.dependOn(&watch_tests.step);
     check.dependOn(&system_tests.step);
     check.dependOn(&embed_probe.step);
     check.dependOn(&packaging_tests.step);
@@ -2100,6 +2106,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_document_diff_view_tests.step);
     b.step("test-document-diff-view", "Run paired snapshot delivery and aligned diff view invariants").dependOn(&run_document_diff_view_tests.step);
     test_step.dependOn(&b.addRunArtifact(shell_tests).step);
+    test_step.dependOn(&b.addRunArtifact(watch_tests).step);
     test_step.dependOn(&b.addRunArtifact(system_tests).step);
     test_step.dependOn(&b.addRunArtifact(embed_probe).step);
     test_step.dependOn(&b.addRunArtifact(packaging_tests).step);
