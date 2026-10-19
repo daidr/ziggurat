@@ -3,6 +3,9 @@ const builtin = @import("builtin");
 const z = @import("ziggurat");
 const view = @import("ziggurat_view");
 const ui = @import("ziggurat_ui");
+const wake = @import("ziggurat_wake");
+const view_timer = @import("ziggurat_view_timer");
+const Watchdog = @import("watchdog.zig").Watchdog;
 const c = if (builtin.os.tag == .windows) @cImport({
     @cDefine("WIN32_LEAN_AND_MEAN", "1");
     @cDefine("NO_STRICT", "1");
@@ -96,6 +99,8 @@ const State = struct {
     more: bool = false,
     opened: usize = 0,
     score: u8 = 0,
+    font: usize = 0,
+    forward: usize = 0,
     fn build(self: *State, v: *view.View) anyerror!void {
         try v.textf("Count: {d}", .{self.count}, .{});
         try v.toolbar(.{ .gap = 8, .name = "Actions" });
@@ -140,7 +145,16 @@ const State = struct {
         _ = try v.rating(&self.score, 5, .{ .name = "Score" });
         try v.meter(3, .{ .minimum = 0, .maximum = 4 }, .{}, .{ .name = "Level", .grow = 1 });
         try v.end();
+        try v.row(.{ .gap = 8, .alignment = .center });
+        try v.comboBox(fonts[self.font], .{ .name = "Font", .width = 140 });
+        for (fonts, 0..) |font, i| _ = try v.comboOption(usize, &self.font, i, font, .{});
+        try v.end();
+        try v.tooltip("Typeface");
+        if (try v.navButton(.forward, .{})) self.forward += 1;
+        try v.avatar("Ada Lovelace", null, .{});
+        try v.end();
     }
+    const fonts = [_][]const u8{ "Serif", "Sans", "Mono" };
     const columns = [_]view.Track{ view.Track.fixed(80), view.Track.fraction(1) };
 };
 
@@ -269,16 +283,84 @@ fn run(allocator: std.mem.Allocator) !void {
     try paint(&host, window);
     try std.testing.expectEqual(@as(f64, 4), (try find(&host, .rating, 0)).value);
 
+    // A combo box opens its list over the content above or below it; a
+    // press on an option picks it and closes the list.
+    const combo = try find(&host, .combo_box, 0);
+    try std.testing.expect(combo.bounds.y + combo.bounds.height <= height);
+    Native.click(window, combo.bounds);
+    try paint(&host, window);
+    try std.testing.expect((try find(&host, .popup, 0)).checked and (try find(&host, .combo_box, 0)).checked);
+    Native.click(window, (try find(&host, .list_item, 2)).bounds);
+    try std.testing.expectEqual(@as(usize, 2), state.font);
+    try paint(&host, window);
+    try std.testing.expect(!(try find(&host, .popup, 0)).checked);
+    try std.testing.expectEqualStrings("Mono", (try find(&host, .combo_box, 0)).text);
+    Native.click(window, (try find(&host, .nav_button, 0)).bounds);
+    try std.testing.expectEqual(@as(usize, 1), state.forward);
+
     _ = try window.destroy();
     try app.dispatch();
     try std.testing.expect(host.context.window == null);
+}
+
+/// A toast that expires through the native one-shot timer, with the window
+/// repainting only for that deadline.
+const Expiring = struct {
+    app: *z.App,
+    host: *view.Host = undefined,
+    queue: view.Toasts(2) = .{},
+    shown: bool = false,
+    quitting: bool = false,
+    fn build(self: *Expiring, v: *view.View) anyerror!void {
+        try v.text("Notices", .{});
+        _ = try v.toasts(&self.queue, .{});
+        if (self.queue.len > 0) self.shown = true;
+        if (self.shown and self.queue.len == 0 and !self.quitting) {
+            self.quitting = true;
+            try self.app.post(.{ .context = self, .call = quit });
+        }
+    }
+    fn quit(ptr: *anyopaque) void {
+        const self: *Expiring = @ptrCast(@alignCast(ptr));
+        self.app.quit();
+    }
+};
+
+fn runTimer(allocator: std.mem.Allocator) !void {
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    var state: Expiring = .{ .app = app };
+    _ = try state.queue.show("Saved", .{ .duration = 30 * std.time.ns_per_ms });
+    var storage: view.Storage(16, 128) = .{};
+    var host = view.Host.init(&state, Expiring.build, storage.buffers(), .{});
+    state.host = &host;
+    host.context.render_mode = .gdi;
+    var timer = view_timer.Timer.init(&host);
+    const window = try app.createWindow(.{ .width = 240, .height = 160 });
+    try host.attach(window);
+    try timer.attach(app, allocator);
+    try window.setClientBounds(.{ .position = .{ .x = -16000, .y = -16000 }, .width = 240, .height = 160 });
+    try window.perform(.show);
+    var watchdog: Watchdog = .{ .app = app };
+    try watchdog.start();
+    defer watchdog.stop();
+    try app.run();
+    try std.testing.expect(!watchdog.expired);
+    if (host.last_error) |err| return err;
+    if (timer.last_error) |err| return err;
+    try std.testing.expect(state.shown and state.queue.len == 0);
+    // Nothing is left to wait for, so the window goes idle.
+    try std.testing.expectEqual(@as(?u64, null), host.view.wake);
+    try timer.close();
+    try std.testing.expectEqual(wake.NativeCounts{}, wake.nativeCounts());
 }
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     try run(gpa.allocator());
+    try runTimer(gpa.allocator());
     if (builtin.os.tag == .windows) try @import("view_uia.zig").run(gpa.allocator());
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter and keyed identity passed\n", .{});
+    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, timed toast expiry and keyed identity passed\n", .{});
 }

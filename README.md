@@ -51,9 +51,11 @@ WSL 应将 Zig 本地缓存放在 Linux 文件系统，见 `scripts/linux-check.
 | `ziggurat_animation` | 显式时钟的 tween/spring、固定容量时间线、播放头与下一次唤醒请求 | 纯 Zig、无分配/线程/timer |
 | `ziggurat_wake` | 主线程单次截止唤醒、代数取消与 App 停止回收 | Windows waitable timer；Linux GLib Source；独立按需导入 |
 | `ziggurat_window_placement` | 显式显示器快照、离屏约束恢复与版本化状态存储 | Windows/X11；宿主事件推进，磁盘 I/O 由显式 worker 执行 |
+| `ziggurat_document_app` | 文档身份、每文件一个窗口、最近文档、未保存预检、原子保存、自动保存调度、冲突检测与崩溃恢复 | 主线程状态无分配无计时器；文件 I/O 由显式 worker 执行；Linux 运行验证，Windows 仅交叉编译 |
 | `ziggurat_assets` | 显式磁盘快照、目录通知、构建期内容寻址嵌入 | 快照/嵌入可移植；目录通知为 Windows |
 | `ziggurat_system` | 系统菜单、托盘、文本剪贴板、异步选择器、全局快捷键、通知区通知、显式 Shell worker | 菜单、托盘、选择器、通知为 Windows/Linux（Linux 托盘与通知需会话总线，全局快捷键仅 X11）；剪贴板与文件图标为 Windows；executable 启动为 Windows/Linux |
 | `ziggurat_update` | Ed25519 元数据、限长流校验、ZIP 清单和版本目录发布 | 纯 Zig + OS 文件系统 |
+| `ziggurat_audio` | [音频](docs/audio.md)：内存音效、流式播放、Zig 混音（音量/声像/变速/区间循环/淡入淡出）、WAV 与 FLAC 解码、结束与输出变化经 `App.post` 回主线程 | Windows WASAPI；Linux PulseAudio/PipeWire 或 ALSA（运行时加载）；无设备时按时静音播放并报告原因 |
 | `ziggurat_net` | [Fetch 与 WebSocket 客户端](docs/net.md)：显式 worker、取消、发送队列与读取暂停背压、大小上限、JSON 解码 | 纯 Zig；HTTPS/WSS 复用调用者 `std.http.Client` 的 TLS、系统 CA 与代理 |
 | `ziggurat_extensions` | 显式插件依赖、初始化、失败回滚与逆序关闭 | 纯 Zig、固定容量，无隐式服务或线程 |
 | `ziggurat_text_layout` | 独立拥有的系统 shaping、字素/坐标、双向/换行、caret 与选区查询 | DirectWrite + 系统 ICU；Pango；可选导入 |
@@ -123,12 +125,12 @@ Ziggurat 使用 [MIT 许可证](LICENSE)。源码包包含 LICENSE，构建安�
 - [窗口状态与关系](docs/windows.md)、[内容组合](docs/composition.md)、[布局](docs/layout.md)、[声明式视图](docs/view.md)、[基础控件](docs/widgets.md)、[虚拟列表](docs/virtual-list.md)、[基础绘制](docs/drawing.md)、[透明分组](docs/layers.md)、[离屏快照](docs/offscreen.md)、[路径资源](docs/vector.md)、[SVG 文档](docs/svg.md)、[系统文本布局](docs/text-layout.md)、[编辑器桥接](docs/editor.md)、[索引文档](docs/document.md)、[文档视图](docs/document-editor.md)、[编辑前输入门](docs/editor-pre-input.md)、[区间标记](docs/editor-range-markers.md)、[原生文本上下文](docs/text-input.md)、[窗口输入模式](docs/text-input-mode.md)、[图片解码](docs/images.md)、[图片绘制](docs/image-drawing.md)
 - [错误诊断](docs/diagnostics.md)、[图标、打包与安装程序](docs/packaging.md)
 - [应用资源与停止](docs/application-resources.md)、[代码编辑服务](docs/code-editor.md)、[Snippet 会话](docs/snippets.md)、[完整文档辅助功能](docs/document-accessibility.md)、[快照差异](docs/document-diff.md)、[双栏比较](docs/document-diff-view.md)
-- [窗口位置恢复](docs/window-placement.md)、[语言协议](docs/language-protocol.md)
+- [窗口位置恢复](docs/window-placement.md)、[文档应用模型](docs/document-app.md)、[语言协议](docs/language-protocol.md)
 - [Diff 文档辅助功能](docs/document-diff-accessibility.md)、[SVG 文字排版](docs/svg-text.md)
 - [IPC](docs/ipc.md)、[应用字节流](docs/resource-stream.md)、[页面导航](docs/pages.md)、[文档初始化器](docs/document-initializers.md)、[独立 Cookie 存储](docs/cookie-store.md)、[Web 资源工具](docs/web-assets.md)、[系统设施](docs/system.md)
 - [签名更新](docs/updates.md)、[Fetch 与 WebSocket](docs/net.md)、[ziggurat 命令](docs/cli.md)、[性能与复现实验](docs/performance.md)
 - [扩展生命周期](docs/extensions.md)
-- [本地化](docs/i18n.md)、[显式时钟动画](docs/animation.md)、[单次唤醒](docs/wake.md)、[系统文字轮廓](docs/text-outlines.md)
+- [音频](docs/audio.md)、[本地化](docs/i18n.md)、[显式时钟动画](docs/animation.md)、[单次唤醒](docs/wake.md)、[系统文字轮廓](docs/text-outlines.md)
 - [仿射坐标与输入](docs/affine.md)、[仿射栅格合成](docs/affine-rendering.md)、[多窗口设备域测量](docs/gpu-performance.md)
 - [局部失效](docs/invalidation.md)
 - [构建缓存与 WSL 容量](docs/build-cache.md)

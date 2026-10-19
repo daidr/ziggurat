@@ -28,7 +28,7 @@
 #define CHECKED 16
 #define INVALID 32
 #define REQUIRED 64
-enum { ROLE_WINDOW, ROLE_GROUP, ROLE_BUTTON, ROLE_TEXT, ROLE_TEXT_BOX, ROLE_CHECKBOX, ROLE_RADIO, ROLE_SWITCH, ROLE_PROGRESS, ROLE_RADIO_GROUP, ROLE_SLIDER, ROLE_STEPPER, ROLE_LIST, ROLE_TAB_LIST, ROLE_TAB, ROLE_TOOLBAR, ROLE_SPLITTER, ROLE_LINK, ROLE_DISCLOSURE, ROLE_METER, ROLE_NAVIGATION, ROLE_LIST_BOX, ROLE_LIST_ITEM };
+enum { ROLE_WINDOW, ROLE_GROUP, ROLE_BUTTON, ROLE_TEXT, ROLE_TEXT_BOX, ROLE_CHECKBOX, ROLE_RADIO, ROLE_SWITCH, ROLE_PROGRESS, ROLE_RADIO_GROUP, ROLE_SLIDER, ROLE_STEPPER, ROLE_LIST, ROLE_TAB_LIST, ROLE_TAB, ROLE_TOOLBAR, ROLE_SPLITTER, ROLE_LINK, ROLE_DISCLOSURE, ROLE_METER, ROLE_NAVIGATION, ROLE_LIST_BOX, ROLE_LIST_ITEM, ROLE_COMBO_BOX, ROLE_TOOLTIP, ROLE_STATUS, ROLE_SEARCH, ROLE_IMAGE };
 enum { PATTERN_INVOKE = 1, PATTERN_VALUE = 2, PATTERN_TEXT = 4, PATTERN_TOGGLE = 8, PATTERN_SELECTION_ITEM = 16, PATTERN_SELECTION = 32, PATTERN_RANGE_VALUE = 64, PATTERN_COLLECTION = 128, PATTERN_EXPAND_COLLAPSE = 256 };
 
 typedef struct Node {
@@ -209,7 +209,9 @@ static BOOL toggle_role(uint32_t role) { return role == ROLE_CHECKBOX || role ==
 static BOOL item_role(uint32_t role) { return role == ROLE_RADIO || role == ROLE_TAB || role == ROLE_LIST_ITEM; }
 static BOOL chooser_role(uint32_t role) { return role == ROLE_RADIO_GROUP || role == ROLE_TAB_LIST || role == ROLE_LIST_BOX; }
 static BOOL invoke_role(uint32_t role) { return role == ROLE_BUTTON || role == ROLE_LINK; }
-static BOOL actionable(uint32_t role) { return invoke_role(role) || item_role(role) || toggle_role(role) || role == ROLE_DISCLOSURE; }
+/* A combo box expands and collapses its list like a disclosure. */
+static BOOL expander_role(uint32_t role) { return role == ROLE_DISCLOSURE || role == ROLE_COMBO_BOX; }
+static BOOL actionable(uint32_t role) { return invoke_role(role) || item_role(role) || toggle_role(role) || expander_role(role); }
 /* Progress and meters report a value no client may set. */
 static BOOL fixed_range(uint32_t role) { return role == ROLE_PROGRESS || role == ROLE_METER; }
 static BOOL range_role(uint32_t role) { return fixed_range(role) || role == ROLE_SLIDER || role == ROLE_STEPPER || role == ROLE_SPLITTER; }
@@ -217,6 +219,7 @@ static BOOL focusable(uint32_t role) { return actionable(role) || role == ROLE_T
 static uint32_t patterns_for_role(uint32_t role) {
     if (invoke_role(role)) return PATTERN_INVOKE;
     if (role == ROLE_DISCLOSURE) return PATTERN_EXPAND_COLLAPSE;
+    if (role == ROLE_COMBO_BOX) return PATTERN_EXPAND_COLLAPSE | PATTERN_VALUE;
     if (role == ROLE_TEXT_BOX) return PATTERN_VALUE | PATTERN_TEXT;
     if (toggle_role(role)) return PATTERN_TOGGLE;
     if (item_role(role)) return PATTERN_SELECTION_ITEM;
@@ -419,8 +422,8 @@ static HRESULT STDMETHODCALLTYPE simple_pattern(IRawElementProviderSimple *iface
         if (id == UIA_SelectionPatternId) return collection_container_new(p, &IID_ISelectionProvider2, (void **)out);
     }
     if (id == UIA_InvokePatternId && invoke_role(n.role)) *out = (IUnknown *)&p->invoke;
-    if (id == UIA_ExpandCollapsePatternId && n.role == ROLE_DISCLOSURE) *out = (IUnknown *)&p->expand_collapse;
-    if (id == UIA_ValuePatternId && n.role == ROLE_TEXT_BOX) *out = (IUnknown *)&p->value;
+    if (id == UIA_ExpandCollapsePatternId && expander_role(n.role)) *out = (IUnknown *)&p->expand_collapse;
+    if (id == UIA_ValuePatternId && (n.role == ROLE_TEXT_BOX || n.role == ROLE_COMBO_BOX)) *out = (IUnknown *)&p->value;
     if (id == UIA_TextPatternId && n.role == ROLE_TEXT_BOX) *out = (IUnknown *)&p->text;
     if (id == UIA_TogglePatternId && toggle_role(n.role)) *out = (IUnknown *)&p->toggle;
     if (id == UIA_SelectionItemPatternId && item_role(n.role)) *out = (IUnknown *)&p->selection_item;
@@ -452,6 +455,11 @@ static int control_type(uint32_t role) {
         case ROLE_NAVIGATION: return UIA_GroupControlTypeId;
         case ROLE_LIST_BOX: return UIA_ListControlTypeId;
         case ROLE_LIST_ITEM: return UIA_ListItemControlTypeId;
+        case ROLE_COMBO_BOX: return UIA_ComboBoxControlTypeId;
+        case ROLE_TOOLTIP: return UIA_ToolTipControlTypeId;
+        case ROLE_STATUS: return UIA_GroupControlTypeId;
+        case ROLE_SEARCH: return UIA_GroupControlTypeId;
+        case ROLE_IMAGE: return UIA_ImageControlTypeId;
         default: return UIA_EditControlTypeId;
     }
 }
@@ -482,18 +490,24 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
         case UIA_ControlTypePropertyId: out->vt = VT_I4; out->lVal = control_type(n->role); break;
         case UIA_LocalizedControlTypePropertyId:
             /* A meter shares the progress bar control type but is not progress. */
-            if (n->role == ROLE_METER) { out->vt = VT_BSTR; out->bstrVal = SysAllocString(L"meter"); if (!out->bstrVal) hr = E_OUTOFMEMORY; }
+            if (n->role == ROLE_METER || n->role == ROLE_STATUS) { out->vt = VT_BSTR; out->bstrVal = SysAllocString(n->role == ROLE_METER ? L"meter" : L"status"); if (!out->bstrVal) hr = E_OUTOFMEMORY; }
             break;
-        case UIA_LandmarkTypePropertyId: if (n->role == ROLE_NAVIGATION) { out->vt = VT_I4; out->lVal = UIA_NavigationLandmarkTypeId; } break;
+        case UIA_LandmarkTypePropertyId:
+            if (n->role == ROLE_NAVIGATION) { out->vt = VT_I4; out->lVal = UIA_NavigationLandmarkTypeId; }
+            if (n->role == ROLE_SEARCH) { out->vt = VT_I4; out->lVal = UIA_SearchLandmarkTypeId; }
+            break;
+        /* A status message is announced politely when it appears. */
+        case UIA_LiveSettingPropertyId: if (n->role == ROLE_STATUS) { out->vt = VT_I4; out->lVal = Polite; } break;
         case UIA_IsEnabledPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & ENABLED) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_HasKeyboardFocusPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & FOCUSED) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsKeyboardFocusablePropertyId: out->vt = VT_BOOL; out->boolVal = focusable(n->role) && (n->flags & ENABLED) && n->width > 0 && n->height > 0 ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsControlElementPropertyId: case UIA_IsContentElementPropertyId: out->vt = VT_BOOL; out->boolVal = VARIANT_TRUE; break;
         case UIA_IsOffscreenPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & OFFSCREEN) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsInvokePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = invoke_role(n->role) ? VARIANT_TRUE : VARIANT_FALSE; break;
-        case UIA_IsExpandCollapsePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_DISCLOSURE ? VARIANT_TRUE : VARIANT_FALSE; break;
+        case UIA_IsExpandCollapsePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = expander_role(n->role) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_ExpandCollapseExpandCollapseStatePropertyId: out->vt = VT_I4; out->lVal = (n->flags & CHECKED) ? ExpandCollapseState_Expanded : ExpandCollapseState_Collapsed; break;
-        case UIA_IsValuePatternAvailablePropertyId: case UIA_IsTextPatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_TEXT_BOX ? VARIANT_TRUE : VARIANT_FALSE; break;
+        case UIA_IsValuePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_TEXT_BOX || n->role == ROLE_COMBO_BOX ? VARIANT_TRUE : VARIANT_FALSE; break;
+        case UIA_IsTextPatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_TEXT_BOX ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_ValueIsReadOnlyPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & READ_ONLY) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsTogglePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = toggle_role(n->role) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_ToggleToggleStatePropertyId: out->vt = VT_I4; out->lVal = (n->flags & CHECKED) ? ToggleState_On : ToggleState_Off; break;
@@ -651,7 +665,13 @@ static HRESULT STDMETHODCALLTYPE root_focus(IRawElementProviderFragmentRoot *ifa
     return found ? make_fragment(s, id, out) : S_OK;
 }
 static HRESULT STDMETHODCALLTYPE invoke_call(IInvokeProvider *iface) { Provider *p = invoke_self(iface); return request(p->state, p->id, 1, NULL, 0, 0, 0); }
-static HRESULT STDMETHODCALLTYPE value_set(IValueProvider *iface, LPCWSTR value) { Provider *p = value_self(iface); return request(p->state, p->id, 3, value, 0, 0, 0); }
+static HRESULT STDMETHODCALLTYPE value_set(IValueProvider *iface, LPCWSTR value) {
+    Provider *p = value_self(iface); Node n;
+    HRESULT hr = read_provider_node(p, &n); if (FAILED(hr)) return hr;
+    /* A combo box value is its current choice, changed only through its list. */
+    if (n.role != ROLE_TEXT_BOX) return UIA_E_INVALIDOPERATION;
+    return request(p->state, p->id, 3, value, 0, 0, 0);
+}
 static HRESULT STDMETHODCALLTYPE value_get(IValueProvider *iface, BSTR *out) {
     if (!out) return E_POINTER; *out = NULL; Provider *p = value_self(iface); State *s = p->state;
     AcquireSRWLockShared(&s->lock); Node *n = provider_find_locked(p);
@@ -671,7 +691,8 @@ static HRESULT STDMETHODCALLTYPE toggle_state(IToggleProvider *iface, enum Toggl
     HRESULT hr = read_provider_node(p, &n);
     if (SUCCEEDED(hr)) *out = (n.flags & CHECKED) ? ToggleState_On : ToggleState_Off; return hr;
 }
-/* A disclosure's checked flag is its expanded state; one activation flips it. */
+/* A disclosure's or combo box's checked flag is its expanded state; one
+   activation flips it. */
 static HRESULT expand_collapse_to(IExpandCollapseProvider *iface, BOOL expanded) {
     Provider *p = expand_collapse_self(iface); Node n;
     HRESULT hr = read_provider_node(p, &n); if (FAILED(hr)) return hr;
@@ -898,6 +919,13 @@ static HRESULT publish(State *s,const Node *nodes,uint32_t count,const WCHAR *te
             ReleaseSRWLockExclusive(&s->lock); return E_INVALIDARG;
         }
     }
+    /* A status message absent from the previous tree announces itself once. */
+    uint64_t announce[8]; uint32_t announced = 0;
+    for (uint32_t i = 0; i < count && announced < 8; ++i) if (nodes[i].role == ROLE_STATUS) {
+        BOOL seen = FALSE;
+        for (uint32_t j = 0; j < s->count; ++j) if (s->nodes[j].id == nodes[i].id && s->nodes[j].role == ROLE_STATUS) { seen = TRUE; break; }
+        if (!seen) announce[announced++] = nodes[i].id;
+    }
     memcpy(s->nodes, nodes, count * sizeof(Node)); memcpy(s->text, text, length * sizeof(WCHAR)); s->count = count; s->text_len = length;
     if(geometry)memcpy(s->geometry,geometry,sizeof(*geometry));s->geometry_active=geometry!=NULL;
     if (s->collections) {
@@ -905,7 +933,14 @@ static HRESULT publish(State *s,const Node *nodes,uint32_t count,const WCHAR *te
         if (recipients) memcpy(s->collections->front, recipients, count * sizeof(*recipients));
         if (s->collections->virtuals) collection_store_commit(s->collections->virtuals, s->collections->virtuals->frame, publication);
     }
-    ReleaseSRWLockExclusive(&s->lock); return S_OK;
+    ReleaseSRWLockExclusive(&s->lock);
+    /* Raised after the new tree is visible and outside the lock, because
+       UI Automation may read the provider back synchronously. */
+    for (uint32_t i = 0; i < announced && UiaClientsAreListening(); ++i) {
+        Provider *p = NULL;
+        if (SUCCEEDED(provider_new(s, announce[i], &p))) { UiaRaiseAutomationEvent(&p->simple, UIA_LiveRegionChangedEventId); provider_release(p); }
+    }
+    return S_OK;
 }
 HRESULT zua_publish(State *s,const Node *nodes,uint32_t count,const WCHAR *text,uint32_t length){return publish(s,nodes,count,text,length,NULL,NULL);}
 HRESULT zua_publish_geometry(State *s,const Node *nodes,uint32_t count,const WCHAR *text,uint32_t length,const Geometry *geometry){if(!geometry)return E_INVALIDARG;return publish(s,nodes,count,text,length,geometry,NULL);}

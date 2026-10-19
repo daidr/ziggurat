@@ -51,7 +51,7 @@ jobs:
           zig fmt --check build.zig build_support src examples tests tools
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/test-native-header-cache.ps1
-          zig build test check update-tool smoke smoke-lifecycle smoke-window-registry smoke-app-stop smoke-composition smoke-composition-ui smoke-window-state smoke-window-relationships smoke-window-chrome smoke-key-input smoke-pointer-press smoke-pointer-focus smoke-pointer-clicks smoke-pointer-accessibility smoke-drawing smoke-gradients smoke-gradient-analytic smoke-conic-gradients smoke-gradient-interpolation smoke-coverage smoke-layers smoke-offscreen smoke-gaussian smoke-gaussian-scope smoke-document-fields smoke-svg smoke-svg-text smoke-svg-image smoke-text-layout smoke-text-layout-capture smoke-text-words smoke-text-words-fault smoke-text-clusters smoke-text-outlines smoke-text-cells smoke-text-drawing smoke-shaped-editor smoke-shaped-editor-native smoke-editor-caret smoke-editor-line-backgrounds smoke-editor-pre-input smoke-editor-range-markers smoke-text-input-mode smoke-text-client smoke-document smoke-document-editor smoke-code-editor smoke-document-diff-view smoke-virtual-list smoke-images smoke-image-prepare smoke-image-drawing smoke-image-update smoke-diagnostics smoke-waitables smoke-damage smoke-wake smoke-animation-ui smoke-affine-renderer smoke-affine-ui smoke-affine-document smoke-affine-text-binding smoke-affine-document-diff smoke-affine-diff-controls smoke-document-provider smoke-document-point-latch smoke-document-accessibility smoke-document-diff-accessibility smoke-document-geometry smoke-window-placement smoke-snippets smoke-native-reentry smoke-ime-cancel smoke-editor smoke-editor-routing smoke-packaging smoke-ui-config smoke-system smoke-system-events smoke-system-menus smoke-shell smoke-file-watch smoke-clipboard smoke-drop smoke-desktop smoke-widgets smoke-widget-ranges smoke-theme smoke-view smoke-view-text smoke-picker smoke-picker-result smoke-cleanup -Daccessibility=true -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
+          zig build test check update-tool smoke smoke-lifecycle smoke-window-registry smoke-app-stop smoke-composition smoke-composition-ui smoke-window-state smoke-window-relationships smoke-window-chrome smoke-key-input smoke-pointer-press smoke-pointer-focus smoke-pointer-clicks smoke-pointer-accessibility smoke-drawing smoke-gradients smoke-gradient-analytic smoke-conic-gradients smoke-gradient-interpolation smoke-coverage smoke-layers smoke-offscreen smoke-gaussian smoke-gaussian-scope smoke-document-fields smoke-svg smoke-svg-text smoke-svg-image smoke-text-layout smoke-text-layout-capture smoke-text-words smoke-text-words-fault smoke-text-clusters smoke-text-outlines smoke-text-cells smoke-text-drawing smoke-shaped-editor smoke-shaped-editor-native smoke-editor-caret smoke-editor-line-backgrounds smoke-editor-pre-input smoke-editor-range-markers smoke-text-input-mode smoke-text-client smoke-document smoke-document-editor smoke-code-editor smoke-document-diff-view smoke-virtual-list smoke-images smoke-image-prepare smoke-image-drawing smoke-image-update smoke-diagnostics smoke-waitables smoke-damage smoke-wake smoke-animation-ui smoke-affine-renderer smoke-affine-ui smoke-affine-document smoke-affine-text-binding smoke-affine-document-diff smoke-affine-diff-controls smoke-document-provider smoke-document-point-latch smoke-document-accessibility smoke-document-diff-accessibility smoke-document-geometry smoke-window-placement smoke-snippets smoke-native-reentry smoke-ime-cancel smoke-editor smoke-editor-routing smoke-packaging smoke-ui-config smoke-system smoke-system-events smoke-system-menus smoke-shell smoke-file-watch smoke-clipboard smoke-drop smoke-desktop smoke-widgets smoke-widget-ranges smoke-theme smoke-view smoke-view-text smoke-picker smoke-picker-result smoke-cleanup smoke-audio -Daccessibility=true -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           zig build smoke-accessibility -Daccessibility=true -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -72,6 +72,11 @@ jobs:
         run: |
           ./scripts/fetch-webp.ps1
           zig build smoke-images -Dwebp=true -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
+      - name: Optional pinned SQLite amalgamation
+        run: |
+          python scripts/fetch-sqlite.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          zig build test-sqlite -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
       # Hardware GPU coverage is a separate local driver check. Hosted runner
       # measurements below explicitly record any GPU fallback and deferred work.
       - name: Capture reproducible benchmark evidence
@@ -114,6 +119,7 @@ jobs:
           zig fmt --check build.zig build_support src examples tests tools
           bash scripts/test-native-header-cache.sh
           zig build test check -Doptimize=${{ matrix.optimize }}
+          zig build smoke-audio -Doptimize=${{ matrix.optimize }}
           zig build smoke-webview-runtime-linux -Doptimize=${{ matrix.optimize }}
           zig build test-document-word-units -Doptimize=${{ matrix.optimize }}
           bash scripts/net-tls-probe.sh -Doptimize=${{ matrix.optimize }}
@@ -137,6 +143,10 @@ jobs:
         run: |
           sh scripts/fetch-webp.sh
           zig build smoke-images -Dwebp=true -Doptimize=${{ matrix.optimize }}
+      - name: Optional pinned SQLite amalgamation
+        run: |
+          python3 scripts/fetch-sqlite.py
+          zig build test-sqlite -Doptimize=${{ matrix.optimize }}
       - name: Optional WebKitGTK lifecycle and policy checks
         if: github.event_name == 'workflow_dispatch' && inputs.webview
         run: |

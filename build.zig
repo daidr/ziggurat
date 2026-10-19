@@ -108,6 +108,7 @@ pub fn build(b: *std.Build) void {
         window_placement.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
     }
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) addSmoke(b, "smoke-window-placement", "tests/window_placement_smoke.zig", target, optimize, &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_window_placement", .module = window_placement } });
+    const document_app = b.addModule("ziggurat_document_app", .{ .root_source_file = b.path("src/document_app/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
     const resource_stream = b.addModule("ziggurat_resource_stream", .{ .root_source_file = b.path("src/resource_stream/root.zig"), .target = target, .optimize = optimize });
     const http_response = b.addModule("ziggurat_http_response", .{ .root_source_file = b.path("src/http_response/root.zig"), .target = target, .optimize = optimize });
     const tls_pem = b.createModule(.{ .root_source_file = b.path("src/tls_pem/root.zig"), .target = target, .optimize = optimize });
@@ -249,6 +250,11 @@ pub fn build(b: *std.Build) void {
     const run_i18n_tests = b.addRunArtifact(i18n_tests);
     test_step.dependOn(&run_i18n_tests.step);
     b.step("test-i18n", "Run locale fallback, catalog, plural, number, date and pseudolocale tests").dependOn(&run_i18n_tests.step);
+    // Optional: needs `python scripts/fetch-sqlite.py`, so it stays out of `test` and `check`.
+    const sqlite = b.addModule("ziggurat_sqlite", .{ .root_source_file = b.path("src/sqlite/root.zig"), .target = target, .optimize = optimize });
+    @import("build_support/sqlite.zig").add(b, sqlite, target, optimize);
+    const sqlite_tests = b.addTest(.{ .root_module = sqlite });
+    b.step("test-sqlite", "Run SQLite connection, binding, row, transaction, migration and thread tests (fetch source first)").dependOn(&b.addRunArtifact(sqlite_tests).step);
     const wake = b.addModule("ziggurat_wake", .{ .root_source_file = b.path("src/wake/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
         wake.link_libc = true;
@@ -559,6 +565,7 @@ pub fn build(b: *std.Build) void {
         core.linkSystemLibrary("user32", .{});
         core.linkSystemLibrary("ole32", .{});
         core.linkSystemLibrary("imm32", .{});
+        core.linkSystemLibrary("dwmapi", .{});
         core.link_libc = true;
     }
     if (target.result.os.tag == .linux) {
@@ -610,6 +617,10 @@ pub fn build(b: *std.Build) void {
         .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "pointer_classifier", .module = pointer_classifier } },
     });
     const declarative_view = b.addModule("ziggurat_view", .{ .root_source_file = b.path("src/view/root.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui } } });
+    const view_timer = b.addModule("ziggurat_view_timer", .{ .root_source_file = b.path("src/view/timer.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat", .module = core },      .{ .name = "ziggurat_view", .module = declarative_view },
+        .{ .name = "ziggurat_wake", .module = wake },
+    } });
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
         addSmoke(b, "smoke-affine-renderer", "tests/affine_renderer_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
@@ -628,6 +639,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
             .{ .name = "ziggurat_view", .module = declarative_view },
+            .{ .name = "ziggurat_wake", .module = wake },
+            .{ .name = "ziggurat_view_timer", .module = view_timer },
         });
         addSmoke(b, "smoke-animation-ui", "tests/animation_ui_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
@@ -2191,7 +2204,21 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&window_placement_tests.step);
     test_step.dependOn(&run_window_placement_tests.step);
     b.step("test-window-placement", "Run monitor placement, versioned encoding and explicit worker storage invariants").dependOn(&run_window_placement_tests.step);
+    const document_app_tests = b.addTest(.{ .root_module = document_app });
+    const run_document_app_tests = b.addRunArtifact(document_app_tests);
+    check.dependOn(&document_app_tests.step);
+    test_step.dependOn(&run_document_app_tests.step);
+    b.step("test-document-app", "Run document identity, close preflight, atomic save, autosave and recovery invariants").dependOn(&run_document_app_tests.step);
     test_step.dependOn(&run_webkit_remote.step);
+    const audio = b.addModule("ziggurat_audio", .{ .root_source_file = b.path("src/audio/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
+    if (target.result.os.tag == .linux) audio.link_libc = true;
+    if (target.result.os.tag == .windows) audio.linkSystemLibrary("ole32", .{});
+    const audio_tests = b.addTest(.{ .root_module = audio });
+    const run_audio_tests = b.addRunArtifact(audio_tests);
+    check.dependOn(&audio_tests.step);
+    test_step.dependOn(&run_audio_tests.step);
+    b.step("test-audio", "Run WAV/FLAC decoding, mixing, player, stream, notification and test-backend output invariants").dependOn(&run_audio_tests.step);
+    addSmoke(b, "smoke-audio", "tests/audio_smoke.zig", target, optimize, &.{.{ .name = "ziggurat_audio", .module = audio }});
     const snippets_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/code_editor/snippet.zig"),
         .target = target,

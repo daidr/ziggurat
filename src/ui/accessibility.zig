@@ -14,7 +14,7 @@ const c = if (builtin.os.tag == .windows) @cImport({
 pub const max_nodes = 128;
 pub const text_capacity = 32768;
 pub const root_id: u64 = 0;
-pub const Role = enum(u32) { window, group, button, text, text_box, checkbox, radio, toggle_switch, progress, radio_group, slider, stepper, list, tab_list, tab, toolbar, splitter, link, disclosure, meter, navigation, list_box, list_item };
+pub const Role = enum(u32) { window, group, button, text, text_box, checkbox, radio, toggle_switch, progress, radio_group, slider, stepper, list, tab_list, tab, toolbar, splitter, link, disclosure, meter, navigation, list_box, list_item, combo_box, tooltip, status, search, image };
 pub const Node = struct {
     id: u64,
     parent: ?u64 = root_id,
