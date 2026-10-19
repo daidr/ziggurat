@@ -38,6 +38,7 @@ flowchart TD
     Host --> I18n[ziggurat_i18n]
     Host --> Wake[ziggurat_wake]
     Host --> Placement[ziggurat_window_placement]
+    Host --> DocumentApp[ziggurat_document_app]
     Host --> LanguageProtocol[ziggurat_language_protocol]
     Host --> Producer[ziggurat_webview_producer]
     Host --> ResourceStream[ziggurat_resource_stream]
@@ -50,6 +51,7 @@ flowchart TD
     Net --> NetTLS[调用者 std.http.Client / TLS / 系统 CA]
     Wake --> Core
     Placement --> Core
+    DocumentApp --> Core
     LanguageProtocol --> Core
     LanguageProtocol --> Document
     LanguageProtocol --> CodeEditor
