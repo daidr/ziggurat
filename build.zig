@@ -494,6 +494,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
         });
+        addSmoke(b, "smoke-file-watch", "tests/system_watch_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat_system", .module = system },
+        });
     }
     if (target.result.os.tag == .linux) {
         const desktop_native = native_support.add(b, system, "system-desktop-native", "src/system/desktop_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
@@ -1938,6 +1941,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "ziggurat", .module = core }},
     }) });
+    const watch_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/system/watch.zig"), .target = target, .optimize = optimize, .link_libc = target.result.os.tag == .windows }) });
+    b.step("test-file-watch", "Run coarse file-watch unit tests").dependOn(&b.addRunArtifact(watch_tests).step);
     const system_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/system_capabilities.zig"),
         .target = target,
@@ -2000,6 +2005,7 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&animation_tests.step);
     check.dependOn(&producer_tests.step);
     check.dependOn(&shell_tests.step);
+    check.dependOn(&watch_tests.step);
     check.dependOn(&system_tests.step);
     check.dependOn(&clipboard_tests.step);
     check.dependOn(&embed_probe.step);
@@ -2188,6 +2194,7 @@ pub fn build(b: *std.Build) void {
     const system_test_step = b.step("test-system", "Run system module capability, convention and unsupported-path tests");
     system_test_step.dependOn(&run_system_tests.step);
     system_test_step.dependOn(&run_clipboard_tests.step);
+    test_step.dependOn(&b.addRunArtifact(watch_tests).step);
     test_step.dependOn(&b.addRunArtifact(embed_probe).step);
     test_step.dependOn(&b.addRunArtifact(packaging_tests).step);
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {

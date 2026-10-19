@@ -14,6 +14,7 @@ pub const drop = @import("drop.zig");
 pub const picker = @import("picker.zig");
 pub const shell = @import("shell.zig");
 pub const desktop = @import("desktop.zig");
+pub const watch = @import("watch.zig");
 pub const capabilities = .{
     .native_menu = builtin.os.tag == .windows,
     .tray = builtin.os.tag == .windows,
@@ -25,4 +26,5 @@ pub const capabilities = .{
     .notification_area = builtin.os.tag == .windows,
     .shell = shell.capabilities,
     .desktop = desktop.capabilities,
+    .file_watch = builtin.os.tag == .windows or builtin.os.tag == .linux,
 };
