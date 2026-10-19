@@ -20,7 +20,7 @@ const ScrollEvent = extern struct { kind: c_int, window: ?*anyopaque, send_event
 const ButtonEvent = extern struct { kind: c_int, window: ?*anyopaque, send_event: i8, time: u32, x: f64, y: f64, axes: ?*anyopaque, state: c_uint, button: c_uint, device: ?*anyopaque, x_root: f64, y_root: f64 };
 
 const width = 360;
-const height = 480;
+const height = 600;
 
 const Native = struct {
     fn paint(window: z.Window) void {
@@ -89,9 +89,11 @@ const State = struct {
     mode: enum { list, grid } = .list,
     amount: f64 = 3,
     list: view.ScrollModel = .{},
+    section: enum { general, advanced } = .general,
+    pane: f64 = 0.5,
     fn build(self: *State, v: *view.View) anyerror!void {
         try v.textf("Count: {d}", .{self.count}, .{});
-        try v.row(.{ .gap = 8 });
+        try v.toolbar(.{ .gap = 8, .name = "Actions" });
         if (try v.button("Increment", .{})) self.count += 1;
         if (try v.button("Add row", .{})) self.rows += 1;
         try v.end();
@@ -108,6 +110,16 @@ const State = struct {
         try v.grid(&columns, .{ .gap = 8, .self_align = .stretch });
         try v.text("Name", .{});
         try v.text("Value", .{});
+        try v.end();
+        try v.tabs(.{ .name = "Sections" });
+        _ = try v.tab(@TypeOf(self.section), &self.section, .general, "General", .{});
+        _ = try v.tab(@TypeOf(self.section), &self.section, .advanced, "Advanced", .{});
+        try v.end();
+        _ = try v.split(.row, &self.pane, .{ .minimum = 0.1, .maximum = 0.9 }, .{ .height = 40, .self_align = .stretch, .name = "Panes" });
+        try v.column(.{ .background = 0xe5e9ed });
+        try v.end();
+        try v.column(.{ .background = 0xd5dde5 });
+        try v.end();
         try v.end();
     }
     const columns = [_]view.Track{ view.Track.fixed(80), view.Track.fraction(1) };
@@ -199,6 +211,21 @@ fn run(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(name.bounds.y, value.bounds.y);
     try std.testing.expectEqual(name.bounds.x + 88, value.bounds.x);
 
+    // A tab selects on click, and the divider follows a captured drag.
+    Native.click(window, (try find(&host, .tab, 1)).bounds);
+    try std.testing.expectEqual(.advanced, state.section);
+    try paint(&host, window);
+    try std.testing.expect((try find(&host, .tab, 1)).checked and !(try find(&host, .tab, 0)).checked);
+    const split = try find(&host, .split, 0);
+    const divider = host.view.divider(&split).?;
+    const y = divider.y + divider.height / 2;
+    Native.pointer(window, true, divider.x + divider.width / 2, y);
+    Native.pointer(window, false, split.bounds.x + view.split_divider / 2 + (split.bounds.width - view.split_divider) * 0.75, y);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.75), state.pane, 0.02);
+    try paint(&host, window);
+    const pane = try find(&host, .column, 1);
+    try std.testing.expectEqual(@round((split.bounds.width - view.split_divider) * @as(f32, @floatCast(state.pane))), pane.bounds.width);
+
     _ = try window.destroy();
     try app.dispatch();
     try std.testing.expect(host.context.window == null);
@@ -208,6 +235,7 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     try run(gpa.allocator());
+    if (builtin.os.tag == .windows) try @import("view_uia.zig").run(gpa.allocator());
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid and keyed identity passed\n", .{});
+    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar and keyed identity passed\n", .{});
 }

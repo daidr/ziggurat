@@ -3414,6 +3414,25 @@ pub const Frame = struct {
         if (id == accessibility.root_id) return error.ReservedControlId;
         try self.semantic(.{ .id = id, .role = .radio_group, .name = name, .bounds = bounds });
     }
+    /// A row of tabs; each `tab` names this id as its `radio_group`.
+    pub fn tabList(self: *Frame, id: u64, bounds: Rect, name: []const u8) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.semantic(.{ .id = id, .role = .tab_list, .name = name, .bounds = bounds });
+    }
+    /// One tab. Like a radio, it shares a Tab stop and arrow navigation with
+    /// its `radio_group` peers, and activation selects it.
+    pub fn tab(self: *Frame, id: u64, bounds: Rect, text: []const u8, selected: bool, options: widgets.Options) !void {
+        if (options.radio_group == null) return error.MissingGroup;
+        try widgets.emit(self, .tab, id, bounds, text, selected, 0, options);
+    }
+    /// A named group of tool controls; controls name it as `semantic_parent`.
+    pub fn toolbar(self: *Frame, id: u64, bounds: Rect, name: []const u8) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.semantic(.{ .id = id, .role = .toolbar, .name = name, .bounds = bounds });
+    }
+    pub fn splitter(self: *Frame, id: u64, bounds: Rect, divider: Rect, value: f64, spec: Range, options: widgets.SplitterOptions) !void {
+        try widgets.emitSplitter(self, id, bounds, divider, value, spec, options);
+    }
     pub fn toggleSwitch(self: *Frame, id: u64, bounds: Rect, text: []const u8, checked: bool, options: widgets.Options) !void {
         try widgets.emit(self, .toggle_switch, id, bounds, text, checked, 0, options);
     }
@@ -3772,6 +3791,46 @@ test "range widgets share transactional metadata and never update values while d
     try std.testing.expectEqual(length, context.command_buffer.len);
     context.on_value = null;
     try std.testing.expectError(error.MissingValueHandler, frame.slider(8, bounds, 0, spec, .{}));
+}
+
+test "tabs select like radios inside a tab list and splitters report ranges" {
+    const Dummy = struct {
+        fn draw(_: *anyopaque, _: *Frame) void {}
+        fn action(_: *anyopaque, _: u64) void {}
+        fn value(_: *anyopaque, _: u64, _: ValueChange) void {}
+    };
+    var dummy: u8 = 0;
+    var context = Context.init(&dummy, Dummy.draw, Dummy.action);
+    context.on_value = Dummy.value;
+    if (build_options.accessibility) {
+        context.attached_semantics_enabled = true;
+        try context.semantic_tree.reset("Tabs", .{ .x = 0, .y = 0, .width = 200, .height = 200 });
+    }
+    var frame: Frame = .{ .context = &context, .size = .{ .width = 200, .height = 200, .scale = 1 } };
+    const strip: Rect = .{ .x = 0, .y = 0, .width = 200, .height = 30 };
+    try frame.tabList(10, strip, "Sections");
+    try frame.tab(11, .{ .x = 0, .y = 0, .width = 60, .height = 30 }, "General", true, .{ .radio_group = 10 });
+    try frame.tab(12, .{ .x = 60, .y = 0, .width = 60, .height = 30 }, "Advanced", false, .{ .radio_group = 10 });
+    try std.testing.expectError(error.MissingGroup, frame.tab(13, strip, "Loose", false, .{}));
+    try std.testing.expectError(error.MultipleRadioSelection, frame.tab(14, strip, "Second", true, .{ .radio_group = 10 }));
+    try frame.toolbar(20, .{ .x = 0, .y = 30, .width = 200, .height = 30 }, "Tools");
+    try frame.buttonWithOptions(21, .{ .x = 0, .y = 30, .width = 40, .height = 30 }, "Bold", .{ .semantic_parent = 20 });
+    const area: Rect = .{ .x = 0, .y = 60, .width = 200, .height = 100 };
+    try frame.splitter(30, area, .{ .x = 97, .y = 60, .width = 6, .height = 100 }, 0.5, .{ .minimum = 0.2, .maximum = 0.8 }, .{ .control = .{ .name = "Panes" } });
+    try std.testing.expectEqual(@as(usize, 4), context.input_state.len);
+    // Tab moves to the selected tab; arrows move to and select a peer.
+    context.input_state.tab();
+    try std.testing.expectEqual(@as(?u64, 11), context.input_state.focused);
+    try std.testing.expectEqual(@as(?u64, 12), context.input_state.navigate(.{ .key = .right }));
+    if (build_options.accessibility) {
+        const nodes = context.semantic_tree.entries[0..context.semantic_tree.len];
+        var roles: [8]accessibility.Role = undefined;
+        for (nodes[1..], 0..) |node, i| roles[i] = node.role;
+        try std.testing.expectEqualSlices(accessibility.Role, &.{ .tab_list, .tab, .tab, .toolbar, .button, .splitter }, roles[0 .. nodes.len - 1]);
+        try std.testing.expectEqual(@as(?u64, 10), nodes[2].parent);
+        try std.testing.expectEqual(@as(?u64, 20), nodes[5].parent);
+        try std.testing.expectEqual(@as(f64, 0.8), nodes[6].range_maximum);
+    }
 }
 
 fn testWorkspace(context: *Context, size: z.Size) !*TransformWorkspace {

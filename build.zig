@@ -548,6 +548,7 @@ pub fn build(b: *std.Build) void {
         });
         addSmoke(b, "smoke-view", "tests/view_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
             .{ .name = "ziggurat_view", .module = declarative_view },
         });
         addSmoke(b, "smoke-animation-ui", "tests/animation_ui_smoke.zig", target, optimize, &.{

@@ -34,7 +34,7 @@ try host.attach(window);
 Host 拥有一个 `ui.Context`，从 attach 到 Context 的 detach 回调期间必须保持地址稳定，规则与普通 Context 相同。构建函数在两种场合运行，都在主线程：
 
 - **绘制**：每次 paint 运行一遍构建，随后测量、排列、录制。失败的帧保留上一帧，错误记录在 `host.last_error`。
-- **输入**：Context 每交付一个动作或数值变化，或滚轮落在滚动容器上，Host 立即运行一遍构建并携带该事件。拥有该 ID 的控件在这一遍中消费事件：`button` 返回 true，`checkbox`/`toggleSwitch` 翻转绑定的布尔值，`radio` 选中自己的选项，`slider`/`stepper` 对绑定的**当前值**应用 `ValueChange`，`scroll` 移动它的模型。这一遍不录制也不排列，`host.view` 里的节点边界要到下一次绘制才更新；Context 随后照常使窗口失效。
+- **输入**：Context 每交付一个动作或数值变化，或滚轮落在滚动容器上，Host 立即运行一遍构建并携带该事件。拥有该 ID 的控件在这一遍中消费事件：`button` 返回 true，`checkbox`/`toggleSwitch` 翻转绑定的布尔值，`radio`/`tab` 选中自己的选项，`slider`/`stepper`/`split` 对绑定的**当前值**应用 `ValueChange`，`scroll` 移动它的模型。这一遍不录制也不排列，`host.view` 里的节点边界要到下一次绘制才更新；Context 随后照常使窗口失效。
 
 因此连续输入在重绘前逐个作用于状态，不会被重绘合并吞掉。事件的 ID 若已不在树中（例如上一个事件移除了该控件），这一遍不改变任何值。构建函数应只依据状态描述视图，可以重复调用；副作用放在控件返回 true 的分支里。
 
@@ -63,6 +63,16 @@ Host 拥有一个 `ui.Context`，从 attach 到 Context 的 detach 回调期间�
 `scroll(&model, style)` 与 `end` 配对，开始一个纵向滚动、始终裁剪的列。`ui.scroll.ScrollModel` 由应用持有，跨帧保存偏移。它的最小高度为零，首选高度是内容高度，所以要让它出现滚动，需给它固定 `height`，或者在受限的父容器里用 `grow`/收缩。每次排列都会以视口和内容尺寸调用 `model.setSizes`，偏移随内容变化被夹回有效范围；子项按内容坐标排列后整体上移 `offset.y`，因此节点边界始终是窗口坐标。内容溢出时，右侧画一条不可交互的细滑块指示位置。
 
 Host 在每帧绘制后记录可见的滚动容器（最多 `max_scroll_regions` 个，按绘制顺序），滚轮事件落在其中时交给最内层的那个，作为一个携带 `Event.scroll` 的构建遍立即作用于模型并消费该事件；不在任何滚动容器内的滚轮照常交给 Context。目前没有滚动条拖动、键盘滚动、焦点自动显露和横向滚动。
+
+### 标签页、分栏与工具栏
+
+`tabs(style)` 与 `end` 配对，开始一行标签，`Style.name` 是标签列表的可访问名称；其中的 `tab(T, &selected, option, label, style)` 与 `radio` 相同地绑定一个值，激活即选中，返回选择是否改变。标签共享一个 Tab 停靠点，方向键和 Home/End 在标签间移动并选中。标签页内容由应用在 `end` 之后按所选值自行构建，视图层不保存未选中页的状态。选中的标签有底部强调条，聚焦时画焦点框。
+
+`split(axis, &fraction, limits, style)` 与 `end` 配对，**必须恰好两个子节点**，否则 `end` 返回 `InvalidSplit`。`axis = .row` 左右分栏，`.column` 上下分栏；两个子节点在交叉轴上填满，第一个占去掉 `split_divider`（6 DIP）后长度的 `fraction`，第二个占余下部分。`limits` 是 0..1 内的 `Range`，超出返回 `InvalidRange`，绑定值每遍都被夹回其中；`step = 0` 时指针连续拖动，键盘一步为范围的百分之一。分隔条的指针按下、拖动和松开都更新值，拖动期间捕获指针；方向键增减一步（上下分栏时向下增大），PageUp/PageDown 一页，Home/End 到上下限。分栏的最小尺寸是两个子节点的最小尺寸加分隔条，但窗口更小时仍按比例分配，子节点会溢出，需要时给它们 `clip` 或滚动容器。`Style.name` 是分隔条的可访问名称。
+
+`toolbar(style)` 与 `end` 配对，开始一行工具控件，`Style.name` 是工具栏的可访问名称。其中的叶子控件（包括嵌套行列里的）把工具栏作为可访问父节点；嵌套的单选组或标签列表仍挂在窗口根下。工具栏不改变焦点顺序，也没有溢出菜单。
+
+启用 `-Daccessibility=true` 时，Windows UIA 把标签列表映射为 Tab / Selection（单选），标签为 TabItem / SelectionItem，工具栏为 ToolBar，分隔条为 Thumb / 可写 RangeValue（值为第一栏比例，上下限即 `limits`）。Linux 没有为普通控件提供 AT-SPI 语义，这些角色同样只在 Windows 暴露。
 
 ## 文本测量
 
@@ -109,9 +119,9 @@ try h.change(.{ .kind = .slider }, .{ .steps = 2 });
 ```
 
 - `Query` 按 `kind`、精确的 `text`（标签或文本内容）、`name`（`Style.name`）和 `key` 匹配，所有给出的字段都必须相符。匹配多于一个返回 `Ambiguous`，用 `nth` 按构建顺序选其中之一；没有匹配返回 `NotFound`。`find` 返回节点，`count` 返回匹配数。
-- `click` 只接受按钮、复选框、开关和单选；`change` 只接受滑块和步进器，`ValueChange` 与原生输入相同；`scroll(query, delta)` 只接受滚动容器，`wheel(x, y, delta)` 像 Host 一样把滚轮交给该点最内层的可见滚动容器。目标禁用返回 `Disabled`，被自身尺寸或任一裁剪祖先完全遮住返回 `Hidden`，种类不符返回 `NotActivatable` 或 `NotAdjustable`。
+- `click` 只接受按钮、复选框、开关、单选和标签；`change` 只接受滑块、步进器和分栏，`ValueChange` 与原生输入相同；`scroll(query, delta)` 只接受滚动容器，`wheel(x, y, delta)` 像 Host 一样把滚轮交给该点最内层的可见滚动容器。目标禁用返回 `Disabled`，被自身尺寸或任一裁剪祖先完全遮住返回 `Hidden`，种类不符返回 `NotActivatable` 或 `NotAdjustable`。
 - 事件遍若没有控件消费该事件（构建已不再产生这个节点），返回 `Stale`，不会静默忽略。成功的事件之后自动重新渲染，节点与 `frames` 反映新状态。
-- `at(x, y)` 返回该点最后绘制的可交互节点，尊重裁剪；`clickAt` 激活它。`visible(node)` 给出裁剪后的可见矩形。
+- `at(x, y)` 返回该点最后绘制的可交互节点，尊重裁剪；`clickAt` 激活它。`visible(node)` 给出裁剪后的可见矩形，`view.divider(node)` 给出分栏的分隔条矩形。
 - `write(writer)` 输出缩进的树大纲（种类、文本、名称、选中或数值、禁用、取整后的边界），适合与期望文本比较。
 - `Config` 提供窗口边界、主题和 `Options`（根样式与测量回调），`resize` 改变边界并重新渲染。
 
@@ -119,4 +129,4 @@ Harness 不经过 `ui.Context`，把嵌入叶子当作不可交互的节点，�
 
 ## 当前范围
 
-已提供列、行、网格、纵向滚动容器、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子和（通过 `ziggurat_view_text`）可编辑文本字段。没有悬停状态、虚拟列表和动画；需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。
+已提供列、行、网格、纵向滚动容器、标签页、分栏、工具栏、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子和（通过 `ziggurat_view_text`）可编辑文本字段。分栏只接受比例偏好，没有 DIP 偏好、从右到左布局和折叠；工具栏没有溢出菜单。没有悬停状态、虚拟列表和动画；需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。

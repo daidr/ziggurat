@@ -108,7 +108,7 @@ pub const Harness = struct {
         return null;
     }
 
-    /// Activate the matching button, checkbox, switch or radio, then render.
+    /// Activate the matching button, checkbox, switch, radio or tab, then render.
     pub fn click(self: *Harness, query: Query) anyerror!void {
         try self.activate(try self.find(query));
     }
@@ -118,10 +118,13 @@ pub const Harness = struct {
         try self.activate(self.at(x, y) orelse return error.NotFound);
     }
 
-    /// Apply a value change to the matching slider or stepper, then render.
+    /// Apply a value change to the matching slider, stepper or split, then render.
     pub fn change(self: *Harness, query: Query, value: ValueChange) anyerror!void {
         const node = try self.find(query);
-        if (node.kind != .slider and node.kind != .stepper) return error.NotAdjustable;
+        switch (node.kind) {
+            .slider, .stepper, .split => {},
+            else => return error.NotAdjustable,
+        }
         try self.check(node);
         try self.deliver(.{ .value = .{ .id = node.id, .change = value } });
     }
@@ -152,7 +155,7 @@ pub const Harness = struct {
 
     fn activate(self: *Harness, node: *const Node) anyerror!void {
         switch (node.kind) {
-            .button, .checkbox, .toggle_switch, .radio => {},
+            .button, .checkbox, .toggle_switch, .radio, .tab => {},
             else => return error.NotActivatable,
         }
         try self.check(node);
@@ -185,9 +188,9 @@ pub const Harness = struct {
             if (node.text.len > 0) try writer.print(" \"{s}\"", .{node.text});
             if (node.style.name.len > 0) try writer.print(" name=\"{s}\"", .{node.style.name});
             switch (node.kind) {
-                .checkbox, .toggle_switch, .radio => try writer.writeAll(if (node.checked) " on" else " off"),
+                .checkbox, .toggle_switch, .radio, .tab => try writer.writeAll(if (node.checked) " on" else " off"),
                 .progress => try writer.print(" {d:.2}", .{node.fraction}),
-                .slider, .stepper => try writer.print(" {d}", .{node.value}),
+                .slider, .stepper, .split => try writer.print(" {d}", .{node.value}),
                 .scroll => if (node.scroll) |model| try writer.print(" offset={d}", .{round(model.offset.y)}),
                 else => {},
             }
@@ -200,7 +203,7 @@ pub const Harness = struct {
 
 fn interactive(kind: Kind) bool {
     return switch (kind) {
-        .button, .checkbox, .toggle_switch, .radio, .slider, .stepper => true,
+        .button, .checkbox, .toggle_switch, .radio, .tab, .slider, .stepper => true,
         else => false,
     };
 }
@@ -428,4 +431,89 @@ test "scroll containers clip, scroll by wheel and clamp to content" {
     try std.testing.expectEqual(@as(f32, 0), state.model.offset.y);
     try std.testing.expectError(error.NotFound, h.wheel(-5, -5, .{ .x = 0, .y = 10 }));
     try std.testing.expectError(error.NotScrollable, h.scroll(.{ .kind = .stepper }, .{ .x = 0, .y = 1 }));
+}
+
+const Editor = struct {
+    section: enum { files, search } = .files,
+    sidebar: f64 = 0.3,
+    bold: bool = false,
+    saved: usize = 0,
+
+    fn build(self: *Editor, v: *View) anyerror!void {
+        try v.toolbar(.{ .name = "Formatting", .gap = 4 });
+        if (try v.button("Save", .{})) self.saved += 1;
+        _ = try v.toggleSwitch(&self.bold, "Bold", .{});
+        try v.end();
+        _ = try v.split(.row, &self.sidebar, .{ .minimum = 0.2, .maximum = 0.8, .step = 0.1 }, .{ .grow = 1, .self_align = .stretch, .name = "Sidebar" });
+        try v.column(.{ .clip = true });
+        try v.tabs(.{ .name = "Sections" });
+        _ = try v.tab(@TypeOf(self.section), &self.section, .files, "Files", .{});
+        _ = try v.tab(@TypeOf(self.section), &self.section, .search, "Search", .{});
+        try v.end();
+        switch (self.section) {
+            .files => try v.text("All files", .{}),
+            .search => try v.text("Find in files", .{}),
+        }
+        try v.end();
+        try v.text("Document", .{});
+        try v.end();
+    }
+};
+
+test "tabs switch content, splits divide space and toolbars parent controls" {
+    var storage: view.Storage(32, 256) = .{};
+    var state: Editor = .{};
+    var h = Harness.init(&state, Editor.build, storage.buffers(), .{ .bounds = .{ .x = 0, .y = 0, .width = 600, .height = 400 } });
+    try h.render();
+    const toolbar = try h.find(.{ .kind = .toolbar });
+    try std.testing.expectEqual(toolbar.id, (try h.find(.{ .text = "Save" })).semantic_parent);
+    try std.testing.expectEqual(toolbar.id, (try h.find(.{ .text = "Bold" })).semantic_parent);
+    try std.testing.expectEqual(@as(u64, 0), (try h.find(.{ .text = "Files" })).semantic_parent);
+
+    // The first pane takes 30% of the width left beside the divider.
+    const split = try h.find(.{ .kind = .split });
+    const sidebar = &h.nodes()[split.first_child];
+    const content = try h.find(.{ .text = "Document" });
+    const available = split.bounds.width - view.split_divider;
+    try std.testing.expectEqual(@round(available * 0.3), sidebar.bounds.width);
+    try std.testing.expectEqual(sidebar.bounds.x + sidebar.bounds.width + view.split_divider, content.bounds.x);
+    try std.testing.expectEqualDeep(Rect{ .x = sidebar.bounds.x + sidebar.bounds.width, .y = split.bounds.y, .width = view.split_divider, .height = split.bounds.height }, h.view.divider(split).?);
+
+    try h.change(.{ .name = "Sidebar" }, .{ .steps = 2 });
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), state.sidebar, 1e-9);
+    try h.change(.{ .kind = .split }, .maximum);
+    try std.testing.expectEqual(@as(f64, 0.8), state.sidebar);
+
+    try std.testing.expect((try h.find(.{ .text = "Files" })).checked);
+    try std.testing.expectEqual(@as(usize, 1), h.count(.{ .text = "All files" }));
+    try h.click(.{ .text = "Search" });
+    try std.testing.expectEqual(.search, state.section);
+    try std.testing.expectEqual(@as(usize, 1), h.count(.{ .text = "Find in files" }));
+    try std.testing.expect(!(try h.find(.{ .text = "Files" })).checked);
+    try h.click(.{ .text = "Save" });
+    try std.testing.expectEqual(@as(usize, 1), state.saved);
+}
+
+test "a split needs exactly two panes and limits within 0..1" {
+    const Bad = struct {
+        panes: usize = 1,
+        limits: view.Range = .{ .minimum = 0, .maximum = 1 },
+        value: f64 = 0.5,
+        fn build(self: *@This(), v: *View) anyerror!void {
+            _ = try v.split(.column, &self.value, self.limits, .{});
+            for (0..self.panes) |_| try v.text("Pane", .{});
+            try v.end();
+        }
+    };
+    var storage: view.Storage(8, 64) = .{};
+    var state: Bad = .{};
+    var h = Harness.init(&state, Bad.build, storage.buffers(), .{});
+    try std.testing.expectError(error.InvalidSplit, h.render());
+    state.panes = 2;
+    state.limits = .{ .minimum = 0, .maximum = 2 };
+    try std.testing.expectError(error.InvalidRange, h.render());
+    state.limits = .{ .minimum = 0.25, .maximum = 0.75 };
+    state.value = 0.9;
+    try h.render();
+    try std.testing.expectEqual(@as(f64, 0.75), state.value);
 }

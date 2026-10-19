@@ -20,11 +20,13 @@ pub const Point = layout.Point;
 pub const ScrollModel = ui.scroll.ScrollModel;
 pub const Track = ui.grid.Track;
 
-pub const Error = error{ TooManyNodes, TextFull, NestingTooDeep, UnbalancedContainer, NotContainer, Busy, InvalidRange, InvalidValue, InvalidText } || layout.Error;
+pub const Error = error{ TooManyNodes, TextFull, NestingTooDeep, UnbalancedContainer, NotContainer, Busy, InvalidRange, InvalidValue, InvalidText, InvalidSplit } || layout.Error;
 
 pub const max_depth = 32;
 /// Scroll containers Host can route wheel input to in one frame.
 pub const max_scroll_regions = 16;
+/// Thickness of a split's draggable divider, in DIP.
+pub const split_divider: f32 = 6;
 const none = std.math.maxInt(u32);
 const root_seed: u64 = 0x5a1f_7c3d_9b2e_4a61;
 
@@ -85,7 +87,7 @@ pub const Measurer = struct {
     }
 };
 
-pub const Kind = enum { column, row, radio_group, scroll, grid, text, spacer, button, checkbox, radio, toggle_switch, progress, slider, stepper, embed };
+pub const Kind = enum { column, row, radio_group, tab_list, toolbar, split, scroll, grid, text, spacer, button, checkbox, radio, tab, toggle_switch, progress, slider, stepper, embed };
 
 /// A leaf that measures, places and paints itself, for content the view
 /// layer does not model, such as an editable text field. The context must
@@ -111,6 +113,10 @@ pub const Node = struct {
     value: f64 = 0,
     range: Range = .{ .minimum = 0, .maximum = 1 },
     radio_group: ?u64 = null,
+    /// Nearest enclosing toolbar, the accessible parent of leaf controls.
+    semantic_parent: u64 = ui.accessibility.root_id,
+    /// Direction a split lays out its two panes.
+    axis: Axis = .column,
     /// Application-owned scroll state of a scroll container.
     scroll: ?*ScrollModel = null,
     /// Column tracks of a grid, borrowed until the pass is arranged.
@@ -130,7 +136,7 @@ pub const Node = struct {
 
     pub fn isContainer(self: *const Node) bool {
         return switch (self.kind) {
-            .column, .row, .radio_group, .scroll, .grid => true,
+            .column, .row, .radio_group, .tab_list, .toolbar, .split, .scroll, .grid => true,
             else => false,
         };
     }
@@ -236,7 +242,7 @@ pub const View = struct {
         const parent = &self.buffers.nodes[parent_index];
         if (parent.child_count >= layout.max_items) return error.TooManyItems;
         const index = self.len;
-        self.buffers.nodes[index] = .{ .kind = kind, .id = self.identity(parent, kind, style), .style = style, .parent = parent_index, .end = index + 1 };
+        self.buffers.nodes[index] = .{ .kind = kind, .id = self.identity(parent, kind, style), .style = style, .parent = parent_index, .end = index + 1, .semantic_parent = if (parent.kind == .toolbar) parent.id else parent.semantic_parent };
         if (parent.last_child == none) parent.first_child = index else self.buffers.nodes[parent.last_child].next_sibling = index;
         parent.last_child = index;
         parent.child_count += 1;
@@ -286,7 +292,9 @@ pub const View = struct {
         if (self.depth <= 1) return error.UnbalancedContainer;
         self.depth -= 1;
         const index = self.stack[self.depth];
-        self.buffers.nodes[index].end = self.len;
+        const node = &self.buffers.nodes[index];
+        if (node.kind == .split and node.child_count != 2) return error.InvalidSplit;
+        node.end = self.len;
     }
 
     pub fn text(self: *View, value: []const u8, style: Style) Error!void {
@@ -354,10 +362,60 @@ pub const View = struct {
     }
     /// Selects `option` on activation; true when the selection changed.
     pub fn radio(self: *View, comptime T: type, selected: *T, option: T, label: []const u8, style: Style) Error!bool {
+        return self.choice(.radio, .radio_group, T, selected, option, label, style);
+    }
+    /// Starts a row of tabs bound to one value. The list carries the
+    /// accessible `name`; the application builds the selected tab's content
+    /// after it. Close it with `end`.
+    pub fn tabs(self: *View, style: Style) Error!void {
+        _ = try self.open(.tab_list, style);
+    }
+    /// Selects `option` on activation; true when the selection changed.
+    pub fn tab(self: *View, comptime T: type, selected: *T, option: T, label: []const u8, style: Style) Error!bool {
+        return self.choice(.tab, .tab_list, T, selected, option, label, style);
+    }
+    /// Starts a row of tool controls under one accessible `name`. Controls
+    /// inside it, however deeply nested, report the toolbar as their parent.
+    /// Close it with `end`.
+    pub fn toolbar(self: *View, style: Style) Error!void {
+        _ = try self.open(.toolbar, style);
+    }
+    /// Starts two panes along `axis` separated by a draggable divider. The
+    /// first pane takes `fraction` of the length, kept within `limits`, which
+    /// must lie in 0..1; pointer drags, arrow keys and accessibility clients
+    /// move it. Build exactly two children, then close it with `end`. True
+    /// when the divider moved in this pass.
+    pub fn split(self: *View, axis: Axis, fraction: *f64, limits: Range, style: Style) Error!bool {
+        limits.validate() catch return error.InvalidRange;
+        if (limits.minimum < 0 or limits.maximum > 1) return error.InvalidRange;
+        const node = try self.open(.split, style);
+        node.axis = axis;
+        node.range = limits;
+        var changed = false;
+        if (self.take(node.id)) |event| if (event == .value) {
+            const next = limits.apply(fraction.*, event.value.change) catch return error.InvalidValue;
+            changed = next != fraction.*;
+            fraction.* = next;
+        };
+        if (!std.math.isFinite(fraction.*)) return error.InvalidValue;
+        fraction.* = std.math.clamp(fraction.*, limits.minimum, limits.maximum);
+        node.value = fraction.*;
+        return changed;
+    }
+    /// The divider strip between a split's arranged panes.
+    pub fn divider(self: *const View, node: *const Node) ?Rect {
+        if (node.kind != .split or node.first_child == none) return null;
+        const first = self.buffers.nodes[node.first_child].bounds;
+        return if (node.axis == .column)
+            .{ .x = first.x, .y = first.y + first.height, .width = first.width, .height = split_divider }
+        else
+            .{ .x = first.x + first.width, .y = first.y, .width = split_divider, .height = first.height };
+    }
+    fn choice(self: *View, kind: Kind, container: Kind, comptime T: type, selected: *T, option: T, label: []const u8, style: Style) Error!bool {
         const parent = &self.buffers.nodes[self.stack[self.depth - 1]];
-        if (parent.kind != .radio_group) return error.NotContainer;
+        if (parent.kind != container) return error.NotContainer;
         const group = parent.id;
-        const node = try self.append(.radio, style);
+        const node = try self.append(kind, style);
         node.text = try self.copy(label);
         node.radio_group = group;
         var changed = false;
@@ -416,13 +474,13 @@ pub const View = struct {
         const size: Size = switch (node.kind) {
             .text => text_size,
             .spacer => .{},
-            .button => .{ .width = text_size.width + 2 * (metrics.content_inset + 8), .height = @max(text_size.height, metrics.indicator_size) + 2 * metrics.content_inset },
+            .button, .tab => .{ .width = text_size.width + 2 * (metrics.content_inset + 8), .height = @max(text_size.height, metrics.indicator_size) + 2 * metrics.content_inset },
             .checkbox, .radio => .{ .width = metrics.indicator_size + metrics.label_gap + text_size.width, .height = @max(text_size.height, metrics.indicator_size) + metrics.content_inset },
             .toggle_switch => .{ .width = metrics.indicator_size * 1.7 + metrics.label_gap + text_size.width, .height = @max(text_size.height, metrics.indicator_size) + metrics.content_inset },
             .progress => .{ .width = 160, .height = 12 },
             .slider => .{ .width = 200, .height = metrics.thumb_size + 2 * metrics.content_inset },
             .stepper => .{ .width = 4 * (Measurer.line_height + metrics.content_inset), .height = Measurer.line_height + metrics.content_inset },
-            .column, .row, .radio_group, .scroll, .grid, .embed => unreachable,
+            .column, .row, .radio_group, .tab_list, .toolbar, .split, .scroll, .grid, .embed => unreachable,
         };
         const minimum: Size = switch (node.kind) {
             .progress, .slider, .spacer => .{ .width = 0, .height = size.height },
@@ -432,7 +490,12 @@ pub const View = struct {
     }
 
     fn options(node: *const Node) layout.Options {
-        return .{ .axis = if (node.kind == .row) .row else .column, .padding = node.style.padding, .gap = node.style.gap, .alignment = node.style.alignment, .justify = node.style.justify, .overflow = if (node.clips()) .clip else .visible };
+        const axis: Axis = switch (node.kind) {
+            .row, .tab_list, .toolbar => .row,
+            .split => node.axis,
+            else => .column,
+        };
+        return .{ .axis = axis, .padding = node.style.padding, .gap = if (node.kind == .split) split_divider else node.style.gap, .alignment = node.style.alignment, .justify = node.style.justify, .overflow = if (node.clips()) .clip else .visible };
     }
     fn gridOptions(node: *const Node) ui.grid.AutoOptions {
         const style = node.style;
@@ -558,6 +621,7 @@ pub const View = struct {
                     const content: Rect = .{ .x = node.bounds.x, .y = node.bounds.y - model.offset.y, .width = viewport.width, .height = @max(viewport.height, node.content.height) };
                     _ = try layout.arrange(content, options(node), items, rects);
                 },
+                .split => splitPanes(node, rects),
                 else => _ = try layout.arrange(node.bounds, options(node), items, rects),
             }
             var child = node.first_child;
@@ -566,6 +630,25 @@ pub const View = struct {
                 all[child].bounds = rects[i];
                 i += 1;
             }
+        }
+    }
+
+    /// Both panes fill the cross axis; the first takes `value` of the length
+    /// left after the divider.
+    fn splitPanes(node: *const Node, rects: []Rect) void {
+        const p = node.style.padding;
+        const b = node.bounds;
+        const inner: Rect = .{ .x = b.x + p.left, .y = b.y + p.top, .width = @max(0, b.width - p.left - p.right), .height = @max(0, b.height - p.top - p.bottom) };
+        const vertical = node.axis == .column;
+        const available = @max(0, (if (vertical) inner.height else inner.width) - split_divider);
+        const first: f32 = @round(available * @as(f32, @floatCast(node.value)));
+        const second = available - first;
+        if (vertical) {
+            rects[0] = .{ .x = inner.x, .y = inner.y, .width = inner.width, .height = first };
+            rects[1] = .{ .x = inner.x, .y = inner.y + first + split_divider, .width = inner.width, .height = second };
+        } else {
+            rects[0] = .{ .x = inner.x, .y = inner.y, .width = first, .height = inner.height };
+            rects[1] = .{ .x = inner.x + first + split_divider, .y = inner.y, .width = second, .height = inner.height };
         }
     }
 
@@ -584,12 +667,22 @@ pub const View = struct {
             }
             const bounds = node.bounds;
             const style = node.style;
-            const control: ui.widgets.Options = .{ .enabled = style.enabled, .name = style.name };
+            const control: ui.widgets.Options = .{ .enabled = style.enabled, .name = style.name, .semantic_parent = node.semantic_parent };
             switch (node.kind) {
-                .column, .row, .radio_group, .scroll, .grid => {
-                    if (node.kind == .radio_group) try target.radioGroup(node.id, bounds, style.name);
+                .column, .row, .radio_group, .tab_list, .toolbar, .split, .scroll, .grid => {
+                    switch (node.kind) {
+                        .radio_group => try target.radioGroup(node.id, bounds, style.name),
+                        .tab_list => try target.tabList(node.id, bounds, style.name),
+                        .toolbar => try target.toolbar(node.id, bounds, style.name),
+                        else => {},
+                    }
                     if (style.background) |color| target.roundedRect(bounds, style.radius, ui.Color.rgb(color));
                     if (style.border) |color| target.strokeRect(bounds, style.radius, style.border_width, ui.Color.rgb(color));
+                    if (node.kind == .split) {
+                        const p = style.padding;
+                        const area: Rect = .{ .x = bounds.x + p.left, .y = bounds.y + p.top, .width = @max(0, bounds.width - p.left - p.right), .height = @max(0, bounds.height - p.top - p.bottom) };
+                        try target.splitter(node.id, area, self.divider(node).?, node.value, node.range, .{ .control = control, .vertical = node.axis == .column });
+                    }
                     if (node.clips() and node.child_count > 0) {
                         try target.pushClip(bounds);
                         clips[clip_depth] = @intCast(at);
@@ -604,6 +697,11 @@ pub const View = struct {
                     var radio_options = control;
                     radio_options.radio_group = node.radio_group;
                     try target.radio(node.id, bounds, node.text, node.checked, radio_options);
+                },
+                .tab => {
+                    var tab_options = control;
+                    tab_options.radio_group = node.radio_group;
+                    try target.tab(node.id, bounds, node.text, node.checked, tab_options);
                 },
                 .toggle_switch => try target.toggleSwitch(node.id, bounds, node.text, node.checked, control),
                 .progress => try target.progress(node.id, bounds, node.fraction, control),
@@ -821,6 +919,19 @@ const Recorder = struct {
     pub fn radio(self: *Recorder, id: u64, bounds: Rect, _: []const u8, checked: bool, options: ui.widgets.Options) !void {
         if (options.radio_group == null or options.radio_group.? != self.group) return error.MissingGroup;
         self.push(.radio, id, bounds, checked);
+    }
+    pub fn tabList(self: *Recorder, id: u64, _: Rect, _: []const u8) !void {
+        self.group = id;
+    }
+    pub fn tab(self: *Recorder, id: u64, bounds: Rect, _: []const u8, checked: bool, options: ui.widgets.Options) !void {
+        if (options.radio_group == null or options.radio_group.? != self.group) return error.MissingGroup;
+        self.push(.tab, id, bounds, checked);
+    }
+    pub fn toolbar(self: *Recorder, id: u64, bounds: Rect, _: []const u8) !void {
+        self.push(.toolbar, id, bounds, false);
+    }
+    pub fn splitter(self: *Recorder, id: u64, _: Rect, divider: Rect, _: f64, _: Range, _: ui.widgets.SplitterOptions) !void {
+        self.push(.split, id, divider, false);
     }
     pub fn toggleSwitch(self: *Recorder, id: u64, bounds: Rect, _: []const u8, checked: bool, _: ui.widgets.Options) !void {
         self.push(.toggle_switch, id, bounds, checked);
