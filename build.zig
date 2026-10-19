@@ -464,11 +464,24 @@ pub fn build(b: *std.Build) void {
         });
     }
     const system = b.addModule("ziggurat_system", .{ .root_source_file = b.path("src/system/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
+    if (target.result.os.tag == .linux) {
+        const native = native_support.add(b, system, "system-shell-native", "src/system/shell_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
+        system.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
+        system.link_libc = true;
+    }
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
-        addSmoke(b, "smoke-shell", "tests/system_shell_smoke.zig", target, optimize, &.{
+        const shell_smoke = addSmokeExecutable(b, "smoke-shell", "tests/system_shell_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
         });
+        if (target.result.os.tag == .linux) {
+            // Test-only private FileManager1 provider on the smoke's session bus.
+            const fake = native_support.add(b, shell_smoke.root_module, "shell-file-manager-fake", "tests/system_shell_file_manager.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+            fake.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
+            shell_smoke.root_module.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
+            shell_smoke.root_module.link_libc = true;
+        }
         addSmoke(b, "smoke-clipboard", "tests/system_clipboard_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
@@ -487,10 +500,10 @@ pub fn build(b: *std.Build) void {
         system.link_libc = true;
     }
     if (target.result.os.tag == .windows) {
+        system.linkSystemLibrary("ole32", .{});
         system.linkSystemLibrary("shell32", .{});
         system.linkSystemLibrary("user32", .{});
         system.linkSystemLibrary("gdi32", .{});
-        system.linkSystemLibrary("ole32", .{});
         system.linkSystemLibrary("comctl32", .{});
         _ = native_support.add(b, system, "system-picker-native", "src/system/picker.c", &.{"-std=c11"}, target, optimize);
         system.link_libc = true;
@@ -2330,6 +2343,11 @@ fn addWindowsProfileStorageNative(b: *std.Build, owner: *std.Build.Module, prefi
 }
 
 fn addSmoke(b: *std.Build, name: []const u8, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) void {
+    _ = addSmokeExecutable(b, name, path, target, optimize, imports);
+}
+
+/// addSmoke that returns the executable for test-only native additions.
+fn addSmokeExecutable(b: *std.Build, name: []const u8, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) *std.Build.Step.Compile {
     const exe = b.addExecutable(.{
         .name = name,
         .root_module = b.createModule(.{ .root_source_file = b.path(path), .target = target, .optimize = optimize, .imports = imports }),
@@ -2345,6 +2363,7 @@ fn addSmoke(b: *std.Build, name: []const u8, path: []const u8, target: std.Build
     if (b.args) |args| run.addArgs(args);
     b.step(name, "Run integration checks with hidden windows").dependOn(&run.step);
     b.top_level_steps.get("check").?.step.dependOn(&exe.step);
+    return exe;
 }
 
 fn addResources(b: *std.Build, exe: *std.Build.Step.Compile) void {
