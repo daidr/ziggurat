@@ -6,6 +6,7 @@ const z = @import("ziggurat");
 const types = @import("types.zig");
 const native_menu = @import("windows_menu.zig");
 const menus = @import("menus.zig");
+const desktop = @import("desktop.zig");
 const c = @cImport({
     @cDefine("WIN32_LEAN_AND_MEAN", "1");
     @cDefine("NO_STRICT", "1");
@@ -165,6 +166,27 @@ pub const Tray = struct {
             if (self.popup.last_error != 0) self.last_error = self.popup.last_error;
             return err;
         };
+    }
+    /// Where the shell shows the icon, in physical desktop pixels, or null
+    /// when it reports none, as when the icon sits in the overflow area.
+    pub fn iconRect(self: *Tray) ?desktop.Rect {
+        const app = self.app orelse return null;
+        app.assertOwner();
+        var identifier = std.mem.zeroes(c.NOTIFYICONIDENTIFIER);
+        identifier.cbSize = @sizeOf(c.NOTIFYICONIDENTIFIER);
+        identifier.hWnd = self.hwnd;
+        identifier.uID = self.id;
+        if (self.guid) |guid| identifier.guidItem = guid;
+        var rect = std.mem.zeroes(c.RECT);
+        if (c.Shell_NotifyIconGetRect(&identifier, &rect) < 0 or rect.right <= rect.left or rect.bottom <= rect.top) return null;
+        return .{ .x = rect.left, .y = rect.top, .width = @intCast(rect.right - rect.left), .height = @intCast(rect.bottom - rect.top) };
+    }
+    /// Whether the pointer is over the icon now.
+    pub fn pointerOverIcon(self: *Tray) bool {
+        const rect = self.iconRect() orelse return false;
+        var cursor: c.POINT = undefined;
+        if (c.GetCursorPos(&cursor) == 0) return false;
+        return cursor.x >= rect.x and cursor.y >= rect.y and cursor.x - rect.x < rect.width and cursor.y - rect.y < rect.height;
     }
     pub fn cancelPopup(self: *Tray) void {
         if (self.app) |app| app.assertOwner();

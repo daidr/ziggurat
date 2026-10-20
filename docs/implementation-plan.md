@@ -125,7 +125,7 @@ U09 的实时折线须保留源数据供选择/读数，按可见物理像素列
 | T02 | 进行中 | 完整输入控件、IME/候选/组合、平台文本服务 | 保留客户端及IMM/GTK surrounding、单Document普通字段的焦点/单多行策略/组合/注入clipboard/滚动caret与Windows Value动作已分项验；TSF、真实语言引擎、Linux系统clipboard及更广投影编辑继续；依赖T01 |
 | T03 | 已完成（Windows/Linux，有界段落视图） | 可扩展文档 buffer、多选区、查找替换、折叠 | 单文档原子多选编辑/撤销、worker快照流式字面搜索及派生段落折叠已验收；段落/缓存/元数据上限明确，语言服务与成熟字段UI另验；依赖 T01 |
 | T04 | 进行中 | 代码编辑 hooks、补全、hover、诊断、Diff | T04.1版本化Broker/Presenter、T04.2行差异/双栏/统一可编辑比较、行内标记及成对上下文折叠已验收；可访问语义与语言工具继续分项；依赖 T03 |
-| T05 | 待实现 | 富文本与 Markdown 展示/编辑 | 结构化模型、链接/嵌入资源/复制、非可信内容约束与大文档；依赖 G01/T03 |
+| T05 | 部分完成 | 富文本与 Markdown 展示/编辑 | T05.1 已有纯 Zig `ziggurat_markdown`（CommonMark 块/行内、GitHub 表格/任务列表/删除线/扩展自动链接，有界节点树，原始 HTML 作字面文本）、`ziggurat_markdown_view`（声明式视图映射、折行、链接/任务激活）与 `ziggurat_markdown_code`（预排版等宽代码块），见[Markdown](markdown.md)；混合字重/字体 runs、嵌入资源、复制选区与编辑待实现；依赖 G01/T03 |
 | T06 | 进行中 | UIA/AT-SPI/NSAccessibility 完整控件与文本语义 | Windows文档/MTA、空caret/TextPattern2、仿射凸裁剪与辅助动作，以及Linux单源只读AT-SPI/完整Prepared命中已分项验；Windows完整候选point迁移、Linux动作/多源、完整语言单位与其他平台继续；依赖 T01/U04/P02 |
 | T07 | 待实现 | 可选字体资产注册、系统/应用字体发现 | 显式准备、有界字体数据/枚举、monospaced与来源、别名/去重、缓存失效及旧Layout最后lease；依赖 T01 |
 
@@ -196,7 +196,7 @@ B02 分项：
 | S01 | 已完成（Windows） | 全局快捷键、通知区通知 | 原生注册/冲突/注销、稳定事件 ID、Owner 关闭与诊断重入检查；Linux/macOS 见 P02/P04 |
 | S02 | 部分完成 | shell 打开 URL/文件、定位、回收站、文件图标、应用发现/启动 | S02.1 executable 启动、S02.2 URL（https/http/mailto 默认白名单）/关联文件/定位、S02.3 回收站（Windows/Linux）及 S02.4 Windows 16/32px 不透明图标已实现；完整图标（Linux/高分辨率/透明）与安装应用发现/按身份启动待实现；真实关联程序/资源管理器显示未自动验证 |
 | S03 | 部分完成 | 多显示器、主题/accent/可访问性偏好、网络、电源与文件监视 | 显示器/偏好/电源/网络快照与合并变化订阅（Windows/Linux）、粗模式文件监视（inotify/ReadDirectoryChangesW）已实现；详细文件监视（快照/rename 匹配）、Linux 电源来源变化、Wayland 显示器、portal 配色待实现；Windows 路径首次运行在 CI |
-| S04 | 待实现 | 密钥存储、登录启动、深链和文件关联 | OS 权限/用户作用域、安装与运行时分工、卸载和参数转发；依赖 W05/R01 |
+| S04 | 部分完成（密钥存储） | 密钥存储、登录启动、深链和文件关联 | OS 权限/用户作用域、安装与运行时分工、卸载和参数转发；依赖 W05/R01 |
 | S05 | 部分完成 | 多格式剪贴板、transfer、惰性 provider、原生拖放 | Board 的 text/HTML/PNG/文件/自定义事务写入、异步读取、惰性 provider、变化事件、Windows 有界占用重试及 Windows/Linux 放置目标已实现；拖动源（需模态拖动循环）未提供；真实跨进程拖放、他进程占用重试与退出渲染未自动验证 |
 | S06 | 部分完成（Windows/Linux） | 异步消息对话框、上下文菜单与菜单快捷键 | S06.1 两平台上下文菜单与异步消息框、Windows 菜单栏快捷键已验；非嵌套循环（Windows 菜单在私有安全点进入系统菜单循环）、取消/关闭、禁用祖先、旧消息隔离分别验证；Linux 菜单栏与快捷键分发、物理输入与视觉验收继续；依赖 W02/U02 |
 | S07 | 待实现 | 应用身份/系统目录、任务栏或 Dock badge/progress/menu、阻止休眠 | 按平台 capability、用户作用域、原生引用/电源断言配对与最后 owner 回收；依赖 S03/P03 |
