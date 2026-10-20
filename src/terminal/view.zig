@@ -475,7 +475,9 @@ pub const TerminalView = struct {
             }
         }
         if (self.token) |token| try frame.textField(token, bounds, true);
-        try frame.semantic(.{ .id = id, .role = .text_box, .name = self.options.name, .value = self.cursorLine(), .bounds = bounds, .focused = focused });
+        // Until the leaf is a registered text field nothing can take input
+        // for it, so the box reads as read-only.
+        try frame.semantic(.{ .id = id, .role = .text_box, .name = self.options.name, .value = self.cursorLine(), .bounds = bounds, .focused = focused, .read_only = self.token == null });
     }
 
     fn fontFor(self: *const TerminalView, cell: Cell) ui.Font {
