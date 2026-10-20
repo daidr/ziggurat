@@ -35,3 +35,16 @@ else false;
 ```
 
 These sinks require a non-null expected error, so either null correctly rejects the diagnostic. A sink that permits two null errors must handle that null/null case explicitly. The workaround preserves error identity checks; it never substitutes error-name strings or accepts unexpected diagnostics. Project inspection found the risky two-optional pattern in native test sinks; production diagnostic storage used null checks or unwrapped payloads. Keep that distinction when adding or reviewing future comparisons.
+
+## Writing to `std.Io.Reader.ending`
+
+In Zig 0.15.2, `std.http.Client.Response.reader` returns `std.Io.Reader.ending` for methods whose responses carry no body (`HEAD`, `PUT`, `TRACE`). That pointer is `@constCast` of a constant `Reader`. Methods that move its position, such as `discardRemaining` (which assigns `seek = end` before asking the stream), write to that constant. LLVM places it in read-only memory, so the write faults: on Windows Debug, and in every Linux build that uses LLVM, including ReleaseSafe. The Linux x86_64 Debug self-hosted backend keeps it writable, which is why Linux Debug runs passed:
+
+```zig
+const r = std.Io.Reader.ending;
+_ = r.discardRemaining() catch 0;
+// zig run -fllvm: Segmentation fault in Reader.discardRemaining
+// zig run -fno-llvm: returns 0
+```
+
+This is a standard library defect, not a framework HTTP client one. Never call a position-changing `Reader` method on `Response.reader` for those methods. To read such a response's body, use `response.request.reader.bodyReader(...)`, as `src/net/fetch.zig` and the error path of `tools/s3.zig` do. On a connection that is not kept alive, return without reading. The CLI tests are built with LLVM so CI covers this path.

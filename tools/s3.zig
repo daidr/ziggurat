@@ -173,8 +173,10 @@ pub fn put(allocator: std.mem.Allocator, http: *std.http.Client, client: *const 
     request.connection.?.flush() catch |err| return fail(reason, "{s}", .{@errorName(err)});
     var response = request.receiveHead(&.{}) catch |err| return fail(reason, "{s}", .{@errorName(err)});
     const status = response.head.status;
-    // The connection is not kept alive, so an unread success body is
-    // dropped with it.
+    // Never discard through `response.reader` here: for a PUT it returns
+    // `std.Io.Reader.ending`, a constant that discarding writes to, which
+    // faults where constants are read-only (LLVM builds). The connection is
+    // not kept alive, so an unread success body is dropped with it.
     if (status.class() == .success) return;
     var bucket_region: [64]u8 = undefined;
     var bucket_region_len: usize = 0;
@@ -186,7 +188,8 @@ pub fn put(allocator: std.mem.Allocator, http: *std.http.Client, client: *const 
     var text: [64 * 1024]u8 = undefined;
     var sink: std.Io.Writer = .fixed(&text);
     var transfer: [64]u8 = undefined;
-    // std.http reads no body of a PUT's response through `reader`.
+    // `response.reader` gives a PUT no body, so read the error through the
+    // request's own body reader.
     const head = response.head;
     _ = request.reader.bodyReader(&transfer, head.transfer_encoding, head.content_length).streamRemaining(&sink) catch {};
     reason.print("{d} {s}", .{ @intFromEnum(status), status.phrase() orelse "" }) catch {};
