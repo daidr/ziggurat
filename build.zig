@@ -295,7 +295,8 @@ pub fn build(b: *std.Build) void {
         .imports = &.{ .{ .name = "ziggurat_document", .module = document }, .{ .name = "ziggurat_document_diff", .module = document_diff } },
     }) });
     b.step("benchmark-document-diff", "Measure bounded snapshot comparison without a UI loop").dependOn(&b.addRunArtifact(document_diff_benchmark).step);
-    const code_editor = b.addModule("ziggurat_code_editor", .{ .root_source_file = b.path("src/code_editor/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_document", .module = document }} });
+    const code_syntax = b.addModule("ziggurat_code_syntax", .{ .root_source_file = b.path("src/code_editor/syntax/root.zig"), .target = target, .optimize = optimize });
+    const code_editor = b.addModule("ziggurat_code_editor", .{ .root_source_file = b.path("src/code_editor/root.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat_document", .module = document }, .{ .name = "ziggurat_code_syntax", .module = code_syntax }, .{ .name = "ziggurat_document_diff", .module = document_diff } } });
     const language_protocol = b.addModule("ziggurat_language_protocol", .{ .root_source_file = b.path("src/language_protocol/root.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat_document", .module = document },
         .{ .name = "ziggurat_code_editor", .module = code_editor },
@@ -656,6 +657,23 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_text_layout", .module = text_layout }, .{ .name = "ziggurat_ui", .module = ui },
         .{ .name = "ziggurat_view", .module = declarative_view },
     } });
+    const view_rich_text = b.addModule("ziggurat_view_rich_text", .{ .root_source_file = b.path("src/view/rich_text.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat_ui", .module = ui }, .{ .name = "ziggurat_view", .module = declarative_view },
+    } });
+    const view_rich_text_tests = b.addTest(.{ .root_module = view_rich_text });
+    check.dependOn(&view_rich_text_tests.step);
+    const run_view_rich_text_tests = b.addRunArtifact(view_rich_text_tests);
+    test_step.dependOn(&run_view_rich_text_tests.step);
+    b.step("test-view-rich-text", "Run rich text wrapping, baseline, decoration and paint tests").dependOn(&run_view_rich_text_tests.step);
+    const markdown_rich = b.addModule("ziggurat_markdown_rich", .{ .root_source_file = b.path("src/markdown/rich_text.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat_markdown", .module = markdown },     .{ .name = "ziggurat_markdown_view", .module = markdown_view },
+        .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_view_rich_text", .module = view_rich_text },
+    } });
+    const markdown_rich_tests = b.addTest(.{ .root_module = markdown_rich });
+    check.dependOn(&markdown_rich_tests.step);
+    const run_markdown_rich_tests = b.addRunArtifact(markdown_rich_tests);
+    test_step.dependOn(&run_markdown_rich_tests.step);
+    b.step("test-markdown-rich", "Run Markdown inline style to rich text span tests").dependOn(&run_markdown_rich_tests.step);
     const chart = b.addModule("ziggurat_chart", .{ .root_source_file = b.path("src/chart/root.zig"), .target = target, .optimize = optimize });
     const chart_tests = b.addTest(.{ .root_module = chart });
     check.dependOn(&chart_tests.step);
@@ -2342,6 +2360,11 @@ pub fn build(b: *std.Build) void {
         check.dependOn(&math_tests.step);
         b.step(entry[0], "Run pure coordinate and committed-frame geometry invariants").dependOn(&run_math_tests.step);
     }
+    const code_syntax_tests = b.addTest(.{ .root_module = code_syntax });
+    const run_code_syntax_tests = b.addRunArtifact(code_syntax_tests);
+    test_step.dependOn(&run_code_syntax_tests.step);
+    check.dependOn(&code_syntax_tests.step);
+    b.step("test-code-syntax", "Run lexer, language, theme, incremental highlighting, bracket and word search tests").dependOn(&run_code_syntax_tests.step);
     const run_code_editor_tests = b.addRunArtifact(code_editor_tests);
     test_step.dependOn(&run_code_editor_tests.step);
     b.step("test-code-editor", "Run revisioned editor services and ownership tests").dependOn(&run_code_editor_tests.step);
