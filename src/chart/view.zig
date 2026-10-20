@@ -108,6 +108,16 @@ pub fn Storage(comptime marks: usize, comptime paths: usize, comptime legend_ite
 
 pub const Error = error{ TooManyMarks, TooManyPaths, TooManyLegendItems };
 
+/// Describes a point for assistive technology, "March: 42 sales": write
+/// into `buffer` and return the written part.
+pub const Describe = struct {
+    context: ?*const anyopaque = null,
+    call: *const fn (context: ?*const anyopaque, index: usize, buffer: []u8) []const u8,
+};
+
+/// Longest point description kept, in bytes.
+pub const max_description = 128;
+
 /// Keep Chart at a stable address while the view emits it and until
 /// `deinit`; the posted preparation refers to it.
 pub const Chart = struct {
@@ -130,6 +140,17 @@ pub const Chart = struct {
     outline: std.ArrayListUnmanaged(vector.Command) = .empty,
     /// The first error from deferred preparation, for diagnostics.
     last_error: ?anyerror = null,
+    /// The point the pointer or the keyboard chose among `points`; it
+    /// persists across builds. Read `selection.index` in the build function
+    /// to show the choice with marks.
+    selection: chart.Selection = .{},
+    /// Fractions along the plot, in ascending order, that the selection
+    /// chooses among; empty leaves the chart without input. Borrowed.
+    points: []const f32 = &.{},
+    describe: ?Describe = null,
+    /// The leaf's bounds of the last paint, in window DIPs.
+    bounds: chart.Rect = .{},
+    description: [max_description]u8 = undefined,
 
     pub fn init(host: *view.Host, allocator: std.mem.Allocator, buffers: Buffers, options: Options) Chart {
         return .{ .host = host, .allocator = allocator, .buffers = buffers, .options = options };
@@ -142,6 +163,33 @@ pub const Chart = struct {
         self.path_len = 0;
         self.legend_items = &.{};
         self.value = "";
+        self.points = &.{};
+        self.describe = null;
+    }
+
+    /// Let the pointer and the keyboard choose among the points at `xs`,
+    /// borrowed fractions along the plot in ascending order: the point
+    /// nearest the pointer while it is over the plot's area, none once it
+    /// leaves. The chart becomes a Tab stop where the left and right arrows,
+    /// Home and End move the choice and Escape clears it. `describe` tells
+    /// assistive technology about a point, read as the chart's value and
+    /// announced as the keys reach it.
+    pub fn select(self: *Chart, xs: []const f32, describe: ?Describe) void {
+        self.points = xs;
+        self.describe = describe;
+        if (self.selection.index) |i| if (i >= xs.len) {
+            self.selection.index = null;
+        };
+    }
+
+    /// The description of the chosen point, or empty.
+    pub fn selected(self: *Chart) []const u8 {
+        const index = self.selection.index orelse return "";
+        const describe = self.describe orelse return "";
+        const text = describe.call(describe.context, index, &self.description);
+        const len = @min(text.len, max_description);
+        std.mem.copyForwards(u8, self.description[0..len], text[0..len]);
+        return self.description[0..len];
     }
 
     pub fn add(self: *Chart, mark: Mark) Error!void {
@@ -167,7 +215,46 @@ pub const Chart = struct {
     /// The leaf to emit with `View.embed`. Give it a `Style.key` when
     /// siblings before it can change.
     pub fn embed(self: *Chart) view.Embed {
-        return .{ .context = self, .measure = measure, .place = place, .paint = paint };
+        const interactive = self.points.len > 0;
+        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .focusable = interactive, .input = if (interactive) input else null };
+    }
+
+    /// The fraction along the plot's area of a point local to the leaf, or
+    /// null outside the area.
+    fn along(self: *const Chart, local: view.Point) ?f32 {
+        const a = self.area;
+        const px = self.bounds.x + local.x;
+        const py = self.bounds.y + local.y;
+        if (!(a.width > 0) or px < a.x or px > a.x + a.width or py < a.y or py > a.y + a.height) return null;
+        return (px - a.x) / a.width;
+    }
+
+    fn input(ptr: *anyopaque, _: u64, event: view.EmbedInput) bool {
+        const self: *Chart = @ptrCast(@alignCast(ptr));
+        switch (event) {
+            .pointer_move => |local| return self.selection.pointer(self.along(local), self.points).changed,
+            .pointer_leave => return self.selection.pointer(null, self.points).changed,
+            // A press in the area takes the focus for the keys.
+            .pointer_down => |local| return self.along(local) != null,
+            .key => |key_input| {
+                const m = key_input.modifiers;
+                if (m.shift or m.control or m.alt or m.super) return false;
+                const pressed: chart.Key = switch (key_input.key) {
+                    .left => .left,
+                    .right => .right,
+                    .home => .home,
+                    .end => .end,
+                    .escape => if (self.selection.index == null) return false else .escape,
+                    else => return false,
+                };
+                const change = self.selection.key(pressed, self.points.len);
+                if (change.announce) {
+                    const text = self.selected();
+                    if (text.len > 0) self.host.announce(text);
+                }
+                return true;
+            },
+        }
     }
 
     /// Release prepared coverage. Call outside paint, before the Context
@@ -235,6 +322,7 @@ pub const Chart = struct {
         const plot = arranged.plot;
         const a = plot.area;
         self.area = a;
+        self.bounds = .{ .x = bounds.x, .y = bounds.y, .width = bounds.width, .height = bounds.height };
         self.scale = frame.size.scale;
         if (a.width > 0 and a.height > 0) {
             const grid = ui.Color.rgb(self.options.grid_color orelse theme.palette.border);
@@ -283,7 +371,10 @@ pub const Chart = struct {
             frame.roundedRect(rect(slot.swatch), 2, ui.Color.rgb(item.color));
             frame.label(rect(slot.label), item.label, text_color);
         }
-        try frame.semantic(.{ .id = id, .role = .image, .name = self.options.name, .value = self.value, .bounds = bounds });
+        const value = if (self.value.len > 0) self.value else self.selected();
+        const focused = self.points.len > 0 and frame.context.input_state.focused == id;
+        if (focused and a.width > 0 and a.height > 0) frame.strokeRect(rect(.{ .x = a.x - 2, .y = a.y - 2, .width = a.width + 4, .height = a.height + 4 }), 3, 2, ui.Color.rgb(theme.palette.focus));
+        try frame.semantic(.{ .id = id, .role = .image, .name = self.options.name, .value = value, .bounds = bounds, .focused = focused });
     }
 
     fn place(ptr: *anyopaque, _: u64, _: view.Rect) void {
@@ -485,4 +576,69 @@ test "marks and paths are bounded by the storage" {
     try c.add(.{ .point = .{ .x = 0.5, .y = 0.5, .color = red } });
     try std.testing.expectError(error.TooManyMarks, c.add(.{ .rule_y = .{ .y = 0.5, .color = red } }));
     try std.testing.expectEqual(@as(usize, 3), c.marks().len);
+}
+
+fn describePoint(_: ?*const anyopaque, index: usize, buffer: []u8) []const u8 {
+    const names = [_][]const u8{ "one", "two", "three" };
+    const text = names[index];
+    @memcpy(buffer[0..text.len], text);
+    return buffer[0..text.len];
+}
+
+test "the pointer and the keys choose a point and announce it" {
+    const Empty = struct {
+        fn build(_: *u8, _: *view.View) anyerror!void {}
+    };
+    var state: u8 = 0;
+    var view_storage: view.Storage(4, 64) = .{};
+    var host = view.Host.init(&state, Empty.build, view_storage.buffers(), .{});
+    var storage: Storage(1, 1, 1) = .{};
+    var c = Chart.init(&host, std.testing.allocator, storage.buffers(), .{});
+    c.begin(.{});
+    try std.testing.expect(c.embed().input == null and !c.embed().focusable);
+    const xs = [_]f32{ 0.1, 0.5, 0.9 };
+    c.select(&xs, .{ .call = describePoint });
+    try std.testing.expect(c.embed().input != null and c.embed().focusable);
+    c.bounds = .{ .x = 10, .y = 10, .width = 220, .height = 120 };
+    c.area = .{ .x = 30, .y = 10, .width = 200, .height = 100 };
+    const embedded = c.embed();
+    const send = struct {
+        fn call(e: view.Embed, event: view.EmbedInput) bool {
+            return e.input.?(e.context, 1, event);
+        }
+    }.call;
+    // Local x 115 is window x 125, 0.475 along the area: the middle point.
+    try std.testing.expect(send(embedded, .{ .pointer_move = .{ .x = 115, .y = 50 } }));
+    try std.testing.expectEqual(@as(?usize, 1), c.selection.index);
+    try std.testing.expectEqualStrings("two", c.selected());
+    // Over the axis labels, left of the area, the pointer has left the plot.
+    try std.testing.expect(send(embedded, .{ .pointer_move = .{ .x = 5, .y = 50 } }));
+    try std.testing.expectEqual(@as(?usize, null), c.selection.index);
+    try std.testing.expect(send(embedded, .{ .pointer_down = .{ .x = 100, .y = 50 } }));
+    try std.testing.expect(!send(embedded, .{ .pointer_down = .{ .x = 5, .y = 50 } }));
+    try std.testing.expect(send(embedded, .{ .pointer_move = .{ .x = 210, .y = 50 } }));
+    try std.testing.expect(send(embedded, .pointer_leave));
+    try std.testing.expectEqual(@as(?usize, null), c.selection.index);
+
+    const serial = host.view.announcement_serial;
+    try std.testing.expect(send(embedded, .{ .key = .{ .key = .right } }));
+    try std.testing.expectEqual(@as(?usize, 0), c.selection.index);
+    try std.testing.expectEqual(serial + 1, host.view.announcement_serial);
+    try std.testing.expectEqualStrings("one", host.view.announcement[0..host.view.announcement_len]);
+    try std.testing.expect(send(embedded, .{ .key = .{ .key = .end } }));
+    try std.testing.expectEqualStrings("three", host.view.announcement[0..host.view.announcement_len]);
+    // Staying at the last point announces nothing new.
+    try std.testing.expect(send(embedded, .{ .key = .{ .key = .right } }));
+    try std.testing.expectEqual(serial + 2, host.view.announcement_serial);
+    try std.testing.expect(!send(embedded, .{ .key = .{ .key = .right, .modifiers = .{ .shift = true } } }));
+    try std.testing.expect(!send(embedded, .{ .key = .{ .key = .a } }));
+    try std.testing.expect(send(embedded, .{ .key = .{ .key = .escape } }));
+    try std.testing.expectEqual(@as(?usize, null), c.selection.index);
+    // With nothing chosen, Escape is left for others.
+    try std.testing.expect(!send(embedded, .{ .key = .{ .key = .escape } }));
+    // Fewer points drop a choice past them.
+    c.selection.index = 2;
+    c.select(xs[0..2], null);
+    try std.testing.expectEqual(@as(?usize, null), c.selection.index);
+    try std.testing.expectEqualStrings("", c.selected());
 }
