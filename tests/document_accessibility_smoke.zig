@@ -692,7 +692,16 @@ fn primary(allocator: std.mem.Allocator) !void {
     // This caller-owned ref intentionally remains until after native cleanup.
     zda_probe_release(provider);
     provider_owned = false;
-    const after = a.resourceCounts();
+    // UI Automation may drop its last provider and range references on its
+    // own threads shortly after the client apartment closes; a leak still
+    // fails once the bounded wait ends.
+    var after = a.resourceCounts();
+    var waited: usize = 0;
+    while (!std.meta.eql(baseline, after) and waited < 200) : (waited += 1) {
+        try app.dispatch();
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+        after = a.resourceCounts();
+    }
     try std.testing.expectEqual(baseline, after);
     if (state.failure) |err| return err;
     std.debug.print("document accessibility: complete text, MTA snapshots, same Prepared geometry, selection posts, failed front, move, close resources=0\n", .{});

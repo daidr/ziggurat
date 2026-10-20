@@ -24,7 +24,7 @@ extern fn zlc_gradient_surface(*anyopaque, *cpu_gradient.Surface) c_int;
 extern fn zlc_gradient_dirty(*anyopaque, u32, u32, u32, u32) void;
 extern fn zlc_brush_stats(*anyopaque, *u32, *u32, *u32) void;
 pub const BrushStats = struct { creations: u32 = 0, evictions: u32 = 0, cached: u32 = 0 };
-extern fn zlc_text(*anyopaque, f32, f32, f32, f32, [*]const u8, u32, u32) c_int;
+extern fn zlc_text(*anyopaque, f32, f32, f32, f32, [*]const u8, u32, u32, f32, u16, c_int, c_int) c_int;
 extern fn zlc_prepared(*anyopaque, *anyopaque, f32, f32, f32, i32, i32, ?*const drawing.Rect, u32) c_int;
 extern fn zlc_scale(*anyopaque) f32;
 extern fn zlc_push_clip(*anyopaque, f32, f32, f32, f32) void;
@@ -399,9 +399,12 @@ pub const Renderer = struct {
         zlc_fill(self.native.?, rect.x, rect.y, rect.width, rect.height, color);
     }
     pub fn text(self: *Renderer, rect: Rect, utf8: []const u8, color: u32) !void {
+        return self.textFont(rect, utf8, color, .{});
+    }
+    pub fn textFont(self: *Renderer, rect: Rect, utf8: []const u8, color: u32, font: commands.FontKey) !void {
         if (utf8.len > 64 * 1024) return error.TextTooLong;
         if (!std.unicode.utf8ValidateSlice(utf8)) return error.InvalidUtf8;
-        if (zlc_text(self.native.?, rect.x, rect.y, rect.width, rect.height, utf8.ptr, @intCast(utf8.len), color) != 0) return error.DrawTextFailed;
+        if (zlc_text(self.native.?, rect.x, rect.y, rect.width, rect.height, utf8.ptr, @intCast(utf8.len), color, font.size(), font.weight.value(), @intFromBool(font.italic), @intFromBool(font.monospace)) != 0) return error.DrawTextFailed;
     }
     pub fn preparedText(self: *Renderer, view: drawing.PreparedTextView, origin: drawing.Point, tint: geometry.Color) !void {
         try view.validate();
@@ -465,7 +468,7 @@ pub const Renderer = struct {
             .text => |value| {
                 if (!layout.validRect(value.bounds)) return error.InvalidGeometry;
                 if (value.offset > text_bytes.len or value.len > text_bytes.len - value.offset) return error.InvalidTextRange;
-                try self.text(value.bounds, text_bytes[value.offset..][0..value.len], value.color);
+                try self.textFont(value.bounds, text_bytes[value.offset..][0..value.len], value.color, value.font);
             },
             .prepared_text => |value| {
                 if (value.resource >= prepared.len) return error.MissingResources;
@@ -514,3 +517,34 @@ pub const Renderer = struct {
         return stats;
     }
 };
+
+test "Cairo text follows the command font" {
+    var renderer: Renderer = .{};
+    defer renderer.deinit();
+    const size: z.Size = .{ .width = 160, .height = 48, .scale = 1 };
+    var dummy: u8 = 0;
+    try renderer.begin(.{ .native_context = &dummy, .size = size });
+    const Ink = struct {
+        fn measure(target: *Renderer, font: commands.Font) !usize {
+            target.fill(.{ .x = 0, .y = 0, .width = 160, .height = 48 }, 0xffffff);
+            var buffer: commands.Buffer = .{};
+            try buffer.textFont(.{ .x = 0, .y = 0, .width = 160, .height = 48 }, "Wide", 0, font);
+            try target.replayBuffer(&buffer);
+            var surface: cpu_gradient.Surface = undefined;
+            if (zlc_gradient_surface(target.native.?, &surface) != 0) return error.DrawGradientFailed;
+            var dark: usize = 0;
+            for (0..surface.height) |y| for (surface.pixels[y * surface.stride ..][0..surface.width]) |pixel| {
+                if (pixel & 0xff < 0x80) dark += 1;
+            };
+            return dark;
+        }
+    };
+    const body = try Ink.measure(&renderer, .body);
+    const heading = try Ink.measure(&renderer, .heading1);
+    const bold = try Ink.measure(&renderer, .{ .weight = .bold });
+    try std.testing.expect(body > 0);
+    try std.testing.expect(heading > body * 2);
+    try std.testing.expect(bold > body);
+    // Returning to the default font draws the same pixels as before.
+    try std.testing.expectEqual(body, try Ink.measure(&renderer, .{}));
+}

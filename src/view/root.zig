@@ -22,6 +22,7 @@ pub const Track = ui.grid.Track;
 pub const MeterBands = ui.widgets.MeterBands;
 pub const NavDirection = ui.widgets.NavDirection;
 pub const ImageView = ui.drawing.ImageView;
+pub const Font = ui.Font;
 pub const SortDirection = ui.widgets.SortDirection;
 pub const ItemRequest = ui.widgets.ItemRequest;
 
@@ -50,6 +51,10 @@ pub const max_collections = 8;
 pub const max_tokens = 64;
 /// Token fields whose wrapped width is remembered between passes.
 pub const max_token_fields = 4;
+/// Bytes of one announcement kept for assistive technology.
+pub const max_announcement = 256;
+/// Embedded leaves with an input callback that one pass routes input to.
+pub const max_interactive_embeds = 16;
 /// Column tracks of all tables in one pass.
 pub const max_table_tracks = 64;
 /// Scroll containers Host can route wheel input to in one frame.
@@ -90,6 +95,9 @@ pub const Style = struct {
     radius: f32 = 0,
     /// Text color for text nodes; widgets use the theme palette.
     color: ?u32 = null,
+    /// Font for text nodes, such as `.heading1` or `.code`; null is the
+    /// 16 DIP label font that widgets use.
+    font: ?Font = null,
     /// False disables the node; on a container it also disables every
     /// descendant.
     enabled: bool = true,
@@ -274,8 +282,26 @@ pub fn key(text: []const u8) u64 {
 pub const Measurer = struct {
     context: ?*anyopaque = null,
     measure: *const fn (?*anyopaque, []const u8) Size = estimate,
+    /// Extent of text in a font other than the label font. Without it,
+    /// `measure` is scaled by the font size, and fixed-pitch text counts
+    /// 0.6 em per character.
+    measure_font: ?*const fn (?*anyopaque, []const u8, Font) Size = null,
 
     pub const line_height: f32 = 24;
+    /// Extent of `text` in `font`, or in the label font when null.
+    pub fn textSize(self: Measurer, text: []const u8, font: ?Font) Size {
+        const value = font orelse return self.measure(self.context, text);
+        if (self.measure_font) |callback| return callback(self.context, text, value);
+        const scale = value.size / 16;
+        const height = @max(line_height * scale, @ceil(value.size * 1.25));
+        if (value.monospace) {
+            const count = std.unicode.utf8CountCodepoints(text) catch text.len;
+            return .{ .width = @as(f32, @floatFromInt(count)) * value.size * 0.6, .height = height };
+        }
+        const base = self.measure(self.context, text);
+        const emphasis: f32 = if (value.weight == .regular) 1 else 1.05;
+        return .{ .width = @ceil(base.width * scale * emphasis), .height = height };
+    }
     pub fn estimate(_: ?*anyopaque, text: []const u8) Size {
         var width: f32 = 0;
         var view = std.unicode.Utf8View.init(text) catch return .{ .width = @as(f32, @floatFromInt(text.len)) * 9, .height = line_height };
@@ -306,6 +332,22 @@ pub const Embed = struct {
     /// boxes, suggestion lists and token fields; called during passes and
     /// key routing, so it must not allocate or block.
     status: ?*const fn (*anyopaque) EmbedStatus = null,
+    /// Register the leaf as a Tab stop under its node id, so it can hold
+    /// focus and receive keys through `input`.
+    focusable: bool = false,
+    /// Pointer and key input over the leaf, in coordinates local to its
+    /// bounds; keys arrive while it holds focus. True consumes the input and
+    /// repaints the window. Runs on the main thread outside paint.
+    input: ?*const fn (*anyopaque, u64, EmbedInput) bool = null,
+};
+/// An embedded leaf that consumed a press.
+pub const EmbedPress = struct { id: u64, focusable: bool };
+pub const EmbedInput = union(enum) {
+    pointer_move: Point,
+    /// The pointer moved off the leaf, or another leaf took it.
+    pointer_leave,
+    pointer_down: Point,
+    key: z.KeyInput,
 };
 
 pub const Node = struct {
@@ -536,6 +578,7 @@ pub const Overlay = struct {
     pub const Collection = struct { id: u64, tree: bool, multiple: bool, anchor: ?u64, page: usize };
     pub const Token = struct { id: u64, remove: u64, field: u64, rect: Rect, enabled: bool };
     pub const TokenField = struct { id: u64, input: ?u64, embed: ?Embed };
+    pub const Interactive = struct { id: u64, bounds: Rect, rect: Rect, embed: Embed };
     popup: ?Popup = null,
     /// Enabled options of the open popup, in build order.
     items: [max_popup_items]Region = undefined,
@@ -555,6 +598,9 @@ pub const Overlay = struct {
     token_count: usize = 0,
     token_fields: [max_token_fields]TokenField = undefined,
     token_field_count: usize = 0,
+    /// Visible enabled embedded leaves with an input callback, in paint order.
+    embeds: [max_interactive_embeds]Interactive = undefined,
+    embed_count: usize = 0,
 };
 
 /// What `View.routeKey` did with a key press.
@@ -599,6 +645,13 @@ pub const View = struct {
     popup: PopupState = .{},
     tip: TooltipState = .{},
     overlay: Overlay = .{},
+    /// The interactive embedded leaf under the pointer.
+    embed_hover: ?u64 = null,
+    /// Text for assistive technology to announce, and the serial that
+    /// makes each announcement a new live region.
+    announcement: [max_announcement]u8 = undefined,
+    announcement_len: usize = 0,
+    announcement_serial: u64 = 0,
     /// Node whose tooltip this pass shows, and where after arrange.
     tip_index: u32 = none,
     tip_rect: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
@@ -1940,6 +1993,60 @@ pub const View = struct {
     /// Record the pointer position, or null when it left the window, for
     /// tooltips; true when the control under it changed and the window
     /// should repaint.
+    fn interactiveEmbed(self: *const View, id: ?u64) ?*const Overlay.Interactive {
+        const wanted = id orelse return null;
+        for (self.overlay.embeds[0..self.overlay.embed_count]) |*entry| if (entry.id == wanted) return entry;
+        return null;
+    }
+    /// The topmost interactive embedded leaf at `point`; none while an
+    /// open list covers it.
+    fn embedAt(self: *const View, point: Point) ?*const Overlay.Interactive {
+        if (self.overlay.popup) |list| if (contains(list.rect, point)) return null;
+        var index = self.overlay.embed_count;
+        while (index > 0) {
+            index -= 1;
+            if (contains(self.overlay.embeds[index].rect, point)) return &self.overlay.embeds[index];
+        }
+        return null;
+    }
+    fn local(entry: *const Overlay.Interactive, point: Point) Point {
+        return .{ .x = point.x - entry.bounds.x, .y = point.y - entry.bounds.y };
+    }
+    /// Move the pointer to `point`, or off the window when null: the leaf
+    /// it left sees `pointer_leave` and the leaf under it `pointer_move`.
+    /// True when a leaf asked to repaint.
+    pub fn embedPointerMove(self: *View, point: ?Point) bool {
+        const target = if (point) |at| self.embedAt(at) else null;
+        var repaint = false;
+        if (self.embed_hover) |previous| if (target == null or target.?.id != previous) {
+            if (self.interactiveEmbed(previous)) |entry| repaint = entry.embed.input.?(entry.embed.context, entry.id, .pointer_leave);
+        };
+        self.embed_hover = if (target) |entry| entry.id else null;
+        if (target) |entry| repaint = entry.embed.input.?(entry.embed.context, entry.id, .{ .pointer_move = local(entry, point.?) }) or repaint;
+        return repaint;
+    }
+    /// A primary press at `point`: the leaf under it sees `pointer_down`.
+    /// The leaf that consumed it, which takes focus when it is focusable.
+    pub fn embedPointerDown(self: *View, point: Point) ?EmbedPress {
+        const entry = self.embedAt(point) orelse return null;
+        if (!entry.embed.input.?(entry.embed.context, entry.id, .{ .pointer_down = local(entry, point) })) return null;
+        return .{ .id = entry.id, .focusable = entry.embed.focusable };
+    }
+    /// A key for the focused leaf; true when it consumed the key.
+    pub fn embedKey(self: *View, input: z.KeyInput) bool {
+        const entry = self.interactiveEmbed(self.focus) orelse return false;
+        return entry.embed.input.?(entry.embed.context, entry.id, .{ .key = input });
+    }
+    /// Ask assistive technology to announce `message` politely, as a status
+    /// update with no visible text; longer text is cut at a character
+    /// boundary. Takes effect from the next paint.
+    pub fn announce(self: *View, message: []const u8) void {
+        var length = @min(message.len, max_announcement);
+        while (length > 0 and length < message.len and message[length] & 0xc0 == 0x80) length -= 1;
+        @memcpy(self.announcement[0..length], message[0..length]);
+        self.announcement_len = length;
+        self.announcement_serial +%= 1;
+    }
     pub fn hoverAt(self: *View, point: ?Point) bool {
         var target: ?u64 = null;
         if (point) |at| find: {
@@ -2004,7 +2111,8 @@ pub const View = struct {
     fn intrinsic(node: *const Node, theme: Theme, measurer: Measurer) layout.Measurement {
         if (node.embed) |content| return content.measure(content.context, theme);
         const metrics = theme.metrics;
-        const text_size = if (node.text.len > 0) measurer.measure(measurer.context, node.text) else Size{ .width = 0, .height = Measurer.line_height };
+        const font = if (node.kind == .text) node.style.font else null;
+        const text_size = if (node.text.len > 0) measurer.textSize(node.text, font) else if (font) |value| measurer.textSize("", value) else Size{ .width = 0, .height = Measurer.line_height };
         const size: Size = switch (node.kind) {
             .text, .note => text_size,
             .spacer => .{},
@@ -2271,9 +2379,14 @@ pub const View = struct {
         overlay.collection_count = 0;
         overlay.token_count = 0;
         overlay.token_field_count = 0;
+        overlay.embed_count = 0;
         const zero: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
         for (all, 0..) |*node, index| {
             switch (node.kind) {
+                .embed => if (node.embed.?.input != null and node.style.enabled and overlay.embed_count < max_interactive_embeds) if (self.visible(node)) |rect| {
+                    overlay.embeds[overlay.embed_count] = .{ .id = node.id, .bounds = node.bounds, .rect = rect, .embed = node.embed.? };
+                    overlay.embed_count += 1;
+                },
                 .tree, .table => if (overlay.collection_count < max_collections) {
                     const selection = node.selection.?;
                     overlay.collections[overlay.collection_count] = .{ .id = node.id, .tree = node.kind == .tree, .multiple = selection.mode == .multiple, .anchor = null, .page = 1 };
@@ -2530,6 +2643,8 @@ pub const View = struct {
             const node = &all[self.tip_index];
             try target.tooltip(tooltipId(node.id), self.tip_rect, node.tooltip);
         }
+        // Each announcement is a new status, so clients announce it once.
+        if (self.announcement_len > 0) try target.status(announcementId(self.announcement_serial), .{ .x = 0, .y = 0, .width = 0, .height = 0 }, self.announcement[0..self.announcement_len], ui.accessibility.root_id);
     }
 
     /// Paint nodes `start..stop` in order, skipping floating subtrees, whose
@@ -2617,7 +2732,7 @@ pub const View = struct {
                         clip_depth += 1;
                     }
                 },
-                .text => target.label(bounds, node.text, style.color orelse if (!style.enabled) theme.palette.disabled_text else if (node.row != none and all[node.row].checked) theme.palette.on_accent else theme.palette.text),
+                .text => target.labelFont(bounds, node.text, style.color orelse if (!style.enabled) theme.palette.disabled_text else if (node.row != none and all[node.row].checked) theme.palette.on_accent else theme.palette.text, style.font orelse .{}),
                 .tree_row => try target.treeItem(node.id, bounds, node.text, self.rowOptions(node, control)),
                 .column_header => try target.columnHeader(node.id, bounds, node.text, node.sort, node.checked, control),
                 .token => {
@@ -2670,6 +2785,9 @@ pub const View = struct {
                 .embed => {
                     const content = node.embed.?;
                     if (content.annotate) |annotate| annotate(content.context, annotation);
+                    // A focusable leaf is a Tab stop under its own id; the
+                    // controls it paints itself stay above it.
+                    if (content.focusable and @TypeOf(target) == *ui.Frame) try target.addControl(node.id, bounds, .{ .enabled = node.style.enabled });
                     if (@TypeOf(target) == *ui.Frame) try content.paint(content.context, target, node.id, bounds) else try target.embedded(node.id, bounds);
                 },
             }
@@ -2802,6 +2920,11 @@ pub fn tokenRemoveId(id: u64) u64 {
     return if (value == 0) 1 else value;
 }
 /// The semantic id of the tooltip shown for the control `id`.
+/// The status node id of the announcement with `serial`.
+pub fn announcementId(serial: u64) u64 {
+    const value = std.hash.Wyhash.hash(serial, "announcement");
+    return if (value == 0) 1 else value;
+}
 pub fn tooltipId(id: u64) u64 {
     const value = std.hash.Wyhash.hash(id, "tooltip");
     return if (value == 0) 1 else value;
@@ -2896,6 +3019,12 @@ pub const Host = struct {
         self.scheduled = null;
         if (self.context.window) |window| window.invalidate();
     }
+    /// Ask assistive technology to announce `message`, such as a chart's newly
+    /// selected point, and repaint so it takes effect; see `View.announce`.
+    pub fn announce(self: *Host, message: []const u8) void {
+        self.view.announce(message);
+        self.invalidate();
+    }
     /// Called by the scheduler when the deadline it was given has passed.
     pub fn wakeFired(self: *Host) void {
         self.scheduled = null;
@@ -2956,7 +3085,9 @@ pub const Host = struct {
         if (self.building) return false;
         switch (event) {
             .pointer_move => |point| {
-                if (self.view.hoverAt(.{ .x = point.x, .y = point.y })) self.invalidate();
+                const at: Point = .{ .x = point.x, .y = point.y };
+                const hover = self.view.hoverAt(at);
+                if (self.view.embedPointerMove(at) or hover) self.invalidate();
                 return false;
             },
             .pointer_down => |press| {
@@ -2972,6 +3103,14 @@ pub const Host = struct {
                 }
                 // A press on a tree or table row selects through the view,
                 // which sees its modifiers; the pass then focuses the row.
+                if (self.view.embedPointerDown(point)) |press_on| {
+                    if (press_on.focusable) {
+                        self.view.restore = press_on.id;
+                        self.restoreFocus();
+                    }
+                    self.invalidate();
+                    return true;
+                }
                 const hit = self.context.input_state.hit(.{ .x = point.x, .y = point.y });
                 if (self.view.rowPress(point, press.modifiers, hit orelse return false, self.context.currentTheme())) |value| {
                     self.deliver(value);
@@ -2982,13 +3121,21 @@ pub const Host = struct {
             },
             .focus => |focused| {
                 // A window that loses focus leaves no tooltip behind.
-                if (!focused and self.view.hoverAt(null)) self.invalidate();
+                if (!focused) {
+                    const hover = self.view.hoverAt(null);
+                    if (self.view.embedPointerMove(null) or hover) self.invalidate();
+                }
                 return false;
             },
             .key_input => |input| {
                 self.view.focus = self.context.input_state.focused;
                 switch (self.view.routeKey(input)) {
-                    .ignored => return false,
+                    // Keys nothing else routes go to a focused embedded leaf.
+                    .ignored => {
+                        if (!self.view.embedKey(input)) return false;
+                        self.invalidate();
+                        return true;
+                    },
                     // A consumed key bypasses the Context, so repaint here
                     // for the moved highlight or closed list.
                     .handled => {
@@ -3104,6 +3251,9 @@ const Recorder = struct {
         self.clip_depth -= 1;
     }
     pub fn label(self: *Recorder, bounds: Rect, _: []const u8, _: u32) void {
+        self.push(.text, 0, bounds, false);
+    }
+    pub fn labelFont(self: *Recorder, bounds: Rect, _: []const u8, _: u32, _: Font) void {
         self.push(.text, 0, bounds, false);
     }
     pub fn buttonWithOptions(self: *Recorder, id: u64, bounds: Rect, _: []const u8, _: ui.widgets.Options) !void {
@@ -3500,4 +3650,32 @@ test "open lists and toasts paint after the tree and tooltips paint last" {
     try std.testing.expectEqual(tooltipId(view.nodes()[1].id), recorder.tooltip_id);
     try std.testing.expectEqual(Kind.text, calls[calls.len - 1].kind);
     try std.testing.expectEqual(@as(usize, 0), recorder.clip_depth);
+}
+
+test "each announcement paints a new status node, cut at a character boundary" {
+    var storage: Storage(8, 64) = .{};
+    var view = View.init(storage.buffers());
+    view.reset(.{}, null);
+    try view.text("chart", .{});
+    try view.finish();
+    try view.arrange(.{ .x = 0, .y = 0, .width = 200, .height = 100 }, .{}, .{});
+    var recorder: Recorder = .{};
+    try view.paint(&recorder);
+    try std.testing.expectEqual(@as(usize, 1), recorder.len);
+
+    view.announce("Bar 1");
+    recorder = .{};
+    try view.paint(&recorder);
+    const first = recorder.calls[1];
+    try std.testing.expectEqual(Kind.toast, first.kind);
+    try std.testing.expectEqual(announcementId(1), first.id);
+    view.announce("Bar 1");
+    recorder = .{};
+    try view.paint(&recorder);
+    try std.testing.expect(recorder.calls[1].id != first.id);
+
+    var long: [max_announcement + 1]u8 = @splat('a');
+    @memcpy(long[max_announcement - 1 ..], "\xc3\xa9");
+    view.announce(&long);
+    try std.testing.expectEqual(max_announcement - 1, view.announcement_len);
 }

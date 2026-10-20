@@ -13,7 +13,58 @@ const gaussian_scope = @import("gaussian_scope.zig");
 pub const no_filter: u8 = 255;
 pub const GroupCommand = struct { bounds: Rect, mask_origin: drawing.Point = .{}, opacity: u8 = 255, mask_resource: ?u8 = null, filter_slot: u8 = no_filter };
 pub const GradientShape = struct { bounds: Rect, radius: f32 = 0, stroke_width: f32 = 0, brush: u8 };
-pub const Text = struct { bounds: Rect, color: u32, offset: u32, len: u32 };
+/// Font of a text command: size in DIP, weight, slant and whether to use
+/// the platform's fixed-pitch family instead of the interface family.
+pub const Font = struct {
+    size: f32 = 16,
+    weight: Weight = .regular,
+    italic: bool = false,
+    monospace: bool = false,
+
+    pub const Weight = enum(u8) {
+        regular,
+        medium,
+        semibold,
+        bold,
+        /// The CSS-style numeric weight that native font APIs take.
+        pub fn value(self: Weight) u16 {
+            return 400 + 100 * @as(u16, @intFromEnum(self));
+        }
+    };
+    /// Presets for document text: body copy, six heading levels from
+    /// largest to smallest, and fixed-pitch code.
+    pub const body: Font = .{};
+    pub const heading1: Font = .{ .size = 32, .weight = .bold };
+    pub const heading2: Font = .{ .size = 26, .weight = .bold };
+    pub const heading3: Font = .{ .size = 22, .weight = .semibold };
+    pub const heading4: Font = .{ .size = 19, .weight = .semibold };
+    pub const heading5: Font = .{ .size = 16, .weight = .semibold };
+    pub const heading6: Font = .{ .size = 14, .weight = .semibold };
+    pub const code: Font = .{ .size = 14, .monospace = true };
+    pub const smallest: f32 = 1;
+    pub const largest: f32 = 1024;
+    pub fn valid(self: Font) bool {
+        return std.math.isFinite(self.size) and self.size >= smallest and self.size <= largest;
+    }
+    /// The compact form stored in a command; sizes round to 1/16 DIP.
+    pub fn key(self: Font) FontKey {
+        return .{ .sixteenths = @intFromFloat(@round(self.size * 16)), .weight = self.weight, .italic = self.italic, .monospace = self.monospace };
+    }
+};
+pub const FontKey = packed struct(u32) {
+    sixteenths: u16 = 16 * 16,
+    weight: Font.Weight = .regular,
+    italic: bool = false,
+    monospace: bool = false,
+    _: u6 = 0,
+    pub fn size(self: FontKey) f32 {
+        return @as(f32, @floatFromInt(self.sixteenths)) / 16;
+    }
+    pub fn isDefault(self: FontKey) bool {
+        return @as(u32, @bitCast(self)) == @as(u32, @bitCast(FontKey{}));
+    }
+};
+pub const Text = struct { bounds: Rect, color: u32, offset: u16, len: u16, font: FontKey = .{} };
 pub const ImageCommand = struct { destination: Rect, alignment: drawing.Point, fit: drawing.ImageFit, sampling: drawing.ImageSampling, opacity: u8, resource: u8 };
 pub const Command = union(enum) {
     fill: struct { bounds: Rect, color: u32 },
@@ -426,11 +477,17 @@ pub const Buffer = struct {
         try self.append(.{ .gradient = .{ .bounds = bounds, .radius = radius, .stroke_width = width, .brush = @intCast(index) } });
     }
     pub fn text(self: *Buffer, bounds: Rect, utf8: []const u8, color: u32) !void {
+        return self.textFont(bounds, utf8, color, .{});
+    }
+    pub fn textFont(self: *Buffer, bounds: Rect, utf8: []const u8, color: u32, font: Font) !void {
         if (!layout.validRect(bounds)) return error.InvalidGeometry;
+        if (!font.valid()) return error.InvalidFont;
         if (!std.unicode.utf8ValidateSlice(utf8)) return error.InvalidUtf8;
         if (utf8.len > 2048) return error.TextTooLong;
         if (utf8.len > self.text_storage.len - self.text_len) return error.TextStorageFull;
-        try self.append(.{ .text = .{ .bounds = bounds, .color = color, .offset = @intCast(self.text_len), .len = @intCast(utf8.len) } });
+        // Storage is 64 KiB, so a non-empty run always starts below 65536.
+        const offset: u16 = if (utf8.len == 0) 0 else @intCast(self.text_len);
+        try self.append(.{ .text = .{ .bounds = bounds, .color = color, .offset = offset, .len = @intCast(utf8.len), .font = font.key() } });
         @memcpy(self.text_storage[self.text_len..][0..utf8.len], utf8);
         self.text_len += utf8.len;
     }
@@ -1046,4 +1103,19 @@ test "typed textures pin once and reject capacity or loss transactionally" {
     try std.testing.expectError(error.CommandsFull, buffer.texture(rect, views[0], .{}));
     try std.testing.expectEqual(@as(usize, 0), leases[0].pins);
     try std.testing.expectEqual(@as(usize, 0), buffer.texture_len);
+}
+
+test "text commands carry their font compactly" {
+    var buffer: Buffer = .{};
+    try buffer.textFont(.{ .x = 0, .y = 0, .width = 10, .height = 10 }, "x", 0, .heading2);
+    try buffer.text(.{ .x = 0, .y = 0, .width = 10, .height = 10 }, "y", 0);
+    const list = buffer.commands();
+    try std.testing.expectEqual(@as(f32, 26), list[0].text.font.size());
+    try std.testing.expectEqual(Font.Weight.bold, list[0].text.font.weight);
+    try std.testing.expect(!list[0].text.font.isDefault() and list[1].text.font.isDefault());
+    try std.testing.expectEqual(@as(u16, 700), Font.Weight.bold.value());
+    try std.testing.expectEqual(@as(f32, 14.5), (Font{ .size = 14.5, .monospace = true }).key().size());
+    try std.testing.expectError(error.InvalidFont, buffer.textFont(.{ .x = 0, .y = 0, .width = 10, .height = 10 }, "z", 0, .{ .size = 0 }));
+    try std.testing.expectError(error.InvalidFont, buffer.textFont(.{ .x = 0, .y = 0, .width = 10, .height = 10 }, "z", 0, .{ .size = std.math.nan(f32) }));
+    try std.testing.expectEqual(@as(usize, 2), buffer.len);
 }

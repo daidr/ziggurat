@@ -631,6 +631,12 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat", .module = core },      .{ .name = "ziggurat_view", .module = declarative_view },
         .{ .name = "ziggurat_wake", .module = wake },
     } });
+    const chart = b.addModule("ziggurat_chart", .{ .root_source_file = b.path("src/chart/root.zig"), .target = target, .optimize = optimize });
+    const chart_tests = b.addTest(.{ .root_module = chart });
+    check.dependOn(&chart_tests.step);
+    const run_chart_tests = b.addRunArtifact(chart_tests);
+    test_step.dependOn(&run_chart_tests.step);
+    b.step("test-chart", "Run chart scale, tick, stack, path, downsampling, layout and selection tests").dependOn(&run_chart_tests.step);
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
         addSmoke(b, "smoke-affine-renderer", "tests/affine_renderer_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
@@ -2423,6 +2429,23 @@ pub fn build(b: *std.Build) void {
         const run_declarative_view_tests = b.addRunArtifact(declarative_view_tests);
         test_step.dependOn(&run_declarative_view_tests.step);
         b.step("test-view", "Run declarative view build, identity and layout tests").dependOn(&run_declarative_view_tests.step);
+        const chart_view = b.addModule("ziggurat_chart_view", .{ .root_source_file = b.path("src/chart/view.zig"), .target = target, .optimize = optimize, .imports = &.{
+            .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_vector", .module = vector },
+            .{ .name = "ziggurat_chart", .module = chart },
+        } });
+        const chart_view_tests = b.addTest(.{ .root_module = chart_view });
+        check.dependOn(&chart_view_tests.step);
+        const run_chart_view_tests = b.addRunArtifact(chart_view_tests);
+        test_step.dependOn(&run_chart_view_tests.step);
+        b.step("test-chart-view", "Run chart view arrangement, storage and preparation key tests").dependOn(&run_chart_view_tests.step);
+        addSmoke(b, "smoke-chart", "tests/chart_view_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_view", .module = declarative_view },
+            .{ .name = "ziggurat_chart", .module = chart },
+            .{ .name = "ziggurat_chart_view", .module = chart_view },
+        });
     }
 }
 
