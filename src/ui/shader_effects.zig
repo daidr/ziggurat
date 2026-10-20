@@ -41,8 +41,9 @@ pub const Entry = struct {
     box: Rect,
     margin: f32 = 0,
     radius: f32 = 0,
-    /// Isolates an element's content with a one-pixel transparent halo.
-    carrier: gaussian_kernel.Kernel = undefined,
+    /// Physical pixels per DIP of the frame that records an element
+    /// effect; selects the capture kernel (see `Workspace.carrierFor`).
+    scale: f32 = 1,
     pub fn captureBounds(self: Entry) Rect {
         return .{ .x = self.box.x - self.margin, .y = self.box.y - self.margin, .width = self.box.width + 2 * self.margin, .height = self.box.height + 2 * self.margin };
     }
@@ -93,7 +94,20 @@ pub const Workspace = struct {
     planes: []u32,
     /// An isolation is in progress; nested ones draw plainly.
     isolating: bool = false,
+    /// The capture kernel for `carrier_scale`, kept here so command
+    /// entries stay small and the kernel stays put while a capture is open.
+    carrier_kernel: gaussian_kernel.Kernel = undefined,
+    carrier_scale: f32 = 0,
 
+    /// The kernel whose capture an element effect at `scale` borrows. It is
+    /// prepared when the scale changes, outside any open capture.
+    pub fn carrierFor(self: *Workspace, scale: f32) !*const gaussian_kernel.Kernel {
+        if (self.carrier_scale != scale) {
+            self.carrier_kernel = try carrier(scale);
+            self.carrier_scale = scale;
+        }
+        return &self.carrier_kernel;
+    }
     pub fn bytesFor(options: Options) !usize {
         if (options.max_work == 0 or options.max_pixels == 0) return error.InvalidShaderEffectOptions;
         const bytes = std.math.mul(usize, @as(usize, options.max_pixels) * 3, 4) catch return error.ShaderEffectBudgetExceeded;
@@ -465,7 +479,7 @@ fn testProgram(source: []const u8) !*shader.Program {
     return shader.compile(std.testing.allocator, source, .{}, &diagnostic);
 }
 fn testEntry(program: *const shader.Program, values: shader.Values, box: Rect, margin: f32) !Entry {
-    return .{ .program = program, .values = values, .target = .element, .box = box, .margin = margin, .carrier = try carrier(1) };
+    return .{ .program = program, .values = values, .target = .element, .box = box, .margin = margin };
 }
 
 test "color effects rewrite every captured pixel and fault to transparent" {
@@ -481,7 +495,8 @@ test "color effects rewrite every captured pixel and fault to transparent" {
     try values.set(program.uniform("limit").?, @as(f32, 3));
     // A 4x2 box at (10, 10) with a one-pixel halo: a 6x4 plane.
     const entry = try testEntry(program, values, .{ .x = 10, .y = 10, .width = 4, .height = 2 }, 0);
-    const capture = try gaussian_scope.Capture.init(entry.captureRect(), &entry.carrier);
+    const kernel = try carrier(entry.scale);
+    const capture = try gaussian_scope.Capture.init(entry.captureRect(), &kernel);
     var source: [24]u32 = @splat(0xff0000ff);
     var scratch: [24]u32 = undefined;
     const workspace = try Workspace.create(std.testing.allocator, .{});
@@ -502,7 +517,8 @@ test "distortion reads displaced content and transparency beyond the capture" {
     );
     defer program.destroy();
     const entry = try testEntry(program, shader.Values.init(program), .{ .x = 0, .y = 0, .width = 4, .height = 1 }, 0);
-    const capture = try gaussian_scope.Capture.init(entry.captureRect(), &entry.carrier);
+    const kernel = try carrier(entry.scale);
+    const capture = try gaussian_scope.Capture.init(entry.captureRect(), &kernel);
     // Plane columns 0..5 hold distinct reds; the last reads past the edge.
     var source: [18]u32 = undefined;
     for (0..3) |row| for (0..6) |col| {
@@ -524,7 +540,8 @@ test "a layer effect blurs its content into the margin and respects the frame bu
     );
     defer program.destroy();
     const entry = try testEntry(program, shader.Values.init(program), .{ .x = 2, .y = 0, .width = 2, .height = 1 }, 2);
-    const capture = try gaussian_scope.Capture.init(entry.captureRect(), &entry.carrier);
+    const kernel = try carrier(entry.scale);
+    const capture = try gaussian_scope.Capture.init(entry.captureRect(), &kernel);
     try std.testing.expectEqual(@as(u32, 8), capture.pixelWidth());
     var source: [8 * 7]u32 = @splat(0);
     // The box itself is opaque white; the margin is empty.

@@ -200,10 +200,12 @@ pub const Renderer = struct {
         const workspace = self.layer_workspace orelse return false;
         if (!workspace.active or self.effect_count == self.effect_scopes.len) return false;
         const capacity = self.gaussianCapacity() orelse return false;
+        const effects = self.backdrop_source.?.shader_storage.workspace orelse return false;
+        const kernel = effects.carrierFor(entry.scale) catch return false;
         const capture_bounds = entry.captureRect();
-        const capture = gaussian_scope.Capture.init(capture_bounds, &entry.carrier) catch return false;
+        const capture = gaussian_scope.Capture.init(capture_bounds, kernel) catch return false;
         capture.check(capacity) catch return false;
-        workspace.beginGaussian(capture_bounds, .{ .opacity = entry.opacity }, &entry.carrier) catch |err| switch (err) {
+        workspace.beginGaussian(capture_bounds, .{ .opacity = entry.opacity }, kernel) catch |err| switch (err) {
             // The layer depth or the frame's filter budget is spent.
             error.LayerDepthExceeded, error.GaussianWorkExceeded => return false,
             else => return err,

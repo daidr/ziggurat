@@ -234,12 +234,16 @@ pub const Renderer = struct {
     fn captureEffect(self: *Renderer, entry: *const commands.shader_effects.Entry) ?gaussian_scope.Capture {
         if (self.layer_plan == null or !self.layer_active or self.effect_count == self.effect_scopes.len) return null;
         const capacity = self.gaussianCapacity() orelse return null;
+        const workspace = self.backdrop_source.?.shader_storage.workspace orelse return null;
+        // Opening a capture with a new kernel never happens inside another
+        // one: all entries of a frame share its scale.
+        const kernel = workspace.carrierFor(entry.scale) catch return null;
         const bounds = entry.captureRect();
-        const capture = gaussian_scope.Capture.init(bounds, &entry.carrier) catch return null;
+        const capture = gaussian_scope.Capture.init(bounds, kernel) catch return null;
         capture.check(capacity) catch return null;
         const descriptor = self.groupDescriptor(bounds, .{ .opacity = entry.opacity }) catch return null;
         // Fails when the layer depth or the frame's filter budget is spent.
-        if (zlc_layer_begin_gaussian(self.native.?, &descriptor, &capture, &entry.carrier) != 0) return null;
+        if (zlc_layer_begin_gaussian(self.native.?, &descriptor, &capture, kernel) != 0) return null;
         return capture;
     }
     /// Draw `body` isolated on the current target and composite it through
@@ -727,7 +731,7 @@ test "Cairo element effects rewrite a Gaussian capture or an isolation on the ta
     var buffer: commands.Buffer = .{};
     defer buffer.reset();
     try buffer.fill(.{ .x = 0, .y = 0, .width = 32, .height = 16 }, 0xffffff);
-    try buffer.beginEffect(.{ .program = program, .values = values, .target = .element, .box = .{ .x = 4, .y = 4, .width = 8, .height = 8 }, .margin = 2, .carrier = try commands.shader_effects.carrier(1) });
+    try buffer.beginEffect(.{ .program = program, .values = values, .target = .element, .box = .{ .x = 4, .y = 4, .width = 8, .height = 8 }, .margin = 2 });
     try buffer.fill(.{ .x = 4, .y = 4, .width = 8, .height = 8 }, 0xff0000);
     try buffer.endEffect();
     buffer.shader_storage.workspace = workspace;

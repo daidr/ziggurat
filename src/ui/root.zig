@@ -3560,7 +3560,8 @@ pub const Frame = struct {
         if (self.effect_depth == self.effect_scopes.len) return error.EffectStackFull;
         var entry: shader_effects.Entry = .{ .program = effect.program, .values = effect.values.*, .target = .element, .box = self.absolute(box), .margin = effect.margin, .opacity = options.opacity };
         try shader_effects.validate(entry);
-        entry.carrier = try shader_effects.carrier(self.size.scale);
+        entry.scale = self.size.scale;
+        _ = try shader_effects.carrier(entry.scale);
         if (self.context.shader_workspace == null or self.group_depth == layers.max_depth) {
             self.context.shader_unprepared += 1;
             self.effect_scopes[self.effect_depth] = false;

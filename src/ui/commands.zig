@@ -466,7 +466,7 @@ pub const Buffer = struct {
     pub fn beginEffect(self: *Buffer, entry: shader_effects.Entry) !void {
         try shader_effects.validate(entry);
         if (entry.target != .element) return error.InvalidGeometry;
-        try entry.carrier.validate();
+        _ = try shader_effects.carrier(entry.scale);
         if (self.group_depth == layers.max_depth) return error.GroupStackFull;
         if (self.len == self.storage.len) return error.CommandsFull;
         const table = &self.shader_storage;
