@@ -22,7 +22,10 @@ concurrency:
 
 jobs:
   windows:
-    runs-on: windows-2022
+    # Self-hosted Windows x64 runner with PowerShell 7, Python 3 and tar on PATH.
+    # The repository variable WINDOWS_RUNS_ON overrides the labels with a JSON
+    # value, for example '"windows-2022"' to return to a hosted runner.
+    runs-on: ${{ fromJSON(vars.WINDOWS_RUNS_ON || '["self-hosted", "windows", "x64"]') }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -39,13 +42,11 @@ jobs:
       - name: Install verified Zig 0.15.2
         run: |
           $ErrorActionPreference = 'Stop'
-          $archive = Join-Path $env:RUNNER_TEMP 'zig-0.15.2.zip'
-          Invoke-WebRequest 'https://ziglang.org/download/0.15.2/zig-x86_64-windows-0.15.2.zip' -OutFile $archive
-          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine '3a0ed1e8799a2f8ce2a6e6290a9ff22e6906f8227865911fb7ddedc3cc14cb0c') { throw 'Zig archive checksum mismatch.' }
-          Expand-Archive -LiteralPath $archive -DestinationPath $env:RUNNER_TEMP
-          $bin = Join-Path $env:RUNNER_TEMP 'zig-x86_64-windows-0.15.2'
-          if ((& (Join-Path $bin 'zig.exe') version) -cne '0.15.2') { throw 'Wrong Zig version.' }
-          $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          foreach ($tool in 'python', 'tar') {
+            if (!(Get-Command $tool -ErrorAction SilentlyContinue)) { throw "The Windows runner needs $tool on PATH." }
+          }
+          $zig = ./scripts/fetch-zig-windows.ps1
+          Split-Path -Parent $zig | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Format, compile, unit and native integration checks
         run: |
           zig fmt --check build.zig build_support src examples tests tools
@@ -217,7 +218,8 @@ jobs:
 
   webview:
     if: github.event_name == 'workflow_dispatch' && inputs.webview
-    runs-on: windows-2022
+    # Also needs Node.js and an installed WebView2 Runtime on the runner.
+    runs-on: ${{ fromJSON(vars.WINDOWS_RUNS_ON || '["self-hosted", "windows", "x64"]') }}
     timeout-minutes: 20
     defaults:
       run:
@@ -228,11 +230,9 @@ jobs:
           persist-credentials: false
       - name: Install verified Zig 0.15.2 and SDK
         run: |
-          $archive = Join-Path $env:RUNNER_TEMP 'zig-0.15.2.zip'
-          Invoke-WebRequest 'https://ziglang.org/download/0.15.2/zig-x86_64-windows-0.15.2.zip' -OutFile $archive
-          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine '3a0ed1e8799a2f8ce2a6e6290a9ff22e6906f8227865911fb7ddedc3cc14cb0c') { throw 'Zig archive checksum mismatch.' }
-          Expand-Archive -LiteralPath $archive -DestinationPath $env:RUNNER_TEMP
-          (Join-Path $env:RUNNER_TEMP 'zig-x86_64-windows-0.15.2') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $ErrorActionPreference = 'Stop'
+          $zig = ./scripts/fetch-zig-windows.ps1
+          Split-Path -Parent $zig | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           ./scripts/fetch-webview2.ps1
       - name: Install verified Bun 1.3.5
         run: |
