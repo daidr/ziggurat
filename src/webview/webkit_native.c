@@ -27,7 +27,7 @@ typedef struct Navigation {
 } Navigation;
 struct Script { Script *next; ZwkState *state; GCancellable *cancel; uint64_t token; gboolean cancelled; };
 struct ZwkState {
-    unsigned refs, pending, limit, result_limit;
+    unsigned refs, pending, limit, result_limit, posts;
     GThread *thread;
     GtkWidget *view;
     WebKitWebContext *context;
@@ -875,17 +875,21 @@ static void sent(GObject *view,GAsyncResult *result,gpointer data) {
     JSCValue *value=webkit_web_view_evaluate_javascript_finish(WEBKIT_WEB_VIEW(view),result,&error);
     if (value) g_object_unref(value);
     if (error) g_error_free(error);
-    --s->pending; g_atomic_int_add(&live_callbacks,-1); release(s);
+    --s->posts; g_atomic_int_add(&live_callbacks,-1); release(s);
 }
+/* Posts are messages, not script evaluations: like the Windows host's posts
+   they do not share the evaluation limit. The bound only stops a page that
+   never runs from queueing without end; 1024 messages of at most 64 KiB. */
+enum { POST_LIMIT=1024 };
 int zwk_post(ZwkState *s,const char *text) {
     if (!live(s)) return ZWK_CLOSED;
     if (!document(s)) return ZWK_NOT_READY;
     if (!ipc_allowed(s)) return ZWK_IPC_DENIED;
-    if (s->pending>=s->limit) return ZWK_FULL;
+    if (s->posts>=POST_LIMIT) return ZWK_FULL;
     char *quoted=js_quote(text); if (!quoted) return ZWK_OOM;
     char *script=try_format("window.postMessage({__zigguratHost:%s},'*')",quoted); g_free(quoted);
     if (!script) return ZWK_OOM;
-    ++s->pending; retain(s); g_atomic_int_inc(&live_callbacks);
+    ++s->posts; retain(s); g_atomic_int_inc(&live_callbacks);
     webkit_web_view_evaluate_javascript(WEBKIT_WEB_VIEW(s->view),script,-1,NULL,NULL,NULL,sent,s);
     g_free(script); return ZWK_OK;
 }
