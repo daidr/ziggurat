@@ -162,7 +162,16 @@ try timer.close();
 
 ## 文本测量
 
-`Frame.label` 使用固定的 16px 单行字体。`Options.measurer` 决定文本节点与控件标签的宽度。默认的 `Measurer.estimate` 是保守估计（窄字符 9 DIP，宽字符 16 DIP，行高 24），不调用原生字体；需要精确宽度时，应用可以提供基于 `ziggurat_text_layout` 的测量回调。测量回调在 paint 中调用，应自行缓存，避免在常规绘制路径分配。
+`Frame.label` 使用默认的 16px 单行字体。文本节点可以用 `Style.font` 换成其他字体变体：`Font` 包含 `size`（1–1024 DIP）、`weight`（`regular`/`medium`/`semibold`/`bold`）、`italic` 与 `monospace`，并提供预设 `.body`、`.heading1`–`.heading6` 与 `.code`：
+
+```zig
+try v.text("概览", .{ .font = view.Font.heading2 });
+try v.text("zig build test", .{ .font = view.Font.code });
+```
+
+字体随文本命令一起录制（命令仍为 32 字节），GDI、Direct3D 11 与 Cairo/Pango 渲染器都按它选择字形；GDI 和 Direct3D 11 各自缓存最近使用的 8 个变体，不在常规绘制路径中重复创建。
+
+`Options.measurer` 决定文本节点与控件标签的宽度。默认的 `Measurer.estimate` 是保守估计（窄字符 9 DIP，宽字符 16 DIP，行高 24），不调用原生字体；需要精确宽度时，应用可以提供基于 `ziggurat_text_layout` 的测量回调；`measure_font(context, text, font)`（可选）在节点带字体时调用。没有它时按字号相对 16 缩放 `measure` 的结果，等宽字体按每字符 0.6 em、非常规字重加宽 5% 估算。测量回调在 paint 中调用，应自行缓存，避免在常规绘制路径分配。
 
 ## 存储与容量
 
@@ -209,6 +218,10 @@ try v.end();
 - `paint(context, frame, id, bounds)`：在绘制顺序中的位置录制内容。
 - `annotate(context, annotation)`（可选）：每次 `paint` 前调用，传入外层表单字段的标签、说明、错误与必填状态；不在字段内时传空值。规则与 `place` 相同。
 - `status(context)`（可选）：返回 `EmbedStatus`（是否正在输入法组合、内容是否为空），在构建和路由按键时读取，不能分配或阻塞。
+- `focusable`（默认 false）：以节点 ID 登记为 Tab 停靠点，叶子自己绘制的控件仍在它上面。
+- `input(context, id, EmbedInput)`（可选）：叶子上的指针与按键输入，坐标相对叶子边界。`pointer_move` 与 `pointer_leave` 跟随指针（窗口失去焦点也算离开），`pointer_down` 是主键按下，`key` 是叶子持有焦点时其他控件都不处理的按键。返回 true 表示已消费并重绘窗口；消费按下的可聚焦叶子随即获得焦点。不消费的按键（例如 Tab）照常路由。它在主线程、绘制之外运行；被禁用、被裁剪遮住或位于打开的列表下面的叶子收不到输入，每帧最多 16 个叶子参与路由。
+
+叶子的状态变化需要告诉辅助技术时，调用 `host.announce(text)`（或在构建中调用 `View.announce`）：文字作为一个没有可见内容的状态节点礼貌播报，每次调用都是新的状态，超过 256 字节时在字符边界截断。
 
 `ziggurat_view_text` 用它提供可编辑文本字段。应用持有 `ziggurat_document_editor.Field` 及其 Document 和 Engine，并在 Host attach 后调用一次 `host.context.prepareTextFields(allocator, .{})`：
 
@@ -260,7 +273,7 @@ try std.testing.expectEqualStrings("Sans", h.focused().?.text);
 
 - 时间与浮层：`advance(ns)` 推进测试时钟并重新渲染，`deadline()` 返回上一遍请求的唤醒时刻；`hover(query)`、`hoverAt(x, y)` 与 `leave()` 移动或移走指针，`tooltip()` 返回当前显示的提示文字；`focus(query)` 直接给节点焦点。`key` 先把按键交给打开的列表或显示的提示，`clickAt` 先让按下经过列表与提示的处理，`at` 先查浮在上面的列表和通知。`write` 的大纲带出列表的打开/关闭、高亮项与提示文字。
 
-Harness 把嵌入叶子当作不可交互的节点，不验证原生命中、文本输入、可访问性或指针捕获；这些仍由隐藏窗口 smoke 和原生检查覆盖。
+带 `input` 的嵌入叶子在 Harness 中同样收到 `hoverAt`/`leave`、`clickAt` 与 `key` 的输入，`announcement()` 返回最近的播报文字。除此之外，Harness 把嵌入叶子当作不可交互的节点，不验证原生命中、文本输入、可访问性或指针捕获；这些仍由隐藏窗口 smoke 和原生检查覆盖。
 
 ## 当前范围
 

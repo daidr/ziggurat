@@ -2,6 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const Cancel = @import("cancel.zig").Cancel;
 const shutdownSocket = @import("cancel.zig").shutdownSocket;
+const guardSends = @import("cancel.zig").guardSends;
 const Waker = @import("waker.zig").Waker;
 
 pub const Header = std.http.Header;
@@ -165,6 +166,7 @@ pub const Socket = struct {
             else => error.ConnectionFailed,
         };
         connection.closing = true;
+        guardSends(connection);
         errdefer client.connection_pool.release(connection);
         if (connection.proxied) return error.UnsupportedProxy;
         const handle = connection.stream_reader.getStream().handle;
@@ -897,4 +899,30 @@ test "cancel aborts a running socket and a rejected handshake fails" {
     defer http_thread.join();
     const url = try std.fmt.bufPrint(&buffer, "ws://127.0.0.1:{d}/", .{http_server.port()});
     try std.testing.expectError(error.HandshakeRejected, Socket.connect(std.testing.allocator, &client, url, .{}, null));
+}
+
+test "output queued before cancel fails as a write error" {
+    const script = struct {
+        fn run(peer: *TestPeer, _: *std.http.Server.WebSocket, _: std.net.Stream) anyerror!void {
+            peer.release.wait();
+        }
+    }.run;
+    var peer = try TestPeer.init(script);
+    defer peer.deinit();
+    const thread = try std.Thread.spawn(.{}, TestPeer.serve, .{&peer});
+    defer thread.join();
+    defer peer.release.set();
+    var client: std.http.Client = .{ .allocator = std.testing.allocator };
+    defer client.deinit();
+    var buffer: [64]u8 = undefined;
+    const socket = try Socket.connect(std.testing.allocator, &client, try peer.url(&buffer), .{}, null);
+    defer socket.deinit();
+    // The worker writes this to a socket that cancel already shut down.
+    try socket.send(.binary, "queued before cancel");
+    socket.cancel();
+    try std.testing.expectError(error.Cancelled, socket.run(.{ .on_message = struct {
+        fn on(_: ?*anyopaque, _: Message) Flow {
+            return .proceed;
+        }
+    }.on }));
 }
