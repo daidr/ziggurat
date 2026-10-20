@@ -2223,7 +2223,9 @@ pub fn build(b: *std.Build) void {
     cli_step.dependOn(&install_setup_stub.step);
     setup_smoke.dependOn(&b.addInstallArtifact(cli, .{}).step);
     check.dependOn(&cli.step);
-    const cli_tests = b.addTest(.{ .root_module = cli_module });
+    // LLVM, as release builds use: the Linux Debug self-hosted backend keeps
+    // constants writable and hid a write to `std.Io.Reader.ending`.
+    const cli_tests = b.addTest(.{ .root_module = cli_module, .use_llvm = true });
     check.dependOn(&cli_tests.step);
     const run_cli_tests = b.addRunArtifact(cli_tests);
     test_step.dependOn(&run_cli_tests.step);
