@@ -712,6 +712,13 @@ pub fn build(b: *std.Build) void {
     }
     const ui_options = b.addOptions();
     ui.addImport("ziggurat_drawing_resources", drawing_resources);
+    const shader = b.addModule("ziggurat_shader", .{ .root_source_file = b.path("src/shader/root.zig"), .target = target, .optimize = optimize });
+    ui.addImport("ziggurat_shader", shader);
+    const shader_tests = b.addTest(.{ .root_module = shader });
+    check.dependOn(&shader_tests.step);
+    const run_shader_tests = b.addRunArtifact(shader_tests);
+    test_step.dependOn(&run_shader_tests.step);
+    b.step("test-shader", "Run shader language, bounded execution and uniform contracts").dependOn(&run_shader_tests.step);
     const shaped_editor = b.addModule("ziggurat_shaped_editor", .{ .root_source_file = b.path("src/ui/shaped_editor.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat", .module = core },
         .{ .name = "ziggurat_ui", .module = ui },

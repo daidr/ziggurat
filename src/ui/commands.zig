@@ -12,6 +12,7 @@ pub const gaussian = @import("gaussian_filter.zig");
 const gaussian_scope = @import("gaussian_scope.zig");
 pub const backdrop = @import("backdrop.zig");
 pub const loading = @import("loading.zig");
+pub const shader_effects = @import("shader_effects.zig");
 pub const no_filter: u8 = 255;
 pub const GroupCommand = struct { bounds: Rect, mask_origin: drawing.Point = .{}, opacity: u8 = 255, mask_resource: ?u8 = null, filter_slot: u8 = no_filter };
 pub const GradientShape = struct { bounds: Rect, radius: f32 = 0, stroke_width: f32 = 0, brush: u8 };
@@ -87,6 +88,11 @@ pub const Command = union(enum) {
     backdrop: u8,
     /// Index into the Buffer's loading indicator table.
     indicator: u8,
+    /// Index into the Buffer's shader table; the next `begin_group` opens
+    /// that element effect's capture.
+    effect: u8,
+    /// Index into the Buffer's shader table: a backdrop shader.
+    backdrop_shader: u8,
 };
 comptime {
     if (@sizeOf(Command) != 32 or @sizeOf(GroupCommand) != 28) @compileError("command ABI mismatch");
@@ -103,12 +109,15 @@ pub const FilterStorage = struct {
     len: usize = 0,
     bound: bool = false,
 };
-const ScopeKind = enum { group, transform, gaussian };
+const ScopeKind = enum { group, transform, gaussian, effect };
 
-/// Backdrop effects and loading indicators are drawn on the software
-/// planes; a GPU renderer rejects a batch that holds one.
+/// Backdrop effects, loading indicators and shader effects are drawn on the
+/// software planes; a GPU renderer rejects a batch that holds one.
 pub fn softwareOnly(list: []const Command) bool {
-    for (list) |command| if (command == .backdrop or command == .indicator) return true;
+    for (list) |command| switch (command) {
+        .backdrop, .indicator, .effect, .backdrop_shader => return true,
+        else => {},
+    };
     return false;
 }
 
@@ -144,6 +153,7 @@ pub const Buffer = struct {
     backdrop_storage: backdrop.Storage = .{},
     indicator_storage: [loading.max_entries]loading.Entry = undefined,
     indicator_len: usize = 0,
+    shader_storage: shader_effects.Storage = .{},
 
     pub fn reset(self: *Buffer) void {
         for (self.preparedTextResources()) |view| view.lease.release();
@@ -168,6 +178,8 @@ pub const Buffer = struct {
         self.backdrop_storage.len = 0;
         self.backdrop_storage.workspace = null;
         self.indicator_len = 0;
+        self.shader_storage.len = 0;
+        self.shader_storage.workspace = null;
         if (self.transform_storage) |storage| {
             storage.len = 0;
             storage.bound = false;
@@ -209,9 +221,10 @@ pub const Buffer = struct {
         transforms: usize,
         backdrops: usize,
         indicators: usize,
+        shaders: usize,
     };
     pub fn checkpoint(self: *const Buffer) Checkpoint {
-        return .{ .len = self.len, .text_len = self.text_len, .depth = self.depth, .brush_len = self.brush_len, .prepared = self.prepared_text_len, .images = self.image_len, .coverage = self.coverage_len, .textures = self.texture_len, .group_depth = self.group_depth, .filters = self.filterResources().len, .transforms = self.transformResources().len, .backdrops = self.backdrop_storage.len, .indicators = self.indicator_len };
+        return .{ .len = self.len, .text_len = self.text_len, .depth = self.depth, .brush_len = self.brush_len, .prepared = self.prepared_text_len, .images = self.image_len, .coverage = self.coverage_len, .textures = self.texture_len, .group_depth = self.group_depth, .filters = self.filterResources().len, .transforms = self.transformResources().len, .backdrops = self.backdrop_storage.len, .indicators = self.indicator_len, .shaders = self.shader_storage.len };
     }
     /// Only the same owning Buffer may roll back to its earlier scope mark.
     /// No allocator or foreign destructor is called while releasing these pins.
@@ -236,6 +249,7 @@ pub const Buffer = struct {
         self.group_depth = mark.group_depth;
         self.backdrop_storage.len = mark.backdrops;
         self.indicator_len = mark.indicators;
+        self.shader_storage.len = mark.shaders;
     }
     pub fn beginTransform(self: *Buffer, value: layers.NativeTransform) !void {
         const storage = self.transform_storage orelse return error.TransformStorageRequired;
@@ -445,6 +459,50 @@ pub const Buffer = struct {
         self.storage[self.len] = .{ .indicator = @intCast(self.indicator_len) };
         self.indicator_len += 1;
         self.len += 1;
+    }
+    /// Open an element effect: the effect marker, then a group over the
+    /// capture bounds (box plus margin). Close it with `endEffect`.
+    pub fn beginEffect(self: *Buffer, entry: shader_effects.Entry, options: layers.Group) !void {
+        try shader_effects.validate(entry);
+        if (entry.target != .element) return error.InvalidGeometry;
+        try entry.carrier.validate();
+        const bounds = entry.captureBounds();
+        try layers.validateGroup(entry.captureRect(), options, entry.carrier.scale);
+        if (options.mask != null) return error.InvalidGeometry;
+        if (self.group_depth == layers.max_depth) return error.GroupStackFull;
+        if (self.len + 2 > self.storage.len) return error.CommandsFull;
+        const table = &self.shader_storage;
+        if (table.len == table.entries.len) return error.ShaderEffectsFull;
+        table.entries[table.len] = entry;
+        self.storage[self.len] = .{ .effect = @intCast(table.len) };
+        self.storage[self.len + 1] = .{ .begin_group = .{ .bounds = bounds, .opacity = options.opacity, .mask_origin = options.mask_origin } };
+        table.len += 1;
+        self.len += 2;
+        self.group_clips[self.group_depth] = self.depth;
+        self.scope_kinds[self.group_depth] = .effect;
+        self.group_depth += 1;
+    }
+    pub fn endEffect(self: *Buffer) Error!void {
+        if (self.group_depth == 0 or self.scope_kinds[self.group_depth - 1] != .effect) return error.GroupStackEmpty;
+        if (self.depth != self.group_clips[self.group_depth - 1]) return error.UnbalancedGroupClips;
+        try self.append(.end_group);
+        self.group_depth -= 1;
+    }
+    /// Record a backdrop shader in absolute DIP. Like a backdrop effect it
+    /// reads the target plane as drawn so far.
+    pub fn backdropShader(self: *Buffer, entry: shader_effects.Entry) !void {
+        try shader_effects.validate(entry);
+        if (entry.target != .backdrop) return error.InvalidGeometry;
+        if (self.len == self.storage.len) return error.CommandsFull;
+        const table = &self.shader_storage;
+        if (table.len == table.entries.len) return error.ShaderEffectsFull;
+        table.entries[table.len] = entry;
+        self.storage[self.len] = .{ .backdrop_shader = @intCast(table.len) };
+        table.len += 1;
+        self.len += 1;
+    }
+    pub fn shaderEntries(self: *const Buffer) []const shader_effects.Entry {
+        return self.shader_storage.entries[0..self.shader_storage.len];
     }
     pub fn indicatorEntries(self: *const Buffer) []const loading.Entry {
         return self.indicator_storage[0..self.indicator_len];

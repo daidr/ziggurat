@@ -34,6 +34,10 @@ pub const Renderer = struct {
     layer_fault: u32 = 0,
     /// The Buffer whose backdrop and indicator tables the current replay reads.
     backdrop_source: ?*const commands.Buffer = null,
+    /// Per open group: the element effect it captures for, if any.
+    effect_scopes: [layers.max_depth]?EffectScope = undefined,
+    group_count: usize = 0,
+    pending_effect: ?u8 = null,
     layer_candidate_peak: usize = 0,
     /// Fonts other than the default label font, created on first use and
     /// kept until deinit; the oldest is replaced when all are taken.
@@ -180,6 +184,41 @@ pub const Renderer = struct {
         const workspace = self.layer_workspace orelse return error.LayersRequired;
         try workspace.endGroup();
         self.bindSurface(workspace.current());
+    }
+    const EffectScope = struct { slot: u8, entry: *const commands.shader_effects.Entry, workspace: ?*commands.shader_effects.Workspace };
+    /// Open an element effect's capture. Without a Gaussian workspace, or
+    /// when the capture does not fit it, the content is drawn as an ordinary
+    /// group and the effect is skipped.
+    fn beginEffect(self: *Renderer, group_bounds: drawing.Rect, options: layers.Group, entry: *const commands.shader_effects.Entry) !bool {
+        const workspace = self.layer_workspace orelse return error.LayersRequired;
+        const capacity = self.gaussianCapacity() orelse {
+            try self.beginGroup(group_bounds, options);
+            return false;
+        };
+        const capture = gaussian_scope.Capture.init(group_bounds, &entry.carrier) catch {
+            try self.beginGroup(group_bounds, options);
+            return false;
+        };
+        capture.check(capacity) catch {
+            try self.beginGroup(group_bounds, options);
+            return false;
+        };
+        workspace.beginGaussian(group_bounds, options, &entry.carrier) catch |err| switch (err) {
+            // The frame's filter budget is spent.
+            error.GaussianWorkExceeded => {
+                try self.beginGroup(group_bounds, options);
+                return false;
+            },
+            else => return err,
+        };
+        self.bindSurface(workspace.current());
+        return true;
+    }
+    fn runEffect(context: *const anyopaque, source: []u32, source_stride: usize, scratch: []u32, scratch_stride: usize, capture: gaussian_scope.Capture) void {
+        const scope: *const EffectScope = @ptrCast(@alignCast(context));
+        const width = capture.pixelWidth();
+        const height = capture.pixelHeight();
+        commands.shader_effects.applyElement(scope.entry, .{ .pixels = source, .width = width, .height = height, .stride = source_stride }, .{ .pixels = scratch, .width = width, .height = height, .stride = scratch_stride }, capture, scope.workspace);
     }
     pub fn beginTransform(self: *Renderer, value: layers.NativeTransform) !void {
         const workspace = self.layer_workspace orelse return error.TransformsRequired;
@@ -639,6 +678,9 @@ pub const Renderer = struct {
                 workspace.popClip() catch {};
             } else _ = c.RestoreDC(self.dc, -1);
         };
+        self.group_count = 0;
+        self.pending_effect = null;
+        if (self.backdrop_source) |source| if (source.shader_storage.workspace) |workspace| workspace.beginFrame();
         for (list) |command| switch (command) {
             .fill => |fill_command| try self.fill(fill_command.bounds, fill_command.color),
             .shape => |shape_command| try self.shape(shape_command, null),
@@ -667,9 +709,41 @@ pub const Renderer = struct {
                 const r = value.bounds;
                 const group_bounds: drawing.Rect = .{ .x = r.x, .y = r.y, .width = r.width, .height = r.height };
                 const options = try commands.groupOptions(value, coverage_resources);
-                if (value.filter_slot == commands.no_filter) try self.beginGroup(group_bounds, options) else try self.beginGaussian(group_bounds, options, filters[value.filter_slot]);
+                const pending = self.pending_effect;
+                self.pending_effect = null;
+                if (self.group_count == self.effect_scopes.len) return error.LayerDepthExceeded;
+                var scope: ?EffectScope = null;
+                if (pending) |slot| {
+                    const source = self.backdrop_source.?;
+                    const entry = &source.shader_storage.entries[slot];
+                    if (try self.beginEffect(group_bounds, options, entry)) scope = .{ .slot = slot, .entry = entry, .workspace = source.shader_storage.workspace };
+                } else if (value.filter_slot == commands.no_filter) try self.beginGroup(group_bounds, options) else try self.beginGaussian(group_bounds, options, filters[value.filter_slot]);
+                self.effect_scopes[self.group_count] = scope;
+                self.group_count += 1;
             },
-            .end_group => try self.endGroup(),
+            .end_group => {
+                if (self.group_count == 0) return error.GroupStackEmpty;
+                self.group_count -= 1;
+                if (self.effect_scopes[self.group_count]) |*scope| {
+                    const workspace = self.layer_workspace orelse return error.LayersRequired;
+                    try workspace.endGroupFiltered(.{ .context = scope, .run = runEffect });
+                    self.bindSurface(workspace.current());
+                } else try self.endGroup();
+            },
+            .effect => |slot| {
+                const source = self.backdrop_source orelse return error.MissingResources;
+                if (slot >= source.shader_storage.len) return error.MissingResources;
+                self.pending_effect = slot;
+            },
+            .backdrop_shader => |slot| {
+                const source = self.backdrop_source orelse return error.MissingResources;
+                if (slot >= source.shader_storage.len) return error.MissingResources;
+                const clip = try self.physicalClip();
+                if (c.GdiFlush() == 0) return error.FlushSurfaceFailed;
+                const surface: cpu_gradient.Surface = .{ .pixels = self.pixels orelse return error.NoSurface, .width = self.width, .height = self.height, .stride = self.width, .scale = self.scale, .clip = clip, .origin = self.pixelOrigin() };
+                const scratch = if (source.backdrop_storage.workspace) |workspace| workspace.planes else null;
+                _ = commands.shader_effects.applyBackdrop(surface, self.transparent(), &source.shader_storage.entries[slot], scratch, source.shader_storage.workspace);
+            },
             .begin_transform => |slot| try self.beginTransform(transforms[slot]),
             .end_transform => try self.endTransform(),
             .backdrop => |slot| {

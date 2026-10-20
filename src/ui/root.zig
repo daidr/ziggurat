@@ -37,6 +37,19 @@ pub const BackdropEffectStats = struct {
     /// a loading indicator.
     software_frames: u64 = 0,
 };
+/// The shading language that programmable effects run.
+pub const shader = @import("ziggurat_shader");
+pub const shader_effects = commands.shader_effects;
+pub const ShaderEffect = shader_effects.Effect;
+pub const ShaderEffectStats = struct {
+    workspace: shader_effects.Stats = .{},
+    /// Effects drawn without their program because no shader workspace, or
+    /// no Gaussian workspace with room for an element's capture, was
+    /// prepared.
+    unprepared: u64 = 0,
+};
+/// How an element effect composites into its parent.
+pub const EffectOptions = struct { opacity: u8 = 255 };
 pub const offscreen = @import("offscreen.zig");
 pub const gpu_resources = @import("gpu_resources.zig");
 pub const gpu_offscreen = @import("gpu_offscreen.zig");
@@ -473,6 +486,8 @@ pub const Context = struct {
     backdrop_workspace: ?*backdrop_effects.Workspace = null,
     backdrop_preferences: backdrop_effects.Preferences = .{},
     backdrop_unprepared: u64 = 0,
+    shader_workspace: ?*shader_effects.Workspace = null,
+    shader_unprepared: u64 = 0,
     backdrop_software_frames: u64 = 0,
     space_generation: u64 = 0,
     space_binding_epoch: u64 = 0,
@@ -785,6 +800,31 @@ pub const Context = struct {
         self.backdrop_workspace = null;
         workspace.destroy();
         if (self.window) |window| if (self.live(window)) window.invalidate();
+    }
+    /// Allocate the machine that runs shader effects. Element effects also
+    /// need `prepareGaussianWorkspace` with room for each element's capture
+    /// (box plus margin); backdrop shaders read through the backdrop
+    /// workspace. Until then effects draw their content unchanged.
+    pub fn prepareShaderEffects(self: *Context, allocator: std.mem.Allocator, options: shader_effects.Options) !void {
+        const window = self.window orelse return error.NotAttached;
+        const scope = self.callbackScope(window) orelse return error.Closed;
+        defer scope.end();
+        if (self.painting) return error.Busy;
+        const workspace = try shader_effects.Workspace.create(allocator, options);
+        const previous = self.shader_workspace;
+        self.shader_workspace = workspace;
+        if (previous) |value| value.destroy();
+        window.invalidate();
+    }
+    pub fn releaseShaderEffects(self: *Context) !void {
+        if (self.painting) return error.Busy;
+        const workspace = self.shader_workspace orelse return error.ShaderEffectsNotPrepared;
+        self.shader_workspace = null;
+        workspace.destroy();
+        if (self.window) |window| if (self.live(window)) window.invalidate();
+    }
+    pub fn shaderEffectStats(self: *const Context) ShaderEffectStats {
+        return .{ .workspace = if (self.shader_workspace) |workspace| workspace.stats else .{}, .unprepared = self.shader_unprepared };
     }
     /// The host's reading of the system's reduced transparency and high
     /// contrast settings; either one draws every effect as an opaque fill.
@@ -2675,6 +2715,7 @@ pub const Context = struct {
                 self.command_buffer.reset();
                 defer self.command_buffer.reset();
                 self.command_buffer.backdrop_storage.workspace = self.backdrop_workspace;
+                self.command_buffer.shader_storage.workspace = self.shader_workspace;
                 if (self.gaussian_workspace) |workspace| self.command_buffer.bindFilterStorage(&workspace.storage) catch |err| {
                     window.report(.{ .domain = .renderer, .operation = .paint, .err = err });
                     return;
@@ -2902,6 +2943,10 @@ pub const Context = struct {
             self.backdrop_workspace = null;
             workspace.destroy();
         }
+        if (self.shader_workspace) |workspace| {
+            self.shader_workspace = null;
+            workspace.destroy();
+        }
         self.painting = false;
         self.dropGaussianMetadata();
         self.frame_accessibility_source = null;
@@ -2952,6 +2997,9 @@ pub const Frame = struct {
     group_bounds: [layers.max_depth]Rect = undefined,
     group_geometry_passthrough: u8 = 0,
     transforms: ?*TransformWorkspace = null,
+    /// Open element effects; false marks one drawn without its program.
+    effect_scopes: [16]bool = undefined,
+    effect_depth: usize = 0,
 
     pub fn beginShortcutScope(self: *Frame, id: u64, options: ShortcutScopeOptions) !void {
         errdefer |err| self.failure = self.failure orelse err;
@@ -3472,6 +3520,70 @@ pub const Frame = struct {
         self.context.command_buffer.loadingIndicator(.{ .bounds = self.absolute(bounds), .kind = kind, .phase = phase, .color = color, .options = options }) catch |err| {
             self.failure = self.failure orelse err;
         };
+    }
+    /// Draw what follows, until `endEffect`, through `effect`: the content is
+    /// captured in isolation over `box` plus the effect's margin, rewritten
+    /// by its program and composited at `options.opacity`. Hit testing,
+    /// focus and semantics keep their geometry. Without the shader and
+    /// Gaussian workspaces, or when the capture does not fit, the content is
+    /// drawn as it is and counted as unprepared.
+    pub fn beginEffect(self: *Frame, box: Rect, effect: ShaderEffect, options: EffectOptions) !void {
+        errdefer |err| self.failure = self.failure orelse err;
+        if (self.effect_depth == self.effect_scopes.len) return error.EffectStackFull;
+        var entry: shader_effects.Entry = .{ .program = effect.program, .values = effect.values.*, .target = .element, .box = self.absolute(box), .margin = effect.margin };
+        try shader_effects.validate(entry);
+        const ready = ready: {
+            if (self.context.shader_workspace == null or self.group_depth == layers.max_depth) break :ready false;
+            const capacity = self.context.renderer.gaussianCapacity() orelse break :ready false;
+            entry.carrier = shader_effects.carrier(self.size.scale) catch break :ready false;
+            const capture = gaussian_scope.Capture.init(entry.captureRect(), &entry.carrier) catch break :ready false;
+            capture.check(capacity) catch break :ready false;
+            break :ready true;
+        };
+        if (!ready) {
+            self.context.shader_unprepared += 1;
+            self.effect_scopes[self.effect_depth] = false;
+            self.effect_depth += 1;
+            return;
+        }
+        var absolute_options: layers.Group = .{ .opacity = options.opacity };
+        absolute_options.mask_origin = self.offset;
+        try self.context.command_buffer.beginEffect(entry, absolute_options);
+        self.group_clip_base[self.group_depth] = self.clips.len;
+        self.group_bounds[self.group_depth] = entry.captureBounds();
+        self.group_geometry_passthrough |= @as(u8, 1) << @intCast(self.group_depth);
+        self.group_depth += 1;
+        self.effect_scopes[self.effect_depth] = true;
+        self.effect_depth += 1;
+    }
+    pub fn endEffect(self: *Frame) !void {
+        errdefer |err| self.failure = self.failure orelse err;
+        if (self.effect_depth == 0) return error.EffectStackEmpty;
+        if (self.effect_scopes[self.effect_depth - 1]) {
+            if (self.group_depth == 0 or self.group_geometry_passthrough & (@as(u8, 1) << @intCast(self.group_depth - 1)) == 0) return error.UnbalancedEffect;
+            try self.context.command_buffer.endEffect();
+            self.group_depth -= 1;
+            self.group_geometry_passthrough &= ~(@as(u8, 1) << @intCast(self.group_depth));
+        }
+        self.effect_depth -= 1;
+    }
+    /// Rewrite what has been drawn beneath `bounds` with `effect`'s program,
+    /// inside its rounded rectangle; reads reach `effect.margin` beyond it.
+    /// Like `backdropEffect` it sees only the current scope's content.
+    /// Without the shader and backdrop workspaces it draws nothing.
+    pub fn backdropShader(self: *Frame, bounds: Rect, radius: f32, effect: ShaderEffect) void {
+        self.recordBackdropShader(bounds, radius, effect) catch |err| {
+            self.failure = self.failure orelse err;
+        };
+    }
+    fn recordBackdropShader(self: *Frame, bounds: Rect, radius: f32, effect: ShaderEffect) !void {
+        const entry: shader_effects.Entry = .{ .program = effect.program, .values = effect.values.*, .target = .backdrop, .box = self.absolute(bounds), .margin = effect.margin, .radius = radius };
+        try shader_effects.validate(entry);
+        if (self.context.shader_workspace == null or self.context.backdrop_workspace == null) {
+            self.context.shader_unprepared += 1;
+            return;
+        }
+        try self.context.command_buffer.backdropShader(entry);
     }
     fn recordBackdrop(self: *Frame, bounds: Rect, radius: f32, effect: BackdropEffect) !void {
         const palette = self.currentTheme().palette;

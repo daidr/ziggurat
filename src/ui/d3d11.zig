@@ -933,7 +933,7 @@ pub const Renderer = struct {
             .end_group => try self.endGroup(),
             .begin_transform => |slot| try self.beginTransform(transforms[slot]),
             .end_transform => try self.endTransform(),
-            .backdrop, .indicator => unreachable, // Whole batch rejected before drawing.
+            .backdrop, .indicator, .effect, .backdrop_shader => unreachable, // Whole batch rejected before drawing.
             .push_clip => |r| {
                 if (!layout.validRect(r)) return error.InvalidGeometry;
                 if (depth == 32) return error.ClipStackFull;

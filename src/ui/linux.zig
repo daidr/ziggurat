@@ -79,8 +79,14 @@ pub const Renderer = struct {
     layer_active: bool = false,
     layer_fault: u32 = 0,
     layer_candidate_peak: usize = 0,
-    /// The Buffer whose backdrop and indicator tables the current replay reads.
+    /// The Buffer whose backdrop, indicator and shader tables the current
+    /// replay reads.
     backdrop_source: ?*const commands.Buffer = null,
+    /// Per open group: the element effect it captures for, if any.
+    effect_scopes: [layers.max_depth]?EffectScope = undefined,
+    group_count: usize = 0,
+    pending_effect: ?u8 = null,
+    const EffectScope = struct { slot: u8, capture: gaussian_scope.Capture };
     pub const LayerCandidate = struct { native: *anyopaque, plan: layers.Plan };
     pub fn layerMetadataBytes() usize {
         return zlc_layer_metadata_bytes();
@@ -214,6 +220,39 @@ pub const Renderer = struct {
         if (self.layer_plan == null) return error.LayersRequired;
         if (zlc_layer_gaussian_active(self.native.?) != 0) try self.filterGaussian();
         if (zlc_layer_end_group(self.native.?) != 0) return error.EndGroupFailed;
+    }
+    /// Open an element effect's capture. Without a Gaussian workspace, or
+    /// when the capture does not fit it, the content is drawn as an ordinary
+    /// group and the effect is skipped.
+    fn beginEffect(self: *Renderer, bounds: drawing.Rect, options: layers.Group, entry: *const commands.shader_effects.Entry) !?EffectScope {
+        const capacity = self.gaussianCapacity() orelse {
+            try self.beginGroup(bounds, options);
+            return null;
+        };
+        const capture = gaussian_scope.Capture.init(bounds, &entry.carrier) catch {
+            try self.beginGroup(bounds, options);
+            return null;
+        };
+        capture.check(capacity) catch {
+            try self.beginGroup(bounds, options);
+            return null;
+        };
+        const descriptor = try self.groupDescriptor(bounds, options);
+        if (zlc_layer_begin_gaussian(self.native.?, &descriptor, &capture, &entry.carrier) != 0) {
+            // The frame's filter budget is spent.
+            try self.beginGroup(bounds, options);
+            return null;
+        }
+        return .{ .slot = 0, .capture = capture };
+    }
+    noinline fn filterEffect(self: *Renderer, entry: *const commands.shader_effects.Entry, capture: gaussian_scope.Capture, workspace: ?*commands.shader_effects.Workspace) !void {
+        var source: cpu_gradient.Surface = undefined;
+        var temporary: cpu_gradient.Surface = undefined;
+        var kernel: ?*const gaussian_kernel.Kernel = null;
+        if (zlc_layer_gaussian_planes(self.native.?, &source, &temporary, &kernel) != 0) return error.EndGaussianFailed;
+        const pixels = source.pixels[0 .. @as(usize, source.stride) * (source.height - 1) + source.width];
+        const scratch = temporary.pixels[0 .. @as(usize, temporary.stride) * (temporary.height - 1) + temporary.width];
+        commands.shader_effects.applyElement(entry, .{ .pixels = pixels, .width = source.width, .height = source.height, .stride = source.stride }, .{ .pixels = scratch, .width = temporary.width, .height = temporary.height, .stride = temporary.stride }, capture, workspace);
     }
     pub fn beginGaussian(self: *Renderer, bounds: drawing.Rect, options: layers.Group, view: gaussian.View) !void {
         try view.validate();
@@ -451,6 +490,9 @@ pub const Renderer = struct {
         defer while (self.layer_plan == null and depth != 0) : (depth -= 1) {
             zlc_pop_clip(self.native.?);
         };
+        self.group_count = 0;
+        self.pending_effect = null;
+        if (self.backdrop_source) |source| if (source.shader_storage.workspace) |workspace| workspace.beginFrame();
         for (list) |op| switch (op) {
             .fill => |fill_command| {
                 if (!layout.validRect(fill_command.bounds)) return error.InvalidGeometry;
@@ -491,9 +533,41 @@ pub const Renderer = struct {
                 const r = value.bounds;
                 const bounds: drawing.Rect = .{ .x = r.x, .y = r.y, .width = r.width, .height = r.height };
                 const options = try commands.groupOptions(value, coverage_resources);
-                if (value.filter_slot == commands.no_filter) try self.beginGroup(bounds, options) else try self.beginGaussian(bounds, options, filters[value.filter_slot]);
+                const pending = self.pending_effect;
+                self.pending_effect = null;
+                if (self.group_count == self.effect_scopes.len) return error.LayerDepthExceeded;
+                var scope: ?EffectScope = null;
+                if (pending) |slot| {
+                    scope = try self.beginEffect(bounds, options, &self.backdrop_source.?.shader_storage.entries[slot]);
+                    if (scope) |*value_scope| value_scope.slot = slot;
+                } else if (value.filter_slot == commands.no_filter) try self.beginGroup(bounds, options) else try self.beginGaussian(bounds, options, filters[value.filter_slot]);
+                self.effect_scopes[self.group_count] = scope;
+                self.group_count += 1;
             },
-            .end_group => try self.endGroup(),
+            .end_group => {
+                if (self.group_count == 0) return error.GroupStackEmpty;
+                self.group_count -= 1;
+                if (self.effect_scopes[self.group_count]) |scope| {
+                    if (self.layer_plan == null) return error.LayersRequired;
+                    const source = self.backdrop_source orelse return error.MissingResources;
+                    try self.filterEffect(&source.shader_storage.entries[scope.slot], scope.capture, source.shader_storage.workspace);
+                    if (zlc_layer_end_group(self.native.?) != 0) return error.EndGroupFailed;
+                } else try self.endGroup();
+            },
+            .effect => |slot| {
+                const source = self.backdrop_source orelse return error.MissingResources;
+                if (slot >= source.shader_storage.len) return error.MissingResources;
+                self.pending_effect = slot;
+            },
+            .backdrop_shader => |slot| {
+                const source = self.backdrop_source orelse return error.MissingResources;
+                if (slot >= source.shader_storage.len) return error.MissingResources;
+                var surface: cpu_gradient.Surface = undefined;
+                if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawBackdropFailed;
+                const scratch = if (source.backdrop_storage.workspace) |workspace| workspace.planes else null;
+                const dirty = commands.shader_effects.applyBackdrop(surface, zlc_layer_transparent(self.native.?) != 0, &source.shader_storage.entries[slot], scratch, source.shader_storage.workspace);
+                zlc_gradient_dirty(self.native.?, dirty.left, dirty.top, dirty.right - dirty.left, dirty.bottom - dirty.top);
+            },
             .begin_transform => |slot| try self.beginTransform(transforms[slot]),
             .end_transform => try self.endTransform(),
             .backdrop => |slot| {
@@ -594,4 +668,52 @@ test "Cairo backdrop effects filter the plane drawn so far and fall back without
     try renderer.replayBuffer(&buffer);
     if (zlc_gradient_surface(renderer.native.?, &surface) != 0) return error.DrawGradientFailed;
     try std.testing.expectEqual(@as(u32, 0xffff0000), surface.pixels[8 * surface.stride + 15]);
+}
+
+test "Cairo element effects rewrite an isolated capture and fall back to a plain group" {
+    const allocator = std.testing.allocator;
+    const size: z.Size = .{ .width = 32, .height = 16, .scale = 1 };
+    var renderer: Renderer = .{};
+    defer renderer.deinit();
+    try renderer.prepareGaussian(allocator, .{ .layers = .{ .size = size }, .source_size = .{ .width = 32, .height = 16 }, .max_radius = 2 });
+    var diagnostic: commands.shader_effects.shader.Diagnostic = .{};
+    // Swap red and blue, and paint the margin's empty pixels green.
+    const program = try commands.shader_effects.shader.compile(allocator,
+        \\vec4 color(vec2 position, vec4 pixel) {
+        \\    if (pixel.a == 0.0) return vec4(0.0, 1.0, 0.0, 1.0);
+        \\    return pixel.bgra;
+        \\}
+    , .{}, &diagnostic);
+    defer program.destroy();
+    const values = commands.shader_effects.shader.Values.init(program);
+    const workspace = try commands.shader_effects.Workspace.create(allocator, .{});
+    defer workspace.destroy();
+    var buffer: commands.Buffer = .{};
+    defer buffer.reset();
+    try buffer.fill(.{ .x = 0, .y = 0, .width = 32, .height = 16 }, 0xffffff);
+    try buffer.beginEffect(.{ .program = program, .values = values, .target = .element, .box = .{ .x = 4, .y = 4, .width = 8, .height = 8 }, .margin = 2, .carrier = try commands.shader_effects.carrier(1) }, .{});
+    try buffer.fill(.{ .x = 4, .y = 4, .width = 8, .height = 8 }, 0xff0000);
+    try buffer.endEffect();
+    buffer.shader_storage.workspace = workspace;
+    var dummy: u8 = 0;
+    try renderer.begin(.{ .native_context = &dummy, .size = size });
+    try renderer.replayBuffer(&buffer);
+    var surface: cpu_gradient.Surface = undefined;
+    if (zlc_gradient_surface(renderer.native.?, &surface) != 0) return error.DrawGradientFailed;
+    try std.testing.expectEqual(@as(u32, 0xff0000ff), surface.pixels[8 * surface.stride + 8]);
+    // The margin (and one-pixel halo) was transparent in the capture.
+    try std.testing.expectEqual(@as(u32, 0xff00ff00), surface.pixels[8 * surface.stride + 3]);
+    try std.testing.expectEqual(@as(u32, 0xff00ff00), surface.pixels[8 * surface.stride + 1]);
+    try std.testing.expectEqual(@as(u32, 0xffffffff), surface.pixels[8 * surface.stride + 0]);
+    try std.testing.expectEqual(@as(u64, 1), workspace.stats.applied);
+    renderer.abort();
+    // Without a Gaussian workspace the content draws as an ordinary group.
+    try renderer.releaseGaussian();
+    try renderer.begin(.{ .native_context = &dummy, .size = size });
+    try renderer.replayBuffer(&buffer);
+    if (zlc_gradient_surface(renderer.native.?, &surface) != 0) return error.DrawGradientFailed;
+    try std.testing.expectEqual(@as(u32, 0xffff0000), surface.pixels[8 * surface.stride + 8]);
+    try std.testing.expectEqual(@as(u32, 0xffffffff), surface.pixels[8 * surface.stride + 3]);
+    try std.testing.expectEqual(@as(u64, 1), workspace.stats.applied);
+    renderer.abort();
 }
