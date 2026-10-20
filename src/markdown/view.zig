@@ -86,8 +86,8 @@ fn resolve(options: Options) Resolved {
     return .{
         .text = c.text orelse p.text,
         .heading = c.heading orelse p.text,
-        .emphasis = c.emphasis orelse p.accent,
-        .strong = c.strong orelse p.focus,
+        .emphasis = c.emphasis orelse p.text,
+        .strong = c.strong orelse p.text,
         .strikethrough = c.strikethrough orelse p.disabled_text,
         .code = c.code orelse p.text,
         .code_background = c.code_background orelse p.field,
@@ -98,6 +98,8 @@ fn resolve(options: Options) Resolved {
 }
 
 const bullets = [_][]const u8{ "•", "◦", "▪" };
+const headings = [_]view.Font{ .heading1, .heading2, .heading3, .heading4, .heading5, .heading6 };
+const header_font: view.Font = .{ .weight = .semibold };
 
 const Builder = struct {
     v: *View,
@@ -128,8 +130,8 @@ const Builder = struct {
         const node = self.tree.get(index);
         const v = self.v;
         switch (node.kind) {
-            .paragraph => try self.flow(index, width, self.colors.text),
-            .heading => try self.flow(index, width, self.colors.heading),
+            .paragraph => try self.flow(index, width, self.colors.text, .body),
+            .heading => try self.flow(index, width, self.colors.heading, headings[@min(node.level, 6) -| 1]),
             .thematic_break => {
                 try v.column(.{ .height = 1, .background = self.colors.rule, .self_align = .stretch });
                 try v.end();
@@ -206,7 +208,7 @@ const Builder = struct {
                 if (count > chunk) try v.end();
                 try v.column(.{});
             }
-            try v.text(if (line.len == 0) " " else line, .{ .color = self.colors.code, .shrink = 0 });
+            try v.text(if (line.len == 0) " " else line, .{ .color = self.colors.code, .font = .code, .shrink = 0 });
         }
         if (count > chunk) try v.end();
         try v.end();
@@ -240,7 +242,10 @@ const Builder = struct {
                     else => .start,
                 };
                 try v.column(.{ .padding = .{ .top = 4, .bottom = 4, .left = 8, .right = 8 }, .border = self.colors.rule, .alignment = alignment });
-                try self.flow(cell_index, cell_width, if (row.header) self.colors.heading else self.colors.text);
+                if (row.header)
+                    try self.flow(cell_index, cell_width, self.colors.heading, header_font)
+                else
+                    try self.flow(cell_index, cell_width, self.colors.text, .body);
                 try v.end();
             }
             try v.end();
@@ -251,8 +256,8 @@ const Builder = struct {
     /// Inline content of `index` as rows that fit `width`. Each row holds
     /// one node per run of one style; links stay activatable on every row
     /// they wrap onto.
-    fn flow(self: *Builder, index: u32, width: f32, color: u32) Error!void {
-        var line: Line = .{ .b = self, .width = width, .base = color };
+    fn flow(self: *Builder, index: u32, width: f32, color: u32, font: view.Font) Error!void {
+        var line: Line = .{ .b = self, .width = width, .base = color, .font = font };
         try self.v.column(.{ .gap = 2 });
         var walker = self.tree.walk(index);
         _ = walker.next();
@@ -308,6 +313,8 @@ const Line = struct {
     b: *Builder,
     width: f32,
     base: u32,
+    /// Font of the block's plain text; inline styles derive from it.
+    font: view.Font,
     style: InlineStyle = .{},
     link: u32 = none,
     used: f32 = 0,
@@ -318,9 +325,23 @@ const Line = struct {
     /// The column rows are added to, while rows nest in chunks.
     nested: bool = false,
 
-    fn measure(self: *Line, text: []const u8) f32 {
-        const m = self.b.options.measurer;
-        return m.measure(m.context, text).width;
+    fn measure(self: *Line, text: []const u8, code: bool) f32 {
+        return self.b.options.measurer.textSize(text, self.fontFor(code)).width;
+    }
+    /// The font of the current run; null for links, which draw in the
+    /// label font.
+    fn fontFor(self: *Line, code: bool) ?view.Font {
+        if (self.link != none and self.style.image == 0) return null;
+        var font = self.font;
+        if (code) {
+            font.size = font.size * view.Font.code.size / view.Font.body.size;
+            font.monospace = true;
+            font.italic = false;
+            return font;
+        }
+        if (self.style.strong > 0 and @intFromEnum(font.weight) < @intFromEnum(view.Font.Weight.bold)) font.weight = .bold;
+        if (self.style.emphasis > 0) font.italic = true;
+        return if (std.meta.eql(font, view.Font.body)) null else font;
     }
     fn color(self: *Line, code: bool) u32 {
         const c = self.b.colors;
@@ -346,7 +367,7 @@ const Line = struct {
         while (at < text.len) {
             const end = nextBreak(text, at);
             const visible = std.mem.trimRight(u8, text[at..end], " ");
-            const visible_width = self.measure(visible);
+            const visible_width = self.measure(visible, code);
             if (self.used + pending + visible_width > self.width and self.used + pending > 0) {
                 const kept = std.mem.trimRight(u8, text[start..at], " ");
                 if (kept.len > 0) try self.segment(kept, code);
@@ -362,7 +383,7 @@ const Line = struct {
                     var stop = cut + sequenceLength(text[cut]);
                     while (stop < stop_all) {
                         const next = stop + sequenceLength(text[stop]);
-                        if (self.measure(text[cut..next]) > self.width) break;
+                        if (self.measure(text[cut..next], code) > self.width) break;
                         stop = next;
                     }
                     if (stop >= stop_all) break;
@@ -371,11 +392,11 @@ const Line = struct {
                     cut = stop;
                 }
                 start = cut;
-                pending = self.measure(text[cut..end]);
+                pending = self.measure(text[cut..end], code);
                 at = end;
                 continue;
             }
-            pending += self.measure(text[at..end]);
+            pending += self.measure(text[at..end], code);
             at = end;
         }
         if (start < text.len and !(self.used == 0 and std.mem.trim(u8, text[start..], " ").len == 0))
@@ -403,15 +424,15 @@ const Line = struct {
             try self.row();
         }
         self.segments += 1;
-        self.used += self.measure(text);
+        self.used += self.measure(text, code);
         const color_value = self.color(code);
         if (self.link != none and self.style.image == 0) {
             if (try v.link(text, .{ .shrink = 0 })) self.b.activation = .{ .link = self.b.tree.get(self.link).url };
         } else if (code) {
             try v.row(.{ .background = self.b.colors.code_background, .radius = 3, .padding = .{ .left = 3, .right = 3 }, .shrink = 0 });
-            try v.text(text, .{ .color = color_value });
+            try v.text(text, .{ .color = color_value, .font = self.fontFor(true) });
             try v.end();
-        } else try v.text(text, .{ .color = color_value, .shrink = 0 });
+        } else try v.text(text, .{ .color = color_value, .font = self.fontFor(false), .shrink = 0 });
     }
     fn newLine(self: *Line) Error!void {
         if (!self.open) try self.row();
