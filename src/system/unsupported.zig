@@ -1,6 +1,7 @@
 const z = @import("ziggurat");
 const types = @import("types.zig");
 const picker = @import("picker.zig");
+const desktop = @import("desktop.zig");
 
 pub const Owner = struct {
     context: *anyopaque,
@@ -90,4 +91,10 @@ pub const Tray = struct {
         return error.UnsupportedCapability;
     }
     pub fn cancelPopup(_: *Tray) void {}
+    pub fn iconRect(_: *Tray) ?desktop.Rect {
+        return null;
+    }
+    pub fn pointerOverIcon(_: *Tray) bool {
+        return false;
+    }
 };

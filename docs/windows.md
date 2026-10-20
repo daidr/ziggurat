@@ -104,6 +104,10 @@ try dialog.perform(.show);
 
 `perform(.focus)` 对模态阻塞窗口返回 `ModalBlocked`，应用禁用窗口返回 `Disabled`。`focusTarget()` 查询当前可交互的目标。隐藏或关闭当前活动所属窗口时，Core 尝试恢复 owner 或其当前模态目标的焦点。焦点受操作系统限制：Windows 可返回 `FocusDenied`，即使本线程键盘焦点已经移动；GTK 向 WM 提交激活请求，须由后续状态事件确认。自动焦点恢复是尽力操作，关闭过程不会等待激活。
 
+## 弹出窗口角色
+
+`WindowOptions.popup = .{ .focusable, .topmost, .shadow, .handler }` 在创建时把 `.borderless` 窗口设为弹出窗口（浮出窗口、菜单式列表、悬停卡片）：没有任务栏和分页器条目，用户不能移动或缩放；非 `.borderless` 或模态返回 `InvalidPopup`。可以有 owner，此时它在 owner 之上并随 owner 关闭。非 focusable 的弹出窗口显示、`perform(.focus)` 和指针按下都不改变活动窗口；focusable 的显示时取得键盘，失去键盘（Windows 激活离开，且新活动窗口不是它或它拥有的窗口）或 Linux 上外部按下、抓取被打断时，Core 在安全点调用 `handler.dismiss`。owner 报告 `resize`/`window_position` 后，Core 依次调用其弹出子窗口的 `handler.owner_moved`。任何弹出窗口在 Content 未消费的无修饰 Escape 上按 `requestCloseFrom(.user)` 关闭。放置与驳回策略由 `ziggurat_system` 的 `Flyout` 实现，见[系统工具](system.md#浮出窗口)。
+
 ## 关系树关闭
 
 `requestClose()` 先检查目标及全部后代；目标收到原始 `CloseReason`，后代收到 `.owner`。任意仍存活窗口否决，则不开始此次树关闭。`App.requestQuit()` 同样先检查全部窗口，使用 `.quit`。预检回调中再次请求关闭/退出返回 `in_progress`，创建窗口返回 `CloseInProgress`。无条件 `destroy()` 与 `quit()` 仍绕过否决。

@@ -36,6 +36,9 @@ pub const paths = @import("paths.zig");
 pub const menu_roles = @import("menu_roles.zig");
 pub const menu_role_actions = @import("menu_role_actions.zig");
 pub const signals = @import("signals.zig");
+pub const secrets = @import("secrets.zig");
+pub const flyout = @import("flyout.zig");
+pub const Flyout = flyout.Flyout;
 pub const capabilities = .{
     .native_menu = windows or linux,
     .menu_accelerators = windows or linux,
@@ -53,4 +56,5 @@ pub const capabilities = .{
     .desktop = desktop.capabilities,
     .file_watch = builtin.os.tag == .windows or builtin.os.tag == .linux,
     .quit_on_signals = signals.capabilities.quit_on_signals,
+    .secrets = secrets.capabilities,
 };

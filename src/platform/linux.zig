@@ -59,6 +59,7 @@ extern fn zlg_window_create(*anyopaque, *const fn (*anyopaque, *const NativeEven
 extern fn zlg_window_create_mode(*anyopaque, *const fn (*anyopaque, *const NativeEvent) callconv(.c) c_int, [*:0]const u8, u32, u32, u32, u32, ?*anyopaque, c_int, c_int, c_int, c_int, *c_int) ?*anyopaque;
 extern fn zlg_window_create_mode_host(*anyopaque, *const fn (*anyopaque, *const NativeEvent) callconv(.c) c_int, [*:0]const u8, u32, u32, u32, u32, ?*anyopaque, c_int, c_int, c_int, c_int, c_int, *c_int) ?*anyopaque;
 extern fn zlg_window_create_mode_host_pointer(*anyopaque, *const fn (*anyopaque, *const NativeEvent) callconv(.c) c_int, [*:0]const u8, u32, u32, u32, u32, ?*anyopaque, c_int, c_int, c_int, c_int, c_int, c_int, *c_int) ?*anyopaque;
+extern fn zlg_window_create_popup(*anyopaque, *const fn (*anyopaque, *const NativeEvent) callconv(.c) c_int, [*:0]const u8, u32, u32, u32, u32, ?*anyopaque, c_int, c_int, c_int, c_int, c_int, c_int, c_int, *c_int) ?*anyopaque;
 extern fn zlg_window_pointer_operation(*anyopaque) u64;
 extern fn zlg_window_advance_pointer_operation(*anyopaque) u64;
 extern fn zlg_window_interaction(*anyopaque, c_int) c_int;
@@ -117,7 +118,8 @@ pub fn create(record: *core.WindowRecord, options: core.WindowOptions) !void {
     const title = try allocator.dupeZ(u8, options.title);
     defer allocator.free(title);
     var code: c_int = 0;
-    record.native.native = zlg_window_create_mode_host_pointer(record, event, title, options.width, options.height, options.min_width, options.min_height, if (record.owner_record) |owner| owner.native.native else null, @intFromBool(options.modal), @intFromEnum(options.decoration), @intFromBool(options.resizable), @intFromBool(options.text_input_mode == .keyboard_compose), @intFromBool(options.accessibility_host == .children), @intFromBool(options.native_pointer_clicks), &code) orelse return if (code == 1) error.UnsupportedCapability else error.OutOfMemory;
+    const popup: c_int = if (options.popup) |role| 1 | @as(c_int, if (role.focusable) 2 else 0) | @as(c_int, if (role.topmost) 4 else 0) else 0;
+    record.native.native = zlg_window_create_popup(record, event, title, options.width, options.height, options.min_width, options.min_height, if (record.owner_record) |owner| owner.native.native else null, @intFromBool(options.modal), @intFromEnum(options.decoration), @intFromBool(options.resizable), @intFromBool(options.text_input_mode == .keyboard_compose), @intFromBool(options.accessibility_host == .children), @intFromBool(options.native_pointer_clicks), popup, &code) orelse return if (code == 1) error.UnsupportedCapability else error.OutOfMemory;
     if (options.text_input_mode != .system) record.publishTextInputMode(options.text_input_mode);
 }
 pub fn show(record: *core.WindowRecord) void {
@@ -269,6 +271,7 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
         1 => record.emit(.{ .paint = .{ .native_context = native.context.?, .native_window = native.window, .size = .{ .width = native.width, .height = native.height, .scale = @floatFromInt(native.scale) } } }),
         2 => pointerLifecycle(record, native, .{ .resize = .{ .width = native.width, .height = native.height, .scale = @floatFromInt(native.scale) } }),
         22 => pointerLifecycle(record, native, .window_position),
+        25 => record.popupDismissed(),
         // C has installed its new active context and retired old callbacks.
         // Publish before its final native reference releases can reenter.
         23 => record.publishTextInputMode(if (native.flags == 0) .system else .keyboard_compose),
@@ -317,7 +320,8 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
             } else record.emitState();
         },
         17 => return @intFromBool(record.inputAllowed()),
-        18 => return @intFromBool(record.keyInput(.{ .key = keyCode(@intCast(native.key)), .modifiers = .{ .shift = native.flags & 1 != 0, .control = native.flags & 2 != 0, .alt = native.flags & 4 != 0, .super = native.flags & 8 != 0 }, .repeat = native.flags & 16 != 0 })),
+        18 => return @intFromBool(record.keyInput(.{ .key = keyCode(@intCast(native.key)), .modifiers = .{ .shift = native.flags & 1 != 0, .control = native.flags & 2 != 0, .alt = native.flags & 4 != 0, .super = native.flags & 8 != 0 }, .repeat = native.flags & 16 != 0, .physical = core.physical_keys.fromEvdev(native.width) })),
+        26 => record.keyRelease(.{ .key = keyCode(@intCast(native.key)), .modifiers = .{ .shift = native.flags & 1 != 0, .control = native.flags & 2 != 0, .alt = native.flags & 4 != 0, .super = native.flags & 8 != 0 }, .physical = core.physical_keys.fromEvdev(native.width) }),
         19 => return @intFromEnum(record.hitTest(point, @floatFromInt(native.width), @floatFromInt(native.height))),
         20, 21 => return textContext(record, native) catch |err| {
             if (err != error.StaleTextClient and err != error.CompositionActive) record.window.report(.{ .domain = .core, .operation = .text_input, .err = err });

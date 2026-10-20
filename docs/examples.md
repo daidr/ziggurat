@@ -24,6 +24,7 @@
 | `launcher` | [launcher.zig](../examples/launcher.zig) | 全局快捷键唤出窗口、搜索过滤、方向键与回车执行、Escape 隐藏、Shell 打开 |
 | `timeline` | [timeline.zig](../examples/timeline.zig) | 动画时间线：多轨缓动、播放/暂停/反向/拖动定位、减少动态效果；只在播放时唤醒 |
 | `i18n` | [i18n.zig](../examples/i18n.zig) | 运行时切换语言（英文、中文、阿拉伯文、俄文）、复数规则、数字与日期格式化、窗口标题更新 |
+| `farm` | [farm.zig](../examples/farm.zig) | 小游戏：`ziggurat_game` 固定步长循环、按位置的 WASD/方向键、手柄左摇杆与按键、跟随相机（3 倍、整像素）、帧间插值、失去键盘时暂停 |
 | `hybrid` | [hybrid.zig](../examples/hybrid.zig) | 混合应用：原生侧栏 + 矩形区域中的系统 WebView 页面，双向消息；需要 `-Dwebview=true` |
 
 早期示例 `counter`、`view-counter`、`web-counter`、`rectangular-pages` 与 `counter_service.zig`（IPC 客户端生成）保持不变。Markdown、终端与浮出窗口的示例等对应模块合入后再补。
@@ -41,7 +42,7 @@
 
 **视图与输入**
 - `view.Host` 没有给应用的右键、中键、双击事件，也没有应用级快捷键或“无人处理的按键”钩子；`menubar`、`piano`、`launcher` 只能包装 `host.context.on_input`。
-- 没有按键抬起事件，`piano` 的音符只能是固定时长。
+- 按键抬起只交给嵌入叶子（`EmbedInput.key_up`），`piano` 仍用固定时长的音符。
 - 在绘制之外拿不到节点的窗口坐标；`frameless` 用嵌入叶子的 `place` 记录标题区。
 - 没有指针光标形状与自定义按钮的悬停外观。
 - `view.Host` 不能作为组合区域的背景层 attach，`hybrid` 的侧栏只能用 Frame API。
