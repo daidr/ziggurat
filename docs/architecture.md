@@ -43,6 +43,9 @@ flowchart TD
     Host --> Shadows[ziggurat_shadows]
     Host --> Animation[ziggurat_animation]
     Host --> I18n[ziggurat_i18n]
+    Host --> MarkdownView[ziggurat_markdown_view]
+    MarkdownView --> Markdown[ziggurat_markdown]
+    MarkdownView --> View
     Host --> Wake[ziggurat_wake]
     Host --> Placement[ziggurat_window_placement]
     Host --> DocumentApp[ziggurat_document_app]

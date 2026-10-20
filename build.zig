@@ -260,6 +260,12 @@ pub fn build(b: *std.Build) void {
     const run_page_runtime_tests = b.addRunArtifact(page_runtime_tests);
     test_step.dependOn(&run_page_runtime_tests.step);
     b.step("test-page-runtime", "Run page handshake, runtime service, plugin routing, find script and plugin manifest tests").dependOn(&run_page_runtime_tests.step);
+    const markdown = b.addModule("ziggurat_markdown", .{ .root_source_file = b.path("src/markdown/root.zig"), .target = target, .optimize = optimize });
+    const markdown_tests = b.addTest(.{ .root_module = markdown });
+    check.dependOn(&markdown_tests.step);
+    const run_markdown_tests = b.addRunArtifact(markdown_tests);
+    test_step.dependOn(&run_markdown_tests.step);
+    b.step("test-markdown", "Run CommonMark block, inline, table, task list and HTML output tests").dependOn(&run_markdown_tests.step);
     // Optional: needs `python scripts/fetch-sqlite.py`, so it stays out of `test` and `check`.
     const sqlite = b.addModule("ziggurat_sqlite", .{ .root_source_file = b.path("src/sqlite/root.zig"), .target = target, .optimize = optimize });
     @import("build_support/sqlite.zig").add(b, sqlite, target, optimize);
@@ -641,6 +647,15 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat", .module = core },      .{ .name = "ziggurat_view", .module = declarative_view },
         .{ .name = "ziggurat_wake", .module = wake },
     } });
+    const markdown_view = b.addModule("ziggurat_markdown_view", .{ .root_source_file = b.path("src/markdown/view.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat_markdown", .module = markdown }, .{ .name = "ziggurat_view", .module = declarative_view },
+        .{ .name = "ziggurat_ui", .module = ui },
+    } });
+    const markdown_code = b.addModule("ziggurat_markdown_code", .{ .root_source_file = b.path("src/markdown/code_text.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat_markdown", .module = markdown },       .{ .name = "ziggurat_markdown_view", .module = markdown_view },
+        .{ .name = "ziggurat_text_layout", .module = text_layout }, .{ .name = "ziggurat_ui", .module = ui },
+        .{ .name = "ziggurat_view", .module = declarative_view },
+    } });
     const chart = b.addModule("ziggurat_chart", .{ .root_source_file = b.path("src/chart/root.zig"), .target = target, .optimize = optimize });
     const chart_tests = b.addTest(.{ .root_module = chart });
     check.dependOn(&chart_tests.step);
@@ -648,6 +663,13 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_chart_tests.step);
     b.step("test-chart", "Run chart scale, tick, stack, path, downsampling, layout and selection tests").dependOn(&run_chart_tests.step);
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
+        addSmoke(b, "smoke-markdown-code", "tests/markdown_code_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat_markdown", .module = markdown },
+            .{ .name = "ziggurat_markdown_view", .module = markdown_view },
+            .{ .name = "ziggurat_markdown_code", .module = markdown_code },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+            .{ .name = "ziggurat_view", .module = declarative_view },
+        });
         addSmoke(b, "smoke-affine-renderer", "tests/affine_renderer_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
@@ -2485,6 +2507,11 @@ pub fn build(b: *std.Build) void {
         const run_declarative_view_tests = b.addRunArtifact(declarative_view_tests);
         test_step.dependOn(&run_declarative_view_tests.step);
         b.step("test-view", "Run declarative view build, identity and layout tests").dependOn(&run_declarative_view_tests.step);
+        const markdown_view_tests = b.addTest(.{ .root_module = markdown_view });
+        check.dependOn(&markdown_view_tests.step);
+        const run_markdown_view_tests = b.addRunArtifact(markdown_view_tests);
+        test_step.dependOn(&run_markdown_view_tests.step);
+        b.step("test-markdown-view", "Run Markdown to declarative view mapping, wrapping and activation tests").dependOn(&run_markdown_view_tests.step);
         const chart_view = b.addModule("ziggurat_chart_view", .{ .root_source_file = b.path("src/chart/view.zig"), .target = target, .optimize = optimize, .imports = &.{
             .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
             .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_vector", .module = vector },
