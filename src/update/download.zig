@@ -189,7 +189,11 @@ test "downloads resume after cancellation and short bodies, restart without rang
     try std.testing.expectEqual(0, (try file.stat()).size);
     _ = try fetch(manifest, memory.source(), file, &control);
 
-    const extended = payload ++ [_]u8{'x'};
+    // Copy instead of `payload ++ ...`: concatenating a runtime array lowers to
+    // one element per byte and stalls LLVM builds.
+    var extended: [payload.len + 1]u8 = undefined;
+    @memcpy(extended[0..payload.len], &payload);
+    extended[payload.len] = 'x';
     var longer: MemorySource = .{ .bytes = &extended };
     try file.setEndPos(0);
     try std.testing.expectError(error.SizeMismatch, fetch(manifest, longer.source(), file, &control));

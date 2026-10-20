@@ -22,11 +22,11 @@ concurrency:
 
 jobs:
   windows:
-    # Hosted until the self-hosted Windows runner passes the native smokes. The
-    # repository variable WINDOWS_RUNS_ON selects another runner with a JSON
-    # value, for example '["self-hosted", "windows", "x64"]'; that runner needs
-    # PowerShell 7, Python 3 and tar on PATH and an interactive desktop session.
-    runs-on: ${{ fromJSON(vars.WINDOWS_RUNS_ON || '"windows-2022"') }}
+    # Self-hosted Windows x64 runner with PowerShell 7, Python 3 and tar on
+    # PATH, running in an interactive desktop session. The repository variable
+    # WINDOWS_RUNS_ON overrides the labels with a JSON value, for example
+    # '"windows-2022"' to return to a hosted runner.
+    runs-on: ${{ fromJSON(vars.WINDOWS_RUNS_ON || '["self-hosted", "windows", "x64"]') }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -220,7 +220,7 @@ jobs:
   webview:
     if: github.event_name == 'workflow_dispatch' && inputs.webview
     # Also needs Node.js and an installed WebView2 Runtime on the runner.
-    runs-on: ${{ fromJSON(vars.WINDOWS_RUNS_ON || '"windows-2022"') }}
+    runs-on: ${{ fromJSON(vars.WINDOWS_RUNS_ON || '["self-hosted", "windows", "x64"]') }}
     timeout-minutes: 20
     defaults:
       run:
