@@ -55,6 +55,7 @@ WSL 应将 Zig 本地缓存放在 Linux 文件系统，见 `scripts/linux-check.
 | `ziggurat_assets` | 显式磁盘快照、目录通知、构建期内容寻址嵌入 | 快照/嵌入可移植；目录通知为 Windows |
 | `ziggurat_system` | 系统菜单、托盘、文本剪贴板、异步选择器、全局快捷键、通知区通知、显式 Shell worker | 菜单、托盘、选择器、通知为 Windows/Linux（Linux 托盘与通知需会话总线，全局快捷键仅 X11）；剪贴板与文件图标为 Windows；executable 启动为 Windows/Linux |
 | `ziggurat_update` | Ed25519 元数据、限长流校验、ZIP 清单和版本目录发布 | 纯 Zig + OS 文件系统 |
+| `ziggurat_audio` | [音频](docs/audio.md)：内存音效、流式播放、Zig 混音（音量/声像/变速/区间循环/淡入淡出）、WAV 与 FLAC 解码、结束与输出变化经 `App.post` 回主线程 | Windows WASAPI；Linux PulseAudio/PipeWire 或 ALSA（运行时加载）；无设备时按时静音播放并报告原因 |
 | `ziggurat_net` | [Fetch 与 WebSocket 客户端](docs/net.md)：显式 worker、取消、发送队列与读取暂停背压、大小上限、JSON 解码 | 纯 Zig；HTTPS/WSS 复用调用者 `std.http.Client` 的 TLS、系统 CA 与代理 |
 | `ziggurat_extensions` | 显式插件依赖、初始化、失败回滚与逆序关闭 | 纯 Zig、固定容量，无隐式服务或线程 |
 | `ziggurat_text_layout` | 独立拥有的系统 shaping、字素/坐标、双向/换行、caret 与选区查询 | DirectWrite + 系统 ICU；Pango；可选导入 |
@@ -131,7 +132,7 @@ Ziggurat 使用 [MIT 许可证](LICENSE)。源码包包含 LICENSE，构建安�
 - [IPC](docs/ipc.md)、[应用字节流](docs/resource-stream.md)、[页面导航](docs/pages.md)、[文档初始化器](docs/document-initializers.md)、[独立 Cookie 存储](docs/cookie-store.md)、[Web 资源工具](docs/web-assets.md)、[系统设施](docs/system.md)
 - [签名更新](docs/updates.md)、[Fetch 与 WebSocket](docs/net.md)、[ziggurat 命令](docs/cli.md)、[性能与复现实验](docs/performance.md)
 - [扩展生命周期](docs/extensions.md)
-- [本地化](docs/i18n.md)、[显式时钟动画](docs/animation.md)、[单次唤醒](docs/wake.md)、[系统文字轮廓](docs/text-outlines.md)
+- [音频](docs/audio.md)、[本地化](docs/i18n.md)、[显式时钟动画](docs/animation.md)、[单次唤醒](docs/wake.md)、[系统文字轮廓](docs/text-outlines.md)
 - [仿射坐标与输入](docs/affine.md)、[仿射栅格合成](docs/affine-rendering.md)、[多窗口设备域测量](docs/gpu-performance.md)
 - [局部失效](docs/invalidation.md)
 - [构建缓存与 WSL 容量](docs/build-cache.md)

@@ -6,7 +6,16 @@ const win = if (builtin.os.tag == .windows) @cImport({
     @cInclude("windows.h");
     @cInclude("objbase.h");
     @cInclude("shellapi.h");
+    @cInclude("shlobj.h");
 }) else struct {};
+const NativeShellFailure = extern struct { domain: u32 = 0, code: u32 = 0 };
+const gio = if (builtin.os.tag == .linux) struct {
+    extern fn zsh_open_uri(uri: [*:0]const u8, failure: *NativeShellFailure) c_int;
+    extern fn zsh_open_path(path: [*:0]const u8, failure: *NativeShellFailure) c_int;
+    extern fn zsh_reveal(path: [*:0]const u8, timeout_ms: c_int, failure: *NativeShellFailure) c_int;
+    extern fn zsh_trash(path: [*:0]const u8, failure: *NativeShellFailure) c_int;
+} else struct {};
+const GioStatus = enum(c_int) { ok = 0, failed = 1, not_supported = 2, not_found = 3, access_denied = 4, unavailable = 5, timed_out = 6, invalid = 7, _ };
 
 pub const max_arguments = 128;
 pub const max_argument_bytes = 16 * 1024;
@@ -29,7 +38,30 @@ pub const LaunchOptions = struct {
     cancellation: ?*const Cancellation = null,
 };
 pub const Term = union(enum) { Exited: u32, Signal: u32, Stopped: u32, Unknown: u32 };
-pub const NativeFailure = struct { domain: enum { win32, hresult }, code: u32 };
+/// win32: GetLastError. hresult: COM/Shell HRESULT. shell_file_operation:
+/// SHFileOperationW's own return code (not a Win32 error). gio/dbus/glib:
+/// GError code in G_IO_ERROR, G_DBUS_ERROR or another GLib domain.
+pub const NativeFailure = struct { domain: enum { win32, hresult, shell_file_operation, gio, dbus, glib }, code: u32 };
+pub const max_url_bytes = 8 * 1024;
+pub const max_extra_schemes = 32;
+pub const max_reveal_timeout_ms = 60_000;
+/// Schemes openUrl accepts without UrlOptions.extra_schemes.
+pub const default_url_schemes = [_][]const u8{ "https", "http", "mailto" };
+pub const UrlOptions = struct {
+    /// Further schemes the host deliberately allows, without ':'. Matching is
+    /// ASCII case-insensitive. "file" and one-letter (drive-like) schemes are
+    /// always rejected; local paths go through openPath.
+    extra_schemes: []const []const u8 = &.{},
+    cancellation: ?*const Cancellation = null,
+};
+pub const PathOptions = struct {
+    cancellation: ?*const Cancellation = null,
+};
+pub const RevealOptions = struct {
+    /// Linux D-Bus reply bound, 1...max_reveal_timeout_ms. Windows ignores it.
+    timeout_ms: u32 = 5000,
+    cancellation: ?*const Cancellation = null,
+};
 pub const IconOptions = struct {
     /// Native small/large shell icon only. No thumbnail or image-file decode.
     size: u16 = 32,
@@ -46,10 +78,10 @@ pub const FileIcon = struct {
 };
 pub const capabilities = .{
     .launch_executable = builtin.os.tag == .windows or builtin.os.tag == .linux,
-    .open_url = false,
-    .open_path = false,
-    .reveal = false,
-    .trash = false,
+    .open_url = builtin.os.tag == .windows or builtin.os.tag == .linux,
+    .open_path = builtin.os.tag == .windows or builtin.os.tag == .linux,
+    .reveal = builtin.os.tag == .windows or builtin.os.tag == .linux,
+    .trash = builtin.os.tag == .windows or builtin.os.tag == .linux,
     .file_icon = builtin.os.tag == .windows,
     .installed_applications = false,
     .launch_application = false,
@@ -140,6 +172,183 @@ pub const Worker = struct {
             destination[index * 4 + 3] = 255;
         }
         return .{ .width = options.size, .height = options.size, .stride = @as(usize, options.size) * 4, .pixels = destination[0..bytes] };
+    }
+    /// Blocking hand-off of an absolute URI to its default handler. Success
+    /// means the system accepted the request; the handler process is not owned,
+    /// returned or awaited. Only https/http/mailto plus UrlOptions.extra_schemes
+    /// pass; see validateUrl for the accepted syntax.
+    pub fn openUrl(self: *Worker, url: []const u8, options: UrlOptions) !void {
+        try self.require();
+        if (options.cancellation) |cancel| try cancel.check();
+        try validateUrl(url, options.extra_schemes);
+        if (builtin.os.tag == .windows) {
+            var storage: [max_url_bytes + 1]u16 = undefined;
+            const target = try wideZ(&storage, url);
+            try self.ensureApartment();
+            if (options.cancellation) |cancel| try cancel.check();
+            return self.shellExecute(target.ptr);
+        } else if (builtin.os.tag == .linux) {
+            var storage: [max_url_bytes + 1]u8 = undefined;
+            const target = narrowZ(&storage, url);
+            if (options.cancellation) |cancel| try cancel.check();
+            var failure: NativeShellFailure = .{};
+            return self.openStatus(@enumFromInt(gio.zsh_open_uri(target.ptr, &failure)), failure);
+        } else return error.UnsupportedCapability;
+    }
+    /// Opens an existing absolute file or directory with its association. An
+    /// executable, script or shortcut is launched by whatever its association
+    /// does, without arguments; the host decides which paths it passes here.
+    pub fn openPath(self: *Worker, path: []const u8, options: PathOptions) !void {
+        try self.require();
+        if (options.cancellation) |cancel| try cancel.check();
+        try validateText(path);
+        if (!absolute(path)) return error.AbsolutePathRequired;
+        if (builtin.os.tag == .windows) {
+            var storage: [max_argument_bytes + 2]u16 = undefined;
+            const target = try widePath(&storage, path);
+            try requireExisting(target);
+            try self.ensureApartment();
+            if (options.cancellation) |cancel| try cancel.check();
+            return self.shellExecute(target.ptr);
+        } else if (builtin.os.tag == .linux) {
+            var storage: [max_argument_bytes + 1]u8 = undefined;
+            const target = narrowZ(&storage, path);
+            try requireExisting(target);
+            if (options.cancellation) |cancel| try cancel.check();
+            var failure: NativeShellFailure = .{};
+            return self.openStatus(@enumFromInt(gio.zsh_open_path(target.ptr, &failure)), failure);
+        } else return error.UnsupportedCapability;
+    }
+    /// Shows an existing absolute item selected in the system file manager.
+    /// Linux asks org.freedesktop.FileManager1.ShowItems on the session bus and
+    /// returns FileManagerUnavailable when no bus or provider answers; there is
+    /// no fallback to opening the parent directory.
+    pub fn reveal(self: *Worker, path: []const u8, options: RevealOptions) !void {
+        try self.require();
+        if (options.cancellation) |cancel| try cancel.check();
+        try validateText(path);
+        if (!absolute(path)) return error.AbsolutePathRequired;
+        if (options.timeout_ms == 0 or options.timeout_ms > max_reveal_timeout_ms) return error.InvalidTimeout;
+        if (builtin.os.tag == .windows) {
+            var storage: [max_argument_bytes + 2]u16 = undefined;
+            const target = try widePath(&storage, path);
+            try requireExisting(target);
+            try self.ensureApartment();
+            if (options.cancellation) |cancel| try cancel.check();
+            var item: win.PIDLIST_ABSOLUTE = null;
+            const parsed = win.SHParseDisplayName(target.ptr, null, &item, 0, null);
+            if (parsed < 0) {
+                self.last_failure = .{ .domain = .hresult, .code = @bitCast(parsed) };
+                return error.RevealFailed;
+            }
+            defer win.ILFree(item);
+            const shown = win.SHOpenFolderAndSelectItems(item, 0, null, 0);
+            if (shown < 0) {
+                self.last_failure = .{ .domain = .hresult, .code = @bitCast(shown) };
+                return error.RevealFailed;
+            }
+        } else if (builtin.os.tag == .linux) {
+            var storage: [max_argument_bytes + 1]u8 = undefined;
+            const target = narrowZ(&storage, path);
+            try requireExisting(target);
+            if (options.cancellation) |cancel| try cancel.check();
+            var failure: NativeShellFailure = .{};
+            const status: GioStatus = @enumFromInt(gio.zsh_reveal(target.ptr, @intCast(options.timeout_ms), &failure));
+            if (status == .ok) return;
+            self.recordGio(failure);
+            return switch (status) {
+                .unavailable => error.FileManagerUnavailable,
+                .timed_out => error.RevealTimedOut,
+                .not_found => error.FileNotFound,
+                else => error.RevealFailed,
+            };
+        } else return error.UnsupportedCapability;
+    }
+    /// Moves one existing absolute item to the user's trash/recycle bin and
+    /// never falls back to permanent deletion itself. Filesystem roots and, on
+    /// Windows, wildcard characters are rejected. Windows accepts only local
+    /// fixed drives; the system recycle-bin policy (disabled bin, size limit)
+    /// still decides what the Shell does with an accepted request.
+    pub fn trash(self: *Worker, path: []const u8, options: PathOptions) !void {
+        try self.require();
+        if (options.cancellation) |cancel| try cancel.check();
+        try validateText(path);
+        if (!absolute(path)) return error.AbsolutePathRequired;
+        if (root(path)) return error.InvalidTrashPath;
+        if (builtin.os.tag == .windows) {
+            if (std.mem.indexOfAny(u8, path, "*?") != null) return error.InvalidTrashPath;
+            // Double-NUL list: widePath leaves one spare unit after the NUL.
+            var storage: [max_argument_bytes + 2]u16 = undefined;
+            const target = try widePath(&storage, path);
+            storage[target.len + 1] = 0;
+            try requireExisting(target);
+            if (target.len < 3 or target[1] != ':') return error.TrashUnsupported;
+            const drive = [_:0]u16{ target[0], ':', '\\' };
+            if (win.GetDriveTypeW(&drive) != win.DRIVE_FIXED) return error.TrashUnsupported;
+            try self.ensureApartment();
+            if (options.cancellation) |cancel| try cancel.check();
+            var operation = std.mem.zeroes(win.SHFILEOPSTRUCTW);
+            operation.wFunc = win.FO_DELETE;
+            operation.pFrom = target.ptr;
+            operation.fFlags = @intCast(win.FOF_ALLOWUNDO | win.FOF_NOCONFIRMATION | win.FOF_NOERRORUI | win.FOF_SILENT);
+            const result = win.SHFileOperationW(&operation);
+            if (result != 0) {
+                self.last_failure = .{ .domain = .shell_file_operation, .code = @bitCast(result) };
+                return error.TrashFailed;
+            }
+            if (operation.fAnyOperationsAborted != 0) return error.TrashAborted;
+        } else if (builtin.os.tag == .linux) {
+            var storage: [max_argument_bytes + 1]u8 = undefined;
+            const target = narrowZ(&storage, path);
+            if (options.cancellation) |cancel| try cancel.check();
+            var failure: NativeShellFailure = .{};
+            const status: GioStatus = @enumFromInt(gio.zsh_trash(target.ptr, &failure));
+            if (status == .ok) return;
+            self.recordGio(failure);
+            return switch (status) {
+                .not_supported => error.TrashUnsupported,
+                .not_found => error.FileNotFound,
+                .access_denied => error.AccessDenied,
+                else => error.TrashFailed,
+            };
+        } else return error.UnsupportedCapability;
+    }
+    fn shellExecute(self: *Worker, target: [*:0]const u16) !void {
+        var info = std.mem.zeroes(win.SHELLEXECUTEINFOW);
+        info.cbSize = @sizeOf(win.SHELLEXECUTEINFOW);
+        // Synchronous hand-off on this worker; no Shell error dialog and no
+        // process handle requested or retained.
+        info.fMask = @intCast(win.SEE_MASK_NOASYNC | win.SEE_MASK_FLAG_NO_UI);
+        info.lpVerb = std.unicode.utf8ToUtf16LeStringLiteral("open");
+        info.lpFile = target;
+        info.nShow = win.SW_SHOWNORMAL;
+        if (win.ShellExecuteExW(&info) != 0) return;
+        const code = win.GetLastError();
+        self.last_failure = .{ .domain = .win32, .code = code };
+        return switch (code) {
+            win.ERROR_NO_ASSOCIATION => error.NoAssociation,
+            win.ERROR_FILE_NOT_FOUND, win.ERROR_PATH_NOT_FOUND => error.FileNotFound,
+            win.ERROR_ACCESS_DENIED => error.AccessDenied,
+            else => error.OpenFailed,
+        };
+    }
+    fn openStatus(self: *Worker, status: GioStatus, failure: NativeShellFailure) !void {
+        if (status == .ok) return;
+        self.recordGio(failure);
+        return switch (status) {
+            .not_supported => error.NoAssociation,
+            .not_found => error.FileNotFound,
+            .access_denied => error.AccessDenied,
+            else => error.OpenFailed,
+        };
+    }
+    fn recordGio(self: *Worker, failure: NativeShellFailure) void {
+        self.last_failure = switch (failure.domain) {
+            1 => .{ .domain = .gio, .code = failure.code },
+            2 => .{ .domain = .dbus, .code = failure.code },
+            3 => .{ .domain = .glib, .code = failure.code },
+            else => null,
+        };
     }
     /// Returns an owned child. The caller must wait or terminateAndWait on this
     /// worker, even if posting its result to the UI fails or the App has closed.
@@ -261,6 +470,87 @@ fn absolute(path: []const u8) bool {
     while (index < path.len and !slash(path[index])) : (index += 1) {}
     return index > 2 and index + 1 < path.len and !slash(path[index + 1]);
 }
+/// Absolute URI: scheme ":" rest. The scheme is RFC 3986 syntax with at least
+/// two characters. http/https need a non-empty "//authority" host. Bytes below
+/// 0x21, DEL and " < > \ ^ ` { | } are rejected; '%' needs two hex digits.
+/// Non-ASCII UTF-8 (IRI text) is passed to the system unchanged.
+fn validateUrl(url: []const u8, extra_schemes: []const []const u8) !void {
+    if (url.len > max_url_bytes) return error.ArgumentTooLong;
+    try validateText(url);
+    if (extra_schemes.len > max_extra_schemes) return error.TooManySchemes;
+    for (extra_schemes) |extra| {
+        if (!schemeSyntax(extra)) return error.InvalidScheme;
+    }
+    for (url, 0..) |byte, index| {
+        if (byte < 0x21 or byte == 0x7f or std.mem.indexOfScalar(u8, "\"<>\\^`{|}", byte) != null) return error.InvalidUrl;
+        if (byte == '%' and (index + 2 >= url.len or !std.ascii.isHex(url[index + 1]) or !std.ascii.isHex(url[index + 2]))) return error.InvalidUrl;
+    }
+    const colon = std.mem.indexOfScalar(u8, url, ':') orelse return error.InvalidUrl;
+    const scheme = url[0..colon];
+    const rest = url[colon + 1 ..];
+    if (std.ascii.eqlIgnoreCase(scheme, "file")) return error.SchemeNotAllowed;
+    if (!schemeSyntax(scheme) or rest.len == 0) return error.InvalidUrl;
+    var allowed = false;
+    for (default_url_schemes) |name| allowed = allowed or std.ascii.eqlIgnoreCase(scheme, name);
+    for (extra_schemes) |name| allowed = allowed or std.ascii.eqlIgnoreCase(scheme, name);
+    if (!allowed) return error.SchemeNotAllowed;
+    if (std.ascii.eqlIgnoreCase(scheme, "http") or std.ascii.eqlIgnoreCase(scheme, "https")) {
+        if (!std.mem.startsWith(u8, rest, "//")) return error.InvalidUrl;
+        const authority = rest[2..];
+        const end = std.mem.indexOfAny(u8, authority, "/?#") orelse authority.len;
+        const start = if (std.mem.lastIndexOfScalar(u8, authority[0..end], '@')) |at| at + 1 else 0;
+        const host = authority[start..end];
+        if (host.len == 0 or host[0] == ':') return error.InvalidUrl;
+    }
+}
+fn schemeSyntax(scheme: []const u8) bool {
+    if (scheme.len < 2 or scheme.len > 64 or !std.ascii.isAlphabetic(scheme[0])) return false;
+    for (scheme) |byte| {
+        if (!std.ascii.isAlphanumeric(byte) and byte != '+' and byte != '-' and byte != '.') return false;
+    }
+    return !std.ascii.eqlIgnoreCase(scheme, "file");
+}
+/// A filesystem root has nothing after its root separator(s).
+fn root(path: []const u8) bool {
+    const trimmed = std.mem.trimRight(u8, path, if (builtin.os.tag == .windows) "\\/" else "/");
+    if (builtin.os.tag != .windows) return trimmed.len == 0;
+    if (trimmed.len == 2 and trimmed[1] == ':') return true;
+    // \\server\share with no further component.
+    if (trimmed.len > 2 and (trimmed[0] == '\\' or trimmed[0] == '/')) {
+        var separators: usize = 0;
+        for (trimmed[2..]) |byte| separators += @intFromBool(byte == '\\' or byte == '/');
+        return separators < 2;
+    }
+    return false;
+}
+fn narrowZ(storage: []u8, text: []const u8) [:0]u8 {
+    @memcpy(storage[0..text.len], text);
+    storage[text.len] = 0;
+    return storage[0..text.len :0];
+}
+/// UTF-16 path with '/' normalized to '\'. Keeps one spare unit after the NUL.
+fn widePath(storage: []u16, path: []const u8) ![:0]u16 {
+    const terminated = try wideZ(storage[0 .. storage.len - 1], path);
+    for (terminated) |*value| {
+        if (value.* == '/') value.* = '\\';
+    }
+    return terminated;
+}
+/// Existence check without following a final symbolic link.
+fn requireExisting(path: anytype) !void {
+    if (builtin.os.tag == .windows) {
+        if (win.GetFileAttributesW(path.ptr) != win.INVALID_FILE_ATTRIBUTES) return;
+        return switch (win.GetLastError()) {
+            win.ERROR_ACCESS_DENIED => error.AccessDenied,
+            else => error.FileNotFound,
+        };
+    }
+    _ = std.posix.fstatatZ(std.posix.AT.FDCWD, path.ptr, std.posix.AT.SYMLINK_NOFOLLOW) catch |err| return switch (err) {
+        error.FileNotFound => error.FileNotFound,
+        error.AccessDenied => error.AccessDenied,
+        else => err,
+    };
+}
 fn validateLaunch(options: LaunchOptions) !void {
     try validateText(options.executable);
     if (!absolute(options.executable)) return error.AbsolutePathRequired;
@@ -331,4 +621,42 @@ test "shell arguments are bounded UTF-8 paths and Windows quoting round trips" {
     cancellation.request();
     try std.testing.expectError(error.Cancelled, cancellation.check());
     try std.testing.expectError(error.UiThreadForbidden, Worker.init(std.Thread.getCurrentId()));
+}
+
+test "shell URLs pass only absolute allowlisted schemes" {
+    for ([_][]const u8{ "https://example.com/a?b=c#d", "HTTP://user@host:80/", "mailto:someone@example.com", "https://例子.测试/路径", "https://h/%41" }) |url| try validateUrl(url, &.{});
+    try validateUrl("Ziggurat-Test+x.y:anything", &.{"ziggurat-test+x.y"});
+    const rejected = [_]struct { []const u8, anyerror }{
+        .{ "file:///etc/passwd", error.SchemeNotAllowed },
+        .{ "FILE:///C:/x", error.SchemeNotAllowed },
+        .{ "javascript:alert(1)", error.SchemeNotAllowed },
+        .{ "ftp://example.com", error.SchemeNotAllowed },
+        .{ "C:\\Windows", error.InvalidUrl },
+        .{ "c:/x", error.InvalidUrl },
+        .{ "relative/path", error.InvalidUrl },
+        .{ "://host", error.InvalidUrl },
+        .{ "1http://host", error.InvalidUrl },
+        .{ "https:", error.InvalidUrl },
+        .{ "https:host", error.InvalidUrl },
+        .{ "https://", error.InvalidUrl },
+        .{ "https://user@/x", error.InvalidUrl },
+        .{ "https://exa mple.com", error.InvalidUrl },
+        .{ "https://host/\"quote", error.InvalidUrl },
+        .{ "https://host/%4", error.InvalidUrl },
+        .{ "https://host/\n", error.InvalidUrl },
+        .{ "https://host/\x00", error.EmbeddedNul },
+        .{ "https://host/\xff", error.InvalidUtf8 },
+        .{ "", error.InvalidUrl },
+    };
+    for (rejected) |case| try std.testing.expectError(case[1], validateUrl(case[0], &.{}));
+    try std.testing.expectError(error.InvalidScheme, validateUrl("file:///x", &.{"file"}));
+    try std.testing.expectError(error.InvalidScheme, validateUrl("https://h", &.{"c"}));
+    const long = [_]u8{'a'} ** (max_url_bytes + 1);
+    try std.testing.expectError(error.ArgumentTooLong, validateUrl(&long, &.{}));
+    try std.testing.expect(root(if (builtin.os.tag == .windows) "C:\\" else "/"));
+    try std.testing.expect(!root(if (builtin.os.tag == .windows) "C:\\x" else "/x"));
+    if (builtin.os.tag == .windows) {
+        try std.testing.expect(root("\\\\server\\share\\"));
+        try std.testing.expect(!root("\\\\server\\share\\x"));
+    }
 }

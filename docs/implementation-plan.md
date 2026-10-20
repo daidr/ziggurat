@@ -32,8 +32,8 @@
 | --- | --- | --- | --- |
 | W01 | 已完成（Windows/X11） | DIP 客户区尺寸、明确坐标系的屏幕位置、全屏进入/退出、置顶 | 普通/max/min 还原、外部 WM、状态事件、失败/重入/关闭；Wayland 能力失败已验，全屏运行未验 |
 | W02 | 已完成（Windows/X11） | 拥有/瞬态窗口、模态窗口、关闭及焦点策略 | 父关闭传播、整树模态输入策略、取消与异常回滚；独立顶层窗口，不嵌套事件循环或替代 H02 内嵌内容；依赖 W01 |
-| W03 | 部分完成（Windows/X11） | 无边框、自定义标题栏、原生拖动/缩放、透明与材质 | W03.1 装饰/命中/原生交互已验收；透明与材质继续待实现；DPI/最大化/系统菜单；依赖 W01 |
-| W04 | 部分完成（Windows/X11） | 窗口枚举/查找、焦点、显示器约束与状态持久化 | 运行期枚举/查找、显式显示器快照、离屏恢复及版本化 worker 存储已验；原生变化订阅、物理混合 DPI/热插拔与其他平台继续，不在 paint 访问磁盘 |
+| W03 | 部分完成（Windows/X11） | 无边框、自定义标题栏、原生拖动/缩放、透明与材质 | W03.1 装饰/命中/原生交互已验收；W03.3 Windows 系统框架材质已实现（运行验证见记录）；W03.2 客户区透明、Linux/Wayland 材质继续待实现；DPI/最大化/系统菜单；依赖 W01 |
+| W04 | 部分完成（Windows/X11） | 窗口枚举/查找、焦点、显示器约束与状态持久化 | 运行期枚举/查找、显式显示器快照、离屏恢复及版本化 worker 存储已验；经 S03 monitors 订阅的显示器变化可达性判断与重新放置已接入（X11 RandR 实测），物理混合 DPI/热插拔、Windows 真实显示器变化与其他平台继续，不在 paint 访问磁盘 |
 | W05 | 待实现 | 应用激活、单实例与参数转发 | OS 锁与显式 IPC；启动竞争、旧实例关闭、恶意/超长参数和用户隔离 |
 
 ## 布局、控件与绘制
@@ -43,8 +43,8 @@
 | U01 | 已完成（Windows/Linux） | checkbox、radio、switch、progress、禁用态 | 原生输入、失败帧/嵌套 paint、关闭、Windows UIA 身份及资源回收；无每帧分配 |
 | U02 | 部分完成（Windows/Linux） | slider、双端范围、步进控件、焦点导航、快捷键与多击 | U02.1、U02.2嵌套scope/显式Escape续交、U02.3原生时序入口与显式注册主按钮多击、普通及committed Space下单文档词/逻辑行选择已分项验；更广未消费键续交、折叠/投影视图的编辑器选择及其他控件多击继续；直接键入数字归 T02；依赖 U01 |
 | U03 | 已完成（纯布局合同，Windows/Linux） | grid 与可组合约束布局 | U03.1 grid/span/对齐/自动放置/隐式轨道及U03.2弹性百分比上限、内容/显式minimum优先级、数值基线与未知父尺寸测量已验；失败输出事务、硬界与overflow明确；分隔拖动归U06 |
-| U04 | 部分完成（Windows/Linux） | 虚拟 list、table、tree/outline、grid view | U04.1 可变行高列表/可见回放/稳定 ID 锚点已实现；U04.2 声明式视图的单选列表框（非虚拟）已实现；完整列表语义及 table/tree/grid view 继续待实现；基础依赖 U02.1/T01 |
-| U05 | 部分完成（U05.1 声明式视图的只读组合框、建议列表与搜索区域） | combobox、autocomplete、search、token field | popup 所有权、输入法、筛选取消、键盘与焦点恢复；可编辑组合框、输入法组合期间的建议处理与 token field 继续；依赖 U02.2/T02/W02 |
+| U04 | 部分完成（Windows/Linux） | 虚拟 list、table、tree/outline、grid view | U04.1 可变行高列表/可见回放/稳定 ID 锚点已实现；U04.2 声明式视图的单选列表框（非虚拟）已实现；U04.3/U04.4 声明式视图的非虚拟 table（共享列宽、排序指示、单/多选）与 tree（展开折叠、层级键盘）已实现；虚拟 table/tree、列宽拖动/冻结/重排与 grid view 继续待实现；基础依赖 U02.1/T01 |
+| U05 | 部分完成（U05.1 只读组合框、建议列表与搜索区域；U05.2 可编辑组合框与 token field） | combobox、autocomplete、search、token field | popup 所有权、输入法、筛选取消、键盘与焦点恢复；可编辑组合框、输入法组合期间的建议处理与 token field 已在声明式视图实现，读屏实际播报与 Linux 可访问性继续；依赖 U02.2/T02/W02 |
 | U06 | 部分完成（U06.1 声明式视图的 tabs/toolbar/比例 split；U06.2 tooltip、toast 与一次性唤醒） | tabs、sidebar、toolbar、split、tooltip、toast | 生命周期、遮挡/命中、延迟唤醒撤销与可访问性；split 的 DIP 偏好、RTL、折叠与 sidebar、toast 动画继续；基础依赖 U02.1/G02，popup scope另依赖U02.2 |
 | U07 | 待实现 | calendar、date/time、color picker | locale/范围/键盘/可访问性；依赖 L01/U05 |
 | U08 | 已完成（U08.1 link、badge、segmented、disclosure；U08.2 meter、rating、breadcrumbs、accordion；U08.3 avatar 与导航按钮，Windows UIA） | badge、avatar、link、meter、rating、segmented、accordion、breadcrumbs 与导航按钮 | 稳定身份、分组/展开/链接动作、键盘和语义；不把静态文字/矩形算成完整控件；Linux AT-SPI 不在本行范围；基础依赖 U02.1/G01 |
@@ -159,8 +159,8 @@ T07 负责可选字体注册与发现，不扩大T01已验收布局范围：有�
 | I01 | 已完成 | 类型化事件、订阅/退订、显式广播、TS 生成 | 纯 Zig/生成 TS；真实 Windows WebView 闭环；session/重入/部分失败/旧客户端兼容检查通过 |
 | I02 | 已完成 | 编译期服务调度与显式 caller 上下文 | 签名/错误类型校验、拥有的 Reply/Work、OOM 编码重试不重复业务副作用、真实 WebView 调度 |
 | B01 | 部分完成（Windows/Linux） | page 导航、远程/文件资源策略、历史、标题/加载状态 | B01.1 本地页面与 B01.2 远程/显式文件快照已验收；methods/headers、私有文件按需读取与原生 scheme 由 B05.1–B05.3 验收，未开放 file:// 目录；导航中关闭/重定向/失败和 IPC 绑定 |
-| B02 | 部分完成（Windows/Linux） | 异步 JS 求值、zoom、user agent、devtools、用户注入脚本 | B02.1既有Windows操作及B02.2两平台文档起始主frame初始化器/有序替换首片已验；其他时机/frame/world及Linux更广操作继续，未做人眼工具窗展示验收；依赖 B01 |
-| B03 | 部分完成（Windows/Linux） | cookie/data store、find、截图、打印/PDF | Windows View Cookie/Profile清理、原生find、预算PNG、异步PDF，以及Linux独立CookieStore的URL/显式授权全量查询、写入/快照删除/身份删除/非空完整替换/清Cookie、原生PNG和有界substring Find/显式unknown状态已分项验收；整词/高亮关闭等不支持选项明确拒绝，Linux PDF及系统打印机输出继续，无页面Windows CookieStore仍明确不支持；依赖 B02 |
+| B02 | 部分完成（Windows/Linux） | 异步 JS 求值、zoom、user agent、devtools、用户注入脚本 | B02.1既有Windows操作及B02.2两平台文档起始主frame初始化器/有序替换首片已验；Linux DevTools 开关/独立 inspector 已验，两平台 B02.1 属性操作对齐；其他时机/frame/world继续，未做人眼工具窗展示验收；依赖 B01 |
+| B03 | 部分完成（Windows/Linux） | cookie/data store、find、截图、打印/PDF | Windows View Cookie/Profile清理、原生find、预算PNG、异步PDF，以及Linux独立CookieStore的URL/显式授权全量查询、写入/快照删除/身份删除/非空完整替换/清Cookie、原生PNG、整体数据清理和有界substring Find/显式unknown状态已分项验收；整词/高亮关闭等不支持选项明确拒绝，Linux PDF及系统打印机输出继续，无页面Windows CookieStore仍明确不支持；依赖 B02 |
 | B04 | 已完成（Windows，宿主显式策略） | 下载管理、权限决策与持久策略 | B04.1 有界下载/临时权限与 B04.2 版本化宿主规则已验收；宿主负责规则执行与 worker I/O，合作取消不等于硬磁盘配额；依赖 B01/I01 |
 | B05 | 部分完成（Windows/Linux） | 自定义协议、请求/响应与资源流 | Windows B05.1–B05.4及Linux有界custom读取/头授权、异步资源/文件泵、HTTP Range/准备文件响应、独立TLS站点、两平台已知长producer已分项验收；Windows实际HTTPS/browser链使用测试证书例外，生产Profile级pin待实现；Linux custom写请求受实际Origin缺失限制，opaque scheme及更广策略继续；不在UI线程磁盘等待；依赖 B01/I01 |
 | H01 | 已完成（Windows/Linux 页面与区域） | page/viewport 与窗口分离、多份内容生命周期 | H01.1 组合所有者/UI backdrop/矩形页面与H01.2独立PageSession/跨宿主DOM/App停机接线已验收；更广Linux页面策略及其他平台归P01/P04；依赖 W02/B01 |
@@ -182,7 +182,7 @@ B02 分项：
 
 | 子项 | 状态 | 验收范围 |
 | --- | --- | --- |
-| B02.1 | 已完成（Windows） | 既有异步JS、zoom、user agent与devtools；有界双层请求/结果、取消/超时/导航/detach、单槽完成重入与属性恢复 |
+| B02.1 | 已完成（Windows/Linux） | 既有异步JS、zoom、user agent与devtools（Linux DevTools 为独立 inspector 顶层窗口）；有界双层请求/结果、取消/超时/导航/detach、单槽完成重入与属性恢复 |
 | B02.2 | 部分完成（Windows/Linux 首片） | document-start/top-frame/page-world 的拥有型可信初始化函数体、精确 HTTPS 来源和有序整批替换已通过独立原生验收；初始安装完成才允许导航，失败保旧、旧 ID/关闭/reload/取消回收均验证。Linux提交表示本地future-document manager已安装，不承诺WebProcess ACK或当前文档执行；其他时机/frame/world继续 |
 
 当前细分实施顺序：B01.1 本地页面导航、历史、元数据与代数 → B01.2 远程/文件来源和只读资源策略 → B02 页面操作 → H01 内容生命周期分离；写 method、headers 与流通过 B05 的显式协议推进。本地 Runtime 验证不代替远程策略验证，也不将 URL 参数或网络访问隐藏加入默认可信来源。
@@ -194,10 +194,10 @@ B02 分项：
 | ID | 状态 | 范围 | 验收与依赖 |
 | --- | --- | --- | --- |
 | S01 | 已完成（Windows） | 全局快捷键、通知区通知 | 原生注册/冲突/注销、稳定事件 ID、Owner 关闭与诊断重入检查；Linux/macOS 见 P02/P04 |
-| S02 | 部分完成 | shell 打开 URL/文件、定位、回收站、文件图标、应用发现/启动 | S02.1 显式 worker 的 executable 启动（Windows/Linux）及 S02.4 Windows 16/32px 不透明图标已验收；URL/关联文件/定位/回收站/完整图标/应用发现继续待实现；参数/路径/编码、异步成本、系统错误和图标所有权 |
-| S03 | 待实现 | 多显示器、主题/accent/可访问性偏好、网络、电源与文件监视 | 变化订阅、取消与最后订阅者回收；无持续轮询；Windows/Linux/macOS capability |
+| S02 | 部分完成 | shell 打开 URL/文件、定位、回收站、文件图标、应用发现/启动 | S02.1 executable 启动、S02.2 URL（https/http/mailto 默认白名单）/关联文件/定位、S02.3 回收站（Windows/Linux）及 S02.4 Windows 16/32px 不透明图标已实现；完整图标（Linux/高分辨率/透明）与安装应用发现/按身份启动待实现；真实关联程序/资源管理器显示未自动验证 |
+| S03 | 部分完成 | 多显示器、主题/accent/可访问性偏好、网络、电源与文件监视 | 显示器/偏好/电源/网络快照与合并变化订阅（Windows/Linux）、粗模式文件监视（inotify/ReadDirectoryChangesW）已实现；详细文件监视（快照/rename 匹配）、Linux 电源来源变化、Wayland 显示器、portal 配色待实现；Windows 路径首次运行在 CI |
 | S04 | 待实现 | 密钥存储、登录启动、深链和文件关联 | OS 权限/用户作用域、安装与运行时分工、卸载和参数转发；依赖 W05/R01 |
-| S05 | 待实现 | 多格式剪贴板、transfer、惰性 provider、原生拖放 | 文本/HTML/图片/文件/自定义，多 item、异步请求寿命、关闭后无悬空回调；依赖 G01 |
+| S05 | 部分完成 | 多格式剪贴板、transfer、惰性 provider、原生拖放 | Board 的 text/HTML/PNG/文件/自定义事务写入、异步读取、惰性 provider、变化事件、Windows 有界占用重试及 Windows/Linux 放置目标已实现；拖动源（需模态拖动循环）未提供；真实跨进程拖放、他进程占用重试与退出渲染未自动验证 |
 | S06 | 部分完成（Windows/Linux） | 异步消息对话框、上下文菜单与菜单快捷键 | S06.1 两平台上下文菜单与异步消息框、Windows 菜单栏快捷键已验；非嵌套循环（Windows 菜单在私有安全点进入系统菜单循环）、取消/关闭、禁用祖先、旧消息隔离分别验证；Linux 菜单栏与快捷键分发、物理输入与视觉验收继续；依赖 W02/U02 |
 | S07 | 待实现 | 应用身份/系统目录、任务栏或 Dock badge/progress/menu、阻止休眠 | 按平台 capability、用户作用域、原生引用/电源断言配对与最后 owner 回收；依赖 S03/P03 |
 | S08 | 部分完成（Windows） | 独立托盘/status item、多图标、菜单与popover锚定 | 窗口Owner单托盘/任务栏重建恢复，及 S08.1 App 独立多 item、可选稳定 GUID、锚定托盘菜单、App 停止回收已验；标题与popover亮态（无 Windows 对应）、Linux/macOS 继续；其余平台依赖 P02/P04 |
@@ -249,10 +249,10 @@ P01 的 Linux HTTPS 本地来源分两片实施。首片由宿主提供已运行
 | ID | 状态 | 范围 | 验收与依赖 |
 | --- | --- | --- | --- |
 | L01 | 部分完成 | catalog、locale、ICU message/plural、数字/日期与 RTL | 已有纯 Zig `ziggurat_i18n`：编译期/加载期校验、无分配格式化、locale fallback 与协商、约 50 种语言复数规则、数字/日期、pseudolocale 与方向查询，见[本地化](i18n.md)；控件双向布局、时区数据、货币数据与完整 CLDR 覆盖待实现 |
-| A01 | 待实现 | 音频解码、内存音效与流式播放 | WAV/MP3/Vorbis、seek/音量/pan/速度/loop、无实时线程分配、设备切换与关闭 |
+| A01 | 部分完成 | 音频解码、内存音效与流式播放 | 已有 `ziggurat_audio`：WAV 与纯 Zig FLAC、内存音效与流式播放、seek/音量/pan/速度/循环与区间循环、混音线程无分配、WASAPI 与 PulseAudio/ALSA、默认设备切换重开、空闲关闭与无设备静音走时，见[音频](audio.md)；MP3 与 Ogg Vorbis 待实现 |
 | E01 | 已完成 | 插件注册与显式初始化/关闭依赖 | 固定容量应用级依赖图、全图预检、失败逆序回滚、取消/重入/线程；Windows/Linux 运行及独立 review 通过 |
 | E02 | 首片完成 | Fetch 与 WebSocket | 显式 transport/worker、取消/背压/大小限制、TLS/断线、类型化客户端；依赖 E01/I01 |
-| E03 | 待实现 | SQLite | 连接/事务/游标所有权、取消/线程约束、打包依赖；依赖 E01 |
+| E03 | 首片完成 | SQLite | 已有可选 `ziggurat_sqlite`：脚本拉取并校验固定 amalgamation，连接、预处理语句、类型化绑定、借用行读取、事务/savepoint、`user_version` 迁移、`interrupt` 取消与 `ui_thread` 主线程拒绝，`test-sqlite` 在 Windows/Linux CI 运行，见[SQLite](sqlite.md)；在线备份、增量 BLOB I/O、自定义函数与加密待实现 |
 | E04 | 待实现 | PTY 与终端视图 | 子进程/终端解析、输入/resize/流控/退出和回收；依赖 E01/T01/G01 |
 | E05 | 待实现 | game loop、camera、gamepad 与材质扩展 | 显式启停时钟、输入热插拔、帧/功耗预算与平台能力；依赖 E01/G02 |
 | E06 | 待实现 | backdrop blur、glass 与滚动边缘合成 | 按 compositor 能力、reduce transparency、高对比/后备、离屏/设备丢失与显存预算；依赖 E01/G01/G02/W03 |
@@ -1644,6 +1644,12 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - `ziggurat_view` 提供 `breadcrumbs`、`meter`、`rating`、`accordion`/`section`。面包屑在间隙中画分隔符；手风琴最多打开一节，再次激活已打开的节会关闭它。面包屑和手风琴里的控件以容器为可访问父节点。
 - 单元测试覆盖区间与参数校验、评分标记命中、语义角色与父节点，以及无窗口的分节切换和评分调整；Linux 隐藏窗口 smoke 在 1x/2x 下实测评分的原生点击。Windows smoke 用真实 UIAutomationClient 检查导航地标、度量条只读 RangeValue、评分 SetValue 与分节 ExpandCollapse。
 
+### U04.3/U04.4/U05.2 声明式视图的树、表格、可编辑组合框与标记输入框
+
+- 新增语义角色 `tree`、`tree_item`、`table`、`table_header`、`column_header`、`table_row`、`token_field`、`token`，追加在既有编号之后；语义节点新增 `multiple` 与 `expanded`。Frame 提供 `treeView`、`treeItem`、`dataTable`、`tableHeader`、`columnHeader`、`tableRow`、`tokenField`、`tokenItem`、`comboField` 与 `comboToggle`。Windows UIA 映射为 Tree、TreeItem / SelectionItem / ExpandCollapse、DataGrid、Header、HeaderItem / Invoke（ItemStatus 为排序方向）、DataItem、List / ListItem（标记）；多选集合报告 CanSelectMultiple，AddToSelection/RemoveFromSelection 经数值请求只改动该项。Linux 不声明 AT-SPI。
+- `ziggurat_view` 提供应用持有的 `Selection`（按稳定项 ID，容量由调用者给出）、`tree`/`treeItem`、`table`/`tableRow`（`Column`、`Sort`）、`editableComboBox` 与 `tokenField`/`token`；`Embed.status` 报告输入法组合与空输入。行共享一个 Tab 停靠点，键盘与指针支持单选、Ctrl 切换、Shift 范围、Ctrl+Shift 追加范围、Ctrl+A、PageUp/PageDown 与树的 Left/Right 层级导航；表头与各行按全部单元格的内容统一求列宽。可编辑组合框在组合期间隐藏建议并把按键留给输入法。标记输入框按宽度换行，排列宽度变化时再测量一次。
+- 无窗口测试（含 `-fllvm`）覆盖树的展开、三角按下、键盘层级导航、按 ID 保持选择，表格的排序、列对齐、多选修饰键、Ctrl+A、翻页与滚入，可编辑组合框的打开/关闭/按钮/组合期间隐藏与选中后焦点，标记输入框的换行、移除与焦点移动，以及选择容量。Linux 隐藏窗口 smoke 在 1x/2x 下实测树的三角与行按下、列头排序、行选择、列对齐与标记移除。Windows smoke 用真实 UIAutomationClient 检查树 ExpandCollapse/LeafNode/选择、DataGrid 多选、列头 Invoke 与 ItemStatus、标记的控件类型。行不做虚拟化；列宽拖动、冻结、重排、读屏实际播报与视觉质量未验收。见[声明式视图](view.md)。
+
 ### U05.1/U06.2/U08.3 组合框、建议列表、提示、通知、导航按钮与头像
 
 - 新增语义角色 `combo_box`、`tooltip`、`status`、`search`、`image`，追加在既有编号之后。Frame 提供 `comboBox`、`popupList`、`navButton`、`avatar`、`tooltip`、`status` 与 `search`。Windows UIA 映射为 ComboBox / ExpandCollapse / 只读 Value、ToolTip、Polite 实时区域的 Group（出现时引发 LiveRegionChanged）、带搜索地标的 Group 与 Image；Value 只在文本框上可写。Linux 不声明 AT-SPI。
@@ -1698,3 +1704,37 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - `WebSocket` 由单一 worker 独占连接两个方向（同一 TLS 会话不并发读写），任意线程 `send`/`ping`/`close`/`cancel`/`resumeReading`；预分配发送队列满返回 `Full`，handler 返回 `pause` 停止读 socket。分片重组、UTF-8、掩码/保留位/控制帧/关闭码校验与 1002/1007/1009 关闭、自动 pong、关闭握手、子协议协商。HTTPS/WSS 复用调用者 `std.http.Client` 的 TLS、系统 CA 与代理。
 - 单元测试用回环服务覆盖以上路径，Linux ReleaseSafe/Debug 各连续运行 1000/300 次（含 CPU 压力）无失败；`scripts/net-tls-probe.sh` 用临时 localhost 证书实测 HTTPS、100 KB WSS 回显和不受信证书拒绝。Windows 单元测试交叉编译通过，运行结果以 CI 为准。未实现：压缩扩展、非 CONNECT HTTP 代理上的 WebSocket、内置超时与自动重连、连接/握手阶段的即时取消、公网与代理环境验证。见[Fetch 与 WebSocket](net.md)。
 
+### W03.3 Windows 系统框架材质
+
+- `Window.setBackdrop(.system/.none/.mica/.acrylic/.mica_alt)` 经 DWM system backdrop 属性在主线程同步提交；`backdrop_material` 只在 `.system` 装饰且系统版本不低于 Windows 11 build 22621 时为 true，版本由 RtlGetVersion 每进程读取一次。不支持时在原生调用前返回 `UnsupportedCapability`，原生拒绝为 `WindowUpdateFailed` 并保留 HRESULT 诊断；选择不由框架保存。
+- 材质只覆盖系统标题栏/边框；客户区仍不透明，`transparent` 保持 false，W03.2 需渲染器预乘 alpha 输出后另行实现。Linux/Wayland 报告不支持。
+- 测试后端单测覆盖能力门禁、Busy、失败不改状态与关闭后 `Closed`；`smoke-window-chrome` 在 Windows 比对独立读取的版本与能力，支持时提交五种材质并在 DWM 允许时读回原值。本地已通过 Linux 原生检查与 Windows 交叉编译；Windows 运行结果以 CI 为准，不建立视觉效果结论。
+
+### B02/B03 Linux DevTools 与整体数据清理
+
+- Linux 接受 `devtools_enabled` 与 `setDevToolsEnabled/devToolsEnabled/openDevTools`，映射 WebKit developer extras；inspector 是引擎拥有的独立顶层窗口，拒绝停靠进 Content host。禁用、detach、reload/recover 替换与关闭同步关闭已显示 inspector，`devToolsResourceCount()` 回到 0；网页上下文菜单仍被拒绝。
+- Linux `clearBrowsingData(.entire_profile)` 对 View 自己的数据管理器清除全部类型与时间范围，持久 Profile 下影响共用者。它复用截图的显式 budget、每 View 与进程物理上限及 GTask 结果寿命，不要求当前文档、不预留 PNG 容量；新增独立 `clear_browsing_data` 能力位，`browser_tools` 仍为 false。
+- 本地 Linux（Xvfb、WebKitGTK 4.1）Debug 通过 `smoke-webview-linux`、`P01_PROBE=backend`、`smoke-webview-cookies-linux`、`smoke-webview-capture-linux`、`test-webkit-capture` 与 `test-webview`：DevTools 默认关闭/禁用拒绝/显示/重复/禁用关闭/recover 保留/reload 清除，清理后 Store 查询为空、新文档无旧 Cookie 与 localStorage，取消恰好一次，原生计数归零。Linux PDF、无页面 Windows CookieStore 与 Linux View Cookie 工具保持原状态。
+
+### S05.1 多格式剪贴板 Board 与放置目标
+
+- `clipboard.Board` 每个 App 一个原生连接：Windows 用私有 message-only HWND 作为 owner、更新监听、延迟渲染与重试 timer；GTK 用 CLIPBOARD selection。写入先校验全部条目并在打开剪贴板前构造原生块，失败不留部分内容；lazy offer 的 released 恰好一次。读取经调用者 Request 槽异步交付，取消/停机后无回调；GTK 同 selection 的同步应答改由 idle 交付，保持“启动调用内不回调”。
+- `drop.Target` 为窗口注册原生放置目标：Windows `IDropTarget`（嵌套 OleInitialize、subclass 在 WM_DESTROY 撤销），GTK 扩展 GtkWindow 既有 root-window target 列表并在 detach 还原。悬停 leave 总先于 drop；payload 复制到调用者 buffer，超出报告所需字节。拖动源因两平台都需要模态拖动循环而不提供。
+- Linux Xvfb 1x/2x 下 `smoke-clipboard`、`smoke-drop` 通过；Windows 路径只交叉编译。未自动验证：真实跨进程拖放、另一进程占用剪贴板时的重试、`WM_RENDERALLFORMATS` 退出渲染。见[系统工具](system.md)。
+
+### S03.1 桌面环境快照、订阅与粗模式文件监视
+
+- `system.desktop` 提供显示器、偏好、电源、网络快照和每 Watch 独立原生订阅，突发合并、stop/停机撤销后无回调；Windows 用不显示的顶层窗口接收广播，网络变化回调只 PostMessage；Linux 用 GDK/GtkSettings/GIO 信号。Linux 配色/高对比度来自主题名启发式，不读取 portal，accent 为 null。见[桌面环境](desktop-environment.md)。
+- `system.watch.Watcher` 在宿主 worker 上运行，预算在 init 分配，`changed`/`overflow`/`root_removed` 合并交付且容量不足时顺延；详细模式未实现。见[文件监视](file-watch.md)。
+- Linux 下 `smoke-desktop`（1x/2x，真实 GtkSettings 突发合并）与 `smoke-file-watch` 通过；inotify 溢出、Windows 零字节完成和真实系统主题/电源/网络变化未自动触发。
+
+### S02.2–S02.3 打开 URL/路径、定位与回收站
+
+- `shell.Worker` 新增 `openUrl`（默认只允许 https/http/mailto，`file:` 永远拒绝）、`openPath`、`reveal`（Windows SHOpenFolderAndSelectItems，Linux FileManager1.ShowItems 有界超时）与 `trash`（Windows SHFileOperationW 仅本地固定盘，Linux g_file_trash）。均在宿主 worker 阻塞执行，校验在交给处理程序之前完成。
+- `smoke-shell` 在私有 XDG 目录真实 trash 12 个 Unicode 文件，并在私有会话总线上用假 FileManager1 验证 ShowItems 与超时；不打开浏览器或用户文件。真实关联程序、资源管理器显示与回收站策略边界未自动验证。
+
+### W04.2 显示器变化后的重新放置
+
+- `window_placement.displacement(window, &topology)` 对照宿主刚刷新的快照分类当前原生 frame：`contained`、`partial`（单个 workarea 两个方向至少重叠 48 原生单位）、`offscreen`，特殊状态为 `special`，快照过期返回 `DisplayChanged`。只查询，不分配、不注册回调；模块仍只依赖核心。
+- 宿主用 `system.desktop.Watch` 订阅 monitors 变化，在回调里 `refresh` 与 `displacement`，`offscreen` 时以 Tracker 快照建立新的 `Restorer`。`partial` 是否收回由宿主决定，Openbox 会把越界窗口夹到可见边缘而得到这个结果。
+- 单测覆盖跨两个 workarea 的包含、部分可见、阈值边界、仅落在 workarea 外条带、小 frame 与无效矩形。`smoke-window-placement` 增加越界移动后恢复与最大化期间 `special`；新增 Linux `smoke-window-placement-displays` 用 RandR 实际缩小 Xvfb 输出，monitors 回调推进到 `offscreen` 并恢复到新 workarea，1x 与 `GDK_SCALE=2` 本地通过，结束时恢复原模式。Windows 只交叉编译，没有在真实系统上改变显示器配置。见[窗口恢复](window-placement.md)。

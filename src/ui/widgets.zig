@@ -557,6 +557,164 @@ pub fn emitTooltip(frame: anytype, id: u64, bounds: layout.Rect, text: []const u
 /// Space between a tooltip's edge and its text.
 pub const tooltip_inset: f32 = 4;
 
+/// Indentation of each tree level, in DIP.
+pub const tree_indent: f32 = 16;
+/// How an accessibility client changes a multiple-selection item or a tree
+/// item's expansion. It arrives as `ValueChange.set` on the item's id,
+/// because ordinary activation already means "select only this one".
+pub const ItemRequest = enum(u8) { deselect = 0, add = 1, collapse = 2, expand = 3 };
+/// One row of a tree or table. The collection's id goes in
+/// `control.radio_group`, so its rows share one Tab stop on the row that has
+/// the keyboard cursor.
+pub const RowOptions = struct {
+    control: Options = .{},
+    /// Member of the selection.
+    selected: bool = false,
+    /// Holds the collection's keyboard cursor.
+    cursor: bool = false,
+    /// The collection lets several rows be selected at once.
+    multiple: bool = false,
+    /// Depth of a tree row, from 0.
+    level: u16 = 0,
+    /// A tree row's expansion; null for a leaf.
+    expanded: ?bool = null,
+};
+pub const SortDirection = enum { ascending, descending };
+pub const TokenOptions = struct {
+    control: Options = .{},
+    /// Accessible name of the remove button.
+    remove_name: []const u8 = "Remove",
+};
+
+/// The disclosure triangle of a tree row at `level`; pressing it expands
+/// or collapses the row without changing the selection.
+pub fn treeExpander(bounds: layout.Rect, level: u16, indicator: f32) layout.Rect {
+    const side = @min(bounds.height, indicator);
+    const x = bounds.x + tree_indent * @as(f32, @floatFromInt(level));
+    return .{ .x = x, .y = bounds.y + (bounds.height - side) / 2, .width = @max(0, @min(side, bounds.x + bounds.width - x)), .height = side };
+}
+
+fn rowRecord(frame: anytype, role: access.Role, id: u64, bounds: layout.Rect, name: []const u8, options: RowOptions) !bool {
+    if (id == access.root_id) return error.ReservedControlId;
+    if (!layout.validRect(bounds) or !layout.validRect(absolute(frame, bounds))) return error.InvalidGeometry;
+    const control = options.control;
+    // The cursor row is the group's one selected peer, so Tab lands on it.
+    try frame.addControl(id, bounds, .{ .enabled = control.enabled, .radio_group = control.radio_group, .selected = options.cursor, .shortcut = control.shortcut });
+    const visible = visibleBounds(frame, bounds);
+    const focused = control.enabled and visible.width > 0 and visible.height > 0 and frame.context.input_state.focused == id;
+    try frame.semantic(.{ .id = id, .parent = control.semantic_parent, .role = role, .name = name, .description = control.description, .bounds = bounds, .enabled = control.enabled, .focused = focused, .checked = options.selected, .multiple = options.multiple, .expanded = options.expanded });
+    const colors = frame.currentTheme().palette;
+    if (options.selected) try fill(frame, bounds, if (control.enabled) colors.accent else colors.disabled_accent) else if (control.enabled and frame.context.input_state.active == id) try fill(frame, bounds, colors.pressed);
+    if (focused) try outline(frame, bounds, frame.currentTheme().metrics.border, if (options.selected) colors.on_accent else colors.focus);
+    return focused;
+}
+
+/// A tree row: an indented label after a disclosure triangle when it has
+/// children. Announced as a tree item, selected while `options.selected`,
+/// expandable unless `options.expanded` is null.
+pub fn emitTreeItem(frame: anytype, id: u64, bounds: layout.Rect, label: []const u8, options: RowOptions) !void {
+    const snapshot = Snapshot.init(frame);
+    errdefer snapshot.restore(frame);
+    _ = try rowRecord(frame, .tree_item, id, bounds, label, options);
+    const style = frame.currentTheme();
+    const colors = style.palette;
+    const foreground: u32 = if (!options.control.enabled) colors.disabled_text else if (options.selected) colors.on_accent else colors.text;
+    const mark = treeExpander(bounds, options.level, style.metrics.indicator_size);
+    if (options.expanded) |open| if (mark.width > 0) try triangle(frame, inset(mark, mark.height / 4), open, foreground);
+    const label_x = @min(bounds.width, mark.x - bounds.x + mark.height + style.metrics.label_gap / 2);
+    try frame.context.command_buffer.text(absolute(frame, .{ .x = bounds.x + label_x, .y = bounds.y, .width = bounds.width - label_x, .height = bounds.height }), label, foreground);
+}
+
+/// The background, hit target and semantics of a table row; its cells are
+/// recorded after it and draw over it. Named by `name`.
+pub fn emitTableRow(frame: anytype, id: u64, bounds: layout.Rect, name: []const u8, options: RowOptions) !void {
+    const snapshot = Snapshot.init(frame);
+    errdefer snapshot.restore(frame);
+    _ = try rowRecord(frame, .table_row, id, bounds, name, options);
+}
+
+/// A column title that sorts its table on activation, with a chevron for
+/// the current sort direction, announced as item status. A column that does
+/// not sort takes no input. The header row paints the background.
+pub fn emitColumnHeader(frame: anytype, id: u64, bounds: layout.Rect, title: []const u8, sort: ?SortDirection, sortable: bool, options: Options) !void {
+    if (id == access.root_id) return error.ReservedControlId;
+    if (!layout.validRect(bounds) or !layout.validRect(absolute(frame, bounds))) return error.InvalidGeometry;
+    const snapshot = Snapshot.init(frame);
+    errdefer snapshot.restore(frame);
+    try frame.addControl(id, bounds, .{ .enabled = options.enabled, .focusable = sortable, .pointer_enabled = sortable, .shortcut = if (sortable) options.shortcut else null });
+    const visible = visibleBounds(frame, bounds);
+    const focused = sortable and options.enabled and visible.width > 0 and visible.height > 0 and frame.context.input_state.focused == id;
+    try frame.semantic(.{ .id = id, .parent = options.semantic_parent, .role = .column_header, .name = title, .value = if (sort) |direction| @tagName(direction) else "", .description = options.description, .bounds = bounds, .enabled = options.enabled, .focused = focused, .read_only = true });
+    const style = frame.currentTheme();
+    const colors = style.palette;
+    if (sortable and options.enabled and frame.context.input_state.active == id) try fill(frame, bounds, colors.pressed);
+    const foreground: u32 = if (options.enabled) colors.text else colors.disabled_text;
+    const side = @min(bounds.height, style.metrics.indicator_size) / 2;
+    const mark: layout.Rect = .{ .x = bounds.x + @max(0, bounds.width - side), .y = bounds.y + (bounds.height - side) / 2, .width = @min(side, bounds.width), .height = side };
+    if (sort) |direction| try chevron(frame, mark, if (direction == .ascending) .up else .down, foreground);
+    const label_width = @max(0, (if (sort != null) mark.x - style.metrics.content_inset / 2 else bounds.x + bounds.width) - bounds.x);
+    try frame.context.command_buffer.text(absolute(frame, .{ .x = bounds.x, .y = bounds.y, .width = label_width, .height = bounds.height }), title, foreground);
+    if (focused) try outline(frame, bounds, style.metrics.border, colors.focus);
+}
+
+/// Width of a token's remove button, in DIP.
+pub fn tokenRemoveWidth(bounds: layout.Rect) f32 {
+    return @min(bounds.width / 2, bounds.height);
+}
+/// A token of a token field: a rounded chip with its label and a remove
+/// button `remove_id` at its end. The chip takes focus and is announced as
+/// a token; the button removes it.
+pub fn emitToken(frame: anytype, id: u64, remove_id: u64, bounds: layout.Rect, label: []const u8, options: TokenOptions) !void {
+    if (id == access.root_id or remove_id == access.root_id) return error.ReservedControlId;
+    if (!layout.validRect(bounds) or !layout.validRect(absolute(frame, bounds))) return error.InvalidGeometry;
+    const snapshot = Snapshot.init(frame);
+    errdefer snapshot.restore(frame);
+    const control = options.control;
+    const button_width = tokenRemoveWidth(bounds);
+    const button: layout.Rect = .{ .x = bounds.x + bounds.width - button_width, .y = bounds.y, .width = button_width, .height = bounds.height };
+    try frame.addControl(id, bounds, .{ .enabled = control.enabled, .radio_group = control.radio_group });
+    // The remove button lies over the chip and takes presses first; it is
+    // not a Tab stop of its own.
+    try frame.addControl(remove_id, button, .{ .enabled = control.enabled, .focusable = false });
+    const visible = visibleBounds(frame, bounds);
+    const focused = control.enabled and visible.width > 0 and visible.height > 0 and frame.context.input_state.focused == id;
+    try frame.semantic(.{ .id = id, .parent = control.semantic_parent, .role = .token, .name = label, .description = control.description, .bounds = bounds, .enabled = control.enabled, .focused = focused, .read_only = true });
+    try frame.semantic(.{ .id = remove_id, .parent = id, .role = .button, .name = options.remove_name, .bounds = button, .enabled = control.enabled });
+    const style = frame.currentTheme();
+    const colors = style.palette;
+    try fill(frame, bounds, if (focused) colors.focus else colors.border);
+    try fill(frame, inset(bounds, style.metrics.border / 2), if (control.enabled and frame.context.input_state.active == remove_id) colors.pressed else colors.control);
+    const foreground: u32 = if (control.enabled) colors.text else colors.disabled_text;
+    const text = inset(.{ .x = bounds.x, .y = bounds.y, .width = @max(0, bounds.width - button_width), .height = bounds.height }, style.metrics.content_inset / 2);
+    try frame.context.command_buffer.text(absolute(frame, .{ .x = text.x + style.metrics.content_inset / 2, .y = text.y, .width = @max(0, text.width - style.metrics.content_inset / 2), .height = text.height }), label, foreground);
+    // A small cross from two bounded strips.
+    const cross = inset(button, button.height * 0.32);
+    const strips: usize = 5;
+    for (0..strips) |i| {
+        const t = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(strips));
+        const d = cross.width / @as(f32, @floatFromInt(strips));
+        try fill(frame, .{ .x = cross.x + cross.width * t, .y = cross.y + cross.height * t, .width = d, .height = d }, foreground);
+        try fill(frame, .{ .x = cross.x + cross.width * (1 - t) - d, .y = cross.y + cross.height * t, .width = d, .height = d }, foreground);
+    }
+}
+
+/// The button at the end of an editable combo box that opens or closes its
+/// list. It takes presses but not focus, which stays in the text input.
+pub fn emitComboToggle(frame: anytype, id: u64, bounds: layout.Rect, expanded: bool, options: Options) !void {
+    if (id == access.root_id) return error.ReservedControlId;
+    if (!layout.validRect(bounds) or !layout.validRect(absolute(frame, bounds))) return error.InvalidGeometry;
+    const snapshot = Snapshot.init(frame);
+    errdefer snapshot.restore(frame);
+    try frame.addControl(id, bounds, .{ .enabled = options.enabled, .focusable = false });
+    try frame.semantic(.{ .id = id, .parent = options.semantic_parent, .role = .button, .name = options.name, .bounds = bounds, .enabled = options.enabled });
+    const style = frame.currentTheme();
+    const colors = style.palette;
+    if (options.enabled and frame.context.input_state.active == id) try fill(frame, bounds, colors.pressed);
+    const side = @min(bounds.height, bounds.width, style.metrics.indicator_size);
+    const mark: layout.Rect = .{ .x = bounds.x + (bounds.width - side) / 2, .y = bounds.y + (bounds.height - side) / 2, .width = side, .height = side };
+    try chevron(frame, inset(mark, side / 3), if (expanded) .up else .down, if (options.enabled) colors.text else colors.disabled_text);
+}
+
 test "initials take the first letter of two words" {
     var out: [8]u8 = undefined;
     try std.testing.expectEqualStrings("AL", initials("ada lovelace", &out));

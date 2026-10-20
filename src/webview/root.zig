@@ -623,7 +623,7 @@ fn validateBackendOptions(options: Options) !void {
                 if (options.user_data_folder.len != 0) return error.ProfilePathForbidden;
             },
         }
-        if (options.permissions != null or options.downloads != null or options.devtools_enabled or options.allow_local_navigation)
+        if (options.permissions != null or options.downloads != null or options.allow_local_navigation)
             return error.UnsupportedCapability;
         if (options.remote) |remote| {
             if ((options.storage == .ephemeral and remote.credentials != .ephemeral) or
@@ -647,7 +647,7 @@ fn validateBackendOptions(options: Options) !void {
         if (options.policy.new_window != .deny or options.policy.download != .deny or options.policy.permission != .deny or options.policy.frame_navigation != .deny or
             options.max_cached_permissions != 256 or options.tool_limits.max_cookies != (tools.Limits{}).max_cookies or options.tool_limits.max_cookie_bytes != (tools.Limits{}).max_cookie_bytes) return error.UnsupportedCapability;
         if (options.max_resource_bytes > 16 * 1024 * 1024) return error.InvalidResourceLimit;
-        inline for (std.meta.fields(tools.Policy)) |field| if (!std.mem.eql(u8, field.name, "capture") and !std.mem.eql(u8, field.name, "find") and @field(options.tools, field.name)) return error.UnsupportedCapability;
+        inline for (std.meta.fields(tools.Policy)) |field| if (!std.mem.eql(u8, field.name, "capture") and !std.mem.eql(u8, field.name, "find") and !std.mem.eql(u8, field.name, "clear_entire_profile") and @field(options.tools, field.name)) return error.UnsupportedCapability;
     } else {
         if (options.storage != .profile or !std.meta.eql(options.custom_local_limits, CustomLocalLimits{}) or options.request_policy_extension != null) return error.UnsupportedCapability;
         if (options.profile != null) {
@@ -1033,6 +1033,14 @@ pub fn customLocalResourceCounts() custom_local.ResourceCounts {
     var result: custom_local.ResourceCounts = undefined;
     webkit.zwk_local_counts(&result.budgets, &result.streams, &result.body_bytes);
     return result;
+}
+/// Linux inspectors explicitly shown and not yet closed by disable, detach,
+/// recover or close. Windows tool windows belong to the Runtime and report 0.
+pub fn devToolsResourceCount() u32 {
+    if (!is_linux) return 0;
+    var shown: u32 = undefined;
+    webkit.zwk_devtools_counts(&shown);
+    return shown;
 }
 pub const ToolResourceCounts = struct { streams: u32, pending: u32 };
 pub fn toolResourceCounts() ToolResourceCounts {
@@ -1445,7 +1453,8 @@ pub const View = struct {
                 webkit.zwk_capture_budget_release(value);
             }
         };
-        if (options.tools.capture) {
+        // Capture and whole-data clear share one physical owner and quota.
+        if (options.tools.capture or options.tools.clear_entire_profile) {
             const limits = options.tool_limits;
             const budget = self.capture_budget orelse blk: {
                 const value = webkit.zwk_capture_budget_new(limits.max_pending, limits.max_capture_bytes, webkitCaptureNotify) orelse return error.OutOfMemory;
@@ -1485,7 +1494,7 @@ pub const View = struct {
             flags |= @as(u32, 1) << @intCast(i);
         };
         const initializer_input = if (self.config.?.initializer_config) |source| source.input() else null;
-        const native_options: webkit.Options = .{ .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null };
+        const native_options: webkit.Options = .{ .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled) };
         var candidate: ?*anyopaque = null;
         if (self.session) |session| {
             try webkit.check(webkit.zwk_session_create(&native_options, session.last_size.width, session.last_size.height, webkitNotify, pageNotify, webkitScriptNotify, webkitTimeout, self, &candidate));
@@ -1493,7 +1502,7 @@ pub const View = struct {
             const native_window = callback_scope.?.record.native.native orelse return error.Closed;
             try webkit.check(webkit.zwk_create(native_window, &native_options, webkitNotify, pageNotify, webkitScriptNotify, webkitTimeout, self, &candidate));
         }
-        if (options.tools.capture) {
+        if (options.tools.capture or options.tools.clear_entire_profile) {
             webkit.check(webkit.zwk_capture_enable(candidate.?, self.capture_budget.?)) catch |err| {
                 webkit.zwk_close(candidate.?);
                 return err;
@@ -2333,7 +2342,7 @@ pub const View = struct {
         return true;
     }
     fn toolWindow(self: *View, kind: tools.Kind, page: ?PageId) !Access {
-        if (is_linux and kind != .capture and kind != .find) return self.unavailableBackend();
+        if (is_linux and kind != .capture and kind != .find and kind != .clear) return self.unavailableBackend();
         const window = try self.propertyWindow();
         if (!self.tool_accepting) return error.ToolUnavailable;
         const policy = self.config.?.options.tools;
@@ -2375,7 +2384,7 @@ pub const View = struct {
             self.find_token = token;
             self.find_listener = listener;
         }
-        const hr = if (is_linux) webkit.zwk_capture_start(self.native.?, token) else zwv_tool_start(self.native.?, &request);
+        const hr = if (!is_linux) zwv_tool_start(self.native.?, &request) else if (kind == .clear) webkit.zwk_clear_start(self.native.?, token) else webkit.zwk_capture_start(self.native.?, token);
         if (is_linux) {
             if (hr != 0) {
                 _ = self.tool_book.take(token);
@@ -2413,7 +2422,6 @@ pub const View = struct {
         return self.submitTool(.cookies, .profile, .{ .kind = 0, .text = &wide }, options, completion, null, null, null);
     }
     pub fn clearBrowsingData(self: *View, _: tools.ClearScope, options: tools.RequestOptions, completion: tools.Completion) !ToolOperation {
-        if (is_linux) return self.unavailableBackend();
         _ = try self.toolWindow(.clear, null);
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
@@ -2630,9 +2638,14 @@ pub const View = struct {
         const slot = self.tool_book.take(token) orelse return;
         self.syncEvalTimer() catch self.failEvalTimer();
         if (self.attachmentClosed() or appStopping(window)) return self.completeToolSlot(slot, .detached);
-        if (self.recovering or slot.page != self.page_generation or !self.page_active) return self.completeToolSlot(slot, .page_changed);
-        if (slot.kind != .capture) return self.completeToolSlot(slot, .invalid_result);
+        if (self.recovering or (slot.scope == .page and (slot.page != self.page_generation or !self.page_active))) return self.completeToolSlot(slot, .page_changed);
         if (failure) |native| self.last_native_failure = .{ .glib = native.* };
+        if (slot.kind == .clear) return self.completeToolSlot(slot, switch (status) {
+            0 => if (count == 0) .cleared else .invalid_result,
+            1 => if (failure) |native| .{ .native_failure = native.code } else .invalid_result,
+            else => .invalid_result,
+        });
+        if (slot.kind != .capture) return self.completeToolSlot(slot, .invalid_result);
         const result: tools.Result = switch (status) {
             0 => if (count == 0 or count > self.config.?.options.tool_limits.max_capture_bytes) .invalid_result else .{ .png = data[0..count] },
             1 => if (failure) |native| .{ .native_failure = native.code } else .invalid_result,
@@ -2887,29 +2900,43 @@ pub const View = struct {
         return result;
     }
     pub fn setDevToolsEnabled(self: *View, enabled: bool) !void {
-        if (is_linux) return self.unavailableBackend();
         _ = try self.propertyWindow();
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
+        if (is_linux) {
+            try webkit.check(webkit.zwk_devtools(self.native.?, if (enabled) 1 else 2, null, null));
+            _ = try self.propertyWindow();
+            self.devtools_override = enabled;
+            return;
+        }
         var value = enabled;
         try self.propertyResult(zwv_devtools(self.native.?, &value, true, false));
         self.devtools_override = enabled;
     }
     pub fn devToolsEnabled(self: *View) !bool {
-        if (is_linux) return self.unavailableBackend();
         _ = try self.propertyWindow();
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
+        if (is_linux) {
+            var enabled: c_int = 0;
+            try webkit.check(webkit.zwk_devtools(self.native.?, 0, &enabled, null));
+            _ = try self.propertyWindow();
+            return enabled != 0;
+        }
         var value = false;
         try self.propertyResult(zwv_devtools(self.native.?, &value, false, false));
         return value;
     }
     /// Explicitly opens a native tool window; never called automatically.
     pub fn openDevTools(self: *View) !void {
-        if (is_linux) return self.unavailableBackend();
         _ = try self.propertyWindow();
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
+        if (is_linux) {
+            try webkit.check(webkit.zwk_devtools(self.native.?, 3, null, null));
+            _ = try self.propertyWindow();
+            return;
+        }
         var value = false;
         const hr = zwv_devtools(self.native.?, &value, false, true);
         if (@as(u32, @bitCast(hr)) == 0x80070005) return error.DevToolsDisabled;
@@ -5214,9 +5241,7 @@ test "Linux capability preflight rejects unsupported configuration before alloca
         .{ .html = "", .storage = .ephemeral, .custom_schemes = &.{.{ .name = "private" }} },
         .{ .html = "", .storage = .ephemeral, .tools = .{ .cookies = true } },
         .{ .html = "", .storage = .ephemeral, .tools = .{ .pdf = true } },
-        .{ .html = "", .storage = .ephemeral, .tools = .{ .clear_entire_profile = true } },
         .{ .html = "", .storage = .ephemeral, .tools = .{ .capture = true }, .tool_limits = .{ .max_cookies = 1 } },
-        .{ .html = "", .storage = .ephemeral, .devtools_enabled = true },
         .{ .html = "", .storage = .ephemeral, .policy = .{ .permission = .notify } },
     };
     for (cases) |options| {

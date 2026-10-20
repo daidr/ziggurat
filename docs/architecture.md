@@ -14,6 +14,7 @@ flowchart TD
     Host --> System[ziggurat_system]
     Host --> Update[ziggurat_update]
     Host --> Net[ziggurat_net]
+    Host --> Audio[ziggurat_audio]
     Host --> Assets[ziggurat_assets]
     Host --> Extensions[ziggurat_extensions]
     Host --> Text[ziggurat_text_layout]
@@ -52,6 +53,7 @@ flowchart TD
     Host --> Gaussian[ziggurat_gaussian]
     Net --> NetTLS[调用者 std.http.Client / TLS / 系统 CA]
     Wake --> Core
+    Audio --> Core
     Placement --> Core
     DocumentApp --> Core
     LanguageProtocol --> Core

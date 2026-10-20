@@ -22,7 +22,8 @@ static gint live_records;
    Each item exports org.kde.StatusNotifierItem at its own object path and
    registers that path with org.kde.StatusNotifierWatcher whenever a watcher
    appears, so a restarted panel shows the item again. Events: 0 activate,
-   1 context menu at (x, y), 2 secondary activate, -1 bus failure. */
+   1 context menu at (x, y), 2 secondary activate, 3 menu command at index
+   x, -1 bus failure. */
 
 static const char tray_xml[] =
     "<node><interface name='org.kde.StatusNotifierItem'>"
@@ -38,11 +39,54 @@ static const char tray_xml[] =
     "<property name='AttentionIconPixmap' type='a(iiay)' access='read'/><property name='AttentionMovieName' type='s' access='read'/>"
     "<property name='ToolTip' type='(sa(iiay)ss)' access='read'/><property name='ItemIsMenu' type='b' access='read'/>"
     "<property name='Menu' type='o' access='read'/>"
+    "<property name='XAyatanaLabel' type='s' access='read'/><property name='XAyatanaLabelGuide' type='s' access='read'/>"
     "<signal name='NewTitle'/><signal name='NewIcon'/><signal name='NewToolTip'/>"
     "<signal name='NewStatus'><arg type='s'/></signal>"
+    "<signal name='XAyatanaNewLabel'><arg type='s'/><arg type='s'/></signal>"
     "</interface></node>";
 static GDBusNodeInfo *tray_info;
 static guint tray_paths;
+
+/* com.canonical.dbusmenu, the menu a status notifier host draws itself. The
+   item's Menu property names it once a menu is set. Menu IDs are fresh for
+   every snapshot, so a host still holding an old layout cannot select an
+   item of a newer one. */
+static const char menu_xml[] =
+    "<node><interface name='com.canonical.dbusmenu'>"
+    "<method name='GetLayout'><arg type='i' direction='in'/><arg type='i' direction='in'/><arg type='as' direction='in'/>"
+    "<arg type='u' direction='out'/><arg type='(ia{sv}av)' direction='out'/></method>"
+    "<method name='GetGroupProperties'><arg type='ai' direction='in'/><arg type='as' direction='in'/><arg type='a(ia{sv})' direction='out'/></method>"
+    "<method name='GetProperty'><arg type='i' direction='in'/><arg type='s' direction='in'/><arg type='v' direction='out'/></method>"
+    "<method name='Event'><arg type='i' direction='in'/><arg type='s' direction='in'/><arg type='v' direction='in'/><arg type='u' direction='in'/></method>"
+    "<method name='EventGroup'><arg type='a(isvu)' direction='in'/><arg type='ai' direction='out'/></method>"
+    "<method name='AboutToShow'><arg type='i' direction='in'/><arg type='b' direction='out'/></method>"
+    "<method name='AboutToShowGroup'><arg type='ai' direction='in'/><arg type='ai' direction='out'/><arg type='ai' direction='out'/></method>"
+    "<property name='Version' type='u' access='read'/><property name='TextDirection' type='s' access='read'/>"
+    "<property name='Status' type='s' access='read'/><property name='IconThemePath' type='as' access='read'/>"
+    "<signal name='ItemsPropertiesUpdated'><arg type='a(ia{sv})'/><arg type='a(ias)'/></signal>"
+    "<signal name='LayoutUpdated'><arg type='u'/><arg type='i'/></signal>"
+    "<signal name='ItemActivationRequested'><arg type='i'/><arg type='u'/></signal>"
+    "</interface></node>";
+static GDBusNodeInfo *menu_info;
+
+/* The layout Zig passes for menu bars and popups. */
+typedef struct NativeItem {
+    const char *label;
+    int32_t parent;
+    uint8_t kind;
+    uint8_t enabled;
+    uint8_t checked;
+    uint8_t padding;
+    uint32_t keyval;
+    uint32_t modifiers;
+    int32_t command;
+} NativeItem;
+typedef struct MenuEntry {
+    gchar *label;
+    int32_t parent, id;
+    uint8_t kind, enabled, checked;
+    uint32_t keyval, modifiers;
+} MenuEntry;
 
 typedef struct Tray {
     int refs;
@@ -51,11 +95,23 @@ typedef struct Tray {
     TrayEvent event;
     GCancellable *cancel;
     GDBusConnection *bus;
-    guint object, watch;
-    gchar path[64];
-    gchar *id, *title, *icon_name;
+    guint object, watch, menu_object;
+    gchar path[64], menu_path[80];
+    gchar *id, *title, *icon_name, *label;
     GVariant *pixmap;
+    MenuEntry *entries;
+    uint32_t count;
+    gboolean has_menu;
+    guint32 revision;
+    int32_t next_id;
 } Tray;
+
+static void menu_clear(Tray *tray) {
+    for (uint32_t index = 0; index < tray->count; ++index) g_free(tray->entries[index].label);
+    g_free(tray->entries);
+    tray->entries = NULL;
+    tray->count = 0;
+}
 
 static void tray_release(Tray *tray) {
     if (--tray->refs) return;
@@ -64,7 +120,9 @@ static void tray_release(Tray *tray) {
     g_free(tray->id);
     g_free(tray->title);
     g_free(tray->icon_name);
+    g_free(tray->label);
     if (tray->pixmap) g_variant_unref(tray->pixmap);
+    menu_clear(tray);
     g_atomic_int_dec_and_test(&live_records);
     g_free(tray);
 }
@@ -97,12 +155,169 @@ static GVariant *tray_property(GDBusConnection *bus, const gchar *sender, const 
     if (strcmp(name, "IconPixmap") == 0) return tray->pixmap ? g_variant_ref(tray->pixmap) : empty_pixmaps();
     if (strcmp(name, "ToolTip") == 0) return g_variant_new("(s@a(iiay)ss)", "", empty_pixmaps(), tray->title, "");
     if (strcmp(name, "ItemIsMenu") == 0) return g_variant_new_boolean(FALSE);
-    if (strcmp(name, "Menu") == 0) return g_variant_new_object_path("/NO_DBUSMENU");
+    if (strcmp(name, "Menu") == 0) return g_variant_new_object_path(tray->has_menu && tray->menu_object ? tray->menu_path : "/NO_DBUSMENU");
+    if (strcmp(name, "XAyatanaLabel") == 0 || strcmp(name, "XAyatanaLabelGuide") == 0) return g_variant_new_string(tray->label);
     if (g_str_has_suffix(name, "Pixmap")) return empty_pixmaps();
     return g_variant_new_string("");
 }
 static void tray_object_freed(gpointer data) { tray_release(data); }
 static const GDBusInterfaceVTable tray_vtable = {tray_method, tray_property, NULL, {0}};
+
+/* ---- tray menus ---- */
+
+static int menu_index(Tray *tray, int32_t id) {
+    for (uint32_t index = 0; index < tray->count; ++index) if (tray->entries[index].id == id) return (int)index;
+    return -1;
+}
+static GVariant *menu_shortcut(const MenuEntry *entry) {
+    GVariantBuilder keys;
+    g_variant_builder_init(&keys, G_VARIANT_TYPE("as"));
+    /* GDK_CONTROL_MASK, GDK_MOD1_MASK, GDK_SHIFT_MASK and GDK_SUPER_MASK. */
+    if (entry->modifiers & (1u << 2)) g_variant_builder_add(&keys, "s", "Control");
+    if (entry->modifiers & (1u << 3)) g_variant_builder_add(&keys, "s", "Alt");
+    if (entry->modifiers & (1u << 0)) g_variant_builder_add(&keys, "s", "Shift");
+    if (entry->modifiers & (1u << 26)) g_variant_builder_add(&keys, "s", "Super");
+    const gchar *name = gdk_keyval_name(entry->keyval);
+    g_variant_builder_add(&keys, "s", name ? name : "");
+    GVariant *one = g_variant_builder_end(&keys);
+    return g_variant_new_array(G_VARIANT_TYPE("as"), &one, 1);
+}
+/* Properties of one entry, or of the root for index -1. */
+static GVariant *menu_properties(Tray *tray, int index) {
+    GVariantBuilder properties;
+    g_variant_builder_init(&properties, G_VARIANT_TYPE("a{sv}"));
+    if (index < 0) {
+        g_variant_builder_add(&properties, "{sv}", "children-display", g_variant_new_string("submenu"));
+        return g_variant_builder_end(&properties);
+    }
+    const MenuEntry *entry = &tray->entries[index];
+    if (entry->kind == 2) {
+        g_variant_builder_add(&properties, "{sv}", "type", g_variant_new_string("separator"));
+        return g_variant_builder_end(&properties);
+    }
+    g_variant_builder_add(&properties, "{sv}", "label", g_variant_new_string(entry->label));
+    g_variant_builder_add(&properties, "{sv}", "enabled", g_variant_new_boolean(entry->enabled != 0));
+    g_variant_builder_add(&properties, "{sv}", "visible", g_variant_new_boolean(TRUE));
+    if (entry->kind == 1) g_variant_builder_add(&properties, "{sv}", "children-display", g_variant_new_string("submenu"));
+    if (entry->kind == 0 && entry->checked) {
+        g_variant_builder_add(&properties, "{sv}", "toggle-type", g_variant_new_string("checkmark"));
+        g_variant_builder_add(&properties, "{sv}", "toggle-state", g_variant_new_int32(1));
+    }
+    if (entry->kind == 0 && entry->keyval) g_variant_builder_add(&properties, "{sv}", "shortcut", menu_shortcut(entry));
+    return g_variant_builder_end(&properties);
+}
+static GVariant *menu_layout(Tray *tray, int index, int depth) {
+    GVariantBuilder children;
+    g_variant_builder_init(&children, G_VARIANT_TYPE("av"));
+    if (depth != 0) {
+        for (uint32_t child = 0; child < tray->count; ++child) {
+            if (tray->entries[child].parent != index) continue;
+            g_variant_builder_add(&children, "v", menu_layout(tray, (int)child, depth < 0 ? -1 : depth - 1));
+        }
+    }
+    return g_variant_new("(i@a{sv}@av)", index < 0 ? 0 : tray->entries[index].id, menu_properties(tray, index), g_variant_builder_end(&children));
+}
+static int menu_lookup(Tray *tray, int32_t id, int *index) {
+    if (id == 0) { *index = -1; return 1; }
+    *index = menu_index(tray, id);
+    return *index >= 0;
+}
+/* Reports a click on an enabled command as event 3 with its index. */
+static void menu_event(Tray *tray, int32_t id, const gchar *event) {
+    int index = menu_index(tray, id);
+    if (index < 0 || strcmp(event, "clicked") != 0) return;
+    if (tray->entries[index].kind != 0 || !tray->entries[index].enabled) return;
+    tray_emit(tray, 3, index, 0);
+}
+static void menu_method(GDBusConnection *bus, const gchar *sender, const gchar *path, const gchar *interface, const gchar *method, GVariant *parameters, GDBusMethodInvocation *invocation, gpointer data) {
+    (void)bus; (void)sender; (void)path; (void)interface;
+    Tray *tray = data;
+    if (strcmp(method, "GetLayout") == 0) {
+        gint32 parent = 0, depth = -1;
+        g_variant_get(parameters, "(ii@as)", &parent, &depth, NULL);
+        int index = 0;
+        if (!menu_lookup(tray, parent, &index)) {
+            g_dbus_method_invocation_return_error(invocation, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS, "Unknown menu item %d", parent);
+            return;
+        }
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("(u@(ia{sv}av))", tray->revision, menu_layout(tray, index, depth)));
+    } else if (strcmp(method, "GetGroupProperties") == 0) {
+        GVariantIter *ids = NULL;
+        g_variant_get(parameters, "(ai@as)", &ids, NULL);
+        GVariantBuilder result;
+        g_variant_builder_init(&result, G_VARIANT_TYPE("a(ia{sv})"));
+        gint32 id = 0;
+        while (g_variant_iter_next(ids, "i", &id)) {
+            int index = 0;
+            if (menu_lookup(tray, id, &index)) g_variant_builder_add(&result, "(i@a{sv})", id, menu_properties(tray, index));
+        }
+        g_variant_iter_free(ids);
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("(@a(ia{sv}))", g_variant_builder_end(&result)));
+    } else if (strcmp(method, "GetProperty") == 0) {
+        gint32 id = 0;
+        const gchar *name = NULL;
+        g_variant_get(parameters, "(i&s)", &id, &name);
+        int index = 0;
+        GVariant *value = NULL;
+        if (menu_lookup(tray, id, &index)) {
+            GVariant *properties = menu_properties(tray, index);
+            g_variant_ref_sink(properties);
+            value = g_variant_lookup_value(properties, name, NULL);
+            g_variant_unref(properties);
+        }
+        if (!value) {
+            g_dbus_method_invocation_return_error(invocation, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS, "Unknown menu property");
+            return;
+        }
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("(v)", value));
+        g_variant_unref(value);
+    } else if (strcmp(method, "Event") == 0) {
+        gint32 id = 0;
+        const gchar *event = NULL;
+        g_variant_get(parameters, "(i&svu)", &id, &event, NULL, NULL);
+        gchar *copy = g_strdup(event);
+        ++tray->refs;
+        g_dbus_method_invocation_return_value(invocation, NULL);
+        menu_event(tray, id, copy);
+        g_free(copy);
+        tray_release(tray);
+    } else if (strcmp(method, "EventGroup") == 0) {
+        GVariantIter *events = NULL;
+        g_variant_get(parameters, "(a(isvu))", &events);
+        GVariantBuilder errors;
+        g_variant_builder_init(&errors, G_VARIANT_TYPE("ai"));
+        guint total = (guint)g_variant_iter_n_children(events);
+        gint32 *ids = g_new0(gint32, total ? total : 1);
+        gchar **names = g_new0(gchar *, total ? total : 1);
+        guint count = 0;
+        gint32 id = 0;
+        const gchar *event = NULL;
+        while (g_variant_iter_next(events, "(i&svu)", &id, &event, NULL, NULL)) {
+            if (menu_index(tray, id) < 0) g_variant_builder_add(&errors, "i", id);
+            else { ids[count] = id; names[count] = g_strdup(event); ++count; }
+        }
+        g_variant_iter_free(events);
+        ++tray->refs;
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("(@ai)", g_variant_builder_end(&errors)));
+        /* Each event can replace the menu, so IDs are looked up again. */
+        for (guint index = 0; index < count; ++index) { menu_event(tray, ids[index], names[index]); g_free(names[index]); }
+        g_free(ids);
+        g_free(names);
+        tray_release(tray);
+    } else if (strcmp(method, "AboutToShow") == 0) {
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("(b)", FALSE));
+    } else {
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("(@ai@ai)", g_variant_new_array(G_VARIANT_TYPE_INT32, NULL, 0), g_variant_new_array(G_VARIANT_TYPE_INT32, NULL, 0)));
+    }
+}
+static GVariant *menu_property(GDBusConnection *bus, const gchar *sender, const gchar *path, const gchar *interface, const gchar *name, GError **error, gpointer data) {
+    (void)bus; (void)sender; (void)path; (void)interface; (void)error; (void)data;
+    if (strcmp(name, "Version") == 0) return g_variant_new_uint32(3);
+    if (strcmp(name, "TextDirection") == 0) return g_variant_new_string(gtk_widget_get_default_direction() == GTK_TEXT_DIR_RTL ? "rtl" : "ltr");
+    if (strcmp(name, "Status") == 0) return g_variant_new_string("normal");
+    return g_variant_new_strv(NULL, 0);
+}
+static const GDBusInterfaceVTable menu_vtable = {menu_method, menu_property, NULL, {0}};
 
 static void tray_registered(GObject *source, GAsyncResult *result, gpointer data) {
     Tray *tray = data;
@@ -145,6 +360,15 @@ static void tray_bus_ready(GObject *source, GAsyncResult *result, gpointer data)
         tray_release(tray);
         return;
     }
+    if (!menu_info) menu_info = g_dbus_node_info_new_for_xml(menu_xml, NULL);
+    ++tray->refs;
+    tray->menu_object = g_dbus_connection_register_object(bus, tray->menu_path, menu_info->interfaces[0], &menu_vtable, tray, tray_object_freed, &error);
+    if (!tray->menu_object) {
+        /* The item still works; hosts call ContextMenu instead. */
+        --tray->refs;
+        tray_emit(tray, -1, 4, error ? error->code : 0);
+        g_clear_error(&error);
+    }
     ++tray->refs;
     tray->watch = g_bus_watch_name_on_connection(bus, "org.kde.StatusNotifierWatcher", G_BUS_NAME_WATCHER_FLAGS_NONE, watcher_appeared, NULL, tray, tray_object_freed);
     tray_release(tray);
@@ -174,7 +398,7 @@ static GVariant *pixmap_from(GdkPixbuf *pixbuf) {
 
 /* The pixbuf is borrowed; a NULL icon names the generic application icon.
    Returns NULL with error 1 when the icon cannot be copied. */
-Tray *zsl_tray_show(void *icon, const char *title, const char *id, void *owner, uint64_t serial, TrayEvent event, int *error) {
+Tray *zsl_tray_show(void *icon, const char *title, const char *label, const char *id, void *owner, uint64_t serial, TrayEvent event, int *error) {
     *error = 0;
     GVariant *pixmap = NULL;
     if (icon) {
@@ -188,16 +412,19 @@ Tray *zsl_tray_show(void *icon, const char *title, const char *id, void *owner, 
     tray->cancel = g_cancellable_new();
     tray->id = g_strdup(id && id[0] ? id : g_get_prgname() ? g_get_prgname() : "application");
     tray->title = g_strdup(title);
+    tray->label = g_strdup(label);
     tray->icon_name = g_strdup(pixmap ? "" : "application-x-executable");
     tray->pixmap = pixmap;
+    tray->next_id = 1;
     g_snprintf(tray->path, sizeof tray->path, "/org/ziggurat/StatusNotifierItem/%u", ++tray_paths);
+    g_snprintf(tray->menu_path, sizeof tray->menu_path, "%s/Menu", tray->path);
     g_atomic_int_inc(&live_records);
     ++tray->refs;
     g_bus_get(G_BUS_TYPE_SESSION, tray->cancel, tray_bus_ready, tray);
     return tray;
 }
 /* Replaces the icon and title in place and tells the host to reread them. */
-int zsl_tray_update(Tray *tray, void *icon, const char *title) {
+int zsl_tray_update(Tray *tray, void *icon, const char *title, const char *label) {
     GVariant *pixmap = NULL;
     if (icon && (!GDK_IS_PIXBUF(icon) || !(pixmap = pixmap_from(icon)))) return 0;
     if (tray->pixmap) g_variant_unref(tray->pixmap);
@@ -206,17 +433,56 @@ int zsl_tray_update(Tray *tray, void *icon, const char *title) {
     tray->icon_name = g_strdup(pixmap ? "" : "application-x-executable");
     g_free(tray->title);
     tray->title = g_strdup(title);
+    gboolean relabel = strcmp(tray->label, label) != 0;
+    g_free(tray->label);
+    tray->label = g_strdup(label);
     tray_signal(tray, "NewIcon");
     tray_signal(tray, "NewTitle");
     tray_signal(tray, "NewToolTip");
+    if (relabel && tray->bus && tray->object)
+        g_dbus_connection_emit_signal(tray->bus, NULL, tray->path, "org.kde.StatusNotifierItem", "XAyatanaNewLabel", g_variant_new("(ss)", tray->label, tray->label), NULL);
     return 1;
 }
+/* Replaces the menu with a copy of `items`; zero items remove it. Item
+   kinds are 0 command, 1 submenu, 2 separator; parents index earlier items
+   or are -1, and `enabled` already includes every ancestor's state. */
+void zsl_tray_menu(Tray *tray, const NativeItem *items, uint32_t count) {
+    gboolean had_menu = tray->has_menu;
+    menu_clear(tray);
+    tray->has_menu = count != 0;
+    if (count) tray->entries = g_new0(MenuEntry, count);
+    for (uint32_t index = 0; index < count; ++index) {
+        MenuEntry *entry = &tray->entries[index];
+        entry->label = g_strdup(items[index].label);
+        entry->parent = items[index].parent;
+        entry->kind = items[index].kind;
+        entry->enabled = items[index].enabled;
+        entry->checked = items[index].checked;
+        entry->keyval = items[index].keyval;
+        entry->modifiers = items[index].modifiers;
+        if (tray->next_id <= 0) tray->next_id = 1;
+        entry->id = tray->next_id++;
+    }
+    tray->count = count;
+    ++tray->revision;
+    if (!tray->bus || !tray->menu_object) return;
+    g_dbus_connection_emit_signal(tray->bus, NULL, tray->menu_path, "com.canonical.dbusmenu", "LayoutUpdated", g_variant_new("(ui)", tray->revision, 0), NULL);
+    if (had_menu != tray->has_menu && tray->object) {
+        GVariantBuilder changed;
+        g_variant_builder_init(&changed, G_VARIANT_TYPE("a{sv}"));
+        g_variant_builder_add(&changed, "{sv}", "Menu", g_variant_new_object_path(tray->has_menu ? tray->menu_path : "/NO_DBUSMENU"));
+        g_dbus_connection_emit_signal(tray->bus, NULL, tray->path, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+            g_variant_new("(sa{sv}as)", "org.kde.StatusNotifierItem", &changed, NULL), NULL);
+    }
+}
+const char *zsl_tray_menu_path(Tray *tray) { return tray->menu_path; }
 const char *zsl_tray_path(Tray *tray) { return tray->path; }
 /* Silent: unexports the item, which also removes it from the watcher. */
 void zsl_tray_remove(Tray *tray) {
     tray->owner = NULL;
     g_cancellable_cancel(tray->cancel);
     if (tray->watch) { guint watch = tray->watch; tray->watch = 0; g_bus_unwatch_name(watch); }
+    if (tray->menu_object) { guint object = tray->menu_object; tray->menu_object = 0; g_dbus_connection_unregister_object(tray->bus, object); }
     if (tray->object) { guint object = tray->object; tray->object = 0; g_dbus_connection_unregister_object(tray->bus, object); }
     tray_release(tray);
 }

@@ -14,7 +14,7 @@ try view.attach(window, .{
 });
 ```
 
-`storage` 默认 `.profile`，Windows 保留绝对 `user_data_folder` 契约。Linux 临时页面显式选择 `.ephemeral` 且 folder 为空，不读取已有持久数据；持久页面必须传入同一 App 显式创建的 `Profile` owner，folder 仍为空，见[Linux 页面存储](webview-profile.md)。没有 owner 返回 `ProfileRequired`，不自动根据路径创建 manager。Windows 暂不接受 `.ephemeral` 或这个 Linux Profile owner。Linux 支持下述显式 custom 本地站点、异步资源/私有文件流、远程页面、独立矩形区域、PageSession 和单独授权的 PNG 截图；HTTPS local、其余浏览器工具、权限决定、下载和 DevTools 仍返回 `UnsupportedCapability`。不支持的配置在分配或接管前拒绝，非空临时 folder 返回 `EphemeralProfilePathForbidden`；关闭入口优先 `Closed`。没有将 HTTPS 来源、目录权限或其他平台的 grant 转换成本地 scheme。
+`storage` 默认 `.profile`，Windows 保留绝对 `user_data_folder` 契约。Linux 临时页面显式选择 `.ephemeral` 且 folder 为空，不读取已有持久数据；持久页面必须传入同一 App 显式创建的 `Profile` owner，folder 仍为空，见[Linux 页面存储](webview-profile.md)。没有 owner 返回 `ProfileRequired`，不自动根据路径创建 manager。Windows 暂不接受 `.ephemeral` 或这个 Linux Profile owner。Linux 支持下述显式 custom 本地站点、异步资源/私有文件流、远程页面、独立矩形区域、PageSession，以及单独授权的 PNG 截图和整体数据清理；HTTPS local、其余浏览器工具、权限决定和下载仍返回 `UnsupportedCapability`；DevTools 见下文 Linux 说明。不支持的配置在分配或接管前拒绝，非空临时 folder 返回 `EphemeralProfilePathForbidden`；关闭入口优先 `Closed`。没有将 HTTPS 来源、目录权限或其他平台的 grant 转换成本地 scheme。
 
 这一内存 HTML 模式的实际页面 URI 是 `about:blank`，采用构造时不可被文档放宽的 default CSP：网络子资源、connect、frame、worker、object、base 和 form 均拒绝，仅允许内联脚本/样式及 data/blob 图片；显式宿主 JS 仍可执行。普通文档导航只接受适配器为首次加载/刷新准备的 about:blank，其余脚本/链接导航拒绝。可设置 `policy.navigation = .notify` 观察 Runtime 实际发出的已拒绝导航；其余非默认 policy 通知尚不接受。HTTP 方法/header 前置策略仅由下述显式远程模式安装，普通 HTML 不加载请求扩展。CSP 和这些导航规则不是操作系统网络沙箱，不提供对不可信 HTML 的通用隔离保证。
 
@@ -158,6 +158,14 @@ Linux 同一原生 controller 只有一个未退休的物理 Find 命令。取�
 默认为 View 和 native State 各增加一个可空指针；工具关闭或仅开启而尚未发命令，不创建 FindDomain/Gate/Command，也不进入 4097 字节的 noinline 查询捕获 helper。第一次允许的查询才复制输入并创建原生拥有者，旧 gate、候选、迟到 command 同时计费到实际 free 返回。本轮 x64 的旧891/新 View 为 5024/5032 字节、native State 为 2496/2504 字节；Domain/Gate/Command header 为 56/112/56 字节，N=`tool_limits.max_pending` 的新增请求字节上界为 `56 + N*112 + N*(56+4097)`，N 在 1..8。Command 可延长其旧 native State、完整配置和 SDK 对象的寿命；这些既有存储不计入 Find 新增字节，该公式不是全部引擎内存上限。
 
 固定 Zig 0.15.2 / WebKitGTK 2.52.6 的 Debug 与 ReleaseSafe 已用真实公开 View/Book 路径验证顺序查找、大小写/UTF-8、step unknown、取消/timeout 后物理 Full、普通刷新、原生 reload/recover、关闭/raw close/Stop 和最终引用零。进程故障可先完成旧 SDK 查找为零，再发实际 process_failed；成功的零结果不表示恢复成功。恢复另需显式 recover、新文档 PageId 与新查询结果。此结果不扩展为其他引擎版本或完整浏览器工具支持。
+
+## Linux 整体数据清理
+
+`backendCapabilities().clear_browsing_data` 独立表示 `clearBrowsingData`，两平台均报告；Linux 的 `browser_tools` 仍为 false。设置 `.tools = .{ .clear_entire_profile = true }` 后，`clearBrowsingData(.entire_profile, options, completion)` 对该 View 自己的 WebKit 网站数据管理器调用一次全部数据类型、全部时间范围的原生 clear；成功为 `.cleared`，GLib 错误为 `native_failure` 并保留完整域/码快照。持久 `.profile` 页面清除的是整个显式 Profile，会同时影响共用它的其他 View 与 CookieStore；`.ephemeral` 页面只清除自己的临时 Context。这是宿主能力，框架不弹确认框，也不按 origin 清理。默认关闭时返回 `ToolDenied`。
+
+清理是 Profile 作用域请求：不要求当前文档已提交，普通导航不终结它；reload/recover、detach、App 停止和进程失败仍按工具通用规则终结回调。它与截图共用同一个显式 budget、每 View `max_pending` 和进程级 8 个物理请求上限，仅开启清理时不预留 PNG 容量，每请求只多一个 56-byte Op。取消或超时只终结宿主回调，GCancellable 不保证撤回已经执行的删除；物理槽保留到原生 GTask 结果释放。已打开文档的内存状态由引擎决定，验证以随后加载的文档为准。
+
+`smoke-webview-cookies-linux` 在随机私有 Profile 中先由 CookieStore 写入 HttpOnly Cookie、页面写入 Cookie 与 localStorage，再经 View 清理；随后 Store 查询为空、reload 后的新文档看不到旧 Cookie 和 localStorage，并验证取消恰好一次与 deadline/关闭路径。`test-webkit-capture` 用受控 GTask 验证清理与截图共享配额、不要求文档、OOM、取消后迟到完成、真实错误和回调内关闭；最终原生计数归零。
 
 Linux PDF 也保留 `UnsupportedCapability`。已核对的[WebKitGTK 2.52.6 实现](https://github.com/WebKit/WebKit/blob/webkitgtk-2.52.6/Source/WebKit/UIProcess/API/gtk/WebKitPrintOperation.cpp)在无对话框 print 入口仍自行同步枚举 printer；[GTK 3.24.41 枚举实现](https://github.com/GNOME/gtk/blob/3.24.41/gtk/gtkprinter.c#L1182)可能进入递归主循环，不能满足本项目主线程合同。提前枚举不跳过这次内部枚举。其[文件打印后端](https://github.com/GNOME/gtk/blob/3.24.41/modules/printbackends/file/gtkprintbackendfile.c#L398)还在主循环同步写文件，关闭输出的错误未传回原完成，并登记最近文件；这条路径尚未建立既有私有异步PDF合同。没有启动打印操作或更改系统打印配置；未来适配需要可验证的非阻塞输出边界与独立拥有的结果。
 
@@ -351,6 +359,8 @@ timeout 可省略，设定时范围 1 ms 到 10 分钟。每 View 惰性创建�
 
 `Options.devtools_enabled` 默认 false；`setDevToolsEnabled`/`devToolsEnabled` 显式修改/读取开关，`openDevTools` 仅在启用时打开原生工具窗口，否则返回 `DevToolsDisabled`。不会自动打开工具窗口。三个 setter 成功后保留 override，`recover` 复用它们；事务 `reload(options)` 应用新 Options 并清除旧 override，detach 释放复制的 UA。属性操作在主线程、受窗口 pin 保护，未 ready/正在重建时返回 `NotReady`，失败不修改已保存配置。
 
+Linux 同样接受 `devtools_enabled` 和三个 DevTools 方法，对应 WebKit 的 developer extras 设置。`openDevTools` 只在启用时显示引擎拥有的独立 inspector 顶层窗口；它拒绝停靠进 Content host，不改变 GtkOverlay/区域/PageSession 的 widget 层级。重复打开不新增窗口。`setDevToolsEnabled(false)`、detach、reload/recover 替换原生页面和关闭均同步关闭已显示的 inspector；`devToolsResourceCount()` 统计尚未关闭的已显示 inspector，Windows 工具窗属于 Runtime，固定返回 0。网页上下文菜单仍被拒绝，因此启用开关不会额外打开“检查元素”入口。inspector 运行在同一主线程和引擎进程中，没有新增框架 worker、轮询或嵌套循环；`smoke-webview-linux` 与 `P01_PROBE=backend` 覆盖默认关闭、关闭时拒绝打开、显示/重复显示、禁用关闭、recover 保留 override、reload 清除 override 和最终计数归零，不建立人眼工具窗展示结论。
+
 ## Cookie、Profile 与页面工具
 
 `Options.tools` 的 `cookies`、`clear_entire_profile`、`find`、`capture`、`pdf` 全部默认 false，逐项显式开启。相应原生能力或所需 Runtime 接口不可用时返回 `UnsupportedCapability`。这些是宿主能力，不赋予页面 IPC 或额外导航/网络权限。
@@ -373,7 +383,7 @@ timeout 可省略，设定时范围 1 ms 到 10 分钟。每 View 惰性创建�
 
 `printToPdf(page_id, tools.PdfOptions, options, completion)` 使用 Runtime 的异步 PDF 文件输出，不调用系统打印机或打印对话框。宿主必须在自己的显式 worker 准备可信的私有绝对路径，调用时填写 `accept_overwrite = true`；UI 入口不 stat/read 文件，也不判定路径是否安全、是否已有内容。输出可覆盖该路径。路径最多 32766 UTF-16 单元，复制到本次请求；选定连续页范围最多 256 页，默认 1–16，支持横向和背景选项。成功返回 `Result.pdf_path`（借用输出路径），不是 PDF bytes。输出大小、磁盘空间、复杂页面排版与 Runtime 耗时没有硬预算；应用负责路径权限、并发写入及在 worker 检查产物。
 
-工具、JS、deferred resource、权限与待决下载共用一个惰性创建的 waitable timer，timeout 同为 1 ms 到 10 分钟。取消/超时只终结宿主回调，不撤回已写 Cookie、已执行的 Profile 清理、已提交截图编码或 PDF 写入；PDF 可能在逻辑终结后继续写目标。未完成的原生操作继续占有界 native pending 槽，直到真实 completion；Windows 真实完成先释放容量，允许回调内再次提交，Linux Find/capture 的物理引用时点见上文。PNG sink 和独立 COM 状态保留到原生 Release。页面作用域的查找/截图/PDF 在新页面、失效或重建时收到 `page_changed`，detach 为 `detached`，进程失败为 `unavailable`。批量清理先同时取出五类旧请求，再取消原生操作并运行任何业务回调，正常关闭不重新挂载计时器；重新 arm 失败则终结剩余请求并关闭提交入口，避免悬挂。已接受传输的下载没有持续 timer，进度由原生事件驱动。
+工具、JS、deferred resource、权限与待决下载共用一个惰性创建的 waitable timer，timeout 同为 1 ms 到 10 分钟。取消/超时只终结宿主回调，不撤回已写 Cookie、已执行的 Profile 清理、已提交截图编码或 PDF 写入；PDF 可能在逻辑终结后继续写目标。未完成的原生操作继续占有界 native pending 槽，直到真实 completion；Windows 真实完成先释放容量，允许回调内再次提交，Linux Find/capture/clear 的物理引用时点见上文。PNG sink 和独立 COM 状态保留到原生 Release。页面作用域的查找/截图/PDF 在新页面、失效或重建时收到 `page_changed`，detach 为 `detached`，进程失败为 `unavailable`。批量清理先同时取出五类旧请求，再取消原生操作并运行任何业务回调，正常关闭不重新挂载计时器；重新 arm 失败则终结剩余请求并关闭提交入口，避免悬挂。已接受传输的下载没有持续 timer，进度由原生事件驱动。
 
 真实 native C→Zig 回调以独立 App native callback scope 遮蔽被暂停的原始输入 receipt，结束后恢复外层输入上下文；普通 Region/Session 回调转发保持原权限。scope 先结束 attachment pin，再结束保存的 App pin，之后不读取可能已释放的 View/Session。CookieStore 的晚到完成/停止 teardown 也进入该边界。这不宣称 SDK 在 C ABI 返回后的任意 C-only 尾部都被包住；后续新 C→Zig 入口会独立建立边界。
 

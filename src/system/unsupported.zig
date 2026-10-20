@@ -83,6 +83,9 @@ pub const Tray = struct {
         return error.UnsupportedCapability;
     }
     pub fn remove(_: *Tray) !void {}
+    pub fn setMenu(_: *Tray, _: []const types.Item) !void {
+        return error.UnsupportedCapability;
+    }
     pub fn popupMenu(_: *Tray, _: u64, _: []const types.Item, _: types.TrayAnchor) !void {
         return error.UnsupportedCapability;
     }

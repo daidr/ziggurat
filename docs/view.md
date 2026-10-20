@@ -168,6 +168,38 @@ try timer.close();
 
 `view.Storage(nodes, text_bytes)` 是调用者拥有的固定存储，提供节点、文本副本、布局项与矩形缓冲。`text`、控件标签都会复制进存储，`textf` 直接格式化进存储，因此构建函数可以传入临时缓冲。超出容量返回 `TooManyNodes`、`TextFull`、`TooManyItems` 或 `NestingTooDeep`，容器不配对返回 `UnbalancedContainer`；绘制中的这些错误使本帧失败并保留上一帧。底层 Frame 的每帧上限（128 个控件、2048 条命令等）同样适用。
 
+### 树与表格
+
+两者都把选择交给应用持有的 `Selection`：它记录选中项的应用 ID（非零 `u64`，在集合内唯一），而不是位置，所以改名、排序或插入行都不会改变选择。`Selection.init(.single 或 .multiple, &storage)` 以调用者的缓冲为容量，`add` 超出容量返回 `SelectionFull`；`items()`、`contains`、`set`、`add`、`remove`、`clear` 可在构建之外直接调用。`anchor` 是 Shift 范围的起点，`cursor` 是焦点行，`version` 在每次改动时递增。
+
+- `tree(&selection, style)` 与 `end` 配对开始一棵树。`treeItem(id, expanded, label, style)` 打开一个以 `id` 为键的条目并加入它的行，返回 Enter 激活这一行的那一遍；子条目在它和对应的 `end` 之间构建，层级由嵌套决定。`expanded` 为 null 表示叶子；非 null 时行首画三角，按下三角只切换展开而不选择。应用只在 `expanded.*` 为 true 时构建子条目。
+- `table(columns, &sort, &selection, style)` 与 `end` 配对开始一个表格，先画一行列头，`Column` 给出标题、`Track`（默认 `fraction(1)`）和是否可排序。激活可排序的列头时 `sort` 变为该列升序，再次激活翻转方向；返回 true 的那一遍由应用按 `sort` 排列行。不可排序的列头不取焦点。`Style.gap` 是列间距，为 0 时取 8 DIP。
+- `tableRow(id, name, style)` 开始一行，`name` 是行的可访问名称（例如第一格），随后每列构建一个单元格，再 `end`。表头和所有行用同一组列宽：列宽在每次排列时由各列单元格（只计跨一列的）的最大内容尺寸统一求出，所以长文本不会让某一行错位。行放进 `scroll` 容器时表头保持不动。选中行以强调色填充，其中文本改用强调色上的前景色。
+- 行共享一个 Tab 停靠点，落在 `cursor` 行。Up/Down 移动并单选，Home/End 到首尾，PageUp/PageDown 按可见行数翻页；Ctrl+方向键只移动 `cursor`，Space 单选、Ctrl+Space 切换、Shift+方向键或 Shift+Space 从 `anchor` 选到当前行，Ctrl+Shift 把范围加入已有选择，Ctrl+A 全选（多选时）。树里 Right 展开折叠的条目，已展开时进入第一个子条目；Left 折叠展开的条目，否则回到父条目。指针按下同理：Ctrl 切换、Shift 选范围、Ctrl+Shift 追加范围。移动后的行以最小位移滚入外层滚动容器。
+- 行全部参与构建和排列，不做虚拟化；滚出可见区的行不绘制、也不登记命中（焦点行除外）。大量行请使用 `ziggurat_ui` 的虚拟列表。`treeItem`、`tableRow` 在各自容器之外调用返回 `NotContainer`。
+
+```zig
+try v.tree(&selection, .{ .name = "文件" });
+for (roots) |entry| {
+    _ = try v.treeItem(entry.id, if (entry.branch) &open[entry.id] else null, entry.name, .{});
+    if (entry.branch and open[entry.id]) try children(v, entry.id);
+    try v.end();
+}
+try v.end();
+```
+
+启用 `-Daccessibility=true` 时，Windows UIA 把树映射为 Tree / Selection，条目为 TreeItem / SelectionItem / ExpandCollapse（叶子报告 LeafNode）；表格为 DataGrid / Selection，表头为 Header，列头为 HeaderItem / Invoke，排序方向放在 ItemStatus（"ascending" 或 "descending"），行为 DataItem / SelectionItem。多选集合报告 CanSelectMultiple，AddToSelection 与 RemoveFromSelection 只改动该项。
+
+### 可编辑组合框与标记输入框
+
+- `editableComboBox(value, style)` 与 `end` 配对，开始一个带边框的组合字段，其中放文本输入（通常是 `ziggurat_view_text` 的 `TextField`，用 `.frame = false` 去掉它自己的边框），`end` 时在末尾自动加入展开按钮。紧随其后的 `suggestions` 列表锚定在整个字段上。列表在输入获得焦点时不打开，在选项因输入变化时打开；Down、Alt+Down 或 F4 打开同一组选项，Alt+Up、F4 或 Escape 关闭；按钮切换打开状态而焦点留在输入里。选中后列表关闭，焦点回到输入。
+- 输入法组合期间（`Embed.status` 报告 `composing`）列表隐藏，方向键、Enter 和 Escape 都留给输入法；组合结束后按选项是否变化恢复。
+- `tokenField(style)` 与 `end` 配对，开始一个会换行的标记输入框，其中依次构建 `token(label, style)`（用 `Style.key` 保持身份）和最后的文本输入。`token` 在其移除按钮被按下、或标记有焦点时按 Backspace/Delete 的那一遍返回 true，应用在这个分支里删掉它；之后焦点回到输入。输入为空时 Backspace 或 Left 把焦点移到最后一个标记；标记之间用 Left/Right、Home/End 移动，越过最后一个回到输入。标记在可用宽度内按行排列，窗口变窄时自动换行。
+
+`Embed.status(context)`（可选）报告嵌入输入是否正在组合、是否为空，供上面两种容器决定按键归属；`ziggurat_view_text` 的文本框已实现它。
+
+启用 `-Daccessibility=true` 时，Windows UIA 把可编辑组合框映射为 ComboBox / ExpandCollapse，展开按钮为不取焦点的 Button；标记输入框为 List（LocalizedControlType 为 "token field"），标记为 ListItem（"token"），各带一个名为 "Remove" 的按钮。
+
 ## 嵌入与文本输入
 
 `embed(content, style)` 加入一个自己测量、放置和绘制的叶子，用于视图层不建模的内容。`Embed` 提供：
@@ -176,6 +208,7 @@ try timer.close();
 - `place(context, id, bounds)`（可选）：每个成功的帧排列后调用一次，告知稳定的节点 ID 和窗口坐标边界。它在 paint 内运行，不能准备、分配或阻塞，需要的工作要推迟到输入阶段。
 - `paint(context, frame, id, bounds)`：在绘制顺序中的位置录制内容。
 - `annotate(context, annotation)`（可选）：每次 `paint` 前调用，传入外层表单字段的标签、说明、错误与必填状态；不在字段内时传空值。规则与 `place` 相同。
+- `status(context)`（可选）：返回 `EmbedStatus`（是否正在输入法组合、内容是否为空），在构建和路由按键时读取，不能分配或阻塞。
 
 `ziggurat_view_text` 用它提供可编辑文本字段。应用持有 `ziggurat_document_editor.Field` 及其 Document 和 Engine，并在 Host attach 后调用一次 `host.context.prepareTextFields(allocator, .{})`：
 
@@ -213,6 +246,7 @@ try h.change(.{ .kind = .slider }, .{ .steps = 2 });
 - `at(x, y)` 返回该点最后绘制的可交互节点，尊重裁剪；`clickAt` 激活它。`visible(node)` 给出裁剪后的可见矩形，`view.divider(node)` 给出分栏的分隔条矩形。
 - `write(writer)` 输出缩进的树大纲（种类、文本、名称、选中或数值、禁用、取整后的边界），适合与期望文本比较。
 - `Config` 提供窗口边界、主题和 `Options`（根样式与测量回调），`resize` 改变边界并重新渲染。
+- 树和表格的行：`click` 按下行的右端并单选，`clickWith(query, modifiers)` 带 Ctrl/Shift 按下，`toggleExpanded(query)` 按下树行的三角；`removeToken(query)` 按下标记的移除按钮。`click` 也接受列头、标记和组合框的展开按钮。`write` 的大纲带出行的层级、展开、选中与焦点行，以及列头的排序方向。
 
 - `attachInput(&context)` 把之后每次渲染记录进一个未连接窗口的 `ui.Context`，`key(KeyInput)` 按窗口相同的顺序路由按键：快捷键、Tab、范围键、分组方向键、空间方向键、Home/End，最后是 Enter/Space 激活。产生的动作或数值变化交给构建函数，随后重新渲染；返回值表示是否有控件处理该键。`focused()` 返回当前焦点节点。Context 由测试持有，不能已连接窗口。
 
@@ -230,4 +264,4 @@ Harness 把嵌入叶子当作不可交互的节点，不验证原生命中、文
 
 ## 当前范围
 
-已提供列、行、网格、纵向滚动容器、标签页、分栏、工具栏、分段控件、折叠区、手风琴、面包屑、列表框、组合框、建议列表、搜索区域、表单字段与字段集、链接、徽标、度量条、评分、导航按钮、头像、提示、通知、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子和（通过 `ziggurat_view_text`）可编辑文本字段。分栏只接受比例偏好，没有 DIP 偏好、从右到左布局和折叠；工具栏没有溢出菜单。组合框不可编辑、不按输入筛选；建议列表的筛选由应用完成；悬停只用于提示，控件本身没有悬停外观；通知没有进出动画。没有虚拟列表、多选列表、标记输入框和动画；需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。Linux 没有普通控件的 AT-SPI 层，上述可访问性只在 Windows UIA 上提供。
+已提供列、行、网格、纵向滚动容器、标签页、分栏、工具栏、分段控件、折叠区、手风琴、面包屑、列表框、树、表格、组合框、可编辑组合框、建议列表、标记输入框、搜索区域、表单字段与字段集、链接、徽标、度量条、评分、导航按钮、头像、提示、通知、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子和（通过 `ziggurat_view_text`）可编辑文本字段。分栏只接受比例偏好，没有 DIP 偏好、从右到左布局和折叠；工具栏没有溢出菜单。只读组合框不按输入筛选；建议列表与可编辑组合框的筛选由应用完成；表格没有列宽拖动、列重排、冻结列和行头，排序由应用完成；树与表格不做虚拟化，也没有拖放和行内编辑；悬停只用于提示，控件本身没有悬停外观；通知没有进出动画。没有虚拟列表和动画；需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。Linux 没有普通控件的 AT-SPI 层，上述可访问性只在 Windows UIA 上提供。

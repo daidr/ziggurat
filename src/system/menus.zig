@@ -203,6 +203,35 @@ pub fn gtkMnemonic(destination: []u8, label: []const u8) ![:0]const u8 {
     return destination[0..used :0];
 }
 
+/// An owned copy of a menu, for menus a platform opens later on its own,
+/// such as a tray item's menu after a click. Labels are copied into fixed
+/// storage, so the caller's slice is free once `set` returns.
+pub const Snapshot = struct {
+    items: [max_items]types.Item = undefined,
+    text: [max_items * 256]u8 = undefined,
+    count: usize = 0,
+
+    /// Replaces the copy; an empty slice clears it. A failed call keeps the
+    /// previous copy.
+    pub fn set(self: *Snapshot, items: []const types.Item) !void {
+        _ = try validate(items, false);
+        var needed: usize = 0;
+        for (items) |item| needed += item.label.len;
+        if (needed > self.text.len) return error.TextCapacityExceeded;
+        var used: usize = 0;
+        for (items, 0..) |item, index| {
+            @memcpy(self.text[used..][0..item.label.len], item.label);
+            self.items[index] = item;
+            self.items[index].label = self.text[used..][0..item.label.len];
+            used += item.label.len;
+        }
+        self.count = items.len;
+    }
+    pub fn slice(self: *const Snapshot) []const types.Item {
+        return self.items[0..self.count];
+    }
+};
+
 /// Validates the button set and the default/cancel indices of a message.
 pub fn validateMessage(options: types.MessageOptions) !void {
     if (options.buttons.len == 0 or options.buttons.len > types.max_message_buttons) return error.InvalidMessageButtons;
@@ -295,6 +324,20 @@ test "ampersand mnemonics translate to GTK underscores" {
     try testing.expectEqualStrings("snake__case", try gtkMnemonic(&buffer, "snake_case"));
     try testing.expectEqualStrings("End", try gtkMnemonic(&buffer, "End&"));
     try testing.expectError(error.TextCapacityExceeded, gtkMnemonic(buffer[0..4], "____"));
+}
+
+test "menu snapshots own their labels and keep the old copy on failure" {
+    var snapshot: Snapshot = .{};
+    var label = "&Show".*;
+    try snapshot.set(&.{ .{ .id = 1, .label = &label }, .{ .kind = .separator }, .{ .id = 2, .label = "Quit", .checked = true } });
+    label[1] = 'X';
+    try testing.expectEqual(3, snapshot.slice().len);
+    try testing.expectEqualStrings("&Show", snapshot.slice()[0].label);
+    try testing.expect(snapshot.slice()[2].checked);
+    try testing.expectError(error.DuplicateMenuId, snapshot.set(&.{ .{ .id = 1, .label = "A" }, .{ .id = 1, .label = "B" } }));
+    try testing.expectEqualStrings("Quit", snapshot.slice()[2].label);
+    try snapshot.set(&.{});
+    try testing.expectEqual(0, snapshot.slice().len);
 }
 
 test "message options are bounded and indices checked" {

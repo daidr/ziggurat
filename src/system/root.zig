@@ -25,10 +25,13 @@ pub const Owner = if (windows) @import("windows.zig").Owner else if (linux) @imp
 /// An App-level notification-area item independent of any window.
 pub const Tray = if (windows) @import("windows_tray.zig").Tray else if (linux) @import("linux.zig").Tray else @import("unsupported.zig").Tray;
 pub const clipboard = @import("clipboard.zig");
+pub const drop = @import("drop.zig");
 pub const picker = @import("picker.zig");
 pub const message = if (linux) @import("linux.zig").message else @import("message.zig");
 pub const menus = @import("menus.zig");
 pub const shell = @import("shell.zig");
+pub const desktop = @import("desktop.zig");
+pub const watch = @import("watch.zig");
 pub const capabilities = .{
     .native_menu = windows or linux,
     .menu_accelerators = windows or linux,
@@ -37,8 +40,12 @@ pub const capabilities = .{
     .tray = windows or linux,
     .standalone_tray = windows or linux,
     .clipboard_text = windows,
+    .clipboard = clipboard.capabilities,
+    .drop = drop.capabilities,
     .async_file_dialog = windows or linux,
     .global_hotkeys = windows or linux,
     .notification_area = windows or linux,
     .shell = shell.capabilities,
+    .desktop = desktop.capabilities,
+    .file_watch = builtin.os.tag == .windows or builtin.os.tag == .linux,
 };

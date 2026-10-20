@@ -83,3 +83,24 @@ test "native gesture ownership, capability, failure and modal policy are checked
     try std.testing.expect(!(try owner.capabilities()).transparent and !(try owner.capabilities()).backdrop_material);
     _ = try owner.destroy();
 }
+test "backdrop material is capability gated, update guarded and failure reported without state" {
+    const app = try z.App.init(std.testing.allocator);
+    defer app.deinit();
+    const window = try app.createWindow(.{});
+    const record = app.windows.get(window.key).?;
+    try std.testing.expectError(error.UnsupportedCapability, window.setBackdrop(.mica));
+    try std.testing.expectEqual(z.WindowBackdrop.system, record.native.backdrop);
+    record.native.caps.backdrop_material = true;
+    try window.setBackdrop(.acrylic);
+    try std.testing.expectEqual(z.WindowBackdrop.acrylic, record.native.backdrop);
+    app.native.fail_update = true;
+    try std.testing.expectError(error.WindowUpdateFailed, window.setBackdrop(.none));
+    try std.testing.expectEqual(z.WindowBackdrop.acrylic, record.native.backdrop);
+    try std.testing.expectEqual(@as(u32, 5), app.last_native_error);
+    record.window_update_busy = true;
+    try std.testing.expectError(error.Busy, window.setBackdrop(.system));
+    record.window_update_busy = false;
+    try window.setBackdrop(.system);
+    _ = try window.destroy();
+    try std.testing.expectError(error.Closed, window.setBackdrop(.mica));
+}

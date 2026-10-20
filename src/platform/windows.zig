@@ -496,8 +496,40 @@ pub fn state(window: *core.WindowRecord) core.WindowState {
     const topmost = c.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE) & c.WS_EX_TOPMOST != 0;
     return .{ .visible = c.IsWindowVisible(hwnd) != 0, .minimized = c.IsIconic(hwnd) != 0, .maximized = c.IsZoomed(hwnd) != 0, .focused = c.GetFocus() == hwnd, .enabled = c.IsWindowEnabled(hwnd) != 0, .fullscreen = window.native.fullscreen, .fullscreen_requested = window.native.fullscreen, .always_on_top = topmost, .always_on_top_requested = topmost };
 }
-pub fn capabilities(_: *core.WindowRecord) core.WindowCapabilities {
-    return .{ .client_position = true, .fullscreen = true, .always_on_top = true, .owned_windows = true, .modal_windows = true, .custom_decoration = true, .native_move_resize = true, .system_menu = true };
+pub fn capabilities(window: *core.WindowRecord) core.WindowCapabilities {
+    return .{ .client_position = true, .fullscreen = true, .always_on_top = true, .owned_windows = true, .modal_windows = true, .custom_decoration = true, .native_move_resize = true, .system_menu = true, .backdrop_material = window.options.decoration == .system and systemBackdropAvailable() };
+}
+extern "dwmapi" fn DwmSetWindowAttribute(c.HWND, u32, *const anyopaque, u32) callconv(.winapi) c.HRESULT;
+const dwm_system_backdrop_type = 38;
+/// DWMWA_SYSTEMBACKDROP_TYPE is accepted from Windows 11 build 22621. The
+/// version is read once per process; RtlGetVersion is not manifest-shimmed.
+fn systemBackdropAvailable() bool {
+    const Cache = struct {
+        var value: std.atomic.Value(u8) = .init(0);
+    };
+    const cached = Cache.value.load(.acquire);
+    if (cached != 0) return cached == 2;
+    var info: std.os.windows.RTL_OSVERSIONINFOW = undefined;
+    info.dwOSVersionInfoSize = @sizeOf(std.os.windows.RTL_OSVERSIONINFOW);
+    const available = std.os.windows.ntdll.RtlGetVersion(&info) == .SUCCESS and (info.dwMajorVersion > 10 or (info.dwMajorVersion == 10 and info.dwBuildNumber >= 22621));
+    Cache.value.store(if (available) 2 else 1, .release);
+    return available;
+}
+pub fn setBackdrop(window: *core.WindowRecord, material: core.WindowBackdrop) !void {
+    const hwnd = window.native.hwnd;
+    const value: u32 = switch (material) {
+        .system => 0,
+        .none => 1,
+        .mica => 2,
+        .acrylic => 3,
+        .mica_alt => 4,
+    };
+    const hr = DwmSetWindowAttribute(hwnd, dwm_system_backdrop_type, &value, @sizeOf(u32));
+    if (!sameWindow(window, hwnd)) return error.Closed;
+    if (hr < 0) {
+        window.window.app.captureNativeFailure(.hresult, @bitCast(hr));
+        return error.WindowUpdateFailed;
+    }
 }
 fn nativeIdentity(hwnd: c.HWND, identity: usize) bool {
     return c.IsWindow(hwnd) != 0 and @intFromPtr(c.GetPropW(hwnd, identity_property)) == identity;
