@@ -605,8 +605,8 @@ const Grid = struct {
                 self.hover = null;
                 return true;
             },
-            .pointer_down => |point| {
-                const index = self.cellAt(point) orelse return true;
+            .pointer_down => |press| {
+                const index = self.cellAt(press.position) orelse return true;
                 const day = self.dayOf(index);
                 self.owner().cursor = day.clamp(self.minimum, self.maximum);
                 if (self.choosable(day)) self.pending = day;
@@ -633,6 +633,7 @@ const Grid = struct {
                 }
                 return true;
             },
+            else => return false,
         }
     }
 };
@@ -891,8 +892,8 @@ const TimeLeaf = struct {
     fn input(ptr: *anyopaque, _: u64, event: view.EmbedInput) bool {
         const self: *TimeLeaf = @ptrCast(@alignCast(ptr));
         switch (event) {
-            .pointer_down => |point| {
-                for (0..self.count) |index| if (contains(self.segmentRect(index), point)) {
+            .pointer_down => |press| {
+                for (0..self.count) |index| if (contains(self.segmentRect(index), press.position)) {
                     self.active = index;
                     self.typed_len = 0;
                 };
@@ -1409,7 +1410,10 @@ const Square = struct {
         const self: *Square = @ptrCast(@alignCast(ptr));
         var next = self.pending orelse self.hsva;
         switch (event) {
-            .pointer_down => |point| {
+            // A press picks the point under it, and the captured drag
+            // follows the pointer, held to the square's edges.
+            .pointer_down, .pointer_drag => {
+                const point = if (event == .pointer_down) event.pointer_down.position else event.pointer_drag.position;
                 // The square's size is the leaf's; input points are local.
                 if (self.width <= 0 or self.height <= 0) return true;
                 next.s = std.math.clamp(point.x / self.width, 0, 1);

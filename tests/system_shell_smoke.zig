@@ -69,12 +69,7 @@ const Probe = struct {
             try std.testing.expectEqual(if (builtin.os.tag == .windows) shell.Term{ .Exited = 1 } else shell.Term{ .Signal = std.posix.SIG.KILL }, stopped);
             try std.testing.expectEqual(stopped, try held.wait());
         }
-        const after_children = try handles();
-        if (after_children != baseline) std.debug.print("process handles: before={d}, after={d}\n", .{ baseline, after_children });
-        // Windows shell work just before this loop leaves pool threads that
-        // can retire meanwhile and lower the count; a leaked child or thread
-        // handle still raises it.
-        if (builtin.os.tag == .windows) try std.testing.expect(after_children <= baseline) else try std.testing.expectEqual(baseline, after_children);
+        try expectHandles("process", baseline, 12);
         var pixels: [32 * 32 * 4]u8 = @splat(0x6b);
         if (builtin.os.tag == .windows) {
             try std.testing.expectError(error.ResultCapacityExceeded, worker.fileIcon(self.executable, .{}, pixels[0..4]));
@@ -96,7 +91,7 @@ const Probe = struct {
                 }
                 try std.testing.expect(differing);
             }
-            try std.testing.expectEqual(native_handles, try handles());
+            try expectHandles("icon", native_handles, 12);
             try std.testing.expectEqual(gdi, c.GetGuiResources(c.GetCurrentProcess(), c.GR_GDIOBJECTS));
         } else try std.testing.expectError(error.UnsupportedCapability, worker.fileIcon(self.executable, .{}, &pixels));
         const missing = try std.fs.path.join(std.heap.page_allocator, &.{ self.cwd, "missing.exe" });
@@ -109,9 +104,9 @@ const Probe = struct {
                 _ = try unexpected.terminateAndWait();
             } else |_| failed = true;
             try std.testing.expect(failed);
-            const count = try handles();
-            if (failure_baseline) |expected| try std.testing.expectEqual(expected, count) else failure_baseline = count;
+            if (failure_baseline == null) failure_baseline = try handles();
         }
+        try expectHandles("failed launch", failure_baseline.?, 12);
         worker.deinit();
         try std.testing.expectError(error.Closed, worker.launchExecutable(std.heap.page_allocator, .{ .executable = self.executable }));
         try std.testing.expectError(error.Closed, worker.openUrl("https://example.invalid/", .{}));
@@ -293,6 +288,16 @@ const Affinity = struct {
         };
     }
 };
+/// Windows grows and shrinks process-owned handles on its own (shell pool
+/// threads, loader and registry caches) by a run-dependent amount, so an
+/// exact count is not stable there. A handle leaked per call still grows the
+/// count by at least `calls`. Other systems keep the exact count.
+fn expectHandles(label: []const u8, baseline: usize, calls: usize) !void {
+    const count = try handles();
+    if (count != baseline) std.debug.print("{s} handles: before={d}, after={d}\n", .{ label, baseline, count });
+    if (builtin.os.tag != .windows) return std.testing.expectEqual(baseline, count);
+    if (count >= baseline + calls) return error.HandleLeak;
+}
 fn handles() !usize {
     if (builtin.os.tag == .windows) {
         var count: c.DWORD = 0;

@@ -22,7 +22,11 @@ concurrency:
 
 jobs:
   windows:
-    runs-on: windows-2022
+    # Self-hosted Windows x64 runner with PowerShell 7, Python 3 and tar on
+    # PATH, running in an interactive desktop session. The repository variable
+    # WINDOWS_RUNS_ON overrides the labels with a JSON value, for example
+    # '"windows-2022"' to return to a hosted runner.
+    runs-on: ${{ fromJSON(vars.WINDOWS_RUNS_ON || '["self-hosted", "windows", "x64"]') }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -39,19 +43,17 @@ jobs:
       - name: Install verified Zig 0.15.2
         run: |
           $ErrorActionPreference = 'Stop'
-          $archive = Join-Path $env:RUNNER_TEMP 'zig-0.15.2.zip'
-          Invoke-WebRequest 'https://ziglang.org/download/0.15.2/zig-x86_64-windows-0.15.2.zip' -OutFile $archive
-          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine '3a0ed1e8799a2f8ce2a6e6290a9ff22e6906f8227865911fb7ddedc3cc14cb0c') { throw 'Zig archive checksum mismatch.' }
-          Expand-Archive -LiteralPath $archive -DestinationPath $env:RUNNER_TEMP
-          $bin = Join-Path $env:RUNNER_TEMP 'zig-x86_64-windows-0.15.2'
-          if ((& (Join-Path $bin 'zig.exe') version) -cne '0.15.2') { throw 'Wrong Zig version.' }
-          $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          foreach ($tool in 'python', 'tar') {
+            if (!(Get-Command $tool -ErrorAction SilentlyContinue)) { throw "The Windows runner needs $tool on PATH." }
+          }
+          $zig = ./scripts/fetch-zig-windows.ps1
+          Split-Path -Parent $zig | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Format, compile, unit and native integration checks
         run: |
           zig fmt --check build.zig build_support src examples tests tools
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/test-native-header-cache.ps1
-          zig build test check update-tool smoke smoke-lifecycle smoke-window-registry smoke-app-stop smoke-composition smoke-composition-ui smoke-window-state smoke-window-relationships smoke-window-chrome smoke-key-input smoke-pointer-press smoke-pointer-focus smoke-pointer-clicks smoke-pointer-accessibility smoke-drawing smoke-gradients smoke-gradient-analytic smoke-conic-gradients smoke-gradient-interpolation smoke-coverage smoke-layers smoke-offscreen smoke-gaussian smoke-gaussian-scope smoke-document-fields smoke-svg smoke-svg-text smoke-svg-image smoke-text-layout smoke-text-layout-capture smoke-text-words smoke-text-words-fault smoke-text-clusters smoke-text-outlines smoke-text-cells smoke-text-drawing smoke-shaped-editor smoke-shaped-editor-native smoke-editor-caret smoke-editor-line-backgrounds smoke-editor-pre-input smoke-editor-range-markers smoke-text-input-mode smoke-text-client smoke-document smoke-document-editor smoke-code-editor smoke-document-diff-view smoke-virtual-list smoke-images smoke-image-prepare smoke-image-drawing smoke-image-update smoke-diagnostics smoke-waitables smoke-damage smoke-wake smoke-animation-ui smoke-affine-renderer smoke-affine-ui smoke-affine-document smoke-affine-text-binding smoke-affine-document-diff smoke-affine-diff-controls smoke-document-provider smoke-document-point-latch smoke-document-accessibility smoke-document-diff-accessibility smoke-document-geometry smoke-window-placement smoke-snippets smoke-native-reentry smoke-ime-cancel smoke-editor smoke-editor-routing smoke-packaging smoke-ui-config smoke-system smoke-system-events smoke-system-menus smoke-shell smoke-file-watch smoke-clipboard smoke-drop smoke-desktop smoke-widgets smoke-widget-ranges smoke-theme smoke-view smoke-view-text smoke-chart smoke-view-pickers smoke-picker smoke-picker-result smoke-secrets smoke-flyout smoke-cleanup smoke-audio -Daccessibility=true -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
+          zig build test check update-tool smoke smoke-lifecycle smoke-window-registry smoke-app-stop smoke-composition smoke-composition-ui smoke-window-state smoke-window-relationships smoke-window-chrome smoke-key-input smoke-pointer-press smoke-pointer-focus smoke-pointer-clicks smoke-pointer-accessibility smoke-drawing smoke-gradients smoke-gradient-analytic smoke-conic-gradients smoke-gradient-interpolation smoke-coverage smoke-layers smoke-offscreen smoke-gaussian smoke-gaussian-scope smoke-document-fields smoke-svg smoke-svg-text smoke-svg-image smoke-text-layout smoke-text-layout-capture smoke-text-words smoke-text-words-fault smoke-text-clusters smoke-text-outlines smoke-text-cells smoke-text-drawing smoke-shaped-editor smoke-shaped-editor-native smoke-editor-caret smoke-editor-line-backgrounds smoke-editor-pre-input smoke-editor-range-markers smoke-text-input-mode smoke-text-client smoke-document smoke-document-editor smoke-code-editor smoke-document-diff-view smoke-virtual-list smoke-images smoke-image-prepare smoke-image-drawing smoke-image-update smoke-diagnostics smoke-waitables smoke-damage smoke-wake smoke-animation-ui smoke-affine-renderer smoke-affine-ui smoke-affine-document smoke-affine-text-binding smoke-affine-document-diff smoke-affine-diff-controls smoke-document-provider smoke-document-point-latch smoke-document-accessibility smoke-document-diff-accessibility smoke-document-geometry smoke-window-placement smoke-snippets smoke-native-reentry smoke-ime-cancel smoke-editor smoke-editor-routing smoke-packaging smoke-ui-config smoke-system smoke-system-events smoke-system-menus smoke-shell smoke-file-watch smoke-clipboard smoke-drop smoke-desktop smoke-widgets smoke-widget-ranges smoke-theme smoke-backdrop smoke-view smoke-view-text smoke-chart smoke-terminal smoke-view-pickers smoke-picker smoke-picker-result smoke-secrets smoke-flyout smoke-cleanup smoke-audio -Daccessibility=true -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           zig build smoke-accessibility -Daccessibility=true -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -91,7 +93,10 @@ jobs:
           retention-days: 7
 
   linux:
-    runs-on: ubuntu-24.04
+    # Self-hosted Linux runner (Debian/Ubuntu with apt). The repository variable
+    # LINUX_RUNS_ON overrides the labels with a JSON value, for example
+    # '"ubuntu-24.04"' to return to a hosted runner.
+    runs-on: ${{ fromJSON(vars.LINUX_RUNS_ON || '["self-hosted", "linux", "x64"]') }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -104,8 +109,7 @@ jobs:
           persist-credentials: false
       - name: Native GTK/Pango dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y libgtk-3-dev libpango1.0-dev libicu-dev pkg-config xvfb xauth openbox x11-utils libxtst6 libatspi2.0-dev at-spi2-core dbus-x11 fonts-dejavu-core fonts-noto-cjk
+          sh scripts/ci-linux-deps.sh ca-certificates curl xz-utils python3 libgtk-3-dev libpango1.0-dev libicu-dev pkg-config xvfb xauth openbox x11-utils libxtst6 libatspi2.0-dev at-spi2-core dbus-x11 fonts-dejavu-core fonts-noto-cjk
       - name: Install verified Zig 0.15.2
         run: |
           zig_bin=$(sh scripts/fetch-zig-linux.sh)
@@ -129,13 +133,14 @@ jobs:
           bash scripts/test-profile-storage.sh -Doptimize=${{ matrix.optimize }}
           xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-language-protocol smoke-language-protocol-shutdown smoke-completion-resolve smoke-completion-details smoke-diff-caret smoke-diff-commands smoke-diff-find -Doptimize=${{ matrix.optimize }}
           xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-text-layout smoke-text-layout-capture smoke-text-words smoke-text-words-fault smoke-text-clusters smoke-text-outlines smoke-text-cells smoke-text-drawing smoke-shaped-editor smoke-images smoke-image-prepare smoke-image-drawing smoke-image-update smoke-shell smoke-file-watch smoke-clipboard smoke-drop smoke-desktop -Doptimize=${{ matrix.optimize }}
-          xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-linux smoke-system-menus test-pointer-gtk smoke-pointer-core-linux smoke-pointer-clicks smoke-content-host smoke-damage smoke-wake smoke-animation-ui smoke-window-registry smoke-app-stop smoke-composition smoke-composition-ui smoke-key-input smoke-widgets smoke-widget-ranges smoke-theme smoke-view smoke-view-text smoke-chart smoke-view-pickers smoke-affine-renderer smoke-affine-ui smoke-affine-document smoke-affine-text-binding smoke-affine-document-diff smoke-document-geometry smoke-snippets smoke-drawing smoke-gradients smoke-gradient-analytic smoke-conic-gradients smoke-gradient-interpolation smoke-coverage smoke-layers smoke-offscreen smoke-gaussian smoke-gaussian-scope smoke-document-fields smoke-svg smoke-svg-text smoke-svg-image smoke-shaped-editor-native smoke-editor-caret smoke-editor-line-backgrounds smoke-editor-pre-input smoke-editor-range-markers smoke-text-input-mode smoke-text-client smoke-document smoke-document-editor smoke-code-editor smoke-document-diff-view smoke-virtual-list smoke-desktop smoke-flyout -Doptimize=${{ matrix.optimize }}
-          GDK_SCALE=2 xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-linux smoke-system-menus test-pointer-gtk smoke-pointer-core-linux smoke-pointer-clicks smoke-content-host smoke-damage smoke-wake smoke-animation-ui smoke-window-registry smoke-app-stop smoke-composition smoke-composition-ui smoke-key-input smoke-widgets smoke-widget-ranges smoke-theme smoke-view smoke-view-text smoke-chart smoke-view-pickers smoke-affine-renderer smoke-affine-ui smoke-affine-document smoke-affine-text-binding smoke-affine-document-diff smoke-document-geometry smoke-snippets smoke-drawing smoke-gradients smoke-gradient-analytic smoke-conic-gradients smoke-gradient-interpolation smoke-coverage smoke-layers smoke-offscreen smoke-gaussian smoke-gaussian-scope smoke-document-fields smoke-svg smoke-svg-text smoke-svg-image smoke-shaped-editor-native smoke-editor-caret smoke-editor-line-backgrounds smoke-editor-pre-input smoke-editor-range-markers smoke-text-input-mode smoke-text-client smoke-document smoke-document-editor smoke-code-editor smoke-document-diff-view smoke-virtual-list smoke-desktop smoke-flyout -Doptimize=${{ matrix.optimize }}
+          xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-linux smoke-system-menus test-pointer-gtk smoke-pointer-core-linux smoke-pointer-clicks smoke-content-host smoke-damage smoke-wake smoke-animation-ui smoke-window-registry smoke-app-stop smoke-composition smoke-composition-ui smoke-key-input smoke-widgets smoke-widget-ranges smoke-theme smoke-backdrop smoke-view smoke-view-text smoke-chart smoke-terminal smoke-view-pickers smoke-affine-renderer smoke-affine-ui smoke-affine-document smoke-affine-text-binding smoke-affine-document-diff smoke-document-geometry smoke-snippets smoke-drawing smoke-gradients smoke-gradient-analytic smoke-conic-gradients smoke-gradient-interpolation smoke-coverage smoke-layers smoke-offscreen smoke-gaussian smoke-gaussian-scope smoke-document-fields smoke-svg smoke-svg-text smoke-svg-image smoke-shaped-editor-native smoke-editor-caret smoke-editor-line-backgrounds smoke-editor-pre-input smoke-editor-range-markers smoke-text-input-mode smoke-text-client smoke-document smoke-document-editor smoke-code-editor smoke-document-diff-view smoke-virtual-list smoke-desktop smoke-flyout -Doptimize=${{ matrix.optimize }}
+          GDK_SCALE=2 xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-linux smoke-system-menus test-pointer-gtk smoke-pointer-core-linux smoke-pointer-clicks smoke-content-host smoke-damage smoke-wake smoke-animation-ui smoke-window-registry smoke-app-stop smoke-composition smoke-composition-ui smoke-key-input smoke-widgets smoke-widget-ranges smoke-theme smoke-backdrop smoke-view smoke-view-text smoke-chart smoke-terminal smoke-view-pickers smoke-affine-renderer smoke-affine-ui smoke-affine-document smoke-affine-text-binding smoke-affine-document-diff smoke-document-geometry smoke-snippets smoke-drawing smoke-gradients smoke-gradient-analytic smoke-conic-gradients smoke-gradient-interpolation smoke-coverage smoke-layers smoke-offscreen smoke-gaussian smoke-gaussian-scope smoke-document-fields smoke-svg smoke-svg-text smoke-svg-image smoke-shaped-editor-native smoke-editor-caret smoke-editor-line-backgrounds smoke-editor-pre-input smoke-editor-range-markers smoke-text-input-mode smoke-text-client smoke-document smoke-document-editor smoke-code-editor smoke-document-diff-view smoke-virtual-list smoke-desktop smoke-flyout -Doptimize=${{ matrix.optimize }}
           XDG_RUNTIME_DIR=$(mktemp -d) NO_AT_BRIDGE=1 dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-system-desktop -Doptimize=${{ matrix.optimize }}
           GDK_SCALE=2 XDG_RUNTIME_DIR=$(mktemp -d) NO_AT_BRIDGE=1 dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-system-desktop -Doptimize=${{ matrix.optimize }}
-          # A runner with GNOME Keyring round-trips real secrets; one without a
-          # Secret Service must report CredentialStoreUnavailable everywhere.
-          XDG_RUNTIME_DIR=$(mktemp -d) NO_AT_BRIDGE=1 dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24' sh -c 'if command -v gnome-keyring-daemon >/dev/null; then printf ziggurat | gnome-keyring-daemon --unlock --components=secrets >/dev/null && exec zig build smoke-secrets -Doptimize=${{ matrix.optimize }} -- --require-store; fi; exec zig build smoke-secrets -Doptimize=${{ matrix.optimize }}'
+          # A runner with GNOME Keyring round-trips real secrets in a fresh
+          # keyring; one without a Secret Service must report
+          # CredentialStoreUnavailable everywhere.
+          XDG_DATA_HOME=$(mktemp -d) XDG_RUNTIME_DIR=$(mktemp -d) NO_AT_BRIDGE=1 dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24' sh -c 'if command -v gnome-keyring-daemon >/dev/null; then printf ziggurat | gnome-keyring-daemon --unlock --components=secrets >/dev/null && exec zig build smoke-secrets -Doptimize=${{ matrix.optimize }} -- --require-store; fi; exec zig build smoke-secrets -Doptimize=${{ matrix.optimize }}'
           bash scripts/linux-window-state.sh -Doptimize=${{ matrix.optimize }}
           GDK_SCALE=2 bash scripts/linux-window-state.sh -Doptimize=${{ matrix.optimize }}
       - name: Setup program, launcher and Debian package checks
@@ -153,8 +158,7 @@ jobs:
       - name: Optional WebKitGTK lifecycle and policy checks
         if: github.event_name == 'workflow_dispatch' && inputs.webview
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y libwebkit2gtk-4.1-dev glib-networking dbus-x11 libcurl4-openssl-dev
+          sh scripts/ci-linux-deps.sh libwebkit2gtk-4.1-dev glib-networking dbus-x11 libcurl4-openssl-dev
           export ZIG_BIN="$(command -v zig)"
           export P01_OPTIMIZE=${{ matrix.optimize }}
           zig build test-https-resources -Dhttps-resources=true -Doptimize=${{ matrix.optimize }}
@@ -219,7 +223,8 @@ jobs:
 
   webview:
     if: github.event_name == 'workflow_dispatch' && inputs.webview
-    runs-on: windows-2022
+    # Also needs Node.js and an installed WebView2 Runtime on the runner.
+    runs-on: ${{ fromJSON(vars.WINDOWS_RUNS_ON || '["self-hosted", "windows", "x64"]') }}
     timeout-minutes: 20
     defaults:
       run:
@@ -230,11 +235,9 @@ jobs:
           persist-credentials: false
       - name: Install verified Zig 0.15.2 and SDK
         run: |
-          $archive = Join-Path $env:RUNNER_TEMP 'zig-0.15.2.zip'
-          Invoke-WebRequest 'https://ziglang.org/download/0.15.2/zig-x86_64-windows-0.15.2.zip' -OutFile $archive
-          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine '3a0ed1e8799a2f8ce2a6e6290a9ff22e6906f8227865911fb7ddedc3cc14cb0c') { throw 'Zig archive checksum mismatch.' }
-          Expand-Archive -LiteralPath $archive -DestinationPath $env:RUNNER_TEMP
-          (Join-Path $env:RUNNER_TEMP 'zig-x86_64-windows-0.15.2') | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $ErrorActionPreference = 'Stop'
+          $zig = ./scripts/fetch-zig-windows.ps1
+          Split-Path -Parent $zig | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           ./scripts/fetch-webview2.ps1
       - name: Install verified Bun 1.3.5
         run: |
