@@ -254,7 +254,7 @@ P01 的 Linux HTTPS 本地来源分两片实施。首片由宿主提供已运行
 | E02 | 首片完成 | Fetch 与 WebSocket | 显式 transport/worker、取消/背压/大小限制、TLS/断线、类型化客户端；依赖 E01/I01 |
 | E03 | 首片完成 | SQLite | 已有可选 `ziggurat_sqlite`：脚本拉取并校验固定 amalgamation，连接、预处理语句、类型化绑定、借用行读取、事务/savepoint、`user_version` 迁移、`interrupt` 取消与 `ui_thread` 主线程拒绝，`test-sqlite` 在 Windows/Linux CI 运行，见[SQLite](sqlite.md)；在线备份、增量 BLOB I/O、自定义函数与加密待实现 |
 | E04 | 待实现 | PTY 与终端视图 | 子进程/终端解析、输入/resize/流控/退出和回收；依赖 E01/T01/G01 |
-| E05 | 待实现 | game loop、camera、gamepad 与材质扩展 | 显式启停时钟、输入热插拔、帧/功耗预算与平台能力；依赖 E01/G02 |
+| E05 | 部分完成 | game loop、camera、gamepad 与材质扩展（[game.md](game.md)：固定步长循环、相机、整数缩放、XInput/evdev 手柄已完成；画布纹理、材质扩展待实现） | 显式启停时钟、输入热插拔、帧/功耗预算与平台能力；依赖 E01/G02 |
 | E06 | 首片完成 | backdrop blur、glass 与滚动边缘合成 | 已有 `Frame.backdropEffect`：均匀/渐变模糊、玻璃（regular/clear、tint、颗粒、弧面折射、亮度映射、边光）与柔和/硬滚动边缘，在 GDI/Cairo 软件平面采样，含效果的帧在 D3D11 下整帧软件回放；显式工作区预算与超限后备、减少透明度/高对比不透明后备；另有 29 种由显式相位驱动的加载动画与视图层 `Style.material`/`Style.edges`/`loadingIndicator`，见[背景效果与加载动画](backdrop-effects.md)；GPU 背景采样与按压动效待实现 |
 
 E04 继续分项实施，均为待实现，不由PTY或静态终端绘制单独代表完成：

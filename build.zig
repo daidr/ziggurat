@@ -2489,6 +2489,15 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_chart", .module = chart },
             .{ .name = "ziggurat_chart_view", .module = chart_view },
         });
+        const game = b.addModule("ziggurat_game", .{ .root_source_file = b.path("src/game/root.zig"), .target = target, .optimize = optimize, .imports = &.{
+            .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_view", .module = declarative_view },
+        } });
+        const game_tests = b.addTest(.{ .root_module = game });
+        check.dependOn(&game_tests.step);
+        const run_game_tests = b.addRunArtifact(game_tests);
+        test_step.dependOn(&run_game_tests.step);
+        b.step("test-game", "Run game loop, camera, scaling and gamepad tests").dependOn(&run_game_tests.step);
     }
     addExamples(b, target, optimize);
 }
@@ -2498,7 +2507,7 @@ const app_example_imports = [_][]const u8{
     "ziggurat_view_text",   "ziggurat_document",         "ziggurat_document_editor", "ziggurat_wake",
     "ziggurat_system",      "ziggurat_i18n",             "ziggurat_animation",       "ziggurat_document_app",
     "ziggurat_chart",       "ziggurat_chart_view",       "ziggurat_audio",           "ziggurat_code_editor",
-    "ziggurat_text_layout", "ziggurat_window_placement",
+    "ziggurat_text_layout", "ziggurat_window_placement", "ziggurat_game",
 };
 
 const Example = struct { name: []const u8, path: []const u8, web: bool = false };
@@ -2519,6 +2528,7 @@ const app_examples = [_]Example{
     .{ .name = "launcher", .path = "examples/launcher.zig" },
     .{ .name = "timeline", .path = "examples/timeline.zig" },
     .{ .name = "i18n", .path = "examples/i18n.zig" },
+    .{ .name = "farm", .path = "examples/farm.zig" },
     .{ .name = "hybrid", .path = "examples/hybrid.zig", .web = true },
 };
 

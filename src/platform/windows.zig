@@ -367,7 +367,23 @@ fn nativeKeyInput(window: *core.WindowRecord, hwnd: c.HWND, wp: c.WPARAM, lp: c.
     const control = c.GetKeyState(c.VK_CONTROL) < 0;
     // Layout-generated AltGr text uses Right Alt plus a synthetic Control.
     if (control and c.GetKeyState(c.VK_RMENU) < 0) return false;
-    return window.keyInput(.{ .key = keyCode(wp), .modifiers = .{ .shift = c.GetKeyState(c.VK_SHIFT) < 0, .control = control, .alt = c.GetKeyState(c.VK_MENU) < 0, .super = superDown() }, .repeat = @as(usize, @bitCast(lp)) & (1 << 30) != 0 });
+    return window.keyInput(.{ .key = keyCode(wp), .modifiers = keyModifiers(), .repeat = @as(usize, @bitCast(lp)) & (1 << 30) != 0, .physical = physicalKey(lp) });
+}
+fn keyModifiers() core.KeyModifiers {
+    return .{ .shift = c.GetKeyState(c.VK_SHIFT) < 0, .control = c.GetKeyState(c.VK_CONTROL) < 0, .alt = c.GetKeyState(c.VK_MENU) < 0, .super = superDown() };
+}
+/// The key's position from the scan code and extended flag of lParam.
+fn physicalKey(lp: c.LPARAM) core.KeyCode {
+    const bits = @as(usize, @bitCast(lp));
+    return core.physical_keys.fromScanCode(@intCast((bits >> 16) & 0xff), bits & (1 << 24) != 0);
+}
+/// WM_KEYUP and WM_SYSKEYUP reach content that asks for releases; native
+/// handling, such as Alt opening the window menu, continues after.
+fn nativeKeyRelease(window: *core.WindowRecord, hwnd: c.HWND, wp: c.WPARAM, lp: c.LPARAM) void {
+    if (!window.inputAllowed() or c.IsWindowEnabled(hwnd) == 0) return;
+    const content = window.content orelse return;
+    if (content.key_release == null) return;
+    window.keyRelease(.{ .key = keyCode(wp), .modifiers = keyModifiers(), .physical = physicalKey(lp) });
 }
 fn superDown() bool {
     return c.GetKeyState(c.VK_LWIN) < 0 or c.GetKeyState(c.VK_RWIN) < 0;
@@ -929,6 +945,10 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
         }
     }
     if ((message == c.WM_KEYDOWN or message == c.WM_SYSKEYDOWN) and !key_filtered and nativeKeyInput(window, hwnd, wp, lp)) return 0;
+    if (message == c.WM_KEYUP or message == c.WM_SYSKEYUP) {
+        nativeKeyRelease(window, hwnd, wp, lp);
+        if (window.phase != .open or window.native.hwnd == null) return 0;
+    }
     if (message == c.WM_GETOBJECT) if (window.content) |content| if (content.accessibility) |query| {
         if (query(content.context, window.window, wp, lp)) |result| return result;
         if (window.phase != .open or window.native.hwnd == null) return 0;

@@ -207,7 +207,16 @@ pub const KeyCode = enum {
     browser_favorites,
     browser_home,
 };
-pub const KeyInput = struct { key: KeyCode, modifiers: KeyModifiers = .{}, repeat: bool = false };
+pub const KeyInput = struct {
+    key: KeyCode,
+    modifiers: KeyModifiers = .{},
+    repeat: bool = false,
+    /// The key by its position, whatever the layout (`physical_keys`):
+    /// `.w` is the key in W's place on any layout, as games want for WASD.
+    /// `.unknown` when the native event carried no position.
+    physical: KeyCode = .unknown,
+};
+pub const physical_keys = @import("physical_keys.zig");
 pub const Event = union(enum) {
     paint: Paint,
     resize: Size,
@@ -243,6 +252,10 @@ pub const Content = struct {
     /// Runs before native text translation. True consumes the key, including
     /// its legacy/edit/text consequences. Null preserves the legacy path.
     key_input: ?*const fn (*anyopaque, Window, KeyInput) bool = null,
+    /// A key released while the window has the keyboard, after native
+    /// handling; `repeat` is unset. Only content that asks receives
+    /// releases, which games read to tell held keys from released ones.
+    key_release: ?*const fn (*anyopaque, Window, KeyInput) void = null,
     /// Early native teardown only: no allocation, COM or business callbacks.
     /// Use cached native handles; the Window/Region is already closing.
     /// Windows invokes this at WM_DESTROY while native children still exist.
@@ -1792,6 +1805,16 @@ pub const WindowRecord = struct {
         const consumed = callback(content.context, self.window, input);
         return consumed or !self.inputAllowed() or epoch != self.text_input_epoch;
     }
+    pub fn keyRelease(self: *WindowRecord, input: KeyInput) void {
+        if (!self.inputAllowed()) return;
+        const content = self.content orelse return;
+        const callback = content.key_release orelse return;
+        const scope = self.enter();
+        defer scope.end();
+        const pointer = self.window.app.suspendPointer();
+        defer self.window.app.restorePointer(pointer);
+        callback(content.context, self.window, input);
+    }
     /// Adapter commit point. No rollback or retryable failure may follow it.
     pub fn publishTextInputMode(self: *WindowRecord, mode: TextInputMode) void {
         std.debug.assert(self.text_input_epoch != std.math.maxInt(u64));
@@ -1988,6 +2011,7 @@ pub const WindowRecord = struct {
 
 test {
     _ = app_stop;
+    _ = @import("physical_keys.zig");
     _ = @import("app_shutdown_test.zig");
     _ = mailbox;
     _ = registry;

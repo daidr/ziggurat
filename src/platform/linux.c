@@ -628,6 +628,12 @@ static gboolean key(GtkWidget *widget, GdkEventKey *native, gpointer data) {
     NativeEvent event={0}; event.kind=18; event.key=gdk_keyval_to_lower(logical);
     event.flags=((modifiers&GDK_SHIFT_MASK)?1:0)|((modifiers&GDK_CONTROL_MASK)?2:0)|((modifiers&GDK_MOD1_MASK)?4:0)|
         ((modifiers&(GDK_SUPER_MASK|GDK_META_MASK))?8:0)|(repeat?16:0);
+    /* X11 and Wayland hardware keycodes are evdev codes plus 8. */
+    event.width=native->hardware_keycode>=8?native->hardware_keycode-8:0;
+    if (native->type==GDK_KEY_RELEASE) {
+        NativeEvent up=event; up.kind=26; up.flags&=15; emit(s,&up);
+        if (s->destroyed || epoch!=s->im_epoch || !s->im) { release(s); return TRUE; }
+    }
     if (native->type==GDK_KEY_PRESS && !composing && !altgr && emit(s,&event)) { release(s); return TRUE; }
     if (s->destroyed || epoch!=s->im_epoch || !s->im) { release(s); return TRUE; }
     gboolean plain=(event.flags&(4|8))==0;

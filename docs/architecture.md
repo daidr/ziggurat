@@ -29,6 +29,7 @@ flowchart TD
     Host --> ChartView[ziggurat_chart_view]
     Host --> Terminal[ziggurat_terminal]
     Host --> TerminalView[ziggurat_terminal_view]
+    Host --> Game[ziggurat_game]
     Host --> Pickers[ziggurat_view_pickers]
     Host --> Document[ziggurat_document]
     Host --> DocumentEditor[ziggurat_document_editor]
