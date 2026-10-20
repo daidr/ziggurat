@@ -104,4 +104,6 @@ Windows 使用一个 `ITaskbarList3`，状态按窗口生效，窗口销毁后�
 
 `zig build smoke-os-integration` 启动真实子进程：8 个并发 secondary 与最大长度参数的转发、恶意/超长/停滞对端被拒后 listener 仍可用、primary 停止后旧 secondary 得到 `PrimaryUnavailable` 并可重新成为 primary、被杀死的 primary 释放锁、12 轮 claim/转发/停止后文件描述符或句柄数不变；Linux 另验开放权限的运行目录被拒。注册部分在隔离的 XDG 根中写入 scheme 与文件类型，用 GIO 独立解析默认处理程序和扩展名类型，再由 GIO 真正启动注册的 `%U` 命令，验证深链与文件参数经单实例转发到 primary，最后 unregister 并确认无关的 mimeapps 行保留；登录项写入、查询与删除。Windows 对应用 `AssocQueryStringW` 与 `ShellExecuteExW` 走同样的链路。Linux 用私有 bus 上的 logind 替身核对 Inhibit 参数和 release 后描述符真正关闭（12 轮），并用独立订阅者核对 launcher entry 的进度、计数和提醒；Windows 做 12 轮成对电源请求，句柄数不变。D-Bus 部分需要 session bus 且把同一地址作为 `DBUS_SYSTEM_BUS_ADDRESS`；`-- --require-dbus` 在缺失时失败而不是跳过。
 
+Linux 与 Windows Debug CI 都实际运行这个 smoke。Windows 命令行上限为 32767 个 UTF-16 单元，所以最大长度参数用例在 Windows 只传一个 16 KiB 参数，帧上限本身由单元测试覆盖。
+
 这些检查不点击系统 UI，不验证 dock 的实际显示、真实 logind 策略或 Windows 用户选择对话框；Windows 任务栏只在隐藏窗口上调用，结果按 shell 是否接受记录。

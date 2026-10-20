@@ -7,6 +7,7 @@ const z = @import("ziggurat");
 const types = @import("types.zig");
 const menus = @import("menus.zig");
 const picker = @import("picker.zig");
+const desktop = @import("desktop.zig");
 
 const NativeItem = extern struct { label: [*:0]const u8, parent: i32, kind: u8, enabled: u8, checked: u8, padding: u8 = 0, keyval: u32, modifiers: u32, command: i32 };
 const Done = *const fn (?*anyopaque, u64, i32) callconv(.c) void;
@@ -681,6 +682,20 @@ pub const Tray = struct {
     pub fn cancelPopup(self: *Tray) void {
         if (self.app) |app| app.assertOwner();
         self.popup.cancel();
+    }
+    /// Status notifier hosts tell no icon rectangle, only where the last
+    /// click happened, which hosts that report it give here as an empty
+    /// rectangle. Null when no host has reported a point.
+    pub fn iconRect(self: *Tray) ?desktop.Rect {
+        if (self.app) |app| app.assertOwner();
+        const point = self.point orelse return null;
+        // Hosts that do not know the pointer report the origin.
+        if (point.x == 0 and point.y == 0) return null;
+        return .{ .x = point.x, .y = point.y, .width = 0, .height = 0 };
+    }
+    /// Linux hosts report no icon rectangle to test the pointer against.
+    pub fn pointerOverIcon(_: *Tray) bool {
+        return false;
     }
     fn popupDone(ptr: ?*anyopaque, serial: u64, result: i32) callconv(.c) void {
         const self: *Tray = @ptrCast(@alignCast(ptr.?));

@@ -1,0 +1,30 @@
+//! Named character references most often written in Markdown. Names
+//! outside this table stay literal text.
+const std = @import("std");
+
+const Entry = struct { []const u8, []const u8 };
+const table = std.StaticStringMap([]const u8).initComptime([_]Entry{
+    .{ "amp", "&" },           .{ "lt", "<" },          .{ "gt", ">" },          .{ "quot", "\"" },
+    .{ "apos", "'" },          .{ "nbsp", "\u{a0}" },   .{ "copy", "©" },       .{ "reg", "®" },
+    .{ "trade", "™" },       .{ "hellip", "…" },    .{ "mdash", "—" },     .{ "ndash", "–" },
+    .{ "lsquo", "‘" },       .{ "rsquo", "’" },     .{ "ldquo", "“" },     .{ "rdquo", "”" },
+    .{ "laquo", "«" },        .{ "raquo", "»" },      .{ "middot", "·" },     .{ "bull", "•" },
+    .{ "times", "×" },        .{ "divide", "÷" },     .{ "deg", "°" },        .{ "plusmn", "±" },
+    .{ "para", "¶" },         .{ "sect", "§" },       .{ "euro", "€" },      .{ "pound", "£" },
+    .{ "yen", "¥" },          .{ "cent", "¢" },       .{ "larr", "←" },      .{ "rarr", "→" },
+    .{ "uarr", "↑" },        .{ "darr", "↓" },      .{ "harr", "↔" },      .{ "le", "≤" },
+    .{ "ge", "≥" },          .{ "ne", "≠" },        .{ "infin", "∞" },     .{ "micro", "µ" },
+    .{ "frac12", "½" },       .{ "frac14", "¼" },     .{ "frac34", "¾" },     .{ "iexcl", "¡" },
+    .{ "iquest", "¿" },       .{ "shy", "\u{ad}" },    .{ "ensp", "\u{2002}" }, .{ "emsp", "\u{2003}" },
+    .{ "thinsp", "\u{2009}" }, .{ "zwnj", "\u{200c}" }, .{ "zwj", "\u{200d}" },  .{ "check", "✓" },
+    .{ "auml", "ä" },         .{ "ouml", "ö" },       .{ "uuml", "ü" },       .{ "Auml", "Ä" },
+    .{ "Ouml", "Ö" },         .{ "Uuml", "Ü" },       .{ "szlig", "ß" },      .{ "eacute", "é" },
+    .{ "egrave", "è" },       .{ "aacute", "á" },     .{ "agrave", "à" },     .{ "ccedil", "ç" },
+    .{ "ntilde", "ñ" },       .{ "oslash", "ø" },     .{ "aring", "å" },      .{ "alpha", "α" },
+    .{ "beta", "β" },         .{ "gamma", "γ" },      .{ "delta", "δ" },      .{ "pi", "π" },
+    .{ "sigma", "σ" },        .{ "omega", "ω" },      .{ "Delta", "Δ" },      .{ "Omega", "Ω" },
+});
+
+pub fn lookup(name: []const u8) ?[]const u8 {
+    return table.get(name);
+}

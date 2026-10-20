@@ -34,7 +34,7 @@
 | W02 | 已完成（Windows/X11） | 拥有/瞬态窗口、模态窗口、关闭及焦点策略 | 父关闭传播、整树模态输入策略、取消与异常回滚；独立顶层窗口，不嵌套事件循环或替代 H02 内嵌内容；依赖 W01 |
 | W03 | 部分完成（Windows/X11） | 无边框、自定义标题栏、原生拖动/缩放、透明与材质 | W03.1 装饰/命中/原生交互已验收；W03.3 Windows 系统框架材质已实现（运行验证见记录）；W03.2 客户区透明、Linux/Wayland 材质继续待实现；DPI/最大化/系统菜单；依赖 W01 |
 | W04 | 部分完成（Windows/X11） | 窗口枚举/查找、焦点、显示器约束与状态持久化 | 运行期枚举/查找、显式显示器快照、离屏恢复及版本化 worker 存储已验；经 S03 monitors 订阅的显示器变化可达性判断与重新放置已接入（X11 RandR 实测），物理混合 DPI/热插拔、Windows 真实显示器变化与其他平台继续，不在 paint 访问磁盘 |
-| W05 | 部分完成（Linux 已验；Windows 已编译，待原生运行） | 应用激活、单实例与参数转发 | OS 锁与显式 IPC；启动竞争、旧实例关闭、恶意/超长参数和用户隔离；W05.1 `system.instance` 已有 per-user 锁、显式 worker 接收、有界帧与拒绝、停止和崩溃回收，激活由宿主经 `App.post` 执行，见[单实例与系统集成](os-integration.md) |
+| W05 | 部分完成（Windows/Linux） | 应用激活、单实例与参数转发 | OS 锁与显式 IPC；启动竞争、旧实例关闭、恶意/超长参数和用户隔离；W05.1 `system.instance` 已有 per-user 锁、显式 worker 接收、有界帧与拒绝、停止和崩溃回收，激活由宿主经 `App.post` 执行，见[单实例与系统集成](os-integration.md) |
 
 ## 布局、控件与绘制
 
@@ -125,7 +125,7 @@ U09 的实时折线须保留源数据供选择/读数，按可见物理像素列
 | T02 | 进行中 | 完整输入控件、IME/候选/组合、平台文本服务 | 保留客户端及IMM/GTK surrounding、单Document普通字段的焦点/单多行策略/组合/注入clipboard/滚动caret与Windows Value动作已分项验；TSF、真实语言引擎、Linux系统clipboard及更广投影编辑继续；依赖T01 |
 | T03 | 已完成（Windows/Linux，有界段落视图） | 可扩展文档 buffer、多选区、查找替换、折叠 | 单文档原子多选编辑/撤销、worker快照流式字面搜索及派生段落折叠已验收；段落/缓存/元数据上限明确，语言服务与成熟字段UI另验；依赖 T01 |
 | T04 | 进行中 | 代码编辑 hooks、补全、hover、诊断、Diff | T04.1版本化Broker/Presenter、T04.2行差异/双栏/统一可编辑比较、行内标记及成对上下文折叠已验收；可访问语义与语言工具继续分项；依赖 T03 |
-| T05 | 待实现 | 富文本与 Markdown 展示/编辑 | 结构化模型、链接/嵌入资源/复制、非可信内容约束与大文档；依赖 G01/T03 |
+| T05 | 部分完成 | 富文本与 Markdown 展示/编辑 | T05.1 已有纯 Zig `ziggurat_markdown`（CommonMark 块/行内、GitHub 表格/任务列表/删除线/扩展自动链接，有界节点树，原始 HTML 作字面文本）、`ziggurat_markdown_view`（声明式视图映射、折行、链接/任务激活）与 `ziggurat_markdown_code`（预排版等宽代码块），见[Markdown](markdown.md)；混合字重/字体 runs、嵌入资源、复制选区与编辑待实现；依赖 G01/T03 |
 | T06 | 进行中 | UIA/AT-SPI/NSAccessibility 完整控件与文本语义 | Windows文档/MTA、空caret/TextPattern2、仿射凸裁剪与辅助动作，以及Linux单源只读AT-SPI/完整Prepared命中已分项验；Windows完整候选point迁移、Linux动作/多源、完整语言单位与其他平台继续；依赖 T01/U04/P02 |
 | T07 | 待实现 | 可选字体资产注册、系统/应用字体发现 | 显式准备、有界字体数据/枚举、monospaced与来源、别名/去重、缓存失效及旧Layout最后lease；依赖 T01 |
 
@@ -196,10 +196,10 @@ B02 分项：
 | S01 | 已完成（Windows） | 全局快捷键、通知区通知 | 原生注册/冲突/注销、稳定事件 ID、Owner 关闭与诊断重入检查；Linux/macOS 见 P02/P04 |
 | S02 | 部分完成 | shell 打开 URL/文件、定位、回收站、文件图标、应用发现/启动 | S02.1 executable 启动、S02.2 URL（https/http/mailto 默认白名单）/关联文件/定位、S02.3 回收站（Windows/Linux）及 S02.4 Windows 16/32px 不透明图标已实现；完整图标（Linux/高分辨率/透明）与安装应用发现/按身份启动待实现；真实关联程序/资源管理器显示未自动验证 |
 | S03 | 部分完成 | 多显示器、主题/accent/可访问性偏好、网络、电源与文件监视 | 显示器/偏好/电源/网络快照与合并变化订阅（Windows/Linux）、粗模式文件监视（inotify/ReadDirectoryChangesW）已实现；详细文件监视（快照/rename 匹配）、Linux 电源来源变化、Wayland 显示器、portal 配色待实现；Windows 路径首次运行在 CI |
-| S04 | 部分完成（登录启动、深链、文件关联：Linux 已验，Windows 已编译待原生运行） | 密钥存储、登录启动、深链和文件关联 | OS 权限/用户作用域、安装与运行时分工、卸载和参数转发；依赖 W05/R01；S04.1 `system.integration` 按用户注册/卸载并供安装程序调用；密钥存储继续待实现 |
+| S04 | 部分完成（密钥存储；登录启动、深链、文件关联 Windows/Linux） | 密钥存储、登录启动、深链和文件关联 | OS 权限/用户作用域、安装与运行时分工、卸载和参数转发；依赖 W05/R01；S04.1 `system.integration` 按用户注册/卸载并供安装程序调用；Windows 设置中的默认应用确认与 macOS 继续 |
 | S05 | 部分完成 | 多格式剪贴板、transfer、惰性 provider、原生拖放 | Board 的 text/HTML/PNG/文件/自定义事务写入、异步读取、惰性 provider、变化事件、Windows 有界占用重试及 Windows/Linux 放置目标已实现；拖动源（需模态拖动循环）未提供；真实跨进程拖放、他进程占用重试与退出渲染未自动验证 |
 | S06 | 部分完成（Windows/Linux） | 异步消息对话框、上下文菜单与菜单快捷键 | S06.1 两平台上下文菜单与异步消息框、Windows 菜单栏快捷键已验；非嵌套循环（Windows 菜单在私有安全点进入系统菜单循环）、取消/关闭、禁用祖先、旧消息隔离分别验证；Linux 菜单栏与快捷键分发、物理输入与视觉验收继续；依赖 W02/U02 |
-| S07 | 部分完成（Linux 已验；Windows 已编译待原生运行） | 应用身份/系统目录、任务栏或 Dock badge/progress/menu、阻止休眠 | 按平台 capability、用户作用域、原生引用/电源断言配对与最后 owner 回收；依赖 S03/P03；S07.1 身份、目录、任务栏进度/叠加图标/launcher 计数与提醒、休眠断言已实现；任务栏/Dock 菜单与 macOS 继续 |
+| S07 | 部分完成（Windows/Linux） | 应用身份/系统目录、任务栏或 Dock badge/progress/menu、阻止休眠 | 按平台 capability、用户作用域、原生引用/电源断言配对与最后 owner 回收；依赖 S03/P03；S07.1 身份、目录、任务栏进度/叠加图标/launcher 计数与提醒、休眠断言已实现；任务栏/Dock 菜单与 macOS 继续 |
 | S08 | 部分完成（Windows） | 独立托盘/status item、多图标、菜单与popover锚定 | 窗口Owner单托盘/任务栏重建恢复，及 S08.1 App 独立多 item、可选稳定 GUID、锚定托盘菜单、App 停止回收已验；标题与popover亮态（无 Windows 对应）、Linux/macOS 继续；其余平台依赖 P02/P04 |
 | D01 | 待实现 | document 模型、每文件窗口与最近文档 | 文档身份/重复打开、保存/另存、dirty/关闭/quit 预检；依赖 W02/S02 |
 | D02 | 待实现 | 自动保存、外部修改、冲突检测与崩溃恢复 | 原子保存、版本戳/恢复副本、后台 I/O、丢失与权限错误；依赖 D01 |
@@ -1744,5 +1744,5 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - `system.instance` 以 Linux 运行目录 flock + Unix socket、Windows 每用户每会话 named pipe（仅当前用户 DACL、首实例标志、双向 SID 核对）实现单实例。接收在宿主创建的 worker 上阻塞，可跨线程停止；消息完整校验后才确认，帧上限 128 参数/单项 16 KiB/合计 64 KiB，畸形、超长、停滞与外来用户对端被拒而 listener 继续服务。primary 退出时旧 secondary 得到 `PrimaryUnavailable`，`claimOrForward` 有界重试。激活由宿主复制消息后经 `App.post` 决定。
 - `system.integration` 按用户写入/卸载登录项、URL scheme 与文件关联，供安装程序调用：Windows 为 HKCU Run/Classes 与带所有者标记的 ProgID，不绕过受保护的用户选择；Linux 为 autostart、desktop entry、MIME package 与只改本 ID 条目的 mimeapps.list，原子写入并可刷新缓存。`localPath` 解码转发的 file URL。
 - `system.power.Assertion` 为每个 owner 持有独立 Windows 电源请求或 logind inhibitor 描述符，release 幂等；`system.taskbar` 提供 Windows ITaskbarList3 进度/叠加图标与 Linux launcher entry 进度/计数/提醒，capability 如实报告 Windows 无非打包数字 badge。
-- Linux Debug 与 ReleaseSafe 在私有 session bus（兼作 system bus）与 Xvfb 下实际运行 `smoke-os-integration`：8 个并发与最大长度参数的真实子进程转发、三类恶意对端、旧 primary 停止、被杀 primary 回收、12 轮资源持平与开放运行目录拒绝；隔离 XDG 根中由 GIO 独立解析并真正启动注册的 scheme 与文件类型，参数经单实例送达，卸载后无关 mimeapps 行保留；logind 替身核对 12 轮 Inhibit 参数与描述符关闭，独立订阅者核对 launcher 信号。`test-system-integration` 10/10。Windows 目标 Debug/ReleaseSafe 交叉编译通过，同一 smoke 已加入 Windows CI，原生运行结果尚未记录，故 Windows 不标完成。
-- 密钥存储、任务栏/Dock 菜单（D03）和 macOS 不在本片；dock 实际显示、真实 logind 策略与 Windows 设置中的默认应用对话框未经人工验证。见[单实例与系统集成](os-integration.md)。
+- Linux Debug 与 ReleaseSafe 在私有 session bus（兼作 system bus）与 Xvfb 下实际运行 `smoke-os-integration`：8 个并发与最大长度参数的真实子进程转发、三类恶意对端、旧 primary 停止、被杀 primary 回收、12 轮资源持平与开放运行目录拒绝；隔离 XDG 根中由 GIO 独立解析并真正启动注册的 scheme 与文件类型，参数经单实例送达，卸载后无关 mimeapps 行保留；logind 替身核对 12 轮 Inhibit 参数与描述符关闭，独立订阅者核对 launcher 信号。`test-system-integration` 10/10。Windows 目标 Debug/ReleaseSafe 交叉编译通过；Windows Debug CI 原生运行同一 smoke 通过：10 条转发消息与三类拒绝、经 ShellExecuteExW 启动注册的 scheme 与文件类型并由单实例送达、登录项、12 轮成对系统/显示电源请求和隐藏窗口任务栏调用。Windows 命令行上限为 32767 个 UTF-16 单元，最大长度参数用例在 Windows 只传一个 16 KiB 参数。
+- 密钥存储（另见 S04 密钥存储记录）、任务栏/Dock 菜单（D03）和 macOS 不在本片；dock 实际显示、真实 logind 策略与 Windows 设置中的默认应用对话框未经人工验证。见[单实例与系统集成](os-integration.md)。

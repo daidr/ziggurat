@@ -1,6 +1,6 @@
 # 系统工具
 
-按需导入 `ziggurat_system`。应用身份、系统目录、单实例与参数转发、登录启动、URL scheme/文件关联、阻止休眠和任务栏状态见 [单实例与系统集成](os-integration.md)。原生菜单栏、菜单快捷键、上下文菜单、异步消息框、窗口托盘、独立托盘、异步文件选择器、全局快捷键和通知实现 Windows 和 Linux；同步文本剪贴板 helper 目前仅 Windows；多格式剪贴板 Board、放置目标、桌面环境快照/订阅和粗模式文件监视支持 Windows/Linux。`system.capabilities` 分别报告编译目标的支持状态，未实现的窗口扩展返回 `UnsupportedCapability`。Linux 的托盘与通知走会话总线，全局快捷键只在 X11 上可用，运行时缺少对应服务或显示协议时按下文各节明确报告。独立的无 UI `shell.Worker` 已支持 Windows/Linux 显式程序启动，以及 Windows 有界文件图标，能力见 `system.capabilities.shell`。
+按需导入 `ziggurat_system`。应用身份、系统目录、单实例与参数转发、登录启动、URL scheme/文件关联、阻止休眠和任务栏状态见 [单实例与系统集成](os-integration.md)。原生菜单栏、菜单快捷键、上下文菜单、异步消息框、窗口托盘、独立托盘、异步文件选择器、全局快捷键和通知实现 Windows 和 Linux；同步文本剪贴板 helper 目前仅 Windows；多格式剪贴板 Board、放置目标、桌面环境快照/订阅、粗模式文件监视、密钥存储和浮出窗口支持 Windows/Linux。`system.capabilities` 分别报告编译目标的支持状态，未实现的窗口扩展返回 `UnsupportedCapability`。Linux 的托盘与通知走会话总线，全局快捷键只在 X11 上可用，运行时缺少对应服务或显示协议时按下文各节明确报告。独立的无 UI `shell.Worker` 已支持 Windows/Linux 显式程序启动，以及 Windows 有界文件图标，能力见 `system.capabilities.shell`。
 
 ## 窗口 owner
 
@@ -205,6 +205,30 @@ S02 当前仍为部分实现：Windows/Linux 已提供 `launchExecutable`、`ope
 
 `system.watch.Watcher` 是 S03 的粗模式文件监视：与 `shell.Worker` 相同，只在宿主创建的后台线程初始化和调用（`interrupt()` 除外，可跨线程唤醒），不创建线程、不轮询，所有缓冲和预算（root、目录 watch、pending、路径字节、原生缓冲）在 `init` 显式分配。`addRoot` 返回即 ready；`wait(events, path_storage, timeout_ms)` 按 debounce 与最大延迟交付合并后的 `changed`（应重新列出的目录）、`overflow`（必须重扫整个 root）和 `root_removed`，调用者容量不足时顺延而不丢弃。Linux 使用 inotify/eventfd/poll，Windows 使用 overlapped `ReadDirectoryChangesW`。它不读取文件 metadata、不匹配 rename，详细模式尚未实现。合同、预算与验证范围见 [文件监视](file-watch.md)；Windows 路径目前只验证交叉编译。
 
+## 密钥存储
+
+`system.secrets` 把访问令牌、API 密钥等小块机密交给系统凭据存储：Windows 是 Credential Manager，Linux 是会话总线上的 Secret Service（GNOME Keyring、KWallet、KeePassXC 等，经 libsecret）。系统替当前用户加密，不同于应用自己写的文件。每个机密以“服务名 + key”标识：服务名把一个应用的机密分成一组，通常是应用的反向域名标识；同一用户的其他程序给出相同服务名和 key 时读到同一个机密。Windows 写入 generic credential，target 为 `service/key`，用户名为 key，`CRED_PERSIST_ENTERPRISE`；Linux 写入 `org.freedesktop.Secret.Generic` schema 的条目，`service`/`account` 属性为服务名和 key，标签为 `service/key`。按这种约定保存机密的其他程序可以互读。
+
+`set(service, key, value)` 存入或替换，`get(service, key, destination)` 写入调用者缓冲并返回切片，`delete(service, key)` 删除（不存在也算成功）。服务名与 key 为 1–256 字节、不含 NUL 的 UTF-8，机密最多 `max_secret_bytes`（2560 字节，即 Credential Manager 的上限，两个平台行为一致），可以为空或含任意字节。错误：没有该机密为 `SecretNotFound`；目标缓冲不够为 `SecretTooLarge`；会话里没有可用存储为 `CredentialStoreUnavailable`；存储拒绝或失败为 `CredentialStoreFailed`，`secrets.lastFailure()` 给出本线程最近一次的 Win32 错误码或 GError 码。
+
+三个函数都会阻塞（存储可能要求用户解锁），只能在宿主创建的 worker 上调用，App 运行时不要在主线程调用。模块不创建线程、不分配。`secrets.Request` 把一次操作带到 worker：主线程 `Request.init(app, .get, service, key, "", context, on_done)` 校验并复制输入；请求保持稳定地址，worker 调用 `request.run()` 完成阻塞调用后经 `App.post` 把 `on_done` 交回主线程，恰好一次；投递失败（`Full`/`Closed`）时 `run` 返回该错误、不调用 `on_done`，结果留在请求里，由调用者重试 `post()` 或丢弃。`on_done` 里用 `err()` 和 `value()` 读取结果，`wipe()` 擦除请求持有的机密明文。
+
+Linux 首次使用时才 `dlopen("libsecret-1.so.0")`（需要 0.19 起的二进制接口），所以 libsecret 只是运行时可选依赖。没有该库、没有会话总线，或总线上没有 Secret Service（D-Bus 报告 `ServiceUnknown`、`NameHasNoOwner`、`NoServer`）时，每个操作都返回 `CredentialStoreUnavailable`，不会假装成功；已存在但被锁定、用户拒绝等其他总线错误为 `CredentialStoreFailed`。libsecret 的同步调用自带 main context，可在任意 worker 上运行。
+
+## 浮出窗口
+
+`system.Flyout` 是锚定在某个矩形旁边的无边框弹出窗口：托盘应用的面板、按钮展开的列表或悬停卡片。它没有边框、任务栏按钮或自己的背景，内容（UI Context、WebView 等，照常 attach 到 `flyout.window`）绘制全部区域。`var flyout: system.Flyout = .{}` 后 `try flyout.open(app, options)` 创建、放置并（除非 `hidden`）显示；Flyout 从 open 到窗口 `on_closed` 期间保持稳定地址，`Options.on_closed` 由它转发。
+
+锚点 `Anchor` 有三种：`.window = .{ .owner, .rect }` 是 owner 客户区内的 DIP 矩形（打开它的元素的边框，或空矩形表示一个点），owner 拥有该浮出窗口，它保持在 owner 之上、随 owner 移动或缩放重新放置（核心把 owner 的 `resize`/`window_position` 转告 `PopupHandler.owner_moved`），并随 owner 关闭；`.screen` 是原生桌面坐标中的矩形（与 `desktop.Monitor` 相同约定：Windows 物理像素，X11 GDK 逻辑坐标）；`.tray` 是通知区图标，系统报告图标位置时放在图标旁，否则放在主显示器工作区正中。后两种没有 owner，浮在其他应用窗口之上。
+
+`placement` 是 12 种放置之一：`bottom_start`、`bottom`、`bottom_end`、`top_*`、`right_*`、`left_*`，即位于锚点哪一侧，以及沿该侧与锚点起始边、中心还是末尾对齐；`gap` 是与锚点的 DIP 距离。目标显示器取与锚点重叠最多的工作区，没有重叠时取离锚点中心最近的显示器。每个轴上，放不下时若翻到锚点另一侧或另一端能放下就翻转，然后沿越界的边滑回工作区，仍放不下则缩小到工作区；纯函数 `flyout.placeBeside` 公开并有单元测试。`setAnchor` 换到同类锚点（窗口锚点须同一 owner）后重新放置，`setSize(width, height)` 按内容测得的尺寸调整大小并重新放置，`place()` 按当前状态重放。Wayland 不报告窗口位置，此时只设置尺寸，由合成器放置。
+
+`focusable = true` 的浮出窗口显示时取得键盘；其他窗口取得键盘（Windows：激活离开且新激活窗口不是它自己或它拥有的窗口）或在 Linux 上用户按在它外面时被“驳回”，按用户关闭处理（`requestCloseFrom(.user)`），`on_close` 可以拒绝。托盘浮出窗口在 Windows 上点自己的图标不算驳回，图标的点击交给应用切换它。非 focusable 的浮出窗口从不取得键盘：显示、聚焦和指针按下都不改变当前活动窗口，直到被关闭，适合 tooltip、悬停卡片和输入框建议。两种浮出窗口在内容未消费的 Escape（无修饰键）上都按用户关闭处理。`shadow` 使用系统弹出阴影（Windows `CS_DROPSHADOW`，Windows 11 另按菜单样式圆角和描边；Linux 不画阴影）。
+
+托盘点击弹出浮出窗口：在 `Tray` 的 `on_action` 收到 `.activate` 时调用 `flyout.toggle(app, .{ .anchor = .{ .tray = tray }, .placement = .bottom, .gap = 4, .width = 280, .height = 230, .focusable = true })`，已打开时关闭、否则打开。`Tray.iconRect()` 返回 Shell 报告的图标矩形（Windows `Shell_NotifyIconGetRect`）；Linux status notifier 宿主只报告点击坐标，作为空矩形锚点使用，没有报告时浮出窗口居中。
+
+底层是核心的 `WindowOptions.popup: ?PopupRole`（`focusable`、`topmost`、`shadow`、`handler`），要求 `.borderless` 且不能是模态窗口（`InvalidPopup`）。Windows 上它是 `WS_POPUP` + `WS_EX_TOOLWINDOW` 窗口（不进任务栏和 Alt+Tab），非 focusable 时加 `WS_EX_NOACTIVATE`、`WM_MOUSEACTIVATE` 返回 `MA_NOACTIVATE` 并以 `SW_SHOWNOACTIVATE` 显示；拥有可见 focusable 弹出窗口的窗口被点击激活时返回 `MA_ACTIVATEANDEAT`，那次点击只驳回弹出窗口，与菜单一致；驳回在 `WM_ACTIVATE` 之后用投递消息决定，不在激活处理中回调。Linux X11 上它是 `GTK_WINDOW_POPUP`（override-redirect，精确放在计算出的位置），focusable 时显示期间 `gdk_seat_grab` 抓取整个 seat 并 `gtk_grab_add`，外部按下（含本应用其他窗口和其他应用）或抓取被打断时驳回；没有 X11 时退回 utility 类型的顶层窗口，失去键盘时驳回。两平台都设置不进任务栏/分页器。
+
 ## 已验证范围
 
 `zig build smoke-system` 实际创建菜单和 Shell 托盘项，覆盖 12 轮 owner/窗口生存期、菜单状态、原生命令、同 HWND 更换 Owner 后的旧消息、任务栏重建恢复，以及回调内关闭的清理。
@@ -222,6 +246,10 @@ S02 当前仍为部分实现：Windows/Linux 已提供 `launchExecutable`、`ope
 `zig build smoke-system-desktop`（Linux，需要会话总线和 X11：`dbus-run-session -- xvfb-run -a zig build smoke-system-desktop`）在同一私有总线上用测试替身充当 status notifier watcher 和通知服务器。托盘：导出并登记、读取 ToolTip/IconName/IconPixmap 属性（验证调用后释放的 pixbuf 已被复制为 ARGB）、`Activate`/`ContextMenu` 事件、原地更新、超长提示被拒绝；独立托盘：`guid` 写入 `Id`、更换身份被拒绝、在宿主报告的点打开菜单并选择、重复请求被拒绝、移除。通知：urgency/`suppress-sound`/`transient` 提示、激活后撤回、已显示的通知被替换时撤回、总线连接前被替换的通知不发送、服务器关闭只清理、旧 ID 的激活被忽略。全局快捷键用 XTest 注入真实 X 按键：触发、按住重复只报告一次、进程内重复和另一 X 客户端已抓取的组合被拒绝（`last_error` 非零）、注销后组合可再次注册。选择器：GTK 对话框中实际选择文件、保存到目录加文件名、选择子目录，取消、容量不足、启动后 detach 不回调；多选由原生结果替身完成（GTK 自带对话框没有可脚本化的多选）。最后在菜单栏、托盘、快捷键、通知和选择器都存在时关闭窗口。这些替身不证明某个具体桌面面板或通知守护进程的显示效果。
 
 **Windows 尚未自动操作真实系统 GUI 完成文件/目录选择或保存确认，系统成功结果到返回路径的完整链路仍需原生集成验证；Linux 未验证门户路径。** 这些检查不评价对话框、菜单或图标的视觉质量，也不证明其他系统运行支持。
+
+`zig build smoke-secrets` 在 worker 上经 `Request` 对真实存储依次执行删除、读取不存在、写入 2560 字节、读回比较、替换为含 NUL/非 ASCII 的值、写入空值、删除和重复删除，结果都在主线程核对；服务名和 key 含非 ASCII 字符，只读写测试自己的服务名，不读取用户已有凭据。Windows 必须有 Credential Manager；Linux 默认在没有 Secret Service 时要求每个操作都报告 `CredentialStoreUnavailable`，`--require-store` 则要求真实往返。本地已在 `dbus-run-session` 下分别验证 GNOME Keyring 解锁后的完整往返、总线上无 Secret Service 时的明确错误，以及存储弹出解锁提示但无法显示时的 `CredentialStoreFailed`。
+
+`zig build smoke-flyout` 显示一个 owner 窗口并验证：非 focusable 浮出窗口出现在与 `placeBeside` 计算一致的位置、拥有者是 owner、显示后 owner 仍是活动窗口；owner 移动后浮出窗口跟随；focusable 浮出窗口在 Linux 上由 XTest 注入真实 Escape 后按用户关闭，在 owner 区域注入真实点击后被驳回，`on_close` 拒绝时保持打开；Windows 上激活 owner 驳回它（会话没有前台权限时跳过键盘部分并打印说明）；无 owner 的屏幕矩形浮出窗口放在矩形右侧。Linux 已在 Xvfb 1x、GDK_SCALE=2 以及有无 openbox 时运行通过；Windows 本次只在 Linux 上交叉编译。托盘锚点的居中与放置、跟随、驳回、Escape 和 owner 关闭另由测试后端单元测试覆盖。这些检查不评价阴影、圆角等视觉效果。
 
 `zig build smoke-shell` 使用测试程序自身作为受控 helper，验证 Windows/Linux 的 Unicode、空格、空参数、引号、反斜杠、换行和字面 shell 字符、cwd、预取消、跨线程拒绝、缺失程序、活进程终止和重复回收；12 轮自有子进程后句柄/文件描述符计数不增长，首个失败路径预热后再验证 12 轮失败计数持平。Windows 另验证完整退出码、16/32 像素图标只读查询及 GDI/内核句柄稳定。进程全局计数可以在首次系统调用后增长，并非模块自有资源归零承诺。
 
