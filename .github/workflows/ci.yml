@@ -91,7 +91,10 @@ jobs:
           retention-days: 7
 
   linux:
-    runs-on: ubuntu-24.04
+    # Self-hosted Linux runner (Debian/Ubuntu with apt). The repository variable
+    # LINUX_RUNS_ON overrides the labels with a JSON value, for example
+    # '"ubuntu-24.04"' to return to a hosted runner.
+    runs-on: ${{ fromJSON(vars.LINUX_RUNS_ON || '["self-hosted", "linux", "x64"]') }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -104,8 +107,7 @@ jobs:
           persist-credentials: false
       - name: Native GTK/Pango dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y libgtk-3-dev libpango1.0-dev libicu-dev pkg-config xvfb xauth openbox x11-utils libxtst6 libatspi2.0-dev at-spi2-core dbus-x11 fonts-dejavu-core fonts-noto-cjk
+          sh scripts/ci-linux-deps.sh ca-certificates curl xz-utils python3 libgtk-3-dev libpango1.0-dev libicu-dev pkg-config xvfb xauth openbox x11-utils libxtst6 libatspi2.0-dev at-spi2-core dbus-x11 fonts-dejavu-core fonts-noto-cjk
       - name: Install verified Zig 0.15.2
         run: |
           zig_bin=$(sh scripts/fetch-zig-linux.sh)
@@ -150,8 +152,7 @@ jobs:
       - name: Optional WebKitGTK lifecycle and policy checks
         if: github.event_name == 'workflow_dispatch' && inputs.webview
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y libwebkit2gtk-4.1-dev glib-networking dbus-x11 libcurl4-openssl-dev
+          sh scripts/ci-linux-deps.sh libwebkit2gtk-4.1-dev glib-networking dbus-x11 libcurl4-openssl-dev
           export ZIG_BIN="$(command -v zig)"
           export P01_OPTIMIZE=${{ matrix.optimize }}
           zig build test-https-resources -Dhttps-resources=true -Doptimize=${{ matrix.optimize }}
