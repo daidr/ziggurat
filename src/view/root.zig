@@ -41,8 +41,8 @@ pub const max_popup_height: f32 = 280;
 pub const popup_gap: f32 = 4;
 /// Distance of the toast stack from the window's bottom edge, in DIP.
 pub const toast_margin: f32 = 16;
-/// Popups and toast stacks painted over the tree in one frame.
-const max_floating = 4;
+/// Popups, popovers and toast stacks painted over the tree in one frame.
+const max_floating = 8;
 /// Tree and table rows keyboard navigation can reach in one frame.
 pub const max_collection_rows = 512;
 /// Trees and tables keyboard navigation can reach in one frame.
@@ -311,7 +311,22 @@ pub const Measurer = struct {
     }
 };
 
-pub const Kind = enum { column, row, radio_group, segmented, tab_list, list_box, toolbar, breadcrumbs, accordion, field, fieldset, split, scroll, grid, search, popup, toasts, toast, tree, tree_item, table, table_header, table_row, token_field, combo_field, text, note, badge, spacer, button, link, nav_button, combo_box, checkbox, radio, segment, tab, list_item, disclosure, toggle_switch, progress, meter, slider, stepper, rating, avatar, embed, tree_row, column_header, token, combo_toggle };
+pub const Kind = enum { column, row, radio_group, segmented, tab_list, list_box, toolbar, breadcrumbs, accordion, field, fieldset, split, scroll, grid, search, popup, popover, toasts, toast, tree, tree_item, table, table_header, table_row, token_field, combo_field, text, note, badge, spacer, button, link, nav_button, combo_box, popup_button, checkbox, radio, segment, tab, list_item, disclosure, toggle_switch, progress, meter, slider, stepper, rating, avatar, embed, tree_row, column_header, token, combo_toggle };
+
+/// Where a popover goes beside its anchor: below it by default, starting
+/// at its left edge. It moves to the opposite side when that side has more
+/// room and the panel does not fit, and it always stays within the window.
+pub const Placement = struct {
+    pub const Side = enum { bottom, top, left, right };
+    /// How the panel lines up with the anchor along that side.
+    pub const Alignment = enum { start, center, end };
+    side: Side = .bottom,
+    alignment: Alignment = .start,
+    /// Space between the anchor and the panel, in DIP.
+    gap: f32 = popup_gap,
+    /// Make the panel at least as wide as the anchor.
+    match_width: bool = false,
+};
 
 /// A leaf that measures, places and paints itself, for content the view
 /// layer does not model, such as an editable text field. The context must
@@ -381,8 +396,10 @@ pub const Node = struct {
     embed: ?Embed = null,
     /// Hint shown on hover or focus, and announced as the description.
     tooltip: []const u8 = "",
-    /// The node a popup opens from, its previous sibling.
+    /// The node a popup or popover opens from, its previous sibling.
     anchor: u32 = none,
+    /// Where a popover goes beside its anchor.
+    placement: Placement = .{},
     /// A popup's option labels, to tell when suggestions change.
     signature: u64 = 0,
     /// The popup option keyboard navigation has reached.
@@ -420,7 +437,7 @@ pub const Node = struct {
 
     pub fn isContainer(self: *const Node) bool {
         return switch (self.kind) {
-            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .toasts, .toast, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field => true,
+            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field => true,
             else => false,
         };
     }
@@ -431,11 +448,16 @@ pub const Node = struct {
     }
     /// True when the node clips its descendants to its bounds.
     pub fn clips(self: *const Node) bool {
-        return self.kind == .scroll or self.kind == .popup or (self.style.clip and self.isContainer());
+        return self.kind == .scroll or self.kind == .popup or self.kind == .popover or (self.style.clip and self.isContainer());
     }
-    /// True for a popup or toast stack, placed over the flow instead of in it.
+    /// True for a popup, popover or toast stack, placed over the flow
+    /// instead of in it.
     pub fn floats(self: *const Node) bool {
-        return self.kind == .popup or self.kind == .toasts;
+        return self.kind == .popup or self.kind == .popover or self.kind == .toasts;
+    }
+    /// True for a popup or popover that is not shown in this pass.
+    pub fn hidden(self: *const Node) bool {
+        return (self.kind == .popup or self.kind == .popover) and !self.checked;
     }
 };
 
@@ -552,6 +574,7 @@ pub const Overlay = struct {
         input: u64,
     };
     pub const Region = struct { id: u64, rect: Rect };
+    pub const Popover = struct { id: u64, anchor: u64, rect: Rect, anchor_rect: Rect };
     pub const Anchor = struct {
         id: u64,
         combo: bool,
@@ -580,6 +603,9 @@ pub const Overlay = struct {
     pub const TokenField = struct { id: u64, input: ?u64, embed: ?Embed };
     pub const Interactive = struct { id: u64, bounds: Rect, rect: Rect, embed: Embed };
     popup: ?Popup = null,
+    /// The shown popover painted last, which takes Escape and presses
+    /// outside it.
+    popover: ?Popover = null,
     /// Enabled options of the open popup, in build order.
     items: [max_popup_items]Region = undefined,
     item_count: usize = 0,
@@ -665,6 +691,15 @@ pub const View = struct {
     range: ?struct { collection: u64, from: ?u64, to: u64, inside: bool = false, done: bool = false } = null,
     /// Token field whose token was removed in this pass.
     removed_token: u32 = none,
+    /// Popover that Escape or a press outside closed; the next pass that
+    /// builds it clears its `open` flag.
+    popover_dismiss: ?u64 = null,
+    /// The popover shown in the last pass, which focus moved into when it
+    /// opened, and whether focus was inside it at the end of that pass.
+    popover_shown: ?u64 = null,
+    popover_within: bool = false,
+    /// A popover that opened in this pass, whose first control takes focus.
+    popover_opened: ?u64 = null,
     /// Column tracks of this pass's tables.
     tracks: [max_table_tracks]Track = undefined,
     track_len: usize = 0,
@@ -695,6 +730,7 @@ pub const View = struct {
         self.item_event = null;
         self.range = null;
         self.removed_token = none;
+        self.popover_opened = null;
         self.track_len = 0;
         self.tip_index = none;
         self.buffers.nodes[0] = .{ .kind = .column, .id = root_seed, .style = root_style, .end = 1 };
@@ -712,13 +748,13 @@ pub const View = struct {
     pub fn visible(self: *const View, node: *const Node) ?Rect {
         const all = self.nodes();
         var rect = node.bounds;
-        if (node.kind == .popup and !node.checked) return null;
+        if (node.hidden()) return null;
         // Popups and toasts are drawn over the flow, so the clips of their
         // own ancestors do not apply to them.
         var parent = if (node.floats()) none else node.parent;
         while (parent < all.len) : (parent = all[parent].parent) {
             const ancestor = &all[parent];
-            if (ancestor.kind == .popup and !ancestor.checked) return null;
+            if (ancestor.hidden()) return null;
             if (ancestor.clips()) rect = intersect(rect, ancestor.bounds) orelse return null;
             if (ancestor.floats()) break;
         }
@@ -768,6 +804,12 @@ pub const View = struct {
         return out;
     }
 
+    /// The event of this pass when it targets `id`, which it consumes; for
+    /// composite controls built from embedded leaves that register
+    /// controls of their own under ids they choose.
+    pub fn takeEvent(self: *View, id: u64) ?Event {
+        return self.take(id);
+    }
     fn take(self: *View, id: u64) ?Event {
         const event = self.event orelse return null;
         const target = switch (event) {
@@ -822,6 +864,19 @@ pub const View = struct {
             }
         }
         node.end = self.len;
+        if (node.kind == .popover and node.checked) {
+            if (self.popover_opened) |id| if (id == node.id) {
+                self.popover_opened = null;
+                // Focus moves into a popover as it opens, unless its
+                // content asked for a control of its own.
+                if (self.restore == null) if (self.firstFocusable(index)) |at| {
+                    self.restore = self.buffers.nodes[at].id;
+                };
+            };
+            if (self.popover_shown) |id| if (id == node.id) {
+                self.popover_within = self.focusWithin(node);
+            };
+        }
         if (node.kind == .token_field and self.removed_token == index) {
             // After a removal, typing continues in the field's input.
             if (self.firstEmbed(index)) |input| self.restore = self.buffers.nodes[input].id;
@@ -1484,6 +1539,75 @@ pub const View = struct {
         return changed;
     }
 
+    /// A field showing `value`, such as a chosen date, that opens a panel
+    /// of its own: build a `popover` after it, shown while `expanded`.
+    /// Drawn and announced like a combo box. True once for the pass that
+    /// delivers its activation, by press, Enter or Space; flip the
+    /// popover's flag in that branch. Named by `Style.name` or an enclosing
+    /// field's label.
+    pub fn popupButton(self: *View, value: []const u8, expanded: bool, style: Style) Error!bool {
+        const node = try self.append(.popup_button, style);
+        node.text = try self.copy(value);
+        node.checked = expanded;
+        return self.take(node.id) != null and node.style.enabled;
+    }
+
+    /// Starts a panel floating over the window beside the node just added,
+    /// its anchor, shown while `is_open` is set: build its content only when
+    /// this returns true, and close it with `end` either way. It goes where
+    /// `placement` says, below the anchor by default. When it opens, focus
+    /// moves to its first control. Escape, or a press outside the panel and
+    /// its anchor, clears `is_open`; Escape, or the build clearing it while
+    /// focus is inside, returns focus to the anchor, while a press outside
+    /// leaves it where the press put it. A disabled anchor closes it. Named
+    /// by `Style.name`; padding is 8 DIP unless set.
+    pub fn popover(self: *View, is_open: *bool, placement: Placement, style: Style) Error!bool {
+        if (self.depth == 0) return error.UnbalancedContainer;
+        const parent = &self.buffers.nodes[self.stack[self.depth - 1]];
+        if (parent.last_child == none or self.buffers.nodes[parent.last_child].floats()) return error.NotContainer;
+        const anchor_index = parent.last_child;
+        if (!std.math.isFinite(placement.gap) or placement.gap < 0) return error.InvalidValue;
+        var value = style;
+        if (value.padding.top == 0 and value.padding.bottom == 0 and value.padding.left == 0 and value.padding.right == 0) value.padding = Insets.all(8);
+        const node = try self.open(.popover, value);
+        node.anchor = anchor_index;
+        node.placement = placement;
+        const id = node.id;
+        const anchor = &self.buffers.nodes[anchor_index];
+        if (self.popover_dismiss) |target| if (target == id) {
+            self.popover_dismiss = null;
+            is_open.* = false;
+        };
+        if (!anchor.style.enabled) is_open.* = false;
+        node.checked = is_open.*;
+        const shown = if (self.popover_shown) |current| current == id else false;
+        if (is_open.* and !shown) {
+            self.popover_shown = id;
+            self.popover_within = false;
+            self.popover_opened = id;
+        } else if (!is_open.* and shown) {
+            self.popover_shown = null;
+            if (self.popover_within) self.restore = anchor.id;
+            self.popover_within = false;
+        }
+        return is_open.*;
+    }
+    /// The first control within the container at `index` that can take
+    /// focus, in build order.
+    fn firstFocusable(self: *const View, index: u32) ?u32 {
+        const all = self.buffers.nodes[0..self.len];
+        for (all[index + 1 .. all[index].end], index + 1..) |*node, at| {
+            if (!node.style.enabled) continue;
+            const focusable = switch (node.kind) {
+                .button, .link, .nav_button, .combo_box, .popup_button, .checkbox, .radio, .segment, .tab, .list_item, .disclosure, .toggle_switch, .slider, .stepper, .rating, .token => true,
+                .embed => node.embed.?.focusable,
+                else => false,
+            };
+            if (focusable) return @intCast(at);
+        }
+        return null;
+    }
+
     /// Starts a list of suggestions for the node just added, usually a
     /// text input. The list opens below it while it or one of the
     /// suggestions has focus and at least one is built with `suggestion`;
@@ -1732,6 +1856,13 @@ pub const View = struct {
             }
             return .ignored;
         }
+        if (self.overlay.popover) |panel| if (input.key == .escape and plain) {
+            self.popover_dismiss = panel.id;
+            self.popover_within = false;
+            self.overlay.popover = null;
+            self.restore = panel.anchor;
+            return .handled;
+        };
         if (self.routeRowKey(input)) |route| return route;
         if (self.routeTokenKey(input)) |route| return route;
         if (anchor) |focused| {
@@ -1974,12 +2105,20 @@ pub const View = struct {
     /// Route a primary press before normal input: it hides a shown tooltip,
     /// and outside the open popup it closes the popup. A press outside a
     /// combo box list is consumed, as is one on the list between options.
+    /// A press outside a shown popover and its anchor closes the popover
+    /// and goes on to what lies under it.
     pub fn pointerDown(self: *View, point: Point) PointerRoute {
         var result: PointerRoute = .ignored;
         if (self.tip.target != null and !self.tip.dismissed) {
             self.tip.dismissed = true;
             if (self.tip_index != none) result = .changed;
         }
+        if (self.overlay.popover) |panel| if (!contains(panel.rect, point) and !contains(panel.anchor_rect, point)) {
+            self.popover_dismiss = panel.id;
+            self.popover_within = false;
+            self.overlay.popover = null;
+            result = .changed;
+        };
         const list = self.overlay.popup orelse return result;
         if (contains(list.rect, point)) {
             for (self.overlay.items[0..self.overlay.item_count]) |region| if (contains(region.rect, point)) return result;
@@ -2002,12 +2141,22 @@ pub const View = struct {
     /// open list covers it.
     fn embedAt(self: *const View, point: Point) ?*const Overlay.Interactive {
         if (self.overlay.popup) |list| if (contains(list.rect, point)) return null;
+        const panel = self.popoverAt(point);
         var index = self.overlay.embed_count;
         while (index > 0) {
             index -= 1;
-            if (contains(self.overlay.embeds[index].rect, point)) return &self.overlay.embeds[index];
+            const entry = &self.overlay.embeds[index];
+            if (!contains(entry.rect, point)) continue;
+            // A shown popover covers the leaves under it.
+            if (panel) |rect| if (!inside(entry.rect, rect)) continue;
+            return entry;
         }
         return null;
+    }
+    /// The shown popover's panel when `point` is on it.
+    fn popoverAt(self: *const View, point: Point) ?Rect {
+        const panel = self.overlay.popover orelse return null;
+        return if (contains(panel.rect, point)) panel.rect else null;
     }
     fn local(entry: *const Overlay.Interactive, point: Point) Point {
         return .{ .x = point.x - entry.bounds.x, .y = point.y - entry.bounds.y };
@@ -2051,10 +2200,12 @@ pub const View = struct {
         var target: ?u64 = null;
         if (point) |at| find: {
             if (self.overlay.popup) |list| if (contains(list.rect, at)) break :find;
+            const panel = self.popoverAt(at);
             var index = self.overlay.tip_count;
             while (index > 0) {
                 index -= 1;
                 const region = self.overlay.tips[index];
+                if (panel) |rect| if (!inside(region.rect, rect)) continue;
                 if (contains(region.rect, at)) {
                     target = region.id;
                     break;
@@ -2105,6 +2256,13 @@ pub const View = struct {
             } else false;
             if (!present) self.popup.open = null;
         }
+        // Nor does a popover that is no longer built stay pending.
+        inline for (.{ &self.popover_shown, &self.popover_dismiss }) |slot| if (slot.*) |owner| {
+            const present = for (self.buffers.nodes[0..self.len]) |*node| {
+                if (node.id == owner and node.kind == .popover) break true;
+            } else false;
+            if (!present) slot.* = null;
+        };
         self.settleTooltip();
     }
 
@@ -2122,7 +2280,7 @@ pub const View = struct {
                 const side = @max(Measurer.line_height, metrics.indicator_size) + 2 * metrics.content_inset;
                 break :blk .{ .width = side, .height = side };
             },
-            .combo_box => .{ .width = @max(120, text_size.width + 3 * metrics.content_inset + metrics.indicator_size), .height = @max(text_size.height, metrics.indicator_size) + 2 * metrics.content_inset },
+            .combo_box, .popup_button => .{ .width = @max(120, text_size.width + 3 * metrics.content_inset + metrics.indicator_size), .height = @max(text_size.height, metrics.indicator_size) + 2 * metrics.content_inset },
             .tree_row => .{ .width = ui.widgets.tree_indent * @as(f32, @floatFromInt(node.level)) + metrics.indicator_size + metrics.label_gap / 2 + text_size.width + metrics.content_inset, .height = text_size.height + metrics.content_inset },
             .column_header => .{ .width = text_size.width + metrics.indicator_size, .height = text_size.height + metrics.content_inset },
             .token => .{ .width = text_size.width + metrics.content_inset + text_size.height + 4, .height = text_size.height + 4 },
@@ -2137,7 +2295,7 @@ pub const View = struct {
             .rating => .{ .width = @as(f32, @floatCast(node.range.maximum)) * Measurer.line_height, .height = Measurer.line_height + metrics.content_inset },
             .slider => .{ .width = 200, .height = metrics.thumb_size + 2 * metrics.content_inset },
             .stepper => .{ .width = 4 * (Measurer.line_height + metrics.content_inset), .height = Measurer.line_height + metrics.content_inset },
-            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .toasts, .toast, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .embed => unreachable,
+            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .embed => unreachable,
         };
         const minimum: Size = switch (node.kind) {
             .progress, .meter, .slider, .spacer => .{ .width = 0, .height = size.height },
@@ -2372,6 +2530,7 @@ pub const View = struct {
         const all = self.buffers.nodes[0..self.len];
         const overlay = &self.overlay;
         overlay.popup = null;
+        overlay.popover = null;
         overlay.item_count = 0;
         overlay.tip_count = 0;
         overlay.anchor_count = 0;
@@ -2422,6 +2581,10 @@ pub const View = struct {
                     overlay.token_count += 1;
                 },
                 else => {},
+            }
+            if (node.kind == .popover and node.checked) {
+                const anchor = &all[node.anchor];
+                overlay.popover = .{ .id = node.id, .anchor = anchor.id, .rect = node.bounds, .anchor_rect = self.visible(anchor) orelse anchor.bounds };
             }
             if (node.kind == .popup) {
                 const anchor = &all[node.anchor];
@@ -2516,7 +2679,7 @@ pub const View = struct {
         while (index < all.len) : (index += 1) {
             const node = &all[index];
             // A closed popup's options keep no place.
-            if (node.kind == .popup and !node.checked) {
+            if (node.hidden()) {
                 index = node.end - 1;
                 continue;
             }
@@ -2575,6 +2738,7 @@ pub const View = struct {
         }
         const anchor = self.buffers.nodes[node.anchor].bounds;
         if (!node.checked) return .{ .x = anchor.x, .y = anchor.y + anchor.height, .width = 0, .height = 0 };
+        if (node.kind == .popover) return placePopover(root_bounds, anchor, preferred, node.placement);
         const width = @min(@max(anchor.width, preferred.width), root_bounds.width);
         const below = root_bounds.y + root_bounds.height - (anchor.y + anchor.height + popup_gap);
         const above = anchor.y - popup_gap - root_bounds.y;
@@ -2622,6 +2786,14 @@ pub const View = struct {
         for (floating[0..floating_len]) |index| {
             const node = &all[index];
             const bounds = node.bounds;
+            if (node.kind == .popover) {
+                const radius = if (node.style.radius > 0) node.style.radius else 6;
+                target.roundedRect(bounds, radius, ui.Color.rgb(node.style.border orelse theme.palette.border));
+                target.roundedRect(inset(bounds, theme.metrics.border / 2), @max(0, radius - theme.metrics.border / 2), ui.Color.rgb(node.style.background orelse theme.palette.background));
+                // The anchor may publish its semantics later, so the panel
+                // stays at the root, like a text input's list.
+                try target.popover(node.id, bounds, node.style.name, ui.accessibility.root_id);
+            }
             if (node.kind == .popup) {
                 const anchor = &all[node.anchor];
                 const name = if (node.style.name.len > 0) node.style.name else anchor.style.name;
@@ -2662,7 +2834,7 @@ pub const View = struct {
             }
             const node = &all[at];
             if (node.floats()) {
-                if (node.kind != .popup or node.checked) {
+                if (!node.hidden()) {
                     if (floating_len.* == max_floating) return error.TooManyItems;
                     floating[floating_len.*] = @intCast(at);
                     floating_len.* += 1;
@@ -2687,7 +2859,7 @@ pub const View = struct {
             if (control.name.len == 0) control.name = annotation.name;
             if (control.description.len == 0) control.description = node.tooltip;
             switch (node.kind) {
-                .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .toasts, .toast, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field => {
+                .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field => {
                     switch (node.kind) {
                         .radio_group, .segmented => try target.radioGroup(node.id, bounds, style.name),
                         .list_box => try target.listBox(node.id, bounds, style.name),
@@ -2746,7 +2918,7 @@ pub const View = struct {
                 .button => try target.buttonWithOptions(node.id, bounds, node.text, control),
                 .link => try target.link(node.id, bounds, node.text, control),
                 .nav_button => try target.navButton(node.id, bounds, node.direction, node.text, control),
-                .combo_box => try target.comboBox(node.id, bounds, node.text, node.checked, control),
+                .combo_box, .popup_button => try target.comboBox(node.id, bounds, node.text, node.checked, control),
                 .avatar => try target.avatar(node.id, bounds, node.text, .{ .image = node.image, .color = style.background, .semantic_parent = node.semantic_parent }),
                 .badge => {
                     const pad = theme.metrics.content_inset + 4;
@@ -2932,6 +3104,63 @@ pub fn tooltipId(id: u64) u64 {
 fn inset(rect: Rect, amount: f32) Rect {
     return .{ .x = rect.x + amount, .y = rect.y + amount, .width = @max(0, rect.width - 2 * amount), .height = @max(0, rect.height - 2 * amount) };
 }
+/// True when `inner` lies within `outer`.
+fn inside(inner: Rect, outer: Rect) bool {
+    return inner.x >= outer.x and inner.y >= outer.y and inner.x + inner.width <= outer.x + outer.width and inner.y + inner.height <= outer.y + outer.height;
+}
+
+/// A popover panel of `size` beside `anchor` within `window`, as
+/// `placement` asks: on its side, or the opposite one when the panel does
+/// not fit there and that side has more room, then moved and cut to stay
+/// within the window.
+pub fn placePopover(window: Rect, anchor: Rect, size: Size, placement: Placement) Rect {
+    const width = @min(if (placement.match_width) @max(size.width, anchor.width) else size.width, window.width);
+    const height = @min(size.height, window.height);
+    const gap = placement.gap;
+    const below = window.y + window.height - (anchor.y + anchor.height + gap);
+    const above = anchor.y - gap - window.y;
+    const right = window.x + window.width - (anchor.x + anchor.width + gap);
+    const left = anchor.x - gap - window.x;
+    var side = placement.side;
+    switch (side) {
+        .bottom => if (height > below and above > below) {
+            side = .top;
+        },
+        .top => if (height > above and below > above) {
+            side = .bottom;
+        },
+        .right => if (width > right and left > right) {
+            side = .left;
+        },
+        .left => if (width > left and right > left) {
+            side = .right;
+        },
+    }
+    var x: f32 = undefined;
+    var y: f32 = undefined;
+    switch (side) {
+        .bottom, .top => {
+            y = if (side == .bottom) anchor.y + anchor.height + gap else anchor.y - gap - height;
+            x = switch (placement.alignment) {
+                .start => anchor.x,
+                .center => anchor.x + (anchor.width - width) / 2,
+                .end => anchor.x + anchor.width - width,
+            };
+        },
+        .left, .right => {
+            x = if (side == .right) anchor.x + anchor.width + gap else anchor.x - gap - width;
+            y = switch (placement.alignment) {
+                .start => anchor.y,
+                .center => anchor.y + (anchor.height - height) / 2,
+                .end => anchor.y + anchor.height - height,
+            };
+        },
+    }
+    x = std.math.clamp(x, window.x, @max(window.x, window.x + window.width - width));
+    y = std.math.clamp(y, window.y, @max(window.y, window.y + window.height - height));
+    return .{ .x = x, .y = y, .width = width, .height = height };
+}
+
 fn contains(rect: Rect, point: Point) bool {
     return point.x >= rect.x and point.y >= rect.y and point.x < rect.x + rect.width and point.y < rect.y + rect.height;
 }
@@ -2994,6 +3223,11 @@ pub const Host = struct {
     /// The deadline last handed to the scheduler.
     scheduled: ?u64 = null,
     schedule_queued: bool = false,
+    /// A control asked for focus before any frame registered it, such as
+    /// the first control of a popover that just opened; it takes focus
+    /// after the next frame.
+    pending_focus: ?u64 = null,
+    focus_queued: bool = false,
 
     pub fn init(state: anytype, comptime build: fn (@TypeOf(state), *View) anyerror!void, buffers: Buffers, options: Options) Host {
         var view = View.init(buffers);
@@ -3062,6 +3296,14 @@ pub const Host = struct {
         const id = self.view.restore orelse return;
         self.view.restore = null;
         if (self.context.input_state.focused == id) return;
+        if (self.context.window != null and !self.context.input_state.available(id)) {
+            self.pending_focus = id;
+            self.invalidate();
+            return;
+        }
+        self.focus(id);
+    }
+    fn focus(self: *Host, id: u64) void {
         self.context.focusControl(id) catch |err| switch (err) {
             error.NotAttached => self.context.input_state.setFocused(id),
             else => self.last_error = err,
@@ -3069,6 +3311,26 @@ pub const Host = struct {
     }
     fn invalidate(self: *Host) void {
         if (self.context.window) |window| window.invalidate();
+    }
+    /// An embedded leaf took a press or key and may have changed state
+    /// it owns; a pass lets the build apply it at once, then focus goes
+    /// where that pass asked, or to `leaf`.
+    fn settleEmbed(self: *Host, leaf: ?u64) void {
+        self.pass(null) catch |err| {
+            self.last_error = err;
+        };
+        if (self.view.restore == null) self.view.restore = leaf;
+        self.restoreFocus();
+        self.invalidate();
+    }
+    /// Focus the control a pass asked for once a frame registered it.
+    fn focusTask(ptr: *anyopaque) void {
+        const self: *Host = @ptrCast(@alignCast(ptr));
+        self.focus_queued = false;
+        const id = self.pending_focus orelse return;
+        self.pending_focus = null;
+        if (self.context.window == null or self.context.input_state.focused == id) return;
+        if (self.context.input_state.available(id)) self.focus(id);
     }
     fn onAction(ptr: *anyopaque, id: u64) void {
         const self: *Host = @ptrCast(@alignCast(ptr));
@@ -3104,11 +3366,7 @@ pub const Host = struct {
                 // A press on a tree or table row selects through the view,
                 // which sees its modifiers; the pass then focuses the row.
                 if (self.view.embedPointerDown(point)) |press_on| {
-                    if (press_on.focusable) {
-                        self.view.restore = press_on.id;
-                        self.restoreFocus();
-                    }
-                    self.invalidate();
+                    self.settleEmbed(if (press_on.focusable) press_on.id else null);
                     return true;
                 }
                 const hit = self.context.input_state.hit(.{ .x = point.x, .y = point.y });
@@ -3133,7 +3391,7 @@ pub const Host = struct {
                     // Keys nothing else routes go to a focused embedded leaf.
                     .ignored => {
                         if (!self.view.embedKey(input)) return false;
-                        self.invalidate();
+                        self.settleEmbed(null);
                         return true;
                     },
                     // A consumed key bypasses the Context, so repaint here
@@ -3191,6 +3449,14 @@ pub const Host = struct {
             if (content.place) |place| place(content.context, node.id, node.bounds);
         }
         self.requestWake();
+        if (self.pending_focus != null and !self.focus_queued) if (self.context.window) |window| {
+            if (window.app.post(.{ .context = self, .call = focusTask })) |_| {
+                self.focus_queued = true;
+            } else |err| {
+                self.last_error = self.last_error orelse err;
+                self.pending_focus = null;
+            }
+        };
         self.scroll_region_count = 0;
         for (self.view.nodes()) |*node| {
             if (node.kind != .scroll or self.scroll_region_count == max_scroll_regions) continue;
@@ -3332,6 +3598,9 @@ const Recorder = struct {
     pub fn popupList(self: *Recorder, id: u64, bounds: Rect, _: []const u8, _: u64) !void {
         self.chooser = id;
         self.push(.popup, id, bounds, false);
+    }
+    pub fn popover(self: *Recorder, id: u64, bounds: Rect, _: []const u8, _: u64) !void {
+        self.push(.popover, id, bounds, false);
     }
     pub fn navButton(self: *Recorder, id: u64, bounds: Rect, _: NavDirection, _: []const u8, _: ui.widgets.Options) !void {
         self.push(.nav_button, id, bounds, false);
