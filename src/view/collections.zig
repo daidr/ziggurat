@@ -1660,6 +1660,7 @@ pub const TableState = struct {
                 return true;
             },
             .wheel => |wheel| return core.wheel(wheel.delta),
+            .key_up => return false,
             .key => |press| return self.onKey(press),
         }
     }
@@ -2427,6 +2428,7 @@ pub const GridState = struct {
                 return true;
             },
             .wheel => |wheel| return core.wheel(wheel.delta),
+            .key_up => return false,
             .key => |press| {
                 if (core.sharedKey(press)) |handled| return handled;
                 const count = core.rows.count;
