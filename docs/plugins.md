@@ -13,7 +13,7 @@ endpoint 实现三个回调，全部在主线程、由 Host 调用：
 | 回调 | 时机 | 要求 |
 | --- | --- | --- |
 | `open(host, session)` | 新文档握手 | 取消旧 session 的全部工作，用新 session 重建 Router/EventSession |
-| `receive(host, bytes)` | 发给当前 session 的消息 | 字节只借用到返回；用 `ipc.Dispatcher` 分派，回复经 `host.send` |
+| `receive(host, bytes)` | 发给当前 session 的消息 | 字节只借用到返回；用 `ipc.Dispatcher` 分派，回复经 `host.send`；`host.send` 失败时 Host 已结束连接并关闭所有 endpoint（包括调用者），之后返回错误 |
 | `close(host)` | 文档离开、发送失败或 detach | 取消工作，之后不再发送；`host.send` 此时返回 `NotConnected` |
 
 插件拥有自己的 IPC limits（页面侧客户端须传入相同 limits）。阻塞工作放在插件显式创建并 join 的 worker 上，结果经 `App.post` 回到主线程再用当前 token 回复；迟到结果遇到已关闭或已换代的 session 时由 Router 拒绝（`StaleSession`/`StaleRequest`），插件释放其数据。插件名为 1–32 字节小写 ASCII 字母、数字和 `-`，以字母开头；重名或超过 16 个插件时 `use` 失败。

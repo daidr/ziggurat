@@ -330,6 +330,21 @@ test "a transport failure closes the connection until the next hello" {
     try std.testing.expectError(error.Closed, f.host.use(f.echo.plugin()));
 }
 
+test "a plugin's failed send closes every endpoint" {
+    var f: Fixture = .{};
+    try f.init();
+    defer f.deinit();
+    _ = f.host.receive(runtime.hello);
+    const call = try std.fmt.allocPrint(allocator, "{{\"v\":1,\"session\":\"{s}\",\"kind\":\"call\"}}", .{&(try f.session("plugin:echo"))});
+    defer allocator.free(call);
+    f.page.fail = true;
+    try std.testing.expectEqual(.handled, f.host.receive(call));
+    try std.testing.expect(!f.host.connected());
+    try std.testing.expectEqual(1, f.echo.closes);
+    try std.testing.expectEqual(error.TransportFailed, f.host.last_error.?);
+    try std.testing.expectError(error.NotConnected, f.host.send("x"));
+}
+
 test "plugins need valid distinct names" {
     var f: Fixture = .{};
     try f.init();

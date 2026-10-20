@@ -130,4 +130,4 @@ _ = try view.evaluateJS(script, .{ .timeout_ms = 1000 }, completion);
 
 `zig build test-page-runtime` 覆盖握手配置、foreign/过期消息分流、窗口方法回复与错误码、先回复后关闭、事件订阅与下一文档初始值、非法订阅关闭连接、新文档取消旧 session 与插件、发送失败、插件名校验、偏好转换、查找脚本与结果校验、插件清单，以及 `WindowControls` 在测试后端上的状态切换；`zig build test` 同时检查提交的生成客户端。`bun test packages` 用模拟宿主覆盖握手、窗口控制、事件顺序、连接前注册的监听器、插件 session 分发，以及与 Zig 模块相同用例下的 i18n 结果和查找匹配器。
 
-`smoke-page-runtime -Dwebview=true` 在隐藏窗口的真实页面里运行打包后的 `@ziggurat/runtime`：握手配置、`setTitle`/最大化往返、locale 与拖入文件事件、插件 session 上的生成客户端调用、两种查找路径（Custom Highlight 与 `<mark>` 回退）共 20 步的计数/前进/后退/大小写/清除，以及 `closeWindow` 先回复后关闭。需要 Bun 打包测试页面。Linux 已在 WebKitGTK 2.52.6 本地通过；Windows 由 CI 的 WebView2 步骤运行。隐藏窗口检查不代表高亮的视觉质量。
+`smoke-page-runtime -Dwebview=true` 在隐藏窗口的真实页面里运行打包后的 `@ziggurat/runtime`：握手配置、`setTitle`/最大化往返、locale 与拖入文件事件、插件 session 上的生成客户端调用、两种查找路径（Custom Highlight 与 `<mark>` 回退）共 20 步的计数/前进/后退/大小写/清除，以及 `closeWindow` 先回复后关闭。需要 Bun 打包测试页面。Linux 已在 WebKitGTK 2.52.6 本地通过；Windows 列在 CI 手动触发的 WebView2 任务中。隐藏窗口检查不代表高亮的视觉质量。

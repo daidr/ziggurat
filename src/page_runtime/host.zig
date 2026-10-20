@@ -255,9 +255,14 @@ pub const Host = struct {
     }
 
     /// Sends one message to the current document. Used by plugin endpoints.
+    /// A transport failure ends the connection, so every endpoint, the
+    /// caller included, is closed before the error returns.
     pub fn send(self: *Host, bytes: []const u8) !void {
         if (self.state != .connected) return error.NotConnected;
-        try self.transport.send(self.transport.context, bytes);
+        self.transport.send(self.transport.context, bytes) catch |err| {
+            self.transportFailed(err);
+            return err;
+        };
     }
 
     /// The language the app shows. Connected pages receive a locale event;
