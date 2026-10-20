@@ -24,8 +24,9 @@ extern fn zsl_chooser_show(?*anyopaque, c_int, [*]const [*:0]const u8, u32, [*:0
 extern fn zsl_chooser_path(*anyopaque, u32, *?[*]const u8, *usize) void;
 extern fn zsl_chooser_cancel(*anyopaque) void;
 extern fn zsl_chooser_detach(*anyopaque) void;
-extern fn zsl_tray_show(?*anyopaque, [*:0]const u8, ?[*:0]const u8, ?*anyopaque, u64, TrayEvent, *c_int) ?*anyopaque;
-extern fn zsl_tray_update(*anyopaque, ?*anyopaque, [*:0]const u8) c_int;
+extern fn zsl_tray_show(?*anyopaque, [*:0]const u8, [*:0]const u8, ?[*:0]const u8, ?*anyopaque, u64, TrayEvent, *c_int) ?*anyopaque;
+extern fn zsl_tray_update(*anyopaque, ?*anyopaque, [*:0]const u8, [*:0]const u8) c_int;
+extern fn zsl_tray_menu(*anyopaque, [*]const NativeItem, u32) void;
 extern fn zsl_tray_remove(*anyopaque) void;
 extern fn zsl_note_show([*:0]const u8, [*:0]const u8, c_int, c_int, c_int, ?*anyopaque, u64, Done) ?*anyopaque;
 extern fn zsl_note_close(*anyopaque) void;
@@ -41,6 +42,7 @@ pub extern fn zsl_chooser_select(*anyopaque, [*]const [*:0]const u8, u32, ?[*:0]
 pub extern fn zsl_chooser_accept(*anyopaque, u32, ?[*:0]const u8) c_int;
 pub extern fn zsl_chooser_complete(*anyopaque, [*]const [*:0]const u8, u32) c_int;
 pub extern fn zsl_tray_path(*anyopaque) [*:0]const u8;
+pub extern fn zsl_tray_menu_path(*anyopaque) [*:0]const u8;
 pub extern fn zsl_note_server_id(*anyopaque) u32;
 
 pub const message = struct {
@@ -363,12 +365,12 @@ pub const Owner = struct {
         var tooltip: [512]u8 = undefined;
         const title = try trayText(&tooltip, options.tooltip);
         if (self.tray) |tray| {
-            if (zsl_tray_update(tray, options.icon, title) == 0) return error.IconCopyFailed;
+            if (zsl_tray_update(tray, options.icon, title, "") == 0) return error.IconCopyFailed;
             return;
         }
         const serial = try self.nextSerial();
         var failure: c_int = 0;
-        self.tray = zsl_tray_show(options.icon, title, null, self, serial, trayEvent, &failure) orelse return error.IconCopyFailed;
+        self.tray = zsl_tray_show(options.icon, title, "", null, self, serial, trayEvent, &failure) orelse return error.IconCopyFailed;
         self.tray_serial = serial;
     }
     pub fn clearTray(self: *Owner) !void {
@@ -387,7 +389,7 @@ pub const Owner = struct {
             1 => self.deliver(.{ .tray_context = .{ .x = x, .y = y } }),
             -1 => {
                 self.last_error = @bitCast(y);
-                self.report(.dbus, if (x == 3) error.TrayRegistrationFailed else error.TrayCreationFailed, @bitCast(y));
+                self.report(.dbus, trayFailure(x), @bitCast(y));
             },
             else => {},
         }
@@ -557,7 +559,9 @@ pub const Owner = struct {
 };
 
 /// A notification-area item that belongs to the App rather than a window,
-/// exported as a status notifier item on the session bus.
+/// exported as a status notifier item on the session bus. Its own menu is
+/// exported beside it as a dbusmenu, which the panel draws and reports
+/// clicks on.
 pub const Tray = struct {
     context: *anyopaque,
     on_action: *const fn (*anyopaque, *Tray, types.TrayAction) void,
@@ -565,6 +569,9 @@ pub const Tray = struct {
     native: ?*anyopaque = null,
     guid: ?[16]u8 = null,
     popup: Popup = .{},
+    /// The exported menu's items by index; separators and submenus keep 0.
+    menu_ids: [types.max_menu_items]u64 = undefined,
+    menu_count: usize = 0,
     /// The last point a host reported, used by `TrayAnchor.icon`.
     point: ?types.ScreenPoint = null,
     serial: u64 = 0,
@@ -585,9 +592,13 @@ pub const Tray = struct {
         defer scope.end();
         var tooltip: [512]u8 = undefined;
         const title = try trayText(&tooltip, options.tooltip);
+        var label_buffer: [512]u8 = undefined;
+        const label = try trayText(&label_buffer, options.title);
+        if (options.menu) |items| _ = try menus.validate(items, false);
         if (self.native) |native| {
             if (!std.meta.eql(self.guid, options.guid)) return error.TrayIdentityChanged;
-            if (zsl_tray_update(native, options.icon, title) == 0) return error.IconCopyFailed;
+            if (zsl_tray_update(native, options.icon, title, label) == 0) return error.IconCopyFailed;
+            if (options.menu) |items| try self.setMenu(items);
             return;
         }
         if (self.serial == std.math.maxInt(u64)) return error.IdExhausted;
@@ -605,9 +616,38 @@ pub const Tray = struct {
         }
         self.serial += 1;
         var failure: c_int = 0;
-        self.native = zsl_tray_show(options.icon, title, id, self, self.serial, event, &failure) orelse return error.IconCopyFailed;
+        self.native = zsl_tray_show(options.icon, title, label, id, self, self.serial, event, &failure) orelse return error.IconCopyFailed;
         self.app = app;
         self.guid = options.guid;
+        self.menu_count = 0;
+        if (options.menu) |items| self.setMenu(items) catch |err| {
+            _ = app.cancelStop(self.stop_token.?) catch {};
+            self.stop_token = null;
+            self.release();
+            return err;
+        };
+    }
+    /// Replaces the item's own menu, which the panel opens itself; an empty
+    /// slice removes it. Items are copied. Panels that cannot draw a dbusmenu
+    /// call ContextMenu instead, reported as `TrayAction.context`, where
+    /// popupMenu() can open the same items. Commands report `TrayAction.menu`.
+    pub fn setMenu(self: *Tray, items: []const types.Item) !void {
+        const app = self.app orelse return error.NotAttached;
+        app.assertOwner();
+        const native = self.native orelse return error.NotAttached;
+        const plan = try menus.validate(items, false);
+        var labels: [types.max_menu_items][512]u8 = undefined;
+        var native_items: [types.max_menu_items]NativeItem = undefined;
+        var ids: [types.max_menu_items]u64 = undefined;
+        var enabled: [types.max_menu_items]bool = undefined;
+        _ = try nativeItems(items, &plan, &labels, &native_items, &ids, &enabled);
+        for (items, 0..) |item, index| {
+            // The panel greys what an ancestor disables, too.
+            native_items[index].enabled = @intFromBool(plan.enabled[index]);
+            self.menu_ids[index] = if (item.kind == .command) item.id else 0;
+        }
+        self.menu_count = items.len;
+        zsl_tray_menu(native, &native_items, @intCast(items.len));
     }
     /// Removes the item. A pending popup is dismissed silently.
     pub fn remove(self: *Tray) !void {
@@ -659,10 +699,14 @@ pub const Tray = struct {
                 self.point = .{ .x = x, .y = y };
                 self.deliver(.{ .context = .{ .x = x, .y = y } });
             },
+            3 => {
+                const index: usize = @intCast(x);
+                if (index < self.menu_count and self.menu_ids[index] != 0) self.deliver(.{ .menu = self.menu_ids[index] });
+            },
             -1 => {
                 self.last_error = @bitCast(y);
                 const app = self.app orelse return;
-                app.report(.{ .severity = .warning, .domain = .dbus, .operation = .window_update, .err = if (x == 3) error.TrayRegistrationFailed else error.TrayCreationFailed, .code = @bitCast(y) });
+                app.report(.{ .severity = .warning, .domain = .dbus, .operation = .window_update, .err = trayFailure(x), .code = @bitCast(y) });
             },
             else => {},
         }
@@ -687,6 +731,7 @@ pub const Tray = struct {
         self.app = null;
         self.guid = null;
         self.point = null;
+        self.menu_count = 0;
     }
 };
 
@@ -739,6 +784,16 @@ fn boundedText(destination: []u8, text: []const u8, units: usize) ![*:0]const u8
     const needed = std.unicode.calcUtf16LeLen(text) catch return error.InvalidUtf8;
     if (needed > units) return error.TextCapacityExceeded;
     return terminated(destination, text);
+}
+
+/// Bus failure stages the native item reports: 1 connection, 2 export,
+/// 3 watcher registration, 4 menu export.
+fn trayFailure(stage: i32) anyerror {
+    return switch (stage) {
+        3 => error.TrayRegistrationFailed,
+        4 => error.TrayMenuExportFailed,
+        else => error.TrayCreationFailed,
+    };
 }
 
 fn trayText(destination: []u8, text: []const u8) ![*:0]const u8 {

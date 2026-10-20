@@ -20,6 +20,13 @@ extern fn zsf_last_urgency() c_int;
 extern fn zsf_last_silent() c_int;
 extern fn zsf_last_transient() c_int;
 extern fn zsf_invoke(u32) void;
+extern fn zsf_menu_layout([*:0]const u8) void;
+extern fn zsf_layout_ready() c_int;
+extern fn zsf_layout_text() [*:0]const u8;
+extern fn zsf_layout_revision() u32;
+extern fn zsf_layout_id(c_int) i32;
+extern fn zsf_menu_click([*:0]const u8, i32) void;
+extern fn zsl_tray_menu_path(*anyopaque) [*:0]const u8;
 extern fn zsf_server_close(u32) void;
 extern fn zsl_popup_activate(*anyopaque, i32) c_int;
 extern fn zsl_chooser_select(*anyopaque, [*]const [*:0]const u8, u32, ?[*:0]const u8) c_int;
@@ -46,6 +53,13 @@ const f10 = 0xffc7;
 const control_alt = (1 << 2) | (1 << 3);
 
 const menu = [_]system.Item{ .{ .id = 1, .label = "&Show" }, .{ .id = 2, .label = "&Quit" } };
+const tray_menu = [_]system.Item{
+    .{ .id = 1, .label = "&Show", .accelerator = .{ .key = .s, .modifiers = .{ .control = true } } },
+    .{ .kind = .separator },
+    .{ .id = 3, .kind = .submenu, .label = "More", .enabled = false },
+    .{ .id = 4, .parent = 3, .label = "Deep" },
+    .{ .id = 2, .label = "Quit", .checked = true },
+};
 const guid = [16]u8{ 0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef };
 
 const Step = enum {
@@ -59,6 +73,12 @@ const Step = enum {
     tray_pixmap,
     standalone_show,
     standalone_id,
+    standalone_label,
+    standalone_menu_path,
+    standalone_layout,
+    standalone_menu_click,
+    standalone_menu_replace,
+    standalone_menu_replaced,
     standalone_context,
     standalone_popup,
     notify_show,
@@ -92,6 +112,8 @@ const State = struct {
     actions: usize = 0,
     tray_actions: usize = 0,
     hotkeys: usize = 0,
+    revision: u32 = 0,
+    stale_id: i32 = 0,
     activated: [4]u64 = @splat(0),
     activated_count: usize = 0,
     notification_id: u32 = 0,
@@ -142,6 +164,10 @@ const State = struct {
         switch (self.step) {
             .standalone_context => try std.testing.expectEqual(system.TrayAction{ .context = .{ .x = 30, .y = 31 } }, value),
             .standalone_popup => try std.testing.expectEqual(system.TrayAction{ .popup = .{ .request = 77, .selected = 2 } }, value),
+            // A command below a disabled submenu was clicked first and ignored.
+            .standalone_menu_click => try std.testing.expectEqual(system.TrayAction{ .menu = 2 }, value),
+            // So was a command of the replaced menu.
+            .standalone_menu_replaced => try std.testing.expectEqual(system.TrayAction{ .menu = 12 }, value),
             else => return error.UnexpectedAction,
         }
         self.advance();
@@ -217,6 +243,14 @@ const State = struct {
         try std.testing.expectEqualStrings(expected, std.mem.span(zsf_property_text()));
         self.advance();
     }
+    /// Reads the standalone item's menu as a panel would.
+    fn layout(self: *State) !bool {
+        if (!self.waiting) {
+            self.waiting = true;
+            zsf_menu_layout(zsl_tray_menu_path(self.tray.native.?));
+        }
+        return self.ready(zsf_layout_ready() != 0);
+    }
     fn press(self: *State, keysyms: []const c_ulong, release: bool) !void {
         for (keysyms) |keysym| if (self.xtest(self.display, XKeysymToKeycode(self.display, keysym), 1, 0) == 0) return error.InputInjectionFailed;
         if (release) {
@@ -260,13 +294,44 @@ const State = struct {
             .standalone_show => {
                 if (!self.waiting) {
                     try self.owner.clearTray();
-                    try self.tray.show(self.app, .{ .tooltip = "Standalone", .guid = guid });
+                    try self.tray.show(self.app, .{ .tooltip = "Standalone", .guid = guid, .title = "Ziggurat", .menu = &tray_menu });
+                    try std.testing.expectError(error.DuplicateMenuId, self.tray.setMenu(&.{ .{ .id = 1, .label = "A" }, .{ .id = 1, .label = "B" } }));
                     try std.testing.expectError(error.TrayIdentityChanged, self.tray.show(self.app, .{ .tooltip = "Other" }));
                     self.waiting = true;
                 }
                 if (try self.ready(zsf_registrations() == 2)) self.advance();
             },
             .standalone_id => try self.property("Id", "1032547698badcfe0123456789abcdef"),
+            .standalone_label => try self.property("XAyatanaLabel", "Ziggurat"),
+            .standalone_menu_path => try self.property("Menu", std.mem.span(zsl_tray_menu_path(self.tray.native.?))),
+            .standalone_layout => {
+                if (!try self.layout()) return;
+                try std.testing.expectEqualStrings("(_Show[Control+s];-;!More(!Deep);Quit*)", std.mem.span(zsf_layout_text()));
+                self.revision = zsf_layout_revision();
+                self.advance();
+            },
+            .standalone_menu_click => {
+                if (self.waiting) return;
+                self.waiting = true;
+                const path = zsl_tray_menu_path(self.tray.native.?);
+                zsf_menu_click(path, zsf_layout_id(4));
+                self.stale_id = zsf_layout_id(5);
+                zsf_menu_click(path, self.stale_id);
+            },
+            .standalone_menu_replace => {
+                if (!self.waiting) try self.tray.setMenu(&.{.{ .id = 12, .label = "Open" }});
+                if (!try self.layout()) return;
+                try std.testing.expectEqualStrings("(Open)", std.mem.span(zsf_layout_text()));
+                try std.testing.expectEqual(self.revision + 1, zsf_layout_revision());
+                self.advance();
+            },
+            .standalone_menu_replaced => {
+                if (self.waiting) return;
+                self.waiting = true;
+                const path = zsl_tray_menu_path(self.tray.native.?);
+                zsf_menu_click(path, self.stale_id);
+                zsf_menu_click(path, zsf_layout_id(1));
+            },
             .standalone_context => zsf_item_call("ContextMenu", 30, 31),
             .standalone_popup => {
                 if (!self.waiting) {
@@ -475,5 +540,5 @@ pub fn main() !void {
     try std.testing.expectEqual(2, state.hotkeys);
     try std.testing.expectEqual(6, state.results);
     try std.testing.expect(state.tray.native == null);
-    std.debug.print("Linux desktop smoke passed: tray export/register/activate/context/update/pixmap, standalone tray identity/popup, notifications hints/activate/replace/server-close/stale, X11 hotkeys press/repeat/conflict/release, choosers open/many/save/folder/cancel/capacity/detach, window closure; native records left={d}\n", .{system.message.resourceCount()});
+    std.debug.print("Linux desktop smoke passed: tray export/register/activate/context/update/pixmap, standalone tray identity/label/dbusmenu layout/click/replace/popup, notifications hints/activate/replace/server-close/stale, X11 hotkeys press/repeat/conflict/release, choosers open/many/save/folder/cancel/capacity/detach, window closure; native records left={d}\n", .{system.message.resourceCount()});
 }
