@@ -71,7 +71,10 @@ const Probe = struct {
         }
         const after_children = try handles();
         if (after_children != baseline) std.debug.print("process handles: before={d}, after={d}\n", .{ baseline, after_children });
-        try std.testing.expectEqual(baseline, after_children);
+        // Windows shell work just before this loop leaves pool threads that
+        // can retire meanwhile and lower the count; a leaked child or thread
+        // handle still raises it.
+        if (builtin.os.tag == .windows) try std.testing.expect(after_children <= baseline) else try std.testing.expectEqual(baseline, after_children);
         var pixels: [32 * 32 * 4]u8 = @splat(0x6b);
         if (builtin.os.tag == .windows) {
             try std.testing.expectError(error.ResultCapacityExceeded, worker.fileIcon(self.executable, .{}, pixels[0..4]));
