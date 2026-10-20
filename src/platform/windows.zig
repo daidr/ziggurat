@@ -14,6 +14,10 @@ const class_name = std.unicode.utf8ToUtf16LeStringLiteral("Ziggurat.Window.0");
 const dispatch_name = std.unicode.utf8ToUtf16LeStringLiteral("Ziggurat.Dispatch.0");
 const wake_message = c.WM_APP + 1;
 const interaction_message = c.WM_APP + 2;
+/// Asks a focusable popup, after the activation that moved away from it,
+/// whether it closes.
+const popup_dismiss_message = c.WM_APP + 3;
+const popup_shadow_class_name = std.unicode.utf8ToUtf16LeStringLiteral("Ziggurat.PopupShadow.0");
 const identity_property = std.unicode.utf8ToUtf16LeStringLiteral("Ziggurat.NativeIdentity");
 var next_native_identity: usize = 1;
 var next_interaction: usize = 1;
@@ -32,7 +36,7 @@ const PointerDispatch = struct {
     release: ?PointerRelease = null,
 };
 const Wait = struct { handle: c.HANDLE = null, task: core.Task = undefined, generation: u64 = 1, retired: bool = false };
-pub const AppData = struct { dispatcher: c.HWND = null, wake_event: c.HANDLE = null, wake_pending: std.atomic.Value(bool) = .init(false), class_icons: icons.Icons = .{}, waits: [16]Wait = @splat(.{}), window_class: c.ATOM = 0, key_dispatch: ?*KeyDispatch = null, pointer_dispatch: ?*PointerDispatch = null, pointer_windows: usize = 0 };
+pub const AppData = struct { popup_shadow_class: c.ATOM = 0, dispatcher: c.HWND = null, wake_event: c.HANDLE = null, wake_pending: std.atomic.Value(bool) = .init(false), class_icons: icons.Icons = .{}, waits: [16]Wait = @splat(.{}), window_class: c.ATOM = 0, key_dispatch: ?*KeyDispatch = null, pointer_dispatch: ?*PointerDispatch = null, pointer_windows: usize = 0 };
 const FullscreenPlacement = struct { style: isize, ex_style: isize, placement: c.WINDOWPLACEMENT };
 pub const WindowData = struct { hwnd: c.HWND = null, icons: icons.Icons = .{}, text: text_input.Handler = .{}, fullscreen: bool = false, restoring_placement: bool = false, saved: ?FullscreenPlacement = null, identity: usize = 0, gesture_active: bool = false, gesture_used: bool = false, gesture_point: c.LPARAM = 0, pending_interaction: ?PendingInteraction = null, interaction_handoff: bool = false, native_loop_depth: usize = 0, pointer_operation: pointer_press.Operation = .{}, pointer_counted: bool = false };
 var active_app: std.atomic.Value(bool) = .init(false);
@@ -91,6 +95,8 @@ pub fn deinit(app: *core.App) void {
     _ = c.DestroyWindow(app.native.dispatcher);
     _ = c.UnregisterClassW(dispatch_name, c.GetModuleHandleW(null));
     _ = c.UnregisterClassW(class_name, c.GetModuleHandleW(null));
+    if (app.native.popup_shadow_class != 0) _ = c.UnregisterClassW(popup_shadow_class_name, c.GetModuleHandleW(null));
+    app.native.popup_shadow_class = 0;
     app.native.class_icons.deinit();
     _ = c.CloseHandle(app.native.wake_event);
     c.CoUninitialize();
@@ -133,16 +139,85 @@ pub fn create(window: *core.WindowRecord, options: core.WindowOptions) !void {
         return error.AdjustWindowFailed;
     }
     const owner = if (window.owner_record) |parent| parent.native.hwnd else null;
-    window.native.hwnd = c.CreateWindowExW(0, class_name, title.ptr, native_style, c.CW_USEDEFAULT, c.CW_USEDEFAULT, rect.right - rect.left, rect.bottom - rect.top, owner, null, c.GetModuleHandleW(null), window);
+    var ex_style: u32 = 0;
+    var class: [*:0]const u16 = class_name;
+    var origin: c_int = c.CW_USEDEFAULT;
+    if (options.popup) |role| {
+        // Owned popups stay above their owner; the tool-window style keeps
+        // every popup out of the taskbar and the task switcher.
+        native_style = c.WS_POPUP | c.WS_CLIPCHILDREN;
+        ex_style = c.WS_EX_TOOLWINDOW;
+        if (role.topmost) ex_style |= c.WS_EX_TOPMOST;
+        if (!role.focusable) ex_style |= c.WS_EX_NOACTIVATE;
+        if (role.shadow) class = try popupShadowClass(app);
+        // Popups are placed before they show; CW_USEDEFAULT means 0 here.
+        origin = 0;
+    }
+    window.native.hwnd = c.CreateWindowExW(ex_style, class, title.ptr, native_style, origin, origin, rect.right - rect.left, rect.bottom - rect.top, owner, null, c.GetModuleHandleW(null), window);
     if (window.native.hwnd == null) {
         if (app.native_failure == null) app.captureNativeFailure(.win32, c.GetLastError());
         return error.CreateWindowFailed;
     }
     window.native.icons.apply(window.native.hwnd);
+    if (options.popup) |role| if (role.shadow) {
+        // Windows 11 rounds, outlines and shades it as it does its menus;
+        // earlier versions ignore the attribute and keep the class shadow.
+        const round: u32 = dwm_corner_round;
+        _ = DwmSetWindowAttribute(window.native.hwnd, dwm_window_corner_preference, &round, @sizeOf(u32));
+    };
     if (options.text_input_mode != .system) {
         errdefer _ = c.DestroyWindow(window.native.hwnd);
         _ = try setTextInputMode(window, options.text_input_mode);
     }
+}
+const dwm_window_corner_preference = 33;
+const dwm_corner_round = 2;
+/// The class of popups with the drop shadow of menus and tooltips, which only
+/// a class style gives. Registered once, beside the ordinary window class.
+fn popupShadowClass(app: *core.App) ![*:0]const u16 {
+    if (app.native.popup_shadow_class == 0) {
+        var wc = std.mem.zeroes(c.WNDCLASSEXW);
+        wc.cbSize = @sizeOf(c.WNDCLASSEXW);
+        wc.style = c.CS_DROPSHADOW;
+        wc.hInstance = c.GetModuleHandleW(null);
+        wc.lpfnWndProc = windowProc;
+        wc.hCursor = c.LoadCursorW(null, @ptrFromInt(32512));
+        wc.lpszClassName = popup_shadow_class_name;
+        app.native.popup_shadow_class = c.RegisterClassExW(&wc);
+        if (app.native.popup_shadow_class == 0) {
+            app.captureNativeFailure(.win32, c.GetLastError());
+            return error.RegisterClassFailed;
+        }
+    }
+    return popup_shadow_class_name;
+}
+fn quietPopup(window: *const core.WindowRecord) bool {
+    const role = window.options.popup orelse return false;
+    return !role.focusable;
+}
+/// Whether a visible focusable popup owned by `window`, directly or through
+/// other windows, shows: a press that activates `window` then only dismisses
+/// it, as a press outside a menu does, rather than also reaching what is
+/// under the pointer, which may be what opened it.
+fn ownsFocusablePopup(window: *core.WindowRecord) bool {
+    var cursor = window.window.app.first;
+    while (cursor) |record| : (cursor = record.next) {
+        const role = record.options.popup orelse continue;
+        if (!role.focusable or record.phase != .open or record.native.hwnd == null or c.IsWindowVisible(record.native.hwnd) == 0) continue;
+        var owner = record.owner_record;
+        while (owner) |item| : (owner = item.owner_record) if (item == window) return true;
+    }
+    return false;
+}
+/// Whether the window being activated is `popup` or one of the windows it owns.
+fn popupFamily(popup: *core.WindowRecord, activated: c.HWND) bool {
+    if (activated == null) return false;
+    if (c.GetPropW(activated, identity_property) == null) return false;
+    const address = c.GetWindowLongPtrW(activated, c.GWLP_USERDATA);
+    if (address == 0) return false;
+    var cursor: ?*core.WindowRecord = @ptrFromInt(@as(usize, @bitCast(address)));
+    while (cursor) |record| : (cursor = record.owner_record) if (record == popup) return true;
+    return false;
 }
 fn uncountPointer(window: *core.WindowRecord) void {
     if (!window.native.pointer_counted) return;
@@ -470,10 +545,20 @@ pub fn cleanupSafe() bool {
     return flags & c.ISMEX_SEND == 0 or flags & c.ISMEX_REPLIED != 0;
 }
 pub fn show(window: *core.WindowRecord) void {
+    if (quietPopup(window)) {
+        _ = c.ShowWindow(window.native.hwnd, c.SW_SHOWNOACTIVATE);
+        return;
+    }
     _ = c.ShowWindow(window.native.hwnd, c.SW_SHOW);
+    // A focusable popup takes the keyboard as it shows, as a menu does.
+    if (window.options.popup != null) _ = c.SetForegroundWindow(window.native.hwnd);
 }
 pub fn perform(window: *core.WindowRecord, action: core.WindowAction) !void {
     const hwnd = window.native.hwnd;
+    if ((action == .show or action == .focus) and window.options.popup != null) {
+        // A quiet popup never takes the keyboard; focusing it only shows it.
+        if (action == .show or quietPopup(window)) return show(window);
+    }
     switch (action) {
         .show => _ = c.ShowWindow(hwnd, c.SW_SHOW),
         .hide => _ = c.ShowWindow(hwnd, c.SW_HIDE),
@@ -998,6 +1083,20 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
             return 0;
         },
         c.WM_ERASEBKGND => return 1,
+        c.WM_MOUSEACTIVATE => {
+            if (quietPopup(window)) return c.MA_NOACTIVATE;
+            if (ownsFocusablePopup(window)) return c.MA_ACTIVATEANDEAT;
+        },
+        c.WM_ACTIVATE => if (window.options.popup) |role| {
+            if (role.focusable and wp & 0xffff == c.WA_INACTIVE and !popupFamily(window, @ptrFromInt(@as(usize, @bitCast(lp))))) {
+                // Decide after the activation completes, outside its handler.
+                _ = c.PostMessageW(hwnd, popup_dismiss_message, 0, 0);
+            }
+        },
+        popup_dismiss_message => {
+            if (c.IsWindowVisible(hwnd) != 0 and c.GetActiveWindow() != hwnd) window.popupDismissed();
+            return 0;
+        },
         c.WM_GETMINMAXINFO => {
             if (window.native.fullscreen and !window.native.restoring_placement) return 0;
             const limits: *c.MINMAXINFO = @ptrFromInt(@as(usize, @bitCast(lp)));
@@ -1054,7 +1153,8 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
         },
         c.WM_LBUTTONDOWN => {
             if (!pointerContinuation(window, hwnd, operation)) return 0;
-            _ = c.SetFocus(hwnd);
+            // SetFocus would activate a popup that never takes the keyboard.
+            if (!quietPopup(window)) _ = c.SetFocus(hwnd);
             if (!pointerContinuation(window, hwnd, operation)) return 0;
             if (c.GetCapture() != hwnd) _ = c.SetCapture(hwnd);
             if (!pointerContinuation(window, hwnd, operation)) return 0;
