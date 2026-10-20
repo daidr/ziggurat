@@ -1,0 +1,3 @@
+interface:
+  display_name: "Ziggurat app maintenance"
+  short_description: "Maintain Zig apps built on Ziggurat"
