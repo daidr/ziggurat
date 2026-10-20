@@ -175,6 +175,8 @@ pub fn keyName(key: types.Key) []const u8 {
         .right => "Right",
         .up => "Up",
         .down => "Down",
+        .plus => "Plus",
+        .minus => "-",
     };
 }
 

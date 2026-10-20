@@ -32,6 +32,10 @@ pub const menus = @import("menus.zig");
 pub const shell = @import("shell.zig");
 pub const desktop = @import("desktop.zig");
 pub const watch = @import("watch.zig");
+pub const paths = @import("paths.zig");
+pub const menu_roles = @import("menu_roles.zig");
+pub const menu_role_actions = @import("menu_role_actions.zig");
+pub const signals = @import("signals.zig");
 pub const capabilities = .{
     .native_menu = windows or linux,
     .menu_accelerators = windows or linux,
@@ -48,4 +52,5 @@ pub const capabilities = .{
     .shell = shell.capabilities,
     .desktop = desktop.capabilities,
     .file_watch = builtin.os.tag == .windows or builtin.os.tag == .linux,
+    .quit_on_signals = signals.capabilities.quit_on_signals,
 };

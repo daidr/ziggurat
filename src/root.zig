@@ -25,6 +25,8 @@ pub const AppOptions = struct {
     icon_policy: enum { automatic, disabled, required } = .automatic,
     /// Limits caller-owned nodes; no participant table is allocated.
     stop_capacity: usize = 256,
+    /// Borrowed until deinit.
+    activation: ?ActivationHandler = null,
 };
 
 pub const Task = mailbox.Task;
@@ -285,7 +287,49 @@ pub const WindowState = struct {
 pub const ScreenPoint = struct { x: i32, y: i32 };
 /// Client size is in DIP. A null position preserves the current position when set.
 pub const ClientBounds = struct { position: ?ScreenPoint = null, width: u32, height: u32 };
-pub const WindowCapabilities = struct { client_position: bool, fullscreen: bool, always_on_top: bool, owned_windows: bool = false, modal_windows: bool = false, custom_decoration: bool = false, native_move_resize: bool = false, system_menu: bool = false, transparent: bool = false, backdrop_material: bool = false };
+pub const WindowCapabilities = struct {
+    client_position: bool,
+    fullscreen: bool,
+    always_on_top: bool,
+    owned_windows: bool = false,
+    modal_windows: bool = false,
+    custom_decoration: bool = false,
+    native_move_resize: bool = false,
+    system_menu: bool = false,
+    transparent: bool = false,
+    backdrop_material: bool = false,
+    /// `setOpacity` changes whole-window translucency. GTK needs a compositor.
+    opacity: bool = false,
+    /// `setIgnorePointer` lets pointer input reach the windows below.
+    ignore_pointer: bool = false,
+    /// `setContentProtection` excludes the window from screen capture.
+    content_protection: bool = false,
+    /// `flashFrame` asks for attention: a flashing taskbar button or an
+    /// urgency hint.
+    attention: bool = false,
+    /// `setSkipTaskbar` hides the taskbar entry.
+    skip_taskbar: bool = false,
+    /// `minimizable`/`maximizable` change the system buttons and commands.
+    /// Linux X11 publishes them as window manager hints.
+    window_buttons: bool = false,
+};
+/// Runtime window policy. `resizable` also gates custom resize edges and
+/// `startResize`; `movable` gates `startMove` and native move commands;
+/// `closable` cancels user close requests before `on_close` runs.
+pub const WindowTraits = struct {
+    resizable: bool = true,
+    movable: bool = true,
+    minimizable: bool = true,
+    maximizable: bool = true,
+    closable: bool = true,
+};
+/// Called on the owner thread when the App gains or loses its first focused
+/// window. Focus moving between this App's windows reports nothing: the change
+/// is evaluated at the next dispatch safe point. Context outlives the App.
+pub const ActivationHandler = struct {
+    context: *anyopaque,
+    changed: *const fn (*anyopaque, *App, bool) void,
+};
 pub const WindowDecoration = enum { system, borderless, custom };
 /// System backdrop material drawn by the compositor behind the native frame.
 /// `.system` restores the platform default; client content stays opaque.
@@ -320,6 +364,15 @@ pub const WindowOptions = struct {
     min_height: u32 = 0,
     decoration: WindowDecoration = .system,
     resizable: bool = true,
+    movable: bool = true,
+    minimizable: bool = true,
+    maximizable: bool = true,
+    /// False removes the close command; user close requests are cancelled.
+    closable: bool = true,
+    /// Applied right after native creation; requires the matching capability
+    /// unless left at its default.
+    opacity: f32 = 1,
+    skip_taskbar: bool = false,
     /// Reserved client edge in DIP for .custom; .borderless has no auto edges.
     resize_border: f32 = 6,
     /// Borrowed context remains valid through on_closed, like close handlers.
@@ -381,6 +434,10 @@ pub const App = struct {
     diagnostics_sink: ?diagnostics.Sink = null,
     icon_policy: @FieldType(AppOptions, "icon_policy") = .automatic,
     reporting_diagnostic: bool = false,
+    activation: ?ActivationHandler = null,
+    active: bool = false,
+    activation_dirty: bool = false,
+    activation_notifying: bool = false,
 
     /// Call on the process main thread. App must outlive all its value handles.
     pub fn init(allocator: std.mem.Allocator) !*App {
@@ -396,7 +453,7 @@ pub const App = struct {
             return err;
         };
         errdefer allocator.destroy(self);
-        self.* = .{ .allocator = allocator, .owner = std.Thread.getCurrentId(), .diagnostics_sink = options.diagnostics_sink, .icon_policy = options.icon_policy, .stop_resources = stops };
+        self.* = .{ .allocator = allocator, .owner = std.Thread.getCurrentId(), .diagnostics_sink = options.diagnostics_sink, .icon_policy = options.icon_policy, .stop_resources = stops, .activation = options.activation };
         backend.init(self) catch |err| {
             self.report(self.failureDiagnostic(.app_init, err, null));
             return err;
@@ -537,12 +594,18 @@ pub const App = struct {
         if (options.width == 0 or options.height == 0 or options.width > 32768 or options.height > 32768 or options.min_width > options.width or options.min_height > options.height) return error.InvalidSize;
         if (!std.math.isFinite(options.resize_border) or options.resize_border < 0 or options.resize_border > 64) return error.InvalidGeometry;
         if (options.decoration == .system and options.hit_test != null) return error.InvalidWindowDecoration;
-        const record = try self.allocator.create(WindowRecord);
-        const key = self.windows.insert(self.allocator, record) catch |err| {
-            self.allocator.destroy(record);
+        if (!std.math.isFinite(options.opacity) or options.opacity < 0 or options.opacity > 1) return error.InvalidOpacity;
+        const title = try self.allocator.dupe(u8, options.title);
+        const record = self.allocator.create(WindowRecord) catch |err| {
+            self.allocator.free(title);
             return err;
         };
-        record.* = .{ .window = .{ .app = self, .key = key }, .options = options, .next = self.first, .pins = 1 };
+        const key = self.windows.insert(self.allocator, record) catch |err| {
+            self.allocator.destroy(record);
+            self.allocator.free(title);
+            return err;
+        };
+        record.* = .{ .window = .{ .app = self, .key = key }, .options = options, .next = self.first, .pins = 1, .title = title };
         if (owner) |parent| record.linkOwner(parent);
         if (self.first) |first| first.previous = record;
         self.first = record;
@@ -558,6 +621,11 @@ pub const App = struct {
         }
         record.phase = .open;
         self.refreshRelationships();
+        if (record.phase != .open) return error.CreateWindowFailed;
+        record.applyInitialPolicy() catch |err| {
+            if (record.phase != .closed) record.queueCloseTree();
+            return err;
+        };
         if (record.phase != .open) return error.CreateWindowFailed;
         record.created = true;
         // The native API has copied the title. Do not retain its borrowed slice.
@@ -637,8 +705,44 @@ pub const App = struct {
         try self.flushDestroys();
         self.refreshRelationships();
         self.restoreFocus();
+        self.updateActivation();
         self.flushCleanups();
         self.maybeQuit();
+    }
+    /// Whether one of this App's windows has keyboard focus, as last reported
+    /// to the activation handler.
+    pub fn isActive(self: *const App) bool {
+        self.assertOwner();
+        return self.active;
+    }
+    fn markActivation(self: *App) void {
+        if (self.activation_dirty) return;
+        self.activation_dirty = true;
+        backend.wake(self);
+    }
+    fn updateActivation(self: *App) void {
+        if (!self.activation_dirty or self.activation_notifying) return;
+        self.activation_dirty = false;
+        var focused = false;
+        var cursor = self.first;
+        while (cursor) |record| : (cursor = record.next) {
+            if (record.phase == .open and record.focused) {
+                focused = true;
+                break;
+            }
+        }
+        if (focused == self.active) return;
+        self.active = focused;
+        const handler = self.activation orelse return;
+        self.activation_notifying = true;
+        self.activity_depth += 1;
+        defer {
+            self.activation_notifying = false;
+            self.leaveActivity();
+        }
+        const pointer = self.suspendPointer();
+        defer self.restorePointer(pointer);
+        handler.changed(handler.context, self, focused);
     }
     fn drain(self: *App) void {
         for (0..256) |_| {
@@ -1043,6 +1147,7 @@ pub const Window = struct {
     pub fn startMove(self: Window) !void {
         const scope = try self.beginInteraction(false);
         defer scope.end();
+        if (!scope.record.options.movable) return error.InvalidWindowState;
         if (!backend.capabilities(scope.record).native_move_resize) return error.UnsupportedCapability;
         self.app.native_failure = null;
         backend.startMove(scope.record) catch |err| {
@@ -1138,6 +1243,159 @@ pub const Window = struct {
             return err;
         };
     }
+    pub fn traits(self: Window) !WindowTraits {
+        const record = self.resolve() orelse return error.Closed;
+        if (record.phase != .open) return error.Closed;
+        return record.traits();
+    }
+    pub fn setResizable(self: Window, enabled: bool) !void {
+        var value = try self.traits();
+        value.resizable = enabled;
+        try self.setTraits(value);
+    }
+    pub fn setMovable(self: Window, enabled: bool) !void {
+        var value = try self.traits();
+        value.movable = enabled;
+        try self.setTraits(value);
+    }
+    pub fn setMinimizable(self: Window, enabled: bool) !void {
+        var value = try self.traits();
+        value.minimizable = enabled;
+        try self.setTraits(value);
+    }
+    pub fn setMaximizable(self: Window, enabled: bool) !void {
+        var value = try self.traits();
+        value.maximizable = enabled;
+        try self.setTraits(value);
+    }
+    pub fn setClosable(self: Window, enabled: bool) !void {
+        var value = try self.traits();
+        value.closable = enabled;
+        try self.setTraits(value);
+    }
+    /// Applies all traits in one native style update. Disabling minimize or
+    /// maximize requires `capabilities().window_buttons`.
+    pub fn setTraits(self: Window, value: WindowTraits) !void {
+        const scope = try self.beginUpdate();
+        defer endUpdate(scope);
+        const record = scope.record;
+        if ((!value.minimizable or !value.maximizable) and !backend.capabilities(record).window_buttons) return error.UnsupportedCapability;
+        if (std.meta.eql(record.traits(), value)) return;
+        self.app.native_failure = null;
+        _ = record.invalidatePointer(false);
+        backend.setTraits(record, value) catch |err| {
+            self.reportUpdateFailure(record, err);
+            return err;
+        };
+        record.storeTraits(value);
+        record.emitState();
+    }
+    /// Whole-window translucency from 0 (invisible) to 1 (opaque).
+    pub fn setOpacity(self: Window, value: f32) !void {
+        if (!std.math.isFinite(value) or value < 0 or value > 1) return error.InvalidOpacity;
+        const scope = try self.beginUpdate();
+        defer endUpdate(scope);
+        if (!backend.capabilities(scope.record).opacity) return error.UnsupportedCapability;
+        if (scope.record.opacity == value) return;
+        self.app.native_failure = null;
+        backend.setOpacity(scope.record, value) catch |err| {
+            self.reportUpdateFailure(scope.record, err);
+            return err;
+        };
+        scope.record.opacity = value;
+    }
+    pub fn opacity(self: Window) !f32 {
+        const record = self.resolve() orelse return error.Closed;
+        if (record.phase != .open) return error.Closed;
+        return record.opacity;
+    }
+    /// True lets pointer input pass through to whatever is below the window.
+    /// Keyboard focus is unaffected.
+    pub fn setIgnorePointer(self: Window, enabled: bool) !void {
+        const scope = try self.beginUpdate();
+        defer endUpdate(scope);
+        if (!backend.capabilities(scope.record).ignore_pointer) return error.UnsupportedCapability;
+        if (scope.record.ignore_pointer == enabled) return;
+        self.app.native_failure = null;
+        if (enabled) _ = scope.record.invalidatePointer(false);
+        backend.setIgnorePointer(scope.record, enabled) catch |err| {
+            self.reportUpdateFailure(scope.record, err);
+            return err;
+        };
+        scope.record.ignore_pointer = enabled;
+    }
+    /// Keeps the window's pixels out of screenshots and screen recordings
+    /// where the system honors the request.
+    pub fn setContentProtection(self: Window, enabled: bool) !void {
+        const scope = try self.beginUpdate();
+        defer endUpdate(scope);
+        if (!backend.capabilities(scope.record).content_protection) return error.UnsupportedCapability;
+        self.app.native_failure = null;
+        backend.setContentProtection(scope.record, enabled) catch |err| {
+            self.reportUpdateFailure(scope.record, err);
+            return err;
+        };
+    }
+    /// Starts or stops drawing attention: Windows flashes the taskbar button
+    /// until the window comes to the foreground; GTK sets the urgency hint.
+    pub fn flashFrame(self: Window, enabled: bool) !void {
+        const scope = try self.beginUpdate();
+        defer endUpdate(scope);
+        if (!backend.capabilities(scope.record).attention) return error.UnsupportedCapability;
+        self.app.native_failure = null;
+        backend.flashFrame(scope.record, enabled) catch |err| {
+            self.reportUpdateFailure(scope.record, err);
+            return err;
+        };
+    }
+    pub fn setSkipTaskbar(self: Window, enabled: bool) !void {
+        const scope = try self.beginUpdate();
+        defer endUpdate(scope);
+        if (!backend.capabilities(scope.record).skip_taskbar) return error.UnsupportedCapability;
+        if (scope.record.skip_taskbar == enabled) return;
+        self.app.native_failure = null;
+        backend.setSkipTaskbar(scope.record, enabled) catch |err| {
+            self.reportUpdateFailure(scope.record, err);
+            return err;
+        };
+        scope.record.skip_taskbar = enabled;
+    }
+    /// Marks unsaved changes. Windows and Linux show a "*" before the title,
+    /// as their editors do; `setTitle` keeps the mark.
+    pub fn setDocumentEdited(self: Window, edited: bool) !void {
+        const scope = self.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        const record = scope.record;
+        if (record.document_edited == edited) return;
+        record.document_edited = edited;
+        self.applyTitle(record) catch |err| {
+            record.document_edited = !edited;
+            return err;
+        };
+    }
+    pub fn isDocumentEdited(self: Window) !bool {
+        const record = self.resolve() orelse return error.Closed;
+        if (record.phase != .open) return error.Closed;
+        return record.document_edited;
+    }
+    /// Copies the current title, without the edited mark, into `destination`.
+    pub fn title(self: Window, destination: []u8) ![]const u8 {
+        const record = self.resolve() orelse return error.Closed;
+        if (record.phase != .open) return error.Closed;
+        if (destination.len < record.title.len) return error.ResultCapacityExceeded;
+        @memcpy(destination[0..record.title.len], record.title);
+        return destination[0..record.title.len];
+    }
+    fn applyTitle(self: Window, record: *WindowRecord) !void {
+        const allocator = self.app.allocator;
+        const shown = if (record.document_edited) try std.mem.concat(allocator, u8, &.{ "*", record.title }) else record.title;
+        defer if (record.document_edited) allocator.free(shown);
+        self.app.native_failure = null;
+        backend.setTitle(record, shown) catch |err| {
+            self.app.report(self.app.failureDiagnostic(.window_update, err, self));
+            return err;
+        };
+    }
     fn beginUpdate(self: Window) !CallbackScope {
         const scope = self.beginCallback() orelse return error.Closed;
         if (scope.record.window_update_busy) {
@@ -1160,16 +1418,21 @@ pub const Window = struct {
         const options = record.options;
         if (width == 0 or height == 0 or width > 32768 or height > 32768 or width < options.min_width or height < options.min_height) return error.InvalidSize;
     }
-    pub fn setTitle(self: Window, title: []const u8) !void {
+    pub fn setTitle(self: Window, value: []const u8) !void {
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
-        if (std.mem.indexOfScalar(u8, title, 0) != null) return error.EmbeddedNul;
-        if (!std.unicode.utf8ValidateSlice(title)) return error.InvalidUtf8;
-        self.app.native_failure = null;
-        backend.setTitle(scope.record, title) catch |err| {
-            self.app.report(self.app.failureDiagnostic(.window_update, err, self));
+        if (std.mem.indexOfScalar(u8, value, 0) != null) return error.EmbeddedNul;
+        if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
+        const record = scope.record;
+        const copy = try self.app.allocator.dupe(u8, value);
+        const previous = record.title;
+        record.title = copy;
+        self.applyTitle(record) catch |err| {
+            record.title = previous;
+            self.app.allocator.free(copy);
             return err;
         };
+        self.app.allocator.free(previous);
     }
     pub fn resize(self: Window, width: u32, height: u32) !void {
         const scope = try self.beginUpdate();
@@ -1334,6 +1597,7 @@ pub const Window = struct {
         defer record.unpin();
         if (record.querying_close) return .in_progress;
         if (record.phase == .closing) return .deferred;
+        if (reason == .user and !record.options.closable) return .cancelled;
         if (self.app.querying_close_tree or self.app.querying_quit) return .in_progress;
         self.app.querying_close_tree = true;
         self.app.activity_depth += 1;
@@ -1469,6 +1733,42 @@ pub const WindowRecord = struct {
     next: ?*WindowRecord = null,
     pending_next: ?*WindowRecord = null,
     pending_previous: ?*WindowRecord = null,
+    /// Owned by the record; the native title may add the edited mark.
+    title: []u8 = &.{},
+    document_edited: bool = false,
+    focused: bool = false,
+    opacity: f32 = 1,
+    ignore_pointer: bool = false,
+    skip_taskbar: bool = false,
+    fn traits(self: *const WindowRecord) WindowTraits {
+        return .{ .resizable = self.options.resizable, .movable = self.options.movable, .minimizable = self.options.minimizable, .maximizable = self.options.maximizable, .closable = self.options.closable };
+    }
+    fn storeTraits(self: *WindowRecord, value: WindowTraits) void {
+        self.options.resizable = value.resizable;
+        self.options.movable = value.movable;
+        self.options.minimizable = value.minimizable;
+        self.options.maximizable = value.maximizable;
+        self.options.closable = value.closable;
+    }
+    /// Construction options that the native window starts without.
+    fn applyInitialPolicy(self: *WindowRecord) !void {
+        const options = self.options;
+        const caps = backend.capabilities(self);
+        const buttons = !options.minimizable or !options.maximizable;
+        if (buttons and !caps.window_buttons) return error.UnsupportedCapability;
+        // Native creation already applied `resizable`.
+        if (buttons or !options.movable or !options.closable) try backend.setTraits(self, self.traits());
+        if (options.opacity != 1) {
+            if (!caps.opacity) return error.UnsupportedCapability;
+            try backend.setOpacity(self, options.opacity);
+            self.opacity = options.opacity;
+        }
+        if (options.skip_taskbar) {
+            if (!caps.skip_taskbar) return error.UnsupportedCapability;
+            try backend.setSkipTaskbar(self, true);
+            self.skip_taskbar = true;
+        }
+    }
     fn createNative(self: *WindowRecord, options: WindowOptions) !void {
         if (options.native_pointer_clicks) {
             if (comptime !builtin.is_test and builtin.os.tag != .windows and builtin.os.tag != .linux) return error.UnsupportedCapability;
@@ -1613,6 +1913,7 @@ pub const WindowRecord = struct {
             self.pointer_state = null;
             const previous = app.suspendPointer();
             if (state) |value| app.allocator.destroy(value);
+            app.allocator.free(self.title);
             app.allocated_records -= 1;
             app.allocator.destroy(self);
             app.restorePointer(previous);
@@ -1832,8 +2133,12 @@ pub const WindowRecord = struct {
     pub fn emit(self: *WindowRecord, event: Event) void {
         if (self.phase != .open) return;
         switch (event) {
-            .focus => |focused| if (!focused) {
-                _ = self.invalidatePointer(false);
+            .focus => |focused| {
+                if (!focused) _ = self.invalidatePointer(false);
+                if (self.focused != focused) {
+                    self.focused = focused;
+                    self.window.app.markActivation();
+                }
             },
             .cancel_input => {
                 _ = self.invalidatePointer(false);
@@ -1969,6 +2274,10 @@ pub const WindowRecord = struct {
         if (self.phase == .closed) return;
         self.nativeDestroying();
         const app = self.window.app;
+        if (self.focused) {
+            self.focused = false;
+            app.markActivation();
+        }
         if (app.quit_cursor == self) app.quit_cursor = self.next;
         if (app.relation_cursor == self) app.relation_cursor = self.next;
         _ = app.windows.remove(self.window.key);
@@ -2003,4 +2312,5 @@ test {
     _ = @import("diagnostics_test.zig");
     _ = @import("platform/decoration_test.zig");
     _ = @import("pointer_press_test.zig");
+    _ = @import("window_policy_test.zig");
 }

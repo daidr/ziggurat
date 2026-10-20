@@ -72,6 +72,11 @@ extern fn zlg_window_size(*anyopaque, *u32, *u32, *u32) void;
 extern fn zlg_window_set_bounds(*anyopaque, *const NativeBounds) c_int;
 extern fn zlg_window_fullscreen(*anyopaque, c_int) c_int;
 extern fn zlg_window_topmost(*anyopaque, c_int) c_int;
+extern fn zlg_window_traits(*anyopaque, c_int, c_int, c_int, c_int, c_int) c_int;
+extern fn zlg_window_opacity(*anyopaque, f64) void;
+extern fn zlg_window_ignore_pointer(*anyopaque, c_int) void;
+extern fn zlg_window_urgent(*anyopaque, c_int) void;
+extern fn zlg_window_skip_taskbar(*anyopaque, c_int) void;
 extern fn zlg_window_title(*anyopaque, [*:0]const u8) void;
 extern fn zlg_window_resize(*anyopaque, u32, u32) void;
 extern fn zlg_window_invalidate(*anyopaque) void;
@@ -127,7 +132,25 @@ pub fn state(record: *core.WindowRecord) core.WindowState {
 }
 pub fn capabilities(record: *core.WindowRecord) core.WindowCapabilities {
     const flags = zlg_window_capabilities(record.native.native.?);
-    return .{ .client_position = flags & 1 != 0, .fullscreen = flags & 2 != 0, .always_on_top = flags & 4 != 0, .owned_windows = true, .modal_windows = true, .custom_decoration = flags & 8 != 0, .native_move_resize = flags & 16 != 0, .system_menu = flags & 32 != 0 };
+    return .{ .client_position = flags & 1 != 0, .fullscreen = flags & 2 != 0, .always_on_top = flags & 4 != 0, .owned_windows = true, .modal_windows = true, .custom_decoration = flags & 8 != 0, .native_move_resize = flags & 16 != 0, .system_menu = flags & 32 != 0, .opacity = flags & 64 != 0, .ignore_pointer = flags & 128 != 0, .attention = flags & 256 != 0, .skip_taskbar = flags & 512 != 0, .window_buttons = flags & 1024 != 0 };
+}
+pub fn setTraits(record: *core.WindowRecord, traits: core.WindowTraits) !void {
+    try checkUpdate(zlg_window_traits(record.native.native.?, @intFromBool(traits.resizable), @intFromBool(traits.movable), @intFromBool(traits.minimizable), @intFromBool(traits.maximizable), @intFromBool(traits.closable)));
+}
+pub fn setOpacity(record: *core.WindowRecord, value: f32) !void {
+    zlg_window_opacity(record.native.native.?, value);
+}
+pub fn setIgnorePointer(record: *core.WindowRecord, enabled: bool) !void {
+    zlg_window_ignore_pointer(record.native.native.?, @intFromBool(enabled));
+}
+pub fn setContentProtection(_: *core.WindowRecord, _: bool) !void {
+    return error.UnsupportedCapability;
+}
+pub fn flashFrame(record: *core.WindowRecord, enabled: bool) !void {
+    zlg_window_urgent(record.native.native.?, @intFromBool(enabled));
+}
+pub fn setSkipTaskbar(record: *core.WindowRecord, enabled: bool) !void {
+    zlg_window_skip_taskbar(record.native.native.?, @intFromBool(enabled));
 }
 pub fn setBackdrop(_: *core.WindowRecord, _: core.WindowBackdrop) !void {
     return error.UnsupportedCapability;

@@ -201,11 +201,33 @@ S02 当前仍为部分实现：Windows/Linux 已提供 `launchExecutable`、`ope
 
 `system.desktop` 在 App owner 线程提供显示器、偏好（color scheme、accent、高对比度、减少动态/透明、文字缩放）、电源和网络快照，写入调用者存储且不分配；`Watch` 是调用者持有的变化订阅，每个 Watch 拥有自己的原生订阅，突发合并为每种类最多一次回调，stop 与 App 关闭撤销，停止后的 Watch 不再收到回调，没有轮询计时器。网络 `online` 只表示本地连接。Windows 用从不显示的顶层窗口接收广播，Linux 用 GDK/GtkSettings/GIO 信号。平台差异、启发式和已验证范围见[桌面环境](desktop-environment.md)。
 
+## 应用目录
+
+`paths.Paths.init("Notes")` 按名称解析常用目录，`get(allocator, name)` 返回调用者释放的路径：home、app_data（`$XDG_CONFIG_HOME`，默认 `~/.config`；Windows `%AppData%`）、user_data（app_data/应用名）、cache（`$XDG_CACHE_HOME`，默认 `~/.cache`；Windows `%LocalAppData%`，再接应用名）、logs（user_data/logs）、resources（可执行文件所在目录，解析符号链接后）、temp、exe，以及 desktop/documents/downloads/music/pictures/videos（Linux 读取 `user-dirs.dirs` 并展开 `$HOME`，否则为 home 下的同名目录）。user_data、cache 与 logs 首次 `get` 时创建；`resolve` 只计算不创建。`set(name, path)` 借用覆盖路径，原样返回且不创建。相对的 XDG 目录按规范忽略；缺少 home 时返回 `PathUnavailable`。应用名不得含路径分隔符或保留字符。
+
+## 菜单标准角色
+
+`menu_roles.Role` 列出常用命令（撤销、重做、剪切、复制、粘贴、全选、重新载入、缩放、全屏、最小化、关闭、新建、打开、保存、另存为、退出等）和标准子菜单（文件、编辑、显示、窗口、格式、应用菜单）。`defaults(role, context)` 给出按语言的标签与快捷键：内置英文、简体中文、繁体中文，`resolve(locale, overrides)` 先取应用覆盖、再取内置语言、最后英文；Windows 上重做是 Ctrl+Y、退出叫“退出/Exit”且无快捷键，Linux 重做是 Ctrl+Shift+Z、退出是 Ctrl+Q；`documents = true` 时文件菜单带文档命令，关闭项称“关闭”而非“关闭窗口”。
+
+`Builder.init(items, labels, context)` 把角色写成普通 `Item`，标签写入调用者提供的存储，子菜单角色带出默认条目，同一角色重复出现时（如文件与窗口菜单中的关闭）分配下一个出现序号，只有第一个带快捷键。角色项 ID 位于 `menu_roles.id_base` 之上，`Role.fromId` 还原角色；应用自己的 ID 保持在其下。切换语言时用新 locale 重新构建并再次 `setMenu`。`menu_role_actions.perform(app, window, id)` 执行窗口与应用类角色的默认动作（退出走 `requestQuit`，关闭走用户关闭请求，最小化、缩放、全屏切换），编辑、视图与文档类角色返回 `unhandled`，交给当前内容处理。快捷键键名新增 `plus`（主键盘区的 =/+ 键）与 `minus`。
+
+## 信号退出
+
+`signals.QuitOnSignals.start(app)` 让 SIGINT 与 SIGTERM 变成一次 `requestQuit`：信号处理函数只向管道写一个字节，由默认 GLib 主上下文在主线程读取后调用，关闭处理器照常运行并可取消；第二个信号在处理函数里直接以 128 + 信号值退出进程，即使主线程繁忙或上一次退出被取消。进程启动时已被忽略的信号（如后台作业的 SIGINT）保持忽略。每个进程同时只有一个实例，`stop()` 恢复原处理函数；App 关闭时自动停止。Windows 没有这两个信号，返回 `UnsupportedCapability`。
+
+## 提示音、指针位置与已安装应用
+
+`desktop.beep(app)` 播放系统提示音（Windows `MessageBeep`，GTK `gdk_display_beep`）。`desktop.cursorPosition(app)` 返回与 `Monitor` 相同坐标系的指针位置；Wayland 不公开全局指针位置，返回 `UnsupportedCapability`。
+
+`shell.Worker.installedApps(allocator)` 在后台 worker 上列出启动器可见的应用，按名称（忽略大小写）再按路径排序，结果由 `InstalledApps.deinit` 一次释放。Windows 枚举 Shell 的 Applications 文件夹（开始菜单“所有应用”，打包应用与桌面应用都在内），id 是 AppUserModelID（或已知文件夹下的路径），path 是 `shell:AppsFolder\<id>`；Linux 列出菜单会显示的桌面条目（排除 NoDisplay/Hidden 和不属于当前桌面的条目），id 是桌面文件 ID，path 是 `.desktop` 文件。`launchApp(path)` 启动其中一项：Windows 交给 `ShellExecuteEx`（也接受任意程序路径），Linux 用 `GDesktopAppInfo` 启动；worker 线程上没有 GTK 启动上下文，因此没有启动通知。
+
 ## 文件监视
 
 `system.watch.Watcher` 是 S03 的粗模式文件监视：与 `shell.Worker` 相同，只在宿主创建的后台线程初始化和调用（`interrupt()` 除外，可跨线程唤醒），不创建线程、不轮询，所有缓冲和预算（root、目录 watch、pending、路径字节、原生缓冲）在 `init` 显式分配。`addRoot` 返回即 ready；`wait(events, path_storage, timeout_ms)` 按 debounce 与最大延迟交付合并后的 `changed`（应重新列出的目录）、`overflow`（必须重扫整个 root）和 `root_removed`，调用者容量不足时顺延而不丢弃。Linux 使用 inotify/eventfd/poll，Windows 使用 overlapped `ReadDirectoryChangesW`。它不读取文件 metadata、不匹配 rename，详细模式尚未实现。合同、预算与验证范围见 [文件监视](file-watch.md)；Windows 路径目前只验证交叉编译。
 
 ## 已验证范围
+
+`zig build smoke-system-extras` 在隐藏窗口下播放提示音、读取指针位置、在后台 worker 上列出已安装应用并确认启动不存在的条目失败；Linux 另向本进程发送 SIGTERM，确认经 `requestQuit` 退出事件循环并停止信号处理，Windows 确认信号退出返回 `UnsupportedCapability`。
 
 `zig build smoke-system` 实际创建菜单和 Shell 托盘项，覆盖 12 轮 owner/窗口生存期、菜单状态、原生命令、同 HWND 更换 Owner 后的旧消息、任务栏重建恢复，以及回调内关闭的清理。
 

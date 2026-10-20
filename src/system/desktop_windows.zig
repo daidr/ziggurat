@@ -2,6 +2,7 @@
 //! Owner thread only, except networkChanged, which only posts a message.
 const std = @import("std");
 const desktop = @import("desktop.zig");
+const z = @import("ziggurat");
 const c = @cImport({
     @cDefine("WIN32_LEAN_AND_MEAN", "1");
     @cDefine("NO_STRICT", "1");
@@ -97,6 +98,15 @@ const Enumeration = struct {
         return 1;
     }
 };
+pub fn beep() !void {
+    if (c.MessageBeep(c.MB_OK) == 0) return error.BeepFailed;
+}
+/// Physical pixels, as the process is per-monitor DPI aware.
+pub fn cursorPosition() !z.ScreenPoint {
+    var point: c.POINT = undefined;
+    if (c.GetCursorPos(&point) == 0) return error.CursorUnavailable;
+    return .{ .x = point.x, .y = point.y };
+}
 pub fn monitors(out: *[desktop.max_monitors]desktop.Monitor) !usize {
     var enumeration: Enumeration = .{ .out = out };
     if (c.EnumDisplayMonitors(null, null, Enumeration.visit, @bitCast(@intFromPtr(&enumeration))) == 0) return enumeration.err orelse error.DesktopQueryFailed;

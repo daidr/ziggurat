@@ -3,6 +3,7 @@
    Zig has already validated, keeps no state between calls and releases every
    GLib object before return. Nothing here touches GTK or a main context. */
 #include <gio/gio.h>
+#include <gio/gdesktopappinfo.h>
 #include <stdint.h>
 
 enum {
@@ -125,4 +126,37 @@ int zsh_reveal(const char *path, int timeout_ms, ZshFailure *failure) {
     g_dbus_connection_close_sync(connection, NULL, NULL);
     g_object_unref(connection);
     return status;
+}
+
+/* Visits the applications that menus show (not NoDisplay or Hidden, and
+   meant for this desktop) with their display names, desktop file IDs and
+   entry paths. A nonzero visit result stops early and is returned. */
+typedef int (*ZshAppVisit)(void *context, const char *name, const char *id, const char *path);
+int zsh_apps(ZshAppVisit visit, void *context) {
+    GList *list = g_app_info_get_all();
+    int status = ZSH_OK;
+    for (GList *item = list; item; item = item->next) {
+        GAppInfo *info = item->data;
+        if (status == ZSH_OK && G_IS_DESKTOP_APP_INFO(info) && g_app_info_should_show(info)) {
+            const char *path = g_desktop_app_info_get_filename(G_DESKTOP_APP_INFO(info));
+            const char *name = g_app_info_get_display_name(info);
+            const char *id = g_app_info_get_id(info);
+            if (path && name && id && name[0] && id[0]) status = visit(context, name, id, path);
+        }
+        g_object_unref(info);
+    }
+    g_list_free(list);
+    return status;
+}
+
+/* Launches the application of a desktop entry. Without GTK on this worker
+   there is no display launch context, so no startup notification. */
+int zsh_launch_app(const char *path, ZshFailure *failure) {
+    GDesktopAppInfo *info = g_desktop_app_info_new_from_filename(path);
+    if (!info) return ZSH_NOT_FOUND;
+    GError *error = NULL;
+    gboolean launched = g_app_info_launch(G_APP_INFO(info), NULL, NULL, &error);
+    g_object_unref(info);
+    if (launched) return ZSH_OK;
+    return classify(error, failure);
 }

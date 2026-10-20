@@ -32,9 +32,9 @@ const PointerDispatch = struct {
     release: ?PointerRelease = null,
 };
 const Wait = struct { handle: c.HANDLE = null, task: core.Task = undefined, generation: u64 = 1, retired: bool = false };
-pub const AppData = struct { dispatcher: c.HWND = null, wake_event: c.HANDLE = null, wake_pending: std.atomic.Value(bool) = .init(false), class_icons: icons.Icons = .{}, waits: [16]Wait = @splat(.{}), window_class: c.ATOM = 0, key_dispatch: ?*KeyDispatch = null, pointer_dispatch: ?*PointerDispatch = null, pointer_windows: usize = 0 };
+pub const AppData = struct { taskbar_created: c.UINT = 0, taskbar: ?*TaskbarList = null, dispatcher: c.HWND = null, wake_event: c.HANDLE = null, wake_pending: std.atomic.Value(bool) = .init(false), class_icons: icons.Icons = .{}, waits: [16]Wait = @splat(.{}), window_class: c.ATOM = 0, key_dispatch: ?*KeyDispatch = null, pointer_dispatch: ?*PointerDispatch = null, pointer_windows: usize = 0 };
 const FullscreenPlacement = struct { style: isize, ex_style: isize, placement: c.WINDOWPLACEMENT };
-pub const WindowData = struct { hwnd: c.HWND = null, icons: icons.Icons = .{}, text: text_input.Handler = .{}, fullscreen: bool = false, restoring_placement: bool = false, saved: ?FullscreenPlacement = null, identity: usize = 0, gesture_active: bool = false, gesture_used: bool = false, gesture_point: c.LPARAM = 0, pending_interaction: ?PendingInteraction = null, interaction_handoff: bool = false, native_loop_depth: usize = 0, pointer_operation: pointer_press.Operation = .{}, pointer_counted: bool = false };
+pub const WindowData = struct { hwnd: c.HWND = null, icons: icons.Icons = .{}, text: text_input.Handler = .{}, fullscreen: bool = false, restoring_placement: bool = false, saved: ?FullscreenPlacement = null, identity: usize = 0, gesture_active: bool = false, gesture_used: bool = false, gesture_point: c.LPARAM = 0, pending_interaction: ?PendingInteraction = null, interaction_handoff: bool = false, native_loop_depth: usize = 0, pointer_operation: pointer_press.Operation = .{}, pointer_counted: bool = false, opacity: f32 = 1, ignore_pointer: bool = false, skip_taskbar: bool = false };
 var active_app: std.atomic.Value(bool) = .init(false);
 
 pub fn init(app: *core.App) !void {
@@ -53,6 +53,8 @@ pub fn init(app: *core.App) !void {
         return error.CreateWakeEventFailed;
     }
     errdefer _ = c.CloseHandle(app.native.wake_event);
+    // Zero when unavailable: then a restarted shell simply re-adds skipped tabs.
+    app.native.taskbar_created = c.RegisterWindowMessageW(std.unicode.utf8ToUtf16LeStringLiteral("TaskbarButtonCreated"));
     _ = c.SetProcessDpiAwarenessContext(@ptrFromInt(@as(usize, @bitCast(@as(isize, -4)))));
     const instance = c.GetModuleHandleW(null);
     app.native.class_icons = loadIcons(app, c.GetDpiForSystem()) catch |err| return err;
@@ -88,6 +90,8 @@ pub fn init(app: *core.App) !void {
 }
 
 pub fn deinit(app: *core.App) void {
+    if (app.native.taskbar) |list| _ = list.vtable.release(list);
+    app.native.taskbar = null;
     _ = c.DestroyWindow(app.native.dispatcher);
     _ = c.UnregisterClassW(dispatch_name, c.GetModuleHandleW(null));
     _ = c.UnregisterClassW(class_name, c.GetModuleHandleW(null));
@@ -497,7 +501,119 @@ pub fn state(window: *core.WindowRecord) core.WindowState {
     return .{ .visible = c.IsWindowVisible(hwnd) != 0, .minimized = c.IsIconic(hwnd) != 0, .maximized = c.IsZoomed(hwnd) != 0, .focused = c.GetFocus() == hwnd, .enabled = c.IsWindowEnabled(hwnd) != 0, .fullscreen = window.native.fullscreen, .fullscreen_requested = window.native.fullscreen, .always_on_top = topmost, .always_on_top_requested = topmost };
 }
 pub fn capabilities(window: *core.WindowRecord) core.WindowCapabilities {
-    return .{ .client_position = true, .fullscreen = true, .always_on_top = true, .owned_windows = true, .modal_windows = true, .custom_decoration = true, .native_move_resize = true, .system_menu = true, .backdrop_material = window.options.decoration == .system and systemBackdropAvailable() };
+    return .{ .client_position = true, .fullscreen = true, .always_on_top = true, .owned_windows = true, .modal_windows = true, .custom_decoration = true, .native_move_resize = true, .system_menu = true, .backdrop_material = window.options.decoration == .system and systemBackdropAvailable(), .opacity = true, .ignore_pointer = true, .content_protection = true, .attention = true, .skip_taskbar = true, .window_buttons = true };
+}
+/// Style bits owned by WindowTraits. A window without resize has no maximize
+/// box, as at creation.
+fn traitStyle(current: isize, traits: core.WindowTraits) isize {
+    const owned: isize = c.WS_THICKFRAME | c.WS_MINIMIZEBOX | c.WS_MAXIMIZEBOX;
+    var bits: isize = 0;
+    if (traits.resizable) bits |= c.WS_THICKFRAME;
+    if (traits.minimizable) bits |= c.WS_MINIMIZEBOX;
+    if (traits.resizable and traits.maximizable) bits |= c.WS_MAXIMIZEBOX;
+    return (current & ~owned) | bits;
+}
+pub fn setTraits(window: *core.WindowRecord, traits: core.WindowTraits) !void {
+    const hwnd = window.native.hwnd;
+    if (window.native.saved) |*saved| {
+        // Fullscreen strips the frame; leaving it restores these bits.
+        saved.style = traitStyle(saved.style, traits);
+    } else {
+        const current = c.GetWindowLongPtrW(hwnd, c.GWL_STYLE);
+        const next = traitStyle(current, traits);
+        if (next != current) {
+            if (!writeStyle(hwnd, c.GWL_STYLE, next)) return updateFailure(window);
+            if (!sameWindow(window, hwnd)) return error.Closed;
+            if (c.SetWindowPos(hwnd, null, 0, 0, 0, 0, c.SWP_FRAMECHANGED | c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE) == 0) return updateFailure(window);
+            if (!sameWindow(window, hwnd)) return error.Closed;
+        }
+    }
+    // Graying SC_CLOSE disables the close button and Alt+F4 as well.
+    if (c.GetSystemMenu(hwnd, c.FALSE)) |menu| _ = c.EnableMenuItem(menu, c.SC_CLOSE, @as(c.UINT, c.MF_BYCOMMAND) | @as(c.UINT, if (traits.closable) c.MF_ENABLED else c.MF_GRAYED));
+    if (!sameWindow(window, hwnd)) return error.Closed;
+}
+/// Layered while translucent or transparent to the pointer.
+fn applyLayered(window: *core.WindowRecord, opacity: f32, ignore_pointer: bool) !void {
+    const hwnd = window.native.hwnd;
+    const layered = opacity < 1 or ignore_pointer;
+    const current = c.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE);
+    var next = current & ~@as(isize, c.WS_EX_TRANSPARENT);
+    if (ignore_pointer) next |= c.WS_EX_TRANSPARENT;
+    if (layered) next |= c.WS_EX_LAYERED else next &= ~@as(isize, c.WS_EX_LAYERED);
+    if (next != current) {
+        if (!writeStyle(hwnd, c.GWL_EXSTYLE, next)) return updateFailure(window);
+        if (!sameWindow(window, hwnd)) return error.Closed;
+    }
+    if (layered and c.SetLayeredWindowAttributes(hwnd, 0, @intFromFloat(@round(opacity * 255)), c.LWA_ALPHA) == 0) return updateFailure(window);
+    if (window.native.saved) |*saved| saved.ex_style = (saved.ex_style & ~@as(isize, c.WS_EX_LAYERED | c.WS_EX_TRANSPARENT)) | (next & (c.WS_EX_LAYERED | c.WS_EX_TRANSPARENT));
+}
+pub fn setOpacity(window: *core.WindowRecord, value: f32) !void {
+    try applyLayered(window, value, window.native.ignore_pointer);
+    window.native.opacity = value;
+}
+pub fn setIgnorePointer(window: *core.WindowRecord, enabled: bool) !void {
+    try applyLayered(window, window.native.opacity, enabled);
+    window.native.ignore_pointer = enabled;
+}
+pub fn setContentProtection(window: *core.WindowRecord, enabled: bool) !void {
+    const exclude_from_capture = 0x11;
+    const monitor_only = 0x01;
+    const hwnd = window.native.hwnd;
+    if (c.SetWindowDisplayAffinity(hwnd, if (enabled) exclude_from_capture else c.WDA_NONE) != 0) return;
+    // Before Windows 10 2004 only WDA_MONITOR exists: the window shows black.
+    if (enabled and c.SetWindowDisplayAffinity(hwnd, monitor_only) != 0) return;
+    return updateFailure(window);
+}
+pub fn flashFrame(window: *core.WindowRecord, enabled: bool) !void {
+    var info = std.mem.zeroes(c.FLASHWINFO);
+    info.cbSize = @sizeOf(c.FLASHWINFO);
+    info.hwnd = window.native.hwnd;
+    // Until the window comes to the foreground.
+    info.dwFlags = if (enabled) c.FLASHW_ALL | c.FLASHW_TIMERNOFG else c.FLASHW_STOP;
+    _ = c.FlashWindowEx(&info);
+}
+pub fn setSkipTaskbar(window: *core.WindowRecord, enabled: bool) !void {
+    const list = try taskbarList(window.window.app);
+    window.native.skip_taskbar = enabled;
+    const result = if (enabled) list.vtable.delete_tab(list, window.native.hwnd) else list.vtable.add_tab(list, window.native.hwnd);
+    if (result < 0) {
+        window.native.skip_taskbar = !enabled;
+        window.window.app.captureNativeFailure(.hresult, @bitCast(result));
+        return error.WindowUpdateFailed;
+    }
+}
+/// ITaskbarList, whose header COM macros do not translate.
+const TaskbarList = extern struct {
+    vtable: *const extern struct {
+        query_interface: *const fn (*TaskbarList, *const c.GUID, *?*anyopaque) callconv(.winapi) c.HRESULT,
+        add_ref: *const fn (*TaskbarList) callconv(.winapi) c.ULONG,
+        release: *const fn (*TaskbarList) callconv(.winapi) c.ULONG,
+        hr_init: *const fn (*TaskbarList) callconv(.winapi) c.HRESULT,
+        add_tab: *const fn (*TaskbarList, c.HWND) callconv(.winapi) c.HRESULT,
+        delete_tab: *const fn (*TaskbarList, c.HWND) callconv(.winapi) c.HRESULT,
+        activate_tab: *const fn (*TaskbarList, c.HWND) callconv(.winapi) c.HRESULT,
+        set_active_alt: *const fn (*TaskbarList, c.HWND) callconv(.winapi) c.HRESULT,
+    },
+};
+const clsid_taskbar_list: c.GUID = .{ .Data1 = 0x56fdf344, .Data2 = 0xfd6d, .Data3 = 0x11d0, .Data4 = .{ 0x95, 0x8a, 0x00, 0x60, 0x97, 0xc9, 0xa0, 0x90 } };
+const iid_taskbar_list: c.GUID = .{ .Data1 = 0x56fdf342, .Data2 = 0xfd6d, .Data3 = 0x11d0, .Data4 = .{ 0x95, 0x8a, 0x00, 0x60, 0x97, 0xc9, 0xa0, 0x90 } };
+fn taskbarList(app: *core.App) !*TaskbarList {
+    if (app.native.taskbar) |list| return list;
+    var object: ?*anyopaque = null;
+    var result = c.CoCreateInstance(&clsid_taskbar_list, null, c.CLSCTX_INPROC_SERVER, &iid_taskbar_list, &object);
+    if (result < 0 or object == null) {
+        app.captureNativeFailure(.hresult, @bitCast(result));
+        return error.WindowUpdateFailed;
+    }
+    const list: *TaskbarList = @ptrCast(@alignCast(object.?));
+    result = list.vtable.hr_init(list);
+    if (result < 0) {
+        _ = list.vtable.release(list);
+        app.captureNativeFailure(.hresult, @bitCast(result));
+        return error.WindowUpdateFailed;
+    }
+    app.native.taskbar = list;
+    return list;
 }
 extern "dwmapi" fn DwmSetWindowAttribute(c.HWND, u32, *const anyopaque, u32) callconv(.winapi) c.HRESULT;
 const dwm_system_backdrop_type = 38;
@@ -645,7 +761,8 @@ fn restorePlacement(window: *core.WindowRecord, hwnd: c.HWND, saved: FullscreenP
     const mutable_style: isize = c.WS_VISIBLE | c.WS_DISABLED;
     const restored_style = (saved.style & ~mutable_style) | (current_style & mutable_style);
     const current_ex = c.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE);
-    const restored_ex = (saved.ex_style & ~@as(isize, c.WS_EX_TOPMOST)) | (current_ex & c.WS_EX_TOPMOST);
+    const live_ex: isize = c.WS_EX_TOPMOST | c.WS_EX_LAYERED | c.WS_EX_TRANSPARENT;
+    const restored_ex = (saved.ex_style & ~live_ex) | (current_ex & live_ex);
     if (!writeStyle(hwnd, c.GWL_STYLE, restored_style)) return false;
     if (!sameWindow(window, hwnd)) return false;
     if (!writeStyle(hwnd, c.GWL_EXSTYLE, restored_ex)) return false;
@@ -902,6 +1019,7 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
         window.native.pending_interaction = null;
         if (!window.inputAllowed() or c.IsWindowEnabled(hwnd) == 0 or c.IsWindowVisible(hwnd) == 0 or window.native.fullscreen or c.IsIconic(hwnd) != 0 or window.native.native_loop_depth != 0) return 0;
         if (pending.command & 0xfff0 == c.SC_SIZE and (!window.options.resizable or c.IsZoomed(hwnd) != 0)) return 0;
+        if (pending.command & 0xfff0 == c.SC_MOVE and !window.options.movable) return 0;
         window.native.interaction_handoff = true;
         defer window.native.interaction_handoff = false;
         const handoff = window.invalidatePointer(false);
@@ -915,9 +1033,16 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
         if (message == c.WM_SYSCOMMAND) {
             const command = wp & 0xfff0;
             if ((command == c.SC_SIZE or command == c.SC_MAXIMIZE) and (!window.options.resizable or window.native.fullscreen)) return 0;
-            if (command == c.SC_MOVE and window.native.fullscreen) return 0;
+            if (command == c.SC_MAXIMIZE and !window.options.maximizable) return 0;
+            if (command == c.SC_MINIMIZE and !window.options.minimizable) return 0;
+            if (command == c.SC_CLOSE and !window.options.closable) return 0;
+            if (command == c.SC_MOVE and (window.native.fullscreen or !window.options.movable)) return 0;
             if (command == c.SC_RESTORE and window.native.fullscreen) return 0;
         }
+    }
+    // A restarted shell recreates every button; keep skipped windows off it.
+    if (message != 0 and message == window.window.app.native.taskbar_created and window.native.skip_taskbar) {
+        if (window.window.app.native.taskbar) |list| _ = list.vtable.delete_tab(list, hwnd);
     }
     var key_filtered = false;
     if (message == c.WM_KEYDOWN or message == c.WM_SYSKEYDOWN) {

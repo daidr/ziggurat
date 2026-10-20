@@ -56,6 +56,8 @@ typedef struct NativeWindow {
     /* Present only while a system menu bar is attached: a vertical box that
        holds the bar above the window's ordinary child. */
     GtkWidget *menu_box, *menu_bar;
+    /* WindowTraits the window manager cannot enforce on its own. */
+    gboolean immovable, no_maximize;
 } NativeWindow;
 typedef struct NativeBounds { int32_t x,y; uint32_t width,height; int positioned; } NativeBounds;
 static gint active_app, resources;
@@ -218,14 +220,14 @@ uint32_t zlg_window_capabilities(NativeWindow *s) {
 #ifdef GDK_WINDOWING_X11
     if (GDK_IS_X11_DISPLAY(display)) {
         GdkScreen *screen=gtk_widget_get_screen(s->window);
-        return 1u | 8u | (gdk_x11_screen_supports_net_wm_hint(screen,gdk_atom_intern_static_string("_NET_WM_STATE_FULLSCREEN"))?2u:0u) |
+        return 1u | 8u | 128u | 256u | 512u | 1024u | (gdk_screen_is_composited(screen)?64u:0u) | (gdk_x11_screen_supports_net_wm_hint(screen,gdk_atom_intern_static_string("_NET_WM_STATE_FULLSCREEN"))?2u:0u) |
             (gdk_x11_screen_supports_net_wm_hint(screen,gdk_atom_intern_static_string("_NET_WM_STATE_ABOVE"))?4u:0u) |
             (gdk_x11_screen_supports_net_wm_hint(screen,gdk_atom_intern_static_string("_NET_WM_MOVERESIZE"))?16u:0u) |
             (gdk_x11_screen_supports_net_wm_hint(screen,gdk_atom_intern_static_string("_GTK_SHOW_WINDOW_MENU"))?32u:0u);
     }
 #endif
 #ifdef GDK_WINDOWING_WAYLAND
-    if (GDK_IS_WAYLAND_DISPLAY(display)) return 2u;
+    if (GDK_IS_WAYLAND_DISPLAY(display)) return 2u | 64u | 128u | 256u;
 #endif
     return 0;
 }
@@ -393,6 +395,7 @@ static int start_interaction(NativeWindow *s, GdkEventButton *event, int edge, g
         if (result && owned_gesture && pointer_current(s,operation) && s->gesture==event) s->gesture_used=FALSE;
         return result;
     }
+    if (edge<0 && s->immovable) return 4;
     if (edge<0) gtk_window_begin_move_drag(GTK_WINDOW(s->window),event->button,(int)event->x_root,(int)event->y_root,event->time);
     else gtk_window_begin_resize_drag(GTK_WINDOW(s->window),(GdkWindowEdge)edge,event->button,(int)event->x_root,(int)event->y_root,event->time);
     return s->destroyed?2:0;
@@ -414,7 +417,7 @@ static gboolean button(GtkWidget *widget, GdkEventButton *native, gpointer data)
         uint64_t operation=s->pointer_operation;
         if (native_button==1 && type==GDK_2BUTTON_PRESS && pointer_allowed(s,operation) && query_hit(s,x,y)==1 && pointer_allowed(s,operation)) {
             pointer_revoke(s,TRUE);
-            if (!s->destroyed && gtk_window_get_resizable(GTK_WINDOW(s->window))) {
+            if (!s->destroyed && gtk_window_get_resizable(GTK_WINDOW(s->window)) && !s->no_maximize) {
                 if (window_state(s)&GDK_WINDOW_STATE_MAXIMIZED) gtk_window_unmaximize(GTK_WINDOW(s->window)); else gtk_window_maximize(GTK_WINDOW(s->window));
             }
         }
@@ -851,6 +854,50 @@ int zlg_window_set_menubar(GtkWidget *toplevel, GtkWidget *bar) {
 done:;
     int result=s->destroyed?2:0; release(s); return result;
 }
+/* Applies WindowTraits. Minimize, maximize and move reach the window manager
+   as Motif function hints on X11; other displays keep the GTK part only.
+   Returns 0, or 2 when the window is closing. */
+int zlg_window_traits(NativeWindow *s, int resizable, int movable, int minimizable, int maximizable, int closable) {
+    retain(s);
+    if (s->destroyed) { release(s); return 2; }
+    GtkWindow *window=GTK_WINDOW(s->window);
+    if (!resizable && gtk_window_get_resizable(window)) {
+        /* A fixed window would otherwise shrink to its natural size. */
+        int width=0,height=0; gtk_window_get_size(window,&width,&height);
+        gtk_window_set_default_size(window,width,height);
+    }
+    gtk_window_set_resizable(window,resizable);
+    gtk_window_set_deletable(window,closable);
+    s->immovable=!movable; s->no_maximize=!maximizable;
+#ifdef GDK_WINDOWING_X11
+    if (!s->destroyed && GDK_IS_X11_DISPLAY(gtk_widget_get_display(s->window))) {
+        if (!gtk_widget_get_realized(s->window)) gtk_widget_realize(s->window);
+        GdkWindow *native=gtk_widget_get_window(s->window);
+        GdkWMFunction functions=GDK_FUNC_ALL;
+        if (!resizable || !movable || !minimizable || !maximizable || !closable) {
+            functions=0;
+            if (resizable) functions|=GDK_FUNC_RESIZE;
+            if (movable) functions|=GDK_FUNC_MOVE;
+            if (minimizable) functions|=GDK_FUNC_MINIMIZE;
+            if (maximizable && resizable) functions|=GDK_FUNC_MAXIMIZE;
+            if (closable) functions|=GDK_FUNC_CLOSE;
+        }
+        if (native) gdk_window_set_functions(native,functions);
+    }
+#endif
+    int result=s->destroyed?2:0; release(s); return result;
+}
+void zlg_window_opacity(NativeWindow *s, double opacity) { retain(s);gtk_widget_set_opacity(s->window,opacity);release(s); }
+/* An empty input shape lets the pointer reach the windows below. */
+void zlg_window_ignore_pointer(NativeWindow *s, int enabled) {
+    retain(s);
+    cairo_region_t *empty=enabled?cairo_region_create():NULL;
+    gtk_widget_input_shape_combine_region(s->window,empty);
+    if (empty) cairo_region_destroy(empty);
+    release(s);
+}
+void zlg_window_urgent(NativeWindow *s, int enabled) { retain(s);gtk_window_set_urgency_hint(GTK_WINDOW(s->window),enabled);release(s); }
+void zlg_window_skip_taskbar(NativeWindow *s, int enabled) { retain(s);gtk_window_set_skip_taskbar_hint(GTK_WINDOW(s->window),enabled);release(s); }
 void zlg_window_title(NativeWindow *s, const char *title) { retain(s);gtk_window_set_title(GTK_WINDOW(s->window),title);release(s); }
 void zlg_window_resize(NativeWindow *s, uint32_t width, uint32_t height) { retain(s);gtk_window_resize(GTK_WINDOW(s->window),width,height);release(s); }
 void zlg_window_invalidate(NativeWindow *s) { gtk_widget_queue_draw(s->area); }

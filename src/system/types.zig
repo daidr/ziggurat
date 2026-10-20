@@ -151,6 +151,9 @@ pub const Key = enum {
     right,
     up,
     down,
+    /// The "=" / "+" key of the main block, as "CmdOrCtrl+Plus" names it.
+    plus,
+    minus,
 };
 pub const Modifiers = struct { control: bool = false, alt: bool = false, shift: bool = false, super: bool = false };
 pub const Hotkey = struct { key: Key, modifiers: Modifiers = .{}, repeat: bool = false };

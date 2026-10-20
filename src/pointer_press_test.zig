@@ -390,17 +390,18 @@ test "pointer opt-in allocation is absent by default and OOM construction rolls 
     try std.testing.expect(record(plain).pointerSequenceHighWater() == null);
     try std.testing.expectError(error.UnsupportedCapability, plain.pointerPressSnapshot(.{}, .down));
     _ = try plain.destroy();
-    // Warmed registry slot makes the next allocation the record, followed by
-    // exactly the optional raw owner. Its failed allocation takes no context.
+    // Warmed registry slot makes the next allocations the title copy and the
+    // record, followed by exactly the optional raw owner. Its failed
+    // allocation takes no context.
     const before = failure.alloc_index;
-    failure.fail_index = before + 1;
+    failure.fail_index = before + 2;
     try std.testing.expectError(error.OutOfMemory, app.createWindow(.{ .native_pointer_clicks = true }));
     try std.testing.expectEqual(@as(usize, 0), app.resourceStats().allocated_records);
     failure.fail_index = std.math.maxInt(usize);
     const enabled = try app.createWindow(.{ .native_pointer_clicks = true });
     try std.testing.expect(record(enabled).pointerEnabled());
     try std.testing.expectEqual(@as(u64, 0), record(enabled).pointerSequenceHighWater().?);
-    try std.testing.expectEqual(@as(usize, 2), failure.alloc_index - before - 1);
+    try std.testing.expectEqual(@as(usize, 3), failure.alloc_index - before - 2);
     _ = try enabled.destroy();
 }
 

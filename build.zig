@@ -480,7 +480,10 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .linux) {
         const native = native_support.add(b, system, "system-shell-native", "src/system/shell_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         native.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
+        native.linkSystemLibrary("gio-unix-2.0", .{ .use_pkg_config = .force });
         system.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
+        const signals_native = native_support.add(b, system, "system-signals-native", "src/system/signals_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        signals_native.linkSystemLibrary("glib-2.0", .{ .use_pkg_config = .force });
         system.link_libc = true;
     }
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
@@ -504,6 +507,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_system", .module = system },
         });
         addSmoke(b, "smoke-desktop", "tests/system_desktop_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        addSmoke(b, "smoke-system-extras", "tests/system_extras_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
         });
@@ -1279,6 +1286,7 @@ pub fn build(b: *std.Build) void {
         addSmoke(b, "smoke-window-relationships", "tests/window_relationship_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-key-input", "tests/key_input_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-window-chrome", "tests/window_chrome_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-window-policy", "tests/window_policy_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-drawing", "tests/drawing_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
@@ -1342,6 +1350,7 @@ pub fn build(b: *std.Build) void {
         addSmoke(b, "smoke-window-relationships", "tests/window_relationship_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-key-input", "tests/key_input_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-window-chrome", "tests/window_chrome_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
+        addSmoke(b, "smoke-window-policy", "tests/window_policy_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-drawing", "tests/drawing_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
@@ -2015,6 +2024,16 @@ pub fn build(b: *std.Build) void {
     const watch_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/system/watch.zig"), .target = target, .optimize = optimize, .link_libc = target.result.os.tag == .windows }) });
     b.step("test-file-watch", "Run coarse file-watch unit tests").dependOn(&b.addRunArtifact(watch_tests).step);
     const menu_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/system/menus.zig"), .target = target, .optimize = optimize }) });
+    const system_extra_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/system/extras_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "ziggurat", .module = core }},
+    }) });
+    check.dependOn(&system_extra_tests.step);
+    const run_system_extra_tests = b.addRunArtifact(system_extra_tests);
+    test_step.dependOn(&run_system_extra_tests.step);
+    b.step("test-system-extras", "Run application paths, menu role, role action and signal quit tests").dependOn(&run_system_extra_tests.step);
     const system_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/system_capabilities.zig"),
         .target = target,
