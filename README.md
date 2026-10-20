@@ -144,6 +144,6 @@ Ziggurat 使用 [MIT 许可证](LICENSE)。源码包包含 LICENSE，构建安�
 - [局部失效](docs/invalidation.md)
 - [构建缓存与 WSL 容量](docs/build-cache.md)
 - [共享 GPU 资源](docs/gpu-resources.md)、[GPU 离屏](docs/gpu-offscreen.md)
-- [显式控件主题](docs/theme.md)、[背景效果与加载动画](docs/backdrop-effects.md)
+- [显式控件主题](docs/theme.md)、[背景效果与加载动画](docs/backdrop-effects.md)、[着色器与元素效果](docs/shader-effects.md)
 
 Linux 可选 WebKitGTK 使用显式 `.storage = .ephemeral`，或由宿主 worker 准备目录、同一 App 创建的持久 `Profile`。支持可信 HTML、顶层 IPC、页面与有界脚本，以及显式 custom scheme 的静态/异步响应、worker 文件快照/按需文件泵、独立矩形页面区域、可离窗停放的 PageSession 和需单独部署请求扩展的远程来源。可选 [CookieStore](docs/cookie-store.md) 直接绑定 Profile，无页面时也能执行有界 URL 查询和显式授权的写入/清 Cookie；普通页面不会自动创建它。宿主已有回环 HTTPS 服务时，可在 Profile 创建期显式冻结 `127.0.0.1` 的证书例外与直连策略，沿用 RemotePage 权限；内存/文件资源的 HTTPS 运输与更广浏览器工具继续实施。存储预算、证书例外范围及关闭边界见[Linux Profile](docs/webview-profile.md)，依赖、能力查询及实际检查见[页面策略](docs/pages.md)。
