@@ -880,7 +880,7 @@ pub const TerminalView = struct {
             .pointer_leave => self.hover = null,
             // Presses, drags, the wheel and keys go through the text field
             // route.
-            .pointer_down, .pointer_drag, .pointer_up, .pointer_cancel, .wheel, .key => return false,
+            .pointer_down, .pointer_drag, .pointer_up, .pointer_cancel, .wheel, .key, .key_up => return false,
         }
         const was = before != null;
         const is = self.hover != null;

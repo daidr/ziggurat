@@ -27,6 +27,8 @@ const Host = struct {
     failure: ?anyerror = null,
     prepared: ?*const anyopaque = null,
     expect_same_prepared: bool = false,
+    /// Foreground colors each paint must draw text in.
+    foreground: []const u32 = &.{},
     fn action(_: *anyopaque, _: u64) void {}
     fn diagnostic(ptr: *anyopaque, value: z.diagnostics.Diagnostic) void {
         const self: *Host = @ptrCast(@alignCast(ptr));
@@ -46,6 +48,8 @@ const Host = struct {
         try self.adapter.draw(frame, bounds, .{});
         var seen_text = false;
         var seen: usize = 0;
+        var colored = [_]bool{false} ** 4;
+        var text_draws: usize = 0;
         for (frame.context.command_buffer.commands()) |command| switch (command) {
             .fill => |fill| {
                 if (fill.color != background and fill.color != underline) continue;
@@ -59,10 +63,23 @@ const Host = struct {
                 try std.testing.expect(match);
                 seen += 1;
             },
-            .prepared_text => seen_text = true,
+            .prepared_text => |text| {
+                seen_text = true;
+                text_draws += 1;
+                for (self.foreground, 0..) |rgb, index| if (std.meta.eql(text.color, ui.Color.rgb(rgb))) {
+                    colored[index] = true;
+                };
+            },
             else => {},
         };
-        try std.testing.expect(seen_text and seen == prepared.items.len);
+        var fills: usize = 0;
+        for (prepared.items) |item| if (item.kind != .foreground) {
+            fills += 1;
+        };
+        try std.testing.expect(seen_text and seen == fills);
+        for (self.foreground, 0..) |_, index| try std.testing.expect(colored[index]);
+        // Foreground markers split the text pass into clipped draws.
+        if (self.foreground.len != 0) try std.testing.expect(text_draws > fills);
         const resources = frame.context.command_buffer.preparedTextResources();
         try std.testing.expect(resources.len != 0);
         const identity: *const anyopaque = @ptrCast(resources[0].lease);
@@ -451,6 +468,43 @@ fn drawing(allocator: std.mem.Allocator, engine: *t.Engine) !void {
     try std.testing.expectEqual(projection_version, try adapter.projectionVersion());
     try host.paint();
 }
+/// Foreground markers draw their ranges' text in their colors and the rest in
+/// the text color, without allocating during paint.
+fn foreground(allocator: std.mem.Allocator, engine: *t.Engine) !void {
+    const document = try d.Document.create(allocator, std.Thread.getCurrentId(), "const x = 1; // done\nsecond line\n", .{});
+    defer document.close() catch unreachable;
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    const adapter = try editing.Adapter.create(failing.allocator(), document, engine, .{});
+    defer adapter.close() catch unreachable;
+    const keyword: u32 = 0xcf222e;
+    const comment: u32 = 0x6e7781;
+    var host: Host = .{ .adapter = adapter, .foreground = &.{ keyword, comment } };
+    const app = try z.App.initWithOptions(allocator, .{ .diagnostics_sink = .{ .context = &host, .emit = Host.diagnostic } });
+    defer app.deinit();
+    host.window = try app.createWindow(.{ .width = 144, .height = 192 });
+    defer _ = host.window.destroy() catch unreachable;
+    host.scale = if (builtin.os.tag == .windows) @as(f32, @floatFromInt(c.GetDpiForWindow(host.window.nativeHandle()))) / 96 else @floatFromInt(gtk_widget_get_scale_factor(host.window.nativeHandle().?));
+    host.context = ui.Context.init(&host, Host.draw, Host.action);
+    try host.context.attach(host.window);
+    const markers = [_]editing.RangeMarker{
+        .{ .range = .{ .start = 0, .end = 5 }, .kind = .foreground, .color = keyword },
+        .{ .range = .{ .start = 6, .end = 7 }, .color = background },
+        .{ .range = .{ .start = 13, .end = 20 }, .kind = .foreground, .color = comment },
+    };
+    _ = try adapter.setRangeMarkers(try document.committedTextVersion(), &markers);
+    const parameters: editing.Parameters = .{ .font = .{ .size = 18, .wrap = .word_character }, .scale = host.scale };
+    _ = try adapter.prepare(bounds, parameters);
+    var output: [64]editing.RangeMarkerMark = undefined;
+    const prepared = try adapter.preparedRangeMarkers(bounds, &output);
+    var kinds: usize = 0;
+    for (prepared.items) |item| if (item.kind == .foreground) {
+        kinds += 1;
+    };
+    try std.testing.expect(kinds >= 2);
+    failing.fail_index = failing.alloc_index;
+    try host.paint();
+    failing.fail_index = std.math.maxInt(usize);
+}
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
@@ -465,8 +519,9 @@ pub fn main() !void {
         try compare(allocator, engine);
         try reentry(allocator, engine);
         try drawing(allocator, engine);
+        try foreground(allocator, engine);
     }
     try std.testing.expectEqual(before, t.resourceCounts());
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("range markers: UTF8/combining/bidi/wrap, shared prepared queries, fold/projection/IME/stale, OOM/budgets/reentry, unchanged Prepared and zero draw allocation resources=0\n", .{});
+    std.debug.print("range markers: UTF8/combining/bidi/wrap, shared prepared queries, fold/projection/IME/stale, OOM/budgets/reentry, foreground colors, unchanged Prepared and zero draw allocation resources=0\n", .{});
 }

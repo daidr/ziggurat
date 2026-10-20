@@ -32,6 +32,9 @@ pub const menus = @import("menus.zig");
 pub const shell = @import("shell.zig");
 pub const desktop = @import("desktop.zig");
 pub const watch = @import("watch.zig");
+pub const secrets = @import("secrets.zig");
+pub const flyout = @import("flyout.zig");
+pub const Flyout = flyout.Flyout;
 pub const capabilities = .{
     .native_menu = windows or linux,
     .menu_accelerators = windows or linux,
@@ -48,4 +51,5 @@ pub const capabilities = .{
     .shell = shell.capabilities,
     .desktop = desktop.capabilities,
     .file_watch = builtin.os.tag == .windows or builtin.os.tag == .linux,
+    .secrets = secrets.capabilities,
 };

@@ -56,7 +56,13 @@ typedef struct NativeWindow {
     /* Present only while a system menu bar is attached: a vertical box that
        holds the bar above the window's ordinary child. */
     GtkWidget *menu_box, *menu_bar;
+    /* Popup role (WindowOptions.popup): ZLG_POPUP_* flags. An X11 popup is an
+       override-redirect GTK_WINDOW_POPUP, placed exactly where asked; a
+       focusable one takes the keyboard through a seat grab while it shows. */
+    int popup;
+    gboolean popup_override, popup_grabbed;
 } NativeWindow;
+enum { ZLG_POPUP=1, ZLG_POPUP_FOCUSABLE=2, ZLG_POPUP_TOPMOST=4 };
 typedef struct NativeBounds { int32_t x,y; uint32_t width,height; int positioned; } NativeBounds;
 static gint active_app, resources;
 static void finalized(gpointer unused, GObject *object) { (void)unused; (void)object; g_atomic_int_add(&resources,-1); }
@@ -352,6 +358,64 @@ static void leave_group(NativeWindow *s) {
     }
     g_list_free_full(windows,g_object_unref);
 }
+static void popup_ungrab(NativeWindow *s) {
+    if (!s->popup_grabbed) return;
+    s->popup_grabbed=FALSE;
+    gtk_grab_remove(s->window);
+    gdk_seat_ungrab(gdk_display_get_default_seat(gtk_widget_get_display(s->window)));
+}
+static void popup_dismissed(NativeWindow *s) {
+    if (s->destroyed) return;
+    NativeEvent event={0}; event.kind=25; emit(s,&event);
+}
+static void popup_prepare(GdkSeat *seat, GdkWindow *window, gpointer data) {
+    (void)seat; (void)window; NativeWindow *s=data;
+    if (!s->destroyed) gtk_widget_show(s->window);
+}
+/* Shows a popup. A focusable override-redirect popup grabs the seat, as GTK's
+   menus do: the keyboard comes to it, and a press elsewhere, in another of
+   the application's windows or another application's, reaches it first. */
+static void popup_show(NativeWindow *s) {
+    if (!(s->popup&ZLG_POPUP_FOCUSABLE) || !s->popup_override) {
+        gtk_widget_show(s->window);
+        if (s->popup&ZLG_POPUP_FOCUSABLE && !s->destroyed) { gtk_window_present(GTK_WINDOW(s->window)); if (!s->destroyed) gtk_widget_grab_focus(s->area); }
+        return;
+    }
+    if (gtk_widget_get_visible(s->window) && s->popup_grabbed) return;
+    gtk_widget_realize(s->window);
+    GdkSeat *seat=gdk_display_get_default_seat(gtk_widget_get_display(s->window));
+    if (!s->popup_grabbed && gdk_seat_grab(seat,gtk_widget_get_window(s->window),GDK_SEAT_CAPABILITY_ALL,TRUE,NULL,NULL,popup_prepare,s)==GDK_GRAB_SUCCESS) {
+        s->popup_grabbed=TRUE;
+        gtk_grab_add(s->window);
+    }
+    if (!s->destroyed) gtk_widget_show(s->window);
+    if (!s->destroyed) gtk_widget_grab_focus(s->area);
+}
+static gboolean popup_press(GtkWidget *widget, GdkEventButton *native, gpointer data) {
+    (void)widget; NativeWindow *s=data;
+    if (!s->popup_grabbed || s->destroyed) return FALSE;
+    /* Where the press is on the screen: the event's window may be the grab's
+       or the one under the pointer. */
+    gint x=0,y=0; gdk_window_get_origin(gtk_widget_get_window(s->window),&x,&y);
+    GtkAllocation allocation; gtk_widget_get_allocation(s->window,&allocation);
+    double px=native->x_root-x, py=native->y_root-y;
+    if (px>=0 && py>=0 && px<allocation.width && py<allocation.height) return FALSE;
+    retain(s); popup_dismissed(s); release(s);
+    return TRUE;
+}
+static gboolean popup_grab_broken(GtkWidget *widget, GdkEventGrabBroken *native, gpointer data) {
+    (void)widget; (void)native; NativeWindow *s=data;
+    if (!s->popup_grabbed || s->destroyed) return FALSE;
+    retain(s); popup_ungrab(s); popup_dismissed(s); release(s);
+    return FALSE;
+}
+/* A focusable popup without a grab (a toplevel where popups need a parent)
+   closes as it loses the keyboard. */
+static void popup_active(GObject *object, GParamSpec *spec, gpointer data) {
+    (void)object; (void)spec; NativeWindow *s=data;
+    if (s->destroyed || s->popup_override || gtk_window_is_active(GTK_WINDOW(s->window)) || !gtk_widget_get_visible(s->window)) return;
+    retain(s); popup_dismissed(s); release(s);
+}
 static void destroyed(GtkWidget *widget, gpointer data) {
     (void)widget; NativeWindow *s=data; retain(s);
     if (s->destroyed) { release(s); return; }
@@ -366,6 +430,7 @@ static void destroyed(GtkWidget *widget, gpointer data) {
     if (s->menu_bar) { g_object_unref(s->menu_bar); s->menu_bar=NULL; }
     if (s->menu_box) { g_object_unref(s->menu_box); s->menu_box=NULL; }
     if (gtk_widget_has_grab(s->area)) gtk_grab_remove(s->area);
+    popup_ungrab(s);
     GtkIMContext *im=s->im;s->im=NULL;
     if(im){g_signal_handlers_disconnect_by_data(im,s);gtk_im_context_set_client_window(im,NULL);g_object_unref(im);}
     leave_group(s);
@@ -504,9 +569,14 @@ static gboolean scroll(GtkWidget *widget, GdkEventScroll *native, gpointer data)
     }
     event.dx*=48; event.dy*=48; emit(data,&event); return TRUE;
 }
+/* A popup that does not take the keyboard. X without a window manager moves
+   focus with the pointer, so such a popup can still be handed focus. */
+static int quiet_popup(NativeWindow *s) { return s->popup && !(s->popup&ZLG_POPUP_FOCUSABLE); }
 static gboolean focus(GtkWidget *widget, GdkEventFocus *native, gpointer data) {
-    (void)widget; NativeWindow *s=data; retain(s);
+    (void)widget; NativeWindow *s=data;
     const gboolean gained=native->in;
+    if (gained && quiet_popup(s)) return FALSE;
+    retain(s);
     uint64_t operation=gained?s->pointer_operation:pointer_revoke(s,TRUE);
     if(s->im){GtkIMContext *im=g_object_ref(s->im);
         if (gained) gtk_im_context_focus_in(im); else gtk_im_context_focus_out(im);
@@ -628,6 +698,12 @@ static gboolean key(GtkWidget *widget, GdkEventKey *native, gpointer data) {
     NativeEvent event={0}; event.kind=18; event.key=gdk_keyval_to_lower(logical);
     event.flags=((modifiers&GDK_SHIFT_MASK)?1:0)|((modifiers&GDK_CONTROL_MASK)?2:0)|((modifiers&GDK_MOD1_MASK)?4:0)|
         ((modifiers&(GDK_SUPER_MASK|GDK_META_MASK))?8:0)|(repeat?16:0);
+    /* X11 and Wayland hardware keycodes are evdev codes plus 8. */
+    event.width=native->hardware_keycode>=8?native->hardware_keycode-8:0;
+    if (native->type==GDK_KEY_RELEASE) {
+        NativeEvent up=event; up.kind=26; up.flags&=15; emit(s,&up);
+        if (s->destroyed || epoch!=s->im_epoch || !s->im) { release(s); return TRUE; }
+    }
     if (native->type==GDK_KEY_PRESS && !composing && !altgr && emit(s,&event)) { release(s); return TRUE; }
     if (s->destroyed || epoch!=s->im_epoch || !s->im) { release(s); return TRUE; }
     gboolean plain=(event.flags&(4|8))==0;
@@ -664,7 +740,7 @@ static gboolean key(GtkWidget *widget, GdkEventKey *native, gpointer data) {
     }
     release(s); return handled;
 }
-NativeWindow *zlg_window_create_mode_host_pointer(void *owner, Emit callback, const char *title, uint32_t width, uint32_t height, uint32_t min_width, uint32_t min_height, NativeWindow *parent, int modal, int decoration, int resizable, int text_mode, int accessibility_host, int pointer_enabled, int *error) {
+NativeWindow *zlg_window_create_popup(void *owner, Emit callback, const char *title, uint32_t width, uint32_t height, uint32_t min_width, uint32_t min_height, NativeWindow *parent, int modal, int decoration, int resizable, int text_mode, int accessibility_host, int pointer_enabled, int popup, int *error) {
     *error=0;
     if (decoration) {
 #ifdef GDK_WINDOWING_X11
@@ -676,8 +752,21 @@ NativeWindow *zlg_window_create_mode_host_pointer(void *owner, Emit callback, co
     NativeWindow *s=g_try_new0(NativeWindow,1); if (!s) return NULL;
     g_atomic_int_inc(&resources); s->refs=1; s->owner=owner; s->emit=callback;
     s->pointer_enabled=pointer_enabled!=0;
-    s->window=gtk_window_new(GTK_WINDOW_TOPLEVEL); g_object_ref_sink(s->window); track(G_OBJECT(s->window));
+    s->popup=popup;
+#ifdef GDK_WINDOWING_X11
+    s->popup_override=popup && GDK_IS_X11_DISPLAY(gdk_display_get_default());
+#endif
+    s->window=gtk_window_new(s->popup_override?GTK_WINDOW_POPUP:GTK_WINDOW_TOPLEVEL); g_object_ref_sink(s->window); track(G_OBJECT(s->window));
     s->decoration=decoration; s->cursor_hit=-1;
+    if (popup) {
+        GtkWindow *window=GTK_WINDOW(s->window);
+        gtk_window_set_type_hint(window,s->popup_override?GDK_WINDOW_TYPE_HINT_POPUP_MENU:GDK_WINDOW_TYPE_HINT_UTILITY);
+        gtk_window_set_skip_taskbar_hint(window,TRUE); gtk_window_set_skip_pager_hint(window,TRUE);
+        gtk_window_set_accept_focus(window,(popup&ZLG_POPUP_FOCUSABLE)!=0);
+        gtk_window_set_focus_on_map(window,(popup&ZLG_POPUP_FOCUSABLE)!=0);
+        if (popup&ZLG_POPUP_TOPMOST) gtk_window_set_keep_above(window,TRUE);
+        resizable=TRUE; /* its size is the one asked for, smaller than natural too */
+    }
     gtk_window_set_decorated(GTK_WINDOW(s->window),decoration==0);
     gtk_window_set_resizable(GTK_WINDOW(s->window),resizable);
     if (decoration) {
@@ -720,8 +809,17 @@ NativeWindow *zlg_window_create_mode_host_pointer(void *owner, Emit callback, co
         g_signal_connect(s->window,"state-flags-changed",G_CALLBACK(pointer_state_flags),s);
     }
     g_signal_connect(s->area,"key-press-event",G_CALLBACK(key),s); g_signal_connect(s->area,"key-release-event",G_CALLBACK(key),s);
+    if (popup) {
+        g_signal_connect(s->window,"button-press-event",G_CALLBACK(popup_press),s);
+        g_signal_connect(s->window,"grab-broken-event",G_CALLBACK(popup_grab_broken),s);
+        if (popup&ZLG_POPUP_FOCUSABLE) g_signal_connect(s->window,"notify::is-active",G_CALLBACK(popup_active),s);
+        gtk_widget_add_events(s->window,GDK_BUTTON_PRESS_MASK);
+    }
     connect_im(s,s->im);
     return s;
+}
+NativeWindow *zlg_window_create_mode_host_pointer(void *owner, Emit callback, const char *title, uint32_t width, uint32_t height, uint32_t min_width, uint32_t min_height, NativeWindow *parent, int modal, int decoration, int resizable, int text_mode, int accessibility_host, int pointer_enabled, int *error) {
+    return zlg_window_create_popup(owner,callback,title,width,height,min_width,min_height,parent,modal,decoration,resizable,text_mode,accessibility_host,pointer_enabled,0,error);
 }
 NativeWindow *zlg_window_create_mode_host(void *owner, Emit callback, const char *title, uint32_t width, uint32_t height, uint32_t min_width, uint32_t min_height, NativeWindow *parent, int modal, int decoration, int resizable, int text_mode, int accessibility_host, int *error) {
     return zlg_window_create_mode_host_pointer(owner,callback,title,width,height,min_width,min_height,parent,modal,decoration,resizable,text_mode,accessibility_host,0,error);
@@ -738,10 +836,11 @@ void zlg_window_action(NativeWindow *s, int action) {
     retain(s);
     if (action==1 || action==7) s->gesture=NULL;
     switch(action) {
-        case 0: gtk_widget_show(s->window); break; case 1: gtk_widget_hide(s->window); break;
+        case 0: if (s->popup) popup_show(s); else gtk_widget_show(s->window); break;
+        case 1: popup_ungrab(s); if(!s->destroyed)gtk_widget_hide(s->window); break;
         case 2: gtk_window_iconify(GTK_WINDOW(s->window)); break; case 3: gtk_window_maximize(GTK_WINDOW(s->window)); break;
         case 4: gtk_window_unmaximize(GTK_WINDOW(s->window)); if(!s->destroyed)gtk_window_deiconify(GTK_WINDOW(s->window)); break;
-        case 5: gtk_window_present(GTK_WINDOW(s->window)); if(!s->destroyed)gtk_widget_grab_focus(s->area); break;
+        case 5: if (s->popup) { popup_show(s); break; } gtk_window_present(GTK_WINDOW(s->window)); if(!s->destroyed)gtk_widget_grab_focus(s->area); break;
         case 6: gtk_widget_set_sensitive(s->window,TRUE); break; case 7: gtk_widget_set_sensitive(s->window,FALSE); break;
     }
     release(s);
@@ -749,7 +848,7 @@ void zlg_window_action(NativeWindow *s, int action) {
 uint32_t zlg_window_state(NativeWindow *s) {
     GdkWindowState state=window_state(s);
     return (gtk_widget_get_visible(s->window)?1:0)|((state&GDK_WINDOW_STATE_ICONIFIED)?2:0)|((state&GDK_WINDOW_STATE_MAXIMIZED)?4:0)|
-        (gtk_window_is_active(GTK_WINDOW(s->window))?8:0)|(gtk_widget_is_sensitive(s->window)?16:0)|
+        (gtk_window_is_active(GTK_WINDOW(s->window))&&!quiet_popup(s)?8:0)|(gtk_widget_is_sensitive(s->window)?16:0)|
         ((state&GDK_WINDOW_STATE_FULLSCREEN)?32:0)|(s->fullscreen_requested?64:0)|
         (s->above_observed?128:0)|(s->above_requested?256:0);
 }
