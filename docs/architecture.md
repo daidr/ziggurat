@@ -30,11 +30,13 @@ flowchart TD
     Host --> ChartView[ziggurat_chart_view]
     Host --> Terminal[ziggurat_terminal]
     Host --> TerminalView[ziggurat_terminal_view]
+    Host --> Game[ziggurat_game]
     Host --> Pickers[ziggurat_view_pickers]
     Host --> Document[ziggurat_document]
     Host --> DocumentEditor[ziggurat_document_editor]
     Host --> DocumentAccessibility[ziggurat_document_accessibility]
     Host --> CodeEditor[ziggurat_code_editor]
+    CodeEditor --> CodeSyntax[ziggurat_code_syntax]
     Host --> DocumentDiff[ziggurat_document_diff]
     Host --> DocumentDiffView[ziggurat_document_diff_view]
     Host --> DocumentDiffAccessibility[ziggurat_document_diff_accessibility]
@@ -46,6 +48,10 @@ flowchart TD
     Host --> MarkdownView[ziggurat_markdown_view]
     MarkdownView --> Markdown[ziggurat_markdown]
     MarkdownView --> View
+    Host --> MarkdownRich[ziggurat_markdown_rich]
+    MarkdownRich --> MarkdownView
+    MarkdownRich --> RichText[ziggurat_view_rich_text]
+    RichText --> View
     Host --> Wake[ziggurat_wake]
     Host --> Placement[ziggurat_window_placement]
     Host --> DocumentApp[ziggurat_document_app]
@@ -136,6 +142,7 @@ flowchart TD
     CodeEditor --> Core
     CodeEditor --> UI
     CodeEditor --> Text
+    CodeEditor --> DocumentDiff
     DocumentDiff --> Document
     DocumentDiffView --> DocumentDiff
     DocumentDiffView --> DocumentEditor

@@ -430,6 +430,9 @@ pub const Context = struct {
     /// Input and resize form the explicit update/layout stage. Resize includes
     /// physical size and DPI for preparing resources before a later paint.
     on_input: ?*const fn (*anyopaque, *Context, z.Event) bool = null,
+    /// A key released while the window has the keyboard, outside paint; see
+    /// `z.Content.key_release`. Text fields and shortcuts see no releases.
+    on_key_release: ?*const fn (*anyopaque, *Context, z.KeyInput) void = null,
     on_accessibility_action: ?*const fn (*anyopaque, *Context, accessibility.Action) void = null,
     semantic_name: []const u8 = "Ziggurat",
     semantics_enabled: bool = true,
@@ -807,7 +810,7 @@ pub const Context = struct {
         if (self.window != null or self.attachment_phase != .detached) return error.AlreadyAttached;
         const scope = window.beginCallback() orelse return error.Closed;
         defer scope.end();
-        try window.setContent(.{ .context = self, .event = event, .detach = detach, .accessibility = getAccessibility, .key_input = nativeKeyInput });
+        try window.setContent(.{ .context = self, .event = event, .detach = detach, .accessibility = getAccessibility, .key_input = nativeKeyInput, .key_release = nativeKeyRelease });
         errdefer window.cancelContent(self);
         try self.initialize(window);
     }
@@ -2183,6 +2186,14 @@ pub const Context = struct {
     fn nativeKeyInput(ptr: *anyopaque, window: z.Window, key: z.KeyInput) bool {
         const self: *Context = @ptrCast(@alignCast(ptr));
         return self.handleKeyInput(window, key);
+    }
+    fn nativeKeyRelease(ptr: *anyopaque, window: z.Window, key: z.KeyInput) void {
+        const self: *Context = @ptrCast(@alignCast(ptr));
+        const callback = self.on_key_release orelse return;
+        const scope = self.callbackScope(window) orelse return;
+        defer scope.end();
+        if (self.painting) return;
+        callback(self.state, self, key);
     }
     fn legacyKey(key: z.KeyInput) ?z.Event {
         if (key.modifiers.alt or key.modifiers.super) return null;

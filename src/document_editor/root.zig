@@ -592,6 +592,9 @@ const View = struct {
     line_backgrounds: []LineBackgroundMark = &.{},
     range_markers: []RangeMarkerMark = &.{},
     range_marker_version: u64 = 0,
+    /// With foreground markers, where each run's text draws in which color:
+    /// the marker rectangles and the rest of the run in the text color.
+    text_clips: []TextClip = &.{},
     projected: bool = false,
     projection_root: ?*ix.Node = null,
     fn ensureUnused(self: *const View) !void {
@@ -610,8 +613,11 @@ const View = struct {
         allocator.free(self.placements);
         allocator.free(self.line_backgrounds);
         allocator.free(self.range_markers);
+        allocator.free(self.text_clips);
     }
 };
+/// One clip of a run's text pass; a null color is the text color.
+const TextClip = struct { rect: Rect, color: ?u32, run: u32 };
 const VisualRun = struct {
     block: *const Block,
     range: d.Range,
@@ -1975,7 +1981,9 @@ pub const Adapter = opaque {
             if (frame.failure) |err| return @as(anyerror!void, err);
         };
         if (colors.caret_style) |style| try drawCarets(value, view, frame, colors.caret, style, true);
-        if (view.projected) {
+        if (view.text_clips.len != 0) {
+            try drawClippedText(value, view, frame, bounds, colors.text);
+        } else if (view.projected) {
             var runs: RunIterator = .{ .view = view };
             while (try runs.next()) |run| {
                 if (run.clip.width == 0 or run.clip.height == 0) continue;
@@ -3932,6 +3940,15 @@ fn prepareRangeMarkers(work: *Working) !void {
     defer marks.deinit(state.allocator());
     var scratch: std.ArrayList(t.Rect) = .empty;
     defer scratch.deinit(state.allocator());
+    var clips: std.ArrayList(TextClip) = .empty;
+    defer clips.deinit(state.allocator());
+    var foreground = false;
+    for (state.range_markers) |entry| if (entry.marker.kind == .foreground) {
+        foreground = true;
+        break;
+    };
+    var run_index: u32 = 0;
+    var run_marks: usize = 0;
     var runs: RunIterator = .{ .view = &work.view };
     while (try runs.next()) |run| {
         // Charge a conservative binary-search upper bound, even when this run
@@ -3964,8 +3981,83 @@ fn prepareRangeMarkers(work: *Working) !void {
                 try marks.append(state.allocator(), .{ .marker = at, .range = marker.range, .kind = marker.kind, .color = marker.color, .rect = rect });
             }
         }
+        if (foreground) try appendTextClips(state, &clips, run, run_index, marks.items[run_marks..]);
+        run_index += 1;
+        run_marks = marks.items.len;
     }
+    const owned_clips = try clips.toOwnedSlice(state.allocator());
+    errdefer state.allocator().free(owned_clips);
     work.view.range_markers = try marks.toOwnedSlice(state.allocator());
+    work.view.text_clips = owned_clips;
+}
+
+/// The clips of one run's text pass: each foreground marker rectangle in its
+/// color, and the rest of the run, cut into strips between the rectangles'
+/// edges, in the text color. Prepared once per layout so paint only replays.
+fn appendTextClips(state: *State, clips: *std.ArrayList(TextClip), run: VisualRun, run_index: u32, marks: []const RangeMarkerMark) !void {
+    const allocator = state.allocator();
+    const area = run.clip;
+    if (area.width <= 0 or area.height <= 0) return;
+    var edges: std.ArrayList(f32) = .empty;
+    defer edges.deinit(allocator);
+    var spans: std.ArrayList([2]f32) = .empty;
+    defer spans.deinit(allocator);
+    try edges.append(allocator, area.y);
+    try edges.append(allocator, area.y + area.height);
+    for (marks) |mark| if (mark.kind == .foreground) {
+        try clips.append(allocator, .{ .rect = mark.rect, .color = mark.color, .run = run_index });
+        try edges.append(allocator, std.math.clamp(mark.rect.y, area.y, area.y + area.height));
+        try edges.append(allocator, std.math.clamp(mark.rect.y + mark.rect.height, area.y, area.y + area.height));
+    };
+    std.mem.sort(f32, edges.items, {}, std.sort.asc(f32));
+    var at: usize = 0;
+    while (at + 1 < edges.items.len) : (at += 1) {
+        const top = edges.items[at];
+        const bottom = edges.items[at + 1];
+        if (bottom <= top) continue;
+        // Horizontal extents of the markers covering this whole strip.
+        spans.clearRetainingCapacity();
+        for (marks) |mark| if (mark.kind == .foreground and mark.rect.y <= top and mark.rect.y + mark.rect.height >= bottom and mark.rect.width > 0) {
+            try spans.append(allocator, .{ mark.rect.x, mark.rect.x + mark.rect.width });
+        };
+        std.mem.sort([2]f32, spans.items, {}, struct {
+            fn less(_: void, a: [2]f32, b: [2]f32) bool {
+                return a[0] < b[0];
+            }
+        }.less);
+        var x = area.x;
+        const right = area.x + area.width;
+        for (spans.items) |span| {
+            if (span[0] > x) try clips.append(allocator, .{ .rect = .{ .x = x, .y = top, .width = @min(span[0], right) - x, .height = bottom - top }, .color = null, .run = run_index });
+            x = @max(x, span[1]);
+            if (x >= right) break;
+        }
+        if (x < right) try clips.append(allocator, .{ .rect = .{ .x = x, .y = top, .width = right - x, .height = bottom - top }, .color = null, .run = run_index });
+        if (clips.items.len > 4 * state.limits.rectangles) return error.RectangleCapacityExceeded;
+    }
+}
+
+/// The text pass with foreground markers: each run's prepared text once per
+/// clip, in the clip's color.
+fn drawClippedText(state: *State, view: *const View, frame: *ui.Frame, bounds: Rect, text: ui.Color) !void {
+    var runs: RunIterator = .{ .view = view };
+    var index: u32 = 0;
+    var at: usize = 0;
+    while (try runs.next()) |run| : (index += 1) {
+        while (at < view.text_clips.len and view.text_clips[at].run < index) at += 1;
+        const origin: ui.layout.Point = .{ .x = bounds.x - @as(f32, @floatCast(state.scroll_x)), .y = @floatCast(@as(f64, bounds.y) + run.y) };
+        const prepared = try run.block.prepared.value.view();
+        while (at < view.text_clips.len and view.text_clips[at].run == index) : (at += 1) {
+            const clip = view.text_clips[at];
+            if (clip.rect.width <= 0 or clip.rect.height <= 0) continue;
+            try frame.pushClip(clip.rect);
+            defer frame.popClip() catch |err| {
+                frame.failure = frame.failure orelse err;
+            };
+            try frame.preparedText(origin, prepared, if (clip.color) |rgb| ui.Color.rgb(rgb) else text);
+        }
+        if (frame.context.window) |window| if (window.isClosed()) return error.Closed;
+    }
 }
 
 fn fillView(work: *Working) !void {
@@ -4076,6 +4168,7 @@ const LayoutCandidate = struct {
         work.view.placements = &.{};
         work.view.line_backgrounds = &.{};
         work.view.range_markers = &.{};
+        work.view.text_clips = &.{};
         std.mem.swap([max_batches]?*cache.Entry, &state.entries, &work.entries);
         std.mem.swap(usize, &state.entry_count, &work.count);
         if (state.overlay != null) {
@@ -4567,6 +4660,7 @@ fn completeView(candidate: *LayoutCandidate) !PrepareResult {
         work.view.placements = &.{};
         work.view.line_backgrounds = &.{};
         work.view.range_markers = &.{};
+        work.view.text_clips = &.{};
         work.view.caret = null;
         if (work.reveal) {
             const selected = try self.selection();

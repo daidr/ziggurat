@@ -460,6 +460,10 @@ pub const EmbedInput = union(enum) {
     /// around it.
     wheel: PointerWheel,
     key: z.KeyInput,
+    /// A key released while the leaf holds focus, whether or not it took
+    /// the press; releases of keys pressed while the window lacked the
+    /// keyboard never come. Leaves that only edit can ignore it.
+    key_up: z.KeyInput,
 };
 
 /// How far a press moves, in DIP, before it drags.
@@ -960,6 +964,10 @@ pub const View = struct {
     /// A control the host should focus after this pass, such as a combo box
     /// whose list just closed.
     restore: ?u64 = null,
+    /// A leaf a build asked to focus with `focusLeaf`.
+    focus_request: ?u64 = null,
+    /// The window has the keyboard, set by the host from focus events.
+    window_focused: bool = true,
     /// Hover or focus time before a tooltip appears, in nanoseconds.
     tooltip_delay: u64 = 500 * std.time.ns_per_ms,
     preferences: Preferences = .{},
@@ -2812,6 +2820,21 @@ pub const View = struct {
         const entry = self.interactiveEmbed(self.focus) orelse return false;
         return entry.embed.input.?(entry.embed.context, entry.id, .{ .key = input });
     }
+    /// A key release for the focused leaf; true when it consumed it.
+    pub fn embedKeyUp(self: *View, input: z.KeyInput) bool {
+        const entry = self.interactiveEmbed(self.focus) orelse return false;
+        return entry.embed.input.?(entry.embed.context, entry.id, .{ .key_up = input });
+    }
+    /// Ask the host to give keyboard focus to the focusable embedded leaf
+    /// `id`, as its `place` or `paint` learned it, after this pass; a leaf
+    /// that is not built by then is left unfocused.
+    pub fn focusLeaf(self: *View, id: u64) void {
+        self.focus_request = id;
+    }
+    /// Node `id` holds keyboard focus and its window has the keyboard.
+    pub fn hasKeyboard(self: *const View, id: u64) bool {
+        return self.window_focused and self.focus == id;
+    }
     /// Ask assistive technology to announce `message` politely, as a status
     /// update with no visible text; longer text is cut at a character
     /// boundary. Takes effect from the next paint.
@@ -4194,6 +4217,7 @@ pub const Host = struct {
         self.context.state = self;
         self.context.on_value = onValue;
         self.context.on_input = onInput;
+        self.context.on_key_release = onKeyRelease;
         try self.context.attach(window);
     }
 
@@ -4218,6 +4242,10 @@ pub const Host = struct {
     /// Return focus where the last pass or route asked, such as to a combo
     /// box whose list closed.
     fn restoreFocus(self: *Host) void {
+        if (self.view.restore == null) {
+            self.view.restore = self.view.focus_request;
+        }
+        self.view.focus_request = null;
         const id = self.view.restore orelse return;
         self.view.restore = null;
         if (self.context.input_state.focused == id) return;
@@ -4315,6 +4343,8 @@ pub const Host = struct {
             .focus => |focused| {
                 // A window that loses focus leaves no tooltip behind, and
                 // loses the press it followed.
+                self.view.window_focused = focused;
+                self.invalidate();
                 if (!focused) {
                     _ = self.apply(self.view.captureCancel());
                     const hover = self.view.hoverAt(null);
@@ -4364,6 +4394,13 @@ pub const Host = struct {
             },
             else => return false,
         }
+    }
+    /// Releases go to the focused embedded leaf only.
+    fn onKeyRelease(ptr: *anyopaque, _: *ui.Context, input: z.KeyInput) void {
+        const self: *Host = @ptrCast(@alignCast(ptr));
+        if (self.building) return;
+        self.view.focus = self.context.input_state.focused;
+        if (self.view.embedKeyUp(input)) self.settleEmbed(null);
     }
     /// Apply what the view did with pointer input; true when it took it.
     fn apply(self: *Host, result: PointerResult) bool {
@@ -4420,6 +4457,10 @@ pub const Host = struct {
             if (content.place) |place| place(content.context, node.id, node.bounds);
         }
         self.requestWake();
+        if (self.view.focus_request) |id| {
+            self.view.focus_request = null;
+            if (self.context.input_state.focused != id) self.pending_focus = id;
+        }
         if (self.pending_focus != null and !self.focus_queued) if (self.context.window) |window| {
             if (window.app.post(.{ .context = self, .call = focusTask })) |_| {
                 self.focus_queued = true;

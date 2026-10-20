@@ -406,6 +406,7 @@ pub const Chart = struct {
                 return self.dragged;
             },
             .wheel => |scroll| return self.wheel(scroll),
+            .key_up => return false,
             .key => |key_input| {
                 const m = key_input.modifiers;
                 if (m.control or m.alt or m.super) return false;

@@ -315,7 +315,8 @@ pub fn build(b: *std.Build) void {
         .imports = &.{ .{ .name = "ziggurat_document", .module = document }, .{ .name = "ziggurat_document_diff", .module = document_diff } },
     }) });
     b.step("benchmark-document-diff", "Measure bounded snapshot comparison without a UI loop").dependOn(&b.addRunArtifact(document_diff_benchmark).step);
-    const code_editor = b.addModule("ziggurat_code_editor", .{ .root_source_file = b.path("src/code_editor/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_document", .module = document }} });
+    const code_syntax = b.addModule("ziggurat_code_syntax", .{ .root_source_file = b.path("src/code_editor/syntax/root.zig"), .target = target, .optimize = optimize });
+    const code_editor = b.addModule("ziggurat_code_editor", .{ .root_source_file = b.path("src/code_editor/root.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat_document", .module = document }, .{ .name = "ziggurat_code_syntax", .module = code_syntax }, .{ .name = "ziggurat_document_diff", .module = document_diff } } });
     const language_protocol = b.addModule("ziggurat_language_protocol", .{ .root_source_file = b.path("src/language_protocol/root.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat_document", .module = document },
         .{ .name = "ziggurat_code_editor", .module = code_editor },
@@ -506,6 +507,8 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .linux) {
         const native = native_support.add(b, system, "system-shell-native", "src/system/shell_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         native.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
+        const secrets_native = native_support.add(b, system, "system-secrets-native", "src/system/secrets_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        secrets_native.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
         system.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
         system.link_libc = true;
     }
@@ -534,6 +537,14 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_system", .module = system },
         });
         addSmoke(b, "smoke-file-watch", "tests/system_watch_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        addSmoke(b, "smoke-secrets", "tests/system_secrets_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        addSmoke(b, "smoke-flyout", "tests/system_flyout_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
         });
     }
@@ -666,6 +677,23 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_text_layout", .module = text_layout }, .{ .name = "ziggurat_ui", .module = ui },
         .{ .name = "ziggurat_view", .module = declarative_view },
     } });
+    const view_rich_text = b.addModule("ziggurat_view_rich_text", .{ .root_source_file = b.path("src/view/rich_text.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat_ui", .module = ui }, .{ .name = "ziggurat_view", .module = declarative_view },
+    } });
+    const view_rich_text_tests = b.addTest(.{ .root_module = view_rich_text });
+    check.dependOn(&view_rich_text_tests.step);
+    const run_view_rich_text_tests = b.addRunArtifact(view_rich_text_tests);
+    test_step.dependOn(&run_view_rich_text_tests.step);
+    b.step("test-view-rich-text", "Run rich text wrapping, baseline, decoration and paint tests").dependOn(&run_view_rich_text_tests.step);
+    const markdown_rich = b.addModule("ziggurat_markdown_rich", .{ .root_source_file = b.path("src/markdown/rich_text.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat_markdown", .module = markdown },     .{ .name = "ziggurat_markdown_view", .module = markdown_view },
+        .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_view_rich_text", .module = view_rich_text },
+    } });
+    const markdown_rich_tests = b.addTest(.{ .root_module = markdown_rich });
+    check.dependOn(&markdown_rich_tests.step);
+    const run_markdown_rich_tests = b.addRunArtifact(markdown_rich_tests);
+    test_step.dependOn(&run_markdown_rich_tests.step);
+    b.step("test-markdown-rich", "Run Markdown inline style to rich text span tests").dependOn(&run_markdown_rich_tests.step);
     const chart = b.addModule("ziggurat_chart", .{ .root_source_file = b.path("src/chart/root.zig"), .target = target, .optimize = optimize });
     const chart_tests = b.addTest(.{ .root_module = chart });
     check.dependOn(&chart_tests.step);
@@ -2376,6 +2404,11 @@ pub fn build(b: *std.Build) void {
         check.dependOn(&math_tests.step);
         b.step(entry[0], "Run pure coordinate and committed-frame geometry invariants").dependOn(&run_math_tests.step);
     }
+    const code_syntax_tests = b.addTest(.{ .root_module = code_syntax });
+    const run_code_syntax_tests = b.addRunArtifact(code_syntax_tests);
+    test_step.dependOn(&run_code_syntax_tests.step);
+    check.dependOn(&code_syntax_tests.step);
+    b.step("test-code-syntax", "Run lexer, language, theme, incremental highlighting, bracket and word search tests").dependOn(&run_code_syntax_tests.step);
     const run_code_editor_tests = b.addRunArtifact(code_editor_tests);
     test_step.dependOn(&run_code_editor_tests.step);
     b.step("test-code-editor", "Run revisioned editor services and ownership tests").dependOn(&run_code_editor_tests.step);
@@ -2560,6 +2593,15 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_chart", .module = chart },
             .{ .name = "ziggurat_chart_view", .module = chart_view },
         });
+        const game = b.addModule("ziggurat_game", .{ .root_source_file = b.path("src/game/root.zig"), .target = target, .optimize = optimize, .imports = &.{
+            .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_view", .module = declarative_view },
+        } });
+        const game_tests = b.addTest(.{ .root_module = game });
+        check.dependOn(&game_tests.step);
+        const run_game_tests = b.addRunArtifact(game_tests);
+        test_step.dependOn(&run_game_tests.step);
+        b.step("test-game", "Run game loop, camera, scaling and gamepad tests").dependOn(&run_game_tests.step);
     }
     addExamples(b, target, optimize);
 }
@@ -2569,7 +2611,7 @@ const app_example_imports = [_][]const u8{
     "ziggurat_view_text",   "ziggurat_document",         "ziggurat_document_editor", "ziggurat_wake",
     "ziggurat_system",      "ziggurat_i18n",             "ziggurat_animation",       "ziggurat_document_app",
     "ziggurat_chart",       "ziggurat_chart_view",       "ziggurat_audio",           "ziggurat_code_editor",
-    "ziggurat_text_layout", "ziggurat_window_placement",
+    "ziggurat_text_layout", "ziggurat_window_placement", "ziggurat_game",
 };
 
 const Example = struct { name: []const u8, path: []const u8, web: bool = false };
@@ -2590,6 +2632,7 @@ const app_examples = [_]Example{
     .{ .name = "launcher", .path = "examples/launcher.zig" },
     .{ .name = "timeline", .path = "examples/timeline.zig" },
     .{ .name = "i18n", .path = "examples/i18n.zig" },
+    .{ .name = "farm", .path = "examples/farm.zig" },
     .{ .name = "hybrid", .path = "examples/hybrid.zig", .web = true },
 };
 

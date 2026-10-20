@@ -124,8 +124,8 @@ U09 的实时折线须保留源数据供选择/读数，按可见物理像素列
 | T01 | 已完成（Windows/Linux） | 系统 shaping、grapheme、bidi、软换行、视觉 caret/hit test | T01.1 布局/查询、T01.2 准备绘制/编辑器桥接、T01.3 批量位置快照已验收；UTF-8/UTF-16/字素、复杂脚本/emoji/RTL/选区/fallback；原生回退与多段落构造成本见文档，成熟输入控件与辅助技术仍属 T02/T06 |
 | T02 | 进行中 | 完整输入控件、IME/候选/组合、平台文本服务 | 保留客户端及IMM/GTK surrounding、单Document普通字段的焦点/单多行策略/组合/注入clipboard/滚动caret与Windows Value动作已分项验；TSF、真实语言引擎、Linux系统clipboard及更广投影编辑继续；依赖T01 |
 | T03 | 已完成（Windows/Linux，有界段落视图） | 可扩展文档 buffer、多选区、查找替换、折叠 | 单文档原子多选编辑/撤销、worker快照流式字面搜索及派生段落折叠已验收；段落/缓存/元数据上限明确，语言服务与成熟字段UI另验；依赖 T01 |
-| T04 | 进行中 | 代码编辑 hooks、补全、hover、诊断、Diff | T04.1版本化Broker/Presenter、T04.2行差异/双栏/统一可编辑比较、行内标记及成对上下文折叠已验收；可访问语义与语言工具继续分项；依赖 T03 |
-| T05 | 部分完成 | 富文本与 Markdown 展示/编辑 | T05.1 已有纯 Zig `ziggurat_markdown`（CommonMark 块/行内、GitHub 表格/任务列表/删除线/扩展自动链接，有界节点树，原始 HTML 作字面文本）、`ziggurat_markdown_view`（声明式视图映射、折行、链接/任务激活）与 `ziggurat_markdown_code`（预排版等宽代码块），见[Markdown](markdown.md)；混合字重/字体 runs、嵌入资源、复制选区与编辑待实现；依赖 G01/T03 |
+| T04 | 进行中 | 代码编辑 hooks、补全、hover、诊断、Diff | T04.1版本化Broker/Presenter、T04.2行差异/双栏/统一可编辑比较、行内标记及成对上下文折叠已验收；T04.3 已有纯 Zig `ziggurat_code_syntax`（28 种语言词法、主题、增量行状态、括号匹配）及编辑器前景高亮、多光标/扩选/括号命令与变更标记，见[语法高亮、多光标与变更标记](code-syntax.md)；可访问语义与语言工具继续分项；依赖 T03 |
+| T05 | 部分完成 | 富文本与 Markdown 展示/编辑 | T05.1 已有纯 Zig `ziggurat_markdown`（CommonMark 块/行内、GitHub 表格/任务列表/删除线/扩展自动链接，有界节点树，原始 HTML 作字面文本）、`ziggurat_markdown_view`（声明式视图映射、折行、链接/任务激活）与 `ziggurat_markdown_code`（预排版等宽代码块），见[Markdown](markdown.md)；T05.2 已有 `ziggurat_view_rich_text`（混合字号/字重/斜体/等宽、颜色、下划线/波浪线/删除线与底色的 span 折行叶子）与 `ziggurat_markdown_rich`（不含链接的段落、标题与表格单元格按行内样式绘制），见[富文本](rich-text.md)；嵌入资源、富文本可访问性、复制选区与编辑待实现；依赖 G01/T03 |
 | T06 | 进行中 | UIA/AT-SPI/NSAccessibility 完整控件与文本语义 | Windows文档/MTA、空caret/TextPattern2、仿射凸裁剪与辅助动作，以及Linux单源只读AT-SPI/完整Prepared命中已分项验；Windows完整候选point迁移、Linux动作/多源、完整语言单位与其他平台继续；依赖 T01/U04/P02 |
 | T07 | 待实现 | 可选字体资产注册、系统/应用字体发现 | 显式准备、有界字体数据/枚举、monospaced与来源、别名/去重、缓存失效及旧Layout最后lease；依赖 T01 |
 
@@ -196,7 +196,7 @@ B02 分项：
 | S01 | 已完成（Windows） | 全局快捷键、通知区通知 | 原生注册/冲突/注销、稳定事件 ID、Owner 关闭与诊断重入检查；Linux/macOS 见 P02/P04 |
 | S02 | 部分完成 | shell 打开 URL/文件、定位、回收站、文件图标、应用发现/启动 | S02.1 executable 启动、S02.2 URL（https/http/mailto 默认白名单）/关联文件/定位、S02.3 回收站（Windows/Linux）及 S02.4 Windows 16/32px 不透明图标已实现；完整图标（Linux/高分辨率/透明）与安装应用发现/按身份启动待实现；真实关联程序/资源管理器显示未自动验证 |
 | S03 | 部分完成 | 多显示器、主题/accent/可访问性偏好、网络、电源与文件监视 | 显示器/偏好/电源/网络快照与合并变化订阅（Windows/Linux）、粗模式文件监视（inotify/ReadDirectoryChangesW）已实现；详细文件监视（快照/rename 匹配）、Linux 电源来源变化、Wayland 显示器、portal 配色待实现；Windows 路径首次运行在 CI |
-| S04 | 待实现 | 密钥存储、登录启动、深链和文件关联 | OS 权限/用户作用域、安装与运行时分工、卸载和参数转发；依赖 W05/R01 |
+| S04 | 部分完成（密钥存储） | 密钥存储、登录启动、深链和文件关联 | OS 权限/用户作用域、安装与运行时分工、卸载和参数转发；依赖 W05/R01 |
 | S05 | 部分完成 | 多格式剪贴板、transfer、惰性 provider、原生拖放 | Board 的 text/HTML/PNG/文件/自定义事务写入、异步读取、惰性 provider、变化事件、Windows 有界占用重试及 Windows/Linux 放置目标已实现；拖动源（需模态拖动循环）未提供；真实跨进程拖放、他进程占用重试与退出渲染未自动验证 |
 | S06 | 部分完成（Windows/Linux） | 异步消息对话框、上下文菜单与菜单快捷键 | S06.1 两平台上下文菜单与异步消息框、Windows 菜单栏快捷键已验；非嵌套循环（Windows 菜单在私有安全点进入系统菜单循环）、取消/关闭、禁用祖先、旧消息隔离分别验证；Linux 菜单栏与快捷键分发、物理输入与视觉验收继续；依赖 W02/U02 |
 | S07 | 待实现 | 应用身份/系统目录、任务栏或 Dock badge/progress/menu、阻止休眠 | 按平台 capability、用户作用域、原生引用/电源断言配对与最后 owner 回收；依赖 S03/P03 |
@@ -254,7 +254,7 @@ P01 的 Linux HTTPS 本地来源分两片实施。首片由宿主提供已运行
 | E02 | 首片完成 | Fetch 与 WebSocket | 显式 transport/worker、取消/背压/大小限制、TLS/断线、类型化客户端；依赖 E01/I01 |
 | E03 | 首片完成 | SQLite | 已有可选 `ziggurat_sqlite`：脚本拉取并校验固定 amalgamation，连接、预处理语句、类型化绑定、借用行读取、事务/savepoint、`user_version` 迁移、`interrupt` 取消与 `ui_thread` 主线程拒绝，`test-sqlite` 在 Windows/Linux CI 运行，见[SQLite](sqlite.md)；在线备份、增量 BLOB I/O、自定义函数与加密待实现 |
 | E04 | 待实现 | PTY 与终端视图 | 子进程/终端解析、输入/resize/流控/退出和回收；依赖 E01/T01/G01 |
-| E05 | 待实现 | game loop、camera、gamepad 与材质扩展 | 显式启停时钟、输入热插拔、帧/功耗预算与平台能力；依赖 E01/G02 |
+| E05 | 部分完成 | game loop、camera、gamepad 与材质扩展（[game.md](game.md)：固定步长循环、相机、整数缩放、XInput/evdev 手柄已完成；画布纹理、材质扩展待实现） | 显式启停时钟、输入热插拔、帧/功耗预算与平台能力；依赖 E01/G02 |
 | E06 | 首片完成 | backdrop blur、glass 与滚动边缘合成 | 已有 `Frame.backdropEffect`：均匀/渐变模糊、玻璃（regular/clear、tint、颗粒、弧面折射、亮度映射、边光）与柔和/硬滚动边缘，在 GDI/Cairo 软件平面采样，含效果的帧在 D3D11 下整帧软件回放；显式工作区预算与超限后备、减少透明度/高对比不透明后备；另有 29 种由显式相位驱动的加载动画与视图层 `Style.material`/`Style.edges`/`loadingIndicator`，见[背景效果与加载动画](backdrop-effects.md)；GPU 背景采样与按压动效待实现 |
 
 E04 继续分项实施，均为待实现，不由PTY或静态终端绘制单独代表完成：

@@ -3,10 +3,12 @@
 //! The text area is a multi-line `ziggurat_document_editor.Field` over one
 //! Document, embedded in a declarative view, so typing, IME, selection, undo
 //! and scrolling come from the native text path. On top of it the example
-//! adds: token highlighting through versioned range markers, a line-number
-//! gutter positioned from the prepared layout, find and replace, a status bar
-//! with the caret's line and column, and Open/Save through the native menu
-//! bar and asynchronous file pickers. File reads and writes run on a thread
+//! adds: incremental syntax highlighting of the visible lines through
+//! versioned range markers, a line-number gutter positioned from the prepared
+//! layout with marks for the lines changed since the file was opened or
+//! saved, multi-cursor and bracket commands in the Edit menu, find and
+//! replace, a status bar with the caret's line and column, and Open/Save
+//! through the native menu bar and asynchronous file pickers. File reads and writes run on a thread
 //! the example owns; results come back with `App.post`. Closing with unsaved
 //! changes asks first.
 //!
@@ -21,6 +23,8 @@ const d = @import("ziggurat_document");
 const t = @import("ziggurat_text_layout");
 const editing = @import("ziggurat_document_editor");
 const system = @import("ziggurat_system");
+const code = @import("ziggurat_code_editor");
+const syntax = code.syntax;
 
 /// The Field shows and exports at most this many bytes.
 const max_file = 16 * 1024;
@@ -37,7 +41,7 @@ const sample =
     \\}
     \\
 ;
-const Menu = enum(u64) { file = 1, open, save, save_as, quit, edit, find, find_next };
+const Menu = enum(u64) { file = 1, open, save, save_as, quit, edit, find, find_next, select_next, select_all, caret_above, caret_below, grow, shrink, bracket, undo_selection, next_change, revert_change };
 
 /// A Document, its Field and the view leaf that shows it.
 const Box = struct {
@@ -80,7 +84,13 @@ const Editor = struct {
     status_len: usize = 0,
     /// Scratch for whole-document passes on the main thread.
     scratch: [max_file]u8 = undefined,
-    markers: [2048]editing.RangeMarker = undefined,
+    /// Find matches, merged with the token markers.
+    matches: [512]editing.RangeMarker = undefined,
+    highlighting: code.Highlighting = undefined,
+    /// The first visible line the markers were made for.
+    highlighted_line: usize = std.math.maxInt(usize),
+    cursors: code.MultiCursor = undefined,
+    changes: code.GitGutter = undefined,
     highlight_queued: bool = false,
     highlighted: bool = false,
     picker_path: [std.fs.max_path_bytes]u8 = undefined,
@@ -163,6 +173,9 @@ const Editor = struct {
         const revision = document.version() catch return;
         const first = (adapter.viewportAnchor() catch return).line;
         const lines = document.lineCount() catch return;
+        // Scrolling shows lines without markers yet: highlight them after
+        // this paint.
+        if (first != self.highlighted_line) self.queueHighlight();
         try frame.pushClip(bounds);
         defer frame.popClip() catch {};
         var line = first;
@@ -175,10 +188,13 @@ const Editor = struct {
             const width = 8 * @as(f32, @floatFromInt(label.len));
             frame.labelFont(.{ .x = bounds.x + bounds.width - width - 10, .y = rect.y, .width = width + 4, .height = rect.height }, label, 0x8a96a3, view.Font.code);
         }
+        try self.changes.paint(frame, adapter, bounds, self.highlighting.theme);
     }
 
-    // Highlighting runs after input returns: it reads the committed text,
-    // installs range markers for that text version and re-prepares the field.
+    // Highlighting runs after input returns: it follows the committed text,
+    // installs the visible lines' token markers with the find matches for
+    // that text version and re-prepares the field. Lines past the budget of
+    // one pass continue in the next.
     fn queueHighlight(self: *Editor) void {
         if (self.highlight_queued) return;
         self.app.post(.{ .context = self, .call = highlight }) catch return;
@@ -187,27 +203,26 @@ const Editor = struct {
     fn highlight(ptr: *anyopaque) void {
         const self: *Editor = @ptrCast(@alignCast(ptr));
         self.highlight_queued = false;
-        const version = self.code.document.committedTextVersion() catch return;
+        const adapter = self.code.field.adapter;
         const source = self.code.value(&self.scratch);
-        var count = lex(source, &self.markers);
+        var count: usize = 0;
         var query_buffer: [256]u8 = undefined;
         const query = self.find.value(&query_buffer);
         if (query.len > 0) {
             var at: usize = 0;
-            while (count < self.markers.len) {
+            while (count < self.matches.len) {
                 const found = std.mem.indexOfPos(u8, source, at, query) orelse break;
-                self.markers[count] = .{ .range = .{ .start = found, .end = found + query.len }, .kind = .underline, .color = 0xd08a00, .thickness = 2 };
+                self.matches[count] = .{ .range = .{ .start = found, .end = found + query.len }, .kind = .underline, .color = 0xd08a00, .thickness = 2 };
                 count += 1;
                 at = found + query.len;
             }
         }
-        std.mem.sort(editing.RangeMarker, self.markers[0..count], {}, struct {
-            fn less(_: void, a: editing.RangeMarker, b: editing.RangeMarker) bool {
-                return a.range.start < b.range.start;
-            }
-        }.less);
+        const first = (adapter.viewportAnchor() catch return).line;
+        self.highlighted_line = first;
         // A composition in progress or a newer edit retries on the next change.
-        _ = self.code.field.adapter.setRangeMarkers(version, self.markers[0..count]) catch return;
+        const result = self.highlighting.update(adapter, first -| 20, 200, self.matches[0..count]) catch return;
+        if (!result.ready) self.queueHighlight();
+        _ = self.changes.update(self.code.document) catch {};
         self.code.field.prepare(self.code.field.bounds, self.code.field.parameters) catch return;
         if (self.window) |window| window.invalidate();
     }
@@ -348,6 +363,10 @@ const Editor = struct {
         }
         @memcpy(self.path[0..self.io_path_len], self.io_path[0..self.io_path_len]);
         self.path_len = self.io_path_len;
+        // The gutter shows changes since the file was opened or saved.
+        self.changes.setBase(self.io_bytes[0..self.io_len]) catch {};
+        if (!self.io_save) self.setLanguage();
+        self.queueHighlight();
         self.saved_version = if (self.io_save) self.io_version else self.code.document.committedTextVersion() catch 0;
         self.say("{s} {s}.", .{ if (self.io_save) "Saved" else "Opened", name });
         self.retitle();
@@ -363,6 +382,16 @@ const Editor = struct {
                 .quit => _ = self.app.requestQuit(),
                 .find => self.find.field.focus() catch {},
                 .find_next => self.findNext(),
+                .select_next => self.selection(self.cursors.selectNext(self.code.field.adapter, false)),
+                .select_all => self.selection(self.cursors.selectAllMatches(self.code.field.adapter)),
+                .caret_above => self.selection(self.cursors.addCaret(self.code.field.adapter, .above)),
+                .caret_below => self.selection(self.cursors.addCaret(self.code.field.adapter, .below)),
+                .grow => self.selection(self.cursors.selectLarger(self.code.field.adapter)),
+                .shrink => self.selection(self.cursors.selectSmaller(self.code.field.adapter)),
+                .bracket => self.selection(self.cursors.toBracket(self.code.field.adapter, false)),
+                .undo_selection => self.selection(self.cursors.undoSelection(self.code.field.adapter, false)),
+                .next_change => self.selection(self.changes.goToHunk(self.code.field.adapter, .next)),
+                .revert_change => self.selection(self.changes.revertHunks(self.code.field.adapter)),
                 .file, .edit => {},
             },
             .message => |result| if (result.response == .button and result.response.button == 1) {
@@ -372,6 +401,20 @@ const Editor = struct {
             else => {},
         }
     }
+    /// Repaint after a selection command, or say why it failed.
+    fn selection(self: *Editor, result: anyerror!bool) void {
+        const changed = result catch |err| return self.say("{s}", .{@errorName(err)});
+        if (!changed) return;
+        self.code.field.prepare(self.code.field.bounds, self.code.field.parameters) catch {};
+        if (self.window) |window| window.invalidate();
+    }
+    /// Highlight by the file's name, or as Zig when it has no known one.
+    fn setLanguage(self: *Editor) void {
+        const language = syntax.forFile(self.fileName()) orelse &syntax.languages.zig;
+        self.highlighting.setLanguage(language);
+        self.cursors.setSyntax(language, &self.highlighting.highlighter);
+    }
+
     /// Unsaved changes veto the close once and ask; Discard closes again.
     fn onClose(ptr: *anyopaque, _: z.Window, _: z.CloseReason) z.CloseDecision {
         const self: *Editor = @ptrCast(@alignCast(ptr));
@@ -387,48 +430,6 @@ const Editor = struct {
         return .cancel;
     }
 };
-
-/// Marks comments, strings, numbers, builtins and keywords of Zig source.
-fn lex(source: []const u8, out: []editing.RangeMarker) usize {
-    var count: usize = 0;
-    var i: usize = 0;
-    while (i < source.len and count < out.len) {
-        const c = source[i];
-        const next: u8 = if (i + 1 < source.len) source[i + 1] else 0;
-        var end = i + 1;
-        const color: ?u32 = switch (c) {
-            '/' => if (next == '/') blk: {
-                end = std.mem.indexOfScalarPos(u8, source, i, '\n') orelse source.len;
-                break :blk 0xeeeeee;
-            } else null,
-            '\\' => if (next == '\\') blk: {
-                end = std.mem.indexOfScalarPos(u8, source, i, '\n') orelse source.len;
-                break :blk 0xdff3d8;
-            } else null,
-            '"', '\'' => blk: {
-                while (end < source.len and source[end] != c and source[end] != '\n') end += if (source[end] == '\\' and end + 1 < source.len and source[end + 1] != '\n') 2 else 1;
-                if (end < source.len and source[end] == c) end += 1;
-                break :blk 0xdff3d8;
-            },
-            '0'...'9' => blk: {
-                while (end < source.len and (std.ascii.isAlphanumeric(source[end]) or source[end] == '_' or (source[end] == '.' and end + 1 < source.len and std.ascii.isDigit(source[end + 1])))) end += 1;
-                break :blk 0xffecd2;
-            },
-            '@', 'a'...'z', 'A'...'Z', '_' => blk: {
-                while (end < source.len and (std.ascii.isAlphanumeric(source[end]) or source[end] == '_')) end += 1;
-                if (c == '@') break :blk if (end > i + 1) 0xf0e2ff else null;
-                break :blk if (std.zig.Token.getKeyword(source[i..end]) != null) 0xdde8ff else null;
-            },
-            else => null,
-        };
-        if (color) |rgb| if (end > i) {
-            out[count] = .{ .range = .{ .start = i, .end = end }, .color = rgb };
-            count += 1;
-        };
-        i = end;
-    }
-    return count;
-}
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -461,6 +462,18 @@ pub fn main() !void {
         .{ .id = @intFromEnum(Menu.edit), .kind = .submenu, .label = "&Edit" },
         .{ .id = @intFromEnum(Menu.find), .parent = @intFromEnum(Menu.edit), .label = "&Find", .accelerator = .{ .key = .f, .modifiers = .{ .control = true } } },
         .{ .id = @intFromEnum(Menu.find_next), .parent = @intFromEnum(Menu.edit), .label = "Find &Next", .accelerator = .{ .key = .f3 } },
+        .{ .parent = @intFromEnum(Menu.edit), .kind = .separator },
+        .{ .id = @intFromEnum(Menu.select_next), .parent = @intFromEnum(Menu.edit), .label = "Select Next Occurrence", .accelerator = .{ .key = .d, .modifiers = .{ .control = true } } },
+        .{ .id = @intFromEnum(Menu.select_all), .parent = @intFromEnum(Menu.edit), .label = "Select All Occurrences", .accelerator = .{ .key = .l, .modifiers = .{ .control = true, .shift = true } } },
+        .{ .id = @intFromEnum(Menu.caret_above), .parent = @intFromEnum(Menu.edit), .label = "Add Caret Above", .accelerator = .{ .key = .up, .modifiers = .{ .control = true, .alt = true } } },
+        .{ .id = @intFromEnum(Menu.caret_below), .parent = @intFromEnum(Menu.edit), .label = "Add Caret Below", .accelerator = .{ .key = .down, .modifiers = .{ .control = true, .alt = true } } },
+        .{ .id = @intFromEnum(Menu.grow), .parent = @intFromEnum(Menu.edit), .label = "Expand Selection", .accelerator = .{ .key = .right, .modifiers = .{ .alt = true, .shift = true } } },
+        .{ .id = @intFromEnum(Menu.shrink), .parent = @intFromEnum(Menu.edit), .label = "Shrink Selection", .accelerator = .{ .key = .left, .modifiers = .{ .alt = true, .shift = true } } },
+        .{ .id = @intFromEnum(Menu.bracket), .parent = @intFromEnum(Menu.edit), .label = "Go to Bracket", .accelerator = .{ .key = .m, .modifiers = .{ .control = true, .shift = true } } },
+        .{ .id = @intFromEnum(Menu.undo_selection), .parent = @intFromEnum(Menu.edit), .label = "Undo Selection", .accelerator = .{ .key = .u, .modifiers = .{ .control = true } } },
+        .{ .parent = @intFromEnum(Menu.edit), .kind = .separator },
+        .{ .id = @intFromEnum(Menu.next_change), .parent = @intFromEnum(Menu.edit), .label = "Next Change", .accelerator = .{ .key = .f7, .modifiers = .{ .alt = true } } },
+        .{ .id = @intFromEnum(Menu.revert_change), .parent = @intFromEnum(Menu.edit), .label = "Revert Change" },
     });
 
     const scale = (try window.contentSize()).scale;
@@ -468,6 +481,14 @@ pub fn main() !void {
     try editor.code.open(allocator, engine, &editor.host, sample, code_parameters, .{ .multiline = true, .accept_tab = true, .value_bytes = max_file, .context = &editor, .changed = Editor.codeChanged }, .{ .name = "Source", .lines = 8, .width = 480 });
     defer editor.code.close();
     editor.saved_version = try editor.code.document.committedTextVersion();
+    editor.highlighting = try code.Highlighting.init(allocator, &syntax.languages.zig, syntax.Theme.light(), .{});
+    defer editor.highlighting.deinit();
+    editor.cursors = code.MultiCursor.init(allocator, .{});
+    defer editor.cursors.deinit();
+    editor.cursors.setSyntax(&syntax.languages.zig, &editor.highlighting.highlighter);
+    editor.changes = code.GitGutter.init(allocator, .{});
+    defer editor.changes.deinit();
+    try editor.changes.setBase(sample);
     const box_parameters: editing.Parameters = .{ .font = .{ .size = 15 }, .scale = scale };
     const box_field: editing.FieldOptions = .{ .value_bytes = 256, .context = &editor, .changed = Editor.queryChanged, .submit = Editor.findSubmitted };
     try editor.find.open(allocator, engine, &editor.host, "", box_parameters, box_field, .{ .name = "Find", .width = 140 });
@@ -489,13 +510,4 @@ pub fn main() !void {
     window.show();
     try app.run();
     editor.window = null;
-}
-
-test "lexer marks Zig tokens in order" {
-    var markers: [16]editing.RangeMarker = undefined;
-    const source = "const x = \"a\\\"b\"; // done\n@as(u8, 42)";
-    const count = lex(source, &markers);
-    const expected = [_][]const u8{ "const", "\"a\\\"b\"", "// done", "@as", "42" };
-    try std.testing.expectEqual(expected.len, count);
-    for (expected, markers[0..count]) |want, marker| try std.testing.expectEqualStrings(want, source[marker.range.start..marker.range.end]);
 }
