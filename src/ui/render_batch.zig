@@ -113,6 +113,18 @@ pub fn preflight(buffer: *const commands.Buffer, options: Options) !u64 {
             .begin_transform => 1, // clear the reserved source including guard
             .end_transform => 1, // inverse sample and source-over composite
             .pop_clip => 0,
+            .backdrop => |slot| blk: {
+                const entries = buffer.backdropEntries();
+                if (slot >= entries.len) return error.MissingResources;
+                try rect(entries[slot].bounds, options.size.scale);
+                break :blk 4; // copy, two filter passes and composite
+            },
+            .indicator => |slot| blk: {
+                const entries = buffer.indicatorEntries();
+                if (slot >= entries.len) return error.MissingResources;
+                try rect(entries[slot].bounds, options.size.scale);
+                break :blk 1;
+            },
         };
         visits = std.math.add(u64, visits, pixels * weight) catch return error.RenderWorkExceeded;
         if (visits > options.render_work) return error.RenderWorkExceeded;
