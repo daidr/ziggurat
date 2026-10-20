@@ -249,7 +249,7 @@ P01 的 Linux HTTPS 本地来源分两片实施。首片由宿主提供已运行
 | ID | 状态 | 范围 | 验收与依赖 |
 | --- | --- | --- | --- |
 | L01 | 部分完成 | catalog、locale、ICU message/plural、数字/日期与 RTL | 已有纯 Zig `ziggurat_i18n`：编译期/加载期校验、无分配格式化、locale fallback 与协商、约 50 种语言复数规则、数字/日期、pseudolocale 与方向查询，见[本地化](i18n.md)；控件双向布局、时区数据、货币数据与完整 CLDR 覆盖待实现 |
-| A01 | 部分完成 | 音频解码、内存音效与流式播放 | 已有 `ziggurat_audio`：WAV 与纯 Zig FLAC、内存音效与流式播放、seek/音量/pan/速度/循环与区间循环、混音线程无分配、WASAPI 与 PulseAudio/ALSA、默认设备切换重开、空闲关闭与无设备静音走时，见[音频](audio.md)；MP3 与 Ogg Vorbis 待实现 |
+| A01 | 部分完成 | 音频解码、内存音效与流式播放 | 已有 `ziggurat_audio`：WAV、纯 Zig FLAC、MP3（minimp3）与 Ogg Vorbis（stb_vorbis）、内存音效与流式播放、seek/音量/pan/速度/循环与区间循环、混音线程无分配、WASAPI 与 PulseAudio/ALSA、默认设备切换重开、空闲关闭与无设备静音走时，见[音频](audio.md)；CI 主机无声卡，真实设备出声尚待本地验证 |
 | E01 | 已完成 | 插件注册与显式初始化/关闭依赖 | 固定容量应用级依赖图、全图预检、失败逆序回滚、取消/重入/线程；Windows/Linux 运行及独立 review 通过 |
 | E02 | 首片完成 | Fetch 与 WebSocket | 显式 transport/worker、取消/背压/大小限制、TLS/断线、类型化客户端；依赖 E01/I01 |
 | E03 | 首片完成 | SQLite | 已有可选 `ziggurat_sqlite`：脚本拉取并校验固定 amalgamation，连接、预处理语句、类型化绑定、借用行读取、事务/savepoint、`user_version` 迁移、`interrupt` 取消与 `ui_thread` 主线程拒绝，`test-sqlite` 在 Windows/Linux CI 运行，见[SQLite](sqlite.md)；在线备份、增量 BLOB I/O、自定义函数与加密待实现 |
