@@ -222,8 +222,8 @@ const Piano = struct {
     fn input(context: *anyopaque, _: u64, event: view.EmbedInput) bool {
         const self: *Piano = @ptrCast(@alignCast(context));
         switch (event) {
-            .pointer_down => |point| {
-                const note = self.noteAt(point) orelse return false;
+            .pointer_down => |pressed| {
+                const note = self.noteAt(pressed.position) orelse return false;
                 self.press(note, self.host.time());
                 return true;
             },
