@@ -2597,6 +2597,7 @@ const app_examples = [_]Example{
     .{ .name = "loading", .path = "examples/loading.zig" },
     .{ .name = "terminal", .path = "examples/terminal.zig" },
     .{ .name = "text-buffer", .path = "examples/text_buffer.zig" },
+    .{ .name = "native", .path = "examples/native.zig" },
     .{ .name = "hybrid", .path = "examples/hybrid.zig", .web = true },
 };
 
