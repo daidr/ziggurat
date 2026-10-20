@@ -232,6 +232,16 @@ pub fn main() !void {
         try startTimer(&probe, .tray_choose);
         try pump(trayCount(3), &probe);
         try std.testing.expectEqual(system.PopupResult{ .request = 30, .selected = 1 }, probe.tray_events[2].popup);
+        // The item's own menu opens after the context event and reports
+        // its command as a menu action rather than a popup result.
+        try std.testing.expectError(error.DuplicateMenuId, probe.tray.setMenu(&.{ .{ .id = 1, .label = "A" }, .{ .id = 1, .label = "B" } }));
+        try probe.tray.setMenu(&popup_items);
+        _ = c.SendMessageW(tray_hwnd, tray_message, (@as(usize, 30) << 16) | 20, @bitCast((@as(usize, tray_id) << 16) | c.WM_CONTEXTMENU));
+        try std.testing.expect(probe.tray_events[3] == .context);
+        try startTimer(&probe, .tray_choose);
+        try pump(trayCount(5), &probe);
+        try std.testing.expectEqual(1, probe.tray_events[4].menu);
+        try probe.tray.setMenu(&.{});
         var removed = std.mem.zeroes(c.NOTIFYICONDATAW);
         removed.cbSize = @sizeOf(c.NOTIFYICONDATAW);
         removed.hWnd = tray_hwnd;

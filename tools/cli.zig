@@ -4,6 +4,7 @@ const update = @import("ziggurat_update");
 const options = @import("cli_options");
 const setup_format = @import("setup_format");
 const deb = @import("deb");
+const publish = @import("publish.zig");
 
 const usage =
     \\ziggurat init DIR [--template native|web|hybrid] [--name NAME] [--id IDENTITY] [--framework PATH]
@@ -61,6 +62,7 @@ fn run(allocator: std.mem.Allocator) !u8 {
     if (std.mem.eql(u8, command, "build")) return buildCommand(allocator, rest);
     if (std.mem.eql(u8, command, "doctor")) return doctor(allocator, rest);
     if (std.mem.eql(u8, command, "package")) return packageCommand(allocator, rest);
+    if (std.mem.eql(u8, command, "publish")) return publishCommand(allocator, rest);
     try std.fs.File.stderr().writeAll(usage);
     return 2;
 }
@@ -706,6 +708,41 @@ fn webviewRuntimeVersion(allocator: std.mem.Allocator) ?[]const u8 {
         }
     }
     return null;
+}
+
+// ---------------------------------------------------------------- publish
+
+fn publishCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
+    var publish_options: publish.Options = .{ .directory = "", .repository = "", .tag = "" };
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        const value = if (index + 1 < args.len) args[index + 1] else null;
+        if (std.mem.eql(u8, arg, "--github")) {
+            publish_options.repository = value orelse return error.InvalidArguments;
+            index += 1;
+        } else if (std.mem.eql(u8, arg, "--tag")) {
+            publish_options.tag = value orelse return error.InvalidArguments;
+            index += 1;
+        } else if (std.mem.eql(u8, arg, "--notes")) {
+            publish_options.notes_file = value orelse return error.InvalidArguments;
+            index += 1;
+        } else if (std.mem.eql(u8, arg, "--not-latest")) {
+            publish_options.latest = false;
+        } else if (publish_options.directory.len == 0 and !std.mem.startsWith(u8, arg, "--")) {
+            publish_options.directory = arg;
+        } else return error.InvalidArguments;
+    }
+    if (publish_options.directory.len == 0 or publish_options.repository.len == 0 or publish_options.tag.len == 0) return error.InvalidArguments;
+    if (std.process.getEnvVarOwned(allocator, "GH")) |gh| publish_options.gh = gh else |_| {}
+    var buffer: [1024]u8 = undefined;
+    var stdout = std.fs.File.stdout().writer(&buffer);
+    try publish.github(allocator, publish_options, &stdout.interface);
+    return 0;
+}
+
+test {
+    _ = publish;
 }
 
 test "templates render without placeholders and identifiers are sanitized" {

@@ -22,8 +22,10 @@ pub const Track = ui.grid.Track;
 pub const MeterBands = ui.widgets.MeterBands;
 pub const NavDirection = ui.widgets.NavDirection;
 pub const ImageView = ui.drawing.ImageView;
+pub const SortDirection = ui.widgets.SortDirection;
+pub const ItemRequest = ui.widgets.ItemRequest;
 
-pub const Error = error{ InvalidField, TooManyNodes, TextFull, NestingTooDeep, UnbalancedContainer, NotContainer, Busy, InvalidRange, InvalidValue, InvalidText, InvalidSplit } || layout.Error;
+pub const Error = error{ InvalidField, TooManyNodes, TextFull, NestingTooDeep, UnbalancedContainer, NotContainer, Busy, InvalidRange, InvalidValue, InvalidText, InvalidSplit, SelectionFull } || layout.Error;
 
 pub const max_depth = 32;
 /// Options of the open popup that keyboard navigation can reach.
@@ -40,6 +42,16 @@ pub const popup_gap: f32 = 4;
 pub const toast_margin: f32 = 16;
 /// Popups and toast stacks painted over the tree in one frame.
 const max_floating = 4;
+/// Tree and table rows keyboard navigation can reach in one frame.
+pub const max_collection_rows = 512;
+/// Trees and tables keyboard navigation can reach in one frame.
+pub const max_collections = 8;
+/// Tokens keyboard navigation can reach in one frame.
+pub const max_tokens = 64;
+/// Token fields whose wrapped width is remembered between passes.
+pub const max_token_fields = 4;
+/// Column tracks of all tables in one pass.
+pub const max_table_tracks = 64;
 /// Scroll containers Host can route wheel input to in one frame.
 pub const max_scroll_regions = 16;
 /// Thickness of a split's draggable divider, in DIP.
@@ -171,6 +183,87 @@ pub fn Toasts(comptime capacity: usize) type {
     };
 }
 
+/// The selected items of a tree or table, kept by the application at a
+/// stable address. Items are named by the application's own stable ids,
+/// so the selection survives renames, reordering and collapsed branches.
+pub const Selection = struct {
+    pub const Mode = enum { single, multiple };
+    mode: Mode = .single,
+    /// Room for the selected ids; its length is the most that can be
+    /// selected at once.
+    storage: []u64,
+    len: usize = 0,
+    /// Where a Shift range starts.
+    anchor: ?u64 = null,
+    /// The item with the keyboard cursor, which holds the collection's Tab
+    /// stop. In multiple mode it may be unselected.
+    cursor: ?u64 = null,
+    /// Counts changes to the selected set, so a build can tell it changed.
+    version: u64 = 0,
+
+    pub fn init(mode: Mode, storage: []u64) Selection {
+        return .{ .mode = mode, .storage = storage };
+    }
+    pub fn items(self: *const Selection) []const u64 {
+        return self.storage[0..self.len];
+    }
+    pub fn contains(self: *const Selection, id: u64) bool {
+        return std.mem.indexOfScalar(u64, self.items(), id) != null;
+    }
+    pub fn clear(self: *Selection) void {
+        if (self.len == 0) return;
+        self.len = 0;
+        self.version += 1;
+    }
+    /// Add `id`; in single mode it replaces the selected item.
+    pub fn add(self: *Selection, id: u64) error{SelectionFull}!void {
+        if (self.contains(id)) return;
+        if (self.mode == .single) self.len = 0;
+        if (self.len == self.storage.len) return error.SelectionFull;
+        self.storage[self.len] = id;
+        self.len += 1;
+        self.version += 1;
+    }
+    /// Remove `id`; false when it was not selected.
+    pub fn remove(self: *Selection, id: u64) bool {
+        const index = std.mem.indexOfScalar(u64, self.items(), id) orelse return false;
+        std.mem.copyForwards(u64, self.storage[index .. self.len - 1], self.storage[index + 1 .. self.len]);
+        self.len -= 1;
+        self.version += 1;
+        return true;
+    }
+    /// Select only `id` and move the cursor and the anchor to it.
+    pub fn set(self: *Selection, id: u64) error{SelectionFull}!void {
+        if (!(self.len == 1 and self.storage[0] == id)) {
+            self.clear();
+            try self.add(id);
+        }
+        self.anchor = id;
+        self.cursor = id;
+    }
+};
+
+/// One table column: its title, its track in the row grid and whether its
+/// header sorts the table.
+pub const Column = struct {
+    title: []const u8,
+    /// Width of the column; fixed and fractional tracks line up across rows,
+    /// while content-sized tracks are sized per row.
+    track: Track = Track.fraction(1),
+    sortable: bool = true,
+};
+/// The column a table is sorted by.
+pub const Sort = struct { column: usize, direction: SortDirection = .ascending };
+
+/// What a text input embedded in a combo box or token field reports to the
+/// view, so keys the input needs are not taken by the list or the tokens.
+pub const EmbedStatus = struct {
+    /// An input method composition is in progress.
+    composing: bool = false,
+    /// The input holds no text.
+    empty: bool = false,
+};
+
 /// Derive a stable key from text, for example a list item's identifier.
 pub fn key(text: []const u8) u64 {
     return std.hash.Wyhash.hash(0x6b65_79, text);
@@ -192,7 +285,7 @@ pub const Measurer = struct {
     }
 };
 
-pub const Kind = enum { column, row, radio_group, segmented, tab_list, list_box, toolbar, breadcrumbs, accordion, field, fieldset, split, scroll, grid, search, popup, toasts, toast, text, note, badge, spacer, button, link, nav_button, combo_box, checkbox, radio, segment, tab, list_item, disclosure, toggle_switch, progress, meter, slider, stepper, rating, avatar, embed };
+pub const Kind = enum { column, row, radio_group, segmented, tab_list, list_box, toolbar, breadcrumbs, accordion, field, fieldset, split, scroll, grid, search, popup, toasts, toast, tree, tree_item, table, table_header, table_row, token_field, combo_field, text, note, badge, spacer, button, link, nav_button, combo_box, checkbox, radio, segment, tab, list_item, disclosure, toggle_switch, progress, meter, slider, stepper, rating, avatar, embed, tree_row, column_header, token, combo_toggle };
 
 /// A leaf that measures, places and paints itself, for content the view
 /// layer does not model, such as an editable text field. The context must
@@ -209,6 +302,10 @@ pub const Embed = struct {
     /// The enclosing form field's description, or an empty one outside a
     /// field; called just before each `paint` under the same rules.
     annotate: ?*const fn (*anyopaque, Annotation) void = null,
+    /// Composition and emptiness of an embedded text input, read by combo
+    /// boxes, suggestion lists and token fields; called during passes and
+    /// key routing, so it must not allocate or block.
+    status: ?*const fn (*anyopaque) EmbedStatus = null,
 };
 
 pub const Node = struct {
@@ -250,6 +347,23 @@ pub const Node = struct {
     highlighted: bool = false,
     direction: NavDirection = .back,
     image: ?ImageView = null,
+    /// The application's stable id of a tree or table row.
+    item: u64 = 0,
+    /// Depth of a tree row, from 0.
+    level: u16 = 0,
+    /// A tree row's expansion; null for a leaf.
+    expanded: ?bool = null,
+    /// The row holds its collection's keyboard cursor.
+    cursor: bool = false,
+    /// Selection of a tree or table.
+    selection: ?*Selection = null,
+    /// Index of the nearest enclosing tree or table.
+    collection: u32 = none,
+    /// Index of the nearest enclosing table row, whose selection colors
+    /// its cell text.
+    row: u32 = none,
+    /// Sort direction of a column header, when the table is sorted by it.
+    sort: ?SortDirection = null,
     parent: u32 = none,
     first_child: u32 = none,
     last_child: u32 = none,
@@ -264,9 +378,14 @@ pub const Node = struct {
 
     pub fn isContainer(self: *const Node) bool {
         return switch (self.kind) {
-            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .toasts, .toast => true,
+            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .toasts, .toast, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field => true,
             else => false,
         };
+    }
+    /// True for a container laid out by `tracks`: a grid or a table's
+    /// header and rows.
+    pub fn isGrid(self: *const Node) bool {
+        return self.kind == .grid or self.kind == .table_header or self.kind == .table_row;
     }
     /// True when the node clips its descendants to its bounds.
     pub fn clips(self: *const Node) bool {
@@ -305,6 +424,37 @@ pub const Event = union(enum) {
     value: struct { id: u64, change: ValueChange },
     /// Wheel movement in DIP over a scroll container; positive y scrolls down.
     scroll: struct { id: u64, delta: Point },
+    /// A press or key on a tree or table row, taken by the collection.
+    item: ItemEvent,
+};
+
+/// What a press or key does to a tree or table row.
+pub const ItemOp = enum {
+    /// Select only this item.
+    select,
+    /// Add it to or remove it from a multiple selection (Ctrl).
+    toggle,
+    /// Select from the anchor to it (Shift), replacing the selection.
+    range,
+    /// Add the items from the anchor to it (Ctrl+Shift).
+    range_add,
+    /// Move the keyboard cursor without selecting (Ctrl+arrow).
+    cursor,
+    expand,
+    collapse,
+    /// Enter on the row; `treeItem` and `tableRow` return true.
+    activate,
+    /// Select every built item of a multiple selection (Ctrl+A).
+    select_all,
+};
+pub const ItemEvent = struct {
+    /// Node id of the tree or table.
+    collection: u64,
+    /// The application's id of the row.
+    item: u64,
+    op: ItemOp,
+    /// Where a range starts; null starts it at `item`.
+    anchor: ?u64 = null,
 };
 
 /// Which popup is open and what keyboard navigation reached in it. It
@@ -321,6 +471,14 @@ pub const PopupState = struct {
     /// Input whose suggestions were just picked; the next pass records the
     /// labels the pick produced, so they do not reopen the list.
     settle: ?u64 = null,
+    /// Editable combo box whose list its button, Alt+Down or Down opened;
+    /// it shows even when its options did not change.
+    forced: ?u64 = null,
+    /// Editable combo box holding focus. Gaining focus does not open its
+    /// list; typing that changes the options does.
+    within: ?u64 = null,
+    /// Editable combo box whose button asked to close its list.
+    close: ?u64 = null,
 };
 
 /// Hover and timing of the tooltip, kept by the View across passes.
@@ -338,9 +496,46 @@ pub const TooltipState = struct {
 /// Geometry of the last arranged pass that input routing needs between
 /// passes, when node bounds are no longer current.
 pub const Overlay = struct {
-    pub const Popup = struct { id: u64, anchor: u64, combo: bool, rect: Rect, anchor_rect: Rect, signature: u64 };
+    pub const Popup = struct {
+        id: u64,
+        anchor: u64,
+        combo: bool,
+        rect: Rect,
+        anchor_rect: Rect,
+        signature: u64,
+        /// The anchor is an editable combo box.
+        editable: bool = false,
+        /// Where focus returns when the list closes: the anchor, or the
+        /// text input of an editable combo box or token field.
+        input: u64,
+    };
     pub const Region = struct { id: u64, rect: Rect };
-    pub const Anchor = struct { id: u64, combo: bool };
+    pub const Anchor = struct {
+        id: u64,
+        combo: bool,
+        /// The text input inside an editable combo box or token field.
+        input: ?u64 = null,
+        /// An editable combo box's button.
+        toggle: ?u64 = null,
+        /// Reports the input's composition.
+        embed: ?Embed = null,
+    };
+    pub const Row = struct {
+        id: u64,
+        item: u64,
+        collection: u64,
+        level: u16,
+        expanded: ?bool,
+        /// Index in `rows` of the tree row this one is nested under.
+        parent: u32,
+        bounds: Rect,
+        /// Part left visible by clips; empty when scrolled out.
+        rect: Rect,
+        enabled: bool,
+    };
+    pub const Collection = struct { id: u64, tree: bool, multiple: bool, anchor: ?u64, page: usize };
+    pub const Token = struct { id: u64, remove: u64, field: u64, rect: Rect, enabled: bool };
+    pub const TokenField = struct { id: u64, input: ?u64, embed: ?Embed };
     popup: ?Popup = null,
     /// Enabled options of the open popup, in build order.
     items: [max_popup_items]Region = undefined,
@@ -351,6 +546,15 @@ pub const Overlay = struct {
     /// Enabled combo boxes and suggestion inputs.
     anchors: [max_popup_anchors]Anchor = undefined,
     anchor_count: usize = 0,
+    /// Tree and table rows in build order.
+    rows: [max_collection_rows]Row = undefined,
+    row_count: usize = 0,
+    collections: [max_collections]Collection = undefined,
+    collection_count: usize = 0,
+    tokens: [max_tokens]Token = undefined,
+    token_count: usize = 0,
+    token_fields: [max_token_fields]TokenField = undefined,
+    token_field_count: usize = 0,
 };
 
 /// What `View.routeKey` did with a key press.
@@ -400,6 +604,25 @@ pub const View = struct {
     tip_rect: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
     /// A suggestion was picked in this pass.
     picked: bool = false,
+    /// The row event the collection that took it is applying in this pass.
+    item_event: ?ItemEvent = null,
+    /// A Shift range or select-all being applied in build order: rows from
+    /// the first of `from` and `to` met through the second are selected; a
+    /// null `from` selects every row.
+    range: ?struct { collection: u64, from: ?u64, to: u64, inside: bool = false, done: bool = false } = null,
+    /// Token field whose token was removed in this pass.
+    removed_token: u32 = none,
+    /// Column tracks of this pass's tables.
+    tracks: [max_table_tracks]Track = undefined,
+    track_len: usize = 0,
+    /// Widest single-column cell content of every table column, gathered
+    /// from the header and all rows so they share column widths.
+    track_minimum: [max_table_tracks]f32 = undefined,
+    track_preferred: [max_table_tracks]f32 = undefined,
+    /// Inner width each token field had at its last arrangement, so its
+    /// tokens wrap at the right width when measured.
+    flow_widths: [max_token_fields]struct { id: u64, width: f32 } = undefined,
+    flow_count: usize = 0,
 
     pub fn init(buffers: Buffers) View {
         return .{ .buffers = buffers };
@@ -416,6 +639,10 @@ pub const View = struct {
         self.wake = null;
         self.restore = null;
         self.picked = false;
+        self.item_event = null;
+        self.range = null;
+        self.removed_token = none;
+        self.track_len = 0;
         self.tip_index = none;
         self.buffers.nodes[0] = .{ .kind = .column, .id = root_seed, .style = root_style, .end = 1 };
     }
@@ -469,9 +696,9 @@ pub const View = struct {
         var effective = style;
         effective.enabled = style.enabled and parent.style.enabled;
         self.buffers.nodes[index] = .{ .kind = kind, .id = self.identity(parent, kind, style), .style = effective, .parent = parent_index, .end = index + 1, .semantic_parent = switch (parent.kind) {
-            .toolbar, .breadcrumbs, .accordion, .fieldset, .search, .toast => parent.id,
+            .toolbar, .breadcrumbs, .accordion, .fieldset, .search, .toast, .table_header, .table_row, .token_field, .combo_field => parent.id,
             else => parent.semantic_parent,
-        }, .field = if (parent.kind == .field) parent_index else parent.field };
+        }, .field = if (parent.kind == .field) parent_index else parent.field, .collection = if (parent.kind == .tree or parent.kind == .table) parent_index else parent.collection, .row = if (parent.kind == .table_row) parent_index else parent.row };
         if (parent.last_child == none) parent.first_child = index else self.buffers.nodes[parent.last_child].next_sibling = index;
         parent.last_child = index;
         parent.child_count += 1;
@@ -494,6 +721,7 @@ pub const View = struct {
             .action => |value| value,
             .value => |value| value.id,
             .scroll => |value| value.id,
+            .item => |value| value.collection,
         };
         if (target != id) return null;
         self.event = null;
@@ -523,11 +751,14 @@ pub const View = struct {
     }
     pub fn end(self: *View) Error!void {
         if (self.depth <= 1) return error.UnbalancedContainer;
+        // An editable combo box ends with its button, inside it.
+        if (self.buffers.nodes[self.stack[self.depth - 1]].kind == .combo_field) try self.comboToggle(self.stack[self.depth - 1]);
         self.depth -= 1;
         const index = self.stack[self.depth];
         const node = &self.buffers.nodes[index];
         if (node.kind == .split and node.child_count != 2) return error.InvalidSplit;
         if (node.kind == .popup) self.settlePopup(index);
+
         if (node.kind == .field) {
             // Only the label precedes the content.
             if (node.child_count < 2) return error.InvalidField;
@@ -538,6 +769,10 @@ pub const View = struct {
             }
         }
         node.end = self.len;
+        if (node.kind == .token_field and self.removed_token == index) {
+            // After a removal, typing continues in the field's input.
+            if (self.firstEmbed(index)) |input| self.restore = self.buffers.nodes[input].id;
+        }
     }
 
     pub fn text(self: *View, value: []const u8, style: Style) Error!void {
@@ -830,6 +1065,270 @@ pub const View = struct {
         return self.ranged(.stepper, value, range, style);
     }
 
+    /// Starts a tree of rows bound to `selection`, named by `Style.name`.
+    /// Build its rows with `treeItem`, nesting each row's children before
+    /// that row's `end`. Rows share one Tab stop on the selection's cursor;
+    /// Up/Down, Home/End and PageUp/PageDown move it, Right expands a row
+    /// or enters its first child, Left collapses it or returns to its
+    /// parent, Enter activates it. With a multiple selection, Ctrl moves the
+    /// cursor alone or toggles on Space and press, Shift extends a range
+    /// from the anchor and Ctrl+A selects every built row. Put it in a
+    /// `scroll` container for long trees. Close it with `end`.
+    pub fn tree(self: *View, selection: *Selection, style: Style) Error!void {
+        const node = try self.open(.tree, style);
+        try self.openCollection(node, selection);
+    }
+    /// A tree row for the application's item `id`, unique in its tree, with
+    /// its children (when `expanded` is set) built before the matching
+    /// `end`. `expanded` is null for a leaf; expansion flips it. True once
+    /// for the pass where Enter activates the row.
+    pub fn treeItem(self: *View, id: u64, expanded: ?*bool, label: []const u8, style: Style) Error!bool {
+        const parent = &self.buffers.nodes[self.stack[self.depth - 1]];
+        if (parent.kind != .tree and parent.kind != .tree_item) return error.NotContainer;
+        const nested = parent.kind == .tree_item;
+        const level: u16 = if (nested) self.buffers.nodes[parent.first_child].level +| 1 else 0;
+        const semantic = if (nested) self.buffers.nodes[parent.first_child].id else parent.id;
+        _ = try self.open(.tree_item, .{ .key = id, .enabled = style.enabled });
+        var value = style;
+        value.key = null;
+        const leaf = try self.append(.tree_row, value);
+        leaf.text = try self.copy(label);
+        leaf.level = level;
+        leaf.semantic_parent = semantic;
+        return self.rowState(leaf, id, expanded);
+    }
+
+    /// Starts a table: a header row with one sortable title per column,
+    /// then the rows built with `tableRow`, which may sit in a `scroll`
+    /// container so the header stays put. Activating a sortable header sorts
+    /// by it, ascending first and then flipping; the application sorts its
+    /// rows from `sort`. Selection and keys follow `tree`, without
+    /// expansion. `Style.gap` is the column gap (8 DIP when 0). True when
+    /// `sort` changed. Close it with `end`.
+    pub fn table(self: *View, columns: []const Column, sort: *?Sort, selection: *Selection, style: Style) Error!bool {
+        if (columns.len == 0 or columns.len > ui.grid.max_tracks) return error.InvalidValue;
+        if (sort.*) |current| if (current.column >= columns.len) return error.InvalidValue;
+        if (self.tracks.len - self.track_len < columns.len) return error.TooManyItems;
+        const tracks = self.tracks[self.track_len..][0..columns.len];
+        for (columns, tracks) |entry, *track| track.* = entry.track;
+        @memset(self.track_minimum[self.track_len..][0..columns.len], 0);
+        @memset(self.track_preferred[self.track_len..][0..columns.len], 0);
+        self.track_len += columns.len;
+        var value = style;
+        const column_gap = if (style.gap == 0) 8 else style.gap;
+        value.gap = 0;
+        const node = try self.open(.table, value);
+        node.tracks = tracks;
+        node.fraction = column_gap;
+        try self.openCollection(node, selection);
+        const header = try self.open(.table_header, .{ .gap = column_gap, .padding = row_padding, .enabled = style.enabled });
+        header.tracks = tracks;
+        header.semantic_parent = node.id;
+        const header_index = self.stack[self.depth - 1];
+        var changed = false;
+        for (columns, 0..) |entry, index| {
+            const cell = try self.append(.column_header, .{ .key = index });
+            cell.text = try self.copy(entry.title);
+            cell.checked = entry.sortable;
+            if (self.take(cell.id) != null and entry.sortable) {
+                const current = sort.*;
+                sort.* = if (current != null and current.?.column == index) .{ .column = index, .direction = if (current.?.direction == .ascending) .descending else .ascending } else .{ .column = index };
+                changed = true;
+            }
+        }
+        var child = self.buffers.nodes[header_index].first_child;
+        var index: usize = 0;
+        while (child != none) : ({
+            child = self.buffers.nodes[child].next_sibling;
+            index += 1;
+        }) {
+            const current = sort.*;
+            self.buffers.nodes[child].sort = if (current != null and current.?.column == index) current.?.direction else null;
+        }
+        try self.end();
+        return changed;
+    }
+    /// Starts the row of the enclosing table for the application's item
+    /// `id`, unique in its table; build one cell per column, then `end`.
+    /// `name` is the row's accessible name, such as its first cell. True
+    /// once for the pass where Enter activates the row.
+    pub fn tableRow(self: *View, id: u64, name: []const u8, style: Style) Error!bool {
+        var value = style;
+        value.key = id;
+        if (value.padding.left == 0 and value.padding.right == 0 and value.padding.top == 0 and value.padding.bottom == 0) value.padding = row_padding;
+        const node = try self.open(.table_row, value);
+        if (node.collection == none or self.buffers.nodes[node.collection].kind != .table) return error.NotContainer;
+        const owner = &self.buffers.nodes[node.collection];
+        node.tracks = owner.tracks;
+        node.style.gap = owner.fraction;
+        node.text = try self.copy(name);
+        node.semantic_parent = owner.id;
+        return self.rowState(node, id, null);
+    }
+    /// Space around the cells of a table's rows and header.
+    pub const row_padding: Insets = .{ .left = 8, .right = 8, .top = 2, .bottom = 2 };
+
+    fn openCollection(self: *View, node: *Node, selection: *Selection) Error!void {
+        node.selection = selection;
+        const event = self.take(node.id) orelse return;
+        if (event != .item) return;
+        const value = event.item;
+        switch (value.op) {
+            .select => try selection.set(value.item),
+            .toggle => {
+                if (!selection.remove(value.item)) try selection.add(value.item);
+                selection.anchor = value.item;
+                selection.cursor = value.item;
+            },
+            .cursor => selection.cursor = value.item,
+            .range, .range_add => if (selection.mode == .single) try selection.set(value.item) else {
+                if (value.op == .range) selection.clear();
+                const from = value.anchor orelse value.item;
+                selection.anchor = from;
+                selection.cursor = value.item;
+                self.range = .{ .collection = node.id, .from = from, .to = value.item };
+            },
+            .select_all => if (selection.mode == .multiple) {
+                self.range = .{ .collection = node.id, .from = null, .to = value.item };
+            },
+            .expand, .collapse, .activate => {},
+        }
+        self.item_event = value;
+    }
+    /// Apply this pass's event to a tree or table row and record its state;
+    /// true when Enter activated it.
+    fn rowState(self: *View, node: *Node, id: u64, expanded: ?*bool) Error!bool {
+        const owner = &self.buffers.nodes[node.collection];
+        const selection = owner.selection.?;
+        node.item = id;
+        var activated = false;
+        if (self.take(node.id)) |event| switch (event) {
+            // Activation by an accessibility client or a test selects only
+            // this row, like a plain press.
+            .action => if (node.style.enabled) try selection.set(id),
+            .value => |value| if (node.style.enabled and value.change == .set) {
+                const code = value.change.set;
+                if (code == @intFromEnum(ItemRequest.deselect)) {
+                    _ = selection.remove(id);
+                } else if (code == @intFromEnum(ItemRequest.add)) {
+                    try selection.add(id);
+                } else if (code == @intFromEnum(ItemRequest.collapse) or code == @intFromEnum(ItemRequest.expand)) {
+                    if (expanded) |flag| flag.* = code == @intFromEnum(ItemRequest.expand);
+                }
+            },
+            else => {},
+        };
+        if (self.item_event) |value| if (value.collection == owner.id and value.item == id) {
+            switch (value.op) {
+                .expand => if (expanded) |flag| {
+                    flag.* = true;
+                },
+                .collapse => if (expanded) |flag| {
+                    flag.* = false;
+                },
+                .activate => activated = true,
+                else => {},
+            }
+            // The row the event reached takes focus and scrolls into view.
+            self.restore = node.id;
+            self.reveal = node.id;
+        };
+        if (self.range) |*range| if (range.collection == owner.id and !range.done) {
+            const edge = if (range.from) |from| id == from or id == range.to else false;
+            if (range.from == null or range.inside or edge) try selection.add(id);
+            if (edge) {
+                if (range.inside or range.from.? == range.to) range.done = true else range.inside = true;
+            }
+        };
+        node.checked = selection.contains(id);
+        node.cursor = if (selection.cursor) |cursor| cursor == id else false;
+        node.expanded = if (expanded) |flag| flag.* else null;
+        return activated;
+    }
+
+    /// Starts a token field: a wrapping row of tokens built with `token`,
+    /// followed by the text input that adds them, usually an embedded text
+    /// field with `Style.grow`. `suggestions` after its `end` opens a list
+    /// under the whole field. Tokens share one Tab stop; Left/Right and
+    /// Home/End move between them, Backspace or Delete removes the focused
+    /// one, and Backspace or Left in the empty input moves to the last one.
+    /// Named by `Style.name`. Gap and padding are 4 DIP unless set.
+    pub fn tokenField(self: *View, style: Style) Error!void {
+        var value = style;
+        if (value.gap == 0) value.gap = 4;
+        if (value.padding.left == 0 and value.padding.right == 0 and value.padding.top == 0 and value.padding.bottom == 0) value.padding = Insets.all(4);
+        _ = try self.open(.token_field, value);
+    }
+    /// A token of the enclosing token field, keyed by `Style.key` when
+    /// tokens can move. A press on it focuses it; its remove button,
+    /// Backspace or Delete removes it. True once for the pass that removes
+    /// it; remove it from the application's list in that branch.
+    pub fn token(self: *View, label: []const u8, style: Style) Error!bool {
+        const parent_index = self.stack[self.depth - 1];
+        const parent = &self.buffers.nodes[parent_index];
+        if (parent.kind != .token_field) return error.NotContainer;
+        const group = parent.id;
+        const node = try self.append(.token, style);
+        node.text = try self.copy(label);
+        node.radio_group = group;
+        if (self.take(node.id) != null) self.restore = node.id;
+        if (self.take(tokenRemoveId(node.id)) != null and node.style.enabled) {
+            self.removed_token = parent_index;
+            return true;
+        }
+        return false;
+    }
+
+    /// Starts an editable combo box: put its text input inside, usually an
+    /// embedded text field with `Style.grow`, then `end` adds the button
+    /// that opens the list. Build the list with `suggestions` and
+    /// `suggestion` after `end`, filtered by the input's text. Gaining focus
+    /// leaves the list closed; typing that changes the options opens it, and
+    /// the button, Down, Alt+Down or F4 open it with the current options.
+    /// Alt+Up, F4, Escape or a pick close it. `value` is the input's text,
+    /// reported to accessibility clients; named by `Style.name`.
+    pub fn editableComboBox(self: *View, value: []const u8, style: Style) Error!void {
+        const node = try self.open(.combo_field, style);
+        node.text = try self.copy(value);
+    }
+    fn comboToggle(self: *View, index: u32) Error!void {
+        const toggle_node = try self.append(.combo_toggle, .{ .enabled = self.buffers.nodes[index].style.enabled, .name = "Open" });
+        const combo = &self.buffers.nodes[index];
+        if (self.take(toggle_node.id) == null or !combo.style.enabled) return;
+        const shown = (if (self.popup.forced) |id| id == combo.id else false) or (if (self.overlay.popup) |list| list.anchor == combo.id else false);
+        if (shown) {
+            self.popup.forced = null;
+            self.popup.close = combo.id;
+        } else {
+            self.popup.forced = combo.id;
+            self.popup.close = null;
+            if (self.popup.dismissed) |id| if (id == combo.id) {
+                self.popup.dismissed = null;
+            };
+        }
+        // Focus stays in, or returns to, the text input.
+        if (self.firstEmbed(index)) |input| self.restore = self.buffers.nodes[input].id;
+    }
+    /// The first embedded leaf within the container at `index`; a container
+    /// still open extends to the last node built.
+    fn firstEmbed(self: *const View, index: u32) ?u32 {
+        const all = self.buffers.nodes[0..self.len];
+        const open_now = for (self.stack[0..self.depth]) |at| {
+            if (at == index) break true;
+        } else false;
+        const stop = if (open_now) self.len else all[index].end;
+        for (all[index + 1 .. stop], index + 1..) |*node, at| if (node.kind == .embed) return @intCast(at);
+        return null;
+    }
+    /// What the text input of the anchor at `index` reports, if any.
+    fn inputStatus(self: *const View, index: u32) EmbedStatus {
+        const all = self.buffers.nodes[0..self.len];
+        const at = if (all[index].kind == .embed) index else self.firstEmbed(index) orelse return .{};
+        const content = all[at].embed orelse return .{};
+        const status = content.status orelse return .{};
+        return status(content.context);
+    }
+
     /// The time of this pass in nanoseconds, from the host's monotonic clock.
     pub fn time(self: *const View) u64 {
         return self.now;
@@ -956,12 +1455,16 @@ pub const View = struct {
         const anchor = &self.buffers.nodes[list.anchor];
         if (anchor.kind == .combo_box) return error.NotContainer;
         const anchor_id = anchor.id;
+        const input_id = if (anchor.isContainer()) (if (self.firstEmbed(list.anchor)) |at| self.buffers.nodes[at].id else anchor_id) else anchor_id;
         const node = try self.popupItem(list, label, style);
         if (self.take(node.id) == null) return false;
         self.popup.highlight = null;
         self.popup.settle = anchor_id;
+        if (self.popup.forced) |owner| if (owner == anchor_id) {
+            self.popup.forced = null;
+        };
         self.picked = true;
-        self.restore = anchor_id;
+        self.restore = input_id;
         return true;
     }
     fn enclosingPopup(self: *const View) ?*Node {
@@ -988,11 +1491,17 @@ pub const View = struct {
         const list = &all[index];
         const anchor = &all[list.anchor];
         const combo = anchor.kind == .combo_box;
+        const editable = anchor.kind == .combo_field;
         const options_slice = all[index + 1 ..];
         var hasher = std.hash.Wyhash.init(anchor.id);
         var count: usize = 0;
         var selected: ?u64 = null;
         var focus_inside = if (self.focus) |id| id == anchor.id else false;
+        // Focus on the input or button of an editable combo box or token
+        // field is focus on the anchor.
+        if (anchor.isContainer()) if (self.focus) |id| for (all[list.anchor..anchor.end]) |*inner| {
+            if (inner.id == id) focus_inside = true;
+        };
         var highlight_inside = false;
         for (options_slice) |*entry| {
             if (entry.kind != .list_item) continue;
@@ -1009,6 +1518,14 @@ pub const View = struct {
         }
         list.signature = hasher.final();
         const enabled = anchor.style.enabled;
+        // While an input method composes, its candidate window owns the
+        // keys and the options still describe the uncommitted text, so the
+        // list stays hidden without forgetting why it was closed.
+        if (!combo and self.inputStatus(list.anchor).composing) {
+            list.checked = false;
+            if (editable) anchor.checked = false;
+            return;
+        }
         const shown = if (combo) blk: {
             const owner = self.popup.open orelse break :blk false;
             if (owner != anchor.id) break :blk false;
@@ -1022,12 +1539,14 @@ pub const View = struct {
                 self.popup.dismissed_signature = list.signature;
                 if (!self.picked) self.popup.settle = null;
             };
+            if (editable) self.trackComboField(anchor.id, focus_inside, list.signature);
             if (!focus_inside) {
                 if (self.popup.dismissed) |owner| if (owner == anchor.id) {
                     if (self.popup.settle == null) self.popup.dismissed = null;
                 };
                 break :blk false;
             }
+            if (self.popup.forced) |owner| if (owner == anchor.id) break :blk enabled and count > 0;
             if (self.popup.dismissed) |owner| if (owner == anchor.id) {
                 if (self.popup.dismissed_signature == list.signature) break :blk false;
                 self.popup.dismissed = null;
@@ -1035,7 +1554,7 @@ pub const View = struct {
             break :blk enabled and count > 0;
         };
         list.checked = shown;
-        if (combo) anchor.checked = shown;
+        if (combo or editable) anchor.checked = shown;
         if (!shown) {
             if (highlight_inside) self.popup.highlight = null;
             return;
@@ -1046,6 +1565,31 @@ pub const View = struct {
             entry.highlighted = if (self.popup.highlight) |id| id == entry.id else false;
             // A suggestion has no chosen value; the highlight is its selection.
             if (!combo) entry.checked = entry.highlighted;
+        }
+    }
+
+    /// Keep an editable combo box closed when it gains focus, and forget
+    /// an explicit opening or closing once focus leaves it.
+    fn trackComboField(self: *View, id: u64, focus_inside: bool, signature: u64) void {
+        const popup = &self.popup;
+        if (popup.close) |owner| if (owner == id) {
+            popup.close = null;
+            popup.forced = null;
+            popup.dismissed = id;
+            popup.dismissed_signature = signature;
+        };
+        const within = if (popup.within) |owner| owner == id else false;
+        if (focus_inside and !within) {
+            popup.within = id;
+            if (popup.forced == null or popup.forced.? != id) {
+                popup.dismissed = id;
+                popup.dismissed_signature = signature;
+            }
+        } else if (!focus_inside and within) {
+            popup.within = null;
+            if (popup.forced) |owner| if (owner == id) {
+                popup.forced = null;
+            };
         }
     }
 
@@ -1099,7 +1643,18 @@ pub const View = struct {
     pub fn routeKey(self: *View, input: z.KeyInput) KeyRoute {
         const mods = input.modifiers;
         const plain = !mods.control and !mods.alt and !mods.super and !mods.shift;
+        const anchor = self.focusedAnchor();
+        // Keys belong to the input method while it composes.
+        if (anchor) |focused| if (focused.embed) |content| if (content.status) |status| {
+            if (status(content.context).composing) return .ignored;
+        };
+        const alt_arrow = mods.alt and !mods.control and !mods.super and (input.key == .down or input.key == .up);
+        const f4 = input.key == .f4 and !mods.control and !mods.alt and !mods.super;
         if (self.overlay.popup) |list| {
+            if (list.editable and (alt_arrow or f4)) {
+                self.closePopup(list, true);
+                return .handled;
+            }
             switch (input.key) {
                 .escape => if (plain) {
                     self.closePopup(list, true);
@@ -1124,17 +1679,20 @@ pub const View = struct {
             }
             return .ignored;
         }
-        if (self.focus) |focused| for (self.overlay.anchors[0..self.overlay.anchor_count]) |anchor| {
-            if (anchor.id != focused) continue;
+        if (self.routeRowKey(input)) |route| return route;
+        if (self.routeTokenKey(input)) |route| return route;
+        if (anchor) |focused| {
             const arrow = input.key == .down or input.key == .up;
-            if (anchor.combo and arrow and !mods.control and !mods.super and !mods.shift) return .{ .deliver = .{ .action = focused } };
+            if (focused.combo and arrow and !mods.control and !mods.super and !mods.shift) return .{ .deliver = .{ .action = focused.id } };
+            // The toggle_id, Down, Alt+Down and F4 open an editable combo box.
+            if (focused.toggle) |toggle_id| if ((input.key == .down and plain) or alt_arrow or f4) return .{ .deliver = .{ .action = toggle_id } };
             // Down reopens suggestions that Escape closed.
-            if (!anchor.combo and input.key == .down and plain) if (self.popup.dismissed) |owner| if (owner == focused) {
+            if (!focused.combo and input.key == .down and plain) if (self.popup.dismissed) |owner| if (owner == focused.id) {
                 self.popup.dismissed = null;
                 self.popup.settle = null;
                 return .handled;
             };
-        };
+        }
         if (input.key == .escape and plain and self.tip_index != none) {
             self.tip.dismissed = true;
             self.tip_index = none;
@@ -1142,14 +1700,206 @@ pub const View = struct {
         }
         return .ignored;
     }
+    /// The combo box, suggestion input, editable combo box or token field
+    /// whose control or input has focus.
+    fn focusedAnchor(self: *const View) ?Overlay.Anchor {
+        const focused = self.focus orelse return null;
+        for (self.overlay.anchors[0..self.overlay.anchor_count]) |anchor| {
+            if (anchor.id == focused) return anchor;
+            if (anchor.input) |id| if (id == focused) return anchor;
+        }
+        return null;
+    }
+
+    /// Keys on a focused tree or table row.
+    fn routeRowKey(self: *View, input: z.KeyInput) ?KeyRoute {
+        const focused = self.focus orelse return null;
+        const rows = self.overlay.rows[0..self.overlay.row_count];
+        const at = for (rows, 0..) |current, i| {
+            if (current.id == focused) break i;
+        } else return null;
+        const current = rows[at];
+        const owner = for (self.overlay.collections[0..self.overlay.collection_count]) |entry| {
+            if (entry.id == current.collection) break entry;
+        } else return null;
+        const mods = input.modifiers;
+        if (mods.alt or mods.super) return null;
+        const multiple = owner.multiple;
+        var target: ?usize = null;
+        switch (input.key) {
+            .up, .down, .home, .end, .page_up, .page_down => {
+                target = self.rowStep(at, input.key, owner.page);
+                if (target == null) return .handled;
+            },
+            .right, .left => {
+                // Table rows have no horizontal movement of their own.
+                if (!owner.tree) return .handled;
+                if (mods.control or mods.shift) return null;
+                if (input.key == .right) {
+                    if (current.expanded) |is_open| {
+                        if (!is_open) return self.rowEvent(current, .expand, null);
+                        // An is_open current's first child follows it directly.
+                        if (at + 1 < rows.len and rows[at + 1].parent == at and rows[at + 1].enabled) target = at + 1;
+                    }
+                } else {
+                    if (current.expanded) |is_open| if (is_open) return self.rowEvent(current, .collapse, null);
+                    if (current.parent != none) target = current.parent;
+                }
+                if (target == null) return .handled;
+                return self.rowEvent(rows[target.?], .select, null);
+            },
+            .space => {
+                if (input.repeat) return .handled;
+                if (multiple and mods.control) return self.rowEvent(current, .toggle, null);
+                if (multiple and mods.shift) return self.rowEvent(current, .range, owner.anchor);
+                return self.rowEvent(current, .select, null);
+            },
+            .enter => {
+                if (input.repeat or mods.control or mods.shift) return .handled;
+                return self.rowEvent(current, .activate, null);
+            },
+            .a => {
+                if (!(mods.control and !mods.shift and multiple)) return null;
+                return self.rowEvent(current, .select_all, null);
+            },
+            else => return null,
+        }
+        const next = rows[target.?];
+        if (multiple and mods.control and mods.shift) return self.rowEvent(next, .range_add, owner.anchor);
+        if (multiple and mods.control) return self.rowEvent(next, .cursor, null);
+        if (multiple and mods.shift) return self.rowEvent(next, .range, owner.anchor);
+        return self.rowEvent(next, .select, null);
+    }
+    fn rowEvent(_: *const View, target: Overlay.Row, op: ItemOp, anchor: ?u64) KeyRoute {
+        return .{ .deliver = .{ .item = .{ .collection = target.collection, .item = target.item, .op = op, .anchor = anchor } } };
+    }
+    /// The enabled row of the same collection that a navigation key reaches
+    /// from `at`, or null when it stays put.
+    fn rowStep(self: *const View, at: usize, key_code: z.KeyCode, page: usize) ?usize {
+        const rows = self.overlay.rows[0..self.overlay.row_count];
+        const collection = rows[at].collection;
+        const forward = key_code == .down or key_code == .end or key_code == .page_down;
+        var count: usize = switch (key_code) {
+            .up, .down => 1,
+            .page_up, .page_down => @max(1, page),
+            else => rows.len,
+        };
+        var index = at;
+        var found: ?usize = null;
+        while (count > 0) {
+            const next = if (forward) (if (index + 1 < rows.len) index + 1 else break) else (if (index > 0) index - 1 else break);
+            index = next;
+            if (rows[next].collection != collection or !rows[next].enabled) continue;
+            found = next;
+            count -= 1;
+        }
+        return if (found) |value| (if (value == at) null else value) else null;
+    }
+
+    /// Keys on a focused token, or in the empty input of a token field.
+    fn routeTokenKey(self: *View, input: z.KeyInput) ?KeyRoute {
+        const focused = self.focus orelse return null;
+        const mods = input.modifiers;
+        if (mods.control or mods.alt or mods.super or mods.shift) return null;
+        const tokens = self.overlay.tokens[0..self.overlay.token_count];
+        for (self.overlay.token_fields[0..self.overlay.token_field_count]) |owner| {
+            const input_id = owner.input orelse continue;
+            if (input_id != focused or (input.key != .backspace and input.key != .left)) continue;
+            const content = owner.embed orelse return null;
+            const status = content.status orelse return null;
+            if (!status(content.context).empty) return null;
+            var last: ?u64 = null;
+            for (tokens) |entry| if (entry.field == owner.id and entry.enabled) {
+                last = entry.id;
+            };
+            self.restore = last orelse return null;
+            return .handled;
+        }
+        const at = for (tokens, 0..) |entry, i| {
+            if (entry.id == focused) break i;
+        } else return null;
+        const current = tokens[at];
+        switch (input.key) {
+            .backspace, .delete => {
+                if (input.repeat and input.key == .delete) return .handled;
+                return .{ .deliver = .{ .action = current.remove } };
+            },
+            .left, .right, .home, .end => {
+                var target: ?u64 = null;
+                for (tokens, 0..) |entry, i| {
+                    if (entry.field != current.field or !entry.enabled) continue;
+                    switch (input.key) {
+                        .left => if (i < at) {
+                            target = entry.id;
+                        },
+                        .right => if (i > at and target == null) {
+                            target = entry.id;
+                        },
+                        .home => if (target == null) {
+                            target = entry.id;
+                        },
+                        else => target = entry.id,
+                    }
+                }
+                // Right from the last token, or End, goes on to the input.
+                if (input.key == .right or input.key == .end) if (target == null or input.key == .end) {
+                    for (self.overlay.token_fields[0..self.overlay.token_field_count]) |owner| if (owner.id == current.field) {
+                        target = owner.input orelse target;
+                    };
+                };
+                self.restore = target orelse return .handled;
+                return .handled;
+            },
+            else => return null,
+        }
+    }
+
+    /// Route a primary press with its modifiers on a tree or table row,
+    /// before the Context sees it: Ctrl toggles and Shift extends a multiple
+    /// selection, and the triangle of a tree row expands or collapses it.
+    /// `hit` is the control the Context finds under the point, so presses on
+    /// controls inside a row stay theirs. Null when the press is not on a row.
+    pub fn rowPress(self: *const View, point: Point, modifiers: z.KeyModifiers, hit: ?u64, theme: Theme) ?Event {
+        const rows = self.overlay.rows[0..self.overlay.row_count];
+        var index = rows.len;
+        while (index > 0) {
+            index -= 1;
+            const candidate = rows[index];
+            if (!contains(candidate.rect, point)) continue;
+            if (hit) |id| if (id != candidate.id) return null;
+            if (!candidate.enabled) return null;
+            const owner = for (self.overlay.collections[0..self.overlay.collection_count]) |entry| {
+                if (entry.id == candidate.collection) break entry;
+            } else return null;
+            var op: ItemOp = .select;
+            var anchor: ?u64 = null;
+            if (candidate.expanded) |is_open| if (contains(ui.widgets.treeExpander(candidate.bounds, candidate.level, theme.metrics.indicator_size), point)) {
+                op = if (is_open) .collapse else .expand;
+            };
+            if (op == .select and owner.multiple) {
+                if (modifiers.control and modifiers.shift) {
+                    op = .range_add;
+                    anchor = owner.anchor;
+                } else if (modifiers.control) op = .toggle else if (modifiers.shift) {
+                    op = .range;
+                    anchor = owner.anchor;
+                }
+            }
+            return .{ .item = .{ .collection = candidate.collection, .item = candidate.item, .op = op, .anchor = anchor } };
+        }
+        return null;
+    }
     fn closePopup(self: *View, list: Overlay.Popup, restore: bool) void {
         if (list.combo) self.popup.open = null else {
             self.popup.dismissed = list.anchor;
             self.popup.dismissed_signature = list.signature;
+            if (self.popup.forced) |owner| if (owner == list.anchor) {
+                self.popup.forced = null;
+            };
         }
         self.popup.highlight = null;
         self.overlay.popup = null;
-        if (restore) self.restore = list.anchor;
+        if (restore) self.restore = list.input;
     }
     fn moveHighlight(self: *View, key_code: z.KeyCode) void {
         const items = self.overlay.items[0..self.overlay.item_count];
@@ -1265,6 +2015,10 @@ pub const View = struct {
                 break :blk .{ .width = side, .height = side };
             },
             .combo_box => .{ .width = @max(120, text_size.width + 3 * metrics.content_inset + metrics.indicator_size), .height = @max(text_size.height, metrics.indicator_size) + 2 * metrics.content_inset },
+            .tree_row => .{ .width = ui.widgets.tree_indent * @as(f32, @floatFromInt(node.level)) + metrics.indicator_size + metrics.label_gap / 2 + text_size.width + metrics.content_inset, .height = text_size.height + metrics.content_inset },
+            .column_header => .{ .width = text_size.width + metrics.indicator_size, .height = text_size.height + metrics.content_inset },
+            .token => .{ .width = text_size.width + metrics.content_inset + text_size.height + 4, .height = text_size.height + 4 },
+            .combo_toggle => .{ .width = metrics.indicator_size + metrics.content_inset, .height = metrics.indicator_size },
             .avatar => .{ .width = 32, .height = 32 },
             .link => .{ .width = text_size.width + 2 * metrics.content_inset, .height = text_size.height + 2 * metrics.content_inset },
             .badge => .{ .width = text_size.width + 2 * (metrics.content_inset + 4), .height = text_size.height + metrics.content_inset },
@@ -1275,7 +2029,7 @@ pub const View = struct {
             .rating => .{ .width = @as(f32, @floatCast(node.range.maximum)) * Measurer.line_height, .height = Measurer.line_height + metrics.content_inset },
             .slider => .{ .width = 200, .height = metrics.thumb_size + 2 * metrics.content_inset },
             .stepper => .{ .width = 4 * (Measurer.line_height + metrics.content_inset), .height = Measurer.line_height + metrics.content_inset },
-            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .toasts, .toast, .embed => unreachable,
+            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .toasts, .toast, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .embed => unreachable,
         };
         const minimum: Size = switch (node.kind) {
             .progress, .meter, .slider, .spacer => .{ .width = 0, .height = size.height },
@@ -1286,7 +2040,7 @@ pub const View = struct {
 
     fn options(node: *const Node) layout.Options {
         const axis: Axis = switch (node.kind) {
-            .row, .segmented, .tab_list, .toolbar, .breadcrumbs, .search, .toast => .row,
+            .row, .segmented, .tab_list, .toolbar, .breadcrumbs, .search, .toast, .combo_field, .token_field => .row,
             .split => node.axis,
             else => .column,
         };
@@ -1314,6 +2068,48 @@ pub const View = struct {
             i += 1;
         }
         return out[0..i];
+    }
+    /// Index of the first of a table's column tracks in `tracks`.
+    fn trackOffset(self: *const View, node: *const Node) usize {
+        return (@intFromPtr(node.tracks.ptr) - @intFromPtr(&self.tracks)) / @sizeOf(Track);
+    }
+    /// Widen the shared column content sizes by a header's or row's cells.
+    fn gatherColumns(self: *View, node: *const Node, items: []const layout.Item) void {
+        if (node.tracks.len == 0) return;
+        const offset = self.trackOffset(node);
+        var child = node.first_child;
+        var i: usize = 0;
+        var track_index: usize = 0;
+        while (child != none) : (child = self.buffers.nodes[child].next_sibling) {
+            const cell = &self.buffers.nodes[child];
+            if (cell.floats()) continue;
+            const span = @max(1, cell.style.column_span);
+            if (span == 1 and track_index < node.tracks.len) {
+                self.track_minimum[offset + track_index] = @max(self.track_minimum[offset + track_index], items[i].content_minimum.width);
+                self.track_preferred[offset + track_index] = @max(self.track_preferred[offset + track_index], items[i].preferred.width);
+            }
+            track_index = (track_index + span) % node.tracks.len;
+            i += 1;
+        }
+    }
+    /// A table's column tracks resolved once from the shared content sizes,
+    /// as fixed widths, so the header and every row line up.
+    fn sharedColumns(self: *const View, node: *const Node, out: *[max_table_tracks]Track) Error![]const Track {
+        const count = node.tracks.len;
+        if (count == 0) return node.tracks;
+        const offset = self.trackOffset(node);
+        var cells: [max_table_tracks]ui.grid.AutoItem = undefined;
+        for (cells[0..count], 0..) |*cell, track_index| cell.* = .{
+            .row = 0,
+            .column = track_index,
+            .minimum = .{ .width = self.track_minimum[offset + track_index] },
+            .preferred = .{ .width = self.track_preferred[offset + track_index] },
+        };
+        var rects: [max_table_tracks]Rect = undefined;
+        var placements: [max_table_tracks]ui.grid.Placement = undefined;
+        const solved = ui.grid.computeAuto(node.bounds, node.tracks, &.{}, cells[0..count], gridOptions(node), &rects, &placements) catch |err| return gridError(err);
+        for (out[0..count], solved.layout.column_widths[0..count]) |*track, width| track.* = Track.fixed(width);
+        return out[0..count];
     }
     /// A grid's content size with every cell at its minimum or preferred size.
     fn measureGrid(self: *const View, node: *const Node, items: []const layout.Item) Error!layout.Measurement {
@@ -1377,6 +2173,23 @@ pub const View = struct {
     /// Measure bottom-up, then place every node within `bounds`.
     pub fn arrange(self: *View, bounds: Rect, theme: Theme, measurer: Measurer) Error!void {
         const all = self.buffers.nodes[0..self.len];
+        // A token field's height depends on the width it wraps at, known
+        // only once placed; a second round measures with the placed width.
+        var round: usize = 0;
+        while (true) : (round += 1) {
+            try self.measure(theme, measurer);
+            all[0].bounds = bounds;
+            try self.place();
+            if (round == 1 or !self.rememberFlowWidths()) break;
+        }
+        if (self.reveal) |id| {
+            self.reveal = null;
+            if (try self.revealNode(id)) try self.place();
+        }
+        self.record(measurer);
+    }
+    fn measure(self: *View, theme: Theme, measurer: Measurer) Error!void {
+        const all = self.buffers.nodes[0..self.len];
         // Children always follow their parent, so reverse order is post-order.
         var index = all.len;
         while (index > 0) {
@@ -1388,8 +2201,13 @@ pub const View = struct {
             }
             var cursor: usize = 0;
             const items = try self.childItems(node, &cursor);
-            if (node.kind == .grid) {
+            if (node.isGrid()) {
+                if (node.kind != .grid) self.gatherColumns(node, items);
                 node.measured = try self.measureGrid(node, items);
+                continue;
+            }
+            if (node.kind == .token_field) {
+                node.measured = self.measureFlow(node, items);
                 continue;
             }
             node.measured = try layout.measure(options(node), items);
@@ -1399,13 +2217,45 @@ pub const View = struct {
                 node.measured.minimum.height = 0;
             }
         }
-        all[0].bounds = bounds;
-        try self.place();
-        if (self.reveal) |id| {
-            self.reveal = null;
-            if (try self.revealNode(id)) try self.place();
+    }
+
+    /// The remembered inner width of the token field `id`, if any.
+    fn flowWidth(self: *const View, id: u64) ?f32 {
+        for (self.flow_widths[0..self.flow_count]) |entry| if (entry.id == id) return entry.width;
+        return null;
+    }
+    /// Remember each token field's placed inner width; true when one changed.
+    fn rememberFlowWidths(self: *View) bool {
+        var changed = false;
+        for (self.buffers.nodes[0..self.len]) |*node| {
+            if (node.kind != .token_field) continue;
+            const width = @max(0, node.bounds.width - node.style.padding.left - node.style.padding.right);
+            if (self.flowWidth(node.id)) |known| if (@abs(known - width) < 0.5) continue;
+            const known = for (self.flow_widths[0..self.flow_count]) |*entry| {
+                if (entry.id == node.id) break entry;
+            } else null;
+            if (known) |entry| entry.width = width else {
+                // The oldest entry makes room.
+                if (self.flow_count == max_token_fields) {
+                    std.mem.copyForwards(@TypeOf(self.flow_widths[0]), self.flow_widths[0 .. max_token_fields - 1], self.flow_widths[1..]);
+                    self.flow_count -= 1;
+                }
+                self.flow_widths[self.flow_count] = .{ .id = node.id, .width = width };
+                self.flow_count += 1;
+            }
+            changed = true;
         }
-        self.record(measurer);
+        return changed;
+    }
+    fn measureFlow(self: *const View, node: *const Node, items: []const layout.Item) layout.Measurement {
+        const p = node.style.padding;
+        const width = self.flowWidth(node.id) orelse std.math.inf(f32);
+        const line = flow(items, node.style.gap, .{ .x = 0, .y = 0, .width = std.math.inf(f32), .height = 0 }, null);
+        const wrapped = flow(items, node.style.gap, .{ .x = 0, .y = 0, .width = width, .height = 0 }, null);
+        var narrowest: f32 = 0;
+        for (items) |entry| narrowest = @max(narrowest, entry.content_minimum.width);
+        const height = wrapped.height + p.top + p.bottom;
+        return .{ .minimum = .{ .width = narrowest + p.left + p.right, .height = height }, .preferred = .{ .width = line.width + p.left + p.right, .height = height } };
     }
 
     /// Keep what input routing needs from this arrangement, and place the
@@ -1417,15 +2267,65 @@ pub const View = struct {
         overlay.item_count = 0;
         overlay.tip_count = 0;
         overlay.anchor_count = 0;
+        overlay.row_count = 0;
+        overlay.collection_count = 0;
+        overlay.token_count = 0;
+        overlay.token_field_count = 0;
+        const zero: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
         for (all, 0..) |*node, index| {
+            switch (node.kind) {
+                .tree, .table => if (overlay.collection_count < max_collections) {
+                    const selection = node.selection.?;
+                    overlay.collections[overlay.collection_count] = .{ .id = node.id, .tree = node.kind == .tree, .multiple = selection.mode == .multiple, .anchor = null, .page = 1 };
+                    overlay.collection_count += 1;
+                },
+                .tree_row, .table_row => if (overlay.row_count < max_collection_rows and node.collection != none) {
+                    const owner = &all[node.collection];
+                    var parent: u32 = none;
+                    if (node.kind == .tree_row) {
+                        const group = &all[node.parent];
+                        if (group.parent < all.len and all[group.parent].kind == .tree_item) {
+                            const above = all[all[group.parent].first_child].id;
+                            var at = overlay.row_count;
+                            while (at > 0) {
+                                at -= 1;
+                                if (overlay.rows[at].id == above) {
+                                    parent = @intCast(at);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    overlay.rows[overlay.row_count] = .{ .id = node.id, .item = node.item, .collection = owner.id, .level = node.level, .expanded = node.expanded, .parent = parent, .bounds = node.bounds, .rect = self.visible(node) orelse zero, .enabled = node.style.enabled };
+                    overlay.row_count += 1;
+                },
+                .token_field => if (overlay.token_field_count < max_token_fields) {
+                    const input = self.firstEmbed(@intCast(index));
+                    overlay.token_fields[overlay.token_field_count] = .{ .id = node.id, .input = if (input) |at| all[at].id else null, .embed = if (input) |at| all[at].embed else null };
+                    overlay.token_field_count += 1;
+                },
+                .token => if (overlay.token_count < max_tokens) {
+                    overlay.tokens[overlay.token_count] = .{ .id = node.id, .remove = tokenRemoveId(node.id), .field = all[node.parent].id, .rect = self.visible(node) orelse zero, .enabled = node.style.enabled };
+                    overlay.token_count += 1;
+                },
+                else => {},
+            }
             if (node.kind == .popup) {
                 const anchor = &all[node.anchor];
+                const input = if (anchor.kind == .embed) node.anchor else if (anchor.isContainer()) self.firstEmbed(node.anchor) else null;
+                const input_id = if (input) |at| all[at].id else anchor.id;
                 if (anchor.style.enabled and overlay.anchor_count < max_popup_anchors) {
-                    overlay.anchors[overlay.anchor_count] = .{ .id = anchor.id, .combo = anchor.kind == .combo_box };
+                    overlay.anchors[overlay.anchor_count] = .{
+                        .id = anchor.id,
+                        .combo = anchor.kind == .combo_box,
+                        .input = if (input) |at| all[at].id else null,
+                        .toggle = if (anchor.kind == .combo_field) all[anchor.last_child].id else null,
+                        .embed = if (input) |at| all[at].embed else null,
+                    };
                     overlay.anchor_count += 1;
                 }
                 if (!node.checked or overlay.popup != null) continue;
-                overlay.popup = .{ .id = node.id, .anchor = anchor.id, .combo = anchor.kind == .combo_box, .rect = node.bounds, .anchor_rect = self.visible(anchor) orelse anchor.bounds, .signature = node.signature };
+                overlay.popup = .{ .id = node.id, .anchor = anchor.id, .combo = anchor.kind == .combo_box, .rect = node.bounds, .anchor_rect = self.visible(anchor) orelse anchor.bounds, .signature = node.signature, .editable = anchor.kind == .combo_field, .input = input_id };
                 for (all[index + 1 .. node.end]) |*entry| {
                     if (entry.kind != .list_item or !entry.style.enabled or overlay.item_count == max_popup_items) continue;
                     overlay.items[overlay.item_count] = .{ .id = entry.id, .rect = self.visible(entry) orelse .{ .x = 0, .y = 0, .width = 0, .height = 0 } };
@@ -1437,6 +2337,7 @@ pub const View = struct {
                 overlay.tip_count += 1;
             };
         }
+        self.recordCollections();
         if (self.tip_index == none) return;
         const anchor = self.visible(&all[self.tip_index]) orelse {
             self.tip_index = none;
@@ -1451,6 +2352,28 @@ pub const View = struct {
         const y = if (below + height > root_bounds.y + root_bounds.height and anchor.y - popup_gap - height >= root_bounds.y) anchor.y - popup_gap - height else below;
         const x = std.math.clamp(anchor.x, root_bounds.x, @max(root_bounds.x, root_bounds.x + root_bounds.width - width));
         self.tip_rect = .{ .x = x, .y = y, .width = width, .height = height };
+    }
+
+    /// The anchor present among a collection's rows and how many rows a
+    /// page moves, from its visible height.
+    fn recordCollections(self: *View) void {
+        const all = self.buffers.nodes[0..self.len];
+        const overlay = &self.overlay;
+        for (overlay.collections[0..overlay.collection_count]) |*entry| {
+            const node = for (all) |*candidate| {
+                if (candidate.id == entry.id) break candidate;
+            } else continue;
+            const selection = node.selection.?;
+            var height: f32 = 0;
+            for (overlay.rows[0..overlay.row_count]) |line| if (line.collection == entry.id) {
+                if (height == 0) height = line.bounds.height;
+                if (selection.anchor) |anchor| if (anchor == line.item) {
+                    entry.anchor = anchor;
+                };
+            };
+            const viewport = self.visible(node) orelse continue;
+            if (height > 0) entry.page = @max(1, @as(usize, @intFromFloat(@floor(viewport.height / height))) -| 1);
+        }
     }
 
     /// Scroll every scroll container around the node with `id` so it is in
@@ -1490,10 +2413,17 @@ pub const View = struct {
             if (self.buffers.rects.len < cursor) return error.OutputTooSmall;
             const rects = self.buffers.rects[start..cursor];
             switch (node.kind) {
-                .grid => {
+                .token_field => {
+                    const p = node.style.padding;
+                    const b = node.bounds;
+                    _ = flow(items, node.style.gap, .{ .x = b.x + p.left, .y = b.y + p.top, .width = @max(0, b.width - p.left - p.right), .height = 0 }, rects);
+                },
+                .grid, .table_header, .table_row => {
                     var cells: [ui.grid.max_items]ui.grid.AutoItem = undefined;
                     var placements: [ui.grid.max_items]ui.grid.Placement = undefined;
-                    _ = ui.grid.computeAuto(node.bounds, node.tracks, &.{}, self.gridItems(node, items, &cells, false), gridOptions(node), rects, &placements) catch |err| return gridError(err);
+                    var shared: [max_table_tracks]Track = undefined;
+                    const tracks = if (node.kind == .grid) node.tracks else try self.sharedColumns(node, &shared);
+                    _ = ui.grid.computeAuto(node.bounds, tracks, &.{}, self.gridItems(node, items, &cells, false), gridOptions(node), rects, &placements) catch |err| return gridError(err);
                 },
                 .scroll => {
                     const model = node.scroll.?;
@@ -1625,6 +2555,13 @@ pub const View = struct {
                 at = node.end;
                 continue;
             }
+            // Rows scrolled out of sight record nothing, so long collections
+            // spend controls only on what can be seen. The cursor row stays
+            // to keep the collection's Tab stop.
+            if ((node.kind == .tree_row or node.kind == .table_row) and !node.cursor and self.visible(node) == null) {
+                at = if (node.isContainer()) node.end else at + 1;
+                continue;
+            }
             const bounds = node.bounds;
             const style = node.style;
             var control: ui.widgets.Options = .{ .enabled = style.enabled, .name = style.name, .semantic_parent = node.semantic_parent };
@@ -1635,7 +2572,7 @@ pub const View = struct {
             if (control.name.len == 0) control.name = annotation.name;
             if (control.description.len == 0) control.description = node.tooltip;
             switch (node.kind) {
-                .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .toasts, .toast => {
+                .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .toasts, .toast, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field => {
                     switch (node.kind) {
                         .radio_group, .segmented => try target.radioGroup(node.id, bounds, style.name),
                         .list_box => try target.listBox(node.id, bounds, style.name),
@@ -1645,6 +2582,20 @@ pub const View = struct {
                         .accordion => try target.group(node.id, bounds, style.name, node.semantic_parent),
                         .fieldset => try target.group(node.id, bounds, node.text, node.semantic_parent),
                         .search => try target.search(node.id, bounds, style.name, node.semantic_parent),
+                        .tree => try target.treeView(node.id, bounds, style.name, node.selection.?.mode == .multiple, node.semantic_parent),
+                        .table => try target.dataTable(node.id, bounds, style.name, node.selection.?.mode == .multiple, node.semantic_parent),
+                        .table_header => {
+                            try target.tableHeader(node.id, bounds, node.semantic_parent);
+                            target.roundedRect(bounds, 0, ui.Color.rgb(theme.palette.control));
+                            target.roundedRect(.{ .x = bounds.x, .y = bounds.y + @max(0, bounds.height - theme.metrics.border / 2), .width = bounds.width, .height = @min(bounds.height, theme.metrics.border / 2) }, 0, ui.Color.rgb(theme.palette.border));
+                        },
+                        .table_row => try target.tableRow(node.id, bounds, node.text, self.rowOptions(node, control)),
+                        .token_field, .combo_field => {
+                            if (node.kind == .token_field) try target.tokenField(node.id, bounds, style.name, node.semantic_parent) else try target.comboField(node.id, bounds, node.text, node.checked, control);
+                            const focused = self.focusWithin(node);
+                            target.roundedRect(bounds, 3, ui.Color.rgb(if (focused) theme.palette.focus else if (style.enabled) theme.palette.border else theme.palette.disabled_border));
+                            target.roundedRect(inset(bounds, theme.metrics.border), 2, ui.Color.rgb(theme.palette.field));
+                        },
                         .toast => {
                             try target.status(node.id, bounds, node.text, node.semantic_parent);
                             target.roundedRect(bounds, 6, ui.Color.rgb(theme.palette.border));
@@ -1666,7 +2617,15 @@ pub const View = struct {
                         clip_depth += 1;
                     }
                 },
-                .text => target.label(bounds, node.text, style.color orelse if (style.enabled) theme.palette.text else theme.palette.disabled_text),
+                .text => target.label(bounds, node.text, style.color orelse if (!style.enabled) theme.palette.disabled_text else if (node.row != none and all[node.row].checked) theme.palette.on_accent else theme.palette.text),
+                .tree_row => try target.treeItem(node.id, bounds, node.text, self.rowOptions(node, control)),
+                .column_header => try target.columnHeader(node.id, bounds, node.text, node.sort, node.checked, control),
+                .token => {
+                    var token_options = control;
+                    token_options.radio_group = node.radio_group;
+                    try target.tokenItem(node.id, tokenRemoveId(node.id), bounds, node.text, .{ .control = token_options });
+                },
+                .combo_toggle => try target.comboToggle(node.id, bounds, all[node.parent].checked, control),
                 .note => target.label(bounds, node.text, if (node.invalid) theme.palette.caution else theme.palette.disabled_text),
                 .spacer => {},
                 .button => try target.buttonWithOptions(node.id, bounds, node.text, control),
@@ -1721,6 +2680,22 @@ pub const View = struct {
             try target.popClip();
             paintScrollIndicator(&all[clips[clip_depth]], target, theme);
         }
+    }
+
+    /// Row options of a tree or table row from its collection.
+    fn rowOptions(self: *const View, node: *const Node, control: ui.widgets.Options) ui.widgets.RowOptions {
+        const owner = &self.buffers.nodes[node.collection];
+        var value = control;
+        value.radio_group = owner.id;
+        value.name = "";
+        return .{ .control = value, .selected = node.checked, .cursor = node.cursor, .multiple = owner.selection.?.mode == .multiple, .level = node.level, .expanded = node.expanded };
+    }
+    /// True when focus is on the node or a node inside it.
+    fn focusWithin(self: *const View, node: *const Node) bool {
+        const focused = self.focus orelse return false;
+        const start = (@intFromPtr(node) - @intFromPtr(self.buffers.nodes.ptr)) / @sizeOf(Node);
+        for (self.buffers.nodes[start..node.end]) |*inner| if (inner.id == focused) return true;
+        return false;
     }
 
     /// What the enclosing field adds to a control's semantics; empty outside
@@ -1780,6 +2755,52 @@ pub const Build = struct {
     }
 };
 
+/// Lay `items` out left to right in lines no wider than `inner.width`,
+/// writing their rects when `rects` is given; returns the content size. A
+/// growing item counts at its minimum width when lines break and then
+/// shares the room left on its line.
+fn flow(items: []const layout.Item, gap: f32, inner: Rect, rects: ?[]Rect) Size {
+    var y: f32 = 0;
+    var widest: f32 = 0;
+    var start: usize = 0;
+    while (start < items.len) {
+        var stop = start;
+        var line_width: f32 = 0;
+        var line_height: f32 = 0;
+        var grow: f32 = 0;
+        while (stop < items.len) : (stop += 1) {
+            const entry = items[stop];
+            const width = if (entry.grow > 0) entry.content_minimum.width else entry.preferred.width;
+            const next = if (stop == start) width else line_width + gap + width;
+            if (stop > start and next > inner.width) break;
+            line_width = next;
+            line_height = @max(line_height, entry.preferred.height);
+            grow += entry.grow;
+        }
+        if (rects) |out| {
+            const extra = if (std.math.isFinite(inner.width)) @max(0, inner.width - line_width) else 0;
+            var x = inner.x;
+            for (items[start..stop], out[start..stop]) |entry, *rect| {
+                var width = if (entry.grow > 0) entry.content_minimum.width + extra * entry.grow / grow else entry.preferred.width;
+                if (std.math.isFinite(inner.width)) width = @min(width, inner.width);
+                const height = @min(entry.preferred.height, line_height);
+                rect.* = .{ .x = x, .y = inner.y + y + (line_height - height) / 2, .width = width, .height = height };
+                x += width + gap;
+            }
+        }
+        widest = @max(widest, line_width);
+        y += line_height;
+        if (stop < items.len) y += gap;
+        start = stop;
+    }
+    return .{ .width = widest, .height = y };
+}
+
+/// The semantic id of the remove button of the token `id`.
+pub fn tokenRemoveId(id: u64) u64 {
+    const value = std.hash.Wyhash.hash(id, "remove");
+    return if (value == 0) 1 else value;
+}
 /// The semantic id of the tooltip shown for the control `id`.
 pub fn tooltipId(id: u64) u64 {
     const value = std.hash.Wyhash.hash(id, "tooltip");
@@ -1940,17 +2961,24 @@ pub const Host = struct {
             },
             .pointer_down => |press| {
                 if (press.button != .primary) return false;
-                switch (self.view.pointerDown(.{ .x = press.position.x, .y = press.position.y })) {
-                    .ignored => return false,
-                    .changed => {
-                        self.invalidate();
-                        return false;
-                    },
+                const point: Point = .{ .x = press.position.x, .y = press.position.y };
+                switch (self.view.pointerDown(point)) {
+                    .ignored => {},
+                    .changed => self.invalidate(),
                     .consumed => {
                         self.invalidate();
                         return true;
                     },
                 }
+                // A press on a tree or table row selects through the view,
+                // which sees its modifiers; the pass then focuses the row.
+                const hit = self.context.input_state.hit(.{ .x = point.x, .y = point.y });
+                if (self.view.rowPress(point, press.modifiers, hit orelse return false, self.context.currentTheme())) |value| {
+                    self.deliver(value);
+                    self.invalidate();
+                    return true;
+                }
+                return false;
             },
             .focus => |focused| {
                 // A window that loses focus leaves no tooltip behind.
@@ -2170,6 +3198,40 @@ const Recorder = struct {
     }
     pub fn search(self: *Recorder, id: u64, bounds: Rect, _: []const u8, _: u64) !void {
         self.push(.search, id, bounds, false);
+    }
+    pub fn treeView(self: *Recorder, id: u64, bounds: Rect, _: []const u8, _: bool, _: u64) !void {
+        self.chooser = id;
+        self.push(.tree, id, bounds, false);
+    }
+    pub fn treeItem(self: *Recorder, id: u64, bounds: Rect, _: []const u8, options: ui.widgets.RowOptions) !void {
+        if (options.control.radio_group == null or options.control.radio_group.? != self.chooser) return error.MissingGroup;
+        self.push(.tree_row, id, bounds, options.selected);
+    }
+    pub fn dataTable(self: *Recorder, id: u64, bounds: Rect, _: []const u8, _: bool, _: u64) !void {
+        self.chooser = id;
+        self.push(.table, id, bounds, false);
+    }
+    pub fn tableHeader(self: *Recorder, id: u64, bounds: Rect, _: u64) !void {
+        self.push(.table_header, id, bounds, false);
+    }
+    pub fn columnHeader(self: *Recorder, id: u64, bounds: Rect, _: []const u8, sort: ?SortDirection, _: bool, _: ui.widgets.Options) !void {
+        self.push(.column_header, id, bounds, sort != null);
+    }
+    pub fn tableRow(self: *Recorder, id: u64, bounds: Rect, _: []const u8, options: ui.widgets.RowOptions) !void {
+        if (options.control.radio_group == null or options.control.radio_group.? != self.chooser) return error.MissingGroup;
+        self.push(.table_row, id, bounds, options.selected);
+    }
+    pub fn tokenField(self: *Recorder, id: u64, bounds: Rect, _: []const u8, _: u64) !void {
+        self.push(.token_field, id, bounds, false);
+    }
+    pub fn tokenItem(self: *Recorder, id: u64, _: u64, bounds: Rect, _: []const u8, _: ui.widgets.TokenOptions) !void {
+        self.push(.token, id, bounds, false);
+    }
+    pub fn comboField(self: *Recorder, id: u64, bounds: Rect, _: []const u8, expanded: bool, _: ui.widgets.Options) !void {
+        self.push(.combo_field, id, bounds, expanded);
+    }
+    pub fn comboToggle(self: *Recorder, id: u64, bounds: Rect, expanded: bool, _: ui.widgets.Options) !void {
+        self.push(.combo_toggle, id, bounds, expanded);
     }
 };
 

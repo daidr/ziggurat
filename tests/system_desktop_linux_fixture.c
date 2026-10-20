@@ -88,7 +88,7 @@ static void property_done(GObject *source, GAsyncResult *result, gpointer data) 
     if (reply) {
         GVariant *value = NULL;
         g_variant_get(reply, "(v)", &value);
-        if (g_variant_is_of_type(value, G_VARIANT_TYPE_STRING)) g_strlcpy(property_text, g_variant_get_string(value, NULL), sizeof property_text);
+        if (g_variant_is_of_type(value, G_VARIANT_TYPE_STRING) || g_variant_is_of_type(value, G_VARIANT_TYPE_OBJECT_PATH)) g_strlcpy(property_text, g_variant_get_string(value, NULL), sizeof property_text);
         else if (g_variant_is_of_type(value, G_VARIANT_TYPE("(sa(iiay)ss)"))) {
             const gchar *title = NULL;
             g_variant_get(value, "(&s@a(iiay)&s&s)", NULL, NULL, &title, NULL);
@@ -131,4 +131,93 @@ void zsf_invoke(uint32_t id) {
 }
 void zsf_server_close(uint32_t id) {
     g_dbus_connection_emit_signal(bus, NULL, "/org/freedesktop/Notifications", "org.freedesktop.Notifications", "NotificationClosed", g_variant_new("(uu)", id, 1), NULL);
+}
+
+/* ---- the item's dbusmenu, read as a panel would ----
+   The layout is flattened to text: items separated by ';', '-' for a
+   separator, '!' before a disabled label, '*' after a checked one,
+   '[keys]' for a shortcut and '(children)' for a submenu. */
+
+static char layout_text[1024];
+static int layout_ready;
+static guint32 layout_revision;
+static gint32 layout_ids[32];
+static int layout_count;
+
+static void append(const char *text) { g_strlcat(layout_text, text, sizeof layout_text); }
+static void describe(GVariant *node) {
+    gint32 id = 0;
+    GVariant *properties = NULL, *children = NULL;
+    g_variant_get(node, "(i@a{sv}@av)", &id, &properties, &children);
+    if (layout_count < 32) layout_ids[layout_count++] = id;
+    const gchar *type = NULL, *label = "", *display = NULL, *toggle = NULL;
+    gboolean enabled = TRUE;
+    gint32 state = 0;
+    g_variant_lookup(properties, "type", "&s", &type);
+    g_variant_lookup(properties, "label", "&s", &label);
+    g_variant_lookup(properties, "enabled", "b", &enabled);
+    g_variant_lookup(properties, "children-display", "&s", &display);
+    g_variant_lookup(properties, "toggle-type", "&s", &toggle);
+    g_variant_lookup(properties, "toggle-state", "i", &state);
+    if (type && strcmp(type, "separator") == 0) append("-");
+    else {
+        if (!enabled) append("!");
+        append(label);
+        if (toggle && strcmp(toggle, "checkmark") == 0 && state == 1) append("*");
+        GVariant *shortcut = g_variant_lookup_value(properties, "shortcut", G_VARIANT_TYPE("aas"));
+        if (shortcut) {
+            append("[");
+            GVariant *keys = g_variant_get_child_value(shortcut, 0);
+            for (gsize index = 0; index < g_variant_n_children(keys); ++index) {
+                const gchar *key = NULL;
+                g_variant_get_child(keys, index, "&s", &key);
+                if (index) append("+");
+                append(key);
+            }
+            append("]");
+            g_variant_unref(keys);
+            g_variant_unref(shortcut);
+        }
+    }
+    if (display && strcmp(display, "submenu") == 0) {
+        append("(");
+        for (gsize index = 0; index < g_variant_n_children(children); ++index) {
+            GVariant *boxed = g_variant_get_child_value(children, index), *child = g_variant_get_variant(boxed);
+            if (index) append(";");
+            describe(child);
+            g_variant_unref(child);
+            g_variant_unref(boxed);
+        }
+        append(")");
+    }
+    g_variant_unref(properties);
+    g_variant_unref(children);
+}
+static void layout_done(GObject *source, GAsyncResult *result, gpointer data) {
+    (void)data;
+    GVariant *reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result, NULL);
+    layout_text[0] = 0;
+    layout_count = 0;
+    if (reply) {
+        GVariant *root = NULL;
+        g_variant_get(reply, "(u@(ia{sv}av))", &layout_revision, &root);
+        describe(root);
+        g_variant_unref(root);
+        g_variant_unref(reply);
+    } else g_strlcpy(layout_text, "error", sizeof layout_text);
+    layout_ready = 1;
+}
+void zsf_menu_layout(const char *path) {
+    layout_ready = 0;
+    g_dbus_connection_call(bus, item_sender, path, "com.canonical.dbusmenu", "GetLayout", g_variant_new("(ii@as)", 0, -1, g_variant_new_strv(NULL, 0)),
+        G_VARIANT_TYPE("(u(ia{sv}av))"), G_DBUS_CALL_FLAGS_NONE, -1, NULL, layout_done, NULL);
+}
+int zsf_layout_ready(void) { return layout_ready; }
+const char *zsf_layout_text(void) { return layout_text; }
+uint32_t zsf_layout_revision(void) { return layout_revision; }
+/* IDs in the order describe() met them; 0 is the root. */
+int32_t zsf_layout_id(int index) { return index < layout_count ? layout_ids[index] : -1; }
+void zsf_menu_click(const char *path, int32_t id) {
+    g_dbus_connection_call(bus, item_sender, path, "com.canonical.dbusmenu", "Event", g_variant_new("(isvu)", id, "clicked", g_variant_new_int32(0), 0u),
+        NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
 }

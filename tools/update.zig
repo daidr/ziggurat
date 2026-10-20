@@ -9,7 +9,7 @@ const usage =
     \\ziggurat-update current ROOT ID TARGET
     \\ziggurat-update pack OUTPUT_ZIP NAME ID TARGET VERSION EXECUTABLE FILE...
     \\ziggurat-update endorse TRUSTED_SEED_FILE NEW_PUBLIC_KEY_FILE ID ENDORSEMENT
-    \\ziggurat-update release DIR ID TARGET VERSION ZIP PRIVATE_SEED_FILE BASE_HTTPS_URL [--endorsement FILE] [--from OLD_ZIP OLD_VERSION]...
+    \\ziggurat-update release DIR ID TARGET VERSION ZIP PRIVATE_SEED_FILE BASE_HTTPS_URL [--endorsement FILE] [--notes FILE] [--from OLD_ZIP OLD_VERSION]...
     \\ziggurat-update check FEED PUBLIC_KEY_FILE ID TARGET ROOT
     \\ziggurat-update fetch FEED PUBLIC_KEY_FILE ID TARGET ROOT
     \\ziggurat-update rollback ROOT ID TARGET VERSION
@@ -20,6 +20,8 @@ const usage =
     \\the retained archive and falls back to the full archive, then publishes.
     \\release writes signed manifests, patches and feed.json for static hosting;
     \\rerunning with the same inputs is a no-op and conflicting assets fail.
+    \\--notes adds plain-text release notes for VERSION, which the feed lists
+    \\and the update window shows.
     \\Publication performs blocking disk I/O and never overwrites a running release.
     \\Application shutdown and restart belong to the host.
     \\
@@ -182,6 +184,8 @@ fn joinUrl(allocator: std.mem.Allocator, base: []const u8, name: []const u8) ![]
     return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ base, if (std.mem.endsWith(u8, base, "/")) "" else "/", name });
 }
 
+const notes_suffix = ".notes.txt";
+
 fn release(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len < 9) return error.InvalidArguments;
     const identity = args[3];
@@ -192,11 +196,15 @@ fn release(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer std.crypto.secureZero(u8, &key.secret_key.bytes);
     const base = args[8];
     var endorsement: ?update.Endorsement = null;
+    var notes_path: ?[]const u8 = null;
     var previous: std.ArrayList(struct { path: []const u8, version: update.Version }) = .empty;
     var index: usize = 9;
     while (index < args.len) : (index += 1) {
         if (std.mem.eql(u8, args[index], "--endorsement") and index + 1 < args.len) {
             endorsement = try readEndorsement(allocator, args[index + 1]);
+            index += 1;
+        } else if (std.mem.eql(u8, args[index], "--notes") and index + 1 < args.len) {
+            notes_path = args[index + 1];
             index += 1;
         } else if (std.mem.eql(u8, args[index], "--from") and index + 2 < args.len) {
             try previous.append(allocator, .{ .path = args[index + 1], .version = try update.retention.parseVersion(args[index + 2]) });
@@ -212,6 +220,11 @@ fn release(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Ed25519 signing is deterministic, so a retry reproduces identical manifests.
     const full_json = try update.sign(allocator, manifest, key);
     _ = try writeAsset(dir, zip_name, zip);
+    if (notes_path) |path| {
+        const text = try std.fs.cwd().readFileAlloc(allocator, path, update.feed.max_notes_bytes);
+        if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidNotes;
+        _ = try writeAsset(dir, try std.fmt.allocPrint(allocator, "{s}-{s}{s}", .{ identity, v, notes_suffix }), text);
+    }
     _ = try writeAsset(dir, try std.fmt.allocPrint(allocator, "{s}-{s}-{s}.json", .{ identity, target, v }), full_json);
     for (previous.items) |old| {
         if (old.version.order(version) != .lt) return error.InvalidArguments;
@@ -232,12 +245,25 @@ fn release(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var releases: std.ArrayList([]const u8) = .empty;
     var deltas: std.ArrayList([]const u8) = .empty;
     var names: std.ArrayList([]const u8) = .empty;
+    var notes: std.ArrayList(update.feed.Note) = .empty;
     var iterator = dir.iterate();
     while (try iterator.next()) |entry| {
-        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json") or std.mem.eql(u8, entry.name, "feed.json")) continue;
+        if (entry.kind != .file or std.mem.eql(u8, entry.name, "feed.json")) continue;
         if (!std.mem.startsWith(u8, entry.name, identity) or entry.name.len <= identity.len or entry.name[identity.len] != '-') continue;
+        if (std.mem.endsWith(u8, entry.name, notes_suffix)) {
+            const text = entry.name[identity.len + 1 .. entry.name.len - notes_suffix.len];
+            const noted = update.retention.parseVersion(text) catch continue;
+            try notes.append(allocator, .{ .version = noted, .text = try dir.readFileAlloc(allocator, entry.name, update.feed.max_notes_bytes) });
+            continue;
+        }
+        if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
         try names.append(allocator, try allocator.dupe(u8, entry.name));
     }
+    std.mem.sort(update.feed.Note, notes.items, {}, struct {
+        fn lessThan(_: void, a: update.feed.Note, b: update.feed.Note) bool {
+            return a.version.order(b.version) == .lt;
+        }
+    }.lessThan);
     std.mem.sort([]const u8, names.items, {}, struct {
         fn lessThan(_: void, a: []const u8, b: []const u8) bool {
             return std.mem.order(u8, a, b) == .lt;
@@ -247,7 +273,7 @@ fn release(allocator: std.mem.Allocator, args: []const []const u8) !void {
         const text = try dir.readFileAlloc(allocator, name, 16384);
         if (std.mem.endsWith(u8, name, ".patch.json")) try deltas.append(allocator, text) else try releases.append(allocator, text);
     }
-    const feed_json = try update.feed.build(allocator, identity, releases.items, deltas.items);
+    const feed_json = try update.feed.buildWithNotes(allocator, identity, releases.items, deltas.items, notes.items);
     var atomic_buffer: [16 * 1024]u8 = undefined;
     var atomic = try dir.atomicFile("feed.json", .{ .write_buffer = &atomic_buffer });
     defer atomic.deinit();

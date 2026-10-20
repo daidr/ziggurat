@@ -5,6 +5,7 @@ const std = @import("std");
 const z = @import("ziggurat");
 const types = @import("types.zig");
 const native_menu = @import("windows_menu.zig");
+const menus = @import("menus.zig");
 const c = @cImport({
     @cDefine("WIN32_LEAN_AND_MEAN", "1");
     @cDefine("NO_STRICT", "1");
@@ -33,6 +34,10 @@ pub const Tray = struct {
     stop_node: z.StopParticipant = undefined,
     stop_token: ?z.StopToken = null,
     popup: native_menu.Host = .{ .context = undefined, .done = popupDone },
+    /// The item's own menu, opened by a right click after `.context`.
+    menu: menus.Snapshot = .{},
+    /// The pending popup is the item's own menu, not a popupMenu request.
+    menu_pending: bool = false,
     last_error: u32 = 0,
 
     pub fn init(context: *anyopaque, on_action: *const fn (*anyopaque, *Tray, types.TrayAction) void) Tray {
@@ -48,6 +53,10 @@ pub const Tray = struct {
         defer scope.end();
         var tooltip: [128]u16 = @splat(0);
         try wideZ(&tooltip, options.tooltip);
+        // The notification area shows no text beside icons.
+        var title: [128]u16 = @splat(0);
+        try wideZ(&title, options.title);
+        if (options.menu) |items| _ = try menus.validate(items, false);
         const source: c.HICON = if (options.icon) |icon| @ptrCast(icon) else c.LoadIconW(null, @ptrFromInt(32512));
         const icon = c.CopyIcon(source) orelse return self.failed(error.IconCopyFailed);
         var owned = true;
@@ -69,6 +78,13 @@ pub const Tray = struct {
             self.icon = icon;
             self.tooltip = tooltip;
             owned = false;
+            self.menu.count = 0;
+            if (options.menu) |items| self.menu.set(items) catch |err| {
+                _ = app.cancelStop(self.stop_token.?) catch {};
+                self.stop_token = null;
+                self.release();
+                return err;
+            };
             return;
         }
         if (!std.meta.eql(self.guid, guid)) return error.TrayIdentityChanged;
@@ -78,6 +94,17 @@ pub const Tray = struct {
         self.icon = icon;
         self.tooltip = tooltip;
         owned = false;
+        if (options.menu) |items| try self.menu.set(items);
+    }
+
+    /// Replaces the item's own menu; an empty slice removes it. Items are
+    /// copied. A right click reports `TrayAction.context` first; unless that
+    /// callback opened a popup itself, the menu then opens beside the icon,
+    /// and its commands report `TrayAction.menu`.
+    pub fn setMenu(self: *Tray, items: []const types.Item) !void {
+        const app = self.app orelse return error.NotAttached;
+        app.assertOwner();
+        try self.menu.set(items);
     }
 
     /// Removes the item. A pending popup is dismissed silently.
@@ -99,6 +126,10 @@ pub const Tray = struct {
         app.assertOwner();
         const scope = app.beginCallback() orelse return error.Closed;
         defer scope.end();
+        try self.startPopup(request, items, anchor);
+        self.menu_pending = false;
+    }
+    fn startPopup(self: *Tray, request: u64, items: []const types.Item, anchor: types.TrayAnchor) !void {
         var placement: native_menu.Placement = .{ .x = 0, .y = 0, .foreground = true };
         var cursor: c.POINT = .{ .x = 0, .y = 0 };
         switch (anchor) {
@@ -142,10 +173,23 @@ pub const Tray = struct {
 
     fn popupDone(ptr: *anyopaque, request: u64, selected: ?u64) void {
         const self: *Tray = @ptrCast(@alignCast(ptr));
+        const own = self.menu_pending;
+        self.menu_pending = false;
         const app = self.app orelse return;
         const scope = app.beginCallback() orelse return;
         defer scope.end();
-        self.on_action(self.context, self, .{ .popup = .{ .request = request, .selected = selected } });
+        if (own) {
+            if (selected) |id| self.on_action(self.context, self, .{ .menu = id });
+        } else self.on_action(self.context, self, .{ .popup = .{ .request = request, .selected = selected } });
+    }
+    /// Opens the item's own menu unless a popup is already pending.
+    fn openMenu(self: *Tray) void {
+        if (self.app == null or self.menu.count == 0 or self.popup.pending()) return;
+        self.startPopup(1, self.menu.slice(), .icon) catch |err| {
+            if (self.app) |app| app.report(.{ .severity = .warning, .domain = .win32, .operation = .window_update, .err = err, .code = self.last_error });
+            return;
+        };
+        self.menu_pending = true;
     }
 
     fn stopped(ptr: *anyopaque) anyerror!void {
@@ -156,6 +200,8 @@ pub const Tray = struct {
 
     fn release(self: *Tray) void {
         self.popup.detach();
+        self.menu_pending = false;
+        self.menu.count = 0;
         if (self.icon != null) {
             var value = self.data(self.icon, self.tooltip);
             _ = c.Shell_NotifyIconW(c.NIM_DELETE, &value);
@@ -244,7 +290,10 @@ pub const Tray = struct {
         defer scope.end();
         switch (@as(u16, @truncate(bits))) {
             c.NIN_SELECT, c.NIN_KEYSELECT => self.on_action(self.context, self, .activate),
-            c.WM_CONTEXTMENU => self.on_action(self.context, self, .{ .context = .{ .x = @as(i16, @bitCast(@as(u16, @truncate(wp)))), .y = @as(i16, @bitCast(@as(u16, @truncate(wp >> 16)))) } }),
+            c.WM_CONTEXTMENU => {
+                self.on_action(self.context, self, .{ .context = .{ .x = @as(i16, @bitCast(@as(u16, @truncate(wp)))), .y = @as(i16, @bitCast(@as(u16, @truncate(wp >> 16)))) } });
+                self.openMenu();
+            },
             else => {},
         }
     }
