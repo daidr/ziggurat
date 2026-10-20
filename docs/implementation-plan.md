@@ -43,7 +43,7 @@
 | U01 | 已完成（Windows/Linux） | checkbox、radio、switch、progress、禁用态 | 原生输入、失败帧/嵌套 paint、关闭、Windows UIA 身份及资源回收；无每帧分配 |
 | U02 | 部分完成（Windows/Linux） | slider、双端范围、步进控件、焦点导航、快捷键与多击 | U02.1、U02.2嵌套scope/显式Escape续交、U02.3原生时序入口与显式注册主按钮多击、普通及committed Space下单文档词/逻辑行选择已分项验；更广未消费键续交、折叠/投影视图的编辑器选择及其他控件多击继续；直接键入数字归 T02；依赖 U01 |
 | U03 | 已完成（纯布局合同，Windows/Linux） | grid 与可组合约束布局 | U03.1 grid/span/对齐/自动放置/隐式轨道及U03.2弹性百分比上限、内容/显式minimum优先级、数值基线与未知父尺寸测量已验；失败输出事务、硬界与overflow明确；分隔拖动归U06 |
-| U04 | 部分完成（Windows/Linux） | 虚拟 list、table、tree/outline、grid view | U04.1 可变行高列表/可见回放/稳定 ID 锚点已实现；U04.2 声明式视图的单选列表框（非虚拟）已实现；U04.3/U04.4 声明式视图的非虚拟 table（共享列宽、排序指示、单/多选）与 tree（展开折叠、层级键盘）已实现；虚拟 table/tree、列宽拖动/冻结/重排与 grid view 继续待实现；基础依赖 U02.1/T01 |
+| U04 | 部分完成（Windows/Linux） | 虚拟 list、table、tree/outline、grid view | U04.1 可变行高列表/可见回放/稳定 ID 锚点已实现；U04.2 声明式视图的单选列表框（非虚拟）已实现；U04.3/U04.4 声明式视图的非虚拟 table（共享列宽、排序指示、单/多选）与 tree（展开折叠、层级键盘）已实现；U04.5 `ziggurat_view_collections` 的虚拟 table（列宽拖动/适配、列移动、冻结 fixed 列、多列排序、单元格块选择与行头、拖选、行重排、键入查找）、outline/outline table 与 grid view 已实现并经无窗口与隐藏窗口检查，见[虚拟集合](collections.md)；右键保选、可变行高、RTL 与完整屏外语义继续；基础依赖 U02.1/T01 |
 | U05 | 部分完成（U05.1 只读组合框、建议列表与搜索区域；U05.2 可编辑组合框与 token field） | combobox、autocomplete、search、token field | popup 所有权、输入法、筛选取消、键盘与焦点恢复；可编辑组合框、输入法组合期间的建议处理与 token field 已在声明式视图实现，读屏实际播报与 Linux 可访问性继续；依赖 U02.2/T02/W02 |
 | U06 | 部分完成（U06.1 声明式视图的 tabs/toolbar/比例 split；U06.2 tooltip、toast 与一次性唤醒） | tabs、sidebar、toolbar、split、tooltip、toast | 生命周期、遮挡/命中、延迟唤醒撤销与可访问性；split 的 DIP 偏好、RTL、折叠与 sidebar、toast 动画继续；基础依赖 U02.1/G02，popup scope另依赖U02.2 |
 | U07 | 部分完成（U07.1 声明式视图的日历、日期/时间/数字输入、颜色选择器与颜色按钮、通用浮层，Windows UIA） | calendar、date/time、color picker | locale/范围/键盘/可访问性已在无窗口测试中验证，见[选择器](pickers.md)；颜色方块已可按住拖动；读屏实际播报与 Linux 可访问性继续；依赖 L01/U05 |
@@ -274,11 +274,11 @@ E04的解析/协议识别、原生PTY和人工交互分别验收；剪贴板格�
 | ID | 状态 | 范围 | 验收与依赖 |
 | --- | --- | --- | --- |
 | R01 | 部分完成（R01.1 单文件安装/启动/卸载程序） | Windows 安装/卸载器与文件关联 | 用户/机器作用域、静默安装、升级/回滚/卸载用户数据、真实签名 |
-| R02 | 部分完成（R02.1 Linux desktop 条目、deb 与用户/系统范围安装；macOS 不在本轮范围） | Linux desktop/deb/安装脚本、macOS app/DMG/公证 | 权限/图标/依赖/卸载、签名与 stapling；依赖 P02/P04 |
+| R02 | 部分完成（R02.1 Linux desktop 条目、deb 与用户/系统范围安装，R02.2 用户级 install.sh；macOS 不在本轮范围） | Linux desktop/deb/安装脚本、macOS app/DMG/公证 | 权限/图标/依赖/卸载、签名与 stapling；依赖 P02/P04 |
 | R03 | 部分完成（R03.1 发布索引检查、可续传下载、进度/取消与关闭后启动） | 更新检查/下载/进度/取消、提示 UI 与重启 | 重用现有验签发布；feed 版本/网络错误/部分文件/运行 EXE与退出否决；依赖 I01/U06 |
 | R04 | 部分完成（R04.1 签名增量、全量回退、保留/回滚/清理与密钥背书） | 增量更新、失败全量回退、版本保留/回滚/密钥轮换 | 签名覆盖来源目标、大小限制、故障注入、旧客户端升级；依赖 R03 |
-| R05 | 部分完成（R05.1 静态发布目录、增量生成与幂等索引） | GitHub/S3 发布、增量生成与发布清单 | 显式凭据和发布动作、幂等重试/资产一致性；私钥不进入工程；依赖 R04 |
-| R06 | 部分完成（R06.1 init/dev/build/package/doctor 与三种模板） | 统一 init/dev/build/doctor CLI 与模板 | 原生/Web/混合模板、前端与原生 watch、诊断、可复现构建；依赖 H02/R01 |
+| R05 | 部分完成（R05.1 静态发布目录、增量生成与幂等索引，R05.2 GitHub 与 S3 上传） | GitHub/S3 发布、增量生成与发布清单 | 显式凭据和发布动作、幂等重试/资产一致性；私钥不进入工程；依赖 R04 |
+| R06 | 部分完成（R06.1 init/dev/build/package/doctor 与三种模板，R06.2 generate/i18n check/install-skills 与控制台进度） | 统一 init/dev/build/doctor CLI 与模板 | 原生/Web/混合模板、前端与原生 watch、诊断、可复现构建；依赖 H02/R01 |
 | V01 | 待实现 | 多窗口文档、自绘大列表、Web 与混合应用示例 | 覆盖完整业务流程、失败/取消/退出路径；示例不能替代模块测试 |
 | V02 | 待实现 | 长期内存/多窗口/GPU/冷启动/输入到显示基线 | 可复现硬件/驱动/系统与统计口径，资源随并发峰值而非历史次数增长 |
 | V03 | 待实现 | 原生交互、输入法与屏幕阅读器验收 | 与隐藏窗口检查分开；需要真实平台与明确的交互验证，不由单测推定 |

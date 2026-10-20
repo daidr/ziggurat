@@ -2232,18 +2232,45 @@ pub fn build(b: *std.Build) void {
             .{ .name = "cli_options", .module = cli_options.createModule() },
             .{ .name = "setup_format", .module = setup_format_module },
             .{ .name = "deb", .module = deb_module },
+            .{ .name = "ziggurat_i18n", .module = i18n },
         },
     });
     const cli = b.addExecutable(.{ .name = "ziggurat", .root_module = cli_module });
     addResources(b, cli);
-    const cli_step = b.step("cli", "Build the ziggurat init/dev/build/package/publish/doctor command and its setup stub");
+    const cli_step = b.step("cli", "Build the ziggurat init/dev/build/package/publish/generate/i18n/install-skills/doctor command and its setup stub");
     cli_step.dependOn(&b.addInstallArtifact(cli, .{}).step);
     cli_step.dependOn(&install_setup_stub.step);
     setup_smoke.dependOn(&b.addInstallArtifact(cli, .{}).step);
     check.dependOn(&cli.step);
     const cli_tests = b.addTest(.{ .root_module = cli_module });
     check.dependOn(&cli_tests.step);
-    test_step.dependOn(&b.addRunArtifact(cli_tests).step);
+    const run_cli_tests = b.addRunArtifact(cli_tests);
+    test_step.dependOn(&run_cli_tests.step);
+    b.step("test-cli", "Run the ziggurat command's tests: templates, catalogs, S3 signing, install.sh and console output").dependOn(&run_cli_tests.step);
+    // The accessors `ziggurat generate` writes compile against the module.
+    const i18n_host = b.createModule(.{ .root_source_file = b.path("src/i18n/root.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
+    const catalog_generator = b.addExecutable(.{ .name = "i18n-catalog", .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/i18n_catalog.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+        .imports = &.{.{ .name = "ziggurat_i18n", .module = i18n_host }},
+    }) });
+    const generate_catalog = b.addRunArtifact(catalog_generator);
+    generate_catalog.addDirectoryArg(b.path("tests/i18n_fixture"));
+    const fixture_catalog = generate_catalog.addOutputFileArg("catalog.zig");
+    const generated_catalog_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/i18n_generated_check.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ziggurat_i18n", .module = i18n },
+            .{ .name = "fixture_catalog", .module = b.createModule(.{ .root_source_file = fixture_catalog, .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_i18n", .module = i18n }} }) },
+        },
+    }) });
+    check.dependOn(&generated_catalog_tests.step);
+    const run_generated_catalog_tests = b.addRunArtifact(generated_catalog_tests);
+    test_step.dependOn(&run_generated_catalog_tests.step);
+    b.step("test-i18n-generated", "Compile and run the Zig accessors generated from tests/i18n_fixture").dependOn(&run_generated_catalog_tests.step);
     const assets_host = b.createModule(.{ .root_source_file = b.path("src/assets/root.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
     const asset_generator = b.addExecutable(.{ .name = "web-assets-generator", .root_module = b.createModule(.{
         .root_source_file = b.path("tools/web_assets.zig"),
@@ -2641,6 +2668,20 @@ pub fn build(b: *std.Build) void {
         const run_view_pickers_tests = b.addRunArtifact(view_pickers_tests);
         test_step.dependOn(&run_view_pickers_tests.step);
         b.step("test-view-pickers", "Run calendar, date, time, number and color picker tests").dependOn(&run_view_pickers_tests.step);
+        const view_collections = b.addModule("ziggurat_view_collections", .{ .root_source_file = b.path("src/view/collections.zig"), .target = target, .optimize = optimize, .imports = &.{
+            .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_view", .module = declarative_view },
+        } });
+        const view_collections_tests = b.addTest(.{ .root_module = view_collections });
+        check.dependOn(&view_collections_tests.step);
+        const run_view_collections_tests = b.addRunArtifact(view_collections_tests);
+        test_step.dependOn(&run_view_collections_tests.step);
+        b.step("test-view-collections", "Run virtual table, outline and grid view tests").dependOn(&run_view_collections_tests.step);
+        addSmoke(b, "smoke-view-collections", "tests/collections_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_view", .module = declarative_view },
+            .{ .name = "ziggurat_view_collections", .module = view_collections },
+        });
         addSmoke(b, "smoke-view-pickers", "tests/pickers_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_view", .module = declarative_view },
@@ -2668,11 +2709,12 @@ pub fn build(b: *std.Build) void {
 }
 
 const app_example_imports = [_][]const u8{
-    "ziggurat",             "ziggurat_ui",               "ziggurat_view",            "ziggurat_view_timer",
-    "ziggurat_view_text",   "ziggurat_document",         "ziggurat_document_editor", "ziggurat_wake",
-    "ziggurat_system",      "ziggurat_i18n",             "ziggurat_animation",       "ziggurat_document_app",
-    "ziggurat_chart",       "ziggurat_chart_view",       "ziggurat_audio",           "ziggurat_code_editor",
-    "ziggurat_text_layout", "ziggurat_window_placement", "ziggurat_game",
+    "ziggurat",               "ziggurat_ui",               "ziggurat_view",            "ziggurat_view_timer",
+    "ziggurat_view_text",     "ziggurat_document",         "ziggurat_document_editor", "ziggurat_wake",
+    "ziggurat_system",        "ziggurat_i18n",             "ziggurat_animation",       "ziggurat_document_app",
+    "ziggurat_chart",         "ziggurat_chart_view",       "ziggurat_audio",           "ziggurat_code_editor",
+    "ziggurat_text_layout",   "ziggurat_window_placement", "ziggurat_game",            "ziggurat_terminal",
+    "ziggurat_terminal_view",
 };
 
 const Example = struct { name: []const u8, path: []const u8, web: bool = false };
@@ -2694,6 +2736,10 @@ const app_examples = [_]Example{
     .{ .name = "timeline", .path = "examples/timeline.zig" },
     .{ .name = "i18n", .path = "examples/i18n.zig" },
     .{ .name = "farm", .path = "examples/farm.zig" },
+    .{ .name = "loading", .path = "examples/loading.zig" },
+    .{ .name = "terminal", .path = "examples/terminal.zig" },
+    .{ .name = "text-buffer", .path = "examples/text_buffer.zig" },
+    .{ .name = "native", .path = "examples/native.zig" },
     .{ .name = "hybrid", .path = "examples/hybrid.zig", .web = true },
 };
 
