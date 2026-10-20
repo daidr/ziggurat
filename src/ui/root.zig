@@ -53,6 +53,10 @@ pub const ShaderEffectStats = struct {
 /// How an element effect composites into its parent.
 pub const EffectOptions = struct { opacity: u8 = 255 };
 pub const offscreen = @import("offscreen.zig");
+pub const canvas = @import("canvas.zig");
+pub const frame_stats = @import("frame_stats.zig");
+pub const FrameStats = frame_stats.Stats;
+pub const Canvas = canvas.Canvas;
 pub const gpu_resources = @import("gpu_resources.zig");
 pub const gpu_offscreen = @import("gpu_offscreen.zig");
 pub const GradientInterpolationStats = @import("gradient_interpolation_gpu.zig").Stats;
@@ -490,6 +494,9 @@ pub const Context = struct {
     backdrop_unprepared: u64 = 0,
     shader_workspace: ?*shader_effects.Workspace = null,
     shader_unprepared: u64 = 0,
+    frame_stats_options: frame_stats.Options = .{},
+    frame_stats_set: bool = false,
+    frame_stats_totals: frame_stats.Stats = .{},
     backdrop_software_frames: u64 = 0,
     space_generation: u64 = 0,
     space_binding_epoch: u64 = 0,
@@ -824,6 +831,15 @@ pub const Context = struct {
         self.shader_workspace = null;
         workspace.destroy();
         if (self.window) |window| if (self.live(window)) window.invalidate();
+    }
+    /// Time each frame and log slow ones; see `frame_stats`. Overrides the
+    /// `ZIGGURAT_FRAME_STATS` environment variable.
+    pub fn setFrameStats(self: *Context, options: frame_stats.Options) void {
+        self.frame_stats_options = options;
+        self.frame_stats_set = true;
+    }
+    pub fn frameStats(self: *const Context) frame_stats.Stats {
+        return self.frame_stats_totals;
     }
     pub fn shaderEffectStats(self: *const Context) ShaderEffectStats {
         return .{ .workspace = if (self.shader_workspace) |workspace| workspace.stats else .{}, .unprepared = self.shader_unprepared };
@@ -1628,6 +1644,7 @@ pub const Context = struct {
         return getAccessibility(ptr, snapshot.window, wp, lp);
     }
     fn initialize(self: *Context, window: z.Window) !void {
+        if (!self.frame_stats_set) self.frame_stats_options = frame_stats.fromEnvironment();
         self.attachment_phase = .attaching;
         errdefer self.attachment_phase = .detached;
         if (self.gpu_domain) |domain| {
@@ -2716,6 +2733,8 @@ pub const Context = struct {
                 };
                 self.command_buffer.reset();
                 defer self.command_buffer.reset();
+                var clock = frame_stats.Clock.begin(self.frame_stats_options.enabled);
+                defer frame_stats.finish(&self.frame_stats_totals, self.frame_stats_options, &clock, self.command_buffer.len);
                 self.command_buffer.backdrop_storage.workspace = self.backdrop_workspace;
                 self.command_buffer.shader_storage.workspace = self.shader_workspace;
                 if (self.gaussian_workspace) |workspace| self.command_buffer.bindFilterStorage(&workspace.storage) catch |err| {
@@ -2774,6 +2793,7 @@ pub const Context = struct {
                     window.report(.{ .domain = .renderer, .operation = .paint, .err = err });
                     return;
                 };
+                clock.markBuild();
                 const layer_options = if (build_options.gpu and using_gpu) self.gpu_renderer.layerOptions() else self.renderer.layerOptions();
                 const transform_options = if (build_options.gpu and using_gpu) self.gpu_renderer.transformOptions() else self.renderer.transformOptions();
                 const transform_plan: ?layers.Plan = if (transform_options) |value| layers.Plan.initTransforms(value, if (build_options.gpu and using_gpu) .gpu else if (builtin.os.tag == .linux) .cairo else .gdi) catch |err| {
@@ -2822,12 +2842,15 @@ pub const Context = struct {
                     };
                 };
                 if (!self.live(window)) return;
+                clock.markPreflight();
+                clock.software = !using_gpu;
                 // Backdrop effects and loading indicators draw on the software
                 // planes: replay this frame there without reporting a device
                 // failure.
                 if (build_options.gpu and using_gpu and commands.softwareOnly(self.command_buffer.commands())) {
                     self.gpu_renderer.discard();
                     using_gpu = false;
+                    clock.software = true;
                     self.backdrop_software_frames += 1;
                 }
                 if (build_options.gpu and using_gpu) {
@@ -4021,6 +4044,8 @@ fn nativeRect(bounds: affine.Rect) Rect {
 test {
     _ = gdi;
     _ = effects;
+    _ = canvas;
+    _ = frame_stats;
     _ = input;
     _ = layout;
     _ = grid;
