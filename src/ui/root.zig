@@ -3624,6 +3624,15 @@ pub const Frame = struct {
         if (id == accessibility.root_id) return error.ReservedControlId;
         try self.semantic(.{ .id = id, .parent = parent, .role = .list_box, .name = name, .bounds = bounds });
     }
+    /// A panel drawn over other content and anchored to a control, such as
+    /// a date input's calendar. It occludes the controls behind it, so a
+    /// press on its background reaches none of them; its own controls
+    /// follow it.
+    pub fn popover(self: *Frame, id: u64, bounds: Rect, name: []const u8, parent: u64) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.addControl(id, bounds, .{ .enabled = false, .focusable = false });
+        try self.semantic(.{ .id = id, .parent = parent, .role = .popup, .name = name, .bounds = bounds });
+    }
     /// A button with a chevron along `direction`, such as Back or Forward.
     pub fn navButton(self: *Frame, id: u64, bounds: Rect, direction: widgets.NavDirection, name: []const u8, options: widgets.Options) !void {
         try widgets.emitNavButton(self, id, bounds, direction, name, options);
