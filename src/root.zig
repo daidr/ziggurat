@@ -718,7 +718,11 @@ pub const App = struct {
     fn markActivation(self: *App) void {
         if (self.activation_dirty) return;
         self.activation_dirty = true;
-        backend.wake(self);
+        // Inside an activity, leaving it wakes. Shutdown reports nothing more.
+        if (self.activity_depth == 0 and self.activationLive()) backend.wake(self);
+    }
+    fn activationLive(self: *const App) bool {
+        return self.phase == .ready or self.phase == .running;
     }
     fn updateActivation(self: *App) void {
         if (!self.activation_dirty or self.activation_notifying) return;
@@ -978,7 +982,7 @@ pub const App = struct {
     fn leaveActivity(self: *App) void {
         std.debug.assert(self.activity_depth != 0);
         self.activity_depth -= 1;
-        if (self.activity_depth == 0 and (self.relations_dirty or self.focus_restore != null or self.pending_head != null or self.cleanup_head != null or self.queue.pending() or (self.windows.count == 0 and self.phase == .running))) backend.wake(self);
+        if (self.activity_depth == 0 and (self.relations_dirty or (self.activation_dirty and self.activationLive()) or self.focus_restore != null or self.pending_head != null or self.cleanup_head != null or self.queue.pending() or (self.windows.count == 0 and self.phase == .running))) backend.wake(self);
     }
     fn maybeQuit(self: *App) void {
         if (self.phase == .running and self.windows.count == 0 and self.pending_head == null and self.activity_depth <= 1) self.quit();
@@ -2133,12 +2137,8 @@ pub const WindowRecord = struct {
     pub fn emit(self: *WindowRecord, event: Event) void {
         if (self.phase != .open) return;
         switch (event) {
-            .focus => |focused| {
-                if (!focused) _ = self.invalidatePointer(false);
-                if (self.focused != focused) {
-                    self.focused = focused;
-                    self.window.app.markActivation();
-                }
+            .focus => |focused| if (!focused) {
+                _ = self.invalidatePointer(false);
             },
             .cancel_input => {
                 _ = self.invalidatePointer(false);
@@ -2156,6 +2156,11 @@ pub const WindowRecord = struct {
         defer scope.end();
         const pointer = if (native_pointer) null else self.window.app.suspendPointer();
         defer if (!native_pointer) self.window.app.restorePointer(pointer);
+        // Backends deliver focus loss here directly, without `emit`.
+        if (event == .focus and self.focused != event.focus) {
+            self.focused = event.focus;
+            self.window.app.markActivation();
+        }
         if (event == .focus and !event.focus) {
             if (self.text_busy) self.text_blur_pending = true else self.revokeTextClient(.focus_lost, true) catch |err| self.window.report(.{ .domain = .core, .operation = .text_input, .err = err });
             if (self.phase != .open) return;

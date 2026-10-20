@@ -117,7 +117,8 @@ test "app activation reports focus entering and leaving the app, not moves betwe
     record(b).emit(.{ .focus = true });
     try app.dispatch();
     try equal(1, probe.count);
-    record(b).emit(.{ .focus = false });
+    // The Windows backend delivers focus loss through the pointer lifecycle.
+    record(b).emitPointerLifecycle(record(b).pointerOperation(), .{ .focus = false });
     try app.dispatch();
     try equal(2, probe.count);
     try expect(!probe.changes[1] and !app.isActive());
