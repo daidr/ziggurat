@@ -67,6 +67,11 @@ pub const Data = struct {
     time: [2][]const u8,
     /// `{1}` is the date and `{0}` the time.
     date_time: []const u8 = "{1} {0}",
+    /// A month and its year, as a calendar's title: `MMMM y`.
+    month_year: []const u8 = "MMMM y",
+    /// Month names standing alone, for `LLLL`, where the language inflects
+    /// them inside dates; null uses `months_wide`.
+    months_standalone: ?[12][]const u8 = null,
 
     pub fn datePattern(self: *const Data, style: Style) []const u8 {
         return self.date[@intFromEnum(style)];
@@ -88,6 +93,7 @@ pub const root_data: Data = .{
     .weekdays_abbr = .{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" },
     .date = .{ "y-MM-dd", "y-MM-dd", "y-MM-dd", "y-MM-dd, EEEE" },
     .time = .{ "HH:mm", "HH:mm:ss" },
+    .month_year = "y-MM",
 };
 
 const english_months = [12][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
@@ -142,6 +148,7 @@ const data_table = [_]DataEntry{
         .date = .{ "d/M/yy", "d MMM y", "d 'de' MMMM 'de' y", "EEEE, d 'de' MMMM 'de' y" },
         .time = .{ "H:mm", "H:mm:ss" },
         .date_time = "{1}, {0}",
+        .month_year = "MMMM 'de' y",
     } },
     .{ .tag = "it", .data = .{
         .months_wide = .{ "gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre" },
@@ -159,6 +166,7 @@ const data_table = [_]DataEntry{
         .weekdays_abbr = .{ "dom.", "seg.", "ter.", "qua.", "qui.", "sex.", "sáb." },
         .date = .{ "dd/MM/y", "d 'de' MMM 'de' y", "d 'de' MMMM 'de' y", "EEEE, d 'de' MMMM 'de' y" },
         .time = .{ "HH:mm", "HH:mm:ss" },
+        .month_year = "MMMM 'de' y",
     } },
     .{ .tag = "ru", .data = .{
         .months_wide = .{ "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря" },
@@ -168,6 +176,8 @@ const data_table = [_]DataEntry{
         .date = .{ "dd.MM.y", "d MMM y 'г'.", "d MMMM y 'г'.", "EEEE, d MMMM y 'г'." },
         .time = .{ "HH:mm", "HH:mm:ss" },
         .date_time = "{1}, {0}",
+        .month_year = "LLLL y 'г'.",
+        .months_standalone = .{ "январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь" },
     } },
     .{ .tag = "ja", .data = .{
         .months_wide = numbered_months,
@@ -177,6 +187,7 @@ const data_table = [_]DataEntry{
         .am_pm = .{ "午前", "午後" },
         .date = .{ "y/MM/dd", "y/MM/dd", "y年M月d日", "y年M月d日EEEE" },
         .time = .{ "H:mm", "H:mm:ss" },
+        .month_year = "y年M月",
     } },
     .{ .tag = "zh", .data = .{
         .months_wide = .{ "一月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "十一月", "十二月" },
@@ -186,6 +197,7 @@ const data_table = [_]DataEntry{
         .am_pm = .{ "上午", "下午" },
         .date = .{ "y/M/d", "y年M月d日", "y年M月d日", "y年M月d日EEEE" },
         .time = .{ "HH:mm", "HH:mm:ss" },
+        .month_year = "y年M月",
     } },
     .{ .tag = "zh-Hant", .data = .{
         .months_wide = numbered_months,
@@ -195,6 +207,7 @@ const data_table = [_]DataEntry{
         .am_pm = .{ "上午", "下午" },
         .date = .{ "y/M/d", "y年M月d日", "y年M月d日", "y年M月d日 EEEE" },
         .time = .{ "ah:mm", "ah:mm:ss" },
+        .month_year = "y年M月",
     } },
     .{ .tag = "ko", .data = .{
         .months_wide = .{ "1월", "2월", "3월", "4월", "5월", "6월", "7월", "8월", "9월", "10월", "11월", "12월" },
@@ -204,6 +217,7 @@ const data_table = [_]DataEntry{
         .am_pm = .{ "오전", "오후" },
         .date = .{ "yy. M. d.", "y. M. d.", "y년 MMMM d일", "y년 MMMM d일 EEEE" },
         .time = .{ "a h:mm", "a h:mm:ss" },
+        .month_year = "y년 MMMM",
     } },
 };
 
@@ -217,7 +231,8 @@ pub fn dataFor(locale: *const Locale) *const Data {
     return &root_data;
 }
 
-/// Formats with a CLDR-style pattern: y, yy, yyyy; M/L 1-4; d, dd; E/c 1-4
+/// Formats with a CLDR-style pattern: y, yy, yyyy; M/L 1-4 (LLLL is the
+/// standalone month name); d, dd; E/c 1-4
 /// (1-3 abbreviated); a; h, hh, H, HH; m, mm; s, ss; and 'quoted' text with
 /// '' for an apostrophe. Other ASCII letters are rejected.
 pub fn formatPattern(writer: *std.Io.Writer, data: *const Data, pattern: []const u8, value: Civil) Error!void {
@@ -262,7 +277,7 @@ pub fn formatPattern(writer: *std.Io.Writer, data: *const Data, pattern: []const
             'M', 'L' => switch (count) {
                 1, 2 => try pad(writer, value.month, count),
                 3 => try writer.writeAll(data.months_abbr[value.month - 1]),
-                4 => try writer.writeAll(data.months_wide[value.month - 1]),
+                4 => try writer.writeAll(if (c == 'L') if (data.months_standalone) |names| names[value.month - 1] else data.months_wide[value.month - 1] else data.months_wide[value.month - 1]),
                 else => return error.InvalidPattern,
             },
             'd' => if (count <= 2) try pad(writer, value.day, count) else return error.InvalidPattern,
@@ -287,6 +302,38 @@ fn pad(writer: *std.Io.Writer, value: u32, width: usize) Error!void {
     var missing = width -| digits.len;
     while (missing > 0) : (missing -= 1) try writer.writeByte('0');
     try writer.writeAll(digits);
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian date; `month` is 1-12.
+pub fn daysFromCivil(year: i32, month: u4, day: u5) i64 {
+    const y: i64 = @as(i64, year) - @as(i64, if (month <= 2) 1 else 0);
+    const era = @divFloor(y, 400);
+    const yoe = y - era * 400;
+    const m: i64 = month;
+    const doy = @divFloor(153 * (if (m > 2) m - 3 else m + 9) + 2, 5) + day - 1;
+    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
+    return era * 146097 + doe - 719468;
+}
+
+/// Whether a locale writes the time of day in 12 hours with a day period
+/// or in 24 hours, from its short time pattern.
+pub const HourCycle = enum { h12, h23 };
+pub fn hourCycle(locale: *const Locale) HourCycle {
+    var quoted = false;
+    for (dataFor(locale).timePattern(.short)) |c| {
+        if (c == '\'') quoted = !quoted;
+        if (quoted) continue;
+        if (c == 'h' or c == 'K') return .h12;
+        if (c == 'H' or c == 'k') return .h23;
+    }
+    return .h23;
+}
+
+/// Formats `value`, a date and time of day, with the locale's title of
+/// its month, as `March 2024` or `2024年3月`.
+pub fn formatMonthYear(writer: *std.Io.Writer, locale: *const Locale, value: Civil) Error!void {
+    const data = dataFor(locale);
+    try formatPattern(writer, data, data.month_year, value);
 }
 
 pub fn formatDate(writer: *std.Io.Writer, locale: *const Locale, instant: Instant, style: Style) Error!void {
@@ -377,6 +424,25 @@ test "time and date-time joining" {
     writer = .fixed(&buffer);
     try formatTime(&writer, &de, sample, .full);
     try std.testing.expectEqualStrings("14:07:09", writer.buffered());
+}
+
+test "days from civil dates, hour cycles and month titles" {
+    try std.testing.expectEqual(@as(i64, 0), daysFromCivil(1970, 1, 1));
+    try std.testing.expectEqual(@as(i64, 19787), daysFromCivil(2024, 3, 5));
+    try std.testing.expectEqual(@as(i64, -1), daysFromCivil(1969, 12, 31));
+    try std.testing.expectEqual(@divFloor(min_unix_seconds, 86400), daysFromCivil(1, 1, 1));
+    try std.testing.expectEqual(@as(u5, 29), (try civil(.{ .unix_seconds = daysFromCivil(2000, 2, 29) * 86400 })).day);
+    inline for (.{ .{ "en", HourCycle.h12 }, .{ "en-GB", HourCycle.h23 }, .{ "zh-TW", HourCycle.h12 }, .{ "zh", HourCycle.h23 }, .{ "ko", HourCycle.h12 }, .{ "sw", HourCycle.h23 } }) |case| {
+        const locale = try Locale.parse(case[0]);
+        try std.testing.expectEqual(case[1], hourCycle(&locale));
+    }
+    var buffer: [64]u8 = undefined;
+    inline for (.{ .{ "en", "March 2024" }, .{ "zh-CN", "2024年3月" }, .{ "ru", "март 2024 г." }, .{ "es", "marzo de 2024" }, .{ "ko", "2024년 3월" }, .{ "sw", "2024-03" } }) |case| {
+        const locale = try Locale.parse(case[0]);
+        var writer: std.Io.Writer = .fixed(&buffer);
+        try formatMonthYear(&writer, &locale, try civil(sample));
+        try std.testing.expectEqualStrings(case[1], writer.buffered());
+    }
 }
 
 test "pattern letters and quoting" {

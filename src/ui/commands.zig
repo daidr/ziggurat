@@ -10,10 +10,63 @@ pub const Gradient = brushes.Gradient;
 pub const layers = @import("layers.zig");
 pub const gaussian = @import("gaussian_filter.zig");
 const gaussian_scope = @import("gaussian_scope.zig");
+pub const backdrop = @import("backdrop.zig");
+pub const loading = @import("loading.zig");
 pub const no_filter: u8 = 255;
 pub const GroupCommand = struct { bounds: Rect, mask_origin: drawing.Point = .{}, opacity: u8 = 255, mask_resource: ?u8 = null, filter_slot: u8 = no_filter };
 pub const GradientShape = struct { bounds: Rect, radius: f32 = 0, stroke_width: f32 = 0, brush: u8 };
-pub const Text = struct { bounds: Rect, color: u32, offset: u32, len: u32 };
+/// Font of a text command: size in DIP, weight, slant and whether to use
+/// the platform's fixed-pitch family instead of the interface family.
+pub const Font = struct {
+    size: f32 = 16,
+    weight: Weight = .regular,
+    italic: bool = false,
+    monospace: bool = false,
+
+    pub const Weight = enum(u8) {
+        regular,
+        medium,
+        semibold,
+        bold,
+        /// The CSS-style numeric weight that native font APIs take.
+        pub fn value(self: Weight) u16 {
+            return 400 + 100 * @as(u16, @intFromEnum(self));
+        }
+    };
+    /// Presets for document text: body copy, six heading levels from
+    /// largest to smallest, and fixed-pitch code.
+    pub const body: Font = .{};
+    pub const heading1: Font = .{ .size = 32, .weight = .bold };
+    pub const heading2: Font = .{ .size = 26, .weight = .bold };
+    pub const heading3: Font = .{ .size = 22, .weight = .semibold };
+    pub const heading4: Font = .{ .size = 19, .weight = .semibold };
+    pub const heading5: Font = .{ .size = 16, .weight = .semibold };
+    pub const heading6: Font = .{ .size = 14, .weight = .semibold };
+    pub const code: Font = .{ .size = 14, .monospace = true };
+    pub const smallest: f32 = 1;
+    pub const largest: f32 = 1024;
+    pub fn valid(self: Font) bool {
+        return std.math.isFinite(self.size) and self.size >= smallest and self.size <= largest;
+    }
+    /// The compact form stored in a command; sizes round to 1/16 DIP.
+    pub fn key(self: Font) FontKey {
+        return .{ .sixteenths = @intFromFloat(@round(self.size * 16)), .weight = self.weight, .italic = self.italic, .monospace = self.monospace };
+    }
+};
+pub const FontKey = packed struct(u32) {
+    sixteenths: u16 = 16 * 16,
+    weight: Font.Weight = .regular,
+    italic: bool = false,
+    monospace: bool = false,
+    _: u6 = 0,
+    pub fn size(self: FontKey) f32 {
+        return @as(f32, @floatFromInt(self.sixteenths)) / 16;
+    }
+    pub fn isDefault(self: FontKey) bool {
+        return @as(u32, @bitCast(self)) == @as(u32, @bitCast(FontKey{}));
+    }
+};
+pub const Text = struct { bounds: Rect, color: u32, offset: u16, len: u16, font: FontKey = .{} };
 pub const ImageCommand = struct { destination: Rect, alignment: drawing.Point, fit: drawing.ImageFit, sampling: drawing.ImageSampling, opacity: u8, resource: u8 };
 pub const Command = union(enum) {
     fill: struct { bounds: Rect, color: u32 },
@@ -30,6 +83,10 @@ pub const Command = union(enum) {
     end_group,
     begin_transform: u8,
     end_transform,
+    /// Index into the Buffer's backdrop table.
+    backdrop: u8,
+    /// Index into the Buffer's loading indicator table.
+    indicator: u8,
 };
 comptime {
     if (@sizeOf(Command) != 32 or @sizeOf(GroupCommand) != 28) @compileError("command ABI mismatch");
@@ -47,6 +104,13 @@ pub const FilterStorage = struct {
     bound: bool = false,
 };
 const ScopeKind = enum { group, transform, gaussian };
+
+/// Backdrop effects and loading indicators are drawn on the software
+/// planes; a GPU renderer rejects a batch that holds one.
+pub fn softwareOnly(list: []const Command) bool {
+    for (list) |command| if (command == .backdrop or command == .indicator) return true;
+    return false;
+}
 
 /// Reject the entire batch before a software backend changes its work plane.
 pub fn rejectTextures(list: []const Command) error{UnsupportedTextureBackend}!void {
@@ -77,6 +141,9 @@ pub const Buffer = struct {
     scope_kinds: [layers.max_depth]ScopeKind = undefined,
     transform_storage: ?*TransformStorage = null,
     filter_storage: ?*FilterStorage = null,
+    backdrop_storage: backdrop.Storage = .{},
+    indicator_storage: [loading.max_entries]loading.Entry = undefined,
+    indicator_len: usize = 0,
 
     pub fn reset(self: *Buffer) void {
         for (self.preparedTextResources()) |view| view.lease.release();
@@ -98,6 +165,9 @@ pub const Buffer = struct {
         self.depth = 0;
         self.brush_len = 0;
         self.group_depth = 0;
+        self.backdrop_storage.len = 0;
+        self.backdrop_storage.workspace = null;
+        self.indicator_len = 0;
         if (self.transform_storage) |storage| {
             storage.len = 0;
             storage.bound = false;
@@ -137,9 +207,11 @@ pub const Buffer = struct {
         group_depth: usize,
         filters: usize,
         transforms: usize,
+        backdrops: usize,
+        indicators: usize,
     };
     pub fn checkpoint(self: *const Buffer) Checkpoint {
-        return .{ .len = self.len, .text_len = self.text_len, .depth = self.depth, .brush_len = self.brush_len, .prepared = self.prepared_text_len, .images = self.image_len, .coverage = self.coverage_len, .textures = self.texture_len, .group_depth = self.group_depth, .filters = self.filterResources().len, .transforms = self.transformResources().len };
+        return .{ .len = self.len, .text_len = self.text_len, .depth = self.depth, .brush_len = self.brush_len, .prepared = self.prepared_text_len, .images = self.image_len, .coverage = self.coverage_len, .textures = self.texture_len, .group_depth = self.group_depth, .filters = self.filterResources().len, .transforms = self.transformResources().len, .backdrops = self.backdrop_storage.len, .indicators = self.indicator_len };
     }
     /// Only the same owning Buffer may roll back to its earlier scope mark.
     /// No allocator or foreign destructor is called while releasing these pins.
@@ -162,6 +234,8 @@ pub const Buffer = struct {
         self.coverage_len = mark.coverage;
         self.texture_len = mark.textures;
         self.group_depth = mark.group_depth;
+        self.backdrop_storage.len = mark.backdrops;
+        self.indicator_len = mark.indicators;
     }
     pub fn beginTransform(self: *Buffer, value: layers.NativeTransform) !void {
         const storage = self.transform_storage orelse return error.TransformStorageRequired;
@@ -349,6 +423,35 @@ pub const Buffer = struct {
         try self.append(.end_group);
         self.group_depth -= 1;
     }
+    /// Record a backdrop effect in absolute DIP. It reads the target plane
+    /// as drawn so far, so only software replay can draw it.
+    pub fn backdropEffect(self: *Buffer, entry: backdrop.Entry) !void {
+        if (!layout.validRect(entry.bounds) or !std.math.isFinite(entry.bounds.x + entry.bounds.width) or !std.math.isFinite(entry.bounds.y + entry.bounds.height) or !std.math.isFinite(entry.radius) or entry.radius < 0 or !std.math.isFinite(entry.sigma) or entry.sigma < 0 or !std.math.isFinite(entry.noise)) return error.InvalidGeometry;
+        if (entry.mask) |mask| if (!std.math.isFinite(mask.angle) or !std.math.isFinite(mask.start) or !std.math.isFinite(mask.end)) return error.InvalidGeometry;
+        if (self.len == self.storage.len) return error.CommandsFull;
+        const table = &self.backdrop_storage;
+        if (table.len == table.entries.len) return error.BackdropsFull;
+        table.entries[table.len] = entry;
+        self.storage[self.len] = .{ .backdrop = @intCast(table.len) };
+        table.len += 1;
+        self.len += 1;
+    }
+    /// Record a loading indicator in absolute DIP at a pose the caller chose.
+    pub fn loadingIndicator(self: *Buffer, entry: loading.Entry) !void {
+        if (!layout.validRect(entry.bounds) or !std.math.isFinite(entry.bounds.x + entry.bounds.width) or !std.math.isFinite(entry.bounds.y + entry.bounds.height) or !std.math.isFinite(entry.phase)) return error.InvalidGeometry;
+        if (self.len == self.storage.len) return error.CommandsFull;
+        if (self.indicator_len == self.indicator_storage.len) return error.IndicatorsFull;
+        self.indicator_storage[self.indicator_len] = entry;
+        self.storage[self.len] = .{ .indicator = @intCast(self.indicator_len) };
+        self.indicator_len += 1;
+        self.len += 1;
+    }
+    pub fn indicatorEntries(self: *const Buffer) []const loading.Entry {
+        return self.indicator_storage[0..self.indicator_len];
+    }
+    pub fn backdropEntries(self: *const Buffer) []const backdrop.Entry {
+        return self.backdrop_storage.entries[0..self.backdrop_storage.len];
+    }
     pub fn image(self: *Buffer, destination: Rect, view: drawing.ImageView, options: drawing.ImageOptions) !void {
         if (!layout.validRect(destination) or !std.math.isFinite(destination.x + destination.width) or !std.math.isFinite(destination.y + destination.height)) return error.InvalidGeometry;
         try options.validate();
@@ -426,11 +529,17 @@ pub const Buffer = struct {
         try self.append(.{ .gradient = .{ .bounds = bounds, .radius = radius, .stroke_width = width, .brush = @intCast(index) } });
     }
     pub fn text(self: *Buffer, bounds: Rect, utf8: []const u8, color: u32) !void {
+        return self.textFont(bounds, utf8, color, .{});
+    }
+    pub fn textFont(self: *Buffer, bounds: Rect, utf8: []const u8, color: u32, font: Font) !void {
         if (!layout.validRect(bounds)) return error.InvalidGeometry;
+        if (!font.valid()) return error.InvalidFont;
         if (!std.unicode.utf8ValidateSlice(utf8)) return error.InvalidUtf8;
         if (utf8.len > 2048) return error.TextTooLong;
         if (utf8.len > self.text_storage.len - self.text_len) return error.TextStorageFull;
-        try self.append(.{ .text = .{ .bounds = bounds, .color = color, .offset = @intCast(self.text_len), .len = @intCast(utf8.len) } });
+        // Storage is 64 KiB, so a non-empty run always starts below 65536.
+        const offset: u16 = if (utf8.len == 0) 0 else @intCast(self.text_len);
+        try self.append(.{ .text = .{ .bounds = bounds, .color = color, .offset = offset, .len = @intCast(utf8.len), .font = font.key() } });
         @memcpy(self.text_storage[self.text_len..][0..utf8.len], utf8);
         self.text_len += utf8.len;
     }
@@ -1046,4 +1155,19 @@ test "typed textures pin once and reject capacity or loss transactionally" {
     try std.testing.expectError(error.CommandsFull, buffer.texture(rect, views[0], .{}));
     try std.testing.expectEqual(@as(usize, 0), leases[0].pins);
     try std.testing.expectEqual(@as(usize, 0), buffer.texture_len);
+}
+
+test "text commands carry their font compactly" {
+    var buffer: Buffer = .{};
+    try buffer.textFont(.{ .x = 0, .y = 0, .width = 10, .height = 10 }, "x", 0, .heading2);
+    try buffer.text(.{ .x = 0, .y = 0, .width = 10, .height = 10 }, "y", 0);
+    const list = buffer.commands();
+    try std.testing.expectEqual(@as(f32, 26), list[0].text.font.size());
+    try std.testing.expectEqual(Font.Weight.bold, list[0].text.font.weight);
+    try std.testing.expect(!list[0].text.font.isDefault() and list[1].text.font.isDefault());
+    try std.testing.expectEqual(@as(u16, 700), Font.Weight.bold.value());
+    try std.testing.expectEqual(@as(f32, 14.5), (Font{ .size = 14.5, .monospace = true }).key().size());
+    try std.testing.expectError(error.InvalidFont, buffer.textFont(.{ .x = 0, .y = 0, .width = 10, .height = 10 }, "z", 0, .{ .size = 0 }));
+    try std.testing.expectError(error.InvalidFont, buffer.textFont(.{ .x = 0, .y = 0, .width = 10, .height = 10 }, "z", 0, .{ .size = std.math.nan(f32) }));
+    try std.testing.expectEqual(@as(usize, 2), buffer.len);
 }

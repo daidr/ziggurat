@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src 'none'; connect-src 'none'">
+<title>Ziggurat hybrid page</title>
+<style>
+  body { margin: 24px; color: #182430; background: #ffffff; font: 16px system-ui, 'Segoe UI', sans-serif }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 16px }
+  .count { font-size: 40px; font-weight: 600; margin: 8px 0 16px }
+  button, input { font: inherit; padding: 6px 14px }
+  button:focus-visible, input:focus-visible { outline: 2px solid #274c77; outline-offset: 2px }
+  form { display: flex; gap: 8px; margin-top: 20px }
+  input { flex: 1; min-width: 0 }
+  ul { padding-left: 20px; color: #3f5260 }
+  .muted { color: #536475; font-size: 14px }
+</style>
+<h1>Web page</h1>
+<p class="muted">The count belongs to Zig. Buttons here ask Zig to change it; Zig answers with the new value.</p>
+<div class="count" id="count">-</div>
+<button id="decrement">- 1</button>
+<button id="increment">+ 1</button>
+<form id="note">
+  <input id="text" maxlength="80" placeholder="A note for the native sidebar" aria-label="Note">
+  <button>Send to Zig</button>
+</form>
+<h2 class="muted">Messages from Zig</h2>
+<ul id="log"></ul>
+<script>
+  const send = text => window.chrome.webview.postMessage(text);
+  window.chrome.webview.addEventListener('message', event => {
+    const data = String(event.data);
+    if (data.startsWith('count:')) {
+      document.getElementById('count').textContent = data.slice(6);
+    } else if (data.startsWith('note:')) {
+      const item = document.createElement('li');
+      item.textContent = data.slice(5);
+      const log = document.getElementById('log');
+      log.prepend(item);
+      while (log.children.length > 5) log.lastChild.remove();
+    }
+  });
+  document.getElementById('increment').addEventListener('click', () => send('increment'));
+  document.getElementById('decrement').addEventListener('click', () => send('decrement'));
+  document.getElementById('note').addEventListener('submit', event => {
+    event.preventDefault();
+    const input = document.getElementById('text');
+    if (input.value.trim() !== '') send('note:' + input.value.trim());
+    input.value = '';
+  });
+  // Ask for the current state once the listener is in place.
+  send('hello');
+</script>
+</html>

@@ -646,6 +646,12 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_text_layout", .module = text_layout }, .{ .name = "ziggurat_ui", .module = ui },
         .{ .name = "ziggurat_view", .module = declarative_view },
     } });
+    const chart = b.addModule("ziggurat_chart", .{ .root_source_file = b.path("src/chart/root.zig"), .target = target, .optimize = optimize });
+    const chart_tests = b.addTest(.{ .root_module = chart });
+    check.dependOn(&chart_tests.step);
+    const run_chart_tests = b.addRunArtifact(chart_tests);
+    test_step.dependOn(&run_chart_tests.step);
+    b.step("test-chart", "Run chart scale, tick, stack, path, downsampling, layout and selection tests").dependOn(&run_chart_tests.step);
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
         addSmoke(b, "smoke-markdown-code", "tests/markdown_code_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat_markdown", .module = markdown },
@@ -664,6 +670,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_ui", .module = ui },
         });
         addSmoke(b, "smoke-theme", "tests/theme_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-backdrop", "tests/backdrop_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
         });
@@ -1274,11 +1284,11 @@ pub fn build(b: *std.Build) void {
         content_host.linkSystemLibrary("x11");
         check.dependOn(&content_host.step);
         b.step("smoke-content-host", "Run private GTK content ownership and input reparenting checks").dependOn(&b.addRunArtifact(content_host).step);
-        addExample(b, "counter", "examples/counter.zig", target, optimize, &.{
+        _ = addExample(b, "counter", "examples/counter.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
         });
-        addExample(b, "view-counter", "examples/view_counter.zig", target, optimize, &.{
+        _ = addExample(b, "view-counter", "examples/view_counter.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_view", .module = declarative_view },
         });
@@ -1321,11 +1331,11 @@ pub fn build(b: *std.Build) void {
         b.step("benchmark", "Run measured GTK/Cairo submission and idle workload").dependOn(&benchmark_run.step);
     }
     if (target.result.os.tag == .windows) {
-        addExample(b, "counter", "examples/counter.zig", target, optimize, &.{
+        _ = addExample(b, "counter", "examples/counter.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
         });
-        addExample(b, "view-counter", "examples/view_counter.zig", target, optimize, &.{
+        _ = addExample(b, "view-counter", "examples/view_counter.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_view", .module = declarative_view },
         });
@@ -1572,11 +1582,11 @@ pub fn build(b: *std.Build) void {
         const initializers_build = b.step("build-smoke-document-initializers", "Build the isolated initializer Runtime oracle; run with its explicit Python host");
         initializers_build.dependOn(&initializers_install.step);
         initializers_build.dependOn(web_runtime);
-        addExample(b, "web-counter", "examples/web_counter.zig", target, optimize, &.{
+        _ = addExample(b, "web-counter", "examples/web_counter.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
         });
-        addExample(b, "rectangular-pages", "examples/rectangular_pages.zig", target, optimize, &.{
+        _ = addExample(b, "rectangular-pages", "examples/rectangular_pages.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
             .{ .name = "ziggurat_webview", .module = view },
@@ -2254,14 +2264,41 @@ pub fn build(b: *std.Build) void {
     b.step("test-updater", "Run update window sessions, choices, texts and feed backend tests").dependOn(&run_updater_tests.step);
     test_step.dependOn(&run_webkit_remote.step);
     const audio = b.addModule("ziggurat_audio", .{ .root_source_file = b.path("src/audio/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
-    if (target.result.os.tag == .linux) audio.link_libc = true;
+    audio.link_libc = true;
     if (target.result.os.tag == .windows) audio.linkSystemLibrary("ole32", .{});
+    // Pinned third-party decoders: their own warnings and undefined-behavior
+    // checks are not this project's to enforce.
+    for ([_][]const u8{ "mp3", "vorbis" }) |codec| _ = native_support.add(b, audio, b.fmt("audio-{s}-native", .{codec}), b.fmt("src/audio/{s}.c", .{codec}), &.{ "-std=c99", "-w", "-fno-sanitize=undefined" }, target, optimize);
     const audio_tests = b.addTest(.{ .root_module = audio });
     const run_audio_tests = b.addRunArtifact(audio_tests);
     check.dependOn(&audio_tests.step);
     test_step.dependOn(&run_audio_tests.step);
     b.step("test-audio", "Run WAV/FLAC decoding, mixing, player, stream, notification and test-backend output invariants").dependOn(&run_audio_tests.step);
     addSmoke(b, "smoke-audio", "tests/audio_smoke.zig", target, optimize, &.{.{ .name = "ziggurat_audio", .module = audio }});
+    const terminal = b.addModule("ziggurat_terminal", .{ .root_source_file = b.path("src/terminal/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
+    terminal.link_libc = true;
+    const terminal_tests = b.addTest(.{ .root_module = terminal });
+    const run_terminal_tests = b.addRunArtifact(terminal_tests);
+    check.dependOn(&terminal_tests.step);
+    test_step.dependOn(&run_terminal_tests.step);
+    const terminal_view = b.addModule("ziggurat_terminal_view", .{ .root_source_file = b.path("src/terminal/view.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
+        .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_terminal", .module = terminal },
+    } });
+    const terminal_view_tests = b.addTest(.{ .root_module = terminal_view });
+    const run_terminal_view_tests = b.addRunArtifact(terminal_view_tests);
+    check.dependOn(&terminal_view_tests.step);
+    test_step.dependOn(&run_terminal_view_tests.step);
+    const test_terminal = b.step("test-terminal", "Run escape sequence parsing, screen, scrollback, key and mouse encoding, selection, link, PTY session and terminal view tests");
+    test_terminal.dependOn(&run_terminal_tests.step);
+    test_terminal.dependOn(&run_terminal_view_tests.step);
+    addSmoke(b, "smoke-terminal", "tests/terminal_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_ui", .module = ui },
+        .{ .name = "ziggurat_view", .module = declarative_view },
+        .{ .name = "ziggurat_terminal", .module = terminal },
+        .{ .name = "ziggurat_terminal_view", .module = terminal_view },
+    });
     const snippets_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/code_editor/snippet.zig"),
         .target = target,
@@ -2447,6 +2484,92 @@ pub fn build(b: *std.Build) void {
         const run_markdown_view_tests = b.addRunArtifact(markdown_view_tests);
         test_step.dependOn(&run_markdown_view_tests.step);
         b.step("test-markdown-view", "Run Markdown to declarative view mapping, wrapping and activation tests").dependOn(&run_markdown_view_tests.step);
+        const chart_view = b.addModule("ziggurat_chart_view", .{ .root_source_file = b.path("src/chart/view.zig"), .target = target, .optimize = optimize, .imports = &.{
+            .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_vector", .module = vector },
+            .{ .name = "ziggurat_chart", .module = chart },
+        } });
+        const chart_view_tests = b.addTest(.{ .root_module = chart_view });
+        check.dependOn(&chart_view_tests.step);
+        const run_chart_view_tests = b.addRunArtifact(chart_view_tests);
+        test_step.dependOn(&run_chart_view_tests.step);
+        b.step("test-chart-view", "Run chart view arrangement, storage and preparation key tests").dependOn(&run_chart_view_tests.step);
+        const view_pickers = b.addModule("ziggurat_view_pickers", .{ .root_source_file = b.path("src/view/pickers.zig"), .target = target, .optimize = optimize, .imports = &.{
+            .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_i18n", .module = i18n },
+        } });
+        const view_pickers_tests = b.addTest(.{ .root_module = view_pickers });
+        check.dependOn(&view_pickers_tests.step);
+        const run_view_pickers_tests = b.addRunArtifact(view_pickers_tests);
+        test_step.dependOn(&run_view_pickers_tests.step);
+        b.step("test-view-pickers", "Run calendar, date, time, number and color picker tests").dependOn(&run_view_pickers_tests.step);
+        addSmoke(b, "smoke-view-pickers", "tests/pickers_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_view", .module = declarative_view },
+            .{ .name = "ziggurat_i18n", .module = i18n },
+            .{ .name = "ziggurat_view_pickers", .module = view_pickers },
+        });
+        addSmoke(b, "smoke-chart", "tests/chart_view_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_view", .module = declarative_view },
+            .{ .name = "ziggurat_chart", .module = chart },
+            .{ .name = "ziggurat_chart_view", .module = chart_view },
+        });
+    }
+    addExamples(b, target, optimize);
+}
+
+const app_example_imports = [_][]const u8{
+    "ziggurat",             "ziggurat_ui",               "ziggurat_view",            "ziggurat_view_timer",
+    "ziggurat_view_text",   "ziggurat_document",         "ziggurat_document_editor", "ziggurat_wake",
+    "ziggurat_system",      "ziggurat_i18n",             "ziggurat_animation",       "ziggurat_document_app",
+    "ziggurat_chart",       "ziggurat_chart_view",       "ziggurat_audio",           "ziggurat_code_editor",
+    "ziggurat_text_layout", "ziggurat_window_placement",
+};
+
+const Example = struct { name: []const u8, path: []const u8, web: bool = false };
+
+const app_examples = [_]Example{
+    .{ .name = "hello", .path = "examples/hello.zig" },
+    .{ .name = "todo", .path = "examples/todo.zig" },
+    .{ .name = "notes", .path = "examples/notes.zig" },
+    .{ .name = "gallery", .path = "examples/gallery.zig" },
+    .{ .name = "frameless", .path = "examples/frameless.zig" },
+    .{ .name = "menubar", .path = "examples/menubar.zig" },
+    .{ .name = "clipboard", .path = "examples/clipboard.zig" },
+    .{ .name = "drag-drop", .path = "examples/drag_drop.zig" },
+    .{ .name = "text-input", .path = "examples/text_input.zig" },
+    .{ .name = "code-editor", .path = "examples/code_editor.zig" },
+    .{ .name = "chart-streaming", .path = "examples/chart_streaming.zig" },
+    .{ .name = "piano", .path = "examples/piano.zig" },
+    .{ .name = "launcher", .path = "examples/launcher.zig" },
+    .{ .name = "timeline", .path = "examples/timeline.zig" },
+    .{ .name = "i18n", .path = "examples/i18n.zig" },
+    .{ .name = "hybrid", .path = "examples/hybrid.zig", .web = true },
+};
+
+/// Registers every application example under `run-<name>` and `example-<name>`, and compiles them in `check`.
+/// Examples use only public modules; WebView examples require `-Dwebview=true`.
+fn addExamples(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    if (target.result.os.tag != .windows and target.result.os.tag != .linux) return;
+    const all = b.step("examples", "Compile every application example");
+    const tests = b.step("test-examples", "Run the headless view tests inside the application examples");
+    b.top_level_steps.get("test").?.step.dependOn(tests);
+    var imports: [app_example_imports.len + 1]std.Build.Module.Import = undefined;
+    for (app_example_imports, 0..) |name, index| imports[index] = .{ .name = name, .module = b.modules.get(name) orelse @panic(name) };
+    const webview = b.modules.get("ziggurat_webview");
+    for (app_examples) |example| {
+        var count: usize = app_example_imports.len;
+        if (example.web) {
+            imports[count] = .{ .name = "ziggurat_webview", .module = webview orelse continue };
+            count += 1;
+        }
+        const exe = addExample(b, example.name, example.path, target, optimize, b.allocator.dupe(std.Build.Module.Import, imports[0..count]) catch @panic("OOM"));
+        all.dependOn(&exe.step);
+        const example_tests = b.addTest(.{ .name = b.fmt("example-{s}-test", .{example.name}), .root_module = exe.root_module });
+        b.top_level_steps.get("check").?.step.dependOn(&example_tests.step);
+        tests.dependOn(&b.addRunArtifact(example_tests).step);
     }
 }
 
@@ -2454,7 +2577,7 @@ fn sourcePath(b: *std.Build, path: []const u8) std.Build.LazyPath {
     return if (std.fs.path.isAbsolute(path)) .{ .cwd_relative = path } else b.path(path);
 }
 
-fn addExample(b: *std.Build, name: []const u8, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) void {
+fn addExample(b: *std.Build, name: []const u8, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) *std.Build.Step.Compile {
     const exe = b.addExecutable(.{
         .name = name,
         .root_module = b.createModule(.{
@@ -2471,6 +2594,8 @@ fn addExample(b: *std.Build, name: []const u8, path: []const u8, target: std.Bui
     run.step.dependOn(b.getInstallStep());
     if (b.args) |args| run.addArgs(args);
     b.step(b.fmt("run-{s}", .{name}), b.fmt("Run {s}", .{name})).dependOn(&run.step);
+    b.step(b.fmt("example-{s}", .{name}), b.fmt("Compile and install only {s}", .{name})).dependOn(&b.addInstallArtifact(exe, .{}).step);
+    return exe;
 }
 
 fn addLinuxPointerCoreSmoke(b: *std.Build, check: *std.Build.Step, core: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {

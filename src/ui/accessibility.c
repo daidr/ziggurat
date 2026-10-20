@@ -31,7 +31,7 @@
 #define MULTIPLE 128
 #define EXPANDABLE 256
 #define EXPANDED 512
-enum { ROLE_WINDOW, ROLE_GROUP, ROLE_BUTTON, ROLE_TEXT, ROLE_TEXT_BOX, ROLE_CHECKBOX, ROLE_RADIO, ROLE_SWITCH, ROLE_PROGRESS, ROLE_RADIO_GROUP, ROLE_SLIDER, ROLE_STEPPER, ROLE_LIST, ROLE_TAB_LIST, ROLE_TAB, ROLE_TOOLBAR, ROLE_SPLITTER, ROLE_LINK, ROLE_DISCLOSURE, ROLE_METER, ROLE_NAVIGATION, ROLE_LIST_BOX, ROLE_LIST_ITEM, ROLE_COMBO_BOX, ROLE_TOOLTIP, ROLE_STATUS, ROLE_SEARCH, ROLE_IMAGE, ROLE_TREE, ROLE_TREE_ITEM, ROLE_TABLE, ROLE_TABLE_HEADER, ROLE_COLUMN_HEADER, ROLE_TABLE_ROW, ROLE_TOKEN_FIELD, ROLE_TOKEN };
+enum { ROLE_WINDOW, ROLE_GROUP, ROLE_BUTTON, ROLE_TEXT, ROLE_TEXT_BOX, ROLE_CHECKBOX, ROLE_RADIO, ROLE_SWITCH, ROLE_PROGRESS, ROLE_RADIO_GROUP, ROLE_SLIDER, ROLE_STEPPER, ROLE_LIST, ROLE_TAB_LIST, ROLE_TAB, ROLE_TOOLBAR, ROLE_SPLITTER, ROLE_LINK, ROLE_DISCLOSURE, ROLE_METER, ROLE_NAVIGATION, ROLE_LIST_BOX, ROLE_LIST_ITEM, ROLE_COMBO_BOX, ROLE_TOOLTIP, ROLE_STATUS, ROLE_SEARCH, ROLE_IMAGE, ROLE_TREE, ROLE_TREE_ITEM, ROLE_TABLE, ROLE_TABLE_HEADER, ROLE_COLUMN_HEADER, ROLE_TABLE_ROW, ROLE_TOKEN_FIELD, ROLE_TOKEN, ROLE_POPUP, ROLE_CALENDAR, ROLE_COLOR_WELL };
 enum { PATTERN_INVOKE = 1, PATTERN_VALUE = 2, PATTERN_TEXT = 4, PATTERN_TOGGLE = 8, PATTERN_SELECTION_ITEM = 16, PATTERN_SELECTION = 32, PATTERN_RANGE_VALUE = 64, PATTERN_COLLECTION = 128, PATTERN_EXPAND_COLLAPSE = 256 };
 
 typedef struct Node {
@@ -212,19 +212,24 @@ static BOOL toggle_role(uint32_t role) { return role == ROLE_CHECKBOX || role ==
    chooser container. Trees and tables may allow several (MULTIPLE). */
 static BOOL item_role(uint32_t role) { return role == ROLE_RADIO || role == ROLE_TAB || role == ROLE_LIST_ITEM || role == ROLE_TREE_ITEM || role == ROLE_TABLE_ROW; }
 static BOOL chooser_role(uint32_t role) { return role == ROLE_RADIO_GROUP || role == ROLE_TAB_LIST || role == ROLE_LIST_BOX || role == ROLE_TREE || role == ROLE_TABLE; }
-static BOOL invoke_role(uint32_t role) { return role == ROLE_BUTTON || role == ROLE_LINK || role == ROLE_COLUMN_HEADER; }
-/* A combo box expands and collapses its list like a disclosure. */
-static BOOL expander_role(uint32_t role) { return role == ROLE_DISCLOSURE || role == ROLE_COMBO_BOX; }
+static BOOL invoke_role(uint32_t role) { return role == ROLE_BUTTON || role == ROLE_LINK || role == ROLE_COLUMN_HEADER || role == ROLE_COLOR_WELL; }
+/* A combo box expands and collapses its list like a disclosure, and a
+   color well its picker. */
+static BOOL expander_role(uint32_t role) { return role == ROLE_DISCLOSURE || role == ROLE_COMBO_BOX || role == ROLE_COLOR_WELL; }
 static BOOL actionable(uint32_t role) { return invoke_role(role) || item_role(role) || toggle_role(role) || expander_role(role); }
 /* Progress and meters report a value no client may set. */
 static BOOL fixed_range(uint32_t role) { return role == ROLE_PROGRESS || role == ROLE_METER; }
 static BOOL range_role(uint32_t role) { return fixed_range(role) || role == ROLE_SLIDER || role == ROLE_STEPPER || role == ROLE_SPLITTER; }
+/* A progress bar with equal range bounds is indeterminate and has no value. */
+static BOOL has_range(const Node *n) { return range_role(n->role) && !(n->role == ROLE_PROGRESS && n->range_minimum == n->range_maximum); }
 /* Tree items and table rows take ItemRequest codes (widgets.zig) as value
    requests: deselect 0, add 1, collapse 2, expand 3. */
 static BOOL row_request_role(uint32_t role) { return role == ROLE_TREE_ITEM || role == ROLE_TABLE_ROW; }
 static BOOL row_request(double number) { return number == 0 || number == 1 || number == 2 || number == 3; }
-static BOOL focusable(uint32_t role) { return actionable(role) || role == ROLE_TOKEN || role == ROLE_TEXT_BOX || role == ROLE_SLIDER || role == ROLE_STEPPER || role == ROLE_SPLITTER || role == ROLE_LIST; }
+static BOOL focusable(uint32_t role) { return actionable(role) || role == ROLE_TOKEN || role == ROLE_TEXT_BOX || role == ROLE_SLIDER || role == ROLE_STEPPER || role == ROLE_SPLITTER || role == ROLE_LIST || role == ROLE_CALENDAR; }
 static uint32_t patterns_for_role(uint32_t role) {
+    /* A color well opens its picker and reports its color as a value. */
+    if (role == ROLE_COLOR_WELL) return PATTERN_INVOKE | PATTERN_EXPAND_COLLAPSE | PATTERN_VALUE;
     if (invoke_role(role)) return PATTERN_INVOKE;
     if (role == ROLE_DISCLOSURE) return PATTERN_EXPAND_COLLAPSE;
     if (role == ROLE_TREE_ITEM) return PATTERN_SELECTION_ITEM | PATTERN_EXPAND_COLLAPSE;
@@ -441,7 +446,7 @@ static HRESULT STDMETHODCALLTYPE simple_pattern(IRawElementProviderSimple *iface
     if (id == UIA_TogglePatternId && toggle_role(n.role)) *out = (IUnknown *)&p->toggle;
     if (id == UIA_SelectionItemPatternId && item_role(n.role)) *out = (IUnknown *)&p->selection_item;
     if (id == UIA_SelectionPatternId && chooser_role(n.role)) *out = (IUnknown *)&p->selection;
-    if (id == UIA_RangeValuePatternId && range_role(n.role)) *out = (IUnknown *)&p->range_value;
+    if (id == UIA_RangeValuePatternId && has_range(&n)) *out = (IUnknown *)&p->range_value;
     if (*out) provider_add(p);
     return S_OK;
 }
@@ -501,6 +506,9 @@ static int control_type(uint32_t role) {
         case ROLE_TABLE_ROW: return UIA_DataItemControlTypeId;
         case ROLE_TOKEN_FIELD: return UIA_ListControlTypeId;
         case ROLE_TOKEN: return UIA_ListItemControlTypeId;
+        case ROLE_POPUP: return UIA_PaneControlTypeId;
+        case ROLE_CALENDAR: return UIA_CalendarControlTypeId;
+        case ROLE_COLOR_WELL: return UIA_ButtonControlTypeId;
         default: return UIA_EditControlTypeId;
     }
 }
@@ -531,9 +539,9 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
         case UIA_ControlTypePropertyId: out->vt = VT_I4; out->lVal = control_type(n->role); break;
         case UIA_LocalizedControlTypePropertyId:
             /* A meter shares the progress bar control type but is not progress. */
-            if (n->role == ROLE_METER || n->role == ROLE_STATUS || n->role == ROLE_TOKEN_FIELD || n->role == ROLE_TOKEN) {
+            if (n->role == ROLE_METER || n->role == ROLE_STATUS || n->role == ROLE_TOKEN_FIELD || n->role == ROLE_TOKEN || n->role == ROLE_POPUP || n->role == ROLE_COLOR_WELL) {
                 out->vt = VT_BSTR;
-                out->bstrVal = SysAllocString(n->role == ROLE_METER ? L"meter" : n->role == ROLE_STATUS ? L"status" : n->role == ROLE_TOKEN ? L"token" : L"token field");
+                out->bstrVal = SysAllocString(n->role == ROLE_METER ? L"meter" : n->role == ROLE_STATUS ? L"status" : n->role == ROLE_TOKEN ? L"token" : n->role == ROLE_POPUP ? L"popup" : n->role == ROLE_COLOR_WELL ? L"color well" : L"token field");
                 if (!out->bstrVal) hr = E_OUTOFMEMORY;
             }
             break;
@@ -555,7 +563,7 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
         case UIA_IsInvokePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = invoke_role(n->role) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsExpandCollapsePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = expander_role(n->role) || n->role == ROLE_TREE_ITEM ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_ExpandCollapseExpandCollapseStatePropertyId: out->vt = VT_I4; out->lVal = expand_state(n); break;
-        case UIA_IsValuePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_TEXT_BOX || n->role == ROLE_COMBO_BOX ? VARIANT_TRUE : VARIANT_FALSE; break;
+        case UIA_IsValuePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_TEXT_BOX || n->role == ROLE_COMBO_BOX || n->role == ROLE_COLOR_WELL ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsTextPatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_TEXT_BOX ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_ValueIsReadOnlyPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & READ_ONLY) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsTogglePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = toggle_role(n->role) ? VARIANT_TRUE : VARIANT_FALSE; break;
@@ -566,7 +574,7 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
         case UIA_IsSelectionPattern2AvailablePropertyId: case UIA_IsItemContainerPatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_LIST ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_SelectionCanSelectMultiplePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_LIST || (chooser_role(n->role) && (n->flags & MULTIPLE)) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_SelectionIsSelectionRequiredPropertyId: out->vt = VT_BOOL; out->boolVal = VARIANT_FALSE; break;
-        case UIA_IsRangeValuePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = range_role(n->role) ? VARIANT_TRUE : VARIANT_FALSE; break;
+        case UIA_IsRangeValuePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = has_range(n) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_RangeValueIsReadOnlyPropertyId: out->vt = VT_BOOL; out->boolVal = fixed_range(n->role) || (n->flags & READ_ONLY) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_RangeValueValuePropertyId: out->vt = VT_R8; out->dblVal = n->range_value; break;
         case UIA_RangeValueMinimumPropertyId: out->vt = VT_R8; out->dblVal = n->range_minimum; break;

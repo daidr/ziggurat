@@ -46,10 +46,10 @@
 | U04 | 部分完成（Windows/Linux） | 虚拟 list、table、tree/outline、grid view | U04.1 可变行高列表/可见回放/稳定 ID 锚点已实现；U04.2 声明式视图的单选列表框（非虚拟）已实现；U04.3/U04.4 声明式视图的非虚拟 table（共享列宽、排序指示、单/多选）与 tree（展开折叠、层级键盘）已实现；虚拟 table/tree、列宽拖动/冻结/重排与 grid view 继续待实现；基础依赖 U02.1/T01 |
 | U05 | 部分完成（U05.1 只读组合框、建议列表与搜索区域；U05.2 可编辑组合框与 token field） | combobox、autocomplete、search、token field | popup 所有权、输入法、筛选取消、键盘与焦点恢复；可编辑组合框、输入法组合期间的建议处理与 token field 已在声明式视图实现，读屏实际播报与 Linux 可访问性继续；依赖 U02.2/T02/W02 |
 | U06 | 部分完成（U06.1 声明式视图的 tabs/toolbar/比例 split；U06.2 tooltip、toast 与一次性唤醒） | tabs、sidebar、toolbar、split、tooltip、toast | 生命周期、遮挡/命中、延迟唤醒撤销与可访问性；split 的 DIP 偏好、RTL、折叠与 sidebar、toast 动画继续；基础依赖 U02.1/G02，popup scope另依赖U02.2 |
-| U07 | 待实现 | calendar、date/time、color picker | locale/范围/键盘/可访问性；依赖 L01/U05 |
+| U07 | 部分完成（U07.1 声明式视图的日历、日期/时间/数字输入、颜色选择器与颜色按钮、通用浮层，Windows UIA） | calendar、date/time、color picker | locale/范围/键盘/可访问性已在无窗口测试中验证，见[选择器](pickers.md)；颜色方块已可按住拖动；读屏实际播报与 Linux 可访问性继续；依赖 L01/U05 |
 | U08 | 已完成（U08.1 link、badge、segmented、disclosure；U08.2 meter、rating、breadcrumbs、accordion；U08.3 avatar 与导航按钮，Windows UIA） | badge、avatar、link、meter、rating、segmented、accordion、breadcrumbs 与导航按钮 | 稳定身份、分组/展开/链接动作、键盘和语义；不把静态文字/矩形算成完整控件；Linux AT-SPI 不在本行范围；基础依赖 U02.1/G01 |
-| U09 | 待实现 | chart 的数值/分类/时间尺度、axes、marks、stacking 与 selection | 极值/空数据/大数据、按需绘制、布局与键盘/辅助说明；依赖 G01/T01/L01 |
-| U10 | 部分完成（U10.1 声明式视图的 field/fieldset、说明与验证状态、禁用继承） | form、field/fieldset、验证提示与自定义控件契约 | 标签关联、禁用继承、错误语义、测量/绘制/输入/快照事务；form 提交与焦点跳到首个错误、自定义控件契约继续；依赖 U02.1/U03.2/T02/T06 |
+| U09 | 部分完成 | chart 的数值/分类/时间尺度、axes、marks、stacking 与 selection | 已有纯 Zig `ziggurat_chart`（尺度/刻度、布局、路径、堆叠、降采样、图例、选择状态）与 `ziggurat_chart_view`（视图嵌入、绘制后准备的覆盖蒙版），见[图表](chart.md)，悬停与键盘选择经视图嵌入输入接口接入 |
+| U10 | 部分完成（U10.1 声明式视图的 field/fieldset、说明与验证状态、禁用继承；U10.2 嵌入叶子的可聚焦、指针/按键输入与播报，文本节点字体变体） | form、field/fieldset、验证提示与自定义控件契约 | 标签关联、禁用继承、错误语义、测量/绘制/输入/快照事务；嵌入叶子已能登记 Tab 停靠、接收局部坐标指针与焦点按键并礼貌播报，文本节点可按 `Style.font` 选择字号/字重/斜体/等宽并在 GDI/D3D11/Cairo 绘制；form 提交与焦点跳到首个错误、叶子的指针捕获与拖动继续；依赖 U02.1/U03.2/T02/T06 |
 | G01 | 部分完成 | 圆角、描边、渐变、阴影、透明度、图片与 SVG/path | RGBA/圆角/内描边、图片驻留/同尺寸更新、严格渐变、圆角阴影/path、有界分组和独立软件/GPU离屏已验收；完整 SVG 继续实施；三后端同一语义与明确资源上限 |
 | G02 | 进行中 | theme、动画时间线、spring、变换与局部失效 | 显式动画/有限重复、基础控件主题、Windows/Linux单次唤醒/局部失效、仿射栅格scope/同帧坐标、通用GPU精度预检/整帧后备、共享软件采样及单Document保留坐标桥已验；过滤变换性能、折叠/投影编辑器输入与更广失效复用继续；依赖 G01 |
 | G03 | 进行中 | 共享 GPU 资源、文本/图片缓存与多窗口性能 | 显式DeviceDomain/纹理寿命与预算先行；按测量决定缓存容量与淘汰；设备丢失、跨窗口关闭和显存/内存基线；依赖 G01/V02 |
@@ -249,13 +249,13 @@ P01 的 Linux HTTPS 本地来源分两片实施。首片由宿主提供已运行
 | ID | 状态 | 范围 | 验收与依赖 |
 | --- | --- | --- | --- |
 | L01 | 部分完成 | catalog、locale、ICU message/plural、数字/日期与 RTL | 已有纯 Zig `ziggurat_i18n`：编译期/加载期校验、无分配格式化、locale fallback 与协商、约 50 种语言复数规则、数字/日期、pseudolocale 与方向查询，见[本地化](i18n.md)；控件双向布局、时区数据、货币数据与完整 CLDR 覆盖待实现 |
-| A01 | 部分完成 | 音频解码、内存音效与流式播放 | 已有 `ziggurat_audio`：WAV 与纯 Zig FLAC、内存音效与流式播放、seek/音量/pan/速度/循环与区间循环、混音线程无分配、WASAPI 与 PulseAudio/ALSA、默认设备切换重开、空闲关闭与无设备静音走时，见[音频](audio.md)；MP3 与 Ogg Vorbis 待实现 |
+| A01 | 部分完成 | 音频解码、内存音效与流式播放 | 已有 `ziggurat_audio`：WAV、纯 Zig FLAC、MP3（minimp3）与 Ogg Vorbis（stb_vorbis）、内存音效与流式播放、seek/音量/pan/速度/循环与区间循环、混音线程无分配、WASAPI 与 PulseAudio/ALSA、默认设备切换重开、空闲关闭与无设备静音走时，见[音频](audio.md)；CI 主机无声卡，真实设备出声尚待本地验证 |
 | E01 | 已完成 | 插件注册与显式初始化/关闭依赖 | 固定容量应用级依赖图、全图预检、失败逆序回滚、取消/重入/线程；Windows/Linux 运行及独立 review 通过 |
 | E02 | 首片完成 | Fetch 与 WebSocket | 显式 transport/worker、取消/背压/大小限制、TLS/断线、类型化客户端；依赖 E01/I01 |
 | E03 | 首片完成 | SQLite | 已有可选 `ziggurat_sqlite`：脚本拉取并校验固定 amalgamation，连接、预处理语句、类型化绑定、借用行读取、事务/savepoint、`user_version` 迁移、`interrupt` 取消与 `ui_thread` 主线程拒绝，`test-sqlite` 在 Windows/Linux CI 运行，见[SQLite](sqlite.md)；在线备份、增量 BLOB I/O、自定义函数与加密待实现 |
 | E04 | 待实现 | PTY 与终端视图 | 子进程/终端解析、输入/resize/流控/退出和回收；依赖 E01/T01/G01 |
 | E05 | 待实现 | game loop、camera、gamepad 与材质扩展 | 显式启停时钟、输入热插拔、帧/功耗预算与平台能力；依赖 E01/G02 |
-| E06 | 待实现 | backdrop blur、glass 与滚动边缘合成 | 按 compositor 能力、reduce transparency、高对比/后备、离屏/设备丢失与显存预算；依赖 E01/G01/G02/W03 |
+| E06 | 首片完成 | backdrop blur、glass 与滚动边缘合成 | 已有 `Frame.backdropEffect`：均匀/渐变模糊、玻璃（regular/clear、tint、颗粒、弧面折射、亮度映射、边光）与柔和/硬滚动边缘，在 GDI/Cairo 软件平面采样，含效果的帧在 D3D11 下整帧软件回放；显式工作区预算与超限后备、减少透明度/高对比不透明后备；另有 29 种由显式相位驱动的加载动画与视图层 `Style.material`/`Style.edges`/`loadingIndicator`，见[背景效果与加载动画](backdrop-effects.md)；GPU 背景采样与按压动效待实现 |
 
 E04 继续分项实施，均为待实现，不由PTY或静态终端绘制单独代表完成：
 

@@ -309,6 +309,131 @@ pub fn formatInt(writer: *std.Io.Writer, locale: *const Locale, value: i64, opti
     try writeDigits(writer, symbolsFor(locale), &digits, options);
 }
 
+pub const ParseError = error{InvalidNumber};
+
+/// Reads a decimal number as a person types it in `locale`: an optional
+/// sign (the locale's minus, ASCII `-` or `+`, or U+2212), digits in ASCII
+/// or the locale's digit set, group separators only before the decimal
+/// separator, and the locale's decimal separator. A `.` is a decimal
+/// separator too where the locale does not group with it. Surrounding
+/// spaces are ignored; anything else, or no digit, is `InvalidNumber`.
+pub fn parseFloat(locale: *const Locale, text: []const u8) ParseError!f64 {
+    const symbols = symbolsFor(locale);
+    var ascii: [max_parse_length]u8 = undefined;
+    var len: usize = 0;
+    var rest = trimSpaces(text);
+    var digits: usize = 0;
+    var seen_decimal = false;
+    var signed = false;
+    while (rest.len > 0) {
+        if (!signed and len == 0 and digits == 0) {
+            if (skipMinus(symbols, rest)) |after| {
+                ascii[0] = '-';
+                len = 1;
+                rest = after;
+                signed = true;
+                continue;
+            }
+            if (rest[0] == '+') {
+                rest = rest[1..];
+                signed = true;
+                continue;
+            }
+        }
+        if (len == ascii.len) return error.InvalidNumber;
+        if (std.mem.startsWith(u8, rest, symbols.decimal) or (rest[0] == '.' and !std.mem.eql(u8, symbols.group, "."))) {
+            if (seen_decimal) return error.InvalidNumber;
+            seen_decimal = true;
+            ascii[len] = '.';
+            len += 1;
+            rest = rest[if (std.mem.startsWith(u8, rest, symbols.decimal)) symbols.decimal.len else 1..];
+            continue;
+        }
+        if (!seen_decimal and digits > 0) if (skipGroup(symbols, rest)) |after| {
+            rest = after;
+            continue;
+        };
+        const length = std.unicode.utf8ByteSequenceLength(rest[0]) catch return error.InvalidNumber;
+        if (length > rest.len) return error.InvalidNumber;
+        const codepoint = std.unicode.utf8Decode(rest[0..length]) catch return error.InvalidNumber;
+        const digit: u8 = if (codepoint >= '0' and codepoint <= '9')
+            @intCast(codepoint - '0')
+        else if (codepoint >= symbols.zero and codepoint <= symbols.zero + 9)
+            @intCast(codepoint - symbols.zero)
+        else
+            return error.InvalidNumber;
+        ascii[len] = '0' + digit;
+        len += 1;
+        digits += 1;
+        rest = rest[length..];
+    }
+    if (digits == 0) return error.InvalidNumber;
+    return std.fmt.parseFloat(f64, ascii[0..len]) catch error.InvalidNumber;
+}
+/// Longest number `parseFloat` reads, in ASCII digits and signs.
+pub const max_parse_length = 64;
+
+fn trimSpaces(text: []const u8) []const u8 {
+    var rest = text;
+    while (true) {
+        const before = rest.len;
+        for ([_][]const u8{ " ", "\t", "\u{00A0}", "\u{202F}" }) |space| {
+            while (std.mem.startsWith(u8, rest, space)) rest = rest[space.len..];
+            while (std.mem.endsWith(u8, rest, space)) rest = rest[0 .. rest.len - space.len];
+        }
+        if (rest.len == before) return rest;
+    }
+}
+fn skipMinus(symbols: *const Symbols, text: []const u8) ?[]const u8 {
+    var rest = text;
+    // Direction marks around a minus are invisible to the person typing.
+    for ([_][]const u8{ "\u{200E}", "\u{200F}", "\u{061C}" }) |mark| {
+        if (std.mem.startsWith(u8, rest, mark)) rest = rest[mark.len..];
+    }
+    for ([_][]const u8{ symbols.minus, "-", "\u{2212}" }) |minus| {
+        if (std.mem.startsWith(u8, rest, minus)) return rest[minus.len..];
+    }
+    // A locale minus may itself start with a direction mark.
+    if (std.mem.startsWith(u8, text, symbols.minus)) return text[symbols.minus.len..];
+    return null;
+}
+fn skipGroup(symbols: *const Symbols, text: []const u8) ?[]const u8 {
+    if (std.mem.startsWith(u8, text, symbols.group)) return text[symbols.group.len..];
+    // Locales grouping with a space accept any of the spaces people type.
+    const spaced = std.mem.eql(u8, symbols.group, "\u{00A0}") or std.mem.eql(u8, symbols.group, "\u{202F}");
+    if (spaced) for ([_][]const u8{ " ", "\u{00A0}", "\u{202F}" }) |space| {
+        if (std.mem.startsWith(u8, text, space)) return text[space.len..];
+    };
+    return null;
+}
+
+test "parsing numbers as typed in a locale" {
+    const cases = .{
+        .{ "en", "1,234.5", 1234.5 },
+        .{ "en", " -42 ", -42.0 },
+        .{ "en", "+3", 3.0 },
+        .{ "en", ".5", 0.5 },
+        .{ "de", "1.234,5", 1234.5 },
+        .{ "de", "-0,25", -0.25 },
+        .{ "fr", "1\u{202F}234,5", 1234.5 },
+        .{ "fr", "1 234.5", 1234.5 },
+        .{ "sv", "\u{2212}5", -5.0 },
+        .{ "ar-EG", "١٬٢٣٤٫٥", 1234.5 },
+        .{ "ar-EG", "12.5", 12.5 },
+        .{ "he", "\u{200E}-7", -7.0 },
+    };
+    inline for (cases) |case| {
+        const locale = try Locale.parse(case[0]);
+        try std.testing.expectEqual(@as(f64, case[2]), try parseFloat(&locale, case[1]));
+    }
+    const en = try Locale.parse("en");
+    for ([_][]const u8{ "", " ", "-", "1.2.3", "12a", "1,2.3,4", "--1", "1-" }) |bad| {
+        try std.testing.expectError(error.InvalidNumber, parseFloat(&en, bad));
+    }
+    const de = try Locale.parse("de");
+    try std.testing.expectError(error.InvalidNumber, parseFloat(&de, "1,2,3"));
+}
+
 fn expectFloat(tag: []const u8, value: f64, options: Options, expected: []const u8) !void {
     const locale = try Locale.parse(tag);
     var buffer: [128]u8 = undefined;

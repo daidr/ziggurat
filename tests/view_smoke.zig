@@ -303,8 +303,10 @@ fn run(allocator: std.mem.Allocator) !void {
     try std.testing.expect(host.context.window == null);
 }
 
-/// A tree, a sortable table and a token field driven by native presses.
+/// A tree, a sortable table, a token field and an interactive embedded leaf
+/// driven by native presses.
 const Collections = struct {
+    pressed: ?view.Point = null,
     open: bool = false,
     tree_storage: [2]u64 = undefined,
     tree: view.Selection = undefined,
@@ -343,7 +345,24 @@ const Collections = struct {
             } else index += 1;
         }
         try v.end();
+        try v.embed(.{ .context = self, .measure = Leaf.measure, .paint = Leaf.paint, .focusable = true, .input = Leaf.input }, .{ .key = 9, .name = "Chart" });
     }
+    const Leaf = struct {
+        fn measure(_: *anyopaque, _: view.Theme) view.layout.Measurement {
+            return .{ .minimum = .{ .width = 80, .height = 40 }, .preferred = .{ .width = 80, .height = 40 } };
+        }
+        fn paint(_: *anyopaque, frame: *ui.Frame, _: u64, bounds: view.Rect) anyerror!void {
+            frame.rect(bounds, 0x336699);
+        }
+        fn input(ptr: *anyopaque, _: u64, event: view.EmbedInput) bool {
+            const self: *Collections = @ptrCast(@alignCast(ptr));
+            switch (event) {
+                .pointer_down => |press| self.pressed = press.position,
+                else => return false,
+            }
+            return true;
+        }
+    };
     const names = [_][]const u8{ "alpha.txt", "beta.txt", "gamma.txt" };
 };
 
@@ -394,6 +413,15 @@ fn runCollections(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(usize, 2), state.tag_count);
     try paint(&host, window);
     try std.testing.expectEqualStrings("blue", (try find(&host, .token, 1)).text);
+
+    // A consumed press reaches the leaf in local coordinates and focuses it;
+    // an announcement paints as a status.
+    const chart = try find(&host, .embed, 0);
+    Native.click(window, chart.bounds);
+    try std.testing.expectApproxEqAbs(chart.bounds.width / 2, state.pressed.?.x, 0.5);
+    try std.testing.expectEqual(@as(?u64, chart.id), host.context.input_state.focused);
+    host.announce("Chart selected");
+    try paint(&host, window);
 
     _ = try window.destroy();
     try app.dispatch();
@@ -462,5 +490,5 @@ pub fn main() !void {
         try @import("view_uia.zig").runCollections(gpa.allocator());
     }
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, timed toast expiry and keyed identity passed\n", .{});
+    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, embedded leaf input, timed toast expiry and keyed identity passed\n", .{});
 }

@@ -21,6 +21,8 @@ zig build run-web-counter -Dwebview=true
 zig build run-rectangular-pages -Dwebview=true
 ```
 
+应用示例（hello、todo、notes、gallery、菜单与托盘、剪贴板、拖放、代码编辑器、实时图表、音频、全局快捷键、动画、i18n、混合应用等）见 [docs/examples.md](docs/examples.md)，`zig build run-<名称>` 运行。
+
 安装产物在 `zig-out/bin/`。WebView EXE 需要同目录下的 `WebView2Loader.dll` 和系统 Runtime；构建同时安装 SDK 许可文件，不自动安装 Runtime。
 
 Linux 需要 GTK3、Pango/Cairo 开发包和 pkg-config：
@@ -55,7 +57,7 @@ WSL 应将 Zig 本地缓存放在 Linux 文件系统，见 `scripts/linux-check.
 | `ziggurat_assets` | 显式磁盘快照、目录通知、构建期内容寻址嵌入 | 快照/嵌入可移植；目录通知为 Windows |
 | `ziggurat_system` | 系统菜单、托盘、文本剪贴板、异步选择器、全局快捷键、通知区通知、显式 Shell worker | 菜单、托盘、选择器、通知为 Windows/Linux（Linux 托盘与通知需会话总线，全局快捷键仅 X11）；剪贴板与文件图标为 Windows；executable 启动为 Windows/Linux |
 | `ziggurat_update` | Ed25519 元数据、限长流校验、ZIP 清单和版本目录发布 | 纯 Zig + OS 文件系统 |
-| `ziggurat_audio` | [音频](docs/audio.md)：内存音效、流式播放、Zig 混音（音量/声像/变速/区间循环/淡入淡出）、WAV 与 FLAC 解码、结束与输出变化经 `App.post` 回主线程 | Windows WASAPI；Linux PulseAudio/PipeWire 或 ALSA（运行时加载）；无设备时按时静音播放并报告原因 |
+| `ziggurat_audio` | [音频](docs/audio.md)：内存音效、流式播放、Zig 混音（音量/声像/变速/区间循环/淡入淡出）、WAV/FLAC/MP3/Ogg Vorbis 解码、结束与输出变化经 `App.post` 回主线程 | Windows WASAPI；Linux PulseAudio/PipeWire 或 ALSA（运行时加载）；无设备时按时静音播放并报告原因 |
 | `ziggurat_net` | [Fetch 与 WebSocket 客户端](docs/net.md)：显式 worker、取消、发送队列与读取暂停背压、大小上限、JSON 解码 | 纯 Zig；HTTPS/WSS 复用调用者 `std.http.Client` 的 TLS、系统 CA 与代理 |
 | `ziggurat_extensions` | 显式插件依赖、初始化、失败回滚与逆序关闭 | 纯 Zig、固定容量，无隐式服务或线程 |
 | `ziggurat_text_layout` | 独立拥有的系统 shaping、字素/坐标、双向/换行、caret 与选区查询 | DirectWrite + 系统 ICU；Pango；可选导入 |
@@ -73,6 +75,11 @@ WSL 应将 Zig 本地缓存放在 Linux 文件系统，见 `scripts/linux-check.
 | `ziggurat_document_diff_accessibility` | 可编辑 Diff 双源全文、真实删除行几何与同根有界辅助控件 | 可选 Windows UIA；复用原 Document/Adapter 与唯一 Diff 协调者 |
 | `ziggurat_view` | 从应用状态构建视图树、弹性布局、绑定值的控件与即时输入交付 | 单向依赖 UI；调用者提供固定存储，不分配 |
 | `ziggurat_view_text` | 声明式视图中的可编辑文本字段，包装应用持有的 Document Field | 依赖视图与文档编辑器；准备在绘制后的投递任务中进行 |
+| `ziggurat_view_pickers` | 声明式视图中的[选择器](docs/pickers.md)：日历、日期/时间/数字输入、颜色选择器与颜色按钮，按 locale 格式化与解析 | 依赖视图与本地化；状态由应用持有，不分配 |
+| `ziggurat_chart` | [图表](docs/chart.md)的数值/分类/时间尺度与刻度、绘图区与坐标轴布局、标记位置、折线/面积/扇形路径、堆叠、保极值降采样、图例与选择状态 | 纯 Zig；结果写入调用者存储，不分配 |
+| `ziggurat_chart_view` | 声明式视图中的图表：网格、柱、点、规则线、标签、图例与覆盖蒙版绘制的折线/面积/扇形 | 依赖视图与矢量；蒙版在绘制后的投递任务中准备，未变化时回放不分配 |
+| `ziggurat_terminal` | [终端](docs/terminal.md)：Linux PTY 与 Windows ConPTY 子进程、显式读写线程与背压、VT/ANSI 解析、带 scrollback 的屏幕（SGR 256 色/真彩、备用屏、滚动区、宽字符）、按键/粘贴/鼠标编码、选择与链接识别；OSC 52 默认拒绝 | 仅依赖核心；输出经 `App.post` 回主线程 |
+| `ziggurat_terminal_view` | 声明式视图中的终端：按单元格绘制、作为文本字段接收键盘与输入法、选择复制粘贴、鼠标上报、滚动 scrollback、Ctrl+点击链接 | 依赖视图；改尺寸与注册在绘制后的投递任务中进行，未变化时重绘不分配 |
 | `ziggurat_virtual_list` | 稳定行 ID、可变高度索引、滚动锚点与有界可见回放 | 单向依赖 UI；完整虚拟控件集继续按计划实施 |
 | `ziggurat_images` | 有界 PNG/JPEG/BMP/首帧 GIF、可选 WebP、EXIF 与独占像素交接 | 系统 WIC/GdkPixbuf；有界 LZW；可选固定源码 WebP |
 | `ziggurat_image_drawing` | 不可变预乘像素、裁切与 mip 准备；显式上传、同尺寸更新和有界驻留 | 独立依赖图片与绘制资源；GDI/Cairo/D2D 回放 |
@@ -117,7 +124,7 @@ zig build update-tool -Doptimize=ReleaseSafe
 
 `test` 使用测试后端验证核心不变量，并运行纯 Zig 布局、编辑、协议、资源、打包和更新测试；不创建原生窗口。`check` 编译普通目标后端探针与选中功能的所有示例/检查。原生 smoke 使用真实系统 API；多数窗口隐藏，GPU 就绪检查使用屏幕外窗口，文件选择测试会短暂启动并取消系统对话框。它们不证明视觉质量、真实输入法语言引擎输入或文件选择成功路径。WebView smoke 需要已安装 Runtime。
 
-Linux 上使用 `zig build test check smoke-linux`，包括 GTK 生命周期、绘制、Unicode 输入、调度和外部原生销毁；X11 下另以 `GDK_SCALE=2` 验证实际 2x。CI 定义位于 `.github/workflows/ci.yml`，覆盖 Windows/Linux；WebView 运行检查按需启用。本轮已验证配置和本地等价命令，远端 workflow 尚未执行。
+Linux 上使用 `zig build test check smoke-linux`，包括 GTK 生命周期、绘制、Unicode 输入、调度和外部原生销毁；X11 下另以 `GDK_SCALE=2` 验证实际 2x。CI 定义位于 `.github/workflows/ci.yml`，覆盖 Windows/Linux；Linux 任务默认跑在标签为 `self-hosted, linux, x64` 的自托管 runner（需 apt，缺包时需 root 或免密 sudo，见 `scripts/ci-linux-deps.sh`），Windows 任务默认跑在 `self-hosted, windows, x64`（需 PowerShell 7、Python 3、tar 和交互式桌面会话；WebView 检查另需 Node.js 与 WebView2 Runtime）；Zig 缓存在 runner 用户目录跨任务复用；仓库变量 `LINUX_RUNS_ON` / `WINDOWS_RUNS_ON`（JSON，如 `"ubuntu-24.04"`、`"windows-2022"`）可改回托管 runner；WebView 运行检查按需启用。本轮已验证配置和本地等价命令，远端 workflow 尚未执行。
 
 Ziggurat 使用 [MIT 许可证](LICENSE)。源码包包含 LICENSE，构建安装到 `share/ziggurat/LICENSE`。打包本仓库示例时传入 `-LicensePath LICENSE`；下游应用仍显式提供自己的许可文件。签名、更新和基准工具见以下文档。
 
@@ -135,6 +142,6 @@ Ziggurat 使用 [MIT 许可证](LICENSE)。源码包包含 LICENSE，构建安�
 - [局部失效](docs/invalidation.md)
 - [构建缓存与 WSL 容量](docs/build-cache.md)
 - [共享 GPU 资源](docs/gpu-resources.md)、[GPU 离屏](docs/gpu-offscreen.md)
-- [显式控件主题](docs/theme.md)
+- [显式控件主题](docs/theme.md)、[背景效果与加载动画](docs/backdrop-effects.md)
 
 Linux 可选 WebKitGTK 使用显式 `.storage = .ephemeral`，或由宿主 worker 准备目录、同一 App 创建的持久 `Profile`。支持可信 HTML、顶层 IPC、页面与有界脚本，以及显式 custom scheme 的静态/异步响应、worker 文件快照/按需文件泵、独立矩形页面区域、可离窗停放的 PageSession 和需单独部署请求扩展的远程来源。可选 [CookieStore](docs/cookie-store.md) 直接绑定 Profile，无页面时也能执行有界 URL 查询和显式授权的写入/清 Cookie；普通页面不会自动创建它。宿主已有回环 HTTPS 服务时，可在 Profile 创建期显式冻结 `127.0.0.1` 的证书例外与直连策略，沿用 RemotePage 权限；内存/文件资源的 HTTPS 运输与更广浏览器工具继续实施。存储预算、证书例外范围及关闭边界见[Linux Profile](docs/webview-profile.md)，依赖、能力查询及实际检查见[页面策略](docs/pages.md)。

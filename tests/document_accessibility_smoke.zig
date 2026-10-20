@@ -692,10 +692,28 @@ fn primary(allocator: std.mem.Allocator) !void {
     // This caller-owned ref intentionally remains until after native cleanup.
     zda_probe_release(provider);
     provider_owned = false;
-    const after = a.resourceCounts();
-    try std.testing.expectEqual(baseline, after);
+    try std.testing.expectEqual(baseline, try settledResourceCounts(app, baseline));
     if (state.failure) |err| return err;
     std.debug.print("document accessibility: complete text, MTA snapshots, same Prepared geometry, selection posts, failed front, move, close resources=0\n", .{});
+}
+/// UI Automation can drop its last provider or range reference after the
+/// client apartment closes. With COM threading that Release is a call into
+/// this STA, so it only lands while this thread pumps messages; sleeping
+/// alone can wait forever. The App has stopped, so pump until the ledger
+/// settles; a real leak still fails once the bounded wait ends.
+fn settledResourceCounts(app: *z.App, baseline: a.ResourceCounts) !a.ResourceCounts {
+    var timer = try std.time.Timer.start();
+    while (true) {
+        try app.dispatch();
+        const current = a.resourceCounts();
+        if (std.meta.eql(baseline, current) or timer.read() >= 10 * std.time.ns_per_s) return current;
+        var message: c.MSG = undefined;
+        while (c.PeekMessageW(&message, null, 0, 0, c.PM_REMOVE) != 0) {
+            _ = c.TranslateMessage(&message);
+            _ = c.DispatchMessageW(&message);
+        }
+        _ = c.MsgWaitForMultipleObjects(0, null, 0, 10, c.QS_ALLINPUT);
+    }
 }
 fn allocationFailures(state: *State, failing: *std.testing.FailingAllocator, provider: *anyopaque) !void {
     const saved = try rects(provider);
