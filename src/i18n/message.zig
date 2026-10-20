@@ -71,6 +71,26 @@ pub fn comptimeValidate(comptime pattern: []const u8) void {
     }
 }
 
+/// How a message uses an argument.
+pub const Kind = enum { simple, number, date, time, plural, selectordinal, select };
+
+/// Told the arguments of a message and the cases of its plural,
+/// selectordinal and select arguments, in the order they appear.
+pub const Visitor = struct {
+    context: *anyopaque,
+    argument: *const fn (context: *anyopaque, name: []const u8, kind: Kind) void,
+    /// A case of argument `name`: `=0`, a plural category or a select key.
+    case: *const fn (context: *anyopaque, name: []const u8, key: []const u8) void,
+};
+
+/// Checks the syntax as `validate` does, telling `visitor` what the
+/// message holds. Tools read the parameters of messages with it.
+pub fn visit(pattern: []const u8, visitor: Visitor) Error!void {
+    if (pattern.len > max_pattern_len) return error.InvalidMessage;
+    var walker: Walker = .{ .pattern = pattern, .context = null, .visitor = &visitor };
+    try walker.message(0, null, false, false);
+}
+
 /// Formats a validated or unvalidated pattern without allocation. Syntax
 /// errors are reported before any output is written.
 pub fn format(writer: *std.Io.Writer, locale: *const Locale, pattern: []const u8, arguments: []const Arg, options: Options) Error!void {
@@ -111,6 +131,7 @@ const PluralValue = struct { value: Value, offset: i64 };
 const Walker = struct {
     pattern: []const u8,
     context: ?*const Context,
+    visitor: ?*const Visitor = null,
     position: usize = 0,
     literal_code_points: usize = 0,
 
@@ -215,6 +236,7 @@ const Walker = struct {
         self.skipSpace();
         if (self.peek() == '}') {
             self.position += 1;
+            self.tell(name, .simple);
             if (emit) try self.writeSimple(name);
             return;
         }
@@ -222,6 +244,7 @@ const Walker = struct {
         self.skipSpace();
         const kind = try self.identifier();
         self.skipSpace();
+        if (std.meta.stringToEnum(Kind, kind)) |known| if (known != .simple) self.tell(name, known);
         if (std.mem.eql(u8, kind, "number")) {
             var options: number.Options = .{};
             if (try self.styleName()) |style| {
@@ -276,6 +299,7 @@ const Walker = struct {
             var exact = false;
             var category: plural.Category = .other;
             var exact_value: i64 = 0;
+            const key_start = self.position;
             if (self.peek() == '=') {
                 self.position += 1;
                 exact = true;
@@ -285,6 +309,7 @@ const Walker = struct {
                 if (seen.contains(category)) return error.InvalidMessage;
                 seen.insert(category);
             }
+            self.tellCase(name, self.pattern[key_start..self.position]);
             self.skipSpace();
             try self.expect('{');
             const start = self.position;
@@ -318,6 +343,7 @@ const Walker = struct {
         while (self.peek() != '}') {
             if (self.peek() == null) return error.InvalidMessage;
             const key = try self.identifier();
+            self.tellCase(name, key);
             self.skipSpace();
             try self.expect('{');
             const start = self.position;
@@ -338,6 +364,14 @@ const Walker = struct {
             try self.message(depth, null, true, true);
         }
         self.position = end;
+    }
+
+    fn tell(self: *const Walker, name: []const u8, kind: Kind) void {
+        if (self.visitor) |v| v.argument(v.context, name, kind);
+    }
+
+    fn tellCase(self: *const Walker, name: []const u8, key: []const u8) void {
+        if (self.visitor) |v| v.case(v.context, name, key);
     }
 
     fn integer(self: *Walker) Error!i64 {
@@ -512,4 +546,33 @@ test "pseudolocalization and bidi isolation" {
     writer = .fixed(&buffer);
     try format(&writer, &he, "שלום {name}", &args(.{ .name = "Ana" }), .{ .isolate_arguments = false });
     try std.testing.expectEqualStrings("שלום Ana", writer.buffered());
+}
+
+test "visit tells arguments and cases in order" {
+    const Recorder = struct {
+        buffer: [256]u8 = undefined,
+        len: usize = 0,
+        fn add(self: *@This(), text: []const u8) void {
+            @memcpy(self.buffer[self.len..][0..text.len], text);
+            self.len += text.len;
+        }
+        fn argument(context: *anyopaque, name: []const u8, kind: Kind) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.add(name);
+            self.add(":");
+            self.add(@tagName(kind));
+            self.add(" ");
+        }
+        fn case(context: *anyopaque, name: []const u8, key: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.add(name);
+            self.add("=");
+            self.add(key);
+            self.add(" ");
+        }
+    };
+    var recorder: Recorder = .{};
+    try visit("{who} has {n, plural, offset:1 =0 {none} one {{t, date} #} other {{g, select, a {x} other {y}}}} '{q}'", .{ .context = &recorder, .argument = Recorder.argument, .case = Recorder.case });
+    try std.testing.expectEqualStrings("who:simple n:plural n==0 n=one t:date n=other g:select g=a g=other ", recorder.buffer[0..recorder.len]);
+    try std.testing.expectError(error.InvalidMessage, visit("{n, plural, one {x}}", .{ .context = &recorder, .argument = Recorder.argument, .case = Recorder.case }));
 }

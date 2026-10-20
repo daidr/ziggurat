@@ -1,10 +1,12 @@
 //! Uploads a release directory written by `ziggurat-update release` (or
 //! `ziggurat build --package` plus installers) to a GitHub release with the
-//! GitHub CLI. Archives, patches and installers go first, signed manifests
+//! GitHub CLI, or to an S3 bucket. Archives, patches and installers go first, signed manifests
 //! next and feed.json last, so a client that reads any uploaded index never
 //! finds it pointing at a file that is not there yet. A new release is
 //! created as a draft: installed apps see it once it is published.
 const std = @import("std");
+const s3 = @import("s3.zig");
+const console_mod = @import("console.zig");
 
 pub const Options = struct {
     directory: []const u8,
@@ -171,6 +173,69 @@ pub fn github(allocator: std.mem.Allocator, options: Options, out: *std.Io.Write
         \\
     , .{ assets.count(), options.tag, options.repository, options.tag, options.repository, if (options.latest) "" else " --latest=false" });
     try out.flush();
+}
+
+pub const S3Options = struct {
+    directory: []const u8,
+    bucket: s3.Bucket,
+    /// Where the bucket's prefix is served, ending in `/`; the manifests'
+    /// URLs must be under it.
+    url: []const u8,
+};
+
+/// Blocking: puts every file of the release directory into the bucket, in
+/// the order of `plan`, one request each, and stops at the first failure.
+/// install.sh and feed.json are served with `Cache-Control: no-cache`.
+pub fn toS3(allocator: std.mem.Allocator, options: S3Options, environment: *const std.process.EnvMap, console: *console_mod.Console) !void {
+    if (!std.mem.endsWith(u8, options.url, "/")) return error.InvalidUrl;
+    const client = try s3.Client.fromEnvironment(options.bucket, environment);
+    var dir = try std.fs.cwd().openDir(options.directory, .{ .iterate = true });
+    defer dir.close();
+    const assets = try plan(allocator, dir, options.url);
+    var http: std.http.Client = .{ .allocator = allocator };
+    defer http.deinit();
+    try http.initDefaultProxies(allocator);
+    const feed: []const []const u8 = if (assets.feed) |name| &.{name} else &.{};
+    for ([_][]const []const u8{ assets.files, assets.manifests, feed }) |group| for (group) |name| {
+        const bytes = try dir.readFileAlloc(allocator, name, 4 * 1024 * 1024 * 1024);
+        var task: console_mod.Task = undefined;
+        var title: [256]u8 = undefined;
+        console.start(&task, std.fmt.bufPrint(&title, "Uploading {s}", .{name}) catch name);
+        const Shown = struct {
+            fn sent(context: *anyopaque, done: u64, total: u64) void {
+                const t: *console_mod.Task = @ptrCast(@alignCast(context));
+                var a: [16]u8 = undefined;
+                var b: [16]u8 = undefined;
+                t.set("{s} of {s}", .{ console_mod.formatSize(&a, done), console_mod.formatSize(&b, total) });
+            }
+        };
+        const object = try client.key(allocator, name);
+        var reason_buffer: [1024]u8 = undefined;
+        var reason: std.Io.Writer = .fixed(&reason_buffer);
+        s3.put(allocator, &http, &client, object, bytes, .{ .content_type = s3.contentType(name), .cache_control = s3.cacheControl(name) }, .{ .context = &task, .sent = Shown.sent }, &reason) catch |err| {
+            task.fail();
+            if (err == error.UploadFailed) console.problem("uploading to s3://{s}/{s}: {s}", .{ client.bucket, object, reason.buffered() });
+            return err;
+        };
+        var size: [16]u8 = undefined;
+        task.done("Uploaded {s} ({s})", .{ name, console_mod.formatSize(&size, bytes.len) });
+    };
+    console.log("Uploaded {d} files to s3://{s}/{s}, which {s} serves", .{ assets.count(), client.bucket, client.prefix, options.url });
+}
+
+/// What went wrong, for the error that ends a publish.
+pub fn describe(err: anyerror) []const u8 {
+    return switch (err) {
+        error.MissingCredentials => "uploading to S3 needs the credentials in AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY",
+        error.MissingBucket => "--s3 needs the name of a bucket",
+        error.InvalidEndpoint => "--endpoint is not an http(s) URL without a path: the endpoint is the service's, and --s3 names the bucket",
+        error.InvalidUrl => "--url is where the bucket's files are served, ending in /",
+        error.ManifestOutsideRelease => "a manifest points outside --url",
+        error.MissingAsset => "a manifest names a file the directory does not have",
+        error.NothingToUpload => "the directory holds nothing to upload",
+        error.UploadFailed => "the upload failed",
+        else => @errorName(err),
+    };
 }
 
 const testing = std.testing;

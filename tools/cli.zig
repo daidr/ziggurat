@@ -5,6 +5,10 @@ const options = @import("cli_options");
 const setup_format = @import("setup_format");
 const deb = @import("deb");
 const publish = @import("publish.zig");
+const console_mod = @import("console.zig");
+const i18n_gen = @import("i18n_gen.zig");
+const install_script = @import("install_script.zig");
+const s3 = @import("s3.zig");
 
 const usage =
     \\ziggurat init DIR [--template native|web|hybrid] [--name NAME] [--id IDENTITY] [--framework PATH]
@@ -12,6 +16,11 @@ const usage =
     \\ziggurat build [--debug] [--target TRIPLE] [--package] [-- ZIG_BUILD_ARGS...]
     \\ziggurat package setup --zip PACKAGE [--stub SETUP_STUB] [--publisher NAME] [--comment TEXT] [--categories LIST] [--icon PNG] [--output FILE]
     \\ziggurat package deb --zip PACKAGE --maintainer "NAME <EMAIL>" [--depends LIST] [--webview] [--comment TEXT] [--categories LIST] [--icon PNG] [--output FILE]
+    \\ziggurat package install-script --zip PACKAGE [--github OWNER/REPO [--tag-prefix PREFIX]] [--url BASE] [--webview] [--output FILE]
+    \\ziggurat publish DIR (--github OWNER/REPO --tag TAG [--notes FILE] [--not-latest] | --s3 BUCKET --url BASE [--prefix DIR] [--region REGION] [--endpoint URL] [--path-style])
+    \\ziggurat generate [-o FILE] [--framework PATH] [DIR]
+    \\ziggurat i18n check [DIR]
+    \\ziggurat install-skills [DIR]
     \\ziggurat doctor [--webview]
     \\
     \\init writes a project that depends on this framework checkout by path.
@@ -24,6 +33,18 @@ const usage =
     \\installer file (Windows or Linux, matching the stub); sign the result after.
     \\package deb writes a Debian package that installs under /usr/lib/EXECUTABLE.
     \\--icon names a PNG inside the package for the Linux menu.
+    \\package install-script writes install.sh, which installs a Linux app for the
+    \\current user with its setup installer: the one next to it, else the newest one
+    \\it downloads from the GitHub releases or BASE.
+    \\publish uploads a release directory to a GitHub release with the GitHub CLI, or
+    \\to an S3 bucket (credentials from AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and
+    \\AWS_SESSION_TOKEN) that BASE serves.
+    \\generate checks the catalogs of the app's messages (i18n in ziggurat.json) and
+    \\writes their accessors: catalog.zig in their directory and, with bindings, a
+    \\TypeScript module next to the client; then the typed TypeScript client of
+    \\the service (service and bindings in ziggurat.json, or -o FILE).
+    \\i18n check lists the problems of the catalogs; errors exit with status 1.
+    \\install-skills installs or refreshes the bundled agent skills in .agents/skills.
     \\doctor reports the toolchain and native dependencies this machine provides.
     \\Set ZIG to choose the zig executable.
     \\
@@ -37,6 +58,15 @@ pub const Project = struct {
     executable: []const u8,
     template: []const u8,
     version: []const u8 = "0.1.0.0",
+    /// The catalogs of the app's messages: `<dir>/<tag>.json`.
+    i18n: ?I18n = null,
+    /// Where `ziggurat generate` writes the TypeScript client.
+    bindings: ?[]const u8 = null,
+    /// The Zig source exporting the `Service` type the client is made from.
+    service: ?[]const u8 = null,
+
+    /// `dir` under src/ lets the app import `catalog.zig` from its sources.
+    pub const I18n = struct { dir: []const u8 = "src/locales", source: []const u8 = "en" };
 };
 
 pub fn main() void {
@@ -63,6 +93,9 @@ fn run(allocator: std.mem.Allocator) !u8 {
     if (std.mem.eql(u8, command, "doctor")) return doctor(allocator, rest);
     if (std.mem.eql(u8, command, "package")) return packageCommand(allocator, rest);
     if (std.mem.eql(u8, command, "publish")) return publishCommand(allocator, rest);
+    if (std.mem.eql(u8, command, "generate")) return generateCommand(allocator, rest);
+    if (std.mem.eql(u8, command, "i18n")) return i18nCommand(allocator, rest);
+    if (std.mem.eql(u8, command, "install-skills")) return installSkillsCommand(allocator, rest);
     try std.fs.File.stderr().writeAll(usage);
     return 2;
 }
@@ -190,16 +223,19 @@ pub fn createProject(allocator: std.mem.Allocator, cwd: std.fs.Dir, init_options
     const imports = switch (init_options.template) {
         .native =>
         \\                .{ .name = "ziggurat", .module = ziggurat.module("ziggurat") },
+        \\                .{ .name = "ziggurat_i18n", .module = ziggurat.module("ziggurat_i18n") },
         \\                .{ .name = "ziggurat_view", .module = ziggurat.module("ziggurat_view") },
         \\
         ,
         .web =>
         \\                .{ .name = "ziggurat", .module = ziggurat.module("ziggurat") },
+        \\                .{ .name = "ziggurat_i18n", .module = ziggurat.module("ziggurat_i18n") },
         \\                .{ .name = "ziggurat_webview", .module = ziggurat.module("ziggurat_webview") },
         \\
         ,
         .hybrid =>
         \\                .{ .name = "ziggurat", .module = ziggurat.module("ziggurat") },
+        \\                .{ .name = "ziggurat_i18n", .module = ziggurat.module("ziggurat_i18n") },
         \\                .{ .name = "ziggurat_view", .module = ziggurat.module("ziggurat_view") },
         \\                .{ .name = "ziggurat_webview", .module = ziggurat.module("ziggurat_webview") },
         \\
@@ -225,8 +261,9 @@ pub fn createProject(allocator: std.mem.Allocator, cwd: std.fs.Dir, init_options
         .hybrid => hybrid_template,
     }, &replacements));
     if (web) try write(project, "src/index.html", try render(allocator, html_template, &replacements));
-    const config = try std.json.Stringify.valueAlloc(allocator, Project{ .name = name, .identity = identity, .executable = executable, .template = @tagName(init_options.template) }, .{ .whitespace = .indent_2 });
+    const config = try std.json.Stringify.valueAlloc(allocator, Project{ .name = name, .identity = identity, .executable = executable, .template = @tagName(init_options.template) }, .{ .whitespace = .indent_2, .emit_null_optional_fields = false });
     try write(project, "ziggurat.json", try std.mem.concat(allocator, u8, &.{ config, "\n" }));
+    try installSkills(project);
 }
 
 fn write(dir: std.fs.Dir, path: []const u8, bytes: []const u8) !void {
@@ -335,6 +372,9 @@ const PackageOptions = struct {
     maintainer: []const u8 = "",
     depends: ?[]const u8 = null,
     webview: bool = false,
+    github: ?[]const u8 = null,
+    tag_prefix: []const u8 = "",
+    url: ?[]const u8 = null,
 };
 
 const Inventory = struct { schema_version: u16, name: []const u8 = "", identity: []const u8, version: []const u8, target: []const u8, executable: []const u8 };
@@ -393,7 +433,7 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         if (index + 1 >= args.len) return error.InvalidArguments;
         const value = args[index + 1];
         index += 1;
-        if (std.mem.eql(u8, arg, "--zip")) package_options.zip = value else if (std.mem.eql(u8, arg, "--stub")) package_options.stub = value else if (std.mem.eql(u8, arg, "--output")) package_options.output = value else if (std.mem.eql(u8, arg, "--publisher")) package_options.publisher = value else if (std.mem.eql(u8, arg, "--comment")) package_options.comment = value else if (std.mem.eql(u8, arg, "--categories")) package_options.categories = value else if (std.mem.eql(u8, arg, "--icon")) package_options.icon = value else if (std.mem.eql(u8, arg, "--maintainer")) package_options.maintainer = value else if (std.mem.eql(u8, arg, "--depends")) package_options.depends = value else return error.InvalidArguments;
+        if (std.mem.eql(u8, arg, "--zip")) package_options.zip = value else if (std.mem.eql(u8, arg, "--stub")) package_options.stub = value else if (std.mem.eql(u8, arg, "--output")) package_options.output = value else if (std.mem.eql(u8, arg, "--publisher")) package_options.publisher = value else if (std.mem.eql(u8, arg, "--comment")) package_options.comment = value else if (std.mem.eql(u8, arg, "--categories")) package_options.categories = value else if (std.mem.eql(u8, arg, "--icon")) package_options.icon = value else if (std.mem.eql(u8, arg, "--maintainer")) package_options.maintainer = value else if (std.mem.eql(u8, arg, "--depends")) package_options.depends = value else if (std.mem.eql(u8, arg, "--github")) package_options.github = value else if (std.mem.eql(u8, arg, "--tag-prefix")) package_options.tag_prefix = value else if (std.mem.eql(u8, arg, "--url")) package_options.url = value else return error.InvalidArguments;
     }
     const zip_path = package_options.zip orelse return error.InvalidArguments;
     const package = try readPackage(allocator, zip_path);
@@ -424,6 +464,18 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         try setup_format.writeFooter(&bytes.writer, zip, config_json);
         if (std.fs.path.dirname(output)) |parent| try std.fs.cwd().makePath(parent);
         try std.fs.cwd().writeFile(.{ .sub_path = output, .data = bytes.written(), .flags = .{ .mode = 0o755 } });
+        try std.fs.File.stdout().writeAll(try std.fmt.allocPrint(allocator, "{s}\n", .{output}));
+        return 0;
+    }
+    if (std.mem.eql(u8, kind, "install-script")) {
+        if (!std.mem.startsWith(u8, info.target, "linux-")) return error.WrongTarget;
+        if (package_options.github) |repository| if (!publish.validRepository(repository)) return error.InvalidRepository;
+        if (package_options.url) |url| if (!std.mem.endsWith(u8, url, "/") or !(std.mem.startsWith(u8, url, "https://") or std.mem.startsWith(u8, url, "http://"))) return error.InvalidUrl;
+        var script: std.Io.Writer.Allocating = .init(allocator);
+        try install_script.write(&script.writer, .{ .app_name = name, .identity = info.identity, .stem = stem, .version = info.version, .github = package_options.github, .tag_prefix = package_options.tag_prefix, .url = package_options.url, .webview = package_options.webview });
+        const output = package_options.output orelse "dist/" ++ install_script.name;
+        if (std.fs.path.dirname(output)) |parent| try std.fs.cwd().makePath(parent);
+        try std.fs.cwd().writeFile(.{ .sub_path = output, .data = script.written(), .flags = .{ .mode = 0o755 } });
         try std.fs.File.stdout().writeAll(try std.fmt.allocPrint(allocator, "{s}\n", .{output}));
         return 0;
     }
@@ -714,26 +766,49 @@ fn webviewRuntimeVersion(allocator: std.mem.Allocator) ?[]const u8 {
 
 fn publishCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     var publish_options: publish.Options = .{ .directory = "", .repository = "", .tag = "" };
+    var bucket: ?s3.Bucket = null;
+    var prefix: []const u8 = "";
+    var region: ?[]const u8 = null;
+    var endpoint: ?[]const u8 = null;
+    var path_style: ?bool = null;
+    var url: []const u8 = "";
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
         const value = if (index + 1 < args.len) args[index + 1] else null;
-        if (std.mem.eql(u8, arg, "--github")) {
-            publish_options.repository = value orelse return error.InvalidArguments;
-            index += 1;
-        } else if (std.mem.eql(u8, arg, "--tag")) {
-            publish_options.tag = value orelse return error.InvalidArguments;
-            index += 1;
-        } else if (std.mem.eql(u8, arg, "--notes")) {
-            publish_options.notes_file = value orelse return error.InvalidArguments;
-            index += 1;
-        } else if (std.mem.eql(u8, arg, "--not-latest")) {
+        if (std.mem.eql(u8, arg, "--not-latest")) {
             publish_options.latest = false;
-        } else if (publish_options.directory.len == 0 and !std.mem.startsWith(u8, arg, "--")) {
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--path-style")) {
+            path_style = true;
+            continue;
+        }
+        if (publish_options.directory.len == 0 and !std.mem.startsWith(u8, arg, "--")) {
             publish_options.directory = arg;
-        } else return error.InvalidArguments;
+            continue;
+        }
+        const text = value orelse return error.InvalidArguments;
+        index += 1;
+        if (std.mem.eql(u8, arg, "--github")) publish_options.repository = text else if (std.mem.eql(u8, arg, "--tag")) publish_options.tag = text else if (std.mem.eql(u8, arg, "--notes")) publish_options.notes_file = text else if (std.mem.eql(u8, arg, "--s3")) bucket = .{ .name = text } else if (std.mem.eql(u8, arg, "--prefix")) prefix = text else if (std.mem.eql(u8, arg, "--region")) region = text else if (std.mem.eql(u8, arg, "--endpoint")) endpoint = text else if (std.mem.eql(u8, arg, "--url")) url = text else return error.InvalidArguments;
     }
-    if (publish_options.directory.len == 0 or publish_options.repository.len == 0 or publish_options.tag.len == 0) return error.InvalidArguments;
+    if (publish_options.directory.len == 0) return error.InvalidArguments;
+    if (bucket) |*target| {
+        if (publish_options.repository.len > 0 or url.len == 0) return error.InvalidArguments;
+        target.prefix = prefix;
+        target.region = region;
+        target.endpoint = endpoint;
+        target.path_style = path_style;
+        var environment = try std.process.getEnvMap(allocator);
+        var console: console_mod.Console = .stderr(&environment);
+        defer console.deinit();
+        publish.toS3(allocator, .{ .directory = publish_options.directory, .bucket = target.*, .url = url }, &environment, &console) catch |err| {
+            console.fatal("{s}", .{publish.describe(err)});
+            return 1;
+        };
+        return 0;
+    }
+    if (publish_options.repository.len == 0 or publish_options.tag.len == 0) return error.InvalidArguments;
     if (std.process.getEnvVarOwned(allocator, "GH")) |gh| publish_options.gh = gh else |_| {}
     var buffer: [1024]u8 = undefined;
     var stdout = std.fs.File.stdout().writer(&buffer);
@@ -741,8 +816,228 @@ fn publishCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     return 0;
 }
 
+// ---------------------------------------------------------------- generate
+
+fn projectDirectory(args: []const []const u8) ![]const u8 {
+    if (args.len > 1) return error.InvalidArguments;
+    return if (args.len == 1) args[0] else ".";
+}
+
+/// Writes `bytes` at `path` unless it holds them already. Returns whether it wrote.
+fn writeChanged(allocator: std.mem.Allocator, dir: std.fs.Dir, path: []const u8, bytes: []const u8) !bool {
+    if (dir.readFileAlloc(allocator, path, 64 * 1024 * 1024)) |old| {
+        if (std.mem.eql(u8, old, bytes)) return false;
+    } else |_| {}
+    if (std.fs.path.dirname(path)) |parent| try dir.makePath(parent);
+    try dir.writeFile(.{ .sub_path = path, .data = bytes });
+    return true;
+}
+
+/// Where the TypeScript module of the catalogs goes: next to the client,
+/// named after the catalogs' directory, as src/locales.ts.
+pub fn i18nModule(allocator: std.mem.Allocator, project: Project) !?[]const u8 {
+    const config = project.i18n orelse return null;
+    const bindings = project.bindings orelse return null;
+    const name = try std.fmt.allocPrint(allocator, "{s}.ts", .{std.fs.path.basename(config.dir)});
+    return if (std.fs.path.dirname(bindings)) |parent| try std.fs.path.join(allocator, &.{ parent, name }) else name;
+}
+
+/// Shows the diagnostics of the catalogs and returns their errors.
+fn reportCatalog(console: *console_mod.Console, catalog: *const i18n_gen.Catalog, warnings: bool) usize {
+    for (catalog.diagnostics) |d| {
+        if (!d.warning) console.problem("{f}", .{d}) else if (warnings) console.warn("{f}", .{d});
+    }
+    return catalog.errors();
+}
+
+pub const I18nOutput = struct { written: []const []const u8, catalog: i18n_gen.Catalog };
+
+/// Checks the catalogs and writes their accessors where they changed:
+/// `catalog.zig` in their directory and, with bindings, the TypeScript
+/// module. Errors of the catalogs fail it after `console` shows them.
+pub fn writeI18n(allocator: std.mem.Allocator, dir: std.fs.Dir, project: Project, console: *console_mod.Console) !I18nOutput {
+    const config = project.i18n orelse return .{ .written = &.{}, .catalog = undefined };
+    var catalogs = dir.openDir(config.dir, .{ .iterate = true }) catch return error.MissingCatalogs;
+    defer catalogs.close();
+    const catalog = try i18n_gen.load(allocator, catalogs, .{ .dir_name = config.dir, .source = config.source });
+    const errors = reportCatalog(console, &catalog, false);
+    if (errors > 0) {
+        console.fatal("{d} {s} in the catalogs (ziggurat i18n check lists the warnings too)", .{ errors, if (errors == 1) "error" else "errors" });
+        return error.CatalogErrors;
+    }
+    var written: std.ArrayList([]const u8) = .empty;
+    const zig = try i18n_gen.formattedZig(allocator, &catalog);
+    const zig_path = try std.fs.path.join(allocator, &.{ config.dir, i18n_gen.zig_file });
+    if (try writeChanged(allocator, dir, zig_path, zig)) try written.append(allocator, zig_path);
+    if (try i18nModule(allocator, project)) |module| {
+        var typescript: std.Io.Writer.Allocating = .init(allocator);
+        try i18n_gen.writeTypeScript(&typescript.writer, &catalog);
+        if (try writeChanged(allocator, dir, module, typescript.written())) try written.append(allocator, module);
+    }
+    return .{ .written = written.items, .catalog = catalog };
+}
+
+fn generateCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
+    var output: ?[]const u8 = null;
+    var framework: []const u8 = options.framework_root;
+    var rest: std.ArrayList([]const u8) = .empty;
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--framework")) {
+            if (index + 1 >= args.len) return error.InvalidArguments;
+            if (arg[1] == 'o') output = args[index + 1] else framework = args[index + 1];
+            index += 1;
+        } else if (std.mem.startsWith(u8, arg, "-")) return error.InvalidArguments else try rest.append(allocator, arg);
+    }
+    var environment = try std.process.getEnvMap(allocator);
+    var console: console_mod.Console = .stderr(&environment);
+    defer console.deinit();
+    var dir = try std.fs.cwd().openDir(try projectDirectory(rest.items), .{});
+    defer dir.close();
+    var project = try readProject(allocator, dir);
+    if (output) |path| project.bindings = path;
+    if (project.bindings == null and project.i18n == null) {
+        console.fatal("the project has nothing to generate: set i18n or bindings in ziggurat.json, or pass -o", .{});
+        return 1;
+    }
+    // The accessors come first: the app's Zig code calls them.
+    if (project.i18n) |config| {
+        var task: console_mod.Task = undefined;
+        console.start(&task, "Generating the accessors of the catalogs");
+        const result = writeI18n(allocator, dir, project, &console) catch |err| {
+            task.fail();
+            if (err == error.CatalogErrors) return 1;
+            if (err == error.MissingCatalogs) {
+                console.fatal("i18n.dir {s} is not a directory: create it with {s}.json, the messages of the source language", .{ config.dir, config.source });
+                return 1;
+            }
+            return err;
+        };
+        if (result.written.len > 0) {
+            var names: std.Io.Writer.Allocating = .init(allocator);
+            for (result.written, 0..) |path, i| try names.writer.print("{s}{s}", .{ if (i > 0) ", " else "", path });
+            task.done("Wrote {s}", .{names.written()});
+        } else task.done("The accessors of {s} are up to date", .{config.dir});
+        for (result.catalog.diagnostics) |d| if (d.warning) console.warn("{f}", .{d});
+    }
+    const bindings = project.bindings orelse return 0;
+    const service = project.service orelse {
+        console.fatal("writing the client of {s} needs service in ziggurat.json: the Zig source that exports the Service type", .{bindings});
+        return 1;
+    };
+    var task: console_mod.Task = undefined;
+    console.start(&task, "Generating the TypeScript client");
+    const client = generateClient(allocator, dir, framework, service, &console) catch |err| {
+        task.fail();
+        if (err == error.ClientGenerationFailed) return 1;
+        return err;
+    };
+    if (try writeChanged(allocator, dir, bindings, client)) task.done("Wrote {s}", .{bindings}) else task.done("{s} is up to date", .{bindings});
+    return 0;
+}
+
+/// The client of the Service type `service` exports, made by the
+/// framework's `ipc-client` step.
+fn generateClient(allocator: std.mem.Allocator, dir: std.fs.Dir, framework: []const u8, service: []const u8, console: *console_mod.Console) ![]const u8 {
+    const root = try dir.realpathAlloc(allocator, ".");
+    const source = try std.fs.path.resolve(allocator, &.{ root, service });
+    const prefix = try std.fs.path.join(allocator, &.{ root, ".zig-cache", "ziggurat-generate" });
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ try zigExecutable(allocator), "build", "ipc-client", try std.fmt.allocPrint(allocator, "-Dipc-service={s}", .{source}), "--prefix", prefix },
+        .cwd = framework,
+        .max_output_bytes = 4 * 1024 * 1024,
+    });
+    if (result.term != .Exited or result.term.Exited != 0) {
+        console.problem("zig build ipc-client failed:\n{s}", .{std.mem.trimRight(u8, result.stderr, "\n")});
+        return error.ClientGenerationFailed;
+    }
+    var out = try std.fs.openDirAbsolute(prefix, .{});
+    defer out.close();
+    return out.readFileAlloc(allocator, "share/ziggurat/client.ts", 64 * 1024 * 1024);
+}
+
+fn i18nCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
+    if (args.len == 0 or !std.mem.eql(u8, args[0], "check")) {
+        try std.fs.File.stderr().writeAll(
+            \\Usage: ziggurat i18n check [DIR]
+            \\
+            \\Checks the catalogs of the app's messages (i18n in ziggurat.json): that their
+            \\messages parse, that translations have the arguments of the source language's
+            \\messages and the plural forms of their languages, and which messages they
+            \\lack. Errors exit with status 1; warnings do not.
+            \\
+        );
+        return 2;
+    }
+    var environment = try std.process.getEnvMap(allocator);
+    var console: console_mod.Console = .stderr(&environment);
+    defer console.deinit();
+    var dir = try std.fs.cwd().openDir(try projectDirectory(args[1..]), .{});
+    defer dir.close();
+    const project = try readProject(allocator, dir);
+    const config = project.i18n orelse {
+        console.fatal("the project has no catalogs: set i18n in ziggurat.json, as \"i18n\": {{\"dir\": \"locales\", \"source\": \"en\"}}", .{});
+        return 1;
+    };
+    var catalogs = dir.openDir(config.dir, .{ .iterate = true }) catch {
+        console.fatal("i18n.dir {s} is not a directory: create it with {s}.json, the messages of the source language", .{ config.dir, config.source });
+        return 1;
+    };
+    defer catalogs.close();
+    const catalog = try i18n_gen.load(allocator, catalogs, .{ .dir_name = config.dir, .source = config.source });
+    const errors = reportCatalog(&console, &catalog, true);
+    if (errors > 0) {
+        console.fatal("{d} {s} in the catalogs", .{ errors, if (errors == 1) "error" else "errors" });
+        return 1;
+    }
+    var languages: std.Io.Writer.Allocating = .init(allocator);
+    for (catalog.languages, 0..) |tag, i| try languages.writer.print("{s}{s}", .{ if (i > 0) ", " else "", tag });
+    console.log("{d} messages in {s}", .{ catalog.keys.len, languages.written() });
+    return 0;
+}
+
+// ---------------------------------------------------------------- skills
+
+/// The agent skills every project carries, by path under .agents/skills.
+const skills = [_]struct { path: []const u8, bytes: []const u8 }{
+    .{ .path = "ziggurat-maintenance/SKILL.md", .bytes = @embedFile("templates/skills/ziggurat-maintenance/SKILL.md") },
+    .{ .path = "ziggurat-maintenance/agents/openai.yaml", .bytes = @embedFile("templates/skills/ziggurat-maintenance/agents/openai.yaml") },
+};
+
+/// Writes the bundled skill files, replacing older copies of them and
+/// leaving other skills and other files of a bundled skill alone.
+pub fn installSkills(dir: std.fs.Dir) !void {
+    var root = try dir.makeOpenPath(".agents/skills", .{});
+    defer root.close();
+    for (skills) |skill| {
+        if (std.fs.path.dirname(skill.path)) |parent| try root.makePath(parent);
+        try root.writeFile(.{ .sub_path = skill.path, .data = skill.bytes });
+    }
+}
+
+fn installSkillsCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
+    const path = try projectDirectory(args);
+    var environment = try std.process.getEnvMap(allocator);
+    var console: console_mod.Console = .stderr(&environment);
+    defer console.deinit();
+    var dir = std.fs.cwd().openDir(path, .{}) catch {
+        console.fatal("{s} is not a directory", .{path});
+        return 1;
+    };
+    defer dir.close();
+    try installSkills(dir);
+    console.log("Installed skills in {s}", .{try std.fs.path.join(allocator, &.{ path, ".agents", "skills" })});
+    return 0;
+}
+
 test {
     _ = publish;
+    _ = console_mod;
+    _ = i18n_gen;
+    _ = install_script;
+    _ = s3;
 }
 
 test "templates render without placeholders and identifiers are sanitized" {
@@ -769,6 +1064,7 @@ test "templates render without placeholders and identifiers are sanitized" {
         try std.testing.expectEqualStrings("com.example.sample_app", info.identity);
         try std.testing.expectEqualStrings("sample-app", info.executable);
         try std.testing.expectEqual(template != .native, if (project.access("src/index.html", .{})) |_| true else |_| false);
+        try project.access(".agents/skills/ziggurat-maintenance/SKILL.md", .{});
         try std.testing.expectError(error.DirectoryNotEmpty, createProject(allocator, temp.dir, .{ .directory = directory, .framework = "framework" }));
     }
     try std.testing.expectError(error.FrameworkNotFound, createProject(allocator, temp.dir, .{ .directory = "apps/none", .framework = "apps" }));
@@ -786,4 +1082,43 @@ test "snapshots change with edits and ignore build output" {
     try std.testing.expectEqual(first, try snapshot(allocator, temp.dir, &.{ "src", "build.zig", "missing" }));
     try temp.dir.writeFile(.{ .sub_path = "src/main.zig", .data = "changed" });
     try std.testing.expect(first != try snapshot(allocator, temp.dir, &.{ "src", "build.zig", "missing" }));
+}
+
+test "generate writes the accessors where they changed, and skills keep other files" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var temp = std.testing.tmpDir(.{ .iterate = true });
+    defer temp.cleanup();
+    try temp.dir.makePath("i18n");
+    try temp.dir.writeFile(.{ .sub_path = "i18n/en.json", .data = "{\"hello\": \"Hello, {name}!\"}" });
+    try temp.dir.writeFile(.{ .sub_path = "i18n/de.json", .data = "{\"hello\": \"Hallo, {name}!\"}" });
+    const project: Project = .{ .name = "App", .identity = "com.example.app", .executable = "app", .template = "web", .i18n = .{ .dir = "i18n" }, .bindings = "web/src/client.ts" };
+    try std.testing.expectEqualStrings("web/src" ++ std.fs.path.sep_str ++ "i18n.ts", (try i18nModule(allocator, project)).?);
+    const file = try temp.dir.createFile("console", .{ .read = true });
+    defer file.close();
+    var console: console_mod.Console = .{ .file = file, .mode = .{ .live = false, .color = false, .symbols = &console_mod.plain_symbols } };
+    defer console.deinit();
+    const first = try writeI18n(allocator, temp.dir, project, &console);
+    try std.testing.expectEqual(@as(usize, 2), first.written.len);
+    const zig = try temp.dir.readFileAlloc(allocator, "i18n/catalog.zig", 1 << 16);
+    try std.testing.expect(std.mem.indexOf(u8, zig, "pub fn hello(self: Messages, writer: *std.Io.Writer, name: []const u8)") != null);
+    const module = try temp.dir.readFileAlloc(allocator, "web/src/i18n.ts", 1 << 16);
+    try std.testing.expect(std.mem.indexOf(u8, module, "hello(name: string): string;") != null);
+    try std.testing.expectEqual(@as(usize, 0), (try writeI18n(allocator, temp.dir, project, &console)).written.len);
+    try temp.dir.writeFile(.{ .sub_path = "i18n/de.json", .data = "{\"hello\": \"Hallo, {who}!\"}" });
+    try std.testing.expectError(error.CatalogErrors, writeI18n(allocator, temp.dir, project, &console));
+    try file.seekTo(0);
+    const shown = try file.readToEndAlloc(allocator, 1 << 16);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "  × i18n/de.json:1: \"hello\" uses the argument who, but the source message has the arguments name\n") != null);
+
+    try temp.dir.makePath(".agents/skills/ziggurat-maintenance");
+    try temp.dir.writeFile(.{ .sub_path = ".agents/skills/ziggurat-maintenance/SKILL.md", .data = "old" });
+    try temp.dir.writeFile(.{ .sub_path = ".agents/skills/ziggurat-maintenance/notes.md", .data = "mine" });
+    try temp.dir.makePath(".agents/skills/other");
+    try installSkills(temp.dir);
+    const skill = try temp.dir.readFileAlloc(allocator, ".agents/skills/ziggurat-maintenance/SKILL.md", 1 << 16);
+    try std.testing.expect(std.mem.startsWith(u8, skill, "---\nname: ziggurat-maintenance\n"));
+    try std.testing.expectEqualStrings("mine", try temp.dir.readFileAlloc(allocator, ".agents/skills/ziggurat-maintenance/notes.md", 64));
+    try temp.dir.access(".agents/skills/other", .{});
 }
