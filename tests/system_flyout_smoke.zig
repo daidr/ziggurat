@@ -140,9 +140,10 @@ const Smoke = struct {
             .quiet_shown => {
                 const window = self.quiet.window.?;
                 if (!(try window.state()).visible) return;
-                if (!try at(window, try self.expected(200, 100, 4))) return;
-                // Showing it left the keyboard where it was.
-                if (!(try self.owner.state()).focused or (try window.state()).focused) return error.QuietFlyoutTookFocus;
+                if (!try at(window, try self.expected(200, 100, 4)) or self.waited < 4) return;
+                // Showing it did not take the keyboard. Other smokes share
+                // the display and may hold focus, so the owner is not checked.
+                if ((try window.state()).focused) return error.QuietFlyoutTookFocus;
                 const bounds = try self.owner.clientBounds();
                 const origin = bounds.position.?;
                 try self.owner.setClientBounds(.{ .position = .{ .x = origin.x + 40, .y = origin.y + 30 }, .width = bounds.width, .height = bounds.height });

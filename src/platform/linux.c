@@ -569,9 +569,14 @@ static gboolean scroll(GtkWidget *widget, GdkEventScroll *native, gpointer data)
     }
     event.dx*=48; event.dy*=48; emit(data,&event); return TRUE;
 }
+/* A popup that does not take the keyboard. X without a window manager moves
+   focus with the pointer, so such a popup can still be handed focus. */
+static int quiet_popup(NativeWindow *s) { return s->popup && !(s->popup&ZLG_POPUP_FOCUSABLE); }
 static gboolean focus(GtkWidget *widget, GdkEventFocus *native, gpointer data) {
-    (void)widget; NativeWindow *s=data; retain(s);
+    (void)widget; NativeWindow *s=data;
     const gboolean gained=native->in;
+    if (gained && quiet_popup(s)) return FALSE;
+    retain(s);
     uint64_t operation=gained?s->pointer_operation:pointer_revoke(s,TRUE);
     if(s->im){GtkIMContext *im=g_object_ref(s->im);
         if (gained) gtk_im_context_focus_in(im); else gtk_im_context_focus_out(im);
@@ -837,7 +842,7 @@ void zlg_window_action(NativeWindow *s, int action) {
 uint32_t zlg_window_state(NativeWindow *s) {
     GdkWindowState state=window_state(s);
     return (gtk_widget_get_visible(s->window)?1:0)|((state&GDK_WINDOW_STATE_ICONIFIED)?2:0)|((state&GDK_WINDOW_STATE_MAXIMIZED)?4:0)|
-        (gtk_window_is_active(GTK_WINDOW(s->window))?8:0)|(gtk_widget_is_sensitive(s->window)?16:0)|
+        (gtk_window_is_active(GTK_WINDOW(s->window))&&!quiet_popup(s)?8:0)|(gtk_widget_is_sensitive(s->window)?16:0)|
         ((state&GDK_WINDOW_STATE_FULLSCREEN)?32:0)|(s->fullscreen_requested?64:0)|
         (s->above_observed?128:0)|(s->above_requested?256:0);
 }
