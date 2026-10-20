@@ -34,7 +34,10 @@ music.play();
 
 - WAV：8/16/24/32 位整数 PCM、32/64 位浮点，含 `WAVE_FORMAT_EXTENSIBLE`；数据块长度为 0 或全 1 时按流式写入、长度未知处理。
 - FLAC：纯 Zig 解码，支持 constant/verbatim/fixed/LPC 子帧、三种立体声去相关、wasted bits、4–32 位，校验帧头 CRC-8 与帧 CRC-16；seek 用帧头二分定位，不依赖 seek table。
-- `Options.formats` 是按顺序匹配文件开头的格式列表（`?` 匹配任意字节），默认 `default_formats` 为 WAV 与 FLAC；应用可以追加自己的 `Format`。MP3 与 Ogg Vorbis 尚未实现。
+- MP3：由 minimp3（CC0）解码 MPEG-1/2/2.5 Layer III，跳过 ID3v2 标签，按 Xing/Info 帧去掉编码器延迟与尾部填充；seek 精确到样本。输入可以是内存或文件，按需读取。
+- Ogg Vorbis：由 stb_vorbis（MIT 或 Unlicense，二选一）解码，seek 精确到样本。它只能从内存解码，所以文件流也会先整体读入内存，上限 512 MiB。
+- 两个 C 解码器用 C 运行时分配自己的状态，不经 `Engine` 的分配器；它们只在解码线程或 `decodeSound` 的调用方线程上运行，混音线程照旧不分配。源码按固定提交放在 `src/audio/third_party/`，版本、哈希与许可证见那里的 README，测试会核对哈希。
+- `Options.formats` 是按顺序匹配文件开头的格式列表（`?` 匹配任意字节），默认 `default_formats` 为 WAV、FLAC、Ogg Vorbis 与 MP3；应用可以追加自己的 `Format`。
 
 ## 输出与失败路径
 
@@ -45,4 +48,4 @@ music.play();
 
 ## 验证
 
-`zig build test-audio` 已接默认 test/check：WAV 各编码与截断、FLAC 用独立编码器生成的立体声 16 位与单声道 24 位文件逐样本比对与前后 seek、损坏与截断数据、分配失败无泄漏；混音逐样本行为（结尾静音、叠加与截断、循环与区间循环、暂停淡出与恢复淡入、音量渐变、声像、变速、重采样、seek/stop）；流的无缝循环、区间循环、seek、空循环停止、释放后播完关闭解码器；句柄失效与槽位复用；经测试后端 App 的结束通知、App 停止后的丢弃与引擎先销毁时的排队任务；测试后端设备丢失后重开；无设备时按时播放并报告原因；空设备的时钟、追赶与重试。`zig build smoke-audio` 在真实系统输出上播放 200 ms 并打开一个 WAV 流，有设备走真实后端，无设备走失败路径，两种情况都要求按时结束。CI 主机没有声卡，真实设备上的出声只由本地运行确认。
+`zig build test-audio` 已接默认 test/check：WAV 各编码与截断、FLAC 用独立编码器生成的立体声 16 位与单声道 24 位文件逐样本比对与前后 seek、MP3 与 Ogg Vorbis 的 440 Hz 测试音（长度、过零次数、峰值）及 seek 结果与顺序解码一致、损坏与截断数据、分配失败无泄漏；混音逐样本行为（结尾静音、叠加与截断、循环与区间循环、暂停淡出与恢复淡入、音量渐变、声像、变速、重采样、seek/stop）；流的无缝循环、区间循环、seek、空循环停止、释放后播完关闭解码器；句柄失效与槽位复用；经测试后端 App 的结束通知、App 停止后的丢弃与引擎先销毁时的排队任务；测试后端设备丢失后重开；无设备时按时播放并报告原因；空设备的时钟、追赶与重试。`zig build smoke-audio` 在真实系统输出上播放 200 ms 并打开一个 WAV 流，有设备走真实后端，无设备走失败路径，两种情况都要求按时结束。CI 主机没有声卡，真实设备上的出声只由本地运行确认。

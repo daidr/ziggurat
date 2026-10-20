@@ -9,7 +9,10 @@ const streaming = @import("stream.zig");
 const Stream = streaming.Stream;
 const Voice = mixer.Voice;
 
-pub const default_formats = [_]decoding.Format{ @import("wav.zig").format, @import("flac.zig").format };
+const compressed = @import("compressed.zig");
+
+/// WAV, FLAC, Ogg Vorbis and MP3, detected by their first bytes.
+pub const default_formats = [_]decoding.Format{ @import("wav.zig").format, @import("flac.zig").format, compressed.vorbis_format } ++ compressed.mp3_formats;
 
 /// Main thread, once each time a player plays to its end.
 pub const EndedCallback = struct {

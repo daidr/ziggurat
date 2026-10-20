@@ -13,7 +13,7 @@
 //! music.play();
 //! ```
 //!
-//! WAV and FLAC decode out of the box; other formats join through
+//! WAV, FLAC, Ogg Vorbis and MP3 decode out of the box; other formats join through
 //! `Options.formats`. The output opens when something first plays and
 //! closes a few seconds after everything stopped. Where no output opens,
 //! players still play on time, unheard, and `Engine.outputError` says why.
@@ -25,6 +25,7 @@ const std = @import("std");
 pub const decoder = @import("decoder.zig");
 pub const wav = @import("wav.zig");
 pub const flac = @import("flac.zig");
+pub const compressed = @import("compressed.zig");
 const engine = @import("engine.zig");
 const output = @import("output.zig");
 
@@ -60,6 +61,7 @@ test {
     _ = decoder;
     _ = wav;
     _ = flac;
+    _ = compressed;
     _ = @import("sound.zig");
     _ = output;
     _ = @import("tests.zig");

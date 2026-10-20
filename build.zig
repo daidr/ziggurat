@@ -2238,8 +2238,11 @@ pub fn build(b: *std.Build) void {
     b.step("test-updater", "Run update window sessions, choices, texts and feed backend tests").dependOn(&run_updater_tests.step);
     test_step.dependOn(&run_webkit_remote.step);
     const audio = b.addModule("ziggurat_audio", .{ .root_source_file = b.path("src/audio/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
-    if (target.result.os.tag == .linux) audio.link_libc = true;
+    audio.link_libc = true;
     if (target.result.os.tag == .windows) audio.linkSystemLibrary("ole32", .{});
+    // Pinned third-party decoders: their own warnings and undefined-behavior
+    // checks are not this project's to enforce.
+    for ([_][]const u8{ "mp3", "vorbis" }) |codec| _ = native_support.add(b, audio, b.fmt("audio-{s}-native", .{codec}), b.fmt("src/audio/{s}.c", .{codec}), &.{ "-std=c99", "-w", "-fno-sanitize=undefined" }, target, optimize);
     const audio_tests = b.addTest(.{ .root_module = audio });
     const run_audio_tests = b.addRunArtifact(audio_tests);
     check.dependOn(&audio_tests.step);
