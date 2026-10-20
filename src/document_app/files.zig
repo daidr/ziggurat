@@ -102,7 +102,7 @@ pub const Files = struct {
         try self.worker();
         try absolute(path);
         if (try conflict(path, options.expected)) |found| return .{ .conflict = found };
-        const mode = if (try observe(path)) |current| (if (builtin.os.tag == .windows) std.fs.File.default_mode else current.mode & 0o7777) else std.fs.File.default_mode;
+        const mode: std.fs.File.Mode = if (builtin.os.tag == .windows) std.fs.File.default_mode else if (try observe(path)) |current| current.mode & 0o7777 else std.fs.File.default_mode;
         var atomic = try std.fs.cwd().atomicFile(path, .{ .mode = mode, .write_buffer = write_buffer });
         defer atomic.deinit();
         atomic.file_writer.interface.writeAll(input) catch return atomic.file_writer.err orelse error.WriteFailed;

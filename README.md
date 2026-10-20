@@ -21,6 +21,8 @@ zig build run-web-counter -Dwebview=true
 zig build run-rectangular-pages -Dwebview=true
 ```
 
+应用示例（hello、todo、notes、gallery、菜单与托盘、剪贴板、拖放、代码编辑器、实时图表、音频、全局快捷键、动画、i18n、混合应用等）见 [docs/examples.md](docs/examples.md)，`zig build run-<名称>` 运行。
+
 安装产物在 `zig-out/bin/`。WebView EXE 需要同目录下的 `WebView2Loader.dll` 和系统 Runtime；构建同时安装 SDK 许可文件，不自动安装 Runtime。
 
 Linux 需要 GTK3、Pango/Cairo 开发包和 pkg-config：
