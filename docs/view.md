@@ -333,6 +333,20 @@ try v.scroll(&model, .{ .grow = 1, .edges = .{ .top = .{}, .bottom = .{ .hard = 
 
 效果需要 `host.prepareBackdropEffects(allocator, .{})`（在 `attach` 之后），否则画不透明填充。效果的像素模型、预算和后端行为见[背景效果与加载动画](backdrop-effects.md)。
 
+## 不透明度、位姿与进出场
+
+`Style.opacity`（0–1）把节点及其后代作为一层淡出；`Style.pose`（`ui.effects.Pose`）平移、缩放、旋转或按透视绕 X/Y 轴转动它们；`Style.effect` 用自定义着色器改写它们的绘制；`Style.refraction` 在容器下方画玻璃折射。命中、焦点和语义保持排布后的盒子。`View.presentColumn(&presence, show, transition, style)` 让一个列容器在 `show` 切换时按 `ziggurat_animation` 的运动进入和退出，退出结束后返回 false：
+
+```zig
+try host.prepareShaderEffects(allocator, library, .{}); // attach 之后
+if (try v.presentColumn(&state.panel, state.open, .{ .hidden = .{ .y = 12, .scale_x = 0.96, .scale_y = 0.96 } }, .{ .padding = Insets.all(12) })) {
+    try v.text("详情", .{});
+    try v.end();
+}
+```
+
+运动期间每遍请求下一帧唤醒，静止时不请求；减少动态效果时立即出现与消失。没有 `prepareShaderEffects` 时不透明度与位姿被忽略。语言、隔离方式与预算见[着色器与元素效果](shader-effects.md)。
+
 ## 加载动画
 
 `loadingIndicator(kind, options, style)` 加入 29 种加载动画之一，作为以 `Style.name` 命名的不确定进度条暴露（Windows UIA 上是没有 RangeValue 的 ProgressBar）。`LoadingOptions` 有 `size`（高度，默认 20 DIP，宽度按宽高比）、`color`（默认主题文字色，禁用时为禁用文字色）、`duration`（0 为自身周期）、`paused`、`timer` 与 `variant`（`ui.loading.Options`）。没有 `timer` 时姿态取 `View.time()`，同一窗口的指示器同步转动；应用持有的 `LoadingTimer` 记录各自的起点，`paused` 时保持当前姿态，恢复后从该处继续。
