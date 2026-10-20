@@ -45,7 +45,7 @@
 | U03 | 已完成（纯布局合同，Windows/Linux） | grid 与可组合约束布局 | U03.1 grid/span/对齐/自动放置/隐式轨道及U03.2弹性百分比上限、内容/显式minimum优先级、数值基线与未知父尺寸测量已验；失败输出事务、硬界与overflow明确；分隔拖动归U06 |
 | U04 | 部分完成（Windows/Linux） | 虚拟 list、table、tree/outline、grid view | U04.1 可变行高列表/可见回放/稳定 ID 锚点已实现；U04.2 声明式视图的单选列表框（非虚拟）已实现；U04.3/U04.4 声明式视图的非虚拟 table（共享列宽、排序指示、单/多选）与 tree（展开折叠、层级键盘）已实现；虚拟 table/tree、列宽拖动/冻结/重排与 grid view 继续待实现；基础依赖 U02.1/T01 |
 | U05 | 部分完成（U05.1 只读组合框、建议列表与搜索区域；U05.2 可编辑组合框与 token field） | combobox、autocomplete、search、token field | popup 所有权、输入法、筛选取消、键盘与焦点恢复；可编辑组合框、输入法组合期间的建议处理与 token field 已在声明式视图实现，读屏实际播报与 Linux 可访问性继续；依赖 U02.2/T02/W02 |
-| U06 | 部分完成（U06.1 声明式视图的 tabs/toolbar/比例 split；U06.2 tooltip、toast 与一次性唤醒） | tabs、sidebar、toolbar、split、tooltip、toast | 生命周期、遮挡/命中、延迟唤醒撤销与可访问性；split 的 DIP 偏好、RTL、折叠与 sidebar、toast 动画继续；基础依赖 U02.1/G02，popup scope另依赖U02.2 |
+| U06 | 部分完成（U06.1 声明式视图的 tabs/toolbar/比例 split；U06.2 tooltip、toast 与一次性唤醒；U06.3 sidebar、窗口内对话框、查找栏、可编辑文本与三态复选框） | tabs、sidebar、toolbar、split、tooltip、toast | 生命周期、遮挡/命中、延迟唤醒撤销与可访问性；split 的 DIP 偏好、RTL、折叠与 sidebar、toast 动画继续；基础依赖 U02.1/G02，popup scope另依赖U02.2 |
 | U07 | 部分完成（U07.1 声明式视图的日历、日期/时间/数字输入、颜色选择器与颜色按钮、通用浮层，Windows UIA） | calendar、date/time、color picker | locale/范围/键盘/可访问性已在无窗口测试中验证，见[选择器](pickers.md)；颜色方块已可按住拖动；读屏实际播报与 Linux 可访问性继续；依赖 L01/U05 |
 | U08 | 已完成（U08.1 link、badge、segmented、disclosure；U08.2 meter、rating、breadcrumbs、accordion；U08.3 avatar 与导航按钮，Windows UIA） | badge、avatar、link、meter、rating、segmented、accordion、breadcrumbs 与导航按钮 | 稳定身份、分组/展开/链接动作、键盘和语义；不把静态文字/矩形算成完整控件；Linux AT-SPI 不在本行范围；基础依赖 U02.1/G01 |
 | U09 | 部分完成 | chart 的数值/分类/时间尺度、axes、marks、stacking 与 selection | 已有纯 Zig `ziggurat_chart`（尺度/刻度、布局、路径、堆叠、降采样、图例、选择状态）与 `ziggurat_chart_view`（视图嵌入、绘制后准备的覆盖蒙版），见[图表](chart.md)，悬停与键盘选择经视图嵌入输入接口接入 |
@@ -1656,6 +1656,13 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - `ziggurat_view` 的 View 持有唯一一个打开的列表：组合框由激活或方向键打开，建议列表跟随锚点焦点；高亮是虚拟的，焦点留在锚点上，选中或 Escape 后焦点回到锚点。建议列表在选中或 Escape 后保持关闭，直到标签变化。列表外的按下关闭列表，组合框列表还会吞掉这次按下。列表、通知与提示在主树之后按顺序绘制并优先命中，不受祖先裁剪。
 - 每一遍带有时间，构建通过 `wakeAt` 请求下一遍。Host 只在 paint 之后投递任务，把最早期限交给调度器；`ziggurat_view_timer` 用 `ziggurat_wake.OneShot` 实现调度，期限变化时取消旧装定，没有期限时不装定，不引入持续重绘计时器。
 - 无窗口测试覆盖提示的延迟、按下/Escape/离开隐藏与焦点触发，通知的到期、动作、关闭与满队列淘汰，组合框的打开、方向键、Enter/Escape/Tab/外部按下、选项点击、靠近底边时向上翻转与列表内滚动，建议列表的焦点打开、高亮、选中后关闭与重新打开，导航按钮、头像与搜索区域，以及浮层绘制顺序和 Frame 语义角色。Linux 隐藏窗口 smoke 在 1x/2x 下实测组合框列表的原生点击选择、导航按钮点击，以及通知经真实一次性计时器到期后窗口回到无期限的空闲状态。Windows smoke 用真实 UIAutomationClient 检查组合框 Value/ExpandCollapse、搜索地标、导航按钮 Invoke、Image、提示作为 HelpText 与通知的 LiveSetting。实时区域事件只在有客户端监听时引发，读屏实际播报、视觉质量与动画未验收。见[声明式视图](view.md)。
+
+### U06.3 侧边栏、窗口内对话框、查找栏、可编辑文本与三态复选框
+
+- 新增语义角色 `dialog`、`alert_dialog`，追加在既有编号之后；语义节点新增 `mixed`。Frame 提供 `dialog`、`labelButton`，以及 `inertMark`/`makeInert`：把两次标记之间加入的命中区禁用（仍遮挡指针）、语义节点报告为禁用。Windows UIA 把对话框映射为报告 IsDialog 的 Pane（LocalizedControlType "dialog"/"alert dialog"），部分选中的复选框报告 ToggleState Indeterminate。
+- `ziggurat_view` 新增 `dialog`/`sheet`/`alertDialog`：一次显示一个，遮罩之外的内容不接收输入，Tab 在对话框内循环，打开时焦点进入、关闭时回到打开者，Escape 与遮罩按下按选项关闭（警告对话框忽略遮罩）。`sidebar`/`sidebarSection`/`sidebarItem` 基于树，按 ID 选择，标题只取焦点行，支持折叠与首字母跳转，条目带图标与徽标。`findBar` 显示应用持有的匹配位置并报告前进、后退、选项变化与关闭，F3/Shift+F3 在窗口内生效。`editableText` 在标签与应用的文本输入之间切换，Enter/失焦提交、Escape 还原。`checkboxState` 与 `checkboxGroup` 提供三态复选框与派生的总复选框。`bindKey` 是这些控件共用的按焦点或窗口范围的按键绑定。
+- Host 在绘制后给出渲染遍要求的焦点，并为在帧后才登记的文本输入多等一帧；遮罩按下关闭对话框后同样交还焦点。
+- 无窗口测试（含 `-fllvm`）覆盖对话框的焦点陷阱、遮罩与 Escape 关闭、焦点回到打开者、警告对话框的默认按钮与取消、表单页位置与嵌套拒绝，复选框组的派生与全选/全不选，侧边栏的按 ID 选择、标题跳过、折叠与首字母跳转，可编辑文本的开始/提交/还原/失焦提交与组合期间按键归属，查找栏的打开、前进后退、选项、无结果与关闭，以及按键绑定的焦点与对话框范围。UIA 映射只交叉编译，未在原生 UIA 客户端中验证；未运行隐藏窗口 smoke。
 
 ### S06.1 上下文菜单、异步消息框与菜单快捷键
 
