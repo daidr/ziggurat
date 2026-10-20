@@ -194,7 +194,7 @@ try v.text("zig build test", .{ .font = view.Font.code });
 - `table(columns, &sort, &selection, style)` 与 `end` 配对开始一个表格，先画一行列头，`Column` 给出标题、`Track`（默认 `fraction(1)`）和是否可排序。激活可排序的列头时 `sort` 变为该列升序，再次激活翻转方向；返回 true 的那一遍由应用按 `sort` 排列行。不可排序的列头不取焦点。`Style.gap` 是列间距，为 0 时取 8 DIP。
 - `tableRow(id, name, style)` 开始一行，`name` 是行的可访问名称（例如第一格），随后每列构建一个单元格，再 `end`。表头和所有行用同一组列宽：列宽在每次排列时由各列单元格（只计跨一列的）的最大内容尺寸统一求出，所以长文本不会让某一行错位。行放进 `scroll` 容器时表头保持不动。选中行以强调色填充，其中文本改用强调色上的前景色。
 - 行共享一个 Tab 停靠点，落在 `cursor` 行。Up/Down 移动并单选，Home/End 到首尾，PageUp/PageDown 按可见行数翻页；Ctrl+方向键只移动 `cursor`，Space 单选、Ctrl+Space 切换、Shift+方向键或 Shift+Space 从 `anchor` 选到当前行，Ctrl+Shift 把范围加入已有选择，Ctrl+A 全选（多选时）。树里 Right 展开折叠的条目，已展开时进入第一个子条目；Left 折叠展开的条目，否则回到父条目。指针按下同理：Ctrl 切换、Shift 选范围、Ctrl+Shift 追加范围。移动后的行以最小位移滚入外层滚动容器。
-- 行全部参与构建和排列，不做虚拟化；滚出可见区的行不绘制、也不登记命中（焦点行除外）。大量行请使用 `ziggurat_ui` 的虚拟列表。`treeItem`、`tableRow` 在各自容器之外调用返回 `NotContainer`。
+- 行全部参与构建和排列，不做虚拟化；滚出可见区的行不绘制、也不登记命中（焦点行除外）。大量行请使用 `ziggurat_view_collections` 的[虚拟表格、大纲与网格视图](collections.md)，或 `ziggurat_ui` 的虚拟列表。`treeItem`、`tableRow` 在各自容器之外调用返回 `NotContainer`。
 
 ```zig
 try v.tree(&selection, .{ .name = "文件" });

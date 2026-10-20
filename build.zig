@@ -2485,6 +2485,11 @@ pub fn build(b: *std.Build) void {
         const run_view_collections_tests = b.addRunArtifact(view_collections_tests);
         test_step.dependOn(&run_view_collections_tests.step);
         b.step("test-view-collections", "Run virtual table, outline and grid view tests").dependOn(&run_view_collections_tests.step);
+        addSmoke(b, "smoke-view-collections", "tests/collections_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_view", .module = declarative_view },
+            .{ .name = "ziggurat_view_collections", .module = view_collections },
+        });
         addSmoke(b, "smoke-view-pickers", "tests/pickers_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_view", .module = declarative_view },

@@ -489,8 +489,10 @@ test "a table chooses blocks of cells" {
     try testing.expectEqualSlices(usize, &.{ 2, 3 }, app.state.selectedColumns(&buffer));
     // Fixed columns stay as the table scrolls sideways; the others move.
     const b = (try f.leaf()).bounds;
-    try f.h.wheel(b.x + 100, b.y + 100, .{ .x = 30, .y = 0 });
-    try testing.expectEqual(@as(f32, 30), app.state.core.scroll_x);
+    // Moving the cursor to C scrolled as far right as the columns go.
+    try testing.expectEqual(@as(f32, 648 - 592), app.state.core.scroll_x);
+    try f.h.wheel(b.x + 100, b.y + 100, .{ .x = -30, .y = 0 });
+    try testing.expectEqual(@as(f32, 26), app.state.core.scroll_x);
     try f.click(20, Fixture.rowY(0), .{});
     try testing.expect(app.cells.all);
 }

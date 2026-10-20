@@ -351,6 +351,7 @@ const Core = struct {
     top_key: u64 = 0,
     top_index: usize = 0,
     top_count: usize = 0,
+    content_seen: f64 = -1,
     at_end: bool = true,
     request: ?Request = null,
     cursor_hint: usize = 0,
@@ -506,8 +507,8 @@ const Core = struct {
     fn follow(self: *Core) void {
         const count = self.rows.count;
         if (!self.placed) return;
-        if (self.follow_end and self.at_end and count != self.top_count) {
-            self.scroll_y = self.maxScroll();
+        if (self.follow_end and self.at_end) {
+            // The paint keeps the end in view.
         } else if (!self.keep_offset and self.rows.key != null and self.top_key != 0 and count > 0 and self.shape != .grid) {
             const old = self.top_index;
             if (old >= count or self.keyAt(old) != self.top_key) {
@@ -529,8 +530,12 @@ const Core = struct {
         self.top_count = count;
         self.clampScroll();
     }
-    /// Record what is at the top, after a paint settled the scroll.
+    /// Record what is at the top, after a paint settled the scroll. A
+    /// collection following its end goes on showing it as content grows.
     fn settle(self: *Core) void {
+        const content = self.contentHeight();
+        if (self.follow_end and self.at_end and content != self.content_seen) self.scroll_y = self.maxScroll();
+        self.content_seen = content;
         self.clampScroll();
         self.at_end = self.scroll_y >= self.maxScroll() - 0.5;
         const range = self.visibleLines();
@@ -1067,7 +1072,7 @@ pub const TableState = struct {
     pub fn scrollToEnd(self: *TableState) void {
         self.core.scroll_y = std.math.floatMax(f64);
         self.core.clampScroll();
-        if (!self.core.placed) self.core.at_end = true;
+        self.core.at_end = true;
     }
     /// The first and the last rows in view, as of the last paint.
     pub fn visible(self: *const TableState) struct { first: usize, last: usize } {
@@ -1809,7 +1814,9 @@ pub const TableState = struct {
 
     fn pointerUp(self: *TableState, point: Point) bool {
         const core = &self.core;
-        const pressed = core.press;
+        // A copy, not an alias of the field cleared next.
+        var pressed = core.press;
+        _ = &pressed;
         core.press = .none;
         core.stopEdge();
         switch (pressed) {
@@ -1821,7 +1828,8 @@ pub const TableState = struct {
             },
             .rows => |rows| {
                 if (rows.reordering) {
-                    const target = core.reorder_target orelse core.insertionAt(point);
+                    var target = core.reorder_target orelse core.insertionAt(point);
+                    _ = &target;
                     core.reorder_target = null;
                     if (target != rows.index and target != rows.index + 1) core.pending.moved = .{ .row = rows.index, .to = target, .selection = core.selected(rows.index) };
                 } else if (rows.deferred) {
@@ -2396,12 +2404,15 @@ pub const GridState = struct {
                 }
             },
             .pointer_up => |point| {
-                const pressed = core.press;
+                // A copy, not an alias of the field cleared next.
+                var pressed = core.press;
+                _ = &pressed;
                 core.press = .none;
                 core.stopEdge();
                 switch (pressed) {
                     .rows => |rows| if (rows.reordering) {
-                        const target = core.reorder_target orelse core.insertionAt(point);
+                        var target = core.reorder_target orelse core.insertionAt(point);
+                        _ = &target;
                         core.reorder_target = null;
                         if (target != rows.index and target != rows.index + 1) core.pending.moved = .{ .row = rows.index, .to = target, .selection = core.selected(rows.index) };
                     } else if (rows.deferred) core.choose(rows.index, .set),
