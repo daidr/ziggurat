@@ -13,6 +13,7 @@ pub const scroll = @import("scroll.zig");
 pub const text_buffer = @import("text_buffer.zig");
 pub const editor = @import("editor.zig");
 pub const commands = @import("commands.zig");
+pub const Font = commands.Font;
 pub const drawing = @import("ziggurat_drawing_resources");
 pub const ImageOptions = drawing.ImageOptions;
 pub const ImageCacheStats = struct { software: drawing.ImageStats, gpu: ?drawing.ImageStats };
@@ -3324,7 +3325,12 @@ pub const Frame = struct {
         };
     }
     pub fn label(self: *Frame, bounds: Rect, text: []const u8, rgb: u32) void {
-        self.context.command_buffer.text(self.absolute(bounds), text, rgb) catch |err| {
+        self.labelFont(bounds, text, rgb, .{});
+    }
+    /// A single-line label in `font`, vertically centered and ellipsized
+    /// like `label`.
+    pub fn labelFont(self: *Frame, bounds: Rect, text: []const u8, rgb: u32, font: Font) void {
+        self.context.command_buffer.textFont(self.absolute(bounds), text, rgb, font) catch |err| {
             self.failure = self.failure orelse err;
         };
     }

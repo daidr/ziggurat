@@ -146,13 +146,21 @@ pub const Harness = struct {
     }
     /// Move the pointer to a point, or away from every control with null,
     /// as Host does, then render.
+    /// Embedded leaves with an input callback see the move too.
     pub fn hoverAt(self: *Harness, x: f32, y: f32) anyerror!void {
         _ = self.view.hoverAt(.{ .x = x, .y = y });
+        _ = self.view.embedPointerMove(.{ .x = x, .y = y });
         try self.render();
     }
     pub fn leave(self: *Harness) anyerror!void {
         _ = self.view.hoverAt(null);
+        _ = self.view.embedPointerMove(null);
         try self.render();
+    }
+    /// The text the last render asked assistive technology to announce.
+    pub fn announcement(self: *const Harness) ?[]const u8 {
+        if (self.view.announcement_len == 0) return null;
+        return self.view.announcement[0..self.view.announcement_len];
     }
     /// The tooltip text the last render shows, if any.
     pub fn tooltip(self: *const Harness) ?[]const u8 {
@@ -172,7 +180,10 @@ pub const Harness = struct {
         const context = self.input orelse return error.NoInput;
         self.view.focus = self.focusId();
         switch (self.view.routeKey(input)) {
-            .ignored => {},
+            .ignored => if (self.view.embedKey(input)) {
+                try self.render();
+                return true;
+            },
             .handled => {
                 self.restoreFocus();
                 try self.render();
@@ -325,6 +336,12 @@ pub const Harness = struct {
         switch (self.view.pointerDown(.{ .x = x, .y = y })) {
             .consumed => return self.render(),
             .changed, .ignored => {},
+        }
+        // An embedded leaf that consumes the press takes focus when it is
+        // focusable.
+        if (self.view.embedPointerDown(.{ .x = x, .y = y })) |press| {
+            if (press.focusable) self.setFocus(press.id);
+            return self.render();
         }
         const node = self.at(x, y) orelse {
             try self.render();
@@ -1809,4 +1826,126 @@ test "selections keep stable ids within their capacity" {
     try single.add(1);
     try single.add(2);
     try std.testing.expectEqualSlices(u64, &.{2}, single.items());
+}
+
+const Article = struct {
+    fn build(_: *Article, v: *View) anyerror!void {
+        try v.text("Title", .{ .font = .heading1 });
+        try v.text("Title", .{});
+        try v.text("Title", .{ .font = .code });
+    }
+};
+
+test "text nodes take their font from the style" {
+    var storage: view.Storage(8, 64) = .{};
+    var state: Article = .{};
+    var h = Harness.init(&state, Article.build, storage.buffers(), .{});
+    try h.render();
+    const heading = try h.find(.{ .text = "Title", .nth = 0 });
+    const body = try h.find(.{ .text = "Title", .nth = 1 });
+    const code = try h.find(.{ .text = "Title", .nth = 2 });
+    try std.testing.expect(heading.bounds.height > body.bounds.height and heading.bounds.width > body.bounds.width);
+    try std.testing.expectApproxEqAbs(@as(f32, 5 * 14 * 0.6), code.bounds.width, 0.01);
+
+    // An exact measurer sees the font it measures.
+    const Exact = struct {
+        fn measure(_: ?*anyopaque, text: []const u8, font: view.Font) view.Size {
+            return .{ .width = @as(f32, @floatFromInt(text.len)) * font.size, .height = font.size * 2 };
+        }
+    };
+    var exact = Harness.init(&state, Article.build, storage.buffers(), .{ .options = .{ .measurer = .{ .measure_font = Exact.measure } } });
+    try exact.render();
+    try std.testing.expectEqual(@as(f32, 5 * 32), (try exact.find(.{ .text = "Title", .nth = 0 })).bounds.width);
+    try std.testing.expectEqual(@as(f32, 28), (try exact.find(.{ .text = "Title", .nth = 2 })).bounds.height);
+}
+
+const Chart = struct {
+    values: [3]f64 = .{ 4, 9, 6 },
+    hover: ?usize = null,
+    selected: ?usize = null,
+    announced: ?usize = null,
+    leaves: usize = 0,
+    fn bar(bounds_width: f32, x: f32) ?usize {
+        if (x < 0 or x >= bounds_width) return null;
+        return @intFromFloat(x / (bounds_width / 3));
+    }
+    fn measure(_: *anyopaque, _: view.Theme) view.layout.Measurement {
+        return .{ .minimum = .{ .width = 90, .height = 60 }, .preferred = .{ .width = 90, .height = 60 } };
+    }
+    fn paint(_: *anyopaque, _: *ui.Frame, _: u64, _: Rect) anyerror!void {}
+    fn input(ptr: *anyopaque, _: u64, event: view.EmbedInput) bool {
+        const self: *Chart = @ptrCast(@alignCast(ptr));
+        switch (event) {
+            .pointer_move => |point| {
+                const next = bar(90, point.x);
+                defer self.hover = next;
+                return !std.meta.eql(next, self.hover);
+            },
+            .pointer_leave => {
+                self.leaves += 1;
+                defer self.hover = null;
+                return self.hover != null;
+            },
+            .pointer_down => |point| {
+                self.selected = bar(90, point.x) orelse return false;
+                return true;
+            },
+            .key => |key| {
+                const at = self.selected orelse 0;
+                self.selected = switch (key.key) {
+                    .left => if (at > 0) at - 1 else at,
+                    .right => @min(at + 1, 2),
+                    else => return false,
+                };
+                return true;
+            },
+        }
+    }
+    fn build(self: *Chart, v: *View) anyerror!void {
+        try v.column(.{});
+        _ = try v.button("Before", .{});
+        try v.embed(.{ .context = self, .measure = measure, .paint = paint, .focusable = true, .input = input }, .{ .key = 1, .name = "Sales" });
+        _ = try v.button("After", .{});
+        try v.end();
+        if (self.selected != self.announced) if (self.selected) |index| {
+            var buffer: [32]u8 = undefined;
+            v.announce(try std.fmt.bufPrint(&buffer, "Bar {d}: {d}", .{ index + 1, self.values[index] }));
+            self.announced = index;
+        };
+    }
+};
+
+test "embedded leaves take pointer and key input and announce changes" {
+    var storage: view.Storage(16, 256) = .{};
+    var state: Chart = .{};
+    var h = Harness.init(&state, Chart.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    const chart = try h.find(.{ .key = 1 });
+    const b = chart.bounds;
+    const y = b.y + b.height / 2;
+
+    // Moves arrive in local coordinates; leaving the leaf ends its hover.
+    try h.hoverAt(b.x + 45, y);
+    try std.testing.expectEqual(@as(?usize, 1), state.hover);
+    try h.hoverAt(b.x + b.width + 40, y);
+    try std.testing.expectEqual(@as(?usize, null), state.hover);
+    try std.testing.expectEqual(@as(usize, 1), state.leaves);
+
+    // A consumed press selects and focuses the leaf, which then takes keys.
+    try std.testing.expectEqual(@as(?[]const u8, null), h.announcement());
+    try h.clickAt(b.x + 75, y);
+    try std.testing.expectEqual(@as(?usize, 2), state.selected);
+    try std.testing.expectEqual(chart.id, h.focused().?.id);
+    try h.render();
+    try std.testing.expectEqualStrings("Bar 3: 6", h.announcement().?);
+    try std.testing.expect(try h.key(.{ .key = .left }));
+    try h.render();
+    try std.testing.expectEqualStrings("Bar 2: 9", h.announcement().?);
+    // Keys the leaf declines keep their ordinary routes, such as Tab.
+    try std.testing.expect(try h.key(.{ .key = .tab }));
+    try std.testing.expectEqualStrings("After", h.focused().?.text);
+    try std.testing.expect(try h.key(.{ .key = .tab, .modifiers = .{ .shift = true } }));
+    try std.testing.expectEqual(chart.id, h.focused().?.id);
 }

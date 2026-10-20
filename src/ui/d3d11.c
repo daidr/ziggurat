@@ -42,6 +42,10 @@ typedef struct State {
     IDWriteFactory *text_factory;
     IDWriteTextFormat *format;
     IDWriteInlineObject *ellipsis;
+    /* Formats for fonts other than the default, created on first use and
+       replaced oldest first. */
+    IDWriteTextFormat *variants[8];
+    uint32_t variant_keys[8], variant_next;
     HWND parent, surface;
     UINT width, height, clips;
     D2D1_RECT_F clip_rects[33];
@@ -515,10 +519,28 @@ void zgpu_geometry_stats(State *s,uint32_t *creations,uint32_t *evictions,uint32
     *creations=s->geometry_creations;*evictions=s->geometry_evictions;*cached=0;
     for(unsigned i=0;i<GEOMETRY_CAPACITY;i++)if(s->shapes[i].path)(*cached)++;
 }
-void zgpu_text(State *s, float x, float y, float width, float height, uint32_t rgb, const WCHAR *text, uint32_t len) {
+static void release_variants(State *s){for(uint32_t i=0;i<8;i++){DROP(s->variants[i]);s->variant_keys[i]=0;}s->variant_next=0;}
+/* The text format for a font key (see commands.FontKey); the default format
+   when the key is the default or a variant cannot be made. */
+static IDWriteTextFormat *variant_format(State *s,uint32_t key,float size,uint16_t weight,int italic,int monospace){
+    if(key==0)return s->format;
+    for(uint32_t i=0;i<8;i++)if(s->variants[i]&&s->variant_keys[i]==key)return s->variants[i];
+    IDWriteTextFormat *format=NULL;
+    HRESULT hr=IDWriteFactory_CreateTextFormat(s->text_factory,monospace?L"Consolas":L"Segoe UI",NULL,(DWRITE_FONT_WEIGHT)weight,
+        italic?DWRITE_FONT_STYLE_ITALIC:DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,size,L"",&format);
+    if(FAILED(hr)||!format)return s->format;
+    OWN(format);
+    const DWRITE_TRIMMING trimming={DWRITE_TRIMMING_GRANULARITY_CHARACTER,0,0};
+    if(FAILED(IDWriteTextFormat_SetParagraphAlignment(format,DWRITE_PARAGRAPH_ALIGNMENT_CENTER))||FAILED(IDWriteTextFormat_SetWordWrapping(format,DWRITE_WORD_WRAPPING_NO_WRAP))||
+       FAILED(IDWriteTextFormat_SetTrimming(format,&trimming,s->ellipsis))){DROP(format);return s->format;}
+    uint32_t slot=s->variant_next;s->variant_next=(slot+1)%8;
+    DROP(s->variants[slot]);s->variants[slot]=format;s->variant_keys[slot]=key;
+    return format;
+}
+void zgpu_text(State *s, float x, float y, float width, float height, uint32_t rgb, const WCHAR *text, uint32_t len, uint32_t key, float size, uint16_t weight, int italic, int monospace) {
     const D2D1_RECT_F r = rectangle(x,y,width,height);
     brush_color(s, rgb);
-    ID2D1RenderTarget_DrawText(RT(s), text, len, s->format, &r, (ID2D1Brush *)s->brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+    ID2D1RenderTarget_DrawText(RT(s), text, len, variant_format(s,key,size,weight,italic,monospace), &r, (ID2D1Brush *)s->brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
 }
 typedef struct PreparedClip {float x,y,width,height;} PreparedClip;
 float zgpu_scale(State *s){return s->dpi/96.0f;}
@@ -643,6 +665,7 @@ void zgpu_destroy(State *s) {
     }
     zgpu_layer_release(s);
     destroy_surface(s);
+    release_variants(s);
     DROP(s->format); DROP(s->ellipsis); DROP(s->text_factory); DROP(s->factory);
     if(s->class_owned)release_surface_class();
     free(s); InterlockedDecrement(&live_resources);
