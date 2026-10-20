@@ -1,6 +1,6 @@
 const std = @import("std");
 const Cancel = @import("cancel.zig").Cancel;
-const guardSends = @import("cancel.zig").guardSends;
+const guard = @import("cancel.zig").guard;
 
 pub const Header = std.http.Header;
 
@@ -253,7 +253,7 @@ const Exchange = struct {
             .privileged_headers = credentials,
         }) catch |err| return mapConnect(err);
         const http_request = &self.request.?;
-        guardSends(http_request.connection.?);
+        guard(http_request.connection.?);
         if (self.cancel) |token| {
             try token.attach(http_request.connection.?.stream_reader.getStream().handle);
             self.attached = true;

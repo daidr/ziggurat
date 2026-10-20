@@ -14,7 +14,7 @@ try host.use(plugin.plugin());
 ```
 
 - `directory` 必须是绝对路径。页面只给出其中的文件名；打开可写数据库时，缺失的目录（包括 `directory` 本身）会被创建。
-- SQLite 在 `init` 时以 `std.DynLib` 加载：`library` 为 null 时依次尝试系统库（Windows 为 `winsqlite3.dll`、`sqlite3.dll`，Linux 为 `libsqlite3.so.0`、`libsqlite3.so`），也可以给出路径。版本须不低于 3.7.14。加载失败时插件照常启动，页面打开数据库以 `unsupported` 失败。应用要随包分发自己的 SQLite 时，在应用的清单中声明该库，并把路径传给 `library`。宿主 Zig 代码直接使用数据库时用可选的 [`ziggurat_sqlite`](sqlite.md) 模块；插件在运行时加载库，因此不需要先拉取 amalgamation，也留在 `test` 和 `check` 中。
+- SQLite 在 `init` 时以 `std.DynLib` 加载：`library` 为 null 时依次尝试系统库（Windows 为 `winsqlite3.dll`、`sqlite3.dll`，Linux 为 `libsqlite3.so.0`、`libsqlite3.so`），也可以给出路径。版本须不低于 3.7.14；`RETURNING`（3.35）等较新的语法取决于所加载库的版本，Windows 自带的 `winsqlite3.dll` 可能较旧。加载失败时插件照常启动，页面打开数据库以 `unsupported` 失败。应用要随包分发自己的 SQLite 时，在应用的清单中声明该库，并把路径传给 `library`。宿主 Zig 代码直接使用数据库时用可选的 [`ziggurat_sqlite`](sqlite.md) 模块；插件在运行时加载库，因此不需要先拉取 amalgamation，也留在 `test` 和 `check` 中。
 - `workers`（默认 2）个 worker 由 `init` 启动、`deinit` join，插件不使用全局线程池。同一连接的操作按到达顺序逐个执行，不同连接可以并行。`allocator` 必须线程安全。
 - `busy_timeout_ms`（默认 5000）是等待其他连接所持锁的时间，负数表示不等待。
 - `max_result_bytes`（默认 64 MiB）限制一次查询返回的行，超过时以 `limit` 失败。

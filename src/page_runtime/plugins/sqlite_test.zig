@@ -205,7 +205,9 @@ test "values keep their storage class through execute and query" {
     try std.testing.expectEqualStrings("", field(third[4], "blob").string);
 
     // RETURNING rows of an execute are consumed; changes count the statement.
-    var updated = try f.execute(db, "UPDATE t SET n = 1 WHERE id > ? RETURNING id", &.{integer("1")});
+    // RETURNING needs SQLite 3.35; Windows' own library may be older.
+    const returning = f.plugin.library.?.libversion_number() >= 3_035_000;
+    var updated = try f.execute(db, if (returning) "UPDATE t SET n = 1 WHERE id > ? RETURNING id" else "UPDATE t SET n = 1 WHERE id > ?", &.{integer("1")});
     defer updated.deinit();
     try std.testing.expectEqual(2, field(updated.value, "changes").integer);
 

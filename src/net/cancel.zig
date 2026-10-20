@@ -46,16 +46,72 @@ pub const Cancel = struct {
 
 pub fn shutdownSocket(socket: std.posix.socket_t) void {
     std.posix.shutdown(socket, .both) catch {};
+    // A Windows shutdown does not end a receive already waiting for data;
+    // aborting the socket's pending I/O does.
+    if (builtin.os.tag == .windows) _ = std.os.windows.kernel32.CancelIoEx(@ptrCast(socket), null);
 }
 
 /// The standard Windows stream writer treats sending after a shutdown as
-/// unreachable, but `Cancel` shuts sockets down while the worker may still be
-/// writing. Route the connection's socket writes through a sender that reports
-/// that case as an ordinary write failure. Other targets map it to an error
-/// already. Call on the worker before the socket can be attached.
-pub fn guardSends(connection: *std.http.Client.Connection) void {
+/// unreachable, and its reader treats an aborted receive the same way, but
+/// `Cancel` shuts sockets down and aborts their I/O while the worker may be
+/// writing or reading. Route the connection's socket I/O through functions
+/// that report those cases as ordinary failures. Other targets map them to
+/// errors already. Call on the worker before the socket can be attached.
+pub fn guard(connection: *std.http.Client.Connection) void {
     if (builtin.os.tag != .windows) return;
     connection.stream_writer.interface.vtable = &guarded_vtable;
+    connection.stream_reader.interface_state.vtable = &guarded_reader_vtable;
+}
+
+const guarded_reader_vtable: std.Io.Reader.VTable = .{ .stream = guardedStream, .readVec = guardedReadVec };
+
+fn guardedStream(io_r: *std.Io.Reader, io_w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+    const dest = limit.slice(try io_w.writableSliceGreedy(1));
+    var bufs: [1][]u8 = .{dest};
+    const n = try guardedReadVec(io_r, &bufs);
+    io_w.advance(n);
+    return n;
+}
+
+fn guardedReadVec(io_r: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
+    const ws2_32 = std.os.windows.ws2_32;
+    const reader: *std.net.Stream.Reader = @alignCast(@fieldParentPtr("interface_state", io_r));
+    var iovecs: [8]ws2_32.WSABUF = undefined;
+    const bufs_n, const data_size = try io_r.writableVectorWsa(&iovecs, data);
+    const n = receiveSome(reader, iovecs[0..bufs_n]) catch |err| {
+        reader.error_state = err;
+        return error.ReadFailed;
+    };
+    if (n == 0) return error.EndOfStream;
+    if (n > data_size) {
+        io_r.end += n - data_size;
+        return data_size;
+    }
+    return n;
+}
+
+fn receiveSome(reader: *std.net.Stream.Reader, bufs: []std.os.windows.ws2_32.WSABUF) std.net.Stream.ReadError!u32 {
+    const windows = std.os.windows;
+    const ws2_32 = windows.ws2_32;
+    const handle = reader.net_stream.handle;
+    var flags: u32 = 0;
+    var overlapped: windows.OVERLAPPED = std.mem.zeroes(windows.OVERLAPPED);
+    var n: u32 = 0;
+    if (ws2_32.WSARecv(handle, bufs.ptr, @intCast(bufs.len), &n, &flags, &overlapped, null) == ws2_32.SOCKET_ERROR) {
+        var failure = ws2_32.WSAGetLastError();
+        if (failure == .WSA_IO_PENDING) {
+            var result_flags: u32 = undefined;
+            if (ws2_32.WSAGetOverlappedResult(handle, &overlapped, &n, windows.TRUE, &result_flags) != windows.FALSE) return n;
+            failure = ws2_32.WSAGetLastError();
+        }
+        return switch (failure) {
+            .WSAENETDOWN => error.NetworkSubsystemFailed,
+            .WSAENOTCONN => error.SocketNotConnected,
+            // Aborted, shut down, reset or timed out.
+            else => error.ConnectionResetByPeer,
+        };
+    }
+    return n;
 }
 
 const guarded_vtable: std.Io.Writer.VTable = .{ .drain = guardedDrain };
