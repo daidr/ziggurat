@@ -2484,6 +2484,8 @@ const app_examples = [_]Example{
 fn addExamples(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
     if (target.result.os.tag != .windows and target.result.os.tag != .linux) return;
     const all = b.step("examples", "Compile every application example");
+    const tests = b.step("test-examples", "Run the headless view tests inside the application examples");
+    b.top_level_steps.get("test").?.step.dependOn(tests);
     var imports: [app_example_imports.len + 1]std.Build.Module.Import = undefined;
     for (app_example_imports, 0..) |name, index| imports[index] = .{ .name = name, .module = b.modules.get(name) orelse @panic(name) };
     const webview = b.modules.get("ziggurat_webview");
@@ -2495,6 +2497,9 @@ fn addExamples(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         }
         const exe = addExample(b, example.name, example.path, target, optimize, b.allocator.dupe(std.Build.Module.Import, imports[0..count]) catch @panic("OOM"));
         all.dependOn(&exe.step);
+        const example_tests = b.addTest(.{ .name = b.fmt("example-{s}-test", .{example.name}), .root_module = exe.root_module });
+        b.top_level_steps.get("check").?.step.dependOn(&example_tests.step);
+        tests.dependOn(&b.addRunArtifact(example_tests).step);
     }
 }
 
