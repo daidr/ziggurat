@@ -13,6 +13,7 @@ pub const Entry = model.Entry;
 pub const Store = model.Store;
 pub const Constraints = model.Constraints;
 pub const Plan = model.Plan;
+pub const Reach = model.Reach;
 
 fn owner(window: z.Window, expected: std.Thread.Id) !void {
     if (std.Thread.getCurrentId() != expected or expected != window.app.owner) return error.WrongThread;
@@ -108,6 +109,26 @@ pub const Tracker = struct {
         return self.value orelse error.NormalBoundsRequired;
     }
 };
+
+pub const Displacement = enum { special, contained, partial, offscreen };
+/// Classifies the current native frame against a topology refreshed after a
+/// display change, such as a system.desktop monitors notification. Query only;
+/// relocation is an explicit Restorer started from the Tracker snapshot.
+/// Special states report special: the system owns those frames.
+pub fn displacement(window: z.Window, topology: *const Topology) !Displacement {
+    try owner(window, window.app.owner);
+    const scope = window.beginCallback() orelse return error.Closed;
+    defer scope.end();
+    if (!(try window.capabilities()).client_position) return error.UnsupportedCapability;
+    if (!normal(try window.state())) return .special;
+    const current = try native.current(window);
+    _ = try monitorIndex(topology, current.key);
+    return switch (try model.reach(current.frame, topology)) {
+        .contained => .contained,
+        .partial => .partial,
+        .offscreen => .offscreen,
+    };
+}
 
 pub const Progress = enum { waiting, needs_show, complete };
 pub const Phase = enum { normalize, target, fit, geometry, mode, complete, cancelled };

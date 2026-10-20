@@ -2,7 +2,7 @@
 
 `ziggurat_window_placement` 是只依赖核心的可选模块。纯 `model`、`codec` 和 `Files` 不依赖 UI、WebView 或 renderer；它们也可单独导入。模块没有全局状态、allocator、后台线程、自动存盘、轮询或绘制期磁盘访问。
 
-首片提供有界显示器快照、正常客户区跟踪、工作区约束、离屏恢复，以及版本化存储和真实窗口应用。它不注册显示器变化通知；宿主在显式更新阶段调用 `refresh`，再决定是否重新放置。W04 的完整显示器变化集成仍待后续。
+它提供有界显示器快照、正常客户区跟踪、工作区约束、离屏恢复、显示器变化后的可达性判断，以及版本化存储和真实窗口应用。模块自身不注册显示器变化通知；宿主用 `system.desktop.Watch` 订阅 monitors 变化，在回调里调用 `refresh` 与 `displacement`，再决定是否重新放置，见下文“显示器变化”。
 
 ## 坐标与约束
 
@@ -54,6 +54,29 @@ switch (try restore.advance()) {
 
 每次调用持有 Window callback scope，重入同一 Tracker/Restorer 返回 `Busy`。关闭回调不会在这些方法尚使用宿主上下文时提前释放它。原生步骤可能部分成功；该事务不宣称跨 WM 操作的原子回滚。拓扑快照已经过期或原生归属发生变化时，宿主应显式刷新并用原 State 建立新 Restorer，不累积历史窗口记录。
 
+## 显示器变化
+
+```zig
+var watch = system.desktop.Watch.init(&host, Host.desktopChanged);
+try watch.start(app, .{ .monitors = true });
+
+fn desktopChanged(context: *anyopaque, change: system.desktop.Change) void {
+    const host: *Host = @ptrCast(@alignCast(context));
+    if (!change.monitors) return;
+    host.topology = placement.refresh(host.window) catch return;
+    switch (placement.displacement(host.window, &host.topology) catch return) {
+        .offscreen => host.restorer = placement.Restorer.init(host.window, host.tracker.snapshot() catch return, host.topology, host.constraints) catch return,
+        .special, .contained, .partial => {},
+    }
+}
+```
+
+`displacement` 只查询，不移动窗口：它读取当前原生 frame，对照宿主刚刷新的 `Topology` 分类。普通状态下，frame 完全落在某个 workarea 内为 `contained`；与某个 workarea 在两个方向上都至少重叠 `model.min_reachable`（48 个原生桌面单位，frame 更小时要求该方向完全重叠）为 `partial`；否则为 `offscreen`。最大化、最小化、全屏和待进入全屏都返回 `special`，这些 frame 由系统管理，Tracker 继续保留正常矩形。当前显示器不在传入的快照中时返回 `DisplayChanged`，表示快照已过期，应重新 `refresh`。
+
+建议只在 `offscreen` 时重新放置。`partial` 可能是用户有意拖到屏幕边缘，是否收回由宿主决定。重新放置使用 Tracker 最近确认的正常状态建立新的 `Restorer`，按真实几何事件推进，规则与启动恢复相同：原显示器仍在时保留相对工作区的偏移并夹紧，显示器已移除时按重叠、距离和 primary 选择目标并居中。正在进行的 Restorer 应先 `cancel`，再用新快照建立。
+
+Windows 在显示器移除时通常自己把窗口移到剩余显示器；X11 窗口管理器（如 Openbox）通常把越界窗口夹到可见边缘，此时结果是 `partial`。模块不假设任何一种行为，只报告观测到的结果。`refresh` 与 `displacement` 都在 owner 线程同步执行，不分配，也不注册回调。
+
 ## 有界存储与 worker I/O
 
 ```zig
@@ -86,4 +109,8 @@ save 在同一目录创建独占临时文件，写入、flush、file sync 后原
 
 `zig build smoke-window-placement` 使用真实 Win32 或 GTK/X11。Windows 在未激活的独立 desktop 子进程中运行，父进程等待子进程退出后释放 desktop。Linux 使用隔离 Xvfb/Openbox 和 `-- --require-wm`，另以 `GDK_SCALE=2` 验证。闭环包括离屏恢复、原生 frame 包含工作区、max/full 保留正常矩形、worker 保存读取、窗口销毁重建后恢复、实际状态/几何确认、普通/raw 关闭重入与最终 records=0。
 
-没有以这些检查声称已经验证真实热插拔、多台物理显示器的混合 DPI、全部 WM、Wayland 定位、macOS 或视觉质量。显示器变化事件与更广存储迁移继续属于后续切片。
+同一 smoke 还把已恢复的窗口移到所有显示器之外：Win32 接受越界位置，期望 `offscreen`；Openbox 把 frame 夹到可见边缘，接受 `partial`。随后以 Tracker 快照恢复，检查 frame 回到 workarea、`displacement` 为 `contained`，最大化期间为 `special`。
+
+`zig build smoke-window-placement-displays`（仅 Linux，需隔离 Xvfb 与窗口管理器，由 `scripts/linux-window-state.sh` 最后运行）用 RandR 把 Xvfb 唯一输出的 CRTC 缩小一半，产生真实的显示器几何变化。窗口事先放在原显示器右下四分之一，缩小后不再被覆盖。只有 `system.desktop.Watch` 的 monitors 回调能推进检查，之后 `refresh` 读到新尺寸，`displacement` 为 `offscreen`，Restorer 把窗口放回新的 workarea。1x 与 `GDK_SCALE=2` 均已在本地通过，结束时恢复原模式。
+
+没有以这些检查声称已经验证真实热插拔、多台物理显示器的混合 DPI、全部 WM、Wayland 定位、macOS 或视觉质量。Windows 的显示器变化只在交叉编译中检查，没有在真实系统上改变显示器配置；更广的存储迁移继续属于后续切片。

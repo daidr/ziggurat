@@ -163,6 +163,28 @@ pub fn resolveOn(state: State, topology: *const Topology, index: u8, metrics: Me
     return .{ .bounds = .{ .position = position, .width = width, .height = height }, .display_index = index, .maximized = state.maximized, .fullscreen = state.fullscreen, .always_on_top = state.always_on_top, .recovered = !same or width != state.normal.width or height != state.normal.height or !std.meta.eql(position, state.normal.position) or state.units_per_dip != metrics.units_per_dip };
 }
 
+/// Smallest frame overlap, in native desktop units per axis, that keeps a
+/// window reachable with a pointer. Smaller frames must overlap entirely.
+pub const min_reachable = 48;
+pub const Reach = enum { contained, partial, offscreen };
+/// Classifies a native frame against current workareas. A frame that no single
+/// workarea overlaps by min_reachable on both axes is offscreen.
+pub fn reach(frame: Rect, topology: *const Topology) !Reach {
+    try frame.validate();
+    if (topology.count == 0 or topology.count > max_monitors) return error.NoDisplays;
+    const need_width = @min(frame.width, min_reachable);
+    const need_height = @min(frame.height, min_reachable);
+    var result: Reach = .offscreen;
+    for (topology.items()) |monitor| {
+        const work = monitor.work;
+        if (frame.x >= work.x and frame.y >= work.y and frame.right() <= work.right() and frame.bottom() <= work.bottom()) return .contained;
+        const width = @min(frame.right(), work.right()) - @max(@as(i64, frame.x), work.x);
+        const height = @min(frame.bottom(), work.bottom()) - @max(@as(i64, frame.y), work.y);
+        if (width >= need_width and height >= need_height) result = .partial;
+    }
+    return result;
+}
+
 pub const Entry = struct { key: Key, state: State };
 /// Caller storage; no allocator, callbacks, filesystem, hidden cache or Window.
 /// The caller serializes access and keeps storage alive through every use.
