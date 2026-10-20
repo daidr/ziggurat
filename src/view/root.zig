@@ -4388,6 +4388,14 @@ pub const Host = struct {
     fn focus(self: *Host, id: u64) void {
         self.context.focusControl(id) catch |err| switch (err) {
             error.NotAttached => self.context.input_state.setFocused(id),
+            // The system kept another window in front, as Windows does for
+            // a process without the foreground. The move is the window's
+            // own, so the control still takes its focus, which keys reach
+            // once the window is activated.
+            error.FocusDenied => {
+                if (self.context.input_state.available(id)) self.context.input_state.setFocused(id);
+                self.invalidate();
+            },
             else => self.last_error = err,
         };
     }
