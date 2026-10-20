@@ -1,6 +1,8 @@
 //! Windows UI Automation check for declarative tabs, toolbars, splits,
 //! segments, links, disclosures, breadcrumbs, meters, ratings and
-//! accordions, list boxes, plus form fields and fieldsets, read and driven by a real client on a worker thread.
+//! accordions, list boxes, form fields and fieldsets, plus combo boxes,
+//! search regions, tooltips, avatars and toasts, then trees, tables and
+//! token fields, read and driven by a real client on a worker thread.
 const std = @import("std");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
@@ -41,9 +43,20 @@ const State = struct {
     terms: bool = false,
     font: usize = 0,
     fonts: view.ScrollModel = .{},
+    face: usize = 0,
+    back: usize = 0,
+    notices: view.Toasts(1) = .{},
     fn build(self: *State, v: *view.View) anyerror!void {
+        try v.search(.{ .name = "Find" });
+        try v.comboBox(faces[self.face], .{ .name = "Typeface" });
+        for (faces, 0..) |face, i| _ = try v.comboOption(usize, &self.face, i, face, .{});
+        try v.end();
+        if (try v.navButton(.back, .{})) self.back += 1;
+        try v.avatar("Ada Lovelace", null, .{});
+        try v.end();
         try v.toolbar(.{ .gap = 8, .name = "Actions" });
         if (try v.button("Save", .{})) self.saved += 1;
+        try v.tooltip("Save the document");
         try v.end();
         try v.tabs(.{ .name = "Sections" });
         _ = try v.tab(@TypeOf(self.section), &self.section, .general, "General", .{});
@@ -84,7 +97,9 @@ const State = struct {
         try v.end();
         try v.end();
         try v.end();
+        _ = try v.toasts(&self.notices, .{});
     }
+    const faces = [_][]const u8{ "Roman", "Italic" };
 };
 
 const Client = struct {
@@ -93,6 +108,7 @@ const Client = struct {
     /// Read on the owner thread; the worker never touches the Window handle.
     hwnd: c.HWND,
     fence: c.HANDLE,
+    body: *const fn (*Client, *c.IUIAutomation, *c.IUIAutomationElement, *c.IUIAutomationElementArray, *c.IUIAutomationTreeWalker) anyerror!void,
     err: ?anyerror = null,
 
     /// Repaint on the owner thread after earlier UIA requests, so the next
@@ -199,7 +215,21 @@ const Client = struct {
         var walker: ?*c.IUIAutomationTreeWalker = null;
         try check(api.?.lpVtbl.*.get_ControlViewWalker.?(api.?, &walker));
         defer release(walker.?);
+        try self.body(self, api.?, root.?, elements.?, walker.?);
+    }
+    /// Every descendant of `root`; the caller releases the array.
+    fn descendants(api: *c.IUIAutomation, root: *c.IUIAutomationElement) !*c.IUIAutomationElementArray {
+        var condition: ?*c.IUIAutomationCondition = null;
+        try check(api.lpVtbl.*.CreateTrueCondition.?(api, &condition));
+        defer release(condition.?);
+        var elements: ?*c.IUIAutomationElementArray = null;
+        try check(root.lpVtbl.*.FindAll.?(root, c.TreeScope_Descendants, condition.?, &elements));
+        return elements.?;
+    }
 
+    fn controls(self: *Client, _: *c.IUIAutomation, _: *c.IUIAutomationElement, all: *c.IUIAutomationElementArray, tree_walker: *c.IUIAutomationTreeWalker) !void {
+        const elements: ?*c.IUIAutomationElementArray = all;
+        const walker: ?*c.IUIAutomationTreeWalker = tree_walker;
         const toolbar = try find(elements.?, c.UIA_ToolBarControlTypeId, "Actions");
         defer release(toolbar);
         const save = try find(elements.?, c.UIA_ButtonControlTypeId, "Save");
@@ -378,6 +408,135 @@ const Client = struct {
         try self.synchronize();
         try check(option.?.lpVtbl.*.get_CurrentIsSelected.?(option.?, &selected));
         try std.testing.expect(selected != 0);
+
+        // A combo box reports its value read-only and opens its list through
+        // ExpandCollapse, inside a search landmark.
+        const typeface = try find(elements.?, c.UIA_ComboBoxControlTypeId, "Typeface");
+        defer release(typeface);
+        const find_region = try parentOf(walker.?, typeface);
+        defer release(find_region);
+        try std.testing.expect(try named(find_region, "Find"));
+        landmark = try property(find_region, c.UIA_LandmarkTypePropertyId);
+        try std.testing.expectEqual(@as(c_long, c.UIA_SearchLandmarkTypeId), landmark.unnamed_0.unnamed_0.unnamed_0.lVal);
+        _ = c.VariantClear(&landmark);
+        var current: ?*c.IUIAutomationValuePattern = null;
+        try check(typeface.lpVtbl.*.GetCurrentPatternAs.?(typeface, c.UIA_ValuePatternId, &c.IID_IUIAutomationValuePattern, @ptrCast(&current)));
+        defer release(current.?);
+        try check(current.?.lpVtbl.*.get_CurrentIsReadOnly.?(current.?, &read_only));
+        try std.testing.expect(read_only != 0);
+        try expectText(typeface, c.UIA_ValueValuePropertyId, "Roman");
+        var dropdown: ?*c.IUIAutomationExpandCollapsePattern = null;
+        try check(typeface.lpVtbl.*.GetCurrentPatternAs.?(typeface, c.UIA_ExpandCollapsePatternId, &c.IID_IUIAutomationExpandCollapsePattern, @ptrCast(&dropdown)));
+        defer release(dropdown.?);
+        try check(dropdown.?.lpVtbl.*.Expand.?(dropdown.?));
+        try self.synchronize();
+        try check(dropdown.?.lpVtbl.*.get_CurrentExpandCollapseState.?(dropdown.?, &expansion));
+        try std.testing.expectEqual(@as(c.enum_ExpandCollapseState, c.ExpandCollapseState_Expanded), expansion);
+        try check(dropdown.?.lpVtbl.*.Collapse.?(dropdown.?));
+        try self.synchronize();
+        try check(dropdown.?.lpVtbl.*.get_CurrentExpandCollapseState.?(dropdown.?, &expansion));
+        try std.testing.expectEqual(@as(c.enum_ExpandCollapseState, c.ExpandCollapseState_Collapsed), expansion);
+
+        // Navigation buttons invoke, avatars are images and a tooltip is
+        // its control's help text.
+        const back = try find(elements.?, c.UIA_ButtonControlTypeId, "Back");
+        defer release(back);
+        var step: ?*c.IUIAutomationInvokePattern = null;
+        try check(back.lpVtbl.*.GetCurrentPatternAs.?(back, c.UIA_InvokePatternId, &c.IID_IUIAutomationInvokePattern, @ptrCast(&step)));
+        defer release(step.?);
+        try check(step.?.lpVtbl.*.Invoke.?(step.?));
+        const portrait = try find(elements.?, c.UIA_ImageControlTypeId, "Ada Lovelace");
+        release(portrait);
+        try expectText(save, c.UIA_HelpTextPropertyId, "Save the document");
+        try self.synchronize();
+
+        // A toast is a polite live region named by its message.
+        const notice = try find(elements.?, c.UIA_GroupControlTypeId, "Draft saved");
+        defer release(notice);
+        var live = try property(notice, c.UIA_LiveSettingPropertyId);
+        try std.testing.expectEqual(@as(c.VARTYPE, c.VT_I4), live.unnamed_0.unnamed_0.vt);
+        try std.testing.expectEqual(@as(c_long, c.Polite), live.unnamed_0.unnamed_0.unnamed_0.lVal);
+        _ = c.VariantClear(&live);
+    }
+
+    fn collections(self: *Client, api: *c.IUIAutomation, root: *c.IUIAutomationElement, elements: *c.IUIAutomationElementArray, walker: *c.IUIAutomationTreeWalker) !void {
+        // A tree holds tree items that expand and collapse; a leaf reports
+        // that it has nothing to expand.
+        const folders = try find(elements, c.UIA_TreeControlTypeId, "Folders");
+        defer release(folders);
+        const projects = try find(elements, c.UIA_TreeItemControlTypeId, "Projects");
+        defer release(projects);
+        try std.testing.expectEqual(@as(c.CONTROLTYPEID, c.UIA_TreeControlTypeId), try parentType(walker, projects));
+        var expander: ?*c.IUIAutomationExpandCollapsePattern = null;
+        try check(projects.lpVtbl.*.GetCurrentPatternAs.?(projects, c.UIA_ExpandCollapsePatternId, &c.IID_IUIAutomationExpandCollapsePattern, @ptrCast(&expander)));
+        defer release(expander.?);
+        var expansion: c.enum_ExpandCollapseState = c.ExpandCollapseState_Expanded;
+        try check(expander.?.lpVtbl.*.get_CurrentExpandCollapseState.?(expander.?, &expansion));
+        try std.testing.expectEqual(@as(c.enum_ExpandCollapseState, c.ExpandCollapseState_Collapsed), expansion);
+        try check(expander.?.lpVtbl.*.Expand.?(expander.?));
+        try self.synchronize();
+        try check(expander.?.lpVtbl.*.get_CurrentExpandCollapseState.?(expander.?, &expansion));
+        try std.testing.expectEqual(@as(c.enum_ExpandCollapseState, c.ExpandCollapseState_Expanded), expansion);
+        const expanded = try descendants(api, root);
+        defer release(expanded);
+        const child = try find(expanded, c.UIA_TreeItemControlTypeId, "Ziggurat");
+        defer release(child);
+        const owner = try parentOf(walker, child);
+        defer release(owner);
+        try std.testing.expect(try named(owner, "Projects"));
+        var leaf: ?*c.IUIAutomationExpandCollapsePattern = null;
+        try check(child.lpVtbl.*.GetCurrentPatternAs.?(child, c.UIA_ExpandCollapsePatternId, &c.IID_IUIAutomationExpandCollapsePattern, @ptrCast(&leaf)));
+        defer release(leaf.?);
+        try check(leaf.?.lpVtbl.*.get_CurrentExpandCollapseState.?(leaf.?, &expansion));
+        try std.testing.expectEqual(@as(c.enum_ExpandCollapseState, c.ExpandCollapseState_LeafNode), expansion);
+        const archive = try find(expanded, c.UIA_TreeItemControlTypeId, "Archive");
+        defer release(archive);
+        var item: ?*c.IUIAutomationSelectionItemPattern = null;
+        try check(archive.lpVtbl.*.GetCurrentPatternAs.?(archive, c.UIA_SelectionItemPatternId, &c.IID_IUIAutomationSelectionItemPattern, @ptrCast(&item)));
+        defer release(item.?);
+        try check(item.?.lpVtbl.*.Select.?(item.?));
+        try self.synchronize();
+        var selected: c.BOOL = 0;
+        try check(item.?.lpVtbl.*.get_CurrentIsSelected.?(item.?, &selected));
+        try std.testing.expect(selected != 0);
+
+        // A table is a data grid with invokable column headers that report
+        // their sort, and rows that join a multiple selection.
+        const files = try find(expanded, c.UIA_DataGridControlTypeId, "Files");
+        defer release(files);
+        var selection: ?*c.IUIAutomationSelectionPattern = null;
+        try check(files.lpVtbl.*.GetCurrentPatternAs.?(files, c.UIA_SelectionPatternId, &c.IID_IUIAutomationSelectionPattern, @ptrCast(&selection)));
+        defer release(selection.?);
+        var multiple: c.BOOL = 0;
+        try check(selection.?.lpVtbl.*.get_CurrentCanSelectMultiple.?(selection.?, &multiple));
+        try std.testing.expect(multiple != 0);
+        const size = try find(expanded, c.UIA_HeaderItemControlTypeId, "Size");
+        defer release(size);
+        try std.testing.expectEqual(@as(c.CONTROLTYPEID, c.UIA_HeaderControlTypeId), try parentType(walker, size));
+        var invoke: ?*c.IUIAutomationInvokePattern = null;
+        try check(size.lpVtbl.*.GetCurrentPatternAs.?(size, c.UIA_InvokePatternId, &c.IID_IUIAutomationInvokePattern, @ptrCast(&invoke)));
+        defer release(invoke.?);
+        try check(invoke.?.lpVtbl.*.Invoke.?(invoke.?));
+        try self.synchronize();
+        try expectText(size, c.UIA_ItemStatusPropertyId, "ascending");
+        inline for (.{ "alpha.txt", "gamma.txt" }) |name| {
+            const row = try find(expanded, c.UIA_DataItemControlTypeId, name);
+            defer release(row);
+            var row_item: ?*c.IUIAutomationSelectionItemPattern = null;
+            try check(row.lpVtbl.*.GetCurrentPatternAs.?(row, c.UIA_SelectionItemPatternId, &c.IID_IUIAutomationSelectionItemPattern, @ptrCast(&row_item)));
+            defer release(row_item.?);
+            try check(row_item.?.lpVtbl.*.AddToSelection.?(row_item.?));
+            try self.synchronize();
+        }
+
+        // Tokens are items of their field, each with a remove button.
+        const tags = try find(expanded, c.UIA_ListControlTypeId, "Tags");
+        defer release(tags);
+        try expectText(tags, c.UIA_LocalizedControlTypePropertyId, "token field");
+        const green = try find(expanded, c.UIA_ListItemControlTypeId, "green");
+        defer release(green);
+        try expectText(green, c.UIA_LocalizedControlTypePropertyId, "token");
+        try std.testing.expectEqual(@as(c.CONTROLTYPEID, c.UIA_ListControlTypeId), try parentType(walker, green));
     }
     fn expectFlag(element: *c.IUIAutomationElement, id: c.PROPERTYID, expected: bool) !void {
         var value = try property(element, id);
@@ -399,16 +558,17 @@ pub fn run(allocator: std.mem.Allocator) !void {
     const app = try z.App.init(allocator);
     defer app.deinit();
     var state: State = .{};
+    _ = try state.notices.show("Draft saved", .{ .duration = 0 });
     var storage: view.Storage(64, 768) = .{};
     var host = view.Host.init(&state, State.build, storage.buffers(), .{});
     host.context.render_mode = .gdi;
-    const window = try app.createWindow(.{ .width = 360, .height = 880 });
+    const window = try app.createWindow(.{ .width = 360, .height = 940 });
     try host.attach(window);
     paint(window);
     if (host.last_error) |err| return err;
     const fence = c.CreateEventW(null, 1, 0, null) orelse return error.EventCreationFailed;
     defer _ = c.CloseHandle(fence);
-    var client: Client = .{ .app = app, .window = window, .hwnd = window.nativeHandle(), .fence = fence };
+    var client: Client = .{ .app = app, .window = window, .hwnd = window.nativeHandle(), .fence = fence, .body = Client.controls };
     var watchdog: Watchdog = .{ .app = app };
     try watchdog.start();
     defer watchdog.stop();
@@ -427,7 +587,79 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(.reviews, state.open.?);
     try std.testing.expect(state.terms);
     try std.testing.expectEqual(@as(usize, 1), state.font);
+    try std.testing.expectEqual(@as(usize, 1), state.back);
+    try std.testing.expectEqual(@as(usize, 0), state.face);
     try app.dispatch();
     try std.testing.expect(host.context.window == null);
-    std.debug.print("view UIA smoke passed: real client tab list/tab selection, toolbar parent, splitter RangeValue, segment selection, link invoke, disclosure ExpandCollapse, navigation landmark, read-only meter, rating RangeValue, accordion sections, form field help/validity and list box selection\n", .{});
+    std.debug.print("view UIA smoke passed: real client tab list/tab selection, toolbar parent, splitter RangeValue, segment selection, link invoke, disclosure ExpandCollapse, navigation landmark, read-only meter, rating RangeValue, accordion sections, form field help/validity, list box selection, combo box Value/ExpandCollapse, search landmark, navigation button, image and tooltip help text\n", .{});
+}
+
+const Collections = struct {
+    open: bool = false,
+    tree_storage: [2]u64 = undefined,
+    tree: view.Selection = undefined,
+    sort: ?view.Sort = null,
+    table_storage: [4]u64 = undefined,
+    table: view.Selection = undefined,
+    tags: [2][]const u8 = .{ "red", "green" },
+    fn build(self: *Collections, v: *view.View) anyerror!void {
+        try v.tree(&self.tree, .{ .name = "Folders", .self_align = .stretch });
+        _ = try v.treeItem(1, &self.open, "Projects", .{});
+        if (self.open) {
+            _ = try v.treeItem(2, null, "Ziggurat", .{});
+            try v.end();
+        }
+        try v.end();
+        _ = try v.treeItem(3, null, "Archive", .{});
+        try v.end();
+        try v.end();
+        const columns = [_]view.Column{ .{ .title = "Name" }, .{ .title = "Size" } };
+        _ = try v.table(&columns, &self.sort, &self.table, .{ .name = "Files", .self_align = .stretch });
+        for ([_][]const u8{ "alpha.txt", "beta.txt", "gamma.txt" }, 1..) |name, id| {
+            _ = try v.tableRow(id, name, .{});
+            try v.text(name, .{});
+            try v.textf("{d} KB", .{id * 10}, .{});
+            try v.end();
+        }
+        try v.end();
+        try v.tokenField(.{ .name = "Tags", .self_align = .stretch });
+        for (self.tags) |tag| _ = try v.token(tag, .{ .key = view.key(tag) });
+        try v.end();
+    }
+};
+
+/// Trees, tables and token fields, on their own App after `run`.
+pub fn runCollections(allocator: std.mem.Allocator) !void {
+    if (!ui.capabilities.accessibility) return;
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    var state: Collections = .{};
+    state.tree = .init(.single, &state.tree_storage);
+    state.table = .init(.multiple, &state.table_storage);
+    var storage: view.Storage(64, 512) = .{};
+    var host = view.Host.init(&state, Collections.build, storage.buffers(), .{});
+    host.context.render_mode = .gdi;
+    const window = try app.createWindow(.{ .width = 360, .height = 480 });
+    try host.attach(window);
+    paint(window);
+    if (host.last_error) |err| return err;
+    const fence = c.CreateEventW(null, 1, 0, null) orelse return error.EventCreationFailed;
+    defer _ = c.CloseHandle(fence);
+    var client: Client = .{ .app = app, .window = window, .hwnd = window.nativeHandle(), .fence = fence, .body = Client.collections };
+    var watchdog: Watchdog = .{ .app = app };
+    try watchdog.start();
+    defer watchdog.stop();
+    const thread = try std.Thread.spawn(.{}, Client.worker, .{&client});
+    defer thread.join();
+    try app.run();
+    try std.testing.expect(!watchdog.expired);
+    if (client.err) |err| return err;
+    if (host.last_error) |err| return err;
+    try std.testing.expect(state.open);
+    try std.testing.expectEqualSlices(u64, &.{3}, state.tree.items());
+    try std.testing.expectEqual(@as(?view.Sort, .{ .column = 1 }), state.sort);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 3 }, state.table.items());
+    try app.dispatch();
+    try std.testing.expect(host.context.window == null);
+    std.debug.print("view UIA collections passed: tree ExpandCollapse/LeafNode/selection, data grid header Invoke/ItemStatus and multiple row selection, token field items\n", .{});
 }

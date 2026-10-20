@@ -287,6 +287,9 @@ pub const ScreenPoint = struct { x: i32, y: i32 };
 pub const ClientBounds = struct { position: ?ScreenPoint = null, width: u32, height: u32 };
 pub const WindowCapabilities = struct { client_position: bool, fullscreen: bool, always_on_top: bool, owned_windows: bool = false, modal_windows: bool = false, custom_decoration: bool = false, native_move_resize: bool = false, system_menu: bool = false, transparent: bool = false, backdrop_material: bool = false };
 pub const WindowDecoration = enum { system, borderless, custom };
+/// System backdrop material drawn by the compositor behind the native frame.
+/// `.system` restores the platform default; client content stays opaque.
+pub const WindowBackdrop = enum { system, none, mica, acrylic, mica_alt };
 /// Construction-time native accessibility hosting policy.
 pub const AccessibilityHost = enum { platform, children };
 pub const ResizeEdge = enum(u8) { north_west, north, north_east, west, east, south_west, south, south_east };
@@ -1122,6 +1125,18 @@ pub const Window = struct {
             return err;
         };
         scope.record.emitState();
+    }
+    /// Requires `capabilities().backdrop_material`; the value is not saved by
+    /// the framework and stays on the native window until changed or closed.
+    pub fn setBackdrop(self: Window, material: WindowBackdrop) !void {
+        const scope = try self.beginUpdate();
+        defer endUpdate(scope);
+        if (!backend.capabilities(scope.record).backdrop_material) return error.UnsupportedCapability;
+        self.app.native_failure = null;
+        backend.setBackdrop(scope.record, material) catch |err| {
+            self.reportUpdateFailure(scope.record, err);
+            return err;
+        };
     }
     fn beginUpdate(self: Window) !CallbackScope {
         const scope = self.beginCallback() orelse return error.Closed;

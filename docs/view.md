@@ -114,13 +114,109 @@ Host 在每帧绘制后记录可见的滚动容器（最多 `max_scroll_regions`
 
 启用 `-Daccessibility=true` 时，Windows UIA 把说明映射为 HelpText，错误映射为 IsDataValidForForm = false，必填映射为 IsRequiredForForm，字段集映射为 Group。
 
+### 组合框与建议列表
+
+- `comboBox(current, style)` 与 `end` 配对：先加入一个显示 `current`（当前选项的标签）的字段，再开始它的选项列表，用 `comboOption(T, &selected, value, label, style)` 构建选项。选项每一遍都参与构建和测量，但只在列表打开时放置和绘制；在列表之外调用 `comboOption` 返回 `NotContainer`。名称取 `Style.name`，在 `field` 里没有名称时取字段标签。
+- 激活组合框、或在它有焦点时按 Down/Up 打开列表，当前选项预先高亮。打开时方向键与 Home/End 只移动高亮，焦点仍在组合框上；Enter 或 Space 选中高亮项，Escape、列表外的按下、Tab 或选中都会关闭列表，焦点回到组合框（Tab 随后照常移动焦点）。列表外的按下只关闭列表，不会同时激活下面的控件。
+- `suggestions(style)` 与 `end` 配对，为刚加入的节点（通常是文本输入）开始一个建议列表，`suggestion(label, style)` 加入一条建议，选中的那一遍返回 true，应用在这个分支里把它写回输入。输入或某条建议有焦点、且至少有一条建议时列表打开；Down/Up/Home/End 移动高亮而不移动焦点，Enter 选中高亮项。选中或 Escape 后列表保持关闭，直到建议标签发生变化（例如继续输入）或再次按 Down；焦点离开时关闭。
+- 同一时间最多打开一个列表。列表画在其余内容之上，宽度至少与锚点相同，最高 280 DIP，默认在锚点下方，下方放不下而上方空间更大时翻到上方，并始终夹在窗口内；超出高度的选项被裁剪。选项较多时把它们放进列表里的 `scroll` 容器，高亮项会以最小位移滚入可见区。
+- 搜索输入可以放在 `search(style)` 里：它与 `end` 配对，开始一行（`Style.gap` 为 0 时取 8 DIP），作为以 `Style.name` 命名的搜索区域，其中的控件以它为可访问父节点。
+
+```zig
+try v.search(.{ .name = "查找城市" });
+try v.embed(query.embed(), .{ .grow = 1, .key = 1 });
+try v.suggestions(.{ .name = "城市" });
+for (cities) |city| if (std.mem.startsWith(u8, city, prefix)) {
+    if (try v.suggestion(city, .{ .key = view.key(city) })) choose(city);
+};
+try v.end();
+try v.end();
+```
+
+启用 `-Daccessibility=true` 时，Windows UIA 把组合框映射为 ComboBox / ExpandCollapse / 只读 Value（值为当前标签），打开的列表为其子节点 List，选项为 ListItem；搜索区域为带搜索地标（LandmarkType = Search）的 Group。
+
+### 浮层
+
+- `popupButton(value, expanded, style)` 是一个显示 `value`（例如选中的日期）、画法和读法都像组合框的字段，按下、Enter 或 Space 激活的那一遍返回 true，应用在这个分支里切换紧随其后的浮层的开关。名称取 `Style.name`，在 `field` 里没有名称时取字段标签。
+- `popover(&open, placement, style)` 与 `end` 配对，在前一个节点（锚点）旁边开始一个浮在窗口上的面板，`open` 为 true 时返回 true，只在这时构建内容，无论返回什么都要 `end`。`Placement` 选择放在锚点的哪一侧（默认下方）、沿该侧如何对齐（默认起始边）、与锚点的间距和是否至少与锚点同宽；这一侧放不下而对侧空间更大时翻到对侧，并始终夹在窗口内（`view.placePopover` 是同一计算）。内边距默认 8 DIP，面板画成带边框的圆角矩形。
+- 浮层打开时焦点移到其中第一个可聚焦的控件（构建可以用 `v.restore` 另选，`v.popover_opened` 在打开的那一遍非空）。Escape 或在面板与锚点之外按下会清除 `open`；Escape、或焦点在里面时由构建关闭，焦点回到锚点；在外面的按下照常交给下面的控件。锚点禁用时浮层关闭。同一时间最多一个浮层。
+- 由嵌入叶子组成的复合控件可以用 `takeEvent(id)` 取走本遍针对自己登记的子控件 id 的事件。
+
+启用 `-Daccessibility=true` 时，Windows UIA 把 `popupButton` 映射为 ComboBox / ExpandCollapse，把浮层映射为本地化类型为 "popup" 的 Pane。日历、日期/时间/数字输入与颜色选择器见[选择器](pickers.md)。
+
+### 提示、通知、导航按钮与头像
+
+- `tooltip(text)` 给刚加入的节点（在组合框选项列表 `end` 之后则是组合框）加提示。指针停在控件上或控件持有焦点超过 `Options.tooltip_delay`（默认 500 ms）后，提示出现在控件下方（下方放不下时在上方），悬停优先于焦点。按下或 Escape 会隐藏它，直到指针或焦点移到另一个控件；窗口失去焦点时也会隐藏。提示文字同时作为控件的可访问说明（已有字段说明时保留字段说明）。没有前一个节点时返回 `NotContainer`。
+- `view.Toasts(capacity)` 是应用持有的固定消息队列：`show(message, .{ .action, .duration })` 复制文本并返回 id，队列满时先移除最早的消息，文本过长返回 `TextTooLong`；`dismiss(id)` 移除一条。`toasts(&queue, style)` 把队列画成窗口底部居中的一叠消息，每条带可选的动作按钮和名为 "Dismiss" 的关闭按钮。时长从第一次显示的那一遍开始计算，0 表示一直显示；动作按钮移除消息并让 `toasts` 返回它的 id 一次。每条消息是礼貌型（Polite）实时区域，出现时由读屏播报。
+- `navButton(direction, style)` 是画着朝 `direction`（back/forward/up/down）的箭头的方形按钮，激活的那一遍返回 true；名称取 `Style.name`，默认是英文的 "Back"/"Forward"/"Up"/"Down"。
+- `avatar(name, picture, style)` 显示 `picture`（`ImageView`，按 cover 裁剪）或 `name` 前两个词的首字母，圆底颜色取 `Style.background`，否则由名称稳定派生。默认 32 DIP 见方，不接收输入，作为以 `name` 命名的图像暴露。
+
+### 时间与唤醒
+
+每一遍都有一个时间，`View.time()` 读取，单位纳秒；默认来自 Host 第一次构建时启动的单调计时器，`Options.clock` 可以换成应用自己的时钟。构建函数可以调用 `wakeAt(deadline)` 要求在某一时刻再运行一遍，提示延迟和通知时长也用它。一遍中最早的请求生效，没有请求就不会再唤醒。
+
+Host 本身不持有计时器，只在 paint 之后投递一个任务，把最早的期限交给 `Host.setScheduler` 设置的调度器。`ziggurat_view_timer` 提供基于 `ziggurat_wake.OneShot` 的调度器：
+
+```zig
+const view_timer = @import("ziggurat_view_timer");
+
+var timer = view_timer.Timer.init(&host);
+try host.attach(window);
+try timer.attach(app, allocator);
+// 关闭窗口或 App 之前：
+try timer.close();
+```
+
+它为最早期限装定一次性计时器，期限变化时取消旧的，到期后让窗口失效重绘。没有期限时不装定，空闲窗口不做任何工作，也没有持续重绘的计时器。没有调度器时，提示和通知仍然正确，只是要等下一次因其他原因发生的重绘才会更新。
+
 ## 文本测量
 
-`Frame.label` 使用固定的 16px 单行字体。`Options.measurer` 决定文本节点与控件标签的宽度。默认的 `Measurer.estimate` 是保守估计（窄字符 9 DIP，宽字符 16 DIP，行高 24），不调用原生字体；需要精确宽度时，应用可以提供基于 `ziggurat_text_layout` 的测量回调。测量回调在 paint 中调用，应自行缓存，避免在常规绘制路径分配。
+`Frame.label` 使用默认的 16px 单行字体。文本节点可以用 `Style.font` 换成其他字体变体：`Font` 包含 `size`（1–1024 DIP）、`weight`（`regular`/`medium`/`semibold`/`bold`）、`italic` 与 `monospace`，并提供预设 `.body`、`.heading1`–`.heading6` 与 `.code`：
+
+```zig
+try v.text("概览", .{ .font = view.Font.heading2 });
+try v.text("zig build test", .{ .font = view.Font.code });
+```
+
+字体随文本命令一起录制（命令仍为 32 字节），GDI、Direct3D 11 与 Cairo/Pango 渲染器都按它选择字形；GDI 和 Direct3D 11 各自缓存最近使用的 8 个变体，不在常规绘制路径中重复创建。
+
+`Options.measurer` 决定文本节点与控件标签的宽度。默认的 `Measurer.estimate` 是保守估计（窄字符 9 DIP，宽字符 16 DIP，行高 24），不调用原生字体；需要精确宽度时，应用可以提供基于 `ziggurat_text_layout` 的测量回调；`measure_font(context, text, font)`（可选）在节点带字体时调用。没有它时按字号相对 16 缩放 `measure` 的结果，等宽字体按每字符 0.6 em、非常规字重加宽 5% 估算。测量回调在 paint 中调用，应自行缓存，避免在常规绘制路径分配。
 
 ## 存储与容量
 
 `view.Storage(nodes, text_bytes)` 是调用者拥有的固定存储，提供节点、文本副本、布局项与矩形缓冲。`text`、控件标签都会复制进存储，`textf` 直接格式化进存储，因此构建函数可以传入临时缓冲。超出容量返回 `TooManyNodes`、`TextFull`、`TooManyItems` 或 `NestingTooDeep`，容器不配对返回 `UnbalancedContainer`；绘制中的这些错误使本帧失败并保留上一帧。底层 Frame 的每帧上限（128 个控件、2048 条命令等）同样适用。
+
+### 树与表格
+
+两者都把选择交给应用持有的 `Selection`：它记录选中项的应用 ID（非零 `u64`，在集合内唯一），而不是位置，所以改名、排序或插入行都不会改变选择。`Selection.init(.single 或 .multiple, &storage)` 以调用者的缓冲为容量，`add` 超出容量返回 `SelectionFull`；`items()`、`contains`、`set`、`add`、`remove`、`clear` 可在构建之外直接调用。`anchor` 是 Shift 范围的起点，`cursor` 是焦点行，`version` 在每次改动时递增。
+
+- `tree(&selection, style)` 与 `end` 配对开始一棵树。`treeItem(id, expanded, label, style)` 打开一个以 `id` 为键的条目并加入它的行，返回 Enter 激活这一行的那一遍；子条目在它和对应的 `end` 之间构建，层级由嵌套决定。`expanded` 为 null 表示叶子；非 null 时行首画三角，按下三角只切换展开而不选择。应用只在 `expanded.*` 为 true 时构建子条目。
+- `table(columns, &sort, &selection, style)` 与 `end` 配对开始一个表格，先画一行列头，`Column` 给出标题、`Track`（默认 `fraction(1)`）和是否可排序。激活可排序的列头时 `sort` 变为该列升序，再次激活翻转方向；返回 true 的那一遍由应用按 `sort` 排列行。不可排序的列头不取焦点。`Style.gap` 是列间距，为 0 时取 8 DIP。
+- `tableRow(id, name, style)` 开始一行，`name` 是行的可访问名称（例如第一格），随后每列构建一个单元格，再 `end`。表头和所有行用同一组列宽：列宽在每次排列时由各列单元格（只计跨一列的）的最大内容尺寸统一求出，所以长文本不会让某一行错位。行放进 `scroll` 容器时表头保持不动。选中行以强调色填充，其中文本改用强调色上的前景色。
+- 行共享一个 Tab 停靠点，落在 `cursor` 行。Up/Down 移动并单选，Home/End 到首尾，PageUp/PageDown 按可见行数翻页；Ctrl+方向键只移动 `cursor`，Space 单选、Ctrl+Space 切换、Shift+方向键或 Shift+Space 从 `anchor` 选到当前行，Ctrl+Shift 把范围加入已有选择，Ctrl+A 全选（多选时）。树里 Right 展开折叠的条目，已展开时进入第一个子条目；Left 折叠展开的条目，否则回到父条目。指针按下同理：Ctrl 切换、Shift 选范围、Ctrl+Shift 追加范围。移动后的行以最小位移滚入外层滚动容器。
+- 行全部参与构建和排列，不做虚拟化；滚出可见区的行不绘制、也不登记命中（焦点行除外）。大量行请使用 `ziggurat_ui` 的虚拟列表。`treeItem`、`tableRow` 在各自容器之外调用返回 `NotContainer`。
+
+```zig
+try v.tree(&selection, .{ .name = "文件" });
+for (roots) |entry| {
+    _ = try v.treeItem(entry.id, if (entry.branch) &open[entry.id] else null, entry.name, .{});
+    if (entry.branch and open[entry.id]) try children(v, entry.id);
+    try v.end();
+}
+try v.end();
+```
+
+启用 `-Daccessibility=true` 时，Windows UIA 把树映射为 Tree / Selection，条目为 TreeItem / SelectionItem / ExpandCollapse（叶子报告 LeafNode）；表格为 DataGrid / Selection，表头为 Header，列头为 HeaderItem / Invoke，排序方向放在 ItemStatus（"ascending" 或 "descending"），行为 DataItem / SelectionItem。多选集合报告 CanSelectMultiple，AddToSelection 与 RemoveFromSelection 只改动该项。
+
+### 可编辑组合框与标记输入框
+
+- `editableComboBox(value, style)` 与 `end` 配对，开始一个带边框的组合字段，其中放文本输入（通常是 `ziggurat_view_text` 的 `TextField`，用 `.frame = false` 去掉它自己的边框），`end` 时在末尾自动加入展开按钮。紧随其后的 `suggestions` 列表锚定在整个字段上。列表在输入获得焦点时不打开，在选项因输入变化时打开；Down、Alt+Down 或 F4 打开同一组选项，Alt+Up、F4 或 Escape 关闭；按钮切换打开状态而焦点留在输入里。选中后列表关闭，焦点回到输入。
+- 输入法组合期间（`Embed.status` 报告 `composing`）列表隐藏，方向键、Enter 和 Escape 都留给输入法；组合结束后按选项是否变化恢复。
+- `tokenField(style)` 与 `end` 配对，开始一个会换行的标记输入框，其中依次构建 `token(label, style)`（用 `Style.key` 保持身份）和最后的文本输入。`token` 在其移除按钮被按下、或标记有焦点时按 Backspace/Delete 的那一遍返回 true，应用在这个分支里删掉它；之后焦点回到输入。输入为空时 Backspace 或 Left 把焦点移到最后一个标记；标记之间用 Left/Right、Home/End 移动，越过最后一个回到输入。标记在可用宽度内按行排列，窗口变窄时自动换行。
+
+`Embed.status(context)`（可选）报告嵌入输入是否正在组合、是否为空，供上面两种容器决定按键归属；`ziggurat_view_text` 的文本框已实现它。
+
+启用 `-Daccessibility=true` 时，Windows UIA 把可编辑组合框映射为 ComboBox / ExpandCollapse，展开按钮为不取焦点的 Button；标记输入框为 List（LocalizedControlType 为 "token field"），标记为 ListItem（"token"），各带一个名为 "Remove" 的按钮。
 
 ## 嵌入与文本输入
 
@@ -130,6 +226,44 @@ Host 在每帧绘制后记录可见的滚动容器（最多 `max_scroll_regions`
 - `place(context, id, bounds)`（可选）：每个成功的帧排列后调用一次，告知稳定的节点 ID 和窗口坐标边界。它在 paint 内运行，不能准备、分配或阻塞，需要的工作要推迟到输入阶段。
 - `paint(context, frame, id, bounds)`：在绘制顺序中的位置录制内容。
 - `annotate(context, annotation)`（可选）：每次 `paint` 前调用，传入外层表单字段的标签、说明、错误与必填状态；不在字段内时传空值。规则与 `place` 相同。
+- `status(context)`（可选）：返回 `EmbedStatus`（是否正在输入法组合、内容是否为空），在构建和路由按键时读取，不能分配或阻塞。
+- `focusable`（默认 false）：以节点 ID 登记为 Tab 停靠点，叶子自己绘制的控件仍在它上面。
+- `input(context, id, EmbedInput)`（可选）：叶子上的指针与按键输入，坐标相对叶子边界。`pointer_move` 与 `pointer_leave` 跟随指针（窗口失去焦点也算离开），`pointer_down` 是主键按下（`PointerPress` 带位置、修饰键和连击次数：同一叶子上 500 ms 内、相距 4 DIP 内的按下依次计为 2、3……），`wheel` 是叶子上的滚轮（DIP，正 y 向下；不消费时交给外层滚动容器），`key` 是叶子持有焦点时其他控件都不处理的按键。返回 true 表示已消费并重绘窗口；消费按下的可聚焦叶子随即获得焦点。不消费的按键（例如 Tab）照常路由。它在主线程、绘制之外运行；被禁用、被裁剪遮住或位于打开的列表下面的叶子收不到输入，每帧最多 16 个叶子参与路由。
+- 消费 `pointer_down` 即捕获指针：直到松开，移动都以 `pointer_drag`（带起点、相对上一次的位移，以及是否已移出 `drag_threshold` 4 DIP）送到这个叶子，松开以 `pointer_up` 送达，指针离开叶子甚至窗口也一样。窗口失去焦点或原生捕获被取消时改为 `pointer_cancel`。下一次构建不再产生该叶子时捕获随之丢弃，之后不再调用它。
+
+## 拖动与拖放
+
+以下容器都按列排列，用 `end` 关闭；主键按下后移出 `drag_threshold`（4 DIP）才开始拖动，之前里面的按钮照常点击。拖动期间指针被捕获，移出窗口也继续跟随；松开结束，Escape、窗口失去焦点或捕获被取消则取消。滑块、分栏和接受按下的嵌入叶子保留自己的按下。
+
+- `draggable(&gesture, style)` 是一个拖动区域。应用持有地址稳定的 `Gesture`；每个阶段（`start`、`move`、`end`、`cancel`）在自己的事件遍里更新它并返回该阶段，其他遍返回 null。`gesture.translation()` 是相对起点的位移，`delta` 是相对上一次事件的位移，`modifiers` 是按下时的修饰键。区域不再被构建时拖动丢失，之后第一次构建返回一次 `.cancel`。
+- `dragSource(payload, style)` 在窗口内拖动一个 `Payload`（`kind` 像类型一样说明它是什么，`value` 说明是哪一个，例如条目 ID）。拖动时一份半透明副本跟随指针，返回 true 以便应用把原处画暗。
+- `dropTarget(accept, style)` 接受 `Accept` 列出的内容：指定 `kind` 的 Payload，以及其他应用拖入的文件或文本。指针下最内层接受该内容的目标在拖动经过时描边并返回 `.over`，松开所在的那一遍返回 `.dropped`（`Dropped` 为 Payload、文件或文本，以及窗口坐标）。
+- `reorder()` 在刚打开的表格、列表框或行/列容器上调用（要在加入任何条目之前），让指针把一项拖到其他项之间：副本跟随指针，一条线标出插入位置，松开所在的那一遍返回 `Move{from, to}`，表示原第 `from` 项移到原第 `to` 项之前（`to` 等于项数表示最后）；放回原处不产生移动，条目由应用重排。树不能重排；同一表格不能既 `reorder` 又 `dragSelect`。
+- `dragSelect()` 在刚打开的树或表格上调用，让从一行开始的主键拖动像 Shift 加按下那样选中从该行到指针下一行的范围；按下时按住 Ctrl 则把范围加入已有选择。
+
+拖动经过或越过外层滚动容器的边缘 32 DIP 内时，`reorder`、`dragSource` 与 `dragSelect` 随指针移动滚动它，越靠近边缘越快。每帧最多 32 个拖动区域/拖动源/放置目标、4 个可重排容器和 256 个可重排条目参与路由。
+
+其他应用拖入的文件和文本经由 `ziggurat_system` 的放置目标转交：
+
+```zig
+fn hover(ptr: *anyopaque, _: z.Window, h: drop.Hover) bool {
+    const host: *view.Host = @ptrCast(@alignCast(ptr));
+    return host.systemDragOver(if (h.phase == .leave) null else .{ .x = h.point.x, .y = h.point.y }, h.files, h.text);
+}
+fn dropped(ptr: *anyopaque, _: z.Window, d: drop.Drop) void {
+    const host: *view.Host = @ptrCast(@alignCast(ptr));
+    const data: view.Dropped = switch (d.payload) {
+        .files => |paths| .{ .files = paths },
+        .text => |text| .{ .text = text },
+        else => return,
+    };
+    _ = host.systemDrop(.{ .x = d.point.x, .y = d.point.y }, data);
+}
+```
+
+`systemDragOver` 返回该点是否有目标接受所提供的内容；`systemDrop` 把数据在一遍内交给那里的目标，字节只在该遍中借用。窗口内拖动只在本窗口内进行，没有原生拖动源。
+
+叶子的状态变化需要告诉辅助技术时，调用 `host.announce(text)`（或在构建中调用 `View.announce`）：文字作为一个没有可见内容的状态节点礼貌播报，每次调用都是新的状态，超过 256 字节时在字符边界截断。
 
 `ziggurat_view_text` 用它提供可编辑文本字段。应用持有 `ziggurat_document_editor.Field` 及其 Document 和 Engine，并在 Host attach 后调用一次 `host.context.prepareTextFields(allocator, .{})`：
 
@@ -167,6 +301,7 @@ try h.change(.{ .kind = .slider }, .{ .steps = 2 });
 - `at(x, y)` 返回该点最后绘制的可交互节点，尊重裁剪；`clickAt` 激活它。`visible(node)` 给出裁剪后的可见矩形，`view.divider(node)` 给出分栏的分隔条矩形。
 - `write(writer)` 输出缩进的树大纲（种类、文本、名称、选中或数值、禁用、取整后的边界），适合与期望文本比较。
 - `Config` 提供窗口边界、主题和 `Options`（根样式与测量回调），`resize` 改变边界并重新渲染。
+- 树和表格的行：`click` 按下行的右端并单选，`clickWith(query, modifiers)` 带 Ctrl/Shift 按下，`toggleExpanded(query)` 按下树行的三角；`removeToken(query)` 按下标记的移除按钮。`click` 也接受列头、标记和组合框的展开按钮。`write` 的大纲带出行的层级、展开、选中与焦点行，以及列头的排序方向。
 
 - `attachInput(&context)` 把之后每次渲染记录进一个未连接窗口的 `ui.Context`，`key(KeyInput)` 按窗口相同的顺序路由按键：快捷键、Tab、范围键、分组方向键、空间方向键、Home/End，最后是 Enter/Space 激活。产生的动作或数值变化交给构建函数，随后重新渲染；返回值表示是否有控件处理该键。`focused()` 返回当前焦点节点。Context 由测试持有，不能已连接窗口。
 
@@ -178,8 +313,35 @@ _ = try h.key(.{ .key = .down });
 try std.testing.expectEqualStrings("Sans", h.focused().?.text);
 ```
 
-Harness 把嵌入叶子当作不可交互的节点，不验证原生命中、文本输入、可访问性或指针捕获，也不推进时间；这些仍由隐藏窗口 smoke 和原生检查覆盖。
+- 时间与浮层：`advance(ns)` 推进测试时钟并重新渲染，`deadline()` 返回上一遍请求的唤醒时刻；`hover(query)`、`hoverAt(x, y)` 与 `leave()` 移动或移走指针，`tooltip()` 返回当前显示的提示文字；`focus(query)` 直接给节点焦点。`key` 先把按键交给打开的列表或显示的提示，`clickAt` 先让按下经过列表与提示的处理，`at` 先查浮在上面的列表和通知。`write` 的大纲带出列表的打开/关闭、高亮项与提示文字。
+
+- 指针：`press(x, y, modifiers)`、`moveTo(x, y)`、`release(x, y)` 与 `cancelPointer()` 按 Host 相同的捕获规则重放一次按下，`drag(from_x, from_y, to_x, to_y, steps)` 把它们连起来；`systemDragOver(point, files, text)` 与 `systemDrop(point, data)` 模拟其他应用的拖放。
+
+带 `input` 的嵌入叶子在 Harness 中同样收到 `hoverAt`/`leave`、`clickAt`、上面的指针、`wheel` 与 `key` 的输入，`announcement()` 返回最近的播报文字。除此之外，Harness 把嵌入叶子当作不可交互的节点，不验证原生命中、文本输入、可访问性或原生捕获；这些仍由隐藏窗口 smoke 和原生检查覆盖。
+
+## 背景效果
+
+`Style.material` 是一个 `ui.BackdropEffect`，代替 `background` 画在容器的子节点之下：玻璃、对下方内容的模糊或滚动边缘，形状取 `Style.radius`。`Style.edges` 在裁剪容器（例如滚动容器）的顶部和/或底部画滚动边缘，带高 `height`（默认 24 DIP），在子节点之上、裁剪之内：
+
+```zig
+try v.row(.{ .padding = Insets.all(12), .radius = 16, .material = .{ .glass = .{ .tint = .{ .r = 40, .g = 110, .b = 200, .a = 60 } } } });
+try v.text("在玻璃上", .{});
+try v.end();
+try v.scroll(&model, .{ .grow = 1, .edges = .{ .top = .{}, .bottom = .{ .hard = true } } });
+```
+
+效果需要 `host.prepareBackdropEffects(allocator, .{})`（在 `attach` 之后），否则画不透明填充。效果的像素模型、预算和后端行为见[背景效果与加载动画](backdrop-effects.md)。
+
+## 加载动画
+
+`loadingIndicator(kind, options, style)` 加入 29 种加载动画之一，作为以 `Style.name` 命名的不确定进度条暴露（Windows UIA 上是没有 RangeValue 的 ProgressBar）。`LoadingOptions` 有 `size`（高度，默认 20 DIP，宽度按宽高比）、`color`（默认主题文字色，禁用时为禁用文字色）、`duration`（0 为自身周期）、`paused`、`timer` 与 `variant`（`ui.loading.Options`）。没有 `timer` 时姿态取 `View.time()`，同一窗口的指示器同步转动；应用持有的 `LoadingTimer` 记录各自的起点，`paused` 时保持当前姿态，恢复后从该处继续。
+
+动画中的指示器每一遍都请求 16.7 ms 后的唤醒，因此需要[调度器](#时间与唤醒)才会持续转动；暂停、减少动态效果或指示器不在树中时不请求，窗口回到完全空闲。
+
+## 系统偏好
+
+`host.setPreferences(.{ .reduce_motion, .reduce_transparency, .high_contrast })` 由应用按桌面偏好设置并重绘：减少动态效果让加载动画停在静止姿态，减少透明度或高对比度让背景效果变成不透明填充。
 
 ## 当前范围
 
-已提供列、行、网格、纵向滚动容器、标签页、分栏、工具栏、分段控件、折叠区、手风琴、面包屑、列表框、表单字段与字段集、链接、徽标、度量条、评分、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子和（通过 `ziggurat_view_text`）可编辑文本字段。分栏只接受比例偏好，没有 DIP 偏好、从右到左布局和折叠；工具栏没有溢出菜单。没有悬停状态、虚拟列表、多选列表和动画；需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。
+已提供列、行、网格、纵向滚动容器、浮层与弹出字段、标签页、分栏、工具栏、分段控件、折叠区、手风琴、面包屑、列表框、树、表格、组合框、可编辑组合框、建议列表、标记输入框、搜索区域、表单字段与字段集、链接、徽标、度量条、评分、导航按钮、头像、提示、通知、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子（通过 `ziggurat_view_text`）可编辑文本字段，以及（通过 `ziggurat_view_pickers`）日历、日期/时间/数字输入与颜色选择器。分栏只接受比例偏好，没有 DIP 偏好、从右到左布局和折叠；工具栏没有溢出菜单。只读组合框不按输入筛选；建议列表与可编辑组合框的筛选由应用完成；表格没有列宽拖动、列重排、冻结列和行头，排序由应用完成；树与表格不做虚拟化，也没有行内编辑；树不能拖动重排，重排一次只移动一项，拖动边缘的自动滚动只随指针移动发生；悬停只用于提示，控件本身没有悬停外观；通知没有进出动画。没有虚拟列表和通用动画；玻璃没有按压放大动效。需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。Linux 没有普通控件的 AT-SPI 层，上述可访问性只在 Windows UIA 上提供。

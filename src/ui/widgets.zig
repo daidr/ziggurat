@@ -2,6 +2,7 @@ const std = @import("std");
 const layout = @import("layout.zig");
 const access = @import("accessibility.zig");
 const input = @import("input.zig");
+const drawing = @import("ziggurat_drawing_resources");
 pub const Range = input.Range;
 pub const ValueChange = input.ValueChange;
 pub const Chord = input.Chord;
@@ -49,7 +50,16 @@ pub const MeterBands = struct {
 pub const MeterOptions = struct { control: Options = .{}, bands: MeterBands = .{} };
 /// Most marks a rating offers.
 pub const max_rating = 10;
-pub const Kind = enum { button, checkbox, radio, toggle_switch, progress, tab, segment, link, disclosure, list_item };
+pub const Kind = enum { button, checkbox, radio, toggle_switch, progress, tab, segment, link, disclosure, list_item, combo_box, nav_button };
+/// Where a navigation button's chevron points.
+pub const NavDirection = enum { back, forward, up, down };
+pub const AvatarOptions = struct {
+    /// Picture drawn instead of the initials, cropped to fill the bounds.
+    image: ?drawing.ImageView = null,
+    /// Fill behind the initials; derived from the name when null.
+    color: ?u32 = null,
+    semantic_parent: u64 = access.root_id,
+};
 const Snapshot = struct {
     hits: usize,
     commands: usize,
@@ -104,14 +114,19 @@ fn outline(frame: anytype, bounds: layout.Rect, width: f32, color: u32) !void {
 }
 /// A filled triangle pointing right, or down when `down`, from bounded strips.
 fn triangle(frame: anytype, bounds: layout.Rect, down: bool, color: u32) !void {
-    const strips = 6;
-    for (0..strips) |i| {
+    try chevron(frame, bounds, if (down) .down else .forward, color);
+}
+/// A filled triangle pointing along `direction`, from bounded strips.
+fn chevron(frame: anytype, bounds: layout.Rect, direction: NavDirection, color: u32) !void {
+    const strips: f32 = 6;
+    for (0..6) |i| {
         const t = @as(f32, @floatFromInt(i)) / strips;
         const shrink = 0.5 * t;
-        if (down) {
-            try fill(frame, .{ .x = bounds.x + bounds.width * shrink, .y = bounds.y + bounds.height * t, .width = bounds.width * (1 - 2 * shrink), .height = bounds.height / strips }, color);
-        } else {
-            try fill(frame, .{ .x = bounds.x + bounds.width * t, .y = bounds.y + bounds.height * shrink, .width = bounds.width / strips, .height = bounds.height * (1 - 2 * shrink) }, color);
+        switch (direction) {
+            .down => try fill(frame, .{ .x = bounds.x + bounds.width * shrink, .y = bounds.y + bounds.height * t, .width = bounds.width * (1 - 2 * shrink), .height = bounds.height / strips }, color),
+            .up => try fill(frame, .{ .x = bounds.x + bounds.width * shrink, .y = bounds.y + bounds.height * (1 - t - 1 / strips), .width = bounds.width * (1 - 2 * shrink), .height = bounds.height / strips }, color),
+            .forward => try fill(frame, .{ .x = bounds.x + bounds.width * t, .y = bounds.y + bounds.height * shrink, .width = bounds.width / strips, .height = bounds.height * (1 - 2 * shrink) }, color),
+            .back => try fill(frame, .{ .x = bounds.x + bounds.width * (1 - t - 1 / strips), .y = bounds.y + bounds.height * shrink, .width = bounds.width / strips, .height = bounds.height * (1 - 2 * shrink) }, color),
         }
     }
 }
@@ -147,6 +162,7 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
     const absolute_bounds = absolute(frame, bounds);
     const visible = if (frame.clipBounds()) |clip| layout.intersect(absolute_bounds, clip) else absolute_bounds;
     const interactive = kind != .progress;
+    const combo = kind == .combo_box;
     const chooses = kind == .radio or kind == .tab or kind == .segment or kind == .list_item;
     try frame.addControl(id, bounds, .{ .enabled = options.enabled, .focusable = interactive, .pointer_enabled = interactive, .radio_group = if (chooses) options.radio_group else null, .selected = checked, .shortcut = options.shortcut });
     const focus = interactive and options.enabled and visible.width > 0 and visible.height > 0 and context.input_state.focused == id;
@@ -165,8 +181,12 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
             .link => .link,
             .disclosure => .disclosure,
             .list_item => .list_item,
+            .combo_box => .combo_box,
+            .nav_button => .button,
         },
-        .name = if (kind == .progress) options.name else text,
+        // A combo box is named by its label and reports the choice as its value.
+        .name = if (kind == .progress or combo) options.name else text,
+        .value = if (combo) text else "",
         .description = options.description,
         .bounds = bounds,
         .enabled = options.enabled,
@@ -174,7 +194,7 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
         .checked = checked,
         .invalid = options.invalid,
         .required = options.required,
-        .read_only = kind == .progress,
+        .read_only = kind == .progress or combo,
         .range_value = amount * 100,
     });
     const style = frame.currentTheme();
@@ -184,9 +204,11 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
     const foreground: u32 = if (options.enabled) colors.text else colors.disabled_text;
     const accent: u32 = if (options.enabled) colors.accent else colors.disabled_accent;
     switch (kind) {
-        .button => {
+        .button, .nav_button => {
             try fill(frame, bounds, border);
             try fill(frame, inset(bounds, metrics.border), if (options.enabled and context.input_state.active == id) colors.pressed else colors.control);
+            // A navigation button carries a chevron its caller draws, not its name.
+            if (kind == .nav_button) return;
             try context.command_buffer.text(absolute(frame, inset(bounds, metrics.content_inset)), text, foreground);
         },
         .progress => {
@@ -221,6 +243,17 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
             if (checked) try fill(frame, bounds, accent) else if (options.enabled and context.input_state.active == id) try fill(frame, bounds, colors.pressed);
             if (focus) try outline(frame, bounds, metrics.border, if (checked) colors.on_accent else colors.focus);
             try context.command_buffer.text(absolute(frame, inset(bounds, metrics.content_inset)), text, if (checked and options.enabled) colors.on_accent else foreground);
+        },
+        .combo_box => {
+            // A field showing the current choice with a chevron that points
+            // down while closed and up while the list is open.
+            try fill(frame, bounds, border);
+            try fill(frame, inset(bounds, metrics.border), colors.field);
+            const side = @min(bounds.height, metrics.indicator_size);
+            const mark: layout.Rect = .{ .x = bounds.x + @max(0, bounds.width - side - metrics.content_inset / 2), .y = bounds.y + (bounds.height - side) / 2, .width = side, .height = side };
+            try chevron(frame, inset(mark, side / 3), if (checked) .up else .down, foreground);
+            const label = inset(bounds, metrics.content_inset);
+            try context.command_buffer.text(absolute(frame, .{ .x = label.x, .y = label.y, .width = @max(0, mark.x - label.x), .height = label.height }), text, foreground);
         },
         .tab => {
             // The selected tab carries an accent bar along its bottom edge.
@@ -441,4 +474,252 @@ pub fn emitRating(frame: anytype, id: u64, bounds: layout.Rect, value: f64, coun
         if (!filled) try disk(frame, inset(mark, style.metrics.border), colors.inset);
     }
     if (focused) try outline(frame, bounds, style.metrics.border, colors.focus);
+}
+
+/// A button whose chevron points along `direction`, named `name`.
+pub fn emitNavButton(frame: anytype, id: u64, bounds: layout.Rect, direction: NavDirection, name: []const u8, options: Options) !void {
+    const before = Snapshot.init(frame);
+    errdefer before.restore(frame);
+    try emit(frame, .nav_button, id, bounds, name, false, 0, options);
+    const style = frame.currentTheme();
+    const side = @min(@min(bounds.width, bounds.height) - 2 * style.metrics.content_inset, style.metrics.indicator_size);
+    if (side <= 0) return;
+    const mark: layout.Rect = .{ .x = bounds.x + (bounds.width - side) / 2, .y = bounds.y + (bounds.height - side) / 2, .width = side, .height = side };
+    try chevron(frame, inset(mark, side / 6), direction, if (options.enabled) style.palette.text else style.palette.disabled_text);
+}
+
+/// Up to two initials: the first letter of the first two words, ASCII
+/// letters uppercased. Writes into `out` and returns the used part.
+pub fn initials(name: []const u8, out: *[8]u8) []const u8 {
+    var len: usize = 0;
+    var words: usize = 0;
+    var start = true;
+    var view = std.unicode.Utf8View.init(name) catch return out[0..0];
+    var it = view.iterator();
+    while (it.nextCodepointSlice()) |slice| {
+        const blank = slice.len == 1 and std.ascii.isWhitespace(slice[0]);
+        if (blank) {
+            start = true;
+            continue;
+        }
+        if (!start) continue;
+        start = false;
+        if (words == 2 or len + slice.len > out.len) break;
+        @memcpy(out[len..][0..slice.len], slice);
+        if (slice.len == 1) out[len] = std.ascii.toUpper(out[len]);
+        len += slice.len;
+        words += 1;
+    }
+    return out[0..len];
+}
+
+/// A stable fill for an avatar without its own color.
+pub fn avatarColor(name: []const u8) u32 {
+    const colors = [_]u32{ 0x276aa5, 0x2e7d4f, 0x8e44ad, 0xa8530f, 0x00796b, 0xb03a5b, 0x5d6d7e, 0x6d4c41 };
+    return colors[std.hash.Wyhash.hash(0x61_76, name) % colors.len];
+}
+
+/// A person or entity shown as a picture, or as initials on a disk. It is
+/// an image to accessibility clients, named `name`, and takes no input.
+pub fn emitAvatar(frame: anytype, id: u64, bounds: layout.Rect, name: []const u8, options: AvatarOptions) !void {
+    if (id == access.root_id) return error.ReservedControlId;
+    if (!layout.validRect(bounds) or !layout.validRect(absolute(frame, bounds))) return error.InvalidGeometry;
+    const snapshot = Snapshot.init(frame);
+    errdefer snapshot.restore(frame);
+    try frame.semantic(.{ .id = id, .parent = options.semantic_parent, .role = .image, .name = name, .bounds = bounds, .read_only = true });
+    if (options.image) |picture| return frame.image(bounds, picture, .{ .fit = .cover });
+    const colors = frame.currentTheme().palette;
+    try disk(frame, bounds, options.color orelse avatarColor(name));
+    var storage: [8]u8 = undefined;
+    const letters = initials(name, &storage);
+    if (letters.len == 0) return;
+    // The fixed label font is 16px; centre the estimated run within the disk.
+    var width: f32 = 0;
+    var view = std.unicode.Utf8View.init(letters) catch unreachable;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |codepoint| width += if (codepoint >= 0x1100) 16 else 10;
+    const text: layout.Rect = .{ .x = bounds.x + @max(0, (bounds.width - width) / 2), .y = bounds.y + @max(0, (bounds.height - 22) / 2), .width = @min(width, bounds.width), .height = @min(22, bounds.height) };
+    try frame.context.command_buffer.text(absolute(frame, text), letters, colors.on_accent);
+}
+
+/// A short hint shown near the control it describes. It takes no input
+/// and is announced as a tooltip while drawn.
+pub fn emitTooltip(frame: anytype, id: u64, bounds: layout.Rect, text: []const u8) !void {
+    if (id == access.root_id) return error.ReservedControlId;
+    if (!layout.validRect(bounds) or !layout.validRect(absolute(frame, bounds))) return error.InvalidGeometry;
+    const snapshot = Snapshot.init(frame);
+    errdefer snapshot.restore(frame);
+    try frame.semantic(.{ .id = id, .role = .tooltip, .name = text, .bounds = bounds, .read_only = true });
+    const style = frame.currentTheme();
+    try fill(frame, bounds, style.palette.text);
+    try frame.context.command_buffer.text(absolute(frame, inset(bounds, tooltip_inset)), text, style.palette.background);
+}
+/// Space between a tooltip's edge and its text.
+pub const tooltip_inset: f32 = 4;
+
+/// Indentation of each tree level, in DIP.
+pub const tree_indent: f32 = 16;
+/// How an accessibility client changes a multiple-selection item or a tree
+/// item's expansion. It arrives as `ValueChange.set` on the item's id,
+/// because ordinary activation already means "select only this one".
+pub const ItemRequest = enum(u8) { deselect = 0, add = 1, collapse = 2, expand = 3 };
+/// One row of a tree or table. The collection's id goes in
+/// `control.radio_group`, so its rows share one Tab stop on the row that has
+/// the keyboard cursor.
+pub const RowOptions = struct {
+    control: Options = .{},
+    /// Member of the selection.
+    selected: bool = false,
+    /// Holds the collection's keyboard cursor.
+    cursor: bool = false,
+    /// The collection lets several rows be selected at once.
+    multiple: bool = false,
+    /// Depth of a tree row, from 0.
+    level: u16 = 0,
+    /// A tree row's expansion; null for a leaf.
+    expanded: ?bool = null,
+};
+pub const SortDirection = enum { ascending, descending };
+pub const TokenOptions = struct {
+    control: Options = .{},
+    /// Accessible name of the remove button.
+    remove_name: []const u8 = "Remove",
+};
+
+/// The disclosure triangle of a tree row at `level`; pressing it expands
+/// or collapses the row without changing the selection.
+pub fn treeExpander(bounds: layout.Rect, level: u16, indicator: f32) layout.Rect {
+    const side = @min(bounds.height, indicator);
+    const x = bounds.x + tree_indent * @as(f32, @floatFromInt(level));
+    return .{ .x = x, .y = bounds.y + (bounds.height - side) / 2, .width = @max(0, @min(side, bounds.x + bounds.width - x)), .height = side };
+}
+
+fn rowRecord(frame: anytype, role: access.Role, id: u64, bounds: layout.Rect, name: []const u8, options: RowOptions) !bool {
+    if (id == access.root_id) return error.ReservedControlId;
+    if (!layout.validRect(bounds) or !layout.validRect(absolute(frame, bounds))) return error.InvalidGeometry;
+    const control = options.control;
+    // The cursor row is the group's one selected peer, so Tab lands on it.
+    try frame.addControl(id, bounds, .{ .enabled = control.enabled, .radio_group = control.radio_group, .selected = options.cursor, .shortcut = control.shortcut });
+    const visible = visibleBounds(frame, bounds);
+    const focused = control.enabled and visible.width > 0 and visible.height > 0 and frame.context.input_state.focused == id;
+    try frame.semantic(.{ .id = id, .parent = control.semantic_parent, .role = role, .name = name, .description = control.description, .bounds = bounds, .enabled = control.enabled, .focused = focused, .checked = options.selected, .multiple = options.multiple, .expanded = options.expanded });
+    const colors = frame.currentTheme().palette;
+    if (options.selected) try fill(frame, bounds, if (control.enabled) colors.accent else colors.disabled_accent) else if (control.enabled and frame.context.input_state.active == id) try fill(frame, bounds, colors.pressed);
+    if (focused) try outline(frame, bounds, frame.currentTheme().metrics.border, if (options.selected) colors.on_accent else colors.focus);
+    return focused;
+}
+
+/// A tree row: an indented label after a disclosure triangle when it has
+/// children. Announced as a tree item, selected while `options.selected`,
+/// expandable unless `options.expanded` is null.
+pub fn emitTreeItem(frame: anytype, id: u64, bounds: layout.Rect, label: []const u8, options: RowOptions) !void {
+    const snapshot = Snapshot.init(frame);
+    errdefer snapshot.restore(frame);
+    _ = try rowRecord(frame, .tree_item, id, bounds, label, options);
+    const style = frame.currentTheme();
+    const colors = style.palette;
+    const foreground: u32 = if (!options.control.enabled) colors.disabled_text else if (options.selected) colors.on_accent else colors.text;
+    const mark = treeExpander(bounds, options.level, style.metrics.indicator_size);
+    if (options.expanded) |open| if (mark.width > 0) try triangle(frame, inset(mark, mark.height / 4), open, foreground);
+    const label_x = @min(bounds.width, mark.x - bounds.x + mark.height + style.metrics.label_gap / 2);
+    try frame.context.command_buffer.text(absolute(frame, .{ .x = bounds.x + label_x, .y = bounds.y, .width = bounds.width - label_x, .height = bounds.height }), label, foreground);
+}
+
+/// The background, hit target and semantics of a table row; its cells are
+/// recorded after it and draw over it. Named by `name`.
+pub fn emitTableRow(frame: anytype, id: u64, bounds: layout.Rect, name: []const u8, options: RowOptions) !void {
+    const snapshot = Snapshot.init(frame);
+    errdefer snapshot.restore(frame);
+    _ = try rowRecord(frame, .table_row, id, bounds, name, options);
+}
+
+/// A column title that sorts its table on activation, with a chevron for
+/// the current sort direction, announced as item status. A column that does
+/// not sort takes no input. The header row paints the background.
+pub fn emitColumnHeader(frame: anytype, id: u64, bounds: layout.Rect, title: []const u8, sort: ?SortDirection, sortable: bool, options: Options) !void {
+    if (id == access.root_id) return error.ReservedControlId;
+    if (!layout.validRect(bounds) or !layout.validRect(absolute(frame, bounds))) return error.InvalidGeometry;
+    const snapshot = Snapshot.init(frame);
+    errdefer snapshot.restore(frame);
+    try frame.addControl(id, bounds, .{ .enabled = options.enabled, .focusable = sortable, .pointer_enabled = sortable, .shortcut = if (sortable) options.shortcut else null });
+    const visible = visibleBounds(frame, bounds);
+    const focused = sortable and options.enabled and visible.width > 0 and visible.height > 0 and frame.context.input_state.focused == id;
+    try frame.semantic(.{ .id = id, .parent = options.semantic_parent, .role = .column_header, .name = title, .value = if (sort) |direction| @tagName(direction) else "", .description = options.description, .bounds = bounds, .enabled = options.enabled, .focused = focused, .read_only = true });
+    const style = frame.currentTheme();
+    const colors = style.palette;
+    if (sortable and options.enabled and frame.context.input_state.active == id) try fill(frame, bounds, colors.pressed);
+    const foreground: u32 = if (options.enabled) colors.text else colors.disabled_text;
+    const side = @min(bounds.height, style.metrics.indicator_size) / 2;
+    const mark: layout.Rect = .{ .x = bounds.x + @max(0, bounds.width - side), .y = bounds.y + (bounds.height - side) / 2, .width = @min(side, bounds.width), .height = side };
+    if (sort) |direction| try chevron(frame, mark, if (direction == .ascending) .up else .down, foreground);
+    const label_width = @max(0, (if (sort != null) mark.x - style.metrics.content_inset / 2 else bounds.x + bounds.width) - bounds.x);
+    try frame.context.command_buffer.text(absolute(frame, .{ .x = bounds.x, .y = bounds.y, .width = label_width, .height = bounds.height }), title, foreground);
+    if (focused) try outline(frame, bounds, style.metrics.border, colors.focus);
+}
+
+/// Width of a token's remove button, in DIP.
+pub fn tokenRemoveWidth(bounds: layout.Rect) f32 {
+    return @min(bounds.width / 2, bounds.height);
+}
+/// A token of a token field: a rounded chip with its label and a remove
+/// button `remove_id` at its end. The chip takes focus and is announced as
+/// a token; the button removes it.
+pub fn emitToken(frame: anytype, id: u64, remove_id: u64, bounds: layout.Rect, label: []const u8, options: TokenOptions) !void {
+    if (id == access.root_id or remove_id == access.root_id) return error.ReservedControlId;
+    if (!layout.validRect(bounds) or !layout.validRect(absolute(frame, bounds))) return error.InvalidGeometry;
+    const snapshot = Snapshot.init(frame);
+    errdefer snapshot.restore(frame);
+    const control = options.control;
+    const button_width = tokenRemoveWidth(bounds);
+    const button: layout.Rect = .{ .x = bounds.x + bounds.width - button_width, .y = bounds.y, .width = button_width, .height = bounds.height };
+    try frame.addControl(id, bounds, .{ .enabled = control.enabled, .radio_group = control.radio_group });
+    // The remove button lies over the chip and takes presses first; it is
+    // not a Tab stop of its own.
+    try frame.addControl(remove_id, button, .{ .enabled = control.enabled, .focusable = false });
+    const visible = visibleBounds(frame, bounds);
+    const focused = control.enabled and visible.width > 0 and visible.height > 0 and frame.context.input_state.focused == id;
+    try frame.semantic(.{ .id = id, .parent = control.semantic_parent, .role = .token, .name = label, .description = control.description, .bounds = bounds, .enabled = control.enabled, .focused = focused, .read_only = true });
+    try frame.semantic(.{ .id = remove_id, .parent = id, .role = .button, .name = options.remove_name, .bounds = button, .enabled = control.enabled });
+    const style = frame.currentTheme();
+    const colors = style.palette;
+    try fill(frame, bounds, if (focused) colors.focus else colors.border);
+    try fill(frame, inset(bounds, style.metrics.border / 2), if (control.enabled and frame.context.input_state.active == remove_id) colors.pressed else colors.control);
+    const foreground: u32 = if (control.enabled) colors.text else colors.disabled_text;
+    const text = inset(.{ .x = bounds.x, .y = bounds.y, .width = @max(0, bounds.width - button_width), .height = bounds.height }, style.metrics.content_inset / 2);
+    try frame.context.command_buffer.text(absolute(frame, .{ .x = text.x + style.metrics.content_inset / 2, .y = text.y, .width = @max(0, text.width - style.metrics.content_inset / 2), .height = text.height }), label, foreground);
+    // A small cross from two bounded strips.
+    const cross = inset(button, button.height * 0.32);
+    const strips: usize = 5;
+    for (0..strips) |i| {
+        const t = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(strips));
+        const d = cross.width / @as(f32, @floatFromInt(strips));
+        try fill(frame, .{ .x = cross.x + cross.width * t, .y = cross.y + cross.height * t, .width = d, .height = d }, foreground);
+        try fill(frame, .{ .x = cross.x + cross.width * (1 - t) - d, .y = cross.y + cross.height * t, .width = d, .height = d }, foreground);
+    }
+}
+
+/// The button at the end of an editable combo box that opens or closes its
+/// list. It takes presses but not focus, which stays in the text input.
+pub fn emitComboToggle(frame: anytype, id: u64, bounds: layout.Rect, expanded: bool, options: Options) !void {
+    if (id == access.root_id) return error.ReservedControlId;
+    if (!layout.validRect(bounds) or !layout.validRect(absolute(frame, bounds))) return error.InvalidGeometry;
+    const snapshot = Snapshot.init(frame);
+    errdefer snapshot.restore(frame);
+    try frame.addControl(id, bounds, .{ .enabled = options.enabled, .focusable = false });
+    try frame.semantic(.{ .id = id, .parent = options.semantic_parent, .role = .button, .name = options.name, .bounds = bounds, .enabled = options.enabled });
+    const style = frame.currentTheme();
+    const colors = style.palette;
+    if (options.enabled and frame.context.input_state.active == id) try fill(frame, bounds, colors.pressed);
+    const side = @min(bounds.height, bounds.width, style.metrics.indicator_size);
+    const mark: layout.Rect = .{ .x = bounds.x + (bounds.width - side) / 2, .y = bounds.y + (bounds.height - side) / 2, .width = side, .height = side };
+    try chevron(frame, inset(mark, side / 3), if (expanded) .up else .down, if (options.enabled) colors.text else colors.disabled_text);
+}
+
+test "initials take the first letter of two words" {
+    var out: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("AL", initials("ada lovelace", &out));
+    try std.testing.expectEqualStrings("G", initials("  grace ", &out));
+    try std.testing.expectEqualStrings("李小", initials("李 小龙", &out));
+    try std.testing.expectEqualStrings("", initials("", &out));
+    try std.testing.expectEqual(avatarColor("Ada"), avatarColor("Ada"));
 }

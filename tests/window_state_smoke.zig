@@ -147,9 +147,20 @@ fn isolatedWindowsSmoke() !void {
     const previous = c.GetThreadDesktop(c.GetCurrentThreadId());
     const desktop = c.CreateDesktopW(&name_wide, null, null, 0, c.DESKTOP_CREATEWINDOW | c.DESKTOP_CREATEMENU | c.DESKTOP_READOBJECTS | c.DESKTOP_WRITEOBJECTS, null);
     if (desktop == null) return error.CreateDesktopFailed;
-    defer std.debug.assert(c.CloseDesktop(desktop) != 0);
-    if (c.SetThreadDesktop(desktop) == 0) return error.SetThreadDesktopFailed;
-    defer std.debug.assert(c.SetThreadDesktop(previous) != 0);
+    if (c.SetThreadDesktop(desktop) == 0) {
+        std.debug.assert(c.CloseDesktop(desktop) != 0);
+        return error.SetThreadDesktopFailed;
+    }
+    // Input-method support can leave per-thread windows on the isolated
+    // desktop after every smoke window is gone; the thread then cannot switch
+    // back or close it. The process exits next, which releases both.
+    defer {
+        if (c.SetThreadDesktop(previous) != 0) {
+            std.debug.assert(c.CloseDesktop(desktop) != 0);
+        } else {
+            std.debug.print("window state: isolated desktop left to process exit, error {d}\n", .{c.GetLastError()});
+        }
+    }
     // This desktop is never activated; even maximize/minimize tests stay hidden.
     try windowsSmoke();
 }

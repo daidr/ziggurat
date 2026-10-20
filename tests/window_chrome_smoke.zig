@@ -323,14 +323,50 @@ fn rawHit(allocator: std.mem.Allocator) !void {
     try std.testing.expect(probe.closed);
     try std.testing.expectEqual(@as(usize, 0), app.resourceStats().allocated_records);
 }
+extern "dwmapi" fn DwmGetWindowAttribute(?*anyopaque, u32, *anyopaque, u32) callconv(.winapi) i32;
+fn backdrop(allocator: std.mem.Allocator) !void {
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    const custom = try app.createWindow(.{ .decoration = .custom });
+    try std.testing.expect(!(try custom.capabilities()).backdrop_material);
+    try std.testing.expectError(error.UnsupportedCapability, custom.setBackdrop(.mica));
+    _ = try custom.destroy();
+    const system = try app.createWindow(.{ .title = "Backdrop" });
+    const caps = try system.capabilities();
+    var expected = false;
+    if (builtin.os.tag == .windows) {
+        var info: std.os.windows.RTL_OSVERSIONINFOW = undefined;
+        info.dwOSVersionInfoSize = @sizeOf(std.os.windows.RTL_OSVERSIONINFOW);
+        try std.testing.expect(std.os.windows.ntdll.RtlGetVersion(&info) == .SUCCESS);
+        expected = info.dwMajorVersion > 10 or (info.dwMajorVersion == 10 and info.dwBuildNumber >= 22621);
+    }
+    try std.testing.expectEqual(expected, caps.backdrop_material);
+    try std.testing.expect(!caps.transparent);
+    if (!expected) {
+        try std.testing.expectError(error.UnsupportedCapability, system.setBackdrop(.mica));
+    } else if (builtin.os.tag == .windows) {
+        const materials = [_]z.WindowBackdrop{ .mica, .acrylic, .mica_alt, .none, .system };
+        for (materials, [_]u32{ 2, 3, 4, 1, 0 }) |material, native| {
+            try system.setBackdrop(material);
+            var value: u32 = 99;
+            const hr = DwmGetWindowAttribute(system.nativeHandle(), 38, &value, @sizeOf(u32));
+            // Readback is informational; the accepted set call is the contract.
+            if (hr >= 0) try std.testing.expectEqual(native, value);
+        }
+    }
+    _ = try system.destroy();
+    try std.testing.expectError(error.Closed, system.setBackdrop(.none));
+    try std.testing.expectEqual(@as(usize, 0), app.resourceStats().allocated_records);
+}
 fn run(allocator: std.mem.Allocator, require_wm: bool) !void {
     try geometry(allocator, require_wm);
     try nativeLoops(allocator);
     try captureOwnership(allocator);
     try rawHit(allocator);
+    try backdrop(allocator);
     if (builtin.os.tag == .linux) try @import("window_chrome_x11.zig").run(allocator, require_wm);
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("window chrome passed: custom client geometry, DIP hits/minima, maximize/fullscreen restore; resources=0\n", .{});
+    std.debug.print("window chrome passed: custom client geometry, DIP hits/minima, maximize/fullscreen restore, backdrop gating; resources=0\n", .{});
 }
 fn windows(allocator: std.mem.Allocator, require_wm: bool) !void {
     _ = allocator;

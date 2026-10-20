@@ -16,6 +16,7 @@ pub const Options = extern struct {
     region: u32 = 0,
     profile_context: ?*anyopaque = null,
     initializers: ?*const @import("initializer_owner.zig").NativeInput = null,
+    developer_tools: u32 = 0,
 };
 pub const LocalResource = extern struct {
     path: [*]const u8,
@@ -148,6 +149,7 @@ pub extern fn zwk_capture_budget_close(*anyopaque) void;
 pub extern fn zwk_capture_budget_release(*anyopaque) void;
 pub extern fn zwk_capture_enable(*anyopaque, *anyopaque) c_int;
 pub extern fn zwk_capture_start(*anyopaque, u64) c_int;
+pub extern fn zwk_clear_start(*anyopaque, u64) c_int;
 pub extern fn zwk_capture_cancel(*anyopaque, u64) void;
 pub extern fn zwk_capture_counts(*u32, *u32, *usize, *usize) void;
 pub extern fn zwk_create(*anyopaque, *const Options, Notify, PageNotify, ScriptNotify, *const fn (*anyopaque) callconv(.c) void, *anyopaque, *?*anyopaque) c_int;
@@ -175,6 +177,8 @@ pub extern fn zwk_evaluate_cancel(*anyopaque, u64) void;
 pub extern fn zwk_post(*anyopaque, [*:0]const u8) c_int;
 pub extern fn zwk_zoom(*anyopaque, *f64, c_int) c_int;
 pub extern fn zwk_user_agent(*anyopaque, ?[*:0]const u8, ?*?[*:0]u8) c_int;
+pub extern fn zwk_devtools(*anyopaque, c_int, ?*c_int, ?*c_int) c_int;
+pub extern fn zwk_devtools_counts(*u32) void;
 pub extern fn zwk_string_free([*:0]u8) void;
 pub extern fn zwk_deadline_arm(*anyopaque, u64) c_int;
 pub extern fn zwk_deadline_cancel(*anyopaque) void;
@@ -210,6 +214,7 @@ pub fn check(result: c_int) !void {
         10 => error.NavigationCancelled,
         11 => error.NativeGeometryNotApplied,
         12 => error.InitializerBudgetExceeded,
+        13 => error.DevToolsDisabled,
         else => error.WebViewNativeFailed,
     };
 }

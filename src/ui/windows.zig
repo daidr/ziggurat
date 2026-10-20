@@ -32,7 +32,14 @@ pub const Renderer = struct {
     images: image_cache.Cache = .{},
     layer_workspace: ?*windows_layers.Workspace = null,
     layer_fault: u32 = 0,
+    /// The Buffer whose backdrop and indicator tables the current replay reads.
+    backdrop_source: ?*const commands.Buffer = null,
     layer_candidate_peak: usize = 0,
+    /// Fonts other than the default label font, created on first use and
+    /// kept until deinit; the oldest is replaced when all are taken.
+    variant_fonts: [8]VariantFont = @splat(.{}),
+    variant_next: u8 = 0,
+    const VariantFont = struct { key: u32 = 0, scale: f32 = 0, font: c.HFONT = null };
     pub const LayerCandidate = *windows_layers.Workspace;
     pub fn layerMetadataBytes() usize {
         return @sizeOf(windows_layers.Workspace);
@@ -417,12 +424,42 @@ pub const Renderer = struct {
         pixels[index] = composite.over(source, pixels[index], amount);
     }
     pub fn text(self: *Renderer, r: Rect, utf8: []const u8, rgb: u32) !void {
+        return self.textFont(r, utf8, rgb, .{});
+    }
+    /// The GDI font for `key` at the current scale; null for the default
+    /// font already selected into every surface.
+    fn variantFont(self: *Renderer, key: commands.FontKey) !c.HFONT {
+        const bits: u32 = @bitCast(key);
+        for (self.variant_fonts) |entry| if (entry.font != null and entry.key == bits and entry.scale == self.scale) return entry.font;
+        const height: c_int = @intFromFloat(@round(-key.size() * self.scale));
+        const family = if (key.monospace) std.unicode.utf8ToUtf16LeStringLiteral("Consolas") else std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI");
+        const font = c.CreateFontW(height, 0, 0, 0, key.weight.value(), @intFromBool(key.italic), c.FALSE, c.FALSE, c.DEFAULT_CHARSET, c.OUT_DEFAULT_PRECIS, c.CLIP_DEFAULT_PRECIS, c.CLEARTYPE_QUALITY, if (key.monospace) c.FIXED_PITCH else c.DEFAULT_PITCH, family) orelse return error.CreateFontFailed;
+        const slot = &self.variant_fonts[self.variant_next];
+        // A replaced font is never selected: text restores the default font
+        // before returning.
+        if (slot.font != null) _ = c.DeleteObject(slot.font);
+        slot.* = .{ .key = bits, .scale = self.scale, .font = font };
+        self.variant_next = (self.variant_next + 1) % @as(u8, self.variant_fonts.len);
+        return font;
+    }
+    fn releaseVariantFonts(self: *Renderer) void {
+        for (&self.variant_fonts) |*entry| {
+            if (entry.font != null) _ = c.DeleteObject(entry.font);
+            entry.* = .{};
+        }
+    }
+    pub fn textFont(self: *Renderer, r: Rect, utf8: []const u8, rgb: u32, key: commands.FontKey) !void {
         _ = try self.bounds(r);
         var buffer: [2048]u16 = undefined;
         if (utf8.len > buffer.len) return error.TextTooLong;
         const count = try std.unicode.utf8ToUtf16Le(&buffer, utf8);
+        const variant: c.HFONT = if (key.isDefault()) null else try self.variantFont(key);
         if (self.layer_workspace) |workspace| {
             const scratch = try workspace.glyph();
+            const previous = if (variant) |font| c.SelectObject(scratch.dc, font) else null;
+            defer if (previous) |font| {
+                _ = c.SelectObject(scratch.dc, font);
+            };
             const physical = self.physicalRect(.{ .x = r.x, .y = r.y, .width = r.width, .height = r.height });
             const region = windows_layers.intersection(physical, try self.physicalClip());
             const size: z.Size = .{ .width = self.width, .height = self.height, .scale = self.scale };
@@ -445,6 +482,10 @@ pub const Renderer = struct {
         }
         _ = c.SetTextColor(self.dc, color(rgb));
         var rect = try self.bounds(r);
+        const previous = if (variant) |font| c.SelectObject(self.dc, font) else null;
+        defer if (previous) |font| {
+            _ = c.SelectObject(self.dc, font);
+        };
         _ = c.DrawTextW(self.dc, &buffer, @intCast(count), &rect, c.DT_LEFT | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX | c.DT_END_ELLIPSIS);
     }
     pub fn preparedText(self: *Renderer, view: drawing.PreparedTextView, origin: drawing.Point, tint: geometry.Color) !void {
@@ -566,6 +607,8 @@ pub const Renderer = struct {
         try self.replayWithResources(list, text_bytes, &.{});
     }
     pub fn replayBuffer(self: *Renderer, buffer: *const commands.Buffer) !void {
+        self.backdrop_source = buffer;
+        defer self.backdrop_source = null;
         try self.replayWithGaussianResources(buffer.commands(), buffer.textBytes(), buffer.brushResources(), buffer.preparedTextResources(), buffer.imageResources(), buffer.coverageResources(), buffer.transformResources(), buffer.filterResources());
     }
     pub fn replayWithResources(self: *Renderer, list: []const commands.Command, text_bytes: []const u8, resources: []const commands.brushes.Stored) !void {
@@ -605,7 +648,7 @@ pub const Renderer = struct {
             },
             .text => |text_command| {
                 if (text_command.offset > text_bytes.len or text_command.len > text_bytes.len - text_command.offset) return error.InvalidTextRange;
-                try self.text(text_command.bounds, text_bytes[text_command.offset..][0..text_command.len], text_command.color);
+                try self.textFont(text_command.bounds, text_bytes[text_command.offset..][0..text_command.len], text_command.color, text_command.font);
             },
             .prepared_text => |value| {
                 if (value.resource >= prepared.len) return error.MissingResources;
@@ -629,6 +672,23 @@ pub const Renderer = struct {
             .end_group => try self.endGroup(),
             .begin_transform => |slot| try self.beginTransform(transforms[slot]),
             .end_transform => try self.endTransform(),
+            .backdrop => |slot| {
+                const source = self.backdrop_source orelse return error.MissingResources;
+                if (slot >= source.backdrop_storage.len) return error.MissingResources;
+                const clip = try self.physicalClip();
+                // Complete batched GDI drawing before reading the DIB.
+                if (c.GdiFlush() == 0) return error.FlushSurfaceFailed;
+                const surface: cpu_gradient.Surface = .{ .pixels = self.pixels orelse return error.NoSurface, .width = self.width, .height = self.height, .stride = self.width, .scale = self.scale, .clip = clip, .origin = self.pixelOrigin() };
+                _ = commands.backdrop.apply(surface, self.transparent(), source.backdrop_storage.entries[slot], source.backdrop_storage.workspace);
+            },
+            .indicator => |slot| {
+                const source = self.backdrop_source orelse return error.MissingResources;
+                if (slot >= source.indicator_len) return error.MissingResources;
+                const clip = try self.physicalClip();
+                if (c.GdiFlush() == 0) return error.FlushSurfaceFailed;
+                const surface: cpu_gradient.Surface = .{ .pixels = self.pixels orelse return error.NoSurface, .width = self.width, .height = self.height, .stride = self.width, .scale = self.scale, .clip = clip, .origin = self.pixelOrigin() };
+                _ = commands.loading.draw(surface, self.transparent(), source.indicator_storage[slot]);
+            },
             .push_clip => |clip| {
                 if (depth == 32) return error.ClipStackFull;
                 if (self.layer_workspace) |workspace| {
@@ -655,6 +715,7 @@ pub const Renderer = struct {
         if (depth != 0) return error.UnbalancedClips;
     }
     pub fn deinit(self: *Renderer) void {
+        self.releaseVariantFonts();
         if (self.layer_workspace) |workspace| {
             workspace.deinit();
             self.layer_workspace = null;
@@ -822,4 +883,63 @@ test "prepared opaque row fill preserves shape AA and fractional clip on transpa
             }
         }
     }
+}
+
+test "GDI text follows the command font and reuses its fonts" {
+    const destination = c.CreateCompatibleDC(null) orelse return error.CreateSurfaceFailed;
+    defer _ = c.DeleteDC(destination);
+    var renderer: Renderer = .{};
+    defer renderer.deinit();
+    try renderer.begin(.{ .native_context = destination, .size = .{ .width = 160, .height = 48, .scale = 1 } });
+    const Ink = struct {
+        fn measure(target: *Renderer, font: commands.Font) !usize {
+            var buffer: commands.Buffer = .{};
+            try buffer.fill(.{ .x = 0, .y = 0, .width = 160, .height = 48 }, 0xffffff);
+            try buffer.textFont(.{ .x = 0, .y = 0, .width = 160, .height = 48 }, "Wide", 0, font);
+            try target.replay(buffer.commands(), buffer.textBytes());
+            if (c.GdiFlush() == 0) return error.FlushSurfaceFailed;
+            var dark: usize = 0;
+            for (target.pixels.?[0 .. 160 * 48]) |pixel| {
+                if (pixel & 0xff < 0x80) dark += 1;
+            }
+            return dark;
+        }
+    };
+    const body = try Ink.measure(&renderer, .body);
+    const heading = try Ink.measure(&renderer, .heading1);
+    const objects = c.GetGuiResources(c.GetCurrentProcess(), c.GR_GDIOBJECTS);
+    try std.testing.expectEqual(heading, try Ink.measure(&renderer, .heading1));
+    try std.testing.expectEqual(objects, c.GetGuiResources(c.GetCurrentProcess(), c.GR_GDIOBJECTS));
+    try std.testing.expect(body > 0);
+    try std.testing.expect(heading > body * 2);
+    try std.testing.expect(try Ink.measure(&renderer, .{ .weight = .bold }) > body);
+    try std.testing.expectEqual(body, try Ink.measure(&renderer, .{}));
+}
+
+test "GDI backdrop effects filter the plane drawn so far and fall back without a workspace" {
+    const destination = c.CreateCompatibleDC(null) orelse return error.CreateSurfaceFailed;
+    defer _ = c.DeleteDC(destination);
+    const bitmap = c.CreateCompatibleBitmap(destination, 32, 16) orelse return error.CreateSurfaceFailed;
+    defer _ = c.DeleteObject(bitmap);
+    const original = c.SelectObject(destination, bitmap);
+    defer _ = c.SelectObject(destination, original);
+    var renderer: Renderer = .{};
+    defer renderer.deinit();
+    try renderer.begin(.{ .native_context = destination, .size = .{ .width = 32, .height = 16, .scale = 1 } });
+    const workspace = try commands.backdrop.Workspace.create(std.testing.allocator, .{ .max_pixels = 32 * 16 });
+    defer workspace.destroy();
+    var buffer: commands.Buffer = .{};
+    defer buffer.reset();
+    try buffer.fill(.{ .x = 0, .y = 0, .width = 16, .height = 16 }, 0x000000);
+    try buffer.fill(.{ .x = 16, .y = 0, .width = 16, .height = 16 }, 0xffffff);
+    try buffer.backdropEffect(.{ .bounds = .{ .x = 8, .y = 0, .width = 16, .height = 16 }, .kind = .blur, .sigma = 2, .fallback = .rgb(0xff0000) });
+    buffer.backdrop_storage.workspace = workspace;
+    try renderer.replayBuffer(&buffer);
+    const left = renderer.pixels.?[8 * 32 + 15] & 255;
+    try std.testing.expect(left > 40 and left < 128);
+    try std.testing.expectEqual(@as(u32, 0), renderer.pixels.?[8 * 32 + 7] & 0xffffff);
+    try std.testing.expectEqual(@as(u64, 1), workspace.stats.applied);
+    buffer.backdrop_storage.workspace = null;
+    try renderer.replayBuffer(&buffer);
+    try std.testing.expectEqual(@as(u32, 0xff0000), renderer.pixels.?[8 * 32 + 15] & 0xffffff);
 }

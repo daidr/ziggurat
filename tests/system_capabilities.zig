@@ -38,13 +38,40 @@ test "unsupported system capabilities fail explicitly" {
     var tray = system.Tray.init(&context, trayAction);
     try std.testing.expectError(error.UnsupportedCapability, tray.show(app, .{}));
     try std.testing.expectError(error.UnsupportedCapability, tray.popupMenu(1, &.{.{ .id = 1, .label = "Item" }}, .icon));
+    try std.testing.expectError(error.UnsupportedCapability, tray.setMenu(&.{.{ .id = 1, .label = "Item" }}));
     try tray.remove();
     try std.testing.expectError(error.UnsupportedCapability, system.clipboard.writeText(window, "text"));
     try std.testing.expectError(error.UnsupportedCapability, system.clipboard.readText(window, &destination));
+    // The test backend has no native display; Board reports that explicitly.
+    var board: system.clipboard.Board = undefined;
+    try std.testing.expectError(error.UnsupportedCapability, board.init(app, .{}));
     var picker: system.picker.Picker = .{};
     try std.testing.expectError(error.UnsupportedCapability, picker.start(window, .open_file, .{}, &destination, &context, selected));
     try std.testing.expectError(error.UnsupportedCapability, picker.cancel());
     picker.detach();
     try owner.detach();
     try std.testing.expectEqual(0, system.picker.resourceCount());
+}
+
+fn desktopChanged(_: *anyopaque, _: system.desktop.Change) void {}
+test "desktop environment queries need the native display outside the test backend" {
+    const desktop = system.desktop;
+    const app = try z.App.init(std.testing.allocator);
+    defer app.deinit();
+    var monitors: [desktop.max_monitors]desktop.Monitor = undefined;
+    try std.testing.expectError(error.UnsupportedCapability, desktop.monitors(app, &monitors));
+    try std.testing.expectError(error.UnsupportedCapability, desktop.preferences(app));
+    try std.testing.expectError(error.UnsupportedCapability, desktop.power(app));
+    try std.testing.expectError(error.UnsupportedCapability, desktop.network(app));
+    var context: u8 = 0;
+    var watch = desktop.Watch.init(&context, desktopChanged);
+    try std.testing.expectError(error.EmptySelection, watch.start(app, .{}));
+    try std.testing.expectError(error.UnsupportedCapability, watch.start(app, .{ .preferences = true }));
+    try std.testing.expect(!watch.running());
+    watch.stop();
+    try std.testing.expectEqual(@as(usize, 0), app.resourceStats().stop_participants);
+    try std.testing.expectEqual(@as(usize, 0), desktop.resourceCount());
+    const all: desktop.Kinds = .{ .monitors = true, .preferences = true, .power = true, .network = true };
+    try std.testing.expectEqual(all, desktop.Kinds.fromBits(all.bits()));
+    try std.testing.expectEqual(desktop.Kinds{ .power = true }, desktop.Kinds.fromBits(4));
 }

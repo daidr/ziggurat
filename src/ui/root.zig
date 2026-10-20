@@ -13,6 +13,7 @@ pub const scroll = @import("scroll.zig");
 pub const text_buffer = @import("text_buffer.zig");
 pub const editor = @import("editor.zig");
 pub const commands = @import("commands.zig");
+pub const Font = commands.Font;
 pub const drawing = @import("ziggurat_drawing_resources");
 pub const ImageOptions = drawing.ImageOptions;
 pub const ImageCacheStats = struct { software: drawing.ImageStats, gpu: ?drawing.ImageStats };
@@ -25,6 +26,17 @@ const gaussian_scope = @import("gaussian_scope.zig");
 pub const GaussianWorkspaceOptions = gaussian_scope.Options;
 pub const GaussianFilterOptions = gaussian_scope.FilterOptions;
 const GaussianWorkspace = struct { allocator: std.mem.Allocator, options: GaussianWorkspaceOptions, storage: commands.FilterStorage = .{} };
+pub const backdrop_effects = commands.backdrop;
+pub const BackdropEffect = backdrop_effects.Effect;
+pub const loading = commands.loading;
+pub const BackdropEffectStats = struct {
+    workspace: backdrop_effects.Stats = .{},
+    /// Effects drawn as their opaque fill because no workspace was prepared.
+    unprepared: u64 = 0,
+    /// Frames replayed in software because they held a backdrop effect or
+    /// a loading indicator.
+    software_frames: u64 = 0,
+};
 pub const offscreen = @import("offscreen.zig");
 pub const gpu_resources = @import("gpu_resources.zig");
 pub const gpu_offscreen = @import("gpu_offscreen.zig");
@@ -458,6 +470,10 @@ pub const Context = struct {
     theme_generation: u64 = 0,
     transforms: ?*TransformWorkspace = null,
     gaussian_workspace: ?*GaussianWorkspace = null,
+    backdrop_workspace: ?*backdrop_effects.Workspace = null,
+    backdrop_preferences: backdrop_effects.Preferences = .{},
+    backdrop_unprepared: u64 = 0,
+    backdrop_software_frames: u64 = 0,
     space_generation: u64 = 0,
     space_binding_epoch: u64 = 0,
     layer_mutating: bool = false,
@@ -747,6 +763,43 @@ pub const Context = struct {
         self.theme_generation += 1;
         if (self.window) |window| window.invalidate();
         return true;
+    }
+
+    /// Allocate the scratch planes backdrop effects filter in. Until then,
+    /// and when a region exceeds `max_pixels`, effects draw their opaque
+    /// fill. The workspace lasts until release or detach.
+    pub fn prepareBackdropEffects(self: *Context, allocator: std.mem.Allocator, options: backdrop_effects.Options) !void {
+        const window = self.window orelse return error.NotAttached;
+        const scope = self.callbackScope(window) orelse return error.Closed;
+        defer scope.end();
+        if (self.painting) return error.Busy;
+        const workspace = try backdrop_effects.Workspace.create(allocator, options);
+        const previous = self.backdrop_workspace;
+        self.backdrop_workspace = workspace;
+        if (previous) |value| value.destroy();
+        window.invalidate();
+    }
+    pub fn releaseBackdropEffects(self: *Context) !void {
+        if (self.painting) return error.Busy;
+        const workspace = self.backdrop_workspace orelse return error.BackdropNotPrepared;
+        self.backdrop_workspace = null;
+        workspace.destroy();
+        if (self.window) |window| if (self.live(window)) window.invalidate();
+    }
+    /// The host's reading of the system's reduced transparency and high
+    /// contrast settings; either one draws every effect as an opaque fill.
+    pub fn setBackdropPreferences(self: *Context, value: backdrop_effects.Preferences) !void {
+        if (self.window) |window| if (window.app.owner != std.Thread.getCurrentId()) return error.WrongThread;
+        if (self.painting) return error.Busy;
+        if (std.meta.eql(self.backdrop_preferences, value)) return;
+        self.backdrop_preferences = value;
+        if (self.window) |window| if (self.live(window)) window.invalidate();
+    }
+    pub fn backdropPreferences(self: *const Context) backdrop_effects.Preferences {
+        return self.backdrop_preferences;
+    }
+    pub fn backdropEffectStats(self: *const Context) BackdropEffectStats {
+        return .{ .workspace = if (self.backdrop_workspace) |workspace| workspace.stats else .{}, .unprepared = self.backdrop_unprepared, .software_frames = self.backdrop_software_frames };
     }
 
     /// Keep this Context at a stable address through its actual detach callback.
@@ -2621,6 +2674,7 @@ pub const Context = struct {
                 };
                 self.command_buffer.reset();
                 defer self.command_buffer.reset();
+                self.command_buffer.backdrop_storage.workspace = self.backdrop_workspace;
                 if (self.gaussian_workspace) |workspace| self.command_buffer.bindFilterStorage(&workspace.storage) catch |err| {
                     window.report(.{ .domain = .renderer, .operation = .paint, .err = err });
                     return;
@@ -2725,6 +2779,14 @@ pub const Context = struct {
                     };
                 };
                 if (!self.live(window)) return;
+                // Backdrop effects and loading indicators draw on the software
+                // planes: replay this frame there without reporting a device
+                // failure.
+                if (build_options.gpu and using_gpu and commands.softwareOnly(self.command_buffer.commands())) {
+                    self.gpu_renderer.discard();
+                    using_gpu = false;
+                    self.backdrop_software_frames += 1;
+                }
                 if (build_options.gpu and using_gpu) {
                     const rendered = if (self.gpu_renderer.replayBuffer(&self.command_buffer)) rendered: {
                         if (self.gpu_renderer.end()) break :rendered true else |err| {
@@ -2836,6 +2898,10 @@ pub const Context = struct {
         self.last_paint_size = null;
         self.input_state = .{ .scope_epoch = shortcut_epoch, .click_epoch = click_epoch };
         self.dropTransformMetadata();
+        if (self.backdrop_workspace) |workspace| {
+            self.backdrop_workspace = null;
+            workspace.destroy();
+        }
         self.painting = false;
         self.dropGaussianMetadata();
         self.frame_accessibility_source = null;
@@ -3324,7 +3390,12 @@ pub const Frame = struct {
         };
     }
     pub fn label(self: *Frame, bounds: Rect, text: []const u8, rgb: u32) void {
-        self.context.command_buffer.text(self.absolute(bounds), text, rgb) catch |err| {
+        self.labelFont(bounds, text, rgb, .{});
+    }
+    /// A single-line label in `font`, vertically centered and ellipsized
+    /// like `label`.
+    pub fn labelFont(self: *Frame, bounds: Rect, text: []const u8, rgb: u32, font: Font) void {
+        self.context.command_buffer.textFont(self.absolute(bounds), text, rgb, font) catch |err| {
             self.failure = self.failure orelse err;
         };
     }
@@ -3381,6 +3452,78 @@ pub const Frame = struct {
         self.context.command_buffer.strokeRect(self.absolute(bounds), radius, width, color) catch |err| {
             self.failure = self.failure orelse err;
         };
+    }
+    /// Filter what has been drawn beneath `bounds` in the current target and
+    /// write the result inside its rounded rectangle: a blur, a glass pane or
+    /// a scroll edge. Inside a group, transform or Gaussian scope the effect
+    /// sees only what that scope has drawn so far. Under reduced
+    /// transparency or high contrast, and before `prepareBackdropEffects`,
+    /// it draws an opaque fill instead. Hit testing and semantics are the
+    /// caller's, as for any drawing.
+    pub fn backdropEffect(self: *Frame, bounds: Rect, radius: f32, effect: BackdropEffect) void {
+        self.recordBackdrop(bounds, radius, effect) catch |err| {
+            self.failure = self.failure orelse err;
+        };
+    }
+    /// Draw loading indicator `kind` fitted and centered in `bounds`, at the
+    /// pose `phase` cycles into its animation; `loading.phase` derives it
+    /// from elapsed time. Scheduling the next frame is the caller's.
+    pub fn loadingIndicator(self: *Frame, bounds: Rect, kind: loading.Kind, phase: f64, color: Color, options: loading.Options) void {
+        self.context.command_buffer.loadingIndicator(.{ .bounds = self.absolute(bounds), .kind = kind, .phase = phase, .color = color, .options = options }) catch |err| {
+            self.failure = self.failure orelse err;
+        };
+    }
+    fn recordBackdrop(self: *Frame, bounds: Rect, radius: f32, effect: BackdropEffect) !void {
+        const palette = self.currentTheme().palette;
+        const preferences = self.context.backdrop_preferences;
+        const dark = backdrop_effects.isDark(palette.background);
+        const fallback = backdrop_effects.fallbackColor(effect, palette.background, palette.control);
+        const buffer = &self.context.command_buffer;
+        const absolute_bounds = self.absolute(bounds);
+        const opaque_fill = preferences.opaqueFill() or self.context.backdrop_workspace == null;
+        if (!preferences.opaqueFill() and self.context.backdrop_workspace == null) self.context.backdrop_unprepared += 1;
+        switch (effect) {
+            .scroll_edge => |edge| {
+                const background = edge.background orelse palette.background;
+                if (opaque_fill) {
+                    try buffer.roundedRect(absolute_bounds, radius, .rgb(background));
+                } else if (!edge.hard) {
+                    const stops = [_]commands.brushes.Stop{ .{ .offset = 0, .color = alphaColor(background, backdrop_effects.soft_edge_alpha) }, .{ .offset = 1, .color = alphaColor(background, 0) } };
+                    const top: layout.Point = .{ .x = absolute_bounds.x, .y = absolute_bounds.y };
+                    const bottom: layout.Point = .{ .x = absolute_bounds.x, .y = absolute_bounds.y + absolute_bounds.height };
+                    try buffer.gradientRect(absolute_bounds, radius, .{ .linear = .{ .start = if (edge.bottom) bottom else top, .end = if (edge.bottom) top else bottom, .stops = &stops } });
+                    return;
+                } else try buffer.backdropEffect(.{ .bounds = absolute_bounds, .radius = radius, .kind = .edge, .dark = dark, .background = background, .fallback = fallback });
+                if (!edge.hard) return;
+                // A hairline separates the hard edge from the content.
+                const height = @max(0.5, 1 / self.size.scale);
+                const alpha: f64 = (if (dark) @as(f64, 0.07) else 0.1) * 0.5 / height;
+                const y = if (edge.bottom) absolute_bounds.y - height else absolute_bounds.y + absolute_bounds.height;
+                try buffer.roundedRect(.{ .x = absolute_bounds.x, .y = y, .width = absolute_bounds.width, .height = height }, 0, alphaColor(if (dark) 0xffffff else 0, alpha));
+            },
+            .glass => |glass| {
+                if (!std.math.isFinite(glass.noise)) return error.InvalidGeometry;
+                if (opaque_fill) {
+                    try buffer.roundedRect(absolute_bounds, radius, fallback);
+                    if (preferences.high_contrast) try buffer.strokeRect(absolute_bounds, radius, 1, .rgb(palette.border));
+                    return;
+                }
+                try buffer.backdropEffect(.{ .bounds = absolute_bounds, .radius = radius, .kind = .glass, .style = glass.style, .dark = dark, .tint = glass.tint orelse .{ .r = 0, .g = 0, .b = 0, .a = 0 }, .noise = glass.noise, .fallback = fallback });
+            },
+            .blur => |blur| {
+                if (!std.math.isFinite(blur.radius) or blur.radius < 0) return error.InvalidGeometry;
+                if (opaque_fill) {
+                    if (blur.mask) |mask| {
+                        const points = backdrop_effects.maskPoints(mask, absolute_bounds);
+                        const stops = [_]commands.brushes.Stop{ .{ .offset = 0, .color = alphaColor(palette.background, @as(f64, @floatFromInt(mask.from)) / 255) }, .{ .offset = 1, .color = alphaColor(palette.background, @as(f64, @floatFromInt(mask.to)) / 255) } };
+                        try buffer.gradientRect(absolute_bounds, radius, .{ .linear = .{ .start = points[0], .end = points[1], .stops = &stops } });
+                    } else try buffer.roundedRect(absolute_bounds, radius, fallback);
+                    return;
+                }
+                if (blur.radius == 0 and blur.mask == null) return;
+                try buffer.backdropEffect(.{ .bounds = absolute_bounds, .radius = radius, .kind = .blur, .sigma = blur.radius, .mask = blur.mask, .dark = dark, .fallback = fallback });
+            },
+        }
     }
     pub fn gradientRect(self: *Frame, bounds: Rect, radius: f32, gradient: commands.Gradient) void {
         self.context.command_buffer.gradientRect(self.absolute(bounds), radius, gradient.translated(.{ .x = self.offset.x, .y = self.offset.y })) catch |err| {
@@ -3469,6 +3612,98 @@ pub const Frame = struct {
         if (id == accessibility.root_id) return error.ReservedControlId;
         try self.semantic(.{ .id = id, .parent = parent, .role = .group, .name = name, .bounds = bounds });
     }
+    /// A field showing the current choice `text` that opens a list of
+    /// options; `expanded` is whether that list is open. Activation should
+    /// open or close it. Named by `options.name`.
+    pub fn comboBox(self: *Frame, id: u64, bounds: Rect, text: []const u8, expanded: bool, options: widgets.Options) !void {
+        try widgets.emit(self, .combo_box, id, bounds, text, expanded, 0, options);
+    }
+    /// The list a combo box or text input opens, drawn over other content;
+    /// its options name this id as their `radio_group`.
+    pub fn popupList(self: *Frame, id: u64, bounds: Rect, name: []const u8, parent: u64) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.semantic(.{ .id = id, .parent = parent, .role = .list_box, .name = name, .bounds = bounds });
+    }
+    /// A panel drawn over other content and anchored to a control, such as
+    /// a date input's calendar. It occludes the controls behind it, so a
+    /// press on its background reaches none of them; its own controls
+    /// follow it.
+    pub fn popover(self: *Frame, id: u64, bounds: Rect, name: []const u8, parent: u64) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.addControl(id, bounds, .{ .enabled = false, .focusable = false });
+        try self.semantic(.{ .id = id, .parent = parent, .role = .popup, .name = name, .bounds = bounds });
+    }
+    /// A button with a chevron along `direction`, such as Back or Forward.
+    pub fn navButton(self: *Frame, id: u64, bounds: Rect, direction: widgets.NavDirection, name: []const u8, options: widgets.Options) !void {
+        try widgets.emitNavButton(self, id, bounds, direction, name, options);
+    }
+    pub fn avatar(self: *Frame, id: u64, bounds: Rect, name: []const u8, options: widgets.AvatarOptions) !void {
+        try widgets.emitAvatar(self, id, bounds, name, options);
+    }
+    pub fn tooltip(self: *Frame, id: u64, bounds: Rect, text: []const u8) !void {
+        try widgets.emitTooltip(self, id, bounds, text);
+    }
+    /// A transient status message, such as a toast; its contents follow.
+    /// Announced politely to accessibility clients when it first appears.
+    pub fn status(self: *Frame, id: u64, bounds: Rect, name: []const u8, parent: u64) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.semantic(.{ .id = id, .parent = parent, .role = .status, .name = name, .bounds = bounds });
+    }
+    /// A named search region holding a query input and its controls.
+    pub fn search(self: *Frame, id: u64, bounds: Rect, name: []const u8, parent: u64) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.semantic(.{ .id = id, .parent = parent, .role = .search, .name = name, .bounds = bounds });
+    }
+    /// A tree of rows; `multiple` lets several be selected at once. Its rows
+    /// name this id as their `radio_group`.
+    pub fn treeView(self: *Frame, id: u64, bounds: Rect, name: []const u8, multiple: bool, parent: u64) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.semantic(.{ .id = id, .parent = parent, .role = .tree, .name = name, .bounds = bounds, .multiple = multiple });
+    }
+    /// One tree row. Its semantic parent is the tree or the row it is
+    /// nested under; `options.expanded` is null for a leaf.
+    pub fn treeItem(self: *Frame, id: u64, bounds: Rect, text: []const u8, options: widgets.RowOptions) !void {
+        if (options.control.radio_group == null) return error.MissingGroup;
+        try widgets.emitTreeItem(self, id, bounds, text, options);
+    }
+    /// A table of rows under a header row; `multiple` lets several rows be
+    /// selected at once. Its rows name this id as their `radio_group`.
+    pub fn dataTable(self: *Frame, id: u64, bounds: Rect, name: []const u8, multiple: bool, parent: u64) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.semantic(.{ .id = id, .parent = parent, .role = .table, .name = name, .bounds = bounds, .multiple = multiple });
+    }
+    /// The row of column headers at the top of a table.
+    pub fn tableHeader(self: *Frame, id: u64, bounds: Rect, parent: u64) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.semantic(.{ .id = id, .parent = parent, .role = .table_header, .name = "", .bounds = bounds });
+    }
+    /// A column title that sorts on activation when `sortable`; `sort` is
+    /// the column's current direction, or null when another column sorts.
+    pub fn columnHeader(self: *Frame, id: u64, bounds: Rect, title: []const u8, sort: ?widgets.SortDirection, sortable: bool, options: widgets.Options) !void {
+        try widgets.emitColumnHeader(self, id, bounds, title, sort, sortable, options);
+    }
+    /// The background and semantics of one table row; record its cells after it.
+    pub fn tableRow(self: *Frame, id: u64, bounds: Rect, name: []const u8, options: widgets.RowOptions) !void {
+        if (options.control.radio_group == null) return error.MissingGroup;
+        try widgets.emitTableRow(self, id, bounds, name, options);
+    }
+    /// A text input that collects tokens; its tokens and input follow.
+    pub fn tokenField(self: *Frame, id: u64, bounds: Rect, name: []const u8, parent: u64) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.semantic(.{ .id = id, .parent = parent, .role = .token_field, .name = name, .bounds = bounds });
+    }
+    pub fn tokenItem(self: *Frame, id: u64, remove_id: u64, bounds: Rect, text: []const u8, options: widgets.TokenOptions) !void {
+        try widgets.emitToken(self, id, remove_id, bounds, text, options);
+    }
+    /// An editable combo box around a text input that follows: `value` is
+    /// the input's text and `expanded` whether its list is open.
+    pub fn comboField(self: *Frame, id: u64, bounds: Rect, value: []const u8, expanded: bool, options: widgets.Options) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.semantic(.{ .id = id, .parent = options.semantic_parent, .role = .combo_box, .name = options.name, .value = value, .description = options.description, .invalid = options.invalid, .required = options.required, .bounds = bounds, .enabled = options.enabled, .checked = expanded, .read_only = true });
+    }
+    pub fn comboToggle(self: *Frame, id: u64, bounds: Rect, expanded: bool, options: widgets.Options) !void {
+        try widgets.emitComboToggle(self, id, bounds, expanded, options);
+    }
     pub fn meter(self: *Frame, id: u64, bounds: Rect, value: f64, spec: Range, options: widgets.MeterOptions) !void {
         try widgets.emitMeter(self, id, bounds, value, spec, options);
     }
@@ -3494,6 +3729,12 @@ pub const Frame = struct {
         try widgets.emitStepper(self, id, bounds, value, spec, options);
     }
 };
+
+fn alphaColor(rgb: u32, alpha: f64) Color {
+    var color = Color.rgb(rgb);
+    color.a = @intFromFloat(@round(std.math.clamp(alpha, 0, 1) * 255));
+    return color;
+}
 
 const SavedTransform = struct {
     frame: Frame,
@@ -3726,6 +3967,72 @@ test "theme updates copy values at update boundaries and preserve failed transac
     context.attachment_phase = .detached;
     context.theme_generation = std.math.maxInt(u64);
     try std.testing.expectError(error.IdExhausted, context.setTheme(.light()));
+}
+
+test "backdrop effects record opaque fills for system preferences and an unprepared workspace" {
+    const Dummy = struct {
+        fn draw(_: *anyopaque, _: *Frame) void {}
+        fn action(_: *anyopaque, _: u64) void {}
+    };
+    var dummy: u8 = 0;
+    var context = Context.init(&dummy, Dummy.draw, Dummy.action);
+    defer context.command_buffer.reset();
+    var frame: Frame = .{ .context = &context, .size = .{ .width = 100, .height = 100, .scale = 2 } };
+    const bounds: Rect = .{ .x = 0, .y = 0, .width = 80, .height = 40 };
+    const buffer = &context.command_buffer;
+    // Unprepared: an opaque fill, counted.
+    frame.backdropEffect(bounds, 12, .{ .glass = .{} });
+    try std.testing.expect(buffer.commands()[0] == .shape);
+    try std.testing.expectEqual(@as(u64, 1), context.backdropEffectStats().unprepared);
+    const workspace = try backdrop_effects.Workspace.create(std.testing.allocator, .{ .max_pixels = 64 });
+    context.backdrop_workspace = workspace;
+    defer {
+        context.backdrop_workspace = null;
+        workspace.destroy();
+    }
+    buffer.reset();
+    try frame.pushOffset(.{ .x = 5, .y = 6 });
+    frame.backdropEffect(bounds, 12, .{ .glass = .{ .tint = .{ .r = 255, .g = 0, .b = 0, .a = 128 } } });
+    frame.backdropEffect(bounds, 0, .{ .blur = .{ .radius = 4, .mask = .{} } });
+    frame.backdropEffect(bounds, 0, .{ .scroll_edge = .{ .hard = true } });
+    frame.backdropEffect(bounds, 0, .{ .scroll_edge = .{} });
+    try frame.popOffset();
+    try std.testing.expectEqual(@as(?anyerror, null), frame.failure);
+    const list = buffer.commands();
+    try std.testing.expectEqual(@as(usize, 5), list.len);
+    try std.testing.expect(list[0] == .backdrop and list[1] == .backdrop and list[2] == .backdrop and list[3] == .shape and list[4] == .gradient);
+    const glass = buffer.backdropEntries()[0];
+    try std.testing.expectEqual(backdrop_effects.Kind.glass, glass.kind);
+    try std.testing.expectEqual(@as(f32, 5), glass.bounds.x);
+    try std.testing.expectEqual(@as(u8, 128), glass.tint.a);
+    // The hard edge's hairline is half a DIP below it at scale 2.
+    try std.testing.expectEqual(@as(f32, 46), list[3].shape.bounds.y);
+    try std.testing.expectEqual(@as(f32, 0.5), list[3].shape.bounds.height);
+    try std.testing.expect(commands.softwareOnly(list));
+    // Reduced transparency and high contrast fill opaquely, outlined in high contrast.
+    buffer.reset();
+    try context.setBackdropPreferences(.{ .high_contrast = true });
+    frame.backdropEffect(bounds, 12, .{ .glass = .{} });
+    frame.backdropEffect(bounds, 0, .{ .blur = .{ .radius = 4 } });
+    try std.testing.expectEqual(@as(usize, 3), buffer.commands().len);
+    try std.testing.expect(buffer.commands()[0] == .shape and buffer.commands()[1] == .shape and buffer.commands()[2] == .shape);
+    try std.testing.expect(!commands.softwareOnly(buffer.commands()));
+    try std.testing.expectEqual(@as(u64, 1), context.backdropEffectStats().unprepared);
+    // Invalid input records nothing and keeps the error.
+    buffer.reset();
+    try context.setBackdropPreferences(.{});
+    frame.backdropEffect(bounds, 0, .{ .blur = .{ .radius = std.math.nan(f32) } });
+    try std.testing.expectEqual(@as(usize, 0), buffer.commands().len);
+    try std.testing.expectEqual(@as(?anyerror, error.InvalidGeometry), frame.failure);
+    // The table is bounded and rolls back with a checkpoint.
+    frame.failure = null;
+    const mark = buffer.checkpoint();
+    for (0..backdrop_effects.max_entries) |_| frame.backdropEffect(bounds, 0, .{ .glass = .{} });
+    try std.testing.expectEqual(@as(?anyerror, null), frame.failure);
+    frame.backdropEffect(bounds, 0, .{ .glass = .{} });
+    try std.testing.expectEqual(@as(?anyerror, error.BackdropsFull), frame.failure);
+    buffer.rollback(mark);
+    try std.testing.expectEqual(@as(usize, 0), buffer.backdropEntries().len);
 }
 
 test "widget errors roll back hit semantics and commands" {
@@ -3985,6 +4292,97 @@ test "meters report values, ratings snap to marks and regions nest" {
         try std.testing.expectEqual(accessibility.Role.slider, nodes[5].role);
         try std.testing.expectEqual(@as(?u64, 30), nodes[5].parent);
         try std.testing.expectEqual(@as(f64, 5), nodes[5].range_maximum);
+    }
+}
+
+test "combo boxes, tooltips, status, search and avatars publish their roles" {
+    const Dummy = struct {
+        fn draw(_: *anyopaque, _: *Frame) void {}
+        fn action(_: *anyopaque, _: u64) void {}
+    };
+    var dummy: u8 = 0;
+    var context = Context.init(&dummy, Dummy.draw, Dummy.action);
+    if (build_options.accessibility) {
+        context.attached_semantics_enabled = true;
+        try context.semantic_tree.reset("Controls", .{ .x = 0, .y = 0, .width = 300, .height = 300 });
+    }
+    var frame: Frame = .{ .context = &context, .size = .{ .width = 300, .height = 300, .scale = 1 } };
+    try frame.search(10, .{ .x = 0, .y = 0, .width = 300, .height = 40 }, "Find", accessibility.root_id);
+    try frame.comboBox(11, .{ .x = 0, .y = 0, .width = 160, .height = 32 }, "Sans", true, .{ .name = "Font", .semantic_parent = 10 });
+    try frame.popupList(12, .{ .x = 0, .y = 36, .width = 160, .height = 64 }, "Font", 11);
+    try frame.listItem(13, .{ .x = 0, .y = 36, .width = 160, .height = 32 }, "Serif", false, .{ .semantic_parent = 12, .radio_group = 12 });
+    try frame.navButton(20, .{ .x = 0, .y = 120, .width = 32, .height = 32 }, .back, "Back", .{});
+    try frame.avatar(21, .{ .x = 40, .y = 120, .width = 32, .height = 32 }, "Ada Lovelace", .{});
+    try frame.status(22, .{ .x = 0, .y = 200, .width = 200, .height = 40 }, "Saved", accessibility.root_id);
+    try frame.tooltip(23, .{ .x = 0, .y = 160, .width = 100, .height = 24 }, "Go back");
+    // The combo box and navigation button take presses like buttons.
+    context.input_state.down(.{ .x = 10, .y = 10 });
+    try std.testing.expectEqual(@as(?u64, 11), context.input_state.active);
+    context.input_state.cancelPress();
+    context.input_state.down(.{ .x = 10, .y = 130 });
+    try std.testing.expectEqual(@as(?u64, 20), context.input_state.active);
+    context.input_state.cancelPress();
+    if (build_options.accessibility) {
+        const nodes = context.semantic_tree.entries[0..context.semantic_tree.len];
+        const expected = [_]accessibility.Role{ .search, .combo_box, .list_box, .list_item, .button, .image, .status, .tooltip };
+        for (expected, nodes[1..][0..expected.len]) |role, node| try std.testing.expectEqual(role, node.role);
+        const text = context.semantic_tree.storage[0..];
+        try std.testing.expectEqualStrings("Font", text[nodes[2].name_start..][0..nodes[2].name_len]);
+        try std.testing.expectEqualStrings("Sans", text[nodes[2].value_start..][0..nodes[2].value_len]);
+        try std.testing.expect(nodes[2].checked and nodes[2].read_only);
+        try std.testing.expectEqual(@as(?u64, 10), nodes[2].parent);
+        try std.testing.expectEqual(@as(?u64, 11), nodes[3].parent);
+        try std.testing.expectEqualStrings("Ada Lovelace", text[nodes[6].name_start..][0..nodes[6].name_len]);
+        try std.testing.expectEqualStrings("Go back", text[nodes[8].name_start..][0..nodes[8].name_len]);
+    }
+}
+
+test "trees, tables and token fields publish their roles and states" {
+    const Dummy = struct {
+        fn draw(_: *anyopaque, _: *Frame) void {}
+        fn action(_: *anyopaque, _: u64) void {}
+    };
+    var dummy: u8 = 0;
+    var context = Context.init(&dummy, Dummy.draw, Dummy.action);
+    if (build_options.accessibility) {
+        context.attached_semantics_enabled = true;
+        try context.semantic_tree.reset("Collections", .{ .x = 0, .y = 0, .width = 300, .height = 300 });
+    }
+    var frame: Frame = .{ .context = &context, .size = .{ .width = 300, .height = 300, .scale = 1 } };
+    const row: Rect = .{ .x = 0, .y = 0, .width = 200, .height = 24 };
+    try frame.treeView(1, .{ .x = 0, .y = 0, .width = 200, .height = 48 }, "Files", true, accessibility.root_id);
+    try frame.treeItem(2, row, "src", .{ .control = .{ .semantic_parent = 1, .radio_group = 1 }, .selected = true, .cursor = true, .multiple = true, .expanded = true });
+    try frame.treeItem(3, .{ .x = 0, .y = 24, .width = 200, .height = 24 }, "main.zig", .{ .control = .{ .semantic_parent = 2, .radio_group = 1 }, .multiple = true, .level = 1 });
+    try frame.dataTable(4, .{ .x = 0, .y = 60, .width = 200, .height = 60 }, "Parts", false, accessibility.root_id);
+    try frame.tableHeader(5, .{ .x = 0, .y = 60, .width = 200, .height = 30 }, 4);
+    try frame.columnHeader(6, .{ .x = 0, .y = 60, .width = 100, .height = 30 }, "Name", .descending, true, .{ .semantic_parent = 5 });
+    try frame.columnHeader(7, .{ .x = 100, .y = 60, .width = 100, .height = 30 }, "Note", null, false, .{ .semantic_parent = 5 });
+    try frame.tableRow(8, .{ .x = 0, .y = 90, .width = 200, .height = 30 }, "Bolts", .{ .control = .{ .semantic_parent = 4, .radio_group = 4 }, .cursor = true });
+    try frame.tokenField(9, .{ .x = 0, .y = 130, .width = 200, .height = 30 }, "Tags", accessibility.root_id);
+    try frame.tokenItem(10, 11, .{ .x = 0, .y = 130, .width = 80, .height = 30 }, "zig", .{ .control = .{ .semantic_parent = 9, .radio_group = 9 } });
+    // The sortable header takes presses; the other one does not.
+    context.input_state.down(.{ .x = 10, .y = 70 });
+    try std.testing.expectEqual(@as(?u64, 6), context.input_state.active);
+    context.input_state.cancelPress();
+    context.input_state.down(.{ .x = 150, .y = 70 });
+    try std.testing.expectEqual(@as(?u64, null), context.input_state.active);
+    context.input_state.cancelPress();
+    // The end of a token is its remove button.
+    context.input_state.down(.{ .x = 78, .y = 140 });
+    try std.testing.expectEqual(@as(?u64, 11), context.input_state.active);
+    context.input_state.cancelPress();
+    if (build_options.accessibility) {
+        const nodes = context.semantic_tree.entries[0..context.semantic_tree.len];
+        const expected = [_]accessibility.Role{ .tree, .tree_item, .tree_item, .table, .table_header, .column_header, .column_header, .table_row, .token_field, .token, .button };
+        for (expected, nodes[1..][0..expected.len]) |role, node| try std.testing.expectEqual(role, node.role);
+        try std.testing.expect(nodes[1].multiple and !nodes[4].multiple);
+        try std.testing.expect(nodes[2].checked and nodes[2].expanded.?);
+        try std.testing.expectEqual(@as(?bool, null), nodes[3].expanded);
+        try std.testing.expectEqual(@as(?u64, 2), nodes[3].parent);
+        const text = context.semantic_tree.storage[0..];
+        try std.testing.expectEqualStrings("descending", text[nodes[6].value_start..][0..nodes[6].value_len]);
+        try std.testing.expectEqual(@as(usize, 0), nodes[7].value_len);
+        try std.testing.expectEqual(@as(?u64, 10), nodes[11].parent);
     }
 }
 

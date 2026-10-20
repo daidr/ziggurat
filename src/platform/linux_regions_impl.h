@@ -75,9 +75,9 @@ static void region_restore(ZlgRegionLayer *layer) {
     if (!content_live(s)) return;
     content_remove(s->area,layer->overlay);
     if (!content_live(s)) return;
-    content_remove(layer->overlay,s->window);
+    content_remove(layer->overlay,GTK_WIDGET(root_container(s)));
     if (!content_live(s)) return;
-    if (!gtk_widget_get_parent(s->area)) gtk_container_add(GTK_CONTAINER(s->window),s->area);
+    if (!gtk_widget_get_parent(s->area)) root_add(s,s->area);
     if (!content_live(s)) return;
     gtk_widget_show(s->area);
     if (!content_live(s)) return;
@@ -95,9 +95,9 @@ static ZlgRegionLayer *region_layer_create(NativeWindow *s) {
     s->regions=layer;
     content_cancel_input(s);
     if (!content_live(s)) goto closed;
-    gtk_container_remove(GTK_CONTAINER(s->window),s->area);
+    gtk_container_remove(root_container(s),s->area);
     if (!content_live(s)) goto closed;
-    gtk_container_add(GTK_CONTAINER(s->window),layer->overlay);
+    root_add(s,layer->overlay);
     if (!content_live(s)) goto closed;
     gtk_container_add(GTK_CONTAINER(layer->overlay),s->area);
     if (!content_live(s)) goto closed;

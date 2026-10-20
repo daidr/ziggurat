@@ -20,6 +20,8 @@ struct CaptureOp {
     size_t capacity,used;
     gboolean cancelled,overflow;
 };
+/* Whole-data clear shares this physical owner: same pending quota, Zig owner
+ * revocation and GTask-lifetime pinning, with no PNG capacity. */
 static _Atomic uint32_t capture_budgets,capture_operations;
 static _Atomic size_t capture_bytes,capture_peak;
 static void capture_account(size_t amount) {
@@ -134,6 +136,40 @@ int zwk_capture_start(ZwkState *s,uint64_t token) {
     atomic_fetch_add_explicit(&capture_operations,1,memory_order_relaxed);capture_account(bytes);retain(s);
     retain(s);
     webkit_web_view_get_snapshot(WEBKIT_WEB_VIEW(s->view),WEBKIT_SNAPSHOT_REGION_VISIBLE,WEBKIT_SNAPSHOT_OPTIONS_NONE,op->cancel,capture_finished,op);
+    release(s);return ZWK_OK;
+}
+static void clear_finished(GObject *object,GAsyncResult *result,gpointer data) {
+    CaptureOp *op=data;ZwkState *s=op->state;ZwkCaptureBudget *b=s->capture;
+    g_assert(s->thread==g_thread_self() && G_IS_TASK(result));
+    GError *error=NULL;
+    const gboolean cleared=webkit_website_data_manager_clear_finish(WEBKIT_WEBSITE_DATA_MANAGER(object),result,&error);
+    const int status=error?ZWK_CAPTURE_NATIVE:cleared?ZWK_CAPTURE_OK:ZWK_CAPTURE_INVALID;
+    if (!op->cancelled && !b->closed && live(s) && b->notify) {
+        const ZwkFailure failure=error?(ZwkFailure){error->domain,error->code}:(ZwkFailure){0};
+        b->notify(s->owner,op->token,status,(const unsigned char *)(op+1),0,error?&failure:NULL);
+    }
+    if (error) g_error_free(error);
+    GQuark key=g_quark_from_static_string("ziggurat-capture-operation-result");
+    g_assert(!g_object_get_qdata(G_OBJECT(result),key));
+    g_object_set_qdata_full(G_OBJECT(result),key,op,capture_finalized);
+}
+/* Clears every data type of the WebView's own data manager, for all time. A
+ * persistent Profile is shared with every View and Store using it. */
+int zwk_clear_start(ZwkState *s,uint64_t token) {
+    if (!s || s->thread!=g_thread_self() || !token) return ZWK_INVALID;
+    if (!live(s)) return ZWK_CLOSED;
+    ZwkCaptureBudget *b=s->capture;
+    if (!b || b->closed) return ZWK_CLOSED;
+    if (b->pending>=b->limit || atomic_load_explicit(&capture_operations,memory_order_relaxed)>=CAPTURE_PENDING) return ZWK_FULL;
+    for (CaptureOp *at=b->ops;at;at=at->next) if (at->token==token) return ZWK_INVALID;
+    WebKitWebsiteDataManager *manager=webkit_web_view_get_website_data_manager(WEBKIT_WEB_VIEW(s->view));
+    if (!manager) return ZWK_NATIVE_FAILED;
+    CaptureOp *op=malloc(sizeof(CaptureOp));if (!op) return ZWK_OOM;
+    memset(op,0,sizeof(*op));op->state=s;op->token=token;op->cancel=g_cancellable_new();
+    op->next=b->ops;b->ops=op;++b->pending;b->bytes+=sizeof(*op);if (b->bytes>b->peak) b->peak=b->bytes;
+    atomic_fetch_add_explicit(&capture_operations,1,memory_order_relaxed);capture_account(sizeof(*op));retain(s);
+    retain(s);
+    webkit_website_data_manager_clear(manager,WEBKIT_WEBSITE_DATA_ALL,0,op->cancel,clear_finished,op);
     release(s);return ZWK_OK;
 }
 void zwk_capture_counts(uint32_t *budgets,uint32_t *operations,size_t *bytes,size_t *peak) {

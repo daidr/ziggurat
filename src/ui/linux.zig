@@ -24,7 +24,7 @@ extern fn zlc_gradient_surface(*anyopaque, *cpu_gradient.Surface) c_int;
 extern fn zlc_gradient_dirty(*anyopaque, u32, u32, u32, u32) void;
 extern fn zlc_brush_stats(*anyopaque, *u32, *u32, *u32) void;
 pub const BrushStats = struct { creations: u32 = 0, evictions: u32 = 0, cached: u32 = 0 };
-extern fn zlc_text(*anyopaque, f32, f32, f32, f32, [*]const u8, u32, u32) c_int;
+extern fn zlc_text(*anyopaque, f32, f32, f32, f32, [*]const u8, u32, u32, f32, u16, c_int, c_int) c_int;
 extern fn zlc_prepared(*anyopaque, *anyopaque, f32, f32, f32, i32, i32, ?*const drawing.Rect, u32) c_int;
 extern fn zlc_scale(*anyopaque) f32;
 extern fn zlc_push_clip(*anyopaque, f32, f32, f32, f32) void;
@@ -79,6 +79,8 @@ pub const Renderer = struct {
     layer_active: bool = false,
     layer_fault: u32 = 0,
     layer_candidate_peak: usize = 0,
+    /// The Buffer whose backdrop and indicator tables the current replay reads.
+    backdrop_source: ?*const commands.Buffer = null,
     pub const LayerCandidate = struct { native: *anyopaque, plan: layers.Plan };
     pub fn layerMetadataBytes() usize {
         return zlc_layer_metadata_bytes();
@@ -399,9 +401,12 @@ pub const Renderer = struct {
         zlc_fill(self.native.?, rect.x, rect.y, rect.width, rect.height, color);
     }
     pub fn text(self: *Renderer, rect: Rect, utf8: []const u8, color: u32) !void {
+        return self.textFont(rect, utf8, color, .{});
+    }
+    pub fn textFont(self: *Renderer, rect: Rect, utf8: []const u8, color: u32, font: commands.FontKey) !void {
         if (utf8.len > 64 * 1024) return error.TextTooLong;
         if (!std.unicode.utf8ValidateSlice(utf8)) return error.InvalidUtf8;
-        if (zlc_text(self.native.?, rect.x, rect.y, rect.width, rect.height, utf8.ptr, @intCast(utf8.len), color) != 0) return error.DrawTextFailed;
+        if (zlc_text(self.native.?, rect.x, rect.y, rect.width, rect.height, utf8.ptr, @intCast(utf8.len), color, font.size(), font.weight.value(), @intFromBool(font.italic), @intFromBool(font.monospace)) != 0) return error.DrawTextFailed;
     }
     pub fn preparedText(self: *Renderer, view: drawing.PreparedTextView, origin: drawing.Point, tint: geometry.Color) !void {
         try view.validate();
@@ -416,6 +421,8 @@ pub const Renderer = struct {
         try self.replayWithResources(list, text_bytes, &.{});
     }
     pub fn replayBuffer(self: *Renderer, buffer: *const commands.Buffer) !void {
+        self.backdrop_source = buffer;
+        defer self.backdrop_source = null;
         try self.replayWithGaussianResources(buffer.commands(), buffer.textBytes(), buffer.brushResources(), buffer.preparedTextResources(), buffer.imageResources(), buffer.coverageResources(), buffer.transformResources(), buffer.filterResources());
     }
     pub fn replayWithResources(self: *Renderer, list: []const commands.Command, text_bytes: []const u8, resources: []const commands.brushes.Stored) !void {
@@ -465,7 +472,7 @@ pub const Renderer = struct {
             .text => |value| {
                 if (!layout.validRect(value.bounds)) return error.InvalidGeometry;
                 if (value.offset > text_bytes.len or value.len > text_bytes.len - value.offset) return error.InvalidTextRange;
-                try self.text(value.bounds, text_bytes[value.offset..][0..value.len], value.color);
+                try self.textFont(value.bounds, text_bytes[value.offset..][0..value.len], value.color, value.font);
             },
             .prepared_text => |value| {
                 if (value.resource >= prepared.len) return error.MissingResources;
@@ -489,6 +496,22 @@ pub const Renderer = struct {
             .end_group => try self.endGroup(),
             .begin_transform => |slot| try self.beginTransform(transforms[slot]),
             .end_transform => try self.endTransform(),
+            .backdrop => |slot| {
+                const source = self.backdrop_source orelse return error.MissingResources;
+                if (slot >= source.backdrop_storage.len) return error.MissingResources;
+                var surface: cpu_gradient.Surface = undefined;
+                if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawBackdropFailed;
+                const dirty = commands.backdrop.apply(surface, zlc_layer_transparent(self.native.?) != 0, source.backdrop_storage.entries[slot], source.backdrop_storage.workspace);
+                zlc_gradient_dirty(self.native.?, dirty.left, dirty.top, dirty.right - dirty.left, dirty.bottom - dirty.top);
+            },
+            .indicator => |slot| {
+                const source = self.backdrop_source orelse return error.MissingResources;
+                if (slot >= source.indicator_len) return error.MissingResources;
+                var surface: cpu_gradient.Surface = undefined;
+                if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawIndicatorFailed;
+                const dirty = commands.loading.draw(surface, zlc_layer_transparent(self.native.?) != 0, source.indicator_storage[slot]);
+                zlc_gradient_dirty(self.native.?, dirty.left, dirty.top, dirty.right - dirty.left, dirty.bottom - dirty.top);
+            },
             .push_clip => |rect| {
                 if (depth == 32) return error.ClipStackFull;
                 if (!layout.validRect(rect)) return error.InvalidGeometry;
@@ -514,3 +537,61 @@ pub const Renderer = struct {
         return stats;
     }
 };
+
+test "Cairo text follows the command font" {
+    var renderer: Renderer = .{};
+    defer renderer.deinit();
+    const size: z.Size = .{ .width = 160, .height = 48, .scale = 1 };
+    var dummy: u8 = 0;
+    try renderer.begin(.{ .native_context = &dummy, .size = size });
+    const Ink = struct {
+        fn measure(target: *Renderer, font: commands.Font) !usize {
+            target.fill(.{ .x = 0, .y = 0, .width = 160, .height = 48 }, 0xffffff);
+            var buffer: commands.Buffer = .{};
+            try buffer.textFont(.{ .x = 0, .y = 0, .width = 160, .height = 48 }, "Wide", 0, font);
+            try target.replayBuffer(&buffer);
+            var surface: cpu_gradient.Surface = undefined;
+            if (zlc_gradient_surface(target.native.?, &surface) != 0) return error.DrawGradientFailed;
+            var dark: usize = 0;
+            for (0..surface.height) |y| for (surface.pixels[y * surface.stride ..][0..surface.width]) |pixel| {
+                if (pixel & 0xff < 0x80) dark += 1;
+            };
+            return dark;
+        }
+    };
+    const body = try Ink.measure(&renderer, .body);
+    const heading = try Ink.measure(&renderer, .heading1);
+    const bold = try Ink.measure(&renderer, .{ .weight = .bold });
+    try std.testing.expect(body > 0);
+    try std.testing.expect(heading > body * 2);
+    try std.testing.expect(bold > body);
+    // Returning to the default font draws the same pixels as before.
+    try std.testing.expectEqual(body, try Ink.measure(&renderer, .{}));
+}
+
+test "Cairo backdrop effects filter the plane drawn so far and fall back without a workspace" {
+    var renderer: Renderer = .{};
+    defer renderer.deinit();
+    var dummy: u8 = 0;
+    try renderer.begin(.{ .native_context = &dummy, .size = .{ .width = 32, .height = 16, .scale = 1 } });
+    const workspace = try commands.backdrop.Workspace.create(std.testing.allocator, .{ .max_pixels = 32 * 16 });
+    defer workspace.destroy();
+    var buffer: commands.Buffer = .{};
+    defer buffer.reset();
+    try buffer.fill(.{ .x = 0, .y = 0, .width = 16, .height = 16 }, 0x000000);
+    try buffer.fill(.{ .x = 16, .y = 0, .width = 16, .height = 16 }, 0xffffff);
+    try buffer.backdropEffect(.{ .bounds = .{ .x = 8, .y = 0, .width = 16, .height = 16 }, .kind = .blur, .sigma = 2, .fallback = .rgb(0xff0000) });
+    buffer.backdrop_storage.workspace = workspace;
+    try renderer.replayBuffer(&buffer);
+    var surface: cpu_gradient.Surface = undefined;
+    if (zlc_gradient_surface(renderer.native.?, &surface) != 0) return error.DrawGradientFailed;
+    const left = surface.pixels[8 * surface.stride + 15] & 255;
+    try std.testing.expect(left > 40 and left < 128);
+    try std.testing.expectEqual(@as(u32, 0xff000000), surface.pixels[8 * surface.stride + 7]);
+    try std.testing.expectEqual(@as(u64, 1), workspace.stats.applied);
+    // Without a bound workspace the pane draws its fallback fill.
+    buffer.backdrop_storage.workspace = null;
+    try renderer.replayBuffer(&buffer);
+    if (zlc_gradient_surface(renderer.native.?, &surface) != 0) return error.DrawGradientFailed;
+    try std.testing.expectEqual(@as(u32, 0xffff0000), surface.pixels[8 * surface.stride + 15]);
+}

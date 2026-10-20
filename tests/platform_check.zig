@@ -21,6 +21,7 @@ pub fn main() !void {
         try window.setFullscreen(false);
     }
     _ = try window.state();
+    if (caps.backdrop_material) try window.setBackdrop(.mica) else window.setBackdrop(.mica) catch {};
     const chrome = try app.createWindow(.{ .decoration = if (caps.custom_decoration) .custom else .system, .resizable = false });
     _ = try chrome.hitTest(.{ .x = 20, .y = 20 });
     chrome.startMove() catch {};

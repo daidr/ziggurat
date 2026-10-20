@@ -69,7 +69,7 @@ extern fn zgpu_interpolation_stats(*anyopaque, *GradientInterpolationStats) void
 extern fn zgpu_interpolation_failure(*anyopaque, i32) i32;
 extern fn zgpu_gradient_interpolated(*anyopaque, f32, f32, f32, f32, f32, f32, *const commands.brushes.Native, *const interpolation.Packet) i32;
 extern fn zgpu_geometry_stats(*anyopaque, *u32, *u32, *u32) void;
-extern fn zgpu_text(*anyopaque, f32, f32, f32, f32, u32, [*]const u16, u32) void;
+extern fn zgpu_text(*anyopaque, f32, f32, f32, f32, u32, [*]const u16, u32, u32, f32, u16, c_int, c_int) void;
 extern fn zgpu_prepared(*anyopaque, *anyopaque, f32, f32, ?*const drawing.Rect, u32) void;
 extern fn zgpu_scale(*anyopaque) f32;
 extern fn zgpu_push_clip(*anyopaque, f32, f32, f32, f32) void;
@@ -799,6 +799,8 @@ pub const Renderer = struct {
     }
     fn preflightTextures(self: *Renderer, ops: []const command.Command, textures: []const drawing.TextureView) !void {
         // Validate every device-bound command before the first native draw.
+        // Backdrop effects and loading indicators draw on the software plane.
+        if (commands.softwareOnly(ops)) return error.SoftwareOnlyCommands;
         // Software fallback cannot consume these resources or repair a domain.
         for (ops) |op| if (op == .texture) {
             const value = op.texture;
@@ -902,7 +904,8 @@ pub const Renderer = struct {
                 if (bytes.len > utf16.len) return error.TextTooLong;
                 const count = try std.unicode.utf8ToUtf16Le(&utf16, bytes);
                 const r = value.bounds;
-                zgpu_text(native, r.x, r.y, r.width, r.height, value.color, &utf16, @intCast(count));
+                const font = value.font;
+                zgpu_text(native, r.x, r.y, r.width, r.height, value.color, &utf16, @intCast(count), if (font.isDefault()) 0 else @bitCast(font), font.size(), font.weight.value(), @intFromBool(font.italic), @intFromBool(font.monospace));
             },
             .prepared_text => |value| {
                 if (value.resource >= prepared.len) return error.MissingResources;
@@ -930,6 +933,7 @@ pub const Renderer = struct {
             .end_group => try self.endGroup(),
             .begin_transform => |slot| try self.beginTransform(transforms[slot]),
             .end_transform => try self.endTransform(),
+            .backdrop, .indicator => unreachable, // Whole batch rejected before drawing.
             .push_clip => |r| {
                 if (!layout.validRect(r)) return error.InvalidGeometry;
                 if (depth == 32) return error.ClipStackFull;
