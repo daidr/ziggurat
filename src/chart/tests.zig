@@ -437,3 +437,59 @@ test "selections follow the pointer and the keys" {
     _ = s.pointer(0.1, &xs);
     try testing.expectEqual(@as(?usize, 2), s.index);
 }
+
+test "a zoom keeps the point it zooms around in place and stays within the plot" {
+    var zoom: chart.Zoom = .{};
+    try testing.expect(zoom.whole());
+    // Zooming in by 2 around a quarter of the way keeps that point there.
+    try testing.expect(zoom.zoomAt(.x, 2, .{ .x = 0.25, .y = 0.5 }, 0.01));
+    try testing.expectApproxEqAbs(@as(f32, 0.125), zoom.x.lo, 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.625), zoom.x.hi, 1e-6);
+    try testing.expectEqual(chart.Span{ .lo = 0, .hi = 1 }, zoom.y);
+    try testing.expectApproxEqAbs(@as(f32, 0.25), zoom.shownX(0.25), 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.25), zoom.wholeX(zoom.shownX(0.25)), 1e-6);
+    // Panning holds the span within the whole plot.
+    try testing.expect(zoom.pan(.xy, 10, 0));
+    try testing.expectApproxEqAbs(@as(f32, 1), zoom.x.hi, 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), zoom.x.lo, 1e-6);
+    try testing.expect(!zoom.pan(.xy, 1, 0));
+    // Zooming stops at the closest span, and zooming out at the whole plot.
+    _ = zoom.zoomAt(.xy, 1000, .{ .x = 0.5, .y = 0.5 }, 0.05);
+    try testing.expectApproxEqAbs(@as(f32, 0.05), zoom.x.hi - zoom.x.lo, 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.05), zoom.y.hi - zoom.y.lo, 1e-6);
+    _ = zoom.zoomAt(.xy, 0.0001, .{ .x = 0.5, .y = 0.5 }, 0.05);
+    try testing.expect(zoom.whole());
+    try testing.expect(!zoom.zoomAt(.xy, std.math.nan(f32), .{}, 0.05));
+    // A brush in what shows selects that part of it.
+    _ = zoom.zoomAt(.x, 2, .{ .x = 0, .y = 0 }, 0.01);
+    try testing.expect(zoom.select(.x, .{ .lo = 0.8, .hi = 0.2 }, .{ .lo = 0, .hi = 0.5 }, 0.01));
+    try testing.expectApproxEqAbs(@as(f32, 0.1), zoom.x.lo, 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.4), zoom.x.hi, 1e-6);
+    try testing.expectEqual(chart.Span{ .lo = 0, .hi = 1 }, zoom.y);
+    // A box shows the whole plot's box placed for the zoom.
+    const placed = zoom.place(.{ .x = 10, .y = 20, .width = 300, .height = 100 });
+    try testing.expectApproxEqAbs(@as(f32, 1000), placed.width, 1e-3);
+    try testing.expectApproxEqAbs(@as(f32, 10 - 100), placed.x, 1e-3);
+    try testing.expectApproxEqAbs(@as(f32, 10), chart.x(placed, 0.1), 1e-3);
+    try testing.expectApproxEqAbs(@as(f32, 120), chart.y(placed, 0), 1e-3);
+    try testing.expect(zoom.reset());
+    try testing.expect(!zoom.reset());
+    // A selection narrower than the closest span widens around its middle.
+    try testing.expect(zoom.select(.x, .{ .lo = 0.999, .hi = 1 }, .{ .lo = 0, .hi = 1 }, 0.1));
+    try testing.expectApproxEqAbs(@as(f32, 0.9), zoom.x.lo, 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 1), zoom.x.hi, 1e-6);
+}
+
+test "ticks picked for what a zoom shows move to fractions of the whole plot" {
+    const whole = chart.Linear.init(0, 100);
+    const shown: chart.Span = .{ .lo = 0.2, .hi = 0.4 };
+    const part = chart.Linear.init(whole.invert(shown.lo), whole.invert(shown.hi));
+    var storage: [16]chart.Tick = undefined;
+    const ticks = try part.ticks(4, &storage);
+    chart.rebase(ticks, shown);
+    try testing.expect(ticks.len >= 3);
+    for (ticks) |tick| {
+        try testing.expectApproxEqAbs(whole.at(tick.value), tick.at, 1e-5);
+        try testing.expect(tick.value >= 19.99 and tick.value <= 40.01);
+    }
+}

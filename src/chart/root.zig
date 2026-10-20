@@ -1,8 +1,8 @@
 //! Charts without a look of their own: scales that map data onto a plot and
 //! pick round ticks, a plot layout with axes around it, placement of bars,
 //! points and rules, paths of lines, areas and pie slices, stacking,
-//! downsampling of dense lines, legends, and a selection that the pointer
-//! and the keyboard move.
+//! downsampling of dense lines, legends, a selection that the pointer and
+//! the keyboard move, and the zoom and brush that the pointer drags.
 //!
 //! Positions along a plot are fractions of it, from 0 to 1: along x from its
 //! left edge, and along y from its bottom up, the way values grow. Nothing
@@ -78,6 +78,10 @@ pub const legend = plot.legend;
 pub const Key = plot.Key;
 pub const Change = plot.Change;
 pub const Selection = plot.Selection;
+pub const Directions = plot.Directions;
+pub const Zoom = plot.Zoom;
+pub const Brush = plot.Brush;
+pub const rebase = plot.rebase;
 
 test {
     _ = @import("tests.zig");

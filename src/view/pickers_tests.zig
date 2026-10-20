@@ -447,6 +447,13 @@ test "color well opens a picker whose controls set the color" {
     try h.clickAt(square.bounds.x, square.bounds.y);
     try testing.expectEqual(pickers.Rgba{ .r = 255, .g = 255, .b = 255, .a = 128 }, app.color);
     try testing.expectEqual(@as(f64, 240), picker.hsva.h);
+    // A drag from there follows the pointer past the square's far corner,
+    // where it is fully saturated and black.
+    try h.drag(square.bounds.x + 1, square.bounds.y + 1, square.bounds.x + square.bounds.width + 40, square.bounds.y + square.bounds.height + 40, 4);
+    try testing.expectEqual(@as(f64, 1), picker.hsva.s);
+    try testing.expectEqual(@as(f64, 0), picker.hsva.v);
+    try testing.expectEqual(pickers.Rgba{ .r = 0, .g = 0, .b = 0, .a = 128 }, app.color);
+    try h.clickAt(square.bounds.x, square.bounds.y);
     // Typed hex applies once it is a color.
     try h.focus(.{ .kind = .embed, .nth = 5 });
     try testing.expectEqual(picker.hex.id, h.focused().?.id);
