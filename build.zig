@@ -297,6 +297,17 @@ pub fn build(b: *std.Build) void {
     const run_plugin_fetch_tests = b.addRunArtifact(plugin_fetch_tests);
     test_step.dependOn(&run_plugin_fetch_tests.step);
     b.step("test-plugin-fetch", "Run the fetch plugin's streaming, redirect, validation and cancellation tests against local servers").dependOn(&run_plugin_fetch_tests.step);
+    const system_watch = b.createModule(.{ .root_source_file = b.path("src/system/watch.zig"), .target = target, .optimize = optimize, .link_libc = target.result.os.tag == .windows });
+    const plugin_watch = b.addModule("ziggurat_plugin_watch", .{ .root_source_file = b.path("src/page_runtime/plugins/watch.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat_ipc", .module = ipc },
+        .{ .name = "ziggurat_page_runtime", .module = page_runtime },
+        .{ .name = "ziggurat_system_watch", .module = system_watch },
+    } });
+    const plugin_watch_tests = b.addTest(.{ .root_module = plugin_watch });
+    check.dependOn(&plugin_watch_tests.step);
+    const run_plugin_watch_tests = b.addRunArtifact(plugin_watch_tests);
+    test_step.dependOn(&run_plugin_watch_tests.step);
+    b.step("test-plugin-watch", "Run the watch plugin's snapshot comparison, rename pairing, root and request checks against temporary directories").dependOn(&run_plugin_watch_tests.step);
     const assets = b.addModule("ziggurat_assets", .{ .root_source_file = b.path("src/assets/root.zig"), .target = target, .optimize = optimize });
     const extensions = b.addModule("ziggurat_extensions", .{ .root_source_file = b.path("src/extensions/root.zig"), .target = target, .optimize = optimize });
     const drawing_resources = b.addModule("ziggurat_drawing_resources", .{ .root_source_file = b.path("src/drawing_resources.zig"), .target = target, .optimize = optimize });
@@ -1765,7 +1776,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "counter_service", .module = counter_service },
             .{ .name = "ipc_page", .module = page_module },
         });
-        addPageRuntimeSmoke(b, target, optimize, core, view, ipc, i18n, page_runtime, net, plugin_fetch);
+        addPageRuntimeSmoke(b, target, optimize, core, view, ipc, i18n, page_runtime, net, plugin_fetch, plugin_watch);
         const producer_bundle = b.addSystemCommand(&.{ "bun", "build" });
         producer_bundle.addFileArg(b.path("tests/resource_producer_page.ts"));
         producer_bundle.addFileInput(b.path("tests/resource_producer_fixture.ts"));
@@ -1860,7 +1871,7 @@ pub fn build(b: *std.Build) void {
         view_tests = b.addTest(.{ .root_module = view });
         _ = b.step("webview-runtime", "Use the installed WebKitGTK 4.1 runtime");
         addWebNativeBoundarySmoke(b, target, optimize, core, view);
-        addPageRuntimeSmoke(b, target, optimize, core, view, ipc, i18n, page_runtime, net, plugin_fetch);
+        addPageRuntimeSmoke(b, target, optimize, core, view, ipc, i18n, page_runtime, net, plugin_fetch, plugin_watch);
         addSmoke(b, "smoke-webview-linux", "tests/linux_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
@@ -2038,6 +2049,7 @@ pub fn build(b: *std.Build) void {
     // Schemas only: the generator does not build Core for the host.
     const page_runtime_host = b.createModule(.{ .root_source_file = b.path("src/page_runtime/service.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .imports = &.{.{ .name = "ziggurat_ipc", .module = ipc_host }} });
     const plugin_fetch_host = b.createModule(.{ .root_source_file = b.path("src/page_runtime/plugins/fetch_service.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .imports = &.{.{ .name = "ziggurat_ipc", .module = ipc_host }} });
+    const plugin_watch_host = b.createModule(.{ .root_source_file = b.path("src/page_runtime/plugins/watch_service.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .imports = &.{.{ .name = "ziggurat_ipc", .module = ipc_host }} });
     const page_runtime_clients = b.addExecutable(.{ .name = "page-runtime-clients", .root_module = b.createModule(.{
         .root_source_file = b.path("tools/page_runtime_clients.zig"),
         .target = b.graph.host,
@@ -2046,6 +2058,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_ipc", .module = ipc_host },
             .{ .name = "page_runtime_service", .module = page_runtime_host },
             .{ .name = "plugin_fetch_service", .module = plugin_fetch_host },
+            .{ .name = "plugin_watch_service", .module = plugin_watch_host },
         },
     }) });
     const write_page_clients = b.addRunArtifact(page_runtime_clients);
@@ -2055,6 +2068,7 @@ pub fn build(b: *std.Build) void {
     check_page_clients.addArgs(&.{ "check", b.pathFromRoot(".") });
     check_page_clients.addFileInput(b.path("packages/runtime/src/generated/runtime.ts"));
     check_page_clients.addFileInput(b.path("packages/plugin-fetch/src/generated/fetch.ts"));
+    check_page_clients.addFileInput(b.path("packages/plugin-watch/src/generated/watch.ts"));
     test_step.dependOn(&check_page_clients.step);
     b.step("check-page-runtime-clients", "Fail when a generated page runtime client under packages/ differs from its Zig schema").dependOn(&check_page_clients.step);
     const ipc_tests = b.addTest(.{ .root_module = ipc });
@@ -2764,7 +2778,7 @@ fn addWindowsProfileStorageNative(b: *std.Build, owner: *std.Build.Module, prefi
 }
 
 /// One end-to-end page: the runtime package bundled into a hidden window.
-fn addPageRuntimeSmoke(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module, view: *std.Build.Module, ipc: *std.Build.Module, i18n: *std.Build.Module, page_runtime: *std.Build.Module, net: *std.Build.Module, plugin_fetch: *std.Build.Module) void {
+fn addPageRuntimeSmoke(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module, view: *std.Build.Module, ipc: *std.Build.Module, i18n: *std.Build.Module, page_runtime: *std.Build.Module, net: *std.Build.Module, plugin_fetch: *std.Build.Module, plugin_watch: *std.Build.Module) void {
     const fetch_bundle = b.addSystemCommand(&.{ "bun", "build" });
     fetch_bundle.addFileArg(b.path("tests/plugin_fetch_page.ts"));
     fetch_bundle.addFileInput(b.path("packages/runtime/src/index.ts"));
@@ -2779,6 +2793,20 @@ fn addPageRuntimeSmoke(b: *std.Build, target: std.Build.ResolvedTarget, optimize
         .{ .name = "ziggurat_page_runtime", .module = page_runtime },
         .{ .name = "ziggurat_plugin_fetch", .module = plugin_fetch },
         .{ .name = "plugin_fetch_page", .module = fetch_page },
+    });
+    const watch_bundle = b.addSystemCommand(&.{ "bun", "build" });
+    watch_bundle.addFileArg(b.path("tests/plugin_watch_page.ts"));
+    watch_bundle.addFileInput(b.path("packages/runtime/src/index.ts"));
+    watch_bundle.addFileInput(b.path("packages/plugin-watch/src/index.ts"));
+    watch_bundle.addFileInput(b.path("packages/plugin-watch/src/generated/watch.ts"));
+    watch_bundle.addArgs(&.{ "--target", "browser", "--format", "iife", "--outfile" });
+    const watch_page = b.createModule(.{ .root_source_file = watch_bundle.addOutputFileArg("plugin-watch-page.js") });
+    addSmoke(b, "smoke-plugin-watch", "tests/plugin_watch_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_webview", .module = view },
+        .{ .name = "ziggurat_page_runtime", .module = page_runtime },
+        .{ .name = "ziggurat_plugin_watch", .module = plugin_watch },
+        .{ .name = "plugin_watch_page", .module = watch_page },
     });
     const bundle = b.addSystemCommand(&.{ "bun", "build" });
     bundle.addFileArg(b.path("tests/page_runtime_page.ts"));

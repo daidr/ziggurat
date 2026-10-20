@@ -1,0 +1,22 @@
+{
+  "name": "@ziggurat/plugin-watch",
+  "version": "0.1.0-dev",
+  "description": "Changes to the files in the directories a Ziggurat app lets its pages watch",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "ziggurat-plugin.json"
+  ],
+  "peerDependencies": {
+    "@ziggurat/runtime": "0.1.0-dev"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p ."
+  }
+}

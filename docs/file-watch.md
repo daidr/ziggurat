@@ -69,4 +69,4 @@ for (batch.events) |event| switch (event) {
 
 `zig build smoke-file-watch` 在 Linux（Debug 与 ReleaseSafe）实际运行：在临时目录中由宿主创建的 worker 线程运行 Watcher，验证空闲超时、零超时读取、文件创建/修改、嵌套目录新建并立即写入、目录重命名后新路径报告且旧路径不再出现、文件和子树删除、20 次写入在一个 debounce 窗口内合并、持续写入下首个批次受 `max_latency_ms` 约束（本机约 200 ms）、容量为 1 的批次逐个顺延且不丢事件、`ResultCapacityExceeded` 不消费事件、跨线程 `interrupt` 与预先中断、跨线程调用 `WrongThread`、`max_pending` 溢出、`max_directories` 初始失败与运行期 `incomplete_tree`、root 删除、重叠 root、非递归模式，以及 12 轮 init/addRoot/deinit（含重复 deinit）后 `/proc/self/fd` 计数回到基线。
 
-**Windows 路径只验证了 `x86_64-windows-gnu` 交叉编译（`zig build build-smoke-file-watch -Dtarget=x86_64-windows-gnu`），尚未在 Windows 上运行；** CI 的 Windows 列表包含 `smoke-file-watch`，其结果以实际运行为准。inotify 原生队列溢出和 Windows 零字节完成未被人为触发，只验证了代码路径编译；网络共享、可移动卷卸载和大规模目录树（数万目录）的行为与耗时未测量。详细模式、ignore 规则、页面监视入口及其授权均未实现。
+**Windows 路径只验证了 `x86_64-windows-gnu` 交叉编译（`zig build build-smoke-file-watch -Dtarget=x86_64-windows-gnu`），尚未在 Windows 上运行；** CI 的 Windows 列表包含 `smoke-file-watch`，其结果以实际运行为准。inotify 原生队列溢出和 Windows 零字节完成未被人为触发，只验证了代码路径编译；网络共享、可移动卷卸载和大规模目录树（数万目录）的行为与耗时未测量。本模块的详细模式与 ignore 规则未实现；页面监视入口、按名称授权和基于快照比较的详细事件由 [watch 插件](plugin-watch.md) 提供。
