@@ -629,6 +629,25 @@ pub fn build(b: *std.Build) void {
         system.linkSystemLibrary("x11", .{ .use_pkg_config = .force });
         system.link_libc = true;
     }
+    addSystemIntegrationNative(b, system, target, optimize);
+    const system_unit_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/system/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} }) });
+    addSystemIntegrationNative(b, system_unit_tests.root_module, target, optimize);
+    if (target.result.os.tag == .windows) {
+        for ([_][]const u8{ "user32", "gdi32", "shell32", "ole32" }) |library| system_unit_tests.root_module.linkSystemLibrary(library, .{});
+        _ = native_support.add(b, system_unit_tests.root_module, "system-picker-native-test", "src/system/picker.c", &.{"-std=c11"}, target, optimize);
+    }
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
+        const integration_probe = b.createModule(.{ .root_source_file = b.path("tests/os_integration_probe.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        if (target.result.os.tag == .linux) {
+            integration_probe.addCSourceFile(.{ .file = b.path("tests/os_integration_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+            for ([_][]const u8{ "gio-2.0", "gio-unix-2.0" }) |library| integration_probe.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+        } else integration_probe.linkSystemLibrary("shlwapi", .{});
+        addSmoke(b, "smoke-os-integration", "tests/os_integration_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+            .{ .name = "os_integration_probe", .module = integration_probe },
+        });
+    }
     if (target.result.os.tag == .windows) {
         core.linkSystemLibrary("user32", .{});
         core.linkSystemLibrary("ole32", .{});
@@ -2304,6 +2323,7 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&watch_tests.step);
     check.dependOn(&menu_tests.step);
     check.dependOn(&system_tests.step);
+    check.dependOn(&system_unit_tests.step);
     check.dependOn(&clipboard_tests.step);
     check.dependOn(&embed_probe.step);
     check.dependOn(&packaging_tests.step);
@@ -2561,6 +2581,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(watch_tests).step);
     test_step.dependOn(&b.addRunArtifact(menu_tests).step);
     test_step.dependOn(&run_system_tests.step);
+    const run_system_unit_tests = b.addRunArtifact(system_unit_tests);
+    test_step.dependOn(&run_system_unit_tests.step);
+    b.step("test-system-integration", "Run single-instance framing, identity, registration and power unit tests").dependOn(&run_system_unit_tests.step);
     test_step.dependOn(&b.addRunArtifact(embed_probe).step);
     test_step.dependOn(&b.addRunArtifact(packaging_tests).step);
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
@@ -2847,6 +2870,26 @@ fn addWindowsProfileStorageNative(b: *std.Build, owner: *std.Build.Module, prefi
     for ([_][]const u8{ "windows_profile_lifetime.c", "windows_profile_storage.c" }) |file|
         _ = native_support.add(b, owner, b.fmt("{s}-{s}", .{ prefix, file }), b.fmt("src/webview/{s}", .{file}), &.{"-std=c11"}, target, optimize);
     owner.linkSystemLibrary("advapi32", .{});
+}
+
+/// Single-instance, registration, power and taskbar natives of ziggurat_system.
+fn addSystemIntegrationNative(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    switch (target.result.os.tag) {
+        .windows => {
+            _ = native_support.add(b, module, "system-taskbar-native", "src/system/taskbar_windows.c", &.{"-std=c11"}, target, optimize);
+            for ([_][]const u8{ "advapi32", "ole32", "shell32" }) |library| module.linkSystemLibrary(library, .{});
+            module.link_libc = true;
+        },
+        .linux => {
+            const native = native_support.add(b, module, "system-integration-native", "src/system/linux_integration.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+            for ([_][]const u8{ "gio-2.0", "gio-unix-2.0" }) |library| {
+                native.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+                module.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+            }
+            module.link_libc = true;
+        },
+        else => {},
+    }
 }
 
 /// One end-to-end page: the runtime package bundled into a hidden window.
