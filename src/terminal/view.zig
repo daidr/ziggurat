@@ -878,8 +878,9 @@ pub const TerminalView = struct {
                 }
             },
             .pointer_leave => self.hover = null,
-            // Presses and keys go through the text field route.
-            .pointer_down, .key => return false,
+            // Presses and keys go through the text field route; the wheel
+            // scrolls the containers around the leaf.
+            .pointer_down, .pointer_drag, .pointer_up, .pointer_cancel, .wheel, .key => return false,
         }
         const was = before != null;
         const is = self.hover != null;
