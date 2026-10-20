@@ -2448,7 +2448,7 @@ pub fn build(b: *std.Build) void {
         const run_view_pickers_tests = b.addRunArtifact(view_pickers_tests);
         test_step.dependOn(&run_view_pickers_tests.step);
         b.step("test-view-pickers", "Run calendar, date, time, number and color picker tests").dependOn(&run_view_pickers_tests.step);
-        addSmoke(b, "smoke-pickers", "tests/pickers_smoke.zig", target, optimize, &.{
+        addSmoke(b, "smoke-view-pickers", "tests/pickers_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_view", .module = declarative_view },
             .{ .name = "ziggurat_i18n", .module = i18n },

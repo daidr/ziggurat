@@ -77,4 +77,4 @@ const Form = struct {
 
 ## 验证
 
-`zig build test-view-pickers` 已接入默认 test/check，用无窗口 Harness 覆盖：日期换算、月份边界与日历范围；按 locale 的周起始、周数与标题；按键与按下选择、禁用日与范围限制、辅助技术按 id 选日；日期输入的打开、选中、Escape 与外部按下关闭及焦点归还；时间输入在 12/24 小时制下的步进、键入、上午/下午、分隔符布局与按段设置；数字输入的步进、键入、范围、德语分隔符与 Escape；Hex/RGB/HSV 换算；颜色按钮浮层中预设色、色相与不透明度滑块、方块按键与按下、Hex 键入和 Escape；浮层翻转。隐藏窗口检查 `zig build smoke-pickers` 经窗口的 Context 发送按键并以 GDI/Cairo 绘制，验证日期浮层打开时的焦点投递、选择后焦点回到字段、时间分段、数字步进与键入，以及颜色按钮浮层的打开、按键和 Escape 关闭。这些检查不验证真实读屏播报或视觉效果；Linux 没有普通控件的 AT-SPI 层。
+`zig build test-view-pickers` 已接入默认 test/check，用无窗口 Harness 覆盖：日期换算、月份边界与日历范围；按 locale 的周起始、周数与标题；按键与按下选择、禁用日与范围限制、辅助技术按 id 选日；日期输入的打开、选中、Escape 与外部按下关闭及焦点归还；时间输入在 12/24 小时制下的步进、键入、上午/下午、分隔符布局与按段设置；数字输入的步进、键入、范围、德语分隔符与 Escape；Hex/RGB/HSV 换算；颜色按钮浮层中预设色、色相与不透明度滑块、方块按键与按下、Hex 键入和 Escape；浮层翻转。隐藏窗口检查 `zig build smoke-view-pickers` 经窗口的 Context 发送按键并以 GDI/Cairo 绘制，验证日期浮层打开时的焦点投递、选择后焦点回到字段、时间分段、数字步进与键入，以及颜色按钮浮层的打开、按键和 Escape 关闭。这些检查不验证真实读屏播报或视觉效果；Linux 没有普通控件的 AT-SPI 层。
