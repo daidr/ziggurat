@@ -93,6 +93,11 @@ pub const Harness = struct {
         try self.run(null);
         try self.view.arrange(self.config.bounds, self.config.theme, self.config.options.measurer);
         if (self.input) |context| try self.record(context);
+        // Embedded leaves learn their bounds after each frame, as in Host.
+        for (self.view.nodes()) |*node| {
+            const content = node.embed orelse continue;
+            if (content.place) |place| place(content.context, node.id, node.bounds);
+        }
         self.frames += 1;
     }
 
@@ -191,7 +196,7 @@ pub const Harness = struct {
         self.view.focus = self.focusId();
         switch (self.view.routeKey(input)) {
             .ignored => if (self.view.embedKey(input)) {
-                try self.render();
+                try self.settleEmbed(null);
                 return true;
             },
             .handled => {
@@ -224,6 +229,15 @@ pub const Harness = struct {
         } else return false;
         try self.render();
         return true;
+    }
+    /// As Host does after an embedded leaf takes a press or key: a pass
+    /// applies what the leaf changed, focus goes where it asked or to
+    /// `leaf`, then a render.
+    fn settleEmbed(self: *Harness, leaf: ?u64) anyerror!void {
+        try self.run(null);
+        if (self.view.restore == null) self.view.restore = leaf;
+        self.restoreFocus();
+        try self.render();
     }
     fn deliverKey(self: *Harness, event: Event) anyerror!bool {
         try self.deliver(event);
@@ -460,8 +474,9 @@ pub const Harness = struct {
         };
     }
     fn apply(self: *Harness, result: view.PointerResult) anyerror!void {
-        if (result.focus) |id| self.setFocus(id);
         if (result.cancel_press) if (self.input) |context| context.input_state.cancelPress();
+        if (result.settle) return self.settleEmbed(result.focus);
+        if (result.focus) |id| self.setFocus(id);
         for (result.events) |slot| if (slot) |event| {
             try self.run(event);
             self.restoreFocus();
@@ -509,7 +524,7 @@ pub const Harness = struct {
 
     fn activate(self: *Harness, node: *const Node) anyerror!void {
         switch (node.kind) {
-            .button, .link, .nav_button, .combo_box, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .column_header, .token, .combo_toggle => {},
+            .button, .link, .nav_button, .combo_box, .popup_button, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .column_header, .token, .combo_toggle => {},
             else => return error.NotActivatable,
         }
         try self.check(node);
@@ -521,6 +536,14 @@ pub const Harness = struct {
     fn check(self: *const Harness, node: *const Node) Error!void {
         if (!node.style.enabled) return error.Disabled;
         if (self.visible(node) == null) return error.Hidden;
+    }
+
+    /// Deliver `event` as a window would, then render: for controls that
+    /// embedded leaves register under ids of their own, such as a color
+    /// swatch's activation (`.action`) or a channel slider's change
+    /// (`.value`). `Stale` when no build takes it.
+    pub fn send(self: *Harness, event: Event) anyerror!void {
+        try self.deliver(event);
     }
 
     fn deliver(self: *Harness, event: Event) anyerror!void {
@@ -576,7 +599,7 @@ pub const Harness = struct {
 
 fn interactive(kind: Kind) bool {
     return switch (kind) {
-        .button, .link, .nav_button, .combo_box, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .slider, .stepper, .rating, .tree_row, .table_row, .column_header, .token, .combo_toggle => true,
+        .button, .link, .nav_button, .combo_box, .popup_button, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .slider, .stepper, .rating, .tree_row, .table_row, .column_header, .token, .combo_toggle => true,
         else => false,
     };
 }
