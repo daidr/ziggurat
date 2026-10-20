@@ -11,6 +11,7 @@ flowchart TD
     Host --> Web[ziggurat_webview]
     Host --> Runtime[ziggurat_webview_runtime]
     Host --> IPC[ziggurat_ipc]
+    Host --> PageRuntime[ziggurat_page_runtime]
     Host --> System[ziggurat_system]
     Host --> Update[ziggurat_update]
     Host --> Net[ziggurat_net]
@@ -64,6 +65,9 @@ flowchart TD
     Host --> Caret[ziggurat_caret]
     Host --> Gaussian[ziggurat_gaussian]
     Net --> NetTLS[调用者 std.http.Client / TLS / 系统 CA]
+    PageRuntime --> IPC
+    PageRuntime --> I18n
+    PageRuntime --> Core
     Wake --> Core
     Audio --> Core
     Placement --> Core

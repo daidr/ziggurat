@@ -19,6 +19,9 @@ pub const fetch = fetch_api.fetch;
 pub const fetchJson = fetch_api.fetchJson;
 pub const Json = fetch_api.Json;
 pub const stream = fetch_api.stream;
+pub const receive = fetch_api.receive;
+pub const Receiver = fetch_api.Receiver;
+pub const Redirect = fetch_api.Redirect;
 
 pub const WebSocket = websocket.Socket;
 
