@@ -7,6 +7,9 @@ pub const host = @import("host.zig");
 pub const find = @import("find.zig");
 pub const manifest = @import("manifest.zig");
 pub const controls = @import("controls.zig");
+pub const outbox = @import("outbox.zig");
+/// Fixtures for plugin tests.
+pub const testing = @import("testing.zig");
 
 pub const Host = host.Host;
 pub const Options = host.Options;
@@ -17,6 +20,8 @@ pub const Preferences = host.Preferences;
 pub const Received = host.Received;
 pub const Controls = controls.Controls;
 pub const WindowControls = controls.WindowControls;
+pub const Post = outbox.Post;
+pub const Outbox = outbox.Outbox;
 pub const Service = service.Service;
 pub const DocumentState = service.DocumentState;
 pub const hello = host.hello;
@@ -28,4 +33,5 @@ test {
     _ = find;
     _ = manifest;
     _ = controls;
+    _ = outbox;
 }

@@ -4,11 +4,23 @@ const guardSends = @import("cancel.zig").guardSends;
 
 pub const Header = std.http.Header;
 
+pub const Redirect = enum {
+    /// Follow up to `Limits.redirects` hops.
+    follow,
+    /// Return the redirect response itself.
+    manual,
+    /// Fail with `Redirected` on a redirect response.
+    reject,
+};
+
 pub const Request = struct {
     method: std.http.Method = .GET,
     /// `http` or `https` URL. Credentials in the URL are sent as Basic auth.
     url: []const u8,
-    /// Sent on every hop, including redirects to another host.
+    /// Sent on every hop, including redirects to another host. A `Host`,
+    /// `User-Agent`, `Authorization` or `Content-Type` here replaces the
+    /// client's own. An `Accept-Encoding` here replaces the module's and
+    /// the body is returned as the server encoded it, without decoding.
     headers: []const Header = &.{},
     /// Sent only while redirects stay on the same scheme and host, such as
     /// `Authorization` or `Cookie`.
@@ -17,6 +29,7 @@ pub const Request = struct {
     /// follow redirects; the redirect response is returned instead.
     body: ?[]const u8 = null,
     content_type: ?[]const u8 = null,
+    redirect: Redirect = .follow,
 };
 
 pub const Limits = struct {
@@ -37,7 +50,11 @@ pub const Limits = struct {
 /// Status and copied headers of the final response.
 pub const Head = struct {
     status: std.http.Status,
+    /// The status line's reason phrase, possibly empty.
+    reason: []const u8,
     headers: []const Header,
+    /// URL of the final response, after redirects.
+    url: []const u8,
     /// Number of redirects followed.
     redirects: u8,
     storage: []u8,
@@ -76,6 +93,7 @@ pub const Error = error{
     HeadersTooLarge,
     TooManyHeaders,
     TooManyRedirects,
+    Redirected,
     RedirectLocationInvalid,
     UnsupportedEncoding,
     ConnectionFailed,
@@ -126,11 +144,33 @@ pub fn fetchJson(comptime T: type, allocator: std.mem.Allocator, client: *std.ht
     return .{ .head = response.head, .value = value };
 }
 
-/// Perform `request` and write the body to `sink` as it arrives. A sink that
-/// blocks holds the transfer back, so a slow consumer applies TCP
-/// backpressure instead of buffering the body. Bytes written before an
-/// error stay in `sink`. Blocking: run on an application-managed worker.
+/// Perform `request` and write the body to `sink` as it arrives; the sink is
+/// flushed after every read. A sink that blocks holds the transfer back, so a
+/// slow consumer applies TCP backpressure instead of buffering the body.
+/// Bytes written before an error stay in `sink`. Blocking: run on an
+/// application-managed worker.
 pub fn stream(allocator: std.mem.Allocator, client: *std.http.Client, request: Request, limits: Limits, cancel: ?*Cancel, sink: *std.Io.Writer) Error!Head {
+    return (try perform(allocator, client, request, limits, cancel, sink, null)).?;
+}
+
+/// Receives a response's head before its body.
+pub const Receiver = struct {
+    context: *anyopaque,
+    /// Takes ownership of `head`, which it frees with the transfer's
+    /// allocator, before the first body byte is read. An error ends the
+    /// transfer with that error.
+    head: *const fn (*anyopaque, Head) Error!void,
+    body: *std.Io.Writer,
+};
+
+/// `stream` that hands the head to `receiver` as soon as it arrives, so a
+/// consumer can act on the status and headers while the body streams.
+pub fn receive(allocator: std.mem.Allocator, client: *std.http.Client, request: Request, limits: Limits, cancel: ?*Cancel, receiver: Receiver) Error!void {
+    _ = try perform(allocator, client, request, limits, cancel, receiver.body, receiver);
+}
+
+/// The head is returned unless `receiver` took it.
+fn perform(allocator: std.mem.Allocator, client: *std.http.Client, request: Request, limits: Limits, cancel: ?*Cancel, sink: *std.Io.Writer, receiver: ?Receiver) Error!?Head {
     if (request.body != null and !request.method.requestHasBody()) return error.InvalidRequest;
     if (request.url.len > limits.url_bytes) return error.UrlTooLong;
     const urls = try allocator.alloc(u8, 3 * limits.url_bytes);
@@ -150,7 +190,8 @@ pub fn stream(allocator: std.mem.Allocator, client: *std.http.Client, request: R
         var exchange: Exchange = .{ .client = client, .cancel = cancel };
         defer exchange.deinit();
         var response = try exchange.send(uri, method, request, credentials, limits);
-        if (response.head.status.class() == .redirect and response.head.location != null and request.body == null and response.head.status != .not_modified) {
+        if (response.head.status.class() == .redirect and response.head.location != null and response.head.status != .not_modified and request.redirect == .reject) return error.Redirected;
+        if (response.head.status.class() == .redirect and response.head.location != null and request.body == null and response.head.status != .not_modified and request.redirect == .follow) {
             if (redirects == limits.redirects) return error.TooManyRedirects;
             const location = response.head.location.?;
             if (location.len > aux.len) return error.UrlTooLong;
@@ -170,9 +211,14 @@ pub fn stream(allocator: std.mem.Allocator, client: *std.http.Client, request: R
             redirects += 1;
             continue;
         }
-        var head = try copyHead(allocator, &response.head, limits, redirects);
+        var head = try copyHead(allocator, &response.head, current[0..url_len], limits, redirects);
+        if (receiver) |target| {
+            try target.head(target.context, head);
+            try exchange.readBody(allocator, &response, limits, decoding(request, limits), sink);
+            return null;
+        }
         errdefer head.deinit(allocator);
-        try exchange.readBody(allocator, &response, limits, sink);
+        try exchange.readBody(allocator, &response, limits, decoding(request, limits), sink);
         return head;
     }
 }
@@ -192,12 +238,16 @@ const Exchange = struct {
     }
 
     fn send(self: *Exchange, uri: std.Uri, method: std.http.Method, request: Request, credentials: []const Header, limits: Limits) Error!std.http.Client.Response {
+        const decode = decoding(request, limits);
         self.request = self.client.request(method, uri, .{
             .keep_alive = false,
             .redirect_behavior = .unhandled,
             .headers = .{
-                .accept_encoding = if (limits.decompress) .{ .override = "gzip, deflate" } else .{ .override = "identity" },
-                .content_type = if (request.content_type) |value| .{ .override = value } else .default,
+                .host = if (has(request.headers, "host")) .omit else .default,
+                .authorization = if (has(request.headers, "authorization") or has(credentials, "authorization")) .omit else .default,
+                .user_agent = if (has(request.headers, "user-agent")) .omit else .default,
+                .accept_encoding = if (has(request.headers, "accept-encoding")) .omit else if (decode) .{ .override = "gzip, deflate" } else .{ .override = "identity" },
+                .content_type = if (has(request.headers, "content-type")) .omit else if (request.content_type) |value| .{ .override = value } else .default,
             },
             .extra_headers = request.headers,
             .privileged_headers = credentials,
@@ -208,9 +258,10 @@ const Exchange = struct {
             try token.attach(http_request.connection.?.stream_reader.getStream().handle);
             self.attached = true;
         }
-        http_request.accept_encoding = @splat(false);
+        // A caller's own Accept-Encoding takes any encoding back undecoded.
+        http_request.accept_encoding = @splat(has(request.headers, "accept-encoding"));
         http_request.accept_encoding[@intFromEnum(std.http.ContentEncoding.identity)] = true;
-        if (limits.decompress) {
+        if (decode) {
             http_request.accept_encoding[@intFromEnum(std.http.ContentEncoding.gzip)] = true;
             http_request.accept_encoding[@intFromEnum(std.http.ContentEncoding.deflate)] = true;
         }
@@ -232,8 +283,11 @@ const Exchange = struct {
         };
     }
 
-    fn readBody(self: *Exchange, allocator: std.mem.Allocator, response: *std.http.Client.Response, limits: Limits, sink: *std.Io.Writer) Error!void {
-        const encoded = response.head.content_encoding != .identity;
+    fn readBody(self: *Exchange, allocator: std.mem.Allocator, response: *std.http.Client.Response, limits: Limits, decode: bool, sink: *std.Io.Writer) Error!void {
+        // Responses to HEAD, and 1xx, 204 and 304 responses, end with their head.
+        const status = response.head.status;
+        if (response.request.method == .HEAD or status.class() == .informational or status == .no_content or status == .not_modified) return;
+        const encoded = decode and response.head.content_encoding != .identity;
         if (!encoded) if (response.head.content_length) |length| if (length > limits.response_bytes) return error.ResponseTooLarge;
         var transfer: [16 * 1024]u8 = undefined;
         var decompress: std.http.Decompress = undefined;
@@ -242,7 +296,10 @@ const Exchange = struct {
             self.decompress_buffer = try allocator.alloc(u8, std.compress.flate.max_window_len);
             self.allocator = allocator;
             break :reader response.readerDecompressing(&transfer, &decompress, self.decompress_buffer);
-        } else response.reader(&transfer);
+        } else identity: {
+            // The client's own reader drops the body of a PUT or TRACE response.
+            break :identity response.request.reader.bodyReader(&transfer, response.head.transfer_encoding, response.head.content_length);
+        };
         var total: usize = 0;
         while (true) {
             const n = reader.stream(sink, .limited(limits.response_bytes - total + 1)) catch |err| switch (err) {
@@ -252,6 +309,7 @@ const Exchange = struct {
             };
             total += n;
             if (total > limits.response_bytes) return error.ResponseTooLarge;
+            sink.flush() catch return error.WriteFailed;
         }
         // A shutdown can surface as end of stream; a cancelled transfer never
         // reports success, and a short identity body is never complete.
@@ -265,6 +323,15 @@ const Exchange = struct {
         return err;
     }
 };
+
+fn has(headers: []const Header, name: []const u8) bool {
+    for (headers) |item| if (std.ascii.eqlIgnoreCase(item.name, name)) return true;
+    return false;
+}
+
+fn decoding(request: Request, limits: Limits) bool {
+    return limits.decompress and !has(request.headers, "accept-encoding");
+}
 
 fn mapConnect(err: std.http.Client.RequestError) Error {
     return switch (err) {
@@ -286,9 +353,11 @@ fn sameOrigin(a: std.Uri, b: std.Uri) bool {
     return std.ascii.eqlIgnoreCase(host_a, host_b) and (a.port orelse default) == (b.port orelse default);
 }
 
-fn copyHead(allocator: std.mem.Allocator, head: *const std.http.Client.Response.Head, limits: Limits, redirects: u8) Error!Head {
+fn copyHead(allocator: std.mem.Allocator, head: *const std.http.Client.Response.Head, url: []const u8, limits: Limits, redirects: u8) Error!Head {
     var count: usize = 0;
     var bytes: usize = 0;
+    const reason = std.mem.trim(u8, head.reason, " \t\r");
+    if (reason.len > limits.header_bytes) return error.HeadersTooLarge;
     var iterator = head.iterateHeaders();
     while (iterator.next()) |item| {
         count += 1;
@@ -298,7 +367,9 @@ fn copyHead(allocator: std.mem.Allocator, head: *const std.http.Client.Response.
     }
     const headers = try allocator.alloc(Header, count);
     errdefer allocator.free(headers);
-    const storage = try allocator.alloc(u8, bytes);
+    const storage = try allocator.alloc(u8, bytes + reason.len + url.len);
+    @memcpy(storage[bytes..][0..reason.len], reason);
+    @memcpy(storage[bytes + reason.len ..], url);
     var offset: usize = 0;
     iterator = head.iterateHeaders();
     for (headers) |*item| {
@@ -311,7 +382,7 @@ fn copyHead(allocator: std.mem.Allocator, head: *const std.http.Client.Response.
         offset += value.len;
         item.* = .{ .name = name, .value = value };
     }
-    return .{ .status = head.status, .headers = headers, .redirects = redirects, .storage = storage };
+    return .{ .status = head.status, .reason = storage[bytes..][0..reason.len], .headers = headers, .url = storage[bytes + reason.len ..], .redirects = redirects, .storage = storage };
 }
 
 /// Local plain HTTP server for the module's tests. Serves scripted responses
@@ -354,10 +425,10 @@ fn testUrl(buffer: []u8, server: *const TestServer, path: []const u8) ![]const u
     return std.fmt.bufPrint(buffer, "http://127.0.0.1:{d}{s}", .{ server.port(), path });
 }
 
-test "fetch returns status, headers and body; posts carry their body" {
+test "fetch returns status, headers and body; posts and puts carry their body" {
     const handler = struct {
         fn handle(_: *TestServer, request: *std.http.Server.Request) anyerror!void {
-            if (request.head.method == .POST) {
+            if (request.head.method == .POST or request.head.method == .PUT) {
                 var buffer: [64]u8 = undefined;
                 const body = try (try request.readerExpectContinue(&buffer)).allocRemaining(std.testing.allocator, .limited(64));
                 defer std.testing.allocator.free(body);
@@ -367,7 +438,7 @@ test "fetch returns status, headers and body; posts carry their body" {
     }.handle;
     var server = try TestServer.init(handler);
     defer server.deinit();
-    const thread = try std.Thread.spawn(.{}, TestServer.serve, .{ &server, 2 });
+    const thread = try std.Thread.spawn(.{}, TestServer.serve, .{ &server, 4 });
     defer thread.join();
     var client: std.http.Client = .{ .allocator = std.testing.allocator };
     defer client.deinit();
@@ -382,6 +453,14 @@ test "fetch returns status, headers and body; posts carry their body" {
     defer posted.deinit(std.testing.allocator);
     try std.testing.expectEqual(std.http.Status.created, posted.head.status);
     try std.testing.expectEqualStrings("payload", posted.body);
+    // A PUT response has its body; a HEAD response ends with its head.
+    var put = try fetch(std.testing.allocator, &client, .{ .method = .PUT, .url = url, .body = "replaced" }, .{}, null);
+    defer put.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("replaced", put.body);
+    var head = try fetch(std.testing.allocator, &client, .{ .method = .HEAD, .url = url }, .{}, null);
+    defer head.deinit(std.testing.allocator);
+    try std.testing.expectEqual(std.http.Status.not_found, head.head.status);
+    try std.testing.expectEqualStrings("", head.body);
 }
 
 test "fetch enforces body, header and redirect limits" {
@@ -516,4 +595,117 @@ test "fetch decodes gzip and applies the limit to decoded bytes" {
     try std.testing.expectEqual(@as(usize, 1200), response.body.len);
     try std.testing.expect(std.mem.startsWith(u8, response.body, "hello hello "));
     try std.testing.expectError(error.ResponseTooLarge, fetch(std.testing.allocator, &client, .{ .url = url }, .{ .response_bytes = 1199 }, null));
+}
+
+test "redirect modes, final URL, reason and replaced default headers" {
+    const handler = struct {
+        fn handle(_: *TestServer, request: *std.http.Server.Request) anyerror!void {
+            if (std.mem.eql(u8, request.head.target, "/hop")) {
+                try request.respond("", .{ .status = .found, .reason = "Found It", .keep_alive = false, .extra_headers = &.{.{ .name = "location", .value = "/headers" }} });
+                return;
+            }
+            // Echo the agent and encoding headers, counting repeats.
+            var agents: usize = 0;
+            var agent: []const u8 = "";
+            var encoding: []const u8 = "";
+            var iterator = request.iterateHeaders();
+            while (iterator.next()) |item| {
+                if (std.ascii.eqlIgnoreCase(item.name, "user-agent")) {
+                    agents += 1;
+                    agent = item.value;
+                }
+                if (std.ascii.eqlIgnoreCase(item.name, "accept-encoding")) encoding = item.value;
+            }
+            var body: [256]u8 = undefined;
+            const text = try std.fmt.bufPrint(&body, "{d} {s} {s}", .{ agents, agent, encoding });
+            try request.respond(text, .{ .keep_alive = false, .extra_headers = &.{.{ .name = "content-encoding", .value = "zstd" }} });
+        }
+    }.handle;
+    var server = try TestServer.init(handler);
+    defer server.deinit();
+    const thread = try std.Thread.spawn(.{}, TestServer.serve, .{ &server, 5 });
+    defer thread.join();
+    var client: std.http.Client = .{ .allocator = std.testing.allocator };
+    defer client.deinit();
+    var url_buffer: [64]u8 = undefined;
+    var final_buffer: [64]u8 = undefined;
+    const final = try testUrl(&final_buffer, &server, "/headers");
+    const custom: []const Header = &.{ .{ .name = "User-Agent", .value = "page/1" }, .{ .name = "Accept-Encoding", .value = "zstd" } };
+
+    var manual = try fetch(std.testing.allocator, &client, .{ .url = try testUrl(&url_buffer, &server, "/hop"), .redirect = .manual }, .{}, null);
+    defer manual.deinit(std.testing.allocator);
+    try std.testing.expectEqual(std.http.Status.found, manual.head.status);
+    try std.testing.expectEqualStrings("Found It", manual.head.reason);
+    try std.testing.expectEqualStrings("/headers", manual.head.header("location").?);
+    try std.testing.expectEqual(@as(u8, 0), manual.head.redirects);
+
+    try std.testing.expectError(error.Redirected, fetch(std.testing.allocator, &client, .{ .url = try testUrl(&url_buffer, &server, "/hop"), .redirect = .reject }, .{}, null));
+
+    var followed = try fetch(std.testing.allocator, &client, .{ .url = try testUrl(&url_buffer, &server, "/hop"), .headers = custom }, .{}, null);
+    defer followed.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u8, 1), followed.head.redirects);
+    try std.testing.expectEqualStrings(final, followed.head.url);
+    try std.testing.expectEqualStrings("OK", followed.head.reason);
+    // One agent, the caller's; the body comes back as the server encoded it.
+    try std.testing.expectEqualStrings("1 page/1 zstd", followed.body);
+
+    // Without the caller's header an encoding the module cannot decode fails.
+    try std.testing.expectError(error.UnsupportedEncoding, fetch(std.testing.allocator, &client, .{ .url = final }, .{}, null));
+}
+
+test "receive hands over the head first and flushes each read as it arrives" {
+    const handler = struct {
+        fn handle(server: *TestServer, request: *std.http.Server.Request) anyerror!void {
+            var buffer: [64]u8 = undefined;
+            var writer = try request.respondStreaming(&buffer, .{ .respond_options = .{ .status = .accepted, .keep_alive = false } });
+            try writer.writer.writeAll("first");
+            try writer.writer.flush();
+            try writer.flush();
+            // The rest waits until the client saw the first bytes.
+            server.release.wait();
+            try writer.writer.writeAll(" second");
+            try writer.end();
+        }
+    }.handle;
+    var server = try TestServer.init(handler);
+    defer server.deinit();
+    const thread = try std.Thread.spawn(.{}, TestServer.serve, .{ &server, 1 });
+    defer thread.join();
+    defer server.release.set();
+    var client: std.http.Client = .{ .allocator = std.testing.allocator };
+    defer client.deinit();
+    var url_buffer: [64]u8 = undefined;
+    const Consumer = struct {
+        server: *TestServer,
+        status: ?std.http.Status = null,
+        body: [64]u8 = undefined,
+        len: usize = 0,
+        writer: std.Io.Writer,
+
+        fn head(context: *anyopaque, value: Head) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            var owned = value;
+            defer owned.deinit(std.testing.allocator);
+            self.status = owned.status;
+        }
+        fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+            const self: *@This() = @fieldParentPtr("writer", w);
+            std.debug.assert(self.status != null);
+            const bytes = w.buffered();
+            @memcpy(self.body[self.len..][0..bytes.len], bytes);
+            self.len += bytes.len;
+            w.end = 0;
+            _ = splat;
+            const first = data[0];
+            @memcpy(self.body[self.len..][0..first.len], first);
+            self.len += first.len;
+            if (std.mem.eql(u8, self.body[0..self.len], "first")) self.server.release.set();
+            return first.len;
+        }
+    };
+    var storage: [4]u8 = undefined;
+    var consumer: Consumer = .{ .server = &server, .writer = .{ .vtable = &.{ .drain = Consumer.drain }, .buffer = &storage } };
+    try receive(std.testing.allocator, &client, .{ .url = try testUrl(&url_buffer, &server, "/stream") }, .{}, null, .{ .context = &consumer, .head = Consumer.head, .body = &consumer.writer });
+    try std.testing.expectEqual(std.http.Status.accepted, consumer.status.?);
+    try std.testing.expectEqualStrings("first second", consumer.body[0..consumer.len]);
 }

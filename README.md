@@ -134,7 +134,7 @@ Ziggurat 使用 [MIT 许可证](LICENSE)。源码包包含 LICENSE，构建安�
 - [应用资源与停止](docs/application-resources.md)、[代码编辑服务](docs/code-editor.md)、[Snippet 会话](docs/snippets.md)、[完整文档辅助功能](docs/document-accessibility.md)、[快照差异](docs/document-diff.md)、[双栏比较](docs/document-diff-view.md)
 - [窗口位置恢复](docs/window-placement.md)、[文档应用模型](docs/document-app.md)、[语言协议](docs/language-protocol.md)
 - [Diff 文档辅助功能](docs/document-diff-accessibility.md)、[SVG 文字排版](docs/svg-text.md)
-- [IPC](docs/ipc.md)、[页面 runtime](docs/page-runtime.md)、[插件](docs/plugins.md)、[应用字节流](docs/resource-stream.md)、[页面导航](docs/pages.md)、[文档初始化器](docs/document-initializers.md)、[独立 Cookie 存储](docs/cookie-store.md)、[Web 资源工具](docs/web-assets.md)、[系统设施](docs/system.md)
+- [IPC](docs/ipc.md)、[页面 runtime](docs/page-runtime.md)、[插件](docs/plugins.md)、[fetch 插件](docs/plugin-fetch.md)、[应用字节流](docs/resource-stream.md)、[页面导航](docs/pages.md)、[文档初始化器](docs/document-initializers.md)、[独立 Cookie 存储](docs/cookie-store.md)、[Web 资源工具](docs/web-assets.md)、[系统设施](docs/system.md)
 - [签名更新](docs/updates.md)、[Fetch 与 WebSocket](docs/net.md)、[ziggurat 命令](docs/cli.md)、[性能与复现实验](docs/performance.md)
 - [扩展生命周期](docs/extensions.md)
 - [音频](docs/audio.md)、[本地化](docs/i18n.md)、[显式时钟动画](docs/animation.md)、[单次唤醒](docs/wake.md)、[系统文字轮廓](docs/text-outlines.md)

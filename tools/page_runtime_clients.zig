@@ -4,9 +4,11 @@
 const std = @import("std");
 const ipc = @import("ziggurat_ipc");
 const runtime_service = @import("page_runtime_service");
+const fetch_service = @import("plugin_fetch_service");
 
 const clients = .{
     .{ runtime_service.Service, "packages/runtime/src/generated/runtime.ts" },
+    .{ fetch_service.Service, "packages/plugin-fetch/src/generated/fetch.ts" },
 };
 
 pub fn main() !void {

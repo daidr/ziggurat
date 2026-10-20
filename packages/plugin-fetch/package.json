@@ -1,0 +1,22 @@
+{
+  "name": "@ziggurat/plugin-fetch",
+  "version": "0.1.0-dev",
+  "description": "A fetch that makes HTTP requests from the Ziggurat host, free of CORS and of the WebView's header rules",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "ziggurat-plugin.json"
+  ],
+  "peerDependencies": {
+    "@ziggurat/runtime": "0.1.0-dev"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p ."
+  }
+}
