@@ -2253,6 +2253,30 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_audio_tests.step);
     b.step("test-audio", "Run WAV/FLAC decoding, mixing, player, stream, notification and test-backend output invariants").dependOn(&run_audio_tests.step);
     addSmoke(b, "smoke-audio", "tests/audio_smoke.zig", target, optimize, &.{.{ .name = "ziggurat_audio", .module = audio }});
+    const terminal = b.addModule("ziggurat_terminal", .{ .root_source_file = b.path("src/terminal/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
+    terminal.link_libc = true;
+    const terminal_tests = b.addTest(.{ .root_module = terminal });
+    const run_terminal_tests = b.addRunArtifact(terminal_tests);
+    check.dependOn(&terminal_tests.step);
+    test_step.dependOn(&run_terminal_tests.step);
+    const terminal_view = b.addModule("ziggurat_terminal_view", .{ .root_source_file = b.path("src/terminal/view.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
+        .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_terminal", .module = terminal },
+    } });
+    const terminal_view_tests = b.addTest(.{ .root_module = terminal_view });
+    const run_terminal_view_tests = b.addRunArtifact(terminal_view_tests);
+    check.dependOn(&terminal_view_tests.step);
+    test_step.dependOn(&run_terminal_view_tests.step);
+    const test_terminal = b.step("test-terminal", "Run escape sequence parsing, screen, scrollback, key and mouse encoding, selection, link, PTY session and terminal view tests");
+    test_terminal.dependOn(&run_terminal_tests.step);
+    test_terminal.dependOn(&run_terminal_view_tests.step);
+    addSmoke(b, "smoke-terminal", "tests/terminal_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_ui", .module = ui },
+        .{ .name = "ziggurat_view", .module = declarative_view },
+        .{ .name = "ziggurat_terminal", .module = terminal },
+        .{ .name = "ziggurat_terminal_view", .module = terminal_view },
+    });
     const snippets_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/code_editor/snippet.zig"),
         .target = target,

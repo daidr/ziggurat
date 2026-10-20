@@ -78,6 +78,8 @@ WSL 应将 Zig 本地缓存放在 Linux 文件系统，见 `scripts/linux-check.
 | `ziggurat_view_pickers` | 声明式视图中的[选择器](docs/pickers.md)：日历、日期/时间/数字输入、颜色选择器与颜色按钮，按 locale 格式化与解析 | 依赖视图与本地化；状态由应用持有，不分配 |
 | `ziggurat_chart` | [图表](docs/chart.md)的数值/分类/时间尺度与刻度、绘图区与坐标轴布局、标记位置、折线/面积/扇形路径、堆叠、保极值降采样、图例与选择状态 | 纯 Zig；结果写入调用者存储，不分配 |
 | `ziggurat_chart_view` | 声明式视图中的图表：网格、柱、点、规则线、标签、图例与覆盖蒙版绘制的折线/面积/扇形 | 依赖视图与矢量；蒙版在绘制后的投递任务中准备，未变化时回放不分配 |
+| `ziggurat_terminal` | [终端](docs/terminal.md)：Linux PTY 与 Windows ConPTY 子进程、显式读写线程与背压、VT/ANSI 解析、带 scrollback 的屏幕（SGR 256 色/真彩、备用屏、滚动区、宽字符）、按键/粘贴/鼠标编码、选择与链接识别；OSC 52 默认拒绝 | 仅依赖核心；输出经 `App.post` 回主线程 |
+| `ziggurat_terminal_view` | 声明式视图中的终端：按单元格绘制、作为文本字段接收键盘与输入法、选择复制粘贴、鼠标上报、滚动 scrollback、Ctrl+点击链接 | 依赖视图；改尺寸与注册在绘制后的投递任务中进行，未变化时重绘不分配 |
 | `ziggurat_virtual_list` | 稳定行 ID、可变高度索引、滚动锚点与有界可见回放 | 单向依赖 UI；完整虚拟控件集继续按计划实施 |
 | `ziggurat_images` | 有界 PNG/JPEG/BMP/首帧 GIF、可选 WebP、EXIF 与独占像素交接 | 系统 WIC/GdkPixbuf；有界 LZW；可选固定源码 WebP |
 | `ziggurat_image_drawing` | 不可变预乘像素、裁切与 mip 准备；显式上传、同尺寸更新和有界驻留 | 独立依赖图片与绘制资源；GDI/Cairo/D2D 回放 |
