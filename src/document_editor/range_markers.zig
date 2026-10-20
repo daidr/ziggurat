@@ -1,9 +1,12 @@
 const std = @import("std");
 const d = @import("ziggurat_document");
 
-pub const Kind = enum { background, underline };
+pub const Kind = enum { background, underline, foreground };
 /// Paint-only committed UTF-8 source range. Underline decorates the bottom of
 /// selection cells; it is not a font-metric underline or a glyph ink bound.
+/// Foreground draws the range's text in `color` instead of the text color,
+/// as syntax highlighting does; overlapping foreground ranges draw the text
+/// once per range, so callers give each byte at most one.
 pub const Marker = struct {
     range: d.Range,
     kind: Kind = .background,

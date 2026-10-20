@@ -80,6 +80,7 @@ WSL 应将 Zig 本地缓存放在 Linux 文件系统，见 `scripts/linux-check.
 | `ziggurat_chart_view` | 声明式视图中的图表：网格、柱、点、规则线、标签、图例与覆盖蒙版绘制的折线/面积/扇形 | 依赖视图与矢量；蒙版在绘制后的投递任务中准备，未变化时回放不分配 |
 | `ziggurat_terminal` | [终端](docs/terminal.md)：Linux PTY 与 Windows ConPTY 子进程、显式读写线程与背压、VT/ANSI 解析、带 scrollback 的屏幕（SGR 256 色/真彩、备用屏、滚动区、宽字符）、按键/粘贴/鼠标编码、选择与链接识别；OSC 52 默认拒绝 | 仅依赖核心；输出经 `App.post` 回主线程 |
 | `ziggurat_terminal_view` | 声明式视图中的终端：按单元格绘制、作为文本字段接收键盘与输入法、选择复制粘贴、鼠标上报、滚动 scrollback、Ctrl+点击链接 | 依赖视图；改尺寸与注册在绘制后的投递任务中进行，未变化时重绘不分配 |
+| `ziggurat_game` | [游戏](docs/game.md)：固定步长游戏循环与按位置的键盘/指针输入、二维相机、整数倍像素缩放、Windows XInput 与 Linux evdev 手柄 | 依赖视图；不分配，主线程运行；手柄由应用持有 |
 | `ziggurat_virtual_list` | 稳定行 ID、可变高度索引、滚动锚点与有界可见回放 | 单向依赖 UI；完整虚拟控件集继续按计划实施 |
 | `ziggurat_images` | 有界 PNG/JPEG/BMP/首帧 GIF、可选 WebP、EXIF 与独占像素交接 | 系统 WIC/GdkPixbuf；有界 LZW；可选固定源码 WebP |
 | `ziggurat_image_drawing` | 不可变预乘像素、裁切与 mip 准备；显式上传、同尺寸更新和有界驻留 | 独立依赖图片与绘制资源；GDI/Cairo/D2D 回放 |
@@ -142,6 +143,6 @@ Ziggurat 使用 [MIT 许可证](LICENSE)。源码包包含 LICENSE，构建安�
 - [局部失效](docs/invalidation.md)
 - [构建缓存与 WSL 容量](docs/build-cache.md)
 - [共享 GPU 资源](docs/gpu-resources.md)、[GPU 离屏](docs/gpu-offscreen.md)
-- [显式控件主题](docs/theme.md)、[背景效果与加载动画](docs/backdrop-effects.md)
+- [显式控件主题](docs/theme.md)、[背景效果与加载动画](docs/backdrop-effects.md)、[着色器与元素效果](docs/shader-effects.md)
 
 Linux 可选 WebKitGTK 使用显式 `.storage = .ephemeral`，或由宿主 worker 准备目录、同一 App 创建的持久 `Profile`。支持可信 HTML、顶层 IPC、页面与有界脚本，以及显式 custom scheme 的静态/异步响应、worker 文件快照/按需文件泵、独立矩形页面区域、可离窗停放的 PageSession 和需单独部署请求扩展的远程来源。可选 [CookieStore](docs/cookie-store.md) 直接绑定 Profile，无页面时也能执行有界 URL 查询和显式授权的写入/清 Cookie；普通页面不会自动创建它。宿主已有回环 HTTPS 服务时，可在 Profile 创建期显式冻结 `127.0.0.1` 的证书例外与直连策略，沿用 RemotePage 权限；内存/文件资源的 HTTPS 运输与更广浏览器工具继续实施。存储预算、证书例外范围及关闭边界见[Linux Profile](docs/webview-profile.md)，依赖、能力查询及实际检查见[页面策略](docs/pages.md)。

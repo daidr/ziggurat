@@ -29,11 +29,13 @@ flowchart TD
     Host --> ChartView[ziggurat_chart_view]
     Host --> Terminal[ziggurat_terminal]
     Host --> TerminalView[ziggurat_terminal_view]
+    Host --> Game[ziggurat_game]
     Host --> Pickers[ziggurat_view_pickers]
     Host --> Document[ziggurat_document]
     Host --> DocumentEditor[ziggurat_document_editor]
     Host --> DocumentAccessibility[ziggurat_document_accessibility]
     Host --> CodeEditor[ziggurat_code_editor]
+    CodeEditor --> CodeSyntax[ziggurat_code_syntax]
     Host --> DocumentDiff[ziggurat_document_diff]
     Host --> DocumentDiffView[ziggurat_document_diff_view]
     Host --> DocumentDiffAccessibility[ziggurat_document_diff_accessibility]
@@ -45,6 +47,10 @@ flowchart TD
     Host --> MarkdownView[ziggurat_markdown_view]
     MarkdownView --> Markdown[ziggurat_markdown]
     MarkdownView --> View
+    Host --> MarkdownRich[ziggurat_markdown_rich]
+    MarkdownRich --> MarkdownView
+    MarkdownRich --> RichText[ziggurat_view_rich_text]
+    RichText --> View
     Host --> Wake[ziggurat_wake]
     Host --> Placement[ziggurat_window_placement]
     Host --> DocumentApp[ziggurat_document_app]
@@ -85,6 +91,7 @@ flowchart TD
     ImageDrawing --> Images
     ImageDrawing --> Resources[纯数据绘制资源 ABI]
     UI --> Resources
+    UI --> Shader[ziggurat_shader]
     Text --> Resources
     ChartView --> Chart
     ChartView --> View
@@ -100,6 +107,7 @@ flowchart TD
     DocumentEditor --> Caret
     List --> UI
     View --> UI
+    View --> Animation
     Document --> Core
     Vector --> Resources
     Shadows --> Resources
@@ -132,6 +140,7 @@ flowchart TD
     CodeEditor --> Core
     CodeEditor --> UI
     CodeEditor --> Text
+    CodeEditor --> DocumentDiff
     DocumentDiff --> Document
     DocumentDiffView --> DocumentDiff
     DocumentDiffView --> DocumentEditor
@@ -216,6 +225,8 @@ GDI 复用 DC、位图和字体；Linux 复用 Cairo surface 并通过 Pango 系
 可选 `ziggurat_svg` 在拥有的有界 XML 树上解析样式、局部引用与几何，显式准备独立的 BGRA 图片；核心和普通 UI 不导入解析器。CSS、引用展开、attribute bytes、路径生成/扫描、像素和临时透明层分别有整个场景的累计预算。准备结果走相同图片驻留和 Lease，不在 paint 解析文档。完整支持范围见[SVG 文档](svg.md)。
 
 透明分组由 Context 在 paint 外显式预留 front/work/group 平面，软件与可用 GPU 的候选全部成功才替换旧工作面。分组在透明平面完成子项后一次应用 opacity/mask/parent clip。回放和结束失败或 GPU 暂缓呈现保留已提交前帧及输入/语义快照；软件 fallback 成功后才替换可见后端和提交新快照。关闭/资源替换先撤销借用的 ready watch。默认未启用的 Context 不分配这些平面，详见[分组工作面](layers.md)。
+
+独立 `ziggurat_shader` 只依赖标准库：源文本在绘制之前编译为有界寄存器字节码，最坏单像素步数在编译期确定。Context 在 paint 外显式准备着色器工作区，Frame 记录元素效果与背景着色器时复制参数；软件 renderer 用高斯捕获或目标上两遍隔离执行，含此类命令的帧在 D3D11 下整帧软件回放，正常绘制不分配、不编译。见[着色器与元素效果](shader-effects.md)。
 
 编辑模块拥有显式预分配的 UTF-8 文档、历史、preedit 和显示缓冲，支持选择、插入删除、剪贴板注入、撤销重做、逻辑行导航与滚动。应用提供 Surface.measure/paint 和剪贴板回调；不是自动加入 Frame 的成熟文本控件。左右按 Unicode scalar 移动，无完整 grapheme、bidi、soft wrap 或 shaping caret 模型。Windows 处理 UTF-16 surrogate、WM_UNICHAR、IMM preedit/result/cancel 与候选位置；Linux 接 GTK IM。真实语言引擎与视觉效果另行验证。
 

@@ -297,7 +297,8 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
             } else record.emitState();
         },
         17 => return @intFromBool(record.inputAllowed()),
-        18 => return @intFromBool(record.keyInput(.{ .key = keyCode(@intCast(native.key)), .modifiers = .{ .shift = native.flags & 1 != 0, .control = native.flags & 2 != 0, .alt = native.flags & 4 != 0, .super = native.flags & 8 != 0 }, .repeat = native.flags & 16 != 0 })),
+        18 => return @intFromBool(record.keyInput(.{ .key = keyCode(@intCast(native.key)), .modifiers = .{ .shift = native.flags & 1 != 0, .control = native.flags & 2 != 0, .alt = native.flags & 4 != 0, .super = native.flags & 8 != 0 }, .repeat = native.flags & 16 != 0, .physical = core.physical_keys.fromEvdev(native.width) })),
+        26 => record.keyRelease(.{ .key = keyCode(@intCast(native.key)), .modifiers = .{ .shift = native.flags & 1 != 0, .control = native.flags & 2 != 0, .alt = native.flags & 4 != 0, .super = native.flags & 8 != 0 }, .physical = core.physical_keys.fromEvdev(native.width) }),
         19 => return @intFromEnum(record.hitTest(point, @floatFromInt(native.width), @floatFromInt(native.height))),
         20, 21 => return textContext(record, native) catch |err| {
             if (err != error.StaleTextClient and err != error.CompositionActive) record.window.report(.{ .domain = .core, .operation = .text_input, .err = err });
