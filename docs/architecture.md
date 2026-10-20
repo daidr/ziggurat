@@ -27,6 +27,7 @@ flowchart TD
     Host --> View[ziggurat_view]
     Host --> Chart[ziggurat_chart]
     Host --> ChartView[ziggurat_chart_view]
+    Host --> Pickers[ziggurat_view_pickers]
     Host --> Document[ziggurat_document]
     Host --> DocumentEditor[ziggurat_document_editor]
     Host --> DocumentAccessibility[ziggurat_document_accessibility]
@@ -83,6 +84,8 @@ flowchart TD
     ChartView --> Chart
     ChartView --> View
     ChartView --> Vector
+    Pickers --> View
+    Pickers --> I18n
     Editor --> UI
     Editor --> Text
     Editor --> Caret

@@ -75,6 +75,7 @@ WSL 应将 Zig 本地缓存放在 Linux 文件系统，见 `scripts/linux-check.
 | `ziggurat_document_diff_accessibility` | 可编辑 Diff 双源全文、真实删除行几何与同根有界辅助控件 | 可选 Windows UIA；复用原 Document/Adapter 与唯一 Diff 协调者 |
 | `ziggurat_view` | 从应用状态构建视图树、弹性布局、绑定值的控件与即时输入交付 | 单向依赖 UI；调用者提供固定存储，不分配 |
 | `ziggurat_view_text` | 声明式视图中的可编辑文本字段，包装应用持有的 Document Field | 依赖视图与文档编辑器；准备在绘制后的投递任务中进行 |
+| `ziggurat_view_pickers` | 声明式视图中的[选择器](docs/pickers.md)：日历、日期/时间/数字输入、颜色选择器与颜色按钮，按 locale 格式化与解析 | 依赖视图与本地化；状态由应用持有，不分配 |
 | `ziggurat_chart` | [图表](docs/chart.md)的数值/分类/时间尺度与刻度、绘图区与坐标轴布局、标记位置、折线/面积/扇形路径、堆叠、保极值降采样、图例与选择状态 | 纯 Zig；结果写入调用者存储，不分配 |
 | `ziggurat_chart_view` | 声明式视图中的图表：网格、柱、点、规则线、标签、图例与覆盖蒙版绘制的折线/面积/扇形 | 依赖视图与矢量；蒙版在绘制后的投递任务中准备，未变化时回放不分配 |
 | `ziggurat_virtual_list` | 稳定行 ID、可变高度索引、滚动锚点与有界可见回放 | 单向依赖 UI；完整虚拟控件集继续按计划实施 |
