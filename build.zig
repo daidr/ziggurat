@@ -480,6 +480,8 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .linux) {
         const native = native_support.add(b, system, "system-shell-native", "src/system/shell_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         native.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
+        const secrets_native = native_support.add(b, system, "system-secrets-native", "src/system/secrets_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        secrets_native.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
         system.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
         system.link_libc = true;
     }
@@ -508,6 +510,14 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_system", .module = system },
         });
         addSmoke(b, "smoke-file-watch", "tests/system_watch_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        addSmoke(b, "smoke-secrets", "tests/system_secrets_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        addSmoke(b, "smoke-flyout", "tests/system_flyout_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
         });
     }

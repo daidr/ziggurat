@@ -312,6 +312,32 @@ pub const WindowHit = enum(c_int) {
 };
 pub const HitTestHandler = struct { context: *anyopaque, query: *const fn (*anyopaque, Window, Point) WindowHit };
 pub const WindowRelationship = struct { owner: ?Window, modal: bool, modal_active: bool, modal_children: usize };
+/// Construction-time role of a borderless window placed beside an anchor,
+/// such as a flyout, a menu or a hover card: it has no taskbar or pager entry
+/// and the user does not move or resize it. Requires `.borderless`.
+pub const PopupRole = struct {
+    /// Takes the keyboard when shown, and reports `PopupHandler.dismiss` when
+    /// another window outside its own popups takes the keyboard or, on Linux,
+    /// when the user presses outside it. Others never take the keyboard: show,
+    /// focus and pointer presses leave the active window as it was.
+    focusable: bool = false,
+    /// Floats above other applications' windows, as a popup without an owner
+    /// beside a notification-area icon does.
+    topmost: bool = false,
+    /// The system's popup shadow. Windows 11 also rounds and outlines the
+    /// window as it does its menus; Linux draws no shadow of its own.
+    shadow: bool = false,
+    /// Borrowed context remains valid through on_closed, like close handlers.
+    handler: ?PopupHandler = null,
+};
+pub const PopupHandler = struct {
+    context: *anyopaque,
+    /// A focusable popup lost the keyboard or saw a press outside it. Runs on
+    /// the main thread at a safe point; the popup is still open.
+    dismiss: *const fn (*anyopaque, Window) void,
+    /// The owner reported a new size or position; place the popup again.
+    owner_moved: ?*const fn (*anyopaque, Window) void = null,
+};
 pub const WindowOptions = struct {
     title: []const u8 = "Ziggurat",
     width: u32 = 720,
@@ -335,6 +361,7 @@ pub const WindowOptions = struct {
     /// .children selects the optional GTK accessible child host on Linux.
     /// Other native backends reject it with UnsupportedCapability.
     accessibility_host: AccessibilityHost = .platform,
+    popup: ?PopupRole = null,
     on_close: ?CloseHandler = null,
     on_closed: ?ClosedHandler = null,
 };
@@ -537,6 +564,7 @@ pub const App = struct {
         if (options.width == 0 or options.height == 0 or options.width > 32768 or options.height > 32768 or options.min_width > options.width or options.min_height > options.height) return error.InvalidSize;
         if (!std.math.isFinite(options.resize_border) or options.resize_border < 0 or options.resize_border > 64) return error.InvalidGeometry;
         if (options.decoration == .system and options.hit_test != null) return error.InvalidWindowDecoration;
+        if (options.popup != null and (options.decoration != .borderless or options.modal)) return error.InvalidPopup;
         const record = try self.allocator.create(WindowRecord);
         const key = self.windows.insert(self.allocator, record) catch |err| {
             self.allocator.destroy(record);
@@ -1782,15 +1810,22 @@ pub const WindowRecord = struct {
     }
     pub fn keyInput(self: *WindowRecord, input: KeyInput) bool {
         if (!self.inputAllowed()) return true;
-        const content = self.content orelse return false;
-        const callback = content.key_input orelse return false;
         const scope = self.enter();
         defer scope.end();
-        const epoch = self.text_input_epoch;
-        const pointer = self.window.app.suspendPointer();
-        defer self.window.app.restorePointer(pointer);
-        const consumed = callback(content.context, self.window, input);
-        return consumed or !self.inputAllowed() or epoch != self.text_input_epoch;
+        if (self.content) |content| if (content.key_input) |callback| {
+            const epoch = self.text_input_epoch;
+            const pointer = self.window.app.suspendPointer();
+            defer self.window.app.restorePointer(pointer);
+            const consumed = callback(content.context, self.window, input);
+            if (consumed or !self.inputAllowed() or epoch != self.text_input_epoch) return true;
+        };
+        // A popup closes, as the user closing it, on an Escape its content
+        // leaves unconsumed, as menus and popovers do.
+        if (self.options.popup != null and input.key == .escape and std.meta.eql(input.modifiers, KeyModifiers{}) and self.phase == .open) {
+            _ = self.window.requestCloseFrom(.user) catch |err| self.window.report(.{ .domain = .core, .operation = .window_destroy, .err = err });
+            return true;
+        }
+        return false;
     }
     /// Adapter commit point. No rollback or retryable failure may follow it.
     pub fn publishTextInputMode(self: *WindowRecord, mode: TextInputMode) void {
@@ -1863,6 +1898,40 @@ pub const WindowRecord = struct {
             const delivered: Event = if (event == .text_preedit_cancel and self.text_revoking_native and self.text_client == null) .text_preedit_revoked else event;
             content.event(content.context, self.window, delivered);
         }
+        if (event == .resize or event == .window_position) self.notifyOwnedPopups();
+    }
+    /// Popups follow their owner: each open one with an `owner_moved`
+    /// handler hears that the owner's geometry changed.
+    fn notifyOwnedPopups(self: *WindowRecord) void {
+        var cursor = self.first_child;
+        while (cursor) |child| {
+            if (self.phase != .open) return;
+            child.pin();
+            defer {
+                cursor = child.sibling_next;
+                child.unpin();
+            }
+            if (child.phase != .open) continue;
+            const role = child.options.popup orelse continue;
+            const handler = role.handler orelse continue;
+            const moved = handler.owner_moved orelse continue;
+            const scope = child.enter();
+            defer scope.end();
+            moved(handler.context, child.window);
+        }
+    }
+    /// Native backends report that a focusable popup was dismissed. Call it
+    /// outside native activation handlers; destruction it requests is deferred.
+    pub fn popupDismissed(self: *WindowRecord) void {
+        if (self.phase != .open) return;
+        const role = self.options.popup orelse return;
+        if (!role.focusable) return;
+        const handler = role.handler orelse return;
+        const scope = self.enter();
+        defer scope.end();
+        const pointer = self.window.app.suspendPointer();
+        defer self.window.app.restorePointer(pointer);
+        handler.dismiss(handler.context, self.window);
     }
     pub fn emitState(self: *WindowRecord) void {
         if (self.phase != .open) return;
