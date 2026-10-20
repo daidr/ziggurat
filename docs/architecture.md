@@ -27,6 +27,8 @@ flowchart TD
     Host --> View[ziggurat_view]
     Host --> Chart[ziggurat_chart]
     Host --> ChartView[ziggurat_chart_view]
+    Host --> Terminal[ziggurat_terminal]
+    Host --> TerminalView[ziggurat_terminal_view]
     Host --> Pickers[ziggurat_view_pickers]
     Host --> Document[ziggurat_document]
     Host --> DocumentEditor[ziggurat_document_editor]
@@ -84,6 +86,9 @@ flowchart TD
     ChartView --> Chart
     ChartView --> View
     ChartView --> Vector
+    Terminal --> Core
+    TerminalView --> Terminal
+    TerminalView --> View
     Pickers --> View
     Pickers --> I18n
     Editor --> UI
