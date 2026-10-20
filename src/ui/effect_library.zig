@@ -16,6 +16,11 @@ pub const pose_source =
     \\    return sample(q.xy / q.z);
     \\}
 ;
+/// Leaves content as it is; with an effect opacity it fades the content
+/// as one isolated layer.
+pub const passthrough_source =
+    \\vec4 color(vec2 position, vec4 pixel) { return pixel; }
+;
 pub const glass_source =
     \\uniform float radius;
     \\uniform float bezel;
@@ -162,6 +167,8 @@ pub const Library = struct {
     allocator: std.mem.Allocator,
     pose_program: *shader.Program,
     glass_program: *shader.Program,
+    passthrough_program: *shader.Program,
+    passthrough_values: shader.Values,
     /// Largest margin a pose may claim around its box, in DIP; content
     /// moved farther is clipped.
     max_pose_margin: f32 = 128,
@@ -172,8 +179,10 @@ pub const Library = struct {
         errdefer pose_program.destroy();
         const glass_program = shader.compile(allocator, glass_source, .{}, &diagnostic) catch |err| return builtinFailure(err);
         errdefer glass_program.destroy();
+        const passthrough_program = shader.compile(allocator, passthrough_source, .{}, &diagnostic) catch |err| return builtinFailure(err);
+        errdefer passthrough_program.destroy();
         const self = try allocator.create(Library);
-        self.* = .{ .allocator = allocator, .pose_program = pose_program, .glass_program = glass_program };
+        self.* = .{ .allocator = allocator, .pose_program = pose_program, .glass_program = glass_program, .passthrough_program = passthrough_program, .passthrough_values = shader.Values.init(passthrough_program) };
         return self;
     }
     fn builtinFailure(err: error{ InvalidShader, OutOfMemory }) error{OutOfMemory} {
@@ -186,7 +195,13 @@ pub const Library = struct {
     pub fn destroy(self: *Library) void {
         self.pose_program.destroy();
         self.glass_program.destroy();
+        self.passthrough_program.destroy();
         self.allocator.destroy(self);
+    }
+    /// An element effect that changes nothing, for fading content as one
+    /// layer through `EffectOptions.opacity`.
+    pub fn passthrough(self: *const Library) Effect {
+        return .{ .program = self.passthrough_program, .values = &self.passthrough_values, .margin = 0 };
     }
     /// An element effect that draws a box of `size` DIP at `pose`, or null
     /// when the pose is the identity or degenerate (nothing would show).
