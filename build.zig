@@ -2567,11 +2567,12 @@ pub fn build(b: *std.Build) void {
 }
 
 const app_example_imports = [_][]const u8{
-    "ziggurat",             "ziggurat_ui",               "ziggurat_view",            "ziggurat_view_timer",
-    "ziggurat_view_text",   "ziggurat_document",         "ziggurat_document_editor", "ziggurat_wake",
-    "ziggurat_system",      "ziggurat_i18n",             "ziggurat_animation",       "ziggurat_document_app",
-    "ziggurat_chart",       "ziggurat_chart_view",       "ziggurat_audio",           "ziggurat_code_editor",
-    "ziggurat_text_layout", "ziggurat_window_placement", "ziggurat_game",
+    "ziggurat",               "ziggurat_ui",               "ziggurat_view",            "ziggurat_view_timer",
+    "ziggurat_view_text",     "ziggurat_document",         "ziggurat_document_editor", "ziggurat_wake",
+    "ziggurat_system",        "ziggurat_i18n",             "ziggurat_animation",       "ziggurat_document_app",
+    "ziggurat_chart",         "ziggurat_chart_view",       "ziggurat_audio",           "ziggurat_code_editor",
+    "ziggurat_text_layout",   "ziggurat_window_placement", "ziggurat_game",            "ziggurat_terminal",
+    "ziggurat_terminal_view",
 };
 
 const Example = struct { name: []const u8, path: []const u8, web: bool = false };
@@ -2593,6 +2594,8 @@ const app_examples = [_]Example{
     .{ .name = "timeline", .path = "examples/timeline.zig" },
     .{ .name = "i18n", .path = "examples/i18n.zig" },
     .{ .name = "farm", .path = "examples/farm.zig" },
+    .{ .name = "loading", .path = "examples/loading.zig" },
+    .{ .name = "terminal", .path = "examples/terminal.zig" },
     .{ .name = "hybrid", .path = "examples/hybrid.zig", .web = true },
 };
 
