@@ -31,6 +31,10 @@ fn nativePaint(window: z.Window) void {
 
 const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun" };
 
+fn describe(_: ?*const anyopaque, index: usize, buffer: []u8) []const u8 {
+    return std.fmt.bufPrint(buffer, "{s}: point {d}", .{ months[index], index }) catch buffer[0..0];
+}
+
 const State = struct {
     chart: *chart_view.Chart = undefined,
     sales: [6]f64 = .{ 12, 30, 22, 48, 41, 57 },
@@ -59,7 +63,8 @@ const State = struct {
         try self.chart.add(.{ .rule_y = .{ .y = y.at(40), .color = ui.Color.rgb(0xcc3333) } });
         try self.chart.add(.{ .label = .{ .x = x.at(5), .y = y.at(self.sales[5]), .text = "57" } });
         try self.chart.setLegend(&.{ .{ .label = "Sales", .color = 0x2a7fd4 }, .{ .label = "Trend", .color = 0xd47f2a } });
-        self.chart.value = "June: 57 sales";
+        self.chart.select(&self.xs, .{ .call = describe });
+        if (self.chart.selection.index) |i| try self.chart.add(.{ .rule_x = .{ .x = self.xs[i], .color = ui.Color.rgb(0x888888) } });
         try v.text("Sales by month", .{});
         try v.embed(self.chart.embed(), .{ .grow = 1, .self_align = .stretch, .key = 1 });
     }
@@ -121,6 +126,19 @@ fn run(allocator: std.mem.Allocator) !void {
     const stats = try host.context.coverageStats();
     // GDI draws masks directly and keeps none resident, so count requests.
     try std.testing.expect(stats.software.upload_requests >= 5 and stats.software.draws > 0);
+
+    // The pointer over the plot chooses the nearest month, a press there
+    // makes the chart take the focus, and leaving clears the choice.
+    const middle: view.Point = .{ .x = area.x + area.width * state.xs[3], .y = area.y + area.height / 2 };
+    try std.testing.expect(host.view.embedPointerMove(middle));
+    try std.testing.expectEqual(@as(?usize, 3), figure.selection.index);
+    try std.testing.expectEqualStrings("Apr: point 3", figure.selected());
+    const press = host.view.embedPointerDown(middle).?;
+    try std.testing.expect(press.focusable);
+    try paint(&host, window);
+    try std.testing.expect(host.view.embedPointerMove(null));
+    try std.testing.expectEqual(@as(?usize, null), figure.selection.index);
+    try paint(&host, window);
 
     // New data prepares the line and area again; the slices keep theirs.
     // Dropping the pie releases its masks.

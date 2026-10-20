@@ -48,7 +48,7 @@
 | U06 | 部分完成（U06.1 声明式视图的 tabs/toolbar/比例 split；U06.2 tooltip、toast 与一次性唤醒） | tabs、sidebar、toolbar、split、tooltip、toast | 生命周期、遮挡/命中、延迟唤醒撤销与可访问性；split 的 DIP 偏好、RTL、折叠与 sidebar、toast 动画继续；基础依赖 U02.1/G02，popup scope另依赖U02.2 |
 | U07 | 待实现 | calendar、date/time、color picker | locale/范围/键盘/可访问性；依赖 L01/U05 |
 | U08 | 已完成（U08.1 link、badge、segmented、disclosure；U08.2 meter、rating、breadcrumbs、accordion；U08.3 avatar 与导航按钮，Windows UIA） | badge、avatar、link、meter、rating、segmented、accordion、breadcrumbs 与导航按钮 | 稳定身份、分组/展开/链接动作、键盘和语义；不把静态文字/矩形算成完整控件；Linux AT-SPI 不在本行范围；基础依赖 U02.1/G01 |
-| U09 | 部分完成 | chart 的数值/分类/时间尺度、axes、marks、stacking 与 selection | 已有纯 Zig `ziggurat_chart`（尺度/刻度、布局、路径、堆叠、降采样、图例、选择状态）与 `ziggurat_chart_view`（视图嵌入、绘制后准备的覆盖蒙版），见[图表](chart.md)；视图嵌入的输入接口已就绪，图表的悬停与键盘选择待接入 |
+| U09 | 部分完成 | chart 的数值/分类/时间尺度、axes、marks、stacking 与 selection | 已有纯 Zig `ziggurat_chart`（尺度/刻度、布局、路径、堆叠、降采样、图例、选择状态）与 `ziggurat_chart_view`（视图嵌入、绘制后准备的覆盖蒙版），见[图表](chart.md)，悬停与键盘选择经视图嵌入输入接口接入 |
 | U10 | 部分完成（U10.1 声明式视图的 field/fieldset、说明与验证状态、禁用继承；U10.2 嵌入叶子的可聚焦、指针/按键输入与播报，文本节点字体变体） | form、field/fieldset、验证提示与自定义控件契约 | 标签关联、禁用继承、错误语义、测量/绘制/输入/快照事务；嵌入叶子已能登记 Tab 停靠、接收局部坐标指针与焦点按键并礼貌播报，文本节点可按 `Style.font` 选择字号/字重/斜体/等宽并在 GDI/D3D11/Cairo 绘制；form 提交与焦点跳到首个错误、叶子的指针捕获与拖动继续；依赖 U02.1/U03.2/T02/T06 |
 | G01 | 部分完成 | 圆角、描边、渐变、阴影、透明度、图片与 SVG/path | RGBA/圆角/内描边、图片驻留/同尺寸更新、严格渐变、圆角阴影/path、有界分组和独立软件/GPU离屏已验收；完整 SVG 继续实施；三后端同一语义与明确资源上限 |
 | G02 | 进行中 | theme、动画时间线、spring、变换与局部失效 | 显式动画/有限重复、基础控件主题、Windows/Linux单次唤醒/局部失效、仿射栅格scope/同帧坐标、通用GPU精度预检/整帧后备、共享软件采样及单Document保留坐标桥已验；过滤变换性能、折叠/投影编辑器输入与更广失效复用继续；依赖 G01 |

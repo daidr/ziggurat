@@ -98,6 +98,16 @@ defer figure.deinit(); // 在 Context detach 之前、paint 之外
 
 `smoke-chart` 在隐藏窗口里验证首帧投递、蒙版准备与复用、数据变化后的重新准备与释放。
 
-## 尚未提供
+## 悬停与键盘选择
 
-视图嵌入叶子目前拿不到指针与按键输入，也不能成为 Tab 停靠点，因此 `Selection` 需要应用自行驱动；视图层提供嵌入输入接口后再接入悬停与键盘选择。
+构建时调用 `figure.select(xs, describe)`，传入升序的比例位置（借用，下一次构建前保持有效），图表就成为一个 Tab 停靠点：指针在绘图区上移动时选最近的点，移出绘图区或离开图表时清除；在绘图区按下取得焦点；获焦时左右方向键、Home、End 移动选择，Escape 清除（没有选择时 Escape 不被消费）。`describe` 把点写成文字，作为图表图像节点的值，键盘移到新点时通过 `Host.announce` 播报。选择保存在 `figure.selection` 中、跨构建保留，构建函数读 `selection.index` 用标记画出来：
+
+```zig
+figure.select(&self.xs, .{ .call = describeMonth });
+if (figure.selection.index) |i| {
+    try figure.add(.{ .rule_x = .{ .x = self.xs[i], .color = ui.Color.rgb(0x888888) } });
+    try figure.add(.{ .point = .{ .x = self.xs[i], .y = self.ys[i], .color = accent, .size = 8 } });
+}
+```
+
+获焦时绘图区外画一圈主题焦点色描边。没有调用 `select` 的图表不参与输入，也不是 Tab 停靠点。
