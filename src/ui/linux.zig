@@ -82,11 +82,19 @@ pub const Renderer = struct {
     /// The Buffer whose backdrop, indicator and shader tables the current
     /// replay reads.
     backdrop_source: ?*const commands.Buffer = null,
-    /// Per open group: the element effect it captures for, if any.
-    effect_scopes: [layers.max_depth]?EffectScope = undefined,
-    group_count: usize = 0,
-    pending_effect: ?u8 = null,
+    /// Element effects isolated in a Gaussian capture, innermost last.
+    effect_scopes: [layers.max_depth]EffectScope = undefined,
+    effect_count: usize = 0,
     const EffectScope = struct { slot: u8, capture: gaussian_scope.Capture };
+    const Resources = struct {
+        text_bytes: []const u8,
+        brushes: []const commands.brushes.Stored,
+        prepared: []const drawing.PreparedTextView,
+        images: []const drawing.ImageView,
+        coverage: []const drawing.CoverageView,
+        transforms: []const layers.NativeTransform,
+        filters: []const gaussian.View,
+    };
     pub const LayerCandidate = struct { native: *anyopaque, plan: layers.Plan };
     pub fn layerMetadataBytes() usize {
         return zlc_layer_metadata_bytes();
@@ -221,29 +229,45 @@ pub const Renderer = struct {
         if (zlc_layer_gaussian_active(self.native.?) != 0) try self.filterGaussian();
         if (zlc_layer_end_group(self.native.?) != 0) return error.EndGroupFailed;
     }
-    /// Open an element effect's capture. Without a Gaussian workspace, or
-    /// when the capture does not fit it, the content is drawn as an ordinary
-    /// group and the effect is skipped.
-    fn beginEffect(self: *Renderer, bounds: drawing.Rect, options: layers.Group, entry: *const commands.shader_effects.Entry) !?EffectScope {
-        const capacity = self.gaussianCapacity() orelse {
-            try self.beginGroup(bounds, options);
-            return null;
-        };
-        const capture = gaussian_scope.Capture.init(bounds, &entry.carrier) catch {
-            try self.beginGroup(bounds, options);
-            return null;
-        };
-        capture.check(capacity) catch {
-            try self.beginGroup(bounds, options);
-            return null;
-        };
-        const descriptor = try self.groupDescriptor(bounds, options);
-        if (zlc_layer_begin_gaussian(self.native.?, &descriptor, &capture, &entry.carrier) != 0) {
-            // The frame's filter budget is spent.
-            try self.beginGroup(bounds, options);
-            return null;
+    /// Open an element effect's Gaussian capture when one is prepared with
+    /// room for it; null leaves the effect to isolation on the target.
+    fn captureEffect(self: *Renderer, entry: *const commands.shader_effects.Entry) ?gaussian_scope.Capture {
+        if (self.layer_plan == null or !self.layer_active or self.effect_count == self.effect_scopes.len) return null;
+        const capacity = self.gaussianCapacity() orelse return null;
+        const bounds = entry.captureRect();
+        const capture = gaussian_scope.Capture.init(bounds, &entry.carrier) catch return null;
+        capture.check(capacity) catch return null;
+        const descriptor = self.groupDescriptor(bounds, .{ .opacity = entry.opacity }) catch return null;
+        // Fails when the layer depth or the frame's filter budget is spent.
+        if (zlc_layer_begin_gaussian(self.native.?, &descriptor, &capture, &entry.carrier) != 0) return null;
+        return capture;
+    }
+    /// Draw `body` isolated on the current target and composite it through
+    /// the effect; without a workspace or room it is drawn plainly.
+    fn isolateEffect(self: *Renderer, body: []const commands.Command, entry: *const commands.shader_effects.Entry, resources: Resources) anyerror!void {
+        const effects = commands.shader_effects;
+        const workspace = self.backdrop_source.?.shader_storage.workspace orelse return self.execute(body, resources);
+        var surface: cpu_gradient.Surface = undefined;
+        if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawEffectFailed;
+        const region = effects.twoPassRegion(surface, entry, workspace) orelse return self.execute(body, resources);
+        const dirty_left: u32 = @intCast(region.x0);
+        const dirty_top: u32 = @intCast(region.y0);
+        const dirty_width: u32 = @intCast(region.width());
+        const dirty_height: u32 = @intCast(region.height());
+        effects.beginIsolation(surface, region, workspace);
+        errdefer {
+            effects.cancelIsolation(surface, region, workspace);
+            zlc_gradient_dirty(self.native.?, dirty_left, dirty_top, dirty_width, dirty_height);
         }
-        return .{ .slot = 0, .capture = capture };
+        zlc_gradient_dirty(self.native.?, dirty_left, dirty_top, dirty_width, dirty_height);
+        try self.execute(body, resources);
+        if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawEffectFailed;
+        effects.secondIsolation(surface, region, workspace);
+        zlc_gradient_dirty(self.native.?, dirty_left, dirty_top, dirty_width, dirty_height);
+        try self.execute(body, resources);
+        if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawEffectFailed;
+        _ = effects.finishIsolation(surface, zlc_layer_transparent(self.native.?) != 0, region, entry, workspace);
+        zlc_gradient_dirty(self.native.?, dirty_left, dirty_top, dirty_width, dirty_height);
     }
     noinline fn filterEffect(self: *Renderer, entry: *const commands.shader_effects.Entry, capture: gaussian_scope.Capture, workspace: ?*commands.shader_effects.Workspace) !void {
         var source: cpu_gradient.Surface = undefined;
@@ -486,14 +510,28 @@ pub const Renderer = struct {
         for (resources) |*resource| try resource.validate();
         const layer_plan: ?layers.Plan = self.layer_plan;
         _ = try commands.preflightGaussianScopes(list, if (layer_plan) |p| p.options.max_depth else 0, if (layer_plan) |p| p.options.size.scale else 1, coverage_resources, if (layer_plan) |p| p.options.legacy_text == .grayscale else true, layer_plan, transforms, filters, if (filters.len != 0) self.gaussianCapacity() else null);
+        self.effect_count = 0;
+        if (self.backdrop_source) |source| if (source.shader_storage.workspace) |workspace| {
+            workspace.beginFrame();
+            workspace.isolating = false;
+        };
+        try self.execute(list, .{ .text_bytes = text_bytes, .brushes = resources, .prepared = prepared, .images = image_resources, .coverage = coverage_resources, .transforms = transforms, .filters = filters });
+        if (self.effect_count != 0) return error.UnbalancedEffects;
+    }
+    fn execute(self: *Renderer, list: []const commands.Command, all: Resources) anyerror!void {
+        const text_bytes = all.text_bytes;
+        const resources = all.brushes;
+        const prepared = all.prepared;
+        const image_resources = all.images;
+        const coverage_resources = all.coverage;
+        const transforms = all.transforms;
+        const filters = all.filters;
         var depth: usize = 0;
         defer while (self.layer_plan == null and depth != 0) : (depth -= 1) {
             zlc_pop_clip(self.native.?);
         };
-        self.group_count = 0;
-        self.pending_effect = null;
-        if (self.backdrop_source) |source| if (source.shader_storage.workspace) |workspace| workspace.beginFrame();
-        for (list) |op| switch (op) {
+        var index: usize = 0;
+        while (index < list.len) : (index += 1) switch (list[index]) {
             .fill => |fill_command| {
                 if (!layout.validRect(fill_command.bounds)) return error.InvalidGeometry;
                 self.fill(fill_command.bounds, fill_command.color);
@@ -533,31 +571,29 @@ pub const Renderer = struct {
                 const r = value.bounds;
                 const bounds: drawing.Rect = .{ .x = r.x, .y = r.y, .width = r.width, .height = r.height };
                 const options = try commands.groupOptions(value, coverage_resources);
-                const pending = self.pending_effect;
-                self.pending_effect = null;
-                if (self.group_count == self.effect_scopes.len) return error.LayerDepthExceeded;
-                var scope: ?EffectScope = null;
-                if (pending) |slot| {
-                    scope = try self.beginEffect(bounds, options, &self.backdrop_source.?.shader_storage.entries[slot]);
-                    if (scope) |*value_scope| value_scope.slot = slot;
-                } else if (value.filter_slot == commands.no_filter) try self.beginGroup(bounds, options) else try self.beginGaussian(bounds, options, filters[value.filter_slot]);
-                self.effect_scopes[self.group_count] = scope;
-                self.group_count += 1;
+                if (value.filter_slot == commands.no_filter) try self.beginGroup(bounds, options) else try self.beginGaussian(bounds, options, filters[value.filter_slot]);
             },
-            .end_group => {
-                if (self.group_count == 0) return error.GroupStackEmpty;
-                self.group_count -= 1;
-                if (self.effect_scopes[self.group_count]) |scope| {
-                    if (self.layer_plan == null) return error.LayersRequired;
-                    const source = self.backdrop_source orelse return error.MissingResources;
-                    try self.filterEffect(&source.shader_storage.entries[scope.slot], scope.capture, source.shader_storage.workspace);
-                    if (zlc_layer_end_group(self.native.?) != 0) return error.EndGroupFailed;
-                } else try self.endGroup();
-            },
+            .end_group => try self.endGroup(),
             .effect => |slot| {
                 const source = self.backdrop_source orelse return error.MissingResources;
                 if (slot >= source.shader_storage.len) return error.MissingResources;
-                self.pending_effect = slot;
+                const entry = &source.shader_storage.entries[slot];
+                const effect_end = commands.effectEnd(list, index) orelse return error.UnbalancedEffects;
+                if (self.captureEffect(entry)) |capture| {
+                    self.effect_scopes[self.effect_count] = .{ .slot = slot, .capture = capture };
+                    self.effect_count += 1;
+                } else {
+                    try self.isolateEffect(list[index + 1 .. effect_end], entry, all);
+                    index = effect_end;
+                }
+            },
+            .end_effect => {
+                if (self.effect_count == 0) return error.UnbalancedEffects;
+                self.effect_count -= 1;
+                const scope = self.effect_scopes[self.effect_count];
+                const source = self.backdrop_source.?;
+                try self.filterEffect(&source.shader_storage.entries[scope.slot], scope.capture, source.shader_storage.workspace);
+                if (zlc_layer_end_group(self.native.?) != 0) return error.EndGroupFailed;
             },
             .backdrop_shader => |slot| {
                 const source = self.backdrop_source orelse return error.MissingResources;
@@ -670,7 +706,7 @@ test "Cairo backdrop effects filter the plane drawn so far and fall back without
     try std.testing.expectEqual(@as(u32, 0xffff0000), surface.pixels[8 * surface.stride + 15]);
 }
 
-test "Cairo element effects rewrite an isolated capture and fall back to a plain group" {
+test "Cairo element effects rewrite a Gaussian capture or an isolation on the target" {
     const allocator = std.testing.allocator;
     const size: z.Size = .{ .width = 32, .height = 16, .scale = 1 };
     var renderer: Renderer = .{};
@@ -691,7 +727,7 @@ test "Cairo element effects rewrite an isolated capture and fall back to a plain
     var buffer: commands.Buffer = .{};
     defer buffer.reset();
     try buffer.fill(.{ .x = 0, .y = 0, .width = 32, .height = 16 }, 0xffffff);
-    try buffer.beginEffect(.{ .program = program, .values = values, .target = .element, .box = .{ .x = 4, .y = 4, .width = 8, .height = 8 }, .margin = 2, .carrier = try commands.shader_effects.carrier(1) }, .{});
+    try buffer.beginEffect(.{ .program = program, .values = values, .target = .element, .box = .{ .x = 4, .y = 4, .width = 8, .height = 8 }, .margin = 2, .carrier = try commands.shader_effects.carrier(1) });
     try buffer.fill(.{ .x = 4, .y = 4, .width = 8, .height = 8 }, 0xff0000);
     try buffer.endEffect();
     buffer.shader_storage.workspace = workspace;
@@ -707,13 +743,23 @@ test "Cairo element effects rewrite an isolated capture and fall back to a plain
     try std.testing.expectEqual(@as(u32, 0xffffffff), surface.pixels[8 * surface.stride + 0]);
     try std.testing.expectEqual(@as(u64, 1), workspace.stats.applied);
     renderer.abort();
-    // Without a Gaussian workspace the content draws as an ordinary group.
-    try renderer.releaseGaussian();
+    // Without a Gaussian workspace (and without layers) the body is
+    // isolated on the target: the capture has no halo.
+    try renderer.releaseLayers();
     try renderer.begin(.{ .native_context = &dummy, .size = size });
     try renderer.replayBuffer(&buffer);
     if (zlc_gradient_surface(renderer.native.?, &surface) != 0) return error.DrawGradientFailed;
+    try std.testing.expectEqual(@as(u32, 0xff0000ff), surface.pixels[8 * surface.stride + 8]);
+    try std.testing.expectEqual(@as(u32, 0xff00ff00), surface.pixels[8 * surface.stride + 2]);
+    try std.testing.expectEqual(@as(u32, 0xffffffff), surface.pixels[8 * surface.stride + 1]);
+    try std.testing.expectEqual(@as(u64, 2), workspace.stats.applied);
+    // A workspace too small to isolate draws the body unchanged.
+    const small = try commands.shader_effects.Workspace.create(allocator, .{ .max_pixels = 16 });
+    defer small.destroy();
+    buffer.shader_storage.workspace = small;
+    try renderer.replayBuffer(&buffer);
+    if (zlc_gradient_surface(renderer.native.?, &surface) != 0) return error.DrawGradientFailed;
     try std.testing.expectEqual(@as(u32, 0xffff0000), surface.pixels[8 * surface.stride + 8]);
-    try std.testing.expectEqual(@as(u32, 0xffffffff), surface.pixels[8 * surface.stride + 3]);
-    try std.testing.expectEqual(@as(u64, 1), workspace.stats.applied);
-    renderer.abort();
+    try std.testing.expectEqual(@as(u32, 0xffffffff), surface.pixels[8 * surface.stride + 2]);
+    try std.testing.expectEqual(@as(u64, 1), small.stats.skipped);
 }

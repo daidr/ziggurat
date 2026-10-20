@@ -126,10 +126,12 @@ pub fn preflight(buffer: *const commands.Buffer, options: Options) !u64 {
                 break :blk 1;
             },
             .effect => |slot| blk: {
-                // The capture's own clear and composite are its group's.
-                if (slot >= buffer.shaderEntries().len) return error.MissingResources;
-                break :blk 0;
+                const entries = buffer.shaderEntries();
+                if (slot >= entries.len) return error.MissingResources;
+                try rect(entries[slot].captureBounds(), options.size.scale);
+                break :blk 6; // save, two fills and copies, recovery and composite
             },
+            .end_effect => 0,
             .backdrop_shader => |slot| blk: {
                 const entries = buffer.shaderEntries();
                 if (slot >= entries.len) return error.MissingResources;

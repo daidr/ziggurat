@@ -41,6 +41,8 @@ pub const BackdropEffectStats = struct {
 pub const shader = @import("ziggurat_shader");
 pub const shader_effects = commands.shader_effects;
 pub const ShaderEffect = shader_effects.Effect;
+/// Built-in pose (2D/3D transform) and refracting glass programs.
+pub const effects = @import("effect_library.zig");
 pub const ShaderEffectStats = struct {
     workspace: shader_effects.Stats = .{},
     /// Effects drawn without their program because no shader workspace, or
@@ -3524,31 +3526,25 @@ pub const Frame = struct {
     /// Draw what follows, until `endEffect`, through `effect`: the content is
     /// captured in isolation over `box` plus the effect's margin, rewritten
     /// by its program and composited at `options.opacity`. Hit testing,
-    /// focus and semantics keep their geometry. Without the shader and
-    /// Gaussian workspaces, or when the capture does not fit, the content is
-    /// drawn as it is and counted as unprepared.
+    /// focus and semantics keep their geometry. A prepared Gaussian
+    /// workspace with room isolates the content exactly in a layer;
+    /// otherwise it is isolated on the target (see
+    /// `shader_effects.twoPassRegion`). Without `prepareShaderEffects`, or
+    /// nested deeper than the layer depth, the content is drawn as it is
+    /// and counted as unprepared.
     pub fn beginEffect(self: *Frame, box: Rect, effect: ShaderEffect, options: EffectOptions) !void {
         errdefer |err| self.failure = self.failure orelse err;
         if (self.effect_depth == self.effect_scopes.len) return error.EffectStackFull;
-        var entry: shader_effects.Entry = .{ .program = effect.program, .values = effect.values.*, .target = .element, .box = self.absolute(box), .margin = effect.margin };
+        var entry: shader_effects.Entry = .{ .program = effect.program, .values = effect.values.*, .target = .element, .box = self.absolute(box), .margin = effect.margin, .opacity = options.opacity };
         try shader_effects.validate(entry);
-        const ready = ready: {
-            if (self.context.shader_workspace == null or self.group_depth == layers.max_depth) break :ready false;
-            const capacity = self.context.renderer.gaussianCapacity() orelse break :ready false;
-            entry.carrier = shader_effects.carrier(self.size.scale) catch break :ready false;
-            const capture = gaussian_scope.Capture.init(entry.captureRect(), &entry.carrier) catch break :ready false;
-            capture.check(capacity) catch break :ready false;
-            break :ready true;
-        };
-        if (!ready) {
+        entry.carrier = try shader_effects.carrier(self.size.scale);
+        if (self.context.shader_workspace == null or self.group_depth == layers.max_depth) {
             self.context.shader_unprepared += 1;
             self.effect_scopes[self.effect_depth] = false;
             self.effect_depth += 1;
             return;
         }
-        var absolute_options: layers.Group = .{ .opacity = options.opacity };
-        absolute_options.mask_origin = self.offset;
-        try self.context.command_buffer.beginEffect(entry, absolute_options);
+        try self.context.command_buffer.beginEffect(entry);
         self.group_clip_base[self.group_depth] = self.clips.len;
         self.group_bounds[self.group_depth] = entry.captureBounds();
         self.group_geometry_passthrough |= @as(u8, 1) << @intCast(self.group_depth);
@@ -4024,6 +4020,7 @@ fn nativeRect(bounds: affine.Rect) Rect {
 
 test {
     _ = gdi;
+    _ = effects;
     _ = input;
     _ = layout;
     _ = grid;

@@ -35,6 +35,8 @@ pub const Entry = struct {
     program: *const shader.Program,
     values: shader.Values,
     target: Target,
+    /// An element effect's opacity as it composites into its parent.
+    opacity: u8 = 255,
     /// The element's box, or the backdrop shader's shape.
     box: Rect,
     margin: f32 = 0,
@@ -60,7 +62,12 @@ pub const Options = struct {
     /// Pixels times worst-case program steps one frame may spend. An effect
     /// that would exceed it draws its content unchanged and counts as skipped.
     max_work: u64 = 256 * 1024 * 1024,
+    /// Largest element capture, in physical pixels, that can be isolated
+    /// without a Gaussian workspace (see `twoPassRegion`).
+    max_pixels: u32 = 1024 * 1024,
 };
+/// Largest total of the workspace's planes.
+pub const max_bytes = 256 * 1024 * 1024;
 pub const Stats = struct {
     applied: u64 = 0,
     /// Effects drawn without their program because the frame's work budget
@@ -74,22 +81,40 @@ pub const Stats = struct {
     work: u64 = 0,
 };
 
-/// Machine and accounting, allocated once by `create`. Replay never allocates.
+/// Machine, isolation planes and accounting, allocated once by `create`.
+/// Replay never allocates.
 pub const Workspace = struct {
     allocator: std.mem.Allocator,
     machine: shader.Machine = .{},
     options: Options,
     stats: Stats = .{},
     frame_work: u64 = 0,
+    /// Saved target, content over black and content over white.
+    planes: []u32,
+    /// An isolation is in progress; nested ones draw plainly.
+    isolating: bool = false,
 
+    pub fn bytesFor(options: Options) !usize {
+        if (options.max_work == 0 or options.max_pixels == 0) return error.InvalidShaderEffectOptions;
+        const bytes = std.math.mul(usize, @as(usize, options.max_pixels) * 3, 4) catch return error.ShaderEffectBudgetExceeded;
+        if (bytes > max_bytes) return error.ShaderEffectBudgetExceeded;
+        return bytes + @sizeOf(Workspace);
+    }
     pub fn create(allocator: std.mem.Allocator, options: Options) !*Workspace {
-        if (options.max_work == 0) return error.InvalidShaderEffectOptions;
+        _ = try bytesFor(options);
         const self = try allocator.create(Workspace);
-        self.* = .{ .allocator = allocator, .options = options };
+        errdefer allocator.destroy(self);
+        const planes = try allocator.alloc(u32, @as(usize, options.max_pixels) * 3);
+        self.* = .{ .allocator = allocator, .options = options, .planes = planes };
         return self;
     }
     pub fn destroy(self: *Workspace) void {
+        self.allocator.free(self.planes);
         self.allocator.destroy(self);
+    }
+    fn plane(self: *Workspace, index: usize, region: Region) Plane {
+        const len = region.width() * region.height();
+        return .{ .pixels = self.planes[index * self.options.max_pixels ..][0..len], .width = region.width(), .height = region.height(), .stride = region.width() };
     }
     /// Starts a frame's work budget.
     pub fn beginFrame(self: *Workspace) void {
@@ -193,20 +218,22 @@ fn sampleDip(context: *const anyopaque, x: f32, y: f32) [4]f32 {
 /// plane at least as large. Without a workspace, or over budget, the content
 /// stays as drawn.
 pub fn applyElement(entry: *const Entry, source: Plane, scratch: Plane, capture: gaussian_scope.Capture, workspace: ?*Workspace) void {
+    const x0: f32 = @as(f32, @floatFromInt(capture.left)) - @as(f32, @floatFromInt(capture.radius));
+    const y0: f32 = @as(f32, @floatFromInt(capture.top)) - @as(f32, @floatFromInt(capture.radius));
+    runContent(entry, source, scratch, x0, y0, capture.scale, workspace);
+}
+/// Plane pixel (px, py) shows absolute DIP ((px + 0.5 + x0) / scale, ...).
+fn runContent(entry: *const Entry, source: Plane, scratch: Plane, x0: f32, y0: f32, scale: f32, workspace: ?*Workspace) void {
     const space = workspace orelse return;
     const pixels = @as(u64, source.width) * source.height;
     if (!space.charge(pixels, entry.program)) return;
     const machine = &space.machine;
-    const scale = capture.scale;
     machine.begin(entry.program, &entry.values, .{ entry.box.width, entry.box.height }, scale) catch {
         // A faulting prologue leaves the content as drawn.
         space.stats.faulted_pixels += pixels;
         return;
     };
     space.stats.applied += 1;
-    // Physical pixel (px, py) of the plane is target pixel (px + x0, py + y0).
-    const x0: f32 = @as(f32, @floatFromInt(capture.left)) - @as(f32, @floatFromInt(capture.radius));
-    const y0: f32 = @as(f32, @floatFromInt(capture.top)) - @as(f32, @floatFromInt(capture.radius));
     const kind = entry.program.kind;
     if (kind != .color) for (0..source.height) |y| @memcpy(scratch.pixels[y * scratch.stride ..][0..source.width], source.pixels[y * source.stride ..][0..source.width]);
     const content: SampleContext = .{ .plane = scratch, .scale = scale, .x0 = x0, .y0 = y0, .clamp = false };
@@ -228,6 +255,112 @@ pub fn applyElement(entry: *const Entry, source: Plane, scratch: Plane, capture:
         } else source.pixels[at] = fromColor(color);
     };
 }
+/// Physical pixels of a plane: columns x0..x1 and rows y0..y1.
+pub const Region = struct {
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+    pub fn width(self: Region) usize {
+        return self.x1 - self.x0;
+    }
+    pub fn height(self: Region) usize {
+        return self.y1 - self.y0;
+    }
+};
+
+/// Without a Gaussian workspace an element is isolated on the target plane
+/// itself: its pixels under the capture are saved, the body is drawn twice,
+/// over opaque black and over opaque white, the saved pixels are restored
+/// and the content's premultiplied color and coverage are recovered from
+/// the two results. Antialiased edges of the same coverage in every channel
+/// are recovered exactly; text with per-channel coverage is averaged.
+///
+/// The capture region on `surface`, or null when it is empty, larger than
+/// the workspace or an isolation is already in progress; the body is then
+/// drawn plainly.
+pub fn twoPassRegion(surface: cpu.Surface, entry: *const Entry, workspace: *Workspace) ?Region {
+    if (workspace.isolating) return null;
+    const r = entry.captureBounds();
+    const s: f64 = surface.scale;
+    const x0 = @max(@floor(@as(f64, r.x) * s + surface.origin[0]), 0);
+    const y0 = @max(@floor(@as(f64, r.y) * s + surface.origin[1]), 0);
+    const x1 = @min(@ceil((@as(f64, r.x) + r.width) * s + surface.origin[0]), @as(f64, @floatFromInt(surface.width)));
+    const y1 = @min(@ceil((@as(f64, r.y) + r.height) * s + surface.origin[1]), @as(f64, @floatFromInt(surface.height)));
+    if (!(x1 > x0 and y1 > y0)) return null;
+    const region: Region = .{ .x0 = @intFromFloat(x0), .y0 = @intFromFloat(y0), .x1 = @intFromFloat(x1), .y1 = @intFromFloat(y1) };
+    if (region.width() * region.height() > workspace.options.max_pixels) {
+        workspace.stats.skipped += 1;
+        return null;
+    }
+    return region;
+}
+fn copyOut(surface: cpu.Surface, region: Region, into: Plane) void {
+    for (0..region.height()) |row| @memcpy(into.pixels[row * into.stride ..][0..region.width()], surface.pixels[(region.y0 + row) * surface.stride + region.x0 ..][0..region.width()]);
+}
+fn fillRegion(surface: cpu.Surface, region: Region, value: u32) void {
+    for (region.y0..region.y1) |y| @memset(surface.pixels[y * surface.stride + region.x0 ..][0..region.width()], value);
+}
+/// Save the region and paint it opaque black for the first pass.
+pub fn beginIsolation(surface: cpu.Surface, region: Region, workspace: *Workspace) void {
+    workspace.isolating = true;
+    copyOut(surface, region, workspace.plane(0, region));
+    fillRegion(surface, region, 0xff000000);
+}
+/// Keep the first pass and paint the region opaque white for the second.
+pub fn secondIsolation(surface: cpu.Surface, region: Region, workspace: *Workspace) void {
+    copyOut(surface, region, workspace.plane(1, region));
+    fillRegion(surface, region, 0xffffffff);
+}
+/// Abandon an isolation after a failed pass, restoring the target.
+pub fn cancelIsolation(surface: cpu.Surface, region: Region, workspace: *Workspace) void {
+    if (!workspace.isolating) return;
+    workspace.isolating = false;
+    const saved = workspace.plane(0, region);
+    for (0..region.height()) |row| @memcpy(surface.pixels[(region.y0 + row) * surface.stride + region.x0 ..][0..region.width()], saved.pixels[row * saved.stride ..][0..region.width()]);
+}
+/// Recover the content, run the effect over it and composite the result
+/// over the restored target inside the surface's clip at the entry's
+/// opacity. `surface` must hold the second (white) pass.
+pub fn finishIsolation(surface: cpu.Surface, transparent: bool, region: Region, entry: *const Entry, workspace: *Workspace) Dirty {
+    const black = workspace.plane(1, region);
+    const white = workspace.plane(2, region);
+    copyOut(surface, region, white);
+    cancelIsolation(surface, region, workspace);
+    // Over black the result is the premultiplied color; the difference
+    // between the passes is what the content let through.
+    for (black.pixels, white.pixels) |*b, w| {
+        const bc = toColor(b.*);
+        const wc = toColor(w);
+        var through: f32 = 0;
+        for (0..3) |i| through += std.math.clamp(wc[i] - bc[i], 0, 1);
+        const alpha = 1 - through / 3;
+        b.* = fromColor(.{ bc[0], bc[1], bc[2], alpha });
+    }
+    const scale = surface.scale;
+    const x0: f32 = @as(f32, @floatFromInt(region.x0)) - @as(f32, @floatCast(surface.origin[0]));
+    const y0: f32 = @as(f32, @floatFromInt(region.y0)) - @as(f32, @floatCast(surface.origin[1]));
+    runContent(entry, black, white, x0, y0, scale, workspace);
+    const opacity = @as(f32, @floatFromInt(entry.opacity)) / 255;
+    const clip = surface.clip;
+    for (region.y0..region.y1) |y| for (region.x0..region.x1) |x| {
+        const fx: f64 = @floatFromInt(x);
+        const fy: f64 = @floatFromInt(y);
+        const cover: f32 = @floatCast(@max(0, @min(fx + 1, clip[2]) - @max(fx, clip[0])) * @max(0, @min(fy + 1, clip[3]) - @max(fy, clip[1])));
+        const amount = cover * opacity;
+        if (amount == 0) continue;
+        const source = toColor(black.pixels[(y - region.y0) * black.stride + x - region.x0]);
+        if (source[3] == 0) continue;
+        const at = y * surface.stride + x;
+        const beneath = toColor(surface.pixels[at]);
+        var mixed: [4]f32 = undefined;
+        for (0..4) |i| mixed[i] = source[i] * amount + beneath[i] * (1 - source[3] * amount);
+        if (!transparent) mixed[3] = 1;
+        surface.pixels[at] = fromColor(mixed);
+    };
+    return .{ .left = @intCast(region.x0), .top = @intCast(region.y0), .right = @intCast(region.x1), .bottom = @intCast(region.y1) };
+}
+
 /// Sampling in the program's box-relative DIP.
 fn shifted(context: SampleContext, box: Rect) SampleContext {
     var result = context;

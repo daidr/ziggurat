@@ -88,9 +88,10 @@ pub const Command = union(enum) {
     backdrop: u8,
     /// Index into the Buffer's loading indicator table.
     indicator: u8,
-    /// Index into the Buffer's shader table; the next `begin_group` opens
-    /// that element effect's capture.
+    /// Index into the Buffer's shader table: opens an element effect, closed
+    /// by the matching `end_effect`.
     effect: u8,
+    end_effect,
     /// Index into the Buffer's shader table: a backdrop shader.
     backdrop_shader: u8,
 };
@@ -115,7 +116,7 @@ const ScopeKind = enum { group, transform, gaussian, effect };
 /// software planes; a GPU renderer rejects a batch that holds one.
 pub fn softwareOnly(list: []const Command) bool {
     for (list) |command| switch (command) {
-        .backdrop, .indicator, .effect, .backdrop_shader => return true,
+        .backdrop, .indicator, .effect, .end_effect, .backdrop_shader => return true,
         else => {},
     };
     return false;
@@ -460,24 +461,20 @@ pub const Buffer = struct {
         self.indicator_len += 1;
         self.len += 1;
     }
-    /// Open an element effect: the effect marker, then a group over the
-    /// capture bounds (box plus margin). Close it with `endEffect`.
-    pub fn beginEffect(self: *Buffer, entry: shader_effects.Entry, options: layers.Group) !void {
+    /// Open an element effect over the entry's box plus margin; the
+    /// renderer isolates what is drawn until `endEffect`.
+    pub fn beginEffect(self: *Buffer, entry: shader_effects.Entry) !void {
         try shader_effects.validate(entry);
         if (entry.target != .element) return error.InvalidGeometry;
         try entry.carrier.validate();
-        const bounds = entry.captureBounds();
-        try layers.validateGroup(entry.captureRect(), options, entry.carrier.scale);
-        if (options.mask != null) return error.InvalidGeometry;
         if (self.group_depth == layers.max_depth) return error.GroupStackFull;
-        if (self.len + 2 > self.storage.len) return error.CommandsFull;
+        if (self.len == self.storage.len) return error.CommandsFull;
         const table = &self.shader_storage;
         if (table.len == table.entries.len) return error.ShaderEffectsFull;
         table.entries[table.len] = entry;
         self.storage[self.len] = .{ .effect = @intCast(table.len) };
-        self.storage[self.len + 1] = .{ .begin_group = .{ .bounds = bounds, .opacity = options.opacity, .mask_origin = options.mask_origin } };
         table.len += 1;
-        self.len += 2;
+        self.len += 1;
         self.group_clips[self.group_depth] = self.depth;
         self.scope_kinds[self.group_depth] = .effect;
         self.group_depth += 1;
@@ -485,7 +482,7 @@ pub const Buffer = struct {
     pub fn endEffect(self: *Buffer) Error!void {
         if (self.group_depth == 0 or self.scope_kinds[self.group_depth - 1] != .effect) return error.GroupStackEmpty;
         if (self.depth != self.group_clips[self.group_depth - 1]) return error.UnbalancedGroupClips;
-        try self.append(.end_group);
+        try self.append(.end_effect);
         self.group_depth -= 1;
     }
     /// Record a backdrop shader in absolute DIP. Like a backdrop effect it
@@ -695,6 +692,20 @@ test "Gaussian commands commit pins together and identity needs no filter storag
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(Command));
     try std.testing.expectEqual(@as(usize, 28), @sizeOf(GroupCommand));
     std.debug.print("Gaussian recording sizes command={d} group={d} buffer={d} filterStorage={d} view={d}\n", .{ @sizeOf(Command), @sizeOf(GroupCommand), @sizeOf(Buffer), @sizeOf(FilterStorage), @sizeOf(gaussian.View) });
+}
+
+/// Index of the `end_effect` matching the `effect` at `start`.
+pub fn effectEnd(list: []const Command, start: usize) ?usize {
+    var depth: usize = 0;
+    for (list[start..], start..) |command, index| switch (command) {
+        .effect => depth += 1,
+        .end_effect => {
+            depth -= 1;
+            if (depth == 0) return index;
+        },
+        else => {},
+    };
+    return null;
 }
 
 pub fn groupOptions(value: GroupCommand, coverage_resources: []const drawing.CoverageView) !layers.Group {
