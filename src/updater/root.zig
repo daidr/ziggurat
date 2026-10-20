@@ -12,6 +12,7 @@
 //! on a worker thread it starts per job. Automatic checks are timed by a
 //! `Scheduler`, such as `WakeScheduler`.
 const std = @import("std");
+const builtin = @import("builtin");
 const z = @import("ziggurat");
 const view = @import("ziggurat_view");
 pub const strings = @import("strings.zig");
@@ -496,6 +497,8 @@ pub const Updater = struct {
         self.release_layout = self.screen == .available and self.notes_len != 0;
         const size = if (self.release_layout) release_size else status_size;
         self.host = view.Host.init(self, build, self.storage.buffers(), .{ .root = .{ .padding = view.Insets.all(20), .gap = 10, .alignment = .stretch } });
+        // The pure test backend has no native window for UI Automation.
+        if (builtin.is_test) self.host.context.semantics_enabled = false;
         const window = try self.app.createWindow(.{
             .title = self.text.title,
             .width = size.width,
