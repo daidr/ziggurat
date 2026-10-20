@@ -104,7 +104,72 @@ pub const Style = struct {
     /// Accessible name for a control without a visible label, such as a
     /// progress indicator, or for a named container.
     name: []const u8 = "",
+    /// A backdrop effect painted in place of `background`: glass, a blur of
+    /// what lies beneath the container, or a scroll edge. Effects need
+    /// `Host.prepareBackdropEffects`; until then they draw an opaque fill.
+    material: ?ui.BackdropEffect = null,
+    /// Scroll edge effects over the top and bottom of a clipping container,
+    /// such as a scroll container, painted above its children.
+    edges: Edges = .{},
 };
+
+/// Edge effects of a clipping container; see `Style.edges`.
+pub const Edges = struct {
+    top: ?ui.backdrop_effects.ScrollEdge = null,
+    bottom: ?ui.backdrop_effects.ScrollEdge = null,
+    /// Depth of each edge band in DIP.
+    height: f32 = 24,
+};
+/// The system's accessibility appearance, chosen by the host from its
+/// desktop preferences; see `Host.setPreferences`.
+pub const Preferences = struct {
+    /// Loading indicators hold a still pose and schedule no frames.
+    reduce_motion: bool = false,
+    /// Backdrop effects draw opaque fills.
+    reduce_transparency: bool = false,
+    high_contrast: bool = false,
+};
+pub const LoadingKind = ui.loading.Kind;
+/// How a loading indicator looks and moves; see `View.loadingIndicator`.
+pub const LoadingOptions = struct {
+    /// Height in DIP; the width follows the indicator's aspect.
+    size: f32 = ui.loading.default_size,
+    /// RGB; null is the theme's text color.
+    color: ?u32 = null,
+    /// One cycle in nanoseconds; zero is the indicator's own.
+    duration: u64 = 0,
+    /// Hold the current pose; with a `timer` it resumes from there.
+    paused: bool = false,
+    /// Application-owned start and hold time. Without one, every indicator
+    /// keeps the host's time, so indicators move in step.
+    timer: ?*LoadingTimer = null,
+    variant: ui.loading.Options = .{},
+};
+/// When one indicator started and where it was paused, kept by the
+/// application at a stable address while the indicator is built.
+pub const LoadingTimer = struct {
+    start: ?u64 = null,
+    held: ?u64 = null,
+    /// Elapsed animation time at `now`, starting the timer on first use.
+    pub fn elapsed(self: *LoadingTimer, now: u64, paused: bool) u64 {
+        const start = self.start orelse blk: {
+            self.start = now;
+            break :blk now;
+        };
+        if (paused) {
+            if (self.held == null) self.held = now -| start;
+            return self.held.?;
+        }
+        if (self.held) |held| {
+            self.start = now -| held;
+            self.held = null;
+        }
+        return now -| self.start.?;
+    }
+};
+/// Repaint interval of a moving loading indicator.
+pub const loading_frame_interval: u64 = 16_666_667;
+const Indicator = struct { kind: LoadingKind, phase: f64, color: ?u32, size: f32, variant: ui.loading.Options };
 
 /// The label, help and error of a form field; see `View.field`.
 pub const Field = struct {
@@ -311,7 +376,7 @@ pub const Measurer = struct {
     }
 };
 
-pub const Kind = enum { column, row, radio_group, segmented, tab_list, list_box, toolbar, breadcrumbs, accordion, field, fieldset, split, scroll, grid, search, popup, popover, toasts, toast, tree, tree_item, table, table_header, table_row, token_field, combo_field, drag_area, drag_source, drop_target, text, note, badge, spacer, button, link, nav_button, combo_box, popup_button, checkbox, radio, segment, tab, list_item, disclosure, toggle_switch, progress, meter, slider, stepper, rating, avatar, embed, tree_row, column_header, token, combo_toggle };
+pub const Kind = enum { column, row, radio_group, segmented, tab_list, list_box, toolbar, breadcrumbs, accordion, field, fieldset, split, scroll, grid, search, popup, popover, toasts, toast, tree, tree_item, table, table_header, table_row, token_field, combo_field, drag_area, drag_source, drop_target, text, note, badge, spacer, button, link, nav_button, combo_box, popup_button, checkbox, radio, segment, tab, list_item, disclosure, toggle_switch, progress, meter, slider, stepper, rating, avatar, embed, tree_row, column_header, token, combo_toggle, loading };
 
 /// Where a popover goes beside its anchor: below it by default, starting
 /// at its left edge. It moves to the opposite side when that side has more
@@ -555,6 +620,8 @@ pub const Node = struct {
     reorder: bool = false,
     /// A drag from a row of this tree or table selects the rows it crosses.
     drag_select: bool = false,
+    /// A loading indicator's look and pose.
+    indicator: ?Indicator = null,
     parent: u32 = none,
     first_child: u32 = none,
     last_child: u32 = none,
@@ -895,6 +962,7 @@ pub const View = struct {
     restore: ?u64 = null,
     /// Hover or focus time before a tooltip appears, in nanoseconds.
     tooltip_delay: u64 = 500 * std.time.ns_per_ms,
+    preferences: Preferences = .{},
     popup: PopupState = .{},
     tip: TooltipState = .{},
     overlay: Overlay = .{},
@@ -1361,6 +1429,18 @@ pub const View = struct {
         }
         node.checked = std.meta.eql(selected.*, option);
         return changed;
+    }
+    /// An animated indicator of work of unknown length, named by
+    /// `Style.name` and exposed as an indeterminate progress bar. While it
+    /// moves it asks for a pass every frame; under reduced motion or when
+    /// paused it holds still and asks for none.
+    pub fn loadingIndicator(self: *View, kind: LoadingKind, look: LoadingOptions, style: Style) Error!void {
+        if (!std.math.isFinite(look.size) or look.size <= 0) return error.InvalidValue;
+        const node = try self.append(.loading, style);
+        const still = self.preferences.reduce_motion;
+        const elapsed = if (still) 0 else if (look.timer) |timer| timer.elapsed(self.now, look.paused) else self.now;
+        node.indicator = .{ .kind = kind, .phase = if (still) 0 else ui.loading.phase(kind, elapsed, look.duration), .color = look.color, .size = look.size, .variant = look.variant };
+        if (!still and !look.paused) self.wakeAt(self.now + loading_frame_interval);
     }
     pub fn progress(self: *View, fraction: f32, style: Style) Error!void {
         if (!std.math.isFinite(fraction)) return error.InvalidValue;
@@ -2959,6 +3039,7 @@ pub const View = struct {
             .checkbox, .radio => .{ .width = metrics.indicator_size + metrics.label_gap + text_size.width, .height = @max(text_size.height, metrics.indicator_size) + metrics.content_inset },
             .toggle_switch => .{ .width = metrics.indicator_size * 1.7 + metrics.label_gap + text_size.width, .height = @max(text_size.height, metrics.indicator_size) + metrics.content_inset },
             .progress, .meter => .{ .width = 160, .height = 12 },
+            .loading => .{ .width = node.indicator.?.size * node.indicator.?.kind.aspect(), .height = node.indicator.?.size },
             .rating => .{ .width = @as(f32, @floatCast(node.range.maximum)) * Measurer.line_height, .height = Measurer.line_height + metrics.content_inset },
             .slider => .{ .width = 200, .height = metrics.thumb_size + 2 * metrics.content_inset },
             .stepper => .{ .width = 4 * (Measurer.line_height + metrics.content_inset), .height = Measurer.line_height + metrics.content_inset },
@@ -3634,6 +3715,7 @@ pub const View = struct {
         while (at < stop) {
             while (clip_depth > 0 and all[clips[clip_depth - 1]].end <= at) {
                 clip_depth -= 1;
+                paintEdges(&all[clips[clip_depth]], target);
                 try target.popClip();
                 paintScrollIndicator(&all[clips[clip_depth]], target, theme);
             }
@@ -3695,7 +3777,7 @@ pub const View = struct {
                         },
                         else => {},
                     }
-                    if (node.kind != .toast) if (style.background) |color| target.roundedRect(bounds, style.radius, ui.Color.rgb(color));
+                    if (style.material) |material| target.backdropEffect(bounds, style.radius, material) else if (node.kind != .toast) if (style.background) |color| target.roundedRect(bounds, style.radius, ui.Color.rgb(color));
                     if (style.border) |color| target.strokeRect(bounds, style.radius, style.border_width, ui.Color.rgb(color));
                     if (node.kind == .breadcrumbs) self.paintSeparators(node, target, theme);
                     if (node.kind == .split) {
@@ -3755,6 +3837,15 @@ pub const View = struct {
                 },
                 .toggle_switch => try target.toggleSwitch(node.id, bounds, node.text, node.checked, control),
                 .progress => try target.progress(node.id, bounds, node.fraction, control),
+                .loading => {
+                    const indicator = node.indicator.?;
+                    const color = indicator.color orelse if (style.enabled) theme.palette.text else theme.palette.disabled_text;
+                    if (@TypeOf(target) == *ui.Frame) {
+                        target.loadingIndicator(bounds, indicator.kind, indicator.phase, ui.Color.rgb(color), indicator.variant);
+                        // Equal range bounds mark the progress indeterminate.
+                        try target.semantic(.{ .id = node.id, .parent = node.semantic_parent, .role = .progress, .name = style.name, .bounds = bounds, .enabled = style.enabled, .read_only = true, .range_minimum = 0, .range_maximum = 0 });
+                    } else try target.indicator(node.id, bounds);
+                },
                 .meter => try target.meter(node.id, bounds, node.value, node.range, .{ .control = control, .bands = node.bands }),
                 .rating => try target.rating(node.id, bounds, node.value, @intFromFloat(node.range.maximum), control),
                 .slider => try target.slider(node.id, bounds, node.value, node.range, .{ .control = control }),
@@ -3772,6 +3863,7 @@ pub const View = struct {
         }
         while (clip_depth > 0) {
             clip_depth -= 1;
+            paintEdges(&all[clips[clip_depth]], target);
             try target.popClip();
             paintScrollIndicator(&all[clips[clip_depth]], target, theme);
         }
@@ -3816,6 +3908,21 @@ pub const View = struct {
     }
 
     /// A thin, non-interactive thumb along the right edge while content overflows.
+    fn paintEdges(node: *const Node, target: anytype) void {
+        const edges = node.style.edges;
+        const b = node.bounds;
+        const height = @min(edges.height, b.height);
+        if (edges.top) |edge| {
+            var top = edge;
+            top.bottom = false;
+            target.backdropEffect(.{ .x = b.x, .y = b.y, .width = b.width, .height = height }, 0, .{ .scroll_edge = top });
+        }
+        if (edges.bottom) |edge| {
+            var bottom = edge;
+            bottom.bottom = true;
+            target.backdropEffect(.{ .x = b.x, .y = b.y + b.height - height, .width = b.width, .height = height }, 0, .{ .scroll_edge = bottom });
+        }
+    }
     fn paintScrollIndicator(node: *const Node, target: anytype, theme: Theme) void {
         const model = node.scroll orelse return;
         const b = node.bounds;
@@ -4063,6 +4170,19 @@ pub const Host = struct {
     pub fn announce(self: *Host, message: []const u8) void {
         self.view.announce(message);
         self.invalidate();
+    }
+    /// Apply the system's accessibility appearance: reduced motion stills
+    /// loading indicators, and reduced transparency or high contrast turn
+    /// backdrop effects into opaque fills. Repaints when attached.
+    pub fn setPreferences(self: *Host, value: Preferences) !void {
+        try self.context.setBackdropPreferences(.{ .reduce_transparency = value.reduce_transparency, .high_contrast = value.high_contrast });
+        self.view.preferences = value;
+        self.invalidate();
+    }
+    /// Allocate the scratch planes that backdrop effects filter in; see
+    /// `ui.Context.prepareBackdropEffects`. Call after `attach`.
+    pub fn prepareBackdropEffects(self: *Host, allocator: std.mem.Allocator, options: ui.backdrop_effects.Options) !void {
+        try self.context.prepareBackdropEffects(allocator, options);
     }
     /// Called by the scheduler when the deadline it was given has passed.
     pub fn wakeFired(self: *Host) void {
@@ -4337,6 +4457,7 @@ const Recorder = struct {
     clip_depth: usize = 0,
     max_clip_depth: usize = 0,
     fills: usize = 0,
+    effects: usize = 0,
     chooser: u64 = 0,
     tooltip_id: u64 = 0,
     fn push(self: *Recorder, kind: Kind, id: u64, bounds: Rect, checked: bool) void {
@@ -4351,6 +4472,12 @@ const Recorder = struct {
     }
     pub fn strokeRect(self: *Recorder, _: Rect, _: f32, _: f32, _: ui.Color) void {
         self.fills += 1;
+    }
+    pub fn backdropEffect(self: *Recorder, _: Rect, _: f32, _: ui.BackdropEffect) void {
+        self.effects += 1;
+    }
+    pub fn indicator(self: *Recorder, id: u64, bounds: Rect) !void {
+        self.push(.loading, id, bounds, false);
     }
     pub fn pushClip(self: *Recorder, _: Rect) !void {
         self.clip_depth += 1;
@@ -4616,6 +4743,77 @@ test "arrange places rows and columns with flex layout" {
 fn findIndex(view: *const View, kind: Kind) usize {
     for (view.nodes(), 0..) |node, i| if (node.kind == kind) return i;
     unreachable;
+}
+
+test "loading indicators size by aspect, ask for frames while moving and hold still on request" {
+    var storage: Storage(16, 256) = .{};
+    var view = View.init(storage.buffers());
+    view.now = 1000;
+    view.reset(.{}, null);
+    try view.loadingIndicator(.bouncing_dots, .{ .size = 10 }, .{ .name = "Loading" });
+    try view.loadingIndicator(.arc, .{}, .{});
+    try view.finish();
+    try std.testing.expectEqual(@as(?u64, 1000 + loading_frame_interval), view.wake);
+    try view.arrange(.{ .x = 0, .y = 0, .width = 200, .height = 100 }, .{}, .{});
+    try std.testing.expectEqual(@as(f32, 20), view.nodes()[1].measured.preferred.width);
+    try std.testing.expectEqual(@as(f32, 10), view.nodes()[1].bounds.height);
+    try std.testing.expectEqual(@as(f32, ui.loading.default_size), view.nodes()[2].bounds.height);
+    try std.testing.expectApproxEqAbs(ui.loading.phase(.arc, 1000, 0), view.nodes()[2].indicator.?.phase, 1e-12);
+    var recorder: Recorder = .{};
+    try view.paint(&recorder);
+    try std.testing.expectEqual(Kind.loading, recorder.calls[0].kind);
+    try std.testing.expectEqual(Kind.loading, recorder.calls[1].kind);
+    // A paused indicator with a timer holds its pose and resumes from it.
+    var timer: LoadingTimer = .{};
+    view.reset(.{}, null);
+    try view.loadingIndicator(.ring, .{ .timer = &timer }, .{});
+    try view.finish();
+    view.now = 5000;
+    view.reset(.{}, null);
+    try view.loadingIndicator(.ring, .{ .timer = &timer, .paused = true }, .{});
+    try view.finish();
+    try std.testing.expectEqual(@as(?u64, null), view.wake);
+    const held = view.nodes()[1].indicator.?.phase;
+    try std.testing.expectApproxEqAbs(ui.loading.phase(.ring, 4000, 0), held, 1e-12);
+    view.now = 900000;
+    view.reset(.{}, null);
+    try view.loadingIndicator(.ring, .{ .timer = &timer, .paused = true }, .{});
+    try view.finish();
+    try std.testing.expectEqual(held, view.nodes()[1].indicator.?.phase);
+    view.now = 1000000;
+    view.reset(.{}, null);
+    try view.loadingIndicator(.ring, .{ .timer = &timer }, .{});
+    try view.finish();
+    try std.testing.expectApproxEqAbs(held, view.nodes()[1].indicator.?.phase, 1e-12);
+    // Reduced motion: a still pose and no frames.
+    view.preferences.reduce_motion = true;
+    view.now = 2000000;
+    view.reset(.{}, null);
+    try view.loadingIndicator(.ring, .{}, .{});
+    try view.finish();
+    try std.testing.expectEqual(@as(?u64, null), view.wake);
+    try std.testing.expectEqual(@as(f64, 0), view.nodes()[1].indicator.?.phase);
+    view.reset(.{}, null);
+    try std.testing.expectError(error.InvalidValue, view.loadingIndicator(.ring, .{ .size = 0 }, .{}));
+}
+
+test "materials replace container backgrounds and edges paint inside the clip" {
+    var storage: Storage(16, 256) = .{};
+    var view = View.init(storage.buffers());
+    var model: ScrollModel = .{};
+    view.reset(.{}, null);
+    try view.row(.{ .background = 0xff0000, .material = .{ .glass = .{} }, .radius = 12, .padding = Insets.all(8) });
+    try view.text("on glass", .{});
+    try view.end();
+    try view.scroll(&model, .{ .height = 60, .edges = .{ .top = .{}, .bottom = .{ .hard = true }, .height = 20 } });
+    try view.text("content", .{});
+    try view.end();
+    try view.finish();
+    try view.arrange(.{ .x = 0, .y = 0, .width = 200, .height = 200 }, .{}, .{});
+    var recorder: Recorder = .{};
+    try view.paint(&recorder);
+    try std.testing.expectEqual(@as(usize, 3), recorder.effects);
+    try std.testing.expectEqual(@as(usize, 0), recorder.clip_depth);
 }
 
 test "explicit sizes and paint order with balanced clips" {

@@ -220,6 +220,8 @@ static BOOL actionable(uint32_t role) { return invoke_role(role) || item_role(ro
 /* Progress and meters report a value no client may set. */
 static BOOL fixed_range(uint32_t role) { return role == ROLE_PROGRESS || role == ROLE_METER; }
 static BOOL range_role(uint32_t role) { return fixed_range(role) || role == ROLE_SLIDER || role == ROLE_STEPPER || role == ROLE_SPLITTER; }
+/* A progress bar with equal range bounds is indeterminate and has no value. */
+static BOOL has_range(const Node *n) { return range_role(n->role) && !(n->role == ROLE_PROGRESS && n->range_minimum == n->range_maximum); }
 /* Tree items and table rows take ItemRequest codes (widgets.zig) as value
    requests: deselect 0, add 1, collapse 2, expand 3. */
 static BOOL row_request_role(uint32_t role) { return role == ROLE_TREE_ITEM || role == ROLE_TABLE_ROW; }
@@ -444,7 +446,7 @@ static HRESULT STDMETHODCALLTYPE simple_pattern(IRawElementProviderSimple *iface
     if (id == UIA_TogglePatternId && toggle_role(n.role)) *out = (IUnknown *)&p->toggle;
     if (id == UIA_SelectionItemPatternId && item_role(n.role)) *out = (IUnknown *)&p->selection_item;
     if (id == UIA_SelectionPatternId && chooser_role(n.role)) *out = (IUnknown *)&p->selection;
-    if (id == UIA_RangeValuePatternId && range_role(n.role)) *out = (IUnknown *)&p->range_value;
+    if (id == UIA_RangeValuePatternId && has_range(&n)) *out = (IUnknown *)&p->range_value;
     if (*out) provider_add(p);
     return S_OK;
 }
@@ -572,7 +574,7 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
         case UIA_IsSelectionPattern2AvailablePropertyId: case UIA_IsItemContainerPatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_LIST ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_SelectionCanSelectMultiplePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_LIST || (chooser_role(n->role) && (n->flags & MULTIPLE)) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_SelectionIsSelectionRequiredPropertyId: out->vt = VT_BOOL; out->boolVal = VARIANT_FALSE; break;
-        case UIA_IsRangeValuePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = range_role(n->role) ? VARIANT_TRUE : VARIANT_FALSE; break;
+        case UIA_IsRangeValuePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = has_range(n) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_RangeValueIsReadOnlyPropertyId: out->vt = VT_BOOL; out->boolVal = fixed_range(n->role) || (n->flags & READ_ONLY) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_RangeValueValuePropertyId: out->vt = VT_R8; out->dblVal = n->range_value; break;
         case UIA_RangeValueMinimumPropertyId: out->vt = VT_R8; out->dblVal = n->range_minimum; break;
