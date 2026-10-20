@@ -2439,6 +2439,21 @@ pub fn build(b: *std.Build) void {
         const run_chart_view_tests = b.addRunArtifact(chart_view_tests);
         test_step.dependOn(&run_chart_view_tests.step);
         b.step("test-chart-view", "Run chart view arrangement, storage and preparation key tests").dependOn(&run_chart_view_tests.step);
+        const view_pickers = b.addModule("ziggurat_view_pickers", .{ .root_source_file = b.path("src/view/pickers.zig"), .target = target, .optimize = optimize, .imports = &.{
+            .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_i18n", .module = i18n },
+        } });
+        const view_pickers_tests = b.addTest(.{ .root_module = view_pickers });
+        check.dependOn(&view_pickers_tests.step);
+        const run_view_pickers_tests = b.addRunArtifact(view_pickers_tests);
+        test_step.dependOn(&run_view_pickers_tests.step);
+        b.step("test-view-pickers", "Run calendar, date, time, number and color picker tests").dependOn(&run_view_pickers_tests.step);
+        addSmoke(b, "smoke-pickers", "tests/pickers_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_view", .module = declarative_view },
+            .{ .name = "ziggurat_i18n", .module = i18n },
+            .{ .name = "ziggurat_view_pickers", .module = view_pickers },
+        });
         addSmoke(b, "smoke-chart", "tests/chart_view_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
