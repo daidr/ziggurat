@@ -45,7 +45,7 @@
 | U03 | 已完成（纯布局合同，Windows/Linux） | grid 与可组合约束布局 | U03.1 grid/span/对齐/自动放置/隐式轨道及U03.2弹性百分比上限、内容/显式minimum优先级、数值基线与未知父尺寸测量已验；失败输出事务、硬界与overflow明确；分隔拖动归U06 |
 | U04 | 部分完成（Windows/Linux） | 虚拟 list、table、tree/outline、grid view | U04.1 可变行高列表/可见回放/稳定 ID 锚点已实现；U04.2 声明式视图的单选列表框（非虚拟）已实现；U04.3/U04.4 声明式视图的非虚拟 table（共享列宽、排序指示、单/多选）与 tree（展开折叠、层级键盘）已实现；虚拟 table/tree、列宽拖动/冻结/重排与 grid view 继续待实现；基础依赖 U02.1/T01 |
 | U05 | 部分完成（U05.1 只读组合框、建议列表与搜索区域；U05.2 可编辑组合框与 token field） | combobox、autocomplete、search、token field | popup 所有权、输入法、筛选取消、键盘与焦点恢复；可编辑组合框、输入法组合期间的建议处理与 token field 已在声明式视图实现，读屏实际播报与 Linux 可访问性继续；依赖 U02.2/T02/W02 |
-| U06 | 部分完成（U06.1 声明式视图的 tabs/toolbar/比例 split；U06.2 tooltip、toast 与一次性唤醒；U06.3 sidebar、窗口内对话框、查找栏、可编辑文本与三态复选框） | tabs、sidebar、toolbar、split、tooltip、toast | 生命周期、遮挡/命中、延迟唤醒撤销与可访问性；split 的 DIP 偏好、RTL、折叠与 sidebar、toast 动画继续；基础依赖 U02.1/G02，popup scope另依赖U02.2 |
+| U06 | 部分完成（U06.1 声明式视图的 tabs/toolbar/比例 split；U06.2 tooltip、toast 与一次性唤醒；U06.3 sidebar、窗口内对话框、查找栏、可编辑文本与三态复选框；U06.4 路由历史、图片/SVG/图标与从右到左布局） | tabs、sidebar、toolbar、split、tooltip、toast | 生命周期、遮挡/命中、延迟唤醒撤销与可访问性；split 的 DIP 偏好、RTL 镜像、折叠与 sidebar、toast 动画继续；基础依赖 U02.1/G02，popup scope另依赖U02.2 |
 | U07 | 部分完成（U07.1 声明式视图的日历、日期/时间/数字输入、颜色选择器与颜色按钮、通用浮层，Windows UIA） | calendar、date/time、color picker | locale/范围/键盘/可访问性已在无窗口测试中验证，见[选择器](pickers.md)；颜色方块已可按住拖动；读屏实际播报与 Linux 可访问性继续；依赖 L01/U05 |
 | U08 | 已完成（U08.1 link、badge、segmented、disclosure；U08.2 meter、rating、breadcrumbs、accordion；U08.3 avatar 与导航按钮，Windows UIA） | badge、avatar、link、meter、rating、segmented、accordion、breadcrumbs 与导航按钮 | 稳定身份、分组/展开/链接动作、键盘和语义；不把静态文字/矩形算成完整控件；Linux AT-SPI 不在本行范围；基础依赖 U02.1/G01 |
 | U09 | 部分完成 | chart 的数值/分类/时间尺度、axes、marks、stacking 与 selection | 已有纯 Zig `ziggurat_chart`（尺度/刻度、布局、路径、堆叠、降采样、图例、选择状态）与 `ziggurat_chart_view`（视图嵌入、绘制后准备的覆盖蒙版），见[图表](chart.md)，悬停与键盘选择经视图嵌入输入接口接入 |
@@ -1664,6 +1664,13 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - Host 在绘制后给出渲染遍要求的焦点，并为在帧后才登记的文本输入多等一帧；遮罩按下关闭对话框后同样交还焦点。
 - 无窗口测试（含 `-fllvm`）覆盖对话框的焦点陷阱、遮罩与 Escape 关闭、焦点回到打开者、警告对话框的默认按钮与取消、表单页位置与嵌套拒绝，复选框组的派生与全选/全不选，侧边栏的按 ID 选择、标题跳过、折叠与首字母跳转，可编辑文本的开始/提交/还原/失焦提交与组合期间按键归属，查找栏的打开、前进后退、选项、无结果与关闭，以及按键绑定的焦点与对话框范围。UIA 映射只交叉编译，未在原生 UIA 客户端中验证；未运行隐藏窗口 smoke。
 
+
+### U06.4 路由历史、图片/SVG/图标与从右到左布局
+
+- `ziggurat_view` 新增 `Router`：应用持有的有界历史（调用者提供 `RouteEntry` 数组，满时丢弃最旧条目），`push`/`replace`/`back`/`forward`/`go`、相对位置解析与查询读取。`route` 按页键控构建当前页，`Route.match` 支持 `{name}` 与末尾的 `{name...}`（后者把页面变为共享身份的布局），页面以标题命名并在显示时播报。焦点随离开的页面进入新页（回到该页上次的控件），焦点在页外时不动。Alt+Left/Alt+Right、浏览器后退/前进键与鼠标侧键在持有焦点的路由（否则第一个路由）中导航，历史两端不占用这些键，Backspace 不导航。`backButton`/`forwardButton` 在两端禁用。
+- `image`、`svg`、`icon` 叶子：`contain`/`cover`/`fill`/`none` 填充，`alt` 作为 Image 的名称，无 `alt` 或 `decorative` 时不暴露。内置 41 个图标的路径数据由本项目绘制，按样式颜色着色。新增 `ziggurat_view_graphics`：`Icons` 把图标准备为有界（16 个，最久未用替换）覆盖遮罩，`SvgImage` 按布局像素尺寸与 `currentColor` 准备图片；两者都在绘制后投递任务准备上传并重绘，paint 不分配。
+- `Direction`（`Options.direction`、`Style.direction` 继承、`Host.setDirection`）：除分栏外的容器在排列后镜像子节点，内边距、对齐、网格列与换行随之镜像；文本、弹出列表、浮层、滚动指示条、导航按钮与方向性图标跟随方向，标签页/分段/树/标记输入框的 Left/Right 按屏幕方向移动，Alt 方向键互换。基础控件内部不镜像。
+- 无窗口测试（含 `-fllvm`）覆盖历史的截断、满时丢弃、相对解析与模式匹配，路由的按键、侧键、按钮、焦点恢复与播报、布局身份，图片填充与 SVG/图标绘制器调用，以及从右到左的行、内边距、对齐、网格、图标、标签页方向键与浮层。`smoke-view` 在 Xvfb 上以软件渲染驱动路由页面、历史按钮与延迟准备的图标和 SVG。UIA 映射只交叉编译。
 ### S06.1 上下文菜单、异步消息框与菜单快捷键
 
 - `system.menus` 统一校验菜单栏、上下文菜单和托盘菜单：ID、父项顺序、标签、禁用祖先及快捷键（command 项、不重复、普通键须带 Control/Alt/Super）。`&` 助记符在 GTK 上转为 `_`。
