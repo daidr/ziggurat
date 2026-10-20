@@ -219,6 +219,10 @@ static BOOL actionable(uint32_t role) { return invoke_role(role) || item_role(ro
 /* Progress and meters report a value no client may set. */
 static BOOL fixed_range(uint32_t role) { return role == ROLE_PROGRESS || role == ROLE_METER; }
 static BOOL range_role(uint32_t role) { return fixed_range(role) || role == ROLE_SLIDER || role == ROLE_STEPPER || role == ROLE_SPLITTER; }
+/* Tree items and table rows take ItemRequest codes (widgets.zig) as value
+   requests: deselect 0, add 1, collapse 2, expand 3. */
+static BOOL row_request_role(uint32_t role) { return role == ROLE_TREE_ITEM || role == ROLE_TABLE_ROW; }
+static BOOL row_request(double number) { return number == 0 || number == 1 || number == 2 || number == 3; }
 static BOOL focusable(uint32_t role) { return actionable(role) || role == ROLE_TOKEN || role == ROLE_TEXT_BOX || role == ROLE_SLIDER || role == ROLE_STEPPER || role == ROLE_SPLITTER || role == ROLE_LIST; }
 static uint32_t patterns_for_role(uint32_t role) {
     if (invoke_role(role)) return PATTERN_INVOKE;
@@ -285,12 +289,16 @@ static HRESULT request_registered(State *s, uint64_t id, uint32_t kind, const WC
         }
     }
     if (!(n->flags & ENABLED)) { ReleaseSRWLockExclusive(&s->lock); return UIA_E_ELEMENTNOTENABLED; }
-    if ((kind == 1 && !actionable(n->role)) || (kind == 2 && !focusable(n->role)) || ((kind == 3 || kind == 4) && n->role != ROLE_TEXT_BOX) || (kind == 5 && !range_role(n->role))) {
+    if ((kind == 1 && !actionable(n->role)) || (kind == 2 && !focusable(n->role)) || ((kind == 3 || kind == 4) && n->role != ROLE_TEXT_BOX) || (kind == 5 && !range_role(n->role) && !row_request_role(n->role))) {
         ReleaseSRWLockExclusive(&s->lock); return UIA_E_NOTSUPPORTED;
     }
     if (kind == 3 && (n->flags & READ_ONLY)) { ReleaseSRWLockExclusive(&s->lock); return UIA_E_INVALIDOPERATION; }
-    if (kind == 5 && (fixed_range(n->role) || (n->flags & READ_ONLY))) { ReleaseSRWLockExclusive(&s->lock); return UIA_E_INVALIDOPERATION; }
-    if (kind == 5 && (!isfinite(number) || number < n->range_minimum || number > n->range_maximum)) { ReleaseSRWLockExclusive(&s->lock); return E_INVALIDARG; }
+    if (kind == 5 && row_request_role(n->role)) {
+        if (!row_request(number)) { ReleaseSRWLockExclusive(&s->lock); return E_INVALIDARG; }
+    } else {
+        if (kind == 5 && (fixed_range(n->role) || (n->flags & READ_ONLY))) { ReleaseSRWLockExclusive(&s->lock); return UIA_E_INVALIDOPERATION; }
+        if (kind == 5 && (!isfinite(number) || number < n->range_minimum || number > n->range_maximum)) { ReleaseSRWLockExclusive(&s->lock); return E_INVALIDARG; }
+    }
     uint32_t length = 0;
     if (kind == 3) {
         if (!value) { ReleaseSRWLockExclusive(&s->lock); return E_INVALIDARG; }
@@ -372,7 +380,7 @@ int zua_take_action(Action *a, ActionView *out) {
         const CollectionRowRequest *row = store ? &store->requests[a - s->actions] : NULL;
         if (!binding || !row || n->role != ROLE_LIST || row->kind < 1 || row->kind > 5 || row->reserved || !collection_binding_accepts(binding, row->authority)) available = FALSE;
     }
-    if (available && a->kind == 5 && ((n->flags & READ_ONLY) || fixed_range(n->role) || a->number < n->range_minimum || a->number > n->range_maximum)) available = FALSE;
+    if (available && a->kind == 5 && (row_request_role(n->role) ? !row_request(a->number) : (n->flags & READ_ONLY) || fixed_range(n->role) || a->number < n->range_minimum || a->number > n->range_maximum)) available = FALSE;
     if (available) *out = (ActionView){ s->context, a->kind, a->id, a->value, a->value_len, a->start, a->end, a->number, captured };
     ReleaseSRWLockShared(&s->lock);
     return available;
