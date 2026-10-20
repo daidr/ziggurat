@@ -1,0 +1,22 @@
+{
+  "name": "@ziggurat/plugin-sqlite",
+  "version": "0.1.0-dev",
+  "description": "SQLite databases in the Ziggurat host's data directory, for pages",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "ziggurat-plugin.json"
+  ],
+  "peerDependencies": {
+    "@ziggurat/runtime": "0.1.0-dev"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p ."
+  }
+}

@@ -1,6 +1,6 @@
 # 插件
 
-插件给页面增加一项宿主能力，由三部分组成，随应用一起分发（仓库内的标准插件见 [fetch](plugin-fetch.md)、[watch](plugin-watch.md)）：
+插件给页面增加一项宿主能力，由三部分组成，随应用一起分发（仓库内的标准插件见 [fetch](plugin-fetch.md)、[watch](plugin-watch.md)、[sqlite](plugin-sqlite.md)）：
 
 1. **Zig 半部**：一个模块，导出返回 `page_runtime.Plugin` 的构造（名称 + endpoint）。应用在页面连接前调用 `host.use(plugin)`，页面以 `plugin:<name>` 访问。
 2. **页面半部**：一个 npm 包，内含由插件服务 schema 生成的 TypeScript 客户端，并通过 `@ziggurat/runtime` 的 `service("plugin:<name>", createClient)` 连接；`@ziggurat/runtime` 作为 peer dependency。
