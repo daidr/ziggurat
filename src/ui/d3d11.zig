@@ -799,6 +799,8 @@ pub const Renderer = struct {
     }
     fn preflightTextures(self: *Renderer, ops: []const command.Command, textures: []const drawing.TextureView) !void {
         // Validate every device-bound command before the first native draw.
+        // Backdrop effects read the software plane; replay them in software.
+        if (commands.backdrop.requiresSoftware(ops)) return error.BackdropRequiresSoftware;
         // Software fallback cannot consume these resources or repair a domain.
         for (ops) |op| if (op == .texture) {
             const value = op.texture;
@@ -931,6 +933,7 @@ pub const Renderer = struct {
             .end_group => try self.endGroup(),
             .begin_transform => |slot| try self.beginTransform(transforms[slot]),
             .end_transform => try self.endTransform(),
+            .backdrop => unreachable, // Whole batch rejected before drawing.
             .push_clip => |r| {
                 if (!layout.validRect(r)) return error.InvalidGeometry;
                 if (depth == 32) return error.ClipStackFull;

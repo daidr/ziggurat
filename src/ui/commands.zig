@@ -10,6 +10,7 @@ pub const Gradient = brushes.Gradient;
 pub const layers = @import("layers.zig");
 pub const gaussian = @import("gaussian_filter.zig");
 const gaussian_scope = @import("gaussian_scope.zig");
+pub const backdrop = @import("backdrop.zig");
 pub const no_filter: u8 = 255;
 pub const GroupCommand = struct { bounds: Rect, mask_origin: drawing.Point = .{}, opacity: u8 = 255, mask_resource: ?u8 = null, filter_slot: u8 = no_filter };
 pub const GradientShape = struct { bounds: Rect, radius: f32 = 0, stroke_width: f32 = 0, brush: u8 };
@@ -81,6 +82,8 @@ pub const Command = union(enum) {
     end_group,
     begin_transform: u8,
     end_transform,
+    /// Index into the Buffer's backdrop table.
+    backdrop: u8,
 };
 comptime {
     if (@sizeOf(Command) != 32 or @sizeOf(GroupCommand) != 28) @compileError("command ABI mismatch");
@@ -128,6 +131,7 @@ pub const Buffer = struct {
     scope_kinds: [layers.max_depth]ScopeKind = undefined,
     transform_storage: ?*TransformStorage = null,
     filter_storage: ?*FilterStorage = null,
+    backdrop_storage: backdrop.Storage = .{},
 
     pub fn reset(self: *Buffer) void {
         for (self.preparedTextResources()) |view| view.lease.release();
@@ -149,6 +153,8 @@ pub const Buffer = struct {
         self.depth = 0;
         self.brush_len = 0;
         self.group_depth = 0;
+        self.backdrop_storage.len = 0;
+        self.backdrop_storage.workspace = null;
         if (self.transform_storage) |storage| {
             storage.len = 0;
             storage.bound = false;
@@ -188,9 +194,10 @@ pub const Buffer = struct {
         group_depth: usize,
         filters: usize,
         transforms: usize,
+        backdrops: usize,
     };
     pub fn checkpoint(self: *const Buffer) Checkpoint {
-        return .{ .len = self.len, .text_len = self.text_len, .depth = self.depth, .brush_len = self.brush_len, .prepared = self.prepared_text_len, .images = self.image_len, .coverage = self.coverage_len, .textures = self.texture_len, .group_depth = self.group_depth, .filters = self.filterResources().len, .transforms = self.transformResources().len };
+        return .{ .len = self.len, .text_len = self.text_len, .depth = self.depth, .brush_len = self.brush_len, .prepared = self.prepared_text_len, .images = self.image_len, .coverage = self.coverage_len, .textures = self.texture_len, .group_depth = self.group_depth, .filters = self.filterResources().len, .transforms = self.transformResources().len, .backdrops = self.backdrop_storage.len };
     }
     /// Only the same owning Buffer may roll back to its earlier scope mark.
     /// No allocator or foreign destructor is called while releasing these pins.
@@ -213,6 +220,7 @@ pub const Buffer = struct {
         self.coverage_len = mark.coverage;
         self.texture_len = mark.textures;
         self.group_depth = mark.group_depth;
+        self.backdrop_storage.len = mark.backdrops;
     }
     pub fn beginTransform(self: *Buffer, value: layers.NativeTransform) !void {
         const storage = self.transform_storage orelse return error.TransformStorageRequired;
@@ -399,6 +407,22 @@ pub const Buffer = struct {
         if (self.depth != self.group_clips[self.group_depth - 1]) return error.UnbalancedGroupClips;
         try self.append(.end_group);
         self.group_depth -= 1;
+    }
+    /// Record a backdrop effect in absolute DIP. It reads the target plane
+    /// as drawn so far, so only software replay can draw it.
+    pub fn backdropEffect(self: *Buffer, entry: backdrop.Entry) !void {
+        if (!layout.validRect(entry.bounds) or !std.math.isFinite(entry.bounds.x + entry.bounds.width) or !std.math.isFinite(entry.bounds.y + entry.bounds.height) or !std.math.isFinite(entry.radius) or entry.radius < 0 or !std.math.isFinite(entry.sigma) or entry.sigma < 0 or !std.math.isFinite(entry.noise)) return error.InvalidGeometry;
+        if (entry.mask) |mask| if (!std.math.isFinite(mask.angle) or !std.math.isFinite(mask.start) or !std.math.isFinite(mask.end)) return error.InvalidGeometry;
+        if (self.len == self.storage.len) return error.CommandsFull;
+        const table = &self.backdrop_storage;
+        if (table.len == table.entries.len) return error.BackdropsFull;
+        table.entries[table.len] = entry;
+        self.storage[self.len] = .{ .backdrop = @intCast(table.len) };
+        table.len += 1;
+        self.len += 1;
+    }
+    pub fn backdropEntries(self: *const Buffer) []const backdrop.Entry {
+        return self.backdrop_storage.entries[0..self.backdrop_storage.len];
     }
     pub fn image(self: *Buffer, destination: Rect, view: drawing.ImageView, options: drawing.ImageOptions) !void {
         if (!layout.validRect(destination) or !std.math.isFinite(destination.x + destination.width) or !std.math.isFinite(destination.y + destination.height)) return error.InvalidGeometry;

@@ -32,6 +32,8 @@ pub const Renderer = struct {
     images: image_cache.Cache = .{},
     layer_workspace: ?*windows_layers.Workspace = null,
     layer_fault: u32 = 0,
+    /// The Buffer whose backdrop table the current replay reads.
+    backdrop_source: ?*const commands.Buffer = null,
     layer_candidate_peak: usize = 0,
     /// Fonts other than the default label font, created on first use and
     /// kept until deinit; the oldest is replaced when all are taken.
@@ -605,6 +607,8 @@ pub const Renderer = struct {
         try self.replayWithResources(list, text_bytes, &.{});
     }
     pub fn replayBuffer(self: *Renderer, buffer: *const commands.Buffer) !void {
+        self.backdrop_source = buffer;
+        defer self.backdrop_source = null;
         try self.replayWithGaussianResources(buffer.commands(), buffer.textBytes(), buffer.brushResources(), buffer.preparedTextResources(), buffer.imageResources(), buffer.coverageResources(), buffer.transformResources(), buffer.filterResources());
     }
     pub fn replayWithResources(self: *Renderer, list: []const commands.Command, text_bytes: []const u8, resources: []const commands.brushes.Stored) !void {
@@ -668,6 +672,15 @@ pub const Renderer = struct {
             .end_group => try self.endGroup(),
             .begin_transform => |slot| try self.beginTransform(transforms[slot]),
             .end_transform => try self.endTransform(),
+            .backdrop => |slot| {
+                const source = self.backdrop_source orelse return error.MissingResources;
+                if (slot >= source.backdrop_storage.len) return error.MissingResources;
+                const clip = try self.physicalClip();
+                // Complete batched GDI drawing before reading the DIB.
+                if (c.GdiFlush() == 0) return error.FlushSurfaceFailed;
+                const surface: cpu_gradient.Surface = .{ .pixels = self.pixels orelse return error.NoSurface, .width = self.width, .height = self.height, .stride = self.width, .scale = self.scale, .clip = clip, .origin = self.pixelOrigin() };
+                _ = commands.backdrop.apply(surface, self.transparent(), source.backdrop_storage.entries[slot], source.backdrop_storage.workspace);
+            },
             .push_clip => |clip| {
                 if (depth == 32) return error.ClipStackFull;
                 if (self.layer_workspace) |workspace| {
@@ -893,4 +906,32 @@ test "GDI text follows the command font and reuses its fonts" {
     try std.testing.expect(heading > body * 2);
     try std.testing.expect(try Ink.measure(&renderer, .{ .weight = .bold }) > body);
     try std.testing.expectEqual(body, try Ink.measure(&renderer, .{}));
+}
+
+test "GDI backdrop effects filter the plane drawn so far and fall back without a workspace" {
+    const destination = c.CreateCompatibleDC(null) orelse return error.CreateSurfaceFailed;
+    defer _ = c.DeleteDC(destination);
+    const bitmap = c.CreateCompatibleBitmap(destination, 32, 16) orelse return error.CreateSurfaceFailed;
+    defer _ = c.DeleteObject(bitmap);
+    const original = c.SelectObject(destination, bitmap);
+    defer _ = c.SelectObject(destination, original);
+    var renderer: Renderer = .{};
+    defer renderer.deinit();
+    try renderer.begin(.{ .native_context = destination, .size = .{ .width = 32, .height = 16, .scale = 1 } });
+    const workspace = try commands.backdrop.Workspace.create(std.testing.allocator, .{ .max_pixels = 32 * 16 });
+    defer workspace.destroy();
+    var buffer: commands.Buffer = .{};
+    defer buffer.reset();
+    try buffer.fill(.{ .x = 0, .y = 0, .width = 16, .height = 16 }, 0x000000);
+    try buffer.fill(.{ .x = 16, .y = 0, .width = 16, .height = 16 }, 0xffffff);
+    try buffer.backdropEffect(.{ .bounds = .{ .x = 8, .y = 0, .width = 16, .height = 16 }, .kind = .blur, .sigma = 2, .fallback = .rgb(0xff0000) });
+    buffer.backdrop_storage.workspace = workspace;
+    try renderer.replayBuffer(&buffer);
+    const left = renderer.pixels.?[8 * 32 + 15] & 255;
+    try std.testing.expect(left > 40 and left < 128);
+    try std.testing.expectEqual(@as(u32, 0), renderer.pixels.?[8 * 32 + 7] & 0xffffff);
+    try std.testing.expectEqual(@as(u64, 1), workspace.stats.applied);
+    buffer.backdrop_storage.workspace = null;
+    try renderer.replayBuffer(&buffer);
+    try std.testing.expectEqual(@as(u32, 0xff0000), renderer.pixels.?[8 * 32 + 15] & 0xffffff);
 }
