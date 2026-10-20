@@ -28,11 +28,13 @@ pub const GaussianFilterOptions = gaussian_scope.FilterOptions;
 const GaussianWorkspace = struct { allocator: std.mem.Allocator, options: GaussianWorkspaceOptions, storage: commands.FilterStorage = .{} };
 pub const backdrop_effects = commands.backdrop;
 pub const BackdropEffect = backdrop_effects.Effect;
+pub const loading = commands.loading;
 pub const BackdropEffectStats = struct {
     workspace: backdrop_effects.Stats = .{},
     /// Effects drawn as their opaque fill because no workspace was prepared.
     unprepared: u64 = 0,
-    /// Frames replayed in software because they held a backdrop effect.
+    /// Frames replayed in software because they held a backdrop effect or
+    /// a loading indicator.
     software_frames: u64 = 0,
 };
 pub const offscreen = @import("offscreen.zig");
@@ -2777,9 +2779,10 @@ pub const Context = struct {
                     };
                 };
                 if (!self.live(window)) return;
-                // The GPU renderer has no backdrop sampler: replay this frame
-                // in software without reporting a device failure.
-                if (build_options.gpu and using_gpu and self.command_buffer.backdrop_storage.len != 0) {
+                // Backdrop effects and loading indicators draw on the software
+                // planes: replay this frame there without reporting a device
+                // failure.
+                if (build_options.gpu and using_gpu and commands.softwareOnly(self.command_buffer.commands())) {
                     self.gpu_renderer.discard();
                     using_gpu = false;
                     self.backdrop_software_frames += 1;
@@ -3462,6 +3465,14 @@ pub const Frame = struct {
             self.failure = self.failure orelse err;
         };
     }
+    /// Draw loading indicator `kind` fitted and centered in `bounds`, at the
+    /// pose `phase` cycles into its animation; `loading.phase` derives it
+    /// from elapsed time. Scheduling the next frame is the caller's.
+    pub fn loadingIndicator(self: *Frame, bounds: Rect, kind: loading.Kind, phase: f64, color: Color, options: loading.Options) void {
+        self.context.command_buffer.loadingIndicator(.{ .bounds = self.absolute(bounds), .kind = kind, .phase = phase, .color = color, .options = options }) catch |err| {
+            self.failure = self.failure orelse err;
+        };
+    }
     fn recordBackdrop(self: *Frame, bounds: Rect, radius: f32, effect: BackdropEffect) !void {
         const palette = self.currentTheme().palette;
         const preferences = self.context.backdrop_preferences;
@@ -3988,7 +3999,7 @@ test "backdrop effects record opaque fills for system preferences and an unprepa
     // The hard edge's hairline is half a DIP below it at scale 2.
     try std.testing.expectEqual(@as(f32, 46), list[3].shape.bounds.y);
     try std.testing.expectEqual(@as(f32, 0.5), list[3].shape.bounds.height);
-    try std.testing.expect(backdrop_effects.requiresSoftware(list));
+    try std.testing.expect(commands.softwareOnly(list));
     // Reduced transparency and high contrast fill opaquely, outlined in high contrast.
     buffer.reset();
     try context.setBackdropPreferences(.{ .high_contrast = true });
@@ -3996,7 +4007,7 @@ test "backdrop effects record opaque fills for system preferences and an unprepa
     frame.backdropEffect(bounds, 0, .{ .blur = .{ .radius = 4 } });
     try std.testing.expectEqual(@as(usize, 3), buffer.commands().len);
     try std.testing.expect(buffer.commands()[0] == .shape and buffer.commands()[1] == .shape and buffer.commands()[2] == .shape);
-    try std.testing.expect(!backdrop_effects.requiresSoftware(buffer.commands()));
+    try std.testing.expect(!commands.softwareOnly(buffer.commands()));
     try std.testing.expectEqual(@as(u64, 1), context.backdropEffectStats().unprepared);
     // Invalid input records nothing and keeps the error.
     buffer.reset();

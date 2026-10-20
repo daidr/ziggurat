@@ -275,6 +275,29 @@ try std.testing.expectEqualStrings("Sans", h.focused().?.text);
 
 带 `input` 的嵌入叶子在 Harness 中同样收到 `hoverAt`/`leave`、`clickAt` 与 `key` 的输入，`announcement()` 返回最近的播报文字。除此之外，Harness 把嵌入叶子当作不可交互的节点，不验证原生命中、文本输入、可访问性或指针捕获；这些仍由隐藏窗口 smoke 和原生检查覆盖。
 
+## 背景效果
+
+`Style.material` 是一个 `ui.BackdropEffect`，代替 `background` 画在容器的子节点之下：玻璃、对下方内容的模糊或滚动边缘，形状取 `Style.radius`。`Style.edges` 在裁剪容器（例如滚动容器）的顶部和/或底部画滚动边缘，带高 `height`（默认 24 DIP），在子节点之上、裁剪之内：
+
+```zig
+try v.row(.{ .padding = Insets.all(12), .radius = 16, .material = .{ .glass = .{ .tint = .{ .r = 40, .g = 110, .b = 200, .a = 60 } } } });
+try v.text("在玻璃上", .{});
+try v.end();
+try v.scroll(&model, .{ .grow = 1, .edges = .{ .top = .{}, .bottom = .{ .hard = true } } });
+```
+
+效果需要 `host.prepareBackdropEffects(allocator, .{})`（在 `attach` 之后），否则画不透明填充。效果的像素模型、预算和后端行为见[背景效果与加载动画](backdrop-effects.md)。
+
+## 加载动画
+
+`loadingIndicator(kind, options, style)` 加入 29 种加载动画之一，作为以 `Style.name` 命名的不确定进度条暴露（Windows UIA 上是没有 RangeValue 的 ProgressBar）。`LoadingOptions` 有 `size`（高度，默认 20 DIP，宽度按宽高比）、`color`（默认主题文字色，禁用时为禁用文字色）、`duration`（0 为自身周期）、`paused`、`timer` 与 `variant`（`ui.loading.Options`）。没有 `timer` 时姿态取 `View.time()`，同一窗口的指示器同步转动；应用持有的 `LoadingTimer` 记录各自的起点，`paused` 时保持当前姿态，恢复后从该处继续。
+
+动画中的指示器每一遍都请求 16.7 ms 后的唤醒，因此需要[调度器](#时间与唤醒)才会持续转动；暂停、减少动态效果或指示器不在树中时不请求，窗口回到完全空闲。
+
+## 系统偏好
+
+`host.setPreferences(.{ .reduce_motion, .reduce_transparency, .high_contrast })` 由应用按桌面偏好设置并重绘：减少动态效果让加载动画停在静止姿态，减少透明度或高对比度让背景效果变成不透明填充。
+
 ## 当前范围
 
-已提供列、行、网格、纵向滚动容器、标签页、分栏、工具栏、分段控件、折叠区、手风琴、面包屑、列表框、树、表格、组合框、可编辑组合框、建议列表、标记输入框、搜索区域、表单字段与字段集、链接、徽标、度量条、评分、导航按钮、头像、提示、通知、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子和（通过 `ziggurat_view_text`）可编辑文本字段。分栏只接受比例偏好，没有 DIP 偏好、从右到左布局和折叠；工具栏没有溢出菜单。只读组合框不按输入筛选；建议列表与可编辑组合框的筛选由应用完成；表格没有列宽拖动、列重排、冻结列和行头，排序由应用完成；树与表格不做虚拟化，也没有拖放和行内编辑；悬停只用于提示，控件本身没有悬停外观；通知没有进出动画。没有虚拟列表和动画；需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。Linux 没有普通控件的 AT-SPI 层，上述可访问性只在 Windows UIA 上提供。
+已提供列、行、网格、纵向滚动容器、标签页、分栏、工具栏、分段控件、折叠区、手风琴、面包屑、列表框、树、表格、组合框、可编辑组合框、建议列表、标记输入框、搜索区域、表单字段与字段集、链接、徽标、度量条、评分、导航按钮、头像、提示、通知、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子和（通过 `ziggurat_view_text`）可编辑文本字段。分栏只接受比例偏好，没有 DIP 偏好、从右到左布局和折叠；工具栏没有溢出菜单。只读组合框不按输入筛选；建议列表与可编辑组合框的筛选由应用完成；表格没有列宽拖动、列重排、冻结列和行头，排序由应用完成；树与表格不做虚拟化，也没有拖放和行内编辑；悬停只用于提示，控件本身没有悬停外观；通知没有进出动画。没有虚拟列表和通用动画；玻璃没有按压放大动效。需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。Linux 没有普通控件的 AT-SPI 层，上述可访问性只在 Windows UIA 上提供。

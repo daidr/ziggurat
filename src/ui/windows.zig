@@ -32,7 +32,7 @@ pub const Renderer = struct {
     images: image_cache.Cache = .{},
     layer_workspace: ?*windows_layers.Workspace = null,
     layer_fault: u32 = 0,
-    /// The Buffer whose backdrop table the current replay reads.
+    /// The Buffer whose backdrop and indicator tables the current replay reads.
     backdrop_source: ?*const commands.Buffer = null,
     layer_candidate_peak: usize = 0,
     /// Fonts other than the default label font, created on first use and
@@ -680,6 +680,14 @@ pub const Renderer = struct {
                 if (c.GdiFlush() == 0) return error.FlushSurfaceFailed;
                 const surface: cpu_gradient.Surface = .{ .pixels = self.pixels orelse return error.NoSurface, .width = self.width, .height = self.height, .stride = self.width, .scale = self.scale, .clip = clip, .origin = self.pixelOrigin() };
                 _ = commands.backdrop.apply(surface, self.transparent(), source.backdrop_storage.entries[slot], source.backdrop_storage.workspace);
+            },
+            .indicator => |slot| {
+                const source = self.backdrop_source orelse return error.MissingResources;
+                if (slot >= source.indicator_len) return error.MissingResources;
+                const clip = try self.physicalClip();
+                if (c.GdiFlush() == 0) return error.FlushSurfaceFailed;
+                const surface: cpu_gradient.Surface = .{ .pixels = self.pixels orelse return error.NoSurface, .width = self.width, .height = self.height, .stride = self.width, .scale = self.scale, .clip = clip, .origin = self.pixelOrigin() };
+                _ = commands.loading.draw(surface, self.transparent(), source.indicator_storage[slot]);
             },
             .push_clip => |clip| {
                 if (depth == 32) return error.ClipStackFull;

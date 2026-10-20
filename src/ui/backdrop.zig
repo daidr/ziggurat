@@ -176,12 +176,6 @@ pub fn maskPoints(mask: Mask, bounds: Rect) [2]layout.Point {
     };
 }
 
-/// GPU renderers have no backdrop sampler; such a frame replays in software.
-pub fn requiresSoftware(list: anytype) bool {
-    for (list) |command| if (command == .backdrop) return true;
-    return false;
-}
-
 const Box = struct { x0: f64, y0: f64, x1: f64, y1: f64, radius: f64 };
 const Region = struct { x0: usize, y0: usize, x1: usize, y1: usize };
 

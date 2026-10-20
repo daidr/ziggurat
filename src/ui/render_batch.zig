@@ -119,6 +119,12 @@ pub fn preflight(buffer: *const commands.Buffer, options: Options) !u64 {
                 try rect(entries[slot].bounds, options.size.scale);
                 break :blk 4; // copy, two filter passes and composite
             },
+            .indicator => |slot| blk: {
+                const entries = buffer.indicatorEntries();
+                if (slot >= entries.len) return error.MissingResources;
+                try rect(entries[slot].bounds, options.size.scale);
+                break :blk 1;
+            },
         };
         visits = std.math.add(u64, visits, pixels * weight) catch return error.RenderWorkExceeded;
         if (visits > options.render_work) return error.RenderWorkExceeded;

@@ -79,7 +79,7 @@ pub const Renderer = struct {
     layer_active: bool = false,
     layer_fault: u32 = 0,
     layer_candidate_peak: usize = 0,
-    /// The Buffer whose backdrop table the current replay reads.
+    /// The Buffer whose backdrop and indicator tables the current replay reads.
     backdrop_source: ?*const commands.Buffer = null,
     pub const LayerCandidate = struct { native: *anyopaque, plan: layers.Plan };
     pub fn layerMetadataBytes() usize {
@@ -502,6 +502,14 @@ pub const Renderer = struct {
                 var surface: cpu_gradient.Surface = undefined;
                 if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawBackdropFailed;
                 const dirty = commands.backdrop.apply(surface, zlc_layer_transparent(self.native.?) != 0, source.backdrop_storage.entries[slot], source.backdrop_storage.workspace);
+                zlc_gradient_dirty(self.native.?, dirty.left, dirty.top, dirty.right - dirty.left, dirty.bottom - dirty.top);
+            },
+            .indicator => |slot| {
+                const source = self.backdrop_source orelse return error.MissingResources;
+                if (slot >= source.indicator_len) return error.MissingResources;
+                var surface: cpu_gradient.Surface = undefined;
+                if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawIndicatorFailed;
+                const dirty = commands.loading.draw(surface, zlc_layer_transparent(self.native.?) != 0, source.indicator_storage[slot]);
                 zlc_gradient_dirty(self.native.?, dirty.left, dirty.top, dirty.right - dirty.left, dirty.bottom - dirty.top);
             },
             .push_clip => |rect| {
