@@ -17,6 +17,7 @@ const Kind = view.Kind;
 const Rect = view.Rect;
 const Event = view.Event;
 const ValueChange = view.ValueChange;
+const SortDirection = view.SortDirection;
 
 /// Selects nodes in build order. Every set field must match; `nth` picks one
 /// of several matches, otherwise more than one match is `Ambiguous`.
@@ -282,7 +283,39 @@ pub const Harness = struct {
     /// Activate the matching button, link, checkbox, switch, radio, segment,
     /// tab, list item or disclosure, then render.
     pub fn click(self: *Harness, query: Query) anyerror!void {
-        try self.activate(try self.find(query));
+        const node = try self.find(query);
+        if (isRow(node.kind)) return self.clickWith(query, .{});
+        try self.activate(node);
+    }
+
+    /// Press a tree or table row with modifiers, as Host routes a press:
+    /// Ctrl toggles and Shift extends a multiple selection. Renders.
+    pub fn clickWith(self: *Harness, query: Query, modifiers: z.KeyModifiers) anyerror!void {
+        const node = try self.find(query);
+        if (!isRow(node.kind)) return error.NotActivatable;
+        try self.check(node);
+        const rect = self.visible(node).?;
+        // The right end of a row is clear of a tree row's triangle.
+        try self.pressRow(node, .{ .x = rect.x + rect.width - 1, .y = rect.y + rect.height / 2 }, modifiers);
+    }
+    /// Press the triangle of a tree row to expand or collapse it. Renders.
+    pub fn toggleExpanded(self: *Harness, query: Query) anyerror!void {
+        const node = try self.find(query);
+        if (node.kind != .tree_row or node.expanded == null) return error.NotActivatable;
+        try self.check(node);
+        const mark = ui.widgets.treeExpander(node.bounds, node.level, self.config.theme.metrics.indicator_size);
+        try self.pressRow(node, .{ .x = mark.x + mark.width / 2, .y = mark.y + mark.height / 2 }, .{});
+    }
+    fn pressRow(self: *Harness, node: *const Node, point: view.Point, modifiers: z.KeyModifiers) anyerror!void {
+        const event = self.view.rowPress(point, modifiers, node.id, self.config.theme) orelse return error.Hidden;
+        try self.deliver(event);
+    }
+    /// Press the remove button of the matching token. Renders.
+    pub fn removeToken(self: *Harness, query: Query) anyerror!void {
+        const node = try self.find(query);
+        if (node.kind != .token) return error.NotActivatable;
+        try self.check(node);
+        try self.deliver(.{ .action = view.tokenRemoveId(node.id) });
     }
 
     /// Press and release at a point, as Host routes it: an open popup or a
@@ -297,6 +330,12 @@ pub const Harness = struct {
             try self.render();
             return error.NotFound;
         };
+        if (isRow(node.kind)) return self.pressRow(node, .{ .x = x, .y = y }, .{});
+        if (node.kind == .token) {
+            const b = node.bounds;
+            const width = ui.widgets.tokenRemoveWidth(b);
+            if (x >= b.x + b.width - width) return self.deliver(.{ .action = view.tokenRemoveId(node.id) });
+        }
         try self.activate(node);
     }
 
@@ -338,7 +377,7 @@ pub const Harness = struct {
 
     fn activate(self: *Harness, node: *const Node) anyerror!void {
         switch (node.kind) {
-            .button, .link, .nav_button, .combo_box, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure => {},
+            .button, .link, .nav_button, .combo_box, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .column_header, .token, .combo_toggle => {},
             else => return error.NotActivatable,
         }
         try self.check(node);
@@ -375,7 +414,14 @@ pub const Harness = struct {
             if (node.style.name.len > 0) try writer.print(" name=\"{s}\"", .{node.style.name});
             switch (node.kind) {
                 .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure => try writer.writeAll(if (node.checked) " on" else " off"),
-                .combo_box, .popup => try writer.writeAll(if (node.checked) " open" else " closed"),
+                .combo_box, .popup, .combo_field => try writer.writeAll(if (node.checked) " open" else " closed"),
+                .tree_row, .table_row => {
+                    if (node.kind == .tree_row) try writer.print(" level={d}", .{node.level});
+                    if (node.expanded) |open| try writer.writeAll(if (open) " expanded" else " collapsed");
+                    if (node.checked) try writer.writeAll(" selected");
+                    if (node.cursor) try writer.writeAll(" cursor");
+                },
+                .column_header => if (node.sort) |direction| try writer.print(" {s}", .{@tagName(direction)}),
                 .progress => try writer.print(" {d:.2}", .{node.fraction}),
                 .slider, .stepper, .rating, .meter, .split => try writer.print(" {d}", .{node.value}),
                 .scroll => if (node.scroll) |model| try writer.print(" offset={d}", .{round(model.offset.y)}),
@@ -398,9 +444,12 @@ pub const Harness = struct {
 
 fn interactive(kind: Kind) bool {
     return switch (kind) {
-        .button, .link, .nav_button, .combo_box, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .slider, .stepper, .rating => true,
+        .button, .link, .nav_button, .combo_box, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .slider, .stepper, .rating, .tree_row, .table_row, .column_header, .token, .combo_toggle => true,
         else => false,
     };
+}
+fn isRow(kind: Kind) bool {
+    return kind == .tree_row or kind == .table_row;
 }
 
 fn contains(rect: Rect, x: f32, y: f32) bool {
@@ -1359,4 +1408,405 @@ test "a scroll inside a combo box list keeps the highlight in view" {
     try std.testing.expect(try h.key(.{ .key = .enter }));
     try std.testing.expectEqual(@as(usize, 11), state.size);
     try std.testing.expectEqualStrings("19 pt", (try h.find(.{ .kind = .combo_box })).text);
+}
+
+/// A focusable stand-in for an embedded text input that reports
+/// composition and emptiness like a text field.
+const FakeInput = struct {
+    composing: bool = false,
+    text: []const u8 = "",
+    fn measure(_: *anyopaque, _: view.Theme) view.layout.Measurement {
+        return .{ .minimum = .{ .width = 40, .height = 32 }, .preferred = .{ .width = 120, .height = 32 } };
+    }
+    fn paint(_: *anyopaque, frame: *ui.Frame, id: u64, bounds: Rect) anyerror!void {
+        try frame.addControl(id, bounds, .{});
+    }
+    fn status(ptr: *anyopaque) view.EmbedStatus {
+        const self: *FakeInput = @ptrCast(@alignCast(ptr));
+        return .{ .composing = self.composing, .empty = self.text.len == 0 };
+    }
+    fn embed(self: *FakeInput) view.Embed {
+        return .{ .context = self, .measure = measure, .paint = paint, .status = status };
+    }
+};
+
+const Files = struct {
+    const Entry = struct { id: u64, name: []const u8, parent: ?u64 };
+    entries: []const Entry = &.{
+        .{ .id = 10, .name = "src", .parent = null },
+        .{ .id = 11, .name = "main.zig", .parent = 10 },
+        .{ .id = 12, .name = "view", .parent = 10 },
+        .{ .id = 13, .name = "root.zig", .parent = 12 },
+        .{ .id = 20, .name = "docs", .parent = null },
+        .{ .id = 30, .name = "README.md", .parent = null },
+    },
+    open: [64]bool = @splat(false),
+    storage: [8]u64 = undefined,
+    selection: view.Selection = undefined,
+    activated: ?u64 = null,
+    fn branch(self: *const Files, id: u64) bool {
+        for (self.entries) |entry| if (entry.parent == id) return true;
+        return false;
+    }
+    fn level(self: *Files, v: *View, parent: ?u64) anyerror!void {
+        for (self.entries) |entry| if (std.meta.eql(entry.parent, parent)) {
+            const expanded: ?*bool = if (self.branch(entry.id)) &self.open[entry.id] else null;
+            if (try v.treeItem(entry.id, expanded, entry.name, .{})) self.activated = entry.id;
+            if (expanded) |flag| if (flag.*) try self.level(v, entry.id);
+            try v.end();
+        };
+    }
+    fn build(self: *Files, v: *View) anyerror!void {
+        try v.tree(&self.selection, .{ .name = "Files" });
+        try self.level(v, null);
+        try v.end();
+        _ = try v.button("Done", .{});
+    }
+};
+
+test "trees expand, select by stable id and move with the keyboard" {
+    var storage: view.Storage(64, 1024) = .{};
+    var state: Files = .{};
+    state.selection = .init(.single, &state.storage);
+    var h = Harness.init(&state, Files.build, storage.buffers(), .{});
+    try h.render();
+    try std.testing.expectEqual(@as(usize, 3), h.count(.{ .kind = .tree_row }));
+    try h.click(.{ .text = "docs" });
+    try std.testing.expectEqualSlices(u64, &.{20}, state.selection.items());
+    try std.testing.expectEqual(@as(?u64, 20), state.selection.cursor);
+    // The triangle expands without selecting.
+    try h.toggleExpanded(.{ .text = "src" });
+    try std.testing.expect(state.open[10]);
+    try std.testing.expectEqual(@as(usize, 5), h.count(.{ .kind = .tree_row }));
+    try std.testing.expectEqualSlices(u64, &.{20}, state.selection.items());
+    const child = try h.find(.{ .text = "main.zig" });
+    try std.testing.expectEqual(@as(u16, 1), child.level);
+    try std.testing.expect(child.bounds.y > (try h.find(.{ .text = "src" })).bounds.y);
+    // A disabled id-less query is stale once the row is gone.
+    try h.toggleExpanded(.{ .text = "src" });
+    try std.testing.expect(!state.open[10]);
+
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    // Tab lands on the cursor row.
+    try std.testing.expect(try h.key(.{ .key = .tab }));
+    try std.testing.expectEqualStrings("docs", h.focused().?.text);
+    try std.testing.expect(try h.key(.{ .key = .up }));
+    try std.testing.expectEqualSlices(u64, &.{10}, state.selection.items());
+    try std.testing.expectEqualStrings("src", h.focused().?.text);
+    // Right expands, Right again enters the first child, Left returns to
+    // the parent and Left again collapses it.
+    try std.testing.expect(try h.key(.{ .key = .right }));
+    try std.testing.expect(state.open[10]);
+    try std.testing.expect(try h.key(.{ .key = .right }));
+    try std.testing.expectEqualStrings("main.zig", h.focused().?.text);
+    try std.testing.expect(try h.key(.{ .key = .down }));
+    try std.testing.expect(try h.key(.{ .key = .right }));
+    try std.testing.expect(state.open[12]);
+    try std.testing.expect(try h.key(.{ .key = .end }));
+    try std.testing.expectEqualStrings("README.md", h.focused().?.text);
+    try std.testing.expect(try h.key(.{ .key = .home }));
+    try std.testing.expectEqualStrings("src", h.focused().?.text);
+    try std.testing.expect(try h.key(.{ .key = .down }));
+    try std.testing.expect(try h.key(.{ .key = .down }));
+    try std.testing.expect(try h.key(.{ .key = .left }));
+    try std.testing.expect(!state.open[12]);
+    try std.testing.expect(try h.key(.{ .key = .left }));
+    try std.testing.expectEqualStrings("src", h.focused().?.text);
+    try std.testing.expect(try h.key(.{ .key = .enter }));
+    try std.testing.expectEqual(@as(?u64, 10), state.activated);
+    // The selection follows the item id when labels and order change.
+    state.entries = &.{
+        .{ .id = 30, .name = "README.md", .parent = null },
+        .{ .id = 10, .name = "source", .parent = null },
+    };
+    try h.render();
+    try std.testing.expect((try h.find(.{ .text = "source" })).checked);
+    try std.testing.expect(!(try h.find(.{ .text = "README.md" })).checked);
+
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try h.write(&out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "tree_row \"source\" level=0 selected cursor") != null);
+}
+
+const Inventory = struct {
+    const Item = struct { id: u64, name: []const u8, count: u32 };
+    items: [5]Item = .{
+        .{ .id = 1, .name = "Bolts", .count = 40 },
+        .{ .id = 2, .name = "Nuts", .count = 12 },
+        .{ .id = 3, .name = "Washers", .count = 90 },
+        .{ .id = 4, .name = "Screws", .count = 7 },
+        .{ .id = 5, .name = "Rivets", .count = 55 },
+    },
+    sort: ?view.Sort = null,
+    storage: [8]u64 = undefined,
+    selection: view.Selection = undefined,
+    scroll: view.ScrollModel = .{},
+    sorts: usize = 0,
+    fn lessName(_: void, a: Item, b: Item) bool {
+        return std.mem.lessThan(u8, a.name, b.name);
+    }
+    fn lessCount(_: void, a: Item, b: Item) bool {
+        return a.count < b.count;
+    }
+    fn build(self: *Inventory, v: *View) anyerror!void {
+        const columns = [_]view.Column{ .{ .title = "Name", .track = view.Track.fraction(2) }, .{ .title = "Count" }, .{ .title = "Note", .sortable = false } };
+        if (try v.table(&columns, &self.sort, &self.selection, .{ .name = "Parts", .self_align = .stretch })) {
+            self.sorts += 1;
+            const current = self.sort.?;
+            if (current.column == 0) std.mem.sort(Item, &self.items, {}, lessName) else std.mem.sort(Item, &self.items, {}, lessCount);
+            if (current.direction == .descending) std.mem.reverse(Item, &self.items);
+        }
+        try v.scroll(&self.scroll, .{ .height = 90 });
+        for (self.items) |entry| {
+            _ = try v.tableRow(entry.id, entry.name, .{});
+            try v.text(entry.name, .{});
+            try v.textf("{d}", .{entry.count}, .{});
+            try v.text("", .{});
+            try v.end();
+        }
+        try v.end();
+        try v.end();
+    }
+};
+
+test "tables sort from headers and select several rows by stable id" {
+    var storage: view.Storage(64, 1024) = .{};
+    var state: Inventory = .{};
+    state.selection = .init(.multiple, &state.storage);
+    var h = Harness.init(&state, Inventory.build, storage.buffers(), .{});
+    try h.render();
+    // Header columns line up with the row cells.
+    const header = try h.find(.{ .text = "Count", .kind = .column_header });
+    const cell = try h.find(.{ .text = "40" });
+    try std.testing.expectApproxEqAbs(header.bounds.x, cell.bounds.x, 0.01);
+    try h.click(.{ .text = "Count", .kind = .column_header });
+    try std.testing.expectEqual(@as(?view.Sort, .{ .column = 1 }), state.sort);
+    try std.testing.expectEqualStrings("Screws", state.items[0].name);
+    try h.click(.{ .text = "Count", .kind = .column_header });
+    try std.testing.expectEqual(SortDirection.descending, state.sort.?.direction);
+    try std.testing.expectEqual(SortDirection.descending, (try h.find(.{ .text = "Count", .kind = .column_header })).sort.?);
+    try std.testing.expectEqual(@as(?SortDirection, null), (try h.find(.{ .text = "Name", .kind = .column_header })).sort);
+    // A column that does not sort ignores activation.
+    try h.click(.{ .text = "Note", .kind = .column_header });
+    try std.testing.expectEqual(@as(usize, 2), state.sorts);
+
+    try h.click(.{ .kind = .table_row, .text = "Washers" });
+    try h.clickWith(.{ .kind = .table_row, .text = "Bolts" }, .{ .control = true });
+    try std.testing.expectEqualSlices(u64, &.{ 3, 1 }, state.selection.items());
+    // Shift selects from the anchor through the visible order, and
+    // Ctrl+Shift adds such a range to the selection.
+    try h.clickWith(.{ .kind = .table_row, .text = "Rivets" }, .{ .shift = true });
+    try std.testing.expectEqual(@as(usize, 2), state.selection.len);
+    for ([_]u64{ 1, 5 }) |id| try std.testing.expect(state.selection.contains(id));
+    try h.clickWith(.{ .kind = .table_row, .text = "Washers" }, .{ .shift = true, .control = true });
+    try std.testing.expectEqual(@as(usize, 3), state.selection.len);
+    for ([_]u64{ 1, 3, 5 }) |id| try std.testing.expect(state.selection.contains(id));
+    // Cells of a selected row are drawn on the accent.
+    try std.testing.expect((try h.find(.{ .kind = .table_row, .text = "Rivets" })).checked);
+    // Sorting keeps the selection, which names items, not positions.
+    try h.click(.{ .text = "Name", .kind = .column_header });
+    try std.testing.expectEqualStrings("Bolts", state.items[0].name);
+    try std.testing.expectEqual(@as(usize, 3), state.selection.len);
+
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    context.input_state.setFocused((try h.find(.{ .kind = .table_row, .text = "Bolts" })).id);
+    try h.render();
+    // Ctrl moves the cursor alone, Ctrl+Space toggles, Space selects only.
+    try std.testing.expect(try h.key(.{ .key = .down, .modifiers = .{ .control = true } }));
+    try std.testing.expectEqualStrings("Nuts", h.focused().?.text);
+    try std.testing.expect(!state.selection.contains(2));
+    try std.testing.expect(try h.key(.{ .key = .space, .modifiers = .{ .control = true } }));
+    try std.testing.expect(state.selection.contains(2));
+    try std.testing.expect(try h.key(.{ .key = .space }));
+    try std.testing.expectEqualSlices(u64, &.{2}, state.selection.items());
+    try std.testing.expect(try h.key(.{ .key = .down, .modifiers = .{ .shift = true } }));
+    try std.testing.expectEqual(@as(usize, 2), state.selection.len);
+    try std.testing.expect(try h.key(.{ .key = .a, .modifiers = .{ .control = true } }));
+    try std.testing.expectEqual(@as(usize, 5), state.selection.len);
+    // Moving to the last row scrolls it into view.
+    try std.testing.expect(try h.key(.{ .key = .end }));
+    try std.testing.expectEqualStrings("Washers", h.focused().?.text);
+    try std.testing.expect(state.scroll.offset.y > 0);
+    try std.testing.expect(h.visible(try h.find(.{ .kind = .table_row, .text = "Washers" })) != null);
+    try std.testing.expect(try h.key(.{ .key = .page_up }));
+    try std.testing.expectEqualSlices(u64, &.{h.focused().?.item}, state.selection.items());
+    // Rows scrolled out of sight record no controls, except the cursor.
+    try std.testing.expect(context.input_state.len < 3 + 5);
+}
+
+const FontPicker = struct {
+    all: [4][]const u8 = .{ "Serif", "Sans", "Mono", "Script" },
+    input: FakeInput = .{ .text = "S" },
+    picked: ?[]const u8 = null,
+    fn build(self: *FontPicker, v: *View) anyerror!void {
+        try v.editableComboBox(self.input.text, .{ .name = "Font" });
+        try v.embed(self.input.embed(), .{ .grow = 1, .key = 1 });
+        try v.end();
+        try v.suggestions(.{});
+        for (self.all) |font| if (std.mem.startsWith(u8, font, self.input.text)) {
+            if (try v.suggestion(font, .{ .key = view.key(font) })) {
+                self.picked = font;
+                self.input.text = font;
+            }
+        };
+        try v.end();
+        _ = try v.button("Apply", .{});
+    }
+};
+
+test "editable combo boxes open on typing, the button or Down and wait for composition" {
+    var storage: view.Storage(32, 256) = .{};
+    var state: FontPicker = .{};
+    var h = Harness.init(&state, FontPicker.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    const input_id = (try h.find(.{ .key = 1 })).id;
+    context.input_state.setFocused(input_id);
+    try h.render();
+    // Gaining focus leaves the list closed.
+    try std.testing.expect(!(try h.find(.{ .kind = .popup })).checked);
+    // Typing that changes the options opens it.
+    state.input.text = "Se";
+    try h.render();
+    try std.testing.expect((try h.find(.{ .kind = .popup })).checked);
+    try std.testing.expect((try h.find(.{ .kind = .combo_field })).checked);
+    try std.testing.expect(try h.key(.{ .key = .escape }));
+    try std.testing.expect(!(try h.find(.{ .kind = .popup })).checked);
+    try std.testing.expectEqual(input_id, h.focused().?.id);
+    // Down opens it with the same options; F4 closes it.
+    try std.testing.expect(try h.key(.{ .key = .down }));
+    try std.testing.expect((try h.find(.{ .kind = .popup })).checked);
+    try std.testing.expect(try h.key(.{ .key = .f4 }));
+    try std.testing.expect(!(try h.find(.{ .kind = .popup })).checked);
+    // The button opens and closes it, and focus stays in the input.
+    state.input.text = "S";
+    try h.render();
+    try std.testing.expect((try h.find(.{ .kind = .popup })).checked);
+    try h.click(.{ .kind = .combo_toggle });
+    try std.testing.expect(!(try h.find(.{ .kind = .popup })).checked);
+    try h.click(.{ .kind = .combo_toggle });
+    try std.testing.expect((try h.find(.{ .kind = .popup })).checked);
+    try std.testing.expectEqual(input_id, h.focused().?.id);
+    // While an input method composes, the list hides and keys go to it.
+    state.input.composing = true;
+    try h.render();
+    try std.testing.expect(!(try h.find(.{ .kind = .popup })).checked);
+    h.view.focus = input_id;
+    try std.testing.expect(h.view.routeKey(.{ .key = .enter }) == .ignored);
+    try std.testing.expect(h.view.routeKey(.{ .key = .down }) == .ignored);
+    try std.testing.expect(h.view.routeKey(.{ .key = .escape }) == .ignored);
+    try std.testing.expect(state.picked == null);
+    state.input.composing = false;
+    try h.render();
+    try std.testing.expect((try h.find(.{ .kind = .popup })).checked);
+    try std.testing.expect(try h.key(.{ .key = .down }));
+    try std.testing.expect(try h.key(.{ .key = .enter }));
+    try std.testing.expectEqualStrings("Serif", state.picked.?);
+    try std.testing.expect(!(try h.find(.{ .kind = .popup })).checked);
+    try std.testing.expectEqual(input_id, h.focused().?.id);
+    // Leaving the field forgets the explicit opening.
+    context.input_state.setFocused((try h.find(.{ .text = "Apply" })).id);
+    try h.render();
+    try std.testing.expect(!(try h.find(.{ .kind = .popup })).checked);
+}
+
+const Tags = struct {
+    tags: [8][]const u8 = .{ "zig", "ui", "desktop", "windows", "linux", "", "", "" },
+    len: usize = 5,
+    input: FakeInput = .{},
+    fn build(self: *Tags, v: *View) anyerror!void {
+        try v.tokenField(.{ .name = "Tags", .self_align = .stretch });
+        var index: usize = 0;
+        while (index < self.len) {
+            const tag = self.tags[index];
+            if (try v.token(tag, .{ .key = view.key(tag) })) {
+                std.mem.copyForwards([]const u8, self.tags[index .. self.len - 1], self.tags[index + 1 .. self.len]);
+                self.len -= 1;
+            } else index += 1;
+        }
+        try v.embed(self.input.embed(), .{ .grow = 1, .key = 1 });
+        try v.end();
+    }
+};
+
+test "token fields wrap, remove tokens and move between tokens and input" {
+    var storage: view.Storage(32, 256) = .{};
+    var state: Tags = .{};
+    var h = Harness.init(&state, Tags.build, storage.buffers(), .{ .bounds = .{ .x = 0, .y = 0, .width = 640, .height = 480 } });
+    try h.render();
+    const wide = (try h.find(.{ .kind = .token_field })).bounds.height;
+    // A narrow window wraps the tokens onto more lines.
+    try h.resize(.{ .x = 0, .y = 0, .width = 220, .height = 480 });
+    const field = try h.find(.{ .kind = .token_field });
+    try std.testing.expect(field.bounds.height > wide);
+    for (h.nodes()) |*node| if (node.parent < h.nodes().len and h.nodes()[node.parent].kind == .token_field) {
+        try std.testing.expect(node.bounds.x + node.bounds.width <= field.bounds.x + field.bounds.width + 0.01);
+    };
+    try h.resize(.{ .x = 0, .y = 0, .width = 640, .height = 480 });
+    try std.testing.expectEqual(wide, (try h.find(.{ .kind = .token_field })).bounds.height);
+
+    try h.removeToken(.{ .text = "ui" });
+    try std.testing.expectEqual(@as(usize, 4), state.len);
+    try std.testing.expectEqualStrings("desktop", state.tags[1]);
+
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    const input_id = (try h.find(.{ .key = 1 })).id;
+    context.input_state.setFocused(input_id);
+    try h.render();
+    // Backspace in the empty input moves to the last token; Left moves on.
+    try std.testing.expect(try h.key(.{ .key = .backspace }));
+    try std.testing.expectEqualStrings("linux", h.focused().?.text);
+    try std.testing.expect(try h.key(.{ .key = .left }));
+    try std.testing.expectEqualStrings("windows", h.focused().?.text);
+    try std.testing.expect(try h.key(.{ .key = .home }));
+    try std.testing.expectEqualStrings("zig", h.focused().?.text);
+    // Delete removes the focused token and returns to the input.
+    try std.testing.expect(try h.key(.{ .key = .delete }));
+    try std.testing.expectEqual(@as(usize, 3), state.len);
+    try std.testing.expectEqual(input_id, h.focused().?.id);
+    // Right from the last token goes back to the input.
+    context.input_state.setFocused((try h.find(.{ .text = "linux" })).id);
+    try h.render();
+    try std.testing.expect(try h.key(.{ .key = .right }));
+    try std.testing.expectEqual(input_id, h.focused().?.id);
+    // A non-empty input keeps Backspace for itself.
+    state.input.text = "x";
+    try std.testing.expect(!try h.key(.{ .key = .backspace }));
+    // A press on the remove button removes the token.
+    const last = try h.find(.{ .text = "linux" });
+    try h.clickAt(last.bounds.x + last.bounds.width - 2, last.bounds.y + last.bounds.height / 2);
+    try std.testing.expectEqual(@as(usize, 2), state.len);
+
+    var loose: view.Storage(4, 32) = .{};
+    var v = View.init(loose.buffers());
+    v.reset(.{}, null);
+    try std.testing.expectError(error.NotContainer, v.token("x", .{}));
+    try std.testing.expectError(error.NotContainer, v.treeItem(1, null, "x", .{}));
+    try std.testing.expectError(error.NotContainer, v.tableRow(1, "x", .{}));
+}
+
+test "selections keep stable ids within their capacity" {
+    var storage: [2]u64 = undefined;
+    var selection: view.Selection = .init(.multiple, &storage);
+    try selection.add(4);
+    try selection.add(4);
+    try selection.add(9);
+    try std.testing.expectError(error.SelectionFull, selection.add(1));
+    try std.testing.expect(selection.remove(4));
+    try std.testing.expect(!selection.remove(4));
+    try selection.set(7);
+    try std.testing.expectEqualSlices(u64, &.{7}, selection.items());
+    try std.testing.expectEqual(@as(?u64, 7), selection.anchor);
+    var single: view.Selection = .init(.single, &storage);
+    try single.add(1);
+    try single.add(2);
+    try std.testing.expectEqualSlices(u64, &.{2}, single.items());
 }

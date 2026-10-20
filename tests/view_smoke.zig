@@ -303,6 +303,102 @@ fn run(allocator: std.mem.Allocator) !void {
     try std.testing.expect(host.context.window == null);
 }
 
+/// A tree, a sortable table and a token field driven by native presses.
+const Collections = struct {
+    open: bool = false,
+    tree_storage: [2]u64 = undefined,
+    tree: view.Selection = undefined,
+    sort: ?view.Sort = null,
+    table_storage: [4]u64 = undefined,
+    table: view.Selection = undefined,
+    order: [3]u64 = .{ 1, 2, 3 },
+    tags: [3][]const u8 = .{ "red", "green", "blue" },
+    tag_count: usize = 3,
+    fn build(self: *Collections, v: *view.View) anyerror!void {
+        try v.tree(&self.tree, .{ .name = "Folders", .self_align = .stretch });
+        _ = try v.treeItem(1, &self.open, "Projects", .{});
+        if (self.open) {
+            _ = try v.treeItem(2, null, "Ziggurat", .{});
+            try v.end();
+        }
+        try v.end();
+        _ = try v.treeItem(3, null, "Archive", .{});
+        try v.end();
+        try v.end();
+        const columns = [_]view.Column{ .{ .title = "Name" }, .{ .title = "Size" } };
+        if (try v.table(&columns, &self.sort, &self.table, .{ .name = "Files", .self_align = .stretch })) std.mem.reverse(u64, &self.order);
+        for (self.order) |id| {
+            _ = try v.tableRow(id, names[id - 1], .{});
+            try v.text(names[id - 1], .{});
+            try v.textf("{d} KB", .{id * 10}, .{});
+            try v.end();
+        }
+        try v.end();
+        try v.tokenField(.{ .name = "Tags", .self_align = .stretch });
+        var index: usize = 0;
+        while (index < self.tag_count) {
+            if (try v.token(self.tags[index], .{ .key = view.key(self.tags[index]) })) {
+                std.mem.copyForwards([]const u8, self.tags[index .. self.tag_count - 1], self.tags[index + 1 .. self.tag_count]);
+                self.tag_count -= 1;
+            } else index += 1;
+        }
+        try v.end();
+    }
+    const names = [_][]const u8{ "alpha.txt", "beta.txt", "gamma.txt" };
+};
+
+fn runCollections(allocator: std.mem.Allocator) !void {
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    var state: Collections = .{};
+    state.tree = .init(.single, &state.tree_storage);
+    state.table = .init(.multiple, &state.table_storage);
+    var storage: view.Storage(64, 512) = .{};
+    var host = view.Host.init(&state, Collections.build, storage.buffers(), .{});
+    host.context.render_mode = .gdi;
+    const window = try app.createWindow(.{ .width = width, .height = height });
+    try host.attach(window);
+    try paint(&host, window);
+    // The triangle expands a tree item; a press elsewhere selects it.
+    const projects = try find(&host, .tree_row, 0);
+    const mark = ui.widgets.treeExpander(projects.bounds, 0, host.context.currentTheme().metrics.indicator_size);
+    Native.click(window, mark);
+    try std.testing.expect(state.open);
+    try std.testing.expectEqual(@as(usize, 0), state.tree.len);
+    try paint(&host, window);
+    try std.testing.expectEqualStrings("Ziggurat", (try find(&host, .tree_row, 1)).text);
+    Native.click(window, (try find(&host, .tree_row, 2)).bounds);
+    try std.testing.expectEqualSlices(u64, &.{3}, state.tree.items());
+    try paint(&host, window);
+    try std.testing.expect((try find(&host, .tree_row, 2)).checked);
+
+    // A header press sorts; a row press selects that item.
+    Native.click(window, (try find(&host, .column_header, 1)).bounds);
+    try std.testing.expectEqual(@as(?view.Sort, .{ .column = 1 }), state.sort);
+    try paint(&host, window);
+    try std.testing.expectEqual(@as(?view.SortDirection, .ascending), (try find(&host, .column_header, 1)).sort);
+    try std.testing.expectEqualStrings("gamma.txt", (try find(&host, .table_row, 0)).text);
+    Native.click(window, (try find(&host, .table_row, 1)).bounds);
+    try std.testing.expectEqualSlices(u64, &.{2}, state.table.items());
+    try paint(&host, window);
+    const header = try find(&host, .column_header, 1);
+    var cell: ?view.Node = null;
+    for (host.view.nodes()) |node| if (node.kind == .text and std.mem.eql(u8, node.text, "30 KB")) {
+        cell = node;
+    };
+    try std.testing.expectEqual(header.bounds.x, cell.?.bounds.x);
+
+    // The end of a token is its remove button.
+    const green = try find(&host, .token, 1);
+    Native.click(window, .{ .x = green.bounds.x + green.bounds.width - 4, .y = green.bounds.y, .width = 0, .height = green.bounds.height });
+    try std.testing.expectEqual(@as(usize, 2), state.tag_count);
+    try paint(&host, window);
+    try std.testing.expectEqualStrings("blue", (try find(&host, .token, 1)).text);
+
+    _ = try window.destroy();
+    try app.dispatch();
+}
+
 /// A toast that expires through the native one-shot timer, with the window
 /// repainting only for that deadline.
 const Expiring = struct {
@@ -359,8 +455,12 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     try run(gpa.allocator());
+    try runCollections(gpa.allocator());
     try runTimer(gpa.allocator());
-    if (builtin.os.tag == .windows) try @import("view_uia.zig").run(gpa.allocator());
+    if (builtin.os.tag == .windows) {
+        try @import("view_uia.zig").run(gpa.allocator());
+        try @import("view_uia.zig").runCollections(gpa.allocator());
+    }
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, timed toast expiry and keyed identity passed\n", .{});
+    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, timed toast expiry and keyed identity passed\n", .{});
 }

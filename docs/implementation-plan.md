@@ -43,8 +43,8 @@
 | U01 | 已完成（Windows/Linux） | checkbox、radio、switch、progress、禁用态 | 原生输入、失败帧/嵌套 paint、关闭、Windows UIA 身份及资源回收；无每帧分配 |
 | U02 | 部分完成（Windows/Linux） | slider、双端范围、步进控件、焦点导航、快捷键与多击 | U02.1、U02.2嵌套scope/显式Escape续交、U02.3原生时序入口与显式注册主按钮多击、普通及committed Space下单文档词/逻辑行选择已分项验；更广未消费键续交、折叠/投影视图的编辑器选择及其他控件多击继续；直接键入数字归 T02；依赖 U01 |
 | U03 | 已完成（纯布局合同，Windows/Linux） | grid 与可组合约束布局 | U03.1 grid/span/对齐/自动放置/隐式轨道及U03.2弹性百分比上限、内容/显式minimum优先级、数值基线与未知父尺寸测量已验；失败输出事务、硬界与overflow明确；分隔拖动归U06 |
-| U04 | 部分完成（Windows/Linux） | 虚拟 list、table、tree/outline、grid view | U04.1 可变行高列表/可见回放/稳定 ID 锚点已实现；U04.2 声明式视图的单选列表框（非虚拟）已实现；完整列表语义及 table/tree/grid view 继续待实现；基础依赖 U02.1/T01 |
-| U05 | 部分完成（U05.1 声明式视图的只读组合框、建议列表与搜索区域） | combobox、autocomplete、search、token field | popup 所有权、输入法、筛选取消、键盘与焦点恢复；可编辑组合框、输入法组合期间的建议处理与 token field 继续；依赖 U02.2/T02/W02 |
+| U04 | 部分完成（Windows/Linux） | 虚拟 list、table、tree/outline、grid view | U04.1 可变行高列表/可见回放/稳定 ID 锚点已实现；U04.2 声明式视图的单选列表框（非虚拟）已实现；U04.3/U04.4 声明式视图的非虚拟 table（共享列宽、排序指示、单/多选）与 tree（展开折叠、层级键盘）已实现；虚拟 table/tree、列宽拖动/冻结/重排与 grid view 继续待实现；基础依赖 U02.1/T01 |
+| U05 | 部分完成（U05.1 只读组合框、建议列表与搜索区域；U05.2 可编辑组合框与 token field） | combobox、autocomplete、search、token field | popup 所有权、输入法、筛选取消、键盘与焦点恢复；可编辑组合框、输入法组合期间的建议处理与 token field 已在声明式视图实现，读屏实际播报与 Linux 可访问性继续；依赖 U02.2/T02/W02 |
 | U06 | 部分完成（U06.1 声明式视图的 tabs/toolbar/比例 split；U06.2 tooltip、toast 与一次性唤醒） | tabs、sidebar、toolbar、split、tooltip、toast | 生命周期、遮挡/命中、延迟唤醒撤销与可访问性；split 的 DIP 偏好、RTL、折叠与 sidebar、toast 动画继续；基础依赖 U02.1/G02，popup scope另依赖U02.2 |
 | U07 | 待实现 | calendar、date/time、color picker | locale/范围/键盘/可访问性；依赖 L01/U05 |
 | U08 | 已完成（U08.1 link、badge、segmented、disclosure；U08.2 meter、rating、breadcrumbs、accordion；U08.3 avatar 与导航按钮，Windows UIA） | badge、avatar、link、meter、rating、segmented、accordion、breadcrumbs 与导航按钮 | 稳定身份、分组/展开/链接动作、键盘和语义；不把静态文字/矩形算成完整控件；Linux AT-SPI 不在本行范围；基础依赖 U02.1/G01 |
@@ -1643,6 +1643,12 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - 新增语义角色 `meter` 与 `navigation`，追加在既有编号之后。Frame 提供 `meter`、`rating`、`navigation` 与 `group`。度量条只读，报告实际值与上下限，值在首选区间外时用主题新增的 `caution` 色。评分是步长为 1 的范围控件，轨道从第一个标记前半格开始，按到哪个标记就取哪个分数。Windows UIA 映射为 ProgressBar（LocalizedControlType 为 "meter"）、Slider，以及带导航地标的 Group。Linux 不声明 AT-SPI。
 - `ziggurat_view` 提供 `breadcrumbs`、`meter`、`rating`、`accordion`/`section`。面包屑在间隙中画分隔符；手风琴最多打开一节，再次激活已打开的节会关闭它。面包屑和手风琴里的控件以容器为可访问父节点。
 - 单元测试覆盖区间与参数校验、评分标记命中、语义角色与父节点，以及无窗口的分节切换和评分调整；Linux 隐藏窗口 smoke 在 1x/2x 下实测评分的原生点击。Windows smoke 用真实 UIAutomationClient 检查导航地标、度量条只读 RangeValue、评分 SetValue 与分节 ExpandCollapse。
+
+### U04.3/U04.4/U05.2 声明式视图的树、表格、可编辑组合框与标记输入框
+
+- 新增语义角色 `tree`、`tree_item`、`table`、`table_header`、`column_header`、`table_row`、`token_field`、`token`，追加在既有编号之后；语义节点新增 `multiple` 与 `expanded`。Frame 提供 `treeView`、`treeItem`、`dataTable`、`tableHeader`、`columnHeader`、`tableRow`、`tokenField`、`tokenItem`、`comboField` 与 `comboToggle`。Windows UIA 映射为 Tree、TreeItem / SelectionItem / ExpandCollapse、DataGrid、Header、HeaderItem / Invoke（ItemStatus 为排序方向）、DataItem、List / ListItem（标记）；多选集合报告 CanSelectMultiple，AddToSelection/RemoveFromSelection 经数值请求只改动该项。Linux 不声明 AT-SPI。
+- `ziggurat_view` 提供应用持有的 `Selection`（按稳定项 ID，容量由调用者给出）、`tree`/`treeItem`、`table`/`tableRow`（`Column`、`Sort`）、`editableComboBox` 与 `tokenField`/`token`；`Embed.status` 报告输入法组合与空输入。行共享一个 Tab 停靠点，键盘与指针支持单选、Ctrl 切换、Shift 范围、Ctrl+Shift 追加范围、Ctrl+A、PageUp/PageDown 与树的 Left/Right 层级导航；表头与各行按全部单元格的内容统一求列宽。可编辑组合框在组合期间隐藏建议并把按键留给输入法。标记输入框按宽度换行，排列宽度变化时再测量一次。
+- 无窗口测试（含 `-fllvm`）覆盖树的展开、三角按下、键盘层级导航、按 ID 保持选择，表格的排序、列对齐、多选修饰键、Ctrl+A、翻页与滚入，可编辑组合框的打开/关闭/按钮/组合期间隐藏与选中后焦点，标记输入框的换行、移除与焦点移动，以及选择容量。Linux 隐藏窗口 smoke 在 1x/2x 下实测树的三角与行按下、列头排序、行选择、列对齐与标记移除。Windows smoke 用真实 UIAutomationClient 检查树 ExpandCollapse/LeafNode/选择、DataGrid 多选、列头 Invoke 与 ItemStatus、标记的控件类型。行不做虚拟化；列宽拖动、冻结、重排、读屏实际播报与视觉质量未验收。见[声明式视图](view.md)。
 
 ### U05.1/U06.2/U08.3 组合框、建议列表、提示、通知、导航按钮与头像
 
