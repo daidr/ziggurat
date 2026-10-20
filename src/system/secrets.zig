@@ -284,8 +284,11 @@ const windows = if (os == .windows) struct {
         defer c.CredFree(credential);
         const size: usize = credential.*.CredentialBlobSize;
         if (size > destination.len) return error.SecretTooLarge;
-        if (size != 0) @memcpy(destination[0..size], credential.*.CredentialBlob[0..size]);
-        std.crypto.secureZero(u8, credential.*.CredentialBlob[0..size]);
+        // An empty secret has no blob.
+        if (size != 0) {
+            @memcpy(destination[0..size], credential.*.CredentialBlob[0..size]);
+            std.crypto.secureZero(u8, credential.*.CredentialBlob[0..size]);
+        }
         return destination[0..size];
     }
 
