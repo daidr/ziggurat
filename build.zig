@@ -250,6 +250,16 @@ pub fn build(b: *std.Build) void {
     const run_i18n_tests = b.addRunArtifact(i18n_tests);
     test_step.dependOn(&run_i18n_tests.step);
     b.step("test-i18n", "Run locale fallback, catalog, plural, number, date and pseudolocale tests").dependOn(&run_i18n_tests.step);
+    const page_runtime = b.addModule("ziggurat_page_runtime", .{ .root_source_file = b.path("src/page_runtime/root.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_ipc", .module = ipc },
+        .{ .name = "ziggurat_i18n", .module = i18n },
+    } });
+    const page_runtime_tests = b.addTest(.{ .root_module = page_runtime });
+    check.dependOn(&page_runtime_tests.step);
+    const run_page_runtime_tests = b.addRunArtifact(page_runtime_tests);
+    test_step.dependOn(&run_page_runtime_tests.step);
+    b.step("test-page-runtime", "Run page handshake, runtime service, plugin routing, find script and plugin manifest tests").dependOn(&run_page_runtime_tests.step);
     // Optional: needs `python scripts/fetch-sqlite.py`, so it stays out of `test` and `check`.
     const sqlite = b.addModule("ziggurat_sqlite", .{ .root_source_file = b.path("src/sqlite/root.zig"), .target = target, .optimize = optimize });
     @import("build_support/sqlite.zig").add(b, sqlite, target, optimize);
@@ -1695,6 +1705,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "counter_service", .module = counter_service },
             .{ .name = "ipc_page", .module = page_module },
         });
+        addPageRuntimeSmoke(b, target, optimize, core, view, ipc, i18n, page_runtime);
         const producer_bundle = b.addSystemCommand(&.{ "bun", "build" });
         producer_bundle.addFileArg(b.path("tests/resource_producer_page.ts"));
         producer_bundle.addFileInput(b.path("tests/resource_producer_fixture.ts"));
@@ -1789,6 +1800,7 @@ pub fn build(b: *std.Build) void {
         view_tests = b.addTest(.{ .root_module = view });
         _ = b.step("webview-runtime", "Use the installed WebKitGTK 4.1 runtime");
         addWebNativeBoundarySmoke(b, target, optimize, core, view);
+        addPageRuntimeSmoke(b, target, optimize, core, view, ipc, i18n, page_runtime);
         addSmoke(b, "smoke-webview-linux", "tests/linux_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
@@ -1963,6 +1975,22 @@ pub fn build(b: *std.Build) void {
     const client_source = generated.addOutputFileArg("client.ts");
     const install_client = b.addInstallFileWithDir(client_source, .prefix, "share/ziggurat/client.ts");
     b.step("ipc-client", "Generate the versioned TypeScript client from Zig service types").dependOn(&install_client.step);
+    // Schemas only: the generator does not build Core for the host.
+    const page_runtime_host = b.createModule(.{ .root_source_file = b.path("src/page_runtime/service.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .imports = &.{.{ .name = "ziggurat_ipc", .module = ipc_host }} });
+    const page_runtime_clients = b.addExecutable(.{ .name = "page-runtime-clients", .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/page_runtime_clients.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+        .imports = &.{ .{ .name = "ziggurat_ipc", .module = ipc_host }, .{ .name = "page_runtime_service", .module = page_runtime_host } },
+    }) });
+    const write_page_clients = b.addRunArtifact(page_runtime_clients);
+    write_page_clients.addArgs(&.{ "write", b.pathFromRoot(".") });
+    b.step("page-runtime-clients", "Regenerate the TypeScript clients of the page runtime's services under packages/").dependOn(&write_page_clients.step);
+    const check_page_clients = b.addRunArtifact(page_runtime_clients);
+    check_page_clients.addArgs(&.{ "check", b.pathFromRoot(".") });
+    check_page_clients.addFileInput(b.path("packages/runtime/src/generated/runtime.ts"));
+    test_step.dependOn(&check_page_clients.step);
+    b.step("check-page-runtime-clients", "Fail when a generated page runtime client under packages/ differs from its Zig schema").dependOn(&check_page_clients.step);
     const ipc_tests = b.addTest(.{ .root_module = ipc });
     const ipc_fixture = b.createModule(.{ .root_source_file = b.path("src/ipc/fixture.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ipc", .module = ipc }} });
     const ipc_fixture_tests = b.addTest(.{ .root_module = b.createModule(.{
@@ -2647,6 +2675,27 @@ fn addWindowsProfileStorageNative(b: *std.Build, owner: *std.Build.Module, prefi
     for ([_][]const u8{ "windows_profile_lifetime.c", "windows_profile_storage.c" }) |file|
         _ = native_support.add(b, owner, b.fmt("{s}-{s}", .{ prefix, file }), b.fmt("src/webview/{s}", .{file}), &.{"-std=c11"}, target, optimize);
     owner.linkSystemLibrary("advapi32", .{});
+}
+
+/// One end-to-end page: the runtime package bundled into a hidden window.
+fn addPageRuntimeSmoke(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module, view: *std.Build.Module, ipc: *std.Build.Module, i18n: *std.Build.Module, page_runtime: *std.Build.Module) void {
+    const bundle = b.addSystemCommand(&.{ "bun", "build" });
+    bundle.addFileArg(b.path("tests/page_runtime_page.ts"));
+    bundle.addFileInput(b.path("tests/ipc_fixture.ts"));
+    bundle.addFileInput(b.path("packages/runtime/src/index.ts"));
+    bundle.addFileInput(b.path("packages/runtime/src/generated/runtime.ts"));
+    bundle.addArgs(&.{ "--target", "browser", "--format", "iife", "--outfile" });
+    const page = b.createModule(.{ .root_source_file = bundle.addOutputFileArg("page-runtime-page.js") });
+    const counter_service = b.createModule(.{ .root_source_file = b.path("examples/counter_service.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_ipc", .module = ipc }} });
+    addSmoke(b, "smoke-page-runtime", "tests/page_runtime_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_webview", .module = view },
+        .{ .name = "ziggurat_ipc", .module = ipc },
+        .{ .name = "ziggurat_i18n", .module = i18n },
+        .{ .name = "ziggurat_page_runtime", .module = page_runtime },
+        .{ .name = "counter_service", .module = counter_service },
+        .{ .name = "page_runtime_page", .module = page },
+    });
 }
 
 fn addSmoke(b: *std.Build, name: []const u8, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) void {

@@ -1,0 +1,40 @@
+//! Writes or checks the generated TypeScript clients of the page runtime's
+//! services under packages/. `write <repo>` regenerates them; `check <repo>`
+//! fails when a checked-in client differs from its Zig schema.
+const std = @import("std");
+const ipc = @import("ziggurat_ipc");
+const runtime_service = @import("page_runtime_service");
+
+const clients = .{
+    .{ runtime_service.Service, "packages/runtime/src/generated/runtime.ts" },
+};
+
+pub fn main() !void {
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const args = try std.process.argsAlloc(allocator);
+    if (args.len != 3) return error.Usage;
+    const write = std.mem.eql(u8, args[1], "write");
+    if (!write and !std.mem.eql(u8, args[1], "check")) return error.Usage;
+    var root = try std.fs.cwd().openDir(args[2], .{});
+    defer root.close();
+    var stale = false;
+    inline for (clients) |client| {
+        const source = try ipc.generate(client[0], allocator);
+        if (write) {
+            try root.makePath(std.fs.path.dirname(client[1]).?);
+            try root.writeFile(.{ .sub_path = client[1], .data = source });
+        } else {
+            const current = root.readFileAlloc(allocator, client[1], 16 * 1024 * 1024) catch |err| switch (err) {
+                error.FileNotFound => "",
+                else => return err,
+            };
+            if (!std.mem.eql(u8, current, source)) {
+                std.debug.print("{s} is out of date; run `zig build page-runtime-clients`\n", .{client[1]});
+                stale = true;
+            }
+        }
+    }
+    if (stale) std.process.exit(1);
+}
