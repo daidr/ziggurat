@@ -173,10 +173,9 @@ pub fn put(allocator: std.mem.Allocator, http: *std.http.Client, client: *const 
     request.connection.?.flush() catch |err| return fail(reason, "{s}", .{@errorName(err)});
     var response = request.receiveHead(&.{}) catch |err| return fail(reason, "{s}", .{@errorName(err)});
     const status = response.head.status;
-    if (status.class() == .success) {
-        _ = response.reader(&.{}).discardRemaining() catch {};
-        return;
-    }
+    // The connection is not kept alive, so an unread success body is
+    // dropped with it.
+    if (status.class() == .success) return;
     var bucket_region: [64]u8 = undefined;
     var bucket_region_len: usize = 0;
     var iterator = response.head.iterateHeaders();
