@@ -546,6 +546,16 @@ pub fn build(b: *std.Build) void {
         fixture.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
         desktop_smoke.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
         desktop_smoke.linkSystemLibrary("x11", .{ .use_pkg_config = .force });
+        // Needs an isolated Xvfb with a window manager: shrinks its only output.
+        const displays_smoke = addSmokeModule(b, "smoke-window-placement-displays", "tests/window_placement_displays_linux.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_window_placement", .module = window_placement },
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        const randr = native_support.add(b, displays_smoke, "window-placement-randr-fixture", "tests/window_placement_randr_fixture.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        randr.linkSystemLibrary("xrandr", .{ .use_pkg_config = .force });
+        displays_smoke.linkSystemLibrary("xrandr", .{ .use_pkg_config = .force });
+        displays_smoke.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
     }
     if (target.result.os.tag == .windows) addSmoke(b, "smoke-system-menus", "tests/system_menus_smoke.zig", target, optimize, &.{
         .{ .name = "ziggurat", .module = core },

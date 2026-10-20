@@ -33,7 +33,7 @@
 | W01 | 已完成（Windows/X11） | DIP 客户区尺寸、明确坐标系的屏幕位置、全屏进入/退出、置顶 | 普通/max/min 还原、外部 WM、状态事件、失败/重入/关闭；Wayland 能力失败已验，全屏运行未验 |
 | W02 | 已完成（Windows/X11） | 拥有/瞬态窗口、模态窗口、关闭及焦点策略 | 父关闭传播、整树模态输入策略、取消与异常回滚；独立顶层窗口，不嵌套事件循环或替代 H02 内嵌内容；依赖 W01 |
 | W03 | 部分完成（Windows/X11） | 无边框、自定义标题栏、原生拖动/缩放、透明与材质 | W03.1 装饰/命中/原生交互已验收；W03.3 Windows 系统框架材质已实现（运行验证见记录）；W03.2 客户区透明、Linux/Wayland 材质继续待实现；DPI/最大化/系统菜单；依赖 W01 |
-| W04 | 部分完成（Windows/X11） | 窗口枚举/查找、焦点、显示器约束与状态持久化 | 运行期枚举/查找、显式显示器快照、离屏恢复及版本化 worker 存储已验；原生变化订阅待 S03 显示器订阅合入后接入，物理混合 DPI/热插拔与其他平台继续，不在 paint 访问磁盘 |
+| W04 | 部分完成（Windows/X11） | 窗口枚举/查找、焦点、显示器约束与状态持久化 | 运行期枚举/查找、显式显示器快照、离屏恢复及版本化 worker 存储已验；经 S03 monitors 订阅的显示器变化可达性判断与重新放置已接入（X11 RandR 实测），物理混合 DPI/热插拔、Windows 真实显示器变化与其他平台继续，不在 paint 访问磁盘 |
 | W05 | 待实现 | 应用激活、单实例与参数转发 | OS 锁与显式 IPC；启动竞争、旧实例关闭、恶意/超长参数和用户隔离 |
 
 ## 布局、控件与绘制
@@ -1727,3 +1727,8 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - `shell.Worker` 新增 `openUrl`（默认只允许 https/http/mailto，`file:` 永远拒绝）、`openPath`、`reveal`（Windows SHOpenFolderAndSelectItems，Linux FileManager1.ShowItems 有界超时）与 `trash`（Windows SHFileOperationW 仅本地固定盘，Linux g_file_trash）。均在宿主 worker 阻塞执行，校验在交给处理程序之前完成。
 - `smoke-shell` 在私有 XDG 目录真实 trash 12 个 Unicode 文件，并在私有会话总线上用假 FileManager1 验证 ShowItems 与超时；不打开浏览器或用户文件。真实关联程序、资源管理器显示与回收站策略边界未自动验证。
 
+### W04.2 显示器变化后的重新放置
+
+- `window_placement.displacement(window, &topology)` 对照宿主刚刷新的快照分类当前原生 frame：`contained`、`partial`（单个 workarea 两个方向至少重叠 48 原生单位）、`offscreen`，特殊状态为 `special`，快照过期返回 `DisplayChanged`。只查询，不分配、不注册回调；模块仍只依赖核心。
+- 宿主用 `system.desktop.Watch` 订阅 monitors 变化，在回调里 `refresh` 与 `displacement`，`offscreen` 时以 Tracker 快照建立新的 `Restorer`。`partial` 是否收回由宿主决定，Openbox 会把越界窗口夹到可见边缘而得到这个结果。
+- 单测覆盖跨两个 workarea 的包含、部分可见、阈值边界、仅落在 workarea 外条带、小 frame 与无效矩形。`smoke-window-placement` 增加越界移动后恢复与最大化期间 `special`；新增 Linux `smoke-window-placement-displays` 用 RandR 实际缩小 Xvfb 输出，monitors 回调推进到 `offscreen` 并恢复到新 workarea，1x 与 `GDK_SCALE=2` 本地通过，结束时恢复原模式。Windows 只交叉编译，没有在真实系统上改变显示器配置。见[窗口恢复](window-placement.md)。

@@ -38,6 +38,6 @@ if [[ "$ready" != true ]]; then
     printf '%s\n' 'Isolated window manager did not become ready.' >&2
     exit 1
 fi
-for check in smoke-window-state smoke-window-relationships smoke-window-chrome smoke-window-placement; do
+for check in smoke-window-state smoke-window-relationships smoke-window-chrome smoke-window-placement smoke-window-placement-displays; do
     G_DEBUG=fatal-criticals GDK_BACKEND=x11 "${ZIG_BIN:-zig}" build "$check" "$@" -- --require-wm
 done

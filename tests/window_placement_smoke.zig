@@ -11,7 +11,7 @@ extern fn gtk_widget_get_mapped(*anyopaque) c_int;
 extern fn gtk_widget_get_window(*anyopaque) *anyopaque;
 const GdkRect = extern struct { x: c_int, y: c_int, width: c_int, height: c_int };
 extern fn gdk_window_get_frame_extents(*anyopaque, *GdkRect) void;
-const Stage = enum { initial, recover, maximize, fullscreen, io, reopen, final, done };
+const Stage = enum { initial, recover, displace, relocate, maximize, fullscreen, io, reopen, final, done };
 const Probe = struct {
     app: *z.App,
     window: z.Window = undefined,
@@ -106,7 +106,7 @@ const Probe = struct {
                 self.stage = .recover;
                 self.event_pending = true;
             },
-            .recover, .reopen, .final => {
+            .recover, .relocate, .reopen, .final => {
                 const progress = try self.restorer.advance();
                 if (progress == .needs_show) {
                     try self.window.perform(.show);
@@ -116,6 +116,19 @@ const Probe = struct {
                 if (progress != .complete) return;
                 if (self.stage == .recover) {
                     try frameContained(self.window, self.topology.monitors[self.restorer.display_index].work);
+                    try self.tracker.confirmNormal(self.window, &self.topology);
+                    try std.testing.expectEqual(p.Displacement.contained, try p.displacement(self.window, &self.topology));
+                    // Stand-in for a display change: put the frame beyond every
+                    // workarea, then recover as a monitors notification would.
+                    var right: i64 = 0;
+                    for (self.topology.items()) |monitor| right = @max(right, monitor.bounds.right());
+                    const bounds = try self.window.clientBounds();
+                    try self.window.setClientBounds(.{ .position = .{ .x = @intCast(right + 2000), .y = bounds.position.?.y }, .width = bounds.width, .height = bounds.height });
+                    self.stage = .displace;
+                    self.event_pending = true;
+                } else if (self.stage == .relocate) {
+                    try frameContained(self.window, self.topology.monitors[self.restorer.display_index].work);
+                    try std.testing.expectEqual(p.Displacement.contained, try p.displacement(self.window, &self.topology));
                     try self.tracker.confirmNormal(self.window, &self.topology);
                     self.normal = try self.tracker.snapshot();
                     self.stage = .maximize;
@@ -144,8 +157,23 @@ const Probe = struct {
                     _ = try self.window.destroy();
                 }
             },
+            .displace => {
+                self.topology = try p.refresh(self.window);
+                // Win32 accepts the frame beyond every workarea. X11 window
+                // managers such as Openbox clamp it to a visible strip.
+                switch (try p.displacement(self.window, &self.topology)) {
+                    .offscreen => {},
+                    .partial => if (builtin.os.tag != .linux) return,
+                    else => return,
+                }
+                // The tracker still holds the last confirmed normal rectangle.
+                self.restorer = try p.Restorer.init(self.window, try self.tracker.snapshot(), self.topology, .{});
+                self.stage = .relocate;
+                self.event_pending = true;
+            },
             .maximize => {
                 if (!state.maximized) return;
+                try std.testing.expectEqual(p.Displacement.special, try p.displacement(self.window, &self.topology));
                 var missing = p.Tracker.init();
                 try std.testing.expectError(error.NormalBoundsRequired, missing.observe(self.window, &self.topology));
                 try std.testing.expectEqual(p.Observation.special, try self.tracker.observe(self.window, &self.topology));
@@ -312,7 +340,7 @@ fn run(allocator: std.mem.Allocator, require_wm: bool) !void {
     try std.testing.expectEqual(Stage.done, probe.stage);
     try std.testing.expectEqual(@as(usize, 2), probe.closed);
     try std.testing.expectEqual(@as(usize, 0), app.resourceStats().allocated_records);
-    std.debug.print("window placement: workarea/offscreen restore, normal/max/full tracker, worker atomic store, reopened WM-observed placement, records=0\n", .{});
+    std.debug.print("window placement: workarea/offscreen restore, displaced-frame relocation, normal/max/full tracker, worker atomic store, reopened WM-observed placement, records=0\n", .{});
 }
 fn isolatedWindows() !void {
     var name: [64]u8 = undefined;

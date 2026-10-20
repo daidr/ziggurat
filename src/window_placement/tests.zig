@@ -201,3 +201,17 @@ test "explicit worker atomic store replaces, reloads and retries a failed destin
     thread.join();
     if (work.err) |err| return err;
 }
+test "reach separates contained, partially visible and unreachable frames across workareas" {
+    const topology = try m.Topology.init(.win32_physical, &.{ monitor("left", -1000, 0, 1000, 800, false), monitor("right", 0, 0, 1000, 800, true) });
+    try std.testing.expectEqual(m.Reach.contained, try m.reach(.{ .x = -900, .y = 40, .width = 400, .height = 300 }, &topology));
+    try std.testing.expectEqual(m.Reach.partial, try m.reach(.{ .x = -200, .y = 40, .width = 400, .height = 300 }, &topology));
+    try std.testing.expectEqual(m.Reach.partial, try m.reach(.{ .x = 1000 - m.min_reachable, .y = 800 - m.min_reachable, .width = 400, .height = 300 }, &topology));
+    try std.testing.expectEqual(m.Reach.offscreen, try m.reach(.{ .x = 1000 - m.min_reachable + 1, .y = 40, .width = 400, .height = 300 }, &topology));
+    // The workarea starts below a 20-unit band, so this frame overlaps only it.
+    try std.testing.expectEqual(m.Reach.offscreen, try m.reach(.{ .x = 100, .y = -280, .width = 400, .height = 300 }, &topology));
+    try std.testing.expectEqual(m.Reach.offscreen, try m.reach(.{ .x = 5000, .y = 5000, .width = 400, .height = 300 }, &topology));
+    // Frames smaller than the threshold must overlap entirely on that axis.
+    try std.testing.expectEqual(m.Reach.contained, try m.reach(.{ .x = 990, .y = 40, .width = 10, .height = 10 }, &topology));
+    try std.testing.expectEqual(m.Reach.offscreen, try m.reach(.{ .x = 995, .y = 40, .width = 10, .height = 10 }, &topology));
+    try std.testing.expectError(error.InvalidRectangle, m.reach(.{ .x = 0, .y = 0, .width = 0, .height = 10 }, &topology));
+}
