@@ -258,3 +258,119 @@ pub const Selection = struct {
         return self.index;
     }
 };
+
+/// Directions a zoom, a pan or a brush works in.
+pub const Directions = enum { x, y, xy };
+
+/// The part of a plot that shows, along x and along y, as spans of
+/// fractions of the whole plot: all of it from 0 to 1 at first. Marks and
+/// ticks stay in fractions of the whole plot; `shownX` and `shownY` tell
+/// where they show.
+pub const Zoom = struct {
+    x: Span = .{ .lo = 0, .hi = 1 },
+    y: Span = .{ .lo = 0, .hi = 1 },
+
+    /// The whole plot shows.
+    pub fn whole(self: Zoom) bool {
+        return self.x.lo == 0 and self.x.hi == 1 and self.y.lo == 0 and self.y.hi == 1;
+    }
+    /// Where `f`, a fraction along the whole plot's width, shows.
+    pub fn shownX(self: Zoom, f: f32) f32 {
+        return (f - self.x.lo) / (self.x.hi - self.x.lo);
+    }
+    pub fn shownY(self: Zoom, f: f32) f32 {
+        return (f - self.y.lo) / (self.y.hi - self.y.lo);
+    }
+    /// The fraction of the whole plot's width that shows at `f`, a
+    /// fraction along what shows, as under the pointer.
+    pub fn wholeX(self: Zoom, f: f32) f32 {
+        return self.x.lo + f * (self.x.hi - self.x.lo);
+    }
+    pub fn wholeY(self: Zoom, f: f32) f32 {
+        return self.y.lo + f * (self.y.hi - self.y.lo);
+    }
+    /// The box the whole plot would take for `area` to show this part of
+    /// it, for placing marks with the functions above.
+    pub fn place(self: Zoom, area: Rect) Rect {
+        const w = area.width / (self.x.hi - self.x.lo);
+        const h = area.height / (self.y.hi - self.y.lo);
+        return .{ .x = area.x - self.x.lo * w, .y = area.y + area.height + self.y.lo * h - h, .width = w, .height = h };
+    }
+
+    /// Zoom in by `factor`, or out below 1, around `at`, a point in
+    /// fractions of what shows, which stays where it is. Spans stay within
+    /// the whole plot and no shorter than `min_span`. True when it changed.
+    pub fn zoomAt(self: *Zoom, axes: Directions, factor: f32, at: Point, min_span: f32) bool {
+        if (!(factor > 0) or !std.math.isFinite(factor)) return false;
+        const before = self.*;
+        if (axes != .y) self.x = scaleSpan(self.x, factor, at.x, min_span);
+        if (axes != .x) self.y = scaleSpan(self.y, factor, at.y, min_span);
+        return !std.meta.eql(before, self.*);
+    }
+    /// Move what shows by `dx` and `dy` fractions of it, positive toward
+    /// the right and the top, held within the whole plot. True when it
+    /// changed.
+    pub fn pan(self: *Zoom, axes: Directions, dx: f32, dy: f32) bool {
+        const before = self.*;
+        if (axes != .y and std.math.isFinite(dx)) self.x = shift(self.x, dx * (self.x.hi - self.x.lo));
+        if (axes != .x and std.math.isFinite(dy)) self.y = shift(self.y, dy * (self.y.hi - self.y.lo));
+        return !std.meta.eql(before, self.*);
+    }
+    /// Show `x` and `y`, spans in fractions of what shows now, as a brush
+    /// chose them; directions outside `axes` keep their span. True when it
+    /// changed.
+    pub fn select(self: *Zoom, axes: Directions, x: Span, y: Span, min_span: f32) bool {
+        const before = self.*;
+        if (axes != .y) self.x = sub(self.x, x, min_span);
+        if (axes != .x) self.y = sub(self.y, y, min_span);
+        return !std.meta.eql(before, self.*);
+    }
+    /// Show the whole plot again. True when it changed.
+    pub fn reset(self: *Zoom) bool {
+        const changed = !self.whole();
+        self.* = .{};
+        return changed;
+    }
+
+    fn scaleSpan(s: Span, factor: f32, at: f32, min_span: f32) Span {
+        const width = s.hi - s.lo;
+        const next = std.math.clamp(width / factor, @min(@max(min_span, 1e-6), 1), 1);
+        const pivot = s.lo + std.math.clamp(at, 0, 1) * width;
+        const lo = std.math.clamp(pivot - std.math.clamp(at, 0, 1) * next, 0, 1 - next);
+        return .{ .lo = lo, .hi = lo + next };
+    }
+    fn shift(s: Span, by: f32) Span {
+        const width = s.hi - s.lo;
+        const lo = std.math.clamp(s.lo + by, 0, 1 - width);
+        return .{ .lo = lo, .hi = lo + width };
+    }
+    fn sub(s: Span, part: Span, min_span: f32) Span {
+        const width = s.hi - s.lo;
+        var lo = s.lo + @min(part.lo, part.hi) * width;
+        var hi = s.lo + @max(part.lo, part.hi) * width;
+        const least = @min(@max(min_span, 1e-6), 1);
+        if (hi - lo < least) {
+            const mid = (lo + hi) / 2;
+            lo = mid - least / 2;
+            hi = mid + least / 2;
+        }
+        lo = std.math.clamp(lo, 0, 1);
+        hi = std.math.clamp(hi, 0, 1);
+        if (hi - lo < least) {
+            if (lo == 0) hi = least else lo = 1 - least;
+        }
+        return .{ .lo = lo, .hi = hi };
+    }
+};
+
+/// A part of a plot chosen by dragging across it, in fractions of the
+/// whole plot; a brush along x alone spans all of y, and the other way.
+pub const Brush = struct { x: Span, y: Span };
+
+/// Move ticks a scale picked for the part of a plot that `shown` spans,
+/// in fractions of that part, to fractions of the whole plot, so a zoomed
+/// chart labels what shows with ticks of its own: take a scale over the
+/// values `shown` covers, its ticks, then `rebase` them.
+pub fn rebase(ticks: []Tick, shown: Span) void {
+    for (ticks) |*tick| tick.at = shown.lo + tick.at * (shown.hi - shown.lo);
+}

@@ -311,7 +311,7 @@ pub const Measurer = struct {
     }
 };
 
-pub const Kind = enum { column, row, radio_group, segmented, tab_list, list_box, toolbar, breadcrumbs, accordion, field, fieldset, split, scroll, grid, search, popup, toasts, toast, tree, tree_item, table, table_header, table_row, token_field, combo_field, text, note, badge, spacer, button, link, nav_button, combo_box, checkbox, radio, segment, tab, list_item, disclosure, toggle_switch, progress, meter, slider, stepper, rating, avatar, embed, tree_row, column_header, token, combo_toggle };
+pub const Kind = enum { column, row, radio_group, segmented, tab_list, list_box, toolbar, breadcrumbs, accordion, field, fieldset, split, scroll, grid, search, popup, toasts, toast, tree, tree_item, table, table_header, table_row, token_field, combo_field, drag_area, drag_source, drop_target, text, note, badge, spacer, button, link, nav_button, combo_box, checkbox, radio, segment, tab, list_item, disclosure, toggle_switch, progress, meter, slider, stepper, rating, avatar, embed, tree_row, column_header, token, combo_toggle };
 
 /// A leaf that measures, places and paints itself, for content the view
 /// layer does not model, such as an editable text field. The context must
@@ -342,13 +342,137 @@ pub const Embed = struct {
 };
 /// An embedded leaf that consumed a press.
 pub const EmbedPress = struct { id: u64, focusable: bool };
+/// A primary press on an embedded leaf.
+pub const PointerPress = struct {
+    position: Point,
+    /// 1 for a single press, 2 for the second of a double press, and so on.
+    count: u8 = 1,
+    modifiers: z.KeyModifiers = .{},
+};
+/// The pointer moving while it presses a leaf that took the press.
+pub const PointerDrag = struct {
+    position: Point,
+    /// Where the press began.
+    origin: Point,
+    /// Movement since the previous drag input or the press.
+    delta: Point,
+    /// The pointer has gone `drag_threshold` from the origin during this
+    /// press; it stays set once reached.
+    dragging: bool,
+};
+/// A wheel or touchpad scroll over a leaf, in DIP; positive y scrolls down.
+pub const PointerWheel = struct { position: Point, delta: Point };
 pub const EmbedInput = union(enum) {
     pointer_move: Point,
     /// The pointer moved off the leaf, or another leaf took it.
     pointer_leave,
-    pointer_down: Point,
+    /// A primary press. Taking it captures the pointer for the leaf: until
+    /// the release, moves arrive as `pointer_drag` and the release as
+    /// `pointer_up` wherever the pointer is, even outside the leaf or the
+    /// window. A press the window loses instead, through focus loss or a
+    /// cancelled capture, ends with `pointer_cancel`. A leaf that is no
+    /// longer built loses its capture and sees nothing more.
+    pointer_down: PointerPress,
+    pointer_drag: PointerDrag,
+    pointer_up: Point,
+    pointer_cancel,
+    /// Wheel input over the leaf; one it declines scrolls the containers
+    /// around it.
+    wheel: PointerWheel,
     key: z.KeyInput,
 };
+
+/// How far a press moves, in DIP, before it drags.
+pub const drag_threshold: f32 = 4;
+/// Longest gap between presses on one leaf that still counts them together.
+pub const double_press_time: u64 = 500 * std.time.ns_per_ms;
+/// Farthest a press may land from the previous one and still count with it.
+pub const double_press_distance: f32 = 4;
+/// How near the edge of a scroll container a drag scrolls it, in DIP.
+pub const drag_scroll_edge: f32 = 32;
+/// Drag areas, drag sources and drop targets input can reach in one frame.
+pub const max_drag_regions = 32;
+/// Containers whose items reorder by dragging, in one frame.
+pub const max_reorder_lists = 4;
+/// Items of those containers that a drag can reach in one frame.
+pub const max_reorder_items = 256;
+
+pub const DragPhase = enum {
+    /// The press moved `drag_threshold` away from where it began.
+    start,
+    move,
+    /// The pointer was released.
+    end,
+    /// The press was lost: Escape, a cancelled capture or focus loss.
+    cancel,
+};
+/// A drag of a `draggable` area, delivered in its own pass.
+pub const DragEvent = struct {
+    id: u64,
+    phase: DragPhase,
+    origin: Point,
+    position: Point,
+    /// Movement since the previous drag event.
+    delta: Point,
+    modifiers: z.KeyModifiers = .{},
+};
+/// The drag of a `draggable` area, kept by the application at a stable
+/// address. The view updates it in the pass of each drag event.
+pub const Gesture = struct {
+    /// A press moved past `drag_threshold` and has neither ended nor been
+    /// cancelled.
+    dragging: bool = false,
+    /// Where the press began, in window DIP.
+    origin: Point = .{},
+    /// Where the pointer is now.
+    position: Point = .{},
+    /// Movement since the previous drag event.
+    delta: Point = .{},
+    /// Modifiers held when the press began.
+    modifiers: z.KeyModifiers = .{},
+    /// How far the pointer moved from the origin.
+    pub fn translation(self: Gesture) Point {
+        return .{ .x = self.position.x - self.origin.x, .y = self.position.y - self.origin.y };
+    }
+};
+
+/// A value dragged within the window from a `dragSource` to a `dropTarget`:
+/// `kind` tells targets what it is, as a type would, and `value` which one,
+/// such as an item id.
+pub const Payload = struct { kind: u64, value: u64 };
+/// What a `dropTarget` takes: values of one kind from this window, and
+/// files or text dragged in from other applications through `Host`.
+pub const Accept = struct {
+    kind: ?u64 = null,
+    files: bool = false,
+    text: bool = false,
+
+    fn takes(self: Accept, offer: Offer) bool {
+        if (offer.value) |payload| if (self.kind) |wanted| if (wanted == payload.kind) return true;
+        return (self.files and offer.files) or (self.text and offer.text);
+    }
+};
+/// What a drag over a target offers. Drags from other applications tell the
+/// kinds of data before the drop, but not the data.
+pub const Offer = struct { value: ?Payload = null, files: bool = false, text: bool = false };
+/// What dropped on a target. Files are absolute UTF-8 paths separated by a
+/// NUL byte. Bytes are borrowed for the pass that delivers them.
+pub const Dropped = union(enum) {
+    value: Payload,
+    files: []const u8,
+    text: []const u8,
+};
+pub const DropState = union(enum) {
+    none,
+    /// A drag the target takes is over it.
+    over: Offer,
+    /// Something dropped on it in this pass, at a window point.
+    dropped: struct { data: Dropped, position: Point },
+};
+/// Items of a `reorder` container moving: the item at `from` goes before
+/// the item at `to`, where the count of items means after the last. Both
+/// count the items in build order before the move.
+pub const Move = struct { from: usize, to: usize };
 
 pub const Node = struct {
     kind: Kind,
@@ -406,6 +530,14 @@ pub const Node = struct {
     row: u32 = none,
     /// Sort direction of a column header, when the table is sorted by it.
     sort: ?SortDirection = null,
+    /// What a drag source drags.
+    payload: Payload = .{ .kind = 0, .value = 0 },
+    /// What a drop target takes.
+    accept: Accept = .{},
+    /// The container's items reorder by dragging; see `View.reorder`.
+    reorder: bool = false,
+    /// A drag from a row of this tree or table selects the rows it crosses.
+    drag_select: bool = false,
     parent: u32 = none,
     first_child: u32 = none,
     last_child: u32 = none,
@@ -420,7 +552,7 @@ pub const Node = struct {
 
     pub fn isContainer(self: *const Node) bool {
         return switch (self.kind) {
-            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .toasts, .toast, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field => true,
+            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .toasts, .toast, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target => true,
             else => false,
         };
     }
@@ -468,6 +600,12 @@ pub const Event = union(enum) {
     scroll: struct { id: u64, delta: Point },
     /// A press or key on a tree or table row, taken by the collection.
     item: ItemEvent,
+    /// A drag of a `draggable` area.
+    drag: DragEvent,
+    /// A drop on a `dropTarget`, at a window point.
+    drop: struct { id: u64, data: Dropped, position: Point },
+    /// Items of a `reorder` container dropped at another place.
+    reorder: struct { id: u64, move: Move },
 };
 
 /// What a press or key does to a tree or table row.
@@ -488,6 +626,10 @@ pub const ItemOp = enum {
     activate,
     /// Select every built item of a multiple selection (Ctrl+A).
     select_all,
+    /// A drag from the anchor over rows to this one: select from the anchor
+    /// to it, replacing the selection, or with `ItemEvent.add` adding to
+    /// the selection the drag began with.
+    drag,
 };
 pub const ItemEvent = struct {
     /// Node id of the tree or table.
@@ -497,6 +639,8 @@ pub const ItemEvent = struct {
     op: ItemOp,
     /// Where a range starts; null starts it at `item`.
     anchor: ?u64 = null,
+    /// A `drag` keeps the selection it began with (Ctrl held at the press).
+    add: bool = false,
 };
 
 /// Which popup is open and what keyboard navigation reached in it. It
@@ -574,11 +718,40 @@ pub const Overlay = struct {
         /// Part left visible by clips; empty when scrolled out.
         rect: Rect,
         enabled: bool,
+        /// Node index in build order.
+        index: u32 = 0,
     };
-    pub const Collection = struct { id: u64, tree: bool, multiple: bool, anchor: ?u64, page: usize };
+    pub const Collection = struct {
+        id: u64,
+        tree: bool,
+        multiple: bool,
+        anchor: ?u64,
+        page: usize,
+        /// A drag from a row selects the rows it crosses.
+        drag_select: bool = false,
+        /// The nearest scroll container around it.
+        scroll: ?u64 = null,
+    };
     pub const Token = struct { id: u64, remove: u64, field: u64, rect: Rect, enabled: bool };
     pub const TokenField = struct { id: u64, input: ?u64, embed: ?Embed };
     pub const Interactive = struct { id: u64, bounds: Rect, rect: Rect, embed: Embed };
+    /// A draggable area, drag source or drop target.
+    pub const DragRegion = struct {
+        pub const Role = enum { area, source, target };
+        id: u64,
+        /// Node index in build order, deeper nodes after their ancestors.
+        index: u32,
+        role: Role,
+        bounds: Rect,
+        /// Part left visible by clips.
+        rect: Rect,
+        payload: Payload = .{ .kind = 0, .value = 0 },
+        accept: Accept = .{},
+    };
+    /// A container whose items reorder by dragging; its items are
+    /// `reorder_items[first..][0..count]`.
+    pub const ReorderList = struct { id: u64, axis: Axis, rect: Rect, first: u32, count: u32, scroll: ?u64 };
+    pub const ReorderItem = struct { id: u64, index: u32, bounds: Rect, rect: Rect };
     popup: ?Popup = null,
     /// Enabled options of the open popup, in build order.
     items: [max_popup_items]Region = undefined,
@@ -601,6 +774,57 @@ pub const Overlay = struct {
     /// Visible enabled embedded leaves with an input callback, in paint order.
     embeds: [max_interactive_embeds]Interactive = undefined,
     embed_count: usize = 0,
+    /// Enabled draggable areas, drag sources and drop targets in build order.
+    regions: [max_drag_regions]DragRegion = undefined,
+    region_count: usize = 0,
+    lists: [max_reorder_lists]ReorderList = undefined,
+    list_count: usize = 0,
+    reorder_items: [max_reorder_items]ReorderItem = undefined,
+    reorder_item_count: usize = 0,
+    /// Visible scroll containers in paint order, which wheel input and
+    /// drags near their edges scroll.
+    scrolls: [max_scroll_regions]Region = undefined,
+    scroll_count: usize = 0,
+};
+
+/// A press the view follows until its release: one an embedded leaf took,
+/// or one on something the pointer drags, which drags once it moves
+/// `drag_threshold`.
+pub const Capture = struct {
+    pub const Target = union(enum) {
+        embed: u64,
+        area: u64,
+        source: struct { id: u64, payload: Payload },
+        reorder: struct { list: u64, from: usize, to: usize },
+        select: struct { collection: u64, item: u64, add: bool, last: u64 },
+    };
+    target: Target,
+    origin: Point,
+    position: Point,
+    modifiers: z.KeyModifiers = .{},
+    dragging: bool = false,
+};
+
+/// What the view did with pointer input it routed; the caller delivers the
+/// events and applies the rest.
+pub const PointerResult = struct {
+    /// Taken; route it no further.
+    consumed: bool = false,
+    repaint: bool = false,
+    /// Drop the press of the control under the pointer, so a drag does not
+    /// end in its activation.
+    cancel_press: bool = false,
+    /// An embedded leaf that took a press and holds focus from now on.
+    focus: ?u64 = null,
+    /// Events to deliver in order, each in a pass of its own.
+    events: [2]?Event = .{ null, null },
+
+    fn push(self: *PointerResult, event: Event) void {
+        for (&self.events) |*slot| if (slot.* == null) {
+            slot.* = event;
+            return;
+        };
+    }
 };
 
 /// What `View.routeKey` did with a key press.
@@ -647,6 +871,24 @@ pub const View = struct {
     overlay: Overlay = .{},
     /// The interactive embedded leaf under the pointer.
     embed_hover: ?u64 = null,
+    /// The press being followed, if any; it outlives passes.
+    capture: ?Capture = null,
+    /// The last press on an embedded leaf, to count double presses.
+    last_press: struct { id: u64 = 0, time: u64 = 0, at: Point = .{}, count: u8 = 0 } = .{},
+    /// The drop target under a drag within the window.
+    drop_over: ?u64 = null,
+    /// A drag from another application over the window.
+    system_drag: ?struct { over: ?u64, files: bool, text: bool } = null,
+    /// The selection a Ctrl drag over rows began with.
+    drag_base: [max_collection_rows]u64 = undefined,
+    drag_base_len: usize = 0,
+    drag_base_taken: bool = false,
+    /// What the last arrange paints for a drag: a copy of what moves, its
+    /// label, the gap a reordered item goes to, and the target under it.
+    drag_ghost: ?Rect = null,
+    drag_label: []const u8 = "",
+    insert_mark: ?Rect = null,
+    drop_mark: ?Rect = null,
     /// Text for assistive technology to announce, and the serial that
     /// makes each announcement a new live region.
     announcement: [max_announcement]u8 = undefined,
@@ -775,6 +1017,9 @@ pub const View = struct {
             .value => |value| value.id,
             .scroll => |value| value.id,
             .item => |value| value.collection,
+            .drag => |value| value.id,
+            .drop => |value| value.id,
+            .reorder => |value| value.id,
         };
         if (target != id) return null;
         self.event = null;
@@ -1223,9 +1468,11 @@ pub const View = struct {
 
     fn openCollection(self: *View, node: *Node, selection: *Selection) Error!void {
         node.selection = selection;
-        const event = self.take(node.id) orelse return;
-        if (event != .item) return;
-        const value = event.item;
+        // Other events for the collection, such as a reorder, are left
+        // for the calls that follow.
+        const pending = self.event orelse return;
+        if (pending != .item or pending.item.collection != node.id) return;
+        const value = self.take(node.id).?.item;
         switch (value.op) {
             .select => try selection.set(value.item),
             .toggle => {
@@ -1243,6 +1490,25 @@ pub const View = struct {
             },
             .select_all => if (selection.mode == .multiple) {
                 self.range = .{ .collection = node.id, .from = null, .to = value.item };
+            },
+            .drag => if (selection.mode == .single) try selection.set(value.item) else {
+                // The first step of a drag keeps the selection it began
+                // with when it adds; every step rebuilds from it.
+                if (!self.drag_base_taken) {
+                    self.drag_base_taken = true;
+                    self.drag_base_len = 0;
+                    if (value.add) for (selection.items()) |id| {
+                        if (self.drag_base_len == self.drag_base.len) break;
+                        self.drag_base[self.drag_base_len] = id;
+                        self.drag_base_len += 1;
+                    };
+                }
+                selection.clear();
+                for (self.drag_base[0..self.drag_base_len]) |id| try selection.add(id);
+                const from = value.anchor orelse value.item;
+                selection.anchor = from;
+                selection.cursor = value.item;
+                self.range = .{ .collection = node.id, .from = from, .to = value.item };
             },
             .expand, .collapse, .activate => {},
         }
@@ -2025,12 +2291,285 @@ pub const View = struct {
         if (target) |entry| repaint = entry.embed.input.?(entry.embed.context, entry.id, .{ .pointer_move = local(entry, point.?) }) or repaint;
         return repaint;
     }
-    /// A primary press at `point`: the leaf under it sees `pointer_down`.
-    /// The leaf that consumed it, which takes focus when it is focusable.
-    pub fn embedPointerDown(self: *View, point: Point) ?EmbedPress {
-        const entry = self.embedAt(point) orelse return null;
-        if (!entry.embed.input.?(entry.embed.context, entry.id, .{ .pointer_down = local(entry, point) })) return null;
-        return .{ .id = entry.id, .focusable = entry.embed.focusable };
+    /// A primary press at `point`, routed after `pointerDown`. The leaf
+    /// under it sees `pointer_down`; one that takes it captures the pointer
+    /// and, when focusable, takes focus. Otherwise a press on a draggable
+    /// area, a drag source, a reorderable item or a row of a tree or table
+    /// that drag-selects is followed, and drags once it moves
+    /// `drag_threshold`. `adjusting` tells that the press landed on a
+    /// control that drags its own value, such as a slider, which keeps it.
+    /// `now` is the time of the press, which counts double presses.
+    pub fn pointerPress(self: *View, point: Point, modifiers: z.KeyModifiers, now: u64, adjusting: bool) PointerResult {
+        var result: PointerResult = .{};
+        self.capture = null;
+        self.drop_over = null;
+        self.drag_base_taken = false;
+        if (self.embedAt(point)) |entry| {
+            const last = self.last_press;
+            const again = last.id == entry.id and now >= last.time and now - last.time <= double_press_time and distance(last.at, point) <= double_press_distance;
+            const count: u8 = if (again) last.count +| 1 else 1;
+            self.last_press = .{ .id = entry.id, .time = now, .at = point, .count = count };
+            if (entry.embed.input.?(entry.embed.context, entry.id, .{ .pointer_down = .{ .position = local(entry, point), .count = count, .modifiers = modifiers } })) {
+                self.capture = .{ .target = .{ .embed = entry.id }, .origin = point, .position = point, .modifiers = modifiers };
+                result.consumed = true;
+                result.repaint = true;
+                if (entry.embed.focusable) result.focus = entry.id;
+                return result;
+            }
+        } else self.last_press.id = 0;
+        if (adjusting) return result;
+        const target = self.pressTarget(point, modifiers) orelse return result;
+        self.capture = .{ .target = target, .origin = point, .position = point, .modifiers = modifiers };
+        return result;
+    }
+
+    /// The innermost thing under `point` that a drag from it moves.
+    fn pressTarget(self: *const View, point: Point, modifiers: z.KeyModifiers) ?Capture.Target {
+        var best: ?Capture.Target = null;
+        var depth: u32 = 0;
+        for (self.overlay.regions[0..self.overlay.region_count]) |region| {
+            if (region.role == .target or !contains(region.rect, point) or (best != null and region.index < depth)) continue;
+            best = if (region.role == .area) .{ .area = region.id } else .{ .source = .{ .id = region.id, .payload = region.payload } };
+            depth = region.index;
+        }
+        for (self.overlay.lists[0..self.overlay.list_count]) |list| {
+            for (self.overlay.reorder_items[list.first..][0..list.count], 0..) |entry, at| {
+                if (!contains(entry.rect, point) or (best != null and entry.index < depth)) continue;
+                best = .{ .reorder = .{ .list = list.id, .from = at, .to = at } };
+                depth = entry.index;
+            }
+        }
+        for (self.overlay.rows[0..self.overlay.row_count]) |line| {
+            if (!line.enabled or !contains(line.rect, point) or (best != null and line.index < depth)) continue;
+            const owner = self.collectionEntry(line.collection) orelse continue;
+            if (!owner.drag_select) continue;
+            best = .{ .select = .{ .collection = line.collection, .item = line.item, .add = modifiers.control and owner.multiple, .last = line.item } };
+            depth = line.index;
+        }
+        return best;
+    }
+    fn collectionEntry(self: *const View, id: u64) ?Overlay.Collection {
+        for (self.overlay.collections[0..self.overlay.collection_count]) |entry| if (entry.id == id) return entry;
+        return null;
+    }
+
+    /// The pointer moved to `point` while a press is followed. Null when
+    /// none is, or it has not moved far enough to drag, so the move goes
+    /// on to hover and the controls.
+    pub fn captureMove(self: *View, point: Point) ?PointerResult {
+        const capture = if (self.capture) |*value| value else return null;
+        var result: PointerResult = .{};
+        const delta: Point = .{ .x = point.x - capture.position.x, .y = point.y - capture.position.y };
+        capture.position = point;
+        const started = !capture.dragging and distance(capture.origin, point) >= drag_threshold;
+        if (started) capture.dragging = true;
+        if (capture.target == .embed) {
+            result.consumed = true;
+            const entry = self.interactiveEmbed(capture.target.embed) orelse {
+                self.capture = null;
+                return result;
+            };
+            result.repaint = entry.embed.input.?(entry.embed.context, entry.id, .{ .pointer_drag = .{ .position = local(entry, point), .origin = local(entry, capture.origin), .delta = delta, .dragging = capture.dragging } });
+            return result;
+        }
+        if (!capture.dragging) return null;
+        result.consumed = true;
+        result.repaint = true;
+        result.cancel_press = started;
+        switch (capture.target) {
+            .embed => unreachable,
+            .area => |id| result.push(.{ .drag = .{ .id = id, .phase = if (started) .start else .move, .origin = capture.origin, .position = point, .delta = if (started) .{ .x = point.x - capture.origin.x, .y = point.y - capture.origin.y } else delta, .modifiers = capture.modifiers } }),
+            .source => |source| {
+                self.drop_over = self.dropTargetAt(point, .{ .value = source.payload });
+                if (self.edgeScroll(self.scrollAt(point), point)) |event| result.push(event);
+            },
+            .reorder => |*value| {
+                const list = self.reorderList(value.list) orelse {
+                    self.capture = null;
+                    return result;
+                };
+                value.to = self.reorderSlot(list, point);
+                if (self.edgeScroll(list.scroll, point)) |event| result.push(event);
+            },
+            .select => |*value| {
+                const under = self.rowUnder(value.collection, point) orelse value.last;
+                if (started or under != value.last) result.push(.{ .item = .{ .collection = value.collection, .item = under, .op = .drag, .anchor = value.item, .add = value.add } });
+                value.last = under;
+                if (self.collectionEntry(value.collection)) |owner| if (self.edgeScroll(owner.scroll, point)) |event| result.push(event);
+            },
+        }
+        return result;
+    }
+
+    /// The primary button was released at `point`. A leaf holding the
+    /// capture sees `pointer_up`; a drag ends, delivering its drop, and its
+    /// press activates nothing. A press that never dragged is left to the
+    /// controls, as a click.
+    pub fn captureRelease(self: *View, point: Point) PointerResult {
+        var result: PointerResult = .{};
+        const capture = self.capture orelse return result;
+        self.capture = null;
+        self.drop_over = null;
+        if (capture.target == .embed) {
+            result.consumed = true;
+            const entry = self.interactiveEmbed(capture.target.embed) orelse return result;
+            result.repaint = entry.embed.input.?(entry.embed.context, entry.id, .{ .pointer_up = local(entry, point) });
+            return result;
+        }
+        if (!capture.dragging) return result;
+        result.consumed = true;
+        result.repaint = true;
+        result.cancel_press = true;
+        switch (capture.target) {
+            .embed => unreachable,
+            .area => |id| result.push(.{ .drag = .{ .id = id, .phase = .end, .origin = capture.origin, .position = point, .delta = .{ .x = point.x - capture.position.x, .y = point.y - capture.position.y }, .modifiers = capture.modifiers } }),
+            .source => |source| if (self.dropTargetAt(point, .{ .value = source.payload })) |id| {
+                result.push(.{ .drop = .{ .id = id, .data = .{ .value = source.payload }, .position = point } });
+            },
+            .reorder => |value| {
+                const list = self.reorderList(value.list) orelse return result;
+                const to = self.reorderSlot(list, point);
+                // An item dropped where it is stays.
+                if (to != value.from and to != value.from + 1) result.push(.{ .reorder = .{ .id = value.list, .move = .{ .from = value.from, .to = to } } });
+            },
+            .select => {},
+        }
+        return result;
+    }
+
+    /// The press was lost before its release: the window lost focus or the
+    /// capture, or Escape gave the drag up. A leaf holding the capture sees
+    /// `pointer_cancel`, a draggable area a `.cancel` drag, and a drag of a
+    /// payload or an item drops nothing.
+    pub fn captureCancel(self: *View) PointerResult {
+        var result: PointerResult = .{};
+        const capture = self.capture orelse return result;
+        self.capture = null;
+        self.drop_over = null;
+        switch (capture.target) {
+            .embed => |id| {
+                const entry = self.interactiveEmbed(id) orelse return result;
+                result.repaint = entry.embed.input.?(entry.embed.context, entry.id, .pointer_cancel);
+            },
+            .area => |id| if (capture.dragging) result.push(.{ .drag = .{ .id = id, .phase = .cancel, .origin = capture.origin, .position = capture.position, .delta = .{}, .modifiers = capture.modifiers } }),
+            else => {},
+        }
+        if (capture.dragging) {
+            result.repaint = true;
+            result.cancel_press = true;
+        }
+        return result;
+    }
+
+    /// Escape during a drag gives it up; null for any other key, or when
+    /// nothing drags. A leaf holding the capture handles its own keys.
+    pub fn dragKey(self: *View, input: z.KeyInput) ?PointerResult {
+        const capture = self.capture orelse return null;
+        if (input.key != .escape or !capture.dragging or capture.target == .embed) return null;
+        var result = self.captureCancel();
+        result.consumed = true;
+        return result;
+    }
+
+    /// Wheel movement at `point`: the interactive leaf under it sees it
+    /// first; true when it took it.
+    pub fn embedWheel(self: *View, point: Point, delta: Point) bool {
+        const entry = self.embedAt(point) orelse return false;
+        return entry.embed.input.?(entry.embed.context, entry.id, .{ .wheel = .{ .position = local(entry, point), .delta = delta } });
+    }
+
+    /// The innermost visible scroll container at `point`.
+    pub fn scrollAt(self: *const View, point: Point) ?u64 {
+        var index = self.overlay.scroll_count;
+        while (index > 0) {
+            index -= 1;
+            const region = self.overlay.scrolls[index];
+            if (contains(region.rect, point)) return region.id;
+        }
+        return null;
+    }
+
+    /// A scroll of the container `id` toward the pointer near or past its
+    /// top or bottom edge, faster nearer and past it.
+    fn edgeScroll(self: *const View, id: ?u64, point: Point) ?Event {
+        const wanted = id orelse return null;
+        for (self.overlay.scrolls[0..self.overlay.scroll_count]) |region| {
+            if (region.id != wanted) continue;
+            const r = region.rect;
+            const top = point.y - r.y;
+            const bottom = r.y + r.height - point.y;
+            const dy: f32 = if (top < drag_scroll_edge) -@min(drag_scroll_edge - top, 2 * drag_scroll_edge) / 2 else if (bottom < drag_scroll_edge) @min(drag_scroll_edge - bottom, 2 * drag_scroll_edge) / 2 else 0;
+            if (dy == 0) return null;
+            return .{ .scroll = .{ .id = wanted, .delta = .{ .x = 0, .y = dy } } };
+        }
+        return null;
+    }
+
+    /// The innermost drop target at `point` that takes `offer`.
+    fn dropTargetAt(self: *const View, point: Point, offer: Offer) ?u64 {
+        var index = self.overlay.region_count;
+        while (index > 0) {
+            index -= 1;
+            const region = self.overlay.regions[index];
+            if (region.role == .target and contains(region.rect, point) and region.accept.takes(offer)) return region.id;
+        }
+        return null;
+    }
+
+    fn reorderList(self: *const View, id: u64) ?Overlay.ReorderList {
+        for (self.overlay.lists[0..self.overlay.list_count]) |list| if (list.id == id) return list;
+        return null;
+    }
+    /// The item before which an item dropped at `point` goes: the first
+    /// whose middle is past the point along the list, or the count of items.
+    fn reorderSlot(self: *const View, list: Overlay.ReorderList, point: Point) usize {
+        for (self.overlay.reorder_items[list.first..][0..list.count], 0..) |entry, at| {
+            const b = entry.bounds;
+            const past = if (list.axis == .row) point.x < b.x + b.width / 2 else point.y < b.y + b.height / 2;
+            if (past) return at;
+        }
+        return list.count;
+    }
+
+    /// The application id of the visible row of `collection` level with
+    /// `point`, or the first or last visible row when the point is above or
+    /// below them.
+    fn rowUnder(self: *const View, collection: u64, point: Point) ?u64 {
+        var first: ?Overlay.Row = null;
+        var last: ?Overlay.Row = null;
+        for (self.overlay.rows[0..self.overlay.row_count]) |line| {
+            if (line.collection != collection or !line.enabled or !(line.rect.height > 0)) continue;
+            if (point.y >= line.rect.y and point.y < line.rect.y + line.rect.height) return line.item;
+            if (first == null) first = line;
+            last = line;
+        }
+        const top = first orelse return null;
+        if (point.y < top.rect.y) return top.item;
+        const bottom = last.?;
+        if (point.y >= bottom.rect.y + bottom.rect.height) return bottom.item;
+        return null;
+    }
+
+    /// Follow a drag from another application at `point`, or off the window
+    /// with null, offering files or text; true when a drop target there
+    /// takes it. `changed` tells that the target under it changed.
+    pub fn systemDragOver(self: *View, point: ?Point, files: bool, plain: bool) struct { accepted: bool, changed: bool } {
+        const before: ?u64 = if (self.system_drag) |drag| drag.over else null;
+        const over = if (point) |at| self.dropTargetAt(at, .{ .files = files, .text = plain }) else null;
+        self.system_drag = if (point != null) .{ .over = over, .files = files, .text = plain } else null;
+        return .{ .accepted = over != null, .changed = !std.meta.eql(before, over) };
+    }
+    /// A drop from another application at `point`: the event that delivers
+    /// it to the drop target there, or null when none takes it.
+    pub fn systemDrop(self: *View, point: Point, data: Dropped) ?Event {
+        self.system_drag = null;
+        const offer: Offer = switch (data) {
+            .files => .{ .files = true },
+            .text => .{ .text = true },
+            .value => |payload| .{ .value = payload },
+        };
+        const id = self.dropTargetAt(point, offer) orelse return null;
+        return .{ .drop = .{ .id = id, .data = data, .position = point } };
     }
     /// A key for the focused leaf; true when it consumed the key.
     pub fn embedKey(self: *View, input: z.KeyInput) bool {
@@ -2094,10 +2633,131 @@ pub const View = struct {
         node.embed = content;
     }
 
+    /// Starts an area the pointer drags, laid out as a column. A primary
+    /// press on it that moves `drag_threshold` starts a drag, followed
+    /// wherever the pointer goes until the release, which ends it, or until
+    /// Escape, focus loss or a lost capture cancels it. Each phase arrives
+    /// in a pass of its own that updates `gesture` and returns the phase;
+    /// other passes return null. A press on a button inside still clicks it
+    /// unless it moves far enough to drag; sliders, splits and embedded
+    /// leaves that take the press keep it. An area no longer built loses
+    /// its drag, and the next build after that returns `.cancel` once.
+    /// Close it with `end`.
+    pub fn draggable(self: *View, gesture: *Gesture, style: Style) Error!?DragPhase {
+        const node = try self.open(.drag_area, style);
+        if (self.take(node.id)) |event| if (event == .drag) {
+            const drag = event.drag;
+            gesture.origin = drag.origin;
+            gesture.position = drag.position;
+            gesture.delta = drag.delta;
+            gesture.modifiers = drag.modifiers;
+            gesture.dragging = drag.phase == .start or drag.phase == .move;
+            return drag.phase;
+        };
+        if (gesture.dragging and !self.dragging(.area, node.id)) {
+            gesture.dragging = false;
+            gesture.delta = .{};
+            return .cancel;
+        }
+        return null;
+    }
+
+    /// Starts a drag source, laid out as a column: a primary press on it
+    /// that moves `drag_threshold` drags `payload` within the window. A copy
+    /// of it follows the pointer, and the innermost `dropTarget` under the
+    /// pointer that takes the payload's kind gets it when released; Escape
+    /// gives the drag up. Controls inside keep their clicks unless the press
+    /// drags. True while it is dragged, to show it dimmed. Close it with
+    /// `end`.
+    pub fn dragSource(self: *View, payload: Payload, style: Style) Error!bool {
+        const node = try self.open(.drag_source, style);
+        node.payload = payload;
+        return self.dragging(.source, node.id);
+    }
+
+    /// Starts a drop target, laid out as a column, that takes what `accept`
+    /// names: payloads of its kind dragged from a `dragSource`, and files
+    /// or text dragged in from other applications when the application
+    /// routes them through `Host.systemDragOver` and `Host.systemDrop`.
+    /// While a drag it takes is over it, it is outlined and returns `.over`;
+    /// in the pass delivering a drop it returns `.dropped`. Close it with
+    /// `end`.
+    pub fn dropTarget(self: *View, accept: Accept, style: Style) Error!DropState {
+        const node = try self.open(.drop_target, style);
+        node.accept = accept;
+        if (self.take(node.id)) |event| if (event == .drop) return .{ .dropped = .{ .data = event.drop.data, .position = event.drop.position } };
+        if (self.drop_over) |over| if (over == node.id) if (self.capture) |capture| switch (capture.target) {
+            .source => |source| return .{ .over = .{ .value = source.payload } },
+            else => {},
+        };
+        if (self.system_drag) |drag| if (drag.over) |over| if (over == node.id) return .{ .over = .{ .files = drag.files, .text = drag.text } };
+        return .none;
+    }
+
+    /// Let the pointer drag the items of the container just opened to
+    /// another place among them: the rows of a table, the options of a list
+    /// box, or the children of a column or row. Call it before building any
+    /// item. A primary press on an item that moves `drag_threshold` picks it
+    /// up; a copy follows the pointer, a line shows where it would go, and
+    /// near or past the edge of a scroll container around the items the
+    /// drag scrolls it. The release returns the move in its own pass; the
+    /// application moves its items. Escape gives the drag up. A tree cannot
+    /// reorder, and a table cannot both reorder and `dragSelect`.
+    pub fn reorder(self: *View) Error!?Move {
+        const index = self.stack[self.depth - 1];
+        if (index == 0) return error.NotContainer;
+        const node = &self.buffers.nodes[index];
+        if (node.kind == .tree or node.drag_select) return error.InvalidValue;
+        if (node.kind != .table and node.child_count != 0) return error.InvalidValue;
+        node.reorder = true;
+        if (self.take(node.id)) |event| if (event == .reorder) return event.reorder.move;
+        return null;
+    }
+
+    /// Let a primary drag from a row of the tree or table just opened select
+    /// the rows from that row to the one under the pointer, as Shift and a
+    /// press would; with Ctrl held as the press began, it adds them to the
+    /// rows already selected. Near or past the edge of a scroll container
+    /// around the collection, the drag scrolls it.
+    pub fn dragSelect(self: *View) Error!void {
+        const node = &self.buffers.nodes[self.stack[self.depth - 1]];
+        if (node.kind != .tree and node.kind != .table) return error.NotContainer;
+        if (node.reorder) return error.InvalidValue;
+        node.drag_select = true;
+    }
+
+    /// True while a press that began on the node with `id` drags it.
+    fn dragging(self: *const View, comptime role: std.meta.Tag(Capture.Target), id: u64) bool {
+        const capture = self.capture orelse return false;
+        if (!capture.dragging) return false;
+        return switch (capture.target) {
+            .area => |value| role == .area and value == id,
+            .source => |value| role == .source and value.id == id,
+            else => false,
+        };
+    }
+
+    fn captureBuilt(self: *const View, target: Capture.Target) bool {
+        for (self.buffers.nodes[0..self.len]) |*node| switch (target) {
+            .embed => |id| if (node.id == id and node.kind == .embed and node.embed.?.input != null) return true,
+            .area => |id| if (node.id == id and node.kind == .drag_area) return true,
+            .source => |source| if (node.id == source.id and node.kind == .drag_source) return true,
+            .reorder => |value| if (node.id == value.list and node.reorder) return true,
+            .select => |value| if (node.id == value.collection and node.drag_select) return true,
+        };
+        return false;
+    }
+
     /// Validate balance after the build function returns.
     pub fn finish(self: *View) Error!void {
         if (self.depth != 1) return error.UnbalancedContainer;
         self.buffers.nodes[0].end = self.len;
+        // A press on something no longer built is no longer followed; a
+        // leaf that is gone is never called again.
+        if (self.capture) |capture| if (!self.captureBuilt(capture.target)) {
+            self.capture = null;
+            self.drop_over = null;
+        };
         // A combo box that is no longer built cannot keep its list open.
         if (self.popup.open) |owner| {
             const present = for (self.buffers.nodes[0..self.len]) |*node| {
@@ -2137,7 +2797,7 @@ pub const View = struct {
             .rating => .{ .width = @as(f32, @floatCast(node.range.maximum)) * Measurer.line_height, .height = Measurer.line_height + metrics.content_inset },
             .slider => .{ .width = 200, .height = metrics.thumb_size + 2 * metrics.content_inset },
             .stepper => .{ .width = 4 * (Measurer.line_height + metrics.content_inset), .height = Measurer.line_height + metrics.content_inset },
-            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .toasts, .toast, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .embed => unreachable,
+            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .toasts, .toast, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target, .embed => unreachable,
         };
         const minimum: Size = switch (node.kind) {
             .progress, .meter, .slider, .spacer => .{ .width = 0, .height = size.height },
@@ -2380,6 +3040,10 @@ pub const View = struct {
         overlay.token_count = 0;
         overlay.token_field_count = 0;
         overlay.embed_count = 0;
+        overlay.region_count = 0;
+        overlay.list_count = 0;
+        overlay.reorder_item_count = 0;
+        overlay.scroll_count = 0;
         const zero: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
         for (all, 0..) |*node, index| {
             switch (node.kind) {
@@ -2389,7 +3053,7 @@ pub const View = struct {
                 },
                 .tree, .table => if (overlay.collection_count < max_collections) {
                     const selection = node.selection.?;
-                    overlay.collections[overlay.collection_count] = .{ .id = node.id, .tree = node.kind == .tree, .multiple = selection.mode == .multiple, .anchor = null, .page = 1 };
+                    overlay.collections[overlay.collection_count] = .{ .id = node.id, .tree = node.kind == .tree, .multiple = selection.mode == .multiple, .anchor = null, .page = 1, .drag_select = node.drag_select and node.style.enabled, .scroll = self.scrollAround(node) };
                     overlay.collection_count += 1;
                 },
                 .tree_row, .table_row => if (overlay.row_count < max_collection_rows and node.collection != none) {
@@ -2409,13 +3073,33 @@ pub const View = struct {
                             }
                         }
                     }
-                    overlay.rows[overlay.row_count] = .{ .id = node.id, .item = node.item, .collection = owner.id, .level = node.level, .expanded = node.expanded, .parent = parent, .bounds = node.bounds, .rect = self.visible(node) orelse zero, .enabled = node.style.enabled };
+                    overlay.rows[overlay.row_count] = .{ .id = node.id, .item = node.item, .collection = owner.id, .level = node.level, .expanded = node.expanded, .parent = parent, .bounds = node.bounds, .rect = self.visible(node) orelse zero, .enabled = node.style.enabled, .index = @intCast(index) };
                     overlay.row_count += 1;
                 },
                 .token_field => if (overlay.token_field_count < max_token_fields) {
                     const input = self.firstEmbed(@intCast(index));
                     overlay.token_fields[overlay.token_field_count] = .{ .id = node.id, .input = if (input) |at| all[at].id else null, .embed = if (input) |at| all[at].embed else null };
                     overlay.token_field_count += 1;
+                },
+                .drag_area, .drag_source, .drop_target => if (node.style.enabled and overlay.region_count < max_drag_regions) {
+                    overlay.regions[overlay.region_count] = .{
+                        .id = node.id,
+                        .index = @intCast(index),
+                        .role = switch (node.kind) {
+                            .drag_area => .area,
+                            .drag_source => .source,
+                            else => .target,
+                        },
+                        .bounds = node.bounds,
+                        .rect = self.visible(node) orelse zero,
+                        .payload = node.payload,
+                        .accept = node.accept,
+                    };
+                    overlay.region_count += 1;
+                },
+                .scroll => if (overlay.scroll_count < max_scroll_regions) if (self.visible(node)) |rect| {
+                    overlay.scrolls[overlay.scroll_count] = .{ .id = node.id, .rect = rect };
+                    overlay.scroll_count += 1;
                 },
                 .token => if (overlay.token_count < max_tokens) {
                     overlay.tokens[overlay.token_count] = .{ .id = node.id, .remove = tokenRemoveId(node.id), .field = all[node.parent].id, .rect = self.visible(node) orelse zero, .enabled = node.style.enabled };
@@ -2451,6 +3135,8 @@ pub const View = struct {
             };
         }
         self.recordCollections();
+        self.recordReorders();
+        self.recordDrag();
         if (self.tip_index == none) return;
         const anchor = self.visible(&all[self.tip_index]) orelse {
             self.tip_index = none;
@@ -2465,6 +3151,96 @@ pub const View = struct {
         const y = if (below + height > root_bounds.y + root_bounds.height and anchor.y - popup_gap - height >= root_bounds.y) anchor.y - popup_gap - height else below;
         const x = std.math.clamp(anchor.x, root_bounds.x, @max(root_bounds.x, root_bounds.x + root_bounds.width - width));
         self.tip_rect = .{ .x = x, .y = y, .width = width, .height = height };
+    }
+
+    /// The nearest scroll container around `node`.
+    fn scrollAround(self: *const View, node: *const Node) ?u64 {
+        const all = self.buffers.nodes[0..self.len];
+        var parent = node.parent;
+        while (parent < all.len) : (parent = all[parent].parent) if (all[parent].kind == .scroll) return all[parent].id;
+        return null;
+    }
+
+    /// The items of each container that reorders: a table's rows, or the
+    /// children of any other container.
+    fn recordReorders(self: *View) void {
+        const all = self.buffers.nodes[0..self.len];
+        const overlay = &self.overlay;
+        const zero: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+        for (all, 0..) |*node, index| {
+            if (!node.reorder or !node.style.enabled or overlay.list_count == max_reorder_lists) continue;
+            const first = overlay.reorder_item_count;
+            if (node.kind == .table) {
+                for (all[index + 1 .. node.end], index + 1..) |*entry, at| {
+                    if (entry.kind != .table_row or entry.collection != index or overlay.reorder_item_count == max_reorder_items) continue;
+                    overlay.reorder_items[overlay.reorder_item_count] = .{ .id = entry.id, .index = @intCast(at), .bounds = entry.bounds, .rect = if (entry.style.enabled) self.visible(entry) orelse zero else zero };
+                    overlay.reorder_item_count += 1;
+                }
+            } else {
+                var child = node.first_child;
+                while (child != none and overlay.reorder_item_count < max_reorder_items) : (child = all[child].next_sibling) {
+                    const entry = &all[child];
+                    overlay.reorder_items[overlay.reorder_item_count] = .{ .id = entry.id, .index = child, .bounds = entry.bounds, .rect = if (entry.style.enabled) self.visible(entry) orelse zero else zero };
+                    overlay.reorder_item_count += 1;
+                }
+            }
+            overlay.lists[overlay.list_count] = .{ .id = node.id, .axis = options(node).axis, .rect = self.visible(node) orelse zero, .first = @intCast(first), .count = @intCast(overlay.reorder_item_count - first), .scroll = self.scrollAround(node) };
+            overlay.list_count += 1;
+        }
+    }
+
+    /// Where the copy of what a drag moves goes, the line showing where a
+    /// reordered item would land, and the outline of the target under it.
+    fn recordDrag(self: *View) void {
+        const all = self.buffers.nodes[0..self.len];
+        self.drag_ghost = null;
+        self.drag_label = "";
+        self.insert_mark = null;
+        self.drop_mark = null;
+        const over: ?u64 = self.drop_over orelse if (self.system_drag) |drag| drag.over else null;
+        if (over) |id| for (all) |*node| if (node.id == id and node.kind == .drop_target) {
+            self.drop_mark = self.visible(node);
+            break;
+        };
+        const capture = self.capture orelse return;
+        if (!capture.dragging) return;
+        const moved: ?u32 = switch (capture.target) {
+            .source => |source| for (all, 0..) |*node, index| {
+                if (node.id == source.id and node.kind == .drag_source) break @intCast(index);
+            } else null,
+            .reorder => |value| reorder: {
+                const list = self.reorderList(value.list) orelse break :reorder null;
+                if (value.from >= list.count) break :reorder null;
+                const items = self.overlay.reorder_items[list.first..][0..list.count];
+                self.insert_mark = insertion(list, items, value.to);
+                break :reorder items[value.from].index;
+            },
+            else => null,
+        };
+        const index = moved orelse return;
+        const node = &all[index];
+        const b = node.bounds;
+        self.drag_ghost = .{ .x = b.x + capture.position.x - capture.origin.x, .y = b.y + capture.position.y - capture.origin.y, .width = b.width, .height = b.height };
+        // The first text inside names what moves.
+        for (all[index..node.end]) |*inner| if (inner.text.len > 0 and inner.kind != .fieldset) {
+            self.drag_label = inner.text;
+            break;
+        };
+    }
+
+    /// A thin bar across a list at the gap before item `to`.
+    fn insertion(list: Overlay.ReorderList, items: []const Overlay.ReorderItem, to: usize) ?Rect {
+        if (items.len == 0) return null;
+        const thickness: f32 = 2;
+        const before = if (to < items.len) items[to].bounds else null;
+        const after = if (to > 0) items[to - 1].bounds else null;
+        const reference = before orelse after.?;
+        if (list.axis == .row) {
+            const x = if (before != null and after != null) (after.?.x + after.?.width + before.?.x) / 2 else if (before) |b| b.x else after.?.x + after.?.width;
+            return .{ .x = x - thickness / 2, .y = reference.y, .width = thickness, .height = reference.height };
+        }
+        const y = if (before != null and after != null) (after.?.y + after.?.height + before.?.y) / 2 else if (before) |b| b.y else after.?.y + after.?.height;
+        return .{ .x = reference.x, .y = y - thickness / 2, .width = reference.width, .height = thickness };
     }
 
     /// The anchor present among a collection's rows and how many rows a
@@ -2639,12 +3415,34 @@ pub const View = struct {
             try self.paintRange(target, theme, index + 1, node.end, &nested, &nested_len);
             try target.popClip();
         }
+        try self.paintDrag(target, theme);
         if (self.tip_index != none) {
             const node = &all[self.tip_index];
             try target.tooltip(tooltipId(node.id), self.tip_rect, node.tooltip);
         }
         // Each announcement is a new status, so clients announce it once.
         if (self.announcement_len > 0) try target.status(announcementId(self.announcement_serial), .{ .x = 0, .y = 0, .width = 0, .height = 0 }, self.announcement[0..self.announcement_len], ui.accessibility.root_id);
+    }
+
+    /// The outline of the target under a drag, the line where a reordered
+    /// item would go, and a translucent copy of what moves, over the rest.
+    fn paintDrag(self: *const View, target: anytype, theme: Theme) !void {
+        var accent = ui.Color.rgb(theme.palette.accent);
+        if (self.drop_mark) |rect| target.strokeRect(rect, 4, 2, accent);
+        if (self.insert_mark) |rect| target.roundedRect(rect, 1, accent);
+        const ghost = self.drag_ghost orelse return;
+        const all_bounds = self.buffers.nodes[0].bounds;
+        try target.pushClip(all_bounds);
+        var fill = ui.Color.rgb(theme.palette.control);
+        fill.a = 0xd0;
+        target.roundedRect(ghost, 4, fill);
+        accent.a = 0xa0;
+        target.strokeRect(ghost, 4, 1, accent);
+        if (self.drag_label.len > 0) {
+            const pad = theme.metrics.content_inset + 4;
+            target.label(.{ .x = ghost.x + pad, .y = ghost.y, .width = @max(0, ghost.width - 2 * pad), .height = ghost.height }, self.drag_label, theme.palette.text);
+        }
+        try target.popClip();
     }
 
     /// Paint nodes `start..stop` in order, skipping floating subtrees, whose
@@ -2687,7 +3485,7 @@ pub const View = struct {
             if (control.name.len == 0) control.name = annotation.name;
             if (control.description.len == 0) control.description = node.tooltip;
             switch (node.kind) {
-                .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .toasts, .toast, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field => {
+                .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .toasts, .toast, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target => {
                     switch (node.kind) {
                         .radio_group, .segmented => try target.radioGroup(node.id, bounds, style.name),
                         .list_box => try target.listBox(node.id, bounds, style.name),
@@ -2932,6 +3730,9 @@ pub fn tooltipId(id: u64) u64 {
 fn inset(rect: Rect, amount: f32) Rect {
     return .{ .x = rect.x + amount, .y = rect.y + amount, .width = @max(0, rect.width - 2 * amount), .height = @max(0, rect.height - 2 * amount) };
 }
+fn distance(a: Point, b: Point) f32 {
+    return std.math.hypot(a.x - b.x, a.y - b.y);
+}
 fn contains(rect: Rect, point: Point) bool {
     return point.x >= rect.x and point.y >= rect.y and point.x < rect.x + rect.width and point.y < rect.y + rect.height;
 }
@@ -2986,9 +3787,6 @@ pub const Host = struct {
     /// The first error from the most recent pass, kept for diagnostics.
     last_error: ?anyerror = null,
     frames: usize = 0,
-    /// Visible scroll containers of the last frame, in paint order.
-    scroll_regions: [max_scroll_regions]struct { id: u64, bounds: Rect } = undefined,
-    scroll_region_count: usize = 0,
     timer: ?std.time.Timer = null,
     scheduler: ?Scheduler = null,
     /// The deadline last handed to the scheduler.
@@ -3078,14 +3876,16 @@ pub const Host = struct {
         const self: *Host = @ptrCast(@alignCast(ptr));
         self.deliver(.{ .value = .{ .id = id, .change = change } });
     }
-    /// Route popup, tooltip and toast input before the Context, and a wheel
-    /// event to the innermost visible scroll container under it.
+    /// Route popup, tooltip and toast input before the Context, follow
+    /// presses that leaves capture or that drag, and send a wheel event to
+    /// the leaf or the innermost visible scroll container under it.
     fn onInput(ptr: *anyopaque, _: *ui.Context, event: z.Event) bool {
         const self: *Host = @ptrCast(@alignCast(ptr));
         if (self.building) return false;
         switch (event) {
             .pointer_move => |point| {
                 const at: Point = .{ .x = point.x, .y = point.y };
+                if (self.view.captureMove(at)) |result| if (result.consumed) return self.apply(result);
                 const hover = self.view.hoverAt(at);
                 if (self.view.embedPointerMove(at) or hover) self.invalidate();
                 return false;
@@ -3101,17 +3901,12 @@ pub const Host = struct {
                         return true;
                     },
                 }
+                const hit = self.context.input_state.hit(.{ .x = point.x, .y = point.y });
+                const adjusting = if (hit) |id| if (self.context.input_state.get(id)) |item| item.options.range != null else false else false;
+                const pressed = self.view.pointerPress(point, press.modifiers, self.time(), adjusting);
+                if (pressed.consumed) return self.apply(pressed);
                 // A press on a tree or table row selects through the view,
                 // which sees its modifiers; the pass then focuses the row.
-                if (self.view.embedPointerDown(point)) |press_on| {
-                    if (press_on.focusable) {
-                        self.view.restore = press_on.id;
-                        self.restoreFocus();
-                    }
-                    self.invalidate();
-                    return true;
-                }
-                const hit = self.context.input_state.hit(.{ .x = point.x, .y = point.y });
                 if (self.view.rowPress(point, press.modifiers, hit orelse return false, self.context.currentTheme())) |value| {
                     self.deliver(value);
                     self.invalidate();
@@ -3119,15 +3914,27 @@ pub const Host = struct {
                 }
                 return false;
             },
+            .pointer_up => |release| {
+                if (release.button != .primary) return false;
+                const result = self.view.captureRelease(.{ .x = release.position.x, .y = release.position.y });
+                return self.apply(result);
+            },
+            .cancel_input => {
+                _ = self.apply(self.view.captureCancel());
+                return false;
+            },
             .focus => |focused| {
-                // A window that loses focus leaves no tooltip behind.
+                // A window that loses focus leaves no tooltip behind, and
+                // loses the press it followed.
                 if (!focused) {
+                    _ = self.apply(self.view.captureCancel());
                     const hover = self.view.hoverAt(null);
                     if (self.view.embedPointerMove(null) or hover) self.invalidate();
                 }
                 return false;
             },
             .key_input => |input| {
+                if (self.view.dragKey(input)) |result| return self.apply(result);
                 self.view.focus = self.context.input_state.focused;
                 switch (self.view.routeKey(input)) {
                     // Keys nothing else routes go to a focused embedded leaf.
@@ -3155,20 +3962,51 @@ pub const Host = struct {
                     },
                 }
             },
-            .wheel => {},
+            .wheel => |wheel| {
+                const at: Point = .{ .x = wheel.position.x, .y = wheel.position.y };
+                const delta: Point = .{ .x = wheel.delta.x, .y = wheel.delta.y };
+                if (self.view.embedWheel(at, delta)) {
+                    self.invalidate();
+                    return true;
+                }
+                const id = self.view.scrollAt(at) orelse return false;
+                self.deliver(.{ .scroll = .{ .id = id, .delta = delta } });
+                return self.view.consumed;
+            },
             else => return false,
         }
-        const wheel = event.wheel;
-        var index = self.scroll_region_count;
-        while (index > 0) {
-            index -= 1;
-            const region = self.scroll_regions[index];
-            const b = region.bounds;
-            if (wheel.position.x < b.x or wheel.position.y < b.y or wheel.position.x >= b.x + b.width or wheel.position.y >= b.y + b.height) continue;
-            self.deliver(.{ .scroll = .{ .id = region.id, .delta = .{ .x = wheel.delta.x, .y = wheel.delta.y } } });
-            return self.view.consumed;
+    }
+    /// Apply what the view did with pointer input; true when it took it.
+    fn apply(self: *Host, result: PointerResult) bool {
+        if (result.cancel_press) self.context.input_state.cancelPress();
+        if (result.focus) |id| {
+            self.view.restore = id;
+            self.restoreFocus();
         }
-        return false;
+        for (result.events) |slot| if (slot) |value| self.deliver(value);
+        if (result.repaint or result.events[0] != null) self.invalidate();
+        return result.consumed;
+    }
+    /// Follow a drag from another application, such as one a
+    /// `ziggurat_system` drop target reports from its hover callback, at a
+    /// point in window DIP, or with null once it left the window. True when
+    /// a `View.dropTarget` there takes files or text as offered.
+    pub fn systemDragOver(self: *Host, point: ?Point, files: bool, text: bool) bool {
+        const result = self.view.systemDragOver(point, files, text);
+        if (result.changed) self.invalidate();
+        return result.accepted;
+    }
+    /// Deliver a drop from another application at a window point to the
+    /// `View.dropTarget` there; true when one took it. The bytes are only
+    /// borrowed for the pass that delivers them.
+    pub fn systemDrop(self: *Host, point: Point, data: Dropped) bool {
+        const event = self.view.systemDrop(point, data) orelse {
+            self.invalidate();
+            return false;
+        };
+        self.deliver(event);
+        self.invalidate();
+        return self.view.consumed;
     }
     fn draw(ptr: *anyopaque, frame: *ui.Frame) void {
         const self: *Host = @ptrCast(@alignCast(ptr));
@@ -3191,13 +4029,6 @@ pub const Host = struct {
             if (content.place) |place| place(content.context, node.id, node.bounds);
         }
         self.requestWake();
-        self.scroll_region_count = 0;
-        for (self.view.nodes()) |*node| {
-            if (node.kind != .scroll or self.scroll_region_count == max_scroll_regions) continue;
-            const bounds = self.view.visible(node) orelse continue;
-            self.scroll_regions[self.scroll_region_count] = .{ .id = node.id, .bounds = bounds };
-            self.scroll_region_count += 1;
-        }
     }
 
     /// Hand a changed deadline to the scheduler after this paint.

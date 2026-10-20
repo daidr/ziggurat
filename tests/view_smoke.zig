@@ -357,7 +357,7 @@ const Collections = struct {
         fn input(ptr: *anyopaque, _: u64, event: view.EmbedInput) bool {
             const self: *Collections = @ptrCast(@alignCast(ptr));
             switch (event) {
-                .pointer_down => |point| self.pressed = point,
+                .pointer_down => |press| self.pressed = press.position,
                 else => return false,
             }
             return true;
