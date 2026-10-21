@@ -17,6 +17,9 @@ const std = @import("std");
 pub const parser = @import("parser.zig");
 pub const screen = @import("screen.zig");
 pub const width = @import("width.zig");
+pub const theme = @import("theme.zig");
+pub const search = @import("search.zig");
+pub const keybind = @import("keybind.zig");
 pub const input = @import("input.zig");
 pub const links = @import("links.zig");
 pub const selection = @import("selection.zig");
@@ -39,6 +42,7 @@ pub const Style = screen.Style;
 pub const Position = screen.Position;
 pub const Modes = screen.Modes;
 pub const Selection = selection.Selection;
+pub const Theme = theme.Theme;
 
 pub const Session = session.Session;
 pub const Sink = session.Sink;

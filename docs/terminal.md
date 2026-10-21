@@ -10,6 +10,7 @@ const terminal_view = @import("ziggurat_terminal_view");
 var terminal = try term.Terminal.init(allocator, .{ .screen = .{ .scrollback = 5000 } });
 defer terminal.deinit();
 var tv = terminal_view.TerminalView.init(&host, allocator, &terminal, .{ .clipboard = clipboard, .notify = notify });
+defer tv.deinit();
 tv.bind();
 try host.context.prepareTextFields(allocator, .{}); // 终端作为文本字段接收输入
 
@@ -57,18 +58,67 @@ session.close();
 - 叶子按单元格绘制：每行先画合并后的背景色段，再按相同颜色与字体合并成文本段，宽字符逐个画在自己的格子上，保证网格不被后备字体的字宽推移。下划线、删除线、上划线用矩形画出。每帧接近命令上限时停止追加文本，而不是让整帧失败。未变化的终端重绘不分配、不投递任务；空闲时没有任何定时器。
 - 光标支持方块、下划线、竖线三种形状；失焦时画空心方块。正在组合的输入法文本显示在光标处并加下划线，输入法候选窗跟随光标。
 - 尺寸：在绘制时计算网格，变化时投递一个任务调整屏幕与伪终端尺寸，并在同一任务里注册为 Context 的文本字段，从不在绘制中注册或改尺寸。单元尺寸默认由测量器按等宽字体计算，也可以指定。
-- 键盘：Ctrl+Shift+C/V 与 Ctrl+Insert/Shift+Insert 复制粘贴；有选区时 Ctrl+C 复制并清除选区，否则发送中断；Shift+PageUp/PageDown/Home/End 滚动 scrollback；其余按键编码后发给程序，输入时视口回到底部。
-- 指针：拖动选择、双击选词、三击选行，Shift+点击扩展选区，拖出上下边缘时滚动；`copy_on_select` 让选区结束时自动复制。程序跟踪鼠标时按下、拖动、松开和滚轮上报给程序，按住 Shift 仍可本地选择。Ctrl+点击链接经 `Notice.open` 交给应用打开；悬停时链接显示下划线。链接来自 OSC 8，或文本中识别出的 `http(s)`、`ftp`、`file`、`ssh`、`git`、`mailto` 地址（去掉末尾的标点与不配对的括号）。
-- 滚轮：每格 3 行（可配置）滚动 scrollback；备用屏上若程序未跟踪鼠标，按 1007 模式（默认开启）发送上下方向键。
-- 通知：响铃、标题、当前目录、程序退出、打开链接都经 `Options.notify` 在主线程交给应用；剪贴板读写经 `Options.clipboard` 由应用提供。没有 `Session` 时可用 `Options.send` 接收发给程序的字节。
+- 指针：拖动选择、双击选词、三击选行，Shift+点击扩展选区，拖出上下边缘时滚动；`copy_on_select` 让选区结束时（以及全选时）自动复制。程序跟踪鼠标时按下、拖动、松开和滚轮上报给程序，按住 Shift 仍可本地选择。
+- 滚轮：每格 3 行（可配置）滚动 scrollback；程序跟踪鼠标时上报滚轮；备用屏上按 1007 模式（默认开启）发送上下方向键；按住 Ctrl 时缩放。
+- 通知：响铃、标题、当前目录、桌面通知（OSC 9、OSC 777）、程序退出、打开链接、复制、搜索进度与右键菜单请求都经 `Options.notify` 在主线程交给应用；剪贴板读写经 `Options.clipboard` 由应用提供。没有 `Session` 时可用 `Options.send` 接收发给程序的字节。
 - 可访问性：叶子发布 `text_box` 语义节点，名称取 `Options.name`，值为光标所在行的文本。
+- `TerminalView.deinit` 释放搜索用的缓冲。
+
+## 主题
+
+`Options.theme` 设置前景、背景、光标及其下文字、选区及选中文字、搜索匹配及其文字、16 色调色板（256 色的其余部分是 xterm 的色立方和灰阶）；`dark_theme` 同时设置时用于深色窗口。两者都不设时终端随窗口外观（由视图的 `ui.Theme` 背景判断）取 `term.theme.dark` 或 `term.theme.light`：窗口的背景与文字，配 Visual Studio Code 的调色板。`setTheme(theme, dark_theme)` 在运行中切换。程序仍可用 OSC 4/10/11/12 改色：程序设过的颜色在切换主题后保留，直到程序用 OSC 104/110/111/112 或 RIS 复位，复位后回到当前主题的颜色。
+
+内置 Ghostty 附带的全部主题（来自 iTerm2-Color-Schemes，MIT 许可）：
+
+```zig
+const mocha = term.theme.builtinTheme("Catppuccin Mocha").?; // 先精确匹配，再忽略大小写
+const latte = try term.theme.lookup(allocator, &env, "Catppuccin Latte");
+var tv = terminal_view.TerminalView.init(&host, allocator, &terminal, .{ .theme = latte, .dark_theme = mocha });
+```
+
+`lookup` 与 Ghostty 一致：先找用户 Ghostty 主题目录里的同名文件（`$XDG_CONFIG_HOME/ghostty/themes`，默认 `~/.config/ghostty/themes`，Windows 无 XDG_CONFIG_HOME 时用 `%LOCALAPPDATA%\ghostty\themes`），再找内置主题；绝对路径直接读该文件。`names` 列出用户主题与内置主题（忽略大小写排序、去重），供选择器使用。`parse` 读 Ghostty 格式（`palette = 0=#45475a`、`background`、`foreground`、`cursor-color`、`cursor-text`、`selection-background/foreground`、`search-background/foreground`、`search-selected-background/foreground`），颜色为 `#rgb`、`#rrggbb`、`#rrrgggbbb`、`#rrrrggggbbbb` 或不带 `#` 的前两种；其他选项、第 16 个以后的调色板项、`cell-foreground`/`cell-background` 被忽略，未给出的颜色取 `dark`（背景为浅色时取 `light`）。搜索颜色缺省为 Ghostty 的浅琥珀与浅橙底、黑字。
+
+## 搜索
+
+`startSearch(text)` 在屏幕与 scrollback 中搜索（备用屏上只搜屏幕），除 ASCII 字母大小写外精确匹配，匹配可跨软换行；匹配高亮显示，并随新输出更新（在绘制后投递的任务里重新搜索，绘制本身不分配）。最新的匹配被选中并显示。`searchNext` 选向更旧输出的下一个，`searchPrevious` 反向，都会循环，且匹配不在视口内时滚动到视口中部，避开贴边的查找栏。再次搜索同一文本保留选中项，空文本或 `endSearch` 结束搜索。`Notice.search` 报告 `total` 与 `selected`（1 为最新）。终端不画查找栏，由应用绘制并绑定按键。
+
+## 按键
+
+按键依次经过 `Hooks.key`、按键绑定、程序。默认绑定是 Ghostty 在各平台的默认值（`term.keybind`）：
+
+| 动作 | Linux 与 Windows | Windows 另有 |
+| --- | --- | --- |
+| `copy` | Ctrl+Shift+C、Ctrl+Insert | Ctrl+C（performable） |
+| `paste` | Ctrl+Shift+V、Shift+Insert | Ctrl+V（performable） |
+| `select_all` | Ctrl+Shift+A | |
+| `clear_screen` | | Ctrl+Shift+K |
+| `increase/decrease/reset_font_size` | Ctrl+=、Ctrl++、Ctrl+-、Ctrl+0 | |
+| `scroll_page_up/down`、`scroll_to_top/bottom` | Shift+PageUp/PageDown，Linux 另有 Shift+Home/End | Ctrl+Shift+PageUp/PageDown/Home/End |
+
+`Options.keybinds` 在默认值之上追加：同键同修饰的绑定替换默认值，绑定到 `.none` 即解绑（按键交给程序），`no_default_keybinds` 从空表开始。performable 绑定只在动作真正做了事时吞键：无选区时 Ctrl+C 仍是中断；performable 的复制会放开选区，下一次按键就到达程序。清屏与滚动绑定都是 performable，全屏程序照常收到。`.ignore` 吞键不做事。被钩子或绑定吞掉的按键不会再输入其文字。Super 组合键留给应用快捷键。
+
+`clear_screen`（以及右键菜单的 Clear）清除 scrollback 和光标行以上的屏幕，光标行移到顶部，保留 shell 提示符；先询问 `Hooks.clear`，全屏程序的屏幕上不做。`clearScrollback` 只清 scrollback。缩放每步 1 DIP，最小 1，重置回 `Font.size`；`Hooks.zoom` 可以接管。
+
+## 链接、右键与复制
+
+- 按住 Ctrl 时，指针下的链接加下划线（Ctrl 的按下与松开由按键与按键释放得知），`hoveredLink()` 给出链接、是否文件路径及其相对视图的格子矩形，供应用显示预览；`pointerShape(shift)` 给出指针形状：链接上为手形，程序用 OSC 22 指定的形状，程序跟踪鼠标时为箭头（按住 Shift 选择时为 I 形），否则为 I 形。Ctrl+点击在程序跟踪鼠标时也会打开链接，这次按下的移动与松开都不再交给别人。
+- 链接来自 OSC 8，或文本中的 `http(s)`、`ftp`、`file` 地址与 `mailto:`（去掉末尾的标点与不配对的括号）。设置 `Hooks.open_link` 后还识别文本中的文件路径（`/abs/path`、`~/notes.md`、`./a.go`、`src/app.go:12:3`、`main.go:250`）。钩子未接手的超链接与地址经 `Notice.open` 由应用交给系统打开，文件路径则不打开。
+- `right_click` 决定副键点击：`.context_menu`（默认）发出 `Notice.context_menu`，应用在该点弹出 `contextMenu()` 给出的 Copy、Paste、Select All、Clear（Clear 前有分隔线，各项带绑定的快捷键，无选区时 Copy 不可用，全屏程序上 Clear 不可用）并把选中项交给 `choose`；`.paste`、`.copy`、`.copy_or_paste`（有选区复制，否则粘贴）、`.ignore`。复制会放开选区。程序跟踪鼠标时仍收到点击，除非按住 Shift。
+- `Notice.copied` 报告终端写入剪贴板的文字与来源：`.user`（复制键、菜单、副键复制）、`.select`（`copy_on_select`）、`.program`（OSC 52）。
+
+## 字体、对比度与留白
+
+- `Options.font`：`size`（DIP，默认 13）、`weight`（100–900，映射到 UI 字体的常规、中等、半粗、粗体；粗体文字在此基础上加 300，至少 700）、`line_height`（行高倍数，文字在行内居中）。`setFont` 运行中更换字体并取消缩放。
+- `minimum_contrast` 是文字与背景的最小 WCAG 对比度（1 到 21，默认 1 即不调整）：对比不足的文字向黑或白中与背景对比更大的一方混合，混合量是达到对比度所需的最小值；线框、方块、旧式计算机符号与 Powerline 符号保持原色。`setMinimumContrast` 运行中修改。
+- `padding` 是网格四周的留白，横向 6、纵向 4 DIP，负值为无。`padding_color` 为 `.background`（默认）、`.extend`（每个格子都有自己背景色的行，把边缘格子的背景延伸到留白，顶行与底行向上下延伸，全屏程序的颜色因此铺满视图）或 `.extend_always`（所有行都延伸）；单独一个反显字符（程序自己画的光标）不延伸。`transparent` 不画终端背景，下面的内容透出，自有背景色的格子照常绘制。
 
 ## 限制
 
-- 非主按钮的按下只在程序跟踪鼠标时上报；本地右键菜单与中键粘贴未实现。
+- 字体族与 OpenType 特性需要 UI 字体按族名选择与注册后才能接入；目前使用系统等宽字体。
+- 指针形状由应用依 `pointerShape` 设置，视图本身不改变系统指针。
 - 改变宽度时不按软换行重排段落。
-- 不渲染 Sixel 等图像协议，DCS 内容被跳过。
+- 不渲染 Sixel 与 Kitty 图像协议，DCS、APC 内容被跳过。
 
 ## 验证
 
-`zig build test-terminal` 已接默认 test/check：解析器状态机与 UTF-8、宽度表、屏幕编辑与滚动区、scrollback 上限与改尺寸、备用屏、SGR 全部形式、回复、OSC 标题/颜色/超链接/剪贴板策略、按键/粘贴/鼠标/焦点编码、选择文本与链接识别；Linux 上真实 PTY 的终端判定、环境变量、尺寸与退出码，会话的回显、按序交付、背压、退出只报告一次，以及忽略 SIGHUP 的程序被强制结束；视图的网格计算、按键/文本/粘贴/回复、选择与复制、鼠标上报、滚轮滚动 scrollback 与备用屏方向键。`zig build smoke-terminal` 在隐藏窗口里显示终端叶子，以实际网格尺寸启动 shell，经平台文本输入路径输入命令、经原生按键发送回车，确认 shell 的输出出现在屏幕上、`stty size` 与网格一致（Linux），再退出 shell 并确认会话释放、无资源泄漏。Windows 的 ConPTY 路径由交叉编译和 CI 的 Windows smoke 运行覆盖。
+`zig build test-terminal` 已接默认 test/check：解析器状态机与 UTF-8、宽度表、屏幕编辑与滚动区、scrollback 上限与改尺寸、备用屏、SGR 全部形式、回复、OSC 标题/颜色/超链接/剪贴板策略、按键/粘贴/鼠标/焦点编码、选择文本与链接识别；Linux 上真实 PTY 的终端判定、环境变量、尺寸与退出码，会话的回显、按序交付、背压、退出只报告一次，以及忽略 SIGHUP 的程序被强制结束；视图的网格计算、按键/文本/粘贴/回复、选择与复制、鼠标上报、滚轮滚动 scrollback 与备用屏方向键；主题（内置主题、主题文件、用户主题目录、程序改色在切换主题后保留）、搜索（跨 scrollback 与软换行、上下切换并滚动、随输出更新）、按键绑定（平台默认、performable、解绑与忽略、钩子吞掉文字）、缩放与清屏、副键动作与右键菜单、Ctrl 悬停与打开链接、文件路径识别、最小对比度。`zig build smoke-terminal` 在隐藏窗口里显示终端叶子，以实际网格尺寸启动 shell，经平台文本输入路径输入命令、经原生按键发送回车，确认 shell 的输出出现在屏幕上、`stty size` 与网格一致（Linux），再退出 shell 并确认会话释放、无资源泄漏。Windows 的 ConPTY 路径由交叉编译和 CI 的 Windows smoke 运行覆盖。
