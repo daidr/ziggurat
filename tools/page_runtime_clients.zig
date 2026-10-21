@@ -7,12 +7,14 @@ const runtime_service = @import("page_runtime_service");
 const fetch_service = @import("plugin_fetch_service");
 const watch_service = @import("plugin_watch_service");
 const sqlite_service = @import("plugin_sqlite_service");
+const websocket_service = @import("plugin_websocket_service");
 
 const clients = .{
     .{ runtime_service.Service, "packages/runtime/src/generated/runtime.ts" },
     .{ fetch_service.Service, "packages/plugin-fetch/src/generated/fetch.ts" },
     .{ watch_service.Service, "packages/plugin-watch/src/generated/watch.ts" },
     .{ sqlite_service.Service, "packages/plugin-sqlite/src/generated/sqlite.ts" },
+    .{ websocket_service.Service, "packages/plugin-websocket/src/generated/websocket.ts" },
 };
 
 pub fn main() !void {
