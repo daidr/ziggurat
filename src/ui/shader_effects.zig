@@ -30,6 +30,9 @@ pub const Effect = struct {
 };
 
 pub const Target = enum(u8) { element, backdrop };
+/// A program a GPU renderer prepares to draw as `target`; see
+/// `Context.prepareGpuShaders`.
+pub const GpuShader = struct { program: *const shader.Program, target: Target };
 /// One recorded effect in absolute DIP.
 pub const Entry = struct {
     program: *const shader.Program,
@@ -239,15 +242,8 @@ pub fn applyElement(entry: *const Entry, source: Plane, scratch: Plane, capture:
 /// Plane pixel (px, py) shows absolute DIP ((px + 0.5 + x0) / scale, ...).
 fn runContent(entry: *const Entry, source: Plane, scratch: Plane, x0: f32, y0: f32, scale: f32, workspace: ?*Workspace) void {
     const space = workspace orelse return;
-    const pixels = @as(u64, source.width) * source.height;
-    if (!space.charge(pixels, entry.program)) return;
+    if (!startElement(space, entry, @as(u64, source.width) * source.height, scale)) return;
     const machine = &space.machine;
-    machine.begin(entry.program, &entry.values, .{ entry.box.width, entry.box.height }, scale) catch {
-        // A faulting prologue leaves the content as drawn.
-        space.stats.faulted_pixels += pixels;
-        return;
-    };
-    space.stats.applied += 1;
     const kind = entry.program.kind;
     if (kind != .color) for (0..source.height) |y| @memcpy(scratch.pixels[y * scratch.stride ..][0..source.width], source.pixels[y * source.stride ..][0..source.width]);
     const content: SampleContext = .{ .plane = scratch, .scale = scale, .x0 = x0, .y0 = y0, .clamp = false };
@@ -268,6 +264,18 @@ fn runContent(entry: *const Entry, source: Plane, scratch: Plane, x0: f32, y0: f
             source.pixels[at] = 0;
         } else source.pixels[at] = fromColor(color);
     };
+}
+/// Charge an element effect over `pixels` captured pixels and run its
+/// prologue on the workspace's machine. False leaves the content as drawn:
+/// the frame's work budget is spent or the prologue faults.
+pub fn startElement(space: *Workspace, entry: *const Entry, pixels: u64, scale: f32) bool {
+    if (!space.charge(pixels, entry.program)) return false;
+    space.machine.begin(entry.program, &entry.values, .{ entry.box.width, entry.box.height }, scale) catch {
+        space.stats.faulted_pixels += pixels;
+        return false;
+    };
+    space.stats.applied += 1;
+    return true;
 }
 /// Physical pixels of a plane: columns x0..x1 and rows y0..y1.
 pub const Region = struct {
@@ -383,6 +391,66 @@ fn shifted(context: SampleContext, box: Rect) SampleContext {
     return result;
 }
 
+/// Where a backdrop shader draws on a target, in physical pixels: its
+/// rounded rectangle, the pixels it writes (`out`, inside the clip) and the
+/// pixels it reads (`region`, `out` plus the margin).
+pub const BackdropPlan = struct {
+    box: [4]f32,
+    radius: f32,
+    out: [4]usize,
+    region: [4]usize,
+    pub fn pixels(self: BackdropPlan) u64 {
+        return @as(u64, self.out[2] - self.out[0]) * (self.out[3] - self.out[1]);
+    }
+    pub fn regionPixels(self: BackdropPlan) usize {
+        return (self.region[2] - self.region[0]) * (self.region[3] - self.region[1]);
+    }
+    pub fn dirty(self: BackdropPlan) Dirty {
+        return .{ .left = @intCast(self.out[0]), .top = @intCast(self.out[1]), .right = @intCast(self.out[2]), .bottom = @intCast(self.out[3]) };
+    }
+};
+/// The plan for `entry` on a `width` x `height` target where physical =
+/// DIP * `scale` + `origin`, or null when nothing is drawn.
+pub fn planBackdrop(width: usize, height: usize, scale: f32, origin: [2]f64, clip: [4]f64, entry: *const Entry) ?BackdropPlan {
+    const s = scale;
+    const b = entry.box;
+    const ox: f32 = @floatCast(origin[0]);
+    const oy: f32 = @floatCast(origin[1]);
+    const box = [4]f32{ @round(b.x * s + ox), @round(b.y * s + oy), @round((b.x + b.width) * s + ox), @round((b.y + b.height) * s + oy) };
+    if (!(box[2] > box[0] and box[3] > box[1])) return null;
+    const radius = @min(entry.radius * s, @min(box[2] - box[0], box[3] - box[1]) / 2);
+    const fw: f32 = @floatFromInt(width);
+    const fh: f32 = @floatFromInt(height);
+    const fx0 = @max(@max(box[0], @as(f32, @floatCast(@floor(clip[0])))), 0);
+    const fy0 = @max(@max(box[1], @as(f32, @floatCast(@floor(clip[1])))), 0);
+    const fx1 = @min(@min(box[2], @as(f32, @floatCast(@ceil(clip[2])))), fw);
+    const fy1 = @min(@min(box[3], @as(f32, @floatCast(@ceil(clip[3])))), fh);
+    if (!(fx1 > fx0 and fy1 > fy0)) return null;
+    const out = [4]usize{ @intFromFloat(fx0), @intFromFloat(fy0), @intFromFloat(fx1), @intFromFloat(fy1) };
+    const reach: usize = @intFromFloat(@min(@ceil(entry.margin * s), max_margin_pixels));
+    return .{ .box = box, .radius = radius, .out = out, .region = .{ out[0] -| reach, out[1] -| reach, @min(out[2] + reach, width), @min(out[3] + reach, height) } };
+}
+/// Charge a backdrop shader and run its prologue. `room` is how many
+/// pixels the backdrop workspace can copy, null without one. False leaves
+/// the backdrop unchanged.
+pub fn startBackdrop(space: *Workspace, entry: *const Entry, plan: BackdropPlan, room: ?usize, scale: f32) bool {
+    const available = room orelse {
+        space.stats.skipped += 1;
+        return false;
+    };
+    if (plan.regionPixels() > available) {
+        space.stats.skipped += 1;
+        return false;
+    }
+    if (!space.charge(plan.pixels(), entry.program)) return false;
+    space.machine.begin(entry.program, &entry.values, .{ entry.box.width, entry.box.height }, scale) catch {
+        space.stats.faulted_pixels += plan.pixels();
+        return false;
+    };
+    space.stats.applied += 1;
+    return true;
+}
+
 /// Run a backdrop shader over what the surface holds beneath `entry.box`,
 /// writing inside its rounded rectangle and the surface's clip. Reads beyond
 /// the plane repeat its nearest pixel. `scratch` must hold the shape plus
@@ -393,39 +461,18 @@ pub fn applyBackdrop(surface: cpu.Surface, transparent: bool, entry: *const Entr
     const b = entry.box;
     const ox: f32 = @floatCast(surface.origin[0]);
     const oy: f32 = @floatCast(surface.origin[1]);
-    const box = [4]f32{ @round(b.x * s + ox), @round(b.y * s + oy), @round((b.x + b.width) * s + ox), @round((b.y + b.height) * s + oy) };
-    if (!(box[2] > box[0] and box[3] > box[1])) return empty;
-    const radius = @min(entry.radius * s, @min(box[2] - box[0], box[3] - box[1]) / 2);
-    const width: f32 = @floatFromInt(surface.width);
-    const height: f32 = @floatFromInt(surface.height);
     const clip = surface.clip;
-    const fx0 = @max(@max(box[0], @as(f32, @floatCast(@floor(clip[0])))), 0);
-    const fy0 = @max(@max(box[1], @as(f32, @floatCast(@floor(clip[1])))), 0);
-    const fx1 = @min(@min(box[2], @as(f32, @floatCast(@ceil(clip[2])))), width);
-    const fy1 = @min(@min(box[3], @as(f32, @floatCast(@ceil(clip[3])))), height);
-    if (!(fx1 > fx0 and fy1 > fy0)) return empty;
-    const out = [4]usize{ @intFromFloat(fx0), @intFromFloat(fy0), @intFromFloat(fx1), @intFromFloat(fy1) };
-    const dirty: Dirty = .{ .left = @intCast(out[0]), .top = @intCast(out[1]), .right = @intCast(out[2]), .bottom = @intCast(out[3]) };
+    const plan = planBackdrop(surface.width, surface.height, s, surface.origin, clip, entry) orelse return empty;
+    const box = plan.box;
+    const radius = plan.radius;
+    const out = plan.out;
+    const region = plan.region;
     const space = workspace orelse return empty;
-    const reach: usize = @intFromFloat(@min(@ceil(entry.margin * s), max_margin_pixels));
-    const region = [4]usize{ out[0] -| reach, out[1] -| reach, @min(out[2] + reach, surface.width), @min(out[3] + reach, surface.height) };
+    if (!startBackdrop(space, entry, plan, if (scratch) |storage| storage.len else null, s)) return empty;
+    const storage = scratch.?;
     const rw = region[2] - region[0];
     const rh = region[3] - region[1];
-    const storage = scratch orelse {
-        space.stats.skipped += 1;
-        return empty;
-    };
-    if (rw * rh > storage.len) {
-        space.stats.skipped += 1;
-        return empty;
-    }
-    if (!space.charge(@as(u64, out[2] - out[0]) * (out[3] - out[1]), entry.program)) return empty;
     const machine = &space.machine;
-    machine.begin(entry.program, &entry.values, .{ b.width, b.height }, s) catch {
-        space.stats.faulted_pixels += @as(u64, out[2] - out[0]) * (out[3] - out[1]);
-        return empty;
-    };
-    space.stats.applied += 1;
     for (0..rh) |row| @memcpy(storage[row * rw ..][0..rw], surface.pixels[(region[1] + row) * surface.stride + region[0] ..][0..rw]);
     const plane: Plane = .{ .pixels = storage[0 .. rw * rh], .width = rw, .height = rh, .stride = rw };
     const rx: f32 = @floatFromInt(region[0]);
@@ -471,7 +518,7 @@ pub fn applyBackdrop(surface: cpu.Surface, transparent: bool, entry: *const Entr
         if (!transparent) mixed[3] = 1;
         surface.pixels[at] = fromColor(mixed);
     };
-    return dirty;
+    return plan.dirty();
 }
 
 fn testProgram(source: []const u8) !*shader.Program {

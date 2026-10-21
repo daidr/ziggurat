@@ -16,6 +16,7 @@
 #include "coverage_resource.h"
 #include "gradient_interpolation_native.h"
 #include "gaussian_gpu_native.h"
+#define ZG_EFFECT_SLOTS 16
 
 /* Native graphics resources only; command storage and rendering policy live in Zig. */
 #define GEOMETRY_CAPACITY 32
@@ -70,6 +71,17 @@ typedef struct State {
     uint64_t coverage_creations,coverage_restores;
     size_t coverage_scratch_peak;
     ZgInterpolation *interpolation;
+    /* Shader effects: the shared vertex shader, the installed pixel
+       shaders, their constants and the copy a backdrop shader reads. */
+    ID3D11VertexShader *effect_vertex;
+    ID3D11PixelShader *effect_pixels[ZG_EFFECT_SLOTS];
+    ID3D11Buffer *effect_constants[2];
+    ID3D11RasterizerState *effect_raster;
+    ID3D11Texture2D *backdrop_copy,*backdrop_output;
+    ID3D11ShaderResourceView *backdrop_view;
+    ID3D11RenderTargetView *backdrop_target;
+    UINT backdrop_width,backdrop_height;
+    uint64_t effect_passes;
 } State;
 static LONG live_resources;
 static unsigned class_owners;
@@ -85,6 +97,7 @@ static D2D1_RECT_F rectangle(float x,float y,float width,float height);
 static HRESULT end_frame(State *s,int offscreen);
 /* Raster scopes retain their transparent guard through final sampling. */
 #include "gpu_layers.h"
+#include "gpu_effects.h"
 #include "gpu_domain.h"
 
 uint32_t zgpu_resource_count(void) { return (uint32_t)InterlockedCompareExchange(&live_resources, 0, 0); }
@@ -177,6 +190,7 @@ static void release_device(State *s) {
     finish_draw(s);
     release_target(s);
     if(s->interpolation)s->interpolation->ops->lose(s->interpolation);
+    gpu_effect_drop_objects(s);
     gpu_layer_drop_objects(s->layers);
     for (unsigned i=0;i<GEOMETRY_CAPACITY;i++) { DROP(s->shapes[i].path); s->shapes[i].used=0; }
     s->gradient_previous_uploads+=gradient_uploads(s->gradient);DROP(s->gradient);

@@ -1355,6 +1355,7 @@ pub fn build(b: *std.Build) void {
         _ = native_support.add(b, ui, "ui-d3d11-native", "src/ui/d3d11.c", &.{"-std=c11"}, target, optimize);
         _ = native_support.addArchive(b, ui, "ui-gradient-interpolation-native", "src/ui/gradient_interpolation.c", &.{"-std=c11"}, target, optimize);
         _ = native_support.addArchive(b, ui, "ui-gaussian-native", "src/ui/gaussian_gpu.c", &.{"-std=c11"}, target, optimize);
+        _ = native_support.addArchive(b, ui, "ui-hlsl-compile-native", "src/ui/hlsl_compile.c", &.{"-std=c11"}, target, optimize);
         for ([_][]const u8{ "d3d11", "dxgi", "d2d1", "dwrite", "user32" }) |library| ui.linkSystemLibrary(library, .{});
         for ([_][]const u8{ "default", "prepare" }) |kind| {
             const probe = b.addExecutable(.{ .name = b.fmt("gradient-program-{s}-link", .{kind}), .root_module = b.createModule(.{
@@ -1382,6 +1383,10 @@ pub fn build(b: *std.Build) void {
         const run_program_smoke = b.addSystemCommand(&.{b.getInstallPath(.bin, "smoke-gradient-program.exe")});
         run_program_smoke.step.dependOn(&install_program_smoke.step);
         b.step("smoke-gradient-program", "Verify explicitly prepared interpolation programs, rollback and resource ownership").dependOn(&run_program_smoke.step);
+        addSmoke(b, "smoke-shader-effects-gpu", "tests/shader_effects_gpu_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
     }
     if (accessibility) {
         if (target.result.os.tag != .windows) @panic("UI Automation requires Windows");

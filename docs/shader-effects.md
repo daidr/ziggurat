@@ -2,7 +2,7 @@
 
 `ziggurat_shader` 是一门有界的着色语言：程序在绘制之前编译成寄存器字节码，编译时就算出每个像素最多执行多少步；`ziggurat_ui` 用它改写元素的绘制结果（元素效果）或元素下方已画好的内容（背景着色器）。在此之上，`ui.effects.Library` 提供内置的位姿/透视变换、淡出和玻璃折射程序，声明式视图把它们接成 `Style.opacity`、`Style.pose`、`Style.effect`、`Style.refraction` 与 `View.presentColumn` 进出场过渡。
 
-**范围说明**：窗口仍在 CPU 上逐像素解释执行程序。含有着色器命令的一帧在 D3D11 下与[背景效果](backdrop-effects.md)一样整帧改走软件回放（Windows GDI DIB、Linux Cairo 图像面）。`ziggurat_shader.gpu` 已能把程序翻译成 HLSL 与 GLSL，并与 CPU 逐像素对照验证（见下文“GPU 翻译”），渲染器接入在后续改动中进行；目前没有吞吐量基准。像素正确性由单元测试与隐藏窗口 smoke 检查验证，不代表视觉质量评审。
+**范围说明**：软件回放（Windows GDI DIB、Linux Cairo 图像面）在 CPU 上逐像素解释执行程序。Windows D3D11 渲染器把程序翻译成 HLSL 后在 GPU 上执行元素效果与背景着色器（见下文“Direct3D 11 执行”），与软件回放逐像素对照验证；Linux 目前仍走软件回放。目前没有吞吐量基准。像素正确性由单元测试与隐藏窗口 smoke 检查验证，不代表视觉质量评审。
 
 ## 语言
 
@@ -135,6 +135,12 @@ try canvas.invalidate();
 
 Direct3D 用系统自带的 HLSL 编译器（`d3dcompiler_47.dll`，按需加载，O3 + IEEE 严格模式）编译翻译结果。`ui.shader_cache.DiskCache` 把字节码按“编译参数 + 完整源码”的 SHA-256 命名保存在用户缓存目录（Windows `%LOCALAPPDATA%\Ziggurat\ShaderCache`，其他系统 `$XDG_CACHE_HOME/ziggurat/shader-cache` 或 `~/.cache/ziggurat/shader-cache`），由同一用户的所有应用共享；先写临时文件再改名，读回时校验 DXBC 头并刷新修改时间，超过 32 MiB 时先删最久未用的文件。任何失败都只是不使用缓存。OpenGL 由驱动自己缓存，不使用磁盘缓存。
 
+## Direct3D 11 执行
+
+D3D11 渲染器只执行事先准备过的程序。`Context.prepareGpuShaders(allocator, &.{ .{ .program = p, .target = .element } })` 在 paint 之外把程序翻译成 HLSL、套上宿主代码后编译（或从磁盘缓存读出）并装入渲染器的 16 个像素着色器槽之一（最久未用的槽先被替换），返回在 GPU 上就绪的个数；没有 GPU 渲染器时返回 0。编译结果同时保存在内存中，设备丢失后在下一帧直接重新装入，绘制期间从不编译。编译器拒绝的程序被记住。`ui.effects.Library.gpuShaders()` 列出内置程序，`view.Host.prepareShaderEffects` 会一并准备它们。以下情况整帧走软件回放且不计为设备失败：帧中有[背景效果](backdrop-effects.md)或加载指示器、用到未准备或无法在 GPU 上执行的程序、没有着色器工作区、着色器命令位于变换内部，或元素效果借不到高斯捕获（未准备高斯工作区、捕获超出容量、层深或该帧的滤波工作量用尽）。
+
+元素效果像软件回放一样借用高斯捕获：内容画进捕获平面后，着色器代替滤波器在捕获上逐像素运行，结果写回平面再按效果的不透明度合成。背景着色器结束当前绘制，把目标中形状加边距的区域复制到纹理，在形状与裁剪覆盖的像素上运行着色器并写回目标，再继续绘制。两者都与软件回放使用相同的位置、精确双线性采样（元素捕获外读作透明，背景复制区外取最近像素）、失败处理、结果截取与合成公式；prologue 仍在 CPU 上运行，工作量预算、`applied`、`skipped` 与 `pixels` 统计照常计入。GPU 不统计逐像素的 `faulted_pixels`。`Renderer.effectPasses()` 给出 GPU 上执行的着色器遍数。
+
 ## 帧统计与慢帧日志
 
 `Context.setFrameStats(.{ .enabled = true, .slow_ns = 8 * std.time.ns_per_ms })` 为每帧计时：录制（build）、预检（preflight）与回放呈现（render）三段，以及命令数与是否走软件回放；`frameStats()` 返回帧数、慢帧数、平均、最近一帧与最慢一帧。超过阈值的帧通过 `std.log`（scope `ziggurat_frames`，info 级）输出一行。未显式设置时，attach 读取环境变量 `ZIGGURAT_FRAME_STATS`：`1`/`on`/`true`/`yes` 为 8 ms 阈值，数字为毫秒阈值，`all` 记录每帧，`0`/`off`/`false`/`no` 关闭。计时只读单调时钟，不分配内存。
@@ -146,4 +152,5 @@ Direct3D 用系统自带的 HLSL 编译器（`d3dcompiler_47.dll`，按需加载
 - `zig build test-view`：样式包裹顺序、裁剪/效果平衡与 `presentColumn` 进出场。
 - `zig build test-shader-gl`（Linux，经 EGL 在 Mesa 上运行）与 `zig build test-shader-d3d`（Windows，WARP；属于 `zig build test`）：一组覆盖循环、函数调用、数组、矩阵、整数故障与各内置函数的程序翻译后逐像素与 CPU 机器对照，包括哪些像素失败。
 - `zig build test-ui`：磁盘缓存的命名、校验、最久未用淘汰与临时文件清理。
+- `zig build smoke-shader-effects-gpu -Dgpu=true`（Windows，WARP）：未准备程序时整帧走软件回放；准备后同一帧分别由 D3D11 与软件回放绘制，五个效果都在 GPU 上执行，统计一致，逐像素差不超过 2。
 - `zig build smoke-shader-effects`：隐藏窗口上未准备时的原样绘制，准备后的改色、位姿、淡出像素，背景着色器，帧统计与工作区随 detach 释放。

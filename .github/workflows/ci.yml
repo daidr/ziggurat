@@ -70,6 +70,10 @@ jobs:
           zig build build-setup-smoke -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./tests/setup_smoke.ps1
+      - name: Direct3D 11 shader effects on WARP
+        run: |
+          zig build smoke-shader-effects-gpu -Dgpu=true -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Optional pinned WebP decoder
         run: |
           ./scripts/fetch-webp.ps1
