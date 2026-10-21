@@ -265,6 +265,12 @@ pub const TerminalView = struct {
     told_search: SearchStatus = .{},
     told_search_text: [term.search.max_text]u8 = undefined,
     exit: ?term.Exit = null,
+    /// Images placements show, uploaded to the window; those let go of,
+    /// until no frame draws them.
+    uploads: std.ArrayList(*Upload) = .empty,
+    retired: std.ArrayList(*Upload) = .empty,
+    /// The last paint met a placement whose image is not uploaded.
+    images_missing: bool = false,
     /// The first error from deferred work or input, for diagnostics.
     last_error: ?anyerror = null,
     value: [max_value]u8 = undefined,
@@ -287,6 +293,10 @@ pub const TerminalView = struct {
 
     pub fn deinit(self: *TerminalView) void {
         self.search.deinit();
+        self.releaseImages();
+        for (self.retired.items) |upload| upload.destroy(self.allocator);
+        self.retired.deinit(self.allocator);
+        self.uploads.deinit(self.allocator);
     }
 
     /// Route the terminal's events here and take the theme's colors. Call
@@ -318,6 +328,7 @@ pub const TerminalView = struct {
     /// Unregister from the Context and stop deferred work. Call before the
     /// Context detaches or the view goes away; it can be shown again.
     pub fn detach(self: *TerminalView) void {
+        self.releaseImages();
         if (self.client) |client| _ = client.window.clearTextClient(client) catch {};
         self.client = null;
         if (self.token) |token| _ = token.close() catch {};
@@ -750,11 +761,194 @@ pub const TerminalView = struct {
             self.caret_sent = self.caret;
         }
         if (self.searchStale()) self.refreshSearch();
+        self.syncImages();
     }
 
     fn searchStale(self: *const TerminalView) bool {
         const s = &self.terminal.screen;
         return self.search.active() and (self.search.revision != s.content or self.search.alternate != s.onAlternate() or self.search.pushed != s.pushed);
+    }
+
+    // ---- Images ----------------------------------------------------------
+
+    /// An image uploaded to the window: its pixels premultiplied BGRA, at
+    /// most as many as the window takes, sampled down from bigger ones.
+    const Upload = struct {
+        alternate: bool,
+        id: u32,
+        generation: u64,
+        /// 0 when it could not be uploaded, which is not tried again.
+        identity: u64 = 0,
+        lease: ui.drawing.Lease,
+        pixels: []u8 = &.{},
+        level: [1]ui.drawing.ImageLevel = undefined,
+        /// A paint drew it.
+        seen: bool = true,
+
+        fn imageView(self: *Upload) ui.drawing.ImageView {
+            return .{ .lease = &self.lease, .identity = self.identity, .levels = &self.level };
+        }
+
+        fn destroy(self: *Upload, allocator: std.mem.Allocator) void {
+            allocator.free(self.pixels);
+            allocator.destroy(self);
+        }
+    };
+
+    /// Images in layers by their z, as Ghostty draws them.
+    const ImageLayer = enum { below_background, below_text, above_text };
+
+    fn layerOf(z_index: i32) ImageLayer {
+        if (z_index < -(1 << 30)) return .below_background;
+        if (z_index < 0) return .below_text;
+        return .above_text;
+    }
+
+    fn uploadOf(self: *const TerminalView, alternate: bool, image: *const term.graphics.Image) ?*Upload {
+        for (self.uploads.items) |upload| {
+            if (upload.alternate == alternate and upload.id == image.id and upload.generation == image.generation) return upload;
+        }
+        return null;
+    }
+
+    /// Whether a placement shows some of itself in the view.
+    fn placementShows(self: *const TerminalView, p: term.graphics.Placement, size: term.graphics.Layout) bool {
+        if (p.virtual or size.width == 0 or size.height == 0 or size.src_w == 0 or size.src_h == 0) return false;
+        const t = self.terminal;
+        const top = t.imagesTop();
+        return p.row + size.rows > top and p.row < top + t.screen.rows;
+    }
+
+    fn imagesStale(self: *const TerminalView) bool {
+        if (self.images_missing or self.retired.items.len > 0) return true;
+        for (self.uploads.items) |upload| if (!upload.seen) return true;
+        return false;
+    }
+
+    /// Draw the placements of a layer, within the grid.
+    fn paintImages(self: *TerminalView, frame: *ui.Frame, layer: ImageLayer, ox: f32, oy: f32, cw: f32, ch: f32) !void {
+        const t = self.terminal;
+        if (t.cell_width == 0 or t.cell_height == 0) return;
+        const storage = t.activeImages();
+        const alternate = t.screen.onAlternate();
+        const top: i64 = @intCast(t.imagesTop());
+        const scale = self.scale;
+        const grid: view.Rect = .{ .x = ox, .y = oy, .width = @as(f32, @floatFromInt(t.screen.cols)) * cw, .height = @as(f32, @floatFromInt(t.screen.rows)) * ch };
+        for (storage.placements.items) |p| {
+            if (layerOf(p.z) != layer) continue;
+            const image = storage.image(p.image_id) orelse continue;
+            const size = term.graphics.layout(p, image.*, t.cell_width, t.cell_height);
+            if (!self.placementShows(p, size)) continue;
+            const upload = self.uploadOf(alternate, image) orelse {
+                self.images_missing = true;
+                continue;
+            };
+            upload.seen = true;
+            if (upload.identity == 0) continue;
+            const rects = imageRects(p, size, image.*, .{ .x = ox + @as(f32, @floatFromInt(p.col)) * cw, .y = oy + @as(f32, @floatFromInt(@as(i64, @intCast(p.row)) - top)) * ch }, scale, grid) orelse continue;
+            const whole = rects.whole;
+            const clip = rects.clip;
+            try frame.pushClip(clip);
+            frame.image(whole, upload.imageView(), .{}) catch |err| self.fail(err);
+            try frame.popClip();
+        }
+    }
+
+    /// Upload the images placements show, and let go of the rest. Runs
+    /// outside paint.
+    fn syncImages(self: *TerminalView) void {
+        const t = self.terminal;
+        const storage = t.activeImages();
+        const alternate = t.screen.onAlternate();
+        var changed = false;
+        var i: usize = 0;
+        while (i < self.uploads.items.len) {
+            const upload = self.uploads.items[i];
+            const image = if (upload.alternate == alternate) storage.image(upload.id) else null;
+            const keep = if (image) |img| img.generation == upload.generation and self.imageShows(img.id) else false;
+            if (keep) {
+                i += 1;
+                continue;
+            }
+            _ = self.uploads.swapRemove(i);
+            self.retire(upload);
+            changed = true;
+        }
+        for (storage.placements.items) |p| {
+            const image = storage.image(p.image_id) orelse continue;
+            if (self.uploadOf(alternate, image) != null) continue;
+            if (!self.placementShows(p, term.graphics.layout(p, image.*, t.cell_width, t.cell_height))) continue;
+            self.uploadImage(alternate, image) catch |err| {
+                self.fail(err);
+                continue;
+            };
+            changed = true;
+        }
+        self.freeRetired();
+        if (changed) self.invalidate();
+    }
+
+    fn imageShows(self: *const TerminalView, id: u32) bool {
+        const t = self.terminal;
+        const storage = t.activeImages();
+        const image = storage.image(id) orelse return false;
+        for (storage.placements.items) |p| {
+            if (p.image_id == id and self.placementShows(p, term.graphics.layout(p, image.*, t.cell_width, t.cell_height))) return true;
+        }
+        return false;
+    }
+
+    fn uploadImage(self: *TerminalView, alternate: bool, image: *const term.graphics.Image) !void {
+        try self.uploads.ensureUnusedCapacity(self.allocator, 1);
+        const kept = try self.allocator.create(Upload);
+        kept.* = .{ .alternate = alternate, .id = image.id, .generation = image.generation, .lease = .init(std.Thread.getCurrentId()) };
+        errdefer kept.destroy(self.allocator);
+        // Halve what the window cannot take.
+        var width = image.width;
+        var height = image.height;
+        while (width > 16384 or height > 16384 or @as(u64, width) * height > 16 * 1024 * 1024) {
+            width = (width + 1) / 2;
+            height = (height + 1) / 2;
+        }
+        kept.pixels = try self.allocator.alloc(u8, @as(usize, width) * height * 4);
+        convertImage(image.*, width, height, kept.pixels);
+        kept.level = .{.{ .pixels = kept.pixels.ptr, .byte_len = kept.pixels.len, .width = width, .height = height, .stride = width * 4 }};
+        kept.identity = try ui.drawing.reserveRasterIdentity();
+        self.host.context.uploadImage(kept.imageView()) catch |err| {
+            // Kept, so as not to try again.
+            kept.identity = 0;
+            self.fail(err);
+        };
+        self.uploads.appendAssumeCapacity(kept);
+    }
+
+    fn retire(self: *TerminalView, kept: *Upload) void {
+        if (kept.identity != 0 and self.host.context.window != null) _ = self.host.context.releaseImage(kept.identity) catch |err| self.fail(err);
+        self.retired.append(self.allocator, kept) catch {
+            // With nowhere to wait, it goes now; frames end before the
+            // window lets go of the image.
+            kept.destroy(self.allocator);
+        };
+    }
+
+    /// Free the pixels of images no frame draws any longer.
+    fn freeRetired(self: *TerminalView) void {
+        var i: usize = 0;
+        while (i < self.retired.items.len) {
+            const kept = self.retired.items[i];
+            kept.lease.ensureUnused() catch {
+                i += 1;
+                continue;
+            };
+            _ = self.retired.swapRemove(i);
+            kept.destroy(self.allocator);
+        }
+    }
+
+    fn releaseImages(self: *TerminalView) void {
+        for (self.uploads.items) |kept| self.retire(kept);
+        self.uploads.clearRetainingCapacity();
+        self.freeRetired();
     }
 
     // ---- Paint -----------------------------------------------------------
@@ -819,6 +1013,9 @@ pub const TerminalView = struct {
         if (self.options.padding_color != .background) self.extendPadding(frame, bounds, ox, oy, cell.width, cell.height);
         const range = if (self.selection) |selection| (if (selection.empty()) null else selection.range(s)) else null;
         const offset = s.viewportOffset();
+        for (self.uploads.items) |upload| upload.seen = false;
+        self.images_missing = false;
+        try self.paintImages(frame, .below_background, ox, oy, cell.width, cell.height);
         for (0..s.rows) |y| {
             const abs = s.viewRow(y);
             const line = s.rowAt(abs) orelse continue;
@@ -838,12 +1035,21 @@ pub const TerminalView = struct {
             if (range) |r| if (line.cells.len < s.cols and selectedAt(r, abs, line.cells.len)) {
                 frame.rect(.{ .x = ox + @as(f32, @floatFromInt(line.cells.len)) * cell.width, .y = top, .width = @as(f32, @floatFromInt(s.cols - line.cells.len)) * cell.width, .height = cell.height }, self.theme().selectionColor());
             };
-            self.paintText(frame, line.cells, abs, range, ox, top, cell.width, cell.height);
-            if (self.hover) |hover| if (hover.row == abs and hover.start < line.cells.len) {
+        }
+        try self.paintImages(frame, .below_text, ox, oy, cell.width, cell.height);
+        for (0..s.rows) |y| {
+            const abs = s.viewRow(y);
+            const line = s.rowAt(abs) orelse continue;
+            self.paintText(frame, line.cells, abs, range, ox, oy + @as(f32, @floatFromInt(y)) * cell.height, cell.width, cell.height);
+        }
+        try self.paintImages(frame, .above_text, ox, oy, cell.width, cell.height);
+        if (self.hover) |hover| if (hover.row >= s.viewRow(0) and hover.row < s.viewRow(s.rows)) {
+            if (s.rowAt(hover.row)) |line| if (hover.start < line.cells.len) {
+                const top = oy + @as(f32, @floatFromInt(hover.row - s.viewRow(0))) * cell.height;
                 const fg = self.colorsOf(line.cells[hover.start], false, .none).fg;
                 frame.rect(.{ .x = ox + @as(f32, @floatFromInt(hover.start)) * cell.width, .y = top + cell.height - 1, .width = @as(f32, @floatFromInt(hover.end - hover.start)) * cell.width, .height = 1 }, fg);
             };
-        }
+        };
         const focused = self.token != null and frame.context.input_state.focused == self.id;
         self.caret = null;
         // The cursor, when its row is in view.
@@ -881,9 +1087,9 @@ pub const TerminalView = struct {
             frame.roundedRect(.{ .x = bounds.x + bounds.width - 5, .y = bounds.y + (bounds.height - height) * along, .width = 4, .height = height }, 2, ui.Color.rgb(blend(t.foreground, background)));
         }
         try frame.popClip();
-        // Output moved the cursor, or changed what a search finds: the
-        // posted task follows.
-        if ((self.client != null and !std.meta.eql(self.caret, self.caret_sent)) or self.searchStale()) self.schedule();
+        // Output moved the cursor, changed what a search finds or which
+        // images show: the posted task follows.
+        if ((self.client != null and !std.meta.eql(self.caret, self.caret_sent)) or self.searchStale() or self.imagesStale()) self.schedule();
         if (self.token) |token| try frame.textField(token, bounds, true);
         // Until the leaf is a registered text field nothing can take input
         // for it, so the box reads as read-only.
@@ -1441,6 +1647,55 @@ pub const TerminalView = struct {
 
 /// Whether the cell is one character in inverse video alone, as a
 /// program draws its own cursor.
+/// Where a placement draws: its whole image, scaled as the part it shows,
+/// from its cell's corner, and the clip to that part within the grid.
+fn imageRects(p: term.graphics.Placement, size: term.graphics.Layout, image: term.graphics.Image, corner: view.Point, scale: f32, grid: view.Rect) ?struct { whole: view.Rect, clip: view.Rect } {
+    const at: view.Rect = .{
+        .x = corner.x + @as(f32, @floatFromInt(p.x_offset)) / scale,
+        .y = corner.y + @as(f32, @floatFromInt(p.y_offset)) / scale,
+        .width = @as(f32, @floatFromInt(size.width)) / scale,
+        .height = @as(f32, @floatFromInt(size.height)) / scale,
+    };
+    const clip = intersect(at, grid) orelse return null;
+    const kx = at.width / @as(f32, @floatFromInt(size.src_w));
+    const ky = at.height / @as(f32, @floatFromInt(size.src_h));
+    return .{ .clip = clip, .whole = .{
+        .x = at.x - @as(f32, @floatFromInt(size.src_x)) * kx,
+        .y = at.y - @as(f32, @floatFromInt(size.src_y)) * ky,
+        .width = @as(f32, @floatFromInt(image.width)) * kx,
+        .height = @as(f32, @floatFromInt(image.height)) * ky,
+    } };
+}
+
+fn intersect(a: view.Rect, b: view.Rect) ?view.Rect {
+    const x0 = @max(a.x, b.x);
+    const y0 = @max(a.y, b.y);
+    const x1 = @min(a.x + a.width, b.x + b.width);
+    const y1 = @min(a.y + a.height, b.y + b.height);
+    if (x1 <= x0 or y1 <= y0) return null;
+    return .{ .x = x0, .y = y0, .width = x1 - x0, .height = y1 - y0 };
+}
+
+/// An image's pixels, straight RGB or RGBA, as premultiplied BGRA, sampled
+/// to `width` by `height`.
+fn convertImage(image: term.graphics.Image, width: u32, height: u32, out: []u8) void {
+    const bpp: usize = image.format.bytesPerPixel();
+    for (0..height) |y| {
+        const sy = y * image.height / height;
+        for (0..width) |x| {
+            const sx = x * image.width / width;
+            const in = image.pixels[(sy * image.width + sx) * bpp ..][0..bpp];
+            const a: u16 = if (bpp == 4) in[3] else 255;
+            const o = out[(y * width + x) * 4 ..][0..4];
+            o.* = .{ premultiply(in[2], a), premultiply(in[1], a), premultiply(in[0], a), @intCast(a) };
+        }
+    }
+}
+
+fn premultiply(c: u8, a: u16) u8 {
+    return @intCast((@as(u16, c) * a + 127) / 255);
+}
+
 fn loneInverse(line: []const Cell, x: usize) bool {
     if (!line[x].style.attrs.inverse) return false;
     const before = x > 0 and line[x - 1].style.attrs.inverse;
@@ -1897,6 +2152,31 @@ test "themes follow the window, and contrast keeps text readable" {
     const fg = tv.colorsOf(cells[0], false, .none).fg;
     try std.testing.expect(contrast(luminance(fg), luminance(0xffffff)) >= 3);
     try std.testing.expectEqual(term.theme.light.palette[11], tv.colorsOf(cells[1], false, .none).fg);
+}
+
+test "images draw scaled into their cells, clipped to their part and the grid" {
+    var pixels = [_]u8{ 255, 0, 0, 128, 0, 255, 0, 255, 0, 0, 255, 0, 9, 9, 9, 255 };
+    const image: term.graphics.Image = .{ .id = 1, .width = 2, .height = 2, .format = .rgba, .pixels = &pixels };
+    var out: [16]u8 = undefined;
+    convertImage(image, 2, 2, &out);
+    // Premultiplied BGRA.
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 128, 128, 0, 255, 0, 255, 0, 0, 0, 0, 9, 9, 9, 255 }, &out);
+    var small: [4]u8 = undefined;
+    convertImage(image, 1, 1, &small);
+    try std.testing.expectEqualSlices(u8, out[0..4], &small);
+
+    // The right column of the image over two cells of 10 by 20, at scale 2.
+    const p: term.graphics.Placement = .{ .image_id = 1, .id = 1, .row = 0, .col = 0, .src_x = 1, .cols = 2, .rows = 1 };
+    const size = term.graphics.layout(p, image, 20, 40);
+    const grid: view.Rect = .{ .x = 0, .y = 0, .width = 100, .height = 100 };
+    const rects = imageRects(p, size, image, .{ .x = 30, .y = 40 }, 2, grid).?;
+    try std.testing.expectEqual(view.Rect{ .x = 30, .y = 40, .width = 20, .height = 20 }, rects.clip);
+    try std.testing.expectEqual(view.Rect{ .x = 10, .y = 40, .width = 40, .height = 20 }, rects.whole);
+    // Out of the grid, nothing.
+    try std.testing.expect(imageRects(p, size, image, .{ .x = 100, .y = 0 }, 2, grid) == null);
+    try std.testing.expectEqual(TerminalView.ImageLayer.below_background, TerminalView.layerOf(-(1 << 30) - 1));
+    try std.testing.expectEqual(TerminalView.ImageLayer.below_text, TerminalView.layerOf(-1));
+    try std.testing.expectEqual(TerminalView.ImageLayer.above_text, TerminalView.layerOf(0));
 }
 
 test {

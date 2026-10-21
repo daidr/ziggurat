@@ -326,6 +326,8 @@ pub const Screen = struct {
     modes: Modes = .{},
     /// Lines ever pushed into the scrollback, including dropped ones.
     pushed: u64 = 0,
+    /// Lines ever scrolled off the top of the alternate screen.
+    alternate_scrolled: u64 = 0,
     /// Lines the view is scrolled back from the bottom.
     viewport: usize = 0,
     /// Changes whenever a visible cell, the cursor or a mode changes.
@@ -684,6 +686,7 @@ pub const Screen = struct {
             // A view scrolled back keeps showing the same lines.
             if (self.viewport > 0) self.viewport = @min(self.viewport + n, self.history.count);
         }
+        if (self.on_alternate and self.top == 0) self.alternate_scrolled += n;
         g.rotateUp(self.top, @as(usize, self.bottom) + 1, n, self.fill());
         self.changed();
     }

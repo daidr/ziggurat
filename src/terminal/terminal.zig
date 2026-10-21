@@ -6,6 +6,7 @@
 const std = @import("std");
 const parser_module = @import("parser.zig");
 const screen_module = @import("screen.zig");
+const graphics = @import("graphics.zig");
 
 const Parser = parser_module.Parser;
 const Action = parser_module.Action;
@@ -53,6 +54,10 @@ pub const Options = struct {
     foreground: u24 = 0xd4d4d4,
     background: u24 = 0x1e1e1e,
     cursor: u24 = 0xd4d4d4,
+    /// The most bytes the images programs show take (the Kitty graphics
+    /// protocol), on each screen; 0 refuses images, for programs to show
+    /// something else.
+    image_limit: usize = graphics.default_limit,
 };
 
 pub const max_title = 256;
@@ -93,6 +98,9 @@ pub const Terminal = struct {
     /// `crosshair`, `col-resize`…), until it takes or leaves the mouse.
     pointer_shape_bytes: [32]u8 = undefined,
     pointer_shape_len: usize = 0,
+    /// Images of the primary screen and of the alternate one.
+    images: [2]graphics.Storage,
+    receiver: graphics.Receiver = .{},
 
     pub fn init(allocator: std.mem.Allocator, options: Options) !Terminal {
         var screen = try Screen.init(allocator, options.screen);
@@ -100,13 +108,25 @@ pub const Terminal = struct {
         const osc = try allocator.alloc(u8, options.osc_bytes);
         errdefer allocator.free(osc);
         const clipboard = try allocator.alloc(u8, if (options.clipboard.write) options.osc_bytes else 0);
-        return .{ .allocator = allocator, .screen = screen, .parser = Parser.init(osc), .osc_storage = osc, .clipboard_storage = clipboard, .options = options, .foreground = options.foreground, .background = options.background, .cursor_color = options.cursor, .base_foreground = options.foreground, .base_background = options.background, .base_cursor = options.cursor };
+        return .{ .allocator = allocator, .screen = screen, .parser = Parser.init(osc), .osc_storage = osc, .clipboard_storage = clipboard, .options = options, .foreground = options.foreground, .background = options.background, .cursor_color = options.cursor, .base_foreground = options.foreground, .base_background = options.background, .base_cursor = options.cursor, .images = .{ .init(allocator, options.image_limit, 0), .init(allocator, options.image_limit, 1 << 62) } };
     }
 
     pub fn deinit(self: *Terminal) void {
         self.screen.deinit();
         self.allocator.free(self.osc_storage);
         self.allocator.free(self.clipboard_storage);
+        for (&self.images) |*storage| storage.deinit();
+        self.receiver.deinit(self.allocator);
+    }
+
+    /// The images and placements of the screen that shows.
+    pub fn activeImages(self: *Terminal) *graphics.Storage {
+        return &self.images[@intFromBool(self.screen.onAlternate())];
+    }
+    /// The row placements count at the top of the view, as the screen
+    /// shows it scrolled back.
+    pub fn imagesTop(self: *const Terminal) u64 {
+        return graphics.Storage.top(&self.screen) - self.screen.viewportOffset();
     }
 
     /// Interpret output from the program.
@@ -199,6 +219,18 @@ pub const Terminal = struct {
             .csi => |c| self.handleCsi(c),
             .esc => |e| self.handleEsc(e.intermediates, e.final),
             .osc => |payload| self.handleOsc(payload),
+            .apc_start => self.receiver.start(self.allocator),
+            .apc_data => |bytes| self.receiver.data(self.allocator, bytes),
+            .apc_end => |ok| {
+                const command = self.receiver.end() orelse return;
+                if (!ok) return;
+                const grid: graphics.Grid = .{ .screen = &self.screen, .cell_width = self.cell_width, .cell_height = self.cell_height };
+                // Placing moves the cursor, deleting changes what shows.
+                self.screen.revision +%= 1;
+                const response = self.activeImages().execute(command.control, command.payload, grid) orelse return;
+                var buffer: [256]u8 = undefined;
+                self.reply(response.write(&buffer) catch return);
+            },
         }
     }
 
@@ -232,6 +264,7 @@ pub const Terminal = struct {
                 s.reset();
                 self.resetColors();
                 self.title_len = 0;
+                for (&self.images) |*storage| storage.clear();
             },
             '=' => s.modes.keypad = true,
             '>' => s.modes.keypad = false,
@@ -283,7 +316,12 @@ pub const Terminal = struct {
             'G', '`' => s.moveToColumn(p.get(0, 1) - 1),
             'H', 'f' => s.moveTo(p.get(1, 1) - 1, p.get(0, 1) - 1),
             'I' => s.tabForward(p.get(0, 1)),
-            'J' => s.eraseDisplay(erase(p.get(0, 0)) orelse return),
+            'J' => {
+                const mode = erase(p.get(0, 0)) orelse return;
+                s.eraseDisplay(mode);
+                // Clearing the screen clears its images too.
+                if (mode == .all) self.activeImages().clear();
+            },
             'K' => s.eraseLine(erase(p.get(0, 0)) orelse return),
             'L' => s.insertLines(p.get(0, 1)),
             'M' => s.deleteLines(p.get(0, 1)),
@@ -390,9 +428,15 @@ pub const Terminal = struct {
             1007 => m.alternate_scroll = on,
             1015 => m.mouse_encoding = if (on) .urxvt else .x10,
             1016 => m.mouse_encoding = if (on) .sgr_pixels else .x10,
-            1047 => s.useAlternate(on, false, !on),
+            1047 => {
+                s.useAlternate(on, false, !on);
+                if (!on) self.images[1].clear();
+            },
             1048 => if (on) s.saveCursor() else s.restoreCursor(),
-            1049 => s.useAlternate(on, true, true),
+            1049 => {
+                s.useAlternate(on, true, true);
+                self.images[1].clear();
+            },
             2004 => m.bracketed_paste = on,
             2026 => m.synchronized = on,
             else => {},
@@ -864,4 +908,43 @@ test "notifications and the pointer's shape" {
     try std.testing.expectEqualStrings("pointer", t.pointerShape());
     t.feed("\x1b[?1000h");
     try std.testing.expectEqualStrings("", t.pointerShape());
+}
+
+test "images through APC strings, per screen, gone as the screen clears" {
+    var t = try Terminal.init(std.testing.allocator, .{ .screen = .{ .cols = 10, .rows = 4 } });
+    defer t.deinit();
+    t.cell_width = 8;
+    t.cell_height = 16;
+    // 16 by 16 pixels: two cells by one, the cursor past them.
+    const pixel = "AAAA";
+    var text: [16 * 16 * 4 + 64]u8 = undefined;
+    const head = "\x1b_Ga=T,f=24,s=16,v=16,i=3;";
+    @memcpy(text[0..head.len], head);
+    for (0..16 * 16) |i| @memcpy(text[head.len + i * 4 ..][0..4], pixel);
+    const end = head.len + 16 * 16 * 4;
+    @memcpy(text[end..][0..2], "\x1b\\");
+    t.feed(text[0 .. end + 2]);
+    try std.testing.expectEqualStrings("\x1b_Gi=3;OK\x1b\\", t.pendingReplies());
+    t.clearReplies();
+    try std.testing.expectEqual(@as(u16, 2), t.screen.cursor.x);
+    try std.testing.expectEqual(@as(usize, 1), t.activeImages().placements.items.len);
+    // The alternate screen has its own, none.
+    t.feed("\x1b[?1049h");
+    try std.testing.expectEqual(@as(usize, 0), t.activeImages().placements.items.len);
+    t.feed("\x1b_Ga=p,i=3\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=3;ENOENT: image not found\x1b\\", t.pendingReplies());
+    t.clearReplies();
+    t.feed("\x1b[?1049l");
+    try std.testing.expectEqual(@as(usize, 1), t.activeImages().placements.items.len);
+    // Not an image command, or cancelled: nothing.
+    t.feed("\x1b_Xyz\x1b\\\x1b_Ga=p,i=3\x18");
+    try std.testing.expectEqual(@as(usize, 0), t.pendingReplies().len);
+    try std.testing.expectEqual(@as(usize, 1), t.activeImages().placements.items.len);
+    // Clearing the screen clears them.
+    t.feed("\x1b[2J");
+    try std.testing.expectEqual(@as(usize, 0), t.activeImages().images.items.len);
+    var refused = try Terminal.init(std.testing.allocator, .{ .image_limit = 0 });
+    defer refused.deinit();
+    refused.feed("\x1b_Ga=q,i=1,s=1,v=1,f=24;AAAA\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), refused.pendingReplies().len);
 }
