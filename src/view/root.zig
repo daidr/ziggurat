@@ -127,10 +127,11 @@ pub const Style = struct {
     /// Accessible name for a control without a visible label, such as a
     /// progress indicator, or for a named container.
     name: []const u8 = "",
-    /// A backdrop effect painted in place of `background`: glass, a blur of
-    /// what lies beneath the container, or a scroll edge. Effects need
+    /// A material painted in place of `background`, shaped by `radius`:
+    /// glass, a blur of what lies beneath the container, a scroll edge, or a
+    /// custom material that paints itself. Backdrop effects need
     /// `Host.prepareBackdropEffects`; until then they draw an opaque fill.
-    material: ?ui.BackdropEffect = null,
+    material: ?ui.Material = null,
     /// Scroll edge effects over the top and bottom of a clipping container,
     /// such as a scroll container, painted above its children.
     edges: Edges = .{},
@@ -4280,7 +4281,7 @@ pub const View = struct {
                         },
                         else => {},
                     }
-                    if (try self.paintRefraction(target, style, bounds)) {} else if (style.material) |material| target.backdropEffect(bounds, style.radius, material) else if (node.kind != .toast) if (style.background) |color| target.roundedRect(bounds, style.radius, ui.Color.rgb(color));
+                    if (try self.paintRefraction(target, style, bounds)) {} else if (style.material) |material| target.material(bounds, style.radius, material) else if (node.kind != .toast) if (style.background) |color| target.roundedRect(bounds, style.radius, ui.Color.rgb(color));
                     if (style.border) |color| target.strokeRect(bounds, style.radius, style.border_width, ui.Color.rgb(color));
                     if (node.kind == .breadcrumbs) self.paintSeparators(node, target, theme);
                     if (node.kind == .split) {
@@ -5169,6 +5170,9 @@ const Recorder = struct {
     pub fn backdropEffect(self: *Recorder, _: Rect, _: f32, _: ui.BackdropEffect) void {
         self.effects += 1;
     }
+    pub fn material(self: *Recorder, _: Rect, _: f32, _: ui.Material) void {
+        self.effects += 1;
+    }
     pub fn backdropShader(self: *Recorder, _: Rect, _: f32, _: ui.ShaderEffect) void {
         self.effects += 1;
     }
@@ -5528,6 +5532,21 @@ test "materials replace container backgrounds and edges paint inside the clip" {
     try view.paint(&recorder);
     try std.testing.expectEqual(@as(usize, 3), recorder.effects);
     try std.testing.expectEqual(@as(usize, 0), recorder.clip_depth);
+    // A custom material paints in place of the background too.
+    const Paint = struct {
+        fn paint(_: ?*const anyopaque, frame: *ui.Frame, box: Rect, radius: f32) anyerror!void {
+            frame.roundedRect(box, radius, ui.Color.oklch(0.6, 0.1, 30));
+        }
+    };
+    view.reset(.{}, null);
+    try view.row(.{ .background = 0xff0000, .material = .{ .custom = .{ .paint = Paint.paint } }, .radius = 6 });
+    try view.end();
+    try view.finish();
+    try view.arrange(.{ .x = 0, .y = 0, .width = 200, .height = 200 }, .{}, .{});
+    recorder = .{};
+    try view.paint(&recorder);
+    try std.testing.expectEqual(@as(usize, 1), recorder.effects);
+    try std.testing.expectEqual(@as(usize, 0), recorder.fills);
 }
 
 test "opacity, pose and effects wrap a node's subtree, closing inside out" {

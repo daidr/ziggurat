@@ -1,5 +1,6 @@
 const std = @import("std");
 const layout = @import("layout.zig");
+const gamut = @import("gamut.zig");
 pub const Rect = layout.Rect;
 
 /// Explicit bound for the adapters' reusable 32-bit software surfaces.
@@ -25,7 +26,75 @@ pub const Color = struct {
     pub fn rgba(self: Color) u32 {
         return (@as(u32, self.r) << 24) | (@as(u32, self.g) << 16) | (@as(u32, self.b) << 8) | self.a;
     }
+    /// 0xRRGGBB without alpha, the form of `Style.background` and palettes.
+    pub fn hex(self: Color) u32 {
+        return (@as(u32, self.r) << 16) | (@as(u32, self.g) << 8) | self.b;
+    }
+    /// The color with its alpha multiplied by `alpha` in 0..1.
+    pub fn withAlpha(self: Color, alpha: f32) Color {
+        var copy = self;
+        copy.a = alphaByte(@as(f32, @floatFromInt(self.a)) / 255 * alpha);
+        return copy;
+    }
+    /// CSS `oklch(l c h)`: lightness from 0 to 1, chroma from 0 to about 0.4
+    /// and hue in degrees; `withAlpha` gives `oklch(l c h / a)`. A color
+    /// Display P3 cannot show first loses chroma, keeping lightness and hue,
+    /// and a negative chroma is 0, as in CSS. Windows draw sRGB, so a color
+    /// outside it shows as the nearest sRGB color, found as CSS Color 4 does.
+    pub fn oklch(l: f32, c: f32, h: f32) Color {
+        const p3 = gamut.map(.display_p3, l, c, h);
+        const linear = gamut.linearP3ToSrgb(p3[0], p3[1], p3[2]);
+        return extended(@floatCast(gamut.encode(linear[0])), @floatCast(gamut.encode(linear[1])), @floatCast(gamut.encode(linear[2])));
+    }
+    /// CSS `color(display-p3 r g b)`: components from 0 to 1, encoded with
+    /// the sRGB curve, shown as the nearest sRGB color.
+    pub fn displayP3(r: f32, g: f32, b: f32) Color {
+        const linear = gamut.linearP3ToSrgb(gamut.decode(std.math.clamp(r, 0, 1)), gamut.decode(std.math.clamp(g, 0, 1)), gamut.decode(std.math.clamp(b, 0, 1)));
+        return extended(@floatCast(gamut.encode(linear[0])), @floatCast(gamut.encode(linear[1])), @floatCast(gamut.encode(linear[2])));
+    }
+    /// The opaque color of extended sRGB components, mapped into sRGB when
+    /// outside it; components that are not finite give opaque black.
+    pub fn extended(r: f32, g: f32, b: f32) Color {
+        const mapped = gamut.nearestSrgb(r, g, b) orelse return .{ .r = 0, .g = 0, .b = 0 };
+        const byte = struct {
+            fn run(v: f64) u8 {
+                return @intFromFloat(@max(0, @min(v, 1)) * 255 + 0.5);
+            }
+        }.run;
+        return .{ .r = byte(mapped[0]), .g = byte(mapped[1]), .b = byte(mapped[2]) };
+    }
 };
+fn alphaByte(a: f32) u8 {
+    if (!(a > 0)) return 0;
+    if (a >= 1) return 255;
+    return @intFromFloat(a * 255 + 0.5);
+}
+
+test "oklch colors match CSS's sRGB results" {
+    // oklch(62.8% 0.2577 29.23) is sRGB red.
+    try std.testing.expectEqual(Color{ .r = 255, .g = 0, .b = 0 }, Color.oklch(0.6279554, 0.2576833, 29.2338851));
+    try std.testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255 }, Color.oklch(1, 0.1, 30));
+    try std.testing.expectEqual(Color{ .r = 0, .g = 0, .b = 0 }, Color.oklch(0, 0.1, 30));
+    // Gray when chroma is zero or negative.
+    const gray = Color.oklch(0.5, -1, 200);
+    try std.testing.expect(gray.r == gray.g and gray.g == gray.b);
+    try std.testing.expectEqual(Color.oklch(0.5, 0, 0), gray);
+    // A vivid P3 green maps to a saturated sRGB green.
+    const green = Color.oklch(0.85, 0.35, 145);
+    try std.testing.expect(green.g > 200 and green.r < green.g and green.b < green.g);
+    try std.testing.expectEqual(@as(u8, 128), Color.oklch(0.5, 0.1, 30).withAlpha(0.5).a);
+    try std.testing.expectEqual(@as(u32, 0xff0000), Color.oklch(0.6279554, 0.2576833, 29.2338851).hex());
+}
+
+test "display P3 primaries show as the nearest sRGB colors" {
+    try std.testing.expectEqual(Color{ .r = 255, .g = 255, .b = 255 }, Color.displayP3(1, 1, 1));
+    try std.testing.expectEqual(Color{ .r = 0, .g = 0, .b = 0 }, Color.displayP3(0, 0, 0));
+    const red = Color.displayP3(1, 0, 0);
+    try std.testing.expect(red.r == 255 and red.g < 40 and red.b < 40);
+    // Inside sRGB a P3 color converts exactly.
+    const mid = Color.displayP3(0.5, 0.5, 0.5);
+    try std.testing.expect(mid.r == mid.g and mid.g == mid.b and (mid.r == 127 or mid.r == 128));
+}
 pub const Shape = struct { bounds: Rect, color: Color, radius: f32 = 0, stroke_width: f32 = 0 };
 pub const Plan = struct {
     bounds: Rect,

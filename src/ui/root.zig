@@ -28,6 +28,37 @@ pub const GaussianFilterOptions = gaussian_scope.FilterOptions;
 const GaussianWorkspace = struct { allocator: std.mem.Allocator, options: GaussianWorkspaceOptions, storage: commands.FilterStorage = .{} };
 pub const backdrop_effects = commands.backdrop;
 pub const BackdropEffect = backdrop_effects.Effect;
+/// Color spaces and gamut mapping behind `Color.oklch` and `Color.displayP3`.
+pub const gamut = @import("gamut.zig");
+/// What fills a container in place of its background, under its border and
+/// children: a backdrop effect or a look the application or a package
+/// paints (`custom`).
+pub const Material = union(enum) {
+    blur: backdrop_effects.Blur,
+    glass: backdrop_effects.Glass,
+    scroll_edge: backdrop_effects.ScrollEdge,
+    custom: CustomMaterial,
+
+    /// The backdrop effect this material is, or null for a custom one.
+    pub fn backdrop(self: Material) ?BackdropEffect {
+        return switch (self) {
+            .blur => |value| .{ .blur = value },
+            .glass => |value| .{ .glass = value },
+            .scroll_edge => |value| .{ .scroll_edge = value },
+            .custom => null,
+        };
+    }
+};
+/// A material painted by code: `paint` draws over `box`, in the frame's
+/// DIPs and rounded by `radius`, with anything a Frame draws, such as
+/// gradients, backdrop effects and backdrop shaders. `context` must outlive
+/// every frame that paints the material.
+pub const CustomMaterial = struct {
+    context: ?*const anyopaque = null,
+    paint: *const fn (context: ?*const anyopaque, frame: *Frame, box: Rect, radius: f32) anyerror!void,
+    /// How an inspector or a test names the material.
+    name: []const u8 = "custom",
+};
 pub const loading = commands.loading;
 pub const BackdropEffectStats = struct {
     workspace: backdrop_effects.Stats = .{},
@@ -3549,6 +3580,16 @@ pub const Frame = struct {
             self.failure = self.failure orelse err;
         };
     }
+    /// Fill `bounds`, rounded by `radius`, with a material: a backdrop
+    /// effect as `backdropEffect` draws it, or a custom material's paint.
+    pub fn material(self: *Frame, bounds: Rect, radius: f32, value: Material) void {
+        switch (value) {
+            .custom => |custom| custom.paint(custom.context, self, bounds, radius) catch |err| {
+                self.failure = self.failure orelse err;
+            },
+            else => self.backdropEffect(bounds, radius, value.backdrop().?),
+        }
+    }
     /// Draw loading indicator `kind` fitted and centered in `bounds`, at the
     /// pose `phase` cycles into its animation; `loading.phase` derives it
     /// from elapsed time. Scheduling the next frame is the caller's.
@@ -4097,6 +4138,8 @@ fn nativeRect(bounds: affine.Rect) Rect {
 
 test {
     _ = gdi;
+    _ = gamut;
+    _ = geometry;
     _ = effects;
     _ = canvas;
     _ = frame_stats;
@@ -5713,4 +5756,36 @@ test "Gaussian and nested raster scopes restore visual flags without expanding S
     try std.testing.expectEqual(@as(u8, 0), frame.group_geometry_passthrough);
     try frame.popClip();
     try context.command_buffer.finish();
+}
+
+test "a custom material paints itself and a backdrop material draws its effect" {
+    const Dummy = struct {
+        fn draw(_: *anyopaque, _: *Frame) void {}
+        fn action(_: *anyopaque, _: u64) void {}
+    };
+    const Stripes = struct {
+        color: Color,
+        fn paint(context: ?*const anyopaque, frame: *Frame, box: Rect, radius: f32) anyerror!void {
+            const self: *const @This() = @ptrCast(@alignCast(context.?));
+            frame.roundedRect(box, radius, self.color);
+            frame.roundedRect(.{ .x = box.x, .y = box.y, .width = box.width, .height = box.height / 2 }, 0, self.color.withAlpha(0.5));
+        }
+        fn fail(_: ?*const anyopaque, _: *Frame, _: Rect, _: f32) anyerror!void {
+            return error.MaterialFailed;
+        }
+    };
+    var dummy: u8 = 0;
+    var context = Context.init(&dummy, Dummy.draw, Dummy.action);
+    defer context.command_buffer.reset();
+    var frame: Frame = .{ .context = &context, .size = .{ .width = 100, .height = 100, .scale = 1 } };
+    const stripes: Stripes = .{ .color = Color.oklch(0.7, 0.15, 250) };
+    frame.material(.{ .x = 0, .y = 0, .width = 40, .height = 20 }, 4, .{ .custom = .{ .context = &stripes, .paint = Stripes.paint } });
+    try std.testing.expectEqual(@as(usize, 2), context.command_buffer.len);
+    try std.testing.expect(frame.failure == null);
+    // Without a backdrop workspace a backdrop material draws its fallback fill.
+    frame.material(.{ .x = 0, .y = 0, .width = 40, .height = 20 }, 4, .{ .glass = .{} });
+    try std.testing.expect(context.command_buffer.len > 2);
+    try std.testing.expect((Material{ .glass = .{} }).backdrop() != null);
+    frame.material(.{ .x = 0, .y = 0, .width = 40, .height = 20 }, 4, .{ .custom = .{ .paint = Stripes.fail } });
+    try std.testing.expectEqual(@as(?anyerror, error.MaterialFailed), frame.failure);
 }
