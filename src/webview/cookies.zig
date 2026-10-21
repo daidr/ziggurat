@@ -111,6 +111,24 @@ pub fn matches(filter: Filter, cookie: Cookie) bool {
 /// Linear, caller-owned result. It contains no Store, Profile, App or GLib
 /// pointer and may outlive them. The supplied allocator must still be alive.
 /// Move with take; copying does not create another owner.
+/// A cookie of `cookie_domain` belongs to `domain` when its host, without
+/// a leading dot, is `domain` or one of its subdomains, ignoring case and a
+/// leading dot on either: "example.com" holds ".example.com" and
+/// "www.example.com" but not "badexample.com".
+pub fn inDomain(cookie_domain: []const u8, domain: []const u8) bool {
+    const host = std.mem.trimLeft(u8, cookie_domain, ".");
+    const want = std.mem.trimLeft(u8, domain, ".");
+    if (want.len == 0) return true;
+    if (host.len < want.len or !std.ascii.eqlIgnoreCase(host[host.len - want.len ..], want)) return false;
+    return host.len == want.len or host[host.len - want.len - 1] == '.';
+}
+fn before(_: void, a: Cookie, b: Cookie) bool {
+    const domain = std.ascii.orderIgnoreCase(a.domain, b.domain);
+    if (domain != .eq) return domain == .lt;
+    const path = std.mem.order(u8, a.path, b.path);
+    if (path != .eq) return path == .lt;
+    return std.mem.order(u8, a.name, b.name) == .lt;
+}
 pub const Batch = struct {
     allocator: std.mem.Allocator,
     storage: ?[]align(@alignOf(Cookie)) u8,
@@ -146,6 +164,23 @@ pub const Batch = struct {
             out.path = copy(storage, &offset, row.path);
         }
         return .{ .allocator = allocator, .storage = storage, .rows = copied };
+    }
+    /// Keep only the cookies of `domain` and its subdomains, with or
+    /// without a leading dot, as `inDomain` decides; order is kept.
+    pub fn keepDomain(self: *Batch, domain: []const u8) void {
+        if (self.storage == null) return;
+        const rows = @constCast(self.rows);
+        var kept: usize = 0;
+        for (rows) |row| if (inDomain(row.domain, domain)) {
+            rows[kept] = row;
+            kept += 1;
+        };
+        self.rows = rows[0..kept];
+    }
+    /// Sort the cookies by domain, path and name, domains ignoring case.
+    pub fn sort(self: *Batch) void {
+        if (self.storage == null) return;
+        std.mem.sort(Cookie, @constCast(self.rows), {}, before);
     }
     pub fn isOwned(self: *const Batch) bool {
         return self.storage != null;
@@ -321,4 +356,22 @@ test "replacement validates a nonempty bounded set and exact source identity" {
     const oversized: Cookie = .{ .name = unreadable[0..input_byte_capacity], .value = "", .domain = "h", .path = "/" };
     try std.testing.expectError(error.CapacityExceeded, measureReplacement(&.{oversized}, row_capacity, 104));
     try std.testing.expectError(error.CapacityExceeded, measureReplacement(&.{first}, row_capacity, std.math.maxInt(usize)));
+}
+
+test "cookie batches keep a domain with its subdomains and sort like a browser list" {
+    try std.testing.expect(inDomain(".Example.com", "example.com") and inDomain("www.example.com", ".example.com") and inDomain("example.com", "example.com"));
+    try std.testing.expect(!inDomain("badexample.com", "example.com") and !inDomain("example.org", "example.com") and !inDomain("com", "example.com"));
+    const rows = [_]Cookie{
+        .{ .name = "b", .value = "1", .domain = "www.example.com", .path = "/" },
+        .{ .name = "z", .value = "2", .domain = "other.test", .path = "/" },
+        .{ .name = "a", .value = "3", .domain = ".example.com", .path = "/docs" },
+        .{ .name = "a", .value = "4", .domain = ".example.com", .path = "/" },
+        .{ .name = "c", .value = "5", .domain = "badexample.com", .path = "/" },
+    };
+    var batch = try Batch.init(std.testing.allocator, &rows, .{});
+    defer batch.deinit();
+    batch.keepDomain("example.com");
+    batch.sort();
+    try std.testing.expectEqual(@as(usize, 3), batch.rows.len);
+    for ([_][]const u8{ "4", "3", "1" }, batch.rows) |value, row| try std.testing.expectEqualStrings(value, row.value);
 }

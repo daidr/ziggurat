@@ -1833,6 +1833,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ipc_page", .module = page_module },
         });
         addPageRuntimeSmoke(b, target, optimize, core, view, ipc, i18n, page_runtime, net, plugin_fetch, plugin_watch, plugin_sqlite, plugin_websocket);
+        addEmbeddedWebView(b, target, optimize, core, ui, declarative_view, view);
         const producer_bundle = b.addSystemCommand(&.{ "bun", "build" });
         producer_bundle.addFileArg(b.path("tests/resource_producer_page.ts"));
         producer_bundle.addFileInput(b.path("tests/resource_producer_fixture.ts"));
@@ -1928,6 +1929,7 @@ pub fn build(b: *std.Build) void {
         _ = b.step("webview-runtime", "Use the installed WebKitGTK 4.1 runtime");
         addWebNativeBoundarySmoke(b, target, optimize, core, view);
         addPageRuntimeSmoke(b, target, optimize, core, view, ipc, i18n, page_runtime, net, plugin_fetch, plugin_watch, plugin_sqlite, plugin_websocket);
+        addEmbeddedWebView(b, target, optimize, core, ui, declarative_view, view);
         addSmoke(b, "smoke-webview-linux", "tests/linux_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
@@ -1946,6 +1948,9 @@ pub fn build(b: *std.Build) void {
         capture_smoke.root_module.linkSystemLibrary("cairo", .{ .use_pkg_config = .force });
         check.dependOn(&capture_smoke.step);
         b.step("smoke-webview-capture-linux", "Verify bounded native PNG capture, independent pixel data and request ownership").dependOn(&b.addRunArtifact(capture_smoke).step);
+        addSmoke(b, "smoke-webview-pdf-linux", "tests/linux_pdf_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
         const capture_owner_tests = b.addExecutable(.{ .name = "test-webkit-capture", .root_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
@@ -2434,6 +2439,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_view", .module = declarative_view },
         .{ .name = "ziggurat_update", .module = update },
         .{ .name = "ziggurat_wake", .module = wake },
+        .{ .name = "ziggurat_markdown", .module = markdown },
+        .{ .name = "ziggurat_markdown_view", .module = markdown_view },
     } });
     const updater_tests = b.addTest(.{ .root_module = updater });
     const run_updater_tests = b.addRunArtifact(updater_tests);
@@ -2991,6 +2998,22 @@ fn addPageRuntimeSmoke(b: *std.Build, target: std.Build.ResolvedTarget, optimize
         .{ .name = "ziggurat_page_runtime", .module = page_runtime },
         .{ .name = "counter_service", .module = counter_service },
         .{ .name = "page_runtime_page", .module = page },
+    });
+}
+
+/// Web views laid out in declarative native UI.
+fn addEmbeddedWebView(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module, ui: *std.Build.Module, declarative_view: *std.Build.Module, view: *std.Build.Module) void {
+    const embedded = b.addModule("ziggurat_webview_view", .{ .root_source_file = b.path("src/webview/embedded.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_ui", .module = ui },
+        .{ .name = "ziggurat_view", .module = declarative_view },
+        .{ .name = "ziggurat_webview", .module = view },
+    } });
+    addSmoke(b, "smoke-embedded-webview", "tests/embedded_webview_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_view", .module = declarative_view },
+        .{ .name = "ziggurat_webview", .module = view },
+        .{ .name = "ziggurat_webview_view", .module = embedded },
     });
 }
 

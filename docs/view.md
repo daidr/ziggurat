@@ -374,6 +374,8 @@ try v.end();
 - `View.focusLeaf(id)` 在这一遍之后把键盘焦点交给可聚焦叶子 `id`（`place` 或 `paint` 得到的节点 ID），`View.hasKeyboard(id)` 表示该叶子持有焦点且窗口有键盘；游戏循环用它们在叶子出现时取得焦点、失去键盘时暂停。
 - 消费 `pointer_down` 即捕获指针：直到松开，移动都以 `pointer_drag`（带起点、相对上一次的位移，以及是否已移出 `drag_threshold` 4 DIP）送到这个叶子，松开以 `pointer_up` 送达，指针离开叶子甚至窗口也一样。窗口失去焦点或原生捕获被取消时改为 `pointer_cancel`。下一次构建不再产生该叶子时捕获随之丢弃，之后不再调用它。
 
+`Options.after_frame`（可选 `FrameHook{context, run}`）在 Host 每次成功绘制的帧末、所有叶子的 `place` 之后调用一次，规则同 `place`。跟随叶子放置的原生内容用它发现本帧没有构建的叶子，例如[视图中的 WebView](embedded-webview.md)。`Host.attachBackdrop(owner)` 代替 `attach(window)`，把 Host 作为 `composition.Owner` 的全窗背景，原生区域位于其上；Context 需使用 `.gdi` 渲染模式。
+
 ## 拖动与拖放
 
 以下容器都按列排列，用 `end` 关闭；主键按下后移出 `drag_threshold`（4 DIP）才开始拖动，之前里面的按钮照常点击。拖动期间指针被捕获，移出窗口也继续跟随；松开结束，Escape、窗口失去焦点或捕获被取消则取消。滑块、分栏和接受按下的嵌入叶子保留自己的按下。
