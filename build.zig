@@ -2755,7 +2755,7 @@ const app_example_imports = [_][]const u8{
     "ziggurat_system",        "ziggurat_i18n",             "ziggurat_animation",       "ziggurat_document_app",
     "ziggurat_chart",         "ziggurat_chart_view",       "ziggurat_audio",           "ziggurat_code_editor",
     "ziggurat_text_layout",   "ziggurat_window_placement", "ziggurat_game",            "ziggurat_terminal",
-    "ziggurat_terminal_view", "ziggurat_markdown",         "ziggurat_markdown_view",
+    "ziggurat_terminal_view", "ziggurat_markdown",         "ziggurat_markdown_view",   "ziggurat_vector",
 };
 
 const Example = struct { name: []const u8, path: []const u8, web: bool = false };
@@ -2785,6 +2785,7 @@ const app_examples = [_]Example{
     .{ .name = "menubar-flyout", .path = "examples/menubar_flyout.zig" },
     .{ .name = "markdown-chat", .path = "examples/markdown_chat.zig" },
     .{ .name = "confetti", .path = "examples/confetti.zig" },
+    .{ .name = "effort-slider", .path = "examples/effort_slider.zig" },
     .{ .name = "hybrid", .path = "examples/hybrid.zig", .web = true },
 };
 
