@@ -2786,6 +2786,7 @@ const app_examples = [_]Example{
     .{ .name = "markdown-chat", .path = "examples/markdown_chat.zig" },
     .{ .name = "confetti", .path = "examples/confetti.zig" },
     .{ .name = "effort-slider", .path = "examples/effort_slider.zig" },
+    .{ .name = "chat-glow", .path = "examples/chat_glow.zig" },
     .{ .name = "hybrid", .path = "examples/hybrid.zig", .web = true },
 };
 
