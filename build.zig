@@ -2725,6 +2725,15 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_rich_text_tests.step);
     const test_rich_text = b.step("test-rich-text", "Run attributed text, document, undo, HTML, RTF, Markdown and clipboard codec tests");
     test_rich_text.dependOn(&run_rich_text_tests.step);
+    const rich_text_editor = b.addModule("ziggurat_rich_text_editor", .{ .root_source_file = b.path("src/rich_text/editor.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
+        .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_rich_text", .module = rich_text },
+    } });
+    const rich_text_editor_tests = b.addTest(.{ .root_module = rich_text_editor });
+    const run_rich_text_editor_tests = b.addRunArtifact(rich_text_editor_tests);
+    check.dependOn(&rich_text_editor_tests.step);
+    test_step.dependOn(&run_rich_text_editor_tests.step);
+    test_rich_text.dependOn(&run_rich_text_editor_tests.step);
     addExamples(b, target, optimize);
 }
 
