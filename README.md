@@ -76,6 +76,7 @@ WSL 应将 Zig 本地缓存放在 Linux 文件系统，见 `scripts/linux-check.
 | `ziggurat_view` | 从应用状态构建视图树、弹性布局、绑定值的控件与即时输入交付 | 单向依赖 UI；调用者提供固定存储，不分配 |
 | `ziggurat_view_text` | 声明式视图中的可编辑文本字段，包装应用持有的 Document Field | 依赖视图与文档编辑器；准备在绘制后的投递任务中进行 |
 | `ziggurat_view_pickers` | 声明式视图中的[选择器](docs/pickers.md)：日历、日期/时间/数字输入、颜色选择器与颜色按钮，按 locale 格式化与解析 | 依赖视图与本地化；状态由应用持有，不分配 |
+| `ziggurat_view_collections` | 声明式视图中的[虚拟集合](docs/collections.md)：可调整/移动/排序列的表格、单元格块选择、大纲与大纲表格、网格视图，只绘制可见行 | 依赖视图；状态与选择存储由应用持有，不分配 |
 | `ziggurat_chart` | [图表](docs/chart.md)的数值/分类/时间尺度与刻度、绘图区与坐标轴布局、标记位置、折线/面积/扇形路径、堆叠、保极值降采样、图例与选择状态 | 纯 Zig；结果写入调用者存储，不分配 |
 | `ziggurat_chart_view` | 声明式视图中的图表：网格、柱、点、规则线、标签、图例与覆盖蒙版绘制的折线/面积/扇形 | 依赖视图与矢量；蒙版在绘制后的投递任务中准备，未变化时回放不分配 |
 | `ziggurat_terminal` | [终端](docs/terminal.md)：Linux PTY 与 Windows ConPTY 子进程、显式读写线程与背压、VT/ANSI 解析、带 scrollback 的屏幕（SGR 256 色/真彩、备用屏、滚动区、宽字符）、按键/粘贴/鼠标编码、选择与链接识别；OSC 52 默认拒绝 | 仅依赖核心；输出经 `App.post` 回主线程 |
@@ -135,7 +136,7 @@ Ziggurat 使用 [MIT 许可证](LICENSE)。源码包包含 LICENSE，构建安�
 - [应用资源与停止](docs/application-resources.md)、[代码编辑服务](docs/code-editor.md)、[Snippet 会话](docs/snippets.md)、[完整文档辅助功能](docs/document-accessibility.md)、[快照差异](docs/document-diff.md)、[双栏比较](docs/document-diff-view.md)
 - [窗口位置恢复](docs/window-placement.md)、[文档应用模型](docs/document-app.md)、[语言协议](docs/language-protocol.md)
 - [Diff 文档辅助功能](docs/document-diff-accessibility.md)、[SVG 文字排版](docs/svg-text.md)
-- [IPC](docs/ipc.md)、[应用字节流](docs/resource-stream.md)、[页面导航](docs/pages.md)、[文档初始化器](docs/document-initializers.md)、[独立 Cookie 存储](docs/cookie-store.md)、[Web 资源工具](docs/web-assets.md)、[系统设施](docs/system.md)
+- [IPC](docs/ipc.md)、[页面 runtime](docs/page-runtime.md)、[插件](docs/plugins.md)、[fetch 插件](docs/plugin-fetch.md)、[watch 插件](docs/plugin-watch.md)、[sqlite 插件](docs/plugin-sqlite.md)、[应用字节流](docs/resource-stream.md)、[页面导航](docs/pages.md)、[文档初始化器](docs/document-initializers.md)、[独立 Cookie 存储](docs/cookie-store.md)、[Web 资源工具](docs/web-assets.md)、[系统设施](docs/system.md)、[单实例与系统集成](docs/os-integration.md)
 - [签名更新](docs/updates.md)、[Fetch 与 WebSocket](docs/net.md)、[ziggurat 命令](docs/cli.md)、[性能与复现实验](docs/performance.md)
 - [扩展生命周期](docs/extensions.md)
 - [音频](docs/audio.md)、[本地化](docs/i18n.md)、[显式时钟动画](docs/animation.md)、[单次唤醒](docs/wake.md)、[系统文字轮廓](docs/text-outlines.md)
@@ -143,6 +144,6 @@ Ziggurat 使用 [MIT 许可证](LICENSE)。源码包包含 LICENSE，构建安�
 - [局部失效](docs/invalidation.md)
 - [构建缓存与 WSL 容量](docs/build-cache.md)
 - [共享 GPU 资源](docs/gpu-resources.md)、[GPU 离屏](docs/gpu-offscreen.md)
-- [显式控件主题](docs/theme.md)、[背景效果与加载动画](docs/backdrop-effects.md)
+- [显式控件主题](docs/theme.md)、[背景效果与加载动画](docs/backdrop-effects.md)、[着色器与元素效果](docs/shader-effects.md)
 
 Linux 可选 WebKitGTK 使用显式 `.storage = .ephemeral`，或由宿主 worker 准备目录、同一 App 创建的持久 `Profile`。支持可信 HTML、顶层 IPC、页面与有界脚本，以及显式 custom scheme 的静态/异步响应、worker 文件快照/按需文件泵、独立矩形页面区域、可离窗停放的 PageSession 和需单独部署请求扩展的远程来源。可选 [CookieStore](docs/cookie-store.md) 直接绑定 Profile，无页面时也能执行有界 URL 查询和显式授权的写入/清 Cookie；普通页面不会自动创建它。宿主已有回环 HTTPS 服务时，可在 Profile 创建期显式冻结 `127.0.0.1` 的证书例外与直连策略，沿用 RemotePage 权限；内存/文件资源的 HTTPS 运输与更广浏览器工具继续实施。存储预算、证书例外范围及关闭边界见[Linux Profile](docs/webview-profile.md)，依赖、能力查询及实际检查见[页面策略](docs/pages.md)。

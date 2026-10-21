@@ -125,6 +125,19 @@ pub fn preflight(buffer: *const commands.Buffer, options: Options) !u64 {
                 try rect(entries[slot].bounds, options.size.scale);
                 break :blk 1;
             },
+            .effect => |slot| blk: {
+                const entries = buffer.shaderEntries();
+                if (slot >= entries.len) return error.MissingResources;
+                try rect(entries[slot].captureBounds(), options.size.scale);
+                break :blk 6; // save, two fills and copies, recovery and composite
+            },
+            .end_effect => 0,
+            .backdrop_shader => |slot| blk: {
+                const entries = buffer.shaderEntries();
+                if (slot >= entries.len) return error.MissingResources;
+                try rect(entries[slot].box, options.size.scale);
+                break :blk 2; // copy and shade
+            },
         };
         visits = std.math.add(u64, visits, pixels * weight) catch return error.RenderWorkExceeded;
         if (visits > options.render_work) return error.RenderWorkExceeded;
@@ -193,6 +206,15 @@ pub fn capture(destination: *commands.Buffer, source: *const commands.Buffer) !v
     destination.len = source.len;
     destination.text_len = source.text_len;
     destination.brush_len = source.brush_len;
+    // Effect tables are plain values; the workspaces stay the source's.
+    @memcpy(destination.backdrop_storage.entries[0..source.backdrop_storage.len], source.backdropEntries());
+    destination.backdrop_storage.len = source.backdrop_storage.len;
+    destination.backdrop_storage.workspace = source.backdrop_storage.workspace;
+    @memcpy(destination.indicator_storage[0..source.indicator_len], source.indicatorEntries());
+    destination.indicator_len = source.indicator_len;
+    @memcpy(destination.shader_storage.entries[0..source.shader_storage.len], source.shaderEntries());
+    destination.shader_storage.len = source.shader_storage.len;
+    destination.shader_storage.workspace = source.shader_storage.workspace;
 }
 
 test "batch preflight bounds work and capture owns independent resource pins" {

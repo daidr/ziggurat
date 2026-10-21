@@ -1,0 +1,5 @@
+{
+  "@@locale": "de",
+  "greeting": "Hallo, {name}!",
+  "files": "{count, plural, =0 {Keine Dateien} one {# Datei} other {# Dateien}}"
+}

@@ -27,6 +27,8 @@ pub fn Event(comptime PayloadType: type) type {
 
 pub fn events(comptime Schema: type) []const std.builtin.Type.StructField {
     if (!@hasDecl(Schema, "events")) return &.{};
+    // Validation walks every nested field; large schemas need room.
+    @setEvalBranchQuota(100_000);
     const fields = @typeInfo(@TypeOf(Schema.events)).@"struct".fields;
     if (fields.len > 256) @compileError("IPC event schemas support at most 256 named events");
     inline for (fields) |field| validateType(@field(Schema.events, field.name).Payload, 0);
@@ -121,6 +123,7 @@ pub fn validateValue(value: anytype) !void {
 }
 
 pub fn methods(comptime Service: type) []const std.builtin.Type.StructField {
+    @setEvalBranchQuota(100_000);
     if (!@hasDecl(Service, "methods")) {
         if (events(Service).len != 0) return &.{};
         @compileError("An IPC schema must declare methods or events");
