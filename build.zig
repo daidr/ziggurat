@@ -2254,7 +2254,35 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&cli_tests.step);
     const run_cli_tests = b.addRunArtifact(cli_tests);
     test_step.dependOn(&run_cli_tests.step);
-    b.step("test-cli", "Run the ziggurat command's tests: templates, catalogs, S3 signing, install.sh and console output").dependOn(&run_cli_tests.step);
+    b.step("test-cli", "Run the ziggurat command's tests: templates, catalogs, S3 signing, install.sh, console output, icons, Windows signing and vet").dependOn(&run_cli_tests.step);
+    // Measurement tools: apps' memory once idle, and how long input takes
+    // to be painted.
+    if (target.result.os.tag == .linux or target.result.os.tag == .windows) {
+        const idle_memory_module = b.createModule(.{ .root_source_file = b.path("tools/idle_memory.zig"), .target = target, .optimize = optimize });
+        const idle_memory = b.addExecutable(.{ .name = "idle-memory", .root_module = idle_memory_module });
+        check.dependOn(&idle_memory.step);
+        const idle_memory_run = b.addRunArtifact(idle_memory);
+        if (b.args) |args| idle_memory_run.addArgs(args);
+        b.step("idle-memory", "Report apps' memory once idle, with the processes they run: zig build idle-memory -- [--count N] [--idle SECONDS] APP...").dependOn(&idle_memory_run.step);
+        const input_latency_module = b.createModule(.{ .root_source_file = b.path("tools/input_latency.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui } } });
+        const input_latency = b.addExecutable(.{ .name = "input-latency", .root_module = input_latency_module });
+        addResources(b, input_latency);
+        check.dependOn(&input_latency.step);
+        const input_latency_install = b.addInstallArtifact(input_latency, .{});
+        // Installed first: each run starts the installed tool again.
+        const input_latency_run = b.addSystemCommand(&.{b.getInstallPath(.bin, if (target.result.os.tag == .windows) "input-latency.exe" else "input-latency")});
+        input_latency_run.step.dependOn(&input_latency_install.step);
+        if (b.args) |args| input_latency_run.addArgs(args);
+        b.step("input-latency", "Measure how long typing, scrolling, dragging and animation take to be painted: zig build input-latency -- [--mode LIST] [--runs N] [--events N]").dependOn(&input_latency_run.step);
+        const measurement_tests = b.step("test-measurement-tools", "Run the idle-memory and input-latency tools' tests");
+        inline for (.{ idle_memory_module, input_latency_module }) |module| {
+            const tool_tests = b.addTest(.{ .root_module = module });
+            check.dependOn(&tool_tests.step);
+            const run_tool_tests = b.addRunArtifact(tool_tests);
+            measurement_tests.dependOn(&run_tool_tests.step);
+            test_step.dependOn(&run_tool_tests.step);
+        }
+    }
     // The accessors `ziggurat generate` writes compile against the module.
     const i18n_host = b.createModule(.{ .root_source_file = b.path("src/i18n/root.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
     const catalog_generator = b.addExecutable(.{ .name = "i18n-catalog", .root_module = b.createModule(.{
@@ -2996,11 +3024,41 @@ fn addSmokeExecutable(b: *std.Build, name: []const u8, path: []const u8, target:
     return exe;
 }
 
+/// Where an application's Windows icon comes from: this package's default
+/// icon, an .ico, or a square PNG (ideally 1024x1024) rendered at each icon
+/// size when the app builds.
+pub const ApplicationIcon = union(enum) {
+    default,
+    ico: std.Build.LazyPath,
+    png: std.Build.LazyPath,
+};
+
 /// For applications that depend on this package: embed the Windows manifest,
 /// version resource and icon. Other targets need no resources.
 pub fn addApplicationResources(b: *std.Build, exe: *std.Build.Step.Compile, dependency: *std.Build.Dependency, metadata: packaging.Metadata) void {
+    addApplicationResourcesWithIcon(b, exe, dependency, metadata, .default);
+}
+
+/// As `addApplicationResources`, with the app's own icon.
+pub fn addApplicationResourcesWithIcon(b: *std.Build, exe: *std.Build.Step.Compile, dependency: *std.Build.Dependency, metadata: packaging.Metadata, icon: ApplicationIcon) void {
     if (exe.root_module.resolved_target.?.result.os.tag != .windows) return;
-    _ = packaging.addWindowsResources(b, exe, .{ .metadata = metadata, .icon = dependency.path("assets/application.ico") }) catch |err| std.debug.panic("invalid application resources: {s}", .{@errorName(err)});
+    const file = iconFile(b, dependency.path("tools/icon_main.zig"), dependency.path("assets/application.ico"), icon);
+    _ = packaging.addWindowsResources(b, exe, .{ .metadata = metadata, .icon = file }) catch |err| std.debug.panic("invalid application resources: {s}", .{@errorName(err)});
+}
+
+/// The .ico of `icon`: a PNG is rendered by the icon tool, built for the
+/// machine that runs the build.
+fn iconFile(b: *std.Build, tool_source: std.Build.LazyPath, default: std.Build.LazyPath, icon: ApplicationIcon) std.Build.LazyPath {
+    return switch (icon) {
+        .default => default,
+        .ico => |path| path,
+        .png => |path| blk: {
+            const tool = b.addExecutable(.{ .name = "ziggurat-icon", .root_module = b.createModule(.{ .root_source_file = tool_source, .target = b.graph.host, .optimize = .ReleaseSafe }) });
+            const run = b.addRunArtifact(tool);
+            run.addFileArg(path);
+            break :blk run.addOutputFileArg("application.ico");
+        },
+    };
 }
 
 fn addResources(b: *std.Build, exe: *std.Build.Step.Compile) void {
@@ -3012,7 +3070,10 @@ fn addResources(b: *std.Build, exe: *std.Build.Step.Compile) void {
             .display_name = if (special) "Ziggurat \"资源\" & packaging \\ test" else b.fmt("Ziggurat {s}", .{exe.name}),
             .version = if (special) .{ .major = 1, .minor = 2, .patch = 3, .revision = 4 } else .{ .major = 0, .minor = 1, .patch = 0 },
             .description = "Ziggurat desktop application",
+            // The packaging smoke checks a second string table.
+            .translations = if (special) &.{.{ .language = "zh-Hans", .display_name = "Ziggurat 资源测试" }} else &.{},
         },
-        .icon = b.path("assets/application.ico"),
+        // The packaging smoke checks icons rendered from a PNG.
+        .icon = if (special) iconFile(b, b.path("tools/icon_main.zig"), b.path("assets/application.ico"), .{ .png = b.path("assets/application.png") }) else b.path("assets/application.ico"),
     }) catch |err| std.debug.panic("invalid application resources: {s}", .{@errorName(err)});
 }

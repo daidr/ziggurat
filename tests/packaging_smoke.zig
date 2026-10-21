@@ -7,6 +7,7 @@ const c = @cImport({
 });
 const name = std.unicode.utf8ToUtf16LeStringLiteral("Ziggurat.Packaging.Smoke");
 const product_name = std.unicode.utf8ToUtf16LeStringLiteral("Ziggurat \"资源\" & packaging \\ test");
+const translated_name = std.unicode.utf8ToUtf16LeStringLiteral("Ziggurat 资源测试");
 extern "kernel32" fn FindResourceW(?*anyopaque, ?*const anyopaque, ?*const anyopaque) callconv(.winapi) ?*anyopaque;
 
 fn resource(instance: c.HINSTANCE, id: u16, kind: u16) ![]const u8 {
@@ -50,6 +51,7 @@ pub fn main() !void {
     try std.testing.expect(std.mem.indexOf(u8, manifest, "level=\"asInvoker\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, manifest, "PerMonitorV2") != null);
     try std.testing.expect(std.mem.indexOf(u8, manifest, "longPathAware") != null);
+    try std.testing.expect(std.mem.indexOf(u8, manifest, ">UTF-8</activeCodePage>") != null);
     const version = try resource(instance, 1, 16);
     var offset: usize = 6;
     while (offset + 2 <= version.len and read16(version, offset) != 0) offset += 2;
@@ -59,9 +61,14 @@ pub fn main() !void {
     try std.testing.expectEqual(@as(u32, 0x00010002), read32(version, offset + 8));
     try std.testing.expectEqual(@as(u32, 0x00030004), read32(version, offset + 12));
     try std.testing.expect(std.mem.indexOf(u8, version, std.mem.sliceAsBytes(product_name)) != null);
+    // A string table per language, keyed by language and code page.
+    try std.testing.expect(std.mem.indexOf(u8, version, std.mem.sliceAsBytes(std.unicode.utf8ToUtf16LeStringLiteral("040904B0"))) != null);
+    try std.testing.expect(std.mem.indexOf(u8, version, std.mem.sliceAsBytes(std.unicode.utf8ToUtf16LeStringLiteral("080404B0"))) != null);
+    try std.testing.expect(std.mem.indexOf(u8, version, std.mem.sliceAsBytes(translated_name)) != null);
     const group = try resource(instance, icons.resource_id, 14);
     try std.testing.expectEqual(@as(u16, 1), read16(group, 2));
-    const sizes = [_]u16{ 16, 20, 24, 32, 40, 48, 64, 128, 256 };
+    // Rendered from assets/application.png when the smoke builds.
+    const sizes = [_]u16{ 16, 24, 32, 48, 64, 128, 256 };
     try std.testing.expectEqual(sizes.len, read16(group, 4));
     try std.testing.expectEqual(6 + 14 * sizes.len, group.len);
     for (sizes, 0..) |size, index| {
@@ -117,5 +124,5 @@ pub fn main() !void {
     const after = c.GetGuiResources(c.GetCurrentProcess(), c.GR_USEROBJECTS);
     try std.testing.expectEqual(baseline, after);
     try std.testing.expectEqual(baseline_gdi, c.GetGuiResources(c.GetCurrentProcess(), c.GR_GDIOBJECTS));
-    std.debug.print("packaging smoke passed: manifest/version/9 icon sizes, 1000 icon reloads; USER {d}->{d}\n", .{ baseline, after });
+    std.debug.print("packaging smoke passed: manifest/version/7 icon sizes from PNG, 1000 icon reloads; USER {d}->{d}\n", .{ baseline, after });
 }
