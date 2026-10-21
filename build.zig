@@ -2756,6 +2756,7 @@ const app_example_imports = [_][]const u8{
     "ziggurat_chart",         "ziggurat_chart_view",       "ziggurat_audio",           "ziggurat_code_editor",
     "ziggurat_text_layout",   "ziggurat_window_placement", "ziggurat_game",            "ziggurat_terminal",
     "ziggurat_terminal_view", "ziggurat_markdown",         "ziggurat_markdown_view",   "ziggurat_vector",
+    "ziggurat_text_outlines",
 };
 
 const Example = struct { name: []const u8, path: []const u8, web: bool = false };
@@ -2788,6 +2789,7 @@ const app_examples = [_]Example{
     .{ .name = "effort-slider", .path = "examples/effort_slider.zig" },
     .{ .name = "chat-glow", .path = "examples/chat_glow.zig" },
     .{ .name = "blackhole", .path = "examples/blackhole.zig" },
+    .{ .name = "wind", .path = "examples/wind.zig" },
     .{ .name = "hybrid", .path = "examples/hybrid.zig", .web = true },
 };
 
