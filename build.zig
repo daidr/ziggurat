@@ -2718,6 +2718,13 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_game_tests.step);
         b.step("test-game", "Run game loop, camera, scaling and gamepad tests").dependOn(&run_game_tests.step);
     }
+    const rich_text = b.addModule("ziggurat_rich_text", .{ .root_source_file = b.path("src/rich_text/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_markdown", .module = markdown }} });
+    const rich_text_tests = b.addTest(.{ .root_module = rich_text });
+    const run_rich_text_tests = b.addRunArtifact(rich_text_tests);
+    check.dependOn(&rich_text_tests.step);
+    test_step.dependOn(&run_rich_text_tests.step);
+    const test_rich_text = b.step("test-rich-text", "Run attributed text, document, undo, HTML, RTF, Markdown and clipboard codec tests");
+    test_rich_text.dependOn(&run_rich_text_tests.step);
     addExamples(b, target, optimize);
 }
 
