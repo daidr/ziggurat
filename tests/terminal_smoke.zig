@@ -148,6 +148,7 @@ fn run(allocator: std.mem.Allocator) !void {
     var terminal = try term.Terminal.init(allocator, .{});
     defer terminal.deinit();
     var tv = terminal_view.TerminalView.init(&host, allocator, &terminal, .{});
+    defer tv.deinit();
     tv.bind();
     state.terminal = &tv;
 
