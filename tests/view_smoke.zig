@@ -22,6 +22,7 @@ extern fn gdk_event_free(*anyopaque) void;
 extern fn g_object_ref(*anyopaque) *anyopaque;
 extern fn g_signal_emit_by_name(*anyopaque, [*:0]const u8, ...) void;
 const ScrollEvent = extern struct { kind: c_int, window: ?*anyopaque, send_event: i8, time: u32, x: f64, y: f64, state: c_uint, direction: c_int, device: ?*anyopaque, x_root: f64, y_root: f64, delta_x: f64, delta_y: f64, is_stop: c_uint };
+const MotionEvent = extern struct { kind: c_int, window: ?*anyopaque, send_event: i8, time: u32, x: f64, y: f64, axes: ?*anyopaque, state: c_uint, is_hint: i16, device: ?*anyopaque, x_root: f64, y_root: f64 };
 const ButtonEvent = extern struct { kind: c_int, window: ?*anyopaque, send_event: i8, time: u32, x: f64, y: f64, axes: ?*anyopaque, state: c_uint, button: c_uint, device: ?*anyopaque, x_root: f64, y_root: f64 };
 
 const width = 360;
@@ -55,6 +56,23 @@ const Native = struct {
             native.* = .{ .kind = if (down) 4 else 7, .window = g_object_ref(gtk_widget_get_window(widget).?), .send_event = 1, .time = 0, .x = x, .y = y, .axes = null, .state = 0, .button = 1, .device = null, .x_root = 0, .y_root = 0 };
             var handled: c_int = 0;
             g_signal_emit_by_name(widget, if (down) @as([*:0]const u8, "button-press-event") else @as([*:0]const u8, "button-release-event"), native, &handled);
+        }
+    }
+    fn move(window: z.Window, x: f32, y: f32) void {
+        if (builtin.os.tag == .windows) {
+            const hwnd: c.HWND = window.nativeHandle();
+            const scale = @as(f32, @floatFromInt(c.GetDpiForWindow(hwnd))) / 96;
+            const px: u16 = @bitCast(@as(i16, @intFromFloat(x * scale)));
+            const py: u16 = @bitCast(@as(i16, @intFromFloat(y * scale)));
+            _ = c.SendMessageW(hwnd, c.WM_MOUSEMOVE, 0, @intCast(@as(u32, px) | (@as(u32, py) << 16)));
+        } else {
+            const widget = gtk_bin_get_child(window.nativeHandle().?).?;
+            const event = gdk_event_new(3).?;
+            defer gdk_event_free(event);
+            const native: *MotionEvent = @ptrCast(@alignCast(event));
+            native.* = .{ .kind = 3, .window = g_object_ref(gtk_widget_get_window(widget).?), .send_event = 1, .time = 0, .x = x, .y = y, .axes = null, .state = 0, .is_hint = 0, .device = null, .x_root = 0, .y_root = 0 };
+            var handled: c_int = 0;
+            g_signal_emit_by_name(widget, "motion-notify-event", native, &handled);
         }
     }
     /// One wheel notch downwards at a point, which both backends report as 48 DIP.
@@ -259,6 +277,14 @@ fn run(allocator: std.mem.Allocator) !void {
     try paint(&host, window);
     const pane = try find(&host, .column, 1);
     try std.testing.expectEqual(@round((split.bounds.width - view.split_divider) * @as(f32, @floatCast(state.pane))), pane.bounds.width);
+    // The pointer over the divider shows the resize arrow, over a button
+    // the default one.
+    const moved = host.view.divider(&(try find(&host, .split, 0))).?;
+    Native.move(window, moved.x + moved.width / 2, moved.y + moved.height / 2);
+    try std.testing.expectEqual(z.Cursor.resize_ew, window.currentCursor());
+    const button = try find(&host, .button, 0);
+    Native.move(window, button.bounds.x + 2, button.bounds.y + 2);
+    try std.testing.expectEqual(z.Cursor.default, window.currentCursor());
 
     // Segments, links and disclosures activate through native clicks.
     Native.click(window, (try find(&host, .segment, 1)).bounds);

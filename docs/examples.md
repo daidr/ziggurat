@@ -47,19 +47,13 @@
 以下是示例只能绕开实现、留待后续补齐的公开 API：
 
 **视图与输入**
-- `view.Host` 没有给应用的右键、中键、双击事件，也没有应用级快捷键或“无人处理的按键”钩子；`menubar`、`piano`、`launcher` 只能包装 `host.context.on_input`。
-- 按键抬起只交给嵌入叶子（`EmbedInput.key_up`），`piano` 仍用固定时长的音符。
-- 在绘制之外拿不到节点的窗口坐标；`frameless` 用嵌入叶子的 `place` 记录标题区。
-- 没有指针光标形状与自定义按钮的悬停外观。
 - `view.Host` 不能作为组合区域的背景层 attach，`hybrid` 的侧栏只能用 Frame API。
-- 布局不能按从右到左镜像，`i18n` 只把阿拉伯文对齐到尾端。
-- 没有会换行的多行静态文本，也没有声明式的虚拟列表；每帧 128 个控件的上限让列表示例需要固定条目上限。
-- `Harness.click` 不接受 `listItem`。
+- 每帧 128 个控件的上限让不用虚拟集合的列表示例需要固定条目上限。
 
 **文本编辑**
 - `editing.Field`/`TextField` 没有密码（掩码）选项，值上限 16 KiB，没有区间替换、按范围着色文字和行号栏；`code-editor` 以背景色范围标记着色，并借助 `viewportAnchor`/`positionRect` 自建行号。
 - `editing.Field` 的值上限是 16 KiB，而且每次提交都复制整个值，大文档不能放进声明式视图；视图也不把原生文本输入转给嵌入叶子。`text-buffer` 因此不用 `view.Host`，直接在 `ui.Context` 中驱动 `editing.Adapter`，自己绘制标题与状态行。
-- `TextField` 没有 attach 完成通知与 `focus()`；`submit`/`changed` 回调在输入处理中运行，`Field.setValue` 必须用 `App.post` 推迟。
+- `submit`/`changed` 回调在输入处理中运行，`Field.setValue` 必须用 `App.post` 推迟。
 - `editing.Field` 需要同步剪贴板，而系统剪贴板读取是异步的（同步 `readText`/`writeText` 只在 Windows 提供）。
 
 **系统设施**

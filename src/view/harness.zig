@@ -116,9 +116,21 @@ pub const Harness = struct {
     /// took it, as Host does. True when it took it.
     pub fn keyUp(self: *Harness, input: z.KeyInput) anyerror!bool {
         self.view.focus = self.focusId();
-        if (!self.view.embedKeyUp(input)) return false;
+        if (!self.view.embedKeyUp(input) and !self.applicationKey(input, true)) return false;
         try self.settleEmbed(null);
         return true;
+    }
+    /// A press nothing in the view handled goes to the application, as
+    /// Host routes it after the controls.
+    fn unhandled(self: *Harness, input: z.KeyInput) anyerror!bool {
+        if (!self.applicationKey(input, false)) return false;
+        try self.settleEmbed(null);
+        return true;
+    }
+    fn applicationKey(self: *Harness, input: z.KeyInput, up: bool) bool {
+        const handler = self.config.options.keys orelse return false;
+        const call = (if (up) handler.key_up else handler.key) orelse return false;
+        return call(handler.context, input);
     }
     /// Give the window the keyboard or take it away, as a focus event
     /// would, then render.
@@ -184,11 +196,13 @@ pub const Harness = struct {
     /// as Host does, then render.
     /// Embedded leaves with an input callback see the move too.
     pub fn hoverAt(self: *Harness, x: f32, y: f32) anyerror!void {
+        _ = self.view.pointerMoved(.{ .x = x, .y = y });
         _ = self.view.hoverAt(.{ .x = x, .y = y });
         _ = self.view.embedPointerMove(.{ .x = x, .y = y });
         try self.render();
     }
     pub fn leave(self: *Harness) anyerror!void {
+        _ = self.view.pointerMoved(null);
         _ = self.view.hoverAt(null);
         _ = self.view.embedPointerMove(null);
         try self.render();
@@ -247,13 +261,14 @@ pub const Harness = struct {
         } else if (if (editKey(input)) |edit| state.navigate(edit) else null) |id| {
             return self.deliverKey(.{ .action = id });
         } else if (!plain or mods.shift) {
-            return false;
+            return self.unhandled(input);
         } else if (state.spatial(input.key)) {} else if (input.key == .home or input.key == .end) {
             state.setFocused(null);
             state.tabDirection(input.key == .end);
         } else if (input.key == .enter or input.key == .space) {
             if (!input.repeat) if (state.activation()) |id| return self.deliverKey(.{ .action = id });
-        } else return false;
+            _ = try self.unhandled(input);
+        } else return self.unhandled(input);
         try self.render();
         return true;
     }
@@ -447,7 +462,12 @@ pub const Harness = struct {
         }
         const result = self.view.pointerPress(.{ .x = x, .y = y }, modifiers, self.clock, self.adjusting(x, y));
         if (result.consumed) return self.apply(result);
-        const node = self.at(x, y) orelse return self.render();
+        _ = self.view.pointerMoved(.{ .x = x, .y = y });
+        const node = self.at(x, y) orelse {
+            // Where no control lies, a pointer area takes the press.
+            if (self.view.areaPress(.{ .x = x, .y = y }, .primary, modifiers, self.clock)) |event| return self.deliver(event);
+            return self.render();
+        };
         if (isRow(node.kind)) {
             try self.check(node);
             if (self.view.rowPress(.{ .x = x, .y = y }, modifiers, node.id, self.config.theme)) |event| return self.deliver(event);
@@ -459,6 +479,7 @@ pub const Harness = struct {
     /// captured the press sees `pointer_drag`, and a press that moved
     /// `drag_threshold` drags. Without a press it hovers. Renders.
     pub fn moveTo(self: *Harness, x: f32, y: f32) anyerror!void {
+        _ = self.view.pointerMoved(.{ .x = x, .y = y });
         if (self.view.captureMove(.{ .x = x, .y = y })) |result| if (result.consumed) {
             // A drag takes the press from the control under it.
             if (result.cancel_press) self.pressed = null;
@@ -471,6 +492,11 @@ pub const Harness = struct {
     /// never dragged activates the control it began on when released over
     /// it. Renders.
     pub fn release(self: *Harness, x: f32, y: f32) anyerror!void {
+        if (self.view.areaRelease(.{ .x = x, .y = y }, .primary)) |event| {
+            self.pressed = null;
+            _ = self.view.captureRelease(.{ .x = x, .y = y });
+            return self.deliver(event);
+        }
         const result = self.view.captureRelease(.{ .x = x, .y = y });
         if (result.consumed) {
             self.pressed = null;
@@ -485,8 +511,44 @@ pub const Harness = struct {
     /// Lose the press, as focus loss or a cancelled capture does. Renders.
     pub fn cancelPointer(self: *Harness) anyerror!void {
         self.pressed = null;
+        if (self.view.areaCancel()) |event| try self.run(event);
         return self.apply(self.view.captureCancel());
     }
+    /// Press and release a secondary or middle button at a point, as Host
+    /// routes them: a pointer area there that no control covers learns of
+    /// the press and the click. Returns whether one took them. Renders.
+    pub fn clickButtonAt(self: *Harness, x: f32, y: f32, button: view.PointerButton, modifiers: z.KeyModifiers) anyerror!bool {
+        if (button == .primary) {
+            try self.press(x, y, modifiers);
+            const taken = self.view.area_press != null;
+            try self.release(x, y);
+            return taken;
+        }
+        const point: view.Point = .{ .x = x, .y = y };
+        _ = self.view.pointerMoved(point);
+        if (self.view.pointerDown(point) == .consumed) {
+            self.restoreFocus();
+            try self.render();
+            return true;
+        }
+        if (self.at(x, y) != null) return false;
+        const event = self.view.areaPress(point, button, modifiers, self.clock) orelse return false;
+        try self.deliver(event);
+        if (self.view.areaRelease(point, button)) |up| try self.deliver(up);
+        return true;
+    }
+    /// The pointer's shape at the pointer's last position, as Host shows it.
+    pub fn cursor(self: *const Harness) view.Cursor {
+        const point = self.view.pointer orelse return .default;
+        return self.view.cursorAt(point);
+    }
+    /// Window bounds of the matching node, as `View.boundsOf` keeps them
+    /// between frames.
+    pub fn boundsOf(self: *const Harness, query: Query) Error!Rect {
+        const node = try self.find(query);
+        return self.view.boundsOf(node.id) orelse error.NotFound;
+    }
+
     /// Press at one point, move to another in `steps` even moves and
     /// release there. Renders after each step.
     pub fn drag(self: *Harness, from_x: f32, from_y: f32, to_x: f32, to_y: f32, steps: usize) anyerror!void {

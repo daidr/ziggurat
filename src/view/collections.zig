@@ -1391,7 +1391,13 @@ pub const TableState = struct {
     }
 
     fn embed(self: *TableState) view.Embed {
-        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .focusable = true, .input = input };
+        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .focusable = true, .input = input, .cursor = pointerShape };
+    }
+    /// A column header's trailing edge shows the resize arrow.
+    fn pointerShape(ptr: *anyopaque, _: u64, point: Point) ?view.Cursor {
+        const self: *TableState = @ptrCast(@alignCast(ptr));
+        if (point.y < self.core.header_height and self.resizeEdgeAt(point.x) != null) return .resize_ew;
+        return null;
     }
     fn measure(ptr: *anyopaque, _: Theme) view.layout.Measurement {
         const self: *TableState = @ptrCast(@alignCast(ptr));

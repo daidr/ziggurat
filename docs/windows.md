@@ -140,6 +140,15 @@ const window = try app.createWindow(.{
 
 客户区透明（`transparent`）仍未实现：它需要渲染器输出预乘 alpha 并改变整窗合成方式，不能只靠窗口属性完成。无边框能力不表示具备透明合成、模糊或背景材质。X11 无 WM 时仍可创建无边框窗口，但不能据此认为原生拖动、缩放或系统菜单可用；调用前查询每窗口的 capabilities。不支持的操作明确返回 `UnsupportedCapability`。Openbox 验证环境支持移动/缩放，未公布系统窗口菜单协议。
 
+## 指针形状
+
+`Window.setCursor(shape)` 设置指针在客户区上的形状，直到再次改变；`currentCursor()` 返回最近一次设置的形状，窗口关闭后形状随之丢弃。`z.Cursor` 有 `default`、`pointer`、`text`、`move`、四种双向缩放、`not_allowed`、`crosshair`、`grab`/`grabbing`、四个单向缩放、`resize_column`/`resize_row`、`vertical_text`、`copy`、`alias`、`context_menu` 和隐藏指针的 `none`。
+
+- **Windows**：在 `WM_SETCURSOR` 中对客户区（`HTCLIENT`）设置对应的系统光标；标题栏、边框与自定义框架的缩放边缘仍由系统决定。没有的形状取最接近的：单向缩放与列/行缩放用双向缩放，竖排文字用 I 形，`copy`、`alias`、`context_menu` 用箭头；`grab` 是手形，`grabbing` 是四向移动。指针正在客户区内时立即生效。
+- **Linux**：按 CSS 名称用 `gdk_cursor_new_from_name` 创建，设置在绘制区域的 GdkWindow 上；`default` 恢复默认箭头。自定义框架的缩放边缘保留自己的形状，指针回到客户区时显示应用的形状。主题没有该名称时由 GDK 回退。
+
+声明式视图用 `Style.cursor` 设置形状，Host 在指针移动和每帧之后调用它，见[声明式视图](view.md#指针区域与指针形状)。
+
 ## 原生交互与重入
 
 内容可在本窗口当前的原生 `pointer_down` 回调中调用 `startMove()` 或 `startResize(edge)`。这会借用当前按下事件一次；同一按下不能重复消费，也不能交给其他窗口或留到 `App.post` 中使用。无有效事件返回 `InvalidGesture`。失焦、隐藏、禁用、模态阻塞和关闭会使借用及排队命令失效，之后重新获得焦点或启用不会恢复旧命令。Windows 原生移动消息使用有符号 16 位屏幕坐标，超出该范围的按下仍发送普通内容输入，但不能作为该原生交互的手势。
