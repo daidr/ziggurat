@@ -75,3 +75,15 @@ App 仍须覆盖最后一次 Window/token 使用。
 整个 close 清理阶段保持独立关闭门；最后的调用者 allocator.free/destroy
 重入 close 也返回 ResourceInUse，不会再次访问已经释放的 Adapter。关闭失败
 时仍保留可重试的壳，已成功完成的撤销步骤不会重新发布。
+
+## 密码字段
+
+`FieldOptions.password = true` 的单行字段把正文当作密码（多行字段忽略它）：
+
+- Adapter 用 `setMasked` 把每个 Unicode 标量替换成同样 UTF-8 长度、整形为一个字素且宽度一致的占位字符，再在每个占位字素的前进格中央画一个圆点。字节偏移、光标停靠点和选区几何仍与 Document 一致，密码的字形既不整形也不绘制；输入法预编辑同样显示为圆点。
+- 原生文本客户端读取快照时得到同样长度的占位字符，不接触正文。
+- Ctrl+C 与 Ctrl+X 什么也不做，粘贴照常。
+- 无障碍语义只报告 `password`，不报告值与选区；Windows UIA 的 `IsPassword` 为真，不提供 Text 模式。
+- 聚焦时把窗口切到 `TextInputMode.keyboard_compose` 关闭输入法，失焦或关闭时恢复聚焦前的模式。
+
+`Field.setPassword(bool)` 切换显示（如“显示密码”按钮），在 paint 之外调用，下一次 prepare 重新整形；视图叶子用 `TextField.setPassword`，它在下一帧后重新准备。
