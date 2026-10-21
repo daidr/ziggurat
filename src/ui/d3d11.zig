@@ -876,7 +876,7 @@ pub const Renderer = struct {
             else => |e| return e,
         };
         defer translation.deinit();
-        const source = try effect_host.hlsl(allocator, &translation, program.kind, target);
+        const source = try effect_host.source(allocator, &translation, program.kind, target, .hlsl);
         defer allocator.free(source);
         var flags_buffer: [64]u8 = undefined;
         const flags = std.fmt.bufPrint(&flags_buffer, "ps_4_0 main {s}", .{std.mem.span(zgpu_hlsl_flags())}) catch unreachable;

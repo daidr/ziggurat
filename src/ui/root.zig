@@ -77,6 +77,7 @@ pub const ShaderEffect = shader_effects.Effect;
 /// Built-in pose (2D/3D transform) and refracting glass programs.
 pub const effects = @import("effect_library.zig");
 pub const GpuShader = shader_effects.GpuShader;
+pub const GlMode = shader_effects.GlMode;
 pub const ShaderEffectStats = struct {
     workspace: shader_effects.Stats = .{},
     /// Effects drawn without their program because no shader workspace, or
@@ -502,6 +503,9 @@ pub const Context = struct {
     control_focus_cancelled: bool = false,
     renderer: gdi.Renderer = .{},
     gpu_renderer: if (build_options.gpu) d3d11.Renderer else void = if (build_options.gpu) .{} else {},
+    /// Linux: whether `prepareGpuShaders` links programs for OpenGL; null
+    /// reads `ZIGGURAT_GL` (see `GlMode`).
+    gl_mode: ?GlMode = null,
     /// Configuration for the next attach; an attached surface keeps its mode.
     render_mode: RenderMode = .automatic,
     /// Optional explicit shared GPU device. Frozen into the renderer at attach.
@@ -881,10 +885,18 @@ pub const Context = struct {
         const scope = self.callbackScope(window) orelse return error.Closed;
         defer scope.end();
         if (self.painting) return error.Busy;
-        if (!build_options.gpu or self.gpu_unavailable or self.attached_render_mode == .gdi) return 0;
         var ready: usize = 0;
-        for (shaders) |item| {
-            if (try self.gpu_renderer.prepareEffect(allocator, item.program, item.target)) ready += 1;
+        if (comptime builtin.os.tag == .linux) {
+            // Linux runs effects on OpenGL over the software planes.
+            const mode = self.gl_mode orelse gdi.glModeFromEnvironment();
+            for (shaders) |item| {
+                if (try self.renderer.prepareEffect(allocator, item.program, item.target, mode)) ready += 1;
+            }
+        } else {
+            if (!build_options.gpu or self.gpu_unavailable or self.attached_render_mode == .gdi) return 0;
+            for (shaders) |item| {
+                if (try self.gpu_renderer.prepareEffect(allocator, item.program, item.target)) ready += 1;
+            }
         }
         window.invalidate();
         return ready;

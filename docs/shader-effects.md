@@ -2,7 +2,7 @@
 
 `ziggurat_shader` 是一门有界的着色语言：程序在绘制之前编译成寄存器字节码，编译时就算出每个像素最多执行多少步；`ziggurat_ui` 用它改写元素的绘制结果（元素效果）或元素下方已画好的内容（背景着色器）。在此之上，`ui.effects.Library` 提供内置的位姿/透视变换、淡出和玻璃折射程序，声明式视图把它们接成 `Style.opacity`、`Style.pose`、`Style.effect`、`Style.refraction` 与 `View.presentColumn` 进出场过渡。
 
-**范围说明**：软件回放（Windows GDI DIB、Linux Cairo 图像面）在 CPU 上逐像素解释执行程序。Windows D3D11 渲染器把程序翻译成 HLSL 后在 GPU 上执行元素效果与背景着色器（见下文“Direct3D 11 执行”），与软件回放逐像素对照验证；Linux 目前仍走软件回放。目前没有吞吐量基准。像素正确性由单元测试与隐藏窗口 smoke 检查验证，不代表视觉质量评审。
+**范围说明**：软件回放（Windows GDI DIB、Linux Cairo 图像面）在 CPU 上逐像素解释执行程序。Windows D3D11 渲染器把程序翻译成 HLSL 后在 GPU 上执行元素效果与背景着色器（见下文“Direct3D 11 执行”）；Linux 渲染器可把它们翻译成 GLSL 交给 OpenGL 执行，结果读回软件平面（见下文“Linux OpenGL 执行”）。两者都与软件回放逐像素对照验证。目前没有吞吐量基准。像素正确性由单元测试与隐藏窗口 smoke 检查验证，不代表视觉质量评审。
 
 ## 语言
 
@@ -141,6 +141,12 @@ D3D11 渲染器只执行事先准备过的程序。`Context.prepareGpuShaders(al
 
 元素效果像软件回放一样借用高斯捕获：内容画进捕获平面后，着色器代替滤波器在捕获上逐像素运行，结果写回平面再按效果的不透明度合成。背景着色器结束当前绘制，把目标中形状加边距的区域复制到纹理，在形状与裁剪覆盖的像素上运行着色器并写回目标，再继续绘制。两者都与软件回放使用相同的位置、精确双线性采样（元素捕获外读作透明，背景复制区外取最近像素）、失败处理、结果截取与合成公式；prologue 仍在 CPU 上运行，工作量预算、`applied`、`skipped` 与 `pixels` 统计照常计入。GPU 不统计逐像素的 `faulted_pixels`。`Renderer.effectPasses()` 给出 GPU 上执行的着色器遍数。
 
+## Linux OpenGL 执行
+
+Linux 渲染器始终在 Cairo 图像面上绘制，着色器效果可以改由 OpenGL 执行。`Context.prepareGpuShaders` 在 paint 之外创建一个与窗口系统无关的无表面 EGL 上下文（OpenGL 3.3 core，通过 GTK 已依赖的 libepoxy），把程序翻译成 GLSL、套上与 HLSL 共用的宿主代码后链接，装入 16 个程序槽之一；OpenGL 驱动自己缓存编译结果。绘制时，高斯捕获中的元素效果把捕获平面上传为纹理、在帧缓冲上运行片段着色器并读回平面；背景着色器上传形状加边距的区域，把 `out` 中的像素读回目标。charge、prologue、统计与软件回放相同；未准备的程序、两遍隔离中的元素效果以及 OpenGL 失败（此后该渲染器不再使用 OpenGL）都在 CPU 上执行。上下文在使用前后保存并恢复线程当前的 EGL 上下文，不干扰工具包自己的 OpenGL。
+
+默认（`GlMode.automatic`）只在硬件渲染器上使用 OpenGL，llvmpipe/softpipe 等软件光栅器仍走 CPU。`Context.gl_mode` 设为 `.on` 时也使用软件光栅器、设为 `.off` 时不使用；为 null 时读取环境变量 `ZIGGURAT_GL`：`1`/`on`/`true`/`yes` 为 `.on`，`0`/`off`/`false`/`no` 为 `.off`，其余为自动。
+
 ## 帧统计与慢帧日志
 
 `Context.setFrameStats(.{ .enabled = true, .slow_ns = 8 * std.time.ns_per_ms })` 为每帧计时：录制（build）、预检（preflight）与回放呈现（render）三段，以及命令数与是否走软件回放；`frameStats()` 返回帧数、慢帧数、平均、最近一帧与最慢一帧。超过阈值的帧通过 `std.log`（scope `ziggurat_frames`，info 级）输出一行。未显式设置时，attach 读取环境变量 `ZIGGURAT_FRAME_STATS`：`1`/`on`/`true`/`yes` 为 8 ms 阈值，数字为毫秒阈值，`all` 记录每帧，`0`/`off`/`false`/`no` 关闭。计时只读单调时钟，不分配内存。
@@ -153,4 +159,5 @@ D3D11 渲染器只执行事先准备过的程序。`Context.prepareGpuShaders(al
 - `zig build test-shader-gl`（Linux，经 EGL 在 Mesa 上运行）与 `zig build test-shader-d3d`（Windows，WARP；属于 `zig build test`）：一组覆盖循环、函数调用、数组、矩阵、整数故障与各内置函数的程序翻译后逐像素与 CPU 机器对照，包括哪些像素失败。
 - `zig build test-ui`：磁盘缓存的命名、校验、最久未用淘汰与临时文件清理。
 - `zig build smoke-shader-effects-gpu -Dgpu=true`（Windows，WARP）：未准备程序时整帧走软件回放；准备后同一帧分别由 D3D11 与软件回放绘制，五个效果都在 GPU 上执行，统计一致，逐像素差不超过 2。
+- `zig build smoke-shader-effects-gl`（Linux）：强制 OpenGL（CI 上为 Mesa llvmpipe）时五个效果都在 OpenGL 上执行，与 CPU 绘制的同一帧逐像素比较；没有 OpenGL 3.3 上下文时跳过。
 - `zig build smoke-shader-effects`：隐藏窗口上未准备时的原样绘制，准备后的改色、位姿、淡出像素，背景着色器，帧统计与工作区随 detach 释放。

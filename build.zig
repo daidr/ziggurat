@@ -774,6 +774,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
         });
+        if (target.result.os.tag == .linux) addSmoke(b, "smoke-shader-effects-gl", "tests/shader_effects_gl_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
         addSmoke(b, "smoke-view", "tests/view_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
@@ -1403,6 +1407,10 @@ pub fn build(b: *std.Build) void {
         const native = native_support.add(b, ui, "ui-cairo-native", "src/ui/linux.c", &.{"-std=c11"}, target, optimize);
         native.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .force });
         ui.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .force });
+        // Shader effects on OpenGL through libepoxy, which GTK already uses.
+        const gl_effects = native_support.add(b, ui, "ui-gl-effects-native", "src/ui/gl_effects.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        gl_effects.linkSystemLibrary("epoxy", .{ .use_pkg_config = .force });
+        ui.linkSystemLibrary("epoxy", .{ .use_pkg_config = .force });
         ui.link_libc = true;
         const content_host = b.addExecutable(.{ .name = "smoke-content-host", .root_module = b.createModule(.{
             .target = target,

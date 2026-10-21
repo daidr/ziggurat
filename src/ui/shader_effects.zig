@@ -33,6 +33,9 @@ pub const Target = enum(u8) { element, backdrop };
 /// A program a GPU renderer prepares to draw as `target`; see
 /// `Context.prepareGpuShaders`.
 pub const GpuShader = struct { program: *const shader.Program, target: Target };
+/// Linux: when shader effects run on OpenGL. `automatic` uses a hardware
+/// renderer only, `on` also a software rasterizer such as llvmpipe.
+pub const GlMode = enum { automatic, on, off };
 /// One recorded effect in absolute DIP.
 pub const Entry = struct {
     program: *const shader.Program,
@@ -243,6 +246,11 @@ pub fn applyElement(entry: *const Entry, source: Plane, scratch: Plane, capture:
 fn runContent(entry: *const Entry, source: Plane, scratch: Plane, x0: f32, y0: f32, scale: f32, workspace: ?*Workspace) void {
     const space = workspace orelse return;
     if (!startElement(space, entry, @as(u64, source.width) * source.height, scale)) return;
+    shadeContent(entry, source, scratch, x0, y0, scale, space);
+}
+/// Run a started element effect (see `startElement`) over a capture:
+/// plane pixel (px, py) shows absolute DIP ((px + 0.5 + x0) / scale, ...).
+pub fn shadeContent(entry: *const Entry, source: Plane, scratch: Plane, x0: f32, y0: f32, scale: f32, space: *Workspace) void {
     const machine = &space.machine;
     const kind = entry.program.kind;
     if (kind != .color) for (0..source.height) |y| @memcpy(scratch.pixels[y * scratch.stride ..][0..source.width], source.pixels[y * source.stride ..][0..source.width]);
@@ -458,18 +466,24 @@ pub fn startBackdrop(space: *Workspace, entry: *const Entry, plan: BackdropPlan,
 pub fn applyBackdrop(surface: cpu.Surface, transparent: bool, entry: *const Entry, scratch: ?[]u32, workspace: ?*Workspace) Dirty {
     const empty: Dirty = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
     const s: f32 = surface.scale;
+    const plan = planBackdrop(surface.width, surface.height, surface.scale, surface.origin, surface.clip, entry) orelse return empty;
+    const space = workspace orelse return empty;
+    if (!startBackdrop(space, entry, plan, if (scratch) |storage| storage.len else null, s)) return empty;
+    shadeBackdrop(surface, transparent, entry, plan, scratch.?, space);
+    return plan.dirty();
+}
+/// Run a started backdrop shader (see `startBackdrop`) on `surface`;
+/// `storage` holds the plan's region.
+pub fn shadeBackdrop(surface: cpu.Surface, transparent: bool, entry: *const Entry, plan: BackdropPlan, storage: []u32, space: *Workspace) void {
+    const s: f32 = surface.scale;
     const b = entry.box;
     const ox: f32 = @floatCast(surface.origin[0]);
     const oy: f32 = @floatCast(surface.origin[1]);
     const clip = surface.clip;
-    const plan = planBackdrop(surface.width, surface.height, s, surface.origin, clip, entry) orelse return empty;
     const box = plan.box;
     const radius = plan.radius;
     const out = plan.out;
     const region = plan.region;
-    const space = workspace orelse return empty;
-    if (!startBackdrop(space, entry, plan, if (scratch) |storage| storage.len else null, s)) return empty;
-    const storage = scratch.?;
     const rw = region[2] - region[0];
     const rh = region[3] - region[1];
     const machine = &space.machine;
@@ -518,7 +532,6 @@ pub fn applyBackdrop(surface: cpu.Surface, transparent: bool, entry: *const Entr
         if (!transparent) mixed[3] = 1;
         surface.pixels[at] = fromColor(mixed);
     };
-    return plan.dirty();
 }
 
 fn testProgram(source: []const u8) !*shader.Program {
