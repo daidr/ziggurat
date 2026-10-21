@@ -381,9 +381,19 @@ Linux 同样接受 `devtools_enabled` 和三个 DevTools 方法，对应 WebKit 
 
 `capturePreview(page_id, options, completion)` 用原生 PNG 编码写入固定预算的内存 `IStream`，不读写文件、不在 UI 解码图片。超预算整体返回 `limit_exceeded`，不交付部分 PNG。结果为 `Result.png` 的借用 bytes；需要保存时由宿主复制并交给显式 worker。它不会限制 Runtime 编码过程自身的临时内存或耗时。
 
-`printToPdf(page_id, tools.PdfOptions, options, completion)` 使用 Runtime 的异步 PDF 文件输出，不调用系统打印机或打印对话框。宿主必须在自己的显式 worker 准备可信的私有绝对路径，调用时填写 `accept_overwrite = true`；UI 入口不 stat/read 文件，也不判定路径是否安全、是否已有内容。输出可覆盖该路径。路径最多 32766 UTF-16 单元，复制到本次请求；选定连续页范围最多 256 页，默认 1–16，支持横向和背景选项。成功返回 `Result.pdf_path`（借用输出路径），不是 PDF bytes。输出大小、磁盘空间、复杂页面排版与 Runtime 耗时没有硬预算；应用负责路径权限、并发写入及在 worker 检查产物。
+`printToPdf(page_id, tools.PdfOptions, options, completion)` 使用 Runtime 的异步 PDF 文件输出，不调用系统打印机或打印对话框。宿主必须在自己的显式 worker 准备可信的私有绝对路径，调用时填写 `accept_overwrite = true`；UI 入口不 stat/read 文件，也不判定路径是否安全、是否已有内容。输出可覆盖该路径。路径最多 32766 UTF-16 单元，复制到本次请求。
 
-工具、JS、deferred resource、权限与待决下载共用一个惰性创建的 waitable timer，timeout 同为 1 ms 到 10 分钟。取消/超时只终结宿主回调，不撤回已写 Cookie、已执行的 Profile 清理、已提交截图编码或 PDF 写入；PDF 可能在逻辑终结后继续写目标。未完成的原生操作继续占有界 native pending 槽，直到真实 completion；Windows 真实完成先释放容量，允许回调内再次提交，Linux Find/capture/clear 的物理引用时点见上文。PNG sink 和独立 COM 状态保留到原生 Release。页面作用域的查找/截图/PDF 在新页面、失效或重建时收到 `page_changed`，detach 为 `detached`，进程失败为 `unavailable`。批量清理先同时取出五类旧请求，再取消原生操作并运行任何业务回调，正常关闭不重新挂载计时器；重新 arm 失败则终结剩余请求并关闭提交入口，避免悬挂。已接受传输的下载没有持续 timer，进度由原生事件驱动。
+排版选项与浏览器打印对话框一致，页面的 print 样式表生效：
+
+- `page_size` 以英寸计，默认 `PageSize.letter`（8.5×11），另有 `legal`、`tabloid`、`a3`、`a4`、`a5` 预设或任意 1–100 英寸的自定义尺寸；`landscape` 横向。
+- `margins` 四边默认 0.4 英寸，`Margins.none` 为零；每边 0–10 英寸，且左右、上下之和须小于纸张尺寸，否则返回 `InvalidMargins`。
+- `first_page` 从 1 起，`last_page = null`（默认）打印到最后一页；给定 `last_page` 时连续范围最多 256 页，否则返回 `InvalidPageRange`。
+- `print_backgrounds` 默认 false，与打印对话框一样不打印背景色和背景图。
+- 不打印页眉页脚。
+
+Windows 使用 Runtime 的 PrintToPdf。Linux 通过 WebKitGTK 打印操作交给 GTK 的“打印到文件”后端写 PDF，同样不显示对话框；它与截图、清理共用物理 pending 配额，同一 View 同时只运行一个 PDF（运行期间临时替换该 View 的打印背景设置），文件写完后先释放物理槽再回调，回调内可以立即提交下一次。Linux 的取消同样只终结回调，已开始的打印继续写完目标。成功返回 `Result.pdf_path`（借用输出路径），不是 PDF bytes。输出大小、磁盘空间、复杂页面排版与 Runtime 耗时没有硬预算；应用负责路径权限、并发写入及在 worker 检查产物。
+
+工具、JS、deferred resource、权限与待决下载共用一个惰性创建的 waitable timer，timeout 同为 1 ms 到 10 分钟。取消/超时只终结宿主回调，不撤回已写 Cookie、已执行的 Profile 清理、已提交截图编码或 PDF 写入；PDF 可能在逻辑终结后继续写目标。未完成的原生操作继续占有界 native pending 槽，直到真实 completion；Windows 真实完成先释放容量，允许回调内再次提交，Linux Find/capture/clear/PDF 的物理引用时点见上文。PNG sink 和独立 COM 状态保留到原生 Release。页面作用域的查找/截图/PDF 在新页面、失效或重建时收到 `page_changed`，detach 为 `detached`，进程失败为 `unavailable`。批量清理先同时取出五类旧请求，再取消原生操作并运行任何业务回调，正常关闭不重新挂载计时器；重新 arm 失败则终结剩余请求并关闭提交入口，避免悬挂。已接受传输的下载没有持续 timer，进度由原生事件驱动。
 
 真实 native C→Zig 回调以独立 App native callback scope 遮蔽被暂停的原始输入 receipt，结束后恢复外层输入上下文；普通 Region/Session 回调转发保持原权限。scope 先结束 attachment pin，再结束保存的 App pin，之后不读取可能已释放的 View/Session。CookieStore 的晚到完成/停止 teardown 也进入该边界。这不宣称 SDK 在 C ABI 返回后的任意 C-only 尾部都被包住；后续新 C→Zig 入口会独立建立边界。
 

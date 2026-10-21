@@ -1946,6 +1946,9 @@ pub fn build(b: *std.Build) void {
         capture_smoke.root_module.linkSystemLibrary("cairo", .{ .use_pkg_config = .force });
         check.dependOn(&capture_smoke.step);
         b.step("smoke-webview-capture-linux", "Verify bounded native PNG capture, independent pixel data and request ownership").dependOn(&b.addRunArtifact(capture_smoke).step);
+        addSmoke(b, "smoke-webview-pdf-linux", "tests/linux_pdf_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
         const capture_owner_tests = b.addExecutable(.{ .name = "test-webkit-capture", .root_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
