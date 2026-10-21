@@ -19,7 +19,7 @@ const measure = @import("ziggurat_text_measure");
 const sample =
     \\# Notes
     \\
-    \\Select text and use the toolbar, or **Ctrl+B**, _Ctrl+I_ and `Ctrl+E`.
+    \\Select text and use the toolbar, or **Ctrl+B**, _Ctrl+I_ and `Ctrl+Shift+E`.
     \\
     \\- Lists continue on Enter
     \\- Tab indents, Shift+Tab outdents

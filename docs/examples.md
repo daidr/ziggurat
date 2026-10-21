@@ -29,6 +29,7 @@
 | `terminal` | [terminal.zig](../examples/terminal.zig) | 用户的 shell 运行在终端视图中：窗口标题跟随 shell，shell 退出后关闭窗口 |
 | `text-buffer` | [text_buffer.zig](../examples/text_buffer.zig) | 10 万行混合文字的大文档直接由编辑器 Adapter 编辑：只排版视口附近的行，状态行读取文档索引中的行数、字符数与版本 |
 | `native` | [native.zig](../examples/native.zig) | 桌面集成一览：菜单栏（快捷键、勾选、互斥项）、右键菜单、托盘、多选文件对话框、问答消息框、通知、全局快捷键 Ctrl+Shift+Space、剪贴板、深色模式与系统外观变化、主显示器信息 |
+| `rich-text` | [rich_text.zig](../examples/rich_text.zig) | 富文本编辑器：格式工具栏、Markdown 快捷方式、列表与任务、链接，系统剪贴板复制粘贴 HTML/RTF/Markdown，原生文字测量 |
 | `hybrid` | [hybrid.zig](../examples/hybrid.zig) | 混合应用：原生侧栏 + 矩形区域中的系统 WebView 页面，双向消息；需要 `-Dwebview=true` |
 
 早期示例 `counter`、`view-counter`、`web-counter`、`rectangular-pages` 与 `counter_service.zig`（IPC 客户端生成）保持不变。Markdown 与浮出窗口的示例等对应模块合入后再补。
