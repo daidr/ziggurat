@@ -45,7 +45,6 @@ const Chrome = struct {
     fn advance(ptr: *anyopaque) void {
         const self: *Chrome = @ptrCast(@alignCast(ptr));
         self.pending = false;
-        std.debug.print("chrome probe: stage {s}\n", .{@tagName(self.stage)});
         self.step() catch |err| std.debug.panic("chrome stage {s}: {s}", .{ @tagName(self.stage), @errorName(err) });
     }
     fn step(self: *Chrome) !void {
@@ -231,7 +230,6 @@ const Loop = struct {
 fn nativeLoops(allocator: std.mem.Allocator) !void {
     if (builtin.os.tag != .windows) return;
     for ([_]@FieldType(Loop, "mode"){ .move, .resize, .menu, .raw, .gesture_move, .gesture_resize, .stale_disable, .stale_modal, .stale_focus }) |mode| {
-        std.debug.print("chrome probe: loop {s}\n", .{@tagName(mode)});
         const app = try z.App.init(allocator);
         defer app.deinit();
         var probe: Loop = .{ .mode = mode };
@@ -361,15 +359,10 @@ fn backdrop(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(usize, 0), app.resourceStats().allocated_records);
 }
 fn run(allocator: std.mem.Allocator, require_wm: bool) !void {
-    std.debug.print("chrome probe: geometry\n", .{});
     try geometry(allocator, require_wm);
-    std.debug.print("chrome probe: native loops\n", .{});
     try nativeLoops(allocator);
-    std.debug.print("chrome probe: capture\n", .{});
     try captureOwnership(allocator);
-    std.debug.print("chrome probe: raw hit\n", .{});
     try rawHit(allocator);
-    std.debug.print("chrome probe: backdrop\n", .{});
     try backdrop(allocator);
     if (builtin.os.tag == .linux) try @import("window_chrome_x11.zig").run(allocator, require_wm);
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());

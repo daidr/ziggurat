@@ -322,7 +322,13 @@ fn dispatchMessage(app: *core.App, message: *c.MSG) bool {
     if (message.message == c.WM_QUIT) return false;
     // The main loop already dispatches from the kernel event once per turn.
     // The window procedure remains usable by native resize/modal loops.
-    if (message.hwnd == app.native.dispatcher and message.message == wake_message) return true;
+    // A wake raised during this turn's dispatch is still pending: its message
+    // is the only signal a native modal loop entered later this turn can see,
+    // so handle it now rather than leave the flag set with nothing queued.
+    if (message.hwnd == app.native.dispatcher and message.message == wake_message) {
+        if (app.native.wake_pending.load(.acquire)) consumeWake(app);
+        return true;
+    }
     if (message.message == c.WM_KEYDOWN or message.message == c.WM_SYSKEYDOWN) {
         if (keyRecord(app, message.hwnd)) |record| {
             const scope = record.enterNative();
