@@ -2734,16 +2734,24 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&rich_text_editor_tests.step);
     test_step.dependOn(&run_rich_text_editor_tests.step);
     test_rich_text.dependOn(&run_rich_text_editor_tests.step);
+    _ = b.addModule("ziggurat_rich_text_clipboard", .{ .root_source_file = b.path("src/rich_text/clipboard.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat_rich_text", .module = rich_text }, .{ .name = "ziggurat_rich_text_editor", .module = rich_text_editor },
+        .{ .name = "ziggurat_system", .module = system },
+    } });
+    _ = b.addModule("ziggurat_text_measure", .{ .root_source_file = b.path("src/text_measure/root.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_text_layout", .module = text_layout },
+    } });
     addExamples(b, target, optimize);
 }
 
 const app_example_imports = [_][]const u8{
-    "ziggurat",               "ziggurat_ui",               "ziggurat_view",            "ziggurat_view_timer",
-    "ziggurat_view_text",     "ziggurat_document",         "ziggurat_document_editor", "ziggurat_wake",
-    "ziggurat_system",        "ziggurat_i18n",             "ziggurat_animation",       "ziggurat_document_app",
-    "ziggurat_chart",         "ziggurat_chart_view",       "ziggurat_audio",           "ziggurat_code_editor",
-    "ziggurat_text_layout",   "ziggurat_window_placement", "ziggurat_game",            "ziggurat_terminal",
-    "ziggurat_terminal_view",
+    "ziggurat",               "ziggurat_ui",               "ziggurat_view",             "ziggurat_view_timer",
+    "ziggurat_view_text",     "ziggurat_document",         "ziggurat_document_editor",  "ziggurat_wake",
+    "ziggurat_system",        "ziggurat_i18n",             "ziggurat_animation",        "ziggurat_document_app",
+    "ziggurat_chart",         "ziggurat_chart_view",       "ziggurat_audio",            "ziggurat_code_editor",
+    "ziggurat_text_layout",   "ziggurat_window_placement", "ziggurat_game",             "ziggurat_terminal",
+    "ziggurat_terminal_view", "ziggurat_rich_text",        "ziggurat_rich_text_editor", "ziggurat_rich_text_clipboard",
+    "ziggurat_text_measure",
 };
 
 const Example = struct { name: []const u8, path: []const u8, web: bool = false };
@@ -2769,6 +2777,7 @@ const app_examples = [_]Example{
     .{ .name = "terminal", .path = "examples/terminal.zig" },
     .{ .name = "text-buffer", .path = "examples/text_buffer.zig" },
     .{ .name = "native", .path = "examples/native.zig" },
+    .{ .name = "rich-text", .path = "examples/rich_text.zig" },
     .{ .name = "hybrid", .path = "examples/hybrid.zig", .web = true },
 };
 
