@@ -466,7 +466,7 @@ try std.testing.expectEqualStrings("Sans", h.focused().?.text);
 
 ## 背景效果
 
-`Style.material` 是一个 `ui.BackdropEffect`，代替 `background` 画在容器的子节点之下：玻璃、对下方内容的模糊或滚动边缘，形状取 `Style.radius`。`Style.edges` 在裁剪容器（例如滚动容器）的顶部和/或底部画滚动边缘，带高 `height`（默认 24 DIP），在子节点之上、裁剪之内：
+`Style.material` 是一个 `ui.Material`，代替 `background` 画在容器的边框和子节点之下：玻璃、对下方内容的模糊、滚动边缘，或自己绘制的 `custom` 材质，形状取 `Style.radius`。`Style.edges` 在裁剪容器（例如滚动容器）的顶部和/或底部画滚动边缘，带高 `height`（默认 24 DIP），在子节点之上、裁剪之内：
 
 ```zig
 try v.row(.{ .padding = Insets.all(12), .radius = 16, .material = .{ .glass = .{ .tint = .{ .r = 40, .g = 110, .b = 200, .a = 60 } } } });
@@ -476,6 +476,23 @@ try v.scroll(&model, .{ .grow = 1, .edges = .{ .top = .{}, .bottom = .{ .hard = 
 ```
 
 效果需要 `host.prepareBackdropEffects(allocator, .{})`（在 `attach` 之后），否则画不透明填充。效果的像素模型、预算和后端行为见[背景效果与加载动画](backdrop-effects.md)。
+
+`custom` 材质是一段绘制代码：`paint(context, frame, box, radius)` 在 `box`（帧的 DIP 坐标）上用 `ui.Frame` 能画的任何东西填充，例如渐变、背景效果或背景着色器；`context` 要比画它的每一帧都活得久。组件包可以这样提供自己的材质：
+
+```zig
+const Stripes = struct {
+    color: ui.Color,
+    fn paint(context: ?*const anyopaque, frame: *ui.Frame, box: ui.Rect, radius: f32) anyerror!void {
+        const self: *const @This() = @ptrCast(@alignCast(context.?));
+        frame.roundedRect(box, radius, self.color);
+        frame.roundedRect(.{ .x = box.x, .y = box.y, .width = box.width, .height = box.height / 2 }, 0, self.color.withAlpha(0.5));
+    }
+};
+const stripes: Stripes = .{ .color = ui.Color.oklch(0.7, 0.15, 250) };
+try v.row(.{ .radius = 12, .material = .{ .custom = .{ .context = &stripes, .paint = Stripes.paint, .name = "stripes" } } });
+```
+
+不经过视图时，`frame.material(bounds, radius, value)` 画同样的材质。
 
 ## 不透明度、位姿与进出场
 
