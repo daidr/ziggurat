@@ -297,6 +297,16 @@ pub fn build(b: *std.Build) void {
     const run_plugin_fetch_tests = b.addRunArtifact(plugin_fetch_tests);
     test_step.dependOn(&run_plugin_fetch_tests.step);
     b.step("test-plugin-fetch", "Run the fetch plugin's streaming, redirect, validation and cancellation tests against local servers").dependOn(&run_plugin_fetch_tests.step);
+    const plugin_websocket = b.addModule("ziggurat_plugin_websocket", .{ .root_source_file = b.path("src/page_runtime/plugins/websocket.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat_ipc", .module = ipc },
+        .{ .name = "ziggurat_net", .module = net },
+        .{ .name = "ziggurat_page_runtime", .module = page_runtime },
+    } });
+    const plugin_websocket_tests = b.addTest(.{ .root_module = plugin_websocket });
+    check.dependOn(&plugin_websocket_tests.step);
+    const run_plugin_websocket_tests = b.addRunArtifact(plugin_websocket_tests);
+    test_step.dependOn(&run_plugin_websocket_tests.step);
+    b.step("test-plugin-websocket", "Run the WebSocket plugin's message, piece, close, refusal and page-leave tests against local servers").dependOn(&run_plugin_websocket_tests.step);
     const system_watch = b.createModule(.{ .root_source_file = b.path("src/system/watch.zig"), .target = target, .optimize = optimize, .link_libc = target.result.os.tag == .windows });
     const plugin_watch = b.addModule("ziggurat_plugin_watch", .{ .root_source_file = b.path("src/page_runtime/plugins/watch.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat_ipc", .module = ipc },
@@ -1822,7 +1832,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "counter_service", .module = counter_service },
             .{ .name = "ipc_page", .module = page_module },
         });
-        addPageRuntimeSmoke(b, target, optimize, core, view, ipc, i18n, page_runtime, net, plugin_fetch, plugin_watch, plugin_sqlite);
+        addPageRuntimeSmoke(b, target, optimize, core, view, ipc, i18n, page_runtime, net, plugin_fetch, plugin_watch, plugin_sqlite, plugin_websocket);
         const producer_bundle = b.addSystemCommand(&.{ "bun", "build" });
         producer_bundle.addFileArg(b.path("tests/resource_producer_page.ts"));
         producer_bundle.addFileInput(b.path("tests/resource_producer_fixture.ts"));
@@ -1917,7 +1927,7 @@ pub fn build(b: *std.Build) void {
         view_tests = b.addTest(.{ .root_module = view });
         _ = b.step("webview-runtime", "Use the installed WebKitGTK 4.1 runtime");
         addWebNativeBoundarySmoke(b, target, optimize, core, view);
-        addPageRuntimeSmoke(b, target, optimize, core, view, ipc, i18n, page_runtime, net, plugin_fetch, plugin_watch, plugin_sqlite);
+        addPageRuntimeSmoke(b, target, optimize, core, view, ipc, i18n, page_runtime, net, plugin_fetch, plugin_watch, plugin_sqlite, plugin_websocket);
         addSmoke(b, "smoke-webview-linux", "tests/linux_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
@@ -2095,6 +2105,7 @@ pub fn build(b: *std.Build) void {
     // Schemas only: the generator does not build Core for the host.
     const page_runtime_host = b.createModule(.{ .root_source_file = b.path("src/page_runtime/service.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .imports = &.{.{ .name = "ziggurat_ipc", .module = ipc_host }} });
     const plugin_fetch_host = b.createModule(.{ .root_source_file = b.path("src/page_runtime/plugins/fetch_service.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .imports = &.{.{ .name = "ziggurat_ipc", .module = ipc_host }} });
+    const plugin_websocket_host = b.createModule(.{ .root_source_file = b.path("src/page_runtime/plugins/websocket_service.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .imports = &.{.{ .name = "ziggurat_ipc", .module = ipc_host }} });
     const plugin_watch_host = b.createModule(.{ .root_source_file = b.path("src/page_runtime/plugins/watch_service.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .imports = &.{.{ .name = "ziggurat_ipc", .module = ipc_host }} });
     const plugin_sqlite_host = b.createModule(.{ .root_source_file = b.path("src/page_runtime/plugins/sqlite_service.zig"), .target = b.graph.host, .optimize = .ReleaseSafe, .imports = &.{.{ .name = "ziggurat_ipc", .module = ipc_host }} });
     const page_runtime_clients = b.addExecutable(.{ .name = "page-runtime-clients", .root_module = b.createModule(.{
@@ -2107,6 +2118,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "plugin_fetch_service", .module = plugin_fetch_host },
             .{ .name = "plugin_watch_service", .module = plugin_watch_host },
             .{ .name = "plugin_sqlite_service", .module = plugin_sqlite_host },
+            .{ .name = "plugin_websocket_service", .module = plugin_websocket_host },
         },
     }) });
     const write_page_clients = b.addRunArtifact(page_runtime_clients);
@@ -2118,6 +2130,7 @@ pub fn build(b: *std.Build) void {
     check_page_clients.addFileInput(b.path("packages/plugin-fetch/src/generated/fetch.ts"));
     check_page_clients.addFileInput(b.path("packages/plugin-watch/src/generated/watch.ts"));
     check_page_clients.addFileInput(b.path("packages/plugin-sqlite/src/generated/sqlite.ts"));
+    check_page_clients.addFileInput(b.path("packages/plugin-websocket/src/generated/websocket.ts"));
     test_step.dependOn(&check_page_clients.step);
     b.step("check-page-runtime-clients", "Fail when a generated page runtime client under packages/ differs from its Zig schema").dependOn(&check_page_clients.step);
     const ipc_tests = b.addTest(.{ .root_module = ipc });
@@ -2904,7 +2917,7 @@ fn addSystemIntegrationNative(b: *std.Build, module: *std.Build.Module, target: 
 }
 
 /// One end-to-end page: the runtime package bundled into a hidden window.
-fn addPageRuntimeSmoke(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module, view: *std.Build.Module, ipc: *std.Build.Module, i18n: *std.Build.Module, page_runtime: *std.Build.Module, net: *std.Build.Module, plugin_fetch: *std.Build.Module, plugin_watch: *std.Build.Module, plugin_sqlite: *std.Build.Module) void {
+fn addPageRuntimeSmoke(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module, view: *std.Build.Module, ipc: *std.Build.Module, i18n: *std.Build.Module, page_runtime: *std.Build.Module, net: *std.Build.Module, plugin_fetch: *std.Build.Module, plugin_watch: *std.Build.Module, plugin_sqlite: *std.Build.Module, plugin_websocket: *std.Build.Module) void {
     const fetch_bundle = b.addSystemCommand(&.{ "bun", "build" });
     fetch_bundle.addFileArg(b.path("tests/plugin_fetch_page.ts"));
     fetch_bundle.addFileInput(b.path("packages/runtime/src/index.ts"));
@@ -2947,6 +2960,20 @@ fn addPageRuntimeSmoke(b: *std.Build, target: std.Build.ResolvedTarget, optimize
         .{ .name = "ziggurat_page_runtime", .module = page_runtime },
         .{ .name = "ziggurat_plugin_sqlite", .module = plugin_sqlite },
         .{ .name = "plugin_sqlite_page", .module = sqlite_page },
+    });
+    const websocket_bundle = b.addSystemCommand(&.{ "bun", "build" });
+    websocket_bundle.addFileArg(b.path("tests/plugin_websocket_page.ts"));
+    websocket_bundle.addFileInput(b.path("packages/runtime/src/index.ts"));
+    websocket_bundle.addFileInput(b.path("packages/plugin-websocket/src/index.ts"));
+    websocket_bundle.addFileInput(b.path("packages/plugin-websocket/src/generated/websocket.ts"));
+    websocket_bundle.addArgs(&.{ "--target", "browser", "--format", "iife", "--outfile" });
+    const websocket_page = b.createModule(.{ .root_source_file = websocket_bundle.addOutputFileArg("plugin-websocket-page.js") });
+    addSmoke(b, "smoke-plugin-websocket", "tests/plugin_websocket_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_webview", .module = view },
+        .{ .name = "ziggurat_page_runtime", .module = page_runtime },
+        .{ .name = "ziggurat_plugin_websocket", .module = plugin_websocket },
+        .{ .name = "plugin_websocket_page", .module = websocket_page },
     });
     const bundle = b.addSystemCommand(&.{ "bun", "build" });
     bundle.addFileArg(b.path("tests/page_runtime_page.ts"));
