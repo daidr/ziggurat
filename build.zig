@@ -2787,6 +2787,7 @@ const app_examples = [_]Example{
     .{ .name = "confetti", .path = "examples/confetti.zig" },
     .{ .name = "effort-slider", .path = "examples/effort_slider.zig" },
     .{ .name = "chat-glow", .path = "examples/chat_glow.zig" },
+    .{ .name = "blackhole", .path = "examples/blackhole.zig" },
     .{ .name = "hybrid", .path = "examples/hybrid.zig", .web = true },
 };
 
