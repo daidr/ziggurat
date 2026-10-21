@@ -619,6 +619,48 @@ fn runImage(allocator: std.mem.Allocator) !void {
     const panel = (try h.find(.{ .kind = .column, .nth = 1 })).bounds;
     try std.testing.expectEqual(@as(u32, 0x2050c0), pixelAt(level, @intFromFloat((panel.x + 10) * 2), @intFromFloat((panel.y + 10) * 2)));
     try std.testing.expectEqual(@as(u32, 0xffffff), pixelAt(level, 196, 156));
+
+    // With the inspector open, its panel's toolbar takes the right of the
+    // window and the content the rest.
+    var tools: view.Inspector = .{};
+    var wide = view.Harness.init(&state, Swatch.build, storage.buffers(), .{ .bounds = .{ .x = 0, .y = 0, .width = 600, .height = 300 }, .options = .{ .background = 0xffffff, .inspector = &tools } });
+    var wide_context = ui.Context.init(&dummy, Swatch.draw, Swatch.action);
+    try wide.attachInput(&wide_context);
+    try std.testing.expect(try wide.key(.{ .key = .f12 }));
+    try std.testing.expectEqual(@as(f32, 600 - view.inspector.default_width), wide.view.root().bounds.width);
+    const panel_surface = try ui.offscreen.Surface.create(app, allocator, .{ .size = .{ .width = 600, .height = 300, .scale = 1 } });
+    defer panel_surface.close() catch unreachable;
+    const panel_image = try wide.image(panel_surface);
+    defer panel_image.close() catch unreachable;
+    const panel_level = (try panel_image.view()).levels[0];
+    try std.testing.expectEqual(@as(u32, 0xf1f3f4), pixelAt(panel_level, 600 - 200, 2));
+    try std.testing.expectEqual(@as(u32, 0xffffff), pixelAt(panel_level, 600 - 200, 290));
+}
+
+/// The inspector in a window: open, the content narrower, and a click on
+/// its close button closes it through the Host's routing.
+fn runInspector(allocator: std.mem.Allocator) !void {
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    var state: Swatch = .{};
+    var storage: view.Storage(8, 64) = .{};
+    var tools: view.Inspector = .{};
+    var host = view.Host.init(&state, Swatch.build, storage.buffers(), .{ .inspector = &tools });
+    host.context.render_mode = .gdi;
+    const window = try app.createWindow(.{ .width = width, .height = height });
+    try host.attach(window);
+    try paint(&host, window);
+    try std.testing.expectEqual(@as(f32, width), host.view.root().bounds.width);
+    tools.toggle();
+    try paint(&host, window);
+    try std.testing.expectEqual(@as(f32, width / 2), host.view.root().bounds.width);
+    try std.testing.expect(tools.len == host.view.nodes().len);
+    Native.click(window, tools.layout().close);
+    try std.testing.expect(!tools.open);
+    try paint(&host, window);
+    try std.testing.expectEqual(@as(f32, width), host.view.root().bounds.width);
+    _ = try window.destroy();
+    try app.dispatch();
 }
 
 pub fn main() !void {
@@ -629,10 +671,11 @@ pub fn main() !void {
     try runPictures(gpa.allocator());
     try runTimer(gpa.allocator());
     try runImage(gpa.allocator());
+    try runInspector(gpa.allocator());
     if (builtin.os.tag == .windows) {
         try @import("view_uia.zig").run(gpa.allocator());
         try @import("view_uia.zig").runCollections(gpa.allocator());
     }
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, embedded leaf input, routed pages with history buttons, deferred icon and SVG preparation, timed toast expiry, keyed identity and harness frames drawn to pixels passed\n", .{});
+    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, embedded leaf input, routed pages with history buttons, deferred icon and SVG preparation, timed toast expiry, keyed identity and harness frames drawn to pixels and the inspector panel passed\n", .{});
 }

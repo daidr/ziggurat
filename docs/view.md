@@ -497,7 +497,7 @@ try std.testing.expectEqualStrings("Sans", h.focused().?.text);
 
 - 指针：`press(x, y, modifiers)`、`moveTo(x, y)`、`release(x, y)` 与 `cancelPointer()` 按 Host 相同的捕获规则重放一次按下，`drag(from_x, from_y, to_x, to_y, steps)` 把它们连起来；`systemDragOver(point, files, text)` 与 `systemDrop(point, data)` 模拟其他应用的拖放。
 
-- 像素：`image(surface)` 把上一遍渲染按窗口的样子画出来（背景 `Options.background` 或主题背景，加上视图绘制的内容），由 `ui.offscreen.Surface` 按它的尺寸和缩放画成一张图片，用于截图比对和像素检查；需要 `attachInput`，返回的 `Snapshot` 由调用方关闭。离屏表面需要应用的主线程（`z.App`），所以它用在 smoke 与工具里，而不是单元测试中；`smoke-view` 用它检查面板与背景的颜色。
+- 像素：`image(surface)` 把上一遍渲染按窗口的样子画出来（背景 `Options.background` 或主题背景，加上视图绘制的内容，打开时还有 inspector），由 `ui.offscreen.Surface` 按它的尺寸和缩放画成一张图片，用于截图比对和像素检查；需要 `attachInput`，返回的 `Snapshot` 由调用方关闭。离屏表面需要应用的主线程（`z.App`），所以它用在 smoke 与工具里，而不是单元测试中；`smoke-view` 用它检查面板与背景的颜色。
 
 带 `input` 的嵌入叶子在 Harness 中同样收到 `hoverAt`/`leave`、`clickAt`、上面的指针、`wheel` 与 `key` 的输入，`announcement()` 返回最近的播报文字。除此之外，Harness 把嵌入叶子当作不可交互的节点，不验证原生命中、文本输入、可访问性或原生捕获；这些仍由隐藏窗口 smoke 和原生检查覆盖。
 
@@ -537,6 +537,26 @@ if (try v.presentColumn(&state.panel, state.open, .{ .hidden = .{ .y = 12, .scal
 ## 系统偏好
 
 `host.setPreferences(.{ .reduce_motion, .reduce_transparency, .high_contrast })` 由应用按桌面偏好设置并重绘：减少动态效果让加载动画停在静止姿态，减少透明度或高对比度让背景效果变成不透明填充。
+
+## 开发者工具（inspector）
+
+`Options.inspector` 给 Host（或 Harness）一个 `view.Inspector`，像浏览器的开发者工具那样把视图的元素显示在停靠在窗口右侧的面板里：元素树写成标记，选中元素的样式、盒模型与属性，悬停或选中元素时在内容上画出的高亮，帧耗时，以及问题。
+
+```zig
+var inspector: view.Inspector = .{};
+var host = view.Host.init(&app, App.build, storage.buffers(), .{
+    .inspector = if (builtin.mode == .Debug) &inspector else null,
+});
+```
+
+- 打开与拾取：F12 或 Ctrl+Shift+I 打开或关闭，Ctrl+Shift+C 打开并进入拾取，Escape 停止拾取；`enabled = false` 时这些键交给视图。打开时内容得到窗口减去面板的宽度（默认 420 DIP，至少 260，给内容留至少 160；窗口窄于 520 时各占一半），拖动面板左缘改变宽度。面板按主题背景的明暗选用浅色或深色配色，自身始终从左到右。
+- 元素树：每个元素按种类写成标签（`<Button>`、`<TreeRow>`、根是 `<Column>`），带 `key` 与 `name` 属性和文本节点的文字；靠近根的三层默认展开，点三角展开或收起，按住 Alt 展开或收起其中全部。悬停一行在内容上高亮它的元素：内容蓝色、内边距绿色、边框黄色，附带提示框（种类与 key、尺寸、文字颜色与字体、背景、内边距，以及辅助技术看到的名称、角色和能否用键盘聚焦）。点一行选中；面板有键盘时上下键、Home/End 移动选中，左键收起或回到父元素，右键展开或进入第一个子元素。树下的路径条显示从根到选中元素的路径，点其中一项选中它。
+- 拾取：工具栏的拾取按钮或 Ctrl+Shift+C 之后，指针下最内层的元素高亮（浮层优先于流内元素），按下选中它并在树中展开到它；这次按下和松开交给 inspector，不会点到元素。
+- 详情：Styles 把元素设置的样式写成一条 CSS 规则（`flex-direction`、`gap`、`padding`、`border`、`background-color`、`font-size`、`white-space`、`line-clamp` 等）；Computed 画出边框、内边距与内容的盒模型及尺寸，再按名称列出布局后的值（位置、尺寸、方向、字体、颜色、不透明度，滚动容器的滚动偏移与内容尺寸）；Properties 列出种类、id、key、文字，状态（焦点、悬停、禁用、选中或数值），以及辅助技术看到的名称、角色和能否聚焦。
+- 性能与问题：Performance 显示最近 120 帧构建、排列与绘制的耗时柱状图，以及最近一帧、平均、最慢、显示器刷新率（`refresh_hz`，默认 60）和元素数，参考线是一帧的预算。Issues 列出构建中发现的问题，工具栏显示其数量：同一父元素下两个元素给了同一个 `key` 时它们共享一个身份，点击、焦点或滚动会落到另一个上；每个问题只记一次。帧的元素超过 `max_elements`（1024）时树只显示前面的部分并记为问题。
+- 工具栏的 RTL 按钮把窗口按从右到左布局，再点恢复，用来在翻译之前检查界面；它设置 `direction_override`，Host 与 Harness 在下一遍应用它。
+
+inspector 在视图之后绘制在同一帧上，并先于视图接收落在面板上的指针、滚轮以及它自己的按键，因此不向视图增加节点、控件或可访问性元素，也不占用视图的存储。它显示上一帧排列后的元素，复制在自身的固定存储里（约 300 KB），不分配；应用把它放在稳定的地址，通常只在调试构建中传入。Harness 的 `key`、`clickAt`、`press`/`moveTo`/`release`、`hoverAt`、`wheel`、`cursor()` 与 `image` 按 Host 相同的顺序经过它。面板没有元素查找（Ctrl+F），也不记录构建元素的源码位置。
 
 ## 当前范围
 

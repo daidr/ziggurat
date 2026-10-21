@@ -44,8 +44,12 @@ pub const Graphic = image_nodes.Graphic;
 pub const icons = @import("icons.zig");
 const pointer_controls = @import("pointer_area.zig");
 const wrap_text = @import("wrap.zig");
+const inspector_panel = @import("inspector.zig");
 pub const Cursor = z.Cursor;
 pub const PointerEvent = pointer_controls.PointerEvent;
+/// The developer tools of a window of views; see `inspector.zig`.
+pub const Inspector = inspector_panel.Inspector;
+pub const inspector = inspector_panel;
 pub const PointerArea = pointer_controls.PointerArea;
 pub const PointerButton = pointer_controls.Button;
 pub const AreaOptions = pointer_controls.Options;
@@ -4907,6 +4911,11 @@ pub const Options = struct {
     /// control, binding or embedded leaf handled, and every release that no
     /// focused leaf took.
     keys: ?KeyHandler = null,
+    /// Developer tools: F12 or Ctrl+Shift+I opens the inspector docked at
+    /// the right, Ctrl+Shift+C picks an element; see `inspector.zig`. The
+    /// application keeps it at a stable address, typically only in debug
+    /// builds: `if (builtin.mode == .Debug) &inspector else null`.
+    inspector: ?*Inspector = null,
 };
 
 /// The application's own key handling; see `Options.keys`. Both run on the
@@ -5128,6 +5137,7 @@ pub const Host = struct {
     fn onInput(ptr: *anyopaque, _: *ui.Context, event: z.Event) bool {
         const self: *Host = @ptrCast(@alignCast(ptr));
         if (self.building) return false;
+        if (self.options.inspector) |tools| if (self.inspectorInput(tools, event)) return true;
         switch (event) {
             .pointer_move => |point| {
                 const at: Point = .{ .x = point.x, .y = point.y };
@@ -5266,6 +5276,32 @@ pub const Host = struct {
             else => return false,
         }
     }
+    /// Input the inspector takes before the view: its keys, and the pointer
+    /// and wheel over its panel or while it picks.
+    fn inspectorInput(self: *Host, tools: *Inspector, event: z.Event) bool {
+        const was_open = tools.open;
+        var repaint = false;
+        const taken = switch (event) {
+            .key_input => |input| tools.key(input),
+            .pointer_move => |point| blk: {
+                const over = tools.pointerMove(.{ .x = point.x, .y = point.y }, &repaint);
+                if (over) {
+                    // The view's hover leaves what the panel covers.
+                    _ = self.view.pointerMoved(null);
+                    if (self.view.hoverAt(null)) repaint = true;
+                    self.view.pointer = .{ .x = point.x, .y = point.y };
+                    self.updateCursor();
+                }
+                break :blk over;
+            },
+            .pointer_down => |press| tools.pointerDown(.{ .x = press.position.x, .y = press.position.y }, press.modifiers, &repaint),
+            .pointer_up => |release| tools.pointerUp(.{ .x = release.position.x, .y = release.position.y }),
+            .wheel => |value| tools.wheel(.{ .x = value.position.x, .y = value.position.y }, .{ .x = value.delta.x, .y = value.delta.y }),
+            else => false,
+        };
+        if (taken or repaint or tools.open != was_open) self.invalidate();
+        return taken;
+    }
     /// Releases go to the focused embedded leaf only.
     fn onKeyRelease(ptr: *anyopaque, _: *ui.Context, input: z.KeyInput) void {
         const self: *Host = @ptrCast(@alignCast(ptr));
@@ -5298,7 +5334,8 @@ pub const Host = struct {
         const window = self.context.window orelse return;
         if (self.view.area_press != null or self.view.capture != null) return;
         const point = self.view.pointer orelse return;
-        window.setCursor(self.view.cursorAt(point)) catch {};
+        const tools = if (self.options.inspector) |value| value.cursorAt(point) else null;
+        window.setCursor(tools orelse self.view.cursorAt(point)) catch {};
     }
     /// Deliver what a pointer area learned, if anything; true when one did.
     fn deliverArea(self: *Host, event: ?Event) bool {
@@ -5362,12 +5399,25 @@ pub const Host = struct {
         self.frames += 1;
     }
     fn render(self: *Host, frame: *ui.Frame, theme: Theme) anyerror!void {
-        try self.pass(null);
-        try self.view.arrange(frame.sourceBounds(), theme, self.options.measurer);
+        var lap = if (self.options.inspector) |tools| if (tools.open) std.time.Timer.start() catch null else null else null;
+        const built: u64 = blk: {
+            if (self.options.inspector) |tools| self.view.layout_direction = tools.direction_override orelse self.options.direction;
+            try self.pass(null);
+            break :blk if (lap) |*timer| timer.lap() else 0;
+        };
+        const whole = frame.sourceBounds();
+        const content = if (self.options.inspector) |tools| tools.contentBounds(whole) else whole;
+        try self.view.arrange(content, theme, self.options.measurer);
+        const laid = if (lap) |*timer| timer.lap() else 0;
         try self.view.paint(frame);
         for (self.view.nodes()) |*node| {
-            const content = node.embed orelse continue;
-            if (content.place) |place| place(content.context, node.id, node.bounds);
+            const embed = node.embed orelse continue;
+            if (embed.place) |place| place(embed.context, node.id, node.bounds);
+        }
+        if (self.options.inspector) |tools| {
+            tools.capture(&self.view, self.context.input_state.focused, self.options.measurer, theme);
+            try tools.paint(frame);
+            tools.frameTimes(built, laid, if (lap) |*timer| timer.lap() else 0);
         }
         // What lies under a still pointer may have changed shape or moved;
         // the next pass that builds the areas sees it.
@@ -5937,6 +5987,7 @@ test {
     _ = @import("direction.zig");
     _ = @import("navigation_tests.zig");
     _ = @import("pointer_tests.zig");
+    _ = @import("inspector_tests.zig");
 }
 
 test "embedded leaves measure themselves and paint in order" {
