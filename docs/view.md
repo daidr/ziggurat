@@ -218,6 +218,78 @@ try v.end();
 
 启用 `-Daccessibility=true` 时，Windows UIA 把可编辑组合框映射为 ComboBox / ExpandCollapse，展开按钮为不取焦点的 Button；标记输入框为 List（LocalizedControlType 为 "token field"），标记为 ListItem（"token"），各带一个名为 "Remove" 的按钮。
 
+### 对话框、警告对话框与表单页
+
+- `dialog(&open, options, style)` 与 `end` 配对，开始一个浮在整个窗口上的对话框，返回 `DialogState`：`.open` 时构建内容，`.dismissed` 表示 Escape 或按下遮罩在这一遍把 `open` 清除，其余为 `.closed`；无论返回什么都要 `end`。`DialogOptions` 有 `role`（`.dialog` 或 `.alert`）、`position`（`.center` 居中，`.top` 贴着窗口顶边）、`dismiss_on_escape`、`dismiss_on_scrim`（警告对话框总是忽略）与 `description`。名称取 `Style.name`；内边距默认 16 DIP、间距 12 DIP；宽度在窗口有余地时至少为 `view.dialog_min_width`（320 DIP），并与窗口边缘保持 `view.dialog_margin`（24 DIP）。`sheet(&open, options, style)` 是 `position = .top` 的同一控件。
+- 显示期间窗口其余部分画上半透明遮罩，并且不接收按下、按键和焦点：其中的命中区仍然遮挡指针但被禁用，语义节点报告为禁用，因此 Tab 与 Shift+Tab 只在对话框内循环；滚轮、悬停与按键绑定也只到达对话框内部。在遮罩上按下先关闭对话框里打开的列表或浮层，再按 `dismiss_on_scrim` 关闭对话框，按下本身不会传到下面。对话框外的浮层与通知仍会绘制，但同样不接收输入。
+- 打开时焦点移到对话框中第一个可聚焦的控件；内容中调用 `v.initialFocus()` 可改为刚加入的节点。无论怎样关闭（Escape、遮罩、构建清除 `open`、或不再构建），焦点都回到打开时持有焦点的控件。对话框不能放在弹出列表、浮层或另一个对话框里（`NotContainer`），里面可以有组合框、建议列表、浮层与通知。同一时间只显示一个对话框，另一个尚在显示时打开新的返回 `Busy`。
+- `alertDialog(&open, alert, style)` 是一个完整的警告对话框：标题、可选的消息和一行回应按钮。`Alert.default` 是打开时取得焦点的按钮，`Alert.cancel` 是 Escape 给出的回应（为 null 时 Escape 不起作用）；按下按钮或 Escape 清除 `open` 并返回该按钮的序号，其余时候返回 null。它自己 `end`，不需要再调用。
+
+```zig
+if (try v.button("删除…", .{})) confirm = true;
+if (try v.alertDialog(&confirm, .{ .title = "删除文件？", .message = "此操作无法撤销。", .buttons = &.{ "取消", "删除" }, .default = 0, .cancel = 0 }, .{})) |answer| {
+    if (answer == 1) try remove(current);
+}
+if (try v.dialog(&settings_open, .{ .description = "选择文件的打开方式" }, .{ .name = "设置" }) == .open) {
+    _ = try v.checkbox(&prefs.autosave, "自动保存", .{});
+    if (try v.button("完成", .{})) settings_open = false;
+}
+try v.end();
+```
+
+启用 `-Daccessibility=true` 时，Windows UIA 把对话框映射为报告 IsDialog 的 Pane，LocalizedControlType 为 "dialog" 或 "alert dialog"，名称与说明来自 `Style.name` 与 `description`。
+
+### 侧边栏
+
+- `sidebar(&selection, style)` 与 `end` 配对开始一个导航侧边栏，它就是一棵树：选择由应用持有的 `Selection`（通常为单选）按条目 ID 记录。`sidebarSection(id, title, expanded, style)` 加入一个分区标题，`expanded` 为 null 表示总是展开；返回 true 时在它之后构建条目，无论返回什么都要 `end`。`sidebarItem(id, label, options, style)` 加入一个条目，`SidebarItemOptions` 有 `icon`（`ImageView`，画在缩进之后、标签之前）与 `badge`（画在行尾的计数或短状态，并作为说明播报）；按下、方向键或 Enter 选中它的那一遍返回 true。标题和条目的 ID 在同一个侧边栏内唯一。
+- 键盘沿用树的规则并有三点不同：Up/Down、Home/End 到达标题时只移动焦点行而不选中；Space 或 Enter 在标题上切换展开；字母或数字移到下一个（循环）标签以它开头的行。按下标题切换展开，Left 从条目回到所属标题，Right 展开标题。标题文字以弱化颜色绘制。
+- 侧边栏没有默认背景，用 `Style.background` 或 `Style.material` 与内容区分；条目很多时放进 `scroll` 容器。
+
+```zig
+try v.sidebar(&selection, .{ .name = "位置", .width = 220, .background = 0xf4f6f8 });
+if (try v.sidebarSection(1, "资料库", &library_open, .{})) {
+    if (try v.sidebarItem(10, "收件箱", .{ .icon = inbox_icon, .badge = unread_text }, .{})) show(.inbox);
+    if (try v.sidebarItem(11, "草稿", .{}, .{})) show(.drafts);
+}
+try v.end();
+try v.end();
+```
+
+启用 `-Daccessibility=true` 时，Windows UIA 把侧边栏映射为 Tree / Selection，标题与条目都是 TreeItem，标题报告 ExpandCollapse。
+
+### 可编辑文本
+
+- `editableText(&state, value, input, options, style)` 平时显示 `value`，像按钮一样接收按下、Enter、Space 与 F2，开始编辑后由 `input`（通常是 `ziggurat_view_text` 的 `TextField` 的 `embed()`）取代并获得焦点。返回 `Edit`：`.begin` 时应用把当前文本载入输入，`.commit`（Enter 或焦点离开输入）时把输入的文本写回，`.cancel`（Escape）时保留原文本；其余时候返回 null。结束后焦点回到标签，除非它已经移到别处。
+- `EditableText` 由应用持有并保持地址稳定。`EditableOptions` 有 `hint`（作为标签的提示和说明，例如 "按 Enter 或 F2 重命名"）与 `placeholder`（值为空时显示）。标签以 `value` 命名，`Style.name` 命名输入；兄弟节点会变化时给它 `Style.key`。
+- 输入法组合期间 Enter 与 Escape 留给输入法，需要 `Embed.status` 报告 `composing`（`TextField` 已实现）。
+
+启用 `-Daccessibility=true` 时，标签是以文字命名的 Button，输入是 TextField 自己的 Edit。
+
+### 查找栏
+
+- `findBar(&bar, input, matches, texts, style)` 在 `bar.open` 为 true 时显示一个名为 "Find" 的工具栏：查询输入（通常是 `TextField`）、当前位置（"2 of 7"，没有结果时显示 "No results"，输入为空时不显示）、上一个与下一个按钮（没有匹配时禁用）、"Match case" 与 "Whole word" 复选框和 "Done" 按钮。返回本遍的 `FindEvent`：`.opened`、`.next`、`.previous`、`.options`（`case_sensitive` 或 `whole_word` 变化，需要重新搜索）或 `.closed`；其余时候返回 null。
+- 查询、搜索和匹配都由应用持有：`FindMatches` 给出 `count` 与 `current`，`step(forward)` 计算前进或后退（循环）后的序号。查询变化由应用从输入自己得知。输入里 Enter 前进、Shift+Enter 后退；整个窗口内 F3 与 Shift+F3 相同，栏关闭时 F3 打开它；栏内任一控件上的 Escape 或 "Done" 关闭它。打开时焦点移到输入，关闭后回到打开前的控件。位置变化时播报新的位置文字。`FindTexts` 提供所有可见文字，用于本地化。
+- 与 `ziggurat_document_diff_view` 的查找对接时，`.next`/`.previous` 对应 `Options.direction` 的 `.next`/`.previous`，`case_sensitive` 对应 `Case.exact`，否则为 `.ascii_insensitive`；那里的查找没有整词选项，也不给出匹配总数，整词与计数由应用自行处理。
+
+```zig
+if (try v.findBar(&find, query_field.embed(), matches, .{}, .{ .key = 1 })) |event| switch (event) {
+    .next, .previous => matches.current = matches.step(event == .next),
+    .options, .opened => try research(),
+    .closed => {},
+};
+```
+
+### 三态复选框与复选框组
+
+- `checkboxState(&state, label, style)` 绑定一个 `CheckState`（`unchecked`、`checked`、`mixed`）。部分选中画成短横线；激活时未选中或部分选中变为选中，选中变为未选中，返回 true。只有应用会设为 `mixed`。`CheckState.of(values)` 从一组布尔值求出状态。
+- `checkboxGroup(label, items, style)` 构建一个总复选框，以及其下缩进 30 DIP 的 `CheckboxItem` 复选框（各绑定一个布尔值，可单独禁用）。总复选框的状态由子项派生：全部选中为选中，全部未选中为未选中，否则为部分选中；激活它时，除非所有启用的子项都已选中（此时全部取消），否则把它们全部选中。任何值变化时返回 true。
+
+启用 `-Daccessibility=true` 时，部分选中的复选框在 UIA 上报告 ToggleState Indeterminate。
+
+### 按键绑定
+
+`bindKey(chord, window, action)` 把一个 `ui.widgets.Chord` 绑定到动作 id：`window` 为 false 时只在刚加入的节点持有焦点时生效，为 true 时在整个窗口生效。按下时以 `.action = action` 在单独的一遍交付，由构建用 `takeEvent(action)` 取走，先于任何控件看到这个键。焦点上的绑定优先于窗口绑定，先绑定的优先；打开的弹出列表先处理按键，焦点上的绑定先于浮层与对话框的 Escape。焦点输入正在组合时忽略，对话框显示时只有其中的绑定生效。绑定每一遍都要重新建立，每帧最多 `view.max_key_bindings`（32）个。上面的可编辑文本和查找栏都用它实现。
+
 ## 嵌入与文本输入
 
 `embed(content, style)` 加入一个自己测量、放置和绘制的叶子，用于视图层不建模的内容。`Embed` 提供：
@@ -297,7 +369,7 @@ try h.change(.{ .kind = .slider }, .{ .steps = 2 });
 ```
 
 - `Query` 按 `kind`、精确的 `text`（标签或文本内容）、`name`（`Style.name`）和 `key` 匹配，所有给出的字段都必须相符。匹配多于一个返回 `Ambiguous`，用 `nth` 按构建顺序选其中之一；没有匹配返回 `NotFound`。`find` 返回节点，`count` 返回匹配数。
-- `click` 只接受按钮、链接、复选框、开关、单选、分段、标签和折叠区；`change` 只接受滑块、步进器和分栏，`ValueChange` 与原生输入相同；`scroll(query, delta)` 只接受滚动容器，`wheel(x, y, delta)` 像 Host 一样把滚轮交给该点最内层的可见滚动容器。目标禁用返回 `Disabled`，被自身尺寸或任一裁剪祖先完全遮住返回 `Hidden`，种类不符返回 `NotActivatable` 或 `NotAdjustable`。
+- `click` 只接受按钮、链接、复选框、开关、单选、分段、标签和折叠区；`change` 只接受滑块、步进器和分栏，`ValueChange` 与原生输入相同；`scroll(query, delta)` 只接受滚动容器，`wheel(x, y, delta)` 像 Host 一样把滚轮交给该点最内层的可见滚动容器。目标禁用返回 `Disabled`，被自身尺寸或任一裁剪祖先完全遮住返回 `Hidden`，位于显示中的对话框之外返回 `Inert`，种类不符返回 `NotActivatable` 或 `NotAdjustable`。
 - 事件遍若没有控件消费该事件（构建已不再产生这个节点），返回 `Stale`，不会静默忽略。成功的事件之后自动重新渲染，节点与 `frames` 反映新状态。
 - `at(x, y)` 返回该点最后绘制的可交互节点，尊重裁剪；`clickAt` 激活它。`visible(node)` 给出裁剪后的可见矩形，`view.divider(node)` 给出分栏的分隔条矩形。
 - `write(writer)` 输出缩进的树大纲（种类、文本、名称、选中或数值、禁用、取整后的边界），适合与期望文本比较。
@@ -314,7 +386,7 @@ _ = try h.key(.{ .key = .down });
 try std.testing.expectEqualStrings("Sans", h.focused().?.text);
 ```
 
-- 时间与浮层：`advance(ns)` 推进测试时钟并重新渲染，`deadline()` 返回上一遍请求的唤醒时刻；`hover(query)`、`hoverAt(x, y)` 与 `leave()` 移动或移走指针，`tooltip()` 返回当前显示的提示文字；`focus(query)` 直接给节点焦点。`key` 先把按键交给打开的列表或显示的提示，`clickAt` 先让按下经过列表与提示的处理，`at` 先查浮在上面的列表和通知。`write` 的大纲带出列表的打开/关闭、高亮项与提示文字。
+- 时间与浮层：`advance(ns)` 推进测试时钟并重新渲染，`deadline()` 返回上一遍请求的唤醒时刻；`hover(query)`、`hoverAt(x, y)` 与 `leave()` 移动或移走指针，`tooltip()` 返回当前显示的提示文字；`focus(query)` 直接给节点焦点。`key` 先把按键交给打开的列表、按键绑定、对话框或显示的提示，`clickAt` 先让按下经过列表、对话框遮罩与提示的处理，`at` 先查浮在上面的列表、对话框和通知，并跳过对话框之外的节点。渲染遍要求的焦点（例如刚打开的对话框里的第一个控件）在渲染后给出，与 Host 在绘制后给出相同。`click` 也接受可编辑文本的标签。`write` 的大纲带出对话框的打开/关闭、复选框的部分选中，以及侧边栏的标题与徽标。`write` 的大纲带出列表的打开/关闭、高亮项与提示文字。
 
 - 指针：`press(x, y, modifiers)`、`moveTo(x, y)`、`release(x, y)` 与 `cancelPointer()` 按 Host 相同的捕获规则重放一次按下，`drag(from_x, from_y, to_x, to_y, steps)` 把它们连起来；`systemDragOver(point, files, text)` 与 `systemDrop(point, data)` 模拟其他应用的拖放。
 
@@ -359,4 +431,4 @@ if (try v.presentColumn(&state.panel, state.open, .{ .hidden = .{ .y = 12, .scal
 
 ## 当前范围
 
-已提供列、行、网格、纵向滚动容器、浮层与弹出字段、标签页、分栏、工具栏、分段控件、折叠区、手风琴、面包屑、列表框、树、表格、组合框、可编辑组合框、建议列表、标记输入框、搜索区域、表单字段与字段集、链接、徽标、度量条、评分、导航按钮、头像、提示、通知、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子（通过 `ziggurat_view_text`）可编辑文本字段，以及（通过 `ziggurat_view_pickers`）日历、日期/时间/数字输入与颜色选择器。分栏只接受比例偏好，没有 DIP 偏好、从右到左布局和折叠；工具栏没有溢出菜单。只读组合框不按输入筛选；建议列表与可编辑组合框的筛选由应用完成；表格没有列宽拖动、列重排、冻结列和行头，排序由应用完成；树与表格不做虚拟化，也没有行内编辑；树不能拖动重排，重排一次只移动一项，拖动边缘的自动滚动只随指针移动发生；悬停只用于提示，控件本身没有悬停外观；通知没有进出动画。没有虚拟列表和通用动画；玻璃没有按压放大动效。需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。Linux 没有普通控件的 AT-SPI 层，上述可访问性只在 Windows UIA 上提供。
+已提供列、行、网格、纵向滚动容器、浮层与弹出字段、对话框、警告对话框与表单页、侧边栏、可编辑文本、查找栏、三态复选框与复选框组、按键绑定、标签页、分栏、工具栏、分段控件、折叠区、手风琴、面包屑、列表框、树、表格、组合框、可编辑组合框、建议列表、标记输入框、搜索区域、表单字段与字段集、链接、徽标、度量条、评分、导航按钮、头像、提示、通知、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子（通过 `ziggurat_view_text`）可编辑文本字段，以及（通过 `ziggurat_view_pickers`）日历、日期/时间/数字输入与颜色选择器。分栏只接受比例偏好，没有 DIP 偏好、从右到左布局和折叠；工具栏没有溢出菜单。只读组合框不按输入筛选；建议列表与可编辑组合框的筛选由应用完成；表格没有列宽拖动、列重排、冻结列和行头，排序由应用完成；树与表格不做虚拟化，也没有行内编辑；树不能拖动重排，重排一次只移动一项，拖动边缘的自动滚动只随指针移动发生；悬停只用于提示，控件本身没有悬停外观；通知没有进出动画；对话框没有进出动画，一次只显示一个，也不能拖动或改变大小；可编辑文本单击即开始编辑；查找栏不自己搜索，也不高亮匹配；侧边栏的选中行在失去焦点时外观不变。没有虚拟列表和通用动画；玻璃没有按压放大动效。需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。Linux 没有普通控件的 AT-SPI 层，上述可访问性只在 Windows UIA 上提供。
