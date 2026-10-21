@@ -1,0 +1,5 @@
+{
+  "name": "watch",
+  "package": "@ziggurat/plugin-watch",
+  "libraries": []
+}

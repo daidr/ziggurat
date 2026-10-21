@@ -5,6 +5,7 @@
 const std = @import("std");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
+const animation = @import("ziggurat_animation");
 
 pub const layout = ui.layout;
 pub const Rect = ui.Rect;
@@ -111,6 +112,60 @@ pub const Style = struct {
     /// Scroll edge effects over the top and bottom of a clipping container,
     /// such as a scroll container, painted above its children.
     edges: Edges = .{},
+    /// Glass that bends what lies beneath a container through its rim,
+    /// painted in place of `material` and `background` once
+    /// `Host.prepareShaderEffects` has run; until then those draw.
+    refraction: ?ui.effects.Glass = null,
+    /// Opacity of the node and its descendants, composited as one layer.
+    opacity: f32 = 1,
+    /// Where the node and its descendants are drawn, moved, scaled or turned
+    /// in perspective about `pose.origin` within the node's box. Hit
+    /// testing, focus and semantics keep the arranged box.
+    pose: ?ui.effects.Pose = null,
+    /// A shader program that rewrites how the node and its descendants
+    /// draw; see `ui.Frame.beginEffect`. Opacity and pose need
+    /// `Host.prepareShaderEffects`; without it they and `effect` draw the
+    /// content as it is.
+    effect: ?ui.ShaderEffect = null,
+};
+
+/// How `View.presentColumn` brings content in and takes it out.
+pub const Transition = struct {
+    /// Pose and opacity of the content while hidden; it moves between them
+    /// and its own style.
+    hidden: ui.effects.Pose = .{ .y = 8 },
+    hidden_opacity: f32 = 0,
+    enter: animation.Motion = .{ .tween = .{ .duration_ns = 200 * std.time.ns_per_ms, .easing = .cubic_out } },
+    exit: animation.Motion = .{ .tween = .{ .duration_ns = 150 * std.time.ns_per_ms, .easing = .smoothstep } },
+    /// Enter on the first pass that shows the content, rather than appear
+    /// already in place.
+    appear: bool = true,
+};
+/// Whether content shown by `View.presentColumn` is in, coming in or going out,
+/// kept by the application at a stable address across passes.
+pub const Presence = struct {
+    channel: ?animation.Channel = null,
+    visible: bool = false,
+
+    /// Progress at `now` from 0 (hidden) to 1 (shown), retargeting when
+    /// `visible` changes. Springs may overshoot.
+    pub fn update(self: *Presence, now: u64, visible: bool, transition: Transition, reduce_motion: bool) !f64 {
+        if (self.channel == null) {
+            self.channel = try animation.Channel.init(if (visible and !transition.appear) 1 else 0);
+            self.visible = !visible;
+        }
+        const channel = &self.channel.?;
+        if (channel.reduce_motion != reduce_motion) try channel.setReducedMotion(now, reduce_motion);
+        if (visible != self.visible) {
+            self.visible = visible;
+            try channel.retarget(now, if (visible) 1 else 0, .{ .motion = if (visible) transition.enter else transition.exit });
+        }
+        return (try channel.advance(now)).value;
+    }
+    /// True while the content is coming in or going out.
+    pub fn moving(self: *const Presence) bool {
+        return if (self.channel) |channel| channel.run != null else false;
+    }
 };
 
 /// Edge effects of a clipping container; see `Style.edges`.
@@ -460,6 +515,10 @@ pub const EmbedInput = union(enum) {
     /// around it.
     wheel: PointerWheel,
     key: z.KeyInput,
+    /// A key released while the leaf holds focus, whether or not it took
+    /// the press; releases of keys pressed while the window lacked the
+    /// keyboard never come. Leaves that only edit can ignore it.
+    key_up: z.KeyInput,
 };
 
 /// How far a press moves, in DIP, before it drags.
@@ -960,9 +1019,16 @@ pub const View = struct {
     /// A control the host should focus after this pass, such as a combo box
     /// whose list just closed.
     restore: ?u64 = null,
+    /// A leaf a build asked to focus with `focusLeaf`.
+    focus_request: ?u64 = null,
+    /// The window has the keyboard, set by the host from focus events.
+    window_focused: bool = true,
     /// Hover or focus time before a tooltip appears, in nanoseconds.
     tooltip_delay: u64 = 500 * std.time.ns_per_ms,
     preferences: Preferences = .{},
+    /// Built-in programs for `Style.opacity`, `pose` and `refraction`, set
+    /// by `Host.prepareShaderEffects`.
+    effects: ?*const ui.effects.Library = null,
     popup: PopupState = .{},
     tip: TooltipState = .{},
     overlay: Overlay = .{},
@@ -1094,6 +1160,8 @@ pub const View = struct {
         const parent_index = self.stack[self.depth - 1];
         const parent = &self.buffers.nodes[parent_index];
         if (parent.child_count >= layout.max_items) return error.TooManyItems;
+        if (!std.math.isFinite(style.opacity) or style.opacity < 0 or style.opacity > 1) return error.InvalidValue;
+        if (style.pose) |pose| if (!pose.valid()) return error.InvalidValue;
         const index = self.len;
         var effective = style;
         effective.enabled = style.enabled and parent.style.enabled;
@@ -1156,6 +1224,23 @@ pub const View = struct {
     }
     pub fn column(self: *View, style: Style) Error!void {
         return self.begin(.column, style);
+    }
+    /// Open a column that enters while `show` and exits after it turns
+    /// false, moving between `transition.hidden` and `style`. Returns false
+    /// once the content has gone; otherwise build its children and `end`
+    /// it. Under reduced motion it appears and goes at once.
+    pub fn presentColumn(self: *View, presence: *Presence, show: bool, transition: Transition, style: Style) Error!bool {
+        if (!transition.hidden.valid() or !std.math.isFinite(transition.hidden_opacity)) return error.InvalidValue;
+        const amount = presence.update(self.now, show, transition, self.preferences.reduce_motion) catch return error.InvalidValue;
+        if (!show and !presence.moving()) return false;
+        const t: f32 = @floatCast(amount);
+        var shown = style;
+        shown.opacity = std.math.clamp(style.opacity * (transition.hidden_opacity + (1 - transition.hidden_opacity) * t), 0, 1);
+        const pose = ui.effects.Pose.mix(transition.hidden, style.pose orelse .{}, t);
+        shown.pose = if (pose.isIdentity()) null else pose;
+        try self.begin(.column, shown);
+        if (presence.moving()) if (presence.channel.?.nextWake(self.now, loading_frame_interval) catch null) |deadline| self.wakeAt(deadline);
+        return true;
     }
     pub fn row(self: *View, style: Style) Error!void {
         return self.begin(.row, style);
@@ -2812,6 +2897,21 @@ pub const View = struct {
         const entry = self.interactiveEmbed(self.focus) orelse return false;
         return entry.embed.input.?(entry.embed.context, entry.id, .{ .key = input });
     }
+    /// A key release for the focused leaf; true when it consumed it.
+    pub fn embedKeyUp(self: *View, input: z.KeyInput) bool {
+        const entry = self.interactiveEmbed(self.focus) orelse return false;
+        return entry.embed.input.?(entry.embed.context, entry.id, .{ .key_up = input });
+    }
+    /// Ask the host to give keyboard focus to the focusable embedded leaf
+    /// `id`, as its `place` or `paint` learned it, after this pass; a leaf
+    /// that is not built by then is left unfocused.
+    pub fn focusLeaf(self: *View, id: u64) void {
+        self.focus_request = id;
+    }
+    /// Node `id` holds keyboard focus and its window has the keyboard.
+    pub fn hasKeyboard(self: *const View, id: u64) bool {
+        return self.window_focused and self.focus == id;
+    }
     /// Ask assistive technology to announce `message` politely, as a status
     /// update with no visible text; longer text is cut at a character
     /// boundary. Takes effect from the next paint.
@@ -3709,15 +3809,15 @@ pub const View = struct {
     /// indices are added to `floating` when they are shown.
     fn paintRange(self: *const View, target: anytype, theme: Theme, start: usize, stop: usize, floating: *[max_floating]u32, floating_len: *usize) !void {
         const all = self.buffers.nodes[0..self.len];
-        var clips: [max_depth + 1]u32 = undefined;
-        var clip_depth: usize = 0;
+        // Clips and effects open in node order and close, innermost first,
+        // where their node's subtree ends.
+        var scopes: [3 * (max_depth + 1)]Scope = undefined;
+        var scope_depth: usize = 0;
         var at = start;
         while (at < stop) {
-            while (clip_depth > 0 and all[clips[clip_depth - 1]].end <= at) {
-                clip_depth -= 1;
-                paintEdges(&all[clips[clip_depth]], target);
-                try target.popClip();
-                paintScrollIndicator(&all[clips[clip_depth]], target, theme);
+            while (scope_depth > 0 and all[scopes[scope_depth - 1].index].end <= at) {
+                scope_depth -= 1;
+                try closeScope(&all[scopes[scope_depth].index], scopes[scope_depth].clip, target, theme);
             }
             const node = &all[at];
             if (node.floats()) {
@@ -3738,6 +3838,10 @@ pub const View = struct {
             }
             const bounds = node.bounds;
             const style = node.style;
+            for (0..try self.openEffects(target, style, bounds)) |_| {
+                scopes[scope_depth] = .{ .index = @intCast(at), .clip = false };
+                scope_depth += 1;
+            }
             var control: ui.widgets.Options = .{ .enabled = style.enabled, .name = style.name, .semantic_parent = node.semantic_parent };
             const annotation = self.annotationOf(node);
             control.description = annotation.description;
@@ -3777,7 +3881,7 @@ pub const View = struct {
                         },
                         else => {},
                     }
-                    if (style.material) |material| target.backdropEffect(bounds, style.radius, material) else if (node.kind != .toast) if (style.background) |color| target.roundedRect(bounds, style.radius, ui.Color.rgb(color));
+                    if (try self.paintRefraction(target, style, bounds)) {} else if (style.material) |material| target.backdropEffect(bounds, style.radius, material) else if (node.kind != .toast) if (style.background) |color| target.roundedRect(bounds, style.radius, ui.Color.rgb(color));
                     if (style.border) |color| target.strokeRect(bounds, style.radius, style.border_width, ui.Color.rgb(color));
                     if (node.kind == .breadcrumbs) self.paintSeparators(node, target, theme);
                     if (node.kind == .split) {
@@ -3787,8 +3891,8 @@ pub const View = struct {
                     }
                     if (node.clips() and node.child_count > 0) {
                         try target.pushClip(bounds);
-                        clips[clip_depth] = @intCast(at);
-                        clip_depth += 1;
+                        scopes[scope_depth] = .{ .index = @intCast(at), .clip = true };
+                        scope_depth += 1;
                     }
                 },
                 .text => target.labelFont(bounds, node.text, style.color orelse if (!style.enabled) theme.palette.disabled_text else if (node.row != none and all[node.row].checked) theme.palette.on_accent else theme.palette.text, style.font orelse .{}),
@@ -3861,12 +3965,51 @@ pub const View = struct {
             }
             at += 1;
         }
-        while (clip_depth > 0) {
-            clip_depth -= 1;
-            paintEdges(&all[clips[clip_depth]], target);
-            try target.popClip();
-            paintScrollIndicator(&all[clips[clip_depth]], target, theme);
+        while (scope_depth > 0) {
+            scope_depth -= 1;
+            try closeScope(&all[scopes[scope_depth].index], scopes[scope_depth].clip, target, theme);
         }
+    }
+    const Scope = struct { index: u32, clip: bool };
+    fn closeScope(node: *const Node, clip: bool, target: anytype, theme: Theme) !void {
+        if (!clip) return target.endEffect();
+        paintEdges(node, target);
+        try target.popClip();
+        paintScrollIndicator(node, target, theme);
+    }
+    /// Open the pose, effect and opacity of a node, outermost first, and
+    /// return how many opened. Opacity applies to the outermost one.
+    fn openEffects(self: *const View, target: anytype, style: Style, bounds: Rect) !usize {
+        var alpha: u8 = @intFromFloat(@round(style.opacity * 255));
+        if (style.pose == null and style.effect == null and alpha == 255) return 0;
+        var count: usize = 0;
+        if (self.effects) |library| if (style.pose) |pose| {
+            var values: ui.shader.Values = undefined;
+            if (try library.pose(&values, pose, .{ bounds.width, bounds.height })) |effect| {
+                try target.beginEffect(bounds, effect, .{ .opacity = alpha });
+                alpha = 255;
+                count += 1;
+            } else if (!pose.isIdentity()) alpha = 0; // Flattened to nothing.
+        };
+        if (style.effect) |effect| {
+            try target.beginEffect(bounds, effect, .{ .opacity = alpha });
+            alpha = 255;
+            count += 1;
+        }
+        if (alpha != 255) if (self.effects) |library| {
+            try target.beginEffect(bounds, library.passthrough(), .{ .opacity = alpha });
+            count += 1;
+        };
+        return count;
+    }
+    /// Paint a container's refraction, true when it replaces the fill.
+    fn paintRefraction(self: *const View, target: anytype, style: Style, bounds: Rect) !bool {
+        const glass = style.refraction orelse return false;
+        const library = self.effects orelse return false;
+        if (self.preferences.reduce_transparency or self.preferences.high_contrast) return false;
+        var values: ui.shader.Values = undefined;
+        target.backdropShader(bounds, style.radius, try library.glass(&values, glass, style.radius));
+        return true;
     }
 
     /// Row options of a tree or table row from its collection.
@@ -4184,6 +4327,15 @@ pub const Host = struct {
     pub fn prepareBackdropEffects(self: *Host, allocator: std.mem.Allocator, options: ui.backdrop_effects.Options) !void {
         try self.context.prepareBackdropEffects(allocator, options);
     }
+    /// Allocate the workspace that shader effects run in (see
+    /// `ui.Context.prepareShaderEffects`) and draw `Style.opacity`, `pose`
+    /// and `refraction` with `library`, which the application keeps alive
+    /// while the host is attached. Call after `attach`; refraction also
+    /// needs `prepareBackdropEffects`.
+    pub fn prepareShaderEffects(self: *Host, allocator: std.mem.Allocator, library: *const ui.effects.Library, options: ui.shader_effects.Options) !void {
+        try self.context.prepareShaderEffects(allocator, options);
+        self.view.effects = library;
+    }
     /// Called by the scheduler when the deadline it was given has passed.
     pub fn wakeFired(self: *Host) void {
         self.scheduled = null;
@@ -4194,6 +4346,7 @@ pub const Host = struct {
         self.context.state = self;
         self.context.on_value = onValue;
         self.context.on_input = onInput;
+        self.context.on_key_release = onKeyRelease;
         try self.context.attach(window);
     }
 
@@ -4218,6 +4371,10 @@ pub const Host = struct {
     /// Return focus where the last pass or route asked, such as to a combo
     /// box whose list closed.
     fn restoreFocus(self: *Host) void {
+        if (self.view.restore == null) {
+            self.view.restore = self.view.focus_request;
+        }
+        self.view.focus_request = null;
         const id = self.view.restore orelse return;
         self.view.restore = null;
         if (self.context.input_state.focused == id) return;
@@ -4231,6 +4388,14 @@ pub const Host = struct {
     fn focus(self: *Host, id: u64) void {
         self.context.focusControl(id) catch |err| switch (err) {
             error.NotAttached => self.context.input_state.setFocused(id),
+            // The system kept another window in front, as Windows does for
+            // a process without the foreground. The move is the window's
+            // own, so the control still takes its focus, which keys reach
+            // once the window is activated.
+            error.FocusDenied => {
+                if (self.context.input_state.available(id)) self.context.input_state.setFocused(id);
+                self.invalidate();
+            },
             else => self.last_error = err,
         };
     }
@@ -4315,6 +4480,8 @@ pub const Host = struct {
             .focus => |focused| {
                 // A window that loses focus leaves no tooltip behind, and
                 // loses the press it followed.
+                self.view.window_focused = focused;
+                self.invalidate();
                 if (!focused) {
                     _ = self.apply(self.view.captureCancel());
                     const hover = self.view.hoverAt(null);
@@ -4364,6 +4531,13 @@ pub const Host = struct {
             },
             else => return false,
         }
+    }
+    /// Releases go to the focused embedded leaf only.
+    fn onKeyRelease(ptr: *anyopaque, _: *ui.Context, input: z.KeyInput) void {
+        const self: *Host = @ptrCast(@alignCast(ptr));
+        if (self.building) return;
+        self.view.focus = self.context.input_state.focused;
+        if (self.view.embedKeyUp(input)) self.settleEmbed(null);
     }
     /// Apply what the view did with pointer input; true when it took it.
     fn apply(self: *Host, result: PointerResult) bool {
@@ -4420,6 +4594,10 @@ pub const Host = struct {
             if (content.place) |place| place(content.context, node.id, node.bounds);
         }
         self.requestWake();
+        if (self.view.focus_request) |id| {
+            self.view.focus_request = null;
+            if (self.context.input_state.focused != id) self.pending_focus = id;
+        }
         if (self.pending_focus != null and !self.focus_queued) if (self.context.window) |window| {
             if (window.app.post(.{ .context = self, .call = focusTask })) |_| {
                 self.focus_queued = true;
@@ -4458,6 +4636,9 @@ const Recorder = struct {
     max_clip_depth: usize = 0,
     fills: usize = 0,
     effects: usize = 0,
+    opened_effects: [16]struct { margin: f32, opacity: u8 } = undefined,
+    effect_depth: usize = 0,
+    effect_count: usize = 0,
     chooser: u64 = 0,
     tooltip_id: u64 = 0,
     fn push(self: *Recorder, kind: Kind, id: u64, bounds: Rect, checked: bool) void {
@@ -4475,6 +4656,18 @@ const Recorder = struct {
     }
     pub fn backdropEffect(self: *Recorder, _: Rect, _: f32, _: ui.BackdropEffect) void {
         self.effects += 1;
+    }
+    pub fn backdropShader(self: *Recorder, _: Rect, _: f32, _: ui.ShaderEffect) void {
+        self.effects += 1;
+    }
+    pub fn beginEffect(self: *Recorder, _: Rect, effect: ui.ShaderEffect, options: ui.EffectOptions) !void {
+        self.opened_effects[self.effect_count] = .{ .margin = effect.margin, .opacity = options.opacity };
+        self.effect_depth += 1;
+        self.effect_count += 1;
+    }
+    pub fn endEffect(self: *Recorder) !void {
+        if (self.effect_depth == 0) return error.EffectStackEmpty;
+        self.effect_depth -= 1;
     }
     pub fn indicator(self: *Recorder, id: u64, bounds: Rect) !void {
         self.push(.loading, id, bounds, false);
@@ -4814,6 +5007,75 @@ test "materials replace container backgrounds and edges paint inside the clip" {
     try view.paint(&recorder);
     try std.testing.expectEqual(@as(usize, 3), recorder.effects);
     try std.testing.expectEqual(@as(usize, 0), recorder.clip_depth);
+}
+
+test "opacity, pose and effects wrap a node's subtree, closing inside out" {
+    const library = try ui.effects.Library.create(std.testing.allocator);
+    defer library.destroy();
+    var storage: Storage(16, 256) = .{};
+    var view = View.init(storage.buffers());
+    view.reset(.{}, null);
+    // Without the library only a custom effect opens.
+    try view.column(.{ .opacity = 0.5, .pose = .{ .y = 10 }, .clip = true });
+    try view.text("faded", .{ .opacity = 0.25 });
+    try view.end();
+    try view.text("tinted", .{ .effect = library.passthrough() });
+    try std.testing.expectError(error.InvalidValue, view.text("bad", .{ .opacity = 2 }));
+    try view.finish();
+    try view.arrange(.{ .x = 0, .y = 0, .width = 200, .height = 200 }, .{}, .{});
+    var recorder: Recorder = .{};
+    try view.paint(&recorder);
+    try std.testing.expectEqual(@as(usize, 1), recorder.effect_count);
+    view.effects = library;
+    recorder = .{};
+    try view.paint(&recorder);
+    // The column's pose carries its opacity; the faded text and the tinted
+    // one open one effect each.
+    try std.testing.expectEqual(@as(usize, 3), recorder.effect_count);
+    try std.testing.expectEqual(@as(u8, 128), recorder.opened_effects[0].opacity);
+    try std.testing.expectEqual(@as(f32, 10), recorder.opened_effects[0].margin);
+    try std.testing.expectEqual(@as(u8, 64), recorder.opened_effects[1].opacity);
+    try std.testing.expectEqual(@as(usize, 0), recorder.effect_depth);
+    try std.testing.expectEqual(@as(usize, 0), recorder.clip_depth);
+}
+
+test "presentColumn enters, exits and asks for frames only while moving" {
+    var storage: Storage(16, 256) = .{};
+    var view = View.init(storage.buffers());
+    var presence: Presence = .{};
+    const transition: Transition = .{ .enter = .{ .tween = .{ .duration_ns = 100, .easing = .linear } }, .exit = .{ .tween = .{ .duration_ns = 100, .easing = .linear } } };
+    const Pass = struct {
+        fn run(v: *View, p: *Presence, t: Transition, now: u64, visible: bool) !bool {
+            v.reset(.{}, null);
+            v.now = now;
+            const shown = try v.presentColumn(p, visible, t, .{});
+            if (shown) {
+                try v.text("panel", .{});
+                try v.end();
+            }
+            try v.finish();
+            return shown;
+        }
+    };
+    try std.testing.expect(try Pass.run(&view, &presence, transition, 1000, true));
+    try std.testing.expectEqual(@as(f32, 0), view.nodes()[1].style.opacity);
+    try std.testing.expect(view.wake != null);
+    try std.testing.expect(try Pass.run(&view, &presence, transition, 1050, true));
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), view.nodes()[1].style.opacity, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 4), view.nodes()[1].style.pose.?.y, 1e-6);
+    try std.testing.expect(try Pass.run(&view, &presence, transition, 1100, true));
+    try std.testing.expectEqual(@as(f32, 1), view.nodes()[1].style.opacity);
+    try std.testing.expect(view.nodes()[1].style.pose == null);
+    try std.testing.expectEqual(@as(?u64, null), view.wake);
+    // Exiting keeps the content until the motion ends.
+    try std.testing.expect(try Pass.run(&view, &presence, transition, 2000, false));
+    try std.testing.expect(try Pass.run(&view, &presence, transition, 2050, false));
+    try std.testing.expect(!try Pass.run(&view, &presence, transition, 2100, false));
+    // Reduced motion shows the content at once.
+    view.preferences.reduce_motion = true;
+    try std.testing.expect(try Pass.run(&view, &presence, transition, 3000, true));
+    try std.testing.expectEqual(@as(f32, 1), view.nodes()[1].style.opacity);
+    try std.testing.expectEqual(@as(?u64, null), view.wake);
 }
 
 test "explicit sizes and paint order with balanced clips" {

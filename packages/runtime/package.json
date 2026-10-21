@@ -1,0 +1,19 @@
+{
+  "name": "@ziggurat/runtime",
+  "version": "0.1.0-dev",
+  "description": "The page side of the Ziggurat page runtime: window controls, locale, preferences, page i18n and plugin connections",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts",
+    "./i18n": "./src/i18n.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p ."
+  }
+}

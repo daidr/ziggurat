@@ -1,6 +1,6 @@
 # 可选代码编辑服务
 
-`ziggurat_code_editor` 在同一个 `Document` 和 `document_editor.Adapter` 上组合请求、诊断、悬浮提示与补全。它不创建第二份文本、选区或 undo，不启动线程，不连接语言服务器。实际分析由宿主实现，可以同步调用，也可以使用宿主自己的 worker 和 `App.post`。
+`ziggurat_code_editor` 在同一个 `Document` 和 `document_editor.Adapter` 上组合请求、诊断、悬浮提示与补全；语法高亮、多光标、括号匹配与变更标记见[语法高亮、多光标与变更标记](code-syntax.md)。它不创建第二份文本、选区或 undo，不启动线程，不连接语言服务器。实际分析由宿主实现，可以同步调用，也可以使用宿主自己的 worker 和 `App.post`。
 
 ## 请求与交付寿命
 

@@ -23,10 +23,21 @@ pub const CompletionChoice = presentation.CompletionChoice;
 pub const CompletionRefinement = presentation.CompletionRefinement;
 pub const CompletionDetailsOptions = presentation.CompletionDetailsOptions;
 pub const snippets = @import("snippet.zig");
+/// Line tokenizers, languages, token themes, bracket matching and word
+/// searches, without native dependencies.
+pub const syntax = @import("ziggurat_code_syntax");
+pub const highlight = @import("highlight.zig");
+pub const Highlighting = highlight.Highlighting;
+pub const DocumentLines = highlight.DocumentLines;
+pub const multicursor = @import("multicursor.zig");
+pub const MultiCursor = multicursor.Commands;
+pub const git_gutter = @import("git_gutter.zig");
+pub const GitGutter = git_gutter.GitGutter;
 
 test {
     _ = results;
     _ = requests;
     _ = snippets;
     _ = @import("completion_details.zig");
+    _ = @import("editing_tests.zig");
 }

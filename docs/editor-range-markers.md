@@ -5,7 +5,7 @@ paint-only 标记集合。`RangeMarker.range` 是唯一 Document 的 committed U
 半开字节范围；版本来自 `Document.committedTextVersion()`。Adapter 不拥有第二份
 正文、选区或 undo，也不为编辑后的范围猜测新归属。
 
-每项包含 `range`、`kind`（`background` 或 `underline`）、24 位 RGB `color` 和
+每项包含 `range`、`kind`（`background`、`underline` 或 `foreground`）、24 位 RGB `color` 和
 `thickness`。范围必须非空，端点必须是有效 UTF-8 边界，不能超出文档。字素内部的
 合法 UTF-8 边界按已有范围几何规则扩展到完整系统 advance cell。集合按 start 非递减；
 允许相交、嵌套、重复范围与相同起点，保留调用者次序。定义借用至方法返回，成功后
@@ -15,6 +15,13 @@ Adapter 独立拥有副本和 prefix-max-end 索引。空集合显式清空；�
 glyph ink。厚度是布局 DIP，必须有限且在 `(0,16]`，实际不超过 cell 高度。
 背景忽略厚度，但所有定义仍验证该字段。先从未裁剪 cell 的底边计算装饰，再裁剪；
 滚动只显示 cell 上半部时不会在视口边缘制造新的下划线。
+
+`foreground` 把范围内的正文改用 `color` 绘制，供语法高亮使用。prepare 为每个含
+前景标记的可见 run 生成文字裁剪区：标记矩形取标记颜色，其余部分按矩形边缘切成
+水平条带取正文颜色；draw 对每个裁剪区回放一次同一份 Prepared 文本，不重新 shape、
+不分配。重叠的前景范围会让同一段文字绘制多次，调用者应保证每个字节至多属于一个
+前景标记。裁剪区数量受 `Limits.rectangles` 的 4 倍约束，超出返回
+`RectangleCapacityExceeded`。
 
 绘制次序为段落背景、区间背景、selection、block caret、正文、区间下划线、
 composition、其余 caret。每个可见 run 内同层按定义次序覆盖；不同 run 受各自 clip

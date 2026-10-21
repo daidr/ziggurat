@@ -36,6 +36,18 @@ pub const CodeFace = struct {
     embed: *const fn (*anyopaque, md.Tree, u32) ?view.Embed,
 };
 
+/// Styled text for paragraphs, headings and table cells, such as
+/// `ziggurat_markdown_rich`, which draws emphasis, strong text, struck
+/// text and inline code in their own fonts and lines.
+pub const RichFace = struct {
+    context: *anyopaque,
+    /// An embed that shows the inline content of block `index` of `tree`
+    /// wrapped at `width` in `color`, or null to build it from view text and
+    /// links. The embed's context must stay valid while any pass that emits
+    /// it runs.
+    embed: *const fn (*anyopaque, md.Tree, u32, f32, u32) ?view.Embed,
+};
+
 pub const Options = struct {
     /// Width that paragraphs wrap at, in DIP. Nested blocks subtract their
     /// indentation from it.
@@ -54,6 +66,7 @@ pub const Options = struct {
     /// Task checkboxes the reader can toggle; otherwise they are disabled.
     interactive_tasks: bool = false,
     code: ?CodeFace = null,
+    rich: ?RichFace = null,
 };
 
 pub const Activation = union(enum) {
@@ -257,6 +270,10 @@ const Builder = struct {
     /// one node per run of one style; links stay activatable on every row
     /// they wrap onto.
     fn flow(self: *Builder, index: u32, width: f32, color: u32, font: view.Font) Error!void {
+        if (self.options.rich) |face| if (face.embed(face.context, self.tree, index, width, color)) |content| {
+            try self.v.embed(content, .{});
+            return;
+        };
         var line: Line = .{ .b = self, .width = width, .base = color, .font = font };
         try self.v.column(.{ .gap = 2 });
         var walker = self.tree.walk(index);

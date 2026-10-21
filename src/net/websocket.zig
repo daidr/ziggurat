@@ -2,7 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const Cancel = @import("cancel.zig").Cancel;
 const shutdownSocket = @import("cancel.zig").shutdownSocket;
-const guardSends = @import("cancel.zig").guardSends;
+const guard = @import("cancel.zig").guard;
 const Waker = @import("waker.zig").Waker;
 
 pub const Header = std.http.Header;
@@ -166,7 +166,7 @@ pub const Socket = struct {
             else => error.ConnectionFailed,
         };
         connection.closing = true;
-        guardSends(connection);
+        guard(connection);
         errdefer client.connection_pool.release(connection);
         if (connection.proxied) return error.UnsupportedProxy;
         const handle = connection.stream_reader.getStream().handle;
