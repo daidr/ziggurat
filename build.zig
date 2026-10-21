@@ -2790,6 +2790,7 @@ const app_examples = [_]Example{
     .{ .name = "chat-glow", .path = "examples/chat_glow.zig" },
     .{ .name = "blackhole", .path = "examples/blackhole.zig" },
     .{ .name = "wind", .path = "examples/wind.zig" },
+    .{ .name = "mayoi", .path = "examples/mayoi.zig" },
     .{ .name = "hybrid", .path = "examples/hybrid.zig", .web = true },
 };
 
