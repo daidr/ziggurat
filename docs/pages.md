@@ -417,6 +417,8 @@ App 已进入 stopping/stopped、原生窗口尚未销毁时，同样停止接�
 
 Destination 是不可复制的拥有结果，失败 post 后可在 worker `deinit`，不含 COM、不删除输出。取消不保证立即停止 Runtime I/O，也不删除部分文件；完成只表示原生传输完成，不证明文件内容安全。准备与最终内容验证由宿主管理，框架不扫描、解码、执行或打开下载文件。
 
+像浏览器那样把下载存进“下载”目录时，可组合两个辅助函数：`downloads.safeName(buffer, offer.suggested_name)` 取建议名的最后一个路径分量（`/` 和 `\` 都算分隔符），为空时用 `download`；Windows 上把文件名不能含的字符换成 `_`、去掉结尾的点和空格、给设备名加前缀 `_`，截断不拆开 UTF-8 序列。worker 上的 `downloads.uniquePath(allocator, main_thread_id, directory, name)` 在目录中已有同名文件时依次编号为 `name (2).ext`、`name (3).ext`……，返回调用者拥有的绝对路径。目录可用 `ziggurat_system` 的 `identity.directory(.downloads, &buffer)` 取得。之后照常 `Destination.prepare`，不要开 `accept_overwrite`，这样期间被其他进程占用的名字会被拒绝而不是覆盖。
+
 权限与下载的物理预算独立于逻辑槽：每附着 View 的 budget 跨 recover 保留，降低配置上限不能绕过旧对象；全进程分别最多 32 个权限 deferral 与 16 个物理下载对象。下载直到最后一次原生 event-handler Release 才返还物理槽，取消和移除事件本身不提前返还。迟到 handler 只持有原生 State/budget，不读取已 detach 的 Zig context。`actionResourceCounts()` 供诊断，不计系统 Runtime 内部资源。禁用功能不分配其 deferral 或下载 progress/state 事件对象；原有默认拒绝入口继续保留。
 
 ## 宿主持久策略

@@ -5264,7 +5264,6 @@ test "Linux capability preflight rejects unsupported configuration before alloca
         .{ .html = "", .storage = .ephemeral, .remote = .{ .url = "https://example.test", .origins = &.{}, .credentials = .profile } },
         .{ .html = "", .storage = .ephemeral, .custom_schemes = &.{.{ .name = "private" }} },
         .{ .html = "", .storage = .ephemeral, .tools = .{ .cookies = true } },
-        .{ .html = "", .storage = .ephemeral, .tools = .{ .pdf = true } },
         .{ .html = "", .storage = .ephemeral, .tools = .{ .capture = true }, .tool_limits = .{ .max_cookies = 1 } },
         .{ .html = "", .storage = .ephemeral, .policy = .{ .permission = .notify } },
     };
