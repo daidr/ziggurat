@@ -30,6 +30,8 @@ pub const backdrop_effects = commands.backdrop;
 pub const BackdropEffect = backdrop_effects.Effect;
 /// Color spaces and gamut mapping behind `Color.oklch` and `Color.displayP3`.
 pub const gamut = @import("gamut.zig");
+/// The on-disk cache of compiled GPU effect code.
+pub const shader_cache = @import("shader_cache.zig");
 /// What fills a container in place of its background, under its border and
 /// children: a backdrop effect or a look the application or a package
 /// paints (`custom`).
@@ -4140,6 +4142,7 @@ test {
     _ = gdi;
     _ = gamut;
     _ = geometry;
+    _ = shader_cache;
     _ = effects;
     _ = canvas;
     _ = frame_stats;

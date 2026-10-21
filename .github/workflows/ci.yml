@@ -109,7 +109,7 @@ jobs:
           persist-credentials: false
       - name: Native GTK/Pango dependencies
         run: |
-          sh scripts/ci-linux-deps.sh ca-certificates curl xz-utils python3 libgtk-3-dev libpango1.0-dev libicu-dev pkg-config xvfb xauth openbox x11-utils libxtst6 libatspi2.0-dev at-spi2-core dbus dbus-x11 shared-mime-info fonts-dejavu-core fonts-noto-cjk
+          sh scripts/ci-linux-deps.sh ca-certificates curl xz-utils python3 libgtk-3-dev libpango1.0-dev libicu-dev pkg-config xvfb xauth openbox x11-utils libxtst6 libatspi2.0-dev at-spi2-core dbus dbus-x11 shared-mime-info fonts-dejavu-core fonts-noto-cjk libepoxy-dev libegl-dev libgl1-mesa-dri
       - name: Install verified Zig 0.15.2
         run: |
           zig_bin=$(sh scripts/fetch-zig-linux.sh)
@@ -126,6 +126,7 @@ jobs:
           zig build smoke-audio -Doptimize=${{ matrix.optimize }}
           zig build smoke-webview-runtime-linux -Doptimize=${{ matrix.optimize }}
           zig build test-document-word-units -Doptimize=${{ matrix.optimize }}
+          zig build test-shader-gl -Doptimize=${{ matrix.optimize }}
           bash scripts/net-tls-probe.sh -Doptimize=${{ matrix.optimize }}
           NO_AT_BRIDGE=1 xvfb-run -a -s '-screen 0 1280x800x24' zig build test-linux-accessibility-host test-linux-accessibility-position smoke-accessibility-host smoke-shortcut-scopes test-document-accessibility-linux-owner smoke-document-accessibility-linux -Doptimize=${{ matrix.optimize }}
           GDK_SCALE=2 NO_AT_BRIDGE=1 xvfb-run -a -s '-screen 0 1280x800x24' zig build test-linux-accessibility-host test-linux-accessibility-position smoke-accessibility-host smoke-shortcut-scopes test-document-accessibility-linux-owner smoke-document-accessibility-linux -Doptimize=${{ matrix.optimize }}

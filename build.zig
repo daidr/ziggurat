@@ -807,6 +807,26 @@ pub fn build(b: *std.Build) void {
     const run_shader_tests = b.addRunArtifact(shader_tests);
     test_step.dependOn(&run_shader_tests.step);
     b.step("test-shader", "Run shader language, bounded execution and uniform contracts").dependOn(&run_shader_tests.step);
+    if (target.result.os.tag == .linux) {
+        // Translated programs against the CPU machine on OpenGL (Mesa
+        // draws without a GPU); needs EGL and libepoxy.
+        const gl_parity = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/shader_gpu_gl.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "ziggurat_shader", .module = shader }} }) });
+        gl_parity.root_module.addCSourceFile(.{ .file = b.path("tests/shader_gpu_gl.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        gl_parity.root_module.linkSystemLibrary("epoxy", .{});
+        check.dependOn(&gl_parity.step);
+        b.step("test-shader-gl", "Run translated shader programs on OpenGL against the CPU machine").dependOn(&b.addRunArtifact(gl_parity).step);
+    }
+    if (target.result.os.tag == .windows) {
+        // Translated programs against the CPU machine on Direct3D 11 WARP,
+        // compiled by the system's HLSL compiler.
+        const d3d_parity = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/shader_gpu_d3d.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "ziggurat_shader", .module = shader }} }) });
+        d3d_parity.root_module.addCSourceFiles(.{ .files = &.{ "tests/shader_gpu_d3d.c", "src/ui/hlsl_compile.c" }, .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        d3d_parity.root_module.linkSystemLibrary("d3d11", .{});
+        check.dependOn(&d3d_parity.step);
+        const run_d3d_parity = b.addRunArtifact(d3d_parity);
+        test_step.dependOn(&run_d3d_parity.step);
+        b.step("test-shader-d3d", "Run translated shader programs on Direct3D 11 against the CPU machine").dependOn(&run_d3d_parity.step);
+    }
     const shaped_editor = b.addModule("ziggurat_shaped_editor", .{ .root_source_file = b.path("src/ui/shaped_editor.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat", .module = core },
         .{ .name = "ziggurat_ui", .module = ui },

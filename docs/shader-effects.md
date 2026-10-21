@@ -2,7 +2,7 @@
 
 `ziggurat_shader` 是一门有界的着色语言：程序在绘制之前编译成寄存器字节码，编译时就算出每个像素最多执行多少步；`ziggurat_ui` 用它改写元素的绘制结果（元素效果）或元素下方已画好的内容（背景着色器）。在此之上，`ui.effects.Library` 提供内置的位姿/透视变换、淡出和玻璃折射程序，声明式视图把它们接成 `Style.opacity`、`Style.pose`、`Style.effect`、`Style.refraction` 与 `View.presentColumn` 进出场过渡。
 
-**范围说明**：程序只在 CPU 上逐像素解释执行。含有着色器命令的一帧在 D3D11 下与[背景效果](backdrop-effects.md)一样整帧改走软件回放（Windows GDI DIB、Linux Cairo 图像面）；没有 GPU 后端、没有 worker 编译与磁盘缓存，也没有吞吐量基准。像素正确性由单元测试与隐藏窗口 smoke 检查验证，不代表视觉质量评审。
+**范围说明**：窗口仍在 CPU 上逐像素解释执行程序。含有着色器命令的一帧在 D3D11 下与[背景效果](backdrop-effects.md)一样整帧改走软件回放（Windows GDI DIB、Linux Cairo 图像面）。`ziggurat_shader.gpu` 已能把程序翻译成 HLSL 与 GLSL，并与 CPU 逐像素对照验证（见下文“GPU 翻译”），渲染器接入在后续改动中进行；目前没有吞吐量基准。像素正确性由单元测试与隐藏窗口 smoke 检查验证，不代表视觉质量评审。
 
 ## 语言
 
@@ -127,6 +127,14 @@ try canvas.invalidate();
 
 `Canvas` 把一段命令绘制到[离屏面](offscreen.md)得到的图片中，之后每帧直接画这张图，直到应用调用 `invalidate`。被仍在记录的帧持有的图片无法关闭（`Busy`），因此在帧之间失效。`stats()` 给出重绘与复用次数。
 
+## GPU 翻译与编译缓存
+
+`shader.gpu.translate(allocator, program, .hlsl | .glsl)` 把编译好的程序翻译成 GPU 源码。翻译执行的是 CPU 机器运行的同一份寄存器字节码：每个寄存器字是一个 `uint` 变量，float/int 是它的位转换，跳转、调用与返回照原样执行；没有分支的代码直接展开，其余代码作为一个以程序静态步数为上界的基本块循环运行。整数溢出、除以零、下标越界和放不进 int 的 float 都像在 CPU 上一样让这次运行失败。
+
+生成的代码定义 `bool zs_run(vec2 position, vec4 pixel, out vec4 result)`（HLSL 为 `float2`/`float4`），失败时返回 false；`result` 是颜色程序与图层程序的颜色、扭曲程序在 `.xy` 中的读取位置。宿主在它之前定义 `uint zs_input(uint index)` 与（图层程序用的）`vec4 zs_sample(vec2 position)`。常量初始化（prologue）不翻译：宿主每次应用效果时用 `Machine.begin` 在 CPU 上运行一次，再用 `Translation.gather` 收集要上传的字——尺寸、缩放、uniform 和 prologue 算出的常量。
+
+Direct3D 用系统自带的 HLSL 编译器（`d3dcompiler_47.dll`，按需加载，O3 + IEEE 严格模式）编译翻译结果。`ui.shader_cache.DiskCache` 把字节码按“编译参数 + 完整源码”的 SHA-256 命名保存在用户缓存目录（Windows `%LOCALAPPDATA%\Ziggurat\ShaderCache`，其他系统 `$XDG_CACHE_HOME/ziggurat/shader-cache` 或 `~/.cache/ziggurat/shader-cache`），由同一用户的所有应用共享；先写临时文件再改名，读回时校验 DXBC 头并刷新修改时间，超过 32 MiB 时先删最久未用的文件。任何失败都只是不使用缓存。OpenGL 由驱动自己缓存，不使用磁盘缓存。
+
 ## 帧统计与慢帧日志
 
 `Context.setFrameStats(.{ .enabled = true, .slow_ns = 8 * std.time.ns_per_ms })` 为每帧计时：录制（build）、预检（preflight）与回放呈现（render）三段，以及命令数与是否走软件回放；`frameStats()` 返回帧数、慢帧数、平均、最近一帧与最慢一帧。超过阈值的帧通过 `std.log`（scope `ziggurat_frames`，info 级）输出一行。未显式设置时，attach 读取环境变量 `ZIGGURAT_FRAME_STATS`：`1`/`on`/`true`/`yes` 为 8 ms 阈值，数字为毫秒阈值，`all` 记录每帧，`0`/`off`/`false`/`no` 关闭。计时只读单调时钟，不分配内存。
@@ -136,4 +144,6 @@ try canvas.invalidate();
 - `zig build test-shader`：语言、诊断位置、静态步数上界、运行时错误、uniform 类型与分配失败。
 - `zig build test-ui`：元素/背景着色器像素、两遍隔离、高斯捕获路径、预算、内置程序、Canvas 与帧统计。
 - `zig build test-view`：样式包裹顺序、裁剪/效果平衡与 `presentColumn` 进出场。
+- `zig build test-shader-gl`（Linux，经 EGL 在 Mesa 上运行）与 `zig build test-shader-d3d`（Windows，WARP；属于 `zig build test`）：一组覆盖循环、函数调用、数组、矩阵、整数故障与各内置函数的程序翻译后逐像素与 CPU 机器对照，包括哪些像素失败。
+- `zig build test-ui`：磁盘缓存的命名、校验、最久未用淘汰与临时文件清理。
 - `zig build smoke-shader-effects`：隐藏窗口上未准备时的原样绘制，准备后的改色、位姿、淡出像素，背景着色器，帧统计与工作区随 detach 释放。
