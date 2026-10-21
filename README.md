@@ -84,6 +84,7 @@ WSL 应将 Zig 本地缓存放在 Linux 文件系统，见 `scripts/linux-check.
 | `ziggurat_rich_text` | [富文本](docs/rich-text-editor.md)模型：段落与属性 run、可撤销文档、HTML/RTF/Markdown/JSON 编解码 | 纯 Zig |
 | `ziggurat_rich_text_editor` | 声明式视图中的富文本编辑器：按段落虚拟化排版、Markdown 快捷方式、格式快捷键、输入法、任务与链接点击 | 依赖视图；排版在绘制后的投递任务与输入处理中进行 |
 | `ziggurat_rich_text_clipboard` | 富文本编辑器与系统剪贴板的连接：写自有格式/HTML/纯文本，读自有格式/HTML/RTF/Markdown/纯文本 | 依赖 `ziggurat_system`；异步读取 |
+| `ziggurat_fonts` | [应用字体](docs/fonts.md)：注册 TrueType/OpenType 字体（Linux fontconfig + Pango，Windows GDI + DirectWrite 字体集）、字体族 id 与名称解析、带等宽与注册标记的字体族列表 | 主线程；注册字体写入用户缓存目录 |
 | `ziggurat_text_measure` | 用平台文本排版测量文字的 `view.Measurer`，按文字与字体缓存 | 主线程使用 |
 | `ziggurat_game` | [游戏](docs/game.md)：固定步长游戏循环与按位置的键盘/指针输入、二维相机、整数倍像素缩放、Windows XInput 与 Linux evdev 手柄 | 依赖视图；不分配，主线程运行；手柄由应用持有 |
 | `ziggurat_virtual_list` | 稳定行 ID、可变高度索引、滚动锚点与有界可见回放 | 单向依赖 UI；完整虚拟控件集继续按计划实施 |

@@ -16,6 +16,8 @@
 //! input method's caret run as tasks posted after paint, never inside it;
 //! the window's Context needs `prepareTextFields` before the editor shows.
 const std = @import("std");
+const builtin = @import("builtin");
+const fonts = @import("ziggurat_fonts");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const view = @import("ziggurat_view");
@@ -630,6 +632,7 @@ pub const Editor = struct {
         if (a.size > 0) s.font.size = a.size;
         if (a.weight > 0) s.font.weight = weightOf(a.weight);
         if (a.italic) s.font.italic = true;
+        if (a.font.len > 0) applyFamily(&s.font, a.font);
         if (a.color.set()) s.color = a.color.value();
         if (a.background.set()) s.background = uiColor(a.background);
         if (a.code) {
@@ -2589,6 +2592,22 @@ const copies = struct {
         return try kept.clone(allocator);
     }
 };
+
+/// Sets the family of `font` from a CSS family list, as HTML and RTF give
+/// it: its first family, generic ones as the platform names them.
+pub fn applyFamily(font: *view.Font, list: []const u8) void {
+    var names = std.mem.splitScalar(u8, list, ',');
+    const first = std.mem.trim(u8, std.mem.trim(u8, names.first(), " \t"), "\"'");
+    if (first.len == 0) return;
+    if (std.ascii.eqlIgnoreCase(first, "monospace") or std.ascii.eqlIgnoreCase(first, "ui-monospace")) {
+        font.monospace = true;
+        return;
+    }
+    if (std.ascii.eqlIgnoreCase(first, "sans-serif") or std.ascii.eqlIgnoreCase(first, "system-ui") or std.ascii.eqlIgnoreCase(first, "ui-sans-serif")) return;
+    const name = if (std.ascii.eqlIgnoreCase(first, "serif") or std.ascii.eqlIgnoreCase(first, "ui-serif")) (if (builtin.os.tag == .windows) "Times New Roman" else "Serif") else first;
+    // A family past the table's room keeps the interface family.
+    font.family = fonts.family(name) catch 0;
+}
 
 fn weightOf(w: u16) view.Font.Weight {
     if (w >= 700) return .bold;

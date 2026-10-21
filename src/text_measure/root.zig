@@ -6,6 +6,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const view = @import("ziggurat_view");
 const text = @import("ziggurat_text_layout");
+const fonts = @import("ziggurat_fonts");
 
 const Allocator = std.mem.Allocator;
 const Font = view.Font;
@@ -53,7 +54,7 @@ pub const Native = struct {
     }
 
     fn layoutWidth(self: *Native, utf8: []const u8, font: Font) !f32 {
-        const family = if (font.monospace) monospace_family else interface_family;
+        const family = if (font.family != 0) fonts.systemName(font.family) else if (font.monospace) monospace_family else interface_family;
         const layout = try self.engine.layout(utf8, .{ .family = family, .size = font.size, .weight = font.weight.value(), .italic = font.italic });
         defer layout.close() catch {};
         const m = try layout.metrics();

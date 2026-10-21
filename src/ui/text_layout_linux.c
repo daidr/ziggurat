@@ -2,7 +2,9 @@
 #include <string.h>
 #include "text_layout_native.h"
 #include "text_layout_words_impl.h"
-typedef struct Engine {PangoFontMap *map;} Engine;
+typedef struct Engine {PangoFontMap *map;uint64_t fonts_seen;} Engine;
+/* Fonts the application registered since the map last looked. */
+void zfont_refresh(void *map,uint64_t *seen);
 typedef struct Layout {PangoLayout *layout;uint32_t length,line_count,cell_count;ZtlLine *lines;ZtlCell *cells;} Layout;
 typedef struct Prepared {cairo_surface_t *surface;cairo_pattern_t *pattern;} Prepared;
 #include "text_layout_outline_linux.h"
@@ -21,6 +23,7 @@ int ztl_engine_init(void *storage,ZtlError *error){
 void ztl_engine_close(void *storage){Engine *s=storage;DROP_OBJECT(s->map);g_atomic_int_add(&engines,-1);}
 int ztl_layout_init(void *storage,void *engine,const char *text,uint32_t length,const uint16_t *utf16,uint32_t length16,const ZtlOptions *options,ZtlError *error){
     (void)utf16;(void)length16;Engine *e=engine;Layout *s=storage;memset(s,0,sizeof(*s));*error=(ZtlError){0};
+    zfont_refresh(e->map,&e->fonts_seen);
     PangoContext *context=pango_font_map_create_context(e->map);if(!context)return ZTL_OOM;OWN();
     pango_context_set_base_dir(context,options->rtl?PANGO_DIRECTION_RTL:PANGO_DIRECTION_LTR);
     if(options->locale[0])pango_context_set_language(context,pango_language_from_string(options->locale));

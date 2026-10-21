@@ -585,3 +585,20 @@ test "list markers number by level" {
     try testing.expect(!ed.safeToOpen("file:///etc"));
     try testing.expect(!ed.safeToOpen("https://x\\y"));
 }
+
+test "font families of runs come from the first family of a CSS list" {
+    const view = @import("ziggurat_view");
+    var font: view.Font = .{};
+    ed.applyFamily(&font, "'Courier New', monospace");
+    try testing.expect(font.family != 0 and !font.monospace);
+    const courier = font.family;
+    font = .{};
+    ed.applyFamily(&font, "\"courier new\"");
+    try testing.expectEqual(courier, font.family);
+    font = .{};
+    ed.applyFamily(&font, "monospace, serif");
+    try testing.expect(font.monospace and font.family == 0);
+    font = .{};
+    ed.applyFamily(&font, "sans-serif");
+    try testing.expectEqual(@as(u8, 0), font.family);
+}
