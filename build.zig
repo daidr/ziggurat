@@ -2755,7 +2755,7 @@ const app_example_imports = [_][]const u8{
     "ziggurat_system",        "ziggurat_i18n",             "ziggurat_animation",       "ziggurat_document_app",
     "ziggurat_chart",         "ziggurat_chart_view",       "ziggurat_audio",           "ziggurat_code_editor",
     "ziggurat_text_layout",   "ziggurat_window_placement", "ziggurat_game",            "ziggurat_terminal",
-    "ziggurat_terminal_view",
+    "ziggurat_terminal_view", "ziggurat_markdown",         "ziggurat_markdown_view",
 };
 
 const Example = struct { name: []const u8, path: []const u8, web: bool = false };
@@ -2781,6 +2781,9 @@ const app_examples = [_]Example{
     .{ .name = "terminal", .path = "examples/terminal.zig" },
     .{ .name = "text-buffer", .path = "examples/text_buffer.zig" },
     .{ .name = "native", .path = "examples/native.zig" },
+    .{ .name = "flyout", .path = "examples/flyout.zig" },
+    .{ .name = "menubar-flyout", .path = "examples/menubar_flyout.zig" },
+    .{ .name = "markdown-chat", .path = "examples/markdown_chat.zig" },
     .{ .name = "hybrid", .path = "examples/hybrid.zig", .web = true },
 };
 
@@ -2804,7 +2807,9 @@ fn addExamples(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         all.dependOn(&exe.step);
         const example_tests = b.addTest(.{ .name = b.fmt("example-{s}-test", .{example.name}), .root_module = exe.root_module });
         b.top_level_steps.get("check").?.step.dependOn(&example_tests.step);
-        tests.dependOn(&b.addRunArtifact(example_tests).step);
+        const run_example_tests = b.addRunArtifact(example_tests);
+        tests.dependOn(&run_example_tests.step);
+        b.step(b.fmt("test-example-{s}", .{example.name}), b.fmt("Run the headless view tests inside {s}", .{example.name})).dependOn(&run_example_tests.step);
     }
 }
 
