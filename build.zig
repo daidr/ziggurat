@@ -2434,6 +2434,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_view", .module = declarative_view },
         .{ .name = "ziggurat_update", .module = update },
         .{ .name = "ziggurat_wake", .module = wake },
+        .{ .name = "ziggurat_markdown", .module = markdown },
+        .{ .name = "ziggurat_markdown_view", .module = markdown_view },
     } });
     const updater_tests = b.addTest(.{ .root_module = updater });
     const run_updater_tests = b.addRunArtifact(updater_tests);
