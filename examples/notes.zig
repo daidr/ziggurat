@@ -1,15 +1,19 @@
-//! A plain-text notes app built on the document app model
-//! (`ziggurat_document_app`): one window per note, New / Open / Save /
+//! A notes editor of Markdown and text files built on the document app
+//! model (`ziggurat_document_app`): one window per note, New / Open / Save /
 //! Save As from a native menu bar and a toolbar, a dirty marker in the
 //! window title, a prompt before closing or quitting with unsaved changes,
-//! timer-driven autosave for notes that have a file, and a persisted list of
-//! recent notes under File > Open Recent.
+//! timer-driven autosave for notes that have a file, a persisted list of
+//! recent notes under File > Open Recent, a word count, recovery of unsaved
+//! notes after a crash, and notes changed by other apps: an unedited note
+//! reloads, an edited one shows a banner to keep it or revert to the file.
 //!
 //! The registry owns document state on the main thread; all file I/O runs
 //! on one explicit worker thread that this file starts and joins, and every
-//! result returns to the main thread through `App.post`. Autosave arms a
-//! single `ziggurat_wake.OneShot` for the registry's next deadline, so an
-//! idle window does no work. The note body is a multiline
+//! result returns to the main thread through `App.post`. A second thread
+//! owns a `system.watch.Watcher` over the directories of open notes and
+//! posts one recheck per batch of changes. Autosave and recovery snapshots
+//! arm a single `ziggurat_wake.OneShot` for the registry's next deadline,
+//! so an idle window does no work. The note body is a multiline
 //! `ziggurat_view_text.TextField`, which holds up to 16 KiB.
 //!
 //! Run it with `zig build run-notes` (or `zig build run-notes -- file.txt`).
@@ -29,10 +33,11 @@ const docs = @import("ziggurat_document_app");
 const max_note = 16 * 1024;
 const max_windows = 8;
 const max_recent = 6;
-const extensions = [_][]const u8{ ".txt", ".md" };
+const extensions = [_][]const u8{ ".md", ".markdown", ".txt" };
 const muted: u32 = 0x6b7785;
+const Probe = docs.Probe;
 
-const Command = enum { new, open, save, save_as, close, quit };
+const Command = enum { new, open, save, save_as, close, quit, revert, keep_mine };
 const menu = struct {
     const file = 1;
     const new = 2;
@@ -54,7 +59,7 @@ const prompt = struct {
 /// One unit of blocking file work, created on the main thread, run on the
 /// worker and completed back on the main thread.
 const Job = struct {
-    kind: enum { open, resolve_target, save, load_recent, store_recent },
+    kind: enum { open, resolve_target, save, load_recent, store_recent, probe, reload, snapshot, drop_snapshot, recover, recovered },
     notes: *Notes,
     /// The window that asked, kept alive by its `in_flight` count.
     note: ?*Note = null,
@@ -65,6 +70,13 @@ const Job = struct {
     identity: docs.Identity = undefined,
     stamp: ?docs.Stamp = null,
     saved: ?docs.SaveResult = null,
+    probe: ?docs.Probe = null,
+    snapshot: docs.SnapshotTicket = undefined,
+    recovery: docs.RecoveryName = .{},
+    /// `identity` and `path` name a file; otherwise the note is untitled.
+    has_identity: bool = false,
+    /// A recovered note whose file changed after its snapshot was taken.
+    conflict: bool = false,
     failure: ?anyerror = null,
     next: ?*Job = null,
 };
@@ -73,6 +85,7 @@ const Job = struct {
 /// registry or UI state; results go back through `App.post`.
 const Worker = struct {
     app: *z.App,
+    notes: *Notes = undefined,
     allocator: std.mem.Allocator,
     files: docs.Files,
     mutex: std.Thread.Mutex = .{},
@@ -81,6 +94,15 @@ const Worker = struct {
     tail: ?*Job = null,
     stopping: bool = false,
     thread: ?std.Thread = null,
+    /// This process's recovery session, opened by the `recover` job.
+    root: ?std.fs.Dir = null,
+    session: ?docs.Session = null,
+    nonce: u64,
+    /// Set by `stop`: a forced quit left unsaved notes whose snapshots must
+    /// survive for the next launch.
+    keep_snapshots: bool = false,
+    scratch: [max_note + docs.max_path + 256]u8 = undefined,
+    write_buffer: [4096]u8 = undefined,
 
     fn submit(self: *Worker, job: *Job) void {
         self.mutex.lock();
@@ -96,8 +118,9 @@ const Worker = struct {
             self.mutex.lock();
             while (self.head == null and !self.stopping) self.ready.wait(&self.mutex);
             const job = self.head orelse {
+                const keep = self.keep_snapshots;
                 self.mutex.unlock();
-                return;
+                return self.closeSession(keep);
             };
             self.head = job.next;
             if (self.head == null) self.tail = null;
@@ -141,7 +164,94 @@ const Worker = struct {
                     _ = try self.save(path, &job.bytes, job.len, null);
                 }
             },
+            .probe => job.probe = try self.files.probe(job.path.slice(), job.stamp.?),
+            .reload => {
+                const loaded = try self.files.read(job.path.slice(), job.bytes[0..max_note]);
+                job.len = loaded.bytes.len;
+                job.stamp = loaded.stamp;
+            },
+            .snapshot => {
+                const session = if (self.session) |*session| session else return error.NoRecoverySession;
+                try session.write(&job.snapshot.name, .{
+                    .path = if (job.has_identity) job.path.slice() else null,
+                    .base = job.stamp,
+                    .revision = job.snapshot.revision,
+                    .saved_ns = std.time.nanoTimestamp(),
+                    .content = job.bytes[0..job.len],
+                }, &self.scratch, &self.write_buffer);
+            },
+            .drop_snapshot => if (self.session) |*session| try session.remove(&job.recovery),
+            .recover => try self.recover(),
+            .recovered => unreachable,
         }
+    }
+
+    /// Opens this process's recovery session, then hands every snapshot of
+    /// a session that ended without finishing (a crash or a forced quit) to
+    /// the main thread as a `recovered` job.
+    fn recover(self: *Worker) !void {
+        const directory = try std.fs.getAppDataDir(self.allocator, "ziggurat-notes");
+        defer self.allocator.free(directory);
+        const path = try std.fs.path.join(self.allocator, &.{ directory, "recovery" });
+        defer self.allocator.free(path);
+        try std.fs.cwd().makePath(path);
+        self.root = try std.fs.cwd().openDir(path, .{ .iterate = true });
+        self.session = try docs.Session.open(self.files, self.root.?, self.nonce);
+        var found: [16]u64 = undefined;
+        for (try docs.recovery.orphans(self.files, self.root.?, self.nonce, &found)) |orphan| {
+            // Another launch may be restoring it right now.
+            var session = docs.Session.adopt(self.files, self.root.?, orphan) catch continue;
+            var names: [4 * max_windows]docs.RecoveryName = undefined;
+            const listed = session.list(&names) catch {
+                session.close();
+                continue;
+            };
+            var delivered = true;
+            for (listed) |*name| delivered = self.deliver(&session, name) and delivered;
+            // Keep the session for a later launch unless every note is back.
+            if (delivered) session.finish(self.root.?, orphan) catch {} else session.close();
+        }
+    }
+
+    fn deliver(self: *Worker, session: *docs.Session, name: *const docs.RecoveryName) bool {
+        const snapshot = session.read(name, &self.scratch) catch |err| switch (err) {
+            // Damaged or foreign files protect nothing.
+            error.InvalidFormat, error.Corrupt => return true,
+            else => return false,
+        };
+        if (snapshot.content.len > max_note) return false;
+        const job = self.allocator.create(Job) catch return false;
+        job.* = .{ .kind = .recovered, .notes = self.notes };
+        @memcpy(job.bytes[0..snapshot.content.len], snapshot.content);
+        job.len = snapshot.content.len;
+        // A file that is gone comes back as an untitled note.
+        if (snapshot.path) |path| if (self.files.resolve(path)) |identity| {
+            job.identity = identity;
+            job.has_identity = true;
+            if (snapshot.base) |base| switch (self.files.probe(path, base) catch Probe.missing) {
+                .unchanged => job.stamp = base,
+                .modified => |stamp| {
+                    job.stamp = stamp;
+                    job.conflict = true;
+                },
+                .missing => job.has_identity = false,
+            };
+        } else |_| {};
+        self.app.post(.{ .context = job, .call = Notes.complete }) catch {
+            self.allocator.destroy(job);
+            return false;
+        };
+        return true;
+    }
+
+    /// Worker thread, once the queue is empty after `stop`.
+    fn closeSession(self: *Worker, keep: bool) void {
+        if (self.session) |*session| {
+            if (keep) session.close() else session.finish(self.root.?, self.nonce) catch {};
+        }
+        self.session = null;
+        if (self.root) |*root| root.close();
+        self.root = null;
     }
 
     /// Atomic replace with conflict detection through `Files.save`.
@@ -151,10 +261,129 @@ const Worker = struct {
     }
 
     /// Main thread, after `App.run` returns: finish the queue and join.
-    fn stop(self: *Worker) void {
+    fn stop(self: *Worker, keep_snapshots: bool) void {
         self.mutex.lock();
         self.stopping = true;
+        self.keep_snapshots = keep_snapshots;
         self.ready.signal();
+        self.mutex.unlock();
+        if (self.thread) |thread| thread.join();
+        self.thread = null;
+    }
+};
+
+/// The directories of open notes, watched on a thread that owns the
+/// watcher. A batch of changes posts one `Notes.recheck`; the file worker
+/// then compares each note's file with the stamp it was loaded or saved at.
+const Watch = struct {
+    app: *z.App,
+    notes: *Notes = undefined,
+    allocator: std.mem.Allocator,
+    ui_thread: std.Thread.Id,
+    watcher: system.watch.Watcher = undefined,
+    mutex: std.Thread.Mutex = .{},
+    /// The watcher exists, so `interrupt` may be called.
+    live: bool = false,
+    stopping: bool = false,
+    wanted: [max_windows]docs.Path = undefined,
+    wanted_len: usize = 0,
+    revision: u64 = 0,
+    /// A recheck is posted and not yet run; later batches fold into it.
+    posted: std.atomic.Value(bool) = .init(false),
+    thread: ?std.Thread = null,
+
+    /// Main thread: replace the watched directories.
+    fn set(self: *Watch, directories: []const []const u8) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        same: {
+            if (directories.len != self.wanted_len) break :same;
+            for (directories, self.wanted[0..self.wanted_len]) |directory, *current| {
+                if (!std.mem.eql(u8, directory, current.slice())) break :same;
+            }
+            return;
+        }
+        self.wanted_len = 0;
+        for (directories) |directory| {
+            self.wanted[self.wanted_len] = docs.Path.init(directory) catch continue;
+            self.wanted_len += 1;
+        }
+        self.revision += 1;
+        if (self.live) self.watcher.interrupt();
+    }
+
+    fn loop(self: *Watch) void {
+        self.watcher = system.watch.Watcher.init(self.allocator, self.ui_thread, .{ .recursive = false, .max_roots = max_windows, .max_directories = max_windows }) catch |err| {
+            std.log.info("notes changed by other apps are not noticed: {s}", .{@errorName(err)});
+            return;
+        };
+        self.mutex.lock();
+        self.live = true;
+        self.mutex.unlock();
+        defer {
+            self.mutex.lock();
+            self.live = false;
+            self.mutex.unlock();
+            self.watcher.deinit();
+        }
+        var roots: [max_windows]?struct { root: system.watch.Root, path: docs.Path } = .{null} ** max_windows;
+        var wanted: [max_windows]docs.Path = undefined;
+        var seen: u64 = 0;
+        var events: [32]system.watch.Event = undefined;
+        var paths: [8192]u8 = undefined;
+        while (true) {
+            self.mutex.lock();
+            if (self.stopping) return self.mutex.unlock();
+            const revision = self.revision;
+            const count = self.wanted_len;
+            @memcpy(wanted[0..count], self.wanted[0..count]);
+            self.mutex.unlock();
+            if (revision != seen) {
+                seen = revision;
+                for (&roots) |*entry| if (entry.*) |current| {
+                    const kept = for (wanted[0..count]) |*path| {
+                        if (path.eql(&current.path)) break true;
+                    } else false;
+                    if (!kept) {
+                        self.watcher.removeRoot(current.root) catch {};
+                        entry.* = null;
+                    }
+                };
+                for (wanted[0..count]) |*path| {
+                    const present = for (roots) |entry| {
+                        if (entry) |current| if (current.path.eql(path)) break true;
+                    } else false;
+                    if (present) continue;
+                    const root = self.watcher.addRoot(path.slice()) catch continue;
+                    for (&roots) |*entry| if (entry.* == null) {
+                        entry.* = .{ .root = root, .path = path.* };
+                        break;
+                    };
+                }
+            }
+            const batch = self.watcher.wait(&events, &paths, null) catch |err| {
+                std.log.err("watching notes failed: {s}", .{@errorName(err)});
+                return;
+            };
+            for (batch.events) |event| switch (event) {
+                .root_removed => |removed| for (&roots) |*entry| {
+                    if (entry.*) |current| if (current.root.eql(removed.root)) {
+                        entry.* = null;
+                    };
+                },
+                else => {},
+            };
+            if (batch.events.len > 0 and !self.posted.swap(true, .acq_rel)) {
+                self.app.post(.{ .context = self.notes, .call = Notes.recheck }) catch self.posted.store(false, .release);
+            }
+        }
+    }
+
+    /// Main thread, after `App.run` returns.
+    fn stop(self: *Watch) void {
+        self.mutex.lock();
+        self.stopping = true;
+        if (self.live) self.watcher.interrupt();
         self.mutex.unlock();
         if (self.thread) |thread| thread.join();
         self.thread = null;
@@ -184,8 +413,13 @@ const Note = struct {
     message_len: usize = 0,
     in_flight: usize = 0,
     closed: bool = false,
+    /// The text version a reload set, so it is not counted as an edit.
+    loaded_version: ?u64 = null,
+    reloading: bool = false,
+    /// Note text for the word count, read once per build.
+    words_buffer: [max_note]u8 = undefined,
 
-    fn create(notes: *Notes, document_id: docs.DocumentId, initial: []const u8, stamp: ?docs.Stamp) !void {
+    fn create(notes: *Notes, document_id: docs.DocumentId, initial: []const u8, stamp: ?docs.Stamp) !*Note {
         const self = try notes.allocator.create(Note);
         self.* = .{ .notes = notes, .document_id = document_id };
         notes.track(self) catch |err| {
@@ -216,7 +450,9 @@ const Note = struct {
         try notes.registry.attach(document_id, window, stamp);
         self.registered = true;
         self.refreshTitle();
+        notes.updateWatch();
         window.show();
+        return self;
     }
 
     fn build(self: *Note, v: *view.View) anyerror!void {
@@ -226,21 +462,39 @@ const Note = struct {
         if (try v.button("Save", .{})) self.queue(.save);
         if (try v.button("Save As…", .{})) self.queue(.save_as);
         try v.end();
+        const conflict = if (self.registered) if (self.notes.registry.info(self.document_id)) |info| info.conflict else |_| false else false;
+        if (conflict) {
+            try v.row(.{ .gap = 8, .alignment = .center, .padding = .all(10), .radius = 6, .background = 0xfbefd0, .key = 3 });
+            try v.text("Another app changed this note. Keep yours, or revert to the file.", .{ .grow = 1 });
+            if (try v.button("Revert", .{})) self.queue(.revert);
+            if (try v.button("Keep Mine", .{})) self.queue(.keep_mine);
+            try v.end();
+        }
         if (self.editor != null) try v.embed(self.field.embed(), .{ .grow = 1, .key = 1 });
-        try v.row(.{ .gap = 8, .key = 2 });
-        try v.text(self.status(), .{ .color = muted, .grow = 1 });
+        try v.row(.{ .gap = 12, .key = 2 });
+        const count = self.wordCount();
+        try v.textf("{d} word{s}", .{ count, if (count == 1) "" else "s" }, .{ .color = muted, .grow = 1 });
         if (self.message_len > 0) try v.text(self.message[0..self.message_len], .{ .color = 0xa33a2c });
+        try v.text(self.status(), .{ .color = muted });
         try v.end();
+    }
+
+    fn wordCount(self: *Note) usize {
+        const length = self.read(&self.words_buffer) catch return 0;
+        var count: usize = 0;
+        var iterator = std.mem.tokenizeAny(u8, self.words_buffer[0..length], " \t\r\n");
+        while (iterator.next() != null) count += 1;
+        return count;
     }
 
     fn status(self: *Note) []const u8 {
         if (!self.registered) return "";
         const info = self.notes.registry.info(self.document_id) catch return "";
-        if (info.conflict) return "Changed on disk; Save to choose what to keep";
         if (info.saving) return "Saving…";
         const file = info.kind.* == .file;
-        if (info.dirty) return if (file) "Edited; autosaves when you pause typing" else "Not saved yet";
-        return if (file) "Saved" else "New note";
+        if (info.conflict) return "Changed by another app";
+        if (info.dirty) return if (file) "Edited" else "Not saved";
+        return if (file) "Saved" else "Not saved";
     }
 
     fn report(self: *Note, comptime format: []const u8, args: anytype) void {
@@ -320,7 +574,73 @@ const Note = struct {
             .save_as => self.saveAs(),
             .close => _ = (self.window orelse return).requestClose() catch {},
             .quit => _ = notes.registry.requestQuit(),
+            .revert => self.reload(),
+            .keep_mine => self.save(.overwrite),
         }
+    }
+
+    fn filePath(self: *Note) ?docs.Path {
+        if (!self.registered) return null;
+        const info = self.notes.registry.info(self.document_id) catch return null;
+        return switch (info.kind.*) {
+            .file => |identity| identity.path,
+            .untitled => null,
+        };
+    }
+
+    /// Ask the worker whether the file still matches the stamp the note
+    /// knows; `Notes.complete` reloads or marks a conflict.
+    fn probe(self: *Note) void {
+        if (self.closed) return;
+        const info = self.notes.registry.info(self.document_id) catch return;
+        if (info.saving) return;
+        const stamp = info.stamp orelse return;
+        const path = self.filePath() orelse return;
+        const job = self.notes.job(.probe, self) orelse return;
+        job.path = path;
+        job.stamp = stamp;
+        self.notes.worker.submit(job);
+    }
+
+    /// Read the file again and show it, dropping the note's own edits.
+    fn reload(self: *Note) void {
+        const path = self.filePath() orelse return;
+        const job = self.notes.job(.reload, self) orelse return;
+        job.path = path;
+        self.notes.worker.submit(job);
+    }
+
+    fn applyReload(self: *Note, bytes: []const u8, stamp: docs.Stamp) void {
+        const editor = self.editor orelse return;
+        self.reloading = true;
+        _ = editor.setValue(bytes) catch |err| {
+            self.reloading = false;
+            return self.report("Cannot revert: {s}", .{@errorName(err)});
+        };
+        self.reloading = false;
+        if (self.document) |document| self.loaded_version = document.committedTextVersion() catch null;
+        self.notes.registry.reloaded(self.document_id, stamp) catch {};
+        self.message_len = 0;
+        self.notes.schedule();
+        if (self.window) |window| window.invalidate();
+    }
+
+    /// Write the unsaved text to this session's recovery directory.
+    fn snapshot(self: *Note) void {
+        const registry = &self.notes.registry;
+        const ticket = registry.beginSnapshot(self.document_id) catch return;
+        const job = self.notes.job(.snapshot, self) orelse return registry.failSnapshot(&ticket);
+        job.snapshot = ticket;
+        if (self.filePath()) |path| {
+            job.path = path;
+            job.has_identity = true;
+            job.stamp = (registry.info(self.document_id) catch unreachable).stamp;
+        }
+        job.len = self.read(job.bytes[0..max_note]) catch {
+            registry.failSnapshot(&ticket);
+            return self.notes.finish(job);
+        };
+        self.notes.worker.submit(job);
     }
 
     fn openPicked(ptr: *anyopaque, _: z.Window, result: system.picker.Result) void {
@@ -446,9 +766,9 @@ const Note = struct {
         }
     }
 
-    fn edited(ptr: ?*anyopaque, _: z.Window, _: u64) void {
+    fn edited(ptr: ?*anyopaque, _: z.Window, version: u64) void {
         const self: *Note = @ptrCast(@alignCast(ptr.?));
-        if (!self.registered) return;
+        if (!self.registered or self.reloading or self.loaded_version == version) return;
         self.notes.registry.edited(self.document_id, self.notes.now()) catch return;
         self.message_len = 0;
         self.notes.schedule();
@@ -469,6 +789,7 @@ const Note = struct {
         self.document = null;
         self.window = null;
         self.closed = true;
+        self.notes.updateWatch();
         self.notes.schedule();
         self.notes.app.post(.{ .context = self.notes, .call = Notes.reapTask }) catch {};
     }
@@ -484,7 +805,10 @@ const Notes = struct {
     recent_storage: [max_recent]docs.Path = undefined,
     recent: docs.Recent = undefined,
     worker: Worker,
+    watch: Watch,
     clock: std.time.Timer,
+    /// A note closed unsaved by a forced quit kept its snapshot.
+    keep_snapshots: bool = false,
     autosave: ?*wake.OneShot = null,
     armed: ?wake.Token = null,
 
@@ -537,7 +861,7 @@ const Notes = struct {
 
     fn newNote(self: *Notes) void {
         const document_id = self.registry.claimUntitled() catch return;
-        Note.create(self, document_id, "", null) catch |err| {
+        _ = Note.create(self, document_id, "", null) catch |err| {
             self.registry.cancel(document_id) catch {};
             std.log.err("cannot create a note window: {s}", .{@errorName(err)});
         };
@@ -574,6 +898,17 @@ const Notes = struct {
         const note = done.note;
         const live = if (note) |value| !value.closed else false;
         if (done.failure) |err| {
+            switch (done.kind) {
+                .probe, .drop_snapshot => return,
+                // Without a place for snapshots, stop asking for them.
+                .snapshot, .recover => {
+                    if (done.kind == .snapshot) self.registry.failSnapshot(&done.snapshot);
+                    self.registry.policy.recovery = false;
+                    self.schedule();
+                    return std.log.err("recovery is off: {s}", .{@errorName(err)});
+                },
+                else => {},
+            }
             if (done.kind == .save) self.registry.failSave(&done.ticket) catch {};
             if (live) note.?.report("{s} failed: {s}", .{ @tagName(done.kind), @errorName(err) }) else if (done.kind != .load_recent and done.kind != .store_recent) std.log.err("{s} failed: {s}", .{ @tagName(done.kind), @errorName(err) });
             if ((done.kind == .save or done.kind == .resolve_target) and live) note.?.abandonPendingClose();
@@ -585,13 +920,12 @@ const Notes = struct {
                 switch (claim) {
                     .existing => |existing| _ = self.registry.reveal(existing) catch {},
                     .reserved => |document_id| {
-                        Note.create(self, document_id, done.bytes[0..done.len], done.stamp) catch |err| {
+                        const opened = Note.create(self, document_id, done.bytes[0..done.len], done.stamp) catch |err| {
                             self.registry.cancel(document_id) catch {};
                             if (live) note.?.report("Cannot open: {s}", .{@errorName(err)});
                             return;
                         };
-                        // An untouched blank note gives way to the opened one.
-                        if (live and note.?.isBlankUntitled()) _ = note.?.window.?.requestClose() catch {};
+                        self.closeBlank(opened);
                     },
                 }
                 self.recent.add(done.identity.path.slice()) catch {};
@@ -609,7 +943,9 @@ const Notes = struct {
                         if (done.ticket.target != null) {
                             self.recent.add(done.ticket.path.slice()) catch {};
                             self.storeRecent();
+                            self.updateWatch();
                         }
+                        if (outcome.obsolete_snapshot) |name| self.dropSnapshot(name);
                         if (outcome.retry_close) |reason| {
                             if (reason == .quit) {
                                 _ = self.registry.requestQuit();
@@ -622,8 +958,83 @@ const Notes = struct {
                 self.recent.decode(done.bytes[0..done.len]) catch {};
                 for (self.list) |entry| if (entry) |value| value.refreshMenu() catch {};
             },
-            .store_recent => {},
+            .store_recent, .drop_snapshot, .recover => {},
+            .probe => if (live) {
+                const info = self.registry.info(note.?.document_id) catch return;
+                // A save or reload since the question makes the answer stale.
+                if (info.saving or info.stamp == null or !info.stamp.?.eql(done.stamp.?)) return;
+                switch (done.probe.?) {
+                    .unchanged => {},
+                    .modified => if (info.dirty) self.registry.externallyModified(note.?.document_id) catch {} else note.?.reload(),
+                    .missing => self.registry.externallyModified(note.?.document_id) catch {},
+                }
+            },
+            .reload => if (live) note.?.applyReload(done.bytes[0..done.len], done.stamp.?),
+            .snapshot => if (self.registry.finishSnapshot(&done.snapshot) == .obsolete) self.dropSnapshot(done.snapshot.name),
+            .recovered => self.restore(done),
         }
+    }
+
+    /// A note from a session that ended without saving it.
+    fn restore(self: *Notes, done: *Job) void {
+        const document_id = if (done.has_identity) switch (self.registry.claim(&done.identity) catch return) {
+            // Opened from the command line meanwhile: the file wins.
+            .existing => return,
+            .reserved => |reserved| reserved,
+        } else self.registry.claimUntitled() catch return;
+        const note = Note.create(self, document_id, done.bytes[0..done.len], if (done.has_identity) done.stamp else null) catch |err| {
+            self.registry.cancel(document_id) catch {};
+            return std.log.err("cannot restore a note: {s}", .{@errorName(err)});
+        };
+        self.registry.edited(document_id, self.now()) catch {};
+        if (done.conflict) self.registry.externallyModified(document_id) catch {};
+        note.report("Restored unsaved changes", .{});
+        self.closeBlank(note);
+        self.schedule();
+    }
+
+    /// An untouched blank note gives way to one that was opened or restored.
+    fn closeBlank(self: *Notes, kept: *Note) void {
+        for (self.list) |entry| if (entry) |note| if (note != kept and note.isBlankUntitled()) {
+            _ = note.window.?.requestClose() catch {};
+        };
+    }
+
+    fn dropSnapshot(self: *Notes, name: docs.RecoveryName) void {
+        const created = self.job(.drop_snapshot, null) orelse return;
+        created.recovery = name;
+        self.worker.submit(created);
+    }
+
+    /// Watch the directory of every note that has a file.
+    fn updateWatch(self: *Notes) void {
+        var directories: [max_windows][]const u8 = undefined;
+        var paths: [max_windows]docs.Path = undefined;
+        var count: usize = 0;
+        for (self.list) |entry| if (entry) |note| if (!note.closed) {
+            paths[count] = note.filePath() orelse continue;
+            const directory = std.fs.path.dirname(paths[count].slice()) orelse continue;
+            for (directories[0..count]) |known| {
+                if (std.mem.eql(u8, known, directory)) break;
+            } else {
+                directories[count] = directory;
+                count += 1;
+            }
+        };
+        self.watch.set(directories[0..count]);
+    }
+
+    /// Posted by the watch thread: something changed beside an open note.
+    fn recheck(ptr: *anyopaque) void {
+        const self: *Notes = @ptrCast(@alignCast(ptr));
+        self.watch.posted.store(false, .release);
+        for (self.list) |entry| if (entry) |note| note.probe();
+    }
+
+    fn released(ptr: *anyopaque, _: *docs.Registry, event: docs.Released) void {
+        const self: *Notes = @ptrCast(@alignCast(ptr));
+        if (!event.snapshot) return;
+        if (event.unsaved) self.keep_snapshots = true else self.dropSnapshot(event.recovery);
     }
 
     /// Autosave: arm one timer for the registry's earliest deadline.
@@ -642,6 +1053,9 @@ const Notes = struct {
         var due: [max_windows]docs.DocumentId = undefined;
         for (self.registry.dueAutosaves(self.now(), &due)) |document_id| {
             if (self.find(document_id)) |note| note.save(.normal);
+        }
+        for (self.registry.dueSnapshots(self.now(), &due)) |document_id| {
+            if (self.find(document_id)) |note| note.snapshot();
         }
         self.schedule();
     }
@@ -700,14 +1114,18 @@ pub fn main() !void {
         .app = app,
         .allocator = allocator,
         .engine = engine,
-        .worker = .{ .app = app, .allocator = allocator, .files = .{ .ui_thread = thread } },
+        .worker = .{ .app = app, .allocator = allocator, .files = .{ .ui_thread = thread }, .nonce = std.crypto.random.int(u64) },
+        .watch = .{ .app = app, .allocator = allocator, .ui_thread = thread },
         .clock = try std.time.Timer.start(),
     };
-    notes.registry = docs.Registry.init(app, &notes.slots, .{ .recovery = false }, .{
+    notes.worker.notes = notes;
+    notes.watch.notes = notes;
+    notes.registry = docs.Registry.init(app, &notes.slots, .{}, .{
         .context = notes,
         .close_blocked = Notes.closeBlocked,
         .quit_blocked = Notes.quitBlocked,
         .changed = Notes.changed,
+        .released = Notes.released,
     });
     notes.recent = docs.Recent.init(&notes.recent_storage);
     notes.autosave = try wake.OneShot.create(app, allocator, .{ .context = notes, .fire = Notes.fire }, .{});
@@ -715,13 +1133,17 @@ pub fn main() !void {
     defer _ = notes.autosave.?.close() catch {};
 
     notes.worker.thread = try std.Thread.spawn(.{}, Worker.loop, .{&notes.worker});
-    // After the loop: join the worker, then free every note it might name.
+    // After the loop: join both threads, then free every note they might name.
     defer {
-        notes.worker.stop();
+        notes.watch.stop();
+        notes.worker.stop(notes.keep_snapshots);
         notes.reap(true);
     }
+    notes.watch.thread = std.Thread.spawn(.{}, Watch.loop, .{&notes.watch}) catch null;
 
     notes.newNote();
+    // First in the queue, so the session exists before any snapshot.
+    if (notes.job(.recover, null)) |job| notes.worker.submit(job);
     if (notes.job(.load_recent, null)) |job| notes.worker.submit(job);
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();

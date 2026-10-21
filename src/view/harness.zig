@@ -85,6 +85,8 @@ pub const Harness = struct {
         if (self.input) |context| context.input_state.setFocused(id) else self.focus_id = id;
     }
     fn restoreFocus(self: *Harness) void {
+        if (self.view.restore == null) self.view.restore = self.view.focus_request;
+        self.view.focus_request = null;
         const id = self.view.restore orelse return;
         self.view.restore = null;
         self.setFocus(id);
@@ -100,10 +102,30 @@ pub const Harness = struct {
             const content = node.embed orelse continue;
             if (content.place) |place| place(content.context, node.id, node.bounds);
         }
+        if (self.view.focus_request) |id| {
+            self.view.focus_request = null;
+            for (self.view.nodes()) |*node| if (node.id == id) self.setFocus(id);
+        }
         // Focus a render pass asked for once the frame registered it, as
         // Host does after paint.
         self.restoreFocus();
         self.frames += 1;
+    }
+
+    /// Replay a key release to the focused embedded leaf, then render if it
+    /// took it, as Host does. True when it took it.
+    pub fn keyUp(self: *Harness, input: z.KeyInput) anyerror!bool {
+        self.view.focus = self.focusId();
+        if (!self.view.embedKeyUp(input)) return false;
+        try self.settleEmbed(null);
+        return true;
+    }
+    /// Give the window the keyboard or take it away, as a focus event
+    /// would, then render.
+    pub fn windowFocus(self: *Harness, has_keyboard: bool) anyerror!void {
+        self.view.window_focused = has_keyboard;
+        if (!has_keyboard) _ = self.view.embedPointerMove(null);
+        try self.render();
     }
 
     /// Record every following render into `context`, which must not be
@@ -2064,7 +2086,7 @@ const Chart = struct {
                 self.selected = bar(90, press.position.x) orelse return false;
                 return true;
             },
-            .pointer_drag, .pointer_up, .pointer_cancel, .wheel => return false,
+            .pointer_drag, .pointer_up, .pointer_cancel, .wheel, .key_up => return false,
             .key => |key| {
                 const at = self.selected orelse 0;
                 self.selected = switch (key.key) {
@@ -2267,7 +2289,7 @@ const Canvas = struct {
             .pointer_up => |point| log.up = point,
             .pointer_cancel => log.cancels += 1,
             .wheel => |wheel| log.wheel = wheel.delta,
-            .key => return false,
+            .key, .key_up => return false,
         }
         return true;
     }

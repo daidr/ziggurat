@@ -1,0 +1,11 @@
+{
+  "@@locale": "en",
+  "greeting": "Hello, {name}!",
+  "@greeting": {"description": "Shown on the start page."},
+  "files": "{count, plural, =0 {No files} one {# file} other {# files}}",
+  "@files": {"placeholders": {"count": {"type": "int"}}},
+  "share": "{ratio, number, percent} done",
+  "@share": {"placeholders": {"ratio": {"type": "double"}}},
+  "saved": "Saved on {when, date, short}",
+  "error": "{fn} failed"
+}

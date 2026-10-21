@@ -13,6 +13,12 @@ const c = @cImport({
     @cDefine("NO_STRICT", "1");
     @cInclude("windows.h");
 });
+/// Replaces a capture's Gaussian filter: rewrites the capture's planes in
+/// place, given each plane's stride in pixels.
+pub const CaptureFilter = struct {
+    context: *const anyopaque,
+    run: *const fn (context: *const anyopaque, source: []u32, source_stride: usize, scratch: []u32, scratch_stride: usize, capture: gaussian_scope.Capture) void,
+};
 pub const Surface = struct {
     dc: c.HDC = null,
     bitmap: c.HBITMAP = null,
@@ -245,8 +251,13 @@ pub const Workspace = struct {
         self.stats.clear_pixels +%= @as(u64, box[2] - box[0]) * (box[3] - box[1]);
     }
     pub fn endGroup(self: *Workspace) !void {
+        return self.endGroupFiltered(null);
+    }
+    /// Close a group; a capture opened by `beginGaussian` runs `filter` over
+    /// its planes instead of its kernel.
+    pub fn endGroupFiltered(self: *Workspace, filter: ?CaptureFilter) !void {
         if (self.depth == 0) return error.GroupStackEmpty;
-        if (self.gaussian) |owner| if (owner.active & (@as(u8, 1) << @intCast(self.depth - 1)) != 0) return self.endGaussian(owner);
+        if (self.gaussian) |owner| if (owner.active & (@as(u8, 1) << @intCast(self.depth - 1)) != 0) return self.endGaussian(owner, filter);
         if (self.groups[self.depth - 1] != .group) return error.GroupStackEmpty;
         if (self.current().clip_depth != 0) return error.UnbalancedGroupClips;
         const source = self.current();
@@ -291,7 +302,7 @@ pub const Workspace = struct {
         self.stats.groups +%= 1;
         self.stats.clear_pixels +%= @as(u64, capture.pixelWidth()) * capture.pixelHeight();
     }
-    noinline fn endGaussian(self: *Workspace, owner: *gaussian_workspace.Owner) !void {
+    noinline fn endGaussian(self: *Workspace, owner: *gaussian_workspace.Owner, filter: ?CaptureFilter) !void {
         if (self.current().clip_depth != 0) return error.UnbalancedGroupClips;
         if (c.GdiFlush() == 0) return error.FlushSurfaceFailed;
         const frame = &owner.frames[self.depth - 1];
@@ -299,7 +310,9 @@ pub const Workspace = struct {
         const source = self.current();
         const source_pixels = source.pixels.?[0 .. @as(usize, source.width) * source.height];
         var visits: u64 = 0;
-        try gaussian_kernel.apply(&frame.kernel, .{ .pixels = source_pixels, .width = capture.pixelWidth(), .height = capture.pixelHeight(), .stride = source.width }, .{ .pixels = owner.scratch, .width = capture.pixelWidth(), .height = capture.pixelHeight(), .stride = self.plan.pool_size.width }, .{ .pixels = source_pixels, .width = capture.pixelWidth(), .height = capture.pixelHeight(), .stride = source.width }, owner.capacity.filter_samples, null, &visits);
+        if (filter) |value| {
+            value.run(value.context, source_pixels, source.width, owner.scratch, self.plan.pool_size.width, capture);
+        } else try gaussian_kernel.apply(&frame.kernel, .{ .pixels = source_pixels, .width = capture.pixelWidth(), .height = capture.pixelHeight(), .stride = source.width }, .{ .pixels = owner.scratch, .width = capture.pixelWidth(), .height = capture.pixelHeight(), .stride = self.plan.pool_size.width }, .{ .pixels = source_pixels, .width = capture.pixelWidth(), .height = capture.pixelHeight(), .stride = source.width }, owner.capacity.filter_samples, null, &visits);
         const options = self.groups[self.depth - 1].group.options;
         self.depth -= 1;
         const destination = self.current();

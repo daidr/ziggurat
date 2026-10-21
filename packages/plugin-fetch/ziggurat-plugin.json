@@ -1,0 +1,5 @@
+{
+  "name": "fetch",
+  "package": "@ziggurat/plugin-fetch",
+  "libraries": []
+}

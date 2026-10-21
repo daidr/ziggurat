@@ -37,7 +37,26 @@ pub const BackdropEffectStats = struct {
     /// a loading indicator.
     software_frames: u64 = 0,
 };
+/// The shading language that programmable effects run.
+pub const shader = @import("ziggurat_shader");
+pub const shader_effects = commands.shader_effects;
+pub const ShaderEffect = shader_effects.Effect;
+/// Built-in pose (2D/3D transform) and refracting glass programs.
+pub const effects = @import("effect_library.zig");
+pub const ShaderEffectStats = struct {
+    workspace: shader_effects.Stats = .{},
+    /// Effects drawn without their program because no shader workspace, or
+    /// no Gaussian workspace with room for an element's capture, was
+    /// prepared.
+    unprepared: u64 = 0,
+};
+/// How an element effect composites into its parent.
+pub const EffectOptions = struct { opacity: u8 = 255 };
 pub const offscreen = @import("offscreen.zig");
+pub const canvas = @import("canvas.zig");
+pub const frame_stats = @import("frame_stats.zig");
+pub const FrameStats = frame_stats.Stats;
+pub const Canvas = canvas.Canvas;
 pub const gpu_resources = @import("gpu_resources.zig");
 pub const gpu_offscreen = @import("gpu_offscreen.zig");
 pub const GradientInterpolationStats = @import("gradient_interpolation_gpu.zig").Stats;
@@ -430,6 +449,9 @@ pub const Context = struct {
     /// Input and resize form the explicit update/layout stage. Resize includes
     /// physical size and DPI for preparing resources before a later paint.
     on_input: ?*const fn (*anyopaque, *Context, z.Event) bool = null,
+    /// A key released while the window has the keyboard, outside paint; see
+    /// `z.Content.key_release`. Text fields and shortcuts see no releases.
+    on_key_release: ?*const fn (*anyopaque, *Context, z.KeyInput) void = null,
     on_accessibility_action: ?*const fn (*anyopaque, *Context, accessibility.Action) void = null,
     semantic_name: []const u8 = "Ziggurat",
     semantics_enabled: bool = true,
@@ -473,6 +495,11 @@ pub const Context = struct {
     backdrop_workspace: ?*backdrop_effects.Workspace = null,
     backdrop_preferences: backdrop_effects.Preferences = .{},
     backdrop_unprepared: u64 = 0,
+    shader_workspace: ?*shader_effects.Workspace = null,
+    shader_unprepared: u64 = 0,
+    frame_stats_options: frame_stats.Options = .{},
+    frame_stats_set: bool = false,
+    frame_stats_totals: frame_stats.Stats = .{},
     backdrop_software_frames: u64 = 0,
     space_generation: u64 = 0,
     space_binding_epoch: u64 = 0,
@@ -786,6 +813,40 @@ pub const Context = struct {
         workspace.destroy();
         if (self.window) |window| if (self.live(window)) window.invalidate();
     }
+    /// Allocate the machine that runs shader effects. Element effects also
+    /// need `prepareGaussianWorkspace` with room for each element's capture
+    /// (box plus margin); backdrop shaders read through the backdrop
+    /// workspace. Until then effects draw their content unchanged.
+    pub fn prepareShaderEffects(self: *Context, allocator: std.mem.Allocator, options: shader_effects.Options) !void {
+        const window = self.window orelse return error.NotAttached;
+        const scope = self.callbackScope(window) orelse return error.Closed;
+        defer scope.end();
+        if (self.painting) return error.Busy;
+        const workspace = try shader_effects.Workspace.create(allocator, options);
+        const previous = self.shader_workspace;
+        self.shader_workspace = workspace;
+        if (previous) |value| value.destroy();
+        window.invalidate();
+    }
+    pub fn releaseShaderEffects(self: *Context) !void {
+        if (self.painting) return error.Busy;
+        const workspace = self.shader_workspace orelse return error.ShaderEffectsNotPrepared;
+        self.shader_workspace = null;
+        workspace.destroy();
+        if (self.window) |window| if (self.live(window)) window.invalidate();
+    }
+    /// Time each frame and log slow ones; see `frame_stats`. Overrides the
+    /// `ZIGGURAT_FRAME_STATS` environment variable.
+    pub fn setFrameStats(self: *Context, options: frame_stats.Options) void {
+        self.frame_stats_options = options;
+        self.frame_stats_set = true;
+    }
+    pub fn frameStats(self: *const Context) frame_stats.Stats {
+        return self.frame_stats_totals;
+    }
+    pub fn shaderEffectStats(self: *const Context) ShaderEffectStats {
+        return .{ .workspace = if (self.shader_workspace) |workspace| workspace.stats else .{}, .unprepared = self.shader_unprepared };
+    }
     /// The host's reading of the system's reduced transparency and high
     /// contrast settings; either one draws every effect as an opaque fill.
     pub fn setBackdropPreferences(self: *Context, value: backdrop_effects.Preferences) !void {
@@ -807,7 +868,7 @@ pub const Context = struct {
         if (self.window != null or self.attachment_phase != .detached) return error.AlreadyAttached;
         const scope = window.beginCallback() orelse return error.Closed;
         defer scope.end();
-        try window.setContent(.{ .context = self, .event = event, .detach = detach, .accessibility = getAccessibility, .key_input = nativeKeyInput });
+        try window.setContent(.{ .context = self, .event = event, .detach = detach, .accessibility = getAccessibility, .key_input = nativeKeyInput, .key_release = nativeKeyRelease });
         errdefer window.cancelContent(self);
         try self.initialize(window);
     }
@@ -1586,6 +1647,7 @@ pub const Context = struct {
         return getAccessibility(ptr, snapshot.window, wp, lp);
     }
     fn initialize(self: *Context, window: z.Window) !void {
+        if (!self.frame_stats_set) self.frame_stats_options = frame_stats.fromEnvironment();
         self.attachment_phase = .attaching;
         errdefer self.attachment_phase = .detached;
         if (self.gpu_domain) |domain| {
@@ -2184,6 +2246,14 @@ pub const Context = struct {
         const self: *Context = @ptrCast(@alignCast(ptr));
         return self.handleKeyInput(window, key);
     }
+    fn nativeKeyRelease(ptr: *anyopaque, window: z.Window, key: z.KeyInput) void {
+        const self: *Context = @ptrCast(@alignCast(ptr));
+        const callback = self.on_key_release orelse return;
+        const scope = self.callbackScope(window) orelse return;
+        defer scope.end();
+        if (self.painting) return;
+        callback(self.state, self, key);
+    }
     fn legacyKey(key: z.KeyInput) ?z.Event {
         if (key.modifiers.alt or key.modifiers.super) return null;
         const code: z.EditKeyCode = switch (key.key) {
@@ -2674,7 +2744,10 @@ pub const Context = struct {
                 };
                 self.command_buffer.reset();
                 defer self.command_buffer.reset();
+                var clock = frame_stats.Clock.begin(self.frame_stats_options.enabled);
+                defer frame_stats.finish(&self.frame_stats_totals, self.frame_stats_options, &clock, self.command_buffer.len);
                 self.command_buffer.backdrop_storage.workspace = self.backdrop_workspace;
+                self.command_buffer.shader_storage.workspace = self.shader_workspace;
                 if (self.gaussian_workspace) |workspace| self.command_buffer.bindFilterStorage(&workspace.storage) catch |err| {
                     window.report(.{ .domain = .renderer, .operation = .paint, .err = err });
                     return;
@@ -2731,6 +2804,7 @@ pub const Context = struct {
                     window.report(.{ .domain = .renderer, .operation = .paint, .err = err });
                     return;
                 };
+                clock.markBuild();
                 const layer_options = if (build_options.gpu and using_gpu) self.gpu_renderer.layerOptions() else self.renderer.layerOptions();
                 const transform_options = if (build_options.gpu and using_gpu) self.gpu_renderer.transformOptions() else self.renderer.transformOptions();
                 const transform_plan: ?layers.Plan = if (transform_options) |value| layers.Plan.initTransforms(value, if (build_options.gpu and using_gpu) .gpu else if (builtin.os.tag == .linux) .cairo else .gdi) catch |err| {
@@ -2779,12 +2853,15 @@ pub const Context = struct {
                     };
                 };
                 if (!self.live(window)) return;
+                clock.markPreflight();
+                clock.software = !using_gpu;
                 // Backdrop effects and loading indicators draw on the software
                 // planes: replay this frame there without reporting a device
                 // failure.
                 if (build_options.gpu and using_gpu and commands.softwareOnly(self.command_buffer.commands())) {
                     self.gpu_renderer.discard();
                     using_gpu = false;
+                    clock.software = true;
                     self.backdrop_software_frames += 1;
                 }
                 if (build_options.gpu and using_gpu) {
@@ -2902,6 +2979,10 @@ pub const Context = struct {
             self.backdrop_workspace = null;
             workspace.destroy();
         }
+        if (self.shader_workspace) |workspace| {
+            self.shader_workspace = null;
+            workspace.destroy();
+        }
         self.painting = false;
         self.dropGaussianMetadata();
         self.frame_accessibility_source = null;
@@ -2952,6 +3033,9 @@ pub const Frame = struct {
     group_bounds: [layers.max_depth]Rect = undefined,
     group_geometry_passthrough: u8 = 0,
     transforms: ?*TransformWorkspace = null,
+    /// Open element effects; false marks one drawn without its program.
+    effect_scopes: [16]bool = undefined,
+    effect_depth: usize = 0,
 
     pub fn beginShortcutScope(self: *Frame, id: u64, options: ShortcutScopeOptions) !void {
         errdefer |err| self.failure = self.failure orelse err;
@@ -3473,6 +3557,65 @@ pub const Frame = struct {
             self.failure = self.failure orelse err;
         };
     }
+    /// Draw what follows, until `endEffect`, through `effect`: the content is
+    /// captured in isolation over `box` plus the effect's margin, rewritten
+    /// by its program and composited at `options.opacity`. Hit testing,
+    /// focus and semantics keep their geometry. A prepared Gaussian
+    /// workspace with room isolates the content exactly in a layer;
+    /// otherwise it is isolated on the target (see
+    /// `shader_effects.twoPassRegion`). Without `prepareShaderEffects`, or
+    /// nested deeper than the layer depth, the content is drawn as it is
+    /// and counted as unprepared.
+    pub fn beginEffect(self: *Frame, box: Rect, effect: ShaderEffect, options: EffectOptions) !void {
+        errdefer |err| self.failure = self.failure orelse err;
+        if (self.effect_depth == self.effect_scopes.len) return error.EffectStackFull;
+        var entry: shader_effects.Entry = .{ .program = effect.program, .values = effect.values.*, .target = .element, .box = self.absolute(box), .margin = effect.margin, .opacity = options.opacity };
+        try shader_effects.validate(entry);
+        entry.scale = self.size.scale;
+        _ = try shader_effects.carrier(entry.scale);
+        if (self.context.shader_workspace == null or self.group_depth == layers.max_depth) {
+            self.context.shader_unprepared += 1;
+            self.effect_scopes[self.effect_depth] = false;
+            self.effect_depth += 1;
+            return;
+        }
+        try self.context.command_buffer.beginEffect(entry);
+        self.group_clip_base[self.group_depth] = self.clips.len;
+        self.group_bounds[self.group_depth] = entry.captureBounds();
+        self.group_geometry_passthrough |= @as(u8, 1) << @intCast(self.group_depth);
+        self.group_depth += 1;
+        self.effect_scopes[self.effect_depth] = true;
+        self.effect_depth += 1;
+    }
+    pub fn endEffect(self: *Frame) !void {
+        errdefer |err| self.failure = self.failure orelse err;
+        if (self.effect_depth == 0) return error.EffectStackEmpty;
+        if (self.effect_scopes[self.effect_depth - 1]) {
+            if (self.group_depth == 0 or self.group_geometry_passthrough & (@as(u8, 1) << @intCast(self.group_depth - 1)) == 0) return error.UnbalancedEffect;
+            try self.context.command_buffer.endEffect();
+            self.group_depth -= 1;
+            self.group_geometry_passthrough &= ~(@as(u8, 1) << @intCast(self.group_depth));
+        }
+        self.effect_depth -= 1;
+    }
+    /// Rewrite what has been drawn beneath `bounds` with `effect`'s program,
+    /// inside its rounded rectangle; reads reach `effect.margin` beyond it.
+    /// Like `backdropEffect` it sees only the current scope's content.
+    /// Without the shader and backdrop workspaces it draws nothing.
+    pub fn backdropShader(self: *Frame, bounds: Rect, radius: f32, effect: ShaderEffect) void {
+        self.recordBackdropShader(bounds, radius, effect) catch |err| {
+            self.failure = self.failure orelse err;
+        };
+    }
+    fn recordBackdropShader(self: *Frame, bounds: Rect, radius: f32, effect: ShaderEffect) !void {
+        const entry: shader_effects.Entry = .{ .program = effect.program, .values = effect.values.*, .target = .backdrop, .box = self.absolute(bounds), .margin = effect.margin, .radius = radius };
+        try shader_effects.validate(entry);
+        if (self.context.shader_workspace == null or self.context.backdrop_workspace == null) {
+            self.context.shader_unprepared += 1;
+            return;
+        }
+        try self.context.command_buffer.backdropShader(entry);
+    }
     fn recordBackdrop(self: *Frame, bounds: Rect, radius: f32, effect: BackdropEffect) !void {
         const palette = self.currentTheme().palette;
         const preferences = self.context.backdrop_preferences;
@@ -3954,6 +4097,9 @@ fn nativeRect(bounds: affine.Rect) Rect {
 
 test {
     _ = gdi;
+    _ = effects;
+    _ = canvas;
+    _ = frame_stats;
     _ = input;
     _ = layout;
     _ = grid;
