@@ -497,6 +497,8 @@ try std.testing.expectEqualStrings("Sans", h.focused().?.text);
 
 - 指针：`press(x, y, modifiers)`、`moveTo(x, y)`、`release(x, y)` 与 `cancelPointer()` 按 Host 相同的捕获规则重放一次按下，`drag(from_x, from_y, to_x, to_y, steps)` 把它们连起来；`systemDragOver(point, files, text)` 与 `systemDrop(point, data)` 模拟其他应用的拖放。
 
+- 像素：`image(surface)` 把上一遍渲染按窗口的样子画出来（背景 `Options.background` 或主题背景，加上视图绘制的内容），由 `ui.offscreen.Surface` 按它的尺寸和缩放画成一张图片，用于截图比对和像素检查；需要 `attachInput`，返回的 `Snapshot` 由调用方关闭。离屏表面需要应用的主线程（`z.App`），所以它用在 smoke 与工具里，而不是单元测试中；`smoke-view` 用它检查面板与背景的颜色。
+
 带 `input` 的嵌入叶子在 Harness 中同样收到 `hoverAt`/`leave`、`clickAt`、上面的指针、`wheel` 与 `key` 的输入，`announcement()` 返回最近的播报文字。除此之外，Harness 把嵌入叶子当作不可交互的节点，不验证原生命中、文本输入、可访问性或原生捕获；这些仍由隐藏窗口 smoke 和原生检查覆盖。
 
 ## 背景效果

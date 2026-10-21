@@ -581,6 +581,46 @@ fn runTimer(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(wake.NativeCounts{}, wake.nativeCounts());
 }
 
+/// A harness frame drawn to pixels: the background, a colored panel and a
+/// button, as a window would show them.
+const Swatch = struct {
+    fn build(_: *Swatch, v: *view.View) anyerror!void {
+        try v.column(.{ .width = 40, .height = 30, .background = 0x2050c0 });
+        try v.end();
+        _ = try v.button("Go", .{});
+    }
+    fn draw(_: *anyopaque, _: *ui.Frame) void {}
+    fn action(_: *anyopaque, _: u64) void {}
+};
+
+fn runImage(allocator: std.mem.Allocator) !void {
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    var state: Swatch = .{};
+    var storage: view.Storage(8, 64) = .{};
+    var h = view.Harness.init(&state, Swatch.build, storage.buffers(), .{ .bounds = .{ .x = 0, .y = 0, .width = 100, .height = 80 }, .options = .{ .background = 0xffffff } });
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Swatch.draw, Swatch.action);
+    try h.attachInput(&context);
+    const surface = try ui.offscreen.Surface.create(app, allocator, .{ .size = .{ .width = 200, .height = 160, .scale = 2 } });
+    defer surface.close() catch unreachable;
+    const snapshot = try h.image(surface);
+    defer snapshot.close() catch unreachable;
+    const shown = try snapshot.view();
+    const level = shown.levels[0];
+    try std.testing.expectEqual(@as(u32, 200), level.width);
+    const pixelAt = struct {
+        fn get(l: @TypeOf(level), x: usize, y: usize) u32 {
+            const value = l.pixels[y * l.stride + x * 4 ..][0..4];
+            return @as(u32, value[0]) | (@as(u32, value[1]) << 8) | (@as(u32, value[2]) << 16);
+        }
+    }.get;
+    // BGRA: the panel inside its 40 x 30 DIP box, the background beside it.
+    const panel = (try h.find(.{ .kind = .column, .nth = 1 })).bounds;
+    try std.testing.expectEqual(@as(u32, 0x2050c0), pixelAt(level, @intFromFloat((panel.x + 10) * 2), @intFromFloat((panel.y + 10) * 2)));
+    try std.testing.expectEqual(@as(u32, 0xffffff), pixelAt(level, 196, 156));
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
@@ -588,10 +628,11 @@ pub fn main() !void {
     try runCollections(gpa.allocator());
     try runPictures(gpa.allocator());
     try runTimer(gpa.allocator());
+    try runImage(gpa.allocator());
     if (builtin.os.tag == .windows) {
         try @import("view_uia.zig").run(gpa.allocator());
         try @import("view_uia.zig").runCollections(gpa.allocator());
     }
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, embedded leaf input, routed pages with history buttons, deferred icon and SVG preparation, timed toast expiry and keyed identity passed\n", .{});
+    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, embedded leaf input, routed pages with history buttons, deferred icon and SVG preparation, timed toast expiry, keyed identity and harness frames drawn to pixels passed\n", .{});
 }

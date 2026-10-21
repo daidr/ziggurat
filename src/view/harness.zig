@@ -164,6 +164,27 @@ pub const Harness = struct {
         context.input_state.commitFrame();
     }
 
+    /// The last render as a window would show it: the background and what
+    /// the view paints, drawn by `surface` at its size and scale, for
+    /// snapshots and pixel checks. Needs `attachInput`; the caller closes
+    /// the image. The surface needs the app's thread, so this runs where an
+    /// app does, as smoke tests and tools, not in unit tests.
+    pub fn image(self: *Harness, surface: *ui.offscreen.Surface) anyerror!*ui.offscreen.Snapshot {
+        const context = self.input orelse return error.NoInput;
+        const size = (try surface.stats()).size;
+        _ = try context.setTheme(self.config.theme);
+        context.command_buffer.reset();
+        defer context.command_buffer.reset();
+        context.input_state.beginFrame();
+        errdefer context.input_state.cancelFrame();
+        var frame: ui.Frame = .{ .context = context, .size = size };
+        frame.clear(self.config.options.background orelse self.config.theme.palette.background);
+        try self.view.paint(&frame);
+        if (frame.failure) |err| return err;
+        context.input_state.commitFrame();
+        return surface.render(&context.command_buffer);
+    }
+
     /// The node holding keyboard focus after the last render, if any.
     pub fn focused(self: *const Harness) ?*const Node {
         const id = self.focusId() orelse return null;
