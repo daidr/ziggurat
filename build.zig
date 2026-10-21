@@ -2784,6 +2784,7 @@ const app_examples = [_]Example{
     .{ .name = "flyout", .path = "examples/flyout.zig" },
     .{ .name = "menubar-flyout", .path = "examples/menubar_flyout.zig" },
     .{ .name = "markdown-chat", .path = "examples/markdown_chat.zig" },
+    .{ .name = "confetti", .path = "examples/confetti.zig" },
     .{ .name = "hybrid", .path = "examples/hybrid.zig", .web = true },
 };
 
