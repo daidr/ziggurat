@@ -704,6 +704,11 @@ pub fn build(b: *std.Build) void {
         .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "pointer_classifier", .module = pointer_classifier } },
     });
     const declarative_view = b.addModule("ziggurat_view", .{ .root_source_file = b.path("src/view/root.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui }, .{ .name = "ziggurat_animation", .module = animation } } });
+    const view_graphics = b.addModule("ziggurat_view_graphics", .{ .root_source_file = b.path("src/view/graphics.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
+        .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_vector", .module = vector },
+        .{ .name = "ziggurat_svg", .module = svg },
+    } });
     const view_timer = b.addModule("ziggurat_view_timer", .{ .root_source_file = b.path("src/view/timer.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat", .module = core },      .{ .name = "ziggurat_view", .module = declarative_view },
         .{ .name = "ziggurat_wake", .module = wake },
@@ -775,6 +780,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_view", .module = declarative_view },
             .{ .name = "ziggurat_wake", .module = wake },
             .{ .name = "ziggurat_view_timer", .module = view_timer },
+            .{ .name = "ziggurat_view_graphics", .module = view_graphics },
         });
         addSmoke(b, "smoke-animation-ui", "tests/animation_ui_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
@@ -2661,6 +2667,11 @@ pub fn build(b: *std.Build) void {
         const run_chart_view_tests = b.addRunArtifact(chart_view_tests);
         test_step.dependOn(&run_chart_view_tests.step);
         b.step("test-chart-view", "Run chart view arrangement, storage and preparation key tests").dependOn(&run_chart_view_tests.step);
+        const view_graphics_tests = b.addTest(.{ .root_module = view_graphics });
+        check.dependOn(&view_graphics_tests.step);
+        const run_view_graphics_tests = b.addRunArtifact(view_graphics_tests);
+        test_step.dependOn(&run_view_graphics_tests.step);
+        b.step("test-view-graphics", "Run view icon mask and SVG picture preparation tests").dependOn(&run_view_graphics_tests.step);
         const view_pickers = b.addModule("ziggurat_view_pickers", .{ .root_source_file = b.path("src/view/pickers.zig"), .target = target, .optimize = optimize, .imports = &.{
             .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
             .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_i18n", .module = i18n },

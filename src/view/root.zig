@@ -26,6 +26,22 @@ pub const ImageView = ui.drawing.ImageView;
 pub const Font = ui.Font;
 pub const SortDirection = ui.widgets.SortDirection;
 pub const ItemRequest = ui.widgets.ItemRequest;
+const direction_controls = @import("direction.zig");
+const router_controls = @import("router.zig");
+const image_nodes = @import("image.zig");
+pub const Direction = direction_controls.Direction;
+pub const Router = router_controls.Router;
+pub const RouteEntry = router_controls.RouteEntry;
+pub const Route = router_controls.Route;
+pub const RouteError = router_controls.Error;
+pub const Icon = image_nodes.Icon;
+pub const Fit = image_nodes.Fit;
+pub const ImageOptions = image_nodes.ImageOptions;
+pub const IconOptions = image_nodes.IconOptions;
+pub const SvgPicture = image_nodes.SvgPicture;
+pub const IconPainter = image_nodes.IconPainter;
+pub const Graphic = image_nodes.Graphic;
+pub const icons = @import("icons.zig");
 
 pub const Error = error{ InvalidField, TooManyNodes, TextFull, NestingTooDeep, UnbalancedContainer, NotContainer, Busy, InvalidRange, InvalidValue, InvalidText, InvalidSplit, SelectionFull } || layout.Error;
 
@@ -118,6 +134,9 @@ pub const Style = struct {
     /// Scroll edge effects over the top and bottom of a clipping container,
     /// such as a scroll container, painted above its children.
     edges: Edges = .{},
+    /// Lay this node and what is built inside it out in this direction,
+    /// whatever the direction around it; see `direction.zig`.
+    direction: ?Direction = null,
     /// Glass that bends what lies beneath a container through its rim,
     /// painted in place of `material` and `background` once
     /// `Host.prepareShaderEffects` has run; until then those draw.
@@ -437,7 +456,7 @@ pub const Measurer = struct {
     }
 };
 
-pub const Kind = enum { column, row, radio_group, segmented, tab_list, list_box, toolbar, breadcrumbs, accordion, field, fieldset, split, scroll, grid, search, popup, popover, toasts, toast, dialog, tree, tree_item, table, table_header, table_row, token_field, combo_field, drag_area, drag_source, drop_target, text, note, badge, spacer, button, link, nav_button, combo_box, popup_button, checkbox, radio, segment, tab, list_item, disclosure, toggle_switch, progress, meter, slider, stepper, rating, avatar, embed, tree_row, column_header, token, combo_toggle, loading, editable_text };
+pub const Kind = enum { column, row, radio_group, segmented, tab_list, list_box, toolbar, breadcrumbs, accordion, field, fieldset, split, scroll, grid, search, popup, popover, toasts, toast, dialog, tree, tree_item, table, table_header, table_row, token_field, combo_field, drag_area, drag_source, drop_target, text, note, badge, spacer, button, link, nav_button, combo_box, popup_button, checkbox, radio, segment, tab, list_item, disclosure, toggle_switch, progress, meter, slider, stepper, rating, avatar, embed, tree_row, column_header, token, combo_toggle, loading, editable_text, route, image, svg, icon };
 
 /// Where a popover goes beside its anchor: below it by default, starting
 /// at its left edge. It moves to the opposite side when that side has more
@@ -743,6 +762,12 @@ pub const Node = struct {
     badge: []const u8 = "",
     /// How a dialog is placed and dismissed.
     modal: DialogOptions = .{},
+    /// Laid out right to left: a container mirrors its children.
+    rtl: bool = false,
+    /// The router whose page a route node shows.
+    router: ?*Router = null,
+    /// What an image, SVG or icon shows.
+    graphic: ?Graphic = null,
     parent: u32 = none,
     first_child: u32 = none,
     last_child: u32 = none,
@@ -757,7 +782,7 @@ pub const Node = struct {
 
     pub fn isContainer(self: *const Node) bool {
         return switch (self.kind) {
-            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .dialog, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target => true,
+            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .dialog, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target, .route => true,
             else => false,
         };
     }
@@ -1178,6 +1203,15 @@ pub const View = struct {
     /// tokens wrap at the right width when measured.
     flow_widths: [max_token_fields]struct { id: u64, width: f32 } = undefined,
     flow_count: usize = 0,
+    /// Direction of the root, unless its style gives one; see `Options`.
+    layout_direction: Direction = .ltr,
+    /// Draws icon nodes; see `Options.icons`.
+    icons: ?IconPainter = null,
+    /// Which router takes the history keys in this pass.
+    routes: router_controls.PassState = .{},
+    /// A tab or segment a mirrored arrow key moves to; it takes focus after
+    /// the pass that selects it.
+    arrow_focus: ?u64 = null,
 
     pub fn init(buffers: Buffers) View {
         return .{ .buffers = buffers };
@@ -1202,7 +1236,8 @@ pub const View = struct {
         self.binding_count = 0;
         self.track_len = 0;
         self.tip_index = none;
-        self.buffers.nodes[0] = .{ .kind = .column, .id = root_seed, .style = root_style, .end = 1 };
+        self.routes = .{};
+        self.buffers.nodes[0] = .{ .kind = .column, .id = root_seed, .style = root_style, .end = 1, .rtl = (root_style.direction orelse self.layout_direction) == .rtl };
     }
 
     pub fn root(self: *const View) *const Node {
@@ -1256,9 +1291,9 @@ pub const View = struct {
         var effective = style;
         effective.enabled = style.enabled and parent.style.enabled;
         self.buffers.nodes[index] = .{ .kind = kind, .id = self.identity(parent, kind, style), .style = effective, .parent = parent_index, .end = index + 1, .semantic_parent = switch (parent.kind) {
-            .toolbar, .breadcrumbs, .accordion, .fieldset, .search, .toast, .dialog, .table_header, .table_row, .token_field, .combo_field => parent.id,
+            .toolbar, .breadcrumbs, .accordion, .fieldset, .search, .toast, .dialog, .table_header, .table_row, .token_field, .combo_field, .route => parent.id,
             else => parent.semantic_parent,
-        }, .field = if (parent.kind == .field) parent_index else parent.field, .collection = if (parent.kind == .tree or parent.kind == .table) parent_index else parent.collection, .row = if (parent.kind == .table_row) parent_index else parent.row };
+        }, .rtl = if (style.direction) |value| value == .rtl else parent.rtl, .field = if (parent.kind == .field) parent_index else parent.field, .collection = if (parent.kind == .tree or parent.kind == .table) parent_index else parent.collection, .row = if (parent.kind == .table_row) parent_index else parent.row };
         if (parent.last_child == none) parent.first_child = index else self.buffers.nodes[parent.last_child].next_sibling = index;
         parent.last_child = index;
         parent.child_count += 1;
@@ -1337,6 +1372,22 @@ pub const View = struct {
     pub const editableText = editable_controls.editableText;
     /// A find bar over application-owned matches; see `find_bar.zig`.
     pub const findBar = find_bar_controls.findBar;
+    /// The page a router shows, as a column; see `router.zig`.
+    pub const route = router_controls.route;
+    /// Buttons going back and forward in a router's history.
+    pub const backButton = router_controls.backButton;
+    pub const forwardButton = router_controls.forwardButton;
+    /// Pictures and icons; see `image.zig`.
+    pub const image = image_nodes.image;
+    pub const svg = image_nodes.svg;
+    pub const icon = image_nodes.icon;
+    /// The direction of what is built now: that of the container it goes
+    /// in, for widgets of an application's own that draw what points
+    /// along the line.
+    pub fn currentDirection(self: *const View) Direction {
+        if (self.depth == 0) return self.layout_direction;
+        return if (self.buffers.nodes[self.stack[self.depth - 1]].rtl) .rtl else .ltr;
+    }
     /// True when a dialog is shown and `node` is outside it, so it takes no
     /// input until the dialog closes.
     pub fn inert(self: *const View, node: *const Node) bool {
@@ -1425,6 +1476,7 @@ pub const View = struct {
             }
         }
         node.end = self.len;
+        if (node.kind == .route) try router_controls.close(self, index);
         if (node.kind == .dialog and node.checked) if (self.dialog_opened) |id| if (id == node.id) {
             self.dialog_opened = null;
             // Focus moves into a dialog as it opens, unless its content
@@ -2479,8 +2531,11 @@ pub const View = struct {
             return .handled;
         };
         if (self.matchBinding(input, true)) |action| return .{ .deliver = .{ .action = action } };
-        if (self.routeRowKey(input)) |route| return route;
-        if (self.routeTokenKey(input)) |route| return route;
+        // Right to left, Left and Right move the way they point.
+        const visual = direction_controls.visualInput(self, input);
+        if (self.routeRowKey(visual)) |route_value| return route_value;
+        if (self.routeTokenKey(visual)) |route_value| return route_value;
+        if (direction_controls.routeGroupArrow(self, input)) |route_value| return route_value;
         if (anchor) |focused| {
             const arrow = input.key == .down or input.key == .up;
             if (focused.combo and arrow and !mods.control and !mods.super and !mods.shift) return .{ .deliver = .{ .action = focused.id } };
@@ -3331,6 +3386,11 @@ pub const View = struct {
     pub fn finish(self: *View) Error!void {
         if (self.depth != 1) return error.UnbalancedContainer;
         self.buffers.nodes[0].end = self.len;
+        try router_controls.finish(self);
+        if (self.arrow_focus) |id| {
+            self.arrow_focus = null;
+            if (self.restore == null) self.restore = id;
+        }
         // A press on something no longer built is no longer followed; a
         // leaf that is gone is never called again.
         if (self.capture) |capture| if (!self.captureBuilt(capture.target)) {
@@ -3369,6 +3429,7 @@ pub const View = struct {
 
     fn intrinsic(node: *const Node, theme: Theme, measurer: Measurer) layout.Measurement {
         if (node.embed) |content| return content.measure(content.context, theme);
+        if (node.graphic != null) return image_nodes.measure(node);
         const metrics = theme.metrics;
         const font = if (node.kind == .text) node.style.font else null;
         const text_size = if (node.text.len > 0) measurer.textSize(node.text, font) else if (font) |value| measurer.textSize("", value) else Size{ .width = 0, .height = Measurer.line_height };
@@ -3397,7 +3458,7 @@ pub const View = struct {
             .rating => .{ .width = @as(f32, @floatCast(node.range.maximum)) * Measurer.line_height, .height = Measurer.line_height + metrics.content_inset },
             .slider => .{ .width = 200, .height = metrics.thumb_size + 2 * metrics.content_inset },
             .stepper => .{ .width = 4 * (Measurer.line_height + metrics.content_inset), .height = Measurer.line_height + metrics.content_inset },
-            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .dialog, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target, .embed => unreachable,
+            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .dialog, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target, .route, .embed, .image, .svg, .icon => unreachable,
         };
         const minimum: Size = switch (node.kind) {
             .progress, .meter, .slider, .spacer => .{ .width = 0, .height = size.height },
@@ -3954,6 +4015,9 @@ pub const View = struct {
                 .split => splitPanes(node, rects),
                 else => _ = try layout.arrange(node.bounds, options(node), items, rects),
             }
+            // Right to left, children mirror across the container; a split
+            // keeps its first pane at the left, as its divider's value does.
+            if (node.rtl and node.kind != .split) direction_controls.mirror(rects, node.bounds);
             var child = node.first_child;
             var i: usize = 0;
             while (child != none) : (child = all[child].next_sibling) {
@@ -3991,7 +4055,23 @@ pub const View = struct {
         }
         const anchor = self.buffers.nodes[node.anchor].bounds;
         if (!node.checked) return .{ .x = anchor.x, .y = anchor.y + anchor.height, .width = 0, .height = 0 };
-        if (node.kind == .popover) return placePopover(root_bounds, anchor, preferred, node.placement);
+        if (node.kind == .popover) {
+            // Right to left, a popover's start is the anchor's right edge.
+            var placement = node.placement;
+            if (node.rtl) {
+                placement.alignment = switch (placement.alignment) {
+                    .start => .end,
+                    .center => .center,
+                    .end => .start,
+                };
+                placement.side = switch (placement.side) {
+                    .left => .right,
+                    .right => .left,
+                    else => placement.side,
+                };
+            }
+            return placePopover(root_bounds, anchor, preferred, placement);
+        }
         const width = @min(@max(anchor.width, preferred.width), root_bounds.width);
         const below = root_bounds.y + root_bounds.height - (anchor.y + anchor.height + popup_gap);
         const above = anchor.y - popup_gap - root_bounds.y;
@@ -4004,7 +4084,8 @@ pub const View = struct {
             height = @min(height, @max(0, below));
             y = anchor.y + anchor.height + popup_gap;
         }
-        const x = std.math.clamp(anchor.x, root_bounds.x, @max(root_bounds.x, root_bounds.x + root_bounds.width - width));
+        const start = if (node.rtl) anchor.x + anchor.width - width else anchor.x;
+        const x = std.math.clamp(start, root_bounds.x, @max(root_bounds.x, root_bounds.x + root_bounds.width - width));
         return .{ .x = x, .y = y, .width = width, .height = height };
     }
 
@@ -4167,7 +4248,7 @@ pub const View = struct {
             if (control.name.len == 0) control.name = annotation.name;
             if (control.description.len == 0) control.description = node.tooltip;
             switch (node.kind) {
-                .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .dialog, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target => {
+                .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .dialog, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target, .route => {
                     switch (node.kind) {
                         .radio_group, .segmented => try target.radioGroup(node.id, bounds, style.name),
                         .list_box => try target.listBox(node.id, bounds, style.name),
@@ -4176,6 +4257,7 @@ pub const View = struct {
                         .breadcrumbs => try target.navigation(node.id, bounds, style.name, node.semantic_parent),
                         .accordion => try target.group(node.id, bounds, style.name, node.semantic_parent),
                         .fieldset => try target.group(node.id, bounds, node.text, node.semantic_parent),
+                        .route => try target.group(node.id, bounds, style.name, node.semantic_parent),
                         .search => try target.search(node.id, bounds, style.name, node.semantic_parent),
                         .tree => try target.treeView(node.id, bounds, style.name, node.selection.?.mode == .multiple, node.semantic_parent),
                         .table => try target.dataTable(node.id, bounds, style.name, node.selection.?.mode == .multiple, node.semantic_parent),
@@ -4212,7 +4294,7 @@ pub const View = struct {
                         scope_depth += 1;
                     }
                 },
-                .text => target.labelFont(bounds, node.text, style.color orelse if (!style.enabled) theme.palette.disabled_text else if (node.row != none and all[node.row].checked) theme.palette.on_accent else theme.palette.text, style.font orelse .{}),
+                .text => target.labelFont(if (node.rtl) trailing(bounds, node.measured.preferred.width) else bounds, node.text, style.color orelse if (!style.enabled) theme.palette.disabled_text else if (node.row != none and all[node.row].checked) theme.palette.on_accent else theme.palette.text, style.font orelse .{}),
                 .tree_row => {
                     var row_control = control;
                     // The badge is announced with the row.
@@ -4231,11 +4313,16 @@ pub const View = struct {
                     try target.tokenItem(node.id, tokenRemoveId(node.id), bounds, node.text, .{ .control = token_options });
                 },
                 .combo_toggle => try target.comboToggle(node.id, bounds, all[node.parent].checked, control),
-                .note => target.label(bounds, node.text, if (node.invalid) theme.palette.caution else theme.palette.disabled_text),
+                .note => target.label(if (node.rtl) trailing(bounds, node.measured.preferred.width) else bounds, node.text, if (node.invalid) theme.palette.caution else theme.palette.disabled_text),
                 .spacer => {},
                 .button => try target.buttonWithOptions(node.id, bounds, node.text, control),
                 .link => try target.link(node.id, bounds, node.text, control),
-                .nav_button => try target.navButton(node.id, bounds, node.direction, node.text, control),
+                .nav_button => try target.navButton(node.id, bounds, if (node.rtl) switch (node.direction) {
+                    .back => .forward,
+                    .forward => .back,
+                    else => node.direction,
+                } else node.direction, node.text, control),
+                .image, .svg, .icon => try image_nodes.paint(self, target, node, theme),
                 .combo_box, .popup_button => try target.comboBox(node.id, bounds, node.text, node.checked, control),
                 .avatar => try target.avatar(node.id, bounds, node.text, .{ .image = node.image, .color = style.background, .semantic_parent = node.semantic_parent }),
                 .badge => {
@@ -4420,7 +4507,8 @@ pub const View = struct {
         const model = node.scroll orelse return;
         const b = node.bounds;
         if (b.width < 8 or b.height < 8) return;
-        const track: Rect = .{ .x = b.x + b.width - 6, .y = b.y + 2, .width = 4, .height = b.height - 4 };
+        // Right to left, the indicator runs along the left edge.
+        const track: Rect = .{ .x = if (node.rtl) b.x + 2 else b.x + b.width - 6, .y = b.y + 2, .width = 4, .height = b.height - 4 };
         const bar = (model.scrollbar(.vertical, track, 16) catch return) orelse return;
         target.roundedRect(bar.thumb, 2, ui.Color.rgb(theme.palette.track));
     }
@@ -4505,6 +4593,11 @@ pub fn announcementId(serial: u64) u64 {
 pub fn tooltipId(id: u64) u64 {
     const value = std.hash.Wyhash.hash(id, "tooltip");
     return if (value == 0) 1 else value;
+}
+/// The end of `rect` that `width` takes, for text starting at the right.
+fn trailing(rect: Rect, width: f32) Rect {
+    const used = @min(rect.width, width);
+    return .{ .x = rect.x + rect.width - used, .y = rect.y, .width = used, .height = rect.height };
 }
 fn inset(rect: Rect, amount: f32) Rect {
     return .{ .x = rect.x + amount, .y = rect.y + amount, .width = @max(0, rect.width - 2 * amount), .height = @max(0, rect.height - 2 * amount) };
@@ -4626,6 +4719,11 @@ pub const Options = struct {
     /// The time passes see; the default is a monotonic timer started at the
     /// Host's first pass.
     clock: ?Clock = null,
+    /// The direction the window reads in, usually the locale's:
+    /// `.direction = view.Direction.of(locale.direction())`.
+    direction: Direction = .ltr,
+    /// Draws `View.icon` nodes, such as `ziggurat_view_graphics.Icons`.
+    icons: ?IconPainter = null,
 };
 
 /// Owns the ui.Context for one window. Keep Host at a stable address from
@@ -4656,6 +4754,8 @@ pub const Host = struct {
     pub fn init(state: anytype, comptime build: fn (@TypeOf(state), *View) anyerror!void, buffers: Buffers, options: Options) Host {
         var view = View.init(buffers);
         view.tooltip_delay = options.tooltip_delay;
+        view.layout_direction = options.direction;
+        view.icons = options.icons;
         return .{
             .context = ui.Context.init(undefined, draw, onAction),
             .view = view,
@@ -4695,6 +4795,13 @@ pub const Host = struct {
     /// `ui.Context.prepareBackdropEffects`. Call after `attach`.
     pub fn prepareBackdropEffects(self: *Host, allocator: std.mem.Allocator, options: ui.backdrop_effects.Options) !void {
         try self.context.prepareBackdropEffects(allocator, options);
+    }
+    /// Lay the window out in `value` from the next pass, such as after the
+    /// application's language changed, and repaint.
+    pub fn setDirection(self: *Host, value: Direction) void {
+        self.options.direction = value;
+        self.view.layout_direction = value;
+        self.invalidate();
     }
     /// Allocate the workspace that shader effects run in (see
     /// `ui.Context.prepareShaderEffects`) and draw `Style.opacity`, `pose`
@@ -4823,6 +4930,19 @@ pub const Host = struct {
                 return false;
             },
             .pointer_down => |press| {
+                // A mouse's back and forward buttons act as the keyboard's
+                // Back and Forward keys, which routers bind.
+                if (press.button == .back or press.button == .forward) {
+                    self.view.focus = self.context.input_state.focused;
+                    switch (self.view.routeKey(.{ .key = if (press.button == .back) .browser_back else .browser_forward, .modifiers = press.modifiers })) {
+                        .deliver => |value| {
+                            self.deliver(value);
+                            self.invalidate();
+                            return true;
+                        },
+                        else => return false,
+                    }
+                }
                 if (press.button != .primary) return false;
                 const point: Point = .{ .x = press.position.x, .y = press.position.y };
                 switch (self.view.pointerDown(point)) {
@@ -5144,6 +5264,9 @@ const Recorder = struct {
     }
     pub fn stepper(self: *Recorder, id: u64, bounds: Rect, _: f64, _: Range, _: ui.widgets.Options) !void {
         self.push(.stepper, id, bounds, false);
+    }
+    pub fn graphic(self: *Recorder, kind: Kind, id: u64, bounds: Rect) !void {
+        self.push(kind, id, bounds, false);
     }
     pub fn embedded(self: *Recorder, id: u64, bounds: Rect) !void {
         self.push(.embed, id, bounds, false);
@@ -5531,6 +5654,11 @@ test "capacity and balance failures are reported" {
 test {
     _ = @import("harness.zig");
     _ = @import("controls_tests.zig");
+    _ = @import("router.zig");
+    _ = @import("image.zig");
+    _ = @import("icons.zig");
+    _ = @import("direction.zig");
+    _ = @import("navigation_tests.zig");
 }
 
 test "embedded leaves measure themselves and paint in order" {

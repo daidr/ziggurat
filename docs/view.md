@@ -290,6 +290,76 @@ if (try v.findBar(&find, query_field.embed(), matches, .{}, .{ .key = 1 })) |eve
 
 `bindKey(chord, window, action)` 把一个 `ui.widgets.Chord` 绑定到动作 id：`window` 为 false 时只在刚加入的节点持有焦点时生效，为 true 时在整个窗口生效。按下时以 `.action = action` 在单独的一遍交付，由构建用 `takeEvent(action)` 取走，先于任何控件看到这个键。焦点上的绑定优先于窗口绑定，先绑定的优先；打开的弹出列表先处理按键，焦点上的绑定先于浮层与对话框的 Escape。焦点输入正在组合时忽略，对话框显示时只有其中的绑定生效。绑定每一遍都要重新建立，每帧最多 `view.max_key_bindings`（32）个。上面的可编辑文本和查找栏都用它实现。
 
+### 路由与历史按钮
+
+- `Router` 是一个窗口（或窗口一部分）的页面历史，像浏览器为一个标签页保存的那样。应用持有 Router 和它使用的 `RouteEntry` 数组，`Router.init(&entries, "/")` 之后保持地址稳定，不分配内存。位置是带可选查询的路径，例如 "/notes/42?tab=info"，最长 `view.max_location`（256）字节。
+- `push(target)` 前往当前页之后的页并丢弃其后的历史；`target` 是绝对路径，或像网页链接那样相对当前页解析（"edit"、"../settings"、"?tab=info"），其中的 `.` 与 `..` 被消去，控制字符与 `#` 返回 `InvalidLocation`。前往当前位置什么也不做。`replace(target)` 原地替换当前页，Back 不会回到它。`back`、`forward` 与 `go(n)` 在历史中移动并停在两端，`canGoBack`/`canGoForward` 判断能否移动。历史满时丢弃最旧的条目。`location`、`path`、`query(name)` 与 `title` 读当前页，`entryAt(offset)` 读前后的条目，用于应用自己的历史菜单。
+- `route(&router, style)` 与 `end` 配对构建当前页：一个按页键控的列，不同页的节点从不共享身份；路径相同、查询不同的位置是同一页，保留身份和焦点。默认 `grow = 1` 并横向拉伸。返回的 `Route` 用 `match(pattern)` 按模式区分路径：两条斜线之间的部分要么与路径相同，要么是 `{name}`（任一部分），末尾的 `{name...}` 取余下的路径（可以为空），尾部斜线无关紧要，各部分按原样比较，不解码转义。用 `{name...}` 匹配的页是一个布局：只在余下部分不同的页共享它的节点身份，因此布局内的侧栏或标签页保持状态。`param(name)` 与 `query(name)` 读出取值。`title(text)` 给页面命名：它是页面的可访问名称，显示时播报，并随历史条目保存（最长 96 字节，在字符边界截断）。在构建页面内容之前调用 `match`。
+- 焦点在离开的页里时，前往另一页把焦点移入新页：移到该页上次显示时持有焦点的控件，否则移到它的第一个控件。焦点在页外时（例如用侧栏选择页面）焦点不动，改为播报新页的标题。
+- Alt+Left 与 Alt+Right（从右到左时互换）、键盘的浏览器后退/前进键和鼠标的后退/前进侧键在持有焦点的路由中后退与前进，焦点不在任何路由中时作用于窗口中第一个构建的路由。到达历史两端时这些键留给其他控件。Backspace 不导航。
+- `backButton(&router, style)` 与 `forwardButton(&router, style)` 加入名为 "Back"/"Forward"（`Style.name` 可覆盖）的导航按钮，在历史两端禁用，从右到左时箭头指向另一侧；移动历史的那一遍返回 true。
+
+```zig
+var entries: [32]view.RouteEntry = undefined;
+var router = try view.Router.init(&entries, "/notes");
+
+try v.toolbar(.{});
+_ = try v.backButton(&router, .{});
+_ = try v.forwardButton(&router, .{});
+try v.end();
+const page = try v.route(&router, .{});
+if (page.match("/notes")) {
+    page.title("全部笔记");
+    for (notes) |note| if (try v.button(note.title, .{ .key = note.id })) try router.push(note.path);
+} else if (page.match("/notes/{id}")) {
+    page.title("笔记");
+    try showNote(v, page.param("id"));
+} else if (page.match("/settings/{section...}")) {
+    page.title("设置");
+    try settings(v, page.param("section"));
+}
+try v.end();
+```
+
+启用 `-Daccessibility=true` 时，页面是以标题命名的 Group，历史按钮是 Button。
+
+### 图片、SVG 与图标
+
+- `image(picture, options, style)` 显示一张已解码、准备并上传的位图（`ImageView`，见[图片](images.md)），自然尺寸是第 0 级的像素数作为 DIP；`svg(picture, options, style)` 显示一个按布局尺寸绘制的矢量图；`icon(which, options, style)` 显示内置图标集中的一个。它们都是不接收输入的叶子。`Style.width`/`height` 覆盖自然尺寸；图片与 SVG 在拥挤的行中可以缩到零，图标保持自身大小。
+- `ImageOptions.fit` 决定图片如何填充盒子：`contain`（默认，保持比例放进盒子）、`cover`（保持比例盖满盒子，超出部分裁掉）、`fill`（拉伸到盒子）与 `none`（自身尺寸、居中并裁剪）。`alt` 是给可访问性客户端的替代文字，作为图片的名称；没有 `alt`，或设置 `decorative`，图片是装饰性的，不暴露给可访问性客户端。
+- 图标在 24×24 网格上以 2 单位宽的圆头描边绘制，由 `Style.color` 着色，默认取主题文字色（禁用时为禁用文字色）。`IconOptions` 有 `name`（可访问名称；没有名称时是装饰性的，图标旁有标签时应命名按钮而不是图标）、`size`（默认 20 DIP）与 `mirror`（从右到左时是否镜像，null 时只镜像水平的 chevron 和箭头）。`view.Icon` 列出全部图标：chevron 与箭头的四个方向、close、check、plus、minus、search、menu、more_horizontal、more_vertical、settings、home、info、warning、error_circle、help、star、heart、trash、edit、copy、refresh、download、upload、external_link、folder、file、calendar、user、bell、lock、eye、filter、play 与 pause。图标的路径数据由本项目绘制，`view.icons` 提供 `pathData()` 与 `directional()`。
+- 绘制只读取绘制之前准备好的内容。SVG 与图标由应用提供的绘制器画出：`SvgPicture` 与 `IconPainter` 在 paint 中被调用，不能分配或准备；没有对应尺寸像素的绘制器什么也不画，在绘制之后准备。`ziggurat_view_graphics` 提供这两个绘制器：
+  - `Icons.init(allocator, &host)` 为一个 Host 绘制图标，`host.view.icons = icons.painter()`（或在 `Options.icons` 中传入）。它把图标按物理像素尺寸、缩放与镜像准备成覆盖遮罩，最多保留 `max_icons`（16）个，最久未用的先被替换；遮罩与图片共享渲染器的 32 个驻留槽。
+  - `SvgImage.init(allocator, &host, bytes, options)` 解析一个 SVG 文档，自然尺寸取根元素的 `width`/`height`，否则取 `viewBox`，否则为 24×24，`SvgOptions` 可覆盖。`picture()` 交给 `svg`。它以节点颜色作为 `currentColor`，按绘制的像素尺寸准备一张图片；尺寸或颜色变化后重新准备，失败的准备在尺寸或颜色再次变化前不重试。
+  - 两者都在绘制发现缺少像素时投递一个任务，在主线程上准备并上传后重绘；未变化的视图绘制时不分配。`last_error` 记录第一个错误。在绘制之外、Context 分离之前调用 `deinit` 释放资源。
+
+```zig
+var icons = graphics.Icons.init(allocator, &host);
+host.view.icons = icons.painter();
+var logo = try graphics.SvgImage.init(allocator, &host, logo_bytes, .{});
+defer logo.deinit();
+defer icons.deinit();
+
+try v.icon(.settings, .{}, .{ .color = 0x4a5568 });
+try v.svg(logo.picture(), .{ .alt = "Ziggurat" }, .{ .height = 32 });
+try v.image(photo.view(), .{ .fit = .cover, .alt = "封面" }, .{ .width = 120, .height = 80 });
+```
+
+启用 `-Daccessibility=true` 时，有名称的图片、SVG 与图标在 UIA 上是 Image。
+
+### 从右到左布局
+
+- `Options.direction`（`.ltr` 或 `.rtl`）给出视图的方向，通常来自应用的语言区域：`view.Direction.of(locale.direction())` 接受 `ziggurat_i18n` 的方向，视图模块本身不依赖它。`host.setDirection(value)` 改变方向并重绘；`currentDirection()` 在构建中读出根的方向。任何容器可以用 `Style.direction` 指定自己的方向，其中构建的节点继承它，例如在从右到左的界面中放一段从左到右的代码或数字。
+- 从右到左时，除分栏以外的每个容器在常规布局之后把子节点沿自身边界镜像：行从右侧开始，列的起始对齐是右边缘，左右内边距互换，网格的列从右侧排列，标记输入框从右侧换行。坐标系不镜像：边界、指针位置与绘制中 x 仍向右增长。
+- 文本从盒子右侧开始；弹出列表与锚点右边缘对齐，浮层交换起始与末尾对齐，滚动指示条移到左边缘；后退/前进导航按钮与方向性图标指向另一侧，Alt+Left/Alt+Right 的含义互换。标签页、分段控件、树与标记输入框中 Left/Right 按屏幕上的方向移动；空间方向键导航本来就跟随镜像后的边界。
+
+```zig
+var host = view.Host.init(&state, State.build, storage.buffers(), .{ .direction = view.Direction.of(localizer.direction()) });
+try v.row(.{ .direction = .ltr });
+try v.text("+1 555 0100", .{});
+try v.end();
+```
+
 ## 嵌入与文本输入
 
 `embed(content, style)` 加入一个自己测量、放置和绘制的叶子，用于视图层不建模的内容。`Embed` 提供：
@@ -388,6 +458,8 @@ try std.testing.expectEqualStrings("Sans", h.focused().?.text);
 
 - 时间与浮层：`advance(ns)` 推进测试时钟并重新渲染，`deadline()` 返回上一遍请求的唤醒时刻；`hover(query)`、`hoverAt(x, y)` 与 `leave()` 移动或移走指针，`tooltip()` 返回当前显示的提示文字；`focus(query)` 直接给节点焦点。`key` 先把按键交给打开的列表、按键绑定、对话框或显示的提示，`clickAt` 先让按下经过列表、对话框遮罩与提示的处理，`at` 先查浮在上面的列表、对话框和通知，并跳过对话框之外的节点。渲染遍要求的焦点（例如刚打开的对话框里的第一个控件）在渲染后给出，与 Host 在绘制后给出相同。`click` 也接受可编辑文本的标签。`write` 的大纲带出对话框的打开/关闭、复选框的部分选中，以及侧边栏的标题与徽标。`write` 的大纲带出列表的打开/关闭、高亮项与提示文字。
 
+- 路由与方向：`mouseButton(.back)` 与 `mouseButton(.forward)` 像鼠标侧键那样在历史中移动，返回是否被处理；`setDirection(value)` 改变方向并重新渲染。`write` 的大纲为图片与 SVG 带出填充方式，为镜像的图标带出 `mirrored`。
+
 - 指针：`press(x, y, modifiers)`、`moveTo(x, y)`、`release(x, y)` 与 `cancelPointer()` 按 Host 相同的捕获规则重放一次按下，`drag(from_x, from_y, to_x, to_y, steps)` 把它们连起来；`systemDragOver(point, files, text)` 与 `systemDrop(point, data)` 模拟其他应用的拖放。
 
 带 `input` 的嵌入叶子在 Harness 中同样收到 `hoverAt`/`leave`、`clickAt`、上面的指针、`wheel` 与 `key` 的输入，`announcement()` 返回最近的播报文字。除此之外，Harness 把嵌入叶子当作不可交互的节点，不验证原生命中、文本输入、可访问性或原生捕获；这些仍由隐藏窗口 smoke 和原生检查覆盖。
@@ -431,4 +503,4 @@ if (try v.presentColumn(&state.panel, state.open, .{ .hidden = .{ .y = 12, .scal
 
 ## 当前范围
 
-已提供列、行、网格、纵向滚动容器、浮层与弹出字段、对话框、警告对话框与表单页、侧边栏、可编辑文本、查找栏、三态复选框与复选框组、按键绑定、标签页、分栏、工具栏、分段控件、折叠区、手风琴、面包屑、列表框、树、表格、组合框、可编辑组合框、建议列表、标记输入框、搜索区域、表单字段与字段集、链接、徽标、度量条、评分、导航按钮、头像、提示、通知、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子（通过 `ziggurat_view_text`）可编辑文本字段，以及（通过 `ziggurat_view_pickers`）日历、日期/时间/数字输入与颜色选择器。分栏只接受比例偏好，没有 DIP 偏好、从右到左布局和折叠；工具栏没有溢出菜单。只读组合框不按输入筛选；建议列表与可编辑组合框的筛选由应用完成；表格没有列宽拖动、列重排、冻结列和行头，排序由应用完成；树与表格不做虚拟化，也没有行内编辑；树不能拖动重排，重排一次只移动一项，拖动边缘的自动滚动只随指针移动发生；悬停只用于提示，控件本身没有悬停外观；通知没有进出动画；对话框没有进出动画，一次只显示一个，也不能拖动或改变大小；可编辑文本单击即开始编辑；查找栏不自己搜索，也不高亮匹配；侧边栏的选中行在失去焦点时外观不变。没有虚拟列表和通用动画；玻璃没有按压放大动效。需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。Linux 没有普通控件的 AT-SPI 层，上述可访问性只在 Windows UIA 上提供。
+已提供列、行、网格、纵向滚动容器、浮层与弹出字段、对话框、警告对话框与表单页、侧边栏、可编辑文本、查找栏、三态复选框与复选框组、按键绑定、路由与历史按钮、图片、SVG 与图标、从右到左布局、标签页、分栏、工具栏、分段控件、折叠区、手风琴、面包屑、列表框、树、表格、组合框、可编辑组合框、建议列表、标记输入框、搜索区域、表单字段与字段集、链接、徽标、度量条、评分、导航按钮、头像、提示、通知、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子（通过 `ziggurat_view_text`）可编辑文本字段，以及（通过 `ziggurat_view_pickers`）日历、日期/时间/数字输入与颜色选择器。分栏只接受比例偏好，没有 DIP 偏好和折叠，从右到左时也不镜像；从右到左时基础控件内部（复选框标记的位置、滑块的填充方向、树的缩进与三角）不镜像；路由没有页面过渡动画、历史菜单和转义解码，页面状态由应用持有；工具栏没有溢出菜单。只读组合框不按输入筛选；建议列表与可编辑组合框的筛选由应用完成；表格没有列宽拖动、列重排、冻结列和行头，排序由应用完成；树与表格不做虚拟化，也没有行内编辑；树不能拖动重排，重排一次只移动一项，拖动边缘的自动滚动只随指针移动发生；悬停只用于提示，控件本身没有悬停外观；通知没有进出动画；对话框没有进出动画，一次只显示一个，也不能拖动或改变大小；可编辑文本单击即开始编辑；查找栏不自己搜索，也不高亮匹配；侧边栏的选中行在失去焦点时外观不变。没有虚拟列表和通用动画；玻璃没有按压放大动效。需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。Linux 没有普通控件的 AT-SPI 层，上述可访问性只在 Windows UIA 上提供。

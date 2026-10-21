@@ -67,6 +67,8 @@ pub const Harness = struct {
     pub fn init(state: anytype, comptime build: fn (@TypeOf(state), *View) anyerror!void, buffers: view.Buffers, config: Config) Harness {
         var built = View.init(buffers);
         built.tooltip_delay = config.options.tooltip_delay;
+        built.layout_direction = config.options.direction;
+        built.icons = config.options.icons;
         return .{ .view = built, .build = view.Build.bind(state, build), .config = config };
     }
 
@@ -279,6 +281,23 @@ pub const Harness = struct {
             else => return null,
         };
         return .{ .key = code, .shift = input.modifiers.shift, .control = input.modifiers.control };
+    }
+
+    /// Press a mouse's back or forward button as Host routes it: to the
+    /// history keys that routers bind. Returns whether one took it.
+    pub fn mouseButton(self: *Harness, button: z.PointerButton) anyerror!bool {
+        if (button != .back and button != .forward) return error.NotActivatable;
+        self.view.focus = self.focusId();
+        return switch (self.view.routeKey(.{ .key = if (button == .back) .browser_back else .browser_forward })) {
+            .deliver => |event| self.deliverKey(event),
+            else => false,
+        };
+    }
+    /// Lay out in `value` from now on, as `Host.setDirection`, and render.
+    pub fn setDirection(self: *Harness, value: view.Direction) anyerror!void {
+        self.config.options.direction = value;
+        self.view.layout_direction = value;
+        try self.render();
     }
 
     pub fn resize(self: *Harness, bounds: Rect) anyerror!void {
@@ -617,6 +636,8 @@ pub const Harness = struct {
                 .progress => try writer.print(" {d:.2}", .{node.fraction}),
                 .slider, .stepper, .rating, .meter, .split => try writer.print(" {d}", .{node.value}),
                 .scroll => if (node.scroll) |model| try writer.print(" offset={d}", .{round(model.offset.y)}),
+                .icon => if (node.graphic.?.mirrored) try writer.writeAll(" mirrored"),
+                .image, .svg => try writer.print(" {s}", .{@tagName(node.graphic.?.fit)}),
                 else => {},
             }
             if (node.highlighted) try writer.writeAll(" highlighted");
