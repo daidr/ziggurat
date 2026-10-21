@@ -172,6 +172,33 @@ pub fn ordinal(locale: *const Locale, o: Operands) Category {
     return .other;
 }
 
+pub const Categories = std.EnumSet(Category);
+
+/// The categories `rules` selects for some number: those a message needs
+/// cases for. Found by trying integers to 1100, a million and two million,
+/// and every number below 110 with one and with two fraction digits.
+pub fn cardinalCategories(rules: Rules) Categories {
+    var found: Categories = .initEmpty();
+    for (0..1101) |i| found.insert(cardinal(rules, .fromInt(@intCast(i))));
+    found.insert(cardinal(rules, .fromInt(1_000_000)));
+    found.insert(cardinal(rules, .fromInt(2_000_000)));
+    var buffer: [16]u8 = undefined;
+    for (0..110) |i| for (0..100) |f| {
+        const one = std.fmt.bufPrint(&buffer, "{d}.{d}", .{ i, f / 10 }) catch unreachable;
+        found.insert(cardinal(rules, Operands.parse(one) catch unreachable));
+        const two = std.fmt.bufPrint(&buffer, "{d}.{d:0>2}", .{ i, f }) catch unreachable;
+        found.insert(cardinal(rules, Operands.parse(two) catch unreachable));
+    };
+    return found;
+}
+
+/// The categories `ordinal` selects for some integer in `locale`.
+pub fn ordinalCategories(locale: *const Locale) Categories {
+    var found: Categories = .initEmpty();
+    for (0..1101) |i| found.insert(ordinal(locale, .fromInt(@intCast(i))));
+    return found;
+}
+
 fn expectCardinal(tag: []const u8, text: []const u8, expected: Category) !void {
     const locale = try Locale.parse(tag);
     try std.testing.expectEqual(expected, cardinal(rulesFor(&locale), try Operands.parse(text)));
@@ -249,4 +276,15 @@ test "ordinal rule samples" {
     try std.testing.expectEqual(Category.many, ordinal(&it, .fromInt(800)));
     const de = try Locale.parse("de");
     try std.testing.expectEqual(Category.other, ordinal(&de, .fromInt(1)));
+}
+
+test "category sets list what the rules select" {
+    const english = try Locale.parse("en");
+    const russian = try Locale.parse("ru");
+    const japanese = try Locale.parse("ja");
+    try std.testing.expect(cardinalCategories(rulesFor(&english)).eql(.initMany(&.{ .one, .other })));
+    try std.testing.expect(cardinalCategories(rulesFor(&russian)).eql(.initMany(&.{ .one, .few, .many, .other })));
+    try std.testing.expect(cardinalCategories(rulesFor(&japanese)).eql(.initOne(.other)));
+    try std.testing.expect(cardinalCategories(.arabic).eql(.initFull()));
+    try std.testing.expect(ordinalCategories(&english).eql(.initMany(&.{ .one, .two, .few, .other })));
 }

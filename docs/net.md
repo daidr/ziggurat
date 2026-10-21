@@ -22,13 +22,14 @@ var response = try net.fetch(allocator, &client, .{
 defer response.deinit(allocator);
 ```
 
-- 任何 HTTP 状态都作为响应返回，只有传输失败才是错误。`Head` 拥有复制的头部，`header(name)` 不区分大小写。
-- `stream` 把响应体边到达边写入调用者的 `std.Io.Writer`；写入阻塞时传输随之停住，慢消费者通过 TCP 施加背压，而不是在内存里堆积。`fetch` 是写入内存的便捷形式。
+- 任何 HTTP 状态都作为响应返回，只有传输失败才是错误。`Head` 拥有复制的头部、状态行的 reason（可能为空）和最终响应的 `url`，`header(name)` 不区分大小写。
+- `stream` 把响应体边到达边写入调用者的 `std.Io.Writer`，每次读取后 flush 一次，流式响应（如 server-sent events）不会等缓冲填满；写入阻塞时传输随之停住，慢消费者通过 TCP 施加背压，而不是在内存里堆积。`receive` 在读取 body 之前把 `Head` 交给 `Receiver.head`（接管所有权），适合先处理状态和头部、再流式消费 body。`fetch` 是写入内存的便捷形式。
+- `headers` 中的 `Host`、`User-Agent`、`Authorization`、`Content-Type` 替换客户端默认值而不是重复发送。调用者自己给出 `Accept-Encoding` 时模块不再声明 gzip/deflate，响应体按服务器编码原样返回、不解码；标准库不认识的编码（如 br）仍无法接收，返回 `ProtocolError`。
 - `fetchJson(T, ...)` 在同一上限下把 2xx JSON 解码为 `T`，非 2xx 返回 `HttpStatus`，无法解码返回 `InvalidJson`，未知字段被忽略。
-- 重定向由模块逐跳处理，最多 `Limits.redirects` 次；`headers` 每跳都发送，`credentials` 只在 scheme、host、port 不变时发送。带 body 的请求不跟随重定向，直接返回重定向响应；303 以及 POST 的 301/302 改为 GET。
+- 重定向由模块逐跳处理，最多 `Limits.redirects` 次；`Request.redirect = .manual` 直接返回重定向响应，`.reject` 遇到重定向返回 `Redirected`；`headers` 每跳都发送，`credentials` 只在 scheme、host、port 不变时发送。带 body 的请求不跟随重定向，直接返回重定向响应；303 以及 POST 的 301/302 改为 GET。
 - 默认接受 gzip/deflate 并解码，解码窗口只为编码响应分配；`decompress = false` 只请求 identity。
 
-上限都是显式的：`response_bytes`（解码后的 body，默认 8 MiB）、`header_bytes` 与 `headers`（复制的头部）、`redirects`、`url_bytes`。响应头整体还必须放进客户端的 `read_buffer_size`。已知长度的 identity body 先按 Content-Length 预检，短于声明长度的 body 不会被当作完成。
+上限都是显式的：`response_bytes`（解码后的 body，默认 8 MiB）、`header_bytes` 与 `headers`（复制的头部）、`redirects`、`url_bytes`。响应头整体还必须放进客户端的 `read_buffer_size`。已知长度的 identity body 先按 Content-Length 预检，短于声明长度的 body 不会被当作完成。PUT 和 TRACE 响应同样读取 body；HEAD 响应以及 1xx、204、304 响应在头部处结束。
 
 ## 取消
 
@@ -64,4 +65,4 @@ try socket.close(net.websocket.close_code.normal, "bye");
 
 ## 验证范围
 
-单元测试用回环 HTTP/WebSocket 服务覆盖状态与头部、POST body、gzip 解码及解码后上限、body/头部/重定向/URL 上限、阻塞读取时的取消、JSON 解码、文本/二进制回显、ping/pong、分片重组、暂停与恢复、远端与本地关闭、超限消息、队列满和握手拒绝。`scripts/net-tls-probe.sh` 用临时生成的 localhost 证书启动回环 TLS 对端，实际验证 HTTPS、跨多个 TLS record 的 WSS 消息，以及不受信证书被拒绝。标准库 TLS 客户端只按 DNS 名称校验证书，IP 地址 URL 不匹配证书中的 IP SAN。公网服务器、代理、证书吊销和长时间断线重连没有在本模块中验证；重连策略由宿主决定。
+单元测试用回环 HTTP/WebSocket 服务覆盖状态与头部、reason、最终 URL、重定向模式、默认头替换与不解码的调用者编码、head 先于 body 交付与逐次 flush、POST body、gzip 解码及解码后上限、body/头部/重定向/URL 上限、阻塞读取时的取消、JSON 解码、文本/二进制回显、ping/pong、分片重组、暂停与恢复、远端与本地关闭、超限消息、队列满和握手拒绝。`scripts/net-tls-probe.sh` 用临时生成的 localhost 证书启动回环 TLS 对端，实际验证 HTTPS、跨多个 TLS record 的 WSS 消息，以及不受信证书被拒绝。标准库 TLS 客户端只按 DNS 名称校验证书，IP 地址 URL 不匹配证书中的 IP SAN。公网服务器、代理、证书吊销和长时间断线重连没有在本模块中验证；重连策略由宿主决定。

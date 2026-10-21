@@ -62,8 +62,22 @@ options.code = blocks.face();
 
 `prepare` 在主线程、绘制之外为树中前 `capacity` 个代码块（最多 32 个，即一帧可绘制的预排版文本数）创建布局并按窗口缩放光栅化，默认字体在 Windows 上为 Consolas，在 Linux 上为 fontconfig 的 monospace。嵌入只按内容哈希匹配同一位置的代码块，重新解析后未重新准备的代码块回落为普通文字。绘制时缩放与准备时不同，则先用标签字体逐行绘制，直到应用为新缩放重新调用 `prepare`。仍有帧在使用旧的预排版文本时，`prepare` 与 `release` 返回 `Busy`，旧内容继续可用。
 
+## 富文本段落
+
+`options.rich` 接受一个 `RichFace`：它为段落、标题和表格单元格返回富文本嵌入，返回 null 时按上文映射为文字节点。`ziggurat_markdown_rich.RichBlocks` 是基于[富文本](rich-text.md)的实现：
+
+```zig
+var blocks = mr.RichBlocks.init(allocator);
+defer blocks.deinit();
+try blocks.prepare(tree, .{ .measurer = measurer, .theme = theme });
+options.rich = blocks.face();
+```
+
+`prepare` 在主线程、构建与绘制之外运行，为树中不含链接和图片的段落、标题与表格单元格生成 span：强调为斜体，加粗为粗体，删除线带横线，行内代码用等宽字体（正文字号的 7/8）放在圆角底色上，标题按级别取 `heading_sizes` 字号与 `heading_weight` 字重。含链接或图片的块仍按上文映射，链接保持键盘可达。构建时嵌入只按节点序号和内容哈希匹配，并按该块的宽度不分配地重新折行，颜色取该块的正文颜色（块引用中为引用颜色）；重新解析后未重新准备的块回落为文字节点。span 借用树的文本，树在其缓冲复用前必须保持有效。富文本嵌入不向辅助技术提供文字，见富文本一节的限制。
+
 ## 检查
 
 - `zig build test-markdown`：块、行内、表格、任务列表、扩展自动链接、HTML 输出与上限。
 - `zig build test-markdown-view`：视图映射、折行、链接/任务激活、代码块嵌入与长文档嵌套。
+- `zig build test-markdown-rich`：行内样式到 span 的转换、含链接的块保持链接节点、嵌入按宽度折行与过期树回落。
 - `zig build smoke-markdown-code`（Windows/Linux）：默认字体等宽、预排版尺寸进入视图嵌入、过期树不匹配、释放全部原生资源。

@@ -34,7 +34,7 @@
 | W02 | 已完成（Windows/X11） | 拥有/瞬态窗口、模态窗口、关闭及焦点策略 | 父关闭传播、整树模态输入策略、取消与异常回滚；独立顶层窗口，不嵌套事件循环或替代 H02 内嵌内容；依赖 W01 |
 | W03 | 部分完成（Windows/X11） | 无边框、自定义标题栏、原生拖动/缩放、透明与材质 | W03.1 装饰/命中/原生交互已验收；W03.3 Windows 系统框架材质已实现（运行验证见记录）；W03.2 客户区透明、Linux/Wayland 材质继续待实现；DPI/最大化/系统菜单；依赖 W01 |
 | W04 | 部分完成（Windows/X11） | 窗口枚举/查找、焦点、显示器约束与状态持久化 | 运行期枚举/查找、显式显示器快照、离屏恢复及版本化 worker 存储已验；经 S03 monitors 订阅的显示器变化可达性判断与重新放置已接入（X11 RandR 实测），物理混合 DPI/热插拔、Windows 真实显示器变化与其他平台继续，不在 paint 访问磁盘 |
-| W05 | 待实现 | 应用激活、单实例与参数转发 | OS 锁与显式 IPC；启动竞争、旧实例关闭、恶意/超长参数和用户隔离 |
+| W05 | 部分完成（Windows/Linux） | 应用激活、单实例与参数转发 | OS 锁与显式 IPC；启动竞争、旧实例关闭、恶意/超长参数和用户隔离；W05.1 `system.instance` 已有 per-user 锁、显式 worker 接收、有界帧与拒绝、停止和崩溃回收，激活由宿主经 `App.post` 执行，见[单实例与系统集成](os-integration.md) |
 
 ## 布局、控件与绘制
 
@@ -43,7 +43,7 @@
 | U01 | 已完成（Windows/Linux） | checkbox、radio、switch、progress、禁用态 | 原生输入、失败帧/嵌套 paint、关闭、Windows UIA 身份及资源回收；无每帧分配 |
 | U02 | 部分完成（Windows/Linux） | slider、双端范围、步进控件、焦点导航、快捷键与多击 | U02.1、U02.2嵌套scope/显式Escape续交、U02.3原生时序入口与显式注册主按钮多击、普通及committed Space下单文档词/逻辑行选择已分项验；更广未消费键续交、折叠/投影视图的编辑器选择及其他控件多击继续；直接键入数字归 T02；依赖 U01 |
 | U03 | 已完成（纯布局合同，Windows/Linux） | grid 与可组合约束布局 | U03.1 grid/span/对齐/自动放置/隐式轨道及U03.2弹性百分比上限、内容/显式minimum优先级、数值基线与未知父尺寸测量已验；失败输出事务、硬界与overflow明确；分隔拖动归U06 |
-| U04 | 部分完成（Windows/Linux） | 虚拟 list、table、tree/outline、grid view | U04.1 可变行高列表/可见回放/稳定 ID 锚点已实现；U04.2 声明式视图的单选列表框（非虚拟）已实现；U04.3/U04.4 声明式视图的非虚拟 table（共享列宽、排序指示、单/多选）与 tree（展开折叠、层级键盘）已实现；虚拟 table/tree、列宽拖动/冻结/重排与 grid view 继续待实现；基础依赖 U02.1/T01 |
+| U04 | 部分完成（Windows/Linux） | 虚拟 list、table、tree/outline、grid view | U04.1 可变行高列表/可见回放/稳定 ID 锚点已实现；U04.2 声明式视图的单选列表框（非虚拟）已实现；U04.3/U04.4 声明式视图的非虚拟 table（共享列宽、排序指示、单/多选）与 tree（展开折叠、层级键盘）已实现；U04.5 `ziggurat_view_collections` 的虚拟 table（列宽拖动/适配、列移动、冻结 fixed 列、多列排序、单元格块选择与行头、拖选、行重排、键入查找）、outline/outline table 与 grid view 已实现并经无窗口与隐藏窗口检查，见[虚拟集合](collections.md)；右键保选、可变行高、RTL 与完整屏外语义继续；基础依赖 U02.1/T01 |
 | U05 | 部分完成（U05.1 只读组合框、建议列表与搜索区域；U05.2 可编辑组合框与 token field） | combobox、autocomplete、search、token field | popup 所有权、输入法、筛选取消、键盘与焦点恢复；可编辑组合框、输入法组合期间的建议处理与 token field 已在声明式视图实现，读屏实际播报与 Linux 可访问性继续；依赖 U02.2/T02/W02 |
 | U06 | 部分完成（U06.1 声明式视图的 tabs/toolbar/比例 split；U06.2 tooltip、toast 与一次性唤醒；U06.3 sidebar、窗口内对话框、查找栏、可编辑文本与三态复选框） | tabs、sidebar、toolbar、split、tooltip、toast | 生命周期、遮挡/命中、延迟唤醒撤销与可访问性；split 的 DIP 偏好、RTL、折叠与 sidebar、toast 动画继续；基础依赖 U02.1/G02，popup scope另依赖U02.2 |
 | U07 | 部分完成（U07.1 声明式视图的日历、日期/时间/数字输入、颜色选择器与颜色按钮、通用浮层，Windows UIA） | calendar、date/time、color picker | locale/范围/键盘/可访问性已在无窗口测试中验证，见[选择器](pickers.md)；颜色方块已可按住拖动；读屏实际播报与 Linux 可访问性继续；依赖 L01/U05 |
@@ -53,7 +53,7 @@
 | G01 | 部分完成 | 圆角、描边、渐变、阴影、透明度、图片与 SVG/path | RGBA/圆角/内描边、图片驻留/同尺寸更新、严格渐变、圆角阴影/path、有界分组和独立软件/GPU离屏已验收；完整 SVG 继续实施；三后端同一语义与明确资源上限 |
 | G02 | 进行中 | theme、动画时间线、spring、变换与局部失效 | 显式动画/有限重复、基础控件主题、Windows/Linux单次唤醒/局部失效、仿射栅格scope/同帧坐标、通用GPU精度预检/整帧后备、共享软件采样及单Document保留坐标桥已验；过滤变换性能、折叠/投影编辑器输入与更广失效复用继续；依赖 G01 |
 | G03 | 进行中 | 共享 GPU 资源、文本/图片缓存与多窗口性能 | 显式DeviceDomain/纹理寿命与预算先行；按测量决定缓存容量与淘汰；设备丢失、跨窗口关闭和显存/内存基线；依赖 G01/V02 |
-| G04 | 待实现 | 可选可编程着色器、类型化参数、形状填充与元素效果 | 独立准备/编译与拥有型产品，明确软件与各GPU后端能力；不得在paint编译或等待worker；分项见下表；依赖 G01/G03 |
+| G04 | 部分实现 | 可选可编程着色器、类型化参数、形状填充与元素效果 | 独立准备/编译与拥有型产品，明确软件与各GPU后端能力；不得在paint编译或等待worker；分项见下表；依赖 G01/G03 |
 
 G01 分项独立验收，父项只有以下分项全部完成后才可标为已完成：
 
@@ -108,12 +108,12 @@ G04 分项如下；具备固定内部shader不代表公开可编程能力已经�
 
 | 子项 | 状态 | 边界与验收 |
 | --- | --- | --- |
-| G04.1 | 待实现 | 有界类型系统/中间表示、数字/向量/矩阵/数组、受限控制流、图像采样与CPU执行基准；非法程序/非有限值/整数边界、循环和执行预算、精确错误位置；产品不借源文本 |
+| G04.1 | 部分实现 | 已有 `ziggurat_shader`：有界类型、寄存器字节码、静态最坏步数、精确错误位置与CPU执行，见[着色器与元素效果](shader-effects.md)；CPU执行基准待实现。有界类型系统/中间表示、数字/向量/矩阵/数组、受限控制流、图像采样与CPU执行基准；非法程序/非有限值/整数边界、循环和执行预算、精确错误位置；产品不借源文本 |
 | G04.2 | 待实现 | 显式worker编译与预热、owner采用、ready/failed/cancelled状态；按设备/格式/编译选项区分缓存，磁盘损坏/版本变化可回退；缓存有界且可清理，paint不阻塞、不启动隐藏线程或隐式重试 |
-| G04.3 | 待实现 | 预查类型化uniform句柄和可复用值缓冲；拒绝跨程序/旧代数/类型与长度错误；记录命令时复制参数，后续修改不能影响已接受帧；图像/程序资源借用与预算明确 |
+| G04.3 | 部分实现 | 类型化句柄、跨程序/类型/长度/非有限值拒绝与记录时复制已有；图像/程序资源预算待实现。预查类型化uniform句柄和可复用值缓冲；拒绝跨程序/旧代数/类型与长度错误；记录命令时复制参数，后续修改不能影响已接受帧；图像/程序资源借用与预算明确 |
 | G04.4 | 待实现 | 矩形与圆角、path填充/描边、文字与图标coverage填充；预乘alpha、边缘与彩色glyph策略；软件/硬件/后备三者使用独立oracle，不以编译成功代替像素验证 |
-| G04.5 | 待实现 | color/distortion/layer元素效果；独立有界输入层、采样外扩与透明越界；效果只改变外观，绘制/命中/语义坐标关系明确；层复用/失败回滚遵守G03 |
-| G04.6 | 待实现 | 当前帧backdrop采样与可选预模糊；捕获点/顺序/变换/采样边界明确，防止读写同纹理和错误遮挡剔除；嵌套/设备丢失/预算失败；与E06共用资源而非重复截图 |
+| G04.5 | 部分实现 | color/distortion/layer元素效果已在GDI/Cairo软件平面实现（高斯捕获或目标上两遍隔离），D3D11整帧软件回放，GPU执行待实现。color/distortion/layer元素效果；独立有界输入层、采样外扩与透明越界；效果只改变外观，绘制/命中/语义坐标关系明确；层复用/失败回滚遵守G03 |
+| G04.6 | 部分实现 | 软件平面背景着色器与内置玻璃折射已有；预模糊与GPU采样待实现。当前帧backdrop采样与可选预模糊；捕获点/顺序/变换/采样边界明确，防止读写同纹理和错误遮挡剔除；嵌套/设备丢失/预算失败；与E06共用资源而非重复截图 |
 
 U09 的实时折线须保留源数据供选择/读数，按可见物理像素列准备保极值的有界降采样；保留窄峰、数据段端点和NaN/Inf断线，声明横坐标排序前提及重复值策略。独立polyline回放需验证圆角连接/端帽、透明重叠、clip/仿射/DPI；不能用不透明分段快路径改变半透明结果。准备成本、绘制命令和预热后分配分别计量。
 
@@ -124,8 +124,8 @@ U09 的实时折线须保留源数据供选择/读数，按可见物理像素列
 | T01 | 已完成（Windows/Linux） | 系统 shaping、grapheme、bidi、软换行、视觉 caret/hit test | T01.1 布局/查询、T01.2 准备绘制/编辑器桥接、T01.3 批量位置快照已验收；UTF-8/UTF-16/字素、复杂脚本/emoji/RTL/选区/fallback；原生回退与多段落构造成本见文档，成熟输入控件与辅助技术仍属 T02/T06 |
 | T02 | 进行中 | 完整输入控件、IME/候选/组合、平台文本服务 | 保留客户端及IMM/GTK surrounding、单Document普通字段的焦点/单多行策略/组合/注入clipboard/滚动caret与Windows Value动作已分项验；TSF、真实语言引擎、Linux系统clipboard及更广投影编辑继续；依赖T01 |
 | T03 | 已完成（Windows/Linux，有界段落视图） | 可扩展文档 buffer、多选区、查找替换、折叠 | 单文档原子多选编辑/撤销、worker快照流式字面搜索及派生段落折叠已验收；段落/缓存/元数据上限明确，语言服务与成熟字段UI另验；依赖 T01 |
-| T04 | 进行中 | 代码编辑 hooks、补全、hover、诊断、Diff | T04.1版本化Broker/Presenter、T04.2行差异/双栏/统一可编辑比较、行内标记及成对上下文折叠已验收；可访问语义与语言工具继续分项；依赖 T03 |
-| T05 | 部分完成 | 富文本与 Markdown 展示/编辑 | T05.1 已有纯 Zig `ziggurat_markdown`（CommonMark 块/行内、GitHub 表格/任务列表/删除线/扩展自动链接，有界节点树，原始 HTML 作字面文本）、`ziggurat_markdown_view`（声明式视图映射、折行、链接/任务激活）与 `ziggurat_markdown_code`（预排版等宽代码块），见[Markdown](markdown.md)；混合字重/字体 runs、嵌入资源、复制选区与编辑待实现；依赖 G01/T03 |
+| T04 | 进行中 | 代码编辑 hooks、补全、hover、诊断、Diff | T04.1版本化Broker/Presenter、T04.2行差异/双栏/统一可编辑比较、行内标记及成对上下文折叠已验收；T04.3 已有纯 Zig `ziggurat_code_syntax`（28 种语言词法、主题、增量行状态、括号匹配）及编辑器前景高亮、多光标/扩选/括号命令与变更标记，见[语法高亮、多光标与变更标记](code-syntax.md)；可访问语义与语言工具继续分项；依赖 T03 |
+| T05 | 部分完成 | 富文本与 Markdown 展示/编辑 | T05.1 已有纯 Zig `ziggurat_markdown`（CommonMark 块/行内、GitHub 表格/任务列表/删除线/扩展自动链接，有界节点树，原始 HTML 作字面文本）、`ziggurat_markdown_view`（声明式视图映射、折行、链接/任务激活）与 `ziggurat_markdown_code`（预排版等宽代码块），见[Markdown](markdown.md)；T05.2 已有 `ziggurat_view_rich_text`（混合字号/字重/斜体/等宽、颜色、下划线/波浪线/删除线与底色的 span 折行叶子）与 `ziggurat_markdown_rich`（不含链接的段落、标题与表格单元格按行内样式绘制），见[富文本](rich-text.md)；嵌入资源、富文本可访问性、复制选区与编辑待实现；依赖 G01/T03 |
 | T06 | 进行中 | UIA/AT-SPI/NSAccessibility 完整控件与文本语义 | Windows文档/MTA、空caret/TextPattern2、仿射凸裁剪与辅助动作，以及Linux单源只读AT-SPI/完整Prepared命中已分项验；Windows完整候选point迁移、Linux动作/多源、完整语言单位与其他平台继续；依赖 T01/U04/P02 |
 | T07 | 待实现 | 可选字体资产注册、系统/应用字体发现 | 显式准备、有界字体数据/枚举、monospaced与来源、别名/去重、缓存失效及旧Layout最后lease；依赖 T01 |
 
@@ -196,10 +196,10 @@ B02 分项：
 | S01 | 已完成（Windows） | 全局快捷键、通知区通知 | 原生注册/冲突/注销、稳定事件 ID、Owner 关闭与诊断重入检查；Linux/macOS 见 P02/P04 |
 | S02 | 部分完成 | shell 打开 URL/文件、定位、回收站、文件图标、应用发现/启动 | S02.1 executable 启动、S02.2 URL（https/http/mailto 默认白名单）/关联文件/定位、S02.3 回收站（Windows/Linux）及 S02.4 Windows 16/32px 不透明图标已实现；完整图标（Linux/高分辨率/透明）与安装应用发现/按身份启动待实现；真实关联程序/资源管理器显示未自动验证 |
 | S03 | 部分完成 | 多显示器、主题/accent/可访问性偏好、网络、电源与文件监视 | 显示器/偏好/电源/网络快照与合并变化订阅（Windows/Linux）、粗模式文件监视（inotify/ReadDirectoryChangesW）已实现；详细文件监视（快照/rename 匹配）、Linux 电源来源变化、Wayland 显示器、portal 配色待实现；Windows 路径首次运行在 CI |
-| S04 | 部分完成（密钥存储） | 密钥存储、登录启动、深链和文件关联 | OS 权限/用户作用域、安装与运行时分工、卸载和参数转发；依赖 W05/R01 |
+| S04 | 部分完成（密钥存储；登录启动、深链、文件关联 Windows/Linux） | 密钥存储、登录启动、深链和文件关联 | OS 权限/用户作用域、安装与运行时分工、卸载和参数转发；依赖 W05/R01；S04.1 `system.integration` 按用户注册/卸载并供安装程序调用；Windows 设置中的默认应用确认与 macOS 继续 |
 | S05 | 部分完成 | 多格式剪贴板、transfer、惰性 provider、原生拖放 | Board 的 text/HTML/PNG/文件/自定义事务写入、异步读取、惰性 provider、变化事件、Windows 有界占用重试及 Windows/Linux 放置目标已实现；拖动源（需模态拖动循环）未提供；真实跨进程拖放、他进程占用重试与退出渲染未自动验证 |
 | S06 | 部分完成（Windows/Linux） | 异步消息对话框、上下文菜单与菜单快捷键 | S06.1 两平台上下文菜单与异步消息框、Windows 菜单栏快捷键已验；非嵌套循环（Windows 菜单在私有安全点进入系统菜单循环）、取消/关闭、禁用祖先、旧消息隔离分别验证；Linux 菜单栏与快捷键分发、物理输入与视觉验收继续；依赖 W02/U02 |
-| S07 | 待实现 | 应用身份/系统目录、任务栏或 Dock badge/progress/menu、阻止休眠 | 按平台 capability、用户作用域、原生引用/电源断言配对与最后 owner 回收；依赖 S03/P03 |
+| S07 | 部分完成（Windows/Linux） | 应用身份/系统目录、任务栏或 Dock badge/progress/menu、阻止休眠 | 按平台 capability、用户作用域、原生引用/电源断言配对与最后 owner 回收；依赖 S03/P03；S07.1 身份、目录、任务栏进度/叠加图标/launcher 计数与提醒、休眠断言已实现；任务栏/Dock 菜单与 macOS 继续 |
 | S08 | 部分完成（Windows） | 独立托盘/status item、多图标、菜单与popover锚定 | 窗口Owner单托盘/任务栏重建恢复，及 S08.1 App 独立多 item、可选稳定 GUID、锚定托盘菜单、App 停止回收已验；标题与popover亮态（无 Windows 对应）、Linux/macOS 继续；其余平台依赖 P02/P04 |
 | D01 | 待实现 | document 模型、每文件窗口与最近文档 | 文档身份/重复打开、保存/另存、dirty/关闭/quit 预检；依赖 W02/S02 |
 | D02 | 待实现 | 自动保存、外部修改、冲突检测与崩溃恢复 | 原子保存、版本戳/恢复副本、后台 I/O、丢失与权限错误；依赖 D01 |
@@ -254,7 +254,7 @@ P01 的 Linux HTTPS 本地来源分两片实施。首片由宿主提供已运行
 | E02 | 首片完成 | Fetch 与 WebSocket | 显式 transport/worker、取消/背压/大小限制、TLS/断线、类型化客户端；依赖 E01/I01 |
 | E03 | 首片完成 | SQLite | 已有可选 `ziggurat_sqlite`：脚本拉取并校验固定 amalgamation，连接、预处理语句、类型化绑定、借用行读取、事务/savepoint、`user_version` 迁移、`interrupt` 取消与 `ui_thread` 主线程拒绝，`test-sqlite` 在 Windows/Linux CI 运行，见[SQLite](sqlite.md)；在线备份、增量 BLOB I/O、自定义函数与加密待实现 |
 | E04 | 待实现 | PTY 与终端视图 | 子进程/终端解析、输入/resize/流控/退出和回收；依赖 E01/T01/G01 |
-| E05 | 待实现 | game loop、camera、gamepad 与材质扩展 | 显式启停时钟、输入热插拔、帧/功耗预算与平台能力；依赖 E01/G02 |
+| E05 | 部分完成 | game loop、camera、gamepad 与材质扩展（[game.md](game.md)：固定步长循环、相机、整数缩放、XInput/evdev 手柄已完成；画布纹理、材质扩展待实现） | 显式启停时钟、输入热插拔、帧/功耗预算与平台能力；依赖 E01/G02 |
 | E06 | 首片完成 | backdrop blur、glass 与滚动边缘合成 | 已有 `Frame.backdropEffect`：均匀/渐变模糊、玻璃（regular/clear、tint、颗粒、弧面折射、亮度映射、边光）与柔和/硬滚动边缘，在 GDI/Cairo 软件平面采样，含效果的帧在 D3D11 下整帧软件回放；显式工作区预算与超限后备、减少透明度/高对比不透明后备；另有 29 种由显式相位驱动的加载动画与视图层 `Style.material`/`Style.edges`/`loadingIndicator`，见[背景效果与加载动画](backdrop-effects.md)；GPU 背景采样与按压动效待实现 |
 
 E04 继续分项实施，均为待实现，不由PTY或静态终端绘制单独代表完成：
@@ -274,11 +274,11 @@ E04的解析/协议识别、原生PTY和人工交互分别验收；剪贴板格�
 | ID | 状态 | 范围 | 验收与依赖 |
 | --- | --- | --- | --- |
 | R01 | 部分完成（R01.1 单文件安装/启动/卸载程序） | Windows 安装/卸载器与文件关联 | 用户/机器作用域、静默安装、升级/回滚/卸载用户数据、真实签名 |
-| R02 | 部分完成（R02.1 Linux desktop 条目、deb 与用户/系统范围安装；macOS 不在本轮范围） | Linux desktop/deb/安装脚本、macOS app/DMG/公证 | 权限/图标/依赖/卸载、签名与 stapling；依赖 P02/P04 |
+| R02 | 部分完成（R02.1 Linux desktop 条目、deb 与用户/系统范围安装，R02.2 用户级 install.sh；macOS 不在本轮范围） | Linux desktop/deb/安装脚本、macOS app/DMG/公证 | 权限/图标/依赖/卸载、签名与 stapling；依赖 P02/P04 |
 | R03 | 部分完成（R03.1 发布索引检查、可续传下载、进度/取消与关闭后启动） | 更新检查/下载/进度/取消、提示 UI 与重启 | 重用现有验签发布；feed 版本/网络错误/部分文件/运行 EXE与退出否决；依赖 I01/U06 |
 | R04 | 部分完成（R04.1 签名增量、全量回退、保留/回滚/清理与密钥背书） | 增量更新、失败全量回退、版本保留/回滚/密钥轮换 | 签名覆盖来源目标、大小限制、故障注入、旧客户端升级；依赖 R03 |
-| R05 | 部分完成（R05.1 静态发布目录、增量生成与幂等索引） | GitHub/S3 发布、增量生成与发布清单 | 显式凭据和发布动作、幂等重试/资产一致性；私钥不进入工程；依赖 R04 |
-| R06 | 部分完成（R06.1 init/dev/build/package/doctor 与三种模板） | 统一 init/dev/build/doctor CLI 与模板 | 原生/Web/混合模板、前端与原生 watch、诊断、可复现构建；依赖 H02/R01 |
+| R05 | 部分完成（R05.1 静态发布目录、增量生成与幂等索引，R05.2 GitHub 与 S3 上传） | GitHub/S3 发布、增量生成与发布清单 | 显式凭据和发布动作、幂等重试/资产一致性；私钥不进入工程；依赖 R04 |
+| R06 | 部分完成（R06.1 init/dev/build/package/doctor 与三种模板，R06.2 generate/i18n check/install-skills 与控制台进度） | 统一 init/dev/build/doctor CLI 与模板 | 原生/Web/混合模板、前端与原生 watch、诊断、可复现构建；依赖 H02/R01 |
 | V01 | 待实现 | 多窗口文档、自绘大列表、Web 与混合应用示例 | 覆盖完整业务流程、失败/取消/退出路径；示例不能替代模块测试 |
 | V02 | 待实现 | 长期内存/多窗口/GPU/冷启动/输入到显示基线 | 可复现硬件/驱动/系统与统计口径，资源随并发峰值而非历史次数增长 |
 | V03 | 待实现 | 原生交互、输入法与屏幕阅读器验收 | 与隐藏窗口检查分开；需要真实平台与明确的交互验证，不由单测推定 |
@@ -1745,3 +1745,11 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 - `window_placement.displacement(window, &topology)` 对照宿主刚刷新的快照分类当前原生 frame：`contained`、`partial`（单个 workarea 两个方向至少重叠 48 原生单位）、`offscreen`，特殊状态为 `special`，快照过期返回 `DisplayChanged`。只查询，不分配、不注册回调；模块仍只依赖核心。
 - 宿主用 `system.desktop.Watch` 订阅 monitors 变化，在回调里 `refresh` 与 `displacement`，`offscreen` 时以 Tracker 快照建立新的 `Restorer`。`partial` 是否收回由宿主决定，Openbox 会把越界窗口夹到可见边缘而得到这个结果。
 - 单测覆盖跨两个 workarea 的包含、部分可见、阈值边界、仅落在 workarea 外条带、小 frame 与无效矩形。`smoke-window-placement` 增加越界移动后恢复与最大化期间 `special`；新增 Linux `smoke-window-placement-displays` 用 RandR 实际缩小 Xvfb 输出，monitors 回调推进到 `offscreen` 并恢复到新 workarea，1x 与 `GDK_SCALE=2` 本地通过，结束时恢复原模式。Windows 只交叉编译，没有在真实系统上改变显示器配置。见[窗口恢复](window-placement.md)。
+### W05.1、S04.1、S07.1 单实例与系统集成
+
+- `system.identity` 定义贯穿锁、desktop ID、AppUserModelID 和处理程序的应用 ID 规则，在 App.init 前设置进程身份，并把 Windows Known Folder 与 Linux XDG/user-dirs 目录写入调用者缓冲；未配置的 Linux 用户目录明确返回 `DirectoryUnavailable`。
+- `system.instance` 以 Linux 运行目录 flock + Unix socket、Windows 每用户每会话 named pipe（仅当前用户 DACL、首实例标志、双向 SID 核对）实现单实例。接收在宿主创建的 worker 上阻塞，可跨线程停止；消息完整校验后才确认，帧上限 128 参数/单项 16 KiB/合计 64 KiB，畸形、超长、停滞与外来用户对端被拒而 listener 继续服务。primary 退出时旧 secondary 得到 `PrimaryUnavailable`，`claimOrForward` 有界重试。激活由宿主复制消息后经 `App.post` 决定。
+- `system.integration` 按用户写入/卸载登录项、URL scheme 与文件关联，供安装程序调用：Windows 为 HKCU Run/Classes 与带所有者标记的 ProgID，不绕过受保护的用户选择；Linux 为 autostart、desktop entry、MIME package 与只改本 ID 条目的 mimeapps.list，原子写入并可刷新缓存。`localPath` 解码转发的 file URL。
+- `system.power.Assertion` 为每个 owner 持有独立 Windows 电源请求或 logind inhibitor 描述符，release 幂等；`system.taskbar` 提供 Windows ITaskbarList3 进度/叠加图标与 Linux launcher entry 进度/计数/提醒，capability 如实报告 Windows 无非打包数字 badge。
+- Linux Debug 与 ReleaseSafe 在私有 session bus（兼作 system bus）与 Xvfb 下实际运行 `smoke-os-integration`：8 个并发与最大长度参数的真实子进程转发、三类恶意对端、旧 primary 停止、被杀 primary 回收、12 轮资源持平与开放运行目录拒绝；隔离 XDG 根中由 GIO 独立解析并真正启动注册的 scheme 与文件类型，参数经单实例送达，卸载后无关 mimeapps 行保留；logind 替身核对 12 轮 Inhibit 参数与描述符关闭，独立订阅者核对 launcher 信号。`test-system-integration` 10/10。Windows 目标 Debug/ReleaseSafe 交叉编译通过；Windows Debug CI 原生运行同一 smoke 通过：10 条转发消息与三类拒绝、经 ShellExecuteExW 启动注册的 scheme 与文件类型并由单实例送达、登录项、12 轮成对系统/显示电源请求和隐藏窗口任务栏调用。Windows 命令行上限为 32767 个 UTF-16 单元，最大长度参数用例在 Windows 只传一个 16 KiB 参数。
+- 密钥存储（另见 S04 密钥存储记录）、任务栏/Dock 菜单（D03）和 macOS 不在本片；dock 实际显示、真实 logind 策略与 Windows 设置中的默认应用对话框未经人工验证。见[单实例与系统集成](os-integration.md)。

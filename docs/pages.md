@@ -20,7 +20,7 @@ try view.attach(window, .{
 
 双向字符串 IPC 兼容页面的 `chrome.webview.postMessage` 与 `addEventListener('message', handler)`。接收入口由仅注入顶层的独立 script world 转发，检查真实 MessageEvent、`source === window`、文档标记和已提交的 about:blank；不会仅根据当前 URI 猜测消息来自顶层。旧文档标记、子 frame 的 `parent.postMessage`、默认 world 直接调用私有 handler 及合成 MessageEvent 均不能通过该入口。宿主仍只应附加可信页面；同源代码共享 DOM 的一般能力没有变成安全隔离边界。
 
-已有的 PageId、页面事件、`postFor`、异步 JS、缩放、UA、显式 reload/recover 和关闭所有权规则继续使用同一个 View。HTML 最多 16 MiB；脚本/JSON 使用 `scripts` 显式上限。Linux 的原生待完成容量也包含宿主消息投递；Full 不接受责任，逻辑取消不会在迟到 finish 前返还物理槽。JS 结果与元数据转换的上限不限制引擎内部执行/JSON 序列化的内存或耗时。截止时间使用已有主循环上的 one-shot GSource，无框架 worker、UI 等待或嵌套 pump。
+已有的 PageId、页面事件、`postFor`、异步 JS、缩放、UA、显式 reload/recover 和关闭所有权规则继续使用同一个 View。HTML 最多 16 MiB；脚本/JSON 使用 `scripts` 显式上限。Linux 的宿主消息投递另有 1024 条待完成上限，与 Windows 一样不占用脚本容量；Full 不接受责任，逻辑取消不会在迟到 finish 前返还物理槽。JS 结果与元数据转换的上限不限制引擎内部执行/JSON 序列化的内存或耗时。截止时间使用已有主循环上的 one-shot GSource，无框架 worker、UI 等待或嵌套 pump。
 
 `nativeFailure()` 保留真实 `.glib = .{ .domain, .code }`，Windows 仍可返回 `.hresult`。`Event.failed`/`ScriptResult.native_failure` 的数字是所属系统的原生 code；需要域时在回调内读取完整快照。本地参数、容量和 allocator 错误不制造 HRESULT，Linux 不改写 `last_hresult`。引擎进程终止仍通过独立的 process_failed 原生 reason 通知。
 

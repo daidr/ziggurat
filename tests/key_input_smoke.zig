@@ -34,6 +34,9 @@ const Probe = struct {
     closed: bool = false,
     compose: bool = false,
     pass_key: bool = false,
+    releases: usize = 0,
+    last_release: ?z.KeyInput = null,
+    last_physical: z.KeyCode = .unknown,
     fn event(ptr: *anyopaque, _: z.Window, value: z.Event) void {
         const self: *Probe = @ptrCast(@alignCast(ptr));
         if (value == .key or value == .edit_key) self.legacy += 1;
@@ -43,13 +46,22 @@ const Probe = struct {
     fn key(ptr: *anyopaque, window: z.Window, input: z.KeyInput) bool {
         const self: *Probe = @ptrCast(@alignCast(ptr));
         self.keys += 1;
-        if (self.expected) |expected| std.debug.assert(std.meta.eql(expected, input));
+        self.last_physical = input.physical;
+        // Positions are checked on their own below.
+        var logical = input;
+        logical.physical = .unknown;
+        if (self.expected) |expected| std.debug.assert(std.meta.eql(expected, logical));
         if (self.close_on_key) {
             std.debug.assert((window.destroy() catch unreachable) == .deferred);
             std.debug.assert(!self.closed);
             return false;
         }
         return !self.compose and !self.pass_key and input.key != .f5;
+    }
+    fn release(ptr: *anyopaque, _: z.Window, input: z.KeyInput) void {
+        const self: *Probe = @ptrCast(@alignCast(ptr));
+        self.releases += 1;
+        self.last_release = input;
     }
     fn detach(_: *anyopaque) void {}
     fn notify(ptr: *anyopaque, _: z.Window) void {
@@ -72,7 +84,7 @@ const Probe = struct {
     }
     fn init(self: *Probe, app: *z.App) !void {
         self.window = try app.createWindow(.{ .on_closed = .{ .context = self, .notify = notify } });
-        try self.window.setContent(.{ .context = self, .event = event, .detach = detach, .key_input = key });
+        try self.window.setContent(.{ .context = self, .event = event, .detach = detach, .key_input = key, .key_release = release });
     }
 };
 
@@ -137,8 +149,29 @@ fn run(allocator: std.mem.Allocator) !void {
         if (c.MapVirtualKeyExW(c.VK_OEM_1, c.MAPVK_VK_TO_CHAR, c.GetKeyboardLayout(0)) == ';') try check(&probe, .{ .key = .semicolon, .modifiers = .{ .shift = true } }, c.VK_OEM_1, ':', ';', true);
     } else try check(&probe, .{ .key = .semicolon, .modifiers = .{ .shift = true } }, 0, ':', ';', true);
     try check(&probe, .{ .key = .f24, .modifiers = .{ .control = true, .alt = true, .super = true } }, 0x87, 0xffd5, 0, true);
+    const releases_before = probe.releases;
     try check(&probe, .{ .key = .a }, 'A', 'a', 'a', false);
+    try std.testing.expectEqual(releases_before, probe.releases);
+    if (builtin.os.tag == .windows) {
+        // The scan code places the key: 0x1e is A's place, 0x11 W's.
+        _ = c.SendMessageW(probe.window.nativeHandle(), c.WM_KEYDOWN, 'Q', 0x11 << 16);
+        try std.testing.expectEqual(z.KeyCode.w, probe.last_physical);
+        _ = c.SendMessageW(probe.window.nativeHandle(), c.WM_KEYUP, 'Q', 0x11 << 16 | 0xc000_0000);
+        try std.testing.expectEqual(releases_before + 1, probe.releases);
+        try std.testing.expectEqual(z.KeyCode.q, probe.last_release.?.key);
+        try std.testing.expectEqual(z.KeyCode.w, probe.last_release.?.physical);
+    } else {
+        // The hardware keycode places the key.
+        try std.testing.expectEqual(z.KeyCode.a, probe.last_physical);
+    }
     try check(&probe, .{ .key = .a, .repeat = true }, 'A', 'a', 'a', true);
+    if (builtin.os.tag == .linux) {
+        // The release follows the held key, which a repeat reported.
+        try std.testing.expectEqual(releases_before + 1, probe.releases);
+        try std.testing.expectEqual(z.KeyCode.a, probe.last_release.?.key);
+        try std.testing.expectEqual(z.KeyCode.a, probe.last_release.?.physical);
+        try std.testing.expect(!probe.last_release.?.repeat);
+    }
     try check(&probe, .{ .key = .a }, 'A', 'a', 'a', true);
     const before_altgr = probe.keys;
     const text_before_altgr = probe.text;
@@ -205,6 +238,7 @@ fn runQueue(allocator: std.mem.Allocator) !void {
     try app.run();
     try std.testing.expect(!watchdog.expired);
     try std.testing.expectEqual(@as(usize, 4), probe.keys);
+    try std.testing.expectEqual(@as(usize, 0), probe.releases);
     try std.testing.expectEqual(@as(usize, 2), probe.services);
     try std.testing.expectEqual(@as(usize, 0), probe.consumed_services);
 }
@@ -215,5 +249,5 @@ pub fn main() !void {
     try run(allocator.allocator());
     try runQueue(allocator.allocator());
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("key input passed: logical shifted keys, modifiers, repeat, AltGr/IME ownership, native queue/direct priority, foreign HWND and callback close; resources=0\n", .{});
+    std.debug.print("key input passed: logical shifted keys, positions, releases, modifiers, repeat, AltGr/IME ownership, native queue/direct priority, foreign HWND and callback close; resources=0\n", .{});
 }
