@@ -28,7 +28,8 @@ typedef struct Renderer {
     uint32_t generation;
     double gradient_clips[33][4];
     uint32_t gradient_clip_depth;
-    CachedImage images[ZI_IMAGE_SLOTS];
+    CachedImage *images;
+    uint32_t image_capacity;
     CachedImage image_candidate;
     uint32_t image_fault;
     uint64_t image_creations;
@@ -172,7 +173,7 @@ int zlc_end_checked(Renderer *s,cairo_t *destination){
 void zlc_end(Renderer *s,cairo_t *destination) {
     (void)zlc_end_checked(s,destination);
 }
-void zlc_destroy(Renderer *s) { if(s){destroy(s);for(unsigned i=0;i<ZI_IMAGE_SLOTS;i++)drop_image(&s->images[i]);drop_image(&s->image_candidate);g_free(s);} }
+void zlc_destroy(Renderer *s) { if(s){destroy(s);for(unsigned i=0;i<s->image_capacity;i++)drop_image(&s->images[i]);g_free(s->images);drop_image(&s->image_candidate);g_free(s);} }
 static int prepare_image(Renderer *s,const ZiImageLevel *levels,uint32_t count,int dynamic){
     if(count==0||count>ZI_IMAGE_LEVELS||s->image_candidate.count)return 1;
     uint32_t fault=s->image_fault;s->image_fault=0;
@@ -220,7 +221,7 @@ int zlc_prepare_coverage(Renderer *s,const ZgCoverage *coverage){
 failed:drop_image(&image);return 2;
 }
 int zlc_update_image(Renderer *s,uint32_t slot,const ZiImageLevel *levels,uint32_t count){
-    if(slot>=ZI_IMAGE_SLOTS||!s->images[slot].dynamic||s->images[slot].count!=count)return 1;
+    if(slot>=s->image_capacity||!s->images[slot].dynamic||s->images[slot].count!=count)return 1;
     CachedImage *image=&s->images[slot];unsigned bank=1-image->active;uint32_t fault=s->image_fault;s->image_fault=0;
     for(uint32_t i=0;i<count;i++){
         if(fault==i+1)return 2;
@@ -231,11 +232,20 @@ int zlc_update_image(Renderer *s,uint32_t slot,const ZiImageLevel *levels,uint32
     }
     image->active=bank;image->levels=levels;return 0;
 }
+/* Grow the slot table; coverage entries point at their own level, so moved
+   entries are pointed at it again. */
+int zlc_reserve_images(Renderer *s,uint32_t capacity){
+    if(capacity<=s->image_capacity)return 0;
+    CachedImage *images=g_try_realloc_n(s->images,capacity,sizeof(*images));if(!images)return 1;
+    memset(images+s->image_capacity,0,(size_t)(capacity-s->image_capacity)*sizeof(*images));
+    for(uint32_t i=0;i<s->image_capacity;i++)if(images[i].is_coverage)images[i].levels=&images[i].coverage_level;
+    s->images=images;s->image_capacity=capacity;return 0;
+}
 void zlc_commit_image(Renderer *s,uint32_t slot){drop_image(&s->images[slot]);s->images[slot]=s->image_candidate;if(s->images[slot].is_coverage)s->images[slot].levels=&s->images[slot].coverage_level;memset(&s->image_candidate,0,sizeof(s->image_candidate));}
 void zlc_image_fault(Renderer *s,uint32_t mip){s->image_fault=mip;}
-void zlc_release_image(Renderer *s,uint32_t slot){if(slot<ZI_IMAGE_SLOTS)drop_image(&s->images[slot]);}
+void zlc_release_image(Renderer *s,uint32_t slot){if(slot<s->image_capacity)drop_image(&s->images[slot]);}
 int zlc_image(Renderer *s,uint32_t slot,const ZiImagePlan *plan){
-    if(slot>=ZI_IMAGE_SLOTS||plan->level>=s->images[slot].count)return 1;
+    if(slot>=s->image_capacity||plan->level>=s->images[slot].count)return 1;
     cairo_pattern_t *pattern=s->images[slot].patterns[s->images[slot].active][plan->level];const ZiImageRect *d=&plan->destination,*r=&plan->source;
     if(d->width<=0||d->height<=0||plan->opacity<=0)return 0;
     cairo_matrix_t matrix;cairo_matrix_init(&matrix,(double)r->width/d->width,0,0,(double)r->height/d->height,(double)r->x-(double)d->x*r->width/d->width,(double)r->y-(double)d->y*r->height/d->height);
@@ -245,10 +255,10 @@ int zlc_image(Renderer *s,uint32_t slot,const ZiImagePlan *plan){
     return cairo_status(s->context)==CAIRO_STATUS_SUCCESS?0:2;
 }
 int zlc_coverage(Renderer *s,uint32_t slot,float x,float y,float scale,int32_t left,int32_t top,uint32_t rgba){
-    if(slot>=ZI_IMAGE_SLOTS||!s->images[slot].is_coverage)return 1;
+    if(slot>=s->image_capacity||!s->images[slot].is_coverage)return 1;
     return zlc_prepared(s,s->images[slot].patterns[0][0],x,y,scale,left,top,NULL,rgba);
 }
-static uint32_t raster_objects(Renderer *s,int coverage){uint32_t n=0;for(unsigned i=0;i<ZI_IMAGE_SLOTS;i++)if(s->images[i].is_coverage==(uint32_t)coverage)for(unsigned bank=0;bank<2;bank++)for(unsigned j=0;j<s->images[i].count;j++){if(s->images[i].surfaces[bank][j])n++;if(s->images[i].patterns[bank][j])n++;}return n;}
+static uint32_t raster_objects(Renderer *s,int coverage){uint32_t n=0;for(unsigned i=0;i<s->image_capacity;i++)if(s->images[i].is_coverage==(uint32_t)coverage)for(unsigned bank=0;bank<2;bank++)for(unsigned j=0;j<s->images[i].count;j++){if(s->images[i].surfaces[bank][j])n++;if(s->images[i].patterns[bank][j])n++;}return n;}
 uint32_t zlc_image_objects(Renderer *s){return raster_objects(s,0);}
 uint64_t zlc_image_creations(Renderer *s){return s->image_creations;}
 uint32_t zlc_coverage_objects(Renderer *s){return raster_objects(s,1);}

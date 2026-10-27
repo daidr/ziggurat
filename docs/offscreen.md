@@ -44,7 +44,7 @@ Surface 仍存在时，Snapshot 关闭期间还暂时关闭该账户的业务入
 
 填充、RGBA、圆角/内描边、严格渐变、矩形 clip、prepared text、图片、A8 与透明 group 使用同一命令和 renderer。group opacity、parent fractional clip 与 mask 的次序沿用[分组工作面](layers.md)。透明根不占用 group/clip 层。改变 opacity 或业务资源仍须显式重新 render；Snapshot 自身和已记录旧 view 不会原地更新。
 
-图片和 A8 在 `surface.uploadImage` / `surface.uploadCoverage` 显式上传，释放用对应 release 方法。Cairo 必须有匹配驻留，缺失返回 `ImageNotUploaded` / `CoverageNotUploaded`；GDI 静态路径直接读取 CPU view。A8 与 prepared text 必须匹配 Surface.scale。缓存仍是共享32槽、一个 LRU 和合计 pixel byte 预算，驱逐只发生在显式上传，普通回放不会补建资源。Surface 首片不提供动态驻留更新包装；可显式上传新的不可变 identity。
+图片和 A8 在 `surface.uploadImage` / `surface.uploadCoverage` 显式上传，释放用对应 release 方法。Cairo 必须有匹配驻留，缺失返回 `ImageNotUploaded` / `CoverageNotUploaded`；GDI 静态路径直接读取 CPU view。A8 与 prepared text 必须匹配 Surface.scale。缓存仍是共享的可增长槽表、一个 LRU 和合计 pixel byte 预算，驱逐只发生在显式上传，Surface 回放不会补建资源（补传只发生在窗口 Context 的帧里）。Surface 首片不提供动态驻留更新包装；可显式上传新的不可变 identity。
 
 默认 legacy text 策略是 grayscale。GDI 在创建时预备灰阶字体和复用 glyph scratch；Cairo 在创建时设置灰阶 font options。透明根和透明组都保留正确 alpha，不使用 ClearType 颜色条纹重建覆盖。`legacy_text=.disabled` 在预检拒绝旧 text 命令，prepared text 仍可使用同一份已拥有的 shaping/coverage。legacy text 的系统 shaping、字形缓存和字体内部成本属于 native text API；需要预备 shaping 的路径使用 prepared text。此处不承诺字体边缘在两个系统逐像素相同。
 

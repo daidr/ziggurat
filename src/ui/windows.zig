@@ -316,10 +316,14 @@ pub const Renderer = struct {
         }
         const charge = view.pixelBytes();
         if (charge > self.images.stats.budget_bytes) return error.ImageBudgetExceeded;
+        if (self.images.empty() == null) {
+            if (self.images.nextCapacity()) |capacity| self.images.grow(capacity) catch {} else |_| {}
+            if (self.images.empty() == null) self.images.drop(self.images.victim() orelse return error.ImageSlotsFull, true);
+        }
         try view.lease.acquireResidency();
         self.images.stats.peak_reserved_bytes = @max(self.images.stats.peak_reserved_bytes, self.images.stats.pixel_bytes + charge);
         self.images.reserveCandidate(charge);
-        while (self.images.needsEviction(charge)) self.images.drop(self.images.oldest().?, true);
+        while (self.images.needsEviction(charge)) self.images.drop(self.images.victim() orelse break, true);
         self.images.commitCharged(self.images.empty().?, view, true, charge);
     }
     pub fn updateImage(self: *Renderer, old_identity: u64, view: drawing.ImageView) !void {
@@ -342,6 +346,11 @@ pub const Renderer = struct {
     }
     pub fn imageStats(self: *const Renderer) drawing.ImageStats {
         return self.images.stats;
+    }
+    /// GDI draws from the caller's CPU pixels, so a frame needs no uploads.
+    pub fn residentFrame(self: *Renderer, buffer: *const commands.Buffer) !void {
+        _ = self;
+        _ = buffer;
     }
     pub fn image(self: *Renderer, view: drawing.ImageView, destination: Rect, options: drawing.ImageOptions) !void {
         const plan = try drawing.planImage(view, .{ .x = destination.x, .y = destination.y, .width = destination.width, .height = destination.height }, options, self.scale);
@@ -742,7 +751,7 @@ pub const Renderer = struct {
             .texture => unreachable, // Whole batch rejected before drawing.
             .image => |value| {
                 if (value.resource >= image_resources.len) return error.MissingResources;
-                try self.image(image_resources[value.resource], value.destination, .{ .alignment = value.alignment, .fit = value.fit, .sampling = value.sampling, .opacity = value.opacity });
+                try self.image(image_resources[value.resource], value.destination, value.options());
             },
             .begin_group => |value| {
                 const r = value.bounds;
@@ -828,7 +837,7 @@ pub const Renderer = struct {
             workspace.deinit();
             self.layer_workspace = null;
         } else self.releaseSurface();
-        self.images.clear();
+        self.images.deinit();
         self.* = .{};
     }
     fn releaseSurface(self: *Renderer) void {

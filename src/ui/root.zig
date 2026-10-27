@@ -2546,6 +2546,7 @@ pub const Context = struct {
     fn software(self: *Context, paint: z.Paint) !void {
         try self.renderer.begin(paint);
         errdefer self.renderer.abort();
+        try self.renderer.residentFrame(&self.command_buffer);
         try self.renderer.replayBuffer(&self.command_buffer);
         const restore_gpu = if (build_options.gpu) self.gpu_renderer.suspendSurface() else false;
         errdefer if (build_options.gpu and restore_gpu) self.gpu_renderer.restoreSurface();
@@ -2943,6 +2944,16 @@ pub const Context = struct {
                     clock.software = true;
                     self.backdrop_software_frames += 1;
                 }
+                // The device cannot upload while it draws: a frame drawing an
+                // image or mask it does not hold draws in software, and the
+                // missing ones are uploaded after it for the next frame.
+                var upload_gpu = false;
+                if (build_options.gpu and using_gpu and !self.gpu_renderer.holdsFrame(&self.command_buffer)) {
+                    self.gpu_renderer.discard();
+                    using_gpu = false;
+                    clock.software = true;
+                    upload_gpu = true;
+                }
                 if (build_options.gpu and using_gpu) {
                     const rendered = if (self.gpu_renderer.replayBuffer(&self.command_buffer)) rendered: {
                         if (self.gpu_renderer.end()) break :rendered true else |err| {
@@ -2967,6 +2978,7 @@ pub const Context = struct {
                 if (self.live(window)) {
                     if (self.software(paint)) self.commitFrame(window) else |err| window.report(.{ .domain = .renderer, .operation = .paint, .err = err });
                 }
+                if (build_options.gpu and upload_gpu and self.live(window)) self.gpu_renderer.residentFrame(&self.command_buffer) catch |err| self.gpuFailure(window, err);
                 self.frames += 1;
             },
             .pointer_down => |pointer| {

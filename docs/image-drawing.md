@@ -48,7 +48,9 @@ CPU 准备只有稳定 State 和一个连续像素 allocation；mip descriptors 
 
 取消在入口、crop/每层 mip 的每 32 行边界和发布前检查；分配或取消失败不发布部分资源。系统 decode 和 native upload 本身是同步调用，不能在调用中抢占。宿主负责线程、deadline、关闭与 join，不存在隐藏 worker。
 
-GPU/Cairo 的图片与 A8 Coverage 合计最多 32 个驻留 identity；默认共享 pixel payload budget 为 64 MiB，`setRasterBudget(bytes)` 与兼容的 `setImageBudget(bytes)` 接受 1..256 MiB 并修改同一预算。缓存只在显式 upload 或降低 budget 时按 LRU 淘汰，draw 只查找和更新最近使用次序，未上传图片返回 `ImageNotUploaded`。重复上传同 identity 为命中，不创建原生对象。整体扫描固定至多 32 项，与历史资源总数无关。Coverage 的准备与上传契约见[阴影与覆盖](shadows.md)。
+GPU/Cairo 的图片与 A8 Coverage 共用一张驻留槽表，起始 32 槽，满了按倍数增长（最多 65536 槽，到顶才按 LRU 腾出一槽），驻留数量由字节预算而不是槽数限制。默认共享 pixel payload budget 为 64 MiB，`setRasterBudget(bytes)` 与兼容的 `setImageBudget(bytes)` 接受 1..256 MiB 并修改同一预算。缓存在显式 upload、降低 budget 和窗口帧补传（见下）时按 LRU 淘汰；渲染器层的 draw 只查找和更新最近使用次序，未上传图片返回 `ImageNotUploaded`。重复上传同 identity 为命中，不创建原生对象。查找按槽表线性扫描，成本随当前槽数增长。Coverage 的准备与上传契约见[阴影与覆盖](shadows.md)。
+
+一帧里同一 Lease 的不同 identity 各占 Buffer 图片表的一项，分别绘制；图片表与命令表等长（2048），每条图片命令都可以画不同的图片。窗口 Context 在回放前让这一帧画到的图片与 Coverage 都驻留：缺的（从未上传、已释放或被淘汰的）就地上传，只淘汰这一帧没画到的项；这一帧本身超过预算时全部保留、暂时超出预算，直到下一次显式 upload 或 budget 变更再按 LRU 收回。Direct3D 11 在绘制中不能上传，所以缺图的那一帧改在软件（GDI）上画，画完再把缺的上传到 GPU，下一帧回到 GPU。离屏 Surface 与渲染器的直接回放不补传，仍返回 `ImageNotUploaded` / `CoverageNotUploaded`。被淘汰后又被帧补传回来的动态图片成为静态驻留，`PixelImage.commit` 遇到 `ImageNotDynamic` 会释放它再重新注册动态驻留。
 
 上传先验证预算，再创建一份完整候选 native mip 集合；所有层成功之后才驱逐旧项并提交。第 N 层 OOM/一般故障释放整个候选，保留旧驻留及其 pin。候选与旧驻留同时存在的瞬时 payload 上限是 `budget + min(budget, 96 MiB)`；`peak_reserved_bytes` 记录生命周期内这种保守预留峰值，允许失败尝试增加。`pixel_bytes` 只计已提交驻留。它们都不是实际进程内存或显存测量：GPU/codec 驱动元数据、对齐和系统缓存另计；Cairo surface 借用 CPU pool，payload 统计同样按全尺寸保守计费。
 
@@ -58,7 +60,7 @@ Cairo 显式 upload 创建各 mip 的 surface 和 pattern，draw 仅设置既有
 
 ## 同尺寸更新
 
-`Context.uploadDynamicImage(view)` 显式注册可更新的驻留项。GDI 只预留最多 32 项的 CPU view 元数据并持 residency pin，按 1×payload 计费；其静态 `uploadImage` 仍无驻留。Cairo/GPU 预留 active/inactive 两套 mip surface/pattern 或 bitmap，按 2×payload 计费。Cairo 两套 bank 各有自己的固定连续像素 pool，区别于静态 surface 直接借用 PreparedImage pool 的零拷贝路径。静态调用不会隐式支付双 bank 成本。
+`Context.uploadDynamicImage(view)` 显式注册可更新的驻留项。GDI 只在同一张可增长槽表里记录 CPU view 元数据并持 residency pin，按 1×payload 计费；其静态 `uploadImage` 仍无驻留。Cairo/GPU 预留 active/inactive 两套 mip surface/pattern 或 bitmap，按 2×payload 计费。Cairo 两套 bank 各有自己的固定连续像素 pool，区别于静态 surface 直接借用 PreparedImage pool 的零拷贝路径。静态调用不会隐式支付双 bank 成本。
 
 Renderer 的图片/Coverage 共享固定缓存元数据在 64-bit 为 5104 bytes，native state 的双 bank 指针表也在初始化时固定预留；这份结构体增量不随历史资源数增长。额外纹理和像素 pool 只在显式 dynamic upload 或 Coverage upload 创建，不为节省固定字段而引入隐藏 allocator 或首次 paint 分配。
 
@@ -82,6 +84,6 @@ stats 的 `update_requests` 包含失败和重试；`updates/update_bytes` 只�
 
 `zig build smoke-image-prepare` 使用真实系统 PNG 解码，覆盖 worker 准备、原图提前关闭、独占 adopt、裁剪、预乘、完整 mip、逐 allocation OOM，以及两次分配后取消的回滚。纯测试覆盖 27×27、31×7、3×27 的完整奇数 mip 链。
 
-`zig build smoke-image-drawing -Dgpu=true` 在 Windows 隐藏窗口实际检查 GDI、硬件 D2D 和 WARP 像素；Linux 相同步骤检查 Cairo。1/1.5/2 scale 覆盖 nearest/linear/mip、透明彩色输入、opacity、contain/cover、源裁剪隔离和 clip。Cairo/GPU 还检查第 2 mip 创建失败后的旧图可画、容量/预算驱逐、32 项 LRU、miss、重复回放无额外 upload 和 native 资源归零。Context 检查 failed frame、draw 内关闭和最终 pin 释放；Windows GPU 检查 pending readiness watch 先取消，再模拟 upload device loss、恢复和 GDI fallback。这些是像素与生命周期检查，不声明可见效果质量或显示延迟。
+`zig build smoke-image-drawing -Dgpu=true` 在 Windows 隐藏窗口实际检查 GDI、硬件 D2D 和 WARP 像素；Linux 相同步骤检查 Cairo。1/1.5/2 scale 覆盖 nearest/linear/mip、透明彩色输入、opacity、contain/cover、源裁剪隔离和 clip。Cairo/GPU 还检查第 2 mip 创建失败后的旧图可画、超过 32 项时槽表增长而不驱逐、预算 LRU、miss、重复回放无额外 upload 和 native 资源归零。Context 检查一帧画 33 张未上传、超出预算的图片仍逐张画出（Cairo 逐像素，GPU 首帧走 GDI、下一帧回到 GPU）、预算变更收回、failed frame、draw 内关闭和最终 pin 释放；Windows GPU 检查 pending readiness watch 先取消，再模拟 upload device loss、恢复和 GDI fallback。这些是像素与生命周期检查，不声明可见效果质量或显示延迟。
 
 `zig build smoke-image-update -Dgpu=true` 使用真实解码的两个不可变版本，在 GDI、硬件 D2D、WARP 和 Linux Cairo 检查 base/1×1 mip 像素。65 次提交后 native 对象和累计创建数不增长；第二 bank 创建失败、第 2 mip 更新失败均保留旧版本可画，Frame pin 阻止替换，另一个 renderer 的旧驻留保持有效。另查 shape/预算/静态项拒绝、精确 transition 重试、旧 identity 差别、Context 分后端失败后重试、watch 先撤销、device-loss 完整恢复、旧业务快照 GDI fallback 和 draw 内关闭释放全部借用。

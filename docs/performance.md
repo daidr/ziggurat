@@ -39,7 +39,7 @@
 
 系统文本的构造成本与正常 paint 分开。Windows 快照使用真实 cluster/range 与逐 run 校验，复杂或非精确坐标继续查询原生布局；同构建的 layout/layoutReference、position/range/fallback 次数和 scratch 峰值由 `smoke-text-layout` 一起输出。长行优化不能推导多段落或全部脚本同等加速，测量与限制见[系统文本布局](text-layout.md)。准备覆盖仅限当前 viewport，不为长文档创建完整像素平面。
 
-静态图片的 decode、crop/预乘/mip、显式 upload 与命中回放分别计费。32 项驻留 LRU 按像素 payload 预算，候选上传成功后才淘汰旧项；`peak_reserved_bytes` 是候选与旧驻留同时存在的保守预留量，不是驱动显存测量。设备丢失恢复重新上传有界驻留集合，并单独计数；正常命中绘制不生成 mip、不创建纹理。详见[图片准备与绘制](image-drawing.md)。
+静态图片的 decode、crop/预乘/mip、显式 upload 与命中回放分别计费。驻留槽表按需增长，LRU 按像素 payload 预算淘汰，候选上传成功后才淘汰旧项；`peak_reserved_bytes` 是候选与旧驻留同时存在的保守预留量，不是驱动显存测量。设备丢失恢复重新上传有界驻留集合，并单独计数；正常命中绘制不生成 mip、不创建纹理。详见[图片准备与绘制](image-drawing.md)。
 
 ## 基准方法与复现
 
