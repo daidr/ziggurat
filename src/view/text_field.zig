@@ -70,6 +70,14 @@ pub const TextField = struct {
         self.host.focusNode(self.id);
     }
 
+    /// Shows or hides the text as a password, as an eye button beside the
+    /// field does; the field is shaped again after the next paint.
+    pub fn setPassword(self: *TextField, password: bool) !void {
+        try self.field.setPassword(password);
+        self.prepared = null;
+        if (self.host.context.window) |window| window.invalidate();
+    }
+
     /// Stop deferred work before the Field is closed. Closing the Field is
     /// still the caller's job and unregisters it from the Context.
     pub fn detach(self: *TextField) void {

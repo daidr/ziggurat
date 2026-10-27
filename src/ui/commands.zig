@@ -23,6 +23,9 @@ pub const Font = struct {
     weight: Weight = .regular,
     italic: bool = false,
     monospace: bool = false,
+    /// A family by its `ziggurat_fonts` id, registered or the system's;
+    /// 0 is the interface family, or the fixed-pitch one for monospace.
+    family: u8 = 0,
 
     pub const Weight = enum(u8) {
         regular,
@@ -44,14 +47,15 @@ pub const Font = struct {
     pub const heading5: Font = .{ .size = 16, .weight = .semibold };
     pub const heading6: Font = .{ .size = 14, .weight = .semibold };
     pub const code: Font = .{ .size = 14, .monospace = true };
+    pub const max_family = 63;
     pub const smallest: f32 = 1;
     pub const largest: f32 = 1024;
     pub fn valid(self: Font) bool {
-        return std.math.isFinite(self.size) and self.size >= smallest and self.size <= largest;
+        return std.math.isFinite(self.size) and self.size >= smallest and self.size <= largest and self.family <= max_family;
     }
     /// The compact form stored in a command; sizes round to 1/16 DIP.
     pub fn key(self: Font) FontKey {
-        return .{ .sixteenths = @intFromFloat(@round(self.size * 16)), .weight = self.weight, .italic = self.italic, .monospace = self.monospace };
+        return .{ .sixteenths = @intFromFloat(@round(self.size * 16)), .weight = self.weight, .italic = self.italic, .monospace = self.monospace, .family = @intCast(@min(self.family, max_family)) };
     }
 };
 pub const FontKey = packed struct(u32) {
@@ -59,7 +63,7 @@ pub const FontKey = packed struct(u32) {
     weight: Font.Weight = .regular,
     italic: bool = false,
     monospace: bool = false,
-    _: u6 = 0,
+    family: u6 = 0,
     pub fn size(self: FontKey) f32 {
         return @as(f32, @floatFromInt(self.sixteenths)) / 16;
     }

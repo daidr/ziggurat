@@ -12,7 +12,10 @@
 typedef void *(__cdecl *BreakOpen)(int32_t,const char *,const uint16_t *,int32_t,int32_t *);
 typedef int32_t (__cdecl *BreakNext)(void *);
 typedef void (__cdecl *BreakClose)(void *);
-typedef struct Engine {IDWriteFactory *factory;HMODULE unicode;BreakOpen open;BreakNext first,next;BreakClose close;} Engine;
+typedef struct Engine {IDWriteFactory *factory;HMODULE unicode;BreakOpen open;BreakNext first,next;BreakClose close;IDWriteFontCollection *fonts;uint64_t fonts_seen;} Engine;
+/* The system's fonts and the application's registered ones; NULL, the
+   system's alone, while none is registered. */
+IDWriteFontCollection *zfont_collection(IDWriteFactory *factory,uint64_t *seen,IDWriteFontCollection **cache);
 typedef struct Layout {Engine *engine;IDWriteTextLayout *layout;const uint16_t *text;uint32_t length,cell_count;ZtlCell *cells;ZtlRect terminal;int snapshot;ZtlSnapshotStats stats;} Layout;
 enum { CELL_BULK=1,CELL_FALLBACK=2,CELL_CANDIDATE=3 };
 static uint32_t cell_at(Layout *,uint32_t);
@@ -36,12 +39,12 @@ int ztl_engine_init(void *storage,ZtlError *error){
     if(FAILED(hr)){DROP(s->factory);FreeLibrary(s->unicode);s->unicode=NULL;InterlockedDecrement(&modules);return status(hr,error);}
     InterlockedIncrement(&engines);return ZTL_OK;
 }
-void ztl_engine_close(void *storage){Engine *s=storage;DROP(s->factory);if(s->unicode){FreeLibrary(s->unicode);s->unicode=NULL;InterlockedDecrement(&modules);}InterlockedDecrement(&engines);}
+void ztl_engine_close(void *storage){Engine *s=storage;if(s->fonts){IDWriteFontCollection_Release(s->fonts);s->fonts=NULL;}DROP(s->factory);if(s->unicode){FreeLibrary(s->unicode);s->unicode=NULL;InterlockedDecrement(&modules);}InterlockedDecrement(&engines);}
 int ztl_layout_init(void *storage,void *engine,const char *utf8,uint32_t n8,const uint16_t *text,uint32_t length,const ZtlOptions *options,ZtlError *error){
     (void)utf8;(void)n8;Layout *s=storage;memset(s,0,sizeof(*s));s->engine=engine;s->text=text;s->length=length;*error=(ZtlError){0};
     WCHAR family[256],locale[128];
     if(!MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,options->family[0]?options->family:"Segoe UI",-1,family,256)||!MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,options->locale[0]?options->locale:"en-US",-1,locale,128)){*error=(ZtlError){2,(int32_t)GetLastError()};return ZTL_FAILED;}
-    IDWriteTextFormat *format=NULL;HRESULT hr=IDWriteFactory_CreateTextFormat(s->engine->factory,family,NULL,(DWRITE_FONT_WEIGHT)options->weight,options->italic?DWRITE_FONT_STYLE_ITALIC:DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,options->size,locale,&format);OWN(format);
+    IDWriteTextFormat *format=NULL;HRESULT hr=IDWriteFactory_CreateTextFormat(s->engine->factory,family,zfont_collection(s->engine->factory,&s->engine->fonts_seen,&s->engine->fonts),(DWRITE_FONT_WEIGHT)options->weight,options->italic?DWRITE_FONT_STYLE_ITALIC:DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,options->size,locale,&format);OWN(format);
     if(FAILED(hr))goto done;
     hr=IDWriteTextFormat_SetWordWrapping(format,options->wrap==0?DWRITE_WORD_WRAPPING_NO_WRAP:options->wrap==1?DWRITE_WORD_WRAPPING_WHOLE_WORD:DWRITE_WORD_WRAPPING_WRAP);if(FAILED(hr))goto done;
     hr=IDWriteTextFormat_SetReadingDirection(format,options->rtl?DWRITE_READING_DIRECTION_RIGHT_TO_LEFT:DWRITE_READING_DIRECTION_LEFT_TO_RIGHT);if(FAILED(hr))goto done;

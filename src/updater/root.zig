@@ -15,6 +15,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const view = @import("ziggurat_view");
+const md = @import("ziggurat_markdown");
+const md_view = @import("ziggurat_markdown_view");
 pub const strings = @import("strings.zig");
 pub const prefs = @import("prefs.zig");
 pub const FeedBackend = @import("feed_backend.zig").FeedBackend;
@@ -36,7 +38,7 @@ pub const max_version = prefs.max_version;
 /// A newer version a check found. Copied by `checkFinished`.
 pub const Release = struct {
     version: []const u8,
-    /// Plain text; blank lines separate paragraphs.
+    /// Markdown: headings, lists, emphasis, code and links show as such.
     notes: []const u8 = "",
 };
 
@@ -102,6 +104,18 @@ pub const Options = struct {
     /// Called after a saved choice or the last-check time changed, for a
     /// preferences page that shows them.
     on_change: ?z.Task = null,
+    /// The application's icon, shown beside the texts; uploaded by the
+    /// host and kept alive until deinit.
+    icon: ?view.ImageView = null,
+    /// Opens a link of the release notes, typically in the browser; links
+    /// do nothing without it.
+    open_link: ?LinkHandler = null,
+};
+
+pub const LinkHandler = struct {
+    context: *anyopaque,
+    /// The destination is borrowed during the call.
+    open: *const fn (*anyopaque, []const u8) void,
 };
 
 fn defaultNow() i64 {
@@ -116,6 +130,8 @@ const Job = enum { none, check, install };
 pub const Size = struct { width: u32, height: u32 };
 pub const status_size: Size = .{ .width = 440, .height = 190 };
 pub const release_size: Size = .{ .width = 560, .height = 440 };
+/// Side of the application icon in DIP; the windows widen by it.
+pub const icon_size: f32 = 64;
 
 /// Keep at a stable address from start() until deinit(). Main thread only.
 pub const Updater = struct {
@@ -139,6 +155,9 @@ pub const Updater = struct {
     version_len: usize = 0,
     notes: [max_notes]u8 = undefined,
     notes_len: usize = 0,
+    /// The notes parsed as Markdown, or null when they did not fit.
+    notes_tree: ?md.Tree = null,
+    notes_storage: md.Storage(1024, max_notes + 1024) = .{},
     detail: [max_detail]u8 = undefined,
     detail_len: usize = 0,
     received: u64 = 0,
@@ -155,7 +174,7 @@ pub const Updater = struct {
     /// Show the window once the previous one has closed.
     reopen: bool = false,
     host: view.Host = undefined,
-    storage: view.Storage(160, 24 * 1024) = .{},
+    storage: view.Storage(400, 48 * 1024) = .{},
     notes_scroll: view.ScrollModel = .{},
     /// The size the window was given, release or status.
     release_layout: bool = false,
@@ -451,11 +470,19 @@ pub const Updater = struct {
         if (!std.unicode.utf8ValidateSlice(notes)) notes = "";
         @memcpy(self.notes[0..notes.len], notes);
         self.notes_len = notes.len;
+        self.notes_tree = md.parse(self.notes[0..notes.len], self.notes_storage.buffers()) catch null;
     }
     fn keepDetail(self: *Updater, err: anyerror) void {
         const name = @errorName(err);
         self.detail_len = @min(name.len, max_detail);
         @memcpy(self.detail[0..self.detail_len], name[0..self.detail_len]);
+    }
+
+    /// The size for the current layout, wider by the icon's column.
+    pub fn windowSize(self: *const Updater) Size {
+        var size = if (self.release_layout) release_size else status_size;
+        if (self.options.icon != null) size.width += @as(u32, @intFromFloat(icon_size)) + 16;
+        return size;
     }
 
     fn set(self: *Updater, screen: Screen) void {
@@ -464,7 +491,7 @@ pub const Updater = struct {
             const release = screen == .available and self.notes_len != 0;
             if (release != self.release_layout) {
                 self.release_layout = release;
-                const size = if (release) release_size else status_size;
+                const size = self.windowSize();
                 window.resize(size.width, size.height) catch |err| {
                     self.last_error = err;
                 };
@@ -495,7 +522,7 @@ pub const Updater = struct {
 
     fn open(self: *Updater) !void {
         self.release_layout = self.screen == .available and self.notes_len != 0;
-        const size = if (self.release_layout) release_size else status_size;
+        const size = self.windowSize();
         self.host = view.Host.init(self, build, self.storage.buffers(), .{ .root = .{ .padding = view.Insets.all(20), .gap = 10, .alignment = .stretch } });
         // The pure test backend has no native window for UI Automation.
         if (builtin.is_test) self.host.context.semantics_enabled = false;
@@ -599,8 +626,24 @@ pub const Updater = struct {
         var title_buffer: [512]u8 = undefined;
         var message_buffer: [1024]u8 = undefined;
         const shown = self.content(&title_buffer, &message_buffer) orelse return;
+        var width: f32 = @floatFromInt(self.windowSize().width - 40);
+        if (self.options.icon) |picture| {
+            // The icon sits beside everything else, as on the system's own
+            // update prompts.
+            try v.row(.{ .gap = 16, .grow = 1, .alignment = .start });
+            try v.image(picture, .{ .decorative = true }, .{ .width = icon_size, .height = icon_size });
+            try v.column(.{ .gap = 10, .grow = 1, .alignment = .stretch });
+            width -= icon_size + 16;
+        }
+        try self.body(v, shown, width);
+        if (self.options.icon != null) {
+            try v.end();
+            try v.end();
+        }
+    }
+
+    fn body(self: *Updater, v: *view.View, shown: Content, width: f32) anyerror!void {
         const t = &self.text;
-        const width: f32 = @floatFromInt((if (self.release_layout) release_size else status_size).width - 40);
         try v.text(shown.title, .{});
         if (shown.message.len != 0) try wrapped(v, shown.message, width, .{});
         if (shown.detail.len != 0) try v.text(shown.detail, .{ .color = 0x7b8794 });
@@ -609,7 +652,13 @@ pub const Updater = struct {
             if (self.notes_len != 0) {
                 try v.text(t.release_notes, .{});
                 try v.scroll(&self.notes_scroll, .{ .grow = 1, .padding = view.Insets.all(8), .border = 0xcbd2d9, .radius = 4, .name = t.release_notes });
-                try wrapped(v, self.releaseNotes(), width - 24, .{});
+                if (self.notes_tree) |tree| {
+                    const activation = try md_view.build(v, tree, .{ .width = width - 24 }, .{});
+                    if (activation) |value| switch (value) {
+                        .link => |destination| if (self.options.open_link) |handler| handler.open(handler.context, destination),
+                        .task => {},
+                    };
+                } else try wrapped(v, self.releaseNotes(), width - 24, .{});
                 try v.end();
             } else try v.spacer(.{});
             _ = try v.checkbox(&self.automatic_choice, t.automatic_downloads, .{});

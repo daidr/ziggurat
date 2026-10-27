@@ -29,6 +29,16 @@
 | `terminal` | [terminal.zig](../examples/terminal.zig) | 用户的 shell 运行在终端视图中：窗口标题跟随 shell，shell 退出后关闭窗口 |
 | `text-buffer` | [text_buffer.zig](../examples/text_buffer.zig) | 10 万行混合文字的大文档直接由编辑器 Adapter 编辑：只排版视口附近的行，状态行读取文档索引中的行数、字符数与版本 |
 | `native` | [native.zig](../examples/native.zig) | 桌面集成一览：菜单栏（快捷键、勾选、互斥项）、右键菜单、托盘、多选文件对话框、问答消息框、通知、全局快捷键 Ctrl+Shift+Space、剪贴板、深色模式与系统外观变化、主显示器信息 |
+| `flyout` | [flyout.zig](../examples/flyout.zig) | `system.Flyout` 弹出层：颜色列表、可编辑便笺与关于框，各有自己的 `view.Host`；接收键盘，点到别处或按 Escape 关闭，超出窗口并翻转/滑动以留在屏幕内 |
+| `menubar-flyout` | [menubar_flyout.zig](../examples/menubar_flyout.zig) | 通知区域应用：托盘图标打开面板式弹出层（任务栏上方或顶栏下方），点到别处、Escape 或再点图标关闭；托盘图标由像素生成；Linux 指示器只有菜单，由菜单打开面板 |
+| `markdown-chat` | [markdown_chat.zig](../examples/markdown_chat.zig) | 模拟语言模型的聊天：Markdown 回复按 token 流入，可选按词、句、行、段或完成后显示；列表跟随末尾直到用户上滚；`View.wakeAt` 驱动不均匀的到达节奏 |
+| `confetti` | [confetti.zig](../examples/confetti.zig) | 纸屑：CPU 上逐帧模拟与绘制到 `ui.PixelImage`，在绘制之外提交，覆盖整个窗口 |
+| `effort-slider` | [effort_slider.zig](../examples/effort_slider.zig) | 分档“努力程度”滑块：从 Low 到 Max 再到 Galaxy，拇指为矢量轮廓画出的大脑，超过 Max 时爆开、卡片抖动、轨道闪烁；拖动、点击轨道、方向键与 Home/End；卡片在 CPU 上绘制到 `ui.PixelImage` |
+| `chat-glow` | [chat_glow.zig](../examples/chat_glow.zig) | 带流光边缘的聊天：CPU 绘制的光球、头像与输入框光环，Oklab 锥形渐变，逐词流出的回复与停止 |
+| `blackhole` | [blackhole.zig](../examples/blackhole.zig) | CPU 光线追踪的史瓦西黑洞：渲染线程 + 线程池分行、泛光与收尾处理、按渲染时间自适应分辨率，拖动/甩动/缩放视角 |
+| `wind` | [wind.zig](../examples/wind.zig) | 风中的字符场：系统等宽字体轮廓生成图集，场、单元与字形三遍在 CPU 上计算；指针扰动、点击涟漪、Ctrl+R 换种子 |
+| `mayoi` | [mayoi.zig](../examples/mayoi.zig) | 幸存者小游戏：代码绘制的像素画以原分辨率合成到 `ui.PixelImage`、静态图片 HUD 图标、合成音效与流式播放的 lo-fi 曲子、手柄、暂停与升级选择 |
+| `rich-text` | [rich_text.zig](../examples/rich_text.zig) | 富文本编辑器：格式工具栏、Markdown 快捷方式、列表与任务、链接，系统剪贴板复制粘贴 HTML/RTF/Markdown，原生文字测量 |
 | `hybrid` | [hybrid.zig](../examples/hybrid.zig) | 混合应用：原生侧栏 + 矩形区域中的系统 WebView 页面，双向消息；需要 `-Dwebview=true` |
 
 早期示例 `counter`、`view-counter`、`web-counter`、`rectangular-pages` 与 `counter_service.zig`（IPC 客户端生成）保持不变。Markdown 与浮出窗口的示例等对应模块合入后再补。
@@ -73,4 +83,7 @@
 - 文档应用没有共享的文件 I/O worker，每个应用都要自建线程、队列与 join；在还没有窗口时不能先打开文件（没有窗口时 `App.run` 立即返回）。
 - 用户关闭窗口时，图表没有文档化的“在 Context detach 之前”释放点；`chart-streaming` 在 `on_close` 中释放并在 `run` 后再次释放，`App.quit` 会跳过 `on_close`。
 - 缓动只有 linear、smoothstep 与 cubic_out；播放头没有无限循环（重复次数有限）。
+- 一帧中同一个 `drawing.Lease` 只对应一张图片（后画的同 Lease 不同 identity 会画成第一张），Cairo/GPU 最多驻留 32 张图片；`mayoi` 只上传用到的图标，每个图标一个 Lease。
+- Frame 没有居中或右对齐的文字，`view.Measurer` 只是估算；`mayoi` 用 `ziggurat_text_layout` 量出宽度后居中。
+- `ImageOptions` 没有源区域、翻转与着色，精灵图集不能直接按格绘制；`mayoi` 在 CPU 上合成世界画面。
 - WebView 没有“带本地资源加载页面”的一步式辅助，持久 Profile 与 ephemeral 要按平台手动选择。

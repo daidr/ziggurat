@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 pub const drawing = @import("ziggurat_drawing_resources");
+const fonts = @import("ziggurat_fonts");
 pub const outlines = @import("text_layout_outline.zig");
 pub const OutlineSnapshot = outlines.Snapshot;
 pub const OutlineOptions = outlines.Options;
@@ -797,12 +798,15 @@ fn createLayout(engine: *EngineState, allocator: std.mem.Allocator, source: []co
     var timer = std.time.Timer.start() catch null;
     // These bounded strings must not remain caller aliases across allocation.
     // Text can be much larger, so its sole copy is allocated, then validated.
-    if (options.family.len > 255 or options.locale.len > 127) return error.InvalidOptions;
+    // A family the application registered under its own name lays out in
+    // the font's own family.
+    const family_name = fonts.resolve(options.family);
+    if (family_name.len > 255 or options.locale.len > 127) return error.InvalidOptions;
     var family_storage: [255]u8 = undefined;
     var locale_storage: [127]u8 = undefined;
-    const captured_family = family_storage[0..options.family.len];
+    const captured_family = family_storage[0..family_name.len];
     const captured_locale = locale_storage[0..options.locale.len];
-    @memcpy(captured_family, options.family);
+    @memcpy(captured_family, family_name);
     @memcpy(captured_locale, options.locale);
     var captured_options = options;
     captured_options.family = captured_family;

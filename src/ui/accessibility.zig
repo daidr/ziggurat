@@ -35,6 +35,9 @@ pub const Node = struct {
     invalid: bool = false,
     /// A form cannot be submitted without a value.
     required: bool = false,
+    /// A text box whose value is a password: it reports no value, text or
+    /// selection, only that it holds a password.
+    password: bool = false,
     /// A tree or table whose items can be selected together.
     multiple: bool = false,
     /// Whether a tree item's children are shown; null for a leaf.
@@ -65,6 +68,7 @@ const Entry = struct {
     mixed: bool,
     invalid: bool,
     required: bool,
+    password: bool,
     multiple: bool,
     expanded: ?bool,
     range_value: f64,
@@ -150,7 +154,7 @@ pub const Tree = struct {
             const description = text[used..][0..entry.description_len];
             @memcpy(description, self.storage[entry.description_start..][0..entry.description_len]);
             used += description.len;
-            nodes[written] = .{ .id = entry.id, .parent = entry.parent, .role = entry.role, .name = name, .value = value, .description = description, .bounds = entry.bounds, .enabled = entry.enabled, .focused = entry.focused, .read_only = entry.read_only, .checked = entry.checked, .mixed = entry.mixed, .invalid = entry.invalid, .required = entry.required, .multiple = entry.multiple, .expanded = entry.expanded, .range_value = entry.range_value, .range_minimum = entry.range_minimum, .range_maximum = entry.range_maximum, .range_small_change = entry.range_small_change, .range_large_change = entry.range_large_change, .selection_start = entry.selection_start, .selection_end = entry.selection_end };
+            nodes[written] = .{ .id = entry.id, .parent = entry.parent, .role = entry.role, .name = name, .value = value, .description = description, .bounds = entry.bounds, .enabled = entry.enabled, .focused = entry.focused, .read_only = entry.read_only, .checked = entry.checked, .mixed = entry.mixed, .invalid = entry.invalid, .required = entry.required, .password = entry.password, .multiple = entry.multiple, .expanded = entry.expanded, .range_value = entry.range_value, .range_minimum = entry.range_minimum, .range_maximum = entry.range_maximum, .range_small_change = entry.range_small_change, .range_large_change = entry.range_large_change, .selection_start = entry.selection_start, .selection_end = entry.selection_end };
             written += 1;
         };
         return nodes[0..written];
@@ -205,6 +209,7 @@ pub const Tree = struct {
             .mixed = node.mixed,
             .invalid = node.invalid,
             .required = node.required,
+            .password = node.password,
             .multiple = node.multiple,
             .expanded = node.expanded,
             .range_value = node.range_value,
@@ -490,7 +495,7 @@ pub const Bridge = struct {
                 .id = entry.id,
                 .parent = entry.parent orelse root_id,
                 .role = @intFromEnum(entry.role),
-                .flags = @as(u32, @intFromBool(entry.enabled and enabled)) | (@as(u32, @intFromBool(entry.focused and focused)) << 1) | (@as(u32, @intFromBool(entry.read_only)) << 2) | (@as(u32, @intFromBool(!visible or entry.bounds.width == 0 or entry.bounds.height == 0)) << 3) | (@as(u32, @intFromBool(entry.checked)) << 4) | (@as(u32, @intFromBool(entry.invalid)) << 5) | (@as(u32, @intFromBool(entry.required)) << 6) | (@as(u32, @intFromBool(entry.multiple)) << 7) | (@as(u32, @intFromBool(entry.expanded != null)) << 8) | (@as(u32, @intFromBool(entry.expanded orelse false)) << 9) | (@as(u32, @intFromBool(entry.mixed)) << 10),
+                .flags = @as(u32, @intFromBool(entry.enabled and enabled)) | (@as(u32, @intFromBool(entry.focused and focused)) << 1) | (@as(u32, @intFromBool(entry.read_only)) << 2) | (@as(u32, @intFromBool(!visible or entry.bounds.width == 0 or entry.bounds.height == 0)) << 3) | (@as(u32, @intFromBool(entry.checked)) << 4) | (@as(u32, @intFromBool(entry.invalid)) << 5) | (@as(u32, @intFromBool(entry.required)) << 6) | (@as(u32, @intFromBool(entry.multiple)) << 7) | (@as(u32, @intFromBool(entry.expanded != null)) << 8) | (@as(u32, @intFromBool(entry.expanded orelse false)) << 9) | (@as(u32, @intFromBool(entry.mixed)) << 10) | (@as(u32, @intFromBool(entry.password)) << 11),
                 .name_start = @intCast(name_start),
                 .name_len = @intCast(name_len),
                 .value_start = @intCast(value_start),

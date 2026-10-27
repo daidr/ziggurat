@@ -409,6 +409,8 @@ if (row.right_clicked) self.showMenu(item, row.bounds.?);
 - `View.focusLeaf(id)` 在这一遍之后把键盘焦点交给可聚焦叶子 `id`（`place` 或 `paint` 得到的节点 ID），`View.hasKeyboard(id)` 表示该叶子持有焦点且窗口有键盘；游戏循环用它们在叶子出现时取得焦点、失去键盘时暂停。
 - 消费 `pointer_down` 即捕获指针：直到松开，移动都以 `pointer_drag`（带起点、相对上一次的位移，以及是否已移出 `drag_threshold` 4 DIP）送到这个叶子，松开以 `pointer_up` 送达，指针离开叶子甚至窗口也一样。窗口失去焦点或原生捕获被取消时改为 `pointer_cancel`。下一次构建不再产生该叶子时捕获随之丢弃，之后不再调用它。
 
+`Options.after_frame`（可选 `FrameHook{context, run}`）在 Host 每次成功绘制的帧末、所有叶子的 `place` 之后调用一次，规则同 `place`。跟随叶子放置的原生内容用它发现本帧没有构建的叶子，例如[视图中的 WebView](embedded-webview.md)。`Host.attachBackdrop(owner)` 代替 `attach(window)`，把 Host 作为 `composition.Owner` 的全窗背景，原生区域位于其上；Context 需使用 `.gdi` 渲染模式。
+
 ## 拖动与拖放
 
 以下容器都按列排列，用 `end` 关闭；主键按下后移出 `drag_threshold`（4 DIP）才开始拖动，之前里面的按钮照常点击。拖动期间指针被捕获，移出窗口也继续跟随；松开结束，Escape、窗口失去焦点或捕获被取消则取消。滑块、分栏和接受按下的嵌入叶子保留自己的按下。
@@ -503,7 +505,7 @@ try std.testing.expectEqualStrings("Sans", h.focused().?.text);
 
 ## 背景效果
 
-`Style.material` 是一个 `ui.BackdropEffect`，代替 `background` 画在容器的子节点之下：玻璃、对下方内容的模糊或滚动边缘，形状取 `Style.radius`。`Style.edges` 在裁剪容器（例如滚动容器）的顶部和/或底部画滚动边缘，带高 `height`（默认 24 DIP），在子节点之上、裁剪之内：
+`Style.material` 是一个 `ui.Material`，代替 `background` 画在容器的边框和子节点之下：玻璃、对下方内容的模糊、滚动边缘，或自己绘制的 `custom` 材质，形状取 `Style.radius`。`Style.edges` 在裁剪容器（例如滚动容器）的顶部和/或底部画滚动边缘，带高 `height`（默认 24 DIP），在子节点之上、裁剪之内：
 
 ```zig
 try v.row(.{ .padding = Insets.all(12), .radius = 16, .material = .{ .glass = .{ .tint = .{ .r = 40, .g = 110, .b = 200, .a = 60 } } } });
@@ -513,6 +515,23 @@ try v.scroll(&model, .{ .grow = 1, .edges = .{ .top = .{}, .bottom = .{ .hard = 
 ```
 
 效果需要 `host.prepareBackdropEffects(allocator, .{})`（在 `attach` 之后），否则画不透明填充。效果的像素模型、预算和后端行为见[背景效果与加载动画](backdrop-effects.md)。
+
+`custom` 材质是一段绘制代码：`paint(context, frame, box, radius)` 在 `box`（帧的 DIP 坐标）上用 `ui.Frame` 能画的任何东西填充，例如渐变、背景效果或背景着色器；`context` 要比画它的每一帧都活得久。组件包可以这样提供自己的材质：
+
+```zig
+const Stripes = struct {
+    color: ui.Color,
+    fn paint(context: ?*const anyopaque, frame: *ui.Frame, box: ui.Rect, radius: f32) anyerror!void {
+        const self: *const @This() = @ptrCast(@alignCast(context.?));
+        frame.roundedRect(box, radius, self.color);
+        frame.roundedRect(.{ .x = box.x, .y = box.y, .width = box.width, .height = box.height / 2 }, 0, self.color.withAlpha(0.5));
+    }
+};
+const stripes: Stripes = .{ .color = ui.Color.oklch(0.7, 0.15, 250) };
+try v.row(.{ .radius = 12, .material = .{ .custom = .{ .context = &stripes, .paint = Stripes.paint, .name = "stripes" } } });
+```
+
+不经过视图时，`frame.material(bounds, radius, value)` 画同样的材质。
 
 ## 不透明度、位姿与进出场
 
