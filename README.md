@@ -81,6 +81,11 @@ WSL 应将 Zig 本地缓存放在 Linux 文件系统，见 `scripts/linux-check.
 | `ziggurat_chart_view` | 声明式视图中的图表：网格、柱、点、规则线、标签、图例与覆盖蒙版绘制的折线/面积/扇形 | 依赖视图与矢量；蒙版在绘制后的投递任务中准备，未变化时回放不分配 |
 | `ziggurat_terminal` | [终端](docs/terminal.md)：Linux PTY 与 Windows ConPTY 子进程、显式读写线程与背压、VT/ANSI 解析、带 scrollback 的屏幕（SGR 256 色/真彩、备用屏、滚动区、宽字符）、按键/粘贴/鼠标编码、选择与链接识别；OSC 52 默认拒绝 | 仅依赖核心；输出经 `App.post` 回主线程 |
 | `ziggurat_terminal_view` | 声明式视图中的终端：按单元格绘制、作为文本字段接收键盘与输入法、选择复制粘贴、鼠标上报、滚动 scrollback、Ctrl+点击链接 | 依赖视图；改尺寸与注册在绘制后的投递任务中进行，未变化时重绘不分配 |
+| `ziggurat_rich_text` | [富文本](docs/rich-text-editor.md)模型：段落与属性 run、可撤销文档、HTML/RTF/Markdown/JSON 编解码 | 纯 Zig |
+| `ziggurat_rich_text_editor` | 声明式视图中的富文本编辑器：按段落虚拟化排版、Markdown 快捷方式、格式快捷键、输入法、任务与链接点击 | 依赖视图；排版在绘制后的投递任务与输入处理中进行 |
+| `ziggurat_rich_text_clipboard` | 富文本编辑器与系统剪贴板的连接：写自有格式/HTML/纯文本，读自有格式/HTML/RTF/Markdown/纯文本 | 依赖 `ziggurat_system`；异步读取 |
+| `ziggurat_fonts` | [应用字体](docs/fonts.md)：注册 TrueType/OpenType 字体（Linux fontconfig + Pango，Windows GDI + DirectWrite 字体集）、字体族 id 与名称解析、带等宽与注册标记的字体族列表 | 主线程；注册字体写入用户缓存目录 |
+| `ziggurat_text_measure` | 用平台文本排版测量文字的 `view.Measurer`，按文字与字体缓存 | 主线程使用 |
 | `ziggurat_game` | [游戏](docs/game.md)：固定步长游戏循环与按位置的键盘/指针输入、二维相机、整数倍像素缩放、Windows XInput 与 Linux evdev 手柄 | 依赖视图；不分配，主线程运行；手柄由应用持有 |
 | `ziggurat_virtual_list` | 稳定行 ID、可变高度索引、滚动锚点与有界可见回放 | 单向依赖 UI；完整虚拟控件集继续按计划实施 |
 | `ziggurat_images` | 有界 PNG/JPEG/BMP/首帧 GIF、可选 WebP、EXIF 与独占像素交接 | 系统 WIC/GdkPixbuf；有界 LZW；可选固定源码 WebP |
@@ -131,12 +136,12 @@ Linux 上使用 `zig build test check smoke-linux`，包括 GTK 生命周期、�
 Ziggurat 使用 [MIT 许可证](LICENSE)。源码包包含 LICENSE，构建安装到 `share/ziggurat/LICENSE`。打包本仓库示例时传入 `-LicensePath LICENSE`；下游应用仍显式提供自己的许可文件。签名、更新和基准工具见以下文档。
 
 - [架构](docs/architecture.md)、[设计原则](docs/philosophy.md)、[路线图](docs/roadmap.md)、[完整实施计划](docs/implementation-plan.md)
-- [窗口状态与关系](docs/windows.md)、[内容组合](docs/composition.md)、[布局](docs/layout.md)、[声明式视图](docs/view.md)、[基础控件](docs/widgets.md)、[虚拟列表](docs/virtual-list.md)、[基础绘制](docs/drawing.md)、[透明分组](docs/layers.md)、[离屏快照](docs/offscreen.md)、[路径资源](docs/vector.md)、[SVG 文档](docs/svg.md)、[系统文本布局](docs/text-layout.md)、[编辑器桥接](docs/editor.md)、[索引文档](docs/document.md)、[文档视图](docs/document-editor.md)、[编辑前输入门](docs/editor-pre-input.md)、[区间标记](docs/editor-range-markers.md)、[原生文本上下文](docs/text-input.md)、[窗口输入模式](docs/text-input-mode.md)、[图片解码](docs/images.md)、[图片绘制](docs/image-drawing.md)
+- [窗口状态与关系](docs/windows.md)、[内容组合](docs/composition.md)、[视图中的 WebView](docs/embedded-webview.md)、[布局](docs/layout.md)、[声明式视图](docs/view.md)、[基础控件](docs/widgets.md)、[虚拟列表](docs/virtual-list.md)、[基础绘制](docs/drawing.md)、[透明分组](docs/layers.md)、[离屏快照](docs/offscreen.md)、[路径资源](docs/vector.md)、[SVG 文档](docs/svg.md)、[系统文本布局](docs/text-layout.md)、[编辑器桥接](docs/editor.md)、[索引文档](docs/document.md)、[文档视图](docs/document-editor.md)、[编辑前输入门](docs/editor-pre-input.md)、[区间标记](docs/editor-range-markers.md)、[原生文本上下文](docs/text-input.md)、[窗口输入模式](docs/text-input-mode.md)、[图片解码](docs/images.md)、[图片绘制](docs/image-drawing.md)
 - [错误诊断](docs/diagnostics.md)、[图标、打包与安装程序](docs/packaging.md)
 - [应用资源与停止](docs/application-resources.md)、[代码编辑服务](docs/code-editor.md)、[Snippet 会话](docs/snippets.md)、[完整文档辅助功能](docs/document-accessibility.md)、[快照差异](docs/document-diff.md)、[双栏比较](docs/document-diff-view.md)
 - [窗口位置恢复](docs/window-placement.md)、[文档应用模型](docs/document-app.md)、[语言协议](docs/language-protocol.md)
 - [Diff 文档辅助功能](docs/document-diff-accessibility.md)、[SVG 文字排版](docs/svg-text.md)
-- [IPC](docs/ipc.md)、[页面 runtime](docs/page-runtime.md)、[插件](docs/plugins.md)、[fetch 插件](docs/plugin-fetch.md)、[watch 插件](docs/plugin-watch.md)、[sqlite 插件](docs/plugin-sqlite.md)、[应用字节流](docs/resource-stream.md)、[页面导航](docs/pages.md)、[文档初始化器](docs/document-initializers.md)、[独立 Cookie 存储](docs/cookie-store.md)、[Web 资源工具](docs/web-assets.md)、[系统设施](docs/system.md)、[单实例与系统集成](docs/os-integration.md)
+- [IPC](docs/ipc.md)、[页面 runtime](docs/page-runtime.md)、[插件](docs/plugins.md)、[fetch 插件](docs/plugin-fetch.md)、[watch 插件](docs/plugin-watch.md)、[sqlite 插件](docs/plugin-sqlite.md)、[WebSocket 插件](docs/plugin-websocket.md)、[应用字节流](docs/resource-stream.md)、[页面导航](docs/pages.md)、[文档初始化器](docs/document-initializers.md)、[独立 Cookie 存储](docs/cookie-store.md)、[Web 资源工具](docs/web-assets.md)、[系统设施](docs/system.md)、[单实例与系统集成](docs/os-integration.md)
 - [签名更新](docs/updates.md)、[Fetch 与 WebSocket](docs/net.md)、[ziggurat 命令](docs/cli.md)、[性能与复现实验](docs/performance.md)
 - [扩展生命周期](docs/extensions.md)
 - [音频](docs/audio.md)、[本地化](docs/i18n.md)、[显式时钟动画](docs/animation.md)、[单次唤醒](docs/wake.md)、[系统文字轮廓](docs/text-outlines.md)

@@ -77,7 +77,7 @@ const Fixture = struct {
     fake: Fake = .{},
     timer: Timer = .{},
     updater: u.Updater = undefined,
-    storage: view.Storage(160, 24 * 1024) = .{},
+    storage: view.Storage(400, 48 * 1024) = .{},
     harness: view.Harness = undefined,
 
     fn init(self: *Fixture, configured: u.Options) !void {
@@ -354,6 +354,54 @@ test "release notes are kept within bounds at a line end" {
     f.updater.checkForUpdates();
     f.updater.checkFinished(f.fake.token, .{ .available = .{ .version = "1.1.0.0", .notes = long } });
     try equal(@as(usize, 100), f.updater.releaseNotes().len);
+}
+
+test "release notes show as Markdown and their links open through the host" {
+    const Links = struct {
+        opened: [64]u8 = undefined,
+        len: usize = 0,
+        fn open(ptr: *anyopaque, destination: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            @memcpy(self.opened[0..destination.len], destination);
+            self.len = destination.len;
+        }
+    };
+    var links: Links = .{};
+    var with = options;
+    with.open_link = .{ .context = &links, .open = Links.open };
+    var f: Fixture = undefined;
+    try f.init(with);
+    defer f.deinit();
+    f.updater.checkForUpdates();
+    f.updater.checkFinished(f.fake.token, .{ .available = .{ .version = "1.1.0.0", .notes = "## What's new\n\n- **Faster** start\n- Fixes a crash\n\nSee [the changelog](https://example.com/changes)." } });
+    try expect(f.updater.notes_tree != null);
+    try expect(try f.has("What's new"));
+    try expect(try f.has("Fixes a crash"));
+    // Markup does not show as text.
+    try expect(!try f.has("**"));
+    try expect(!try f.has("##"));
+    try f.harness.click(.{ .kind = .link });
+    try strings("https://example.com/changes", links.opened[0..links.len]);
+}
+
+test "an icon widens the window and shows beside the texts" {
+    const Picture = view.ImageView;
+    const Lease = @typeInfo(@FieldType(Picture, "lease")).pointer.child;
+    const Level = @typeInfo(@FieldType(Picture, "levels")).pointer.child;
+    var pixels = [_]u8{0} ** (4 * 4 * 4);
+    var lease = Lease.init(std.Thread.getCurrentId());
+    const levels = [_]Level{.{ .pixels = &pixels, .byte_len = pixels.len, .width = 4, .height = 4, .stride = 16 }};
+    var with = options;
+    with.icon = .{ .lease = &lease, .identity = 1, .levels = &levels };
+    var f: Fixture = undefined;
+    try f.init(with);
+    defer f.deinit();
+    try equal(u.status_size.width + 80, f.updater.windowSize().width);
+    f.updater.checkForUpdates();
+    f.updater.checkFinished(f.fake.token, .current);
+    try expect(try f.has("You’re up to date"));
+    const icon = try f.harness.find(.{ .kind = .image });
+    try equal(@as(f32, u.icon_size), icon.bounds.width);
 }
 
 // ------------------------------------------------------------ FeedBackend

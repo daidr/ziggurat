@@ -326,10 +326,15 @@ pub const Screen = struct {
     modes: Modes = .{},
     /// Lines ever pushed into the scrollback, including dropped ones.
     pushed: u64 = 0,
+    /// Lines ever scrolled off the top of the alternate screen.
+    alternate_scrolled: u64 = 0,
     /// Lines the view is scrolled back from the bottom.
     viewport: usize = 0,
     /// Changes whenever a visible cell, the cursor or a mode changes.
     revision: u64 = 0,
+    /// Changes with what the screen and scrollback hold, but not as the
+    /// view scrolls.
+    content: u64 = 0,
     /// The character last printed, repeated by REP.
     last_printed: u21 = 0,
 
@@ -365,6 +370,10 @@ pub const Screen = struct {
         return if (self.on_alternate) &self.alternate else &self.primary;
     }
     fn changed(self: *Screen) void {
+        self.revision +%= 1;
+        self.content +%= 1;
+    }
+    fn viewChanged(self: *Screen) void {
         self.revision +%= 1;
     }
     fn fill(self: *const Screen) Cell {
@@ -419,13 +428,13 @@ pub const Screen = struct {
         const wanted: isize = @as(isize, @intCast(before)) + delta;
         self.viewport = @intCast(std.math.clamp(wanted, 0, @as(isize, @intCast(self.history.count))));
         if (self.viewport == before) return false;
-        self.changed();
+        self.viewChanged();
         return true;
     }
     pub fn scrollViewToBottom(self: *Screen) bool {
         if (self.viewport == 0) return false;
         self.viewport = 0;
-        self.changed();
+        self.viewChanged();
         return true;
     }
     pub fn historyCount(self: *const Screen) usize {
@@ -677,6 +686,7 @@ pub const Screen = struct {
             // A view scrolled back keeps showing the same lines.
             if (self.viewport > 0) self.viewport = @min(self.viewport + n, self.history.count);
         }
+        if (self.on_alternate and self.top == 0) self.alternate_scrolled += n;
         g.rotateUp(self.top, @as(usize, self.bottom) + 1, n, self.fill());
         self.changed();
     }
@@ -783,6 +793,32 @@ pub const Screen = struct {
                 self.viewport = 0;
             },
         }
+        self.changed();
+    }
+    /// Clear the scrollback and the screen above the cursor's line, which
+    /// moves to the top with what is below it: what a user's clear does,
+    /// keeping the shell's prompt. Nothing on the alternate screen.
+    pub fn clearToCursor(self: *Screen) bool {
+        if (self.on_alternate) return false;
+        const g = self.grid();
+        const from: usize = self.cursor.y;
+        if (from > 0) {
+            for (0..self.rows - from) |y| {
+                @memcpy(g.row(y), g.row(y + from));
+                g.wrap(y).* = g.wrap(y + from).*;
+            }
+            for (self.rows - from..self.rows) |y| g.clearRow(y, Cell.blank(.{}));
+        }
+        self.cursor.y = 0;
+        self.history.clear();
+        self.viewport = 0;
+        self.changed();
+        return true;
+    }
+    /// Clear the scrollback alone.
+    pub fn clearScrollback(self: *Screen) void {
+        self.history.clear();
+        self.viewport = 0;
         self.changed();
     }
     /// DECALN: fill the screen with 'E'.
@@ -1144,4 +1180,18 @@ test "the view scrolls back and follows new lines" {
     try std.testing.expectEqual(@as(u21, 'a'), screen.rowAt(screen.viewRow(0)).?.cells[0].cp);
     try std.testing.expect(screen.scrollViewToBottom());
     try std.testing.expectEqual(@as(u21, 'd'), screen.rowAt(screen.viewRow(0)).?.cells[0].cp);
+}
+
+test "a user's clear keeps the cursor's line at the top" {
+    var screen = try Screen.init(std.testing.allocator, .{ .cols = 4, .rows = 3, .scrollback = 10 });
+    defer screen.deinit();
+    printAll(&screen, "a\nb\nc\nd\n$ x");
+    try std.testing.expect(screen.historyCount() > 0);
+    try std.testing.expect(screen.clearToCursor());
+    try std.testing.expectEqual(@as(usize, 0), screen.historyCount());
+    try std.testing.expectEqual(@as(u16, 0), screen.cursor.y);
+    try std.testing.expectEqual(@as(u21, '$'), screen.row(0)[0].cp);
+    try std.testing.expect(screen.row(1)[0].isBlank());
+    screen.useAlternate(true, true, true);
+    try std.testing.expect(!screen.clearToCursor());
 }

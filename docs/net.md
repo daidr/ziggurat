@@ -53,10 +53,10 @@ try socket.close(net.websocket.close_code.normal, "bye");
 ```
 
 - `connect` 和 `run` 在同一个 worker 上执行，该 worker 独占连接的两个方向，同一 TLS 会话不会被并发读写。`send`、`ping`、`close`、`cancel`、`resumeReading` 可在任意线程调用且不等待网络。
-- 发送队列在连接时按 `send_buffer_bytes` 一次性分配，`send` 只复制进队列；空间不足返回 `Full`，`close`/`cancel`/连接结束后返回 `Closed`。`sendCapacity` 报告剩余空间。消息按入队顺序整帧发送，`close` 在已排队的消息之后发送。
+- 发送队列在连接时按 `send_buffer_bytes` 一次性分配，`send` 只复制进队列；空间不足返回 `Full`，`close`/`cancel`/连接结束后返回 `Closed`。`sendCapacity` 报告剩余空间；`Handler.on_flushed` 在 worker 写出排队消息后调用，收到 `Full` 的生产者可据此重试。消息按入队顺序整帧发送，`close` 在已排队的消息之后发送。
 - 入站消息在 worker 上交给 handler，`bytes` 只在调用期间有效。handler 返回 `pause` 后 worker 停止读 socket，直到 `resumeReading`；在 handler 仍在执行时调用的 `resumeReading` 同样生效。典型用法是 `App.post` 返回 `Full` 时保留该消息并返回 `pause`，UI 处理完后恢复读取。
 - 分片在 `message_bytes` 内重组；超限以 1009 关闭并返回 `MessageTooLarge`，非 UTF-8 文本以 1007 关闭并返回 `InvalidUtf8`，被掩码的服务器帧、保留位、非法控制帧或关闭码以 1002 关闭并返回 `ProtocolViolation`。收到 ping 自动回复 pong；模块不主动发送心跳，由宿主按需调用 `ping`。
-- `run` 在关闭握手完成时返回 `Closed{code, reason, remote}`；连接未经关闭握手就断开返回 `ConnectionLost`，`cancel` 返回 `Cancelled`。关闭握手和阻塞写都没有内置超时，对端不回应时由宿主在截止时间后 `cancel`。握手校验 `101`、`Upgrade`、`Connection` 与 `Sec-WebSocket-Accept`，服务器选择未提供的子协议或任何扩展都会被拒绝。不支持压缩扩展，也不支持非 CONNECT 的普通 HTTP 代理。
+- `run` 在关闭握手完成时返回 `Closed{code, reason, remote}`；连接未经关闭握手就断开返回 `ConnectionLost`，`cancel` 返回 `Cancelled`。`close` 接受 1000、1001（离开）和 3000–4999。`Limits.close_timeout_ms` 非零时，本端发出关闭帧后对端在该时间内不回应，`run` 返回 `CloseTimedOut`；默认 0 不限时。阻塞写没有内置超时，由宿主在截止时间后 `cancel`。`wss` 首次连接前与 `std.http.Client.request` 一样按需扫描系统 CA。握手校验 `101`、`Upgrade`、`Connection` 与 `Sec-WebSocket-Accept`，服务器选择未提供的子协议或任何扩展都会被拒绝。不支持压缩扩展，也不支持非 CONNECT 的普通 HTTP 代理。
 - `deinit` 在 `run` 返回后（或从不调用 `run` 时）由 worker 调用，其他线程此前必须停止使用该 socket；`std.http.Client` 必须比 socket 活得更久。
 
 ## 线程与停机次序

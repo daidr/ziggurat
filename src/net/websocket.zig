@@ -21,6 +21,9 @@ pub const Flow = enum { proceed, pause };
 pub const Handler = struct {
     context: ?*anyopaque = null,
     on_message: *const fn (context: ?*anyopaque, message: Message) Flow,
+    /// Called after queued messages were written, so a producer that got
+    /// `Full` from `send` knows when to try again.
+    on_flushed: ?*const fn (context: ?*anyopaque) void = null,
 };
 
 pub const Limits = struct {
@@ -30,6 +33,10 @@ pub const Limits = struct {
     /// of framing metadata; `send` returns `Full` when it cannot fit.
     send_buffer_bytes: usize = 1024 * 1024,
     url_bytes: usize = 8 * 1024,
+    /// After this endpoint sent its close frame, how long `run` waits for the
+    /// peer's before returning `CloseTimedOut`; 0 waits as long as the
+    /// connection lasts.
+    close_timeout_ms: u32 = 0,
 };
 
 pub const ConnectOptions = struct {
@@ -87,6 +94,8 @@ pub const RunError = error{
     MessageTooLarge,
     /// A text message or close reason was not UTF-8; a 1007 close was attempted.
     InvalidUtf8,
+    /// The peer did not answer the close frame within `Limits.close_timeout_ms`.
+    CloseTimedOut,
     OutOfMemory,
 };
 
@@ -135,6 +144,7 @@ pub const Socket = struct {
     paused: bool = false,
     paused_epoch: u64 = 0,
     close_sent: bool = false,
+    close_deadline: ?i64 = null,
     message: std.ArrayListUnmanaged(u8) = .empty,
     fragment: ?Kind = null,
     closed_reason: Control = .{},
@@ -156,6 +166,15 @@ pub const Socket = struct {
         const port = uri.port orelse @as(u16, if (tls) 443 else 80);
         if (handshake_cancel) |token| if (token.isCancelled()) return error.Cancelled;
 
+        if (tls and @atomicLoad(bool, &client.next_https_rescan_certs, .acquire)) {
+            // As std.http.Client.request does before its first HTTPS request.
+            client.ca_bundle_mutex.lock();
+            defer client.ca_bundle_mutex.unlock();
+            if (client.next_https_rescan_certs) {
+                client.ca_bundle.rescan(client.allocator) catch return error.TlsFailed;
+                @atomicStore(bool, &client.next_https_rescan_certs, false, .release);
+            }
+        }
         const ring = try allocator.alloc(u8, options.limits.send_buffer_bytes);
         errdefer allocator.free(ring);
         var waker = Waker.init() catch return error.SystemResources;
@@ -252,10 +271,11 @@ pub const Socket = struct {
     }
 
     /// Start the closing handshake after already queued messages. `code` is
-    /// 1000 or 3000-4999 and `reason` is at most 123 UTF-8 bytes. Later
+    /// 1000, 1001 (going away) or 3000-4999 and `reason` is at most 123 UTF-8
+    /// bytes. Later
     /// `send` calls return `Closed`; `run` returns once the peer answers.
     pub fn close(self: *Socket, code: u16, reason: []const u8) error{ Closed, InvalidClose }!void {
-        if (!(code == close_code.normal or (code >= 3000 and code <= 4999))) return error.InvalidClose;
+        if (!(code == close_code.normal or code == close_code.going_away or (code >= 3000 and code <= 4999))) return error.InvalidClose;
         if (reason.len > 123 or !std.unicode.utf8ValidateSlice(reason)) return error.InvalidClose;
         {
             self.mutex.lock();
@@ -299,7 +319,7 @@ pub const Socket = struct {
             self.mutex.unlock();
         }
         while (true) {
-            try self.flushOutgoing();
+            if (try self.flushOutgoing()) if (handler.on_flushed) |flushed| flushed(handler.context);
             if (self.paused and self.resume_epoch.load(.acquire) != self.paused_epoch) self.paused = false;
             const reader = self.connection.reader();
             const buffered = reader.bufferedLen() > 0 or self.connection.stream_reader.interface().bufferedLen() > 0;
@@ -309,7 +329,14 @@ pub const Socket = struct {
                     .{ .fd = self.connection.stream_reader.getStream().handle, .events = posix.POLL.IN, .revents = 0 },
                 };
                 const count: usize = if (self.paused) 1 else 2;
-                _ = posix.poll(fds[0..count], -1) catch return self.lost();
+                var timeout: i32 = -1;
+                if (self.close_deadline) |deadline| {
+                    const left = deadline - std.time.milliTimestamp();
+                    if (left <= 0) return error.CloseTimedOut;
+                    timeout = @intCast(@min(left, std.math.maxInt(i32)));
+                }
+                const ready = posix.poll(fds[0..count], timeout) catch return self.lost();
+                if (ready == 0 and self.close_deadline != null) return error.CloseTimedOut;
                 if (fds[0].revents != 0) self.waker.drain();
                 if (self.abort.isCancelled()) return error.Cancelled;
                 if (count == 1 or fds[1].revents == 0) continue;
@@ -334,8 +361,10 @@ pub const Socket = struct {
         @memcpy(out[first..], self.ring[0 .. out.len - first]);
     }
 
-    fn flushOutgoing(self: *Socket) RunError!void {
+    /// Returns whether queued messages were written.
+    fn flushOutgoing(self: *Socket) RunError!bool {
         var wrote = false;
+        var messages = false;
         while (true) {
             self.mutex.lock();
             if (self.pong) |control| {
@@ -360,6 +389,7 @@ pub const Socket = struct {
                 self.ring_len -= ring_header + len;
                 self.queued_messages -= 1;
                 self.mutex.unlock();
+                messages = true;
             } else if (!self.close_sent and self.close_request != null) {
                 const request = self.close_request.?;
                 self.mutex.unlock();
@@ -371,6 +401,7 @@ pub const Socket = struct {
             wrote = true;
         }
         if (wrote) self.connection.flush() catch return self.lost();
+        return messages;
     }
 
     fn writeClose(self: *Socket, code: u16, reason: []const u8) RunError!void {
@@ -378,6 +409,7 @@ pub const Socket = struct {
         std.mem.writeInt(u16, payload[0..2], code, .big);
         @memcpy(payload[2..][0..reason.len], reason);
         self.close_sent = true;
+        if (self.limits.close_timeout_ms > 0) self.close_deadline = std.time.milliTimestamp() + self.limits.close_timeout_ms;
         try self.writeFrame(0x8, payload[0 .. 2 + reason.len]);
     }
 

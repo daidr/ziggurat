@@ -6,6 +6,7 @@
 const std = @import("std");
 const parser_module = @import("parser.zig");
 const screen_module = @import("screen.zig");
+const graphics = @import("graphics.zig");
 
 const Parser = parser_module.Parser;
 const Action = parser_module.Action;
@@ -33,6 +34,9 @@ pub const Event = union(enum) {
     /// A program asks for the clipboard; allowed by policy. Answer with
     /// `Terminal.answerClipboard`.
     clipboard_read,
+    /// A desktop notification a program asks for (OSC 9, OSC 777); the
+    /// text is borrowed until the next feed.
+    notify: struct { title: []const u8, body: []const u8 },
 };
 
 pub const Handler = struct {
@@ -50,6 +54,10 @@ pub const Options = struct {
     foreground: u24 = 0xd4d4d4,
     background: u24 = 0x1e1e1e,
     cursor: u24 = 0xd4d4d4,
+    /// The most bytes the images programs show take (the Kitty graphics
+    /// protocol), on each screen; 0 refuses images, for programs to show
+    /// something else.
+    image_limit: usize = graphics.default_limit,
 };
 
 pub const max_title = 256;
@@ -71,10 +79,28 @@ pub const Terminal = struct {
     foreground: u24,
     background: u24,
     cursor_color: u24,
+    /// The colors programs return to when they reset them: the theme's.
+    /// Colors a program set stay until it resets them, even as the theme
+    /// changes.
+    base_palette: [256]u24 = default_palette,
+    base_foreground: u24,
+    base_background: u24,
+    base_cursor: u24,
+    palette_set: std.StaticBitSet(256) = .initEmpty(),
+    foreground_set: bool = false,
+    background_set: bool = false,
+    cursor_set: bool = false,
     /// Cell size in device pixels, for size reports; set by the view.
     cell_width: u16 = 0,
     cell_height: u16 = 0,
     bells: u64 = 0,
+    /// The pointer's shape a program asked for with OSC 22 (`pointer`,
+    /// `crosshair`, `col-resize`…), until it takes or leaves the mouse.
+    pointer_shape_bytes: [32]u8 = undefined,
+    pointer_shape_len: usize = 0,
+    /// Images of the primary screen and of the alternate one.
+    images: [2]graphics.Storage,
+    receiver: graphics.Receiver = .{},
 
     pub fn init(allocator: std.mem.Allocator, options: Options) !Terminal {
         var screen = try Screen.init(allocator, options.screen);
@@ -82,13 +108,25 @@ pub const Terminal = struct {
         const osc = try allocator.alloc(u8, options.osc_bytes);
         errdefer allocator.free(osc);
         const clipboard = try allocator.alloc(u8, if (options.clipboard.write) options.osc_bytes else 0);
-        return .{ .allocator = allocator, .screen = screen, .parser = Parser.init(osc), .osc_storage = osc, .clipboard_storage = clipboard, .options = options, .foreground = options.foreground, .background = options.background, .cursor_color = options.cursor };
+        return .{ .allocator = allocator, .screen = screen, .parser = Parser.init(osc), .osc_storage = osc, .clipboard_storage = clipboard, .options = options, .foreground = options.foreground, .background = options.background, .cursor_color = options.cursor, .base_foreground = options.foreground, .base_background = options.background, .base_cursor = options.cursor, .images = .{ .init(allocator, options.image_limit, 0), .init(allocator, options.image_limit, 1 << 62) } };
     }
 
     pub fn deinit(self: *Terminal) void {
         self.screen.deinit();
         self.allocator.free(self.osc_storage);
         self.allocator.free(self.clipboard_storage);
+        for (&self.images) |*storage| storage.deinit();
+        self.receiver.deinit(self.allocator);
+    }
+
+    /// The images and placements of the screen that shows.
+    pub fn activeImages(self: *Terminal) *graphics.Storage {
+        return &self.images[@intFromBool(self.screen.onAlternate())];
+    }
+    /// The row placements count at the top of the view, as the screen
+    /// shows it scrolled back.
+    pub fn imagesTop(self: *const Terminal) u64 {
+        return graphics.Storage.top(&self.screen) - self.screen.viewportOffset();
     }
 
     /// Interpret output from the program.
@@ -105,6 +143,37 @@ pub const Terminal = struct {
     }
     pub fn title(self: *const Terminal) []const u8 {
         return self.title_bytes[0..self.title_len];
+    }
+    /// The pointer shape a program asked for with OSC 22, or empty.
+    pub fn pointerShape(self: *const Terminal) []const u8 {
+        return self.pointer_shape_bytes[0..self.pointer_shape_len];
+    }
+
+    /// Make these the default colors, as a theme sets them. Colors a
+    /// program set keep its values until it resets them.
+    pub fn setColors(self: *Terminal, foreground: u24, background: u24, cursor: u24, palette: [256]u24) void {
+        self.base_foreground = foreground;
+        self.base_background = background;
+        self.base_cursor = cursor;
+        self.base_palette = palette;
+        if (!self.foreground_set) self.foreground = foreground;
+        if (!self.background_set) self.background = background;
+        if (!self.cursor_set) self.cursor_color = cursor;
+        for (&self.palette, palette, 0..) |*color, base, i| {
+            if (!self.palette_set.isSet(i)) color.* = base;
+        }
+        self.screen.revision +%= 1;
+    }
+
+    fn resetColors(self: *Terminal) void {
+        self.palette = self.base_palette;
+        self.foreground = self.base_foreground;
+        self.background = self.base_background;
+        self.cursor_color = self.base_cursor;
+        self.palette_set = .initEmpty();
+        self.foreground_set = false;
+        self.background_set = false;
+        self.cursor_set = false;
     }
 
     /// Resolve a cell color to RGB.
@@ -150,6 +219,18 @@ pub const Terminal = struct {
             .csi => |c| self.handleCsi(c),
             .esc => |e| self.handleEsc(e.intermediates, e.final),
             .osc => |payload| self.handleOsc(payload),
+            .apc_start => self.receiver.start(self.allocator),
+            .apc_data => |bytes| self.receiver.data(self.allocator, bytes),
+            .apc_end => |ok| {
+                const command = self.receiver.end() orelse return;
+                if (!ok) return;
+                const grid: graphics.Grid = .{ .screen = &self.screen, .cell_width = self.cell_width, .cell_height = self.cell_height };
+                // Placing moves the cursor, deleting changes what shows.
+                self.screen.revision +%= 1;
+                const response = self.activeImages().execute(command.control, command.payload, grid) orelse return;
+                var buffer: [256]u8 = undefined;
+                self.reply(response.write(&buffer) catch return);
+            },
         }
     }
 
@@ -181,11 +262,9 @@ pub const Terminal = struct {
             'M' => s.reverseIndex(),
             'c' => {
                 s.reset();
-                self.palette = default_palette;
-                self.foreground = self.options.foreground;
-                self.background = self.options.background;
-                self.cursor_color = self.options.cursor;
+                self.resetColors();
                 self.title_len = 0;
+                for (&self.images) |*storage| storage.clear();
             },
             '=' => s.modes.keypad = true,
             '>' => s.modes.keypad = false,
@@ -237,7 +316,12 @@ pub const Terminal = struct {
             'G', '`' => s.moveToColumn(p.get(0, 1) - 1),
             'H', 'f' => s.moveTo(p.get(1, 1) - 1, p.get(0, 1) - 1),
             'I' => s.tabForward(p.get(0, 1)),
-            'J' => s.eraseDisplay(erase(p.get(0, 0)) orelse return),
+            'J' => {
+                const mode = erase(p.get(0, 0)) orelse return;
+                s.eraseDisplay(mode);
+                // Clearing the screen clears its images too.
+                if (mode == .all) self.activeImages().clear();
+            },
             'K' => s.eraseLine(erase(p.get(0, 0)) orelse return),
             'L' => s.insertLines(p.get(0, 1)),
             'M' => s.deleteLines(p.get(0, 1)),
@@ -313,6 +397,12 @@ pub const Terminal = struct {
         return @as(u32, s.cursor.y - top) + 1;
     }
 
+    /// Taking or leaving the mouse drops the pointer shape asked for.
+    fn setMouse(self: *Terminal, tracking: screen_module.MouseTracking) void {
+        if ((tracking == .none) != (self.screen.modes.mouse == .none)) self.pointer_shape_len = 0;
+        self.screen.modes.mouse = tracking;
+    }
+
     fn setPrivateMode(self: *Terminal, mode: u16, on: bool) void {
         const s = &self.screen;
         const m = &s.modes;
@@ -324,23 +414,29 @@ pub const Terminal = struct {
                 s.moveTo(0, 0);
             },
             7 => m.autowrap = on,
-            9 => m.mouse = if (on) .x10 else .none,
+            9 => self.setMouse(if (on) .x10 else .none),
             12 => m.cursor_blink = on,
             25 => m.cursor_visible = on,
             47 => s.useAlternate(on, false, false),
             66 => m.keypad = on,
-            1000 => m.mouse = if (on) .normal else .none,
-            1002 => m.mouse = if (on) .button else .none,
-            1003 => m.mouse = if (on) .any else .none,
+            1000 => self.setMouse(if (on) .normal else .none),
+            1002 => self.setMouse(if (on) .button else .none),
+            1003 => self.setMouse(if (on) .any else .none),
             1004 => m.focus_events = on,
             1005 => m.mouse_encoding = if (on) .utf8 else .x10,
             1006 => m.mouse_encoding = if (on) .sgr else .x10,
             1007 => m.alternate_scroll = on,
             1015 => m.mouse_encoding = if (on) .urxvt else .x10,
             1016 => m.mouse_encoding = if (on) .sgr_pixels else .x10,
-            1047 => s.useAlternate(on, false, !on),
+            1047 => {
+                s.useAlternate(on, false, !on);
+                if (!on) self.images[1].clear();
+            },
             1048 => if (on) s.saveCursor() else s.restoreCursor(),
-            1049 => s.useAlternate(on, true, true),
+            1049 => {
+                s.useAlternate(on, true, true);
+                self.images[1].clear();
+            },
             2004 => m.bracketed_paste = on,
             2026 => m.synchronized = on,
             else => {},
@@ -470,23 +566,43 @@ pub const Terminal = struct {
                         self.replyColor("4;{d};", index, self.palette[index]);
                     } else if (parseColor(spec)) |value| {
                         self.palette[index] = value;
+                        self.palette_set.set(index);
                         self.screen.revision +%= 1;
                     }
                 }
             },
             104 => {
                 if (rest.len == 0) {
-                    self.palette = default_palette;
+                    self.palette = self.base_palette;
+                    self.palette_set = .initEmpty();
                 } else {
                     var parts = std.mem.splitScalar(u8, rest, ';');
                     while (parts.next()) |index_text| {
                         const index = std.fmt.parseInt(u8, index_text, 10) catch continue;
-                        self.palette[index] = default_palette[index];
+                        self.palette[index] = self.base_palette[index];
+                        self.palette_set.unset(index);
                     }
                 }
                 self.screen.revision +%= 1;
             },
             7 => self.emit(.{ .directory = rest }),
+            9 => {
+                // ConEmu's progress (9;4) and the like are not notifications.
+                if (rest.len > 1 and std.ascii.isDigit(rest[0]) and rest[1] == ';') return;
+                self.emit(.{ .notify = .{ .title = "", .body = rest } });
+            },
+            777 => {
+                var parts = std.mem.splitScalar(u8, rest, ';');
+                if (!std.mem.eql(u8, parts.next() orelse "", "notify")) return;
+                const heading = parts.next() orelse "";
+                self.emit(.{ .notify = .{ .title = heading, .body = parts.rest() } });
+            },
+            22 => {
+                const len = @min(rest.len, self.pointer_shape_bytes.len);
+                @memcpy(self.pointer_shape_bytes[0..len], rest[0..len]);
+                self.pointer_shape_len = len;
+                self.screen.revision +%= 1;
+            },
             8 => {
                 // Parameters, then the URI, which may itself hold ';'.
                 const at = std.mem.indexOfScalar(u8, rest, ';') orelse return;
@@ -502,12 +618,31 @@ pub const Terminal = struct {
                     self.replyColor("{d};", code, target.*);
                 } else if (parseColor(rest)) |value| {
                     target.* = value;
+                    switch (code) {
+                        10 => self.foreground_set = true,
+                        11 => self.background_set = true,
+                        else => self.cursor_set = true,
+                    }
                     self.screen.revision +%= 1;
                 }
             },
-            110 => self.foreground = self.options.foreground,
-            111 => self.background = self.options.background,
-            112 => self.cursor_color = self.options.cursor,
+            110, 111, 112 => {
+                switch (code) {
+                    110 => {
+                        self.foreground = self.base_foreground;
+                        self.foreground_set = false;
+                    },
+                    111 => {
+                        self.background = self.base_background;
+                        self.background_set = false;
+                    },
+                    else => {
+                        self.cursor_color = self.base_cursor;
+                        self.cursor_set = false;
+                    },
+                }
+                self.screen.revision +%= 1;
+            },
             52 => {
                 const at = std.mem.indexOfScalar(u8, rest, ';') orelse return;
                 const data = rest[at + 1 ..];
@@ -630,7 +765,7 @@ const Recorder = struct {
                 self.written_len = bytes.len;
             },
             .clipboard_read => self.reads += 1,
-            .directory => {},
+            .directory, .notify => {},
         }
     }
 };
@@ -724,4 +859,92 @@ test "palette and color specs" {
     try std.testing.expectEqualStrings("\x1b]4;1;rgb:0101/0202/0303\x1b\\", t.pendingReplies());
     t.feed("\x1b]104\x07");
     try std.testing.expectEqual(default_palette[1], t.palette[1]);
+}
+
+test "a theme sets the defaults, and colors programs set stay until they reset" {
+    var t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var palette = default_palette;
+    palette[1] = 0x112233;
+    palette[2] = 0x445566;
+    t.feed("\x1b]4;2;#000002\x07\x1b]10;#0000ff\x07");
+    t.setColors(0xeeeeee, 0x101010, 0xcccccc, palette);
+    try std.testing.expectEqual(@as(u24, 0x112233), t.palette[1]);
+    try std.testing.expectEqual(@as(u24, 0x000002), t.palette[2]);
+    try std.testing.expectEqual(@as(u24, 0x0000ff), t.foreground);
+    try std.testing.expectEqual(@as(u24, 0x101010), t.background);
+    t.feed("\x1b]104;2\x07\x1b]110\x07");
+    try std.testing.expectEqual(@as(u24, 0x445566), t.palette[2]);
+    try std.testing.expectEqual(@as(u24, 0xeeeeee), t.foreground);
+    t.feed("\x1b]11;#ffffff\x07\x1bc");
+    try std.testing.expectEqual(@as(u24, 0x101010), t.background);
+}
+
+test "notifications and the pointer's shape" {
+    const Seen = struct {
+        title: [16]u8 = undefined,
+        body: [16]u8 = undefined,
+        count: usize = 0,
+        fn call(context: ?*anyopaque, event: Event) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            switch (event) {
+                .notify => |n| {
+                    @memcpy(self.title[0..n.title.len], n.title);
+                    @memcpy(self.body[0..n.body.len], n.body);
+                    self.count += 1;
+                },
+                else => {},
+            }
+        }
+    };
+    var seen: Seen = .{};
+    var t = try Terminal.init(std.testing.allocator, .{ .handler = .{ .context = &seen, .call = Seen.call } });
+    defer t.deinit();
+    t.feed("\x1b]9;done\x07\x1b]9;4;1;50\x07\x1b]777;notify;Build;ok\x07");
+    try std.testing.expectEqual(@as(usize, 2), seen.count);
+    try std.testing.expectEqualStrings("Build", seen.title[0..5]);
+    try std.testing.expectEqualStrings("ok", seen.body[0..2]);
+    t.feed("\x1b]22;pointer\x07");
+    try std.testing.expectEqualStrings("pointer", t.pointerShape());
+    t.feed("\x1b[?1000h");
+    try std.testing.expectEqualStrings("", t.pointerShape());
+}
+
+test "images through APC strings, per screen, gone as the screen clears" {
+    var t = try Terminal.init(std.testing.allocator, .{ .screen = .{ .cols = 10, .rows = 4 } });
+    defer t.deinit();
+    t.cell_width = 8;
+    t.cell_height = 16;
+    // 16 by 16 pixels: two cells by one, the cursor past them.
+    const pixel = "AAAA";
+    var text: [16 * 16 * 4 + 64]u8 = undefined;
+    const head = "\x1b_Ga=T,f=24,s=16,v=16,i=3;";
+    @memcpy(text[0..head.len], head);
+    for (0..16 * 16) |i| @memcpy(text[head.len + i * 4 ..][0..4], pixel);
+    const end = head.len + 16 * 16 * 4;
+    @memcpy(text[end..][0..2], "\x1b\\");
+    t.feed(text[0 .. end + 2]);
+    try std.testing.expectEqualStrings("\x1b_Gi=3;OK\x1b\\", t.pendingReplies());
+    t.clearReplies();
+    try std.testing.expectEqual(@as(u16, 2), t.screen.cursor.x);
+    try std.testing.expectEqual(@as(usize, 1), t.activeImages().placements.items.len);
+    // The alternate screen has its own, none.
+    t.feed("\x1b[?1049h");
+    try std.testing.expectEqual(@as(usize, 0), t.activeImages().placements.items.len);
+    t.feed("\x1b_Ga=p,i=3\x1b\\");
+    try std.testing.expectEqualStrings("\x1b_Gi=3;ENOENT: image not found\x1b\\", t.pendingReplies());
+    t.clearReplies();
+    t.feed("\x1b[?1049l");
+    try std.testing.expectEqual(@as(usize, 1), t.activeImages().placements.items.len);
+    // Not an image command, or cancelled: nothing.
+    t.feed("\x1b_Xyz\x1b\\\x1b_Ga=p,i=3\x18");
+    try std.testing.expectEqual(@as(usize, 0), t.pendingReplies().len);
+    try std.testing.expectEqual(@as(usize, 1), t.activeImages().placements.items.len);
+    // Clearing the screen clears them.
+    t.feed("\x1b[2J");
+    try std.testing.expectEqual(@as(usize, 0), t.activeImages().images.items.len);
+    var refused = try Terminal.init(std.testing.allocator, .{ .image_limit = 0 });
+    defer refused.deinit();
+    refused.feed("\x1b_Ga=q,i=1,s=1,v=1,f=24;AAAA\x1b\\");
+    try std.testing.expectEqual(@as(usize, 0), refused.pendingReplies().len);
 }

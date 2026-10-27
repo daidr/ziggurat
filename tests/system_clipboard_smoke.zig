@@ -180,7 +180,7 @@ fn script(allocator: std.mem.Allocator) !void {
     var state: Script = .{ .app = app };
     try state.board.init(app, .{ .context = &state, .on_changed = Script.changed, .render_on_stop = false });
     defer state.board.deinit();
-    try std.testing.expectError(error.InvalidFormatName, state.board.write(&.{.{ .format = .{ .kind = .custom, .name = "bad name" }, .data = "" }}));
+    try std.testing.expectError(error.InvalidFormatName, state.board.write(&.{.{ .format = .{ .kind = .custom, .name = "bad name " }, .data = "" }}));
     try std.testing.expectError(error.DuplicateFormat, state.board.write(&.{ .{ .format = .{ .kind = .text }, .data = "a" }, .{ .format = .{ .kind = .text }, .data = "b" } }));
     try std.testing.expectError(error.InvalidPng, state.board.write(&.{.{ .format = .{ .kind = .png }, .data = "nope" }}));
     try std.testing.expectError(error.InvalidOptions, state.board.read(&state.request, .{ .kind = .text }, &state.buffer, &state, Script.result, .{ .attempts = 200 }));

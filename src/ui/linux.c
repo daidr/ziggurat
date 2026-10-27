@@ -124,9 +124,10 @@ int zlc_test_opaque(Renderer *s) {
     return 1;
 }
 /* Points the shared description at the requested font, touching the
-   layout only when something differs from the last text drawn. */
-static void use_font(Renderer *s,float size,uint16_t weight,int italic,int monospace){
-    const char *family=monospace?"Monospace":"Sans";
+   layout only when something differs from the last text drawn. A family
+   given by name stays valid for the process. */
+static void use_font(Renderer *s,const char *named,float size,uint16_t weight,int italic,int monospace){
+    const char *family=named&&named[0]?named:monospace?"Monospace":"Sans";
     gint absolute=(gint)(size*PANGO_SCALE+0.5f);
     PangoStyle style=italic?PANGO_STYLE_ITALIC:PANGO_STYLE_NORMAL;
     const char *current=pango_font_description_get_family(s->font);
@@ -136,9 +137,9 @@ static void use_font(Renderer *s,float size,uint16_t weight,int italic,int monos
     pango_font_description_set_weight(s->font,(PangoWeight)weight);pango_font_description_set_style(s->font,style);
     pango_layout_set_font_description(s->layout,s->font);
 }
-int zlc_text(Renderer *s,float x,float y,float width,float height,const char *text,uint32_t length,uint32_t color,float size,uint16_t weight,int italic,int monospace) {
+int zlc_text(Renderer *s,float x,float y,float width,float height,const char *text,uint32_t length,uint32_t color,float size,uint16_t weight,int italic,int monospace,const char *family) {
     if(width>G_MAXINT/PANGO_SCALE || length>G_MAXINT || !(size>=1&&size<=1024))return 1;
-    use_font(s,size,weight,italic,monospace);
+    use_font(s,family,size,weight,italic,monospace);
     pango_layout_set_text(s->layout,text,length);pango_layout_set_width(s->layout,(int)(width*PANGO_SCALE));
     int layout_width,layout_height;pango_layout_get_size(s->layout,&layout_width,&layout_height);
     cairo_save(s->context);cairo_rectangle(s->context,x,y,width,height);cairo_clip(s->context);

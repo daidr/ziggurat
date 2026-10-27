@@ -10,6 +10,11 @@ pub const Policy = struct { enabled: bool = true, read_only: bool = false };
 pub const Description = struct { description: []const u8 = "", invalid: bool = false, required: bool = false };
 pub const Options = struct {
     multiline: bool = false,
+    /// A single-line field holding a password: it shows a bullet for every
+    /// character, copies and cuts nothing, tells assistive technology only
+    /// that it holds a password, and turns the input method off while
+    /// focused. Multiline fields ignore it.
+    password: bool = false,
     accept_tab: bool = false,
     words: bool = false,
     policy: Policy = .{},
@@ -52,6 +57,9 @@ pub fn Field(comptime Private: type) type {
         closing: bool = false,
         ready: bool = false,
         scope: ?*ui.TextFieldScope = null,
+        /// The window's input mode before a focused password turned the
+        /// input method off; restored on blur.
+        restore_mode: ?z.TextInputMode = null,
 
         pub fn create(allocator: std.mem.Allocator, document: *d.Document, engine: *t.Engine, options: Options) !*Self {
             // An aggregate parameter may borrow the caller's storage. Give
@@ -75,9 +83,43 @@ pub fn Field(comptime Private: type) type {
             errdefer allocator.free(storage);
             self.* = .{ .allocator = allocator, .owner = std.Thread.getCurrentId(), .document = document, .adapter = adapter, .options = options.*, .storage = storage, .value = storage[0..options.value_bytes], .scratch = storage[options.value_bytes..], .notified_text_version = try document.committedTextVersion() };
             try self.copyValue();
+            try adapter.setMasked(self.masked());
             try adapter.setPreInputHook(.{ .context = self, .call = preInput });
             self.observer = try adapter.observeNativeChanges(.{ .context = self, .call = nativeChanged, .validate = nativeAuthority });
             return self;
+        }
+        fn masked(self: *const Self) bool {
+            return self.options.password and !self.options.multiline;
+        }
+        /// Shows or hides the text as a password, as a field's eye button
+        /// does. The text is shaped again at the next prepare; call it
+        /// outside paint.
+        pub fn setPassword(self: *Self, password: bool) !void {
+            try self.enter();
+            defer self.leave();
+            if (self.options.password == password) return;
+            self.options.password = password;
+            try self.adapter.setMasked(self.masked());
+            if (self.window) |window| {
+                if (try self.adapter.isBound()) try self.useInputMode(window);
+                window.invalidate();
+            }
+        }
+        /// Turns the input method off while a password is focused, and back
+        /// to what it was otherwise.
+        fn useInputMode(self: *Self, window: z.Window) !void {
+            if (self.masked()) {
+                if (self.restore_mode != null) return;
+                const current = try window.textInputMode();
+                if (current == .keyboard_compose) return;
+                if (try window.setTextInputMode(.keyboard_compose) == .applied) self.restore_mode = current;
+            } else try self.restoreInputMode(window);
+        }
+        fn restoreInputMode(self: *Self, window: z.Window) !void {
+            const mode = self.restore_mode orelse return;
+            self.restore_mode = null;
+            if (window.isClosed()) return;
+            _ = try window.setTextInputMode(mode);
         }
         fn enter(self: *Self) !void {
             if (std.Thread.getCurrentId() != self.owner) return error.WrongThread;
@@ -147,7 +189,9 @@ pub fn Field(comptime Private: type) type {
             try frame.textField(token, self.bounds, self.options.policy.enabled);
             try self.adapter.draw(frame, self.bounds, colors);
             const selected = try self.document.selection();
-            try frame.semantic(.{ .id = token.key.id, .role = .text_box, .name = name, .value = self.value[0..self.value_len], .description = about.description, .invalid = about.invalid, .required = about.required, .bounds = self.bounds, .enabled = self.options.policy.enabled, .read_only = self.options.policy.read_only, .focused = frame.context.input_state.focused == token.key.id, .selection_start = selected.range().start, .selection_end = selected.range().end });
+            // A password reports neither its value nor a selection in it.
+            const password = self.masked();
+            try frame.semantic(.{ .id = token.key.id, .role = .text_box, .name = name, .value = if (password) "" else self.value[0..self.value_len], .description = about.description, .invalid = about.invalid, .required = about.required, .password = password, .bounds = self.bounds, .enabled = self.options.policy.enabled, .read_only = self.options.policy.read_only, .focused = frame.context.input_state.focused == token.key.id, .selection_start = if (password) 0 else selected.range().start, .selection_end = if (password) 0 else selected.range().end });
         }
         pub fn focus(self: *Self) !void {
             try self.enter();
@@ -232,7 +276,8 @@ pub fn Field(comptime Private: type) type {
                 } else self.withdrawn = true;
             }
             if (self.entered != 0) return error.ResourceInUse;
-            if (self.window != null) {
+            if (self.window) |window| {
+                self.restoreInputMode(window) catch {};
                 try self.adapter.unbind();
                 self.window = null;
             }
@@ -312,16 +357,20 @@ pub fn Field(comptime Private: type) type {
             try self.adapter.bind(window);
             errdefer self.adapter.unbind() catch {};
             try scope.validate();
+            try self.useInputMode(window);
+            errdefer self.restoreInputMode(window) catch {};
+            try scope.validate();
             try self.adapter.setCommittedSpace(try self.token.?.context.committedSpace(self.token.?.key.id));
             if (self.options.words) try Private.activatePointer(self.adapter, scope);
             try scope.validate();
             return window.textClientToken() orelse error.NotBound;
         }
-        fn blurCallback(ptr: *anyopaque, _: z.Window) !void {
+        fn blurCallback(ptr: *anyopaque, window: z.Window) !void {
             const self: *Self = @ptrCast(@alignCast(ptr));
             // Withdrawal may have retired the field while the slot remains pinned.
             self.entered += 1;
             defer self.leave();
+            defer self.restoreInputMode(window) catch {};
             try self.adapter.unbind();
         }
         fn inputCallback(ptr: *anyopaque, scope: *ui.TextFieldScope, event: z.Event) !ui.TextFieldResult {
@@ -391,6 +440,8 @@ pub fn Field(comptime Private: type) type {
         }
         fn clipboardKey(self: *Self, scope: *ui.TextFieldScope, key: z.KeyInput) !ui.TextFieldResult {
             if (key.key != .c and self.options.policy.read_only) return .{ .handled = true };
+            // A password is never copied or cut.
+            if (key.key != .v and self.masked()) return .{ .handled = true };
             const clipboard = self.options.clipboard orelse return error.ClipboardUnavailable;
             const revision = try self.document.version();
             if (key.key == .v) {

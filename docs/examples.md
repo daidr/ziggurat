@@ -38,6 +38,7 @@
 | `blackhole` | [blackhole.zig](../examples/blackhole.zig) | CPU 光线追踪的史瓦西黑洞：渲染线程 + 线程池分行、泛光与收尾处理、按渲染时间自适应分辨率，拖动/甩动/缩放视角 |
 | `wind` | [wind.zig](../examples/wind.zig) | 风中的字符场：系统等宽字体轮廓生成图集，场、单元与字形三遍在 CPU 上计算；指针扰动、点击涟漪、Ctrl+R 换种子 |
 | `mayoi` | [mayoi.zig](../examples/mayoi.zig) | 幸存者小游戏：代码绘制的像素画以原分辨率合成到 `ui.PixelImage`、静态图片 HUD 图标、合成音效与流式播放的 lo-fi 曲子、手柄、暂停与升级选择 |
+| `rich-text` | [rich_text.zig](../examples/rich_text.zig) | 富文本编辑器：格式工具栏、Markdown 快捷方式、列表与任务、链接，系统剪贴板复制粘贴 HTML/RTF/Markdown，原生文字测量 |
 | `hybrid` | [hybrid.zig](../examples/hybrid.zig) | 混合应用：原生侧栏 + 矩形区域中的系统 WebView 页面，双向消息；需要 `-Dwebview=true` |
 
 早期示例 `counter`、`view-counter`、`web-counter`、`rectangular-pages` 与 `counter_service.zig`（IPC 客户端生成）保持不变。Markdown 与浮出窗口的示例等对应模块合入后再补。

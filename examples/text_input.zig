@@ -31,6 +31,7 @@ const Input = struct {
     later: [256]u8 = undefined,
     later_len: usize = 0,
     queued: bool = false,
+    reveal: ?bool = null,
 
     fn open(self: *Input, allocator: std.mem.Allocator, engine: *t.Engine, host: *view.Host, scale: f32, field: editing.FieldOptions, options: text.Options) !void {
         const document = try d.Document.create(allocator, std.Thread.getCurrentId(), "", .{});
@@ -63,6 +64,17 @@ const Input = struct {
         window.app.post(.{ .context = self, .call = applyLater }) catch return;
         self.queued = true;
     }
+    /// Shows or hides a password outside the build that asked for it.
+    fn revealLater(self: *Input, window: z.Window, shown: bool) void {
+        self.reveal = shown;
+        window.app.post(.{ .context = self, .call = applyReveal }) catch return;
+    }
+    fn applyReveal(ptr: *anyopaque) void {
+        const self: *Input = @ptrCast(@alignCast(ptr));
+        const shown = self.reveal orelse return;
+        self.reveal = null;
+        self.box.setPassword(!shown) catch |err| std.log.err("password: {s}", .{@errorName(err)});
+    }
     fn applyLater(ptr: *anyopaque) void {
         const self: *Input = @ptrCast(@alignCast(ptr));
         self.queued = false;
@@ -78,6 +90,8 @@ const Form = struct {
     window: ?z.Window = null,
     name: Input = undefined,
     email: Input = undefined,
+    password: Input = undefined,
+    show_password: bool = false,
     notes: Input = undefined,
     country: Input = undefined,
     tag: Input = undefined,
@@ -161,6 +175,10 @@ const Form = struct {
         try v.field("Email", .{ .@"error" = email_error, .help = "Checked as you type." }, .{ .self_align = .stretch, .key = 2 });
         try v.embed(self.email.box.embed(), .{ .self_align = .stretch, .key = 2 });
         try v.end();
+        try v.field("Password", .{ .help = "Hidden from copying, assistive technology and input methods." }, .{ .self_align = .stretch, .key = 8 });
+        try v.embed(self.password.box.embed(), .{ .self_align = .stretch, .key = 8 });
+        try v.end();
+        if (try v.checkbox(&self.show_password, "Show password", .{ .key = 9 })) if (self.window) |window| self.password.revealLater(window, self.show_password);
 
         try v.field("Country", .{ .help = "Type to filter, or press Down." }, .{ .self_align = .stretch, .key = 3 });
         try v.editableComboBox(country, .{ .name = "Country", .self_align = .stretch });
@@ -254,6 +272,10 @@ pub fn main() !void {
     defer form.name.close();
     try form.email.open(allocator, engine, &host, scale, common, .{ .width = 320 });
     defer form.email.close();
+    var password_options = common;
+    password_options.password = true;
+    try form.password.open(allocator, engine, &host, scale, password_options, .{ .width = 320 });
+    defer form.password.close();
     try form.country.open(allocator, engine, &host, scale, common, .{ .frame = false });
     defer form.country.close();
     var tag_options = common;

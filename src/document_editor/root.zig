@@ -5,6 +5,7 @@ const ui = @import("ziggurat_ui");
 const t = @import("ziggurat_text_layout");
 const ix = @import("index.zig");
 const cache = @import("cache.zig");
+const password_mask = @import("mask.zig");
 const memory = @import("memory.zig");
 const folding = @import("folds.zig");
 const owner_commands = @import("owner_commands.zig");
@@ -478,6 +479,61 @@ test "Document fields share control focus native text clipboard readonly and one
     const stats = try context.transformStats();
     try std.testing.expect(!stats.layers.software.prepared and stats.layers.current_bytes == 0);
 }
+test "password fields shape placeholders, copy nothing, hide text from input services and turn the input method off" {
+    const app = try z.App.init(std.testing.allocator);
+    defer app.deinit();
+    const window = try app.createWindow(.{});
+    defer _ = window.destroy() catch unreachable;
+    var host: FieldTestHost = .{};
+    var context = ui.Context.init(&host, FieldTestHost.draw, FieldTestHost.action);
+    context.semantics_enabled = false;
+    try context.attach(window);
+    try context.prepareTextFields(std.testing.allocator, .{});
+    const engine = try t.Engine.create(std.testing.allocator, std.Thread.getCurrentId(), .{});
+    defer engine.close() catch unreachable;
+    const document = try d.Document.create(std.testing.allocator, std.Thread.getCurrentId(), "s\xc3\xa9", .{});
+    defer document.close() catch unreachable;
+    const field = try Field.create(std.testing.allocator, document, engine, .{ .password = true, .clipboard = .{ .context = &host, .read = FieldTestHost.read, .write = FieldTestHost.write } });
+    defer field.close() catch unreachable;
+    const bounds: Rect = .{ .x = 8, .y = 8, .width = 180, .height = 40 };
+    try field.prepare(bounds, .{});
+    try field.attach(&context, 1);
+    try FieldTestHost.front(&context, &.{field}, false);
+    const shaped = struct {
+        fn text(adapter: *Adapter) ![]const u8 {
+            const value = try adapter.state();
+            return value.view.?.blocks[0].entry.layout.text();
+        }
+    };
+    try std.testing.expectEqualStrings("o\xce\xbf", try shaped.text(field.adapter));
+    try field.focus();
+    try std.testing.expectEqual(z.TextInputMode.keyboard_compose, try window.textInputMode());
+    FieldTestHost.emit(window, .{ .text_input = .{ .text = "!", .producer = .application } });
+    try FieldTestHost.text(document, "s\xc3\xa9!");
+    var storage: [64]u8 = undefined;
+    const snapshot = try window.readTextClient(window.textClientToken().?, &storage);
+    try std.testing.expect(std.mem.indexOf(u8, storage[0..snapshot.bytes], "s") == null and std.mem.indexOf(u8, storage[0..snapshot.bytes], "!") == null);
+    try std.testing.expect(context.handleKeyInput(window, .{ .key = .a, .modifiers = .{ .control = true } }));
+    try std.testing.expect(context.handleKeyInput(window, .{ .key = .c, .modifiers = .{ .control = true } }));
+    try std.testing.expect(context.handleKeyInput(window, .{ .key = .x, .modifiers = .{ .control = true } }));
+    try std.testing.expectEqual(@as(usize, 0), host.clipboard_len);
+    try FieldTestHost.text(document, "s\xc3\xa9!");
+    try FieldTestHost.write(&host, "pw");
+    try std.testing.expect(context.handleKeyInput(window, .{ .key = .v, .modifiers = .{ .control = true } }));
+    try FieldTestHost.text(document, "pw");
+    // Showing the password turns the input method back on and shapes the
+    // text itself at the next prepare.
+    try field.setPassword(false);
+    try std.testing.expectEqual(z.TextInputMode.system, try window.textInputMode());
+    try field.prepare(bounds, .{});
+    try std.testing.expectEqualStrings("pw", try shaped.text(field.adapter));
+    try field.setPassword(true);
+    try std.testing.expectEqual(z.TextInputMode.keyboard_compose, try window.textInputMode());
+    try field.blur();
+    try std.testing.expectEqual(z.TextInputMode.system, try window.textInputMode());
+    try field.prepare(bounds, .{});
+    try std.testing.expectEqualStrings("oo", try shaped.text(field.adapter));
+}
 test "field callback close retires before slot reuse and old close retry never withdraws new registration" {
     const app = try z.App.init(std.testing.allocator);
     defer app.deinit();
@@ -878,6 +934,10 @@ const State = struct {
     font: OwnedFont = .{},
     configured: bool = false,
     caret_cells: bool = false,
+    /// Password text: shaped as placeholders and drawn as bullets. The
+    /// committed view was shaped with `mask_shaped`.
+    masked: bool = false,
+    mask_shaped: bool = false,
     projected_plan: ?*projection.Plan = null,
     projected_geometry: ?projection.Geometry = null,
     projected_fold_version: u64 = 0,
@@ -1464,6 +1524,10 @@ const State = struct {
         };
     }
     fn readDisplay(self: *State, range: d.Range, bytes: []u8) !void {
+        try self.readShown(range, bytes);
+        if (self.masked) password_mask.apply(bytes);
+    }
+    fn readShown(self: *State, range: d.Range, bytes: []u8) !void {
         const composition_value = try self.document.composition();
         if (composition_value == null) {
             _ = try self.document.read(range, bytes);
@@ -1981,7 +2045,9 @@ pub const Adapter = opaque {
             if (frame.failure) |err| return @as(anyerror!void, err);
         };
         if (colors.caret_style) |style| try drawCarets(value, view, frame, colors.caret, style, true);
-        if (view.text_clips.len != 0) {
+        if (value.mask_shaped) {
+            try drawMasked(value, view, frame, bounds, colors.text);
+        } else if (view.text_clips.len != 0) {
             try drawClippedText(value, view, frame, bounds, colors.text);
         } else if (view.projected) {
             var runs: RunIterator = .{ .view = view };
@@ -2010,6 +2076,20 @@ pub const Adapter = opaque {
             try drawCarets(value, view, frame, colors.caret, style, false);
         } else if (value.token != null) for (view.carets) |mark| frame.rect(mark.rect, colors.caret);
         if (frame.failure) |err| return @as(anyerror!void, err);
+    }
+    /// A bullet centered in the advance of every placeholder grapheme.
+    fn drawMasked(value: *State, view: *const View, frame: *ui.Frame, bounds: Rect, color: ui.Color) !void {
+        const size = value.font.get().size;
+        for (view.blocks[0..view.count]) |block| {
+            for (try block.entry.layout.advanceSpans()) |span| {
+                if (span.rect.width <= 0 or span.rect.height <= 0) continue;
+                const radius = @min(size * 0.18, span.rect.width * 0.4);
+                const x = bounds.x - @as(f32, @floatCast(value.scroll_x)) + span.rect.x + span.rect.width / 2;
+                const y = bounds.y + @as(f32, @floatCast(block.y)) + span.rect.y + span.rect.height / 2;
+                frame.roundedRect(.{ .x = x - radius, .y = y - radius, .width = 2 * radius, .height = 2 * radius }, radius, color);
+                if (frame.failure) |err| return err;
+            }
+        }
     }
     pub fn hitTest(self: *Adapter, bounds: Rect, point: Point) !t.Caret {
         const value = try self.state();
@@ -2262,6 +2342,19 @@ pub const Adapter = opaque {
         if (token.adapter != self or token.generation != value.observer_generation or value.native_observer == null) return false;
         value.native_observer = null;
         return true;
+    }
+    /// Shows the text as a password from the next prepare: a bullet for
+    /// every scalar. The native text client reads placeholders of the same
+    /// lengths instead of the text from now on.
+    pub fn setMasked(self: *Adapter, on: bool) !void {
+        const value = try self.state();
+        if (value.busy) return error.Busy;
+        // The view shaped before keeps drawing as it was shaped until the
+        // next prepare, which shapes the text again.
+        value.masked = on;
+    }
+    pub fn isMasked(self: *const Adapter) !bool {
+        return (try self.state()).masked;
     }
     /// No allocation. Installation and clearing are forbidden from a running
     /// hook; the old context remains borrowed until this call succeeds.
@@ -2669,6 +2762,8 @@ fn clientRead(ptr: *anyopaque, window: z.Window, destination: []u8) !z.text.Snap
     if (window.app.phase == .stopping or window.app.phase == .stopped or window.isClosed()) return error.Closed;
     if (self.native_space) |binding| try binding.checkWindow(window);
     const result = try self.document.nativeContext(destination);
+    // A password reaches input services as placeholders of the same length.
+    if (self.masked) password_mask.apply(destination[0..result.bytes]);
     try self.checkInput(authority);
     return result;
 }
@@ -4183,6 +4278,7 @@ const LayoutCandidate = struct {
         state.scroll_x = work.scroll_x;
         state.font = self.font;
         state.generation = work.generation;
+        state.mask_shaped = state.masked;
         state.view_version = self.view_version;
         state.projection_version = self.projection_version;
         state.parameters_version = work.parameters.version;
@@ -4589,7 +4685,7 @@ fn constructView(candidate: *LayoutCandidate, bounds: Rect, parameters: Paramete
     if (self.folds_required) return error.FoldIndexRequired;
     var font = parameters.font;
     if (font.wrap != .none) font.width = bounds.width;
-    const same = self.configured and parameters.version == self.parameters_version and fontEqual(font, self.font.get());
+    const same = self.configured and parameters.version == self.parameters_version and fontEqual(font, self.font.get()) and self.mask_shaped == self.masked;
     candidate.revision = self.observed;
     const want_projected = if (self.projected_plan) |plan| !candidate.suppress_projection and try plan.current() and try self.document.composition() == null else false;
     if (self.view) |*view| try view.ensureUnused();
@@ -4738,6 +4834,7 @@ test {
     _ = pointer_selection;
     _ = @import("pointer_selection_tests.zig");
     _ = @import("tests.zig");
+    _ = password_mask;
     _ = projection;
     _ = owner_commands;
     _ = line_backgrounds;
