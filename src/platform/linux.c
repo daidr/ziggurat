@@ -51,6 +51,7 @@ typedef struct NativeWindow {
     gboolean fullscreen_requested, above_requested, above_observed, saved_geometry, restore_pending;
     gboolean saved_maximized, saved_minimized;
     gint normal_x, normal_y, normal_width, normal_height;
+    gint configured_x, configured_y, configured_width, configured_height; gboolean configured_size, configured_position, configured_special; guint mode_request;
     gint saved_x, saved_y, saved_width, saved_height;
     uint64_t pointer_operation;
     const ZlgPointerTicket *pointer_release;
@@ -269,9 +270,67 @@ static gboolean property_changed(GtkWidget *widget, GdkEventProperty *event, gpo
 #endif
     release(s); return FALSE;
 }
+#ifdef GDK_WINDOWING_X11
+/* GDK's state comes from events it already processed. WMs publish a mode in
+   _NET_WM_STATE before configuring the window into it, so the live property
+   also covers configure events that arrive ahead of the state event. */
+static gboolean x11_special_mode(NativeWindow *s) {
+    GdkDisplay *display=gtk_widget_get_display(s->window);
+    GdkWindow *native=gtk_widget_get_window(s->window);
+    if (!GDK_IS_X11_DISPLAY(display) || !native) return FALSE;
+    Atom type=None; int format=0; unsigned long count=0,remaining=0; unsigned char *values=NULL;
+    gdk_x11_display_error_trap_push(display);
+    int status=XGetWindowProperty(GDK_DISPLAY_XDISPLAY(display),GDK_WINDOW_XID(native),gdk_x11_get_xatom_by_name_for_display(display,"_NET_WM_STATE"),0,256,False,XA_ATOM,&type,&format,&count,&remaining,&values);
+    int failure=gdk_x11_display_error_trap_pop(display);
+    gboolean special=FALSE;
+    if (!failure && status==Success && type==XA_ATOM && format==32 && values) {
+        const char *names[]={"_NET_WM_STATE_MAXIMIZED_VERT","_NET_WM_STATE_MAXIMIZED_HORZ","_NET_WM_STATE_FULLSCREEN","_NET_WM_STATE_HIDDEN"};
+        const Atom *atoms=(const Atom *)values;
+        for (unsigned long i=0;i<count && !special;i++) for (int n=0;n<4;n++) if (atoms[i]==gdk_x11_get_xatom_by_name_for_display(display,names[n])) { special=TRUE; break; }
+    }
+    if (values) XFree(values);
+    return special;
+}
+#endif
+/* The normal rectangle comes from configure events, each one a single
+   statement of the geometry. Live reads mix moments: the origin is a server
+   round trip while GTK's size and state are from processed events, so during
+   a WM transition they combine the old size with the new origin, or the WM's
+   announced size with a client the server has not resized yet. A synthetic
+   event carries the WM's root position; a real one carries a size whose
+   origin GDK reads live, so it only seeds a position never announced. */
+enum { MODE_MAXIMIZED=1u, MODE_MINIMIZED=2u };
+/* A maximize or minimize the framework asked for is a transition until its
+   state is observed: the WM may configure the window into that mode before
+   it publishes the state, and those configure events are not normal. */
+static gboolean in_transition(NativeWindow *s) {
+    if (s->mode_request || (window_state(s)&(GDK_WINDOW_STATE_FULLSCREEN|GDK_WINDOW_STATE_MAXIMIZED|GDK_WINDOW_STATE_ICONIFIED))) return TRUE;
+#ifdef GDK_WINDOWING_X11
+    if (x11_special_mode(s)) return TRUE;
+#endif
+    return FALSE;
+}
+static void request_mode(NativeWindow *s, guint mode) {
+    s->mode_request|=mode;
+    if (mode==MODE_MAXIMIZED) gtk_window_maximize(GTK_WINDOW(s->window)); else gtk_window_iconify(GTK_WINDOW(s->window));
+}
+static void configure_seen(NativeWindow *s, const GdkEventConfigure *native) {
+    s->configured_width=native->width; s->configured_height=native->height; s->configured_size=TRUE;
+    if (native->send_event || !s->configured_position) { s->configured_x=native->x; s->configured_y=native->y; s->configured_position=TRUE; }
+    s->configured_special=in_transition(s);
+}
 static void remember_normal(NativeWindow *s) {
     GdkWindowState state=window_state(s);
     if (s->fullscreen_requested || s->saved_geometry || (state&(GDK_WINDOW_STATE_FULLSCREEN|GDK_WINDOW_STATE_MAXIMIZED|GDK_WINDOW_STATE_ICONIFIED))) return;
+    if (in_transition(s)) return;
+    if (s->configured_size && gtk_widget_get_mapped(s->window)) {
+        // The last configure still describes the special mode just left;
+        // the next one brings the normal geometry.
+        if (s->configured_special) return;
+        s->normal_width=s->configured_width; s->normal_height=s->configured_height;
+        if ((zlg_window_capabilities(s)&1u) && s->configured_position) { s->normal_x=s->configured_x; s->normal_y=s->configured_y; }
+        return;
+    }
     gtk_window_get_size(GTK_WINDOW(s->window),&s->normal_width,&s->normal_height);
     if (zlg_window_capabilities(s)&1u) gtk_window_get_position(GTK_WINDOW(s->window),&s->normal_x,&s->normal_y);
 }
@@ -296,21 +355,24 @@ static void restore_geometry(NativeWindow *s) {
        its own normal geometry. Unmaximizing, moving and maximizing again would
        only leave requests in flight behind ones the app sends next. */
     if (s->saved_maximized && (state&GDK_WINDOW_STATE_MAXIMIZED)) {
-        if (s->saved_minimized) gtk_window_iconify(GTK_WINDOW(s->window));
+        if (s->saved_minimized) request_mode(s,MODE_MINIMIZED);
         return;
     }
     gtk_window_unmaximize(GTK_WINDOW(s->window));
     if (s->destroyed) return;
     request_bounds(s,(zlg_window_capabilities(s)&1u)!=0,s->saved_x,s->saved_y,s->saved_width,s->saved_height);
     if (s->destroyed) return;
-    if (s->saved_maximized) gtk_window_maximize(GTK_WINDOW(s->window));
+    if (s->saved_maximized) request_mode(s,MODE_MAXIMIZED);
     if (s->destroyed) return;
-    if (s->saved_minimized) gtk_window_iconify(GTK_WINDOW(s->window));
+    if (s->saved_minimized) request_mode(s,MODE_MINIMIZED);
 }
 static gboolean state_changed(GtkWidget *widget, GdkEventWindowState *event, gpointer data) {
     (void)widget; (void)event; NativeWindow *s=data; retain(s);
     uint64_t operation=pointer_revoke(s,TRUE);
     if (s->destroyed || s->pointer_operation!=operation) { release(s); return FALSE; }
+    GdkWindowState observed=window_state(s);
+    if (observed&GDK_WINDOW_STATE_MAXIMIZED) s->mode_request&=~(guint)MODE_MAXIMIZED;
+    if (observed&GDK_WINDOW_STATE_ICONIFIED) s->mode_request&=~(guint)MODE_MINIMIZED;
     restore_geometry(s);
     if (!s->destroyed && s->pointer_operation==operation) remember_normal(s);
     if (!s->destroyed && s->pointer_operation==operation) notify_state(s);
@@ -321,8 +383,9 @@ static gboolean draw(GtkWidget *widget, cairo_t *context, gpointer data) {
     size_event(s,&event); emit(s,&event); return FALSE;
 }
 static gboolean configured(GtkWidget *widget, GdkEventConfigure *native, gpointer data) {
-    (void)widget; (void)native; NativeWindow *s=data; retain(s);
+    (void)widget; NativeWindow *s=data; retain(s);
     if (!s->destroyed) {
+        configure_seen(s,native);
         uint64_t operation=pointer_revoke(s,TRUE);
         if (s->destroyed || s->pointer_operation!=operation) { release(s); return FALSE; }
         remember_normal(s);
@@ -502,7 +565,7 @@ static gboolean button(GtkWidget *widget, GdkEventButton *native, gpointer data)
         if (native_button==1 && type==GDK_2BUTTON_PRESS && pointer_allowed(s,operation) && query_hit(s,x,y)==1 && pointer_allowed(s,operation)) {
             pointer_revoke(s,TRUE);
             if (!s->destroyed && gtk_window_get_resizable(GTK_WINDOW(s->window))) {
-                if (window_state(s)&GDK_WINDOW_STATE_MAXIMIZED) gtk_window_unmaximize(GTK_WINDOW(s->window)); else gtk_window_maximize(GTK_WINDOW(s->window));
+                if (window_state(s)&GDK_WINDOW_STATE_MAXIMIZED) gtk_window_unmaximize(GTK_WINDOW(s->window)); else request_mode(s,MODE_MAXIMIZED);
             }
         }
         release(s); return native_button==1;
@@ -860,11 +923,12 @@ void zlg_window_action(NativeWindow *s, int action) {
     switch(action) {
         case 0: if (s->popup) popup_show(s); else gtk_widget_show(s->window); break;
         case 1: popup_ungrab(s); if(!s->destroyed)gtk_widget_hide(s->window); break;
-        case 2: gtk_window_iconify(GTK_WINDOW(s->window)); break; case 3: gtk_window_maximize(GTK_WINDOW(s->window)); break;
+        case 2: request_mode(s,MODE_MINIMIZED); break; case 3: request_mode(s,MODE_MAXIMIZED); break;
         case 4:
             /* Restoring while leaving full screen asks for the normal mode, so
                the mode remembered before full screen is not reapplied. */
             if (s->restore_pending) { s->saved_maximized=FALSE; s->saved_minimized=FALSE; }
+            s->mode_request=0;
             gtk_window_unmaximize(GTK_WINDOW(s->window)); if(!s->destroyed)gtk_window_deiconify(GTK_WINDOW(s->window)); break;
         case 5: if (s->popup) { popup_show(s); break; } gtk_window_present(GTK_WINDOW(s->window)); if(!s->destroyed)gtk_widget_grab_focus(s->area); break;
         case 6: gtk_widget_set_sensitive(s->window,TRUE); break; case 7: gtk_widget_set_sensitive(s->window,FALSE); break;

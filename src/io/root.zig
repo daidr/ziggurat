@@ -678,3 +678,24 @@ pub const DynLib = if (builtin.os.tag == .windows) struct {
         return @ptrCast(@alignCast(kernel32.GetProcAddress(self.module, name.ptr) orelse return null));
     }
 } else std.DynLib;
+
+/// Runs `f` once across threads, as `std.once` did before Zig 0.17.
+pub fn once(comptime f: fn () void) Once(f) {
+    return .{};
+}
+
+pub fn Once(comptime f: fn () void) type {
+    return struct {
+        done: bool = false,
+        mutex: Mutex = .{},
+
+        pub fn call(self: *@This()) void {
+            if (@atomicLoad(bool, &self.done, .acquire)) return;
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            if (self.done) return;
+            f();
+            @atomicStore(bool, &self.done, true, .release);
+        }
+    };
+}

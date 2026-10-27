@@ -41,7 +41,7 @@ Coverage 原点是相对准备几何原点的有符号物理像素坐标，view 
 
 GDI 的静态 `uploadCoverage` 只验证；回放直接读取 CPU 快照，无 native 上传或跨帧驻留 pin。Cairo 显式创建 A8 surface+pattern，D2D 显式创建 A8 bitmap；回放只查找已有 identity，不自动上传或淘汰。native 丢失时保留 CPU descriptor/lease，在设备恢复时重建有界驻留集合；恢复成本由 coverage stats 单独计数。关闭或 release 先释放 native 对象，再释放 CPU pin。
 
-图片和 Coverage 合计最多 **32** 个驻留槽，并共享同一个字节预算。`setRasterBudget` 与兼容的 `setImageBudget` 修改同一预算；`RasterStats` 给出总项数、总 bytes、budget 和候选 peak。ImageStats 与 CoverageStats 分别记录自己实际发生的操作，不表示两份独立预算。GDI 静态图片/覆盖不占槽，GDI dynamic 图片仍占显式元数据槽。
+图片和 Coverage 共用一张从 32 槽起按需增长的驻留槽表，并共享同一个字节预算。`setRasterBudget` 与兼容的 `setImageBudget` 修改同一预算；`RasterStats` 给出总项数、总 bytes、budget 和候选 peak。ImageStats 与 CoverageStats 分别记录自己实际发生的操作，不表示两份独立预算。GDI 静态图片/覆盖不占槽，GDI dynamic 图片仍占显式元数据槽。
 
 Coverage 的 GPU 驻留按 `(width+2)*(height+2)` A8 计费：显式 upload/device restore 给四周加入一像素透明 halo，保证边缘非零的 mask 做分数平移时也以透明外延双线性采样，不能依赖 FillOpacityMask 的边界 clamp。原 CPU view、identity 和维度保持不变。候选构造时临时分配同样大小的有界 padding plane，创建 bitmap 后立即释放；`CoverageStats.native_scratch_peak_bytes` 单独记录其实际峰值，不计为已驻留 bytes。正常命中回放没有这个分配。加 halo 后的尺寸仍受 native 最大 bitmap 尺寸限制，超限明确上传失败。
 
@@ -49,11 +49,11 @@ Cairo 对未四字节对齐的外部 stride 在显式 upload 创建对齐副本�
 
 候选 native 完整创建成功后才按共享 LRU 淘汰和提交；失败保持旧驻留、预算和 leases。候选与旧驻留可能短时并存，像素计费峰值不超过两倍已配置预算，另加有界 native metadata。LRU 只在显式 upload/budget 操作淘汰，draw 命中仅更新固定 metadata。跨 software/GPU 的 Context 调用是分别提交，GPU 失败可能保留 software 的成功驻留，调用者可重试或显式 release。修改这些资源前 Context 先取消旧 GPU ready wait。
 
-`Buffer` 对 Coverage 另有 32 项 frame 表，按 lease 去重，追加失败不增加 pin 或部分写命令；这些 frame 表不是 native 缓存槽。64-bit 共享缓存固定 metadata 为 5104 bytes，Frame Coverage 表另占约 1.8 KiB，native 的每槽 descriptor/指针表也固定预留。这些成本不随历史资源数增长，不引入首次 paint allocator。旧 `replay`/资源入口保持可用，缺少 Coverage 表时明确返回 `MissingResources`。`replayBuffer` 自动带齐资源表。
+`Buffer` 对 Coverage 另有 32 项 frame 表，按 lease 与 identity 去重，追加失败不增加 pin 或部分写命令；这些 frame 表不是 native 缓存槽。共享缓存的槽表与 native 的每槽 descriptor/指针表从 32 槽起按需倍增，随同时驻留的项数增长，不随历史资源数增长；Frame Coverage 表另占约 1.8 KiB。旧 `replay`/资源入口保持可用，缺少 Coverage 表时明确返回 `MissingResources`。`replayBuffer` 自动带齐资源表。
 
 ## 验证边界
 
-`smoke-coverage` 实际运行 GDI、硬件/WARP D2D 和 Cairo：outer/inset、曲线/arc/复合洞和描边 A8，1×/1.5×/2× DPI、RGBA、分数平移、clip、非对齐行填充，逐物理像素与准备快照的 source-over oracle 比较。它还覆盖共享 LRU32、混合图片预算、候选部分失败、原 dynamic transition 重试、资源表满/重复借用、失败帧、callback 内关闭、GPU wait 关闭及设备恢复。原生对象创建数在热回放保持不变，结束后归零。
+`smoke-coverage` 实际运行 GDI、硬件/WARP D2D 和 Cairo：outer/inset、曲线/arc/复合洞和描边 A8，1×/1.5×/2× DPI、RGBA、分数平移、clip、非对齐行填充，逐物理像素与准备快照的 source-over oracle 比较。它还覆盖共享槽表增长、预算 LRU、混合图片预算、候选部分失败、原 dynamic transition 重试、资源表满/重复借用、失败帧、callback 内关闭、GPU wait 关闭及设备恢复。原生对象创建数在热回放保持不变，结束后归零。
 
 这些隐藏窗口/读回检查验证数据路径与资源契约，不建立视觉质量、显示延迟或任意阴影持续帧率保证。通用 offscreen 与组 opacity 仍需要独立的显式 workspace、透明 target 与 frame rollback 契约，尚未由此切片实现。
 

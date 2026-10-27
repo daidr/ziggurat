@@ -498,9 +498,6 @@ pub const Plugin = struct {
     fn worker(self: *Plugin) void {
         var client: std.http.Client = .{ .allocator = self.allocator, .io = zio.io() };
         defer client.deinit();
-        var proxies: std.heap.ArenaAllocator = .init(self.allocator);
-        defer proxies.deinit();
-        if (zio.getEnvMap(proxies.allocator())) |environment| client.initDefaultProxies(proxies.allocator(), &environment) catch {} else |_| {}
         while (true) {
             self.mutex.lock();
             while (!self.stopping and self.queue_len == 0) self.queued.wait(&self.mutex);

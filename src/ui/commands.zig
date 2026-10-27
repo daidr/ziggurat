@@ -72,7 +72,20 @@ pub const FontKey = packed struct(u32) {
     }
 };
 pub const Text = struct { bounds: Rect, color: u32, offset: u16, len: u16, font: FontKey = .{} };
-pub const ImageCommand = struct { destination: Rect, alignment: drawing.Point, fit: drawing.ImageFit, sampling: drawing.ImageSampling, opacity: u8, resource: u8 };
+pub const ImageCommand = struct {
+    destination: Rect,
+    alignment: drawing.Point,
+    fit: drawing.ImageFit,
+    sampling: drawing.ImageSampling,
+    opacity: u8,
+    resource: u8,
+    pub fn init(destination: Rect, value: drawing.ImageOptions, resource: usize) ImageCommand {
+        return .{ .destination = destination, .alignment = value.alignment, .fit = value.fit, .sampling = value.sampling, .opacity = value.opacity, .resource = @intCast(resource) };
+    }
+    pub fn options(self: ImageCommand) drawing.ImageOptions {
+        return .{ .alignment = self.alignment, .fit = self.fit, .sampling = self.sampling, .opacity = self.opacity };
+    }
+};
 pub const Command = union(enum) {
     fill: struct { bounds: Rect, color: u32 },
     shape: Shape,
@@ -140,7 +153,10 @@ pub const Buffer = struct {
     brush_storage: [brushes.max_brushes]brushes.Stored = undefined,
     prepared_text_storage: [32]drawing.PreparedTextView = undefined,
     prepared_text_len: usize = 0,
-    image_storage: [32]drawing.ImageView = undefined,
+    /// One entry per distinct image (lease and identity) a frame draws. Kept
+    /// at what a u8 resource index reaches: a Context holds a Buffer, and
+    /// Debug builds copy Contexts on the stack.
+    image_storage: [256]drawing.ImageView = undefined,
     image_len: usize = 0,
     coverage_storage: [32]drawing.CoverageView = undefined,
     coverage_len: usize = 0,
@@ -313,7 +329,7 @@ pub const Buffer = struct {
             self.texture_storage[index] = view;
             self.texture_len += 1;
         }
-        self.storage[self.len] = .{ .texture = .{ .destination = destination, .alignment = options.alignment, .fit = options.fit, .sampling = options.sampling, .opacity = options.opacity, .resource = @intCast(index) } };
+        self.storage[self.len] = .{ .texture = ImageCommand.init(destination, options, index) };
         self.len += 1;
     }
     pub fn coverage(self: *Buffer, origin: drawing.Point, view: drawing.CoverageView, color: Color) !void {
@@ -321,7 +337,7 @@ pub const Buffer = struct {
         try view.validate();
         if (self.len == self.storage.len) return error.CommandsFull;
         var index: usize = 0;
-        while (index < self.coverage_len) : (index += 1) if (self.coverage_storage[index].lease == view.lease) break;
+        while (index < self.coverage_len) : (index += 1) if (self.coverage_storage[index].lease == view.lease and self.coverage_storage[index].identity == view.identity) break;
         if (index == self.coverage_len) {
             if (index == self.coverage_storage.len) return error.CoverageResourcesFull;
             try view.lease.acquire();
@@ -345,7 +361,7 @@ pub const Buffer = struct {
         while (brush < self.brush_len) : (brush += 1) if (brushes.Stored.eql(&resource, &self.brush_storage[brush])) break;
         if (brush == self.brush_len and brush == self.brush_storage.len) return error.BrushesFull;
         var mask: usize = 0;
-        while (mask < self.coverage_len) : (mask += 1) if (self.coverage_storage[mask].lease == view.lease) break;
+        while (mask < self.coverage_len) : (mask += 1) if (self.coverage_storage[mask].lease == view.lease and self.coverage_storage[mask].identity == view.identity) break;
         if (mask == self.coverage_len) {
             if (mask == self.coverage_storage.len) return error.CoverageResourcesFull;
             try view.lease.acquire();
@@ -371,7 +387,7 @@ pub const Buffer = struct {
         var resource: ?u8 = null;
         if (options.mask) |view| {
             var index: usize = 0;
-            while (index < self.coverage_len) : (index += 1) if (self.coverage_storage[index].lease == view.lease) break;
+            while (index < self.coverage_len) : (index += 1) if (self.coverage_storage[index].lease == view.lease and self.coverage_storage[index].identity == view.identity) break;
             if (index == self.coverage_len) {
                 if (index == self.coverage_storage.len) return error.CoverageResourcesFull;
                 try view.lease.acquire();
@@ -411,7 +427,7 @@ pub const Buffer = struct {
         if (filter == storage.len and filter == storage.storage.len) return error.GaussianResourcesFull;
         var mask: usize = 0;
         if (options.mask) |value| {
-            while (mask < self.coverage_len) : (mask += 1) if (self.coverage_storage[mask].lease == value.lease) break;
+            while (mask < self.coverage_len) : (mask += 1) if (self.coverage_storage[mask].lease == value.lease and self.coverage_storage[mask].identity == value.identity) break;
             if (mask == self.coverage_len and mask == self.coverage_storage.len) return error.CoverageResourcesFull;
         }
         var mask_pin = false;
@@ -517,14 +533,14 @@ pub const Buffer = struct {
         try view.validate();
         if (self.len == self.storage.len) return error.CommandsFull;
         var index: usize = 0;
-        while (index < self.image_len) : (index += 1) if (self.image_storage[index].lease == view.lease) break;
+        while (index < self.image_len) : (index += 1) if (self.image_storage[index].lease == view.lease and self.image_storage[index].identity == view.identity) break;
         if (index == self.image_len) {
             if (index == self.image_storage.len) return error.ImageResourcesFull;
             try view.lease.acquire();
             self.image_storage[index] = view;
             self.image_len += 1;
         }
-        self.storage[self.len] = .{ .image = .{ .destination = destination, .alignment = options.alignment, .fit = options.fit, .sampling = options.sampling, .opacity = options.opacity, .resource = @intCast(index) } };
+        self.storage[self.len] = .{ .image = ImageCommand.init(destination, options, index) };
         self.len += 1;
     }
     pub fn preparedText(self: *Buffer, origin: drawing.Point, view: drawing.PreparedTextView, color: Color) !void {
@@ -894,7 +910,7 @@ test "prepared text pins are deduplicated bounded and released after every reset
     try std.testing.expectEqual(0, buffer.preparedTextResources().len);
 }
 
-test "image frame resources pin once and reject bad capacity and geometry without mutation" {
+test "image frame resources pin once per identity and reject bad capacity and geometry without mutation" {
     var buffer: Buffer = .{};
     defer buffer.reset();
     var leases: [33]drawing.Lease = undefined;
@@ -909,14 +925,23 @@ test "image frame resources pin once and reject bad capacity and geometry withou
     try buffer.image(bounds, view, .{});
     try buffer.image(bounds, view, .{ .opacity = 128, .fit = .cover });
     try std.testing.expectEqual(1, leases[0].pins);
-    for (leases[1..32], 1..) |*lease, identity| try buffer.image(bounds, .{ .lease = lease, .identity = identity + 1, .levels = &levels }, .{});
+    for (leases[1..], 1..) |*lease, identity| try buffer.image(bounds, .{ .lease = lease, .identity = identity + 1, .levels = &levels }, .{});
+    try std.testing.expectEqual(33, buffer.imageResources().len);
+    // Another identity of the same lease is its own resource.
+    try buffer.image(bounds, .{ .lease = &leases[0], .identity = 100, .levels = &levels }, .{});
+    try std.testing.expectEqual(34, buffer.imageResources().len);
+    try std.testing.expectEqual(2, leases[0].pins);
+    try std.testing.expectEqual(100, buffer.imageResources()[buffer.commands()[buffer.len - 1].image.resource].identity);
+    try std.testing.expectEqual(1, buffer.imageResources()[buffer.commands()[0].image.resource].identity);
+    for (34..buffer.image_storage.len) |identity| try buffer.image(bounds, .{ .lease = &leases[1], .identity = 1000 + identity, .levels = &levels }, .{});
     const count = buffer.len;
-    try std.testing.expectError(error.ImageResourcesFull, buffer.image(bounds, .{ .lease = &leases[32], .identity = 33, .levels = &levels }, .{}));
+    const pins = leases[1].pins;
+    try std.testing.expectError(error.ImageResourcesFull, buffer.image(bounds, .{ .lease = &leases[1], .identity = 999, .levels = &levels }, .{}));
     try std.testing.expectEqual(count, buffer.len);
-    try std.testing.expectEqual(0, leases[32].pins);
+    try std.testing.expectEqual(pins, leases[1].pins);
     buffer.len = buffer.storage.len;
     try std.testing.expectError(error.CommandsFull, buffer.image(bounds, view, .{}));
-    try std.testing.expectEqual(1, leases[0].pins);
+    try std.testing.expectEqual(2, leases[0].pins);
     buffer.reset();
     buffer.reset();
     for (leases) |lease| try lease.ensureUnused();

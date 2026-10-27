@@ -2,6 +2,8 @@ const std = @import("std");
 const zio = @import("ziggurat_io");
 const Cancel = @import("cancel.zig").Cancel;
 const Waker = @import("waker.zig").Waker;
+const proxy_api = @import("proxy.zig");
+const tunnel = @import("tunnel.zig");
 
 pub const Header = std.http.Header;
 pub const Kind = enum { text, binary };
@@ -43,6 +45,9 @@ pub const ConnectOptions = struct {
     /// Offered subprotocols; the accepted one is `Socket.protocol`.
     protocols: []const []const u8 = &.{},
     limits: Limits = .{},
+    /// The system's proxy by default (`proxy.forUrl`), reached through a
+    /// tunnel. A client whose own `http_proxy`/`https_proxy` is set keeps it.
+    proxy: proxy_api.Choice = .system,
 };
 
 pub const close_code = struct {
@@ -177,29 +182,14 @@ pub const Socket = struct {
                 return err;
             }
         }.map;
-        if (target.tls) tls: {
-            // As std.http.Client.request does before its first HTTPS request.
-            const io = client.io;
-            {
-                client.ca_bundle_lock.lockShared(io) catch return failed(handshake_cancel, error.TlsFailed);
-                defer client.ca_bundle_lock.unlockShared(io);
-                if (client.now != null) break :tls;
-            }
-            var bundle: std.crypto.Certificate.Bundle = .empty;
-            defer bundle.deinit(client.allocator);
-            const now = std.Io.Clock.real.now(io);
-            bundle.rescan(client.allocator, io, now) catch return failed(handshake_cancel, error.TlsFailed);
-            client.ca_bundle_lock.lock(io) catch return failed(handshake_cancel, error.TlsFailed);
-            defer client.ca_bundle_lock.unlock(io);
-            client.now = now;
-            std.mem.swap(std.crypto.Certificate.Bundle, &client.ca_bundle, &bundle);
-        }
+        if (target.tls) tunnel.loadCertificates(client) catch return failed(handshake_cancel, error.TlsFailed);
         const ring = try allocator.alloc(u8, options.limits.send_buffer_bytes);
         errdefer allocator.free(ring);
         var waker = Waker.init() catch return error.SystemResources;
         errdefer waker.deinit();
-        const connection = client.connect(target.host, target.port, if (target.tls) .tls else .plain) catch |err| return switch (err) {
+        const connection = tunnel.connect(client, &options.proxy, target.uri, target.host, target.port, if (target.tls) .tls else .plain, handshake_cancel) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
+            error.Cancelled => error.Cancelled,
             error.TlsInitializationFailed => failed(handshake_cancel, error.TlsFailed),
             else => failed(handshake_cancel, error.ConnectionFailed),
         };
