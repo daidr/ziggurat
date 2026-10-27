@@ -1,5 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
+/// Windows (DirectWrite), Linux (Pango) and macOS (Core Text) lay out text.
+const native_available = builtin.os.tag == .windows or builtin.os.tag == .linux or builtin.os.tag == .macos;
+/// Native positions are UTF-16 offsets on Windows and macOS, bytes on Linux.
+const native_utf16 = builtin.os.tag == .windows or builtin.os.tag == .macos;
 pub const drawing = @import("ziggurat_drawing_resources");
 const fonts = @import("ziggurat_fonts");
 pub const outlines = @import("text_layout_outline.zig");
@@ -63,8 +67,8 @@ pub const NativeError = extern struct { domain: u32 = 0, code: i32 = 0 };
 pub const ResourceCounts = struct { engines: u32 = 0, layouts: u32 = 0, references: u32 = 0, modules: u32 = 0, prepared: u32 = 0 };
 pub fn resourceCounts() ResourceCounts {
     var counts: ResourceCounts = .{};
-    if (builtin.os.tag == .windows or builtin.os.tag == .linux) ztl_resources(&counts.engines, &counts.layouts, &counts.references, &counts.modules);
-    if (builtin.os.tag == .windows or builtin.os.tag == .linux) counts.prepared = ztl_prepared_count();
+    if (native_available) ztl_resources(&counts.engines, &counts.layouts, &counts.references, &counts.modules);
+    if (native_available) counts.prepared = ztl_prepared_count();
     return counts;
 }
 
@@ -75,7 +79,7 @@ pub const Engine = opaque {
     pub fn create(allocator: std.mem.Allocator, process_main_thread: std.Thread.Id, limits: Limits) !*Engine {
         if (std.Thread.getCurrentId() != process_main_thread) return error.WrongThread;
         try limits.validate();
-        if (builtin.os.tag != .windows and builtin.os.tag != .linux) return error.UnsupportedPlatform;
+        if (!native_available) return error.UnsupportedPlatform;
         const state = try allocator.create(EngineState);
         errdefer allocator.destroy(state);
         state.* = .{ .allocator = allocator, .owner = process_main_thread, .limits = limits };
@@ -733,10 +737,10 @@ noinline fn prepareWords(engine: *EngineState, allocator: std.mem.Allocator, sto
     return index;
 }
 fn nativePosition(scalar: Scalar) u32 {
-    return if (builtin.os.tag == .windows) scalar.utf16 else scalar.bytes;
+    return if (native_utf16) scalar.utf16 else scalar.bytes;
 }
 fn bytePosition(map: []const Scalar, position: u32) !u32 {
-    return map[try findScalar(map, position, if (builtin.os.tag == .windows) .utf16 else .bytes)].bytes;
+    return map[try findScalar(map, position, if (native_utf16) .utf16 else .bytes)].bytes;
 }
 fn validRect(rect: Rect) bool {
     return std.math.isFinite(rect.x) and std.math.isFinite(rect.y) and std.math.isFinite(rect.width) and std.math.isFinite(rect.height) and rect.width >= 0 and rect.height > 0;
@@ -825,7 +829,7 @@ fn createLayout(engine: *EngineState, allocator: std.mem.Allocator, source: []co
     const utf16_count = try std.unicode.calcUtf16LeLen(text);
     var owned_bytes = @sizeOf(LayoutState) + text.len + 1 + (utf16_count + 1) * @sizeOf(u16) + captured_family.len + 1 + captured_locale.len + 1 + (scalar_count + 1) * @sizeOf(Scalar);
     const position_capacity = @min(engine.limits.graphemes + 1, scalar_count + 1);
-    const cell_capacity = if (builtin.os.tag == .linux or (builtin.os.tag == .windows and !reference)) scalar_count else 0;
+    const cell_capacity = if (builtin.os.tag == .linux or builtin.os.tag == .macos or (builtin.os.tag == .windows and !reference)) scalar_count else 0;
     const cell_bytes = cell_capacity * @sizeOf(NativeCell);
     if (owned_bytes + position_capacity * @sizeOf(u32) + cell_bytes > engine.limits.layout_bytes) return error.LayoutByteCapacityExceeded;
     const utf16 = try allocator.allocSentinel(u16, utf16_count, 0);
@@ -921,7 +925,7 @@ fn createLayout(engine: *EngineState, allocator: std.mem.Allocator, source: []co
         line.next_start = try bytePosition(scalars, line.next_start);
         if (!validRect(.{ .x = line.x, .y = line.y, .width = line.width, .height = line.height }) or !std.math.isFinite(line.baseline)) return error.NativeLayoutFailed;
     }
-    if (builtin.os.tag == .linux) {
+    if (builtin.os.tag == .linux or builtin.os.tag == .macos) {
         try nativeResult(ztl_cells(&state.native, cells.ptr, @intCast(cells.len), &engine.last_error));
         calls += 1;
     }

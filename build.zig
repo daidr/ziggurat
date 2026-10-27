@@ -464,7 +464,7 @@ pub fn build(b: *std.Build) void {
     }
     if (target.result.os.tag == .macos) {
         _ = native_support.add(b, text_layout, "text-layout-native", "src/ui/text_layout_macos.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
-        text_layout.link_libc = true;
+        native_support.linkFrameworks(b, text_layout, &.{ "CoreFoundation", "CoreGraphics", "CoreText" });
     }
     if (target.result.os.tag == .linux) {
         const native = native_support.add(b, text_layout, "text-layout-native", "src/ui/text_layout_linux.c", &.{"-std=c11"}, target, optimize);
