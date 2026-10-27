@@ -1045,7 +1045,10 @@ pub const Window = struct {
             return;
         }
         const current = backend.state(scope.record);
-        if ((current.fullscreen or current.fullscreen_requested) and (action == .minimize or action == .maximize or action == .restore)) return error.InvalidWindowState;
+        // While a requested exit from full screen is still observed, restore
+        // asks for the normal mode instead of the one from before full screen.
+        const leaving = current.fullscreen and !current.fullscreen_requested and action == .restore;
+        if ((current.fullscreen or current.fullscreen_requested) and !leaving and (action == .minimize or action == .maximize or action == .restore)) return error.InvalidWindowState;
         const activated = action == .show and record.options.modal and !record.modal_active;
         if (activated) {
             try record.setModalActive(true);
