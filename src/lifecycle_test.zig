@@ -1026,3 +1026,44 @@ test "resource cleanup waits for callbacks to leave" {
     try std.testing.expectEqual(1, completed);
     try std.testing.expect(!cleanup.queued);
 }
+
+test "emitted events reach the content through the native input gate" {
+    const EmitProbe = struct {
+        texts: usize = 0,
+        focus: usize = 0,
+        fn event(ptr: *anyopaque, _: z.Window, value: z.Event) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            switch (value) {
+                .text_input => self.texts += 1,
+                .focus => self.focus += 1,
+                else => {},
+            }
+        }
+        fn detach(_: *anyopaque) void {}
+        fn emitFromThread(window: z.Window, result: *?anyerror) void {
+            window.emitEvent(.{ .focus = true }) catch |err| {
+                result.* = err;
+            };
+        }
+    };
+    const app = try z.App.init(std.testing.allocator);
+    defer app.deinit();
+    var probe: EmitProbe = .{};
+    const window = try app.createWindow(.{});
+    try window.setContent(.{ .context = &probe, .event = EmitProbe.event, .detach = EmitProbe.detach });
+    try window.emitEvent(.{ .text_input = .{ .text = "a", .producer = .application } });
+    try equal(1, probe.texts);
+    // Disabled windows take no input, as natively.
+    try window.perform(.disable);
+    try window.emitEvent(.{ .text_input = .{ .text = "b", .producer = .application } });
+    try equal(1, probe.texts);
+    try window.perform(.enable);
+    var result: ?anyerror = null;
+    const thread = try std.Thread.spawn(.{}, EmitProbe.emitFromThread, .{ window, &result });
+    thread.join();
+    try equal(@as(?anyerror, error.WrongThread), result);
+    try equal(0, probe.focus);
+    _ = try window.destroy();
+    try app.dispatch();
+    try std.testing.expectError(error.Closed, window.emitEvent(.{ .focus = true }));
+}

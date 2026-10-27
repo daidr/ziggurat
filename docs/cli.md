@@ -11,6 +11,9 @@ ziggurat publish DIR (--github OWNER/REPO --tag TAG ... | --s3 BUCKET --url BASE
 ziggurat generate [-o FILE] [--framework PATH] [DIR]
 ziggurat i18n check [DIR]
 ziggurat install-skills [DIR]
+ziggurat icon PNG [-o FILE]
+ziggurat sign FILE...
+ziggurat vet [DIR]
 ziggurat doctor [--webview]
 ```
 
@@ -32,7 +35,7 @@ ziggurat doctor [--webview]
 
 ## build
 
-以 ReleaseSafe（`--debug` 时为 Debug）运行 `zig build`。`--package` 读取 `ziggurat.json`，把 `zig-out/bin` 中的可执行文件、Windows 上存在的 `WebView2Loader.dll` 和项目根的 LICENSE 打成 `dist/<identity>-<os>-<arch>-<version>.zip`，并打印其 SHA-256。该包可直接交给 `ziggurat-update release` 签名发布，或交给 `ziggurat package` 生成安装程序与 deb，见 [打包](packaging.md) 和 [更新](updates.md)。打包确定性只针对同一组输入与工具环境；编译产物本身是否逐字节一致取决于 Zig 编译器。
+以 ReleaseSafe（`--debug` 时为 Debug）运行 `zig build`。`--package` 读取 `ziggurat.json`，把 `zig-out/bin` 中的可执行文件、Windows 上存在的 `WebView2Loader.dll`、项目根的 LICENSE 和 `icon` 指定的 PNG（包内名为 `icon.png`）打成 `dist/<identity>-<os>-<arch>-<version>.zip`，并打印其 SHA-256。该包可直接交给 `ziggurat-update release` 签名发布，或交给 `ziggurat package` 生成安装程序与 deb，见 [打包](packaging.md) 和 [更新](updates.md)。打包确定性只针对同一组输入与工具环境；编译产物本身是否逐字节一致取决于 Zig 编译器。
 
 ## package install-script
 
@@ -88,6 +91,39 @@ curl -fsSL https://github.com/OWNER/REPO/releases/latest/download/install.sh | s
 
 `ziggurat install-skills [DIR]` 把随 CLI 打包的代理技能写入 `DIR/.agents/skills`（目前是 `ziggurat-maintenance`：所有权、生命周期、主线程、声明式视图、消息目录与验证规则）。只替换打包的文件，保留其他技能和技能目录中的其他文件。
 
+## 图标
+
+`ziggurat.json` 的 `icon` 是一张正方形 PNG（最好 1024×1024）。`build --package` 检查它是正方形 PNG 后放进更新包，`package setup` 与 `package deb` 在没有 `--icon` 时用包里的 `icon.png` 作 Linux 菜单图标。Windows 可执行文件的图标由应用的 `build.zig` 嵌入：
+
+```zig
+ziggurat_build.addApplicationResourcesWithIcon(b, exe, ziggurat, metadata, .{ .png = b.path("icon.png") });
+```
+
+构建时一个为本机编译的小工具把 PNG 缩放到 16、24、32、48、64、128、256 像素并写成 PNG 载荷的 `.ico`：缩小按面积平均，放大按双线性采样，都在预乘颜色上进行，透明像素不会把边缘变暗。`.ico = ...` 直接用现成的 ICO，`.default` 是框架自带图标。`ziggurat icon PNG [-o FILE]` 单独生成同样的 `.ico`，默认写在 PNG 旁边。PNG 读写不依赖平台：解码支持全部标准颜色类型、位深与隔行，编码输出 8 位 RGBA（自适应行滤波、固定 Huffman 的 deflate），同样输入得到同样字节。
+
+## Windows 签名
+
+`ziggurat.json` 的 `windows` 说明如何对 Windows 可执行文件和安装程序做 Authenticode 签名，SmartScreen 因此不再警告：
+
+```json
+{
+  "windows": {
+    "certificate": "certs/app.pfx",
+    "timestampUrl": "http://timestamp.digicert.com"
+  }
+}
+```
+
+- `certificate`：相对项目的 `.pfx`，密码只从环境变量 `ZIGGURAT_WINDOWS_CERTIFICATE_PASSWORD` 读取。Windows 上用 PATH 中或最新 Windows 10/11 SDK 的 `signtool`（`sign /f … /fd sha256 /tr … /td sha256`），其他系统用 `osslsigncode`（签到 `.signed` 临时文件后替换原文件）。
+- `timestampUrl`：RFC 3161 时间戳服务，默认 `http://timestamp.digicert.com`。
+- `signCommand`：代替以上两项的 shell 命令，`%1` 换成加引号的文件路径，适合签名服务和硬件令牌上的证书，例如 `"signtool sign /fd sha256 /tr http://timestamp.digicert.com /td sha256 /a %1"`。命令输出照常显示，命令行本身不显示，因为其中可能有凭据。
+
+`build --package` 在打包前签署 `zig-out/bin` 中的可执行文件；`WebView2Loader.dll` 这类已由发布者签名的库保持原签名，没有签名的 PE 文件会一并签署。`package setup` 在追加更新包之后签署 Windows 安装程序（存根跳过证书表，所以签名必须在最后）。`ziggurat sign FILE...` 按同样配置签署任意文件。签名在 Linux 上用 osslsigncode 2.8 与自签名测试证书实际验证过（证书与 `signCommand` 两条路径、默认时间戳服务）；Windows 上的 signtool 路径只做了命令行单元测试。
+
+## vet
+
+`ziggurat vet [DIR]` 先对项目的 `build.zig` 和 `src/` 下每个 `.zig` 文件运行 `zig ast-check`，然后检查视图生命周期：只在一次构建中有效的 `*view.View`，和只在一次绘制中有效的 `*ui.Frame`，不能存进结构体字段、容器级 `var` 或 `std.Thread.spawn` 的参数（构建和绘制只在主线程运行，结果应通过 `App.post` 交回）。以这些类型为参数的回调签名是正常用法，不报告；持久的状态、`view.Host` 和缓冲区也不受影响。检查只读语法树：它跟随文件给 `@import("ziggurat_view")`、`@import("ziggurat_ui")` 起的名字及 `View`/`Frame` 的别名，看不到类型的值（例如由调用推断的）不检查。有问题时逐条打印 `文件:行:列` 并以状态 1 退出。
+
 ## 控制台输出
 
 `generate`、`i18n check`、`install-skills` 与 S3 发布在标准错误上每步一行。终端上进行中的步骤显示旋转指示、已用时间和当前进度（如上传的字节数），结束时改写为成功或失败及耗时；不是终端时开始与结束各打印一行。`NO_COLOR` 关闭颜色，`FORCE_COLOR` 在非终端输出中开启颜色，`TERM=dumb` 不重绘；Linux 虚拟控制台和字体不全的 Windows 控制台改用简单符号。旋转指示由一个只在终端输出时启动的线程重绘，命令结束前停止。
@@ -98,4 +134,4 @@ curl -fsSL https://github.com/OWNER/REPO/releases/latest/download/install.sh | s
 
 ## 验证
 
-`zig build test-cli` 运行 CLI 的单元测试，`zig build test-i18n-generated` 从 `tests/i18n_fixture` 生成访问器后编译并在多种语言中调用它们。`zig build test` 覆盖三种模板的渲染、名称与 identity 清理、非空目录与缺失框架拒绝，以及变化检测忽略构建输出。本地在 Linux 上用三种模板各生成项目、对本仓库实际 `zig build`，并在 Xvfb 中各运行 8 秒无错误退出（未做页面内容或视觉检查）；`dev` 在修改源文件后重建并保持单个应用进程；`build --package` 两次产生相同摘要。Windows 只完成交叉编译。
+`zig build test-cli` 运行 CLI 的单元测试（含 PNG 编解码与外部解码器互通的样本、图标缩放、ICO 目录、签名命令行与 PE 证书表识别、vet 的报告与例外），`zig build test-i18n-generated` 从 `tests/i18n_fixture` 生成访问器后编译并在多种语言中调用它们。`zig build test` 覆盖三种模板的渲染、名称与 identity 清理、非空目录与缺失框架拒绝，以及变化检测忽略构建输出。本地在 Linux 上用三种模板各生成项目、对本仓库实际 `zig build`，并在 Xvfb 中各运行 8 秒无错误退出（未做页面内容或视觉检查）；`dev` 在修改源文件后重建并保持单个应用进程；`build --package` 两次产生相同摘要。Windows 只完成交叉编译。

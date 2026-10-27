@@ -1362,6 +1362,16 @@ pub const Window = struct {
             return err;
         };
     }
+    /// Deliver `event` to the window's content as the platform adapter
+    /// does, with the same pointer bookkeeping and input gating. Main
+    /// thread only, outside the content's own callbacks; for measurement
+    /// tools and checks that drive a real window.
+    pub fn emitEvent(self: Window, event: Event) !void {
+        if (std.Thread.getCurrentId() != self.app.owner) return error.WrongThread;
+        const record = self.resolve() orelse return error.Closed;
+        if (record.phase != .open) return error.Closed;
+        record.emit(event);
+    }
     pub fn nativeHandle(self: Window) ?*anyopaque {
         const record = self.resolve() orelse return null;
         return if (record.phase == .open) backend.handle(record) else null;

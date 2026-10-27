@@ -85,6 +85,7 @@ pub const ShaderEffectStats = struct {
 pub const EffectOptions = struct { opacity: u8 = 255 };
 pub const offscreen = @import("offscreen.zig");
 pub const canvas = @import("canvas.zig");
+pub const PixelImage = @import("pixel_image.zig").PixelImage;
 pub const frame_stats = @import("frame_stats.zig");
 pub const FrameStats = frame_stats.Stats;
 pub const Canvas = canvas.Canvas;
@@ -4142,6 +4143,7 @@ test {
     _ = geometry;
     _ = effects;
     _ = canvas;
+    _ = @import("pixel_image.zig");
     _ = frame_stats;
     _ = input;
     _ = layout;
