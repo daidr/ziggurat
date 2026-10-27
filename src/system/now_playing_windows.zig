@@ -272,12 +272,14 @@ fn ensureControls() ?Object {
     if (c.RegisterClassExW(&class) == 0 and c.GetLastError() != c.ERROR_CLASS_ALREADY_EXISTS) return null;
     // The controls belong to a top-level window; this one is never shown.
     const hwnd = c.CreateWindowExW(c.WS_EX_TOOLWINDOW | c.WS_EX_NOACTIVATE, L("ZigguratNowPlaying"), L(""), c.WS_OVERLAPPED, 0, 0, 0, 0, null, null, c.GetModuleHandleW(null), null) orelse return null;
+    // Commands reach the owner thread through this window even where the
+    // session has no media controls (a service session, for one).
+    window.store(@intFromPtr(hwnd), .release);
     const interop = activationFactory(winrt, "Windows.Media.SystemMediaTransportControls", &iid_interop) orelse return null;
     defer release(interop);
     var object: ?Object = null;
     if (call(interop, interop_get_for_window, .{ hwnd, &iid_controls, &object }) < 0) return null;
     const value = object orelse return null;
-    window.store(@intFromPtr(hwnd), .release);
     var token: i64 = 0;
     _ = call(value, controls_add_button_pressed, .{ &button_handler, &token });
     if (queryInterface(value, &iid_controls2)) |second| {
