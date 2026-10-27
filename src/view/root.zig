@@ -45,6 +45,7 @@ pub const icons = @import("icons.zig");
 const pointer_controls = @import("pointer_area.zig");
 const wrap_text = @import("wrap.zig");
 const inspector_panel = @import("inspector.zig");
+const view_options = @import("ziggurat_view_options");
 pub const Cursor = z.Cursor;
 pub const PointerEvent = pointer_controls.PointerEvent;
 /// The developer tools of a window of views; see `inspector.zig`.
@@ -57,6 +58,8 @@ pub const AreaOptions = pointer_controls.Options;
 pub const Error = error{ InvalidField, TooManyNodes, TextFull, NestingTooDeep, UnbalancedContainer, NotContainer, Busy, InvalidRange, InvalidValue, InvalidText, InvalidSplit, SelectionFull } || layout.Error;
 
 pub const max_depth = 32;
+/// Return addresses the view notes for the element the inspector shows.
+pub const source_depth = 24;
 /// Options of the open popup that keyboard navigation can reach.
 pub const max_popup_items = 64;
 /// Controls with a tooltip that hover can find in one frame.
@@ -1207,6 +1210,11 @@ pub const View = struct {
     /// The pointer in window DIP, or null while it is outside the window;
     /// set by the host as it moves.
     pointer: ?Point = null,
+    /// The element whose building to trace, for the inspector to tell
+    /// where the application built it, and the trace of the last pass.
+    source_of: u64 = 0,
+    source_trace: [source_depth]usize = undefined,
+    source_len: usize = 0,
     /// The pointer area a button went down on, until it comes up.
     area_press: ?pointer_controls.Press = null,
     /// The last press on a pointer area, to count double presses.
@@ -1372,7 +1380,15 @@ pub const View = struct {
         parent.last_child = index;
         parent.child_count += 1;
         self.len += 1;
+        if (comptime inspector_panel.enabled) if (self.source_of != 0 and self.buffers.nodes[index].id == self.source_of) self.noteSource();
         return &self.buffers.nodes[index];
+    }
+
+    /// Note the calls that are building the element the inspector shows.
+    noinline fn noteSource(self: *View) void {
+        var trace: std.builtin.StackTrace = .{ .instruction_addresses = &self.source_trace, .index = 0 };
+        std.debug.captureStackTrace(@returnAddress(), &trace);
+        self.source_len = @min(trace.index, self.source_trace.len);
     }
 
     fn copy(self: *View, value: []const u8) Error![]const u8 {
@@ -4914,12 +4930,19 @@ pub const Options = struct {
     keys: ?KeyHandler = null,
     /// Developer tools: F12 or Ctrl+Shift+I opens the inspector docked at
     /// the right, Ctrl+Shift+C picks an element; see `inspector.zig`. The
-    /// application keeps it at a stable address, typically only in debug
-    /// builds: `if (builtin.mode == .Debug) &inspector else null`.
+    /// application keeps it at a stable address. Builds without it (release
+    /// builds unless `-Dinspector=true`) ignore it and leave its code out.
     inspector: ?*Inspector = null,
     /// Runs once at the end of every frame the Host draws, after the
     /// embedded leaves learned their places; see `FrameHook`.
     after_frame: ?FrameHook = null,
+
+    /// The inspector, when the build has one; known at compile time to be
+    /// null otherwise, so that nothing of it is compiled in.
+    pub inline fn tools(self: Options) ?*Inspector {
+        if (comptime !inspector_panel.enabled) return null;
+        return self.inspector;
+    }
 };
 
 /// The application's own key handling; see `Options.keys`. Both run on the
@@ -5158,7 +5181,7 @@ pub const Host = struct {
     fn onInput(ptr: *anyopaque, _: *ui.Context, event: z.Event) bool {
         const self: *Host = @ptrCast(@alignCast(ptr));
         if (self.building) return false;
-        if (self.options.inspector) |tools| if (self.inspectorInput(tools, event)) return true;
+        if (self.options.tools()) |tools| if (self.inspectorInput(tools, event)) return true;
         switch (event) {
             .pointer_move => |point| {
                 const at: Point = .{ .x = point.x, .y = point.y };
@@ -5302,8 +5325,10 @@ pub const Host = struct {
     fn inspectorInput(self: *Host, tools: *Inspector, event: z.Event) bool {
         const was_open = tools.open;
         var repaint = false;
+        const finding = tools.finding and tools.focused;
         const taken = switch (event) {
             .key_input => |input| tools.key(input),
+            .text_input => |typed| tools.typeText(typed.text),
             .pointer_move => |point| blk: {
                 const over = tools.pointerMove(.{ .x = point.x, .y = point.y }, &repaint);
                 if (over) {
@@ -5320,6 +5345,8 @@ pub const Host = struct {
             .wheel => |value| tools.wheel(.{ .x = value.position.x, .y = value.position.y }, .{ .x = value.delta.x, .y = value.delta.y }),
             else => false,
         };
+        // Typing goes to the find bar, not to a field of the content.
+        if (tools.finding and tools.focused and !finding) self.context.blurControls() catch {};
         if (taken or repaint or tools.open != was_open) self.invalidate();
         return taken;
     }
@@ -5355,7 +5382,7 @@ pub const Host = struct {
         const window = self.context.window orelse return;
         if (self.view.area_press != null or self.view.capture != null) return;
         const point = self.view.pointer orelse return;
-        const tools = if (self.options.inspector) |value| value.cursorAt(point) else null;
+        const tools = if (self.options.tools()) |value| value.cursorAt(point) else null;
         window.setCursor(tools orelse self.view.cursorAt(point)) catch {};
     }
     /// Deliver what a pointer area learned, if anything; true when one did.
@@ -5420,14 +5447,18 @@ pub const Host = struct {
         self.frames += 1;
     }
     fn render(self: *Host, frame: *ui.Frame, theme: Theme) anyerror!void {
-        var lap = if (self.options.inspector) |tools| if (tools.open) std.time.Timer.start() catch null else null else null;
+        var lap: ?std.time.Timer = if (self.options.tools()) |tools| if (tools.open) std.time.Timer.start() catch null else null else null;
         const built: u64 = blk: {
-            if (self.options.inspector) |tools| self.view.layout_direction = tools.direction_override orelse self.options.direction;
+            if (self.options.tools()) |tools| {
+                self.view.layout_direction = tools.direction_override orelse self.options.direction;
+                self.view.source_of = if (tools.open) tools.selected else 0;
+                self.view.source_len = 0;
+            }
             try self.pass(null);
             break :blk if (lap) |*timer| timer.lap() else 0;
         };
         const whole = frame.sourceBounds();
-        const content = if (self.options.inspector) |tools| tools.contentBounds(whole) else whole;
+        const content = if (self.options.tools()) |tools| tools.contentBounds(whole) else whole;
         try self.view.arrange(content, theme, self.options.measurer);
         const laid = if (lap) |*timer| timer.lap() else 0;
         try self.view.paint(frame);
@@ -5435,7 +5466,7 @@ pub const Host = struct {
             const embed = node.embed orelse continue;
             if (embed.place) |place| place(embed.context, node.id, node.bounds);
         }
-        if (self.options.inspector) |tools| {
+        if (self.options.tools()) |tools| {
             tools.capture(&self.view, self.context.input_state.focused, self.options.measurer, theme);
             try tools.paint(frame);
             tools.frameTimes(built, laid, if (lap) |*timer| timer.lap() else 0);

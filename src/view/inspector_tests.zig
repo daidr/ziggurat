@@ -1,5 +1,7 @@
 //! Headless tests of the inspector: opening and closing it, the tree,
-//! picking, the keyboard, details, issues, the RTL toggle and resizing.
+//! picking, the keyboard, details, issues, finding, where an element was
+//! built, the RTL toggle and resizing. A build without the inspector skips
+//! them.
 const std = @import("std");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
@@ -37,7 +39,8 @@ const App = struct {
 const ctrl_shift: z.KeyModifiers = .{ .control = true, .shift = true };
 
 fn setup(app: *App, storage: *Storage, tools: *Inspector, context: *ui.Context) !Harness {
-    var h = Harness.init(app, App.build, storage.buffers(), .{ .options = .{ .inspector = tools } });
+    if (!inspector.enabled) return error.SkipZigTest;
+    var h = Harness.init(app, App.build, storage.buffers(), .{ .options = .{ .inspector = tools }, .strict = !app.duplicate });
     try h.attachInput(context);
     return h;
 }
@@ -196,12 +199,77 @@ test "two elements with one key under a parent are an issue, noted once" {
     try testing.expectEqual(inspector.Tab.issues, tools.tab);
 }
 
+test "a Harness fails a build that gives two elements one key" {
+    var app: App = .{ .duplicate = true };
+    var storage: Storage = .{};
+    var h = Harness.init(&app, App.build, storage.buffers(), .{});
+    try testing.expectError(error.DuplicateKey, h.render());
+    try testing.expect(std.mem.indexOf(u8, h.issue(), "key 9") != null);
+    app.duplicate = false;
+    try h.render();
+}
+
+test "Ctrl+F finds elements by tag, text, name or key" {
+    var app: App = .{};
+    var storage: Storage = .{};
+    var tools: Inspector = .{};
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    var h = try setup(&app, &storage, &tools, &context);
+    _ = try h.key(.{ .key = .f12 });
+    // The panel takes the keyboard with a press on it.
+    try h.clickAt(tools.layout().tree.x + 40, tools.layout().tree.y + 4);
+    try testing.expect(try h.key(.{ .key = .f, .modifiers = .{ .control = true } }));
+    try testing.expect(tools.finding and tools.layout().find != null);
+    try h.typeText("sav");
+    // The button labelled Save, chosen and shown in the tree.
+    const button = try h.find(.{ .kind = .button });
+    try testing.expectEqual(@as(usize, 1), tools.match_count);
+    try testing.expectEqual(button.id, tools.selected);
+    try testing.expect(tools.rowOf(button.id) != null);
+    // Fewer letters find more: the text "Title" and its tag both hold "t".
+    _ = try h.key(.{ .key = .backspace });
+    _ = try h.key(.{ .key = .backspace });
+    _ = try h.key(.{ .key = .backspace });
+    try h.typeText("T");
+    try testing.expect(tools.match_count > 1);
+    const first = tools.selected;
+    try testing.expect(try h.key(.{ .key = .enter }));
+    try testing.expect(tools.selected != first);
+    try testing.expect(try h.key(.{ .key = .enter, .modifiers = .{ .shift = true } }));
+    try testing.expectEqual(first, tools.selected);
+    // By key.
+    _ = try h.key(.{ .key = .backspace });
+    try h.typeText("3");
+    try testing.expectEqual(h.view.nodes()[1].id, tools.selected);
+    try testing.expect(try h.key(.{ .key = .escape }));
+    try testing.expect(!tools.finding);
+    try testing.expectError(error.NoTextTarget, h.typeText("x"));
+}
+
+test "the details tell where the application built the element chosen" {
+    var app: App = .{};
+    var storage: Storage = .{};
+    var tools: Inspector = .{};
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    var h = try setup(&app, &storage, &tools, &context);
+    _ = try h.key(.{ .key = .f12 });
+    const button = try h.find(.{ .kind = .button });
+    tools.choose(button.id);
+    try h.render();
+    // A build with debug information knows the line of `v.button`.
+    if (tools.source().len == 0) return error.SkipZigTest;
+    try testing.expect(std.mem.endsWith(u8, tools.source(), "inspector_tests.zig:28"));
+}
+
 test "the RTL toggle, the close button and the panel's edge" {
     var app: App = .{};
     var storage: Storage = .{};
     var tools: Inspector = .{};
     var dummy: u8 = 0;
     var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    if (!inspector.enabled) return error.SkipZigTest;
     var h = Harness.init(&app, App.build, storage.buffers(), .{ .bounds = .{ .x = 0, .y = 0, .width = 1000, .height = 600 }, .options = .{ .inspector = &tools } });
     try h.attachInput(&context);
     _ = try h.key(.{ .key = .f12 });
