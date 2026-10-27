@@ -313,6 +313,28 @@ jobs:
         run: |
           zig_bin=$(sh scripts/fetch-zig-macos.sh)
           printf '%s\n' "$(dirname "$zig_bin")" >> "$GITHUB_PATH"
+      - name: Link against Zig's own libSystem stubs when the SDK's fail
+        # Zig 0.15.2 cannot read the libSystem stubs of some newer SDKs and
+        # then fails to link anything, its build runner included. Zig falls
+        # back to the stubs it ships when xcode-select names no developer
+        # directory, so a failing xcode-select goes first on PATH; codesign,
+        # hdiutil, lipo and plutil live in /usr/bin and are unaffected.
+        run: |
+          sw_vers
+          xcode-select --print-path || true
+          xcrun --sdk macosx --show-sdk-path || true
+          probe="$RUNNER_TEMP/zig-probe"
+          mkdir -p "$probe"
+          printf 'pub fn main() void {}\n' >"$probe/main.zig"
+          if zig build-exe -lc -femit-bin="$probe/main" "$probe/main.zig" --cache-dir "$probe/cache" --global-cache-dir "$probe/cache"; then
+            echo "Zig links against the SDK"
+          else
+            mkdir -p "$probe/bin"
+            printf '#!/bin/sh\nexit 1\n' >"$probe/bin/xcode-select"
+            chmod +x "$probe/bin/xcode-select"
+            printf '%s\n' "$probe/bin" >> "$GITHUB_PATH"
+            echo "Zig links against its own libSystem stubs"
+          fi
       - name: CLI tests, then a universal app, its signature, disk image and install script
         env:
           ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}/zig-local-cache
