@@ -462,6 +462,10 @@ pub fn build(b: *std.Build) void {
         text_layout.linkSystemLibrary("gdi32", .{});
         text_layout.link_libc = true;
     }
+    if (target.result.os.tag == .macos) {
+        _ = native_support.add(b, text_layout, "text-layout-native", "src/ui/text_layout_macos.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        text_layout.link_libc = true;
+    }
     if (target.result.os.tag == .linux) {
         const native = native_support.add(b, text_layout, "text-layout-native", "src/ui/text_layout_linux.c", &.{"-std=c11"}, target, optimize);
         native.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .force });
@@ -1398,6 +1402,10 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .windows) {
         ui.linkSystemLibrary("gdi32", .{});
         ui.link_libc = true;
+    }
+    if (target.result.os.tag == .macos) {
+        _ = native_support.add(b, ui, "ui-core-graphics-native", "src/ui/macos.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native_support.linkFrameworks(b, ui, &.{ "CoreFoundation", "CoreGraphics", "CoreText" });
     }
     if (target.result.os.tag == .linux) {
         const native = native_support.add(b, ui, "ui-cairo-native", "src/ui/linux.c", &.{"-std=c11"}, target, optimize);
@@ -2520,7 +2528,7 @@ pub fn build(b: *std.Build) void {
     const test_terminal = b.step("test-terminal", "Run escape sequence parsing, screen, scrollback, key and mouse encoding, selection, link, PTY session and terminal view tests");
     test_terminal.dependOn(&run_terminal_tests.step);
     test_terminal.dependOn(&run_terminal_view_tests.step);
-    addSmoke(b, "smoke-terminal", "tests/terminal_smoke.zig", target, optimize, &.{
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux) addSmoke(b, "smoke-terminal", "tests/terminal_smoke.zig", target, optimize, &.{
         .{ .name = "ziggurat", .module = core },
         .{ .name = "ziggurat_ui", .module = ui },
         .{ .name = "ziggurat_view", .module = declarative_view },

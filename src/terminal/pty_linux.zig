@@ -2,6 +2,7 @@
 //! secondary side as its controlling terminal, and this process keeps the
 //! primary side, non-blocking, for the session's workers.
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const pty = @import("pty.zig");
 
@@ -10,6 +11,10 @@ extern "c" fn grantpt(fd: c_int) c_int;
 extern "c" fn unlockpt(fd: c_int) c_int;
 extern "c" fn ptsname_r(fd: c_int, buf: [*]u8, len: usize) c_int;
 extern "c" fn execvpe(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) c_int;
+extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+// macOS's <sys/ttycom.h> values; Zig's Darwin bindings omit both requests.
+const set_controlling_tty = if (builtin.os.tag == .macos) @as(c_int, 0x20007461) else posix.T.IOCSCTTY;
+const set_window_size = if (builtin.os.tag == .macos) @as(c_int, @bitCast(@as(u32, 0x80087467))) else posix.T.IOCSWINSZ;
 extern "c" fn sigprocmask(how: c_int, set: ?*const posix.sigset_t, old: ?*posix.sigset_t) c_int;
 
 pub const Pty = struct {
@@ -59,11 +64,16 @@ pub const Pty = struct {
         _ = std.c.setsid();
         const fd = std.c.open(secondary, @bitCast(posix.O{ .ACCMODE = .RDWR }));
         if (fd < 0) std.c._exit(126);
-        _ = std.c.ioctl(fd, posix.T.IOCSCTTY, @as(c_int, 0));
+        _ = std.c.ioctl(fd, set_controlling_tty, @as(c_int, 0));
         for (0..3) |target| _ = std.c.dup2(fd, @intCast(target));
         if (fd > 2) _ = std.c.close(fd);
         if (cwd) |dir| _ = std.c.chdir(dir);
-        _ = execvpe(argv[0].?, argv, envp);
+        if (builtin.os.tag == .macos) {
+            // macOS has no execvpe: the child replaces its own environment,
+            // then searches PATH as execvp does.
+            std.c.environ = @ptrCast(@constCast(envp));
+            _ = execvp(argv[0].?, argv);
+        } else _ = execvpe(argv[0].?, argv, envp);
         std.c._exit(127);
     }
 
@@ -109,7 +119,7 @@ pub const Pty = struct {
 
 fn setSize(fd: posix.fd_t, size: pty.Size) void {
     var value: posix.winsize = .{ .row = size.rows, .col = size.cols, .xpixel = size.width, .ypixel = size.height };
-    _ = std.c.ioctl(fd, posix.T.IOCSWINSZ, &value);
+    _ = std.c.ioctl(fd, set_window_size, &value);
 }
 
 /// This process's environment with the command's variables and the
