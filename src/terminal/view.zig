@@ -20,6 +20,7 @@ const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const view = @import("ziggurat_view");
 const term = @import("ziggurat_terminal");
+const box = @import("box.zig");
 
 const Screen = term.Screen;
 const Cell = term.Cell;
@@ -1066,11 +1067,13 @@ pub const TerminalView = struct {
             };
         }
         try self.paintImages(frame, .below_text, ox, oy, cell.width, cell.height);
+        var boxes: BoxPainter = .{ .frame = frame };
         for (0..s.rows) |y| {
             const abs = s.viewRow(y);
             const line = s.rowAt(abs) orelse continue;
-            self.paintText(frame, line.cells, abs, range, ox, oy + @as(f32, @floatFromInt(y)) * cell.height, cell.width, cell.height);
+            self.paintText(frame, &boxes, line.cells, abs, range, ox, oy + @as(f32, @floatFromInt(y)) * cell.height, cell.width, cell.height);
         }
+        boxes.flush();
         try self.paintImages(frame, .above_text, ox, oy, cell.width, cell.height);
         if (self.hover) |hover| if (hover.row >= s.viewRow(0) and hover.row < s.viewRow(s.rows)) {
             if (s.rowAt(hover.row)) |line| if (hover.start < line.cells.len) {
@@ -1098,10 +1101,16 @@ pub const TerminalView = struct {
                 .block => {
                     frame.rect(rect, t.cursor_color);
                     if (under.cp != 0 and under.wide != .spacer) {
-                        var bytes: [4]u8 = undefined;
-                        const n = std.unicode.utf8Encode(under.cp, &bytes) catch 0;
                         const text_color = (self.applied_theme orelse self.theme()).cursor_text orelse self.colorsOf(under, false, .none).bg;
-                        frame.labelFont(.{ .x = rect.x, .y = rect.y, .width = rect.width + cell.width, .height = rect.height }, bytes[0..n], text_color, self.fontFor(under));
+                        if (box.drawn(under.cp)) {
+                            var cursor_box: BoxPainter = .{ .frame = frame };
+                            cursor_box.cell(under.cp, rect, text_color);
+                            cursor_box.flush();
+                        } else {
+                            var bytes: [4]u8 = undefined;
+                            const n = std.unicode.utf8Encode(under.cp, &bytes) catch 0;
+                            frame.labelFont(.{ .x = rect.x, .y = rect.y, .width = rect.width + cell.width, .height = rect.height }, bytes[0..n], text_color, self.fontFor(under));
+                        }
                     }
                 },
                 .underline => frame.rect(.{ .x = rect.x, .y = rect.y + rect.height - 2, .width = rect.width, .height = 2 }, t.cursor_color),
@@ -1172,7 +1181,7 @@ pub const TerminalView = struct {
 
     /// Text in runs of one color and font. Wide characters go one by one at
     /// their cells, so a fallback font's advance cannot shift the grid.
-    fn paintText(self: *TerminalView, frame: *ui.Frame, cells: []const Cell, abs: u64, range: ?term.selection.Range, ox: f32, top: f32, cw: f32, ch: f32) void {
+    fn paintText(self: *TerminalView, frame: *ui.Frame, boxes: *BoxPainter, cells: []const Cell, abs: u64, range: ?term.selection.Range, ox: f32, top: f32, cw: f32, ch: f32) void {
         var glyphs: [1024]u8 = undefined;
         var x: usize = 0;
         while (x < cells.len) {
@@ -1187,12 +1196,23 @@ pub const TerminalView = struct {
                 continue;
             }
             const colors = self.colorsOf(first, selectedAt(range, abs, x), self.foundAt(abs, x));
+            if (box.drawn(first.cp)) {
+                // Drawn rather than taken from the font. Curves take a
+                // command per row, so they wait for room.
+                const span: f32 = if (first.wide == .wide) 2 else 1;
+                const left = ox + @as(f32, @floatFromInt(x)) * cw;
+                if (!first.style.attrs.hidden and (!box.scanned(first.cp) or buffer.storage.len - buffer.len >= 256)) boxes.cell(first.cp, .{ .x = left, .y = top, .width = span * cw, .height = ch }, colors.fg);
+                const a = first.style.attrs;
+                if (a.underline != .none or a.strike or a.overline) self.decorate(frame, first, selectedAt(range, abs, x), self.foundAt(abs, x), left, top, cw, ch);
+                x += if (first.wide == .wide) 2 else 1;
+                continue;
+            }
             const face = self.fontFor(first);
             var len: usize = 0;
             var end = x;
             while (end < cells.len) {
                 const c = cells[end];
-                if (c.wide == .spacer) break;
+                if (c.wide == .spacer or box.drawn(c.cp)) break;
                 if (end > x and (c.wide == .wide or first.wide == .wide)) break;
                 if (c.cp != 0 and c.cp != ' ') {
                     const other = self.colorsOf(c, selectedAt(range, abs, end), self.foundAt(abs, end));
@@ -1216,6 +1236,50 @@ pub const TerminalView = struct {
             x = end;
         }
     }
+
+    /// Draws the characters the terminal draws itself, merging their
+    /// rectangles where they meet in one color, as runs of lines do across
+    /// cells, so a screen of borders takes few commands.
+    const BoxPainter = struct {
+        frame: *ui.Frame,
+        color: u24 = 0,
+        pending: ?box.Fill = null,
+
+        /// Draw `cp` in its cell, snapped to the frame's device pixels.
+        fn cell(self: *BoxPainter, cp: u21, at: view.Rect, color: u24) void {
+            if (color != self.color) {
+                self.flush();
+                self.color = color;
+            }
+            const s = self.frame.size.scale;
+            box.draw(cp, @round(at.x * s), @round(at.y * s), @round((at.x + at.width) * s), @round((at.y + at.height) * s), s, self);
+        }
+
+        pub fn fill(self: *BoxPainter, f: box.Fill) void {
+            if (self.pending) |*p| if (p.alpha == f.alpha) {
+                if (p.y0 == f.y0 and p.y1 == f.y1 and f.x0 <= p.x1 and f.x1 >= p.x0) {
+                    p.x0 = @min(p.x0, f.x0);
+                    p.x1 = @max(p.x1, f.x1);
+                    return;
+                }
+                if (p.x0 == f.x0 and p.x1 == f.x1 and f.y0 <= p.y1 and f.y1 >= p.y0) {
+                    p.y0 = @min(p.y0, f.y0);
+                    p.y1 = @max(p.y1, f.y1);
+                    return;
+                }
+            };
+            self.flush();
+            self.pending = f;
+        }
+
+        fn flush(self: *BoxPainter) void {
+            const f = self.pending orelse return;
+            self.pending = null;
+            const s = self.frame.size.scale;
+            const rect: view.Rect = .{ .x = f.x0 / s, .y = f.y0 / s, .width = (f.x1 - f.x0) / s, .height = (f.y1 - f.y0) / s };
+            if (f.alpha >= 1) self.frame.rect(rect, self.color) else self.frame.roundedRect(rect, 0, ui.Color.rgb(self.color).withAlpha(f.alpha));
+        }
+    };
 
     fn decorate(self: *const TerminalView, frame: *ui.Frame, cell: Cell, selected: bool, found: Found, left: f32, top: f32, cw: f32, ch: f32) void {
         const a = cell.style.attrs;
@@ -2235,4 +2299,5 @@ test "a terminal shown from a server tells its stream the theme, and resizes whe
 
 test {
     std.testing.refAllDecls(TerminalView);
+    _ = box;
 }
