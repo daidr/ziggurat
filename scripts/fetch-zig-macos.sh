@@ -22,8 +22,19 @@ fi
 mkdir -p "$cache"
 archive=$(mktemp "$cache/zig-download.XXXXXX")
 trap 'rm -f "$archive"' EXIT HUP INT TERM
-curl --fail --location --silent --show-error "https://ziglang.org/download/$version/zig-$arch-macos-$version.tar.xz" --output "$archive"
-printf '%s  %s\n' "$expected" "$archive" | shasum -a 256 -c -s
+# A stalled download gives up rather than holding the job until it times
+# out, and a mirror serves the same archive; the SHA-256 decides either way.
+file=zig-$arch-macos-$version.tar.xz
+fetched=
+for url in "https://ziglang.org/download/$version/$file" "https://pkg.machengine.org/zig/$version/$file"; do
+    if curl --fail --location --silent --show-error --connect-timeout 20 --speed-limit 10240 --speed-time 60 --max-time 900 --retry 2 "$url" --output "$archive" &&
+        printf '%s  %s\n' "$expected" "$archive" | shasum -a 256 -c -s; then
+        fetched=1
+        break
+    fi
+    echo "fetch-zig-macos.sh: $url failed or did not match the SHA-256" >&2
+done
+[ -n "$fetched" ] || exit 1
 tar -xJf "$archive" -C "$cache"
 [ "$("$destination/zig" version)" = "$version" ]
 printf '%s\n' "$destination/zig"
