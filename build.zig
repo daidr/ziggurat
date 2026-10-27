@@ -408,6 +408,21 @@ pub fn build(b: *std.Build) void {
         b.step("benchmark-affine-cairo", "Measure segmented software affine completion against a test-only native baseline").dependOn(&affine_run.step);
     }
     const caret = b.addModule("ziggurat_caret", .{ .root_source_file = b.path("src/document_editor/caret.zig"), .target = target, .optimize = optimize });
+    const fonts = b.addModule("ziggurat_fonts", .{ .root_source_file = b.path("src/fonts/root.zig"), .target = target, .optimize = optimize });
+    if (target.result.os.tag == .linux) {
+        const native = native_support.add(b, fonts, "fonts-native", "src/fonts/linux.c", &.{"-std=c11"}, target, optimize);
+        for ([_][]const u8{ "fontconfig", "pangoft2", "pangocairo" }) |library| {
+            native.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+            fonts.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+        }
+        fonts.link_libc = true;
+    }
+    if (target.result.os.tag == .windows) {
+        _ = native_support.add(b, fonts, "fonts-native", "src/fonts/windows.c", &.{"-std=c11"}, target, optimize);
+        fonts.linkSystemLibrary("dwrite", .{});
+        fonts.linkSystemLibrary("gdi32", .{});
+        fonts.link_libc = true;
+    }
     const text_layout = b.addModule("ziggurat_text_layout", .{ .root_source_file = b.path("src/ui/text_layout.zig"), .target = target, .optimize = optimize });
     text_layout.addImport("ziggurat_drawing_resources", drawing_resources);
     const text_outlines = b.addModule("ziggurat_text_outlines", .{ .root_source_file = b.path("src/text_outlines/root.zig"), .target = target, .optimize = optimize, .imports = &.{
@@ -470,7 +485,7 @@ pub fn build(b: *std.Build) void {
         check.dependOn(&word_smoke.step);
         b.step("build-smoke-text-words", "Build the independent system word-range oracle").dependOn(&install_word_smoke.step);
         b.step("smoke-text-words", "Verify word ranges against independent ICU/Pango segmentation").dependOn(&run_word_smoke.step);
-        const word_fault_layout = b.createModule(.{ .root_source_file = b.path("src/ui/text_layout.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "ziggurat_drawing_resources", .module = drawing_resources }} });
+        const word_fault_layout = b.createModule(.{ .root_source_file = b.path("src/ui/text_layout.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "ziggurat_drawing_resources", .module = drawing_resources }, .{ .name = "ziggurat_fonts", .module = fonts } } });
         if (target.result.os.tag == .windows) {
             _ = native_support.add(b, word_fault_layout, "text-layout-word-fault-native", "src/ui/text_layout_windows.c", &.{ "-std=c11", "-DZTL_WORD_TESTING" }, target, optimize);
             word_fault_layout.linkSystemLibrary("dwrite", .{});
@@ -2738,16 +2753,52 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_game_tests.step);
         b.step("test-game", "Run game loop, camera, scaling and gamepad tests").dependOn(&run_game_tests.step);
     }
+    const rich_text = b.addModule("ziggurat_rich_text", .{ .root_source_file = b.path("src/rich_text/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_markdown", .module = markdown }} });
+    const rich_text_tests = b.addTest(.{ .root_module = rich_text });
+    const run_rich_text_tests = b.addRunArtifact(rich_text_tests);
+    check.dependOn(&rich_text_tests.step);
+    test_step.dependOn(&run_rich_text_tests.step);
+    const test_rich_text = b.step("test-rich-text", "Run attributed text, document, undo, HTML, RTF, Markdown and clipboard codec tests");
+    test_rich_text.dependOn(&run_rich_text_tests.step);
+    const rich_text_editor = b.addModule("ziggurat_rich_text_editor", .{ .root_source_file = b.path("src/rich_text/editor.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
+        .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_rich_text", .module = rich_text },
+    } });
+    const rich_text_editor_tests = b.addTest(.{ .root_module = rich_text_editor });
+    const run_rich_text_editor_tests = b.addRunArtifact(rich_text_editor_tests);
+    check.dependOn(&rich_text_editor_tests.step);
+    test_step.dependOn(&run_rich_text_editor_tests.step);
+    test_rich_text.dependOn(&run_rich_text_editor_tests.step);
+    _ = b.addModule("ziggurat_rich_text_clipboard", .{ .root_source_file = b.path("src/rich_text/clipboard.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat_rich_text", .module = rich_text }, .{ .name = "ziggurat_rich_text_editor", .module = rich_text_editor },
+        .{ .name = "ziggurat_system", .module = system },
+    } });
+    const text_measure = b.addModule("ziggurat_text_measure", .{ .root_source_file = b.path("src/text_measure/root.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_text_layout", .module = text_layout },
+    } });
+    ui.addImport("ziggurat_fonts", fonts);
+    text_layout.addImport("ziggurat_fonts", fonts);
+    text_measure.addImport("ziggurat_fonts", fonts);
+    rich_text_editor.addImport("ziggurat_fonts", fonts);
+    const fonts_tests = b.addTest(.{ .root_module = fonts });
+    const run_fonts_tests = b.addRunArtifact(fonts_tests);
+    check.dependOn(&fonts_tests.step);
+    test_step.dependOn(&run_fonts_tests.step);
+    b.step("test-fonts", "Run font family and registration tests").dependOn(&run_fonts_tests.step);
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux) addSmoke(b, "smoke-fonts", "tests/fonts_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat_fonts", .module = fonts }, .{ .name = "ziggurat_text_layout", .module = text_layout },
+    });
     addExamples(b, target, optimize);
 }
 
 const app_example_imports = [_][]const u8{
-    "ziggurat",               "ziggurat_ui",               "ziggurat_view",            "ziggurat_view_timer",
-    "ziggurat_view_text",     "ziggurat_document",         "ziggurat_document_editor", "ziggurat_wake",
-    "ziggurat_system",        "ziggurat_i18n",             "ziggurat_animation",       "ziggurat_document_app",
-    "ziggurat_chart",         "ziggurat_chart_view",       "ziggurat_audio",           "ziggurat_code_editor",
-    "ziggurat_text_layout",   "ziggurat_window_placement", "ziggurat_game",            "ziggurat_terminal",
-    "ziggurat_terminal_view",
+    "ziggurat",               "ziggurat_ui",               "ziggurat_view",             "ziggurat_view_timer",
+    "ziggurat_view_text",     "ziggurat_document",         "ziggurat_document_editor",  "ziggurat_wake",
+    "ziggurat_system",        "ziggurat_i18n",             "ziggurat_animation",        "ziggurat_document_app",
+    "ziggurat_chart",         "ziggurat_chart_view",       "ziggurat_audio",            "ziggurat_code_editor",
+    "ziggurat_text_layout",   "ziggurat_window_placement", "ziggurat_game",             "ziggurat_terminal",
+    "ziggurat_terminal_view", "ziggurat_rich_text",        "ziggurat_rich_text_editor", "ziggurat_rich_text_clipboard",
+    "ziggurat_text_measure",
 };
 
 const Example = struct { name: []const u8, path: []const u8, web: bool = false };
@@ -2773,6 +2824,7 @@ const app_examples = [_]Example{
     .{ .name = "terminal", .path = "examples/terminal.zig" },
     .{ .name = "text-buffer", .path = "examples/text_buffer.zig" },
     .{ .name = "native", .path = "examples/native.zig" },
+    .{ .name = "rich-text", .path = "examples/rich_text.zig" },
     .{ .name = "hybrid", .path = "examples/hybrid.zig", .web = true },
 };
 

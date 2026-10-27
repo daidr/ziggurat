@@ -79,6 +79,9 @@ jobs:
           python scripts/fetch-sqlite.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           zig build test-sqlite -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
+      - name: Application font registration
+        run: |
+          zig build smoke-fonts -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
       # Hardware GPU coverage is a separate local driver check. Hosted runner
       # measurements below explicitly record any GPU fallback and deferred work.
       - name: Capture reproducible benchmark evidence
@@ -157,6 +160,9 @@ jobs:
         run: |
           python3 scripts/fetch-sqlite.py
           zig build test-sqlite -Doptimize=${{ matrix.optimize }}
+      - name: Application font registration
+        run: |
+          XDG_CACHE_HOME=$(mktemp -d) zig build smoke-fonts -Doptimize=${{ matrix.optimize }}
       - name: Optional WebKitGTK lifecycle and policy checks
         if: github.event_name == 'workflow_dispatch' && inputs.webview
         run: |

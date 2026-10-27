@@ -4,6 +4,7 @@ const gaussian_scope = @import("gaussian_scope.zig");
 const z = @import("ziggurat");
 const Rect = @import("input.zig").Rect;
 const commands = @import("commands.zig");
+const fonts = @import("ziggurat_fonts");
 const layout = @import("layout.zig");
 const geometry = @import("geometry.zig");
 const drawing = @import("ziggurat_drawing_resources");
@@ -492,7 +493,12 @@ pub const Renderer = struct {
         const bits: u32 = @bitCast(key);
         for (self.variant_fonts) |entry| if (entry.font != null and entry.key == bits and entry.scale == self.scale) return entry.font;
         const height: c_int = @intFromFloat(@round(-key.size() * self.scale));
-        const family = if (key.monospace) std.unicode.utf8ToUtf16LeStringLiteral("Consolas") else std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI");
+        var named: [fonts.max_name_bytes + 1]u16 = undefined;
+        const family: [*:0]const u16 = if (key.family != 0) named: {
+            const length = std.unicode.utf8ToUtf16Le(&named, fonts.systemName(key.family)) catch 0;
+            named[length] = 0;
+            break :named named[0..length :0];
+        } else if (key.monospace) std.unicode.utf8ToUtf16LeStringLiteral("Consolas") else std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI");
         const font = c.CreateFontW(height, 0, 0, 0, key.weight.value(), @intFromBool(key.italic), c.FALSE, c.FALSE, c.DEFAULT_CHARSET, c.OUT_DEFAULT_PRECIS, c.CLIP_DEFAULT_PRECIS, c.CLEARTYPE_QUALITY, if (key.monospace) c.FIXED_PITCH else c.DEFAULT_PITCH, family) orelse return error.CreateFontFailed;
         const slot = &self.variant_fonts[self.variant_next];
         // A replaced font is never selected: text restores the default font

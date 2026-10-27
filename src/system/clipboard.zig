@@ -47,8 +47,9 @@ pub const capabilities = .{
 pub const Kind = enum(u8) { text, html, png, files, custom };
 pub const Format = struct {
     kind: Kind,
-    /// Custom only: 1..100 visible ASCII bytes, used as the Windows registered
-    /// format name and the GTK selection target, for example "application/x-app".
+    /// Custom only: 1..100 printable ASCII bytes, spaces only between others,
+    /// used as the Windows registered format name and the GTK selection target,
+    /// for example "application/x-app" or "Rich Text Format".
     name: []const u8 = "",
 
     pub fn eql(self: Format, other: Format) bool {
@@ -359,7 +360,8 @@ pub fn validateFormat(item: Format) !void {
         return;
     }
     if (item.name.len == 0 or item.name.len > max_name_bytes) return error.InvalidFormatName;
-    for (item.name) |byte| if (byte <= 0x20 or byte >= 0x7f) return error.InvalidFormatName;
+    if (item.name[0] == ' ' or item.name[item.name.len - 1] == ' ') return error.InvalidFormatName;
+    for (item.name) |byte| if (byte < 0x20 or byte >= 0x7f) return error.InvalidFormatName;
 }
 pub fn validateData(kind: Kind, data: []const u8) !void {
     if (data.len > max_entry_bytes) return error.EntryTooLarge;
@@ -426,7 +428,9 @@ pub fn joinPaths(destination: []u8, items: []const []const u8) ![]const u8 {
 
 test "clipboard data conventions validate before native work" {
     try validateFormat(.{ .kind = .custom, .name = "application/x-ziggurat" });
-    try std.testing.expectError(error.InvalidFormatName, validateFormat(.{ .kind = .custom, .name = "has space" }));
+    try std.testing.expectError(error.InvalidFormatName, validateFormat(.{ .kind = .custom, .name = " leading space" }));
+    try std.testing.expectError(error.InvalidFormatName, validateFormat(.{ .kind = .custom, .name = "has\ttab" }));
+    try validateFormat(.{ .kind = .custom, .name = "Rich Text Format" });
     try std.testing.expectError(error.InvalidFormatName, validateFormat(.{ .kind = .custom }));
     try std.testing.expectError(error.InvalidFormatName, validateFormat(.{ .kind = .text, .name = "x" }));
     try std.testing.expectError(error.EmbeddedNul, validateData(.text, "a\x00b"));
