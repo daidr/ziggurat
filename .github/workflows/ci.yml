@@ -298,3 +298,24 @@ jobs:
           path: .validation/ci/*.json
           if-no-files-found: ignore
           retention-days: 7
+
+  macos-packaging:
+    # Self-hosted macOS runner with the Xcode command line tools. The
+    # repository variable MACOS_RUNS_ON overrides the labels with a JSON
+    # value, for example '"macos-15"' to use a hosted runner.
+    runs-on: ${{ fromJSON(vars.MACOS_RUNS_ON || '["self-hosted", "macOS"]') }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install verified Zig 0.15.2
+        run: |
+          zig_bin=$(sh scripts/fetch-zig-macos.sh)
+          printf '%s\n' "$(dirname "$zig_bin")" >> "$GITHUB_PATH"
+      - name: CLI tests, then a universal app, its signature, disk image and install script
+        env:
+          ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}/zig-local-cache
+        run: |
+          zig build cli test-cli
+          sh tests/macos_packaging.sh

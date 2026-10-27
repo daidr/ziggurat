@@ -76,6 +76,36 @@ try {
     Invoke-Checked "$root/uninstall.exe" @('--silent', '--purge')
     Wait-Until { -not (Test-Path $root) -and -not (Test-Path "$work/local/$id") } 'purge'
     if (Test-Path $key) { throw 'purge left the uninstall entry' }
+
+    # install.ps1 downloads the newest installer, checks it against
+    # SHA256SUMS and runs it silently, in Windows PowerShell 5.1 and in
+    # PowerShell 7; a wrong SHA-256 installs nothing.
+    New-Item -ItemType Directory -Path "$work/serve" | Out-Null
+    $served = 'fixture-1.1.0.0-windows-x86_64-setup.exe'
+    Copy-Item "$work/setup-v2.exe" "$work/serve/$served"
+    $sum = (Get-FileHash -Algorithm SHA256 "$work/serve/$served").Hash.ToLowerInvariant()
+    Set-Content -NoNewline -Path "$work/serve/SHA256SUMS" -Value "$sum  $served`n"
+    Invoke-Checked "$Bin/ziggurat.exe" @('package', 'install-ps1', '--zip', "$work/v2.zip", '--output', "$work/install.ps1")
+    $port = Get-Random -Minimum 20000 -Maximum 40000
+    $server = Start-Process -PassThru -WindowStyle Hidden -FilePath python -ArgumentList @('-m', 'http.server', "$port", '--bind', '127.0.0.1', '--directory', "$work/serve")
+    try {
+        Wait-Until { try { (Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:$port/SHA256SUMS").StatusCode -eq 200 } catch { $false } } 'the download server'
+        $env:FIXTURE_DOWNLOAD_URL = "http://127.0.0.1:$port/"
+        $env:FIXTURE_NO_OPEN = '1'
+        foreach ($shell in @('powershell.exe', 'pwsh')) {
+            & $shell -NoProfile -ExecutionPolicy Bypass -File "$work/install.ps1"
+            if ($LASTEXITCODE -ne 0) { throw "install.ps1 failed in $shell" }
+            if (-not (Test-Path "$root/fixture.exe") -or (Get-ItemProperty $key).DisplayVersion -ne '1.1.0.0') { throw "install.ps1 did not install in $shell" }
+            Invoke-Checked "$root/uninstall.exe" @('--silent', '--purge')
+            Wait-Until { -not (Test-Path $root) } "uninstall after $shell"
+        }
+        Set-Content -NoNewline -Path "$work/serve/SHA256SUMS" -Value ('0' * 64 + "  $served`n")
+        & pwsh -NoProfile -File "$work/install.ps1"
+        if ($LASTEXITCODE -eq 0 -or (Test-Path "$root/fixture.exe")) { throw 'install.ps1 installed an installer with the wrong SHA-256' }
+    } finally {
+        Remove-Item Env:FIXTURE_DOWNLOAD_URL, Env:FIXTURE_NO_OPEN -ErrorAction SilentlyContinue
+        Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+    }
     Write-Output 'setup smoke passed'
 } finally {
     $env:LOCALAPPDATA = $savedLocal
