@@ -1,13 +1,10 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const shadows = @import("ziggurat_shadows");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn cairo_image_surface_create(c_int, c_int, c_int) ?*anyopaque;
 extern fn cairo_create(*anyopaque) ?*anyopaque;
 extern fn cairo_destroy(*anyopaque) void;
@@ -31,7 +28,7 @@ fn end(renderer: anytype, paint: z.Paint) !bool {
 }
 fn replay(name: []const u8, renderer: anytype, paint: z.Paint, prepared: *shadows.PreparedShadow, sigma: f32, prepare_ns: u64) !void {
     const view = try prepared.view();
-    var clock = try std.time.Timer.start();
+    var clock = try zio.Timer.start();
     try renderer.uploadCoverage(view);
     const upload_ns = clock.read();
     var buffer: ui.commands.Buffer = .{};
@@ -71,7 +68,7 @@ fn run(allocator: std.mem.Allocator, base: z.Paint) !void {
         const options: shadows.PrepareOptions = .{ .main_thread = std.Thread.getCurrentId(), .scale = scale };
         var times: [samples]u64 = undefined;
         for (&times) |*sample| {
-            var clock = try std.time.Timer.start();
+            var clock = try zio.Timer.start();
             const prepared = try shadows.PreparedShadow.create(allocator, .{ .width = 256, .height = 128, .radius = 16 }, .{ .sigma = sigma }, options);
             sample.* = clock.read();
             try prepared.close();

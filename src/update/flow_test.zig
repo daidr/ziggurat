@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const update = @import("root.zig");
 const archive = update.archive;
 const delta = update.delta;
@@ -31,8 +32,8 @@ test "full install, delta upgrade with full fallback, rollback and pruning" {
     const allocator = std.testing.allocator;
     var temp = std.testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
-    var root = try temp.dir.makeOpenPath("root", .{ .iterate = true });
-    defer root.close();
+    var root = try temp.dir.createDirPathOpen(zio.io(), "root", .{ .open_options = .{ .iterate = true } });
+    defer root.close(zio.io());
     const key = try update.Ed25519.KeyPair.generateDeterministic(@splat(61));
     const base_policy: update.Policy = .{ .identity = identity, .target = target, .current_version = .{ .major = 0, .minor = 0, .patch = 0 }, .public_key = key.public_key.toBytes() };
 
@@ -56,9 +57,9 @@ test "full install, delta upgrade with full fallback, rollback and pruning" {
         defer allocator.free(json);
         const verified = try update.parseAndVerify(allocator, json, base_policy);
         defer verified.deinit();
-        try root.writeFile(.{ .sub_path = "download.zip", .data = archives[0] });
-        var file = try root.openFile("download.zip", .{});
-        defer file.close();
+        try root.writeFile(zio.io(), .{ .sub_path = "download.zip", .data = archives[0] });
+        var file = try root.openFile(zio.io(), "download.zip", .{});
+        defer file.close(zio.io());
         _ = try publication.publishZip(allocator, root, file, &verified, .{ .retain_archive = true });
     }
 
@@ -80,7 +81,7 @@ test "full install, delta upgrade with full fallback, rollback and pruning" {
     defer allocator.free(feed_json);
 
     const retained = (try retention.currentArchive(allocator, root, identity, target)).?;
-    defer retained.file.close();
+    defer retained.file.close(zio.io());
     try std.testing.expectEqual(source_digest, retained.sha256);
     var policy = base_policy;
     policy.current_version = retained.version;
@@ -92,22 +93,22 @@ test "full install, delta upgrade with full fallback, rollback and pruning" {
     // Download the patch through the resumable transfer and rebuild 1.1.
     var memory: download.MemorySource = .{ .bytes = patch_bytes.written() };
     var control: download.Control = .{};
-    var patch_file = try root.createFile("patch.partial", .{ .read = true });
-    defer patch_file.close();
+    var patch_file = try root.createFile(zio.io(), "patch.partial", .{ .read = true });
+    defer patch_file.close(zio.io());
     _ = try download.fetch(chosen.manifest.artifact(), memory.source(), patch_file, &control);
-    var rebuilt = try root.createFile("rebuilt.zip", .{ .read = true });
-    defer rebuilt.close();
+    var rebuilt = try root.createFile(zio.io(), "rebuilt.zip", .{ .read = true });
+    defer rebuilt.close(zio.io());
     {
         var buffer: [4096]u8 = undefined;
-        var writer = rebuilt.writer(&buffer);
+        var writer = rebuilt.writer(zio.io(), &buffer);
         try delta.applyVerified(&chosen, available.full.manifest, retained.file, patch_file, &writer.interface, .{});
     }
     // A corrupted patch is rejected, leaving the full download as fallback.
     {
-        try root.writeFile(.{ .sub_path = "bad.patch", .data = patch_bytes.written() });
-        var bad = try root.openFile("bad.patch", .{ .mode = .read_write });
-        defer bad.close();
-        try bad.pwriteAll("X", 40);
+        try root.writeFile(zio.io(), .{ .sub_path = "bad.patch", .data = patch_bytes.written() });
+        var bad = try root.openFile(zio.io(), "bad.patch", .{ .mode = .read_write });
+        defer bad.close(zio.io());
+        try bad.writePositionalAll(zio.io(), "X", 40);
         var sink: std.Io.Writer.Allocating = .init(allocator);
         defer sink.deinit();
         try std.testing.expectError(error.HashMismatch, delta.applyVerified(&chosen, available.full.manifest, retained.file, bad, &sink.writer, .{}));
@@ -122,9 +123,9 @@ test "full install, delta upgrade with full fallback, rollback and pruning" {
         policy.current_version = version(1);
         const verified = try update.parseAndVerify(allocator, json, policy);
         defer verified.deinit();
-        try root.writeFile(.{ .sub_path = "download.zip", .data = archives[2] });
-        var file = try root.openFile("download.zip", .{});
-        defer file.close();
+        try root.writeFile(zio.io(), .{ .sub_path = "download.zip", .data = archives[2] });
+        var file = try root.openFile(zio.io(), "download.zip", .{});
+        defer file.close(zio.io());
         _ = try publication.publishZip(allocator, root, file, &verified, .{ .retain_archive = true });
     }
     const versions = try retention.list(allocator, root, target);
@@ -132,7 +133,7 @@ test "full install, delta upgrade with full fallback, rollback and pruning" {
     try std.testing.expectEqualSlices(update.Version, &.{ version(0), version(1), version(2) }, versions);
 
     // Rollback re-checks the retained release; tampering blocks it.
-    try root.writeFile(.{ .sub_path = "releases/linux-x86_64-1.0.0.0/app", .data = "tampered" });
+    try root.writeFile(zio.io(), .{ .sub_path = "releases/linux-x86_64-1.0.0.0/app", .data = "tampered" });
     try std.testing.expectError(error.SizeMismatch, retention.rollback(allocator, root, identity, target, version(0)));
     const back = try retention.rollback(allocator, root, identity, target, version(1));
     try std.testing.expectEqual(version(1), back.version);
@@ -144,5 +145,5 @@ test "full install, delta upgrade with full fallback, rollback and pruning" {
     const left = try retention.list(allocator, root, target);
     defer allocator.free(left);
     try std.testing.expectEqualSlices(update.Version, &.{ version(1), version(2) }, left);
-    try std.testing.expectError(error.FileNotFound, root.openFile("archives/linux-x86_64-1.0.0.0.zip", .{}));
+    try std.testing.expectError(error.FileNotFound, root.openFile(zio.io(), "archives/linux-x86_64-1.0.0.0.zip", .{}));
 }

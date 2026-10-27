@@ -106,7 +106,7 @@ const Parser = struct {
         const last = self.b.nodes[self.block].last_child;
         if (last != none and self.b.nodes[last].kind == .text) {
             const node = &self.b.nodes[last];
-            const kept = std.mem.trimRight(u8, node.text, " ");
+            const kept = std.mem.trimEnd(u8, node.text, " ");
             hard = node.text.len - kept.len >= 2;
             node.text = kept;
         }

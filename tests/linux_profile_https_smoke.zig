@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
@@ -87,7 +88,7 @@ fn constructorChecks(allocator: std.mem.Allocator, base: []const u8) !void {
     for ([_]bool{ false, true }) |quit| {
         const app = try z.App.init(allocator);
         defer app.deinit();
-        const path = try std.fmt.allocPrint(allocator, "{s}/https-construct-{d}-{}", .{ base, std.time.nanoTimestamp(), quit });
+        const path = try std.fmt.allocPrint(allocator, "{s}/https-construct-{d}-{}", .{ base, zio.nanoTimestamp(), quit });
         defer allocator.free(path);
         var preparation: Preparation = .{ .allocator = allocator, .main = app.owner, .path = path };
         try preparation.open();
@@ -188,7 +189,7 @@ const State = struct {
         }
     }
     fn scrambleCredential(self: *State) void {
-        self.credential[0] = .{ .origin = self.grant[1].origin, .bearer = .{0xee} ** 32 };
+        self.credential[0] = .{ .origin = self.grant[1].origin, .bearer = @splat(0xee) };
     }
     fn mount(self: *State) !void {
         try self.session.attachRegion(try self.owner.?.reserve(.{ .bounds = .{ .x = 8, .y = 8, .width = 240, .height = 160 } }));
@@ -273,7 +274,7 @@ const State = struct {
         switch (self.messages) {
             1 => {
                 ztest_https_credentials(self.fixture, 0x6b);
-                self.credential[0] = .{ .origin = self.origin, .bearer = .{0x6b} ** 32 };
+                self.credential[0] = .{ .origin = self.origin, .bearer = @splat(0x6b) };
                 try view.reload(self.options());
                 self.scrambleCredential();
             },
@@ -407,7 +408,7 @@ fn run(allocator: std.mem.Allocator, base: []const u8, extension: []const u8, mo
     if (hasCredentials(mode)) ztest_https_credentials(fixture, 0x5a);
     // No Context or client has existed yet: there is no reusable connection.
     if (mode == .server_stopped) ztest_https_stop_server(fixture);
-    const path = try std.fmt.allocPrint(allocator, "{s}/https-{d}-{s}", .{ base, std.time.nanoTimestamp(), @tagName(mode) });
+    const path = try std.fmt.allocPrint(allocator, "{s}/https-{d}-{s}", .{ base, zio.nanoTimestamp(), @tagName(mode) });
     defer allocator.free(path);
     var preparation: Preparation = .{ .allocator = allocator, .main = app.owner, .path = path };
     try preparation.open();
@@ -440,7 +441,7 @@ fn run(allocator: std.mem.Allocator, base: []const u8, extension: []const u8, mo
     var state: State = .{ .allocator = allocator, .app = app, .profile = profile, .window = try app.createWindow(.{ .width = 320, .height = 200 }), .fixture = fixture, .origin = origin, .url = url, .extension = directory, .grant = .{ .{ .origin = origin, .ipc = mode != .ipc_denied }, .{ .origin = std.mem.span(ztest_https_peer_origin(fixture)), .ipc = true } }, .mode = mode };
     state.view = web.View.init(allocator, &state, State.event);
     state.alternate_profile = alternate_profile;
-    if (hasCredentials(mode)) state.credential[0] = .{ .origin = origin, .bearer = .{0x5a} ** 32 };
+    if (hasCredentials(mode)) state.credential[0] = .{ .origin = origin, .bearer = @splat(0x5a) };
     state.session = web.PageSession.init(allocator, &state, State.event);
     if (isSession(mode)) state.owner = try z.composition.Owner.create(allocator, state.window, .{ .capacity = 1 });
     defer if (state.owner) |owner| {
@@ -512,9 +513,9 @@ pub fn main() !void {
     var debug: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(debug.deinit() == .ok);
     const allocator = debug.allocator();
-    const base = std.posix.getenv("ZIGGURAT_PROFILE_TEST_ROOT") orelse return error.MissingProfileTestRoot;
-    const extension = std.posix.getenv("ZIGGURAT_REQUEST_POLICY_EXTENSION") orelse return error.MissingRequestPolicyExtension;
-    const filter = std.posix.getenv("ZIGGURAT_HTTPS_MODE");
+    const base = zio.getenv("ZIGGURAT_PROFILE_TEST_ROOT") orelse return error.MissingProfileTestRoot;
+    const extension = zio.getenv("ZIGGURAT_REQUEST_POLICY_EXTENSION") orelse return error.MissingRequestPolicyExtension;
+    const filter = zio.getenv("ZIGGURAT_HTTPS_MODE");
     if (filter == null) try constructorChecks(allocator, base);
     var selected: usize = 0;
     inline for (std.meta.tags(Mode)) |mode| {

@@ -529,7 +529,7 @@ fn stopLess(_: void, a: Stop, b: Stop) bool {
     if (a.line != b.line) return a.line < b.line;
     if (a.rect.x != b.rect.x) return a.rect.x < b.rect.x;
     if (a.caret.byte_offset != b.caret.byte_offset) return a.caret.byte_offset < b.caret.byte_offset;
-    return @intFromEnum(a.caret.affinity) < @intFromEnum(b.caret.affinity);
+    return @backingInt(a.caret.affinity) < @backingInt(b.caret.affinity);
 }
 fn visualStep(snapshot: *const Snapshot, row_index: usize, rect: t.Rect, current_caret: t.Caret, forwards: bool) t.Caret {
     const row = snapshot.rows[row_index];

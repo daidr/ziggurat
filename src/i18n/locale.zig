@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 
 /// Longest canonical tag kept by a Locale. Extensions and private-use
@@ -266,7 +267,7 @@ pub fn system() ?Locale {
         },
         .linux => {
             for ([_][]const u8{ "LC_ALL", "LC_MESSAGES", "LANG" }) |name| {
-                const value = std.posix.getenv(name) orelse continue;
+                const value = zio.getenv(name) orelse continue;
                 if (value.len == 0) continue;
                 return fromPosix(value);
             }

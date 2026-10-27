@@ -3,11 +3,10 @@ const std = @import("std");
 pub const source = ".deps/sqlite-3.54.1/";
 
 /// Pinned amalgamation build; no configure subprocess or network in build.
-/// A missing source fails only the steps that compile it, with a fetch hint.
+/// A missing source fails only the steps that compile it; fetch it with
+/// `python scripts/fetch-sqlite.py`.
 pub fn add(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
     const library = b.addLibrary(.{ .name = "sqlite-native", .linkage = .static, .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }) });
-    b.build_root.handle.access(source ++ "sqlite3.c", .{}) catch
-        library.step.dependOn(&b.addFail("SQLite source missing; run python scripts/fetch-sqlite.py first").step);
     library.root_module.addCSourceFile(.{
         .file = b.path(source ++ "sqlite3.c"),
         .flags = &.{

@@ -1,14 +1,7 @@
 const std = @import("std");
 const z = @import("ziggurat");
 const api = @import("drop.zig");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("ole2.h");
-    @cInclude("shellapi.h");
-    @cInclude("commctrl.h");
-});
+const c = @import("ziggurat_c_win32");
 
 pub const supported = true;
 

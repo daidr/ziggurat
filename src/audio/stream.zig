@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const decoding = @import("decoder.zig");
 
 /// Frames a decode step reads at a time.
@@ -22,10 +23,10 @@ pub const Stream = struct {
     keep: usize,
     storage: Storage,
     /// Owned by the stream once opened.
-    file: ?std.fs.File = null,
+    file: ?std.Io.File = null,
     wake: Wake,
 
-    mutex: std.Thread.Mutex = .{},
+    mutex: zio.Mutex = .{},
     /// Frames of `keep` channels.
     ring: []f32,
     /// Where the next sample is read, and how many there are.
@@ -108,7 +109,7 @@ pub const Stream = struct {
     /// once closed, or the engine's teardown.
     pub fn destroy(self: *Stream) void {
         self.decoder.deinit();
-        if (self.file) |file| file.close();
+        if (self.file) |file| file.close(zio.io());
         if (self.kept.ptr != self.buffer.ptr) self.allocator.free(self.kept);
         self.allocator.free(self.buffer);
         self.allocator.free(self.ring);

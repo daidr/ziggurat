@@ -34,7 +34,7 @@ pub const Font = struct {
         bold,
         /// The CSS-style numeric weight that native font APIs take.
         pub fn value(self: Weight) u16 {
-            return 400 + 100 * @as(u16, @intFromEnum(self));
+            return 400 + 100 * @as(u16, @backingInt(self));
         }
     };
     /// Presets for document text: body copy, six heading levels from

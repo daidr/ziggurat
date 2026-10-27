@@ -7,12 +7,7 @@ const types = @import("types.zig");
 const native_menu = @import("windows_menu.zig");
 const menus = @import("menus.zig");
 const desktop = @import("desktop.zig");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("shellapi.h");
-});
+const c = @import("ziggurat_c_win32");
 
 pub const callback_message: u32 = c.WM_APP + 0x422;
 const self_slot = 0;

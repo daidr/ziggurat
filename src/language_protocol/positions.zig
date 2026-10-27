@@ -187,7 +187,7 @@ test "UTF16 positions distinguish CR LF CRLF scalar and surrogate boundaries wit
 }
 
 test "worker preparation transfers immutable metadata while the original Reader stays borrowed" {
-    const document = try d.Document.create(std.testing.allocator, std.Thread.getCurrentId(), "😀\r\n" ** 1500, .{});
+    const document = try d.Document.create(std.testing.allocator, std.Thread.getCurrentId(), &@as([1500 * "😀\r\n".len]u8, @bitCast(@as([1500]["😀\r\n".len]u8, @splat("😀\r\n".*)))), .{});
     defer document.close() catch unreachable;
     const snapshot = try document.snapshot();
     defer snapshot.close() catch unreachable;

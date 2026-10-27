@@ -14,6 +14,7 @@
 //!
 //! Run it with `zig build run-blackhole`.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const view = @import("ziggurat_view");
@@ -383,10 +384,11 @@ fn finish(scene: *const Plane, glow: *const Plane, time: f64, x: f64, y: f64) Ve
 /// hands each to the window's thread when it is done.
 const Renderer = struct {
     allocator: std.mem.Allocator,
-    pool: std.Thread.Pool = undefined,
+    /// Threads that share the rows with the drawing thread.
+    helpers: usize = 0,
     thread: ?std.Thread = null,
-    mutex: std.Thread.Mutex = .{},
-    wake: std.Thread.Condition = .{},
+    mutex: zio.Mutex = .{},
+    wake: zio.Condition = .{},
     /// The frame asked for, and its size in pixels; quit ends the thread.
     pending: ?Shot = null,
     width: usize = 0,
@@ -403,8 +405,7 @@ const Renderer = struct {
 
     fn start(self: *Renderer) !void {
         const helpers = @max(1, (std.Thread.getCpuCount() catch 2) -| 1);
-        try self.pool.init(.{ .allocator = self.allocator, .n_jobs = helpers });
-        errdefer self.pool.deinit();
+        self.helpers = helpers;
         self.thread = try std.Thread.spawn(.{}, run, .{self});
     }
 
@@ -415,7 +416,6 @@ const Renderer = struct {
             self.wake.signal();
             self.mutex.unlock();
             thread.join();
-            self.pool.deinit();
             self.thread = null;
         }
         self.allocator.free(self.scene.data);
@@ -444,9 +444,9 @@ const Renderer = struct {
             const width = self.width;
             const height = self.height;
             self.mutex.unlock();
-            const began = std.time.nanoTimestamp();
+            const began = zio.nanoTimestamp();
             self.draw(shot, width, height, true) catch |err| std.log.err("blackhole: {s}", .{@errorName(err)});
-            self.took = @as(f64, @floatFromInt(std.time.nanoTimestamp() - began)) / std.time.ns_per_s;
+            self.took = @as(f64, @floatFromInt(zio.nanoTimestamp() - began)) / std.time.ns_per_s;
             if (self.done) |done| done(self);
         }
     }
@@ -463,10 +463,10 @@ const Renderer = struct {
                 else => height,
             };
             if (parallel) {
-                var group: std.Thread.WaitGroup = .{};
-                const bands = 4 * (self.pool.threads.len + 1);
-                for (0..bands) |band| self.pool.spawnWg(&group, rowsOf, .{ self, pass, shot, band, bands, rows });
-                self.pool.waitAndWork(&group);
+                var group: std.Io.Group = .init;
+                const bands = 4 * (self.helpers + 1);
+                for (0..bands) |band| group.async(zio.io(), rowsOf, .{ self, pass, shot, band, bands, rows });
+                group.await(zio.io()) catch unreachable;
             } else rowsOf(self, pass, shot, 0, 1, rows);
         }
     }
@@ -648,7 +648,7 @@ const Hole = struct {
 
     fn input(ptr: *anyopaque, _: u64, event: view.EmbedInput) bool {
         const self: *Hole = @ptrCast(@alignCast(ptr));
-        const now = std.time.nanoTimestamp();
+        const now = zio.nanoTimestamp();
         switch (event) {
             .pointer_down => |p| self.press(p.position.x, p.position.y, now),
             .pointer_drag => |p| self.drag(p.position.x, p.position.y, now),

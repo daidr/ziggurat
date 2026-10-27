@@ -1,16 +1,13 @@
 //! Real Windows WebView HTTPS workflow. Test-only certificate observation is
 //! linked by this target; production TLS and browser trust are unchanged.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const https = @import("ziggurat_https_resources");
 const stream = @import("ziggurat_native_stream");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const w = @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-});
+const w = @import("ziggurat_c_win32");
 extern fn zwv_test_credential_probe_install(*anyopaque, [*]const [*:0]const u16, u32, c_int, *?*anyopaque) i32;
 extern fn zwv_test_credential_probe_counts(*anyopaque, *u32, *u32, *u32, *u32, *u32) void;
 extern fn zwv_test_credential_probe_release(*anyopaque) void;
@@ -28,8 +25,8 @@ const Preparation = struct {
     directory: []const u8,
     wrong_certificate: bool,
     prepared: ?https.Transport.Prepared = null,
-    ready: std.Thread.Semaphore = .{},
-    go: std.Thread.Semaphore = .{},
+    ready: zio.Semaphore = .{},
+    go: zio.Semaphore = .{},
     abandoned: std.atomic.Value(bool) = .init(false),
     failure: std.atomic.Value(u16) = .init(0),
     thread: ?std.Thread = null,
@@ -45,7 +42,7 @@ const Preparation = struct {
         self.prepared.?.driver.deinit() catch |err| self.failure.store(@intFromError(err), .release);
     }
     fn prepare(self: *Preparation) !void {
-        var directory = try std.fs.cwd().openDir(self.directory, .{});
+        var directory = try std.Io.Dir.cwd().openDir(zio.io(), self.directory, .{});
         defer directory.close();
         var certificate: [16384]u8 = undefined;
         var private_key: [16384]u8 = undefined;
@@ -54,10 +51,10 @@ const Preparation = struct {
         const key = try read(directory, if (self.wrong_certificate) "other-key.pem" else "server-key.pem", &private_key);
         self.prepared = try https.Transport.prepareOnWorker(self.main, .{ .certificate_pem = cert, .private_key_pem = key }, .{ .bytes = 8 * 1024 * 1024 }, null);
     }
-    fn read(directory: std.fs.Dir, path: []const u8, buffer: []u8) ![]const u8 {
-        const file = try directory.openFile(path, .{});
+    fn read(directory: std.Io.Dir, path: []const u8, buffer: []u8) ![]const u8 {
+        const file = try directory.openFile(zio.io(), path, .{});
         defer file.close();
-        const n = try file.readAll(buffer);
+        const n = try zio.readAll(file, buffer);
         if (n == 0 or n == buffer.len) return error.InvalidFixtureMaterial;
         return buffer[0..n];
     }
@@ -85,8 +82,8 @@ const Job = struct {
     file_response: ?https.PreparedFileResponse = null,
     source: ?stream.Source = null,
     control: ?https.files.Control = null,
-    gate: std.Thread.Semaphore = .{},
-    retired: std.Thread.Semaphore = .{},
+    gate: zio.Semaphore = .{},
+    retired: zio.Semaphore = .{},
     thread: ?std.Thread = null,
     failure: std.atomic.Value(u16) = .init(0),
     generated: std.atomic.Value(u64) = .init(0),
@@ -146,13 +143,13 @@ const Job = struct {
         if (self.kind != .body and self.kind != .zero and self.kind != .close_listener) return error.ExpectedProducerCancellation;
     }
     fn produceFile(self: *Job) !void {
-        const file = try std.fs.cwd().openFile(self.state.file_path, .{});
+        const file = try std.Io.Dir.cwd().openFile(zio.io(), self.state.file_path, .{});
         defer file.close();
         try file.seekTo(3);
         const prepared = try https.PreparedFileResponse.prepare(self.state.app.owner, file, large_length, self.file_request.?);
         var pump = prepared.pump;
         defer if (pump) |*value| value.deinit();
-        if (try file.getPos() != 3 or prepared.response.total != large_length) return error.FileMetadataChanged;
+        if (try zio.posix.position(file.handle) != 3 or prepared.response.total != large_length) return error.FileMetadataChanged;
         if (self.kind == .file_unsat) {
             if (prepared.response.source != null or pump != null or prepared.response.selection != .unsatisfiable) return error.UnsatisfiableCreatedSource;
         } else if (prepared.response.source == null or pump == null) return error.MissingPreparedFile;
@@ -171,7 +168,7 @@ const Job = struct {
             try value.pump();
             self.completed.store(true, .release);
         } else self.completed.store(true, .release);
-        if (try file.getPos() != 3) return error.FileCursorChanged;
+        if (try zio.posix.position(file.handle) != 3) return error.FileCursorChanged;
     }
     fn deliverFile(context: *anyopaque) void {
         const self: *Job = @ptrCast(@alignCast(context));
@@ -721,13 +718,13 @@ fn adoptionZero() !void {
     if (value.servers != 0 or value.payloads != 0 or value.envelopes != 0 or value.connections != 0 or value.bytes != 0 or endpoint.owners != 0 or endpoint.operations != 0 or endpoint.tickets != 0 or endpoint.requested_bytes != 0 or zhtp_provider_count() != 0 or zhtp_domain_count() != 0) return error.AdoptionNativeRefsRemain;
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     std.debug.print("Windows HTTPS public layout: Transport={d} Source={d} Writer={d} Pump={d}\n", .{ @sizeOf(https.Transport), @sizeOf(stream.Source), @sizeOf(stream.Writer), @sizeOf(https.files.Pump) });
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try zio.argsAlloc(allocator, init.args);
+    defer zio.argsFree(allocator, args);
     if (args.len != 5) return error.ExpectedModeFixtureProfileAndPrivateFile;
     const mode = std.meta.stringToEnum(Mode, args[1]) orelse return error.InvalidMode;
     if (mode == .constructors) return adoptionConstructors(allocator, args[2]);

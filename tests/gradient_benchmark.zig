@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const ui = @import("ziggurat_ui");
 const z = @import("ziggurat");
 const brushes = ui.commands.brushes;
@@ -40,7 +41,7 @@ fn run(name: []const u8, value: brushes.Gradient, scale: f32) !void {
     var cpu_samples: [samples]u64 = undefined;
     var native_samples: [samples]u64 = undefined;
     for (0..samples) |index| {
-        var timer = try std.time.Timer.start();
+        var timer = try zio.Timer.start();
         for (0..iterations) |_| try renderer.replayBuffer(&buffer);
         cpu_samples[index] = timer.read() / iterations;
         timer.reset();

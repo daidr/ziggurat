@@ -250,7 +250,7 @@ fn drawLinearRadial(comptime opaque_target: bool, surface: Surface, plan: geomet
                         if (first == sampler.upper(t[7])) {
                             sampler.blendEight(opaque_target, surface.pixels + base + px_index, t, first, all_opaque);
                         } else {
-                            for (0..8) |lane| {
+                            inline for (0..8) |lane| {
                                 const offset = base + px_index + lane;
                                 surface.pixels[offset] = blend(opaque_target, sampler.at(t[lane], sampler.upper(t[lane])), surface.pixels[offset], 255);
                             }

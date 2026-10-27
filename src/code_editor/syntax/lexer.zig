@@ -278,7 +278,7 @@ pub const Lexer = struct {
             }
         }
         if (self.stringStart(st, i, "")) |j| return j;
-        if (self.directives and c == '#' and std.mem.trimLeft(u8, line[0..i], " \t").len == 0) {
+        if (self.directives and c == '#' and std.mem.trimStart(u8, line[0..i], " \t").len == 0) {
             var j = i + 1;
             while (j < n and (line[j] == ' ' or line[j] == '\t')) j += 1;
             while (j < n and isIdentByte(line[j])) j += 1;

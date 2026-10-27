@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const v = @import("ziggurat_vector");
 const d = @import("document.zig");
 const refs = @import("references.zig");
@@ -344,7 +345,7 @@ fn inverse(matrix: v.Transform) !?v.Transform {
     const determinant = matrix.xx * matrix.yy - matrix.xy * matrix.yx;
     if (determinant == 0) return null;
     const result: v.Transform = .{ .xx = matrix.yy / determinant, .xy = -matrix.xy / determinant, .yx = -matrix.yx / determinant, .yy = matrix.xx / determinant, .x0 = (matrix.xy * matrix.y0 - matrix.yy * matrix.x0) / determinant, .y0 = (matrix.yx * matrix.x0 - matrix.xx * matrix.y0) / determinant };
-    inline for (std.meta.fields(v.Transform)) |field| if (!std.math.isFinite(@field(result, field.name)) or @abs(@field(result, field.name)) > 1e15) return error.UnsupportedGradientPrecision;
+    inline for (zio.fields(v.Transform)) |field| if (!std.math.isFinite(@field(result, field.name)) or @abs(@field(result, field.name)) > 1e15) return error.UnsupportedGradientPrecision;
     return result;
 }
 fn decode(value: f64) f64 {

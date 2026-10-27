@@ -3,6 +3,7 @@
 //! consoles need Windows 10 1809 or later; on older systems spawning
 //! returns `Unsupported`.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const windows = std.os.windows;
 const pty = @import("pty.zig");
 
@@ -72,7 +73,7 @@ pub const Pty = struct {
     output: HANDLE,
     process: HANDLE,
     pid: DWORD,
-    console_mutex: std.Thread.Mutex = .{},
+    console_mutex: zio.Mutex = .{},
 
     pub fn spawn(allocator: std.mem.Allocator, command: pty.Command) pty.Error!Pty {
         const calls = api() orelse return error.Unsupported;
@@ -177,7 +178,7 @@ pub const Pty = struct {
 fn commandLine(arena: std.mem.Allocator, argv: []const []const u8) ![*:0]u16 {
     var text: std.ArrayList(u8) = .empty;
     if (argv.len == 0) {
-        const comspec = std.process.getEnvVarOwned(arena, "COMSPEC") catch try arena.dupe(u8, "cmd.exe");
+        const comspec = zio.getEnvVarOwned(arena, "COMSPEC") catch try arena.dupe(u8, "cmd.exe");
         try text.appendSlice(arena, comspec);
     }
     for (argv, 0..) |arg, i| {

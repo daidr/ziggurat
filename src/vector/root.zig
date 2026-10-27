@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 pub const drawing = @import("ziggurat_drawing_resources");
 const raster = @import("raster.zig");
 pub const geometry = @import("geometry.zig");
@@ -57,7 +58,7 @@ pub const Transform = struct {
         };
     }
     pub fn validate(self: Transform) !void {
-        inline for (std.meta.fields(Transform)) |field| {
+        inline for (zio.fields(Transform)) |field| {
             const value = @field(self, field.name);
             if (!std.math.isFinite(value) or @abs(value) > 1e6) return error.InvalidTransform;
         }

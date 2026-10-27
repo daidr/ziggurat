@@ -310,12 +310,12 @@ test "tree shape and limits" {
     try std.testing.expectError(error.InvalidText, md.parse("\xff", storage.buffers()));
 
     // Nesting past the limit stays literal instead of failing.
-    const deep = ">" ** 40 ++ " x";
+    const deep = &@as([40]u8, @splat('>')) ++ " x";
     var out: [8192]u8 = undefined;
     const html = try render(deep, &out);
     try std.testing.expectEqual(@as(usize, md.max_depth), std.mem.count(u8, html, "<blockquote>"));
-    const emphasis = "*a " ** 300 ++ "b" ++ "*" ** 300;
+    const emphasis = &@as([300 * "*a ".len]u8, @bitCast(@as([300]["*a ".len]u8, @splat("*a ".*)))) ++ "b" ++ &@as([300]u8, @splat('*'));
     _ = try render(emphasis, &out);
-    const brackets = "[" ** 200 ++ "x" ++ "]" ** 200;
+    const brackets = &@as([200]u8, @splat('[')) ++ "x" ++ &@as([200]u8, @splat(']'));
     _ = try render(brackets, &out);
 }

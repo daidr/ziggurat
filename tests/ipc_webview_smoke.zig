@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const ipc = @import("ziggurat_ipc");
@@ -93,7 +94,7 @@ const State = struct {
             const old_token = self.event_token.?;
             try std.testing.expectError(error.StaleSubscription, self.events.emit("changed", self.allocator, old_token, .{ .path = "late", .revision = 8 }));
             var nonce: [16]u8 = undefined;
-            std.crypto.random.bytes(&nonce);
+            zio.random.bytes(&nonce);
             const replacement = std.fmt.bytesToHex(nonce, .lower);
             try self.events.reset(try ipc.Session.init(&replacement));
             try std.testing.expectEqual(0, self.events.active);
@@ -170,7 +171,7 @@ pub fn main() !void {
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
     var nonce: [16]u8 = undefined;
-    std.crypto.random.bytes(&nonce);
+    zio.random.bytes(&nonce);
     const session = std.fmt.bytesToHex(nonce, .lower);
     const identity = try ipc.Session.init(&session);
     var state: State = .{ .allocator = allocator, .dispatcher = Dispatcher.init(identity), .events = Events.init(identity) };
@@ -182,7 +183,7 @@ pub fn main() !void {
     defer app.deinit();
     var view = web.View.init(allocator, &state, State.event);
     const window = try app.createWindow(.{});
-    const local = try std.process.getEnvVarOwned(allocator, "LOCALAPPDATA");
+    const local = try zio.getEnvVarOwned(allocator, "LOCALAPPDATA");
     defer allocator.free(local);
     const profile = try std.fs.path.join(allocator, &.{ local, "Ziggurat", "IpcSmoke" });
     defer allocator.free(profile);

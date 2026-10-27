@@ -187,7 +187,7 @@ test "baseline establishes a minimum cross extent and permits a zero offset" {
 }
 
 test "invalid extended constraints preserve all caller output and absolute validation" {
-    var output = [_]Rect{sentinel} ** 2;
+    var output = @as([2]Rect, @splat(sentinel));
     const invalid_items = [_]layout.Item{
         .{ .preferred = .{}, .main_minimum = -1 },
         .{ .preferred = .{}, .main_minimum = std.math.inf(f32) },
@@ -202,24 +202,24 @@ test "invalid extended constraints preserve all caller output and absolute valid
     };
     for (invalid_items) |invalid| {
         try std.testing.expectError(error.InvalidConstraints, layout.arrange(bounds, .{ .axis = .row }, &.{ .{ .preferred = .{ .width = 10 } }, invalid }, &output));
-        try std.testing.expectEqualSlices(Rect, &([_]Rect{sentinel} ** 2), &output);
+        try std.testing.expectEqualSlices(Rect, &(@as([2]Rect, @splat(sentinel))), &output);
         try std.testing.expectError(error.InvalidConstraints, layout.measure(.{ .axis = .row }, &.{invalid}));
     }
 }
 
 test "late coordinate and result overflows do not partially publish rectangles" {
-    var output = [_]Rect{sentinel} ** 3;
+    var output = @as([3]Rect, @splat(sentinel));
     const maximum = std.math.floatMax(f32);
     const items = [_]layout.Item{
         .{ .preferred = .{ .width = 1 }, .shrink = 0 },
         .{ .preferred = .{ .width = maximum }, .shrink = 0 },
     };
     try std.testing.expectError(error.GeometryOverflow, layout.arrange(bounds, .{ .axis = .row, .gap = maximum }, &items, &output));
-    try std.testing.expectEqualSlices(Rect, &([_]Rect{sentinel} ** 3), &output);
+    try std.testing.expectEqualSlices(Rect, &(@as([3]Rect, @splat(sentinel))), &output);
     try std.testing.expectError(error.GeometryOverflow, layout.arrange(bounds, .{ .padding = .{ .left = maximum, .right = maximum } }, &.{.{ .preferred = .{} }}, &output));
-    try std.testing.expectEqualSlices(Rect, &([_]Rect{sentinel} ** 3), &output);
+    try std.testing.expectEqualSlices(Rect, &(@as([3]Rect, @splat(sentinel))), &output);
     try std.testing.expectError(error.GeometryOverflow, layout.arrange(.{ .x = maximum, .y = 0, .width = maximum, .height = 1 }, .{}, &.{}, &output));
-    try std.testing.expectEqualSlices(Rect, &([_]Rect{sentinel} ** 3), &output);
+    try std.testing.expectEqualSlices(Rect, &(@as([3]Rect, @splat(sentinel))), &output);
     _ = try layout.arrange(bounds, .{}, &.{.{ .preferred = .{} }}, &output);
     try std.testing.expectEqual(sentinel, output[1]);
     try std.testing.expectEqual(sentinel, output[2]);

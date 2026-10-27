@@ -389,7 +389,12 @@ pub fn Control(comptime Access: type) type {
         pub fn draw(self: *Self, frame: *ui.Frame, bounds: ui.Rect, name: []const u8, renderer: Renderer, options: Access.DrawOptions) !Access.Range {
             var operation = try self.enter();
             defer operation.end();
-            errdefer |err| frame.failure = frame.failure orelse err;
+            return self.drawBody(frame, bounds, name, renderer, options) catch |err| {
+                frame.failure = frame.failure orelse err;
+                return err;
+            };
+        }
+        fn drawBody(self: *Self, frame: *ui.Frame, bounds: ui.Rect, name: []const u8, renderer: Renderer, options: Access.DrawOptions) !Access.Range {
             if (self.drawing or self.snapshotting) return error.Busy;
             const token = self.token orelse return error.NotAttached;
             if (token.context != frame.context) return error.ForeignFrame;

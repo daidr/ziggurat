@@ -6,6 +6,7 @@
 //! Input queues in another bounded buffer: `write` takes all of the bytes
 //! or returns `Full` without taking any.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const pty = @import("pty.zig");
@@ -89,9 +90,9 @@ pub const Session = struct {
     options: Options,
     refs: std.atomic.Value(usize),
 
-    mutex: std.Thread.Mutex = .{},
+    mutex: zio.Mutex = .{},
     /// Signaled when output space frees, input arrives or the session closes.
-    changed: std.Thread.Condition = .{},
+    changed: zio.Condition = .{},
     output: Ring,
     input: Ring,
     /// Main-thread copy of a chunk while the sink reads it.
@@ -348,7 +349,7 @@ pub const Session = struct {
             const posix = std.posix;
             if (killing and self.closing_since == 0) {
                 // Ask the program to hang up, then keep draining.
-                self.closing_since = std.time.milliTimestamp();
+                self.closing_since = zio.milliTimestamp();
                 self.pty.signal(posix.SIG.HUP);
             }
             // The program ended while something else keeps the terminal open:
@@ -384,7 +385,7 @@ pub const Session = struct {
     /// A closed program that has not hung up after a while is killed; the
     /// read ends once it is gone or a while later regardless.
     fn escalate(self: *Session) ?usize {
-        const waited = std.time.milliTimestamp() - self.closing_since;
+        const waited = zio.milliTimestamp() - self.closing_since;
         if (self.pty.wait(false)) |exit| {
             self.mutex.lock();
             self.exit = exit;
@@ -465,14 +466,14 @@ pub const Session = struct {
 const PipeStop = struct {
     fds: [2]std.posix.fd_t,
     fn init() !PipeStop {
-        return .{ .fds = try std.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true }) };
+        return .{ .fds = try zio.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true }) };
     }
     fn raise(self: *PipeStop) void {
-        _ = std.posix.write(self.fds[1], "x") catch {};
+        _ = zio.posix.write(self.fds[1], "x") catch {};
     }
     fn deinit(self: *PipeStop) void {
-        std.posix.close(self.fds[0]);
-        std.posix.close(self.fds[1]);
+        zio.posix.close(self.fds[0]);
+        zio.posix.close(self.fds[1]);
     }
 };
 
@@ -537,7 +538,7 @@ fn settle(app: *z.App, done: anytype) !void {
     while (!done.check()) : (waited += 1) {
         if (waited > 1000) return error.Timeout;
         try app.dispatch();
-        std.Thread.sleep(5 * std.time.ns_per_ms);
+        zio.sleep(5 * std.time.ns_per_ms);
     }
 }
 

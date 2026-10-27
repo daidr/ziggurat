@@ -178,7 +178,7 @@ test "command policy and revision are checked at distinct transaction boundaries
 }
 
 test "command scratch follows configured Document selection capacity" {
-    const document = try d.Document.create(std.testing.allocator, std.Thread.getCurrentId(), "ab" ** 128, .{ .selections = 128 });
+    const document = try d.Document.create(std.testing.allocator, std.Thread.getCurrentId(), &@as([128 * "ab".len]u8, @bitCast(@as([128]["ab".len]u8, @splat("ab".*)))), .{ .selections = 128 });
     defer document.close() catch unreachable;
     var selections: [97]d.Selection = undefined;
     for (&selections, 0..) |*selected, at| selected.* = .{ .anchor = at * 2, .caret = at * 2 };

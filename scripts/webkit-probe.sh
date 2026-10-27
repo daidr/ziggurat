@@ -18,7 +18,7 @@ if [[ -n "$tls_root" ]]; then
         exit 2
     fi
 fi
-zig_bin="${ZIG_BIN:-$HOME/.cache/ziggurat/zig-x86_64-linux-0.15.2/zig}"
+zig_bin="${ZIG_BIN:-$HOME/.cache/ziggurat/zig-x86_64-linux-0.17.0/zig}"
 source "$project/scripts/linux-cache-env.sh"
 configure_linux_cache "$project" webkit
 build_cache="${P01_BUILD_CACHE:-$ZIG_LOCAL_CACHE_DIR}"

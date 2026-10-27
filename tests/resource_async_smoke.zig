@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
@@ -39,7 +40,7 @@ const Work = struct {
     status: u16,
     late: bool = false,
     closing: bool = false,
-    gate: std.Thread.ResetEvent = .{},
+    gate: zio.ResetEvent = .{},
     thread: ?std.Thread = null,
     owned: ?web.resources.OwnedResponse = null,
     err: ?anyerror = null,
@@ -96,7 +97,7 @@ const State = struct {
         self.app.quit();
     }
     fn options(self: *State, kind: Kind, timeout: u32) web.resources.DeferOptions {
-        return .{ .timeout_ms = timeout, .completion = .{ .context = &self.cases[@intFromEnum(kind)], .complete = Case.complete } };
+        return .{ .timeout_ms = timeout, .completion = .{ .context = &self.cases[@backingInt(kind)], .complete = Case.complete } };
     }
     fn startWork(self: *State, id: web.ResourceRequestId, body: []const u8, status: u16, late: bool, closing: bool) !void {
         if (self.work_count == self.works.len) return error.TooManyWorkers;
@@ -106,7 +107,7 @@ const State = struct {
         work.thread = try std.Thread.spawn(.{}, Work.run, .{work});
     }
     fn complete(self: *State, kind: Kind, result: web.resources.Result) void {
-        self.calls[@intFromEnum(kind)] += 1;
+        self.calls[@backingInt(kind)] += 1;
         const valid = switch (kind) {
             .document, .worker => result == .responded,
             .cancelled => result == .cancelled,
@@ -224,7 +225,7 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    const local = try std.process.getEnvVarOwned(allocator, "LOCALAPPDATA");
+    const local = try zio.getEnvVarOwned(allocator, "LOCALAPPDATA");
     defer allocator.free(local);
     const profile = try std.fs.path.join(allocator, &.{ local, "Ziggurat", "ResourceAsyncSmoke" });
     defer allocator.free(profile);
@@ -232,7 +233,7 @@ pub fn main() !void {
     defer app.deinit();
     var view: web.View = undefined;
     var state: State = .{ .allocator = allocator, .app = app, .view = &view };
-    for (&state.cases, 0..) |*case, i| case.* = .{ .state = &state, .kind = @enumFromInt(i) };
+    for (&state.cases, 0..) |*case, i| case.* = .{ .state = &state, .kind = @fromBackingInt(@intCast(i)) };
     defer for (state.works[0..state.work_count]) |*work| {
         work.gate.set();
         if (work.thread) |thread| thread.join();
@@ -252,7 +253,7 @@ pub fn main() !void {
     }
     if (watchdog.expired) std.debug.print("resource timeout calls={any} native pending={d}\n", .{ state.calls, web.deferredResourceCount() });
     try std.testing.expect(!watchdog.expired and state.failed == null and state.done and state.loading_document and state.late_seen);
-    for (state.calls, 0..) |calls, i| try std.testing.expectEqual(@as(u32, if (i == @intFromEnum(Kind.full)) 0 else 1), calls);
+    for (state.calls, 0..) |calls, i| try std.testing.expectEqual(@as(u32, if (i == @backingInt(Kind.full)) 0 else 1), calls);
     for (state.works[0..state.work_count], 0..) |work, i| {
         if (i == 3) try std.testing.expectEqual(error.Closed, work.err.?) else try std.testing.expect(work.err == null);
         try std.testing.expect(work.owned == null);

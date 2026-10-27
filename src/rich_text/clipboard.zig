@@ -150,11 +150,11 @@ pub const SystemClipboard = struct {
         self.target = null;
         defer self.clear();
         target.paste(.{
-            .rich = self.read[@intFromEnum(Slot.rich)],
-            .html = self.read[@intFromEnum(Slot.html)],
-            .rtf = self.read[@intFromEnum(Slot.rtf)],
-            .markdown = self.read[@intFromEnum(Slot.markdown)],
-            .text = self.read[@intFromEnum(Slot.text)],
+            .rich = self.read[@backingInt(Slot.rich)],
+            .html = self.read[@backingInt(Slot.html)],
+            .rtf = self.read[@backingInt(Slot.rtf)],
+            .markdown = self.read[@backingInt(Slot.markdown)],
+            .text = self.read[@backingInt(Slot.text)],
         }, self.match_style);
     }
 };

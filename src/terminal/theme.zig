@@ -4,6 +4,7 @@
 //! until they reset. The themes Ghostty ships are built in, by name, and
 //! theme files in Ghostty's format are read too.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const data = @import("theme_data.zig");
 
@@ -111,7 +112,7 @@ fn fromEntry(entry: data.Entry) Theme {
     return .{ .palette = c[0..16].*, .background = c[16], .foreground = c[17], .cursor = c[18], .cursor_text = c[19], .selection = c[20], .selection_text = c[21] };
 }
 
-pub const LookupError = error{ NoSuchTheme, InvalidThemeName } || ParseError || std.fs.File.OpenError || std.fs.File.ReadError || std.mem.Allocator.Error || error{ FileTooBig, StreamTooLong };
+pub const LookupError = error{ NoSuchTheme, InvalidThemeName } || ParseError || std.Io.File.OpenError || std.Io.File.Reader.Error || std.mem.Allocator.Error || error{ FileTooBig, StreamTooLong };
 
 /// A theme by name, as Ghostty's `theme` option takes it: a theme file of
 /// the user's in Ghostty's themes directory first (`$XDG_CONFIG_HOME/
@@ -119,7 +120,7 @@ pub const LookupError = error{ NoSuchTheme, InvalidThemeName } || ParseError || 
 /// `%LOCALAPPDATA%\ghostty\themes` on Windows without XDG_CONFIG_HOME),
 /// else one Ghostty ships, of any case; an absolute path names a theme
 /// file. `env` is the environment to read those variables from.
-pub fn lookup(allocator: std.mem.Allocator, env: *const std.process.EnvMap, name: []const u8) LookupError!Theme {
+pub fn lookup(allocator: std.mem.Allocator, env: *const std.process.Environ.Map, name: []const u8) LookupError!Theme {
     if (std.fs.path.isAbsolute(name)) return readFile(allocator, name);
     if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..") or std.mem.indexOfAny(u8, name, "/\\") != null) return error.InvalidThemeName;
     var buffer: [std.fs.max_path_bytes]u8 = undefined;
@@ -133,7 +134,7 @@ pub fn lookup(allocator: std.mem.Allocator, env: *const std.process.EnvMap, name
 }
 
 /// Ghostty's themes directory of the user, as Ghostty finds it.
-pub fn userThemesDir(env: *const std.process.EnvMap, buffer: []u8) ?[]const u8 {
+pub fn userThemesDir(env: *const std.process.Environ.Map, buffer: []u8) ?[]const u8 {
     const sep = std.fs.path.sep_str;
     if (env.get("XDG_CONFIG_HOME")) |dir| if (dir.len > 0) return std.fmt.bufPrint(buffer, "{s}" ++ sep ++ "ghostty" ++ sep ++ "themes", .{dir}) catch null;
     if (builtin.os.tag == .windows) if (env.get("LOCALAPPDATA")) |dir| if (dir.len > 0) return std.fmt.bufPrint(buffer, "{s}" ++ sep ++ "ghostty" ++ sep ++ "themes", .{dir}) catch null;
@@ -144,7 +145,7 @@ pub fn userThemesDir(env: *const std.process.EnvMap, buffer: []u8) ?[]const u8 {
 
 /// The names `lookup` takes, sorted ignoring case and without repeats:
 /// the user's theme files and Ghostty's themes. Free with `freeNames`.
-pub fn names(allocator: std.mem.Allocator, env: *const std.process.EnvMap) ![][]const u8 {
+pub fn names(allocator: std.mem.Allocator, env: *const std.process.Environ.Map) ![][]const u8 {
     var list: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (list.items) |item| allocator.free(item);
@@ -159,11 +160,11 @@ pub fn names(allocator: std.mem.Allocator, env: *const std.process.EnvMap) ![][]
     }
     var buffer: [std.fs.max_path_bytes]u8 = undefined;
     if (userThemesDir(env, &buffer)) |path| {
-        if (std.fs.openDirAbsolute(path, .{ .iterate = true })) |opened| {
+        if (std.Io.Dir.openDirAbsolute(zio.io(), path, .{ .iterate = true })) |opened| {
             var dir = opened;
-            defer dir.close();
+            defer dir.close(zio.io());
             var it = dir.iterate();
-            while (it.next() catch null) |entry| {
+            while (it.next(zio.io()) catch null) |entry| {
                 if (entry.kind == .directory or entry.name.len == 0 or entry.name[0] == '.') continue;
                 const copy = try allocator.dupe(u8, entry.name);
                 list.append(allocator, copy) catch |err| {
@@ -205,9 +206,9 @@ fn lessName(_: void, a: []const u8, b: []const u8) bool {
 }
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) LookupError!Theme {
-    const file = try std.fs.openFileAbsolute(path, .{});
-    defer file.close();
-    const bytes = try file.readToEndAlloc(allocator, 1 << 20);
+    const file = try std.Io.Dir.openFileAbsolute(zio.io(), path, .{});
+    defer file.close(zio.io());
+    const bytes = try zio.readToEndAlloc(file, allocator, 1 << 20);
     defer allocator.free(bytes);
     return parse(bytes);
 }
@@ -362,12 +363,12 @@ test "theme files parse as Ghostty reads them" {
 test "user theme files come before the shipped ones" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("ghostty/themes");
-    try tmp.dir.writeFile(.{ .sub_path = "ghostty/themes/Dracula", .data = "background = #010203\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "ghostty/themes/Mine", .data = "background = #ffffff\n" });
+    try tmp.dir.createDirPath(zio.io(), "ghostty/themes");
+    try tmp.dir.writeFile(zio.io(), .{ .sub_path = "ghostty/themes/Dracula", .data = "background = #010203\n" });
+    try tmp.dir.writeFile(zio.io(), .{ .sub_path = "ghostty/themes/Mine", .data = "background = #ffffff\n" });
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const root = try tmp.dir.realpath(".", &path_buffer);
-    var env = std.process.EnvMap.init(std.testing.allocator);
+    const root = try zio.realpath(tmp.dir, ".", &path_buffer);
+    var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
     try env.put("XDG_CONFIG_HOME", root);
     try std.testing.expectEqual(@as(u24, 0x010203), (try lookup(std.testing.allocator, &env, "Dracula")).background);

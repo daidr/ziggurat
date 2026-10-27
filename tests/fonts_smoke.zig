@@ -1,6 +1,7 @@
 //! Registers a copy of a system font under a name of the application's own
 //! and checks that the family list and text layout know it by that name.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const fonts = @import("ziggurat_fonts");
 const text = @import("ziggurat_text_layout");
@@ -9,16 +10,16 @@ const alias = "Ziggurat Smoke Sans";
 
 fn findFont(allocator: std.mem.Allocator) ![]u8 {
     if (builtin.os.tag == .windows) {
-        const windir = try std.process.getEnvVarOwned(allocator, "WINDIR");
+        const windir = try zio.getEnvVarOwned(allocator, "WINDIR");
         defer allocator.free(windir);
         return std.fs.path.join(allocator, &.{ windir, "Fonts", "arial.ttf" });
     }
     for ([_][]const u8{ "/usr/share/fonts", "/usr/local/share/fonts" }) |root| {
-        var dir = std.fs.openDirAbsolute(root, .{ .iterate = true }) catch continue;
-        defer dir.close();
+        var dir = std.Io.Dir.openDirAbsolute(zio.io(), root, .{ .iterate = true }) catch continue;
+        defer dir.close(zio.io());
         var walker = try dir.walk(allocator);
         defer walker.deinit();
-        while (try walker.next()) |entry| {
+        while (try walker.next(zio.io())) |entry| {
             if (entry.kind == .file and std.mem.endsWith(u8, entry.basename, ".ttf")) return std.fs.path.join(allocator, &.{ root, entry.path });
         }
     }
@@ -31,7 +32,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const path = try findFont(allocator);
     defer allocator.free(path);
-    const data = try std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024 * 1024);
+    const data = try std.Io.Dir.cwd().readFileAlloc(zio.io(), path, allocator, .limited(64 * 1024 * 1024));
     defer allocator.free(data);
 
     const id = try fonts.register(allocator, data, alias);

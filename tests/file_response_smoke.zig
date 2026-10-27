@@ -1,13 +1,10 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Fixture = @import("file_stream_probe.zig").Fixture;
 const Watchdog = @import("watchdog.zig").Watchdog;
-const w = @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-});
+const w = @import("ziggurat_c_win32");
 extern fn zwv_browser_process_id(*anyopaque, *c_uint) i32;
 const size = 4 * 1024 * 1024;
 const enabled_document =
@@ -52,7 +49,7 @@ const Prepared = struct {
         var native_failure: ?i32 = null;
         try std.testing.expectError(error.FileTooLarge, web.OwnedFileResponse.prepareWithFailure(self.fixture.allocator, self.main_thread, file, .{}, 1, &native_failure));
         try std.testing.expectEqual(@as(u32, 0x800700df), @as(u32, @bitCast(native_failure.?)));
-        const invalid: std.fs.File = .{ .handle = w.INVALID_HANDLE_VALUE.? };
+        const invalid: std.Io.File = .{ .handle = w.INVALID_HANDLE_VALUE.?, .flags = .{ .nonblocking = false } };
         try std.testing.expectError(error.FilePrepareFailed, web.OwnedFileResponse.prepareWithFailure(self.fixture.allocator, self.main_thread, invalid, .{}, size, &native_failure));
         try std.testing.expectEqual(@as(u32, 0x80070006), @as(u32, @bitCast(native_failure.?)));
         try std.testing.expectError(error.InvalidFileStreamLimit, web.OwnedFileResponse.prepareWithFailure(self.fixture.allocator, self.main_thread, file, .{}, web.file_responses.hard_max_file_bytes + 1, &native_failure));
@@ -60,7 +57,7 @@ const Prepared = struct {
         try std.testing.expectError(error.UnexpectedResponseBody, web.OwnedFileResponse.prepare(self.fixture.allocator, self.main_thread, file, .{ .status = 204 }, size));
         try std.testing.expectError(error.OutOfMemory, web.OwnedFileResponse.prepare(std.testing.failing_allocator, self.main_thread, file, .{}, size));
         for (&self.owned) |*owned| owned.* = try web.OwnedFileResponse.prepare(self.fixture.allocator, self.main_thread, file, .{ .headers = &.{.{ .name = "X-File", .value = "private" }} }, size);
-        try std.testing.expectEqual(@as(u64, 3), try file.getPos());
+        try std.testing.expectEqual(@as(u64, 3), try zio.posix.position(file.handle));
     }
 };
 const State = struct {
@@ -170,7 +167,7 @@ const LateTicket = struct {
 fn runCycle(enabled: bool, close_in_completion: bool) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
-    var temporary = std.testing.tmpDir(.{});
+    var temporary = zio.tmpDir(.{});
     var fixture: Fixture = .{ .allocator = gpa.allocator(), .temporary = &temporary };
     var prepared: Prepared = .{ .fixture = &fixture, .main_thread = std.Thread.getCurrentId() };
     defer {

@@ -20,6 +20,7 @@
 //! CredentialStoreUnavailable instead of pretending to succeed: on Linux
 //! without libsecret, without a session bus or without a Secret Service on it.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 
@@ -232,12 +233,7 @@ fn linuxCall(result: c_int) Error!void {
 }
 
 const windows = if (os == .windows) struct {
-    const c = @cImport({
-        @cDefine("WIN32_LEAN_AND_MEAN", "1");
-        @cDefine("NO_STRICT", "1");
-        @cInclude("windows.h");
-        @cInclude("wincred.h");
-    });
+    const c = @import("ziggurat_c_win32");
     const error_not_found = 1168;
     /// "service/key" and the key as NUL-terminated UTF-16.
     const Names = struct {
@@ -307,7 +303,7 @@ const windows = if (os == .windows) struct {
 const memory = struct {
     const capacity = 8;
     const Entry = struct { used: bool = false, name: [2 * max_name_bytes + 1]u8 = undefined, name_len: usize = 0, value: [max_secret_bytes]u8 = undefined, value_len: usize = 0 };
-    var mutex: std.Thread.Mutex = .{};
+    var mutex: zio.Mutex = .{};
     var entries: [capacity]Entry = @splat(.{});
 
     fn name(storage: []u8, service: []const u8, key: []const u8) []const u8 {
@@ -356,7 +352,7 @@ test "names are bounded UTF-8 without NUL" {
     try std.testing.expectError(error.EmptyName, validateName(""));
     try std.testing.expectError(error.EmbeddedNul, validateName("a\x00b"));
     try std.testing.expectError(error.InvalidUtf8, validateName("\xff"));
-    try validateName("x" ** max_name_bytes);
-    try std.testing.expectError(error.NameTooLong, validateName("x" ** (max_name_bytes + 1)));
-    try std.testing.expectError(error.SecretTooLarge, set("service", "key", &([_]u8{1} ** (max_secret_bytes + 1))));
+    try validateName(&@as([max_name_bytes]u8, @splat('x')));
+    try std.testing.expectError(error.NameTooLong, validateName(&@as([max_name_bytes + 1]u8, @splat('x'))));
+    try std.testing.expectError(error.SecretTooLarge, set("service", "key", &(@as([max_secret_bytes + 1]u8, @splat(1)))));
 }

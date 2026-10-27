@@ -1,9 +1,10 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const v = @import("ziggurat_vector");
 const space = @import("marker_space.zig");
 
 fn equal(actual: v.Transform, expected: v.Transform) !void {
-    inline for (std.meta.fields(v.Transform)) |field|
+    inline for (zio.fields(v.Transform)) |field|
         try std.testing.expectApproxEqAbs(@field(expected, field.name), @field(actual, field.name), 1e-12);
 }
 

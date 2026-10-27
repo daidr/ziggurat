@@ -1,11 +1,7 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const runtime = @import("ziggurat_webview_runtime");
-const c = @cImport({
-    @cDefine("_GNU_SOURCE", "1");
-    @cInclude("dlfcn.h");
-    @cInclude("stdlib.h");
-    @cInclude("unistd.h");
-});
+const c = @import("ziggurat_c_posix");
 
 const Probe = struct {
     main_thread: std.Thread.Id,
@@ -34,15 +30,15 @@ fn run(main_thread: std.Thread.Id, options: runtime.Options) !runtime.Result {
 }
 
 fn resetLog(path: []const u8) !void {
-    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-    file.close();
+    const file = try std.Io.Dir.cwd().createFile(zio.io(), path, .{ .truncate = true });
+    file.close(zio.io());
 }
 
 fn expectLog(path: []const u8, expected: []const u8) !void {
     var storage: [1024]u8 = undefined;
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    const length = try file.readAll(&storage);
+    const file = try std.Io.Dir.cwd().openFile(zio.io(), path, .{});
+    defer file.close(zio.io());
+    const length = try zio.readAll(file, &storage);
     try std.testing.expectEqualStrings(expected, storage[0..length]);
 }
 
@@ -96,7 +92,7 @@ fn cancelInConstructor(main_thread: std.Thread.Id, fixture: []const u8, log: []c
         for (gate_resume) |fd| _ = c.close(fd);
     }
     var gate_storage: [64]u8 = undefined;
-    const gate = try std.fmt.bufPrintZ(&gate_storage, "{d}:{d}", .{ ready[1], gate_resume[0] });
+    const gate = try std.fmt.bufPrintSentinel(&gate_storage, "{d}:{d}", .{ ready[1], gate_resume[0] }, 0);
     try std.testing.expect(c.setenv("ZIGGURAT_RUNTIME_FIXTURE_GATE", gate.ptr, 1) == 0);
     defer _ = c.unsetenv("ZIGGURAT_RUNTIME_FIXTURE_GATE");
     var cancellation: runtime.Cancellation = .{};
@@ -124,8 +120,7 @@ fn failedPath(main_thread: std.Thread.Id, path: []const u8, truncated: bool) !vo
         _ = c.dlclose(library);
         return error.ExpectedNativeLoadFailure;
     }
-    const text = c.dlerror();
-    try std.testing.expect(text != null);
+    const text = c.dlerror() orelse return error.TestUnexpectedResult;
     var expected: [256]u8 = undefined;
     var length: usize = 0;
     while (length < expected.len and text[length] != 0) : (length += 1) expected[length] = text[length];
@@ -138,8 +133,8 @@ fn failedPath(main_thread: std.Thread.Id, path: []const u8, truncated: bool) !vo
     try std.testing.expect(result.version().len == 0 and result.cleanup_failure == null);
 }
 
-pub fn main() !void {
-    var args = try std.process.argsWithAllocator(std.heap.page_allocator);
+pub fn main(init: std.process.Init.Minimal) !void {
+    var args = try init.args.iterateAllocator(std.heap.page_allocator);
     defer args.deinit();
     _ = args.next();
     var fixtures: [4][]const u8 = undefined;
@@ -167,14 +162,14 @@ pub fn main() !void {
     try std.testing.expectError(error.InvalidPath, run(main_thread, .{ .loader_path = "/bad\xff.so" }));
 
     const allocator = std.heap.page_allocator;
-    const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
+    const cwd = try zio.realPathAlloc(std.Io.Dir.cwd(), ".", allocator);
     defer allocator.free(cwd);
     var root_storage: [4096]u8 = undefined;
-    const template = try std.fmt.bufPrintZ(&root_storage, "{s}/.zig-cache/managed/runtime-linux-author-out/evidence-XXXXXX", .{cwd});
-    try std.fs.cwd().makePath(".zig-cache/managed/runtime-linux-author-out");
+    const template = try std.fmt.bufPrintSentinel(&root_storage, "{s}/.zig-cache/managed/runtime-linux-author-out/evidence-XXXXXX", .{cwd}, 0);
+    try std.Io.Dir.cwd().createDirPath(zio.io(), ".zig-cache/managed/runtime-linux-author-out");
     const root = c.mkdtemp(template.ptr) orelse return error.PrivateDirectoryFailed;
     var log_storage: [4096]u8 = undefined;
-    const log = try std.fmt.bufPrintZ(&log_storage, "{s}/events", .{std.mem.span(root)});
+    const log = try std.fmt.bufPrintSentinel(&log_storage, "{s}/events", .{std.mem.span(root)}, 0);
     try resetLog(log);
     try std.testing.expect(c.setenv("ZIGGURAT_RUNTIME_FIXTURE_LOG", log.ptr, 1) == 0);
     defer _ = c.unsetenv("ZIGGURAT_RUNTIME_FIXTURE_LOG");
@@ -186,7 +181,7 @@ pub fn main() !void {
         try std.testing.expectEqualStrings("7.41.923", copy.version());
         try std.testing.expect(copy.diagnostic().len == 0);
     }
-    try expectLog(log, "LabcD" ** 9);
+    try expectLog(log, &@as([9 * "LabcD".len]u8, @bitCast(@as([9]["LabcD".len]u8, @splat("LabcD".*)))));
     for (fixtures[1..], 0..) |fixture, index| {
         try resetLog(log);
         const result = try run(main_thread, .{ .loader_path = fixture });
@@ -200,7 +195,7 @@ pub fn main() !void {
     var missing_storage: [4096]u8 = undefined;
     const missing = try std.fmt.bufPrint(&missing_storage, "{s}/absent.so", .{std.mem.span(root)});
     try failedPath(main_thread, missing, false);
-    const long_segment = "/" ++ "x" ** 200;
+    const long_segment = "/" ++ &@as([200]u8, @splat('x'));
     const long_missing = try std.fmt.bufPrint(&missing_storage, "{s}{s}{s}{s}/absent.so", .{ std.mem.span(root), long_segment, long_segment, long_segment });
     try failedPath(main_thread, long_missing, true);
     try failedPath(main_thread, log, false);

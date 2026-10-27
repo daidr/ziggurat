@@ -45,9 +45,9 @@ pub const pointer_buttons = 3;
 /// pressed and released between two steps. Keys are by position
 /// (`z.KeyInput.physical`): `.w` is the key in W's place on any layout.
 pub const Input = struct {
-    held: KeySet = .initEmpty(),
-    pressed_keys: KeySet = .initEmpty(),
-    released_keys: KeySet = .initEmpty(),
+    held: KeySet = .empty,
+    pressed_keys: KeySet = .empty,
+    released_keys: KeySet = .empty,
     at: Point = .{},
     inside: bool = false,
     buttons: [pointer_buttons]bool = @splat(false),
@@ -109,8 +109,8 @@ pub const Input = struct {
 
     /// Forget what happened before this step.
     fn step(self: *Input) void {
-        self.pressed_keys = .initEmpty();
-        self.released_keys = .initEmpty();
+        self.pressed_keys = .empty;
+        self.released_keys = .empty;
         self.buttons_pressed = @splat(false);
         self.buttons_released = @splat(false);
         self.scrolled = .{};
@@ -119,7 +119,7 @@ pub const Input = struct {
     /// whose releases never come.
     fn releaseAll(self: *Input) void {
         self.released_keys.setUnion(self.held);
-        self.held = .initEmpty();
+        self.held = .empty;
         for (&self.buttons, &self.buttons_released) |*held, *released_button| {
             if (held.*) released_button.* = true;
             held.* = false;

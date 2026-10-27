@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const d = @import("ziggurat_document");
 const code = @import("ziggurat_code_editor");
@@ -15,8 +16,8 @@ const Host = struct {
     broker: *code.Broker,
     client: *protocol.Client,
     server: []const u8,
-    mutex: std.Thread.Mutex = .{},
-    condition: std.Thread.Condition = .{},
+    mutex: zio.Mutex = .{},
+    condition: zio.Condition = .{},
     command: ?Command = .initialize,
     event: Event = .failed,
     stage: Stage = .completion,
@@ -177,14 +178,10 @@ const Host = struct {
         };
     }
     fn work(self: *Host) !void {
-        var child = std.process.Child.init(&.{self.server}, allocator);
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Inherit;
-        try child.spawn();
+        var child = try zio.spawn(.{ .argv = &.{self.server}, .stdin = .pipe, .stdout = .pipe, .stderr = .inherit });
         var child_live = true;
         defer if (child_live) {
-            _ = child.kill() catch {};
+            child.kill(zio.io());
         };
         var decoder = try codec.Decoder.init(allocator, .{ .body_bytes = 16384 });
         defer decoder.deinit();
@@ -193,14 +190,10 @@ const Host = struct {
                 if (command == .restart) {
                     var exit = try protocol.wire.notification(allocator, "exit", struct {}{}, .{});
                     defer exit.deinit();
-                    try child.stdin.?.writeAll(exit.bytes.?);
-                    try expectExit(try child.wait());
+                    try child.stdin.?.writeStreamingAll(zio.io(), exit.bytes.?);
+                    try expectExit(try child.wait(zio.io()));
                     child_live = false;
-                    child = std.process.Child.init(&.{self.server}, allocator);
-                    child.stdin_behavior = .Pipe;
-                    child.stdout_behavior = .Pipe;
-                    child.stderr_behavior = .Inherit;
-                    try child.spawn();
+                    child = try zio.spawn(.{ .argv = &.{self.server}, .stdin = .pipe, .stdout = .pipe, .stderr = .inherit });
                     child_live = true;
                     try decoder.reset();
                 }
@@ -211,7 +204,7 @@ const Host = struct {
                 var packet = self.control_packet.?;
                 self.control_packet = null;
                 defer packet.deinit();
-                try child.stdin.?.writeAll(packet.bytes.?);
+                try child.stdin.?.writeStreamingAll(zio.io(), packet.bytes.?);
                 self.negotiated = try self.transport.negotiate(allocator, self.handshake, try read(&decoder, child.stdout.?));
                 self.post(.negotiated);
             },
@@ -223,7 +216,7 @@ const Host = struct {
                 var packet = self.control_packet.?;
                 self.control_packet = null;
                 defer packet.deinit();
-                try child.stdin.?.writeAll(packet.bytes.?);
+                try child.stdin.?.writeStreamingAll(zio.io(), packet.bytes.?);
                 self.post(.initialized);
             },
             .prepare_sync => {
@@ -234,7 +227,7 @@ const Host = struct {
             .send_sync => {
                 var packet = try self.candidate_sync.?.takePacket();
                 defer packet.deinit();
-                try child.stdin.?.writeAll(packet.bytes.?);
+                try child.stdin.?.writeStreamingAll(zio.io(), packet.bytes.?);
                 self.diagnostic = try self.candidate_sync.?.diagnostics(&self.transport, allocator, try read(&decoder, child.stdout.?));
                 self.post(.diagnostics);
             },
@@ -245,11 +238,11 @@ const Host = struct {
             .send_request, .send_cancelled => |command| {
                 var packet = try self.request.?.takePacket();
                 defer packet.deinit();
-                try child.stdin.?.writeAll(packet.bytes.?);
+                try child.stdin.?.writeStreamingAll(zio.io(), packet.bytes.?);
                 if (command == .send_cancelled) {
                     var cancel = try self.transport.cancellation(allocator, self.request.?.token);
                     defer cancel.deinit();
-                    try child.stdin.?.writeAll(cancel.bytes.?);
+                    try child.stdin.?.writeStreamingAll(zio.io(), cancel.bytes.?);
                 }
                 self.response = try self.request.?.receive(&self.transport, allocator, try read(&decoder, child.stdout.?));
                 if (self.stage == .queued_stop) try self.app.post(.{ .context = self, .call = stopBeforeDelivery });
@@ -258,8 +251,8 @@ const Host = struct {
             .exit => {
                 var packet = try protocol.wire.notification(allocator, "exit", struct {}{}, .{});
                 defer packet.deinit();
-                try child.stdin.?.writeAll(packet.bytes.?);
-                try expectExit(try child.wait());
+                try child.stdin.?.writeStreamingAll(zio.io(), packet.bytes.?);
+                try expectExit(try child.wait(zio.io()));
                 child_live = false;
                 if (!self.stop_requested.load(.acquire)) self.post(.exited);
                 return;
@@ -267,17 +260,17 @@ const Host = struct {
         };
     }
 };
-fn read(decoder: *codec.Decoder, file: std.fs.File) ![]const u8 {
+fn read(decoder: *codec.Decoder, file: std.Io.File) ![]const u8 {
     // One byte deliberately exercises every header/body boundary without a
     // private unbounded receive queue. No more than one frame is retained.
     var byte: [1]u8 = undefined;
     while (true) {
-        if (try file.read(&byte) == 0) return error.UnexpectedEof;
+        if (try zio.read(file, &byte) == 0) return error.UnexpectedEof;
         if ((try decoder.push(&byte)).body) |body| return body;
     }
 }
 fn expectExit(term: std.process.Child.Term) !void {
-    if (term != .Exited or term.Exited != 0) return error.ServerFailed;
+    if (term != .exited or term.exited != 0) return error.ServerFailed;
 }
 fn runProtocol(server: []const u8) !void {
     const app = try z.App.init(allocator);
@@ -367,9 +360,9 @@ fn postingBoundary() !void {
     try std.testing.expectEqual(@as(usize, 256), counter.calls);
     try std.testing.expectEqual(@as(usize, 0), broker.outstanding);
 }
-pub fn main() !void {
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+pub fn main(init: std.process.Init.Minimal) !void {
+    const args = try zio.argsAlloc(allocator, init.args);
+    defer zio.argsFree(allocator, args);
     if (args.len != 2) return error.ExpectedServerPath;
     try runProtocol(args[1]);
     try postingBoundary();
@@ -390,8 +383,8 @@ const WorkspaceHost = struct {
     incoming: ?session.WorkspaceIncoming = null,
     packet: ?codec.Packet = null,
     negotiated: ?session.Negotiated = null,
-    mutex: std.Thread.Mutex = .{},
-    condition: std.Thread.Condition = .{},
+    mutex: zio.Mutex = .{},
+    condition: zio.Condition = .{},
     command: ?Cmd = .initialize,
     event: Ev = .failed,
     failure: ?anyerror = null,
@@ -562,14 +555,10 @@ const WorkspaceHost = struct {
     }
     fn worker(self: *WorkspaceHost) !void {
         const mode = if (self.configuration_mode) "--configuration" else "--workspace";
-        var child = std.process.Child.init(&.{ self.server, mode }, allocator);
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Inherit;
-        try child.spawn();
+        var child = try zio.spawn(.{ .argv = &.{ self.server, mode }, .stdin = .pipe, .stdout = .pipe, .stderr = .inherit });
         var live = true;
         defer if (live) {
-            _ = child.kill() catch {};
+            child.kill(zio.io());
         };
         var decoder = try codec.Decoder.init(allocator, .{ .body_bytes = 16384 });
         defer decoder.deinit();
@@ -578,14 +567,10 @@ const WorkspaceHost = struct {
                 if (command == .restart) {
                     var exit = try protocol.wire.notification(allocator, "exit", struct {}{}, .{});
                     defer exit.deinit();
-                    try child.stdin.?.writeAll(exit.bytes.?);
-                    try expectExit(try child.wait());
+                    try child.stdin.?.writeStreamingAll(zio.io(), exit.bytes.?);
+                    try expectExit(try child.wait(zio.io()));
                     live = false;
-                    child = std.process.Child.init(&.{ self.server, mode }, allocator);
-                    child.stdin_behavior = .Pipe;
-                    child.stdout_behavior = .Pipe;
-                    child.stderr_behavior = .Inherit;
-                    try child.spawn();
+                    child = try zio.spawn(.{ .argv = &.{ self.server, mode }, .stdin = .pipe, .stdout = .pipe, .stderr = .inherit });
                     live = true;
                     try decoder.reset();
                 }
@@ -595,7 +580,7 @@ const WorkspaceHost = struct {
             .send_initialize => {
                 var packet = try self.work.?.takePacket();
                 defer packet.deinit();
-                try child.stdin.?.writeAll(packet.bytes.?);
+                try child.stdin.?.writeStreamingAll(zio.io(), packet.bytes.?);
                 self.negotiated = try self.transport.negotiate(allocator, self.handshake, try read(&decoder, child.stdout.?));
                 try self.post(.negotiated);
             },
@@ -607,7 +592,7 @@ const WorkspaceHost = struct {
                 var packet = self.packet.?;
                 self.packet = null;
                 defer packet.deinit();
-                try child.stdin.?.writeAll(packet.bytes.?);
+                try child.stdin.?.writeStreamingAll(zio.io(), packet.bytes.?);
                 self.incoming = try self.transport.workspaceRequest(allocator, try read(&decoder, child.stdout.?));
                 try self.post(.request);
             },
@@ -626,7 +611,7 @@ const WorkspaceHost = struct {
             .send_reply => {
                 var packet = try self.incoming.?.takePacket();
                 defer packet.deinit();
-                try child.stdin.?.writeAll(packet.bytes.?);
+                try child.stdin.?.writeStreamingAll(zio.io(), packet.bytes.?);
                 try self.post(.replied);
             },
             .change => {
@@ -636,7 +621,7 @@ const WorkspaceHost = struct {
             .send_change => {
                 var packet = try self.work.?.takePacket();
                 defer packet.deinit();
-                try child.stdin.?.writeAll(packet.bytes.?);
+                try child.stdin.?.writeStreamingAll(zio.io(), packet.bytes.?);
                 self.incoming = try self.transport.workspaceRequest(allocator, try read(&decoder, child.stdout.?));
                 try self.post(.request);
             },
@@ -651,7 +636,7 @@ const WorkspaceHost = struct {
             .send_configuration => {
                 var packet = try self.configuration_work.?.takePacket();
                 defer packet.deinit();
-                try child.stdin.?.writeAll(packet.bytes.?);
+                try child.stdin.?.writeStreamingAll(zio.io(), packet.bytes.?);
                 const stale_diagnostic = try read(&decoder, child.stdout.?);
                 try std.testing.expectError(error.Cancelled, self.current_sync.?.diagnostics(&self.transport, allocator, stale_diagnostic));
                 self.incoming = try self.transport.workspaceRequest(allocator, try read(&decoder, child.stdout.?));
@@ -664,15 +649,15 @@ const WorkspaceHost = struct {
             .send_sync => {
                 var packet = try self.candidate_sync.?.takePacket();
                 defer packet.deinit();
-                try child.stdin.?.writeAll(packet.bytes.?);
+                try child.stdin.?.writeStreamingAll(zio.io(), packet.bytes.?);
                 self.diagnostic = try self.candidate_sync.?.diagnostics(&self.transport, allocator, try read(&decoder, child.stdout.?));
                 try self.post(.diagnostic);
             },
             .exit => {
                 var packet = try protocol.wire.notification(allocator, "exit", struct {}{}, .{});
                 defer packet.deinit();
-                try child.stdin.?.writeAll(packet.bytes.?);
-                try expectExit(try child.wait());
+                try child.stdin.?.writeStreamingAll(zio.io(), packet.bytes.?);
+                try expectExit(try child.wait(zio.io()));
                 live = false;
                 try self.post(.done);
                 return;
@@ -763,7 +748,7 @@ fn workspacePostingBoundary() !void {
 fn runConfiguration(server: []const u8) !void {
     // Initial immutable preparation is explicit setup before the App exists;
     // the next candidate is prepared by the real transport worker below.
-    var initial = try protocol.configuration.Prepared.create(allocator, .{ .settings_json = "{\"version\":1}", .entries = &.{ .{ .section = "language", .value_json = "1" }, .{ .scope_uri = "file:///a/doc", .section = "language", .value_json = "[3,4]" }, .{ .section = "", .value_json = "false" }, .{ .section = "large", .value_json = "\"" ++ "x" ** 3000 ++ "\"" } } }, .{});
+    var initial = try protocol.configuration.Prepared.create(allocator, .{ .settings_json = "{\"version\":1}", .entries = &.{ .{ .section = "language", .value_json = "1" }, .{ .scope_uri = "file:///a/doc", .section = "language", .value_json = "[3,4]" }, .{ .section = "", .value_json = "false" }, .{ .section = "large", .value_json = "\"" ++ &@as([3000]u8, @splat('x')) ++ "\"" } } }, .{});
     defer if (initial.snapshot != null) initial.close() catch unreachable;
     const app = try z.App.init(allocator);
     defer app.deinit();

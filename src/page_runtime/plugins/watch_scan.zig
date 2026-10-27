@@ -3,6 +3,7 @@
 //! the scan lists or stats them again and compares what it finds with what it
 //! saw. Only the watch's worker uses a scan.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const Service = @import("watch_service.zig").Service;
 
@@ -52,7 +53,7 @@ pub const Scan = struct {
     allocator: std.mem.Allocator,
     /// The watched directory, or the directory of the watched file, and its
     /// absolute path.
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     path: []const u8,
     /// The watched file's name in `dir`; null for a directory.
     file: ?[]const u8,
@@ -192,7 +193,7 @@ pub const Scan = struct {
             },
             else => return if (std.mem.eql(u8, path, ".")) error.Io else {},
         };
-        defer if (!std.mem.eql(u8, path, ".")) directory.close();
+        defer if (!std.mem.eql(u8, path, ".")) directory.close(zio.io());
         var seen: std.StringHashMapUnmanaged(void) = .empty;
         defer {
             var keys = seen.keyIterator();
@@ -206,7 +207,7 @@ pub const Scan = struct {
         }
         var iterator = directory.iterate();
         while (true) {
-            const item = (iterator.next() catch return error.Io) orelse break;
+            const item = (iterator.next(zio.io()) catch return error.Io) orelse break;
             const child = try self.join(path, item.name);
             defer self.allocator.free(child);
             const entry = statAt(directory, item.name) catch |err| switch (err) {
@@ -313,14 +314,14 @@ pub const Scan = struct {
         return std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ parent, name });
     }
 
-    fn openDir(self: *Scan, path: []const u8) !std.fs.Dir {
+    fn openDir(self: *Scan, path: []const u8) !std.Io.Dir {
         if (std.mem.eql(u8, path, ".")) return self.dir;
         var buffer: [std.fs.max_path_bytes]u8 = undefined;
         if (path.len > buffer.len) return error.NameTooLong;
         const native = buffer[0..path.len];
         @memcpy(native, path);
         if (is_windows) std.mem.replaceScalar(u8, native, '/', '\\');
-        return self.dir.openDir(native, .{ .iterate = true, .no_follow = true });
+        return self.dir.openDir(zio.io(), native, .{ .iterate = true, .follow_symlinks = false });
     }
 };
 
@@ -360,36 +361,36 @@ fn baseOf(path: []const u8) []const u8 {
 /// Stats `path` without following a symlink.
 pub fn lstatAbsolute(path: []const u8) !Entry {
     const parent = std.fs.path.dirname(path) orelse {
-        var dir = try std.fs.openDirAbsolute(path, .{});
-        defer dir.close();
+        var dir = try std.Io.Dir.openDirAbsolute(zio.io(), path, .{});
+        defer dir.close(zio.io());
         return statSelf(dir);
     };
-    var dir = try std.fs.openDirAbsolute(parent, .{});
-    defer dir.close();
+    var dir = try std.Io.Dir.openDirAbsolute(zio.io(), parent, .{});
+    defer dir.close(zio.io());
     return statAt(dir, std.fs.path.basename(path));
 }
 
 /// Stats `name` in `dir` without following a symlink.
-pub fn statAt(dir: std.fs.Dir, name: []const u8) !Entry {
+pub fn statAt(dir: std.Io.Dir, name: []const u8) !Entry {
     if (is_windows) {
         const w = std.os.windows;
-        const path = try w.sliceToPrefixedFileW(dir.fd, name);
+        const path = try w.sliceToPrefixedFileW(dir.handle, name);
         const handle = try w.OpenFile(path.span(), .{
-            .dir = dir.fd,
+            .dir = dir.handle,
             .access_mask = w.FILE_READ_ATTRIBUTES | w.SYNCHRONIZE,
             .creation = w.FILE_OPEN,
             .filter = .any,
             .follow_symlinks = false,
         });
-        const file: std.fs.File = .{ .handle = handle };
+        const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
         defer file.close();
         return fromStat(try file.stat());
     }
     const linux = std.os.linux;
     const path = try std.posix.toPosixPath(name);
     var stx = std.mem.zeroes(linux.Statx);
-    const mask = linux.STATX_TYPE | linux.STATX_MODE | linux.STATX_INO | linux.STATX_SIZE | linux.STATX_MTIME;
-    return switch (linux.E.init(linux.statx(dir.fd, &path, linux.AT.SYMLINK_NOFOLLOW | linux.AT.NO_AUTOMOUNT, mask, &stx))) {
+    const mask = linux.STATX{ .TYPE = true, .MODE = true, .INO = true, .SIZE = true, .MTIME = true };
+    return switch (linux.errno(linux.statx(dir.handle, &path, linux.AT.SYMLINK_NOFOLLOW | linux.AT.NO_AUTOMOUNT, mask, &stx))) {
         .SUCCESS => fromStatx(stx),
         .NOENT, .NOTDIR => error.FileNotFound,
         .ACCES, .PERM => error.AccessDenied,
@@ -398,15 +399,15 @@ pub fn statAt(dir: std.fs.Dir, name: []const u8) !Entry {
 }
 
 /// Stats the directory `dir` itself.
-pub fn statSelf(dir: std.fs.Dir) !Entry {
+pub fn statSelf(dir: std.Io.Dir) !Entry {
     if (is_windows) {
-        const file: std.fs.File = .{ .handle = dir.fd };
+        const file: std.Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
         return fromStat(try file.stat());
     }
     const linux = std.os.linux;
     var stx = std.mem.zeroes(linux.Statx);
-    const mask = linux.STATX_TYPE | linux.STATX_MODE | linux.STATX_INO | linux.STATX_SIZE | linux.STATX_MTIME;
-    return switch (linux.E.init(linux.statx(dir.fd, "", linux.AT.EMPTY_PATH, mask, &stx))) {
+    const mask = linux.STATX{ .TYPE = true, .MODE = true, .INO = true, .SIZE = true, .MTIME = true };
+    return switch (linux.errno(linux.statx(dir.handle, "", linux.AT.EMPTY_PATH, mask, &stx))) {
         .SUCCESS => fromStatx(stx),
         else => error.Unexpected,
     };
@@ -427,7 +428,7 @@ fn fromStatx(stx: std.os.linux.Statx) Entry {
     };
 }
 
-fn fromStat(stat: std.fs.File.Stat) Entry {
+fn fromStat(stat: std.Io.File.Stat) Entry {
     const kind: Kind = switch (stat.kind) {
         .file => .file,
         .directory => .directory,

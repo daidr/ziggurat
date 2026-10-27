@@ -4,6 +4,7 @@
 //! step prints when it starts and when it ends. NO_COLOR turns colors off;
 //! FORCE_COLOR turns them on where the output is not a terminal.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 
 pub const Symbols = struct {
@@ -29,16 +30,16 @@ pub const Mode = struct {
 
 /// How to write to an output that is (`terminal`) or is not a terminal,
 /// given the environment.
-pub fn decide(terminal: bool, environment: *const std.process.EnvMap) Mode {
+pub fn decide(terminal: bool, environment: *const std.process.Environ.Map) Mode {
     const term = environment.get("TERM") orelse "";
     const live = terminal and !std.mem.eql(u8, term, "dumb");
     const force = environment.get("FORCE_COLOR") orelse "";
     const forced = force.len > 0 and !std.mem.eql(u8, force, "0") and !std.mem.eql(u8, force, "false");
-    const no_color = (environment.get("NO_COLOR") orelse "").len > 0;
+    const no_color = if (environment.get("NO_COLOR")) |value| value.len > 0 else false;
     return .{ .live = live, .color = !no_color and (live or forced), .symbols = if (unicodeTerminal(environment)) &unicode_symbols else &plain_symbols };
 }
 
-fn unicodeTerminal(environment: *const std.process.EnvMap) bool {
+fn unicodeTerminal(environment: *const std.process.Environ.Map) bool {
     const term = environment.get("TERM") orelse "";
     // The Linux virtual console's font has none of them.
     if (builtin.os.tag != .windows) return !std.mem.eql(u8, term, "linux");
@@ -49,9 +50,9 @@ fn unicodeTerminal(environment: *const std.process.EnvMap) bool {
 }
 
 pub const Console = struct {
-    file: std.fs.File,
+    file: std.Io.File,
     mode: Mode,
-    mutex: std.Thread.Mutex = .{},
+    mutex: zio.Mutex = .{},
     /// The step in progress, which the spinner shows.
     task: ?*Task = null,
     drawn: bool = false,
@@ -60,10 +61,10 @@ pub const Console = struct {
     stopping: bool = false,
 
     /// A console on standard error.
-    pub fn stderr(environment: *const std.process.EnvMap) Console {
-        const file = std.fs.File.stderr();
-        var terminal = file.isTty();
-        if (terminal and builtin.os.tag == .windows) terminal = file.getOrEnableAnsiEscapeSupport();
+    pub fn stderr(environment: *const std.process.Environ.Map) Console {
+        const file = std.Io.File.stderr();
+        var terminal = file.isTty(zio.io()) catch false;
+        if (terminal and builtin.os.tag == .windows) terminal = if (file.enableAnsiEscapeCodes(zio.io())) true else |_| false;
         return .{ .file = file, .mode = decide(terminal, environment) };
     }
 
@@ -103,7 +104,7 @@ pub const Console = struct {
         defer self.mutex.unlock();
         self.clear();
         var buffer: [4096]u8 = undefined;
-        var out = self.file.writerStreaming(&buffer);
+        var out = self.file.writerStreaming(zio.io(), &buffer);
         const writer = &out.interface;
         writer.writeAll("\n  ") catch {};
         self.style(writer, "1;31", "error:") catch {};
@@ -117,7 +118,7 @@ pub const Console = struct {
         defer self.mutex.unlock();
         self.clear();
         var buffer: [4096]u8 = undefined;
-        var out = self.file.writerStreaming(&buffer);
+        var out = self.file.writerStreaming(zio.io(), &buffer);
         const writer = &out.interface;
         writer.writeAll("  ") catch {};
         self.style(writer, sgr, symbol) catch {};
@@ -140,14 +141,14 @@ pub const Console = struct {
     /// Starts a step, which `task` tracks until done or failed. `task`
     /// must stay in place until then.
     pub fn start(self: *Console, task: *Task, title: []const u8) void {
-        task.* = .{ .console = self, .started = std.time.nanoTimestamp() };
+        task.* = .{ .console = self, .started = zio.nanoTimestamp() };
         task.title_len = copy(&task.title, title);
         self.mutex.lock();
         defer self.mutex.unlock();
         self.clear();
         if (!self.mode.live) {
             var buffer: [512]u8 = undefined;
-            var out = self.file.writerStreaming(&buffer);
+            var out = self.file.writerStreaming(zio.io(), &buffer);
             out.interface.writeAll("  ") catch {};
             self.style(&out.interface, "2", self.mode.symbols.start) catch {};
             out.interface.print(" {s}\n", .{task.titleText()}) catch {};
@@ -162,7 +163,7 @@ pub const Console = struct {
 
     fn spin(self: *Console) void {
         while (true) {
-            std.Thread.sleep(80 * std.time.ns_per_ms);
+            zio.sleep(80 * std.time.ns_per_ms);
             self.mutex.lock();
             defer self.mutex.unlock();
             if (self.stopping) return;
@@ -176,14 +177,14 @@ pub const Console = struct {
         if (!self.mode.live) return;
         const task = self.task orelse return;
         var buffer: [1024]u8 = undefined;
-        var out = self.file.writerStreaming(&buffer);
+        var out = self.file.writerStreaming(zio.io(), &buffer);
         const writer = &out.interface;
         const room = terminalWidth(self.file) -| 5;
         const symbols = self.mode.symbols;
         const title = fit(task.titleText(), room, symbols.ellipsis);
         var left = room -| codePoints(title.text) -| @as(usize, if (title.cut) codePoints(symbols.ellipsis) else 0);
         var elapsed_buffer: [16]u8 = undefined;
-        const seconds = @divTrunc(std.time.nanoTimestamp() - task.started, std.time.ns_per_s);
+        const seconds = @divTrunc(zio.nanoTimestamp() - task.started, std.time.ns_per_s);
         var elapsed: []const u8 = if (seconds >= 1) formatElapsed(&elapsed_buffer, @intCast(seconds)) else "";
         if (elapsed.len + 1 > left) elapsed = "";
         left -|= elapsed.len + 1;
@@ -211,7 +212,7 @@ pub const Console = struct {
     /// Erases the spinner's line. With the mutex held.
     fn clear(self: *Console) void {
         if (!self.drawn) return;
-        self.file.writeAll("\r\x1b[K") catch {};
+        self.file.writeStreamingAll(zio.io(), "\r\x1b[K") catch {};
         self.drawn = false;
     }
 };
@@ -233,7 +234,7 @@ pub const Task = struct {
         const console = self.console;
         console.mutex.lock();
         defer console.mutex.unlock();
-        self.detail_len = (std.fmt.bufPrint(&self.detail, format, arguments) catch "").len;
+        self.detail_len = (std.fmt.bufPrint(&self.detail, format, arguments) catch @as([]const u8, "")).len;
     }
 
     pub fn done(self: *Task, comptime format: []const u8, arguments: anytype) void {
@@ -252,13 +253,13 @@ pub const Task = struct {
         if (console.task == self) console.task = null;
         console.clear();
         var buffer: [1024]u8 = undefined;
-        var out = console.file.writerStreaming(&buffer);
+        var out = console.file.writerStreaming(zio.io(), &buffer);
         const writer = &out.interface;
         writer.writeAll("  ") catch {};
         if (ok) console.style(writer, "32", console.mode.symbols.ok) catch {} else console.style(writer, "31", console.mode.symbols.fail) catch {};
         writer.print(" {s}  ", .{message}) catch {};
         var duration: [16]u8 = undefined;
-        const elapsed: u64 = @intCast(@max(std.time.nanoTimestamp() - self.started, 0));
+        const elapsed: u64 = @intCast(@max(zio.nanoTimestamp() - self.started, 0));
         console.style(writer, "2", formatDuration(&duration, elapsed)) catch {};
         writer.writeByte('\n') catch {};
         writer.flush() catch {};
@@ -318,7 +319,7 @@ pub fn formatSize(buffer: *[16]u8, bytes: u64) []const u8 {
     return std.fmt.bufPrint(buffer, "{d}.{d} MB", .{ bytes / 1000_000, bytes / 100_000 % 10 }) catch unreachable;
 }
 
-fn terminalWidth(file: std.fs.File) usize {
+fn terminalWidth(file: std.Io.File) usize {
     if (builtin.os.tag == .linux or builtin.os.tag.isDarwin()) {
         var size: std.posix.winsize = undefined;
         if (std.posix.system.ioctl(file.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&size)) == 0 and size.col > 0) return size.col;
@@ -327,7 +328,7 @@ fn terminalWidth(file: std.fs.File) usize {
 }
 
 test "colors follow NO_COLOR and FORCE_COLOR" {
-    var environment = std.process.EnvMap.init(std.testing.allocator);
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
     defer environment.deinit();
     try std.testing.expect(decide(true, &environment).color);
     try std.testing.expect(!decide(false, &environment).color);
@@ -343,8 +344,8 @@ test "colors follow NO_COLOR and FORCE_COLOR" {
 test "steps print a line each when the output is not a terminal" {
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();
-    const file = try temp.dir.createFile("out", .{ .read = true });
-    defer file.close();
+    const file = try temp.dir.createFile(zio.io(), "out", .{ .read = true });
+    defer file.close(zio.io());
     var console: Console = .{ .file = file, .mode = .{ .live = false, .color = false, .symbols = &plain_symbols } };
     defer console.deinit();
     var task: Task = undefined;
@@ -354,9 +355,8 @@ test "steps print a line each when the output is not a terminal" {
     console.warn("two\nlines", .{});
     console.start(&task, "Generating");
     task.fail();
-    try file.seekTo(0);
     var buffer: [512]u8 = undefined;
-    const text = buffer[0..try file.readAll(&buffer)];
+    const text = buffer[0..try file.readPositionalAll(zio.io(), &buffer, 0)];
     var lines = std.mem.splitScalar(u8, text, '\n');
     try std.testing.expectEqualStrings("  o Uploading feed.json", lines.next().?);
     try std.testing.expect(std.mem.startsWith(u8, lines.next().?, "  √ Uploaded feed.json  "));

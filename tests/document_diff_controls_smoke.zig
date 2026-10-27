@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const d = @import("ziggurat_document");
 const e = @import("ziggurat_document_editor");
@@ -8,11 +9,7 @@ const diff = @import("ziggurat_document_diff");
 const v = @import("ziggurat_document_diff_view");
 const a = @import("ziggurat_document_accessibility");
 const paired = @import("ziggurat_document_diff_accessibility");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 extern fn zdd_probe_auxiliary(*anyopaque, u32, *f64) i32;
 extern fn zda_probe_release(*anyopaque) void;
 extern fn zdd_probe_point_hit_mta(*anyopaque, *anyopaque, [*]const u16, u32, *u32, *u32) i32;
@@ -730,7 +727,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     const before = a.resourceCounts();
     // An explicit fixture-only selector isolates prior history without changing
     // the queued key sequence or weakening its focus/undo assertions.
-    if (std.process.getEnvVarOwned(allocator, "ZIGGURAT_DIFF_CONTROLS_REPLAY")) |name| {
+    if (zio.getEnvVarOwned(allocator, "ZIGGURAT_DIFF_CONTROLS_REPLAY")) |name| {
         defer allocator.free(name);
         const mode = std.meta.stringToEnum(Replay, name) orelse return error.InvalidReplay;
         try runScenario(allocator, false, null, mode);

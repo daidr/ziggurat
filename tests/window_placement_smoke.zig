@@ -1,12 +1,9 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const p = @import("ziggurat_window_placement");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn gtk_widget_get_mapped(*anyopaque) c_int;
 extern fn gtk_widget_get_window(*anyopaque) *anyopaque;
 const GdkRect = extern struct { x: c_int, y: c_int, width: c_int, height: c_int };
@@ -26,7 +23,7 @@ const Probe = struct {
     posted: bool = false,
     closed: usize = 0,
     failure: ?anyerror = null,
-    directory: std.fs.Dir,
+    directory: std.Io.Dir,
     encoded: [p.codec.max_bytes]u8 = undefined,
     encoded_length: usize = 0,
     loaded: [p.codec.max_bytes]u8 = undefined,
@@ -243,8 +240,8 @@ const Probe = struct {
     }
 };
 const Watchdog = struct {
-    mutex: std.Thread.Mutex = .{},
-    condition: std.Thread.Condition = .{},
+    mutex: zio.Mutex = .{},
+    condition: zio.Condition = .{},
     done: bool = false,
     app: *z.App = undefined,
     expired: std.atomic.Value(bool) = .init(false),
@@ -304,7 +301,7 @@ fn frameContained(window: z.Window, work: p.Rect) !void {
     try std.testing.expect(x >= work.x and y >= work.y and right <= work.right() and bottom <= work.bottom());
 }
 fn run(allocator: std.mem.Allocator, require_wm: bool) !void {
-    var temporary = std.testing.tmpDir(.{});
+    var temporary = zio.tmpDir(.{});
     defer temporary.cleanup();
     const app = try z.App.init(allocator);
     defer app.deinit();
@@ -379,12 +376,12 @@ fn isolatedWindows() !void {
     var code: c.DWORD = 0;
     if (c.GetExitCodeProcess(process.hProcess, &code) == 0 or code != 0) return error.TestProcessFailed;
 }
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var allocations: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(allocations.deinit() == .ok);
     const allocator = allocations.allocator();
-    const arguments = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, arguments);
+    const arguments = try zio.argsAlloc(allocator, init.args);
+    defer zio.argsFree(allocator, arguments);
     var require_wm = false;
     var desktop_child = false;
     for (arguments[1..]) |argument| if (std.mem.eql(u8, argument, "--require-wm")) {

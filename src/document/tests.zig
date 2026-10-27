@@ -165,7 +165,7 @@ test "snapshot coordinate queries and streaming writers do not flatten or alloca
 }
 
 test "chunk construction preserves a scalar crossing the midpoint and explicit native NUL errors" {
-    var input = [_]u8{'x'} ** 8192;
+    var input = @as([8192]u8, @splat('x'));
     @memcpy(input[4095..4099], "😀");
     const document = try d.Document.create(testing.allocator, std.Thread.getCurrentId(), &input, .{});
     defer document.close() catch unreachable;
@@ -258,7 +258,7 @@ test "composition is virtual, bounded and commits one undo version" {
 }
 
 fn allocationScenario(allocator: std.mem.Allocator) !void {
-    const input = [_]u8{'a'} ** 12000;
+    const input = @as([12000]u8, @splat('a'));
     const document = try d.Document.create(allocator, std.Thread.getCurrentId(), &input, .{ .history_entries = 3 });
     defer document.close() catch unreachable;
     const saved = try document.snapshot();

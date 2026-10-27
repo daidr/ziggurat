@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const Locale = @import("locale.zig").Locale;
 const plural = @import("plural.zig");
 const number = @import("number.zig");
@@ -17,8 +18,8 @@ pub const Arg = struct { name: []const u8, value: Value };
 /// Builds an argument array from a struct literal at the call site:
 /// `args(.{ .count = 3, .name = "Ana" })`. Integers, floats, strings,
 /// `date.Instant` and `Value` fields are accepted.
-pub fn args(values: anytype) [@typeInfo(@TypeOf(values)).@"struct".fields.len]Arg {
-    const fields = @typeInfo(@TypeOf(values)).@"struct".fields;
+pub fn args(values: anytype) [zio.fields(@TypeOf(values)).len]Arg {
+    const fields = zio.fields(@TypeOf(values));
     var out: [fields.len]Arg = undefined;
     inline for (fields, 0..) |field, i| out[i] = .{ .name = field.name, .value = toValue(@field(values, field.name)) };
     return out;
@@ -290,7 +291,7 @@ const Walker = struct {
         if (value) |v| if (v != .int and v != .float) return error.ArgumentType;
         const selected = if (value) |v| try self.pluralCategory(v, offset, ordinal) else plural.Category.other;
         const sign: PluralValue = .{ .value = value orelse .{ .int = 0 }, .offset = offset };
-        var seen = std.EnumSet(plural.Category).initEmpty();
+        var seen = std.EnumSet(plural.Category).empty;
         var exact_start: ?usize = null;
         var keyword_start: ?usize = null;
         var other_start: ?usize = null;

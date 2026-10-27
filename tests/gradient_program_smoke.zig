@@ -1,14 +1,11 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const reference = @import("gradient_interpolation_oracle.zig");
 const b = ui.commands.brushes;
-const c = @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 extern fn zgi_registered(*anyopaque, *u32) i32;
 extern fn zgi_after_program_free(*anyopaque, *anyopaque, *const fn (*anyopaque) callconv(.c) void) i32;
 extern fn zgi_hook_pending() c_int;
@@ -95,7 +92,7 @@ fn surfaceCase(app: *z.App, driver: ui.gpu_resources.Driver, scale: f32) !void {
         try buffer.gradientRect(bounds, 0, gradient(space, colors, direction));
         try surface.render(&buffer);
         try surface.readFrontForTest(pixels);
-        const oracle = reference.Palette.init(@intFromEnum(space), colors);
+        const oracle = reference.Palette.init(@backingInt(space), colors);
         for (0..size.height) |y| for (0..size.width) |x| {
             const position = if (direction < 2) (@as(f64, @floatFromInt(x)) + 0.5) / (width * @as(f64, scale)) else (@as(f64, @floatFromInt(y)) + 0.5) / (height * @as(f64, scale));
             const parameter = if (direction == 1 or direction == 3) 1 - position else position;
@@ -251,7 +248,12 @@ const ClosingContext = struct {
 };
 fn reentry(quit: bool, shared: bool) !void {
     std.debug.print("reentry checkpoint begin quit={any} domain={any}\n", .{ quit, shared });
-    errdefer |err| std.debug.print("reentry failure quit={any} domain={any}: {s}\n", .{ quit, shared, @errorName(err) });
+    return reentryBody(quit, shared) catch |err| {
+        std.debug.print("reentry failure quit={any} domain={any}: {s}\n", .{ quit, shared, @errorName(err) });
+        return err;
+    };
+}
+fn reentryBody(quit: bool, shared: bool) !void {
     const app = try z.App.init(std.heap.page_allocator);
     defer app.deinit();
     const domain = if (shared) try ui.gpu_resources.DeviceDomain.create(app, std.heap.page_allocator, .{ .driver = .warp }) else null;
@@ -347,10 +349,10 @@ fn stopped() !void {
     try renderer.releaseGradientInterpolation();
     try std.testing.expectEqual(@as(u64, 0), (try renderer.gradientInterpolationStats()).metadata_reserved);
 }
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     if (builtin.os.tag != .windows or !ui.capabilities.gpu) return error.GpuNotEnabled;
-    const args = try std.process.argsAlloc(std.heap.page_allocator);
-    defer std.process.argsFree(std.heap.page_allocator, args);
+    const args = try zio.argsAlloc(std.heap.page_allocator, init.args);
+    defer zio.argsFree(std.heap.page_allocator, args);
     if (args.len == 2 and std.mem.eql(u8, args[1], "--ordinary-stop")) return ordinaryStopped();
     if (args.len == 2 and std.mem.eql(u8, args[1], "--ordinary-reentry")) return reentry(true, false);
     if (args.len == 2 and std.mem.eql(u8, args[1], "--conditioning")) {

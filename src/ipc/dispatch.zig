@@ -53,12 +53,13 @@ fn WorkFor(comptime Service: type, comptime limits: protocol.Limits, comptime me
 fn Replies(comptime Service: type) type {
     const methods = schema.methods(Service);
     @setEvalBranchQuota(20000 + methods.len * 10000);
-    var fields: [methods.len]std.builtin.Type.UnionField = undefined;
+    var names: [methods.len][:0]const u8 = undefined;
+    var types: [methods.len]type = undefined;
     for (methods, 0..) |field, index| {
-        const T = Reply(Service, field.name);
-        fields[index] = .{ .name = field.name, .type = T, .alignment = @alignOf(T) };
+        names[index] = field.name;
+        types[index] = Reply(Service, field.name);
     }
-    return @Type(.{ .@"union" = .{ .layout = .auto, .tag_type = schema.MethodTag(Service), .fields = &fields, .decls = &.{} } });
+    return @Union(.auto, schema.MethodTag(Service), &names, &types, &@splat(.{}));
 }
 
 /// An executed synchronous result, retaining request storage until encoding.
@@ -152,7 +153,7 @@ pub fn Dispatcher(comptime Service: type, comptime Impl: type, comptime Context:
                         inline else => |params, method| {
                             const name = @tagName(method);
                             const handler = @field(Impl, name);
-                            const arg = @typeInfo(@TypeOf(handler)).@"fn".params[2].type.?;
+                            const arg = @typeInfo(@TypeOf(handler)).@"fn".param_types[2].?;
                             if (arg == Work(Service, limits, name)) {
                                 handler(implementation, context, .{ .storage = received, .token = call.token, .params = params });
                                 return .{ .taken = call.token };
@@ -173,9 +174,9 @@ fn validateHandler(comptime Service: type, comptime Impl: type, comptime Context
     const info = @typeInfo(@TypeOf(@field(Impl, method)));
     if (info != .@"fn") @compileError("IPC implementation must be a function: " ++ method);
     const function = info.@"fn";
-    if (function.is_generic or function.is_var_args or function.params.len != 3 or function.return_type == null) @compileError("IPC handler requires exactly Impl, Context and typed Params/Work: " ++ method);
-    if (function.params[0].type != *Impl or function.params[1].type != *Context) @compileError("IPC handler Impl/Context pointer mismatch: " ++ method);
-    const arg = function.params[2].type.?;
+    if (function.is_generic or function.attrs.varargs or function.param_types.len != 3 or function.return_type == null) @compileError("IPC handler requires exactly Impl, Context and typed Params/Work: " ++ method);
+    if (function.param_types[0] != *Impl or function.param_types[1] != *Context) @compileError("IPC handler Impl/Context pointer mismatch: " ++ method);
+    const arg = function.param_types[2].?;
     if (arg == Work(Service, limits, method)) {
         if (function.return_type.? != void) @compileError("IPC Work handler transfers ownership and must return void: " ++ method);
     } else {

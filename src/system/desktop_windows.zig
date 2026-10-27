@@ -2,11 +2,7 @@
 //! Owner thread only, except networkChanged, which only posts a message.
 const std = @import("std");
 const desktop = @import("desktop.zig");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 const L = std.unicode.utf8ToUtf16LeStringLiteral;
 
 pub const Native = struct {

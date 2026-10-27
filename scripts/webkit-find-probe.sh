@@ -21,7 +21,7 @@ if [[ -n "$tls" ]]; then
     tls_lib="$tls/usr/lib/x86_64-linux-gnu"
     [[ -f "$tls_lib/gio/modules/libgiognutls.so" ]] || { printf '%s\n' 'Missing GIO TLS module.' >&2; exit 2; }
 fi
-zig="${ZIG_BIN:-$HOME/.cache/ziggurat/zig-x86_64-linux-0.15.2/zig}"
+zig="${ZIG_BIN:-$HOME/.cache/ziggurat/zig-x86_64-linux-0.17.0/zig}"
 source "$project/scripts/linux-cache-env.sh"
 configure_linux_cache "$project" webkit
 build_cache="${P01_BUILD_CACHE:-$ZIG_LOCAL_CACHE_DIR}"

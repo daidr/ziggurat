@@ -2,7 +2,7 @@ param([string] $ZigPath = 'zig')
 $ErrorActionPreference = 'Stop'
 $project = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $zig = (Get-Command $ZigPath -ErrorAction Stop).Source
-if ((& $zig version | Out-String).Trim() -cne '0.15.2' -or $LASTEXITCODE -ne 0) { throw 'Header cache regression requires Zig 0.15.2.' }
+if ((& $zig version | Out-String).Trim() -cne '0.17.0' -or $LASTEXITCODE -ne 0) { throw 'Header cache regression requires Zig 0.17.0.' }
 $work = Join-Path $project ('.zig-cache/managed/native-header-check-' + [Guid]::NewGuid().ToString('N'))
 $fixture = Join-Path $work 'fixture'
 New-Item -ItemType Directory -Path $fixture | Out-Null

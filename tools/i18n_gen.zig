@@ -12,6 +12,7 @@
 //! DateTime and Object. `@@locale` names the file's language; other `@@`
 //! attributes are kept by translation tools and ignored here.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const i18n = @import("ziggurat_i18n");
 
 pub const zig_file = "catalog.zig";
@@ -184,7 +185,7 @@ fn isPseudo(tag: []const u8) bool {
 /// cannot read them; problems of their contents are diagnostics, and a
 /// catalog with errors still holds what could be read. Everything is
 /// allocated in `arena`.
-pub fn load(arena: std.mem.Allocator, dir: std.fs.Dir, options: Options) !Catalog {
+pub fn load(arena: std.mem.Allocator, dir: std.Io.Dir, options: Options) !Catalog {
     var loader: Loader = .{ .arena = arena, .options = options };
     var buffer: [i18n.locale.max_tag_len]u8 = undefined;
     const source_ok = if (canonical(&buffer, options.source)) |tag| std.mem.eql(u8, tag, options.source) and !isPseudo(tag) else false;
@@ -194,7 +195,7 @@ pub fn load(arena: std.mem.Allocator, dir: std.fs.Dir, options: Options) !Catalo
     }
     var names: std.ArrayList([]const u8) = .empty;
     var iterator = dir.iterate();
-    while (try iterator.next()) |entry| {
+    while (try iterator.next(zio.io())) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
         try names.append(arena, try arena.dupe(u8, entry.name));
     }
@@ -214,7 +215,7 @@ pub fn load(arena: std.mem.Allocator, dir: std.fs.Dir, options: Options) !Catalo
             try loader.err(display, 0, "{s} is a pseudo locale, made from the source language: remove the file", .{tag});
             continue;
         }
-        const bytes = try dir.readFileAlloc(arena, name, i18n.catalog.max_json_bytes);
+        const bytes = try dir.readFileAlloc(zio.io(), name, arena, .limited(i18n.catalog.max_json_bytes));
         if (try readFile(&loader, display, tag, bytes)) |file| try loader.files.put(arena, tag, file);
     }
     const source_file = loader.files.get(options.source) orelse {
@@ -512,7 +513,7 @@ fn checkPlurals(loader: *Loader, file: *File, key: []const u8, usage: *Usage) !v
         const word = if (ordinal) "ordinal" else "plural";
         var extra: std.Io.Writer.Allocating = .init(arena);
         var extra_count: usize = 0;
-        var cases: i18n.plural.Categories = .initEmpty();
+        var cases: i18n.plural.Categories = .empty;
         for (argument.cases.items) |name| {
             const category = i18n.plural.Category.parse(name) orelse continue;
             cases.insert(category);
@@ -626,7 +627,7 @@ pub fn formattedZig(allocator: std.mem.Allocator, catalog: *const Catalog) ![]u8
     try writeZig(&out.writer, catalog);
     const source = try out.toOwnedSliceSentinel(0);
     defer allocator.free(source);
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    var tree = try std.zig.Ast.parse(allocator, source, .{ .mode = .zig });
     defer tree.deinit(allocator);
     if (tree.errors.len > 0) return error.InvalidGeneratedCode;
     return tree.renderAlloc(allocator);
@@ -719,7 +720,7 @@ pub fn writeTypeScript(writer: *std.Io.Writer, catalog: *const Catalog) !void {
 fn loadText(arena: std.mem.Allocator, files: []const [2][]const u8, options: Options) !Catalog {
     var temp = std.testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
-    for (files) |file| try temp.dir.writeFile(.{ .sub_path = file[0], .data = file[1] });
+    for (files) |file| try temp.dir.writeFile(zio.io(), .{ .sub_path = file[0], .data = file[1] });
     return load(arena, temp.dir, options);
 }
 
@@ -841,7 +842,7 @@ test "the Zig accessors are formatted Zig and the TypeScript module follows the 
     }, .{});
     try std.testing.expectEqual(@as(usize, 0), catalog.errors());
     const source = try formattedZig(arena, &catalog);
-    const again = try std.zig.Ast.parse(arena, try arena.dupeZ(u8, source), .zig);
+    const again = try std.zig.Ast.parse(arena, try arena.dupeSentinel(u8, source, 0), .{ .mode = .zig });
     try std.testing.expectEqualStrings(source, try again.renderAlloc(arena));
     try std.testing.expect(std.mem.indexOf(u8, source, "pub fn files(self: Messages, writer: *std.Io.Writer, count: i64) i18n.catalog.FormatError!void {\n        return self.localizer.format(writer, \"files\", &.{.{ .name = \"count\", .value = .{ .int = count } }});") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "pub fn @\"error\"(self: Messages, writer: *std.Io.Writer, fn_: []const u8, u8_: []const u8)") != null);

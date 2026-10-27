@@ -1,12 +1,9 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn gtk_window_get_transient_for(*anyopaque) ?*anyopaque;
 extern fn gtk_window_get_modal(*anyopaque) c_int;
 extern fn gtk_window_get_group(*anyopaque) *anyopaque;
@@ -244,9 +241,9 @@ fn runWindows(require_wm: bool) !void {
     try runRelationships(require_wm);
 }
 
-pub fn main() !void {
-    const args = try std.process.argsAlloc(std.heap.page_allocator);
-    defer std.process.argsFree(std.heap.page_allocator, args);
+pub fn main(init: std.process.Init.Minimal) !void {
+    const args = try zio.argsAlloc(std.heap.page_allocator, init.args);
+    defer zio.argsFree(std.heap.page_allocator, args);
     var require_wm = false;
     for (args[1..]) |arg| if (std.mem.eql(u8, arg, "--require-wm")) {
         require_wm = true;

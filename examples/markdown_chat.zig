@@ -9,6 +9,7 @@
 //!
 //! Run it with `zig build run-markdown-chat`.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const view = @import("ziggurat_view");
@@ -62,7 +63,7 @@ const Chat = struct {
     markdown: md.Storage(2048, 16 * 1024) = .{},
 
     fn init(allocator: std.mem.Allocator) Chat {
-        return .{ .allocator = allocator, .random = .init(std.crypto.random.int(u64)) };
+        return .{ .allocator = allocator, .random = .init(zio.random.int(u64)) };
     }
     fn deinit(self: *Chat) void {
         for (self.messages.items) |item| if (item.mine) self.allocator.free(item.text);
@@ -81,7 +82,7 @@ const Chat = struct {
         try v.row(.{ .gap = 8, .alignment = .center, .self_align = .stretch, .padding = .{ .top = 8, .bottom = 8, .left = 20, .right = 20 } });
         try v.text("Stream by", .{ .color = muted });
         try v.segmented(.{ .name = "Stream by" });
-        inline for (reveal_names, 0..) |name, i| _ = try v.segment(Reveal, &self.reveal, @enumFromInt(i), name, .{});
+        inline for (reveal_names, 0..) |name, i| _ = try v.segment(Reveal, &self.reveal, @fromBackingInt(@intCast(i)), name, .{});
         try v.end();
         try v.end();
         try rule(v);
@@ -256,7 +257,7 @@ const replies = [_][]const u8{
     "Here is a minimal **LRU cache** in Zig, for one thread:\n\n" ++
         "```zig\nfn Lru(comptime V: type) type {\n    return struct {\n        map: std.StringHashMapUnmanaged(*Node) = .empty,\n        order: std.DoublyLinkedList = .{},\n        capacity: usize,\n\n" ++
         "        pub fn get(self: *@This(), key: []const u8) ?V {\n            const node = self.map.get(key) orelse return null;\n            self.order.remove(&node.link);\n            self.order.prepend(&node.link);\n            return node.value;\n        }\n    };\n}\n```\n\n" ++
-        "A few things to note:\n\n1. The intrusive `DoublyLinkedList` keeps the order of use in O(1).\n2. `get` moves the entry, so it is a writer too: guard it with a `std.Thread.Mutex` to share the cache.\n3. For heavy read traffic, consider **sharding** by key hash.\n",
+        "A few things to note:\n\n1. The intrusive `DoublyLinkedList` keeps the order of use in O(1).\n2. `get` moves the entry, so it is a writer too: guard it with a `zio.Mutex` to share the cache.\n3. For heavy read traffic, consider **sharding** by key hash.\n",
     "## Comparing the options\n\n| Strategy | Read latency | Staleness | Complexity |\n|---|--:|:-:|---|\n| No cache | ~41 ms | none | trivial |\n| Cache-aside | ~0.2 ms | medium | low |\n| Write-through | ~0.2 ms | low | medium |\n\n" ++
         "> **Tip:** start with *cache-aside*; move to write-through once staleness bites.\n\nSee the [Zig language reference](https://ziglang.org/documentation/master/) before you profile what to cache first.",
     "Sure. The area of a circle is $$A = \\pi r^2$$ and its circumference $$C = 2\\pi r$$.\n\n" ++

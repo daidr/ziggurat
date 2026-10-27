@@ -1,8 +1,9 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const options = @import("ziggurat_image_options");
 const Initialization = struct {
     ready: std.atomic.Value(bool) = .init(false),
-    mutex: std.Thread.Mutex = .{},
+    mutex: zio.Mutex = .{},
     fn ensure(self: *Initialization, comptime initialize: *const fn () callconv(.c) c_int) c_int {
         if (self.ready.load(.acquire)) return 0;
         self.mutex.lock();

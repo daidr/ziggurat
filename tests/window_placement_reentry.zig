@@ -2,11 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const p = @import("ziggurat_window_placement");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn gtk_widget_destroy(*anyopaque) void;
 const Flags = struct { freed: bool = false, in_advance: bool = false, closed_inside_callback: bool = false, busy_checked: bool = false, failure: ?anyerror = null };
 const Host = struct {

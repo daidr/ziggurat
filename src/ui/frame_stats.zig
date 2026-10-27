@@ -6,6 +6,7 @@
 //! `0`/`off`/`false`/`no` keeps timing off. Timing reads a monotonic clock
 //! a few times per frame; it allocates nothing.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 
 pub const env_name = "ZIGGURAT_FRAME_STATS";
@@ -68,25 +69,25 @@ pub fn fromEnvironment() Options {
         for (wide, 0..) |unit, i| narrow[i] = if (unit < 128) @intCast(unit) else '?';
         return parse(narrow[0..wide.len]);
     }
-    if (builtin.link_libc or builtin.os.tag == .linux) return parse(std.posix.getenv(env_name));
+    if (builtin.link_libc or builtin.os.tag == .linux) return parse(zio.getenv(env_name));
     return .{};
 }
 
 /// Marks taken through one frame.
 pub const Clock = struct {
-    start: ?std.time.Instant = null,
-    build: ?std.time.Instant = null,
-    preflight: ?std.time.Instant = null,
+    start: ?zio.Instant = null,
+    build: ?zio.Instant = null,
+    preflight: ?zio.Instant = null,
     software: bool = true,
 
     pub fn begin(enabled: bool) Clock {
-        return .{ .start = if (enabled) std.time.Instant.now() catch null else null };
+        return .{ .start = if (enabled) zio.Instant.now() catch null else null };
     }
     pub fn markBuild(self: *Clock) void {
-        if (self.start != null) self.build = std.time.Instant.now() catch null;
+        if (self.start != null) self.build = zio.Instant.now() catch null;
     }
     pub fn markPreflight(self: *Clock) void {
-        if (self.start != null) self.preflight = std.time.Instant.now() catch null;
+        if (self.start != null) self.preflight = zio.Instant.now() catch null;
     }
 };
 
@@ -95,7 +96,7 @@ pub const Clock = struct {
 pub fn finish(stats: *Stats, options: Options, clock: *const Clock, commands: usize) void {
     const start = clock.start orelse return;
     const build = clock.build orelse return;
-    const end = std.time.Instant.now() catch return;
+    const end = zio.Instant.now() catch return;
     const preflight = clock.preflight orelse end;
     const sample: Sample = .{
         .build_ns = build.since(start),

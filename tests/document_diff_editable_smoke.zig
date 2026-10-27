@@ -7,12 +7,7 @@ const d = @import("ziggurat_document");
 const editing = @import("ziggurat_document_editor");
 const diff = @import("ziggurat_document_diff");
 const viewing = @import("ziggurat_document_diff_view");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("imm.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn zlg_test_paint(*anyopaque, u32, u32) void;
 extern fn zlc_test_raw_pixel(*anyopaque, u32, u32) u32;
 extern fn gtk_widget_get_scale_factor(*anyopaque) c_int;

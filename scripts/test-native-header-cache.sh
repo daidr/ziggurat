@@ -2,8 +2,8 @@
 set -euo pipefail
 project="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 zig_bin="${ZIG_BIN:-zig}"
-if [[ "$("$zig_bin" version)" != 0.15.2 ]]; then
-    printf 'Header cache regression requires Zig 0.15.2.\n' >&2
+if [[ "$("$zig_bin" version)" != 0.17.0 ]]; then
+    printf 'Header cache regression requires Zig 0.17.0.\n' >&2
     exit 2
 fi
 source "$project/scripts/linux-cache-env.sh"

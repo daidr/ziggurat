@@ -1,12 +1,7 @@
 const std = @import("std");
 const z = @import("ziggurat");
 const system = @import("ziggurat_system");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("shellapi.h");
-});
+const c = @import("ziggurat_c_win32");
 const tray_message = c.WM_APP + 0x421;
 const items = [_]system.Item{
     .{ .id = 1, .kind = .submenu, .label = "&File" },

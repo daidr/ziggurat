@@ -4,11 +4,7 @@ const ui = @import("ziggurat_ui");
 const resources = ui.gpu_resources;
 const drawing = ui.drawing;
 const gpu = ui.d3d11;
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 const expect = std.testing.expect;
 const equal = std.testing.expectEqual;
 const expectError = std.testing.expectError;

@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 extern fn zlg_resource_count() u32;
@@ -114,8 +115,8 @@ pub fn main() !void {
         zlg_test_paint(probe.native(), 320, 200);
         try std.testing.expect(probe.content.frames > 0 and probe.content.hasSurface());
         // X11 obeys this explicit test scale; other display servers choose their own scale.
-        if (std.posix.getenv("GDK_BACKEND")) |backend| if (std.mem.eql(u8, backend, "x11")) {
-            if (std.posix.getenv("GDK_SCALE")) |scale| try std.testing.expectEqual(try std.fmt.parseFloat(f32, scale), probe.paint_scale);
+        if (zio.getenv("GDK_BACKEND")) |backend| if (std.mem.eql(u8, backend, "x11")) {
+            if (zio.getenv("GDK_SCALE")) |scale| try std.testing.expectEqual(try std.fmt.parseFloat(f32, scale), probe.paint_scale);
         };
         const surface = probe.content.renderer.native.?;
         try std.testing.expectEqual(@as(u32, 0x274c77), zlc_test_pixel(surface, 20, 70));

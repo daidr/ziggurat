@@ -12,6 +12,7 @@
 //! on a worker thread it starts per job. Automatic checks are timed by a
 //! `Scheduler`, such as `WakeScheduler`.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const view = @import("ziggurat_view");
@@ -97,7 +98,7 @@ pub const Options = struct {
     automatic_checks: bool = true,
     /// Where updater.json is kept; null keeps choices for this run only.
     /// Borrowed until deinit.
-    state_dir: ?std.fs.Dir = null,
+    state_dir: ?std.Io.Dir = null,
     scheduler: ?Scheduler = null,
     /// Epoch seconds; replaced by tests.
     now: *const fn () i64 = defaultNow,
@@ -119,7 +120,7 @@ pub const LinkHandler = struct {
 };
 
 fn defaultNow() i64 {
-    return std.time.timestamp();
+    return zio.timestamp();
 }
 
 pub const Screen = enum { idle, unavailable, checking, up_to_date, check_failed, available, downloading, installing, install_failed, ready };
@@ -687,7 +688,7 @@ pub const Updater = struct {
 pub fn wrapped(v: *view.View, text: []const u8, width: f32, style: view.Style) !void {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {
-        const line = std.mem.trimRight(u8, raw, "\r ");
+        const line = std.mem.trimEnd(u8, raw, "\r ");
         if (line.len == 0) {
             try v.spacer(.{ .height = 6, .grow = 0 });
             continue;

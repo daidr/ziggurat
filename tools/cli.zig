@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const update = @import("ziggurat_update");
 const options = @import("cli_options");
@@ -88,20 +89,20 @@ pub const Project = struct {
     pub const I18n = struct { dir: []const u8 = "src/locales", source: []const u8 = "en" };
 };
 
-pub fn main() void {
+pub fn main(process_init: std.process.Init.Minimal) void {
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
-    const code = run(arena.allocator()) catch |err| {
+    const code = run(arena.allocator(), process_init.args) catch |err| {
         std.debug.print("ziggurat: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
     std.process.exit(code);
 }
 
-fn run(allocator: std.mem.Allocator) !u8 {
-    const args = try std.process.argsAlloc(allocator);
+fn run(allocator: std.mem.Allocator, process_args: std.process.Args) !u8 {
+    const args = try zio.argsAlloc(allocator, process_args);
     if (args.len < 2 or std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "help")) {
-        try std.fs.File.stdout().writeAll(usage);
+        try std.Io.File.stdout().writeStreamingAll(zio.io(), usage);
         return 0;
     }
     const command = args[1];
@@ -118,7 +119,7 @@ fn run(allocator: std.mem.Allocator) !u8 {
     if (std.mem.eql(u8, command, "icon")) return iconCommand(allocator, rest);
     if (std.mem.eql(u8, command, "sign")) return signCommand(allocator, rest);
     if (std.mem.eql(u8, command, "vet")) return vetCommand(allocator, rest);
-    try std.fs.File.stderr().writeAll(usage);
+    try std.Io.File.stderr().writeStreamingAll(zio.io(), usage);
     return 2;
 }
 
@@ -155,9 +156,9 @@ fn init(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         } else return error.InvalidArguments;
     }
     if (init_options.directory.len == 0) return error.InvalidArguments;
-    try createProject(allocator, std.fs.cwd(), init_options);
-    var stdout = std.fs.File.stdout();
-    try stdout.writeAll(try std.fmt.allocPrint(allocator, "created {s}; next: cd {s} && ziggurat dev\n", .{ init_options.directory, init_options.directory }));
+    try createProject(allocator, std.Io.Dir.cwd(), init_options);
+    var stdout = std.Io.File.stdout();
+    try stdout.writeStreamingAll(zio.io(), try std.fmt.allocPrint(allocator, "created {s}; next: cd {s} && ziggurat dev\n", .{ init_options.directory, init_options.directory }));
     return 0;
 }
 
@@ -213,7 +214,7 @@ const hybrid_template = @embedFile("templates/hybrid.zig.template");
 const html_template = @embedFile("templates/index.html.template");
 const gitignore_template = @embedFile("templates/gitignore.template");
 
-pub fn createProject(allocator: std.mem.Allocator, cwd: std.fs.Dir, init_options: InitOptions) !void {
+pub fn createProject(allocator: std.mem.Allocator, cwd: std.Io.Dir, init_options: InitOptions) !void {
     const base = std.fs.path.basename(init_options.directory);
     const name = init_options.name orelse base;
     if (!validDisplayName(name)) return error.InvalidName;
@@ -222,22 +223,22 @@ pub fn createProject(allocator: std.mem.Allocator, cwd: std.fs.Dir, init_options
     if (!validIdentity(identity)) return error.InvalidIdentity;
     const executable = try std.mem.replaceOwned(u8, allocator, package, "_", "-");
 
-    var project = cwd.makeOpenPath(init_options.directory, .{ .iterate = true }) catch |err| return err;
-    defer project.close();
+    var project = cwd.createDirPathOpen(zio.io(), init_options.directory, .{ .open_options = .{ .iterate = true } }) catch |err| return err;
+    defer project.close(zio.io());
     var iterator = project.iterate();
-    if (try iterator.next() != null) return error.DirectoryNotEmpty;
+    if (try iterator.next(zio.io()) != null) return error.DirectoryNotEmpty;
 
     // build.zig.zon paths are relative to the project.
-    const project_absolute = try cwd.realpathAlloc(allocator, init_options.directory);
-    const framework_absolute = try cwd.realpathAlloc(allocator, init_options.framework);
-    var framework_check = try std.fs.openDirAbsolute(framework_absolute, .{});
-    framework_check.access("build.zig.zon", .{}) catch return error.FrameworkNotFound;
-    framework_check.close();
-    const relative = try std.fs.path.relative(allocator, project_absolute, framework_absolute);
+    const project_absolute = try zio.realPathAlloc(cwd, init_options.directory, allocator);
+    const framework_absolute = try zio.realPathAlloc(cwd, init_options.framework, allocator);
+    var framework_check = try std.Io.Dir.openDirAbsolute(zio.io(), framework_absolute, .{});
+    framework_check.access(zio.io(), "build.zig.zon", .{}) catch return error.FrameworkNotFound;
+    framework_check.close(zio.io());
+    const relative = try std.fs.path.relativeAlloc(allocator, project_absolute, null, project_absolute, framework_absolute);
     const framework = try std.mem.replaceOwned(u8, allocator, relative, "\\", "/");
 
     var id: u32 = undefined;
-    std.crypto.random.bytes(std.mem.asBytes(&id));
+    zio.random.bytes(std.mem.asBytes(&id));
     if (id == 0 or id == std.math.maxInt(u32)) id = 1;
     const fingerprint = (@as(u64, std.hash.Crc32.hash(package)) << 32) | id;
 
@@ -273,7 +274,7 @@ pub fn createProject(allocator: std.mem.Allocator, cwd: std.fs.Dir, init_options
         .{ "WEB", if (web) "true" else "false" },
         .{ "IMPORTS", imports },
     };
-    try project.makePath("src");
+    try project.createDirPath(zio.io(), "src");
     try write(project, "build.zig", try render(allocator, build_template, &replacements));
     try write(project, "build.zig.zon", try render(allocator, zon_template, &replacements));
     try write(project, ".gitignore", gitignore_template);
@@ -288,12 +289,12 @@ pub fn createProject(allocator: std.mem.Allocator, cwd: std.fs.Dir, init_options
     try installSkills(project);
 }
 
-fn write(dir: std.fs.Dir, path: []const u8, bytes: []const u8) !void {
-    try dir.writeFile(.{ .sub_path = path, .data = bytes, .flags = .{ .exclusive = true } });
+fn write(dir: std.Io.Dir, path: []const u8, bytes: []const u8) !void {
+    try dir.writeFile(zio.io(), .{ .sub_path = path, .data = bytes, .flags = .{ .exclusive = true } });
 }
 
-pub fn readProject(allocator: std.mem.Allocator, dir: std.fs.Dir) !Project {
-    const bytes = dir.readFileAlloc(allocator, "ziggurat.json", 16 * 1024) catch |err| {
+pub fn readProject(allocator: std.mem.Allocator, dir: std.Io.Dir) !Project {
+    const bytes = dir.readFileAlloc(zio.io(), "ziggurat.json", allocator, .limited(16 * 1024)) catch |err| {
         if (err == error.FileNotFound) return error.MissingProjectFile;
         return err;
     };
@@ -307,17 +308,17 @@ pub fn readProject(allocator: std.mem.Allocator, dir: std.fs.Dir) !Project {
 // ---------------------------------------------------------------- build
 
 fn zigExecutable(allocator: std.mem.Allocator) ![]const u8 {
-    return std.process.getEnvVarOwned(allocator, "ZIG") catch "zig";
+    return zio.getEnvVarOwned(allocator, "ZIG") catch "zig";
 }
 
 fn runZig(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.append(allocator, try zigExecutable(allocator));
     try argv.appendSlice(allocator, args);
-    var child = std.process.Child.init(argv.items, allocator);
-    const term = try child.spawnAndWait();
+    var child = try zio.spawn(.{ .argv = argv.items });
+    const term = try child.wait(zio.io());
     return switch (term) {
-        .Exited => |code| code,
+        .exited => |code| code,
         else => 1,
     };
 }
@@ -348,7 +349,7 @@ fn buildCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
             break;
         } else return error.InvalidArguments;
     }
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     const project = if (package) try readProject(allocator, cwd) else null;
     var zig_args: std.ArrayList([]const u8) = .empty;
     try zig_args.appendSlice(allocator, &.{ "build", if (debug) "-Doptimize=Debug" else "-Doptimize=ReleaseSafe" });
@@ -365,9 +366,9 @@ fn buildCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         if (try signFile(allocator, config, executable_path) != 0) return 1;
     };
     var files: std.ArrayList(update.archive.Entry) = .empty;
-    try files.append(allocator, .{ .name = executable, .bytes = try cwd.readFileAlloc(allocator, executable_path, 512 * 1024 * 1024) });
+    try files.append(allocator, .{ .name = executable, .bytes = try cwd.readFileAlloc(zio.io(), executable_path, allocator, .limited(512 * 1024 * 1024)) });
     if (info.icon) |path| {
-        const bytes = try cwd.readFileAlloc(allocator, path, 64 * 1024 * 1024);
+        const bytes = try cwd.readFileAlloc(zio.io(), path, allocator, .limited(64 * 1024 * 1024));
         icon_mod.validate(bytes) catch |err| {
             std.debug.print("ziggurat: icon {s}: {s}\n", .{ path, if (err == error.IconNotSquare) "the icon must be square" else "the icon must be a PNG" });
             return 1;
@@ -375,26 +376,26 @@ fn buildCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         try files.append(allocator, .{ .name = "icon.png", .bytes = bytes });
     }
     // WebView applications on Windows ship the loader beside the executable.
-    if (windows) if (cwd.readFileAlloc(allocator, "zig-out/bin/WebView2Loader.dll", 16 * 1024 * 1024)) |loader| {
+    if (windows) if (cwd.readFileAlloc(zio.io(), "zig-out/bin/WebView2Loader.dll", allocator, .limited(16 * 1024 * 1024))) |loader| {
         // Libraries their publishers signed keep their signatures.
         const unsigned = !winsign.peKind(loader).signed;
         if (unsigned) if (info.windows) |config| if (config.signs()) {
             if (try signFile(allocator, config, "zig-out/bin/WebView2Loader.dll") != 0) return 1;
         };
-        try files.append(allocator, .{ .name = "WebView2Loader.dll", .bytes = if (unsigned and info.windows != null and info.windows.?.signs()) try cwd.readFileAlloc(allocator, "zig-out/bin/WebView2Loader.dll", 16 * 1024 * 1024) else loader });
+        try files.append(allocator, .{ .name = "WebView2Loader.dll", .bytes = if (unsigned and info.windows != null and info.windows.?.signs()) try cwd.readFileAlloc(zio.io(), "zig-out/bin/WebView2Loader.dll", allocator, .limited(16 * 1024 * 1024)) else loader });
     } else |_| {};
-    for ([_][]const u8{ "LICENSE", "LICENSE.txt" }) |license| if (cwd.readFileAlloc(allocator, license, 4 * 1024 * 1024)) |bytes| {
+    for ([_][]const u8{ "LICENSE", "LICENSE.txt" }) |license| if (cwd.readFileAlloc(zio.io(), license, allocator, .limited(4 * 1024 * 1024))) |bytes| {
         try files.append(allocator, .{ .name = "LICENSE.txt", .bytes = bytes });
         break;
     } else |_| {};
     const version = try update.retention.parseVersion(info.version);
     const zip = try update.archive.buildPackage(allocator, .{ .name = info.name, .identity = info.identity, .target = target, .version = version, .executable = executable }, files.items);
-    try cwd.makePath("dist");
+    try cwd.createDirPath(zio.io(), "dist");
     const output = try std.fmt.allocPrint(allocator, "dist/{s}-{s}-{s}.zip", .{ info.identity, target, info.version });
-    try cwd.writeFile(.{ .sub_path = output, .data = zip });
+    try cwd.writeFile(zio.io(), .{ .sub_path = output, .data = zip });
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(zip, &digest, .{});
-    try std.fs.File.stdout().writeAll(try std.fmt.allocPrint(allocator, "{s} {s}\n", .{ std.fmt.bytesToHex(digest, .lower), output }));
+    try std.Io.File.stdout().writeStreamingAll(zio.io(), try std.fmt.allocPrint(allocator, "{s} {s}\n", .{ std.fmt.bytesToHex(digest, .lower), output }));
     return 0;
 }
 
@@ -420,10 +421,10 @@ const Inventory = struct { schema_version: u16, name: []const u8 = "", identity:
 
 /// Read every entry of a stored or deflated package into memory.
 fn readPackage(allocator: std.mem.Allocator, path: []const u8) !struct { inventory: Inventory, files: []update.archive.Entry } {
-    var file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
+    var file = try std.Io.Dir.cwd().openFile(zio.io(), path, .{});
+    defer file.close(zio.io());
     var buffer: [16 * 1024]u8 = undefined;
-    var reader = file.reader(&buffer);
+    var reader = file.reader(zio.io(), &buffer);
     var iterator = try std.zip.Iterator.init(&reader);
     var files: std.ArrayList(update.archive.Entry) = .empty;
     var name_buffer: [256]u8 = undefined;
@@ -491,12 +492,12 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     if (std.mem.eql(u8, kind, "setup")) {
         const windows = std.mem.startsWith(u8, info.target, "windows-");
         const stub_path = package_options.stub orelse blk: {
-            const directory = try std.fs.selfExeDirPathAlloc(allocator);
+            const directory = try std.process.executableDirPathAlloc(zio.io(), allocator);
             break :blk try std.fs.path.join(allocator, &.{ directory, if (windows) "ziggurat-setup.exe" else "ziggurat-setup" });
         };
-        const stub = try std.fs.cwd().readFileAlloc(allocator, stub_path, 64 * 1024 * 1024);
+        const stub = try std.Io.Dir.cwd().readFileAlloc(zio.io(), stub_path, allocator, .limited(64 * 1024 * 1024));
         if ((stub.len >= 2 and std.mem.eql(u8, stub[0..2], "MZ")) != windows) return error.StubTargetMismatch;
-        const zip = try std.fs.cwd().readFileAlloc(allocator, zip_path, 1024 * 1024 * 1024);
+        const zip = try std.Io.Dir.cwd().readFileAlloc(zio.io(), zip_path, allocator, .limited(1024 * 1024 * 1024));
         const config_json = try std.json.Stringify.valueAlloc(allocator, config, .{ .emit_null_optional_fields = false });
         const output = package_options.output orelse try std.fmt.allocPrint(allocator, "dist/{s}-{s}-{s}-setup{s}", .{ stem, info.version, info.target, if (windows) ".exe" else "" });
         var bytes: std.Io.Writer.Allocating = .init(allocator);
@@ -504,14 +505,14 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         try bytes.writer.writeAll(zip);
         try bytes.writer.writeAll(config_json);
         try setup_format.writeFooter(&bytes.writer, zip, config_json);
-        if (std.fs.path.dirname(output)) |parent| try std.fs.cwd().makePath(parent);
-        try std.fs.cwd().writeFile(.{ .sub_path = output, .data = bytes.written(), .flags = .{ .mode = 0o755 } });
+        if (std.fs.path.dirname(output)) |parent| try std.Io.Dir.cwd().createDirPath(zio.io(), parent);
+        try std.Io.Dir.cwd().writeFile(zio.io(), .{ .sub_path = output, .data = bytes.written(), .flags = .{ .permissions = zio.mode(0o755) } });
         // The stub skips the certificate table, so the installer is signed
         // after the package is appended.
-        if (windows) if (readProject(allocator, std.fs.cwd()) catch null) |project| if (project.windows) |signing| if (signing.signs()) {
+        if (windows) if (readProject(allocator, std.Io.Dir.cwd()) catch null) |project| if (project.windows) |signing| if (signing.signs()) {
             if (try signFile(allocator, signing, output) != 0) return 1;
         };
-        try std.fs.File.stdout().writeAll(try std.fmt.allocPrint(allocator, "{s}\n", .{output}));
+        try std.Io.File.stdout().writeStreamingAll(zio.io(), try std.fmt.allocPrint(allocator, "{s}\n", .{output}));
         return 0;
     }
     if (std.mem.eql(u8, kind, "install-script")) {
@@ -521,9 +522,9 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         var script: std.Io.Writer.Allocating = .init(allocator);
         try install_script.write(&script.writer, .{ .app_name = name, .identity = info.identity, .stem = stem, .version = info.version, .github = package_options.github, .tag_prefix = package_options.tag_prefix, .url = package_options.url, .webview = package_options.webview });
         const output = package_options.output orelse "dist/" ++ install_script.name;
-        if (std.fs.path.dirname(output)) |parent| try std.fs.cwd().makePath(parent);
-        try std.fs.cwd().writeFile(.{ .sub_path = output, .data = script.written(), .flags = .{ .mode = 0o755 } });
-        try std.fs.File.stdout().writeAll(try std.fmt.allocPrint(allocator, "{s}\n", .{output}));
+        if (std.fs.path.dirname(output)) |parent| try std.Io.Dir.cwd().createDirPath(zio.io(), parent);
+        try std.Io.Dir.cwd().writeFile(zio.io(), .{ .sub_path = output, .data = script.written(), .flags = .{ .permissions = zio.mode(0o755) } });
+        try std.Io.File.stdout().writeStreamingAll(zio.io(), try std.fmt.allocPrint(allocator, "{s}\n", .{output}));
         return 0;
     }
     if (!std.mem.eql(u8, kind, "deb")) return error.InvalidArguments;
@@ -548,7 +549,7 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     // Menus and icon caches refresh when the tools exist; failures never block.
     const refresh = "#!/bin/sh\nset -e\nif command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database -q /usr/share/applications || true; fi\nif command -v gtk-update-icon-cache >/dev/null 2>&1; then gtk-update-icon-cache -q -t /usr/share/icons/hicolor || true; fi\n";
     var output_bytes: std.Io.Writer.Allocating = .init(allocator);
-    const mtime: u64 = if (std.process.getEnvVarOwned(allocator, "SOURCE_DATE_EPOCH")) |text| std.fmt.parseInt(u64, text, 10) catch 0 else |_| 0;
+    const mtime: u64 = if (zio.getEnvVarOwned(allocator, "SOURCE_DATE_EPOCH")) |text| std.fmt.parseInt(u64, text, 10) catch 0 else |_| 0;
     try deb.write(allocator, &output_bytes.writer, .{
         .name = package_name,
         .version = debian_version,
@@ -563,9 +564,9 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         .mtime = mtime,
     });
     const output = package_options.output orelse try std.fmt.allocPrint(allocator, "dist/{s}_{s}_{s}.deb", .{ package_name, debian_version, try deb.architecture(arch) });
-    if (std.fs.path.dirname(output)) |parent| try std.fs.cwd().makePath(parent);
-    try std.fs.cwd().writeFile(.{ .sub_path = output, .data = output_bytes.written() });
-    try std.fs.File.stdout().writeAll(try std.fmt.allocPrint(allocator, "{s}\n", .{output}));
+    if (std.fs.path.dirname(output)) |parent| try std.Io.Dir.cwd().createDirPath(zio.io(), parent);
+    try std.Io.Dir.cwd().writeFile(zio.io(), .{ .sub_path = output, .data = output_bytes.written() });
+    try std.Io.File.stdout().writeStreamingAll(zio.io(), try std.fmt.allocPrint(allocator, "{s}\n", .{output}));
     return 0;
 }
 
@@ -574,19 +575,19 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
 /// Change detection over a set of trees: a digest of every regular file's
 /// path, size and modification time. Directories named .zig-cache, zig-out,
 /// node_modules or starting with a dot are skipped.
-pub fn snapshot(allocator: std.mem.Allocator, dir: std.fs.Dir, roots: []const []const u8) !u64 {
+pub fn snapshot(allocator: std.mem.Allocator, dir: std.Io.Dir, roots: []const []const u8) !u64 {
     var hasher = std.hash.Wyhash.init(0);
     for (roots) |root| {
         // Open as a directory first: on Windows statFile fails for directories.
-        var tree = dir.openDir(root, .{ .iterate = true }) catch {
-            const stat = dir.statFile(root) catch continue;
+        var tree = dir.openDir(zio.io(), root, .{ .iterate = true }) catch {
+            const stat = dir.statFile(zio.io(), root, .{}) catch continue;
             if (stat.kind != .file) continue;
             hasher.update(root);
             hasher.update(std.mem.asBytes(&stat.size));
             hasher.update(std.mem.asBytes(&stat.mtime));
             continue;
         };
-        defer tree.close();
+        defer tree.close(zio.io());
         var walker = try tree.walk(allocator);
         defer walker.deinit();
         var entries: std.ArrayList([]const u8) = .empty;
@@ -594,7 +595,7 @@ pub fn snapshot(allocator: std.mem.Allocator, dir: std.fs.Dir, roots: []const []
             for (entries.items) |entry| allocator.free(entry);
             entries.deinit(allocator);
         }
-        while (try walker.next()) |entry| {
+        while (try walker.next(zio.io())) |entry| {
             if (entry.kind != .file) continue;
             var skip = false;
             var parts = std.mem.tokenizeAny(u8, entry.path, "/\\");
@@ -610,7 +611,7 @@ pub fn snapshot(allocator: std.mem.Allocator, dir: std.fs.Dir, roots: []const []
             }
         }.lessThan);
         for (entries.items) |path| {
-            const stat = tree.statFile(path) catch continue;
+            const stat = tree.statFile(zio.io(), path, .{}) catch continue;
             hasher.update(root);
             hasher.update(path);
             hasher.update(std.mem.asBytes(&stat.size));
@@ -626,7 +627,7 @@ fn shellCommand(allocator: std.mem.Allocator, command: []const u8) ![]const []co
 }
 
 fn stop(child: *std.process.Child) void {
-    _ = child.kill() catch {};
+    child.kill(zio.io());
 }
 
 fn dev(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
@@ -648,12 +649,11 @@ fn dev(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
             break;
         } else return error.InvalidArguments;
     }
-    const cwd = std.fs.cwd();
-    cwd.access("build.zig", .{}) catch return error.MissingBuildFile;
+    const cwd = std.Io.Dir.cwd();
+    cwd.access(zio.io(), "build.zig", .{}) catch return error.MissingBuildFile;
     var frontend_child: ?std.process.Child = null;
     if (frontend) |command| {
-        frontend_child = std.process.Child.init(try shellCommand(allocator, command), allocator);
-        try frontend_child.?.spawn();
+        frontend_child = try zio.spawn(.{ .argv = try shellCommand(allocator, command) });
     }
     defer if (frontend_child) |*child| stop(child);
     // Build, then run the installed executable as our own child so a change
@@ -667,12 +667,11 @@ fn dev(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     while (true) {
         var app: ?std.process.Child = null;
         if (try runZig(allocator, build_args.items) == 0) {
-            app = std.process.Child.init(&.{executable}, allocator);
-            try app.?.spawn();
+            app = try zio.spawn(.{ .argv = &.{executable} });
             std.debug.print("ziggurat: running {s} (watching {d} paths)\n", .{ executable, roots.items.len });
         } else std.debug.print("ziggurat: build failed; waiting for changes\n", .{});
         while (true) {
-            std.Thread.sleep(300 * std.time.ns_per_ms);
+            zio.sleep(300 * std.time.ns_per_ms);
             const now = try snapshot(allocator, cwd, roots.items);
             if (now != last) {
                 last = now;
@@ -691,16 +690,17 @@ fn dev(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
 fn childExited(child: *std.process.Child) !bool {
     if (builtin.os.tag == .windows) {
         const windows = std.os.windows;
-        windows.WaitForSingleObject(child.id, 0) catch |err| switch (err) {
+        windows.WaitForSingleObject(child.id.?, 0) catch |err| switch (err) {
             error.WaitTimeOut => return false,
             else => return err,
         };
-        _ = try child.wait();
+        _ = try child.wait(zio.io());
         return true;
     }
-    const result = std.posix.waitpid(child.id, std.posix.W.NOHANG);
+    const result = zio.posix.waitpid(child.id.?, std.posix.W.NOHANG);
     if (result.pid == 0) return false;
-    child.term = .{ .Exited = 0 };
+    // Reaped here: the child holds nothing more to release.
+    child.id = null;
     return true;
 }
 
@@ -717,9 +717,9 @@ fn report(status: Status, label: []const u8, detail: []const u8) void {
 }
 
 fn capture(allocator: std.mem.Allocator, argv: []const []const u8) ?[]const u8 {
-    const result = std.process.Child.run(.{ .allocator = allocator, .argv = argv, .max_output_bytes = 64 * 1024 }) catch return null;
+    const result = zio.run(allocator, .{ .argv = argv, .stdout_limit = .limited(64 * 1024), .stderr_limit = .limited(64 * 1024) }) catch return null;
     switch (result.term) {
-        .Exited => |code| if (code != 0) return null,
+        .exited => |code| if (code != 0) return null,
         else => return null,
     }
     return std.mem.trim(u8, result.stdout, " \r\n\t");
@@ -734,12 +734,12 @@ fn doctor(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     report(.ok, "host", try std.fmt.allocPrint(allocator, "{s}-{s}", .{ @tagName(builtin.os.tag), @tagName(builtin.cpu.arch) }));
     const zig = try zigExecutable(allocator);
     if (capture(allocator, &.{ zig, "version" })) |version| {
-        if (std.mem.eql(u8, version, "0.15.2")) report(.ok, "zig", version) else {
-            report(.missing, "zig", try std.fmt.allocPrint(allocator, "{s} (this framework targets 0.15.2)", .{version}));
+        if (std.mem.eql(u8, version, "0.17.0")) report(.ok, "zig", version) else {
+            report(.missing, "zig", try std.fmt.allocPrint(allocator, "{s} (this framework targets 0.17.0)", .{version}));
             failed = true;
         }
     } else {
-        report(.missing, "zig", "not found; install Zig 0.15.2 or set ZIG");
+        report(.missing, "zig", "not found; install Zig 0.17.0 or set ZIG");
         failed = true;
     }
     if (capture(allocator, &.{ "git", "--version" })) |version| report(.ok, "git", version) else report(.warning, "git", "not found");
@@ -761,11 +761,11 @@ fn doctor(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
                     if (package.required) failed = true;
                 }
             }
-            if (std.process.hasEnvVarConstant("DISPLAY") or std.process.hasEnvVarConstant("WAYLAND_DISPLAY")) report(.ok, "display", "available") else report(.warning, "display", "no DISPLAY or WAYLAND_DISPLAY; windows cannot open here");
+            if ((zio.hasEnvVar(allocator, "DISPLAY") catch false) or (zio.hasEnvVar(allocator, "WAYLAND_DISPLAY") catch false)) report(.ok, "display", "available") else report(.warning, "display", "no DISPLAY or WAYLAND_DISPLAY; windows cannot open here");
         },
         .windows => {
             const sdk = std.fs.path.join(allocator, &.{ options.framework_root, ".deps", "webview2", "build", "native", "include", "WebView2.h" }) catch unreachable;
-            if (std.fs.cwd().access(sdk, .{})) |_| report(.ok, "WebView2 SDK", sdk) else |_| {
+            if (std.Io.Dir.cwd().access(sdk, .{})) |_| report(.ok, "WebView2 SDK", sdk) else |_| {
                 report(if (webview) .missing else .warning, "WebView2 SDK", "not extracted; run scripts/fetch-webview2.ps1");
                 if (webview) failed = true;
             }
@@ -776,7 +776,7 @@ fn doctor(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         },
         else => report(.warning, "platform", "no runtime backend for this operating system"),
     }
-    if (readProject(allocator, std.fs.cwd())) |project| report(.ok, "project", project.identity) else |err| switch (err) {
+    if (readProject(allocator, std.Io.Dir.cwd())) |project| report(.ok, "project", project.identity) else |err| switch (err) {
         error.MissingProjectFile => report(.warning, "project", "no ziggurat.json in this directory"),
         else => {
             report(.missing, "project", @errorName(err));
@@ -846,7 +846,7 @@ fn publishCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         target.region = region;
         target.endpoint = endpoint;
         target.path_style = path_style;
-        var environment = try std.process.getEnvMap(allocator);
+        var environment = try zio.getEnvMap(allocator);
         var console: console_mod.Console = .stderr(&environment);
         defer console.deinit();
         publish.toS3(allocator, .{ .directory = publish_options.directory, .bucket = target.*, .url = url }, &environment, &console) catch |err| {
@@ -856,9 +856,9 @@ fn publishCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         return 0;
     }
     if (publish_options.repository.len == 0 or publish_options.tag.len == 0) return error.InvalidArguments;
-    if (std.process.getEnvVarOwned(allocator, "GH")) |gh| publish_options.gh = gh else |_| {}
+    if (zio.getEnvVarOwned(allocator, "GH")) |gh| publish_options.gh = gh else |_| {}
     var buffer: [1024]u8 = undefined;
-    var stdout = std.fs.File.stdout().writer(&buffer);
+    var stdout = std.Io.File.stdout().writer(zio.io(), &buffer);
     try publish.github(allocator, publish_options, &stdout.interface);
     return 0;
 }
@@ -871,12 +871,12 @@ fn projectDirectory(args: []const []const u8) ![]const u8 {
 }
 
 /// Writes `bytes` at `path` unless it holds them already. Returns whether it wrote.
-fn writeChanged(allocator: std.mem.Allocator, dir: std.fs.Dir, path: []const u8, bytes: []const u8) !bool {
-    if (dir.readFileAlloc(allocator, path, 64 * 1024 * 1024)) |old| {
+fn writeChanged(allocator: std.mem.Allocator, dir: std.Io.Dir, path: []const u8, bytes: []const u8) !bool {
+    if (dir.readFileAlloc(zio.io(), path, allocator, .limited(64 * 1024 * 1024))) |old| {
         if (std.mem.eql(u8, old, bytes)) return false;
     } else |_| {}
-    if (std.fs.path.dirname(path)) |parent| try dir.makePath(parent);
-    try dir.writeFile(.{ .sub_path = path, .data = bytes });
+    if (std.fs.path.dirname(path)) |parent| try dir.createDirPath(zio.io(), parent);
+    try dir.writeFile(zio.io(), .{ .sub_path = path, .data = bytes });
     return true;
 }
 
@@ -902,10 +902,10 @@ pub const I18nOutput = struct { written: []const []const u8, catalog: i18n_gen.C
 /// Checks the catalogs and writes their accessors where they changed:
 /// `catalog.zig` in their directory and, with bindings, the TypeScript
 /// module. Errors of the catalogs fail it after `console` shows them.
-pub fn writeI18n(allocator: std.mem.Allocator, dir: std.fs.Dir, project: Project, console: *console_mod.Console) !I18nOutput {
+pub fn writeI18n(allocator: std.mem.Allocator, dir: std.Io.Dir, project: Project, console: *console_mod.Console) !I18nOutput {
     const config = project.i18n orelse return .{ .written = &.{}, .catalog = undefined };
-    var catalogs = dir.openDir(config.dir, .{ .iterate = true }) catch return error.MissingCatalogs;
-    defer catalogs.close();
+    var catalogs = dir.openDir(zio.io(), config.dir, .{ .iterate = true }) catch return error.MissingCatalogs;
+    defer catalogs.close(zio.io());
     const catalog = try i18n_gen.load(allocator, catalogs, .{ .dir_name = config.dir, .source = config.source });
     const errors = reportCatalog(console, &catalog, false);
     if (errors > 0) {
@@ -937,11 +937,11 @@ fn generateCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
             index += 1;
         } else if (std.mem.startsWith(u8, arg, "-")) return error.InvalidArguments else try rest.append(allocator, arg);
     }
-    var environment = try std.process.getEnvMap(allocator);
+    var environment = try zio.getEnvMap(allocator);
     var console: console_mod.Console = .stderr(&environment);
     defer console.deinit();
-    var dir = try std.fs.cwd().openDir(try projectDirectory(rest.items), .{});
-    defer dir.close();
+    var dir = try std.Io.Dir.cwd().openDir(zio.io(), try projectDirectory(rest.items), .{});
+    defer dir.close(zio.io());
     var project = try readProject(allocator, dir);
     if (output) |path| project.bindings = path;
     if (project.bindings == null and project.i18n == null) {
@@ -986,28 +986,28 @@ fn generateCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
 
 /// The client of the Service type `service` exports, made by the
 /// framework's `ipc-client` step.
-fn generateClient(allocator: std.mem.Allocator, dir: std.fs.Dir, framework: []const u8, service: []const u8, console: *console_mod.Console) ![]const u8 {
-    const root = try dir.realpathAlloc(allocator, ".");
+fn generateClient(allocator: std.mem.Allocator, dir: std.Io.Dir, framework: []const u8, service: []const u8, console: *console_mod.Console) ![]const u8 {
+    const root = try zio.realPathAlloc(dir, ".", allocator);
     const source = try std.fs.path.resolve(allocator, &.{ root, service });
     const prefix = try std.fs.path.join(allocator, &.{ root, ".zig-cache", "ziggurat-generate" });
-    const result = try std.process.Child.run(.{
-        .allocator = allocator,
+    const result = try zio.run(allocator, .{
         .argv = &.{ try zigExecutable(allocator), "build", "ipc-client", try std.fmt.allocPrint(allocator, "-Dipc-service={s}", .{source}), "--prefix", prefix },
-        .cwd = framework,
-        .max_output_bytes = 4 * 1024 * 1024,
+        .cwd = .{ .path = framework },
+        .stdout_limit = .limited(4 * 1024 * 1024),
+        .stderr_limit = .limited(4 * 1024 * 1024),
     });
-    if (result.term != .Exited or result.term.Exited != 0) {
-        console.problem("zig build ipc-client failed:\n{s}", .{std.mem.trimRight(u8, result.stderr, "\n")});
+    if (result.term != .exited or result.term.exited != 0) {
+        console.problem("zig build ipc-client failed:\n{s}", .{std.mem.trimEnd(u8, result.stderr, "\n")});
         return error.ClientGenerationFailed;
     }
-    var out = try std.fs.openDirAbsolute(prefix, .{});
-    defer out.close();
-    return out.readFileAlloc(allocator, "share/ziggurat/client.ts", 64 * 1024 * 1024);
+    var out = try std.Io.Dir.openDirAbsolute(zio.io(), prefix, .{});
+    defer out.close(zio.io());
+    return out.readFileAlloc(zio.io(), "share/ziggurat/client.ts", allocator, .limited(64 * 1024 * 1024));
 }
 
 fn i18nCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     if (args.len == 0 or !std.mem.eql(u8, args[0], "check")) {
-        try std.fs.File.stderr().writeAll(
+        try std.Io.File.stderr().writeStreamingAll(zio.io(),
             \\Usage: ziggurat i18n check [DIR]
             \\
             \\Checks the catalogs of the app's messages (i18n in ziggurat.json): that their
@@ -1018,21 +1018,21 @@ fn i18nCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         );
         return 2;
     }
-    var environment = try std.process.getEnvMap(allocator);
+    var environment = try zio.getEnvMap(allocator);
     var console: console_mod.Console = .stderr(&environment);
     defer console.deinit();
-    var dir = try std.fs.cwd().openDir(try projectDirectory(args[1..]), .{});
-    defer dir.close();
+    var dir = try std.Io.Dir.cwd().openDir(zio.io(), try projectDirectory(args[1..]), .{});
+    defer dir.close(zio.io());
     const project = try readProject(allocator, dir);
     const config = project.i18n orelse {
         console.fatal("the project has no catalogs: set i18n in ziggurat.json, as \"i18n\": {{\"dir\": \"locales\", \"source\": \"en\"}}", .{});
         return 1;
     };
-    var catalogs = dir.openDir(config.dir, .{ .iterate = true }) catch {
+    var catalogs = dir.openDir(zio.io(), config.dir, .{ .iterate = true }) catch {
         console.fatal("i18n.dir {s} is not a directory: create it with {s}.json, the messages of the source language", .{ config.dir, config.source });
         return 1;
     };
-    defer catalogs.close();
+    defer catalogs.close(zio.io());
     const catalog = try i18n_gen.load(allocator, catalogs, .{ .dir_name = config.dir, .source = config.source });
     const errors = reportCatalog(&console, &catalog, true);
     if (errors > 0) {
@@ -1055,25 +1055,25 @@ const skills = [_]struct { path: []const u8, bytes: []const u8 }{
 
 /// Writes the bundled skill files, replacing older copies of them and
 /// leaving other skills and other files of a bundled skill alone.
-pub fn installSkills(dir: std.fs.Dir) !void {
-    var root = try dir.makeOpenPath(".agents/skills", .{});
-    defer root.close();
+pub fn installSkills(dir: std.Io.Dir) !void {
+    var root = try dir.createDirPathOpen(zio.io(), ".agents/skills", .{});
+    defer root.close(zio.io());
     for (skills) |skill| {
-        if (std.fs.path.dirname(skill.path)) |parent| try root.makePath(parent);
-        try root.writeFile(.{ .sub_path = skill.path, .data = skill.bytes });
+        if (std.fs.path.dirname(skill.path)) |parent| try root.createDirPath(zio.io(), parent);
+        try root.writeFile(zio.io(), .{ .sub_path = skill.path, .data = skill.bytes });
     }
 }
 
 fn installSkillsCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     const path = try projectDirectory(args);
-    var environment = try std.process.getEnvMap(allocator);
+    var environment = try zio.getEnvMap(allocator);
     var console: console_mod.Console = .stderr(&environment);
     defer console.deinit();
-    var dir = std.fs.cwd().openDir(path, .{}) catch {
+    var dir = std.Io.Dir.cwd().openDir(zio.io(), path, .{}) catch {
         console.fatal("{s} is not a directory", .{path});
         return 1;
     };
-    defer dir.close();
+    defer dir.close(zio.io());
     try installSkills(dir);
     console.log("Installed skills in {s}", .{try std.fs.path.join(allocator, &.{ path, ".agents", "skills" })});
     return 0;
@@ -1092,10 +1092,10 @@ fn iconCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         } else if (source == null and !std.mem.startsWith(u8, args[index], "-")) source = args[index] else return error.InvalidArguments;
     }
     const path = source orelse return error.InvalidArguments;
-    var environment = try std.process.getEnvMap(allocator);
+    var environment = try zio.getEnvMap(allocator);
     var console: console_mod.Console = .stderr(&environment);
     defer console.deinit();
-    const bytes = std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024 * 1024) catch |err| {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(zio.io(), path, allocator, .limited(64 * 1024 * 1024)) catch |err| {
         console.fatal("{s}: {s}", .{ path, @errorName(err) });
         return 1;
     };
@@ -1108,20 +1108,20 @@ fn iconCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         return 1;
     };
     const destination = output orelse try std.mem.concat(allocator, u8, &.{ path[0 .. path.len - std.fs.path.extension(path).len], ".ico" });
-    try std.fs.cwd().writeFile(.{ .sub_path = destination, .data = ico });
+    try std.Io.Dir.cwd().writeFile(zio.io(), .{ .sub_path = destination, .data = ico });
     console.log("Wrote {s}", .{destination});
     return 0;
 }
 
 /// Sign one file as `config` says, as a step of the console.
 fn signFile(allocator: std.mem.Allocator, config: winsign.Windows, file: []const u8) !u8 {
-    var environment = try std.process.getEnvMap(allocator);
+    var environment = try zio.getEnvMap(allocator);
     var console: console_mod.Console = .stderr(&environment);
     defer console.deinit();
     var task: console_mod.Task = undefined;
     const name = std.fs.path.basename(file);
     console.start(&task, try std.fmt.allocPrint(allocator, "Signing {s}", .{name}));
-    const root = try std.fs.cwd().realpathAlloc(allocator, ".");
+    const root = try zio.realPathAlloc(std.Io.Dir.cwd(), ".", allocator);
     winsign.sign(allocator, config, root, file) catch |err| {
         task.fail();
         console.fatal("{s}", .{switch (@as(anyerror, err)) {
@@ -1140,7 +1140,7 @@ fn signFile(allocator: std.mem.Allocator, config: winsign.Windows, file: []const
 
 fn signCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     if (args.len == 0) return error.InvalidArguments;
-    const project = try readProject(allocator, std.fs.cwd());
+    const project = try readProject(allocator, std.Io.Dir.cwd());
     const config = project.windows orelse winsign.Windows{};
     if (!config.signs()) {
         std.debug.print("ziggurat: set windows.certificate or windows.signCommand in ziggurat.json\n", .{});
@@ -1152,22 +1152,22 @@ fn signCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
 
 fn vetCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     const path = try projectDirectory(args);
-    var environment = try std.process.getEnvMap(allocator);
+    var environment = try zio.getEnvMap(allocator);
     var console: console_mod.Console = .stderr(&environment);
     defer console.deinit();
-    var dir = std.fs.cwd().openDir(path, .{}) catch {
+    var dir = std.Io.Dir.cwd().openDir(zio.io(), path, .{}) catch {
         console.fatal("{s} is not a directory", .{path});
         return 1;
     };
-    defer dir.close();
+    defer dir.close(zio.io());
     var files: std.ArrayList([]const u8) = .empty;
-    if (dir.access("build.zig", .{})) |_| try files.append(allocator, "build.zig") else |_| {}
-    if (dir.openDir("src", .{ .iterate = true })) |opened| {
+    if (dir.access(zio.io(), "build.zig", .{})) |_| try files.append(allocator, "build.zig") else |_| {}
+    if (dir.openDir(zio.io(), "src", .{ .iterate = true })) |opened| {
         var src = opened;
-        defer src.close();
+        defer src.close(zio.io());
         var walker = try src.walk(allocator);
         defer walker.deinit();
-        while (try walker.next()) |entry| {
+        while (try walker.next(zio.io())) |entry| {
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
             try files.append(allocator, try std.fs.path.join(allocator, &.{ "src", entry.path }));
         }
@@ -1185,10 +1185,9 @@ fn vetCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     for (files.items) |file| {
         argv.items.len = 2;
         try argv.append(allocator, file);
-        var child = std.process.Child.init(argv.items, allocator);
-        child.cwd_dir = dir;
-        const term = try child.spawnAndWait();
-        if (term != .Exited or term.Exited != 0) failures += 1;
+        var child = try zio.spawn(.{ .argv = argv.items, .cwd = .{ .dir = dir } });
+        const term = try child.wait(zio.io());
+        if (term != .exited or term.exited != 0) failures += 1;
     }
     if (failures > 0) {
         console.fatal("zig ast-check: {d} file(s) with errors", .{failures});
@@ -1196,7 +1195,7 @@ fn vetCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     }
     var issues: usize = 0;
     for (files.items) |file| {
-        const source = try dir.readFileAllocOptions(allocator, file, 16 * 1024 * 1024, null, .of(u8), 0);
+        const source = try dir.readFileAllocOptions(zio.io(), file, allocator, .limited(16 * 1024 * 1024), .of(u8), 0);
         const diagnostics = vet.analyze(allocator, source) catch |err| {
             console.fatal("{s}: {s}", .{ file, @errorName(err) });
             return 1;
@@ -1233,21 +1232,21 @@ test "templates render without placeholders and identifiers are sanitized" {
     try std.testing.expect(!validIdentity("../x"));
     var temp = std.testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
-    try temp.dir.makePath("framework");
-    try temp.dir.writeFile(.{ .sub_path = "framework/build.zig.zon", .data = ".{}" });
+    try temp.dir.createDirPath(zio.io(), "framework");
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "framework/build.zig.zon", .data = ".{}" });
     for ([_]Template{ .native, .web, .hybrid }) |template| {
         const directory = try std.fmt.allocPrint(allocator, "apps/{s}", .{@tagName(template)});
         try createProject(allocator, temp.dir, .{ .directory = directory, .template = template, .name = "Sample App", .framework = "framework" });
-        var project = try temp.dir.openDir(directory, .{});
-        defer project.close();
-        const zon = try project.readFileAlloc(allocator, "build.zig.zon", 4096);
+        var project = try temp.dir.openDir(zio.io(), directory, .{});
+        defer project.close(zio.io());
+        const zon = try project.readFileAlloc(zio.io(), "build.zig.zon", allocator, .limited(4096));
         try std.testing.expect(std.mem.indexOf(u8, zon, ".path = \"../../framework\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, zon, ".name = .sample_app") != null);
         const info = try readProject(allocator, project);
         try std.testing.expectEqualStrings("com.example.sample_app", info.identity);
         try std.testing.expectEqualStrings("sample-app", info.executable);
-        try std.testing.expectEqual(template != .native, if (project.access("src/index.html", .{})) |_| true else |_| false);
-        try project.access(".agents/skills/ziggurat-maintenance/SKILL.md", .{});
+        try std.testing.expectEqual(template != .native, if (project.access(zio.io(), "src/index.html", .{})) |_| true else |_| false);
+        try project.access(zio.io(), ".agents/skills/ziggurat-maintenance/SKILL.md", .{});
         try std.testing.expectError(error.DirectoryNotEmpty, createProject(allocator, temp.dir, .{ .directory = directory, .framework = "framework" }));
     }
     try std.testing.expectError(error.FrameworkNotFound, createProject(allocator, temp.dir, .{ .directory = "apps/none", .framework = "apps" }));
@@ -1257,13 +1256,13 @@ test "snapshots change with edits and ignore build output" {
     var temp = std.testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
     const allocator = std.testing.allocator;
-    try temp.dir.makePath("src/.zig-cache");
-    try temp.dir.writeFile(.{ .sub_path = "src/main.zig", .data = "a" });
-    try temp.dir.writeFile(.{ .sub_path = "build.zig", .data = "b" });
+    try temp.dir.createDirPath(zio.io(), "src/.zig-cache");
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "src/main.zig", .data = "a" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "build.zig", .data = "b" });
     const first = try snapshot(allocator, temp.dir, &.{ "src", "build.zig", "missing" });
-    try temp.dir.writeFile(.{ .sub_path = "src/.zig-cache/x", .data = "ignored" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "src/.zig-cache/x", .data = "ignored" });
     try std.testing.expectEqual(first, try snapshot(allocator, temp.dir, &.{ "src", "build.zig", "missing" }));
-    try temp.dir.writeFile(.{ .sub_path = "src/main.zig", .data = "changed" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "src/main.zig", .data = "changed" });
     try std.testing.expect(first != try snapshot(allocator, temp.dir, &.{ "src", "build.zig", "missing" }));
 }
 
@@ -1273,35 +1272,35 @@ test "generate writes the accessors where they changed, and skills keep other fi
     const allocator = arena.allocator();
     var temp = std.testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
-    try temp.dir.makePath("i18n");
-    try temp.dir.writeFile(.{ .sub_path = "i18n/en.json", .data = "{\"hello\": \"Hello, {name}!\"}" });
-    try temp.dir.writeFile(.{ .sub_path = "i18n/de.json", .data = "{\"hello\": \"Hallo, {name}!\"}" });
+    try temp.dir.createDirPath(zio.io(), "i18n");
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "i18n/en.json", .data = "{\"hello\": \"Hello, {name}!\"}" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "i18n/de.json", .data = "{\"hello\": \"Hallo, {name}!\"}" });
     const project: Project = .{ .name = "App", .identity = "com.example.app", .executable = "app", .template = "web", .i18n = .{ .dir = "i18n" }, .bindings = "web/src/client.ts" };
     try std.testing.expectEqualStrings("web/src" ++ std.fs.path.sep_str ++ "i18n.ts", (try i18nModule(allocator, project)).?);
-    const file = try temp.dir.createFile("console", .{ .read = true });
-    defer file.close();
+    const file = try temp.dir.createFile(zio.io(), "console", .{ .read = true });
+    defer file.close(zio.io());
     var console: console_mod.Console = .{ .file = file, .mode = .{ .live = false, .color = false, .symbols = &console_mod.plain_symbols } };
     defer console.deinit();
     const first = try writeI18n(allocator, temp.dir, project, &console);
     try std.testing.expectEqual(@as(usize, 2), first.written.len);
-    const zig = try temp.dir.readFileAlloc(allocator, "i18n/catalog.zig", 1 << 16);
+    const zig = try temp.dir.readFileAlloc(zio.io(), "i18n/catalog.zig", allocator, .limited(1 << 16));
     try std.testing.expect(std.mem.indexOf(u8, zig, "pub fn hello(self: Messages, writer: *std.Io.Writer, name: []const u8)") != null);
-    const module = try temp.dir.readFileAlloc(allocator, "web/src/i18n.ts", 1 << 16);
+    const module = try temp.dir.readFileAlloc(zio.io(), "web/src/i18n.ts", allocator, .limited(1 << 16));
     try std.testing.expect(std.mem.indexOf(u8, module, "hello(name: string): string;") != null);
     try std.testing.expectEqual(@as(usize, 0), (try writeI18n(allocator, temp.dir, project, &console)).written.len);
-    try temp.dir.writeFile(.{ .sub_path = "i18n/de.json", .data = "{\"hello\": \"Hallo, {who}!\"}" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "i18n/de.json", .data = "{\"hello\": \"Hallo, {who}!\"}" });
     try std.testing.expectError(error.CatalogErrors, writeI18n(allocator, temp.dir, project, &console));
-    try file.seekTo(0);
-    const shown = try file.readToEndAlloc(allocator, 1 << 16);
+    var shown_reader = file.reader(zio.io(), &.{});
+    const shown = try shown_reader.interface.allocRemaining(allocator, .limited(1 << 16));
     try std.testing.expect(std.mem.indexOf(u8, shown, "  × i18n/de.json:1: \"hello\" uses the argument who, but the source message has the arguments name\n") != null);
 
-    try temp.dir.makePath(".agents/skills/ziggurat-maintenance");
-    try temp.dir.writeFile(.{ .sub_path = ".agents/skills/ziggurat-maintenance/SKILL.md", .data = "old" });
-    try temp.dir.writeFile(.{ .sub_path = ".agents/skills/ziggurat-maintenance/notes.md", .data = "mine" });
-    try temp.dir.makePath(".agents/skills/other");
+    try temp.dir.createDirPath(zio.io(), ".agents/skills/ziggurat-maintenance");
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = ".agents/skills/ziggurat-maintenance/SKILL.md", .data = "old" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = ".agents/skills/ziggurat-maintenance/notes.md", .data = "mine" });
+    try temp.dir.createDirPath(zio.io(), ".agents/skills/other");
     try installSkills(temp.dir);
-    const skill = try temp.dir.readFileAlloc(allocator, ".agents/skills/ziggurat-maintenance/SKILL.md", 1 << 16);
+    const skill = try temp.dir.readFileAlloc(zio.io(), ".agents/skills/ziggurat-maintenance/SKILL.md", allocator, .limited(1 << 16));
     try std.testing.expect(std.mem.startsWith(u8, skill, "---\nname: ziggurat-maintenance\n"));
-    try std.testing.expectEqualStrings("mine", try temp.dir.readFileAlloc(allocator, ".agents/skills/ziggurat-maintenance/notes.md", 64));
-    try temp.dir.access(".agents/skills/other", .{});
+    try std.testing.expectEqualStrings("mine", try temp.dir.readFileAlloc(zio.io(), ".agents/skills/ziggurat-maintenance/notes.md", allocator, .limited(64)));
+    try temp.dir.access(zio.io(), ".agents/skills/other", .{});
 }

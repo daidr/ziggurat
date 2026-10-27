@@ -68,7 +68,7 @@ pub fn validateAccelerator(accelerator: types.Accelerator) !void {
 }
 
 fn functionKey(key: types.Key) bool {
-    return @intFromEnum(key) >= @intFromEnum(types.Key.f1) and @intFromEnum(key) <= @intFromEnum(types.Key.f24);
+    return @backingInt(key) >= @backingInt(types.Key.f1) and @backingInt(key) <= @backingInt(types.Key.f24);
 }
 
 pub fn sameAccelerator(a: types.Accelerator, b: types.Accelerator) bool {
@@ -265,8 +265,8 @@ test "menu plans reject malformed snapshots" {
     try testing.expectError(error.InvalidMenuParent, validate(&.{ .{ .id = 2, .parent = 1, .label = "B" }, .{ .id = 1, .kind = .submenu, .label = "A" } }, true));
     try testing.expectError(error.EmbeddedNul, validate(&.{.{ .id = 1, .label = "a\x00b" }}, true));
     try testing.expectError(error.InvalidUtf8, validate(&.{.{ .id = 1, .label = "\xff" }}, true));
-    try testing.expectError(error.TextCapacityExceeded, validate(&.{.{ .id = 1, .label = "x" ** 256 }}, true));
-    _ = try validate(&.{.{ .id = 1, .label = "x" ** 255 }}, true);
+    try testing.expectError(error.TextCapacityExceeded, validate(&.{.{ .id = 1, .label = &@as([256]u8, @splat('x')) }}, true));
+    _ = try validate(&.{.{ .id = 1, .label = &@as([255]u8, @splat('x')) }}, true);
     const many: [max_items + 1]types.Item = @splat(.{ .kind = .separator });
     try testing.expectError(error.TooManyMenuItems, validate(&many, false));
     // Separators need no identity and may repeat.
@@ -350,5 +350,5 @@ test "message options are bounded and indices checked" {
     try testing.expectError(error.InvalidMessageButtons, validateMessage(.{ .message = "x", .buttons = &.{ .{ .id = 1, .label = "A" }, .{ .id = 2, .label = "B" }, .{ .id = 3, .label = "C" }, .{ .id = 4, .label = "D" } } }));
     try testing.expectError(error.InvalidMessageButtons, validateMessage(.{ .message = "x", .buttons = &.{.{ .id = 1, .label = "" }} }));
     try testing.expectError(error.EmbeddedNul, validateMessage(.{ .message = "a\x00", .buttons = &ok }));
-    try testing.expectError(error.TextCapacityExceeded, validateMessage(.{ .message = "x", .title = "t" ** 256, .buttons = &ok }));
+    try testing.expectError(error.TextCapacityExceeded, validateMessage(.{ .message = "x", .title = &@as([256]u8, @splat('t')), .buttons = &ok }));
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const d = @import("ziggurat_document");
 const code = @import("ziggurat_code_editor");
 const c = @import("client.zig");
@@ -383,8 +384,8 @@ test "force stop does not wait for a worker or release its control before exclus
     defer cleanup(&work);
     const Worker = struct {
         work: *c.ShutdownWork,
-        mutex: std.Thread.Mutex = .{},
-        condition: std.Thread.Condition = .{},
+        mutex: zio.Mutex = .{},
+        condition: zio.Condition = .{},
         entered: bool = false,
         resumed: bool = false,
         result: ?anyerror = null,

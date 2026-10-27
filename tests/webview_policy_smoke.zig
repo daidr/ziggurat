@@ -1,12 +1,9 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 extern fn zwv_browser_process_id(*anyopaque, *c_uint) i32;
 extern fn zwv_close(*anyopaque) void;
 extern fn zwv_test_seed_permission(*anyopaque, [*:0]const u16, *const fn (*anyopaque, i32) callconv(.c) void, *anyopaque) i32;
@@ -192,7 +189,7 @@ const State = struct {
                 self.check();
             },
             .policy_request => |request| {
-                self.policy_counts[@intFromEnum(request.kind)] += 1;
+                self.policy_counts[@backingInt(request.kind)] += 1;
                 self.check();
             },
             .process_failed => |failure| {
@@ -363,7 +360,7 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    const local = try std.process.getEnvVarOwned(allocator, "LOCALAPPDATA");
+    const local = try zio.getEnvVarOwned(allocator, "LOCALAPPDATA");
     defer allocator.free(local);
     const profile = try std.fs.path.join(allocator, &.{ local, "Ziggurat", "PolicySmoke" });
     defer allocator.free(profile);

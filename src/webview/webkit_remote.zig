@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const resources = @import("resources.zig");
 const schemes = @import("schemes.zig");
 const credentials = @import("request_credentials.zig");
@@ -49,12 +50,11 @@ pub fn canonicalUriOrigin(output: []u8, uri: []const u8, origin_only: bool, allo
 }
 fn isLoopback(host: []const u8) bool {
     if (std.mem.eql(u8, host, "localhost") or std.mem.endsWith(u8, host, ".localhost")) return true;
-    if (std.net.Ip4Address.parse(host, 0)) |address| {
-        if (std.mem.asBytes(&address.sa.addr)[0] == 127) return true;
+    if (std.Io.net.Ip4Address.parse(host, 0)) |address| {
+        if (address.bytes[0] == 127) return true;
     } else |_| {}
     if (host.len >= 2 and host[0] == '[') {
-        const address = std.net.Ip6Address.parse(host[1 .. host.len - 1], 0) catch return false;
-        const bytes = address.sa.addr;
+        const bytes = schemes.parseIp6(host[1 .. host.len - 1]) orelse return false;
         if (std.mem.allEqual(u8, bytes[0..15], 0) and bytes[15] == 1) return true;
         const mapped = std.mem.allEqual(u8, bytes[0..10], 0) and bytes[10] == 255 and bytes[11] == 255;
         const compatible = std.mem.allEqual(u8, bytes[0..12], 0);

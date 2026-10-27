@@ -218,7 +218,7 @@ test "RTF lists of pntext, cells, hidden text and bookmark links" {
     var p: u32 = 0;
     while (p < t.paragraphCount()) : (p += 1) {
         if (p > 0) try out.writer.writeByte('|');
-        try out.writer.print("{d}:{s}", .{ @intFromEnum(t.para(p).style.list), t.para(p).text() });
+        try out.writer.print("{d}:{s}", .{ @backingInt(t.para(p).style.list), t.para(p).text() });
     }
     try testing.expectEqualStrings("1:one|2:first|0:e\u{2011}mail visible|0:alpha\tbeta\t|0:up", out.written());
     try testing.expectEqualStrings("#top", t.attributesAt(t.len() - 1).link);
@@ -384,8 +384,8 @@ test "random texts read back from their Markdown" {
         var normal: std.ArrayList(Run) = .empty;
         for (runs.items, 0..) |r, i| {
             var text = r.text;
-            if (i == 0) text = std.mem.trimLeft(u8, text, " ");
-            if (i == runs.items.len - 1) text = std.mem.trimRight(u8, text, " ");
+            if (i == 0) text = std.mem.trimStart(u8, text, " ");
+            if (i == runs.items.len - 1) text = std.mem.trimEnd(u8, text, " ");
             if (r.attributes.code) text = std.mem.trim(u8, text, " ");
             if (text.len == 0) continue;
             if (normal.items.len > 0 and normal.items[normal.items.len - 1].attributes.eql(r.attributes)) {

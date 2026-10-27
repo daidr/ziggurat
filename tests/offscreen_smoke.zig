@@ -5,11 +5,7 @@ const ui = @import("ziggurat_ui");
 const text = @import("ziggurat_text_layout");
 const drawing = ui.drawing;
 const offscreen = ui.offscreen;
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn zlc_layer_live_objects() u32;
 extern fn zlc_test_live_image_objects() u32;
 extern fn cairo_image_surface_create(c_int, c_int, c_int) ?*anyopaque;
@@ -81,7 +77,7 @@ fn mixed(allocator: std.mem.Allocator, app: *z.App, scale: f32) !void {
     const mask: drawing.CoverageView = .{ .lease = &mask_lease, .identity = try drawing.reserveRasterIdentity(), .coverage = .{ .pixels = mask_pixels, .width = size.width, .height = size.height, .stride = size.width, .origin_x = 0, .origin_y = 0, .scale = scale } };
     try surface.uploadCoverage(mask);
     var image_lease = drawing.Lease.init(std.Thread.getCurrentId());
-    var image_pixels = [_]u8{ 0, 128, 0, 128 } ** 4;
+    var image_pixels = @as([16]u8, @bitCast(@as([4][4]u8, @splat(.{ 0, 128, 0, 128 }))));
     const image_levels = [_]drawing.ImageLevel{.{ .pixels = &image_pixels, .byte_len = image_pixels.len, .width = 2, .height = 2, .stride = 8 }};
     const image: drawing.ImageView = .{ .lease = &image_lease, .identity = try drawing.reserveRasterIdentity(), .levels = &image_levels };
     try surface.uploadImage(image);

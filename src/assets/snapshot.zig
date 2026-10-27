@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 
 pub const Asset = struct { path: []const u8, mime: []const u8, bytes: []const u8, digest: [32]u8 };
@@ -22,7 +23,7 @@ pub const Snapshot = struct {
     /// The directory is borrowed only during this synchronous call. It must
     /// permit iteration. Concurrent edits may fail or produce a mixed snapshot;
     /// callers retain the previous snapshot on error and rescan on next notice.
-    pub fn load(allocator: std.mem.Allocator, directory: std.fs.Dir, limits: Limits) !Snapshot {
+    pub fn load(allocator: std.mem.Allocator, directory: std.Io.Dir, limits: Limits) !Snapshot {
         if (limits.max_files == 0 or limits.max_entries == 0 or limits.max_depth == 0 or
             limits.max_path_bytes == 0 or limits.max_file_bytes == 0 or limits.max_total_bytes == 0) return error.InvalidLimits;
         var arena: std.heap.ArenaAllocator = .init(allocator);
@@ -89,9 +90,9 @@ const Builder = struct {
     files: std.ArrayList(Asset) = .empty,
     total_bytes: usize = 0,
     entries: usize = 0,
-    fn scan(self: *Builder, directory: std.fs.Dir, prefix: []const u8, depth: usize) anyerror!void {
+    fn scan(self: *Builder, directory: std.Io.Dir, prefix: []const u8, depth: usize) anyerror!void {
         var iterator = directory.iterate();
-        while (try iterator.next()) |entry| {
+        while (try iterator.next(zio.io())) |entry| {
             if (self.entries == self.limits.max_entries) return error.TooManyEntries;
             self.entries += 1;
             if (!validName(entry.name)) return error.InvalidAssetPath;
@@ -101,27 +102,27 @@ const Builder = struct {
             switch (entry.kind) {
                 .directory => {
                     if (depth == self.limits.max_depth) return error.AssetTreeTooDeep;
-                    var child = try directory.openDir(entry.name, .{ .iterate = true, .no_follow = true });
-                    defer child.close();
-                    const stat = try (std.fs.File{ .handle = child.fd }).stat();
+                    var child = try directory.openDir(zio.io(), entry.name, .{ .iterate = true, .follow_symlinks = false });
+                    defer child.close(zio.io());
+                    const stat = try child.stat(zio.io());
                     if (stat.kind != .directory) return error.NonRegularAsset;
                     try self.scan(child, path, depth + 1);
                 },
                 .file => {
                     if (self.files.items.len == self.limits.max_files) return error.TooManyAssets;
                     var file = try openRegular(directory, entry.name);
-                    defer file.close();
-                    const before = try file.stat();
+                    defer file.close(zio.io());
+                    const before = try file.stat(zio.io());
                     if (before.kind != .file) return error.NonRegularAsset;
                     const remaining = self.limits.max_total_bytes - self.total_bytes;
                     const maximum = @min(self.limits.max_file_bytes, remaining);
                     if (before.size > maximum) return error.AssetBytesExceeded;
                     const bytes = try self.allocator.alloc(u8, @intCast(before.size));
-                    const length = try file.preadAll(bytes, 0);
+                    const length = try file.readPositionalAll(zio.io(), bytes, 0);
                     var extra: [1]u8 = undefined;
-                    if (length != bytes.len or try file.preadAll(&extra, bytes.len) != 0) return error.AssetChangedDuringRead;
-                    const after = try file.stat();
-                    if (before.size != after.size or before.mtime != after.mtime or before.size != bytes.len) return error.AssetChangedDuringRead;
+                    if (length != bytes.len or try file.readPositionalAll(zio.io(), &extra, bytes.len) != 0) return error.AssetChangedDuringRead;
+                    const after = try file.stat(zio.io());
+                    if (before.size != after.size or before.mtime.nanoseconds != after.mtime.nanoseconds or before.size != bytes.len) return error.AssetChangedDuringRead;
                     self.total_bytes += bytes.len;
                     var digest: [32]u8 = undefined;
                     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
@@ -139,7 +140,7 @@ fn validName(name: []const u8) bool {
     return true;
 }
 
-fn openRegular(directory: std.fs.Dir, name: []const u8) !std.fs.File {
+fn openRegular(directory: std.Io.Dir, name: []const u8) !std.Io.File {
     if (builtin.os.tag == .windows) {
         const windows = std.os.windows;
         const path = try windows.sliceToPrefixedFileW(directory.fd, name);
@@ -159,10 +160,10 @@ fn openRegular(directory: std.fs.Dir, name: []const u8) !std.fs.File {
         var handle: windows.HANDLE = undefined;
         var io: windows.IO_STATUS_BLOCK = undefined;
         // Open relative to the held parent and never follow the final reparse
-        // point. Synchronous I/O is explicit so std.fs.File reads can be used.
+        // point. Synchronous I/O is explicit so std.Io.File reads can be used.
         const status = windows.ntdll.NtCreateFile(&handle, windows.GENERIC_READ | windows.SYNCHRONIZE, &attributes, &io, null, windows.FILE_ATTRIBUTE_NORMAL, windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE, windows.FILE_OPEN, windows.FILE_NON_DIRECTORY_FILE | windows.FILE_OPEN_REPARSE_POINT | windows.FILE_SYNCHRONOUS_IO_NONALERT, null, 0);
         switch (status) {
-            .SUCCESS => return .{ .handle = handle },
+            .SUCCESS => return .{ .handle = handle, .flags = .{ .nonblocking = false } },
             .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
             .ACCESS_DENIED => return error.AccessDenied,
             .FILE_IS_A_DIRECTORY => return error.NonRegularAsset,
@@ -170,7 +171,7 @@ fn openRegular(directory: std.fs.Dir, name: []const u8) !std.fs.File {
         }
     }
     if (builtin.os.tag == .wasi) return error.UnsupportedPlatform;
-    return .{ .handle = try std.posix.openat(directory.fd, name, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .CLOEXEC = true, .NONBLOCK = true }, 0) };
+    return .{ .handle = try zio.posix.openat(directory.handle, name, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .CLOEXEC = true, .NONBLOCK = true }, 0), .flags = .{ .nonblocking = true } };
 }
 
 pub fn mimeForPath(path: []const u8) []const u8 {
@@ -196,10 +197,10 @@ pub fn mimeForPath(path: []const u8) []const u8 {
 test "snapshot sorts immutable bytes, hashes content and builds an explicit resource table" {
     var temporary = std.testing.tmpDir(.{ .iterate = true });
     defer temporary.cleanup();
-    try temporary.dir.writeFile(.{ .sub_path = "z.js", .data = "one" });
-    try temporary.dir.writeFile(.{ .sub_path = "index.html", .data = "<html>first</html>" });
-    try temporary.dir.makeDir("nested");
-    try temporary.dir.writeFile(.{ .sub_path = "nested/file.bin", .data = "\x00\xff" });
+    try temporary.dir.writeFile(zio.io(), .{ .sub_path = "z.js", .data = "one" });
+    try temporary.dir.writeFile(zio.io(), .{ .sub_path = "index.html", .data = "<html>first</html>" });
+    try temporary.dir.createDir(zio.io(), "nested", .default_dir);
+    try temporary.dir.writeFile(zio.io(), .{ .sub_path = "nested/file.bin", .data = "\x00\xff" });
     var first = try Snapshot.load(std.testing.allocator, temporary.dir, .{});
     defer first.deinit();
     try std.testing.expectEqualStrings("/index.html", first.files[0].path);
@@ -212,12 +213,12 @@ test "snapshot sorts immutable bytes, hashes content and builds an explicit reso
     var same = try Snapshot.load(std.testing.allocator, temporary.dir, .{});
     defer same.deinit();
     try std.testing.expect(first.sameContent(&same));
-    try temporary.dir.writeFile(.{ .sub_path = "z.js", .data = "two" });
+    try temporary.dir.writeFile(zio.io(), .{ .sub_path = "z.js", .data = "two" });
     var changed = try Snapshot.load(std.testing.allocator, temporary.dir, .{});
     defer changed.deinit();
     try std.testing.expect(!first.sameContent(&changed));
     try std.testing.expectEqualStrings("one", first.find("/z.js").?.bytes);
-    try temporary.dir.deleteFile("nested/file.bin");
+    try temporary.dir.deleteFile(zio.io(), "nested/file.bin");
     var deleted = try Snapshot.load(std.testing.allocator, temporary.dir, .{});
     defer deleted.deinit();
     try std.testing.expect(!changed.sameContent(&deleted));
@@ -226,24 +227,24 @@ test "snapshot sorts immutable bytes, hashes content and builds an explicit reso
 test "snapshot bounds files entries bytes depth and portable paths" {
     var temporary = std.testing.tmpDir(.{ .iterate = true });
     defer temporary.cleanup();
-    try temporary.dir.writeFile(.{ .sub_path = "a.txt", .data = "abc" });
+    try temporary.dir.writeFile(zio.io(), .{ .sub_path = "a.txt", .data = "abc" });
     try std.testing.expectError(error.AssetBytesExceeded, Snapshot.load(std.testing.allocator, temporary.dir, .{ .max_file_bytes = 2 }));
     try std.testing.expectError(error.AssetBytesExceeded, Snapshot.load(std.testing.allocator, temporary.dir, .{ .max_total_bytes = 2 }));
     try std.testing.expectError(error.AssetPathTooLong, Snapshot.load(std.testing.allocator, temporary.dir, .{ .max_path_bytes = 2 }));
-    try temporary.dir.writeFile(.{ .sub_path = "b.txt", .data = "abc" });
+    try temporary.dir.writeFile(zio.io(), .{ .sub_path = "b.txt", .data = "abc" });
     try std.testing.expectError(error.TooManyAssets, Snapshot.load(std.testing.allocator, temporary.dir, .{ .max_files = 1 }));
     try std.testing.expectError(error.TooManyEntries, Snapshot.load(std.testing.allocator, temporary.dir, .{ .max_entries = 1 }));
-    try temporary.dir.makePath("nested/child");
+    try temporary.dir.createDirPath(zio.io(), "nested/child");
     try std.testing.expectError(error.AssetTreeTooDeep, Snapshot.load(std.testing.allocator, temporary.dir, .{ .max_depth = 1 }));
-    try temporary.dir.writeFile(.{ .sub_path = "bad name", .data = "" });
+    try temporary.dir.writeFile(zio.io(), .{ .sub_path = "bad name", .data = "" });
     try std.testing.expectError(error.InvalidAssetPath, Snapshot.load(std.testing.allocator, temporary.dir, .{}));
 }
 
 test "snapshot rejects symbolic links instead of embedding their target" {
     var temporary = std.testing.tmpDir(.{ .iterate = true });
     defer temporary.cleanup();
-    try temporary.dir.writeFile(.{ .sub_path = "a.txt", .data = "private" });
-    temporary.dir.symLink("a.txt", "link.txt", .{}) catch |err| switch (err) {
+    try temporary.dir.writeFile(zio.io(), .{ .sub_path = "a.txt", .data = "private" });
+    temporary.dir.symLink(zio.io(), "a.txt", "link.txt", .{}) catch |err| switch (err) {
         error.AccessDenied => return error.SkipZigTest,
         else => return err,
     };
@@ -253,11 +254,11 @@ test "snapshot rejects symbolic links instead of embedding their target" {
 test "snapshot releases every allocation on construction failure" {
     var temporary = std.testing.tmpDir(.{ .iterate = true });
     defer temporary.cleanup();
-    try temporary.dir.writeFile(.{ .sub_path = "index.html", .data = "<html>entry</html>" });
-    try temporary.dir.makePath("nested");
-    try temporary.dir.writeFile(.{ .sub_path = "nested/file.txt", .data = "snapshot" });
+    try temporary.dir.writeFile(zio.io(), .{ .sub_path = "index.html", .data = "<html>entry</html>" });
+    try temporary.dir.createDirPath(zio.io(), "nested");
+    try temporary.dir.writeFile(zio.io(), .{ .sub_path = "nested/file.txt", .data = "snapshot" });
     const Probe = struct {
-        fn load(allocator: std.mem.Allocator, directory: std.fs.Dir) !void {
+        fn load(allocator: std.mem.Allocator, directory: std.Io.Dir) !void {
             var snapshot = try Snapshot.load(allocator, directory, .{});
             defer snapshot.deinit();
         }

@@ -563,7 +563,12 @@ pub const Presenter = struct {
         defer scope.end();
         self.busy = true;
         defer self.busy = false;
-        errdefer |err| frame.failure = frame.failure orelse err;
+        return self.drawBody(frame, bounds, appearance) catch |err| {
+            frame.failure = frame.failure orelse err;
+            return err;
+        };
+    }
+    fn drawBody(self: *Presenter, frame: *ui.Frame, bounds: ui.Rect, appearance: Appearance) anyerror!void {
         const view = try self.current(bounds, frame.size.scale);
         try self.adapter.draw(frame, bounds, appearance.editor);
         try frame.pushClip(bounds);

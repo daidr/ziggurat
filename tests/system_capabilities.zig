@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const system = @import("ziggurat_system");
@@ -131,9 +132,9 @@ test "secret requests run on a worker and finish once on the main thread" {
     try std.testing.expectError(error.SecretTooLarge, secrets.get("dev.ziggurat.tests", "long", &small));
     try secrets.delete("dev.ziggurat.tests", "long");
     try std.testing.expectError(error.EmptyName, system.secrets.Request.init(app, .get, "", "key", "", &probe, SecretProbe.done));
-    try std.testing.expectError(error.NameTooLong, system.secrets.Request.init(app, .get, "s", "k" ** 257, "", &probe, SecretProbe.done));
+    try std.testing.expectError(error.NameTooLong, system.secrets.Request.init(app, .get, "s", &@as([257]u8, @splat('k')), "", &probe, SecretProbe.done));
     try std.testing.expectError(error.UnexpectedValue, system.secrets.Request.init(app, .delete, "s", "k", "v", &probe, SecretProbe.done));
-    try std.testing.expectError(error.SecretTooLarge, system.secrets.Request.init(app, .set, "s", "k", &([_]u8{0} ** (secrets.max_secret_bytes + 1)), &probe, SecretProbe.done));
+    try std.testing.expectError(error.SecretTooLarge, system.secrets.Request.init(app, .set, "s", "k", &(@as([secrets.max_secret_bytes + 1]u8, @splat(0))), &probe, SecretProbe.done));
     try std.testing.expectError(error.EmbeddedNul, secrets.delete("s\x00", "k"));
 }
 
@@ -189,8 +190,8 @@ test "flyouts go to the display with most of the anchor, else the nearest" {
         .{ .rect = .{ .x = -300, .y = 5, .width = 10, .height = 10 }, .want = 0 },
     }) |case| try std.testing.expectEqual(displays[case.want].work_area, flyout.monitorFor(case.rect, &displays).work_area);
     for (std.enums.values(flyout.Placement), 0..) |placement, index| {
-        try std.testing.expectEqual(@as(flyout.Side, @enumFromInt(index / 3)), placement.side());
-        try std.testing.expectEqual(@as(flyout.Alignment, @enumFromInt(index % 3)), placement.alignment());
+        try std.testing.expectEqual(@as(flyout.Side, @fromBackingInt(@intCast(index / 3))), placement.side());
+        try std.testing.expectEqual(@as(flyout.Alignment, @fromBackingInt(@intCast(index % 3))), placement.alignment());
     }
 }
 

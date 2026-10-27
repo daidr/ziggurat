@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const d = @import("root.zig");
@@ -37,9 +38,9 @@ const Host = struct {
     }
 };
 
-fn absolutePath(dir: std.fs.Dir, name: []const u8, buffer: []u8) ![]const u8 {
+fn absolutePath(dir: std.Io.Dir, name: []const u8, buffer: []u8) ![]const u8 {
     var parent: [std.fs.max_path_bytes]u8 = undefined;
-    const root = try dir.realpath(".", &parent);
+    const root = try zio.realpath(dir, ".", &parent);
     return std.fmt.bufPrint(buffer, "{s}{s}{s}", .{ root, std.fs.path.sep_str, name });
 }
 fn identityOf(path: []const u8) d.Identity {
@@ -60,9 +61,9 @@ test "identity resolution canonicalizes aliases and claims return the existing d
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "notes.txt", .data = "alpha" });
-    try tmp.dir.symLink("notes.txt", "alias.txt", .{});
-    try std.posix.linkat(tmp.dir.fd, "notes.txt", tmp.dir.fd, "hard.txt", 0);
+    try tmp.dir.writeFile(zio.io(), .{ .sub_path = "notes.txt", .data = "alpha" });
+    try tmp.dir.symLink(zio.io(), "notes.txt", "alias.txt", .{});
+    try zio.posix.linkat(tmp.dir.handle, "notes.txt", tmp.dir.handle, "hard.txt", 0);
     var a: [std.fs.max_path_bytes]u8 = undefined;
     var b: [std.fs.max_path_bytes]u8 = undefined;
     var c: [std.fs.max_path_bytes]u8 = undefined;
@@ -271,10 +272,10 @@ test "atomic save replaces content, keeps mode and refuses external modification
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "doc.txt", .data = "one" });
-    const file = try tmp.dir.openFile("doc.txt", .{});
-    try file.chmod(0o640);
-    file.close();
+    try tmp.dir.writeFile(zio.io(), .{ .sub_path = "doc.txt", .data = "one" });
+    const file = try tmp.dir.openFile(zio.io(), "doc.txt", .{});
+    try file.setPermissions(zio.io(), zio.mode(0o640));
+    file.close(zio.io());
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const path = try absolutePath(tmp.dir, "doc.txt", &path_buffer);
     var content: [64]u8 = undefined;
@@ -285,16 +286,16 @@ test "atomic save replaces content, keeps mode and refuses external modification
     var write_buffer: [16]u8 = undefined;
     const saved = (try io.save(path, "second", &write_buffer, .{ .expected = loaded.stamp })).saved;
     try equal(@as(u64, 6), saved.size);
-    try equal(@as(std.fs.File.Mode, 0o640), saved.mode & 0o777);
+    try equal(@as(u32, 0o640), saved.mode & 0o777);
     try expect(saved.key.inode != loaded.stamp.key.inode);
     try std.testing.expectEqualStrings("second", (try io.read(path, &content)).bytes);
     // Another program rewrites the file: the stale stamp is now a conflict.
-    try tmp.dir.writeFile(.{ .sub_path = "doc.txt", .data = "external!" });
+    try tmp.dir.writeFile(zio.io(), .{ .sub_path = "doc.txt", .data = "external!" });
     const result = try io.save(path, "third", &write_buffer, .{ .expected = saved });
     try expect(result == .conflict and result.conflict == .modified);
     try std.testing.expectEqualStrings("external!", (try io.read(path, &content)).bytes);
     try expect((try io.probe(path, saved)) == .modified);
-    try tmp.dir.deleteFile("doc.txt");
+    try tmp.dir.deleteFile(zio.io(), "doc.txt");
     try equal(d.Probe.missing, try io.probe(path, saved));
     try expect((try io.save(path, "fourth", &write_buffer, .{ .expected = saved })).conflict == .missing);
     try expect((try io.save(path, "fourth", &write_buffer, .{})) == .saved);
@@ -303,7 +304,7 @@ test "atomic save replaces content, keeps mode and refuses external modification
     try expect(!target.key.known() and std.mem.endsWith(u8, target.path.slice(), "/fresh.txt"));
     var iterator = tmp.dir.iterate();
     var names: usize = 0;
-    while (try iterator.next()) |_| names += 1;
+    while (try iterator.next(zio.io())) |_| names += 1;
     try equal(@as(usize, 1), names);
 }
 
@@ -361,7 +362,7 @@ test "recovery snapshots round trip, reject corruption and survive only unlocked
     const name = try d.RecoveryName.parse("u3");
     var write_buffer: [32]u8 = undefined;
     try crashed.write(&name, snapshot, &bytes, &write_buffer);
-    try crashed.dir.writeFile(.{ .sub_path = "unrelated.tmp", .data = "x" });
+    try crashed.dir.writeFile(zio.io(), .{ .sub_path = "unrelated.tmp", .data = "x" });
     crashed.close();
     var found: [4]u64 = undefined;
     const orphans = try d.recovery.orphans(io, tmp.dir, 0xa1, &found);

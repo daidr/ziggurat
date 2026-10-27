@@ -13,7 +13,7 @@ pub const MethodSet = packed struct(u8) {
     options: bool = false,
     reserved: u1 = 0,
     pub fn allows(self: MethodSet, method: Method) bool {
-        return @as(u8, @bitCast(self)) & (@as(u8, 1) << @intCast(@intFromEnum(method))) != 0;
+        return @as(u8, @bitCast(self)) & (@as(u8, 1) << @intCast(@backingInt(method))) != 0;
     }
 };
 pub const Header = struct { name: []const u8, value: []const u8 };

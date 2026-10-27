@@ -3,11 +3,7 @@ const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const resources = ui.gpu_resources;
 const drawing = ui.drawing;
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 const expect = std.testing.expect;
 fn equal(expected: anytype, actual: @TypeOf(expected)) !void {
     std.testing.expectEqual(expected, actual) catch |err| {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const files = @import("file_responses");
 const stream = @import("ziggurat_file_stream");
@@ -35,13 +36,13 @@ const WindowWorker = struct {
         };
     }
     fn work(self: *WindowWorker) !void {
-        var directory = std.testing.tmpDir(.{});
+        var directory = zio.tmpDir(.{});
         defer directory.cleanup();
-        const file = try directory.dir.createFile("window", .{ .read = true });
-        defer file.close();
+        const file = try directory.dir.createFile(zio.io(), "window", .{ .read = true });
+        defer file.close(zio.io());
         const bytes = "0123456789abcdefghijklmnopqrst";
-        try file.writeAll(bytes);
-        try file.seekTo(7);
+        try file.writeStreamingAll(zio.io(), bytes);
+        try zio.posix.seekTo(file.handle, 7);
         var code: ?i32 = 91;
         var prepared = try stream.PreparedSource.prepareWindowWithFailure(self.main_thread, file, .{ .offset = 10, .length = 3 }, 1024, &code);
         defer prepared.source.deinit();
@@ -50,7 +51,7 @@ const WindowWorker = struct {
         try std.testing.expectEqual(@as(u64, 3), prepared.source.length);
         prepared.source.length = 999; // Public cache cannot change native authority.
         try std.testing.expectEqual(@as(u64, 3), try prepared.source.authoritativeLength());
-        try std.testing.expectEqual(@as(u64, 7), try file.getPos());
+        try std.testing.expectEqual(@as(u64, 7), try zio.posix.position(file.handle));
         prepared.source.deinit();
         prepared.pump.deinit();
         try std.testing.expectEqualDeep(stream.Counts{}, stream.counts());
@@ -60,9 +61,9 @@ const WindowWorker = struct {
         try std.testing.expect(code == null);
         try std.testing.expectError(error.FileTooLarge, stream.PreparedSource.prepareWindowWithFailure(self.main_thread, file, .{ .offset = 0, .length = 1 }, 1, &code));
         try std.testing.expect(code == null);
-        const invalid: std.fs.File = .{ .handle = -1 };
+        const invalid: std.Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } };
         try std.testing.expectError(error.FileStreamFailed, stream.PreparedSource.prepareWindowWithFailure(self.main_thread, invalid, .{ .offset = 0, .length = 0 }, 1024, &code));
-        try std.testing.expectEqual(@as(i32, @intFromEnum(std.posix.E.BADF)), code.?);
+        try std.testing.expectEqual(@as(i32, @backingInt(std.posix.E.BADF)), code.?);
         var empty = try stream.PreparedSource.prepareWindow(self.main_thread, file, .{ .offset = bytes.len, .length = 0 }, 1024);
         try std.testing.expectEqual(@as(u64, 0), try empty.source.authoritativeLength());
         empty.source.deinit();
@@ -97,7 +98,7 @@ const Worker = struct {
             self.err = err;
         };
     }
-    fn allocationFixture(allocator: std.mem.Allocator, self: *Worker, file: std.fs.File) !void {
+    fn allocationFixture(allocator: std.mem.Allocator, self: *Worker, file: std.Io.File) !void {
         var prepared = try files.OwnedFileResponse.preparePumped(allocator, self.main_thread, file, .{ .mime = "text/plain", .headers = &.{.{ .name = "X-Pump", .value = "owned" }} }, 1024);
         defer prepared.pump.deinit();
         defer prepared.response.deinit();
@@ -106,19 +107,19 @@ const Worker = struct {
         try std.testing.expectEqualStrings("owned", prepared.response.metadata.response.headers[0].value);
     }
     fn work(self: *Worker) !void {
-        var directory = std.testing.tmpDir(.{});
+        var directory = zio.tmpDir(.{});
         defer directory.cleanup();
-        const file = try directory.dir.createFile("private", .{ .read = true });
-        defer file.close();
-        try file.writeAll("explicit transfer");
-        try file.seekTo(3);
+        const file = try directory.dir.createFile(zio.io(), "private", .{ .read = true });
+        defer file.close(zio.io());
+        try file.writeStreamingAll(zio.io(), "explicit transfer");
+        try zio.posix.seekTo(file.handle, 3);
         try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationFixture, .{ self, file });
-        try std.testing.expectEqual(@as(u64, 3), try file.getPos());
+        try std.testing.expectEqual(@as(u64, 3), try zio.posix.position(file.handle));
         try expectCounts(0, 0);
         var code: ?i32 = 91;
-        const invalid: std.fs.File = .{ .handle = -1 };
+        const invalid: std.Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } };
         try std.testing.expectError(error.FileStreamFailed, files.OwnedFileResponse.preparePumpedWithFailure(std.testing.failing_allocator, self.main_thread, invalid, .{}, 1024, &code));
-        try std.testing.expectEqual(@as(i32, @intFromEnum(std.posix.E.BADF)), code.?);
+        try std.testing.expectEqual(@as(i32, @backingInt(std.posix.E.BADF)), code.?);
         try std.testing.expectError(error.FileTooLarge, files.OwnedFileResponse.preparePumpedWithFailure(std.testing.failing_allocator, self.main_thread, file, .{}, 1, &code));
         try std.testing.expect(code == null);
         try std.testing.expectError(error.InvalidFileStreamLimit, files.OwnedFileResponse.preparePumpedWithFailure(std.testing.failing_allocator, self.main_thread, file, .{}, 0, &code));
@@ -213,11 +214,11 @@ const UiGate = struct {
         };
     }
     fn prepareInner(self: *UiGate) !void {
-        var directory = std.testing.tmpDir(.{});
+        var directory = zio.tmpDir(.{});
         defer directory.cleanup();
-        const file = try directory.dir.createFile("private", .{ .read = true });
-        defer file.close();
-        try file.writeAll("bytes");
+        const file = try directory.dir.createFile(zio.io(), "private", .{ .read = true });
+        defer file.close(zio.io());
+        try file.writeStreamingAll(zio.io(), "bytes");
         self.prepared = try files.OwnedFileResponse.preparePumped(std.testing.allocator, self.main_thread, file, .{}, 1024);
     }
     fn cancelledPump(self: *UiGate) void {
@@ -231,7 +232,7 @@ const UiGate = struct {
 test "UI thread cannot prepare or pump and rejected pumping does not consume the worker operation" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const main_thread = std.Thread.getCurrentId();
-    const undefined_file: std.fs.File = undefined;
+    const undefined_file: std.Io.File = undefined;
     try std.testing.expectError(error.UiThreadForbidden, files.OwnedFileResponse.preparePumped(std.testing.failing_allocator, main_thread, undefined_file, .{}, 1024));
     var state: UiGate = .{ .main_thread = main_thread };
     const worker = try std.Thread.spawn(.{}, UiGate.prepare, .{&state});
@@ -261,14 +262,14 @@ const NeutralWorker = struct {
         };
     }
     fn prepareInner(self: *NeutralWorker) !void {
-        var directory = std.testing.tmpDir(.{});
+        var directory = zio.tmpDir(.{});
         defer directory.cleanup();
-        const file = try directory.dir.createFile("neutral-private", .{ .read = true });
-        defer file.close();
-        try file.writeAll("explicit transfer");
-        try file.seekTo(3);
+        const file = try directory.dir.createFile(zio.io(), "neutral-private", .{ .read = true });
+        defer file.close(zio.io());
+        try file.writeStreamingAll(zio.io(), "explicit transfer");
+        try zio.posix.seekTo(file.handle, 3);
         self.prepared = try stream.PreparedSource.prepare(self.owner, file, 1024);
-        try std.testing.expectEqual(@as(u64, 3), try file.getPos());
+        try std.testing.expectEqual(@as(u64, 3), try zio.posix.position(file.handle));
     }
     fn pump(self: *NeutralWorker) void {
         self.prepared.?.pump.pump() catch |err| {

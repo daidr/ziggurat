@@ -16,6 +16,7 @@
 //! without allocating. The window's Context needs `prepareTextFields`
 //! before the leaf is shown.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const view = @import("ziggurat_view");
@@ -1572,7 +1573,7 @@ pub const TerminalView = struct {
         const s = &self.terminal.screen;
         const at = self.cellAt(press.position);
         const position: Position = .{ .row = s.viewRow(at.row), .col = at.col };
-        const now = std.time.milliTimestamp();
+        const now = zio.milliTimestamp();
         const same = position.row == self.last_click_at.row and position.col == self.last_click_at.col;
         self.clicks = if (same and now - self.last_click < double_click_ms) @min(self.clicks + 1, 3) else 1;
         self.last_click = now;

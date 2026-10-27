@@ -6,11 +6,7 @@ const text = @import("ziggurat_text_layout");
 const expect = std.testing.expect;
 const equal = std.testing.expectEqual;
 const expectError = std.testing.expectError;
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn zlc_layer_live_objects() u32;
 extern fn zlc_test_live_image_objects() u32;
 fn near(want: u32, actual: u32, tolerance: u32) !void {

@@ -533,7 +533,7 @@ test "resolve follows web links" {
     try std.testing.expectEqualStrings("/a/c", try resolve(&buffer, "/x", "/a/./b/../c"));
     try std.testing.expectEqualStrings("/", try resolve(&buffer, "/a", "../.."));
     try std.testing.expectError(error.InvalidLocation, resolve(&buffer, "/", "/a#b"));
-    try std.testing.expectError(error.LocationTooLong, resolve(&buffer, "/", "/" ++ "x" ** 300));
+    try std.testing.expectError(error.LocationTooLong, resolve(&buffer, "/", "/" ++ &@as([300]u8, @splat('x'))));
 }
 
 test "history pushes, replaces and moves" {

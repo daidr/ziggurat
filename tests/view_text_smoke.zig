@@ -7,11 +7,7 @@ const t = @import("ziggurat_text_layout");
 const editing = @import("ziggurat_document_editor");
 const view = @import("ziggurat_view");
 const text = @import("ziggurat_view_text");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 
 extern fn zlg_test_paint(*anyopaque, u32, u32) void;
 extern fn zlg_resource_count() u32;

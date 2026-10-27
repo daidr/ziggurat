@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const d = @import("document.zig");
 const s = @import("style.zig");
 pub const Limits = struct { bytes: usize = 128 * 1024, rules: usize = 256, declarations: usize = 4096 };
@@ -134,7 +135,7 @@ pub const Sheet = struct {
                 class_count += 1;
             }
         };
-        var winners: [std.meta.fields(s.Property).len]?Winner = @splat(null);
+        var winners: [zio.fields(s.Property).len]?Winner = @splat(null);
         for (self.rules) |rule| if (try rule.selector.matches(node, name, classes[0..class_count], work)) {
             try work.charge(rule.count);
             for (self.declarations[rule.first..][0..rule.count]) |declaration| select(&winners, declaration, rule.selector.specificity);
@@ -156,7 +157,7 @@ pub const Sheet = struct {
     }
 };
 fn select(winners: []?Winner, declaration: Declaration, specificity: u16) void {
-    const index = @intFromEnum(declaration.property);
+    const index = @backingInt(declaration.property);
     if (winners[index]) |old| {
         if (old.declaration.important and !declaration.important) return;
         if (old.declaration.important == declaration.important and old.specificity > specificity) return;
@@ -352,5 +353,5 @@ fn clean(source: []u8) !usize {
 }
 
 test "marker CSS winner storage is fixed and allocation free" {
-    std.debug.print("svg_marker_css_sizes property_count={d} winner={d} winner_slots={d} pre_marker_slots={d}\n", .{ std.meta.fields(s.Property).len, @sizeOf(?Winner), @sizeOf([std.meta.fields(s.Property).len]?Winner), @sizeOf([std.meta.fields(s.Property).len - 3]?Winner) });
+    std.debug.print("svg_marker_css_sizes property_count={d} winner={d} winner_slots={d} pre_marker_slots={d}\n", .{ zio.fields(s.Property).len, @sizeOf(?Winner), @sizeOf([zio.fields(s.Property).len]?Winner), @sizeOf([zio.fields(s.Property).len - 3]?Winner) });
 }

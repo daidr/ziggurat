@@ -82,7 +82,7 @@ pub fn place(bounds: ui.Rect, popup: ui.Rect, options: Options) !?ui.Rect {
 test "details composition is bounded and failed output is untouched" {
     var output: [8]u8 = @splat(0x5a);
     try std.testing.expectError(error.CapacityExceeded, writeSource("1234", "5678", &output));
-    try std.testing.expectEqual([_]u8{0x5a} ** 8, output);
+    try std.testing.expectEqual(@as([8]u8, @splat(0x5a)), output);
     try std.testing.expectEqualStrings("a\n\nb", try writeSource("a", "b", &output));
     try std.testing.expectEqualStrings("b", try writeSource("", "b", &output));
     try std.testing.expectEqual(@as(usize, 0), try sourceLength("", "", 0));

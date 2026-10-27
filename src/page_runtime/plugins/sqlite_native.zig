@@ -3,6 +3,7 @@
 //! connection is used by one worker at a time; `interrupt` and `cancel` may
 //! come from the main thread.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 
 const Db = opaque {};
@@ -81,7 +82,7 @@ pub const Library = struct {
         errdefer lib.close();
         var self: Library = undefined;
         self.lib = lib;
-        inline for (@typeInfo(Library).@"struct".fields) |field| {
+        inline for (zio.fields(Library)) |field| {
             if (comptime std.mem.eql(u8, field.name, "lib")) continue;
             @field(self, field.name) = lib.lookup(field.type, "sqlite3_" ++ field.name) orelse return error.MissingSymbol;
         }
@@ -106,7 +107,7 @@ pub const Failure = struct {
 
     fn set(self: *Failure, code: c_int, comptime format: []const u8, args: anytype) void {
         self.code = code;
-        self.len = (std.fmt.bufPrint(&self.message, format, args) catch self.message[0..self.message.len]).len;
+        self.len = (std.fmt.bufPrint(&self.message, format, args) catch @as([]const u8, &self.message)).len;
     }
 };
 
@@ -238,7 +239,7 @@ pub const Connection = struct {
         if (self.isCanceled()) return 0;
         const waited: u64 = @as(u64, @intCast(count)) * 5;
         if (waited >= self.timeout_ms) return 0;
-        std.Thread.sleep(5 * std.time.ns_per_ms);
+        zio.sleep(5 * std.time.ns_per_ms);
         return 1;
     }
 

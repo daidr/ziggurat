@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
@@ -191,7 +192,7 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    const directory = try std.process.getEnvVarOwned(allocator, "ZIGGURAT_REQUEST_POLICY_EXTENSION");
+    const directory = try zio.getEnvVarOwned(allocator, "ZIGGURAT_REQUEST_POLICY_EXTENSION");
     defer allocator.free(directory);
     try std.testing.checkAllAllocationFailures(allocator, attachAllocationFailure, .{ allocator, directory });
     try run(allocator, "/ziggurat-missing-request-policy", true, false);

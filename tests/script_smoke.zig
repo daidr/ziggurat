@@ -1,12 +1,9 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 extern fn zwv_browser_process_id(*anyopaque, *c_uint) i32;
 const Kind = enum { normal, large, oom, timeout, cancel, reload, after_reload, reentrant, detached, fill };
 const Case = struct {
@@ -73,7 +70,7 @@ const State = struct {
     done: bool = false,
     native_full: bool = false,
     fn completion(self: *State, kind: Kind) web.ScriptCompletion {
-        return .{ .context = &self.cases[@intFromEnum(kind)], .complete = Case.complete };
+        return .{ .context = &self.cases[@backingInt(kind)], .complete = Case.complete };
     }
     fn options(self: *State) web.Options {
         return .{ .html = "<title>script fixture</title>", .user_data_folder = self.profile, .local = .{}, .zoom = 1.25, .user_agent = "ZigguratScriptSmoke/Initial", .scripts = .{ .max_pending = 4, .max_result_bytes = 64 }, .page_listener = .{ .context = self, .event = page } };
@@ -139,7 +136,7 @@ const State = struct {
         self.app.post(.{ .context = self, .call = advance }) catch |err| self.fail(err);
     }
     fn completed(self: *State, kind: Kind, result: web.ScriptResult) void {
-        self.counts[@intFromEnum(kind)] += 1;
+        self.counts[@backingInt(kind)] += 1;
         switch (kind) {
             .normal => {
                 if (result != .json or std.mem.indexOf(u8, result.json, "42") == null or std.mem.indexOf(u8, result.json, "中文") == null) return self.fail(error.InvalidJson);
@@ -239,7 +236,7 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    const local = try std.process.getEnvVarOwned(allocator, "LOCALAPPDATA");
+    const local = try zio.getEnvVarOwned(allocator, "LOCALAPPDATA");
     defer allocator.free(local);
     const profile = try std.fs.path.join(allocator, &.{ local, "Ziggurat", "ScriptSmoke" });
     defer allocator.free(profile);
@@ -249,7 +246,7 @@ pub fn main() !void {
     var fault = std.testing.FailingAllocator.init(allocator, .{});
     var view: web.View = undefined;
     var state: State = .{ .app = app, .view = &view, .profile = profile, .allocator_fault = &fault };
-    for (&state.cases, 0..) |*case, i| case.* = .{ .state = &state, .kind = @enumFromInt(i) };
+    for (&state.cases, 0..) |*case, i| case.* = .{ .state = &state, .kind = @fromBackingInt(@intCast(i)) };
     view = web.View.init(fault.allocator(), &state, State.event);
     const window = try app.createWindow(.{});
     try view.attach(window, state.options());

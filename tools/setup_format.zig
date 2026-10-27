@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 
 /// A setup program is the setup stub followed by an update package, the
 /// install configuration and a footer. When the result is Authenticode
@@ -43,12 +44,12 @@ pub fn writeFooter(writer: *std.Io.Writer, zip: []const u8, config: []const u8) 
 
 /// Byte length of a PE image before its attribute certificate table, or the
 /// whole length for unsigned images and other formats.
-pub fn contentEnd(file: std.fs.File, size: u64) !u64 {
+pub fn contentEnd(file: std.Io.File, size: u64) !u64 {
     var dos: [64]u8 = undefined;
-    if (size < dos.len or try file.preadAll(&dos, 0) != dos.len or !std.mem.eql(u8, dos[0..2], "MZ")) return size;
+    if (size < dos.len or try file.readPositionalAll(zio.io(), &dos, 0) != dos.len or !std.mem.eql(u8, dos[0..2], "MZ")) return size;
     const pe = std.mem.readInt(u32, dos[0x3c..][0..4], .little);
     var header: [24 + 2]u8 = undefined;
-    if (pe > size or try file.preadAll(&header, pe) != header.len or !std.mem.eql(u8, header[0..4], "PE\x00\x00")) return size;
+    if (pe > size or try file.readPositionalAll(zio.io(), &header, pe) != header.len or !std.mem.eql(u8, header[0..4], "PE\x00\x00")) return size;
     const optional = pe + 24;
     const magic_value = std.mem.readInt(u16, header[24..26], .little);
     const directories: u64 = switch (magic_value) {
@@ -58,7 +59,7 @@ pub fn contentEnd(file: std.fs.File, size: u64) !u64 {
     };
     // Data directory 4 holds the certificate table as a file offset.
     var security: [8]u8 = undefined;
-    if (try file.preadAll(&security, directories + 4 * 8) != security.len) return size;
+    if (try file.readPositionalAll(zio.io(), &security, directories + 4 * 8) != security.len) return size;
     const offset = std.mem.readInt(u32, security[0..4], .little);
     const length = std.mem.readInt(u32, security[4..8], .little);
     if (offset == 0 or length == 0) return size;
@@ -66,12 +67,12 @@ pub fn contentEnd(file: std.fs.File, size: u64) !u64 {
     return offset;
 }
 
-pub fn locate(file: std.fs.File) !?Located {
-    const size = (try file.stat()).size;
+pub fn locate(file: std.Io.File) !?Located {
+    const size = (try file.stat(zio.io())).size;
     const end = try contentEnd(file, size);
     if (end < footer_bytes) return null;
     var footer: [footer_bytes]u8 = undefined;
-    if (try file.preadAll(&footer, end - footer_bytes) != footer.len) return null;
+    if (try file.readPositionalAll(zio.io(), &footer, end - footer_bytes) != footer.len) return null;
     if (!std.mem.eql(u8, footer[0..magic.len], magic)) return null;
     var located: Located = undefined;
     located.zip_bytes = std.mem.readInt(u64, footer[8..16], .little);
@@ -95,9 +96,9 @@ test "payload is found after the stub with and without a certificate table" {
     try output.writer.writeAll("zip!");
     try output.writer.writeAll("{}");
     try writeFooter(&output.writer, "zip!", "{}");
-    try temp.dir.writeFile(.{ .sub_path = "setup", .data = output.written() });
-    var file = try temp.dir.openFile("setup", .{});
-    defer file.close();
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "setup", .data = output.written() });
+    var file = try temp.dir.openFile(zio.io(), "setup", .{});
+    defer file.close(zio.io());
     const located = (try locate(file)).?;
     try std.testing.expectEqual(10, located.stub_bytes);
     try std.testing.expectEqual(4, located.zip_bytes);
@@ -120,13 +121,13 @@ test "payload is found after the stub with and without a certificate table" {
     try signed.writer.writeAll("{}");
     try writeFooter(&signed.writer, "zip!", "{}");
     try signed.writer.writeAll(&@as([16]u8, @splat(0xcc)));
-    try temp.dir.writeFile(.{ .sub_path = "signed.exe", .data = signed.written() });
-    var pe = try temp.dir.openFile("signed.exe", .{});
-    defer pe.close();
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "signed.exe", .data = signed.written() });
+    var pe = try temp.dir.openFile(zio.io(), "signed.exe", .{});
+    defer pe.close(zio.io());
     try std.testing.expectEqual(image.len, (try locate(pe)).?.stub_bytes);
-    try temp.dir.writeFile(.{ .sub_path = "plain", .data = "no payload here" });
-    var plain = try temp.dir.openFile("plain", .{});
-    defer plain.close();
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "plain", .data = "no payload here" });
+    var plain = try temp.dir.openFile(zio.io(), "plain", .{});
+    defer plain.close(zio.io());
     try std.testing.expect((try locate(plain)) == null);
 }
 

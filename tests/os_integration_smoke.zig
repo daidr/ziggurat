@@ -3,27 +3,22 @@
 //! Linux D-Bus checks need a session bus whose address is also exported as
 //! DBUS_SYSTEM_BUS_ADDRESS; pass --require-dbus to fail instead of skipping.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const system = @import("ziggurat_system");
 const probe = @import("os_integration_probe");
 const instance = system.instance;
 const integration = system.integration;
-const win = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("shellapi.h");
-    @cInclude("shlwapi.h");
-}) else struct {};
+const win = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 
 const words = [_][]const u8{ "", "two words", "中文🦎", "embedded\"quote", "tail\\", "\\\"", "$(literal);&|<>%^!", "line\nbreak", "zigsmoke://open?x=1&y=%20" };
 const handler_id = "org.zg.OsSmoke";
 const allocator = std.heap.page_allocator;
 
-pub fn main() !void {
-    const arguments = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, arguments);
+pub fn main(init: std.process.Init.Minimal) !void {
+    const arguments = try zio.argsAlloc(allocator, init.args);
+    defer zio.argsFree(allocator, arguments);
     if (arguments.len >= 3 and std.mem.eql(u8, arguments[1], "--secondary")) return secondary(arguments[2], arguments[3..]);
     if (arguments.len == 4 and std.mem.eql(u8, arguments[1], "--hold-primary")) return holdPrimary(arguments[2], arguments[3]);
     if (arguments.len == 3 and std.mem.eql(u8, arguments[1], "--expect-primary")) {
@@ -45,7 +40,7 @@ pub fn main() !void {
     // Anything else was launched through a registered scheme or file type.
     if (arguments.len >= 2 and !require_dbus) return secondary(handler_id, arguments[1..]);
 
-    const executable = try std.fs.selfExePathAlloc(allocator);
+    const executable = try zio.executablePathAlloc(allocator);
     try directories();
     try singleInstance(executable);
     try registration(executable);
@@ -56,7 +51,7 @@ pub fn main() !void {
 
 fn secondary(id: []const u8, forwarded: []const []const u8) !void {
     var cwd_storage: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd = try std.process.getCwd(&cwd_storage);
+    const cwd = try zio.getCwd(&cwd_storage);
     if (try instance.claimOrForward(.{ .id = id, .timeout_ms = 5000 }, .{ .cwd = cwd, .arguments = forwarded }, 8)) |value| {
         var primary = value;
         primary.deinit();
@@ -66,9 +61,9 @@ fn secondary(id: []const u8, forwarded: []const []const u8) !void {
 fn holdPrimary(id: []const u8, marker: []const u8) !void {
     const claim = try instance.claim(.{ .id = id });
     if (claim != .primary) std.process.exit(5);
-    const file = try std.fs.createFileAbsolute(marker, .{});
-    file.close();
-    while (true) std.Thread.sleep(std.time.ns_per_s);
+    const file = try std.Io.Dir.createFileAbsolute(zio.io(), marker, .{});
+    file.close(zio.io());
+    while (true) zio.sleep(std.time.ns_per_s);
 }
 
 fn directories() !void {
@@ -85,11 +80,11 @@ fn directories() !void {
 
 const Collector = struct {
     primary: *instance.Primary,
-    mutex: std.Thread.Mutex = .{},
-    changed: std.Thread.Condition = .{},
+    mutex: zio.Mutex = .{},
+    changed: zio.Condition = .{},
     messages: std.ArrayList([]const []const u8) = .empty,
     cwds: std.ArrayList([]const u8) = .empty,
-    rejections: [@typeInfo(instance.Rejection).@"enum".fields.len]usize = @splat(0),
+    rejections: [zio.fields(instance.Rejection).len]usize = @splat(0),
     stopped: bool = false,
     failure: ?anyerror = null,
 
@@ -109,7 +104,7 @@ const Collector = struct {
                     self.stopped = true;
                     return;
                 },
-                .rejected => |reason| self.rejections[@intFromEnum(reason)] += 1,
+                .rejected => |reason| self.rejections[@backingInt(reason)] += 1,
                 .message => |message| {
                     const copy = allocator.alloc([]const u8, message.arguments.len) catch unreachable;
                     for (message.arguments, copy) |argument, *slot| slot.* = allocator.dupe(u8, argument) catch unreachable;
@@ -129,10 +124,10 @@ const Collector = struct {
     fn waitMessages(self: *Collector, count: usize) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        const deadline = std.time.milliTimestamp() + 20_000;
+        const deadline = zio.milliTimestamp() + 20_000;
         while (self.messages.items.len < count) {
             if (self.failure) |err| return err;
-            const left = deadline - std.time.milliTimestamp();
+            const left = deadline - zio.milliTimestamp();
             if (left <= 0) return error.MessageTimeout;
             self.changed.timedWait(&self.mutex, @as(u64, @intCast(left)) * std.time.ns_per_ms) catch {};
         }
@@ -140,9 +135,9 @@ const Collector = struct {
     fn waitRejection(self: *Collector, reason: instance.Rejection, count: usize) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        const deadline = std.time.milliTimestamp() + 20_000;
-        while (self.rejections[@intFromEnum(reason)] < count) {
-            const left = deadline - std.time.milliTimestamp();
+        const deadline = zio.milliTimestamp() + 20_000;
+        while (self.rejections[@backingInt(reason)] < count) {
+            const left = deadline - zio.milliTimestamp();
             if (left <= 0) return error.RejectionTimeout;
             self.changed.timedWait(&self.mutex, @as(u64, @intCast(left)) * std.time.ns_per_ms) catch {};
         }
@@ -150,15 +145,12 @@ const Collector = struct {
 };
 
 fn spawn(argv: []const []const u8, cwd: ?[]const u8) !std.process.Child {
-    var child = std.process.Child.init(argv, allocator);
-    child.cwd = cwd;
-    child.stdin_behavior = .Ignore;
-    try child.spawn();
+    const child = try zio.spawn(.{ .argv = argv, .cwd = zio.cwd(cwd), .stdin = .ignore });
     return child;
 }
 fn expectExit(child: *std.process.Child, code: u8) !void {
-    const term = try child.wait();
-    if (term != .Exited or term.Exited != code) {
+    const term = try child.wait(zio.io());
+    if (term != .exited or term.exited != code) {
         std.debug.print("child term {any}, expected exit {d}\n", .{ term, code });
         return error.UnexpectedChildExit;
     }
@@ -170,11 +162,11 @@ fn resourceCount() !usize {
         if (win.GetProcessHandleCount(win.GetCurrentProcess(), &count) == 0) return error.HandleCount;
         return count;
     }
-    var directory = try std.fs.openDirAbsolute("/proc/self/fd", .{ .iterate = true });
-    defer directory.close();
+    var directory = try std.Io.Dir.openDirAbsolute(zio.io(), "/proc/self/fd", .{ .iterate = true });
+    defer directory.close(zio.io());
     var iterator = directory.iterate();
     var count: usize = 0;
-    while (try iterator.next()) |_| count += 1;
+    while (try iterator.next(zio.io())) |_| count += 1;
     return count;
 }
 
@@ -199,7 +191,7 @@ fn singleInstance(executable: []const u8) !void {
     var collector: Collector = .{ .primary = primary };
     const worker = try std.Thread.spawn(.{}, Collector.run, .{&collector});
     var cwd_storage: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd = try std.fs.realpath(if (builtin.os.tag == .windows) "C:\\Windows" else "/", &cwd_storage);
+    const cwd = try zio.realpath(std.Io.Dir.cwd(), if (builtin.os.tag == .windows) "C:\\Windows" else "/", &cwd_storage);
 
     // Eight concurrent second processes, each forwarding the full word list.
     var argv: [3 + words.len][]const u8 = undefined;
@@ -266,19 +258,19 @@ fn singleInstance(executable: []const u8) !void {
     var temp_storage: [std.fs.max_path_bytes]u8 = undefined;
     const temp = try system.identity.directory(.temp, &temp_storage);
     const marker = try std.fmt.bufPrint(&marker_storage, "{s}{c}{s}.ready", .{ temp, std.fs.path.sep, id });
-    std.fs.deleteFileAbsolute(marker) catch {};
+    std.Io.Dir.deleteFileAbsolute(zio.io(), marker) catch {};
     var holder = try spawn(&.{ executable, "--hold-primary", id, marker }, null);
-    const deadline = std.time.milliTimestamp() + 20_000;
+    const deadline = zio.milliTimestamp() + 20_000;
     while (true) {
-        if (std.fs.accessAbsolute(marker, .{})) |_| break else |_| {}
-        if (std.time.milliTimestamp() > deadline) return error.HolderTimeout;
-        std.Thread.sleep(10 * std.time.ns_per_ms);
+        if (std.Io.Dir.accessAbsolute(zio.io(), marker, .{})) |_| break else |_| {}
+        if (zio.milliTimestamp() > deadline) return error.HolderTimeout;
+        zio.sleep(10 * std.time.ns_per_ms);
     }
-    std.fs.deleteFileAbsolute(marker) catch {};
+    std.Io.Dir.deleteFileAbsolute(zio.io(), marker) catch {};
     var blocked = try instance.claim(.{ .id = id });
     if (blocked != .secondary) return error.ExpectedSecondary;
     blocked.secondary.deinit();
-    _ = try holder.kill();
+    holder.kill(zio.io());
     var recovered = try instance.claim(.{ .id = id });
     if (recovered != .primary) return error.ExpectedPrimary;
     recovered.primary.deinit();
@@ -312,13 +304,17 @@ fn rawPeer(id: []const u8, bytes: []const u8, expected: anyerror) !void {
 }
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 fn unsafeRuntimeDirectory(id: []const u8) !void {
-    const original = std.posix.getenv("XDG_RUNTIME_DIR") orelse return;
+    const original = zio.getenv("XDG_RUNTIME_DIR") orelse return;
     var saved: [std.fs.max_path_bytes:0]u8 = undefined;
-    const restore = try std.fmt.bufPrintZ(&saved, "{s}", .{original});
+    const restore = try std.fmt.bufPrintSentinel(&saved, "{s}", .{original}, 0);
     const open_directory = "/tmp/ziggurat-open-runtime";
-    std.fs.makeDirAbsolute(open_directory) catch |err| if (err != error.PathAlreadyExists) return err;
-    defer std.fs.deleteDirAbsolute(open_directory) catch {};
-    try std.posix.fchmodat(std.posix.AT.FDCWD, open_directory, 0o755, 0);
+    zio.posix.mkdir(open_directory, 0o755) catch |err| if (err != error.PathAlreadyExists) return err;
+    defer std.Io.Dir.deleteDirAbsolute(zio.io(), open_directory) catch {};
+    {
+        const fd = try zio.posix.open(open_directory, .{ .DIRECTORY = true, .CLOEXEC = true }, 0);
+        defer zio.posix.close(fd);
+        try zio.posix.fchmod(fd, 0o755);
+    }
     _ = setenv("XDG_RUNTIME_DIR", open_directory, 1);
     defer _ = setenv("XDG_RUNTIME_DIR", restore, 1);
     try std.testing.expectError(error.RuntimeDirectoryUnsafe, instance.claim(.{ .id = id }));
@@ -326,7 +322,7 @@ fn unsafeRuntimeDirectory(id: []const u8) !void {
 
 fn registration(executable_arg: []const u8) !void {
     var executable_storage: [std.fs.max_path_bytes]u8 = undefined;
-    const executable = try std.fs.realpath(executable_arg, &executable_storage);
+    const executable = try zio.realpath(std.Io.Dir.cwd(), executable_arg, &executable_storage);
     var scheme_storage: [32]u8 = undefined;
     const pid = processId();
     const scheme = try std.fmt.bufPrint(&scheme_storage, "zigsmoke{d}", .{pid % 100000});
@@ -343,22 +339,22 @@ fn registration(executable_arg: []const u8) !void {
     };
     var root_storage: [std.fs.max_path_bytes]u8 = undefined;
     var cwd_storage: [std.fs.max_path_bytes]u8 = undefined;
-    const root = try std.fmt.bufPrint(&root_storage, "{s}{c}.zig-cache{c}tmp{c}os-integration-{d}", .{ try std.process.getCwd(&cwd_storage), std.fs.path.sep, std.fs.path.sep, std.fs.path.sep, pid });
-    try std.fs.cwd().makePath(root);
-    defer std.fs.deleteTreeAbsolute(root) catch {};
+    const root = try std.fmt.bufPrint(&root_storage, "{s}{c}.zig-cache{c}tmp{c}os-integration-{d}", .{ try zio.getCwd(&cwd_storage), std.fs.path.sep, std.fs.path.sep, std.fs.path.sep, pid });
+    try std.Io.Dir.cwd().createDirPath(zio.io(), root);
+    defer std.Io.Dir.cwd().deleteTree(zio.io(), root) catch {};
     if (builtin.os.tag == .linux) {
         // GIO and this module read the same XDG roots; set them before any GIO use.
         var data: [std.fs.max_path_bytes:0]u8 = undefined;
         var config: [std.fs.max_path_bytes:0]u8 = undefined;
-        _ = probe.probe_setenv("XDG_DATA_HOME", try std.fmt.bufPrintZ(&data, "{s}/data", .{root}));
-        _ = probe.probe_setenv("XDG_CONFIG_HOME", try std.fmt.bufPrintZ(&config, "{s}/config", .{root}));
+        _ = probe.probe_setenv("XDG_DATA_HOME", try std.fmt.bufPrintSentinel(&data, "{s}/data", .{root}, 0));
+        _ = probe.probe_setenv("XDG_CONFIG_HOME", try std.fmt.bufPrintSentinel(&config, "{s}/config", .{root}, 0));
     }
     // An unrelated user association survives registration and removal.
     if (builtin.os.tag == .linux) {
-        try std.fs.cwd().makePath(try std.fmt.bufPrint(&cwd_storage, "{s}/config", .{root}));
-        const list = try std.fs.createFileAbsolute(try std.fmt.bufPrint(&cwd_storage, "{s}/config/mimeapps.list", .{root}), .{});
-        try list.writeAll("[Default Applications]\ntext/x-unrelated=other.desktop;\n");
-        list.close();
+        try std.Io.Dir.cwd().createDirPath(zio.io(), try std.fmt.bufPrint(&cwd_storage, "{s}/config", .{root}));
+        const list = try std.Io.Dir.createFileAbsolute(zio.io(), try std.fmt.bufPrint(&cwd_storage, "{s}/config/mimeapps.list", .{root}), .{});
+        try list.writeStreamingAll(zio.io(), "[Default Applications]\ntext/x-unrelated=other.desktop;\n");
+        list.close(zio.io());
     }
     const report = try integration.register(allocator, application, .{});
     std.debug.print("registration report {any}\n", .{report});
@@ -367,23 +363,23 @@ fn registration(executable_arg: []const u8) !void {
     var collector: Collector = .{ .primary = &collector_claim.primary };
     const worker = try std.Thread.spawn(.{}, Collector.run, .{&collector});
     var uri_storage: [128:0]u8 = undefined;
-    const uri = try std.fmt.bufPrintZ(&uri_storage, "{s}://open/%E4%B8%AD?x=1", .{scheme});
+    const uri = try std.fmt.bufPrintSentinel(&uri_storage, "{s}://open/%E4%B8%AD?x=1", .{scheme}, 0);
     var document_storage: [std.fs.max_path_bytes:0]u8 = undefined;
-    const document = try std.fmt.bufPrintZ(&document_storage, "{s}{c}a document{s}", .{ root, std.fs.path.sep, extension });
+    const document = try std.fmt.bufPrintSentinel(&document_storage, "{s}{c}a document{s}", .{ root, std.fs.path.sep, extension }, 0);
     {
         // Empty files are typed by size alone; give the glob something to name.
-        const file = try std.fs.createFileAbsolute(document, .{});
-        defer file.close();
-        try file.writeAll("Ziggurat smoke document\n");
+        const file = try std.Io.Dir.createFileAbsolute(zio.io(), document, .{});
+        defer file.close(zio.io());
+        try file.writeStreamingAll(zio.io(), "Ziggurat smoke document\n");
     }
 
     if (builtin.os.tag == .linux) {
         var answer: [256]u8 = undefined;
         var scheme_z: [40:0]u8 = undefined;
         var mime_z: [64:0]u8 = undefined;
-        if (probe.probe_default_for_scheme(try std.fmt.bufPrintZ(&scheme_z, "{s}", .{scheme}), &answer, answer.len) != 0) return error.SchemeNotResolved;
+        if (probe.probe_default_for_scheme(try std.fmt.bufPrintSentinel(&scheme_z, "{s}", .{scheme}, 0), &answer, answer.len) != 0) return error.SchemeNotResolved;
         try std.testing.expectEqualStrings(handler_id ++ ".desktop", std.mem.sliceTo(&answer, 0));
-        if (probe.probe_default_for_type(try std.fmt.bufPrintZ(&mime_z, "{s}", .{mime}), &answer, answer.len) != 0) return error.TypeNotResolved;
+        if (probe.probe_default_for_type(try std.fmt.bufPrintSentinel(&mime_z, "{s}", .{mime}, 0), &answer, answer.len) != 0) return error.TypeNotResolved;
         try std.testing.expectEqualStrings(handler_id ++ ".desktop", std.mem.sliceTo(&answer, 0));
         if (report.mime_database_refreshed) {
             if (probe.probe_guess(document, &answer, answer.len) != 0) return error.GlobNotResolved;
@@ -435,8 +431,8 @@ fn registration(executable_arg: []const u8) !void {
     if (builtin.os.tag == .linux) {
         var answer: [256]u8 = undefined;
         var scheme_z: [40:0]u8 = undefined;
-        if (probe.probe_default_for_scheme(try std.fmt.bufPrintZ(&scheme_z, "{s}", .{scheme}), &answer, answer.len) == 0) return error.SchemeStillRegistered;
-        const list = try std.fs.cwd().readFileAlloc(allocator, try std.fmt.bufPrint(&cwd_storage, "{s}/config/mimeapps.list", .{root}), 1 << 20);
+        if (probe.probe_default_for_scheme(try std.fmt.bufPrintSentinel(&scheme_z, "{s}", .{scheme}, 0), &answer, answer.len) == 0) return error.SchemeStillRegistered;
+        const list = try std.Io.Dir.cwd().readFileAlloc(zio.io(), try std.fmt.bufPrint(&cwd_storage, "{s}/config/mimeapps.list", .{root}), allocator, .limited(1 << 20));
         if (std.mem.indexOf(u8, list, handler_id) != null or std.mem.indexOf(u8, list, "text/x-unrelated=other.desktop;") == null) return error.MimeAppsNotRestored;
     } else {
         try std.testing.expectError(error.AssociationMissing, windowsAssociation(scheme, executable));
@@ -498,7 +494,7 @@ fn power(require_dbus: bool) !void {
         std.debug.print("power: 12 paired system/display requests\n", .{});
         return;
     }
-    if (std.posix.getenv("DBUS_SYSTEM_BUS_ADDRESS") == null) {
+    if (zio.getenv("DBUS_SYSTEM_BUS_ADDRESS") == null) {
         if (require_dbus) return error.SystemBusRequired;
         std.debug.print("power: skipped, no private system bus\n", .{});
         return;
@@ -548,7 +544,7 @@ fn taskbar(require_dbus: bool) !void {
         try std.testing.expectError(error.Closed, bar.setProgress(window, .none));
         return;
     }
-    if (std.posix.getenv("DBUS_SESSION_BUS_ADDRESS") == null) {
+    if (zio.getenv("DBUS_SESSION_BUS_ADDRESS") == null) {
         if (require_dbus) return error.SessionBusRequired;
         std.debug.print("taskbar: skipped, no session bus\n", .{});
         return;

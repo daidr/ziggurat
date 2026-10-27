@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 
 pub const Task = struct {
     context: *anyopaque,
@@ -10,7 +11,7 @@ pub const Task = struct {
 pub fn Mailbox(comptime capacity: usize) type {
     return struct {
         const Self = @This();
-        mutex: std.Thread.Mutex = .{},
+        mutex: zio.Mutex = .{},
         items: [capacity]Task = undefined,
         head: usize = 0,
         len: usize = 0,
@@ -102,8 +103,8 @@ test "closing races active producers and executes only accepted tasks once" {
     };
     const Producer = struct {
         queue: *Mailbox(64),
-        start: *std.Thread.ResetEvent,
-        race: *std.Thread.ResetEvent,
+        start: *zio.ResetEvent,
+        race: *zio.ResetEvent,
         ready: *std.atomic.Value(usize),
         closed: *std.atomic.Value(usize),
         items: [512]Item = @splat(.{}),
@@ -131,8 +132,8 @@ test "closing races active producers and executes only accepted tasks once" {
         }
     };
     var queue: Mailbox(64) = .{};
-    var start: std.Thread.ResetEvent = .{};
-    var race: std.Thread.ResetEvent = .{};
+    var start: zio.ResetEvent = .{};
+    var race: zio.ResetEvent = .{};
     var ready: std.atomic.Value(usize) = .init(0);
     var closed: std.atomic.Value(usize) = .init(0);
     var producers: [4]Producer = undefined;

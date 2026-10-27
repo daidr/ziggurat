@@ -732,7 +732,7 @@ pub const Inspector = struct {
             return true;
         }
         for (l.tabs, 0..) |rect, i| if (contains(rect, point) and point.x < l.rtl.x) {
-            self.tab = @enumFromInt(i);
+            self.tab = @fromBackingInt(@intCast(i));
             return true;
         };
         if (self.tab != .elements) return true;
@@ -764,7 +764,7 @@ pub const Inspector = struct {
             return true;
         };
         for (l.side_tabs, 0..) |rect, i| if (contains(rect, point)) {
-            self.side = @enumFromInt(i);
+            self.side = @fromBackingInt(@intCast(i));
             self.side_scroll = 0;
             return true;
         };
@@ -905,7 +905,7 @@ pub const Inspector = struct {
             // right end.
             try target.pushClip(.{ .x = l.toolbar.x, .y = l.toolbar.y, .width = @max(0, l.rtl.x - l.toolbar.x), .height = l.toolbar.height });
             defer target.popClip() catch {};
-            for (labels, l.tabs, 0..) |text, rect, i| self.paintTab(target, rect, text, @intFromEnum(self.tab) == i);
+            for (labels, l.tabs, 0..) |text, rect, i| self.paintTab(target, rect, text, @backingInt(self.tab) == i);
         }
         const rtl = if (self.direction_override) |value| value == .rtl else false;
         self.paintTab(target, l.rtl, "RTL", rtl);
@@ -1027,7 +1027,7 @@ pub const Inspector = struct {
         target.roundedRect(bar, 0, ui.Color.rgb(p.toolbar));
         target.roundedRect(.{ .x = bar.x, .y = bar.y, .width = bar.width, .height = 1 }, 0, ui.Color.rgb(p.border));
         target.roundedRect(.{ .x = bar.x, .y = bar.y + bar.height - 1, .width = bar.width, .height = 1 }, 0, ui.Color.rgb(p.border));
-        for ([_][]const u8{ "Styles", "Computed", "Properties" }, l.side_tabs, 0..) |text, rect, i| self.paintTab(target, rect, text, @intFromEnum(self.side) == i);
+        for ([_][]const u8{ "Styles", "Computed", "Properties" }, l.side_tabs, 0..) |text, rect, i| self.paintTab(target, rect, text, @backingInt(self.side) == i);
         const side = l.side;
         try target.pushClip(side);
         defer target.popClip() catch {};

@@ -1,11 +1,6 @@
 const std = @import("std");
 const z = @import("ziggurat");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("objbase.h");
-});
+const c = @import("ziggurat_c_win32");
 
 pub fn main() !void {
     var allocator_state: std.heap.DebugAllocator(.{}) = .init;

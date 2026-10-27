@@ -9,11 +9,7 @@ const e = @import("ziggurat_document_editor");
 const a = @import("ziggurat_document_accessibility");
 const oracle = @import("document_accessibility_point_oracle.zig");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 extern fn zda_probe_release(*anyopaque) void;
 const source_text = "aaaaaaaaaaaaaaaa\nאבג e\u{301}😀\r\nthird\nlast";
 const viewport: ui.Rect = .{ .x = 8.25, .y = 8.375, .width = 160.5, .height = 88.25 };
@@ -147,7 +143,7 @@ const Host = struct {
             }
             self.app.quit();
         } else {
-            self.stage = @enumFromInt(@intFromEnum(self.stage) + 1);
+            self.stage = @fromBackingInt(@intCast(@backingInt(self.stage) + 1));
             self.prepareStage() catch |err| self.fail(err);
         }
     }

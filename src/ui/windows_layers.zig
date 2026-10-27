@@ -8,11 +8,7 @@ const gaussian_scope = @import("gaussian_scope.zig");
 const gaussian_workspace = @import("gaussian_workspace.zig");
 const gaussian_kernel = @import("gaussian_kernel.zig");
 const gaussian_composite = @import("gaussian_composite.zig");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 /// Replaces a capture's Gaussian filter: rewrites the capture's planes in
 /// place, given each plane's stride in pixels.
 pub const CaptureFilter = struct {

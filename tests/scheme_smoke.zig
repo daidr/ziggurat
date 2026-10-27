@@ -1,12 +1,9 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const w = @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-});
+const w = @import("ziggurat_c_win32");
 extern fn zwv_browser_process_id(*anyopaque, *c_uint) i32;
 const document =
     \\<!doctype html><script>
@@ -32,7 +29,7 @@ const registrations = [_]web.SchemeRegistration{
 };
 pub const Fixture = struct {
     allocator: std.mem.Allocator,
-    temporary: *std.testing.TmpDir,
+    temporary: *zio.TmpDir,
     profile: ?[]u8 = null,
     handles: [16]?*anyopaque = @splat(null),
     count: usize = 0,
@@ -47,8 +44,8 @@ pub const Fixture = struct {
     }
     fn work(self: *Fixture) !void {
         if (!self.cleanup) {
-            try self.temporary.dir.makeDir("profile");
-            self.profile = try self.temporary.dir.realpathAlloc(self.allocator, "profile");
+            try self.temporary.dir.createDir(zio.io(), "profile", .default_dir);
+            self.profile = try zio.realPathAlloc(self.temporary.dir, "profile", self.allocator);
             return;
         }
         defer {
@@ -64,7 +61,7 @@ pub const Fixture = struct {
             return error.BrowserShutdownUnconfirmed;
         }
         for (self.handles[0..self.count]) |handle| if (w.WaitForSingleObject(handle.?, 10_000) != w.WAIT_OBJECT_0) return error.BrowserShutdownUnconfirmed;
-        try self.temporary.parent_dir.deleteTree(&self.temporary.sub_path);
+        try self.temporary.parent_dir.deleteTree(zio.io(), &self.temporary.sub_path);
     }
     pub fn capture(self: *Fixture, view: *web.View) !void {
         var pid: c_uint = 0;
@@ -271,7 +268,7 @@ const State = struct {
 fn runCycle(secure_and_post: bool) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
-    var temporary = std.testing.tmpDir(.{});
+    var temporary = zio.tmpDir(.{});
     var fixture: Fixture = .{ .allocator = gpa.allocator(), .temporary = &temporary };
     defer {
         if (!fixture.closed) {

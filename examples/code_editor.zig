@@ -14,6 +14,7 @@
 //!
 //! Run with `zig build run-code-editor`, optionally `-- path/to/file.zig`.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
@@ -106,7 +107,7 @@ const Editor = struct {
     load_waiting: bool = false,
 
     fn say(self: *Editor, comptime format: []const u8, arguments: anytype) void {
-        self.status_len = (std.fmt.bufPrint(&self.status, format, arguments) catch self.status[0..0]).len;
+        self.status_len = (std.fmt.bufPrint(&self.status, format, arguments) catch @as([]const u8, self.status[0..0])).len;
         if (self.window) |window| window.invalidate();
     }
     fn dirty(self: *Editor) bool {
@@ -332,12 +333,12 @@ const Editor = struct {
     fn runIo(self: *Editor) void {
         const path = self.io_path[0..self.io_path_len];
         if (self.io_save) {
-            std.fs.cwd().writeFile(.{ .sub_path = path, .data = self.io_bytes[0..self.io_len] }) catch |err| {
+            std.Io.Dir.cwd().writeFile(zio.io(), .{ .sub_path = path, .data = self.io_bytes[0..self.io_len] }) catch |err| {
                 self.io_error = err;
             };
-        } else if (std.fs.cwd().openFile(path, .{})) |file| {
-            defer file.close();
-            self.io_len = file.readAll(&self.io_bytes) catch |err| blk: {
+        } else if (std.Io.Dir.cwd().openFile(zio.io(), path, .{})) |file| {
+            defer file.close(zio.io());
+            self.io_len = zio.readAll(file, &self.io_bytes) catch |err| blk: {
                 self.io_error = err;
                 break :blk 0;
             };
@@ -375,7 +376,7 @@ const Editor = struct {
     fn onSystem(ptr: *anyopaque, window: z.Window, action: system.Action) void {
         const self: *Editor = @ptrCast(@alignCast(ptr));
         switch (action) {
-            .menu => |id| switch (@as(Menu, @enumFromInt(id))) {
+            .menu => |id| switch (@as(Menu, @fromBackingInt(@intCast(id)))) {
                 .open => self.openFile(),
                 .save => self.save(false),
                 .save_as => self.save(true),
@@ -431,7 +432,7 @@ const Editor = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -453,27 +454,27 @@ pub fn main() !void {
     try editor.host.context.prepareTextFields(allocator, .{});
     try editor.owner.attach(window);
     try editor.owner.setMenu(&.{
-        .{ .id = @intFromEnum(Menu.file), .kind = .submenu, .label = "&File" },
-        .{ .id = @intFromEnum(Menu.open), .parent = 1, .label = "&Open\u{2026}", .accelerator = .{ .key = .o, .modifiers = .{ .control = true } } },
-        .{ .id = @intFromEnum(Menu.save), .parent = 1, .label = "&Save", .accelerator = .{ .key = .s, .modifiers = .{ .control = true } } },
-        .{ .id = @intFromEnum(Menu.save_as), .parent = 1, .label = "Save &As\u{2026}", .accelerator = .{ .key = .s, .modifiers = .{ .control = true, .shift = true } } },
+        .{ .id = @backingInt(Menu.file), .kind = .submenu, .label = "&File" },
+        .{ .id = @backingInt(Menu.open), .parent = 1, .label = "&Open\u{2026}", .accelerator = .{ .key = .o, .modifiers = .{ .control = true } } },
+        .{ .id = @backingInt(Menu.save), .parent = 1, .label = "&Save", .accelerator = .{ .key = .s, .modifiers = .{ .control = true } } },
+        .{ .id = @backingInt(Menu.save_as), .parent = 1, .label = "Save &As\u{2026}", .accelerator = .{ .key = .s, .modifiers = .{ .control = true, .shift = true } } },
         .{ .parent = 1, .kind = .separator },
-        .{ .id = @intFromEnum(Menu.quit), .parent = 1, .label = "&Quit", .accelerator = .{ .key = .q, .modifiers = .{ .control = true } } },
-        .{ .id = @intFromEnum(Menu.edit), .kind = .submenu, .label = "&Edit" },
-        .{ .id = @intFromEnum(Menu.find), .parent = @intFromEnum(Menu.edit), .label = "&Find", .accelerator = .{ .key = .f, .modifiers = .{ .control = true } } },
-        .{ .id = @intFromEnum(Menu.find_next), .parent = @intFromEnum(Menu.edit), .label = "Find &Next", .accelerator = .{ .key = .f3 } },
-        .{ .parent = @intFromEnum(Menu.edit), .kind = .separator },
-        .{ .id = @intFromEnum(Menu.select_next), .parent = @intFromEnum(Menu.edit), .label = "Select Next Occurrence", .accelerator = .{ .key = .d, .modifiers = .{ .control = true } } },
-        .{ .id = @intFromEnum(Menu.select_all), .parent = @intFromEnum(Menu.edit), .label = "Select All Occurrences", .accelerator = .{ .key = .l, .modifiers = .{ .control = true, .shift = true } } },
-        .{ .id = @intFromEnum(Menu.caret_above), .parent = @intFromEnum(Menu.edit), .label = "Add Caret Above", .accelerator = .{ .key = .up, .modifiers = .{ .control = true, .alt = true } } },
-        .{ .id = @intFromEnum(Menu.caret_below), .parent = @intFromEnum(Menu.edit), .label = "Add Caret Below", .accelerator = .{ .key = .down, .modifiers = .{ .control = true, .alt = true } } },
-        .{ .id = @intFromEnum(Menu.grow), .parent = @intFromEnum(Menu.edit), .label = "Expand Selection", .accelerator = .{ .key = .right, .modifiers = .{ .alt = true, .shift = true } } },
-        .{ .id = @intFromEnum(Menu.shrink), .parent = @intFromEnum(Menu.edit), .label = "Shrink Selection", .accelerator = .{ .key = .left, .modifiers = .{ .alt = true, .shift = true } } },
-        .{ .id = @intFromEnum(Menu.bracket), .parent = @intFromEnum(Menu.edit), .label = "Go to Bracket", .accelerator = .{ .key = .m, .modifiers = .{ .control = true, .shift = true } } },
-        .{ .id = @intFromEnum(Menu.undo_selection), .parent = @intFromEnum(Menu.edit), .label = "Undo Selection", .accelerator = .{ .key = .u, .modifiers = .{ .control = true } } },
-        .{ .parent = @intFromEnum(Menu.edit), .kind = .separator },
-        .{ .id = @intFromEnum(Menu.next_change), .parent = @intFromEnum(Menu.edit), .label = "Next Change", .accelerator = .{ .key = .f7, .modifiers = .{ .alt = true } } },
-        .{ .id = @intFromEnum(Menu.revert_change), .parent = @intFromEnum(Menu.edit), .label = "Revert Change" },
+        .{ .id = @backingInt(Menu.quit), .parent = 1, .label = "&Quit", .accelerator = .{ .key = .q, .modifiers = .{ .control = true } } },
+        .{ .id = @backingInt(Menu.edit), .kind = .submenu, .label = "&Edit" },
+        .{ .id = @backingInt(Menu.find), .parent = @backingInt(Menu.edit), .label = "&Find", .accelerator = .{ .key = .f, .modifiers = .{ .control = true } } },
+        .{ .id = @backingInt(Menu.find_next), .parent = @backingInt(Menu.edit), .label = "Find &Next", .accelerator = .{ .key = .f3 } },
+        .{ .parent = @backingInt(Menu.edit), .kind = .separator },
+        .{ .id = @backingInt(Menu.select_next), .parent = @backingInt(Menu.edit), .label = "Select Next Occurrence", .accelerator = .{ .key = .d, .modifiers = .{ .control = true } } },
+        .{ .id = @backingInt(Menu.select_all), .parent = @backingInt(Menu.edit), .label = "Select All Occurrences", .accelerator = .{ .key = .l, .modifiers = .{ .control = true, .shift = true } } },
+        .{ .id = @backingInt(Menu.caret_above), .parent = @backingInt(Menu.edit), .label = "Add Caret Above", .accelerator = .{ .key = .up, .modifiers = .{ .control = true, .alt = true } } },
+        .{ .id = @backingInt(Menu.caret_below), .parent = @backingInt(Menu.edit), .label = "Add Caret Below", .accelerator = .{ .key = .down, .modifiers = .{ .control = true, .alt = true } } },
+        .{ .id = @backingInt(Menu.grow), .parent = @backingInt(Menu.edit), .label = "Expand Selection", .accelerator = .{ .key = .right, .modifiers = .{ .alt = true, .shift = true } } },
+        .{ .id = @backingInt(Menu.shrink), .parent = @backingInt(Menu.edit), .label = "Shrink Selection", .accelerator = .{ .key = .left, .modifiers = .{ .alt = true, .shift = true } } },
+        .{ .id = @backingInt(Menu.bracket), .parent = @backingInt(Menu.edit), .label = "Go to Bracket", .accelerator = .{ .key = .m, .modifiers = .{ .control = true, .shift = true } } },
+        .{ .id = @backingInt(Menu.undo_selection), .parent = @backingInt(Menu.edit), .label = "Undo Selection", .accelerator = .{ .key = .u, .modifiers = .{ .control = true } } },
+        .{ .parent = @backingInt(Menu.edit), .kind = .separator },
+        .{ .id = @backingInt(Menu.next_change), .parent = @backingInt(Menu.edit), .label = "Next Change", .accelerator = .{ .key = .f7, .modifiers = .{ .alt = true } } },
+        .{ .id = @backingInt(Menu.revert_change), .parent = @backingInt(Menu.edit), .label = "Revert Change" },
     });
 
     const scale = (try window.contentSize()).scale;
@@ -496,11 +497,11 @@ pub fn main() !void {
     try editor.replace.open(allocator, engine, &editor.host, "", box_parameters, .{ .value_bytes = 256 }, .{ .name = "Replace with", .width = 140 });
     defer editor.replace.close();
 
-    var arguments = try std.process.argsWithAllocator(allocator);
+    var arguments = try init.args.iterateAllocator(allocator);
     defer arguments.deinit();
     _ = arguments.skip();
     if (arguments.next()) |path| {
-        if (std.fs.cwd().realpathAlloc(allocator, path)) |absolute| {
+        if (zio.realPathAlloc(std.Io.Dir.cwd(), path, allocator)) |absolute| {
             defer allocator.free(absolute);
             editor.startIo(false, absolute);
         } else |err| editor.say("{s}: {s}", .{ path, @errorName(err) });

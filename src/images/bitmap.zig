@@ -122,7 +122,7 @@ test "bitmap masks reject overlaps, gaps, out-of-range and required empty channe
 }
 
 fn fixture() [70]u8 {
-    var bytes = [_]u8{0} ** 70;
+    var bytes = @as([70]u8, @splat(0));
     @memcpy(bytes[0..2], "BM");
     put(u32, &bytes, 2, bytes.len);
     put(u32, &bytes, 10, 54);

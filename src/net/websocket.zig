@@ -1,8 +1,6 @@
 const std = @import("std");
-const posix = std.posix;
+const zio = @import("ziggurat_io");
 const Cancel = @import("cancel.zig").Cancel;
-const shutdownSocket = @import("cancel.zig").shutdownSocket;
-const guard = @import("cancel.zig").guard;
 const Waker = @import("waker.zig").Waker;
 
 pub const Header = std.http.Header;
@@ -127,7 +125,7 @@ pub const Socket = struct {
     abort: Cancel = .{},
     waker: Waker,
 
-    mutex: std.Thread.Mutex = .{},
+    mutex: zio.Mutex = .{},
     ring: []u8,
     ring_head: usize = 0,
     ring_len: usize = 0,
@@ -152,7 +150,7 @@ pub const Socket = struct {
 
     /// Open `url` (`ws` or `wss`) and complete the opening handshake.
     /// Blocking: run on the worker that will call `run`. `cancel`
-    /// interrupts the handshake once the connection is established.
+    /// interrupts every step, from name resolution to the handshake.
     pub fn connect(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, options: ConnectOptions, handshake_cancel: ?*Cancel) ConnectError!*Socket {
         for (options.protocols) |protocol| if (!validToken(protocol)) return error.InvalidRequest;
         for (options.headers) |item| if (!validToken(item.name) or std.mem.indexOfAny(u8, item.value, "\r\n") != null) return error.InvalidRequest;
@@ -161,54 +159,65 @@ pub const Socket = struct {
         const uri = std.Uri.parse(url) catch return error.InvalidUrl;
         const tls = if (std.ascii.eqlIgnoreCase(uri.scheme, "wss")) true else if (std.ascii.eqlIgnoreCase(uri.scheme, "ws")) false else return error.UnsupportedScheme;
         if (uri.fragment != null) return error.InvalidUrl;
-        var host_buffer: [std.Uri.host_name_max]u8 = undefined;
-        const host = uri.getHost(&host_buffer) catch return error.InvalidUrl;
+        var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+        const host = std.Io.net.HostName.fromUri(uri, &host_buffer) catch return error.InvalidUrl;
         const port = uri.port orelse @as(u16, if (tls) 443 else 80);
-        if (handshake_cancel) |token| if (token.isCancelled()) return error.Cancelled;
+        const target: Target = .{ .uri = uri, .host = host, .port = port, .tls = tls };
+        const token = handshake_cancel orelse return open(allocator, client, target, options, null);
+        if (token.isCancelled()) return error.Cancelled;
+        return token.run(open, .{ allocator, client, target, options, token });
+    }
 
-        if (tls and @atomicLoad(bool, &client.next_https_rescan_certs, .acquire)) {
-            // As std.http.Client.request does before its first HTTPS request.
-            client.ca_bundle_mutex.lock();
-            defer client.ca_bundle_mutex.unlock();
-            if (client.next_https_rescan_certs) {
-                client.ca_bundle.rescan(client.allocator) catch return error.TlsFailed;
-                @atomicStore(bool, &client.next_https_rescan_certs, false, .release);
-            }
-        }
-        const ring = try allocator.alloc(u8, options.limits.send_buffer_bytes);
-        errdefer allocator.free(ring);
-        var waker = Waker.init() catch return error.SystemResources;
-        errdefer waker.deinit();
-        const connection = client.connect(host, port, if (tls) .tls else .plain) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.TlsInitializationFailed => error.TlsFailed,
-            else => error.ConnectionFailed,
-        };
-        connection.closing = true;
-        guard(connection);
-        errdefer client.connection_pool.release(connection);
-        if (connection.proxied) return error.UnsupportedProxy;
-        const handle = connection.stream_reader.getStream().handle;
-        if (handshake_cancel) |token| try token.attach(handle);
-        defer if (handshake_cancel) |token| token.detach();
+    const Target = struct { uri: std.Uri, host: std.Io.net.HostName, port: u16, tls: bool };
 
-        var key_bytes: [16]u8 = undefined;
-        std.crypto.random.bytes(&key_bytes);
-        var key: [24]u8 = undefined;
-        _ = std.base64.standard.Encoder.encode(&key, &key_bytes);
+    fn open(allocator: std.mem.Allocator, client: *std.http.Client, target: Target, options: ConnectOptions, handshake_cancel: ?*Cancel) ConnectError!*Socket {
         const failed = struct {
             fn map(token: ?*Cancel, err: ConnectError) ConnectError {
                 if (token) |value| if (value.isCancelled()) return error.Cancelled;
                 return err;
             }
         }.map;
-        writeHandshake(connection, uri, host, port, tls, &key, options) catch return failed(handshake_cancel, error.ConnectionFailed);
+        if (target.tls) tls: {
+            // As std.http.Client.request does before its first HTTPS request.
+            const io = client.io;
+            {
+                client.ca_bundle_lock.lockShared(io) catch return failed(handshake_cancel, error.TlsFailed);
+                defer client.ca_bundle_lock.unlockShared(io);
+                if (client.now != null) break :tls;
+            }
+            var bundle: std.crypto.Certificate.Bundle = .empty;
+            defer bundle.deinit(client.allocator);
+            const now = std.Io.Clock.real.now(io);
+            bundle.rescan(client.allocator, io, now) catch return failed(handshake_cancel, error.TlsFailed);
+            client.ca_bundle_lock.lock(io) catch return failed(handshake_cancel, error.TlsFailed);
+            defer client.ca_bundle_lock.unlock(io);
+            client.now = now;
+            std.mem.swap(std.crypto.Certificate.Bundle, &client.ca_bundle, &bundle);
+        }
+        const ring = try allocator.alloc(u8, options.limits.send_buffer_bytes);
+        errdefer allocator.free(ring);
+        var waker = Waker.init() catch return error.SystemResources;
+        errdefer waker.deinit();
+        const connection = client.connect(target.host, target.port, if (target.tls) .tls else .plain) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.TlsInitializationFailed => failed(handshake_cancel, error.TlsFailed),
+            else => failed(handshake_cancel, error.ConnectionFailed),
+        };
+        connection.closing = true;
+        errdefer client.connection_pool.release(connection, client.io);
+        if (connection.proxied) return error.UnsupportedProxy;
+
+        var key_bytes: [16]u8 = undefined;
+        zio.random.bytes(&key_bytes);
+        var key: [24]u8 = undefined;
+        _ = std.base64.standard.Encoder.encode(&key, &key_bytes);
+        writeHandshake(connection, target.uri, target.host.bytes, target.port, target.tls, &key, options) catch return failed(handshake_cancel, error.ConnectionFailed);
         const protocol = try readHandshake(allocator, connection, &key, options.protocols, handshake_cancel);
         errdefer allocator.free(protocol);
 
         const self = try allocator.create(Socket);
         self.* = .{ .allocator = allocator, .client = client, .connection = connection, .limits = options.limits, .protocol = protocol, .waker = waker, .ring = ring };
-        self.abort.attach(handle) catch unreachable;
+        self.abort.attach(connection.stream_reader.stream.socket.handle) catch unreachable;
         return self;
     }
 
@@ -216,7 +225,7 @@ pub const Socket = struct {
     /// stopped using the socket.
     pub fn deinit(self: *Socket) void {
         self.abort.detach();
-        self.client.connection_pool.release(self.connection);
+        self.client.connection_pool.release(self.connection, self.client.io);
         self.waker.deinit();
         self.message.deinit(self.allocator);
         self.allocator.free(self.ring);
@@ -237,7 +246,7 @@ pub const Socket = struct {
             if (self.send_closed) return error.Closed;
             if (self.ring.len - self.ring_len < need) return error.Full;
             var header: [ring_header]u8 = undefined;
-            header[0] = @intFromEnum(kind);
+            header[0] = @backingInt(kind);
             std.mem.writeInt(u32, header[1..5], @intCast(bytes.len), .little);
             const tail = (self.ring_head + self.ring_len) % self.ring.len;
             self.copyIn(tail, &header);
@@ -322,24 +331,24 @@ pub const Socket = struct {
             if (try self.flushOutgoing()) if (handler.on_flushed) |flushed| flushed(handler.context);
             if (self.paused and self.resume_epoch.load(.acquire) != self.paused_epoch) self.paused = false;
             const reader = self.connection.reader();
-            const buffered = reader.bufferedLen() > 0 or self.connection.stream_reader.interface().bufferedLen() > 0;
+            const buffered = reader.bufferedLen() > 0 or self.connection.stream_reader.interface.bufferedLen() > 0;
             if (self.paused or !buffered) {
-                var fds = [_]posix.pollfd{
-                    .{ .fd = self.waker.handle(), .events = posix.POLL.IN, .revents = 0 },
-                    .{ .fd = self.connection.stream_reader.getStream().handle, .events = posix.POLL.IN, .revents = 0 },
+                var fds = [_]zio.net.PollFd{
+                    .{ .handle = self.waker.handle() },
+                    .{ .handle = self.connection.stream_reader.stream.socket.handle },
                 };
                 const count: usize = if (self.paused) 1 else 2;
-                var timeout: i32 = -1;
+                var timeout: ?u32 = null;
                 if (self.close_deadline) |deadline| {
-                    const left = deadline - std.time.milliTimestamp();
+                    const left = deadline - zio.milliTimestamp();
                     if (left <= 0) return error.CloseTimedOut;
                     timeout = @intCast(@min(left, std.math.maxInt(i32)));
                 }
-                const ready = posix.poll(fds[0..count], timeout) catch return self.lost();
+                const ready = zio.net.pollReadable(fds[0..count], timeout) catch return self.lost();
                 if (ready == 0 and self.close_deadline != null) return error.CloseTimedOut;
-                if (fds[0].revents != 0) self.waker.drain();
+                if (fds[0].ready) self.waker.drain();
                 if (self.abort.isCancelled()) return error.Cancelled;
-                if (count == 1 or fds[1].revents == 0) continue;
+                if (count == 1 or !fds[1].ready) continue;
             }
             if (try self.readFrame(handler)) |closed| return closed;
         }
@@ -383,7 +392,7 @@ pub const Socket = struct {
                 // Producers only append after the occupied region, so the
                 // message bytes stay put while the worker writes them.
                 const len = std.mem.readInt(u32, header[1..5], .little);
-                try self.writeQueued(@enumFromInt(header[0]), (head + ring_header) % self.ring.len, len);
+                try self.writeQueued(@fromBackingInt(@intCast(header[0])), (head + ring_header) % self.ring.len, len);
                 self.mutex.lock();
                 self.ring_head = (head + ring_header + len) % self.ring.len;
                 self.ring_len -= ring_header + len;
@@ -409,7 +418,7 @@ pub const Socket = struct {
         std.mem.writeInt(u16, payload[0..2], code, .big);
         @memcpy(payload[2..][0..reason.len], reason);
         self.close_sent = true;
-        if (self.limits.close_timeout_ms > 0) self.close_deadline = std.time.milliTimestamp() + self.limits.close_timeout_ms;
+        if (self.limits.close_timeout_ms > 0) self.close_deadline = zio.milliTimestamp() + self.limits.close_timeout_ms;
         try self.writeFrame(0x8, payload[0 .. 2 + reason.len]);
     }
 
@@ -430,7 +439,7 @@ pub const Socket = struct {
             size = 10;
         }
         var mask: [4]u8 = undefined;
-        std.crypto.random.bytes(&mask);
+        zio.random.bytes(&mask);
         @memcpy(header[size..][0..4], &mask);
         writer.writeAll(header[0 .. size + 4]) catch return self.lost();
         return mask;
@@ -659,24 +668,24 @@ fn readHandshake(allocator: std.mem.Allocator, connection: *std.http.Client.Conn
 }
 
 const TestPeer = struct {
-    server: std.net.Server,
-    script: *const fn (*TestPeer, *std.http.Server.WebSocket, std.net.Stream) anyerror!void,
+    server: std.Io.net.Server,
+    script: *const fn (*TestPeer, *std.http.Server.WebSocket, std.Io.net.Stream) anyerror!void,
     protocol: ?[]const u8 = null,
-    done: std.Thread.ResetEvent = .{},
-    release: std.Thread.ResetEvent = .{},
+    done: zio.ResetEvent = .{},
+    release: zio.ResetEvent = .{},
     failure: ?anyerror = null,
     received: std.ArrayListUnmanaged(u8) = .empty,
 
-    fn init(script: *const fn (*TestPeer, *std.http.Server.WebSocket, std.net.Stream) anyerror!void) !TestPeer {
-        const address = try std.net.Address.parseIp("127.0.0.1", 0);
-        return .{ .server = try address.listen(.{ .reuse_address = true }), .script = script };
+    fn init(script: *const fn (*TestPeer, *std.http.Server.WebSocket, std.Io.net.Stream) anyerror!void) !TestPeer {
+        const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+        return .{ .server = try address.listen(zio.io(), .{ .reuse_address = true }), .script = script };
     }
     fn deinit(self: *TestPeer) void {
         self.received.deinit(std.testing.allocator);
-        self.server.deinit();
+        self.server.deinit(zio.io());
     }
     fn url(self: *TestPeer, buffer: []u8) ![]const u8 {
-        return std.fmt.bufPrint(buffer, "ws://127.0.0.1:{d}/chat?room=1", .{self.server.listen_address.getPort()});
+        return std.fmt.bufPrint(buffer, "ws://127.0.0.1:{d}/chat?room=1", .{self.server.socket.address.getPort()});
     }
     fn serve(self: *TestPeer) void {
         self.one() catch |err| {
@@ -685,13 +694,13 @@ const TestPeer = struct {
         self.done.set();
     }
     fn one(self: *TestPeer) !void {
-        const connection = try self.server.accept();
-        defer connection.stream.close();
+        const connection = try self.server.accept(zio.io());
+        defer connection.close(zio.io());
         var receive_buffer: [64 * 1024]u8 = undefined;
         var send_buffer: [4096]u8 = undefined;
-        var reader = connection.stream.reader(&receive_buffer);
-        var writer = connection.stream.writer(&send_buffer);
-        var http: std.http.Server = .init(reader.interface(), &writer.interface);
+        var reader = connection.reader(zio.io(), &receive_buffer);
+        var writer = connection.writer(zio.io(), &send_buffer);
+        var http: std.http.Server = .init(&reader.interface, &writer.interface);
         var request = try http.receiveHead();
         if (!std.mem.eql(u8, request.head.target, "/chat?room=1")) return error.WrongTarget;
         const key = switch (request.upgradeRequested()) {
@@ -701,7 +710,7 @@ const TestPeer = struct {
         const extra = [_]Header{.{ .name = "sec-websocket-protocol", .value = self.protocol orelse "" }};
         var ws = try request.respondWebSocket(.{ .key = key, .extra_headers = if (self.protocol != null) &extra else &.{} });
         try ws.flush();
-        try self.script(self, &ws, connection.stream);
+        try self.script(self, &ws, connection);
     }
 };
 
@@ -748,7 +757,7 @@ const Collector = struct {
 
 test "echoes text and binary, answers pings and completes a local close" {
     const script = struct {
-        fn run(peer: *TestPeer, ws: *std.http.Server.WebSocket, _: std.net.Stream) anyerror!void {
+        fn run(peer: *TestPeer, ws: *std.http.Server.WebSocket, _: std.Io.net.Stream) anyerror!void {
             try rawFrame(ws, 0x89, "hi");
             while (true) {
                 const frame = try readClientFrame(ws);
@@ -769,7 +778,7 @@ test "echoes text and binary, answers pings and completes a local close" {
     peer.protocol = "chat.v2";
     const thread = try std.Thread.spawn(.{}, TestPeer.serve, .{&peer});
     defer thread.join();
-    var client: std.http.Client = .{ .allocator = std.testing.allocator };
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = zio.io() };
     defer client.deinit();
     var buffer: [64]u8 = undefined;
     const socket = try Socket.connect(std.testing.allocator, &client, try peer.url(&buffer), .{ .protocols = &.{ "chat.v1", "chat.v2" }, .headers = &.{.{ .name = "origin", .value = "app://local" }} }, null);
@@ -801,7 +810,7 @@ test "echoes text and binary, answers pings and completes a local close" {
 
 test "reassembles fragments, pauses reading and reports a remote close" {
     const script = struct {
-        fn run(peer: *TestPeer, ws: *std.http.Server.WebSocket, _: std.net.Stream) anyerror!void {
+        fn run(peer: *TestPeer, ws: *std.http.Server.WebSocket, _: std.Io.net.Stream) anyerror!void {
             try rawFrame(ws, 0x01, "frag");
             try rawFrame(ws, 0x89, "p");
             try rawFrame(ws, 0x80, "ment");
@@ -817,7 +826,7 @@ test "reassembles fragments, pauses reading and reports a remote close" {
     defer peer.deinit();
     const thread = try std.Thread.spawn(.{}, TestPeer.serve, .{&peer});
     defer thread.join();
-    var client: std.http.Client = .{ .allocator = std.testing.allocator };
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = zio.io() };
     defer client.deinit();
     var buffer: [64]u8 = undefined;
     const socket = try Socket.connect(std.testing.allocator, &client, try peer.url(&buffer), .{}, null);
@@ -835,7 +844,7 @@ test "reassembles fragments, pauses reading and reports a remote close" {
     const worker = try std.Thread.spawn(.{}, Runner.go, .{ &runner, socket, &collector });
     while (@atomicLoad(usize, &collector.count, .acquire) == 0) std.Thread.yield() catch {};
     // Paused: the second message stays unread until reading resumes.
-    std.Thread.sleep(20 * std.time.ns_per_ms);
+    zio.sleep(20 * std.time.ns_per_ms);
     try std.testing.expectEqual(@as(usize, 1), @atomicLoad(usize, &collector.count, .acquire));
     try socket.send(.text, "while paused");
     socket.resumeReading();
@@ -853,7 +862,7 @@ test "reassembles fragments, pauses reading and reports a remote close" {
 
 test "oversized messages, masked server frames and full queues fail explicitly" {
     const script = struct {
-        fn run(peer: *TestPeer, ws: *std.http.Server.WebSocket, _: std.net.Stream) anyerror!void {
+        fn run(peer: *TestPeer, ws: *std.http.Server.WebSocket, _: std.Io.net.Stream) anyerror!void {
             try rawFrame(ws, 0x82, "0123456789");
             while (true) {
                 const message = ws.readSmallMessage() catch |err| {
@@ -868,7 +877,7 @@ test "oversized messages, masked server frames and full queues fail explicitly" 
     defer peer.deinit();
     const thread = try std.Thread.spawn(.{}, TestPeer.serve, .{&peer});
     defer thread.join();
-    var client: std.http.Client = .{ .allocator = std.testing.allocator };
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = zio.io() };
     defer client.deinit();
     var buffer: [64]u8 = undefined;
     const socket = try Socket.connect(std.testing.allocator, &client, try peer.url(&buffer), .{ .limits = .{ .message_bytes = 9, .send_buffer_bytes = 16 } }, null);
@@ -887,7 +896,7 @@ test "oversized messages, masked server frames and full queues fail explicitly" 
 
 test "cancel aborts a running socket and a rejected handshake fails" {
     const script = struct {
-        fn run(peer: *TestPeer, _: *std.http.Server.WebSocket, _: std.net.Stream) anyerror!void {
+        fn run(peer: *TestPeer, _: *std.http.Server.WebSocket, _: std.Io.net.Stream) anyerror!void {
             peer.release.wait();
         }
     }.run;
@@ -896,7 +905,7 @@ test "cancel aborts a running socket and a rejected handshake fails" {
     const thread = try std.Thread.spawn(.{}, TestPeer.serve, .{&peer});
     defer thread.join();
     defer peer.release.set();
-    var client: std.http.Client = .{ .allocator = std.testing.allocator };
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = zio.io() };
     defer client.deinit();
     var buffer: [64]u8 = undefined;
     const socket = try Socket.connect(std.testing.allocator, &client, try peer.url(&buffer), .{ .protocols = &.{"x"} }, null);
@@ -935,7 +944,7 @@ test "cancel aborts a running socket and a rejected handshake fails" {
 
 test "output queued before cancel fails as a write error" {
     const script = struct {
-        fn run(peer: *TestPeer, _: *std.http.Server.WebSocket, _: std.net.Stream) anyerror!void {
+        fn run(peer: *TestPeer, _: *std.http.Server.WebSocket, _: std.Io.net.Stream) anyerror!void {
             peer.release.wait();
         }
     }.run;
@@ -944,7 +953,7 @@ test "output queued before cancel fails as a write error" {
     const thread = try std.Thread.spawn(.{}, TestPeer.serve, .{&peer});
     defer thread.join();
     defer peer.release.set();
-    var client: std.http.Client = .{ .allocator = std.testing.allocator };
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = zio.io() };
     defer client.deinit();
     var buffer: [64]u8 = undefined;
     const socket = try Socket.connect(std.testing.allocator, &client, try peer.url(&buffer), .{}, null);

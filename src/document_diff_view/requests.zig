@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const d = @import("ziggurat_document");
 const diff = @import("ziggurat_document_diff");
 const intraline = @import("intraline.zig");
@@ -521,8 +522,8 @@ test "all candidate allocations unwind without moving a rejected result or leaki
 test "explicit worker sees immutable pair snapshots while the owner edits and stopping waits for delivery" {
     const Worker = struct {
         job: Job,
-        started: std.Thread.Semaphore = .{},
-        proceed: std.Thread.Semaphore = .{},
+        started: zio.Semaphore = .{},
+        proceed: zio.Semaphore = .{},
         result: ?diff.Result = null,
         details: ?intraline.Result = null,
         failure: ?anyerror = null,

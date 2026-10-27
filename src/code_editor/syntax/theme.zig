@@ -43,14 +43,14 @@ pub const Theme = struct {
     added: u32,
     deleted: u32,
     modified: u32,
-    tokens: [syntax.token_kinds]TokenStyle = [_]TokenStyle{.{}} ** syntax.token_kinds,
+    tokens: [syntax.token_kinds]TokenStyle = @as([syntax.token_kinds]TokenStyle, @splat(.{})),
 
     /// The color a token of `kind` draws in.
     pub fn color(self: *const Theme, kind: TokenKind) u32 {
-        return self.tokens[@intFromEnum(kind)].color orelse self.text;
+        return self.tokens[@backingInt(kind)].color orelse self.text;
     }
     pub fn style(self: *const Theme, kind: TokenKind) TokenStyle {
-        var value = self.tokens[@intFromEnum(kind)];
+        var value = self.tokens[@backingInt(kind)];
         if (value.color == null) value.color = self.text;
         return value;
     }
@@ -84,10 +84,10 @@ pub const Theme = struct {
             .modified = if (dark_appearance) 0x69b1ff else 0x009fff,
         };
         const palette = if (dark_appearance) dark_tokens else light_tokens;
-        for (palette) |entry| theme.tokens[@intFromEnum(entry[0])].color = entry[1];
-        theme.tokens[@intFromEnum(TokenKind.heading)].bold = true;
-        theme.tokens[@intFromEnum(TokenKind.strong)].bold = true;
-        theme.tokens[@intFromEnum(TokenKind.emphasis)].italic = true;
+        for (palette) |entry| theme.tokens[@backingInt(entry[0])].color = entry[1];
+        theme.tokens[@backingInt(TokenKind.heading)].bold = true;
+        theme.tokens[@backingInt(TokenKind.strong)].bold = true;
+        theme.tokens[@backingInt(TokenKind.emphasis)].italic = true;
         return theme;
     }
     pub fn light() Theme {

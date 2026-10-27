@@ -5,7 +5,7 @@ description: Maintain Zig desktop applications built on the Ziggurat framework, 
 
 # Ziggurat app maintenance
 
-Check the framework checkout the app depends on (the `ziggurat` path or hash in `build.zig.zon`) and the app's own conventions before changing APIs. Read the framework's `docs/architecture.md`, `docs/philosophy.md` and the document of each module the change touches; confirm every API against that checkout, not memory. The app targets Zig 0.15.2 unless its build says otherwise.
+Check the framework checkout the app depends on (the `ziggurat` path or hash in `build.zig.zon`) and the app's own conventions before changing APIs. Read the framework's `docs/architecture.md`, `docs/philosophy.md` and the document of each module the change touches; confirm every API against that checkout, not memory. The app targets Zig 0.17.0 unless its build says otherwise.
 
 ## Ownership and lifetime
 

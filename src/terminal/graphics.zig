@@ -6,6 +6,7 @@
 //! the oldest go. Placements keep their rows as text scrolls, into the
 //! scrollback with it.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const png = @import("png.zig");
 const screen_module = @import("screen.zig");
@@ -290,7 +291,7 @@ const Loading = struct {
         var shm_buffer: [max_path + 16]u8 = undefined;
         const file_path = if (medium == 's') shm: {
             if (builtin.os.tag != .linux) return error.UnsupportedMedium;
-            const name = std.mem.trimLeft(u8, path, "/");
+            const name = std.mem.trimStart(u8, path, "/");
             if (name.len == 0 or std.mem.indexOfScalar(u8, name, '/') != null) return error.InvalidData;
             break :shm std.fmt.bufPrint(&shm_buffer, "/dev/shm/{s}", .{name}) catch return error.FilePathTooLong;
         } else path;
@@ -303,16 +304,16 @@ const Loading = struct {
             if (!inTempDir(allocator, file_path)) return error.TemporaryFileNotInTempDir;
             if (std.mem.indexOf(u8, file_path, "tty-graphics-protocol") == null) return error.TemporaryFileNotNamedCorrectly;
         }
-        defer if (medium == 't' or medium == 's') std.fs.deleteFileAbsolute(file_path) catch {};
-        var file = std.fs.openFileAbsolute(file_path, .{}) catch return error.InvalidData;
-        defer file.close();
-        const stat = file.stat() catch return error.InvalidData;
+        defer if (medium == 't' or medium == 's') std.Io.Dir.deleteFileAbsolute(zio.io(), file_path) catch {};
+        var file = std.Io.Dir.openFileAbsolute(zio.io(), file_path, .{}) catch return error.InvalidData;
+        defer file.close(zio.io());
+        const stat = file.stat(zio.io()) catch return error.InvalidData;
         if (stat.kind != .file) return error.InvalidData;
         const offset = @min(stat.size, self.command.offset);
         const available: u64 = stat.size - offset;
         const len: usize = @intCast(@min(if (self.command.size > 0) @min(available, self.command.size) else available, max_size));
         try self.data.resize(allocator, len);
-        const n = file.preadAll(self.data.items, offset) catch return error.InvalidData;
+        const n = file.readPositionalAll(zio.io(), self.data.items, offset) catch return error.InvalidData;
         self.data.shrinkRetainingCapacity(n);
     }
 
@@ -356,7 +357,7 @@ fn inTempDir(allocator: std.mem.Allocator, path: []const u8) bool {
         if (std.mem.startsWith(u8, path, "/tmp") or std.mem.startsWith(u8, path, "/dev/shm")) return true;
     }
     for ([_][]const u8{ "TMPDIR", "TEMP", "TMP" }) |name| {
-        const dir = std.process.getEnvVarOwned(allocator, name) catch continue;
+        const dir = zio.getEnvVarOwned(allocator, name) catch continue;
         defer allocator.free(dir);
         if (dir.len > 0 and std.mem.startsWith(u8, path, dir)) return true;
     }

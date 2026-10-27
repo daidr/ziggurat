@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const download = @import("download.zig");
 
 /// `download.Source` over `std.http.Client`, for an application-managed
@@ -95,7 +96,7 @@ pub fn get(allocator: std.mem.Allocator, client: *std.http.Client, url: []const 
 }
 
 const TestServer = struct {
-    server: std.net.Server,
+    server: std.Io.net.Server,
     body: []const u8,
     honor_range: bool,
     requests: usize = 0,
@@ -104,13 +105,13 @@ const TestServer = struct {
         for (0..count) |_| self.one() catch return;
     }
     fn one(self: *TestServer) !void {
-        const connection = try self.server.accept();
-        defer connection.stream.close();
+        const connection = try self.server.accept(zio.io());
+        defer connection.close(zio.io());
         var receive_buffer: [4096]u8 = undefined;
         var send_buffer: [4096]u8 = undefined;
-        var reader = connection.stream.reader(&receive_buffer);
-        var writer = connection.stream.writer(&send_buffer);
-        var http: std.http.Server = .init(reader.interface(), &writer.interface);
+        var reader = connection.reader(zio.io(), &receive_buffer);
+        var writer = connection.writer(zio.io(), &send_buffer);
+        var http: std.http.Server = .init(&reader.interface, &writer.interface);
         var request = try http.receiveHead();
         self.requests += 1;
         var start: usize = 0;
@@ -129,20 +130,20 @@ test "HTTP source resumes with ranges and restarts on full responses" {
     var body: [50_000]u8 = undefined;
     for (&body, 0..) |*byte, index| byte.* = @truncate(index *% 31);
     for ([_]bool{ true, false }) |honor| {
-        const address = try std.net.Address.parseIp("127.0.0.1", 0);
-        var server: TestServer = .{ .server = try address.listen(.{ .reuse_address = true }), .body = &body, .honor_range = honor };
-        defer server.server.deinit();
+        const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+        var server: TestServer = .{ .server = try address.listen(zio.io(), .{ .reuse_address = true }), .body = &body, .honor_range = honor };
+        defer server.server.deinit(zio.io());
         const thread = try std.Thread.spawn(.{}, TestServer.serve, .{ &server, 2 });
         defer thread.join();
         var url_buffer: [64]u8 = undefined;
-        const url = try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/a.zip", .{server.server.listen_address.getPort()});
-        var client: std.http.Client = .{ .allocator = std.testing.allocator };
+        const url = try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/a.zip", .{server.server.socket.address.getPort()});
+        var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = zio.io() };
         defer client.deinit();
         var temp = std.testing.tmpDir(.{});
         defer temp.cleanup();
-        var file = try temp.dir.createFile("partial", .{ .read = true });
-        defer file.close();
-        try file.writeAll(body[0..12_345]);
+        var file = try temp.dir.createFile(zio.io(), "partial", .{ .read = true });
+        defer file.close(zio.io());
+        try file.writeStreamingAll(zio.io(), body[0..12_345]);
         var manifest: update.Manifest = .{ .identity = "org.ziggurat.Http", .target = "linux-x86_64", .version = .{ .major = 1, .minor = 0, .patch = 0 }, .url = url, .bytes = body.len, .sha256 = undefined, .signature = @splat(0) };
         std.crypto.hash.sha2.Sha256.hash(&body, &manifest.sha256, .{});
         var http_source: Source = .init(&client);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const profile = @import("profile");
 extern fn test_cookies_init_gtk() c_int;
 extern fn test_cookies_native(*anyopaque) c_int;
@@ -18,8 +19,8 @@ const Fixture = struct {
     }
 };
 test "native cookie owner malloc failures and synchronous completion keep physical pins" {
-    const base = std.posix.getenv("ZIGGURAT_PROFILE_TEST_ROOT") orelse return error.MissingProfileTestRoot;
-    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/native-cookies-{d}", .{ base, std.time.nanoTimestamp() });
+    const base = zio.getenv("ZIGGURAT_PROFILE_TEST_ROOT") orelse return error.MissingProfileTestRoot;
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/native-cookies-{d}", .{ base, zio.nanoTimestamp() });
     defer std.testing.allocator.free(path);
     var fixture: Fixture = .{ .path = path, .main = std.Thread.getCurrentId() };
     const worker = try std.Thread.spawn(.{}, Fixture.worker, .{&fixture});

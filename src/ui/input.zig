@@ -349,7 +349,7 @@ test "pointer failed mapped append rolls back the parallel association" {
     var value: Input = .{ .clicks = workspace };
     var snapshot: affine_state.Snapshot = .{};
     value.beginMappedFrame(&snapshot);
-    try std.testing.expectError(error.InvalidSpace, value.addMapped(7, .{ .x = 0, .y = 0, .width = 20, .height = 20 }, .{}, .{ .space = @enumFromInt(999) }));
+    try std.testing.expectError(error.InvalidSpace, value.addMapped(7, .{ .x = 0, .y = 0, .width = 20, .height = 20 }, .{}, .{ .space = @fromBackingInt(@intCast(999)) }));
     try std.testing.expectEqual(@as(usize, 0), value.pending_len);
     try std.testing.expectEqual(@as(usize, 0), snapshot.hit_len);
     try std.testing.expectEqual(@as(usize, 0), workspace.state.banks[workspace.state.front ^ 1].len);
@@ -1113,7 +1113,7 @@ test "affine focus uses window geometry and invalid appends roll back both recor
     const left = try pending.geometry.addSpace(.{ .x0 = 20 });
     input.beginMappedFrame(pending);
     const bounds: Rect = .{ .x = 0, .y = 0, .width = 20, .height = 20 };
-    try std.testing.expectError(error.InvalidSpace, input.addMapped(3, bounds, .{}, .{ .space = @enumFromInt(999) }));
+    try std.testing.expectError(error.InvalidSpace, input.addMapped(3, bounds, .{}, .{ .space = @fromBackingInt(@intCast(999)) }));
     try std.testing.expectEqual(@as(usize, 0), input.pending_len);
     try std.testing.expectEqual(@as(usize, 0), pending.hit_len);
     try input.addMapped(1, bounds, .{}, .{ .space = right });

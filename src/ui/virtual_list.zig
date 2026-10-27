@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const ui = @import("ziggurat_ui");
 const SelectionControl = @import("virtual_list_control.zig").Control(ControlAccess);
 pub const Control = @import("virtual_list_mount.zig").Control(MountAccess);
@@ -159,7 +160,12 @@ pub const List = opaque {
         const window = frame.context.window orelse return error.Closed;
         const scope = window.beginCallback() orelse return error.Closed;
         defer scope.end();
-        errdefer |err| frame.failure = frame.failure orelse err;
+        return self.renderBody(frame, bounds, scroll, options, renderer, state, window) catch |err| {
+            frame.failure = frame.failure orelse err;
+            return err;
+        };
+    }
+    fn renderBody(_: *List, frame: *ui.Frame, bounds: ui.Rect, scroll: f64, options: DrawOptions, renderer: RowRenderer, state: *State, window: @import("ziggurat").Window) anyerror!Range {
         if (!ui.layout.validRect(bounds)) return error.InvalidGeometry;
         try validScroll(scroll, bounds.height);
         if (options.overscan > 16 or options.max_visible == 0 or options.max_visible > 128) return error.InvalidDrawOptions;
@@ -380,7 +386,7 @@ fn validScroll(scroll: f64, viewport: f64) !void {
     if (!std.math.isFinite(scroll) or !std.math.isFinite(viewport) or viewport < 0 or viewport > 1_000_000) return error.InvalidGeometry;
 }
 fn build(allocator: std.mem.Allocator, source: []const Row, limits: Limits, previous_bytes: usize) !Index {
-    var timer = std.time.Timer.start() catch null;
+    var timer = zio.Timer.start() catch null;
     if (source.len > limits.rows) return error.RowCapacityExceeded;
     const bytes = source.len * (@sizeOf(Stored) + @sizeOf(Identity)) + (source.len + 1) * @sizeOf(u64);
     if (@sizeOf(State) + bytes > limits.owned_bytes or previous_bytes + bytes > limits.peak_bytes) return error.ByteCapacityExceeded;

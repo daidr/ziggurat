@@ -16,7 +16,7 @@ const kinds = ui.loading.all;
 const per_page = 12;
 const pages = (kinds.len + per_page - 1) / per_page;
 const sizes = [_]f32{ 16, 24, 32, 48 };
-const columns = [_]view.Track{view.Track.fraction(1)} ** 4;
+const columns = @as([4]view.Track, @splat(view.Track.fraction(1)));
 const muted = 0x5f6b7a;
 
 const Tint = enum { text, accent, muted };
@@ -70,7 +70,7 @@ const Gallery = struct {
         try v.grid(&columns, .{ .gap = 12, .grow = 1, .self_align = .stretch, .key = 1 });
         const first = self.page * per_page;
         for (kinds[first..@min(kinds.len, first + per_page)]) |kind| {
-            try v.column(.{ .key = @intFromEnum(kind), .gap = 14, .alignment = .center, .justify = .center, .height = 116, .padding = .all(8), .radius = 8, .border = 0xd5dbe3 });
+            try v.column(.{ .key = @backingInt(kind), .gap = 14, .alignment = .center, .justify = .center, .height = 116, .padding = .all(8), .radius = 8, .border = 0xd5dbe3 });
             try v.column(.{ .height = 48, .alignment = .center, .justify = .center });
             try v.loadingIndicator(kind, look, .{ .name = kind.name() });
             try v.end();

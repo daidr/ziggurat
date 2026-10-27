@@ -14,11 +14,7 @@ const cpu_gradient = @import("cpu_gradient.zig");
 const layers = @import("layers.zig");
 const windows_layers = @import("windows_layers.zig");
 const composite = @import("composite.zig");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 
 pub const Renderer = struct {
     dc: c.HDC = null,

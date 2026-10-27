@@ -2,6 +2,7 @@
 //! `third_party/`, compiled with the module. MP3 reads its input as it plays;
 //! Vorbis decodes from a copy of the whole compressed input in memory.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const decoding = @import("decoder.zig");
 const Error = decoding.Error;
 const Input = decoding.Input;

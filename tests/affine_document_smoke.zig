@@ -6,12 +6,7 @@ const t = @import("ziggurat_text_layout");
 const d = @import("ziggurat_document");
 const editing = @import("ziggurat_document_editor");
 const code = @import("ziggurat_code_editor");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("imm.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn zlg_test_paint(*anyopaque, u32, u32) void;
 extern fn zlg_test_commit(*anyopaque, [*:0]const u8) void;
 extern fn zlg_test_surrounding(*anyopaque, [*]u8, usize, *usize, *usize) c_int;
@@ -98,7 +93,7 @@ const State = struct {
     }
     fn phase(ptr: *anyopaque, _: z.Window, value: ui.AccessibilityPhase) void {
         const self: *State = @ptrCast(@alignCast(ptr));
-        self.phases[@intFromEnum(value)] += 1;
+        self.phases[@backingInt(value)] += 1;
         if (value == .committed and self.binding_ready and !self.plain and !self.omit_space) self.adapter.syncNativeCaret() catch |err| {
             self.failure = err;
         };

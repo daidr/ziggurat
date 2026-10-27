@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const update = @import("root.zig");
 const publication = @import("publication.zig");
 
@@ -136,12 +137,12 @@ test "stored package round-trips through publication and is deterministic" {
     defer verified.deinit();
     var temp = std.testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
-    var file = try temp.dir.createFile("download.zip", .{ .read = true });
-    defer file.close();
-    try file.writeAll(first);
+    var file = try temp.dir.createFile(zio.io(), "download.zip", .{ .read = true });
+    defer file.close(zio.io());
+    try file.writeStreamingAll(zio.io(), first);
     const published = try publication.publishZip(allocator, temp.dir, file, &verified, .{});
     var buffer: [512]u8 = undefined;
-    const bytes = try temp.dir.readFileAlloc(allocator, try published.relativePath(&buffer), 64);
+    const bytes = try temp.dir.readFileAlloc(zio.io(), try published.relativePath(&buffer), allocator, .limited(64));
     defer allocator.free(bytes);
     try std.testing.expectEqualStrings(files[0].bytes, bytes);
 }

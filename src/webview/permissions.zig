@@ -19,7 +19,7 @@ pub const Kind = enum(u32) {
     persistent_storage,
     pub fn fromNative(value: u32) ?Kind {
         if (value < 1 or value > 13) return null;
-        return @enumFromInt(value);
+        return @fromBackingInt(@intCast(value));
     }
 };
 pub const Kinds = packed struct(u16) {
@@ -38,7 +38,7 @@ pub const Kinds = packed struct(u16) {
     persistent_storage: bool = false,
     reserved: u3 = 0,
     pub fn allows(self: Kinds, kind: Kind) bool {
-        return @as(u16, @bitCast(self)) & (@as(u16, 1) << @intCast(@intFromEnum(kind) - 1)) != 0;
+        return @as(u16, @bitCast(self)) & (@as(u16, 1) << @intCast(@backingInt(kind) - 1)) != 0;
     }
     pub fn validate(self: Kinds) !void {
         if (self.reserved != 0 or @as(u16, @bitCast(self)) == 0) return error.InvalidPermissionKinds;
@@ -147,7 +147,7 @@ test "permission kinds are explicit and future native values never broaden acces
     const kinds: Kinds = .{ .notifications = true, .persistent_storage = true };
     try kinds.validate();
     try std.testing.expect(kinds.allows(.notifications) and kinds.allows(.persistent_storage) and !kinds.allows(.camera));
-    for (1..14) |native| try std.testing.expectEqual(@as(u32, @intCast(native)), @intFromEnum(Kind.fromNative(@intCast(native)).?));
+    for (1..14) |native| try std.testing.expectEqual(@as(u32, @intCast(native)), @backingInt(Kind.fromNative(@intCast(native)).?));
     for ([_]u32{ 0, 14, std.math.maxInt(u32) }) |native| try std.testing.expect(Kind.fromNative(native) == null);
     try std.testing.expectError(error.InvalidPermissionKinds, (Kinds{}).validate());
     try std.testing.expectError(error.InvalidPermissionKinds, (Kinds{ .notifications = true, .reserved = 1 }).validate());

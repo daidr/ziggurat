@@ -8,11 +8,7 @@ const builtin = @import("builtin");
 const windows = builtin.os.tag == .windows;
 const linux = builtin.os.tag == .linux and !builtin.is_test;
 
-const c = if (windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (windows) @import("ziggurat_c_win32") else struct {};
 
 const gdk = struct {
     extern fn gdk_pixbuf_new(colorspace: c_int, has_alpha: c_int, bits_per_sample: c_int, width: c_int, height: c_int) ?*anyopaque;

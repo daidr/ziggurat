@@ -4,6 +4,7 @@
 //! connection at a time, and their results reach the main thread through
 //! `App.post`.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const ipc = @import("ziggurat_ipc");
 const runtime = @import("ziggurat_page_runtime");
@@ -73,7 +74,7 @@ const Failure = struct {
 
     fn of(code: Service.Code, comptime format: []const u8, args: anytype) Failure {
         var failure: Failure = .{ .code = code };
-        failure.len = (std.fmt.bufPrint(&failure.message, format, args) catch failure.message[0..failure.message.len]).len;
+        failure.len = (std.fmt.bufPrint(&failure.message, format, args) catch @as([]const u8, &failure.message)).len;
         return failure;
     }
     fn text(self: *const Failure) []const u8 {
@@ -116,8 +117,8 @@ pub const Plugin = struct {
     queue: [limits.max_pending]u16 = undefined,
     queue_len: usize = 0,
     threads: []std.Thread = &.{},
-    mutex: std.Thread.Mutex = .{},
-    wake: std.Thread.Condition = .{},
+    mutex: zio.Mutex = .{},
+    wake: zio.Condition = .{},
     stopping: bool = false,
     outbox: runtime.Outbox,
 
@@ -372,10 +373,10 @@ pub const Plugin = struct {
     }
 
     fn pathOf(self: *Plugin, name: []const u8) ![:0]u8 {
-        if (std.mem.eql(u8, name, ":memory:")) return self.allocator.dupeZ(u8, name);
+        if (std.mem.eql(u8, name, ":memory:")) return self.allocator.dupeSentinel(u8, name, 0);
         const joined = try std.fs.path.join(self.allocator, &.{ self.options.directory, name });
         defer self.allocator.free(joined);
-        const path = try self.allocator.dupeZ(u8, joined);
+        const path = try self.allocator.dupeSentinel(u8, joined, 0);
         if (is_windows) std.mem.replaceScalar(u8, path, '/', '\\');
         return path;
     }
@@ -627,13 +628,13 @@ fn openDatabase(self: *Plugin, item: *Connection, path: [:0]const u8, params: Se
 /// Creates the directories of a writable database, and refuses a name that
 /// goes through a symlink or is not a file.
 fn prepareDirectory(self: *Plugin, item: *Connection, name: []const u8, read_only: bool) RunError!void {
-    if (!read_only) std.fs.cwd().makePath(self.options.directory) catch {};
-    var dir = std.fs.openDirAbsolute(self.options.directory, .{}) catch |err| switch (err) {
+    if (!read_only) std.Io.Dir.cwd().createDirPath(zio.io(), self.options.directory) catch {};
+    var dir = std.Io.Dir.openDirAbsolute(zio.io(), self.options.directory, .{}) catch |err| switch (err) {
         // SQLite reports the missing database.
         error.FileNotFound => return,
         else => return denied(item, "the plugin's directory cannot be opened"),
     };
-    defer dir.close();
+    defer dir.close(zio.io());
     var parts = std.mem.splitScalar(u8, name, '/');
     while (parts.next()) |part| {
         const last = parts.peek() == null;
@@ -641,9 +642,9 @@ fn prepareDirectory(self: *Plugin, item: *Connection, name: []const u8, read_onl
             error.FileNotFound => {
                 if (last) return;
                 if (read_only) return;
-                dir.makeDir(part) catch {};
-                const next = dir.openDir(part, .{ .no_follow = true }) catch return denied(item, "a directory of the name cannot be opened");
-                dir.close();
+                dir.createDir(zio.io(), part, .default_dir) catch {};
+                const next = dir.openDir(zio.io(), part, .{ .follow_symlinks = false }) catch return denied(item, "a directory of the name cannot be opened");
+                dir.close(zio.io());
                 dir = next;
                 continue;
             },
@@ -654,8 +655,8 @@ fn prepareDirectory(self: *Plugin, item: *Connection, name: []const u8, read_onl
             return;
         }
         if (found != .directory) return denied(item, "the name goes through a symlink or a file");
-        const next = dir.openDir(part, .{ .no_follow = true }) catch return denied(item, "a directory of the name cannot be opened");
-        dir.close();
+        const next = dir.openDir(zio.io(), part, .{ .follow_symlinks = false }) catch return denied(item, "a directory of the name cannot be opened");
+        dir.close(zio.io());
         dir = next;
     }
 }
@@ -667,25 +668,25 @@ fn denied(item: *Connection, comptime message: []const u8) RunError {
     return error.Denied;
 }
 
-fn statAt(dir: std.fs.Dir, name: []const u8) !std.fs.File.Kind {
+fn statAt(dir: std.Io.Dir, name: []const u8) !std.Io.File.Kind {
     if (is_windows) {
         const w = std.os.windows;
-        const path = try w.sliceToPrefixedFileW(dir.fd, name);
+        const path = try w.sliceToPrefixedFileW(dir.handle, name);
         const handle = try w.OpenFile(path.span(), .{
-            .dir = dir.fd,
+            .dir = dir.handle,
             .access_mask = w.FILE_READ_ATTRIBUTES | w.SYNCHRONIZE,
             .creation = w.FILE_OPEN,
             .filter = .any,
             .follow_symlinks = false,
         });
-        const file: std.fs.File = .{ .handle = handle };
+        const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
         defer file.close();
         return (try file.stat()).kind;
     }
     const linux = std.os.linux;
     const path = try std.posix.toPosixPath(name);
     var stx = std.mem.zeroes(linux.Statx);
-    return switch (linux.E.init(linux.statx(dir.fd, &path, linux.AT.SYMLINK_NOFOLLOW, linux.STATX_TYPE, &stx))) {
+    return switch (linux.errno(linux.statx(dir.handle, &path, linux.AT.SYMLINK_NOFOLLOW, .{ .TYPE = true }, &stx))) {
         .SUCCESS => switch (stx.mode & linux.S.IFMT) {
             linux.S.IFREG => .file,
             linux.S.IFDIR => .directory,
@@ -703,7 +704,7 @@ fn prepared(item: *Connection, arena: std.mem.Allocator, sql: []const u8, params
     const count = statement.parameterCount();
     if (count != params.len) {
         item.native.failure = .{};
-        item.native.failure.len = (std.fmt.bufPrint(&item.native.failure.message, "statement needs {d} parameters, got {d}", .{ count, params.len }) catch "").len;
+        item.native.failure.len = (std.fmt.bufPrint(&item.native.failure.message, "statement needs {d} parameters, got {d}", .{ count, params.len }) catch @as([]const u8, "")).len;
         return error.Invalid;
     }
     for (params, 1..) |param, index| {
@@ -715,7 +716,7 @@ fn prepared(item: *Connection, arena: std.mem.Allocator, sql: []const u8, params
                 error.NotFinite => "number must be finite",
                 error.InvalidBlob => "invalid BLOB encoding",
                 error.InvalidValue => "the value does not match its type",
-            } }) catch "").len;
+            } }) catch @as([]const u8, "")).len;
             return if (err == error.OutOfMemory) error.OutOfMemory else error.Invalid;
         };
         try statement.bind(index, value);
@@ -803,7 +804,7 @@ fn batch(item: *Connection, arena: std.mem.Allocator, statements: []const Servic
         result.* = execute(item, arena, statement.sql, statement.params) catch |err| {
             if (err == error.Sqlite or err == error.Invalid or err == error.Denied) {
                 var failure = item.native.failure;
-                item.native.failure.len = (std.fmt.bufPrint(&item.native.failure.message, "statement {d}: {s}", .{ index, failure.text() }) catch "").len;
+                item.native.failure.len = (std.fmt.bufPrint(&item.native.failure.message, "statement {d}: {s}", .{ index, failure.text() }) catch @as([]const u8, "")).len;
                 _ = &failure;
             }
             return err;

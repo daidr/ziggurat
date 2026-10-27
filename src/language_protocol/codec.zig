@@ -486,9 +486,9 @@ test "encoding byte and nesting limits reject before allocation or deep Stringif
     var rejecting = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     const a = rejecting.allocator();
     var values: [512]std.json.Value = undefined;
-    for (&values, 0..) |*value, index| value.* = if (index + 1 == values.len) .null else .{ .array = .{ .items = values[index + 1 ..][0..1], .capacity = 1, .allocator = std.testing.allocator } };
+    for (&values, 0..) |*value, index| value.* = if (index + 1 == values.len) .null else .{ .array = .{ .items = values[index + 1 ..][0..1], .capacity = 1, .allocator = std.testing.allocator, .pointer_stability = .{} } };
     try std.testing.expectError(error.DepthCapacityExceeded, Packet.json(a, values[0], .{ .depth = 128 }));
-    try std.testing.expectError(error.BodyCapacityExceeded, Packet.json(a, .{ .text = "large" ** 1024 }, .{ .body_bytes = 32 }));
+    try std.testing.expectError(error.BodyCapacityExceeded, Packet.json(a, .{ .text = &@as([1024 * "large".len]u8, @bitCast(@as([1024]["large".len]u8, @splat("large".*)))) }, .{ .body_bytes = 32 }));
     try std.testing.expectEqual(@as(usize, 0), rejecting.alloc_index);
     var quoted = try Packet.json(std.testing.allocator, .{ .text = "[\\\"{}]" }, .{ .depth = 1 });
     defer quoted.deinit();

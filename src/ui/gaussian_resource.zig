@@ -41,10 +41,10 @@ const serial_limit = std.math.maxInt(u64) >> tag_bits;
 const cancel_bit: u64 = 8;
 const Phase = enum(u3) { idle, captured, running, ready, failed, finishing };
 fn word(serial: u64, phase: Phase) u64 {
-    return (serial << tag_bits) | @intFromEnum(phase);
+    return (serial << tag_bits) | @backingInt(phase);
 }
 fn phaseOf(value: u64) Phase {
-    return @enumFromInt(value & 7);
+    return @fromBackingInt(@intCast(value & 7));
 }
 
 /// Explicit CPU filter preparation. The owner holds one physical Work and all
@@ -646,7 +646,7 @@ test "the Gaussian filters composited overlap instead of applying a filter to ea
 
 test "limits charge old outputs and complete borrowed mip storage before any candidate allocation" {
     var lease = drawing.Lease.init(std.Thread.getCurrentId());
-    const pixels = [_]u8{0} ** 20;
+    const pixels = @as([20]u8, @splat(0));
     const levels = [_]drawing.ImageLevel{
         .{ .pixels = &pixels, .byte_len = 16, .width = 2, .height = 2, .stride = 8 },
         .{ .pixels = pixels[16..].ptr, .byte_len = 4, .width = 1, .height = 1, .stride = 4 },
@@ -786,7 +786,7 @@ test "source stride padding is ignored and filtered pixels no longer borrow sour
     };
     // Both descriptors need a full final stride, even though padding is never
     // sampled; the first source therefore supplies16 initialized bytes below.
-    var full_padded = [_]u8{0} ** 16;
+    var full_padded = @as([16]u8, @splat(0));
     @memcpy(full_padded[0..padded.len], &padded);
     var padded_level = sources[0];
     padded_level.pixels = &full_padded;

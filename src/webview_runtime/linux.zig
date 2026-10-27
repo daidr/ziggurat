@@ -1,7 +1,5 @@
 const std = @import("std");
-const c = @cImport({
-    @cInclude("dlfcn.h");
-});
+const c = @import("ziggurat_c_posix");
 
 pub const max_path_bytes = 4095;
 pub const max_payload_bytes = 256;

@@ -1,11 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
-const native = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const native = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 
 const StopProbe = struct {
     app: *z.App,
