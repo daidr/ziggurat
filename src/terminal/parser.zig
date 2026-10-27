@@ -2,6 +2,8 @@
 //! DEC/ANSI state machine for C0 controls, ESC, CSI, OSC and DCS, with
 //! UTF-8 decoding of printable text. It owns no allocation; OSC payloads
 //! are collected into caller storage and dropped whole when they overflow.
+//! APC strings, which carry Kitty graphics, stream to the handler in
+//! pieces, as they can be large.
 const std = @import("std");
 
 pub const max_params = 32;
@@ -48,9 +50,15 @@ pub const Action = union(enum) {
     /// The payload between OSC and its terminator, borrowed until the
     /// next byte is fed.
     osc: []const u8,
+    /// An APC string starts; its payload follows in `apc_data` pieces,
+    /// borrowed until the next byte is fed, then `apc_end`: true when the
+    /// string ended with ST, false when it was cancelled.
+    apc_start,
+    apc_data: []const u8,
+    apc_end: bool,
 };
 
-const State = enum { ground, escape, escape_intermediate, csi_entry, csi_param, csi_intermediate, csi_ignore, osc_string, dcs_passthrough, ignore_string };
+const State = enum { ground, escape, escape_intermediate, csi_entry, csi_param, csi_intermediate, csi_ignore, osc_string, dcs_passthrough, apc_string, ignore_string };
 
 pub const Parser = struct {
     state: State = .ground,
@@ -76,7 +84,21 @@ pub const Parser = struct {
     /// Feed `bytes`, calling `handler.action(Action)` for each complete
     /// action in order.
     pub fn feed(self: *Parser, bytes: []const u8, handler: anytype) void {
-        for (bytes) |byte| self.next(byte, handler);
+        var i: usize = 0;
+        while (i < bytes.len) {
+            // An APC payload goes on in runs up to the next byte that could
+            // end it.
+            if (self.state == .apc_string and !self.string_escape) {
+                const end = std.mem.indexOfAnyPos(u8, bytes, i, "\x18\x1a\x1b") orelse bytes.len;
+                if (end > i) {
+                    handler.action(.{ .apc_data = bytes[i..end] });
+                    i = end;
+                    continue;
+                }
+            }
+            self.next(bytes[i], handler);
+            i += 1;
+        }
     }
 
     pub fn next(self: *Parser, byte: u8, handler: anytype) void {
@@ -100,7 +122,8 @@ pub const Parser = struct {
         // These interrupt any sequence.
         switch (byte) {
             0x18, 0x1a => {
-                if (self.state == .osc_string or self.state == .dcs_passthrough or self.state == .ignore_string) {
+                if (self.state == .apc_string) handler.action(.{ .apc_end = false });
+                if (self.inString()) {
                     self.state = .ground;
                     return;
                 }
@@ -109,7 +132,7 @@ pub const Parser = struct {
                 return;
             },
             0x1b => {
-                if (self.state == .osc_string or self.state == .dcs_passthrough or self.state == .ignore_string) {
+                if (self.inString()) {
                     self.string_escape = true;
                     return;
                 }
@@ -137,7 +160,12 @@ pub const Parser = struct {
                     self.string_escape = false;
                     self.state = .dcs_passthrough;
                 },
-                'X', '^', '_' => {
+                '_' => {
+                    self.string_escape = false;
+                    self.state = .apc_string;
+                    handler.action(.apc_start);
+                },
+                'X', '^' => {
                     self.string_escape = false;
                     self.state = .ignore_string;
                 },
@@ -210,6 +238,20 @@ pub const Parser = struct {
                     },
                 }
             },
+            .apc_string => {
+                if (self.string_escape) {
+                    self.string_escape = false;
+                    self.state = .ground;
+                    // ESC followed by anything but '\\' cancels the string.
+                    handler.action(.{ .apc_end = byte == '\\' });
+                    if (byte != '\\') {
+                        self.enterEscape();
+                        self.next(byte, handler);
+                    }
+                    return;
+                }
+                handler.action(.{ .apc_data = (&byte)[0..1] });
+            },
             .dcs_passthrough, .ignore_string => {
                 if (self.string_escape) {
                     self.string_escape = false;
@@ -220,10 +262,17 @@ pub const Parser = struct {
                     }
                     return;
                 }
-                // DCS and APC strings are read to their end and dropped; BEL
-                // does not end them.
+                // DCS, SOS and PM strings are read to their end and dropped;
+                // BEL does not end them.
             },
         }
+    }
+
+    fn inString(self: *const Parser) bool {
+        return switch (self.state) {
+            .osc_string, .dcs_passthrough, .apc_string, .ignore_string => true,
+            else => false,
+        };
     }
 
     fn ground(self: *Parser, byte: u8, handler: anytype) void {
@@ -398,4 +447,40 @@ test "escape sequences, DCS strings and cancellation" {
     try std.testing.expectEqual(@as(u8, '7'), r.log[1].esc.final);
     try std.testing.expectEqual(@as(u8, 0x18), r.log[2].execute);
     try std.testing.expectEqual(@as(u21, 'y'), r.log[3].print);
+}
+
+test "APC strings stream to the handler and end with ST" {
+    var storage: [8]u8 = undefined;
+    var parser = Parser.init(&storage);
+    const Apc = struct {
+        bytes: [64]u8 = undefined,
+        len: usize = 0,
+        starts: usize = 0,
+        ends: [4]bool = undefined,
+        end_count: usize = 0,
+        printed: usize = 0,
+        fn action(self: *@This(), value: Action) void {
+            switch (value) {
+                .apc_start => self.starts += 1,
+                .apc_data => |data| {
+                    @memcpy(self.bytes[self.len..][0..data.len], data);
+                    self.len += data.len;
+                },
+                .apc_end => |ok| {
+                    self.ends[self.end_count] = ok;
+                    self.end_count += 1;
+                },
+                .print => self.printed += 1,
+                else => {},
+            }
+        }
+    };
+    var r: Apc = .{};
+    parser.feed("\x1b_Ga=T;AAAA", &r);
+    parser.next('B', &r);
+    parser.feed("\x07C\x1b\\x\x1b_Gq\x18y", &r);
+    try std.testing.expectEqualStrings("Ga=T;AAAAB\x07CGq", r.bytes[0..r.len]);
+    try std.testing.expectEqual(@as(usize, 2), r.starts);
+    try std.testing.expectEqualSlices(bool, &.{ true, false }, r.ends[0..r.end_count]);
+    try std.testing.expectEqual(@as(usize, 2), r.printed);
 }
