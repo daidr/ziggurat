@@ -8,6 +8,9 @@ typedef struct ZgGaussianGpuOps {
     void (*destroy)(ZgGaussianGpu *);
     ID2D1Bitmap1 *(*bitmap)(ZgGaussianGpu *,uint32_t);
     HRESULT (*filter)(ZgGaussianGpu *,uint32_t,const ZgGaussianCapture *,const ZgGaussianKernel *);
+    /* Run an effect's pixel shader over the top-left width x height pixels
+       of a slot into the scratch target, then copy them back. */
+    HRESULT (*effect)(ZgGaussianGpu *,uint32_t,uint32_t,uint32_t,ID3D11VertexShader *,ID3D11PixelShader *,ID3D11Buffer *const *);
 } ZgGaussianGpuOps;
 /* No App, Context, State, Zig allocation or callback is retained. Optional
    program, owned textures and metadata leave through these C-only vtables. */

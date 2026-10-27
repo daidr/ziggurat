@@ -5045,10 +5045,12 @@ pub const Host = struct {
     /// `ui.Context.prepareShaderEffects`) and draw `Style.opacity`, `pose`
     /// and `refraction` with `library`, which the application keeps alive
     /// while the host is attached. Call after `attach`; refraction also
-    /// needs `prepareBackdropEffects`.
+    /// needs `prepareBackdropEffects`. A GPU renderer also compiles the
+    /// library's programs (see `ui.Context.prepareGpuShaders`).
     pub fn prepareShaderEffects(self: *Host, allocator: std.mem.Allocator, library: *const ui.effects.Library, options: ui.shader_effects.Options) !void {
         try self.context.prepareShaderEffects(allocator, options);
         self.view.effects = library;
+        _ = try self.context.prepareGpuShaders(allocator, &library.gpuShaders());
     }
     /// Give keyboard focus to the node `id`, such as a text field's, now
     /// when the window registered it, otherwise after the next frame that

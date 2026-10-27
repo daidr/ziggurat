@@ -69,7 +69,26 @@ static HRESULT program_filter(ZgGaussianGpu *bridge,uint32_t slot,const ZgGaussi
     ID3D11DeviceContext_ClearState(p->context);
     return ID3D11Device_GetDeviceRemovedReason(p->device);
 }
-static const ZgGaussianGpuOps ops={program_lose,program_destroy,program_bitmap,program_filter};
+static HRESULT program_effect(ZgGaussianGpu *bridge,uint32_t slot,uint32_t width,uint32_t height,ID3D11VertexShader *vertex,ID3D11PixelShader *pixel,ID3D11Buffer *const *constants){
+    Program *p=(Program *)bridge;if(!bridge->ready||slot>=p->capacity||!width||!height||width>p->pool_width||height>p->pool_height||!vertex||!pixel)return E_INVALIDARG;
+    ID3D11DeviceContext_ClearState(p->context);
+    const D3D11_VIEWPORT viewport={0,0,(float)width,(float)height,0,1};
+    ID3D11DeviceContext_RSSetViewports(p->context,1,&viewport);ID3D11DeviceContext_RSSetState(p->context,p->raster);
+    ID3D11DeviceContext_IASetPrimitiveTopology(p->context,D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_VSSetShader(p->context,vertex,NULL,0);ID3D11DeviceContext_PSSetShader(p->context,pixel,NULL,0);
+    ID3D11DeviceContext_PSSetConstantBuffers(p->context,0,2,constants);
+    ID3D11DeviceContext_OMSetRenderTargets(p->context,1,&p->targets[p->capacity].destination,NULL);
+    ID3D11DeviceContext_PSSetShaderResources(p->context,0,1,&p->targets[slot].source);
+    ID3D11DeviceContext_Draw(p->context,3,0);
+    ID3D11ShaderResourceView *none=NULL;ID3D11DeviceContext_PSSetShaderResources(p->context,0,1,&none);ID3D11DeviceContext_OMSetRenderTargets(p->context,0,NULL,NULL);
+    const D3D11_BOX box={0,0,0,width,height,1};
+    ID3D11DeviceContext_CopySubresourceRegion(p->context,(ID3D11Resource *)p->targets[slot].texture,0,0,0,0,(ID3D11Resource *)p->targets[p->capacity].texture,0,&box);
+    ID3D11DeviceContext_ClearState(p->context);bridge->passes++;
+    return ID3D11Device_GetDeviceRemovedReason(p->device);
+}
+static const ZgGaussianGpuOps ops={program_lose,program_destroy,program_bitmap,program_filter,program_effect};
+/* The full-target triangle effects draw with. */
+const unsigned char *zgpu_effect_vertex_code(size_t *len){*len=sizeof(zg_gaussian_vertex);return zg_gaussian_vertex;}
 size_t zgpu_gaussian_metadata_size(void){return sizeof(Program)+sizeof(GaussianConstants);}
 ZgGaussianGpu *zgpu_gaussian_create_candidate(ID3D11Device *device,ID2D1DeviceContext *d2d,const ZgGaussianCapacity *capacity,uint32_t pool_width,uint32_t pool_height,uint32_t depth,uint32_t fault,HRESULT *out){
     *out=E_INVALIDARG;if(!device||!d2d||!capacity||!depth||depth>4||!pool_width||!pool_height)return NULL;

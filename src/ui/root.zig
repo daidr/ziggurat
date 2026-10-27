@@ -30,6 +30,8 @@ pub const backdrop_effects = commands.backdrop;
 pub const BackdropEffect = backdrop_effects.Effect;
 /// Color spaces and gamut mapping behind `Color.oklch` and `Color.displayP3`.
 pub const gamut = @import("gamut.zig");
+/// The on-disk cache of compiled GPU effect code.
+pub const shader_cache = @import("shader_cache.zig");
 /// What fills a container in place of its background, under its border and
 /// children: a backdrop effect or a look the application or a package
 /// paints (`custom`).
@@ -74,6 +76,8 @@ pub const shader_effects = commands.shader_effects;
 pub const ShaderEffect = shader_effects.Effect;
 /// Built-in pose (2D/3D transform) and refracting glass programs.
 pub const effects = @import("effect_library.zig");
+pub const GpuShader = shader_effects.GpuShader;
+pub const GlMode = shader_effects.GlMode;
 pub const ShaderEffectStats = struct {
     workspace: shader_effects.Stats = .{},
     /// Effects drawn without their program because no shader workspace, or
@@ -503,6 +507,9 @@ pub const Context = struct {
     control_focus_cancelled: bool = false,
     renderer: gdi.Renderer = .{},
     gpu_renderer: if (build_options.gpu) d3d11.Renderer else void = if (build_options.gpu) .{} else {},
+    /// Linux: whether `prepareGpuShaders` links programs for OpenGL; null
+    /// reads `ZIGGURAT_GL` (see `GlMode`).
+    gl_mode: ?GlMode = null,
     /// Configuration for the next attach; an attached surface keeps its mode.
     render_mode: RenderMode = .automatic,
     /// Optional explicit shared GPU device. Frozen into the renderer at attach.
@@ -869,6 +876,34 @@ pub const Context = struct {
         self.shader_workspace = null;
         workspace.destroy();
         if (self.window) |window| if (self.live(window)) window.invalidate();
+    }
+    /// Compile shader programs for the GPU renderer outside paint, so the
+    /// frames that draw them as `target` run their effects on the GPU. The
+    /// compiled code is kept in the user's shader cache and, until the
+    /// Context detaches, in memory allocated with `allocator`. Frames that
+    /// use a program not prepared, or one the GPU cannot run, draw on the
+    /// software planes. Returns how many are ready on the GPU: zero
+    /// without a GPU renderer.
+    pub fn prepareGpuShaders(self: *Context, allocator: std.mem.Allocator, shaders: []const GpuShader) !usize {
+        const window = self.window orelse return error.NotAttached;
+        const scope = self.callbackScope(window) orelse return error.Closed;
+        defer scope.end();
+        if (self.painting) return error.Busy;
+        var ready: usize = 0;
+        if (comptime builtin.os.tag == .linux) {
+            // Linux runs effects on OpenGL over the software planes.
+            const mode = self.gl_mode orelse gdi.glModeFromEnvironment();
+            for (shaders) |item| {
+                if (try self.renderer.prepareEffect(allocator, item.program, item.target, mode)) ready += 1;
+            }
+        } else {
+            if (!build_options.gpu or self.gpu_unavailable or self.attached_render_mode == .gdi) return 0;
+            for (shaders) |item| {
+                if (try self.gpu_renderer.prepareEffect(allocator, item.program, item.target)) ready += 1;
+            }
+        }
+        window.invalidate();
+        return ready;
     }
     /// Time each frame and log slow ones; see `frame_stats`. Overrides the
     /// `ZIGGURAT_FRAME_STATS` environment variable.
@@ -2899,10 +2934,10 @@ pub const Context = struct {
                 if (!self.live(window)) return;
                 clock.markPreflight();
                 clock.software = !using_gpu;
-                // Backdrop effects and loading indicators draw on the software
-                // planes: replay this frame there without reporting a device
-                // failure.
-                if (build_options.gpu and using_gpu and commands.softwareOnly(self.command_buffer.commands())) {
+                // Backdrop effects, loading indicators and shader effects the
+                // GPU cannot run draw on the software planes: replay this
+                // frame there without reporting a device failure.
+                if (build_options.gpu and using_gpu and !self.gpu_renderer.prepareEffects(&self.command_buffer)) {
                     self.gpu_renderer.discard();
                     using_gpu = false;
                     clock.software = true;
@@ -4153,6 +4188,8 @@ test {
     _ = gdi;
     _ = gamut;
     _ = geometry;
+    _ = shader_cache;
+    _ = @import("gpu_effect_host.zig");
     _ = effects;
     _ = canvas;
     _ = @import("pixel_image.zig");

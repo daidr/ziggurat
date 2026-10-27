@@ -14,6 +14,9 @@ const interpolation = @import("gradient_interpolation_gpu.zig");
 const gaussian = @import("gaussian_filter.zig");
 const gaussian_scope = @import("gaussian_scope.zig");
 const gaussian_precision = @import("gaussian_gpu_precision.zig");
+const shader_effects = commands.shader_effects;
+const effect_host = @import("gpu_effect_host.zig");
+const shader_cache = @import("shader_cache.zig");
 
 test "gradient spread GPU preflight rejects the whole used buffer and skips inert resources" {
     var buffer: commands.Buffer = .{};
@@ -156,6 +159,17 @@ extern fn zgpu_layer_gaussian_reserved(*anyopaque) usize;
 extern fn zgpu_layer_candidate_gaussian_reserved(*anyopaque) usize;
 extern fn zgpu_layer_release_gaussian(*anyopaque) i32;
 extern fn zgpu_layer_begin_gaussian(*anyopaque, *const layers.NativeGroup, *const gaussian_scope.Capture, *const gaussian.arithmetic.Kernel) i32;
+const EffectPass = extern struct { words: [*]const u32, word_count: u32, slot: u32, params: effect_host.Params };
+const EffectGeometry = extern struct { clip: [4]f64, scale: f32, origin: [2]f32, width: u32, height: u32, transparent: u32 };
+extern fn zgpu_effect_install(*anyopaque, u32, [*]const u8, usize) i32;
+extern fn zgpu_effect_installed(*anyopaque, u32) c_int;
+extern fn zgpu_effect_passes(*anyopaque) u64;
+extern fn zgpu_effect_geometry(*anyopaque, *EffectGeometry) i32;
+extern fn zgpu_layer_end_effect(*anyopaque, ?*const EffectPass) i32;
+extern fn zgpu_backdrop_shader(*anyopaque, *const EffectPass, *const [4]u32, *const [4]u32) i32;
+extern fn zgpu_hlsl_compile([*]const u8, usize, [*:0]const u8, [*:0]const u8, *?[*]u8, *usize, [*]u8, usize) c_int;
+extern fn zgpu_hlsl_free(?[*]u8) void;
+extern fn zgpu_hlsl_flags() [*:0]const u8;
 
 pub const Renderer = struct {
     native: ?*anyopaque = null,
@@ -170,6 +184,13 @@ pub const Renderer = struct {
     layer_candidate_peak: usize = 0,
     owner: ?std.Thread.Id = null,
     interpolation_mutating: bool = false,
+    /// Installed effect programs, the disk cache their code comes from
+    /// (opened on first compile) and, while a buffer replays, the slot of
+    /// each of its shader entries.
+    effect_table: effect_host.Table = .{},
+    effect_cache: ?shader_cache.DiskCache = null,
+    effect_slots: [shader_effects.max_entries]u32 = undefined,
+    effect_buffer: ?*const commands.Buffer = null,
     /// An unpublished candidate must be destroyed or committed before its
     /// renderer is deinitialized. It is not a domain-owned device-loss cache.
     pub const LayerCandidate = struct { native: *anyopaque, plan: layers.Plan, owner: *Renderer, generation: u64 };
@@ -753,10 +774,200 @@ pub const Renderer = struct {
         self.active = true;
     }
 
+    /// Whether the GPU draws `buffer`'s shader effects; each program it
+    /// uses must have been prepared with `prepareEffect`. Backdrop effects and loading indicators, shader effects without a
+    /// shader workspace or inside a transform, and element effects without
+    /// a Gaussian capture to borrow, as on the software planes, leave the
+    /// whole frame to software.
+    pub fn prepareEffects(self: *Renderer, buffer: *const commands.Buffer) bool {
+        var uses = false;
+        for (buffer.commands()) |op| switch (op) {
+            .backdrop, .indicator => return false,
+            .effect, .end_effect, .backdrop_shader => uses = true,
+            else => {},
+        };
+        if (!uses) return true;
+        const native = self.native orelse return false;
+        if (!self.active) return false;
+        const workspace = buffer.shader_storage.workspace orelse return false;
+        const entries = buffer.shaderEntries();
+        if (entries.len > self.effect_slots.len) return false;
+        const capacity = self.gaussianCapacity();
+        const max_depth: usize = if (self.layer_plan) |plan| plan.options.max_depth else 0;
+        const filters = buffer.filterResources();
+        const Scope = enum { group, transform, effect };
+        var scopes: [layers.max_depth]Scope = undefined;
+        var depth: usize = 0;
+        var transforms: usize = 0;
+        var work: u64 = 0;
+        for (buffer.commands()) |op| switch (op) {
+            .begin_group => |value| {
+                if (depth == scopes.len) return false;
+                if (value.filter_slot != commands.no_filter) {
+                    if (value.filter_slot >= filters.len) return false;
+                    const r = value.bounds;
+                    const capture = gaussian_scope.Capture.init(.{ .x = r.x, .y = r.y, .width = r.width, .height = r.height }, filters[value.filter_slot].descriptor) catch return false;
+                    work = std.math.add(u64, work, capture.samples()) catch return false;
+                }
+                scopes[depth] = .group;
+                depth += 1;
+            },
+            .begin_transform => {
+                if (depth == scopes.len) return false;
+                scopes[depth] = .transform;
+                depth += 1;
+                transforms += 1;
+            },
+            .effect => |slot| {
+                if (slot >= entries.len or transforms != 0 or depth >= max_depth) return false;
+                const entry = &entries[slot];
+                const filter_capacity = capacity orelse return false;
+                const kernel = workspace.carrierFor(entry.scale) catch return false;
+                const capture = gaussian_scope.Capture.init(entry.captureRect(), kernel) catch return false;
+                capture.check(filter_capacity) catch return false;
+                work = std.math.add(u64, work, capture.samples()) catch return false;
+                if (work > filter_capacity.filter_samples) return false;
+                scopes[depth] = .effect;
+                depth += 1;
+            },
+            .end_group, .end_transform, .end_effect => {
+                if (depth == 0) return false;
+                depth -= 1;
+                if (scopes[depth] == .transform) transforms -= 1;
+            },
+            .backdrop_shader => |slot| if (slot >= entries.len or transforms != 0) return false,
+            else => {},
+        };
+        self.effect_table.beginFrame();
+        for (entries, 0..) |*entry, i| self.effect_slots[i] = self.effectSlot(native, entry) orelse return false;
+        return true;
+    }
+    /// The installed pixel shader slot running `entry`'s program, or null
+    /// when it was not prepared. After a device loss the kept bytecode is
+    /// installed again; nothing is compiled while painting.
+    fn effectSlot(self: *Renderer, native: *anyopaque, entry: *const shader_effects.Entry) ?u32 {
+        const slot = self.effect_table.find(entry.program.identity, entry.target) orelse return null;
+        if (zgpu_effect_installed(native, slot) != 0) return slot;
+        const code = self.effect_table.entries[slot].code;
+        if (zgpu_effect_install(native, slot, code.ptr, code.len) < 0) return null;
+        return slot;
+    }
+    /// Compile `program` drawn as `target` (or load its code from the disk
+    /// cache) and install it, outside a frame. False when the compiler
+    /// rejects it or none is available: frames using it draw in software.
+    pub fn prepareEffect(self: *Renderer, allocator: std.mem.Allocator, program: *const shader_effects.shader.Program, target: shader_effects.Target) !bool {
+        const scope = try self.operation(false);
+        defer scope.end();
+        if (self.active) return error.AlreadyDrawing;
+        const native = self.native orelse return error.NotInitialized;
+        const table = &self.effect_table;
+        table.beginFrame();
+        if (table.find(program.identity, target)) |slot| {
+            if (zgpu_effect_installed(native, slot) != 0) return true;
+            const code = table.entries[slot].code;
+            try self.result(zgpu_effect_install(native, slot, code.ptr, code.len));
+            return true;
+        }
+        if (table.failed(program.identity, target)) return false;
+        var translation = shader_effects.shader.gpu.translate(allocator, program, .hlsl) catch |err| switch (err) {
+            error.UnsupportedProgram => {
+                table.fail(program.identity, target);
+                return false;
+            },
+            else => |e| return e,
+        };
+        defer translation.deinit();
+        const source = try effect_host.source(allocator, &translation, program.kind, target, .hlsl);
+        defer allocator.free(source);
+        var flags_buffer: [64]u8 = undefined;
+        const flags = std.fmt.bufPrint(&flags_buffer, "ps_4_0 main {s}", .{std.mem.span(zgpu_hlsl_flags())}) catch unreachable;
+        const name = shader_cache.name(flags, source, ".dxbc");
+        if (self.effect_cache == null) self.effect_cache = shader_cache.DiskCache.openDefault(allocator);
+        const cache = &self.effect_cache.?;
+        const code = cache.load(allocator, name.slice(), shader_cache.validDxbc) orelse compiled: {
+            var bytes: ?[*]u8 = null;
+            var len: usize = 0;
+            var log: [512]u8 = undefined;
+            const status = zgpu_hlsl_compile(source.ptr, source.len, "main", "ps_4_0", &bytes, &len, &log, log.len);
+            defer zgpu_hlsl_free(bytes);
+            switch (status) {
+                0 => {},
+                // The compiler rejects the program: remember it.
+                2 => {
+                    table.fail(program.identity, target);
+                    return false;
+                },
+                3 => return error.OutOfMemory,
+                else => return false,
+            }
+            const copy = try allocator.dupe(u8, bytes.?[0..len]);
+            cache.store(name.slice(), copy);
+            break :compiled copy;
+        };
+        var owned = true;
+        defer if (owned) allocator.free(code);
+        const inputs = try allocator.dupe(u16, translation.inputs);
+        errdefer allocator.free(inputs);
+        const slot = table.victim() orelse return false;
+        try self.result(zgpu_effect_install(native, slot, code.ptr, code.len));
+        table.fill(slot, program.identity, target, inputs, code, allocator);
+        owned = false;
+        return true;
+    }
+    const OpenEffect = struct { slot: u8, capture: gaussian_scope.Capture };
+    fn effectSource(self: *const Renderer, slot: u8) !struct { *const shader_effects.Entry, *shader_effects.Workspace } {
+        const buffer = self.effect_buffer orelse return error.SoftwareOnlyCommands;
+        if (slot >= buffer.shader_storage.len) return error.MissingResources;
+        return .{ &buffer.shader_storage.entries[slot], buffer.shader_storage.workspace orelse return error.ShaderEffectsNotPrepared };
+    }
+    /// Open an element effect's capture with the carrier kernel.
+    fn beginEffect(self: *Renderer, slot: u8) !OpenEffect {
+        const entry, const workspace = try self.effectSource(slot);
+        const kernel = try workspace.carrierFor(entry.scale);
+        const bounds = entry.captureRect();
+        const capture = try gaussian_scope.Capture.init(bounds, kernel);
+        const descriptor = try self.groupDescriptor(bounds, .{ .opacity = entry.opacity });
+        try self.result(zgpu_layer_begin_gaussian(self.native.?, &descriptor, &capture, kernel));
+        return .{ .slot = slot, .capture = capture };
+    }
+    /// Run the effect over its capture, or over budget or with a faulting
+    /// prologue composite the content as drawn.
+    fn endEffect(self: *Renderer, open: OpenEffect, words: []u32) !void {
+        const entry, const workspace = try self.effectSource(open.slot);
+        const capture = open.capture;
+        if (!shader_effects.startElement(workspace, entry, @as(u64, capture.pixelWidth()) * capture.pixelHeight(), capture.scale)) return self.result(zgpu_layer_end_effect(self.native.?, null));
+        const pass = self.effectPass(open.slot, words, effect_host.elementParams(entry, capture), workspace);
+        try self.result(zgpu_layer_end_effect(self.native.?, &pass));
+    }
+    fn backdropShader(self: *Renderer, slot: u8, words: []u32) !void {
+        const entry, const workspace = try self.effectSource(slot);
+        var target: EffectGeometry = undefined;
+        try self.result(zgpu_effect_geometry(self.native.?, &target));
+        const origin = [2]f64{ target.origin[0], target.origin[1] };
+        const plan = shader_effects.planBackdrop(target.width, target.height, target.scale, origin, target.clip, entry) orelse return;
+        const room: ?usize = if (self.effect_buffer.?.backdrop_storage.workspace) |backdrop| backdrop.planes.len else null;
+        if (!shader_effects.startBackdrop(workspace, entry, plan, room, target.scale)) return;
+        const pass = self.effectPass(slot, words, effect_host.backdropParams(entry, plan, target.scale, origin, target.clip, target.transparent != 0), workspace);
+        const region = [4]u32{ @intCast(plan.region[0]), @intCast(plan.region[1]), @intCast(plan.region[2]), @intCast(plan.region[3]) };
+        const out = [4]u32{ @intCast(plan.out[0]), @intCast(plan.out[1]), @intCast(plan.out[2]), @intCast(plan.out[3]) };
+        try self.result(zgpu_backdrop_shader(self.native.?, &pass, &region, &out));
+    }
+    fn effectPass(self: *Renderer, slot: u8, words: []u32, params: effect_host.Params, workspace: *shader_effects.Workspace) EffectPass {
+        const installed = self.effect_slots[slot];
+        const inputs = self.effect_table.entries[installed].inputs;
+        for (inputs, 0..) |register, i| words[i] = workspace.machine.registers[register];
+        return .{ .words = words.ptr, .word_count = @intCast(inputs.len), .slot = installed, .params = params };
+    }
+    /// Shader passes run on the GPU since the device was created.
+    pub fn effectPasses(self: *const Renderer) u64 {
+        return if (self.native) |native| zgpu_effect_passes(native) else 0;
+    }
     pub fn replay(self: *Renderer, ops: []const command.Command, text: []const u8) !void {
         try self.replayWithResources(ops, text, &.{});
     }
     pub fn replayBuffer(self: *Renderer, buffer: *const commands.Buffer) !void {
+        self.effect_buffer = if (self.prepareEffects(buffer)) buffer else null;
+        defer self.effect_buffer = null;
         try self.replayWithGaussianResources(buffer.commands(), buffer.textBytes(), buffer.brushResources(), buffer.preparedTextResources(), buffer.imageResources(), buffer.coverageResources(), buffer.textureResources(), buffer.transformResources(), buffer.filterResources());
     }
     pub fn replayWithResources(self: *Renderer, ops: []const command.Command, text: []const u8, resources: []const commands.brushes.Stored) !void {
@@ -801,7 +1012,11 @@ pub const Renderer = struct {
     fn preflightTextures(self: *Renderer, ops: []const command.Command, textures: []const drawing.TextureView) !void {
         // Validate every device-bound command before the first native draw.
         // Backdrop effects and loading indicators draw on the software plane.
-        if (commands.softwareOnly(ops)) return error.SoftwareOnlyCommands;
+        for (ops) |op| switch (op) {
+            .backdrop, .indicator => return error.SoftwareOnlyCommands,
+            .effect, .end_effect, .backdrop_shader => if (self.effect_buffer == null) return error.SoftwareOnlyCommands,
+            else => {},
+        };
         // Software fallback cannot consume these resources or repair a domain.
         for (ops) |op| if (op == .texture) {
             const value = op.texture;
@@ -875,6 +1090,9 @@ pub const Renderer = struct {
         };
         var depth: usize = 0;
         var utf16: [64 * 1024]u16 = undefined;
+        var effect_stack: [layers.max_depth]OpenEffect = undefined;
+        var effect_depth: usize = 0;
+        var words: [shader_effects.shader.gpu.max_input_words]u32 = undefined;
         for (ops) |op| switch (op) {
             .fill => |fill| {
                 if (!layout.validRect(fill.bounds)) return error.InvalidGeometry;
@@ -940,7 +1158,18 @@ pub const Renderer = struct {
             .end_group => try self.endGroup(),
             .begin_transform => |slot| try self.beginTransform(transforms[slot]),
             .end_transform => try self.endTransform(),
-            .backdrop, .indicator, .effect, .end_effect, .backdrop_shader => unreachable, // Whole batch rejected before drawing.
+            .backdrop, .indicator => unreachable, // Whole batch rejected before drawing.
+            .effect => |slot| {
+                if (effect_depth == effect_stack.len) return error.LayerDepthExceeded;
+                effect_stack[effect_depth] = try self.beginEffect(slot);
+                effect_depth += 1;
+            },
+            .end_effect => {
+                if (effect_depth == 0) return error.UnbalancedEffects;
+                effect_depth -= 1;
+                try self.endEffect(effect_stack[effect_depth], &words);
+            },
+            .backdrop_shader => |slot| try self.backdropShader(slot, &words),
             .push_clip => |r| {
                 if (!layout.validRect(r)) return error.InvalidGeometry;
                 if (depth == 32) return error.ClipStackFull;
@@ -999,6 +1228,10 @@ pub const Renderer = struct {
         self.native = null;
         self.layer_plan = null;
         self.layer_candidate_peak = 0;
+        self.effect_table.deinit();
+        if (self.effect_cache) |*cache| cache.close();
+        self.effect_cache = null;
+        self.effect_buffer = null;
         self.active = false;
         self.offscreen = false;
         self.owner = null;
