@@ -617,7 +617,8 @@ fn runImage(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(u32, 0xffffff), pixelAt(level, 196, 156));
 
     // With the inspector open, its panel's toolbar takes the right of the
-    // window and the content the rest.
+    // window and the content the rest; builds without it skip this.
+    if (!view.inspector.enabled) return;
     var tools: view.Inspector = .{};
     var wide = view.Harness.init(&state, Swatch.build, storage.buffers(), .{ .bounds = .{ .x = 0, .y = 0, .width = 600, .height = 300 }, .options = .{ .background = 0xffffff, .inspector = &tools } });
     var wide_context = ui.Context.init(&dummy, Swatch.draw, Swatch.action);
@@ -667,7 +668,7 @@ pub fn main() !void {
     try runPictures(gpa.allocator());
     try runTimer(gpa.allocator());
     try runImage(gpa.allocator());
-    try runInspector(gpa.allocator());
+    if (view.inspector.enabled) try runInspector(gpa.allocator());
     if (builtin.os.tag == .windows) {
         try @import("view_uia.zig").run(gpa.allocator());
         try @import("view_uia.zig").runCollections(gpa.allocator());

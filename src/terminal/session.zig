@@ -484,7 +484,7 @@ const WindowsStop = struct {
     extern "kernel32" fn CloseHandle(handle: std.os.windows.HANDLE) callconv(.winapi) std.os.windows.BOOL;
     extern "kernel32" fn WaitForMultipleObjects(count: u32, handles: [*]const std.os.windows.HANDLE, all: std.os.windows.BOOL, milliseconds: u32) callconv(.winapi) u32;
     fn init() !WindowsStop {
-        return .{ .event = CreateEventW(null, 1, 0, null) orelse return error.SystemResources };
+        return .{ .event = CreateEventW(null, .TRUE, .FALSE, null) orelse return error.SystemResources };
     }
     fn raise(self: *WindowsStop) void {
         _ = SetEvent(self.event);
@@ -492,7 +492,7 @@ const WindowsStop = struct {
     /// True when the stop was raised before the process ended.
     fn wait(self: *WindowsStop, process: std.os.windows.HANDLE) bool {
         const handles = [_]std.os.windows.HANDLE{ process, self.event };
-        return WaitForMultipleObjects(2, &handles, 0, 0xffffffff) == 1;
+        return WaitForMultipleObjects(2, &handles, .FALSE, 0xffffffff) == 1;
     }
     fn deinit(self: *WindowsStop) void {
         _ = CloseHandle(self.event);

@@ -346,7 +346,7 @@ fn finishUninstall(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     const directory = args[0];
     if (windows) {
         const pid = try std.fmt.parseInt(u32, args[2], 10);
-        if (win.OpenProcess(win.SYNCHRONIZE, 0, pid)) |handle| {
+        if (win.OpenProcess(win.SYNCHRONIZE, .FALSE, pid)) |handle| {
             _ = win.WaitForSingleObject(handle, 30_000);
             _ = win.CloseHandle(handle);
         }
@@ -404,7 +404,7 @@ const win = if (windows) struct {
 } else struct {};
 
 fn elevated() bool {
-    if (windows) return win.IsUserAnAdmin() != 0;
+    if (windows) return win.IsUserAnAdmin().toBool();
     return std.os.linux.geteuid() == 0;
 }
 

@@ -2,7 +2,7 @@
 
 ## 模块与平台
 
-Ziggurat 的依赖指向小内核。核心拥有 App/Window 生命周期、关闭策略、主线程任务、诊断和原生安全点；内容与扩展模块只依赖这套契约。工具链固定 Zig 0.15.2，复杂系统 ABI 通过局部 C 适配，由同一工具链编译，不需要 C++ 运行时。
+Ziggurat 的依赖指向小内核。核心拥有 App/Window 生命周期、关闭策略、主线程任务、诊断和原生安全点；内容与扩展模块只依赖这套契约。工具链固定 Zig 0.17.0，复杂系统 ABI 通过局部 C 适配，由同一工具链编译，不需要 C++ 运行时。
 
 ```mermaid
 flowchart TD
@@ -230,7 +230,7 @@ GDI 复用 DC、位图和字体；Linux 复用 Cairo surface 并通过 Pango 系
 
 透明分组由 Context 在 paint 外显式预留 front/work/group 平面，软件与可用 GPU 的候选全部成功才替换旧工作面。分组在透明平面完成子项后一次应用 opacity/mask/parent clip。回放和结束失败或 GPU 暂缓呈现保留已提交前帧及输入/语义快照；软件 fallback 成功后才替换可见后端和提交新快照。关闭/资源替换先撤销借用的 ready watch。默认未启用的 Context 不分配这些平面，详见[分组工作面](layers.md)。
 
-独立 `ziggurat_shader` 只依赖标准库：源文本在绘制之前编译为有界寄存器字节码，最坏单像素步数在编译期确定。Context 在 paint 外显式准备着色器工作区，Frame 记录元素效果与背景着色器时复制参数；软件 renderer 用高斯捕获或目标上两遍隔离执行，含此类命令的帧在 D3D11 下整帧软件回放，正常绘制不分配、不编译。见[着色器与元素效果](shader-effects.md)。
+独立 `ziggurat_shader` 只依赖标准库：源文本在绘制之前编译为有界寄存器字节码，最坏单像素步数在编译期确定。Context 在 paint 外显式准备着色器工作区，Frame 记录元素效果与背景着色器时复制参数；软件 renderer 用高斯捕获或目标上两遍隔离执行；D3D11 在 paint 之外显式编译并装入程序，绘制时在高斯捕获或目标复制上执行，无法执行时整帧软件回放；正常绘制不分配、不编译。见[着色器与元素效果](shader-effects.md)。
 
 编辑模块拥有显式预分配的 UTF-8 文档、历史、preedit 和显示缓冲，支持选择、插入删除、剪贴板注入、撤销重做、逻辑行导航与滚动。应用提供 Surface.measure/paint 和剪贴板回调；不是自动加入 Frame 的成熟文本控件。左右按 Unicode scalar 移动，无完整 grapheme、bidi、soft wrap 或 shaping caret 模型。Windows 处理 UTF-16 surrogate、WM_UNICHAR、IMM preedit/result/cancel 与候选位置；Linux 接 GTK IM。真实语言引擎与视觉效果另行验证。
 

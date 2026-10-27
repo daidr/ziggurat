@@ -45,7 +45,7 @@ const Prepared = struct {
         self.fixture.run();
         if (self.fixture.err) |err| return err;
         const file = self.fixture.file.?;
-        try file.seekTo(3);
+        try zio.posix.seekTo(file.handle, 3);
         var native_failure: ?i32 = null;
         try std.testing.expectError(error.FileTooLarge, web.OwnedFileResponse.prepareWithFailure(self.fixture.allocator, self.main_thread, file, .{}, 1, &native_failure));
         try std.testing.expectEqual(@as(u32, 0x800700df), @as(u32, @bitCast(native_failure.?)));

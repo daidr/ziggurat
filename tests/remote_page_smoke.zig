@@ -20,16 +20,16 @@ pub const Server = struct {
         if (self.thread) |thread| {
             self.stop_requested.store(true, .release);
             const wake = self.listener.socket.address.connect(zio.io(), .{ .mode = .stream }) catch unreachable;
-            wake.close();
+            wake.close(zio.io());
             thread.join();
             self.thread = null;
         }
-        self.listener.deinit();
+        self.listener.deinit(zio.io());
     }
     fn run(self: *Server) void {
         while (true) {
             const connection = self.listener.accept(zio.io()) catch return;
-            defer connection.close();
+            defer connection.close(zio.io());
             if (self.stop_requested.load(.acquire)) return;
             self.serve(connection) catch |err| {
                 std.debug.print("private server: {s}\n", .{@errorName(err)});
@@ -229,11 +229,11 @@ fn verifyReleased(app: *z.App) !void {
 }
 fn runSnapshot(allocator: std.mem.Allocator, directory: std.Io.Dir, profile: []const u8) !void {
     const document = try directory.createFile(zio.io(), "页面.html", .{ .read = true });
-    defer document.close();
-    try document.writeAll("<title>private file snapshot</title><script>fetch('/asset.txt').then(r=>r.text()).then(t=>{if(t==='private-file-bytes')chrome.webview.postMessage('snapshot-ok')})</script>");
+    defer document.close(zio.io());
+    try document.writeStreamingAll(zio.io(), "<title>private file snapshot</title><script>fetch('/asset.txt').then(r=>r.text()).then(t=>{if(t==='private-file-bytes')chrome.webview.postMessage('snapshot-ok')})</script>");
     const asset = try directory.createFile(zio.io(), "资源.txt", .{ .read = true });
-    defer asset.close();
-    try asset.writeAll("private-file-bytes");
+    defer asset.close(zio.io());
+    try asset.writeStreamingAll(zio.io(), "private-file-bytes");
     const Probe = struct {
         allocator: std.mem.Allocator,
         main: std.Thread.Id,

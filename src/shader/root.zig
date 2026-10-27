@@ -22,7 +22,10 @@ pub const Sampler = machine.Sampler;
 pub const Fault = machine.Fault;
 pub const max_uniform_words = compiler.max_uniform_words;
 pub const max_register_words = compiler.max_register_words;
+/// Translation into HLSL and GLSL for GPU execution.
+pub const gpu = @import("gpu.zig");
 
 test {
     _ = @import("tests.zig");
+    _ = gpu;
 }

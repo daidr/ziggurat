@@ -47,6 +47,10 @@ pub const Config = struct {
     bounds: Rect = .{ .x = 0, .y = 0, .width = 640, .height = 480 },
     theme: view.Theme = .{},
     options: view.Options = .{},
+    /// Fail a render whose build gave two elements under one parent the
+    /// same key, which share one state, with error.DuplicateKey; the
+    /// mistake is in `Harness.issue`. A window notes it in the inspector.
+    strict: bool = true,
 };
 
 pub const Harness = struct {
@@ -59,6 +63,9 @@ pub const Harness = struct {
     input: ?*ui.Context = null,
     /// The test's clock in nanoseconds; it moves only with `advance`.
     clock: u64 = 0,
+    /// What the last render that failed with error.DuplicateKey found.
+    issue_buffer: [160]u8 = undefined,
+    issue_len: usize = 0,
     /// Focus given by `focus` when no input Context is attached.
     focus_id: ?u64 = null,
     /// The control a `press` landed on, activated by a `release` over it.
@@ -94,9 +101,14 @@ pub const Harness = struct {
 
     /// Build and arrange the current state, as a paint would.
     pub fn render(self: *Harness) anyerror!void {
-        const tools = self.config.options.inspector;
-        if (tools) |value| self.view.layout_direction = value.direction_override orelse self.config.options.direction;
+        const tools = self.config.options.tools();
+        if (tools) |value| {
+            self.view.layout_direction = value.direction_override orelse self.config.options.direction;
+            self.view.source_of = if (value.open) value.selected else 0;
+            self.view.source_len = 0;
+        }
         try self.run(null);
+        if (self.config.strict) try self.checkKeys();
         const bounds = if (tools) |value| value.contentBounds(self.config.bounds) else self.config.bounds;
         try self.view.arrange(bounds, self.config.theme, self.config.options.measurer);
         if (tools) |value| value.capture(&self.view, self.focusId(), self.config.options.measurer, self.config.theme);
@@ -114,6 +126,33 @@ pub const Harness = struct {
         // Host does after paint.
         self.restoreFocus();
         self.frames += 1;
+    }
+
+    /// The mistake the last render found, as error.DuplicateKey tells.
+    pub fn issue(self: *const Harness) []const u8 {
+        return self.issue_buffer[0..self.issue_len];
+    }
+    fn checkKeys(self: *Harness) error{DuplicateKey}!void {
+        const all = self.view.nodes();
+        for (all) |*node| {
+            const value = node.style.key orelse continue;
+            var sibling = node.next_sibling;
+            while (sibling < all.len) : (sibling = all[sibling].next_sibling) {
+                if (all[sibling].id != node.id) continue;
+                const parent = &all[node.parent];
+                const text = std.fmt.bufPrint(&self.issue_buffer, "two <{s}> elements under one <{s}> have the key {d} and share one state: give each a key of its own", .{ @tagName(node.kind), @tagName(parent.kind), value }) catch self.issue_buffer[0..];
+                self.issue_len = text.len;
+                return error.DuplicateKey;
+            }
+        }
+    }
+
+    /// Type `text` into the inspector's find bar while it has the
+    /// keyboard, then render; error.NoTextTarget otherwise.
+    pub fn typeText(self: *Harness, text: []const u8) anyerror!void {
+        const tools = self.config.options.tools() orelse return error.NoTextTarget;
+        if (!tools.typeText(text)) return error.NoTextTarget;
+        try self.render();
     }
 
     /// Replay a key release to the focused embedded leaf, then render if it
@@ -164,7 +203,7 @@ pub const Harness = struct {
         errdefer context.input_state.cancelFrame();
         var frame: ui.Frame = .{ .context = context, .size = .{ .width = @intFromFloat(@ceil(b.x + b.width)), .height = @intFromFloat(@ceil(b.y + b.height)), .scale = 1 } };
         try self.view.paint(&frame);
-        if (self.config.options.inspector) |tools| try tools.paint(&frame);
+        if (self.config.options.tools()) |tools| try tools.paint(&frame);
         if (frame.failure) |err| return err;
         context.input_state.commitFrame();
     }
@@ -185,7 +224,7 @@ pub const Harness = struct {
         var frame: ui.Frame = .{ .context = context, .size = size };
         frame.clear(self.config.options.background orelse self.config.theme.palette.background);
         try self.view.paint(&frame);
-        if (self.config.options.inspector) |tools| try tools.paint(&frame);
+        if (self.config.options.tools()) |tools| try tools.paint(&frame);
         if (frame.failure) |err| return err;
         context.input_state.commitFrame();
         return surface.render(&context.command_buffer);
@@ -223,7 +262,7 @@ pub const Harness = struct {
     /// as Host does, then render.
     /// Embedded leaves with an input callback see the move too.
     pub fn hoverAt(self: *Harness, x: f32, y: f32) anyerror!void {
-        if (self.config.options.inspector) |tools| {
+        if (self.config.options.tools()) |tools| {
             var repaint = false;
             if (tools.pointerMove(.{ .x = x, .y = y }, &repaint)) {
                 _ = self.view.pointerMoved(null);
@@ -265,7 +304,7 @@ pub const Harness = struct {
     pub fn key(self: *Harness, input: z.KeyInput) anyerror!bool {
         const context = self.input orelse return error.NoInput;
         // The inspector's keys come before the view's, as in Host.
-        if (self.config.options.inspector) |tools| if (tools.key(input)) {
+        if (self.config.options.tools()) |tools| if (tools.key(input)) {
             try self.render();
             return true;
         };
@@ -457,10 +496,10 @@ pub const Harness = struct {
     /// shown tooltip sees the press first, then the interactive node under
     /// the point is activated. Renders.
     pub fn clickAt(self: *Harness, x: f32, y: f32) anyerror!void {
-        if (try self.inspectorPress(x, y, .{})) {
-            _ = self.config.options.inspector.?.pointerUp(.{ .x = x, .y = y });
+        if (self.config.options.tools()) |tools| if (try self.inspectorPress(x, y, .{})) {
+            _ = tools.pointerUp(.{ .x = x, .y = y });
             return self.render();
-        }
+        };
         switch (self.view.pointerDown(.{ .x = x, .y = y })) {
             .consumed => {
                 self.restoreFocus();
@@ -525,7 +564,7 @@ pub const Harness = struct {
     /// captured the press sees `pointer_drag`, and a press that moved
     /// `drag_threshold` drags. Without a press it hovers. Renders.
     pub fn moveTo(self: *Harness, x: f32, y: f32) anyerror!void {
-        if (self.config.options.inspector) |tools| if (tools.dragging != null) {
+        if (self.config.options.tools()) |tools| if (tools.dragging != null) {
             var repaint = false;
             _ = tools.pointerMove(.{ .x = x, .y = y }, &repaint);
             return self.render();
@@ -543,7 +582,7 @@ pub const Harness = struct {
     /// never dragged activates the control it began on when released over
     /// it. Renders.
     pub fn release(self: *Harness, x: f32, y: f32) anyerror!void {
-        if (self.config.options.inspector) |tools| if (tools.pointerUp(.{ .x = x, .y = y })) return self.render();
+        if (self.config.options.tools()) |tools| if (tools.pointerUp(.{ .x = x, .y = y })) return self.render();
         if (self.view.areaRelease(.{ .x = x, .y = y }, .primary)) |event| {
             self.pressed = null;
             _ = self.view.captureRelease(.{ .x = x, .y = y });
@@ -592,13 +631,13 @@ pub const Harness = struct {
     /// The pointer's shape at the pointer's last position, as Host shows it.
     pub fn cursor(self: *const Harness) view.Cursor {
         const point = self.view.pointer orelse return .default;
-        if (self.config.options.inspector) |tools| if (tools.cursorAt(point)) |shape| return shape;
+        if (self.config.options.tools()) |tools| if (tools.cursorAt(point)) |shape| return shape;
         return self.view.cursorAt(point);
     }
     /// A primary press the inspector takes before the view, as Host routes
     /// it: on its panel, or in the content while it picks.
     fn inspectorPress(self: *Harness, x: f32, y: f32, modifiers: z.KeyModifiers) anyerror!bool {
-        const tools = self.config.options.inspector orelse return false;
+        const tools = self.config.options.tools() orelse return false;
         var repaint = false;
         return tools.pointerDown(.{ .x = x, .y = y }, modifiers, &repaint);
     }
@@ -681,7 +720,7 @@ pub const Harness = struct {
     /// Send wheel movement at a point to the innermost visible scroll
     /// container under it, as Host does, then render.
     pub fn wheel(self: *Harness, x: f32, y: f32, delta: view.Point) anyerror!void {
-        if (self.config.options.inspector) |tools| if (tools.wheel(.{ .x = x, .y = y }, delta)) return self.render();
+        if (self.config.options.tools()) |tools| if (tools.wheel(.{ .x = x, .y = y }, delta)) return self.render();
         // An interactive leaf under the point sees it first.
         if (self.view.embedWheel(.{ .x = x, .y = y }, delta)) return self.render();
         const all = self.view.nodes();

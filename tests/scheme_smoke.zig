@@ -52,8 +52,8 @@ pub const Fixture = struct {
             for (self.handles[0..self.count]) |handle| if (handle) |value| {
                 _ = w.CloseHandle(value);
             };
-            self.temporary.dir.close();
-            self.temporary.parent_dir.close();
+            self.temporary.dir.close(zio.io());
+            self.temporary.parent_dir.close(zio.io());
             self.closed = true;
         }
         if (self.runtime_started and self.count == 0) {

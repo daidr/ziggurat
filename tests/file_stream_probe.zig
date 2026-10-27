@@ -56,7 +56,7 @@ pub const Fixture = struct {
             self.profile = try zio.realPathAlloc(self.temporary.dir, "profile", self.allocator);
             {
                 const file = try self.temporary.dir.createFile(zio.io(), "payload.bin", .{});
-                defer file.close();
+                defer file.close(zio.io());
                 var chunk: [65536]u8 = undefined;
                 var offset: usize = 0;
                 while (offset < file_size) {
@@ -73,7 +73,7 @@ pub const Fixture = struct {
             defer self.allocator.free(wide);
             const handle = w.CreateFileW(wide.ptr, w.GENERIC_READ, w.FILE_SHARE_READ | w.FILE_SHARE_DELETE, null, w.OPEN_EXISTING, w.FILE_ATTRIBUTE_NORMAL, null);
             if (handle == w.INVALID_HANDLE_VALUE) return error.ReadOnlyOpenFailed;
-            self.file = .{ .handle = handle.? };
+            self.file = .{ .handle = handle.?, .flags = .{ .nonblocking = false } };
             var length: w.LARGE_INTEGER = undefined;
             if (w.GetFileSizeEx(handle, &length) == 0 or length.QuadPart != file_size) return error.PreparedLengthChanged;
             const writer = w.CreateFileW(wide.ptr, w.GENERIC_WRITE, w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE, null, w.OPEN_EXISTING, w.FILE_ATTRIBUTE_NORMAL, null);
@@ -85,11 +85,11 @@ pub const Fixture = struct {
         } else {
             var directory_closed = false;
             defer {
-                if (!directory_closed) self.temporary.dir.close();
-                self.temporary.parent_dir.close();
+                if (!directory_closed) self.temporary.dir.close(zio.io());
+                self.temporary.parent_dir.close(zio.io());
                 self.closed = true;
             }
-            if (self.file) |file| file.close();
+            if (self.file) |file| file.close(zio.io());
             self.file = null;
             if (self.runtime_started and self.browser == null) {
                 std.debug.print("private stream profile retained: {?s}\n", .{self.profile});
@@ -100,7 +100,7 @@ pub const Fixture = struct {
                 if (w.WaitForSingleObject(browser, 10_000) != w.WAIT_OBJECT_0) return error.BrowserShutdownUnconfirmed;
                 self.browser = null;
             }
-            self.temporary.dir.close();
+            self.temporary.dir.close(zio.io());
             directory_closed = true;
             // The closed directory token is not reused after deleting its root.
             try self.temporary.parent_dir.deleteTree(zio.io(), &self.temporary.sub_path);

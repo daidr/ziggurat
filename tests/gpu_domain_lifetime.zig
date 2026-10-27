@@ -7,7 +7,7 @@ const c = @import("ziggurat_c_win32");
 const expect = std.testing.expect;
 fn equal(expected: anytype, actual: @TypeOf(expected)) !void {
     std.testing.expectEqual(expected, actual) catch |err| {
-        std.debug.dumpCurrentStackTrace(null);
+        std.debug.dumpCurrentStackTrace(.{});
         return err;
     };
 }

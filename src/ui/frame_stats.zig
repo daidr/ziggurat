@@ -63,11 +63,16 @@ pub fn parse(value: ?[]const u8) Options {
 /// Read `ZIGGURAT_FRAME_STATS` without allocating.
 pub fn fromEnvironment() Options {
     if (builtin.os.tag == .windows) {
-        const wide = std.process.getenvW(std.unicode.utf8ToUtf16LeStringLiteral(env_name)) orelse return .{};
+        const kernel32 = struct {
+            extern "kernel32" fn GetEnvironmentVariableW(name: [*:0]const u16, buffer: [*]u16, size: u32) callconv(.winapi) u32;
+        };
+        var wide: [33]u16 = undefined;
+        const len = kernel32.GetEnvironmentVariableW(std.unicode.utf8ToUtf16LeStringLiteral(env_name), &wide, wide.len);
+        if (len == 0) return .{};
+        if (len >= wide.len) return .{};
         var narrow: [32]u8 = undefined;
-        if (wide.len > narrow.len) return .{};
-        for (wide, 0..) |unit, i| narrow[i] = if (unit < 128) @intCast(unit) else '?';
-        return parse(narrow[0..wide.len]);
+        for (wide[0..len], 0..) |unit, i| narrow[i] = if (unit < 128) @intCast(unit) else '?';
+        return parse(narrow[0..len]);
     }
     if (builtin.link_libc or builtin.os.tag == .linux) return parse(zio.getenv(env_name));
     return .{};

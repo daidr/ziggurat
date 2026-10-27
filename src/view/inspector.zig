@@ -11,10 +11,14 @@
 //! of the frame before, which the inspector copies after each frame is laid
 //! out. It paints itself over the frame after the view and takes the input
 //! that lands on it before the view, so it adds no nodes, controls or
-//! accessibility elements to the view's own. Nothing here allocates: the
-//! application keeps the inspector, which holds the copy, at a stable
-//! address, typically only in debug builds.
+//! accessibility elements to the view's own. Ctrl+F finds elements in the
+//! tree by tag, text, name or key, and the details tell where the
+//! application built the element chosen, read from the build's debug
+//! information. Nothing here allocates but that lookup: the application
+//! keeps the inspector, which holds the copy, at a stable address. Builds
+//! without it (release builds unless `-Dinspector=true`) leave it out.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const view = @import("root.zig");
@@ -29,6 +33,10 @@ const Font = view.Font;
 const Measurer = view.Measurer;
 const Cursor = view.Cursor;
 const Direction = view.Direction;
+
+/// Whether this build has the inspector; without it, Host and Harness
+/// ignore `Options.inspector` and none of this is compiled in.
+pub const enabled = @import("ziggurat_view_options").inspector;
 
 /// Elements the inspector copies from a frame; a larger frame shows its
 /// first ones and notes the rest as an issue.
@@ -139,6 +147,7 @@ const toolbar_height: f32 = 30;
 const tab_height: f32 = 26;
 const row_height: f32 = 20;
 const crumbs_height: f32 = 24;
+const find_height: f32 = 28;
 const indent: f32 = 14;
 const edge_width: f32 = 6;
 const divider_height: f32 = 6;
@@ -186,6 +195,21 @@ pub const Inspector = struct {
     direction_override: ?Direction = null,
     /// The display's refresh rate, for the frame budget.
     refresh_hz: f32 = 60,
+    /// The find bar of the tree (Ctrl+F): its query, the elements matching
+    /// it in the order of the tree, and the one shown among them.
+    finding: bool = false,
+    query: [128]u8 = undefined,
+    query_len: usize = 0,
+    matches: [max_elements]u16 = undefined,
+    match_count: usize = 0,
+    match: usize = 0,
+    /// Where the application built the element chosen: the return
+    /// addresses the view noted while building it, and the first of them
+    /// outside the view's own code as a file and line.
+    trace: [view.source_depth]usize = undefined,
+    trace_len: usize = 0,
+    source_buffer: [512]u8 = undefined,
+    source_len: usize = 0,
 
     elements: [max_elements]Element = undefined,
     len: usize = 0,
@@ -327,6 +351,8 @@ pub const Inspector = struct {
             self.len += 1;
         }
         self.noteDuplicates();
+        self.noteSource(v.source_trace[0..v.source_len]);
+        if (self.finding) self.findMatches();
         if (self.total > max_elements) self.addIssue(1, "The frame has more elements than the inspector copies; the tree shows the first {d}.", .{max_elements});
         self.listRows();
         if (self.reveal and self.selected != 0) {
@@ -334,6 +360,88 @@ pub const Inspector = struct {
             if (self.expandTo(self.selected)) self.listRows();
             self.scrollToSelected();
         }
+    }
+
+    /// Where the element chosen was built: the trace the view noted for it,
+    /// looked up when it changed.
+    fn noteSource(self: *Inspector, trace: []const usize) void {
+        if (std.mem.eql(usize, trace, self.trace[0..self.trace_len])) return;
+        const n = @min(trace.len, self.trace.len);
+        @memcpy(self.trace[0..n], trace[0..n]);
+        self.trace_len = n;
+        self.source_len = 0;
+        if (n > 0) self.source_len = locateSource(trace[0..n], &self.source_buffer).len;
+    }
+    /// Where the application built the element chosen, as `file:line`, or
+    /// "" when the build has no debug information.
+    pub fn source(self: *const Inspector) []const u8 {
+        return self.source_buffer[0..self.source_len];
+    }
+
+    // The find bar.
+
+    /// The query of the find bar.
+    pub fn findQuery(self: *const Inspector) []const u8 {
+        return self.query[0..self.query_len];
+    }
+    /// The elements whose tag, text, name or key holds the query, whatever
+    /// the case.
+    fn findMatches(self: *Inspector) void {
+        self.match_count = 0;
+        const q = self.findQuery();
+        if (q.len == 0) return;
+        for (self.elements[0..self.len], 0..) |*e, index| {
+            var names: [32]u8 = undefined;
+            var digits: [24]u8 = undefined;
+            const key_text = if (e.key) |value| std.fmt.bufPrint(&digits, "{d}", .{value}) catch "" else "";
+            if (std.ascii.findIgnoreCase(tagName(e.kind, &names), q) != null or std.ascii.findIgnoreCase(e.text, q) != null or
+                std.ascii.findIgnoreCase(e.name, q) != null or std.ascii.findIgnoreCase(key_text, q) != null)
+            {
+                self.matches[self.match_count] = @intCast(index);
+                self.match_count += 1;
+            }
+        }
+        if (self.match >= self.match_count) self.match = 0;
+    }
+    /// Open the find bar, or give it the keyboard.
+    pub fn startFind(self: *Inspector) void {
+        if (!self.open) self.toggle();
+        self.finding = true;
+        self.focused = true;
+        self.tab = .elements;
+        self.findMatches();
+    }
+    pub fn endFind(self: *Inspector) void {
+        self.finding = false;
+        self.match_count = 0;
+    }
+    /// Show match `index`: choose it and open the tree around it.
+    fn showMatch(self: *Inspector, index: usize) void {
+        if (self.match_count == 0) return;
+        self.match = index % self.match_count;
+        self.choose(self.elements[self.matches[self.match]].id);
+        if (self.expandTo(self.selected)) self.listRows();
+        self.scrollToSelected();
+    }
+    /// The next match, or the one before.
+    pub fn findNext(self: *Inspector, back: bool) void {
+        if (self.match_count == 0) return;
+        self.showMatch(if (back) self.match + self.match_count - 1 else self.match + 1);
+    }
+    /// Text typed while the find bar has the keyboard goes into its query,
+    /// which shows its first match. True when taken.
+    pub fn typeText(self: *Inspector, value: []const u8) bool {
+        if (!self.open or !self.finding or !self.focused) return false;
+        for (value) |byte| if (byte < 0x20 or byte == 0x7f) return true;
+        if (self.query_len + value.len > self.query.len) return true;
+        @memcpy(self.query[self.query_len..][0..value.len], value);
+        self.query_len += value.len;
+        self.queryChanged();
+        return true;
+    }
+    fn queryChanged(self: *Inspector) void {
+        self.findMatches();
+        self.showMatch(0);
     }
 
     fn copy(self: *Inspector, value: []const u8) []const u8 {
@@ -498,6 +606,9 @@ pub const Inspector = struct {
 
     // Layout of the panel, shared by paint and input.
 
+    /// The find bar above the tree: the query's field, the count of
+    /// matches, and buttons for the match before, the next, and closing.
+    pub const Find = struct { bar: Rect, field: Rect, previous: Rect, next: Rect, close: Rect };
     pub const Layout = struct {
         panel: Rect,
         edge: Rect,
@@ -509,6 +620,7 @@ pub const Inspector = struct {
         close: Rect,
         body: Rect,
         tree: Rect,
+        find: ?Find,
         crumbs: ?Rect,
         divider: Rect,
         side_tabs: [3]Rect,
@@ -550,7 +662,16 @@ pub const Inspector = struct {
         const top_height = std.math.clamp(split, 60, @max(60, body.height - 80));
         const has_crumbs = self.selected != 0 and self.indexOf(self.selected) != null;
         const crumbs: ?Rect = if (has_crumbs) .{ .x = body.x, .y = body.y + top_height - crumbs_height, .width = body.width, .height = crumbs_height } else null;
-        const tree: Rect = .{ .x = body.x, .y = body.y, .width = body.width, .height = @max(0, top_height - (if (has_crumbs) crumbs_height else 0)) };
+        const find_bar: f32 = if (self.finding) find_height else 0;
+        const tree: Rect = .{ .x = body.x, .y = body.y + find_bar, .width = body.width, .height = @max(0, top_height - find_bar - (if (has_crumbs) crumbs_height else 0)) };
+        const find: ?Find = if (self.finding) blk: {
+            const bar: Rect = .{ .x = body.x, .y = body.y, .width = body.width, .height = find_height };
+            const end: Rect = .{ .x = bar.x + bar.width - 26, .y = bar.y + 3, .width = 22, .height = 22 };
+            const next: Rect = .{ .x = end.x - 24, .y = end.y, .width = 22, .height = 22 };
+            const previous: Rect = .{ .x = next.x - 24, .y = end.y, .width = 22, .height = 22 };
+            const count_width: f32 = 80;
+            break :blk .{ .bar = bar, .field = .{ .x = bar.x + 6, .y = bar.y + 4, .width = @max(40, previous.x - count_width - bar.x - 10), .height = 20 }, .previous = previous, .next = next, .close = end };
+        } else null;
         const divider: Rect = .{ .x = body.x, .y = body.y + top_height - divider_height / 2, .width = body.width, .height = divider_height };
         var side_tabs: [3]Rect = undefined;
         x = body.x + 4;
@@ -560,7 +681,7 @@ pub const Inspector = struct {
             x += w;
         }
         const side: Rect = .{ .x = body.x, .y = body.y + top_height + tab_height, .width = body.width, .height = @max(0, body.height - top_height - tab_height) };
-        return .{ .panel = panel, .edge = .{ .x = panel.x - edge_width / 2, .y = panel.y, .width = edge_width, .height = panel.height }, .toolbar = toolbar, .pick = pick, .tabs = tabs, .rtl = rtl, .badge = badge, .close = close, .body = body, .tree = tree, .crumbs = crumbs, .divider = divider, .side_tabs = side_tabs, .side = side };
+        return .{ .panel = panel, .edge = .{ .x = panel.x - edge_width / 2, .y = panel.y, .width = edge_width, .height = panel.height }, .toolbar = toolbar, .pick = pick, .tabs = tabs, .rtl = rtl, .badge = badge, .close = close, .body = body, .tree = tree, .find = find, .crumbs = crumbs, .divider = divider, .side_tabs = side_tabs, .side = side };
     }
 
     // Input.
@@ -588,7 +709,31 @@ pub const Inspector = struct {
             self.tab = .elements;
             return true;
         }
-        if (!self.open or !self.focused or self.tab != .elements or !plain) return false;
+        if (!self.open or !self.focused or self.tab != .elements) return false;
+        if (input.key == .f and m.control and !m.shift and !m.alt and !m.super) {
+            self.startFind();
+            return true;
+        }
+        if (self.finding) switch (input.key) {
+            .escape => if (plain) {
+                self.endFind();
+                return true;
+            },
+            .enter => if (!m.control and !m.alt and !m.super) {
+                self.findNext(m.shift);
+                return true;
+            },
+            .backspace => if (plain) {
+                if (self.query_len > 0) {
+                    self.query_len -= 1;
+                    while (self.query_len > 0 and self.query[self.query_len] & 0xc0 == 0x80) self.query_len -= 1;
+                    self.queryChanged();
+                }
+                return true;
+            },
+            else => {},
+        };
+        if (!plain) return false;
         const current = self.rowOf(self.selected);
         switch (input.key) {
             .up, .down, .home, .end => {
@@ -736,6 +881,10 @@ pub const Inspector = struct {
             return true;
         };
         if (self.tab != .elements) return true;
+        if (l.find) |find| if (contains(find.bar, point)) {
+            if (contains(find.close, point)) self.endFind() else if (contains(find.previous, point)) self.findNext(true) else if (contains(find.next, point)) self.findNext(false);
+            return true;
+        };
         if (contains(l.divider, point)) {
             self.dragging = .divider;
             self.drag_start = point.y;
@@ -813,6 +962,7 @@ pub const Inspector = struct {
         if (self.picking and !contains(l.panel, point)) return .crosshair;
         if (!contains(l.panel, point)) return null;
         if (self.tab == .elements and contains(l.divider, point)) return .resize_ns;
+        if (self.tab == .elements) if (l.find) |find| if (contains(find.field, point)) return .text;
         return .default;
     }
 
@@ -872,6 +1022,7 @@ pub const Inspector = struct {
         try self.paintToolbar(target, l);
         switch (self.tab) {
             .elements => {
+                if (l.find) |find| self.paintFind(target, find);
                 try self.paintTree(target, l);
                 if (l.crumbs) |crumbs| try self.paintCrumbs(target, crumbs);
                 try self.paintSide(target, l);
@@ -918,6 +1069,25 @@ pub const Inspector = struct {
         // The close button: a cross.
         const c = l.close;
         _ = self.label(target, c.x + 8, c.y, c.height, "\u{2715}", p.muted, ui_font);
+    }
+    fn paintFind(self: *const Inspector, target: anytype, find: Find) void {
+        const p = self.palette;
+        target.roundedRect(find.bar, 0, ui.Color.rgb(p.toolbar));
+        target.roundedRect(.{ .x = find.bar.x, .y = find.bar.y + find.bar.height - 1, .width = find.bar.width, .height = 1 }, 0, ui.Color.rgb(p.border));
+        target.roundedRect(find.field, 3, ui.Color.rgb(p.bg));
+        target.strokeRect(find.field, 3, 1, ui.Color.rgb(if (self.focused) p.accent else p.border));
+        const q = self.findQuery();
+        const end = if (q.len > 0) self.label(target, find.field.x + 6, find.field.y, find.field.height, q, p.text, ui_font) else blk: {
+            _ = self.label(target, find.field.x + 6, find.field.y, find.field.height, "Find by tag, text, name or key", p.muted, ui_font);
+            break :blk find.field.x + 6;
+        };
+        if (self.focused) target.roundedRect(.{ .x = end + 1, .y = find.field.y + 4, .width = 1, .height = find.field.height - 8 }, 0, ui.Color.rgb(p.text));
+        var count: [32]u8 = undefined;
+        const status = if (q.len == 0) "" else if (self.match_count == 0) "No matches" else std.fmt.bufPrint(&count, "{d} of {d}", .{ self.match + 1, self.match_count }) catch "";
+        _ = self.label(target, find.field.x + find.field.width + 8, find.bar.y, find.bar.height, status, p.muted, small_font);
+        for ([_]Rect{ find.previous, find.next, find.close }, [_][]const u8{ "\u{2191}", "\u{2193}", "\u{2715}" }) |rect, glyph| {
+            _ = self.label(target, rect.x + 6, rect.y, rect.height, glyph, p.muted, ui_font);
+        }
     }
     fn paintTab(self: *const Inspector, target: anytype, rect: Rect, text: []const u8, selected: bool) void {
         const p = self.palette;
@@ -1044,6 +1214,15 @@ pub const Inspector = struct {
                 const line = 18;
                 var selector: [64]u8 = undefined;
                 _ = self.label(target, side.x + 10, y + 6, line, details.selector(self, index, &selector), p.text, mono_font);
+                // Where the application built it: the file's name and the
+                // line, the whole path in the properties.
+                const at = baseName(self.source());
+                if (at.len > 0) {
+                    const width = self.textWidth(at, small_font);
+                    const x = side.x + side.width - 10 - width;
+                    _ = self.label(target, x, y + 6, line, at, p.muted, small_font);
+                    target.roundedRect(.{ .x = x, .y = y + 6 + line - 3, .width = width, .height = 1 }, 0, ui.Color.rgb(p.muted));
+                }
                 y += 6 + line;
                 for (details.styles[0..details.style_count]) |decl| {
                     self.paintDecl(target, side.x + 26, y, line, decl);
@@ -1677,6 +1856,7 @@ pub const Details = struct {
         self.property("type", self.print("{s}", .{tagName(e.kind, &names)}));
         self.property("id", self.print("{x:0>16}", .{e.id}));
         if (e.key) |value| self.property("key", self.print("{d}", .{value}));
+        if (e.id == inspector.selected and inspector.source_len > 0) self.property("built at", inspector.source());
         if (e.text.len > 0) self.property("text", self.print("\"{s}\"", .{clip(e.text, 200)}));
         self.section("State");
         self.property("focused", bool_(inspector.focus != null and inspector.focus.? == e.id));
@@ -1695,6 +1875,45 @@ pub const Details = struct {
         self.sections[self.section_count - 1].end = self.property_count;
     }
 };
+
+/// The file's name and what follows it in a path.
+fn baseName(path_text: []const u8) []const u8 {
+    const at = std.mem.lastIndexOfAny(u8, path_text, "/\\") orelse return path_text;
+    return path_text[at + 1 ..];
+}
+
+/// The first of the return addresses in `trace` whose code lies outside
+/// the view's own files and the standard library, as `file:line` in
+/// `out`; "" without debug information.
+fn locateSource(trace: []const usize, out: []u8) []const u8 {
+    if (comptime !std.debug.sys_can_stack_trace) return "";
+    const info = std.debug.getSelfDebugInfo() catch return "";
+    var own: [512]u8 = undefined;
+    const here = lineAt(info, @returnAddress() - 1, &own) orelse return "";
+    const own_dir = here.file[0 .. std.mem.lastIndexOfAny(u8, here.file, "/\\") orelse 0];
+    for (trace) |address| {
+        if (address == 0) continue;
+        const at = lineAt(info, address - 1, out) orelse continue;
+        // The view's files, but for its tests, which build as an
+        // application does.
+        if (own_dir.len > 0 and std.mem.startsWith(u8, at.file, own_dir) and std.mem.indexOfAnyPos(u8, at.file, own_dir.len + 1, "/\\") == null and !std.mem.endsWith(u8, at.file, "_tests.zig")) continue;
+        if (std.mem.indexOf(u8, at.file, "lib/std/") != null or std.mem.indexOf(u8, at.file, "lib\\std\\") != null) continue;
+        const suffix = std.fmt.bufPrint(out[at.file.len..], ":{d}", .{at.line}) catch return "";
+        return out[0 .. at.file.len + suffix.len];
+    }
+    return "";
+}
+fn lineAt(info: *std.debug.SelfInfo, address: usize, out: []u8) ?struct { file: []const u8, line: u64 } {
+    var scratch: [4096]u8 = undefined;
+    var fixed: std.heap.FixedBufferAllocator = .init(&scratch);
+    var symbols: std.ArrayList(std.debug.Symbol) = .empty;
+    info.getSymbols(zio.io(), fixed.allocator(), fixed.allocator(), address, false, &symbols) catch return null;
+    if (symbols.items.len == 0) return null;
+    const location = symbols.items[0].source_location orelse return null;
+    if (location.file_name.len + 24 > out.len) return null;
+    @memcpy(out[0..location.file_name.len], location.file_name);
+    return .{ .file = out[0..location.file_name.len], .line = location.line };
+}
 
 fn cursorName(value: Cursor) []const u8 {
     return switch (value) {

@@ -13,14 +13,18 @@ const s3 = @import("s3.zig");
 const icon_mod = @import("icon.zig");
 const winsign = @import("winsign.zig");
 const vet = @import("vet.zig");
+const macos = @import("macos.zig");
+const install_ps1 = @import("install_ps1.zig");
 
 const usage =
     \\ziggurat init DIR [--template native|web|hybrid] [--name NAME] [--id IDENTITY] [--framework PATH]
     \\ziggurat dev [--watch DIR]... [--frontend COMMAND] [-- ZIG_BUILD_ARGS...]
-    \\ziggurat build [--debug] [--target TRIPLE] [--package] [-- ZIG_BUILD_ARGS...]
+    \\ziggurat build [--debug] [--target TRIPLE | --platform LIST] [--package] [--sign IDENTITY] [--skip-dmg] [--skip-notarize] [-- ZIG_BUILD_ARGS...]
     \\ziggurat package setup --zip PACKAGE [--stub SETUP_STUB] [--publisher NAME] [--comment TEXT] [--categories LIST] [--icon PNG] [--output FILE]
     \\ziggurat package deb --zip PACKAGE --maintainer "NAME <EMAIL>" [--depends LIST] [--webview] [--comment TEXT] [--categories LIST] [--icon PNG] [--output FILE]
+    \\ziggurat package app --zip PACKAGE [--sign IDENTITY] [--dmg [--skip-notarize]] [--output DIR]
     \\ziggurat package install-script --zip PACKAGE [--github OWNER/REPO [--tag-prefix PREFIX]] [--url BASE] [--webview] [--output FILE]
+    \\ziggurat package install-ps1 --zip PACKAGE [--github OWNER/REPO [--tag-prefix PREFIX]] [--url BASE] [--output FILE]
     \\ziggurat publish DIR (--github OWNER/REPO --tag TAG [--notes FILE] [--not-latest] | --s3 BUCKET --url BASE [--prefix DIR] [--region REGION] [--endpoint URL] [--path-style])
     \\ziggurat generate [-o FILE] [--framework PATH] [DIR]
     \\ziggurat i18n check [DIR]
@@ -37,13 +41,22 @@ const usage =
     \\build runs `zig build` with ReleaseSafe; --package writes an update package
     \\to dist/ from zig-out/bin and ziggurat.json, with the icon of ziggurat.json,
     \\and signs the Windows executable first when windows in ziggurat.json says how.
+    \\--platform builds each OS/ARCH of a comma separated list into zig-out/OS-ARCH,
+    \\as macos/universal,linux/x86_64,windows/x86_64; macos/universal combines
+    \\aarch64 and x86_64. macOS builds also write dist/macos-ARCH/NAME.app, signed
+    \\with --sign or macos.signingIdentity ("-", ad hoc, by default), and on a Mac
+    \\a disk image, notarized when macos.notarize says how.
+    \\package app writes the .app of a macOS update package, and with --dmg its disk image.
     \\package setup appends an update package to the setup stub, producing one
     \\installer file (Windows or Linux, matching the stub), signed as the executable is.
     \\package deb writes a Debian package that installs under /usr/lib/EXECUTABLE.
     \\--icon names a PNG inside the package for the Linux menu (default: the package's icon.png).
     \\package install-script writes install.sh, which installs a Linux app for the
     \\current user with its setup installer: the one next to it, else the newest one
-    \\it downloads from the GitHub releases or BASE.
+    \\it downloads from the GitHub releases or BASE; on macOS it copies the app of
+    \\its disk image to /Applications (or ~/Applications).
+    \\package install-ps1 writes install.ps1, which runs the newest Windows setup
+    \\installer silently for the current user.
     \\publish uploads a release directory to a GitHub release with the GitHub CLI, or
     \\to an S3 bucket (credentials from AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and
     \\AWS_SESSION_TOKEN) that BASE serves.
@@ -60,7 +73,8 @@ const usage =
     \\vet checks the Zig files of src/ with `zig ast-check`, then that values of a
     \\view pass (*view.View, *ui.Frame) are not kept in structs, container-level
     \\variables or thread arguments.
-    \\doctor reports the toolchain and native dependencies this machine provides.
+    \\doctor reports the toolchain and native dependencies this machine provides,
+    \\and on macOS the SDK and the signing identities.
     \\Set ZIG to choose the zig executable.
     \\
 ;
@@ -84,6 +98,14 @@ pub const Project = struct {
     icon: ?[]const u8 = null,
     /// How Windows executables and installers are signed.
     windows: ?winsign.Windows = null,
+    /// macOS bundles: icon, signing, notarization, Info.plist keys.
+    macos: ?macos.MacOS = null,
+    /// NSHumanReadableCopyright of the macOS bundle.
+    copyright: ?[]const u8 = null,
+    /// The schemes of the app's deep links, which the macOS bundle declares.
+    urlSchemes: []const []const u8 = &.{},
+    /// The types of file the app opens, which the macOS bundle declares.
+    fileAssociations: []const macos.FileAssociation = &.{},
 
     /// `dir` under src/ lets the app import `catalog.zig` from its sources.
     pub const I18n = struct { dir: []const u8 = "src/locales", source: []const u8 = "en" };
@@ -294,7 +316,7 @@ fn write(dir: std.Io.Dir, path: []const u8, bytes: []const u8) !void {
 }
 
 pub fn readProject(allocator: std.mem.Allocator, dir: std.Io.Dir) !Project {
-    const bytes = dir.readFileAlloc(zio.io(), "ziggurat.json", allocator, .limited(16 * 1024)) catch |err| {
+    const bytes = dir.readFileAlloc(zio.io(), "ziggurat.json", allocator, .limited(256 * 1024)) catch |err| {
         if (err == error.FileNotFound) return error.MissingProjectFile;
         return err;
     };
@@ -302,7 +324,40 @@ pub fn readProject(allocator: std.mem.Allocator, dir: std.Io.Dir) !Project {
     if (!validIdentity(project.identity) or !validDisplayName(project.name)) return error.InvalidProjectFile;
     update.publication.validateFilename(project.executable) catch return error.InvalidProjectFile;
     _ = update.retention.parseVersion(project.version) catch return error.InvalidProjectFile;
+    try validateMacOS(project);
     return project;
+}
+
+fn validScheme(scheme: []const u8) bool {
+    if (scheme.len == 0 or !std.ascii.isAlphabetic(scheme[0])) return false;
+    for (scheme) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '+' and byte != '-' and byte != '.') return false;
+    return true;
+}
+
+fn validExtension(extension: []const u8) bool {
+    if (extension.len == 0 or extension.len > 32) return false;
+    for (extension) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return false;
+    return true;
+}
+
+/// The parts of ziggurat.json that macOS bundles use, checked before a
+/// build rather than when the bundle is written.
+fn validateMacOS(project: Project) !void {
+    for (project.urlSchemes) |scheme| if (!validScheme(scheme)) return error.InvalidUrlScheme;
+    for (project.fileAssociations) |association| {
+        if (association.ext.len == 0) return error.InvalidFileAssociation;
+        for (association.ext) |extension| if (!validExtension(extension)) return error.InvalidFileAssociation;
+        if (association.role) |role| if (!std.mem.eql(u8, role, "Editor") and !std.mem.eql(u8, role, "Viewer")) return error.InvalidFileAssociation;
+    }
+    const config = project.macos orelse return;
+    if (config.notarize) |notarize| if (notarize.keychainProfile.len == 0) return error.NotarizeNeedsKeychainProfile;
+    if (config.icon) |path| {
+        const extension = std.fs.path.extension(path);
+        for ([_][]const u8{ ".icns", ".car", ".icon" }) |allowed| {
+            if (std.ascii.eqlIgnoreCase(extension, allowed)) break;
+        } else return error.InvalidMacOSIcon;
+    }
+    if (config.infoPlist) |value| if (value != .object) return error.InvalidInfoPlist;
 }
 
 // ---------------------------------------------------------------- build
@@ -333,56 +388,161 @@ fn targetName(allocator: std.mem.Allocator, triple: ?[]const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}-{s}", .{ @tagName(builtin.os.tag), @tagName(builtin.cpu.arch) });
 }
 
+/// A platform of `build --platform`: an operating system and an
+/// architecture, none for a universal macOS app.
+pub const Platform = struct {
+    os: std.Target.Os.Tag,
+    arch: ?std.Target.Cpu.Arch,
+
+    pub fn host() Platform {
+        return .{ .os = builtin.os.tag, .arch = builtin.cpu.arch };
+    }
+
+    /// OS/ARCH, as macos/aarch64, linux/x86_64, windows/x86_64 or
+    /// macos/universal; darwin, amd64 and arm64 are accepted too.
+    pub fn parse(text: []const u8) !Platform {
+        const slash = std.mem.indexOfScalar(u8, text, '/') orelse return error.InvalidPlatform;
+        const os_text = text[0..slash];
+        const arch_text = text[slash + 1 ..];
+        const os: std.Target.Os.Tag = if (std.mem.eql(u8, os_text, "darwin")) .macos else std.meta.stringToEnum(std.Target.Os.Tag, os_text) orelse return error.InvalidPlatform;
+        if (os != .macos and os != .linux and os != .windows) return error.UnsupportedPlatform;
+        if (std.mem.eql(u8, arch_text, "universal")) {
+            if (os != .macos) return error.UnsupportedPlatform;
+            return .{ .os = os, .arch = null };
+        }
+        const arch: std.Target.Cpu.Arch = if (std.mem.eql(u8, arch_text, "amd64")) .x86_64 else if (std.mem.eql(u8, arch_text, "arm64")) .aarch64 else std.meta.stringToEnum(std.Target.Cpu.Arch, arch_text) orelse return error.InvalidPlatform;
+        if (arch != .x86_64 and arch != .aarch64) return error.UnsupportedPlatform;
+        return .{ .os = os, .arch = arch };
+    }
+
+    /// The name of packages and directories: macos-aarch64, macos-universal.
+    pub fn name(self: Platform, allocator: std.mem.Allocator) ![]const u8 {
+        return std.fmt.allocPrint(allocator, "{s}-{s}", .{ @tagName(self.os), if (self.arch) |arch| @tagName(arch) else "universal" });
+    }
+
+    /// The -Dtarget of a thin platform, or null for the host, which keeps
+    /// the native system's libraries in reach.
+    pub fn triple(self: Platform, allocator: std.mem.Allocator) !?[]const u8 {
+        const arch = self.arch.?;
+        if (self.os == builtin.os.tag and arch == builtin.cpu.arch) return null;
+        return try std.fmt.allocPrint(allocator, "{s}-{s}{s}", .{ @tagName(arch), @tagName(self.os), if (self.os == .linux) "-gnu" else "" });
+    }
+};
+
+const BuildOptions = struct {
+    debug: bool = false,
+    package: bool = false,
+    /// The macOS signing identity, instead of macos.signingIdentity.
+    sign: ?[]const u8 = null,
+    skip_dmg: bool = false,
+    skip_notarize: bool = false,
+    extra: []const []const u8 = &.{},
+};
+
 fn buildCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
-    var debug = false;
-    var package = false;
+    var build_options: BuildOptions = .{};
     var triple: ?[]const u8 = null;
-    var extra: []const []const u8 = &.{};
+    var platforms: ?[]const u8 = null;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
-        if (std.mem.eql(u8, arg, "--debug")) debug = true else if (std.mem.eql(u8, arg, "--package")) package = true else if (std.mem.eql(u8, arg, "--target") and index + 1 < args.len) {
-            triple = args[index + 1];
+        const value = if (index + 1 < args.len) args[index + 1] else null;
+        if (std.mem.eql(u8, arg, "--debug")) build_options.debug = true else if (std.mem.eql(u8, arg, "--package")) build_options.package = true else if (std.mem.eql(u8, arg, "--skip-dmg")) build_options.skip_dmg = true else if (std.mem.eql(u8, arg, "--skip-notarize")) build_options.skip_notarize = true else if (std.mem.eql(u8, arg, "--target") and value != null) {
+            triple = value;
+            index += 1;
+        } else if (std.mem.eql(u8, arg, "--platform") and value != null) {
+            platforms = value;
+            index += 1;
+        } else if (std.mem.eql(u8, arg, "--sign") and value != null) {
+            build_options.sign = value;
             index += 1;
         } else if (std.mem.eql(u8, arg, "--")) {
-            extra = args[index + 1 ..];
+            build_options.extra = args[index + 1 ..];
             break;
         } else return error.InvalidArguments;
     }
+    if (triple != null and platforms != null) return error.InvalidArguments;
     const cwd = std.Io.Dir.cwd();
-    const project = if (package) try readProject(allocator, cwd) else null;
+
+    // One build into zig-out, as before: of --target, else for this machine.
+    const list = platforms orelse {
+        const target = try targetName(allocator, triple);
+        const macos_target = std.mem.startsWith(u8, target, "macos-");
+        const project = if (build_options.package or macos_target) try readProject(allocator, cwd) else null;
+        if (macos_target) try checkMacOS(project.?, build_options);
+        if (try zigBuild(allocator, build_options, triple, null) != 0) return 1;
+        if (build_options.package) _ = try writePackage(allocator, project.?, target, "zig-out/bin");
+        if (macos_target) try macosArtifacts(allocator, project.?, build_options, "zig-out/bin", std.meta.stringToEnum(macos.Arch, target["macos-".len..]));
+        return 0;
+    };
+
+    // Each platform into zig-out/<os>-<arch>.
+    var parsed: std.ArrayList(Platform) = .empty;
+    var names = std.mem.tokenizeScalar(u8, list, ',');
+    while (names.next()) |text| {
+        const platform = Platform.parse(std.mem.trim(u8, text, " ")) catch |err| {
+            std.debug.print("ziggurat: {s}: {s}; use OS/ARCH such as macos/universal, macos/aarch64, linux/x86_64 or windows/x86_64\n", .{ text, @errorName(err) });
+            return 2;
+        };
+        try parsed.append(allocator, platform);
+    }
+    if (parsed.items.len == 0) return error.InvalidArguments;
+    var any_macos = false;
+    for (parsed.items) |platform| any_macos = any_macos or platform.os == .macos;
+    const project = if (build_options.package or any_macos) try readProject(allocator, cwd) else null;
+    if (any_macos) try checkMacOS(project.?, build_options);
+    for (parsed.items) |platform| {
+        const platform_name = try platform.name(allocator);
+        const prefix = try std.fmt.allocPrint(allocator, "zig-out/{s}", .{platform_name});
+        const bin = try std.fmt.allocPrint(allocator, "{s}/bin", .{prefix});
+        if (platform.arch == null) {
+            // A universal app: both architectures, combined.
+            var slices: [2][]const u8 = undefined;
+            for ([_]std.Target.Cpu.Arch{ .aarch64, .x86_64 }, &slices) |arch, *slice| {
+                const thin: Platform = .{ .os = .macos, .arch = arch };
+                const thin_prefix = try std.fmt.allocPrint(allocator, "zig-out/{s}", .{try thin.name(allocator)});
+                if (try zigBuild(allocator, build_options, try thin.triple(allocator), thin_prefix) != 0) return 1;
+                slice.* = try cwd.readFileAlloc(zio.io(), try std.fmt.allocPrint(allocator, "{s}/bin/{s}", .{ thin_prefix, project.?.executable }), allocator, .limited(512 * 1024 * 1024));
+            }
+            try cwd.createDirPath(zio.io(), bin);
+            try cwd.writeFile(zio.io(), .{ .sub_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ bin, project.?.executable }), .data = try macos.writeUniversal(allocator, &slices), .flags = .{ .permissions = zio.mode(0o755) } });
+        } else if (try zigBuild(allocator, build_options, try platform.triple(allocator), prefix) != 0) return 1;
+        if (build_options.package) _ = try writePackage(allocator, project.?, platform_name, bin);
+        if (platform.os == .macos) try macosArtifacts(allocator, project.?, build_options, bin, if (platform.arch) |arch| std.meta.stringToEnum(macos.Arch, @tagName(arch)) else null);
+    }
+    return 0;
+}
+
+fn zigBuild(allocator: std.mem.Allocator, build_options: BuildOptions, triple: ?[]const u8, prefix: ?[]const u8) !u8 {
     var zig_args: std.ArrayList([]const u8) = .empty;
-    try zig_args.appendSlice(allocator, &.{ "build", if (debug) "-Doptimize=Debug" else "-Doptimize=ReleaseSafe" });
+    try zig_args.appendSlice(allocator, &.{ "build", if (build_options.debug) "-Doptimize=Debug" else "-Doptimize=ReleaseSafe" });
     if (triple) |text| try zig_args.append(allocator, try std.fmt.allocPrint(allocator, "-Dtarget={s}", .{text}));
-    try zig_args.appendSlice(allocator, extra);
-    const code = try runZig(allocator, zig_args.items);
-    if (code != 0 or !package) return code;
-    const info = project.?;
-    const target = try targetName(allocator, triple);
+    if (prefix) |path| try zig_args.appendSlice(allocator, &.{ "--prefix", path });
+    try zig_args.appendSlice(allocator, build_options.extra);
+    return runZig(allocator, zig_args.items);
+}
+
+/// Writes the update package of a build to dist/ and prints its SHA-256.
+fn writePackage(allocator: std.mem.Allocator, info: Project, target: []const u8, bin: []const u8) ![]const u8 {
+    const cwd = std.Io.Dir.cwd();
     const windows = std.mem.startsWith(u8, target, "windows-");
     const executable = try std.fmt.allocPrint(allocator, "{s}{s}", .{ info.executable, if (windows) ".exe" else "" });
-    const executable_path = try std.fs.path.join(allocator, &.{ "zig-out", "bin", executable });
+    const executable_path = try std.fs.path.join(allocator, &.{ bin, executable });
     if (windows) if (info.windows) |config| if (config.signs()) {
-        if (try signFile(allocator, config, executable_path) != 0) return 1;
+        if (try signFile(allocator, config, executable_path) != 0) return error.SigningFailed;
     };
     var files: std.ArrayList(update.archive.Entry) = .empty;
     try files.append(allocator, .{ .name = executable, .bytes = try cwd.readFileAlloc(zio.io(), executable_path, allocator, .limited(512 * 1024 * 1024)) });
-    if (info.icon) |path| {
-        const bytes = try cwd.readFileAlloc(zio.io(), path, allocator, .limited(64 * 1024 * 1024));
-        icon_mod.validate(bytes) catch |err| {
-            std.debug.print("ziggurat: icon {s}: {s}\n", .{ path, if (err == error.IconNotSquare) "the icon must be square" else "the icon must be a PNG" });
-            return 1;
-        };
-        try files.append(allocator, .{ .name = "icon.png", .bytes = bytes });
-    }
+    if (info.icon) |path| try files.append(allocator, .{ .name = "icon.png", .bytes = try readIcon(allocator, path) });
     // WebView applications on Windows ship the loader beside the executable.
-    if (windows) if (cwd.readFileAlloc(zio.io(), "zig-out/bin/WebView2Loader.dll", allocator, .limited(16 * 1024 * 1024))) |loader| {
+    const loader_path = try std.fs.path.join(allocator, &.{ bin, "WebView2Loader.dll" });
+    if (windows) if (cwd.readFileAlloc(zio.io(), loader_path, allocator, .limited(16 * 1024 * 1024))) |loader| {
         // Libraries their publishers signed keep their signatures.
         const unsigned = !winsign.peKind(loader).signed;
         if (unsigned) if (info.windows) |config| if (config.signs()) {
-            if (try signFile(allocator, config, "zig-out/bin/WebView2Loader.dll") != 0) return 1;
+            if (try signFile(allocator, config, loader_path) != 0) return error.SigningFailed;
         };
-        try files.append(allocator, .{ .name = "WebView2Loader.dll", .bytes = if (unsigned and info.windows != null and info.windows.?.signs()) try cwd.readFileAlloc(zio.io(), "zig-out/bin/WebView2Loader.dll", allocator, .limited(16 * 1024 * 1024)) else loader });
+        try files.append(allocator, .{ .name = "WebView2Loader.dll", .bytes = if (unsigned and info.windows != null and info.windows.?.signs()) try cwd.readFileAlloc(zio.io(), loader_path, allocator, .limited(16 * 1024 * 1024)) else loader });
     } else |_| {};
     for ([_][]const u8{ "LICENSE", "LICENSE.txt" }) |license| if (cwd.readFileAlloc(zio.io(), license, allocator, .limited(4 * 1024 * 1024))) |bytes| {
         try files.append(allocator, .{ .name = "LICENSE.txt", .bytes = bytes });
@@ -396,7 +556,128 @@ fn buildCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(zip, &digest, .{});
     try std.Io.File.stdout().writeStreamingAll(zio.io(), try std.fmt.allocPrint(allocator, "{s} {s}\n", .{ std.fmt.bytesToHex(digest, .lower), output }));
-    return 0;
+    return output;
+}
+
+fn readIcon(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(zio.io(), path, allocator, .limited(64 * 1024 * 1024));
+    icon_mod.validate(bytes) catch |err| {
+        std.debug.print("ziggurat: icon {s}: {s}\n", .{ path, if (err == error.IconNotSquare) "the icon must be square" else "the icon must be a PNG" });
+        return err;
+    };
+    return bytes;
+}
+
+/// The signing identity of macOS builds: --sign, else macos.signingIdentity.
+fn macosIdentity(project: Project, build_options: BuildOptions) []const u8 {
+    return build_options.sign orelse if (project.macos) |config| config.signingIdentity else "-";
+}
+
+/// Refuses before building what codesign or notarytool would refuse after.
+fn checkMacOS(project: Project, build_options: BuildOptions) !void {
+    const config = project.macos orelse return;
+    const ad_hoc = std.mem.eql(u8, macosIdentity(project, build_options), "-");
+    if (config.notarize != null and !build_options.skip_notarize and ad_hoc) {
+        std.debug.print("ziggurat: notarization needs a Developer ID signing identity: set macos.signingIdentity or pass --sign\n", .{});
+        return error.NotarizeNeedsDeveloperId;
+    }
+    if (config.provisioningProfile != null and ad_hoc) {
+        std.debug.print("ziggurat: macos.provisioningProfile needs a signing identity, not ad-hoc signing: set macos.signingIdentity or pass --sign\n", .{});
+        return error.ProvisioningProfileNeedsIdentity;
+    }
+}
+
+/// The languages of the app's catalogs (i18n.dir/<tag>.json), its own first,
+/// with its name in each where the catalog's appName gives one.
+pub fn appLanguages(allocator: std.mem.Allocator, dir: std.Io.Dir, project: Project) ![]macos.Language {
+    const config = project.i18n orelse return &.{};
+    var catalogs = dir.openDir(zio.io(), config.dir, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return &.{},
+        else => return err,
+    };
+    defer catalogs.close(zio.io());
+    var languages: std.ArrayList(macos.Language) = .empty;
+    try languages.append(allocator, .{ .tag = config.source });
+    var iterator = catalogs.iterate();
+    while (try iterator.next(zio.io())) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
+        const tag = try allocator.dupe(u8, entry.name[0 .. entry.name.len - ".json".len]);
+        const bytes = try catalogs.readFileAlloc(zio.io(), entry.name, allocator, .limited(16 * 1024 * 1024));
+        const value = std.json.parseFromSliceLeaky(std.json.Value, allocator, bytes, .{}) catch return error.InvalidCatalog;
+        var name: ?[]const u8 = null;
+        if (value == .object) if (value.object.get("appName")) |field| if (field == .string) {
+            name = field.string;
+        };
+        if (std.ascii.eqlIgnoreCase(tag, config.source)) continue; // the app's own name is ziggurat.json's
+        try languages.append(allocator, .{ .tag = tag, .name = name });
+    }
+    std.sort.insertion(macos.Language, languages.items[1..], {}, struct {
+        fn less(_: void, a: macos.Language, b: macos.Language) bool {
+            return std.mem.order(u8, a.tag, b.tag) == .lt;
+        }
+    }.less);
+    return languages.toOwnedSlice(allocator);
+}
+
+pub fn macosApp(allocator: std.mem.Allocator, dir: std.Io.Dir, project: Project) !macos.App {
+    return .{
+        .name = project.name,
+        .identity = project.identity,
+        .version = project.version,
+        .copyright = project.copyright,
+        .url_schemes = project.urlSchemes,
+        .file_associations = project.fileAssociations,
+        .macos = project.macos orelse .{},
+        .languages = try appLanguages(allocator, dir, project),
+    };
+}
+
+/// Writes the signed bundle of `executable` into `output` and returns its
+/// path.
+fn writeApp(allocator: std.mem.Allocator, project: Project, identity: []const u8, executable: []const u8, output: []const u8) ![]const u8 {
+    const cwd = std.Io.Dir.cwd();
+    const config = project.macos orelse macos.MacOS{};
+    const png = if (project.icon) |path| try readIcon(allocator, path) else null;
+    const icons = try macos.bundleIcons(allocator, cwd, config, png);
+    const profile = if (config.provisioningProfile) |path| try cwd.readFileAlloc(zio.io(), path, allocator, .limited(16 * 1024 * 1024)) else null;
+    try cwd.createDirPath(zio.io(), output);
+    var parent = try cwd.openDir(zio.io(), output, .{});
+    defer parent.close(zio.io());
+    const bundle = try macos.writeBundle(allocator, parent, try macosApp(allocator, cwd, project), .{ .executable = executable, .icns = icons.icns, .catalog = icons.catalog, .provisioning_profile = profile });
+    const path = try std.fs.path.join(allocator, &.{ output, bundle });
+    const entitlements = if (config.entitlements) |file| try zio.realPathAlloc(cwd, file, allocator) else null;
+    try macos.codesign(allocator, path, identity, entitlements, profile != null);
+    try std.Io.File.stdout().writeStreamingAll(zio.io(), try std.fmt.allocPrint(allocator, "{s}\n", .{path}));
+    return path;
+}
+
+/// The bundle of a macOS build in dist/macos-<arch>, and its disk image
+/// unless --skip-dmg; disk images need macOS.
+fn macosArtifacts(allocator: std.mem.Allocator, project: Project, build_options: BuildOptions, bin: []const u8, arch: ?macos.Arch) !void {
+    const cwd = std.Io.Dir.cwd();
+    const executable = try cwd.readFileAlloc(zio.io(), try std.fs.path.join(allocator, &.{ bin, project.executable }), allocator, .limited(512 * 1024 * 1024));
+    const output = try std.fmt.allocPrint(allocator, "dist/macos-{s}", .{if (arch) |a| @tagName(a) else "universal"});
+    const identity = macosIdentity(project, build_options);
+    const app = try writeApp(allocator, project, identity, executable, output);
+    if (build_options.skip_dmg) return;
+    if (builtin.os.tag != .macos) {
+        std.debug.print("ziggurat: skipping the disk image: it needs macOS\n", .{});
+        return;
+    }
+    try writeDmg(allocator, project, identity, app, output, arch, build_options.skip_notarize);
+}
+
+fn writeDmg(allocator: std.mem.Allocator, project: Project, identity: []const u8, app: []const u8, output: []const u8, arch: ?macos.Arch, skip_notarize: bool) !void {
+    const config = project.macos orelse macos.MacOS{};
+    const dmg = try std.fs.path.join(allocator, &.{ output, try macos.dmgFileName(allocator, project.executable, project.version, arch) });
+    try macos.buildDmg(allocator, .{
+        .app = try zio.realPathAlloc(std.Io.Dir.cwd(), app, allocator),
+        .output = dmg,
+        .volume = config.dmgTitle orelse project.name,
+        .identity = identity,
+        .notarize = if (skip_notarize) null else config.notarize,
+    });
+    try std.Io.File.stdout().writeStreamingAll(zio.io(), try std.fmt.allocPrint(allocator, "{s}\n", .{dmg}));
 }
 
 // ---------------------------------------------------------------- package
@@ -415,6 +696,9 @@ const PackageOptions = struct {
     github: ?[]const u8 = null,
     tag_prefix: []const u8 = "",
     url: ?[]const u8 = null,
+    sign: ?[]const u8 = null,
+    dmg: bool = false,
+    skip_notarize: bool = false,
 };
 
 const Inventory = struct { schema_version: u16, name: []const u8 = "", identity: []const u8, version: []const u8, target: []const u8, executable: []const u8 };
@@ -466,14 +750,14 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
-        if (std.mem.eql(u8, arg, "--webview")) {
-            package_options.webview = true;
+        if (std.mem.eql(u8, arg, "--webview") or std.mem.eql(u8, arg, "--dmg") or std.mem.eql(u8, arg, "--skip-notarize")) {
+            if (arg[2] == 'w') package_options.webview = true else if (arg[2] == 'd') package_options.dmg = true else package_options.skip_notarize = true;
             continue;
         }
         if (index + 1 >= args.len) return error.InvalidArguments;
         const value = args[index + 1];
         index += 1;
-        if (std.mem.eql(u8, arg, "--zip")) package_options.zip = value else if (std.mem.eql(u8, arg, "--stub")) package_options.stub = value else if (std.mem.eql(u8, arg, "--output")) package_options.output = value else if (std.mem.eql(u8, arg, "--publisher")) package_options.publisher = value else if (std.mem.eql(u8, arg, "--comment")) package_options.comment = value else if (std.mem.eql(u8, arg, "--categories")) package_options.categories = value else if (std.mem.eql(u8, arg, "--icon")) package_options.icon = value else if (std.mem.eql(u8, arg, "--maintainer")) package_options.maintainer = value else if (std.mem.eql(u8, arg, "--depends")) package_options.depends = value else if (std.mem.eql(u8, arg, "--github")) package_options.github = value else if (std.mem.eql(u8, arg, "--tag-prefix")) package_options.tag_prefix = value else if (std.mem.eql(u8, arg, "--url")) package_options.url = value else return error.InvalidArguments;
+        if (std.mem.eql(u8, arg, "--zip")) package_options.zip = value else if (std.mem.eql(u8, arg, "--stub")) package_options.stub = value else if (std.mem.eql(u8, arg, "--output")) package_options.output = value else if (std.mem.eql(u8, arg, "--publisher")) package_options.publisher = value else if (std.mem.eql(u8, arg, "--comment")) package_options.comment = value else if (std.mem.eql(u8, arg, "--categories")) package_options.categories = value else if (std.mem.eql(u8, arg, "--icon")) package_options.icon = value else if (std.mem.eql(u8, arg, "--maintainer")) package_options.maintainer = value else if (std.mem.eql(u8, arg, "--depends")) package_options.depends = value else if (std.mem.eql(u8, arg, "--github")) package_options.github = value else if (std.mem.eql(u8, arg, "--tag-prefix")) package_options.tag_prefix = value else if (std.mem.eql(u8, arg, "--url")) package_options.url = value else if (std.mem.eql(u8, arg, "--sign")) package_options.sign = value else return error.InvalidArguments;
     }
     const zip_path = package_options.zip orelse return error.InvalidArguments;
     const package = try readPackage(allocator, zip_path);
@@ -515,12 +799,48 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         try std.Io.File.stdout().writeStreamingAll(zio.io(), try std.fmt.allocPrint(allocator, "{s}\n", .{output}));
         return 0;
     }
-    if (std.mem.eql(u8, kind, "install-script")) {
-        if (!std.mem.startsWith(u8, info.target, "linux-")) return error.WrongTarget;
+    if (std.mem.eql(u8, kind, "app")) {
+        if (!std.mem.startsWith(u8, info.target, "macos-")) return error.WrongTarget;
+        const arch_name = info.target["macos-".len..];
+        const arch = std.meta.stringToEnum(macos.Arch, arch_name);
+        if (arch == null and !std.mem.eql(u8, arch_name, "universal")) return error.UnsupportedArchitecture;
+        // ziggurat.json says how to sign and what Info.plist holds; without
+        // it the package's inventory names the app.
+        const project = (readProject(allocator, std.Io.Dir.cwd()) catch null) orelse Project{ .name = name, .identity = info.identity, .executable = info.executable, .template = "native", .version = info.version };
+        if (!std.mem.eql(u8, project.identity, info.identity)) return error.PackageOfAnotherProject;
+        var app_project = project;
+        app_project.version = info.version;
+        app_project.executable = info.executable;
+        const build_options: BuildOptions = .{ .sign = package_options.sign, .skip_notarize = package_options.skip_notarize or !package_options.dmg };
+        try checkMacOS(app_project, build_options);
+        const executable = for (package.files) |entry| {
+            if (std.mem.eql(u8, entry.name, info.executable)) break entry.bytes;
+        } else return error.ExecutableNotInPackage;
+        const output = package_options.output orelse try std.fmt.allocPrint(allocator, "dist/{s}", .{info.target});
+        const identity = macosIdentity(app_project, build_options);
+        const app = try writeApp(allocator, app_project, identity, executable, output);
+        if (package_options.dmg) try writeDmg(allocator, app_project, identity, app, output, arch, package_options.skip_notarize);
+        return 0;
+    }
+    if (std.mem.eql(u8, kind, "install-ps1")) {
+        if (!std.mem.startsWith(u8, info.target, "windows-")) return error.WrongTarget;
         if (package_options.github) |repository| if (!publish.validRepository(repository)) return error.InvalidRepository;
         if (package_options.url) |url| if (!std.mem.endsWith(u8, url, "/") or !(std.mem.startsWith(u8, url, "https://") or std.mem.startsWith(u8, url, "http://"))) return error.InvalidUrl;
         var script: std.Io.Writer.Allocating = .init(allocator);
-        try install_script.write(&script.writer, .{ .app_name = name, .identity = info.identity, .stem = stem, .version = info.version, .github = package_options.github, .tag_prefix = package_options.tag_prefix, .url = package_options.url, .webview = package_options.webview });
+        try install_ps1.write(&script.writer, .{ .app_name = name, .identity = info.identity, .stem = stem, .version = info.version, .github = package_options.github, .tag_prefix = package_options.tag_prefix, .url = package_options.url });
+        const output = package_options.output orelse "dist/" ++ install_ps1.name;
+        if (std.fs.path.dirname(output)) |parent| try std.Io.Dir.cwd().createDirPath(zio.io(), parent);
+        try std.Io.Dir.cwd().writeFile(zio.io(), .{ .sub_path = output, .data = script.written() });
+        try std.Io.File.stdout().writeStreamingAll(zio.io(), try std.fmt.allocPrint(allocator, "{s}\n", .{output}));
+        return 0;
+    }
+    if (std.mem.eql(u8, kind, "install-script")) {
+        if (!std.mem.startsWith(u8, info.target, "linux-") and !std.mem.startsWith(u8, info.target, "macos-")) return error.WrongTarget;
+        if (package_options.github) |repository| if (!publish.validRepository(repository)) return error.InvalidRepository;
+        if (package_options.url) |url| if (!std.mem.endsWith(u8, url, "/") or !(std.mem.startsWith(u8, url, "https://") or std.mem.startsWith(u8, url, "http://"))) return error.InvalidUrl;
+        var script: std.Io.Writer.Allocating = .init(allocator);
+        const bundle = try std.fmt.allocPrint(allocator, "{s}.app", .{try macos.fileName(allocator, name)});
+        try install_script.write(&script.writer, .{ .app_name = name, .identity = info.identity, .stem = stem, .version = info.version, .github = package_options.github, .tag_prefix = package_options.tag_prefix, .url = package_options.url, .webview = package_options.webview, .bundle = bundle });
         const output = package_options.output orelse "dist/" ++ install_script.name;
         if (std.fs.path.dirname(output)) |parent| try std.Io.Dir.cwd().createDirPath(zio.io(), parent);
         try std.Io.Dir.cwd().writeFile(zio.io(), .{ .sub_path = output, .data = script.written(), .flags = .{ .permissions = zio.mode(0o755) } });
@@ -689,11 +1009,14 @@ fn dev(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
 
 fn childExited(child: *std.process.Child) !bool {
     if (builtin.os.tag == .windows) {
-        const windows = std.os.windows;
-        windows.WaitForSingleObject(child.id.?, 0) catch |err| switch (err) {
-            error.WaitTimeOut => return false,
-            else => return err,
+        const kernel32 = struct {
+            extern "kernel32" fn WaitForSingleObject(std.os.windows.HANDLE, u32) callconv(.winapi) u32;
         };
+        switch (kernel32.WaitForSingleObject(child.id.?, 0)) {
+            0 => {},
+            0x102 => return false, // WAIT_TIMEOUT
+            else => return error.WaitFailed,
+        }
         _ = try child.wait(zio.io());
         return true;
     }
@@ -743,6 +1066,7 @@ fn doctor(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         failed = true;
     }
     if (capture(allocator, &.{ "git", "--version" })) |version| report(.ok, "git", version) else report(.warning, "git", "not found");
+    if (capture(allocator, &.{ "gh", "--version" })) |version| report(.ok, "gh", version[0 .. std.mem.indexOfScalar(u8, version, '\n') orelse version.len]) else report(.warning, "gh", "not found (optional: publish --github, https://cli.github.com)");
     switch (builtin.os.tag) {
         .linux => {
             const packages = [_]struct { name: []const u8, required: bool }{
@@ -765,7 +1089,7 @@ fn doctor(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         },
         .windows => {
             const sdk = std.fs.path.join(allocator, &.{ options.framework_root, ".deps", "webview2", "build", "native", "include", "WebView2.h" }) catch unreachable;
-            if (std.Io.Dir.cwd().access(sdk, .{})) |_| report(.ok, "WebView2 SDK", sdk) else |_| {
+            if (std.Io.Dir.cwd().access(zio.io(), sdk, .{})) |_| report(.ok, "WebView2 SDK", sdk) else |_| {
                 report(if (webview) .missing else .warning, "WebView2 SDK", "not extracted; run scripts/fetch-webview2.ps1");
                 if (webview) failed = true;
             }
@@ -774,16 +1098,62 @@ fn doctor(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
                 if (webview) failed = true;
             }
         },
-        else => report(.warning, "platform", "no runtime backend for this operating system"),
-    }
-    if (readProject(allocator, std.Io.Dir.cwd())) |project| report(.ok, "project", project.identity) else |err| switch (err) {
-        error.MissingProjectFile => report(.warning, "project", "no ziggurat.json in this directory"),
-        else => {
-            report(.missing, "project", @errorName(err));
+        .macos => if (!try doctorMacOS(allocator)) {
             failed = true;
         },
+        else => report(.warning, "platform", "no runtime backend for this operating system"),
     }
+    const project = readProject(allocator, std.Io.Dir.cwd()) catch |err| switch (err) {
+        error.MissingProjectFile => blk: {
+            report(.warning, "project", "no ziggurat.json in this directory");
+            break :blk null;
+        },
+        else => blk: {
+            report(.missing, "project", @errorName(err));
+            failed = true;
+            break :blk null;
+        },
+    };
+    if (project) |info| report(.ok, "project", info.identity);
+    if (builtin.os.tag == .macos) if (project) |info| if (info.macos) |config| {
+        // What this project's macOS builds use beyond the system.
+        if (config.notarize != null) {
+            if (capture(allocator, &.{ "xcrun", "--find", "notarytool" })) |path| report(.ok, "notarytool", path) else {
+                report(.missing, "notarytool", "not found; macos.notarize needs Xcode 13 or later");
+                failed = true;
+            }
+        }
+        if (config.icon) |icon| if (std.ascii.eqlIgnoreCase(std.fs.path.extension(icon), ".icon")) {
+            if (capture(allocator, &.{ "xcrun", "--find", "actool" })) |path| report(.ok, "actool", path) else report(.warning, "actool", "not found; builds keep the .icns of icon instead of macos.icon (needs Xcode 26 or later)");
+        };
+    };
     return if (failed) 1 else 0;
+}
+
+/// The macOS this machine runs, the SDK that builds link against, and the
+/// identities that sign apps for other Macs. Fails without them.
+fn doctorMacOS(allocator: std.mem.Allocator) !bool {
+    var ok = true;
+    if (capture(allocator, &.{ "sw_vers", "-productVersion" })) |version| {
+        const major = std.fmt.parseInt(u32, version[0 .. std.mem.indexOfScalar(u8, version, '.') orelse version.len], 10) catch 0;
+        if (major >= 15) report(.ok, "macOS", version) else {
+            report(.missing, "macOS", try std.fmt.allocPrint(allocator, "{s} (macOS " ++ macos.default_minimum_system_version ++ " or later is required)", .{version}));
+            ok = false;
+        }
+    } else report(.warning, "macOS", "sw_vers not found");
+    if (capture(allocator, &.{ "xcode-select", "-p" })) |path| report(.ok, "developer tools", path) else {
+        report(.missing, "developer tools", "not found; install them with xcode-select --install");
+        ok = false;
+    }
+    if (capture(allocator, &.{ "xcrun", "--sdk", "macosx", "--show-sdk-path" })) |path| report(.ok, "macOS SDK", path) else {
+        report(.missing, "macOS SDK", "not found; builds link AppKit from it (xcode-select --install)");
+        ok = false;
+    }
+    if (capture(allocator, &.{ "security", "find-identity", "-v", "-p", "codesigning" })) |identities| {
+        const count = std.mem.count(u8, identities, "Developer ID Application");
+        if (count > 0) report(.ok, "codesign", try std.fmt.allocPrint(allocator, "{d} Developer ID identities", .{count})) else report(.warning, "codesign", "no Developer ID identity: apps are signed ad hoc and run only on this Mac");
+    } else report(.warning, "codesign", "security find-identity failed");
+    return ok;
 }
 
 fn webviewRuntimeVersion(allocator: std.mem.Allocator) ?[]const u8 {
@@ -1220,6 +1590,72 @@ test {
     _ = icon_mod;
     _ = winsign;
     _ = vet;
+    _ = macos;
+    _ = @import("dsstore.zig");
+    _ = install_ps1;
+}
+
+test "platforms name an operating system and an architecture" {
+    try std.testing.expectEqual(Platform{ .os = .macos, .arch = null }, try Platform.parse("darwin/universal"));
+    try std.testing.expectEqual(Platform{ .os = .macos, .arch = .aarch64 }, try Platform.parse("macos/arm64"));
+    try std.testing.expectEqual(Platform{ .os = .linux, .arch = .x86_64 }, try Platform.parse("linux/amd64"));
+    try std.testing.expectError(error.UnsupportedPlatform, Platform.parse("linux/universal"));
+    try std.testing.expectError(error.UnsupportedPlatform, Platform.parse("freebsd/x86_64"));
+    try std.testing.expectError(error.InvalidPlatform, Platform.parse("macos"));
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    try std.testing.expectEqualStrings("macos-universal", try (Platform{ .os = .macos, .arch = null }).name(allocator));
+    try std.testing.expectEqual(null, try Platform.host().triple(allocator));
+    const other: std.Target.Cpu.Arch = if (builtin.cpu.arch == .x86_64) .aarch64 else .x86_64;
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(allocator, "{s}-linux-gnu", .{@tagName(other)}), (try (Platform{ .os = .linux, .arch = other }).triple(allocator)).?);
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(allocator, "{s}-macos", .{@tagName(other)}), (try (Platform{ .os = .macos, .arch = other }).triple(allocator)).?);
+}
+
+test "ziggurat.json configures macOS bundles, checked when it is read" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "ziggurat.json", .data =
+        \\{"name": "Hello", "identity": "com.example.hello", "executable": "hello", "template": "native", "version": "1.2.0.0",
+        \\ "i18n": {"dir": "src/locales", "source": "en"}, "copyright": "(c) Example", "urlSchemes": ["hello"],
+        \\ "fileAssociations": [{"ext": ["hz"], "role": "Viewer"}],
+        \\ "macos": {"signingIdentity": "Developer ID Application: X (T)", "infoPlist": {"LSUIElement": true}, "notarize": {"keychainProfile": "ci"}}}
+    });
+    try temp.dir.createDirPath(zio.io(), "src/locales");
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "src/locales/en.json", .data = "{\"appName\": \"ignored\"}" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "src/locales/zh-Hans.json", .data = "{\"appName\": \"\\u4f60\\u597d\"}" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "src/locales/de.json", .data = "{\"greeting\": \"Hallo\"}" });
+    const project = try readProject(allocator, temp.dir);
+    try std.testing.expectEqualStrings("ci", project.macos.?.notarize.?.keychainProfile);
+    try checkMacOS(project, .{});
+    try std.testing.expectError(error.NotarizeNeedsDeveloperId, checkMacOS(project, .{ .sign = "-" }));
+    try checkMacOS(project, .{ .sign = "-", .skip_notarize = true });
+    const app = try macosApp(allocator, temp.dir, project);
+    try std.testing.expectEqual(@as(usize, 3), app.languages.len);
+    try std.testing.expectEqualStrings("en", app.languages[0].tag);
+    try std.testing.expectEqual(null, app.languages[0].name);
+    try std.testing.expectEqualStrings("de", app.languages[1].tag);
+    try std.testing.expectEqual(null, app.languages[1].name);
+    try std.testing.expectEqualStrings("\u{4f60}\u{597d}", app.languages[2].name.?);
+    const info = try macos.infoPlist(allocator, app, "Hello", false, false);
+    try std.testing.expect(std.mem.indexOf(u8, info, "<key>LSUIElement</key>\n\t<true/>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, info, "<string>Viewer</string>") != null);
+
+    for ([_][]const u8{
+        \\{"name": "A", "identity": "a.b", "executable": "a", "template": "native", "urlSchemes": ["1bad"]}
+        ,
+        \\{"name": "A", "identity": "a.b", "executable": "a", "template": "native", "fileAssociations": [{"ext": ["a.b"]}]}
+        ,
+        \\{"name": "A", "identity": "a.b", "executable": "a", "template": "native", "macos": {"icon": "icon.png"}}
+        ,
+        \\{"name": "A", "identity": "a.b", "executable": "a", "template": "native", "macos": {"notarize": {"keychainProfile": ""}}}
+    }) |bad| {
+        try temp.dir.writeFile(zio.io(), .{ .sub_path = "ziggurat.json", .data = bad });
+        if (readProject(allocator, temp.dir)) |_| return error.TestExpectedError else |_| {}
+    }
 }
 
 test "templates render without placeholders and identifiers are sanitized" {

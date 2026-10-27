@@ -206,6 +206,10 @@ pub fn send(fd: fd_t, bytes: []const u8, flags: u32) Error!usize {
 
 /// Moves a descriptor's file position to `offset` from the start.
 pub fn seekTo(fd: fd_t, offset: u64) Error!void {
+    if (builtin.os.tag == .windows) {
+        if (kernel32.SetFilePointerEx(fd, @intCast(offset), null, 0) == 0) return error.Unexpected;
+        return;
+    }
     if (libc) {
         try check(c.lseek(fd, @intCast(offset), c.SEEK.SET));
     } else {
@@ -215,10 +219,19 @@ pub fn seekTo(fd: fd_t, offset: u64) Error!void {
 
 /// A descriptor's file position.
 pub fn position(fd: fd_t) Error!u64 {
+    if (builtin.os.tag == .windows) {
+        var at: i64 = 0;
+        if (kernel32.SetFilePointerEx(fd, 0, &at, 1) == 0) return error.Unexpected;
+        return @intCast(at);
+    }
     const rc = if (libc) c.lseek(fd, 0, c.SEEK.CUR) else linux.lseek(fd, 0, linux.SEEK.CUR);
     try check(rc);
     return @intCast(rc);
 }
+
+const kernel32 = struct {
+    extern "kernel32" fn SetFilePointerEx(file: std.os.windows.HANDLE, distance: i64, new_position: ?*i64, method: u32) callconv(.winapi) c_int;
+};
 
 pub const ShutdownHow = enum { recv, send, both };
 

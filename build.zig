@@ -731,6 +731,11 @@ pub fn build(b: *std.Build) void {
         .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "pointer_classifier", .module = pointer_classifier } },
     });
     const declarative_view = b.addModule("ziggurat_view", .{ .root_source_file = b.path("src/view/root.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui }, .{ .name = "ziggurat_animation", .module = animation } } });
+    // The views' developer tools are left out of release builds, as their
+    // windows have none, unless asked for.
+    const view_options = b.addOptions();
+    view_options.addOption(bool, "inspector", b.option(bool, "inspector", "Build the views' inspector (default: Debug builds only)") orelse (optimize == .debug));
+    declarative_view.addOptions("ziggurat_view_options", view_options);
     const view_graphics = b.addModule("ziggurat_view_graphics", .{ .root_source_file = b.path("src/view/graphics.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
         .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_vector", .module = vector },
@@ -801,6 +806,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
         });
+        if (target.result.os.tag == .linux) addSmoke(b, "smoke-shader-effects-gl", "tests/shader_effects_gl_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
         addSmoke(b, "smoke-view", "tests/view_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
@@ -834,6 +843,26 @@ pub fn build(b: *std.Build) void {
     const run_shader_tests = b.addRunArtifact(shader_tests);
     test_step.dependOn(&run_shader_tests.step);
     b.step("test-shader", "Run shader language, bounded execution and uniform contracts").dependOn(&run_shader_tests.step);
+    if (target.result.os.tag == .linux) {
+        // Translated programs against the CPU machine on OpenGL (Mesa
+        // draws without a GPU); needs EGL and libepoxy.
+        const gl_parity = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/shader_gpu_gl.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "ziggurat_shader", .module = shader }} }) });
+        gl_parity.root_module.addCSourceFile(.{ .file = b.path("tests/shader_gpu_gl.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        gl_parity.root_module.linkSystemLibrary("epoxy", .{});
+        check.dependOn(&gl_parity.step);
+        b.step("test-shader-gl", "Run translated shader programs on OpenGL against the CPU machine").dependOn(&b.addRunArtifact(gl_parity).step);
+    }
+    if (target.result.os.tag == .windows) {
+        // Translated programs against the CPU machine on Direct3D 11 WARP,
+        // compiled by the system's HLSL compiler.
+        const d3d_parity = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/shader_gpu_d3d.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "ziggurat_shader", .module = shader }} }) });
+        d3d_parity.root_module.addCSourceFiles(.{ .files = &.{ "tests/shader_gpu_d3d.c", "src/ui/hlsl_compile.c" }, .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        d3d_parity.root_module.linkSystemLibrary("d3d11", .{});
+        check.dependOn(&d3d_parity.step);
+        const run_d3d_parity = b.addRunArtifact(d3d_parity);
+        test_step.dependOn(&run_d3d_parity.step);
+        b.step("test-shader-d3d", "Run translated shader programs on Direct3D 11 against the CPU machine").dependOn(&run_d3d_parity.step);
+    }
     const shaped_editor = b.addModule("ziggurat_shaped_editor", .{ .root_source_file = b.path("src/ui/shaped_editor.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat", .module = core },
         .{ .name = "ziggurat_ui", .module = ui },
@@ -1362,6 +1391,7 @@ pub fn build(b: *std.Build) void {
         _ = native_support.add(b, ui, "ui-d3d11-native", "src/ui/d3d11.c", &.{"-std=c11"}, target, optimize);
         _ = native_support.addArchive(b, ui, "ui-gradient-interpolation-native", "src/ui/gradient_interpolation.c", &.{"-std=c11"}, target, optimize);
         _ = native_support.addArchive(b, ui, "ui-gaussian-native", "src/ui/gaussian_gpu.c", &.{"-std=c11"}, target, optimize);
+        _ = native_support.addArchive(b, ui, "ui-hlsl-compile-native", "src/ui/hlsl_compile.c", &.{"-std=c11"}, target, optimize);
         for ([_][]const u8{ "d3d11", "dxgi", "d2d1", "dwrite", "user32" }) |library| ui.linkSystemLibrary(library, .{});
         for ([_][]const u8{ "default", "prepare" }) |kind| {
             const probe = b.addExecutable(.{ .name = b.fmt("gradient-program-{s}-link", .{kind}), .root_module = b.createModule(.{
@@ -1389,6 +1419,10 @@ pub fn build(b: *std.Build) void {
         const run_program_smoke = b.addRunFile(b.graph.path(.install_bin, "smoke-gradient-program.exe"));
         run_program_smoke.step.dependOn(&install_program_smoke.step);
         b.step("smoke-gradient-program", "Verify explicitly prepared interpolation programs, rollback and resource ownership").dependOn(&run_program_smoke.step);
+        addSmoke(b, "smoke-shader-effects-gpu", "tests/shader_effects_gpu_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
     }
     if (accessibility) {
         if (target.result.os.tag != .windows) @panic("UI Automation requires Windows");
@@ -1405,6 +1439,10 @@ pub fn build(b: *std.Build) void {
         const native = native_support.add(b, ui, "ui-cairo-native", "src/ui/linux.c", &.{"-std=c11"}, target, optimize);
         native.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .force });
         ui.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .force });
+        // Shader effects on OpenGL through libepoxy, which GTK already uses.
+        const gl_effects = native_support.add(b, ui, "ui-gl-effects-native", "src/ui/gl_effects.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        gl_effects.linkSystemLibrary("epoxy", .{ .use_pkg_config = .force });
+        ui.linkSystemLibrary("epoxy", .{ .use_pkg_config = .force });
         ui.link_libc = true;
         const content_host = b.addExecutable(.{ .name = "smoke-content-host", .root_module = b.createModule(.{
             .target = target,
@@ -2291,7 +2329,7 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&cli_tests.step);
     const run_cli_tests = b.addRunArtifact(cli_tests);
     test_step.dependOn(&run_cli_tests.step);
-    b.step("test-cli", "Run the ziggurat command's tests: templates, catalogs, S3 signing, install.sh, console output, icons, Windows signing and vet").dependOn(&run_cli_tests.step);
+    b.step("test-cli", "Run the ziggurat command's tests: templates, catalogs, S3 signing, install.sh and install.ps1, console output, icons, Windows signing, macOS bundles and disk image layout, and vet").dependOn(&run_cli_tests.step);
     // Measurement tools: apps' memory once idle, and how long input takes
     // to be painted.
     if (target.result.os.tag == .linux or target.result.os.tag == .windows) {

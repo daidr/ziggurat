@@ -145,7 +145,7 @@ const Job = struct {
     fn produceFile(self: *Job) !void {
         const file = try std.Io.Dir.cwd().openFile(zio.io(), self.state.file_path, .{});
         defer file.close();
-        try file.seekTo(3);
+        try zio.posix.seekTo(file.handle, 3);
         const prepared = try https.PreparedFileResponse.prepare(self.state.app.owner, file, large_length, self.file_request.?);
         var pump = prepared.pump;
         defer if (pump) |*value| value.deinit();

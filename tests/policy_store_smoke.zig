@@ -18,7 +18,7 @@ const Server = struct {
     fn run(self: *Server) void {
         while (true) {
             const connection = self.listener.accept(zio.io()) catch return;
-            defer connection.close();
+            defer connection.close(zio.io());
             if (self.stopping.load(.acquire)) return;
             self.serve(connection) catch {};
         }
@@ -51,9 +51,9 @@ const Server = struct {
         self.stopping.store(true, .release);
         self.gate.set();
         const wake = self.listener.socket.address.connect(zio.io(), .{ .mode = .stream }) catch unreachable;
-        wake.close();
+        wake.close(zio.io());
         self.thread.?.join();
-        self.listener.deinit();
+        self.listener.deinit(zio.io());
     }
 };
 const Preparation = struct {

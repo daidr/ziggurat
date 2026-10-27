@@ -107,14 +107,14 @@ fn signtool(allocator: std.mem.Allocator) !?[]const u8 {
     const program_files = zio.getEnvVarOwned(allocator, "ProgramFiles(x86)") catch return null;
     const bin = try std.fs.path.join(allocator, &.{ program_files, "Windows Kits", "10", "bin" });
     var dir = std.Io.Dir.cwd().openDir(zio.io(), bin, .{ .iterate = true }) catch return null;
-    defer dir.close();
+    defer dir.close(zio.io());
     const arch = if (builtin.cpu.arch == .aarch64) "arm64" else "x64";
     var newest: ?[]const u8 = null;
     var iterator = dir.iterate();
-    while (try iterator.next()) |entry| {
+    while (try iterator.next(zio.io())) |entry| {
         if (entry.kind != .directory or !std.mem.startsWith(u8, entry.name, "10.")) continue;
         const candidate = try std.fs.path.join(allocator, &.{ bin, entry.name, arch, "signtool.exe" });
-        std.Io.Dir.cwd().access(candidate, .{}) catch continue;
+        std.Io.Dir.cwd().access(zio.io(), candidate, .{}) catch continue;
         if (newest == null or std.mem.order(u8, candidate, newest.?) == .gt) newest = candidate;
     }
     return newest;

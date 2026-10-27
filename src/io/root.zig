@@ -651,3 +651,30 @@ pub fn tmpDir(options: std.Io.Dir.OpenOptions) TmpDir {
     const dir = parent_dir.createDirPathOpen(io(), &sub_path, .{ .open_options = options }) catch @panic("unable to make a temporary directory");
     return .{ .dir = dir, .parent_dir = parent_dir, .sub_path = sub_path };
 }
+
+/// `std.DynLib`, which Zig 0.17 no longer provides on Windows; there the
+/// library is loaded with LoadLibraryW and its symbols found by name.
+pub const DynLib = if (builtin.os.tag == .windows) struct {
+    module: std.os.windows.HMODULE,
+
+    const kernel32 = struct {
+        extern "kernel32" fn LoadLibraryW([*:0]const u16) callconv(.winapi) ?std.os.windows.HMODULE;
+        extern "kernel32" fn GetProcAddress(std.os.windows.HMODULE, [*:0]const u8) callconv(.winapi) ?*anyopaque;
+        extern "kernel32" fn FreeLibrary(std.os.windows.HMODULE) callconv(.winapi) std.os.windows.BOOL;
+    };
+
+    pub fn open(path: []const u8) error{ InvalidWtf8, NameTooLong, FileNotFound }!DynLib {
+        var wide: [std.os.windows.PATH_MAX_WIDE + 1]u16 = undefined;
+        if (path.len > std.os.windows.PATH_MAX_WIDE) return error.NameTooLong;
+        const len = try std.unicode.wtf8ToWtf16Le(&wide, path);
+        wide[len] = 0;
+        return .{ .module = kernel32.LoadLibraryW(wide[0..len :0]) orelse return error.FileNotFound };
+    }
+    pub fn close(self: *DynLib) void {
+        _ = kernel32.FreeLibrary(self.module);
+        self.* = undefined;
+    }
+    pub fn lookup(self: *DynLib, comptime T: type, name: [:0]const u8) ?T {
+        return @ptrCast(@alignCast(kernel32.GetProcAddress(self.module, name.ptr) orelse return null));
+    }
+} else std.DynLib;

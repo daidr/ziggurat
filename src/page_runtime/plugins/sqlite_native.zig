@@ -34,7 +34,7 @@ pub const default_names: []const []const u8 = switch (builtin.os.tag) {
 };
 
 pub const Library = struct {
-    lib: std.DynLib,
+    lib: zio.DynLib,
     open_v2: *const fn ([*:0]const u8, *?*Db, c_int, ?[*:0]const u8) callconv(.c) c_int,
     close_v2: *const fn (?*Db) callconv(.c) c_int,
     extended_result_codes: *const fn (*Db, c_int) callconv(.c) c_int,
@@ -69,15 +69,15 @@ pub const Library = struct {
 
     /// Loads `path`, or the first of `default_names` that loads.
     pub fn load(path: ?[]const u8) !Library {
-        if (path) |name| return bind(try std.DynLib.open(name));
+        if (path) |name| return bind(try zio.DynLib.open(name));
         for (default_names) |name| {
-            const lib = std.DynLib.open(name) catch continue;
+            const lib = zio.DynLib.open(name) catch continue;
             return bind(lib);
         }
         return error.LibraryNotFound;
     }
 
-    fn bind(opened: std.DynLib) !Library {
+    fn bind(opened: zio.DynLib) !Library {
         var lib = opened;
         errdefer lib.close();
         var self: Library = undefined;

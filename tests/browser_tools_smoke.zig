@@ -337,7 +337,7 @@ const PdfFile = struct {
             try self.directory.createDir(zio.io(), "profile", .default_dir);
             self.profile = try zio.realPathAlloc(self.directory, "profile", self.allocator);
             const file = try self.directory.createFile(zio.io(), "私有输出.pdf", .{});
-            defer file.close();
+            defer file.close(zio.io());
             try file.writeStreamingAll(zio.io(), "reserved private output");
             self.path = try zio.realPathAlloc(self.directory, "私有输出.pdf", self.allocator);
         } else if (self.mode == .verify) {
@@ -348,15 +348,15 @@ const PdfFile = struct {
             self.bytes = bytes.len;
         } else {
             self.waitForBrowsers() catch |err| {
-                self.directory.close();
-                self.private.parent_dir.close();
+                self.directory.close(zio.io());
+                self.private.parent_dir.close(zio.io());
                 self.private_closed = true;
                 std.debug.print("private profile retained because shutdown is unconfirmed: {?s}\n", .{self.profile});
                 return err;
             };
-            self.directory.close();
+            self.directory.close(zio.io());
             self.private_closed = true;
-            defer self.private.parent_dir.close();
+            defer self.private.parent_dir.close(zio.io());
             try self.private.parent_dir.deleteTree(zio.io(), &self.private.sub_path);
         }
     }

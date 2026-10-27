@@ -670,18 +670,7 @@ fn denied(item: *Connection, comptime message: []const u8) RunError {
 
 fn statAt(dir: std.Io.Dir, name: []const u8) !std.Io.File.Kind {
     if (is_windows) {
-        const w = std.os.windows;
-        const path = try w.sliceToPrefixedFileW(dir.handle, name);
-        const handle = try w.OpenFile(path.span(), .{
-            .dir = dir.handle,
-            .access_mask = w.FILE_READ_ATTRIBUTES | w.SYNCHRONIZE,
-            .creation = w.FILE_OPEN,
-            .filter = .any,
-            .follow_symlinks = false,
-        });
-        const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
-        defer file.close();
-        return (try file.stat()).kind;
+        return (try dir.statFile(zio.io(), name, .{ .follow_symlinks = false })).kind;
     }
     const linux = std.os.linux;
     const path = try std.posix.toPosixPath(name);

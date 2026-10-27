@@ -37,15 +37,15 @@ const Server = struct {
         if (self.thread) |thread| {
             self.stop_requested.store(true, .release);
             const wake = self.listener.socket.address.connect(zio.io(), .{ .mode = .stream }) catch unreachable;
-            wake.close();
+            wake.close(zio.io());
             thread.join();
         }
-        self.listener.deinit();
+        self.listener.deinit(zio.io());
     }
     fn run(self: *Server) void {
         while (true) {
             const connection = self.listener.accept(zio.io()) catch return;
-            defer connection.close();
+            defer connection.close(zio.io());
             if (self.stop_requested.load(.acquire)) return;
             self.serve(connection) catch {
                 self.bad.store(true, .release);

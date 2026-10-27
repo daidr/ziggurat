@@ -142,33 +142,12 @@ fn validName(name: []const u8) bool {
 
 fn openRegular(directory: std.Io.Dir, name: []const u8) !std.Io.File {
     if (builtin.os.tag == .windows) {
-        const windows = std.os.windows;
-        const path = try windows.sliceToPrefixedFileW(directory.fd, name);
-        var name_w: windows.UNICODE_STRING = .{
-            .Length = @intCast(path.span().len * 2),
-            .MaximumLength = @intCast(path.span().len * 2),
-            .Buffer = @constCast(path.span().ptr),
+        // Opened relative to the held parent, never following the final
+        // reparse point, with synchronous I/O for std.Io.File reads.
+        return directory.openFile(zio.io(), name, .{ .allow_directory = false, .follow_symlinks = false }) catch |err| switch (err) {
+            error.IsDir => error.NonRegularAsset,
+            else => err,
         };
-        var attributes: windows.OBJECT_ATTRIBUTES = .{
-            .Length = @sizeOf(windows.OBJECT_ATTRIBUTES),
-            .RootDirectory = directory.fd,
-            .Attributes = 0,
-            .ObjectName = &name_w,
-            .SecurityDescriptor = null,
-            .SecurityQualityOfService = null,
-        };
-        var handle: windows.HANDLE = undefined;
-        var io: windows.IO_STATUS_BLOCK = undefined;
-        // Open relative to the held parent and never follow the final reparse
-        // point. Synchronous I/O is explicit so std.Io.File reads can be used.
-        const status = windows.ntdll.NtCreateFile(&handle, windows.GENERIC_READ | windows.SYNCHRONIZE, &attributes, &io, null, windows.FILE_ATTRIBUTE_NORMAL, windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE, windows.FILE_OPEN, windows.FILE_NON_DIRECTORY_FILE | windows.FILE_OPEN_REPARSE_POINT | windows.FILE_SYNCHRONOUS_IO_NONALERT, null, 0);
-        switch (status) {
-            .SUCCESS => return .{ .handle = handle, .flags = .{ .nonblocking = false } },
-            .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
-            .ACCESS_DENIED => return error.AccessDenied,
-            .FILE_IS_A_DIRECTORY => return error.NonRegularAsset,
-            else => return windows.unexpectedStatus(status),
-        }
     }
     if (builtin.os.tag == .wasi) return error.UnsupportedPlatform;
     return .{ .handle = try zio.posix.openat(directory.handle, name, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .CLOEXEC = true, .NONBLOCK = true }, 0), .flags = .{ .nonblocking = true } };

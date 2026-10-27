@@ -373,18 +373,7 @@ pub fn lstatAbsolute(path: []const u8) !Entry {
 /// Stats `name` in `dir` without following a symlink.
 pub fn statAt(dir: std.Io.Dir, name: []const u8) !Entry {
     if (is_windows) {
-        const w = std.os.windows;
-        const path = try w.sliceToPrefixedFileW(dir.handle, name);
-        const handle = try w.OpenFile(path.span(), .{
-            .dir = dir.handle,
-            .access_mask = w.FILE_READ_ATTRIBUTES | w.SYNCHRONIZE,
-            .creation = w.FILE_OPEN,
-            .filter = .any,
-            .follow_symlinks = false,
-        });
-        const file: std.Io.File = .{ .handle = handle, .flags = .{ .nonblocking = false } };
-        defer file.close();
-        return fromStat(try file.stat());
+        return fromStat(try dir.statFile(zio.io(), name, .{ .follow_symlinks = false }));
     }
     const linux = std.os.linux;
     const path = try std.posix.toPosixPath(name);
@@ -402,7 +391,7 @@ pub fn statAt(dir: std.Io.Dir, name: []const u8) !Entry {
 pub fn statSelf(dir: std.Io.Dir) !Entry {
     if (is_windows) {
         const file: std.Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
-        return fromStat(try file.stat());
+        return fromStat(try file.stat(zio.io()));
     }
     const linux = std.os.linux;
     var stx = std.mem.zeroes(linux.Statx);
@@ -435,7 +424,7 @@ fn fromStat(stat: std.Io.File.Stat) Entry {
         .sym_link => .symlink,
         else => .other,
     };
-    return .{ .id = .{ .device = 0, .inode = @intCast(stat.inode), .kind = kind }, .size = stat.size, .mtime = stat.mtime };
+    return .{ .id = .{ .device = 0, .inode = @intCast(stat.inode), .kind = kind }, .size = stat.size, .mtime = stat.mtime.nanoseconds };
 }
 
 const Group = struct {

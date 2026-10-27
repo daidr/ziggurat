@@ -228,12 +228,13 @@ const windows = struct {
         dwFlags: u32,
         szExeFile: [260]u16,
     };
-    extern "kernel32" fn OpenProcess(access: u32, inherit: w.BOOL, pid: u32) callconv(.winapi) ?w.HANDLE;
-    extern "kernel32" fn K32GetProcessMemoryInfo(process: w.HANDLE, counters: *MemoryCounters, size: u32) callconv(.winapi) w.BOOL;
+    extern "kernel32" fn OpenProcess(access: u32, inherit: c_int, pid: u32) callconv(.winapi) ?w.HANDLE;
+    extern "kernel32" fn K32GetProcessMemoryInfo(process: w.HANDLE, counters: *MemoryCounters, size: u32) callconv(.winapi) c_int;
     extern "kernel32" fn CreateToolhelp32Snapshot(flags: u32, pid: u32) callconv(.winapi) w.HANDLE;
-    extern "kernel32" fn Process32FirstW(snapshot: w.HANDLE, entry: *ProcessEntry) callconv(.winapi) w.BOOL;
-    extern "kernel32" fn Process32NextW(snapshot: w.HANDLE, entry: *ProcessEntry) callconv(.winapi) w.BOOL;
-    extern "kernel32" fn TerminateProcess(process: w.HANDLE, code: u32) callconv(.winapi) w.BOOL;
+    extern "kernel32" fn WaitForSingleObject(handle: w.HANDLE, milliseconds: u32) callconv(.winapi) u32;
+    extern "kernel32" fn Process32FirstW(snapshot: w.HANDLE, entry: *ProcessEntry) callconv(.winapi) c_int;
+    extern "kernel32" fn Process32NextW(snapshot: w.HANDLE, entry: *ProcessEntry) callconv(.winapi) c_int;
+    extern "kernel32" fn TerminateProcess(process: w.HANDLE, code: u32) callconv(.winapi) c_int;
     extern "kernel32" fn GetProcessId(process: w.HANDLE) callconv(.winapi) u32;
 
     fn id(child: *std.process.Child) u32 {
@@ -242,8 +243,7 @@ const windows = struct {
 
     fn waitExit(child: *std.process.Child, timeout_ns: u64) bool {
         const ms: u32 = @intCast(@min(timeout_ns / std.time.ns_per_ms, std.math.maxInt(u32) - 1));
-        w.WaitForSingleObject(child.id.?, ms) catch return false;
-        return true;
+        return WaitForSingleObject(child.id.?, ms) == 0;
     }
 
     /// The app, then the processes it started and theirs. A parent's ID

@@ -89,7 +89,7 @@ pub fn fileKey(file: std.Io.File) !FileKey {
     switch (builtin.os.tag) {
         .windows => {
             var info: ByHandleFileInformation = undefined;
-            if (GetFileInformationByHandle(file.handle, &info) == 0) return error.Unexpected;
+            if (GetFileInformationByHandle(file.handle, &info) == .FALSE) return error.Unexpected;
             return .{ .device = info.volume_serial, .inode = (@as(u64, info.index_high) << 32) | info.index_low };
         },
         .linux, .macos, .freebsd, .netbsd, .openbsd => {
