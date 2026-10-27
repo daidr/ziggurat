@@ -562,21 +562,22 @@ pub fn translate(gpa: std.mem.Allocator, program: *const Program, language: Lang
         }
     } else {
         // A loop over basic blocks, bounded by the program's step count.
+        // The blocks are a flat run of ifs rather than a switch, because the
+        // Direct3D compiler fails on assignments in switch cases inside a loop.
         try e.print("  uint pc = {d}u;\n", .{program.entry});
         if (language == .hlsl) try e.write("  [loop]\n");
         try e.print("  for (uint guard = 0u; guard <= {d}u; guard++) {{\n", .{@as(u64, program.max_steps) + 1});
         try e.write("    if (pc == 0xFFFFFFFFu) break;\n");
-        try e.write("    switch (pc) {\n");
         var pc: usize = 0;
         while (pc < code.len) : (pc += 1) {
             if (!reachable[pc] or !leader[pc]) continue;
-            try e.print("    case {d}{s}: {{\n", .{ pc, if (language == .glsl) "u" else "" });
+            try e.print("    if (pc == {d}u) {{\n", .{pc});
             var at_pc = pc;
             while (true) : (at_pc += 1) {
                 const ins = code[at_pc];
                 switch (ins.op) {
                     .halt => {
-                        try e.write("      pc = 0xFFFFFFFFu; break;\n");
+                        try e.write("      pc = 0xFFFFFFFFu; continue;\n");
                         break;
                     },
                     .fault => {
@@ -584,19 +585,19 @@ pub fn translate(gpa: std.mem.Allocator, program: *const Program, language: Lang
                         break;
                     },
                     .jump => {
-                        try e.print("      pc = {d}u; break;\n", .{ins.dst});
+                        try e.print("      pc = {d}u; continue;\n", .{ins.dst});
                         break;
                     },
                     .jump_zero => {
-                        try e.print("      pc = r{d} == 0u ? {d}u : {d}u; break;\n", .{ ins.a, ins.dst, at_pc + 1 });
+                        try e.print("      pc = r{d} == 0u ? {d}u : {d}u; continue;\n", .{ ins.a, ins.dst, at_pc + 1 });
                         break;
                     },
                     .call => {
-                        try e.print("      r{d} = {d}u; pc = {d}u; break;\n", .{ ins.a, at_pc + 1, ins.dst });
+                        try e.print("      r{d} = {d}u; pc = {d}u; continue;\n", .{ ins.a, at_pc + 1, ins.dst });
                         break;
                     },
                     .ret => {
-                        try e.print("      pc = r{d}; break;\n", .{ins.a});
+                        try e.print("      pc = r{d}; continue;\n", .{ins.a});
                         break;
                     },
                     else => try e.instruction(ins, "      "),
@@ -606,14 +607,13 @@ pub fn translate(gpa: std.mem.Allocator, program: *const Program, language: Lang
                     break;
                 }
                 if (leader[at_pc + 1]) {
-                    try e.print("      pc = {d}u; break;\n", .{at_pc + 1});
+                    try e.print("      pc = {d}u; continue;\n", .{at_pc + 1});
                     break;
                 }
             }
             try e.write("    }\n");
         }
-        try e.write("    default: return false;\n");
-        try e.write("    }\n");
+        try e.write("    return false;\n");
         try e.write("  }\n");
         try e.write("  if (pc != 0xFFFFFFFFu) return false;\n");
     }
@@ -650,7 +650,7 @@ test "translation uploads size, scale, uniforms and prologue results" {
         try std.testing.expectEqualSlices(u16, &.{ 0, 1, 2, 3 }, translation.inputs[0..4]);
         try std.testing.expect(std.mem.indexOf(u8, translation.source, "bool zs_run(") != null);
         // Calls and the loop run as basic blocks.
-        try std.testing.expect(std.mem.indexOf(u8, translation.source, "switch (pc)") != null);
+        try std.testing.expect(std.mem.indexOf(u8, translation.source, "if (pc == ") != null);
         var values = machine_module.Values.init(program);
         try values.set(program.uniform("amount").?, @as(f32, 1.5));
         var m: machine_module.Machine = .{};
@@ -669,5 +669,5 @@ test "translation uploads size, scale, uniforms and prologue results" {
     defer straight.destroy();
     var translation = try translate(std.testing.allocator, straight, .glsl);
     defer translation.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, translation.source, "switch (pc)") == null);
+    try std.testing.expect(std.mem.indexOf(u8, translation.source, "if (pc == ") == null);
 }
