@@ -563,19 +563,20 @@ if (try v.presentColumn(&state.panel, state.open, .{ .hidden = .{ .y = 12, .scal
 
 ```zig
 var inspector: view.Inspector = .{};
-var host = view.Host.init(&app, App.build, storage.buffers(), .{
-    .inspector = if (builtin.mode == .Debug) &inspector else null,
-});
+var host = view.Host.init(&app, App.build, storage.buffers(), .{ .inspector = &inspector });
 ```
 
+只有带 inspector 的构建才有它：默认是 Debug 构建，`-Dinspector=true` 或 `-Dinspector=false` 改变这一点（`view.inspector.enabled`）。不带它的构建（`ziggurat build` 默认的 ReleaseSafe 等发布构建）里 Host 与 Harness 忽略 `Options.inspector`，`Options.tools()` 在编译期就是 null，inspector 的代码不会编进程序。
+
 - 打开与拾取：F12 或 Ctrl+Shift+I 打开或关闭，Ctrl+Shift+C 打开并进入拾取，Escape 停止拾取；`enabled = false` 时这些键交给视图。打开时内容得到窗口减去面板的宽度（默认 420 DIP，至少 260，给内容留至少 160；窗口窄于 520 时各占一半），拖动面板左缘改变宽度。面板按主题背景的明暗选用浅色或深色配色，自身始终从左到右。
-- 元素树：每个元素按种类写成标签（`<Button>`、`<TreeRow>`、根是 `<Column>`），带 `key` 与 `name` 属性和文本节点的文字；靠近根的三层默认展开，点三角展开或收起，按住 Alt 展开或收起其中全部。悬停一行在内容上高亮它的元素：内容蓝色、内边距绿色、边框黄色，附带提示框（种类与 key、尺寸、文字颜色与字体、背景、内边距，以及辅助技术看到的名称、角色和能否用键盘聚焦）。点一行选中；面板有键盘时上下键、Home/End 移动选中，左键收起或回到父元素，右键展开或进入第一个子元素。树下的路径条显示从根到选中元素的路径，点其中一项选中它。
+- 元素树：每个元素按种类写成标签（`<Button>`、`<TreeRow>`、根是 `<Column>`），带 `key` 与 `name` 属性和文本节点的文字；靠近根的三层默认展开，点三角展开或收起，按住 Alt 展开或收起其中全部。悬停一行在内容上高亮它的元素：内容蓝色、内边距绿色、边框黄色，附带提示框（种类与 key、尺寸、文字颜色与字体、背景、内边距，以及辅助技术看到的名称、角色和能否用键盘聚焦）。点一行选中；面板有键盘时上下键、Home/End 移动选中，左键收起或回到父元素，右键展开或进入第一个子元素。面板有键盘时 Ctrl+F 在树上方打开查找栏：输入的文字（不区分大小写）匹配元素的标签名、文字、`name` 或 `key`，选中第一个匹配并在树中展开、滚动到它，查找栏显示“第几个/共几个”；Enter 与 Shift+Enter（或栏里的上下箭头）在匹配之间前后移动，Backspace 删字，Escape 或 × 关闭。打开查找栏时窗口里持有键盘的文本字段失去焦点，输入进入查找栏；Harness 用 `typeText` 输入。树下的路径条显示从根到选中元素的路径，点其中一项选中它。
 - 拾取：工具栏的拾取按钮或 Ctrl+Shift+C 之后，指针下最内层的元素高亮（浮层优先于流内元素），按下选中它并在树中展开到它；这次按下和松开交给 inspector，不会点到元素。
-- 详情：Styles 把元素设置的样式写成一条 CSS 规则（`flex-direction`、`gap`、`padding`、`border`、`background-color`、`font-size`、`white-space`、`line-clamp` 等）；Computed 画出边框、内边距与内容的盒模型及尺寸，再按名称列出布局后的值（位置、尺寸、方向、字体、颜色、不透明度，滚动容器的滚动偏移与内容尺寸）；Properties 列出种类、id、key、文字，状态（焦点、悬停、禁用、选中或数值），以及辅助技术看到的名称、角色和能否聚焦。
-- 性能与问题：Performance 显示最近 120 帧构建、排列与绘制的耗时柱状图，以及最近一帧、平均、最慢、显示器刷新率（`refresh_hz`，默认 60）和元素数，参考线是一帧的预算。Issues 列出构建中发现的问题，工具栏显示其数量：同一父元素下两个元素给了同一个 `key` 时它们共享一个身份，点击、焦点或滚动会落到另一个上；每个问题只记一次。帧的元素超过 `max_elements`（1024）时树只显示前面的部分并记为问题。
+- 详情：Styles 把元素设置的样式写成一条 CSS 规则（`flex-direction`、`gap`、`padding`、`border`、`background-color`、`font-size`、`white-space`、`line-clamp` 等）；Computed 画出边框、内边距与内容的盒模型及尺寸，再按名称列出布局后的值（位置、尺寸、方向、字体、颜色、不透明度，滚动容器的滚动偏移与内容尺寸）；Properties 列出种类、id、key、构建位置、文字，状态（焦点、悬停、禁用、选中或数值），以及辅助技术看到的名称、角色和能否聚焦。
+- 源码位置：面板打开时，视图构建选中元素的那一刻记下调用栈（只对这一个元素，每遍一次），inspector 用构建的调试信息找出第一个不在视图自身文件和标准库里的调用，即应用调用 `v.button(...)` 等的文件与行。Styles 的规则右侧显示文件名与行号，Properties 的 `built at` 显示完整路径；`Inspector.source()` 返回它。调用栈变化时才重新查找，查找时调试信息的读取会分配内存；没有调试信息的构建不显示。
+- 性能与问题：Performance 显示最近 120 帧构建、排列与绘制的耗时柱状图，以及最近一帧、平均、最慢、显示器刷新率（`refresh_hz`，默认 60）和元素数，参考线是一帧的预算。Issues 列出构建中发现的问题，工具栏显示其数量：同一父元素下两个元素给了同一个 `key` 时它们共享一个身份，点击、焦点或滚动会落到另一个上；每个问题只记一次。Harness 默认（`Config.strict`）在这种构建上直接让 `render` 返回 `error.DuplicateKey`，`issue()` 给出说明，测试因此在出错的地方失败。帧的元素超过 `max_elements`（1024）时树只显示前面的部分并记为问题。
 - 工具栏的 RTL 按钮把窗口按从右到左布局，再点恢复，用来在翻译之前检查界面；它设置 `direction_override`，Host 与 Harness 在下一遍应用它。
 
-inspector 在视图之后绘制在同一帧上，并先于视图接收落在面板上的指针、滚轮以及它自己的按键，因此不向视图增加节点、控件或可访问性元素，也不占用视图的存储。它显示上一帧排列后的元素，复制在自身的固定存储里（约 300 KB），不分配；应用把它放在稳定的地址，通常只在调试构建中传入。Harness 的 `key`、`clickAt`、`press`/`moveTo`/`release`、`hoverAt`、`wheel`、`cursor()` 与 `image` 按 Host 相同的顺序经过它。面板没有元素查找（Ctrl+F），也不记录构建元素的源码位置。
+inspector 在视图之后绘制在同一帧上，并先于视图接收落在面板上的指针、滚轮以及它自己的按键，因此不向视图增加节点、控件或可访问性元素，也不占用视图的存储。它显示上一帧排列后的元素，复制在自身的固定存储里（约 300 KB），不分配；应用把它放在稳定的地址。Harness 的 `key`、`clickAt`、`press`/`moveTo`/`release`、`hoverAt`、`wheel`、`cursor()` 与 `image` 按 Host 相同的顺序经过它。显示器刷新率需要应用设置 `refresh_hz`，Host 不从显示器读取。
 
 ## 当前范围
 
