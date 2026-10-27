@@ -14,7 +14,7 @@ const State = struct {
     commands: [8]system.now_playing.Command = undefined,
     positions: [8]u64 = undefined,
     count: usize = 0,
-    phase: u8 = 0,
+    phase: u16 = 0,
     failure: ?[]const u8 = null,
 
     fn onCommand(context: *anyopaque, command: system.now_playing.Command, position_ns: u64) void {
@@ -47,9 +47,11 @@ const State = struct {
     fn verify(context: *anyopaque) void {
         const self: *State = @ptrCast(@alignCast(context));
         if (self.count < 2) {
-            // The window's messages may come after this task; look again.
+            // The window's messages come after this task. A turn runs at
+            // most 256 tasks before it reads the message queue, so look again
+            // across more than one turn.
             self.phase += 1;
-            if (self.phase > 100) return self.fail("commands did not arrive");
+            if (self.phase > 1000) return self.fail("commands did not arrive");
             self.app.post(.{ .context = self, .call = verify }) catch return self.fail("post");
             return;
         }
