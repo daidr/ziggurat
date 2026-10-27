@@ -358,9 +358,10 @@ static double weight_trait(uint16_t weight){
     int index=(int)lround((double)weight/100)-1;if(index<0)index=0;if(index>8)index=8;return traits[index];
 }
 static CTFontRef create_font(const char *named,float size,uint16_t weight,int italic,int monospace){
+    if(named&&(!strcmp(named,"Serif")||!strcmp(named,"serif")||!strcmp(named,"ui-serif")))named="Times New Roman";
     int system=!named||!named[0]||!strcmp(named,"Sans")||!strcmp(named,"sans-serif")||!strcmp(named,"system-ui");
     int fixed=monospace&&(!named||!named[0]||!strcmp(named,"Monospace")||!strcmp(named,"monospace"));
-    if(named&&(!strcmp(named,"Monospace")||!strcmp(named,"monospace"))){system=1;fixed=1;}
+    if(named&&(!strcmp(named,"Monospace")||!strcmp(named,"monospace")||!strcmp(named,"ui-monospace"))){system=1;fixed=1;}
     CFMutableDictionaryRef attributes=CFDictionaryCreateMutable(NULL,0,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
     CFMutableDictionaryRef traits=CFDictionaryCreateMutable(NULL,0,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
     if(!attributes||!traits){if(attributes)CFRelease(attributes);if(traits)CFRelease(traits);return NULL;}

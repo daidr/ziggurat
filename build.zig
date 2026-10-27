@@ -417,6 +417,10 @@ pub fn build(b: *std.Build) void {
         }
         fonts.link_libc = true;
     }
+    if (target.result.os.tag == .macos) {
+        _ = native_support.add(b, fonts, "fonts-native", "src/fonts/macos.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native_support.linkFrameworks(b, fonts, &.{ "CoreFoundation", "CoreText" });
+    }
     if (target.result.os.tag == .windows) {
         _ = native_support.add(b, fonts, "fonts-native", "src/fonts/windows.c", &.{"-std=c11"}, target, optimize);
         fonts.linkSystemLibrary("dwrite", .{});

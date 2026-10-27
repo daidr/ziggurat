@@ -29,7 +29,8 @@ static double weight_trait(uint32_t weight){
 }
 static int named_as(const char *family,const char *a,const char *b,const char *c){return !strcmp(family,a)||!strcmp(family,b)||(c&&!strcmp(family,c));}
 static CTFontRef create_font(const char *family,float size,uint32_t weight,int italic){
-    const int fixed=named_as(family,"Monospace","monospace",NULL);
+    if(named_as(family,"Serif","serif","ui-serif"))family="Times New Roman";
+    const int fixed=named_as(family,"Monospace","monospace","ui-monospace");
     const int system=!family[0]||fixed||named_as(family,"Sans","sans-serif","system-ui");
     CFMutableDictionaryRef attributes=CFDictionaryCreateMutable(NULL,0,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
     CFMutableDictionaryRef traits=CFDictionaryCreateMutable(NULL,0,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
