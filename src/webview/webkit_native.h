@@ -59,6 +59,10 @@ typedef struct ZwkOptions {
     ZwkProfileContext *profile_context;
     const ZwkInitializerInput *initializers;
     uint32_t developer_tools;
+    /* WebKitUserContentFilter references the manager adds before any load. */
+    void *const *content_filters;
+    uint32_t content_filter_count;
+    uint32_t audio_muted;
 } ZwkOptions;
 enum ZwkResult { ZWK_OK=0, ZWK_CLOSED=1, ZWK_FULL=2, ZWK_OOM=3, ZWK_INVALID=4, ZWK_NATIVE_FAILED=5, ZWK_NOT_READY=6, ZWK_NAVIGATION_PENDING=7, ZWK_IPC_DENIED=8, ZWK_NO_HISTORY=9, ZWK_NAVIGATION_CANCELLED=10, ZWK_GEOMETRY_NOT_APPLIED=11, ZWK_INITIALIZER_BUDGET=12, ZWK_DEVTOOLS_DISABLED=13 };
 enum ZwkPolicyFailure { ZWK_POLICY_MISMATCH=1, ZWK_POLICY_TIMEOUT=2, ZWK_POLICY_PREPARATION=3 };
@@ -72,6 +76,10 @@ int zwk_session_park(ZwkState *,uint64_t epoch);
 int zwk_session_size(ZwkState *,uint32_t *width,uint32_t *height);
 void zwk_session_parent_destroying(ZwkState *,uint64_t epoch);
 void zwk_close(ZwkState *);
+/* op 0 reads muted, 1 sets muted from *value, 2 reads whether the page plays audio. */
+int zwk_audio(ZwkState *,int op,int *value);
+/* Replaces the content filters of the view's user content manager. */
+int zwk_content_filters(ZwkState *,void *const *filters,uint32_t count);
 int zwk_evaluate(ZwkState *,const char *,uint64_t);
 void zwk_evaluate_cancel(ZwkState *,uint64_t);
 int zwk_post(ZwkState *,const char *);

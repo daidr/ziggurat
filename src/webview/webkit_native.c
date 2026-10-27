@@ -394,6 +394,13 @@ static void title_changed(GObject *view,GParamSpec *property,gpointer data) {
     if (document(s)) (void)page(s,4,0,0,webkit_web_view_get_title(WEBKIT_WEB_VIEW(view)));
     release(s);
 }
+/* Audibility belongs to the view, not a document: it is told between
+   documents too, under the current generation. */
+static void audible_changed(GObject *view,GParamSpec *property,gpointer data) {
+    (void)property; ZwkState *s=data; retain(s);
+    if (live(s)) (void)page(s,7,webkit_web_view_is_playing_audio(WEBKIT_WEB_VIEW(view))?1u:0u,0,NULL);
+    release(s);
+}
 static void source_changed(GObject *view,GParamSpec *property,gpointer data) {
     (void)property;ZwkState *s=data;retain(s);
     if (live(s) && !webkit_web_view_is_loading(WEBKIT_WEB_VIEW(view))) {
@@ -710,6 +717,7 @@ static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t
     if (!webkit_user_content_manager_register_script_message_handler_in_world(s->manager,"ziggurat","ziggurat-private")) {
         zwk_close(s); return ZWK_NATIVE_FAILED;
     }
+    for (uint32_t i=0;i<options->content_filter_count;i++) webkit_user_content_manager_add_filter(s->manager,options->content_filters[i]);
     static const char csp[]="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; "
         "connect-src 'none'; frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
     s->view=g_object_new(WEBKIT_TYPE_WEB_VIEW,"web-context",s->context,"user-content-manager",s->manager,
@@ -737,6 +745,7 @@ static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t
     webkit_settings_set_allow_universal_access_from_file_urls(settings,FALSE);
     if (options->user_agent) webkit_settings_set_user_agent(settings,options->user_agent);
     webkit_web_view_set_zoom_level(WEBKIT_WEB_VIEW(s->view),options->zoom);
+    webkit_web_view_set_is_muted(WEBKIT_WEB_VIEW(s->view),options->audio_muted!=0);
     g_signal_connect(s->manager,"script-message-received::ziggurat",G_CALLBACK(message),s);
     g_signal_connect(s->context,"download-started",G_CALLBACK(downloaded),s);
     g_signal_connect(s->view,"decide-policy",G_CALLBACK(policy),s);
@@ -745,6 +754,7 @@ static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t
     g_signal_connect(s->view,"load-failed",G_CALLBACK(load_failed),s);
     g_signal_connect(s->view,"web-process-terminated",G_CALLBACK(process_failed),s);
     g_signal_connect(s->view,"notify::title",G_CALLBACK(title_changed),s);
+    g_signal_connect(s->view,"notify::is-playing-audio",G_CALLBACK(audible_changed),s);
     if (s->local.budget || s->remote) {
         g_signal_connect(s->view,"notify::uri",G_CALLBACK(source_changed),s);
         g_signal_connect(s->view,"notify::is-loading",G_CALLBACK(loading_changed),s);
@@ -897,6 +907,23 @@ int zwk_zoom(ZwkState *s,double *value,int write) {
     if (!live(s)) return ZWK_CLOSED;
     if (write) webkit_web_view_set_zoom_level(WEBKIT_WEB_VIEW(s->view),*value);
     else *value=webkit_web_view_get_zoom_level(WEBKIT_WEB_VIEW(s->view));
+    return ZWK_OK;
+}
+int zwk_audio(ZwkState *s,int op,int *value) {
+    if (!live(s)) return ZWK_CLOSED;
+    WebKitWebView *view=WEBKIT_WEB_VIEW(s->view);
+    switch (op) {
+    case 0: *value=webkit_web_view_get_is_muted(view)?1:0; return ZWK_OK;
+    case 1: webkit_web_view_set_is_muted(view,*value!=0); return ZWK_OK;
+    case 2: *value=webkit_web_view_is_playing_audio(view)?1:0; return ZWK_OK;
+    }
+    return ZWK_INVALID;
+}
+int zwk_content_filters(ZwkState *s,void *const *filters,uint32_t count) {
+    if (!live(s)) return ZWK_CLOSED;
+    if (count && !filters) return ZWK_INVALID;
+    webkit_user_content_manager_remove_all_filters(s->manager);
+    for (uint32_t i=0;i<count;i++) webkit_user_content_manager_add_filter(s->manager,filters[i]);
     return ZWK_OK;
 }
 int zwk_user_agent(ZwkState *s,const char *set,char **get) {

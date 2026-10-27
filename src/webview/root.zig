@@ -61,11 +61,16 @@ pub const SchemeRegistration = schemes.Registration;
 pub const permissions = @import("permissions.zig");
 pub const downloads = @import("downloads.zig");
 pub const policy_store = @import("policy_store.zig");
+pub const content_rules = @import("content_rules.zig");
+const content_rule_lists = @import("content_rule_lists.zig");
+pub const ContentRules = content_rule_lists.Type(z);
+pub const contentRulesCompileCount = content_rule_lists.nativeCompileCount;
 const page_sessions = @import("page_session.zig");
 pub const PageSession = page_sessions.Type(View, SessionHooks);
 test {
     _ = policy_store;
     _ = custom_local;
+    _ = content_rules;
 }
 pub const DownloadDestination = downloads.Destination;
 pub const PermissionId = struct {
@@ -164,6 +169,9 @@ pub const PageEvent = union(enum) {
     source_changed: struct { id: PageId, uri: ?[]const u8 },
     title_changed: struct { id: PageId, title: ?[]const u8 },
     history_changed: struct { id: PageId, can_go_back: bool, can_go_forward: bool },
+    /// The page started or stopped making sound (isAudible). It belongs to
+    /// the view rather than a document, and carries the current page id.
+    audible_changed: struct { id: PageId, audible: bool },
 };
 pub const PageListener = struct {
     /// Stable until detach. Strings are borrowed until return. Null metadata
@@ -354,6 +362,12 @@ pub const Options = struct {
     /// Remote/file/frame navigation remains denied. Host navigateLocal is explicit.
     allow_local_navigation: bool = false,
     page_listener: ?PageListener = null,
+    /// Rules that block what the page loads and hide parts of it, from its
+    /// first load, as setContentRules does. The configuration holds its own
+    /// references.
+    content_rules: []const *ContentRules = &.{},
+    /// The page starts muted, as setAudioMuted(true) does.
+    audio_muted: bool = false,
 };
 
 const NativePageEvent = webkit.PageEvent;
@@ -382,7 +396,7 @@ const NativeActions = extern struct {
     download_offer: ?*const fn (*anyopaque, [*:0]const u16, [*:0]const u16, [*:0]const u16, i64, *anyopaque) callconv(.c) void = null,
     download_notify: ?*const fn (*anyopaque, u64, u32, u64, i64, i32) callconv(.c) void = null,
 };
-const NativeSettings = extern struct { zoom: f64, user_agent: ?[*:0]const u16, devtools: bool, tool_flags: u32, tool_limit: u32, max_cookies: u32, max_cookie_bytes: u32, max_capture_bytes: u32, schemes: ?[*]const NativeScheme, scheme_count: u32, local_ipc: bool, actions: ?*const NativeActions, initializers: ?*const initializer_owner.NativeInput, owned_context: ?*anyopaque };
+const NativeSettings = extern struct { zoom: f64, user_agent: ?[*:0]const u16, devtools: bool, tool_flags: u32, tool_limit: u32, max_cookies: u32, max_cookie_bytes: u32, max_capture_bytes: u32, schemes: ?[*]const NativeScheme, scheme_count: u32, local_ipc: bool, actions: ?*const NativeActions, initializers: ?*const initializer_owner.NativeInput, owned_context: ?*anyopaque, audio_muted: bool, content_verdict: ?ContentVerdict, content_style: ?[*:0]const u16 };
 const PermissionScratch = struct {
     rows: [permissions.origin_capacity]NativePermissionGrant = undefined,
     text: [permissions.origin_capacity][schemes.origin_limit + 1:0]u16 = undefined,
@@ -527,6 +541,9 @@ extern fn zwv_eval_timer_create(*?*anyopaque) i32;
 extern fn zwv_eval_timer_arm(*anyopaque, u64) i32;
 extern fn zwv_eval_timer_close(*anyopaque) void;
 extern fn zwv_zoom(*anyopaque, *f64, bool) i32;
+extern fn zwv_audio(*anyopaque, c_int, *c_int) i32;
+const ContentVerdict = *const fn (*anyopaque, [*:0]const u16, ?[*:0]const u16, c_int) callconv(.c) u32;
+extern fn zwv_content_rules(*anyopaque, ?ContentVerdict, ?[*:0]const u16) i32;
 extern fn zwv_user_agent(*anyopaque, ?[*:0]const u16, ?*?[*:0]u16) i32;
 extern fn zwv_string_free([*:0]u16) void;
 extern fn zwv_devtools(*anyopaque, *bool, bool, bool) i32;
@@ -702,6 +719,9 @@ const OwnedConfig = struct {
     download_config: ?downloads.OwnedOrigins = null,
     initializer_config: ?*initializer_owner.Config = null,
     profile_state: ?*ProfileState = null,
+    /// References to Options.content_rules, which options.content_rules
+    /// then names.
+    rule_lists: ?[]*ContentRules = null,
     fn copy(storage: []u8, offset: *usize, text: []const u8) []const u8 {
         const result = storage[offset.* .. offset.* + text.len];
         @memcpy(result, text);
@@ -762,6 +782,20 @@ const OwnedConfig = struct {
         return initCommon(allocator, options, persistent, domain);
     }
     fn initCommon(allocator: std.mem.Allocator, options: Options, persistent: bool, domain: ?*anyopaque) !OwnedConfig {
+        if (options.content_rules.len != 0) {
+            const lists = try allocator.alloc(*ContentRules, options.content_rules.len);
+            errdefer allocator.free(lists);
+            var cleaned = options;
+            cleaned.content_rules = &.{};
+            var result = try initCommonRules(allocator, cleaned, persistent, domain);
+            for (options.content_rules, lists) |rules, *slot| slot.* = rules.retain();
+            result.rule_lists = lists;
+            result.options.content_rules = lists;
+            return result;
+        }
+        return initCommonRules(allocator, options, persistent, domain);
+    }
+    fn initCommonRules(allocator: std.mem.Allocator, options: Options, persistent: bool, domain: ?*anyopaque) !OwnedConfig {
         if (domain) |value| try initializer_owner.validateSharedLimits(options.initializer_limits, value);
         if (options.document_initializers.len != 0) {
             const owned = (try initializer_owner.Config.create(allocator, options.document_initializers, options.initializer_limits, domain)).?;
@@ -980,6 +1014,10 @@ const OwnedConfig = struct {
         previous.close() catch unreachable;
     }
     fn deinit(self: OwnedConfig, allocator: std.mem.Allocator) void {
+        if (self.rule_lists) |lists| {
+            for (lists) |rules| rules.release();
+            allocator.free(lists);
+        }
         // Withdraw every linear native entry before any foreign destructor.
         var profile_context: ?native_profiles.Context = null;
         var pending_context: ?native_profiles.Context = null;
@@ -1092,6 +1130,9 @@ pub const View = struct {
     zoom_override: ?f64 = null,
     agent_override: ?[]u8 = null,
     devtools_override: ?bool = null,
+    /// setContentRules' references, which replace the configuration's.
+    rules_override: ?[]*ContentRules = null,
+    muted_override: ?bool = null,
     tool_book: tools.Book = .{},
     tool_accepting: bool = true,
     resource_book: resources.Book = .{},
@@ -1418,7 +1459,9 @@ pub const View = struct {
         if (config.options.permissions) |permission_policy| actions = permission_scratch.prepare(permission_policy, self.action_budget.?);
         if (config.options.downloads) |download_policy| download_scratch.prepare(download_policy, &actions.?);
         const initializer_input = if (config.initializer_config) |source| source.input() else null;
-        const settings: NativeSettings = .{ .zoom = self.zoom_override orelse config.options.zoom, .user_agent = if (agent) |value| value.ptr else null, .devtools = self.devtools_override orelse config.options.devtools_enabled, .tool_flags = tool_flags, .tool_limit = limits.max_pending, .max_cookies = limits.max_cookies, .max_cookie_bytes = limits.max_cookie_bytes, .max_capture_bytes = limits.max_capture_bytes, .schemes = if (config.options.custom_schemes.len == 0) null else &scheme_scratch.items, .scheme_count = @intCast(config.options.custom_schemes.len), .local_ipc = if (config.options.local) |site| std.mem.eql(u8, site.scheme, "https") or site.scheme_ipc else true, .actions = if (actions) |*value| value else null, .initializers = if (initializer_input) |*value| value else null, .owned_context = if (config.profile_state) |state| try state.context.windowsContext() else null };
+        const content_style = try self.hidingScript();
+        defer if (content_style) |value| self.allocator.free(value);
+        const settings: NativeSettings = .{ .zoom = self.zoom_override orelse config.options.zoom, .user_agent = if (agent) |value| value.ptr else null, .devtools = self.devtools_override orelse config.options.devtools_enabled, .tool_flags = tool_flags, .tool_limit = limits.max_pending, .max_cookies = limits.max_cookies, .max_cookie_bytes = limits.max_cookie_bytes, .max_capture_bytes = limits.max_capture_bytes, .schemes = if (config.options.custom_schemes.len == 0) null else &scheme_scratch.items, .scheme_count = @intCast(config.options.custom_schemes.len), .local_ipc = if (config.options.local) |site| std.mem.eql(u8, site.scheme, "https") or site.scheme_ipc else true, .actions = if (actions) |*value| value else null, .initializers = if (initializer_input) |*value| value else null, .owned_context = if (config.profile_state) |state| try state.context.windowsContext() else null, .audio_muted = self.mutedWanted(), .content_verdict = if (self.activeRules().len != 0) contentVerdict else null, .content_style = if (content_style) |value| value.ptr else null };
         self.native = zwv_create(window.nativeHandle(), if (html) |value| value.ptr else std.unicode.utf8ToUtf16LeStringLiteral(""), profile.ptr, if (url) |value| value.ptr else null, if (prefix) |value| value.ptr else null, if (remote) |*value| value else null, &settings, policy, config.options.max_cached_permissions, config.options.scripts.max_pending, config.options.allow_local_navigation, config.options.page_listener != null, notify, pageNotify, scriptNotify, toolNotify, resource, self, &self.last_hresult) orelse return error.WebViewCreationFailed;
         errdefer {
             nativeClose(self.native.?);
@@ -1494,7 +1537,15 @@ pub const View = struct {
             flags |= @as(u32, 1) << @intCast(i);
         };
         const initializer_input = if (self.config.?.initializer_config) |source| source.input() else null;
-        const native_options: webkit.Options = .{ .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled) };
+        const rules = self.activeRules();
+        const filters = try self.allocator.alloc(*anyopaque, rules.len);
+        defer self.allocator.free(filters);
+        var filter_count: u32 = 0;
+        for (rules) |value| if (value.filter) |filter| {
+            filters[filter_count] = filter;
+            filter_count += 1;
+        };
+        const native_options: webkit.Options = .{ .content_filters = filters.ptr, .content_filter_count = filter_count, .audio_muted = @intFromBool(self.mutedWanted()), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled) };
         var candidate: ?*anyopaque = null;
         if (self.session) |session| {
             try webkit.check(webkit.zwk_session_create(&native_options, session.last_size.width, session.last_size.height, webkitNotify, pageNotify, webkitScriptNotify, webkitTimeout, self, &candidate));
@@ -2966,9 +3017,173 @@ pub const View = struct {
         if (@as(u32, @bitCast(hr)) == 0x80070005) return error.DevToolsDisabled;
         try self.propertyResult(hr);
     }
+    fn releaseRulesOverride(self: *View) void {
+        const lists = self.rules_override orelse return;
+        self.rules_override = null;
+        for (lists) |rules| rules.release();
+        self.allocator.free(lists);
+    }
+    /// The content rules the page applies: setContentRules', else the
+    /// configuration's.
+    fn activeRules(self: *const View) []const *ContentRules {
+        if (self.rules_override) |lists| return lists;
+        return if (self.config) |config| config.options.content_rules else &.{};
+    }
+    fn mutedWanted(self: *const View) bool {
+        return self.muted_override orelse if (self.config) |config| config.options.audio_muted else false;
+    }
+    /// The page while attached, ready or not: properties kept until the
+    /// engine is ready apply then.
+    fn attachedWindow(self: *View) !Access {
+        const window = self.access() orelse return error.Closed;
+        window.app.assertOwner();
+        if (self.attachmentClosed() or appStopping(window)) return error.Closed;
+        if (self.attachment_phase != .attached) return error.NotReady;
+        return window;
+    }
+
+    /// Replaces the content rules the page applies, which Options.content_rules
+    /// set, with rules; none removes them. Loads from then on go through
+    /// them: a page loaded already keeps what it loaded and hid until it
+    /// reloads. The View holds its own references until the rules are
+    /// replaced, reload applies new Options, or detach. Recovery keeps them.
+    pub fn setContentRules(self: *View, rules: []const *ContentRules) !void {
+        _ = try self.attachedWindow();
+        const scope = self.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        const lists = try self.allocator.alloc(*ContentRules, rules.len);
+        for (rules, lists) |value, *slot| slot.* = value.retain();
+        self.releaseRulesOverride();
+        self.rules_override = lists;
+        if (self.native != null and !self.recovering) try self.applyContentRules();
+    }
+    fn applyContentRules(self: *View) !void {
+        const rules = self.activeRules();
+        if (is_linux) {
+            const filters = try self.allocator.alloc(*anyopaque, rules.len);
+            defer self.allocator.free(filters);
+            var count: u32 = 0;
+            for (rules) |value| if (value.filter) |filter| {
+                filters[count] = filter;
+                count += 1;
+            };
+            return webkit.check(webkit.zwk_content_filters(self.native.?, filters.ptr, count));
+        }
+        const style = try self.hidingScript();
+        defer if (style) |value| self.allocator.free(value);
+        try self.propertyResult(zwv_content_rules(self.native.?, if (rules.len != 0) contentVerdict else null, if (style) |value| value.ptr else null));
+    }
+    /// The UTF-16 script that hides what the page's rules select (Windows).
+    fn hidingScript(self: *View) !?[:0]u16 {
+        const rules = self.activeRules();
+        const lists = try self.allocator.alloc(*const content_rules.List, rules.len);
+        defer self.allocator.free(lists);
+        var count: usize = 0;
+        for (rules) |value| if (value.list) |list| {
+            lists[count] = list;
+            count += 1;
+        };
+        const script = try content_rules.hidingScript(self.allocator, lists[0..count]) orelse return null;
+        defer self.allocator.free(script);
+        return try std.unicode.utf8ToUtf16LeAllocZ(self.allocator, script);
+    }
+    /// What the page's content rules do to a load WebView2 asks about: bit 0
+    /// blocks it, bit 1 sends it without cookies, bit 2 makes it secure.
+    fn contentVerdict(ptr: *anyopaque, uri: [*:0]const u16, top: ?[*:0]const u16, resource_context: c_int) callconv(.c) u32 {
+        const self: *View = @ptrCast(@alignCast(ptr));
+        if (self.attachmentClosed()) return 0;
+        const rules = self.activeRules();
+        const lists = self.allocator.alloc(*content_rules.List, rules.len) catch return 0;
+        defer self.allocator.free(lists);
+        var count: usize = 0;
+        for (rules) |value| if (value.list) |list| {
+            lists[count] = list;
+            count += 1;
+        };
+        if (count == 0) return 0;
+        const url = boundedUtf8(self.allocator, uri) orelse return 0;
+        defer self.allocator.free(url);
+        const top_url = if (top) |value| boundedUtf8(self.allocator, value) else null;
+        defer if (top_url) |value| self.allocator.free(value);
+        const result = content_rules.match(self.allocator, lists[0..count], .{ .url = url, .top_url = top_url orelse "", .types = resourceTypes(resource_context) }) catch return 0;
+        return @as(u32, @intFromBool(result.block)) | @as(u32, @intFromBool(result.block_cookies)) << 1 | @as(u32, @intFromBool(result.make_https)) << 2;
+    }
+    fn boundedUtf8(allocator: std.mem.Allocator, value: [*:0]const u16) ?[]u8 {
+        var length: usize = 0;
+        while (length <= 65536 and value[length] != 0) : (length += 1) {}
+        if (length > 65536) return null;
+        return std.unicode.utf16LeToUtf8Alloc(allocator, value[0..length]) catch null;
+    }
+    /// Maps COREWEBVIEW2_WEB_RESOURCE_CONTEXT to resource-type bits.
+    fn resourceTypes(resource_context: c_int) u16 {
+        const T = content_rules.Type;
+        return switch (resource_context) {
+            1 => T.document,
+            2 => T.style_sheet,
+            3 => T.image,
+            4 => T.media,
+            5 => T.font,
+            6 => T.script,
+            7 => T.raw,
+            8 => T.raw | T.fetch,
+            11 => T.raw | T.websocket,
+            14 => T.ping,
+            else => T.raw | T.other,
+        };
+    }
+
+    /// Mutes all the page's sound, or lets it play again, as a browser mutes
+    /// a tab: its media elements, Web Audio and frames of other sites,
+    /// without the page seeing its elements muted. It lasts as the page
+    /// navigates and through recover, until set again or reload applies new
+    /// Options. A page muted before the engine is ready starts muted.
+    /// Windows needs a WebView2 Runtime with ICoreWebView2_8; older ones
+    /// keep playing.
+    pub fn setAudioMuted(self: *View, muted: bool) !void {
+        _ = try self.attachedWindow();
+        const scope = self.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        if (self.native != null and !self.recovering) {
+            var value: c_int = @intFromBool(muted);
+            if (is_linux) try webkit.check(webkit.zwk_audio(self.native.?, 1, &value)) else try self.audioResult(zwv_audio(self.native.?, 1, &value));
+        }
+        self.muted_override = muted;
+    }
+    /// Whether the page is muted (setAudioMuted, Options.audio_muted).
+    pub fn audioMuted(self: *View) !bool {
+        _ = try self.attachedWindow();
+        if (self.native == null or self.recovering) return self.mutedWanted();
+        const scope = self.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        var value: c_int = 0;
+        if (is_linux) try webkit.check(webkit.zwk_audio(self.native.?, 0, &value)) else try self.audioResult(zwv_audio(self.native.?, 0, &value));
+        return value != 0;
+    }
+    /// Whether the page is making sound: a media element playing or Web
+    /// Audio, from any of its frames. Like a tab's speaker icon it can stay
+    /// true while muted; the engine decides when a paused or silent source
+    /// stops counting. False until the engine is ready, and on WebView2
+    /// Runtimes without ICoreWebView2_8. PageEvent.audible_changed tells its
+    /// changes.
+    pub fn isAudible(self: *View) !bool {
+        _ = try self.attachedWindow();
+        if (self.native == null or self.recovering or !self.ready) return false;
+        const scope = self.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        var value: c_int = 0;
+        if (is_linux) try webkit.check(webkit.zwk_audio(self.native.?, 2, &value)) else try self.audioResult(zwv_audio(self.native.?, 2, &value));
+        return value != 0;
+    }
+    fn audioResult(self: *View, hr: i32) !void {
+        self.last_hresult = hr;
+        if (self.attachmentClosed()) return error.Closed;
+        if (hr < 0) return error.WebViewPropertyFailed;
+    }
     fn clearPropertyOverrides(self: *View) void {
         if (self.agent_override) |agent| self.allocator.free(agent);
         self.agent_override = null;
+        self.releaseRulesOverride();
+        self.muted_override = null;
         self.zoom_override = null;
         self.devtools_override = null;
     }
@@ -3191,6 +3406,7 @@ pub const View = struct {
             3 => .{ .source_changed = .{ .id = id, .uri = utf8 } },
             4 => .{ .title_changed = .{ .id = id, .title = utf8 } },
             5 => .{ .history_changed = .{ .id = id, .can_go_back = self.can_go_back, .can_go_forward = self.can_go_forward } },
+            7 => .{ .audible_changed = .{ .id = id, .audible = native.flags & 1 != 0 } },
             else => return 1,
         };
         listener.event(listener.context, self, ev);

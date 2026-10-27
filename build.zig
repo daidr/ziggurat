@@ -1756,6 +1756,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_webview", .module = view },
             .{ .name = "ziggurat_ui", .module = ui },
         });
+        addSmoke(b, "smoke-webview-content-rules", "tests/content_rules_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
         addSmoke(b, "smoke-page", "tests/page_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
@@ -1873,7 +1877,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         });
         view.addImport("ziggurat_tls_pem", tls_pem);
-        for ([_][]const u8{ "webkit_native.c", "webkit_profile.c", "webkit_cookies.c" }) |file| {
+        for ([_][]const u8{ "webkit_native.c", "webkit_profile.c", "webkit_cookies.c", "webkit_content_rules.c" }) |file| {
             const native = native_support.add(b, view, b.fmt("webview-{s}", .{file}), b.fmt("src/webview/{s}", .{file}), &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
             native.linkSystemLibrary("gio-unix-2.0", .{ .use_pkg_config = .force });
             native.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
@@ -1946,6 +1950,10 @@ pub fn build(b: *std.Build) void {
         addPageRuntimeSmoke(b, target, optimize, core, view, ipc, i18n, page_runtime, net, plugin_fetch, plugin_watch, plugin_sqlite, plugin_websocket);
         addEmbeddedWebView(b, target, optimize, core, ui, declarative_view, view);
         addSmoke(b, "smoke-webview-linux", "tests/linux_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-content-rules", "tests/content_rules_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
         });
@@ -2450,6 +2458,11 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&cookies_tests.step);
     test_step.dependOn(&run_cookies_tests.step);
     b.step("test-cookies", "Verify cookie identity, owned result batches and bounded operation tokens without an engine").dependOn(&run_cookies_tests.step);
+    const content_rules_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/webview/content_rules.zig"), .target = target, .optimize = optimize }) });
+    const run_content_rules_tests = b.addRunArtifact(content_rules_tests);
+    check.dependOn(&content_rules_tests.step);
+    test_step.dependOn(&run_content_rules_tests.step);
+    b.step("test-content-rules", "Verify content rule parsing, WebKit regular expressions, public suffixes and hiding scripts without an engine").dependOn(&run_content_rules_tests.step);
     if (target.result.os.tag == .linux) {
         const file_tests = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path("tests/profile_storage_linux.zig"),
