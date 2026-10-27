@@ -13,7 +13,7 @@ defer plugin.deinit(); // App.run 返回、Host.detach 之后，App.deinit 之�
 try host.use(plugin.plugin());
 ```
 
-- `init` 启动 `workers` 个 worker（默认 4），`deinit` 停止并 join；插件在两者之间保持地址不变。`allocator` 必须线程安全，worker 用它分配。每个 worker 自带一个 `std.http.Client`（读取环境代理），一次处理一个请求；超出 worker 数的请求按顺序排队。
+- `init` 启动 `workers` 个 worker（默认 4），`deinit` 停止并 join；插件在两者之间保持地址不变。`allocator` 必须线程安全，worker 用它分配。每个 worker 自带一个 `std.http.Client`，请求走系统代理（见 [net.md](net.md) “系统代理”），一次处理一个请求；超出 worker 数的请求按顺序排队。
 - worker 产出的响应头和 body 经 `Options.post`（通常是 `.app(app)`）唤醒主线程。插件同一时间最多占用一个邮箱槽；`Full` 在 worker 上重试，`Closed` 后不再投递。
 - `allow` 在主线程上看到方法、URL 和头部，返回 `false` 时调用以 `denied` 失败。它只检查第一跳；重定向按 `Options.limits.redirects`（默认 20）跟随。未设置时允许全部请求。
 - `limits` 是 `ziggurat_net` 的 `Limits`；默认不限制 body 大小。`max_upload_bytes`（默认 64 MiB）限制页面已上传但尚未发出的请求 body 总量。

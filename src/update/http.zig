@@ -1,14 +1,18 @@
 const std = @import("std");
 const download = @import("download.zig");
+const net = @import("ziggurat_net");
 
 /// `download.Source` over `std.http.Client`, for an application-managed
 /// worker thread. Resumes with a `Range` request; a 200 response restarts
 /// from zero. The client, its connection pool and CA bundle belong to the
 /// caller and must not be shared with another thread while a fetch runs.
 /// HTTPS certificate validation uses the client's system CA bundle.
+/// Requests go through the system's proxy (`net.proxy`) unless the client
+/// sets its own.
 pub const Source = struct {
     client: *std.http.Client,
     request: ?std.http.Client.Request = null,
+    route: net.tunnel.Route = .{},
     response: std.http.Client.Response = undefined,
     range_buffer: [48]u8 = undefined,
     redirect_buffer: [8 * 1024]u8 = undefined,
@@ -47,11 +51,11 @@ pub const Source = struct {
         const uri = std.Uri.parse(url) catch return error.InvalidUrl;
         const range = try std.fmt.bufPrint(&self.range_buffer, "bytes={d}-", .{offset});
         const headers = [_]std.http.Header{.{ .name = "Range", .value = range }};
-        self.request = try self.client.request(.GET, uri, .{
+        self.request = try self.route.request(self.client.allocator, self.client, &.system, .GET, uri, .{
             .keep_alive = false,
             .headers = .{ .accept_encoding = .{ .override = "identity" } },
             .extra_headers = if (offset > 0) &headers else &.{},
-        });
+        }, null);
         errdefer close(self);
         try self.request.?.sendBodiless();
         self.response = try self.request.?.receiveHead(&self.redirect_buffer);
@@ -71,14 +75,18 @@ pub const Source = struct {
         const self: *Source = @ptrCast(@alignCast(context));
         if (self.request) |*request| request.deinit();
         self.request = null;
+        self.route.deinit();
     }
 };
 
 /// Fetch a small document such as a feed into caller-owned memory, failing
-/// once it exceeds `limit` bytes.
+/// once it exceeds `limit` bytes, through the system's proxy unless the
+/// client sets its own.
 pub fn get(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, limit: usize) ![]u8 {
     const uri = std.Uri.parse(url) catch return error.InvalidUrl;
-    var request = try client.request(.GET, uri, .{ .keep_alive = false, .headers = .{ .accept_encoding = .{ .override = "identity" } } });
+    var route: net.tunnel.Route = .{};
+    defer route.deinit();
+    var request = try route.request(allocator, client, &.system, .GET, uri, .{ .keep_alive = false, .headers = .{ .accept_encoding = .{ .override = "identity" } } }, null);
     defer request.deinit();
     try request.sendBodiless();
     var redirect_buffer: [8 * 1024]u8 = undefined;
