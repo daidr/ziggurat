@@ -175,7 +175,7 @@ fn run(allocator: std.mem.Allocator) !void {
     try std.testing.expect(near(0x0000ff, at(gpu, size.scale, stride, 145, 25), 1));
     // Half-faded black over white.
     try std.testing.expect(near(0x7f7f7f, at(gpu, size.scale, stride, 130, 85), 2));
-    try std.testing.expect(near(0xffffff, at(gpu, size.scale, stride, 150, 60), 0));
+    try std.testing.expect(near(0xffffff, at(gpu, size.scale, stride, 130, 60), 0));
 
     // Every pixel matches the software planes up to rounding.
     var worst: u32 = 0;
