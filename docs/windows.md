@@ -44,11 +44,11 @@ try window.setFullscreen(false);
 
 `capabilities()` 按窗口当前显示环境查询 `client_position/fullscreen/always_on_top`。X11 每次检查 WM 公布的能力；无 WM 时不会把全屏或置顶当作成功。Wayland 支持标准全屏请求，但不提供任意置顶能力。macOS 后端尚未实现。
 
-全屏不隐式设置置顶。置顶策略可在全屏中独立修改，退出全屏后保留修改后的值。全屏期间禁止 `resize`、`setClientBounds` 和 `perform(.minimize/.maximize/.restore)`，以保持退出时的还原边界；show/hide、enable/disable、focus 和显式关闭仍可使用。
+全屏不隐式设置置顶。置顶策略可在全屏中独立修改，退出全屏后保留修改后的值。全屏期间禁止 `resize`、`setClientBounds` 和 `perform(.minimize/.maximize/.restore)`，以保持退出时的还原边界；show/hide、enable/disable、focus 和显式关闭仍可使用。唯一例外：`setFullscreen(false)` 之后、WM 尚未确认离开全屏时可以 `perform(.restore)`，表示离开全屏后回到普通状态，不再还原进入前的最大化/最小化。
 
 Windows 保存原生 `WINDOWPLACEMENT`、窗口样式与扩展样式，进入所在显示器完整区域的无边框全屏；退出时还原普通几何和之前的最大化/最小化状态。隐藏普通窗口进入/退出全屏仍保持隐藏。为了避免在原生还原中显示一个被隐藏的最小化窗口，这一组合进入全屏返回 `InvalidWindowState`；先 restore 或 show 后重试。原生菜单句柄保持其所有权，全屏时客户区覆盖完整显示器，退出后菜单恢复。隐藏、启用和置顶在全屏期间的显式修改不会被旧快照覆盖。
 
-GTK 保存普通几何及已观测的最大化/最小化状态，使用原生 fullscreen/unfullscreen 请求；WM 确认离开全屏后恢复几何与状态。调用不阻塞等待 WM，不启动轮询，也不运行嵌套消息循环。连续 enter/exit 可取消尚未应用的请求，窗口管理器保留最终决定权。
+GTK 保存普通几何及已观测的最大化/最小化状态，使用原生 fullscreen/unfullscreen 请求；WM 确认离开全屏后恢复几何与状态。WM 自己在全屏期间保留了最大化时，直接沿用它，不再取消最大化、移动后重新最大化。调用不阻塞等待 WM，不启动轮询，也不运行嵌套消息循环。连续 enter/exit 可取消尚未应用的请求，窗口管理器保留最终决定权。
 
 ## 请求、观测与回调
 

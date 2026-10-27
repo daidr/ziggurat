@@ -272,14 +272,33 @@ static void remember_normal(NativeWindow *s) {
     gtk_window_get_size(GTK_WINDOW(s->window),&s->normal_width,&s->normal_height);
     if (zlg_window_capabilities(s)&1u) gtk_window_get_position(GTK_WINDOW(s->window),&s->normal_x,&s->normal_y);
 }
+/* GTK only sends a configure request when it differs from its previous
+   request. After the WM moved the window by itself (restoring a maximized or
+   full screen window), asking again for the previous bounds would be dropped,
+   so a mapped window also gets the request directly. Core uses STATIC gravity
+   and no client-side decoration, so these are the GdkWindow's own bounds. */
+static void request_bounds(NativeWindow *s, gboolean positioned, int x, int y, int width, int height) {
+    gtk_window_resize(GTK_WINDOW(s->window),width,height);
+    if (s->destroyed) return;
+    if (positioned) gtk_window_move(GTK_WINDOW(s->window),x,y);
+    if (s->destroyed || !gtk_widget_get_mapped(s->window)) return;
+    GdkWindow *native=gtk_widget_get_window(s->window); if (!native) return;
+    if (positioned) gdk_window_move_resize(native,x,y,width,height); else gdk_window_resize(native,width,height);
+}
 static void restore_geometry(NativeWindow *s) {
-    if (!s->restore_pending || s->destroyed || (window_state(s)&GDK_WINDOW_STATE_FULLSCREEN)) return;
+    GdkWindowState state=window_state(s);
+    if (!s->restore_pending || s->destroyed || (state&GDK_WINDOW_STATE_FULLSCREEN)) return;
     s->restore_pending=FALSE; s->saved_geometry=FALSE;
+    /* A WM that kept the maximized mode through full screen restored it with
+       its own normal geometry. Unmaximizing, moving and maximizing again would
+       only leave requests in flight behind ones the app sends next. */
+    if (s->saved_maximized && (state&GDK_WINDOW_STATE_MAXIMIZED)) {
+        if (s->saved_minimized) gtk_window_iconify(GTK_WINDOW(s->window));
+        return;
+    }
     gtk_window_unmaximize(GTK_WINDOW(s->window));
     if (s->destroyed) return;
-    gtk_window_resize(GTK_WINDOW(s->window),s->saved_width,s->saved_height);
-    if (s->destroyed) return;
-    if (zlg_window_capabilities(s)&1u) gtk_window_move(GTK_WINDOW(s->window),s->saved_x,s->saved_y);
+    request_bounds(s,(zlg_window_capabilities(s)&1u)!=0,s->saved_x,s->saved_y,s->saved_width,s->saved_height);
     if (s->destroyed) return;
     if (s->saved_maximized) gtk_window_maximize(GTK_WINDOW(s->window));
     if (s->destroyed) return;
@@ -839,7 +858,11 @@ void zlg_window_action(NativeWindow *s, int action) {
         case 0: if (s->popup) popup_show(s); else gtk_widget_show(s->window); break;
         case 1: popup_ungrab(s); if(!s->destroyed)gtk_widget_hide(s->window); break;
         case 2: gtk_window_iconify(GTK_WINDOW(s->window)); break; case 3: gtk_window_maximize(GTK_WINDOW(s->window)); break;
-        case 4: gtk_window_unmaximize(GTK_WINDOW(s->window)); if(!s->destroyed)gtk_window_deiconify(GTK_WINDOW(s->window)); break;
+        case 4:
+            /* Restoring while leaving full screen asks for the normal mode, so
+               the mode remembered before full screen is not reapplied. */
+            if (s->restore_pending) { s->saved_maximized=FALSE; s->saved_minimized=FALSE; }
+            gtk_window_unmaximize(GTK_WINDOW(s->window)); if(!s->destroyed)gtk_window_deiconify(GTK_WINDOW(s->window)); break;
         case 5: if (s->popup) { popup_show(s); break; } gtk_window_present(GTK_WINDOW(s->window)); if(!s->destroyed)gtk_widget_grab_focus(s->area); break;
         case 6: gtk_widget_set_sensitive(s->window,TRUE); break; case 7: gtk_widget_set_sensitive(s->window,FALSE); break;
     }
@@ -868,8 +891,7 @@ int zlg_window_set_bounds(NativeWindow *s, const NativeBounds *bounds) {
     if (bounds->positioned && !(zlg_window_capabilities(s)&1u)) return 1;
     if (s->restore_pending) return 3;
     retain(s);
-    gtk_window_resize(GTK_WINDOW(s->window),bounds->width,bounds->height);
-    if (!s->destroyed && bounds->positioned) gtk_window_move(GTK_WINDOW(s->window),bounds->x,bounds->y);
+    request_bounds(s,bounds->positioned!=0,bounds->x,bounds->y,(int)bounds->width,(int)bounds->height);
     if (!s->destroyed) {
         s->normal_width=bounds->width; s->normal_height=bounds->height;
         if (bounds->positioned) { s->normal_x=bounds->x; s->normal_y=bounds->y; }
