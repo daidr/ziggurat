@@ -545,9 +545,22 @@ pub const TerminalView = struct {
     pub fn resize(self: *TerminalView, cols: u16, rows: u16) !void {
         const s = &self.terminal.screen;
         if (cols == s.cols and rows == s.rows) return;
-        try s.resize(cols, rows);
-        self.selection = null;
+        try self.resizeScreen(cols, rows);
         self.invalidate();
+    }
+
+    /// Resize the screen; on the primary screen, which rewraps, the
+    /// selection moves with its text.
+    fn resizeScreen(self: *TerminalView, cols: u16, rows: u16) !void {
+        if (self.selection) |*selection| if (!self.terminal.screen.onAlternate()) {
+            var ends = [2]Position{ selection.anchor, selection.head };
+            try self.terminal.resize(cols, rows, &ends);
+            selection.anchor = ends[0];
+            selection.head = ends[1];
+            return;
+        };
+        self.selection = null;
+        try self.terminal.resize(cols, rows, &.{});
     }
 
     /// Change the font; the grid takes the new size of its cells, and a
@@ -771,9 +784,7 @@ pub const TerminalView = struct {
             self.terminal.cell_height = @intFromFloat(@round(cell.height * self.scale));
             const s = &self.terminal.screen;
             if (!self.options.resize_by_conn and (grid.cols != s.cols or grid.rows != s.rows)) {
-                if (s.resize(grid.cols, grid.rows)) {
-                    self.selection = null;
-                } else |err| self.fail(err);
+                self.resizeScreen(grid.cols, grid.rows) catch |err| self.fail(err);
             }
             if (self.session) |session| session.resize(grid);
             if (self.options.conn.resize) |resize_conn| resize_conn(self.options.conn.context, grid, self.terminal.cell_width, self.terminal.cell_height) catch |err| self.fail(err);
@@ -2270,6 +2281,25 @@ test "images draw scaled into their cells, clipped to their part and the grid" {
     try std.testing.expectEqual(TerminalView.ImageLayer.below_background, TerminalView.layerOf(-(1 << 30) - 1));
     try std.testing.expectEqual(TerminalView.ImageLayer.below_text, TerminalView.layerOf(-1));
     try std.testing.expectEqual(TerminalView.ImageLayer.above_text, TerminalView.layerOf(0));
+}
+
+test "a selection follows its text as a new width rewraps the screen" {
+    var state: u8 = 0;
+    var storage: view.Storage(4, 64) = .{};
+    var host = view.Host.init(&state, Empty.build, storage.buffers(), .{});
+    var terminal = try term.Terminal.init(std.testing.allocator, .{ .screen = .{ .cols = 8, .rows = 3 } });
+    defer terminal.deinit();
+    var sent: Sent = .{};
+    var board: Board = .{};
+    var tv = testView(&host, &terminal, &sent, &board, .{ .resize_by_conn = true });
+    defer tv.deinit();
+    tv.feed("abcdefghij");
+    // "ij", on the wrapped row.
+    tv.selection = .{ .anchor = .{ .row = terminal.screen.screenRow(1), .col = 0 }, .head = .{ .row = terminal.screen.screenRow(1), .col = 1 }, .dragging = false };
+    try tv.resize(12, 3);
+    const text = (try tv.selectedText(std.testing.allocator)).?;
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("ij", text);
 }
 
 test "a terminal shown from a server tells its stream the theme, and resizes when told" {
