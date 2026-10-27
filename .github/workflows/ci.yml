@@ -164,7 +164,7 @@ jobs:
         run: |
           XDG_CACHE_HOME=$(mktemp -d) zig build smoke-fonts -Doptimize=${{ matrix.optimize }}
       - name: Optional WebKitGTK lifecycle and policy checks
-        if: (github.event_name == 'workflow_dispatch' && inputs.webview) || contains(github.event.pull_request.labels.*.name, 'webview')
+        if: github.event_name == 'workflow_dispatch' && inputs.webview
         run: |
           sh scripts/ci-linux-deps.sh libwebkit2gtk-4.1-dev glib-networking dbus-x11 libcurl4-openssl-dev
           export ZIG_BIN="$(command -v zig)"
@@ -215,6 +215,10 @@ jobs:
           GDK_SCALE=2 P01_PROBE=session-host bash scripts/webkit-probe.sh
           P01_PROBE=session-zig bash scripts/webkit-probe.sh
           GDK_SCALE=2 P01_PROBE=session-zig bash scripts/webkit-probe.sh
+      - name: WebKitGTK content rules and audio
+        if: (github.event_name == 'workflow_dispatch' && inputs.webview) || contains(github.event.pull_request.labels.*.name, 'webview')
+        run: |
+          sh scripts/ci-linux-deps.sh libwebkit2gtk-4.1-dev glib-networking dbus-x11
           xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-webview-content-rules -Dwebview=true -Doptimize=${{ matrix.optimize }}
       - name: Capture Cairo submission and idle evidence
         if: matrix.optimize == 'ReleaseSafe'
