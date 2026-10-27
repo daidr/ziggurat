@@ -21,6 +21,7 @@ pub const theme = @import("theme.zig");
 pub const search = @import("search.zig");
 pub const keybind = @import("keybind.zig");
 pub const graphics = @import("graphics.zig");
+pub const mirror = @import("mirror.zig");
 pub const png = @import("png.zig");
 pub const input = @import("input.zig");
 pub const links = @import("links.zig");
@@ -45,6 +46,9 @@ pub const Position = screen.Position;
 pub const Modes = screen.Modes;
 pub const Selection = selection.Selection;
 pub const Theme = theme.Theme;
+pub const Mirror = mirror.Mirror;
+pub const snapshot = mirror.snapshot;
+pub const history = mirror.history;
 
 pub const Session = session.Session;
 pub const Sink = session.Sink;

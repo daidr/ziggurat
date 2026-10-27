@@ -181,6 +181,8 @@ pub const History = struct {
     lines: []Line,
     first: usize = 0,
     count: usize = 0,
+    /// Times it was cleared.
+    clears: u64 = 0,
 
     pub const Line = struct { start: usize, len: usize, wrapped: bool };
 
@@ -237,6 +239,7 @@ pub const History = struct {
     fn clear(self: *History) void {
         self.first = 0;
         self.count = 0;
+        self.clears += 1;
     }
     /// Take back the newest line.
     fn pop(self: *History) ?Line {
@@ -298,6 +301,10 @@ pub const Options = struct {
 
 /// A position in the scrollback and the screen together. Rows count from
 /// the first line ever written, so they stay put as output scrolls.
+/// A row's cells, borrowed until the screen changes, and whether it
+/// soft-wraps into the next.
+pub const RowRef = struct { cells: []const Cell, wrapped: bool };
+
 pub const Position = struct {
     row: u64,
     col: u16,
@@ -402,7 +409,7 @@ pub const Screen = struct {
     }
     /// The cells of absolute row `abs`, or null once it left the scrollback
     /// or past the bottom. History rows can be shorter than the screen.
-    pub fn rowAt(self: *const Screen, abs: u64) ?struct { cells: []const Cell, wrapped: bool } {
+    pub fn rowAt(self: *const Screen, abs: u64) ?RowRef {
         if (abs < self.firstRow()) return null;
         if (abs < self.pushed) {
             const line = self.history.get(@intCast(abs - self.firstRow()));
@@ -411,6 +418,14 @@ pub const Screen = struct {
         const y = abs - self.pushed;
         if (y >= self.rows) return null;
         return .{ .cells = self.row(@intCast(y)), .wrapped = self.wrapped(@intCast(y)) };
+    }
+    /// Absolute row `abs` of the primary screen and its scrollback, even
+    /// while the alternate screen shows.
+    pub fn primaryRowAt(self: *const Screen, abs: u64) ?RowRef {
+        if (abs < self.pushed) return self.rowAt(abs);
+        const y = abs - self.pushed;
+        if (y >= self.rows) return null;
+        return .{ .cells = self.primary.row(@intCast(y)), .wrapped = self.primary.wrap(@intCast(y)).* };
     }
     /// The absolute row shown at view row `y`, given the viewport.
     pub fn viewRow(self: *const Screen, y: usize) u64 {

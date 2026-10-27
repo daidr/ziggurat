@@ -40,6 +40,18 @@ pub const Clipboard = struct {
 };
 
 /// Bytes for the program, for a terminal without a `Session`.
+/// What a terminal no program runs in talks to, as a stream from a server
+/// whose terminal a `Mirror` frames (what is typed goes to `send`).
+pub const Conn = struct {
+    context: ?*anyopaque = null,
+    /// Told the size the grid fits and the cell's size in pixels, for the
+    /// server's terminal (`Terminal.resizePixels`).
+    resize: ?*const fn (?*anyopaque, term.Size, u16, u16) anyerror!void = null,
+    /// Told the theme the view takes, for the server's terminal
+    /// (`Terminal.useTheme`).
+    theme: ?*const fn (?*anyopaque, Theme) anyerror!void = null,
+};
+
 pub const Send = struct {
     context: ?*anyopaque = null,
     call: *const fn (?*anyopaque, []const u8) anyerror!void,
@@ -163,6 +175,11 @@ pub const Options = struct {
     minimum_contrast: f32 = 1,
     clipboard: ?Clipboard = null,
     send: ?Send = null,
+    conn: Conn = .{},
+    /// Leave the screen's size to the other end of `conn`: the view only
+    /// tells it the size it fits, and the screen keeps its size until the
+    /// app calls `resize`, where the server's stream says it resized.
+    resize_by_conn: bool = false,
     notify: ?Notify = null,
     hooks: Hooks = .{},
     /// Copy whenever a selection ends, and as Select All makes one.
@@ -518,7 +535,18 @@ pub const TerminalView = struct {
         const t = self.theme();
         if (self.applied_theme) |applied| if (std.meta.eql(applied, t)) return;
         self.applied_theme = t;
-        self.terminal.setColors(t.foreground, t.background, t.cursorColor(), t.palette256());
+        self.terminal.useTheme(t);
+        if (self.options.conn.theme) |tell| tell(self.options.conn.context, t) catch |err| self.fail(err);
+    }
+
+    /// Set the screen's size, as a server's stream says it resized, with
+    /// `resize_by_conn`.
+    pub fn resize(self: *TerminalView, cols: u16, rows: u16) !void {
+        const s = &self.terminal.screen;
+        if (cols == s.cols and rows == s.rows) return;
+        try s.resize(cols, rows);
+        self.selection = null;
+        self.invalidate();
     }
 
     /// Change the font; the grid takes the new size of its cells, and a
@@ -721,10 +749,10 @@ pub const TerminalView = struct {
         self.id = id;
         self.bounds = bounds;
         const grid = self.gridFor(bounds);
-        const resize = if (self.applied) |applied| !std.meta.eql(applied, grid) else true;
-        if (resize) self.wanted = grid;
+        const sized = if (self.applied) |applied| !std.meta.eql(applied, grid) else true;
+        if (sized) self.wanted = grid;
         const caret_moved = self.client != null and !std.meta.eql(self.caret, self.caret_sent);
-        if (!resize and self.token != null and !caret_moved) return;
+        if (!sized and self.token != null and !caret_moved) return;
         self.schedule();
     }
 
@@ -741,12 +769,13 @@ pub const TerminalView = struct {
             self.terminal.cell_width = @intFromFloat(@round(cell.width * self.scale));
             self.terminal.cell_height = @intFromFloat(@round(cell.height * self.scale));
             const s = &self.terminal.screen;
-            if (grid.cols != s.cols or grid.rows != s.rows) {
+            if (!self.options.resize_by_conn and (grid.cols != s.cols or grid.rows != s.rows)) {
                 if (s.resize(grid.cols, grid.rows)) {
                     self.selection = null;
                 } else |err| self.fail(err);
             }
             if (self.session) |session| session.resize(grid);
+            if (self.options.conn.resize) |resize_conn| resize_conn(self.options.conn.context, grid, self.terminal.cell_width, self.terminal.cell_height) catch |err| self.fail(err);
             self.applied = grid;
             window.invalidate();
         }
@@ -2177,6 +2206,31 @@ test "images draw scaled into their cells, clipped to their part and the grid" {
     try std.testing.expectEqual(TerminalView.ImageLayer.below_background, TerminalView.layerOf(-(1 << 30) - 1));
     try std.testing.expectEqual(TerminalView.ImageLayer.below_text, TerminalView.layerOf(-1));
     try std.testing.expectEqual(TerminalView.ImageLayer.above_text, TerminalView.layerOf(0));
+}
+
+test "a terminal shown from a server tells its stream the theme, and resizes when told" {
+    var state: u8 = 0;
+    var storage: view.Storage(4, 64) = .{};
+    var host = view.Host.init(&state, Empty.build, storage.buffers(), .{});
+    var terminal = try term.Terminal.init(std.testing.allocator, .{ .screen = .{ .cols = 10, .rows = 2 } });
+    defer terminal.deinit();
+    var sent: Sent = .{};
+    var board: Board = .{};
+    const Stream = struct {
+        background: u24 = 0,
+        fn theme(context: ?*anyopaque, t: Theme) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.background = t.background;
+        }
+    };
+    var stream: Stream = .{};
+    var tv = testView(&host, &terminal, &sent, &board, .{ .conn = .{ .context = &stream, .theme = Stream.theme }, .resize_by_conn = true, .theme = term.theme.light });
+    defer tv.deinit();
+    tv.bind();
+    try std.testing.expectEqual(term.theme.light.background, stream.background);
+    try tv.resize(12, 3);
+    try std.testing.expectEqual(@as(u16, 12), terminal.screen.cols);
+    try std.testing.expectEqual(@as(u16, 3), terminal.screen.rows);
 }
 
 test {
