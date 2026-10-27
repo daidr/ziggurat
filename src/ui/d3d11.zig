@@ -1,4 +1,5 @@
 const std = @import("std");
+const fonts = @import("ziggurat_fonts");
 const z = @import("ziggurat");
 pub const commands = @import("commands.zig");
 const command = commands;
@@ -72,7 +73,7 @@ extern fn zgpu_interpolation_stats(*anyopaque, *GradientInterpolationStats) void
 extern fn zgpu_interpolation_failure(*anyopaque, i32) i32;
 extern fn zgpu_gradient_interpolated(*anyopaque, f32, f32, f32, f32, f32, f32, *const commands.brushes.Native, *const interpolation.Packet) i32;
 extern fn zgpu_geometry_stats(*anyopaque, *u32, *u32, *u32) void;
-extern fn zgpu_text(*anyopaque, f32, f32, f32, f32, u32, [*]const u16, u32, u32, f32, u16, c_int, c_int) void;
+extern fn zgpu_text(*anyopaque, f32, f32, f32, f32, u32, [*]const u16, u32, u32, f32, u16, c_int, c_int, ?[*:0]const u16) void;
 extern fn zgpu_prepared(*anyopaque, *anyopaque, f32, f32, ?*const drawing.Rect, u32) void;
 extern fn zgpu_scale(*anyopaque) f32;
 extern fn zgpu_push_clip(*anyopaque, f32, f32, f32, f32) void;
@@ -1123,7 +1124,13 @@ pub const Renderer = struct {
                 const count = try std.unicode.utf8ToUtf16Le(&utf16, bytes);
                 const r = value.bounds;
                 const font = value.font;
-                zgpu_text(native, r.x, r.y, r.width, r.height, value.color, &utf16, @intCast(count), if (font.isDefault()) 0 else @bitCast(font), font.size(), font.weight.value(), @intFromBool(font.italic), @intFromBool(font.monospace));
+                var family: [fonts.max_name_bytes + 1]u16 = undefined;
+                const named: ?[*:0]const u16 = if (font.family == 0) null else named: {
+                    const length = std.unicode.utf8ToUtf16Le(&family, fonts.systemName(font.family)) catch 0;
+                    family[length] = 0;
+                    break :named family[0..length :0];
+                };
+                zgpu_text(native, r.x, r.y, r.width, r.height, value.color, &utf16, @intCast(count), if (font.isDefault()) 0 else @bitCast(font), font.size(), font.weight.value(), @intFromBool(font.italic), @intFromBool(font.monospace), named);
             },
             .prepared_text => |value| {
                 if (value.resource >= prepared.len) return error.MissingResources;

@@ -7,6 +7,7 @@ const std = @import("std");
 const blocks = @import("blocks.zig");
 const inlines = @import("inlines.zig");
 pub const html = @import("html.zig");
+pub const entities = @import("entities.zig");
 
 /// No node.
 pub const none = std.math.maxInt(u32);

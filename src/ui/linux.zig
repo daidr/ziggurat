@@ -4,6 +4,7 @@ const gaussian_scope = @import("gaussian_scope.zig");
 const gaussian_kernel = @import("gaussian_kernel.zig");
 const z = @import("ziggurat");
 const commands = @import("commands.zig");
+const fonts = @import("ziggurat_fonts");
 const layout = @import("layout.zig");
 const geometry = @import("geometry.zig");
 const drawing = @import("ziggurat_drawing_resources");
@@ -26,7 +27,7 @@ extern fn zlc_gradient_surface(*anyopaque, *cpu_gradient.Surface) c_int;
 extern fn zlc_gradient_dirty(*anyopaque, u32, u32, u32, u32) void;
 extern fn zlc_brush_stats(*anyopaque, *u32, *u32, *u32) void;
 pub const BrushStats = struct { creations: u32 = 0, evictions: u32 = 0, cached: u32 = 0 };
-extern fn zlc_text(*anyopaque, f32, f32, f32, f32, [*]const u8, u32, u32, f32, u16, c_int, c_int) c_int;
+extern fn zlc_text(*anyopaque, f32, f32, f32, f32, [*]const u8, u32, u32, f32, u16, c_int, c_int, ?[*:0]const u8) c_int;
 extern fn zlc_prepared(*anyopaque, *anyopaque, f32, f32, f32, i32, i32, ?*const drawing.Rect, u32) c_int;
 extern fn zlc_scale(*anyopaque) f32;
 extern fn zlc_push_clip(*anyopaque, f32, f32, f32, f32) void;
@@ -597,7 +598,7 @@ pub const Renderer = struct {
     pub fn textFont(self: *Renderer, rect: Rect, utf8: []const u8, color: u32, font: commands.FontKey) !void {
         if (utf8.len > 64 * 1024) return error.TextTooLong;
         if (!std.unicode.utf8ValidateSlice(utf8)) return error.InvalidUtf8;
-        if (zlc_text(self.native.?, rect.x, rect.y, rect.width, rect.height, utf8.ptr, @intCast(utf8.len), color, font.size(), font.weight.value(), @intFromBool(font.italic), @intFromBool(font.monospace)) != 0) return error.DrawTextFailed;
+        if (zlc_text(self.native.?, rect.x, rect.y, rect.width, rect.height, utf8.ptr, @intCast(utf8.len), color, font.size(), font.weight.value(), @intFromBool(font.italic), @intFromBool(font.monospace), if (font.family == 0) null else fonts.systemName(font.family).ptr) != 0) return error.DrawTextFailed;
     }
     pub fn preparedText(self: *Renderer, view: drawing.PreparedTextView, origin: drawing.Point, tint: geometry.Color) !void {
         try view.validate();

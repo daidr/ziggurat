@@ -82,6 +82,8 @@ fn completed(context: *anyopaque, input: web.cookies.Result) void {
 
 Batch 只有一个 owning allocation，完全脱离 GLib/Profile/Store/App。通过 `take()` 线性移交；旧值清空后 `deinit()` 幂等，移动后的 `take()` 返回 `BatchMoved`。allocator 必须覆盖 Batch 生存期；跨线程释放还要求该 allocator 本身允许。宿主保留多个 Batch 的总额由宿主管理，不占已经转交的 Store 额度。
 
+`Filter.domain` 是精确的原生字节比较。需要像浏览器 Cookie 列表那样按站点挑选时，对拥有的 Batch 调用 `keepDomain(domain)`：保留该域及其子域的 Cookie，忽略大小写和任一侧的前导点（`example.com` 保留 `.example.com`、`www.example.com`，不保留 `badexample.com`），判断规则即 `cookies.inDomain`。`sort()` 按 domain（忽略大小写）、path、name 排序。两者都在 Batch 自己的存储里原地进行，不分配。
+
 `operation.cancel()` 先摘除逻辑入口，再取消 native，并同步完成一次 `.cancelled`。它不保证撤回已经开始的写入。物理槽继续占用到 native result 真正结束；因此 logical_pending 为零时仍可能 `Full`。首片没有隐式 timeout，宿主可用自己的显式 deadline 触发 cancel。
 
 ## 停止与最终释放

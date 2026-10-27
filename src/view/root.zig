@@ -4725,6 +4725,16 @@ pub const Options = struct {
     direction: Direction = .ltr,
     /// Draws `View.icon` nodes, such as `ziggurat_view_graphics.Icons`.
     icons: ?IconPainter = null,
+    /// Runs once at the end of every frame the Host draws, after the
+    /// embedded leaves learned their places; see `FrameHook`.
+    after_frame: ?FrameHook = null,
+};
+/// Code that follows the Host's frames, such as native content placed with
+/// embedded leaves that must hide when a frame no longer builds them. It runs
+/// inside paint under the rules of `Embed.place`.
+pub const FrameHook = struct {
+    context: *anyopaque,
+    run: *const fn (*anyopaque) void,
 };
 
 /// Owns the ui.Context for one window. Keep Host at a stable address from
@@ -4827,6 +4837,16 @@ pub const Host = struct {
         self.context.on_input = onInput;
         self.context.on_key_release = onKeyRelease;
         try self.context.attach(window);
+    }
+    /// Attach as the full-window backdrop of a composition Owner, under the
+    /// native regions it holds, such as embedded web views. The Context must
+    /// use the `.gdi` render mode.
+    pub fn attachBackdrop(self: *Host, owner: *z.composition.Owner) !z.composition.Region {
+        self.context.state = self;
+        self.context.on_value = onValue;
+        self.context.on_input = onInput;
+        self.context.on_key_release = onKeyRelease;
+        return self.context.attachBackdrop(owner);
     }
 
     /// Run one build pass. Event passes record nothing; they only let the
@@ -5099,6 +5119,7 @@ pub const Host = struct {
             const content = node.embed orelse continue;
             if (content.place) |place| place(content.context, node.id, node.bounds);
         }
+        if (self.options.after_frame) |hook| hook.run(hook.context);
         // Focus a frame pass asked for, such as the first control of a
         // dialog the build opened, once this frame registered it.
         if (self.view.restore) |id| {

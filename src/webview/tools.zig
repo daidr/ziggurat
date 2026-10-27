@@ -48,15 +48,50 @@ pub const CookieDelete = struct {
     accept_cookie_scope: bool,
 };
 pub const ClearScope = enum { entire_profile };
+/// A sheet of paper in inches, in portrait orientation.
+pub const PageSize = struct {
+    width: f64,
+    height: f64,
+    pub const letter: PageSize = .{ .width = 8.5, .height = 11 };
+    pub const legal: PageSize = .{ .width = 8.5, .height = 14 };
+    pub const tabloid: PageSize = .{ .width = 11, .height = 17 };
+    pub const a3: PageSize = .{ .width = 11.69, .height = 16.54 };
+    pub const a4: PageSize = .{ .width = 8.27, .height = 11.69 };
+    pub const a5: PageSize = .{ .width = 5.83, .height = 8.27 };
+};
+/// Page margins in inches.
+pub const Margins = struct {
+    top: f64 = 0.4,
+    right: f64 = 0.4,
+    bottom: f64 = 0.4,
+    left: f64 = 0.4,
+    pub const none: Margins = .{ .top = 0, .right = 0, .bottom = 0, .left = 0 };
+};
+/// The defaults print Letter pages in portrait with margins of 0.4 inch and
+/// without backgrounds, like a browser's print dialog; the page's print style
+/// sheets apply.
 pub const PdfOptions = struct {
     /// Host prepares a private absolute path on its explicit worker. Native PDF
     /// generation may write after logical cancellation and is not byte-budgeted.
     path: []const u8,
     accept_overwrite: bool,
+    page_size: PageSize = .letter,
+    margins: Margins = .{},
     first_page: u16 = 1,
-    last_page: u16 = 16,
+    /// Null prints through the last page; a range spans at most 256 pages.
+    last_page: ?u16 = null,
     landscape: bool = false,
-    print_backgrounds: bool = true,
+    /// Background colors and images, which printing leaves out by default.
+    print_backgrounds: bool = false,
+    pub fn validate(self: PdfOptions) !void {
+        const size = self.page_size;
+        if (!(size.width >= 1 and size.width <= 100 and size.height >= 1 and size.height <= 100)) return error.InvalidPageSize;
+        const m = self.margins;
+        for ([_]f64{ m.top, m.right, m.bottom, m.left }) |value| if (!(value >= 0 and value <= 10)) return error.InvalidMargins;
+        if (m.left + m.right >= size.width or m.top + m.bottom >= size.height) return error.InvalidMargins;
+        if (self.first_page == 0) return error.InvalidPageRange;
+        if (self.last_page) |last| if (last < self.first_page or @as(u32, last) - self.first_page + 1 > 256) return error.InvalidPageRange;
+    }
 };
 pub const FindState = struct {
     /// null when the native result does not contain a full-document total.

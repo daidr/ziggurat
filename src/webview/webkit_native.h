@@ -124,6 +124,12 @@ int zwk_capture_start(ZwkState *,uint64_t);
 /* Shares the capture owner and its cancel/notify; the result has no bytes. */
 int zwk_clear_start(ZwkState *,uint64_t);
 void zwk_capture_cancel(ZwkState *,uint64_t);
+/* Prints the document to a PDF file through GTK's file printer, sharing the
+ * capture owner, quota, cancel and notify; the result has no bytes. Page
+ * geometry is in inches: width, height, top, right, bottom, left margins.
+ * flags: 1 landscape, 2 backgrounds. last_page 0 prints through the end. */
+typedef struct ZwkPdfRequest { uint32_t first_page,last_page,flags; double page[6]; } ZwkPdfRequest;
+int zwk_pdf_start(ZwkState *,uint64_t,const char *,const ZwkPdfRequest *);
 void zwk_capture_counts(uint32_t *,uint32_t *,size_t *,size_t *);
 int zwk_recovery_begin(ZwkState *);
 void zwk_recovery_cancel(ZwkState *);

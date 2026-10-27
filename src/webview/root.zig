@@ -431,7 +431,7 @@ const SchemeScratch = struct {
         }
     }
 };
-const NativeToolRequest = extern struct { kind: u32, flags: u32 = 0, token: u64 = 0, text: ?[*:0]const u16 = null, first_page: u32 = 0, last_page: u32 = 0 };
+const NativeToolRequest = extern struct { kind: u32, flags: u32 = 0, token: u64 = 0, text: ?[*:0]const u16 = null, first_page: u32 = 0, last_page: u32 = 0, page: [6]f64 = @splat(0) };
 const NativeFind = extern struct { matches: i32, active_index: i32 };
 const NativeCookie = extern struct { name: ?[*:0]const u16, value: ?[*:0]const u16, domain: ?[*:0]const u16, path: ?[*:0]const u16, expires: f64, flags: u32, same_site: u32 };
 const NativeCookieWrite = extern struct { name: [*:0]const u16, value: [*:0]const u16, path: [*:0]const u16, expires: f64, flags: u32, same_site: u32 };
@@ -647,7 +647,7 @@ fn validateBackendOptions(options: Options) !void {
         if (options.policy.new_window != .deny or options.policy.download != .deny or options.policy.permission != .deny or options.policy.frame_navigation != .deny or
             options.max_cached_permissions != 256 or options.tool_limits.max_cookies != (tools.Limits{}).max_cookies or options.tool_limits.max_cookie_bytes != (tools.Limits{}).max_cookie_bytes) return error.UnsupportedCapability;
         if (options.max_resource_bytes > 16 * 1024 * 1024) return error.InvalidResourceLimit;
-        inline for (std.meta.fields(tools.Policy)) |field| if (!std.mem.eql(u8, field.name, "capture") and !std.mem.eql(u8, field.name, "find") and !std.mem.eql(u8, field.name, "clear_entire_profile") and @field(options.tools, field.name)) return error.UnsupportedCapability;
+        inline for (std.meta.fields(tools.Policy)) |field| if (!std.mem.eql(u8, field.name, "capture") and !std.mem.eql(u8, field.name, "find") and !std.mem.eql(u8, field.name, "clear_entire_profile") and !std.mem.eql(u8, field.name, "pdf") and @field(options.tools, field.name)) return error.UnsupportedCapability;
     } else {
         if (options.storage != .profile or !std.meta.eql(options.custom_local_limits, CustomLocalLimits{}) or options.request_policy_extension != null) return error.UnsupportedCapability;
         if (options.profile != null) {
@@ -1454,7 +1454,7 @@ pub const View = struct {
             }
         };
         // Capture and whole-data clear share one physical owner and quota.
-        if (options.tools.capture or options.tools.clear_entire_profile) {
+        if (options.tools.capture or options.tools.clear_entire_profile or options.tools.pdf) {
             const limits = options.tool_limits;
             const budget = self.capture_budget orelse blk: {
                 const value = webkit.zwk_capture_budget_new(limits.max_pending, limits.max_capture_bytes, webkitCaptureNotify) orelse return error.OutOfMemory;
@@ -1502,7 +1502,7 @@ pub const View = struct {
             const native_window = callback_scope.?.record.native.native orelse return error.Closed;
             try webkit.check(webkit.zwk_create(native_window, &native_options, webkitNotify, pageNotify, webkitScriptNotify, webkitTimeout, self, &candidate));
         }
-        if (options.tools.capture or options.tools.clear_entire_profile) {
+        if (options.tools.capture or options.tools.clear_entire_profile or options.tools.pdf) {
             webkit.check(webkit.zwk_capture_enable(candidate.?, self.capture_budget.?)) catch |err| {
                 webkit.zwk_close(candidate.?);
                 return err;
@@ -2342,7 +2342,7 @@ pub const View = struct {
         return true;
     }
     fn toolWindow(self: *View, kind: tools.Kind, page: ?PageId) !Access {
-        if (is_linux and kind != .capture and kind != .find and kind != .clear) return self.unavailableBackend();
+        if (is_linux and kind != .capture and kind != .find and kind != .clear and kind != .pdf) return self.unavailableBackend();
         const window = try self.propertyWindow();
         if (!self.tool_accepting) return error.ToolUnavailable;
         const policy = self.config.?.options.tools;
@@ -2433,20 +2433,39 @@ pub const View = struct {
         defer scope.end();
         return self.submitTool(.capture, .page, .{ .kind = 3 }, options, completion, null, null, page);
     }
+    /// Writes the page as a PDF laid out for printing to `pdf.path`; the
+    /// completion reports `pdf_path` once the file is complete.
     pub fn printToPdf(self: *View, page: PageId, pdf: tools.PdfOptions, options: tools.RequestOptions, completion: tools.Completion) !ToolOperation {
-        if (is_linux) return self.unavailableBackend();
         _ = try self.toolWindow(.pdf, page);
         if (!pdf.accept_overwrite) return error.OverwriteNotAccepted;
         if (!std.fs.path.isAbsolute(pdf.path) or pdf.path.len == 0 or std.mem.indexOfScalar(u8, pdf.path, 0) != null) return error.AbsoluteOutputPathRequired;
-        if (pdf.first_page == 0 or pdf.last_page < pdf.first_page or @as(u32, pdf.last_page) - pdf.first_page + 1 > 256) return error.InvalidPageRange;
+        try pdf.validate();
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
+        const geometry = [6]f64{ pdf.page_size.width, pdf.page_size.height, pdf.margins.top, pdf.margins.right, pdf.margins.bottom, pdf.margins.left };
+        const flags = @as(u32, @intFromBool(pdf.landscape)) | @as(u32, @intFromBool(pdf.print_backgrounds)) << 1;
+        if (is_linux) {
+            const path = try self.allocator.dupeZ(u8, pdf.path);
+            defer self.allocator.free(path);
+            const owned = try self.allocator.dupe(u8, pdf.path);
+            errdefer self.allocator.free(owned);
+            const token = try self.reserveTool(.pdf, .page, options, completion, owned, page);
+            const native: webkit.PdfRequest = .{ .first_page = pdf.first_page, .last_page = pdf.last_page orelse 0, .flags = flags, .page = geometry };
+            const status = webkit.zwk_pdf_start(self.native.?, token, path.ptr, &native);
+            if (status != 0) {
+                _ = self.tool_book.take(token);
+                self.syncEvalTimer() catch self.failEvalTimer();
+                try webkit.check(status);
+                unreachable;
+            }
+            return .{ .view = self, .token = token };
+        }
         const wide = try std.unicode.utf8ToUtf16LeAllocZ(self.allocator, pdf.path);
         defer self.allocator.free(wide);
         if (wide.len > 32766) return error.OutputPathTooLarge;
         const owned = try self.allocator.dupe(u8, pdf.path);
         errdefer self.allocator.free(owned);
-        return self.submitTool(.pdf, .page, .{ .kind = 4, .text = wide.ptr, .first_page = pdf.first_page, .last_page = pdf.last_page, .flags = @as(u32, @intFromBool(pdf.landscape)) | @as(u32, @intFromBool(pdf.print_backgrounds)) << 1 }, options, completion, owned, null, page);
+        return self.submitTool(.pdf, .page, .{ .kind = 4, .text = wide.ptr, .first_page = pdf.first_page, .last_page = pdf.last_page orelse 0, .flags = flags, .page = geometry }, options, completion, owned, null, page);
     }
     pub fn startFind(self: *View, page: PageId, find: tools.FindOptions, options: tools.RequestOptions, completion: tools.Completion) !ToolOperation {
         if (is_linux) {
@@ -2642,6 +2661,11 @@ pub const View = struct {
         if (failure) |native| self.last_native_failure = .{ .glib = native.* };
         if (slot.kind == .clear) return self.completeToolSlot(slot, switch (status) {
             0 => if (count == 0) .cleared else .invalid_result,
+            1 => if (failure) |native| .{ .native_failure = native.code } else .invalid_result,
+            else => .invalid_result,
+        });
+        if (slot.kind == .pdf) return self.completeToolSlot(slot, switch (status) {
+            0 => if (count == 0) .{ .pdf_path = slot.owned orelse "" } else .invalid_result,
             1 => if (failure) |native| .{ .native_failure = native.code } else .invalid_result,
             else => .invalid_result,
         });
@@ -5240,7 +5264,6 @@ test "Linux capability preflight rejects unsupported configuration before alloca
         .{ .html = "", .storage = .ephemeral, .remote = .{ .url = "https://example.test", .origins = &.{}, .credentials = .profile } },
         .{ .html = "", .storage = .ephemeral, .custom_schemes = &.{.{ .name = "private" }} },
         .{ .html = "", .storage = .ephemeral, .tools = .{ .cookies = true } },
-        .{ .html = "", .storage = .ephemeral, .tools = .{ .pdf = true } },
         .{ .html = "", .storage = .ephemeral, .tools = .{ .capture = true }, .tool_limits = .{ .max_cookies = 1 } },
         .{ .html = "", .storage = .ephemeral, .policy = .{ .permission = .notify } },
     };

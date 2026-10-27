@@ -9,6 +9,9 @@ const console_mod = @import("console.zig");
 const i18n_gen = @import("i18n_gen.zig");
 const install_script = @import("install_script.zig");
 const s3 = @import("s3.zig");
+const icon_mod = @import("icon.zig");
+const winsign = @import("winsign.zig");
+const vet = @import("vet.zig");
 
 const usage =
     \\ziggurat init DIR [--template native|web|hybrid] [--name NAME] [--id IDENTITY] [--framework PATH]
@@ -21,6 +24,9 @@ const usage =
     \\ziggurat generate [-o FILE] [--framework PATH] [DIR]
     \\ziggurat i18n check [DIR]
     \\ziggurat install-skills [DIR]
+    \\ziggurat icon PNG [-o FILE]
+    \\ziggurat sign FILE...
+    \\ziggurat vet [DIR]
     \\ziggurat doctor [--webview]
     \\
     \\init writes a project that depends on this framework checkout by path.
@@ -28,11 +34,12 @@ const usage =
     \\when src/, build.zig, build.zig.zon or a --watch directory changes; --frontend starts a frontend
     \\watcher next to it and stops it on exit.
     \\build runs `zig build` with ReleaseSafe; --package writes an update package
-    \\to dist/ from zig-out/bin and ziggurat.json.
+    \\to dist/ from zig-out/bin and ziggurat.json, with the icon of ziggurat.json,
+    \\and signs the Windows executable first when windows in ziggurat.json says how.
     \\package setup appends an update package to the setup stub, producing one
-    \\installer file (Windows or Linux, matching the stub); sign the result after.
+    \\installer file (Windows or Linux, matching the stub), signed as the executable is.
     \\package deb writes a Debian package that installs under /usr/lib/EXECUTABLE.
-    \\--icon names a PNG inside the package for the Linux menu.
+    \\--icon names a PNG inside the package for the Linux menu (default: the package's icon.png).
     \\package install-script writes install.sh, which installs a Linux app for the
     \\current user with its setup installer: the one next to it, else the newest one
     \\it downloads from the GitHub releases or BASE.
@@ -45,6 +52,13 @@ const usage =
     \\the service (service and bindings in ziggurat.json, or -o FILE).
     \\i18n check lists the problems of the catalogs; errors exit with status 1.
     \\install-skills installs or refreshes the bundled agent skills in .agents/skills.
+    \\icon renders a square PNG as a Windows .ico (default: the PNG's name with .ico).
+    \\sign signs Windows executables and installers as windows in ziggurat.json says:
+    \\certificate (password from ZIGGURAT_WINDOWS_CERTIFICATE_PASSWORD), timestampUrl,
+    \\or signCommand with %1 for the file.
+    \\vet checks the Zig files of src/ with `zig ast-check`, then that values of a
+    \\view pass (*view.View, *ui.Frame) are not kept in structs, container-level
+    \\variables or thread arguments.
     \\doctor reports the toolchain and native dependencies this machine provides.
     \\Set ZIG to choose the zig executable.
     \\
@@ -64,6 +78,11 @@ pub const Project = struct {
     bindings: ?[]const u8 = null,
     /// The Zig source exporting the `Service` type the client is made from.
     service: ?[]const u8 = null,
+    /// A square PNG, ideally 1024x1024, that `build --package` ships as
+    /// icon.png: the icon of the Linux menu entries the packages write.
+    icon: ?[]const u8 = null,
+    /// How Windows executables and installers are signed.
+    windows: ?winsign.Windows = null,
 
     /// `dir` under src/ lets the app import `catalog.zig` from its sources.
     pub const I18n = struct { dir: []const u8 = "src/locales", source: []const u8 = "en" };
@@ -96,6 +115,9 @@ fn run(allocator: std.mem.Allocator) !u8 {
     if (std.mem.eql(u8, command, "generate")) return generateCommand(allocator, rest);
     if (std.mem.eql(u8, command, "i18n")) return i18nCommand(allocator, rest);
     if (std.mem.eql(u8, command, "install-skills")) return installSkillsCommand(allocator, rest);
+    if (std.mem.eql(u8, command, "icon")) return iconCommand(allocator, rest);
+    if (std.mem.eql(u8, command, "sign")) return signCommand(allocator, rest);
+    if (std.mem.eql(u8, command, "vet")) return vetCommand(allocator, rest);
     try std.fs.File.stderr().writeAll(usage);
     return 2;
 }
@@ -338,11 +360,28 @@ fn buildCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     const target = try targetName(allocator, triple);
     const windows = std.mem.startsWith(u8, target, "windows-");
     const executable = try std.fmt.allocPrint(allocator, "{s}{s}", .{ info.executable, if (windows) ".exe" else "" });
+    const executable_path = try std.fs.path.join(allocator, &.{ "zig-out", "bin", executable });
+    if (windows) if (info.windows) |config| if (config.signs()) {
+        if (try signFile(allocator, config, executable_path) != 0) return 1;
+    };
     var files: std.ArrayList(update.archive.Entry) = .empty;
-    try files.append(allocator, .{ .name = executable, .bytes = try cwd.readFileAlloc(allocator, try std.fs.path.join(allocator, &.{ "zig-out", "bin", executable }), 512 * 1024 * 1024) });
+    try files.append(allocator, .{ .name = executable, .bytes = try cwd.readFileAlloc(allocator, executable_path, 512 * 1024 * 1024) });
+    if (info.icon) |path| {
+        const bytes = try cwd.readFileAlloc(allocator, path, 64 * 1024 * 1024);
+        icon_mod.validate(bytes) catch |err| {
+            std.debug.print("ziggurat: icon {s}: {s}\n", .{ path, if (err == error.IconNotSquare) "the icon must be square" else "the icon must be a PNG" });
+            return 1;
+        };
+        try files.append(allocator, .{ .name = "icon.png", .bytes = bytes });
+    }
     // WebView applications on Windows ship the loader beside the executable.
     if (windows) if (cwd.readFileAlloc(allocator, "zig-out/bin/WebView2Loader.dll", 16 * 1024 * 1024)) |loader| {
-        try files.append(allocator, .{ .name = "WebView2Loader.dll", .bytes = loader });
+        // Libraries their publishers signed keep their signatures.
+        const unsigned = !winsign.peKind(loader).signed;
+        if (unsigned) if (info.windows) |config| if (config.signs()) {
+            if (try signFile(allocator, config, "zig-out/bin/WebView2Loader.dll") != 0) return 1;
+        };
+        try files.append(allocator, .{ .name = "WebView2Loader.dll", .bytes = if (unsigned and info.windows != null and info.windows.?.signs()) try cwd.readFileAlloc(allocator, "zig-out/bin/WebView2Loader.dll", 16 * 1024 * 1024) else loader });
     } else |_| {};
     for ([_][]const u8{ "LICENSE", "LICENSE.txt" }) |license| if (cwd.readFileAlloc(allocator, license, 4 * 1024 * 1024)) |bytes| {
         try files.append(allocator, .{ .name = "LICENSE.txt", .bytes = bytes });
@@ -439,6 +478,9 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     const package = try readPackage(allocator, zip_path);
     const info = package.inventory;
     const name = if (info.name.len > 0) info.name else info.executable;
+    if (package_options.icon == null) for (package.files) |entry| {
+        if (std.mem.eql(u8, entry.name, "icon.png")) package_options.icon = "icon.png";
+    };
     if (package_options.icon) |icon| {
         var found = false;
         for (package.files) |entry| found = found or std.mem.eql(u8, entry.name, icon);
@@ -464,6 +506,11 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         try setup_format.writeFooter(&bytes.writer, zip, config_json);
         if (std.fs.path.dirname(output)) |parent| try std.fs.cwd().makePath(parent);
         try std.fs.cwd().writeFile(.{ .sub_path = output, .data = bytes.written(), .flags = .{ .mode = 0o755 } });
+        // The stub skips the certificate table, so the installer is signed
+        // after the package is appended.
+        if (windows) if (readProject(allocator, std.fs.cwd()) catch null) |project| if (project.windows) |signing| if (signing.signs()) {
+            if (try signFile(allocator, signing, output) != 0) return 1;
+        };
         try std.fs.File.stdout().writeAll(try std.fmt.allocPrint(allocator, "{s}\n", .{output}));
         return 0;
     }
@@ -1032,12 +1079,148 @@ fn installSkillsCommand(allocator: std.mem.Allocator, args: []const []const u8) 
     return 0;
 }
 
+// ---------------------------------------------------------------- icon, sign, vet
+
+fn iconCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
+    var source: ?[]const u8 = null;
+    var output: ?[]const u8 = null;
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        if (std.mem.eql(u8, args[index], "-o") and index + 1 < args.len) {
+            output = args[index + 1];
+            index += 1;
+        } else if (source == null and !std.mem.startsWith(u8, args[index], "-")) source = args[index] else return error.InvalidArguments;
+    }
+    const path = source orelse return error.InvalidArguments;
+    var environment = try std.process.getEnvMap(allocator);
+    var console: console_mod.Console = .stderr(&environment);
+    defer console.deinit();
+    const bytes = std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024 * 1024) catch |err| {
+        console.fatal("{s}: {s}", .{ path, @errorName(err) });
+        return 1;
+    };
+    const ico = icon_mod.pngToIco(allocator, bytes) catch |err| {
+        console.fatal("{s}: {s}", .{ path, switch (err) {
+            error.IconNotPng => "the icon must be a PNG",
+            error.IconNotSquare => "the icon must be square",
+            else => @errorName(err),
+        } });
+        return 1;
+    };
+    const destination = output orelse try std.mem.concat(allocator, u8, &.{ path[0 .. path.len - std.fs.path.extension(path).len], ".ico" });
+    try std.fs.cwd().writeFile(.{ .sub_path = destination, .data = ico });
+    console.log("Wrote {s}", .{destination});
+    return 0;
+}
+
+/// Sign one file as `config` says, as a step of the console.
+fn signFile(allocator: std.mem.Allocator, config: winsign.Windows, file: []const u8) !u8 {
+    var environment = try std.process.getEnvMap(allocator);
+    var console: console_mod.Console = .stderr(&environment);
+    defer console.deinit();
+    var task: console_mod.Task = undefined;
+    const name = std.fs.path.basename(file);
+    console.start(&task, try std.fmt.allocPrint(allocator, "Signing {s}", .{name}));
+    const root = try std.fs.cwd().realpathAlloc(allocator, ".");
+    winsign.sign(allocator, config, root, file) catch |err| {
+        task.fail();
+        console.fatal("{s}", .{switch (@as(anyerror, err)) {
+            error.SigntoolNotFound => "signing needs signtool from the Windows SDK",
+            error.OsslsigncodeNotFound => "signing Windows apps on this system needs osslsigncode (apt install osslsigncode, brew install osslsigncode)",
+            error.SignCommandFailed => "windows.signCommand failed",
+            error.SigntoolFailed => "signtool failed",
+            error.OsslsigncodeFailed => "osslsigncode failed",
+            else => @errorName(err),
+        }});
+        return 1;
+    };
+    task.done("Signed {s}", .{name});
+    return 0;
+}
+
+fn signCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
+    if (args.len == 0) return error.InvalidArguments;
+    const project = try readProject(allocator, std.fs.cwd());
+    const config = project.windows orelse winsign.Windows{};
+    if (!config.signs()) {
+        std.debug.print("ziggurat: set windows.certificate or windows.signCommand in ziggurat.json\n", .{});
+        return 1;
+    }
+    for (args) |file| if (try signFile(allocator, config, file) != 0) return 1;
+    return 0;
+}
+
+fn vetCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
+    const path = try projectDirectory(args);
+    var environment = try std.process.getEnvMap(allocator);
+    var console: console_mod.Console = .stderr(&environment);
+    defer console.deinit();
+    var dir = std.fs.cwd().openDir(path, .{}) catch {
+        console.fatal("{s} is not a directory", .{path});
+        return 1;
+    };
+    defer dir.close();
+    var files: std.ArrayList([]const u8) = .empty;
+    if (dir.access("build.zig", .{})) |_| try files.append(allocator, "build.zig") else |_| {}
+    if (dir.openDir("src", .{ .iterate = true })) |opened| {
+        var src = opened;
+        defer src.close();
+        var walker = try src.walk(allocator);
+        defer walker.deinit();
+        while (try walker.next()) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+            try files.append(allocator, try std.fs.path.join(allocator, &.{ "src", entry.path }));
+        }
+    } else |_| {}
+    std.mem.sort([]const u8, files.items, {}, struct {
+        fn less(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.less);
+    // The compiler's own checks of each file first: unused names, shadowing
+    // and the other errors that need no analysis.
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.appendSlice(allocator, &.{ try zigExecutable(allocator), "ast-check" });
+    var failures: usize = 0;
+    for (files.items) |file| {
+        argv.items.len = 2;
+        try argv.append(allocator, file);
+        var child = std.process.Child.init(argv.items, allocator);
+        child.cwd_dir = dir;
+        const term = try child.spawnAndWait();
+        if (term != .Exited or term.Exited != 0) failures += 1;
+    }
+    if (failures > 0) {
+        console.fatal("zig ast-check: {d} file(s) with errors", .{failures});
+        return 1;
+    }
+    var issues: usize = 0;
+    for (files.items) |file| {
+        const source = try dir.readFileAllocOptions(allocator, file, 16 * 1024 * 1024, null, .of(u8), 0);
+        const diagnostics = vet.analyze(allocator, source) catch |err| {
+            console.fatal("{s}: {s}", .{ file, @errorName(err) });
+            return 1;
+        };
+        for (diagnostics) |d| console.problem("{s}:{d}:{d}: {s}", .{ try std.fs.path.join(allocator, &.{ path, file }), d.line, d.column, d.message });
+        issues += diagnostics.len;
+    }
+    if (issues > 0) {
+        console.fatal("{d} view lifetime issue(s)", .{issues});
+        return 1;
+    }
+    console.log("No issues in {d} file(s)", .{files.items.len});
+    return 0;
+}
+
 test {
     _ = publish;
     _ = console_mod;
     _ = i18n_gen;
     _ = install_script;
     _ = s3;
+    _ = icon_mod;
+    _ = winsign;
+    _ = vet;
 }
 
 test "templates render without placeholders and identifiers are sanitized" {

@@ -1,10 +1,10 @@
-//! Finds web, mail and file addresses in a line of cells, so the view can
-//! underline the one under the pointer and open it. Links set by the
+//! Finds web, mail and file addresses, and file paths, in a line of cells,
+//! so the view can underline the one under the pointer and open it. Links set by the
 //! program with OSC 8 come from the cells themselves and need no search.
 const std = @import("std");
 const screen = @import("screen.zig");
 
-pub const schemes = [_][]const u8{ "https://", "http://", "ftp://", "file://", "ssh://", "git://", "mailto:" };
+pub const schemes = [_][]const u8{ "https://", "http://", "ftp://", "file://", "mailto:" };
 
 pub const Found = struct {
     /// First and one past the last column.
@@ -14,16 +14,107 @@ pub const Found = struct {
     uri: []const u8,
 };
 
+/// A byte of a URL: anything but spaces, quotes, angle brackets, backticks
+/// and controls.
 fn urlByte(byte: u8) bool {
     return switch (byte) {
-        0...0x20, 0x7f, '<', '>', '"', '`', '{', '}', '|', '\\', '^' => false,
+        0...0x20, 0x7f, '<', '>', '"', '\'', '`' => false,
         else => true,
     };
 }
 
+/// A web, FTP, file or mail address at `text[i..]`: its end, or null.
+fn urlAt(text: []const u8, i: usize) ?usize {
+    for (schemes) |scheme| {
+        if (!std.mem.startsWith(u8, text[i..], scheme)) continue;
+        var end = i + scheme.len;
+        while (end < text.len and urlByte(text[end])) end += 1;
+        if (end > i + scheme.len) return end;
+    }
+    return null;
+}
+
+fn word(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or byte == '_';
+}
+/// A byte of a file name: word characters, '.', '@', '+' and '-'.
+fn nameByte(byte: u8) bool {
+    return word(byte) or byte == '.' or byte == '@' or byte == '+' or byte == '-';
+}
+/// A byte of an absolute path: anything but spaces, quotes, angle
+/// brackets, backticks, controls and ':'.
+fn absoluteByte(byte: u8) bool {
+    return urlByte(byte) and byte != ':';
+}
+
+/// `:line` or `:line:col` at `text[i..]`: its end, else `i`.
+fn lineSuffix(text: []const u8, i: usize) usize {
+    var end = i;
+    for (0..2) |_| {
+        if (end >= text.len or text[end] != ':') break;
+        var digits = end + 1;
+        while (digits < text.len and std.ascii.isDigit(text[digits])) digits += 1;
+        if (digits == end + 1) break;
+        end = digits;
+    }
+    return end;
+}
+
+/// A file path at `text[i..]`: absolute, from `~`, `./` or `../`, with a
+/// slash, or a file name with a `:line`; each may end in `:line` or
+/// `:line:col`. Its end, or null.
+fn pathAt(text: []const u8, i: usize) ?usize {
+    // Absolute, or from ~, ../ or ./.
+    for ([_][]const u8{ "~/", "../", "./", "/" }) |prefix| {
+        if (!std.mem.startsWith(u8, text[i..], prefix)) continue;
+        var end = i + prefix.len;
+        while (end < text.len and absoluteByte(text[end])) end += 1;
+        if (end > i + prefix.len) return lineSuffix(text, end);
+    }
+    // Names joined by slashes.
+    var end = i;
+    while (end < text.len and nameByte(text[end])) end += 1;
+    const name_end = end;
+    if (end > i) {
+        var segments: usize = 0;
+        while (end < text.len and text[end] == '/') {
+            var seg = end + 1;
+            while (seg < text.len and nameByte(text[seg])) seg += 1;
+            if (seg == end + 1) break;
+            end = seg;
+            segments += 1;
+        }
+        if (segments > 0) {
+            if (end < text.len and text[end] == '/') end += 1;
+            return lineSuffix(text, end);
+        }
+    }
+    // A file name with an extension and a line.
+    if (name_end > i and text[i] != '.') {
+        const dot = std.mem.lastIndexOfScalar(u8, text[i + 1 .. name_end], '.') orelse return null;
+        const ext = text[i + 1 + dot + 1 .. name_end];
+        if (ext.len == 0) return null;
+        for (ext) |b| if (!word(b)) return null;
+        const suffix = lineSuffix(text, name_end);
+        if (suffix > name_end) return suffix;
+    }
+    return null;
+}
+
+pub const Kind = enum { url, path };
+
 /// The address covering column `col` of `cells`, if any. `buffer` holds
 /// the line's text while searching and the address after.
 pub fn at(cells: []const screen.Cell, col: u16, buffer: []u8) ?Found {
+    return find(cells, col, buffer, .url);
+}
+
+/// The file path covering column `col`, as `at` finds addresses.
+pub fn pathUnder(cells: []const screen.Cell, col: u16, buffer: []u8) ?Found {
+    return find(cells, col, buffer, .path);
+}
+
+fn find(cells: []const screen.Cell, col: u16, buffer: []u8, kind: Kind) ?Found {
     // Text of the line, and the column each byte came from.
     var columns: [1024]u16 = undefined;
     var len: usize = 0;
@@ -38,37 +129,44 @@ pub fn at(cells: []const screen.Cell, col: u16, buffer: []u8) ?Found {
         len += n;
     }
     const text = buffer[0..len];
-    for (schemes) |scheme| {
-        var from: usize = 0;
-        while (std.mem.indexOfPos(u8, text, from, scheme)) |begin| {
-            from = begin + scheme.len;
-            // The scheme must start a word.
-            if (begin > 0 and (std.ascii.isAlphanumeric(text[begin - 1]) or text[begin - 1] == '+' or text[begin - 1] == '.' or text[begin - 1] == '-')) continue;
-            var end = from;
-            while (end < text.len and urlByte(text[end])) end += 1;
-            end = trim(text[begin..end]) + begin;
-            if (end <= from) continue;
-            const first = columns[begin];
-            const last = columns[end - 1];
-            if (col < first or col > last) continue;
-            const uri = text[begin..end];
-            std.mem.copyForwards(u8, buffer[0..uri.len], uri);
-            return .{ .start = first, .end = last + 1, .uri = buffer[0..uri.len] };
-        }
+    // Leftmost matches, one after another.
+    var i: usize = 0;
+    while (i < text.len) {
+        const matched = switch (kind) {
+            .url => urlAt(text, i),
+            .path => pathAt(text, i),
+        } orelse {
+            i += 1;
+            continue;
+        };
+        const begin = i;
+        i = matched;
+        const end = trim(text[begin..matched]) + begin;
+        if (end <= begin) continue;
+        const first = columns[begin];
+        const last = columns[end - 1];
+        if (col < first or col > last) continue;
+        const uri = text[begin..end];
+        std.mem.copyForwards(u8, buffer[0..uri.len], uri);
+        return .{ .start = first, .end = last + 1, .uri = buffer[0..uri.len] };
     }
     return null;
 }
 
-/// Length without trailing punctuation and closing brackets that have no
-/// opening one inside the address.
+/// Length without what likely ends the sentence around an address rather
+/// than the address: punctuation, and closing brackets it did not open.
 fn trim(uri: []const u8) usize {
     var end = uri.len;
     while (end > 0) {
         const last = uri[end - 1];
         switch (last) {
-            '.', ',', ';', ':', '!', '?', '\'', '*' => end -= 1,
-            ')', ']' => {
-                const open: u8 = if (last == ')') '(' else '[';
+            '.', ',', ';', ':', '!', '?' => end -= 1,
+            ')', ']', '}' => {
+                const open: u8 = switch (last) {
+                    ')' => '(',
+                    ']' => '[',
+                    else => '{',
+                };
                 if (std.mem.count(u8, uri[0..end], &.{open}) >= std.mem.count(u8, uri[0..end], &.{last})) break;
                 end -= 1;
             },
@@ -110,5 +208,30 @@ test "addresses under a column, trimmed of punctuation" {
     const quoted = cellsOf("x<http://a.b/c>y (https://q.r)", &cells);
     try std.testing.expectEqualStrings("http://a.b/c", at(quoted, 5, &buffer).?.uri);
     try std.testing.expectEqualStrings("https://q.r", at(quoted, 20, &buffer).?.uri);
-    try std.testing.expect(at(cellsOf("xhttps://no", &cells), 5, &buffer) == null);
+    // Addresses need not start a word.
+    try std.testing.expectEqualStrings("https://no", at(cellsOf("xhttps://no", &cells), 5, &buffer).?.uri);
+    try std.testing.expect(at(cellsOf("ssh://host", &cells), 3, &buffer) == null);
+}
+
+test "file paths under a column" {
+    var cells: [128]screen.Cell = undefined;
+    var buffer: [256]u8 = undefined;
+    const cases = [_]struct { line: []const u8, col: u16, path: ?[]const u8 }{
+        .{ .line = "open /abs/path.txt now", .col = 8, .path = "/abs/path.txt" },
+        .{ .line = "see ~/notes.md.", .col = 6, .path = "~/notes.md" },
+        .{ .line = "in ./a.go and", .col = 4, .path = "./a.go" },
+        .{ .line = "../up/x", .col = 1, .path = "../up/x" },
+        .{ .line = "error src/app.go:12:3: oops", .col = 8, .path = "src/app.go:12:3" },
+        .{ .line = "main.go:250 here", .col = 2, .path = "main.go:250" },
+        .{ .line = "dir/sub/ end", .col = 1, .path = "dir/sub/" },
+        .{ .line = "just words here", .col = 6, .path = null },
+        .{ .line = "main.go alone", .col = 2, .path = null },
+        .{ .line = "(see /tmp/x)", .col = 7, .path = "/tmp/x" },
+    };
+    for (cases) |case| {
+        const found = pathUnder(cellsOf(case.line, &cells), case.col, &buffer);
+        if (case.path) |path| {
+            try std.testing.expectEqualStrings(path, found.?.uri);
+        } else try std.testing.expect(found == null);
+    }
 }

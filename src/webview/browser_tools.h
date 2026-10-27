@@ -4,7 +4,7 @@ static LONG owned_tool_pending;
 static void browser_tools_close(State *s);
 typedef struct NativeFind { int32_t matches,active_index; } NativeFind;
 typedef struct NativeCookie { WCHAR *name,*value,*domain,*path; double expires; uint32_t flags,same_site; } NativeCookie;
-typedef struct NativeToolRequest { uint32_t kind,flags; uint64_t token; const WCHAR *text; uint32_t first_page,last_page; } NativeToolRequest;
+typedef struct NativeToolRequest { uint32_t kind,flags; uint64_t token; const WCHAR *text; uint32_t first_page,last_page; double page[6]; } NativeToolRequest;
 typedef struct NativeCookieWrite { const WCHAR *name,*value,*path; double expires; uint32_t flags,same_site; } NativeCookieWrite;
 struct ToolOperation {
     const void *vtable;
@@ -212,8 +212,17 @@ HRESULT zwv_tool_start(State *s,const NativeToolRequest *request) {
         if (SUCCEEDED(hr)) hr=ICoreWebView2Environment_QueryInterface(s->environment,&IID_ICoreWebView2Environment6,(void **)&environment);
         if (SUCCEEDED(hr)) hr=ICoreWebView2Environment6_CreatePrintSettings(environment,&settings);
         if (SUCCEEDED(hr)) hr=ICoreWebView2PrintSettings_QueryInterface(settings,&IID_ICoreWebView2PrintSettings2,(void **)&settings2);
-        WCHAR pages[32]; _snwprintf(pages,32,L"%u-%u",request->first_page,request->last_page);
-        if (SUCCEEDED(hr)) hr=ICoreWebView2PrintSettings2_put_PageRanges(settings2,pages);
+        WCHAR pages[32];
+        if (request->last_page) _snwprintf(pages,32,L"%u-%u",request->first_page,request->last_page);
+        else _snwprintf(pages,32,L"%u-",request->first_page);
+        if (SUCCEEDED(hr) && (request->first_page>1 || request->last_page)) hr=ICoreWebView2PrintSettings2_put_PageRanges(settings2,pages);
+        if (SUCCEEDED(hr)) hr=ICoreWebView2PrintSettings_put_PageWidth(settings,request->page[0]);
+        if (SUCCEEDED(hr)) hr=ICoreWebView2PrintSettings_put_PageHeight(settings,request->page[1]);
+        if (SUCCEEDED(hr)) hr=ICoreWebView2PrintSettings_put_MarginTop(settings,request->page[2]);
+        if (SUCCEEDED(hr)) hr=ICoreWebView2PrintSettings_put_MarginRight(settings,request->page[3]);
+        if (SUCCEEDED(hr)) hr=ICoreWebView2PrintSettings_put_MarginBottom(settings,request->page[4]);
+        if (SUCCEEDED(hr)) hr=ICoreWebView2PrintSettings_put_MarginLeft(settings,request->page[5]);
+        if (SUCCEEDED(hr)) hr=ICoreWebView2PrintSettings_put_ShouldPrintHeaderAndFooter(settings,FALSE);
         if (SUCCEEDED(hr)) hr=ICoreWebView2PrintSettings_put_Orientation(settings,(request->flags&1)?COREWEBVIEW2_PRINT_ORIENTATION_LANDSCAPE:COREWEBVIEW2_PRINT_ORIENTATION_PORTRAIT);
         if (SUCCEEDED(hr)) hr=ICoreWebView2PrintSettings_put_ShouldPrintBackgrounds(settings,(request->flags&2)!=0);
         if (SUCCEEDED(hr)) {

@@ -53,3 +53,5 @@ Windows `web.View.attachRegion(region, options)` 将一份稳定 View 接到 nat
 `zig build smoke-composition-webview -Dwebview=true` 在同一个真实 HWND 上组合 GDI 背景与两个 WebView，验证 child 原生几何/可见性、独立 DOM marker、单页 reload、移动/resize、pending 创建时移除及立刻复用、ready/resource 回调移除与请求终结。最终 COM/controller/deferral 和背景资源归零。该检查已在 Windows ReleaseSafe 通过，不包含人眼视觉质量、任意 overlay 或跨 surface Tab/IME 验收。
 
 运行 `zig build run-rectangular-pages -Dwebview=true` 可查看[双页面示例](../examples/rectangular_pages.zig)：隐藏左侧保留计数，关闭后重新打开创建新文档，右侧页面独立运行。每个页面使用独立用户配置目录。
+
+声明式视图里的页面见[视图中的 WebView](embedded-webview.md)：`ziggurat_webview_view` 用 Host 的 `after_frame` 钩子把每个页面区域放在其叶子的 bounds 上，未构建的页面隐藏并保留。
