@@ -329,7 +329,7 @@ try v.end();
 - `ImageOptions.fit` 决定图片如何填充盒子：`contain`（默认，保持比例放进盒子）、`cover`（保持比例盖满盒子，超出部分裁掉）、`fill`（拉伸到盒子）与 `none`（自身尺寸、居中并裁剪）。`alt` 是给可访问性客户端的替代文字，作为图片的名称；没有 `alt`，或设置 `decorative`，图片是装饰性的，不暴露给可访问性客户端。
 - 图标在 24×24 网格上以 2 单位宽的圆头描边绘制，由 `Style.color` 着色，默认取主题文字色（禁用时为禁用文字色）。`IconOptions` 有 `name`（可访问名称；没有名称时是装饰性的，图标旁有标签时应命名按钮而不是图标）、`size`（默认 20 DIP）与 `mirror`（从右到左时是否镜像，null 时只镜像水平的 chevron 和箭头）。`view.Icon` 列出全部图标：chevron 与箭头的四个方向、close、check、plus、minus、search、menu、more_horizontal、more_vertical、settings、home、info、warning、error_circle、help、star、heart、trash、edit、copy、refresh、download、upload、external_link、folder、file、calendar、user、bell、lock、eye、filter、play 与 pause。图标的路径数据由本项目绘制，`view.icons` 提供 `pathData()` 与 `directional()`。
 - 绘制只读取绘制之前准备好的内容。SVG 与图标由应用提供的绘制器画出：`SvgPicture` 与 `IconPainter` 在 paint 中被调用，不能分配或准备；没有对应尺寸像素的绘制器什么也不画，在绘制之后准备。`ziggurat_view_graphics` 提供这两个绘制器：
-  - `Icons.init(allocator, &host)` 为一个 Host 绘制图标，`host.view.icons = icons.painter()`（或在 `Options.icons` 中传入）。它把图标按物理像素尺寸、缩放与镜像准备成覆盖遮罩，最多保留 `max_icons`（16）个，最久未用的先被替换；遮罩与图片共享渲染器的 32 个驻留槽。
+  - `Icons.init(allocator, &host)` 为一个 Host 绘制图标，`host.view.icons = icons.painter()`（或在 `Options.icons` 中传入）。它把图标按物理像素尺寸、缩放与镜像准备成覆盖遮罩，最多保留 `max_icons`（16）个，最久未用的先被替换；遮罩与图片共享渲染器的驻留预算。
   - `SvgImage.init(allocator, &host, bytes, options)` 解析一个 SVG 文档，自然尺寸取根元素的 `width`/`height`，否则取 `viewBox`，否则为 24×24，`SvgOptions` 可覆盖。`picture()` 交给 `svg`。它以节点颜色作为 `currentColor`，按绘制的像素尺寸准备一张图片；尺寸或颜色变化后重新准备，失败的准备在尺寸或颜色再次变化前不重试。
   - 两者都在绘制发现缺少像素时投递一个任务，在主线程上准备并上传后重绘；未变化的视图绘制时不分配。`last_error` 记录第一个错误。在绘制之外、Context 分离之前调用 `deinit` 释放资源。
 

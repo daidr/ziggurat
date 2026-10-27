@@ -2,15 +2,65 @@ const std = @import("std");
 const drawing = @import("ziggurat_drawing_resources");
 pub const CoverageEntry = struct { view: drawing.CoverageView, used: u64, charge: usize };
 pub const Entry = struct { view: drawing.ImageView, used: u64, dynamic: bool = false, charge: usize, last_from_identity: u64 = 0 };
+/// Slots a cache starts with and the most it grows to. The byte budget, not
+/// the slot count, bounds residency; past the ceiling the oldest entry makes
+/// room as before.
+pub const initial_slots = 32;
+pub const max_slots = 64 * 1024;
 /// Metadata only. The backend releases native objects before drop releases the
-/// CPU residency lease. Eviction occurs only in explicit upload/budget methods.
+/// CPU residency lease. Eviction occurs only in explicit upload/budget methods
+/// and when a frame makes the images it draws resident.
 pub const Cache = struct {
-    entries: [32]?Entry = @splat(null),
-    coverage_entries: [32]?CoverageEntry = @splat(null),
+    entries: []?Entry = &.{},
+    coverage_entries: []?CoverageEntry = &.{},
     coverage_stats: drawing.CoverageStats = .{},
     raster_peak_bytes: usize = 0,
     clock: u64 = 0,
+    /// Entries used at or after this clock value belong to the frame being
+    /// prepared and are not evicted for it.
+    protect_from: u64 = std.math.maxInt(u64),
     stats: drawing.ImageStats = .{},
+    /// The slot count to grow to next, or `error.ImageSlotsFull` at the ceiling.
+    pub fn nextCapacity(self: *const Cache) !usize {
+        if (self.entries.len >= max_slots) return error.ImageSlotsFull;
+        return if (self.entries.len == 0) initial_slots else @min(max_slots, self.entries.len * 2);
+    }
+    /// Grow both tables to `capacity` empty-tailed slots. Call after the
+    /// backend's native table has grown to at least as many.
+    pub fn grow(self: *Cache, capacity: usize) !void {
+        std.debug.assert(capacity > self.entries.len);
+        const old = self.entries.len;
+        const entries = try std.heap.page_allocator.alloc(?Entry, capacity);
+        errdefer std.heap.page_allocator.free(entries);
+        const coverage = try std.heap.page_allocator.alloc(?CoverageEntry, capacity);
+        @memcpy(entries[0..old], self.entries);
+        @memset(entries[old..], null);
+        @memcpy(coverage[0..old], self.coverage_entries);
+        @memset(coverage[old..], null);
+        self.free();
+        self.entries = entries;
+        self.coverage_entries = coverage;
+    }
+    fn free(self: *Cache) void {
+        if (self.entries.len != 0) std.heap.page_allocator.free(self.entries);
+        if (self.coverage_entries.len != 0) std.heap.page_allocator.free(self.coverage_entries);
+        self.entries = &.{};
+        self.coverage_entries = &.{};
+    }
+    /// Drop every entry and free the tables.
+    pub fn deinit(self: *Cache) void {
+        self.clear();
+        self.free();
+        self.* = .{};
+    }
+    /// Start making a frame's rasters resident: entries touched from now on
+    /// are kept until `endFrame`.
+    pub fn beginFrame(self: *Cache) void {
+        self.protect_from = self.clock +| 1;
+    }
+    pub fn endFrame(self: *Cache) void {
+        self.protect_from = std.math.maxInt(u64);
+    }
     pub fn find(self: *const Cache, identity: u64) ?usize {
         for (self.entries, 0..) |entry, i| if (entry) |value| if (value.view.identity == identity) return i;
         return null;
@@ -35,10 +85,11 @@ pub const Cache = struct {
     pub fn touch(self: *Cache, index: usize) void {
         if (self.clock == std.math.maxInt(u64)) {
             self.clock = 0;
-            for (&self.coverage_entries) |*entry| if (entry.*) |*value| {
+            if (self.protect_from != std.math.maxInt(u64)) self.protect_from = 0;
+            for (self.coverage_entries) |*entry| if (entry.*) |*value| {
                 value.used = 0;
             };
-            for (&self.entries) |*entry| if (entry.*) |*value| {
+            for (self.entries) |*entry| if (entry.*) |*value| {
                 value.used = 0;
             };
         }
@@ -67,7 +118,16 @@ pub const Cache = struct {
         return index;
     }
     pub fn needsEviction(self: *const Cache, bytes: usize) bool {
-        return self.empty() == null or bytes > self.stats.budget_bytes -| self.totalBytes();
+        return bytes > self.stats.budget_bytes -| self.totalBytes();
+    }
+    /// The oldest entry an upload may evict: any entry outside a frame, else
+    /// one the frame being prepared has not touched. Null when every entry
+    /// belongs to that frame, which then goes over budget until the next
+    /// explicit upload or budget change.
+    pub fn victim(self: *const Cache) ?usize {
+        const index = self.oldest() orelse return null;
+        const used = if (self.entries[index]) |value| value.used else self.coverage_entries[index].?.used;
+        return if (used < self.protect_from) index else null;
     }
     pub fn commit(self: *Cache, index: usize, view: drawing.ImageView) void {
         self.commitCharged(index, view, false, view.pixelBytes());
@@ -175,7 +235,8 @@ test "coverage shares the bounded image slots budget and LRU without changing dy
     const mask: drawing.CoverageView = .{ .lease = &mask_lease, .identity = try drawing.reserveRasterIdentity(), .coverage = .{ .pixels = &alpha, .width = 2, .height = 2, .stride = 4, .origin_x = 0, .origin_y = 0, .scale = 1 } };
     const replacement: drawing.ImageView = .{ .lease = &replacement_lease, .identity = try drawing.reserveRasterIdentity(), .levels = &levels };
     var cache: Cache = .{};
-    defer cache.clear();
+    defer cache.deinit();
+    try cache.grow(try cache.nextCapacity());
     cache.stats.budget_bytes = 64;
     try image.lease.acquireResidency();
     cache.commitCharged(0, image, true, 32);
@@ -202,24 +263,63 @@ test "coverage shares the bounded image slots budget and LRU without changing dy
     try std.testing.expectEqual(1, cache.stats.updates);
 }
 
-test "mixed coverage and images occupy at most thirty-two native slots" {
-    var leases: [32]drawing.Lease = undefined;
+test "mixed coverage and images share slots that grow past thirty-two" {
+    var leases: [33]drawing.Lease = undefined;
     var pixels: [4]u8 = @splat(255);
     const levels = [_]drawing.ImageLevel{.{ .pixels = &pixels, .byte_len = 4, .width = 1, .height = 1, .stride = 4 }};
     var cache: Cache = .{};
+    defer cache.deinit();
+    try std.testing.expectEqual(null, cache.empty());
+    try cache.grow(try cache.nextCapacity());
     for (&leases, 0..) |*lease, index| {
         lease.* = drawing.Lease.init(std.Thread.getCurrentId());
         try lease.acquireResidency();
         const identity = try drawing.reserveRasterIdentity();
+        const slot = cache.empty() orelse slot: {
+            try std.testing.expectEqual(32, index);
+            try cache.grow(try cache.nextCapacity());
+            break :slot cache.empty().?;
+        };
         if (index % 2 == 0) {
-            cache.commit(index, .{ .lease = lease, .identity = identity, .levels = &levels });
-        } else cache.commitCoverage(index, .{ .lease = lease, .identity = identity, .coverage = .{ .pixels = &pixels, .width = 1, .height = 1, .stride = 4, .origin_x = 0, .origin_y = 0, .scale = 1 } }, 4);
+            cache.commit(slot, .{ .lease = lease, .identity = identity, .levels = &levels });
+        } else cache.commitCoverage(slot, .{ .lease = lease, .identity = identity, .coverage = .{ .pixels = &pixels, .width = 1, .height = 1, .stride = 4, .origin_x = 0, .origin_y = 0, .scale = 1 } }, 4);
     }
-    try std.testing.expectEqual(32, cache.totalEntries());
-    try std.testing.expectEqual(null, cache.empty());
-    try std.testing.expect(cache.needsEviction(1));
-    try std.testing.expectEqual(16, cache.stats.resident_entries);
+    try std.testing.expectEqual(64, cache.entries.len);
+    try std.testing.expectEqual(33, cache.totalEntries());
+    try std.testing.expect(!cache.needsEviction(1));
+    try std.testing.expectEqual(17, cache.stats.resident_entries);
     try std.testing.expectEqual(16, cache.coverage_stats.resident_entries);
     cache.clear();
     for (leases) |lease| try std.testing.expectEqual(0, lease.pins);
+}
+
+test "a frame keeps the entries it touched and goes over budget instead of evicting them" {
+    var leases: [3]drawing.Lease = undefined;
+    var pixels: [16]u8 = @splat(255);
+    const levels = [_]drawing.ImageLevel{.{ .pixels = &pixels, .byte_len = 16, .width = 2, .height = 2, .stride = 8 }};
+    var cache: Cache = .{};
+    defer cache.deinit();
+    try cache.grow(try cache.nextCapacity());
+    cache.stats.budget_bytes = 32;
+    var views: [3]drawing.ImageView = undefined;
+    for (&leases, &views) |*lease, *view| {
+        lease.* = drawing.Lease.init(std.Thread.getCurrentId());
+        view.* = .{ .lease = lease, .identity = try drawing.reserveRasterIdentity(), .levels = &levels };
+    }
+    for (views[0..2]) |view| {
+        try view.lease.acquireResidency();
+        cache.commit(cache.empty().?, view);
+    }
+    try std.testing.expectEqual(@as(?usize, 0), cache.victim());
+    cache.beginFrame();
+    cache.touch(cache.find(views[1].identity).?);
+    try std.testing.expectEqual(@as(?usize, 0), cache.victim());
+    cache.touch(cache.find(views[0].identity).?);
+    try std.testing.expect(cache.needsEviction(16));
+    try std.testing.expectEqual(null, cache.victim());
+    try views[2].lease.acquireResidency();
+    cache.commit(cache.empty().?, views[2]);
+    try std.testing.expectEqual(48, cache.totalBytes());
+    cache.endFrame();
+    try std.testing.expectEqual(@as(?usize, 1), cache.victim());
 }

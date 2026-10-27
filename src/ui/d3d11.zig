@@ -94,6 +94,7 @@ extern fn zgpu_frame_ready(*anyopaque) ?*anyopaque;
 extern fn zgpu_prepare_image(*anyopaque, [*]const drawing.ImageLevel, u32) i32;
 extern fn zgpu_prepare_dynamic_image(*anyopaque, [*]const drawing.ImageLevel, u32) i32;
 extern fn zgpu_update_image(*anyopaque, u32, [*]const drawing.ImageLevel, u32) i32;
+extern fn zgpu_reserve_images(*anyopaque, u32) i32;
 extern fn zgpu_commit_image(*anyopaque, u32) void;
 extern fn zgpu_release_image(*anyopaque, u32) void;
 extern fn zgpu_image_fault(*anyopaque, u32) void;
@@ -544,13 +545,14 @@ pub const Renderer = struct {
         }
         const charge = @as(usize, view.coverage.width + 2) * (view.coverage.height + 2);
         if (charge > self.images.stats.budget_bytes) return error.CoverageBudgetExceeded;
+        try self.reserveSlot();
         try view.lease.acquireResidency();
         errdefer view.lease.releaseResidency();
         self.images.reserveCandidate(charge);
         self.images.coverage_stats.peak_reserved_bytes = @max(self.images.coverage_stats.peak_reserved_bytes, self.images.coverage_stats.pixel_bytes + charge);
         const descriptor = view.native();
         try self.result(zgpu_prepare_coverage(native, &descriptor));
-        while (self.images.needsEviction(charge)) self.dropImage(self.images.oldest().?, true);
+        while (self.images.needsEviction(charge)) self.dropImage(self.images.victim() orelse break, true);
         const slot = self.images.empty().?;
         zgpu_commit_image(native, @intCast(slot));
         self.images.commitCoverage(slot, view, charge);
@@ -614,12 +616,13 @@ pub const Renderer = struct {
         }
         const charge = view.pixelBytes() * @as(usize, if (dynamic) 2 else 1);
         if (charge > self.images.stats.budget_bytes) return error.ImageBudgetExceeded;
+        try self.reserveSlot();
         try view.lease.acquireResidency();
         errdefer view.lease.releaseResidency();
         self.images.stats.peak_reserved_bytes = @max(self.images.stats.peak_reserved_bytes, self.images.stats.pixel_bytes + charge);
         self.images.reserveCandidate(charge);
         try self.result(if (dynamic) zgpu_prepare_dynamic_image(native, view.levels.ptr, @intCast(view.levels.len)) else zgpu_prepare_image(native, view.levels.ptr, @intCast(view.levels.len)));
-        while (self.images.needsEviction(charge)) self.dropImage(self.images.oldest().?, true);
+        while (self.images.needsEviction(charge)) self.dropImage(self.images.victim() orelse break, true);
         const slot = self.images.empty().?;
         zgpu_commit_image(native, @intCast(slot));
         self.images.commitCharged(slot, view, dynamic, charge);
@@ -639,6 +642,37 @@ pub const Renderer = struct {
     fn dropImage(self: *Renderer, slot: usize, eviction: bool) void {
         zgpu_release_image(self.native.?, @intCast(slot));
         self.images.drop(slot, eviction);
+    }
+    /// Leave an empty slot for an upload: grow the table, or at its ceiling
+    /// evict the oldest entry the frame being prepared does not draw.
+    fn reserveSlot(self: *Renderer) !void {
+        if (self.images.empty() != null) return;
+        if (self.images.nextCapacity()) |capacity| {
+            if (zgpu_reserve_images(self.native.?, @intCast(capacity)) >= 0) {
+                if (self.images.grow(capacity)) return else |_| {}
+            }
+        } else |_| {}
+        self.dropImage(self.images.victim() orelse return error.ImageSlotsFull, true);
+    }
+    /// Whether every image and coverage mask a frame draws is resident. The
+    /// device cannot upload while it draws, so a frame missing one draws in
+    /// software and `residentFrame` uploads them after it.
+    pub fn holdsFrame(self: *const Renderer, buffer: *const commands.Buffer) bool {
+        for (buffer.imageResources()) |view| if (self.images.find(view.identity) == null) return false;
+        for (buffer.coverageResources()) |view| if (self.images.findCoverage(view.identity) == null) return false;
+        return true;
+    }
+    /// Upload the images and coverage a frame draws that are missing,
+    /// without evicting the others it draws; see `holdsFrame`. Call outside
+    /// drawing. A frame that needs more than the budget keeps them all until
+    /// the next explicit upload or budget change.
+    pub fn residentFrame(self: *Renderer, buffer: *const commands.Buffer) !void {
+        self.images.beginFrame();
+        defer self.images.endFrame();
+        for (buffer.imageResources()) |view| if (self.images.find(view.identity)) |slot| self.images.touch(slot);
+        for (buffer.coverageResources()) |view| if (self.images.findCoverage(view.identity)) |slot| self.images.touch(slot);
+        for (buffer.imageResources()) |view| if (self.images.find(view.identity) == null) try self.uploadImage(view);
+        for (buffer.coverageResources()) |view| if (self.images.findCoverage(view.identity) == null) try self.uploadCoverage(view);
     }
     pub fn releaseImage(self: *Renderer, identity: u64) !bool {
         const scope = try self.operation(true);
@@ -1025,7 +1059,7 @@ pub const Renderer = struct {
             try view.validate();
             const borrow = self.domain_borrow orelse return error.TextureDomainRequired;
             if (view.domain != borrow.epoch) return error.TextureDomainMismatch;
-            _ = try drawing.planTexture(view, .{ .x = value.destination.x, .y = value.destination.y, .width = value.destination.width, .height = value.destination.height }, .{ .alignment = value.alignment, .fit = value.fit, .sampling = value.sampling, .opacity = value.opacity }, zgpu_scale(self.native.?));
+            _ = try drawing.planTexture(view, .{ .x = value.destination.x, .y = value.destination.y, .width = value.destination.width, .height = value.destination.height }, value.options(), zgpu_scale(self.native.?));
         };
     }
     /// Pure backend policy, shared by direct replay and offscreen's pre-begin
@@ -1142,11 +1176,11 @@ pub const Renderer = struct {
             },
             .image => |value| {
                 if (value.resource >= image_resources.len) return error.MissingResources;
-                try self.image(image_resources[value.resource], value.destination, .{ .alignment = value.alignment, .fit = value.fit, .sampling = value.sampling, .opacity = value.opacity });
+                try self.image(image_resources[value.resource], value.destination, value.options());
             },
             .texture => |value| {
                 const view = textures[value.resource];
-                const plan = try drawing.planTexture(view, .{ .x = value.destination.x, .y = value.destination.y, .width = value.destination.width, .height = value.destination.height }, .{ .alignment = value.alignment, .fit = value.fit, .sampling = value.sampling, .opacity = value.opacity }, zgpu_scale(native));
+                const plan = try drawing.planTexture(view, .{ .x = value.destination.x, .y = value.destination.y, .width = value.destination.width, .height = value.destination.height }, value.options(), zgpu_scale(native));
                 if (plan.destination.width != 0 and plan.destination.height != 0 and plan.opacity != 0) try self.result(zgpu_texture(native, view.token, &plan));
             },
             .begin_group => |value| {
@@ -1223,8 +1257,7 @@ pub const Renderer = struct {
         if (domain) |value| value.clearRendererWait(borrow.?.slot);
         if (native) |value| zgpu_destroy(value);
         if (release_borrow) if (domain) |value| value.releaseRenderer(borrow.?.slot);
-        self.images.clear();
-        self.images = .{};
+        self.images.deinit();
         self.native = null;
         self.layer_plan = null;
         self.layer_candidate_peak = 0;

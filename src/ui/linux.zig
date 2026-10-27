@@ -37,6 +37,7 @@ extern fn zlc_destroy(*anyopaque) void;
 extern fn zlc_prepare_image(*anyopaque, [*]const drawing.ImageLevel, u32) c_int;
 extern fn zlc_prepare_dynamic_image(*anyopaque, [*]const drawing.ImageLevel, u32) c_int;
 extern fn zlc_update_image(*anyopaque, u32, [*]const drawing.ImageLevel, u32) c_int;
+extern fn zlc_reserve_images(*anyopaque, u32) c_int;
 extern fn zlc_commit_image(*anyopaque, u32) void;
 extern fn zlc_image_fault(*anyopaque, u32) void;
 extern fn zlc_release_image(*anyopaque, u32) void;
@@ -454,13 +455,14 @@ pub const Renderer = struct {
         if (charge > self.images.stats.budget_bytes) return error.CoverageBudgetExceeded;
         if (self.native == null) self.native = zlc_create() orelse return error.OutOfMemory;
         const native = self.native.?;
+        try self.reserveSlot();
         try view.lease.acquireResidency();
         errdefer view.lease.releaseResidency();
         self.images.reserveCandidate(charge);
         self.images.coverage_stats.peak_reserved_bytes = @max(self.images.coverage_stats.peak_reserved_bytes, self.images.coverage_stats.pixel_bytes + charge);
         const descriptor = view.native();
         if (zlc_prepare_coverage(native, &descriptor) != 0) return error.CoverageUploadFailed;
-        while (self.images.needsEviction(charge)) self.dropImage(self.images.oldest().?, true);
+        while (self.images.needsEviction(charge)) self.dropImage(self.images.victim() orelse break, true);
         const slot = self.images.empty().?;
         zlc_commit_image(native, @intCast(slot));
         self.images.commitCoverage(slot, view, charge);
@@ -513,12 +515,13 @@ pub const Renderer = struct {
         const charge = view.pixelBytes() * @as(usize, if (dynamic) 2 else 1);
         if (charge > self.images.stats.budget_bytes) return error.ImageBudgetExceeded;
         if (self.native == null) self.native = zlc_create() orelse return error.OutOfMemory;
+        try self.reserveSlot();
         try view.lease.acquireResidency();
         errdefer view.lease.releaseResidency();
         self.images.stats.peak_reserved_bytes = @max(self.images.stats.peak_reserved_bytes, self.images.stats.pixel_bytes + charge);
         self.images.reserveCandidate(charge);
         if ((if (dynamic) zlc_prepare_dynamic_image(self.native.?, view.levels.ptr, @intCast(view.levels.len)) else zlc_prepare_image(self.native.?, view.levels.ptr, @intCast(view.levels.len))) != 0) return error.ImageUploadFailed;
-        while (self.images.needsEviction(charge)) self.dropImage(self.images.oldest().?, true);
+        while (self.images.needsEviction(charge)) self.dropImage(self.images.victim() orelse break, true);
         const slot = self.images.empty().?;
         zlc_commit_image(self.native.?, @intCast(slot));
         self.images.commitCharged(slot, view, dynamic, charge);
@@ -540,6 +543,30 @@ pub const Renderer = struct {
     fn dropImage(self: *Renderer, slot: usize, eviction: bool) void {
         zlc_release_image(self.native.?, @intCast(slot));
         self.images.drop(slot, eviction);
+    }
+    /// Leave an empty slot for an upload: grow the table, or at its ceiling
+    /// evict the oldest entry the frame being prepared does not draw.
+    fn reserveSlot(self: *Renderer) !void {
+        if (self.images.empty() != null) return;
+        if (self.images.nextCapacity()) |capacity| {
+            if (zlc_reserve_images(self.native.?, @intCast(capacity)) == 0) {
+                if (self.images.grow(capacity)) return else |_| {}
+            }
+        } else |_| {}
+        self.dropImage(self.images.victim() orelse return error.ImageSlotsFull, true);
+    }
+    /// Make the images and coverage a frame draws resident before it
+    /// replays: upload those missing, whether never uploaded, released or
+    /// evicted, without evicting the others it draws. A frame that needs more
+    /// than the budget keeps them all until the next explicit upload or
+    /// budget change.
+    pub fn residentFrame(self: *Renderer, buffer: *const commands.Buffer) !void {
+        self.images.beginFrame();
+        defer self.images.endFrame();
+        for (buffer.imageResources()) |view| if (self.images.find(view.identity)) |slot| self.images.touch(slot);
+        for (buffer.coverageResources()) |view| if (self.images.findCoverage(view.identity)) |slot| self.images.touch(slot);
+        for (buffer.imageResources()) |view| if (self.images.find(view.identity) == null) try self.uploadImage(view);
+        for (buffer.coverageResources()) |view| if (self.images.findCoverage(view.identity) == null) try self.uploadCoverage(view);
     }
     pub fn releaseImage(self: *Renderer, identity: u64) !bool {
         const slot = self.images.find(identity) orelse return false;
@@ -694,7 +721,7 @@ pub const Renderer = struct {
             .texture => unreachable, // Whole batch rejected before drawing.
             .image => |value| {
                 if (value.resource >= image_resources.len) return error.MissingResources;
-                try self.image(image_resources[value.resource], value.destination, .{ .alignment = value.alignment, .fit = value.fit, .sampling = value.sampling, .opacity = value.opacity });
+                try self.image(image_resources[value.resource], value.destination, value.options());
             },
             .begin_group => |value| {
                 const r = value.bounds;
@@ -768,7 +795,7 @@ pub const Renderer = struct {
     pub fn deinit(self: *Renderer) void {
         self.dropGl();
         if (self.native) |native| zlc_destroy(native);
-        self.images.clear();
+        self.images.deinit();
         self.* = .{};
     }
     pub fn brushStats(self: *const Renderer) BrushStats {

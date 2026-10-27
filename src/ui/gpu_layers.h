@@ -118,7 +118,7 @@ static HRESULT gpu_layer_end(State *s,const GpuCapturePass *pass){
     const float ox=layer->origins[child][0]/layer->scale,oy=layer->origins[child][1]/layer->scale;const D2D1_RECT_F child_destination=rectangle(-ox,-oy,(float)layer->pool_width/layer->scale,(float)layer->pool_height/layer->scale);
     if(group->mask_slot==UINT32_MAX)ID2D1RenderTarget_DrawBitmap(RT(s),(ID2D1Bitmap *)layer->targets[child],&child_destination,opacity,D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,NULL);
     else{
-        if(group->mask_slot>=ZI_IMAGE_SLOTS||!s->images[group->mask_slot].is_coverage){ID2D1RenderTarget_PopAxisAlignedClip(RT(s));return E_INVALIDARG;}
+        if(group->mask_slot>=s->image_capacity||!s->images[group->mask_slot].is_coverage){ID2D1RenderTarget_PopAxisAlignedClip(RT(s));return E_INVALIDARG;}
         CachedImage *mask=&s->images[group->mask_slot];const ZiImageLevel *level=&mask->coverage_level;
         const D2D1_RECT_F destination=rectangle((float)((double)group->mask_x+((double)group->mask_left-1)/group->mask_scale),(float)((double)group->mask_y+((double)group->mask_top-1)/group->mask_scale),(level->width+2)/group->mask_scale,(level->height+2)/group->mask_scale),source=rectangle(0,0,(float)(level->width+2),(float)(level->height+2));
         ID2D1Brush_SetOpacity((ID2D1Brush *)layer->brushes[child],opacity);
