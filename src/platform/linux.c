@@ -42,6 +42,8 @@ typedef struct NativeWindow {
     uint64_t pressed_keys[16];
     int decoration, cursor_hit;
     GdkCursor *resize_cursors[8];
+    /* Shape of the client area (Window.setCursor); NULL is the default arrow. */
+    GdkCursor *client_cursor;
     GdkEventButton *gesture;
     gboolean gesture_used;
     gboolean size_observed;
@@ -108,6 +110,7 @@ static void retain(NativeWindow *s) { g_atomic_int_inc(&s->refs); }
 static void release(NativeWindow *s) {
     if (g_atomic_int_dec_and_test(&s->refs)) {
         for (int i=0;i<8;i++) if (s->resize_cursors[i]) g_object_unref(s->resize_cursors[i]);
+        if (s->client_cursor) g_object_unref(s->client_cursor);
         g_object_unref(s->area); g_object_unref(s->window); g_object_unref(s->group); g_free(s); g_atomic_int_add(&resources,-1);
     }
 }
@@ -551,7 +554,7 @@ static gboolean motion(GtkWidget *widget, GdkEventMotion *native, gpointer data)
     int hit=query_hit(s,x,y);
     if (s->destroyed || s->pointer_operation!=operation) { release(s); return TRUE; }
     if (!s->destroyed && hit!=s->cursor_hit) {
-        GdkCursor *cursor=hit>=3 && hit<=10?s->resize_cursors[hit-3]:NULL;
+        GdkCursor *cursor=hit>=3 && hit<=10?s->resize_cursors[hit-3]:s->client_cursor;
         gdk_window_set_cursor(gtk_widget_get_window(s->area),cursor); s->cursor_hit=hit;
     }
     if (!s->destroyed && s->pointer_operation==operation) {
@@ -951,6 +954,18 @@ done:;
     int result=s->destroyed?2:0; release(s); return result;
 }
 void zlg_window_title(NativeWindow *s, const char *title) { retain(s);gtk_window_set_title(GTK_WINDOW(s->window),title);release(s); }
+/* NULL name restores the default arrow. A resize edge of a custom frame
+   keeps its own shape; motion back into the client area shows this one. */
+void zlg_window_cursor(NativeWindow *s, const char *name) {
+    retain(s);
+    if (!s->destroyed) {
+        if (s->client_cursor) g_object_unref(s->client_cursor);
+        s->client_cursor=name?gdk_cursor_new_from_name(gtk_widget_get_display(s->window),name):NULL;
+        GdkWindow *area=gtk_widget_get_window(s->area);
+        if (area && !(s->cursor_hit>=3 && s->cursor_hit<=10)) gdk_window_set_cursor(area,s->client_cursor);
+    }
+    release(s);
+}
 void zlg_window_resize(NativeWindow *s, uint32_t width, uint32_t height) { retain(s);gtk_window_resize(GTK_WINDOW(s->window),width,height);release(s); }
 void zlg_window_invalidate(NativeWindow *s) { gtk_widget_queue_draw(s->area); }
 void zlg_window_invalidate_rect(NativeWindow *s, int left, int top, int right, int bottom) {

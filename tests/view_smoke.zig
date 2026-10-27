@@ -22,6 +22,7 @@ extern fn gdk_event_free(*anyopaque) void;
 extern fn g_object_ref(*anyopaque) *anyopaque;
 extern fn g_signal_emit_by_name(*anyopaque, [*:0]const u8, ...) void;
 const ScrollEvent = extern struct { kind: c_int, window: ?*anyopaque, send_event: i8, time: u32, x: f64, y: f64, state: c_uint, direction: c_int, device: ?*anyopaque, x_root: f64, y_root: f64, delta_x: f64, delta_y: f64, is_stop: c_uint };
+const MotionEvent = extern struct { kind: c_int, window: ?*anyopaque, send_event: i8, time: u32, x: f64, y: f64, axes: ?*anyopaque, state: c_uint, is_hint: i16, device: ?*anyopaque, x_root: f64, y_root: f64 };
 const ButtonEvent = extern struct { kind: c_int, window: ?*anyopaque, send_event: i8, time: u32, x: f64, y: f64, axes: ?*anyopaque, state: c_uint, button: c_uint, device: ?*anyopaque, x_root: f64, y_root: f64 };
 
 const width = 360;
@@ -55,6 +56,23 @@ const Native = struct {
             native.* = .{ .kind = if (down) 4 else 7, .window = g_object_ref(gtk_widget_get_window(widget).?), .send_event = 1, .time = 0, .x = x, .y = y, .axes = null, .state = 0, .button = 1, .device = null, .x_root = 0, .y_root = 0 };
             var handled: c_int = 0;
             g_signal_emit_by_name(widget, if (down) @as([*:0]const u8, "button-press-event") else @as([*:0]const u8, "button-release-event"), native, &handled);
+        }
+    }
+    fn move(window: z.Window, x: f32, y: f32) void {
+        if (builtin.os.tag == .windows) {
+            const hwnd: c.HWND = window.nativeHandle();
+            const scale = @as(f32, @floatFromInt(c.GetDpiForWindow(hwnd))) / 96;
+            const px: u16 = @bitCast(@as(i16, @intFromFloat(x * scale)));
+            const py: u16 = @bitCast(@as(i16, @intFromFloat(y * scale)));
+            _ = c.SendMessageW(hwnd, c.WM_MOUSEMOVE, 0, @intCast(@as(u32, px) | (@as(u32, py) << 16)));
+        } else {
+            const widget = gtk_bin_get_child(window.nativeHandle().?).?;
+            const event = gdk_event_new(3).?;
+            defer gdk_event_free(event);
+            const native: *MotionEvent = @ptrCast(@alignCast(event));
+            native.* = .{ .kind = 3, .window = g_object_ref(gtk_widget_get_window(widget).?), .send_event = 1, .time = 0, .x = x, .y = y, .axes = null, .state = 0, .is_hint = 0, .device = null, .x_root = 0, .y_root = 0 };
+            var handled: c_int = 0;
+            g_signal_emit_by_name(widget, "motion-notify-event", native, &handled);
         }
     }
     /// One wheel notch downwards at a point, which both backends report as 48 DIP.
@@ -259,6 +277,14 @@ fn run(allocator: std.mem.Allocator) !void {
     try paint(&host, window);
     const pane = try find(&host, .column, 1);
     try std.testing.expectEqual(@round((split.bounds.width - view.split_divider) * @as(f32, @floatCast(state.pane))), pane.bounds.width);
+    // The pointer over the divider shows the resize arrow, over a button
+    // the default one.
+    const moved = host.view.divider(&(try find(&host, .split, 0))).?;
+    Native.move(window, moved.x + moved.width / 2, moved.y + moved.height / 2);
+    try std.testing.expectEqual(z.Cursor.resize_ew, window.currentCursor());
+    const button = try find(&host, .button, 0);
+    Native.move(window, button.bounds.x + 2, button.bounds.y + 2);
+    try std.testing.expectEqual(z.Cursor.default, window.currentCursor());
 
     // Segments, links and disclosures activate through native clicks.
     Native.click(window, (try find(&host, .segment, 1)).bounds);
@@ -555,6 +581,88 @@ fn runTimer(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(wake.NativeCounts{}, wake.nativeCounts());
 }
 
+/// A harness frame drawn to pixels: the background, a colored panel and a
+/// button, as a window would show them.
+const Swatch = struct {
+    fn build(_: *Swatch, v: *view.View) anyerror!void {
+        try v.column(.{ .width = 40, .height = 30, .background = 0x2050c0 });
+        try v.end();
+        _ = try v.button("Go", .{});
+    }
+    fn draw(_: *anyopaque, _: *ui.Frame) void {}
+    fn action(_: *anyopaque, _: u64) void {}
+};
+
+fn runImage(allocator: std.mem.Allocator) !void {
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    var state: Swatch = .{};
+    var storage: view.Storage(8, 64) = .{};
+    var h = view.Harness.init(&state, Swatch.build, storage.buffers(), .{ .bounds = .{ .x = 0, .y = 0, .width = 100, .height = 80 }, .options = .{ .background = 0xffffff } });
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Swatch.draw, Swatch.action);
+    try h.attachInput(&context);
+    const surface = try ui.offscreen.Surface.create(app, allocator, .{ .size = .{ .width = 200, .height = 160, .scale = 2 } });
+    defer surface.close() catch unreachable;
+    const snapshot = try h.image(surface);
+    defer snapshot.close() catch unreachable;
+    const shown = try snapshot.view();
+    const level = shown.levels[0];
+    try std.testing.expectEqual(@as(u32, 200), level.width);
+    const pixelAt = struct {
+        fn get(l: @TypeOf(level), x: usize, y: usize) u32 {
+            const value = l.pixels[y * l.stride + x * 4 ..][0..4];
+            return @as(u32, value[0]) | (@as(u32, value[1]) << 8) | (@as(u32, value[2]) << 16);
+        }
+    }.get;
+    // BGRA: the panel inside its 40 x 30 DIP box, the background beside it.
+    const panel = (try h.find(.{ .kind = .column, .nth = 1 })).bounds;
+    try std.testing.expectEqual(@as(u32, 0x2050c0), pixelAt(level, @intFromFloat((panel.x + 10) * 2), @intFromFloat((panel.y + 10) * 2)));
+    try std.testing.expectEqual(@as(u32, 0xffffff), pixelAt(level, 196, 156));
+
+    // With the inspector open, its panel's toolbar takes the right of the
+    // window and the content the rest.
+    var tools: view.Inspector = .{};
+    var wide = view.Harness.init(&state, Swatch.build, storage.buffers(), .{ .bounds = .{ .x = 0, .y = 0, .width = 600, .height = 300 }, .options = .{ .background = 0xffffff, .inspector = &tools } });
+    var wide_context = ui.Context.init(&dummy, Swatch.draw, Swatch.action);
+    try wide.attachInput(&wide_context);
+    try std.testing.expect(try wide.key(.{ .key = .f12 }));
+    try std.testing.expectEqual(@as(f32, 600 - view.inspector.default_width), wide.view.root().bounds.width);
+    const panel_surface = try ui.offscreen.Surface.create(app, allocator, .{ .size = .{ .width = 600, .height = 300, .scale = 1 } });
+    defer panel_surface.close() catch unreachable;
+    const panel_image = try wide.image(panel_surface);
+    defer panel_image.close() catch unreachable;
+    const panel_level = (try panel_image.view()).levels[0];
+    try std.testing.expectEqual(@as(u32, 0xf1f3f4), pixelAt(panel_level, 600 - 200, 2));
+    try std.testing.expectEqual(@as(u32, 0xffffff), pixelAt(panel_level, 600 - 200, 290));
+}
+
+/// The inspector in a window: open, the content narrower, and a click on
+/// its close button closes it through the Host's routing.
+fn runInspector(allocator: std.mem.Allocator) !void {
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    var state: Swatch = .{};
+    var storage: view.Storage(8, 64) = .{};
+    var tools: view.Inspector = .{};
+    var host = view.Host.init(&state, Swatch.build, storage.buffers(), .{ .inspector = &tools });
+    host.context.render_mode = .gdi;
+    const window = try app.createWindow(.{ .width = width, .height = height });
+    try host.attach(window);
+    try paint(&host, window);
+    try std.testing.expectEqual(@as(f32, width), host.view.root().bounds.width);
+    tools.toggle();
+    try paint(&host, window);
+    try std.testing.expectEqual(@as(f32, width / 2), host.view.root().bounds.width);
+    try std.testing.expect(tools.len == host.view.nodes().len);
+    Native.click(window, tools.layout().close);
+    try std.testing.expect(!tools.open);
+    try paint(&host, window);
+    try std.testing.expectEqual(@as(f32, width), host.view.root().bounds.width);
+    _ = try window.destroy();
+    try app.dispatch();
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
@@ -562,10 +670,12 @@ pub fn main() !void {
     try runCollections(gpa.allocator());
     try runPictures(gpa.allocator());
     try runTimer(gpa.allocator());
+    try runImage(gpa.allocator());
+    try runInspector(gpa.allocator());
     if (builtin.os.tag == .windows) {
         try @import("view_uia.zig").run(gpa.allocator());
         try @import("view_uia.zig").runCollections(gpa.allocator());
     }
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, embedded leaf input, routed pages with history buttons, deferred icon and SVG preparation, timed toast expiry and keyed identity passed\n", .{});
+    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, embedded leaf input, routed pages with history buttons, deferred icon and SVG preparation, timed toast expiry, keyed identity and harness frames drawn to pixels and the inspector panel passed\n", .{});
 }

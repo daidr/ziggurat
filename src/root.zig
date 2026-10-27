@@ -323,6 +323,35 @@ pub const WindowHit = enum(c_int) {
         return if (value >= @intFromEnum(WindowHit.north_west)) @enumFromInt(value - @intFromEnum(WindowHit.north_west)) else null;
     }
 };
+/// The shape of the pointer over the client area. Shapes a platform lacks
+/// fall back to the nearest one it has (on Windows, one-sided and column/row
+/// resizes use the two-sided ones, and copy, alias and context menu the
+/// arrow); `none` hides the pointer.
+pub const Cursor = enum(u8) {
+    default,
+    pointer,
+    text,
+    move,
+    resize_ew,
+    resize_ns,
+    resize_nwse,
+    resize_nesw,
+    not_allowed,
+    crosshair,
+    grab,
+    grabbing,
+    resize_n,
+    resize_e,
+    resize_s,
+    resize_w,
+    resize_column,
+    resize_row,
+    vertical_text,
+    copy,
+    alias,
+    context_menu,
+    none,
+};
 pub const HitTestHandler = struct { context: *anyopaque, query: *const fn (*anyopaque, Window, Point) WindowHit };
 pub const WindowRelationship = struct { owner: ?Window, modal: bool, modal_active: bool, modal_children: usize };
 /// Construction-time role of a borderless window placed beside an anchor,
@@ -1167,6 +1196,22 @@ pub const Window = struct {
         };
         scope.record.emitState();
     }
+    /// Show `cursor` while the pointer is over the client area, from now
+    /// until it changes. Resize edges of a custom frame keep their own
+    /// shapes; the window forgets the shape when it closes.
+    pub fn setCursor(self: Window, shape: Cursor) !void {
+        const scope = self.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        if (scope.record.cursor == shape) return;
+        scope.record.cursor = shape;
+        backend.setCursor(scope.record, shape);
+    }
+    /// The shape last given to `setCursor`.
+    pub fn currentCursor(self: Window) Cursor {
+        const scope = self.beginCallback() orelse return .default;
+        defer scope.end();
+        return scope.record.cursor;
+    }
     /// Requires `capabilities().backdrop_material`; the value is not saved by
     /// the framework and stays on the native window until changed or closed.
     pub fn setBackdrop(self: Window, material: WindowBackdrop) !void {
@@ -1500,6 +1545,8 @@ pub const WindowRecord = struct {
     querying_close: bool = false,
     window_update_busy: bool = false,
     hit_testing: bool = false,
+    /// The pointer shape over the client area; see `Window.setCursor`.
+    cursor: Cursor = .default,
     last_state: ?WindowState = null,
     owner_record: ?*WindowRecord = null,
     first_child: ?*WindowRecord = null,

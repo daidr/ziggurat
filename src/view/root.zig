@@ -42,6 +42,17 @@ pub const SvgPicture = image_nodes.SvgPicture;
 pub const IconPainter = image_nodes.IconPainter;
 pub const Graphic = image_nodes.Graphic;
 pub const icons = @import("icons.zig");
+const pointer_controls = @import("pointer_area.zig");
+const wrap_text = @import("wrap.zig");
+const inspector_panel = @import("inspector.zig");
+pub const Cursor = z.Cursor;
+pub const PointerEvent = pointer_controls.PointerEvent;
+/// The developer tools of a window of views; see `inspector.zig`.
+pub const Inspector = inspector_panel.Inspector;
+pub const inspector = inspector_panel;
+pub const PointerArea = pointer_controls.PointerArea;
+pub const PointerButton = pointer_controls.Button;
+pub const AreaOptions = pointer_controls.Options;
 
 pub const Error = error{ InvalidField, TooManyNodes, TextFull, NestingTooDeep, UnbalancedContainer, NotContainer, Busy, InvalidRange, InvalidValue, InvalidText, InvalidSplit, SelectionFull } || layout.Error;
 
@@ -76,6 +87,10 @@ pub const max_interactive_embeds = 16;
 pub const max_table_tracks = 64;
 /// Scroll containers Host can route wheel input to in one frame.
 pub const max_scroll_regions = 16;
+/// Pointer areas input reaches per pass.
+pub const max_pointer_areas = 32;
+/// Nodes that set or stop the pointer's shape per pass.
+pub const max_cursor_regions = 160;
 /// Thickness of a split's draggable divider, in DIP.
 pub const split_divider: f32 = 6;
 /// Key bindings input can reach in one frame; see `View.bindKey`.
@@ -153,6 +168,18 @@ pub const Style = struct {
     /// `Host.prepareShaderEffects`; without it they and `effect` draw the
     /// content as it is.
     effect: ?ui.ShaderEffect = null,
+    /// The pointer's shape over the node, and over its descendants unless
+    /// they set their own; a control inside without one shows the default
+    /// arrow. Null takes the shape around it. Needs a Host attached to a
+    /// window; links show `.pointer` and text inputs `.text` unless set.
+    cursor: ?Cursor = null,
+    /// A text node wraps its words onto as many lines as its width needs,
+    /// breaking at spaces, between ideographs and at newlines, and within a
+    /// word wider than a line.
+    wrap: bool = false,
+    /// Lines a wrapping text shows at most; the last one shown ends in an
+    /// ellipsis when text remains. 0 shows them all.
+    max_lines: u16 = 0,
 };
 
 /// How `View.presentColumn` brings content in and takes it out.
@@ -457,7 +484,7 @@ pub const Measurer = struct {
     }
 };
 
-pub const Kind = enum { column, row, radio_group, segmented, tab_list, list_box, toolbar, breadcrumbs, accordion, field, fieldset, split, scroll, grid, search, popup, popover, toasts, toast, dialog, tree, tree_item, table, table_header, table_row, token_field, combo_field, drag_area, drag_source, drop_target, text, note, badge, spacer, button, link, nav_button, combo_box, popup_button, checkbox, radio, segment, tab, list_item, disclosure, toggle_switch, progress, meter, slider, stepper, rating, avatar, embed, tree_row, column_header, token, combo_toggle, loading, editable_text, route, image, svg, icon };
+pub const Kind = enum { column, row, radio_group, segmented, tab_list, list_box, toolbar, breadcrumbs, accordion, field, fieldset, split, scroll, grid, search, popup, popover, toasts, toast, dialog, tree, tree_item, table, table_header, table_row, token_field, combo_field, drag_area, drag_source, drop_target, text, note, badge, spacer, button, link, nav_button, combo_box, popup_button, checkbox, radio, segment, tab, list_item, disclosure, toggle_switch, progress, meter, slider, stepper, rating, avatar, embed, tree_row, column_header, token, combo_toggle, loading, editable_text, route, image, svg, icon, pointer_area };
 
 /// Where a popover goes beside its anchor: below it by default, starting
 /// at its left edge. It moves to the opposite side when that side has more
@@ -545,6 +572,10 @@ pub const Embed = struct {
     /// bounds; keys arrive while it holds focus. True consumes the input and
     /// repaints the window. Runs on the main thread outside paint.
     input: ?*const fn (*anyopaque, u64, EmbedInput) bool = null,
+    /// The pointer's shape at a point local to the leaf, such as a resize
+    /// arrow over a column edge, or null for the shape around it. Runs on
+    /// the main thread outside paint; it must not allocate or block.
+    cursor: ?*const fn (*anyopaque, u64, Point) ?Cursor = null,
 };
 /// An embedded leaf that consumed a press.
 pub const EmbedPress = struct { id: u64, focusable: bool };
@@ -769,6 +800,8 @@ pub const Node = struct {
     router: ?*Router = null,
     /// What an image, SVG or icon shows.
     graphic: ?Graphic = null,
+    /// A pointer area repaints as the pointer moves over it.
+    track: bool = false,
     parent: u32 = none,
     first_child: u32 = none,
     last_child: u32 = none,
@@ -783,7 +816,7 @@ pub const Node = struct {
 
     pub fn isContainer(self: *const Node) bool {
         return switch (self.kind) {
-            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .dialog, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target, .route => true,
+            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .dialog, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target, .route, .pointer_area => true,
             else => false,
         };
     }
@@ -813,7 +846,13 @@ pub const Buffers = struct {
     text: []u8,
     items: []layout.Item,
     rects: []Rect,
+    /// Where each node of the last arranged pass went, for `View.boundsOf`
+    /// between frames; empty keeps no record.
+    placed: []Placed = &.{},
 };
+
+/// A node's id and window bounds in the last arranged pass.
+pub const Placed = struct { id: u64, bounds: Rect };
 
 /// Static storage for a bounded tree, kept at a stable address by its owner.
 pub fn Storage(comptime node_capacity: usize, comptime text_capacity: usize) type {
@@ -823,8 +862,9 @@ pub fn Storage(comptime node_capacity: usize, comptime text_capacity: usize) typ
         text: [text_capacity]u8 = undefined,
         items: [node_capacity]layout.Item = undefined,
         rects: [node_capacity]Rect = undefined,
+        placed: [node_capacity]Placed = undefined,
         pub fn buffers(self: *Self) Buffers {
-            return .{ .nodes = &self.nodes, .text = &self.text, .items = &self.items, .rects = &self.rects };
+            return .{ .nodes = &self.nodes, .text = &self.text, .items = &self.items, .rects = &self.rects, .placed = &self.placed };
         }
     };
 }
@@ -842,6 +882,8 @@ pub const Event = union(enum) {
     drop: struct { id: u64, data: Dropped, position: Point },
     /// Items of a `reorder` container dropped at another place.
     reorder: struct { id: u64, move: Move },
+    /// A press, release or lost press of a `pointerArea`.
+    pointer: PointerEvent,
 };
 
 /// What a press or key does to a tree or table row.
@@ -1039,6 +1081,24 @@ pub const Overlay = struct {
     /// drags near their edges scroll.
     scrolls: [max_scroll_regions]Region = undefined,
     scroll_count: usize = 0,
+    /// Enabled pointer areas that input reaches, in build order.
+    areas: [max_pointer_areas]Area = undefined,
+    area_count: usize = 0,
+    /// Nodes that choose the pointer's shape, or stop the search for one,
+    /// in build order.
+    cursors: [max_cursor_regions]CursorRegion = undefined,
+    cursor_count: usize = 0,
+    pub const Area = struct { id: u64, index: u32, bounds: Rect, rect: Rect, track: bool };
+    pub const CursorRegion = struct {
+        index: u32,
+        bounds: Rect,
+        rect: Rect,
+        /// The shape, or null for a control that keeps the default.
+        cursor: ?Cursor,
+        /// An embedded leaf that answers for points within it.
+        embed: ?Embed = null,
+        id: u64 = 0,
+    };
 };
 
 /// A press the view follows until its release: one an embedded leaf took,
@@ -1136,10 +1196,23 @@ pub const View = struct {
     overlay: Overlay = .{},
     /// The interactive embedded leaf under the pointer.
     embed_hover: ?u64 = null,
+    /// Entries of `Buffers.placed` the last arrange filled.
+    placed_len: usize = 0,
+    /// The measurer of the last arrange, which paint wraps text with.
+    measurer: Measurer = .{},
     /// The press being followed, if any; it outlives passes.
     capture: ?Capture = null,
     /// The last press on an embedded leaf, to count double presses.
     last_press: struct { id: u64 = 0, time: u64 = 0, at: Point = .{}, count: u8 = 0 } = .{},
+    /// The pointer in window DIP, or null while it is outside the window;
+    /// set by the host as it moves.
+    pointer: ?Point = null,
+    /// The pointer area a button went down on, until it comes up.
+    area_press: ?pointer_controls.Press = null,
+    /// The last press on a pointer area, to count double presses.
+    area_last: pointer_controls.Last = .{},
+    /// What the pointer hovered at the last move, to tell when to repaint.
+    area_signature: u64 = 0,
     /// The drop target under a drag within the window.
     drop_over: ?u64 = null,
     /// A drag from another application over the window.
@@ -1371,6 +1444,20 @@ pub const View = struct {
     pub const sidebarItem = sidebar_controls.sidebarItem;
     /// A label that becomes a text field; see `editable.zig`.
     pub const editableText = editable_controls.editableText;
+    pub const pointerArea = pointer_controls.pointerArea;
+    pub const areaPress = pointer_controls.press;
+    pub const areaRelease = pointer_controls.release;
+    pub const areaCancel = pointer_controls.cancel;
+    pub const pointerMoved = pointer_controls.moved;
+    pub const cursorAt = pointer_controls.cursorAt;
+
+    /// Window bounds `id` had in the last arranged pass, between frames, as
+    /// for placing a native popup beside a node; null when that pass did not
+    /// build it or the storage keeps no record (`Buffers.placed`).
+    pub fn boundsOf(self: *const View, id: u64) ?Rect {
+        for (self.buffers.placed[0..@min(self.placed_len, self.buffers.placed.len)]) |entry| if (entry.id == id) return entry.bounds;
+        return null;
+    }
     /// A find bar over application-owned matches; see `find_bar.zig`.
     pub const findBar = find_bar_controls.findBar;
     /// The page a router shows, as a column; see `router.zig`.
@@ -1411,6 +1498,7 @@ pub const View = struct {
             .drag => |value| value.id,
             .drop => |value| value.id,
             .reorder => |value| value.id,
+            .pointer => |value| value.id,
         };
         if (target != id) return null;
         self.event = null;
@@ -3459,7 +3547,7 @@ pub const View = struct {
             .rating => .{ .width = @as(f32, @floatCast(node.range.maximum)) * Measurer.line_height, .height = Measurer.line_height + metrics.content_inset },
             .slider => .{ .width = 200, .height = metrics.thumb_size + 2 * metrics.content_inset },
             .stepper => .{ .width = 4 * (Measurer.line_height + metrics.content_inset), .height = Measurer.line_height + metrics.content_inset },
-            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .dialog, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target, .route, .embed, .image, .svg, .icon => unreachable,
+            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .dialog, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target, .route, .pointer_area, .embed, .image, .svg, .icon => unreachable,
         };
         const minimum: Size = switch (node.kind) {
             .progress, .meter, .slider, .spacer => .{ .width = 0, .height = size.height },
@@ -3606,6 +3694,7 @@ pub const View = struct {
 
     /// Measure bottom-up, then place every node within `bounds`.
     pub fn arrange(self: *View, bounds: Rect, theme: Theme, measurer: Measurer) Error!void {
+        self.measurer = measurer;
         const all = self.buffers.nodes[0..self.len];
         // A token field's height depends on the width it wraps at, known
         // only once placed; a second round measures with the placed width.
@@ -3614,7 +3703,9 @@ pub const View = struct {
             try self.measure(theme, measurer);
             all[0].bounds = bounds;
             try self.place();
-            if (round == 1 or !self.rememberFlowWidths()) break;
+            const flows = self.rememberFlowWidths();
+            const wraps = self.wrapsNarrower();
+            if (round == 1 or !(flows or wraps)) break;
         }
         if (self.reveal) |id| {
             self.reveal = null;
@@ -3632,7 +3723,7 @@ pub const View = struct {
             if (!node.isContainer()) {
                 // A tree row's badge keeps its width for paint.
                 if (node.kind == .tree_row) node.fraction = if (node.badge.len > 0) measurer.textSize(node.badge, null).width + 2 * (theme.metrics.content_inset / 2 + 4) + theme.metrics.content_inset / 2 else 0;
-                node.measured = intrinsic(node, theme, measurer);
+                node.measured = if (node.kind == .text and node.style.wrap) self.measureWrap(node, measurer) else intrinsic(node, theme, measurer);
                 continue;
             }
             var cursor: usize = 0;
@@ -3653,6 +3744,38 @@ pub const View = struct {
                 node.measured.minimum.height = 0;
             }
         }
+    }
+
+    /// Width a wrapping text has to wrap at, from the previous round of this
+    /// arrangement: its parent's inner width across a column, otherwise its
+    /// own placed width. Null in the first round.
+    fn wrapWidth(self: *const View, node: *const Node) ?f32 {
+        if (node.bounds.width <= 0 and node.bounds.height <= 0) return null;
+        const parent = &self.buffers.nodes[node.parent];
+        if (!parent.isGrid() and options(parent).axis == .column) {
+            const p = parent.style.padding;
+            return @max(0, parent.bounds.width - p.left - p.right);
+        }
+        return node.bounds.width;
+    }
+    fn measureWrap(self: *const View, node: *const Node, measurer: Measurer) layout.Measurement {
+        const font = node.style.font;
+        const full = wrap_text.measure(node.text, std.math.inf(f32), font, measurer, node.style.max_lines);
+        const narrowest = @min(full.width, wrap_text.longestWord(node.text, font, measurer));
+        const width = self.wrapWidth(node) orelse return .{ .minimum = .{ .width = narrowest, .height = full.height }, .preferred = full };
+        if (width + 0.5 >= full.width) return .{ .minimum = .{ .width = narrowest, .height = full.height }, .preferred = full };
+        const wrapped = wrap_text.measure(node.text, @max(width, narrowest), font, measurer, node.style.max_lines);
+        return .{ .minimum = .{ .width = narrowest, .height = wrapped.height }, .preferred = .{ .width = @max(wrapped.width, narrowest), .height = wrapped.height } };
+    }
+    /// True when a wrapping text got less width than its single line needs,
+    /// so it must be measured again at that width.
+    fn wrapsNarrower(self: *const View) bool {
+        for (self.buffers.nodes[0..self.len]) |*node| {
+            if (node.kind != .text or !node.style.wrap) continue;
+            const width = self.wrapWidth(node) orelse continue;
+            if (width + 0.5 < node.measured.preferred.width) return true;
+        }
+        return false;
     }
 
     /// The remembered inner width of the token field `id`, if any.
@@ -3713,6 +3836,8 @@ pub const View = struct {
         overlay.list_count = 0;
         overlay.reorder_item_count = 0;
         overlay.scroll_count = 0;
+        overlay.area_count = 0;
+        overlay.cursor_count = 0;
         overlay.dialog = null;
         overlay.binding_count = 0;
         const zero: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
@@ -3726,9 +3851,16 @@ pub const View = struct {
             overlay.bindings[overlay.binding_count] = binding;
             overlay.binding_count += 1;
         }
+        self.placed_len = @min(all.len, self.buffers.placed.len);
+        for (all[0..self.placed_len], self.buffers.placed[0..self.placed_len]) |*node, *entry| entry.* = .{ .id = node.id, .bounds = node.bounds };
         for (all, 0..) |*node, index| {
             if (index < inside_start or index >= inside_end) continue;
+            self.recordCursor(node, @intCast(index));
             switch (node.kind) {
+                .pointer_area => if (node.style.enabled and overlay.area_count < max_pointer_areas) if (self.visible(node)) |rect| {
+                    overlay.areas[overlay.area_count] = .{ .id = node.id, .index = @intCast(index), .bounds = node.bounds, .rect = rect, .track = node.track };
+                    overlay.area_count += 1;
+                },
                 .embed => if (node.embed.?.input != null and node.style.enabled and overlay.embed_count < max_interactive_embeds) if (self.visible(node)) |rect| {
                     overlay.embeds[overlay.embed_count] = .{ .id = node.id, .bounds = node.bounds, .rect = rect, .embed = node.embed.? };
                     overlay.embed_count += 1;
@@ -3855,6 +3987,31 @@ pub const View = struct {
 
     /// The items of each container that reorders: a table's rows, or the
     /// children of any other container.
+    /// Keep `node` for choosing the pointer's shape when it sets one, is a
+    /// control that keeps the default, or is a split's divider.
+    fn recordCursor(self: *View, node: *const Node, index: u32) void {
+        const overlay = &self.overlay;
+        if (overlay.cursor_count >= max_cursor_regions) return;
+        var cursor = node.style.cursor;
+        var bounds = node.bounds;
+        var embed_answer: ?Embed = null;
+        switch (node.kind) {
+            .link => cursor = cursor orelse .pointer,
+            .split => if (cursor == null) {
+                bounds = self.divider(node) orelse return;
+                cursor = if (node.axis == .row) .resize_ew else .resize_ns;
+            },
+            .embed => if (node.embed.?.cursor != null and cursor == null) {
+                embed_answer = node.embed;
+            },
+            .button, .nav_button, .combo_box, .popup_button, .checkbox, .radio, .segment, .tab, .list_item, .disclosure, .toggle_switch, .slider, .stepper, .rating, .tree_row, .table_row, .column_header, .token, .combo_toggle, .editable_text, .pointer_area => {},
+            else => if (cursor == null) return,
+        }
+        const rect = intersect(bounds, self.visible(node) orelse return) orelse return;
+        overlay.cursors[overlay.cursor_count] = .{ .index = index, .bounds = node.bounds, .rect = rect, .cursor = cursor, .embed = embed_answer, .id = node.id };
+        overlay.cursor_count += 1;
+    }
+
     fn recordReorders(self: *View) void {
         const all = self.buffers.nodes[0..self.len];
         const overlay = &self.overlay;
@@ -4112,6 +4269,29 @@ pub const View = struct {
     /// Record the arranged tree. `target` is a ui.Frame or any value with the
     /// same recording methods. Popups and toasts are drawn after the tree,
     /// so they cover it and take input first, and the tooltip last.
+    /// Draw a wrapping text a line at a time, each line at the start of the
+    /// node's box, or at its end when laid out right to left.
+    pub fn paintWrapped(self: *const View, target: anytype, node: *const Node, bounds: Rect, color: u32) void {
+        const Lines = struct {
+            target: @TypeOf(target),
+            view: *const View,
+            node: *const Node,
+            bounds: Rect,
+            color: u32,
+            height: f32,
+            fn draw(lines: *const @This(), line: []const u8, index: usize, last_cut: bool) void {
+                var buffer: [512]u8 = undefined;
+                const font = lines.node.style.font;
+                const shown = if (last_cut) wrap_text.cut(line, lines.bounds.width, font, lines.view.measurer, &buffer) else line;
+                const rect: Rect = .{ .x = lines.bounds.x, .y = lines.bounds.y + lines.height * @as(f32, @floatFromInt(index)), .width = lines.bounds.width, .height = lines.height };
+                const width = lines.view.measurer.textSize(shown, font).width;
+                lines.target.labelFont(if (lines.node.rtl) trailing(rect, width) else rect, shown, lines.color, font orelse .{});
+            }
+        };
+        const lines: Lines = .{ .target = target, .view = self, .node = node, .bounds = bounds, .color = color, .height = wrap_text.lineHeight(self.measurer, node.style.font) };
+        wrap_text.each(node.text, bounds.width, node.style.font, self.measurer, node.style.max_lines, &lines, Lines.draw);
+    }
+
     pub fn paint(self: *const View, target: anytype) !void {
         const all = self.buffers.nodes[0..self.len];
         const theme = target.currentTheme();
@@ -4249,7 +4429,7 @@ pub const View = struct {
             if (control.name.len == 0) control.name = annotation.name;
             if (control.description.len == 0) control.description = node.tooltip;
             switch (node.kind) {
-                .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .dialog, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target, .route => {
+                .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .dialog, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target, .route, .pointer_area => {
                     switch (node.kind) {
                         .radio_group, .segmented => try target.radioGroup(node.id, bounds, style.name),
                         .list_box => try target.listBox(node.id, bounds, style.name),
@@ -4295,7 +4475,10 @@ pub const View = struct {
                         scope_depth += 1;
                     }
                 },
-                .text => target.labelFont(if (node.rtl) trailing(bounds, node.measured.preferred.width) else bounds, node.text, style.color orelse if (!style.enabled) theme.palette.disabled_text else if (node.row != none and all[node.row].checked) theme.palette.on_accent else theme.palette.text, style.font orelse .{}),
+                .text => {
+                    const color = style.color orelse if (!style.enabled) theme.palette.disabled_text else if (node.row != none and all[node.row].checked) theme.palette.on_accent else theme.palette.text;
+                    if (style.wrap) self.paintWrapped(target, node, bounds, color) else target.labelFont(if (node.rtl) trailing(bounds, node.measured.preferred.width) else bounds, node.text, color, style.font orelse .{});
+                },
                 .tree_row => {
                     var row_control = control;
                     // The badge is announced with the row.
@@ -4725,9 +4908,30 @@ pub const Options = struct {
     direction: Direction = .ltr,
     /// Draws `View.icon` nodes, such as `ziggurat_view_graphics.Icons`.
     icons: ?IconPainter = null,
+    /// Keys that reach the application after the view: presses that no
+    /// control, binding or embedded leaf handled, and every release that no
+    /// focused leaf took.
+    keys: ?KeyHandler = null,
+    /// Developer tools: F12 or Ctrl+Shift+I opens the inspector docked at
+    /// the right, Ctrl+Shift+C picks an element; see `inspector.zig`. The
+    /// application keeps it at a stable address, typically only in debug
+    /// builds: `if (builtin.mode == .Debug) &inspector else null`.
+    inspector: ?*Inspector = null,
     /// Runs once at the end of every frame the Host draws, after the
     /// embedded leaves learned their places; see `FrameHook`.
     after_frame: ?FrameHook = null,
+};
+
+/// The application's own key handling; see `Options.keys`. Both run on the
+/// main thread outside paint, after the view routed the key.
+pub const KeyHandler = struct {
+    context: *anyopaque,
+    /// A press nothing in the view handled; true takes it, which runs a
+    /// pass and repaints. False lets the window's default handling go on.
+    key: ?*const fn (*anyopaque, z.KeyInput) bool = null,
+    /// A release, while the window has the keyboard; true runs a pass and
+    /// repaints.
+    key_up: ?*const fn (*anyopaque, z.KeyInput) bool = null,
 };
 /// Code that follows the Host's frames, such as native content placed with
 /// embedded leaves that must hide when a frame no longer builds them. It runs
@@ -4823,6 +5027,17 @@ pub const Host = struct {
         try self.context.prepareShaderEffects(allocator, options);
         self.view.effects = library;
     }
+    /// Give keyboard focus to the node `id`, such as a text field's, now
+    /// when the window registered it, otherwise after the next frame that
+    /// does. Outside passes and paint.
+    pub fn focusNode(self: *Host, id: u64) void {
+        self.view.restore = id;
+        self.restoreFocus();
+    }
+    /// Window bounds of the node `id` in the last frame; see `View.boundsOf`.
+    pub fn bounds(self: *const Host, id: u64) ?Rect {
+        return self.view.boundsOf(id);
+    }
     /// Called by the scheduler when the deadline it was given has passed.
     pub fn wakeFired(self: *Host) void {
         self.scheduled = null;
@@ -4834,6 +5049,7 @@ pub const Host = struct {
         self.context.on_value = onValue;
         self.context.on_input = onInput;
         self.context.on_key_release = onKeyRelease;
+        self.context.on_unhandled_key = onUnhandledKey;
         try self.context.attach(window);
     }
     /// Attach as the full-window backdrop of a composition Owner, under the
@@ -4942,12 +5158,14 @@ pub const Host = struct {
     fn onInput(ptr: *anyopaque, _: *ui.Context, event: z.Event) bool {
         const self: *Host = @ptrCast(@alignCast(ptr));
         if (self.building) return false;
+        if (self.options.inspector) |tools| if (self.inspectorInput(tools, event)) return true;
         switch (event) {
             .pointer_move => |point| {
                 const at: Point = .{ .x = point.x, .y = point.y };
+                const moved = self.pointerTo(at);
                 if (self.view.captureMove(at)) |result| if (result.consumed) return self.apply(result);
                 const hover = self.view.hoverAt(at);
-                if (self.view.embedPointerMove(at) or hover) self.invalidate();
+                if (self.view.embedPointerMove(at) or hover or moved) self.invalidate();
                 return false;
             },
             .pointer_down => |press| {
@@ -4964,8 +5182,19 @@ pub const Host = struct {
                         else => return false,
                     }
                 }
-                if (press.button != .primary) return false;
                 const point: Point = .{ .x = press.position.x, .y = press.position.y };
+                if (press.button != .primary) {
+                    // Secondary and middle presses reach pointer areas where
+                    // no control lies.
+                    const button = areaButton(press.button) orelse return false;
+                    if (self.view.pointerDown(point) == .consumed) {
+                        self.restoreFocus();
+                        self.invalidate();
+                        return true;
+                    }
+                    if (self.context.input_state.hit(.{ .x = point.x, .y = point.y }) != null) return false;
+                    return self.deliverArea(self.view.areaPress(point, button, press.modifiers, self.time()));
+                }
                 switch (self.view.pointerDown(point)) {
                     .ignored => {},
                     .changed => {
@@ -4985,19 +5214,29 @@ pub const Host = struct {
                 if (pressed.consumed) return self.apply(pressed);
                 // A press on a tree or table row selects through the view,
                 // which sees its modifiers; the pass then focuses the row.
-                if (self.view.rowPress(point, press.modifiers, hit orelse return false, self.context.currentTheme())) |value| {
+                if (hit) |id| if (self.view.rowPress(point, press.modifiers, id, self.context.currentTheme())) |value| {
                     self.deliver(value);
                     self.invalidate();
                     return true;
-                }
+                };
+                // Where no control lies, a pointer area learns of it; the
+                // Context still sees a press on nothing, which clears focus.
+                if (hit == null) _ = self.deliverArea(self.view.areaPress(point, .primary, press.modifiers, self.time()));
                 return false;
             },
             .pointer_up => |release| {
-                if (release.button != .primary) return false;
-                const result = self.view.captureRelease(.{ .x = release.position.x, .y = release.position.y });
-                return self.apply(result);
+                const point: Point = .{ .x = release.position.x, .y = release.position.y };
+                const button = areaButton(release.button) orelse return false;
+                const area = self.deliverArea(self.view.areaRelease(point, button));
+                if (area) self.updateCursor();
+                if (release.button != .primary) return area;
+                const result = self.view.captureRelease(point);
+                const taken = self.apply(result);
+                self.updateCursor();
+                return taken or area;
             },
             .cancel_input => {
+                _ = self.deliverArea(self.view.areaCancel());
                 _ = self.apply(self.view.captureCancel());
                 return false;
             },
@@ -5007,6 +5246,7 @@ pub const Host = struct {
                 self.view.window_focused = focused;
                 self.invalidate();
                 if (!focused) {
+                    _ = self.deliverArea(self.view.areaCancel());
                     _ = self.apply(self.view.captureCancel());
                     const hover = self.view.hoverAt(null);
                     if (self.view.embedPointerMove(null) or hover) self.invalidate();
@@ -5017,7 +5257,8 @@ pub const Host = struct {
                 if (self.view.dragKey(input)) |result| return self.apply(result);
                 self.view.focus = self.context.input_state.focused;
                 switch (self.view.routeKey(input)) {
-                    // Keys nothing else routes go to a focused embedded leaf.
+                    // Keys nothing else routes go to a focused embedded leaf;
+                    // the controls see the rest, then the application.
                     .ignored => {
                         if (!self.view.embedKey(input)) return false;
                         self.settleEmbed(null);
@@ -5056,12 +5297,81 @@ pub const Host = struct {
             else => return false,
         }
     }
+    /// Input the inspector takes before the view: its keys, and the pointer
+    /// and wheel over its panel or while it picks.
+    fn inspectorInput(self: *Host, tools: *Inspector, event: z.Event) bool {
+        const was_open = tools.open;
+        var repaint = false;
+        const taken = switch (event) {
+            .key_input => |input| tools.key(input),
+            .pointer_move => |point| blk: {
+                const over = tools.pointerMove(.{ .x = point.x, .y = point.y }, &repaint);
+                if (over) {
+                    // The view's hover leaves what the panel covers.
+                    _ = self.view.pointerMoved(null);
+                    if (self.view.hoverAt(null)) repaint = true;
+                    self.view.pointer = .{ .x = point.x, .y = point.y };
+                    self.updateCursor();
+                }
+                break :blk over;
+            },
+            .pointer_down => |press| tools.pointerDown(.{ .x = press.position.x, .y = press.position.y }, press.modifiers, &repaint),
+            .pointer_up => |release| tools.pointerUp(.{ .x = release.position.x, .y = release.position.y }),
+            .wheel => |value| tools.wheel(.{ .x = value.position.x, .y = value.position.y }, .{ .x = value.delta.x, .y = value.delta.y }),
+            else => false,
+        };
+        if (taken or repaint or tools.open != was_open) self.invalidate();
+        return taken;
+    }
     /// Releases go to the focused embedded leaf only.
     fn onKeyRelease(ptr: *anyopaque, _: *ui.Context, input: z.KeyInput) void {
         const self: *Host = @ptrCast(@alignCast(ptr));
         if (self.building) return;
         self.view.focus = self.context.input_state.focused;
-        if (self.view.embedKeyUp(input)) self.settleEmbed(null);
+        if (self.view.embedKeyUp(input) or self.applicationKey(input, true)) self.settleEmbed(null);
+    }
+    /// A press the view and the controls left alone goes to the application.
+    fn onUnhandledKey(ptr: *anyopaque, _: *ui.Context, input: z.KeyInput) bool {
+        const self: *Host = @ptrCast(@alignCast(ptr));
+        if (self.building or !self.applicationKey(input, false)) return false;
+        self.settleEmbed(null);
+        return true;
+    }
+    fn applicationKey(self: *Host, input: z.KeyInput, up: bool) bool {
+        const handler = self.options.keys orelse return false;
+        const call = (if (up) handler.key_up else handler.key) orelse return false;
+        return call(handler.context, input);
+    }
+    /// Follow the pointer to `point` for pointer areas and the pointer's
+    /// shape; true when an area should repaint.
+    fn pointerTo(self: *Host, point: ?Point) bool {
+        const changed = self.view.pointerMoved(point);
+        self.updateCursor();
+        return changed;
+    }
+    /// Show the shape of what lies under the pointer. A press keeps the
+    /// shape it began with until its release.
+    fn updateCursor(self: *Host) void {
+        const window = self.context.window orelse return;
+        if (self.view.area_press != null or self.view.capture != null) return;
+        const point = self.view.pointer orelse return;
+        const tools = if (self.options.inspector) |value| value.cursorAt(point) else null;
+        window.setCursor(tools orelse self.view.cursorAt(point)) catch {};
+    }
+    /// Deliver what a pointer area learned, if anything; true when one did.
+    fn deliverArea(self: *Host, event: ?Event) bool {
+        const value = event orelse return false;
+        self.deliver(value);
+        self.invalidate();
+        return true;
+    }
+    fn areaButton(button: z.PointerButton) ?PointerButton {
+        return switch (button) {
+            .primary => .primary,
+            .secondary => .secondary,
+            .middle => .middle,
+            else => null,
+        };
     }
     /// Apply what the view did with pointer input; true when it took it.
     fn apply(self: *Host, result: PointerResult) bool {
@@ -5110,14 +5420,31 @@ pub const Host = struct {
         self.frames += 1;
     }
     fn render(self: *Host, frame: *ui.Frame, theme: Theme) anyerror!void {
-        try self.pass(null);
-        try self.view.arrange(frame.sourceBounds(), theme, self.options.measurer);
+        var lap = if (self.options.inspector) |tools| if (tools.open) std.time.Timer.start() catch null else null else null;
+        const built: u64 = blk: {
+            if (self.options.inspector) |tools| self.view.layout_direction = tools.direction_override orelse self.options.direction;
+            try self.pass(null);
+            break :blk if (lap) |*timer| timer.lap() else 0;
+        };
+        const whole = frame.sourceBounds();
+        const content = if (self.options.inspector) |tools| tools.contentBounds(whole) else whole;
+        try self.view.arrange(content, theme, self.options.measurer);
+        const laid = if (lap) |*timer| timer.lap() else 0;
         try self.view.paint(frame);
         for (self.view.nodes()) |*node| {
-            const content = node.embed orelse continue;
-            if (content.place) |place| place(content.context, node.id, node.bounds);
+            const embed = node.embed orelse continue;
+            if (embed.place) |place| place(embed.context, node.id, node.bounds);
+        }
+        if (self.options.inspector) |tools| {
+            tools.capture(&self.view, self.context.input_state.focused, self.options.measurer, theme);
+            try tools.paint(frame);
+            tools.frameTimes(built, laid, if (lap) |*timer| timer.lap() else 0);
         }
         if (self.options.after_frame) |hook| hook.run(hook.context);
+        // What lies under a still pointer may have changed shape or moved;
+        // the next pass that builds the areas sees it.
+        _ = self.view.pointerMoved(self.view.pointer);
+        self.updateCursor();
         // Focus a frame pass asked for, such as the first control of a
         // dialog the build opened, once this frame registered it.
         if (self.view.restore) |id| {
@@ -5699,6 +6026,8 @@ test {
     _ = @import("icons.zig");
     _ = @import("direction.zig");
     _ = @import("navigation_tests.zig");
+    _ = @import("pointer_tests.zig");
+    _ = @import("inspector_tests.zig");
 }
 
 test "embedded leaves measure themselves and paint in order" {

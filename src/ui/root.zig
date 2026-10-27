@@ -484,6 +484,9 @@ pub const Context = struct {
     /// A key released while the window has the keyboard, outside paint; see
     /// `z.Content.key_release`. Text fields and shortcuts see no releases.
     on_key_release: ?*const fn (*anyopaque, *Context, z.KeyInput) void = null,
+    /// A key press that on_input, shortcuts, focus movement and activation
+    /// all left alone, outside text fields; true takes it and repaints.
+    on_unhandled_key: ?*const fn (*anyopaque, *Context, z.KeyInput) bool = null,
     on_accessibility_action: ?*const fn (*anyopaque, *Context, accessibility.Action) void = null,
     semantic_name: []const u8 = "Ziggurat",
     semantics_enabled: bool = true,
@@ -2442,12 +2445,21 @@ pub const Context = struct {
                 return true;
             }
             if (key.key == .enter or key.key == .space) {
-                if (!key.repeat) if (self.input_state.activation()) |id| self.on_action(self.state, id);
+                const activated = if (key.repeat) null else self.input_state.activation();
+                if (activated) |id| self.on_action(self.state, id) else _ = self.unhandledKey(key);
                 window.invalidate();
                 return true;
             }
         }
+        if (self.unhandledKey(key)) {
+            window.invalidate();
+            return true;
+        }
         return legacy != null;
+    }
+    fn unhandledKey(self: *Context, key: z.KeyInput) bool {
+        const callback = self.on_unhandled_key orelse return false;
+        return callback(self.state, self, key);
     }
     pub fn hasSurface(self: *const Context) bool {
         if (build_options.gpu) if (self.gpu_renderer.native != null) return true;

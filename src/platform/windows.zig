@@ -1072,6 +1072,15 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
                 return 0;
             }
         },
+        c.WM_SETCURSOR => {
+            // Over the client area the window's own shape shows; the frame
+            // and resize edges keep the system's.
+            const area: c_int = @as(i16, @bitCast(@as(u16, @truncate(@as(usize, @bitCast(lp))))));
+            if (@as(c.HWND, @ptrFromInt(@as(usize, @bitCast(wp)))) == hwnd and area == c.HTCLIENT and window.cursor != .default) {
+                _ = c.SetCursor(cursorHandle(window.cursor));
+                return c.TRUE;
+            }
+        },
         c.WM_NCHITTEST => {
             if (window.native.fullscreen) return c.HTCLIENT;
             if (window.options.decoration != .system) {
@@ -1271,4 +1280,36 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
     }
     if (message == c.WM_CANCELMODE and (!sameWindow(window, hwnd) or pointerOperation(window) != operation)) return 0;
     return delegate(delegation, message, wp, lp);
+}
+/// System cursor for a shape; Windows has no one-sided, column, row or
+/// vertical text cursors and uses the nearest ones, and the arrow for copy,
+/// alias and context menu. Shared system cursors need no release.
+fn cursorHandle(cursor: core.Cursor) c.HCURSOR {
+    const id: usize = switch (cursor) {
+        .none => return null,
+        .default, .copy, .alias, .context_menu => 32512,
+        .pointer, .grab => 32649,
+        .text, .vertical_text => 32513,
+        .move, .grabbing => 32646,
+        .resize_ew, .resize_e, .resize_w, .resize_column => 32644,
+        .resize_ns, .resize_n, .resize_s, .resize_row => 32645,
+        .resize_nwse => 32642,
+        .resize_nesw => 32643,
+        .not_allowed => 32648,
+        .crosshair => 32515,
+    };
+    return c.LoadCursorW(null, @ptrFromInt(id));
+}
+/// Show the shape at once when the pointer is over the client area; later
+/// moves keep it through WM_SETCURSOR.
+pub fn setCursor(window: *core.WindowRecord, cursor: core.Cursor) void {
+    const hwnd = window.native.hwnd orelse return;
+    var at: c.POINT = undefined;
+    if (c.GetCursorPos(&at) == 0) return;
+    if (c.WindowFromPoint(at) != hwnd) return;
+    if (c.ScreenToClient(hwnd, &at) == 0) return;
+    var client: c.RECT = undefined;
+    if (c.GetClientRect(hwnd, &client) == 0) return;
+    if (at.x < client.left or at.y < client.top or at.x >= client.right or at.y >= client.bottom) return;
+    _ = c.SetCursor(cursorHandle(cursor));
 }
