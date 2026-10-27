@@ -102,6 +102,8 @@ try {
         Set-Content -NoNewline -Path "$work/serve/SHA256SUMS" -Value ('0' * 64 + "  $served`n")
         & pwsh -NoProfile -File "$work/install.ps1"
         if ($LASTEXITCODE -eq 0 -or (Test-Path "$root/fixture.exe")) { throw 'install.ps1 installed an installer with the wrong SHA-256' }
+        # The expected failure must not become the exit code of the step.
+        $global:LASTEXITCODE = 0
     } finally {
         Remove-Item Env:FIXTURE_DOWNLOAD_URL, Env:FIXTURE_NO_OPEN -ErrorAction SilentlyContinue
         Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
