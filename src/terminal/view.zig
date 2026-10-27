@@ -20,6 +20,7 @@ const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const view = @import("ziggurat_view");
 const term = @import("ziggurat_terminal");
+const box = @import("box.zig");
 
 const Screen = term.Screen;
 const Cell = term.Cell;
@@ -544,9 +545,22 @@ pub const TerminalView = struct {
     pub fn resize(self: *TerminalView, cols: u16, rows: u16) !void {
         const s = &self.terminal.screen;
         if (cols == s.cols and rows == s.rows) return;
-        try s.resize(cols, rows);
-        self.selection = null;
+        try self.resizeScreen(cols, rows);
         self.invalidate();
+    }
+
+    /// Resize the screen; on the primary screen, which rewraps, the
+    /// selection moves with its text.
+    fn resizeScreen(self: *TerminalView, cols: u16, rows: u16) !void {
+        if (self.selection) |*selection| if (!self.terminal.screen.onAlternate()) {
+            var ends = [2]Position{ selection.anchor, selection.head };
+            try self.terminal.resize(cols, rows, &ends);
+            selection.anchor = ends[0];
+            selection.head = ends[1];
+            return;
+        };
+        self.selection = null;
+        try self.terminal.resize(cols, rows, &.{});
     }
 
     /// Change the font; the grid takes the new size of its cells, and a
@@ -770,9 +784,7 @@ pub const TerminalView = struct {
             self.terminal.cell_height = @intFromFloat(@round(cell.height * self.scale));
             const s = &self.terminal.screen;
             if (!self.options.resize_by_conn and (grid.cols != s.cols or grid.rows != s.rows)) {
-                if (s.resize(grid.cols, grid.rows)) {
-                    self.selection = null;
-                } else |err| self.fail(err);
+                self.resizeScreen(grid.cols, grid.rows) catch |err| self.fail(err);
             }
             if (self.session) |session| session.resize(grid);
             if (self.options.conn.resize) |resize_conn| resize_conn(self.options.conn.context, grid, self.terminal.cell_width, self.terminal.cell_height) catch |err| self.fail(err);
@@ -1066,11 +1078,13 @@ pub const TerminalView = struct {
             };
         }
         try self.paintImages(frame, .below_text, ox, oy, cell.width, cell.height);
+        var boxes: BoxPainter = .{ .frame = frame };
         for (0..s.rows) |y| {
             const abs = s.viewRow(y);
             const line = s.rowAt(abs) orelse continue;
-            self.paintText(frame, line.cells, abs, range, ox, oy + @as(f32, @floatFromInt(y)) * cell.height, cell.width, cell.height);
+            self.paintText(frame, &boxes, line.cells, abs, range, ox, oy + @as(f32, @floatFromInt(y)) * cell.height, cell.width, cell.height);
         }
+        boxes.flush();
         try self.paintImages(frame, .above_text, ox, oy, cell.width, cell.height);
         if (self.hover) |hover| if (hover.row >= s.viewRow(0) and hover.row < s.viewRow(s.rows)) {
             if (s.rowAt(hover.row)) |line| if (hover.start < line.cells.len) {
@@ -1098,10 +1112,16 @@ pub const TerminalView = struct {
                 .block => {
                     frame.rect(rect, t.cursor_color);
                     if (under.cp != 0 and under.wide != .spacer) {
-                        var bytes: [4]u8 = undefined;
-                        const n = std.unicode.utf8Encode(under.cp, &bytes) catch 0;
                         const text_color = (self.applied_theme orelse self.theme()).cursor_text orelse self.colorsOf(under, false, .none).bg;
-                        frame.labelFont(.{ .x = rect.x, .y = rect.y, .width = rect.width + cell.width, .height = rect.height }, bytes[0..n], text_color, self.fontFor(under));
+                        if (box.drawn(under.cp)) {
+                            var cursor_box: BoxPainter = .{ .frame = frame };
+                            cursor_box.cell(under.cp, rect, text_color);
+                            cursor_box.flush();
+                        } else {
+                            var bytes: [4]u8 = undefined;
+                            const n = std.unicode.utf8Encode(under.cp, &bytes) catch 0;
+                            frame.labelFont(.{ .x = rect.x, .y = rect.y, .width = rect.width + cell.width, .height = rect.height }, bytes[0..n], text_color, self.fontFor(under));
+                        }
                     }
                 },
                 .underline => frame.rect(.{ .x = rect.x, .y = rect.y + rect.height - 2, .width = rect.width, .height = 2 }, t.cursor_color),
@@ -1172,7 +1192,7 @@ pub const TerminalView = struct {
 
     /// Text in runs of one color and font. Wide characters go one by one at
     /// their cells, so a fallback font's advance cannot shift the grid.
-    fn paintText(self: *TerminalView, frame: *ui.Frame, cells: []const Cell, abs: u64, range: ?term.selection.Range, ox: f32, top: f32, cw: f32, ch: f32) void {
+    fn paintText(self: *TerminalView, frame: *ui.Frame, boxes: *BoxPainter, cells: []const Cell, abs: u64, range: ?term.selection.Range, ox: f32, top: f32, cw: f32, ch: f32) void {
         var glyphs: [1024]u8 = undefined;
         var x: usize = 0;
         while (x < cells.len) {
@@ -1187,12 +1207,23 @@ pub const TerminalView = struct {
                 continue;
             }
             const colors = self.colorsOf(first, selectedAt(range, abs, x), self.foundAt(abs, x));
+            if (box.drawn(first.cp)) {
+                // Drawn rather than taken from the font. Curves take a
+                // command per row, so they wait for room.
+                const span: f32 = if (first.wide == .wide) 2 else 1;
+                const left = ox + @as(f32, @floatFromInt(x)) * cw;
+                if (!first.style.attrs.hidden and (!box.scanned(first.cp) or buffer.storage.len - buffer.len >= 256)) boxes.cell(first.cp, .{ .x = left, .y = top, .width = span * cw, .height = ch }, colors.fg);
+                const a = first.style.attrs;
+                if (a.underline != .none or a.strike or a.overline) self.decorate(frame, first, selectedAt(range, abs, x), self.foundAt(abs, x), left, top, cw, ch);
+                x += if (first.wide == .wide) 2 else 1;
+                continue;
+            }
             const face = self.fontFor(first);
             var len: usize = 0;
             var end = x;
             while (end < cells.len) {
                 const c = cells[end];
-                if (c.wide == .spacer) break;
+                if (c.wide == .spacer or box.drawn(c.cp)) break;
                 if (end > x and (c.wide == .wide or first.wide == .wide)) break;
                 if (c.cp != 0 and c.cp != ' ') {
                     const other = self.colorsOf(c, selectedAt(range, abs, end), self.foundAt(abs, end));
@@ -1216,6 +1247,50 @@ pub const TerminalView = struct {
             x = end;
         }
     }
+
+    /// Draws the characters the terminal draws itself, merging their
+    /// rectangles where they meet in one color, as runs of lines do across
+    /// cells, so a screen of borders takes few commands.
+    const BoxPainter = struct {
+        frame: *ui.Frame,
+        color: u24 = 0,
+        pending: ?box.Fill = null,
+
+        /// Draw `cp` in its cell, snapped to the frame's device pixels.
+        fn cell(self: *BoxPainter, cp: u21, at: view.Rect, color: u24) void {
+            if (color != self.color) {
+                self.flush();
+                self.color = color;
+            }
+            const s = self.frame.size.scale;
+            box.draw(cp, @round(at.x * s), @round(at.y * s), @round((at.x + at.width) * s), @round((at.y + at.height) * s), s, self);
+        }
+
+        pub fn fill(self: *BoxPainter, f: box.Fill) void {
+            if (self.pending) |*p| if (p.alpha == f.alpha) {
+                if (p.y0 == f.y0 and p.y1 == f.y1 and f.x0 <= p.x1 and f.x1 >= p.x0) {
+                    p.x0 = @min(p.x0, f.x0);
+                    p.x1 = @max(p.x1, f.x1);
+                    return;
+                }
+                if (p.x0 == f.x0 and p.x1 == f.x1 and f.y0 <= p.y1 and f.y1 >= p.y0) {
+                    p.y0 = @min(p.y0, f.y0);
+                    p.y1 = @max(p.y1, f.y1);
+                    return;
+                }
+            };
+            self.flush();
+            self.pending = f;
+        }
+
+        fn flush(self: *BoxPainter) void {
+            const f = self.pending orelse return;
+            self.pending = null;
+            const s = self.frame.size.scale;
+            const rect: view.Rect = .{ .x = f.x0 / s, .y = f.y0 / s, .width = (f.x1 - f.x0) / s, .height = (f.y1 - f.y0) / s };
+            if (f.alpha >= 1) self.frame.rect(rect, self.color) else self.frame.roundedRect(rect, 0, ui.Color.rgb(self.color).withAlpha(f.alpha));
+        }
+    };
 
     fn decorate(self: *const TerminalView, frame: *ui.Frame, cell: Cell, selected: bool, found: Found, left: f32, top: f32, cw: f32, ch: f32) void {
         const a = cell.style.attrs;
@@ -2208,6 +2283,25 @@ test "images draw scaled into their cells, clipped to their part and the grid" {
     try std.testing.expectEqual(TerminalView.ImageLayer.above_text, TerminalView.layerOf(0));
 }
 
+test "a selection follows its text as a new width rewraps the screen" {
+    var state: u8 = 0;
+    var storage: view.Storage(4, 64) = .{};
+    var host = view.Host.init(&state, Empty.build, storage.buffers(), .{});
+    var terminal = try term.Terminal.init(std.testing.allocator, .{ .screen = .{ .cols = 8, .rows = 3 } });
+    defer terminal.deinit();
+    var sent: Sent = .{};
+    var board: Board = .{};
+    var tv = testView(&host, &terminal, &sent, &board, .{ .resize_by_conn = true });
+    defer tv.deinit();
+    tv.feed("abcdefghij");
+    // "ij", on the wrapped row.
+    tv.selection = .{ .anchor = .{ .row = terminal.screen.screenRow(1), .col = 0 }, .head = .{ .row = terminal.screen.screenRow(1), .col = 1 }, .dragging = false };
+    try tv.resize(12, 3);
+    const text = (try tv.selectedText(std.testing.allocator)).?;
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("ij", text);
+}
+
 test "a terminal shown from a server tells its stream the theme, and resizes when told" {
     var state: u8 = 0;
     var storage: view.Storage(4, 64) = .{};
@@ -2235,4 +2329,5 @@ test "a terminal shown from a server tells its stream the theme, and resizes whe
 
 test {
     std.testing.refAllDecls(TerminalView);
+    _ = box;
 }
