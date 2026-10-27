@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const fetch_api = @import("fetch.zig");
 const websocket = @import("websocket.zig");
 const proxy_api = @import("proxy.zig");
@@ -59,11 +60,11 @@ const FakeProxy = struct {
                     self.authorization_len = value.len;
                 };
                 if (self.credentials != null and self.authorization_len == 0) {
-                    try connection.stream.writeAll("HTTP/1.1 407 Proxy Authentication Required\r\ncontent-length: 0\r\n\r\n");
+                    try writeAll(connection.stream, "HTTP/1.1 407 Proxy Authentication Required\r\ncontent-length: 0\r\n\r\n");
                     return;
                 }
                 if (std.mem.eql(u8, method, "CONNECT")) {
-                    try connection.stream.writeAll("HTTP/1.1 200 Connection established\r\n\r\n");
+                    try writeAll(connection.stream, "HTTP/1.1 200 Connection established\r\n\r\n");
                     return answer(connection.stream, "tunneled");
                 }
                 try respond(connection.stream, "forwarded");
@@ -74,7 +75,7 @@ const FakeProxy = struct {
                 var methods: [255]u8 = undefined;
                 try readExact(connection.stream, methods[0..greeting[1]]);
                 if (self.credentials) |expected| {
-                    try connection.stream.writeAll(&.{ 5, 2 });
+                    try writeAll(connection.stream, &.{ 5, 2 });
                     var buffer: [600]u8 = undefined;
                     try readExact(connection.stream, buffer[0..2]);
                     const user_len = buffer[1];
@@ -84,9 +85,9 @@ const FakeProxy = struct {
                     var joined: [600]u8 = undefined;
                     const got = try std.fmt.bufPrint(&joined, "{s}:{s}", .{ buffer[2..][0..user_len], buffer[3 + @as(usize, user_len) ..][0..password_len] });
                     const ok = std.mem.eql(u8, got, expected);
-                    try connection.stream.writeAll(&.{ 1, if (ok) 0 else 1 });
+                    try writeAll(connection.stream, &.{ 1, if (ok) 0 else 1 });
                     if (!ok) return;
-                } else try connection.stream.writeAll(&.{ 5, 0 });
+                } else try writeAll(connection.stream, &.{ 5, 0 });
                 var request: [4]u8 = undefined;
                 try readExact(connection.stream, &request);
                 var name: [256]u8 = undefined;
@@ -104,7 +105,7 @@ const FakeProxy = struct {
                     },
                     else => return error.Unsupported,
                 }
-                try connection.stream.writeAll(&.{ 5, 0, 0, 1, 127, 0, 0, 1, 0, 0 });
+                try writeAll(connection.stream, &.{ 5, 0, 0, 1, 127, 0, 0, 1, 0, 0 });
                 try answer(connection.stream, "socks");
             },
         }
@@ -118,7 +119,7 @@ const FakeProxy = struct {
 
     fn respond(stream: std.net.Stream, body: []const u8) !void {
         var buffer: [256]u8 = undefined;
-        try stream.writeAll(try std.fmt.bufPrint(&buffer, "HTTP/1.1 200 OK\r\ncontent-length: {d}\r\nconnection: close\r\n\r\n{s}", .{ body.len, body }));
+        try writeAll(stream, try std.fmt.bufPrint(&buffer, "HTTP/1.1 200 OK\r\ncontent-length: {d}\r\nconnection: close\r\n\r\n{s}", .{ body.len, body }));
     }
 
     fn readHead(stream: std.net.Stream, out: []u8) !usize {
@@ -134,12 +135,35 @@ const FakeProxy = struct {
     fn readExact(stream: std.net.Stream, out: []u8) !void {
         var done: usize = 0;
         while (done < out.len) {
-            const count = try stream.read(out[done..]);
+            const count = try receive(stream, out[done..]);
             if (count == 0) return error.EndOfStream;
             done += count;
         }
     }
 };
+
+// The loopback peer's socket I/O: the standard stream's read and write go
+// through file I/O on Windows, which sockets refuse.
+fn receive(stream: std.net.Stream, out: []u8) !usize {
+    if (builtin.os.tag == .windows) {
+        const ws2_32 = std.os.windows.ws2_32;
+        const count = ws2_32.recv(stream.handle, out.ptr, @intCast(out.len), 0);
+        return if (count == ws2_32.SOCKET_ERROR) error.ReceiveFailed else @intCast(count);
+    }
+    return std.posix.recv(stream.handle, out, 0);
+}
+
+fn writeAll(stream: std.net.Stream, bytes: []const u8) !void {
+    var sent: usize = 0;
+    while (sent < bytes.len) {
+        if (builtin.os.tag == .windows) {
+            const ws2_32 = std.os.windows.ws2_32;
+            const count = ws2_32.send(stream.handle, bytes[sent..].ptr, @intCast(bytes.len - sent), 0);
+            if (count == ws2_32.SOCKET_ERROR) return error.SendFailed;
+            sent += @intCast(count);
+        } else sent += try std.posix.send(stream.handle, bytes[sent..], 0);
+    }
+}
 
 fn fetchThrough(proxy: *FakeProxy, url: []const u8, comptime setting: []const u8) !fetch_api.Response {
     const thread = try std.Thread.spawn(.{}, FakeProxy.serve, .{proxy});
