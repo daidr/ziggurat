@@ -7,6 +7,7 @@ const std = @import("std");
 const parser_module = @import("parser.zig");
 const screen_module = @import("screen.zig");
 const graphics = @import("graphics.zig");
+const theme_module = @import("theme.zig");
 
 const Parser = parser_module.Parser;
 const Action = parser_module.Action;
@@ -21,6 +22,9 @@ pub const Style = screen_module.Style;
 pub const ClipboardPolicy = struct {
     read: bool = false,
     write: bool = false,
+    /// Programs' reads go on through a `Mirror`'s frames, for the
+    /// terminal showing them to answer, rather than to the handler.
+    forward_read: bool = false,
 };
 
 pub const Event = union(enum) {
@@ -68,8 +72,15 @@ pub const Terminal = struct {
     screen: Screen,
     parser: Parser,
     osc_storage: []u8,
-    /// Decoded OSC 52 text; only allocated when writes are allowed.
+    /// Decoded OSC 52 text: the last a program wrote, which mirrors pass on
+    /// whatever the policy.
     clipboard_storage: []u8,
+    clipboard_len: usize = 0,
+    /// Writes to the clipboard so far, and reads forwarded to mirrors with
+    /// their selections ('c' or 'p'), for the next mirror to frame.
+    clipboard_writes: u64 = 0,
+    forwarded_reads: [8]u8 = undefined,
+    forwarded_len: usize = 0,
     options: Options,
     replies: [reply_bytes]u8 = undefined,
     reply_len: usize = 0,
@@ -107,7 +118,7 @@ pub const Terminal = struct {
         errdefer screen.deinit();
         const osc = try allocator.alloc(u8, options.osc_bytes);
         errdefer allocator.free(osc);
-        const clipboard = try allocator.alloc(u8, if (options.clipboard.write) options.osc_bytes else 0);
+        const clipboard = try allocator.alloc(u8, options.osc_bytes);
         return .{ .allocator = allocator, .screen = screen, .parser = Parser.init(osc), .osc_storage = osc, .clipboard_storage = clipboard, .options = options, .foreground = options.foreground, .background = options.background, .cursor_color = options.cursor, .base_foreground = options.foreground, .base_background = options.background, .base_cursor = options.cursor, .images = .{ .init(allocator, options.image_limit, 0), .init(allocator, options.image_limit, 1 << 62) } };
     }
 
@@ -174,6 +185,26 @@ pub const Terminal = struct {
         self.foreground_set = false;
         self.background_set = false;
         self.cursor_set = false;
+    }
+
+    /// Take a size and the cell's size in pixels, as a terminal no view
+    /// shows learns them from the window that shows it.
+    pub fn resizePixels(self: *Terminal, cols: u16, rows: u16, cell_width: u16, cell_height: u16) !void {
+        try self.screen.resize(cols, rows);
+        self.cell_width = cell_width;
+        self.cell_height = cell_height;
+    }
+
+    /// Take a theme's colors as the defaults, as `setColors` does.
+    pub fn useTheme(self: *Terminal, theme: theme_module.Theme) void {
+        self.setColors(theme.foreground, theme.background, theme.cursorColor(), theme.palette256());
+    }
+
+    /// Clear the scrollback and the screen above the cursor's line, which
+    /// moves to the top, as a user's clear does; nothing on a full-screen
+    /// program's screen. True when it cleared.
+    pub fn clearScreen(self: *Terminal) bool {
+        return self.screen.clearToCursor();
     }
 
     /// Resolve a cell color to RGB.
@@ -444,7 +475,9 @@ pub const Terminal = struct {
         s.revision +%= 1;
     }
 
-    fn privateModeState(self: *const Terminal, mode: u16) u8 {
+    /// A private mode's state as DECRQM reports it: 1 set, 2 reset, 0 for
+    /// one it does not know.
+    pub fn privateModeState(self: *const Terminal, mode: u16) u8 {
         const m = &self.screen.modes;
         const value: ?bool = switch (mode) {
             1 => m.cursor_keys,
@@ -647,14 +680,21 @@ pub const Terminal = struct {
                 const at = std.mem.indexOfScalar(u8, rest, ';') orelse return;
                 const data = rest[at + 1 ..];
                 if (std.mem.eql(u8, data, "?")) {
-                    if (self.options.clipboard.read) self.emit(.clipboard_read);
+                    if (self.options.clipboard.forward_read) {
+                        if (self.forwarded_len < self.forwarded_reads.len) {
+                            self.forwarded_reads[self.forwarded_len] = if (std.mem.indexOfScalar(u8, rest[0..at], 'p') != null) 'p' else 'c';
+                            self.forwarded_len += 1;
+                        }
+                    } else if (self.options.clipboard.read) self.emit(.clipboard_read);
                     return;
                 }
-                if (!self.options.clipboard.write) return;
                 const decoder = std.base64.standard.Decoder;
                 const size = decoder.calcSizeForSlice(data) catch return;
                 if (size > self.clipboard_storage.len) return;
                 decoder.decode(self.clipboard_storage[0..size], data) catch return;
+                self.clipboard_len = size;
+                self.clipboard_writes += 1;
+                if (!self.options.clipboard.write) return;
                 self.emit(.{ .clipboard_write = self.clipboard_storage[0..size] });
             },
             else => {},
