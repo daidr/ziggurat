@@ -2287,7 +2287,7 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&cli_tests.step);
     const run_cli_tests = b.addRunArtifact(cli_tests);
     test_step.dependOn(&run_cli_tests.step);
-    b.step("test-cli", "Run the ziggurat command's tests: templates, catalogs, S3 signing, install.sh, console output, icons, Windows signing and vet").dependOn(&run_cli_tests.step);
+    b.step("test-cli", "Run the ziggurat command's tests: templates, catalogs, S3 signing, install.sh and install.ps1, console output, icons, Windows signing, macOS bundles and disk image layout, and vet").dependOn(&run_cli_tests.step);
     // Measurement tools: apps' memory once idle, and how long input takes
     // to be painted.
     if (target.result.os.tag == .linux or target.result.os.tag == .windows) {

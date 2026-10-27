@@ -298,3 +298,46 @@ jobs:
           path: .validation/ci/*.json
           if-no-files-found: ignore
           retention-days: 7
+
+  macos-packaging:
+    # Self-hosted macOS runner with the Xcode command line tools. The
+    # repository variable MACOS_RUNS_ON overrides the labels with a JSON
+    # value, for example '"macos-15"' to use a hosted runner.
+    runs-on: ${{ fromJSON(vars.MACOS_RUNS_ON || '["self-hosted", "macOS"]') }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install verified Zig 0.15.2
+        run: |
+          zig_bin=$(sh scripts/fetch-zig-macos.sh)
+          printf '%s\n' "$(dirname "$zig_bin")" >> "$GITHUB_PATH"
+      - name: Link against Zig's own libSystem stubs when the SDK's fail
+        # Zig 0.15.2 cannot read the libSystem stubs of some newer SDKs and
+        # then fails to link anything, its build runner included. Zig falls
+        # back to the stubs it ships when xcode-select names no developer
+        # directory, so a failing xcode-select goes first on PATH; codesign,
+        # hdiutil, lipo and plutil live in /usr/bin and are unaffected.
+        run: |
+          sw_vers
+          xcode-select --print-path || true
+          xcrun --sdk macosx --show-sdk-path || true
+          probe="$RUNNER_TEMP/zig-probe"
+          mkdir -p "$probe"
+          printf 'pub fn main() void {}\n' >"$probe/main.zig"
+          if zig build-exe -lc -femit-bin="$probe/main" "$probe/main.zig" --cache-dir "$probe/cache" --global-cache-dir "$probe/cache"; then
+            echo "Zig links against the SDK"
+          else
+            mkdir -p "$probe/bin"
+            printf '#!/bin/sh\nexit 1\n' >"$probe/bin/xcode-select"
+            chmod +x "$probe/bin/xcode-select"
+            printf '%s\n' "$probe/bin" >> "$GITHUB_PATH"
+            echo "Zig links against its own libSystem stubs"
+          fi
+      - name: CLI tests, then a universal app, its signature, disk image and install script
+        env:
+          ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}/zig-local-cache
+        run: |
+          zig build cli test-cli
+          sh tests/macos_packaging.sh

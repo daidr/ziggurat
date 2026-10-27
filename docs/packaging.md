@@ -59,3 +59,64 @@ uninstall [--silent] [--purge]
 ## Debian 包
 
 `ziggurat package deb --zip PACKAGE --maintainer "NAME <EMAIL>"` 写出 Linux 更新包对应的 `.deb`：文件位于 `/usr/lib/<executable>/`，`/usr/bin/<executable>` 是相对链接，另有 desktop 条目、`/usr/share/doc/<executable>/copyright`（来自包内 LICENSE.txt）和可选 `--icon` PNG。控制文件包含 Installed-Size 与 md5sums；默认依赖 GTK 3 与 Pango，`--webview` 加入 WebKitGTK 4.1 与 libsoup 3，`--depends` 可完全替换。postinst/postrm 在工具存在时刷新菜单与图标缓存，失败不阻止安装。成员是未压缩的 tar，时间戳取 `SOURCE_DATE_EPOCH`（默认 0），同样输入得到同样字节。包未签名；仓库签名属于发布者的 APT 仓库配置。Linux 冒烟检查用 `dpkg-deb` 核对控制信息与内容，在有无密码 root 的环境中再实际安装、运行并移除。
+
+## macOS 应用包、签名与磁盘映像
+
+`ziggurat build` 在 macOS 目标上（见 [ziggurat 命令](cli.md#build)）、`ziggurat package app --zip PACKAGE` 从 macOS 更新包写出应用包：
+
+```text
+<名称>.app/Contents/
+  Info.plist
+  PkgInfo                      APPL????
+  MacOS/<名称>                  可执行文件（单架构或通用）
+  Resources/AppIcon.icns        由 icon 的 PNG 生成，或 macos.icon
+  Resources/Assets.car          macos.icon 为 .car 或 .icon 时
+  Resources/<语言>.lproj/InfoPlist.strings
+  embedded.provisionprofile     macos.provisioningProfile
+```
+
+应用包与可执行文件以 `name` 命名（`/ \ : * ? " < > |` 和控制字符换成 `-`）。`ziggurat.json` 中与 macOS 有关的字段：
+
+```json
+{
+  "copyright": "© 2026 Example",
+  "urlSchemes": ["myapp"],
+  "fileAssociations": [{ "ext": ["myd"], "name": "My document", "role": "Editor", "mimeType": "application/x-myd" }],
+  "macos": {
+    "icon": "assets/AppIcon.icon",
+    "minimumSystemVersion": "13.0",
+    "signingIdentity": "Developer ID Application: Example (TEAMID)",
+    "entitlements": "entitlements.plist",
+    "provisioningProfile": "embedded.provisionprofile",
+    "infoPlist": { "NSCameraUsageDescription": "Scan documents." },
+    "dmgTitle": "My App",
+    "notarize": { "keychainProfile": "notary", "keychain": "/path/to/build.keychain-db" }
+  }
+}
+```
+
+Info.plist 写出 `CFBundleName`/`CFBundleDisplayName`（`name`）、`CFBundleIdentifier`（`identity`）、`CFBundleExecutable`、`CFBundlePackageType APPL`、`LSMinimumSystemVersion`（默认 `13.0`，即 Zig 0.15.2 生成的 Mach-O 所声明的最低版本）、`NSPrincipalClass NSApplication`、`NSHighResolutionCapable`、`NSSupportsAutomaticGraphicsSwitching`、`NSHumanReadableCopyright`、`CFBundleDocumentTypes`（每个文件关联一项，`role` 默认 Editor，`name` 默认“扩展名大写 + file”，`LSHandlerRank Default`）与 `CFBundleURLTypes`。版本取四段版本的前三段作 `CFBundleShortVersionString`；第四段不为 0 时 `CFBundleVersion` 保留四段，否则同为三段。`macos.infoPlist` 的键覆盖以上任何键，值按 JSON 类型写成 string、integer（整数值的数字）、real、true/false、array 或 dict。键按字典序写出，同样配置得到同样字节。
+
+有 `i18n` 时，消息目录的每种语言得到一个 `.lproj` 目录，按 Xcode 的命名（`zh-Hans`、`zh-Hant`、`zh-HK`、`sr-Latn`、`pt-BR`），`CFBundleDevelopmentRegion` 为源语言，`CFBundleLocalizations` 列出全部，AppKit 因此用这些语言显示自己的菜单与面板文字，系统设置也会为应用列出这些语言。目录中的 `appName` 消息若与 `name` 不同，写进该语言的 `InfoPlist.strings`，Finder 与程序坞按系统语言显示应用名。
+
+图标：默认把 `icon` 的 PNG 缩放成 32 至 1024 像素的八个 PNG 条目写成 `AppIcon.icns`。`macos.icon` 可以是逐尺寸绘制的 `.icns`（替代生成的那份）、`actool` 编译好的 `Assets.car`（应用图标名为 AppIcon，生成的 `.icns` 留作旧系统的后备），或 Icon Composer 的 `.icon` 文档：在装有 Xcode 26 及以上的 Mac 上用 `xcrun actool` 编译出 `Assets.car` 与对应 `.icns`，其他环境跳过并保留 PNG 生成的图标。
+
+### 通用可执行文件
+
+`--platform macos/universal` 分别以 `aarch64-macos` 与 `x86_64-macos` 构建，再由 CLI 写出 fat Mach-O：大端 `0xcafebabe` 头、每个切片的 CPU 类型与子类型、16 KiB 对齐的偏移。不调用 lipo，所以在任何系统上都能生成；同一架构出现两次或输入不是 64 位 Mach-O 时拒绝。
+
+### 签名
+
+签名调用 `codesign --force --deep --sign IDENTITY`；真实身份另加 `--options runtime --timestamp`（强化运行时与安全时间戳，公证的前提），`macos.entitlements` 以 `--entitlements` 传入。身份 `-` 为 ad hoc 签名：应用可在构建它的 Mac 上运行，其他 Mac 上 Gatekeeper 会阻止。`provisioningProfile` 在签名前复制为 `Contents/embedded.provisionprofile`，必须授权应用的 identity 与 entitlements 并匹配签名身份，因此不能与 ad hoc 签名同用。签名需要 macOS；在其他系统上应用包照常写出，真实身份时提示未签名，arm64 可执行文件保留 Zig 链接器的 ad hoc 签名。
+
+### 磁盘映像
+
+磁盘映像只用 macOS 自带的 hdiutil：把应用以 `ditto --noclone` 复制到暂存目录（保持签名原样，并避免稀疏文件让 hdiutil 低估 HFS+ 所需块数），旁边放 `/Applications` 符号链接、窗口布局 `.DS_Store` 和由应用图标而来的 `.VolumeIcon.icns`；`hdiutil create -fs HFS+ -format UDRW` 生成可写映像，挂载后设置卷的“有自定义图标”Finder 标志并删去系统生成的 `.fseventsd`、`.Trashes`，卸载后 `hdiutil convert -format ULMO` 压缩为只读的 LZMA 映像。create 与 detach 遇到 “Resource busy”（Spotlight、杀毒软件占用）时依次等待 2、4、8、16 秒重试，最终失败时同时报告第一次的错误。卷名为 `macos.dmgTitle`，默认 `name`。不以 Finder 标志隐藏 `.app` 扩展名，因为那会使签名的严格校验失败（Finder 默认已隐藏）。
+
+窗口布局不经 AppleScript 或 Finder 自动化，无需授权，可在无界面的构建机上生成：`.DS_Store` 由 CLI 直接写出——伙伴分配的地址空间、`DSDB` B 树头和单个叶节点，记录窗口位置与大小（屏幕左下 200,400 起 660×400，隐藏工具栏、侧栏、路径栏与状态栏）、白色背景、128 点图标、底部标签，以及应用（180,190）和 Applications 链接（480,185）的图标中心。窗口属性是 `bplist00` 二进制 plist，排布与 Python plistlib 相同（键排序、相同标量共享一个对象）。单元测试把输出与 dmgbuild 所用 `ds_store` 包对相同记录写出的文件逐字节比较。
+
+真实身份签名时映像本身也以 `codesign --timestamp` 签名。配置 `macos.notarize` 时，映像经 `xcrun notarytool submit --keychain-profile PROFILE [--keychain KEYCHAIN] --wait --output-format json` 提交（凭据事先用 `xcrun notarytool store-credentials PROFILE` 存入钥匙串，不写入任何文件），结果为 Accepted 后用 `xcrun stapler staple` 把票据钉在映像上，并钉在应用包上，供直接复制应用包的场合使用；被拒时报告状态、消息和 `notarytool log` 的查询命令。
+
+### 验证
+
+`zig build test-cli` 检查 Info.plist 内容与覆盖规则、语言目录命名、应用包结构、icns、通用文件头与对齐、codesign 参数与 provisioning profile 规则、hdiutil 参数和输出解析、Finder 标志、notarytool 结果解析，以及 `.DS_Store` 与二进制 plist。CI 的 macOS 任务（自托管 runner，`MACOS_RUNS_ON` 可改标签）用 `scripts/fetch-zig-macos.sh` 取得校验过的 Zig，运行 `tests/macos_packaging.sh`：以真实 CLI 把一个夹具项目构建成通用应用，用 `lipo -archs` 确认两种架构并运行可执行文件，`plutil` 校验 Info.plist 与本地化名称，`codesign --verify --strict --deep` 校验 ad hoc 签名，`hdiutil verify`/`imageinfo` 校验映像为 ULMO，挂载后检查应用、Applications 链接、布局与卷图标，再从更新包重新生成应用包，并用 install.sh 从映像安装到私有目录后卸载。Developer ID 签名与公证需要付费开发者账号的凭据，CI 中没有，仅有参数与流程的单元测试。
