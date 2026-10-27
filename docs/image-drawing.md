@@ -50,7 +50,7 @@ CPU 准备只有稳定 State 和一个连续像素 allocation；mip descriptors 
 
 GPU/Cairo 的图片与 A8 Coverage 共用一张驻留槽表，起始 32 槽，满了按倍数增长（最多 65536 槽，到顶才按 LRU 腾出一槽），驻留数量由字节预算而不是槽数限制。默认共享 pixel payload budget 为 64 MiB，`setRasterBudget(bytes)` 与兼容的 `setImageBudget(bytes)` 接受 1..256 MiB 并修改同一预算。缓存在显式 upload、降低 budget 和窗口帧补传（见下）时按 LRU 淘汰；渲染器层的 draw 只查找和更新最近使用次序，未上传图片返回 `ImageNotUploaded`。重复上传同 identity 为命中，不创建原生对象。查找按槽表线性扫描，成本随当前槽数增长。Coverage 的准备与上传契约见[阴影与覆盖](shadows.md)。
 
-一帧里同一 Lease 的不同 identity 各占 Buffer 图片表的一项，分别绘制；图片表与命令表等长（2048），每条图片命令都可以画不同的图片。窗口 Context 在回放前让这一帧画到的图片与 Coverage 都驻留：缺的（从未上传、已释放或被淘汰的）就地上传，只淘汰这一帧没画到的项；这一帧本身超过预算时全部保留、暂时超出预算，直到下一次显式 upload 或 budget 变更再按 LRU 收回。Direct3D 11 在绘制中不能上传，所以缺图的那一帧改在软件（GDI）上画，画完再把缺的上传到 GPU，下一帧回到 GPU。离屏 Surface 与渲染器的直接回放不补传，仍返回 `ImageNotUploaded` / `CoverageNotUploaded`。被淘汰后又被帧补传回来的动态图片成为静态驻留，`PixelImage.commit` 遇到 `ImageNotDynamic` 会释放它再重新注册动态驻留。
+一帧里同一 Lease 的不同 identity 各占 Buffer 图片表的一项，分别绘制；图片表每帧最多 256 个不同图片（原为 32），超出时追加返回 `ImageResourcesFull`。窗口 Context 在回放前让这一帧画到的图片与 Coverage 都驻留：缺的（从未上传、已释放或被淘汰的）就地上传，只淘汰这一帧没画到的项；这一帧本身超过预算时全部保留、暂时超出预算，直到下一次显式 upload 或 budget 变更再按 LRU 收回。Direct3D 11 在绘制中不能上传，所以缺图的那一帧改在软件（GDI）上画，画完再把缺的上传到 GPU，下一帧回到 GPU。离屏 Surface 与渲染器的直接回放不补传，仍返回 `ImageNotUploaded` / `CoverageNotUploaded`。被淘汰后又被帧补传回来的动态图片成为静态驻留，`PixelImage.commit` 遇到 `ImageNotDynamic` 会释放它再重新注册动态驻留。
 
 上传先验证预算，再创建一份完整候选 native mip 集合；所有层成功之后才驱逐旧项并提交。第 N 层 OOM/一般故障释放整个候选，保留旧驻留及其 pin。候选与旧驻留同时存在的瞬时 payload 上限是 `budget + min(budget, 96 MiB)`；`peak_reserved_bytes` 记录生命周期内这种保守预留峰值，允许失败尝试增加。`pixel_bytes` 只计已提交驻留。它们都不是实际进程内存或显存测量：GPU/codec 驱动元数据、对齐和系统缓存另计；Cairo surface 借用 CPU pool，payload 统计同样按全尺寸保守计费。
 

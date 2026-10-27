@@ -75,17 +75,15 @@ pub const Text = struct { bounds: Rect, color: u32, offset: u16, len: u16, font:
 pub const ImageCommand = struct {
     destination: Rect,
     alignment: drawing.Point,
+    fit: drawing.ImageFit,
+    sampling: drawing.ImageSampling,
     opacity: u8,
-    look: Look,
-    resource: u16,
-    /// Fit and sampling share a byte so the resource index fits in the
-    /// command's 32 bytes.
-    pub const Look = packed struct(u8) { fit: u4, sampling: u4 };
+    resource: u8,
     pub fn init(destination: Rect, value: drawing.ImageOptions, resource: usize) ImageCommand {
-        return .{ .destination = destination, .alignment = value.alignment, .opacity = value.opacity, .look = .{ .fit = @intCast(@intFromEnum(value.fit)), .sampling = @intCast(@intFromEnum(value.sampling)) }, .resource = @intCast(resource) };
+        return .{ .destination = destination, .alignment = value.alignment, .fit = value.fit, .sampling = value.sampling, .opacity = value.opacity, .resource = @intCast(resource) };
     }
     pub fn options(self: ImageCommand) drawing.ImageOptions {
-        return .{ .alignment = self.alignment, .fit = @enumFromInt(self.look.fit), .sampling = @enumFromInt(self.look.sampling), .opacity = self.opacity };
+        return .{ .alignment = self.alignment, .fit = self.fit, .sampling = self.sampling, .opacity = self.opacity };
     }
 };
 pub const Command = union(enum) {
@@ -155,9 +153,10 @@ pub const Buffer = struct {
     brush_storage: [brushes.max_brushes]brushes.Stored = undefined,
     prepared_text_storage: [32]drawing.PreparedTextView = undefined,
     prepared_text_len: usize = 0,
-    /// One entry per distinct image a frame draws, so every command can draw a
-    /// different one.
-    image_storage: [2048]drawing.ImageView = undefined,
+    /// One entry per distinct image (lease and identity) a frame draws. Kept
+    /// at what a u8 resource index reaches: a Context holds a Buffer, and
+    /// Debug builds copy Contexts on the stack.
+    image_storage: [256]drawing.ImageView = undefined,
     image_len: usize = 0,
     coverage_storage: [32]drawing.CoverageView = undefined,
     coverage_len: usize = 0,
@@ -911,7 +910,7 @@ test "prepared text pins are deduplicated bounded and released after every reset
     try std.testing.expectEqual(0, buffer.preparedTextResources().len);
 }
 
-test "image frame resources pin once per identity and reject bad geometry without mutation" {
+test "image frame resources pin once per identity and reject bad capacity and geometry without mutation" {
     var buffer: Buffer = .{};
     defer buffer.reset();
     var leases: [33]drawing.Lease = undefined;
@@ -934,6 +933,12 @@ test "image frame resources pin once per identity and reject bad geometry withou
     try std.testing.expectEqual(2, leases[0].pins);
     try std.testing.expectEqual(100, buffer.imageResources()[buffer.commands()[buffer.len - 1].image.resource].identity);
     try std.testing.expectEqual(1, buffer.imageResources()[buffer.commands()[0].image.resource].identity);
+    for (34..buffer.image_storage.len) |identity| try buffer.image(bounds, .{ .lease = &leases[1], .identity = 1000 + identity, .levels = &levels }, .{});
+    const count = buffer.len;
+    const pins = leases[1].pins;
+    try std.testing.expectError(error.ImageResourcesFull, buffer.image(bounds, .{ .lease = &leases[1], .identity = 999, .levels = &levels }, .{}));
+    try std.testing.expectEqual(count, buffer.len);
+    try std.testing.expectEqual(pins, leases[1].pins);
     buffer.len = buffer.storage.len;
     try std.testing.expectError(error.CommandsFull, buffer.image(bounds, view, .{}));
     try std.testing.expectEqual(2, leases[0].pins);
