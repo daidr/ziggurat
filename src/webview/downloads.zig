@@ -57,6 +57,58 @@ fn validOutputName(name: []const u8) bool {
     }
     return true;
 }
+/// The file name to save a download as, from the page's or server's
+/// untrusted suggestion: its last path component (either slash separates),
+/// or "download" when nothing is left. On Windows, characters a file name
+/// cannot hold become "_", trailing dots and spaces go, and a device name
+/// gains a leading "_". The result lives in `buffer` (256 bytes suffice).
+pub fn safeName(buffer: []u8, suggested: []const u8) []const u8 {
+    var name = suggested;
+    if (std.mem.lastIndexOfAny(u8, name, "/\\")) |slash| name = name[slash + 1 ..];
+    if (builtin.os.tag == .windows) name = std.mem.trimRight(u8, name, ". ");
+    if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) name = "download";
+    var length: usize = 0;
+    if (builtin.os.tag == .windows and !validOutputName(name)) {
+        buffer[0] = '_';
+        length = 1;
+    }
+    var taken: usize = 0;
+    for (name) |byte| {
+        if (length == buffer.len) break;
+        buffer[length] = if (byte == 0 or (builtin.os.tag == .windows and (byte < 32 or std.mem.indexOfScalar(u8, "<>:\"|?*", byte) != null))) '_' else byte;
+        length += 1;
+        taken += 1;
+    }
+    // A cut never splits a UTF-8 sequence.
+    while (length > 0 and taken < name.len and name[taken] & 0xc0 == 0x80) {
+        taken -= 1;
+        length -= 1;
+    }
+    return buffer[0..length];
+}
+/// Worker only: `directory/name`, numbered "name (2).ext", "name (3).ext"
+/// and so on when a file already has the name, as browsers save downloads.
+/// The caller owns the path. Another process can still take it before the
+/// Runtime writes, so prepare the Destination without `accept_overwrite`.
+pub fn uniquePath(allocator: std.mem.Allocator, process_main_thread_id: std.Thread.Id, directory: []const u8, name: []const u8) ![]u8 {
+    if (std.Thread.getCurrentId() == process_main_thread_id) return error.UiThreadForbidden;
+    if (!std.fs.path.isAbsolute(directory)) return error.AbsoluteOutputPathRequired;
+    if (!validOutputName(name) or std.mem.indexOfAny(u8, name, "/\\") != null) return error.InvalidOutputName;
+    var dir = try std.fs.openDirAbsolute(directory, .{});
+    defer dir.close();
+    const extension = std.fs.path.extension(name);
+    const stem = name[0 .. name.len - extension.len];
+    var number: u32 = 1;
+    while (number <= 9999) : (number += 1) {
+        const candidate = if (number == 1) try allocator.dupe(u8, name) else try std.fmt.allocPrint(allocator, "{s} ({d}){s}", .{ stem, number, extension });
+        defer allocator.free(candidate);
+        _ = dir.statFile(candidate) catch |err| switch (err) {
+            error.FileNotFound => return std.fs.path.join(allocator, &.{ directory, candidate }),
+            else => return err,
+        };
+    }
+    return error.OutputAlreadyExists;
+}
 /// Owns two bounded allocations, no COM objects or borrowed handles. Do not copy;
 /// successful native commit consumes it. deinit may run on the preparing worker
 /// after App.post fails, and never deletes a completed/partial download.
@@ -271,4 +323,51 @@ test "private destination worker precheck owns metadata and unwinds each allocat
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.allocationCase, .{ std.Thread.getCurrentId(), &temporary });
+}
+
+test "download names keep the last component and number taken names" {
+    var buffer: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("report.pdf", safeName(&buffer, "../../etc/report.pdf"));
+    try std.testing.expectEqualStrings("a.txt", safeName(&buffer, "dir\\a.txt"));
+    try std.testing.expectEqualStrings("download", safeName(&buffer, "folder/"));
+    try std.testing.expectEqualStrings("download", safeName(&buffer, ".."));
+    var short: [4]u8 = undefined;
+    try std.testing.expectEqualStrings("a\u{00e9}", safeName(&short, "a\u{00e9}\u{00e9}"));
+    if (builtin.os.tag == .windows) {
+        try std.testing.expectEqualStrings("a_b_.txt", safeName(&buffer, "a:b?.txt"));
+        try std.testing.expectEqualStrings("_con.txt", safeName(&buffer, "con.txt"));
+        try std.testing.expectEqualStrings("notes", safeName(&buffer, "notes. . "));
+    }
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(directory);
+    const Run = struct {
+        fn run(dir: []const u8, out: *anyerror!void) void {
+            out.* = check(dir);
+        }
+        fn check(dir: []const u8) !void {
+            const allocator = std.testing.allocator;
+            var opened = try std.fs.openDirAbsolute(dir, .{});
+            defer opened.close();
+            const first = try uniquePath(allocator, 0, dir, "photo.png");
+            defer allocator.free(first);
+            try std.testing.expectEqualStrings("photo.png", std.fs.path.basename(first));
+            try opened.writeFile(.{ .sub_path = "photo.png", .data = "" });
+            try opened.writeFile(.{ .sub_path = "photo (2).png", .data = "" });
+            const third = try uniquePath(allocator, 0, dir, "photo.png");
+            defer allocator.free(third);
+            try std.testing.expectEqualStrings("photo (3).png", std.fs.path.basename(third));
+            try opened.writeFile(.{ .sub_path = "notes", .data = "" });
+            const plain = try uniquePath(allocator, 0, dir, "notes");
+            defer allocator.free(plain);
+            try std.testing.expectEqualStrings("notes (2)", std.fs.path.basename(plain));
+            try std.testing.expectError(error.InvalidOutputName, uniquePath(allocator, 0, dir, "a/b"));
+        }
+    };
+    var result: anyerror!void = {};
+    const worker = try std.Thread.spawn(.{}, Run.run, .{ directory, &result });
+    worker.join();
+    try result;
+    try std.testing.expectError(error.UiThreadForbidden, uniquePath(std.testing.allocator, std.Thread.getCurrentId(), directory, "x"));
 }

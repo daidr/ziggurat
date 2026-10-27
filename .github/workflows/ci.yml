@@ -79,6 +79,9 @@ jobs:
           python scripts/fetch-sqlite.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           zig build test-sqlite -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
+      - name: Application font registration
+        run: |
+          zig build smoke-fonts -Doptimize=${{ matrix.optimize }} --global-cache-dir .zig-cache/managed/windows-global
       # Hardware GPU coverage is a separate local driver check. Hosted runner
       # measurements below explicitly record any GPU fallback and deferred work.
       - name: Capture reproducible benchmark evidence
@@ -157,6 +160,9 @@ jobs:
         run: |
           python3 scripts/fetch-sqlite.py
           zig build test-sqlite -Doptimize=${{ matrix.optimize }}
+      - name: Application font registration
+        run: |
+          XDG_CACHE_HOME=$(mktemp -d) zig build smoke-fonts -Doptimize=${{ matrix.optimize }}
       - name: Optional WebKitGTK lifecycle and policy checks
         if: github.event_name == 'workflow_dispatch' && inputs.webview
         run: |
@@ -262,7 +268,7 @@ jobs:
           bun test packages
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # These fail when the system Runtime is unavailable; no Runtime is downloaded.
-          zig build test test-remote-origin smoke-webview smoke-composition-webview smoke-page-host smoke-page-session smoke-webview-policy smoke-page smoke-page-remote smoke-page-authorization smoke-script smoke-browser-tools smoke-request-policy smoke-resource-async smoke-resource-file smoke-scheme smoke-resource-producer smoke-permission smoke-download smoke-browser-policy smoke-ipc smoke-assets smoke-page-runtime smoke-plugin-fetch smoke-plugin-watch smoke-plugin-sqlite -Dwebview=true -Doptimize=ReleaseSafe --global-cache-dir .zig-cache/managed/windows-global
+          zig build test test-remote-origin smoke-webview smoke-composition-webview smoke-page-host smoke-page-session smoke-webview-policy smoke-page smoke-page-remote smoke-page-authorization smoke-script smoke-browser-tools smoke-request-policy smoke-resource-async smoke-resource-file smoke-scheme smoke-resource-producer smoke-permission smoke-download smoke-browser-policy smoke-ipc smoke-assets smoke-page-runtime smoke-plugin-fetch smoke-plugin-watch smoke-plugin-sqlite smoke-plugin-websocket smoke-embedded-webview -Dwebview=true -Doptimize=ReleaseSafe --global-cache-dir .zig-cache/managed/windows-global
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Standalone engine discovery without a page
         run: |

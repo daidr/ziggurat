@@ -149,6 +149,10 @@ pub extern fn zwk_capture_budget_close(*anyopaque) void;
 pub extern fn zwk_capture_budget_release(*anyopaque) void;
 pub extern fn zwk_capture_enable(*anyopaque, *anyopaque) c_int;
 pub extern fn zwk_capture_start(*anyopaque, u64) c_int;
+/// Page geometry in inches: width, height, then top, right, bottom and left
+/// margins. A zero last page prints through the end.
+pub const PdfRequest = extern struct { first_page: u32, last_page: u32, flags: u32, page: [6]f64 };
+pub extern fn zwk_pdf_start(*anyopaque, u64, [*:0]const u8, *const PdfRequest) c_int;
 pub extern fn zwk_clear_start(*anyopaque, u64) c_int;
 pub extern fn zwk_capture_cancel(*anyopaque, u64) void;
 pub extern fn zwk_capture_counts(*u32, *u32, *usize, *usize) void;

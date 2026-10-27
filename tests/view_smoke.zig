@@ -5,6 +5,7 @@ const view = @import("ziggurat_view");
 const ui = @import("ziggurat_ui");
 const wake = @import("ziggurat_wake");
 const view_timer = @import("ziggurat_view_timer");
+const graphics = @import("ziggurat_view_graphics");
 const Watchdog = @import("watchdog.zig").Watchdog;
 const c = if (builtin.os.tag == .windows) @cImport({
     @cDefine("WIN32_LEAN_AND_MEAN", "1");
@@ -427,6 +428,81 @@ fn runCollections(allocator: std.mem.Allocator) !void {
     try app.dispatch();
 }
 
+/// A routed page with history buttons, icons and an SVG picture whose
+/// pixels are prepared in tasks posted after paint.
+const Pictures = struct {
+    router: view.Router = undefined,
+    logo: graphics.SvgImage = undefined,
+    fn build(self: *Pictures, v: *view.View) anyerror!void {
+        try v.row(.{ .gap = 4 });
+        _ = try v.backButton(&self.router, .{});
+        _ = try v.forwardButton(&self.router, .{});
+        try v.icon(.home, .{ .name = "Home" }, .{});
+        try v.end();
+        const page = try v.route(&self.router, .{});
+        if (page.match("/")) {
+            page.title("Start");
+            if (try v.button("Open", .{})) try self.router.push("/details");
+        } else if (page.match("/details")) {
+            page.title("Details");
+            try v.icon(.arrow_right, .{}, .{});
+            try v.svg(self.logo.picture(), .{ .alt = "Logo" }, .{ .width = 96, .height = 48 });
+        }
+        try v.end();
+    }
+};
+
+fn runPictures(allocator: std.mem.Allocator) !void {
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    var state: Pictures = .{};
+    var entries: [4]view.RouteEntry = undefined;
+    state.router = try .init(&entries, "/");
+    var storage: view.Storage(32, 256) = .{};
+    var host = view.Host.init(&state, Pictures.build, storage.buffers(), .{});
+    var icons = graphics.Icons.init(allocator, &host);
+    host.view.icons = icons.painter();
+    host.context.render_mode = .gdi;
+    state.logo = try .init(allocator, &host, "<svg xmlns='http://www.w3.org/2000/svg' width='48' height='24'><rect width='48' height='24' fill='currentColor'/></svg>", .{});
+    const window = try app.createWindow(.{ .width = width, .height = height });
+    try host.attach(window);
+
+    // The first frame finds the icon missing and prepares it after paint.
+    try paint(&host, window);
+    try std.testing.expect(icons.queued and (try find(&host, .nav_button, 0)).style.enabled == false);
+    try app.dispatch();
+    if (icons.last_error) |err| return err;
+    try std.testing.expectEqual(@as(usize, 1), icons.count());
+    try paint(&host, window);
+    try std.testing.expect(!icons.queued);
+
+    Native.click(window, (try find(&host, .button, 0)).bounds);
+    try std.testing.expectEqualStrings("/details", state.router.location());
+    try paint(&host, window);
+    try std.testing.expect(state.logo.queued and !state.logo.ready());
+    try app.dispatch();
+    if (icons.last_error) |err| return err;
+    if (state.logo.last_error) |err| return err;
+    try std.testing.expect(state.logo.ready());
+    try std.testing.expectEqual(@as(usize, 2), icons.count());
+    const shown = try find(&host, .svg, 0);
+    try std.testing.expectEqual(@as(f32, 96), shown.bounds.width);
+    try paint(&host, window);
+    try std.testing.expect(!state.logo.queued and !icons.queued);
+
+    // The Back button returns to the first page.
+    Native.click(window, (try find(&host, .nav_button, 0)).bounds);
+    try std.testing.expectEqualStrings("/", state.router.location());
+    try paint(&host, window);
+    try std.testing.expect(state.router.canGoForward());
+
+    icons.deinit();
+    state.logo.deinit();
+    try std.testing.expectEqual(@as(usize, 0), icons.count());
+    _ = try window.destroy();
+    try app.dispatch();
+}
+
 /// A toast that expires through the native one-shot timer, with the window
 /// repainting only for that deadline.
 const Expiring = struct {
@@ -484,11 +560,12 @@ pub fn main() !void {
     defer std.debug.assert(gpa.deinit() == .ok);
     try run(gpa.allocator());
     try runCollections(gpa.allocator());
+    try runPictures(gpa.allocator());
     try runTimer(gpa.allocator());
     if (builtin.os.tag == .windows) {
         try @import("view_uia.zig").run(gpa.allocator());
         try @import("view_uia.zig").runCollections(gpa.allocator());
     }
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, embedded leaf input, timed toast expiry and keyed identity passed\n", .{});
+    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, embedded leaf input, routed pages with history buttons, deferred icon and SVG preparation, timed toast expiry and keyed identity passed\n", .{});
 }

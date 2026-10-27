@@ -40,8 +40,9 @@ const Shell = struct {
                 if (self.window) |window| _ = window.requestClose() catch {};
             },
             // Opening Ctrl+clicked links needs a `system.shell.Worker` thread,
-            // which this example leaves out.
-            .open, .bell, .directory => {},
+            // and the context menu a popup menu, which this example leaves
+            // out.
+            .open, .bell, .directory, .notify, .copied, .search, .context_menu => {},
         }
     }
 
@@ -72,6 +73,7 @@ pub fn main() !void {
         .clipboard = .{ .context = &shell, .read = Shell.readClipboard, .write = Shell.writeClipboard },
         .notify = .{ .context = &shell, .call = Shell.notice },
     });
+    defer leaf.deinit();
     leaf.bind();
     shell.terminal = &leaf;
 

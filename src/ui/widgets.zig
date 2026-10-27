@@ -22,6 +22,9 @@ pub const Options = struct {
     invalid: bool = false,
     /// A form needs a value before it can be submitted.
     required: bool = false,
+    /// A checkbox is partly checked: it is drawn with a dash and reports
+    /// the indeterminate toggle state. `checked` is then false.
+    mixed: bool = false,
 };
 pub const RangeOptions = struct { control: Options = .{}, vertical: bool = false };
 pub const RangeSliderIds = struct { group: u64, low: u64, high: u64 };
@@ -50,7 +53,7 @@ pub const MeterBands = struct {
 pub const MeterOptions = struct { control: Options = .{}, bands: MeterBands = .{} };
 /// Most marks a rating offers.
 pub const max_rating = 10;
-pub const Kind = enum { button, checkbox, radio, toggle_switch, progress, tab, segment, link, disclosure, list_item, combo_box, nav_button };
+pub const Kind = enum { button, checkbox, radio, toggle_switch, progress, tab, segment, link, disclosure, list_item, combo_box, nav_button, label_button };
 /// Where a navigation button's chevron points.
 pub const NavDirection = enum { back, forward, up, down };
 pub const AvatarOptions = struct {
@@ -182,7 +185,7 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
             .disclosure => .disclosure,
             .list_item => .list_item,
             .combo_box => .combo_box,
-            .nav_button => .button,
+            .nav_button, .label_button => .button,
         },
         // A combo box is named by its label and reports the choice as its value.
         .name = if (kind == .progress or combo) options.name else text,
@@ -192,6 +195,7 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
         .enabled = options.enabled,
         .focused = focus,
         .checked = checked,
+        .mixed = kind == .checkbox and options.mixed,
         .invalid = options.invalid,
         .required = options.required,
         .read_only = kind == .progress or combo,
@@ -222,6 +226,13 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
             try fill(frame, bounds, border);
             try fill(frame, inset(bounds, metrics.border), if (checked) accent else if (options.enabled and context.input_state.active == id) colors.pressed else colors.control);
             try context.command_buffer.text(absolute(frame, inset(bounds, metrics.content_inset)), text, if (checked and options.enabled) colors.on_accent else foreground);
+        },
+        .label_button => {
+            // Plain text that acts as a button, such as a label that turns
+            // into a text field when activated.
+            if (options.enabled and context.input_state.active == id) try fill(frame, bounds, colors.pressed);
+            try context.command_buffer.text(absolute(frame, inset(bounds, metrics.content_inset)), text, foreground);
+            if (focus) try outline(frame, bounds, metrics.border, colors.focus);
         },
         .link => {
             const color: u32 = if (options.enabled) colors.accent else colors.disabled_text;
@@ -275,8 +286,13 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
                 if (checked) try disk(frame, inset(mark, metrics.indicator_inset), accent);
             } else {
                 try fill(frame, mark, border);
-                try fill(frame, inset(mark, metrics.border), if (checked) accent else colors.inset);
-                if (kind == .toggle_switch) {
+                const mixed = kind == .checkbox and options.mixed and !checked;
+                try fill(frame, inset(mark, metrics.border), if (checked or mixed) accent else colors.inset);
+                if (mixed) {
+                    const inner = inset(mark, metrics.indicator_inset);
+                    const bar = @min(inner.height, 2 * metrics.border + 1);
+                    try fill(frame, .{ .x = inner.x, .y = inner.y + (inner.height - bar) / 2, .width = inner.width, .height = bar }, colors.on_accent);
+                } else if (kind == .toggle_switch) {
                     const inner = inset(mark, metrics.border + 1);
                     const thumb = @min(inner.width, inner.height);
                     try fill(frame, .{ .x = if (checked) inner.x + inner.width - thumb else inner.x, .y = inner.y, .width = thumb, .height = inner.height }, if (checked) colors.on_accent else border);
@@ -578,6 +594,13 @@ pub const RowOptions = struct {
     level: u16 = 0,
     /// A tree row's expansion; null for a leaf.
     expanded: ?bool = null,
+    /// Room after the expander and before the label for an icon the
+    /// caller draws, in DIP.
+    lead: f32 = 0,
+    /// Room at the end of the row for a count or badge the caller draws.
+    trail: f32 = 0,
+    /// A section heading: its label is drawn muted.
+    heading: bool = false,
 };
 pub const SortDirection = enum { ascending, descending };
 pub const TokenOptions = struct {
@@ -618,11 +641,12 @@ pub fn emitTreeItem(frame: anytype, id: u64, bounds: layout.Rect, label: []const
     _ = try rowRecord(frame, .tree_item, id, bounds, label, options);
     const style = frame.currentTheme();
     const colors = style.palette;
-    const foreground: u32 = if (!options.control.enabled) colors.disabled_text else if (options.selected) colors.on_accent else colors.text;
+    const foreground: u32 = if (!options.control.enabled or (options.heading and !options.selected)) colors.disabled_text else if (options.selected) colors.on_accent else colors.text;
     const mark = treeExpander(bounds, options.level, style.metrics.indicator_size);
     if (options.expanded) |open| if (mark.width > 0) try triangle(frame, inset(mark, mark.height / 4), open, foreground);
-    const label_x = @min(bounds.width, mark.x - bounds.x + mark.height + style.metrics.label_gap / 2);
-    try frame.context.command_buffer.text(absolute(frame, .{ .x = bounds.x + label_x, .y = bounds.y, .width = bounds.width - label_x, .height = bounds.height }), label, foreground);
+    const label_x = @min(bounds.width, mark.x - bounds.x + mark.height + style.metrics.label_gap / 2 + @max(0, options.lead));
+    const label_width = @max(0, bounds.width - label_x - @max(0, options.trail));
+    try frame.context.command_buffer.text(absolute(frame, .{ .x = bounds.x + label_x, .y = bounds.y, .width = label_width, .height = bounds.height }), label, foreground);
 }
 
 /// The background, hit target and semantics of a table row; its cells are

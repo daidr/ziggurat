@@ -67,13 +67,43 @@ test "blocks map to view nodes" {
     try expect(done.checked and !done.style.enabled);
     try expect(!(try h.find(.{ .kind = .checkbox, .name = "todo" })).checked);
 
-    // Emphasis keeps its run and takes a distinct color.
+    // Emphasis keeps its run in an italic font; body text uses the label font.
     const emphasis = try h.find(.{ .kind = .text, .text = "text" });
     const plain = try h.find(.{ .kind = .text, .text = "Some " });
-    try expect(emphasis.style.color.? != plain.style.color.?);
+    try expect(plain.style.font == null);
+    try expect(emphasis.style.font.?.italic and emphasis.style.font.?.weight == .regular);
+    try expect(std.meta.eql(view.Font.code, (try h.find(.{ .kind = .text, .text = "code" })).style.font.?));
+    try expect(std.meta.eql(view.Font.code, (try h.find(.{ .kind = .text, .text = "const a = 1;" })).style.font.?));
+    try expect(std.meta.eql(view.Font.heading1, (try h.find(.{ .kind = .text, .text = "Title" })).style.font.?));
+    try expect((try h.find(.{ .kind = .text, .text = "A" })).style.font.?.weight == .semibold);
 
     try h.click(.{ .kind = .link, .text = "link" });
     try equalStrings("https://example.com/a", doc.last.?.link);
+}
+
+test "inline styles combine with the block font" {
+    var doc: Doc = .{ .tree = try md.parse("## A **b *c*** `d`\n\n***e*** ~~f~~", parsed.buffers()) };
+    var h = harness(&doc);
+    try h.render();
+    const heading = (try h.find(.{ .kind = .text, .text = "A " })).style.font.?;
+    try expect(std.meta.eql(view.Font.heading2, heading));
+    const strong = (try h.find(.{ .kind = .text, .text = "b " })).style.font.?;
+    try expect(strong.size == heading.size and strong.weight == .bold and !strong.italic);
+    const both = (try h.find(.{ .kind = .text, .text = "c" })).style.font.?;
+    try expect(both.size == heading.size and both.weight == .bold and both.italic);
+    const code = (try h.find(.{ .kind = .text, .text = "d" })).style.font.?;
+    try expect(code.monospace and code.size < heading.size and code.weight == .bold);
+    const e = (try h.find(.{ .kind = .text, .text = "e" })).style.font.?;
+    try expect(e.size == view.Font.body.size and e.weight == .bold and e.italic);
+    try expect((try h.find(.{ .kind = .text, .text = "f" })).style.font == null);
+
+    // Larger fonts wrap sooner: heading 1 measures twice the body width.
+    doc.tree = try md.parse("# alpha beta\n\nalpha beta", parsed.buffers());
+    doc.options.width = 100;
+    try h.render();
+    _ = try h.find(.{ .kind = .text, .text = "alpha" });
+    _ = try h.find(.{ .kind = .text, .text = "beta" });
+    _ = try h.find(.{ .kind = .text, .text = "alpha beta" });
 }
 
 test "paragraphs wrap at the given width" {

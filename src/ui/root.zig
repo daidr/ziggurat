@@ -28,6 +28,37 @@ pub const GaussianFilterOptions = gaussian_scope.FilterOptions;
 const GaussianWorkspace = struct { allocator: std.mem.Allocator, options: GaussianWorkspaceOptions, storage: commands.FilterStorage = .{} };
 pub const backdrop_effects = commands.backdrop;
 pub const BackdropEffect = backdrop_effects.Effect;
+/// Color spaces and gamut mapping behind `Color.oklch` and `Color.displayP3`.
+pub const gamut = @import("gamut.zig");
+/// What fills a container in place of its background, under its border and
+/// children: a backdrop effect or a look the application or a package
+/// paints (`custom`).
+pub const Material = union(enum) {
+    blur: backdrop_effects.Blur,
+    glass: backdrop_effects.Glass,
+    scroll_edge: backdrop_effects.ScrollEdge,
+    custom: CustomMaterial,
+
+    /// The backdrop effect this material is, or null for a custom one.
+    pub fn backdrop(self: Material) ?BackdropEffect {
+        return switch (self) {
+            .blur => |value| .{ .blur = value },
+            .glass => |value| .{ .glass = value },
+            .scroll_edge => |value| .{ .scroll_edge = value },
+            .custom => null,
+        };
+    }
+};
+/// A material painted by code: `paint` draws over `box`, in the frame's
+/// DIPs and rounded by `radius`, with anything a Frame draws, such as
+/// gradients, backdrop effects and backdrop shaders. `context` must outlive
+/// every frame that paints the material.
+pub const CustomMaterial = struct {
+    context: ?*const anyopaque = null,
+    paint: *const fn (context: ?*const anyopaque, frame: *Frame, box: Rect, radius: f32) anyerror!void,
+    /// How an inspector or a test names the material.
+    name: []const u8 = "custom",
+};
 pub const loading = commands.loading;
 pub const BackdropEffectStats = struct {
     workspace: backdrop_effects.Stats = .{},
@@ -54,6 +85,7 @@ pub const ShaderEffectStats = struct {
 pub const EffectOptions = struct { opacity: u8 = 255 };
 pub const offscreen = @import("offscreen.zig");
 pub const canvas = @import("canvas.zig");
+pub const PixelImage = @import("pixel_image.zig").PixelImage;
 pub const frame_stats = @import("frame_stats.zig");
 pub const FrameStats = frame_stats.Stats;
 pub const Canvas = canvas.Canvas;
@@ -3549,6 +3581,16 @@ pub const Frame = struct {
             self.failure = self.failure orelse err;
         };
     }
+    /// Fill `bounds`, rounded by `radius`, with a material: a backdrop
+    /// effect as `backdropEffect` draws it, or a custom material's paint.
+    pub fn material(self: *Frame, bounds: Rect, radius: f32, value: Material) void {
+        switch (value) {
+            .custom => |custom| custom.paint(custom.context, self, bounds, radius) catch |err| {
+                self.failure = self.failure orelse err;
+            },
+            else => self.backdropEffect(bounds, radius, value.backdrop().?),
+        }
+    }
     /// Draw loading indicator `kind` fitted and centered in `bounds`, at the
     /// pose `phase` cycles into its animation; `loading.phase` derives it
     /// from elapsed time. Scheduling the next frame is the caller's.
@@ -3690,6 +3732,11 @@ pub const Frame = struct {
         const binding: input.pointer_clicks.kernel.Target = .{ .owner = &workspace.state, .installation = target.installation, .registration = target.registration, .serial = target.serial, .id = target.id };
         try widgets.emitClickButton(self, binding, bounds, text, options);
     }
+    /// Plain text that acts as a button, such as a label that becomes a
+    /// text field when activated; announced as a button named `text`.
+    pub fn labelButton(self: *Frame, id: u64, bounds: Rect, text: []const u8, options: widgets.Options) !void {
+        try widgets.emit(self, .label_button, id, bounds, text, false, 0, options);
+    }
     pub fn checkbox(self: *Frame, id: u64, bounds: Rect, text: []const u8, checked: bool, options: widgets.Options) !void {
         try widgets.emit(self, .checkbox, id, bounds, text, checked, 0, options);
     }
@@ -3775,6 +3822,43 @@ pub const Frame = struct {
         if (id == accessibility.root_id) return error.ReservedControlId;
         try self.addControl(id, bounds, .{ .enabled = false, .focusable = false });
         try self.semantic(.{ .id = id, .parent = parent, .role = .popup, .name = name, .bounds = bounds });
+    }
+    /// A dialog drawn inside the window over the rest of its content.
+    /// Like a popover it occludes the controls behind it; its own controls
+    /// follow it. `alert` reports an alert dialog, which asks for a
+    /// response before work continues. `description` is announced with
+    /// the name, such as the dialog's message.
+    pub fn dialog(self: *Frame, id: u64, bounds: Rect, name: []const u8, description: []const u8, alert: bool, parent: u64) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.addControl(id, bounds, .{ .enabled = false, .focusable = false });
+        try self.semantic(.{ .id = id, .parent = parent, .role = if (alert) .alert_dialog else .dialog, .name = name, .description = description, .bounds = bounds });
+    }
+    /// How many controls and semantic nodes this frame has added so far,
+    /// for `makeInert`.
+    pub const InertMark = struct { controls: usize, semantics: usize };
+    pub fn inertMark(self: *const Frame) InertMark {
+        return .{
+            .controls = self.context.input_state.checkpoint(),
+            .semantics = if (comptime @TypeOf(self.context.semantic_tree) != void) self.context.semantic_tree.len else 0,
+        };
+    }
+    /// Disables the controls and semantic nodes added between two marks,
+    /// such as the content behind a modal dialog. They keep occluding
+    /// pointer input but take no input or focus and are reported disabled.
+    pub fn makeInert(self: *Frame, from: InertMark, to: InertMark) void {
+        const state = &self.context.input_state;
+        const hits = if (state.building) state.pending[0..state.pending_len] else state.hits[0..state.len];
+        for (hits[@min(from.controls, hits.len)..@min(to.controls, hits.len)]) |*hit| hit.options.enabled = false;
+        if (comptime @TypeOf(self.context.semantic_tree) != void) {
+            const tree = &self.context.semantic_tree;
+            // The window root stays enabled.
+            const start = @max(@min(from.semantics, tree.len), 1);
+            const end = @min(to.semantics, tree.len);
+            if (start < end) for (tree.entries[start..end]) |*entry| {
+                entry.enabled = false;
+                entry.focused = false;
+            };
+        }
     }
     /// A button with a chevron along `direction`, such as Back or Forward.
     pub fn navButton(self: *Frame, id: u64, bounds: Rect, direction: widgets.NavDirection, name: []const u8, options: widgets.Options) !void {
@@ -4055,8 +4139,11 @@ fn nativeRect(bounds: affine.Rect) Rect {
 
 test {
     _ = gdi;
+    _ = gamut;
+    _ = geometry;
     _ = effects;
     _ = canvas;
+    _ = @import("pixel_image.zig");
     _ = frame_stats;
     _ = input;
     _ = layout;
@@ -4529,6 +4616,49 @@ test "trees, tables and token fields publish their roles and states" {
         try std.testing.expectEqualStrings("descending", text[nodes[6].value_start..][0..nodes[6].value_len]);
         try std.testing.expectEqual(@as(usize, 0), nodes[7].value_len);
         try std.testing.expectEqual(@as(?u64, 10), nodes[11].parent);
+    }
+}
+
+test "dialogs make earlier content inert and mixed checkboxes report their state" {
+    const Dummy = struct {
+        fn draw(_: *anyopaque, _: *Frame) void {}
+        fn action(_: *anyopaque, _: u64) void {}
+    };
+    var dummy: u8 = 0;
+    var context = Context.init(&dummy, Dummy.draw, Dummy.action);
+    if (build_options.accessibility) {
+        context.attached_semantics_enabled = true;
+        try context.semantic_tree.reset("Dialogs", .{ .x = 0, .y = 0, .width = 300, .height = 300 });
+    }
+    var frame: Frame = .{ .context = &context, .size = .{ .width = 300, .height = 300, .scale = 1 } };
+    const start = frame.inertMark();
+    try frame.button(1, .{ .x = 0, .y = 0, .width = 100, .height = 30 }, "Behind");
+    try frame.checkbox(2, .{ .x = 0, .y = 40, .width = 100, .height = 30 }, "All", false, .{ .mixed = true });
+    const behind = frame.inertMark();
+    try frame.dialog(3, .{ .x = 50, .y = 100, .width = 200, .height = 100 }, "Delete", "This cannot be undone.", true, accessibility.root_id);
+    try frame.buttonWithOptions(4, .{ .x = 60, .y = 150, .width = 80, .height = 30 }, "Cancel", .{ .semantic_parent = 3 });
+    frame.makeInert(start, behind);
+    // Content behind the dialog takes no press or focus.
+    context.input_state.down(.{ .x = 10, .y = 10 });
+    try std.testing.expectEqual(@as(?u64, null), context.input_state.active);
+    context.input_state.cancelPress();
+    // The dialog's background occludes, and its own controls still work.
+    context.input_state.down(.{ .x = 200, .y = 110 });
+    try std.testing.expectEqual(@as(?u64, null), context.input_state.active);
+    context.input_state.cancelPress();
+    context.input_state.down(.{ .x = 70, .y = 160 });
+    try std.testing.expectEqual(@as(?u64, 4), context.input_state.active);
+    context.input_state.cancelPress();
+    if (build_options.accessibility) {
+        const nodes = context.semantic_tree.entries[0..context.semantic_tree.len];
+        try std.testing.expect(nodes[0].enabled);
+        try std.testing.expect(!nodes[1].enabled and !nodes[2].enabled);
+        try std.testing.expect(nodes[2].mixed and !nodes[2].checked);
+        try std.testing.expectEqual(accessibility.Role.alert_dialog, nodes[3].role);
+        const text = context.semantic_tree.storage[0..];
+        try std.testing.expectEqualStrings("This cannot be undone.", text[nodes[3].description_start..][0..nodes[3].description_len]);
+        try std.testing.expect(nodes[4].enabled);
+        try std.testing.expectEqual(@as(?u64, 3), nodes[4].parent);
     }
 }
 
@@ -5628,4 +5758,36 @@ test "Gaussian and nested raster scopes restore visual flags without expanding S
     try std.testing.expectEqual(@as(u8, 0), frame.group_geometry_passthrough);
     try frame.popClip();
     try context.command_buffer.finish();
+}
+
+test "a custom material paints itself and a backdrop material draws its effect" {
+    const Dummy = struct {
+        fn draw(_: *anyopaque, _: *Frame) void {}
+        fn action(_: *anyopaque, _: u64) void {}
+    };
+    const Stripes = struct {
+        color: Color,
+        fn paint(context: ?*const anyopaque, frame: *Frame, box: Rect, radius: f32) anyerror!void {
+            const self: *const @This() = @ptrCast(@alignCast(context.?));
+            frame.roundedRect(box, radius, self.color);
+            frame.roundedRect(.{ .x = box.x, .y = box.y, .width = box.width, .height = box.height / 2 }, 0, self.color.withAlpha(0.5));
+        }
+        fn fail(_: ?*const anyopaque, _: *Frame, _: Rect, _: f32) anyerror!void {
+            return error.MaterialFailed;
+        }
+    };
+    var dummy: u8 = 0;
+    var context = Context.init(&dummy, Dummy.draw, Dummy.action);
+    defer context.command_buffer.reset();
+    var frame: Frame = .{ .context = &context, .size = .{ .width = 100, .height = 100, .scale = 1 } };
+    const stripes: Stripes = .{ .color = Color.oklch(0.7, 0.15, 250) };
+    frame.material(.{ .x = 0, .y = 0, .width = 40, .height = 20 }, 4, .{ .custom = .{ .context = &stripes, .paint = Stripes.paint } });
+    try std.testing.expectEqual(@as(usize, 2), context.command_buffer.len);
+    try std.testing.expect(frame.failure == null);
+    // Without a backdrop workspace a backdrop material draws its fallback fill.
+    frame.material(.{ .x = 0, .y = 0, .width = 40, .height = 20 }, 4, .{ .glass = .{} });
+    try std.testing.expect(context.command_buffer.len > 2);
+    try std.testing.expect((Material{ .glass = .{} }).backdrop() != null);
+    frame.material(.{ .x = 0, .y = 0, .width = 40, .height = 20 }, 4, .{ .custom = .{ .paint = Stripes.fail } });
+    try std.testing.expectEqual(@as(?anyerror, error.MaterialFailed), frame.failure);
 }

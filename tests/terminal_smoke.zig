@@ -148,6 +148,7 @@ fn run(allocator: std.mem.Allocator) !void {
     var terminal = try term.Terminal.init(allocator, .{});
     defer terminal.deinit();
     var tv = terminal_view.TerminalView.init(&host, allocator, &terminal, .{});
+    defer tv.deinit();
     tv.bind();
     state.terminal = &tv;
 
@@ -164,6 +165,28 @@ fn run(allocator: std.mem.Allocator) !void {
     try std.testing.expect(grid.cols > 40 and grid.rows > 10);
     // An unchanged terminal paints without posting.
     try paint(&host, window);
+    try paint(&host, window);
+    try std.testing.expect(!tv.queued);
+
+    // An image a program places (Kitty graphics) uploads after the frame
+    // that meets it, and goes once deleted.
+    tv.feed("\x1b_Ga=T,f=24,s=2,v=2,i=5,c=2,r=1,q=2;/wAAAP8AAAD/////\x1b\\");
+    try paint(&host, window);
+    try std.testing.expect(tv.queued);
+    try app.dispatch();
+    if (tv.last_error) |err| return err;
+    try std.testing.expectEqual(@as(usize, 1), tv.uploads.items.len);
+    try std.testing.expect(tv.uploads.items[0].identity != 0);
+    try paint(&host, window);
+    try std.testing.expect(!tv.queued);
+    // The frame drew it.
+    try std.testing.expect(tv.uploads.items[0].seen);
+    if (tv.last_error) |err| return err;
+    tv.feed("\x1b_Ga=d,d=I,i=5,q=2\x1b\\\x1b[H");
+    try paint(&host, window);
+    try app.dispatch();
+    try std.testing.expectEqual(@as(usize, 0), tv.uploads.items.len);
+    try std.testing.expectEqual(@as(usize, 0), tv.retired.items.len);
     try paint(&host, window);
     try std.testing.expect(!tv.queued);
 
@@ -243,5 +266,5 @@ pub fn main() !void {
     defer std.debug.assert(gpa.deinit() == .ok);
     try run(gpa.allocator());
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("terminal native: grid sizing, shell echo through the text path, resize report, selection and exit passed\n", .{});
+    std.debug.print("terminal native: grid sizing, images, shell echo through the text path, resize report, selection and exit passed\n", .{});
 }

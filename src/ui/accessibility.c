@@ -31,7 +31,11 @@
 #define MULTIPLE 128
 #define EXPANDABLE 256
 #define EXPANDED 512
-enum { ROLE_WINDOW, ROLE_GROUP, ROLE_BUTTON, ROLE_TEXT, ROLE_TEXT_BOX, ROLE_CHECKBOX, ROLE_RADIO, ROLE_SWITCH, ROLE_PROGRESS, ROLE_RADIO_GROUP, ROLE_SLIDER, ROLE_STEPPER, ROLE_LIST, ROLE_TAB_LIST, ROLE_TAB, ROLE_TOOLBAR, ROLE_SPLITTER, ROLE_LINK, ROLE_DISCLOSURE, ROLE_METER, ROLE_NAVIGATION, ROLE_LIST_BOX, ROLE_LIST_ITEM, ROLE_COMBO_BOX, ROLE_TOOLTIP, ROLE_STATUS, ROLE_SEARCH, ROLE_IMAGE, ROLE_TREE, ROLE_TREE_ITEM, ROLE_TABLE, ROLE_TABLE_HEADER, ROLE_COLUMN_HEADER, ROLE_TABLE_ROW, ROLE_TOKEN_FIELD, ROLE_TOKEN, ROLE_POPUP, ROLE_CALENDAR, ROLE_COLOR_WELL };
+/* A checkbox that is partly checked reports the indeterminate toggle state. */
+#define MIXED 1024
+/* A text box holding a password exposes no text pattern. */
+#define PASSWORD 2048
+enum { ROLE_WINDOW, ROLE_GROUP, ROLE_BUTTON, ROLE_TEXT, ROLE_TEXT_BOX, ROLE_CHECKBOX, ROLE_RADIO, ROLE_SWITCH, ROLE_PROGRESS, ROLE_RADIO_GROUP, ROLE_SLIDER, ROLE_STEPPER, ROLE_LIST, ROLE_TAB_LIST, ROLE_TAB, ROLE_TOOLBAR, ROLE_SPLITTER, ROLE_LINK, ROLE_DISCLOSURE, ROLE_METER, ROLE_NAVIGATION, ROLE_LIST_BOX, ROLE_LIST_ITEM, ROLE_COMBO_BOX, ROLE_TOOLTIP, ROLE_STATUS, ROLE_SEARCH, ROLE_IMAGE, ROLE_TREE, ROLE_TREE_ITEM, ROLE_TABLE, ROLE_TABLE_HEADER, ROLE_COLUMN_HEADER, ROLE_TABLE_ROW, ROLE_TOKEN_FIELD, ROLE_TOKEN, ROLE_POPUP, ROLE_CALENDAR, ROLE_COLOR_WELL, ROLE_DIALOG, ROLE_ALERT_DIALOG };
 enum { PATTERN_INVOKE = 1, PATTERN_VALUE = 2, PATTERN_TEXT = 4, PATTERN_TOGGLE = 8, PATTERN_SELECTION_ITEM = 16, PATTERN_SELECTION = 32, PATTERN_RANGE_VALUE = 64, PATTERN_COLLECTION = 128, PATTERN_EXPAND_COLLAPSE = 256 };
 
 typedef struct Node {
@@ -442,7 +446,7 @@ static HRESULT STDMETHODCALLTYPE simple_pattern(IRawElementProviderSimple *iface
     if (id == UIA_InvokePatternId && invoke_role(n.role)) *out = (IUnknown *)&p->invoke;
     if (id == UIA_ExpandCollapsePatternId && (expander_role(n.role) || n.role == ROLE_TREE_ITEM)) *out = (IUnknown *)&p->expand_collapse;
     if (id == UIA_ValuePatternId && (n.role == ROLE_TEXT_BOX || n.role == ROLE_COMBO_BOX)) *out = (IUnknown *)&p->value;
-    if (id == UIA_TextPatternId && n.role == ROLE_TEXT_BOX) *out = (IUnknown *)&p->text;
+    if (id == UIA_TextPatternId && n.role == ROLE_TEXT_BOX && !(n.flags & PASSWORD)) *out = (IUnknown *)&p->text;
     if (id == UIA_TogglePatternId && toggle_role(n.role)) *out = (IUnknown *)&p->toggle;
     if (id == UIA_SelectionItemPatternId && item_role(n.role)) *out = (IUnknown *)&p->selection_item;
     if (id == UIA_SelectionPatternId && chooser_role(n.role)) *out = (IUnknown *)&p->selection;
@@ -509,6 +513,8 @@ static int control_type(uint32_t role) {
         case ROLE_POPUP: return UIA_PaneControlTypeId;
         case ROLE_CALENDAR: return UIA_CalendarControlTypeId;
         case ROLE_COLOR_WELL: return UIA_ButtonControlTypeId;
+        /* A dialog drawn inside the window is a pane that reports IsDialog. */
+        case ROLE_DIALOG: case ROLE_ALERT_DIALOG: return UIA_PaneControlTypeId;
         default: return UIA_EditControlTypeId;
     }
 }
@@ -539,9 +545,9 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
         case UIA_ControlTypePropertyId: out->vt = VT_I4; out->lVal = control_type(n->role); break;
         case UIA_LocalizedControlTypePropertyId:
             /* A meter shares the progress bar control type but is not progress. */
-            if (n->role == ROLE_METER || n->role == ROLE_STATUS || n->role == ROLE_TOKEN_FIELD || n->role == ROLE_TOKEN || n->role == ROLE_POPUP || n->role == ROLE_COLOR_WELL) {
+            if (n->role == ROLE_METER || n->role == ROLE_STATUS || n->role == ROLE_TOKEN_FIELD || n->role == ROLE_TOKEN || n->role == ROLE_POPUP || n->role == ROLE_COLOR_WELL || n->role == ROLE_DIALOG || n->role == ROLE_ALERT_DIALOG) {
                 out->vt = VT_BSTR;
-                out->bstrVal = SysAllocString(n->role == ROLE_METER ? L"meter" : n->role == ROLE_STATUS ? L"status" : n->role == ROLE_TOKEN ? L"token" : n->role == ROLE_POPUP ? L"popup" : n->role == ROLE_COLOR_WELL ? L"color well" : L"token field");
+                out->bstrVal = SysAllocString(n->role == ROLE_METER ? L"meter" : n->role == ROLE_STATUS ? L"status" : n->role == ROLE_TOKEN ? L"token" : n->role == ROLE_POPUP ? L"popup" : n->role == ROLE_COLOR_WELL ? L"color well" : n->role == ROLE_DIALOG ? L"dialog" : n->role == ROLE_ALERT_DIALOG ? L"alert dialog" : L"token field");
                 if (!out->bstrVal) hr = E_OUTOFMEMORY;
             }
             break;
@@ -555,6 +561,7 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
             break;
         /* A status message is announced politely when it appears. */
         case UIA_LiveSettingPropertyId: if (n->role == ROLE_STATUS) { out->vt = VT_I4; out->lVal = Polite; } break;
+        case UIA_IsDialogPropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_DIALOG || n->role == ROLE_ALERT_DIALOG ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsEnabledPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & ENABLED) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_HasKeyboardFocusPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & FOCUSED) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsKeyboardFocusablePropertyId: out->vt = VT_BOOL; out->boolVal = focusable(n->role) && (n->flags & ENABLED) && n->width > 0 && n->height > 0 ? VARIANT_TRUE : VARIANT_FALSE; break;
@@ -564,10 +571,11 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
         case UIA_IsExpandCollapsePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = expander_role(n->role) || n->role == ROLE_TREE_ITEM ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_ExpandCollapseExpandCollapseStatePropertyId: out->vt = VT_I4; out->lVal = expand_state(n); break;
         case UIA_IsValuePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_TEXT_BOX || n->role == ROLE_COMBO_BOX || n->role == ROLE_COLOR_WELL ? VARIANT_TRUE : VARIANT_FALSE; break;
-        case UIA_IsTextPatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_TEXT_BOX ? VARIANT_TRUE : VARIANT_FALSE; break;
+        case UIA_IsTextPatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_TEXT_BOX && !(n->flags & PASSWORD) ? VARIANT_TRUE : VARIANT_FALSE; break;
+        case UIA_IsPasswordPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & PASSWORD) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_ValueIsReadOnlyPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & READ_ONLY) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsTogglePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = toggle_role(n->role) ? VARIANT_TRUE : VARIANT_FALSE; break;
-        case UIA_ToggleToggleStatePropertyId: out->vt = VT_I4; out->lVal = (n->flags & CHECKED) ? ToggleState_On : ToggleState_Off; break;
+        case UIA_ToggleToggleStatePropertyId: out->vt = VT_I4; out->lVal = (n->flags & MIXED) ? ToggleState_Indeterminate : (n->flags & CHECKED) ? ToggleState_On : ToggleState_Off; break;
         case UIA_IsSelectionItemPatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = item_role(n->role) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_SelectionItemIsSelectedPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & CHECKED) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsSelectionPatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = chooser_role(n->role) || n->role == ROLE_LIST ? VARIANT_TRUE : VARIANT_FALSE; break;
@@ -746,7 +754,7 @@ static HRESULT STDMETHODCALLTYPE toggle_call(IToggleProvider *iface) {
 static HRESULT STDMETHODCALLTYPE toggle_state(IToggleProvider *iface, enum ToggleState *out) {
     if (!out) return E_POINTER; Provider *p = toggle_self(iface); Node n;
     HRESULT hr = read_provider_node(p, &n);
-    if (SUCCEEDED(hr)) *out = (n.flags & CHECKED) ? ToggleState_On : ToggleState_Off; return hr;
+    if (SUCCEEDED(hr)) *out = (n.flags & MIXED) ? ToggleState_Indeterminate : (n.flags & CHECKED) ? ToggleState_On : ToggleState_Off; return hr;
 }
 /* A disclosure's or combo box's checked flag is its expanded state; one
    activation flips it. */

@@ -44,6 +44,7 @@ pub const signals = @import("signals.zig");
 pub const secrets = @import("secrets.zig");
 pub const flyout = @import("flyout.zig");
 pub const Flyout = flyout.Flyout;
+pub const TrayIcon = @import("tray_icon.zig").TrayIcon;
 pub const capabilities = .{
     .native_menu = windows or linux,
     .menu_accelerators = windows or linux,
@@ -74,4 +75,5 @@ test {
     _ = instance;
     _ = integration;
     _ = power;
+    _ = @import("tray_icon.zig");
 }

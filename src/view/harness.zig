@@ -41,7 +41,7 @@ pub const Query = struct {
     }
 };
 
-pub const Error = error{ NotFound, Ambiguous, Disabled, Hidden, NotActivatable, NotAdjustable, NotScrollable, Stale };
+pub const Error = error{ NotFound, Ambiguous, Disabled, Hidden, Inert, NotActivatable, NotAdjustable, NotScrollable, Stale };
 
 pub const Config = struct {
     bounds: Rect = .{ .x = 0, .y = 0, .width = 640, .height = 480 },
@@ -67,6 +67,8 @@ pub const Harness = struct {
     pub fn init(state: anytype, comptime build: fn (@TypeOf(state), *View) anyerror!void, buffers: view.Buffers, config: Config) Harness {
         var built = View.init(buffers);
         built.tooltip_delay = config.options.tooltip_delay;
+        built.layout_direction = config.options.direction;
+        built.icons = config.options.icons;
         return .{ .view = built, .build = view.Build.bind(state, build), .config = config };
     }
 
@@ -104,6 +106,9 @@ pub const Harness = struct {
             self.view.focus_request = null;
             for (self.view.nodes()) |*node| if (node.id == id) self.setFocus(id);
         }
+        // Focus a render pass asked for once the frame registered it, as
+        // Host does after paint.
+        self.restoreFocus();
         self.frames += 1;
     }
 
@@ -278,6 +283,23 @@ pub const Harness = struct {
         return .{ .key = code, .shift = input.modifiers.shift, .control = input.modifiers.control };
     }
 
+    /// Press a mouse's back or forward button as Host routes it: to the
+    /// history keys that routers bind. Returns whether one took it.
+    pub fn mouseButton(self: *Harness, button: z.PointerButton) anyerror!bool {
+        if (button != .back and button != .forward) return error.NotActivatable;
+        self.view.focus = self.focusId();
+        return switch (self.view.routeKey(.{ .key = if (button == .back) .browser_back else .browser_forward })) {
+            .deliver => |event| self.deliverKey(event),
+            else => false,
+        };
+    }
+    /// Lay out in `value` from now on, as `Host.setDirection`, and render.
+    pub fn setDirection(self: *Harness, value: view.Direction) anyerror!void {
+        self.config.options.direction = value;
+        self.view.layout_direction = value;
+        try self.render();
+    }
+
     pub fn resize(self: *Harness, bounds: Rect) anyerror!void {
         self.config.bounds = bounds;
         try self.render();
@@ -323,7 +345,7 @@ pub const Harness = struct {
             while (index > 0) {
                 index -= 1;
                 const node = &all[index];
-                if (!interactive(node.kind) or self.floating(node) != over) continue;
+                if (!interactive(node.kind) or self.floating(node) != over or self.view.inert(node)) continue;
                 const rect = self.visible(node) orelse continue;
                 if (contains(rect, x, y)) return node;
             }
@@ -380,8 +402,12 @@ pub const Harness = struct {
     /// the point is activated. Renders.
     pub fn clickAt(self: *Harness, x: f32, y: f32) anyerror!void {
         switch (self.view.pointerDown(.{ .x = x, .y = y })) {
-            .consumed => return self.render(),
-            .changed, .ignored => {},
+            .consumed => {
+                self.restoreFocus();
+                return self.render();
+            },
+            .changed => self.restoreFocus(),
+            .ignored => {},
         }
         // An embedded leaf that consumes the press takes focus when it is
         // focusable, and sees the release.
@@ -412,8 +438,12 @@ pub const Harness = struct {
     pub fn press(self: *Harness, x: f32, y: f32, modifiers: z.KeyModifiers) anyerror!void {
         self.pressed = null;
         switch (self.view.pointerDown(.{ .x = x, .y = y })) {
-            .consumed => return self.render(),
-            .changed, .ignored => {},
+            .consumed => {
+                self.restoreFocus();
+                return self.render();
+            },
+            .changed => self.restoreFocus(),
+            .ignored => {},
         }
         const result = self.view.pointerPress(.{ .x = x, .y = y }, modifiers, self.clock, self.adjusting(x, y));
         if (result.consumed) return self.apply(result);
@@ -546,7 +576,7 @@ pub const Harness = struct {
 
     fn activate(self: *Harness, node: *const Node) anyerror!void {
         switch (node.kind) {
-            .button, .link, .nav_button, .combo_box, .popup_button, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .column_header, .token, .combo_toggle => {},
+            .button, .link, .nav_button, .combo_box, .popup_button, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .column_header, .token, .combo_toggle, .editable_text => {},
             else => return error.NotActivatable,
         }
         try self.check(node);
@@ -558,6 +588,8 @@ pub const Harness = struct {
     fn check(self: *const Harness, node: *const Node) Error!void {
         if (!node.style.enabled) return error.Disabled;
         if (self.visible(node) == null) return error.Hidden;
+        // Behind a shown dialog nothing takes input.
+        if (self.view.inert(node)) return error.Inert;
     }
 
     /// Deliver `event` as a window would, then render: for controls that
@@ -590,18 +622,22 @@ pub const Harness = struct {
             if (node.text.len > 0) try writer.print(" \"{s}\"", .{node.text});
             if (node.style.name.len > 0) try writer.print(" name=\"{s}\"", .{node.style.name});
             switch (node.kind) {
-                .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure => try writer.writeAll(if (node.checked) " on" else " off"),
-                .combo_box, .popup, .combo_field => try writer.writeAll(if (node.checked) " open" else " closed"),
+                .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure => try writer.writeAll(if (node.checked) " on" else if (node.mixed) " mixed" else " off"),
+                .combo_box, .popup, .combo_field, .dialog => try writer.writeAll(if (node.checked) " open" else " closed"),
                 .tree_row, .table_row => {
                     if (node.kind == .tree_row) try writer.print(" level={d}", .{node.level});
                     if (node.expanded) |open| try writer.writeAll(if (open) " expanded" else " collapsed");
                     if (node.checked) try writer.writeAll(" selected");
                     if (node.cursor) try writer.writeAll(" cursor");
+                    if (node.heading) try writer.writeAll(" heading");
+                    if (node.badge.len > 0) try writer.print(" badge=\"{s}\"", .{node.badge});
                 },
                 .column_header => if (node.sort) |direction| try writer.print(" {s}", .{@tagName(direction)}),
                 .progress => try writer.print(" {d:.2}", .{node.fraction}),
                 .slider, .stepper, .rating, .meter, .split => try writer.print(" {d}", .{node.value}),
                 .scroll => if (node.scroll) |model| try writer.print(" offset={d}", .{round(model.offset.y)}),
+                .icon => if (node.graphic.?.mirrored) try writer.writeAll(" mirrored"),
+                .image, .svg => try writer.print(" {s}", .{@tagName(node.graphic.?.fit)}),
                 else => {},
             }
             if (node.highlighted) try writer.writeAll(" highlighted");
@@ -621,7 +657,7 @@ pub const Harness = struct {
 
 fn interactive(kind: Kind) bool {
     return switch (kind) {
-        .button, .link, .nav_button, .combo_box, .popup_button, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .slider, .stepper, .rating, .tree_row, .table_row, .column_header, .token, .combo_toggle => true,
+        .button, .link, .nav_button, .combo_box, .popup_button, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .slider, .stepper, .rating, .tree_row, .table_row, .column_header, .token, .combo_toggle, .editable_text => true,
         else => false,
     };
 }

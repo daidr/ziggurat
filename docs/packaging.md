@@ -2,7 +2,7 @@
 
 `build_support/packaging.zig` 的 `addWindowsResources` 把显式 Metadata 与 ICO 转成清单、VERSIONINFO 和图标资源，由 Zig 自带资源编译器参与构建。每个可执行文件有独立的生成目录，构建结果依赖实际输入文件。
 
-应用提供 assembly identity、显示名称、四段版本和 ICO。可选描述、公司名称与版权不填虚构值。清单使用 `asInvoker`、PerMonitorV2、长路径支持和 Windows 10 兼容声明；版本资源与清单使用同一个版本来源。XML 和 RC 分别校验与转义，RC 引号采用双写语法。资源 ID 为图标 `101`、清单 `1`、版本 `1`。
+应用提供 assembly identity、显示名称、四段版本和 ICO（或由 PNG 在构建时生成的 ICO，见 [ziggurat 命令](cli.md#图标)）。`Metadata.language` 是名称与描述所用语言的 BCP 47 标签（默认 `en-US`），`translations` 给出其他语言的名称与描述：版本资源为每种语言写一张以“语言 ID + 代码页 1200”为键的字符串表（如 `080404B0`），`Translation` 列出全部语言，Windows 文件属性按系统语言显示，没有时显示应用自己的语言。语言 ID 依次按“语言-地区”“语言-文字”“语言”查表，不带文字的中文按地区区分简繁；Windows 没有 ID 的语言与重复的 ID 被跳过并在构建时警告。清单声明 UTF-8 活动代码页。可选描述、公司名称与版权不填虚构值。清单使用 `asInvoker`、PerMonitorV2、长路径支持和 Windows 10 兼容声明；版本资源与清单使用同一个版本来源。XML 和 RC 分别校验与转义，RC 引号采用双写语法。资源 ID 为图标 `101`、清单 `1`、版本 `1`。
 
 默认图标含九种尺寸，PNG RGBA 图像共 4,181 字节。`assets/generate-icon.ps1` 从确定的几何生成图像；正式构建直接消费已保存 ICO。应用可以替换 ICO，无需修改原生窗口实现。
 
@@ -19,7 +19,7 @@ pwsh -NoProfile -File scripts/package.ps1 -Name MyTool `
 
 通用脚本继续要求 `-LicensePath`，下游应用应传入自己的许可文件；框架的 MIT 选择不会替应用选择许可证。包内文件名为 `LICENSE.txt`，正文保留输入文件的完整字节。隔离测试仍可传入标明用途的 fixture；CI 中本仓库的打包与签名检查使用正式 LICENSE。打包的确定性指同一组输入在同一工具环境重复产生相同归档，不保证不同编译器或压缩库版本的二进制一致。
 
-`zig build smoke-packaging` 检查实际 EXE 的清单、Unicode/引号/反斜杠版本文本、九尺寸图标，以及 1000 次图标重载后的 USER/GDI 计数。`tests/packaging.ps1` 检查 ZIP 排序、文件清单与哈希、许可依赖和版本不一致拒绝路径。
+`zig build smoke-packaging` 检查实际 EXE 的清单（含 UTF-8 代码页）、Unicode/引号/反斜杠版本文本、第二种语言的字符串表、由 `assets/application.png` 在构建时生成的七尺寸图标，以及 1000 次图标重载后的 USER/GDI 计数。`tests/packaging.ps1` 检查 ZIP 排序、文件清单与哈希、许可依赖和版本不一致拒绝路径。
 
 ## Authenticode 签名
 

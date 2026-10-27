@@ -19,6 +19,11 @@ struct CaptureOp {
     uint64_t token;
     size_t capacity,used;
     gboolean cancelled,overflow;
+    /* PDF: the print operation, its failure, and the backgrounds setting it
+     * replaced for its run. */
+    WebKitPrintOperation *print;
+    GError *failure;
+    gboolean backgrounds;
 };
 /* Whole-data clear shares this physical owner: same pending quota, Zig owner
  * revocation and GTask-lifetime pinning, with no PNG capacity. */
@@ -170,6 +175,86 @@ int zwk_clear_start(ZwkState *s,uint64_t token) {
     atomic_fetch_add_explicit(&capture_operations,1,memory_order_relaxed);capture_account(sizeof(*op));retain(s);
     retain(s);
     webkit_website_data_manager_clear(manager,WEBKIT_WEBSITE_DATA_ALL,0,op->cancel,clear_finished,op);
+    release(s);return ZWK_OK;
+}
+static const unsigned char pdf_empty=0;
+static gboolean pdf_release(gpointer print) {
+    g_object_unref(print);return G_SOURCE_REMOVE;
+}
+static void pdf_failed(WebKitPrintOperation *print,GError *error,gpointer data) {
+    CaptureOp *op=data;(void)print;
+    if (!op->failure) op->failure=g_error_copy(error);
+}
+static void pdf_finished(WebKitPrintOperation *print,gpointer data) {
+    CaptureOp *op=data;ZwkState *s=op->state;ZwkCaptureBudget *b=s->capture;
+    g_assert(s->thread==g_thread_self());
+    g_signal_handlers_disconnect_by_data(print,op);
+    WebKitSettings *settings=live(s)?webkit_web_view_get_settings(WEBKIT_WEB_VIEW(s->view)):NULL;
+    if (settings) webkit_settings_set_print_backgrounds(settings,op->backgrounds);
+    /* The file is complete, so the Op ends before the notification and the
+     * caller may start another PDF from it. */
+    const uint64_t token=op->token;const gboolean cancelled=op->cancelled;GError *error=op->failure;
+    retain(s);capture_budget_ref(b);capture_finalized(op);
+    if (!cancelled && !b->closed && live(s) && b->notify) {
+        const ZwkFailure failure=error?(ZwkFailure){error->domain,error->code}:(ZwkFailure){0};
+        b->notify(s->owner,token,error?ZWK_CAPTURE_NATIVE:ZWK_CAPTURE_OK,&pdf_empty,0,error?&failure:NULL);
+    }
+    if (error) g_error_free(error);
+    zwk_capture_budget_release(b);release(s);
+    /* The operation is still emitting; drop it afterwards. */
+    g_idle_add_full(G_PRIORITY_DEFAULT,pdf_release,print,NULL);
+}
+/* Prints through GTK's file printer, which writes the PDF itself. One PDF runs
+ * at a time per WebView, since it changes the shared backgrounds setting. */
+int zwk_pdf_start(ZwkState *s,uint64_t token,const char *path,const ZwkPdfRequest *request) {
+    if (!s || s->thread!=g_thread_self() || !token || !path || !g_path_is_absolute(path) || !request || !request->first_page) return ZWK_INVALID;
+    if (request->last_page && request->last_page<request->first_page) return ZWK_INVALID;
+    if (!live(s)) return ZWK_CLOSED;
+    ZwkCaptureBudget *b=s->capture;
+    if (!b || b->closed) return ZWK_CLOSED;
+    if (!document(s)) return ZWK_NOT_READY;
+    if (b->pending>=b->limit || atomic_load_explicit(&capture_operations,memory_order_relaxed)>=CAPTURE_PENDING) return ZWK_FULL;
+    for (CaptureOp *at=b->ops;at;at=at->next) {
+        if (at->token==token) return ZWK_INVALID;
+        if (at->state==s && at->print) return ZWK_FULL;
+    }
+    WebKitSettings *settings=webkit_web_view_get_settings(WEBKIT_WEB_VIEW(s->view));
+    if (!settings) return ZWK_NATIVE_FAILED;
+    char *uri=g_filename_to_uri(path,NULL,NULL);if (!uri) return ZWK_INVALID;
+    GtkPrintSettings *print_settings=gtk_print_settings_new();
+    gtk_print_settings_set_printer(print_settings,"Print to File");
+    gtk_print_settings_set(print_settings,GTK_PRINT_SETTINGS_OUTPUT_FILE_FORMAT,"pdf");
+    gtk_print_settings_set(print_settings,GTK_PRINT_SETTINGS_OUTPUT_URI,uri);g_free(uri);
+    if (request->first_page>1 || request->last_page) {
+        GtkPageRange range={(gint)request->first_page-1,request->last_page?(gint)request->last_page-1:G_MAXINT/2};
+        gtk_print_settings_set_print_pages(print_settings,GTK_PRINT_PAGES_RANGES);
+        gtk_print_settings_set_page_ranges(print_settings,&range,1);
+    }
+    GtkPaperSize *paper=gtk_paper_size_new_custom("ziggurat","Custom",request->page[0],request->page[1],GTK_UNIT_INCH);
+    GtkPageSetup *setup=gtk_page_setup_new();
+    gtk_page_setup_set_paper_size(setup,paper);
+    gtk_print_settings_set_paper_size(print_settings,paper);gtk_paper_size_free(paper);
+    const GtkPageOrientation orientation=(request->flags&1)?GTK_PAGE_ORIENTATION_LANDSCAPE:GTK_PAGE_ORIENTATION_PORTRAIT;
+    gtk_page_setup_set_orientation(setup,orientation);gtk_print_settings_set_orientation(print_settings,orientation);
+    gtk_page_setup_set_top_margin(setup,request->page[2],GTK_UNIT_INCH);
+    gtk_page_setup_set_right_margin(setup,request->page[3],GTK_UNIT_INCH);
+    gtk_page_setup_set_bottom_margin(setup,request->page[4],GTK_UNIT_INCH);
+    gtk_page_setup_set_left_margin(setup,request->page[5],GTK_UNIT_INCH);
+    CaptureOp *op=malloc(sizeof(CaptureOp));
+    if (!op) { g_object_unref(setup);g_object_unref(print_settings);return ZWK_OOM; }
+    memset(op,0,sizeof(*op));op->state=s;op->token=token;op->cancel=g_cancellable_new();
+    op->print=webkit_print_operation_new(WEBKIT_WEB_VIEW(s->view));
+    webkit_print_operation_set_print_settings(op->print,print_settings);
+    webkit_print_operation_set_page_setup(op->print,setup);
+    g_object_unref(setup);g_object_unref(print_settings);
+    g_signal_connect(op->print,"failed",G_CALLBACK(pdf_failed),op);
+    g_signal_connect(op->print,"finished",G_CALLBACK(pdf_finished),op);
+    op->backgrounds=webkit_settings_get_print_backgrounds(settings);
+    webkit_settings_set_print_backgrounds(settings,(request->flags&2)!=0);
+    op->next=b->ops;b->ops=op;++b->pending;b->bytes+=sizeof(*op);if (b->bytes>b->peak) b->peak=b->bytes;
+    atomic_fetch_add_explicit(&capture_operations,1,memory_order_relaxed);capture_account(sizeof(*op));retain(s);
+    retain(s);
+    webkit_print_operation_print(op->print);
     release(s);return ZWK_OK;
 }
 void zwk_capture_counts(uint32_t *budgets,uint32_t *operations,size_t *bytes,size_t *peak) {
