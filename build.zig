@@ -688,6 +688,11 @@ pub fn build(b: *std.Build) void {
         core.linkSystemLibrary("dwmapi", .{});
         core.link_libc = true;
     }
+    if (target.result.os.tag == .macos) {
+        _ = native_support.add(b, core, "core-native", "src/platform/macos.m", &.{ "-fno-objc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native_support.linkFrameworks(b, core, &.{ "AppKit", "Foundation", "CoreFoundation", "CoreGraphics" });
+        core.linkSystemLibrary("objc", .{ .use_pkg_config = .no });
+    }
     if (target.result.os.tag == .linux) {
         const native = native_support.add(b, core, "core-native", "src/platform/linux.c", &.{"-std=c11"}, target, optimize);
         native.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
@@ -1410,6 +1415,18 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .macos) {
         _ = native_support.add(b, ui, "ui-core-graphics-native", "src/ui/macos.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         native_support.linkFrameworks(b, ui, &.{ "CoreFoundation", "CoreGraphics", "CoreText" });
+        _ = addExample(b, "counter", "examples/counter.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        _ = addExample(b, "view-counter", "examples/view_counter.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_view", .module = declarative_view },
+        });
+        addSmoke(b, "smoke-macos", "tests/macos_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
     }
     if (target.result.os.tag == .linux) {
         const native = native_support.add(b, ui, "ui-cairo-native", "src/ui/linux.c", &.{"-std=c11"}, target, optimize);

@@ -254,6 +254,11 @@ jobs:
           ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}/zig-local-cache
         run: |
           zig build test check -Doptimize=${{ matrix.optimize }} --summary failures
+      - name: AppKit window smoke
+        env:
+          ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}/zig-local-cache
+        run: |
+          zig build smoke-macos -Doptimize=${{ matrix.optimize }} --summary failures
 
   webview:
     if: github.event_name == 'workflow_dispatch' && inputs.webview

@@ -29,6 +29,8 @@ pub fn appleSdk(b: *std.Build, module: *std.Build.Module) void {
     const sysroot = b.sysroot orelse return;
     module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "System/Library/Frameworks" }) });
     module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr/include" }) });
+    // The linker prefixes library paths with the sysroot itself.
+    module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
 }
 
 /// Links Apple frameworks on a module, with the cross-compilation SDK paths.
