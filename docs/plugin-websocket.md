@@ -15,7 +15,7 @@ try host.use(plugin.plugin());
 
 - `init` 启动 `connections` 个 worker（默认 8，最多 `max_connections` = 16），`deinit` 取消全部连接并 join。每个打开的连接占用一个 worker 直到结束：握手、读消息和写消息都由它在 `ziggurat_net` 的 `WebSocket` 上完成。连接数已满时新连接以 `busy` 失败。`allocator` 必须线程安全。
 - `allow` 在主线程上看到 URL、子协议和握手头部，返回 `false` 时连接以 `denied` 失败。未设置时允许全部连接。
-- 握手头部中 `Host`、`Upgrade`、`Connection`、`Sec-WebSocket-*` 由 socket 自己写，页面给出的值被丢弃；其他头部原样发送。`wss` 使用系统 CA；不经过 HTTP 代理，不协商扩展（如 permessage-deflate）。
+- 握手头部中 `Host`、`Upgrade`、`Connection`、`Sec-WebSocket-*` 由 socket 自己写，页面给出的值被丢弃；其他头部原样发送。`wss` 使用系统 CA；经系统代理时走 CONNECT 或 SOCKS5 隧道（见 [net.md](net.md) “系统代理”），不协商扩展（如 permessage-deflate）。
 - `max_message_bytes`（默认 64 MiB）限制收到的单条消息，超限以 1009 关闭连接。`send_buffer_bytes`（默认 4 MiB）是每个连接的发送队列，更大的消息发送失败；队列满时宿主暂缓回复页面，写出后继续。
 - 页面读得慢时，每个连接最多保留 `receive_buffer_bytes`（默认 1 MiB）已收到的字节，之后停止从服务器读取，直到页面读完。
 - 页面主动关闭后等待服务器完成关闭握手最多 `close_timeout_ms`（默认 5 秒），超时以 1006 结束。页面离开、换代或 Host detach 时，连接以 1001（going away）关闭，同样受该时限约束。
