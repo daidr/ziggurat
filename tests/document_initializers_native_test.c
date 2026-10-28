@@ -71,7 +71,7 @@ static ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler *flush(F
     return handler;
 }
 static InitializerInput input(InitializerBudget *budget,const WCHAR *body) {
-    InitializerInput value={budget,body,body?(uint32_t)wcslen(body):0};return value;
+    InitializerInput value={budget,body,body?(uint32_t)wcslen(body):0,0};return value;
 }
 static void counts_zero(void) {
     uint32_t states,handlers,controllers,budgets,owners,initializers;uint64_t bytes;
