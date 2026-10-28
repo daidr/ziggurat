@@ -53,6 +53,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/webview_runtime_smoke.zig"),
             .target = target,
             .optimize = optimize,
+            // Its checks return errors; the trace names the one that failed
+            // in release builds too.
+            .error_tracing = true,
             .imports = &.{.{ .name = "ziggurat_webview_runtime", .module = webview_runtime }},
         }) });
         check.dependOn(&runtime_smoke.step);

@@ -99,7 +99,11 @@ pub const Date = struct {
     }
     /// 0 is Sunday.
     pub fn weekday(self: Date) u3 {
-        return @intCast(@mod(self.days() + 4, 7));
+        // Through an unsigned type: Zig 0.17 lowers a signed-to-unsigned
+        // narrowing cast as a signed truncation, so optimized builds take
+        // Friday and Saturday (4 and up) to be out of range.
+        const index: u64 = @intCast(@mod(self.days() + 4, 7));
+        return @intCast(index);
     }
     pub fn order(a: Date, b: Date) std.math.Order {
         return std.math.order(a.days(), b.days());
