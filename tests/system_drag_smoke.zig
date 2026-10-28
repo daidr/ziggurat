@@ -259,6 +259,7 @@ const Smoke = struct {
         self.stage = .done;
         self.stop.store(true, .release);
         if (self.held) self.input.press(false);
+        if (self.round == .move) self.input.keyEvent(0xffe1, false);
         self.app.quit();
     }
     fn center(self: *Smoke, window: z.Window) !z.ScreenPoint {
@@ -318,10 +319,13 @@ const Smoke = struct {
             },
             .release => if (self.waited > 2) {
                 self.input.press(false);
-                if (self.round == .move) self.input.keyEvent(0xffe1, false);
                 self.to(.wait_done);
             },
             .wait_done => if (self.results[@backingInt(self.round)] != null and self.waited > 6) {
+                // Shift stays down until the drop is over: OLE reads the
+                // key state when it handles the button release, which may
+                // be after a key release queued right behind it.
+                if (self.round == .move) self.input.keyEvent(0xffe1, false);
                 try self.check();
                 self.to(.next);
             },
