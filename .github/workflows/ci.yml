@@ -236,10 +236,11 @@ jobs:
           retention-days: 7
 
   webview:
-    if: github.event_name == 'workflow_dispatch' && inputs.webview
+    if: (github.event_name == 'workflow_dispatch' && inputs.webview) || contains(github.event.pull_request.labels.*.name, 'webview')
     # Also needs Node.js and an installed WebView2 Runtime on the runner.
     runs-on: ${{ fromJSON(vars.WINDOWS_RUNS_ON || '["self-hosted", "windows", "x64"]') }}
-    timeout-minutes: 20
+    # The ReleaseSafe unit build alone takes about 20 minutes.
+    timeout-minutes: 60
     defaults:
       run:
         shell: pwsh
@@ -274,8 +275,22 @@ jobs:
           bun test packages
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # These fail when the system Runtime is unavailable; no Runtime is downloaded.
-          zig build test test-remote-origin smoke-webview smoke-composition-webview smoke-page-host smoke-page-session smoke-webview-policy smoke-page smoke-page-remote smoke-page-authorization smoke-script smoke-browser-tools smoke-request-policy smoke-resource-async smoke-resource-file smoke-scheme smoke-resource-producer smoke-permission smoke-download smoke-browser-policy smoke-ipc smoke-assets smoke-page-runtime smoke-plugin-fetch smoke-plugin-watch smoke-plugin-sqlite smoke-plugin-websocket smoke-embedded-webview -Dwebview=true -Doptimize=ReleaseSafe --global-cache-dir .zig-cache/managed/windows-global
+          $smokes = @('smoke-webview', 'smoke-composition-webview', 'smoke-page-session', 'smoke-webview-policy', 'smoke-page', 'smoke-page-remote', 'smoke-script', 'smoke-browser-tools', 'smoke-request-policy', 'smoke-resource-async', 'smoke-resource-file', 'smoke-scheme', 'smoke-resource-producer', 'smoke-permission', 'smoke-download', 'smoke-browser-policy', 'smoke-ipc', 'smoke-assets', 'smoke-page-runtime', 'smoke-plugin-fetch', 'smoke-plugin-watch', 'smoke-plugin-sqlite', 'smoke-plugin-websocket', 'smoke-embedded-webview')
+          $failed = @()
+          zig build test test-remote-origin smoke-page-host smoke-page-authorization -Dwebview=true -Doptimize=ReleaseSafe --global-cache-dir .zig-cache/managed/windows-global
+          if ($LASTEXITCODE -ne 0) { $failed += 'test' }
+          zig build webview-runtime @($smokes | ForEach-Object { "build-$_" }) -Dwebview=true -Doptimize=ReleaseSafe --global-cache-dir .zig-cache/managed/windows-global
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # One page at a time: each smoke has a 15 s watchdog that a machine
+          # still compiling or running other Runtimes can exhaust.
+          foreach ($smoke in $smokes) {
+            $timer = [Diagnostics.Stopwatch]::StartNew()
+            & "./zig-out/bin/$smoke.exe"
+            $code = $LASTEXITCODE
+            Write-Host "$smoke exit=$code seconds=$([int]$timer.Elapsed.TotalSeconds)"
+            if ($code -ne 0) { $failed += $smoke }
+          }
+          if ($failed.Count -ne 0) { throw "Failed: $($failed -join ', ')" }
       - name: Standalone engine discovery without a page
         run: |
           zig build test-webview-runtime build-smoke-webview-runtime -Doptimize=ReleaseSafe --global-cache-dir .zig-cache/managed/windows-global

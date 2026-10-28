@@ -11,6 +11,10 @@ const Server = struct {
     stop_requested: std.atomic.Value(bool) = .init(false),
     gate: std.Thread.ResetEvent = .{},
     downloads: std.atomic.Value(u32) = .init(0),
+    // A transfer still being written must not hold up the next page, so each
+    // connection gets its own thread.
+    connections: [64]?std.Thread = @splat(null),
+    connection_count: usize = 0,
     fn start(self: *Server) !void {
         self.thread = try std.Thread.spawn(.{}, run, .{self});
     }
@@ -20,15 +24,29 @@ const Server = struct {
         const wake = std.net.tcpConnectToAddress(self.listener.listen_address) catch unreachable;
         wake.close();
         self.thread.?.join();
+        for (self.connections[0..self.connection_count]) |connection| connection.?.join();
         self.listener.deinit();
     }
     fn run(self: *Server) void {
         while (true) {
             const connection = self.listener.accept() catch return;
-            defer connection.stream.close();
-            if (self.stop_requested.load(.acquire)) return;
-            self.serve(connection.stream) catch {};
+            if (self.stop_requested.load(.acquire)) {
+                connection.stream.close();
+                return;
+            }
+            if (self.connection_count < self.connections.len) {
+                if (std.Thread.spawn(.{}, serveConnection, .{ self, connection.stream })) |thread| {
+                    self.connections[self.connection_count] = thread;
+                    self.connection_count += 1;
+                    continue;
+                } else |_| {}
+            }
+            serveConnection(self, connection.stream);
         }
+    }
+    fn serveConnection(self: *Server, stream: std.net.Stream) void {
+        defer stream.close();
+        self.serve(stream) catch {};
     }
     fn serve(self: *Server, stream: std.net.Stream) !void {
         var request: [8192]u8 = undefined;
