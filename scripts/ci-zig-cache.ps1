@@ -23,8 +23,18 @@ $root = Join-Path $ci "zig-$version"
 $workspace = if ($env:GITHUB_WORKSPACE) { $env:GITHUB_WORKSPACE } else { (Get-Location).Path }
 $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($workspace.ToLowerInvariant()))
 $key = (-join ($hash[0..7] | ForEach-Object { $_.ToString('x2') }))
-$local = Join-Path $root "local-$key"
 New-Item -ItemType Directory -Force -Path $root | Out-Null
+# Tests that refuse symlinked ancestors keep files under the local cache, so
+# hand out the physical path even when the cache directory is a link.
+function Resolve-Physical([string]$Path) {
+    $parent = Split-Path -Parent $Path
+    $resolved = if ($parent) { Join-Path (Resolve-Physical $parent) (Split-Path -Leaf $Path) } else { $Path }
+    $item = Get-Item -LiteralPath $resolved -Force
+    if ($item.LinkTarget) { $item.ResolveLinkTarget($true).FullName } else { $resolved }
+}
+$root = Resolve-Physical ([System.IO.Path]::GetFullPath($root))
+$ci = Split-Path -Parent $root
+$local = Join-Path $root "local-$key"
 
 function Remove-Cache([string]$Path) {
     if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force }

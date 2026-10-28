@@ -24,8 +24,12 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
     key=$(printf '%s' "$workspace" | shasum -a 256 | cut -c1-16)
 fi
-local_cache=$root/local-$key
 mkdir -p "$root"
+# Tests that refuse symlinked ancestors keep files under the local cache, so
+# hand out the physical path even when the cache directory is a link.
+root=$(cd "$root" && pwd -P)
+ci=$(dirname "$root")
+local_cache=$root/local-$key
 
 for dir in "$ci"/zig-*; do
     [ -d "$dir" ] && [ "$dir" != "$root" ] && rm -rf "$dir"
