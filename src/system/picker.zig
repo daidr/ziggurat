@@ -86,7 +86,7 @@ pub const Picker = struct {
         self.in_native = true;
         defer self.leaveNative();
         var event: ?*anyopaque = null;
-        const native = zfp_create(window.nativeHandle(), @intFromEnum(kind), &filters, @intCast(extensions.len), &suggested_name, @intCast(name_len), &self.last_hresult, &event) orelse return error.FilePickerCreationFailed;
+        const native = zfp_create(window.nativeHandle(), @backingInt(kind), &filters, @intCast(extensions.len), &suggested_name, @intCast(name_len), &self.last_hresult, &event) orelse return error.FilePickerCreationFailed;
         self.native = native;
         self.window = window;
         self.destination = destination;

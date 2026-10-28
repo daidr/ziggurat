@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const p = @import("ziggurat_window_placement");
 const desktop = @import("ziggurat_system").desktop;
@@ -162,7 +163,7 @@ fn watchdog(probe: *Probe) void {
     var waited: u64 = 0;
     const interval = 250 * std.time.ns_per_ms;
     while (!probe.done.load(.acquire)) {
-        std.Thread.sleep(interval);
+        zio.sleep(interval);
         waited += interval;
         if (waited >= 20 * std.time.ns_per_s) {
             probe.expired.store(true, .release);

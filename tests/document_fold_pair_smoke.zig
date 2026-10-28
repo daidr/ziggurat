@@ -5,11 +5,7 @@ const d = @import("ziggurat_document");
 const t = @import("ziggurat_text_layout");
 const editing = @import("ziggurat_document_editor");
 const text = "zero\none\ntwo\nthree\nfour\nfive\n";
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn gtk_widget_get_scale_factor(*anyopaque) c_int;
 
 const Trap = struct {

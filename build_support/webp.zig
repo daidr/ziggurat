@@ -3,7 +3,6 @@ const std = @import("std");
 /// Decoder-only, pinned source build; no configure subprocess or network in build.
 pub fn add(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
     const source = ".deps/libwebp-1.6.0/";
-    b.build_root.handle.access(source ++ "src/webp/decode.h", .{}) catch @panic("WebP source missing; run scripts/fetch-webp.ps1 or scripts/fetch-webp.sh first");
     const config = b.addWriteFiles();
     _ = config.add("src/webp/config.h", switch (target.result.cpu.arch) {
         .x86_64 => "#define WEBP_HAVE_SSE2 1\n",

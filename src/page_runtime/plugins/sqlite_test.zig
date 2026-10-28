@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const runtime = @import("ziggurat_page_runtime");
 const sqlite = @import("sqlite.zig");
 const Service = sqlite.Service;
@@ -15,7 +16,7 @@ const Fixture = struct {
     fn init(self: *Fixture, options: struct { library: ?[]const u8 = null, max_result_bytes: usize = 64 * 1024 * 1024 }) !void {
         self.tmp = std.testing.tmpDir(.{});
         errdefer self.tmp.cleanup();
-        const base = try self.tmp.dir.realpathAlloc(allocator, ".");
+        const base = try zio.realPathAlloc(self.tmp.dir, ".", allocator);
         defer allocator.free(base);
         self.directory = try std.fs.path.join(allocator, &.{ base, "data" });
         errdefer allocator.free(self.directory);
@@ -332,9 +333,9 @@ test "names stay in the directory, connections are limited and close with the pa
     // Nested names make their directories; a symlink is refused.
     const nested = try f.open("nested/deeper/app.db", false);
     _ = nested;
-    var data = try std.fs.openDirAbsolute(f.directory, .{});
-    defer data.close();
-    try data.access("nested/deeper/app.db", .{});
+    var data = try std.Io.Dir.openDirAbsolute(zio.io(), f.directory, .{});
+    defer data.close(zio.io());
+    try data.access(zio.io(), "nested/deeper/app.db", .{});
     // Windows needs a privilege to make symlinks.
     if (@import("builtin").os.tag != .windows) try symlinks(&f, data);
 
@@ -362,9 +363,9 @@ test "names stay in the directory, connections are limited and close with the pa
     try f.idle();
 }
 
-fn symlinks(f: *Fixture, data: std.fs.Dir) !void {
-    try data.symLink("nested/deeper/app.db", "link.db", .{});
-    try data.symLink("nested", "dir", .{ .is_directory = true });
+fn symlinks(f: *Fixture, data: std.Io.Dir) !void {
+    try data.symLink(zio.io(), "nested/deeper/app.db", "link.db", .{});
+    try data.symLink(zio.io(), "nested", "dir", .{ .is_directory = true });
     for ([_][]const u8{ "link.db", "dir/deeper/app.db" }) |name| {
         var linked = try f.call("open", Service.Open{ .name = name, .readOnly = false });
         defer linked.deinit();
@@ -378,7 +379,7 @@ test "a canceled query is interrupted and the connection stays usable" {
     defer f.deinit();
     const db = try f.open(":memory:", false);
     const id = try f.send("query", Service.Statement{ .connection = db, .sql = "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c) SELECT count(*) FROM c", .params = &.{} });
-    std.Thread.sleep(50 * std.time.ns_per_ms);
+    zio.sleep(50 * std.time.ns_per_ms);
     try f.page.cancel(service, @intCast(id % 32), id);
     try f.idle();
     var rows = try f.query(db, "SELECT 7", &.{});

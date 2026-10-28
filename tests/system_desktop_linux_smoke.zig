@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const system = @import("ziggurat_system");
 const Watchdog = @import("watchdog.zig").Watchdog;
@@ -205,7 +206,7 @@ const State = struct {
         self.app.quit();
     }
     fn advance(self: *State) void {
-        self.step = @enumFromInt(@intFromEnum(self.step) + 1);
+        self.step = @fromBackingInt(@intCast(@backingInt(self.step) + 1));
         self.attempts = 0;
         self.waiting = false;
         self.app.post(.{ .context = self, .call = run }) catch |err| self.fail(err);
@@ -287,7 +288,7 @@ const State = struct {
                 try self.owner.setTray(.{ .icon = pixbuf, .tooltip = "Updated" });
                 // The icon is borrowed only by the call.
                 g_object_unref(pixbuf);
-                try std.testing.expectError(error.TextCapacityExceeded, self.owner.setTray(.{ .tooltip = "x" ** 128 }));
+                try std.testing.expectError(error.TextCapacityExceeded, self.owner.setTray(.{ .tooltip = &@as([128]u8, @splat('x')) }));
                 self.advance();
             },
             .tray_pixmap => try self.property("IconPixmap", "2x2:ff112233"),
@@ -410,7 +411,7 @@ const State = struct {
             .hotkey_conflict => {
                 if (!self.waiting) {
                     self.waiting = true;
-                    std.Thread.sleep(50 * std.time.ns_per_ms);
+                    zio.sleep(50 * std.time.ns_per_ms);
                     return self.app.post(.{ .context = self, .call = run });
                 }
                 try std.testing.expectEqual(2, self.hotkeys);
@@ -510,16 +511,16 @@ pub fn main() !void {
     state.display = XOpenDisplay(null) orelse return error.DisplayUnavailable;
     defer _ = XCloseDisplay(state.display);
 
-    try std.fs.cwd().makePath(".zig-cache/tmp/system-desktop-smoke/folder");
-    const directory = try std.fs.cwd().realpath(".zig-cache/tmp/system-desktop-smoke", state.directory[0 .. state.directory.len - 1]);
+    try std.Io.Dir.cwd().createDirPath(zio.io(), ".zig-cache/tmp/system-desktop-smoke/folder");
+    const directory = try zio.realpath(std.Io.Dir.cwd(), ".zig-cache/tmp/system-desktop-smoke", state.directory[0 .. state.directory.len - 1]);
     state.directory_len = directory.len;
     state.directory[directory.len] = 0;
     for ([_][]const u8{ "a.txt", "b.md", "folder" }, 0..) |name, index| {
-        const path = try std.fmt.bufPrintZ(&state.paths[index], "{s}/{s}", .{ directory, name });
+        const path = try std.fmt.bufPrintSentinel(&state.paths[index], "{s}/{s}", .{ directory, name }, 0);
         state.path_ptrs[index] = path.ptr;
         if (index < 2) {
-            const file = try std.fs.createFileAbsolute(path, .{});
-            file.close();
+            const file = try std.Io.Dir.createFileAbsolute(zio.io(), path, .{});
+            file.close(zio.io());
         }
     }
 

@@ -23,6 +23,7 @@
 //! For tests, `<STEM>_INSTALL_DIR` is the folder of the bundle on macOS and
 //! `<STEM>_NO_OPEN=1` leaves the app closed.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 
 pub const name = "install.sh";
 
@@ -418,17 +419,17 @@ test "the script runs the installer next to it, a downloaded one, and the uninst
     const allocator = arena.allocator();
     var temp = testing.tmpDir(.{});
     defer temp.cleanup();
-    const root = try temp.dir.realpathAlloc(allocator, ".");
+    const root = try zio.realPathAlloc(temp.dir, ".", allocator);
     const target = switch (@import("builtin").cpu.arch) {
         .x86_64 => "linux-x86_64",
         .aarch64 => "linux-aarch64",
         else => return error.SkipZigTest,
     };
-    try temp.dir.makePath("home");
-    try temp.dir.makePath("bin");
+    try temp.dir.createDirPath(zio.io(), "home");
+    try temp.dir.createDirPath(zio.io(), "bin");
     const calls = try std.fs.path.join(allocator, &.{ root, "calls" });
     const installer = try std.fmt.allocPrint(allocator, "#!/bin/sh\necho \"$0 $*\" >> '{s}'\n", .{calls});
-    try temp.dir.writeFile(.{ .sub_path = try std.fmt.allocPrint(allocator, "tool-1.2.0.0-{s}-setup", .{target}), .data = installer, .flags = .{ .mode = 0o755 } });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = try std.fmt.allocPrint(allocator, "tool-1.2.0.0-{s}-setup", .{target}), .data = installer, .flags = .{ .permissions = zio.mode(0o755) } });
     // Releases from the API: a draft, another app's tag, then ours.
     const releases = try std.fmt.allocPrint(allocator,
         \\[{{"tag_name": "tool-v2", "draft": true, "prerelease": false, "assets": [{{"browser_download_url": "https://x/tool-2-{0s}-setup"}}]}},
@@ -436,7 +437,7 @@ test "the script runs the installer next to it, a downloaded one, and the uninst
         \\ {{"tag_name": "tool-v1.3", "draft": false,
         \\   "prerelease": false, "assets": [{{"browser_download_url": "https://x/tool-1.3.0.0-{0s}.zip"}}, {{"browser_download_url": "https://x/tool-1.3.0.0-{0s}-setup"}}]}}]
     , .{target});
-    try temp.dir.writeFile(.{ .sub_path = "releases.json", .data = releases });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "releases.json", .data = releases });
     const curl = try std.fmt.allocPrint(allocator,
         \\#!/bin/sh
         \\echo "curl $*" >> '{0s}/calls'
@@ -446,31 +447,31 @@ test "the script runs the installer next to it, a downloaded one, and the uninst
         \\esac
         \\
     , .{ root, target });
-    try temp.dir.writeFile(.{ .sub_path = "bin/curl", .data = curl, .flags = .{ .mode = 0o755 } });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "bin/curl", .data = curl, .flags = .{ .permissions = zio.mode(0o755) } });
     // As a user, also where tests run as root.
-    try temp.dir.writeFile(.{ .sub_path = "bin/id", .data = "#!/bin/sh\necho 1000\n", .flags = .{ .mode = 0o755 } });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "bin/id", .data = "#!/bin/sh\necho 1000\n", .flags = .{ .permissions = zio.mode(0o755) } });
 
     const local = try script(allocator, .{ .app_name = "Tool's", .identity = "com.example.tool", .stem = "tool", .version = "1.2.0.0" });
-    try temp.dir.writeFile(.{ .sub_path = name, .data = local });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = name, .data = local });
     const remote = try script(allocator, .{ .app_name = "Tool", .identity = "com.example.tool", .stem = "tool", .version = "1.2.0.0", .github = "owner/apps", .tag_prefix = "tool-" });
-    try temp.dir.makePath("remote");
-    try temp.dir.writeFile(.{ .sub_path = "remote/install.sh", .data = remote });
-    try temp.dir.makePath("home/data/com.example.tool/install");
-    try temp.dir.writeFile(.{ .sub_path = "home/data/com.example.tool/install/uninstall", .data = installer, .flags = .{ .mode = 0o755 } });
+    try temp.dir.createDirPath(zio.io(), "remote");
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "remote/install.sh", .data = remote });
+    try temp.dir.createDirPath(zio.io(), "home/data/com.example.tool/install");
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "home/data/com.example.tool/install/uninstall", .data = installer, .flags = .{ .permissions = zio.mode(0o755) } });
 
-    var environment = std.process.EnvMap.init(allocator);
+    var environment = std.process.Environ.Map.init(allocator);
     try environment.put("HOME", try std.fs.path.join(allocator, &.{ root, "home" }));
     try environment.put("XDG_DATA_HOME", try std.fs.path.join(allocator, &.{ root, "home", "data" }));
     try environment.put("PATH", try std.fmt.allocPrint(allocator, "{s}/bin:/usr/bin:/bin", .{root}));
     for ([_][]const []const u8{ &.{ "sh", "install.sh" }, &.{ "sh", "remote/install.sh" }, &.{ "sh", "install.sh", "--uninstall" } }) |argv| {
-        const result = try std.process.Child.run(.{ .allocator = allocator, .argv = argv, .cwd = root, .env_map = &environment });
-        if (result.term != .Exited or result.term.Exited != 0) {
+        const result = try zio.run(allocator, .{ .argv = argv, .cwd = .{ .path = root }, .environ_map = &environment });
+        if (result.term != .exited or result.term.exited != 0) {
             std.debug.print("{s}{s}\n", .{ result.stdout, result.stderr });
             return error.ScriptFailed;
         }
     }
-    const log = try temp.dir.readFileAlloc(allocator, "calls", 8192);
-    var lines = std.mem.splitScalar(u8, std.mem.trimRight(u8, log, "\n"), '\n');
+    const log = try temp.dir.readFileAlloc(zio.io(), "calls", allocator, .limited(8192));
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, log, "\n"), '\n');
     try testing.expect(std.mem.endsWith(u8, lines.next().?, try std.fmt.allocPrint(allocator, "tool-1.2.0.0-{s}-setup --scope user", .{target})));
     try testing.expectEqualStrings("curl -fsSL https://api.github.com/repos/owner/apps/releases?per_page=100&page=1", lines.next().?);
     try testing.expectEqualStrings(try std.fmt.allocPrint(allocator, "curl -fsSL https://x/tool-1.3.0.0-{s}-setup", .{target}), lines.next().?);
@@ -486,9 +487,9 @@ test "on macOS the script installs the bundle of the newest disk image, quitting
     const allocator = arena.allocator();
     var temp = testing.tmpDir(.{});
     defer temp.cleanup();
-    const root = try temp.dir.realpathAlloc(allocator, ".");
-    try temp.dir.makePath("bin");
-    try temp.dir.makePath("home");
+    const root = try zio.realPathAlloc(temp.dir, ".", allocator);
+    try temp.dir.createDirPath(zio.io(), "bin");
+    try temp.dir.createDirPath(zio.io(), "home");
     // The tools of macOS: hdiutil "mounts" an image by copying the bundle
     // named in it, and the app runs until it is asked to quit.
     const stubs = [_][2][]const u8{
@@ -500,40 +501,40 @@ test "on macOS the script installs the bundle of the newest disk image, quitting
         .{ "open", "#!/bin/sh\necho \"open $*\" >> '{0s}/calls'\n" },
         .{ "curl", "#!/bin/sh\necho \"curl $*\" >> '{0s}/calls'\ncase \"$2\" in *api.github.com*) cat '{0s}/releases.json' ;; *) echo \"$2\" ;; esac\n" },
     };
-    for (stubs) |stub| try temp.dir.writeFile(.{ .sub_path = try std.fmt.allocPrint(allocator, "bin/{s}", .{stub[0]}), .data = try std.mem.replaceOwned(u8, allocator, stub[1], "{0s}", root), .flags = .{ .mode = 0o755 } });
+    for (stubs) |stub| try temp.dir.writeFile(zio.io(), .{ .sub_path = try std.fmt.allocPrint(allocator, "bin/{s}", .{stub[0]}), .data = try std.mem.replaceOwned(u8, allocator, stub[1], "{0s}", root), .flags = .{ .permissions = zio.mode(0o755) } });
     // The newest release has only a universal image and another app's; an
     // older one has one for the architecture.
-    try temp.dir.writeFile(.{ .sub_path = "releases.json", .data = 
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "releases.json", .data =
         \\[{"tag_name": "tool-v1.3", "draft": false, "prerelease": false, "assets": [
         \\   {"browser_download_url": "https://x/other-1.3.0.0-aarch64.dmg"}, {"browser_download_url": "https://x/tool-1.3.0.0-x86_64.dmg"},
         \\   {"browser_download_url": "https://x/tool-1.3.0.0-x86_64-setup"}, {"browser_download_url": "https://x/tool-1.3.0.0.dmg"}]},
         \\ {"tag_name": "tool-v1.2", "draft": false, "prerelease": false, "assets": [{"browser_download_url": "https://x/tool-1.2.0.0-aarch64.dmg"}]}]
     });
-    try temp.dir.writeFile(.{ .sub_path = "running", .data = "" });
-    try temp.dir.makePath("apps/Tool.app/Contents");
-    try temp.dir.writeFile(.{ .sub_path = "apps/Tool.app/Contents/old", .data = "" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "running", .data = "" });
+    try temp.dir.createDirPath(zio.io(), "apps/Tool.app/Contents");
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "apps/Tool.app/Contents/old", .data = "" });
     const remote = try script(allocator, .{ .app_name = "Tool", .identity = "com.example.tool", .stem = "tool", .version = "1.2.0.0", .github = "owner/apps", .tag_prefix = "tool-", .bundle = "Tool.app" });
-    try temp.dir.writeFile(.{ .sub_path = "install.sh", .data = remote });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "install.sh", .data = remote });
 
-    var environment = std.process.EnvMap.init(allocator);
+    var environment = std.process.Environ.Map.init(allocator);
     try environment.put("HOME", try std.fs.path.join(allocator, &.{ root, "home" }));
     try environment.put("PATH", try std.fmt.allocPrint(allocator, "{s}/bin:/usr/bin:/bin", .{root}));
     try environment.put("TOOL_INSTALL_DIR", try std.fs.path.join(allocator, &.{ root, "apps" }));
     for ([_][]const []const u8{ &.{ "sh", "install.sh" }, &.{ "sh", "install.sh", "--uninstall" } }, 0..) |argv, step| {
-        const result = try std.process.Child.run(.{ .allocator = allocator, .argv = argv, .cwd = root, .env_map = &environment });
-        if (result.term != .Exited or result.term.Exited != 0) {
+        const result = try zio.run(allocator, .{ .argv = argv, .cwd = .{ .path = root }, .environ_map = &environment });
+        if (result.term != .exited or result.term.exited != 0) {
             std.debug.print("{s}{s}\n", .{ result.stdout, result.stderr });
             return error.ScriptFailed;
         }
         if (step == 0) {
             // Apple silicon under Rosetta: the arm64 image is newest only in
             // the older release, so the universal one wins.
-            try testing.expectEqualStrings("https://x/tool-1.3.0.0.dmg\n", try temp.dir.readFileAlloc(allocator, "apps/Tool.app/Contents/image", 1024));
-            try testing.expectError(error.FileNotFound, temp.dir.access("apps/Tool.app/Contents/old", .{}));
+            try testing.expectEqualStrings("https://x/tool-1.3.0.0.dmg\n", try temp.dir.readFileAlloc(zio.io(), "apps/Tool.app/Contents/image", allocator, .limited(1024)));
+            try testing.expectError(error.FileNotFound, temp.dir.access(zio.io(), "apps/Tool.app/Contents/old", .{}));
         }
     }
-    try testing.expectError(error.FileNotFound, temp.dir.access("apps/Tool.app", .{}));
-    const log = try temp.dir.readFileAlloc(allocator, "calls", 8192);
+    try testing.expectError(error.FileNotFound, temp.dir.access(zio.io(), "apps/Tool.app", .{}));
+    const log = try temp.dir.readFileAlloc(zio.io(), "calls", allocator, .limited(8192));
     for ([_][]const u8{
         "curl -fsSL https://x/tool-1.3.0.0.dmg\n",
         "osascript -e tell application id \"com.example.tool\" to quit\n",

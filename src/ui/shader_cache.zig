@@ -8,6 +8,7 @@
 //! used go first once the directory holds more than `default_limit` bytes.
 //! Every failure means doing without the cache.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 
 /// Bytes kept before the least recently used files are removed.
 pub const default_limit: u64 = 32 << 20;
@@ -47,7 +48,7 @@ pub fn validDxbc(bytes: []const u8) bool {
 }
 
 pub const DiskCache = struct {
-    dir: ?std.fs.Dir = null,
+    dir: ?std.Io.Dir = null,
     limit: u64 = default_limit,
 
     /// The user's cache directory: `%LOCALAPPDATA%\Ziggurat\ShaderCache` on
@@ -56,23 +57,23 @@ pub const DiskCache = struct {
     pub fn openDefault(allocator: std.mem.Allocator) DiskCache {
         const builtin = @import("builtin");
         const base, const sub = if (builtin.os.tag == .windows)
-            .{ std.process.getEnvVarOwned(allocator, "LOCALAPPDATA") catch return .{}, "Ziggurat\\ShaderCache" }
-        else if (std.process.getEnvVarOwned(allocator, "XDG_CACHE_HOME")) |value|
+            .{ zio.getEnvVarOwned(allocator, "LOCALAPPDATA") catch return .{}, "Ziggurat\\ShaderCache" }
+        else if (zio.getEnvVarOwned(allocator, "XDG_CACHE_HOME")) |value|
             .{ value, "ziggurat/shader-cache" }
         else |_|
-            .{ std.process.getEnvVarOwned(allocator, "HOME") catch return .{}, ".cache/ziggurat/shader-cache" };
+            .{ zio.getEnvVarOwned(allocator, "HOME") catch return .{}, ".cache/ziggurat/shader-cache" };
         defer allocator.free(base);
         if (base.len == 0) return .{};
-        var root = std.fs.openDirAbsolute(base, .{}) catch return .{};
-        defer root.close();
+        var root = std.Io.Dir.openDirAbsolute(zio.io(), base, .{}) catch return .{};
+        defer root.close(zio.io());
         return openAt(root, sub) catch .{};
     }
     /// The cache in `sub_path` of `root`, created if missing.
-    pub fn openAt(root: std.fs.Dir, sub_path: []const u8) !DiskCache {
-        return .{ .dir = try root.makeOpenPath(sub_path, .{ .iterate = true }) };
+    pub fn openAt(root: std.Io.Dir, sub_path: []const u8) !DiskCache {
+        return .{ .dir = try root.createDirPathOpen(zio.io(), sub_path, .{ .open_options = .{ .iterate = true } }) };
     }
     pub fn close(self: *DiskCache) void {
-        if (self.dir) |*dir| dir.close();
+        if (self.dir) |*dir| dir.close(zio.io());
         self.dir = null;
     }
 
@@ -80,15 +81,14 @@ pub const DiskCache = struct {
     /// recently used. The caller frees it with `allocator`.
     pub fn load(self: *DiskCache, allocator: std.mem.Allocator, file_name: []const u8, valid: *const fn ([]const u8) bool) ?[]u8 {
         const dir = self.dir orelse return null;
-        const bytes = dir.readFileAlloc(allocator, file_name, max_file_bytes) catch return null;
+        const bytes = dir.readFileAlloc(zio.io(), file_name, allocator, .limited(max_file_bytes)) catch return null;
         if (!valid(bytes)) {
             allocator.free(bytes);
             return null;
         }
-        if (dir.openFile(file_name, .{ .mode = .read_write })) |file| {
-            defer file.close();
-            const now = std.time.nanoTimestamp();
-            file.updateTimes(now, now) catch {};
+        if (dir.openFile(zio.io(), file_name, .{ .mode = .read_write })) |file| {
+            defer file.close(zio.io());
+            file.setTimestampsNow(zio.io()) catch {};
         } else |_| {}
         return bytes;
     }
@@ -98,20 +98,20 @@ pub const DiskCache = struct {
         const dir = self.dir orelse return;
         var temporary: [96]u8 = undefined;
         var random: [8]u8 = undefined;
-        std.crypto.random.bytes(&random);
+        zio.random.bytes(&random);
         const temporary_name = std.fmt.bufPrint(&temporary, "{s}.{x}.tmp", .{ file_name[0..@min(file_name.len, 64)], std.mem.readInt(u64, &random, .little) }) catch return;
-        const file = dir.createFile(temporary_name, .{ .exclusive = true }) catch return;
+        const file = dir.createFile(zio.io(), temporary_name, .{ .exclusive = true }) catch return;
         const written = blk: {
-            file.writeAll(bytes) catch break :blk false;
+            file.writeStreamingAll(zio.io(), bytes) catch break :blk false;
             break :blk true;
         };
-        file.close();
+        file.close(zio.io());
         if (!written) {
-            dir.deleteFile(temporary_name) catch {};
+            dir.deleteFile(zio.io(), temporary_name) catch {};
             return;
         }
-        dir.rename(temporary_name, file_name) catch {
-            dir.deleteFile(temporary_name) catch {};
+        dir.rename(temporary_name, dir, file_name, zio.io()) catch {
+            dir.deleteFile(zio.io(), temporary_name) catch {};
             return;
         };
         self.trim();
@@ -126,11 +126,11 @@ pub const DiskCache = struct {
         var count: usize = 0;
         var total: u64 = 0;
         var iterator = dir.iterate();
-        while (iterator.next() catch null) |entry| {
+        while (iterator.next(zio.io()) catch null) |entry| {
             if (entry.kind != .file or entry.name.len > 96) continue;
-            const stat = dir.statFile(entry.name) catch continue;
+            const stat = dir.statFile(zio.io(), entry.name, .{}) catch continue;
             total += stat.size;
-            const item: Entry = .{ .name = undefined, .len = @intCast(entry.name.len), .size = stat.size, .used = stat.mtime };
+            const item: Entry = .{ .name = undefined, .len = @intCast(entry.name.len), .size = stat.size, .used = stat.mtime.nanoseconds };
             if (count < entries.len) {
                 entries[count] = item;
                 @memcpy(entries[count].name[0..entry.name.len], entry.name);
@@ -155,7 +155,7 @@ pub const DiskCache = struct {
         }.less);
         for (entries[0..count]) |e| {
             if (total <= self.limit) break;
-            dir.deleteFile(e.name[0..e.len]) catch continue;
+            dir.deleteFile(zio.io(), e.name[0..e.len]) catch continue;
             total -|= e.size;
         }
     }
@@ -195,9 +195,9 @@ test "the cache keeps valid code and trims the least recently used" {
     // Make the first file the older one, then a third file overflows.
     const old: i128 = 1_000_000_000 * std.time.ns_per_s;
     {
-        const file = try cache.dir.?.openFile(a.slice(), .{ .mode = .read_write });
-        defer file.close();
-        try file.updateTimes(old, old);
+        const file = try cache.dir.?.openFile(zio.io(), a.slice(), .{ .mode = .read_write });
+        defer file.close(zio.io());
+        try file.setTimestamps(zio.io(), .{ .access_timestamp = .{ .new = .fromNanoseconds(old) }, .modify_timestamp = .{ .new = .fromNanoseconds(old) } });
     }
     cache.store(b.slice(), &second);
     const c = name("x", "third", ".dxbc");
@@ -206,12 +206,12 @@ test "the cache keeps valid code and trims the least recently used" {
     const kept = cache.load(std.testing.allocator, b.slice(), validDxbc).?;
     std.testing.allocator.free(kept);
     // Truncated or foreign bytes are not code.
-    try cache.dir.?.writeFile(.{ .sub_path = a.slice(), .data = first[0..64] });
+    try cache.dir.?.writeFile(zio.io(), .{ .sub_path = a.slice(), .data = first[0..64] });
     try std.testing.expect(cache.load(std.testing.allocator, a.slice(), validDxbc) == null);
     try std.testing.expect(!validDxbc("DXBC"));
     // No temporary files stay behind.
     var iterator = cache.dir.?.iterate();
-    while (try iterator.next()) |entry| try std.testing.expect(!std.mem.endsWith(u8, entry.name, ".tmp"));
+    while (try iterator.next(zio.io())) |entry| try std.testing.expect(!std.mem.endsWith(u8, entry.name, ".tmp"));
 }
 
 test "without a directory the cache keeps nothing" {

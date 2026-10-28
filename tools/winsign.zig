@@ -3,6 +3,7 @@
 //! signs on Windows and osslsigncode elsewhere; `signCommand` replaces
 //! both, for signing services and certificates on hardware tokens.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 
 pub const password_variable = "ZIGGURAT_WINDOWS_CERTIFICATE_PASSWORD";
@@ -38,7 +39,7 @@ pub fn command(allocator: std.mem.Allocator, windows: Windows, root: []const u8,
     const relative = windows.certificate orelse return error.NoSigningConfiguration;
     const absolute = if (host == .windows) std.fs.path.isAbsoluteWindows(relative) else std.fs.path.isAbsolutePosix(relative);
     const separator = if (host == .windows) "\\" else "/";
-    const certificate = if (absolute) relative else try std.mem.concat(allocator, u8, &.{ std.mem.trimRight(u8, root, "/\\"), separator, relative });
+    const certificate = if (absolute) relative else try std.mem.concat(allocator, u8, &.{ std.mem.trimEnd(u8, root, "/\\"), separator, relative });
     const timestamp = windows.timestampUrl orelse default_timestamp_url;
     if (host == .windows) {
         try argv.appendSlice(allocator, &.{ tool, "sign", "/f", certificate, "/fd", "sha256", "/tr", timestamp, "/td", "sha256" });
@@ -65,37 +66,36 @@ pub fn shellQuote(allocator: std.mem.Allocator, text: []const u8, host: std.Targ
 /// Sign `file` in place. `root` is the project directory the certificate
 /// path is relative to.
 pub fn sign(allocator: std.mem.Allocator, windows: Windows, root: []const u8, file: []const u8) !void {
-    const password = std.process.getEnvVarOwned(allocator, password_variable) catch null;
+    const password = zio.getEnvVarOwned(allocator, password_variable) catch null;
     const tool: []const u8 = if (windows.signCommand != null) "" else if (builtin.os.tag == .windows)
         (try signtool(allocator)) orelse return error.SigntoolNotFound
     else
         (try findInPath(allocator, "osslsigncode")) orelse return error.OsslsigncodeNotFound;
     const argv = try command(allocator, windows, root, file, builtin.os.tag, tool, password);
-    var child = std.process.Child.init(argv, allocator);
-    child.cwd = root;
     // The command's own output tells what failed; it is not echoed, as it
     // may hold credentials.
-    const term = try child.spawnAndWait();
+    var child = try zio.spawn(.{ .argv = argv, .cwd = zio.cwd(root) });
+    const term = try child.wait(zio.io());
     const ok = switch (term) {
-        .Exited => |code| code == 0,
+        .exited => |code| code == 0,
         else => false,
     };
     if (windows.signCommand != null) return if (ok) {} else error.SignCommandFailed;
     if (builtin.os.tag == .windows) return if (ok) {} else error.SigntoolFailed;
     const signed = try signedPath(allocator, file);
     if (!ok) {
-        std.fs.cwd().deleteFile(signed) catch {};
+        std.Io.Dir.cwd().deleteFile(zio.io(), signed) catch {};
         return error.OsslsigncodeFailed;
     }
-    try std.fs.cwd().rename(signed, file);
+    try std.Io.Dir.rename(std.Io.Dir.cwd(), signed, std.Io.Dir.cwd(), file, zio.io());
 }
 
 fn findInPath(allocator: std.mem.Allocator, name: []const u8) !?[]const u8 {
-    const path = std.process.getEnvVarOwned(allocator, "PATH") catch return null;
+    const path = zio.getEnvVarOwned(allocator, "PATH") catch return null;
     var parts = std.mem.tokenizeScalar(u8, path, std.fs.path.delimiter);
     while (parts.next()) |dir| {
         const candidate = try std.fs.path.join(allocator, &.{ dir, name });
-        std.fs.cwd().access(candidate, .{}) catch continue;
+        std.Io.Dir.cwd().access(zio.io(), candidate, .{}) catch continue;
         return candidate;
     }
     return null;
@@ -104,17 +104,17 @@ fn findInPath(allocator: std.mem.Allocator, name: []const u8) !?[]const u8 {
 /// signtool on PATH, else that of the newest Windows 10/11 SDK.
 fn signtool(allocator: std.mem.Allocator) !?[]const u8 {
     if (try findInPath(allocator, "signtool.exe")) |found| return found;
-    const program_files = std.process.getEnvVarOwned(allocator, "ProgramFiles(x86)") catch return null;
+    const program_files = zio.getEnvVarOwned(allocator, "ProgramFiles(x86)") catch return null;
     const bin = try std.fs.path.join(allocator, &.{ program_files, "Windows Kits", "10", "bin" });
-    var dir = std.fs.cwd().openDir(bin, .{ .iterate = true }) catch return null;
-    defer dir.close();
+    var dir = std.Io.Dir.cwd().openDir(zio.io(), bin, .{ .iterate = true }) catch return null;
+    defer dir.close(zio.io());
     const arch = if (builtin.cpu.arch == .aarch64) "arm64" else "x64";
     var newest: ?[]const u8 = null;
     var iterator = dir.iterate();
-    while (try iterator.next()) |entry| {
+    while (try iterator.next(zio.io())) |entry| {
         if (entry.kind != .directory or !std.mem.startsWith(u8, entry.name, "10.")) continue;
         const candidate = try std.fs.path.join(allocator, &.{ bin, entry.name, arch, "signtool.exe" });
-        std.fs.cwd().access(candidate, .{}) catch continue;
+        std.Io.Dir.cwd().access(zio.io(), candidate, .{}) catch continue;
         if (newest == null or std.mem.order(u8, candidate, newest.?) == .gt) newest = candidate;
     }
     return newest;
@@ -164,7 +164,7 @@ test "the signing command lines" {
 }
 
 test "PE images and their signatures are told apart" {
-    var bytes = [_]u8{0} ** 512;
+    var bytes = @as([512]u8, @splat(0));
     try std.testing.expect(!peKind(&bytes).image);
     bytes[0] = 'M';
     bytes[1] = 'Z';

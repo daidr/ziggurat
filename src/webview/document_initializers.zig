@@ -438,9 +438,9 @@ test "entry and origin descriptors are captured before the caller allocator can 
 test "initializer hard bounds reject descriptors before any allocation" {
     var budget = try Budget.init(.{});
     const entry: Initializer = .{ .body = "", .origins = &.{"https://example.test"} };
-    try std.testing.expectError(error.TooManyInitializers, Owned.init(std.testing.failing_allocator, &budget, &([_]Initializer{entry} ** 9)));
+    try std.testing.expectError(error.TooManyInitializers, Owned.init(std.testing.failing_allocator, &budget, &(@as([9]Initializer, @splat(entry)))));
     try std.testing.expectError(error.InvalidInitializerOrigins, Owned.init(std.testing.failing_allocator, &budget, &.{.{ .body = "", .origins = &.{} }}));
-    try std.testing.expectError(error.InvalidInitializerOrigins, Owned.init(std.testing.failing_allocator, &budget, &.{.{ .body = "", .origins = &([_][]const u8{"https://example.test"} ** 9) }}));
+    try std.testing.expectError(error.InvalidInitializerOrigins, Owned.init(std.testing.failing_allocator, &budget, &.{.{ .body = "", .origins = &@as([9][]const u8, @splat("https://example.test")) }}));
     const unreadable: [*]const u8 = @ptrFromInt(4096);
     try std.testing.expectError(error.InitializerBodyTooLarge, Owned.init(std.testing.failing_allocator, &budget, &.{.{ .body = unreadable[0 .. body_limit + 1], .origins = &.{"https://example.test"} }}));
     try std.testing.expectError(error.InvalidInitializerOrigin, Owned.init(std.testing.failing_allocator, &budget, &.{.{ .body = "", .origins = &.{unreadable[0 .. schemes.origin_limit + 1]} }}));

@@ -1,15 +1,12 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const view = @import("ziggurat_view");
 const term = @import("ziggurat_terminal");
 const terminal_view = @import("ziggurat_terminal_view");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 
 extern fn zlg_test_paint(*anyopaque, u32, u32) void;
 extern fn zlg_resource_count() u32;
@@ -126,11 +123,11 @@ fn shows(screen: *const term.Screen, needle: []const u8) bool {
 
 /// Dispatch posted work until `done` or a deadline.
 fn until(app: *z.App, context: anytype, comptime done: fn (@TypeOf(context)) bool) !void {
-    const deadline = std.time.milliTimestamp() + 10_000;
+    const deadline = zio.milliTimestamp() + 10_000;
     while (!done(context)) {
-        if (std.time.milliTimestamp() > deadline) return error.Timeout;
+        if (zio.milliTimestamp() > deadline) return error.Timeout;
         try app.dispatch();
-        std.Thread.sleep(5 * std.time.ns_per_ms);
+        zio.sleep(5 * std.time.ns_per_ms);
     }
 }
 

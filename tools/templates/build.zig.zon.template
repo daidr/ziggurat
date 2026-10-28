@@ -2,7 +2,7 @@
     .name = .@@PACKAGE@@,
     .version = "0.1.0",
     .fingerprint = @@FINGERPRINT@@,
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .ziggurat = .{ .path = "@@FRAMEWORK@@" },
     },

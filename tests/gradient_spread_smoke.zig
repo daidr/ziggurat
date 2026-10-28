@@ -4,11 +4,7 @@ const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const b = ui.commands.brushes;
 const oracle = @import("gradient_interpolation_oracle.zig");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn zlc_layer_live_objects() u32;
 extern fn zlc_test_live_image_objects() u32;
 const width = 32;
@@ -93,7 +89,7 @@ fn composition(surface: *ui.offscreen.Surface, size: z.Size, buffer: *ui.command
     try buffer.endGroup();
     try buffer.popClip();
     try buffer.endTransform();
-    const palette = oracle.Palette.init(@intFromEnum(b.InterpolationSpace.oklab), &colors);
+    const palette = oracle.Palette.init(@backingInt(b.InterpolationSpace.oklab), &colors);
     const before = try surface.stats();
     for (0..2) |_| {
         const snapshot = try surface.render(buffer);
@@ -124,7 +120,7 @@ fn software(app: *z.App, allocator: std.mem.Allocator) !void {
         var buffer: ui.commands.Buffer = .{};
         defer buffer.reset();
         for ([_]b.Spread{ .repeat, .reflect }) |spread| for ([_]b.InterpolationSpace{ .srgb, .srgb_linear, .oklab }) |space| for (0..2) |kind| {
-            const palette = oracle.Palette.init(@intFromEnum(space), &colors);
+            const palette = oracle.Palette.init(@backingInt(space), &colors);
             for (0..3) |shape| {
                 buffer.reset();
                 try buffer.fill(bounds, background & 0xffffff);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const images = @import("ziggurat_images");
 const expect = std.testing.expect;
 const equal = std.testing.expectEqual;
@@ -38,8 +39,8 @@ const oriented_order = [8][6]u8{
 
 const Concurrent = struct {
     const Gate = struct {
-        ready: std.Thread.ResetEvent = .{},
-        start: std.Thread.ResetEvent = .{},
+        ready: zio.ResetEvent = .{},
+        start: zio.ResetEvent = .{},
         count: std.atomic.Value(u32) = .init(0),
         fn arrive(self: *Gate) void {
             if (self.count.fetchAdd(1, .acq_rel) == 3) self.ready.set();

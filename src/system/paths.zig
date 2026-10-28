@@ -2,6 +2,7 @@
 //! the environment and, on Linux, `user-dirs.dirs`; it allocates the result
 //! with the caller's allocator and touches no App or window state.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 
 pub const Name = enum {
@@ -73,7 +74,7 @@ pub const Paths = struct {
         if (self.overrides.get(name)) |path| return allocator.dupe(u8, path);
         const path = try self.resolve(allocator, name);
         errdefer allocator.free(path);
-        if (name.creates()) try std.fs.cwd().makePath(path);
+        if (name.creates()) try std.Io.Dir.cwd().createDirPath(zio.io(), path);
         return path;
     }
     /// Like `get`, without creating anything.
@@ -212,7 +213,7 @@ pub fn userDirsValue(allocator: std.mem.Allocator, contents: []const u8, key: []
 const max_config_bytes = 64 * 1024;
 
 fn processEnv(_: ?*anyopaque, allocator: std.mem.Allocator, key: []const u8) anyerror!?[]u8 {
-    const value = std.process.getEnvVarOwned(allocator, key) catch |err| return if (err == error.EnvironmentVariableNotFound) null else err;
+    const value = zio.getEnvVarOwned(allocator, key) catch |err| return if (err == error.EnvironmentVariableNotFound) null else err;
     if (value.len == 0) {
         allocator.free(value);
         return null;
@@ -220,13 +221,13 @@ fn processEnv(_: ?*anyopaque, allocator: std.mem.Allocator, key: []const u8) any
     return value;
 }
 fn readFile(_: ?*anyopaque, allocator: std.mem.Allocator, path: []const u8) anyerror!?[]u8 {
-    return std.fs.cwd().readFileAlloc(allocator, path, max_config_bytes) catch |err| return if (err == error.FileNotFound) null else err;
+    return std.Io.Dir.cwd().readFileAlloc(zio.io(), path, allocator, .limited(max_config_bytes)) catch |err| return if (err == error.FileNotFound) null else err;
 }
 fn selfExe(_: ?*anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
-    const path = try std.fs.selfExePathAlloc(allocator);
+    const path = try zio.executablePathAlloc(allocator);
     errdefer allocator.free(path);
-    var buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const real = std.fs.realpath(path, &buffer) catch return path;
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const real = zio.realpath(std.Io.Dir.cwd(), path, &buffer) catch return path;
     const result = try allocator.dupe(u8, real);
     allocator.free(path);
     return result;
@@ -263,7 +264,7 @@ fn expectPath(paths: *const Paths, name: Name, expected: []const u8) !void {
 }
 
 test "linux paths follow XDG with home fallbacks and user-dirs" {
-    var fake: Fake = .{ .os = .linux, .vars = &.{ .{ "HOME", "/home/ada" }, .{ "XDG_CACHE_HOME", "relative/ignored" } }, .file = 
+    var fake: Fake = .{ .os = .linux, .vars = &.{ .{ "HOME", "/home/ada" }, .{ "XDG_CACHE_HOME", "relative/ignored" } }, .file =
         \\# written by xdg-user-dirs-update
         \\XDG_DESKTOP_DIR="$HOME/Schreibtisch"
         \\XDG_MUSIC_DIR="/srv/music"
@@ -309,12 +310,12 @@ test "missing home and invalid application names fail explicitly" {
 test "get creates the application's own directories" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    const root = try zio.realPathAlloc(tmp.dir, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
     var fake: Fake = .{ .os = builtin.os.tag, .vars = &.{ .{ "HOME", root }, .{ "USERPROFILE", root }, .{ "AppData", root }, .{ "LocalAppData", root } } };
     const paths = try fake.paths();
     const logs = try paths.get(std.testing.allocator, .logs);
     defer std.testing.allocator.free(logs);
-    var directory = try std.fs.cwd().openDir(logs, .{});
-    directory.close();
+    var directory = try std.Io.Dir.cwd().openDir(zio.io(), logs, .{});
+    directory.close(zio.io());
 }

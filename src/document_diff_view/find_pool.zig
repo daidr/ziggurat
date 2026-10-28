@@ -470,7 +470,7 @@ test "find pool previous keeps overlapping matches and no-wrap stays empty" {
 }
 
 test "find pool dense matches consume one global budget and EOF is free" {
-    const document = try d.Document.create(std.testing.allocator, std.Thread.getCurrentId(), "a" ** 64, .{});
+    const document = try d.Document.create(std.testing.allocator, std.Thread.getCurrentId(), &@as([64]u8, @splat('a')), .{});
     defer document.close() catch unreachable;
     _ = try document.setSelection(.{ .anchor = 64, .caret = 64 });
     var source = try TestSource.init(document);
@@ -515,7 +515,7 @@ test "find pool dense matches consume one global budget and EOF is free" {
 }
 
 test "find pool prefix fallback has a strict scan comparison bound" {
-    const document = try d.Document.create(std.testing.allocator, std.Thread.getCurrentId(), "a" ** 100 ++ "b", .{});
+    const document = try d.Document.create(std.testing.allocator, std.Thread.getCurrentId(), &@as([100]u8, @splat('a')) ++ "b", .{});
     defer document.close() catch unreachable;
     var source = try TestSource.init(document);
     const pool = try TestPool.create(std.testing.allocator, .{});
@@ -809,7 +809,7 @@ test "find pool limits and nonwrap serial are checked before allocation or cance
 }
 
 test "find pool bounded next and previous scans skip unrelated source ranges" {
-    const bodies = [_][]const u8{ "x" ** 32768 ++ "needle", "needle" ++ "x" ** 32768 };
+    const bodies = [_][]const u8{ &@as([32768]u8, @splat('x')) ++ "needle", "needle" ++ &@as([32768]u8, @splat('x')) };
     const pool = try TestPool.create(std.testing.allocator, .{ .work = 24 });
     defer pool.close() catch unreachable;
     for (bodies, 0..) |body, at| {

@@ -117,7 +117,7 @@ pub fn write(allocator: std.mem.Allocator, output: *std.Io.Writer, package: Pack
     if (package.depends.len > 0) try control_text.print(scratch, "Depends: {s}\n", .{package.depends});
     if (package.homepage.len > 0) try control_text.print(scratch, "Homepage: {s}\n", .{package.homepage});
     // The first description line is the synopsis; later lines are indented.
-    var lines = std.mem.splitScalar(u8, std.mem.trimRight(u8, package.description, "\n"), '\n');
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, package.description, "\n"), '\n');
     try control_text.print(scratch, "Description: {s}\n", .{lines.next().?});
     while (lines.next()) |line| {
         if (!validField(line)) return error.InvalidControlField;

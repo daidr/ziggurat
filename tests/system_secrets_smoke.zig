@@ -3,6 +3,7 @@
 //! session with no Secret Service must report CredentialStoreUnavailable for
 //! every operation instead of pretending to succeed.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const system = @import("ziggurat_system");
@@ -19,7 +20,7 @@ const Smoke = struct {
     steps: []const Step,
     index: usize = 0,
     request: secrets.Request = undefined,
-    turn: std.Thread.ResetEvent = .{},
+    turn: zio.ResetEvent = .{},
     stop: bool = false,
     unavailable: bool = false,
     require_store: bool,
@@ -82,12 +83,12 @@ const Smoke = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
     var require_store = builtin.os.tag == .windows;
-    var args = try std.process.argsWithAllocator(allocator);
+    var args = try init.args.iterateAllocator(allocator);
     defer args.deinit();
     _ = args.skip();
     while (args.next()) |arg| {

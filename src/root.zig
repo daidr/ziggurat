@@ -363,8 +363,8 @@ pub const WindowHit = enum(c_int) {
     south,
     south_east,
     pub fn resizeEdge(self: WindowHit) ?ResizeEdge {
-        const value = @intFromEnum(self);
-        return if (value >= @intFromEnum(WindowHit.north_west)) @enumFromInt(value - @intFromEnum(WindowHit.north_west)) else null;
+        const value = @backingInt(self);
+        return if (value >= @backingInt(WindowHit.north_west)) @fromBackingInt(@intCast(value - @backingInt(WindowHit.north_west))) else null;
     }
 };
 /// The shape of the pointer over the client area. Shapes a platform lacks

@@ -40,11 +40,7 @@ test "gradient spread GPU preflight rejects the whole used buffer and skips iner
         try Renderer.preflightGradientPrecisionPrepared(buffer.commands(), buffer.brushResources(), 1, true);
     }
 }
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 
 extern fn zgpu_create(c_int, *i32) ?*anyopaque;
 extern fn zgpu_create_in_domain(*anyopaque, *i32) ?*anyopaque;

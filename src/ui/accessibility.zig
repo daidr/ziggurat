@@ -5,11 +5,7 @@ const affine_state = @import("affine_state.zig");
 const recipients = @import("text_field_workspace.zig");
 const affine = affine_state.affine;
 pub const virtual_lists = @import("collection_native.zig");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 
 pub const max_nodes = 128;
 pub const text_capacity = 32768;
@@ -301,10 +297,10 @@ pub const RecipientAuthority = extern struct {
     kind: u32 = 0,
     pub fn capture(registration_key: recipients.Key, publication: u64, recipient_kind: recipients.Kind) !RecipientAuthority {
         if (registration_key.epoch == 0 or registration_key.serial == 0 or registration_key.id == 0 or registration_key.slot >= recipients.max_fields or publication == 0) return error.InvalidRecipientAuthority;
-        return .{ .epoch = registration_key.epoch, .serial = registration_key.serial, .id = registration_key.id, .publication = publication, .slot = registration_key.slot, .kind = @intFromEnum(recipient_kind) };
+        return .{ .epoch = registration_key.epoch, .serial = registration_key.serial, .id = registration_key.id, .publication = publication, .slot = registration_key.slot, .kind = @backingInt(recipient_kind) };
     }
     fn registrationKey(self: RecipientAuthority) !recipients.Key {
-        if (self.epoch == 0 or self.serial == 0 or self.id == 0 or self.publication == 0 or self.slot >= recipients.max_fields or self.kind > @intFromEnum(recipients.Kind.control)) return error.InvalidRecipientAuthority;
+        if (self.epoch == 0 or self.serial == 0 or self.id == 0 or self.publication == 0 or self.slot >= recipients.max_fields or self.kind > @backingInt(recipients.Kind.control)) return error.InvalidRecipientAuthority;
         return .{ .epoch = self.epoch, .serial = self.serial, .id = self.id, .slot = @intCast(self.slot) };
     }
 };
@@ -494,7 +490,7 @@ pub const Bridge = struct {
             native_nodes[index] = .{
                 .id = entry.id,
                 .parent = entry.parent orelse root_id,
-                .role = @intFromEnum(entry.role),
+                .role = @backingInt(entry.role),
                 .flags = @as(u32, @intFromBool(entry.enabled and enabled)) | (@as(u32, @intFromBool(entry.focused and focused)) << 1) | (@as(u32, @intFromBool(entry.read_only)) << 2) | (@as(u32, @intFromBool(!visible or entry.bounds.width == 0 or entry.bounds.height == 0)) << 3) | (@as(u32, @intFromBool(entry.checked)) << 4) | (@as(u32, @intFromBool(entry.invalid)) << 5) | (@as(u32, @intFromBool(entry.required)) << 6) | (@as(u32, @intFromBool(entry.multiple)) << 7) | (@as(u32, @intFromBool(entry.expanded != null)) << 8) | (@as(u32, @intFromBool(entry.expanded orelse false)) << 9) | (@as(u32, @intFromBool(entry.mixed)) << 10) | (@as(u32, @intFromBool(entry.password)) << 11),
                 .name_start = @intCast(name_start),
                 .name_len = @intCast(name_len),
@@ -712,7 +708,7 @@ pub const Bridge = struct {
         if (native.recipient.serial != 0) {
             const callback = self.on_recipient_action orelse return;
             const key = native.recipient.registrationKey() catch return;
-            callback(self.context, window, .{ .key = key, .publication = native.recipient.publication, .kind = @enumFromInt(native.recipient.kind), .action = .{ .ordinary = action } });
+            callback(self.context, window, .{ .key = key, .publication = native.recipient.publication, .kind = @fromBackingInt(@intCast(native.recipient.kind)), .action = .{ .ordinary = action } });
             return;
         }
         self.on_action(self.context, window, action);
@@ -729,7 +725,7 @@ pub const Bridge = struct {
 };
 
 fn geometryRef(bounds: affine.Rect, reference: affine.Ref) NativeGeometryRef {
-    return .{ .x = bounds.x, .y = bounds.y, .width = bounds.width, .height = bounds.height, .space = @intFromEnum(reference.space), .clip = if (reference.clip) |id| @intFromEnum(id) else std.math.maxInt(u32) };
+    return .{ .x = bounds.x, .y = bounds.y, .width = bounds.width, .height = bounds.height, .space = @backingInt(reference.space), .clip = if (reference.clip) |id| @backingInt(id) else std.math.maxInt(u32) };
 }
 
 comptime {

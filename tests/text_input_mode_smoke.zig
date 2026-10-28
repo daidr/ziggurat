@@ -1,12 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("imm.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn zlg_resource_count() u32;
 extern fn zlg_test_text_mode_simple(*anyopaque) c_int;
 extern fn zlg_test_text_key(*anyopaque, c_uint, c_uint) void;

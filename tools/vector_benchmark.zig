@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const vector = @import("ziggurat_vector");
 
 pub fn main() !void {
@@ -19,7 +20,7 @@ pub fn main() !void {
         var samples: [7]u64 = undefined;
         var metrics: vector.Stats = undefined;
         for (&samples) |*sample| {
-            var clock = try std.time.Timer.start();
+            var clock = try zio.Timer.start();
             const prepared = try path.prepare(allocator, options);
             sample.* = clock.read();
             metrics = try prepared.stats();

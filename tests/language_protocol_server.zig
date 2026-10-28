@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const protocol = @import("ziggurat_language_protocol");
 const codec = protocol.codec;
 const allocator = std.heap.page_allocator;
@@ -7,8 +8,8 @@ fn emit(value: anytype) !void {
     defer packet.deinit();
     const bytes = packet.bytes.?;
     // Fragment frames deliberately; no assumptions about pipe message sizes.
-    try std.fs.File.stdout().writeAll(bytes[0..@min(7, bytes.len)]);
-    try std.fs.File.stdout().writeAll(bytes[@min(7, bytes.len)..]);
+    try std.Io.File.stdout().writeStreamingAll(zio.io(), bytes[0..@min(7, bytes.len)]);
+    try std.Io.File.stdout().writeStreamingAll(zio.io(), bytes[@min(7, bytes.len)..]);
 }
 fn field(value: std.json.Value, name: []const u8) !std.json.Value {
     if (value != .object) return error.ExpectedObject;
@@ -17,9 +18,9 @@ fn field(value: std.json.Value, name: []const u8) !std.json.Value {
 fn eq(value: std.json.Value, expected: []const u8) !void {
     if (value != .string or !std.mem.eql(u8, value.string, expected)) return error.InvalidRequest;
 }
-pub fn main() !void {
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+pub fn main(init: std.process.Init.Minimal) !void {
+    const args = try zio.argsAlloc(allocator, init.args);
+    defer zio.argsFree(allocator, args);
     if (args.len == 2 and std.mem.eql(u8, args[1], "--workspace")) return workspaceServer();
     if (args.len == 2 and std.mem.eql(u8, args[1], "--configuration")) return configurationServer();
     if (args.len == 2 and std.mem.eql(u8, args[1], "--resolve")) return resolveServer();
@@ -30,7 +31,7 @@ pub fn main() !void {
     var pending: ?i32 = null;
     var chunk: [113]u8 = undefined;
     while (true) {
-        const count = try std.fs.File.stdin().read(&chunk);
+        const count = try std.Io.File.stdin().readStreaming(zio.io(), &.{&chunk});
         if (count == 0) return error.UnexpectedEof;
         var offset: usize = 0;
         while (offset < count) {
@@ -111,7 +112,7 @@ fn resolveServer() !void {
     var chunk: [83]u8 = undefined;
     var resolved: usize = 0;
     while (true) {
-        const count = try std.fs.File.stdin().read(&chunk);
+        const count = try std.Io.File.stdin().readStreaming(zio.io(), &.{&chunk});
         if (count == 0) return error.UnexpectedEof;
         var offset: usize = 0;
         while (offset < count) {
@@ -165,7 +166,7 @@ fn workspaceServer() !void {
     var pending = false;
     var chunk: [83]u8 = undefined;
     while (true) {
-        const count = try std.fs.File.stdin().read(&chunk);
+        const count = try std.Io.File.stdin().readStreaming(zio.io(), &.{&chunk});
         if (count == 0) return error.UnexpectedEof;
         var offset: usize = 0;
         while (offset < count) {
@@ -243,7 +244,7 @@ fn configurationServer() !void {
     var error_pending = false;
     var chunk: [71]u8 = undefined;
     while (true) {
-        const count = try std.fs.File.stdin().read(&chunk);
+        const count = try std.Io.File.stdin().readStreaming(zio.io(), &.{&chunk});
         if (count == 0) return error.UnexpectedEof;
         var offset: usize = 0;
         while (offset < count) {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const system = @import("ziggurat_system");
 const Watchdog = @import("watchdog.zig").Watchdog;
@@ -96,7 +97,7 @@ const State = struct {
         self.app.quit();
     }
     fn advance(self: *State) void {
-        self.step = @enumFromInt(@intFromEnum(self.step) + 1);
+        self.step = @fromBackingInt(@intCast(@backingInt(self.step) + 1));
         self.app.post(.{ .context = self, .call = run }) catch |err| self.fail(err);
     }
     fn fail(self: *State, err: anyerror) void {
@@ -115,7 +116,7 @@ const State = struct {
             // The first popup waits for the window to become viewable.
             if (err != error.MenuStartFailed or self.attempts > 400) return err;
             self.attempts += 1;
-            std.Thread.sleep(5 * std.time.ns_per_ms);
+            zio.sleep(5 * std.time.ns_per_ms);
             try self.app.post(.{ .context = self, .call = run });
             return false;
         };

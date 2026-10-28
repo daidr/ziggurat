@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
@@ -14,7 +15,7 @@ const big_bytes = 3_000_000;
 const connections = 9;
 
 /// What the page has read, which lets the server write on.
-var parts: std.Thread.Semaphore = .{};
+var parts: zio.Semaphore = .{};
 
 fn serve(server: *TestServer, request: *std.http.Server.Request) anyerror!void {
     const target = request.head.target;
@@ -148,8 +149,8 @@ pub fn main() !void {
         parts.post();
         parts.post();
         parts.post();
-        const address = std.net.Address.parseIp("127.0.0.1", server.port()) catch unreachable;
-        for (0..connections) |_| (std.net.tcpConnectToAddress(address) catch break).close();
+        const address = std.Io.net.IpAddress.parse("127.0.0.1", server.port()) catch unreachable;
+        for (0..connections) |_| (address.connect(zio.io(), .{ .mode = .stream }) catch break).close(zio.io());
         serving.join();
     }
 
@@ -167,7 +168,7 @@ pub fn main() !void {
     var profile: []u8 = &.{};
     defer allocator.free(profile);
     if (builtin.os.tag == .windows) {
-        const local = try std.process.getEnvVarOwned(allocator, "LOCALAPPDATA");
+        const local = try zio.getEnvVarOwned(allocator, "LOCALAPPDATA");
         defer allocator.free(local);
         profile = try std.fs.path.join(allocator, &.{ local, "Ziggurat", "FetchPluginSmoke" });
         try state.view.attach(state.window, .{ .html = html, .user_data_folder = profile });

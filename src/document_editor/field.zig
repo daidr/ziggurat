@@ -183,7 +183,12 @@ pub fn Field(comptime Private: type) type {
         pub fn drawDescribed(self: *Self, frame: *ui.Frame, colors: e.Colors, name: []const u8, about: Description) !void {
             try self.enter();
             defer self.leave();
-            errdefer |err| frame.failure = frame.failure orelse err;
+            return self.drawDescribedBody(frame, colors, name, about) catch |err| {
+                frame.failure = frame.failure orelse err;
+                return err;
+            };
+        }
+        fn drawDescribedBody(self: *Self, frame: *ui.Frame, colors: e.Colors, name: []const u8, about: Description) !void {
             if (!self.ready or try self.document.version() != self.value_revision) return error.LayoutRequired;
             const token = self.token orelse return error.NotAttached;
             try frame.textField(token, self.bounds, self.options.policy.enabled);

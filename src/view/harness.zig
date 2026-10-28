@@ -1535,7 +1535,7 @@ test "toasts stack over the bottom edge, expire, act and dismiss" {
     try std.testing.expectEqual(@as(u64, 5), state.queue.items()[0].id);
     try std.testing.expect(state.queue.dismiss(5));
     try std.testing.expect(!state.queue.dismiss(5));
-    try std.testing.expectError(error.TextTooLong, state.queue.show("x" ** (view.max_toast_message + 1), .{}));
+    try std.testing.expectError(error.TextTooLong, state.queue.show(&@as([view.max_toast_message + 1]u8, @splat('x')), .{}));
     var persistent: view.Toasts(1) = .{};
     _ = try persistent.show("Offline", .{ .duration = 0 });
     try std.testing.expectEqual(@as(u64, 0), persistent.items()[0].duration);

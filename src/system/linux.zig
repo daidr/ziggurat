@@ -333,7 +333,7 @@ pub const Owner = struct {
         const serial = try self.nextSerial();
         var failure: c_int = 0;
         const default_index: i32 = if (options.default_button) |index| @intCast(index) else -1;
-        const native = zsl_message_show(window.nativeHandle(), try terminated(&title, options.title), try terminated(&text, options.message), &buttons, @intCast(options.buttons.len), default_index, @intFromEnum(options.kind), self, serial, messageDone, &failure) orelse return error.MessageDialogCreationFailed;
+        const native = zsl_message_show(window.nativeHandle(), try terminated(&title, options.title), try terminated(&text, options.message), &buttons, @intCast(options.buttons.len), default_index, @backingInt(options.kind), self, serial, messageDone, &failure) orelse return error.MessageDialogCreationFailed;
         self.message_dialog = .{ .native = native, .request = request, .serial = serial };
         self.message_buttons = @splat(0);
         for (options.buttons, 0..) |button, index| self.message_buttons[index] = button.id;
@@ -460,7 +460,7 @@ pub const Owner = struct {
         const summary = try boundedText(&title, options.title, 63);
         const text = try boundedText(&body, options.body, 255);
         const serial = try self.nextSerial();
-        const native = zsl_note_show(summary, text, @intFromEnum(options.kind), @intFromBool(options.silent), @intFromBool(options.real_time), self, serial, noteDone) orelse return error.NotificationSubmissionFailed;
+        const native = zsl_note_show(summary, text, @backingInt(options.kind), @intFromBool(options.silent), @intFromBool(options.real_time), self, serial, noteDone) orelse return error.NotificationSubmissionFailed;
         const previous = self.notification;
         self.notification = .{ .id = id, .native = native, .serial = serial };
         if (previous) |old| zsl_note_close(old.native);
@@ -521,7 +521,7 @@ pub const Owner = struct {
         const suggested = try terminated(&name, options.suggested_name);
         const serial = try self.nextSerial();
         var failure: c_int = 0;
-        const native = zsl_chooser_show(window.nativeHandle(), @intCast(@intFromEnum(kind)), &filters, @intCast(extensions.len), suggested, self, serial, chooserDone, &failure) orelse return error.FilePickerCreationFailed;
+        const native = zsl_chooser_show(window.nativeHandle(), @intCast(@backingInt(kind)), &filters, @intCast(extensions.len), suggested, self, serial, chooserDone, &failure) orelse return error.FilePickerCreationFailed;
         self.chooser = .{ .native = native, .serial = serial, .kind = kind, .destination = destination, .context = context, .on_result = on_result };
     }
     fn chooserDone(ptr: ?*anyopaque, serial: u64, code: i32) callconv(.c) void {
@@ -767,7 +767,7 @@ fn nativeItems(items: []const types.Item, plan: *const menus.Plan, labels: *[typ
         native_items[index] = .{
             .label = label.ptr,
             .parent = if (plan.parent[index]) |parent| parent else -1,
-            .kind = @intFromEnum(item.kind),
+            .kind = @backingInt(item.kind),
             .enabled = @intFromBool(item.enabled),
             .checked = @intFromBool(item.checked),
             .keyval = if (accelerator) |value| keyval(value.key) else 0,
@@ -822,10 +822,10 @@ fn modifierMask(modifiers: types.Modifiers) u32 {
 
 /// GDK keyvals equal X11 keysyms, so this also names keys for key grabs.
 fn keyval(key: types.Key) u32 {
-    const index = @intFromEnum(key);
-    if (index >= @intFromEnum(types.Key.a) and index <= @intFromEnum(types.Key.z)) return 'a' + @as(u32, index - @intFromEnum(types.Key.a));
-    if (index >= @intFromEnum(types.Key.digit0) and index <= @intFromEnum(types.Key.digit9)) return '0' + @as(u32, index - @intFromEnum(types.Key.digit0));
-    if (index >= @intFromEnum(types.Key.f1) and index <= @intFromEnum(types.Key.f24)) return 0xffbe + @as(u32, index - @intFromEnum(types.Key.f1));
+    const index = @backingInt(key);
+    if (index >= @backingInt(types.Key.a) and index <= @backingInt(types.Key.z)) return 'a' + @as(u32, index - @backingInt(types.Key.a));
+    if (index >= @backingInt(types.Key.digit0) and index <= @backingInt(types.Key.digit9)) return '0' + @as(u32, index - @backingInt(types.Key.digit0));
+    if (index >= @backingInt(types.Key.f1) and index <= @backingInt(types.Key.f24)) return 0xffbe + @as(u32, index - @backingInt(types.Key.f1));
     return switch (key) {
         .space => 0x20,
         .enter => 0xff0d,

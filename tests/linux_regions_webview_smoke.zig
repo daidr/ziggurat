@@ -88,7 +88,7 @@ const State = struct {
     fn fail(self: *State, err: anyerror) void {
         if (self.err == null) self.err = err;
         std.debug.print("Linux regions raw={}: {s}\n", .{ self.raw_close, @errorName(err) });
-        if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace.*);
+        if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
         self.app.quit();
     }
     fn closedWindow(ptr: *anyopaque, _: z.Window) void {

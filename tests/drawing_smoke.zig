@@ -4,11 +4,7 @@ const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const commands = ui.commands;
 const Color = commands.Color;
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn zlc_test_pixel(*anyopaque, u32, u32) u32;
 extern fn cairo_image_surface_create(c_int, c_int, c_int) ?*anyopaque;
 extern fn cairo_create(*anyopaque) ?*anyopaque;

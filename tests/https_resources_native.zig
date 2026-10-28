@@ -1,7 +1,8 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 test "explicit TLS consumer native failure matrix and shared physical capacity" {
     const allocator = std.testing.allocator;
-    const directory = std.process.getEnvVarOwned(allocator, "ZIGGURAT_HTTPS_TEST_ROOT") catch |failure| switch (failure) {
+    const directory = zio.getEnvVarOwned(allocator, "ZIGGURAT_HTTPS_TEST_ROOT") catch |failure| switch (failure) {
         error.EnvironmentVariableNotFound => return error.MissingHttpsTestRoot,
         else => return failure,
     };

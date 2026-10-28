@@ -487,7 +487,7 @@ const Builder = struct {
         // Trailing whitespace of a paragraph is not shown.
         if (self.runs.items.len > 0 and self.pre == 0) {
             const last = &self.runs.items[self.runs.items.len - 1];
-            last.text = std.mem.trimRight(u8, last.text, " ");
+            last.text = std.mem.trimEnd(u8, last.text, " ");
             if (last.text.len == 0) _ = self.runs.pop();
         }
         try self.paras.append(self.arena, .{ .style = self.cur_style, .runs = try self.runs.toOwnedSlice(self.arena) });
@@ -547,7 +547,7 @@ const Builder = struct {
         self.begin();
         var value: []const u8 = out.items;
         if (self.runs.items.len == 0) {
-            value = std.mem.trimLeft(u8, value, " ");
+            value = std.mem.trimStart(u8, value, " ");
             if (value.len == 0) return;
         }
         try self.addRun(value, a);
@@ -731,7 +731,7 @@ const Builder = struct {
             },
             .h1, .h2, .h3, .h4, .h5, .h6 => {
                 try self.flush();
-                self.style = .{ .heading = @intFromEnum(t) - @intFromEnum(Tag.h1) + 1, .@"align" = saved.@"align", .quote = saved.quote };
+                self.style = .{ .heading = @backingInt(t) - @backingInt(Tag.h1) + 1, .@"align" = saved.@"align", .quote = saved.quote };
                 block = true;
             },
             .blockquote => {

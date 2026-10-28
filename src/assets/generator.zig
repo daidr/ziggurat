@@ -1,11 +1,12 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const Snapshot = @import("snapshot.zig").Snapshot;
 
 /// Writes into a dedicated build output directory. Content-addressed blobs are
 /// written first; assets.zig is atomically published last. No input path escapes
 /// into generated source, and the resulting directory is independent of disk
 /// source files. Existing unrelated files are never deleted.
-pub fn generate(snapshot: *const Snapshot, allocator: std.mem.Allocator, output: std.fs.Dir, entry_path: []const u8) !void {
+pub fn generate(snapshot: *const Snapshot, allocator: std.mem.Allocator, output: std.Io.Dir, entry_path: []const u8) !void {
     const entry = snapshot.find(entry_path) orelse return error.EntryNotFound;
     if (!std.unicode.utf8ValidateSlice(entry.bytes)) return error.InvalidEntryUtf8;
     if (std.mem.indexOfScalar(u8, entry.bytes, 0) != null) return error.EmbeddedNul;
@@ -15,14 +16,14 @@ pub fn generate(snapshot: *const Snapshot, allocator: std.mem.Allocator, output:
     for (snapshot.files) |file| {
         var filename: [69]u8 = undefined;
         const blob = try std.fmt.bufPrint(&filename, "{x}.blob", .{&file.digest});
-        var atomic = try output.atomicFile(blob, .{ .write_buffer = &.{} });
+        var atomic = try zio.AtomicFile.init(output, blob, .{ .write_buffer = &.{} });
         defer atomic.deinit();
-        try atomic.file_writer.file.writeAll(file.bytes);
+        try atomic.file_writer.interface.writeAll(file.bytes);
         try atomic.finish();
     }
-    var atomic = try output.atomicFile("assets.zig", .{ .write_buffer = &.{} });
+    var atomic = try zio.AtomicFile.init(output, "assets.zig", .{ .write_buffer = &.{} });
     defer atomic.deinit();
-    try atomic.file_writer.file.writeAll(source.written());
+    try atomic.file_writer.interface.writeAll(source.written());
     try atomic.finish();
 }
 
@@ -47,27 +48,27 @@ test "generation embeds binary bytes and deterministically publishes independent
     defer input.cleanup();
     var output = std.testing.tmpDir(.{});
     defer output.cleanup();
-    try input.dir.writeFile(.{ .sub_path = "index.html", .data = "<html>entry</html>" });
-    try input.dir.writeFile(.{ .sub_path = "binary.bin", .data = "\x00\xff\x01" });
+    try input.dir.writeFile(zio.io(), .{ .sub_path = "index.html", .data = "<html>entry</html>" });
+    try input.dir.writeFile(zio.io(), .{ .sub_path = "binary.bin", .data = "\x00\xff\x01" });
     var snapshot = try Snapshot.load(std.testing.allocator, input.dir, .{});
     defer snapshot.deinit();
     try generate(&snapshot, std.testing.allocator, output.dir, "/index.html");
-    const first = try output.dir.readFileAlloc(std.testing.allocator, "assets.zig", 64 * 1024);
+    const first = try output.dir.readFileAlloc(zio.io(), "assets.zig", std.testing.allocator, .limited(64 * 1024));
     defer std.testing.allocator.free(first);
     try generate(&snapshot, std.testing.allocator, output.dir, "/index.html");
-    const second = try output.dir.readFileAlloc(std.testing.allocator, "assets.zig", 64 * 1024);
+    const second = try output.dir.readFileAlloc(zio.io(), "assets.zig", std.testing.allocator, .limited(64 * 1024));
     defer std.testing.allocator.free(second);
     try std.testing.expectEqualStrings(first, second);
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     try std.testing.expectError(error.OutOfMemory, generate(&snapshot, failing.allocator(), output.dir, "/index.html"));
-    const after_failure = try output.dir.readFileAlloc(std.testing.allocator, "assets.zig", 64 * 1024);
+    const after_failure = try output.dir.readFileAlloc(zio.io(), "assets.zig", std.testing.allocator, .limited(64 * 1024));
     defer std.testing.allocator.free(after_failure);
     try std.testing.expectEqualStrings(first, after_failure);
     try std.testing.expect(std.mem.indexOf(u8, first, "[1]Resource") != null);
     var filename: [69]u8 = undefined;
     const blob = try std.fmt.bufPrint(&filename, "{x}.blob", .{&snapshot.find("/binary.bin").?.digest});
-    try input.dir.deleteFile("binary.bin");
-    const bytes = try output.dir.readFileAlloc(std.testing.allocator, blob, 10);
+    try input.dir.deleteFile(zio.io(), "binary.bin");
+    const bytes = try output.dir.readFileAlloc(zio.io(), blob, std.testing.allocator, .limited(10));
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqualStrings("\x00\xff\x01", bytes);
     try std.testing.expectError(error.EntryNotFound, generate(&snapshot, std.testing.allocator, output.dir, "/missing"));

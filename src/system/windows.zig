@@ -5,12 +5,7 @@ const picker_api = @import("picker.zig");
 const menus = @import("menus.zig");
 const native_menu = @import("windows_menu.zig");
 const message_api = @import("message.zig");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("shellapi.h");
-});
+const c = @import("ziggurat_c_win32");
 
 /// Reserved on the owner HWND while attached. Command IDs and tray IDs are never
 /// reused during the HWND's lifetime, so queued old messages cannot target a
@@ -477,9 +472,9 @@ fn modifierBits(modifiers: types.Modifiers) u32 {
 }
 fn virtualKey(key: types.Key) u32 {
     return switch (key) {
-        .a, .b, .c, .d, .e, .f, .g, .h, .i, .j, .k, .l, .m, .n, .o, .p, .q, .r, .s, .t, .u, .v, .w, .x, .y, .z => 0x41 + @as(u32, @intFromEnum(key)) - @intFromEnum(types.Key.a),
-        .digit0, .digit1, .digit2, .digit3, .digit4, .digit5, .digit6, .digit7, .digit8, .digit9 => 0x30 + @as(u32, @intFromEnum(key)) - @intFromEnum(types.Key.digit0),
-        .f1, .f2, .f3, .f4, .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12, .f13, .f14, .f15, .f16, .f17, .f18, .f19, .f20, .f21, .f22, .f23, .f24 => 0x70 + @as(u32, @intFromEnum(key)) - @intFromEnum(types.Key.f1),
+        .a, .b, .c, .d, .e, .f, .g, .h, .i, .j, .k, .l, .m, .n, .o, .p, .q, .r, .s, .t, .u, .v, .w, .x, .y, .z => 0x41 + @as(u32, @backingInt(key)) - @backingInt(types.Key.a),
+        .digit0, .digit1, .digit2, .digit3, .digit4, .digit5, .digit6, .digit7, .digit8, .digit9 => 0x30 + @as(u32, @backingInt(key)) - @backingInt(types.Key.digit0),
+        .f1, .f2, .f3, .f4, .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12, .f13, .f14, .f15, .f16, .f17, .f18, .f19, .f20, .f21, .f22, .f23, .f24 => 0x70 + @as(u32, @backingInt(key)) - @backingInt(types.Key.f1),
         .space => c.VK_SPACE,
         .enter => c.VK_RETURN,
         .escape => c.VK_ESCAPE,

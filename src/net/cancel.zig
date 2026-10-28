@@ -1,15 +1,18 @@
 const std = @import("std");
-const builtin = @import("builtin");
+const zio = @import("ziggurat_io");
 
 /// Cancellation shared between the worker running a transfer and any other
-/// thread. While a transfer's socket is attached, `cancel` shuts the socket
-/// down so a worker blocked in a read or write returns promptly. Name
-/// resolution, TCP connect and the TLS handshake run before a socket can be
-/// attached; cancellation during them takes effect once they return.
+/// thread. A transfer started with `run` executes as a task of the
+/// process-wide `std.Io`; `cancel` cancels that task, which ends a blocked
+/// resolve, connect, TLS handshake, read or write with `error.Canceled`.
+/// A connected socket may also be attached so `cancel` shuts it down, which
+/// wakes a worker waiting for it in `poll`.
 pub const Cancel = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: zio.Mutex = .{},
     cancelled: bool = false,
-    socket: ?std.posix.socket_t = null,
+    socket: ?std.Io.net.Socket.Handle = null,
+    /// Set while a worker waits in `run` for its task.
+    waiter: ?*zio.ResetEvent = null,
 
     /// Any thread. Idempotent.
     pub fn cancel(self: *Cancel) void {
@@ -17,6 +20,7 @@ pub const Cancel = struct {
         defer self.mutex.unlock();
         self.cancelled = true;
         if (self.socket) |socket| shutdownSocket(socket);
+        if (self.waiter) |waiter| waiter.set();
     }
 
     pub fn isCancelled(self: *Cancel) bool {
@@ -25,9 +29,9 @@ pub const Cancel = struct {
         return self.cancelled;
     }
 
-    /// Worker. Binds the transfer's socket until `detach`. Fails without
+    /// Worker. Binds a connected socket until `detach`. Fails without
     /// binding when cancellation already happened.
-    pub fn attach(self: *Cancel, socket: std.posix.socket_t) error{Cancelled}!void {
+    pub fn attach(self: *Cancel, socket: std.Io.net.Socket.Handle) error{Cancelled}!void {
         self.mutex.lock();
         defer self.mutex.unlock();
         std.debug.assert(self.socket == null);
@@ -42,103 +46,43 @@ pub const Cancel = struct {
         defer self.mutex.unlock();
         self.socket = null;
     }
+
+    /// Worker. Calls `function` as a task and waits for it, cancelling the
+    /// task when `cancel` is called first. `function` must report
+    /// cancellation itself, for example by checking `isCancelled` when an
+    /// operation fails. Without concurrency the call runs inline and only
+    /// the checks inside it observe `cancel`.
+    pub fn run(self: *Cancel, comptime function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) @typeInfo(@TypeOf(function)).@"fn".return_type.? {
+        const Result = @typeInfo(@TypeOf(function)).@"fn".return_type.?;
+        const Task = struct {
+            fn call(done: *zio.ResetEvent, inner: @TypeOf(args)) Result {
+                defer done.set();
+                return @call(.auto, function, inner);
+            }
+        };
+        var done: zio.ResetEvent = .{};
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            std.debug.assert(self.waiter == null);
+            self.waiter = &done;
+        }
+        defer {
+            self.mutex.lock();
+            self.waiter = null;
+            self.mutex.unlock();
+        }
+        const io = zio.io();
+        var future = io.concurrent(Task.call, .{ &done, args }) catch return @call(.auto, function, args);
+        done.wait();
+        return if (self.isCancelled()) future.cancel(io) else future.await(io);
+    }
 };
 
-pub fn shutdownSocket(socket: std.posix.socket_t) void {
-    std.posix.shutdown(socket, .both) catch {};
-    // A Windows shutdown does not end a receive already waiting for data;
-    // aborting the socket's pending I/O does.
-    if (builtin.os.tag == .windows) _ = std.os.windows.kernel32.CancelIoEx(@ptrCast(socket), null);
-}
-
-/// The standard Windows stream writer treats sending after a shutdown as
-/// unreachable, and its reader treats an aborted receive the same way, but
-/// `Cancel` shuts sockets down and aborts their I/O while the worker may be
-/// writing or reading. Route the connection's socket I/O through functions
-/// that report those cases as ordinary failures. Other targets map them to
-/// errors already. Call on the worker before the socket can be attached.
-pub fn guard(connection: *std.http.Client.Connection) void {
-    if (builtin.os.tag != .windows) return;
-    connection.stream_writer.interface.vtable = &guarded_vtable;
-    connection.stream_reader.interface_state.vtable = &guarded_reader_vtable;
-}
-
-const guarded_reader_vtable: std.Io.Reader.VTable = .{ .stream = guardedStream, .readVec = guardedReadVec };
-
-fn guardedStream(io_r: *std.Io.Reader, io_w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
-    const dest = limit.slice(try io_w.writableSliceGreedy(1));
-    var bufs: [1][]u8 = .{dest};
-    const n = try guardedReadVec(io_r, &bufs);
-    io_w.advance(n);
-    return n;
-}
-
-fn guardedReadVec(io_r: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
-    const ws2_32 = std.os.windows.ws2_32;
-    const reader: *std.net.Stream.Reader = @alignCast(@fieldParentPtr("interface_state", io_r));
-    var iovecs: [8]ws2_32.WSABUF = undefined;
-    const bufs_n, const data_size = try io_r.writableVectorWsa(&iovecs, data);
-    const n = receiveSome(reader, iovecs[0..bufs_n]) catch |err| {
-        reader.error_state = err;
-        return error.ReadFailed;
-    };
-    if (n == 0) return error.EndOfStream;
-    if (n > data_size) {
-        io_r.end += n - data_size;
-        return data_size;
-    }
-    return n;
-}
-
-fn receiveSome(reader: *std.net.Stream.Reader, bufs: []std.os.windows.ws2_32.WSABUF) std.net.Stream.ReadError!u32 {
-    const windows = std.os.windows;
-    const ws2_32 = windows.ws2_32;
-    const handle = reader.net_stream.handle;
-    var flags: u32 = 0;
-    var overlapped: windows.OVERLAPPED = std.mem.zeroes(windows.OVERLAPPED);
-    var n: u32 = 0;
-    if (ws2_32.WSARecv(handle, bufs.ptr, @intCast(bufs.len), &n, &flags, &overlapped, null) == ws2_32.SOCKET_ERROR) {
-        var failure = ws2_32.WSAGetLastError();
-        if (failure == .WSA_IO_PENDING) {
-            var result_flags: u32 = undefined;
-            if (ws2_32.WSAGetOverlappedResult(handle, &overlapped, &n, windows.TRUE, &result_flags) != windows.FALSE) return n;
-            failure = ws2_32.WSAGetLastError();
-        }
-        return switch (failure) {
-            .WSAENETDOWN => error.NetworkSubsystemFailed,
-            .WSAENOTCONN => error.SocketNotConnected,
-            // Aborted, shut down, reset or timed out.
-            else => error.ConnectionResetByPeer,
-        };
-    }
-    return n;
-}
-
-const guarded_vtable: std.Io.Writer.VTable = .{ .drain = guardedDrain };
-
-fn guardedDrain(io_w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-    const writer: *std.net.Stream.Writer = @alignCast(@fieldParentPtr("interface", io_w));
-    const buffered = io_w.buffered();
-    if (buffered.len != 0) return io_w.consume(try sendSome(writer, buffered));
-    for (data[0 .. data.len - 1]) |bytes| if (bytes.len != 0) return sendSome(writer, bytes);
-    const pattern = data[data.len - 1];
-    if (splat == 0 or pattern.len == 0) return 0;
-    return sendSome(writer, pattern);
-}
-
-fn sendSome(writer: *std.net.Stream.Writer, bytes: []const u8) std.Io.Writer.Error!usize {
-    const ws2_32 = std.os.windows.ws2_32;
-    const len: i32 = @intCast(@min(bytes.len, std.math.maxInt(i32)));
-    const sent = ws2_32.send(writer.stream.handle, bytes.ptr, len, 0);
-    if (sent == ws2_32.SOCKET_ERROR) {
-        writer.err = switch (ws2_32.WSAGetLastError()) {
-            .WSAENOBUFS => error.SystemResources,
-            .WSAENETDOWN => error.NetworkSubsystemFailed,
-            else => error.ConnectionResetByPeer,
-        };
-        return error.WriteFailed;
-    }
-    return @intCast(sent);
+/// Ends both directions of a connected socket so a peer or a worker waiting
+/// in `poll` sees the connection close.
+pub fn shutdownSocket(socket: std.Io.net.Socket.Handle) void {
+    zio.net.shutdown(socket);
 }
 
 test "cancel before attach refuses the socket" {
@@ -147,4 +91,31 @@ test "cancel before attach refuses the socket" {
     try std.testing.expect(cancel.isCancelled());
     try std.testing.expectError(error.Cancelled, cancel.attach(undefined));
     try std.testing.expect(cancel.socket == null);
+}
+
+test "cancel interrupts a task blocked in run" {
+    const Blocked = struct {
+        fn wait(token: *Cancel) error{ Canceled, Cancelled }!void {
+            zio.io().sleep(.fromSeconds(60), .awake) catch |err| {
+                if (token.isCancelled()) return error.Cancelled;
+                return err;
+            };
+        }
+        fn worker(token: *Cancel, result: *error{ Canceled, Cancelled }!void) void {
+            result.* = token.run(wait, .{token});
+        }
+    };
+    var cancel: Cancel = .{};
+    var result: error{ Canceled, Cancelled }!void = {};
+    const thread = try std.Thread.spawn(.{}, Blocked.worker, .{ &cancel, &result });
+    while (true) {
+        cancel.mutex.lock();
+        const waiting = cancel.waiter != null;
+        cancel.mutex.unlock();
+        if (waiting) break;
+        std.Thread.yield() catch {};
+    }
+    cancel.cancel();
+    thread.join();
+    try std.testing.expectError(error.Cancelled, result);
 }

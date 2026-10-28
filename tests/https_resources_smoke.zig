@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const resources = @import("ziggurat_https_resources");
 const Watchdog = @import("watchdog.zig").Watchdog;
@@ -37,7 +38,7 @@ const State = struct {
     owned: ?resources.http.OwnedResponse = null,
     free_closed: bool = false,
     source: ?resources.files.PreparedSource = null,
-    gate: std.Thread.Semaphore = .{},
+    gate: zio.Semaphore = .{},
     stop_node: z.StopParticipant = undefined,
     pump_cancelled: std.atomic.Value(bool) = .init(false),
     full_posts: usize = 0,
@@ -81,7 +82,7 @@ const State = struct {
             },
             .borrowed, .borrowed_head => {
                 var headers = [_]resources.http.Header{.{ .name = "X-Borrowed", .value = "independently copied" }};
-                const response: resources.http.Response = .{ .mime = "text/plain", .bytes = "b" ** (16 * 1024), .headers = &headers };
+                const response: resources.http.Response = .{ .mime = "text/plain", .bytes = &@as([16 * 1024]u8, @splat('b')), .headers = &headers };
                 var receipt = offer.respondBorrowed(response) catch |failure| return self.fail(failure);
                 defer receipt.deinit();
                 headers[0] = .{ .name = "X-Replaced", .value = "caller can release descriptors after return" };
@@ -92,7 +93,7 @@ const State = struct {
             },
             .borrowed_budget => {
                 self.ticket = offer.deferRequest() catch |failure| return self.fail(failure);
-                const response: resources.http.Response = .{ .bytes = "b" ** (24 * 1024) };
+                const response: resources.http.Response = .{ .bytes = &@as([24 * 1024]u8, @splat('b')) };
                 const rejected = self.ticket.?.respondBorrowed(response);
                 if (rejected) |receipt_value| {
                     var receipt = receipt_value;
@@ -106,7 +107,7 @@ const State = struct {
                 if (self.ticket.?.native_ticket != null) return self.fail(error.AcceptedBorrowedKeptTicket);
             },
             .budget_retain => {
-                self.owned = resources.http.OwnedResponse.init(self.allocator, .{ .bytes = "b" ** (24 * 1024) }, 32 * 1024) catch |failure| return self.fail(failure);
+                self.owned = resources.http.OwnedResponse.init(self.allocator, .{ .bytes = &@as([24 * 1024]u8, @splat('b')) }, 32 * 1024) catch |failure| return self.fail(failure);
                 _ = offer.respondOwned(&self.owned.?) catch |failure| {
                     if (failure != error.CapacityExceeded) return self.fail(failure);
                     if (self.owned.?.storage == null) return self.fail(error.RejectedBudgetConsumedOwned);
@@ -222,8 +223,8 @@ const State = struct {
     fn preparedWorker(self: *State) !void {
         const descriptor = zhr_test_host_file();
         if (descriptor < 0) return error.HostFileFailed;
-        const file: std.fs.File = .{ .handle = descriptor };
-        defer file.close();
+        const file: std.Io.File = .{ .handle = descriptor, .flags = .{ .nonblocking = false } };
+        defer file.close(zio.io());
         const reads = zwk_file_pread_count();
         const prepared = try resources.PreparedFileResponse.prepare(self.app.owner, file, 1024 * 1024, self.file_request.?);
         var pump = prepared.pump;
@@ -347,8 +348,8 @@ const State = struct {
     fn fileWorker(self: *State) !void {
         const descriptor = zhr_test_host_file();
         if (descriptor < 0) return error.HostFileFailed;
-        const file: std.fs.File = .{ .handle = descriptor };
-        defer file.close();
+        const file: std.Io.File = .{ .handle = descriptor, .flags = .{ .nonblocking = false } };
+        defer file.close(zio.io());
         var prepared = try resources.files.PreparedSource.prepare(self.app.owner, file, 1024 * 1024);
         defer prepared.pump.deinit();
         self.source = prepared.source;
@@ -460,13 +461,13 @@ const State = struct {
 pub fn main() !void {
     if (!resources.available) return error.UnsupportedCapability;
     const allocator = std.heap.page_allocator;
-    const environment = try std.process.getEnvVarOwned(allocator, "ZIGGURAT_HTTPS_TEST_ROOT");
+    const environment = try zio.getEnvVarOwned(allocator, "ZIGGURAT_HTTPS_TEST_ROOT");
     defer allocator.free(environment);
     const cert = try std.fs.path.joinZ(allocator, &.{ environment, "server-cert.pem" });
     defer allocator.free(cert);
     const key = try std.fs.path.joinZ(allocator, &.{ environment, "server-key.pem" });
     defer allocator.free(key);
-    if (std.posix.getenv("ZIGGURAT_HTTPS_SITE_CONSTRUCTOR_ONLY") != null) {
+    if (zio.getenv("ZIGGURAT_HTTPS_SITE_CONSTRUCTOR_ONLY") != null) {
         for ([_]usize{ 0, 1, 3 }) |at| {
             try siteTransportConstructor(allocator, cert, key, false, at);
             try siteTransportConstructor(allocator, cert, key, true, at);
@@ -588,7 +589,7 @@ fn siteConstructorOom(allocator: std.mem.Allocator, cert: [:0]const u8, key: [:0
     defer zhr_test_host_close(host);
     inline for (.{ false, true }) |range_requests| try std.testing.checkAllAllocationFailures(allocator, owningSiteConstructor, .{ app, @as(*resources.NativeServer, @ptrCast(zhr_test_host_server(host))), @as(u16, @intCast(port)), range_requests });
     try std.testing.expectEqualDeep(resources.NativeCounts{}, resources.nativeCounts());
-    const long_path = [_]u8{'/'} ++ [_]u8{'a'} ** (resources.policy.uri_capacity - 2);
+    const long_path = [_]u8{'/'} ++ @as([resources.policy.uri_capacity - 2]u8, @splat('a'));
     try std.testing.expectError(error.UriTooLong, resources.Site.create(allocator, app, @ptrCast(zhr_test_host_server(host)), .{ .port = @intCast(port), .bearer = @splat(1), .resources = &.{.{ .path = &long_path, .bytes = "" }} }));
     try std.testing.expectEqualDeep(resources.NativeCounts{}, resources.nativeCounts());
     std.debug.print("https_site constructor_oom: every caller allocation and complete URI preflight/native0\n", .{});

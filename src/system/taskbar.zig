@@ -156,11 +156,11 @@ pub const Taskbar = struct {
         var uri: [identity.max_id_bytes + 32]u8 = undefined;
         var path: [identity.max_id_bytes * 2 + 48]u8 = undefined;
         const id = self.id_storage[0..self.id_len];
-        const uri_z = try std.fmt.bufPrintZ(&uri, "application://{s}.desktop", .{id});
+        const uri_z = try std.fmt.bufPrintSentinel(&uri, "application://{s}.desktop", .{id}, 0);
         // Object paths allow [A-Za-z0-9_]; encode the identity as hex.
         var hex: [identity.max_id_bytes * 2]u8 = undefined;
         for (id, 0..) |byte, index| _ = std.fmt.bufPrint(hex[index * 2 ..][0..2], "{x:0>2}", .{byte}) catch unreachable;
-        const path_z = try std.fmt.bufPrintZ(&path, "/com/canonical/unity/launcherentry/{s}", .{hex[0 .. id.len * 2]});
+        const path_z = try std.fmt.bufPrintSentinel(&path, "/com/canonical/unity/launcherentry/{s}", .{hex[0 .. id.len * 2]}, 0);
         const state = self.linux_state;
         if (ziggurat_system_launcher_update(native, uri_z, path_z, @intFromBool(state.progress != null), state.progress orelse 0, @intFromBool(state.count != null), state.count orelse 0, @intFromBool(state.urgent)) != 0) return error.SignalFailed;
     }

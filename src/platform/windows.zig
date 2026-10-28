@@ -3,13 +3,7 @@ const core = @import("../root.zig");
 const icons = @import("windows_icons.zig");
 const text_input = @import("windows_text.zig");
 const pointer_press = @import("pointer_press.zig");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("objbase.h");
-    @cInclude("imm.h");
-});
+const c = @import("ziggurat_c_win32");
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("Ziggurat.Window.0");
 const dispatch_name = std.unicode.utf8ToUtf16LeStringLiteral("Ziggurat.Dispatch.0");
 const wake_message = c.WM_APP + 1;
@@ -468,10 +462,10 @@ fn superDown() bool {
     return c.GetKeyState(c.VK_LWIN) < 0 or c.GetKeyState(c.VK_RWIN) < 0;
 }
 fn keyCode(code: usize) core.KeyCode {
-    if (code >= 'A' and code <= 'Z') return @enumFromInt(@intFromEnum(core.KeyCode.a) + code - 'A');
-    if (code >= '0' and code <= '9') return @enumFromInt(@intFromEnum(core.KeyCode.digit0) + code - '0');
-    if (code >= c.VK_F1 and code <= c.VK_F24) return @enumFromInt(@intFromEnum(core.KeyCode.f1) + code - c.VK_F1);
-    if (code >= c.VK_NUMPAD0 and code <= c.VK_NUMPAD9) return @enumFromInt(@intFromEnum(core.KeyCode.numpad0) + code - c.VK_NUMPAD0);
+    if (code >= 'A' and code <= 'Z') return @fromBackingInt(@intCast(@backingInt(core.KeyCode.a) + code - 'A'));
+    if (code >= '0' and code <= '9') return @fromBackingInt(@intCast(@backingInt(core.KeyCode.digit0) + code - '0'));
+    if (code >= c.VK_F1 and code <= c.VK_F24) return @fromBackingInt(@intCast(@backingInt(core.KeyCode.f1) + code - c.VK_F1));
+    if (code >= c.VK_NUMPAD0 and code <= c.VK_NUMPAD9) return @fromBackingInt(@intCast(@backingInt(core.KeyCode.numpad0) + code - c.VK_NUMPAD0));
     return switch (code) {
         c.VK_TAB => .tab,
         c.VK_RETURN => .enter,

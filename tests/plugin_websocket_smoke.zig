@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
@@ -10,7 +11,7 @@ const html = "<!doctype html><meta charset=utf-8><title>WebSocket plugin</title>
 
 /// An echo server for one connection; it checks the opening handshake.
 const Server = struct {
-    server: std.net.Server,
+    server: std.Io.net.Server,
     failure: ?anyerror = null,
 
     fn serve(self: *Server) void {
@@ -20,13 +21,13 @@ const Server = struct {
     }
 
     fn one(self: *Server) !void {
-        const connection = try self.server.accept();
-        defer connection.stream.close();
+        const connection = try self.server.accept(zio.io());
+        defer connection.close(zio.io());
         var receive_buffer: [512 * 1024]u8 = undefined;
         var send_buffer: [4096]u8 = undefined;
-        var reader = connection.stream.reader(&receive_buffer);
-        var writer = connection.stream.writer(&send_buffer);
-        var http: std.http.Server = .init(reader.interface(), &writer.interface);
+        var reader = connection.reader(zio.io(), &receive_buffer);
+        var writer = connection.writer(zio.io(), &send_buffer);
+        var http: std.http.Server = .init(&reader.interface, &writer.interface);
         var request = try http.receiveHead();
         if (!std.mem.eql(u8, request.head.target, "/live?room=1")) return error.WrongTarget;
         const key = switch (request.upgradeRequested()) {
@@ -121,14 +122,14 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{ .thread_safe = true }) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    const address = try std.net.Address.parseIp("127.0.0.1", 0);
-    var server: Server = .{ .server = try address.listen(.{ .reuse_address = true }) };
-    defer server.server.deinit();
+    const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    var server: Server = .{ .server = try address.listen(zio.io(), .{ .reuse_address = true }) };
+    defer server.server.deinit(zio.io());
     const serving = try std.Thread.spawn(.{}, Server.serve, .{&server});
     // A failed page leaves the server waiting for its connection.
     var served = false;
     defer if (!served) {
-        (std.net.tcpConnectToAddress(server.server.listen_address) catch unreachable).close();
+        (server.server.socket.address.connect(zio.io(), .{ .mode = .stream }) catch unreachable).close(zio.io());
         serving.join();
     };
 
@@ -136,7 +137,7 @@ pub fn main() !void {
     defer app.deinit();
     var plugin: websocket_plugin.Plugin = undefined;
     try plugin.init(allocator, .{ .post = .app(app), .connections = 2 });
-    var state: State = .{ .app = app, .port = server.server.listen_address.getPort() };
+    var state: State = .{ .app = app, .port = server.server.socket.address.getPort() };
     const window = try app.createWindow(.{ .title = "WebSocket plugin smoke" });
     var controls: runtime.WindowControls = .{ .window = window };
     state.host = .init(allocator, .{ .transport = .{ .context = &state, .send = State.send }, .controls = controls.controls() });
@@ -146,7 +147,7 @@ pub fn main() !void {
     var profile: []u8 = &.{};
     defer allocator.free(profile);
     if (builtin.os.tag == .windows) {
-        const local = try std.process.getEnvVarOwned(allocator, "LOCALAPPDATA");
+        const local = try zio.getEnvVarOwned(allocator, "LOCALAPPDATA");
         defer allocator.free(local);
         profile = try std.fs.path.join(allocator, &.{ local, "Ziggurat", "WebSocketPluginSmoke" });
         try state.view.attach(window, .{ .html = html, .user_data_folder = profile });

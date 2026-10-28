@@ -705,7 +705,7 @@ fn rowText(t: *const Terminal, abs: u64, buffer: []u8) []const u8 {
         if (c.wide == .spacer) continue;
         len += std.unicode.utf8Encode(if (c.cp == 0) ' ' else c.cp, buffer[len..]) catch 0;
     }
-    return std.mem.trimRight(u8, buffer[0..len], " ");
+    return std.mem.trimEnd(u8, buffer[0..len], " ");
 }
 
 /// The other terminal shows what the mirrored one does, row by row from

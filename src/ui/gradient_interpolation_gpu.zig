@@ -23,7 +23,7 @@ pub const Packet = extern struct {
 
     pub fn prepare(brush: *const brushes.Stored) Packet {
         std.debug.assert(brush.interpolation != .srgb);
-        var packet: Packet = .{ .space = @intFromEnum(brush.interpolation), .len = brush.len };
+        var packet: Packet = .{ .space = @backingInt(brush.interpolation), .len = brush.len };
         for (brush.stops[0..brush.len], packet.colors[0..brush.len]) |stop, *out| {
             const value = brushes.color_interpolation.Coordinates.fromColor(brush.interpolation, stop.color);
             for (out[0..3], value.channels) |*channel, coordinate| channel.* = @floatCast(coordinate);

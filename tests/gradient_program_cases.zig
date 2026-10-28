@@ -6,11 +6,7 @@ const ui = @import("ziggurat_ui");
 const b = ui.commands.brushes;
 const drawing = ui.drawing;
 const reference = @import("gradient_interpolation_oracle.zig");
-const c = @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 const width = 48;
 const height = 32;
 const bounds: ui.Rect = .{ .x = 0, .y = 0, .width = width, .height = height };
@@ -124,7 +120,7 @@ pub fn run(app: *z.App, driver: ui.gpu_resources.Driver, scale: f32) !void {
                 return err;
             };
             try surface.readFrontForTest(pixels);
-            const palette = reference.Palette.init(@intFromEnum(space), &values);
+            const palette = reference.Palette.init(@backingInt(space), &values);
             try sourcePlane(&palette, kind, size, shape, pixels);
             planes += 1;
         };
@@ -138,7 +134,7 @@ pub fn run(app: *z.App, driver: ui.gpu_resources.Driver, scale: f32) !void {
         try buffer.gradientRect(bounds, 0, hard_value);
         try surface.render(&buffer);
         try surface.readFrontForTest(pixels);
-        const hard_palette = reference.Palette.init(@intFromEnum(space), &hard);
+        const hard_palette = reference.Palette.init(@backingInt(space), &hard);
         try sourcePlane(&hard_palette, 3, size, 0, pixels);
         planes += 1;
         try composed(surface, &buffer, pixels, size, space);
@@ -165,7 +161,7 @@ fn composed(surface: *ui.gpu_offscreen.Surface, buffer: *ui.commands.Buffer, pix
     }
     const origin: drawing.Point = .{ .x = 10 + 0.75 / size.scale, .y = 9 + 0.25 / size.scale };
     const clip: ui.Rect = .{ .x = 10.125, .y = 9.75, .width = 5.5, .height = 5.25 };
-    const palette = reference.Palette.init(@intFromEnum(space), &palettes[2]);
+    const palette = reference.Palette.init(@backingInt(space), &palettes[2]);
     var table: ui.commands.TransformStorage = .{ .scale = size.scale };
     for ([_]bool{ false, true }) |reflect| {
         buffer.reset();
@@ -222,7 +218,7 @@ pub fn wide(app: *z.App, driver: ui.gpu_resources.Driver) !void {
         try buffer.gradientRect(.{ .x = 0, .y = 0, .width = 4096, .height = 4 }, 0, .{ .linear = .{ .start = .{}, .end = .{ .x = 4096 }, .stops = &values, .interpolation = space } });
         try surface.render(&buffer);
         try surface.readFrontForTest(pixels);
-        const palette = reference.Palette.init(@intFromEnum(space), &values);
+        const palette = reference.Palette.init(@backingInt(space), &values);
         for (0..4) |y| for (0..4096) |x| try near(packSample(palette.at((@as(f64, @floatFromInt(x)) + 0.5) / 4096), 1), pixels[y * 4096 + x], 1, 6, x, y);
     }
 }

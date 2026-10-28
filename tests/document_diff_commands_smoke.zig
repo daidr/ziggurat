@@ -7,11 +7,7 @@ const d = @import("ziggurat_document");
 const editing = @import("ziggurat_document_editor");
 const viewing = @import("ziggurat_document_diff_view");
 const State = @import("document_diff_editable_smoke.zig").Harness(viewing.EditableSplit);
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn gtk_widget_get_scale_factor(*anyopaque) c_int;
 extern fn zlg_resource_count() c_uint;
 const bounds: ui.Rect = .{ .x = 4, .y = 4, .width = 420, .height = 260 };
@@ -104,7 +100,7 @@ fn noPolicy(_: *anyopaque) !void {}
 fn normal(state: *State, documents: [2]*d.Document, unified: ?*viewing.EditableUnified, doc_allocator: *GateAllocator, adapter_allocator: *GateAllocator) !void {
     var scratch: [16]d.Selection = undefined;
     const side: viewing.Side = if (unified == null) .a else .b;
-    const at = @intFromEnum(side);
+    const at = @backingInt(side);
     try state.view.focus(side);
     var rows: [96]viewing.editable.Row = undefined;
     const presentation = try state.view.copyPresentation(&rows);

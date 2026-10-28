@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 
 pub const capacity = 4;
 pub const origin_capacity = 8;
@@ -41,9 +42,75 @@ fn component(value: std.Uri.Component) []const u8 {
     };
 }
 
-fn ipv6Host(output: []u8, address: std.net.Ip6Address) ![]const u8 {
+/// The 16 bytes of an IPv6 address in RFC 4291 text form, including `::`
+/// and a trailing dotted IPv4 part; null for anything else, zones included.
+/// Zig 0.17's own parser rejects some valid forms such as `::ffff:7f00:1`.
+pub fn parseIp6(text: []const u8) ?[16]u8 {
+    var head: [8]u16 = undefined;
+    var tail: [8]u16 = undefined;
+    var head_len: usize = 0;
+    var tail_len: usize = 0;
+    var compressed = false;
+    var rest = text;
+    if (std.mem.startsWith(u8, rest, "::")) {
+        compressed = true;
+        rest = rest[2..];
+    } else if (rest.len == 0) return null;
+    while (rest.len != 0) {
+        const words = if (compressed) &tail else &head;
+        const len = if (compressed) &tail_len else &head_len;
+        const end = std.mem.indexOfScalar(u8, rest, ':') orelse rest.len;
+        const piece = rest[0..end];
+        if (end == rest.len and std.mem.indexOfScalar(u8, piece, '.') != null) {
+            const v4 = std.Io.net.Ip4Address.parse(piece, 0) catch return null;
+            if (len.* + 2 > 8) return null;
+            words[len.*] = std.mem.readInt(u16, v4.bytes[0..2], .big);
+            words[len.* + 1] = std.mem.readInt(u16, v4.bytes[2..4], .big);
+            len.* += 2;
+            rest = rest[end..];
+            break;
+        }
+        if (piece.len == 0 or piece.len > 4 or len.* == 8) return null;
+        words[len.*] = std.fmt.parseInt(u16, piece, 16) catch return null;
+        len.* += 1;
+        rest = rest[end..];
+        if (rest.len == 0) break;
+        rest = rest[1..];
+        if (std.mem.startsWith(u8, rest, ":")) {
+            if (compressed) return null;
+            compressed = true;
+            rest = rest[1..];
+        } else if (rest.len == 0) return null;
+    }
+    const total = head_len + tail_len;
+    if (if (compressed) total > 7 else total != 8) return null;
+    var words: [8]u16 = @splat(0);
+    @memcpy(words[0..head_len], head[0..head_len]);
+    @memcpy(words[8 - tail_len ..], tail[0..tail_len]);
+    var bytes: [16]u8 = undefined;
+    for (words, 0..) |word, i| std.mem.writeInt(u16, bytes[i * 2 ..][0..2], word, .big);
+    return bytes;
+}
+
+test "IPv6 text forms" {
+    const zero: [16]u8 = @splat(0);
+    var loopback = zero;
+    loopback[15] = 1;
+    var mapped = zero;
+    mapped[10..16].* = .{ 255, 255, 127, 0, 0, 1 };
+    var documentation = loopback;
+    documentation[0..4].* = .{ 0x20, 0x01, 0x0d, 0xb8 };
+    try std.testing.expectEqual(loopback, parseIp6("::1").?);
+    try std.testing.expectEqual(mapped, parseIp6("::ffff:7f00:1").?);
+    try std.testing.expectEqual(mapped, parseIp6("::ffff:127.0.0.1").?);
+    try std.testing.expectEqual(documentation, parseIp6("2001:db8::1").?);
+    try std.testing.expectEqual(zero, parseIp6("::").?);
+    for ([_][]const u8{ "", ":", ":::", "1::2::3", "1:2:3:4:5:6:7", "1:2:3:4:5:6:7:8:9", "fe80::1%eth0", "12345::", "1:", ":1" }) |bad| try std.testing.expectEqual(null, parseIp6(bad));
+}
+
+fn ipv6Host(output: []u8, address: std.Io.net.Ip6Address) ![]const u8 {
     var words: [8]u16 = undefined;
-    for (&words, 0..) |*word, i| word.* = std.mem.readInt(u16, address.sa.addr[i * 2 ..][0..2], .big);
+    for (&words, 0..) |*word, i| word.* = std.mem.readInt(u16, address.bytes[i * 2 ..][0..2], .big);
     var best_start: usize = 8;
     var best_length: usize = 1;
     var i: usize = 0;
@@ -101,13 +168,13 @@ pub fn canonicalOrigin(output: []u8, value: []const u8, registrations: []const R
     var host_storage: [256]u8 = undefined;
     const canonical_host: []const u8 = if (host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']') blk: {
         if (!http and !https) return error.InvalidSchemeOrigin;
-        const ip = std.net.Ip6Address.parse(host[1 .. host.len - 1], 0) catch return error.InvalidSchemeOrigin;
+        const ip: std.Io.net.Ip6Address = .{ .bytes = parseIp6(host[1 .. host.len - 1]) orelse return error.InvalidSchemeOrigin, .port = 0 };
         // URL origins serialize every piece in hex, including IPv4 mappings.
         // Ip6Address's socket formatter deliberately uses dotted mapped IPv4.
         break :blk try ipv6Host(&host_storage, ip);
     } else blk: {
         if (!validDns(host)) return error.InvalidSchemeOrigin;
-        if (std.net.Ip4Address.parse(host, 0)) |ip| {
+        if (std.Io.net.Ip4Address.parse(host, 0)) |ip| {
             var ip_storage: [32]u8 = undefined;
             const formatted = try std.fmt.bufPrint(&ip_storage, "{f}", .{ip});
             const end = std.mem.indexOfScalar(u8, formatted, ':') orelse return error.InvalidSchemeOrigin;

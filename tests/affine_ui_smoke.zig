@@ -3,14 +3,7 @@ const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const shared = @import("affine_ui_shared.zig");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("imm.h");
-    @cInclude("uiautomation.h");
-    @cInclude("oleauto.h");
-});
+const c = @import("ziggurat_c_win32");
 const Native = struct {
     pub fn paint(window: z.Window) void {
         const hwnd: c.HWND = window.nativeHandle();

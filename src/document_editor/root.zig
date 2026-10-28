@@ -2020,7 +2020,12 @@ pub const Adapter = opaque {
         const value = try self.state();
         value.busy = true;
         defer value.busy = false;
-        errdefer |err| frame.failure = frame.failure orelse err;
+        return drawBody(frame, bounds, colors, value) catch |err| {
+            frame.failure = frame.failure orelse err;
+            return err;
+        };
+    }
+    fn drawBody(frame: *ui.Frame, bounds: Rect, colors: Colors, value: *State) anyerror!void {
         const view = try ready(value, bounds, frame.size.scale);
         if (colors.caret_style) |style| {
             try style.validate();
@@ -2104,7 +2109,12 @@ pub const Adapter = opaque {
         const value = try self.state();
         value.busy = true;
         defer value.busy = false;
-        errdefer |err| frame.failure = frame.failure orelse err;
+        return drawParagraphsBody(frame, bounds, paragraphs, color, value) catch |err| {
+            frame.failure = frame.failure orelse err;
+            return err;
+        };
+    }
+    fn drawParagraphsBody(frame: *ui.Frame, bounds: Rect, paragraphs: []const usize, color: ui.Color, value: *State) anyerror!void {
         const view = try ready(value, bounds, frame.size.scale);
         if (!view.projected) return error.ProjectionRequired;
         if (paragraphs.len > max_batches * cache.max_rows) return error.VisibleCapacityExceeded;
@@ -2223,7 +2233,7 @@ pub const Adapter = opaque {
         if (try value.document.version() != expected_revision or value.projection_version != projection_version) return error.StaleGeometry;
         const written = copyPreparedHit(value, view, buffers, needed.work) catch unreachable;
         std.debug.assert(std.meta.eql(needed, written));
-        return .{ .packet = .{ .bounds = .{ .x = view.bounds.x, .y = view.bounds.y, .width = view.bounds.width, .height = view.bounds.height }, .scroll_x = value.scroll_x, .mode = @intFromEnum(if (view.projected) prepared_hit.Mode.projected else .ordinary), .block_count = @intCast(needed.blocks), .line_count = @intCast(needed.lines), .stop_count = @intCast(needed.stops), .placement_count = @intCast(needed.placements), .blocks = buffers.blocks.ptr, .lines = buffers.lines.ptr, .stops = buffers.stops.ptr, .placements = if (needed.placements == 0) null else buffers.placements.ptr }, .revision = expected_revision, .text_version = view.text_version, .projection_version = projection_version, .geometry_generation = view.geometry_generation, .scale = view.scale };
+        return .{ .packet = .{ .bounds = .{ .x = view.bounds.x, .y = view.bounds.y, .width = view.bounds.width, .height = view.bounds.height }, .scroll_x = value.scroll_x, .mode = @backingInt(if (view.projected) prepared_hit.Mode.projected else .ordinary), .block_count = @intCast(needed.blocks), .line_count = @intCast(needed.lines), .stop_count = @intCast(needed.stops), .placement_count = @intCast(needed.placements), .blocks = buffers.blocks.ptr, .lines = buffers.lines.ptr, .stops = buffers.stops.ptr, .placements = if (needed.placements == 0) null else buffers.placements.ptr }, .revision = expected_revision, .text_version = view.text_version, .projection_version = projection_version, .geometry_generation = view.geometry_generation, .scale = view.scale };
     }
     pub fn revealCaret(self: *Adapter) !void {
         const value = try self.state();
@@ -2712,7 +2722,7 @@ fn copyPreparedHit(value: *State, view: *const View, destination: ?PreparedHitBu
                 try work.take(1);
                 const raw = stops.raw(si);
                 const result = try resolveHit(value, block, raw.caret, !view.projected);
-                if (destination) |buffers| buffers.stops[counts.stops] = .{ .x = raw.rect.x, .position = result.byte_offset, .affinity = @intFromEnum(result.affinity) };
+                if (destination) |buffers| buffers.stops[counts.stops] = .{ .x = raw.rect.x, .position = result.byte_offset, .affinity = @backingInt(result.affinity) };
                 counts.stops += 1;
             }
             if (destination) |buffers| buffers.lines[counts.lines] = .{ .y = line.y, .height = line.height, .first = @intCast(first), .count = @intCast(counts.stops - first) };
@@ -4940,10 +4950,10 @@ test "complete Prepared hit is allocation free transactional and agrees with the
         } else if (scenario == 2) try adapter.setFolds(try document.version(), &.{.{ .id = 1, .header = 0, .end = try document.byteLength(), .collapsed = true }});
         _ = try adapter.scrollBy(.{ .x = 1.375, .y = 0 });
         _ = try adapter.prepare(bounds, parameters);
-        var blocks = [_]HitBlock{.{ .first = 0, .count = 0, .y = 0, .end = 0 }} ** 24;
-        var lines = [_]HitLine{.{ .y = 0, .height = 1, .first = 0, .count = 0 }} ** 128;
-        var stops = [_]HitStop{.{ .x = 0, .position = 0, .affinity = 0 }} ** 1024;
-        var placements = [_]HitPlacement{.{ .block = 0, .y = 0, .native_top = 0, .height = 1 }} ** 768;
+        var blocks = @as([24]HitBlock, @splat(.{ .first = 0, .count = 0, .y = 0, .end = 0 }));
+        var lines = @as([128]HitLine, @splat(.{ .y = 0, .height = 1, .first = 0, .count = 0 }));
+        var stops = @as([1024]HitStop, @splat(.{ .x = 0, .position = 0, .affinity = 0 }));
+        var placements = @as([768]HitPlacement, @splat(.{ .block = 0, .y = 0, .native_top = 0, .height = 1 }));
         const buffers: PreparedHitBuffers = .{ .blocks = &blocks, .lines = &lines, .stops = &stops, .placements = &placements };
         const allocation_index = failing.alloc_index;
         failing.fail_index = allocation_index;
@@ -4982,7 +4992,7 @@ test "complete Prepared hit is allocation free transactional and agrees with the
             try std.testing.expectEqualDeep(expected, try adapter.hitTest(bounds, point));
             const actual = try prepared_hit.query(&snapshot.packet, .{ .x = point.x, .y = point.y });
             try std.testing.expectEqual(expected.byte_offset, actual.position);
-            try std.testing.expectEqual(@as(u32, @intFromEnum(expected.affinity)), actual.affinity);
+            try std.testing.expectEqual(@as(u32, @backingInt(expected.affinity)), actual.affinity);
         };
         const retained = try prepared_hit.query(&snapshot.packet, .{ .x = bounds.x, .y = bounds.y });
         std.debug.print("Prepared hit capture scenario={d} blocks={d} lines={d} stops={d} placements={d} pass_work={d}; sizes State={d} Packet={d} PreparedHit={d} buffers={d}\n", .{ scenario, snapshot.packet.block_count, snapshot.packet.line_count, snapshot.packet.stop_count, snapshot.packet.placement_count, pass.work, @sizeOf(State), @sizeOf(HitPacket), @sizeOf(PreparedHit), @sizeOf(PreparedHitBuffers) });

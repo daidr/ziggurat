@@ -6,6 +6,7 @@
 //! allows at once; each opens and runs a `ziggurat_net` WebSocket, and its
 //! events reach the main thread through `App.post`.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const ipc = @import("ziggurat_ipc");
 const net = @import("ziggurat_net");
 const runtime = @import("ziggurat_page_runtime");
@@ -116,8 +117,8 @@ pub const Plugin = struct {
     host: ?*runtime.Host = null,
     connections: [max_connections]Connection = @splat(.{}),
     threads: []std.Thread = &.{},
-    mutex: std.Thread.Mutex = .{},
-    queued: std.Thread.Condition = .{},
+    mutex: zio.Mutex = .{},
+    queued: zio.Condition = .{},
     queue: [max_connections]u8 = undefined,
     queue_head: usize = 0,
     queue_len: usize = 0,
@@ -578,7 +579,7 @@ pub const Plugin = struct {
     // Workers.
 
     fn worker(self: *Plugin) void {
-        var client: std.http.Client = .{ .allocator = self.allocator };
+        var client: std.http.Client = .{ .allocator = self.allocator, .io = zio.io() };
         defer client.deinit();
         while (true) {
             self.mutex.lock();

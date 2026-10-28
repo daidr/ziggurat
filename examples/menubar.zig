@@ -34,10 +34,10 @@ const Command = enum(u64) {
     show_window,
     hide_window,
     fn id(self: Command) u64 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
     fn label(id_value: u64) []const u8 {
-        const value = std.meta.intToEnum(Command, id_value) catch return "unknown";
+        const value = std.enums.fromInt(Command, id_value) orelse return "unknown";
         return @tagName(value);
     }
 };
@@ -98,7 +98,7 @@ const Menus = struct {
 
     fn note(self: *Menus, comptime format: []const u8, args: anytype) void {
         const slot = self.log_count % self.log.len;
-        self.log_len[slot] = (std.fmt.bufPrint(&self.log[slot], format, args) catch &self.log[slot]).len;
+        self.log_len[slot] = (std.fmt.bufPrint(&self.log[slot], format, args) catch @as([]const u8, &self.log[slot])).len;
         self.log_count += 1;
         if (self.window) |window| window.invalidate();
     }
@@ -107,7 +107,7 @@ const Menus = struct {
     /// results. Runs on the main thread.
     fn run(self: *Menus, id: u64) void {
         self.note("command: {s}", .{Command.label(id)});
-        const command = std.meta.intToEnum(Command, id) catch return;
+        const command = std.enums.fromInt(Command, id) orelse return;
         switch (command) {
             .new => self.documents += 1,
             .quit => _ = (self.window orelse return).app.requestQuit(),

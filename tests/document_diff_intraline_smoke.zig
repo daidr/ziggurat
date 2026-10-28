@@ -6,11 +6,7 @@ const t = @import("ziggurat_text_layout");
 const d = @import("ziggurat_document");
 const editing = @import("ziggurat_document_editor");
 const viewing = @import("ziggurat_document_diff_view");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn gtk_widget_get_scale_factor(*anyopaque) c_int;
 const bounds: ui.Rect = .{ .x = 4, .y = 4, .width = 420, .height = 260 };
 const a_text = "top\nxe\u{301}y 👩‍👩‍👧‍👧 end\nabc אבג def\ninsert HERE\nline\r\n";
@@ -75,11 +71,11 @@ fn verify(comptime Surface: type, state: *@import("document_diff_editable_smoke.
             const rectangles = try adapter.rangeRects(revision, range, &scratch);
             if (rectangles.len > 1 and line == 2) islands = true;
             for (rectangles) |rectangle| {
-                try std.testing.expect(contains(marks, @enumFromInt(side), rectangle));
+                try std.testing.expect(contains(marks, @fromBackingInt(@intCast(side)), rectangle));
                 expected_count += 1;
             }
             if (rectangles.len == 0) if (try adapter.positionRect(revision, range.start, .downstream)) |rectangle| {
-                try std.testing.expect(contains(marks, @enumFromInt(side), rectangle));
+                try std.testing.expect(contains(marks, @fromBackingInt(@intCast(side)), rectangle));
                 expected_count += 1;
                 if (range.start == range.end) empty = true;
             };
@@ -103,7 +99,7 @@ fn verify(comptime Surface: type, state: *@import("document_diff_editable_smoke.
     // fractional outer edges. These are the real retained native surfaces.
     var sampled: [2]bool = @splat(false);
     for (marks) |mark| {
-        const side = @intFromEnum(mark.side);
+        const side = @backingInt(mark.side);
         if (sampled[side] or mark.rect.width < 4 or mark.rect.height < 4) continue;
         const colors: viewing.Colors = .{};
         const expected = if (side == 0) colors.deleted_detail else colors.added_detail;

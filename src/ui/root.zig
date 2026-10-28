@@ -328,7 +328,7 @@ test "prepared Escape invokes its exact new front once through the App queue" {
             // Pure backend publication exercises the actual Input/Context transaction;
             // the separate native fixture must also establish renderer success.
             context.commitFrame(window);
-            if (@hasDecl(Context, "postShortcutContinuation")) context.postShortcutContinuation(window);
+            context.postShortcutContinuation(window);
         }
         try std.testing.expectEqual(@as(usize, 0), host.actions);
         switch (lifecycle) {
@@ -1092,7 +1092,7 @@ pub const Context = struct {
         defer pin.end();
         if (self.painting or self.layer_mutating or self.input_state.building) return error.Busy;
         const fields = self.input_state.fields orelse return error.TextFieldsNotPrepared;
-        if (fields.closed or fields.closed_kinds[@intFromEnum(input.text_fields.Kind.control)]) return error.TextFieldsClosed;
+        if (fields.closed or fields.closed_kinds[@backingInt(input.text_fields.Kind.control)]) return error.TextFieldsClosed;
         if (options.lists > fields.slots.len) return error.InvalidNativeCollectionLimits;
         try self.accessibility_bridge.prepareVirtualLists(options);
     }
@@ -2618,11 +2618,11 @@ pub const Context = struct {
             .pointer_down => |value| {
                 workspace.last_up = .{};
                 const valid = raw != null and raw.?.button == value.button;
-                guard = workspace.state.beginDown(.{ .sequence = if (valid) value.press.sequence else 0, .previous_completed_sequence = if (valid) raw.?.previous_completed_sequence else 0, .timing = if (valid) raw.?.timing else null, .point = route_point, .button = @intFromEnum(value.button) }) catch null;
+                guard = workspace.state.beginDown(.{ .sequence = if (valid) value.press.sequence else 0, .previous_completed_sequence = if (valid) raw.?.previous_completed_sequence else 0, .timing = if (valid) raw.?.timing else null, .point = route_point, .button = @backingInt(value.button) }) catch null;
             },
             .pointer_up => |value| {
                 const valid = raw != null and raw.?.button == value.button;
-                guard = workspace.state.beginUp(.{ .sequence = if (valid) value.press.sequence else 0, .point = route_point, .button = @intFromEnum(value.button) }) catch null;
+                guard = workspace.state.beginUp(.{ .sequence = if (valid) value.press.sequence else 0, .point = route_point, .button = @backingInt(value.button) }) catch null;
             },
             else => {},
         }
@@ -3129,13 +3129,23 @@ pub const Frame = struct {
     effect_depth: usize = 0,
 
     pub fn beginShortcutScope(self: *Frame, id: u64, options: ShortcutScopeOptions) !void {
-        errdefer |err| self.failure = self.failure orelse err;
+        return self.beginShortcutScopeBody(id, options) catch |err| {
+            self.failure = self.failure orelse err;
+            return err;
+        };
+    }
+    fn beginShortcutScopeBody(self: *Frame, id: u64, options: ShortcutScopeOptions) !void {
         if (!self.context.input_state.building) return error.NoFrame;
         const workspace = self.context.input_state.scopes orelse return error.ShortcutScopesNotPrepared;
         try workspace.beginScope(id, options);
     }
     pub fn endShortcutScope(self: *Frame) !void {
-        errdefer |err| self.failure = self.failure orelse err;
+        return self.endShortcutScopeBody() catch |err| {
+            self.failure = self.failure orelse err;
+            return err;
+        };
+    }
+    fn endShortcutScopeBody(self: *Frame) !void {
         if (!self.context.input_state.building) return error.NoFrame;
         const workspace = self.context.input_state.scopes orelse return error.ShortcutScopesNotPrepared;
         try workspace.endScope();
@@ -3143,7 +3153,12 @@ pub const Frame = struct {
     /// Attribute this candidate to the explicit preparation of one consumed
     /// Escape. This publishes no authority and never invokes business code.
     pub fn acceptShortcutRequest(self: *Frame, token: ShortcutRequestToken) !void {
-        errdefer |err| self.failure = self.failure orelse err;
+        return self.acceptShortcutRequestBody(token) catch |err| {
+            self.failure = self.failure orelse err;
+            return err;
+        };
+    }
+    fn acceptShortcutRequestBody(self: *Frame, token: ShortcutRequestToken) !void {
         const context = self.context;
         if (!context.input_state.building) return error.NoFrame;
         const workspace = context.input_state.scopes orelse return error.ShortcutScopesNotPrepared;
@@ -3272,18 +3287,23 @@ pub const Frame = struct {
         var depth: usize = 0;
         while (clip) |id| {
             if (depth == affine.max_clip_depth) return error.ClipDepthExceeded;
-            const index = @intFromEnum(id);
+            const index = @backingInt(id);
             if (index >= snapshot.geometry.clip_len) return error.InvalidClip;
             const item = snapshot.geometry.clips[index];
             _ = try snapshot.geometry.getSpace(item.space);
             try item.bounds.validate();
-            if (item.parent) |parent| if (@intFromEnum(parent) >= index) return error.InvalidClip;
+            if (item.parent) |parent| if (@backingInt(parent) >= index) return error.InvalidClip;
             clip = item.parent;
             depth += 1;
         }
     }
     pub fn beginTransform(self: *Frame, source_size: layout.Size, to_parent: affine.Affine) !void {
-        errdefer |err| self.failure = self.failure orelse err;
+        return self.beginTransformBody(source_size, to_parent) catch |err| {
+            self.failure = self.failure orelse err;
+            return err;
+        };
+    }
+    fn beginTransformBody(self: *Frame, source_size: layout.Size, to_parent: affine.Affine) !void {
         const workspace = self.transforms orelse return error.TransformsNotPrepared;
         const options = workspace.options orelse return error.TransformsNotPrepared;
         if (workspace.depth == workspace.frames.len) return error.LayerDepthExceeded;
@@ -3313,7 +3333,12 @@ pub const Frame = struct {
         self.group_geometry_passthrough = 0;
     }
     pub fn endTransform(self: *Frame) !void {
-        errdefer |err| self.failure = self.failure orelse err;
+        return self.endTransformBody() catch |err| {
+            self.failure = self.failure orelse err;
+            return err;
+        };
+    }
+    fn endTransformBody(self: *Frame) !void {
         const workspace = self.transforms orelse return error.TransformsNotPrepared;
         if (workspace.depth == 0) return error.TransformStackEmpty;
         if (self.offset_depth != 0 or self.clips.len != 0 or self.group_depth != 0) return error.UnbalancedTransform;
@@ -3350,7 +3375,12 @@ pub const Frame = struct {
     /// Record the model structure and scroll used for this candidate image.
     /// Failed/cancelled frames preserve the old receipt with the old hits.
     pub fn controlRecipientStamped(self: *Frame, token: ControlToken, bounds: Rect, enabled: bool, receipt: ControlFrame) !void {
-        errdefer |err| self.failure = self.failure orelse err;
+        return self.controlRecipientStampedBody(token, bounds, enabled, receipt) catch |err| {
+            self.failure = self.failure orelse err;
+            return err;
+        };
+    }
+    fn controlRecipientStampedBody(self: *Frame, token: ControlToken, bounds: Rect, enabled: bool, receipt: ControlFrame) !void {
         if (token.context != self.context) return error.ForeignFrame;
         if (!self.context.input_state.building) return error.NoFrame;
         const fields = self.context.input_state.fields orelse return error.TextFieldsNotPrepared;
@@ -3369,7 +3399,12 @@ pub const Frame = struct {
     /// Full immutable native rows attach to the same viewport hit and Window
     /// root. Recording this stage allocates no labels, rows or providers.
     pub noinline fn virtualListRecipient(self: *Frame, token: ControlToken, bounds: Rect, enabled: bool, name: []const u8, receipt: ControlFrame, selection: u64, caret: ?VirtualListCaret) !void {
-        errdefer |err| self.failure = self.failure orelse err;
+        return self.virtualListRecipientBody(token, bounds, enabled, name, receipt, selection, caret) catch |err| {
+            self.failure = self.failure orelse err;
+            return err;
+        };
+    }
+    fn virtualListRecipientBody(self: *Frame, token: ControlToken, bounds: Rect, enabled: bool, name: []const u8, receipt: ControlFrame, selection: u64, caret: ?VirtualListCaret) !void {
         if (comptime builtin.os.tag != .windows) return error.UnsupportedPlatform;
         if (!build_options.accessibility or !self.context.attached_semantics_enabled) return error.AccessibilityNotEnabled;
         try self.controlRecipientStamped(token, bounds, enabled, receipt);
@@ -3378,10 +3413,15 @@ pub const Frame = struct {
         const visible = try snapshot.geometry.visibleBounds(capture.reference, capture.local_bounds);
         try self.context.semantic_tree.addMapped(.{ .id = token.key.id, .role = .list, .name = name, .bounds = if (visible) |value| nativeRect(value) else .{ .x = 0, .y = 0, .width = 0, .height = 0 }, .enabled = enabled, .focused = visible != null and self.context.input_state.focused == token.key.id }, capture.reference, capture.local_bounds);
         const mapping = try accessibility.virtual_lists.math.prepare(&snapshot.geometry, capture.reference, capture.local_bounds);
-        try self.context.accessibility_bridge.stageVirtualList(token.key, receipt.model, selection, .{ .x = capture.local_bounds.x, .y = capture.local_bounds.y, .width = capture.local_bounds.width, .height = capture.local_bounds.height, .scroll = receipt.scroll, .space = @intFromEnum(capture.reference.space), .clip = if (capture.reference.clip) |clip| @intFromEnum(clip) else std.math.maxInt(u32), .caret = if (caret) |value| value.id else 0, .caret_incarnation = if (caret) |value| value.incarnation else 0 }, &mapping);
+        try self.context.accessibility_bridge.stageVirtualList(token.key, receipt.model, selection, .{ .x = capture.local_bounds.x, .y = capture.local_bounds.y, .width = capture.local_bounds.width, .height = capture.local_bounds.height, .scroll = receipt.scroll, .space = @backingInt(capture.reference.space), .clip = if (capture.reference.clip) |clip| @backingInt(clip) else std.math.maxInt(u32), .caret = if (caret) |value| value.id else 0, .caret_incarnation = if (caret) |value| value.incarnation else 0 }, &mapping);
     }
     pub fn textField(self: *Frame, token: TextFieldToken, bounds: Rect, enabled: bool) !void {
-        errdefer |err| self.failure = self.failure orelse err;
+        return self.textFieldBody(token, bounds, enabled) catch |err| {
+            self.failure = self.failure orelse err;
+            return err;
+        };
+    }
+    fn textFieldBody(self: *Frame, token: TextFieldToken, bounds: Rect, enabled: bool) !void {
         if (token.context != self.context) return error.ForeignFrame;
         if (!self.context.input_state.building) return error.NoFrame;
         const fields = self.context.input_state.fields orelse return error.TextFieldsNotPrepared;
@@ -3433,7 +3473,12 @@ pub const Frame = struct {
         self.offset = self.offsets[self.offset_depth];
     }
     pub fn beginGroup(self: *Frame, bounds: Rect, options: layers.Group) !void {
-        errdefer |err| self.failure = self.failure orelse err;
+        return self.beginGroupBody(bounds, options) catch |err| {
+            self.failure = self.failure orelse err;
+            return err;
+        };
+    }
+    fn beginGroupBody(self: *Frame, bounds: Rect, options: layers.Group) !void {
         const absolute_bounds = self.absolute(bounds);
         const snapshot = if (self.transforms) |workspace| try workspace.state.pending() else null;
         const mark = if (snapshot) |value| value.checkpoint() else null;
@@ -3453,7 +3498,12 @@ pub const Frame = struct {
         self.group_depth += 1;
     }
     pub fn endGroup(self: *Frame) !void {
-        errdefer |err| self.failure = self.failure orelse err;
+        return self.endGroupBody() catch |err| {
+            self.failure = self.failure orelse err;
+            return err;
+        };
+    }
+    fn endGroupBody(self: *Frame) !void {
         if (self.group_depth == 0) return error.GroupStackEmpty;
         if (self.group_geometry_passthrough & (@as(u8, 1) << @intCast(self.group_depth - 1)) != 0) return error.GroupStackEmpty;
         try self.context.command_buffer.endGroup();
@@ -3498,7 +3548,12 @@ pub const Frame = struct {
     /// Visual isolation only: source bounds never become hit/semantic clipping.
     /// Parent visual clips are suspended while the body is recorded once.
     pub noinline fn gaussianScope(self: *Frame, bounds: Rect, kernel: gaussian.View, options: layers.Group, state: *anyopaque, body: *const fn (*anyopaque, *Frame) anyerror!void) anyerror!void {
-        errdefer |err| self.failure = self.failure orelse err;
+        return self.gaussianScopeBody(bounds, kernel, options, state, body) catch |err| {
+            self.failure = self.failure orelse err;
+            return err;
+        };
+    }
+    fn gaussianScopeBody(self: *Frame, bounds: Rect, kernel: gaussian.View, options: layers.Group, state: *anyopaque, body: *const fn (*anyopaque, *Frame) anyerror!void) anyerror!void {
         try kernel.validate();
         if (kernel.descriptor.scale != self.size.scale) return error.GaussianDpiMismatch;
         if (self.group_depth == layers.max_depth) return error.GroupStackFull;
@@ -3668,7 +3723,12 @@ pub const Frame = struct {
     /// nested deeper than the layer depth, the content is drawn as it is
     /// and counted as unprepared.
     pub fn beginEffect(self: *Frame, box: Rect, effect: ShaderEffect, options: EffectOptions) !void {
-        errdefer |err| self.failure = self.failure orelse err;
+        return self.beginEffectBody(box, effect, options) catch |err| {
+            self.failure = self.failure orelse err;
+            return err;
+        };
+    }
+    fn beginEffectBody(self: *Frame, box: Rect, effect: ShaderEffect, options: EffectOptions) !void {
         if (self.effect_depth == self.effect_scopes.len) return error.EffectStackFull;
         var entry: shader_effects.Entry = .{ .program = effect.program, .values = effect.values.*, .target = .element, .box = self.absolute(box), .margin = effect.margin, .opacity = options.opacity };
         try shader_effects.validate(entry);
@@ -3689,7 +3749,12 @@ pub const Frame = struct {
         self.effect_depth += 1;
     }
     pub fn endEffect(self: *Frame) !void {
-        errdefer |err| self.failure = self.failure orelse err;
+        return self.endEffectBody() catch |err| {
+            self.failure = self.failure orelse err;
+            return err;
+        };
+    }
+    fn endEffectBody(self: *Frame) !void {
         if (self.effect_depth == 0) return error.EffectStackEmpty;
         if (self.effect_scopes[self.effect_depth - 1]) {
             if (self.group_depth == 0 or self.group_geometry_passthrough & (@as(u8, 1) << @intCast(self.group_depth - 1)) == 0) return error.UnbalancedEffect;
@@ -4801,7 +4866,7 @@ test "Context source hooks pin the old entry and require a matching begin" {
         }
         fn phase(ptr: *anyopaque, _: z.Window, value: AccessibilityPhase) void {
             const self: *@This() = @ptrCast(@alignCast(ptr));
-            self.phases[@intFromEnum(value)] += 1;
+            self.phases[@backingInt(value)] += 1;
             if (value == .frame_begin and self.clear_begin) std.debug.assert(self.context.clearAccessibilitySource(self.token.?) catch unreachable);
         }
         fn position(ptr: *anyopaque, _: z.Window) void {
@@ -5036,10 +5101,10 @@ test "semantic batch is atomic for capacity missing ids malformed peers and fore
     fixture.tree.mapped = &fixture.workspace.state.snapshots[fixture.workspace.state.front];
     try std.testing.expectError(error.InvalidSemanticGeometry, fixture.frame.semanticLocalBoundsFrom(&fixture.tree, &.{7}, &output));
     fixture.tree.mapped = snapshot;
-    snapshot.semantics[2].reference.space = @enumFromInt(999);
+    snapshot.semantics[2].reference.space = @fromBackingInt(@intCast(999));
     try std.testing.expectError(error.InvalidSpace, fixture.frame.semanticLocalBoundsFrom(&fixture.tree, &.{7}, &output));
     snapshot.semantics[2].reference.space = .identity;
-    snapshot.semantics[2].reference.clip = @enumFromInt(999);
+    snapshot.semantics[2].reference.clip = @fromBackingInt(@intCast(999));
     try std.testing.expectError(error.InvalidClip, fixture.frame.semanticLocalBoundsFrom(&fixture.tree, &.{7}, &output));
     snapshot.semantics[2].reference.clip = null;
     snapshot.semantics[2].local_bounds.width = -1;

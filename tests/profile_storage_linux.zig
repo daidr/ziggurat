@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const storage = @import("profile_storage");
 
@@ -42,25 +43,25 @@ fn prepare(allocator: std.mem.Allocator, path: []const u8, limits: storage.Limit
 /// at a pre-existing private Linux filesystem directory, not a mounted host FS.
 fn newPath(case: []const u8) ![]u8 {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
-    const root = std.process.getEnvVarOwned(std.testing.allocator, "ZIGGURAT_PROFILE_TEST_ROOT") catch |err| return if (err == error.EnvironmentVariableNotFound) error.MissingProfileTestRoot else err;
+    const root = zio.getEnvVarOwned(std.testing.allocator, "ZIGGURAT_PROFILE_TEST_ROOT") catch |err| return if (err == error.EnvironmentVariableNotFound) error.MissingProfileTestRoot else err;
     defer std.testing.allocator.free(root);
     if (!std.fs.path.isAbsolute(root)) return error.AbsoluteTestRootRequired;
-    const result = try std.fmt.allocPrint(std.testing.allocator, "{s}/{s}-{x}", .{ root, case, std.crypto.random.int(u64) });
+    const result = try std.fmt.allocPrint(std.testing.allocator, "{s}/{s}-{x}", .{ root, case, zio.random.int(u64) });
     std.debug.print("profile-storage evidence: {s}\n", .{result});
     return result;
 }
 
 fn descriptorCount() !usize {
-    var directory = try std.fs.openDirAbsolute("/proc/self/fd", .{ .iterate = true });
-    defer directory.close();
+    var directory = try std.Io.Dir.openDirAbsolute(zio.io(), "/proc/self/fd", .{ .iterate = true });
+    defer directory.close(zio.io());
     var iterator = directory.iterate();
     var count: usize = 0;
-    while (try iterator.next()) |_| count += 1;
+    while (try iterator.next(zio.io())) |_| count += 1;
     return count;
 }
 
 fn makeRoot(path: []const u8) !void {
-    try std.posix.mkdir(path, 0o700);
+    try zio.posix.mkdir(path, 0o700);
 }
 
 test "private profile directories share one nonblocking lock and retain existing data" {
@@ -74,7 +75,7 @@ test "private profile directories share one nonblocking lock and retain existing
         const paths = try prepared.paths();
         try std.testing.expectEqual(@as(usize, 5), (try prepared.stats()).native_handles);
         try std.testing.expectEqual(before + 5, try descriptorCount());
-        for (prepared.fds) |fd| try std.testing.expect((try std.posix.fcntl(fd, std.posix.F.GETFD, 0)) & std.posix.FD_CLOEXEC != 0);
+        for (prepared.fds) |fd| try std.testing.expect((try zio.posix.fcntl(fd, std.posix.F.GETFD, 0)) & std.posix.FD_CLOEXEC != 0);
         try std.testing.expectError(error.ProfileStorageInUse, prepare(std.testing.allocator, path, .{}));
         try std.testing.expectEqual(before + 5, try descriptorCount());
         const lease = try prepared.acquire();
@@ -82,19 +83,19 @@ test "private profile directories share one nonblocking lock and retain existing
         try lease.release();
         const marker = try std.fmt.allocPrint(std.testing.allocator, "{s}/preserved", .{paths.data});
         defer std.testing.allocator.free(marker);
-        const file = try std.fs.createFileAbsolute(marker, .{ .mode = 0o600, .exclusive = true });
-        try file.writeAll("keep existing data");
-        file.close();
+        const file = try std.Io.Dir.createFileAbsolute(zio.io(), marker, .{ .permissions = zio.mode(0o600), .exclusive = true });
+        try file.writeStreamingAll(zio.io(), "keep existing data");
+        file.close(zio.io());
     }
     try std.testing.expectEqual(before, try descriptorCount());
     var reopened = try prepare(std.testing.allocator, path, .{});
     defer reopened.close() catch unreachable;
     const marker = try std.fmt.allocPrint(std.testing.allocator, "{s}/preserved", .{(try reopened.paths()).data});
     defer std.testing.allocator.free(marker);
-    const file = try std.fs.openFileAbsolute(marker, .{});
-    defer file.close();
+    const file = try std.Io.Dir.openFileAbsolute(zio.io(), marker, .{});
+    defer file.close(zio.io());
     var bytes: [32]u8 = undefined;
-    const length = try file.readAll(&bytes);
+    const length = try zio.readAll(file, &bytes);
     try std.testing.expectEqualStrings("keep existing data", bytes[0..length]);
 }
 
@@ -106,7 +107,7 @@ test "profile root ancestors and fixed children cannot redirect through symlinks
     try original.close();
     const alias = try newPath("symlink-root");
     defer std.testing.allocator.free(alias);
-    try std.posix.symlink(target, alias);
+    try zio.posix.symlink(target, alias);
     const before = try descriptorCount();
     if (prepare(std.testing.allocator, alias, .{})) |value| {
         var unexpected = value;
@@ -126,7 +127,7 @@ test "profile root ancestors and fixed children cannot redirect through symlinks
         try makeRoot(path);
         const child = try std.fmt.allocPrint(std.testing.allocator, "{s}/{s}", .{ path, name });
         defer std.testing.allocator.free(child);
-        try std.posix.symlink(target, child);
+        try zio.posix.symlink(target, child);
         if (prepare(std.testing.allocator, path, .{})) |value| {
             var unexpected = value;
             try unexpected.close();
@@ -141,25 +142,25 @@ test "profile preparation rejects insecure modes hardlinks and missing ancestors
     const path = try newPath("permissions");
     defer std.testing.allocator.free(path);
     try makeRoot(path);
-    var directory = try std.fs.openDirAbsolute(path, .{ .iterate = true });
-    defer directory.close();
-    try std.posix.fchmod(directory.fd, 0o755);
+    var directory = try std.Io.Dir.openDirAbsolute(zio.io(), path, .{ .iterate = true });
+    defer directory.close(zio.io());
+    try zio.posix.fchmod(directory.handle, 0o755);
     try std.testing.expectError(error.InsecureProfileStoragePermissions, prepare(std.testing.allocator, path, .{}));
-    try std.posix.fchmod(directory.fd, 0o700);
+    try zio.posix.fchmod(directory.handle, 0o700);
     var prepared = try prepare(std.testing.allocator, path, .{});
     const data_path = try std.testing.allocator.dupe(u8, (try prepared.paths()).data);
     defer std.testing.allocator.free(data_path);
     try prepared.close();
-    var data = try std.fs.openDirAbsolute(data_path, .{ .iterate = true });
-    defer data.close();
-    try std.posix.fchmod(data.fd, 0o500);
+    var data = try std.Io.Dir.openDirAbsolute(zio.io(), data_path, .{ .iterate = true });
+    defer data.close(zio.io());
+    try zio.posix.fchmod(data.handle, 0o500);
     try std.testing.expectError(error.InsecureProfileStoragePermissions, prepare(std.testing.allocator, path, .{}));
-    try std.posix.fchmod(data.fd, 0o700);
+    try zio.posix.fchmod(data.handle, 0o700);
     const external = try std.fmt.allocPrint(std.testing.allocator, "{s}/duplicate-cookie", .{path});
     defer std.testing.allocator.free(external);
     const cookies = try std.fmt.allocPrint(std.testing.allocator, "{s}/cookies.sqlite", .{path});
     defer std.testing.allocator.free(cookies);
-    try std.posix.link(cookies, external);
+    try std.Io.Dir.cwd().hardLink(cookies, std.Io.Dir.cwd(), external, zio.io(), .{});
     try std.testing.expectError(error.LinkedProfileStorageFile, prepare(std.testing.allocator, path, .{}));
     const missing = try newPath("missing");
     defer std.testing.allocator.free(missing);
@@ -184,7 +185,7 @@ test "all profile metadata allocations fail before filesystem mutation and retur
         } else |err| {
             try std.testing.expectEqual(error.OutOfMemory, err);
             try std.testing.expect(failing.has_induced_failure);
-            try std.testing.expectError(error.FileNotFound, std.fs.openDirAbsolute(path, .{}));
+            try std.testing.expectError(error.FileNotFound, std.Io.Dir.openDirAbsolute(zio.io(), path, .{}));
         }
         try std.testing.expectEqual(before, try descriptorCount());
         if (offset >= 8) return error.AllocationSweepLimit;
@@ -237,12 +238,12 @@ test "adopted profile rejects foreign threads and duplicated lock ownership surv
     thread.join();
     // A later native owner can retain this open-file-description without a
     // callback to Prepared. close must not issue LOCK_UN on the shared lock.
-    const duplicate = try std.posix.dup(prepared.fds[1]);
-    _ = try std.posix.fcntl(duplicate, std.posix.F.SETFD, std.posix.FD_CLOEXEC);
+    const duplicate = try zio.posix.dup(prepared.fds[1]);
+    _ = try zio.posix.fcntl(duplicate, std.posix.F.SETFD, std.posix.FD_CLOEXEC);
     try prepared.close();
     try std.testing.expectError(error.ProfileStorageInUse, prepare(std.testing.allocator, path, .{}));
     try std.testing.expectEqual(before + 1, try descriptorCount());
-    std.posix.close(duplicate);
+    zio.posix.close(duplicate);
     var reopened = try prepare(std.testing.allocator, path, .{});
     try reopened.close();
     try std.testing.expectEqual(before, try descriptorCount());

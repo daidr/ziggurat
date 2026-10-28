@@ -1,16 +1,12 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const d = @import("ziggurat_document");
 const t = @import("ziggurat_text_layout");
 const editing = @import("ziggurat_document_editor");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-    @cInclude("uiautomation.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn gtk_bin_get_child(*anyopaque) ?*anyopaque;
 extern fn gtk_widget_get_window(*anyopaque) ?*anyopaque;
 extern fn gtk_widget_grab_focus(*anyopaque) void;
@@ -631,10 +627,10 @@ fn isolatedWindows() !void {
         return error.TestProcessFailed;
     }
 }
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
-    var args = try std.process.argsWithAllocator(gpa.allocator());
+    var args = try init.args.iterateAllocator(gpa.allocator());
     defer args.deinit();
     _ = args.next();
     var child = false;
@@ -644,7 +640,7 @@ pub fn main() !void {
     }
     if (args.next() != null) return error.InvalidArgument;
     if (builtin.os.tag == .windows and !child) return isolatedWindows();
-    const only = std.process.getEnvVarOwned(gpa.allocator(), "ZIGGURAT_FIELD_CASE") catch |err| switch (err) {
+    const only = zio.getEnvVarOwned(gpa.allocator(), "ZIGGURAT_FIELD_CASE") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => null,
         else => return err,
     };

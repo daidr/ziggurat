@@ -1,13 +1,10 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const resources = ui.gpu_resources;
-const c = @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 const Memory = extern struct {
     cb: u32 = @sizeOf(Memory),
     faults: u32 = 0,
@@ -123,7 +120,7 @@ fn measure(child: std.mem.Allocator, driver: resources.Driver, windows: usize, s
     const levels = [_]ui.drawing.ImageLevel{.{ .pixels = pixels.ptr, .byte_len = pixels.len, .width = 256, .height = 256, .stride = 1024 }};
     const image: ui.drawing.ImageView = .{ .lease = &lease, .identity = try ui.drawing.reserveRasterIdentity(), .levels = &levels };
     const before = try memory();
-    var timer = try std.time.Timer.start();
+    var timer = try zio.Timer.start();
     const domain_count = if (shared) 1 else windows;
     for (0..domain_count) |index| {
         domains[index] = try resources.DeviceDomain.create(app, allocator, .{ .driver = driver, .texture_bytes = pixels.len, .total_bytes = 4 * 1024 * 1024 });
@@ -211,12 +208,12 @@ fn cleanup(slots: []Slot, textures: *[8]?*resources.Texture, domains: *[8]?*reso
         domain.* = null;
     };
 }
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var debug: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(debug.deinit() == .ok);
     const allocator = debug.allocator();
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try zio.argsAlloc(allocator, init.args);
+    defer zio.argsFree(allocator, args);
     var driver: resources.Driver = .hardware;
     var repetitions: usize = 3;
     var output: ?[]const u8 = null;
@@ -238,7 +235,7 @@ pub fn main() !void {
     };
     const json = try std.json.Stringify.valueAlloc(allocator, .{ .schema = 1, .os = "windows", .arch = @tagName(builtin.cpu.arch), .optimize = @tagName(builtin.mode), .driver = @tagName(driver), .hidden_windows = true, .rounds = 64, .warmup_rounds = 8, .workload = "one fill and sixteen draws of one explicitly uploaded 256x256 premultiplied BGRA texture per 320x180 render target, scale 1", .setup_scope = "Domain creation and upload through first native begin/replay/end in every window; excludes App/source/command-storage construction", .timing_scope = "CPU wall time for a round of begin/replay/end submissions, including busy/occluded Present; no fence, readback, event-loop wait or display-latency measurement", .memory_scope = "whole-process samples; includes driver and OS caches and the benchmark harness; after is before App/source/harness allocator teardown; logical reservations are separate", .allocator_scope = "explicit Zig allocator calls only; native libraries and driver allocations are not intercepted", .ordering = "shared first on even trials, isolated first on odd trials; all trials in one process, so setup is not a clean process/driver cold-start comparison", .samples = samples.items }, .{ .whitespace = .indent_2 });
     defer allocator.free(json);
-    if (output) |path| try std.fs.cwd().writeFile(.{ .sub_path = path, .data = json });
-    try std.fs.File.stdout().writeAll(json);
-    try std.fs.File.stdout().writeAll("\n");
+    if (output) |path| try std.Io.Dir.cwd().writeFile(zio.io(), .{ .sub_path = path, .data = json });
+    try std.Io.File.stdout().writeStreamingAll(zio.io(), json);
+    try std.Io.File.stdout().writeStreamingAll(zio.io(), "\n");
 }

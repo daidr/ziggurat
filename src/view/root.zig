@@ -3,6 +3,7 @@
 //! flex layout and records the resulting frame. Widgets bind directly to
 //! application values and report activation as ordinary return values.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const animation = @import("ziggurat_animation");
@@ -1386,9 +1387,8 @@ pub const View = struct {
 
     /// Note the calls that are building the element the inspector shows.
     noinline fn noteSource(self: *View) void {
-        var trace: std.builtin.StackTrace = .{ .instruction_addresses = &self.source_trace, .index = 0 };
-        std.debug.captureStackTrace(@returnAddress(), &trace);
-        self.source_len = @min(trace.index, self.source_trace.len);
+        const trace = std.debug.captureCurrentStackTrace(.{ .first_address = @returnAddress() }, &self.source_trace);
+        self.source_len = trace.return_addresses.len;
     }
 
     fn copy(self: *View, value: []const u8) Error![]const u8 {
@@ -2079,12 +2079,12 @@ pub const View = struct {
             },
             .value => |value| if (node.style.enabled and value.change == .set) {
                 const code = value.change.set;
-                if (code == @intFromEnum(ItemRequest.deselect)) {
+                if (code == @backingInt(ItemRequest.deselect)) {
                     _ = selection.remove(id);
-                } else if (code == @intFromEnum(ItemRequest.add)) {
+                } else if (code == @backingInt(ItemRequest.add)) {
                     try selection.add(id);
-                } else if (code == @intFromEnum(ItemRequest.collapse) or code == @intFromEnum(ItemRequest.expand)) {
-                    if (expanded) |flag| flag.* = code == @intFromEnum(ItemRequest.expand);
+                } else if (code == @backingInt(ItemRequest.collapse) or code == @backingInt(ItemRequest.expand)) {
+                    if (expanded) |flag| flag.* = code == @backingInt(ItemRequest.expand);
                 }
             },
             else => {},
@@ -2762,9 +2762,9 @@ pub const View = struct {
     }
     /// The lowercased letter or digit a key types, if any.
     fn keyInitial(code: z.KeyCode) ?u8 {
-        const value = @intFromEnum(code);
-        if (value >= @intFromEnum(z.KeyCode.a) and value <= @intFromEnum(z.KeyCode.z)) return 'a' + @as(u8, @intCast(value - @intFromEnum(z.KeyCode.a)));
-        if (value >= @intFromEnum(z.KeyCode.digit0) and value <= @intFromEnum(z.KeyCode.digit9)) return '0' + @as(u8, @intCast(value - @intFromEnum(z.KeyCode.digit0)));
+        const value = @backingInt(code);
+        if (value >= @backingInt(z.KeyCode.a) and value <= @backingInt(z.KeyCode.z)) return 'a' + @as(u8, @intCast(value - @backingInt(z.KeyCode.a)));
+        if (value >= @backingInt(z.KeyCode.digit0) and value <= @backingInt(z.KeyCode.digit9)) return '0' + @as(u8, @intCast(value - @backingInt(z.KeyCode.digit0)));
         return null;
     }
     fn rowEvent(_: *const View, target: Overlay.Row, op: ItemOp, anchor: ?u64) KeyRoute {
@@ -4975,7 +4975,7 @@ pub const Host = struct {
     /// The first error from the most recent pass, kept for diagnostics.
     last_error: ?anyerror = null,
     frames: usize = 0,
-    timer: ?std.time.Timer = null,
+    timer: ?zio.Timer = null,
     scheduler: ?Scheduler = null,
     /// The deadline last handed to the scheduler.
     scheduled: ?u64 = null,
@@ -5005,7 +5005,7 @@ pub const Host = struct {
     /// The time the next pass will see, in nanoseconds.
     pub fn time(self: *Host) u64 {
         if (self.options.clock) |clock| return clock.now(clock.context);
-        if (self.timer == null) self.timer = std.time.Timer.start() catch return 0;
+        if (self.timer == null) self.timer = zio.Timer.start() catch return 0;
         return self.timer.?.read();
     }
     /// Install or remove the timer that serves the build's deadlines; the
@@ -5449,7 +5449,7 @@ pub const Host = struct {
         self.frames += 1;
     }
     fn render(self: *Host, frame: *ui.Frame, theme: Theme) anyerror!void {
-        var lap: ?std.time.Timer = if (self.options.tools()) |tools| if (tools.open) std.time.Timer.start() catch null else null else null;
+        var lap = if (self.options.tools()) |tools| if (tools.open) zio.Timer.start() catch null else null else null;
         const built: u64 = blk: {
             if (self.options.tools()) |tools| {
                 self.view.layout_direction = tools.direction_override orelse self.options.direction;

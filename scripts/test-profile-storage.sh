@@ -7,10 +7,10 @@ if [[ "$(uname -s)" != Linux ]]; then
 fi
 zig_bin="${ZIG_BIN:-$(command -v zig || true)}"
 if [[ -z "$zig_bin" ]]; then
-    zig_bin="$HOME/.cache/ziggurat/zig-x86_64-linux-0.15.2/zig"
+    zig_bin="$HOME/.cache/ziggurat/zig-x86_64-linux-0.17.0/zig"
 fi
-if [[ "$("$zig_bin" version)" != 0.15.2 ]]; then
-    printf '%s\n' 'Profile checks require Zig 0.15.2.' >&2
+if [[ "$("$zig_bin" version)" != 0.17.0 ]]; then
+    printf '%s\n' 'Profile checks require Zig 0.17.0.' >&2
     exit 2
 fi
 source "$project/scripts/linux-cache-env.sh"
@@ -24,5 +24,5 @@ linux_cache_filesystem "$ZIGGURAT_PROFILE_TEST_ROOT"
 mkdir -p -- "$ZIGGURAT_PROFILE_TEST_ROOT"
 cd "$project"
 exec "$zig_bin" build test-profile-storage test-profile-storage-files \
-    -j1 --cache-dir "$ZIG_LOCAL_CACHE_DIR" --global-cache-dir "$ZIG_GLOBAL_CACHE_DIR" \
+    -j1 --cache-dir "$ZIG_LOCAL_CACHE_DIR" \
     --prefix .zig-cache/managed/profile-storage-out --summary all "$@"

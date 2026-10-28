@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 
 /// Private math boundary. Both input and output are copied POD values; this
 /// code has no Window, Context, allocator, registration or foreign callbacks.
@@ -111,7 +112,7 @@ pub fn Geometry(comptime a: type) type {
                 .width = window_bounds.width * scale,
                 .height = window_bounds.height * scale,
             }, .visible = 1 };
-            inline for (std.meta.fields(Rect)) |field| if (!std.math.isFinite(@field(result.rect, field.name))) return error.GeometryOverflow;
+            inline for (zio.fields(Rect)) |field| if (!std.math.isFinite(@field(result.rect, field.name))) return error.GeometryOverflow;
             if (!std.math.isFinite(result.rect.x + result.rect.width) or !std.math.isFinite(result.rect.y + result.rect.height)) return error.GeometryOverflow;
             output.* = if (result.rect.width > 0 and result.rect.height > 0) result else .{};
         }

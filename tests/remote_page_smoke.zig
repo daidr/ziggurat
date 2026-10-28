@@ -1,11 +1,12 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
 
 // Private test server only. No framework HTTP server or worker is introduced.
 pub const Server = struct {
-    listener: std.net.Server,
+    listener: std.Io.net.Server,
     thread: ?std.Thread = null,
     stop_requested: std.atomic.Value(bool) = .init(false),
     requests: std.atomic.Value(u32) = .init(0),
@@ -18,29 +19,29 @@ pub const Server = struct {
     pub fn stop(self: *Server) void {
         if (self.thread) |thread| {
             self.stop_requested.store(true, .release);
-            const wake = std.net.tcpConnectToAddress(self.listener.listen_address) catch unreachable;
-            wake.close();
+            const wake = self.listener.socket.address.connect(zio.io(), .{ .mode = .stream }) catch unreachable;
+            wake.close(zio.io());
             thread.join();
             self.thread = null;
         }
-        self.listener.deinit();
+        self.listener.deinit(zio.io());
     }
     fn run(self: *Server) void {
         while (true) {
-            const connection = self.listener.accept() catch return;
-            defer connection.stream.close();
+            const connection = self.listener.accept(zio.io()) catch return;
+            defer connection.close(zio.io());
             if (self.stop_requested.load(.acquire)) return;
-            self.serve(connection.stream) catch |err| {
+            self.serve(connection) catch |err| {
                 std.debug.print("private server: {s}\n", .{@errorName(err)});
             };
         }
     }
-    fn serve(self: *Server, stream: std.net.Stream) !void {
+    fn serve(self: *Server, stream: std.Io.net.Stream) !void {
         var buffer: [8192]u8 = undefined;
         var used: usize = 0;
         while (std.mem.indexOf(u8, buffer[0..used], "\r\n\r\n") == null) {
             if (used == buffer.len) return error.RequestTooLarge;
-            const n = try std.posix.recv(stream.handle, buffer[used..], 0);
+            const n = try zio.net.receive(stream.socket.handle, buffer[used..]);
             if (n == 0) return;
             used += n;
         }
@@ -62,8 +63,8 @@ pub const Server = struct {
             try std.fmt.bufPrint(&headers, "HTTP/1.1 302 Found\r\nLocation: /trusted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{})
         else
             try std.fmt.bufPrint(&headers, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{body.len});
-        try stream.writeAll(head);
-        if (!std.mem.eql(u8, path, "/redirect")) try stream.writeAll(body);
+        try zio.net.sendAll(stream.socket.handle, head);
+        if (!std.mem.eql(u8, path, "/redirect")) try zio.net.sendAll(stream.socket.handle, body);
     }
 };
 
@@ -226,18 +227,18 @@ fn verifyReleased(app: *z.App) !void {
     try std.testing.expectEqual(@as(u32, 0), counts.handlers);
     try std.testing.expectEqual(@as(u32, 0), counts.controllers);
 }
-fn runSnapshot(allocator: std.mem.Allocator, directory: std.fs.Dir, profile: []const u8) !void {
-    const document = try directory.createFile("页面.html", .{ .read = true });
-    defer document.close();
-    try document.writeAll("<title>private file snapshot</title><script>fetch('/asset.txt').then(r=>r.text()).then(t=>{if(t==='private-file-bytes')chrome.webview.postMessage('snapshot-ok')})</script>");
-    const asset = try directory.createFile("资源.txt", .{ .read = true });
-    defer asset.close();
-    try asset.writeAll("private-file-bytes");
+fn runSnapshot(allocator: std.mem.Allocator, directory: std.Io.Dir, profile: []const u8) !void {
+    const document = try directory.createFile(zio.io(), "页面.html", .{ .read = true });
+    defer document.close(zio.io());
+    try document.writeStreamingAll(zio.io(), "<title>private file snapshot</title><script>fetch('/asset.txt').then(r=>r.text()).then(t=>{if(t==='private-file-bytes')chrome.webview.postMessage('snapshot-ok')})</script>");
+    const asset = try directory.createFile(zio.io(), "资源.txt", .{ .read = true });
+    defer asset.close(zio.io());
+    try asset.writeStreamingAll(zio.io(), "private-file-bytes");
     const Probe = struct {
         allocator: std.mem.Allocator,
         main: std.Thread.Id,
-        document: std.fs.File,
-        asset: std.fs.File,
+        document: std.Io.File,
+        asset: std.Io.File,
         snapshot: ?web.snapshots.FileSnapshot = null,
         err: ?anyerror = null,
         fn run(self: *@This()) void {
@@ -255,7 +256,7 @@ fn runSnapshot(allocator: std.mem.Allocator, directory: std.fs.Dir, profile: []c
     var snapshot = probe.snapshot.?;
     defer snapshot.deinit();
     // A later write cannot alter the immutable bytes served by the View.
-    try asset.pwriteAll("changed-after-snapshot", 0);
+    try asset.writePositionalAll(zio.io(), "changed-after-snapshot", 0);
     const app = try z.App.init(allocator);
     defer app.deinit();
     var view: web.View = undefined;
@@ -276,20 +277,20 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    var private = std.testing.tmpDir(.{});
+    var private = zio.tmpDir(.{});
     defer private.cleanup();
-    const local = try std.process.getEnvVarOwned(allocator, "LOCALAPPDATA");
+    const local = try zio.getEnvVarOwned(allocator, "LOCALAPPDATA");
     defer allocator.free(local);
     const profile = try std.fs.path.join(allocator, &.{ local, "Ziggurat", "RemotePageSmoke" });
     defer allocator.free(profile);
-    const bind = try std.net.Address.parseIp4("127.0.0.1", 0);
-    var allowed: Server = .{ .listener = try bind.listen(.{}) };
+    const bind = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var allowed: Server = .{ .listener = try bind.listen(zio.io(), .{}) };
     defer allowed.stop();
-    var forbidden: Server = .{ .listener = try bind.listen(.{}) };
+    var forbidden: Server = .{ .listener = try bind.listen(zio.io(), .{}) };
     defer forbidden.stop();
-    const base = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{allowed.listener.listen_address.getPort()});
+    const base = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{allowed.listener.socket.address.getPort()});
     defer allocator.free(base);
-    const unlisted = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/leak", .{forbidden.listener.listen_address.getPort()});
+    const unlisted = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/leak", .{forbidden.listener.socket.address.getPort()});
     defer allocator.free(unlisted);
     allowed.start_html = try std.fmt.allocPrint(allocator,
         \\<title>starting</title><iframe src="/frame"></iframe><script>

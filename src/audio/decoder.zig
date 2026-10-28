@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 
 /// Failures of inputs, decoders and the formats that open them.
 pub const Error = error{
@@ -87,14 +88,14 @@ pub const BytesInput = struct {
 /// A file as an Input, read through a buffer of its own. The input does not
 /// close the file.
 pub const FileInput = struct {
-    file: std.fs.File,
+    file: std.Io.File,
     buffer: [16 * 1024]u8 = undefined,
     start: usize = 0,
     end: usize = 0,
     /// File offset of `buffer[end]`.
     offset: u64 = 0,
 
-    pub fn init(file: std.fs.File) FileInput {
+    pub fn init(file: std.Io.File) FileInput {
         return .{ .file = file };
     }
 
@@ -108,11 +109,11 @@ pub const FileInput = struct {
         const self: *FileInput = @ptrCast(@alignCast(context));
         if (self.start == self.end) {
             if (out.len >= self.buffer.len) {
-                const count = self.file.pread(out, self.offset) catch return error.ReadFailed;
+                const count = self.file.readPositional(zio.io(), &.{out}, self.offset) catch return error.ReadFailed;
                 self.offset += count;
                 return count;
             }
-            const count = self.file.pread(&self.buffer, self.offset) catch return error.ReadFailed;
+            const count = self.file.readPositional(zio.io(), &.{&self.buffer}, self.offset) catch return error.ReadFailed;
             self.offset += count;
             self.start = 0;
             self.end = count;
@@ -138,7 +139,7 @@ pub const FileInput = struct {
 
     fn sizeFn(context: *anyopaque) Error!u64 {
         const self: *FileInput = @ptrCast(@alignCast(context));
-        const stat = self.file.stat() catch return error.ReadFailed;
+        const stat = self.file.stat(zio.io()) catch return error.ReadFailed;
         return stat.size;
     }
 };
@@ -235,9 +236,9 @@ test "file input reads through its buffer and seeks" {
     defer dir.cleanup();
     var data: [40000]u8 = undefined;
     for (&data, 0..) |*byte, index| byte.* = @truncate(index * 7);
-    try dir.dir.writeFile(.{ .sub_path = "data", .data = &data });
-    const file = try dir.dir.openFile("data", .{});
-    defer file.close();
+    try dir.dir.writeFile(zio.io(), .{ .sub_path = "data", .data = &data });
+    const file = try dir.dir.openFile(zio.io(), "data", .{});
+    defer file.close(zio.io());
     var file_input = FileInput.init(file);
     const input = file_input.input();
     try std.testing.expectEqual(@as(u64, data.len), try input.size());

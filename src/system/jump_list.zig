@@ -9,6 +9,7 @@
 //! that acts on the application is best one of its own URL schemes as the
 //! argument: with `instance.claimOrForward` the running instance receives it.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const identity = @import("identity.zig");
 const integration = @import("integration.zig");
@@ -90,7 +91,7 @@ pub fn setTasks(allocator: std.mem.Allocator, tasks: []const Task, options: Opti
         if (ziggurat_system_jump_list_delete(app_id) < 0) return error.JumpListUnavailable;
         return;
     }
-    const self_path = try std.fs.selfExePathAlloc(arena);
+    const self_path = try zio.executablePathAlloc(arena);
     var list: ?*anyopaque = null;
     if (ziggurat_system_jump_list_begin(app_id, &list) < 0) return error.JumpListUnavailable;
     var committed = false;
@@ -125,7 +126,7 @@ test "jump list tasks are validated before the system is touched" {
     try std.testing.expectError(error.InvalidText, validate(&.{.{ .title = "a\nb" }}, .{}));
     try std.testing.expectError(error.RelativePath, validate(&.{.{ .title = "a", .path = "bin/app" }}, .{}));
     try std.testing.expectError(error.InvalidIdentity, validate(&.{ok}, .{ .app_id = "bad id" }));
-    const many = [_]Task{ok} ** (max_tasks + 1);
+    const many: [max_tasks + 1]Task = @splat(ok);
     try std.testing.expectError(error.TooManyTasks, validate(&many, .{}));
 }
 

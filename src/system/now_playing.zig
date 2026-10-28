@@ -14,6 +14,7 @@
 //! Every call runs on the App owner thread, and so does `on_command`. One
 //! NowPlaying shows at a time in a process.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 
@@ -55,8 +56,8 @@ pub const Commands = struct {
 
     pub fn bits(self: Commands) u32 {
         var value: u32 = 0;
-        inline for (std.meta.fields(Command)) |field| {
-            if (@field(self, field.name)) value |= bit(@enumFromInt(field.value));
+        inline for (zio.fields(Command)) |field| {
+            if (@field(self, field.name)) value |= bit(@fromBackingInt(@intCast(field.value)));
         }
         return value;
     }
@@ -180,7 +181,7 @@ pub const NowPlaying = struct {
     /// Owns the info's strings and artwork.
     storage: []u8 = &.{},
     /// When `info.position_ns` was.
-    at: ?std.time.Instant = null,
+    at: ?zio.Instant = null,
     player: ?Player = null,
 
     pub fn init(allocator: std.mem.Allocator, context: *anyopaque, on_command: *const fn (*anyopaque, Command, u64) void) NowPlaying {
@@ -254,7 +255,7 @@ pub const NowPlaying = struct {
         self.allocator.free(self.storage);
         self.storage = storage;
         self.info = copy;
-        self.at = std.time.Instant.now() catch null;
+        self.at = zio.Instant.now() catch null;
         self.showing = true;
         _ = self.syncPlayer();
         self.apply();
@@ -267,7 +268,7 @@ pub const NowPlaying = struct {
         app.assertOwner();
         self.info.state = state;
         self.info.position_ns = position_ns;
-        self.at = std.time.Instant.now() catch null;
+        self.at = zio.Instant.now() catch null;
         if (self.showing) self.apply();
     }
 
@@ -323,7 +324,7 @@ pub const NowPlaying = struct {
             .paused;
         self.info.position_ns = position_ns;
         self.info.duration_ns = duration_ns;
-        self.at = std.time.Instant.now() catch null;
+        self.at = zio.Instant.now() catch null;
         return true;
     }
 
@@ -334,7 +335,7 @@ pub const NowPlaying = struct {
     /// Where playback is now.
     pub fn position(self: *const NowPlaying) u64 {
         var value: f64 = @floatFromInt(self.info.position_ns);
-        if (self.info.state == .playing) if (self.at) |at| if (std.time.Instant.now()) |now| {
+        if (self.info.state == .playing) if (self.at) |at| if (zio.Instant.now()) |now| {
             value += @as(f64, @floatFromInt(now.since(at))) * self.rate();
         } else |_| {};
         var result: u64 = @intFromFloat(@min(value, @as(f64, @floatFromInt(std.math.maxInt(u63)))));
@@ -469,7 +470,7 @@ const linux = struct {
             .duration_us = @intCast(value.duration_ns / std.time.ns_per_us),
             .position_us = @intCast(value.position_ns / std.time.ns_per_us),
             .rate = value.rate,
-            .state = @intFromEnum(value.state),
+            .state = @backingInt(value.state),
             .commands = value.commands,
         };
         _ = znp_set(&c_info, received);
@@ -494,10 +495,10 @@ test "commands default to play, pause and stop, with seek for a controlled playe
 test "the position advances at the rate while playing, within the track" {
     var now = NowPlaying.init(std.testing.allocator, undefined, undefined);
     now.info = .{ .position_ns = 5, .duration_ns = 10, .state = .paused };
-    now.at = try std.time.Instant.now();
+    now.at = try zio.Instant.now();
     try std.testing.expectEqual(@as(u64, 5), now.position());
     now.info.state = .playing;
     now.info.rate = 1e12;
-    std.Thread.sleep(1000);
+    zio.sleep(1000);
     try std.testing.expectEqual(@as(u64, 10), now.position());
 }

@@ -2,6 +2,7 @@
 //! application overrides. Formats name their arguments in braces, such as
 //! `{app}`, so a translation can order them as its grammar needs.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 
 /// One language. Empty fields fall back to the shipped language, then to
 /// English. Placeholders: `{app}` application name, `{version}` the new
@@ -46,7 +47,7 @@ pub const Strings = struct {
     /// Fills empty fields from `fallback`.
     pub fn merge(self: Strings, fallback: Strings) Strings {
         var result = self;
-        inline for (std.meta.fields(Strings)) |field| {
+        inline for (zio.fields(Strings)) |field| {
             if (@field(result, field.name).len == 0) @field(result, field.name) = @field(fallback, field.name);
         }
         return result;
@@ -514,7 +515,7 @@ pub fn shipped(locale: []const u8) Language {
 }
 
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    return std.ascii.indexOfIgnoreCase(haystack, needle) != null;
+    return std.ascii.findIgnoreCase(haystack, needle) != null;
 }
 
 pub fn find(tag: []const u8) ?Language {
@@ -570,10 +571,10 @@ pub fn megabytes(destination: []u8, bytes: u64, decimal: []const u8) ![]const u8
 const testing = std.testing;
 
 test "every shipped language fills every field and keeps the placeholders" {
-    inline for (std.meta.fields(Strings)) |field| try testing.expect(@field(english, field.name).len > 0);
+    inline for (zio.fields(Strings)) |field| try testing.expect(@field(english, field.name).len > 0);
     for (languages) |language| {
         const strings = language.strings.merge(english);
-        inline for (std.meta.fields(Strings)) |field| {
+        inline for (zio.fields(Strings)) |field| {
             const text = @field(strings, field.name);
             const reference = @field(english, field.name);
             try testing.expect(std.unicode.utf8ValidateSlice(text));

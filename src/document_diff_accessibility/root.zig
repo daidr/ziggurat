@@ -164,7 +164,12 @@ pub const Bridge = struct {
     /// Pair drawing and recording prevents arming geometry for an omitted source.
     /// Commands, input and native geometry still commit only on successful front.
     pub fn draw(self: *Bridge, frame: *ui.Frame, colors: diff.Colors) !void {
-        errdefer |err| frame.failure = frame.failure orelse err;
+        return self.drawBody(frame, colors) catch |err| {
+            frame.failure = frame.failure orelse err;
+            return err;
+        };
+    }
+    fn drawBody(self: *Bridge, frame: *ui.Frame, colors: diff.Colors) !void {
         try self.checked();
         const scope = self.window.beginCallback() orelse return error.Closed;
         defer scope.end();
@@ -184,7 +189,12 @@ pub const Bridge = struct {
     }
     /// Use after drawing the same prepared Diff when integrating custom marks.
     pub fn record(self: *Bridge, frame: *ui.Frame) !void {
-        errdefer |err| frame.failure = frame.failure orelse err;
+        return self.recordBody(frame) catch |err| {
+            frame.failure = frame.failure orelse err;
+            return err;
+        };
+    }
+    fn recordBody(self: *Bridge, frame: *ui.Frame) !void {
         try self.checked();
         try self.recordCheck();
         try self.native.?.recordGeometry(frame);
@@ -463,13 +473,13 @@ pub const Bridge = struct {
         self.busy = true;
         defer self.busy = false;
         if (self.context) |context| try context.blurControls();
-        try self.view.focusPresented(self.prepared_epoch, @enumFromInt(source));
+        try self.view.focusPresented(self.prepared_epoch, @fromBackingInt(@intCast(source)));
     }
     fn selectAction(ptr: *anyopaque, window: z.Window, source: usize, selections: []const d.Selection, primary: usize) !void {
         const self: *Bridge = @ptrCast(@alignCast(ptr));
         self.busy = true;
         defer self.busy = false;
-        const result = try self.view.selectPresented(self.prepared_epoch, @enumFromInt(source), selections, primary);
+        const result = try self.view.selectPresented(self.prepared_epoch, @fromBackingInt(@intCast(source)), selections, primary);
         self.needs_prepare = true;
         if (result.presentation_error) |err| window.report(.{ .domain = .core, .operation = .resource_release, .err = err });
     }
@@ -477,7 +487,7 @@ pub const Bridge = struct {
         const self: *Bridge = @ptrCast(@alignCast(ptr));
         self.busy = true;
         defer self.busy = false;
-        try self.view.scrollPresented(self.prepared_epoch, @enumFromInt(source), range, align_top);
+        try self.view.scrollPresented(self.prepared_epoch, @fromBackingInt(@intCast(source)), range, align_top);
         self.needs_prepare = true;
     }
     fn changedAction(ptr: *anyopaque, window: z.Window, _: usize, _: @FieldType(a.Source, "adapter")) !void {

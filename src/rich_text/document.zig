@@ -9,6 +9,7 @@
 //! character formats change only the typing attributes, which the next
 //! typed text gets and the next move of the caret forgets.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const tx = @import("text.zig");
 
 const Allocator = std.mem.Allocator;
@@ -163,7 +164,7 @@ pub const Document = struct {
     /// Typing may join the last step.
     coalesce: bool = false,
     /// Milliseconds now, for the coalescing of typing.
-    clock: *const fn () i64 = std.time.milliTimestamp,
+    clock: *const fn () i64 = zio.milliTimestamp,
 
     /// A document of `text`, which it takes, its caret at the end.
     pub fn init(allocator: Allocator, text: Text) Document {

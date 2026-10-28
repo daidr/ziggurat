@@ -1,11 +1,8 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 
 // Only calls through this test executable's selected IAT entries are counted.
 // Wrappers preserve real SDK behavior. SDK/GDI internal allocations, DLL-local
@@ -149,7 +146,7 @@ const Driver = struct {
             else => return,
         };
         if (actual != phase) return error.UnexpectedNativePhase;
-        const shot = &self.shots[@intFromEnum(phase)];
+        const shot = &self.shots[@backingInt(phase)];
         shot.callbacks += 1;
         if (shot.callbacks != 1) return error.DuplicateNativePhase;
         if (comptime @hasField(z.WindowOptions, "native_pointer_clicks") and @hasDecl(z.Window, "pointerPressSnapshot")) {
@@ -179,7 +176,7 @@ const Driver = struct {
     }
     fn step(self: *Driver) !void {
         if (self.phase) |phase| {
-            const shot = &self.shots[@intFromEnum(phase)];
+            const shot = &self.shots[@backingInt(phase)];
             try probe(zpc_end(&shot.sdk));
             self.measuring = false;
             shot.after = self.memory.stats;
@@ -201,7 +198,7 @@ const Driver = struct {
             self.app.quit();
             return;
         }
-        const phase: Phase = @enumFromInt(self.phase_index);
+        const phase: Phase = @fromBackingInt(@intCast(self.phase_index));
         self.phase = phase;
         self.shots[self.phase_index].before = self.memory.stats;
         try probe(zpc_begin());
@@ -343,10 +340,10 @@ fn isolatedWindows() !void {
     }
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     if (builtin.os.tag != .windows) return error.UnsupportedCapability;
-    const args = try std.process.argsAlloc(std.heap.page_allocator);
-    defer std.process.argsFree(std.heap.page_allocator, args);
+    const args = try zio.argsAlloc(std.heap.page_allocator, init.args);
+    defer zio.argsFree(std.heap.page_allocator, args);
     if (args.len == 1) return isolatedWindows();
     if (args.len != 2 or !std.mem.eql(u8, args[1], "--desktop-child")) return error.InvalidArgument;
     var debug: std.heap.DebugAllocator(.{}) = .init;

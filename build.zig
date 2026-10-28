@@ -92,7 +92,7 @@ pub fn build(b: *std.Build) void {
         runtime_run.addArg("--failed-load");
         runtime_run.addArtifactArg(runtime_consumer);
         runtime_build.dependOn(&b.addInstallArtifact(runtime_consumer, .{}).step);
-        if (b.args) |args| runtime_run.addArgs(args);
+        runtime_run.addPassthruArgs();
         b.step("smoke-webview-runtime-linux", "Run explicit worker and test-DSO discovery contracts; optional real DSO path follows --").dependOn(&runtime_run.step);
         const runtime_oracle = b.addExecutable(.{ .name = "webview-runtime-linux-oracle", .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }) });
         runtime_oracle.root_module.addCSourceFile(.{ .file = b.path("tests/webview_runtime_linux_oracle.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
@@ -146,10 +146,12 @@ pub fn build(b: *std.Build) void {
         https_resources.link_libc = true;
         const native = native_support.add(b, https_resources, "https-resources-native", "src/https_resources/linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         const transport_native = native_support.add(b, https_resources, "https-transport-native", "src/https_resources/transport_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        // libsoup and WebKitGTK inherit -Wl,--export-dynamic from gmodule, a
+        // pkg-config flag Zig rejects under `.force`; `.yes` skips it.
         for ([_][]const u8{ "libsoup-3.0", "gio-unix-2.0" }) |library| {
-            native.linkSystemLibrary(library, .{ .use_pkg_config = .force });
-            transport_native.linkSystemLibrary(library, .{ .use_pkg_config = .force });
-            https_resources.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+            native.linkSystemLibrary(library, .{ .use_pkg_config = .yes });
+            transport_native.linkSystemLibrary(library, .{ .use_pkg_config = .yes });
+            https_resources.linkSystemLibrary(library, .{ .use_pkg_config = .yes });
         }
         const smoke = b.addExecutable(.{ .name = "smoke-https-resources", .root_module = b.createModule(.{
             .root_source_file = b.path("tests/https_resources_smoke.zig"),
@@ -160,15 +162,15 @@ pub fn build(b: *std.Build) void {
         }) });
         const host_native = native_support.add(b, smoke.root_module, "https-resources-test-host", "tests/https_resources_host.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         for ([_][]const u8{ "libsoup-3.0", "gio-unix-2.0" }) |library| {
-            host_native.linkSystemLibrary(library, .{ .use_pkg_config = .force });
-            smoke.root_module.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+            host_native.linkSystemLibrary(library, .{ .use_pkg_config = .yes });
+            smoke.root_module.linkSystemLibrary(library, .{ .use_pkg_config = .yes });
         }
         smoke.root_module.linkSystemLibrary("curl", .{ .use_pkg_config = .no });
         smoke.root_module.linkSystemLibrary("pthread", .{ .use_pkg_config = .no });
         check.dependOn(&smoke.step);
         const install_smoke = b.addInstallArtifact(smoke, .{});
         b.step("check-https-resources-smoke", "Link and copy host-owned HTTPS integration checks without starting them").dependOn(&install_smoke.step);
-        const run_smoke = b.addSystemCommand(&.{b.getInstallPath(.bin, "smoke-https-resources")});
+        const run_smoke = runInstalled(b, b.graph.path(.install_bin, "smoke-https-resources"));
         run_smoke.step.dependOn(&install_smoke.step);
         b.step("smoke-https-resources", "Verify explicit HTTPS resource ownership, authentication and shutdown").dependOn(&run_smoke.step);
         // Fault-injected implementations stay in this separate test process;
@@ -181,9 +183,9 @@ pub fn build(b: *std.Build) void {
         }) });
         for ([_][]const u8{ "tests/https_resources_native.c", "src/https_resources/linux.c", "src/file_stream/linux.c" }, 0..) |file, index| {
             const unit = native_support.add(b, native_tests.root_module, b.fmt("https-resource-fault-{d}", .{index}), file, &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZHR_TESTING", "-DZWK_FILE_TESTING" }, target, optimize);
-            for ([_][]const u8{ "libsoup-3.0", "gio-unix-2.0" }) |library| unit.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+            for ([_][]const u8{ "libsoup-3.0", "gio-unix-2.0" }) |library| unit.linkSystemLibrary(library, .{ .use_pkg_config = .yes });
         }
-        for ([_][]const u8{ "libsoup-3.0", "gio-unix-2.0" }) |library| native_tests.root_module.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+        for ([_][]const u8{ "libsoup-3.0", "gio-unix-2.0" }) |library| native_tests.root_module.linkSystemLibrary(library, .{ .use_pkg_config = .yes });
         for ([_][]const u8{ "curl", "pthread" }) |library| native_tests.root_module.linkSystemLibrary(library, .{ .use_pkg_config = .no });
         check.dependOn(&native_tests.step);
         b.step("test-https-resources-native", "Verify real TLS failure paths and shared physical request capacity").dependOn(&b.addRunArtifact(native_tests).step);
@@ -195,9 +197,9 @@ pub fn build(b: *std.Build) void {
         }) });
         for ([_][]const u8{ "tests/https_transport_native.c", "src/https_resources/transport_linux.c" }, 0..) |file, index| {
             const unit = native_support.add(b, transport_tests.root_module, b.fmt("https-transport-fault-{d}", .{index}), file, &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZHT_TESTING" }, target, optimize);
-            for ([_][]const u8{ "libsoup-3.0", "gio-unix-2.0" }) |library| unit.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+            for ([_][]const u8{ "libsoup-3.0", "gio-unix-2.0" }) |library| unit.linkSystemLibrary(library, .{ .use_pkg_config = .yes });
         }
-        for ([_][]const u8{ "libsoup-3.0", "gio-unix-2.0" }) |library| transport_tests.root_module.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+        for ([_][]const u8{ "libsoup-3.0", "gio-unix-2.0" }) |library| transport_tests.root_module.linkSystemLibrary(library, .{ .use_pkg_config = .yes });
         check.dependOn(&transport_tests.step);
         b.step("test-https-transport-native", "Verify explicit TLS listener ownership, sealing and independent native references").dependOn(&b.addRunArtifact(transport_tests).step);
     }
@@ -401,11 +403,11 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{.{ .name = "sampler", .module = sampler }},
         }) });
-        affine_benchmark.addCSourceFile(.{ .file = b.path("tools/benchmark_affine_cairo.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        affine_benchmark.root_module.addCSourceFile(.{ .file = b.path("tools/benchmark_affine_cairo.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
         affine_benchmark.root_module.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .force });
         affine_benchmark.root_module.linkSystemLibrary("m", .{});
         const affine_run = b.addRunArtifact(affine_benchmark);
-        if (b.args) |args| affine_run.addArgs(args);
+        affine_run.addPassthruArgs();
         b.step("benchmark-affine-cairo", "Measure segmented software affine completion against a test-only native baseline").dependOn(&affine_run.step);
     }
     const caret = b.addModule("ziggurat_caret", .{ .root_source_file = b.path("src/document_editor/caret.zig"), .target = target, .optimize = optimize });
@@ -413,8 +415,8 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .linux) {
         const native = native_support.add(b, fonts, "fonts-native", "src/fonts/linux.c", &.{"-std=c11"}, target, optimize);
         for ([_][]const u8{ "fontconfig", "pangoft2", "pangocairo" }) |library| {
-            native.linkSystemLibrary(library, .{ .use_pkg_config = .force });
-            fonts.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+            native.linkSystemLibrary(library, .{ .use_pkg_config = .yes });
+            fonts.linkSystemLibrary(library, .{ .use_pkg_config = .yes });
         }
         fonts.link_libc = true;
     }
@@ -526,7 +528,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "ziggurat_vector", .module = vector },
             },
         }) });
-        text_clusters.addCSourceFile(.{ .file = b.path("tests/text_clusters_oracle.c"), .flags = &.{"-std=c11"} });
+        text_clusters.root_module.addCSourceFile(.{ .file = b.path("tests/text_clusters_oracle.c"), .flags = &.{"-std=c11"} });
         if (target.result.os.tag == .linux) text_clusters.root_module.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .force });
         addResources(b, text_clusters);
         check.dependOn(&text_clusters.step);
@@ -540,7 +542,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "ziggurat_text_outlines", .module = text_outlines },
             },
         }) });
-        text_cells.addCSourceFile(.{ .file = b.path("tests/text_cells_native.c"), .flags = &.{"-std=c11"} });
+        text_cells.root_module.addCSourceFile(.{ .file = b.path("tests/text_cells_native.c"), .flags = &.{"-std=c11"} });
         if (target.result.os.tag == .linux) text_cells.root_module.linkSystemLibrary("pangocairo", .{ .use_pkg_config = .force });
         addResources(b, text_cells);
         check.dependOn(&text_cells.step);
@@ -693,7 +695,7 @@ pub fn build(b: *std.Build) void {
         const integration_probe = b.createModule(.{ .root_source_file = b.path("tests/os_integration_probe.zig"), .target = target, .optimize = optimize, .link_libc = true });
         if (target.result.os.tag == .linux) {
             integration_probe.addCSourceFile(.{ .file = b.path("tests/os_integration_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-            for ([_][]const u8{ "gio-2.0", "gio-unix-2.0" }) |library| integration_probe.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+            for ([_][]const u8{ "gio-2.0", "gio-unix-2.0" }) |library| integration_probe.linkSystemLibrary(library, .{ .use_pkg_config = .yes });
         } else integration_probe.linkSystemLibrary("shlwapi", .{});
         addSmoke(b, "smoke-os-integration", "tests/os_integration_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
@@ -743,7 +745,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "ziggurat", .module = core }},
         }) });
         if (target.result.os.tag == .linux) {
-            damage.addCSourceFile(.{ .file = b.path("tests/damage_linux.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-deprecated-declarations" } });
+            damage.root_module.addCSourceFile(.{ .file = b.path("tests/damage_linux.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-deprecated-declarations" } });
             damage.root_module.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
         }
         addResources(b, damage);
@@ -760,7 +762,7 @@ pub fn build(b: *std.Build) void {
     // The views' developer tools are left out of release builds, as their
     // windows have none, unless asked for.
     const view_options = b.addOptions();
-    view_options.addOption(bool, "inspector", b.option(bool, "inspector", "Build the views' inspector (default: Debug builds only)") orelse (optimize == .Debug));
+    view_options.addOption(bool, "inspector", b.option(bool, "inspector", "Build the views' inspector (default: Debug builds only)") orelse (optimize == .debug));
     declarative_view.addOptions("ziggurat_view_options", view_options);
     const view_graphics = b.addModule("ziggurat_view_graphics", .{ .root_source_file = b.path("src/view/graphics.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
@@ -913,7 +915,7 @@ pub fn build(b: *std.Build) void {
         check.dependOn(&list_smoke.step);
         const install = b.addInstallArtifact(list_smoke, .{});
         b.step("build-smoke-virtual-list-control", "Build the isolated native complete-list UI Automation fixture").dependOn(&install.step);
-        const run = b.addSystemCommand(&.{b.getInstallPath(.bin, "smoke-virtual-list-control.exe")});
+        const run = runInstalled(b, b.graph.path(.install_bin, "smoke-virtual-list-control.exe"));
         run.step.dependOn(&install.step);
         b.step("smoke-virtual-list-control", "Verify native complete-list selection, offscreen rows and captured action retirement").dependOn(&run.step);
     } else if (target.result.os.tag == .linux) {
@@ -1009,7 +1011,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "ziggurat_document_accessibility", .module = document_accessibility },
             },
         }) });
-        accessibility_smoke.addCSourceFile(.{ .file = b.path("tests/document_accessibility_client.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        accessibility_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/document_accessibility_client.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
         addResources(b, accessibility_smoke);
         check.dependOn(&accessibility_smoke.step);
         b.step("smoke-document-accessibility", "Verify complete-document native UIA and main-thread action/lifetime boundaries").dependOn(&b.addRunArtifact(accessibility_smoke).step);
@@ -1078,7 +1080,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "ziggurat_document_diff_accessibility", .module = document_diff_accessibility },
             },
         }) });
-        for ([_][]const u8{ "tests/document_diff_accessibility_client.c", "tests/document_accessibility_client.c" }) |file| smoke_diff_accessibility.addCSourceFile(.{ .file = b.path(file), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        for ([_][]const u8{ "tests/document_diff_accessibility_client.c", "tests/document_accessibility_client.c" }) |file| smoke_diff_accessibility.root_module.addCSourceFile(.{ .file = b.path(file), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
         addResources(b, smoke_diff_accessibility);
         check.dependOn(&smoke_diff_accessibility.step);
         b.step("smoke-document-diff-accessibility", "Verify paired editable document text, presentation epochs and owner actions with real UIA").dependOn(&b.addRunArtifact(smoke_diff_accessibility).step);
@@ -1104,8 +1106,8 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "ziggurat_document_diff_accessibility", .module = document_diff_accessibility },
                 },
             }) });
-            if (target.result.os.tag == .windows) for ([_][]const u8{ "tests/document_diff_accessibility_client.c", "tests/document_accessibility_client.c" }) |file| smoke_affine_diff.addCSourceFile(.{ .file = b.path(file), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-            if (target.result.os.tag == .windows and std.mem.eql(u8, fixture.name, "smoke-affine-diff-controls")) smoke_affine_diff.addCSourceFile(.{ .file = b.path("tests/document_diff_affine_controls_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+            if (target.result.os.tag == .windows) for ([_][]const u8{ "tests/document_diff_accessibility_client.c", "tests/document_accessibility_client.c" }) |file| smoke_affine_diff.root_module.addCSourceFile(.{ .file = b.path(file), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+            if (target.result.os.tag == .windows and std.mem.eql(u8, fixture.name, "smoke-affine-diff-controls")) smoke_affine_diff.root_module.addCSourceFile(.{ .file = b.path("tests/document_diff_affine_controls_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
             addResources(b, smoke_affine_diff);
             check.dependOn(&smoke_affine_diff.step);
             const install = b.addInstallArtifact(smoke_affine_diff, .{});
@@ -1356,7 +1358,7 @@ pub fn build(b: *std.Build) void {
         check.dependOn(&gaussian_smoke.step);
         b.step("check-gaussian-smoke", "Compile composed-image Gaussian checks without starting native graphics").dependOn(&gaussian_smoke.step);
         const install_gaussian = b.addInstallArtifact(gaussian_smoke, .{});
-        const run_gaussian = b.addSystemCommand(&.{b.getInstallPath(.bin, b.fmt("smoke-gaussian{s}", .{if (target.result.os.tag == .windows) ".exe" else ""}))});
+        const run_gaussian = runInstalled(b, b.graph.path(.install_bin, b.fmt("smoke-gaussian{s}", .{if (target.result.os.tag == .windows) ".exe" else ""})));
         run_gaussian.step.dependOn(&install_gaussian.step);
         b.step("smoke-gaussian", "Verify composed subtree filtering, image replay and resource lifetime").dependOn(&run_gaussian.step);
         const shadow_benchmark = b.addExecutable(.{ .name = "benchmark-shadows", .root_module = b.createModule(.{
@@ -1407,7 +1409,7 @@ pub fn build(b: *std.Build) void {
         gradient_benchmark.root_module.linkSystemLibrary("cairo", .{ .use_pkg_config = .force });
         gradient_benchmark.root_module.link_libc = true;
         const run = b.addRunArtifact(gradient_benchmark);
-        if (b.args) |args| run.addArgs(args);
+        run.addPassthruArgs();
         b.step("benchmark-gradients", "Measure explicit software gradient replay costs").dependOn(&run.step);
     }
     ui_options.addOption(bool, "accessibility", accessibility);
@@ -1442,7 +1444,7 @@ pub fn build(b: *std.Build) void {
         check.dependOn(&program_smoke.step);
         const install_program_smoke = b.addInstallArtifact(program_smoke, .{});
         b.step("check-gradient-program-smoke", "Link and copy interpolation program integration checks without starting graphics").dependOn(&install_program_smoke.step);
-        const run_program_smoke = b.addSystemCommand(&.{b.getInstallPath(.bin, "smoke-gradient-program.exe")});
+        const run_program_smoke = runInstalled(b, b.graph.path(.install_bin, "smoke-gradient-program.exe"));
         run_program_smoke.step.dependOn(&install_program_smoke.step);
         b.step("smoke-gradient-program", "Verify explicitly prepared interpolation programs, rollback and resource ownership").dependOn(&run_program_smoke.step);
         addSmoke(b, "smoke-shader-effects-gpu", "tests/shader_effects_gpu_smoke.zig", target, optimize, &.{
@@ -1475,9 +1477,9 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = true,
         }) });
-        content_host.addCSourceFile(.{ .file = b.path("tests/linux_content_smoke.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-        content_host.linkSystemLibrary("gtk+-3.0");
-        content_host.linkSystemLibrary("x11");
+        content_host.root_module.addCSourceFile(.{ .file = b.path("tests/linux_content_smoke.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        content_host.root_module.linkSystemLibrary("gtk+-3.0", .{});
+        content_host.root_module.linkSystemLibrary("x11", .{});
         check.dependOn(&content_host.step);
         b.step("smoke-content-host", "Run private GTK content ownership and input reparenting checks").dependOn(&b.addRunArtifact(content_host).step);
         _ = addExample(b, "counter", "examples/counter.zig", target, optimize, &.{
@@ -1522,9 +1524,9 @@ pub fn build(b: *std.Build) void {
         }) });
         check.dependOn(&benchmark.step);
         const benchmark_install = b.addInstallArtifact(benchmark, .{});
-        const benchmark_run = b.addSystemCommand(&.{b.getInstallPath(.bin, "benchmark")});
+        const benchmark_run = runInstalled(b, b.graph.path(.install_bin, "benchmark"));
         benchmark_run.step.dependOn(&benchmark_install.step);
-        if (b.args) |args| benchmark_run.addArgs(args);
+        benchmark_run.addPassthruArgs();
         b.step("benchmark", "Run measured GTK/Cairo submission and idle workload").dependOn(&benchmark_run.step);
     }
     if (target.result.os.tag == .windows) {
@@ -1631,9 +1633,9 @@ pub fn build(b: *std.Build) void {
         addResources(b, benchmark);
         check.dependOn(&benchmark.step);
         const benchmark_install = b.addInstallArtifact(benchmark, .{});
-        const benchmark_run = b.addSystemCommand(&.{b.getInstallPath(.bin, "benchmark.exe")});
+        const benchmark_run = runInstalled(b, b.graph.path(.install_bin, "benchmark.exe"));
         benchmark_run.step.dependOn(&benchmark_install.step);
-        if (b.args) |args| benchmark_run.addArgs(args);
+        benchmark_run.addPassthruArgs();
         b.step("benchmark", "Run measured paint submission, input, idle CPU and memory workload").dependOn(&benchmark_run.step);
         if (gpu) {
             const domain_benchmark = b.addExecutable(.{ .name = "benchmark-gpu-domain", .root_module = b.createModule(.{
@@ -1645,7 +1647,7 @@ pub fn build(b: *std.Build) void {
             addResources(b, domain_benchmark);
             check.dependOn(&domain_benchmark.step);
             const domain_benchmark_run = b.addRunArtifact(domain_benchmark);
-            if (b.args) |args| domain_benchmark_run.addArgs(args);
+            domain_benchmark_run.addPassthruArgs();
             b.step("benchmark-gpu-domain", "Measure explicit shared and isolated device domains across hidden windows").dependOn(&domain_benchmark_run.step);
             addSmoke(b, "smoke-gpu-offscreen", "tests/gpu_offscreen_smoke.zig", target, optimize, &.{
                 .{ .name = "ziggurat", .module = core },
@@ -1944,7 +1946,7 @@ pub fn build(b: *std.Build) void {
         for ([_][]const u8{ "webkit_native.c", "webkit_profile.c", "webkit_cookies.c" }) |file| {
             const native = native_support.add(b, view, b.fmt("webview-{s}", .{file}), b.fmt("src/webview/{s}", .{file}), &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
             native.linkSystemLibrary("gio-unix-2.0", .{ .use_pkg_config = .force });
-            native.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+            native.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
         }
         view.linkSystemLibrary("gio-unix-2.0", .{ .use_pkg_config = .force });
         const test_file_stream = b.createModule(.{ .root_source_file = b.path("src/file_stream/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
@@ -1968,9 +1970,9 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "profile", .module = profile_module }},
         }) });
         const profile_native = native_support.add(b, profile_tests.root_module, "webkit-profile-native-test", "src/webview/webkit_profile.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZWK_PROFILE_TESTING" }, target, optimize);
-        profile_native.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
-        profile_tests.addCSourceFile(.{ .file = b.path("tests/webkit_profile_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZWK_PROFILE_TESTING" } });
-        profile_tests.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        profile_native.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
+        profile_tests.root_module.addCSourceFile(.{ .file = b.path("tests/webkit_profile_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZWK_PROFILE_TESTING" } });
+        profile_tests.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
         check.dependOn(&profile_tests.step);
         b.step("test-webkit-profile", "Verify private profile manager ownership, native finalization and exclusive storage without a page").dependOn(&b.addRunArtifact(profile_tests).step);
         const profile_tls_owner_tests = b.addTest(.{ .root_module = b.createModule(.{
@@ -1981,9 +1983,9 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "profile", .module = profile_module }},
         }) });
         const profile_tls_native = native_support.add(b, profile_tls_owner_tests.root_module, "webkit-profile-tls-native-test", "src/webview/webkit_profile.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZWK_PROFILE_TESTING" }, target, optimize);
-        profile_tls_native.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
-        profile_tls_owner_tests.addCSourceFile(.{ .file = b.path("tests/webkit_profile_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZWK_PROFILE_TESTING" } });
-        profile_tls_owner_tests.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        profile_tls_native.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
+        profile_tls_owner_tests.root_module.addCSourceFile(.{ .file = b.path("tests/webkit_profile_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZWK_PROFILE_TESTING" } });
+        profile_tls_owner_tests.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
         check.dependOn(&profile_tls_owner_tests.step);
         b.step("test-webkit-profile-tls", "Verify frozen TLS profile construction, allocation failure and late native ownership without a page").dependOn(&b.addRunArtifact(profile_tls_owner_tests).step);
         const cookies_owner_tests = b.addTest(.{ .root_module = b.createModule(.{
@@ -1994,17 +1996,17 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "profile", .module = profile_module }},
         }) });
         const cookies_profile_native = native_support.add(b, cookies_owner_tests.root_module, "cookies-profile-native-test", "src/webview/webkit_profile.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
-        cookies_profile_native.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        cookies_profile_native.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
         const cookies_native = native_support.add(b, cookies_owner_tests.root_module, "cookies-native-test", "src/webview/webkit_cookies.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZWK_COOKIES_TESTING" }, target, optimize);
-        cookies_native.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
-        cookies_owner_tests.addCSourceFile(.{ .file = b.path("tests/webkit_cookies_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZWK_COOKIES_TESTING" } });
-        cookies_owner_tests.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        cookies_native.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
+        cookies_owner_tests.root_module.addCSourceFile(.{ .file = b.path("tests/webkit_cookies_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZWK_COOKIES_TESTING" } });
+        cookies_owner_tests.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
         check.dependOn(&cookies_owner_tests.step);
         b.step("test-webkit-cookies", "Verify native cookie allocation failure, acceptance and task finalization without a page").dependOn(&b.addRunArtifact(cookies_owner_tests).step);
-        view.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        view.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
         const request_extension = b.addLibrary(.{ .name = "ziggurat-request-policy", .linkage = .dynamic, .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }) });
         request_extension.root_module.addCSourceFile(.{ .file = b.path("src/webview/webkit_request_extension.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-        request_extension.root_module.linkSystemLibrary("webkit2gtk-web-extension-4.1", .{ .use_pkg_config = .force });
+        request_extension.root_module.linkSystemLibrary("webkit2gtk-web-extension-4.1", .{ .use_pkg_config = .yes });
         const install_extension = b.addInstallArtifact(request_extension, .{});
         b.step("webview-request-extension", "Install the optional WebProcess request policy adapter for explicit deployment").dependOn(&install_extension.step);
         check.dependOn(&request_extension.step);
@@ -2040,7 +2042,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }) });
         capture_owner_tests.root_module.addCSourceFile(.{ .file = b.path("tests/webkit_capture_owner_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-        capture_owner_tests.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        capture_owner_tests.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
         check.dependOn(&capture_owner_tests.step);
         b.step("test-webkit-capture", "Verify native capture allocation, cancellation and task finalization ownership").dependOn(&b.addRunArtifact(capture_owner_tests).step);
         const find_owner_tests = b.addExecutable(.{ .name = "test-webkit-find", .root_module = b.createModule(.{
@@ -2061,12 +2063,12 @@ pub fn build(b: *std.Build) void {
             .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view } },
         }) });
         find_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/webkit_find_fixture.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-        find_smoke.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        find_smoke.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
         check.dependOn(&find_smoke.step);
         const install_find_smoke = b.addInstallArtifact(find_smoke, .{});
         b.step("build-smoke-find", "Install the native Find ownership and lifecycle integration probe").dependOn(&install_find_smoke.step);
         const find_smoke_run = b.addRunArtifact(find_smoke);
-        if (b.args) |args| find_smoke_run.addArgs(args);
+        find_smoke_run.addPassthruArgs();
         b.step("smoke-find", "Verify native Find request ordering, cancellation and lifecycle").dependOn(&find_smoke_run.step);
         const initializers_smoke = b.addExecutable(.{ .name = "smoke-webview-initializers-linux", .root_module = b.createModule(.{
             .root_source_file = b.path("tests/linux_document_initializers_smoke.zig"),
@@ -2075,11 +2077,11 @@ pub fn build(b: *std.Build) void {
             .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view } },
         }) });
         initializers_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/initializer_https_fixture.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-        initializers_smoke.root_module.linkSystemLibrary("libsoup-3.0", .{ .use_pkg_config = .force });
+        initializers_smoke.root_module.linkSystemLibrary("libsoup-3.0", .{ .use_pkg_config = .yes });
         check.dependOn(&initializers_smoke.step);
         const initializers_run = b.addRunArtifact(initializers_smoke);
         initializers_run.step.dependOn(&install_extension.step);
-        initializers_run.setEnvironmentVariable("ZIGGURAT_REQUEST_POLICY_EXTENSION", b.pathFromRoot(b.getInstallPath(.lib, "")));
+        initializers_run.setEnvironmentVariable("ZIGGURAT_REQUEST_POLICY_EXTENSION", "zig-out/lib");
         b.step("smoke-webview-initializers-linux", "Verify trusted future-document initializers and owned bootstrap replacement").dependOn(&initializers_run.step);
         const initializers_owner_tests = b.addExecutable(.{ .name = "test-webkit-initializers", .root_module = b.createModule(.{
             .target = target,
@@ -2087,7 +2089,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }) });
         initializers_owner_tests.root_module.addCSourceFile(.{ .file = b.path("tests/webkit_initializers_owner_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-        initializers_owner_tests.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        initializers_owner_tests.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
         check.dependOn(&initializers_owner_tests.step);
         b.step("test-webkit-initializers", "Verify prepared native initializer ownership and synchronous replacement transactions").dependOn(&b.addRunArtifact(initializers_owner_tests).step);
         addSmoke(b, "smoke-webview-navigation-linux", "tests/linux_navigation_webview_smoke.zig", target, optimize, &.{
@@ -2096,24 +2098,24 @@ pub fn build(b: *std.Build) void {
         });
         const regions_smoke = b.addExecutable(.{ .name = "smoke-webview-regions-linux", .root_module = b.createModule(.{ .root_source_file = b.path("tests/linux_regions_webview_smoke.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view } } }) });
         regions_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/linux_regions_webview_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-        regions_smoke.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        regions_smoke.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
         check.dependOn(&regions_smoke.step);
         b.step("smoke-webview-regions-linux", "Verify independent rectangular WebKit children, geometry and close lifetime").dependOn(&b.addRunArtifact(regions_smoke).step);
         const session_smoke = b.addExecutable(.{ .name = "smoke-webview-session-linux", .root_module = b.createModule(.{ .root_source_file = b.path("tests/linux_session_webview_smoke.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view } } }) });
         session_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/webkit_remote_fixture.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-        session_smoke.root_module.linkSystemLibrary("libsoup-3.0", .{ .use_pkg_config = .force });
+        session_smoke.root_module.linkSystemLibrary("libsoup-3.0", .{ .use_pkg_config = .yes });
         check.dependOn(&session_smoke.step);
         const session_run = b.addRunArtifact(session_smoke);
         session_run.step.dependOn(&install_extension.step);
-        session_run.setEnvironmentVariable("ZIGGURAT_REQUEST_POLICY_EXTENSION", b.pathFromRoot(b.getInstallPath(.lib, "")));
+        session_run.setEnvironmentVariable("ZIGGURAT_REQUEST_POLICY_EXTENSION", "zig-out/lib");
         b.step("smoke-webview-session-linux", "Verify parked and rehosted page ownership, pending work and shutdown").dependOn(&session_run.step);
         const remote_smoke = b.addExecutable(.{ .name = "smoke-webview-remote-linux", .root_module = b.createModule(.{ .root_source_file = b.path("tests/linux_remote_webview_smoke.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view } } }) });
         remote_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/webkit_remote_fixture.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-        remote_smoke.root_module.linkSystemLibrary("libsoup-3.0", .{ .use_pkg_config = .force });
+        remote_smoke.root_module.linkSystemLibrary("libsoup-3.0", .{ .use_pkg_config = .yes });
         check.dependOn(&remote_smoke.step);
         const remote_run = b.addRunArtifact(remote_smoke);
         remote_run.step.dependOn(&install_extension.step);
-        remote_run.setEnvironmentVariable("ZIGGURAT_REQUEST_POLICY_EXTENSION", b.pathFromRoot(b.getInstallPath(.lib, "")));
+        remote_run.setEnvironmentVariable("ZIGGURAT_REQUEST_POLICY_EXTENSION", "zig-out/lib");
         b.step("smoke-webview-remote-linux", "Run isolated loopback remote View policy and lifetime checks").dependOn(&remote_run.step);
         const profile_smoke = b.addExecutable(.{ .name = "smoke-webview-profile-linux", .root_module = b.createModule(.{
             .root_source_file = b.path("tests/linux_profile_webview_smoke.zig"),
@@ -2124,7 +2126,7 @@ pub fn build(b: *std.Build) void {
         check.dependOn(&profile_smoke.step);
         const profile_run = b.addRunArtifact(profile_smoke);
         profile_run.step.dependOn(&install_extension.step);
-        profile_run.setEnvironmentVariable("ZIGGURAT_REQUEST_POLICY_EXTENSION", b.pathFromRoot(b.getInstallPath(.lib, "")));
+        profile_run.setEnvironmentVariable("ZIGGURAT_REQUEST_POLICY_EXTENSION", "zig-out/lib");
         b.step("smoke-webview-profile-linux", "Verify explicit persistent profile ownership, admission and first-request restoration").dependOn(&profile_run.step);
         const cookies_smoke = b.addExecutable(.{ .name = "smoke-webview-cookies-linux", .root_module = b.createModule(.{
             .root_source_file = b.path("tests/linux_cookie_store_smoke.zig"),
@@ -2135,7 +2137,7 @@ pub fn build(b: *std.Build) void {
         check.dependOn(&cookies_smoke.step);
         const cookies_run = b.addRunArtifact(cookies_smoke);
         cookies_run.step.dependOn(&install_extension.step);
-        cookies_run.setEnvironmentVariable("ZIGGURAT_REQUEST_POLICY_EXTENSION", b.pathFromRoot(b.getInstallPath(.lib, "")));
+        cookies_run.setEnvironmentVariable("ZIGGURAT_REQUEST_POLICY_EXTENSION", "zig-out/lib");
         b.step("smoke-webview-cookies-linux", "Verify independent profile cookie operations, bounded ownership and shutdown").dependOn(&cookies_run.step);
         const https_smoke = b.addExecutable(.{ .name = "smoke-webview-https-linux", .root_module = b.createModule(.{
             .root_source_file = b.path("tests/linux_profile_https_smoke.zig"),
@@ -2144,12 +2146,12 @@ pub fn build(b: *std.Build) void {
             .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view } },
         }) });
         const https_fixture = native_support.add(b, https_smoke.root_module, "profile-https-fixture", "tests/profile_https_fixture.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
-        https_fixture.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
-        https_smoke.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .force });
+        https_fixture.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
+        https_smoke.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
         check.dependOn(&https_smoke.step);
         const https_run = b.addRunArtifact(https_smoke);
         https_run.step.dependOn(&install_extension.step);
-        https_run.setEnvironmentVariable("ZIGGURAT_REQUEST_POLICY_EXTENSION", b.pathFromRoot(b.getInstallPath(.lib, "")));
+        https_run.setEnvironmentVariable("ZIGGURAT_REQUEST_POLICY_EXTENSION", "zig-out/lib");
         b.step("smoke-webview-https-linux", "Verify frozen profile trust and policy for a host-owned loopback HTTPS service").dependOn(&https_run.step);
         if (https_resources_enabled) {
             const pages_smoke = b.addExecutable(.{ .name = "smoke-https-pages", .root_module = b.createModule(.{
@@ -2161,13 +2163,13 @@ pub fn build(b: *std.Build) void {
             }) });
             const pages_host = native_support.add(b, pages_smoke.root_module, "https-page-resources-host", "tests/https_page_resources_host.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
             for ([_][]const u8{ "libsoup-3.0", "gio-unix-2.0" }) |library| {
-                pages_host.linkSystemLibrary(library, .{ .use_pkg_config = .force });
-                pages_smoke.root_module.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+                pages_host.linkSystemLibrary(library, .{ .use_pkg_config = .yes });
+                pages_smoke.root_module.linkSystemLibrary(library, .{ .use_pkg_config = .yes });
             }
             check.dependOn(&pages_smoke.step);
             const pages_run = b.addRunArtifact(pages_smoke);
             pages_run.step.dependOn(&install_extension.step);
-            pages_run.setEnvironmentVariable("ZIGGURAT_REQUEST_POLICY_EXTENSION", b.pathFromRoot(b.getInstallPath(.lib, "")));
+            pages_run.setEnvironmentVariable("ZIGGURAT_REQUEST_POLICY_EXTENSION", "zig-out/lib");
             b.step("smoke-https-pages", "Verify WebKit credentials and host HTTPS memory and file resources together").dependOn(&pages_run.step);
         }
     }
@@ -2210,10 +2212,12 @@ pub fn build(b: *std.Build) void {
         },
     }) });
     const write_page_clients = b.addRunArtifact(page_runtime_clients);
-    write_page_clients.addArgs(&.{ "write", b.pathFromRoot(".") });
+    write_page_clients.addArg("write");
+    write_page_clients.addDirectoryArg(b.path("."));
     b.step("page-runtime-clients", "Regenerate the TypeScript clients of the page runtime's services under packages/").dependOn(&write_page_clients.step);
     const check_page_clients = b.addRunArtifact(page_runtime_clients);
-    check_page_clients.addArgs(&.{ "check", b.pathFromRoot(".") });
+    check_page_clients.addArg("check");
+    check_page_clients.addDirectoryArg(b.path("."));
     check_page_clients.addFileInput(b.path("packages/runtime/src/generated/runtime.ts"));
     check_page_clients.addFileInput(b.path("packages/plugin-fetch/src/generated/fetch.ts"));
     check_page_clients.addFileInput(b.path("packages/plugin-watch/src/generated/watch.ts"));
@@ -2339,7 +2343,7 @@ pub fn build(b: *std.Build) void {
     setup_smoke.dependOn(&install_setup_stub.step);
     setup_smoke.dependOn(&install_update.step);
     const cli_options = b.addOptions();
-    cli_options.addOption([]const u8, "framework_root", b.build_root.path orelse ".");
+    cli_options.addOptionPathDirectory("framework_root", b.path("."));
     const cli_module = b.createModule(.{
         .root_source_file = b.path("tools/cli.zig"),
         .target = target,
@@ -2373,7 +2377,7 @@ pub fn build(b: *std.Build) void {
         const idle_memory = b.addExecutable(.{ .name = "idle-memory", .root_module = idle_memory_module });
         check.dependOn(&idle_memory.step);
         const idle_memory_run = b.addRunArtifact(idle_memory);
-        if (b.args) |args| idle_memory_run.addArgs(args);
+        idle_memory_run.addPassthruArgs();
         b.step("idle-memory", "Report apps' memory once idle, with the processes they run: zig build idle-memory -- [--count N] [--idle SECONDS] APP...").dependOn(&idle_memory_run.step);
         const input_latency_module = b.createModule(.{ .root_source_file = b.path("tools/input_latency.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui } } });
         const input_latency = b.addExecutable(.{ .name = "input-latency", .root_module = input_latency_module });
@@ -2381,9 +2385,9 @@ pub fn build(b: *std.Build) void {
         check.dependOn(&input_latency.step);
         const input_latency_install = b.addInstallArtifact(input_latency, .{});
         // Installed first: each run starts the installed tool again.
-        const input_latency_run = b.addSystemCommand(&.{b.getInstallPath(.bin, if (target.result.os.tag == .windows) "input-latency.exe" else "input-latency")});
+        const input_latency_run = runInstalled(b, b.graph.path(.install_bin, if (target.result.os.tag == .windows) "input-latency.exe" else "input-latency"));
         input_latency_run.step.dependOn(&input_latency_install.step);
-        if (b.args) |args| input_latency_run.addArgs(args);
+        input_latency_run.addPassthruArgs();
         b.step("input-latency", "Measure how long typing, scrolling, dragging and animation take to be painted: zig build input-latency -- [--mode LIST] [--runs N] [--events N]").dependOn(&input_latency_run.step);
         const measurement_tests = b.step("test-measurement-tools", "Run the idle-memory and input-latency tools' tests");
         inline for (.{ idle_memory_module, input_latency_module }) |module| {
@@ -2402,6 +2406,8 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSafe,
         .imports = &.{.{ .name = "ziggurat_i18n", .module = i18n_host }},
     }) });
+    // Checked directly too, which also lets the shared modules reach it.
+    check.dependOn(&catalog_generator.step);
     const generate_catalog = b.addRunArtifact(catalog_generator);
     generate_catalog.addDirectoryArg(b.path("tests/i18n_fixture"));
     const fixture_catalog = generate_catalog.addOutputFileArg("catalog.zig");
@@ -2895,6 +2901,50 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_fonts", .module = fonts }, .{ .name = "ziggurat_text_layout", .module = text_layout },
     });
     addExamples(b, target, optimize);
+    shareCommonModules(b, target, optimize, check, test_step);
+}
+
+/// Every module may import the process-wide Io (`ziggurat_io`) and the system
+/// declarations (`ziggurat_c_win32`, `ziggurat_c_gtk`, `ziggurat_c_posix`).
+/// They are added to each module reachable from a step or an exported module.
+fn shareCommonModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, check: *std.Build.Step, test_step: *std.Build.Step) void {
+    // Shared modules leave target and optimization to the module importing them.
+    const io = b.addModule("ziggurat_io", .{ .root_source_file = b.path("src/io/root.zig") });
+    const io_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/io/root.zig"), .target = target, .optimize = optimize }) });
+    check.dependOn(&io_tests.step);
+    test_step.dependOn(&b.addRunArtifact(io_tests).step);
+    const win32 = b.addTranslateC(.{ .root_source_file = b.path("build_support/c/win32.h"), .target = target, .optimize = optimize });
+    const shared = [_]std.Build.Module.Import{
+        .{ .name = "ziggurat_io", .module = io },
+        .{ .name = "ziggurat_c_win32", .module = win32.createModule() },
+        .{ .name = "ziggurat_c_gtk", .module = b.createModule(.{ .root_source_file = b.path("src/c/gtk.zig") }) },
+        .{ .name = "ziggurat_c_posix", .module = b.createModule(.{ .root_source_file = b.path("src/c/posix.zig") }) },
+    };
+    var modules: std.AutoArrayHashMapUnmanaged(*std.Build.Module, void) = .empty;
+    var steps: std.AutoArrayHashMapUnmanaged(*std.Build.Step, void) = .empty;
+    for (shared) |import| modules.put(b.allocator, import.module, {}) catch @panic("OOM");
+    for (b.modules.values()) |module| collectModule(b, &modules, module);
+    for (b.top_level_steps.values()) |top| collectStep(b, &modules, &steps, &top.step);
+    for (modules.keys()[shared.len..]) |module| {
+        // C-only executables have no Zig root to import into.
+        if (module.root_source_file == null) continue;
+        for (shared) |import| {
+            if (!module.import_table.contains(import.name)) module.addImport(import.name, import.module);
+        }
+    }
+}
+
+fn collectStep(b: *std.Build, modules: *std.AutoArrayHashMapUnmanaged(*std.Build.Module, void), steps: *std.AutoArrayHashMapUnmanaged(*std.Build.Step, void), step: *std.Build.Step) void {
+    if ((steps.getOrPut(b.allocator, step) catch @panic("OOM")).found_existing) return;
+    if (step.cast(std.Build.Step.Compile)) |compile| collectModule(b, modules, compile.root_module);
+    // A run step names the executable it runs without depending on its step.
+    if (step.cast(std.Build.Step.Run)) |run| if (run.producer) |producer| collectStep(b, modules, steps, &producer.step);
+    for (step.dependencies.items) |dependency| collectStep(b, modules, steps, dependency);
+}
+
+fn collectModule(b: *std.Build, modules: *std.AutoArrayHashMapUnmanaged(*std.Build.Module, void), module: *std.Build.Module) void {
+    if ((modules.getOrPut(b.allocator, module) catch @panic("OOM")).found_existing) return;
+    for (module.import_table.values()) |import| collectModule(b, modules, import);
 }
 
 const app_example_imports = [_][]const u8{
@@ -2987,9 +3037,9 @@ fn addExample(b: *std.Build, name: []const u8, path: []const u8, target: std.Bui
     addResources(b, exe);
     b.installArtifact(exe);
     b.top_level_steps.get("check").?.step.dependOn(&exe.step);
-    const run = b.addSystemCommand(&.{b.getInstallPath(.bin, b.fmt("{s}{s}", .{ name, if (target.result.os.tag == .windows) ".exe" else "" }))});
+    const run = runInstalled(b, b.graph.path(.install_bin, b.fmt("{s}{s}", .{ name, if (target.result.os.tag == .windows) ".exe" else "" })));
     run.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     b.step(b.fmt("run-{s}", .{name}), b.fmt("Run {s}", .{name})).dependOn(&run.step);
     b.step(b.fmt("example-{s}", .{name}), b.fmt("Compile and install only {s}", .{name})).dependOn(&b.addInstallArtifact(exe, .{}).step);
     return exe;
@@ -3007,7 +3057,7 @@ fn addLinuxPointerCoreSmoke(b: *std.Build, check: *std.Build.Step, core: *std.Bu
     check.dependOn(&smoke.step);
     const install = b.addInstallArtifact(smoke, .{});
     b.step("build-smoke-pointer-core-linux", "Build the real GTK-to-Core pointer boundary check").dependOn(&install.step);
-    const run = b.addSystemCommand(&.{b.getInstallPath(.bin, "smoke-pointer-core-linux")});
+    const run = runInstalled(b, b.graph.path(.install_bin, "smoke-pointer-core-linux"));
     run.step.dependOn(&install.step);
     b.step("smoke-pointer-core-linux", "Verify real GTK/Core pointer facts and independent callback scopes").dependOn(&run.step);
 }
@@ -3026,9 +3076,9 @@ fn addPointerCostSmoke(b: *std.Build, target: std.Build.ResolvedTarget, optimize
     b.top_level_steps.get("check").?.step.dependOn(&exe.step);
     const install = b.addInstallArtifact(exe, .{});
     b.step("build-" ++ name, "Build the isolated native pointer cost probe").dependOn(&install.step);
-    const run = b.addSystemCommand(&.{b.getInstallPath(.bin, name ++ ".exe")});
+    const run = runInstalled(b, b.graph.path(.install_bin, name ++ ".exe"));
     run.step.dependOn(&install.step);
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     b.step(name, "Measure caller allocations and selected real native pointer calls").dependOn(&run.step);
 }
 
@@ -3048,10 +3098,10 @@ fn addWebNativeBoundarySmoke(b: *std.Build, target: std.Build.ResolvedTarget, op
     const build_step = b.step("build-" ++ name, "Build the independent SDK callback ownership probe");
     build_step.dependOn(&install.step);
     build_step.dependOn(&b.top_level_steps.get("webview-runtime").?.step);
-    const run = b.addSystemCommand(&.{b.getInstallPath(.bin, b.fmt("{s}{s}", .{ name, if (target.result.os.tag == .windows) ".exe" else "" }))});
+    const run = runInstalled(b, b.graph.path(.install_bin, b.fmt("{s}{s}", .{ name, if (target.result.os.tag == .windows) ".exe" else "" })));
     run.step.dependOn(&install.step);
     run.step.dependOn(&b.top_level_steps.get("webview-runtime").?.step);
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     b.step(name, "Verify synchronous SDK completion cannot borrow pointer ingress").dependOn(&run.step);
 }
 
@@ -3085,8 +3135,8 @@ fn addSystemIntegrationNative(b: *std.Build, module: *std.Build.Module, target: 
         .linux => {
             const native = native_support.add(b, module, "system-integration-native", "src/system/linux_integration.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
             for ([_][]const u8{ "gio-2.0", "gio-unix-2.0" }) |library| {
-                native.linkSystemLibrary(library, .{ .use_pkg_config = .force });
-                module.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+                native.linkSystemLibrary(library, .{ .use_pkg_config = .yes });
+                module.linkSystemLibrary(library, .{ .use_pkg_config = .yes });
             }
             module.link_libc = true;
         },
@@ -3206,12 +3256,12 @@ fn addSmokeExecutable(b: *std.Build, name: []const u8, path: []const u8, target:
     addResources(b, exe);
     const install = b.addInstallArtifact(exe, .{});
     b.step(b.fmt("build-{s}", .{name}), "Build a hidden-window integration executable without running it").dependOn(&install.step);
-    const run = b.addSystemCommand(&.{b.getInstallPath(.bin, b.fmt("{s}{s}", .{ name, if (target.result.os.tag == .windows) ".exe" else "" }))});
+    const run = runInstalled(b, b.graph.path(.install_bin, b.fmt("{s}{s}", .{ name, if (target.result.os.tag == .windows) ".exe" else "" })));
     run.step.dependOn(&install.step);
     for (imports) |dependency| {
         if (std.mem.eql(u8, dependency.name, "ziggurat_webview")) run.step.dependOn(&b.top_level_steps.get("webview-runtime").?.step);
     }
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     b.step(name, "Run integration checks with hidden windows").dependOn(&run.step);
     b.top_level_steps.get("check").?.step.dependOn(&exe.step);
     return exe;
@@ -3252,6 +3302,17 @@ fn iconFile(b: *std.Build, tool_source: std.Build.LazyPath, default: std.Build.L
             break :blk run.addOutputFileArg("application.ico");
         },
     };
+}
+
+/// Runs an installed executable. The build runner forks children while other
+/// steps write their files; until such a child execs it still holds those
+/// write handles, so starting a file installed a moment ago can fail with
+/// ETXTBSY. On POSIX hosts a shell retries only that failure (status 126).
+fn runInstalled(b: *std.Build, executable: std.Build.LazyPath) *std.Build.Step.Run {
+    if (b.graph.host.result.os.tag == .windows) return b.addRunFile(executable);
+    const run = b.addSystemCommand(&.{ "/bin/sh", "-c", "n=0; while :; do \"$0\" \"$@\"; s=$?; if [ $s -ne 126 ] || [ $n -ge 20 ]; then exit $s; fi; n=$((n + 1)); sleep 0.1; done" });
+    run.addFileArg(executable);
+    return run;
 }
 
 fn addResources(b: *std.Build, exe: *std.Build.Step.Compile) void {

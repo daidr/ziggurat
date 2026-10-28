@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 
@@ -9,8 +10,8 @@ pub const FileWorker = struct {
     app: *z.App,
     ready: z.Task,
     thread: ?std.Thread = null,
-    gate: std.Thread.Semaphore = .{},
-    mutex: std.Thread.Mutex = .{},
+    gate: zio.Semaphore = .{},
+    mutex: zio.Mutex = .{},
     stopping: bool = false,
     response: ?web.OwnedFileResponse = null,
     failure: std.atomic.Value(u16) = .init(0),
@@ -55,14 +56,14 @@ pub const FileWorker = struct {
         };
     }
     fn perform(self: *FileWorker) !void {
-        var temporary = std.testing.tmpDir(.{});
+        var temporary = zio.tmpDir(.{});
         defer temporary.cleanup();
-        const file = try temporary.dir.createFile("private", .{ .read = true });
-        defer file.close();
+        const file = try temporary.dir.createFile(zio.io(), "private", .{ .read = true });
+        defer file.close(zio.io());
         const block: [4096]u8 = @splat('w');
-        for (0..128) |_| try file.writeAll(&block);
-        try file.writeAll(block[0..37]);
-        const position = try file.getPos();
+        for (0..128) |_| try file.writeStreamingAll(zio.io(), &block);
+        try file.writeStreamingAll(zio.io(), block[0..37]);
+        const position = try zio.posix.position(file.handle);
         var prepared = try web.OwnedFileResponse.preparePumped(self.allocator, self.app.owner, file, .{ .mime = "application/octet-stream" }, 1024 * 1024);
         defer prepared.pump.deinit();
         self.mutex.lock();
@@ -81,6 +82,6 @@ pub const FileWorker = struct {
             return failure;
         };
         try prepared.pump.pump();
-        try std.testing.expectEqual(position, try file.getPos());
+        try std.testing.expectEqual(position, try zio.posix.position(file.handle));
     }
 };

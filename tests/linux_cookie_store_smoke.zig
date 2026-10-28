@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
@@ -277,9 +278,9 @@ pub fn main() !void {
     };
     try std.testing.expectEqual(@sizeOf(PreviousOptions), @sizeOf(CookieStore.Options));
     std.debug.print("CookieStore explicit grants: Options bytes before={d} after={d}; read-all/replace-all/write/clear stay independent\n", .{ @sizeOf(PreviousOptions), @sizeOf(CookieStore.Options) });
-    const base = try std.process.getEnvVarOwned(allocator, "ZIGGURAT_PROFILE_TEST_ROOT");
+    const base = try zio.getEnvVarOwned(allocator, "ZIGGURAT_PROFILE_TEST_ROOT");
     defer allocator.free(base);
-    const path = try std.fmt.allocPrint(allocator, "{s}/cookies-{d}", .{ base, std.time.nanoTimestamp() });
+    const path = try std.fmt.allocPrint(allocator, "{s}/cookies-{d}", .{ base, zio.nanoTimestamp() });
     defer allocator.free(path);
     var retained = try basic(allocator, path, &counter);
     defer retained.deinit();

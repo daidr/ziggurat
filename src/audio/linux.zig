@@ -3,6 +3,7 @@
 //! a program runs where neither is installed; both block while the device
 //! holds enough, on the engine's output thread.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const output = @import("output.zig");
 const Detail = output.Detail;
 const OpenError = output.OpenError;
@@ -34,14 +35,14 @@ const Alsa = struct {
 
 /// Libraries load once per process and stay loaded: unloading audio
 /// libraries is not safe while any of their state may remain.
-var load_mutex: std.Thread.Mutex = .{};
+var load_mutex: zio.Mutex = .{};
 var pulse_state: ?union(enum) { loaded: Pulse, missing } = null;
 var alsa_state: ?union(enum) { loaded: Alsa, missing } = null;
 
 /// Every field of `T` is the library's function of that name.
 fn lookup(library: *std.DynLib, comptime T: type) ?T {
     var table: T = undefined;
-    inline for (@typeInfo(T).@"struct".fields) |field| {
+    inline for (zio.fields(T)) |field| {
         @field(table, field.name) = library.lookup(field.type, field.name) orelse return null;
     }
     return table;
@@ -85,7 +86,7 @@ pub fn threadDeinit() void {}
 
 fn applicationName(buffer: *[128]u8) [*:0]const u8 {
     var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const path = std.fs.selfExePath(&path_buffer) catch "ziggurat";
+    const path = zio.selfExePath(&path_buffer) catch "ziggurat";
     const name = std.fs.path.basename(path);
     const count = @min(name.len, buffer.len - 1);
     @memcpy(buffer[0..count], name[0..count]);
@@ -132,7 +133,7 @@ pub fn open(storage: *Storage, detail: *Detail) OpenError!output.Device {
             _ = alsa.snd_pcm_close(pcm.?);
             result = error.DeviceFailed;
         } else {
-            const errno: std.posix.E = @enumFromInt(-code);
+            const errno: std.posix.E = @fromBackingInt(@intCast(-code));
             result = switch (errno) {
                 .NOENT, .NODEV, .NXIO => error.NoDevice,
                 else => error.DeviceFailed,

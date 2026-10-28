@@ -12,6 +12,7 @@
 //!
 //! Run it with `zig build run-chat-glow`.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const view = @import("ziggurat_view");
@@ -437,13 +438,13 @@ const Chat = struct {
     markdown: md.Storage(256, 4096) = .{},
 
     fn init(allocator: std.mem.Allocator) Chat {
-        var rng: std.Random.DefaultPrng = .init(std.crypto.random.int(u64));
+        var rng: std.Random.DefaultPrng = .init(zio.random.int(u64));
         return .{ .allocator = allocator, .stops = .init(rng.random()), .rng = rng };
     }
     fn deinit(self: *Chat) void {
         for (self.messages.items) |item| if (item.mine) self.allocator.free(item.text);
         self.messages.deinit(self.allocator);
-        inline for (std.meta.fields(@TypeOf(self.pictures))) |field| if (@field(self.pictures, field.name).image) |*image| image.deinit();
+        inline for (zio.fields(@TypeOf(self.pictures))) |field| if (@field(self.pictures, field.name).image) |*image| image.deinit();
     }
 
     /// Moves the conversation on by dt seconds: the assistant thinks, then
@@ -648,7 +649,7 @@ const Chat = struct {
         const host = self.host orelse return;
         const window = host.context.window orelse return;
         var changed_any = false;
-        inline for (std.meta.fields(@TypeOf(self.pictures))) |field| {
+        inline for (zio.fields(@TypeOf(self.pictures))) |field| {
             const picture = &@field(self.pictures, field.name);
             if (picture.painted) {
                 const before = picture.drawn;

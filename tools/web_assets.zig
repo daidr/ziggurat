@@ -1,24 +1,25 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const assets = @import("ziggurat_assets");
 
 /// web-assets INPUT_DIRECTORY OUTPUT_DIRECTORY [ENTRY_PATH]
 /// INPUT is a built frontend; OUTPUT is a dedicated build-generated directory.
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const args = try std.process.argsAlloc(allocator);
+    const args = try zio.argsAlloc(allocator, init.args);
     if (args.len < 3 or args.len > 4) return error.ExpectedInputAndOutputDirectory;
-    var input = try std.fs.cwd().openDir(args[1], .{ .iterate = true, .no_follow = true });
-    defer input.close();
-    if ((try (std.fs.File{ .handle = input.fd }).stat()).kind != .directory) return error.NonRegularAsset;
+    var input = try std.Io.Dir.cwd().openDir(zio.io(), args[1], .{ .iterate = true, .follow_symlinks = false });
+    defer input.close(zio.io());
+    if ((try input.stat(zio.io())).kind != .directory) return error.NonRegularAsset;
     var snapshot = try assets.Snapshot.load(allocator, input, .{});
     defer snapshot.deinit();
-    var output = try std.fs.cwd().makeOpenPath(args[2], .{});
-    defer output.close();
-    const input_path = try input.realpathAlloc(allocator, ".");
-    const output_path = try output.realpathAlloc(allocator, ".");
-    const relative_output = try std.fs.path.relative(allocator, input_path, output_path);
+    var output = try std.Io.Dir.cwd().createDirPathOpen(zio.io(), args[2], .{});
+    defer output.close(zio.io());
+    const input_path = try zio.realPathAlloc(input, ".", allocator);
+    const output_path = try zio.realPathAlloc(output, ".", allocator);
+    const relative_output = try std.fs.path.relativeAlloc(allocator, input_path, null, input_path, output_path);
     if (!std.fs.path.isAbsolute(relative_output)) {
         var segments = std.mem.tokenizeAny(u8, relative_output, "/\\");
         const first = segments.next();

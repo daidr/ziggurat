@@ -85,7 +85,7 @@ fn mappedSamples(source: Plane, inverse: affine.Affine, scale: f32, origin_x: f6
     const one: V = @splat(1);
     const weights = [4]V{ (one - fx) * (one - fy), fx * (one - fy), (one - fx) * fy, fx * fy };
     var taps: [4]U = undefined;
-    for (0..8) |lane| {
+    inline for (0..8) |lane| {
         const index = @as(usize, iy[lane]) * source.stride + ix[lane];
         taps[0][lane] = source.pixels[index];
         taps[1][lane] = source.pixels[index + 1];

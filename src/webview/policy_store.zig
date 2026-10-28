@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const schemes = @import("schemes.zig");
 const permissions = @import("permissions.zig");
 const downloads = @import("downloads.zig");
@@ -93,7 +94,7 @@ fn sameScope(a: Scope, b: Scope) bool {
 }
 fn code(subject: Subject) u8 {
     return switch (subject) {
-        .permission => |kind| @intCast(@intFromEnum(kind)),
+        .permission => |kind| @intCast(@backingInt(kind)),
         .download => 14,
     };
 }
@@ -250,7 +251,7 @@ pub const Store = opaque {
             const action = entry.rule.action;
             const constraints = if (action == .download) action.download.constraints else DownloadConstraints{ .max_known_bytes = 0, .max_received_bytes = 0 };
             write(u8, bytes, &at, code(action.subject()));
-            write(u8, bytes, &at, @intFromEnum(action.decision()));
+            write(u8, bytes, &at, @backingInt(action.decision()));
             write(u16, bytes, &at, if (action == .download) @as(u16, @intFromBool(constraints.allow_unknown_length)) | (@as(u16, @intFromBool(constraints.folder_key != null)) << 1) else 0);
             write(u16, bytes, &at, @intCast(entry.rule.origin.len));
             write(u16, bytes, &at, 0);
@@ -380,16 +381,16 @@ fn saveFile(snapshot: *const Snapshot, main_thread: std.Thread.Id, absolute_path
     defer destination.deinit();
     const parent = std.fs.path.dirname(destination.path.?) orelse return error.AbsoluteOutputPathRequired;
     const name = std.fs.path.basename(destination.path.?);
-    var directory = try std.fs.openDirAbsolute(parent, .{});
-    defer directory.close();
+    var directory = try std.Io.Dir.openDirAbsolute(zio.io(), parent, .{});
+    defer directory.close(zio.io());
     var random: [16]u8 = undefined;
-    std.crypto.random.bytes(&random);
+    zio.random.bytes(&random);
     const encoded = std.fmt.bytesToHex(random, .lower);
     var temporary_storage: [64]u8 = undefined;
     const temporary_name = try std.fmt.bufPrint(&temporary_storage, ".ziggurat-policy-{s}.tmp", .{encoded});
     try checkCancellation(options.cancellation);
-    const file = try directory.createFile(temporary_name, .{ .exclusive = true });
-    errdefer directory.deleteFile(temporary_name) catch |err| {
+    const file = try directory.createFile(zio.io(), temporary_name, .{ .exclusive = true });
+    errdefer directory.deleteFile(zio.io(), temporary_name) catch |err| {
         if (options.failure) |failure| {
             failure.cleanup_error = err;
             @memcpy(failure.temporary_name[0..temporary_name.len], temporary_name);
@@ -397,22 +398,22 @@ fn saveFile(snapshot: *const Snapshot, main_thread: std.Thread.Id, absolute_path
         }
     };
     var opened = true;
-    defer if (opened) file.close();
+    defer if (opened) file.close(zio.io());
     var at: usize = 0;
     while (at < bytes.len) {
         try checkCancellation(options.cancellation);
         const end = @min(at + 64 * 1024, bytes.len);
-        try file.writeAll(bytes[at..end]);
+        try file.writeStreamingAll(zio.io(), bytes[at..end]);
         at = end;
     }
     try checkCancellation(options.cancellation);
-    try file.sync();
-    file.close();
+    try file.sync(zio.io());
+    file.close(zio.io());
     opened = false;
     try checkCancellation(options.cancellation);
     // One rename is the commit point. Cancellation after it cannot roll back.
     // The caller serializes writers and supplies a trusted private directory.
-    try directory.rename(temporary_name, name);
+    try directory.rename(temporary_name, directory, name, zio.io());
 }
 pub fn load(allocator: std.mem.Allocator, main_thread: std.Thread.Id, scope: Scope, absolute_path: []const u8, limits: Limits, cancellation: ?*const Cancellation) !*Store {
     if (std.Thread.getCurrentId() == main_thread) return error.UiThreadForbidden;
@@ -420,9 +421,9 @@ pub fn load(allocator: std.mem.Allocator, main_thread: std.Thread.Id, scope: Sco
     try checkCancellation(cancellation);
     var source = try downloads.Destination.prepare(allocator, main_thread, absolute_path, .{ .accept_overwrite = true });
     defer source.deinit();
-    const file = try std.fs.openFileAbsolute(source.path.?, .{});
-    defer file.close();
-    const metadata = try file.stat();
+    const file = try std.Io.Dir.openFileAbsolute(zio.io(), source.path.?, .{});
+    defer file.close(zio.io());
+    const metadata = try file.stat(zio.io());
     if (metadata.kind != .file) return error.RegularPolicyFileRequired;
     if (metadata.size < header_size or metadata.size > limits.file_bytes) return error.InvalidPolicyFile;
     const bytes = try allocator.alloc(u8, @intCast(metadata.size));
@@ -430,12 +431,12 @@ pub fn load(allocator: std.mem.Allocator, main_thread: std.Thread.Id, scope: Sco
     var at: usize = 0;
     while (at < bytes.len) {
         try checkCancellation(cancellation);
-        const count = try file.read(bytes[at..@min(at + 64 * 1024, bytes.len)]);
+        const count = try zio.read(file, bytes[at..@min(at + 64 * 1024, bytes.len)]);
         if (count == 0) return error.PolicyFileChanged;
         at += count;
     }
     var extra: [1]u8 = undefined;
-    if (try file.read(&extra) != 0) return error.PolicyFileChanged;
+    if (try zio.read(file, &extra) != 0) return error.PolicyFileChanged;
     try checkCancellation(cancellation);
     const candidate = try decode(allocator, main_thread, scope, bytes, limits);
     errdefer candidate.close() catch unreachable;
@@ -465,7 +466,7 @@ pub fn decode(allocator: std.mem.Allocator, main_thread: std.Thread.Id, scope: S
     var characters: usize = 0;
     for (inputs[0..count], 0..) |*entry, i| {
         const kind = try read(u8, bytes, &at);
-        const decision = std.meta.intToEnum(Decision, try read(u8, bytes, &at)) catch return error.InvalidPolicyFile;
+        const decision = std.enums.fromInt(Decision, try read(u8, bytes, &at)) orelse return error.InvalidPolicyFile;
         const flags = try read(u16, bytes, &at);
         const length = try read(u16, bytes, &at);
         if (try read(u16, bytes, &at) != 0 or flags & ~@as(u16, 3) != 0 or length > schemes.origin_limit) return error.InvalidPolicyFile;
@@ -512,7 +513,7 @@ pub fn decode(allocator: std.mem.Allocator, main_thread: std.Thread.Id, scope: S
     return store;
 }
 
-const test_scope: Scope = .{ .namespace = [_]u8{0x42} ** 16, .policy_epoch = 3 };
+const test_scope: Scope = .{ .namespace = @as([16]u8, @splat(0x42)), .policy_epoch = 3 };
 const test_rule: Rule = .{ .origin = "https://permission.example", .issued_at = 100, .expires_at = 1000, .action = .{ .permission = .{ .kind = .notifications, .decision = .allow } } };
 const test_key: Key = .{ .origin = test_rule.origin, .subject = .{ .permission = .notifications } };
 const DecodeProbe = struct {
@@ -682,11 +683,11 @@ test "policy limits revision exhaustion and thousand-rule binary lookup are expl
     try std.testing.expectError(error.UiThreadForbidden, decode(std.testing.failing_allocator, main_thread, test_scope, "", .{}));
 }
 
-fn expectNoTemporaryFiles(directory: std.fs.Dir) !void {
-    var iterable = try directory.openDir(".", .{ .iterate = true });
-    defer iterable.close();
+fn expectNoTemporaryFiles(directory: std.Io.Dir) !void {
+    var iterable = try directory.openDir(zio.io(), ".", .{ .iterate = true });
+    defer iterable.close(zio.io());
     var iterator = iterable.iterate();
-    while (try iterator.next()) |entry| if (std.mem.startsWith(u8, entry.name, ".ziggurat-policy-")) return error.TemporaryPolicyLeaked;
+    while (try iterator.next(zio.io())) |entry| if (std.mem.startsWith(u8, entry.name, ".ziggurat-policy-")) return error.TemporaryPolicyLeaked;
 }
 test "worker save replaces a private file and failed rename or cancellation preserves it" {
     const main_thread = std.Thread.getCurrentId();
@@ -717,7 +718,7 @@ test "worker save replaces a private file and failed rename or cancellation pres
         }
         fn work(self: *@This()) !void {
             try std.testing.expectError(error.WrongThread, self.live.lookup(test_key, 101));
-            const parent = try self.temporary.dir.realpathAlloc(std.testing.allocator, ".");
+            const parent = try zio.realPathAlloc(self.temporary.dir, ".", std.testing.allocator);
             defer std.testing.allocator.free(parent);
             const path = try std.fs.path.join(std.testing.allocator, &.{ parent, "策略.bin" });
             defer std.testing.allocator.free(path);
@@ -729,11 +730,7 @@ test "worker save replaces a private file and failed rename or cancellation pres
             try std.testing.expectError(error.Cancelled, load(std.testing.failing_allocator, self.main_thread, test_scope, path, .{}, &cancellation));
             try std.testing.expectError(error.UiThreadForbidden, self.first.save(std.Thread.getCurrentId(), path, .{}));
             if (@import("builtin").os.tag == .windows) {
-                const w = @cImport({
-                    @cDefine("NO_STRICT", "1");
-                    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-                    @cInclude("windows.h");
-                });
+                const w = @import("ziggurat_c_win32");
                 const wide = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, path);
                 defer std.testing.allocator.free(wide);
                 const handle = w.CreateFileW(wide.ptr, w.GENERIC_READ, w.FILE_SHARE_READ | w.FILE_SHARE_WRITE, null, w.OPEN_EXISTING, 0, null);
@@ -744,7 +741,7 @@ test "worker save replaces a private file and failed rename or cancellation pres
                 if (result) |_| return error.RenameIgnoredNativeLock else |_| {}
                 try std.testing.expect(failure.primary_error != null and failure.cleanup_error == null and !failure.committed);
             }
-            const preserved = try self.temporary.dir.readFileAlloc(std.testing.allocator, "策略.bin", 1024 * 1024);
+            const preserved = try self.temporary.dir.readFileAlloc(zio.io(), "策略.bin", std.testing.allocator, .limited(1024 * 1024));
             defer std.testing.allocator.free(preserved);
             try std.testing.expectEqualSlices(u8, self.second.bytes.?, preserved);
             try expectNoTemporaryFiles(self.temporary.dir);
@@ -788,15 +785,15 @@ test "worker persistence allocation failures retain old files and release candid
             };
         }
         fn work(self: *@This()) !void {
-            const parent = try self.temporary.dir.realpathAlloc(std.testing.allocator, ".");
+            const parent = try zio.realPathAlloc(self.temporary.dir, ".", std.testing.allocator);
             defer std.testing.allocator.free(parent);
             const path = try std.fs.path.join(std.testing.allocator, &.{ parent, "policy.bin" });
             defer std.testing.allocator.free(path);
-            try self.temporary.dir.writeFile(.{ .sub_path = "policy.bin", .data = "previous-private-file" });
+            try self.temporary.dir.writeFile(zio.io(), .{ .sub_path = "policy.bin", .data = "previous-private-file" });
             var owned: Snapshot = .{ .allocator = self.allocator, .bytes = try self.allocator.dupe(u8, self.snapshot.bytes.?) };
             defer owned.deinit();
             owned.save(self.main_thread, path, .{}) catch |err| {
-                const previous = try self.temporary.dir.readFileAlloc(std.testing.allocator, "policy.bin", 1024 * 1024);
+                const previous = try self.temporary.dir.readFileAlloc(zio.io(), "policy.bin", std.testing.allocator, .limited(1024 * 1024));
                 defer std.testing.allocator.free(previous);
                 try std.testing.expectEqualStrings("previous-private-file", previous);
                 try expectNoTemporaryFiles(self.temporary.dir);

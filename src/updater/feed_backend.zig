@@ -6,6 +6,7 @@
 //! starts for it and joins once the job has reported back, so the main
 //! thread never waits on the network or the disk.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const update = @import("ziggurat_update");
 const root = @import("root.zig");
@@ -43,7 +44,7 @@ pub const FeedBackend = struct {
     /// Release to install, copied by `install`.
     version: update.Version = .{ .major = 0, .minor = 0, .patch = 0 },
     /// Worker results, read on the main thread by the posted tasks.
-    mutex: std.Thread.Mutex = .{},
+    mutex: zio.Mutex = .{},
     outcome: Outcome = .none,
     progress: ?update.download.Progress = null,
     progress_posted: bool = false,
@@ -86,11 +87,11 @@ pub const FeedBackend = struct {
     }
 
     fn probe(path: []const u8) bool {
-        var dir = std.fs.cwd().makeOpenPath(path, .{}) catch return false;
-        defer dir.close();
-        var file = dir.createFile(".ziggurat-update-probe", .{}) catch return false;
-        file.close();
-        dir.deleteFile(".ziggurat-update-probe") catch {};
+        var dir = std.Io.Dir.cwd().createDirPathOpen(zio.io(), path, .{}) catch return false;
+        defer dir.close(zio.io());
+        var file = dir.createFile(zio.io(), ".ziggurat-update-probe", .{}) catch return false;
+        file.close(zio.io());
+        dir.deleteFile(zio.io(), ".ziggurat-update-probe") catch {};
         return true;
     }
 
@@ -166,14 +167,14 @@ pub const FeedBackend = struct {
 
     fn readFeed(self: *FeedBackend, allocator: std.mem.Allocator, client: *std.http.Client) ![]u8 {
         if (std.mem.startsWith(u8, self.config.feed, "https://")) return update.http.get(allocator, client, self.config.feed, update.feed.max_feed_bytes);
-        return std.fs.cwd().readFileAlloc(allocator, self.config.feed, update.feed.max_feed_bytes);
+        return std.Io.Dir.cwd().readFileAlloc(zio.io(), self.config.feed, allocator, .limited(update.feed.max_feed_bytes));
     }
 
     fn checkFeed(self: *FeedBackend) !Outcome {
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
         defer arena.deinit();
         const allocator = arena.allocator();
-        var client: std.http.Client = .{ .allocator = allocator };
+        var client: std.http.Client = .{ .allocator = allocator, .io = zio.io() };
         defer client.deinit();
         const bytes = try self.readFeed(allocator, &client);
         if (self.control.isCancelled()) return error.Cancelled;
@@ -198,13 +199,13 @@ pub const FeedBackend = struct {
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
         defer arena.deinit();
         const allocator = arena.allocator();
-        var install_root = try std.fs.cwd().makeOpenPath(self.config.install_root, .{ .iterate = true, .no_follow = true });
-        defer install_root.close();
-        var client: std.http.Client = .{ .allocator = allocator };
+        var install_root = try std.Io.Dir.cwd().createDirPathOpen(zio.io(), self.config.install_root, .{ .open_options = .{ .iterate = true, .follow_symlinks = false } });
+        defer install_root.close(zio.io());
+        var client: std.http.Client = .{ .allocator = allocator, .io = zio.io() };
         defer client.deinit();
         var current = self.policy();
         var retained: ?update.retention.Retained = null;
-        defer if (retained) |value| value.file.close();
+        defer if (retained) |value| value.file.close(zio.io());
         if (update.publication.readCurrent(allocator, install_root, self.config.identity, self.config.target)) |published| {
             if (published.version.order(current.current_version) == .gt) current.current_version = published.version;
             retained = update.retention.currentArchive(allocator, install_root, self.config.identity, self.config.target) catch null;
@@ -218,28 +219,28 @@ pub const FeedBackend = struct {
             .available => |value| value,
         };
         if (available.full.manifest.version.order(self.version) != .eq) return error.ReleaseChanged;
-        var downloads = try install_root.makeOpenPath("downloads", .{ .no_follow = true });
-        defer downloads.close();
+        var downloads = try install_root.createDirPathOpen(zio.io(), "downloads", .{ .open_options = .{ .follow_symlinks = false } });
+        defer downloads.close(zio.io());
         var http_source: update.http.Source = .init(&client);
         const v = self.version;
         const archive_name = try std.fmt.allocPrint(allocator, "{s}-{d}.{d}.{d}.{d}.zip", .{ self.config.target, v.major, v.minor, v.patch, v.revision });
-        var archive = try downloads.createFile(archive_name, .{ .read = true, .truncate = false });
-        defer archive.close();
+        var archive = try downloads.createFile(zio.io(), archive_name, .{ .read = true, .truncate = false });
+        defer archive.close(zio.io());
         var rebuilt = false;
         if (available.delta) |patch| delta: {
             const patch_name = try std.fmt.allocPrint(allocator, "{s}.patch", .{archive_name});
-            var patch_file = try downloads.createFile(patch_name, .{ .read = true, .truncate = false });
-            defer patch_file.close();
-            defer downloads.deleteFile(patch_name) catch {};
+            var patch_file = try downloads.createFile(zio.io(), patch_name, .{ .read = true, .truncate = false });
+            defer patch_file.close(zio.io());
+            defer downloads.deleteFile(zio.io(), patch_name) catch {};
             _ = update.download.fetch(patch.manifest.artifact(), http_source.source(), patch_file, &self.control) catch |err| {
                 if (err == error.Cancelled) return err;
                 break :delta;
             };
-            try archive.setEndPos(0);
+            try archive.setLength(zio.io(), 0);
             var buffer: [16 * 1024]u8 = undefined;
-            var writer = archive.writer(&buffer);
+            var writer = archive.writer(zio.io(), &buffer);
             update.delta.applyVerified(&patch, available.full.manifest, retained.?.file, patch_file, &writer.interface, .{}) catch {
-                try archive.setEndPos(0);
+                try archive.setLength(zio.io(), 0);
                 break :delta;
             };
             rebuilt = true;
@@ -248,7 +249,7 @@ pub const FeedBackend = struct {
         if (self.control.isCancelled()) return error.Cancelled;
         self.post(.{ .received = available.full.manifest.bytes, .total = available.full.manifest.bytes });
         _ = try update.publication.publishZip(allocator, install_root, archive, &available.full, .{ .retain_archive = true });
-        downloads.deleteFile(archive_name) catch {};
+        downloads.deleteFile(zio.io(), archive_name) catch {};
     }
 
     fn reportProgress(ptr: ?*anyopaque, progress: update.download.Progress) void {
@@ -283,7 +284,7 @@ pub const FeedBackend = struct {
         while (true) {
             self.app.post(.{ .context = self, .call = deliverOutcome }) catch |err| switch (err) {
                 error.Full => {
-                    std.Thread.sleep(2 * std.time.ns_per_ms);
+                    zio.sleep(2 * std.time.ns_per_ms);
                     continue;
                 },
                 else => {},

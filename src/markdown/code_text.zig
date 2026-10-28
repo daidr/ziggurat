@@ -48,7 +48,7 @@ pub fn CodeBlocks(comptime capacity: usize) type {
             errdefer self.release() catch {};
             for (tree.nodes, 0..) |node, index| {
                 if (node.kind != .code_block or self.len == capacity) continue;
-                const text = std.mem.trimRight(u8, node.text, "\n");
+                const text = std.mem.trimEnd(u8, node.text, "\n");
                 const layout = try engine.layoutAllocated(allocator, if (text.len == 0) " " else text, .{ .family = options.family, .size = options.size });
                 errdefer layout.close() catch {};
                 const prepared = try layout.prepare(scale, .{});

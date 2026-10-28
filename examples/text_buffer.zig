@@ -107,7 +107,7 @@ const Buffer = struct {
         const self: *Buffer = @ptrCast(@alignCast(ptr));
         switch (event) {
             .menu => |id| {
-                switch (@as(Menu, @enumFromInt(id))) {
+                switch (@as(Menu, @fromBackingInt(@intCast(id)))) {
                     .undo => _ = self.adapter.undo() catch return,
                     .redo => _ = self.adapter.redo() catch return,
                     .select_all => _ = self.document.setSelection(.{ .anchor = 0, .caret = self.document.byteLength() catch return }) catch return,
@@ -163,11 +163,11 @@ pub fn main() !void {
     try buffer.owner.attach(window);
     const control: system.Modifiers = .{ .control = true };
     try buffer.owner.setMenu(&.{
-        .{ .id = @intFromEnum(Menu.edit), .kind = .submenu, .label = "&Edit" },
-        .{ .id = @intFromEnum(Menu.undo), .parent = @intFromEnum(Menu.edit), .label = "&Undo", .accelerator = .{ .key = .z, .modifiers = control } },
-        .{ .id = @intFromEnum(Menu.redo), .parent = @intFromEnum(Menu.edit), .label = "&Redo", .accelerator = .{ .key = .y, .modifiers = control } },
-        .{ .parent = @intFromEnum(Menu.edit), .kind = .separator },
-        .{ .id = @intFromEnum(Menu.select_all), .parent = @intFromEnum(Menu.edit), .label = "Select &All", .accelerator = .{ .key = .a, .modifiers = control } },
+        .{ .id = @backingInt(Menu.edit), .kind = .submenu, .label = "&Edit" },
+        .{ .id = @backingInt(Menu.undo), .parent = @backingInt(Menu.edit), .label = "&Undo", .accelerator = .{ .key = .z, .modifiers = control } },
+        .{ .id = @backingInt(Menu.redo), .parent = @backingInt(Menu.edit), .label = "&Redo", .accelerator = .{ .key = .y, .modifiers = control } },
+        .{ .parent = @backingInt(Menu.edit), .kind = .separator },
+        .{ .id = @backingInt(Menu.select_all), .parent = @backingInt(Menu.edit), .label = "Select &All", .accelerator = .{ .key = .a, .modifiers = control } },
     });
     window.show();
     try app.run();

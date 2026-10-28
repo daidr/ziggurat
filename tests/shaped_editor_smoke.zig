@@ -192,7 +192,7 @@ fn failureAndCost(allocator: std.mem.Allocator, engine: *text.Engine) !void {
     _ = try adapter.prepare(bounds, parameters);
 }
 fn visiblePlane(allocator: std.mem.Allocator, engine: *text.Engine) !void {
-    var editor = try ui.editor.Editor.init(allocator, .{ .multiline = true, .autofocus = true }, "i\n" ** 2000);
+    var editor = try ui.editor.Editor.init(allocator, .{ .multiline = true, .autofocus = true }, &@as([2000 * "i\n".len]u8, @bitCast(@as([2000]["i\n".len]u8, @splat("i\n".*)))));
     defer editor.deinit();
     var adapter = try shaped.Adapter.init(allocator, &editor, engine, .{});
     defer adapter.deinit() catch unreachable;

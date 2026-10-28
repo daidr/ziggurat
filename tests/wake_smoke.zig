@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const wake = @import("ziggurat_wake");
 const animation = @import("ziggurat_animation");
@@ -6,7 +7,7 @@ const Watchdog = @import("watchdog.zig").Watchdog;
 
 const Motion = struct {
     app: *z.App,
-    clock: std.time.Timer,
+    clock: zio.Timer,
     channel: animation.Channel,
     calls: u32 = 0,
     closed: u32 = 0,
@@ -63,7 +64,7 @@ fn motion(allocator: std.mem.Allocator) !void {
 const Rearm = struct {
     app: *z.App,
     timers: [2]*wake.OneShot = undefined,
-    clock: std.time.Timer,
+    clock: zio.Timer,
     start: u64 = 0,
     calls: u32 = 0,
     closed: u32 = 0,

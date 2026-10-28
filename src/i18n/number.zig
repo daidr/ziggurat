@@ -139,7 +139,7 @@ pub fn digitsFloat(value: f64, options: Options) Error!Digits {
         }
         frac_digits = frac_digits[@min(2, frac_digits.len)..];
     }
-    int_digits = std.mem.trimLeft(u8, digits[0..n], "0");
+    int_digits = std.mem.trimStart(u8, digits[0..n], "0");
     if (int_digits.len == 0) int_digits = "0";
     var len: usize = 0;
     const text = out.buffer[1..];
@@ -157,7 +157,7 @@ pub fn digitsFloat(value: f64, options: Options) Error!Digits {
     }
     if (frac_digits.len > kept) {
         const rest = frac_digits[kept..];
-        const above_half = rest[0] > '5' or (rest[0] == '5' and std.mem.trimRight(u8, rest[1..], "0").len > 0);
+        const above_half = rest[0] > '5' or (rest[0] == '5' and std.mem.trimEnd(u8, rest[1..], "0").len > 0);
         const tie = rest[0] == '5' and !above_half;
         if (above_half or (tie and (text[len - 1] - '0') % 2 == 1)) len = incrementLast(&out.buffer, len);
     }

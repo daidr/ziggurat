@@ -157,7 +157,7 @@ fn hashOf(tree: md.Tree, index: u32) u64 {
     var walker = tree.walk(index);
     while (walker.next()) |event| {
         const node = tree.get(event.index);
-        hasher.update(&.{ @intFromEnum(node.kind), @intFromBool(event.entering), node.level });
+        hasher.update(&.{ @backingInt(node.kind), @intFromBool(event.entering), node.level });
         hasher.update(node.text);
     }
     return hasher.final();

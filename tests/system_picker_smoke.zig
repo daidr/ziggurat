@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const system = @import("ziggurat_system");
 const Watchdog = @import("watchdog.zig").Watchdog;

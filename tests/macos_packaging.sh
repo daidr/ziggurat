@@ -33,8 +33,8 @@ pub fn build(b: *std.Build) void {
 ZIG
 cat >"$project/src/main.zig" <<'ZIG'
 const std = @import("std");
-pub fn main() !void {
-    try std.fs.File.stdout().writeAll("packaging smoke\n");
+pub fn main(init: std.process.Init) !void {
+    try std.Io.File.stdout().writeStreamingAll(init.io, "packaging smoke\n");
 }
 ZIG
 cat >"$project/ziggurat.json" <<'JSON'

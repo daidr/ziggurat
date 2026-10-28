@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
@@ -121,17 +122,17 @@ const Prepare = struct {
     result: ?web.snapshots.FileSnapshot = null,
     err: ?anyerror = null,
     fn prepare(self: *@This()) !web.snapshots.FileSnapshot {
-        var temporary = std.testing.tmpDir(.{});
+        var temporary = zio.tmpDir(.{});
         defer temporary.cleanup();
-        const html = try temporary.dir.createFile("document.html", .{ .read = true });
-        defer html.close();
-        try html.writeAll(document);
-        const script = try temporary.dir.createFile("script.js", .{ .read = true });
-        defer script.close();
-        try script.writeAll(resources[0].bytes);
-        const body = try temporary.dir.createFile("value.txt", .{ .read = true });
-        defer body.close();
-        try body.writeAll(resources[1].bytes);
+        const html = try temporary.dir.createFile(zio.io(), "document.html", .{ .read = true });
+        defer html.close(zio.io());
+        try html.writeStreamingAll(zio.io(), document);
+        const script = try temporary.dir.createFile(zio.io(), "script.js", .{ .read = true });
+        defer script.close(zio.io());
+        try script.writeStreamingAll(zio.io(), resources[0].bytes);
+        const body = try temporary.dir.createFile(zio.io(), "value.txt", .{ .read = true });
+        defer body.close(zio.io());
+        try body.writeStreamingAll(zio.io(), resources[1].bytes);
         return web.snapshots.FileSnapshot.init(self.allocator, self.main_thread, html, &.{
             .{ .path = "/script.js", .mime = "text/javascript", .file = script },
             .{ .path = "/value.txt", .mime = "text/plain", .file = body },

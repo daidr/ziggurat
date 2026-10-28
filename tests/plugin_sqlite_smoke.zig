@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
@@ -57,9 +58,9 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{ .thread_safe = true }) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = zio.tmpDir(.{});
     defer tmp.cleanup();
-    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    const base = try zio.realPathAlloc(tmp.dir, ".", allocator);
     defer allocator.free(base);
     const directory = try std.fs.path.join(allocator, &.{ base, "data" });
     defer allocator.free(directory);
@@ -78,7 +79,7 @@ pub fn main() !void {
     var profile: []u8 = &.{};
     defer allocator.free(profile);
     if (builtin.os.tag == .windows) {
-        const local = try std.process.getEnvVarOwned(allocator, "LOCALAPPDATA");
+        const local = try zio.getEnvVarOwned(allocator, "LOCALAPPDATA");
         defer allocator.free(local);
         profile = try std.fs.path.join(allocator, &.{ local, "Ziggurat", "SqlitePluginSmoke" });
         try state.view.attach(state.window, .{ .html = html, .user_data_folder = profile });
@@ -95,6 +96,6 @@ pub fn main() !void {
     if (state.failure) |err| return err;
     try std.testing.expect(state.done);
     // The database is a file in the plugin's directory.
-    try tmp.dir.access("data/notes/app.db", .{});
+    try tmp.dir.access(zio.io(), "data/notes/app.db", .{});
     std.debug.print("sqlite plugin WebView smoke passed: denied name, nested database, BLOB and bigint values, batched transactions, rollback, multi-part query, read-only reopen\n", .{});
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const text = @import("ziggurat_text_layout");
@@ -38,7 +39,7 @@ fn measure(allocator: std.mem.Allocator, count: usize) !void {
     const generation = broker.display_generation;
     var elapsed: [64]u64 = undefined;
     for (&elapsed, 0..) |*duration, index| {
-        var timer = try std.time.Timer.start();
+        var timer = try zio.Timer.start();
         _ = try adapter.setSelection(.{ .anchor = index % 32, .caret = index % 32 }, .downstream);
         try presenter.prepare(bounds, parameters);
         duration.* = timer.read();

@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const d = @import("ziggurat_document");
 const code = @import("ziggurat_code_editor");
 const codec = @import("codec.zig");
@@ -951,7 +952,7 @@ fn charge(total: *usize, count: usize, bytes: usize, limit: usize) !void {
 }
 fn resultLimits(left: code.ResultLimits, right: code.ResultLimits) code.ResultLimits {
     var result: code.ResultLimits = undefined;
-    inline for (std.meta.fields(code.ResultLimits)) |field| @field(result, field.name) = @min(@field(left, field.name), @field(right, field.name));
+    inline for (zio.fields(code.ResultLimits)) |field| @field(result, field.name) = @min(@field(left, field.name), @field(right, field.name));
     return result;
 }
 fn validString(text: []const u8, max: usize) !void {

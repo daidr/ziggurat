@@ -49,10 +49,10 @@ pub const Placement = enum {
     left_end,
 
     pub fn side(self: Placement) Side {
-        return @enumFromInt(@intFromEnum(self) / 3);
+        return @fromBackingInt(@intCast(@backingInt(self) / 3));
     }
     pub fn alignment(self: Placement) Alignment {
-        return @enumFromInt(@intFromEnum(self) % 3);
+        return @fromBackingInt(@intCast(@backingInt(self) % 3));
     }
 };
 
@@ -205,10 +205,11 @@ pub const Flyout = struct {
         const window = self.window orelse return error.Closed;
         if (window.isClosed()) return error.Closed;
         var staging: [desktop.max_monitors]desktop.Monitor = undefined;
-        const displays = self.displays orelse staging[0 .. desktop.monitors(window.app, &staging) catch |err| switch (err) {
-            // Without displays to place against, keep the size only.
-            error.UnsupportedCapability => return window.setClientBounds(.{ .width = self.width, .height = self.height }),
-            else => return err,
+        const displays = self.displays orelse staging[0 .. desktop.monitors(window.app, &staging) catch |err| {
+            // Without displays to place against, keep the size only. Some
+            // builds report no other failure, so this is not a switch.
+            if (err == error.UnsupportedCapability) return window.setClientBounds(.{ .width = self.width, .height = self.height });
+            return err;
         }];
         if (displays.len == 0) return window.setClientBounds(.{ .width = self.width, .height = self.height });
         const anchor: ?Box = switch (self.anchor) {
@@ -307,7 +308,7 @@ pub const Placed = struct { box: Box, flipped_x: bool, flipped_y: bool };
 /// not fit and the flipped place would; then it slides along the edge it
 /// would cross, back into the work area; then it shrinks to it.
 pub fn placeBeside(anchor: Box, size: Size, work: Box, placement: Placement, gap: i32) Placed {
-    const cross: i32 = @as(i32, @intFromEnum(placement.alignment())) - 1;
+    const cross: i32 = @as(i32, @backingInt(placement.alignment())) - 1;
     // The point of the anchor the flyout goes to, the point of the flyout
     // that goes there (-1 left or top, 0 middle, 1 right or bottom), and the
     // offset between them.

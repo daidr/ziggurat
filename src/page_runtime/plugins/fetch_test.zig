@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const net = @import("ziggurat_net");
 const runtime = @import("ziggurat_page_runtime");
 const fetch = @import("fetch.zig");
@@ -99,10 +100,10 @@ const Outcome = struct {
 /// never made: each extra connection ends one wait.
 fn finish(server: *TestServer, thread: std.Thread, count: usize) void {
     server.release.set();
-    const address = std.net.Address.parseIp("127.0.0.1", server.port()) catch unreachable;
+    const address = std.Io.net.IpAddress.parse("127.0.0.1", server.port()) catch unreachable;
     for (0..count) |_| {
-        const stream = std.net.tcpConnectToAddress(address) catch break;
-        stream.close();
+        const stream = address.connect(zio.io(), .{ .mode = .stream }) catch break;
+        stream.close(zio.io());
     }
     thread.join();
 }

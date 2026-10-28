@@ -1,12 +1,9 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 const Memory = extern struct {
     cb: u32 = @sizeOf(Memory),
     faults: u32 = 0,
@@ -50,12 +47,12 @@ const State = struct {
     context: *ui.Context = undefined,
     actions: usize = 0,
     scale: f32 = 1,
-    idle_timer: std.time.Timer = undefined,
+    idle_timer: zio.Timer = undefined,
     idle_start_cpu: u64 = 0,
     idle_cpu_ns: u64 = 0,
     idle_wall_ns: u64 = 0,
     idle_milliseconds: u32 = 500,
-    idle_started: std.Thread.ResetEvent = .{},
+    idle_started: zio.ResetEvent = .{},
     final_busy_presents: u32 = 0,
     fn draw(ptr: *anyopaque, frame: *ui.Frame) void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
@@ -83,25 +80,25 @@ const State = struct {
     }
     fn startIdle(ptr: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
-        self.idle_timer = std.time.Timer.start() catch unreachable;
+        self.idle_timer = zio.Timer.start() catch unreachable;
         self.idle_start_cpu = cpuTime() catch unreachable;
         self.idle_started.set();
     }
     fn idle(self: *@This()) void {
-        std.Thread.sleep(200 * std.time.ns_per_ms);
+        zio.sleep(200 * std.time.ns_per_ms);
         self.window.app.post(.{ .context = self, .call = startIdle }) catch return;
         // Only this owned worker waits; the measured UI interval starts first.
         self.idle_started.wait();
-        std.Thread.sleep(@as(u64, self.idle_milliseconds) * std.time.ns_per_ms);
+        zio.sleep(@as(u64, self.idle_milliseconds) * std.time.ns_per_ms);
         self.window.app.post(.{ .context = self, .call = stop }) catch return;
     }
 };
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try zio.argsAlloc(allocator, init.args);
+    defer zio.argsFree(allocator, args);
     var visible = false;
     var software_only = false;
     var warp = false;
@@ -120,7 +117,7 @@ pub fn main() !void {
             if (idle_milliseconds == 0 or idle_milliseconds > 120000) return error.InvalidIdleDuration;
         } else return error.UnknownArgument;
     }
-    var startup = try std.time.Timer.start();
+    var startup = try zio.Timer.start();
     const app = try z.App.init(allocator);
     defer app.deinit();
     var state: State = .{ .idle_milliseconds = idle_milliseconds };
@@ -137,13 +134,13 @@ pub fn main() !void {
     for (0..16) |_| _ = c.SendMessageW(hwnd, c.WM_PAINT, 0, 0);
     var samples: [200]u64 = undefined;
     for (&samples) |*sample| {
-        var frame_time = try std.time.Timer.start();
+        var frame_time = try zio.Timer.start();
         _ = c.SendMessageW(hwnd, c.WM_PAINT, 0, 0);
         sample.* = frame_time.read();
     }
     const x: isize = @intFromFloat(32 * state.scale);
     const y: isize = @intFromFloat(410 * state.scale);
-    var input_timer = try std.time.Timer.start();
+    var input_timer = try zio.Timer.start();
     for (0..100) |_| {
         _ = c.SendMessageW(hwnd, c.WM_LBUTTONDOWN, 0, (y << 16) | x);
         _ = c.SendMessageW(hwnd, c.WM_LBUTTONUP, 0, (y << 16) | x);
@@ -158,16 +155,16 @@ pub fn main() !void {
     const fallbacks = context.fallbacks;
     const deferred_frames = context.deferred_frames;
     const draw_callbacks = context.frames;
-    state.idle_timer = try std.time.Timer.start();
+    state.idle_timer = try zio.Timer.start();
     state.idle_start_cpu = try cpuTime();
     const worker = try std.Thread.spawn(.{}, State.idle, .{&state});
     defer worker.join();
     try app.run();
     if (state.idle_wall_ns < @as(u64, idle_milliseconds) * std.time.ns_per_ms) return error.IdleMeasurementInterrupted;
     std.mem.sort(u64, &samples, {}, std.sort.asc(u64));
-    const executable = try std.fs.selfExePathAlloc(allocator);
+    const executable = try zio.executablePathAlloc(allocator);
     defer allocator.free(executable);
-    const executable_size = (try std.fs.cwd().statFile(executable)).size;
+    const executable_size = (try std.Io.Dir.cwd().statFile(zio.io(), executable, .{})).size;
     const json = try std.json.Stringify.valueAlloc(allocator, .{
         .schema = 1,
         .os = "windows",
@@ -208,7 +205,7 @@ pub fn main() !void {
         .display_latency_measured = false,
     }, .{ .whitespace = .indent_2 });
     defer allocator.free(json);
-    if (output_path) |path| try std.fs.cwd().writeFile(.{ .sub_path = path, .data = json });
-    try std.fs.File.stdout().writeAll(json);
-    try std.fs.File.stdout().writeAll("\n");
+    if (output_path) |path| try std.Io.Dir.cwd().writeFile(zio.io(), .{ .sub_path = path, .data = json });
+    try std.Io.File.stdout().writeStreamingAll(zio.io(), json);
+    try std.Io.File.stdout().writeStreamingAll(zio.io(), "\n");
 }

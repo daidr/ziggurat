@@ -251,7 +251,7 @@ pub const View = struct {
                 const line = if (side == .a) mapped.a else mapped.b;
                 if (line) |source_line| {
                     const ref = try self.resolve(&candidate, index, display, side, row, source_line, font, generation);
-                    refs[@intFromEnum(side)] = ref;
+                    refs[@backingInt(side)] = ref;
                     height = @max(height, candidate.planes[ref.plane].entry.parts[ref.part].height);
                 }
             }
@@ -348,7 +348,7 @@ pub const View = struct {
         }
     }
     fn resolve(self: *View, candidate: *Snapshot, index: *const ix.Index, display: *const requests.Display, side: Side, row: usize, line: usize, font: t.Options, generation: u64) !Ref {
-        const tag = @intFromEnum(side);
+        const tag = @backingInt(side);
         const source = if (side == .a) display.a else display.b;
         const text_version = try source.committedTextVersion();
         for (candidate.planes[0..candidate.plane_count], 0..) |plane, at| if (plane.entry.side == tag and plane.entry.generation == generation and plane.entry.text_version == text_version) if (plane.entry.find(line)) |part| return .{ .plane = at, .part = part };
@@ -435,7 +435,12 @@ pub const View = struct {
         defer scope.end();
         self.busy = true;
         defer self.busy = false;
-        errdefer |err| frame.failure = frame.failure orelse err;
+        return self.drawBody(frame, bounds, colors) catch |err| {
+            frame.failure = frame.failure orelse err;
+            return err;
+        };
+    }
+    fn drawBody(self: *View, frame: *ui.Frame, bounds: ui.Rect, colors: Colors) anyerror!void {
         const snapshot = try self.current(bounds, frame.size.scale);
         try frame.pushClip(bounds);
         defer frame.popClip() catch |err| {
@@ -445,10 +450,10 @@ pub const View = struct {
         frame.rect(.{ .x = bounds.x, .y = bounds.y, .width = bounds.width, .height = snapshot.columns[0].y - bounds.y }, colors.header);
         for (snapshot.rows[0..snapshot.row_count]) |row| {
             for ([_]Side{ .a, .b }) |side| {
-                const column = snapshot.columns[@intFromEnum(side)];
+                const column = snapshot.columns[@backingInt(side)];
                 const rectangle = ui.layout.intersect(.{ .x = column.x, .y = column.y + row.y, .width = column.width, .height = row.height }, column);
                 if (rectangle.height == 0) continue;
-                const reference = row.sides[@intFromEnum(side)];
+                const reference = row.sides[@backingInt(side)];
                 if (row.hunk != null) frame.rect(rectangle, if (reference == null) colors.blank else if (side == .a) colors.deleted else colors.added);
                 if (row.hunk != null and row.hunk == self.selected) frame.rect(.{ .x = column.x, .y = rectangle.y, .width = 3, .height = rectangle.height }, colors.selected);
                 if (reference) |ref| {

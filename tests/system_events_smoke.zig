@@ -1,12 +1,7 @@
 const std = @import("std");
 const z = @import("ziggurat");
 const system = @import("ziggurat_system");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("shellapi.h");
-});
+const c = @import("ziggurat_c_win32");
 const tray_message = c.WM_APP + 0x421;
 const hotkey: system.Hotkey = .{ .key = .f24, .modifiers = .{ .control = true, .alt = true, .shift = true } };
 const native_key = c.VK_F24;
@@ -112,7 +107,7 @@ pub fn main() !void {
             try std.testing.expectError(error.EmptyNotification, first.owner.showNotification(9, .{ .title = "Title", .body = "" }));
             try std.testing.expectError(error.EmbeddedNul, first.owner.showNotification(9, .{ .title = "bad\x00title", .body = "Body" }));
             try std.testing.expectError(error.InvalidUtf8, first.owner.showNotification(9, .{ .title = "Title", .body = "\xff" }));
-            const overlong = [_]u8{'a'} ** 256;
+            const overlong = @as([256]u8, @splat('a'));
             try std.testing.expectError(error.TextCapacityExceeded, first.owner.showNotification(9, .{ .title = "Title", .body = &overlong }));
             try first.owner.showNotification(9, .{ .title = "Ziggurat integration check", .body = "Silent notification lifecycle check", .silent = true });
             const notification_id = first.owner.notification.?.tray.id;

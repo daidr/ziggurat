@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 
 /// Independent SPSC byte storage. The UI owns delivery and acknowledgement;
 /// one linear Writer owns production. No App, View, transport or COM is stored.
@@ -97,7 +98,7 @@ pub const Control = struct {
         // There can be at most max_chunks distinct ACK advances and one cancel.
         const previous = self.wake_sequence.fetchAdd(1, .release);
         std.debug.assert(previous < std.math.maxInt(u32));
-        std.Thread.Futex.wake(&self.wake_sequence, 1);
+        zio.Futex.wake(&self.wake_sequence, 1);
     }
     /// At most one held delivery. Encoding/transport rejection retains that
     /// Delivery for retry of the same packet, or explicit stream cancellation.
@@ -209,7 +210,7 @@ pub const Writer = struct {
             if (self.sequence == control.limits.max_chunks) return error.ChunkLimit;
             if (self.total_bytes == control.limits.max_total_bytes) return error.ByteLimit;
             if (control.slots[self.sequence % control.slots.len].state.load(.acquire) == .free) return;
-            std.Thread.Futex.wait(&control.wake_sequence, observed);
+            zio.Futex.wait(&control.wake_sequence, observed);
         }
     }
     /// EOF does not release slots. The UI can send its terminal result only
@@ -348,7 +349,7 @@ test "all allocation failures and owners released before held delivery are safe"
 
 const WaitProbe = struct {
     writer: Writer,
-    ready: std.Thread.ResetEvent = .{},
+    ready: zio.ResetEvent = .{},
     outcome: ?anyerror = null,
     wrote: bool = false,
     fn run(self: *WaitProbe) void {

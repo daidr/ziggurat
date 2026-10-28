@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const ziggurat = @import("ziggurat");
 const decoding = @import("decoder.zig");
 const output = @import("output.zig");
@@ -80,7 +81,7 @@ pub const Engine = struct {
     clock: output.Clock,
 
     /// Guards voices, slots and notifications.
-    mutex: std.Thread.Mutex = .{},
+    mutex: zio.Mutex = .{},
     /// Playing or fading out. Capacity covers every voice alive, so that
     /// starting one never allocates.
     voices: std.ArrayList(*Voice) = .empty,
@@ -97,7 +98,7 @@ pub const Engine = struct {
     master: f64 = 1,
     notifier: ?*Notifier = null,
 
-    error_mutex: std.Thread.Mutex = .{},
+    error_mutex: zio.Mutex = .{},
     output_error: ?output.OpenError = null,
     detail: output.Detail = .{},
 
@@ -106,7 +107,7 @@ pub const Engine = struct {
     decode_wake: std.atomic.Value(u32) = .init(0),
     output_thread: ?std.Thread = null,
     decode_thread: ?std.Thread = null,
-    decode_mutex: std.Thread.Mutex = .{},
+    decode_mutex: zio.Mutex = .{},
     streams: ?*Stream = null,
     mix_buffer: [output.period_frames * output.channels]f32 = undefined,
     system_storage: output.system.Storage = .{},
@@ -164,7 +165,7 @@ pub const Engine = struct {
 
     fn wakeFutex(word: *std.atomic.Value(u32)) void {
         _ = word.fetchAdd(1, .release);
-        std.Thread.Futex.wake(word, 1);
+        zio.Futex.wake(word, 1);
     }
 
     fn wakeDecoder(context: ?*anyopaque) void {
@@ -205,7 +206,7 @@ pub const Engine = struct {
     /// A paused player decoding `file` as it plays, about a second ahead,
     /// for music and other long audio. The player owns the file once this
     /// succeeds and closes it with itself.
-    pub fn openStreamFile(self: *Engine, file: std.fs.File) decoding.Error!Player {
+    pub fn openStreamFile(self: *Engine, file: std.Io.File) decoding.Error!Player {
         return self.openStream(.{ .file = .init(file) }, file);
     }
 
@@ -226,7 +227,7 @@ pub const Engine = struct {
         };
     }
 
-    fn openStream(self: *Engine, storage: streaming.Storage, file: ?std.fs.File) decoding.Error!Player {
+    fn openStream(self: *Engine, storage: streaming.Storage, file: ?std.Io.File) decoding.Error!Player {
         const stream = try Stream.create(self.allocator, .{ .context = self, .call = wakeDecoder });
         stream.storage = storage;
         const input = switch (stream.storage) {
@@ -245,7 +246,7 @@ pub const Engine = struct {
         };
     }
 
-    fn adopt(self: *Engine, stream: *Stream, decoder: decoding.Decoder, file: ?std.fs.File) error{ OutOfMemory, InvalidData }!Player {
+    fn adopt(self: *Engine, stream: *Stream, decoder: decoding.Decoder, file: ?std.Io.File) error{ OutOfMemory, InvalidData }!Player {
         try stream.start(decoder);
         const player = blk: {
             self.mutex.lock();
@@ -519,7 +520,7 @@ pub const Engine = struct {
         while (true) {
             const seen = self.decode_wake.load(.acquire);
             if (self.quit.load(.acquire)) return;
-            if (!self.decodePass()) std.Thread.Futex.wait(&self.decode_wake, seen);
+            if (!self.decodePass()) zio.Futex.wait(&self.decode_wake, seen);
         }
     }
 
@@ -540,7 +541,7 @@ pub const Engine = struct {
                 const busy = self.voices.items.len > 0;
                 self.mutex.unlock();
                 if (busy) break;
-                std.Thread.Futex.wait(&self.output_wake, seen);
+                zio.Futex.wait(&self.output_wake, seen);
             }
             var detail: output.Detail = .{};
             const opened: output.OpenError!output.Device = switch (self.mode) {
