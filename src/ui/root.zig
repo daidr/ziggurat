@@ -3957,6 +3957,18 @@ pub const Frame = struct {
         try self.addControl(id, bounds, .{ .enabled = false, .focusable = false });
         try self.semantic(.{ .id = id, .parent = parent, .role = if (alert) .alert_dialog else .dialog, .name = name, .description = description, .bounds = bounds });
     }
+    /// A menu drawn in the window, such as one a right-click opens, over
+    /// other content. Like a popover it occludes the controls behind it;
+    /// its items (`menuItem`) name it as their `semantic_parent`.
+    pub fn menu(self: *Frame, id: u64, bounds: Rect, name: []const u8, parent: u64) !void {
+        if (id == accessibility.root_id) return error.ReservedControlId;
+        try self.addControl(id, bounds, .{ .enabled = false, .focusable = false });
+        try self.semantic(.{ .id = id, .parent = parent, .role = .menu, .name = name, .bounds = bounds });
+    }
+    /// One item of a `menu`; see `widgets.MenuItemOptions`.
+    pub fn menuItem(self: *Frame, id: u64, bounds: Rect, text: []const u8, options: widgets.MenuItemOptions) !void {
+        try widgets.emitMenuItem(self, id, bounds, text, options);
+    }
     /// How many controls and semantic nodes this frame has added so far,
     /// for `makeInert`.
     pub const InertMark = struct { controls: usize, semantics: usize };

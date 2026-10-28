@@ -10,7 +10,7 @@ const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struc
 pub const max_nodes = 128;
 pub const text_capacity = 32768;
 pub const root_id: u64 = 0;
-pub const Role = enum(u32) { window, group, button, text, text_box, checkbox, radio, toggle_switch, progress, radio_group, slider, stepper, list, tab_list, tab, toolbar, splitter, link, disclosure, meter, navigation, list_box, list_item, combo_box, tooltip, status, search, image, tree, tree_item, table, table_header, column_header, table_row, token_field, token, popup, calendar, color_well, dialog, alert_dialog };
+pub const Role = enum(u32) { window, group, button, text, text_box, checkbox, radio, toggle_switch, progress, radio_group, slider, stepper, list, tab_list, tab, toolbar, splitter, link, disclosure, meter, navigation, list_box, list_item, combo_box, tooltip, status, search, image, tree, tree_item, table, table_header, column_header, table_row, token_field, token, popup, calendar, color_well, dialog, alert_dialog, menu, menu_item, menu_item_checkbox, menu_item_radio };
 pub const Node = struct {
     id: u64,
     parent: ?u64 = root_id,

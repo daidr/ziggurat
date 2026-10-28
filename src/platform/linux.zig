@@ -276,7 +276,9 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
         23 => record.publishTextInputMode(if (native.flags == 0) .system else .keyboard_compose),
         3, 4 => {
             const phase: core.PointerPhase = if (native.kind == 3) .down else .up;
-            const input: core.PointerButtonInput = .{ .position = point, .modifiers = pointerModifiers(@intCast(native.flags)) };
+            // `key` carries a button other than the primary one.
+            if (native.key < 0 or native.key > 4) return 0;
+            const input: core.PointerButtonInput = .{ .position = point, .modifiers = pointerModifiers(@intCast(native.flags)), .button = @fromBackingInt(@intCast(native.key)) };
             if (record.pointerEnabled()) {
                 if (native.context) |context| {
                     const ticket: *const PointerTicket = @ptrCast(@alignCast(context));

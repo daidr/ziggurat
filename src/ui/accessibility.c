@@ -35,7 +35,7 @@
 #define MIXED 1024
 /* A text box holding a password exposes no text pattern. */
 #define PASSWORD 2048
-enum { ROLE_WINDOW, ROLE_GROUP, ROLE_BUTTON, ROLE_TEXT, ROLE_TEXT_BOX, ROLE_CHECKBOX, ROLE_RADIO, ROLE_SWITCH, ROLE_PROGRESS, ROLE_RADIO_GROUP, ROLE_SLIDER, ROLE_STEPPER, ROLE_LIST, ROLE_TAB_LIST, ROLE_TAB, ROLE_TOOLBAR, ROLE_SPLITTER, ROLE_LINK, ROLE_DISCLOSURE, ROLE_METER, ROLE_NAVIGATION, ROLE_LIST_BOX, ROLE_LIST_ITEM, ROLE_COMBO_BOX, ROLE_TOOLTIP, ROLE_STATUS, ROLE_SEARCH, ROLE_IMAGE, ROLE_TREE, ROLE_TREE_ITEM, ROLE_TABLE, ROLE_TABLE_HEADER, ROLE_COLUMN_HEADER, ROLE_TABLE_ROW, ROLE_TOKEN_FIELD, ROLE_TOKEN, ROLE_POPUP, ROLE_CALENDAR, ROLE_COLOR_WELL, ROLE_DIALOG, ROLE_ALERT_DIALOG };
+enum { ROLE_WINDOW, ROLE_GROUP, ROLE_BUTTON, ROLE_TEXT, ROLE_TEXT_BOX, ROLE_CHECKBOX, ROLE_RADIO, ROLE_SWITCH, ROLE_PROGRESS, ROLE_RADIO_GROUP, ROLE_SLIDER, ROLE_STEPPER, ROLE_LIST, ROLE_TAB_LIST, ROLE_TAB, ROLE_TOOLBAR, ROLE_SPLITTER, ROLE_LINK, ROLE_DISCLOSURE, ROLE_METER, ROLE_NAVIGATION, ROLE_LIST_BOX, ROLE_LIST_ITEM, ROLE_COMBO_BOX, ROLE_TOOLTIP, ROLE_STATUS, ROLE_SEARCH, ROLE_IMAGE, ROLE_TREE, ROLE_TREE_ITEM, ROLE_TABLE, ROLE_TABLE_HEADER, ROLE_COLUMN_HEADER, ROLE_TABLE_ROW, ROLE_TOKEN_FIELD, ROLE_TOKEN, ROLE_POPUP, ROLE_CALENDAR, ROLE_COLOR_WELL, ROLE_DIALOG, ROLE_ALERT_DIALOG, ROLE_MENU, ROLE_MENU_ITEM, ROLE_MENU_ITEM_CHECKBOX, ROLE_MENU_ITEM_RADIO };
 enum { PATTERN_INVOKE = 1, PATTERN_VALUE = 2, PATTERN_TEXT = 4, PATTERN_TOGGLE = 8, PATTERN_SELECTION_ITEM = 16, PATTERN_SELECTION = 32, PATTERN_RANGE_VALUE = 64, PATTERN_COLLECTION = 128, PATTERN_EXPAND_COLLAPSE = 256 };
 
 typedef struct Node {
@@ -211,12 +211,13 @@ static ULONG provider_release(Provider *p) {
 static HRESULT provider_new(State *, uint64_t, Provider **);
 static Range *range_new(State *, uint64_t, uint32_t, uint32_t);
 static const ITextRangeProviderVtbl range_vtable;
-static BOOL toggle_role(uint32_t role) { return role == ROLE_CHECKBOX || role == ROLE_SWITCH; }
+/* Check box and radio menu items toggle as their menu chooses them. */
+static BOOL toggle_role(uint32_t role) { return role == ROLE_CHECKBOX || role == ROLE_SWITCH || role == ROLE_MENU_ITEM_CHECKBOX || role == ROLE_MENU_ITEM_RADIO; }
 /* Tabs and list box options select like radios: one selected item per
    chooser container. Trees and tables may allow several (MULTIPLE). */
 static BOOL item_role(uint32_t role) { return role == ROLE_RADIO || role == ROLE_TAB || role == ROLE_LIST_ITEM || role == ROLE_TREE_ITEM || role == ROLE_TABLE_ROW; }
 static BOOL chooser_role(uint32_t role) { return role == ROLE_RADIO_GROUP || role == ROLE_TAB_LIST || role == ROLE_LIST_BOX || role == ROLE_TREE || role == ROLE_TABLE; }
-static BOOL invoke_role(uint32_t role) { return role == ROLE_BUTTON || role == ROLE_LINK || role == ROLE_COLUMN_HEADER || role == ROLE_COLOR_WELL; }
+static BOOL invoke_role(uint32_t role) { return role == ROLE_BUTTON || role == ROLE_LINK || role == ROLE_COLUMN_HEADER || role == ROLE_COLOR_WELL || role == ROLE_MENU_ITEM; }
 /* A combo box expands and collapses its list like a disclosure, and a
    color well its picker. */
 static BOOL expander_role(uint32_t role) { return role == ROLE_DISCLOSURE || role == ROLE_COMBO_BOX || role == ROLE_COLOR_WELL; }
@@ -234,6 +235,8 @@ static BOOL focusable(uint32_t role) { return actionable(role) || role == ROLE_T
 static uint32_t patterns_for_role(uint32_t role) {
     /* A color well opens its picker and reports its color as a value. */
     if (role == ROLE_COLOR_WELL) return PATTERN_INVOKE | PATTERN_EXPAND_COLLAPSE | PATTERN_VALUE;
+    /* A menu item that opens a submenu also expands, as EXPANDABLE says. */
+    if (role == ROLE_MENU_ITEM) return PATTERN_INVOKE | PATTERN_EXPAND_COLLAPSE;
     if (invoke_role(role)) return PATTERN_INVOKE;
     if (role == ROLE_DISCLOSURE) return PATTERN_EXPAND_COLLAPSE;
     if (role == ROLE_TREE_ITEM) return PATTERN_SELECTION_ITEM | PATTERN_EXPAND_COLLAPSE;
@@ -444,7 +447,7 @@ static HRESULT STDMETHODCALLTYPE simple_pattern(IRawElementProviderSimple *iface
         if (id == UIA_SelectionPatternId) return collection_container_new(p, &IID_ISelectionProvider2, (void **)out);
     }
     if (id == UIA_InvokePatternId && invoke_role(n.role)) *out = (IUnknown *)&p->invoke;
-    if (id == UIA_ExpandCollapsePatternId && (expander_role(n.role) || n.role == ROLE_TREE_ITEM)) *out = (IUnknown *)&p->expand_collapse;
+    if (id == UIA_ExpandCollapsePatternId && (expander_role(n.role) || n.role == ROLE_TREE_ITEM || (n.role == ROLE_MENU_ITEM && (n.flags & EXPANDABLE)))) *out = (IUnknown *)&p->expand_collapse;
     if (id == UIA_ValuePatternId && (n.role == ROLE_TEXT_BOX || n.role == ROLE_COMBO_BOX)) *out = (IUnknown *)&p->value;
     if (id == UIA_TextPatternId && n.role == ROLE_TEXT_BOX && !(n.flags & PASSWORD)) *out = (IUnknown *)&p->text;
     if (id == UIA_TogglePatternId && toggle_role(n.role)) *out = (IUnknown *)&p->toggle;
@@ -457,7 +460,7 @@ static HRESULT STDMETHODCALLTYPE simple_pattern(IRawElementProviderSimple *iface
 /* A tree item keeps its selection in CHECKED and its expansion in its own
    flags; a disclosure or combo box is expanded while CHECKED. */
 static enum ExpandCollapseState expand_state(const Node *n) {
-    if (n->role == ROLE_TREE_ITEM) {
+    if (n->role == ROLE_TREE_ITEM || n->role == ROLE_MENU_ITEM) {
         if (!(n->flags & EXPANDABLE)) return ExpandCollapseState_LeafNode;
         return (n->flags & EXPANDED) ? ExpandCollapseState_Expanded : ExpandCollapseState_Collapsed;
     }
@@ -515,6 +518,8 @@ static int control_type(uint32_t role) {
         case ROLE_COLOR_WELL: return UIA_ButtonControlTypeId;
         /* A dialog drawn inside the window is a pane that reports IsDialog. */
         case ROLE_DIALOG: case ROLE_ALERT_DIALOG: return UIA_PaneControlTypeId;
+        case ROLE_MENU: return UIA_MenuControlTypeId;
+        case ROLE_MENU_ITEM: case ROLE_MENU_ITEM_CHECKBOX: case ROLE_MENU_ITEM_RADIO: return UIA_MenuItemControlTypeId;
         default: return UIA_EditControlTypeId;
     }
 }
@@ -568,7 +573,7 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
         case UIA_IsControlElementPropertyId: case UIA_IsContentElementPropertyId: out->vt = VT_BOOL; out->boolVal = VARIANT_TRUE; break;
         case UIA_IsOffscreenPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & OFFSCREEN) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsInvokePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = invoke_role(n->role) ? VARIANT_TRUE : VARIANT_FALSE; break;
-        case UIA_IsExpandCollapsePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = expander_role(n->role) || n->role == ROLE_TREE_ITEM ? VARIANT_TRUE : VARIANT_FALSE; break;
+        case UIA_IsExpandCollapsePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = expander_role(n->role) || n->role == ROLE_TREE_ITEM || (n->role == ROLE_MENU_ITEM && (n->flags & EXPANDABLE)) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_ExpandCollapseExpandCollapseStatePropertyId: out->vt = VT_I4; out->lVal = expand_state(n); break;
         case UIA_IsValuePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_TEXT_BOX || n->role == ROLE_COMBO_BOX || n->role == ROLE_COLOR_WELL ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsTextPatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_TEXT_BOX && !(n->flags & PASSWORD) ? VARIANT_TRUE : VARIANT_FALSE; break;
@@ -767,6 +772,12 @@ static HRESULT expand_collapse_to(IExpandCollapseProvider *iface, BOOL expanded)
     if (n.role == ROLE_TREE_ITEM) {
         if (!(n.flags & EXPANDABLE)) return UIA_E_INVALIDOPERATION;
         return ((n.flags & EXPANDED) != 0) == expanded ? S_OK : request(p->state, p->id, 5, NULL, 0, 0, expanded ? 3 : 2);
+    }
+    /* A menu item opens its submenu as it is activated, and its submenu
+       closes as the menu moves on, so collapsing asks nothing. */
+    if (n.role == ROLE_MENU_ITEM) {
+        if (!(n.flags & EXPANDABLE)) return UIA_E_INVALIDOPERATION;
+        return (n.flags & EXPANDED) || !expanded ? S_OK : request(p->state, p->id, 1, NULL, 0, 0, 0);
     }
     return ((n.flags & CHECKED) != 0) == expanded ? S_OK : request(p->state, p->id, 1, NULL, 0, 0, 0);
 }

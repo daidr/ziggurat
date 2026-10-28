@@ -1603,6 +1603,9 @@ pub fn roleName(kind: Kind, named: bool) []const u8 {
         .dialog => "dialog",
         .popover => "dialog",
         .popup => "listbox",
+        .menu => "menu",
+        .menu_item => "menuitem",
+        .menu_separator => "separator",
         .toolbar => "toolbar",
         .breadcrumbs => "navigation",
         .text, .note, .badge => "text",
@@ -1623,7 +1626,7 @@ pub fn roleName(kind: Kind, named: bool) []const u8 {
 fn focusable(e: *const Element) bool {
     if (!e.enabled) return false;
     return switch (e.kind) {
-        .button, .link, .nav_button, .combo_box, .popup_button, .checkbox, .radio, .segment, .tab, .list_item, .disclosure, .toggle_switch, .slider, .stepper, .rating, .tree_row, .column_header, .token, .combo_toggle, .editable_text, .embed => true,
+        .button, .link, .nav_button, .combo_box, .popup_button, .checkbox, .radio, .segment, .tab, .list_item, .disclosure, .toggle_switch, .slider, .stepper, .rating, .tree_row, .column_header, .token, .combo_toggle, .editable_text, .embed, .menu_item => true,
         else => false,
     };
 }
