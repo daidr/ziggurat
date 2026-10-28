@@ -37,6 +37,10 @@ pub const power = @import("power.zig");
 pub const taskbar = @import("taskbar.zig");
 pub const desktop = @import("desktop.zig");
 pub const watch = @import("watch.zig");
+pub const paths = @import("paths.zig");
+pub const menu_roles = @import("menu_roles.zig");
+pub const menu_role_actions = @import("menu_role_actions.zig");
+pub const signals = @import("signals.zig");
 pub const secrets = @import("secrets.zig");
 pub const flyout = @import("flyout.zig");
 pub const Flyout = flyout.Flyout;
@@ -64,6 +68,7 @@ pub const capabilities = .{
     .taskbar = taskbar.capabilities,
     .desktop = desktop.capabilities,
     .file_watch = builtin.os.tag == .windows or builtin.os.tag == .linux,
+    .quit_on_signals = signals.capabilities.quit_on_signals,
     .secrets = secrets.capabilities,
     .now_playing = now_playing.capabilities.now_playing,
 };

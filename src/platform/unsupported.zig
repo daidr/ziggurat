@@ -56,6 +56,24 @@ pub fn setBackdrop(_: *core.WindowRecord, _: core.WindowBackdrop) !void {
 pub fn setTitle(_: *core.WindowRecord, _: []const u8) !void {
     return error.UnsupportedPlatform;
 }
+pub fn setTraits(_: *core.WindowRecord, _: core.WindowTraits) !void {
+    return error.UnsupportedPlatform;
+}
+pub fn setOpacity(_: *core.WindowRecord, _: f32) !void {
+    return error.UnsupportedPlatform;
+}
+pub fn setIgnorePointer(_: *core.WindowRecord, _: bool) !void {
+    return error.UnsupportedPlatform;
+}
+pub fn setContentProtection(_: *core.WindowRecord, _: bool) !void {
+    return error.UnsupportedPlatform;
+}
+pub fn flashFrame(_: *core.WindowRecord, _: bool) !void {
+    return error.UnsupportedPlatform;
+}
+pub fn setSkipTaskbar(_: *core.WindowRecord, _: bool) !void {
+    return error.UnsupportedPlatform;
+}
 pub fn setTextCaret(_: *core.WindowRecord, _: core.Rect) !void {
     return error.UnsupportedPlatform;
 }

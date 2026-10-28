@@ -98,6 +98,8 @@ pub fn keyFromVirtual(code: usize) ?types.Key {
         c.VK_RIGHT => .right,
         c.VK_UP => .up,
         c.VK_DOWN => .down,
+        c.VK_OEM_PLUS => .plus,
+        c.VK_OEM_MINUS => .minus,
         else => null,
     };
 }
