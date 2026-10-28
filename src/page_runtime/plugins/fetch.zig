@@ -497,9 +497,6 @@ pub const Plugin = struct {
     fn worker(self: *Plugin) void {
         var client: std.http.Client = .{ .allocator = self.allocator };
         defer client.deinit();
-        var proxies: std.heap.ArenaAllocator = .init(self.allocator);
-        defer proxies.deinit();
-        client.initDefaultProxies(proxies.allocator()) catch {};
         while (true) {
             self.mutex.lock();
             while (!self.stopping and self.queue_len == 0) self.queued.wait(&self.mutex);

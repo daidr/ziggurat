@@ -45,6 +45,8 @@ pub const secrets = @import("secrets.zig");
 pub const flyout = @import("flyout.zig");
 pub const Flyout = flyout.Flyout;
 pub const TrayIcon = @import("tray_icon.zig").TrayIcon;
+pub const now_playing = @import("now_playing.zig");
+pub const NowPlaying = now_playing.NowPlaying;
 pub const capabilities = .{
     .native_menu = windows or linux,
     .menu_accelerators = windows or linux,
@@ -68,6 +70,7 @@ pub const capabilities = .{
     .file_watch = builtin.os.tag == .windows or builtin.os.tag == .linux,
     .quit_on_signals = signals.capabilities.quit_on_signals,
     .secrets = secrets.capabilities,
+    .now_playing = now_playing.capabilities.now_playing,
 };
 
 test {
@@ -76,4 +79,5 @@ test {
     _ = integration;
     _ = power;
     _ = @import("tray_icon.zig");
+    _ = now_playing;
 }

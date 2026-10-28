@@ -205,13 +205,16 @@ fn pressure(renderer: anytype, paint: z.Paint) !void {
             try equal(before.coverage.native_objects, failed.coverage.native_objects);
             try equal(0, views[1].lease.pins);
         }
-        for (views[1..31]) |view| try renderer.uploadCoverage(view);
-        try equal(32, renderer.rasterStats().resident_entries);
-        // Refresh dynamic image before evicting the oldest A8 entry.
+        for (views[1..32]) |view| try renderer.uploadCoverage(view);
+        // Past thirty-two entries the slot table grows instead of evicting.
+        try equal(33, renderer.rasterStats().resident_entries);
+        try equal(1, views[0].lease.pins);
+        // Refresh dynamic image before the budget evicts the oldest A8 entry.
+        try renderer.setRasterBudget(renderer.rasterStats().pixel_bytes);
         try renderer.uploadDynamicImage(image);
-        try renderer.uploadCoverage(views[31]);
+        try renderer.uploadCoverage(views[32]);
         try equal(0, views[0].lease.pins);
-        try equal(32, renderer.rasterStats().resident_entries);
+        try equal(33, renderer.rasterStats().resident_entries);
         try renderer.begin(paint);
         try expectError(error.CoverageNotUploaded, renderer.coverage(views[0], .{}, ui.Color.rgb(0)));
         try renderer.coverage(views[1], .{ .x = 2, .y = 2 }, ui.Color.rgb(0xff0000));
@@ -391,5 +394,5 @@ pub fn main() !void {
         try integrated(allocator, true, false);
         try integrated(allocator, true, true);
     }
-    std.debug.print("coverage: software/path/shadow pixels, padded A8, shared budget/LRU32, candidate rollback, dynamic retry and Context failed/close pins passed\n", .{});
+    std.debug.print("coverage: software/path/shadow pixels, padded A8, shared budget/growing LRU, candidate rollback, dynamic retry and Context failed/close pins passed\n", .{});
 }

@@ -99,3 +99,4 @@ pub fn destroy(_: *core.WindowRecord) !void {
 pub fn handle(_: *core.WindowRecord) ?*anyopaque {
     return null;
 }
+pub fn setCursor(_: *core.WindowRecord, _: core.Cursor) void {}

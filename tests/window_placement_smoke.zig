@@ -144,15 +144,21 @@ const Probe = struct {
                     self.stage = .final;
                     self.event_pending = true;
                 } else {
+                    try std.testing.expectEqual(p.Observation.normal_pending, try self.tracker.observe(self.window, &self.topology));
+                    try std.testing.expectEqualDeep(self.normal.normal, (try self.tracker.snapshot()).normal);
+                    // Confirm first: a configure still being delivered makes it
+                    // GeometryPending, and the checks below run once it settled.
+                    self.tracker.confirmNormal(self.window, &self.topology) catch |err| {
+                        if (err == error.GeometryPending) return;
+                        return err;
+                    };
                     const actual = try self.window.clientBounds();
                     try std.testing.expectEqual(self.normal.normal.width, actual.width);
                     try std.testing.expectEqual(self.normal.normal.height, actual.height);
                     try std.testing.expectEqual(self.normal.normal.position.x, actual.position.?.x);
                     try std.testing.expectEqual(self.normal.normal.position.y, actual.position.?.y);
                     try frameContained(self.window, self.topology.monitors[self.restorer.display_index].work);
-                    try std.testing.expectEqual(p.Observation.normal_pending, try self.tracker.observe(self.window, &self.topology));
                     try std.testing.expectEqualDeep(self.normal.normal, (try self.tracker.snapshot()).normal);
-                    try self.tracker.confirmNormal(self.window, &self.topology);
                     self.stage = .done;
                     _ = try self.window.destroy();
                 }

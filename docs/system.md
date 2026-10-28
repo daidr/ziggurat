@@ -249,6 +249,27 @@ Linux 首次使用时才 `dlopen("libsecret-1.so.0")`（需要 0.19 起的二进
 
 底层是核心的 `WindowOptions.popup: ?PopupRole`（`focusable`、`topmost`、`shadow`、`handler`），要求 `.borderless` 且不能是模态窗口（`InvalidPopup`）。Windows 上它是 `WS_POPUP` + `WS_EX_TOOLWINDOW` 窗口（不进任务栏和 Alt+Tab），非 focusable 时加 `WS_EX_NOACTIVATE`、`WM_MOUSEACTIVATE` 返回 `MA_NOACTIVATE` 并以 `SW_SHOWNOACTIVATE` 显示；拥有可见 focusable 弹出窗口的窗口被点击激活时返回 `MA_ACTIVATEANDEAT`，那次点击只驳回弹出窗口，与菜单一致；驳回在 `WM_ACTIVATE` 之后用投递消息决定，不在激活处理中回调。Linux X11 上它是 `GTK_WINDOW_POPUP`（override-redirect，精确放在计算出的位置），focusable 时显示期间 `gdk_seat_grab` 抓取整个 seat 并 `gtk_grab_add`，外部按下（含本应用其他窗口和其他应用）或抓取被打断时驳回；没有 X11 时退回 utility 类型的顶层窗口，失去键盘时驳回。两平台都设置不进任务栏/分页器。
 
+## Now Playing 与媒体键
+
+`system.NowPlaying` 把应用正在播放的内容放到系统显示媒体的地方：Windows 是音量浮出面板与锁屏上的媒体控件（SystemMediaTransportControls），Linux 是 MPRIS 客户端（GNOME、KDE 的媒体控件与锁屏、playerctl）。显示期间，键盘与耳机的媒体键以及这些控件把命令交给应用：
+
+```zig
+var now = system.NowPlaying.init(allocator, &state, onCommand);
+try now.start(app);
+try now.set(.{ .title = "Spring", .artist = "Vivaldi", .album = "The Four Seasons", .artwork = cover_png,
+    .duration_ns = 200 * std.time.ns_per_s, .commands = .{ .play = true, .pause = true, .next = true, .seek = true } });
+// onCommand(context, command, position_ns) 在主线程：播放、暂停或跳转，再用 setPlayback 告诉系统。
+```
+
+- 所有调用和 `on_command` 都在 App owner 线程。NowPlaying 由调用者持有，`start` 后地址不变，`stop` 或 App 关闭时撤销；一个进程同时只有一个（否则 `AlreadyActive`）。
+- `Info`：标题、艺术家、专辑（各最多 1024 字节 UTF-8）、封面（PNG 或 JPEG）、`duration_ns`（0 为未知，如直播，不显示进度）、`position_ns`、`rate`（0 即 1）、`state`（默认 `playing`）、`commands`（全不设为播放、暂停、停止）。字符串和封面都被复制。系统在 `playing` 时按 rate 自己推进位置，应用只在跳转时用 `setPlayback(state, position_ns)` 更新；`clear()` 让系统控件不再显示应用、媒体键交给其他应用；`current()` 返回带当前位置的信息。
+- 命令：`play`、`pause`、`stop`、`next`、`previous`、`seek`。播放/暂停键在 `playing` 时为 `pause`，否则为 `play`；未提供的命令被忽略。`seek` 的位置是目标位置（限制在曲目内），其他命令给出命令到达时的播放位置，便于 `setPlayback(.paused, position_ns)` 停在原处。
+- `control(Player)` 让媒体键直接驱动播放器（`Player.of(&audio_player)` 适配 `ziggurat_audio` 的 Player 或任何有 `play`/`pause`/`stop`/`isPlaying`/`seek`/`position`/`duration` 的值）：播放、暂停、停止与跳转作用于播放器，显示的状态、位置和时长取自播放器，并额外提供播放、暂停、停止以及（时长已知时）跳转；`next`/`previous` 仍交给 `on_command` 换曲，其他命令在播放器处理后也照常交给 `on_command`。应用自己操作播放器或播放结束后调用 `sync()`。
+- Windows：控件属于一个从不显示的顶层窗口（经 `ISystemMediaTransportControlsInterop`），设置播放状态、各按钮可用性、音乐元数据、缩略图、时间线与速率；控件在自己的线程调用敏捷委托，委托只向该窗口投递消息，命令在主线程交付。窗口、控件与委托首次使用时创建并保留到进程结束。
+- Linux：会话总线上的 MPRIS 播放器（`/org/mpris/MediaPlayer2`），只在显示期间持有总线名 `org.mpris.MediaPlayer2.<程序名>.instance<pid>`，清除后离开桌面控件。`Identity` 是 GLib 应用名，`DesktopEntry` 是程序名（与 `identity.setProcessIdentity` 一致）。曲目变化时换 trackid；位置跳变超过半秒发 `Seeked`；`Seek` 与 `SetPosition`（只接受当前曲目、曲目内的位置）作为 `seek`；封面写到 `$XDG_RUNTIME_DIR/<程序名>/` 下的文件并以 `file://` 给出，封面变化或清除时删除；`OpenUri` 返回 NotSupported。没有会话总线时不显示，也不报错。
+
+`zig build smoke-now-playing`（需要 `dbus-run-session` 与 X11）用另一条总线连接作为 MPRIS 客户端，验证总线名、元数据与封面文件、可用命令、播放/暂停键、未提供的命令被忽略、`SetPosition` 与 `Seek`、`OpenUri` 拒绝、清除后离开总线并删除封面。`zig build smoke-now-playing-commands` 在两个平台经各自后端的主线程路径（Windows 为窗口消息）交付命令，验证播放/暂停键按状态、未提供的命令、跳转位置与清除后不再交付；Windows 上的系统控件显示与真实媒体键没有自动验证。
+
 ## 已验证范围
 
 `zig build smoke-system-extras` 在隐藏窗口下播放提示音、读取指针位置、在后台 worker 上列出已安装应用并确认启动不存在的条目失败；Linux 另向本进程发送 SIGTERM，确认经 `requestQuit` 退出事件循环并停止信号处理，Windows 确认信号退出返回 `UnsupportedCapability`。

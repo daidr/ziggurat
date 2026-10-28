@@ -191,14 +191,17 @@ pub const Restorer = struct {
                             try self.window.setFullscreen(false);
                             self.leave_fullscreen_sent = true;
                             self.normal_required = true;
+                            // Request normal together with the exit: sent
+                            // after it, the asynchronous return to the max/min
+                            // mode from before full screen could still be in
+                            // flight when the normal geometry is observed.
+                            try self.window.perform(.restore);
+                            self.restore_sent = true;
                         }
                         return .waiting;
                     }
                     if (!self.restore_sent and (self.normal_required or state.minimized or state.maximized)) {
-                        // Leaving fullscreen restores the preceding max/min
-                        // mode asynchronously. Order an explicit normal request
-                        // after that exit even if its intermediate observation
-                        // already looks normal. Each request is submitted once.
+                        // Each request is submitted once.
                         try self.window.perform(.restore);
                         self.restore_sent = true;
                         continue;
@@ -225,6 +228,11 @@ pub const Restorer = struct {
                     if (!normal(state)) return .waiting;
                     const current = try native.current(self.window);
                     if (!current.key.eql(self.topology.monitors[self.display_index].key)) return .waiting;
+                    // Insets and limits only come from a settled window: while
+                    // the toolkit's view lags the server, a WM change is still
+                    // being delivered and the next geometry event retries.
+                    const observed = try self.window.clientBounds();
+                    if (observed.position == null or observed.width != current.observed.width or observed.height != current.observed.height or observed.position.?.x != current.observed.position.x or observed.position.?.y != current.observed.position.y) return .waiting;
                     const plan = try model.resolveOn(self.saved, &self.topology, self.display_index, current.metrics, self.constraints);
                     try self.setBounds(plan.bounds);
                     if (self.window.isClosed()) return error.Closed;

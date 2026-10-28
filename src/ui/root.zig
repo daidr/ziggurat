@@ -30,6 +30,8 @@ pub const backdrop_effects = commands.backdrop;
 pub const BackdropEffect = backdrop_effects.Effect;
 /// Color spaces and gamut mapping behind `Color.oklch` and `Color.displayP3`.
 pub const gamut = @import("gamut.zig");
+/// The on-disk cache of compiled GPU effect code.
+pub const shader_cache = @import("shader_cache.zig");
 /// What fills a container in place of its background, under its border and
 /// children: a backdrop effect or a look the application or a package
 /// paints (`custom`).
@@ -74,6 +76,8 @@ pub const shader_effects = commands.shader_effects;
 pub const ShaderEffect = shader_effects.Effect;
 /// Built-in pose (2D/3D transform) and refracting glass programs.
 pub const effects = @import("effect_library.zig");
+pub const GpuShader = shader_effects.GpuShader;
+pub const GlMode = shader_effects.GlMode;
 pub const ShaderEffectStats = struct {
     workspace: shader_effects.Stats = .{},
     /// Effects drawn without their program because no shader workspace, or
@@ -484,6 +488,9 @@ pub const Context = struct {
     /// A key released while the window has the keyboard, outside paint; see
     /// `z.Content.key_release`. Text fields and shortcuts see no releases.
     on_key_release: ?*const fn (*anyopaque, *Context, z.KeyInput) void = null,
+    /// A key press that on_input, shortcuts, focus movement and activation
+    /// all left alone, outside text fields; true takes it and repaints.
+    on_unhandled_key: ?*const fn (*anyopaque, *Context, z.KeyInput) bool = null,
     on_accessibility_action: ?*const fn (*anyopaque, *Context, accessibility.Action) void = null,
     semantic_name: []const u8 = "Ziggurat",
     semantics_enabled: bool = true,
@@ -500,6 +507,9 @@ pub const Context = struct {
     control_focus_cancelled: bool = false,
     renderer: gdi.Renderer = .{},
     gpu_renderer: if (build_options.gpu) d3d11.Renderer else void = if (build_options.gpu) .{} else {},
+    /// Linux: whether `prepareGpuShaders` links programs for OpenGL; null
+    /// reads `ZIGGURAT_GL` (see `GlMode`).
+    gl_mode: ?GlMode = null,
     /// Configuration for the next attach; an attached surface keeps its mode.
     render_mode: RenderMode = .automatic,
     /// Optional explicit shared GPU device. Frozen into the renderer at attach.
@@ -866,6 +876,34 @@ pub const Context = struct {
         self.shader_workspace = null;
         workspace.destroy();
         if (self.window) |window| if (self.live(window)) window.invalidate();
+    }
+    /// Compile shader programs for the GPU renderer outside paint, so the
+    /// frames that draw them as `target` run their effects on the GPU. The
+    /// compiled code is kept in the user's shader cache and, until the
+    /// Context detaches, in memory allocated with `allocator`. Frames that
+    /// use a program not prepared, or one the GPU cannot run, draw on the
+    /// software planes. Returns how many are ready on the GPU: zero
+    /// without a GPU renderer.
+    pub fn prepareGpuShaders(self: *Context, allocator: std.mem.Allocator, shaders: []const GpuShader) !usize {
+        const window = self.window orelse return error.NotAttached;
+        const scope = self.callbackScope(window) orelse return error.Closed;
+        defer scope.end();
+        if (self.painting) return error.Busy;
+        var ready: usize = 0;
+        if (comptime builtin.os.tag == .linux) {
+            // Linux runs effects on OpenGL over the software planes.
+            const mode = self.gl_mode orelse gdi.glModeFromEnvironment();
+            for (shaders) |item| {
+                if (try self.renderer.prepareEffect(allocator, item.program, item.target, mode)) ready += 1;
+            }
+        } else {
+            if (!build_options.gpu or self.gpu_unavailable or self.attached_render_mode == .gdi) return 0;
+            for (shaders) |item| {
+                if (try self.gpu_renderer.prepareEffect(allocator, item.program, item.target)) ready += 1;
+            }
+        }
+        window.invalidate();
+        return ready;
     }
     /// Time each frame and log slow ones; see `frame_stats`. Overrides the
     /// `ZIGGURAT_FRAME_STATS` environment variable.
@@ -2442,12 +2480,21 @@ pub const Context = struct {
                 return true;
             }
             if (key.key == .enter or key.key == .space) {
-                if (!key.repeat) if (self.input_state.activation()) |id| self.on_action(self.state, id);
+                const activated = if (key.repeat) null else self.input_state.activation();
+                if (activated) |id| self.on_action(self.state, id) else _ = self.unhandledKey(key);
                 window.invalidate();
                 return true;
             }
         }
+        if (self.unhandledKey(key)) {
+            window.invalidate();
+            return true;
+        }
         return legacy != null;
+    }
+    fn unhandledKey(self: *Context, key: z.KeyInput) bool {
+        const callback = self.on_unhandled_key orelse return false;
+        return callback(self.state, self, key);
     }
     pub fn hasSurface(self: *const Context) bool {
         if (build_options.gpu) if (self.gpu_renderer.native != null) return true;
@@ -2499,6 +2546,7 @@ pub const Context = struct {
     fn software(self: *Context, paint: z.Paint) !void {
         try self.renderer.begin(paint);
         errdefer self.renderer.abort();
+        try self.renderer.residentFrame(&self.command_buffer);
         try self.renderer.replayBuffer(&self.command_buffer);
         const restore_gpu = if (build_options.gpu) self.gpu_renderer.suspendSurface() else false;
         errdefer if (build_options.gpu and restore_gpu) self.gpu_renderer.restoreSurface();
@@ -2887,14 +2935,24 @@ pub const Context = struct {
                 if (!self.live(window)) return;
                 clock.markPreflight();
                 clock.software = !using_gpu;
-                // Backdrop effects and loading indicators draw on the software
-                // planes: replay this frame there without reporting a device
-                // failure.
-                if (build_options.gpu and using_gpu and commands.softwareOnly(self.command_buffer.commands())) {
+                // Backdrop effects, loading indicators and shader effects the
+                // GPU cannot run draw on the software planes: replay this
+                // frame there without reporting a device failure.
+                if (build_options.gpu and using_gpu and !self.gpu_renderer.prepareEffects(&self.command_buffer)) {
                     self.gpu_renderer.discard();
                     using_gpu = false;
                     clock.software = true;
                     self.backdrop_software_frames += 1;
+                }
+                // The device cannot upload while it draws: a frame drawing an
+                // image or mask it does not hold draws in software, and the
+                // missing ones are uploaded after it for the next frame.
+                var upload_gpu = false;
+                if (build_options.gpu and using_gpu and !self.gpu_renderer.holdsFrame(&self.command_buffer)) {
+                    self.gpu_renderer.discard();
+                    using_gpu = false;
+                    clock.software = true;
+                    upload_gpu = true;
                 }
                 if (build_options.gpu and using_gpu) {
                     const rendered = if (self.gpu_renderer.replayBuffer(&self.command_buffer)) rendered: {
@@ -2920,6 +2978,7 @@ pub const Context = struct {
                 if (self.live(window)) {
                     if (self.software(paint)) self.commitFrame(window) else |err| window.report(.{ .domain = .renderer, .operation = .paint, .err = err });
                 }
+                if (build_options.gpu and upload_gpu and self.live(window)) self.gpu_renderer.residentFrame(&self.command_buffer) catch |err| self.gpuFailure(window, err);
                 self.frames += 1;
             },
             .pointer_down => |pointer| {
@@ -4141,6 +4200,8 @@ test {
     _ = gdi;
     _ = gamut;
     _ = geometry;
+    _ = shader_cache;
+    _ = @import("gpu_effect_host.zig");
     _ = effects;
     _ = canvas;
     _ = @import("pixel_image.zig");

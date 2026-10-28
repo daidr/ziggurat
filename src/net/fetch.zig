@@ -1,6 +1,8 @@
 const std = @import("std");
 const Cancel = @import("cancel.zig").Cancel;
 const guard = @import("cancel.zig").guard;
+const proxy = @import("proxy.zig");
+const tunnel = @import("tunnel.zig");
 
 pub const Header = std.http.Header;
 
@@ -30,6 +32,9 @@ pub const Request = struct {
     body: ?[]const u8 = null,
     content_type: ?[]const u8 = null,
     redirect: Redirect = .follow,
+    /// The proxy of each hop: the system's (`proxy.forUrl`) by default. A
+    /// client whose own `http_proxy`/`https_proxy` is set keeps it.
+    proxy: proxy.Choice = .system,
 };
 
 pub const Limits = struct {
@@ -189,7 +194,7 @@ fn perform(allocator: std.mem.Allocator, client: *std.http.Client, request: Requ
         if (std.http.Client.Protocol.fromUri(uri) == null) return error.UnsupportedScheme;
         var exchange: Exchange = .{ .client = client, .cancel = cancel };
         defer exchange.deinit();
-        var response = try exchange.send(uri, method, request, credentials, limits);
+        var response = try exchange.send(allocator, uri, method, request, credentials, limits);
         if (response.head.status.class() == .redirect and response.head.location != null and response.head.status != .not_modified and request.redirect == .reject) return error.Redirected;
         if (response.head.status.class() == .redirect and response.head.location != null and request.body == null and response.head.status != .not_modified and request.redirect == .follow) {
             if (redirects == limits.redirects) return error.TooManyRedirects;
@@ -227,6 +232,7 @@ const Exchange = struct {
     client: *std.http.Client,
     cancel: ?*Cancel,
     request: ?std.http.Client.Request = null,
+    route: tunnel.Route = .{},
     attached: bool = false,
     decompress_buffer: []u8 = &.{},
     allocator: ?std.mem.Allocator = null,
@@ -234,12 +240,13 @@ const Exchange = struct {
     fn deinit(self: *Exchange) void {
         if (self.attached) self.cancel.?.detach();
         if (self.request) |*request| request.deinit();
+        self.route.deinit();
         if (self.allocator) |allocator| allocator.free(self.decompress_buffer);
     }
 
-    fn send(self: *Exchange, uri: std.Uri, method: std.http.Method, request: Request, credentials: []const Header, limits: Limits) Error!std.http.Client.Response {
+    fn send(self: *Exchange, allocator: std.mem.Allocator, uri: std.Uri, method: std.http.Method, request: Request, credentials: []const Header, limits: Limits) Error!std.http.Client.Response {
         const decode = decoding(request, limits);
-        self.request = self.client.request(method, uri, .{
+        self.request = self.route.request(allocator, self.client, &request.proxy, method, uri, .{
             .keep_alive = false,
             .redirect_behavior = .unhandled,
             .headers = .{
@@ -251,7 +258,7 @@ const Exchange = struct {
             },
             .extra_headers = request.headers,
             .privileged_headers = credentials,
-        }) catch |err| return mapConnect(err);
+        }, self.cancel) catch |err| return mapConnect(err);
         const http_request = &self.request.?;
         guard(http_request.connection.?);
         if (self.cancel) |token| {
@@ -333,8 +340,9 @@ fn decoding(request: Request, limits: Limits) bool {
     return limits.decompress and !has(request.headers, "accept-encoding");
 }
 
-fn mapConnect(err: std.http.Client.RequestError) Error {
+fn mapConnect(err: tunnel.RequestError) Error {
     return switch (err) {
+        error.Cancelled => error.Cancelled,
         error.UnsupportedUriScheme => error.UnsupportedScheme,
         error.UriMissingHost, error.UriHostTooLong => error.InvalidUrl,
         error.TlsInitializationFailed, error.CertificateBundleLoadFailure => error.TlsFailed,

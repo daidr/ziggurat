@@ -190,6 +190,19 @@ fn run(allocator: std.mem.Allocator) !void {
     try paint(&host, window);
     try std.testing.expect(!tv.queued);
 
+    // Box drawing, blocks and Powerline's shapes are drawn rather than
+    // taken from the font, a whole screen of them within the frame's
+    // commands, with the block cursor over one.
+    tv.feed("\x1b[2J\x1b[H");
+    for (0..terminal.screen.rows) |_| {
+        for (0..terminal.screen.cols) |i| tv.feed(([_][]const u8{ "─", "┼", "╬", "╭", "▒", "▚", "", "", "╳" })[i % 9]);
+    }
+    tv.feed("\x1b[H");
+    try paint(&host, window);
+    if (host.last_error) |err| return err;
+    tv.feed("\x1b[2J\x1b[H");
+    try paint(&host, window);
+
     // A shell in the grid's size, answering what is typed.
     const argv: []const []const u8 = if (builtin.os.tag == .windows) &.{ "cmd.exe", "/q", "/k", "prompt $G" } else &.{ "/bin/sh", "-i" };
     const env: []const term.pty.Variable = if (builtin.os.tag == .windows) &.{} else &.{ .{ .name = "PS1", .value = "$ " }, .{ .name = "ENV", .value = "" } };

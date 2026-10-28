@@ -104,7 +104,7 @@ int zlc_layer_end_group(Renderer *s){
     layer->depth--;CairoTarget *parent=layer_current(layer);layer_alias(s,parent);s->gradient_clip_depth=frame->clip_depth;memcpy(s->gradient_clips,frame->clips,sizeof(frame->clips));
     cairo_save(parent->context);cairo_rectangle(parent->context,x,y,width,height);cairo_clip(parent->context);cairo_set_source(parent->context,child->pattern);
     if(group->mask_slot!=UINT32_MAX){
-        if(group->mask_slot>=ZI_IMAGE_SLOTS||!s->images[group->mask_slot].is_coverage){cairo_restore(parent->context);return 1;}
+        if(group->mask_slot>=s->image_capacity||!s->images[group->mask_slot].is_coverage){cairo_restore(parent->context);return 1;}
         cairo_pattern_t *mask=s->images[group->mask_slot].patterns[0][0];cairo_matrix_t matrix;
         cairo_matrix_init(&matrix,group->mask_scale,0,0,group->mask_scale,-(double)group->mask_x*group->mask_scale-group->mask_left,-(double)group->mask_y*group->mask_scale-group->mask_top);cairo_pattern_set_matrix(mask,&matrix);cairo_mask(parent->context,mask);cairo_matrix_init_identity(&matrix);cairo_pattern_set_matrix(mask,&matrix);
     }else cairo_paint(parent->context);

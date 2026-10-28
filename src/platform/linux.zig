@@ -79,6 +79,7 @@ extern fn zlg_window_ignore_pointer(*anyopaque, c_int) void;
 extern fn zlg_window_urgent(*anyopaque, c_int) void;
 extern fn zlg_window_skip_taskbar(*anyopaque, c_int) void;
 extern fn zlg_window_title(*anyopaque, [*:0]const u8) void;
+extern fn zlg_window_cursor(*anyopaque, ?[*:0]const u8) void;
 extern fn zlg_window_resize(*anyopaque, u32, u32) void;
 extern fn zlg_window_invalidate(*anyopaque) void;
 extern fn zlg_window_invalidate_rect(*anyopaque, c_int, c_int, c_int, c_int) void;
@@ -487,4 +488,32 @@ fn keyCode(code: u32) core.KeyCode {
         keys.GDK_KEY_HomePage => .browser_home,
         else => .unknown,
     };
+}
+pub fn setCursor(record: *core.WindowRecord, cursor: core.Cursor) void {
+    const native = record.native.native orelse return;
+    zlg_window_cursor(native, switch (cursor) {
+        .default => null,
+        .pointer => "pointer",
+        .text => "text",
+        .move => "move",
+        .resize_ew => "ew-resize",
+        .resize_ns => "ns-resize",
+        .resize_nwse => "nwse-resize",
+        .resize_nesw => "nesw-resize",
+        .not_allowed => "not-allowed",
+        .crosshair => "crosshair",
+        .grab => "grab",
+        .grabbing => "grabbing",
+        .resize_n => "n-resize",
+        .resize_e => "e-resize",
+        .resize_s => "s-resize",
+        .resize_w => "w-resize",
+        .resize_column => "col-resize",
+        .resize_row => "row-resize",
+        .vertical_text => "vertical-text",
+        .copy => "copy",
+        .alias => "alias",
+        .context_menu => "context-menu",
+        .none => "none",
+    });
 }

@@ -252,3 +252,5 @@ pub fn destroy(record: *core.WindowRecord) !void {
 pub fn handle(record: *core.WindowRecord) ?*anyopaque {
     return if (record.native.alive) record else null;
 }
+/// The shape is kept on the record, where tests read it.
+pub fn setCursor(_: *core.WindowRecord, _: core.Cursor) void {}

@@ -1,13 +1,16 @@
 //! Optional HTTP fetch and WebSocket client. Every transfer blocks on an
 //! application-managed worker; the module creates no threads and never
 //! touches the UI thread. Results reach the UI with `App.post`.
-//! HTTPS and WSS use the caller's `std.http.Client`: its TLS client, system
-//! CA bundle and proxy settings.
+//! HTTPS and WSS use the caller's `std.http.Client`: its TLS client and
+//! system CA bundle. Requests go through the proxy the user set in the
+//! system's settings (`proxy`), unless the client sets its own.
 const std = @import("std");
 
 pub const Cancel = @import("cancel.zig").Cancel;
 pub const fetch_api = @import("fetch.zig");
 pub const websocket = @import("websocket.zig");
+pub const proxy = @import("proxy.zig");
+pub const tunnel = @import("tunnel.zig");
 
 pub const Header = fetch_api.Header;
 pub const Request = fetch_api.Request;
@@ -31,4 +34,7 @@ test {
     _ = @import("fetch.zig");
     _ = @import("websocket.zig");
     _ = @import("waker.zig");
+    _ = @import("proxy.zig");
+    _ = @import("tunnel.zig");
+    _ = @import("proxy_test.zig");
 }
