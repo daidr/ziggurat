@@ -292,6 +292,8 @@ jobs:
           }
           if ($failed.Count -ne 0) { throw "Failed: $($failed -join ', ')" }
       - name: Standalone engine discovery without a page
+        # Independent of the page checks above, so a failure there still shows these.
+        if: ${{ !cancelled() }}
         run: |
           zig build test-webview-runtime build-smoke-webview-runtime -Doptimize=ReleaseSafe --global-cache-dir .zig-cache/managed/windows-global
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -299,12 +301,14 @@ jobs:
           ./zig-out/bin/smoke-webview-runtime.exe $loader
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Exact-origin HTTPS credential lifecycle and redirect checks
+        if: ${{ !cancelled() }}
         run: |
           zig build build-smoke-request-credentials -Dwebview=true -Doptimize=ReleaseSafe --global-cache-dir .zig-cache/managed/windows-global
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -B tests/windows_https_credentials_host.py --exe zig-out/bin/smoke-request-credentials.exe --cache .zig-cache/managed/windows-credentials-ci --log .validation/ci/windows-credentials.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Document-start initializer lifecycle and wire checks
+        if: ${{ !cancelled() }}
         run: |
           zig build test-document-initializers test-document-initializers-native build-initializer-semantics-emitter build-smoke-document-initializers -Dwebview=true -Doptimize=ReleaseSafe --global-cache-dir .zig-cache/managed/windows-global
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
