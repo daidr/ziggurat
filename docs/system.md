@@ -221,6 +221,14 @@ S02 当前仍为部分实现：Windows/Linux 已提供 `launchExecutable`、`ope
 
 `shell.Worker.installedApps(allocator)` 在后台 worker 上列出启动器可见的应用，按名称（忽略大小写）再按路径排序，结果由 `InstalledApps.deinit` 一次释放。Windows 枚举 Shell 的 Applications 文件夹（开始菜单“所有应用”，打包应用与桌面应用都在内），id 是 AppUserModelID（或已知文件夹下的路径），path 是 `shell:AppsFolder\<id>`；Linux 列出菜单会显示的桌面条目（排除 NoDisplay/Hidden 和不属于当前桌面的条目），id 是桌面文件 ID，path 是 `.desktop` 文件。`launchApp(path)` 启动其中一项：Windows 交给 `ShellExecuteEx`（也接受任意程序路径），Linux 用 `GDesktopAppInfo` 启动；worker 线程上没有 GTK 启动上下文，因此没有启动通知。
 
+## 最近文档、Jump List 与重启
+
+`recent.RecentDocuments.load(allocator, file, capacity)` 读取应用自己的最近文档列表（JSON，新的在前），文件缺失或损坏时从空列表开始；`add` 把路径移到最前、去重并截到容量，`remove`、`clear` 修改列表，每次修改都先写同目录临时文件再改名替换。它只管理应用自己的 Open Recent 列表（菜单角色 `open_recent`），不登记到系统。`recent.addToSystem(allocator, path, app_name)` 把绝对路径登记到系统：Windows 调用 `SHAddToRecentDocs`，进入用户的最近项目和本应用 Jump List 的 Recent 类别（仅限应用已注册处理程序的文件类型）；Linux 用 GLib 同步编辑 GTK 使用的 `recently-used.xbel`，写入 MIME 类型和应用名，文件选择器和文件管理器的“最近”会显示它。两者都会阻塞，不适合放在逐帧路径上。
+
+`jump_list.setTasks(allocator, tasks, .{ .app_id, .recent })`（仅 Windows）用 `ICustomDestinationList` 一次替换整个 Jump List：每个任务是一个 shell link，有标题、提示、程序（默认本程序）、参数、工作目录和图标，`recent = true` 另加 Recent 类别。参数按常规 argv 规则逐项加引号，`argumentLine` 给出与 shell link 相同的字符串。所有输入先校验（标题必填、最多 32 个任务、文本不超过 259 字节且不含控制字符、程序须为绝对路径）再调用系统；任何一步失败都会放弃新列表，原列表保持不变。没有任务也不要 Recent 时删除整个列表。Windows 在应用退出后仍保留列表，通常启动时设置一次。需要作用于正在运行的应用时，把本应用的 URL scheme 作为参数，再由单实例转发给 primary。Linux 没有对应的任务菜单，返回 `UnsupportedCapability`。
+
+`relaunch.Relaunch.request(app)` 在事件循环运行期间、owner 线程上调用 `requestQuit`：关闭处理器照常运行，取消退出时重启也一并取消。Windows 会先把前台权限交出去，让新进程的窗口能到最前。`App.run` 返回、App 与单实例锁等资源释放之后，`finish(allocator, options)` 再启动新进程（默认本程序并沿用当前参数，也可以改程序、参数和工作目录），不等待它结束，然后返回 true；没有被接受的请求时返回 false。
+
 ## 文件监视
 
 `system.watch.Watcher` 是 S03 的粗模式文件监视：与 `shell.Worker` 相同，只在宿主创建的后台线程初始化和调用（`interrupt()` 除外，可跨线程唤醒），不创建线程、不轮询，所有缓冲和预算（root、目录 watch、pending、路径字节、原生缓冲）在 `init` 显式分配。`addRoot` 返回即 ready；`wait(events, path_storage, timeout_ms)` 按 debounce 与最大延迟交付合并后的 `changed`（应重新列出的目录）、`overflow`（必须重扫整个 root）和 `root_removed`，调用者容量不足时顺延而不丢弃。Linux 使用 inotify/eventfd/poll，Windows 使用 overlapped `ReadDirectoryChangesW`。它不读取文件 metadata、不匹配 rename，详细模式尚未实现。合同、预算与验证范围见 [文件监视](file-watch.md)；Windows 路径目前只验证交叉编译。
@@ -271,6 +279,8 @@ try now.set(.{ .title = "Spring", .artist = "Vivaldi", .album = "The Four Season
 `zig build smoke-now-playing`（需要 `dbus-run-session` 与 X11）用另一条总线连接作为 MPRIS 客户端，验证总线名、元数据与封面文件、可用命令、播放/暂停键、未提供的命令被忽略、`SetPosition` 与 `Seek`、`OpenUri` 拒绝、清除后离开总线并删除封面。`zig build smoke-now-playing-commands` 在两个平台经各自后端的主线程路径（Windows 为窗口消息）交付命令，验证播放/暂停键按状态、未提供的命令、跳转位置与清除后不再交付；Windows 上的系统控件显示与真实媒体键没有自动验证。
 
 ## 已验证范围
+
+`zig build smoke-system-session` 在隐藏窗口的事件循环中经 `Relaunch` 退出，再真实启动自身。被启动的子进程在 Linux 上把私有 `XDG_DATA_HOME` 下的文件两次登记到最近文档，读回 `recently-used.xbel`，确认只有一条记录且带应用名。在 Windows 上，子进程登记最近文档，设置含两个任务和 Recent 类别的 Jump List 后再删除；再按 Jump List 的参数串用 `CreateProcessW` 启动自身，确认空参数、空格、引号、尾部反斜杠、UNC 前缀和非 ASCII 参数都原样往返。这些检查不打开或点击任务栏菜单，也不检查 shell 的显示效果。
 
 `zig build smoke-system-extras` 在隐藏窗口下播放提示音、读取指针位置、在后台 worker 上列出已安装应用并确认启动不存在的条目失败；Linux 另向本进程发送 SIGTERM，确认经 `requestQuit` 退出事件循环并停止信号处理，Windows 确认信号退出返回 `UnsupportedCapability`。
 

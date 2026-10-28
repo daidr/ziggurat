@@ -562,6 +562,8 @@ pub fn build(b: *std.Build) void {
         system.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
         const signals_native = native_support.add(b, system, "system-signals-native", "src/system/signals_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         signals_native.linkSystemLibrary("glib-2.0", .{ .use_pkg_config = .force });
+        const recent_native = native_support.add(b, system, "system-recent-native", "src/system/recent_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        recent_native.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
         system.link_libc = true;
     }
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
@@ -589,6 +591,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_system", .module = system },
         });
         addSmoke(b, "smoke-system-extras", "tests/system_extras_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        addSmoke(b, "smoke-system-session", "tests/system_session_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
         });
@@ -2276,7 +2282,7 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&system_extra_tests.step);
     const run_system_extra_tests = b.addRunArtifact(system_extra_tests);
     test_step.dependOn(&run_system_extra_tests.step);
-    b.step("test-system-extras", "Run application paths, menu role, role action and signal quit tests").dependOn(&run_system_extra_tests.step);
+    b.step("test-system-extras", "Run application paths, menu role, role action, signal quit, jump list, recent document and relaunch tests").dependOn(&run_system_extra_tests.step);
     const system_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/system_capabilities.zig"),
         .target = target,
@@ -3072,6 +3078,7 @@ fn addSystemIntegrationNative(b: *std.Build, module: *std.Build.Module, target: 
     switch (target.result.os.tag) {
         .windows => {
             _ = native_support.add(b, module, "system-taskbar-native", "src/system/taskbar_windows.c", &.{"-std=c11"}, target, optimize);
+            _ = native_support.add(b, module, "system-jump-list-native", "src/system/jump_list_windows.c", &.{"-std=c11"}, target, optimize);
             for ([_][]const u8{ "advapi32", "ole32", "shell32" }) |library| module.linkSystemLibrary(library, .{});
             module.link_libc = true;
         },
