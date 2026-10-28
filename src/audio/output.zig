@@ -74,10 +74,12 @@ pub const Device = struct {
 };
 
 /// Opens a device on the engine's output thread, as a test backend or an
-/// app's own output does. The context outlives the engine.
+/// app's own output does, to hold `ahead` nanoseconds before they are heard
+/// (`Engine.setLatency`); players' positions count on it doing so. The
+/// context outlives the engine.
 pub const Opener = struct {
     context: *anyopaque,
-    open: *const fn (context: *anyopaque, detail: *Detail) OpenError!Device,
+    open: *const fn (context: *anyopaque, ahead: u64, detail: *Detail) OpenError!Device,
 };
 
 /// The time a null device keeps, which tests replace.
@@ -137,7 +139,7 @@ pub const system = switch (builtin.os.tag) {
         pub const Storage = struct {};
         pub fn threadInit() void {}
         pub fn threadDeinit() void {}
-        pub fn open(_: *Storage, detail: *Detail) OpenError!Device {
+        pub fn open(_: *Storage, _: u64, detail: *Detail) OpenError!Device {
             detail.set("no audio output on this platform", .{});
             return error.Unsupported;
         }

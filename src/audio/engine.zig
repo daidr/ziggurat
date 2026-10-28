@@ -41,8 +41,35 @@ pub const Output = union(enum) {
     custom: output.Opener,
 };
 
+/// How far ahead of what is heard the output mixes, as Web Audio's
+/// `latencyHint`.
+pub const Latency = enum {
+    /// About 40 ms ahead, so that sounds start, stop and change as soon as
+    /// they are asked to, as games and interfaces want. The default.
+    interactive,
+    /// About 250 ms ahead, for apps that play music and other long audio:
+    /// it plays on through the moments the system keeps an app waiting,
+    /// where the interactive latency runs dry and is heard to stop. Plays,
+    /// pauses, seeks and volume changes are heard that much later.
+    playback,
+
+    /// Nanoseconds the output holds before they are heard.
+    pub fn ahead(self: Latency) u64 {
+        return switch (self) {
+            .interactive => 40 * std.time.ns_per_ms,
+            .playback => 250 * std.time.ns_per_ms,
+        };
+    }
+
+    /// `ahead` in output frames.
+    pub fn frames(self: Latency) i64 {
+        return @intCast(self.ahead() * output.sample_rate / std.time.ns_per_s);
+    }
+};
+
 pub const Options = struct {
     output: Output = .system,
+    latency: Latency = .interactive,
     /// Formats `openStream*` and `decodeSound` detect, in order.
     formats: []const decoding.Format = &default_formats,
     /// Where `EndedCallback`s and `on_output` run, through `App.post`.
@@ -97,6 +124,12 @@ pub const Engine = struct {
     app_closed: bool = false,
     master: f64 = 1,
     notifier: ?*Notifier = null,
+    output_latency: Latency = .interactive,
+    /// The output's clock: the frames mixed so far, how many of the latest
+    /// the device holds, not heard yet, and how many it holds at most.
+    mixed: i64 = 0,
+    unheard: i64 = 0,
+    held: i64 = 0,
 
     error_mutex: zio.Mutex = .{},
     output_error: ?output.OpenError = null,
@@ -115,7 +148,7 @@ pub const Engine = struct {
     pub fn init(allocator: std.mem.Allocator, options: Options) !*Engine {
         const self = try allocator.create(Engine);
         errdefer allocator.destroy(self);
-        self.* = .{ .allocator = allocator, .formats = options.formats, .app = options.app, .on_output = options.on_output, .mode = options.output, .clock = options.clock };
+        self.* = .{ .allocator = allocator, .formats = options.formats, .app = options.app, .on_output = options.on_output, .mode = options.output, .clock = options.clock, .output_latency = options.latency };
         if (options.app != null) {
             const notifier = try allocator.create(Notifier);
             notifier.* = .{ .allocator = allocator, .engine = self };
@@ -377,15 +410,35 @@ pub const Engine = struct {
     /// manual engine, from one thread at a time.
     pub fn render(self: *Engine, out: []f32) bool {
         std.debug.assert(self.mode == .manual);
-        return self.mixOutput(out);
+        self.mutex.lock();
+        return self.mixLocked(out);
     }
 
-    fn mixOutput(self: *Engine, out: []f32) bool {
+    /// Mixes for an output opened at `opened_at`, as `render`; null, mixing
+    /// nothing, once the latency changed.
+    fn mixFor(self: *Engine, out: []f32, opened_at: Latency) ?bool {
         self.mutex.lock();
+        if (self.output_latency != opened_at) {
+            self.mutex.unlock();
+            return null;
+        }
+        return self.mixLocked(out);
+    }
+
+    /// The output's frame heard now: the frames mixed before it are.
+    /// Mutex held.
+    fn heard(self: *const Engine) i64 {
+        return self.mixed - self.unheard;
+    }
+
+    /// Mixes with the mutex held, and unlocks it.
+    fn mixLocked(self: *Engine, out: []f32) bool {
         @memset(out, 0);
+        const out_at = self.mixed;
+        const heard_now = self.heard();
         var kept: usize = 0;
         for (self.voices.items) |voice| {
-            const outcome: mixer.Outcome = if (voice.closed) .faded else voice.mix(out, self.master);
+            const outcome: mixer.Outcome = if (voice.closed) .faded else voice.mix(out, self.master, out_at, heard_now);
             if (outcome == .playing) {
                 self.voices.items[kept] = voice;
                 kept += 1;
@@ -404,6 +457,9 @@ pub const Engine = struct {
             } else if (done) self.retire(voice);
         }
         self.voices.items.len = kept;
+        const frames: i64 = @intCast(out.len / output.channels);
+        self.mixed += frames;
+        self.unheard = @min(self.unheard + frames, self.held);
         for (out) |*sample| sample.* = std.math.clamp(sample.*, -1, 1);
         const post = self.wantPost();
         self.mutex.unlock();
@@ -544,9 +600,12 @@ pub const Engine = struct {
                 zio.Futex.wait(&self.output_wake, seen);
             }
             var detail: output.Detail = .{};
+            self.mutex.lock();
+            const opened_at = self.output_latency;
+            self.mutex.unlock();
             const opened: output.OpenError!output.Device = switch (self.mode) {
-                .system => output.system.open(&self.system_storage, &detail),
-                .custom => |opener| opener.open(opener.context, &detail),
+                .system => output.system.open(&self.system_storage, opened_at.ahead(), &detail),
+                .custom => |opener| opener.open(opener.context, opened_at.ahead(), &detail),
                 .silent, .manual => null_blk: {
                     null_device = .init(self.clock, false);
                     break :null_blk null_device.device();
@@ -558,9 +617,13 @@ pub const Engine = struct {
                 break :blk null_device.device();
             };
             if (opened) |_| self.setError(null, "") else |_| {}
+            // A device holds what it takes ahead of what is heard, and none
+            // of what was mixed before; a null one hears it as it takes it.
+            const real = self.mode == .system or self.mode == .custom;
+            self.setHeld(if (opened) |_| (if (real) opened_at.frames() else 0) else |_| 0);
             var idle: u64 = 0;
             while (!self.quit.load(.acquire)) {
-                const busy = self.mixOutput(&self.mix_buffer);
+                const busy = self.mixFor(&self.mix_buffer, opened_at) orelse break;
                 device.write(&self.mix_buffer) catch break;
                 if (busy) {
                     idle = 0;
@@ -571,6 +634,27 @@ pub const Engine = struct {
             }
             device.close();
         }
+    }
+
+    fn setHeld(self: *Engine, frames: i64) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.held = frames;
+        self.unheard = 0;
+    }
+
+    /// Sets how far ahead the output mixes. An output already open opens
+    /// again, which drops what it held.
+    pub fn setLatency(self: *Engine, value: Latency) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.output_latency = value;
+    }
+
+    pub fn latency(self: *Engine) Latency {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.output_latency;
     }
 
     fn setError(self: *Engine, err: ?output.OpenError, detail: []const u8) void {
@@ -680,11 +764,13 @@ pub const Player = struct {
         voice.reset(frame);
     }
 
-    /// Nanoseconds from the start.
+    /// Nanoseconds from the start, in what is heard: the output mixes
+    /// ahead of it (`Engine.setLatency`), and the player goes on for as
+    /// long after a pause, but it is where `seek` moved it at once.
     pub fn position(self: Player) u64 {
         const voice = self.lock() orelse return 0;
         defer self.unlock();
-        return @intFromFloat(voice.position() / voice.rate * std.time.ns_per_s);
+        return @intFromFloat(voice.position(voice.heardAt(self.engine.heard())) / voice.rate * std.time.ns_per_s);
     }
 
     /// How long the audio is in nanoseconds, or null when unknown.
