@@ -158,7 +158,7 @@ fn byteBudgets(allocator: std.mem.Allocator) !void {
     try std.testing.expectError(error.InvalidOptions, bounded.layoutAllocated(hook.allocator(), "x", .{ .locale = &@as([128]u8, @splat('a')) }));
     try std.testing.expectEqual(@as(usize, 0), hook.allocations);
 
-    var editor = try ui.editor.Editor.init(allocator, .{}, &@as([256]u8, @splat('é')));
+    var editor = try ui.editor.Editor.init(allocator, .{}, &@as([512]u8, @bitCast(@as([256][2]u8, @splat("é".*)))));
     defer editor.deinit();
     hook.editor = &editor;
     hook.replace_end = 512;

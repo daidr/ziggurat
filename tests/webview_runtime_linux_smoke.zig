@@ -133,17 +133,22 @@ fn failedPath(main_thread: std.Thread.Id, path: []const u8, truncated: bool) !vo
     try std.testing.expect(result.version().len == 0 and result.cleanup_failure == null);
 }
 
+/// The build runner passes artifacts relative to its working directory.
+fn absolute(path: []const u8) ![]const u8 {
+    return zio.realPathAlloc(std.Io.Dir.cwd(), path, std.heap.page_allocator);
+}
+
 pub fn main(init: std.process.Init.Minimal) !void {
     var args = try init.args.iterateAllocator(std.heap.page_allocator);
     defer args.deinit();
     _ = args.next();
     var fixtures: [4][]const u8 = undefined;
-    for (&fixtures) |*fixture| fixture.* = args.next() orelse return error.FourFixturePathsRequired;
+    for (&fixtures) |*fixture| fixture.* = try absolute(args.next() orelse return error.FourFixturePathsRequired);
     var real_library: ?[]const u8 = null;
     var missing_dependency: ?[]const u8 = null;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--failed-load")) {
-            missing_dependency = args.next() orelse return error.FailedLoadPathRequired;
+            missing_dependency = try absolute(args.next() orelse return error.FailedLoadPathRequired);
         } else {
             if (real_library != null) return error.UnexpectedArgument;
             real_library = arg;
