@@ -38,6 +38,7 @@ pub fn apply(app: *z.App, source: Source, dark: bool) void {
     app.assertOwner();
     if (comptime !native_supported) return;
     if (os == .linux) return zsx_theme_set_source(@backingInt(source));
+    @import("windows_menu.zig").dark_menus = dark;
     menuMode(dark);
 }
 

@@ -80,13 +80,17 @@ typedef struct NativeItem {
     uint32_t keyval;
     uint32_t modifiers;
     int32_t command;
+    void *icon;
 } NativeItem;
 typedef struct MenuEntry {
     gchar *label;
     int32_t parent, id;
     uint8_t kind, enabled, checked;
     uint32_t keyval, modifiers;
+    /* The PNG of the item's icon, sent as DBusMenu's icon-data. */
+    GBytes *icon;
 } MenuEntry;
+GBytes *zsx_menu_icon_png(void *icon);
 
 typedef struct Tray {
     int refs;
@@ -107,7 +111,10 @@ typedef struct Tray {
 } Tray;
 
 static void menu_clear(Tray *tray) {
-    for (uint32_t index = 0; index < tray->count; ++index) g_free(tray->entries[index].label);
+    for (uint32_t index = 0; index < tray->count; ++index) {
+        g_free(tray->entries[index].label);
+        if (tray->entries[index].icon) g_bytes_unref(tray->entries[index].icon);
+    }
     g_free(tray->entries);
     tray->entries = NULL;
     tray->count = 0;
@@ -204,6 +211,7 @@ static GVariant *menu_properties(Tray *tray, int index) {
         g_variant_builder_add(&properties, "{sv}", "toggle-state", g_variant_new_int32(1));
     }
     if (entry->kind == 0 && entry->keyval) g_variant_builder_add(&properties, "{sv}", "shortcut", menu_shortcut(entry));
+    if (entry->icon) g_variant_builder_add(&properties, "{sv}", "icon-data", g_variant_new_from_bytes(G_VARIANT_TYPE_BYTESTRING, entry->icon, TRUE));
     return g_variant_builder_end(&properties);
 }
 static GVariant *menu_layout(Tray *tray, int index, int depth) {
@@ -460,6 +468,7 @@ void zsl_tray_menu(Tray *tray, const NativeItem *items, uint32_t count) {
         entry->checked = items[index].checked;
         entry->keyval = items[index].keyval;
         entry->modifiers = items[index].modifiers;
+        entry->icon = items[index].icon ? g_bytes_ref(zsx_menu_icon_png(items[index].icon)) : NULL;
         if (tray->next_id <= 0) tray->next_id = 1;
         entry->id = tray->next_id++;
     }
@@ -476,6 +485,17 @@ void zsl_tray_menu(Tray *tray, const NativeItem *items, uint32_t count) {
     }
 }
 const char *zsl_tray_menu_path(Tray *tray) { return tray->menu_path; }
+/* For checks: the size of the icon-data a host gets for item index, 0
+   for none. */
+gsize zsl_test_tray_icon(Tray *tray, uint32_t index) {
+    if (index >= tray->count) return 0;
+    GVariant *properties = menu_properties(tray, (int)index);
+    GVariant *data = g_variant_lookup_value(properties, "icon-data", G_VARIANT_TYPE_BYTESTRING);
+    gsize size = data ? g_variant_get_size(data) : 0;
+    if (data) g_variant_unref(data);
+    g_variant_unref(g_variant_ref_sink(properties));
+    return size;
+}
 const char *zsl_tray_path(Tray *tray) { return tray->path; }
 /* Silent: unexports the item, which also removes it from the watcher. */
 void zsl_tray_remove(Tray *tray) {

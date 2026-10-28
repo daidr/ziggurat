@@ -8,12 +8,28 @@ const menus = @import("menus.zig");
 const c = @import("ziggurat_c_win32");
 
 /// `radio_first`/`radio_last` are the command IDs bounding a radio item's group.
-pub const Entry = struct { id: u64, command: u16, menu: c.HMENU, enabled: bool, ancestor_enabled: bool, accelerator: ?types.Accelerator, radio_first: u16 = 0, radio_last: u16 = 0 };
+/// `top`: an item of a bar itself, which shows no icon.
+pub const Entry = struct { id: u64, command: u16, menu: c.HMENU, enabled: bool, ancestor_enabled: bool, accelerator: ?types.Accelerator, radio_first: u16 = 0, radio_last: u16 = 0, top: bool = false };
 pub const Built = struct { menu: c.HMENU, count: usize };
+
+/// Popup menus are dark since the app's appearance last was (theme.zig):
+/// template icons take their text color.
+pub var dark_menus = false;
+
+/// The color of menu text, 0xRRGGBB, which template icons take.
+fn textColor() u32 {
+    var contrast = std.mem.zeroes(c.HIGHCONTRASTW);
+    contrast.cbSize = @sizeOf(c.HIGHCONTRASTW);
+    const high = c.SystemParametersInfoW(c.SPI_GETHIGHCONTRAST, contrast.cbSize, &contrast, 0) != 0 and contrast.dwFlags & c.HCF_HIGHCONTRASTON != 0;
+    if (dark_menus and !high) return 0xffffff;
+    const color: u32 = c.GetSysColor(c.COLOR_MENUTEXT);
+    return (color & 0xff) << 16 | (color & 0xff00) | (color >> 16 & 0xff);
+}
 
 /// Builds a menu bar (`popup == false`) or a popup root. Labels are copied by
 /// Win32 during the call. Command IDs run consecutively from `first_command`.
-pub fn build(items: []const types.Item, plan: *const menus.Plan, popup: bool, first_command: u32, entries: []Entry) !Built {
+/// Item icons are made for `dpi`; the items of a bar itself show none.
+pub fn build(items: []const types.Item, plan: *const menus.Plan, popup: bool, first_command: u32, entries: []Entry, dpi: u32) !Built {
     const root = (if (popup) c.CreatePopupMenu() else c.CreateMenu()) orelse return error.MenuCreationFailed;
     var owned = true;
     defer if (owned) {
@@ -22,6 +38,7 @@ pub fn build(items: []const types.Item, plan: *const menus.Plan, popup: bool, fi
     var submenus: [types.max_menu_items]c.HMENU = @splat(null);
     var count: usize = 0;
     var command: u32 = first_command;
+    const tint = textColor();
     for (items, 0..) |item, index| {
         const parent_menu = if (plan.parent[index]) |parent| submenus[parent].? else root;
         if (item.kind == .separator) {
@@ -38,9 +55,11 @@ pub fn build(items: []const types.Item, plan: *const menus.Plan, popup: bool, fi
                 return error.MenuCreationFailed;
             }
             submenus[index] = submenu;
+            try setIcon(parent_menu, c.GetMenuItemCount(parent_menu) - 1, true, if (popup or item.parent != null) item.icon else null, dpi, tint);
         } else {
             if (c.AppendMenuW(parent_menu, flags, command, text.ptr) == 0) return error.MenuCreationFailed;
-            entries[count] = .{ .id = item.id, .command = @intCast(command), .menu = parent_menu, .enabled = plan.enabled[index], .ancestor_enabled = plan.ancestors_enabled[index], .accelerator = item.accelerator };
+            entries[count] = .{ .id = item.id, .command = @intCast(command), .menu = parent_menu, .enabled = plan.enabled[index], .ancestor_enabled = plan.ancestors_enabled[index], .accelerator = item.accelerator, .top = !popup and item.parent == null };
+            if (!entries[count].top) try setIcon(parent_menu, command, false, item.icon, dpi, tint);
             if (plan.radio_group[index]) |group| {
                 var info = std.mem.zeroes(c.MENUITEMINFOW);
                 info.cbSize = @sizeOf(c.MENUITEMINFOW);
@@ -61,6 +80,22 @@ pub fn build(items: []const types.Item, plan: *const menus.Plan, popup: bool, fi
     }
     owned = false;
     return .{ .menu = root, .count = count };
+}
+
+/// Gives an item its icon's bitmap, or none. The icon keeps the bitmap,
+/// which Win32 only borrows. An icon that cannot be drawn shows nothing.
+pub fn setIcon(menu: c.HMENU, item: anytype, by_position: bool, icon: ?*types.MenuIcon, dpi: u32, tint: u32) !void {
+    const handle: ?*anyopaque = if (icon) |value| value.bitmap(dpi, tint) else null;
+    if (icon != null and handle == null) return;
+    var info = std.mem.zeroes(c.MENUITEMINFOW);
+    info.cbSize = @sizeOf(c.MENUITEMINFOW);
+    info.fMask = c.MIIM_BITMAP;
+    info.hbmpItem = @ptrCast(handle);
+    if (c.SetMenuItemInfoW(menu, @intCast(item), @intFromBool(by_position), &info) == 0) return error.MenuCreationFailed;
+}
+/// The current menu text color for an update of one item's icon.
+pub fn iconTint() u32 {
+    return textColor();
 }
 
 fn labelText(destination: []u16, item: types.Item) ![:0]const u16 {
@@ -165,7 +200,8 @@ pub const Host = struct {
         if (request == 0) return error.InvalidRequestId;
         const plan = try menus.validate(items, true);
         var entries: [types.max_menu_items]Entry = undefined;
-        const built = try build(items, &plan, true, 1, &entries);
+        const dpi = if (target) |window| c.GetDpiForWindow(window) else c.GetDpiForSystem();
+        const built = try build(items, &plan, true, 1, &entries, if (dpi == 0) 96 else dpi);
         var owned = true;
         defer if (owned) {
             _ = c.DestroyMenu(built.menu);

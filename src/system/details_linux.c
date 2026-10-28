@@ -16,6 +16,44 @@ void *zsx_icon_from_png(const uint8_t *data, size_t length) {
     return pixbuf;
 }
 void zsx_icon_release(void *pixbuf) { g_object_unref(pixbuf); }
+
+/* A menu item icon (menu_icon.zig): the decoded image, its copies fit to
+   the 16 DIP box at scales 1 to 4, made as menus ask for them, and the PNG
+   bytes a tray's DBusMenu sends. */
+typedef struct MenuIcon { GdkPixbuf *source; GBytes *png; cairo_surface_t *sized[4]; } MenuIcon;
+enum { MENU_ICON_BOX = 16 };
+void *zsx_menu_icon_new(const uint8_t *data, size_t length) {
+    GdkPixbuf *pixbuf = zsx_icon_from_png(data, length);
+    if (!pixbuf) return NULL;
+    MenuIcon *icon = g_new0(MenuIcon, 1);
+    icon->source = pixbuf;
+    icon->png = g_bytes_new(data, length);
+    return icon;
+}
+void zsx_menu_icon_free(void *native) {
+    MenuIcon *icon = native;
+    for (int i = 0; i < 4; ++i) if (icon->sized[i]) cairo_surface_destroy(icon->sized[i]);
+    g_bytes_unref(icon->png);
+    g_object_unref(icon->source);
+    g_free(icon);
+}
+/* A new GtkImage of the icon for widgets at scale. */
+GtkWidget *zsx_menu_icon_image(void *native, int scale) {
+    MenuIcon *icon = native;
+    scale = CLAMP(scale, 1, 4);
+    if (!icon->sized[scale - 1]) {
+        int width = gdk_pixbuf_get_width(icon->source), height = gdk_pixbuf_get_height(icon->source), side = MENU_ICON_BOX * scale;
+        int w = width >= height ? side : MAX((width * side + height / 2) / height, 1);
+        int h = width >= height ? MAX((height * side + width / 2) / width, 1) : side;
+        GdkPixbuf *scaled = gdk_pixbuf_scale_simple(icon->source, w, h, GDK_INTERP_HYPER);
+        if (!scaled) return gtk_image_new();
+        icon->sized[scale - 1] = gdk_cairo_surface_create_from_pixbuf(scaled, scale, NULL);
+        g_object_unref(scaled);
+    }
+    return gtk_image_new_from_surface(icon->sized[scale - 1]);
+}
+/* The PNG bytes, borrowed. */
+GBytes *zsx_menu_icon_png(void *native) { return ((MenuIcon *)native)->png; }
 void zsx_window_set_icon(void *window, void *pixbuf) { gtk_window_set_icon(GTK_WINDOW(window), pixbuf); }
 /* The window's icon, borrowed, for checks. */
 void *zsx_window_icon(void *window) { return gtk_window_get_icon(GTK_WINDOW(window)); }

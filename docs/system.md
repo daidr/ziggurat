@@ -31,6 +31,25 @@ try owner.setMenu(&.{
 
 `setItemState(id, enabled, checked)` 更新命令项；submenu 状态变化用新的 `setMenu` 快照。`clearMenu()` 移除菜单栏。禁用的 submenu 使其下所有命令（含快捷键）失效。
 
+### 菜单项图标
+
+命令项和 submenu 可以带 `icon`，显示在标签前，比如 VPN 托盘菜单里每个服务器的旗帜。`system.MenuIcon.fromPng(app, png, .{})` 从 PNG 字节做一个图标，非 PNG 返回 `InvalidPng`；每个图标做一次，给任意多个菜单项用。分隔符不能带图标（`InvalidMenuIcon`）。
+
+```zig
+var japan = try system.MenuIcon.fromPng(app, japan_png, .{});
+defer japan.deinit();
+try tray.show(app, .{ .icon = icon.handle(), .tooltip = "VPN", .menu = &.{
+    .{ .id = 1, .label = "Tokyo", .radio = true, .checked = true, .icon = &japan },
+    .{ .id = 2, .label = "Osaka", .radio = true, .icon = &japan },
+    .{ .id = 3, .label = "Direct", .radio = true },
+} });
+```
+
+图标按原比例放进 16×16 DIP 的方框，按菜单所在显示器的缩放生成；给 32×32 或 48×48 像素以上的图，150% 和 200% 缩放下才清晰。勾选和单选项仍显示勾选标记。`owner.setItemIcon(id, &icon)` 替换菜单栏里命令项的图标，null 去掉。`.template = true` 的模板图是黑色加透明，在 Windows 上取菜单文字颜色（深色菜单为白色）；GTK 按原样显示。菜单只借用图标：MenuIcon 要在没有菜单再显示它之后才 `deinit`。
+
+- **Windows**：图标是菜单项的位图（`hbmpItem`），32 位预乘 alpha 的 DIB section，每种尺寸和颜色只生成一次，归 MenuIcon 所有；位图画在勾选标记那一列，勾选的项显示带勾选框的图标而不是勾。菜单栏自身的项不显示图标。
+- **Linux**：菜单栏的下拉菜单和上下文菜单（GTK）在标签前放一个 `GtkImage`，菜单栏自身的项不显示。托盘菜单由面板绘制，图标通过 DBusMenu 的 `icon-data` 发送 PNG：GNOME Shell 的 AppIndicator 扩展和 KDE Plasma 会显示，其他面板可能不显示。
+
 Linux 菜单栏是 `GtkMenuBar`。附加时平台层把窗口原有子控件（绘制区或内容宿主）移进一个纵向 `GtkBox`，菜单栏在上；`clearMenu`、detach 时移回原位，并重新实现绘制区、重新绑定输入法。替换快照时新菜单栏先占位再销毁旧菜单栏。客户区和内容尺寸不含菜单栏高度。命令激活与快捷键都在一次性 idle 中报告，不在 GTK 信号发射期间调用业务代码；带勾选的项是 `GtkCheckMenuItem`，GTK 激活时自行切换的勾选状态会被还原，状态只由 `setItemState` 决定。
 
 菜单栏、上下文菜单和托盘菜单共用同一套校验（`system.menus.validate`）：标签不得含 NUL 或非法 UTF-8；`&` 标记助记符，`&&` 表示字面 `&`，在 GTK 上自动转换为 `_` 形式。
@@ -298,7 +317,7 @@ try now.set(.{ .title = "Spring", .artist = "Vivaldi", .album = "The Four Season
 
 ## 图标
 
-`system.Icon.fromPng(app, png)` 把 PNG 字节（最大 1024×1024，先读头部尺寸再解码）变成平台图标：Windows 是 `CreateIconFromResourceEx` 得到的 HICON，Linux 是 GdkPixbuf。`icon.handle()` 就是 `TrayOptions.icon`/`TrayItemOptions.icon` 借用的原生图标，所以托盘可以直接用 PNG。`system.icon.setWindowIcon(window, &icon)` 设置窗口标题栏和任务栏图标，null 恢复应用图标；Windows 的 `WM_SETICON` 不复制图标，Icon 必须在所有显示它的窗口换掉图标或关闭后才 `deinit`，GTK 自己持有引用。
+`system.Icon.fromPng(app, png)` 把 PNG 字节（最大 1024×1024，先读头部尺寸再解码）变成平台图标：Windows 是 `CreateIconFromResourceEx` 得到的 HICON，Linux 是 GdkPixbuf。`icon.handle()` 就是 `TrayOptions.icon`/`TrayItemOptions.icon` 借用的原生图标，所以托盘可以直接用 PNG。`system.icon.setWindowIcon(window, &icon)` 设置窗口标题栏和任务栏图标，null 恢复应用图标；Windows 的 `WM_SETICON` 不复制图标，Icon 必须在所有显示它的窗口换掉图标或关闭后才 `deinit`，GTK 自己持有引用。菜单项用的图标见[菜单项图标](#菜单项图标)。
 
 ## 外观跟随
 
@@ -322,7 +341,7 @@ Windows 上大多数程序把图片作为位图（`CF_DIB`，系统也会从其�
 
 `zig build smoke-drag` 用真实输入（X11 上 XTest，Windows 上 SetCursorPos/SendInput）在两个窗口间拖动：同进程的多 item、多格式（含一个 lazy 表示）拖动完整到达 DataTarget，copy 与 Shift 的 move 协商一致且 provider 每次拖动只渲染一次；Escape、`cancel()`、在无目标处松开、目标拒绝格式都只结束一次且结果正确；files/text 的 `Target` 收到同一拖动的文本；另一个进程拖入的文本、自定义格式和文件作为一个 item 到达。
 
-`zig build smoke-system-details` 在隐藏窗口下检查：位图编码成的 PNG 由系统解码为图标并设为窗口图标（Windows 另用于托盘项）；强制深色/浅色时 Windows 标题栏属性与 GTK 的 prefer-dark 设置随之变化，切回跟随后与桌面偏好一致；写入文本后 `clear` 使剪贴板为空；Windows 上手工放入 `CF_DIB` 后读到可解码的 PNG；Linux 上用未关联的 scheme 异步打开 URL，在 owner 线程收到失败结果；关闭唯一窗口后 App 继续运行，由 `on_all_windows_closed` 之后的任务退出。`smoke-system-menus` 另检查单选项的原生标记与同组互斥。
+`zig build smoke-system-details` 在隐藏窗口下检查：位图编码成的 PNG 由系统解码为图标并设为窗口图标（Windows 另用于托盘项）；同一 PNG 做成菜单项图标后，下拉菜单里的命令显示图标、菜单栏自身的项不显示，`setItemIcon` 替换和去掉图标，GTK 重建的勾选项保留图标，Windows 位图是 16 DIP 按窗口 DPI 的 32 位 DIB，Linux 托盘菜单项的 `icon-data` 就是 PNG 字节；强制深色/浅色时 Windows 标题栏属性与 GTK 的 prefer-dark 设置随之变化，切回跟随后与桌面偏好一致；写入文本后 `clear` 使剪贴板为空；Windows 上手工放入 `CF_DIB` 后读到可解码的 PNG；Linux 上用未关联的 scheme 异步打开 URL，在 owner 线程收到失败结果；关闭唯一窗口后 App 继续运行，由 `on_all_windows_closed` 之后的任务退出。`smoke-system-menus` 另检查单选项的原生标记与同组互斥。
 
 `zig build smoke-system-session` 在隐藏窗口的事件循环中经 `Relaunch` 退出，再真实启动自身。被启动的子进程在 Linux 上把私有 `XDG_DATA_HOME` 下的文件两次登记到最近文档，读回 `recently-used.xbel`，确认只有一条记录且带应用名。在 Windows 上，子进程登记最近文档，设置含两个任务和 Recent 类别的 Jump List 后再删除；再按 Jump List 的参数串用 `CreateProcessW` 启动自身，确认空参数、空格、引号、尾部反斜杠、UNC 前缀和非 ASCII 参数都原样往返。这些检查不打开或点击任务栏菜单，也不检查 shell 的显示效果。
 

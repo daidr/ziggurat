@@ -1,5 +1,5 @@
 //! Hidden-window check of the system details against the real session: PNG
-//! icons, the forced and followed appearance, clipboard clear and bitmaps,
+//! icons, menu item icons, the forced and followed appearance, clipboard clear and bitmaps,
 //! opening a URL off the owner thread, and an App that keeps running after its last window closed.
 const std = @import("std");
 const builtin = @import("builtin");
@@ -14,6 +14,8 @@ const c = @import("ziggurat_c_win32");
 extern "dwmapi" fn DwmGetWindowAttribute(c.HWND, u32, *anyopaque, u32) callconv(.winapi) c.HRESULT;
 extern fn zsx_window_icon(window: *anyopaque) ?*anyopaque;
 extern fn zsx_theme_prefers_dark() c_int;
+extern fn zsl_test_menubar_icon(bar: *anyopaque, command: i32) c_int;
+extern fn zsl_test_tray_icon(tray: *anyopaque, index: u32) usize;
 
 const Step = enum { clipboard_written, clipboard_cleared, bitmap, open_url, close_window, done };
 
@@ -115,6 +117,87 @@ fn frameDark(window: z.Window) !bool {
     return value != 0;
 }
 
+/// Commands and submenus show icons beside their labels, but the items of
+/// the bar itself show none; setItemIcon replaces and removes them, and
+/// remade items keep them.
+fn menuIcons(app: *z.App, window: z.Window, png: []const u8) !void {
+    try std.testing.expectError(error.InvalidPng, system.MenuIcon.fromPng(app, "not a png", .{}));
+    var full = try system.MenuIcon.fromPng(app, png, .{});
+    defer full.deinit();
+    var template = try system.MenuIcon.fromPng(app, png, .{ .template = true });
+    defer template.deinit();
+    var owner = system.Owner.init(app, struct {
+        fn action(_: *anyopaque, _: z.Window, _: system.Action) void {}
+    }.action);
+    try owner.attach(window);
+    defer owner.detach() catch {};
+    try owner.setMenu(&.{
+        .{ .id = 40, .kind = .submenu, .label = "File", .icon = &full },
+        .{ .id = 41, .parent = 40, .label = "Open", .icon = &full, .accelerator = .{ .key = .o, .modifiers = .{ .control = true } } },
+        .{ .id = 42, .parent = 40, .label = "Wrap", .checked = true, .icon = &template },
+        .{ .id = 43, .parent = 40, .label = "Plain" },
+        .{ .id = 44, .label = "Top", .icon = &full },
+    });
+    try std.testing.expectEqualSlices(bool, &.{ true, true, false, false }, &try shownIcons(&owner, .{ 41, 42, 43, 44 }));
+    try owner.setItemIcon(41, null);
+    try owner.setItemIcon(43, &template);
+    try owner.setItemIcon(44, &full);
+    // Unchecked, GTK makes the item again.
+    try owner.setItemState(42, true, false);
+    try std.testing.expectEqualSlices(bool, &.{ false, true, true, false }, &try shownIcons(&owner, .{ 41, 42, 43, 44 }));
+    try std.testing.expectError(error.MenuItemNotFound, owner.setItemIcon(99, &full));
+    if (windows) {
+        // The bar's own items, submenus included, show no bitmap; the
+        // icons fit 16 DIPs at the window's DPI.
+        var info = std.mem.zeroes(c.MENUITEMINFOW);
+        info.cbSize = @sizeOf(c.MENUITEMINFOW);
+        info.fMask = c.MIIM_BITMAP;
+        try std.testing.expect(c.GetMenuItemInfoW(owner.menu, 0, c.TRUE, &info) != 0);
+        try std.testing.expectEqual(null, info.hbmpItem);
+        const bitmap = itemBitmap(&owner, 42).?;
+        var object: c.BITMAP = undefined;
+        try std.testing.expect(c.GetObjectW(bitmap, @sizeOf(c.BITMAP), &object) != 0);
+        const dpi = c.GetDpiForWindow(@ptrCast(window.nativeHandle().?));
+        try std.testing.expectEqual(@as(c_long, @intCast(16 * @max(dpi, 96) / 96)), object.bmWidth);
+        try std.testing.expectEqual(32, object.bmBitsPixel);
+    }
+    if (linux) {
+        // A tray's panel gets the PNG as DBusMenu's icon-data.
+        var tray = system.Tray.init(app, struct {
+            fn action(_: *anyopaque, _: *system.Tray, _: system.TrayAction) void {}
+        }.action);
+        try tray.show(app, .{ .tooltip = "Icons", .menu = &.{ .{ .id = 50, .label = "Tokyo", .radio = true, .checked = true, .icon = &full }, .{ .id = 51, .label = "Direct", .radio = true } } });
+        defer tray.remove() catch {};
+        try std.testing.expectEqual(png.len, zsl_test_tray_icon(tray.native.?, 0));
+        try std.testing.expectEqual(0, zsl_test_tray_icon(tray.native.?, 1));
+    }
+}
+fn shownIcons(owner: *system.Owner, ids: [4]u64) ![4]bool {
+    var shown: [4]bool = undefined;
+    for (ids, &shown) |id, *value| {
+        if (windows) value.* = itemBitmap(owner, id) != null;
+        if (linux) {
+            const index = for (owner.bar_entries[0..owner.bar_count], 0..) |entry, at| {
+                if (entry.id == id) break at;
+            } else return error.MenuItemNotFound;
+            const result = zsl_test_menubar_icon(owner.bar.?, @intCast(index));
+            if (result < 0) return error.MenuItemBroken;
+            value.* = result == 1;
+        }
+    }
+    return shown;
+}
+fn itemBitmap(owner: *system.Owner, id: u64) ?c.HBITMAP {
+    for (owner.entries[0..owner.entry_count]) |entry| if (entry.id == id) {
+        var info = std.mem.zeroes(c.MENUITEMINFOW);
+        info.cbSize = @sizeOf(c.MENUITEMINFOW);
+        info.fMask = c.MIIM_BITMAP;
+        if (c.GetMenuItemInfoW(entry.menu, entry.command, c.FALSE, &info) == 0) return null;
+        return info.hbmpItem;
+    };
+    return null;
+}
+
 pub fn main() !void {
     var debug: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(debug.deinit() == .ok);
@@ -148,6 +231,7 @@ pub fn main() !void {
         const big = c.SendMessageW(@ptrCast(state.window.nativeHandle().?), c.WM_GETICON, c.ICON_BIG, 0);
         try std.testing.expectEqual(@intFromPtr(icon.handle()), @as(usize, @bitCast(big)));
     } else try std.testing.expectEqual(icon.handle(), zsx_window_icon(state.window.nativeHandle().?).?);
+    try menuIcons(app, state.window, png);
     var tray = system.Tray.init(&state, struct {
         fn action(_: *anyopaque, _: *system.Tray, _: system.TrayAction) void {}
     }.action);
@@ -187,5 +271,5 @@ pub fn main() !void {
     try std.testing.expectEqual(Step.done, state.step);
     try std.testing.expectEqual(1, state.all_closed);
     if (linux) try std.testing.expect(std.meta.isError(state.open_result.?));
-    std.debug.print("system details passed: png icon, appearance, clipboard clear/bitmap, open url={s}, running without windows\n", .{if (state.open_result) |value| (if (value) |_| "opened" else |err| @errorName(err)) else "skipped"});
+    std.debug.print("system details passed: png icon, menu icons, appearance, clipboard clear/bitmap, open url={s}, running without windows\n", .{if (state.open_result) |value| (if (value) |_| "opened" else |err| @errorName(err)) else "skipped"});
 }
