@@ -66,11 +66,16 @@ pub const page_facts = @import("page_facts.zig");
 pub const Rgba = page_facts.Rgba;
 pub const ContentSize = page_facts.ContentSize;
 pub const FitContent = page_facts.FitContent;
+pub const http_auth = @import("http_auth.zig");
+pub const AuthChallenge = http_auth.Challenge;
+pub const Credentials = http_auth.Credentials;
+pub const CertificateError = http_auth.CertificateError;
 const page_sessions = @import("page_session.zig");
 pub const PageSession = page_sessions.Type(View, SessionHooks);
 test {
     _ = policy_store;
     _ = page_facts;
+    _ = http_auth;
     _ = custom_local;
 }
 pub const DownloadDestination = downloads.Destination;
@@ -398,6 +403,34 @@ pub const Options = struct {
     /// Whether the page may play audible media before the user clicked or
     /// typed in it, as a hidden window's page never can.
     autoplay: Autoplay = .user_gesture,
+    /// Answers the HTTP sign-ins (Basic, Digest, NTLM, Negotiate) of a
+    /// remote page and what it loads, the server's or a proxy's. Without
+    /// it every sign-in is canceled; no engine's dialog ever shows.
+    http_auth: ?AuthHandler = null,
+    /// Decides about server certificates of a remote page that do not
+    /// verify. Without it, or when it says no, the load fails.
+    certificate_errors: ?CertificateHandler = null,
+};
+pub const AuthHandler = struct {
+    context: *anyopaque,
+    /// Synchronous, on the App owner thread while the load waits: the
+    /// credentials to sign in with, or null to go without, which shows the
+    /// server's refusal (its 401 or 407 page). A server that refuses them
+    /// asks again; the engine keeps those it accepts for the session, for
+    /// that server and realm, so this is not asked for every request. To ask
+    /// the user, return null, prompt, and reload once there is an answer.
+    answer: *const fn (*anyopaque, *View, AuthChallenge) ?Credentials,
+};
+pub const CertificateHandler = struct {
+    context: *anyopaque,
+    /// Synchronous, on the App owner thread while the load waits: true
+    /// loads it anyway. Allow only the certificate expected, never a host
+    /// whatever its certificate, which anyone in between can present.
+    /// Windows asks for the page and what it loads, and a yes holds for the
+    /// host until the browser process ends. Linux asks for the page only,
+    /// as WebKitGTK tells no more, and on a yes allows the certificate for
+    /// the host in the View's web context and loads the page again.
+    allow: *const fn (*anyopaque, *View, CertificateError) bool,
 };
 pub const Autoplay = enum {
     /// The engine's own policy: sound only after a user's gesture.
@@ -436,7 +469,7 @@ const NativeActions = extern struct {
     download_offer: ?*const fn (*anyopaque, [*:0]const u16, [*:0]const u16, [*:0]const u16, i64, *anyopaque) callconv(.c) void = null,
     download_notify: ?*const fn (*anyopaque, u64, u32, u64, i64, i32) callconv(.c) void = null,
 };
-const NativeSettings = extern struct { zoom: f64, user_agent: ?[*:0]const u16, devtools: bool, tool_flags: u32, tool_limit: u32, max_cookies: u32, max_cookie_bytes: u32, max_capture_bytes: u32, schemes: ?[*]const NativeScheme, scheme_count: u32, local_ipc: bool, actions: ?*const NativeActions, initializers: ?*const initializer_owner.NativeInput, owned_context: ?*anyopaque, facts: ?[*:0]const u16 = null, browser_arguments: ?[*:0]const u16 = null };
+const NativeSettings = extern struct { zoom: f64, user_agent: ?[*:0]const u16, devtools: bool, tool_flags: u32, tool_limit: u32, max_cookies: u32, max_cookie_bytes: u32, max_capture_bytes: u32, schemes: ?[*]const NativeScheme, scheme_count: u32, local_ipc: bool, actions: ?*const NativeActions, initializers: ?*const initializer_owner.NativeInput, owned_context: ?*anyopaque, facts: ?[*:0]const u16 = null, browser_arguments: ?[*:0]const u16 = null, auth: ?*const fn (*anyopaque, [*:0]const u16, [*:0]const u16, *anyopaque) callconv(.c) void = null, certificate: ?*const fn (*anyopaque, [*:0]const u16, i32, [*:0]const u16) callconv(.c) c_int = null };
 const PermissionScratch = struct {
     rows: [permissions.origin_capacity]NativePermissionGrant = undefined,
     text: [permissions.origin_capacity][schemes.origin_limit + 1:0]u16 = undefined,
@@ -539,6 +572,8 @@ extern fn zwv_action_budget_create(u32, u32) ?*anyopaque;
 extern fn zwv_action_budget_limit(*anyopaque, u32, u32) void;
 extern fn zwv_action_budget_release(*anyopaque) void;
 extern fn zwv_action_counts(*u32, *u32, *u32) void;
+extern fn zwv_auth_answer(*anyopaque, [*:0]const u16, [*:0]const u16) i32;
+extern fn zwk_auth_answer(*anyopaque, [*:0]const u8, [*:0]const u8) c_int;
 extern fn zwv_permission_defer(*anyopaque, u64) i32;
 extern fn zwv_permission_decide(*anyopaque, u64, bool) i32;
 extern fn zwv_permission_cancel(*anyopaque, u64) i32;
@@ -1482,7 +1517,7 @@ pub const View = struct {
         const initializer_input = if (config.initializer_config) |source| source.input() else null;
         const facts = try self.factsScript(.windows);
         defer if (facts) |value| self.allocator.free(value);
-        const settings: NativeSettings = .{ .facts = if (facts) |value| value.ptr else null, .browser_arguments = if (config.options.autoplay == .allow) std.unicode.utf8ToUtf16LeStringLiteral("--autoplay-policy=no-user-gesture-required") else null, .zoom = self.zoom_override orelse config.options.zoom, .user_agent = if (agent) |value| value.ptr else null, .devtools = self.devtools_override orelse config.options.devtools_enabled, .tool_flags = tool_flags, .tool_limit = limits.max_pending, .max_cookies = limits.max_cookies, .max_cookie_bytes = limits.max_cookie_bytes, .max_capture_bytes = limits.max_capture_bytes, .schemes = if (config.options.custom_schemes.len == 0) null else &scheme_scratch.items, .scheme_count = @intCast(config.options.custom_schemes.len), .local_ipc = if (config.options.local) |site| std.mem.eql(u8, site.scheme, "https") or site.scheme_ipc else true, .actions = if (actions) |*value| value else null, .initializers = if (initializer_input) |*value| value else null, .owned_context = if (config.profile_state) |state| try state.context.windowsContext() else null };
+        const settings: NativeSettings = .{ .auth = if (config.options.http_auth != null) View.windowsAuth else null, .certificate = if (config.options.certificate_errors != null) View.windowsCertificate else null, .facts = if (facts) |value| value.ptr else null, .browser_arguments = if (config.options.autoplay == .allow) std.unicode.utf8ToUtf16LeStringLiteral("--autoplay-policy=no-user-gesture-required") else null, .zoom = self.zoom_override orelse config.options.zoom, .user_agent = if (agent) |value| value.ptr else null, .devtools = self.devtools_override orelse config.options.devtools_enabled, .tool_flags = tool_flags, .tool_limit = limits.max_pending, .max_cookies = limits.max_cookies, .max_cookie_bytes = limits.max_cookie_bytes, .max_capture_bytes = limits.max_capture_bytes, .schemes = if (config.options.custom_schemes.len == 0) null else &scheme_scratch.items, .scheme_count = @intCast(config.options.custom_schemes.len), .local_ipc = if (config.options.local) |site| std.mem.eql(u8, site.scheme, "https") or site.scheme_ipc else true, .actions = if (actions) |*value| value else null, .initializers = if (initializer_input) |*value| value else null, .owned_context = if (config.profile_state) |state| try state.context.windowsContext() else null };
         self.native = zwv_create(window.nativeHandle(), if (html) |value| value.ptr else std.unicode.utf8ToUtf16LeStringLiteral(""), profile.ptr, if (url) |value| value.ptr else null, if (prefix) |value| value.ptr else null, if (remote) |*value| value else null, &settings, policy, config.options.max_cached_permissions, config.options.scripts.max_pending, config.options.allow_local_navigation, config.options.page_listener != null, notify, pageNotify, scriptNotify, toolNotify, resource, self, &self.last_hresult) orelse return error.WebViewCreationFailed;
         errdefer {
             nativeClose(self.native.?);
@@ -1560,7 +1595,7 @@ pub const View = struct {
         const initializer_input = if (self.config.?.initializer_config) |source| source.input() else null;
         const facts = try self.factsScript(.linux);
         defer if (facts) |value| self.allocator.free(value);
-        const native_options: webkit.Options = .{ .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled) };
+        const native_options: webkit.Options = .{ .auth = if (options.http_auth != null) View.webkitAuth else null, .certificate = if (options.certificate_errors != null) View.webkitCertificate else null, .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled) };
         var candidate: ?*anyopaque = null;
         if (self.session) |session| {
             try webkit.check(webkit.zwk_session_create(&native_options, session.last_size.width, session.last_size.height, webkitNotify, pageNotify, webkitScriptNotify, webkitTimeout, self, &candidate));
@@ -2115,6 +2150,90 @@ pub const View = struct {
         var destination = slot.destination;
         defer if (destination) |*owned| owned.deinit();
         if (slot.completion) |completion| completion.complete(completion.context, result);
+    }
+    /// The View's pages' sign-ins and certificate errors, answered by the
+    /// app's handlers while the engine waits; see Options.http_auth.
+    fn authView(ptr: *anyopaque) ?*View {
+        const self: *View = @ptrCast(@alignCast(ptr));
+        const window = self.access() orelse return null;
+        if (self.attachmentClosed() or appStopping(window) or self.recovering) return null;
+        return self;
+    }
+    fn windowsAuth(ptr: *anyopaque, uri_wide: [*:0]const u16, challenge_wide: [*:0]const u16, call: *anyopaque) callconv(.c) void {
+        if (is_linux) return;
+        const self = authView(ptr) orelse return;
+        const handler = self.config.?.options.http_auth orelse return;
+        var uri_storage: [16384]u8 = undefined;
+        var challenge_storage: [4096]u8 = undefined;
+        const uri = uri_storage[0 .. std.unicode.utf16LeToUtf8(&uri_storage, std.mem.span(uri_wide)) catch return];
+        const challenge = challenge_storage[0 .. std.unicode.utf16LeToUtf8(&challenge_storage, std.mem.span(challenge_wide)) catch return];
+        const place = http_auth.authority(uri) orelse return;
+        var parsed: http_auth.Parsed = .{ .scheme = "", .realm = "" };
+        http_auth.parseChallenge(challenge, &parsed);
+        const scheme = http_auth.schemeNamed(parsed.scheme) orelse return;
+        const scope = self.beginNativeAttachment() orelse return;
+        defer scope.end();
+        const credentials = handler.answer(handler.context, self, .{ .host = place.host, .port = place.port, .realm = parsed.realm, .scheme = scheme, .proxy = false }) orelse return;
+        var user: [http_auth.limits.credential_bytes + 1:0]u16 = undefined;
+        var password: [http_auth.limits.credential_bytes + 1:0]u16 = undefined;
+        if (!wideCredential(&user, credentials.username) or !wideCredential(&password, credentials.password)) return;
+        defer std.crypto.secureZero(u16, &password);
+        _ = zwv_auth_answer(call, &user, &password);
+    }
+    fn wideCredential(out: *[http_auth.limits.credential_bytes + 1:0]u16, text: []const u8) bool {
+        if (text.len > http_auth.limits.credential_bytes) return false;
+        const length = std.unicode.utf8ToUtf16Le(out, text) catch return false;
+        out[length] = 0;
+        return true;
+    }
+    fn credentialZ(out: *[http_auth.limits.credential_bytes + 1:0]u8, text: []const u8) ?[*:0]const u8 {
+        if (text.len > http_auth.limits.credential_bytes or std.mem.indexOfScalar(u8, text, 0) != null) return null;
+        @memcpy(out[0..text.len], text);
+        out[text.len] = 0;
+        return out;
+    }
+    fn windowsCertificate(ptr: *anyopaque, uri_wide: [*:0]const u16, status: i32, pem_wide: [*:0]const u16) callconv(.c) c_int {
+        if (is_linux) return 0;
+        const self = authView(ptr) orelse return 0;
+        const handler = self.config.?.options.certificate_errors orelse return 0;
+        var uri_storage: [16384]u8 = undefined;
+        const uri = uri_storage[0 .. std.unicode.utf16LeToUtf8(&uri_storage, std.mem.span(uri_wide)) catch return 0];
+        const place = http_auth.authority(uri) orelse return 0;
+        const pem_text = std.mem.span(pem_wide);
+        if (pem_text.len > http_auth.limits.certificate_bytes * 2) return 0;
+        var pem_storage: [http_auth.limits.certificate_bytes * 2]u8 = undefined;
+        var der_storage: [http_auth.limits.certificate_bytes]u8 = undefined;
+        const pem = pem_storage[0 .. std.unicode.utf16LeToUtf8(&pem_storage, pem_text) catch return 0];
+        const der = http_auth.pemCertificate(pem, &der_storage) orelse return 0;
+        const scope = self.beginNativeAttachment() orelse return 0;
+        defer scope.end();
+        return @intFromBool(handler.allow(handler.context, self, .{ .uri = uri, .host = place.host, .reason = http_auth.webview2Reason(status), .certificate = der }));
+    }
+    fn webkitAuth(ptr: *anyopaque, host: [*:0]const u8, port: u32, realm: [*:0]const u8, native_scheme: u32, proxy: c_int, call: *anyopaque) callconv(.c) void {
+        if (!is_linux) return;
+        const self = authView(ptr) orelse return;
+        const handler = self.config.?.options.http_auth orelse return;
+        const scheme = http_auth.webkitScheme(native_scheme) orelse return;
+        const scope = self.beginNativeAttachment() orelse return;
+        defer scope.end();
+        const credentials = handler.answer(handler.context, self, .{ .host = std.mem.span(host), .port = std.math.cast(u16, port) orelse return, .realm = std.mem.span(realm), .scheme = scheme, .proxy = proxy != 0 }) orelse return;
+        var user: [http_auth.limits.credential_bytes + 1:0]u8 = undefined;
+        var password: [http_auth.limits.credential_bytes + 1:0]u8 = undefined;
+        defer std.crypto.secureZero(u8, &password);
+        const user_z = credentialZ(&user, credentials.username) orelse return;
+        const password_z = credentialZ(&password, credentials.password) orelse return;
+        _ = zwk_auth_answer(call, user_z, password_z);
+    }
+    fn webkitCertificate(ptr: *anyopaque, uri_z: [*:0]const u8, flags: u32, der: [*]const u8, length: usize) callconv(.c) c_int {
+        if (!is_linux) return 0;
+        const self = authView(ptr) orelse return 0;
+        const handler = self.config.?.options.certificate_errors orelse return 0;
+        const uri = std.mem.span(uri_z);
+        const place = http_auth.authority(uri) orelse return 0;
+        if (length > http_auth.limits.certificate_bytes) return 0;
+        const scope = self.beginNativeAttachment() orelse return 0;
+        defer scope.end();
+        return @intFromBool(handler.allow(handler.context, self, .{ .uri = uri, .host = place.host, .reason = http_auth.gtlsReason(flags), .certificate = der[0..length] }));
     }
     fn downloadOffer(ptr: *anyopaque, uri_wide: [*:0]const u16, mime_wide: [*:0]const u16, name_wide: [*:0]const u16, total: i64, native_call: *anyopaque) callconv(.c) void {
         const self: *View = @ptrCast(@alignCast(ptr));

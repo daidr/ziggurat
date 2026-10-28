@@ -65,6 +65,12 @@ struct ZwkState {
     uint32_t policy;
     char *facts;
     gboolean autoplay;
+    ZwkAuth auth;
+    ZwkCertificate certificate;
+    /* A page whose certificate the app allowed loads again once the failed
+       load finished. */
+    char *tls_retry;
+    unsigned tls_retries;
     gboolean closed, committed, failed, dom_ready, recovering,load_started,inspector;
 };
 static gint live_states, live_callbacks, live_views, inspectors_shown;
@@ -85,7 +91,7 @@ static void release(gpointer data) {
     initializers_free(s->initializers);
     if(s->private_bootstrap)webkit_user_script_unref(s->private_bootstrap);
     if(s->public_bootstrap)webkit_user_script_unref(s->public_bootstrap);
-    local_finish(&s->local); remote_free(s->remote); g_free(s->facts); g_free(s->html);g_free(s->current_uri);g_free(s->resources); g_free(s); g_atomic_int_add(&live_states,-1);
+    local_finish(&s->local); remote_free(s->remote); g_free(s->facts); g_free(s->tls_retry); g_free(s->html);g_free(s->current_uri);g_free(s->resources); g_free(s); g_atomic_int_add(&live_states,-1);
 }
 static gboolean live(ZwkState *s) { return !s->closed && !s->recovering && s->owner; }
 static size_t bounded_length(const char *text,size_t limit) {
@@ -241,8 +247,55 @@ static void view_finalized(gpointer data,GObject *object) {
 static gboolean permission(WebKitWebView *view,WebKitPermissionRequest *request,gpointer data) {
     (void)view; (void)data; webkit_permission_request_deny(request); return TRUE;
 }
+typedef struct AuthCall { WebKitAuthenticationRequest *request; gboolean answered; } AuthCall;
+int zwk_auth_answer(void *call_pointer,const char *user,const char *password) {
+    AuthCall *call=call_pointer;
+    if (!call || call->answered || !user || !password) return ZWK_INVALID;
+    WebKitCredential *credential=webkit_credential_new(user,password,WEBKIT_CREDENTIAL_PERSISTENCE_FOR_SESSION);
+    if (!credential) return ZWK_OOM;
+    webkit_authentication_request_authenticate(call->request,credential);
+    webkit_credential_free(credential);
+    call->answered=TRUE; return ZWK_OK;
+}
+/* Without the app's handler a sign-in is canceled, and its load with it.
+   The handler's no is a sign-in without credentials: the server's refusal. */
 static gboolean authentication(WebKitWebView *view,WebKitAuthenticationRequest *request,gpointer data) {
-    (void)view; (void)data; webkit_authentication_request_cancel(request); return TRUE;
+    (void)view; ZwkState *s=data; retain(s);
+    const WebKitAuthenticationScheme scheme=webkit_authentication_request_get_scheme(request);
+    const gboolean http=scheme==WEBKIT_AUTHENTICATION_SCHEME_DEFAULT || scheme==WEBKIT_AUTHENTICATION_SCHEME_HTTP_BASIC || scheme==WEBKIT_AUTHENTICATION_SCHEME_HTTP_DIGEST ||
+        scheme==WEBKIT_AUTHENTICATION_SCHEME_NTLM || scheme==WEBKIT_AUTHENTICATION_SCHEME_NEGOTIATE;
+    if (live(s) && s->auth && http) {
+        AuthCall call={request,FALSE};
+        const char *host=webkit_authentication_request_get_host(request),*realm=webkit_authentication_request_get_realm(request);
+        s->auth(s->owner,host?host:"",webkit_authentication_request_get_port(request),realm?realm:"",(uint32_t)scheme,webkit_authentication_request_is_for_proxy(request)?1:0,&call);
+        call.request=NULL;
+        if (!call.answered) webkit_authentication_request_authenticate(request,NULL);
+    } else webkit_authentication_request_cancel(request);
+    release(s); return TRUE;
+}
+/* WebKitGTK tells the page's certificate errors only: what it loads from
+   such a server fails without asking. An allowed certificate is the
+   context's for its host until it ends, and the page loads again. */
+static gboolean tls_errors(WebKitWebView *view,const char *uri,GTlsCertificate *certificate,GTlsCertificateFlags flags,gpointer data) {
+    ZwkState *s=data; retain(s);
+    if (live(s) && s->certificate && s->remote && uri && certificate && !s->tls_retry && s->tls_retries<3) {
+        GUri *parsed=g_uri_parse(uri,G_URI_FLAGS_NONE,NULL);
+        const char *host=parsed?g_uri_get_host(parsed):NULL;
+        GByteArray *der=NULL;
+        g_object_get(certificate,"certificate",&der,NULL);
+        if (host && *host && der && der->len && s->certificate(s->owner,uri,(uint32_t)flags,der->data,der->len) && live(s) && !s->tls_retry) {
+            webkit_web_context_allow_tls_certificate_for_host(webkit_web_view_get_context(view),certificate,host);
+            s->tls_retry=g_strdup(uri);
+        }
+        if (der) g_byte_array_unref(der);
+        if (parsed) g_uri_unref(parsed);
+    }
+    release(s); return FALSE;
+}
+static gboolean tls_retry(gpointer data) {
+    ZwkState *s=data; char *uri=s->tls_retry; s->tls_retry=NULL;
+    if (uri && live(s)) { s->tls_retries++; (void)zwk_navigate_remote(s,uri); }
+    g_free(uri); release(s); return G_SOURCE_REMOVE;
 }
 static gboolean dialog(WebKitWebView *view,WebKitScriptDialog *dialog_value,gpointer data) {
     (void)view; (void)data;
@@ -371,10 +424,12 @@ static void loaded(WebKitWebView *view,WebKitLoadEvent event,gpointer data) {
             s->load_started=FALSE;
             s->loading_serial=0; s->revoked_load_serial=0; s->loading_failure=(ZwkFailure){0};
             const gboolean success=document(s);
+            if (success) s->tls_retries=0;
             if (op) { op->finished=TRUE; navigation_clear(s); }
             (void)page(s,1,success?1:0,status,NULL);
             if (live(s) && s->generation==generation) history_notify(s);
         }
+        if (s->tls_retry && live(s)) { retain(s); g_idle_add(tls_retry,s); }
     }
 op_done:
     if (op) navigation_release(op);
@@ -698,6 +753,7 @@ static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t
     strcpy(s->html,options->html);
     if (options->facts && !(s->facts=g_strdup(options->facts))) { zwk_close(s); return ZWK_OOM; }
     s->autoplay=options->autoplay!=0;
+    s->auth=options->auth; s->certificate=options->certificate;
     s->owner=owner; s->notify=callback; s->page=page_callback; s->script=script_callback; s->deadline=deadline;
     s->limit=options->max_pending; s->result_limit=options->max_result_bytes; s->policy=options->policy_flags;
     if(options->initializers){
@@ -761,6 +817,7 @@ static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t
     if(s->remote)g_signal_connect(s->view,"user-message-received",G_CALLBACK(remote_message),s);
     g_signal_connect(s->view,"load-changed",G_CALLBACK(loaded),s);
     g_signal_connect(s->view,"load-failed",G_CALLBACK(load_failed),s);
+    g_signal_connect(s->view,"load-failed-with-tls-errors",G_CALLBACK(tls_errors),s);
     g_signal_connect(s->view,"web-process-terminated",G_CALLBACK(process_failed),s);
     g_signal_connect(s->view,"notify::title",G_CALLBACK(title_changed),s);
     if (s->local.budget || s->remote) {

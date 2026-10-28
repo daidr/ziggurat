@@ -34,7 +34,13 @@ typedef struct ToolOperation ToolOperation;
 typedef struct DeferredResource DeferredResource;
 typedef struct FileControl FileControl;
 typedef void (*ToolNotify)(void *,uint64_t,uint32_t,HRESULT,const void *,uint32_t);
-typedef struct ViewSettings { double zoom; const WCHAR *user_agent; _Bool devtools; uint32_t tool_flags,tool_limit,max_cookies,max_cookie_bytes,max_capture_bytes; const SchemeInput *schemes;uint32_t scheme_count;_Bool local_ipc;const ActionInput *actions;const InitializerInput *initializers; ZwpwContext *owned_context; const WCHAR *facts; const WCHAR *browser_arguments; } ViewSettings;
+/* An HTTP sign-in: the request's URI and the server's challenge. zwv_auth_answer
+   answers it during the call; not answered, it goes without credentials. */
+typedef void (*AuthOffer)(void *,const WCHAR *,const WCHAR *,void *);
+/* A certificate error: URI, COREWEBVIEW2_WEB_ERROR_STATUS and the PEM
+   certificate. Nonzero allows it for the host until the browser ends. */
+typedef int (*CertificateOffer)(void *,const WCHAR *,int32_t,const WCHAR *);
+typedef struct ViewSettings { double zoom; const WCHAR *user_agent; _Bool devtools; uint32_t tool_flags,tool_limit,max_cookies,max_cookie_bytes,max_capture_bytes; const SchemeInput *schemes;uint32_t scheme_count;_Bool local_ipc;const ActionInput *actions;const InitializerInput *initializers; ZwpwContext *owned_context; const WCHAR *facts; const WCHAR *browser_arguments; AuthOffer auth; CertificateOffer certificate_offer; } ViewSettings;
 typedef void (*Resource)(void *, const WCHAR *, const WCHAR *, const NativeHeader *, uint32_t, void *);
 typedef struct PageEvent {
     int kind;
@@ -97,6 +103,8 @@ struct State {
     BOOL has_authentication, has_certificate;
     WCHAR *facts_script;
     BOOL facts_added;
+    AuthOffer auth;
+    CertificateOffer certificate_offer;
     WCHAR *html;
     WCHAR *document_source;
     WCHAR *initial_url, *local_prefix;
@@ -543,29 +551,39 @@ static HRESULT owned_controller_prepare(State *s) {
     if (s->closed||!zwpw_context_is_pending(context)) return E_ABORT;
     return hr;
 }
+/* An owned profile's own loopback certificate is allowed while its session
+   is active; any other goes to the app's handler, else fails. */
 static HRESULT STDMETHODCALLTYPE server_certificate_invoke(ICoreWebView2ServerCertificateErrorDetectedEventHandler *iface,ICoreWebView2 *sender,ICoreWebView2ServerCertificateErrorDetectedEventArgs *args) {
     (void)sender;State *s=((ServerCertificateHandler *)iface)->state;retain(s);
     HRESULT hr=ICoreWebView2ServerCertificateErrorDetectedEventArgs_put_Action(args,COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL);
-    BOOL action_failed=FAILED(hr);
+    BOOL action_failed=FAILED(hr),allow=FALSE;
     WCHAR *uri=NULL,*pem=NULL;ICoreWebView2Certificate *certificate=NULL;
     ZwpwContext *context=s->owned_context;
-    if (SUCCEEDED(hr)&&!s->closed&&context&&zwpw_context_is_active(context)) hr=ICoreWebView2ServerCertificateErrorDetectedEventArgs_get_RequestUri(args,&uri);
+    if (SUCCEEDED(hr)&&!s->closed&&((context&&zwpw_context_is_active(context))||s->certificate_offer)) hr=ICoreWebView2ServerCertificateErrorDetectedEventArgs_get_RequestUri(args,&uri);
     else if (SUCCEEDED(hr)) hr=E_ABORT;
-    NetOrigin origin;
-    if (SUCCEEDED(hr)) hr=net_origin(uri,FALSE,TRUE,&origin);
-    if (SUCCEEDED(hr)&&(!origin.https||wcscmp(origin.host,L"127.0.0.1")||s->closed||!zwpw_context_is_active(context))) hr=E_ACCESSDENIED;
+    if (SUCCEEDED(hr)&&!uri) hr=E_POINTER;
     if (SUCCEEDED(hr)) hr=ICoreWebView2ServerCertificateErrorDetectedEventArgs_get_ServerCertificate(args,&certificate);
-    if (SUCCEEDED(hr)&&(!certificate||s->closed||!zwpw_context_is_active(context))) hr=E_ABORT;
+    if (SUCCEEDED(hr)&&(!certificate||s->closed)) hr=E_ABORT;
     if (SUCCEEDED(hr)) hr=ICoreWebView2Certificate_ToPemEncoding(certificate,&pem);
-    if (SUCCEEDED(hr)&&!s->closed&&zwpw_context_is_active(context)&&zwpw_context_certificate_matches(context,pem)) {
+    if (SUCCEEDED(hr)&&!pem) hr=E_POINTER;
+    if (SUCCEEDED(hr)&&context&&!s->closed&&zwpw_context_is_active(context)) {
+        NetOrigin origin;
         /* Seal never changes an already active session authority; cache hits
            may omit this callback. Navigation/request rights remain separate. */
+        allow=SUCCEEDED(net_origin(uri,FALSE,TRUE,&origin))&&origin.https&&!wcscmp(origin.host,L"127.0.0.1")&&zwpw_context_certificate_matches(context,pem);
+    }
+    if (SUCCEEDED(hr)&&!allow&&!s->closed&&s->certificate_offer) {
+        COREWEBVIEW2_WEB_ERROR_STATUS status=COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
+        (void)ICoreWebView2ServerCertificateErrorDetectedEventArgs_get_ErrorStatus(args,&status);
+        allow=s->certificate_offer(s->context,uri,(int32_t)status,pem)!=0&&!s->closed;
+    }
+    if (allow) {
         hr=ICoreWebView2ServerCertificateErrorDetectedEventArgs_put_Action(args,COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_ALWAYS_ALLOW);
         action_failed=FAILED(hr);
     }
     CoTaskMemFree(uri);CoTaskMemFree(pem);
     if (certificate) ICoreWebView2Certificate_Release(certificate);
-    if (action_failed&&!s->closed) owned_revoke(s,hr);
+    if (action_failed&&!s->closed&&context) owned_revoke(s,hr);
     release(s);return S_OK;
 }
 
@@ -573,7 +591,7 @@ static HRESULT STDMETHODCALLTYPE controller_invoke(ICoreWebView2CreateCoreWebVie
     State *s=((ControllerHandler *)p)->state;retain(s);
     ICoreWebView2 *view=NULL;
     ICoreWebView2_4 *view4=NULL;ICoreWebView2_22 *view22=NULL;
-    ICoreWebView2_10 *view10=NULL;ICoreWebView2_5 *view5=NULL;
+    ICoreWebView2_10 *view10=NULL;ICoreWebView2_5 *view5=NULL;ICoreWebView2_14 *view14=NULL;
     ICoreWebView2Settings *settings=NULL;ICoreWebView2Settings2 *settings2=NULL;
     BOOL controller_pin=FALSE;
     if (s->closed) { if (controller) ICoreWebView2Controller_Close(controller);goto done; }
@@ -601,6 +619,10 @@ static HRESULT STDMETHODCALLTYPE controller_invoke(ICoreWebView2CreateCoreWebVie
         QUERY_INTERFACE(ICoreWebView2_5,IID_ICoreWebView2_5,view5,webview5);
         REGISTER_HANDLER(AuthenticationHandler,ICoreWebView2_10,view10,add_BasicAuthenticationRequested,remove_BasicAuthenticationRequested,authentication_token,has_authentication);
         REGISTER_HANDLER(CertificateHandler,ICoreWebView2_5,view5,add_ClientCertificateRequested,remove_ClientCertificateRequested,certificate_token,has_certificate);
+        if (s->certificate_offer&&!s->tls_webview) {
+            QUERY_INTERFACE(ICoreWebView2_14,IID_ICoreWebView2_14,view14,tls_webview);
+            REGISTER_HANDLER(ServerCertificateHandler,ICoreWebView2_14,view14,add_ServerCertificateErrorDetected,remove_ServerCertificateErrorDetected,server_certificate_token,has_server_certificate);
+        }
     }
     QUERY_INTERFACE(ICoreWebView2_4,IID_ICoreWebView2_4,view4,webview4);
     QUERY_INTERFACE(ICoreWebView2_22,IID_ICoreWebView2_22,view22,webview22);
@@ -668,6 +690,7 @@ done:
     if (settings) ICoreWebView2Settings_Release(settings);
     if (view5) ICoreWebView2_5_Release(view5);
     if (view10) ICoreWebView2_10_Release(view10);
+    if (view14) ICoreWebView2_14_Release(view14);
     if (view22) ICoreWebView2_22_Release(view22);
     if (view4) ICoreWebView2_4_Release(view4);
     if (view) ICoreWebView2_Release(view);
@@ -931,9 +954,33 @@ static HRESULT STDMETHODCALLTYPE process_invoke(ICoreWebView2ProcessFailedEventH
     if (SUCCEEDED(ICoreWebView2ProcessFailedEventArgs_get_ProcessFailedKind(args, &kind)) && !s->closed) { file_controls_close(s);notify(s, 8, NULL, (HRESULT)kind); }
     release(s); return S_OK;
 }
+typedef struct AuthCall { ICoreWebView2BasicAuthenticationRequestedEventArgs *args; BOOL answered; } AuthCall;
+HRESULT zwv_auth_answer(void *call_pointer,const WCHAR *user,const WCHAR *password) {
+    AuthCall *call=call_pointer;
+    if (!call||call->answered||!user||!password) return E_INVALIDARG;
+    ICoreWebView2BasicAuthenticationResponse *response=NULL;
+    HRESULT hr=ICoreWebView2BasicAuthenticationRequestedEventArgs_get_Response(call->args,&response);
+    if (SUCCEEDED(hr)&&!response) hr=E_POINTER;
+    if (SUCCEEDED(hr)) hr=ICoreWebView2BasicAuthenticationResponse_put_UserName(response,user);
+    if (SUCCEEDED(hr)) hr=ICoreWebView2BasicAuthenticationResponse_put_Password(response,password);
+    if (response) ICoreWebView2BasicAuthenticationResponse_Release(response);
+    if (SUCCEEDED(hr)) call->answered=TRUE;
+    return hr;
+}
+/* Every sign-in is answered: WebView2's own dialog never shows. Without the
+   app's credentials the request goes without, to the server's refusal. */
 static HRESULT STDMETHODCALLTYPE authentication_invoke(ICoreWebView2BasicAuthenticationRequestedEventHandler *p, ICoreWebView2 *sender, ICoreWebView2BasicAuthenticationRequestedEventArgs *args) {
-    (void)p; (void)sender;
-    ICoreWebView2BasicAuthenticationRequestedEventArgs_put_Cancel(args,TRUE); return S_OK;
+    (void)sender; State *s=((AuthenticationHandler *)p)->state; retain(s);
+    AuthCall call={args,FALSE};
+    if (!s->closed&&s->auth) {
+        WCHAR *uri=NULL,*challenge=NULL;
+        if (SUCCEEDED(ICoreWebView2BasicAuthenticationRequestedEventArgs_get_Uri(args,&uri))&&uri&&
+            SUCCEEDED(ICoreWebView2BasicAuthenticationRequestedEventArgs_get_Challenge(args,&challenge))&&challenge&&!s->closed)
+            s->auth(s->context,uri,challenge,&call);
+        CoTaskMemFree(uri);CoTaskMemFree(challenge);
+    }
+    if (!call.answered) ICoreWebView2BasicAuthenticationRequestedEventArgs_put_Cancel(args,TRUE);
+    release(s); return S_OK;
 }
 static HRESULT STDMETHODCALLTYPE certificate_invoke(ICoreWebView2ClientCertificateRequestedEventHandler *p, ICoreWebView2 *sender, ICoreWebView2ClientCertificateRequestedEventArgs *args) {
     (void)p; (void)sender;
@@ -1088,6 +1135,7 @@ State *zwv_create(HWND hwnd, const WCHAR *html, const WCHAR *profile, const WCHA
     if (!s->tool_limit || s->tool_limit>8 || !s->max_cookies || s->max_cookies>128 || !s->max_cookie_bytes || s->max_cookie_bytes>262144 || !s->max_capture_bytes || s->max_capture_bytes>16777216) { release(s); *out=E_INVALIDARG; return NULL; }
     if (s->zoom!=s->zoom || s->zoom<0.25 || s->zoom>5.0) { release(s); *out=E_INVALIDARG; return NULL; }
     if (settings && settings->user_agent) { s->user_agent=_wcsdup(settings->user_agent); if (!s->user_agent) { release(s); *out=E_OUTOFMEMORY; return NULL; } }
+    if (settings) { s->auth=settings->auth; s->certificate_offer=settings->certificate_offer; }
     if (settings && settings->facts) { s->facts_script=_wcsdup(settings->facts); if (!s->facts_script) { release(s); *out=E_OUTOFMEMORY; return NULL; } }
     *out=remote_init(&s->remote,remote);
     if (FAILED(*out)) { release(s); return NULL; }

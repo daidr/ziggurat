@@ -244,11 +244,19 @@ Windows 通过 [CreateUri/IUri](https://learn.microsoft.com/en-us/previous-versi
 
 常规远程只允许 HTTPS。开发用 HTTP 仅支持标准 127/8、`::1`、`localhost` 及 `.localhost` 名称，并需显式 `allow_insecure_loopback = true`；HTTPS loopback 也需该开关。它们仍须逐个列入精确 origin 表，端口没有隐式放行，也不自动获得 IPC 信任。不做 DNS 查询，因此不声称阻止域名解析变化或 DNS 重绑定；TLS 校验沿用 Runtime，不忽略证书错误。
 
-`credentials = .profile` 明确使用所选 profile 的浏览器 cookies、缓存和可能已有的认证状态，不提供匿名/无凭据保证。框架默认不注入密码或 token；显式 `request_credentials` 只按[独立请求凭据合同](request-credentials.md)注入本模块的 Bearer。URL 凭据仍拒绝，并取消 Runtime 发出的 Basic/代理认证和客户端证书选择请求，避免弹出认证选择窗口。使用应用独占 profile；不同信任域是否共用 profile 由应用决定。
+`credentials = .profile` 明确使用所选 profile 的浏览器 cookies、缓存和可能已有的认证状态，不提供匿名/无凭据保证。框架默认不注入密码或 token；显式 `request_credentials` 只按[独立请求凭据合同](request-credentials.md)注入本模块的 Bearer。URL 凭据仍拒绝，并取消 Runtime 发出的 Basic/代理认证（设置了 `Options.http_auth` 时改由它回答）和客户端证书选择请求，避免弹出认证选择窗口。使用应用独占 profile；不同信任域是否共用 profile 由应用决定。
 
 frame 文档导航、弹窗、下载、权限仍默认拒绝。资源入口额外限制 DOCUMENT 请求只能匹配正在加载的顶层地址，非文档资源必须有对应请求 grant。每个 `OriginGrant.methods` 默认仅 GET/HEAD；POST、PUT、PATCH、DELETE、OPTIONS 分别显式开启，不存在 allow-all。写请求的 body 由 Runtime 原样发送，框架不在 UI 读取它，也没有请求体大小/上传耗时预算。OPTIONS 和后续实际请求各自检查权限，不自动放行 CORS preflight。`WebResourceRequested` 的覆盖范围由 [Runtime 请求拦截 API](https://learn.microsoft.com/en-us/microsoft-edge/webview2/how-to/webresourcerequested) 决定：这不是整个浏览器的网络沙箱，不保证覆盖 WebSocket/WebRTC、DNS、Runtime 自身流量或全部缓存行为；严格网络隔离需由宿主另行部署。
 
 远程双向 IPC 都要求显式 `ipc` grant。接收还要求当前已提交的顶层 Source、controller 当前地址与保存来源一致；新文档 Starting 到 ContentLoading 之间不接收。`post`/`postFor` 向未信任或未提交的远程来源返回 `IpcOriginDenied`。授予某 origin IPC 就信任它的全部页面，路径不是权限边界；应用继续使用 session 和 PageId，不能把 origin 许可等同于业务授权。
+
+## HTTP 登录与证书错误
+
+`Options.http_auth` 回答远程页面及其加载内容遇到的 HTTP 认证质询（Basic、Digest、NTLM、Negotiate），质询可以来自服务器，也可以来自代理。处理器在 App 所有者线程上同步运行，加载会等它返回。`AuthChallenge` 包含 host、port、realm、小写 scheme，以及是否由代理提出。WebView2 不区分代理，所以 Windows 上 `proxy` 恒为 false，此时 host 就是代理的 host。处理器返回 `Credentials` 就用它登录；返回 null 表示不带凭据继续，页面会看到服务器的拒绝（401 或 407 页）。服务器拒绝凭据时会再次质询。引擎在本会话内按服务器和 realm 记住它接受的凭据，所以不会每个请求都询问一次。凭据只借用到处理器返回，原生层复制后，Zig 侧会清零密码缓冲区；长于 1024 字节或含 NUL 的凭据会被拒绝，并按不带凭据处理。没有处理器时，每个质询都会被取消，两端都不会显示引擎自己的登录框。客户端证书仍然一律取消。
+
+`Options.certificate_errors` 决定无法验证的服务器证书。`CertificateError` 包含正在加载的 URI、其中的 host、引擎给出的原因，以及 DER 编码的证书。处理器返回 true 时继续加载；没有处理器或返回 false 时，加载失败。只应放行预期的那张证书（比较 DER 或其哈希），不要按 host 一律放行，因为中间任何人都能出示一张证书。Windows 来自 `ICoreWebView2_14` 的 `ServerCertificateErrorDetected`，覆盖页面及其子资源，放行后在浏览器进程结束前对该 host 一直有效。Windows Profile owner 自己的回环证书仍按原规则放行，其余证书交给处理器。Linux 来自 `load-failed-with-tls-errors`，WebKitGTK 只报告主文档：子资源遇到这样的服务器会直接失败，不会询问。放行后调用 `webkit_web_context_allow_tls_certificate_for_host`，在 View 的 web context 结束前对该 host 有效，等失败的加载结束后重新导航到同一 URI（仍需该来源的导航授权）；同一页面连续重试最多三次。两项都只对远程页面生效。
+
+`smoke-webview-http-auth` 由 `tests/http_auth_host.py` 启动两个回环服务器：一个 HTTP 服务器按两个 realm 要求 Basic 认证，一个 HTTPS 服务器出示无人信任的公开测试证书。smoke 依次检查：用凭据登录并看到欢迎页；另一个 realm 返回 null，看到服务器的拒绝页；第一次拒绝证书时加载失败；第二次按 DER 放行后页面加载成功。Linux（WebKitGTK 2.52.6，xvfb）本地通过，Windows 在 CI 的 WebView2 任务中运行。
 
 ## 请求头与有界异步响应
 

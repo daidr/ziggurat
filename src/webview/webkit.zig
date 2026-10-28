@@ -19,6 +19,8 @@ pub const Options = extern struct {
     developer_tools: u32 = 0,
     facts: ?[*:0]const u8 = null,
     autoplay: u32 = 0,
+    auth: ?*const fn (*anyopaque, [*:0]const u8, u32, [*:0]const u8, u32, c_int, *anyopaque) callconv(.c) void = null,
+    certificate: ?*const fn (*anyopaque, [*:0]const u8, u32, [*]const u8, usize) callconv(.c) c_int = null,
 };
 pub const LocalResource = extern struct {
     path: [*]const u8,
