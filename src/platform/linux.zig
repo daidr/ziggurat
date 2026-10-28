@@ -76,6 +76,7 @@ extern fn zlg_window_opacity(*anyopaque, f64) void;
 extern fn zlg_window_ignore_pointer(*anyopaque, c_int) void;
 extern fn zlg_window_urgent(*anyopaque, c_int) void;
 extern fn zlg_window_skip_taskbar(*anyopaque, c_int) void;
+extern fn zlg_window_focus_on_map(*anyopaque, c_int) void;
 extern fn zlg_window_title(*anyopaque, [*:0]const u8) void;
 extern fn zlg_window_cursor(*anyopaque, ?[*:0]const u8) void;
 extern fn zlg_window_resize(*anyopaque, u32, u32) void;
@@ -120,6 +121,7 @@ pub fn create(record: *core.WindowRecord, options: core.WindowOptions) !void {
     const popup: c_int = if (options.popup) |role| 1 | @as(c_int, if (role.focusable) 2 else 0) | @as(c_int, if (role.topmost) 4 else 0) else 0;
     record.native.native = zlg_window_create_popup(record, event, title, options.width, options.height, options.min_width, options.min_height, if (record.owner_record) |owner| owner.native.native else null, @intFromBool(options.modal), @backingInt(options.decoration), @intFromBool(options.resizable), @intFromBool(options.text_input_mode == .keyboard_compose), @intFromBool(options.accessibility_host == .children), @intFromBool(options.native_pointer_clicks), popup, &code) orelse return if (code == 1) error.UnsupportedCapability else error.OutOfMemory;
     if (options.text_input_mode != .system) record.publishTextInputMode(options.text_input_mode);
+    if (!options.focus_on_show) zlg_window_focus_on_map(record.native.native.?, 0);
 }
 pub fn show(record: *core.WindowRecord) void {
     zlg_window_action(record.native.native.?, 0);

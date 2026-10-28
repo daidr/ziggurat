@@ -21,6 +21,7 @@ const md_view = @import("ziggurat_markdown_view");
 pub const strings = @import("strings.zig");
 pub const prefs = @import("prefs.zig");
 pub const FeedBackend = @import("feed_backend.zig").FeedBackend;
+pub const UpdateSource = @import("feed_backend.zig").Source;
 pub const WakeScheduler = @import("wake_scheduler.zig").WakeScheduler;
 pub const Strings = strings.Strings;
 pub const Language = strings.Language;
@@ -145,6 +146,7 @@ pub const Updater = struct {
     /// Epoch seconds of the last failed automatic check; 0 after a success.
     failed_at: i64 = 0,
     launch_checked: bool = false,
+    offer_prereleases: bool = false,
 
     screen: Screen = .idle,
     /// The user asked for this session: the window shows from the start.
@@ -236,6 +238,18 @@ pub const Updater = struct {
         self.store(next);
     }
     /// Epoch seconds of the last successful check, or 0.
+    /// Offer prereleases too, such as a beta, to a user who chose them; the
+    /// next check takes them. Turning it off installs no older version:
+    /// the app updates again once a release is newer than the one it runs.
+    /// The choice lasts while the app runs; the app keeps it, such as in its
+    /// settings, and sets it at launch.
+    pub fn setPrereleases(self: *Updater, on: bool) void {
+        self.offer_prereleases = on;
+    }
+    pub fn prereleases(self: *const Updater) bool {
+        return self.offer_prereleases;
+    }
+
     pub fn lastCheck(self: *const Updater) i64 {
         return self.prefs.last_check;
     }
@@ -532,6 +546,9 @@ pub const Updater = struct {
             .width = size.width,
             .height = size.height,
             .resizable = false,
+            // As Sparkle shows its alert: a check in the background takes
+            // the keyboard from no other app.
+            .focus_on_show = self.user or self.app.isActive(),
             .on_closed = .{ .context = self, .notify = closed },
         });
         self.host.attach(window) catch |err| {
@@ -647,7 +664,7 @@ pub const Updater = struct {
         const t = &self.text;
         try v.text(shown.title, .{});
         if (shown.message.len != 0) try wrapped(v, shown.message, width, .{});
-        if (shown.detail.len != 0) try v.text(shown.detail, .{ .color = 0x7b8794 });
+        if (shown.detail.len != 0) try wrapped(v, shown.detail, width, .{ .color = 0x7b8794 });
         if (shown.bar) |fraction| try v.progress(fraction, .{ .self_align = .stretch, .name = shown.title });
         if (self.screen == .available) {
             if (self.notes_len != 0) {

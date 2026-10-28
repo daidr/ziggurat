@@ -480,3 +480,85 @@ test "the feed backend checks a signed feed and installs into the managed root" 
     try waitDone(&current, f.app);
     try equal(u.Screen.up_to_date, f.updater.screen);
 }
+
+/// An app's own update source, serving a feed and files from memory.
+const MemorySource = struct {
+    feed: []const u8,
+    files: []const u8,
+    asked_prereleases: ?bool = null,
+    opens: usize = 0,
+    reader: std.Io.Reader = undefined,
+
+    fn source(self: *MemorySource) u.UpdateSource {
+        return .{ .context = self, .feed = readFeed, .files = .{ .context = self, .open = open, .close = close } };
+    }
+    fn readFeed(ptr: *anyopaque, allocator: std.mem.Allocator, prereleases: bool) anyerror![]u8 {
+        const self: *MemorySource = @ptrCast(@alignCast(ptr));
+        self.asked_prereleases = prereleases;
+        return allocator.dupe(u8, self.feed);
+    }
+    fn open(ptr: *anyopaque, url: []const u8, offset: u64) anyerror!update.download.Body {
+        const self: *MemorySource = @ptrCast(@alignCast(ptr));
+        if (!std.mem.startsWith(u8, url, "https://account.example.invalid/")) return error.UnknownFile;
+        self.opens += 1;
+        self.reader = .fixed(self.files[@intCast(offset)..]);
+        return .{ .reader = &self.reader, .offset = offset };
+    }
+    fn close(_: *anyopaque) void {}
+};
+
+test "the feed backend reads the app's own source, and prereleases only when offered" {
+    const allocator = std.testing.allocator;
+    var temp = std.testing.tmpDir(.{ .iterate = true });
+    defer temp.cleanup();
+    const identity = "org.ziggurat.UpdaterTest";
+    const target = "linux-x86_64";
+    const key = try update.Ed25519.KeyPair.generateDeterministic(@splat(22));
+    const beta: update.Version = .{ .major = 1, .minor = 2, .patch = 0, .revision = 1 };
+    const zip = try update.archive.buildPackage(allocator, .{ .name = "Notes", .identity = identity, .target = target, .version = beta, .executable = "notes" }, &.{.{ .name = "notes", .bytes = "beta build" }});
+    defer allocator.free(zip);
+    var manifest: update.Manifest = .{ .identity = identity, .target = target, .version = beta, .url = "https://account.example.invalid/notes-beta.zip", .bytes = zip.len, .sha256 = undefined, .signature = undefined };
+    std.crypto.hash.sha2.Sha256.hash(zip, &manifest.sha256, .{});
+    const signed_beta = try update.sign(allocator, manifest, key);
+    defer allocator.free(signed_beta);
+    manifest.version = .{ .major = 1, .minor = 1, .patch = 0 };
+    manifest.url = "https://account.example.invalid/notes.zip";
+    const signed_stable = try update.sign(allocator, manifest, key);
+    defer allocator.free(signed_stable);
+    const feed = try update.feed.buildWith(allocator, identity, &.{ signed_stable, signed_beta }, &.{}, .{ .prereleases = &.{beta} });
+    defer allocator.free(feed);
+    const base = try zio.realPathAlloc(temp.dir, ".", allocator);
+    defer allocator.free(base);
+    const install_root = try std.fs.path.join(allocator, &.{ base, "root" });
+    defer allocator.free(install_root);
+
+    var f: Fixture = undefined;
+    try f.init(options);
+    defer f.deinit();
+    var memory: MemorySource = .{ .feed = feed, .files = zip };
+    // The configured feed does not exist: everything comes from the source.
+    var backend = u.FeedBackend.init(allocator, f.app, .{ .feed = "missing-feed.json", .public_key = key.public_key.toBytes(), .identity = identity, .target = target, .current_version = .{ .major = 1, .minor = 0, .patch = 0 }, .install_root = install_root, .source = memory.source() });
+    defer backend.deinit();
+    f.updater.backend = backend.backend();
+    f.updater.checkForUpdates();
+    try waitDone(&backend, f.app);
+    try equal(@as(?bool, false), memory.asked_prereleases);
+    try strings("1.1.0.0", f.updater.releaseVersion());
+    try f.click("Remind Me Later");
+    try f.settle();
+
+    f.updater.setPrereleases(true);
+    try expect(f.updater.prereleases());
+    f.updater.checkForUpdates();
+    try waitDone(&backend, f.app);
+    try equal(@as(?bool, true), memory.asked_prereleases);
+    try strings("1.2.0.1", f.updater.releaseVersion());
+    try f.click("Install Update");
+    try waitDone(&backend, f.app);
+    try equal(u.Screen.ready, f.updater.screen);
+    try equal(@as(usize, 1), memory.opens);
+    var root = try std.Io.Dir.cwd().openDir(zio.io(), install_root, .{});
+    defer root.close(zio.io());
+    const published = try update.publication.readCurrent(allocator, root, identity, target);
+    try equal(beta, published.version);
+}

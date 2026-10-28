@@ -444,6 +444,9 @@ pub const WindowOptions = struct {
     /// unless left at its default.
     opacity: f32 = 1,
     skip_taskbar: bool = false,
+    /// False shows the window without taking the keyboard from the window
+    /// that has it, as a prompt raised by background work should.
+    focus_on_show: bool = true,
     /// Reserved client edge in DIP for .custom; .borderless has no auto edges.
     resize_border: f32 = 6,
     /// Borrowed context remains valid through on_closed, like close handlers.

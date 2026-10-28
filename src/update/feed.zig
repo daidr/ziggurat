@@ -14,6 +14,10 @@ pub const Wire = struct {
     /// Release notes by version, shown before installing. Unsigned, like the
     /// rest of the index: display text only, never acted on.
     notes: []const Note = &.{},
+    /// Versions published as prereleases, such as a beta: only clients
+    /// that offer prereleases (`Channel.prereleases`) take them. Unsigned,
+    /// like the rest of the index, which can always withhold a release.
+    prereleases: []const update.Version = &.{},
 };
 pub const Note = struct { version: update.Version, text: []const u8 };
 pub const max_notes_bytes = 64 * 1024;
@@ -33,6 +37,14 @@ pub const Available = struct {
     }
 };
 
+/// Which releases a check takes.
+pub const Channel = struct {
+    /// Prereleases too, for users who chose a beta. A client that turns it
+    /// off installs no older version: it updates again once a release is
+    /// newer than the prerelease it runs.
+    prereleases: bool = false,
+};
+
 pub const Check = union(enum) {
     current,
     available: Available,
@@ -50,6 +62,12 @@ pub const Check = union(enum) {
 /// target that fails verification fails the whole check rather than silently
 /// choosing an older release. Returned manifests own their storage.
 pub fn check(allocator: std.mem.Allocator, bytes: []const u8, policy: update.Policy, installed: ?Installed) !Check {
+    return checkChannel(allocator, bytes, policy, installed, .{});
+}
+
+/// `check` on a channel: without `prereleases`, the versions the feed lists
+/// as prereleases are passed over.
+pub fn checkChannel(allocator: std.mem.Allocator, bytes: []const u8, policy: update.Policy, installed: ?Installed, channel: Channel) !Check {
     if (bytes.len > max_feed_bytes) return error.FeedTooLarge;
     const parsed = std.json.parseFromSlice(Wire, allocator, bytes, .{ .allocate = .alloc_always, .duplicate_field_behavior = .@"error" }) catch |err| {
         if (err == error.OutOfMemory) return err;
@@ -63,6 +81,7 @@ pub fn check(allocator: std.mem.Allocator, bytes: []const u8, policy: update.Pol
     for (feed.releases, 0..) |entry, index| {
         if (!std.mem.eql(u8, entry.target, policy.target)) continue;
         if (entry.version.order(policy.current_version) != .gt) continue;
+        if (!channel.prereleases and listed(feed.prereleases, entry.version)) continue;
         if (best) |previous| switch (entry.version.order(feed.releases[previous].version)) {
             .gt => {},
             .eq => return error.DuplicateRelease,
@@ -100,6 +119,11 @@ pub fn check(allocator: std.mem.Allocator, bytes: []const u8, policy: update.Pol
     return .{ .available = .{ .full = full, .delta = selected } };
 }
 
+fn listed(versions: []const update.Version, version: update.Version) bool {
+    for (versions) |candidate| if (candidate.order(version) == .eq) return true;
+    return false;
+}
+
 fn reverify(comptime W: type, comptime V: type, allocator: std.mem.Allocator, entry: W, policy: update.Policy, extra: anytype) !V {
     // Round-trip the entry so the verified manifest owns independent storage.
     const json = try std.json.Stringify.valueAlloc(allocator, entry, .{ .emit_null_optional_fields = false });
@@ -132,6 +156,18 @@ pub fn build(allocator: std.mem.Allocator, identity: []const u8, releases: []con
 
 /// `build` with release notes by version.
 pub fn buildWithNotes(allocator: std.mem.Allocator, identity: []const u8, releases: []const []const u8, deltas: []const []const u8, notes: []const Note) ![]u8 {
+    return buildWith(allocator, identity, releases, deltas, .{ .notes = notes });
+}
+
+/// What a feed lists besides its manifests.
+pub const Extras = struct {
+    notes: []const Note = &.{},
+    prereleases: []const update.Version = &.{},
+};
+
+/// `build` with release notes and prereleases.
+pub fn buildWith(allocator: std.mem.Allocator, identity: []const u8, releases: []const []const u8, deltas: []const []const u8, extras: Extras) ![]u8 {
+    const notes = extras.notes;
     for (notes) |note| if (note.text.len > max_notes_bytes or !std.unicode.utf8ValidateSlice(note.text)) return error.InvalidNotes;
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
@@ -146,7 +182,7 @@ pub fn buildWithNotes(allocator: std.mem.Allocator, identity: []const u8, releas
         out.* = std.json.parseFromSliceLeaky(delta.Wire, scratch, text, .{ .duplicate_field_behavior = .@"error" }) catch return error.InvalidManifest;
         if (!std.mem.eql(u8, out.identity, identity)) return error.WrongIdentity;
     }
-    return std.json.Stringify.valueAlloc(allocator, Wire{ .format = 1, .identity = identity, .releases = full, .deltas = patches, .notes = notes }, .{ .whitespace = .indent_2, .emit_null_optional_fields = false });
+    return std.json.Stringify.valueAlloc(allocator, Wire{ .format = 1, .identity = identity, .releases = full, .deltas = patches, .notes = notes, .prereleases = extras.prereleases }, .{ .whitespace = .indent_2, .emit_null_optional_fields = false });
 }
 
 test "feed selects the newest verified release and a matching delta" {
@@ -220,6 +256,30 @@ test "feeds carry release notes by version" {
     defer result.deinit();
     try std.testing.expectEqual(v2, result.available.full.manifest.version);
     try std.testing.expectError(error.InvalidNotes, buildWithNotes(allocator, identity, &.{full}, &.{}, &.{.{ .version = v2, .text = "\xff" }}));
+}
+
+test "prereleases go only to clients that offer them, and never downgrade" {
+    const allocator = std.testing.allocator;
+    const key = try update.Ed25519.KeyPair.generateDeterministic(@splat(14));
+    const identity = "org.ziggurat.Feed";
+    const v2: update.Version = .{ .major = 2, .minor = 0, .patch = 0 };
+    const beta: update.Version = .{ .major = 2, .minor = 1, .patch = 0, .revision = 1 };
+    const stable = try update.sign(allocator, .{ .identity = identity, .target = "linux-x86_64", .version = v2, .url = "https://example.invalid/a.zip", .bytes = 5, .sha256 = @splat(3), .signature = undefined }, key);
+    defer allocator.free(stable);
+    const pre = try update.sign(allocator, .{ .identity = identity, .target = "linux-x86_64", .version = beta, .url = "https://example.invalid/b.zip", .bytes = 6, .sha256 = @splat(4), .signature = undefined }, key);
+    defer allocator.free(pre);
+    const json = try buildWith(allocator, identity, &.{ stable, pre }, &.{}, .{ .prereleases = &.{beta} });
+    defer allocator.free(json);
+    var policy: update.Policy = .{ .identity = identity, .target = "linux-x86_64", .current_version = .{ .major = 1, .minor = 0, .patch = 0 }, .public_key = key.public_key.toBytes() };
+    const plain = try check(allocator, json, policy, null);
+    defer plain.deinit();
+    try std.testing.expectEqual(v2, plain.available.full.manifest.version);
+    const offered = try checkChannel(allocator, json, policy, null, .{ .prereleases = true });
+    defer offered.deinit();
+    try std.testing.expectEqual(beta, offered.available.full.manifest.version);
+    // On the beta with prereleases turned off: nothing older is offered.
+    policy.current_version = beta;
+    try std.testing.expect((try check(allocator, json, policy, null)) == .current);
 }
 
 test "feed check frees all allocations at every failure" {

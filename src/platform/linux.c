@@ -1088,6 +1088,7 @@ void zlg_window_ignore_pointer(NativeWindow *s, int enabled) {
     release(s);
 }
 void zlg_window_urgent(NativeWindow *s, int enabled) { retain(s);gtk_window_set_urgency_hint(GTK_WINDOW(s->window),enabled);release(s); }
+void zlg_window_focus_on_map(NativeWindow *s, int enabled) { retain(s);gtk_window_set_focus_on_map(GTK_WINDOW(s->window),enabled);release(s); }
 void zlg_window_skip_taskbar(NativeWindow *s, int enabled) { retain(s);gtk_window_set_skip_taskbar_hint(GTK_WINDOW(s->window),enabled);release(s); }
 void zlg_window_title(NativeWindow *s, const char *title) { retain(s);gtk_window_set_title(GTK_WINDOW(s->window),title);release(s); }
 /* NULL name restores the default arrow. A resize edge of a custom frame
