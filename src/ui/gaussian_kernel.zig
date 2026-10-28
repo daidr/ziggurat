@@ -159,10 +159,10 @@ test "live Gaussian Q24 kernels normalize exactly and preserve symmetry without 
 test "live Gaussian two passes use transparent extension and the independent byte oracle" {
     const kernel = try Kernel.prepare(.{ .sigma = 0.75 });
     const size = 7;
-    var pixels = [_]u32{0} ** (size * size);
+    var pixels = @as([size * size]u32, @splat(0));
     pixels[3 * size + 3] = 0x80402010;
-    var scratch = [_]u32{0} ** (size * size);
-    var output = [_]u32{0} ** (size * size);
+    var scratch = @as([size * size]u32, @splat(0));
+    var output = @as([size * size]u32, @splat(0));
     var visits: u64 = 0;
     try apply(&kernel, .{ .pixels = &pixels, .width = size, .height = size, .stride = size }, .{ .pixels = &scratch, .width = size, .height = size, .stride = size }, .{ .pixels = &output, .width = size, .height = size, .stride = size }, 686, null, &visits);
     try std.testing.expectEqual(@as(u64, 686), visits);
@@ -185,9 +185,9 @@ test "live Gaussian two passes use transparent extension and the independent byt
 
 test "live Gaussian rejects budget and aliases before writes and identity needs no scratch" {
     const kernel = try Kernel.prepare(.{ .sigma = 0.25 });
-    var source = [_]u32{0xffabcdef} ** 9;
-    var temporary = [_]u32{0} ** 9;
-    var output = [_]u32{0x12345678} ** 9;
+    var source = @as([9]u32, @splat(0xffabcdef));
+    var temporary = @as([9]u32, @splat(0));
+    var output = @as([9]u32, @splat(0x12345678));
     const first: Plane = .{ .pixels = &source, .width = 3, .height = 3, .stride = 3 };
     const middle: Plane = .{ .pixels = &temporary, .width = 3, .height = 3, .stride = 3 };
     const last: Plane = .{ .pixels = &output, .width = 3, .height = 3, .stride = 3 };
@@ -197,7 +197,7 @@ test "live Gaussian rejects budget and aliases before writes and identity needs 
     var cancelled: std.atomic.Value(bool) = .init(true);
     try std.testing.expectError(error.Cancelled, apply(&kernel, first, middle, last, 54, &cancelled, &visits));
     try std.testing.expectEqual(@as(u64, 0), visits);
-    try std.testing.expectEqualSlices(u32, &([_]u32{0x12345678} ** 9), &output);
+    try std.testing.expectEqualSlices(u32, &(@as([9]u32, @splat(0x12345678))), &output);
     const identity = try Kernel.prepare(.{ .sigma = 0 });
     try apply(&identity, first, .{ .pixels = &.{}, .width = 0, .height = 0, .stride = 0 }, last, 0, null, &visits);
     try std.testing.expectEqualSlices(u32, &source, &output);
@@ -207,9 +207,9 @@ test "live Gaussian rejects budget and aliases before writes and identity needs 
 
 test "live Gaussian rounds only after a full sum and bounds maximum byte accumulation" {
     const kernel = try Kernel.prepare(.{ .sigma = 1 });
-    var source = [_]u32{0xffffffff} ** 49;
-    var scratch = [_]u32{0} ** 49;
-    var output = [_]u32{0} ** 49;
+    var source = @as([49]u32, @splat(0xffffffff));
+    var scratch = @as([49]u32, @splat(0));
+    var output = @as([49]u32, @splat(0));
     var visits: u64 = 0;
     try apply(&kernel, .{ .pixels = &source, .width = 7, .height = 7, .stride = 7 }, .{ .pixels = &scratch, .width = 7, .height = 7, .stride = 7 }, .{ .pixels = &output, .width = 7, .height = 7, .stride = 7 }, 686, null, &visits);
     try std.testing.expectEqual(@as(u32, 0xffffffff), output[24]);

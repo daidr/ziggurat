@@ -11,6 +11,7 @@
 //! and their `View` and `Frame`, so a value whose type it cannot see, such
 //! as one inferred from a call, is not checked.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const Ast = std.zig.Ast;
 
 pub const Diagnostic = struct {
@@ -37,7 +38,7 @@ const Names = struct {
 
 /// Diagnostics of one file, in source order. Their messages are static.
 pub fn analyze(allocator: std.mem.Allocator, source: [:0]const u8) ![]Diagnostic {
-    var tree = try Ast.parse(allocator, source, .zig);
+    var tree = try Ast.parse(allocator, source, .{ .mode = .zig });
     defer tree.deinit(allocator);
     if (tree.errors.len > 0) return error.ParseFailed;
     var names: Names = .{};
@@ -58,12 +59,12 @@ pub fn analyze(allocator: std.mem.Allocator, source: [:0]const u8) ![]Diagnostic
     // Fields of every container, and container-level variables.
     try checkContainer(allocator, &tree, &names, tree.rootDecls(), &out);
     for (0..tree.nodes.len) |i| {
-        const node: Ast.Node.Index = @enumFromInt(i);
+        const node: Ast.Node.Index = @fromBackingInt(@intCast(i));
         if (tree.fullContainerDecl(&buffer, node)) |container| try checkContainer(allocator, &tree, &names, container.ast.members, &out);
     }
     // Thread arguments, function by function.
     for (0..tree.nodes.len) |i| {
-        const node: Ast.Node.Index = @enumFromInt(i);
+        const node: Ast.Node.Index = @fromBackingInt(@intCast(i));
         if (tree.nodeTag(node) != .fn_decl) continue;
         try checkFunction(allocator, &tree, &names, node, &out);
     }
@@ -78,7 +79,7 @@ pub fn analyze(allocator: std.mem.Allocator, source: [:0]const u8) ![]Diagnostic
 fn collectNames(allocator: std.mem.Allocator, tree: *const Ast, names: *Names) !void {
     // Two rounds: aliases of types may come before the import they use.
     for (0..2) |_| for (0..tree.nodes.len) |i| {
-        const node: Ast.Node.Index = @enumFromInt(i);
+        const node: Ast.Node.Index = @fromBackingInt(@intCast(i));
         const decl = tree.fullVarDecl(node) orelse continue;
         const init = decl.ast.init_node.unwrap() orelse continue;
         const name = tree.tokenSlice(decl.ast.mut_token + 1);
@@ -171,7 +172,7 @@ fn checkFunction(allocator: std.mem.Allocator, tree: *const Ast, names: *const N
         if (transient(tree, names, type_node)) try locals.append(allocator, tree.tokenSlice(name));
     }
     for (0..tree.nodes.len) |i| {
-        const child: Ast.Node.Index = @enumFromInt(i);
+        const child: Ast.Node.Index = @fromBackingInt(@intCast(i));
         const first = tree.firstToken(child);
         if (first < body_first or first > body_last) continue;
         const decl = tree.fullVarDecl(child) orelse continue;
@@ -180,7 +181,7 @@ fn checkFunction(allocator: std.mem.Allocator, tree: *const Ast, names: *const N
     }
     if (locals.items.len == 0) return;
     for (0..tree.nodes.len) |i| {
-        const child: Ast.Node.Index = @enumFromInt(i);
+        const child: Ast.Node.Index = @fromBackingInt(@intCast(i));
         const first = tree.firstToken(child);
         if (first < body_first or first > body_last) continue;
         var call_buffer: [1]Ast.Node.Index = undefined;

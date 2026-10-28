@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
@@ -6,11 +7,7 @@ const t = @import("ziggurat_text_layout");
 const d = @import("ziggurat_document");
 const editing = @import("ziggurat_document_editor");
 const code = @import("ziggurat_code_editor");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn zlg_test_paint(*anyopaque, u32, u32) void;
 extern fn zlg_test_commit(*anyopaque, [*:0]const u8) void;
 extern fn zlg_resource_count() u32;
@@ -493,7 +490,7 @@ fn completionSnippets(allocator: std.mem.Allocator) !void {
     try expectText(document, "import;\na猫=猫;red; tail!");
     try std.testing.expectError(error.ClientsAlive, state.presenter.snippet_template.?.close());
     try state.presenter.prepare(bounds, state.parameters);
-    try std.testing.expect(broker.stored[@intFromEnum(code.Kind.completion)] == null);
+    try std.testing.expect(broker.stored[@backingInt(code.Kind.completion)] == null);
     failing.fail_index = failing.alloc_index;
     try state.paint();
     failing.fail_index = std.math.maxInt(usize);
@@ -779,7 +776,7 @@ fn nestedCompletion(allocator: std.mem.Allocator, mode: @FieldType(ResolverHook,
         try std.testing.expectError(error.ClientsAlive, state.presenter.snippet_session.?.close());
         try std.testing.expectError(error.ClientsAlive, state.presenter.snippet_template.?.close());
         try state.presenter.prepare(bounds, state.parameters);
-        try std.testing.expect(broker.stored[@intFromEnum(code.Kind.completion)] == null);
+        try std.testing.expect(broker.stored[@backingInt(code.Kind.completion)] == null);
         try state.paint();
         try state.key(0x09, 0xff09);
         try state.commitByte('x');
@@ -873,7 +870,7 @@ fn transformedCompletion(allocator: std.mem.Allocator) !void {
     try std.testing.expect(accepted.snippet_active and !accepted.stale_after_commit);
     try expectText(document, "import;\naCAT ab ab ab x tail!");
     try state.presenter.prepare(bounds, state.parameters);
-    try std.testing.expect(broker.stored[@intFromEnum(code.Kind.completion)] == null);
+    try std.testing.expect(broker.stored[@backingInt(code.Kind.completion)] == null);
     try std.testing.expectError(error.ClientsAlive, state.presenter.snippet_template.?.close());
     try state.paint();
     const revision = try document.version();
@@ -941,10 +938,10 @@ fn isolatedWindows() !void {
     var exit_code: c.DWORD = 0;
     if (c.GetExitCodeProcess(process.hProcess, &exit_code) == 0 or exit_code != 0) return error.TestProcessFailed;
 }
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     if (builtin.os.tag == .windows) {
-        const args = try std.process.argsAlloc(std.heap.page_allocator);
-        defer std.process.argsFree(std.heap.page_allocator, args);
+        const args = try zio.argsAlloc(std.heap.page_allocator, init.args);
+        defer zio.argsFree(std.heap.page_allocator, args);
         if (args.len == 1) return isolatedWindows();
         if (args.len != 2 or !std.mem.eql(u8, args[1], "--desktop-child")) return error.InvalidArgument;
     }

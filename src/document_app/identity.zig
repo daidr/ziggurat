@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 
 pub const max_path = 4096;
@@ -51,7 +52,8 @@ pub const Stamp = struct {
     size: u64,
     mtime_ns: i128,
     key: FileKey,
-    mode: std.fs.File.Mode = 0,
+    /// POSIX mode bits; 0 on Windows.
+    mode: u32 = 0,
     pub fn eql(self: Stamp, other: Stamp) bool {
         return self.size == other.size and self.mtime_ns == other.mtime_ns and self.key.device == other.key.device and self.key.inode == other.key.inode;
     }
@@ -83,23 +85,23 @@ const ByHandleFileInformation = extern struct {
 };
 extern "kernel32" fn GetFileInformationByHandle(file: std.os.windows.HANDLE, info: *ByHandleFileInformation) callconv(.winapi) std.os.windows.BOOL;
 
-pub fn fileKey(file: std.fs.File) !FileKey {
+pub fn fileKey(file: std.Io.File) !FileKey {
     switch (builtin.os.tag) {
         .windows => {
             var info: ByHandleFileInformation = undefined;
-            if (GetFileInformationByHandle(file.handle, &info) == 0) return error.Unexpected;
+            if (GetFileInformationByHandle(file.handle, &info) == .FALSE) return error.Unexpected;
             return .{ .device = info.volume_serial, .inode = (@as(u64, info.index_high) << 32) | info.index_low };
         },
         .linux, .macos, .freebsd, .netbsd, .openbsd => {
-            const st = try std.posix.fstat(file.handle);
+            const st = try zio.posix.fstat(file.handle);
             return .{ .device = @intCast(st.dev), .inode = @intCast(st.ino) };
         },
         else => return .{},
     }
 }
 
-pub fn stamp(file: std.fs.File) !Stamp {
-    const st = try file.stat();
+pub fn stamp(file: std.Io.File) !Stamp {
+    const st = try file.stat(zio.io());
     if (st.kind != .file) return error.NotAFile;
-    return .{ .size = st.size, .mtime_ns = st.mtime, .key = try fileKey(file), .mode = st.mode };
+    return .{ .size = st.size, .mtime_ns = st.mtime.nanoseconds, .key = try fileKey(file), .mode = zio.modeOf(st.permissions) };
 }

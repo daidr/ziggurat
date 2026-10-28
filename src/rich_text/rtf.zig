@@ -14,7 +14,7 @@ pub fn parse(allocator: Allocator, data: []const u8) !Text {
     var arena_state: std.heap.ArenaAllocator = .init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    var r: Reader = .{ .arena = arena, .s = std.mem.trimRight(u8, data, "\x00") };
+    var r: Reader = .{ .arena = arena, .s = std.mem.trimEnd(u8, data, "\x00") };
     try r.read();
     try r.endParagraph(false);
     var paras = r.paras.items;

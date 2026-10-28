@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
@@ -6,11 +7,7 @@ const vector = @import("ziggurat_vector");
 const drawing = ui.drawing;
 const brushes = ui.commands.brushes;
 const reference = @import("gradient_interpolation_oracle.zig");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn cairo_image_surface_create(c_int, c_int, c_int) ?*anyopaque;
 extern fn cairo_create(*anyopaque) ?*anyopaque;
 extern fn cairo_destroy(*anyopaque) void;
@@ -119,7 +116,7 @@ fn expected(palette: *const reference.Palette, kind: usize, size: z.Size, place:
 }
 fn verify(pixels: []const u32, masks: []const f64, size: z.Size, place: Placement, space: brushes.InterpolationSpace, kind: usize, index: usize, hard: bool, label: []const u8) !void {
     const palette_stops: []const brushes.Stop = if (hard) &hard_stops else &stops;
-    const palette = reference.Palette.init(@intFromEnum(space), palette_stops);
+    const palette = reference.Palette.init(@backingInt(space), palette_stops);
     for (0..size.height) |y| for (0..size.width) |x| {
         const want = expected(&palette, kind, size, place, masks[y * size.width + x], x, y);
         const actual = pixels[y * size.width + x];
@@ -280,7 +277,7 @@ const Fallback = struct {
 };
 fn fallback(app: *z.App, mode: ui.RenderMode) !void {
     var lease = drawing.Lease.init(std.Thread.getCurrentId());
-    const raw = [_]u8{255} ** 16;
+    const raw = @as([16]u8, @splat(255));
     const window = try app.createWindow(.{ .width = width, .height = height });
     defer _ = window.destroy() catch unreachable;
     const size = try window.contentSize();
@@ -327,7 +324,7 @@ pub fn main() !void {
     var debug: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(debug.deinit() == .ok);
     const allocator = debug.allocator();
-    const selection: ?[]u8 = std.process.getEnvVarOwned(allocator, "ZIGGURAT_GRADIENT_COVERAGE_CASE") catch |err| switch (err) {
+    const selection: ?[]u8 = zio.getEnvVarOwned(allocator, "ZIGGURAT_GRADIENT_COVERAGE_CASE") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => null,
         else => return err,
     };

@@ -3,7 +3,7 @@
 Read `docs/architecture.md` and `docs/philosophy.md` before changing public APIs.
 
 - Keep project documentation, code, comments, examples and generated files self-contained. Do not introduce names, code, attribution or comparisons from external reference frameworks.
-- Target Zig 0.15.2 until a deliberate toolchain upgrade is tested.
+- Target Zig 0.17.0 until a deliberate toolchain upgrade is tested. Code reaches `std.Io` through the shared `ziggurat_io` module (`src/io`), which owns the process-wide `Io`.
 - Core owns lifecycle and window policy. Platform adapters translate native operations. UI and WebView remain separate dependency modules.
 - Require explicit allocation and stable ownership. No global application allocator, hidden worker pool, blocking UI waits or nested event loops.
 - `Window` is a value handle with an App, slot and generation. App must outlive every handle use. Reclaim closed native records after callback pins are released; reuse slots without reviving stale handles. Keep active and pending work independent of historical window count.

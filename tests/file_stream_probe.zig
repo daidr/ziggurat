@@ -1,12 +1,9 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const w = @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-});
+const w = @import("ziggurat_c_win32");
 extern fn zwv_probe_file_create(*anyopaque, u64, *?*anyopaque) i32;
 extern fn zwv_probe_respond(*anyopaque, *anyopaque, u64) i32;
 extern fn zwv_probe_marshal(*anyopaque, *?*anyopaque) i32;
@@ -40,9 +37,9 @@ const document =
 ;
 pub const Fixture = struct {
     allocator: std.mem.Allocator,
-    temporary: *std.testing.TmpDir,
+    temporary: *zio.TmpDir,
     profile: ?[]u8 = null,
-    file: ?std.fs.File = null,
+    file: ?std.Io.File = null,
     browser: ?*anyopaque = null,
     runtime_started: bool = false,
     cleanup: bool = false,
@@ -55,28 +52,28 @@ pub const Fixture = struct {
     }
     fn work(self: *Fixture) !void {
         if (!self.cleanup) {
-            try self.temporary.dir.makeDir("profile");
-            self.profile = try self.temporary.dir.realpathAlloc(self.allocator, "profile");
+            try self.temporary.dir.createDir(zio.io(), "profile", .default_dir);
+            self.profile = try zio.realPathAlloc(self.temporary.dir, "profile", self.allocator);
             {
-                const file = try self.temporary.dir.createFile("payload.bin", .{});
-                defer file.close();
+                const file = try self.temporary.dir.createFile(zio.io(), "payload.bin", .{});
+                defer file.close(zio.io());
                 var chunk: [65536]u8 = undefined;
                 var offset: usize = 0;
                 while (offset < file_size) {
                     for (&chunk, 0..) |*byte, i| byte.* = @intCast((offset + i) % 251);
-                    try file.writeAll(&chunk);
+                    try file.writeStreamingAll(zio.io(), &chunk);
                     offset += chunk.len;
                 }
             }
             // Reopen read-only before transfer so this experiment cannot mutate
             // the available content while the Runtime owns stream references.
-            const path = try self.temporary.dir.realpathAlloc(self.allocator, "payload.bin");
+            const path = try zio.realPathAlloc(self.temporary.dir, "payload.bin", self.allocator);
             defer self.allocator.free(path);
             const wide = try std.unicode.utf8ToUtf16LeAllocZ(self.allocator, path);
             defer self.allocator.free(wide);
             const handle = w.CreateFileW(wide.ptr, w.GENERIC_READ, w.FILE_SHARE_READ | w.FILE_SHARE_DELETE, null, w.OPEN_EXISTING, w.FILE_ATTRIBUTE_NORMAL, null);
             if (handle == w.INVALID_HANDLE_VALUE) return error.ReadOnlyOpenFailed;
-            self.file = .{ .handle = handle.? };
+            self.file = .{ .handle = handle.?, .flags = .{ .nonblocking = false } };
             var length: w.LARGE_INTEGER = undefined;
             if (w.GetFileSizeEx(handle, &length) == 0 or length.QuadPart != file_size) return error.PreparedLengthChanged;
             const writer = w.CreateFileW(wide.ptr, w.GENERIC_WRITE, w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE, null, w.OPEN_EXISTING, w.FILE_ATTRIBUTE_NORMAL, null);
@@ -88,11 +85,11 @@ pub const Fixture = struct {
         } else {
             var directory_closed = false;
             defer {
-                if (!directory_closed) self.temporary.dir.close();
-                self.temporary.parent_dir.close();
+                if (!directory_closed) self.temporary.dir.close(zio.io());
+                self.temporary.parent_dir.close(zio.io());
                 self.closed = true;
             }
-            if (self.file) |file| file.close();
+            if (self.file) |file| file.close(zio.io());
             self.file = null;
             if (self.runtime_started and self.browser == null) {
                 std.debug.print("private stream profile retained: {?s}\n", .{self.profile});
@@ -103,17 +100,17 @@ pub const Fixture = struct {
                 if (w.WaitForSingleObject(browser, 10_000) != w.WAIT_OBJECT_0) return error.BrowserShutdownUnconfirmed;
                 self.browser = null;
             }
-            self.temporary.dir.close();
+            self.temporary.dir.close(zio.io());
             directory_closed = true;
             // The closed directory token is not reused after deleting its root.
-            try self.temporary.parent_dir.deleteTree(&self.temporary.sub_path);
+            try self.temporary.parent_dir.deleteTree(zio.io(), &self.temporary.sub_path);
         }
     }
 };
 const Mta = struct {
     packet: *anyopaque,
     ready: *anyopaque,
-    gate: std.Thread.ResetEvent = .{},
+    gate: zio.ResetEvent = .{},
     entered: std.atomic.Value(i32) = .init(-1),
     finished: i32 = -1,
     thread_id: u32 = 0,
@@ -202,7 +199,7 @@ fn runCycle(cancel_while_read: bool) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    var temporary = std.testing.tmpDir(.{});
+    var temporary = zio.tmpDir(.{});
     var fixture: Fixture = .{ .allocator = allocator, .temporary = &temporary };
     defer {
         if (!fixture.closed) {

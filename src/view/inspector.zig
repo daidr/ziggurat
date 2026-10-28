@@ -18,6 +18,7 @@
 //! keeps the inspector, which holds the copy, at a stable address. Builds
 //! without it (release builds unless `-Dinspector=true`) leave it out.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const view = @import("root.zig");
@@ -393,8 +394,8 @@ pub const Inspector = struct {
             var names: [32]u8 = undefined;
             var digits: [24]u8 = undefined;
             const key_text = if (e.key) |value| std.fmt.bufPrint(&digits, "{d}", .{value}) catch "" else "";
-            if (std.ascii.indexOfIgnoreCase(tagName(e.kind, &names), q) != null or std.ascii.indexOfIgnoreCase(e.text, q) != null or
-                std.ascii.indexOfIgnoreCase(e.name, q) != null or std.ascii.indexOfIgnoreCase(key_text, q) != null)
+            if (std.ascii.findIgnoreCase(tagName(e.kind, &names), q) != null or std.ascii.findIgnoreCase(e.text, q) != null or
+                std.ascii.findIgnoreCase(e.name, q) != null or std.ascii.findIgnoreCase(key_text, q) != null)
             {
                 self.matches[self.match_count] = @intCast(index);
                 self.match_count += 1;
@@ -876,7 +877,7 @@ pub const Inspector = struct {
             return true;
         }
         for (l.tabs, 0..) |rect, i| if (contains(rect, point) and point.x < l.rtl.x) {
-            self.tab = @enumFromInt(i);
+            self.tab = @fromBackingInt(@intCast(i));
             return true;
         };
         if (self.tab != .elements) return true;
@@ -912,7 +913,7 @@ pub const Inspector = struct {
             return true;
         };
         for (l.side_tabs, 0..) |rect, i| if (contains(rect, point)) {
-            self.side = @enumFromInt(i);
+            self.side = @fromBackingInt(@intCast(i));
             self.side_scroll = 0;
             return true;
         };
@@ -1055,7 +1056,7 @@ pub const Inspector = struct {
             // right end.
             try target.pushClip(.{ .x = l.toolbar.x, .y = l.toolbar.y, .width = @max(0, l.rtl.x - l.toolbar.x), .height = l.toolbar.height });
             defer target.popClip() catch {};
-            for (labels, l.tabs, 0..) |text, rect, i| self.paintTab(target, rect, text, @intFromEnum(self.tab) == i);
+            for (labels, l.tabs, 0..) |text, rect, i| self.paintTab(target, rect, text, @backingInt(self.tab) == i);
         }
         const rtl = if (self.direction_override) |value| value == .rtl else false;
         self.paintTab(target, l.rtl, "RTL", rtl);
@@ -1196,7 +1197,7 @@ pub const Inspector = struct {
         target.roundedRect(bar, 0, ui.Color.rgb(p.toolbar));
         target.roundedRect(.{ .x = bar.x, .y = bar.y, .width = bar.width, .height = 1 }, 0, ui.Color.rgb(p.border));
         target.roundedRect(.{ .x = bar.x, .y = bar.y + bar.height - 1, .width = bar.width, .height = 1 }, 0, ui.Color.rgb(p.border));
-        for ([_][]const u8{ "Styles", "Computed", "Properties" }, l.side_tabs, 0..) |text, rect, i| self.paintTab(target, rect, text, @intFromEnum(self.side) == i);
+        for ([_][]const u8{ "Styles", "Computed", "Properties" }, l.side_tabs, 0..) |text, rect, i| self.paintTab(target, rect, text, @backingInt(self.side) == i);
         const side = l.side;
         try target.pushClip(side);
         defer target.popClip() catch {};
@@ -1903,10 +1904,12 @@ fn locateSource(trace: []const usize, out: []u8) []const u8 {
     return "";
 }
 fn lineAt(info: *std.debug.SelfInfo, address: usize, out: []u8) ?struct { file: []const u8, line: u64 } {
-    const module = info.getModuleForAddress(address) catch return null;
-    const symbol = module.getSymbolAtAddress(info.allocator, address) catch return null;
-    const location = symbol.source_location orelse return null;
-    defer info.allocator.free(location.file_name);
+    var scratch: [4096]u8 = undefined;
+    var fixed: std.heap.FixedBufferAllocator = .init(&scratch);
+    var symbols: std.ArrayList(std.debug.Symbol) = .empty;
+    info.getSymbols(zio.io(), fixed.allocator(), fixed.allocator(), address, false, &symbols) catch return null;
+    if (symbols.items.len == 0) return null;
+    const location = symbols.items[0].source_location orelse return null;
     if (location.file_name.len + 24 > out.len) return null;
     @memcpy(out[0..location.file_name.len], location.file_name);
     return .{ .file = out[0..location.file_name.len], .line = location.line };

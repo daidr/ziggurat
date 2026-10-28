@@ -3,6 +3,7 @@
 //! connection is used by one worker at a time; `interrupt` and `cancel` may
 //! come from the main thread.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 
 const Db = opaque {};
@@ -33,7 +34,7 @@ pub const default_names: []const []const u8 = switch (builtin.os.tag) {
 };
 
 pub const Library = struct {
-    lib: std.DynLib,
+    lib: zio.DynLib,
     open_v2: *const fn ([*:0]const u8, *?*Db, c_int, ?[*:0]const u8) callconv(.c) c_int,
     close_v2: *const fn (?*Db) callconv(.c) c_int,
     extended_result_codes: *const fn (*Db, c_int) callconv(.c) c_int,
@@ -68,20 +69,20 @@ pub const Library = struct {
 
     /// Loads `path`, or the first of `default_names` that loads.
     pub fn load(path: ?[]const u8) !Library {
-        if (path) |name| return bind(try std.DynLib.open(name));
+        if (path) |name| return bind(try zio.DynLib.open(name));
         for (default_names) |name| {
-            const lib = std.DynLib.open(name) catch continue;
+            const lib = zio.DynLib.open(name) catch continue;
             return bind(lib);
         }
         return error.LibraryNotFound;
     }
 
-    fn bind(opened: std.DynLib) !Library {
+    fn bind(opened: zio.DynLib) !Library {
         var lib = opened;
         errdefer lib.close();
         var self: Library = undefined;
         self.lib = lib;
-        inline for (@typeInfo(Library).@"struct".fields) |field| {
+        inline for (zio.fields(Library)) |field| {
             if (comptime std.mem.eql(u8, field.name, "lib")) continue;
             @field(self, field.name) = lib.lookup(field.type, "sqlite3_" ++ field.name) orelse return error.MissingSymbol;
         }
@@ -106,7 +107,7 @@ pub const Failure = struct {
 
     fn set(self: *Failure, code: c_int, comptime format: []const u8, args: anytype) void {
         self.code = code;
-        self.len = (std.fmt.bufPrint(&self.message, format, args) catch self.message[0..self.message.len]).len;
+        self.len = (std.fmt.bufPrint(&self.message, format, args) catch @as([]const u8, &self.message)).len;
     }
 };
 
@@ -238,7 +239,7 @@ pub const Connection = struct {
         if (self.isCanceled()) return 0;
         const waited: u64 = @as(u64, @intCast(count)) * 5;
         if (waited >= self.timeout_ms) return 0;
-        std.Thread.sleep(5 * std.time.ns_per_ms);
+        zio.sleep(5 * std.time.ns_per_ms);
         return 1;
     }
 

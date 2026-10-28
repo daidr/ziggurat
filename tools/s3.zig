@@ -3,6 +3,7 @@
 //! Version 4. Credentials come from AWS_ACCESS_KEY_ID,
 //! AWS_SECRET_ACCESS_KEY and AWS_SESSION_TOKEN and are never stored.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 
 pub const Bucket = struct {
     name: []const u8,
@@ -39,7 +40,7 @@ pub const Client = struct {
     path_style: bool,
     credentials: Credentials,
 
-    pub fn init(bucket: Bucket, credentials: Credentials, environment: *const std.process.EnvMap) Error!Client {
+    pub fn init(bucket: Bucket, credentials: Credentials, environment: *const std.process.Environ.Map) Error!Client {
         if (bucket.name.len == 0) return error.MissingBucket;
         if (credentials.access_key.len == 0 or credentials.secret_key.len == 0) return error.MissingCredentials;
         const region = bucket.region orelse environment.get("AWS_REGION") orelse environment.get("AWS_DEFAULT_REGION") orelse "us-east-1";
@@ -72,7 +73,7 @@ pub const Client = struct {
     }
 
     /// The bucket from the environment's credentials.
-    pub fn fromEnvironment(bucket: Bucket, environment: *const std.process.EnvMap) Error!Client {
+    pub fn fromEnvironment(bucket: Bucket, environment: *const std.process.Environ.Map) Error!Client {
         return init(bucket, .{
             .access_key = environment.get("AWS_ACCESS_KEY_ID") orelse "",
             .secret_key = environment.get("AWS_SECRET_ACCESS_KEY") orelse "",
@@ -133,7 +134,7 @@ pub fn put(allocator: std.mem.Allocator, http: *std.http.Client, client: *const 
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
     const payload_hash = std.fmt.bytesToHex(digest, .lower);
     var stamp_buffer: [16]u8 = undefined;
-    const stamp = timestamp(&stamp_buffer, std.time.timestamp());
+    const stamp = timestamp(&stamp_buffer, zio.timestamp());
     var headers: std.ArrayList(std.http.Header) = .empty;
     defer headers.deinit(allocator);
     try headers.append(allocator, .{ .name = "host", .value = place.host });
@@ -192,7 +193,7 @@ pub fn put(allocator: std.mem.Allocator, http: *std.http.Client, client: *const 
     // request's own body reader.
     const head = response.head;
     _ = request.reader.bodyReader(&transfer, head.transfer_encoding, head.content_length).streamRemaining(&sink) catch {};
-    reason.print("{d} {s}", .{ @intFromEnum(status), status.phrase() orelse "" }) catch {};
+    reason.print("{d} {s}", .{ @backingInt(status), status.phrase() orelse "" }) catch {};
     // S3 explains errors in XML.
     const xml = sink.buffered();
     if (element(xml, "Code")) |code| reason.print(": {s}: {s}", .{ code, element(xml, "Message") orelse "" }) catch {};
@@ -315,7 +316,7 @@ pub fn cacheControl(name: []const u8) ?[]const u8 {
 
 test "signature matches the published example" {
     // The GET example of the Signature Version 4 documentation for S3.
-    var environment = std.process.EnvMap.init(std.testing.allocator);
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
     defer environment.deinit();
     const client = try Client.init(.{ .name = "examplebucket" }, .{
         .access_key = "AKIAIOSFODNN7EXAMPLE",
@@ -334,7 +335,7 @@ test "signature matches the published example" {
 
 test "locations follow the bucket's style" {
     const allocator = std.testing.allocator;
-    var environment = std.process.EnvMap.init(allocator);
+    var environment = std.process.Environ.Map.init(allocator);
     defer environment.deinit();
     try environment.put("AWS_REGION", "eu-west-1");
     const credentials: Credentials = .{ .access_key = "a", .secret_key = "b" };
@@ -364,19 +365,19 @@ test "locations follow the bucket's style" {
 
 test "put sends a signed object and reports the service's error" {
     const allocator = std.testing.allocator;
-    const address = try std.net.Address.parseIp("127.0.0.1", 0);
-    var server = try address.listen(.{ .reuse_address = true });
-    defer server.deinit();
+    const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    var server = try address.listen(zio.io(), .{ .reuse_address = true });
+    defer server.deinit(zio.io());
     const Serve = struct {
-        fn run(listener: *std.net.Server, seen: *[2][256]u8) void {
+        fn run(listener: *std.Io.net.Server, seen: *[2][256]u8) void {
             for (0..2) |round| {
-                const connection = listener.accept() catch return;
-                defer connection.stream.close();
+                const connection = listener.accept(zio.io()) catch return;
+                defer connection.close(zio.io());
                 var read_buffer: [8192]u8 = undefined;
                 var write_buffer: [1024]u8 = undefined;
-                var reader = connection.stream.reader(&read_buffer);
-                var writer = connection.stream.writer(&write_buffer);
-                var http_server = std.http.Server.init(reader.interface(), &writer.interface);
+                var reader = connection.reader(zio.io(), &read_buffer);
+                var writer = connection.writer(zio.io(), &write_buffer);
+                var http_server = std.http.Server.init(&reader.interface, &writer.interface);
                 var request = http_server.receiveHead() catch return;
                 var line: std.Io.Writer = .fixed(&seen[round]);
                 line.print("{s} {s}", .{ @tagName(request.head.method), request.head.target }) catch {};
@@ -402,12 +403,12 @@ test "put sends a signed object and reports the service's error" {
     };
     var seen: [2][256]u8 = .{ @splat(0), @splat(0) };
     const thread = try std.Thread.spawn(.{}, Serve.run, .{ &server, &seen });
-    var environment = std.process.EnvMap.init(allocator);
+    var environment = std.process.Environ.Map.init(allocator);
     defer environment.deinit();
     var endpoint_buffer: [64]u8 = undefined;
-    const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "http://127.0.0.1:{d}", .{server.listen_address.getPort()});
+    const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "http://127.0.0.1:{d}", .{server.socket.address.getPort()});
     const client = try Client.init(.{ .name = "apps", .prefix = "tool", .endpoint = endpoint }, .{ .access_key = "key", .secret_key = "secret" }, &environment);
-    var http: std.http.Client = .{ .allocator = allocator };
+    var http: std.http.Client = .{ .allocator = allocator, .io = zio.io() };
     defer http.deinit();
     var reason_buffer: [256]u8 = undefined;
     var reason: std.Io.Writer = .fixed(&reason_buffer);

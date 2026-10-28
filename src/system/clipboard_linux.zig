@@ -62,7 +62,7 @@ pub fn close(owner: *api.Board, _: bool) void {
 fn items(storage: *[api.max_formats]Item, formats: []const api.Format, entries: ?[]const api.Entry) []const Item {
     for (formats, 0..) |item, index| {
         const data = if (entries) |values| values[index].data else "";
-        storage[index] = .{ .kind = @intFromEnum(item.kind), .name = item.name.ptr, .name_len = item.name.len, .data = data.ptr, .len = data.len };
+        storage[index] = .{ .kind = @backingInt(item.kind), .name = item.name.ptr, .name_len = item.name.len, .data = data.ptr, .len = data.len };
     }
     return storage[0..formats.len];
 }
@@ -84,7 +84,7 @@ pub fn revoke(owner: *api.Board) void {
 pub fn start(owner: *api.Board, request: *api.Request) !void {
     const formats = request.query == .formats;
     const item: api.Format = if (formats) .{ .kind = .text } else request.format();
-    request.native.read = zsc_read_start(owner.native.handle.?, request, @intFromBool(formats), @intFromEnum(item.kind), item.name.ptr, item.name.len) orelse return error.OutOfMemory;
+    request.native.read = zsc_read_start(owner.native.handle.?, request, @intFromBool(formats), @backingInt(item.kind), item.name.ptr, item.name.len) orelse return error.OutOfMemory;
 }
 pub fn cancel(_: *api.Board, request: *api.Request) void {
     if (request.native.read) |read| zsc_read_cancel(read);

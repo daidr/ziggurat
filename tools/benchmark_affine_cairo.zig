@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const sampler = @import("sampler");
 const Matrix = @typeInfo(@TypeOf(sampler.draw)).@"fn".params[2].type.?;
 const Surface = extern struct { pixels: [*]u32, width: u32, height: u32, stride: u32, scale: f32, clip: [4]f64, origin: [2]f64 };
@@ -33,7 +34,7 @@ fn usage() void {
     , .{});
 }
 fn options() !?Options {
-    var args = try std.process.argsWithAllocator(std.heap.page_allocator);
+    var args = try init.args.iterateAllocator(std.heap.page_allocator);
     defer args.deinit();
     _ = args.next();
     var result: Options = .{};
@@ -55,7 +56,7 @@ fn options() !?Options {
     }
     return result;
 }
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     const config = (options() catch |err| {
         usage();
         return err;
@@ -74,7 +75,7 @@ pub fn main() !void {
     const median = config.samples / 2;
     const p95 = (config.samples * 95 + 99) / 100 - 1;
     std.debug.print("samples={d} warmup={d} pilot={} display_latency=false\n", .{ config.samples, config.warmup, config.pilot });
-    var timer = try std.time.Timer.start();
+    var timer = try zio.Timer.start();
     for (sizes) |size| for (scales) |scale| for (cases) |case| for (depths) |depth| for ([_]u32{ 255, 128 }) |alpha| {
         if (config.matrix) |selected| if (case.name != selected) continue;
         const renderer = bench_create(size[0], size[1], scale) orelse return error.Create;

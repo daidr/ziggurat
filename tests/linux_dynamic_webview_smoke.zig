@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
@@ -25,8 +26,8 @@ const Probe = struct {
     window: z.Window = undefined,
     view: web.View = undefined,
     allocator: std.mem.Allocator,
-    semaphore: std.Thread.Semaphore = .{},
-    accepted: std.Thread.Semaphore = .{},
+    semaphore: zio.Semaphore = .{},
+    accepted: zio.Semaphore = .{},
     stop_worker: std.atomic.Value(bool) = .init(false),
     worker_error: ?anyerror = null,
     owned: ?web.resources.OwnedResponse = null,
@@ -139,18 +140,18 @@ const Probe = struct {
         const head = self.file_head;
         const truncate_source = self.truncate_source;
         const skip_pump = self.skip_pump;
-        var directory = std.testing.tmpDir(.{});
+        var directory = zio.tmpDir(.{});
         defer directory.cleanup();
-        const file = try directory.dir.createFile("private-response", .{ .read = true });
-        defer file.close();
+        const file = try directory.dir.createFile(zio.io(), "private-response", .{ .read = true });
+        defer file.close(zio.io());
         const block: [4096]u8 = @splat('a');
-        for (0..128) |_| try file.writeAll(&block);
-        try file.writeAll(block[0..37]);
-        const original_position = try file.getPos();
+        for (0..128) |_| try file.writeStreamingAll(zio.io(), &block);
+        try file.writeStreamingAll(zio.io(), block[0..37]);
+        const original_position = try zio.posix.position(file.handle);
         const reads = zwk_file_pread_count();
         var prepared = try web.OwnedFileResponse.preparePumped(self.allocator, self.app.owner, file, .{ .mime = "application/octet-stream" }, 1024 * 1024);
         defer prepared.pump.deinit();
-        if (truncate_source) try file.setEndPos(1);
+        if (truncate_source) try file.setLength(zio.io(), 1);
         self.file_response = prepared.response;
         self.app.post(.{ .context = self, .call = deliver }) catch |err| {
             self.file_response.?.deinit();
@@ -164,7 +165,7 @@ const Probe = struct {
         prepared.pump.pump() catch |err| {
             if (!(head and err == error.Cancelled) and !(truncate_source and err == error.FileSourceChanged)) return err;
         };
-        try std.testing.expectEqual(original_position, try file.getPos());
+        try std.testing.expectEqual(original_position, try zio.posix.position(file.handle));
         if (head) self.head_reads = zwk_file_pread_count() - reads;
     }
     fn deliver(ptr: *anyopaque) void {

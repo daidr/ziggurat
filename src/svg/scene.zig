@@ -355,7 +355,7 @@ fn factor(value: f64) !void {
 }
 fn validColor(color: Color) !void {
     try factor(color[3]);
-    for (0..3) |index| if (!std.math.isFinite(color[index]) or color[index] < 0 or color[index] > color[3]) return error.InvalidPremultipliedColor;
+    inline for (0..3) |index| if (!std.math.isFinite(color[index]) or color[index] < 0 or color[index] > color[3]) return error.InvalidPremultipliedColor;
 }
 fn unite(a: ?v.Bounds, b: ?v.Bounds) ?v.Bounds {
     const first = a orelse return b;
@@ -380,7 +380,8 @@ fn overlaps(bounds: ?v.Bounds, x: i32, y: i32, width: usize) bool {
     const top: f64 = @floatFromInt(y);
     return left < box.x + box.width and left + @as(f64, @floatFromInt(width)) > box.x and top < box.y + box.height and top + 1 > box.y;
 }
-fn maskFactor(mean: Color, mask: Mask) f64 {
+fn maskFactor(mean_vector: Color, mask: Mask) f64 {
+    const mean: [4]f64 = mean_vector;
     // The mask remains a continuous alpha image resolved at physical pixels.
     // Quantize its premultiplied image once before the existing mask formula.
     const alpha = @round(std.math.clamp(mean[3], 0, 1) * 255) / 255;

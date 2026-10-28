@@ -1,15 +1,10 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const access = ui.accessibility;
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("uiautomation.h");
-    @cInclude("oleauto.h");
-});
+const c = @import("ziggurat_c_win32");
 
 const Mode = enum { invoke, close, all };
 const position: c.LPARAM = 20 | (20 << 16);
@@ -270,10 +265,10 @@ fn parseMode(value: []const u8) !Mode {
     return std.meta.stringToEnum(Mode, value) orelse error.InvalidArgument;
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     if (builtin.os.tag != .windows or !ui.capabilities.accessibility) return error.UnsupportedCapability;
-    const args = try std.process.argsAlloc(std.heap.page_allocator);
-    defer std.process.argsFree(std.heap.page_allocator, args);
+    const args = try zio.argsAlloc(std.heap.page_allocator, init.args);
+    defer zio.argsFree(std.heap.page_allocator, args);
     if (args.len == 1) return isolatedWindows(.invoke);
     if (args.len == 2) return isolatedWindows(try parseMode(args[1]));
     if (args.len != 3 or !std.mem.eql(u8, args[1], "--desktop-child")) return error.InvalidArgument;

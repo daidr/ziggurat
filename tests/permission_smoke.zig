@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Fixture = @import("scheme_smoke.zig").Fixture;
@@ -26,7 +27,7 @@ const Case = struct {
             std.debug.print("permission phase={s} unexpected result={any}\n", .{ @tagName(self.phase), result });
             return self.state.fail(error.WrongPermissionTerminal);
         }
-        self.state.terminals[@intFromEnum(self.phase)] += 1;
+        self.state.terminals[@backingInt(self.phase)] += 1;
         self.state.advanceWhenReady();
     }
     fn worker(self: *Case) void {
@@ -123,7 +124,7 @@ const State = struct {
         self.case_count += 1;
         case.* = .{ .state = self, .phase = self.phase };
         case.id = responder.deferDecision(.{ .timeout_ms = if (self.phase == .timeout) 20 else 5000, .completion = .{ .context = case, .complete = Case.complete } }) catch |err| return self.fail(err);
-        self.offers[@intFromEnum(self.phase)] += 1;
+        self.offers[@backingInt(self.phase)] += 1;
         if (self.phase == .allowed or self.phase == .denied) {
             case.thread = std.Thread.spawn(.{}, Case.worker, .{case}) catch |err| return self.fail(err);
         } else if (self.phase == .navigate) {
@@ -161,7 +162,7 @@ const State = struct {
     }
     fn advanceWhenReady(self: *State) void {
         if (self.done or self.queued or self.failure != null or !self.loaded) return;
-        const index = @intFromEnum(self.phase);
+        const index = @backingInt(self.phase);
         if (self.phase == .closing) {
             if (!self.resource_pending or self.offers[index] != 1) return;
         } else if (!self.script_done or self.terminals[index] != self.offers[index]) return;
@@ -182,7 +183,7 @@ const State = struct {
             const old = self.cases[self.case_count - 1].id;
             std.testing.expectError(error.StalePermission, self.view.decidePermission(old, .allow_ephemeral)) catch |err| return self.fail(err);
         }
-        self.phase = @enumFromInt(@intFromEnum(self.phase) + 1);
+        self.phase = @fromBackingInt(@intCast(@backingInt(self.phase) + 1));
         self.loaded = false;
         self.script_done = false;
         self.next_started = false;
@@ -192,7 +193,7 @@ const State = struct {
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
-    var temporary = std.testing.tmpDir(.{});
+    var temporary = zio.tmpDir(.{});
     var fixture: Fixture = .{ .allocator = gpa.allocator(), .temporary = &temporary };
     defer {
         if (!fixture.closed) {

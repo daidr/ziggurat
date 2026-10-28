@@ -1,11 +1,7 @@
 const std = @import("std");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 const bounds = [_]ui.Rect{
     .{ .x = 0, .y = 0, .width = 100, .height = 40 },
     .{ .x = 120, .y = 0, .width = 100, .height = 40 },

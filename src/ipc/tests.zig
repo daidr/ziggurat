@@ -272,15 +272,18 @@ const ReenterAllocator = struct {
         self.fire();
         return allocator.rawAlloc(size, alignment, address);
     }
-    fn resize(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, size: usize, address: usize) bool {
+    // In-place growth depends on the backing allocator's history, which
+    // would make the call sequence differ between the counting run and the
+    // probes. Refusing it keeps every run on the same allocate-and-copy path.
+    fn resize(context: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
         const self: *@This() = @ptrCast(@alignCast(context));
         self.fire();
-        return allocator.rawResize(bytes, alignment, size, address);
+        return false;
     }
-    fn remap(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, size: usize, address: usize) ?[*]u8 {
+    fn remap(context: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
         const self: *@This() = @ptrCast(@alignCast(context));
         self.fire();
-        return allocator.rawRemap(bytes, alignment, size, address);
+        return null;
     }
     fn free(_: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, address: usize) void {
         allocator.rawFree(bytes, alignment, address);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 pub const drawing = @import("ziggurat_drawing_resources");
 pub const RoundedRect = struct { width: f32, height: f32, radius: f32 = 0 };
 pub const Kind = enum { outer, inset };
@@ -20,7 +21,7 @@ const kernel_bytes = max_kernel * @sizeOf(f64);
 pub const PreparedShadow = opaque {
     pub fn create(allocator: std.mem.Allocator, shape: RoundedRect, shadow: Shadow, options: PrepareOptions) !*PreparedShadow {
         try cancelled(options.cancellation);
-        var timer = std.time.Timer.start() catch null;
+        var timer = zio.Timer.start() catch null;
         const plan = try Plan.init(shape, shadow, options);
         const state = try allocator.create(State);
         errdefer allocator.destroy(state);

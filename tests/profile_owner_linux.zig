@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const profile = @import("profile");
 const storage = profile.storage;
@@ -28,11 +29,11 @@ const Fixture = struct {
 };
 fn rootPath(allocator: std.mem.Allocator, suffix: []const u8) ![:0]u8 {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
-    const base = std.posix.getenv("ZIGGURAT_PROFILE_TEST_ROOT") orelse return error.MissingProfileTestRoot;
+    const base = zio.getenv("ZIGGURAT_PROFILE_TEST_ROOT") orelse return error.MissingProfileTestRoot;
     // A newly named child preserves every previous run's diagnostic files.
-    const run = try std.fmt.allocPrint(allocator, "{s}/owner-{d}-{s}", .{ base, std.time.nanoTimestamp(), suffix });
+    const run = try std.fmt.allocPrint(allocator, "{s}/owner-{d}-{s}", .{ base, zio.nanoTimestamp(), suffix });
     defer allocator.free(run);
-    return allocator.dupeZ(u8, run);
+    return allocator.dupeSentinel(u8, run, 0);
 }
 fn initGtk() !void {
     if (test_profile_init_gtk() == 0) return error.NativeGtkInitializationFailed;

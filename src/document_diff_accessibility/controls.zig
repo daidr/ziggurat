@@ -108,7 +108,12 @@ pub const Controls = struct {
         self.valid = true;
     }
     pub fn draw(self: *Controls, frame: *ui.Frame) !void {
-        errdefer |err| frame.failure = frame.failure orelse err;
+        return self.drawBody(frame) catch |err| {
+            frame.failure = frame.failure orelse err;
+            return err;
+        };
+    }
+    fn drawBody(self: *Controls, frame: *ui.Frame) !void {
         if (!self.valid) return error.ControlsRequired;
         const bank = &self.banks[self.active];
         for (bank.nodes[0..bank.len], bank.bounds[0..bank.len], bank.enabled[0..bank.len]) |node, bounds, enabled| {

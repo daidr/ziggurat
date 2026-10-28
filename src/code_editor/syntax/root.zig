@@ -9,6 +9,7 @@
 //! caller buffers and never allocates; the incremental highlighter owns its
 //! line states through an explicit allocator.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 
 pub const lexer = @import("lexer.zig");
 pub const lexers = @import("lexers.zig");
@@ -62,7 +63,7 @@ pub const TokenKind = enum(u8) {
     deleted,
     invalid,
 };
-pub const token_kinds = @typeInfo(TokenKind).@"enum".fields.len;
+pub const token_kinds = zio.fields(TokenKind).len;
 
 /// A run of a line of one kind, from the end of the token before it, or the
 /// start of the line, to `end`, a byte offset in the line.

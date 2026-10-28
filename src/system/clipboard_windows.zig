@@ -1,11 +1,6 @@
 const std = @import("std");
 const api = @import("clipboard.zig");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("shellapi.h");
-});
+const c = @import("ziggurat_c_win32");
 
 pub const supported = true;
 /// A private message-only HWND per Board owns the clipboard, receives delayed

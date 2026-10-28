@@ -161,7 +161,7 @@ pub const LineStops = struct {
     }
     pub fn at(self: LineStops, index_value: usize) hit.Stop {
         const stop = self.raw(index_value);
-        return .{ .x = stop.rect.x, .position = stop.caret.byte_offset, .affinity = @intFromEnum(stop.caret.affinity) };
+        return .{ .x = stop.rect.x, .position = stop.caret.byte_offset, .affinity = @backingInt(stop.caret.affinity) };
     }
 };
 pub fn lineStops(entry: *const Entry, line: usize, has_previous: bool) LineStops {

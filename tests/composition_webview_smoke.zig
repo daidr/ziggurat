@@ -1,14 +1,11 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const ui = @import("ziggurat_ui");
 const Fixture = @import("scheme_smoke.zig").Fixture;
 const Watchdog = @import("watchdog.zig").Watchdog;
-const w = @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-});
+const w = @import("ziggurat_c_win32");
 
 const Case = struct {
     state: *State,
@@ -305,7 +302,7 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    var temporary = std.testing.tmpDir(.{});
+    var temporary = zio.tmpDir(.{});
     var fixture: Fixture = .{ .allocator = allocator, .temporary = &temporary };
     var worker = try std.Thread.spawn(.{}, Fixture.run, .{&fixture});
     worker.join();

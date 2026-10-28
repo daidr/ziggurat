@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 
 /// Includes the trailing NUL needed by native absolute-path consumers.
@@ -135,7 +136,7 @@ pub const Prepared = struct {
         errdefer closeHandles(fds);
         fds[0] = try privateRoot(absolute_root);
         fds[1] = try privateFile(fds[0], lock_name);
-        std.posix.flock(fds[1], std.posix.LOCK.EX | std.posix.LOCK.NB) catch |err| return if (err == error.WouldBlock) error.ProfileStorageInUse else err;
+        zio.posix.flock(fds[1], std.posix.LOCK.EX | std.posix.LOCK.NB) catch |err| return if (err == error.WouldBlock) error.ProfileStorageInUse else err;
         fds[2] = try privateDirectory(fds[0], "data");
         fds[3] = try privateDirectory(fds[0], "cache");
         fds[4] = try privateFile(fds[0], cookie_name);
@@ -269,38 +270,38 @@ fn closeHandles(fds: [5]c_int) void {
     var at = fds.len;
     while (at != 0) {
         at -= 1;
-        if (fds[at] >= 0) std.posix.close(fds[at]);
+        if (fds[at] >= 0) zio.posix.close(fds[at]);
     }
 }
 fn privateRoot(path: []const u8) !std.posix.fd_t {
-    var parent = try std.posix.open("/", .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0);
-    defer std.posix.close(parent);
+    var parent = try zio.posix.open("/", .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0);
+    defer zio.posix.close(parent);
     var parts = std.mem.splitScalar(u8, path[1..], '/');
     while (parts.next()) |part| {
         if (parts.peek() == null) return privateDirectory(parent, part);
-        const next = try std.posix.openat(parent, part, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, 0);
-        std.posix.close(parent);
+        const next = try zio.posix.openat(parent, part, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, 0);
+        zio.posix.close(parent);
         parent = next;
     }
     unreachable;
 }
 fn privateDirectory(parent: std.posix.fd_t, name: []const u8) !std.posix.fd_t {
-    std.posix.mkdirat(parent, name, 0o700) catch |err| if (err != error.PathAlreadyExists) return err;
-    const fd = try std.posix.openat(parent, name, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, 0);
-    errdefer std.posix.close(fd);
+    zio.posix.mkdirat(parent, name, 0o700) catch |err| if (err != error.PathAlreadyExists) return err;
+    const fd = try zio.posix.openat(parent, name, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, 0);
+    errdefer zio.posix.close(fd);
     try validatePrivate(fd, true);
     return fd;
 }
 fn privateFile(parent: std.posix.fd_t, name: []const u8) !std.posix.fd_t {
-    const fd = try std.posix.openat(parent, name, .{ .ACCMODE = .RDWR, .CREAT = true, .NOFOLLOW = true, .CLOEXEC = true, .NONBLOCK = true }, 0o600);
-    errdefer std.posix.close(fd);
+    const fd = try zio.posix.openat(parent, name, .{ .ACCMODE = .RDWR, .CREAT = true, .NOFOLLOW = true, .CLOEXEC = true, .NONBLOCK = true }, 0o600);
+    errdefer zio.posix.close(fd);
     try validatePrivate(fd, false);
     return fd;
 }
 fn validatePrivate(fd: std.posix.fd_t, directory: bool) !void {
-    const info = try std.posix.fstat(fd);
+    const info = try zio.posix.fstat(fd);
     if (if (directory) !std.posix.S.ISDIR(info.mode) else !std.posix.S.ISREG(info.mode)) return error.InvalidProfileStorageType;
-    if (info.uid != std.posix.geteuid()) return error.ForeignProfileStorageOwner;
+    if (info.uid != zio.posix.geteuid()) return error.ForeignProfileStorageOwner;
     const expected: std.posix.mode_t = if (directory) 0o700 else 0o600;
     if (info.mode & 0o7777 != expected) return error.InsecureProfileStoragePermissions;
     if (!directory and info.nlink != 1) return error.LinkedProfileStorageFile;
@@ -324,9 +325,9 @@ test "profile paths and exact metadata budget are validated without allocation" 
     try std.testing.expectError(error.AbsoluteProfilePathRequired, Prepared.requiredBytes("relative", .{}));
     try std.testing.expectError(error.EmbeddedNul, Prepared.requiredBytes("/private\x00x", .{}));
     try std.testing.expectError(error.InvalidUtf8, Prepared.requiredBytes("/private\xff", .{}));
-    try std.testing.expectError(error.ProfilePathTooLong, Prepared.requiredBytes("/" ++ "x" ** max_path_bytes, .{}));
-    _ = try Prepared.requiredBytes("/" ++ "x" ** (max_path_bytes - cookie_name.len - 3), .{});
-    try std.testing.expectError(error.ProfilePathTooLong, Prepared.requiredBytes("/" ++ "x" ** (max_path_bytes - cookie_name.len - 2), .{}));
+    try std.testing.expectError(error.ProfilePathTooLong, Prepared.requiredBytes("/" ++ &@as([max_path_bytes]u8, @splat('x')), .{}));
+    _ = try Prepared.requiredBytes("/" ++ &@as([max_path_bytes - cookie_name.len - 3]u8, @splat('x')), .{});
+    try std.testing.expectError(error.ProfilePathTooLong, Prepared.requiredBytes("/" ++ &@as([max_path_bytes - cookie_name.len - 2]u8, @splat('x')), .{}));
     try std.testing.expectError(error.InvalidProfileStorageLimits, Prepared.requiredBytes("/private", .{ .leases = 0 }));
     try std.testing.expectError(error.InvalidProfileStorageLimits, Prepared.requiredBytes("/private", .{ .leases = max_leases + 1 }));
 }

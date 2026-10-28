@@ -4,13 +4,7 @@ const ui = @import("ziggurat_ui");
 const access = ui.accessibility;
 const Watchdog = @import("watchdog.zig").Watchdog;
 extern fn zua_get_object(*anyopaque, usize, isize) isize;
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("uiautomation.h");
-    @cInclude("oleauto.h");
-});
+const c = @import("ziggurat_c_win32");
 const detach_message = c.WM_APP + 61;
 var subclass_state: ?*State = null;
 var original_proc: c.WNDPROC = null;

@@ -133,7 +133,7 @@ pub fn select(reader: anytype, point: Point) !Selection {
 pub const PacketReader = struct {
     packet: *const Packet,
     pub fn mode(self: PacketReader) Mode {
-        return @enumFromInt(self.packet.mode);
+        return @fromBackingInt(@intCast(self.packet.mode));
     }
     pub fn bounds(self: PacketReader) Rect {
         return self.packet.bounds;

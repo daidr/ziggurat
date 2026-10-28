@@ -5,11 +5,7 @@ const ui = @import("ziggurat_ui");
 const t = @import("ziggurat_text_layout");
 const d = @import("ziggurat_document");
 const editing = @import("ziggurat_document_editor");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn zlg_test_paint(*anyopaque, u32, u32) void;
 extern fn zlg_resource_count() u32;
 extern fn gtk_widget_get_scale_factor(*anyopaque) c_int;
@@ -48,7 +44,7 @@ const Host = struct {
         try self.adapter.draw(frame, bounds, .{});
         var seen_text = false;
         var seen: usize = 0;
-        var colored = [_]bool{false} ** 4;
+        var colored = @as([4]bool, @splat(false));
         var text_draws: usize = 0;
         for (frame.context.command_buffer.commands()) |command| switch (command) {
             .fill => |fill| {
@@ -291,12 +287,12 @@ fn failures(allocator: std.mem.Allocator, engine: *t.Engine) !void {
     try std.testing.expectError(error.RectangleCapacityExceeded, no_rects.prepare(bounds, .{}));
     const constrained = try editing.Adapter.create(allocator, document, engine, .{ .bytes = construction_peak });
     defer constrained.close() catch unreachable;
-    const many = [_]editing.RangeMarker{definitions[0]} ** 1024;
+    const many = @as([1024]editing.RangeMarker, @splat(definitions[0]));
     try std.testing.expectError(error.CapacityExceeded, constrained.setRangeMarkers(stamp, &many));
 }
 
 fn sparse(allocator: std.mem.Allocator, engine: *t.Engine) !void {
-    const text = "a\n" ** 4096;
+    const text = &@as([4096 * "a\n".len]u8, @bitCast(@as([4096]["a\n".len]u8, @splat("a\n".*))));
     const document = try d.Document.create(allocator, std.Thread.getCurrentId(), text, .{});
     defer document.close() catch unreachable;
     const adapter = try editing.Adapter.create(allocator, document, engine, .{ .range_marker_work = 32 });

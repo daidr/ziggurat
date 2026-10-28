@@ -1,14 +1,10 @@
 //! Native point expectations come from the live Adapter, never a hit packet.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const ui = @import("ziggurat_ui");
 const e = @import("ziggurat_document_editor");
 const d = @import("ziggurat_document");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("objbase.h");
-});
+const c = @import("ziggurat_c_win32");
 extern fn zda_probe_point(*anyopaque, f64, f64, *u32) i32;
 
 pub const invalid_argument: i32 = @bitCast(@as(u32, 0x80070057));
@@ -25,7 +21,7 @@ pub const Coordinates = struct {
         // Independently apply the public native-float contract to all six
         // configured coefficients. No recorded Mapping/Space is inspected.
         var forward: ui.affine.Affine = undefined;
-        inline for (std.meta.fields(ui.affine.Affine)) |field| {
+        inline for (zio.fields(ui.affine.Affine)) |field| {
             @field(forward, field.name) = @as(f32, @floatCast(@field(matrix, field.name)));
         }
         forward.x0 += forward.xx * offset.x + forward.xy * offset.y;

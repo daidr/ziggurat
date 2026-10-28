@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const decoding = @import("decoder.zig");
 const Error = decoding.Error;
 const Input = decoding.Input;

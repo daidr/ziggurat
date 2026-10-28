@@ -145,7 +145,7 @@ pub const Broker = struct {
         return if (ticket.kind == .completion) ticket.revision == try self.document.version() else ticket.text_version == try self.document.committedTextVersion();
     }
     fn drop(self: *Broker, kind: r.Kind) void {
-        const index = @intFromEnum(kind);
+        const index = @backingInt(kind);
         const previous = self.stored[index];
         self.stored[index] = null;
         if (previous) |item| {
@@ -154,7 +154,7 @@ pub const Broker = struct {
         }
     }
     fn revoke(self: *Broker, kind: r.Kind) void {
-        const index = @intFromEnum(kind);
+        const index = @backingInt(kind);
         for (self.slots) |*value| if (value.serial != 0 and value.kind == kind and value.serial == self.current[index]) value.control.cancelled.store(true, .release);
         self.current[index] = 0;
         self.drop(kind);
@@ -195,8 +195,8 @@ pub const Broker = struct {
         self.outstanding += 1;
         // Keep the previous still-fresh display until a valid replacement is
         // published. Ingress cancellation and visible result ownership differ.
-        for (self.slots) |*entry| if (entry.serial != 0 and entry.kind == kind and entry.serial == self.current[@intFromEnum(kind)]) entry.control.cancelled.store(true, .release);
-        self.current[@intFromEnum(kind)] = serial;
+        for (self.slots) |*entry| if (entry.serial != 0 and entry.kind == kind and entry.serial == self.current[@backingInt(kind)]) entry.control.cancelled.store(true, .release);
+        self.current[@backingInt(kind)] = serial;
         self.display_generation = generation;
         return .{ .ticket = .{ .broker = self, .index = @intCast(index), .serial = serial, .revision = revision, .text_version = text_version, .kind = kind }, .reader = reader, .position = position, .limits = self.limits.results, .control = &value.control };
     }
@@ -206,7 +206,7 @@ pub const Broker = struct {
         const value = self.slot(ticket) orelse return false;
         const generation = try self.nextDisplay();
         value.control.cancelled.store(true, .release);
-        if (self.current[@intFromEnum(ticket.kind)] == ticket.serial) self.revoke(ticket.kind);
+        if (self.current[@backingInt(ticket.kind)] == ticket.serial) self.revoke(ticket.kind);
         self.display_generation = generation;
         return true;
     }
@@ -218,7 +218,7 @@ pub const Broker = struct {
         defer self.busy = false;
         if (self.stopping) return error.Closed;
         const value = self.slot(ticket) orelse return error.StaleTicket;
-        if (self.current[@intFromEnum(ticket.kind)] != ticket.serial or value.control.cancelled.load(.acquire)) return error.Cancelled;
+        if (self.current[@backingInt(ticket.kind)] != ticket.serial or value.control.cancelled.load(.acquire)) return error.Cancelled;
         if (!try self.fresh(ticket)) return error.StaleRevision;
         if (value.control.state.load(.acquire) != ticket.serial * 4 + 3) return error.WorkerRunning;
         if (value.published) return error.AlreadyPublished;
@@ -226,8 +226,8 @@ pub const Broker = struct {
         if (std.meta.activeTag(owned.data) != ticket.kind) return error.WrongResultKind;
         try validateResult(owned, self.limits.results, value.snapshot.?);
         const generation = try self.nextDisplay();
-        const old = self.stored[@intFromEnum(ticket.kind)];
-        self.stored[@intFromEnum(ticket.kind)] = .{ .ticket = ticket, .result = owned.*, .position = value.position };
+        const old = self.stored[@backingInt(ticket.kind)];
+        self.stored[@backingInt(ticket.kind)] = .{ .ticket = ticket, .result = owned.*, .position = value.position };
         owned.storage = null;
         owned.data = .{ .completion = &.{} };
         value.published = true;
@@ -249,7 +249,7 @@ pub const Broker = struct {
         if (value.control.state.load(.acquire) != ticket.serial * 4 + 3) return error.WorkerRunning;
         try value.snapshot.?.close();
         value.snapshot = null;
-        if (!value.published and self.current[@intFromEnum(value.kind)] == value.serial) self.current[@intFromEnum(value.kind)] = 0;
+        if (!value.published and self.current[@backingInt(value.kind)] == value.serial) self.current[@backingInt(value.kind)] = 0;
         value.serial = 0;
         value.control.state.store(0, .release);
         self.outstanding -= 1;
@@ -264,7 +264,7 @@ pub const Broker = struct {
         if (self.stopping) return error.Closed;
         if (expected_generation != self.display_generation) return error.StaleDisplay;
         const generation = try self.nextDisplay();
-        const previous = self.stored[@intFromEnum(r.Kind.completion)] orelse return error.StaleDisplay;
+        const previous = self.stored[@backingInt(r.Kind.completion)] orelse return error.StaleDisplay;
         if (!std.meta.eql(ticket, previous.ticket) or ticket.kind != .completion) return error.StaleDisplay;
         if (!try self.fresh(ticket) or try self.document.composition() != null) return error.StaleRevision;
         if (owned.storage == null) return error.ResultMoved;
@@ -284,7 +284,7 @@ pub const Broker = struct {
             }
             if (at != index and (!std.mem.eql(u8, left.detail, right.detail) or !std.mem.eql(u8, left.documentation, right.documentation))) return error.InvalidRefinement;
         }
-        self.stored[@intFromEnum(r.Kind.completion)] = .{ .ticket = ticket, .result = owned.*, .position = previous.position };
+        self.stored[@backingInt(r.Kind.completion)] = .{ .ticket = ticket, .result = owned.*, .position = previous.position };
         self.display_generation = generation;
         owned.storage = null;
         owned.data = .{ .completion = &.{} };
@@ -305,7 +305,7 @@ pub const Broker = struct {
         const generation = if (changed) try self.nextDisplay() else self.display_generation;
         for (self.slots) |*value| if (value.serial != 0 and (if (value.kind == .completion) value.revision != revision else value.text_version != text_version)) value.control.cancelled.store(true, .release);
         for (self.stored, 0..) |item, index| if (item) |stored| if (!try self.fresh(stored.ticket)) {
-            self.drop(@enumFromInt(index));
+            self.drop(@fromBackingInt(@intCast(index)));
         };
         self.display_generation = generation;
     }
@@ -317,7 +317,7 @@ pub const Broker = struct {
     fn displayInner(self: *const Broker, kind: r.Kind) !?Display {
         if (self.owner != std.Thread.getCurrentId()) return error.WrongThread;
         if (self.stopping) return error.Closed;
-        const item = self.stored[@intFromEnum(kind)] orelse return null;
+        const item = self.stored[@backingInt(kind)] orelse return null;
         if (!try self.fresh(item.ticket) or try self.document.composition() != null) return null;
         return .{ .ticket = item.ticket, .data = item.result.data, .position = item.position };
     }
@@ -697,7 +697,7 @@ test "snippet delivery retains explicit raw format under the same revision and c
     _ = try doc.setSelection(.{});
     try std.testing.expect((try broker.display(.completion)) == null);
     try broker.observe();
-    try std.testing.expect(broker.stored[@intFromEnum(r.Kind.completion)] == null);
+    try std.testing.expect(broker.stored[@backingInt(r.Kind.completion)] == null);
     const cancelled = try broker.begin(.completion, 0);
     _ = try broker.cancel(cancelled.ticket);
     try cancelled.release();

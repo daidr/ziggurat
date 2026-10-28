@@ -1,11 +1,6 @@
 const std = @import("std");
 const core = @import("../root.zig");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("imm.h");
-});
+const c = @import("ziggurat_c_win32");
 
 pub const max_composition_units = 4096;
 pub const InputError = error{ InvalidScalar, InvalidUtf16, CapacityExceeded, IdExhausted, InputContextUnavailable, CompositionQueryFailed, CompositionChanged, CandidatePositionFailed, InvalidGeometry, InvalidWindow, ClipboardUnavailable, ClipboardAllocationFailed, ClipboardMalformed, ClipboardWriteFailed, InvalidUtf8, EmbeddedNul };

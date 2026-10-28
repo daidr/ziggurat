@@ -3,13 +3,7 @@ const builtin = @import("builtin");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-}) else @cImport({
-    @cInclude("gtk/gtk.h");
-});
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else @import("ziggurat_c_gtk");
 
 const Mode = enum { normal, close };
 const html = "<!doctype html><meta charset=utf-8><title>Native callback boundary</title><p>Owned fixture</p>";
@@ -247,10 +241,10 @@ fn scenario(allocator: std.mem.Allocator, mode: Mode, profile: []const u8) !void
     try std.testing.expect(observer.masked == 1 and observer.borrowed == 0);
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
-    var args = try std.process.argsWithAllocator(gpa.allocator());
+    var args = try init.args.iterateAllocator(gpa.allocator());
     defer args.deinit();
     _ = args.next();
     const mode = std.meta.stringToEnum(Mode, args.next() orelse return error.ExpectedMode) orelse return error.InvalidMode;

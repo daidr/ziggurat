@@ -11,6 +11,7 @@
 //!
 //! Run with `zig build run-clipboard`.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const d = @import("ziggurat_document");
 const t = @import("ziggurat_text_layout");
@@ -44,7 +45,7 @@ const Clip = struct {
     status_len: usize = 0,
 
     fn say(self: *Clip, comptime format: []const u8, args: anytype) void {
-        self.status_len = (std.fmt.bufPrint(&self.status, format, args) catch &self.status).len;
+        self.status_len = (std.fmt.bufPrint(&self.status, format, args) catch @as([]const u8, &self.status)).len;
         if (self.window) |window| window.invalidate();
     }
 
@@ -82,7 +83,7 @@ const Clip = struct {
         self.say("Copied text and {d} bytes of HTML.", .{html.buffered().len});
     }
     fn copyPath(self: *Clip) void {
-        const path = std.fs.selfExePath(&self.out) catch |err| return self.say("No executable path: {s}", .{@errorName(err)});
+        const path = zio.selfExePath(&self.out) catch |err| return self.say("No executable path: {s}", .{@errorName(err)});
         self.board.write(&.{.{ .format = .{ .kind = .files }, .data = path }}) catch |err| return self.say("Copy failed: {s}", .{@errorName(err)});
         self.say("Copied this program as a file; paste it in a file manager.", .{});
     }

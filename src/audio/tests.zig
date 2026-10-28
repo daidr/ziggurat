@@ -1,6 +1,7 @@
 //! Mixer, player, stream and notification behavior on a manual engine, and
 //! the output thread on a test backend.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const ziggurat = @import("ziggurat");
 const audio = @import("root.zig");
 const mixer = @import("mixer.zig");
@@ -156,7 +157,7 @@ test "a loop plays again without a gap" {
 test "pause fades out, holds its place, and resumes fading in" {
     const engine = try manual();
     defer engine.deinit();
-    const samples = [_]f32{0.5} ** 10000;
+    const samples = @as([10000]f32, @splat(0.5));
     const tone = try sound(1, &samples);
     defer tone.release();
     const player = try engine.createPlayer(tone);
@@ -184,7 +185,7 @@ test "pause fades out, holds its place, and resumes fading in" {
 test "volume changes ramp, and the master volume silences" {
     const engine = try manual();
     defer engine.deinit();
-    const samples = [_]f32{0.5} ** 10000;
+    const samples = @as([10000]f32, @splat(0.5));
     const tone = try sound(1, &samples);
     defer tone.release();
     const player = try engine.play(tone);
@@ -515,8 +516,8 @@ test "streams open files and bytes of every default format" {
     try testing.expectEqual(@as(?u64, @import("sound.zig").framesToNanoseconds(12000, 44100)), from_bytes.duration());
     var dir = testing.tmpDir(.{});
     defer dir.cleanup();
-    try dir.dir.writeFile(.{ .sub_path = "music.flac", .data = flac_bytes });
-    const from_file = try engine.openStreamFile(try dir.dir.openFile("music.flac", .{}));
+    try dir.dir.writeFile(zio.io(), .{ .sub_path = "music.flac", .data = flac_bytes });
+    const from_file = try engine.openStreamFile(try dir.dir.openFile(zio.io(), "music.flac", .{}));
     from_file.play();
     // Silence leads the file: play past it to its noise.
     const out = try renderStream(engine, 9000);
@@ -624,7 +625,7 @@ test "an engine torn down with a notification queued leaves it harmless" {
 
 /// A test backend: counts opens, captures what it plays, and fails as told.
 const TestBackend = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: zio.Mutex = .{},
     opens: u32 = 0,
     closes: u32 = 0,
     fail_open: ?audio.OpenError = null,
@@ -660,7 +661,7 @@ const TestBackend = struct {
         if (lost) self.fail_writes_after = null;
         self.mutex.unlock();
         if (lost) return error.DeviceLost;
-        std.Thread.sleep(std.time.ns_per_ms);
+        zio.sleep(std.time.ns_per_ms);
     }
 
     fn close(context: *anyopaque) void {
@@ -675,7 +676,7 @@ fn waitUntilStopped(player: Player) !void {
     var waited: u32 = 0;
     while (player.isPlaying()) : (waited += 1) {
         if (waited > 10_000) return error.Timeout;
-        std.Thread.sleep(std.time.ns_per_ms);
+        zio.sleep(std.time.ns_per_ms);
     }
 }
 
@@ -683,7 +684,7 @@ test "the output thread plays into a device and opens it again when lost" {
     var backend = TestBackend{ .fail_writes_after = 3 };
     const engine = try Engine.init(allocator, .{ .output = .{ .custom = backend.opener() } });
     defer engine.deinit();
-    const samples = [_]f32{0.5} ** (rate / 10);
+    const samples = @as([rate / 10]f32, @splat(0.5));
     const tone = try sound(1, &samples);
     defer tone.release();
     const player = try engine.play(tone);
@@ -700,14 +701,14 @@ test "without a device players play on time, unheard, and say why" {
     var backend = TestBackend{ .fail_open = error.NoDevice };
     const engine = try Engine.init(allocator, .{ .output = .{ .custom = backend.opener() } });
     defer engine.deinit();
-    const samples = [_]f32{0.5} ** (rate / 10);
+    const samples = @as([rate / 10]f32, @splat(0.5));
     const tone = try sound(1, &samples);
     defer tone.release();
-    const started = std.time.nanoTimestamp();
+    const started = zio.nanoTimestamp();
     const player = try engine.play(tone);
     try waitUntilStopped(player);
     // 100 ms of sound takes about as long on the null device.
-    try testing.expect(std.time.nanoTimestamp() - started >= 80 * std.time.ns_per_ms);
+    try testing.expect(zio.nanoTimestamp() - started >= 80 * std.time.ns_per_ms);
     try testing.expectEqual(@as(?audio.OpenError, error.NoDevice), engine.outputError());
     var buffer: [64]u8 = undefined;
     try testing.expectEqualStrings("test backend: NoDevice", engine.outputErrorDetail(&buffer));
@@ -716,7 +717,7 @@ test "without a device players play on time, unheard, and say why" {
 test "a silent engine plays on time without a device or an error" {
     const engine = try Engine.init(allocator, .{ .output = .silent });
     defer engine.deinit();
-    const samples = [_]f32{0.5} ** (rate / 20);
+    const samples = @as([rate / 20]f32, @splat(0.5));
     const tone = try sound(1, &samples);
     defer tone.release();
     const player = try engine.play(tone);
@@ -736,6 +737,6 @@ test "threads decode streams ahead on their own" {
     var waited: u32 = 0;
     while (deinits.load(.monotonic) == 0) : (waited += 1) {
         if (waited > 10_000) return error.Timeout;
-        std.Thread.sleep(std.time.ns_per_ms);
+        zio.sleep(std.time.ns_per_ms);
     }
 }

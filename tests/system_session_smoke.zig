@@ -4,6 +4,7 @@
 //! private XDG data home, then reads the list back), sets and removes a
 //! Windows jump list, and writes a marker the parent waits for.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const system = @import("ziggurat_system");
@@ -20,19 +21,25 @@ const Probe = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var allocator_state: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(allocator_state.deinit() == .ok);
     const allocator = allocator_state.allocator();
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try zio.argsAlloc(allocator, init.args);
+    defer zio.argsFree(allocator, args);
     if (args.len == 3 and std.mem.eql(u8, args[1], "--relaunched")) return relaunched(allocator, args[2]);
     if (args.len >= 3 and std.mem.eql(u8, args[1], "--echo")) return echo(allocator, args[2], args[3..]);
     if (args.len != 1) return error.InvalidArgument;
 
-    var dir = std.testing.tmpDir(.{});
-    defer dir.cleanup();
-    const root = try dir.dir.realpathAlloc(allocator, ".");
+    var name: [64]u8 = undefined;
+    const sub_path = try std.fmt.bufPrint(&name, ".zig-cache/tmp/system-session-{x}", .{zio.random.int(u64)});
+    const cwd = std.Io.Dir.cwd();
+    var dir = try cwd.createDirPathOpen(zio.io(), sub_path, .{});
+    defer {
+        dir.close(zio.io());
+        cwd.deleteTree(zio.io(), sub_path) catch {};
+    }
+    const root = try zio.realPathAlloc(dir, ".", allocator);
     defer allocator.free(root);
     const marker = try std.fs.path.join(allocator, &.{ root, "relaunched" });
     defer allocator.free(marker);
@@ -50,9 +57,9 @@ pub fn main() !void {
     try std.testing.expect(try relaunch.finish(allocator, .{ .arguments = &.{ "--relaunched", root } }));
     try std.testing.expect(!try relaunch.finish(allocator, .{}));
 
-    var timer = try std.time.Timer.start();
+    var timer = try zio.Timer.start();
     while (true) {
-        if (dir.dir.readFileAlloc(allocator, "relaunched", 4096)) |data| {
+        if (dir.readFileAlloc(zio.io(), "relaunched", allocator, .limited(4096))) |data| {
             defer allocator.free(data);
             if (std.mem.endsWith(u8, data, "\n")) {
                 std.debug.print("system session passed: relaunch; {s}", .{data});
@@ -60,7 +67,7 @@ pub fn main() !void {
             }
         } else |err| if (err != error.FileNotFound) return err;
         if (timer.read() > 20 * std.time.ns_per_s) return error.RelaunchTimeout;
-        std.Thread.sleep(50 * std.time.ns_per_ms);
+        zio.sleep(50 * std.time.ns_per_ms);
     }
 }
 
@@ -69,7 +76,7 @@ fn relaunched(allocator: std.mem.Allocator, root: []const u8) !void {
     defer report.deinit();
     const document = try std.fs.path.join(allocator, &.{ root, "notes.txt" });
     defer allocator.free(document);
-    try std.fs.cwd().writeFile(.{ .sub_path = document, .data = "hello" });
+    try std.Io.Dir.cwd().writeFile(zio.io(), .{ .sub_path = document, .data = "hello" });
 
     if (builtin.os.tag == .linux) {
         const data_home = try std.fs.path.joinZ(allocator, &.{ root, "data" });
@@ -80,7 +87,7 @@ fn relaunched(allocator: std.mem.Allocator, root: []const u8) !void {
         try system.recent.addToSystem(allocator, document, "Ziggurat Session Smoke");
         const list_path = try std.fs.path.join(allocator, &.{ data_home, "recently-used.xbel" });
         defer allocator.free(list_path);
-        const list = try std.fs.cwd().readFileAlloc(allocator, list_path, 1024 * 1024);
+        const list = try std.Io.Dir.cwd().readFileAlloc(zio.io(), list_path, allocator, .limited(1024 * 1024));
         defer allocator.free(list);
         const uri = try std.fmt.allocPrint(allocator, "file://{s}", .{document});
         defer allocator.free(uri);
@@ -100,11 +107,11 @@ fn relaunched(allocator: std.mem.Allocator, root: []const u8) !void {
     try std.testing.expectError(error.MissingTitle, system.jump_list.setTasks(allocator, &.{.{ .title = "" }}, .{}));
 
     try report.writer.writeByte('\n');
-    var marker_dir = try std.fs.cwd().openDir(root, .{});
-    defer marker_dir.close();
+    var marker_dir = try std.Io.Dir.cwd().openDir(zio.io(), root, .{});
+    defer marker_dir.close(zio.io());
     // Written whole, then renamed, so the parent never reads half of it.
-    try marker_dir.writeFile(.{ .sub_path = "relaunched.tmp", .data = report.written() });
-    try marker_dir.rename("relaunched.tmp", "relaunched");
+    try marker_dir.writeFile(zio.io(), .{ .sub_path = "relaunched.tmp", .data = report.written() });
+    try marker_dir.rename("relaunched.tmp", marker_dir, "relaunched", zio.io());
 }
 
 /// Writes its arguments, one per line, for the argv round trip.
@@ -112,14 +119,13 @@ fn echo(allocator: std.mem.Allocator, path: []const u8, arguments: []const []con
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
     try std.json.Stringify.value(arguments, .{}, &out.writer);
-    try std.fs.cwd().writeFile(.{ .sub_path = path, .data = out.written() });
+    try std.Io.Dir.cwd().writeFile(zio.io(), .{ .sub_path = path, .data = out.written() });
 }
 
 /// Starts this program with a jump list task's argument line, as the shell
 /// does, and checks the child sees exactly the task's arguments.
 fn argumentRoundTrips(allocator: std.mem.Allocator, root: []const u8) !void {
     if (builtin.os.tag != .windows) return;
-    const win = std.os.windows;
     const cases = [_][]const []const u8{
         &.{},
         &.{""},
@@ -127,7 +133,7 @@ fn argumentRoundTrips(allocator: std.mem.Allocator, root: []const u8) !void {
         &.{ "quote\"inside", "trailing\\", "both\\\"", "\\\\server\\share\\" },
         &.{"例子 ünicode"},
     };
-    const exe = try std.fs.selfExePathAlloc(allocator);
+    const exe = try zio.executablePathAlloc(allocator);
     defer allocator.free(exe);
     const out_path = try std.fs.path.join(allocator, &.{ root, "argv.json" });
     defer allocator.free(out_path);
@@ -142,19 +148,20 @@ fn argumentRoundTrips(allocator: std.mem.Allocator, root: []const u8) !void {
         defer allocator.free(line);
         const line_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, line);
         defer allocator.free(line_w);
-        var startup = std.mem.zeroes(win.STARTUPINFOW);
-        startup.cb = @sizeOf(win.STARTUPINFOW);
-        var info: win.PROCESS_INFORMATION = undefined;
-        if (win.kernel32.CreateProcessW(null, line_w.ptr, null, null, win.FALSE, .{}, null, null, &startup, &info) == 0) return error.CreateProcessFailed;
-        defer win.CloseHandle(info.hProcess);
-        defer win.CloseHandle(info.hThread);
-        try win.WaitForSingleObject(info.hProcess, 20_000);
-        const data = try std.fs.cwd().readFileAlloc(allocator, out_path, 64 * 1024);
+        const c = @import("ziggurat_c_win32");
+        var startup = std.mem.zeroes(c.STARTUPINFOW);
+        startup.cb = @sizeOf(c.STARTUPINFOW);
+        var info: c.PROCESS_INFORMATION = undefined;
+        if (c.CreateProcessW(null, line_w.ptr, null, null, 0, 0, null, null, &startup, &info) == 0) return error.CreateProcessFailed;
+        defer _ = c.CloseHandle(info.hProcess);
+        defer _ = c.CloseHandle(info.hThread);
+        if (c.WaitForSingleObject(info.hProcess, 20_000) != 0) return error.WaitFailed;
+        const data = try std.Io.Dir.cwd().readFileAlloc(zio.io(), out_path, allocator, .limited(64 * 1024));
         defer allocator.free(data);
         const parsed = try std.json.parseFromSlice([]const []const u8, allocator, data, .{});
         defer parsed.deinit();
         try std.testing.expectEqual(case.len, parsed.value.len);
         for (case, parsed.value) |want, got| try std.testing.expectEqualStrings(want, got);
-        try std.fs.cwd().deleteFile(out_path);
+        try std.Io.Dir.cwd().deleteFile(zio.io(), out_path);
     }
 }

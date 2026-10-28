@@ -73,7 +73,7 @@ pub fn main() !void {
     }
     try app.run();
     if (system.signals.capabilities.quit_on_signals) {
-        try std.testing.expectEqual(@as(c_int, std.posix.SIG.TERM), quit.last_signal);
+        try std.testing.expectEqual(@as(c_int, @backingInt(std.posix.SIG.TERM)), quit.last_signal);
         try std.testing.expectEqual(z.App.QuitResult.accepted, quit.last_result.?);
         try std.testing.expect(!quit.active());
     }

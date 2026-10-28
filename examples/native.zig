@@ -15,6 +15,7 @@
 //! status-notifier host on the session bus, and notifications need a
 //! notification daemon.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const view = @import("ziggurat_view");
@@ -42,7 +43,7 @@ const Command = enum(u64) {
     time,
 
     fn id(self: Command) u64 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 };
 
@@ -79,7 +80,7 @@ const Tour = struct {
 
     fn note(self: *Tour, comptime format: []const u8, args: anytype) void {
         const slot = self.log_count % log_lines;
-        self.log_len[slot] = (std.fmt.bufPrint(&self.log[slot], format, args) catch &self.log[slot]).len;
+        self.log_len[slot] = (std.fmt.bufPrint(&self.log[slot], format, args) catch @as([]const u8, &self.log[slot])).len;
         self.log_count += 1;
         if (self.window) |window| window.invalidate();
     }
@@ -141,7 +142,7 @@ const Tour = struct {
             }) catch |err| self.note("message: {s}", .{@errorName(err)}),
             .copy => {
                 var text: [64]u8 = undefined;
-                const now: u64 = @intCast(@max(0, std.time.timestamp()));
+                const now: u64 = @intCast(@max(0, zio.timestamp()));
                 const value = std.fmt.bufPrint(&text, "Copied from Ziggurat at {d:0>2}:{d:0>2}:{d:0>2} UTC", .{ now / 3600 % 24, now / 60 % 60, now % 60 }) catch unreachable;
                 self.board.write(&.{.{ .format = .{ .kind = .text }, .data = value }}) catch |err| return self.note("copy: {s}", .{@errorName(err)});
                 self.note("copied", .{});
@@ -158,7 +159,7 @@ const Tour = struct {
                 window.perform(.focus) catch {};
             },
             .time => {
-                const now: u64 = @intCast(@max(0, std.time.timestamp()));
+                const now: u64 = @intCast(@max(0, zio.timestamp()));
                 self.note("It's {d:0>2}:{d:0>2} UTC", .{ now / 3600 % 24, now / 60 % 60 });
             },
         }
@@ -233,8 +234,8 @@ const Tour = struct {
     fn onOwner(ptr: *anyopaque, _: z.Window, action: system.Action) void {
         const self: *Tour = @ptrCast(@alignCast(ptr));
         switch (action) {
-            .menu => |id| self.run(std.meta.intToEnum(Command, id) catch return),
-            .popup => |result| if (result.selected) |id| self.run(std.meta.intToEnum(Command, id) catch return),
+            .menu => |id| self.run(std.enums.fromInt(Command, id) orelse return),
+            .popup => |result| if (result.selected) |id| self.run(std.enums.fromInt(Command, id) orelse return),
             .hotkey => {
                 self.run(.show_window);
                 self.note("global shortcut pressed", .{});
@@ -254,8 +255,8 @@ const Tour = struct {
             .activate => self.run(.show_window),
             // Hosts that cannot draw the item's own menu ask for one here.
             .context => tray.popupMenu(tray_request, &tray_items, .icon) catch |err| self.note("tray popup: {s}", .{@errorName(err)}),
-            .menu => |id| self.run(std.meta.intToEnum(Command, id) catch return),
-            .popup => |result| if (result.selected) |id| self.run(std.meta.intToEnum(Command, id) catch return),
+            .menu => |id| self.run(std.enums.fromInt(Command, id) orelse return),
+            .popup => |result| if (result.selected) |id| self.run(std.enums.fromInt(Command, id) orelse return),
         }
     }
 

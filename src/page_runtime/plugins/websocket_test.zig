@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const runtime = @import("ziggurat_page_runtime");
 const websocket = @import("websocket.zig");
 const Service = websocket.Service;
@@ -7,28 +8,28 @@ const service = "plugin:websocket";
 
 /// A local WebSocket server running one script per accepted connection.
 const Server = struct {
-    server: std.net.Server,
+    server: std.Io.net.Server,
     script: *const fn (*Server, *std.http.Server.WebSocket, *const std.http.Server.Request.Head) anyerror!void,
     failure: ?anyerror = null,
     /// What the script saw, for the test to check.
     seen: std.ArrayList(u8) = .empty,
-    mutex: std.Thread.Mutex = .{},
+    mutex: zio.Mutex = .{},
     thread: ?std.Thread = null,
 
     fn start(self: *Server, script: *const fn (*Server, *std.http.Server.WebSocket, *const std.http.Server.Request.Head) anyerror!void, count: usize) !void {
-        const address = try std.net.Address.parseIp("127.0.0.1", 0);
-        self.* = .{ .server = try address.listen(.{ .reuse_address = true }), .script = script };
+        const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+        self.* = .{ .server = try address.listen(zio.io(), .{ .reuse_address = true }), .script = script };
         self.thread = try std.Thread.spawn(.{}, serve, .{ self, count });
     }
 
     fn stop(self: *Server) void {
         if (self.thread) |thread| thread.join();
         self.seen.deinit(allocator);
-        self.server.deinit();
+        self.server.deinit(zio.io());
     }
 
     fn url(self: *Server, buffer: []u8, path: []const u8) ![]const u8 {
-        return std.fmt.bufPrint(buffer, "ws://127.0.0.1:{d}{s}", .{ self.server.listen_address.getPort(), path });
+        return std.fmt.bufPrint(buffer, "ws://127.0.0.1:{d}{s}", .{ self.server.socket.address.getPort(), path });
     }
 
     fn note(self: *Server, text: []const u8) void {
@@ -53,13 +54,13 @@ const Server = struct {
     }
 
     fn one(self: *Server) !void {
-        const connection = try self.server.accept();
-        defer connection.stream.close();
+        const connection = try self.server.accept(zio.io());
+        defer connection.close(zio.io());
         var receive_buffer: [256 * 1024]u8 = undefined;
         var send_buffer: [4096]u8 = undefined;
-        var reader = connection.stream.reader(&receive_buffer);
-        var writer = connection.stream.writer(&send_buffer);
-        var http: std.http.Server = .init(reader.interface(), &writer.interface);
+        var reader = connection.reader(zio.io(), &receive_buffer);
+        var writer = connection.writer(zio.io(), &send_buffer);
+        var http: std.http.Server = .init(&reader.interface, &writer.interface);
         var request = try http.receiveHead();
         const key = switch (request.upgradeRequested()) {
             .websocket => |value| value orelse return error.MissingKey,
@@ -174,7 +175,7 @@ const Fixture = struct {
                     return kind;
                 },
                 .close => {
-                    try message.writer(allocator).print("{d}:{s}:{}:{s}", .{
+                    try message.print(allocator, "{d}:{s}:{}:{s}", .{
                         value.get("code").?.integer,
                         value.get("reason").?.string,
                         value.get("clean").?.bool,
@@ -302,10 +303,10 @@ test "the server closing and a refused connection end with their codes" {
     try f.done(1);
 
     // Nothing listens on a port the server gave back.
-    const address = try std.net.Address.parseIp("127.0.0.1", 0);
-    var closed = try address.listen(.{});
-    const port = closed.listen_address.getPort();
-    closed.deinit();
+    const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    var closed = try address.listen(zio.io(), .{});
+    const port = closed.socket.address.getPort();
+    closed.deinit(zio.io());
     const refused = try std.fmt.bufPrint(&buffer, "ws://127.0.0.1:{d}/", .{port});
     try f.connect(2, 2, refused, .{});
     try std.testing.expectEqual(Service.Kind.close, try f.event(2, &message));
@@ -383,7 +384,7 @@ test "a server that misses the closing handshake times out" {
             const frame = try readFrame(socket);
             if (frame.opcode != 0x8) return error.NoClose;
             // Holds the connection open without answering.
-            std.Thread.sleep(500 * std.time.ns_per_ms);
+            zio.sleep(500 * std.time.ns_per_ms);
         }
     }.run;
     var server: Server = undefined;

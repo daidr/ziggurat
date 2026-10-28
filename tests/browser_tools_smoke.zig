@@ -1,13 +1,10 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
 const Server = @import("remote_page_smoke.zig").Server;
-const w = @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-});
+const w = @import("ziggurat_c_win32");
 extern fn zwv_browser_process_id(*anyopaque, *c_uint) i32;
 const Kind = enum { small, cookies, deleted, find, capture, pdf, clear, empty, cancel, detached, rejected };
 const Case = struct {
@@ -35,7 +32,7 @@ const State = struct {
     queued: bool = false,
     png_bytes: usize = 0,
     script_detached: u32 = 0,
-    cookie_clock: ?std.time.Timer = null,
+    cookie_clock: ?zio.Timer = null,
     cookie_timer: ?*anyopaque = null,
     cookie_watch: ?z.NativeWaitToken = null,
     cookie_checks: u32 = 0,
@@ -81,7 +78,7 @@ const State = struct {
         self.cookie_watch = self.app.watchNative(self.cookie_timer.?, .{ .context = self, .call = cookieTimerReady }) catch |err| return self.fail(err);
     }
     fn completion(self: *State, kind: Kind) web.tools.Completion {
-        return .{ .context = &self.cases[@intFromEnum(kind)], .complete = Case.complete };
+        return .{ .context = &self.cases[@backingInt(kind)], .complete = Case.complete };
     }
     fn options(self: *State) web.Options {
         const enabled = self.phase != .denied;
@@ -120,7 +117,7 @@ const State = struct {
     }
     fn complete(self: *State, kind: Kind, result: web.tools.Result) void {
         if (result == .native_failure) std.debug.print("browser tool native failure kind={s} HRESULT=0x{x:0>8}\n", .{ @tagName(kind), @as(u32, @bitCast(result.native_failure)) });
-        if (kind != .deleted and kind != .cookies) self.calls[@intFromEnum(kind)] += 1;
+        if (kind != .deleted and kind != .cookies) self.calls[@backingInt(kind)] += 1;
         switch (kind) {
             .small => {
                 if (result != .limit_exceeded) return self.fail(error.UnboundedCapture);
@@ -136,7 +133,7 @@ const State = struct {
                 };
                 if (!found) return self.observeCookieAgain();
                 self.cookie_set_checks = self.cookie_checks;
-                self.calls[@intFromEnum(kind)] += 1;
+                self.calls[@backingInt(kind)] += 1;
                 self.pauseCookieTimer();
                 // The explicitly authorized second port sees the same cookie.
                 // Origin authorization does not turn cookies into port isolation.
@@ -152,7 +149,7 @@ const State = struct {
                     // only in this bounded test driver, without blocking the UI.
                     return self.observeCookieAgain();
                 };
-                self.calls[@intFromEnum(kind)] += 1;
+                self.calls[@backingInt(kind)] += 1;
                 self.cookie_delete_checks = self.cookie_checks;
                 self.closeCookieTimer();
                 self.phase = .find_start;
@@ -224,7 +221,7 @@ const State = struct {
         if (result != .json) return self.fail(error.QueryFailed);
         if (self.phase == .cookie_visibility) {
             if (!std.mem.eql(u8, result.json, "false")) return self.fail(error.HttpOnlyExposed);
-            self.cookie_clock = std.time.Timer.start() catch |err| return self.fail(err);
+            self.cookie_clock = zio.Timer.start() catch |err| return self.fail(err);
             self.cookie_checks = 0;
             self.view.deleteCookie(self.url, .{ .name = "private_cookie", .path = "/", .accept_cookie_scope = true }) catch |err| return self.fail(err);
             self.phase = .cookie_deleted;
@@ -252,7 +249,7 @@ const State = struct {
                 _ = self.view.capturePreview(page_id, .{ .timeout_ms = 5000 }, self.completion(.small)) catch |err| self.fail(err);
             },
             .large => {
-                self.cookie_clock = std.time.Timer.start() catch |err| return self.fail(err);
+                self.cookie_clock = zio.Timer.start() catch |err| return self.fail(err);
                 self.cookie_checks = 0;
                 self.view.setCookie(self.url, .{ .name = "private_cookie", .value = "secret", .secure = false, .http_only = true, .accept_cookie_scope = true }) catch |err| return self.fail(err);
                 _ = self.view.getCookies("https://unknown.example/", .{}, self.completion(.rejected)) catch |err| {
@@ -290,8 +287,8 @@ const State = struct {
 
 const PdfFile = struct {
     allocator: std.mem.Allocator,
-    directory: std.fs.Dir,
-    private: *std.testing.TmpDir,
+    directory: std.Io.Dir,
+    private: *zio.TmpDir,
     path: ?[]u8 = null,
     profile: ?[]u8 = null,
     mode: enum { prepare, verify, cleanup } = .prepare,
@@ -337,30 +334,30 @@ const PdfFile = struct {
     }
     fn work(self: *PdfFile) !void {
         if (self.mode == .prepare) {
-            try self.directory.makeDir("profile");
-            self.profile = try self.directory.realpathAlloc(self.allocator, "profile");
-            const file = try self.directory.createFile("私有输出.pdf", .{});
-            defer file.close();
-            try file.writeAll("reserved private output");
-            self.path = try self.directory.realpathAlloc(self.allocator, "私有输出.pdf");
+            try self.directory.createDir(zio.io(), "profile", .default_dir);
+            self.profile = try zio.realPathAlloc(self.directory, "profile", self.allocator);
+            const file = try self.directory.createFile(zio.io(), "私有输出.pdf", .{});
+            defer file.close(zio.io());
+            try file.writeStreamingAll(zio.io(), "reserved private output");
+            self.path = try zio.realPathAlloc(self.directory, "私有输出.pdf", self.allocator);
         } else if (self.mode == .verify) {
             try self.waitForBrowsers();
-            const bytes = try self.directory.readFileAlloc(self.allocator, "私有输出.pdf", 16 * 1024 * 1024);
+            const bytes = try self.directory.readFileAlloc(zio.io(), "私有输出.pdf", self.allocator, .limited(16 * 1024 * 1024));
             defer self.allocator.free(bytes);
             try std.testing.expect(std.mem.startsWith(u8, bytes, "%PDF-") and std.mem.indexOf(u8, bytes, "/Type /Page") != null and std.mem.indexOf(u8, bytes, "%%EOF") != null);
             self.bytes = bytes.len;
         } else {
             self.waitForBrowsers() catch |err| {
-                self.directory.close();
-                self.private.parent_dir.close();
+                self.directory.close(zio.io());
+                self.private.parent_dir.close(zio.io());
                 self.private_closed = true;
                 std.debug.print("private profile retained because shutdown is unconfirmed: {?s}\n", .{self.profile});
                 return err;
             };
-            self.directory.close();
+            self.directory.close(zio.io());
             self.private_closed = true;
-            defer self.private.parent_dir.close();
-            try self.private.parent_dir.deleteTree(&self.private.sub_path);
+            defer self.private.parent_dir.close(zio.io());
+            try self.private.parent_dir.deleteTree(zio.io(), &self.private.sub_path);
         }
     }
 };
@@ -368,7 +365,7 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    var private = std.testing.tmpDir(.{});
+    var private = zio.tmpDir(.{});
     var pdf: PdfFile = .{ .allocator = allocator, .directory = private.dir, .private = &private };
     defer {
         if (!pdf.private_closed) {
@@ -384,16 +381,16 @@ pub fn main() !void {
     var worker = try std.Thread.spawn(.{}, PdfFile.run, .{&pdf});
     worker.join();
     if (pdf.err) |err| return err;
-    const bind = try std.net.Address.parseIp4("127.0.0.1", 0);
-    var allowed: Server = .{ .listener = try bind.listen(.{}), .start_html = "<body>needle needle other NEEDLE<script>localStorage.setItem('fixture','private');document.cookie='visible=1;path=/;SameSite=Lax'</script></body>" };
+    const bind = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var allowed: Server = .{ .listener = try bind.listen(zio.io(), .{}), .start_html = "<body>needle needle other NEEDLE<script>localStorage.setItem('fixture','private');document.cookie='visible=1;path=/;SameSite=Lax'</script></body>" };
     defer allowed.stop();
-    var other: Server = .{ .listener = try bind.listen(.{}) };
+    var other: Server = .{ .listener = try bind.listen(zio.io(), .{}) };
     defer other.stop();
     try allowed.start();
     try other.start();
-    const origin = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{allowed.listener.listen_address.getPort()});
+    const origin = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{allowed.listener.socket.address.getPort()});
     defer allocator.free(origin);
-    const other_origin = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{other.listener.listen_address.getPort()});
+    const other_origin = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{other.listener.socket.address.getPort()});
     defer allocator.free(other_origin);
     const url = try std.fmt.allocPrint(allocator, "{s}/start", .{origin});
     defer allocator.free(url);
@@ -405,7 +402,7 @@ pub fn main() !void {
         var view: web.View = undefined;
         var state: State = .{ .app = app, .view = &view, .profile = pdf.profile.?, .fixture = &pdf, .url = url, .other_url = other_url, .pdf_path = pdf.path.?, .origins = .{ .{ .origin = origin }, .{ .origin = other_origin } } };
         defer state.closeCookieTimer();
-        for (&state.cases, 0..) |*case, i| case.* = .{ .state = &state, .kind = @enumFromInt(i) };
+        for (&state.cases, 0..) |*case, i| case.* = .{ .state = &state, .kind = @fromBackingInt(@intCast(i)) };
         view = web.View.init(allocator, &state, State.event);
         const window = try app.createWindow(.{});
         try view.attach(window, state.options());

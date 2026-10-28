@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const m = @import("model.zig");
 const codec = @import("codec.zig");
 const Files = @import("files.zig").Files;
@@ -161,7 +162,7 @@ test "explicit worker atomic store replaces, reloads and retries a failed destin
     defer temporary.cleanup();
     const Work = struct {
         files: Files,
-        directory: std.fs.Dir,
+        directory: std.Io.Dir,
         err: ?anyerror = null,
         fn run(self: *@This()) void {
             self.inner() catch |err| {
@@ -178,9 +179,9 @@ test "explicit worker atomic store replaces, reloads and retries a failed destin
             var output: [1024]u8 = undefined;
             try self.files.save(self.directory, "placement.bin", bytes, &write_buffer);
             try std.testing.expectEqualSlices(u8, bytes, try self.files.read(self.directory, "placement.bin", &output));
-            try self.directory.makeDir("blocked");
+            try self.directory.createDir(zio.io(), "blocked", .default_dir);
             if (self.files.save(self.directory, "blocked", bytes, &write_buffer)) |_| return error.RenameShouldFail else |_| {}
-            try self.directory.deleteDir("blocked");
+            try self.directory.deleteDir(zio.io(), "blocked");
             try self.files.save(self.directory, "blocked", bytes, &write_buffer);
             try std.testing.expectEqualSlices(u8, bytes, try self.files.read(self.directory, "blocked", &output));
             try std.testing.expectError(error.CapacityExceeded, self.files.read(self.directory, "placement.bin", output[0..10]));

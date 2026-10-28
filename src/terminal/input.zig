@@ -42,13 +42,13 @@ pub fn key(input: z.KeyInput, modes: Modes, buffer: *[max_key]u8) ?[]const u8 {
             return std.fmt.bufPrint(buffer, "\x1b[{d}~", .{number}) catch unreachable;
         },
         .f1, .f2, .f3, .f4 => {
-            const final: u8 = 'P' + @as(u8, @intCast(@intFromEnum(input.key) - @intFromEnum(z.KeyCode.f1)));
+            const final: u8 = 'P' + @as(u8, @intCast(@backingInt(input.key) - @backingInt(z.KeyCode.f1)));
             if (modified) return std.fmt.bufPrint(buffer, "\x1b[1;{d}{c}", .{ mod, final }) catch unreachable;
             return std.fmt.bufPrint(buffer, "\x1bO{c}", .{final}) catch unreachable;
         },
         .f5, .f6, .f7, .f8, .f9, .f10, .f11, .f12, .f13, .f14, .f15, .f16, .f17, .f18, .f19, .f20 => {
             const codes = [_]u8{ 15, 17, 18, 19, 20, 21, 23, 24, 25, 26, 28, 29, 31, 32, 33, 34 };
-            const number = codes[@intFromEnum(input.key) - @intFromEnum(z.KeyCode.f5)];
+            const number = codes[@backingInt(input.key) - @backingInt(z.KeyCode.f5)];
             if (modified) return std.fmt.bufPrint(buffer, "\x1b[{d};{d}~", .{ number, mod }) catch unreachable;
             return std.fmt.bufPrint(buffer, "\x1b[{d}~", .{number}) catch unreachable;
         },
@@ -71,7 +71,7 @@ pub fn key(input: z.KeyInput, modes: Modes, buffer: *[max_key]u8) ?[]const u8 {
                 .subtract => 'm',
                 .multiply => 'j',
                 .divide => 'o',
-                else => 'p' + @as(u8, @intCast(@intFromEnum(input.key) - @intFromEnum(z.KeyCode.numpad0))),
+                else => 'p' + @as(u8, @intCast(@backingInt(input.key) - @backingInt(z.KeyCode.numpad0))),
             };
             return std.fmt.bufPrint(buffer, "\x1bO{c}", .{final}) catch unreachable;
         },
@@ -105,13 +105,13 @@ fn prefixed(buffer: *[max_key]u8, alt: bool, bytes: []const u8) []const u8 {
 
 /// The character a key types on a US layout, for Control and Alt chords.
 fn character(code: z.KeyCode, shift: bool) ?u8 {
-    const index = @intFromEnum(code);
-    if (index >= @intFromEnum(z.KeyCode.a) and index <= @intFromEnum(z.KeyCode.z)) {
-        const letter: u8 = 'a' + @as(u8, @intCast(index - @intFromEnum(z.KeyCode.a)));
+    const index = @backingInt(code);
+    if (index >= @backingInt(z.KeyCode.a) and index <= @backingInt(z.KeyCode.z)) {
+        const letter: u8 = 'a' + @as(u8, @intCast(index - @backingInt(z.KeyCode.a)));
         return if (shift) std.ascii.toUpper(letter) else letter;
     }
-    if (index >= @intFromEnum(z.KeyCode.digit0) and index <= @intFromEnum(z.KeyCode.digit9)) {
-        const digit: u8 = @intCast(index - @intFromEnum(z.KeyCode.digit0));
+    if (index >= @backingInt(z.KeyCode.digit0) and index <= @backingInt(z.KeyCode.digit9)) {
+        const digit: u8 = @intCast(index - @backingInt(z.KeyCode.digit0));
         return if (shift) ")!@#$%^&*("[digit] else '0' + digit;
     }
     return switch (code) {

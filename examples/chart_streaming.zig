@@ -6,6 +6,7 @@
 //!
 //! Run with `zig build run-chart-streaming`.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const view = @import("ziggurat_view");
@@ -56,7 +57,7 @@ const Stream = struct {
     /// Created once the App exists; null in headless tests.
     ticker: ?*wake.OneShot = null,
     token: ?wake.Token = null,
-    clock: std.time.Timer,
+    clock: zio.Timer,
     rng: std.Random.DefaultPrng = .init(0x5eed),
     ring: Ring(capacity) = .{},
     running: bool = true,
@@ -93,7 +94,7 @@ const Stream = struct {
             self.token = null;
             return;
         }
-        self.token = ticker.armAfter(@intFromEnum(self.interval)) catch |err| blk: {
+        self.token = ticker.armAfter(@backingInt(self.interval)) catch |err| blk: {
             self.last_error = err;
             break :blk null;
         };
@@ -143,7 +144,7 @@ const Stream = struct {
         if (selected.len > 0) {
             try v.text(selected, .{ .key = 2 });
         } else if (self.running) {
-            try v.textf("Sampling every {d} ms. Hover the plot, or focus it and use the arrow keys.", .{@intFromEnum(self.interval) / std.time.ns_per_ms}, .{ .color = 0x536475, .key = 3 });
+            try v.textf("Sampling every {d} ms. Hover the plot, or focus it and use the arrow keys.", .{@backingInt(self.interval) / std.time.ns_per_ms}, .{ .color = 0x536475, .key = 3 });
         } else {
             try v.text("Paused: no timer is armed and the window stays idle.", .{ .color = 0x536475, .key = 4 });
         }
@@ -198,7 +199,7 @@ pub fn main() !void {
     defer app.deinit();
 
     var figure: chart_view.Chart = undefined;
-    var stream: Stream = .{ .figure = &figure, .clock = try std.time.Timer.start() };
+    var stream: Stream = .{ .figure = &figure, .clock = try zio.Timer.start() };
     var storage: view.Storage(64, 2048) = .{};
     var host = view.Host.init(&stream, Stream.build, storage.buffers(), .{});
     var chart_storage: chart_view.Storage(16, 8, 2) = .{};
@@ -238,7 +239,7 @@ test "the ring keeps the newest samples in order" {
 
 test "pause and clear work headlessly" {
     var figure: chart_view.Chart = undefined;
-    var stream: Stream = .{ .figure = &figure, .clock = try std.time.Timer.start() };
+    var stream: Stream = .{ .figure = &figure, .clock = try zio.Timer.start() };
     var chart_host_storage: view.Storage(8, 64) = .{};
     var chart_host = view.Host.init(&stream, Stream.build, chart_host_storage.buffers(), .{});
     var chart_storage: chart_view.Storage(16, 8, 2) = .{};

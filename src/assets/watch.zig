@@ -1,10 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 
 /// A Windows change-notification handle, with no thread, timer or I/O buffer.
 /// Register `nativeHandle` with App.watchNative. Its callback must call `rearm`

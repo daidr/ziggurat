@@ -5,6 +5,7 @@
 //! hand results back with `App.post`. Only `Database.interrupt` may be called
 //! from another thread while the connection is open.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const c = @import("c.zig");
 
 pub const Error = error{
@@ -176,7 +177,7 @@ pub const Database = struct {
     pub fn open(allocator: std.mem.Allocator, path: []const u8, options: Options) Error!Database {
         try guard(options.ui_thread);
         if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidPath;
-        const terminated = try allocator.dupeZ(u8, path);
+        const terminated = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(terminated);
         var flags: c_int = switch (options.mode) {
             .read_only => c.OPEN_READONLY,
@@ -461,7 +462,7 @@ pub const Statement = struct {
 
     /// Binds a tuple positionally from parameter 1; its length must match.
     pub fn bindAll(self: *Statement, args: anytype) Error!void {
-        const fields = @typeInfo(@TypeOf(args)).@"struct".fields;
+        const fields = zio.fields(@TypeOf(args));
         if (fields.len != self.parameterCount()) return error.ParameterCount;
         inline for (fields, 1..) |field, index| try self.bind(index, @field(args, field.name));
     }
@@ -505,7 +506,7 @@ fn bindValue(stmt: *c.sqlite3_stmt, index: c_int, value: anytype) Error!c_int {
         .bool => return c.sqlite3_bind_int64(stmt, index, @intFromBool(value)),
         .comptime_int => return c.sqlite3_bind_int64(stmt, index, value),
         .int => return c.sqlite3_bind_int64(stmt, index, std.math.cast(i64, value) orelse return error.IntegerOverflow),
-        .@"enum" => return bindValue(stmt, index, @intFromEnum(value)),
+        .@"enum" => return bindValue(stmt, index, @backingInt(value)),
         .comptime_float, .float => return c.sqlite3_bind_double(stmt, index, @floatCast(value)),
         .pointer => {
             const text = textSlice(value);
@@ -618,7 +619,7 @@ pub const Row = struct {
 
     /// Reads all columns into a struct whose fields follow column order.
     pub fn decode(self: Row, comptime T: type) Error!T {
-        const fields = @typeInfo(T).@"struct".fields;
+        const fields = zio.fields(T);
         if (fields.len != self.count()) return error.ColumnCount;
         var result: T = undefined;
         inline for (fields, 0..) |field, index| @field(result, field.name) = try self.get(field.type, index);

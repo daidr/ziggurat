@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const v = @import("ziggurat_vector");
 const pre = @import("prepare.zig");
 const d = @import("document.zig");
@@ -195,7 +196,7 @@ pub noinline fn grid(work: *pre.Work, definition: Plan, frame: pre.Frame, output
     const determinant = matrix.xx * matrix.yy - matrix.xy * matrix.yx;
     if (determinant == 0) return error.UnsupportedPatternPrecision;
     const inverse: v.Transform = .{ .xx = matrix.yy / determinant, .xy = -matrix.xy / determinant, .yx = -matrix.yx / determinant, .yy = matrix.xx / determinant, .x0 = (matrix.xy * matrix.y0 - matrix.yy * matrix.x0) / determinant, .y0 = (matrix.yx * matrix.x0 - matrix.xx * matrix.y0) / determinant };
-    inline for (std.meta.fields(v.Transform)) |field| if (!std.math.isFinite(@field(inverse, field.name)) or @abs(@field(inverse, field.name)) > 1e15) return error.UnsupportedPatternPrecision;
+    inline for (zio.fields(v.Transform)) |field| if (!std.math.isFinite(@field(inverse, field.name)) or @abs(@field(inverse, field.name)) > 1e15) return error.UnsupportedPatternPrecision;
     const bounds = output orelse return null;
     const left = @max(0, bounds.x);
     const top = @max(0, bounds.y);

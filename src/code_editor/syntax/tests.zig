@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const syntax = @import("root.zig");
 const languages = syntax.languages;
 
@@ -129,7 +130,7 @@ test "token output merges runs and degrades without losing coverage when full" {
     try std.testing.expectEqual(@as(usize, 2), result.tokens.len);
     try std.testing.expectEqual(@as(u32, 9), result.tokens[1].end);
     // Overlong lines stay plain and pass the state through.
-    const long = [_]u8{'"'} ** (syntax.max_line + 1);
+    const long = @as([syntax.max_line + 1]u8, @splat('"'));
     var buffer: [4]Token = undefined;
     const plain = syntax.tokenizeLine(languages.go.tokenizer.?, &long, 7, &buffer);
     try std.testing.expectEqual(@as(u64, 7), plain.state);
@@ -140,7 +141,7 @@ test "the highlighter re-lexes after edits until states agree" {
     const allocator = std.testing.allocator;
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(allocator);
-    for (0..50) |i| try text.writer(allocator).print("line {d}\n", .{i});
+    for (0..50) |i| try text.print(allocator, "line {d}\n", .{i});
     var h = try syntax.Highlighter.init(allocator, languages.go.tokenizer.?);
     defer h.deinit();
     try std.testing.expect(!try h.highlight(syntax.highlighter.SliceLines{ .text = text.items }, 40, 10));

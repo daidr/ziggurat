@@ -1,8 +1,4 @@
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 
 // Resource identifiers are integer tokens encoded as pointers, including odd IDs.
 // Their ABI must not impose the alignment of the optional UTF-16 string form.

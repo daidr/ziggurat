@@ -1,6 +1,6 @@
 # Ziggurat
 
-Ziggurat 是以 Zig 为中心的桌面应用框架。小内核管理窗口、生命周期和主线程调度，自绘 UI、系统 WebView、类型化 IPC、系统设施和更新工具按需导入。工具链固定为 **Zig 0.15.2**，API 仍处于早期演进阶段。
+Ziggurat 是以 Zig 为中心的桌面应用框架。小内核管理窗口、生命周期和主线程调度，自绘 UI、系统 WebView、类型化 IPC、系统设施和更新工具按需导入。工具链固定为 **Zig 0.17.0**，API 仍处于早期演进阶段。
 
 Windows x86_64 已实现 Win32/GDI、可选 D3D11/DirectWrite、WebView2、UI Automation、系统菜单、托盘、剪贴板、异步文件选择、全局快捷键与通知区通知。Linux 已通过 GTK3/GLib/Cairo/Pango 的真实桌面运行检查，系统菜单栏、托盘、文件选择器、通知和 X11 全局快捷键已有 Linux 实现，可选 WebKitGTK 已验收显式 ephemeral HTML、独立持久 Profile、custom 本地资源/文件流、远程来源策略、矩形区域及可跨宿主保留 DOM 的离窗会话。各模块公开实际 capability；macOS 运行后端、完整 Linux 页面策略和完整控件库继续按计划实施。
 

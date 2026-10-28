@@ -3,6 +3,7 @@
 //! key, seeking, and leaving the bus on clear. Needs a session bus and an X11
 //! display: dbus-run-session -- xvfb-run.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const system = @import("ziggurat_system");
 const Watchdog = @import("watchdog.zig").Watchdog;
@@ -114,13 +115,13 @@ const State = struct {
                 const end = std.mem.indexOfScalarPos(u8, reply, start, '\'') orelse return;
                 @memcpy(self.art_path[0 .. end - start], reply[start..end]);
                 self.art_len = end - start;
-                const file = std.fs.openFileAbsolute(self.art_path[0..self.art_len], .{}) catch {
+                const file = std.Io.Dir.openFileAbsolute(zio.io(), self.art_path[0..self.art_len], .{}) catch {
                     self.failure = "artwork file";
                     return;
                 };
-                defer file.close();
+                defer file.close(zio.io());
                 var content: [64]u8 = undefined;
-                const length = file.readAll(&content) catch 0;
+                const length = file.readPositionalAll(zio.io(), &content, 0) catch 0;
                 if (!std.mem.eql(u8, content[0..length], artwork)) self.failure = "artwork content";
             },
             2 => self.expectText("'Paused'"),
@@ -142,7 +143,7 @@ const State = struct {
             12 => self.expectText("NotSupported"),
             13 => {
                 if (std.mem.span(znpf_player()).len != 0) self.failure = "player stayed on the bus";
-                if (std.fs.accessAbsolute(self.art_path[0..self.art_len], .{})) |_| {
+                if (std.Io.Dir.accessAbsolute(zio.io(), self.art_path[0..self.art_len], .{})) |_| {
                     self.failure = "artwork file stayed";
                 } else |_| {}
             },

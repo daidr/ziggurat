@@ -9,12 +9,7 @@ const diff = @import("ziggurat_document_diff");
 const v = @import("ziggurat_document_diff_view");
 const a = @import("ziggurat_document_accessibility");
 const paired = @import("ziggurat_document_diff_accessibility");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("objbase.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn zdd_probe_auxiliary(*anyopaque, u32, *f64) i32;
 extern fn zdd_probe_auxiliary_hit_mta(*anyopaque, *anyopaque, f64, f64) i32;
 extern fn zda_probe_release(*anyopaque) void;

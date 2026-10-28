@@ -5,11 +5,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const menus = @import("menus.zig");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 
 pub const Entry = struct { id: u64, command: u16, menu: c.HMENU, enabled: bool, ancestor_enabled: bool, accelerator: ?types.Accelerator };
 pub const Built = struct { menu: c.HMENU, count: usize };
@@ -79,9 +75,9 @@ pub fn pressed(wp: usize, lp: isize) ?types.Accelerator {
 }
 
 pub fn keyFromVirtual(code: usize) ?types.Key {
-    if (code >= 'A' and code <= 'Z') return @enumFromInt(@intFromEnum(types.Key.a) + code - 'A');
-    if (code >= '0' and code <= '9') return @enumFromInt(@intFromEnum(types.Key.digit0) + code - '0');
-    if (code >= c.VK_F1 and code <= c.VK_F24) return @enumFromInt(@intFromEnum(types.Key.f1) + code - c.VK_F1);
+    if (code >= 'A' and code <= 'Z') return @fromBackingInt(@intCast(@backingInt(types.Key.a) + code - 'A'));
+    if (code >= '0' and code <= '9') return @fromBackingInt(@intCast(@backingInt(types.Key.digit0) + code - '0'));
+    if (code >= c.VK_F1 and code <= c.VK_F24) return @fromBackingInt(@intCast(@backingInt(types.Key.f1) + code - c.VK_F1));
     return switch (code) {
         c.VK_SPACE => .space,
         c.VK_RETURN => .enter,

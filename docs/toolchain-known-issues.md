@@ -1,6 +1,6 @@
 # Pinned toolchain observations
 
-The supported compiler remains Zig 0.15.2. The following is a locally reproduced compiler/backend issue, not a change to framework error identities or native callback ownership. No global LLVM override or toolchain upgrade is required by this workaround.
+The supported compiler is Zig 0.17.0; the issues below were reproduced on 0.15.2 and are kept for reference. The following is a locally reproduced compiler/backend issue, not a change to framework error identities or native callback ownership. No global LLVM override or toolchain upgrade is required by this workaround.
 
 ## Linux x86 Debug optional-error comparison
 

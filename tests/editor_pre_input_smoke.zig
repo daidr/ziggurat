@@ -5,11 +5,7 @@ const ui = @import("ziggurat_ui");
 const t = @import("ziggurat_text_layout");
 const d = @import("ziggurat_document");
 const editing = @import("ziggurat_document_editor");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn zlg_test_commit(*anyopaque, [*:0]const u8) void;
 extern fn zlg_resource_count() u32;
 const bounds: ui.Rect = .{ .x = 0, .y = 0, .width = 200, .height = 100 };

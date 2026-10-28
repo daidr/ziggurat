@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
@@ -9,7 +10,7 @@ const Step = struct { options: web.tools.PdfOptions, pages: usize, media_box: []
 const State = struct {
     app: *z.App,
     path: []const u8,
-    directory: std.fs.Dir,
+    directory: std.Io.Dir,
     allocator: std.mem.Allocator,
     view: web.View = undefined,
     step: usize = 0,
@@ -59,7 +60,7 @@ const State = struct {
         self.submit();
     }
     fn check(self: *State) !void {
-        const bytes = try self.directory.readFileAlloc(self.allocator, "out.pdf", 16 * 1024 * 1024);
+        const bytes = try self.directory.readFileAlloc(zio.io(), "out.pdf", self.allocator, .limited(16 * 1024 * 1024));
         defer self.allocator.free(bytes);
         const want = self.steps[self.step];
         if (!std.mem.startsWith(u8, bytes, "%PDF-")) return error.NotPdf;
@@ -69,16 +70,16 @@ const State = struct {
             std.debug.print("pages={d} want={d} media box {s} found={}\n", .{ pages, want.pages, want.media_box, box });
             return error.WrongPdf;
         }
-        try self.directory.deleteFile("out.pdf");
+        try self.directory.deleteFile(zio.io(), "out.pdf");
     }
 };
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    var private = std.testing.tmpDir(.{});
+    var private = zio.tmpDir(.{});
     defer private.cleanup();
-    const directory = try private.dir.realpathAlloc(allocator, ".");
+    const directory = try zio.realPathAlloc(private.dir, ".", allocator);
     defer allocator.free(directory);
     const path = try std.fs.path.join(allocator, &.{ directory, "out.pdf" });
     defer allocator.free(path);

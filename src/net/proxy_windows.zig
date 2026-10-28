@@ -3,10 +3,11 @@
 //! (WPAD) and setup scripts (PAC files) first, then the manual proxy and its
 //! bypass list. WinHTTP is loaded from the system directory on first use.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const windows = std.os.windows;
 const proxy = @import("proxy.zig");
 
-const BOOL = windows.BOOL;
+const BOOL = c_int;
 const LPWSTR = ?[*:0]u16;
 
 /// WINHTTP_CURRENT_USER_IE_PROXY_CONFIG. Its strings are the caller's, freed
@@ -55,7 +56,7 @@ extern "kernel32" fn LoadLibraryExW(name: [*:0]const u16, file: ?*anyopaque, fla
 extern "kernel32" fn GetProcAddress(module: windows.HMODULE, name: [*:0]const u8) callconv(.winapi) ?*anyopaque;
 extern "kernel32" fn GlobalFree(memory: ?*anyopaque) callconv(.winapi) ?*anyopaque;
 
-var once = std.once(load);
+var once = zio.once(load);
 var api: ?Api = null;
 
 /// Loads WinHTTP from the system directory, never from the app's directory
@@ -120,7 +121,7 @@ fn automatic(winhttp: Api, url: []const u8, detect: bool, pac: []const u8, secur
         options.flags |= autoproxy_config_url;
         options.auto_config_url = pac_wide[0..length :0];
     }
-    var url_wide: [std.Uri.host_name_max + 64:0]u16 = undefined;
+    var url_wide: [std.Io.net.HostName.max_len + 64:0]u16 = undefined;
     const url_length = std.unicode.utf8ToUtf16Le(&url_wide, url) catch return null;
     url_wide[url_length] = 0;
     var info: ProxyInfo = .{ .access_type = 0, .proxy = null, .proxy_bypass = null };

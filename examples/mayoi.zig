@@ -19,6 +19,7 @@
 //!
 //! Run it with `zig build run-mayoi`.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const view = @import("ziggurat_view");
@@ -129,7 +130,7 @@ const Popup = struct {
 /// The upgrades a level offers, three at a time. Four bring a bandmate: the
 /// first time, they join, and follow Tomori from then on.
 const Upgrade = enum { voice, tempo, harmony, bass, picks, drums, shoes, eye, bandaid };
-const upgrade_count = std.meta.fields(Upgrade).len;
+const upgrade_count = zio.fields(Upgrade).len;
 
 const UpgradeInfo = struct { name: []const u8, desc: []const u8, max: u32, icon: usize, member: ?usize };
 const upgrades = std.EnumArray(Upgrade, UpgradeInfo).init(.{
@@ -548,7 +549,7 @@ const World = struct {
         const push: f64 = if (e.kind == .shadow) 40 else 90;
         e.knock = e.pos.sub(from).norm().mul(push);
         var popup: Popup = .{ .pos = e.pos.add(.{ .y = -10 }) };
-        popup.len = (std.fmt.bufPrint(&popup.text, "{d}", .{@round(d * 10) / 10}) catch "").len;
+        popup.len = (std.fmt.bufPrint(&popup.text, "{d}", .{@round(d * 10) / 10}) catch @as([]const u8, "")).len;
         self.popups.append(self.allocator, popup) catch {};
         if (e.hp > 0) return self.emit(.hit);
         e.dead = true;
@@ -646,7 +647,7 @@ const World = struct {
         if (upgrades.get(u).member) |m| if (self.levels.get(u) == 1) {
             self.band[self.band_len] = m;
             self.band_len += 1;
-            self.banner_len = (std.fmt.bufPrint(&self.banner, "{s} joins the band!", .{member_names[m]}) catch "").len;
+            self.banner_len = (std.fmt.bufPrint(&self.banner, "{s} joins the band!", .{member_names[m]}) catch @as([]const u8, "")).len;
             self.banner_time = 2.5;
             // They come from where the vocalist walked a moment ago.
             self.emit(.join);
@@ -1491,7 +1492,7 @@ const Tune = struct {
     band: std.atomic.Value(u32) = .init(0),
     /// Fade the bandmates in and out, per sample.
     gains: [member_count]f64 = @splat(0),
-    parts: [std.meta.fields(Voice).len]Part,
+    parts: [zio.fields(Voice).len]Part,
     rng: std.Random.DefaultPrng = .init(55),
 
     fn create(allocator: std.mem.Allocator) !*Tune {
@@ -1555,7 +1556,7 @@ const Tune = struct {
     }
 
     fn add(self: *Tune, voice: Voice, hit: Hit) !void {
-        try self.parts[@intFromEnum(voice)].hits.append(self.allocator, hit);
+        try self.parts[@backingInt(voice)].hits.append(self.allocator, hit);
     }
 
     fn noteHit(t: f64, m: i32, vel: f64) Hit {
@@ -1775,10 +1776,10 @@ const Widths = struct {
         const estimate = (view.Measurer{}).textSize(text, font).width;
         const engine = self.engine orelse return estimate;
         var buffer: [256]u8 = undefined;
-        const key = std.fmt.bufPrint(&buffer, "{d}/{d}/{s}", .{ font.size, @intFromEnum(font.weight), text }) catch return estimate;
+        const key = std.fmt.bufPrint(&buffer, "{d}/{d}/{s}", .{ font.size, @backingInt(font.weight), text }) catch return estimate;
         if (self.known.get(key)) |w| return w;
         const weights = [_]u32{ 400, 500, 600, 700 };
-        const layout = engine.layout(text, .{ .size = font.size, .weight = weights[@intFromEnum(font.weight)] }) catch return estimate;
+        const layout = engine.layout(text, .{ .size = font.size, .weight = weights[@backingInt(font.weight)] }) catch return estimate;
         defer layout.close() catch {};
         var w: f32 = 0;
         for (layout.lines() catch return estimate) |line| w = @max(w, line.width);
@@ -2278,7 +2279,7 @@ pub fn main() !void {
 
     const app_state = try allocator.create(App);
     defer allocator.destroy(app_state);
-    app_state.* = .{ .mayoi = .init(allocator, std.crypto.random.int(u64)) };
+    app_state.* = .{ .mayoi = .init(allocator, zio.random.int(u64)) };
     defer app_state.mayoi.deinit();
     app_state.bind();
     var storage: view.Storage(16, 256) = .{};

@@ -1,16 +1,17 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const publication = @import("publication.zig");
 
 /// Absolute path of the current release's executable under `root_path`.
 /// Caller frees.
 pub fn currentExecutable(allocator: std.mem.Allocator, root_path: []const u8, identity: []const u8, target: []const u8) ![]u8 {
-    var root = try std.fs.cwd().openDir(root_path, .{ .no_follow = true });
-    defer root.close();
+    var root = try std.Io.Dir.cwd().openDir(zio.io(), root_path, .{ .follow_symlinks = false });
+    defer root.close(zio.io());
     const current = try publication.readCurrent(allocator, root, identity, target);
     var relative_buffer: [512]u8 = undefined;
     const relative = try current.relativePath(&relative_buffer);
-    const absolute = try std.fs.cwd().realpathAlloc(allocator, root_path);
+    const absolute = try zio.realPathAlloc(std.Io.Dir.cwd(), root_path, allocator);
     defer allocator.free(absolute);
     return std.fs.path.join(allocator, &.{ absolute, relative });
 }
@@ -19,16 +20,10 @@ pub fn currentExecutable(allocator: std.mem.Allocator, root_path: []const u8, id
 /// Used to start a newly published release after the running App has
 /// finished shutting down (after `App.run` returns), so no window, callback
 /// or update lock of the old process is still live.
-pub fn spawnDetached(allocator: std.mem.Allocator, argv: []const []const u8, cwd: ?[]const u8) !void {
-    var child = std.process.Child.init(argv, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    child.cwd = cwd;
-    if (builtin.os.tag != .windows) child.pgid = 0;
-    try child.spawn();
+pub fn spawnDetached(_: std.mem.Allocator, argv: []const []const u8, cwd: ?[]const u8) !void {
+    const child = try zio.spawn(.{ .argv = argv, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore, .cwd = zio.cwd(cwd), .pgid = if (builtin.os.tag != .windows) 0 else null });
     if (builtin.os.tag == .windows) {
-        std.os.windows.CloseHandle(child.id);
+        std.os.windows.CloseHandle(child.id.?);
         std.os.windows.CloseHandle(child.thread_handle);
     }
     // POSIX: the child is reaped by init once this process exits.
@@ -38,11 +33,11 @@ test "current executable resolves inside the managed root" {
     const allocator = std.testing.allocator;
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();
-    try temp.dir.makePath("root/releases/linux-x86_64-1.0.0.0");
-    try temp.dir.writeFile(.{ .sub_path = "root/current.json", .data = 
+    try temp.dir.createDirPath(zio.io(), "root/releases/linux-x86_64-1.0.0.0");
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "root/current.json", .data =
         \\{"format":1,"identity":"org.ziggurat.Launch","target":"linux-x86_64","version":{"major":1,"minor":0,"patch":0,"revision":0},"release":"linux-x86_64-1.0.0.0","executable":"app"}
     });
-    const base = try temp.dir.realpathAlloc(allocator, ".");
+    const base = try zio.realPathAlloc(temp.dir, ".", allocator);
     defer allocator.free(base);
     const root = try std.fs.path.join(allocator, &.{ base, "root" });
     defer allocator.free(root);

@@ -1,10 +1,6 @@
 const std = @import("std");
 const icons = @import("ziggurat_windows_icons");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 const name = std.unicode.utf8ToUtf16LeStringLiteral("Ziggurat.Packaging.Smoke");
 const product_name = std.unicode.utf8ToUtf16LeStringLiteral("Ziggurat \"资源\" & packaging \\ test");
 const translated_name = std.unicode.utf8ToUtf16LeStringLiteral("Ziggurat 资源测试");

@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const schema = @import("schema.zig");
 
 /// Returns an owned standalone TypeScript module, including its runtime.
@@ -40,7 +41,7 @@ fn write(comptime Service: type, writer: *std.Io.Writer) !void {
         try writer.writeAll(", item: ");
         try shape(M.Item, writer);
         try writer.writeAll(", errors: [");
-        inline for (@typeInfo(M.ErrorCode).@"enum".fields, 0..) |error_field, index| {
+        inline for (zio.fields(M.ErrorCode), 0..) |error_field, index| {
             if (index != 0) try writer.writeAll(",");
             try quoted(writer, error_field.name);
         }
@@ -79,9 +80,9 @@ fn tsType(comptime T: type, writer: *std.Io.Writer) anyerror!void {
             try tsType(info.child, writer);
             try writer.writeAll(" | null)");
         },
-        .@"enum" => |info| {
-            if (info.fields.len == 0) try writer.writeAll("never");
-            inline for (info.fields, 0..) |field, index| {
+        .@"enum" => {
+            if (zio.fields(T).len == 0) try writer.writeAll("never");
+            inline for (zio.fields(T), 0..) |field, index| {
                 if (index != 0) try writer.writeAll(" | ");
                 try quoted(writer, field.name);
             }
@@ -101,9 +102,9 @@ fn tsType(comptime T: type, writer: *std.Io.Writer) anyerror!void {
             try tsType(info.child, writer);
             try writer.writeAll(">");
         },
-        .@"struct" => |info| {
+        .@"struct" => {
             try writer.writeAll("{ ");
-            inline for (info.fields) |field| {
+            inline for (zio.fields(T)) |field| {
                 try quoted(writer, field.name);
                 try writer.writeAll(if (field.default_value_ptr != null) "?: " else ": ");
                 try tsType(field.type, writer);
@@ -126,9 +127,9 @@ fn shape(comptime T: type, writer: *std.Io.Writer) anyerror!void {
             try shape(info.child, writer);
             try writer.writeAll("}");
         },
-        .@"enum" => |info| {
+        .@"enum" => {
             try writer.writeAll("{kind:'enum',values:[");
-            inline for (info.fields, 0..) |field, index| {
+            inline for (zio.fields(T), 0..) |field, index| {
                 if (index != 0) try writer.writeAll(",");
                 try quoted(writer, field.name);
             }
@@ -146,9 +147,9 @@ fn shape(comptime T: type, writer: *std.Io.Writer) anyerror!void {
             try shape(info.child, writer);
             try writer.writeAll("}");
         },
-        .@"struct" => |info| {
+        .@"struct" => {
             try writer.writeAll("{kind:'object',fields:[");
-            inline for (info.fields, 0..) |field, index| {
+            inline for (zio.fields(T), 0..) |field, index| {
                 if (index != 0) try writer.writeAll(",");
                 try writer.writeAll("{name:");
                 try quoted(writer, field.name);

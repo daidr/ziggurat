@@ -321,9 +321,9 @@ test "assistive technology chooses rows and sorts by column headers" {
     const id = (try f.leaf()).id;
     try f.h.send(.{ .action = collections.partId(id, 37) });
     try testing.expectEqualSlices(u64, &.{37}, app.selection.items());
-    try f.h.send(.{ .value = .{ .id = collections.partId(id, 47), .change = .{ .set = @intFromEnum(view.ItemRequest.add) } } });
+    try f.h.send(.{ .value = .{ .id = collections.partId(id, 47), .change = .{ .set = @backingInt(view.ItemRequest.add) } } });
     try testing.expectEqualSlices(u64, &.{ 37, 47 }, app.selection.items());
-    try f.h.send(.{ .value = .{ .id = collections.partId(id, 37), .change = .{ .set = @intFromEnum(view.ItemRequest.deselect) } } });
+    try f.h.send(.{ .value = .{ .id = collections.partId(id, 37), .change = .{ .set = @backingInt(view.ItemRequest.deselect) } } });
     try testing.expectEqualSlices(u64, &.{47}, app.selection.items());
     try f.h.send(.{ .action = collections.partId(id, 0x636f_6c75_6d6e_0000 ^ view.key("Kind")) });
     try testing.expectEqual(@as(usize, 2), app.sort.?.column);
@@ -587,7 +587,7 @@ test "an outline opens and closes its items" {
     try testing.expectEqual(@as(usize, 0), app.open.len);
     // Assistive technology opens items too.
     const id = (try f.leaf()).id;
-    try f.h.send(.{ .value = .{ .id = collections.partId(id, 1), .change = .{ .set = @intFromEnum(view.ItemRequest.expand) } } });
+    try f.h.send(.{ .value = .{ .id = collections.partId(id, 1), .change = .{ .set = @backingInt(view.ItemRequest.expand) } } });
     try testing.expectEqualSlices(u64, &.{ 1, 2, 3, 6 }, app.keys(&buffer));
     try testing.expect(app.toggles >= 6);
 }

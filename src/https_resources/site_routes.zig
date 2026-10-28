@@ -193,11 +193,11 @@ test "policy header merge is explicit bounded and rejects replacement or duplica
     for (policy_headers) |header| try std.testing.expectError(error.ReservedSiteHeader, mergePolicyHeaders(&.{.{ .name = header.name, .value = "weakened" }}, &rows));
     try std.testing.expectError(error.DuplicateResponseHeader, mergePolicyHeaders(&.{ .{ .name = "X-a", .value = "x" }, .{ .name = "x-A", .value = "y" } }, &rows));
     try std.testing.expectError(error.ReservedResponseHeader, mergePolicyHeaders(&.{.{ .name = "Content-Length", .value = "1" }}, &rows));
-    const extra = [_]http.Header{.{ .name = "X-a", .value = "x" }} ** 14;
+    const extra = @as([14]http.Header, @splat(.{ .name = "X-a", .value = "x" }));
     try std.testing.expectError(error.TooManyResponseHeaders, mergePolicyHeaders(&extra, &rows));
 }
 test "policy header merge snapshots aliases and publishes nothing on validation failure" {
-    var rows = [_]http.Header{.{ .name = "X-sentinel", .value = "retained" }} ** 16;
+    var rows = @as([16]http.Header, @splat(.{ .name = "X-sentinel", .value = "retained" }));
     const merged = try mergePolicyHeaders(rows[0..1], &rows);
     try std.testing.expectEqualStrings("X-sentinel", merged[3].name);
     try std.testing.expectEqualStrings("retained", merged[3].value);

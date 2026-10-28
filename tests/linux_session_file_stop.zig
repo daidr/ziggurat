@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
@@ -27,14 +28,14 @@ const Worker = struct {
     app: *z.App,
     ready: z.Task,
     thread: ?std.Thread = null,
-    begin: std.Thread.Semaphore = .{},
-    finish: std.Thread.Semaphore = .{},
+    begin: zio.Semaphore = .{},
+    finish: zio.Semaphore = .{},
     stopping: std.atomic.Value(bool) = .init(false),
     failure: std.atomic.Value(u16) = .init(0),
     cancelled: std.atomic.Value(bool) = .init(false),
     post_closed: std.atomic.Value(bool) = .init(false),
     late_calls: std.atomic.Value(u32) = .init(0),
-    mutex: std.Thread.Mutex = .{},
+    mutex: zio.Mutex = .{},
     response: ?web.OwnedFileResponse = null,
 
     fn start(self: *Worker) !void {
@@ -71,13 +72,13 @@ const Worker = struct {
         };
     }
     fn perform(self: *Worker) !void {
-        var temporary = std.testing.tmpDir(.{});
+        var temporary = zio.tmpDir(.{});
         defer temporary.cleanup();
-        const file = try temporary.dir.createFile("private", .{ .read = true });
-        defer file.close();
+        const file = try temporary.dir.createFile(zio.io(), "private", .{ .read = true });
+        defer file.close(zio.io());
         const block: [4096]u8 = @splat('p');
-        for (0..128) |_| try file.writeAll(&block);
-        const position = try file.getPos();
+        for (0..128) |_| try file.writeStreamingAll(zio.io(), &block);
+        const position = try zio.posix.position(file.handle);
         var prepared = try web.OwnedFileResponse.preparePumped(self.allocator, self.app.owner, file, .{}, 1024 * 1024);
         defer prepared.pump.deinit();
         // Move the response to the protected slot. Only pump stays on worker.
@@ -99,7 +100,7 @@ const Worker = struct {
             self.cancelled.store(true, .release);
         };
         if (!self.cancelled.load(.acquire)) return error.PumpCompletedBeforeStop;
-        try std.testing.expectEqual(position, try file.getPos());
+        try std.testing.expectEqual(position, try zio.posix.position(file.handle));
 
         const late = try self.allocator.create(Late);
         const response = web.resources.OwnedResponse.init(self.allocator, .{ .bytes = "late worker response" }, 128) catch |failure| {

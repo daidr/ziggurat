@@ -25,7 +25,7 @@ const Mock = struct {
         try std.testing.expectEqual(@as(usize, 1), self.lease.pins);
         try std.testing.expectEqualStrings(key, uri);
         self.calls += 1;
-        if (self.solid) self.pixels = .{ 0, 0, 255, 255 } ** 4;
+        if (self.solid) self.pixels = @bitCast(@as([4][4]u8, @splat(.{ 0, 0, 255, 255 })));
         if (self.invalid) self.pixels[0] = 255;
         if (self.invalid) self.pixels[3] = 0;
         self.level = .{ .pixels = &self.pixels, .byte_len = self.pixels.len, .width = 2, .height = 2, .stride = 8 };

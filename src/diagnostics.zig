@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 
 pub const Severity = enum { info, warning, err };
 
@@ -79,7 +80,7 @@ pub fn Recorder(comptime capacity: usize) type {
     if (capacity == 0) @compileError("Diagnostic recorder capacity must be positive");
     return struct {
         const Self = @This();
-        mutex: std.Thread.Mutex = .{},
+        mutex: zio.Mutex = .{},
         items: [capacity]Diagnostic = undefined,
         head: usize = 0,
         len: usize = 0,
@@ -219,7 +220,7 @@ test "concurrent sinks retain every diagnostic without tearing snapshot values" 
     const total = 4 * 128;
     const Worker = struct {
         sink: Sink,
-        start: *std.Thread.ResetEvent,
+        start: *zio.ResetEvent,
         finished: *std.atomic.Value(usize),
         base: u32,
         fn run(self: *@This()) void {
@@ -237,7 +238,7 @@ test "concurrent sinks retain every diagnostic without tearing snapshot values" 
         }
     };
     var recorder: Recorder(total) = .{};
-    var start: std.Thread.ResetEvent = .{};
+    var start: zio.ResetEvent = .{};
     var finished: std.atomic.Value(usize) = .init(0);
     var workers: [4]Worker = undefined;
     var threads: [4]std.Thread = undefined;
@@ -277,14 +278,14 @@ test "concurrent sinks retain every diagnostic without tearing snapshot values" 
 test "concurrent bounded recording counts overwritten diagnostics exactly" {
     const Worker = struct {
         recorder: *Recorder(7),
-        start: *std.Thread.ResetEvent,
+        start: *zio.ResetEvent,
         fn run(self: *@This()) void {
             self.start.wait();
             for (0..128) |_| self.recorder.record(.{ .domain = .hresult, .operation = .webview_create, .err = error.InitializationFailed });
         }
     };
     var recorder: Recorder(7) = .{};
-    var start: std.Thread.ResetEvent = .{};
+    var start: zio.ResetEvent = .{};
     var worker: Worker = .{ .recorder = &recorder, .start = &start };
     var threads: [4]std.Thread = undefined;
     var spawned: usize = 0;

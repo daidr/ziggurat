@@ -23,10 +23,10 @@ pub const PreparedSource = struct {
     /// Worker-only setup. Takes no ownership of the caller's file, preserves its
     /// seek position and duplicates its descriptor. The host must keep all bytes
     /// private and immutable until the pump finishes. No body-sized copy occurs.
-    pub fn prepare(main_thread: std.Thread.Id, file: std.fs.File, maximum: u64) !Prepared {
+    pub fn prepare(main_thread: std.Thread.Id, file: std.Io.File, maximum: u64) !Prepared {
         return prepareWithFailure(main_thread, file, maximum, null);
     }
-    pub fn prepareWithFailure(main_thread: std.Thread.Id, file: std.fs.File, maximum: u64, native_failure: ?*?i32) !Prepared {
+    pub fn prepareWithFailure(main_thread: std.Thread.Id, file: std.Io.File, maximum: u64, native_failure: ?*?i32) !Prepared {
         if (native_failure) |failure| failure.* = null;
         if (std.Thread.getCurrentId() == main_thread) return error.UiThreadForbidden;
         if (maximum == 0 or maximum > hard_max_bytes) return error.InvalidFileStreamLimit;
@@ -49,10 +49,10 @@ pub const PreparedSource = struct {
     /// source file must still fit maximum. Duplicates the fd without changing
     /// its seek position. The same privacy/immutability contract as prepare
     /// applies to the source until the explicit pump has finished.
-    pub fn prepareWindow(main_thread: std.Thread.Id, file: std.fs.File, window: FileWindow, maximum: u64) !Prepared {
+    pub fn prepareWindow(main_thread: std.Thread.Id, file: std.Io.File, window: FileWindow, maximum: u64) !Prepared {
         return prepareWindowWithFailure(main_thread, file, window, maximum, null);
     }
-    pub fn prepareWindowWithFailure(main_thread: std.Thread.Id, file: std.fs.File, window: FileWindow, maximum: u64, native_failure: ?*?i32) !Prepared {
+    pub fn prepareWindowWithFailure(main_thread: std.Thread.Id, file: std.Io.File, window: FileWindow, maximum: u64, native_failure: ?*?i32) !Prepared {
         if (native_failure) |failure| failure.* = null;
         if (std.Thread.getCurrentId() == main_thread) return error.UiThreadForbidden;
         if (maximum == 0 or maximum > hard_max_bytes) return error.InvalidFileStreamLimit;
@@ -71,7 +71,7 @@ pub const PreparedSource = struct {
         }
         return .{ .source = .{ .native = source, .length = length }, .pump = .{ .native = pump } };
     }
-    fn prepareWindows(main_thread: std.Thread.Id, file: std.fs.File, maximum: u64, window: ?FileWindow, native_failure: ?*?i32) !Prepared {
+    fn prepareWindows(main_thread: std.Thread.Id, file: std.Io.File, maximum: u64, window: ?FileWindow, native_failure: ?*?i32) !Prepared {
         var source: ?*anyopaque = null;
         var pump: ?*anyopaque = null;
         var code: u32 = 0;
@@ -354,7 +354,7 @@ extern fn zwk_file_candidate_abort(*anyopaque) void;
 extern fn zwk_file_candidate_admit(*anyopaque, c_int, c_int, *?*anyopaque) void;
 extern fn zwk_file_counts(*u32, *u32, *u32, *u32) void;
 const WindowsCounts = extern struct { physical: u32, controls: u32, budgets: u32, readers: u32, candidates: u32, rings: u32 };
-extern fn zws_file_prepare(u64, std.fs.File.Handle, u64, c_int, u64, u64, *?*anyopaque, *?*anyopaque, *u32) c_int;
+extern fn zws_file_prepare(u64, std.Io.File.Handle, u64, c_int, u64, u64, *?*anyopaque, *?*anyopaque, *u32) c_int;
 extern fn zws_file_pump(*anyopaque, *u32) c_int;
 extern fn zws_file_pump_release(*anyopaque) void;
 extern fn zws_source_release(*anyopaque) void;
@@ -375,7 +375,7 @@ extern fn zws_candidate_admit(*anyopaque, c_int, ?*?*anyopaque) void;
 extern fn zws_counts(*WindowsCounts) void;
 
 test "owner preparation rejects UI thread before borrowing a file" {
-    const file: std.fs.File = undefined;
+    const file: std.Io.File = undefined;
     var code: ?i32 = 19;
     try std.testing.expectError(error.UiThreadForbidden, PreparedSource.prepareWithFailure(std.Thread.getCurrentId(), file, hard_max_bytes, &code));
     try std.testing.expect(code == null);
@@ -389,7 +389,7 @@ test "file window unsupported platform is cold before file access" {
     if (builtin.os.tag == .linux or builtin.os.tag == .windows) return;
     const current = std.Thread.getCurrentId();
     const other: std.Thread.Id = if (current == 1) 2 else 1;
-    const file: std.fs.File = undefined;
+    const file: std.Io.File = undefined;
     var code: ?i32 = 19;
     try std.testing.expectError(error.UnsupportedCapability, PreparedSource.prepareWindowWithFailure(other, file, .{ .offset = std.math.maxInt(u64), .length = 1 }, hard_max_bytes, &code));
     try std.testing.expect(code == null);

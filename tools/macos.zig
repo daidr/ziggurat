@@ -4,6 +4,7 @@
 //! executables are written anywhere; signing, disk images and notarization
 //! run the tools of macOS (codesign, hdiutil, xcrun) and need a Mac.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const icon = @import("icon.zig");
 const dsstore = @import("dsstore.zig");
@@ -46,7 +47,7 @@ pub const MacOS = struct {
     };
 };
 
-pub const default_minimum_system_version = "13.0";
+pub const default_minimum_system_version = "15.0";
 
 /// A type of file the app opens: Finder offers it for files with these
 /// extensions.
@@ -387,36 +388,36 @@ pub const BundleContents = struct {
 
 /// Writes `<name>.app` into `parent`, replacing an older one, and returns
 /// its file name.
-pub fn writeBundle(allocator: std.mem.Allocator, parent: std.fs.Dir, app: App, contents: BundleContents) ![]u8 {
+pub fn writeBundle(allocator: std.mem.Allocator, parent: std.Io.Dir, app: App, contents: BundleContents) ![]u8 {
     const name = try fileName(allocator, app.name);
     defer allocator.free(name);
     const bundle = try std.fmt.allocPrint(allocator, "{s}.app", .{name});
     errdefer allocator.free(bundle);
-    try parent.deleteTree(bundle);
-    var root = try parent.makeOpenPath(bundle, .{});
-    defer root.close();
-    try root.makePath("Contents/MacOS");
-    try root.makePath("Contents/Resources");
+    try parent.deleteTree(zio.io(), bundle);
+    var root = try parent.createDirPathOpen(zio.io(), bundle, .{});
+    defer root.close(zio.io());
+    try root.createDirPath(zio.io(), "Contents/MacOS");
+    try root.createDirPath(zio.io(), "Contents/Resources");
     var buffer: [std.fs.max_path_bytes]u8 = undefined;
-    try root.writeFile(.{ .sub_path = try std.fmt.bufPrint(&buffer, "Contents/MacOS/{s}", .{name}), .data = contents.executable, .flags = .{ .mode = 0o755 } });
-    if (contents.provisioning_profile) |profile| try root.writeFile(.{ .sub_path = "Contents/embedded.provisionprofile", .data = profile });
-    if (contents.icns) |bytes| try root.writeFile(.{ .sub_path = "Contents/Resources/" ++ icon_file, .data = bytes });
-    if (contents.catalog) |bytes| try root.writeFile(.{ .sub_path = "Contents/Resources/" ++ catalog_file, .data = bytes });
+    try root.writeFile(zio.io(), .{ .sub_path = try std.fmt.bufPrint(&buffer, "Contents/MacOS/{s}", .{name}), .data = contents.executable, .flags = .{ .permissions = zio.mode(0o755) } });
+    if (contents.provisioning_profile) |profile| try root.writeFile(zio.io(), .{ .sub_path = "Contents/embedded.provisionprofile", .data = profile });
+    if (contents.icns) |bytes| try root.writeFile(zio.io(), .{ .sub_path = "Contents/Resources/" ++ icon_file, .data = bytes });
+    if (contents.catalog) |bytes| try root.writeFile(zio.io(), .{ .sub_path = "Contents/Resources/" ++ catalog_file, .data = bytes });
     for (app.languages) |language| {
         const folder = try lprojName(allocator, language.tag);
         defer allocator.free(folder);
         const path = try std.fmt.bufPrint(&buffer, "Contents/Resources/{s}.lproj", .{folder});
-        try root.makePath(path);
+        try root.createDirPath(zio.io(), path);
         const localized = language.name orelse continue;
         if (std.mem.eql(u8, localized, app.name)) continue;
         const strings = try localizedStrings(allocator, localized);
         defer allocator.free(strings);
-        try root.writeFile(.{ .sub_path = try std.fmt.bufPrint(&buffer, "Contents/Resources/{s}.lproj/InfoPlist.strings", .{folder}), .data = strings });
+        try root.writeFile(zio.io(), .{ .sub_path = try std.fmt.bufPrint(&buffer, "Contents/Resources/{s}.lproj/InfoPlist.strings", .{folder}), .data = strings });
     }
     const info = try infoPlist(allocator, app, name, contents.icns != null, contents.catalog != null);
     defer allocator.free(info);
-    try root.writeFile(.{ .sub_path = "Contents/Info.plist", .data = info });
-    try root.writeFile(.{ .sub_path = "Contents/PkgInfo", .data = "APPL????" });
+    try root.writeFile(zio.io(), .{ .sub_path = "Contents/Info.plist", .data = info });
+    try root.writeFile(zio.io(), .{ .sub_path = "Contents/PkgInfo", .data = "APPL????" });
     return bundle;
 }
 
@@ -442,7 +443,7 @@ pub const Arch = enum {
 pub fn machOArch(bytes: []const u8) !Arch {
     if (bytes.len < 12 or std.mem.readInt(u32, bytes[0..4], .little) != mach_o_64) return error.NotMachO;
     const cpu = std.mem.readInt(u32, bytes[4..8], .little);
-    inline for (std.meta.fields(Arch)) |field| if (cpu == @as(Arch, @enumFromInt(field.value)).cpuType()) return @enumFromInt(field.value);
+    inline for (comptime std.enums.values(Arch)) |arch| if (cpu == arch.cpuType()) return arch;
     return error.UnsupportedArchitecture;
 }
 
@@ -514,10 +515,10 @@ pub const Output = struct {
 };
 
 pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !Output {
-    const result = std.process.Child.run(.{ .allocator = allocator, .argv = argv, .max_output_bytes = 16 * 1024 * 1024 }) catch |err| {
+    const result = zio.run(allocator, .{ .argv = argv, .stdout_limit = .limited(16 * 1024 * 1024), .stderr_limit = .limited(16 * 1024 * 1024) }) catch |err| {
         return .{ .ok = false, .text = try std.fmt.allocPrint(allocator, "{s}: {s}", .{ argv[0], @errorName(err) }) };
     };
-    const ok = result.term == .Exited and result.term.Exited == 0;
+    const ok = result.term == .exited and result.term.exited == 0;
     return .{ .ok = ok, .text = try std.mem.concat(allocator, u8, &.{ result.stdout, result.stderr }) };
 }
 
@@ -553,12 +554,12 @@ pub fn compileIcon(allocator: std.mem.Allocator, source: []const u8, minimum_sys
     const document = try std.fs.path.join(allocator, &.{ temporary.path, icon_name ++ ".icon" });
     try command(allocator, &.{ "/bin/cp", "-R", source, document });
     const out = try std.fs.path.join(allocator, &.{ temporary.path, "out" });
-    try std.fs.cwd().makePath(out);
+    try std.Io.Dir.cwd().createDirPath(zio.io(), out);
     const output = try run(allocator, &.{ "xcrun", "actool", document, "--compile", out, "--output-format", "human-readable-text", "--platform", "macosx", "--target-device", "mac", "--minimum-deployment-target", minimum_system_version, "--app-icon", icon_name, "--output-partial-info-plist", try std.fs.path.join(allocator, &.{ out, "partial.plist" }) });
-    var dir = try std.fs.cwd().openDir(out, .{});
-    defer dir.close();
-    const catalog = dir.readFileAlloc(allocator, catalog_file, 64 * 1024 * 1024) catch null;
-    const icns = dir.readFileAlloc(allocator, icon_name ++ ".icns", 64 * 1024 * 1024) catch null;
+    var dir = try std.Io.Dir.cwd().openDir(zio.io(), out, .{});
+    defer dir.close(zio.io());
+    const catalog = dir.readFileAlloc(zio.io(), catalog_file, allocator, .limited(64 * 1024 * 1024)) catch null;
+    const icns = dir.readFileAlloc(zio.io(), icon_name ++ ".icns", allocator, .limited(64 * 1024 * 1024)) catch null;
     if (!output.ok or catalog == null or icns == null) {
         std.debug.print("ziggurat: actool could not compile {s} (it needs Xcode 26 or later)\n{s}\n", .{ source, std.mem.trim(u8, output.text, " \r\n") });
         return error.IconNotCompiled;
@@ -568,25 +569,25 @@ pub fn compileIcon(allocator: std.mem.Allocator, source: []const u8, minimum_sys
 
 /// The bundle's icon: `macos.icon` as an .icns or a catalog, else `png`
 /// (the project's icon) rendered as .icns.
-pub fn bundleIcons(allocator: std.mem.Allocator, project: std.fs.Dir, macos: MacOS, png: ?[]const u8) !struct { icns: ?[]const u8 = null, catalog: ?[]const u8 = null } {
+pub fn bundleIcons(allocator: std.mem.Allocator, project: std.Io.Dir, macos: MacOS, png: ?[]const u8) !struct { icns: ?[]const u8 = null, catalog: ?[]const u8 = null } {
     var rendered: ?[]const u8 = null;
     if (png) |bytes| rendered = try icon.pngToIcns(allocator, bytes);
     const source = macos.icon orelse return .{ .icns = rendered };
     const extension = std.fs.path.extension(source);
     if (std.ascii.eqlIgnoreCase(extension, ".icns")) {
-        const bytes = try project.readFileAlloc(allocator, source, 64 * 1024 * 1024);
+        const bytes = try project.readFileAlloc(zio.io(), source, allocator, .limited(64 * 1024 * 1024));
         if (!std.mem.startsWith(u8, bytes, "icns")) return error.IconNotIcns;
         return .{ .icns = bytes };
     }
     if (std.ascii.eqlIgnoreCase(extension, ".icon")) {
-        const path = try project.realpathAlloc(allocator, source);
+        const path = try zio.realPathAlloc(project, source, allocator);
         const compiled = compileIcon(allocator, path, macos.minimumSystemVersion) catch |err| {
             std.debug.print("ziggurat: skipping {s}: {s}\n", .{ source, if (err == error.NeedsMacOS) "compiling it needs macOS with Xcode 26 or later" else @errorName(err) });
             return .{ .icns = rendered };
         };
         return .{ .icns = compiled.icns, .catalog = compiled.catalog };
     }
-    if (std.ascii.eqlIgnoreCase(extension, ".car")) return .{ .icns = rendered, .catalog = try project.readFileAlloc(allocator, source, 64 * 1024 * 1024) };
+    if (std.ascii.eqlIgnoreCase(extension, ".car")) return .{ .icns = rendered, .catalog = try project.readFileAlloc(zio.io(), source, allocator, .limited(64 * 1024 * 1024)) };
     return error.UnknownIconType;
 }
 
@@ -634,13 +635,13 @@ fn hdiutilRetrying(allocator: std.mem.Allocator, argv: []const []const u8) !void
             if (attempt > 0) std.debug.print("first attempt: {s}\n", .{std.mem.trim(u8, first.?, " \r\n")});
             return error.CommandFailed;
         }
-        std.Thread.sleep((@as(u64, 2) << attempt) * std.time.ns_per_s);
+        zio.sleep((@as(u64, 2) << attempt) * std.time.ns_per_s);
     }
 }
 
 /// The com.apple.FinderInfo attribute of a folder with a custom icon.
 pub fn finderInfoHex() [64]u8 {
-    var info = [_]u8{0} ** 32;
+    var info: [32]u8 = @splat(0);
     info[8] = 0x04; // kHasCustomIcon, 0x0400, big-endian
     return std.fmt.bytesToHex(info, .lower);
 }
@@ -651,15 +652,15 @@ pub const TempDir = struct {
 
     /// A new directory in `parent` (default: the system's temporary folder).
     pub fn create(allocator: std.mem.Allocator, parent: ?[]const u8, prefix: []const u8) !TempDir {
-        const base = parent orelse std.process.getEnvVarOwned(allocator, "TMPDIR") catch try allocator.dupe(u8, "/tmp");
+        const base = parent orelse zio.getEnvVarOwned(allocator, "TMPDIR") catch try allocator.dupe(u8, "/tmp");
         var random: [8]u8 = undefined;
-        std.crypto.random.bytes(&random);
-        const path = try std.fmt.allocPrint(allocator, "{s}/{s}-{s}", .{ std.mem.trimRight(u8, base, "/"), prefix, std.fmt.bytesToHex(random, .lower) });
-        try std.fs.cwd().makePath(path);
+        zio.random.bytes(&random);
+        const path = try std.fmt.allocPrint(allocator, "{s}/{s}-{s}", .{ std.mem.trimEnd(u8, base, "/"), prefix, std.fmt.bytesToHex(random, .lower) });
+        try std.Io.Dir.cwd().createDirPath(zio.io(), path);
         return .{ .allocator = allocator, .path = path };
     }
     pub fn remove(self: TempDir) void {
-        std.fs.cwd().deleteTree(self.path) catch {};
+        std.Io.Dir.cwd().deleteTree(zio.io(), self.path) catch {};
     }
 };
 
@@ -690,23 +691,23 @@ pub fn buildDmg(allocator: std.mem.Allocator, options: DmgOptions) !void {
     // sparse file, which HFS+ cannot keep sparse.
     const source = try std.fs.path.join(allocator, &.{ work.path, "src" });
     const app_name = std.fs.path.basename(options.app);
-    try std.fs.cwd().makePath(source);
+    try std.Io.Dir.cwd().createDirPath(zio.io(), source);
     try command(allocator, &.{ "ditto", "--noclone", options.app, try std.fs.path.join(allocator, &.{ source, app_name }) });
-    var source_dir = try std.fs.cwd().openDir(source, .{});
-    defer source_dir.close();
-    try source_dir.symLink("/Applications", "Applications", .{ .is_directory = true });
+    var source_dir = try std.Io.Dir.cwd().openDir(zio.io(), source, .{});
+    defer source_dir.close(zio.io());
+    try source_dir.symLink(zio.io(), "/Applications", "Applications", .{ .is_directory = true });
     // Finder hides the .app extension of bundles by default; hiding it with
     // the Finder flag would make the signature fail strict verification.
     const layout = try dsstore.dmgLayout(allocator, app_name);
-    try source_dir.writeFile(.{ .sub_path = ".DS_Store", .data = layout });
+    try source_dir.writeFile(zio.io(), .{ .sub_path = ".DS_Store", .data = layout });
     const volume_icon = try std.fs.path.join(allocator, &.{ options.app, "Contents", "Resources", icon_file });
-    const has_icon = if (std.fs.cwd().access(volume_icon, .{})) |_| true else |_| false;
-    if (has_icon) try std.fs.cwd().copyFile(volume_icon, source_dir, ".VolumeIcon.icns", .{});
+    const has_icon = if (std.Io.Dir.cwd().access(zio.io(), volume_icon, .{})) |_| true else |_| false;
+    if (has_icon) try std.Io.Dir.cwd().copyFile(volume_icon, source_dir, ".VolumeIcon.icns", zio.io(), .{});
 
     const writable = try std.fs.path.join(allocator, &.{ work.path, "rw.dmg" });
     try hdiutilRetrying(allocator, &hdiutilCreateArgs(options.volume, source, writable));
     const mount = try std.fs.path.join(allocator, &.{ work.path, "mnt" });
-    try std.fs.cwd().makePath(mount);
+    try std.Io.Dir.cwd().createDirPath(zio.io(), mount);
     const attach = try run(allocator, &.{ "hdiutil", "attach", "-readwrite", "-noverify", "-noautoopen", "-nobrowse", "-mountpoint", mount, writable });
     const disk = if (attach.ok) attachedDisk(attach.text) else null;
     if (disk == null) {
@@ -719,10 +720,10 @@ pub fn buildDmg(allocator: std.mem.Allocator, options: DmgOptions) !void {
     };
     if (has_icon) try command(allocator, &.{ "/usr/bin/xattr", "-wx", "com.apple.FinderInfo", &finderInfoHex(), mount });
     // Created by macOS while the image is mounted.
-    var mounted = try std.fs.cwd().openDir(mount, .{});
-    mounted.deleteTree(".fseventsd") catch {};
-    mounted.deleteTree(".Trashes") catch {};
-    mounted.close();
+    var mounted = try std.Io.Dir.cwd().openDir(zio.io(), mount, .{});
+    mounted.deleteTree(zio.io(), ".fseventsd") catch {};
+    mounted.deleteTree(zio.io(), ".Trashes") catch {};
+    mounted.close(zio.io());
     try hdiutilRetrying(allocator, &.{ "hdiutil", "detach", disk.? });
     attached = false;
 
@@ -744,12 +745,12 @@ pub fn notarize(allocator: std.mem.Allocator, credentials: MacOS.Notarize, dmg: 
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(allocator, &.{ "xcrun", "notarytool", "submit", dmg, "--keychain-profile", credentials.keychainProfile, "--wait", "--output-format", "json" });
     if (credentials.keychain) |keychain| try argv.appendSlice(allocator, &.{ "--keychain", keychain });
-    const result = std.process.Child.run(.{ .allocator = allocator, .argv = argv.items, .max_output_bytes = 16 * 1024 * 1024 }) catch |err| {
+    const result = zio.run(allocator, .{ .argv = argv.items, .stdout_limit = .limited(16 * 1024 * 1024), .stderr_limit = .limited(16 * 1024 * 1024) }) catch |err| {
         std.debug.print("ziggurat: xcrun notarytool: {s}\n", .{@errorName(err)});
         return error.NotarizationFailed;
     };
     const verdict = notaryVerdict(allocator, result.stdout);
-    const exited = result.term == .Exited and result.term.Exited == 0;
+    const exited = result.term == .exited and result.term.exited == 0;
     if (!exited or !std.mem.eql(u8, verdict.status, "Accepted")) {
         std.debug.print("ziggurat: notarization failed ({s} {s})\n{s}{s}\n", .{ verdict.status, verdict.message, result.stdout, result.stderr });
         if (verdict.id.len > 0) std.debug.print("see: xcrun notarytool log {s} --keychain-profile '{s}'\n", .{ verdict.id, credentials.keychainProfile });
@@ -838,30 +839,30 @@ test "bundles hold the executable, the icon, the profile and the localized names
     const allocator = arena.allocator();
     var temp = testing.tmpDir(.{});
     defer temp.cleanup();
-    try temp.dir.makePath("Hello.app/Contents/stale");
+    try temp.dir.createDirPath(zio.io(), "Hello.app/Contents/stale");
     const app: App = .{ .name = "Hello", .identity = "com.example.hello", .version = "1.0.0.0", .languages = &.{ .{ .tag = "en" }, .{ .tag = "de", .name = "Hallo" }, .{ .tag = "fr" } } };
     const bundle = try writeBundle(allocator, temp.dir, app, .{ .executable = "binary", .icns = "icns....", .provisioning_profile = "profile" });
     try testing.expectEqualStrings("Hello.app", bundle);
-    try testing.expectError(error.FileNotFound, temp.dir.access("Hello.app/Contents/stale", .{}));
-    try testing.expectEqualStrings("binary", try temp.dir.readFileAlloc(allocator, "Hello.app/Contents/MacOS/Hello", 64));
+    try testing.expectError(error.FileNotFound, temp.dir.access(zio.io(), "Hello.app/Contents/stale", .{}));
+    try testing.expectEqualStrings("binary", try temp.dir.readFileAlloc(zio.io(), "Hello.app/Contents/MacOS/Hello", allocator, .limited(64)));
     if (builtin.os.tag != .windows) {
-        const stat = try temp.dir.statFile("Hello.app/Contents/MacOS/Hello");
-        try testing.expect(stat.mode & 0o111 != 0);
+        const stat = try temp.dir.statFile(zio.io(), "Hello.app/Contents/MacOS/Hello", .{});
+        try testing.expect(zio.modeOf(stat.permissions) & 0o111 != 0);
     }
-    try testing.expectEqualStrings("APPL????", try temp.dir.readFileAlloc(allocator, "Hello.app/Contents/PkgInfo", 64));
-    try testing.expectEqualStrings("profile", try temp.dir.readFileAlloc(allocator, "Hello.app/Contents/embedded.provisionprofile", 64));
-    try testing.expectEqualStrings("icns....", try temp.dir.readFileAlloc(allocator, "Hello.app/Contents/Resources/AppIcon.icns", 64));
-    const strings = try temp.dir.readFileAlloc(allocator, "Hello.app/Contents/Resources/de.lproj/InfoPlist.strings", 4096);
+    try testing.expectEqualStrings("APPL????", try temp.dir.readFileAlloc(zio.io(), "Hello.app/Contents/PkgInfo", allocator, .limited(64)));
+    try testing.expectEqualStrings("profile", try temp.dir.readFileAlloc(zio.io(), "Hello.app/Contents/embedded.provisionprofile", allocator, .limited(64)));
+    try testing.expectEqualStrings("icns....", try temp.dir.readFileAlloc(zio.io(), "Hello.app/Contents/Resources/AppIcon.icns", allocator, .limited(64)));
+    const strings = try temp.dir.readFileAlloc(zio.io(), "Hello.app/Contents/Resources/de.lproj/InfoPlist.strings", allocator, .limited(4096));
     try testing.expect(std.mem.indexOf(u8, strings, "<key>CFBundleName</key>\n\t<string>Hallo</string>") != null);
-    try temp.dir.access("Hello.app/Contents/Resources/fr.lproj", .{});
-    try testing.expectError(error.FileNotFound, temp.dir.access("Hello.app/Contents/Resources/fr.lproj/InfoPlist.strings", .{}));
-    const info = try temp.dir.readFileAlloc(allocator, "Hello.app/Contents/Info.plist", 64 * 1024);
+    try temp.dir.access(zio.io(), "Hello.app/Contents/Resources/fr.lproj", .{});
+    try testing.expectError(error.FileNotFound, temp.dir.access(zio.io(), "Hello.app/Contents/Resources/fr.lproj/InfoPlist.strings", .{}));
+    const info = try temp.dir.readFileAlloc(zio.io(), "Hello.app/Contents/Info.plist", allocator, .limited(64 * 1024));
     try testing.expect(std.mem.indexOf(u8, info, "<key>CFBundleExecutable</key>\n\t<string>Hello</string>") != null);
 }
 
 fn thin(allocator: std.mem.Allocator, arch: Arch, size: usize) ![]u8 {
     const bytes = try allocator.alloc(u8, size);
-    for (bytes, 0..) |*byte, index| byte.* = @truncate(index *% 7 +% @intFromEnum(arch));
+    for (bytes, 0..) |*byte, index| byte.* = @truncate(index *% 7 +% @backingInt(arch));
     std.mem.writeInt(u32, bytes[0..4], mach_o_64, .little);
     std.mem.writeInt(u32, bytes[4..8], arch.cpuType(), .little);
     std.mem.writeInt(u32, bytes[8..12], if (arch == .aarch64) 0 else 3, .little);

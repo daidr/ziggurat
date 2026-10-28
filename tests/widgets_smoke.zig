@@ -3,13 +3,7 @@ const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const Watchdog = @import("watchdog.zig").Watchdog;
 extern fn zua_test_provider_status(*anyopaque, u64, c_int) i32;
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("uiautomation.h");
-    @cInclude("oleauto.h");
-});
+const c = @import("ziggurat_c_win32");
 fn rect(y: f32) ui.Rect {
     return .{ .x = 0, .y = y, .width = 180, .height = 32 };
 }

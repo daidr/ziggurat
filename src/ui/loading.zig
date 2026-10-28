@@ -588,7 +588,7 @@ pub fn draw(surface: cpu.Surface, transparent: bool, entry: Entry) cpu.Dirty {
 }
 
 fn coverageOf(kind: Kind, t: f64, options: Options) struct { ink: u32, pixels: [48 * 24]u32 } {
-    var pixels = [_]u32{0xffffffff} ** (48 * 24);
+    var pixels = @as([48 * 24]u32, @splat(0xffffffff));
     const surface: cpu.Surface = .{ .pixels = &pixels, .width = 48, .height = 24, .stride = 48, .scale = 1, .clip = .{ 0, 0, 48, 24 } };
     _ = draw(surface, false, .{ .bounds = .{ .x = 0, .y = 0, .width = 24 * kind.aspect(), .height = 24 }, .kind = kind, .phase = t, .color = .rgb(0), .options = options });
     var ink: u32 = 0;
@@ -628,7 +628,7 @@ test "options vary the indicators they apply to" {
 }
 
 test "indicators respect the clip and keep alpha on transparent planes" {
-    var pixels = [_]u32{0} ** (24 * 24);
+    var pixels = @as([24 * 24]u32, @splat(0));
     var surface: cpu.Surface = .{ .pixels = &pixels, .width = 24, .height = 24, .stride = 24, .scale = 1, .clip = .{ 0, 0, 12, 24 } };
     const dirty = draw(surface, true, .{ .bounds = .{ .x = 0, .y = 0, .width = 24, .height = 24 }, .kind = .ring, .phase = 0, .color = .{ .r = 255, .g = 0, .b = 0, .a = 255 } });
     try std.testing.expect(dirty.right <= 12);

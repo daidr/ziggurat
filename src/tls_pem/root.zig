@@ -59,6 +59,6 @@ test "certificate and private key share bounded exact block framing" {
         } else try std.testing.expectError(error.InvalidTlsPrivateKey, validatePrivateKey(invalid));
     }
     try validatePrivateKey("-----BEGIN PRIVATE KEY-----\r\nYQ==\r\n-----END PRIVATE KEY-----\r\n");
-    const excessive = [_]u8{'x'} ** (private_key_capacity + 1);
+    const excessive = @as([private_key_capacity + 1]u8, @splat('x'));
     try std.testing.expectError(error.TlsPrivateKeyCapacityExceeded, validatePrivateKey(&excessive));
 }

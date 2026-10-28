@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const schemes = @import("schemes.zig");
 
@@ -65,7 +66,7 @@ fn validOutputName(name: []const u8) bool {
 pub fn safeName(buffer: []u8, suggested: []const u8) []const u8 {
     var name = suggested;
     if (std.mem.lastIndexOfAny(u8, name, "/\\")) |slash| name = name[slash + 1 ..];
-    if (builtin.os.tag == .windows) name = std.mem.trimRight(u8, name, ". ");
+    if (builtin.os.tag == .windows) name = std.mem.trimEnd(u8, name, ". ");
     if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) name = "download";
     var length: usize = 0;
     for (name) |byte| {
@@ -76,7 +77,7 @@ pub fn safeName(buffer: []u8, suggested: []const u8) []const u8 {
     length = utf8Cut(buffer[0..length], name.len);
     if (builtin.os.tag != .windows) return buffer[0..length];
     // A cut can leave a trailing dot or space, which Windows would drop.
-    length = std.mem.trimRight(u8, buffer[0..length], ". ").len;
+    length = std.mem.trimEnd(u8, buffer[0..length], ". ").len;
     if (length == 0) return buffer[0..0];
     // Only a device name is left invalid once the characters are replaced.
     if (!validOutputName(buffer[0..length])) {
@@ -108,15 +109,15 @@ pub fn uniquePath(allocator: std.mem.Allocator, process_main_thread_id: std.Thre
     if (std.Thread.getCurrentId() == process_main_thread_id) return error.UiThreadForbidden;
     if (!std.fs.path.isAbsolute(directory)) return error.AbsoluteOutputPathRequired;
     if (!validOutputName(name) or std.mem.indexOfAny(u8, name, "/\\") != null) return error.InvalidOutputName;
-    var dir = try std.fs.openDirAbsolute(directory, .{});
-    defer dir.close();
+    var dir = try std.Io.Dir.openDirAbsolute(zio.io(), directory, .{});
+    defer dir.close(zio.io());
     const extension = std.fs.path.extension(name);
     const stem = name[0 .. name.len - extension.len];
     var number: u32 = 1;
     while (number <= 9999) : (number += 1) {
         const candidate = if (number == 1) try allocator.dupe(u8, name) else try std.fmt.allocPrint(allocator, "{s} ({d}){s}", .{ stem, number, extension });
         defer allocator.free(candidate);
-        _ = dir.statFile(candidate) catch |err| switch (err) {
+        _ = dir.statFile(zio.io(), candidate, .{}) catch |err| switch (err) {
             error.FileNotFound => return std.fs.path.join(allocator, &.{ directory, candidate }),
             else => return err,
         };
@@ -143,9 +144,9 @@ pub const Destination = struct {
         if (!validOutputName(name)) return error.InvalidOutputName;
         // This checks the caller's private path at preparation time. It neither
         // locks that path for the Runtime nor defeats concurrent reparse changes.
-        var directory = try std.fs.openDirAbsolute(parent, .{});
-        defer directory.close();
-        const existing = directory.statFile(name) catch |err| switch (err) {
+        var directory = try std.Io.Dir.openDirAbsolute(zio.io(), parent, .{});
+        defer directory.close(zio.io());
+        const existing = directory.statFile(zio.io(), name, .{}) catch |err| switch (err) {
             error.FileNotFound => null,
             else => return err,
         };
@@ -310,7 +311,7 @@ test "private destination worker precheck owns metadata and unwinds each allocat
             };
         }
         fn work(self: *@This()) !void {
-            const parent = try self.temporary.dir.realpathAlloc(std.testing.allocator, ".");
+            const parent = try zio.realPathAlloc(self.temporary.dir, ".", std.testing.allocator);
             defer std.testing.allocator.free(parent);
             const path = try std.fs.path.join(std.testing.allocator, &.{ parent, "private.bin" });
             defer std.testing.allocator.free(path);
@@ -319,8 +320,8 @@ test "private destination worker precheck owns metadata and unwinds each allocat
             try destination.validate();
             try std.testing.expectEqualStrings(path, destination.path.?);
             try std.testing.expect(!destination.accept_overwrite);
-            const file = try self.temporary.dir.createFile("exists.bin", .{});
-            file.close();
+            const file = try self.temporary.dir.createFile(zio.io(), "exists.bin", .{});
+            file.close(zio.io());
             const exists = try std.fs.path.join(std.testing.allocator, &.{ parent, "exists.bin" });
             defer std.testing.allocator.free(exists);
             try std.testing.expectError(error.OutputAlreadyExists, Destination.prepare(self.allocator, self.main_thread, exists, .{}));
@@ -354,7 +355,7 @@ test "download names keep the last component and number taken names" {
     }
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
-    const directory = try temporary.dir.realpathAlloc(std.testing.allocator, ".");
+    const directory = try zio.realPathAlloc(temporary.dir, ".", std.testing.allocator);
     defer std.testing.allocator.free(directory);
     const Run = struct {
         fn run(dir: []const u8, out: *anyerror!void) void {
@@ -362,17 +363,17 @@ test "download names keep the last component and number taken names" {
         }
         fn check(dir: []const u8) !void {
             const allocator = std.testing.allocator;
-            var opened = try std.fs.openDirAbsolute(dir, .{});
-            defer opened.close();
+            var opened = try std.Io.Dir.openDirAbsolute(zio.io(), dir, .{});
+            defer opened.close(zio.io());
             const first = try uniquePath(allocator, 0, dir, "photo.png");
             defer allocator.free(first);
             try std.testing.expectEqualStrings("photo.png", std.fs.path.basename(first));
-            try opened.writeFile(.{ .sub_path = "photo.png", .data = "" });
-            try opened.writeFile(.{ .sub_path = "photo (2).png", .data = "" });
+            try opened.writeFile(zio.io(), .{ .sub_path = "photo.png", .data = "" });
+            try opened.writeFile(zio.io(), .{ .sub_path = "photo (2).png", .data = "" });
             const third = try uniquePath(allocator, 0, dir, "photo.png");
             defer allocator.free(third);
             try std.testing.expectEqualStrings("photo (3).png", std.fs.path.basename(third));
-            try opened.writeFile(.{ .sub_path = "notes", .data = "" });
+            try opened.writeFile(zio.io(), .{ .sub_path = "notes", .data = "" });
             const plain = try uniquePath(allocator, 0, dir, "notes");
             defer allocator.free(plain);
             try std.testing.expectEqualStrings("notes (2)", std.fs.path.basename(plain));

@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
@@ -7,11 +8,7 @@ const d = @import("ziggurat_document");
 const editing = @import("ziggurat_document_editor");
 const diff = @import("ziggurat_document_diff");
 const viewing = @import("ziggurat_document_diff_view");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn zlg_test_paint(*anyopaque, u32, u32) void;
 extern fn zlg_resource_count() u32;
 extern fn zlc_test_raw_pixel(*anyopaque, u32, u32) u32;
@@ -588,12 +585,12 @@ fn run(allocator: std.mem.Allocator) !void {
     try std.testing.expect(state.window.isClosed() and state.context.window == null);
     try std.testing.expectEqual(@as(usize, 0), app.resourceStats().allocated_records);
 }
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var debug: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(debug.deinit() == .ok);
     const before = t.resourceCounts();
-    const args = try std.process.argsAlloc(debug.allocator());
-    defer std.process.argsFree(debug.allocator(), args);
+    const args = try zio.argsAlloc(debug.allocator(), init.args);
+    defer zio.argsFree(debug.allocator(), args);
     if (args.len > 1) {
         if (args.len != 2) return error.InvalidSmokeSelector;
         if (std.mem.eql(u8, args[1], "projection")) {

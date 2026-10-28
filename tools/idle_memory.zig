@@ -14,13 +14,14 @@
 //! - Windows: the private working set, as Task Manager shows it, of the
 //!   app and of its descendants, WebView2's processes.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const args = try std.process.argsAlloc(allocator);
+    const args = try zio.argsAlloc(allocator, init.args);
     var count: usize = 3;
     var idle_seconds: f64 = 6;
     var apps: std.ArrayList([]const u8) = .empty;
@@ -57,7 +58,7 @@ pub fn main() !void {
         try out.writer.print(":{{\"app\":{d},\"total\":{d}}}", .{ median(own), median(totals) });
     }
     try out.writer.writeAll("}\n");
-    try std.fs.File.stdout().writeAll(out.written());
+    try std.Io.File.stdout().writeStreamingAll(zio.io(), out.written());
 }
 
 fn usage() void {
@@ -80,9 +81,7 @@ pub fn median(values: []u64) u64 {
 const Usage = struct { app: u64, total: u64 };
 
 fn measure(allocator: std.mem.Allocator, app: []const u8, idle_ns: u64) !Usage {
-    var child = std.process.Child.init(&.{app}, allocator);
-    child.stdin_behavior = .Ignore;
-    try child.spawn();
+    var child = try zio.spawn(.{ .argv = &.{app}, .stdin = .ignore });
     if (platform.waitExit(&child, idle_ns)) return error.ExitedAfterStarting;
     const processes = try platform.descendants(allocator, platform.id(&child));
     var result: Usage = .{ .app = 0, .total = 0 };
@@ -111,7 +110,7 @@ const linux = struct {
     const posix = std.posix;
 
     fn id(child: *std.process.Child) i32 {
-        return child.id;
+        return child.id.?;
     }
 
     /// Whether the child exited within `timeout_ns`; it is reaped if so.
@@ -119,9 +118,12 @@ const linux = struct {
         var waited: u64 = 0;
         const step = 50 * std.time.ns_per_ms;
         while (waited < timeout_ns) : (waited += step) {
-            const result = posix.waitpid(child.id, posix.W.NOHANG);
-            if (result.pid == child.id) return true;
-            std.Thread.sleep(step);
+            const result = zio.posix.waitpid(child.id.?, posix.W.NOHANG);
+            if (result.pid == child.id.?) {
+                child.id = null;
+                return true;
+            }
+            zio.sleep(step);
         }
         return false;
     }
@@ -129,14 +131,14 @@ const linux = struct {
     /// The app, then the processes it started and theirs.
     fn descendants(allocator: std.mem.Allocator, pid: i32) ![]i32 {
         var parents: std.AutoHashMapUnmanaged(i32, std.ArrayList(i32)) = .empty;
-        var proc = try std.fs.openDirAbsolute("/proc", .{ .iterate = true });
-        defer proc.close();
+        var proc = try std.Io.Dir.openDirAbsolute(zio.io(), "/proc", .{ .iterate = true });
+        defer proc.close(zio.io());
         var iterator = proc.iterate();
         var buffer: [4096]u8 = undefined;
-        while (try iterator.next()) |entry| {
+        while (try iterator.next(zio.io())) |entry| {
             const child = std.fmt.parseInt(i32, entry.name, 10) catch continue;
             var path: [64]u8 = undefined;
-            const stat = proc.readFile(std.fmt.bufPrint(&path, "{s}/stat", .{entry.name}) catch continue, &buffer) catch continue;
+            const stat = proc.readFile(zio.io(), std.fmt.bufPrint(&path, "{s}/stat", .{entry.name}) catch continue, &buffer) catch continue;
             const ppid = parentOf(stat) orelse continue;
             const list = try parents.getOrPut(allocator, ppid);
             if (!list.found_existing) list.value_ptr.* = .empty;
@@ -163,7 +165,7 @@ const linux = struct {
     fn memory(pid: i32) !u64 {
         var path: [64]u8 = undefined;
         var buffer: [8192]u8 = undefined;
-        const rollup = try std.fs.cwd().readFile(try std.fmt.bufPrint(&path, "/proc/{d}/smaps_rollup", .{pid}), &buffer);
+        const rollup = try std.Io.Dir.cwd().readFile(zio.io(), try std.fmt.bufPrint(&path, "/proc/{d}/smaps_rollup", .{pid}), &buffer);
         return pss(rollup) orelse error.NoProportionalSetSize;
     }
 
@@ -172,7 +174,7 @@ const linux = struct {
         while (lines.next()) |line| {
             if (!std.mem.startsWith(u8, line, "Pss:")) continue;
             const value = std.mem.trim(u8, line["Pss:".len..], " \t");
-            const number = std.mem.trimRight(u8, std.mem.trimRight(u8, value, "kB"), " ");
+            const number = std.mem.trimEnd(u8, std.mem.trimEnd(u8, value, "kB"), " ");
             const kb = std.fmt.parseInt(u64, number, 10) catch return null;
             return kb * 1024;
         }
@@ -182,10 +184,12 @@ const linux = struct {
     /// Ask the app to quit, which its WebKit processes follow; kill it if
     /// it has not after 10 seconds.
     fn stop(child: *std.process.Child, _: []const i32) void {
-        posix.kill(child.id, posix.SIG.TERM) catch {};
+        const pid = child.id orelse return;
+        posix.kill(pid, .TERM) catch {};
         if (!waitExit(child, 10 * std.time.ns_per_s)) {
-            posix.kill(child.id, posix.SIG.KILL) catch {};
-            _ = posix.waitpid(child.id, 0);
+            posix.kill(pid, .KILL) catch {};
+            _ = zio.posix.waitpid(pid, 0);
+            child.id = null;
         }
     }
 };
@@ -224,22 +228,22 @@ const windows = struct {
         dwFlags: u32,
         szExeFile: [260]u16,
     };
-    extern "kernel32" fn OpenProcess(access: u32, inherit: w.BOOL, pid: u32) callconv(.winapi) ?w.HANDLE;
-    extern "kernel32" fn K32GetProcessMemoryInfo(process: w.HANDLE, counters: *MemoryCounters, size: u32) callconv(.winapi) w.BOOL;
+    extern "kernel32" fn OpenProcess(access: u32, inherit: c_int, pid: u32) callconv(.winapi) ?w.HANDLE;
+    extern "kernel32" fn K32GetProcessMemoryInfo(process: w.HANDLE, counters: *MemoryCounters, size: u32) callconv(.winapi) c_int;
     extern "kernel32" fn CreateToolhelp32Snapshot(flags: u32, pid: u32) callconv(.winapi) w.HANDLE;
-    extern "kernel32" fn Process32FirstW(snapshot: w.HANDLE, entry: *ProcessEntry) callconv(.winapi) w.BOOL;
-    extern "kernel32" fn Process32NextW(snapshot: w.HANDLE, entry: *ProcessEntry) callconv(.winapi) w.BOOL;
-    extern "kernel32" fn TerminateProcess(process: w.HANDLE, code: u32) callconv(.winapi) w.BOOL;
+    extern "kernel32" fn WaitForSingleObject(handle: w.HANDLE, milliseconds: u32) callconv(.winapi) u32;
+    extern "kernel32" fn Process32FirstW(snapshot: w.HANDLE, entry: *ProcessEntry) callconv(.winapi) c_int;
+    extern "kernel32" fn Process32NextW(snapshot: w.HANDLE, entry: *ProcessEntry) callconv(.winapi) c_int;
+    extern "kernel32" fn TerminateProcess(process: w.HANDLE, code: u32) callconv(.winapi) c_int;
     extern "kernel32" fn GetProcessId(process: w.HANDLE) callconv(.winapi) u32;
 
     fn id(child: *std.process.Child) u32 {
-        return GetProcessId(child.id);
+        return GetProcessId(child.id.?);
     }
 
     fn waitExit(child: *std.process.Child, timeout_ns: u64) bool {
         const ms: u32 = @intCast(@min(timeout_ns / std.time.ns_per_ms, std.math.maxInt(u32) - 1));
-        w.WaitForSingleObject(child.id, ms) catch return false;
-        return true;
+        return WaitForSingleObject(child.id.?, ms) == 0;
     }
 
     /// The app, then the processes it started and theirs. A parent's ID
@@ -276,12 +280,12 @@ const windows = struct {
     /// End the app and the processes it ran: Windows has no signal to ask
     /// it to quit.
     fn stop(child: *std.process.Child, processes: []const u32) void {
-        _ = TerminateProcess(child.id, 1);
+        _ = TerminateProcess(child.id.?, 1);
         for (processes[1..]) |pid| if (OpenProcess(PROCESS_TERMINATE, 0, pid)) |process| {
             _ = TerminateProcess(process, 1);
             w.CloseHandle(process);
         };
-        _ = child.wait() catch {};
+        _ = child.wait(zio.io()) catch {};
     }
 };
 

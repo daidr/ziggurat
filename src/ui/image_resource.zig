@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const images = @import("ziggurat_images");
 pub const drawing = @import("ziggurat_drawing_resources");
@@ -20,7 +21,7 @@ pub const PreparedImage = opaque {
         if (options.bytes == 0 or options.bytes > drawing.max_image_bytes) return error.InvalidPrepareLimits;
         const crop = options.source orelse PixelRect{ .width = image.width, .height = image.height };
         if (crop.width == 0 or crop.height == 0 or crop.x > image.width or crop.y > image.height or crop.width > image.width - crop.x or crop.height > image.height - crop.y) return error.InvalidSourceRectangle;
-        var timer = std.time.Timer.start() catch null;
+        var timer = zio.Timer.start() catch null;
         var total: usize = 0;
         var count: usize = 0;
         var width = crop.width;

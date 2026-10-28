@@ -189,8 +189,8 @@ pub fn sameReferenceGeometry(a: *const Geometry, ar: affine.Ref, b: *const Geome
     var depth: usize = 0;
     while (ac != null or bc != null) {
         if (ac == null or bc == null or depth == affine.max_clip_depth) return false;
-        const ax = @intFromEnum(ac.?);
-        const bx = @intFromEnum(bc.?);
+        const ax = @backingInt(ac.?);
+        const bx = @backingInt(bc.?);
         if (ax >= a.clip_len or bx >= b.clip_len) return false;
         const av = a.clips[ax];
         const bv = b.clips[bx];
@@ -198,10 +198,10 @@ pub fn sameReferenceGeometry(a: *const Geometry, ar: affine.Ref, b: *const Geome
         bv.bounds.validate() catch return false;
         if (av.depth == 0 or av.depth > affine.max_clip_depth or bv.depth == 0 or bv.depth > affine.max_clip_depth) return false;
         if (av.parent) |parent| {
-            if (@intFromEnum(parent) >= ax or a.clips[@intFromEnum(parent)].depth + @as(usize, 1) != av.depth) return false;
+            if (@backingInt(parent) >= ax or a.clips[@backingInt(parent)].depth + @as(usize, 1) != av.depth) return false;
         } else if (av.depth != 1) return false;
         if (bv.parent) |parent| {
-            if (@intFromEnum(parent) >= bx or b.clips[@intFromEnum(parent)].depth + @as(usize, 1) != bv.depth) return false;
+            if (@backingInt(parent) >= bx or b.clips[@backingInt(parent)].depth + @as(usize, 1) != bv.depth) return false;
         } else if (bv.depth != 1) return false;
         if (!std.meta.eql(av.bounds, bv.bounds) or !sameSpace(a, av.space, b, bv.space)) return false;
         ac = av.parent;
@@ -212,5 +212,5 @@ pub fn sameReferenceGeometry(a: *const Geometry, ar: affine.Ref, b: *const Geome
 }
 
 fn retained(reference: affine.Ref, mark: affine.Checkpoint) bool {
-    return @intFromEnum(reference.space) < mark.spaces and (if (reference.clip) |id| @intFromEnum(id) < mark.clips else true);
+    return @backingInt(reference.space) < mark.spaces and (if (reference.clip) |id| @backingInt(id) < mark.clips else true);
 }

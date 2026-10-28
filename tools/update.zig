@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const update = @import("ziggurat_update");
 
 const usage =
@@ -27,41 +28,41 @@ const usage =
     \\
 ;
 
-pub fn main() void {
-    run() catch |err| {
+pub fn main(init: std.process.Init.Minimal) void {
+    run(init.args) catch |err| {
         std.debug.print("update: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
 }
 
 fn out(text: []const u8) !void {
-    try std.fs.File.stdout().writeAll(text);
+    try std.Io.File.stdout().writeStreamingAll(zio.io(), text);
 }
 
-fn run() !void {
+fn run(process_args: std.process.Args) !void {
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const args = try std.process.argsAlloc(allocator);
+    const args = try zio.argsAlloc(allocator, process_args);
     if (args.len == 1 or std.mem.eql(u8, args[1], "--help")) return out(usage);
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     const command = args[1];
     if (std.mem.eql(u8, command, "keygen")) {
         if (args.len != 4) return error.InvalidArguments;
-        var key = update.Ed25519.KeyPair.generate();
+        var key = update.Ed25519.KeyPair.generate(zio.io());
         defer std.crypto.secureZero(u8, &key.secret_key.bytes);
         var seed = key.secret_key.seed();
         defer std.crypto.secureZero(u8, &seed);
-        var secret = try cwd.createFile(args[2], .{ .exclusive = true, .mode = 0o600 });
-        defer secret.close();
-        errdefer cwd.deleteFile(args[2]) catch {};
-        try secret.writeAll(&seed);
-        try secret.sync();
-        var public = try cwd.createFile(args[3], .{ .exclusive = true });
-        defer public.close();
-        errdefer cwd.deleteFile(args[3]) catch {};
-        try public.writeAll(&key.public_key.toBytes());
-        try public.sync();
+        var secret = try cwd.createFile(zio.io(), args[2], .{ .exclusive = true, .permissions = zio.mode(0o600) });
+        defer secret.close(zio.io());
+        errdefer cwd.deleteFile(zio.io(), args[2]) catch {};
+        try secret.writeStreamingAll(zio.io(), &seed);
+        try secret.sync(zio.io());
+        var public = try cwd.createFile(zio.io(), args[3], .{ .exclusive = true });
+        defer public.close(zio.io());
+        errdefer cwd.deleteFile(zio.io(), args[3]) catch {};
+        try public.writeStreamingAll(zio.io(), &key.public_key.toBytes());
+        try public.sync(zio.io());
     } else if (std.mem.eql(u8, command, "sign")) {
         if (args.len != 9 and args.len != 10) return error.InvalidArguments;
         var key = try loadKeyPair(args[4]);
@@ -83,7 +84,7 @@ fn run() !void {
     } else if (std.mem.eql(u8, command, "verify") or std.mem.eql(u8, command, "publish")) {
         const publish = std.mem.eql(u8, command, "publish");
         if (args.len != (if (publish) @as(usize, 9) else 7)) return error.InvalidArguments;
-        const bytes = try cwd.readFileAlloc(allocator, args[2], 16384);
+        const bytes = try cwd.readFileAlloc(zio.io(), args[2], allocator, .limited(16384));
         const verified = try update.parseAndVerify(allocator, bytes, .{
             .public_key = try readKey(args[3]),
             .identity = args[4],
@@ -92,22 +93,22 @@ fn run() !void {
         });
         defer verified.deinit();
         if (publish) {
-            var archive = try cwd.openFile(args[7], .{});
-            defer archive.close();
-            var root = try cwd.makeOpenPath(args[8], .{ .no_follow = true });
-            defer root.close();
+            var archive = try cwd.openFile(zio.io(), args[7], .{});
+            defer archive.close(zio.io());
+            var root = try cwd.createDirPathOpen(zio.io(), args[8], .{ .open_options = .{ .follow_symlinks = false } });
+            defer root.close(zio.io());
             const result = try update.publication.publishZip(allocator, root, archive, &verified, .{ .retain_archive = true });
             try printPublished(result);
         } else try out("verified\n");
     } else if (std.mem.eql(u8, command, "current")) {
         if (args.len != 5) return error.InvalidArguments;
-        var root = try cwd.openDir(args[2], .{ .no_follow = true });
-        defer root.close();
+        var root = try cwd.openDir(zio.io(), args[2], .{ .follow_symlinks = false });
+        defer root.close(zio.io());
         try printPublished(try update.publication.readCurrent(allocator, root, args[3], args[4]));
     } else if (std.mem.eql(u8, command, "pack")) {
         if (args.len < 9) return error.InvalidArguments;
         const entries = try allocator.alloc(update.archive.Entry, args.len - 8);
-        for (args[8..], entries) |path, *entry| entry.* = .{ .name = std.fs.path.basename(path), .bytes = try cwd.readFileAlloc(allocator, path, 512 * 1024 * 1024) };
+        for (args[8..], entries) |path, *entry| entry.* = .{ .name = std.fs.path.basename(path), .bytes = try cwd.readFileAlloc(zio.io(), path, allocator, .limited(512 * 1024 * 1024)) };
         const zip = try update.archive.buildPackage(allocator, .{ .name = args[3], .identity = args[4], .target = args[5], .version = try update.retention.parseVersion(args[6]), .executable = args[7] }, entries);
         try writeExclusive(args[2], zip);
     } else if (std.mem.eql(u8, command, "endorse")) {
@@ -124,13 +125,13 @@ fn run() !void {
         try checkOrFetch(allocator, args, std.mem.eql(u8, command, "fetch"));
     } else if (std.mem.eql(u8, command, "rollback")) {
         if (args.len != 6) return error.InvalidArguments;
-        var root = try cwd.openDir(args[2], .{ .no_follow = true });
-        defer root.close();
+        var root = try cwd.openDir(zio.io(), args[2], .{ .follow_symlinks = false });
+        defer root.close(zio.io());
         try printPublished(try update.retention.rollback(allocator, root, args[3], args[4], try update.retention.parseVersion(args[5])));
     } else if (std.mem.eql(u8, command, "prune")) {
         if (args.len != 6) return error.InvalidArguments;
-        var root = try cwd.openDir(args[2], .{ .no_follow = true });
-        defer root.close();
+        var root = try cwd.openDir(zio.io(), args[2], .{ .follow_symlinks = false });
+        defer root.close(zio.io());
         const removed = try update.retention.prune(allocator, root, args[3], args[4], try std.fmt.parseInt(usize, args[5], 10));
         try out(try std.fmt.allocPrint(allocator, "removed {d}\n", .{removed}));
     } else return error.UnknownCommand;
@@ -143,18 +144,18 @@ fn printPublished(result: update.publication.Published) !void {
 }
 
 fn writeExclusive(path: []const u8, bytes: []const u8) !void {
-    var output = try std.fs.cwd().createFile(path, .{ .exclusive = true });
-    defer output.close();
-    errdefer std.fs.cwd().deleteFile(path) catch {};
-    try output.writeAll(bytes);
-    try output.sync();
+    var output = try std.Io.Dir.cwd().createFile(zio.io(), path, .{ .exclusive = true });
+    defer output.close(zio.io());
+    errdefer std.Io.Dir.cwd().deleteFile(zio.io(), path) catch {};
+    try output.writeStreamingAll(zio.io(), bytes);
+    try output.sync(zio.io());
 }
 
 /// Idempotent release asset: identical existing bytes are kept, others conflict.
-fn writeAsset(dir: std.fs.Dir, name: []const u8, bytes: []const u8) !bool {
-    if (dir.openFile(name, .{})) |file| {
-        defer file.close();
-        const stat = try file.stat();
+fn writeAsset(dir: std.Io.Dir, name: []const u8, bytes: []const u8) !bool {
+    if (dir.openFile(zio.io(), name, .{})) |file| {
+        defer file.close(zio.io());
+        const stat = try file.stat(zio.io());
         if (stat.size == bytes.len) {
             var existing_hash: [32]u8 = undefined;
             var new_hash: [32]u8 = undefined;
@@ -167,11 +168,11 @@ fn writeAsset(dir: std.fs.Dir, name: []const u8, bytes: []const u8) !bool {
         return error.AssetConflict;
     } else |err| if (err != error.FileNotFound) return err;
     var atomic_buffer: [16 * 1024]u8 = undefined;
-    var atomic = try dir.atomicFile(name, .{ .write_buffer = &atomic_buffer });
+    var atomic = try zio.AtomicFile.init(dir, name, .{ .write_buffer = &atomic_buffer });
     defer atomic.deinit();
     try atomic.file_writer.interface.writeAll(bytes);
     try atomic.flush();
-    try atomic.file_writer.file.sync();
+    try atomic.file_writer.file.sync(zio.io());
     try atomic.renameIntoPlace();
     return true;
 }
@@ -191,7 +192,7 @@ fn release(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const identity = args[3];
     const target = args[4];
     const version = try update.retention.parseVersion(args[5]);
-    const zip = try std.fs.cwd().readFileAlloc(allocator, args[6], 512 * 1024 * 1024);
+    const zip = try std.Io.Dir.cwd().readFileAlloc(zio.io(), args[6], allocator, .limited(512 * 1024 * 1024));
     var key = try loadKeyPair(args[7]);
     defer std.crypto.secureZero(u8, &key.secret_key.bytes);
     const base = args[8];
@@ -211,8 +212,8 @@ fn release(allocator: std.mem.Allocator, args: []const []const u8) !void {
             index += 2;
         } else return error.InvalidArguments;
     }
-    var dir = try std.fs.cwd().makeOpenPath(args[2], .{ .iterate = true });
-    defer dir.close();
+    var dir = try std.Io.Dir.cwd().createDirPathOpen(zio.io(), args[2], .{ .open_options = .{ .iterate = true } });
+    defer dir.close(zio.io());
     const v = try versionText(allocator, version);
     const zip_name = try std.fmt.allocPrint(allocator, "{s}-{s}-{s}.zip", .{ identity, target, v });
     var manifest: update.Manifest = .{ .identity = identity, .target = target, .version = version, .url = try joinUrl(allocator, base, zip_name), .bytes = zip.len, .sha256 = undefined, .signature = @splat(0), .endorsement = endorsement };
@@ -221,14 +222,14 @@ fn release(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const full_json = try update.sign(allocator, manifest, key);
     _ = try writeAsset(dir, zip_name, zip);
     if (notes_path) |path| {
-        const text = try std.fs.cwd().readFileAlloc(allocator, path, update.feed.max_notes_bytes);
+        const text = try std.Io.Dir.cwd().readFileAlloc(zio.io(), path, allocator, .limited(update.feed.max_notes_bytes));
         if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidNotes;
         _ = try writeAsset(dir, try std.fmt.allocPrint(allocator, "{s}-{s}{s}", .{ identity, v, notes_suffix }), text);
     }
     _ = try writeAsset(dir, try std.fmt.allocPrint(allocator, "{s}-{s}-{s}.json", .{ identity, target, v }), full_json);
     for (previous.items) |old| {
         if (old.version.order(version) != .lt) return error.InvalidArguments;
-        const source = try std.fs.cwd().readFileAlloc(allocator, old.path, 512 * 1024 * 1024);
+        const source = try std.Io.Dir.cwd().readFileAlloc(zio.io(), old.path, allocator, .limited(512 * 1024 * 1024));
         var patch: std.Io.Writer.Allocating = .init(allocator);
         try update.delta.diff(allocator, source, zip, &patch.writer);
         // A patch that saves little is not worth a second download path.
@@ -247,13 +248,13 @@ fn release(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var names: std.ArrayList([]const u8) = .empty;
     var notes: std.ArrayList(update.feed.Note) = .empty;
     var iterator = dir.iterate();
-    while (try iterator.next()) |entry| {
+    while (try iterator.next(zio.io())) |entry| {
         if (entry.kind != .file or std.mem.eql(u8, entry.name, "feed.json")) continue;
         if (!std.mem.startsWith(u8, entry.name, identity) or entry.name.len <= identity.len or entry.name[identity.len] != '-') continue;
         if (std.mem.endsWith(u8, entry.name, notes_suffix)) {
             const text = entry.name[identity.len + 1 .. entry.name.len - notes_suffix.len];
             const noted = update.retention.parseVersion(text) catch continue;
-            try notes.append(allocator, .{ .version = noted, .text = try dir.readFileAlloc(allocator, entry.name, update.feed.max_notes_bytes) });
+            try notes.append(allocator, .{ .version = noted, .text = try dir.readFileAlloc(zio.io(), entry.name, allocator, .limited(update.feed.max_notes_bytes)) });
             continue;
         }
         if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
@@ -270,12 +271,12 @@ fn release(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
     }.lessThan);
     for (names.items) |name| {
-        const text = try dir.readFileAlloc(allocator, name, 16384);
+        const text = try dir.readFileAlloc(zio.io(), name, allocator, .limited(16384));
         if (std.mem.endsWith(u8, name, ".patch.json")) try deltas.append(allocator, text) else try releases.append(allocator, text);
     }
     const feed_json = try update.feed.buildWithNotes(allocator, identity, releases.items, deltas.items, notes.items);
     var atomic_buffer: [16 * 1024]u8 = undefined;
-    var atomic = try dir.atomicFile("feed.json", .{ .write_buffer = &atomic_buffer });
+    var atomic = try zio.AtomicFile.init(dir, "feed.json", .{ .write_buffer = &atomic_buffer });
     defer atomic.deinit();
     try atomic.file_writer.interface.writeAll(feed_json);
     try atomic.flush();
@@ -285,7 +286,7 @@ fn release(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
 fn readFeed(allocator: std.mem.Allocator, client: *std.http.Client, location: []const u8) ![]u8 {
     if (std.mem.startsWith(u8, location, "https://")) return update.http.get(allocator, client, location, update.feed.max_feed_bytes);
-    return std.fs.cwd().readFileAlloc(allocator, location, update.feed.max_feed_bytes);
+    return std.Io.Dir.cwd().readFileAlloc(zio.io(), location, allocator, .limited(update.feed.max_feed_bytes));
 }
 
 fn printProgress(_: ?*anyopaque, progress: update.download.Progress) void {
@@ -294,15 +295,15 @@ fn printProgress(_: ?*anyopaque, progress: update.download.Progress) void {
 }
 
 fn checkOrFetch(allocator: std.mem.Allocator, args: []const []const u8, fetch: bool) !void {
-    var root = try std.fs.cwd().makeOpenPath(args[6], .{ .iterate = true, .no_follow = true });
-    defer root.close();
-    var client: std.http.Client = .{ .allocator = allocator };
+    var root = try std.Io.Dir.cwd().createDirPathOpen(zio.io(), args[6], .{ .open_options = .{ .iterate = true, .follow_symlinks = false } });
+    defer root.close(zio.io());
+    var client: std.http.Client = .{ .allocator = allocator, .io = zio.io() };
     defer client.deinit();
     const identity = args[4];
     const target = args[5];
     var policy: update.Policy = .{ .identity = identity, .target = target, .current_version = .{ .major = 0, .minor = 0, .patch = 0 }, .public_key = try readKey(args[3]) };
     var retained: ?update.retention.Retained = null;
-    defer if (retained) |value| value.file.close();
+    defer if (retained) |value| value.file.close(zio.io());
     if (update.publication.readCurrent(allocator, root, identity, target)) |current| {
         policy.current_version = current.version;
         retained = try update.retention.currentArchive(allocator, root, identity, target);
@@ -317,27 +318,27 @@ fn checkOrFetch(allocator: std.mem.Allocator, args: []const []const u8, fetch: b
     const v = available.full.manifest.version;
     try out(try std.fmt.allocPrint(allocator, "available {d}.{d}.{d}.{d}{s}\n", .{ v.major, v.minor, v.patch, v.revision, if (available.delta != null) " (delta)" else "" }));
     if (!fetch) return;
-    var downloads = try root.makeOpenPath("downloads", .{ .no_follow = true });
-    defer downloads.close();
+    var downloads = try root.createDirPathOpen(zio.io(), "downloads", .{ .open_options = .{ .follow_symlinks = false } });
+    defer downloads.close(zio.io());
     var control: update.download.Control = .{ .on_progress = printProgress };
     var http_source: update.http.Source = .init(&client);
     const archive_name = try std.fmt.allocPrint(allocator, "{s}-{d}.{d}.{d}.{d}.zip", .{ target, v.major, v.minor, v.patch, v.revision });
-    var archive = try downloads.createFile(archive_name, .{ .read = true, .truncate = false });
-    defer archive.close();
+    var archive = try downloads.createFile(zio.io(), archive_name, .{ .read = true, .truncate = false });
+    defer archive.close(zio.io());
     var rebuilt = false;
     if (available.delta) |patch| delta: {
-        var patch_file = try downloads.createFile(try std.fmt.allocPrint(allocator, "{s}.patch", .{archive_name}), .{ .read = true, .truncate = false });
-        defer patch_file.close();
+        var patch_file = try downloads.createFile(zio.io(), try std.fmt.allocPrint(allocator, "{s}.patch", .{archive_name}), .{ .read = true, .truncate = false });
+        defer patch_file.close(zio.io());
         _ = update.download.fetch(patch.manifest.artifact(), http_source.source(), patch_file, &control) catch |err| {
             std.debug.print("update: delta download failed ({s}); using the full archive\n", .{@errorName(err)});
             break :delta;
         };
-        try archive.setEndPos(0);
+        try archive.setLength(zio.io(), 0);
         var buffer: [16 * 1024]u8 = undefined;
-        var writer = archive.writer(&buffer);
+        var writer = archive.writer(zio.io(), &buffer);
         update.delta.applyVerified(&patch, available.full.manifest, retained.?.file, patch_file, &writer.interface, .{}) catch |err| {
             std.debug.print("update: delta rejected ({s}); using the full archive\n", .{@errorName(err)});
-            try archive.setEndPos(0);
+            try archive.setLength(zio.io(), 0);
             break :delta;
         };
         rebuilt = true;
@@ -345,11 +346,11 @@ fn checkOrFetch(allocator: std.mem.Allocator, args: []const []const u8, fetch: b
     if (!rebuilt) _ = try update.download.fetch(available.full.manifest, http_source.source(), archive, &control);
     const published = try update.publication.publishZip(allocator, root, archive, &available.full, .{ .retain_archive = true });
     try printPublished(published);
-    downloads.deleteFile(archive_name) catch {};
+    downloads.deleteFile(zio.io(), archive_name) catch {};
 }
 
 fn readEndorsement(allocator: std.mem.Allocator, path: []const u8) !update.Endorsement {
-    const bytes = try std.fs.cwd().readFileAlloc(allocator, path, 4096);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(zio.io(), path, allocator, .limited(4096));
     const parsed = try std.json.parseFromSliceLeaky(update.EndorsementWire, allocator, bytes, .{ .duplicate_field_behavior = .@"error" });
     return (try update.decodeEndorsement(parsed)).?;
 }
@@ -361,12 +362,12 @@ fn loadKeyPair(path: []const u8) !update.Ed25519.KeyPair {
 }
 
 const Digest = struct { bytes: u64, sha256: [32]u8 };
-fn hashFile(file: std.fs.File) !Digest {
+fn hashFile(file: std.Io.File) !Digest {
     var hash: std.crypto.hash.sha2.Sha256 = .init(.{});
     var bytes: u64 = 0;
     var chunk: [16 * 1024]u8 = undefined;
     while (true) {
-        const n = try file.pread(&chunk, bytes);
+        const n = try file.readPositional(zio.io(), &.{&chunk}, bytes);
         if (n == 0) break;
         hash.update(chunk[0..n]);
         bytes = try std.math.add(u64, bytes, n);
@@ -376,16 +377,16 @@ fn hashFile(file: std.fs.File) !Digest {
     return .{ .bytes = bytes, .sha256 = digest };
 }
 fn hashPath(path: []const u8) !Digest {
-    var file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
+    var file = try std.Io.Dir.cwd().openFile(zio.io(), path, .{});
+    defer file.close(zio.io());
     return hashFile(file);
 }
 
 fn readKey(path: []const u8) ![32]u8 {
-    var file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    if ((try file.stat()).size != 32) return error.InvalidKeyLength;
+    var file = try std.Io.Dir.cwd().openFile(zio.io(), path, .{});
+    defer file.close(zio.io());
+    if ((try file.stat(zio.io())).size != 32) return error.InvalidKeyLength;
     var bytes: [32]u8 = undefined;
-    if (try file.readAll(&bytes) != bytes.len) return error.InvalidKeyLength;
+    if (try zio.readAll(file, &bytes) != bytes.len) return error.InvalidKeyLength;
     return bytes;
 }

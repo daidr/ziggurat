@@ -18,7 +18,7 @@ export ZIGGURAT_HTTPS_TEST_ROOT="$project/tests/fixtures/profile-https"
 export XDG_CACHE_HOME="$runtime" XDG_DATA_HOME="$runtime/data"
 export G_DEBUG=fatal-criticals GDK_BACKEND=x11
 command=("$zig" build "$build_target" -Dhttps-resources=true -j1
-    --cache-dir "$ZIG_LOCAL_CACHE_DIR" --global-cache-dir "$ZIG_GLOBAL_CACHE_DIR"
+    --cache-dir "$ZIG_LOCAL_CACHE_DIR"
     --prefix "$prefix" --summary all "$@")
 cd "$project"
 if [[ -z "$tls_root" ]]; then

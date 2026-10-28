@@ -19,7 +19,7 @@ ziggurat doctor [--webview]
 
 ## init
 
-在空目录中生成 `build.zig`、`build.zig.zon`、`src/main.zig`、`.gitignore` 和 `ziggurat.json`。依赖以相对路径指向本框架检出（默认是构建 CLI 的那份源码），`build.zig.zon` 的 fingerprint 按 Zig 0.15.2 规则由包名生成。三种模板：
+在空目录中生成 `build.zig`、`build.zig.zon`、`src/main.zig`、`.gitignore` 和 `ziggurat.json`。依赖以相对路径指向本框架检出（默认是构建 CLI 的那份源码），`build.zig.zon` 的 fingerprint 按 Zig 0.17.0 规则由包名生成。三种模板：
 
 - `native`：声明式视图计数器，用到 `ziggurat` 与 `ziggurat_view`。
 - `web`：WebView 页面和嵌入的 `src/index.html`，页面与 Zig 通过同一套 `window.chrome.webview` 消息往返；Linux 在启动前由 worker 准备私有 Profile 目录。
@@ -152,7 +152,7 @@ ziggurat_build.addApplicationResourcesWithIcon(b, exe, ziggurat, metadata, .{ .p
 
 ## doctor
 
-报告主机、`zig version` 是否为 0.15.2、git、gh（可选，用于 `publish --github`）；Linux 上用 pkg-config 检查 GTK 3、Pango、ICU（`--webview` 时 WebKitGTK 4.1 与 libsoup 3 为必需）以及是否有显示；Windows 上检查框架的 WebView2 SDK 目录和注册的 WebView2 Runtime 版本；macOS 上检查系统版本（13.0 及以上，与 Zig 支持的最低版本一致）、`xcode-select -p` 的开发者工具、`xcrun --show-sdk-path` 的 macOS SDK（前两项缺少时为错误），以及钥匙串中 Developer ID Application 身份的数量（没有时提示只能 ad hoc 签名）；当前目录的 `ziggurat.json` 是否有效，在 macOS 上还按其 `macos` 配置检查 notarytool（配置公证时必需）与 actool（使用 `.icon` 图标时）。缺少必需项时退出码为 1。它只读取版本信息，不初始化任何页面或窗口；页面能否真正启动见 [引擎发现](webview-runtime.md)。
+报告主机、`zig version` 是否为 0.17.0、git、gh（可选，用于 `publish --github`）；Linux 上用 pkg-config 检查 GTK 3、Pango、ICU（`--webview` 时 WebKitGTK 4.1 与 libsoup 3 为必需）以及是否有显示；Windows 上检查框架的 WebView2 SDK 目录和注册的 WebView2 Runtime 版本；macOS 上检查系统版本（15.0 及以上，与 Zig 支持的最低版本一致）、`xcode-select -p` 的开发者工具、`xcrun --show-sdk-path` 的 macOS SDK（前两项缺少时为错误），以及钥匙串中 Developer ID Application 身份的数量（没有时提示只能 ad hoc 签名）；当前目录的 `ziggurat.json` 是否有效，在 macOS 上还按其 `macos` 配置检查 notarytool（配置公证时必需）与 actool（使用 `.icon` 图标时）。缺少必需项时退出码为 1。它只读取版本信息，不初始化任何页面或窗口；页面能否真正启动见 [引擎发现](webview-runtime.md)。
 
 ## 验证
 

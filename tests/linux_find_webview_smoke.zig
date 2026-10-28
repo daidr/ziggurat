@@ -295,14 +295,14 @@ fn run(allocator: std.mem.Allocator, mode: Mode) !void {
     std.debug.print("Linux Find {s}: once={d}, listener={d}, SDK={d}, remaining native={d}/{d}/{d} find={d}/{d}/{d}/{d}, peak={d}\n", .{ @tagName(mode), state.completed, state.changed, state.observed, native.states, native.handlers, native.controllers, physical.budgets, physical.gates, physical.commands, physical.bytes, physical.peak });
     try std.testing.expect(native.states == 0 and native.handlers == 0 and native.controllers == 0 and physical.budgets == 0 and physical.gates == 0 and physical.commands == 0 and physical.bytes == 0 and zfind_test_observers() == 0);
 }
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
     try std.testing.expect(web.backendCapabilities().find_text and !web.backendCapabilities().browser_tools);
     const options = web.findCapabilities();
     try std.testing.expect(!options.whole_word and !options.highlight_control and !options.total_count_on_step and !options.active_index);
-    var args = std.process.args();
+    var args = init.args.iterate();
     _ = args.next();
     const selected = args.next() orelse return error.ExpectedMode;
     const mode = std.meta.stringToEnum(Mode, selected) orelse return error.InvalidMode;

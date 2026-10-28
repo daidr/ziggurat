@@ -10,6 +10,7 @@
 //!
 //! Run it with `zig build run-confetti`.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const view = @import("ziggurat_view");
@@ -258,7 +259,7 @@ const Confetti = struct {
     layer: Layer = .{},
 
     fn init(allocator: std.mem.Allocator) Confetti {
-        return .{ .allocator = allocator, .rng = .init(std.crypto.random.int(u64)) };
+        return .{ .allocator = allocator, .rng = .init(zio.random.int(u64)) };
     }
     fn deinit(self: *Confetti) void {
         self.pieces.deinit(self.allocator);

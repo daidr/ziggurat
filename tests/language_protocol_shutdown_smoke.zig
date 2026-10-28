@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const d = @import("ziggurat_document");
 const code = @import("ziggurat_code_editor");
@@ -23,8 +24,8 @@ const Host = struct {
     reply: ?protocol.ShutdownReply = null,
     incoming: ?protocol.WorkspaceIncoming = null,
     packet: ?codec.Packet = null,
-    mutex: std.Thread.Mutex = .{},
-    condition: std.Thread.Condition = .{},
+    mutex: zio.Mutex = .{},
+    condition: zio.Condition = .{},
     command: ?Command = .configuration,
     event: Event = .failed,
     failure: ?anyerror = null,
@@ -151,13 +152,13 @@ const Host = struct {
             .failed => self.app.quit(),
         }
     }
-    fn writePacket(self: *Host, output: std.fs.File) !void {
+    fn writePacket(self: *Host, output: std.Io.File) !void {
         var packet = self.packet orelse return error.MissingPacket;
         self.packet = null;
         defer packet.deinit();
-        try output.writeAll(packet.bytes.?);
+        try output.writeStreamingAll(zio.io(), packet.bytes.?);
     }
-    fn receiveReply(self: *Host, input: std.fs.File, decoder: *codec.Decoder) !void {
+    fn receiveReply(self: *Host, input: std.Io.File, decoder: *codec.Decoder) !void {
         const bytes = try readBody(input, decoder);
         const message = try codec.Message.parse(allocator, bytes, .{});
         const request = (try message.value()) == .request;
@@ -179,14 +180,10 @@ const Host = struct {
     }
     fn workLoop(self: *Host) !void {
         const mode = if (self.mode == .late_stop) "normal" else @tagName(self.mode);
-        var child = std.process.Child.init(&.{ self.server, mode }, allocator);
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Inherit;
-        try child.spawn();
+        var child = try zio.spawn(.{ .argv = &.{ self.server, mode }, .stdin = .pipe, .stdout = .pipe, .stderr = .inherit });
         var child_live = true;
         defer if (child_live) {
-            _ = child.kill() catch {};
+            child.kill(zio.io());
         };
         var decoder = try codec.Decoder.init(allocator, .{ .body_bytes = 16384 });
         defer decoder.deinit();
@@ -239,17 +236,17 @@ const Host = struct {
             },
             .send_exit => {
                 try self.writePacket(child.stdin.?);
-                const term = try child.wait();
+                const term = try child.wait(zio.io());
                 child_live = false;
-                if (term != .Exited or term.Exited != 0) return error.ServerFailed;
+                if (term != .exited or term.exited != 0) return error.ServerFailed;
                 self.exited = true;
                 try self.post(.exited);
                 return;
             },
             .terminate => {
-                const term = try child.kill();
+                const term = try zio.terminate(&child);
                 child_live = false;
-                if (term == .Exited and term.Exited == 0) return error.ServerExitedBeforeForce;
+                if (term == .exited and term.exited == 0) return error.ServerExitedBeforeForce;
                 self.exited = true;
                 try self.post(.exited);
                 return;
@@ -257,10 +254,10 @@ const Host = struct {
         };
     }
 };
-fn readBody(input: std.fs.File, decoder: *codec.Decoder) ![]const u8 {
+fn readBody(input: std.Io.File, decoder: *codec.Decoder) ![]const u8 {
     var byte: [1]u8 = undefined;
     while (true) {
-        if (try input.read(&byte) == 0) return error.UnexpectedEof;
+        if (try zio.read(input, &byte) == 0) return error.UnexpectedEof;
         if ((try decoder.push(&byte)).body) |value| return value;
     }
 }
@@ -360,9 +357,9 @@ fn queueOwnership() !void {
     try std.testing.expectEqual(@as(usize, 1), probe.replies);
     try std.testing.expectError(error.DeliveryClosed, reply.finish());
 }
-pub fn main() !void {
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+pub fn main(init: std.process.Init.Minimal) !void {
+    const args = try zio.argsAlloc(allocator, init.args);
+    defer zio.argsFree(allocator, args);
     if (args.len != 2) return error.ExpectedServerPath;
     for (std.enums.values(Mode)) |mode| try run(args[1], mode);
     try queueOwnership();

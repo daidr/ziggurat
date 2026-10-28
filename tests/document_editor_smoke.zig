@@ -1,16 +1,12 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const t = @import("ziggurat_text_layout");
 const d = @import("ziggurat_document");
 const editing = @import("ziggurat_document_editor");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("imm.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn zlg_test_paint(*anyopaque, u32, u32) void;
 extern fn zlg_test_commit(*anyopaque, [*:0]const u8) void;
 extern fn zlg_test_surrounding(*anyopaque, [*]u8, usize, *usize, *usize) c_int;
@@ -154,13 +150,13 @@ fn transactions(allocator: std.mem.Allocator) !void {
     const bounded = try editing.Adapter.create(allocator, document, engine, .{ .bytes = 16384 });
     defer bounded.close() catch unreachable;
     const owned = (try bounded.stats()).owned_bytes;
-    try document.replace(.{ .start = 0, .end = try document.byteLength() }, "x\n" ** 10000);
+    try document.replace(.{ .start = 0, .end = try document.byteLength() }, &@as([10000 * "x\n".len]u8, @bitCast(@as([10000]["x\n".len]u8, @splat("x\n".*)))));
     try std.testing.expectError(error.CapacityExceeded, bounded.reindex());
     try std.testing.expectEqual(owned, (try bounded.stats()).owned_bytes);
     try std.testing.expect((try bounded.status()).index_required);
 }
 fn paragraphKeys(allocator: std.mem.Allocator) !void {
-    const source = "aa\r\n" ** 100 ++ "end";
+    const source = &@as([100 * "aa\r\n".len]u8, @bitCast(@as([100]["aa\r\n".len]u8, @splat("aa\r\n".*)))) ++ "end";
     const document = try d.Document.create(allocator, std.Thread.getCurrentId(), source, .{});
     defer document.close() catch unreachable;
     const engine = try t.Engine.create(allocator, std.Thread.getCurrentId(), .{});
@@ -212,7 +208,7 @@ fn compositionAnchors(allocator: std.mem.Allocator) !void {
     _ = try adapter.prepare(bounds, parameters);
     try adapter.bind(window);
     defer adapter.unbind() catch unreachable;
-    const many = "a\n" ** 80 ++ "z";
+    const many = &@as([80 * "a\n".len]u8, @bitCast(@as([80]["a\n".len]u8, @splat("a\n".*)))) ++ "z";
     _ = try adapter.handleEvent(window, .{ .text_preedit = .{ .text = many, .selection_start = many.len, .selection_end = many.len } }, bounds, parameters);
     _ = try adapter.handleEvent(window, .{ .text_preedit = .{ .text = "q", .selection_start = 1, .selection_end = 1 } }, bounds, parameters);
     try std.testing.expectEqual(@as(usize, 1), (try adapter.stats()).paragraphs);
@@ -233,7 +229,7 @@ fn compositionAnchors(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqualStrings("x", bytes[0..try document.read(.{ .start = 0, .end = try document.byteLength() }, &bytes)]);
 }
 fn horizontalReveal(allocator: std.mem.Allocator) !void {
-    const source = "a" ** 2000;
+    const source = &@as([2000]u8, @splat('a'));
     const document = try d.Document.create(allocator, std.Thread.getCurrentId(), source, .{});
     defer document.close() catch unreachable;
     const engine = try t.Engine.create(allocator, std.Thread.getCurrentId(), .{});
@@ -310,7 +306,7 @@ fn oracle(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(initial.shaped_batches, (try adapter.stats()).shaped_batches);
 }
 fn multiNavigation(allocator: std.mem.Allocator) !void {
-    const source = "abc\r\n" ** 3 ++ "abc";
+    const source = &@as([3 * "abc\r\n".len]u8, @bitCast(@as([3]["abc\r\n".len]u8, @splat("abc\r\n".*)))) ++ "abc";
     const document = try d.Document.create(allocator, std.Thread.getCurrentId(), source, .{});
     defer document.close() catch unreachable;
     const engine = try t.Engine.create(allocator, std.Thread.getCurrentId(), .{});
@@ -424,7 +420,7 @@ fn run(allocator: std.mem.Allocator) !void {
     const engine = try t.Engine.create(engine_failing.allocator(), std.Thread.getCurrentId(), .{});
     defer engine.close() catch unreachable;
     var adapter_failing = std.testing.FailingAllocator.init(allocator, .{});
-    var timer = try std.time.Timer.start();
+    var timer = try zio.Timer.start();
     const adapter = try editing.Adapter.create(adapter_failing.allocator(), document, engine, .{});
     const construct_ns = timer.lap();
     defer adapter.close() catch unreachable;
@@ -582,7 +578,7 @@ fn clickFold(state: *State) !void {
     if (state.failure) |err| return err;
 }
 fn foldedEditor(allocator: std.mem.Allocator) !void {
-    const source = "h\n" ++ "x\n" ** 10000 ++ "tail";
+    const source = "h\n" ++ &@as([10000 * "x\n".len]u8, @bitCast(@as([10000]["x\n".len]u8, @splat("x\n".*)))) ++ "tail";
     const document = try d.Document.create(allocator, std.Thread.getCurrentId(), source, .{});
     defer document.close() catch unreachable;
     const engine = try t.Engine.create(allocator, std.Thread.getCurrentId(), .{});

@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 
 /// A method's wire types. ErrorCode must be an enum. Item = void is unary;
 /// otherwise each stream chunk has type Item and the terminal result is Result.
@@ -25,11 +26,11 @@ pub fn Event(comptime PayloadType: type) type {
     };
 }
 
-pub fn events(comptime Schema: type) []const std.builtin.Type.StructField {
+pub inline fn events(comptime Schema: type) []const zio.Field {
     if (!@hasDecl(Schema, "events")) return &.{};
     // Validation walks every nested field; large schemas need room.
     @setEvalBranchQuota(100_000);
-    const fields = @typeInfo(@TypeOf(Schema.events)).@"struct".fields;
+    const fields = zio.fields(@TypeOf(Schema.events));
     if (fields.len > 256) @compileError("IPC event schemas support at most 256 named events");
     inline for (fields) |field| validateType(@field(Schema.events, field.name).Payload, 0);
     return fields;
@@ -41,7 +42,7 @@ pub fn validateType(comptime T: type, comptime depth: usize) void {
     switch (@typeInfo(T)) {
         .void, .bool => {},
         .@"enum" => |info| {
-            if (!info.is_exhaustive) @compileError("IPC enums must be exhaustive");
+            if (info.mode != .exhaustive) @compileError("IPC enums must be exhaustive");
             if (std.meta.hasFn(T, "jsonStringify") or std.meta.hasFn(T, "jsonParse") or std.meta.hasFn(T, "jsonParseFromValue")) @compileError("IPC types cannot customize their JSON encoding");
         },
         .int => |info| if (info.bits > 53) @compileError("IPC integers must fit JavaScript's exact integer range"),
@@ -55,7 +56,7 @@ pub fn validateType(comptime T: type, comptime depth: usize) void {
         .@"struct" => |info| {
             if (std.meta.hasFn(T, "jsonStringify") or std.meta.hasFn(T, "jsonParse") or std.meta.hasFn(T, "jsonParseFromValue")) @compileError("IPC types cannot customize their JSON encoding");
             if (info.is_tuple) @compileError("IPC structs must use named fields");
-            inline for (info.fields) |field| {
+            inline for (zio.fields(T)) |field| {
                 if (field.is_comptime) @compileError("IPC fields cannot be comptime");
                 validateType(field.type, depth + 1);
             }
@@ -88,9 +89,9 @@ pub fn validateJson(comptime T: type, value: std.json.Value) !void {
                 for (value.array.items) |item| try validateJson(info.child, item);
             }
         },
-        .@"struct" => |info| {
+        .@"struct" => {
             if (value != .object) return error.InvalidParams;
-            inline for (info.fields) |field| {
+            inline for (zio.fields(T)) |field| {
                 if (value.object.get(field.name)) |item| {
                     try validateJson(field.type, item);
                 } else if (field.default_value_ptr == null) return error.InvalidParams;
@@ -117,25 +118,25 @@ pub fn validateValue(value: anytype) !void {
                 if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
             } else for (value) |item| try validateValue(item);
         },
-        .@"struct" => |info| inline for (info.fields) |field| try validateValue(@field(value, field.name)),
+        .@"struct" => inline for (zio.fields(T)) |field| try validateValue(@field(value, field.name)),
         else => unreachable,
     }
 }
 
-pub fn methods(comptime Service: type) []const std.builtin.Type.StructField {
+pub inline fn methods(comptime Service: type) []const zio.Field {
     @setEvalBranchQuota(100_000);
     if (!@hasDecl(Service, "methods")) {
         if (events(Service).len != 0) return &.{};
         @compileError("An IPC schema must declare methods or events");
     }
-    const fields = @typeInfo(@TypeOf(Service.methods)).@"struct".fields;
+    const fields = zio.fields(@TypeOf(Service.methods));
     if (fields.len == 0 and events(Service).len == 0) @compileError("An IPC schema must declare methods or events");
     inline for (fields) |field| {
-        for (.{ "receive", "close", "pendingCount", "__proto__", "constructor", "prototype" }) |reserved| {
-            if (std.mem.eql(u8, field.name, reserved)) @compileError("Reserved IPC method name: " ++ field.name);
+        inline for (.{ "receive", "close", "pendingCount", "__proto__", "constructor", "prototype" }) |reserved| {
+            if (comptime std.mem.eql(u8, field.name, reserved)) @compileError("Reserved IPC method name: " ++ field.name);
         }
-        if (events(Service).len != 0) for (.{ "on", "listenerCount", "subscriptionCount" }) |reserved| {
-            if (std.mem.eql(u8, field.name, reserved)) @compileError("Reserved IPC event API name: " ++ field.name);
+        if (events(Service).len != 0) inline for (.{ "on", "listenerCount", "subscriptionCount" }) |reserved| {
+            if (comptime std.mem.eql(u8, field.name, reserved)) @compileError("Reserved IPC event API name: " ++ field.name);
         };
         const M = @field(Service.methods, field.name);
         validateType(M.Params, 0);
@@ -154,10 +155,11 @@ pub fn MethodTag(comptime Service: type) type {
 
 pub fn ParamsUnion(comptime Service: type) type {
     const fields = methods(Service);
-    var union_fields: [fields.len]std.builtin.Type.UnionField = undefined;
+    var names: [fields.len][:0]const u8 = undefined;
+    var types: [fields.len]type = undefined;
     for (fields, 0..) |field, index| {
-        const T = @field(Service.methods, field.name).Params;
-        union_fields[index] = .{ .name = field.name, .type = T, .alignment = @alignOf(T) };
+        names[index] = field.name;
+        types[index] = @field(Service.methods, field.name).Params;
     }
-    return @Type(.{ .@"union" = .{ .layout = .auto, .tag_type = MethodTag(Service), .fields = &union_fields, .decls = &.{} } });
+    return @Union(.auto, MethodTag(Service), &names, &types, &@splat(.{}));
 }

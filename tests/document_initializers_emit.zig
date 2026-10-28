@@ -1,14 +1,15 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const initializers = @import("ziggurat_document_initializers");
 
 /// Test-only source emitter. A separate JS engine executes the exact encoded
 /// batch; it does not recreate the compiler's wrapping or origin guards.
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try zio.argsAlloc(allocator, init.args);
+    defer zio.argsFree(allocator, args);
     if (args.len != 2) return error.ExpectedOracleCase;
     const bodies: [2][]const u8 = if (std.mem.eql(u8, args[1], "return"))
         .{ "window.order.push('甲😀');var localOnly=1;return;window.order.push('unreachable');", "window.order.push(typeof localOnly);// final line comment" }
@@ -36,5 +37,5 @@ pub fn main() !void {
     defer owned.deinit();
     const program = try std.unicode.utf16LeToUtf8Alloc(allocator, owned.encoded.?);
     defer allocator.free(program);
-    try std.fs.File.stdout().writeAll(program);
+    try std.Io.File.stdout().writeStreamingAll(zio.io(), program);
 }

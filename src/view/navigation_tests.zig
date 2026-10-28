@@ -236,7 +236,7 @@ test "icons and SVG pictures lay out at their own size and paint through their p
 }
 
 test "a bitmap is its size in pixels unless styled, and fits as asked" {
-    var pixels = [_]u8{0} ** (8 * 4 * 4);
+    var pixels = @as([8 * 4 * 4]u8, @splat(0));
     var lease = ui.drawing.Lease.init(std.Thread.getCurrentId());
     const levels = [_]ui.drawing.ImageLevel{.{ .pixels = &pixels, .byte_len = pixels.len, .width = 8, .height = 4, .stride = 32 }};
     const picture: view.ImageView = .{ .lease = &lease, .identity = 1, .levels = &levels };

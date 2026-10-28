@@ -71,7 +71,7 @@ const Fixture = struct {
     }
     fn expected(self: *@This()) !void {
         const position = try self.view.cursor();
-        const document = self.documents[@intFromEnum(position.side)];
+        const document = self.documents[@backingInt(position.side)];
         const selected = try document.selection();
         try std.testing.expectEqual(selected.caret, position.byte_offset);
         try std.testing.expectEqual(try document.version(), position.revision);
@@ -219,14 +219,14 @@ fn run(child: std.mem.Allocator, mode: viewing.editable.Mode) !void {
     thread.join();
     {
         const common = "unchanged wrapped paragraph with enough words to occupy more than one visual line\n";
-        try fixture.sources(common ** 12 ++ "A\n" ++ common ** 12, common ** 12 ++ "B\n" ++ common ** 12);
+        try fixture.sources(&@as([12 * common.len]u8, @bitCast(@as([12][common.len]u8, @splat(common.*)))) ++ "A\n" ++ &@as([12 * common.len]u8, @bitCast(@as([12][common.len]u8, @splat(common.*)))), &@as([12 * common.len]u8, @bitCast(@as([12][common.len]u8, @splat(common.*)))) ++ "B\n" ++ &@as([12 * common.len]u8, @bitCast(@as([12][common.len]u8, @splat(common.*)))));
         try view.setContext(.{ .context_lines = 1, .minimum_hidden = 2 });
         try view.prepare(bounds, fixture.parameters);
         var regions: [96]viewing.editable.ContextRegion = undefined;
         const folded = try view.contextRegions(&regions);
         try std.testing.expect(folded.len != 0 and folded[0].collapsed);
         const side = try view.activeSide();
-        const document = documents[@intFromEnum(side)];
+        const document = documents[@backingInt(side)];
         const hidden = if (side == .a) folded[0].a else folded[0].b;
         const byte = (try document.line(hidden.start)).start;
         _ = try document.setSelection(.{ .anchor = byte, .caret = byte });
@@ -249,7 +249,7 @@ fn run(child: std.mem.Allocator, mode: viewing.editable.Mode) !void {
         for ([_]viewing.Side{ .a, .b }) |side| {
             if (mode == .unified and side == .a) continue;
             try view.focus(side);
-            const document = documents[@intFromEnum(side)];
+            const document = documents[@backingInt(side)];
             for (0..try document.byteLength() + 1) |byte| {
                 _ = try document.setSelection(.{ .anchor = byte, .caret = byte });
                 try fixture.expected();
