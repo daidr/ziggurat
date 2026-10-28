@@ -261,7 +261,8 @@ jobs:
           sh scripts/ci-zig-cache.sh >> "$GITHUB_ENV"
       - name: Compile and unit checks
         run: |
-          zig build test check -Doptimize=${{ matrix.optimize }} --summary failures
+          # A test that waits forever fails by name instead of using up the job.
+          zig build test check -Doptimize=${{ matrix.optimize }} --test-timeout 5m --summary failures
       - name: AppKit window smoke
         run: |
           zig build smoke-macos -Doptimize=${{ matrix.optimize }} --summary failures
