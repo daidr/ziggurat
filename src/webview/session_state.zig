@@ -26,7 +26,7 @@ pub fn encode(allocator: std.mem.Allocator, platform: Platform, uri: []const u8,
     const out = try allocator.alloc(u8, header_bytes + uri.len + native.len);
     @memcpy(out[0..magic.len], magic);
     out[magic.len] = version;
-    out[magic.len + 1] = @intFromEnum(platform);
+    out[magic.len + 1] = @backingInt(platform);
     std.mem.writeInt(u32, out[magic.len + 2 ..][0..4], @intCast(uri.len), .little);
     @memcpy(out[header_bytes..][0..uri.len], uri);
     @memcpy(out[header_bytes + uri.len ..], native);
@@ -40,7 +40,7 @@ pub fn parse(bytes: []const u8) !Parsed {
     if (length == 0 or length > max_uri_bytes or length > bytes.len - header_bytes) return error.InvalidSessionState;
     const native = bytes[header_bytes + length ..];
     if (native.len > max_native_bytes) return error.SessionStateTooLarge;
-    return .{ .platform = @enumFromInt(bytes[magic.len + 1]), .uri = bytes[header_bytes..][0..length], .native = native };
+    return .{ .platform = @fromBackingInt(@intCast(bytes[magic.len + 1])), .uri = bytes[header_bytes..][0..length], .native = native };
 }
 
 /// The path of a local site's URI, scheme://host/path, or null for another
