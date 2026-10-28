@@ -532,8 +532,14 @@ pub fn getCwd(buffer: []u8) std.process.CurrentPathError![]u8 {
 }
 
 /// The canonical absolute path of `sub_path` relative to `dir`, in `buffer`.
+/// `buffer` may be shorter than the `max_path_bytes` std requires.
 pub fn realpath(dir: std.Io.Dir, sub_path: []const u8, buffer: []u8) std.Io.Dir.RealPathFileError![]u8 {
-    return buffer[0..try dir.realPathFile(io(), sub_path, buffer)];
+    if (buffer.len >= std.Io.Dir.max_path_bytes) return buffer[0..try dir.realPathFile(io(), sub_path, buffer)];
+    var full: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = full[0..try dir.realPathFile(io(), sub_path, &full)];
+    if (path.len > buffer.len) return error.NameTooLong;
+    @memcpy(buffer[0..path.len], path);
+    return buffer[0..path.len];
 }
 
 /// File permissions from a POSIX mode; systems without modes use the default.
