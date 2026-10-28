@@ -1132,11 +1132,11 @@ pub const Editor = struct {
             const bg = s.background orelse continue;
             if (s.object != null) continue;
             const line = l.lines.items[p.line];
-            const width = l.options.measurer.textSize(std.mem.trimEnd(u8, l.pieceText(p), " \t"), s.font).width;
+            const width = l.options.measurer.textSize(l.visibleText(p), s.font).width;
             if (s.radius > 0) {
                 const size = s.font.size;
                 const pad = @min(size * 0.22, s.radius);
-                const baseline = y + line.y + line.baseline;
+                const baseline = y + line.y + line.baseline - s.baseline_shift;
                 frame.roundedRect(.{ .x = x + line.x + p.x - pad, .y = baseline - size * 0.98, .width = width + 2 * pad, .height = size * 1.32 }, s.radius, bg);
             } else frame.roundedRect(.{ .x = x + line.x + p.x, .y = y + line.y, .width = p.width, .height = line.height }, 0, bg);
         }
@@ -1146,15 +1146,19 @@ pub const Editor = struct {
             const line = l.lines.items[p.line];
             const m = l.fontMetrics(p.span);
             const color = s.color orelse base;
-            const t = std.mem.trimEnd(u8, l.pieceText(p), " \t");
-            const width = if (t.len > 0) l.options.measurer.textSize(t, s.font).width else 0;
-            if (t.len > 0) {
-                const top = y + line.y + line.baseline - m.ascent;
-                frame.labelFont(.{ .x = x + line.x + p.x, .y = top, .width = width + m.size, .height = m.height }, t, color, s.font);
+            const t = l.visibleText(p);
+            var width = if (t.len > 0) l.options.measurer.textSize(t, s.font).width else 0;
+            const baseline = y + line.y + line.baseline - s.baseline_shift;
+            const top = baseline - m.ascent;
+            if (t.len > 0) frame.labelFont(.{ .x = x + line.x + p.x, .y = top, .width = width + m.size, .height = m.height }, t, color, s.font);
+            if (p.hyphen) {
+                // The soft hyphen the line breaks at.
+                const hyphen = l.hyphenWidth(p.span);
+                frame.labelFont(.{ .x = x + line.x + p.x + width, .y = top, .width = hyphen + m.size, .height = m.height }, "-", color, s.font);
+                width += hyphen;
             }
             if (!(s.underline or s.strikethrough) or width <= 0) continue;
             const thickness = @max(1, @round(m.size / 14));
-            const baseline = y + line.y + line.baseline;
             if (s.underline) frame.rect(.{ .x = x + line.x + p.x, .y = baseline + @max(1, m.size * 0.08), .width = width, .height = thickness }, color);
             if (s.strikethrough) frame.rect(.{ .x = x + line.x + p.x, .y = baseline - m.size * 0.3 - thickness / 2, .width = width, .height = thickness }, color);
         }
@@ -1481,46 +1485,50 @@ pub const Editor = struct {
         return self.text().runeAt(i);
     }
 
+    /// The end of the word after `from`, skipping what is between: each
+    /// ideograph and kana is a word (see `rt.words`).
     fn nextWord(self: *const Editor, from: u32) u32 {
         const n = self.textLen();
         var i = from;
-        var word = false;
-        while (i < n) : (i += 1) {
-            if (isWord(self.runeAt(i))) {
-                word = true;
-            } else if (word) break;
+        while (i < n and !isWord(self.runeAt(i))) i += 1;
+        if (i < n) {
+            i += 1;
+            while (i < n and !rt.words.boundary(self.runeAt(i - 1), self.runeAt(i))) i += 1;
         }
         return i;
     }
 
+    /// The start of the word before `from`.
     fn prevWord(self: *const Editor, from: u32) u32 {
         var i = from;
-        var word = false;
-        while (i > 0) : (i -= 1) {
-            if (isWord(self.runeAt(i - 1))) {
-                word = true;
-            } else if (word) break;
+        while (i > 0 and !isWord(self.runeAt(i - 1))) i -= 1;
+        if (i > 0) {
+            i -= 1;
+            while (i > 0 and !rt.words.boundary(self.runeAt(i - 1), self.runeAt(i))) i -= 1;
         }
         return i;
     }
 
-    /// The word, or the run of other runes, around i, within its paragraph.
+    /// The word, or the run of other runes, around i, within its
+    /// paragraph: an ideograph or a kana is a word alone.
     fn wordAt(self: *const Editor, i_: u32) [2]u32 {
         const n = self.textLen();
         if (n == 0) return .{ 0, 0 };
         const i = @min(i_, n - 1);
-        const word = isWord(self.runeAt(i));
         var a = i;
         var b = i;
         while (a > 0) {
             const r = self.runeAt(a - 1);
-            if (r == '\n' or isWord(r) != word) break;
+            if (r == '\n' or rt.words.boundary(r, self.runeAt(a))) break;
             a -= 1;
         }
-        while (b < n) {
-            const r = self.runeAt(b);
-            if (r == '\n' or isWord(r) != word) break;
-            b += 1;
+        if (self.runeAt(i) != '\n') {
+            b = i + 1;
+            while (b < n) {
+                const r = self.runeAt(b);
+                if (r == '\n' or rt.words.boundary(self.runeAt(b - 1), r)) break;
+                b += 1;
+            }
         }
         return .{ a, b };
     }
@@ -2621,29 +2629,14 @@ fn uiColor(c: rt.Color) ui.Color {
     return .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a };
 }
 
-fn isWord(r: u21) bool {
-    if (r < 0x80) return std.ascii.isAlphanumeric(@intCast(r)) or r == '_';
-    return !isSpaceRune(r) and !isPunctuation(r);
-}
+const isWord = rt.words.isWordRune;
 
 fn isAlnum(r: u21) bool {
     if (r < 0x80) return std.ascii.isAlphanumeric(@intCast(r));
     return isWord(r);
 }
 
-fn isSpaceRune(r: u21) bool {
-    return switch (r) {
-        ' ', '\t', '\n', '\r', 0x0b, 0x0c, 0x85, 0xa0, 0x1680, 0x2000...0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000 => true,
-        else => false,
-    };
-}
-
-fn isPunctuation(r: u21) bool {
-    return switch (r) {
-        0x2010...0x2027, 0x2030...0x205e, 0x3001...0x3003, 0x3008...0x3011, 0x3014...0x301f, 0xff01...0xff0f, 0xff1a...0xff20, 0xff3b...0xff40, 0xff5b...0xff65, 0xfffc => true,
-        else => false,
-    };
-}
+const isSpaceRune = rt.words.isSpace;
 
 fn eqlAny(s: []const u8, options: []const []const u8) bool {
     for (options) |o| if (std.mem.eql(u8, s, o)) return true;
@@ -2793,4 +2786,5 @@ pub fn romanNumber(n_: u32, out: []u8) []const u8 {
 test {
     _ = @import("heights.zig");
     _ = @import("editor_tests.zig");
+    _ = @import("layout_tests.zig");
 }

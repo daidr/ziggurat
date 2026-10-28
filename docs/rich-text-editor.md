@@ -57,7 +57,7 @@ editor.detach();
 
 - 排版按段落进行，只排版视口附近的段落；其余段落的高度用已测段落的平均值估算，并存在 Fenwick 树中，滚动定位与命中测试都是 O(log n)。绘制不排版：尺寸变化后的排版在绘制后投递的任务和输入处理中完成。
 - Markdown 快捷方式：段首输入 `# `…`###### `、`- `、`* `、`1. `、`[ ] `、`[x] `、`> `，以及在空段落里输入 ```` ``` ```` 后回车，会转换成对应的段落样式；在单词两侧输入 `**粗体**`、`*斜体*`、`` `代码` ``、`~~删除线~~` 会转换成对应属性。`Options.no_markdown` 关闭它们。
-- 快捷键（Windows 与 Linux）：Ctrl+B/I/U 加粗/斜体/下划线，Ctrl+Shift+X 删除线，Ctrl+Shift+E 行内代码，Ctrl+K 链接（`Options.on_link_command` 可接管为弹出输入框），Ctrl+Shift+7/8/L 编号/项目符号/任务列表，Ctrl+]/[ 缩进/减少缩进，Ctrl+L/E/R 左/中/右对齐，Ctrl+Alt+0–6 正文与标题，Ctrl+Z/Ctrl+Y（或 Ctrl+Shift+Z）撤销/重做，Ctrl+Shift+V 粘贴并匹配样式。Ctrl+方向键按词移动，Home/End、PageUp/PageDown、双击选词、三击选段。
+- 快捷键（Windows 与 Linux）：Ctrl+B/I/U 加粗/斜体/下划线，Ctrl+Shift+X 删除线，Ctrl+Shift+E 行内代码，Ctrl+K 链接（`Options.on_link_command` 可接管为弹出输入框），Ctrl+Shift+7/8/L 编号/项目符号/任务列表，Ctrl+]/[ 缩进/减少缩进，Ctrl+L/E/R 左/中/右对齐，Ctrl+Alt+0–6 正文与标题，Ctrl+Z/Ctrl+Y（或 Ctrl+Shift+Z）撤销/重做，Ctrl+Shift+V 粘贴并匹配样式。Ctrl+方向键按词移动、双击选词时，每个汉字、平假名与片假名各自成词，拉丁字母、数字与韩文按连续的一串成词。Home/End、PageUp/PageDown、双击选词、三击选段。
 - 列表里回车延续列表，空列表项回车退出列表；段首退格先去掉段落样式。点击任务框切换完成状态，点击链接交给 `Options.on_link`，否则只把 http、https 与 mailto 链接交给 `Options.open_url`（见 `safeToOpen`）。
 - 输入法：编辑器注册为 Context 的文本字段，预编辑文字在光标处显示并带下划线，候选窗口跟随光标。快照中的偏移是 UTF-16 码元，`units`/`runeOfUnits` 负责换算。
 - 无障碍：叶子是 `.text_box`，值为有界的纯文本。

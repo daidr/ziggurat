@@ -5,6 +5,11 @@
 //! on, the edges of lines and graphemes, and the rectangles a selection
 //! covers. Runes are Unicode scalar values, counted from the paragraph's
 //! start.
+//!
+//! A paragraph can be set as printed prose is: justified, its first line
+//! indented, with more leading; a soft hyphen (U+00AD) is a place a line
+//! may break at, showing a hyphen only there, and a span's baseline shift
+//! raises or lowers it, as superscripts and subscripts are.
 const std = @import("std");
 const ui = @import("ziggurat_ui");
 const view = @import("ziggurat_view");
@@ -28,6 +33,9 @@ pub const Style = struct {
     /// An object of this size takes the place of the span's one rune, an
     /// attachment, sitting on the baseline.
     object: ?struct { width: f32, height: f32 } = null,
+    /// Raises the span's text or object that many DIP above the baseline,
+    /// or lowers it when negative; the line makes room for it.
+    baseline_shift: f32 = 0,
 };
 
 pub const Span = struct {
@@ -44,7 +52,23 @@ pub const Options = struct {
     font: Font = .{},
     /// Width lines wrap at; 0 breaks no lines.
     width: f32 = 0,
+    /// Places lines narrower than `width`, and the last line of a
+    /// justified paragraph.
     @"align": Align = .start,
+    /// Stretches every line but the last to `width`, widening the spaces
+    /// between words and the room after Han characters and kana. A line
+    /// with nothing to widen, as a word broken across lines, stays.
+    justify: bool = false,
+    /// Moves the first line this many DIP in and wraps it that much
+    /// narrower, as a book indents its paragraphs.
+    indent: f32 = 0,
+    /// Breaks lines only between words: a word wider than `width`
+    /// overflows it rather than breaking between its characters.
+    no_break_words: bool = false,
+    /// The height of a line as a multiple of `font.size`, its extra room
+    /// shared above and below; 0, or less than the text needs, keeps the
+    /// line's own.
+    line_height: f32 = 0,
 };
 
 pub const Affinity = enum { upstream, downstream };
@@ -61,6 +85,9 @@ pub const Piece = struct {
     x: f32,
     width: f32,
     line: u32,
+    /// The line breaks at the soft hyphen ending the piece: a hyphen
+    /// follows it.
+    hyphen: bool = false,
 };
 
 pub const Line = struct {
@@ -68,7 +95,12 @@ pub const Line = struct {
     height: f32,
     /// The baseline below `y`.
     baseline: f32,
-    /// Left edge, as aligned, and width without the spaces that end it.
+    /// How far the line's text reaches above and below the baseline; the
+    /// rest of `height` is leading.
+    ascent: f32 = 0,
+    descent: f32 = 0,
+    /// Left edge, as aligned, and width without the spaces that end it;
+    /// the first line's indent is part of its width.
     x: f32,
     width: f32,
     /// Runes of the line: from `start` to `end`, the spaces that end it
@@ -96,6 +128,8 @@ const Word = struct {
     /// No line may break after it: the next span continues the word.
     glued: bool = false,
     cluster: f32 = 0,
+    /// The width of the hyphen of the soft hyphen ending it, 0 without.
+    hyphen: f32 = 0,
 };
 
 const SpanInfo = struct { start: u32, end: u32, rune: u32, style: Style };
@@ -199,7 +233,24 @@ pub const Layout = struct {
         const s = self.spans.items[span];
         if (s.style.object) |o| return if (end > start) o.width else 0;
         if (end <= start) return 0;
-        return self.options.measurer.textSize(self.text.items[start..end], s.style.font).width;
+        // A soft hyphen, which only ends a piece, takes no room.
+        var t = self.text.items[start..end];
+        if (std.mem.endsWith(u8, t, soft_hyphen)) t = t[0 .. t.len - soft_hyphen.len];
+        if (t.len == 0) return 0;
+        return self.options.measurer.textSize(t, s.style.font).width;
+    }
+
+    /// The text a piece draws: without the spaces that end it or a soft
+    /// hyphen.
+    pub fn visibleText(self: *const Layout, piece: Piece) []const u8 {
+        var t = std.mem.trimEnd(u8, self.pieceText(piece), " \t");
+        if (std.mem.endsWith(u8, t, soft_hyphen)) t = t[0 .. t.len - soft_hyphen.len];
+        return t;
+    }
+
+    /// The width of a hyphen in the font of span k.
+    pub fn hyphenWidth(self: *const Layout, k: u32) f32 {
+        return self.options.measurer.textSize("-", self.spans.items[k].style.font).width;
     }
 
     fn split(self: *Layout, k: u32) !void {
@@ -210,8 +261,14 @@ pub const Layout = struct {
         while (at < s.end) {
             const start = at;
             const first_rune = rune;
-            // The word: up to a space, or one character lines break around.
+            // The word: up to a space or a soft hyphen, or one character
+            // lines break around.
+            var soft = false;
             while (at < s.end and !isSpace(text[at])) {
+                if (s.style.object == null and std.mem.startsWith(u8, text[at..s.end], soft_hyphen)) {
+                    soft = true;
+                    break;
+                }
                 const length: u32 = @intCast(sequenceLength(text[at]));
                 if (s.style.object != null or breaksAround(decode(text[at..@min(s.end, at + length)]))) {
                     if (at == start) {
@@ -224,13 +281,18 @@ pub const Layout = struct {
                 rune += 1;
             }
             const visible_end = at;
-            while (at < s.end and isSpace(text[at])) {
+            if (soft) {
+                at += soft_hyphen.len;
+                rune += 1;
+            }
+            while (!soft and at < s.end and isSpace(text[at])) {
                 at += 1;
                 rune += 1;
             }
             const visible = self.measure(k, start, visible_end);
-            const width = if (at > visible_end) self.measure(k, start, at) else visible;
-            try self.words.append(self.allocator, .{ .span = k, .rune = first_rune, .runes = rune - first_rune, .start = start, .end = at, .width = width, .visible = visible });
+            const width = if (at > visible_end and !soft) self.measure(k, start, at) else visible;
+            const hyphen = if (soft) self.hyphenWidth(k) else 0;
+            try self.words.append(self.allocator, .{ .span = k, .rune = first_rune, .runes = rune - first_rune, .start = start, .end = at, .width = width, .visible = visible, .hyphen = hyphen });
         }
     }
 
@@ -240,7 +302,7 @@ pub const Layout = struct {
         for (words, 0..) |*w, i| {
             if (i + 1 == words.len) continue;
             const next = words[i + 1];
-            if (next.span == w.span) continue;
+            if (next.span == w.span or w.hyphen > 0) continue;
             if (self.spans.items[w.span].style.object != null or self.spans.items[next.span].style.object != null) continue;
             const last = lastCodepoint(text[w.start..w.end]);
             w.glued = !isSpace(text[w.end - 1]) and !breaksAround(last) and !isSpace(text[next.start]) and !breaksAround(decode(text[next.start..@min(next.end, next.start + @as(u32, @intCast(sequenceLength(text[next.start]))))]));
@@ -250,46 +312,61 @@ pub const Layout = struct {
             i -= 1;
             const w = &words[i];
             w.cluster = if (w.glued) w.width + words[i + 1].cluster else w.visible;
+            // A line may end at a soft hyphen, with its hyphen, or go on.
+            if (w.hyphen > 0 and i + 1 < words.len) w.cluster = @min(w.visible + w.hyphen, w.width + words[i + 1].cluster);
         }
     }
 
     fn wrap(self: *Layout) !void {
         const width = self.options.width;
-        var x: f32 = 0;
+        // The first line starts at the indent.
+        var left: f32 = self.options.indent;
+        var x: f32 = left;
         var trailing: f32 = 0;
         var line_start: u32 = 0;
         var line_pieces: u32 = 0;
         var widest: f32 = 0;
         var i: usize = 0;
-        while (i < self.words.items.len) : (i += 1) {
+        while (i < self.words.items.len) {
             var w = self.words.items[i];
             const starts_cluster = i == 0 or !self.words.items[i - 1].glued;
-            if (width > 0 and x > 0 and ((starts_cluster and x + w.cluster > width) or (!starts_cluster and x + w.visible > width))) {
-                try self.finishLine(&line_start, w.rune, &line_pieces, x - trailing, &widest);
+            if (width > 0 and x > left and ((starts_cluster and x + w.cluster > width) or (!starts_cluster and x + w.visible > width))) {
+                const hyphen = self.words.items[i - 1].hyphen;
+                try self.finishLine(&line_start, w.rune, &line_pieces, x - trailing + hyphen, &widest, hyphen > 0);
+                left = 0;
                 x = 0;
                 trailing = 0;
             }
             // A word wider than the line breaks between its characters.
-            if (width > 0 and x == 0 and w.visible > width and w.runes > 1) {
-                const cut = self.fit(w, width);
+            if (width > 0 and x == left and x + w.visible > width and w.runes > 1 and !self.options.no_break_words) {
+                const cut = self.fit(w, @max(width - x, 1));
                 if (cut.runes < w.runes) {
                     try self.place(.{ .span = w.span, .rune = w.rune, .runes = cut.runes, .start = w.start, .end = cut.byte, .width = cut.width, .visible = cut.width }, x);
-                    try self.finishLine(&line_start, w.rune + cut.runes, &line_pieces, cut.width, &widest);
-                    const rest: Word = .{ .span = w.span, .rune = w.rune + cut.runes, .runes = w.runes - cut.runes, .start = cut.byte, .end = w.end, .width = 0, .visible = 0, .glued = w.glued };
+                    try self.finishLine(&line_start, w.rune + cut.runes, &line_pieces, x + cut.width, &widest, false);
+                    const rest: Word = .{ .span = w.span, .rune = w.rune + cut.runes, .runes = w.runes - cut.runes, .start = cut.byte, .end = w.end, .width = 0, .visible = 0, .glued = w.glued, .hyphen = w.hyphen };
                     w = rest;
                     w.visible = self.measure(w.span, w.start, self.visibleEnd(w));
-                    w.width = self.measure(w.span, w.start, w.end);
+                    w.width = if (w.hyphen > 0) w.visible else self.measure(w.span, w.start, w.end);
                     w.cluster = w.visible;
+                    // The rest of the word, from the next line.
                     self.words.items[i] = w;
-                    i -= 1;
+                    left = 0;
+                    x = 0;
                     continue;
                 }
             }
             try self.place(w, x);
             x += w.width;
             trailing = w.width - w.visible;
+            i += 1;
         }
-        try self.finishLine(&line_start, self.runeCount(), &line_pieces, x - trailing, &widest);
+        try self.finishLine(&line_start, self.runeCount(), &line_pieces, x - trailing, &widest, false);
+        // Every line but the last stretches to the width.
+        if (self.options.justify and width > 0) {
+            for (self.lines.items[0 .. self.lines.items.len - 1]) |*line| self.justify(line, width);
+            widest = 0;
+            for (self.lines.items) |line| widest = @max(widest, line.width);
+        }
         self.width = widest;
         const last = self.lines.items[self.lines.items.len - 1];
         self.height = last.y + last.height;
@@ -300,6 +377,31 @@ pub const Layout = struct {
                 line.x = if (self.options.@"align" == .center) room / 2 else room;
             }
         }
+    }
+
+    /// Widens the room after each piece of a line that ends with spaces or
+    /// a character that stretches, but its last, until the line is `width`
+    /// wide.
+    fn justify(self: *Layout, line: *Line, width: f32) void {
+        const room = width - line.width;
+        if (room <= 1e-3 or line.pieces_end - line.first_piece < 2) return;
+        const pieces = self.pieces.items[line.first_piece..line.pieces_end];
+        var opportunities: usize = 0;
+        for (pieces[0 .. pieces.len - 1]) |p| opportunities += @intFromBool(self.stretchesAfter(p));
+        if (opportunities == 0) return;
+        const each = room / @as(f32, @floatFromInt(opportunities));
+        var moved: f32 = 0;
+        for (pieces) |*p| {
+            p.x += moved;
+            if (self.stretchesAfter(p.*)) moved += each;
+        }
+        line.width = width;
+    }
+
+    fn stretchesAfter(self: *const Layout, p: Piece) bool {
+        if (p.runes == 0 or self.spans.items[p.span].style.object != null) return false;
+        const last = self.runeAt(p.rune + p.runes - 1);
+        return last != 0xad and stretches(last);
     }
 
     fn visibleEnd(self: *const Layout, w: Word) u32 {
@@ -327,9 +429,10 @@ pub const Layout = struct {
     fn place(self: *Layout, w: Word, x: f32) !void {
         const line: u32 = @intCast(self.lines.items.len);
         const pieces = self.pieces.items;
-        if (pieces.len > 0) {
+        // Justified lines move each word; a soft hyphen ends a piece.
+        if (pieces.len > 0 and !self.options.justify) {
             const last = &pieces[pieces.len - 1];
-            if (last.line == line and last.span == w.span and last.end == w.start and self.spans.items[w.span].style.object == null) {
+            if (last.line == line and last.span == w.span and last.end == w.start and self.spans.items[w.span].style.object == null and !std.mem.endsWith(u8, self.pieceText(last.*), soft_hyphen)) {
                 last.end = w.end;
                 last.runes += w.runes;
                 last.width = self.measure(w.span, last.start, last.end);
@@ -339,21 +442,26 @@ pub const Layout = struct {
         try self.pieces.append(self.allocator, .{ .span = w.span, .rune = w.rune, .runes = w.runes, .start = w.start, .end = w.end, .x = x, .width = w.width, .line = line });
     }
 
-    fn finishLine(self: *Layout, line_start: *u32, end: u32, line_pieces: *u32, width: f32, widest: *f32) !void {
+    fn finishLine(self: *Layout, line_start: *u32, end: u32, line_pieces: *u32, width: f32, widest: *f32, hyphen: bool) !void {
         const pieces = self.pieces.items[line_pieces.*..];
+        if (hyphen and pieces.len > 0) pieces[pieces.len - 1].hyphen = true;
         const base = self.metrics.items[self.metrics.items.len - 1];
         var ascent: f32 = if (pieces.len == 0) base.ascent else 0;
         var descent: f32 = if (pieces.len == 0) base.height - base.ascent else 0;
         for (pieces) |p| {
             const m = self.metrics.items[p.span];
-            ascent = @max(ascent, m.ascent);
-            descent = @max(descent, m.height - m.ascent);
+            const shift = self.spans.items[p.span].style.baseline_shift;
+            ascent = @max(ascent, m.ascent + shift);
+            descent = @max(descent, m.height - m.ascent - shift);
         }
         const y = if (self.lines.items.len == 0) 0 else blk: {
             const previous = self.lines.items[self.lines.items.len - 1];
             break :blk previous.y + previous.height;
         };
-        try self.lines.append(self.allocator, .{ .y = y, .height = ascent + descent, .baseline = ascent, .x = 0, .width = @max(0, width), .start = line_start.*, .end = end, .first_piece = line_pieces.*, .pieces_end = @intCast(self.pieces.items.len) });
+        // Leading a line height asks for goes half above, half below.
+        const height = @max(ascent + descent, self.options.line_height * self.options.font.size);
+        const lead = (height - ascent - descent) / 2;
+        try self.lines.append(self.allocator, .{ .y = y, .height = height, .baseline = lead + ascent, .ascent = ascent, .descent = descent, .x = 0, .width = @max(0, width), .start = line_start.*, .end = end, .first_piece = line_pieces.*, .pieces_end = @intCast(self.pieces.items.len) });
         widest.* = @max(widest.*, @max(0, width));
         line_pieces.* = @intCast(self.pieces.items.len);
         line_start.* = end;
@@ -480,14 +588,27 @@ pub const Layout = struct {
 
     /// The objects of the layout: where each object rune sits.
     pub fn objectRect(self: *const Layout, p: Piece) ?Rect {
-        const o = self.spans.items[p.span].style.object orelse return null;
+        const s = self.spans.items[p.span].style;
+        const o = s.object orelse return null;
         const line = self.lines.items[p.line];
-        return .{ .x = line.x + p.x, .y = line.y + line.baseline - o.height, .width = o.width, .height = o.height };
+        return .{ .x = line.x + p.x, .y = line.y + line.baseline - s.baseline_shift - o.height, .width = o.width, .height = o.height };
     }
 };
 
 fn isSpace(byte: u8) bool {
     return byte == ' ' or byte == '\t';
+}
+/// U+00AD SOFT HYPHEN: a place a line may break at, showing a hyphen there
+/// and nothing elsewhere.
+pub const soft_hyphen = "\u{ad}";
+/// Whether justified lines widen the room after a character: a space, a
+/// Han character, kana, bopomofo or the punctuation written with them,
+/// which lines of Chinese and Japanese take apart.
+pub fn stretches(codepoint: u21) bool {
+    return switch (codepoint) {
+        ' ', '\t', 0xa0, 0x1361, 0x3000, 0x2e80...0x2fdf, 0x3001...0x303f, 0x3041...0x30ff, 0x3105...0x312f, 0x31a0...0x31ff, 0x3400...0x4dbf, 0x4e00...0x9fff, 0xf900...0xfaff, 0xff01...0xff60, 0xff66...0xff9d, 0x20000...0x3fffd => true,
+        else => false,
+    };
 }
 fn sequenceLength(byte: u8) usize {
     return std.unicode.utf8ByteSequenceLength(byte) catch 1;

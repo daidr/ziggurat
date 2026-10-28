@@ -162,3 +162,138 @@ test "the leaf measures to its wrapped size and takes the theme's text color" {
     try testing.expectEqual(@as(usize, 1), text.lines.items.len);
     try testing.expectEqual(@as(f32, 0), text.size.width);
 }
+
+fn labelsText(recorder: *const Recorder, out: []u8) []const u8 {
+    var at: usize = 0;
+    for (recorder.labels[0..recorder.label_count]) |label| {
+        if (at > 0) {
+            out[at] = '|';
+            at += 1;
+        }
+        @memcpy(out[at..][0..label.text.len], label.text);
+        at += label.text.len;
+    }
+    return out[0..at];
+}
+
+test "a line height gives lines leading above and below their text" {
+    var text = RichText.init(testing.allocator, .{ .measurer = measurer, .font = .{ .size = 20 }, .line_height = 2 });
+    defer text.deinit();
+    try text.setSpans(&.{.{ .text = "a\nb" }});
+    // 20 DIP: 30 tall, ascent 22; a line of 40 puts 5 above and 5 below.
+    try testing.expectEqual(@as(f32, 80), text.size.height);
+    const lines = text.textLines();
+    try testing.expectEqual(@as(f32, 40), lines[1].y);
+    try testing.expectEqual(@as(f32, 27), lines[0].baseline);
+    try testing.expectEqual(@as(f32, 22), lines[0].ascent);
+    try testing.expectEqual(@as(f32, 8), lines[0].descent);
+    // Less than the text needs keeps the line's own height.
+    text.options.line_height = 0.5;
+    text.setWidth(0);
+    try testing.expectEqual(@as(f32, 60), text.size.height);
+}
+
+test "justified lines widen spaces and the room after CJK, but not a paragraph's last" {
+    var text = RichText.init(testing.allocator, .{ .measurer = measurer, .width = 100, .justify = true });
+    defer text.deinit();
+    try text.setSpans(&.{.{ .text = "aa bb cc dd ee\nff gg" }});
+    const lines = text.textLines();
+    try testing.expectEqual(@as(usize, 3), lines.len);
+    // "aa bb cc" is 80 wide: the 20 left goes to its two spaces.
+    try testing.expectEqual(@as(f32, 100), lines[0].width);
+    try testing.expectEqual(@as(f32, 0), text.runs.items[0].x);
+    try testing.expectEqual(@as(f32, 40), text.runs.items[1].x);
+    try testing.expectEqual(@as(f32, 80), text.runs.items[2].x);
+    // The last line before a newline, and the text's last, stay.
+    try testing.expectEqual(@as(f32, 50), lines[1].width);
+    try testing.expectEqual(@as(f32, 30), text.runs.items[4].x);
+    try testing.expectEqual(@as(f32, 50), lines[2].width);
+    try testing.expectEqual(@as(f32, 100), text.size.width);
+    var recorder: Recorder = .{};
+    text.paintTo(&recorder, .{ .x = 0, .y = 0 });
+    var buffer: [64]u8 = undefined;
+    try testing.expectEqualStrings("aa|bb|cc|dd|ee|ff|gg", labelsText(&recorder, &buffer));
+
+    // Three ideographs of 30 fit 100: the 10 left goes after the first two.
+    try text.setSpans(&.{.{ .text = "汉字测试" }});
+    try testing.expectEqual(@as(f32, 35), text.runs.items[1].x);
+    try testing.expectEqual(@as(f32, 70), text.runs.items[2].x);
+    try testing.expectEqual(@as(f32, 100), text.textLines()[0].width);
+
+    // A word glued across spans has nothing inside it to widen.
+    try text.setSpans(&.{ .{ .text = "aaaa" }, .{ .text = "bbbbbbb", .weight = .bold }, .{ .text = " cc" } });
+    try testing.expectEqual(@as(f32, 110), text.textLines()[0].width);
+    try testing.expectEqual(@as(f32, 40), text.runs.items[1].x);
+}
+
+test "the first line is indented and wraps narrower; lines after a newline are not" {
+    var text = RichText.init(testing.allocator, .{ .measurer = measurer, .width = 100, .indent = 20 });
+    defer text.deinit();
+    try text.setSpans(&.{.{ .text = "aa bb cc dd\nee" }});
+    const lines = text.textLines();
+    try testing.expectEqual(@as(usize, 3), lines.len);
+    try testing.expectEqual(@as(f32, 20), lines[0].x);
+    try testing.expectEqual(@as(f32, 80), lines[0].width);
+    try testing.expectEqual(@as(f32, 20), text.runs.items[0].x);
+    try testing.expectEqual(@as(f32, 0), lines[1].x);
+    try testing.expectEqual(@as(f32, 0), lines[2].x);
+    try testing.expectEqual(@as(f32, 100), text.size.width);
+    // The lines hold the text's bytes, the spaces ending them in and the
+    // newline out.
+    try testing.expectEqual(@as(u32, 0), lines[0].start);
+    try testing.expectEqual(@as(u32, 9), lines[0].end);
+    try testing.expectEqual(@as(u32, 9), lines[1].start);
+    try testing.expectEqual(@as(u32, 11), lines[1].end);
+    try testing.expectEqual(@as(u32, 12), lines[2].start);
+    try testing.expectEqual(@as(u32, 14), lines[2].end);
+}
+
+test "a soft hyphen shows only where a line breaks at it, making room for its hyphen" {
+    var text = RichText.init(testing.allocator, .{ .measurer = measurer });
+    defer text.deinit();
+    try text.setSpans(&.{.{ .text = "go ordi\u{ad}nary word" }});
+    // On one line it takes no room and draws nothing.
+    try testing.expectEqual(@as(f32, 30 + 40 + 50 + 40), text.size.width);
+    var recorder: Recorder = .{};
+    text.paintTo(&recorder, .{ .x = 0, .y = 0 });
+    var buffer: [64]u8 = undefined;
+    try testing.expectEqualStrings("go ordi|nary word", labelsText(&recorder, &buffer));
+
+    // At 80 the line breaks after "ordi", which shows its hyphen.
+    text.setWidth(80);
+    var lines = text.textLines();
+    try testing.expectEqual(@as(usize, 3), lines.len);
+    try testing.expectEqual(@as(f32, 30 + 40 + 10), lines[0].width);
+    recorder = .{};
+    text.paintTo(&recorder, .{ .x = 0, .y = 0 });
+    try testing.expectEqualStrings("go ordi|-|nary|word", labelsText(&recorder, &buffer));
+    try testing.expectEqual(@as(f32, 70), recorder.labels[1].bounds.x);
+
+    // At 75 "ordi" would fit but its hyphen would not: it moves down.
+    text.setWidth(75);
+    lines = text.textLines();
+    try testing.expectEqual(@as(usize, 4), lines.len);
+    try testing.expectEqual(@as(f32, 20), lines[0].width);
+    try testing.expectEqual(@as(f32, 40 + 10), lines[1].width);
+    try testing.expectEqual(@as(u32, 3), lines[1].start);
+    try testing.expectEqual(@as(u32, 9), lines[1].end);
+}
+
+test "a baseline shift raises or lowers a span and the line makes room" {
+    var text = RichText.init(testing.allocator, .{ .measurer = measurer });
+    defer text.deinit();
+    try text.setSpans(&.{ .{ .text = "H" }, .{ .text = "2", .size = 10, .baseline_shift = -3, .underline = true }, .{ .text = "O" }, .{ .text = "1", .size = 10, .baseline_shift = 10 } });
+    const line = text.textLines()[0];
+    // Size 10 is 15 tall with an ascent of 11: lowered 3 it reaches 7
+    // below the baseline, raised 10 it reaches 21 above.
+    try testing.expectEqual(@as(f32, 21), line.ascent);
+    try testing.expectEqual(@as(f32, 7), line.descent);
+    try testing.expectEqual(@as(f32, 28), line.height);
+    var recorder: Recorder = .{};
+    text.paintTo(&recorder, .{ .x = 0, .y = 0 });
+    try testing.expectApproxEqAbs(@as(f32, 21 - 17.6), recorder.labels[0].bounds.y, 0.001);
+    try testing.expectEqual(@as(f32, 21 + 3 - 11), recorder.labels[1].bounds.y);
+    try testing.expectEqual(@as(f32, 21 - 10 - 11), recorder.labels[3].bounds.y);
+    // The underline goes with the lowered text.
+    try testing.expectEqual(@as(f32, 21 + 3 + 1), recorder.fills[0].bounds.y);
+}

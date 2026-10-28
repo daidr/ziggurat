@@ -602,3 +602,27 @@ test "font families of runs come from the first family of a CSS list" {
     ed.applyFamily(&font, "sans-serif");
     try testing.expectEqual(@as(u8, 0), font.family);
 }
+
+test "each ideograph and kana is a word to the word keys" {
+    var doc = try Document.initString(gpa, "中文abc かな def");
+    defer doc.deinit();
+    var e = try tester(&doc, .{});
+    defer e.deinit();
+    try select(&e, &doc, 0, 0);
+    ctrl(&e, .right);
+    try testing.expectEqual(@as(u32, 1), doc.caret);
+    ctrl(&e, .right);
+    try testing.expectEqual(@as(u32, 2), doc.caret);
+    ctrl(&e, .right);
+    try testing.expectEqual(@as(u32, 5), doc.caret);
+    ctrl(&e, .right);
+    try testing.expectEqual(@as(u32, 7), doc.caret);
+    ctrl(&e, .left);
+    try testing.expectEqual(@as(u32, 6), doc.caret);
+    // Back to the start of "abc", over the space.
+    ctrl(&e, .backspace);
+    try expectString(&doc, "中文かな def");
+    try testing.expectEqual(@as(u32, 2), doc.caret);
+    ctrl(&e, .left);
+    try testing.expectEqual(@as(u32, 1), doc.caret);
+}

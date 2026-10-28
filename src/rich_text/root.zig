@@ -43,6 +43,8 @@ pub const rtf = @import("rtf.zig");
 pub const markdown = @import("markdown.zig");
 pub const clip = @import("clip.zig");
 pub const image_size = @import("image_size.zig");
+/// Word boundaries, as the editor moves and selects by words.
+pub const words = @import("words.zig");
 
 /// The attributed text of HTML.
 pub const parseHtml = html.parse;
@@ -61,4 +63,5 @@ test {
     _ = @import("tests.zig");
     _ = @import("codec_tests.zig");
     _ = image_size;
+    _ = words;
 }
