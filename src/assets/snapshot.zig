@@ -224,7 +224,7 @@ test "snapshot rejects symbolic links instead of embedding their target" {
     defer temporary.cleanup();
     try temporary.dir.writeFile(zio.io(), .{ .sub_path = "a.txt", .data = "private" });
     temporary.dir.symLink(zio.io(), "a.txt", "link.txt", .{}) catch |err| switch (err) {
-        error.AccessDenied => return error.SkipZigTest,
+        error.AccessDenied, error.PermissionDenied => return error.SkipZigTest,
         else => return err,
     };
     try std.testing.expectError(error.NonRegularAsset, Snapshot.load(std.testing.allocator, temporary.dir, .{}));
