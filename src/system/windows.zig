@@ -490,6 +490,8 @@ fn virtualKey(key: types.Key) u32 {
         .right => c.VK_RIGHT,
         .up => c.VK_UP,
         .down => c.VK_DOWN,
+        .plus => c.VK_OEM_PLUS,
+        .minus => c.VK_OEM_MINUS,
     };
 }
 

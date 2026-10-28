@@ -50,6 +50,27 @@ Windows 保存原生 `WINDOWPLACEMENT`、窗口样式与扩展样式，进入所
 
 GTK 保存普通几何及已观测的最大化/最小化状态，使用原生 fullscreen/unfullscreen 请求；WM 确认离开全屏后恢复几何与状态。WM 自己在全屏期间保留了最大化时，直接沿用它，不再取消最大化、移动后重新最大化。普通几何只取自单个 configure 事件（位置取 WM 的合成事件），不混用实时读数；框架请求的最大化/最小化在 WM 确认状态之前、以及 `_NET_WM_STATE` 已是特殊模式时的 configure 都不计入普通几何。调用不阻塞等待 WM，不启动轮询，也不运行嵌套消息循环。连续 enter/exit 可取消尚未应用的请求，窗口管理器保留最终决定权。
 
+## 运行期窗口策略
+
+```zig
+try window.setTraits(.{ .resizable = false, .maximizable = false });
+try window.setClosable(false); // 用户关闭请求直接 cancelled，不调用 on_close
+if ((try window.capabilities()).opacity) try window.setOpacity(0.85);
+try window.setIgnorePointer(true); // 指针穿透到下方窗口，键盘焦点不变
+try window.flashFrame(true);
+try window.setDocumentEdited(true); // 标题前加 "*"
+```
+
+`WindowTraits` 含 resizable/movable/minimizable/maximizable/closable，`WindowOptions` 有同名构造字段，`traits()` 读回当前值，`setTraits` 一次更新全部，`setResizable` 等是单项便捷写法。resizable 同时决定自定义装饰的缩放边与 `startResize`；movable 为 false 时 `startMove` 返回 `InvalidWindowState`；closable 为 false 时 `requestCloseFrom(.user)` 返回 `cancelled`，应用自己的 `requestClose` 与 `destroy` 不受影响。Windows 改写 `WS_THICKFRAME/WS_MINIMIZEBOX/WS_MAXIMIZEBOX`（不可缩放的窗口没有最大化按钮，与创建时一致），把系统菜单的关闭项置灰（关闭按钮与 Alt+F4 随之失效），并在 `WM_SYSCOMMAND` 拒绝被禁用的最小化、最大化、移动与关闭；全屏期间只更新退出时恢复的样式。GTK 设置 resizable/deletable，X11 另以 Motif 功能提示告知 WM 移动、最小化、最大化，提示由 WM 决定是否遵守；禁用可缩放时先固定当前尺寸，避免收缩到自然尺寸。禁用最小化或最大化需要 `capabilities().window_buttons`（Windows、X11）。
+
+`setOpacity(0..1)`、`setIgnorePointer`、`setContentProtection`、`flashFrame`、`setSkipTaskbar` 各有同名能力位。Windows 以 `WS_EX_LAYERED` + `SetLayeredWindowAttributes` 实现整体透明，指针穿透再加 `WS_EX_TRANSPARENT`；内容保护使用 `WDA_EXCLUDEFROMCAPTURE`，旧系统退回 `WDA_MONITOR`（截图中显示为黑色）；闪烁用 `FlashWindowEx` 持续到窗口回到前台；任务栏隐藏经 `ITaskbarList::DeleteTab`，资源管理器重启（`TaskbarButtonCreated`）后重新隐藏。GTK 以 `gtk_widget_set_opacity`（需要合成器，否则不提供 opacity 能力）、空输入形状、urgency hint 与 skip-taskbar hint 实现；Linux 不提供内容保护。`opacity` 与 `skip_taskbar` 也可在 `WindowOptions` 中设定，创建后立即应用，能力不足时创建失败并回收窗口。
+
+`setDocumentEdited(true)` 在 Windows 与 Linux 的原生标题前加 `*`，与系统编辑器一致；`setTitle` 保留该标记，`title(buffer)` 读回不含标记的标题。窗口记录持有一份标题副本，由 App 的分配器分配，随记录释放。
+
+## App 激活
+
+`AppOptions.activation` 在 App 的第一个窗口获得键盘焦点、或最后一个焦点窗口失去焦点时回调 `changed(context, app, active)`；`app.isActive()` 返回最近一次报告的值。焦点在本 App 的窗口之间移动不报告：焦点事件只标记待定，到下一个 dispatch 安全点再汇总比较。焦点窗口关闭等同失去焦点。
+
 ## 请求、观测与回调
 
 `WindowState.fullscreen/always_on_top` 是已观测状态；`fullscreen_requested/always_on_top_requested` 是最近接受的应用策略。GTK 上二者可能不同；外部用户或 WM 也可以改变观测状态。再次设置相同策略仍会纠正已观测到的外部变化；它不会自动强制覆盖用户选择。`setFullscreen(false)` 和 `setAlwaysOnTop(false)` 可撤销请求。外部进入全屏而无框架快照时，离开全屏交由 WM 恢复原生几何。Windows 由同步原生转换更新二者。
@@ -168,6 +189,8 @@ Windows 把接受的交互放入本窗口的私有消息，使用单调序号匹
 焦点继续使用 `window.perform(.focus)` 和 `focusTarget()` 的模态树规则；OS 可以拒绝抢占前台。枚举或查找本身不激活窗口。显示器约束、离屏恢复和版本化窗口状态持久化继续属于 W04 的后续分项，不能把运行期 ID 持久化来恢复窗口。
 
 ## 验证
+
+`zig build smoke-window-policy` 在隐藏窗口上核对运行期窗口策略落到原生窗口：Windows 的样式位、系统菜单关闭项、分层透明、指针穿透、显示亲和性与标题标记；GTK 的 resizable/deletable、透明度（有合成器时）、urgency 与 skip-taskbar hint。
 
 `zig build smoke-window-state` 在 Windows 未激活的独立 desktop 上检查尺寸/位置、普通与最大化/最小化全屏还原、置顶、菜单、隐藏状态和回调内原生销毁。不会切换用户桌面。
 

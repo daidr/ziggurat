@@ -47,7 +47,7 @@ fn windowsSmoke() !void {
     var probe: Reentry = .{};
     const window = try app.createWindow(.{ .width = 720, .height = 480, .min_width = 200, .min_height = 100, .on_closed = .{ .context = &probe, .notify = Reentry.notify } });
     try window.setContent(.{ .context = &probe, .event = Reentry.event, .detach = Reentry.detach });
-    try std.testing.expectEqualDeep(z.WindowCapabilities{ .client_position = true, .fullscreen = true, .always_on_top = true, .owned_windows = true, .modal_windows = true, .custom_decoration = true, .native_move_resize = true, .system_menu = true }, try window.capabilities());
+    try std.testing.expectEqualDeep(z.WindowCapabilities{ .client_position = true, .fullscreen = true, .always_on_top = true, .owned_windows = true, .modal_windows = true, .custom_decoration = true, .native_move_resize = true, .system_menu = true, .opacity = true, .ignore_pointer = true, .content_protection = true, .attention = true, .skip_taskbar = true, .window_buttons = true }, try window.capabilities());
     const target: z.ClientBounds = .{ .position = .{ .x = 111, .y = 139 }, .width = 601, .height = 399 };
     try window.setClientBounds(target);
     try checkBounds(target, try window.clientBounds());
