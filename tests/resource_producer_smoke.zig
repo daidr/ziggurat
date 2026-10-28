@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const ipc = @import("ziggurat_ipc");
@@ -92,7 +93,7 @@ const State = struct {
         if (self.failure == null) {
             self.failure = err;
             std.debug.print("producer phase={s} failure={s} workers={d} streams={d} wakers={d}\n", .{ @tagName(self.phase), @errorName(err), self.pending_workers, self.bridge.stats().physical_streams, self.bridge.stats().wakers });
-            if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace.*);
+            if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
         }
         self.app.quit();
     }
@@ -131,7 +132,7 @@ const State = struct {
         if (self.app.phase == .stopping or self.app.phase == .stopped) return;
         if (self.bridge.close() != .closed) return error.BindingStillOwned;
         var random: [16]u8 = undefined;
-        std.crypto.random.bytes(&random);
+        zio.random.bytes(&random);
         const fresh = std.fmt.bytesToHex(random, .lower);
         const page = &self.session.?.page;
         try self.bridge.bind(page.pageId().?, try ipc.Session.init(&fresh));
@@ -327,7 +328,7 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer if (gpa.deinit() == .leak) @panic("producer fixture leak");
     const allocator = gpa.allocator();
-    var temporary = std.testing.tmpDir(.{});
+    var temporary = zio.tmpDir(.{});
     var fixture: Fixture = .{ .allocator = allocator, .temporary = &temporary };
     var worker = try std.Thread.spawn(.{}, Fixture.run, .{&fixture});
     worker.join();

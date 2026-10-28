@@ -82,11 +82,11 @@ const Gallery = struct {
         _ = try v.split(.row, &self.sidebar, .{ .minimum = 0.15, .maximum = 0.45 }, .{ .grow = 1, .self_align = .stretch, .name = "Sidebar" });
         try v.listBox(.{ .name = "Pages", .padding = view.Insets.all(4) });
         for (page_titles, 0..) |title, index| {
-            if (try v.listItem(Page, &self.page, @enumFromInt(index), title, .{})) self.content.offset = .{};
+            if (try v.listItem(Page, &self.page, @fromBackingInt(@intCast(index)), title, .{})) self.content.offset = .{};
         }
         try v.end();
         try v.scroll(&self.content, .{ .padding = .{ .left = 16, .right = 16 }, .gap = 12 });
-        try v.text(page_titles[@intFromEnum(self.page)], .{ .font = view.Font.heading2 });
+        try v.text(page_titles[@backingInt(self.page)], .{ .font = view.Font.heading2 });
         switch (self.page) {
             .buttons => try self.buttons(v),
             .choices => try self.choices(v),
@@ -326,7 +326,7 @@ test "every page records within the frame's limits" {
     var context = ui.Context.init(&gallery, Unused.draw, Unused.action);
     try h.attachInput(&context);
     for (0..page_titles.len) |index| {
-        gallery.page = @enumFromInt(index);
+        gallery.page = @fromBackingInt(@intCast(index));
         gallery.advanced = true;
         try h.render();
     }

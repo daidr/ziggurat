@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const d = @import("ziggurat_document");
@@ -9,13 +10,7 @@ const a = @import("ziggurat_document_accessibility");
 const Watchdog = @import("watchdog.zig").Watchdog;
 const point_oracle = @import("document_accessibility_point_oracle.zig");
 const point_cases = @import("document_accessibility_point_cases.zig");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("uiautomation.h");
-    @cInclude("oleauto.h");
-});
+const c = @import("ziggurat_c_win32");
 extern fn zda_probe_read(*anyopaque, [*]u16, u32, *u32) i32;
 extern fn zda_probe_word_text(*anyopaque, [*]const u16, u32, [*]u16, u32, *u32) i32;
 extern fn zda_probe_read_mta(*anyopaque, [*]u16, u32, *u32) i32;
@@ -289,12 +284,12 @@ const Client = struct {
         try std.testing.expect(hr < 0);
     }
 };
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     if (builtin.os.tag != .windows) return error.UnsupportedCapability;
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    var args = try std.process.argsWithAllocator(allocator);
+    var args = try init.args.iterateAllocator(allocator);
     defer args.deinit();
     _ = args.next();
     var renderer: ui.RenderMode = .gdi;
@@ -702,7 +697,7 @@ fn primary(allocator: std.mem.Allocator) !void {
 /// alone can wait forever. The App has stopped, so pump until the ledger
 /// settles; a real leak still fails once the bounded wait ends.
 fn settledResourceCounts(app: *z.App, baseline: a.ResourceCounts) !a.ResourceCounts {
-    var timer = try std.time.Timer.start();
+    var timer = try zio.Timer.start();
     while (true) {
         try app.dispatch();
         const current = a.resourceCounts();

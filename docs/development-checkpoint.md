@@ -11,4 +11,4 @@
 - Windows Profile 的存储准备、进程退休与生产证书策略正在接入公开 API 和原生适配器。已验证的私有寿命/会话测试不等于生产浏览器闭环通过；后继线程入口修复和公开整合尚未编译验证。
 - Windows Profile 新增的三个原生源文件尚未接入共享构建，需要单份链接 `windows_profile.c`、`windows_profile_lifetime.c`、`windows_profile_storage.c` 并加入 `advapi32`。当前 Windows WebView 配置可能链接失败，继续实施时须先补齐此处。
 
-构建输出、依赖下载、完整恢复副本和本地验证日志由 `.gitignore` 排除。项目工具链保持 Zig 0.15.2。
+构建输出、依赖下载、完整恢复副本和本地验证日志由 `.gitignore` 排除。项目工具链为 Zig 0.17.0。

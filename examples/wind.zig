@@ -16,6 +16,7 @@
 //!
 //! Run it with `zig build run-wind`.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
@@ -894,10 +895,11 @@ fn glyphAt(f: *const Frame, field: *const Field, cell: Cell, x: i32, y: i32) [4]
 /// hands each to the window's thread when it is done.
 const Renderer = struct {
     allocator: std.mem.Allocator,
-    pool: std.Thread.Pool = undefined,
+    /// Threads that share the rows with the drawing thread.
+    helpers: usize = 0,
     thread: ?std.Thread = null,
-    mutex: std.Thread.Mutex = .{},
-    wake: std.Thread.Condition = .{},
+    mutex: zio.Mutex = .{},
+    wake: zio.Condition = .{},
     pending: ?Frame = null,
     quit: bool = false,
     /// Called on the drawing thread when a frame is done.
@@ -911,8 +913,7 @@ const Renderer = struct {
 
     fn start(self: *Renderer) !void {
         const helpers = @max(1, (std.Thread.getCpuCount() catch 2) -| 1);
-        try self.pool.init(.{ .allocator = self.allocator, .n_jobs = helpers });
-        errdefer self.pool.deinit();
+        self.helpers = helpers;
         self.thread = try std.Thread.spawn(.{}, run, .{self});
     }
 
@@ -923,7 +924,6 @@ const Renderer = struct {
             self.wake.signal();
             self.mutex.unlock();
             thread.join();
-            self.pool.deinit();
             self.thread = null;
         }
         self.allocator.free(self.field.data);
@@ -976,10 +976,16 @@ const Renderer = struct {
                 .glyphs => frame.height,
             };
             if (parallel) {
-                var group: std.Thread.WaitGroup = .{};
-                const bands = 4 * (self.pool.threads.len + 1);
-                for (0..bands) |band| self.pool.spawnWg(&group, rowsOf, .{ self, pass, frame, band, bands, rows });
-                self.pool.waitAndWork(&group);
+                var group: std.Io.Group = .init;
+                const bands = 4 * (self.helpers + 1);
+                // A task takes no comptime arguments, so each pass gets its own.
+                const Band = struct {
+                    fn run(renderer: *Renderer, of: *const Frame, band: usize, count: usize, total: usize) void {
+                        rowsOf(renderer, pass, of, band, count, total);
+                    }
+                };
+                for (0..bands) |band| group.async(zio.io(), Band.run, .{ self, frame, band, bands, rows });
+                group.await(zio.io()) catch unreachable;
             } else rowsOf(self, pass, frame, 0, 1, rows);
         }
     }
@@ -1479,7 +1485,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var app_state: App = .init(allocator, std.crypto.random.int(u32));
+    var app_state: App = .init(allocator, zio.random.int(u32));
     defer app_state.deinit();
     var storage: view.Storage(128, 4096) = .{};
     var host = view.Host.init(&app_state, App.build, storage.buffers(), .{ .root = .{ .padding = view.Insets.all(0) } });

@@ -92,13 +92,13 @@ pub fn preflight(buffer: *const commands.Buffer, options: Options) !u64 {
             .texture => |value| blk: {
                 if (value.resource >= buffer.texture_len) return error.MissingResources;
                 try rect(value.destination, options.size.scale);
-                _ = try drawing.planTexture(buffer.textureResources()[value.resource], .{ .x = value.destination.x, .y = value.destination.y, .width = value.destination.width, .height = value.destination.height }, .{ .alignment = value.alignment, .fit = value.fit, .sampling = value.sampling, .opacity = value.opacity }, options.size.scale);
+                _ = try drawing.planTexture(buffer.textureResources()[value.resource], .{ .x = value.destination.x, .y = value.destination.y, .width = value.destination.width, .height = value.destination.height }, value.options(), options.size.scale);
                 break :blk 1;
             },
             .image => |value| blk: {
                 if (value.resource >= buffer.image_len) return error.MissingResources;
                 try rect(value.destination, options.size.scale);
-                _ = try drawing.planImage(buffer.imageResources()[value.resource], .{ .x = value.destination.x, .y = value.destination.y, .width = value.destination.width, .height = value.destination.height }, .{ .alignment = value.alignment, .fit = value.fit, .sampling = value.sampling, .opacity = value.opacity }, options.size.scale);
+                _ = try drawing.planImage(buffer.imageResources()[value.resource], .{ .x = value.destination.x, .y = value.destination.y, .width = value.destination.width, .height = value.destination.height }, value.options(), options.size.scale);
                 break :blk 1;
             },
             .push_clip => |value| blk: {

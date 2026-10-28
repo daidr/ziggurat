@@ -97,7 +97,7 @@ pub const Terminal = struct {
     base_foreground: u24,
     base_background: u24,
     base_cursor: u24,
-    palette_set: std.StaticBitSet(256) = .initEmpty(),
+    palette_set: std.StaticBitSet(256) = .empty,
     foreground_set: bool = false,
     background_set: bool = false,
     cursor_set: bool = false,
@@ -181,7 +181,7 @@ pub const Terminal = struct {
         self.foreground = self.base_foreground;
         self.background = self.base_background;
         self.cursor_color = self.base_cursor;
-        self.palette_set = .initEmpty();
+        self.palette_set = .empty;
         self.foreground_set = false;
         self.background_set = false;
         self.cursor_set = false;
@@ -190,9 +190,27 @@ pub const Terminal = struct {
     /// Take a size and the cell's size in pixels, as a terminal no view
     /// shows learns them from the window that shows it.
     pub fn resizePixels(self: *Terminal, cols: u16, rows: u16, cell_width: u16, cell_height: u16) !void {
-        try self.screen.resize(cols, rows);
+        try self.resize(cols, rows, &.{});
         self.cell_width = cell_width;
         self.cell_height = cell_height;
+    }
+
+    /// Change the screen's size, as `Screen.resizeTracking` does: a new
+    /// width rewraps the primary screen and its scrollback, and `tracked`
+    /// positions there move with their cells, as the images placed there
+    /// do.
+    pub fn resize(self: *Terminal, cols: u16, rows: u16, tracked: []screen_module.Position) !void {
+        const placements = self.images[0].placements.items;
+        const positions = try self.allocator.alloc(screen_module.Position, tracked.len + placements.len);
+        defer self.allocator.free(positions);
+        @memcpy(positions[0..tracked.len], tracked);
+        for (placements, positions[tracked.len..]) |p, *at| at.* = .{ .row = p.row, .col = p.col };
+        try self.screen.resizeTracking(cols, rows, positions);
+        @memcpy(tracked, positions[0..tracked.len]);
+        for (placements, positions[tracked.len..]) |*p, at| if (!p.virtual) {
+            p.row = at.row;
+            p.col = at.col;
+        };
     }
 
     /// Take a theme's colors as the defaults, as `setColors` does.
@@ -607,7 +625,7 @@ pub const Terminal = struct {
             104 => {
                 if (rest.len == 0) {
                     self.palette = self.base_palette;
-                    self.palette_set = .initEmpty();
+                    self.palette_set = .empty;
                 } else {
                     var parts = std.mem.splitScalar(u8, rest, ';');
                     while (parts.next()) |index_text| {
@@ -987,4 +1005,23 @@ test "images through APC strings, per screen, gone as the screen clears" {
     defer refused.deinit();
     refused.feed("\x1b_Ga=q,i=1,s=1,v=1,f=24;AAAA\x1b\\");
     try std.testing.expectEqual(@as(usize, 0), refused.pendingReplies().len);
+}
+
+test "a new width rewraps the screen; images and tracked positions move with their cells" {
+    var t = try Terminal.init(std.testing.allocator, .{ .screen = .{ .cols = 8, .rows = 4 } });
+    defer t.deinit();
+    t.cell_width = 8;
+    t.cell_height = 16;
+    // A line wrapping once, then an image placed after it.
+    t.feed("abcdefghij\r\n");
+    t.feed("\x1b_Ga=T,f=24,s=1,v=1,i=4,q=2;AAAA\x1b\\");
+    const placed = t.activeImages().placements.items[0];
+    try std.testing.expectEqual(t.screen.screenRow(2), placed.row);
+    var tracked = [_]screen_module.Position{.{ .row = t.screen.screenRow(1), .col = 1 }};
+    try t.resize(12, 4, &tracked);
+    // The line is one row now: the image and 'j' moved up with it.
+    try std.testing.expectEqual(t.screen.screenRow(1), t.activeImages().placements.items[0].row);
+    try std.testing.expectEqual(t.screen.screenRow(0), tracked[0].row);
+    try std.testing.expectEqual(@as(u16, 9), tracked[0].col);
+    try std.testing.expectEqual(@as(u21, 'j'), t.screen.row(0)[9].cp);
 }

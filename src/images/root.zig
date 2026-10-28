@@ -202,7 +202,7 @@ pub const Worker = struct {
                 return if (status == 1) error.OutOfMemory else error.InvalidImage;
             }
             break :result 0;
-        } else zi_decode(self.native, bytes.ptr, @intCast(bytes.len), @intFromEnum(meta.format), meta.width, meta.height, storage.ptr, &failure);
+        } else zi_decode(self.native, bytes.ptr, @intCast(bytes.len), @backingInt(meta.format), meta.width, meta.height, storage.ptr, &failure);
         if (result != 0) {
             self.last_failure = switch (failure.domain) {
                 1 => .{ .hresult = @bitCast(failure.code) },

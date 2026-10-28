@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const d = @import("ziggurat_document");
 const e = @import("ziggurat_document_editor");
@@ -407,12 +408,12 @@ fn exercise(allocator: std.mem.Allocator, raw_close: bool, external: bool, sourc
     return provider;
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try zio.argsAlloc(allocator, init.args);
+    defer zio.argsFree(allocator, args);
     if (args.len == 2 and std.mem.eql(u8, args[1], "--external")) {
         const late = try exercise(allocator, false, true, false);
         g_object_unref(late);

@@ -1,14 +1,10 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const virtual = @import("ziggurat_virtual_list");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-    @cInclude("objbase.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn zvl_release(*anyopaque) void;
 extern fn zvl_catalog_probe(*anyopaque, u32, *?*anyopaque) i32;
 extern fn zvl_selection_probe(*anyopaque, c_int) i32;
@@ -32,7 +28,7 @@ const Host = struct {
     old_row: ?*anyopaque = null,
     new_row: ?*anyopaque = null,
     worker: ?std.Thread = null,
-    wake: std.Thread.ResetEvent = .{},
+    wake: zio.ResetEvent = .{},
     error_value: ?anyerror = null,
     worker_error: ?anyerror = null,
     stopped: std.atomic.Value(bool) = .init(false),
@@ -287,10 +283,10 @@ fn isolatedWindows() !void {
     }
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
-    var args = try std.process.argsWithAllocator(gpa.allocator());
+    var args = try init.args.iterateAllocator(gpa.allocator());
     defer args.deinit();
     _ = args.next();
     const child = if (args.next()) |arg| if (std.mem.eql(u8, arg, "--desktop-child")) true else return error.InvalidArgument else false;

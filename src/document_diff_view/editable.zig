@@ -178,7 +178,7 @@ pub const CoordinateBinding = opaque {
         defer owner.busy = false;
         const generation = (try value.value.lease.snapshot()).generation;
         const binding = try value.value.candidateSpace(owner.window, token);
-        if (owner.focused) |side| if (try owner.adapters[@intFromEnum(side)].isBound()) try owner.adapters[@intFromEnum(side)].setCommittedSpace(token);
+        if (owner.focused) |side| if (try owner.adapters[@backingInt(side)].isBound()) try owner.adapters[@backingInt(side)].setCommittedSpace(token);
         if ((try value.value.lease.snapshot()).generation != generation) return error.StalePresentation;
         if (owner.window.isClosed()) return error.Closed;
         value.value.space = binding;
@@ -291,7 +291,7 @@ pub const View = opaque {
         defer borrow.end();
         value.busy = true;
         errdefer value.busy = false;
-        if (value.focused) |side| try value.adapters[@intFromEnum(side)].unbind();
+        if (value.focused) |side| try value.adapters[@backingInt(side)].unbind();
         for (value.adapters, value.observers) |adapter, token| _ = try adapter.clearNativeObserver(token);
         for (value.adapters, value.plans) |adapter, plan| if (plan != null and try adapter.projectionPlan() == plan) try adapter.setProjection(null);
         for (value.adapters, &value.fold_tokens) |adapter, *token| if (token.*) |owned| {
@@ -348,7 +348,7 @@ pub const View = opaque {
     pub fn captureSource(self: *View) !SourceCapture {
         const value = try self.state();
         const stamp = try value.sourceStamp();
-        return .{ .stamp = stamp, .document = value.documents()[@intFromEnum(stamp.side)] };
+        return .{ .stamp = stamp, .document = value.documents()[@backingInt(stamp.side)] };
     }
     pub fn validateSource(self: *View, stamp: SourceStamp) !void {
         try (try self.state()).validateSource(stamp);
@@ -389,7 +389,7 @@ pub const View = opaque {
         defer value.busy = false;
         const previous = value.focused orelse return;
         value.focused = null;
-        try value.adapters[@intFromEnum(previous)].unbind();
+        try value.adapters[@backingInt(previous)].unbind();
         try value.validateAction(epoch);
     }
     /// A successful text edit is never reported as a retryable layout error.
@@ -455,7 +455,7 @@ pub const View = opaque {
         defer scope.end();
         try value.validateAction(epoch);
         if (value.mode == .unified and side != .b) return error.ReadOnlySource;
-        const document = value.documents()[@intFromEnum(side)];
+        const document = value.documents()[@backingInt(side)];
         _ = try document.utf16Offset(range.start);
         _ = try document.utf16Offset(range.end);
         if (range.start > range.end) return error.InvalidRange;
@@ -466,7 +466,7 @@ pub const View = opaque {
             const snapshot = value.snapshot.?;
             if (value.index) |*index| {
                 const line = try document.lineAt(range.end);
-                if (sourceRow(index, @intFromEnum(side), line)) |row| {
+                if (sourceRow(index, @backingInt(side), line)) |row| {
                     const end = @as(u128, index.prefix(row + 1)) << canonical_shift;
                     const height: u128 = @intFromFloat(@ceil(@as(f64, snapshot.bounds.height) * canonical_units));
                     const target = end -| height;
@@ -497,7 +497,12 @@ pub const View = opaque {
         defer scope.end();
         value.busy = true;
         defer value.busy = false;
-        errdefer |err| frame.failure = frame.failure orelse err;
+        return drawBody(frame, bounds, colors, value) catch |err| {
+            frame.failure = frame.failure orelse err;
+            return err;
+        };
+    }
+    fn drawBody(frame: *ui.Frame, bounds: ui.Rect, colors: Colors, value: *State) anyerror!void {
         const snapshot = try value.current(bounds, frame.size.scale);
         try frame.pushClip(bounds);
         defer frame.popClip() catch |err| {
@@ -569,7 +574,7 @@ pub const View = opaque {
         const borrow = try value.inbox.borrow();
         defer borrow.end();
         const display = try borrow.display() orelse return error.ComparisonRequired;
-        const document = value.documents()[@intFromEnum(position.side)];
+        const document = value.documents()[@backingInt(position.side)];
         const located = caret_query.locate(display.result.hunks, position.line, .{ .side_a = position.side == .a, .bytes = try document.byteLength(), .last_line = (try document.lineCount()) - 1 });
         return .{ .serial = display.serial, .side = position.side, .index = located.index, .inside = located.inside };
     }
@@ -848,7 +853,7 @@ const State = struct {
             .acquisition_generation = self.acquisition_generation,
             .revisions = .{ try documents_value[0].version(), try documents_value[1].version() },
             .text_versions = .{ try documents_value[0].committedTextVersion(), try documents_value[1].committedTextVersion() },
-            .selection = try documents_value[@intFromEnum(side)].selection(),
+            .selection = try documents_value[@backingInt(side)].selection(),
         };
     }
     fn validateSource(self: *State, stamp: SourceStamp) !void {
@@ -861,7 +866,7 @@ const State = struct {
         try self.queryLive();
         for (self.documents()) |document| if (try document.composition() != null) return error.CompositionActive;
         const side = self.activeSide();
-        const document = self.documents()[@intFromEnum(side)];
+        const document = self.documents()[@backingInt(side)];
         const selected = try document.selection();
         const line = try document.lineAt(selected.caret);
         const range = try document.line(line);
@@ -888,7 +893,7 @@ const State = struct {
         try self.queryLive();
         for (self.documents()) |document| if (try document.composition() != null) return error.CompositionActive;
         const side = self.activeSide();
-        const at = @intFromEnum(side);
+        const at = @backingInt(side);
         const revisions = [2]u64{ try self.documents()[0].version(), try self.documents()[1].version() };
         var validation: CommandGuard = .{ .state = self, .side = side, .peer = self.documents()[1 - at], .peer_revision = revisions[1 - at], .acquisition_generation = self.acquisition_generation };
         try CommandGuard.validate(&validation);
@@ -937,7 +942,7 @@ const State = struct {
         const permission = CommandGuard.validate(validation);
         // The coordinator pins both Adapters/Documents and the Window scope
         // delays close callbacks; this owner-thread getter has no foreign call.
-        outcome.observed_revision = self.documents()[@intFromEnum(outcome.side)].version() catch unreachable;
+        outcome.observed_revision = self.documents()[@backingInt(outcome.side)].version() catch unreachable;
         if (outcome.observed_revision != (outcome.committed_revision orelse initial_revision)) {
             if (outcome.committed_revision == null) return error.StaleRevision;
             outcome.stale_after_commit = true;
@@ -1008,7 +1013,7 @@ const State = struct {
         }
     };
     fn prepareSelection(self: *State, side: Side, selections: []const d.Selection, primary: usize, revisions: [2]u64) !void {
-        const at = @intFromEnum(side);
+        const at = @backingInt(side);
         const document = self.documents()[at];
         for (selections) |selected| {
             _ = try document.utf16Offset(selected.anchor);
@@ -1038,7 +1043,7 @@ const State = struct {
         for (self.documents(), revisions) |source, revision| if (try source.version() != revision) return error.StaleRevision;
     }
     fn selectPresented(self: *State, side: Side, selections: []const d.Selection, primary: usize) !SelectionOutcome {
-        const at = @intFromEnum(side);
+        const at = @backingInt(side);
         const document = self.documents()[at];
         const revisions = [2]u64{ try self.documents()[0].version(), try self.documents()[1].version() };
         const coordinate = try self.coordinateGeneration();
@@ -1107,7 +1112,7 @@ const State = struct {
         const coordinate = if (self.coordinates) |space| try space.value.resolve(self.window, snapshot.columns, snapshot.parameters.scale) else null;
         if (self.focused) |previous| if (previous != side) {
             self.focused = null;
-            try self.adapters[@intFromEnum(previous)].unbind();
+            try self.adapters[@backingInt(previous)].unbind();
             if (try self.inbox.pair.a.version() != snapshot.revisions[0] or try self.inbox.pair.b.version() != snapshot.revisions[1]) {
                 const old = self.snapshot.?;
                 var parameters = old.parameters;
@@ -1116,7 +1121,7 @@ const State = struct {
             }
         };
         if (self.window.isClosed()) return error.Closed;
-        const target = self.adapters[@intFromEnum(side)];
+        const target = self.adapters[@backingInt(side)];
         const was_bound = try target.isBound();
         target.bind(self.window) catch |err| if (err != error.AlreadyBound) return err;
         errdefer if (coordinate != null and !was_bound) target.unbind() catch |err| self.window.report(.{ .domain = .core, .operation = .text_input, .err = err });
@@ -1124,7 +1129,7 @@ const State = struct {
         if (coordinate) |accepted| {
             const fresh = try self.coordinates.?.value.resolve(self.window, snapshot.columns, snapshot.parameters.scale);
             if (accepted.generation != fresh.generation) return error.StalePresentation;
-            try self.adapters[@intFromEnum(side)].setCommittedSpace(fresh.token);
+            try self.adapters[@backingInt(side)].setCommittedSpace(fresh.token);
         }
         self.focused = side;
         // Native acquisition already succeeded. A later caret presentation
@@ -1137,16 +1142,16 @@ const State = struct {
     fn syncCaret(self: *State) !void {
         if (self.coordinate_policy and self.coordinates == null) return error.GeometryRequired;
         const side = self.focused orelse return;
-        if (!try self.adapters[@intFromEnum(side)].isBound()) return;
+        if (!try self.adapters[@backingInt(side)].isBound()) return;
         const snapshot = self.snapshot orelse return;
         if (self.coordinates) |space| {
             _ = try space.value.resolve(self.window, snapshot.columns, snapshot.parameters.scale);
             // The Adapter captures the physical client/space/lease before the
             // native operation and checks them again after any reentry.
-            try self.adapters[@intFromEnum(side)].syncNativeCaret();
+            try self.adapters[@backingInt(side)].syncNativeCaret();
             return;
         }
-        const caret = self.adapters[@intFromEnum(side)].caretRect(snapshot.columns[@intFromEnum(side)], snapshot.parameters.scale) catch |err| {
+        const caret = self.adapters[@backingInt(side)].caretRect(snapshot.columns[@backingInt(side)], snapshot.parameters.scale) catch |err| {
             if (err == error.CaretNotVisible) return;
             return err;
         };
@@ -1203,7 +1208,7 @@ const State = struct {
         var transaction: Transaction = .{ .state = self, .index = if (index) |*value| value else if (self.index) |*value| value else null, .display = display, .snapshot = &candidate, .anchor = self.anchor };
         defer transaction.close();
         if (rebuild) if (self.snapshot) |previous| if (!previous.projected and !previous.composing) if (self.focused) |side| {
-            const at = @intFromEnum(side);
+            const at = @backingInt(side);
             if (self.adapters[at].viewportAnchor()) |source| {
                 const aligned = sourceRow(transaction.index.?, at, source.line) orelse transaction.index.?.heights.len;
                 transaction.anchor = .{ .row = aligned, .intra = source.intra_ticks };
@@ -1342,7 +1347,7 @@ const State = struct {
     fn reveal(self: *State, side: Side, position: usize) !void {
         const old = self.snapshot orelse return error.LayoutRequired;
         _ = try self.current(old.bounds, old.parameters.scale);
-        const document = self.documents()[@intFromEnum(side)];
+        const document = self.documents()[@backingInt(side)];
         _ = try document.utf16Offset(position);
         const line = try document.lineAt(position);
         if (self.context_index) |*mapping| for (mapping.regions) |region| {
@@ -1352,7 +1357,7 @@ const State = struct {
                 return;
             }
         };
-        const row = if (self.index) |*index| sourceRow(index, @intFromEnum(side), line) else null;
+        const row = if (self.index) |*index| sourceRow(index, @backingInt(side), line) else null;
         if (row) |value| {
             self.anchor = .{ .row = value };
             var parameters = old.parameters;
@@ -1478,7 +1483,7 @@ const State = struct {
             if (try self.inbox.pair.a.composition() != null or try self.inbox.pair.b.composition() != null) {
                 const side = self.focused orelse return false;
                 const snapshot = self.snapshot orelse return error.LayoutRequired;
-                const at = @intFromEnum(side);
+                const at = @backingInt(side);
                 const used = try self.adapters[at].handleEvent(self.window, event_value, snapshot.columns[at], .{ .font = parameters.font, .scale = parameters.scale, .version = parameters.version, .estimated_height = parameters.estimated_height });
                 try self.prepare(bounds, parameters);
                 return used;
@@ -1529,14 +1534,14 @@ const State = struct {
                     break;
                 };
             } else for (snapshot.columns, 0..) |column, side| if (column.contains(event_value.pointer_down.position)) {
-                try self.focus(@enumFromInt(side));
+                try self.focus(@fromBackingInt(@intCast(side)));
                 break;
             };
         }
         if (event_value == .focus) {
             if (!event_value.focus) if (self.focused) |side| {
                 const snapshot = self.snapshot orelse return false;
-                _ = try self.adapters[@intFromEnum(side)].handleEvent(self.window, event_value, snapshot.columns[@intFromEnum(side)], .{ .font = parameters.font, .scale = parameters.scale, .version = parameters.version, .estimated_height = parameters.estimated_height });
+                _ = try self.adapters[@backingInt(side)].handleEvent(self.window, event_value, snapshot.columns[@backingInt(side)], .{ .font = parameters.font, .scale = parameters.scale, .version = parameters.version, .estimated_height = parameters.estimated_height });
             };
             // Revoking the native client can cancel Document composition
             // before focus(false) arrives, without a separate UI text event.
@@ -1550,7 +1555,7 @@ const State = struct {
         }
         const side = self.focused orelse return false;
         const snapshot = self.snapshot orelse return error.LayoutRequired;
-        const at = @intFromEnum(side);
+        const at = @backingInt(side);
         const text_stamps: [2]u64 = .{ try self.inbox.pair.a.committedTextVersion(), try self.inbox.pair.b.committedTextVersion() };
         const was_composing = try self.inbox.pair.a.composition() != null or try self.inbox.pair.b.composition() != null;
         const used = try self.adapters[at].handleEvent(self.window, event_value, snapshot.columns[at], .{ .font = parameters.font, .scale = parameters.scale, .version = parameters.version, .estimated_height = parameters.estimated_height });
@@ -1616,7 +1621,7 @@ const ContextTransaction = struct {
         const same = self.want and state.context_index != null and state.context_serial == self.display.?.serial and state.applied_context_generation == state.context_generation;
         const allocator = state.budget.allocator();
         if (self.want and (!same or state.pending_context != null)) {
-            self.candidate = if (same) try state.context_index.?.clone(allocator) else try context.Index.create(allocator, &self.display.?.result, @enumFromInt(@intFromEnum(state.mode)), state.context_options.?);
+            self.candidate = if (same) try state.context_index.?.clone(allocator) else try context.Index.create(allocator, &self.display.?.result, @fromBackingInt(@intCast(@backingInt(state.mode))), state.context_options.?);
             try self.validate(revisions);
             if (state.pending_context) |action| {
                 if (action.key.serial != self.display.?.serial) return error.StaleContext;
@@ -1695,7 +1700,7 @@ fn collectMarks(state: *State, snapshot: *const Snapshot, details: *const intral
 }
 fn appendMark(marks: *Marks, side: usize, rectangle: t.Rect) !void {
     if (marks.count == marks.storage.len) return error.IntralineRectangleCapacityExceeded;
-    marks.storage[marks.count] = .{ .side = @enumFromInt(side), .rect = .{ .x = rectangle.x, .y = rectangle.y, .width = rectangle.width, .height = rectangle.height } };
+    marks.storage[marks.count] = .{ .side = @fromBackingInt(@intCast(side)), .rect = .{ .x = rectangle.x, .y = rectangle.y, .width = rectangle.width, .height = rectangle.height } };
     marks.count += 1;
 }
 

@@ -16,6 +16,7 @@
 //! input method's caret run as tasks posted after paint, never inside it;
 //! the window's Context needs `prepareTextFields` before the editor shows.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const fonts = @import("ziggurat_fonts");
 const z = @import("ziggurat");
@@ -1131,7 +1132,7 @@ pub const Editor = struct {
             const bg = s.background orelse continue;
             if (s.object != null) continue;
             const line = l.lines.items[p.line];
-            const width = l.options.measurer.textSize(std.mem.trimRight(u8, l.pieceText(p), " \t"), s.font).width;
+            const width = l.options.measurer.textSize(std.mem.trimEnd(u8, l.pieceText(p), " \t"), s.font).width;
             if (s.radius > 0) {
                 const size = s.font.size;
                 const pad = @min(size * 0.22, s.radius);
@@ -1145,7 +1146,7 @@ pub const Editor = struct {
             const line = l.lines.items[p.line];
             const m = l.fontMetrics(p.span);
             const color = s.color orelse base;
-            const t = std.mem.trimRight(u8, l.pieceText(p), " \t");
+            const t = std.mem.trimEnd(u8, l.pieceText(p), " \t");
             const width = if (t.len > 0) l.options.measurer.textSize(t, s.font).width else 0;
             if (t.len > 0) {
                 const top = y + line.y + line.baseline - m.ascent;
@@ -1439,7 +1440,7 @@ pub const Editor = struct {
             },
             .pointer_down => |down| return self.press(down),
             .pointer_move => |point| return self.move(point),
-            .pointer_up => |_| return self.release(),
+            .pointer_up => return self.release(),
             .wheel => |w| {
                 const before = self.scroll;
                 const total = self.heights.top(self.paras.items.len);
@@ -2576,7 +2577,7 @@ const copies = struct {
     var process: u64 = 0;
 
     fn keep(t: *const Text) ![]const u8 {
-        if (process == 0) process = std.crypto.random.int(u64) | 1;
+        if (process == 0) process = zio.random.int(u64) | 1;
         counter += 1;
         if (text) |*old| old.deinit();
         text = null;

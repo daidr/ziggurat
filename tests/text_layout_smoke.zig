@@ -185,7 +185,7 @@ fn preparations(engine: *t.Engine) !void {
     defer viewport.close() catch unreachable;
     try equal(@as(u32, 60), (try viewport.view()).coverage.width);
     try equal(@as(i32, 40), (try viewport.view()).coverage.origin_x);
-    const long = try engine.layout("i\n" ** 2000, .{ .size = 18 });
+    const long = try engine.layout(&@as([2000 * "i\n".len]u8, @bitCast(@as([2000]["i\n".len]u8, @splat("i\n".*)))), .{ .size = 18 });
     defer long.close() catch unreachable;
     try equal(2001, (try long.lines()).len);
     try roundTrips(long);
@@ -221,7 +221,7 @@ fn ownership(allocator: std.mem.Allocator, engine: *t.Engine) !void {
 fn limits(allocator: std.mem.Allocator) !void {
     const engine = try t.Engine.create(allocator, std.Thread.getCurrentId(), .{ .text_bytes = 100, .graphemes = 3, .lines = 2, .span_rects = 3, .live_layouts = 1 });
     defer engine.close() catch unreachable;
-    try expectError(error.TextCapacityExceeded, engine.layout("a" ** 101, .{}));
+    try expectError(error.TextCapacityExceeded, engine.layout(&@as([101]u8, @splat('a')), .{}));
     try expectError(error.InvalidUtf8, engine.layout("\xff", .{}));
     try expectError(error.EmbeddedNul, engine.layout("a\x00b", .{}));
     try expectError(error.InvalidOptions, engine.layout("x", .{ .size = std.math.inf(f32) }));
@@ -235,7 +235,7 @@ fn allocationBudgets(allocator: std.mem.Allocator) !void {
     const engine = try t.Engine.create(allocator, std.Thread.getCurrentId(), .{ .layout_bytes = 1024 });
     defer engine.close() catch unreachable;
     const before = t.resourceCounts();
-    try expectError(error.LayoutByteCapacityExceeded, engine.layout("x" ** 2048, .{}));
+    try expectError(error.LayoutByteCapacityExceeded, engine.layout(&@as([2048]u8, @splat('x')), .{}));
     try equal(before, t.resourceCounts());
     const limited = try t.Engine.create(allocator, std.Thread.getCurrentId(), .{ .span_rects = 1 });
     defer limited.close() catch unreachable;
@@ -293,7 +293,7 @@ fn constructionSample(engine: *t.Engine, source: []const u8, reference: bool) !t
     return result;
 }
 fn constructionCost(engine: *t.Engine) !void {
-    const fixtures = [_][]const u8{ ("a" ** 8192)[0..1024], ("a" ** 8192)[0..2048], ("a" ** 8192)[0..4096], "a" ** 8192, "abc\n" ** 1024, "abc אבג العربية a\u{0301} 👩‍👩‍👧‍👦\n" ** 128 };
+    const fixtures = [_][]const u8{ (&@as([8192]u8, @splat('a')))[0..1024], (&@as([8192]u8, @splat('a')))[0..2048], (&@as([8192]u8, @splat('a')))[0..4096], &@as([8192]u8, @splat('a')), &@as([1024 * "abc\n".len]u8, @bitCast(@as([1024]["abc\n".len]u8, @splat("abc\n".*)))), &@as([128 * "abc אבג العربية a\u{0301} 👩‍👩‍👧‍👦\n".len]u8, @bitCast(@as([128]["abc אבג العربية a\u{0301} 👩‍👩‍👧‍👦\n".len]u8, @splat("abc אבג العربية a\u{0301} 👩‍👩‍👧‍👦\n".*)))) };
     for (fixtures, 0..) |source, fixture| {
         const fast = try constructionSample(engine, source, false);
         const reference = try constructionSample(engine, source, true);
@@ -314,7 +314,7 @@ fn constructionCost(engine: *t.Engine) !void {
 }
 fn snapshotBudget(allocator: std.mem.Allocator, engine: *t.Engine) !void {
     if (@import("builtin").os.tag != .windows) return;
-    const text = "abc" ** 512;
+    const text = &@as([512 * "abc".len]u8, @bitCast(@as([512]["abc".len]u8, @splat("abc".*))));
     const stats = try constructionSample(engine, text, false);
     const limited = try t.Engine.create(allocator, std.Thread.getCurrentId(), .{ .layout_bytes = stats.peak_owned_bytes - 1 });
     defer limited.close() catch unreachable;
@@ -396,14 +396,14 @@ fn differential(engine: *t.Engine) !void {
     };
     for ([_][]const u8{ "Calibri", "Times New Roman", "Consolas" }) |family| try compareLayouts(engine, "office fi ffi AV x\u{0301} אבג", .{ .family = family, .size = 19.1 });
     for ([_]usize{ 1024, 2048, 4096, 8192 }) |length| {
-        const source = "a" ** 8192;
+        const source = &@as([8192]u8, @splat('a'));
         try compareLayouts(engine, source[0..length], .{});
     }
-    try compareLayouts(engine, "abc\n" ** 1024, .{});
-    try compareLayouts(engine, "i\n" ** 2000, .{ .size = 18 });
-    try compareLayouts(engine, "\r\n" ** 1024, .{ .size = 21.3 });
-    try compareLayouts(engine, " \t" ** 2048, .{ .size = 19.7 });
-    try compareLayouts(engine, "abc אבג العربية a\u{0301} 👩‍👩‍👧‍👦\n" ** 128, .{});
+    try compareLayouts(engine, &@as([1024 * "abc\n".len]u8, @bitCast(@as([1024]["abc\n".len]u8, @splat("abc\n".*)))), .{});
+    try compareLayouts(engine, &@as([2000 * "i\n".len]u8, @bitCast(@as([2000]["i\n".len]u8, @splat("i\n".*)))), .{ .size = 18 });
+    try compareLayouts(engine, &@as([1024 * "\r\n".len]u8, @bitCast(@as([1024]["\r\n".len]u8, @splat("\r\n".*)))), .{ .size = 21.3 });
+    try compareLayouts(engine, &@as([2048 * " \t".len]u8, @bitCast(@as([2048][" \t".len]u8, @splat(" \t".*)))), .{ .size = 19.7 });
+    try compareLayouts(engine, &@as([128 * "abc אבג العربية a\u{0301} 👩‍👩‍👧‍👦\n".len]u8, @bitCast(@as([128]["abc אבג العربية a\u{0301} 👩‍👩‍👧‍👦\n".len]u8, @splat("abc אבג العربية a\u{0301} 👩‍👩‍👧‍👦\n".*)))), .{});
     std.debug.print("snapshot differential passed: reference carets/affinities, islands/selections, line geometry, native coverage and long documents\n", .{});
 }
 pub fn main() !void {

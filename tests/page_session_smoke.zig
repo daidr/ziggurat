@@ -1,14 +1,11 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const ui = @import("ziggurat_ui");
 const Fixture = @import("scheme_smoke.zig").Fixture;
 const Watchdog = @import("watchdog.zig").Watchdog;
-const w = @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-});
+const w = @import("ziggurat_c_win32");
 const Dimensions = struct { width: f64, height: f64, marker: u32 };
 fn cleanupSession(allocator: std.mem.Allocator, slot: *?*web.PageSession) void {
     const session = slot.* orelse return;
@@ -315,7 +312,7 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer if (gpa.deinit() == .leak) @panic("page session leak");
     const allocator = gpa.allocator();
-    var temporary = std.testing.tmpDir(.{});
+    var temporary = zio.tmpDir(.{});
     var fixture: Fixture = .{ .allocator = allocator, .temporary = &temporary };
     var worker = try std.Thread.spawn(.{}, Fixture.run, .{&fixture});
     worker.join();

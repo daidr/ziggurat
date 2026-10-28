@@ -286,7 +286,7 @@ fn usable(value: u64) bool {
     return value != 0 and value != exhausted;
 }
 fn index(button: Button) usize {
-    return @intFromEnum(button);
+    return @backingInt(button);
 }
 fn unpaired(operation: u64, button: ?Button, phase: Phase) Transition {
     return .{ .operation = operation, .button = button, .phase = phase, .press = .{} };

@@ -1,33 +1,34 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const ledger = web.policy_store;
 const Fixture = @import("scheme_smoke.zig").Fixture;
 const Watchdog = @import("watchdog.zig").Watchdog;
-const scope: ledger.Scope = .{ .namespace = [_]u8{0x71} ** 16, .policy_epoch = 4 };
+const scope: ledger.Scope = .{ .namespace = @as([16]u8, @splat(0x71)), .policy_epoch = 4 };
 const local_origin = "https://app.ziggurat.invalid";
 const permission_key: ledger.Key = .{ .origin = local_origin, .subject = .{ .permission = .notifications } };
 const Phase = enum { permission, permission_revoked, download, download_limited, download_revoked, final_save };
-const payload = [_]u8{0x62} ** (64 * 1024);
+const payload = @as([64 * 1024]u8, @splat(0x62));
 const Server = struct {
-    listener: std.net.Server,
+    listener: std.Io.net.Server,
     thread: ?std.Thread = null,
     stopping: std.atomic.Value(bool) = .init(false),
-    gate: std.Thread.ResetEvent = .{},
+    gate: zio.ResetEvent = .{},
     fn run(self: *Server) void {
         while (true) {
-            const connection = self.listener.accept() catch return;
-            defer connection.stream.close();
+            const connection = self.listener.accept(zio.io()) catch return;
+            defer connection.close(zio.io());
             if (self.stopping.load(.acquire)) return;
-            self.serve(connection.stream) catch {};
+            self.serve(connection) catch {};
         }
     }
-    fn serve(self: *Server, stream: std.net.Stream) !void {
+    fn serve(self: *Server, stream: std.Io.net.Stream) !void {
         var request: [8192]u8 = undefined;
         var used: usize = 0;
         while (std.mem.indexOf(u8, request[0..used], "\r\n\r\n") == null) {
             if (used == request.len) return error.RequestTooLarge;
-            const count = try std.posix.recv(stream.handle, request[used..], 0);
+            const count = try zio.net.receive(stream.socket.handle, request[used..]);
             if (count == 0) return;
             used += count;
         }
@@ -36,12 +37,12 @@ const Server = struct {
         const body: []const u8 = if (attachment) &payload else "<title>private persisted download</title>";
         var storage: [512]u8 = undefined;
         const headers = try std.fmt.bufPrint(&storage, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\n{s}Content-Length: {d}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", .{ if (attachment) "application/octet-stream" else "text/html", if (attachment) "Content-Disposition: attachment; filename=private.bin\r\n" else "", body.len });
-        try stream.writeAll(headers);
+        try zio.net.sendAll(stream.socket.handle, headers);
         if (limited) {
-            try stream.writeAll(body[0 .. 32 * 1024]);
+            try zio.net.sendAll(stream.socket.handle, body[0 .. 32 * 1024]);
             self.gate.wait();
-            if (!self.stopping.load(.acquire)) try stream.writeAll(body[32 * 1024 ..]);
-        } else try stream.writeAll(body);
+            if (!self.stopping.load(.acquire)) try zio.net.sendAll(stream.socket.handle, body[32 * 1024 ..]);
+        } else try zio.net.sendAll(stream.socket.handle, body);
     }
     fn start(self: *Server) !void {
         self.thread = try std.Thread.spawn(.{}, run, .{self});
@@ -49,15 +50,15 @@ const Server = struct {
     fn stop(self: *Server) void {
         self.stopping.store(true, .release);
         self.gate.set();
-        const wake = std.net.tcpConnectToAddress(self.listener.listen_address) catch unreachable;
-        wake.close();
+        const wake = self.listener.socket.address.connect(zio.io(), .{ .mode = .stream }) catch unreachable;
+        wake.close(zio.io());
         self.thread.?.join();
-        self.listener.deinit();
+        self.listener.deinit(zio.io());
     }
 };
 const Preparation = struct {
     allocator: std.mem.Allocator,
-    temporary: *std.testing.TmpDir,
+    temporary: *zio.TmpDir,
     directory: ?[]u8 = null,
     policy_path: ?[]u8 = null,
     err: ?anyerror = null,
@@ -67,7 +68,7 @@ const Preparation = struct {
         };
     }
     fn work(self: *Preparation) !void {
-        self.directory = try self.temporary.dir.realpathAlloc(self.allocator, ".");
+        self.directory = try zio.realPathAlloc(self.temporary.dir, ".", self.allocator);
         errdefer {
             self.allocator.free(self.directory.?);
             self.directory = null;
@@ -353,7 +354,7 @@ const State = struct {
     fn advance(ptr: *anyopaque) void {
         const self: *State = @ptrCast(@alignCast(ptr));
         self.queued = false;
-        self.phase = @enumFromInt(@intFromEnum(self.phase) + 1);
+        self.phase = @fromBackingInt(@intCast(@backingInt(self.phase) + 1));
         self.loaded = false;
         self.installed = false;
         self.started = false;
@@ -391,7 +392,7 @@ const State = struct {
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
-    var temporary = std.testing.tmpDir(.{});
+    var temporary = zio.tmpDir(.{});
     var fixture: Fixture = .{ .allocator = gpa.allocator(), .temporary = &temporary };
     defer {
         if (!fixture.closed) {
@@ -412,12 +413,12 @@ pub fn main() !void {
         if (preparation.directory) |directory| gpa.allocator().free(directory);
         if (preparation.policy_path) |path| gpa.allocator().free(path);
     }
-    const address = try std.net.Address.parseIp4("127.0.0.1", 0);
-    var server: Server = .{ .listener = try address.listen(.{}) };
+    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server: Server = .{ .listener = try address.listen(zio.io(), .{}) };
     try server.start();
     defer server.stop();
     var origin_storage: [128]u8 = undefined;
-    const origin = try std.fmt.bufPrint(&origin_storage, "http://127.0.0.1:{d}", .{server.listener.listen_address.getPort()});
+    const origin = try std.fmt.bufPrint(&origin_storage, "http://127.0.0.1:{d}", .{server.listener.socket.address.getPort()});
     var start_storage: [160]u8 = undefined;
     const start = try std.fmt.bufPrint(&start_storage, "{s}/start", .{origin});
     var attachment_storage: [160]u8 = undefined;
@@ -458,7 +459,7 @@ pub fn main() !void {
     try std.testing.expect(refs.states + refs.handlers + refs.controllers == 0);
     try std.testing.expect(app.resourceStats().allocated_records == 0);
     const Validate = struct {
-        temporary: *std.testing.TmpDir,
+        temporary: *zio.TmpDir,
         allocator: std.mem.Allocator,
         err: ?anyerror = null,
         fn run(self: *@This()) void {
@@ -467,10 +468,10 @@ pub fn main() !void {
             };
         }
         fn work(self: *@This()) !void {
-            const bytes = try self.temporary.dir.readFileAlloc(self.allocator, "accepted.bin", payload.len + 1);
+            const bytes = try self.temporary.dir.readFileAlloc(zio.io(), "accepted.bin", self.allocator, .limited(payload.len + 1));
             defer self.allocator.free(bytes);
             try std.testing.expectEqualSlices(u8, &payload, bytes);
-            try std.testing.expectError(error.FileNotFound, self.temporary.dir.openFile("revoked.bin", .{}));
+            try std.testing.expectError(error.FileNotFound, self.temporary.dir.openFile(zio.io(), "revoked.bin", .{}));
         }
     };
     var validate: Validate = .{ .temporary = &temporary, .allocator = gpa.allocator() };

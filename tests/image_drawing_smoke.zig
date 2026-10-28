@@ -5,11 +5,7 @@ const ui = @import("ziggurat_ui");
 const images = @import("ziggurat_images");
 const prepared = @import("ziggurat_image_drawing");
 const drawing = prepared.drawing;
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn cairo_image_surface_create(c_int, c_int, c_int) ?*anyopaque;
 extern fn cairo_create(*anyopaque) ?*anyopaque;
 extern fn cairo_destroy(*anyopaque) void;
@@ -201,11 +197,16 @@ fn cache(renderer: anytype, job: *Job, context: *anyopaque, window: ?*anyopaque)
     try expectError(error.ImageBudgetExceeded, renderer.uploadImage(first));
     try expect(!try renderer.releaseImage(second.identity));
     try renderer.setImageBudget(drawing.default_image_budget);
-    for (3..35) |i| try renderer.uploadImage(try job.view(i));
-    try equal(32, renderer.imageStats().resident_entries);
-    // Refresh the oldest. Capacity eviction must then select the second entry.
+    const evictions = renderer.imageStats().evictions;
+    for (3..36) |i| try renderer.uploadImage(try job.view(i));
+    // Past thirty-two images the slot table grows instead of evicting.
+    try equal(33, renderer.imageStats().resident_entries);
+    try equal(evictions, renderer.imageStats().evictions);
+    try expect(try job.resources[3].?.inUse());
+    try expect(try job.resources[4].?.inUse());
+    // Refresh the oldest. Budget eviction must then select the second entry.
     try renderer.uploadImage(first);
-    try renderer.uploadImage(try job.view(35));
+    try renderer.setImageBudget(32 * first.pixelBytes());
     try expect(try job.resources[3].?.inUse());
     try expect(!try job.resources[4].?.inUse());
     try equal(32, renderer.imageStats().resident_entries);
@@ -223,6 +224,8 @@ const State = struct {
     err: ?anyerror = null,
     bad_frame: bool = false,
     close_in_draw: bool = false,
+    /// Draws the 33 tiny images as tiles below the first image.
+    tiles: ?*Job = null,
     expected_diagnostic: ?anyerror = null,
     diagnostics: usize = 0,
     fn action(_: *anyopaque, _: u64) void {}
@@ -243,6 +246,7 @@ const State = struct {
         try frame.image(.{ .x = 0, .y = 0, .width = 32, .height = 32 }, try self.resource.view(), .{ .sampling = .nearest });
         try expectError(error.ResourceInUse, self.resource.close());
         try expectError(error.Busy, self.context.releaseImage((try self.resource.view()).identity));
+        if (self.tiles) |job| for (3..36) |i| try frame.image(tile(i), try job.view(i), .{ .sampling = .nearest });
         if (self.bad_frame) frame.rect(.{ .x = 0, .y = 0, .width = -1, .height = 1 }, 0);
         if (self.close_in_draw) try equal(z.CloseResult.deferred, try self.window.destroy());
     }
@@ -254,6 +258,58 @@ const State = struct {
         if (self.err) |err| return err;
     }
 };
+fn tile(index: usize) ui.Rect {
+    const i: f32 = @floatFromInt(index - 3);
+    return .{ .x = @mod(i, 16) * 8, .y = 40 + @floor(i / 16) * 8, .width = 8, .height = 8 };
+}
+/// One frame draws more images than the old thirty-two slots, none uploaded
+/// and more than the budget holds: it still draws every one, keeping them
+/// resident over budget until the next explicit upload trims back to it.
+fn tiles(state: *State, job: *Job, gpu: bool) !void {
+    const context = state.context;
+    const bytes = (try job.view(3)).pixelBytes();
+    const budget = 4 * bytes + (try state.resource.view()).pixelBytes();
+    const before = if (gpu) (try context.imageStats()).gpu.? else (try context.imageStats()).software;
+    try context.setImageBudget(budget);
+    state.tiles = job;
+    defer state.tiles = null;
+    const gpu_frames = context.gpu_frames;
+    try state.paint();
+    if (builtin.os.tag == .linux) {
+        const scale = context.last_paint_size.?.scale;
+        const first = try read(&context.renderer, physical(4, scale), physical(44, scale));
+        try expect(first != background);
+        for (3..36) |i| {
+            const r = tile(i);
+            try equal(first, try read(&context.renderer, physical(@intFromFloat(r.x + 4), scale), physical(@intFromFloat(r.y + 4), scale)));
+        }
+    }
+    const resident = if (gpu) (try context.imageStats()).gpu.? else (try context.imageStats()).software;
+    if (gpu or builtin.os.tag != .windows) {
+        try equal(34, resident.resident_entries);
+        try expect(resident.pixel_bytes > resident.budget_bytes);
+        try equal(before.evictions, resident.evictions);
+    }
+    if (ui.capabilities.gpu) if (gpu) {
+        // The device cannot upload while drawing: the first frame drew in
+        // software and uploaded the tiles after it; the next draws on it.
+        try equal(gpu_frames, context.gpu_frames);
+        try state.paint();
+        try equal(gpu_frames + 1, context.gpu_frames);
+    };
+    for (3..36) |i| try expect(try job.resources[i].?.inUse() == (gpu or builtin.os.tag != .windows));
+    // The next budget change trims back to it, oldest first.
+    try context.setImageBudget(budget);
+    if (gpu or builtin.os.tag != .windows) {
+        const trimmed = if (gpu) (try context.imageStats()).gpu.? else (try context.imageStats()).software;
+        try expect(trimmed.pixel_bytes <= budget);
+        try expect(trimmed.evictions > resident.evictions);
+        try expect(try job.resources[35].?.inUse());
+    }
+    for (3..36) |i| _ = try context.releaseImage((try job.view(i)).identity);
+    try context.setImageBudget(drawing.default_image_budget);
+    try context.uploadImage(try state.resource.view());
+}
 fn integrated(allocator: std.mem.Allocator, job: *Job, gpu: bool) !void {
     var state: State = .{ .resource = job.resources[0].? };
     const app = try z.App.initWithOptions(allocator, .{ .diagnostics_sink = .{ .context = &state, .emit = State.diagnostic } });
@@ -266,6 +322,7 @@ fn integrated(allocator: std.mem.Allocator, job: *Job, gpu: bool) !void {
     try context.attach(window);
     try context.uploadImage(try state.resource.view());
     try state.paint();
+    try tiles(&state, job, gpu);
     const residency: usize = if (gpu or builtin.os.tag != .windows) 1 else 0;
     try equal(residency, (try state.resource.view()).lease.pins);
     state.bad_frame = true;
@@ -339,7 +396,7 @@ pub fn main() !void {
                 try cache(&renderer, &job, dc, hwnd);
                 renderer.deinit();
                 try equal(0, ui.d3d11.globalResourceCount());
-                std.debug.print("images {s}: pixels/DPI/crop/fit/alpha/mips; transactional mip failure, LRU32, resources=0\n", .{@tagName(driver)});
+                std.debug.print("images {s}: pixels/DPI/crop/fit/alpha/mips; transactional mip failure, growing LRU, resources=0\n", .{@tagName(driver)});
             };
         }
         _ = try window.destroy();

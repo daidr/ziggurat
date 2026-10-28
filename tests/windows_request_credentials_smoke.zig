@@ -1,12 +1,9 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const w = @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-});
+const w = @import("ziggurat_c_win32");
 const Record = extern struct { origin: u32, method: i32, authorization: i32, path: [128]u16 };
 extern fn zwv_test_credential_probe_install(*anyopaque, [*]const [*:0]const u16, u32, c_int, *?*anyopaque) i32;
 extern fn zwv_test_credential_probe_counts(*anyopaque, *u32, *u32, *u32, *u32, *u32) void;
@@ -221,12 +218,12 @@ fn runRuntime(state: *State, allocator: std.mem.Allocator) !void {
     if (counts.states + counts.handlers + counts.controllers != 0 or app.resourceStats().allocated_records != 0) return error.NativeResourceLeak;
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try zio.argsAlloc(allocator, init.args);
+    defer zio.argsFree(allocator, args);
     if (args.len != 8) return error.ExpectedModeOriginsAndPrivateProfiles;
     if (!web.backendCapabilities().request_credentials) return error.RequestCredentialCapabilityUnavailable;
     const mode = std.meta.stringToEnum(Mode, args[1]) orelse return error.InvalidMode;

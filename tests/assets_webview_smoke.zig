@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const assets = @import("ziggurat_assets");
@@ -10,7 +11,7 @@ const second_html = "<!doctype html><body data-version=two><script>fetch('/data.
 const Loaded = struct {
     snapshot: assets.Snapshot,
     table: []web.Resource,
-    fn load(allocator: std.mem.Allocator, directory: std.fs.Dir) !*Loaded {
+    fn load(allocator: std.mem.Allocator, directory: std.Io.Dir) !*Loaded {
         var snapshot = try assets.Snapshot.load(allocator, directory, .{});
         errdefer snapshot.deinit();
         const table = try snapshot.resourceTable(web.Resource, allocator, "/index.html");
@@ -33,7 +34,7 @@ const State = struct {
     allocator: std.mem.Allocator,
     app: *z.App,
     view: *web.View,
-    directory: std.fs.Dir,
+    directory: std.Io.Dir,
     profile: []const u8,
     watcher: *assets.DirectoryWatch,
     watch_token: z.NativeWaitToken = undefined,
@@ -43,7 +44,7 @@ const State = struct {
     read_error: ?anyerror = null,
     worker_post_failed: std.atomic.Value(bool) = .init(false),
     writer_failed: std.atomic.Value(bool) = .init(false),
-    write_done: std.Thread.ResetEvent = .{},
+    write_done: zio.ResetEvent = .{},
     worker: ?std.Thread = null,
     writer: ?std.Thread = null,
     ready_count: usize = 0,
@@ -64,7 +65,7 @@ const State = struct {
     }
     fn writeChanged(self: *State) void {
         defer self.write_done.set();
-        var atomic = self.directory.atomicFile("index.html", .{ .write_buffer = &.{} }) catch {
+        var atomic = zio.AtomicFile.init(self.directory, "index.html", .{ .write_buffer = &.{} }) catch {
             self.writer_failed.store(true, .release);
             return;
         };
@@ -213,18 +214,18 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{ .thread_safe = true }) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    const local = try std.process.getEnvVarOwned(allocator, "LOCALAPPDATA");
+    const local = try zio.getEnvVarOwned(allocator, "LOCALAPPDATA");
     defer allocator.free(local);
     const profile = try std.fs.path.join(allocator, &.{ local, "Ziggurat", "AssetsSmoke" });
     defer allocator.free(profile);
     const queued_profile = try std.fs.path.join(allocator, &.{ local, "Ziggurat", "AssetsQueueSmoke" });
     defer allocator.free(queued_profile);
     try queuedReloadClose(allocator, queued_profile);
-    var temporary = std.testing.tmpDir(.{ .iterate = true });
+    var temporary = zio.tmpDir(.{ .iterate = true });
     defer temporary.cleanup();
-    try temporary.dir.writeFile(.{ .sub_path = "index.html", .data = first_html });
-    try temporary.dir.writeFile(.{ .sub_path = "data.txt", .data = "memory-resource" });
-    const absolute = try temporary.dir.realpathAlloc(allocator, ".");
+    try temporary.dir.writeFile(zio.io(), .{ .sub_path = "index.html", .data = first_html });
+    try temporary.dir.writeFile(zio.io(), .{ .sub_path = "data.txt", .data = "memory-resource" });
+    const absolute = try zio.realPathAlloc(temporary.dir, ".", allocator);
     defer allocator.free(absolute);
     var watcher = try assets.DirectoryWatch.init(allocator, absolute, null);
     defer watcher.deinit();

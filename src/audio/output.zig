@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 
 /// The output's format: every player is resampled to it.
@@ -37,7 +38,7 @@ pub const Detail = struct {
     len: usize = 0,
 
     pub fn set(self: *Detail, comptime fmt: []const u8, args: anytype) void {
-        self.len = (std.fmt.bufPrint(&self.buffer, fmt, args) catch self.buffer[0..]).len;
+        self.len = (std.fmt.bufPrint(&self.buffer, fmt, args) catch @as([]const u8, self.buffer[0..])).len;
     }
 
     pub fn append(self: *Detail, comptime fmt: []const u8, args: anytype) void {
@@ -86,11 +87,11 @@ pub const Clock = struct {
     sleep: *const fn (?*anyopaque, u64) void = systemSleep,
 
     fn systemNow(_: ?*anyopaque) i128 {
-        return std.time.nanoTimestamp();
+        return zio.nanoTimestamp();
     }
 
     fn systemSleep(_: ?*anyopaque, nanoseconds: u64) void {
-        std.Thread.sleep(nanoseconds);
+        zio.sleep(nanoseconds);
     }
 };
 
@@ -159,7 +160,7 @@ test "a null device keeps time, does not hurry once behind, and asks for a retry
     const start = fake.clock;
     var null_device = NullDevice.init(.{ .context = &fake, .now = Fake.now, .sleep = Fake.sleep }, true);
     const output = null_device.device();
-    const chunk = [_]f32{0} ** (period_frames * channels);
+    const chunk = @as([period_frames * channels]f32, @splat(0));
     for (0..10) |_| try output.write(&chunk);
     try std.testing.expectEqual(@as(i128, 100 * std.time.ns_per_ms), fake.clock - start);
     // Late by a second, as after the computer slept: the next chunk takes

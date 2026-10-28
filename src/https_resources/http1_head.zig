@@ -152,13 +152,14 @@ test "framing rejects smuggling syntax without assigning admission authority" {
 }
 
 test "head wire target header row and header byte limits are bounded" {
-    const excessive = [_]u8{'x'} ** wire_capacity;
+    const excessive = @as([wire_capacity]u8, @splat('x'));
     try std.testing.expectError(error.RequestHeadCapacityExceeded, parse(&excessive));
-    const too_long_target = "GET /" ++ "x" ** target_capacity ++ " HTTP/1.1\r\n\r\n";
+    const too_long_target = "GET /" ++ &@as([target_capacity]u8, @splat('x')) ++ " HTTP/1.1\r\n\r\n";
     try std.testing.expectError(error.InvalidRequestTarget, parse(too_long_target));
-    const many = "GET / HTTP/1.1\r\n" ++ "X: y\r\n" ** (header_capacity + 1) ++ "\r\n";
+    const many = "GET / HTTP/1.1\r\n" ++ &@as([header_capacity + 1 * "X: y\r\n".len]u8, @bitCast(@as([header_capacity + 1]["X: y\r\n".len]u8, @splat("X: y\r\n".*)))) ++ "\r\n";
     try std.testing.expectError(error.RequestHeadersExceeded, parse(many));
-    const value = "GET / HTTP/1.1\r\n" ++ ("X: " ++ "y" ** 2048 ++ "\r\n") ** 9 ++ "\r\n";
+    const header_line = "X: " ++ &@as([2048]u8, @splat('y')) ++ "\r\n";
+    const value = "GET / HTTP/1.1\r\n" ++ &@as([9 * header_line.len]u8, @bitCast(@as([9][header_line.len]u8, @splat(header_line.*)))) ++ "\r\n";
     try std.testing.expectError(error.RequestHeadersExceeded, parse(value));
 }
 
@@ -172,18 +173,18 @@ test "response framing owns length connection and all header boundaries" {
     try std.testing.expect(std.mem.indexOf(u8, empty, "Content-Length") == null);
 }
 test "response formatting validates and sizes before changing caller storage" {
-    var output = [_]u8{0xa5} ** 512;
+    var output = @as([512]u8, @splat(0xa5));
     const response: ResponseMetadata = .{ .mime = "text/plain" };
     var temporary: [512]u8 = undefined;
     const required = (try responseHead(&temporary, response, 4)).len;
     for (0..required) |capacity| {
         try std.testing.expectError(error.NoSpaceLeft, responseHead(output[0..capacity], response, 4));
-        try std.testing.expectEqualSlices(u8, &([_]u8{0xa5} ** 512), &output);
+        try std.testing.expectEqualSlices(u8, &(@as([512]u8, @splat(0xa5))), &output);
     }
     try std.testing.expectError(error.InvalidResponseHeader, responseHead(&output, .{ .headers = &.{.{ .name = "X", .value = "a\r\nb" }} }, 0));
     try std.testing.expectError(error.ReservedResponseHeader, responseHead(&output, .{ .headers = &.{.{ .name = "content-length", .value = "4" }} }, 4));
     try std.testing.expectError(error.UnexpectedResponseBody, responseHead(&output, .{ .status = 204 }, 1));
     try std.testing.expectError(error.UnexpectedResponseBody, responseHead(&output, .{ .status = 205 }, 1));
     try std.testing.expectError(error.UnexpectedResponseBody, responseHead(&output, .{ .status = 304 }, 1));
-    try std.testing.expectEqualSlices(u8, &([_]u8{0xa5} ** 512), &output);
+    try std.testing.expectEqualSlices(u8, &(@as([512]u8, @splat(0xa5))), &output);
 }

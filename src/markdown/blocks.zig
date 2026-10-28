@@ -167,7 +167,7 @@ const Parser = struct {
         self.len -= 1;
         switch (open.kind) {
             .paragraph => {
-                const raw = std.mem.trimRight(u8, self.b.since(open.start), " \t\n");
+                const raw = std.mem.trimEnd(u8, self.b.since(open.start), " \t\n");
                 const rest = try inlines.definitions(self.b, raw);
                 if (rest.len == 0) self.b.unlinkLast(open.node) else self.b.nodes[open.node].text = rest;
             },
@@ -290,7 +290,7 @@ const Parser = struct {
             if (in_paragraph) if (setext(l.content())) |level| {
                 const open = self.tip().*;
                 self.len -= 1;
-                const raw = std.mem.trimRight(u8, self.b.since(open.start), " \t\n");
+                const raw = std.mem.trimEnd(u8, self.b.since(open.start), " \t\n");
                 const rest = try inlines.definitions(self.b, raw);
                 if (rest.len > 0) {
                     const node = &self.b.nodes[open.node];
@@ -390,7 +390,7 @@ const Parser = struct {
     fn table(self: *Parser, delimiter: []const u8) Error!bool {
         var cells: [md.max_columns][]const u8 = undefined;
         const open = self.tip();
-        const header = std.mem.trimRight(u8, self.b.since(open.start), " \t\n");
+        const header = std.mem.trimEnd(u8, self.b.since(open.start), " \t\n");
         if (std.mem.indexOfScalar(u8, delimiter, '|') == null and std.mem.indexOfScalar(u8, header, '|') == null) return false;
         const count = splitCells(delimiter, &cells);
         if (count == 0) return false;
@@ -485,10 +485,10 @@ fn atxHeading(text: []const u8) ?Heading {
     if (level < text.len and text[level] != ' ' and text[level] != '\t') return null;
     var content = std.mem.trim(u8, text[level..], " \t");
     // An optional closing run of `#` after whitespace.
-    const kept = std.mem.trimRight(u8, content, "#");
+    const kept = std.mem.trimEnd(u8, content, "#");
     if (kept.len == 0) {
         content = "";
-    } else if (kept[kept.len - 1] == ' ' or kept[kept.len - 1] == '\t') content = std.mem.trimRight(u8, kept, " \t");
+    } else if (kept[kept.len - 1] == ' ' or kept[kept.len - 1] == '\t') content = std.mem.trimEnd(u8, kept, " \t");
     return .{ .level = @intCast(level), .text = content };
 }
 

@@ -29,13 +29,13 @@ pub const OwnedFileResponse = struct {
     length: u64,
     metadata: resources.OwnedResponse,
 
-    pub fn prepare(allocator: std.mem.Allocator, process_main_thread_id: std.Thread.Id, file: std.fs.File, head: Head, max_bytes: u64) !OwnedFileResponse {
+    pub fn prepare(allocator: std.mem.Allocator, process_main_thread_id: std.Thread.Id, file: std.Io.File, head: Head, max_bytes: u64) !OwnedFileResponse {
         return prepareWithFailure(allocator, process_main_thread_id, file, head, max_bytes, null);
     }
     /// Optional HRESULT output, cleared on entry and populated only when the
     /// native preparation operation fails. Validation/allocation errors have no
     /// fabricated platform code. Caller storage is used only during this call.
-    pub fn prepareWithFailure(allocator: std.mem.Allocator, process_main_thread_id: std.Thread.Id, file: std.fs.File, head: Head, max_bytes: u64, native_failure: ?*?i32) !OwnedFileResponse {
+    pub fn prepareWithFailure(allocator: std.mem.Allocator, process_main_thread_id: std.Thread.Id, file: std.Io.File, head: Head, max_bytes: u64, native_failure: ?*?i32) !OwnedFileResponse {
         if (native_failure) |failure| failure.* = null;
         if (std.Thread.getCurrentId() == process_main_thread_id) return error.UiThreadForbidden;
         if (max_bytes == 0 or max_bytes > hard_max_file_bytes) return error.InvalidFileStreamLimit;
@@ -66,12 +66,12 @@ pub const OwnedFileResponse = struct {
     /// Linux duplicates the fd but cannot enforce exclusion of other writers.
     /// Besides allocator-owned HTTP metadata, bounded native control/socket/GIO
     /// objects use system allocation. No representation-sized body is copied.
-    pub fn preparePumped(allocator: std.mem.Allocator, process_main_thread_id: std.Thread.Id, file: std.fs.File, head: Head, max_bytes: u64) !PreparedPumped {
+    pub fn preparePumped(allocator: std.mem.Allocator, process_main_thread_id: std.Thread.Id, file: std.Io.File, head: Head, max_bytes: u64) !PreparedPumped {
         return preparePumpedWithFailure(allocator, process_main_thread_id, file, head, max_bytes, null);
     }
     /// Optional errno, cleared on entry and set only after a real failed Linux
     /// syscall. Logical validation, capacity and allocator errors have no code.
-    pub fn preparePumpedWithFailure(allocator: std.mem.Allocator, process_main_thread_id: std.Thread.Id, file: std.fs.File, head: Head, max_bytes: u64, native_failure: ?*?i32) !PreparedPumped {
+    pub fn preparePumpedWithFailure(allocator: std.mem.Allocator, process_main_thread_id: std.Thread.Id, file: std.Io.File, head: Head, max_bytes: u64, native_failure: ?*?i32) !PreparedPumped {
         if (native_failure) |failure| failure.* = null;
         if (std.Thread.getCurrentId() == process_main_thread_id) return error.UiThreadForbidden;
         if (max_bytes == 0 or max_bytes > hard_max_file_bytes) return error.InvalidFileStreamLimit;
@@ -177,7 +177,7 @@ extern fn zwv_file_control_add(*anyopaque) void;
 extern fn zwv_file_control_release(*anyopaque) void;
 
 test "file preparation rejects the main thread before file access or allocation" {
-    const file: std.fs.File = undefined;
+    const file: std.Io.File = undefined;
     try std.testing.expectError(error.UiThreadForbidden, OwnedFileResponse.prepare(std.testing.failing_allocator, std.Thread.getCurrentId(), file, .{}, hard_max_file_bytes));
     try std.testing.expectError(error.UiThreadForbidden, OwnedFileResponse.preparePumped(std.testing.failing_allocator, std.Thread.getCurrentId(), file, .{}, hard_max_file_bytes));
     try std.testing.expectError(error.InvalidFileStreamLimits, (Limits{ .max_live = 0 }).validate());

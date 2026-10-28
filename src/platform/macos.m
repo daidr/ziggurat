@@ -56,12 +56,13 @@ typedef struct NativeWindow {
     uint32_t observed_width,observed_height,observed_scale;int size_observed;
     NSEvent *gesture;NSRect caret;
     NSMutableString *marked;NSRange marked_selection;
+    NSCursor *cursor;
 } NativeWindow;
 enum {POPUP=1,POPUP_FOCUSABLE=2,POPUP_TOPMOST=4};
 
 static void retain_window(NativeWindow *s){s->refs++;}
 static atomic_uint live_windows;
-static void release_window(NativeWindow *s){if(--s->refs==0){[s->marked release];free(s);atomic_fetch_sub(&live_windows,1);}}
+static void release_window(NativeWindow *s){if(--s->refs==0){[s->marked release];[s->cursor release];free(s);atomic_fetch_sub(&live_windows,1);}}
 static int emit(NativeWindow *s,NativeEvent *event){retain_window(s);int result=0;if(s->owner&&!s->destroyed)result=s->emit(s->owner,event);release_window(s);return result;}
 static uint32_t modifiers(NSEventModifierFlags flags){
     return ((flags&NSEventModifierFlagShift)?1u:0u)|((flags&NSEventModifierFlagControl)?2u:0u)|((flags&NSEventModifierFlagOption)?4u:0u)|((flags&NSEventModifierFlagCommand)?8u:0u);
@@ -136,6 +137,7 @@ static int edit_for_selector(SEL selector,uint32_t *flags){
     CGContextRef context=[[NSGraphicsContext currentContext] CGContext];if(!context)return;
     NativeEvent event={0};event.kind=1;event.context=context;size_event(s,&event);emit(s,&event);
 }
+- (void)resetCursorRects{NativeWindow *s=native;if(s&&s->cursor)[self addCursorRect:[self bounds] cursor:s->cursor];}
 - (void)setFrameSize:(NSSize)size{[super setFrameSize:size];if(native)notify_size(native);}
 - (void)viewDidChangeBackingProperties{[super viewDidChangeBackingProperties];if(native)notify_size(native);}
 - (void)updateTrackingAreas{
@@ -354,7 +356,7 @@ uint32_t zlm_window_state(NativeWindow *s){
     return ([window isVisible]?1u:0u)|([window isMiniaturized]?2u:0u)|(!fullscreen&&[window isZoomed]?4u:0u)|([window isKeyWindow]?8u:0u)|(s->enabled?16u:0u)|
         (fullscreen?32u:0u)|(s->fullscreen_requested?64u:0u)|(topmost?128u:0u)|(s->topmost_requested?256u:0u);
 }
-uint32_t zlm_window_capabilities(NativeWindow *s){(void)s;return 1u|2u|4u|8u|16u;}
+uint32_t zlm_window_capabilities(NativeWindow *s){(void)s;return 1u|2u|4u|8u|16u|64u|128u|256u|1024u|2048u;}
 static double primary_height(void){NSArray<NSScreen *> *screens=[NSScreen screens];return [screens count]?[[screens objectAtIndex:0] frame].size.height:0;}
 void zlm_window_bounds(NativeWindow *s,NativeBounds *out){
     NSRect content=[s->window contentRectForFrameRect:[s->window frame]];
@@ -418,3 +420,58 @@ void zlm_test_close(NativeWindow *s){@autoreleasepool{[s->delegate windowShouldC
 void zlm_test_commit(NativeWindow *s,const char *text){@autoreleasepool{[s->view insertText:[NSString stringWithUTF8String:text] replacementRange:NSMakeRange(NSNotFound,0)];}}
 void zlm_test_compose(NativeWindow *s,const char *text,size_t caret){@autoreleasepool{[s->view setMarkedText:[NSString stringWithUTF8String:text] selectedRange:NSMakeRange(caret,0) replacementRange:NSMakeRange(NSNotFound,0)];}}
 int zlm_test_title_is(NativeWindow *s,const char *title){@autoreleasepool{return [[s->window title] isEqualToString:[NSString stringWithUTF8String:title]];}}
+/* The client cursor, by the order of core.Cursor. macOS has no public
+   diagonal resize cursors before macOS 15, so those keep the arrow. */
+void zlm_window_cursor(NativeWindow *s,int cursor){
+    if(s->destroyed)return;
+    @autoreleasepool{
+        NSCursor *value=nil;
+        switch(cursor){
+            case 1:value=[NSCursor pointingHandCursor];break;
+            case 2:value=[NSCursor IBeamCursor];break;
+            case 3:case 10:value=[NSCursor openHandCursor];break;
+            case 4:case 13:case 15:case 16:value=[NSCursor resizeLeftRightCursor];break;
+            case 5:case 12:case 14:case 17:value=[NSCursor resizeUpDownCursor];break;
+            case 8:value=[NSCursor operationNotAllowedCursor];break;
+            case 9:value=[NSCursor crosshairCursor];break;
+            case 11:value=[NSCursor closedHandCursor];break;
+            case 18:value=[NSCursor IBeamCursorForVerticalLayout];break;
+            case 19:value=[NSCursor dragCopyCursor];break;
+            case 20:value=[NSCursor dragLinkCursor];break;
+            case 21:value=[NSCursor contextualMenuCursor];break;
+            case 22:{NSImage *blank=[[[NSImage alloc] initWithSize:NSMakeSize(1,1)] autorelease];value=[[[NSCursor alloc] initWithImage:blank hotSpot:NSZeroPoint] autorelease];break;}
+            default:value=nil;break;
+        }
+        [s->cursor release];s->cursor=[value retain];
+        [s->window invalidateCursorRectsForView:s->view];
+        NSPoint inside=[s->view convertPoint:[s->window mouseLocationOutsideOfEventStream] fromView:nil];
+        if([s->window isKeyWindow]&&NSPointInRect(inside,[s->view bounds]))[(s->cursor?s->cursor:[NSCursor arrowCursor]) set];
+    }
+}
+int zlm_window_traits(NativeWindow *s,int resizable,int movable,int minimizable,int maximizable,int closable){
+    if(s->destroyed)return 2;
+    @autoreleasepool{
+        NSWindow *window=s->window;NSWindowStyleMask style=[window styleMask];
+        if(style&NSWindowStyleMaskTitled){
+            style=resizable?style|NSWindowStyleMaskResizable:style&~NSWindowStyleMaskResizable;
+            style=minimizable?style|NSWindowStyleMaskMiniaturizable:style&~NSWindowStyleMaskMiniaturizable;
+            style=closable?style|NSWindowStyleMaskClosable:style&~NSWindowStyleMaskClosable;
+            [window setStyleMask:style];
+            [[window standardWindowButton:NSWindowZoomButton] setEnabled:maximizable&&resizable];
+        }else if(!s->popup)[window setStyleMask:resizable?style|NSWindowStyleMaskResizable:style&~NSWindowStyleMaskResizable];
+        [window setMovable:movable];
+        if(!s->popup)[window setCollectionBehavior:maximizable?NSWindowCollectionBehaviorFullScreenPrimary:NSWindowCollectionBehaviorFullScreenNone];
+    }
+    return 0;
+}
+void zlm_window_opacity(NativeWindow *s,float value){[s->window setAlphaValue:value];}
+void zlm_window_ignore_pointer(NativeWindow *s,int enabled){[s->window setIgnoresMouseEvents:enabled];}
+void zlm_window_content_protection(NativeWindow *s,int enabled){[s->window setSharingType:enabled?NSWindowSharingNone:NSWindowSharingReadOnly];}
+/* Bounces the Dock icon until the app is active; a request per window
+   would need the window to own it, which macOS does not offer. */
+static NSInteger attention_request=0;
+void zlm_window_attention(NativeWindow *s,int enabled){
+    (void)s;
+    if(attention_request){[NSApp cancelUserAttentionRequest:attention_request];attention_request=0;}
+    if(enabled&&![NSApp isActive])attention_request=[NSApp requestUserAttention:NSInformationalRequest];
+}

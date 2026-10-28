@@ -96,8 +96,8 @@ pub const Find = struct {
         return self.pool.begin(.{
             .document = capture.document,
             .stamp = stamp,
-            .revision = stamp.revisions[@intFromEnum(stamp.side)],
-            .text_version = stamp.text_versions[@intFromEnum(stamp.side)],
+            .revision = stamp.revisions[@backingInt(stamp.side)],
+            .text_version = stamp.text_versions[@backingInt(stamp.side)],
             .selection = stamp.selection,
         }, pattern, options, .{ .context = self, .validate = validate });
     }

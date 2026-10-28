@@ -51,7 +51,7 @@ pub fn encode(store: *const m.Store, output: []u8) ![]const u8 {
     for (store.items()) |entry| {
         putKey(output, &offset, entry.key);
         putKey(output, &offset, entry.state.display);
-        put(u8, output, &offset, @intFromEnum(entry.state.space));
+        put(u8, output, &offset, @backingInt(entry.state.space));
         put(u8, output, &offset, @as(u8, @intFromBool(entry.state.maximized)) | @as(u8, @intFromBool(entry.state.fullscreen)) << 1 | @as(u8, @intFromBool(entry.state.always_on_top)) << 2);
         offset += 2;
         put(i32, output, &offset, entry.state.normal.position.x);

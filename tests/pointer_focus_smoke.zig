@@ -1,12 +1,9 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 
 const Mode = enum { startup, foreign_loss, foreign_aba, all };
 const position: c.LPARAM = (10 << 16) | 10;
@@ -285,10 +282,10 @@ fn isolatedWindows(mode: Mode) !void {
     }
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     if (builtin.os.tag != .windows) return error.UnsupportedCapability;
-    const args = try std.process.argsAlloc(std.heap.page_allocator);
-    defer std.process.argsFree(std.heap.page_allocator, args);
+    const args = try zio.argsAlloc(std.heap.page_allocator, init.args);
+    defer zio.argsFree(std.heap.page_allocator, args);
     if (args.len == 1) return isolatedWindows(.all);
     if (args.len == 2) return isolatedWindows(std.meta.stringToEnum(Mode, args[1]) orelse return error.InvalidArgument);
     if (args.len != 3 or !std.mem.eql(u8, args[1], "--desktop-child")) return error.InvalidArgument;

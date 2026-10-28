@@ -201,6 +201,34 @@ S02 当前仍为部分实现：Windows/Linux 已提供 `launchExecutable`、`ope
 
 `system.desktop` 在 App owner 线程提供显示器、偏好（color scheme、accent、高对比度、减少动态/透明、文字缩放）、电源和网络快照，写入调用者存储且不分配；`Watch` 是调用者持有的变化订阅，每个 Watch 拥有自己的原生订阅，突发合并为每种类最多一次回调，stop 与 App 关闭撤销，停止后的 Watch 不再收到回调，没有轮询计时器。网络 `online` 只表示本地连接。Windows 用从不显示的顶层窗口接收广播，Linux 用 GDK/GtkSettings/GIO 信号。平台差异、启发式和已验证范围见[桌面环境](desktop-environment.md)。
 
+## 应用目录
+
+`paths.Paths.init("Notes")` 按名称解析常用目录，`get(allocator, name)` 返回调用者释放的路径：home、app_data（`$XDG_CONFIG_HOME`，默认 `~/.config`；Windows `%AppData%`）、user_data（app_data/应用名）、cache（`$XDG_CACHE_HOME`，默认 `~/.cache`；Windows `%LocalAppData%`，再接应用名）、logs（user_data/logs）、resources（可执行文件所在目录，解析符号链接后）、temp、exe，以及 desktop/documents/downloads/music/pictures/videos（Linux 读取 `user-dirs.dirs` 并展开 `$HOME`，否则为 home 下的同名目录）。user_data、cache 与 logs 首次 `get` 时创建；`resolve` 只计算不创建。`set(name, path)` 借用覆盖路径，原样返回且不创建。相对的 XDG 目录按规范忽略；缺少 home 时返回 `PathUnavailable`。应用名不得含路径分隔符或保留字符。
+
+## 菜单标准角色
+
+`menu_roles.Role` 列出常用命令（撤销、重做、剪切、复制、粘贴、全选、重新载入、缩放、全屏、最小化、关闭、新建、打开、保存、另存为、退出等）和标准子菜单（文件、编辑、显示、窗口、格式、应用菜单）。`defaults(role, context)` 给出按语言的标签与快捷键：内置英文、简体中文、繁体中文，`resolve(locale, overrides)` 先取应用覆盖、再取内置语言、最后英文；Windows 上重做是 Ctrl+Y、退出叫“退出/Exit”且无快捷键，Linux 重做是 Ctrl+Shift+Z、退出是 Ctrl+Q；`documents = true` 时文件菜单带文档命令，关闭项称“关闭”而非“关闭窗口”。
+
+`Builder.init(items, labels, context)` 把角色写成普通 `Item`，标签写入调用者提供的存储，子菜单角色带出默认条目，同一角色重复出现时（如文件与窗口菜单中的关闭）分配下一个出现序号，只有第一个带快捷键。角色项 ID 位于 `menu_roles.id_base` 之上，`Role.fromId` 还原角色；应用自己的 ID 保持在其下。切换语言时用新 locale 重新构建并再次 `setMenu`。`menu_role_actions.perform(app, window, id)` 执行窗口与应用类角色的默认动作（退出走 `requestQuit`，关闭走用户关闭请求，最小化、缩放、全屏切换），编辑、视图与文档类角色返回 `unhandled`，交给当前内容处理。快捷键键名新增 `plus`（主键盘区的 =/+ 键）与 `minus`。
+
+## 信号退出
+
+`signals.QuitOnSignals.start(app)` 让 SIGINT 与 SIGTERM 变成一次 `requestQuit`：信号处理函数只向管道写一个字节，由默认 GLib 主上下文在主线程读取后调用，关闭处理器照常运行并可取消；第二个信号在处理函数里直接以 128 + 信号值退出进程，即使主线程繁忙或上一次退出被取消。进程启动时已被忽略的信号（如后台作业的 SIGINT）保持忽略。每个进程同时只有一个实例，`stop()` 恢复原处理函数；App 关闭时自动停止。Windows 没有这两个信号，返回 `UnsupportedCapability`。
+
+## 提示音、指针位置与已安装应用
+
+`desktop.beep(app)` 播放系统提示音（Windows `MessageBeep`，GTK `gdk_display_beep`）。`desktop.cursorPosition(app)` 返回与 `Monitor` 相同坐标系的指针位置；Wayland 不公开全局指针位置，返回 `UnsupportedCapability`。
+
+`shell.Worker.installedApps(allocator)` 在后台 worker 上列出启动器可见的应用，按名称（忽略大小写）再按路径排序，结果由 `InstalledApps.deinit` 一次释放。Windows 枚举 Shell 的 Applications 文件夹（开始菜单“所有应用”，打包应用与桌面应用都在内），id 是 AppUserModelID（或已知文件夹下的路径），path 是 `shell:AppsFolder\<id>`；Linux 列出菜单会显示的桌面条目（排除 NoDisplay/Hidden 和不属于当前桌面的条目），id 是桌面文件 ID，path 是 `.desktop` 文件。`launchApp(path)` 启动其中一项：Windows 交给 `ShellExecuteEx`（也接受任意程序路径），Linux 用 `GDesktopAppInfo` 启动；worker 线程上没有 GTK 启动上下文，因此没有启动通知。
+
+## 最近文档、Jump List 与重启
+
+`recent.RecentDocuments.load(allocator, file, capacity)` 读取应用自己的最近文档列表（JSON，新的在前），文件缺失或损坏时从空列表开始；`add` 把路径移到最前、去重并截到容量，`remove`、`clear` 修改列表，每次修改都先写同目录临时文件再改名替换。它只管理应用自己的 Open Recent 列表（菜单角色 `open_recent`），不登记到系统。`recent.addToSystem(allocator, path, app_name)` 把绝对路径登记到系统：Windows 调用 `SHAddToRecentDocs`，进入用户的最近项目和本应用 Jump List 的 Recent 类别（仅限应用已注册处理程序的文件类型）；Linux 用 GLib 同步编辑 GTK 使用的 `recently-used.xbel`，写入 MIME 类型和应用名，文件选择器和文件管理器的“最近”会显示它。两者都会阻塞，不适合放在逐帧路径上。
+
+`jump_list.setTasks(allocator, tasks, .{ .app_id, .recent })`（仅 Windows）用 `ICustomDestinationList` 一次替换整个 Jump List：每个任务是一个 shell link，有标题、提示、程序（默认本程序）、参数、工作目录和图标，`recent = true` 另加 Recent 类别。参数按常规 argv 规则逐项加引号，`argumentLine` 给出与 shell link 相同的字符串。所有输入先校验（标题必填、最多 32 个任务、文本不超过 259 字节且不含控制字符、程序须为绝对路径）再调用系统；任何一步失败都会放弃新列表，原列表保持不变。没有任务也不要 Recent 时删除整个列表。Windows 在应用退出后仍保留列表，通常启动时设置一次。需要作用于正在运行的应用时，把本应用的 URL scheme 作为参数，再由单实例转发给 primary。Linux 没有对应的任务菜单，返回 `UnsupportedCapability`。
+
+`relaunch.Relaunch.request(app)` 在事件循环运行期间、owner 线程上调用 `requestQuit`：关闭处理器照常运行，取消退出时重启也一并取消。Windows 会先把前台权限交出去，让新进程的窗口能到最前。`App.run` 返回、App 与单实例锁等资源释放之后，`finish(allocator, options)` 再启动新进程（默认本程序并沿用当前参数，也可以改程序、参数和工作目录），不等待它结束，然后返回 true；没有被接受的请求时返回 false。
+
 ## 文件监视
 
 `system.watch.Watcher` 是 S03 的粗模式文件监视：与 `shell.Worker` 相同，只在宿主创建的后台线程初始化和调用（`interrupt()` 除外，可跨线程唤醒），不创建线程、不轮询，所有缓冲和预算（root、目录 watch、pending、路径字节、原生缓冲）在 `init` 显式分配。`addRoot` 返回即 ready；`wait(events, path_storage, timeout_ms)` 按 debounce 与最大延迟交付合并后的 `changed`（应重新列出的目录）、`overflow`（必须重扫整个 root）和 `root_removed`，调用者容量不足时顺延而不丢弃。Linux 使用 inotify/eventfd/poll，Windows 使用 overlapped `ReadDirectoryChangesW`。它不读取文件 metadata、不匹配 rename，详细模式尚未实现。合同、预算与验证范围见 [文件监视](file-watch.md)；Windows 路径目前只验证交叉编译。
@@ -229,7 +257,32 @@ Linux 首次使用时才 `dlopen("libsecret-1.so.0")`（需要 0.19 起的二进
 
 底层是核心的 `WindowOptions.popup: ?PopupRole`（`focusable`、`topmost`、`shadow`、`handler`），要求 `.borderless` 且不能是模态窗口（`InvalidPopup`）。Windows 上它是 `WS_POPUP` + `WS_EX_TOOLWINDOW` 窗口（不进任务栏和 Alt+Tab），非 focusable 时加 `WS_EX_NOACTIVATE`、`WM_MOUSEACTIVATE` 返回 `MA_NOACTIVATE` 并以 `SW_SHOWNOACTIVATE` 显示；拥有可见 focusable 弹出窗口的窗口被点击激活时返回 `MA_ACTIVATEANDEAT`，那次点击只驳回弹出窗口，与菜单一致；驳回在 `WM_ACTIVATE` 之后用投递消息决定，不在激活处理中回调。Linux X11 上它是 `GTK_WINDOW_POPUP`（override-redirect，精确放在计算出的位置），focusable 时显示期间 `gdk_seat_grab` 抓取整个 seat 并 `gtk_grab_add`，外部按下（含本应用其他窗口和其他应用）或抓取被打断时驳回；没有 X11 时退回 utility 类型的顶层窗口，失去键盘时驳回。两平台都设置不进任务栏/分页器。
 
+## Now Playing 与媒体键
+
+`system.NowPlaying` 把应用正在播放的内容放到系统显示媒体的地方：Windows 是音量浮出面板与锁屏上的媒体控件（SystemMediaTransportControls），Linux 是 MPRIS 客户端（GNOME、KDE 的媒体控件与锁屏、playerctl）。显示期间，键盘与耳机的媒体键以及这些控件把命令交给应用：
+
+```zig
+var now = system.NowPlaying.init(allocator, &state, onCommand);
+try now.start(app);
+try now.set(.{ .title = "Spring", .artist = "Vivaldi", .album = "The Four Seasons", .artwork = cover_png,
+    .duration_ns = 200 * std.time.ns_per_s, .commands = .{ .play = true, .pause = true, .next = true, .seek = true } });
+// onCommand(context, command, position_ns) 在主线程：播放、暂停或跳转，再用 setPlayback 告诉系统。
+```
+
+- 所有调用和 `on_command` 都在 App owner 线程。NowPlaying 由调用者持有，`start` 后地址不变，`stop` 或 App 关闭时撤销；一个进程同时只有一个（否则 `AlreadyActive`）。
+- `Info`：标题、艺术家、专辑（各最多 1024 字节 UTF-8）、封面（PNG 或 JPEG）、`duration_ns`（0 为未知，如直播，不显示进度）、`position_ns`、`rate`（0 即 1）、`state`（默认 `playing`）、`commands`（全不设为播放、暂停、停止）。字符串和封面都被复制。系统在 `playing` 时按 rate 自己推进位置，应用只在跳转时用 `setPlayback(state, position_ns)` 更新；`clear()` 让系统控件不再显示应用、媒体键交给其他应用；`current()` 返回带当前位置的信息。
+- 命令：`play`、`pause`、`stop`、`next`、`previous`、`seek`。播放/暂停键在 `playing` 时为 `pause`，否则为 `play`；未提供的命令被忽略。`seek` 的位置是目标位置（限制在曲目内），其他命令给出命令到达时的播放位置，便于 `setPlayback(.paused, position_ns)` 停在原处。
+- `control(Player)` 让媒体键直接驱动播放器（`Player.of(&audio_player)` 适配 `ziggurat_audio` 的 Player 或任何有 `play`/`pause`/`stop`/`isPlaying`/`seek`/`position`/`duration` 的值）：播放、暂停、停止与跳转作用于播放器，显示的状态、位置和时长取自播放器，并额外提供播放、暂停、停止以及（时长已知时）跳转；`next`/`previous` 仍交给 `on_command` 换曲，其他命令在播放器处理后也照常交给 `on_command`。应用自己操作播放器或播放结束后调用 `sync()`。
+- Windows：控件属于一个从不显示的顶层窗口（经 `ISystemMediaTransportControlsInterop`），设置播放状态、各按钮可用性、音乐元数据、缩略图、时间线与速率；控件在自己的线程调用敏捷委托，委托只向该窗口投递消息，命令在主线程交付。窗口、控件与委托首次使用时创建并保留到进程结束。
+- Linux：会话总线上的 MPRIS 播放器（`/org/mpris/MediaPlayer2`），只在显示期间持有总线名 `org.mpris.MediaPlayer2.<程序名>.instance<pid>`，清除后离开桌面控件。`Identity` 是 GLib 应用名，`DesktopEntry` 是程序名（与 `identity.setProcessIdentity` 一致）。曲目变化时换 trackid；位置跳变超过半秒发 `Seeked`；`Seek` 与 `SetPosition`（只接受当前曲目、曲目内的位置）作为 `seek`；封面写到 `$XDG_RUNTIME_DIR/<程序名>/` 下的文件并以 `file://` 给出，封面变化或清除时删除；`OpenUri` 返回 NotSupported。没有会话总线时不显示，也不报错。
+
+`zig build smoke-now-playing`（需要 `dbus-run-session` 与 X11）用另一条总线连接作为 MPRIS 客户端，验证总线名、元数据与封面文件、可用命令、播放/暂停键、未提供的命令被忽略、`SetPosition` 与 `Seek`、`OpenUri` 拒绝、清除后离开总线并删除封面。`zig build smoke-now-playing-commands` 在两个平台经各自后端的主线程路径（Windows 为窗口消息）交付命令，验证播放/暂停键按状态、未提供的命令、跳转位置与清除后不再交付；Windows 上的系统控件显示与真实媒体键没有自动验证。
+
 ## 已验证范围
+
+`zig build smoke-system-session` 在隐藏窗口的事件循环中经 `Relaunch` 退出，再真实启动自身。被启动的子进程在 Linux 上把私有 `XDG_DATA_HOME` 下的文件两次登记到最近文档，读回 `recently-used.xbel`，确认只有一条记录且带应用名。在 Windows 上，子进程登记最近文档，设置含两个任务和 Recent 类别的 Jump List 后再删除；再按 Jump List 的参数串用 `CreateProcessW` 启动自身，确认空参数、空格、引号、尾部反斜杠、UNC 前缀和非 ASCII 参数都原样往返。这些检查不打开或点击任务栏菜单，也不检查 shell 的显示效果。
+
+`zig build smoke-system-extras` 在隐藏窗口下播放提示音、读取指针位置、在后台 worker 上列出已安装应用并确认启动不存在的条目失败；Linux 另向本进程发送 SIGTERM，确认经 `requestQuit` 退出事件循环并停止信号处理，Windows 确认信号退出返回 `UnsupportedCapability`。
 
 `zig build smoke-system` 实际创建菜单和 Shell 托盘项，覆盖 12 轮 owner/窗口生存期、菜单状态、原生命令、同 HWND 更换 Owner 后的旧消息、任务栏重建恢复，以及回调内关闭的清理。
 

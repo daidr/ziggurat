@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 
 /// Opaque RGB colors. Alpha drawing remains an explicit drawing operation.
 pub const Palette = struct {
@@ -87,10 +88,10 @@ pub const Theme = struct {
         } };
     }
     pub fn validate(self: Theme) !void {
-        inline for (@typeInfo(Palette).@"struct".fields) |field| {
+        inline for (zio.fields(Palette)) |field| {
             if (@field(self.palette, field.name) > 0xffffff) return error.InvalidThemeColor;
         }
-        inline for (@typeInfo(Metrics).@"struct".fields) |field| {
+        inline for (zio.fields(Metrics)) |field| {
             const value = @field(self.metrics, field.name);
             if (!std.math.isFinite(value) or value < 0 or value > 256) return error.InvalidThemeMetric;
         }
@@ -104,12 +105,12 @@ test "themes own copied values and validate every color and metric" {
     const original = custom;
     custom.palette.accent = 0xff5500;
     try std.testing.expect(original.palette.accent != custom.palette.accent);
-    inline for (@typeInfo(Palette).@"struct".fields) |field| {
+    inline for (zio.fields(Palette)) |field| {
         var invalid = original;
         @field(invalid.palette, field.name) = 0x01000000;
         try std.testing.expectError(error.InvalidThemeColor, invalid.validate());
     }
-    inline for (@typeInfo(Metrics).@"struct".fields) |field| {
+    inline for (zio.fields(Metrics)) |field| {
         for ([_]f32{ -1, 257, std.math.nan(f32), std.math.inf(f32) }) |value| {
             var invalid = original;
             @field(invalid.metrics, field.name) = value;

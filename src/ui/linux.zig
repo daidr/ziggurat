@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const gaussian = @import("gaussian_filter.zig");
 const gaussian_scope = @import("gaussian_scope.zig");
 const gaussian_kernel = @import("gaussian_kernel.zig");
@@ -12,6 +13,8 @@ const image_cache = @import("image_cache.zig");
 const cpu_gradient = @import("cpu_gradient.zig");
 const layers = @import("layers.zig");
 const transform_composite = @import("transform_composite.zig");
+const shader_effects = commands.shader_effects;
+const effect_host = @import("gpu_effect_host.zig");
 const Rect = layout.Rect;
 comptime {
     if (@sizeOf(usize) == 8 and (@sizeOf(cpu_gradient.Surface) != 72 or @offsetOf(cpu_gradient.Surface, "clip") != 24 or @offsetOf(cpu_gradient.Surface, "origin") != 56)) @compileError("software plane ABI mismatch");
@@ -35,6 +38,7 @@ extern fn zlc_destroy(*anyopaque) void;
 extern fn zlc_prepare_image(*anyopaque, [*]const drawing.ImageLevel, u32) c_int;
 extern fn zlc_prepare_dynamic_image(*anyopaque, [*]const drawing.ImageLevel, u32) c_int;
 extern fn zlc_update_image(*anyopaque, u32, [*]const drawing.ImageLevel, u32) c_int;
+extern fn zlc_reserve_images(*anyopaque, u32) c_int;
 extern fn zlc_commit_image(*anyopaque, u32) void;
 extern fn zlc_image_fault(*anyopaque, u32) void;
 extern fn zlc_release_image(*anyopaque, u32) void;
@@ -68,6 +72,22 @@ extern fn zlc_offscreen_prepare(*anyopaque) c_int;
 extern fn zlc_offscreen_begin(*anyopaque) c_int;
 extern fn zlc_offscreen_end(*anyopaque, [*]u8, usize) c_int;
 
+extern fn zgl_effects_create(c_int, [*]u8, usize) ?*anyopaque;
+extern fn zgl_effects_destroy(*anyopaque) void;
+extern fn zgl_effects_install(*anyopaque, u32, [*:0]const u8, [*]u8, usize) c_int;
+extern fn zgl_effects_run(*anyopaque, u32, [*]const u32, u32, *const effect_host.Params, [*]const u32, u32, u32, usize, [*]u32, u32, u32, usize) c_int;
+extern fn zgl_effects_passes(*anyopaque) u64;
+
+pub const GlMode = shader_effects.GlMode;
+/// The mode `ZIGGURAT_GL` selects: `0`/`off`/`false`/`no` or `1`/`on`/
+/// `true`/`yes`; anything else is automatic.
+pub fn glModeFromEnvironment() GlMode {
+    const value = zio.getenv("ZIGGURAT_GL") orelse return .automatic;
+    for ([_][]const u8{ "0", "off", "false", "no" }) |word| if (std.ascii.eqlIgnoreCase(value, word)) return .off;
+    for ([_][]const u8{ "1", "on", "true", "yes" }) |word| if (std.ascii.eqlIgnoreCase(value, word)) return .on;
+    return .automatic;
+}
+
 extern fn zlc_prepare_coverage(*anyopaque, *const drawing.NativeCoverage) c_int;
 extern fn zlc_coverage(*anyopaque, u32, f32, f32, f32, i32, i32, u32) c_int;
 extern fn zlc_coverage_objects(*anyopaque) u32;
@@ -86,6 +106,12 @@ pub const Renderer = struct {
     /// Element effects isolated in a Gaussian capture, innermost last.
     effect_scopes: [layers.max_depth]EffectScope = undefined,
     effect_count: usize = 0,
+    /// The OpenGL executor for shader effects and the programs linked for
+    /// it, once `prepareEffect` created it; `gl_unavailable` after it could
+    /// not be created or failed.
+    gl: ?*anyopaque = null,
+    gl_unavailable: bool = false,
+    gl_table: effect_host.Table = .{},
     const EffectScope = struct { slot: u8, capture: gaussian_scope.Capture };
     const Resources = struct {
         text_bytes: []const u8,
@@ -281,7 +307,107 @@ pub const Renderer = struct {
         if (zlc_layer_gaussian_planes(self.native.?, &source, &temporary, &kernel) != 0) return error.EndGaussianFailed;
         const pixels = source.pixels[0 .. @as(usize, source.stride) * (source.height - 1) + source.width];
         const scratch = temporary.pixels[0 .. @as(usize, temporary.stride) * (temporary.height - 1) + temporary.width];
-        commands.shader_effects.applyElement(entry, .{ .pixels = pixels, .width = source.width, .height = source.height, .stride = source.stride }, .{ .pixels = scratch, .width = temporary.width, .height = temporary.height, .stride = temporary.stride }, capture, workspace);
+        const plane: shader_effects.Plane = .{ .pixels = pixels, .width = source.width, .height = source.height, .stride = source.stride };
+        const scratch_plane: shader_effects.Plane = .{ .pixels = scratch, .width = temporary.width, .height = temporary.height, .stride = temporary.stride };
+        if (self.glSlot(entry)) |slot| if (workspace) |space| {
+            if (!shader_effects.startElement(space, entry, @as(u64, source.width) * source.height, capture.scale)) return;
+            var params = effect_host.elementParams(entry, capture);
+            params.plane = .{ source.width, source.height, 0, 0 };
+            if (self.runGl(slot, space, &params, source.pixels, source.width, source.height, source.stride, source.pixels, source.width, source.height, source.stride)) return;
+            shader_effects.shadeContent(entry, plane, scratch_plane, params.a[2], params.a[3], capture.scale, space);
+            return;
+        };
+        shader_effects.applyElement(entry, plane, scratch_plane, capture, workspace);
+    }
+    /// Run a backdrop shader on the current plane: on OpenGL when its
+    /// program is linked, else on the CPU.
+    fn backdropShader(self: *Renderer, entry: *const shader_effects.Entry, surface: cpu_gradient.Surface, transparent: bool, scratch: ?[]u32, workspace: ?*shader_effects.Workspace) cpu_gradient.Dirty {
+        const empty: cpu_gradient.Dirty = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+        const slot = self.glSlot(entry) orelse return shader_effects.applyBackdrop(surface, transparent, entry, scratch, workspace);
+        const plan = shader_effects.planBackdrop(surface.width, surface.height, surface.scale, surface.origin, surface.clip, entry) orelse return empty;
+        const space = workspace orelse return empty;
+        if (!shader_effects.startBackdrop(space, entry, plan, if (scratch) |storage| storage.len else null, surface.scale)) return empty;
+        const params = effect_host.backdropParams(entry, plan, surface.scale, surface.origin, surface.clip, transparent);
+        const stride: usize = surface.stride;
+        const content = surface.pixels + plan.region[1] * stride + plan.region[0];
+        const out = surface.pixels + plan.out[1] * stride + plan.out[0];
+        if (!self.runGl(slot, space, &params, content, @intCast(plan.region[2] - plan.region[0]), @intCast(plan.region[3] - plan.region[1]), stride, out, @intCast(plan.out[2] - plan.out[0]), @intCast(plan.out[3] - plan.out[1]), stride))
+            shader_effects.shadeBackdrop(surface, transparent, entry, plan, scratch.?, space);
+        return plan.dirty();
+    }
+    fn glSlot(self: *Renderer, entry: *const shader_effects.Entry) ?u32 {
+        if (self.gl == null) return null;
+        return self.gl_table.find(entry.program.identity, entry.target);
+    }
+    /// Run a linked program on OpenGL; false after a failure, which turns
+    /// OpenGL off for this renderer.
+    fn runGl(self: *Renderer, slot: u32, space: *shader_effects.Workspace, params: *const effect_host.Params, content: [*]const u32, content_width: u32, content_height: u32, content_stride: usize, out: [*]u32, out_width: u32, out_height: u32, out_stride: usize) bool {
+        var words: [shader_effects.shader.gpu.max_input_words]u32 = undefined;
+        const inputs = self.gl_table.entries[slot].inputs;
+        for (inputs, 0..) |register, i| words[i] = space.machine.registers[register];
+        if (zgl_effects_run(self.gl.?, slot, &words, @intCast(inputs.len), params, content, content_width, content_height, content_stride, out, out_width, out_height, out_stride) == 0) return true;
+        self.dropGl();
+        self.gl_unavailable = true;
+        return false;
+    }
+    fn dropGl(self: *Renderer) void {
+        if (self.gl) |gl| zgl_effects_destroy(gl);
+        self.gl = null;
+        self.gl_table.deinit();
+    }
+    /// Link `program` drawn as `target` for OpenGL, outside paint, creating
+    /// the executor on first use. False when OpenGL is off or unavailable
+    /// or rejects the program: its effects then run on the CPU.
+    pub fn prepareEffect(self: *Renderer, allocator: std.mem.Allocator, program: *const shader_effects.shader.Program, target: shader_effects.Target, mode: GlMode) !bool {
+        if (mode == .off or self.gl_unavailable) return false;
+        const gl = self.gl orelse created: {
+            var log: [256]u8 = @splat(0);
+            const value = zgl_effects_create(@intFromBool(mode == .on), &log, log.len) orelse {
+                self.gl_unavailable = true;
+                return false;
+            };
+            self.gl = value;
+            break :created value;
+        };
+        const table = &self.gl_table;
+        table.beginFrame();
+        if (table.find(program.identity, target) != null) return true;
+        if (table.failed(program.identity, target)) return false;
+        var translation = shader_effects.shader.gpu.translate(allocator, program, .glsl) catch |err| switch (err) {
+            error.UnsupportedProgram => {
+                table.fail(program.identity, target);
+                return false;
+            },
+            else => |e| return e,
+        };
+        defer translation.deinit();
+        const fragment = try effect_host.source(allocator, &translation, program.kind, target, .glsl);
+        defer allocator.free(fragment);
+        const inputs = try allocator.dupe(u16, translation.inputs);
+        errdefer allocator.free(inputs);
+        const slot = table.victim() orelse return false;
+        var log: [1024]u8 = @splat(0);
+        switch (zgl_effects_install(gl, slot, fragment.ptr, &log, log.len)) {
+            0 => {},
+            2 => {
+                std.log.scoped(.ziggurat_gl).warn("shader effect program rejected: {s}", .{std.mem.sliceTo(&log, 0)});
+                table.fail(program.identity, target);
+                allocator.free(inputs);
+                return false;
+            },
+            else => {
+                allocator.free(inputs);
+                self.dropGl();
+                self.gl_unavailable = true;
+                return false;
+            },
+        }
+        table.fill(slot, program.identity, target, inputs, &.{}, allocator);
+        return true;
+    }
+    /// Shader passes run on OpenGL.
+    pub fn effectPasses(self: *const Renderer) u64 {
+        return if (self.gl) |gl| zgl_effects_passes(gl) else 0;
     }
     pub fn beginGaussian(self: *Renderer, bounds: drawing.Rect, options: layers.Group, view: gaussian.View) !void {
         try view.validate();
@@ -330,13 +456,14 @@ pub const Renderer = struct {
         if (charge > self.images.stats.budget_bytes) return error.CoverageBudgetExceeded;
         if (self.native == null) self.native = zlc_create() orelse return error.OutOfMemory;
         const native = self.native.?;
+        try self.reserveSlot();
         try view.lease.acquireResidency();
         errdefer view.lease.releaseResidency();
         self.images.reserveCandidate(charge);
         self.images.coverage_stats.peak_reserved_bytes = @max(self.images.coverage_stats.peak_reserved_bytes, self.images.coverage_stats.pixel_bytes + charge);
         const descriptor = view.native();
         if (zlc_prepare_coverage(native, &descriptor) != 0) return error.CoverageUploadFailed;
-        while (self.images.needsEviction(charge)) self.dropImage(self.images.oldest().?, true);
+        while (self.images.needsEviction(charge)) self.dropImage(self.images.victim() orelse break, true);
         const slot = self.images.empty().?;
         zlc_commit_image(native, @intCast(slot));
         self.images.commitCoverage(slot, view, charge);
@@ -389,12 +516,13 @@ pub const Renderer = struct {
         const charge = view.pixelBytes() * @as(usize, if (dynamic) 2 else 1);
         if (charge > self.images.stats.budget_bytes) return error.ImageBudgetExceeded;
         if (self.native == null) self.native = zlc_create() orelse return error.OutOfMemory;
+        try self.reserveSlot();
         try view.lease.acquireResidency();
         errdefer view.lease.releaseResidency();
         self.images.stats.peak_reserved_bytes = @max(self.images.stats.peak_reserved_bytes, self.images.stats.pixel_bytes + charge);
         self.images.reserveCandidate(charge);
         if ((if (dynamic) zlc_prepare_dynamic_image(self.native.?, view.levels.ptr, @intCast(view.levels.len)) else zlc_prepare_image(self.native.?, view.levels.ptr, @intCast(view.levels.len))) != 0) return error.ImageUploadFailed;
-        while (self.images.needsEviction(charge)) self.dropImage(self.images.oldest().?, true);
+        while (self.images.needsEviction(charge)) self.dropImage(self.images.victim() orelse break, true);
         const slot = self.images.empty().?;
         zlc_commit_image(self.native.?, @intCast(slot));
         self.images.commitCharged(slot, view, dynamic, charge);
@@ -416,6 +544,30 @@ pub const Renderer = struct {
     fn dropImage(self: *Renderer, slot: usize, eviction: bool) void {
         zlc_release_image(self.native.?, @intCast(slot));
         self.images.drop(slot, eviction);
+    }
+    /// Leave an empty slot for an upload: grow the table, or at its ceiling
+    /// evict the oldest entry the frame being prepared does not draw.
+    fn reserveSlot(self: *Renderer) !void {
+        if (self.images.empty() != null) return;
+        if (self.images.nextCapacity()) |capacity| {
+            if (zlc_reserve_images(self.native.?, @intCast(capacity)) == 0) {
+                if (self.images.grow(capacity)) return else |_| {}
+            }
+        } else |_| {}
+        self.dropImage(self.images.victim() orelse return error.ImageSlotsFull, true);
+    }
+    /// Make the images and coverage a frame draws resident before it
+    /// replays: upload those missing, whether never uploaded, released or
+    /// evicted, without evicting the others it draws. A frame that needs more
+    /// than the budget keeps them all until the next explicit upload or
+    /// budget change.
+    pub fn residentFrame(self: *Renderer, buffer: *const commands.Buffer) !void {
+        self.images.beginFrame();
+        defer self.images.endFrame();
+        for (buffer.imageResources()) |view| if (self.images.find(view.identity)) |slot| self.images.touch(slot);
+        for (buffer.coverageResources()) |view| if (self.images.findCoverage(view.identity)) |slot| self.images.touch(slot);
+        for (buffer.imageResources()) |view| if (self.images.find(view.identity) == null) try self.uploadImage(view);
+        for (buffer.coverageResources()) |view| if (self.images.findCoverage(view.identity) == null) try self.uploadCoverage(view);
     }
     pub fn releaseImage(self: *Renderer, identity: u64) !bool {
         const slot = self.images.find(identity) orelse return false;
@@ -570,7 +722,7 @@ pub const Renderer = struct {
             .texture => unreachable, // Whole batch rejected before drawing.
             .image => |value| {
                 if (value.resource >= image_resources.len) return error.MissingResources;
-                try self.image(image_resources[value.resource], value.destination, .{ .alignment = value.alignment, .fit = value.fit, .sampling = value.sampling, .opacity = value.opacity });
+                try self.image(image_resources[value.resource], value.destination, value.options());
             },
             .begin_group => |value| {
                 const r = value.bounds;
@@ -606,7 +758,7 @@ pub const Renderer = struct {
                 var surface: cpu_gradient.Surface = undefined;
                 if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawBackdropFailed;
                 const scratch = if (source.backdrop_storage.workspace) |workspace| workspace.planes else null;
-                const dirty = commands.shader_effects.applyBackdrop(surface, zlc_layer_transparent(self.native.?) != 0, &source.shader_storage.entries[slot], scratch, source.shader_storage.workspace);
+                const dirty = self.backdropShader(&source.shader_storage.entries[slot], surface, zlc_layer_transparent(self.native.?) != 0, scratch, source.shader_storage.workspace);
                 zlc_gradient_dirty(self.native.?, dirty.left, dirty.top, dirty.right - dirty.left, dirty.bottom - dirty.top);
             },
             .begin_transform => |slot| try self.beginTransform(transforms[slot]),
@@ -642,8 +794,9 @@ pub const Renderer = struct {
         if (depth != 0) return error.UnbalancedClips;
     }
     pub fn deinit(self: *Renderer) void {
+        self.dropGl();
         if (self.native) |native| zlc_destroy(native);
-        self.images.clear();
+        self.images.deinit();
         self.* = .{};
     }
     pub fn brushStats(self: *const Renderer) BrushStats {

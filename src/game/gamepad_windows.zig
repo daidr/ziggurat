@@ -103,15 +103,15 @@ pub const Backend = struct {
 
 fn fill(pad: XInputGamepad, state: *State) void {
     for (masks) |entry| if (pad.buttons & entry.mask != 0) {
-        state.buttons[@intFromEnum(entry.button)] = 1;
+        state.buttons[@backingInt(entry.button)] = 1;
     };
-    state.buttons[@intFromEnum(gamepad.Button.left_trigger)] = @as(f32, @floatFromInt(pad.left_trigger)) / 255;
-    state.buttons[@intFromEnum(gamepad.Button.right_trigger)] = @as(f32, @floatFromInt(pad.right_trigger)) / 255;
+    state.buttons[@backingInt(gamepad.Button.left_trigger)] = @as(f32, @floatFromInt(pad.left_trigger)) / 255;
+    state.buttons[@backingInt(gamepad.Button.right_trigger)] = @as(f32, @floatFromInt(pad.right_trigger)) / 255;
     // XInput's y axes go up.
-    state.axes[@intFromEnum(gamepad.Axis.left_x)] = thumb(pad.thumb_lx);
-    state.axes[@intFromEnum(gamepad.Axis.left_y)] = -thumb(pad.thumb_ly);
-    state.axes[@intFromEnum(gamepad.Axis.right_x)] = thumb(pad.thumb_rx);
-    state.axes[@intFromEnum(gamepad.Axis.right_y)] = -thumb(pad.thumb_ry);
+    state.axes[@backingInt(gamepad.Axis.left_x)] = thumb(pad.thumb_lx);
+    state.axes[@backingInt(gamepad.Axis.left_y)] = -thumb(pad.thumb_ly);
+    state.axes[@backingInt(gamepad.Axis.right_x)] = thumb(pad.thumb_rx);
+    state.axes[@backingInt(gamepad.Axis.right_y)] = -thumb(pad.thumb_ry);
 }
 
 fn thumb(value: i16) f32 {

@@ -3,6 +3,7 @@
 //! keyboard, and closing on Escape and on a dismissal. Linux injects input
 //! with XTest on X11; Windows dismisses by activating the owner.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const system = @import("ziggurat_system");
@@ -71,7 +72,7 @@ const Smoke = struct {
 
     fn ticker(self: *Smoke) void {
         while (!self.stop.load(.acquire)) {
-            std.Thread.sleep(50 * std.time.ns_per_ms);
+            zio.sleep(50 * std.time.ns_per_ms);
             self.app.post(.{ .context = self, .call = tick }) catch return;
         }
     }

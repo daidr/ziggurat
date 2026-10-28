@@ -4,12 +4,7 @@ const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const text = @import("ziggurat_text_layout");
 const shaped = @import("ziggurat_shaped_editor");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("imm.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn zlg_test_surrounding(*anyopaque, [*]u8, usize, *usize, *usize) c_int;
 extern fn zlg_test_delete_surrounding(*anyopaque, c_int, c_int) c_int;
 extern fn zlg_test_commit(*anyopaque, [*:0]const u8) void;

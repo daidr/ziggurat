@@ -147,9 +147,9 @@ fn limitsAndThread(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqualDeep(resources, t.resourceCounts());
 }
 fn maximums(engine: *t.Engine, allocator: std.mem.Allocator) !void {
-    const alternating = "a " ** 4096;
+    const alternating = &@as([4096 * "a ".len]u8, @bitCast(@as([4096]["a ".len]u8, @splat("a ".*))));
     try compare(engine, .{ .text = alternating, .locale = "", .selection = false });
-    const punctuation = "!" ** 8192;
+    const punctuation = &@as([8192]u8, @splat('!'));
     try compare(engine, .{ .text = punctuation, .selection = false });
     // Exact text-byte ceiling with only two graphemes. This exercises scalar
     // vs UTF-16 vs byte cursors without an oracle's repeated prefix scans.
@@ -160,10 +160,10 @@ fn maximums(engine: *t.Engine, allocator: std.mem.Allocator) !void {
     marks[65535] = '!';
     try compare(engine, .{ .text = marks, .selection = false });
 }
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
-    var args = try std.process.argsWithAllocator(gpa.allocator());
+    var args = try init.args.iterateAllocator(gpa.allocator());
     defer args.deinit();
     _ = args.next();
     var oracle_only = false;

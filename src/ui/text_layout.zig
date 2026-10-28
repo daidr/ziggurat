@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 /// Windows (DirectWrite), Linux (Pango) and macOS (Core Text) lay out text.
 const native_available = builtin.os.tag == .windows or builtin.os.tag == .linux or builtin.os.tag == .macos;
@@ -799,7 +800,7 @@ fn destroyLayout(state: *LayoutState) void {
     allocator.destroy(state);
 }
 fn createLayout(engine: *EngineState, allocator: std.mem.Allocator, source: []const u8, options: Options, reference: bool) !*Layout {
-    var timer = std.time.Timer.start() catch null;
+    var timer = zio.Timer.start() catch null;
     // These bounded strings must not remain caller aliases across allocation.
     // Text can be much larger, so its sole copy is allocated, then validated.
     // A family the application registered under its own name lays out in
@@ -820,7 +821,7 @@ fn createLayout(engine: *EngineState, allocator: std.mem.Allocator, source: []co
     if (minimum_bytes > engine.limits.layout_bytes) return error.LayoutByteCapacityExceeded;
     const state = try allocator.create(LayoutState);
     errdefer allocator.destroy(state);
-    const text = try allocator.dupeZ(u8, source);
+    const text = try allocator.dupeSentinel(u8, source, 0);
     errdefer allocator.free(text);
     // Never inspect source again. Allocator callbacks may have changed its
     // contents while its storage remained alive; counts must describe text.
@@ -836,9 +837,9 @@ fn createLayout(engine: *EngineState, allocator: std.mem.Allocator, source: []co
     errdefer allocator.free(utf16);
     const converted_units = try std.unicode.utf8ToUtf16Le(utf16, text);
     std.debug.assert(converted_units == utf16_count);
-    const family = try allocator.dupeZ(u8, captured_family);
+    const family = try allocator.dupeSentinel(u8, captured_family, 0);
     errdefer allocator.free(family);
-    const locale = try allocator.dupeZ(u8, captured_locale);
+    const locale = try allocator.dupeSentinel(u8, captured_locale, 0);
     errdefer allocator.free(locale);
     const scalars = try allocator.alloc(Scalar, scalar_count + 1);
     errdefer allocator.free(scalars);
@@ -859,7 +860,7 @@ fn createLayout(engine: *EngineState, allocator: std.mem.Allocator, source: []co
     state.operation_busy = false;
     state.closing = false;
     state.allocator = allocator;
-    const native_options: NativeOptions = .{ .size = captured_options.size, .width = captured_options.width, .weight = captured_options.weight, .italic = @intFromBool(captured_options.italic), .wrap = @intFromEnum(captured_options.wrap), .rtl = @intFromBool(captured_options.direction == .rtl), .family = family.ptr, .locale = locale.ptr };
+    const native_options: NativeOptions = .{ .size = captured_options.size, .width = captured_options.width, .weight = captured_options.weight, .italic = @intFromBool(captured_options.italic), .wrap = @backingInt(captured_options.wrap), .rtl = @intFromBool(captured_options.direction == .rtl), .family = family.ptr, .locale = locale.ptr };
     try nativeResult(ztl_layout_init(&state.native, &engine.native, text.ptr, @intCast(text.len), utf16.ptr, @intCast(utf16.len), &native_options, &engine.last_error));
     errdefer ztl_layout_close(&state.native);
     var calls: usize = 1;
@@ -1026,7 +1027,7 @@ fn prepareLayout(parent: *LayoutState, scale: f32, options: PrepareOptions) !*Pr
     if (!std.math.isFinite(scale) or scale < 0.0625 or scale > 16) return error.InvalidPrepareScale;
     if (options.limits.pixels == 0 or options.limits.pixels > 16 * 1024 * 1024 or options.limits.bytes == 0 or options.limits.bytes > 64 * 1024 * 1024) return error.InvalidPrepareLimits;
     if (parent.prepared_count == max_prepared_per_layout) return error.PreparedCapacityExceeded;
-    var timer = std.time.Timer.start() catch null;
+    var timer = zio.Timer.start() catch null;
     const engine = parent.engine;
     engine.last_error = .{};
     var ink: Rect = undefined;

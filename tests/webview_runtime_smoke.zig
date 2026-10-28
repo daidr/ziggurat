@@ -1,11 +1,6 @@
 const std = @import("std");
 const runtime = @import("ziggurat_webview_runtime");
-const win = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("tlhelp32.h");
-});
+const win = @import("ziggurat_c_win32");
 
 const Probe = struct {
     main_thread: std.Thread.Id,
@@ -80,8 +75,8 @@ fn expectNoChildProcess() !void {
     try std.testing.expectEqual(@as(win.DWORD, win.ERROR_NO_MORE_FILES), win.GetLastError());
 }
 
-pub fn main() !void {
-    var args = try std.process.argsWithAllocator(std.heap.page_allocator);
+pub fn main(init: std.process.Init.Minimal) !void {
+    var args = try init.args.iterateAllocator(std.heap.page_allocator);
     defer args.deinit();
     _ = args.next();
     const loader = args.next() orelse return error.LoaderPathRequired;

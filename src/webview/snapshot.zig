@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 
 pub const Resource = struct {
     path: []const u8,
@@ -6,7 +7,7 @@ pub const Resource = struct {
     /// Immutable storage, borrowed by an attached View until resource release.
     bytes: []const u8,
 };
-pub const FileResource = struct { path: []const u8, mime: []const u8, file: std.fs.File };
+pub const FileResource = struct { path: []const u8, mime: []const u8, file: std.Io.File };
 pub const Cancellation = struct {
     requested: std.atomic.Value(bool) = .init(false),
     pub fn request(self: *@This()) void {
@@ -31,7 +32,7 @@ pub const FileSnapshot = struct {
     allocator: std.mem.Allocator,
     html: []const u8,
     resources: []const Resource,
-    pub fn init(allocator: std.mem.Allocator, main_thread: std.Thread.Id, document: std.fs.File, files: []const FileResource, limits: Limits) !FileSnapshot {
+    pub fn init(allocator: std.mem.Allocator, main_thread: std.Thread.Id, document: std.Io.File, files: []const FileResource, limits: Limits) !FileSnapshot {
         if (std.Thread.getCurrentId() == main_thread) return error.UiThreadForbidden;
         if (limits.max_files == 0 or limits.max_files > 4096 or files.len >= limits.max_files) return error.TooManyFiles;
         if (limits.max_file_bytes == 0 or limits.max_total_bytes == 0 or limits.max_total_bytes > 256 * 1024 * 1024) return error.InvalidLimits;
@@ -82,9 +83,9 @@ pub const FileSnapshot = struct {
         self.allocator.free(self.html);
         self.* = undefined;
     }
-    fn read(allocator: std.mem.Allocator, file: std.fs.File, limits: Limits, remaining: *usize) ![]u8 {
+    fn read(allocator: std.mem.Allocator, file: std.Io.File, limits: Limits, remaining: *usize) ![]u8 {
         if (limits.cancellation) |cancel| try cancel.check();
-        const stat = try file.stat();
+        const stat = try file.stat(zio.io());
         if (stat.kind != .file) return error.RegularFileRequired;
         if (stat.size > limits.max_file_bytes or stat.size > remaining.*) return error.SnapshotTooLarge;
         const bytes = try allocator.alloc(u8, @intCast(stat.size));
@@ -93,12 +94,12 @@ pub const FileSnapshot = struct {
         while (offset < bytes.len) {
             if (limits.cancellation) |cancel| try cancel.check();
             const end = @min(bytes.len, offset + 64 * 1024);
-            const count = try file.pread(bytes[offset..end], offset);
+            const count = try file.readPositional(zio.io(), &.{bytes[offset..end]}, offset);
             if (count == 0) return error.FileChanged;
             offset += count;
         }
         var extra: [1]u8 = undefined;
-        if (try file.pread(&extra, stat.size) != 0) return error.FileChanged;
+        if (try file.readPositional(zio.io(), &.{&extra}, stat.size) != 0) return error.FileChanged;
         if (limits.cancellation) |cancel| try cancel.check();
         remaining.* -= bytes.len;
         return bytes;
@@ -115,16 +116,16 @@ fn validPath(path: []const u8) bool {
 test "snapshot files are explicit, bounded, cancelled and worker-only" {
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();
-    const document = try temp.dir.createFile("document.html", .{ .read = true });
-    defer document.close();
-    try document.writeAll("<title>private snapshot</title>");
-    const asset = try temp.dir.createFile("data.txt", .{ .read = true });
-    defer asset.close();
-    try asset.writeAll("private asset");
+    const document = try temp.dir.createFile(zio.io(), "document.html", .{ .read = true });
+    defer document.close(zio.io());
+    try document.writeStreamingAll(zio.io(), "<title>private snapshot</title>");
+    const asset = try temp.dir.createFile(zio.io(), "data.txt", .{ .read = true });
+    defer asset.close(zio.io());
+    try asset.writeStreamingAll(zio.io(), "private asset");
     const Probe = struct {
         main: std.Thread.Id,
-        document: std.fs.File,
-        asset: std.fs.File,
+        document: std.Io.File,
+        asset: std.Io.File,
         err: ?anyerror = null,
         fn run(self: *@This()) void {
             self.check() catch |err| {
@@ -137,7 +138,7 @@ test "snapshot files are explicit, bounded, cancelled and worker-only" {
             defer result.deinit();
             try std.testing.expectEqualStrings("<title>private snapshot</title>", result.html);
             try std.testing.expectEqualStrings("private asset", result.resources[0].bytes);
-            try std.testing.expectEqual(@as(u64, "<title>private snapshot</title>".len), try self.document.getPos());
+            try std.testing.expectEqual(@as(u64, "<title>private snapshot</title>".len), try zio.posix.position(self.document.handle));
             try std.testing.expectError(error.SnapshotTooLarge, FileSnapshot.init(std.testing.allocator, self.main, self.document, &files, .{ .max_total_bytes = 1 }));
             try std.testing.expectError(error.TooManyFiles, FileSnapshot.init(std.testing.allocator, self.main, self.document, &files, .{ .max_files = 1 }));
             var cancelled: Cancellation = .{};
@@ -149,7 +150,7 @@ test "snapshot files are explicit, bounded, cancelled and worker-only" {
             try std.testing.expectError(error.DuplicateResourcePath, FileSnapshot.init(std.testing.allocator, self.main, self.document, &duplicate, .{}));
             try std.testing.checkAllAllocationFailures(std.testing.allocator, allocate, .{ self.main, self.document, self.asset });
         }
-        fn allocate(allocator: std.mem.Allocator, main: std.Thread.Id, source_document: std.fs.File, source_asset: std.fs.File) !void {
+        fn allocate(allocator: std.mem.Allocator, main: std.Thread.Id, source_document: std.Io.File, source_asset: std.Io.File) !void {
             const files = [_]FileResource{.{ .path = "/asset", .mime = "text/plain", .file = source_asset }};
             var snapshot = try FileSnapshot.init(allocator, main, source_document, &files, .{});
             defer snapshot.deinit();

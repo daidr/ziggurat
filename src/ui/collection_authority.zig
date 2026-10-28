@@ -20,7 +20,7 @@ pub const RowRequest = extern struct {
     reserved: u32 = 0,
     pub fn action(self: RowRequest) !Kind {
         if (self.reserved != 0) return error.InvalidCollectionAction;
-        return std.meta.intToEnum(Kind, self.kind) catch error.InvalidCollectionAction;
+        return std.enums.fromInt(Kind, self.kind) orelse error.InvalidCollectionAction;
     }
 };
 comptime {

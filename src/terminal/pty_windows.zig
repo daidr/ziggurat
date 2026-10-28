@@ -3,13 +3,15 @@
 //! consoles need Windows 10 1809 or later; on older systems spawning
 //! returns `Unsupported`.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const windows = std.os.windows;
 const pty = @import("pty.zig");
 
 const HANDLE = windows.HANDLE;
-const BOOL = windows.BOOL;
+const BOOL = c_int;
+const ProcessInformation = extern struct { hProcess: HANDLE, hThread: HANDLE, dwProcessId: DWORD, dwThreadId: DWORD };
 const DWORD = windows.DWORD;
-const HRESULT = windows.HRESULT;
+const HRESULT = i32;
 const HPCON = *anyopaque;
 const COORD = extern struct { x: i16, y: i16 };
 
@@ -38,7 +40,7 @@ extern "kernel32" fn GetProcAddress(module: windows.HMODULE, name: [*:0]const u8
 extern "kernel32" fn InitializeProcThreadAttributeList(list: ?*anyopaque, count: DWORD, flags: DWORD, size: *usize) callconv(.winapi) BOOL;
 extern "kernel32" fn UpdateProcThreadAttribute(list: *anyopaque, flags: DWORD, attribute: usize, value: ?*anyopaque, size: usize, previous: ?*anyopaque, return_size: ?*usize) callconv(.winapi) BOOL;
 extern "kernel32" fn DeleteProcThreadAttributeList(list: *anyopaque) callconv(.winapi) void;
-extern "kernel32" fn CreateProcessW(application: ?[*:0]const u16, command_line: ?[*:0]u16, process_attributes: ?*anyopaque, thread_attributes: ?*anyopaque, inherit: BOOL, flags: DWORD, environment: ?*anyopaque, directory: ?[*:0]const u16, startup: *windows.STARTUPINFOW, information: *windows.PROCESS_INFORMATION) callconv(.winapi) BOOL;
+extern "kernel32" fn CreateProcessW(application: ?[*:0]const u16, command_line: ?[*:0]u16, process_attributes: ?*anyopaque, thread_attributes: ?*anyopaque, inherit: BOOL, flags: DWORD, environment: ?*anyopaque, directory: ?[*:0]const u16, startup: *windows.STARTUPINFOW, information: *ProcessInformation) callconv(.winapi) BOOL;
 extern "kernel32" fn WaitForSingleObject(handle: HANDLE, milliseconds: DWORD) callconv(.winapi) DWORD;
 extern "kernel32" fn GetExitCodeProcess(process: HANDLE, code: *DWORD) callconv(.winapi) BOOL;
 extern "kernel32" fn TerminateProcess(process: HANDLE, code: c_uint) callconv(.winapi) BOOL;
@@ -72,7 +74,7 @@ pub const Pty = struct {
     output: HANDLE,
     process: HANDLE,
     pid: DWORD,
-    console_mutex: std.Thread.Mutex = .{},
+    console_mutex: zio.Mutex = .{},
 
     pub fn spawn(allocator: std.mem.Allocator, command: pty.Command) pty.Error!Pty {
         const calls = api() orelse return error.Unsupported;
@@ -110,7 +112,7 @@ pub const Pty = struct {
         // Without this the program could inherit this process's redirected
         // standard handles instead of the console's.
         startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-        var information: windows.PROCESS_INFORMATION = undefined;
+        var information: ProcessInformation = undefined;
         const flags = EXTENDED_STARTUPINFO_PRESENT | (if (env != null) CREATE_UNICODE_ENVIRONMENT else 0);
         if (CreateProcessW(null, line, null, null, 0, flags, if (env) |block| @ptrCast(block.ptr) else null, if (cwd) |dir| dir.ptr else null, &startup.StartupInfo, &information) == 0) return error.SpawnFailed;
         _ = CloseHandle(information.hThread);
@@ -177,7 +179,7 @@ pub const Pty = struct {
 fn commandLine(arena: std.mem.Allocator, argv: []const []const u8) ![*:0]u16 {
     var text: std.ArrayList(u8) = .empty;
     if (argv.len == 0) {
-        const comspec = std.process.getEnvVarOwned(arena, "COMSPEC") catch try arena.dupe(u8, "cmd.exe");
+        const comspec = zio.getEnvVarOwned(arena, "COMSPEC") catch try arena.dupe(u8, "cmd.exe");
         try text.appendSlice(arena, comspec);
     }
     for (argv, 0..) |arg, i| {
@@ -219,7 +221,7 @@ fn environment(arena: std.mem.Allocator, variables: []const pty.Variable) !?[]u1
         var keep = true;
         for (variables) |variable| {
             const name = std.unicode.wtf8ToWtf16LeAlloc(arena, variable.name) catch return error.InvalidCommand;
-            if (std.os.windows.eqlIgnoreCaseWTF16(name, entry[0..name_end])) keep = false;
+            if (std.os.windows.eqlIgnoreCaseWtf16(name, entry[0..name_end])) keep = false;
         }
         if (!keep) continue;
         try block.appendSlice(arena, entry);

@@ -1,12 +1,7 @@
 const std = @import("std");
 const z = @import("ziggurat");
 const gpu = @import("ziggurat_ui").d3d11;
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("objbase.h");
-});
+const c = @import("ziggurat_c_win32");
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("Ziggurat.Graphics.Smoke");
 
 fn paint(hwnd: c.HWND, dc: c.HDC, width: u32, height: u32, scale: f32) z.Paint {

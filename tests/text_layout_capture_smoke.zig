@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const t = @import("ziggurat_text_layout");
 const ui = @import("ziggurat_ui");
 const shaped = @import("ziggurat_shaped_editor");
@@ -137,31 +138,31 @@ fn byteBudgets(allocator: std.mem.Allocator) !void {
     const small = try t.Engine.create(allocator, std.Thread.getCurrentId(), .{ .layout_bytes = 1024 });
     defer small.close() catch unreachable;
     const before = t.resourceCounts();
-    try std.testing.expectError(error.LayoutByteCapacityExceeded, small.layoutAllocated(hook.allocator(), "x" ** 2048, .{}));
+    try std.testing.expectError(error.LayoutByteCapacityExceeded, small.layoutAllocated(hook.allocator(), &@as([2048]u8, @splat('x')), .{}));
     try std.testing.expectEqual(@as(usize, 0), hook.allocations);
     try std.testing.expectEqual(before, t.resourceCounts());
 
     const bounded = try t.Engine.create(allocator, std.Thread.getCurrentId(), .{ .layout_bytes = 4096 });
     defer bounded.close() catch unreachable;
     const bounded_before = t.resourceCounts();
-    try std.testing.expectError(error.LayoutByteCapacityExceeded, bounded.layoutAllocated(hook.allocator(), "x" ** 512, .{}));
+    try std.testing.expectError(error.LayoutByteCapacityExceeded, bounded.layoutAllocated(hook.allocator(), &@as([512]u8, @splat('x')), .{}));
     // Only the State and sole UTF-8 copy exist before the exact count check.
     try std.testing.expectEqual(@as(usize, 2), hook.allocations);
     try std.testing.expectEqual(bounded_before, t.resourceCounts());
     hook.allocations = 0;
-    try std.testing.expectError(error.TextCapacityExceeded, bounded.layoutAllocated(hook.allocator(), "x" ** 65537, .{}));
+    try std.testing.expectError(error.TextCapacityExceeded, bounded.layoutAllocated(hook.allocator(), &@as([65537]u8, @splat('x')), .{}));
     try std.testing.expectEqual(@as(usize, 0), hook.allocations);
     try std.testing.expectError(error.InvalidUtf8, bounded.layoutAllocated(hook.allocator(), "x", .{ .family = "\xff" }));
     try std.testing.expectError(error.EmbeddedNul, bounded.layoutAllocated(hook.allocator(), "x", .{ .locale = "a\x00" }));
-    try std.testing.expectError(error.InvalidOptions, bounded.layoutAllocated(hook.allocator(), "x", .{ .family = "a" ** 256 }));
-    try std.testing.expectError(error.InvalidOptions, bounded.layoutAllocated(hook.allocator(), "x", .{ .locale = "a" ** 128 }));
+    try std.testing.expectError(error.InvalidOptions, bounded.layoutAllocated(hook.allocator(), "x", .{ .family = &@as([256]u8, @splat('a')) }));
+    try std.testing.expectError(error.InvalidOptions, bounded.layoutAllocated(hook.allocator(), "x", .{ .locale = &@as([128]u8, @splat('a')) }));
     try std.testing.expectEqual(@as(usize, 0), hook.allocations);
 
-    var editor = try ui.editor.Editor.init(allocator, .{}, "é" ** 256);
+    var editor = try ui.editor.Editor.init(allocator, .{}, &@as([512]u8, @bitCast(@as([256][2]u8, @splat("é".*)))));
     defer editor.deinit();
     hook.editor = &editor;
     hook.replace_end = 512;
-    hook.replacement = "a" ** 512;
+    hook.replacement = &@as([512]u8, @splat('a'));
     hook.engine = bounded;
     hook.trigger = 1;
     try std.testing.expectError(error.LayoutByteCapacityExceeded, bounded.layoutAllocated(hook.allocator(), editor.displayText(), .{}));
@@ -225,28 +226,28 @@ fn runCase(allocator: std.mem.Allocator, name: []const u8) !void {
     }
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var debug: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(debug.deinit() == .ok);
     const allocator = debug.allocator();
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try zio.argsAlloc(allocator, init.args);
+    defer zio.argsFree(allocator, args);
     if (args.len == 3 and std.mem.eql(u8, args[1], "--case")) {
         try std.testing.expectEqual(t.ResourceCounts{}, t.resourceCounts());
         try runCase(allocator, args[2]);
         try std.testing.expectEqual(t.ResourceCounts{}, t.resourceCounts());
         return;
     }
-    const executable = try std.fs.selfExePathAlloc(allocator);
+    const executable = try zio.executablePathAlloc(allocator);
     defer allocator.free(executable);
     var failed = false;
     for (std.enums.values(Case)) |case| {
         const name = @tagName(case);
-        const result = try std.process.Child.run(.{ .allocator = allocator, .argv = &.{ executable, "--case", name }, .max_output_bytes = 128 * 1024 });
+        const result = try zio.run(allocator, .{ .argv = &.{ executable, "--case", name }, .stdout_limit = .limited(128 * 1024), .stderr_limit = .limited(128 * 1024) });
         defer allocator.free(result.stdout);
         defer allocator.free(result.stderr);
         std.debug.print("layout capture {s}: {any}\n{s}{s}", .{ name, result.term, result.stdout, result.stderr });
-        if (result.term != .Exited or result.term.Exited != 0) failed = true;
+        if (result.term != .exited or result.term.exited != 0) failed = true;
     }
     if (failed) return error.CaptureRegression;
     try invalidCapture(allocator);

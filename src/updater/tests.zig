@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const view = @import("ziggurat_view");
 const update = @import("ziggurat_update");
@@ -388,7 +389,7 @@ test "an icon widens the window and shows beside the texts" {
     const Picture = view.ImageView;
     const Lease = @typeInfo(@FieldType(Picture, "lease")).pointer.child;
     const Level = @typeInfo(@FieldType(Picture, "levels")).pointer.child;
-    var pixels = [_]u8{0} ** (4 * 4 * 4);
+    var pixels = @as([4 * 4 * 4]u8, @splat(0));
     var lease = Lease.init(std.Thread.getCurrentId());
     const levels = [_]Level{.{ .pixels = &pixels, .byte_len = pixels.len, .width = 4, .height = 4, .stride = 16 }};
     var with = options;
@@ -410,7 +411,7 @@ fn waitDone(backend: *u.FeedBackend, app: *z.App) !void {
     var spins: usize = 0;
     while (!backend.done.load(.acquire)) : (spins += 1) {
         if (spins > 5000) return error.Timeout;
-        std.Thread.sleep(std.time.ns_per_ms);
+        zio.sleep(std.time.ns_per_ms);
     }
     try app.dispatch();
 }
@@ -430,8 +431,8 @@ test "the feed backend checks a signed feed and installs into the managed root" 
     defer allocator.free(signed);
     const feed = try update.feed.buildWithNotes(allocator, identity, &.{signed}, &.{}, &.{.{ .version = manifest.version, .text = "Faster start." }});
     defer allocator.free(feed);
-    try temp.dir.writeFile(.{ .sub_path = "feed.json", .data = feed });
-    const base = try temp.dir.realpathAlloc(allocator, ".");
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "feed.json", .data = feed });
+    const base = try zio.realPathAlloc(temp.dir, ".", allocator);
     defer allocator.free(base);
     const feed_path = try std.fs.path.join(allocator, &.{ base, "feed.json" });
     defer allocator.free(feed_path);
@@ -458,13 +459,13 @@ test "the feed backend checks a signed feed and installs into the managed root" 
     defer allocator.free(newer);
     const newer_feed = try update.feed.build(allocator, identity, &.{newer}, &.{});
     defer allocator.free(newer_feed);
-    try temp.dir.writeFile(.{ .sub_path = "feed.json", .data = newer_feed });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "feed.json", .data = newer_feed });
     try f.click("Install Update");
     try waitDone(&backend, f.app);
     try equal(u.Screen.install_failed, f.updater.screen);
     try expect(try f.has("ReleaseChanged"));
     try f.click("OK");
-    try temp.dir.writeFile(.{ .sub_path = "feed.json", .data = feed });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "feed.json", .data = feed });
 
     // A disabled configuration never runs a job.
     var disabled = u.FeedBackend.init(allocator, f.app, .{ .feed = feed_path, .public_key = key.public_key.toBytes(), .identity = identity, .target = target, .current_version = .{ .major = 1, .minor = 1, .patch = 0 }, .install_root = install_root, .enabled = false });

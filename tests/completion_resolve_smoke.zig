@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
@@ -32,8 +33,8 @@ const Host = struct {
     resolve: ?p.ResolveWork = null,
     resolved: ?p.ResolveDelivery = null,
     packet: ?p.codec.Packet = null,
-    mutex: std.Thread.Mutex = .{},
-    condition: std.Thread.Condition = .{},
+    mutex: zio.Mutex = .{},
+    condition: zio.Condition = .{},
     command: ?Cmd = .initialize,
     event: Ev = .failed,
     accepted: bool = false,
@@ -56,7 +57,7 @@ const Host = struct {
             std.testing.expectError(error.Busy, self.client.close()) catch unreachable;
             std.testing.expectError(error.Busy, self.broker.borrow()) catch unreachable;
             std.testing.expectError(error.Busy, self.presenter.?.close()) catch unreachable;
-            const published = self.broker.stored[@intFromEnum(code.Kind.completion)].?.result.data.completion[0];
+            const published = self.broker.stored[@backingInt(code.Kind.completion)].?.result.data.completion[0];
             std.testing.expectEqualStrings("resolved type", published.detail) catch unreachable;
             // A genuine subsequent edit during old-result disposal cannot turn
             // a published refinement into a retryable precommit error.
@@ -118,7 +119,7 @@ const Host = struct {
         while (true) {
             self.app.post(.{ .context = self, .call = delivered }) catch |err| {
                 if (err != error.Full) return err;
-                std.Thread.sleep(std.time.ns_per_ms);
+                zio.sleep(std.time.ns_per_ms);
                 continue;
             };
             return;
@@ -277,14 +278,10 @@ const Host = struct {
         };
     }
     fn runWorker(self: *@This()) !void {
-        var child = std.process.Child.init(&.{ self.server, "--resolve" }, allocator);
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Inherit;
-        try child.spawn();
+        var child = try zio.spawn(.{ .argv = &.{ self.server, "--resolve" }, .stdin = .pipe, .stdout = .pipe, .stderr = .inherit });
         var live = true;
         defer if (live) {
-            _ = child.kill() catch {};
+            child.kill(zio.io());
         };
         var decoder = try p.codec.Decoder.init(allocator, .{ .body_bytes = 16384 });
         defer decoder.deinit();
@@ -297,7 +294,7 @@ const Host = struct {
                 var packet = self.packet.?;
                 self.packet = null;
                 defer packet.deinit();
-                try child.stdin.?.writeAll(packet.bytes.?);
+                try child.stdin.?.writeStreamingAll(zio.io(), packet.bytes.?);
                 self.negotiated = try self.transport.negotiate(allocator, self.handshake, try read(&decoder, child.stdout.?));
                 try self.post(.initialized);
             },
@@ -309,7 +306,7 @@ const Host = struct {
                 var packet = self.packet.?;
                 self.packet = null;
                 defer packet.deinit();
-                try child.stdin.?.writeAll(packet.bytes.?);
+                try child.stdin.?.writeStreamingAll(zio.io(), packet.bytes.?);
                 try self.post(.ready);
             },
             .sync => if (!self.accepted) {
@@ -318,7 +315,7 @@ const Host = struct {
             } else {
                 var packet = try self.sync.?.takePacket();
                 defer packet.deinit();
-                try child.stdin.?.writeAll(packet.bytes.?);
+                try child.stdin.?.writeStreamingAll(zio.io(), packet.bytes.?);
                 try self.post(.sync_sent);
             },
             .completion => if (!self.accepted) {
@@ -327,7 +324,7 @@ const Host = struct {
             } else {
                 var packet = try self.request.?.takePacket();
                 defer packet.deinit();
-                try child.stdin.?.writeAll(packet.bytes.?);
+                try child.stdin.?.writeStreamingAll(zio.io(), packet.bytes.?);
                 self.delivery = try self.request.?.receive(&self.transport, self.resultAllocator(), try read(&decoder, child.stdout.?));
                 try self.post(.completion_received);
             },
@@ -337,7 +334,7 @@ const Host = struct {
             } else {
                 var packet = try self.resolve.?.takePacket();
                 defer packet.deinit();
-                try child.stdin.?.writeAll(packet.bytes.?);
+                try child.stdin.?.writeStreamingAll(zio.io(), packet.bytes.?);
                 const response = try read(&decoder, child.stdout.?);
                 self.resolved = self.resolve.?.receive(&self.transport, response) catch |err| blk: {
                     if (err != error.UnsupportedResolvedProperty or self.case != 5) return err;
@@ -348,10 +345,10 @@ const Host = struct {
             .exit => {
                 var packet = try p.wire.notification(allocator, "exit", struct {}{}, .{});
                 defer packet.deinit();
-                try child.stdin.?.writeAll(packet.bytes.?);
-                const status = try child.wait();
+                try child.stdin.?.writeStreamingAll(zio.io(), packet.bytes.?);
+                const status = try child.wait(zio.io());
                 live = false;
-                if (self.failure == null and (status != .Exited or status.Exited != 0)) return error.ServerFailed;
+                if (self.failure == null and (status != .exited or status.exited != 0)) return error.ServerFailed;
                 // Closing the last window can complete App shutdown before the
                 // child exits. The owner joins this worker before reading state.
                 self.post(.done) catch |err| if (err != error.Closed) return err;
@@ -360,17 +357,17 @@ const Host = struct {
         };
     }
 };
-fn read(decoder: *p.codec.Decoder, file: std.fs.File) ![]const u8 {
+fn read(decoder: *p.codec.Decoder, file: std.Io.File) ![]const u8 {
     var byte: [1]u8 = undefined;
     while (true) {
-        if (try file.read(&byte) == 0) return error.UnexpectedEof;
+        if (try zio.read(file, &byte) == 0) return error.UnexpectedEof;
         const progress = try decoder.push(&byte);
         if (progress.body) |body| return body;
     }
 }
-pub fn main() !void {
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+pub fn main(init: std.process.Init.Minimal) !void {
+    const args = try zio.argsAlloc(allocator, init.args);
+    defer zio.argsFree(allocator, args);
     if (args.len != 2) return error.MissingServer;
     const app = try z.App.init(allocator);
     defer app.deinit();

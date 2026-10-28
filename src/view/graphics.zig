@@ -11,8 +11,8 @@ const view = @import("ziggurat_view");
 const vector = @import("ziggurat_vector");
 const svg = @import("ziggurat_svg");
 
-/// Icon masks kept at once. Masks and images share the renderers' 32
-/// resident slots, so keep this below that with room for images.
+/// Icon masks kept at once. Masks and images share the renderers' resident
+/// byte budget.
 pub const max_icons = 16;
 
 /// Draws `View.icon` nodes for one Host: pass `painter()` as

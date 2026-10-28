@@ -1,12 +1,8 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const identity = @import("identity.zig");
-const win = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("shlobj.h");
-}) else struct {};
+const win = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 
 pub const max_url_schemes = 16;
 pub const max_file_types = 64;
@@ -122,7 +118,7 @@ pub fn removeLoginItem(id: []const u8, scope: Scope) !void {
         .windows => try windowsDeleteValue(run_key, id),
         .linux => {
             var path: [std.fs.max_path_bytes]u8 = undefined;
-            std.fs.deleteFileAbsolute(try linuxPath(&path, scope, .config, &.{ "/autostart/", id, ".desktop" })) catch |err| switch (err) {
+            std.Io.Dir.deleteFileAbsolute(zio.io(), try linuxPath(&path, scope, .config, &.{ "/autostart/", id, ".desktop" })) catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => return err,
             };
@@ -141,7 +137,7 @@ pub fn loginItemRegistered(id: []const u8, scope: Scope) !bool {
         },
         .linux => {
             var path: [std.fs.max_path_bytes]u8 = undefined;
-            std.fs.accessAbsolute(try linuxPath(&path, scope, .config, &.{ "/autostart/", id, ".desktop" }), .{}) catch |err| switch (err) {
+            std.Io.Dir.accessAbsolute(zio.io(), try linuxPath(&path, scope, .config, &.{ "/autostart/", id, ".desktop" }), .{}) catch |err| switch (err) {
                 error.FileNotFound => return false,
                 else => return err,
             };
@@ -477,25 +473,25 @@ fn linuxPath(destination: []u8, scope: Scope, root: enum { data, config }, parts
 }
 fn writeFileAtomic(path: []const u8, contents: []const u8) !void {
     const directory = std.fs.path.dirname(path) orelse return error.AbsolutePathRequired;
-    try std.fs.cwd().makePath(directory);
+    try std.Io.Dir.cwd().createDirPath(zio.io(), directory);
     var temporary: [std.fs.max_path_bytes]u8 = undefined;
     var random: [8]u8 = undefined;
-    std.crypto.random.bytes(&random);
+    zio.random.bytes(&random);
     const temp_path = try std.fmt.bufPrint(&temporary, "{s}.{x}.tmp", .{ path, std.mem.readInt(u64, &random, .little) });
     {
-        const file = try std.fs.createFileAbsolute(temp_path, .{ .exclusive = true, .mode = 0o644 });
-        defer file.close();
-        errdefer std.fs.deleteFileAbsolute(temp_path) catch {};
-        try file.writeAll(contents);
-        try file.sync();
+        const file = try std.Io.Dir.createFileAbsolute(zio.io(), temp_path, .{ .exclusive = true, .permissions = zio.mode(0o644) });
+        defer file.close(zio.io());
+        errdefer std.Io.Dir.deleteFileAbsolute(zio.io(), temp_path) catch {};
+        try file.writeStreamingAll(zio.io(), contents);
+        try file.sync(zio.io());
     }
-    std.fs.renameAbsolute(temp_path, path) catch |err| {
-        std.fs.deleteFileAbsolute(temp_path) catch {};
+    std.Io.Dir.renameAbsolute(temp_path, path, zio.io()) catch |err| {
+        std.Io.Dir.deleteFileAbsolute(zio.io(), temp_path) catch {};
         return err;
     };
 }
 fn deleteIfPresent(path: []const u8) !void {
-    std.fs.deleteFileAbsolute(path) catch |err| switch (err) {
+    std.Io.Dir.deleteFileAbsolute(zio.io(), path) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
@@ -503,7 +499,7 @@ fn deleteIfPresent(path: []const u8) !void {
 fn updateMimeApps(allocator: std.mem.Allocator, application: Application, scope: Scope, mode: MimeAppsMode) !void {
     var path: [std.fs.max_path_bytes]u8 = undefined;
     const file_path = try linuxPath(&path, scope, .config, &.{"/mimeapps.list"});
-    const input = std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024) catch |err| switch (err) {
+    const input = std.Io.Dir.cwd().readFileAlloc(zio.io(), file_path, allocator, .limited(1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => try allocator.dupe(u8, ""),
         else => return err,
     };
@@ -521,27 +517,24 @@ fn updateMimeApps(allocator: std.mem.Allocator, application: Application, scope:
     if (output.len == 0) return deleteIfPresent(file_path);
     try writeFileAtomic(file_path, output);
 }
-fn refresh(allocator: std.mem.Allocator, tool: []const u8, directory: []const u8) bool {
+fn refresh(tool: []const u8, directory: []const u8) bool {
     const roots = [_][]const u8{ "/usr/bin/", "/bin/" };
     var storage: [64]u8 = undefined;
     const executable = for (roots) |root| {
         const candidate = std.fmt.bufPrint(&storage, "{s}{s}", .{ root, tool }) catch unreachable;
-        std.fs.accessAbsolute(candidate, .{}) catch continue;
+        std.Io.Dir.accessAbsolute(zio.io(), candidate, .{}) catch continue;
         break candidate;
     } else return false;
-    var child = std.process.Child.init(&.{ executable, directory }, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    const term = child.spawnAndWait() catch return false;
-    return term == .Exited and term.Exited == 0;
+    var child = zio.spawn(.{ .argv = &.{ executable, directory }, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore }) catch return false;
+    const term = child.wait(zio.io()) catch return false;
+    return term == .exited and term.exited == 0;
 }
-fn linuxRefresh(allocator: std.mem.Allocator, application: Application, options: RegisterOptions, report: *Report) !void {
+fn linuxRefresh(application: Application, options: RegisterOptions, report: *Report) !void {
     if (!options.refresh_caches) return;
     var path: [std.fs.max_path_bytes]u8 = undefined;
-    report.desktop_database_refreshed = refresh(allocator, "update-desktop-database", try linuxPath(&path, options.scope, .data, &.{"/applications"}));
+    report.desktop_database_refreshed = refresh("update-desktop-database", try linuxPath(&path, options.scope, .data, &.{"/applications"}));
     if (application.file_types.len != 0) {
-        report.mime_database_refreshed = refresh(allocator, "update-mime-database", try linuxPath(&path, options.scope, .data, &.{"/mime"}));
+        report.mime_database_refreshed = refresh("update-mime-database", try linuxPath(&path, options.scope, .data, &.{"/mime"}));
     }
 }
 fn linuxRegister(allocator: std.mem.Allocator, application: Application, options: RegisterOptions) !Report {
@@ -552,7 +545,7 @@ fn linuxRegister(allocator: std.mem.Allocator, application: Application, options
     try writeFileAtomic(try linuxPath(&path, options.scope, .data, &.{ "/applications/", application.id, ".desktop" }), try desktopEntry(&buffer, application));
     try updateMimeApps(allocator, application, options.scope, if (options.make_default) .register_default else .register);
     var report: Report = .{};
-    try linuxRefresh(allocator, application, options, &report);
+    try linuxRefresh(application, options, &report);
     return report;
 }
 fn linuxUnregister(allocator: std.mem.Allocator, application: Application, options: RegisterOptions) !Report {
@@ -561,7 +554,7 @@ fn linuxUnregister(allocator: std.mem.Allocator, application: Application, optio
     try deleteIfPresent(try linuxPath(&path, options.scope, .data, &.{ "/applications/", application.id, ".desktop" }));
     try deleteIfPresent(try linuxPath(&path, options.scope, .data, &.{ "/mime/packages/", application.id, ".xml" }));
     var report: Report = .{};
-    try linuxRefresh(allocator, application, options, &report);
+    try linuxRefresh(application, options, &report);
     return report;
 }
 
@@ -911,7 +904,7 @@ test "windows handler commands follow argv quoting" {
     try std.testing.expectEqualStrings("\"C:\\Program Files\\App\\app.exe\" \"--hidden\" \"\" \"a b\" \"tail\\\\\" \"q\\\"uote\" \"\\\\\\\"\"", line);
     var wide_line: [512]u16 = undefined;
     const units = try std.unicode.utf8ToUtf16Le(&wide_line, line);
-    var args = try std.process.ArgIteratorWindows.init(std.testing.allocator, wide_line[0..units]);
+    var args = try std.process.Args.Iterator.Windows.init(std.testing.allocator, wide_line[0..units]);
     defer args.deinit();
     try std.testing.expectEqualStrings("C:\\Program Files\\App\\app.exe", args.next().?);
     for ([_][]const u8{ "--hidden", "", "a b", "tail\\", "q\"uote", "\\\"" }) |expected| try std.testing.expectEqualStrings(expected, args.next().?);

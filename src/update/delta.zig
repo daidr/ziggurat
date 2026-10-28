@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const update = @import("root.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
@@ -105,14 +106,14 @@ pub const Applied = struct { bytes: u64, sha256: [32]u8 };
 /// Every copy is bounds-checked against the declared source size and the
 /// result never exceeds `limits.max_result_bytes`. The caller verifies the
 /// returned digest (see `applyVerified`).
-pub fn apply(source: std.fs.File, patch: *std.Io.Reader, writer: *std.Io.Writer, limits: Limits) !Applied {
+pub fn apply(source: std.Io.File, patch: *std.Io.Reader, writer: *std.Io.Writer, limits: Limits) !Applied {
     var header: [magic.len]u8 = undefined;
     patch.readSliceAll(&header) catch return error.InvalidPatch;
     if (!std.mem.eql(u8, &header, magic)) return error.InvalidPatch;
     const source_bytes = patch.takeInt(u64, .little) catch return error.InvalidPatch;
     const result_bytes = patch.takeInt(u64, .little) catch return error.InvalidPatch;
     if (result_bytes > limits.max_result_bytes) return error.ResultTooLarge;
-    if ((try source.stat()).size != source_bytes) return error.SourceMismatch;
+    if ((try source.stat(zio.io())).size != source_bytes) return error.SourceMismatch;
     var hasher: Sha256 = .init(.{});
     var written: u64 = 0;
     var buffer: [16 * 1024]u8 = undefined;
@@ -127,7 +128,7 @@ pub fn apply(source: std.fs.File, patch: *std.Io.Reader, writer: *std.Io.Writer,
                 var done: u64 = 0;
                 while (done < length) {
                     const part: usize = @intCast(@min(buffer.len, length - done));
-                    const n = try source.preadAll(buffer[0..part], offset + done);
+                    const n = try source.readPositionalAll(zio.io(), buffer[0..part], offset + done);
                     if (n != part) return error.SourceMismatch;
                     hasher.update(buffer[0..part]);
                     try writer.writeAll(buffer[0..part]);
@@ -318,20 +319,18 @@ pub fn sign(allocator: std.mem.Allocator, source: Manifest, key: update.Ed25519.
 /// Rebuild the full archive into `output` and require the signed result size
 /// and digest. `full` must describe the same result; on any error the caller
 /// discards `output` and falls back to the full archive.
-pub fn applyVerified(verified: *const Verified, full: update.Manifest, source: std.fs.File, patch: std.fs.File, output: *std.Io.Writer, limits: Limits) !void {
+pub fn applyVerified(verified: *const Verified, full: update.Manifest, source: std.Io.File, patch: std.Io.File, output: *std.Io.Writer, limits: Limits) !void {
     const manifest = verified.manifest;
     if (full.version.order(manifest.to) != .eq or full.bytes != manifest.result_bytes or !std.crypto.timing_safe.eql([32]u8, full.sha256, manifest.result_sha256)) return error.DeltaResultMismatch;
-    if ((try patch.stat()).size != manifest.bytes or manifest.bytes > limits.max_patch_bytes) return error.SizeMismatch;
+    if ((try patch.stat(zio.io())).size != manifest.bytes or manifest.bytes > limits.max_patch_bytes) return error.SizeMismatch;
     // The patch file was produced by a caller transfer; hash the exact bytes first.
-    try patch.seekTo(0);
     var check_buffer: [16 * 1024]u8 = undefined;
-    var check = patch.reader(&check_buffer);
+    var check = patch.reader(zio.io(), &check_buffer);
     var discard_buffer: [256]u8 = undefined;
     var discard: std.Io.Writer.Discarding = .init(&discard_buffer);
     _ = try update.stage(manifest.artifact(), &check.interface, &discard.writer);
-    try patch.seekTo(0);
     var read_buffer: [16 * 1024]u8 = undefined;
-    var reader = patch.reader(&read_buffer);
+    var reader = patch.reader(zio.io(), &read_buffer);
     var bounded = limits;
     bounded.max_result_bytes = @min(limits.max_result_bytes, manifest.result_bytes);
     const result = try apply(source, &reader.interface, output, bounded);
@@ -339,13 +338,13 @@ pub fn applyVerified(verified: *const Verified, full: update.Manifest, source: s
     if (result.bytes != manifest.result_bytes or !std.crypto.timing_safe.eql([32]u8, result.sha256, manifest.result_sha256)) return error.HashMismatch;
 }
 
-fn roundTrip(allocator: std.mem.Allocator, dir: std.fs.Dir, old: []const u8, new: []const u8) !void {
+fn roundTrip(allocator: std.mem.Allocator, dir: std.Io.Dir, old: []const u8, new: []const u8) !void {
     var patch: std.Io.Writer.Allocating = .init(allocator);
     defer patch.deinit();
     try diff(allocator, old, new, &patch.writer);
-    try dir.writeFile(.{ .sub_path = "old.bin", .data = old });
-    var source = try dir.openFile("old.bin", .{});
-    defer source.close();
+    try dir.writeFile(zio.io(), .{ .sub_path = "old.bin", .data = old });
+    var source = try dir.openFile(zio.io(), "old.bin", .{});
+    defer source.close(zio.io());
     var reader: std.Io.Reader = .fixed(patch.written());
     var output: std.Io.Writer.Allocating = .init(allocator);
     defer output.deinit();
@@ -384,9 +383,9 @@ test "malformed patches fail closed before exceeding bounds" {
     const allocator = std.testing.allocator;
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();
-    try temp.dir.writeFile(.{ .sub_path = "old.bin", .data = "0123456789" });
-    var source = try temp.dir.openFile("old.bin", .{});
-    defer source.close();
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "old.bin", .data = "0123456789" });
+    var source = try temp.dir.openFile(zio.io(), "old.bin", .{});
+    defer source.close(zio.io());
     const Case = struct { bytes: []const u8, expected: anyerror };
     const header = magic ++ "\x0a\x00\x00\x00\x00\x00\x00\x00" ++ "\x04\x00\x00\x00\x00\x00\x00\x00";
     const cases = [_]Case{

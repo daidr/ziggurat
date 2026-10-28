@@ -2,6 +2,7 @@
 //! opened again when the default changes or the device goes. Every call
 //! runs on the engine's output thread, in COM's multithreaded apartment.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const output = @import("output.zig");
 const Detail = output.Detail;
 const OpenError = output.OpenError;
@@ -165,7 +166,7 @@ pub fn open(storage: *Storage, detail: *Detail) OpenError!output.Device {
     const start = method(client, 10, *const fn (*anyopaque) callconv(.winapi) HRESULT);
     result = start(client);
     if (failed(result)) return fail(storage, detail, error.DeviceFailed, "IAudioClient.Start", result);
-    storage.checked = std.time.nanoTimestamp();
+    storage.checked = zio.nanoTimestamp();
     return .{ .context = storage, .vtable = &vtable };
 }
 
@@ -175,13 +176,13 @@ fn write(context: *anyopaque, samples: []const f32) output.WriteError!void {
     const storage: *Storage = @ptrCast(@alignCast(context));
     const client = storage.client.?;
     const frames: u32 = @intCast(samples.len / output.channels);
-    const deadline = std.time.nanoTimestamp() + std.time.ns_per_s;
+    const deadline = zio.nanoTimestamp() + std.time.ns_per_s;
     const get_padding = method(client, 6, *const fn (*anyopaque, *u32) callconv(.winapi) HRESULT);
     while (true) {
         var padding: u32 = 0;
         if (failed(get_padding(client, &padding))) return error.DeviceLost;
         if (padding <= storage.frames and storage.frames - padding >= frames) break;
-        if (std.time.nanoTimestamp() > deadline) return error.Unresponsive;
+        if (zio.nanoTimestamp() > deadline) return error.Unresponsive;
         _ = WaitForSingleObject(storage.event.?, 100);
     }
     const render = storage.render.?;
@@ -193,7 +194,7 @@ fn write(context: *anyopaque, samples: []const f32) output.WriteError!void {
     if (failed(release_buffer(render, frames, 0))) return error.DeviceLost;
     // The default output changing (headphones plugged in, a choice in
     // Settings) moves a shared stream nowhere: open the new one.
-    const now = std.time.nanoTimestamp();
+    const now = zio.nanoTimestamp();
     if (now - storage.checked > 500 * std.time.ns_per_ms) {
         storage.checked = now;
         var buffer: [256]u16 = undefined;

@@ -1,6 +1,8 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const Cancel = @import("cancel.zig").Cancel;
-const guard = @import("cancel.zig").guard;
+const proxy = @import("proxy.zig");
+const tunnel = @import("tunnel.zig");
 
 pub const Header = std.http.Header;
 
@@ -30,6 +32,9 @@ pub const Request = struct {
     body: ?[]const u8 = null,
     content_type: ?[]const u8 = null,
     redirect: Redirect = .follow,
+    /// The proxy of each hop: the system's (`proxy.forUrl`) by default. A
+    /// client whose own `http_proxy`/`https_proxy` is set keeps it.
+    proxy: proxy.Choice = .system,
 };
 
 pub const Limits = struct {
@@ -169,8 +174,15 @@ pub fn receive(allocator: std.mem.Allocator, client: *std.http.Client, request: 
     _ = try perform(allocator, client, request, limits, cancel, receiver.body, receiver);
 }
 
-/// The head is returned unless `receiver` took it.
+/// The head is returned unless `receiver` took it. With `cancel` the transfer
+/// runs as a task that `Cancel.cancel` interrupts.
 fn perform(allocator: std.mem.Allocator, client: *std.http.Client, request: Request, limits: Limits, cancel: ?*Cancel, sink: *std.Io.Writer, receiver: ?Receiver) Error!?Head {
+    const token = cancel orelse return transfer(allocator, client, request, limits, null, sink, receiver);
+    if (token.isCancelled()) return error.Cancelled;
+    return token.run(transfer, .{ allocator, client, request, limits, token, sink, receiver });
+}
+
+fn transfer(allocator: std.mem.Allocator, client: *std.http.Client, request: Request, limits: Limits, cancel: ?*Cancel, sink: *std.Io.Writer, receiver: ?Receiver) Error!?Head {
     if (request.body != null and !request.method.requestHasBody()) return error.InvalidRequest;
     if (request.url.len > limits.url_bytes) return error.UrlTooLong;
     const urls = try allocator.alloc(u8, 3 * limits.url_bytes);
@@ -189,7 +201,7 @@ fn perform(allocator: std.mem.Allocator, client: *std.http.Client, request: Requ
         if (std.http.Client.Protocol.fromUri(uri) == null) return error.UnsupportedScheme;
         var exchange: Exchange = .{ .client = client, .cancel = cancel };
         defer exchange.deinit();
-        var response = try exchange.send(uri, method, request, credentials, limits);
+        var response = try exchange.send(allocator, uri, method, request, credentials, limits);
         if (response.head.status.class() == .redirect and response.head.location != null and response.head.status != .not_modified and request.redirect == .reject) return error.Redirected;
         if (response.head.status.class() == .redirect and response.head.location != null and request.body == null and response.head.status != .not_modified and request.redirect == .follow) {
             if (redirects == limits.redirects) return error.TooManyRedirects;
@@ -227,19 +239,19 @@ const Exchange = struct {
     client: *std.http.Client,
     cancel: ?*Cancel,
     request: ?std.http.Client.Request = null,
-    attached: bool = false,
+    route: tunnel.Route = .{},
     decompress_buffer: []u8 = &.{},
     allocator: ?std.mem.Allocator = null,
 
     fn deinit(self: *Exchange) void {
-        if (self.attached) self.cancel.?.detach();
         if (self.request) |*request| request.deinit();
+        self.route.deinit();
         if (self.allocator) |allocator| allocator.free(self.decompress_buffer);
     }
 
-    fn send(self: *Exchange, uri: std.Uri, method: std.http.Method, request: Request, credentials: []const Header, limits: Limits) Error!std.http.Client.Response {
+    fn send(self: *Exchange, allocator: std.mem.Allocator, uri: std.Uri, method: std.http.Method, request: Request, credentials: []const Header, limits: Limits) Error!std.http.Client.Response {
         const decode = decoding(request, limits);
-        self.request = self.client.request(method, uri, .{
+        self.request = self.route.request(allocator, self.client, &request.proxy, method, uri, .{
             .keep_alive = false,
             .redirect_behavior = .unhandled,
             .headers = .{
@@ -251,19 +263,14 @@ const Exchange = struct {
             },
             .extra_headers = request.headers,
             .privileged_headers = credentials,
-        }) catch |err| return mapConnect(err);
+        }, self.cancel) catch |err| return self.failure(mapConnect(err));
         const http_request = &self.request.?;
-        guard(http_request.connection.?);
-        if (self.cancel) |token| {
-            try token.attach(http_request.connection.?.stream_reader.getStream().handle);
-            self.attached = true;
-        }
         // A caller's own Accept-Encoding takes any encoding back undecoded.
         http_request.accept_encoding = @splat(has(request.headers, "accept-encoding"));
-        http_request.accept_encoding[@intFromEnum(std.http.ContentEncoding.identity)] = true;
+        http_request.accept_encoding[@backingInt(std.http.ContentEncoding.identity)] = true;
         if (decode) {
-            http_request.accept_encoding[@intFromEnum(std.http.ContentEncoding.gzip)] = true;
-            http_request.accept_encoding[@intFromEnum(std.http.ContentEncoding.deflate)] = true;
+            http_request.accept_encoding[@backingInt(std.http.ContentEncoding.gzip)] = true;
+            http_request.accept_encoding[@backingInt(std.http.ContentEncoding.deflate)] = true;
         }
         if (method.requestHasBody() and method != .GET) {
             const body = request.body orelse "";
@@ -289,16 +296,16 @@ const Exchange = struct {
         if (response.request.method == .HEAD or status.class() == .informational or status == .no_content or status == .not_modified) return;
         const encoded = decode and response.head.content_encoding != .identity;
         if (!encoded) if (response.head.content_length) |length| if (length > limits.response_bytes) return error.ResponseTooLarge;
-        var transfer: [16 * 1024]u8 = undefined;
+        var transfer_buffer: [16 * 1024]u8 = undefined;
         var decompress: std.http.Decompress = undefined;
         const reader = if (encoded) reader: {
             if (response.head.content_encoding != .gzip and response.head.content_encoding != .deflate) return error.UnsupportedEncoding;
             self.decompress_buffer = try allocator.alloc(u8, std.compress.flate.max_window_len);
             self.allocator = allocator;
-            break :reader response.readerDecompressing(&transfer, &decompress, self.decompress_buffer);
+            break :reader response.readerDecompressing(&transfer_buffer, &decompress, self.decompress_buffer);
         } else identity: {
             // The client's own reader drops the body of a PUT or TRACE response.
-            break :identity response.request.reader.bodyReader(&transfer, response.head.transfer_encoding, response.head.content_length);
+            break :identity response.request.reader.bodyReader(&transfer_buffer, response.head.transfer_encoding, response.head.content_length);
         };
         var total: usize = 0;
         while (true) {
@@ -333,10 +340,11 @@ fn decoding(request: Request, limits: Limits) bool {
     return limits.decompress and !has(request.headers, "accept-encoding");
 }
 
-fn mapConnect(err: std.http.Client.RequestError) Error {
+fn mapConnect(err: tunnel.RequestError) Error {
     return switch (err) {
+        error.Cancelled => error.Cancelled,
         error.UnsupportedUriScheme => error.UnsupportedScheme,
-        error.UriMissingHost, error.UriHostTooLong => error.InvalidUrl,
+        error.UriMissingHost, error.InvalidHostName => error.InvalidUrl,
         error.TlsInitializationFailed, error.CertificateBundleLoadFailure => error.TlsFailed,
         error.OutOfMemory => error.OutOfMemory,
         else => error.ConnectionFailed,
@@ -345,10 +353,10 @@ fn mapConnect(err: std.http.Client.RequestError) Error {
 
 fn sameOrigin(a: std.Uri, b: std.Uri) bool {
     if (!std.ascii.eqlIgnoreCase(a.scheme, b.scheme)) return false;
-    var first: [std.Uri.host_name_max]u8 = undefined;
-    var second: [std.Uri.host_name_max]u8 = undefined;
-    const host_a = a.getHost(&first) catch return false;
-    const host_b = b.getHost(&second) catch return false;
+    var first: [std.Io.net.HostName.max_len]u8 = undefined;
+    var second: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host_a = (std.Io.net.HostName.fromUri(a, &first) catch return false).bytes;
+    const host_b = (std.Io.net.HostName.fromUri(b, &second) catch return false).bytes;
     const default: u16 = if (std.http.Client.Protocol.fromUri(a) == .tls) 443 else 80;
     return std.ascii.eqlIgnoreCase(host_a, host_b) and (a.port orelse default) == (b.port orelse default);
 }
@@ -388,33 +396,35 @@ fn copyHead(allocator: std.mem.Allocator, head: *const std.http.Client.Response.
 /// Local plain HTTP server for the module's tests. Serves scripted responses
 /// one connection at a time.
 pub const TestServer = struct {
-    server: std.net.Server,
+    server: std.Io.net.Server,
     handler: *const fn (*TestServer, *std.http.Server.Request) anyerror!void,
     context: ?*anyopaque = null,
     requests: usize = 0,
-    release: std.Thread.ResetEvent = .{},
+    release: zio.ResetEvent = .{},
+    /// Set by handlers once the client has part of a response.
+    started: zio.ResetEvent = .{},
 
     pub fn init(handler: *const fn (*TestServer, *std.http.Server.Request) anyerror!void) !TestServer {
-        const address = try std.net.Address.parseIp("127.0.0.1", 0);
-        return .{ .server = try address.listen(.{ .reuse_address = true }), .handler = handler };
+        const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+        return .{ .server = try address.listen(zio.io(), .{ .reuse_address = true }), .handler = handler };
     }
     pub fn deinit(self: *TestServer) void {
-        self.server.deinit();
+        self.server.deinit(zio.io());
     }
     pub fn port(self: *const TestServer) u16 {
-        return self.server.listen_address.getPort();
+        return self.server.socket.address.getPort();
     }
     pub fn serve(self: *TestServer, count: usize) void {
         for (0..count) |_| self.one() catch {};
     }
     fn one(self: *TestServer) !void {
-        const connection = try self.server.accept();
-        defer connection.stream.close();
+        const connection = try self.server.accept(zio.io());
+        defer connection.close(zio.io());
         var receive_buffer: [8192]u8 = undefined;
         var send_buffer: [8192]u8 = undefined;
-        var reader = connection.stream.reader(&receive_buffer);
-        var writer = connection.stream.writer(&send_buffer);
-        var http: std.http.Server = .init(reader.interface(), &writer.interface);
+        var reader = connection.reader(zio.io(), &receive_buffer);
+        var writer = connection.writer(zio.io(), &send_buffer);
+        var http: std.http.Server = .init(&reader.interface, &writer.interface);
         var request = try http.receiveHead();
         self.requests += 1;
         try self.handler(self, &request);
@@ -440,7 +450,7 @@ test "fetch returns status, headers and body; posts and puts carry their body" {
     defer server.deinit();
     const thread = try std.Thread.spawn(.{}, TestServer.serve, .{ &server, 4 });
     defer thread.join();
-    var client: std.http.Client = .{ .allocator = std.testing.allocator };
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = zio.io() };
     defer client.deinit();
     var url_buffer: [64]u8 = undefined;
     const url = try testUrl(&url_buffer, &server, "/missing");
@@ -484,7 +494,7 @@ test "fetch enforces body, header and redirect limits" {
     defer server.deinit();
     const thread = try std.Thread.spawn(.{}, TestServer.serve, .{ &server, 1 + 3 + 1 + 1 + 2 });
     defer thread.join();
-    var client: std.http.Client = .{ .allocator = std.testing.allocator };
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = zio.io() };
     defer client.deinit();
     var url_buffer: [64]u8 = undefined;
     try std.testing.expectError(error.ResponseTooLarge, fetch(std.testing.allocator, &client, .{ .url = try testUrl(&url_buffer, &server, "/big") }, .{ .response_bytes = 4095 }, null));
@@ -504,6 +514,7 @@ test "cancel interrupts a worker blocked on a stalled response" {
             var writer = try request.respondStreaming(&buffer, .{ .content_length = 100, .respond_options = .{ .keep_alive = false } });
             try writer.writer.writeAll("partial");
             try writer.flush();
+            server.started.set();
             server.release.wait();
         }
     }.handle;
@@ -512,7 +523,7 @@ test "cancel interrupts a worker blocked on a stalled response" {
     const thread = try std.Thread.spawn(.{}, TestServer.serve, .{ &server, 1 });
     defer thread.join();
     defer server.release.set();
-    var client: std.http.Client = .{ .allocator = std.testing.allocator };
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = zio.io() };
     defer client.deinit();
     var url_buffer: [64]u8 = undefined;
     const url = try testUrl(&url_buffer, &server, "/stall");
@@ -525,13 +536,7 @@ test "cancel interrupts a worker blocked on a stalled response" {
     };
     var worker: Worker = .{};
     const fetching = try std.Thread.spawn(.{}, Worker.run, .{ &worker, &client, url, &cancel });
-    while (true) {
-        cancel.mutex.lock();
-        const attached = cancel.socket != null;
-        cancel.mutex.unlock();
-        if (attached) break;
-        std.Thread.yield() catch {};
-    }
+    server.started.wait();
     cancel.cancel();
     fetching.join();
     try std.testing.expectError(error.Cancelled, worker.result);
@@ -539,7 +544,7 @@ test "cancel interrupts a worker blocked on a stalled response" {
 }
 
 test "fetch rejects malformed requests before connecting" {
-    var client: std.http.Client = .{ .allocator = std.testing.allocator };
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = zio.io() };
     defer client.deinit();
     try std.testing.expectError(error.InvalidRequest, fetch(std.testing.allocator, &client, .{ .url = "http://127.0.0.1/", .body = "x" }, .{}, null));
     try std.testing.expectError(error.UnsupportedScheme, fetch(std.testing.allocator, &client, .{ .url = "ftp://127.0.0.1/" }, .{}, null));
@@ -562,7 +567,7 @@ test "fetchJson decodes typed bodies and rejects errors" {
     defer server.deinit();
     const thread = try std.Thread.spawn(.{}, TestServer.serve, .{ &server, 3 });
     defer thread.join();
-    var client: std.http.Client = .{ .allocator = std.testing.allocator };
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = zio.io() };
     defer client.deinit();
     var url_buffer: [64]u8 = undefined;
     const url = try testUrl(&url_buffer, &server, "/item");
@@ -586,7 +591,7 @@ test "fetch decodes gzip and applies the limit to decoded bytes" {
     defer server.deinit();
     const thread = try std.Thread.spawn(.{}, TestServer.serve, .{ &server, 2 });
     defer thread.join();
-    var client: std.http.Client = .{ .allocator = std.testing.allocator };
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = zio.io() };
     defer client.deinit();
     var url_buffer: [64]u8 = undefined;
     const url = try testUrl(&url_buffer, &server, "/gzip");
@@ -625,7 +630,7 @@ test "redirect modes, final URL, reason and replaced default headers" {
     defer server.deinit();
     const thread = try std.Thread.spawn(.{}, TestServer.serve, .{ &server, 5 });
     defer thread.join();
-    var client: std.http.Client = .{ .allocator = std.testing.allocator };
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = zio.io() };
     defer client.deinit();
     var url_buffer: [64]u8 = undefined;
     var final_buffer: [64]u8 = undefined;
@@ -672,7 +677,7 @@ test "receive hands over the head first and flushes each read as it arrives" {
     const thread = try std.Thread.spawn(.{}, TestServer.serve, .{ &server, 1 });
     defer thread.join();
     defer server.release.set();
-    var client: std.http.Client = .{ .allocator = std.testing.allocator };
+    var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = zio.io() };
     defer client.deinit();
     var url_buffer: [64]u8 = undefined;
     const Consumer = struct {

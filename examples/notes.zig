@@ -18,6 +18,7 @@
 //!
 //! Run it with `zig build run-notes` (or `zig build run-notes -- file.txt`).
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const d = @import("ziggurat_document");
@@ -88,14 +89,14 @@ const Worker = struct {
     notes: *Notes = undefined,
     allocator: std.mem.Allocator,
     files: docs.Files,
-    mutex: std.Thread.Mutex = .{},
-    ready: std.Thread.Condition = .{},
+    mutex: zio.Mutex = .{},
+    ready: zio.Condition = .{},
     head: ?*Job = null,
     tail: ?*Job = null,
     stopping: bool = false,
     thread: ?std.Thread = null,
     /// This process's recovery session, opened by the `recover` job.
-    root: ?std.fs.Dir = null,
+    root: ?std.Io.Dir = null,
     session: ?docs.Session = null,
     nonce: u64,
     /// Set by `stop`: a forced quit left unsaved notes whose snapshots must
@@ -138,7 +139,7 @@ const Worker = struct {
             .open => {
                 var absolute: [std.fs.max_path_bytes]u8 = undefined;
                 const given = job.path.slice();
-                const path = if (std.fs.path.isAbsolute(given)) given else try std.fs.cwd().realpath(given, &absolute);
+                const path = if (std.fs.path.isAbsolute(given)) given else try zio.realpath(std.Io.Dir.cwd(), given, &absolute);
                 job.identity = try self.files.resolve(path);
                 const loaded = try self.files.read(job.identity.path.slice(), job.bytes[0..max_note]);
                 job.len = loaded.bytes.len;
@@ -149,7 +150,7 @@ const Worker = struct {
                 job.saved = try self.save(job.ticket.path.slice(), &job.bytes, job.len, job.ticket.expected);
             },
             .load_recent, .store_recent => {
-                const directory = try std.fs.getAppDataDir(self.allocator, "ziggurat-notes");
+                const directory = try zio.appDataDir(self.allocator, "ziggurat-notes");
                 defer self.allocator.free(directory);
                 const path = try std.fs.path.join(self.allocator, &.{ directory, "recent.txt" });
                 defer self.allocator.free(path);
@@ -160,7 +161,7 @@ const Worker = struct {
                     };
                     job.len = loaded.bytes.len;
                 } else {
-                    try std.fs.cwd().makePath(directory);
+                    try std.Io.Dir.cwd().createDirPath(zio.io(), directory);
                     _ = try self.save(path, &job.bytes, job.len, null);
                 }
             },
@@ -176,7 +177,7 @@ const Worker = struct {
                     .path = if (job.has_identity) job.path.slice() else null,
                     .base = job.stamp,
                     .revision = job.snapshot.revision,
-                    .saved_ns = std.time.nanoTimestamp(),
+                    .saved_ns = zio.nanoTimestamp(),
                     .content = job.bytes[0..job.len],
                 }, &self.scratch, &self.write_buffer);
             },
@@ -190,12 +191,12 @@ const Worker = struct {
     /// a session that ended without finishing (a crash or a forced quit) to
     /// the main thread as a `recovered` job.
     fn recover(self: *Worker) !void {
-        const directory = try std.fs.getAppDataDir(self.allocator, "ziggurat-notes");
+        const directory = try zio.appDataDir(self.allocator, "ziggurat-notes");
         defer self.allocator.free(directory);
         const path = try std.fs.path.join(self.allocator, &.{ directory, "recovery" });
         defer self.allocator.free(path);
-        try std.fs.cwd().makePath(path);
-        self.root = try std.fs.cwd().openDir(path, .{ .iterate = true });
+        try std.Io.Dir.cwd().createDirPath(zio.io(), path);
+        self.root = try std.Io.Dir.cwd().openDir(zio.io(), path, .{ .iterate = true });
         self.session = try docs.Session.open(self.files, self.root.?, self.nonce);
         var found: [16]u64 = undefined;
         for (try docs.recovery.orphans(self.files, self.root.?, self.nonce, &found)) |orphan| {
@@ -250,7 +251,7 @@ const Worker = struct {
             if (keep) session.close() else session.finish(self.root.?, self.nonce) catch {};
         }
         self.session = null;
-        if (self.root) |*root| root.close();
+        if (self.root) |*root| root.close(zio.io());
         self.root = null;
     }
 
@@ -281,7 +282,7 @@ const Watch = struct {
     allocator: std.mem.Allocator,
     ui_thread: std.Thread.Id,
     watcher: system.watch.Watcher = undefined,
-    mutex: std.Thread.Mutex = .{},
+    mutex: zio.Mutex = .{},
     /// The watcher exists, so `interrupt` may be called.
     live: bool = false,
     stopping: bool = false,
@@ -326,7 +327,7 @@ const Watch = struct {
             self.mutex.unlock();
             self.watcher.deinit();
         }
-        var roots: [max_windows]?struct { root: system.watch.Root, path: docs.Path } = .{null} ** max_windows;
+        var roots: [max_windows]?struct { root: system.watch.Root, path: docs.Path } = @splat(null);
         var wanted: [max_windows]docs.Path = undefined;
         var seen: u64 = 0;
         var events: [32]system.watch.Event = undefined;
@@ -498,7 +499,7 @@ const Note = struct {
     }
 
     fn report(self: *Note, comptime format: []const u8, args: anytype) void {
-        self.message_len = (std.fmt.bufPrint(&self.message, format, args) catch &self.message).len;
+        self.message_len = (std.fmt.bufPrint(&self.message, format, args) catch @as([]const u8, &self.message)).len;
         if (self.window) |window| window.invalidate();
     }
 
@@ -801,12 +802,12 @@ const Notes = struct {
     engine: *t.Engine,
     registry: docs.Registry = undefined,
     slots: [max_windows]docs.Slot = undefined,
-    list: [max_windows]?*Note = .{null} ** max_windows,
+    list: [max_windows]?*Note = @splat(null),
     recent_storage: [max_recent]docs.Path = undefined,
     recent: docs.Recent = undefined,
     worker: Worker,
     watch: Watch,
-    clock: std.time.Timer,
+    clock: zio.Timer,
     /// A note closed unsaved by a forced quit kept its snapshot.
     keep_snapshots: bool = false,
     autosave: ?*wake.OneShot = null,
@@ -1097,7 +1098,7 @@ const Notes = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -1114,9 +1115,9 @@ pub fn main() !void {
         .app = app,
         .allocator = allocator,
         .engine = engine,
-        .worker = .{ .app = app, .allocator = allocator, .files = .{ .ui_thread = thread }, .nonce = std.crypto.random.int(u64) },
+        .worker = .{ .app = app, .allocator = allocator, .files = .{ .ui_thread = thread }, .nonce = zio.random.int(u64) },
         .watch = .{ .app = app, .allocator = allocator, .ui_thread = thread },
-        .clock = try std.time.Timer.start(),
+        .clock = try zio.Timer.start(),
     };
     notes.worker.notes = notes;
     notes.watch.notes = notes;
@@ -1145,7 +1146,7 @@ pub fn main() !void {
     // First in the queue, so the session exists before any snapshot.
     if (notes.job(.recover, null)) |job| notes.worker.submit(job);
     if (notes.job(.load_recent, null)) |job| notes.worker.submit(job);
-    var args = try std.process.argsWithAllocator(allocator);
+    var args = try init.args.iterateAllocator(allocator);
     defer args.deinit();
     _ = args.skip();
     // The worker resolves a relative path; the blank note gives way to it.

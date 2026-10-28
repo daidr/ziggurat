@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const geometry = @import("geometry.zig");
 const drawing = @import("ziggurat_drawing_resources");
@@ -46,7 +47,7 @@ pub const NativeTransform = extern struct {
     }
     pub fn validate(self: NativeTransform, scale: f32) !void {
         const expected = try init(self.matrix(), .{ .width = self.source_width, .height = self.source_height }, scale);
-        inline for (std.meta.fields(NativeTransform)) |field| if (@field(self, field.name) != @field(expected, field.name)) return error.InvalidTransform;
+        inline for (zio.fields(NativeTransform)) |field| if (@field(self, field.name) != @field(expected, field.name)) return error.InvalidTransform;
     }
 };
 fn sourcePixels(size: layout.Size, scale: f32) ![2]u32 {

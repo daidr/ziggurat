@@ -1,12 +1,9 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const p = @import("ziggurat_window_placement");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn gtk_widget_get_mapped(*anyopaque) c_int;
 extern fn gtk_widget_get_window(*anyopaque) *anyopaque;
 const GdkRect = extern struct { x: c_int, y: c_int, width: c_int, height: c_int };
@@ -26,7 +23,7 @@ const Probe = struct {
     posted: bool = false,
     closed: usize = 0,
     failure: ?anyerror = null,
-    directory: std.fs.Dir,
+    directory: std.Io.Dir,
     encoded: [p.codec.max_bytes]u8 = undefined,
     encoded_length: usize = 0,
     loaded: [p.codec.max_bytes]u8 = undefined,
@@ -144,15 +141,21 @@ const Probe = struct {
                     self.stage = .final;
                     self.event_pending = true;
                 } else {
+                    try std.testing.expectEqual(p.Observation.normal_pending, try self.tracker.observe(self.window, &self.topology));
+                    try std.testing.expectEqualDeep(self.normal.normal, (try self.tracker.snapshot()).normal);
+                    // Confirm first: a configure still being delivered makes it
+                    // GeometryPending, and the checks below run once it settled.
+                    self.tracker.confirmNormal(self.window, &self.topology) catch |err| {
+                        if (err == error.GeometryPending) return;
+                        return err;
+                    };
                     const actual = try self.window.clientBounds();
                     try std.testing.expectEqual(self.normal.normal.width, actual.width);
                     try std.testing.expectEqual(self.normal.normal.height, actual.height);
                     try std.testing.expectEqual(self.normal.normal.position.x, actual.position.?.x);
                     try std.testing.expectEqual(self.normal.normal.position.y, actual.position.?.y);
                     try frameContained(self.window, self.topology.monitors[self.restorer.display_index].work);
-                    try std.testing.expectEqual(p.Observation.normal_pending, try self.tracker.observe(self.window, &self.topology));
                     try std.testing.expectEqualDeep(self.normal.normal, (try self.tracker.snapshot()).normal);
-                    try self.tracker.confirmNormal(self.window, &self.topology);
                     self.stage = .done;
                     _ = try self.window.destroy();
                 }
@@ -243,8 +246,8 @@ const Probe = struct {
     }
 };
 const Watchdog = struct {
-    mutex: std.Thread.Mutex = .{},
-    condition: std.Thread.Condition = .{},
+    mutex: zio.Mutex = .{},
+    condition: zio.Condition = .{},
     done: bool = false,
     app: *z.App = undefined,
     expired: std.atomic.Value(bool) = .init(false),
@@ -304,7 +307,7 @@ fn frameContained(window: z.Window, work: p.Rect) !void {
     try std.testing.expect(x >= work.x and y >= work.y and right <= work.right() and bottom <= work.bottom());
 }
 fn run(allocator: std.mem.Allocator, require_wm: bool) !void {
-    var temporary = std.testing.tmpDir(.{});
+    var temporary = zio.tmpDir(.{});
     defer temporary.cleanup();
     const app = try z.App.init(allocator);
     defer app.deinit();
@@ -379,12 +382,12 @@ fn isolatedWindows() !void {
     var code: c.DWORD = 0;
     if (c.GetExitCodeProcess(process.hProcess, &code) == 0 or code != 0) return error.TestProcessFailed;
 }
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var allocations: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(allocations.deinit() == .ok);
     const allocator = allocations.allocator();
-    const arguments = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, arguments);
+    const arguments = try zio.argsAlloc(allocator, init.args);
+    defer zio.argsFree(allocator, arguments);
     var require_wm = false;
     var desktop_child = false;
     for (arguments[1..]) |argument| if (std.mem.eql(u8, argument, "--require-wm")) {

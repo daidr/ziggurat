@@ -157,7 +157,7 @@ pub const Workspace = struct {
     }
     pub fn closeKind(self: *Workspace, target: Kind) !void {
         if (self.building) return error.Busy;
-        self.closed_kinds[@intFromEnum(target)] = true;
+        self.closed_kinds[@backingInt(target)] = true;
         for (self.slots) |*slot| if (slot.registration) |registration| {
             if (std.meta.activeTag(registration) == target) {
                 slot.registration = null;
@@ -168,7 +168,7 @@ pub const Workspace = struct {
     pub fn reopenKind(self: *Workspace, target: Kind) !void {
         if (self.building) return error.Busy;
         self.closed = false;
-        self.closed_kinds[@intFromEnum(target)] = false;
+        self.closed_kinds[@backingInt(target)] = false;
     }
     pub fn register(self: *Workspace, id: u64, registration: Registration) !Key {
         return self.registerRecipient(id, .{ .text = registration });
@@ -177,7 +177,7 @@ pub const Workspace = struct {
         return self.registerRecipient(id, .{ .control = registration });
     }
     fn registerRecipient(self: *Workspace, id: u64, registration: Recipient) !Key {
-        if (self.closed or self.closed_kinds[@intFromEnum(std.meta.activeTag(registration))]) return error.TextFieldsClosed;
+        if (self.closed or self.closed_kinds[@backingInt(std.meta.activeTag(registration))]) return error.TextFieldsClosed;
         if (id == 0) return error.InvalidControlId;
         if (self.serial == std.math.maxInt(u64)) return error.IdExhausted;
         var available: ?usize = null;
@@ -200,7 +200,7 @@ pub const Workspace = struct {
         if (self.closed) return false;
         const value = self.lookupSlot(key) catch return false;
         const registration = value.registration orelse return false;
-        return !self.closed_kinds[@intFromEnum(std.meta.activeTag(registration))];
+        return !self.closed_kinds[@backingInt(std.meta.activeTag(registration))];
     }
     pub fn kind(self: *Workspace, key: Key) !Kind {
         if (!self.current(key)) return error.StaleTextField;

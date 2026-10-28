@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
@@ -310,7 +311,7 @@ fn run(allocator: std.mem.Allocator, base: []const u8, extension: []const u8, mo
     defer app.deinit();
     const fixture = zinit_https_new(material) orelse return error.TlsFixtureFailed;
     defer zinit_https_free(fixture);
-    const path = try std.fmt.allocPrint(allocator, "{s}/initializer-{d}-{s}", .{ base, std.time.nanoTimestamp(), @tagName(mode) });
+    const path = try std.fmt.allocPrint(allocator, "{s}/initializer-{d}-{s}", .{ base, zio.nanoTimestamp(), @tagName(mode) });
     defer allocator.free(path);
     var preparation: Preparation = .{ .allocator = allocator, .main = app.owner, .path = path };
     try preparation.open();
@@ -370,9 +371,9 @@ pub fn main() !void {
     var debug: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(debug.deinit() == .ok);
     const allocator = debug.allocator();
-    const base = std.posix.getenv("ZIGGURAT_PROFILE_TEST_ROOT") orelse return error.MissingProfileTestRoot;
-    const extension = std.posix.getenv("ZIGGURAT_REQUEST_POLICY_EXTENSION") orelse return error.MissingRequestPolicyExtension;
-    const filter = std.posix.getenv("ZIGGURAT_INITIALIZER_MODE");
+    const base = zio.getenv("ZIGGURAT_PROFILE_TEST_ROOT") orelse return error.MissingProfileTestRoot;
+    const extension = zio.getenv("ZIGGURAT_REQUEST_POLICY_EXTENSION") orelse return error.MissingRequestPolicyExtension;
+    const filter = zio.getenv("ZIGGURAT_INITIALIZER_MODE");
     var selected: usize = 0;
     inline for (std.meta.tags(Mode)) |mode| {
         if (filter == null or std.mem.eql(u8, filter.?, @tagName(mode))) {

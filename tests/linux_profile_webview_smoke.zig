@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
@@ -11,7 +12,7 @@ extern fn zwk_profile_counts(*u32, *u32, *usize) void;
 // Child exit, rather than a delay or a directory unlock, separates the two
 // persistence observations. This is not an engine fsync guarantee.
 const Server = struct {
-    listener: std.net.Server,
+    listener: std.Io.net.Server,
     thread: ?std.Thread = null,
     closed: bool = false,
     stopped: std.atomic.Value(bool) = .init(false),
@@ -28,31 +29,31 @@ const Server = struct {
         if (self.closed) return;
         if (self.thread) |thread| {
             self.stopped.store(true, .release);
-            const wake = std.net.tcpConnectToAddress(self.listener.listen_address) catch unreachable;
-            wake.close();
+            const wake = self.listener.socket.address.connect(zio.io(), .{ .mode = .stream }) catch unreachable;
+            wake.close(zio.io());
             thread.join();
             self.thread = null;
         }
-        self.listener.deinit();
+        self.listener.deinit(zio.io());
         self.closed = true;
     }
     fn worker(self: *Server) void {
         while (true) {
-            const connection = self.listener.accept() catch return;
-            defer connection.stream.close();
+            const connection = self.listener.accept(zio.io()) catch return;
+            defer connection.close(zio.io());
             if (self.stopped.load(.acquire)) return;
-            self.serve(connection.stream) catch |err| {
+            self.serve(connection) catch |err| {
                 self.failure = err;
                 return;
             };
         }
     }
-    fn serve(self: *Server, stream: std.net.Stream) !void {
+    fn serve(self: *Server, stream: std.Io.net.Stream) !void {
         var request: [8192]u8 = undefined;
         var used: usize = 0;
         while (std.mem.indexOf(u8, request[0..used], "\r\n\r\n") == null) {
             if (used == request.len) return error.RequestTooLarge;
-            const n = try stream.read(request[used..]);
+            const n = try zio.net.receive(stream.socket.handle, request[used..]);
             if (n == 0) return;
             used += n;
         }
@@ -69,8 +70,8 @@ const Server = struct {
         const set_cookie = if (std.mem.eql(u8, path, "/seed")) "Set-Cookie: persistent_cookie=present; Max-Age=31536000; Path=/; SameSite=Lax\r\n" else "";
         var bytes: [768]u8 = undefined;
         const headers = try std.fmt.bufPrint(&bytes, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\n{s}Content-Length: {d}\r\nConnection: close\r\n\r\n", .{ set_cookie, body.len });
-        try stream.writeAll(headers);
-        try stream.writeAll(body);
+        try zio.net.sendAll(stream.socket.handle, headers);
+        try zio.net.sendAll(stream.socket.handle, body);
     }
 };
 
@@ -334,20 +335,18 @@ fn child(allocator: std.mem.Allocator, mode: Mode, path: []const u8, origin: []c
     std.debug.print("Profile child {s}: loads={d}, shutdown completed\n", .{ @tagName(mode), probe.loads });
 }
 
-fn spawn(allocator: std.mem.Allocator, executable: []const u8, mode: Mode, path: []const u8, origin: []const u8, extension: []const u8) !void {
-    var process = std.process.Child.init(&.{ executable, "--child", @tagName(mode), path, origin, extension }, allocator);
-    process.stdin_behavior = .Ignore;
-    try process.spawn();
-    const term = try process.wait();
-    if (term != .Exited or term.Exited != 0) return error.ProfileChildFailed;
+fn spawn(executable: []const u8, mode: Mode, path: []const u8, origin: []const u8, extension: []const u8) !void {
+    var process = try zio.spawn(.{ .argv = &.{ executable, "--child", @tagName(mode), path, origin, extension }, .stdin = .ignore });
+    const term = try process.wait(zio.io());
+    if (term != .exited or term.exited != 0) return error.ProfileChildFailed;
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try zio.argsAlloc(allocator, init.args);
+    defer zio.argsFree(allocator, args);
     if (args.len == 6 and std.mem.eql(u8, args[1], "--child")) {
         const mode = std.meta.stringToEnum(Mode, args[2]) orelse return error.InvalidChildMode;
         try child(allocator, mode, args[3], args[4], args[5]);
@@ -356,11 +355,11 @@ pub fn main() !void {
         return;
     }
     if (args.len != 1) return error.InvalidArguments;
-    const extension = try std.process.getEnvVarOwned(allocator, "ZIGGURAT_REQUEST_POLICY_EXTENSION");
+    const extension = try zio.getEnvVarOwned(allocator, "ZIGGURAT_REQUEST_POLICY_EXTENSION");
     defer allocator.free(extension);
-    const base = try std.process.getEnvVarOwned(allocator, "ZIGGURAT_PROFILE_TEST_ROOT");
+    const base = try zio.getEnvVarOwned(allocator, "ZIGGURAT_PROFILE_TEST_ROOT");
     defer allocator.free(base);
-    const path = try std.fmt.allocPrint(allocator, "{s}/public-{d}", .{ base, std.time.nanoTimestamp() });
+    const path = try std.fmt.allocPrint(allocator, "{s}/public-{d}", .{ base, zio.nanoTimestamp() });
     defer allocator.free(path);
     const live_path = try std.fmt.allocPrint(allocator, "{s}-lifecycle", .{path});
     defer allocator.free(live_path);
@@ -374,25 +373,25 @@ pub fn main() !void {
     defer allocator.free(allocations_path);
     const recovery_path = try std.fmt.allocPrint(allocator, "{s}-recovery", .{path});
     defer allocator.free(recovery_path);
-    const bind = try std.net.Address.parseIp("127.0.0.1", 0);
-    var server: Server = .{ .listener = try bind.listen(.{}) };
+    const bind = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    var server: Server = .{ .listener = try bind.listen(zio.io(), .{}) };
     try server.start();
     defer server.stop();
-    const origin = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{server.listener.listen_address.getPort()});
+    const origin = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{server.listener.socket.address.getPort()});
     defer allocator.free(origin);
-    const executable = try std.fs.selfExePathAlloc(allocator);
+    const executable = try zio.executablePathAlloc(allocator);
     defer allocator.free(executable);
-    try spawn(allocator, executable, .ownership, ownership_path, origin, extension);
-    try spawn(allocator, executable, .allocations, allocations_path, origin, extension);
-    try spawn(allocator, executable, .seed, path, origin, extension);
-    try spawn(allocator, executable, .restore, path, origin, extension);
+    try spawn(executable, .ownership, ownership_path, origin, extension);
+    try spawn(executable, .allocations, allocations_path, origin, extension);
+    try spawn(executable, .seed, path, origin, extension);
+    try spawn(executable, .restore, path, origin, extension);
     try std.testing.expect(server.restore_requests.load(.acquire) == 1 and server.restore_cookie.load(.acquire));
-    try spawn(allocator, executable, .ephemeral, path, origin, extension);
+    try spawn(executable, .ephemeral, path, origin, extension);
     try std.testing.expect(server.ephemeral_requests.load(.acquire) == 1 and !server.ephemeral_cookie.load(.acquire));
-    try spawn(allocator, executable, .lifecycle, live_path, origin, extension);
-    try spawn(allocator, executable, .session, session_path, origin, extension);
-    try spawn(allocator, executable, .rejected, rejected_path, origin, extension);
-    try spawn(allocator, executable, .recover, recovery_path, origin, extension);
+    try spawn(executable, .lifecycle, live_path, origin, extension);
+    try spawn(executable, .session, session_path, origin, extension);
+    try spawn(executable, .rejected, rejected_path, origin, extension);
+    try spawn(executable, .recover, recovery_path, origin, extension);
     server.stop();
     if (server.failure) |err| return err;
     std.debug.print("Profile public: first-request cookie and localStorage across child exit, ephemeral isolation, shared manager/distinct contexts, Full rollback, accepted reload survives owner close, parked Session and stop; native refs=0\n", .{});

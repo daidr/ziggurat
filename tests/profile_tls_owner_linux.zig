@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const profile = @import("profile");
 const certificate = @embedFile("fixtures/profile-https/server-cert.pem");
@@ -32,8 +33,8 @@ const Fixture = struct {
     }
 };
 fn pathFor(suffix: []const u8) ![]u8 {
-    const base = std.posix.getenv("ZIGGURAT_PROFILE_TEST_ROOT") orelse return error.MissingProfileTestRoot;
-    return std.fmt.allocPrint(std.testing.allocator, "{s}/tls-owner-{d}-{s}", .{ base, std.time.nanoTimestamp(), suffix });
+    const base = zio.getenv("ZIGGURAT_PROFILE_TEST_ROOT") orelse return error.MissingProfileTestRoot;
+    return std.fmt.allocPrint(std.testing.allocator, "{s}/tls-owner-{d}-{s}", .{ base, zio.nanoTimestamp(), suffix });
 }
 
 test "native TLS parser preserves real GLib failure and failed candidate preserves claim" {

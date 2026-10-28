@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const http = @import("ziggurat_http_response");
 const files = @import("ziggurat_file_stream");
 const policy = @import("policy.zig");
@@ -106,12 +107,12 @@ pub const PreparedFileResponse = struct {
     /// Worker-only. File must already be authorized, private and immutable
     /// before entry and remain so until pump finishes. Does not open a path,
     /// infer an ETag, process other preconditions, or read representation bytes.
-    pub fn prepare(main_thread: std.Thread.Id, file: std.fs.File, maximum: u64, request: FileRequest) !Prepared {
+    pub fn prepare(main_thread: std.Thread.Id, file: std.Io.File, maximum: u64, request: FileRequest) !Prepared {
         if (!enabled) return error.UnsupportedCapability;
         if (std.Thread.getCurrentId() == main_thread) return error.UiThreadForbidden;
         if (maximum == 0 or maximum > files.hard_max_bytes) return error.InvalidFileStreamLimit;
         try request.validate();
-        const stat = try file.stat();
+        const stat = try file.stat(zio.io());
         if (stat.kind != .file) return error.RegularFileRequired;
         if (stat.size > maximum) return error.FileTooLarge;
         const selection = try request.select(stat.size);

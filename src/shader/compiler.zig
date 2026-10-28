@@ -4,6 +4,7 @@
 //! called only after their definition (so there is no recursion) and every
 //! function's register frame is static.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 
 /// Value types. Matrices are column-major; `bool` and `int` occupy one
 /// 32-bit word like `float`.
@@ -1432,7 +1433,7 @@ fn builtinNamed(name: []const u8) ?Builtin {
     return null;
 }
 fn typeNamed(name: []const u8) ?Type {
-    inline for (std.meta.fields(Type)) |field| if (std.mem.eql(u8, name, field.name)) return @enumFromInt(field.value);
+    inline for (zio.fields(Type)) |field| if (std.mem.eql(u8, name, field.name)) return @fromBackingInt(@intCast(field.value));
     return null;
 }
 fn isKeyword(name: []const u8) bool {

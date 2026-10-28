@@ -207,7 +207,7 @@ pub const RichText = struct {
                 at += 1;
             }
             const visible_width = self.options.measurer.textSize(text[start..visible_end], font).width;
-            const spaced = std.mem.trimRight(u8, text[start..end], "\r");
+            const spaced = std.mem.trimEnd(u8, text[start..end], "\r");
             const width = if (spaced.len > visible_end - start) self.options.measurer.textSize(spaced, font).width else visible_width;
             try self.words.append(self.allocator, .{ .span = index, .start = @intCast(start), .end = @intCast(end), .width = width, .visible = visible_width, .hard_break = hard_break, .glued = false, .cluster = visible_width });
         }
@@ -315,7 +315,7 @@ pub const RichText = struct {
             const line = self.lines.items[run.line];
             const m = self.metrics.items[run.span];
             const color = span.color orelse base_color;
-            const text = std.mem.trimRight(u8, span.text[run.start..run.end], " \t\r");
+            const text = std.mem.trimEnd(u8, span.text[run.start..run.end], " \t\r");
             if (text.len != 0) {
                 const top = origin.y + line.y + line.baseline - m.ascent;
                 // Room past the measured width keeps a label from eliding

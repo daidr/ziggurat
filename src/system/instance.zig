@@ -1,12 +1,8 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const identity = @import("identity.zig");
-const win = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("sddl.h");
-}) else struct {};
+const win = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 
 pub const max_arguments = 128;
 pub const max_argument_bytes = 16 * 1024;
@@ -80,7 +76,7 @@ pub fn claimOrForward(options: Options, outgoing: Outgoing, attempts: u8) !?Prim
                 }
             },
         }
-        std.Thread.sleep(@as(u64, attempt + 1) * 20 * std.time.ns_per_ms);
+        zio.sleep(@as(u64, attempt + 1) * 20 * std.time.ns_per_ms);
     }
 }
 
@@ -273,16 +269,16 @@ const Linux = struct {
         socket_len: usize = 0,
     };
     fn paths(id: []const u8) !Paths {
-        const runtime = posix.getenv("XDG_RUNTIME_DIR") orelse return error.RuntimeDirectoryUnavailable;
+        const runtime = zio.getenv("XDG_RUNTIME_DIR") orelse return error.RuntimeDirectoryUnavailable;
         if (runtime.len == 0 or runtime[0] != '/') return error.RuntimeDirectoryUnavailable;
         // The runtime directory is the user isolation boundary: it must be a
         // directory owned by this user and closed to everyone else.
-        const directory = posix.open(runtime, .{ .DIRECTORY = true, .CLOEXEC = true }, 0) catch return error.RuntimeDirectoryUnavailable;
-        defer posix.close(directory);
-        const status = posix.fstat(directory) catch return error.RuntimeDirectoryUnavailable;
+        const directory = zio.posix.open(runtime, .{ .DIRECTORY = true, .CLOEXEC = true }, 0) catch return error.RuntimeDirectoryUnavailable;
+        defer zio.posix.close(directory);
+        const status = zio.posix.fstat(directory) catch return error.RuntimeDirectoryUnavailable;
         if (status.uid != linux.getuid() or status.mode & 0o077 != 0) return error.RuntimeDirectoryUnsafe;
         var result: Paths = .{};
-        const lock = std.fmt.bufPrintZ(&result.lock, "{s}/ziggurat-instance-{s}.lock", .{ runtime, id }) catch return error.PathTooLong;
+        const lock = std.fmt.bufPrintSentinel(&result.lock, "{s}/ziggurat-instance-{s}.lock", .{ runtime, id }, 0) catch return error.PathTooLong;
         _ = lock;
         const socket = std.fmt.bufPrint(&result.socket.path, "{s}/ziggurat-instance-{s}.sock", .{ runtime, id }) catch return error.PathTooLong;
         if (socket.len >= result.socket.path.len) return error.PathTooLong;
@@ -291,46 +287,46 @@ const Linux = struct {
     }
     fn claim(options: Options) !Claim {
         var p = try paths(options.id);
-        const lock = try posix.openZ(std.mem.sliceTo(&p.lock, 0), .{ .ACCMODE = .RDWR, .CREAT = true, .CLOEXEC = true, .NOFOLLOW = true }, 0o600);
-        errdefer posix.close(lock);
-        posix.flock(lock, posix.LOCK.EX | posix.LOCK.NB) catch |err| switch (err) {
+        const lock = try zio.posix.open(std.mem.sliceTo(&p.lock, 0), .{ .ACCMODE = .RDWR, .CREAT = true, .CLOEXEC = true, .NOFOLLOW = true }, 0o600);
+        errdefer zio.posix.close(lock);
+        zio.posix.flock(lock, posix.LOCK.EX | posix.LOCK.NB) catch |err| switch (err) {
             error.WouldBlock => {
-                posix.close(lock);
+                zio.posix.close(lock);
                 const length: posix.socklen_t = @intCast(@offsetOf(posix.sockaddr.un, "path") + p.socket_len + 1);
                 return .{ .secondary = .{ .native = .{ .address = p.socket, .length = length }, .timeout_ms = options.timeout_ms } };
             },
             else => return err,
         };
         // The lock owner may replace a socket left behind by a crashed primary.
-        posix.unlinkZ(@ptrCast(p.socket.path[0..p.socket_len :0])) catch |err| switch (err) {
+        std.Io.Dir.cwd().deleteFile(zio.io(), p.socket.path[0..p.socket_len]) catch |err| switch (err) {
             error.FileNotFound => {},
             else => return err,
         };
-        const listener = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0);
-        errdefer posix.close(listener);
-        try posix.bind(listener, @ptrCast(&p.socket), @intCast(@offsetOf(posix.sockaddr.un, "path") + p.socket_len + 1));
-        errdefer posix.unlinkZ(@ptrCast(p.socket.path[0..p.socket_len :0])) catch {};
-        try posix.listen(listener, 8);
-        const stop = try posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+        const listener = try zio.posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0);
+        errdefer zio.posix.close(listener);
+        try zio.posix.bind(listener, @ptrCast(&p.socket), @intCast(@offsetOf(posix.sockaddr.un, "path") + p.socket_len + 1));
+        errdefer std.Io.Dir.cwd().deleteFile(zio.io(), p.socket.path[0..p.socket_len]) catch {};
+        try zio.posix.listen(listener, 8);
+        const stop = try zio.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
         var primary: @This().Primary = .{ .lock = lock, .listener = listener, .stop_read = stop[0], .stop_write = stop[1], .socket_path = undefined, .socket_path_len = p.socket_len };
         @memcpy(primary.socket_path[0 .. p.socket_len + 1], p.socket.path[0 .. p.socket_len + 1]);
         return .{ .primary = .{ .native = primary, .timeout_ms = options.timeout_ms } };
     }
     fn requestStop(self: *@This().Primary) void {
-        _ = posix.write(self.stop_write, "s") catch {};
+        _ = zio.posix.write(self.stop_write, "s") catch {};
     }
     fn stopped(self: *@This().Primary) bool {
         var fds = [_]posix.pollfd{.{ .fd = self.stop_read, .events = posix.POLL.IN, .revents = 0 }};
         return (posix.poll(&fds, 0) catch 0) != 0;
     }
     fn deinitPrimary(self: *@This().Primary) void {
-        posix.close(self.listener);
-        posix.unlinkZ(@ptrCast(self.socket_path[0..self.socket_path_len :0])) catch {};
-        posix.close(self.stop_read);
-        posix.close(self.stop_write);
+        zio.posix.close(self.listener);
+        std.Io.Dir.cwd().deleteFile(zio.io(), self.socket_path[0..self.socket_path_len]) catch {};
+        zio.posix.close(self.stop_read);
+        zio.posix.close(self.stop_write);
         // Closing the descriptor releases the flock; the lock file stays so a
         // concurrent claimer never locks an unlinked inode.
-        posix.close(self.lock);
+        zio.posix.close(self.lock);
     }
     fn receive(self: *@This().Primary, timeout_ms: u32, storage: []u8, arguments: [][]const u8) !Received {
         while (true) {
@@ -341,16 +337,16 @@ const Linux = struct {
             _ = try posix.poll(&fds, -1);
             if (fds[1].revents != 0) return .stopped;
             if (fds[0].revents == 0) continue;
-            const peer = posix.accept(self.listener, null, null, posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK) catch |err| switch (err) {
+            const peer = zio.posix.accept(self.listener, posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK) catch |err| switch (err) {
                 error.WouldBlock, error.ConnectionAborted => continue,
                 else => return err,
             };
-            defer posix.close(peer);
+            defer zio.posix.close(peer);
             var credentials: Credentials = undefined;
             var size: posix.socklen_t = @sizeOf(Credentials);
-            if (linux.E.init(linux.getsockopt(peer, posix.SOL.SOCKET, posix.SO.PEERCRED, @ptrCast(&credentials), &size)) != .SUCCESS) return error.PeerCredentialsUnavailable;
+            if (linux.errno(linux.getsockopt(peer, posix.SOL.SOCKET, posix.SO.PEERCRED, @ptrCast(&credentials), &size)) != .SUCCESS) return error.PeerCredentialsUnavailable;
             if (credentials.uid != linux.getuid()) return .{ .rejected = .foreign_user };
-            const deadline = std.time.milliTimestamp() + timeout_ms;
+            const deadline = zio.milliTimestamp() + timeout_ms;
             const message = exchange(self, peer, deadline, storage, arguments, @intCast(credentials.pid)) catch |err| {
                 if (err == error.Stopped) return .stopped;
                 const reason = rejection(err) orelse return err;
@@ -372,7 +368,7 @@ const Linux = struct {
     }
     fn waitFor(self: ?*@This().Primary, fd: posix.fd_t, events: i16, deadline: i64) !void {
         while (true) {
-            const remaining = deadline - std.time.milliTimestamp();
+            const remaining = deadline - zio.milliTimestamp();
             if (remaining <= 0) return error.Timeout;
             var fds = [_]posix.pollfd{
                 .{ .fd = fd, .events = events, .revents = 0 },
@@ -400,7 +396,7 @@ const Linux = struct {
         var at: usize = 0;
         while (at < bytes.len) {
             try waitFor(self, fd, posix.POLL.OUT, deadline);
-            at += posix.send(fd, bytes[at..], posix.MSG.NOSIGNAL) catch |err| switch (err) {
+            at += zio.posix.send(fd, bytes[at..], posix.MSG.NOSIGNAL) catch |err| switch (err) {
                 error.WouldBlock => continue,
                 error.BrokenPipe, error.ConnectionResetByPeer => return error.Disconnected,
                 else => return err,
@@ -408,17 +404,17 @@ const Linux = struct {
         }
     }
     fn forward(self: *@This().Secondary, timeout_ms: u32, frame: []const u8) !void {
-        const socket = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0);
-        defer posix.close(socket);
-        const deadline = std.time.milliTimestamp() + timeout_ms;
+        const socket = try zio.posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0);
+        defer zio.posix.close(socket);
+        const deadline = zio.milliTimestamp() + timeout_ms;
         // A full backlog makes a non-blocking Unix connect fail with EAGAIN
         // instead of waiting, so a primary that stopped accepting is bounded.
         while (true) {
-            if (posix.connect(socket, @ptrCast(&self.address), self.length)) |_| break else |err| switch (err) {
+            if (zio.posix.connect(socket, @ptrCast(&self.address), self.length)) |_| break else |err| switch (err) {
                 error.FileNotFound, error.ConnectionRefused => return error.PrimaryUnavailable,
                 error.WouldBlock => {
-                    if (std.time.milliTimestamp() >= deadline) return error.Timeout;
-                    std.Thread.sleep(5 * std.time.ns_per_ms);
+                    if (zio.milliTimestamp() >= deadline) return error.Timeout;
+                    zio.sleep(5 * std.time.ns_per_ms);
                 },
                 else => return err,
             }

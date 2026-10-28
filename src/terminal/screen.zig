@@ -210,7 +210,7 @@ pub const History = struct {
     fn push(self: *History, row: []const Cell, wrapped: bool) void {
         if (self.lines.len == 0) return;
         var len = row.len;
-        while (len > 0 and row[len - 1].isBlank()) len -= 1;
+        while (len > 0 and row[len - 1].isBlank() and row[len - 1].wide != .spacer) len -= 1;
         len = @min(len, self.cells.len);
         if (self.count == self.lines.len) self.dropOldest();
         var position: usize = 0;
@@ -915,13 +915,24 @@ pub const Screen = struct {
 
     // ---- Size --------------------------------------------------------------
 
-    /// Change the size. Lines keep their text from the left; the cursor
+    /// Change the size, as `resizeTracking` does with nothing to track.
+    pub fn resize(self: *Screen, cols_wanted: u16, rows_wanted: u16) !void {
+        return self.resizeTracking(cols_wanted, rows_wanted, &.{});
+    }
+
+    /// Change the size. A new width rewraps the primary screen and the
+    /// scrollback: lines that wrapped softly join and wrap again at the new
+    /// width, and the cursor stays on its character. The alternate screen
+    /// keeps its lines from the left, cut at the right edge. The cursor
     /// stays on its line, pushing lines above into the scrollback when the
     /// screen gets shorter and pulling them back when it gets taller.
-    pub fn resize(self: *Screen, cols_wanted: u16, rows_wanted: u16) !void {
+    /// `tracked` holds positions in the primary screen and the scrollback,
+    /// such as a selection's ends, which move with their cells.
+    pub fn resizeTracking(self: *Screen, cols_wanted: u16, rows_wanted: u16, tracked: []Position) !void {
         const cols = @max(cols_wanted, 2);
         const rows = @max(rows_wanted, 1);
         if (cols == self.cols and rows == self.rows) return;
+        if (cols != self.cols) return self.reflow(cols, rows, tracked);
         var primary = try Grid.init(self.allocator, cols, rows);
         errdefer primary.deinit(self.allocator);
         var alternate = try Grid.init(self.allocator, cols, rows);
@@ -998,6 +1009,180 @@ pub const Screen = struct {
         self.changed();
     }
 
+    /// A row of the primary screen or the scrollback after rewrapping:
+    /// its cells, whether it wraps into the next, and where it starts in
+    /// its line.
+    const Rewrapped = struct { start: usize, len: usize, wrapped: bool, from: usize };
+    /// Where a row before rewrapping starts in its line, and the line's
+    /// first row after.
+    const Origin = struct { offset: usize, first: usize };
+
+    /// Resize with a new width: join the soft-wrapped lines of the
+    /// scrollback and the primary screen, wrap them at `cols`, and lay the
+    /// rows out again between the scrollback and the screen.
+    fn reflow(self: *Screen, cols: u16, rows: u16, tracked: []Position) !void {
+        const allocator = self.allocator;
+        var cells: std.ArrayList(Cell) = .empty;
+        defer cells.deinit(allocator);
+        var out: std.ArrayList(Rewrapped) = .empty;
+        defer out.deinit(allocator);
+        var line: std.ArrayList(Cell) = .empty;
+        defer line.deinit(allocator);
+        // Rows down to the last with text or the cursor; blank rows below
+        // stay blank.
+        const used = self.usedRows();
+        const history_count = self.history.count;
+        const old_count = history_count + used;
+        const origins = try allocator.alloc(Origin, old_count);
+        defer allocator.free(origins);
+        const cursor = if (self.on_alternate) &self.saved[0].cursor else &self.cursor;
+        const cursor_old = history_count + cursor.y;
+        // The cursor past the last column, waiting to wrap, sits after it.
+        const cursor_pending = cursor.pending_wrap and cursor.x + 1 == self.cols;
+        var cursor_line: usize = 0;
+        var cursor_offset: usize = 0;
+
+        var i: usize = 0;
+        while (i < old_count) {
+            line.clearRetainingCapacity();
+            const first_old = i;
+            var minimum: usize = 0;
+            while (true) : (i += 1) {
+                const old = self.oldRow(i);
+                origins[i] = .{ .offset = line.items.len, .first = out.items.len };
+                const last = !old.wrapped or i + 1 == old_count;
+                if (last) {
+                    var n = old.cells.len;
+                    while (n > 0 and old.cells[n - 1].isBlank() and old.cells[n - 1].wide != .spacer) n -= 1;
+                    try line.appendSlice(allocator, old.cells[0..n]);
+                } else {
+                    // A wrapped row is whole, though the scrollback drops
+                    // trailing blanks; the blank left where a wide character
+                    // did not fit goes.
+                    try line.appendSlice(allocator, old.cells);
+                    try line.appendNTimes(allocator, .{}, self.cols -| old.cells.len);
+                    const next = self.oldRow(i + 1);
+                    if (next.cells.len > 0 and next.cells[0].wide == .wide and line.items[line.items.len - 1].cp == 0) _ = line.pop();
+                }
+                if (i == cursor_old) {
+                    cursor_line = first_old;
+                    cursor_offset = origins[i].offset + cursor.x + @intFromBool(cursor_pending);
+                    // The cursor's cell stays, blank or not.
+                    minimum = if (cursor_pending) cursor_offset else cursor_offset + 1;
+                }
+                if (last) {
+                    i += 1;
+                    break;
+                }
+            }
+            if (line.items.len < minimum) try line.appendNTimes(allocator, .{}, minimum - line.items.len);
+            try rewrap(allocator, line.items, cols, &cells, &out);
+        }
+
+        // Where the cursor goes.
+        const cursor_at = mapOffset(out.items, origins[cursor_line].first, if (cursor_pending) cursor_offset - 1 else cursor_offset);
+        var cursor_col = cursor_at.col;
+        var pending = false;
+        if (cursor_pending) {
+            if (cursor_col + 1 >= cols) {
+                cursor_col = cols - 1;
+                pending = true;
+            } else cursor_col += 1;
+        }
+        cursor_col = @min(cursor_col, cols - 1);
+        const cursor_row = cursor_at.row;
+
+        // The first row on screen: where the old first row went, or the
+        // bottom of the text when the screen was full; down far enough for
+        // the cursor, and as far as the text goes while the cursor shows.
+        const total = out.items.len;
+        const top_old = mapOffset(out.items, origins[history_count].first, origins[history_count].offset).row;
+        var first: usize = if (used == self.rows) total -| rows else top_old;
+        if (total > first + rows) first = total - rows;
+        first = @min(first, cursor_row);
+        if (cursor_row >= first + rows) first = cursor_row + 1 - rows;
+
+        var primary = try Grid.init(allocator, cols, rows);
+        errdefer primary.deinit(allocator);
+        var alternate = try Grid.init(allocator, cols, rows);
+        errdefer alternate.deinit(allocator);
+        const tabs = try allocator.alloc(bool, cols);
+        errdefer comptime unreachable;
+
+        for (0..rows) |y| {
+            if (first + y >= total) break;
+            const new = out.items[first + y];
+            @memcpy(primary.row(y)[0..new.len], cells.items[new.start..][0..new.len]);
+            primary.wrap(y).* = new.wrapped;
+        }
+        for (0..@min(rows, self.rows)) |y| {
+            copyRow(alternate.row(y), self.alternate.row(y));
+            alternate.wrap(y).* = self.alternate.wrap(y).*;
+        }
+
+        // Positions move with their cells; those below the text keep their
+        // distance from the cursor.
+        const dropped = self.pushed - history_count;
+        const old_first = self.firstRow();
+        const old_cursor_abs = self.pushed + cursor.y;
+        const view_top: ?u64 = if (self.viewport > 0) self.pushed - self.viewport else null;
+        const new_cursor_abs = dropped + cursor_row;
+        const bottom_abs = dropped + first + rows - 1;
+        if (!self.on_alternate) for (tracked) |*p| {
+            if (p.row < old_first) continue;
+            const at_old = p.row - old_first;
+            if (at_old < old_count) {
+                const at = mapOffset(out.items, origins[at_old].first, origins[at_old].offset + p.col);
+                p.* = .{ .row = dropped + at.row, .col = @intCast(@min(at.col, cols - 1)) };
+            } else {
+                p.* = .{ .row = @min(new_cursor_abs + (p.row - old_cursor_abs), bottom_abs), .col = @min(p.col, cols - 1) };
+            }
+        };
+        const new_view_top: ?u64 = if (view_top) |top| blk: {
+            if (top < old_first) break :blk null;
+            const at_old = top - old_first;
+            if (at_old >= old_count) break :blk null;
+            break :blk dropped + mapOffset(out.items, origins[at_old].first, origins[at_old].offset).row;
+        } else null;
+
+        // The rows above the screen are the new scrollback.
+        self.history.clear();
+        for (out.items[0..first]) |new| self.history.push(cells.items[new.start..][0..new.len], new.wrapped);
+        self.pushed = dropped + first;
+
+        self.primary.deinit(allocator);
+        self.alternate.deinit(allocator);
+        allocator.free(self.tabs);
+        self.primary = primary;
+        self.alternate = alternate;
+        self.tabs = tabs;
+        self.cols = cols;
+        self.rows = rows;
+        self.resetTabs();
+        self.top = 0;
+        self.bottom = rows - 1;
+        cursor.y = @intCast(cursor_row - first);
+        cursor.x = @intCast(cursor_col);
+        cursor.pending_wrap = pending;
+        if (self.on_alternate) {
+            self.cursor.y = @min(self.cursor.y, rows - 1);
+            self.cursor.x = @min(self.cursor.x, cols - 1);
+            self.cursor.pending_wrap = false;
+        }
+        self.viewport = if (new_view_top) |top| @intCast(@min(self.pushed -| top, self.history.count)) else 0;
+        self.changed();
+    }
+
+    /// Row `at` of the scrollback followed by the primary screen.
+    fn oldRow(self: *const Screen, at: usize) RowRef {
+        if (at < self.history.count) {
+            const line = self.history.get(at);
+            return .{ .cells = line.cells, .wrapped = line.wrapped };
+        }
+        const y = at - self.history.count;
+        return .{ .cells = self.primary.row(y), .wrapped = self.primary.wrap(y).* };
+    }
+
     fn primaryCursorY(self: *const Screen) usize {
         return if (self.on_alternate) self.saved[0].cursor.y else self.cursor.y;
     }
@@ -1012,6 +1197,36 @@ pub const Screen = struct {
         return used;
     }
 };
+
+/// Wrap a line at `cols` into rows appended to `out`, their cells to
+/// `cells`. A wide character that would straddle the edge starts the next
+/// row, leaving a blank. An empty line is one empty row.
+fn rewrap(allocator: std.mem.Allocator, line: []const Cell, cols: u16, cells: *std.ArrayList(Cell), out: *std.ArrayList(Screen.Rewrapped)) !void {
+    var from: usize = 0;
+    while (true) {
+        var take = @min(cols, line.len - from);
+        var head = false;
+        if (take == cols and line[from + take - 1].wide == .wide) {
+            take -= 1;
+            head = true;
+        }
+        const start = cells.items.len;
+        try cells.appendSlice(allocator, line[from..][0..take]);
+        if (head) try cells.append(allocator, .{});
+        const more = from + take < line.len;
+        try out.append(allocator, .{ .start = start, .len = take + @intFromBool(head), .wrapped = more, .from = from });
+        from += take;
+        if (!more) break;
+    }
+}
+
+/// The row and column, after rewrapping, of `offset` in the line whose
+/// first row is `first`; an offset past the line's end is on its last row.
+fn mapOffset(rows: []const Screen.Rewrapped, first: usize, offset: usize) struct { row: usize, col: usize } {
+    var r = first;
+    while (rows[r].wrapped and r + 1 < rows.len and rows[r + 1].from <= offset) r += 1;
+    return .{ .row = r, .col = offset - rows[r].from };
+}
 
 fn copyRow(to: []Cell, from: []const Cell) void {
     const n = @min(to.len, from.len);
@@ -1151,18 +1366,103 @@ test "resizing keeps the cursor's line and trades rows with the scrollback" {
     defer screen.deinit();
     var buffer: [64]u8 = undefined;
     printAll(&screen, "one\ntwo\nthree\nfour");
-    try screen.resize(3, 2);
+    // Shorter: lines above the cursor go to the scrollback.
+    try screen.resize(6, 2);
     try std.testing.expectEqual(@as(usize, 2), screen.history.count);
-    try std.testing.expectEqualStrings("thr", text(&screen, 0, &buffer));
-    try std.testing.expectEqualStrings("fou", text(&screen, 1, &buffer));
+    try std.testing.expectEqualStrings("three", text(&screen, 0, &buffer));
+    try std.testing.expectEqualStrings("four", text(&screen, 1, &buffer));
     try std.testing.expectEqual(@as(u16, 1), screen.cursor.y);
-    try std.testing.expectEqual(@as(u16, 2), screen.cursor.x);
+    try std.testing.expectEqual(@as(u16, 4), screen.cursor.x);
+    // Taller: they come back.
     try screen.resize(6, 4);
     try std.testing.expectEqual(@as(usize, 0), screen.history.count);
     try std.testing.expectEqualStrings("one", text(&screen, 0, &buffer));
     try std.testing.expectEqual(@as(u16, 3), screen.cursor.y);
-    // Text cut by the narrower screen stays cut.
-    try std.testing.expectEqualStrings("thr", text(&screen, 2, &buffer));
+    // The alternate screen is cut rather than rewrapped.
+    screen.useAlternate(true, true, true);
+    screen.moveTo(0, 0);
+    printAll(&screen, "abcdef");
+    try screen.resize(3, 4);
+    try std.testing.expectEqualStrings("abc", text(&screen, 0, &buffer));
+    try std.testing.expectEqualStrings("", text(&screen, 1, &buffer));
+    // Behind it, the primary screen rewrapped.
+    screen.useAlternate(false, true, true);
+    try std.testing.expectEqualStrings("thr", text(&screen, 0, &buffer));
+    try std.testing.expectEqualStrings("ee", text(&screen, 1, &buffer));
+    try std.testing.expectEqualStrings("r", text(&screen, 3, &buffer));
+    try std.testing.expectEqual(@as(u16, 3), screen.cursor.y);
+    try std.testing.expectEqual(@as(u16, 1), screen.cursor.x);
+}
+
+test "a new width rewraps the screen and the scrollback, the cursor on its character" {
+    var screen = try Screen.init(std.testing.allocator, .{ .cols = 6, .rows = 3, .scrollback = 10 });
+    defer screen.deinit();
+    var buffer: [64]u8 = undefined;
+    // "abcdefghij" wraps once; "xy" is a line of its own; the prompt holds
+    // the cursor.
+    printAll(&screen, "abcdefghij\nxy\n$ ");
+    try std.testing.expectEqual(@as(usize, 1), screen.history.count);
+    try screen.resize(4, 3);
+    // The screen was full, so it keeps the bottom; the rest of the
+    // rewrapped line went to the scrollback.
+    try std.testing.expectEqualStrings("ij", text(&screen, 0, &buffer));
+    try std.testing.expectEqualStrings("xy", text(&screen, 1, &buffer));
+    try std.testing.expectEqualStrings("$", text(&screen, 2, &buffer));
+    try std.testing.expectEqual(@as(usize, 2), screen.history.count);
+    try std.testing.expect(screen.history.get(1).wrapped);
+    try std.testing.expectEqual(@as(u16, 2), screen.cursor.y);
+    try std.testing.expectEqual(@as(u16, 2), screen.cursor.x);
+    // Wider again joins the wrapped line.
+    try screen.resize(12, 3);
+    try std.testing.expectEqual(@as(usize, 0), screen.history.count);
+    try std.testing.expectEqualStrings("abcdefghij", text(&screen, 0, &buffer));
+    try std.testing.expect(!screen.wrapped(0));
+    try std.testing.expectEqualStrings("xy", text(&screen, 1, &buffer));
+    try std.testing.expectEqualStrings("$", text(&screen, 2, &buffer));
+    try std.testing.expectEqual(@as(u16, 2), screen.cursor.y);
+    try std.testing.expectEqual(@as(u16, 2), screen.cursor.x);
+    // Printing goes on where it was.
+    printAll(&screen, "ok");
+    try std.testing.expectEqualStrings("$ ok", text(&screen, 2, &buffer));
+}
+
+test "rewrapping keeps wide characters whole and the pending wrap" {
+    var screen = try Screen.init(std.testing.allocator, .{ .cols = 5, .rows = 2, .scrollback = 10 });
+    defer screen.deinit();
+    var buffer: [64]u8 = undefined;
+    // "ab中d" fills the row, the cursor waiting to wrap; 中 does not fit
+    // after "ab" at 3 columns.
+    printAll(&screen, "ab中d");
+    try std.testing.expect(screen.cursor.pending_wrap);
+    try screen.resize(3, 2);
+    try std.testing.expectEqualStrings("ab", text(&screen, 0, &buffer));
+    try std.testing.expect(screen.wrapped(0));
+    try std.testing.expectEqualStrings("中d", text(&screen, 1, &buffer));
+    try std.testing.expectEqual(@as(usize, 0), screen.history.count);
+    try std.testing.expect(screen.cursor.pending_wrap);
+    try std.testing.expectEqual(@as(u16, 2), screen.cursor.x);
+    try std.testing.expectEqual(@as(u16, 1), screen.cursor.y);
+    // Back at 5 columns the blank left for 中 goes, and the cursor waits
+    // at the edge again.
+    try screen.resize(5, 2);
+    try std.testing.expectEqualStrings("ab中d", text(&screen, 0, &buffer));
+    try std.testing.expect(screen.cursor.pending_wrap);
+    try std.testing.expectEqual(@as(u16, 4), screen.cursor.x);
+    printAll(&screen, "f");
+    try std.testing.expectEqualStrings("f", text(&screen, 1, &buffer));
+}
+
+test "tracked positions move with their cells" {
+    var screen = try Screen.init(std.testing.allocator, .{ .cols = 8, .rows = 4, .scrollback = 10 });
+    defer screen.deinit();
+    printAll(&screen, "abcdefghijkl\n$ ");
+    // 'j' at row 1, column 1; '$' at row 2.
+    var tracked = [_]Position{ .{ .row = screen.screenRow(1), .col = 1 }, .{ .row = screen.screenRow(2), .col = 0 } };
+    try screen.resizeTracking(4, 4, &tracked);
+    const j = screen.rowAt(tracked[0].row).?.cells[tracked[0].col];
+    try std.testing.expectEqual(@as(u21, 'j'), j.cp);
+    try std.testing.expectEqual(@as(u21, '$'), screen.rowAt(tracked[1].row).?.cells[tracked[1].col].cp);
+    try std.testing.expectEqual(@as(u16, 1), tracked[0].col);
 }
 
 test "tabs, charsets and repeat" {

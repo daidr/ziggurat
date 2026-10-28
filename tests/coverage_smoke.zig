@@ -5,11 +5,7 @@ const ui = @import("ziggurat_ui");
 const shadows = @import("ziggurat_shadows");
 const vector = @import("ziggurat_vector");
 const drawing = shadows.drawing;
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn cairo_image_surface_create(c_int, c_int, c_int) ?*anyopaque;
 extern fn cairo_create(*anyopaque) ?*anyopaque;
 extern fn cairo_destroy(*anyopaque) void;
@@ -118,7 +114,7 @@ fn render(renderer: anytype, allocator: std.mem.Allocator, base: z.Paint) !void 
         const unaligned: drawing.CoverageView = .{ .lease = &raw_lease, .identity = try drawing.reserveRasterIdentity(), .coverage = .{ .pixels = &raw, .width = 5, .height = 3, .stride = 7, .origin_x = 0, .origin_y = 0, .scale = scale } };
         var edge_leases: [3]drawing.Lease = undefined;
         var edges: [3]drawing.CoverageView = undefined;
-        const solid = [_]u8{255} ** 4;
+        const solid = @as([4]u8, @splat(255));
         for (&edge_leases, &edges) |*lease, *view| {
             lease.* = drawing.Lease.init(main_thread);
             view.* = .{ .lease = lease, .identity = try drawing.reserveRasterIdentity(), .coverage = .{ .pixels = &solid, .width = 2, .height = 2, .stride = 2, .origin_x = 0, .origin_y = 0, .scale = scale } };
@@ -205,13 +201,16 @@ fn pressure(renderer: anytype, paint: z.Paint) !void {
             try equal(before.coverage.native_objects, failed.coverage.native_objects);
             try equal(0, views[1].lease.pins);
         }
-        for (views[1..31]) |view| try renderer.uploadCoverage(view);
-        try equal(32, renderer.rasterStats().resident_entries);
-        // Refresh dynamic image before evicting the oldest A8 entry.
+        for (views[1..32]) |view| try renderer.uploadCoverage(view);
+        // Past thirty-two entries the slot table grows instead of evicting.
+        try equal(33, renderer.rasterStats().resident_entries);
+        try equal(1, views[0].lease.pins);
+        // Refresh dynamic image before the budget evicts the oldest A8 entry.
+        try renderer.setRasterBudget(renderer.rasterStats().pixel_bytes);
         try renderer.uploadDynamicImage(image);
-        try renderer.uploadCoverage(views[31]);
+        try renderer.uploadCoverage(views[32]);
         try equal(0, views[0].lease.pins);
-        try equal(32, renderer.rasterStats().resident_entries);
+        try equal(33, renderer.rasterStats().resident_entries);
         try renderer.begin(paint);
         try expectError(error.CoverageNotUploaded, renderer.coverage(views[0], .{}, ui.Color.rgb(0)));
         try renderer.coverage(views[1], .{ .x = 2, .y = 2 }, ui.Color.rgb(0xff0000));
@@ -391,5 +390,5 @@ pub fn main() !void {
         try integrated(allocator, true, false);
         try integrated(allocator, true, true);
     }
-    std.debug.print("coverage: software/path/shadow pixels, padded A8, shared budget/LRU32, candidate rollback, dynamic retry and Context failed/close pins passed\n", .{});
+    std.debug.print("coverage: software/path/shadow pixels, padded A8, shared budget/growing LRU, candidate rollback, dynamic retry and Context failed/close pins passed\n", .{});
 }

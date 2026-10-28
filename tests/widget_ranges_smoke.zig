@@ -1,11 +1,7 @@
 const std = @import("std");
 const z = @import("ziggurat");
 const shared = @import("widget_ranges_shared.zig");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 const Native = struct {
     pub fn paint(window: z.Window) void {
         const hwnd: c.HWND = window.nativeHandle();
@@ -68,10 +64,10 @@ const Native = struct {
         if (!window.isClosed()) _ = c.SendMessageW(hwnd, if (input.modifiers.alt) c.WM_SYSKEYUP else c.WM_KEYUP, code, flags | 1 << 31);
     }
 };
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var allocator: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(allocator.deinit() == .ok);
-    var args = try std.process.argsWithAllocator(allocator.allocator());
+    var args = try init.args.iterateAllocator(allocator.allocator());
     defer args.deinit();
     _ = args.next();
     const uia_only = if (args.next()) |arg| std.mem.eql(u8, arg, "--uia-only") else false;

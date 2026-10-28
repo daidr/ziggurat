@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const drawing = @import("ziggurat_drawing_resources");
 const v = @import("ziggurat_vector");
 const d = @import("document.zig");
@@ -103,7 +104,7 @@ pub const Paint = struct {
     image: *const Snapshot,
     inverse: v.Transform,
     pub fn validate(self: Paint) !void {
-        inline for (std.meta.fields(v.Transform)) |field| if (!std.math.isFinite(@field(self.inverse, field.name)) or @abs(@field(self.inverse, field.name)) > 1e15) return error.UnsupportedImagePrecision;
+        inline for (zio.fields(v.Transform)) |field| if (!std.math.isFinite(@field(self.inverse, field.name)) or @abs(@field(self.inverse, field.name)) > 1e15) return error.UnsupportedImagePrecision;
         if (self.image.width == 0 or self.image.height == 0 or @as(u64, self.image.width) * self.image.height * 4 != self.image.pixels.len) return error.InvalidImageResource;
     }
     /// Bilinear sampling of premultiplied BGRA8 at physical pixel centers.
@@ -132,14 +133,14 @@ pub const Placement = struct { rectangle: pre.Box, inverse: v.Transform };
 pub fn place(node: d.Node, positioning: pre.Box, width: u32, height: u32, matrix: v.Transform) !?Placement {
     const fit = (try pre.viewTransform(.{ .width = @floatFromInt(width), .height = @floatFromInt(height) }, node, positioning.width, positioning.height)).then(.{ .x0 = positioning.x, .y0 = positioning.y });
     const full = fit.then(matrix);
-    inline for (std.meta.fields(v.Transform)) |field| if (!std.math.isFinite(@field(full, field.name)) or @abs(@field(full, field.name)) > 1e15) return error.UnsupportedImagePrecision;
+    inline for (zio.fields(v.Transform)) |field| if (!std.math.isFinite(@field(full, field.name)) or @abs(@field(full, field.name)) > 1e15) return error.UnsupportedImagePrecision;
     const determinant = full.xx * full.yy - full.xy * full.yx;
     if (determinant == 0) {
         if (pre.nonsingular(full)) return error.UnsupportedImagePrecision;
         return null;
     }
     const inverse: v.Transform = .{ .xx = full.yy / determinant, .xy = -full.xy / determinant, .yx = -full.yx / determinant, .yy = full.xx / determinant, .x0 = (full.xy * full.y0 - full.yy * full.x0) / determinant, .y0 = (full.yx * full.x0 - full.xx * full.y0) / determinant };
-    inline for (std.meta.fields(v.Transform)) |field| if (!std.math.isFinite(@field(inverse, field.name)) or @abs(@field(inverse, field.name)) > 1e15) return error.UnsupportedImagePrecision;
+    inline for (zio.fields(v.Transform)) |field| if (!std.math.isFinite(@field(inverse, field.name)) or @abs(@field(inverse, field.name)) > 1e15) return error.UnsupportedImagePrecision;
     const left = @max(positioning.x, fit.x0);
     const top = @max(positioning.y, fit.y0);
     const right = @min(positioning.x + positioning.width, fit.x0 + fit.xx * @as(f64, @floatFromInt(width)));

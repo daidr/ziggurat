@@ -1,19 +1,15 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
-const win = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("objbase.h");
-    @cInclude("shellapi.h");
-    @cInclude("shlobj.h");
-}) else struct {};
+const win = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 const NativeShellFailure = extern struct { domain: u32 = 0, code: u32 = 0 };
 const gio = if (builtin.os.tag == .linux) struct {
     extern fn zsh_open_uri(uri: [*:0]const u8, failure: *NativeShellFailure) c_int;
     extern fn zsh_open_path(path: [*:0]const u8, failure: *NativeShellFailure) c_int;
     extern fn zsh_reveal(path: [*:0]const u8, timeout_ms: c_int, failure: *NativeShellFailure) c_int;
     extern fn zsh_trash(path: [*:0]const u8, failure: *NativeShellFailure) c_int;
+    extern fn zsh_apps(visit: *const fn (?*anyopaque, [*:0]const u8, [*:0]const u8, [*:0]const u8) callconv(.c) c_int, context: ?*anyopaque) c_int;
+    extern fn zsh_launch_app(path: [*:0]const u8, failure: *NativeShellFailure) c_int;
 } else struct {};
 const GioStatus = enum(c_int) { ok = 0, failed = 1, not_supported = 2, not_found = 3, access_denied = 4, unavailable = 5, timed_out = 6, invalid = 7, _ };
 
@@ -83,9 +79,37 @@ pub const capabilities = .{
     .reveal = builtin.os.tag == .windows or builtin.os.tag == .linux,
     .trash = builtin.os.tag == .windows or builtin.os.tag == .linux,
     .file_icon = builtin.os.tag == .windows,
-    .installed_applications = false,
-    .launch_application = false,
+    .installed_applications = builtin.os.tag == .windows or builtin.os.tag == .linux,
+    .launch_application = builtin.os.tag == .windows or builtin.os.tag == .linux,
 };
+
+/// An application as a launcher lists it. `id` is the AppUserModelID (or a
+/// known-folder path for a desktop app without one) on Windows and the
+/// desktop file ID on Linux; `path` is `shell:AppsFolder\<id>` on Windows and
+/// the desktop entry on Linux, which `launchApp` starts.
+pub const InstalledApp = struct { name: []const u8, id: []const u8, path: []const u8 };
+/// Owns the strings of every listed app.
+pub const InstalledApps = struct {
+    arena: std.heap.ArenaAllocator,
+    items: []InstalledApp,
+    pub fn deinit(self: *InstalledApps) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+/// Orders by case-folded name, then path, as launchers sort.
+pub fn sortApps(items: []InstalledApp) void {
+    std.sort.pdq(InstalledApp, items, {}, struct {
+        fn less(_: void, a: InstalledApp, b: InstalledApp) bool {
+            return switch (std.ascii.orderIgnoreCase(a.name, b.name)) {
+                .lt => true,
+                .gt => false,
+                .eq => std.mem.order(u8, a.path, b.path) == .lt,
+            };
+        }
+    }.less);
+}
 
 /// Standalone blocking system work on a caller-created worker. It never owns a
 /// Window/App, starts a thread, posts a task or invokes an application callback.
@@ -192,7 +216,7 @@ pub const Worker = struct {
             const target = narrowZ(&storage, url);
             if (options.cancellation) |cancel| try cancel.check();
             var failure: NativeShellFailure = .{};
-            return self.openStatus(@enumFromInt(gio.zsh_open_uri(target.ptr, &failure)), failure);
+            return self.openStatus(@fromBackingInt(@intCast(gio.zsh_open_uri(target.ptr, &failure))), failure);
         } else return error.UnsupportedCapability;
     }
     /// Opens an existing absolute file or directory with its association. An
@@ -216,7 +240,7 @@ pub const Worker = struct {
             try requireExisting(target);
             if (options.cancellation) |cancel| try cancel.check();
             var failure: NativeShellFailure = .{};
-            return self.openStatus(@enumFromInt(gio.zsh_open_path(target.ptr, &failure)), failure);
+            return self.openStatus(@fromBackingInt(@intCast(gio.zsh_open_path(target.ptr, &failure))), failure);
         } else return error.UnsupportedCapability;
     }
     /// Shows an existing absolute item selected in the system file manager.
@@ -253,7 +277,7 @@ pub const Worker = struct {
             try requireExisting(target);
             if (options.cancellation) |cancel| try cancel.check();
             var failure: NativeShellFailure = .{};
-            const status: GioStatus = @enumFromInt(gio.zsh_reveal(target.ptr, @intCast(options.timeout_ms), &failure));
+            const status: GioStatus = @fromBackingInt(@intCast(gio.zsh_reveal(target.ptr, @intCast(options.timeout_ms), &failure)));
             if (status == .ok) return;
             self.recordGio(failure);
             return switch (status) {
@@ -302,7 +326,7 @@ pub const Worker = struct {
             const target = narrowZ(&storage, path);
             if (options.cancellation) |cancel| try cancel.check();
             var failure: NativeShellFailure = .{};
-            const status: GioStatus = @enumFromInt(gio.zsh_trash(target.ptr, &failure));
+            const status: GioStatus = @fromBackingInt(@intCast(gio.zsh_trash(target.ptr, &failure)));
             if (status == .ok) return;
             self.recordGio(failure);
             return switch (status) {
@@ -310,6 +334,53 @@ pub const Worker = struct {
                 .not_found => error.FileNotFound,
                 .access_denied => error.AccessDenied,
                 else => error.TrashFailed,
+            };
+        } else return error.UnsupportedCapability;
+    }
+    /// Lists installed applications, sorted by name: the Start menu's All
+    /// apps (packaged and desktop apps alike) on Windows, and the desktop
+    /// entries menus show on Linux. Reads the disk; owned by the caller.
+    pub fn installedApps(self: *Worker, allocator: std.mem.Allocator) !InstalledApps {
+        try self.require();
+        var result: InstalledApps = .{ .arena = .init(allocator), .items = &.{} };
+        errdefer result.arena.deinit();
+        var list: std.ArrayList(InstalledApp) = .empty;
+        const arena = result.arena.allocator();
+        if (builtin.os.tag == .windows) {
+            try self.ensureApartment();
+            try appsFolder(self, arena, &list);
+        } else if (builtin.os.tag == .linux) {
+            var collector: AppCollector = .{ .allocator = arena, .list = &list };
+            if (gio.zsh_apps(AppCollector.visit, &collector) != 0) return collector.failure orelse error.OutOfMemory;
+        } else return error.UnsupportedCapability;
+        result.items = list.items;
+        sortApps(result.items);
+        return result;
+    }
+    /// Starts an application from `installedApps` by its path, or brings it
+    /// to the front if it runs and the system does so. Windows also accepts
+    /// any program path.
+    pub fn launchApp(self: *Worker, path: []const u8) !void {
+        try self.require();
+        try validateText(path);
+        if (path.len == 0) return error.FileNotFound;
+        if (builtin.os.tag == .windows) {
+            var storage: [max_argument_bytes + 1]u16 = undefined;
+            const target = try wideZ(&storage, path);
+            try self.ensureApartment();
+            return self.shellExecute(target.ptr);
+        } else if (builtin.os.tag == .linux) {
+            if (!absolute(path)) return error.AbsolutePathRequired;
+            var storage: [max_argument_bytes + 1]u8 = undefined;
+            const target = narrowZ(&storage, path);
+            var failure: NativeShellFailure = .{};
+            const status: GioStatus = @fromBackingInt(@intCast(gio.zsh_launch_app(target.ptr, &failure)));
+            if (status == .ok) return;
+            self.recordGio(failure);
+            return switch (status) {
+                .not_found => error.FileNotFound,
+                .access_denied => error.AccessDenied,
+                else => error.OpenFailed,
             };
         } else return error.UnsupportedCapability;
     }
@@ -353,7 +424,7 @@ pub const Worker = struct {
     /// Returns an owned child. The caller must wait or terminateAndWait on this
     /// worker, even if posting its result to the UI fails or the App has closed.
     /// Arguments/cwd are borrowed only until return. No child stream is piped.
-    pub fn launchExecutable(self: *Worker, allocator: std.mem.Allocator, options: LaunchOptions) !Child {
+    pub fn launchExecutable(self: *Worker, _: std.mem.Allocator, options: LaunchOptions) !Child {
         try self.require();
         if (options.cancellation) |cancel| try cancel.check();
         try validateLaunch(options);
@@ -378,21 +449,8 @@ pub const Worker = struct {
             var argv: [max_arguments + 1][]const u8 = undefined;
             argv[0] = options.executable;
             @memcpy(argv[1..][0..options.arguments.len], options.arguments);
-            var child = std.process.Child.init(argv[0 .. options.arguments.len + 1], allocator);
-            child.stdin_behavior = .Ignore;
-            child.stdout_behavior = .Ignore;
-            child.stderr_behavior = .Ignore;
-            child.cwd = options.cwd;
             if (options.cancellation) |cancel| try cancel.check();
-            try child.spawn();
-            child.waitForSpawn() catch |err| {
-                // The exec-error handshake has consumed its pipe. Reap the
-                // failed child here rather than returning an unowned zombie.
-                _ = std.posix.waitpid(child.id, 0);
-                return err;
-            };
-            child.argv = &.{};
-            child.cwd = null;
+            const child = try zio.spawn(.{ .argv = argv[0 .. options.arguments.len + 1], .stdin = .ignore, .stdout = .ignore, .stderr = .ignore, .cwd = zio.cwd(options.cwd) });
             return .{ .thread = self.thread, .native = child };
         } else return error.UnsupportedCapability;
     }
@@ -424,8 +482,11 @@ pub const Child = struct {
             _ = win.CloseHandle(self.native);
             self.native = null;
             self.term = .{ .Exited = code };
-        } else if (builtin.os.tag == .linux) self.term = switch (try self.native.wait()) {
-            inline else => |value, tag| @unionInit(Term, @tagName(tag), value),
+        } else if (builtin.os.tag == .linux) self.term = switch (try self.native.wait(zio.io())) {
+            .exited => |code| .{ .Exited = code },
+            .signal => |signal| .{ .Signal = @backingInt(signal) },
+            .stopped => |signal| .{ .Stopped = @backingInt(signal) },
+            .unknown => |value| .{ .Unknown = value },
         } else return error.UnsupportedCapability;
         return self.term.?;
     }
@@ -441,7 +502,7 @@ pub const Child = struct {
                 }
             }
         } else if (builtin.os.tag == .linux) {
-            std.posix.kill(self.native.id, std.posix.SIG.KILL) catch |err| switch (err) {
+            std.posix.kill(self.native.id.?, .KILL) catch |err| switch (err) {
                 error.ProcessNotFound => {},
                 else => return err,
             };
@@ -449,6 +510,97 @@ pub const Child = struct {
         return self.wait();
     }
 };
+
+const AppCollector = struct {
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(InstalledApp),
+    failure: ?anyerror = null,
+    fn visit(ptr: ?*anyopaque, name: [*:0]const u8, id: [*:0]const u8, path: [*:0]const u8) callconv(.c) c_int {
+        const self: *AppCollector = @ptrCast(@alignCast(ptr.?));
+        self.add(std.mem.span(name), std.mem.span(id), std.mem.span(path)) catch |err| {
+            self.failure = err;
+            return 1;
+        };
+        return 0;
+    }
+    fn add(self: *AppCollector, name: []const u8, id: []const u8, path: []const u8) !void {
+        try self.list.append(self.allocator, .{ .name = try self.allocator.dupe(u8, name), .id = try self.allocator.dupe(u8, id), .path = try self.allocator.dupe(u8, path) });
+    }
+};
+
+const Guid = extern struct { data1: u32, data2: u16, data3: u16, data4: [8]u8 };
+const ShellItem = extern struct {
+    vtable: *const extern struct {
+        query_interface: *const anyopaque,
+        add_ref: *const anyopaque,
+        release: *const fn (*ShellItem) callconv(.winapi) u32,
+        bind_to_handler: *const fn (*ShellItem, ?*anyopaque, *const Guid, *const Guid, *?*anyopaque) callconv(.winapi) i32,
+        get_parent: *const anyopaque,
+        get_display_name: *const fn (*ShellItem, u32, *?[*:0]u16) callconv(.winapi) i32,
+    },
+};
+const EnumShellItems = extern struct {
+    vtable: *const extern struct {
+        query_interface: *const anyopaque,
+        add_ref: *const anyopaque,
+        release: *const fn (*EnumShellItems) callconv(.winapi) u32,
+        next: *const fn (*EnumShellItems, u32, *?*ShellItem, *u32) callconv(.winapi) i32,
+    },
+};
+const folder_apps: Guid = .{ .data1 = 0x1e87508d, .data2 = 0x89c2, .data3 = 0x42f0, .data4 = .{ 0x8a, 0x7e, 0x64, 0x5a, 0x0f, 0x50, 0xca, 0x58 } };
+const handler_enum_items: Guid = .{ .data1 = 0x94f60519, .data2 = 0x2850, .data3 = 0x4924, .data4 = .{ 0xaa, 0x5a, 0xd1, 0x5e, 0x84, 0x86, 0x80, 0x39 } };
+const iid_shell_item: Guid = .{ .data1 = 0x43826d1e, .data2 = 0xe718, .data3 = 0x42ee, .data4 = .{ 0xbc, 0x55, 0xa1, 0xe2, 0x61, 0xc3, 0x7b, 0xfe } };
+const iid_enum_shell_items: Guid = .{ .data1 = 0x70629033, .data2 = 0xe363, .data3 = 0x4a28, .data4 = .{ 0xa5, 0x67, 0x0d, 0xb7, 0x80, 0x06, 0xe6, 0xd7 } };
+const shell_apps = if (builtin.os.tag == .windows) struct {
+    extern "shell32" fn SHGetKnownFolderItem(*const Guid, u32, ?*anyopaque, *const Guid, *?*anyopaque) callconv(.winapi) i32;
+    extern "ole32" fn CoTaskMemFree(?*anyopaque) callconv(.winapi) void;
+} else struct {};
+const apps_folder_prefix = "shell:AppsFolder\\";
+
+/// The shell's Applications folder (FOLDERID_AppsFolder), which the Start
+/// menu's All apps list shows.
+fn appsFolder(worker: *Worker, allocator: std.mem.Allocator, list: *std.ArrayList(InstalledApp)) !void {
+    if (builtin.os.tag != .windows) return error.UnsupportedCapability;
+    var folder_object: ?*anyopaque = null;
+    var result = shell_apps.SHGetKnownFolderItem(&folder_apps, 0, null, &iid_shell_item, &folder_object);
+    if (result < 0 or folder_object == null) {
+        worker.last_failure = .{ .domain = .hresult, .code = @bitCast(result) };
+        return error.ApplicationsUnavailable;
+    }
+    const folder: *ShellItem = @ptrCast(@alignCast(folder_object.?));
+    defer _ = folder.vtable.release(folder);
+    var enum_object: ?*anyopaque = null;
+    result = folder.vtable.bind_to_handler(folder, null, &handler_enum_items, &iid_enum_shell_items, &enum_object);
+    if (result < 0 or enum_object == null) {
+        worker.last_failure = .{ .domain = .hresult, .code = @bitCast(result) };
+        return error.ApplicationsUnavailable;
+    }
+    const items: *EnumShellItems = @ptrCast(@alignCast(enum_object.?));
+    defer _ = items.vtable.release(items);
+    const normal_display = 0;
+    const parent_relative_parsing = 0x80018001;
+    while (true) {
+        var item: ?*ShellItem = null;
+        var fetched: u32 = 0;
+        // S_FALSE (1) ends the enumeration.
+        if (items.vtable.next(items, 1, &item, &fetched) != 0 or fetched == 0) break;
+        const shell_item = item orelse break;
+        defer _ = shell_item.vtable.release(shell_item);
+        var name_wide: ?[*:0]u16 = null;
+        var id_wide: ?[*:0]u16 = null;
+        _ = shell_item.vtable.get_display_name(shell_item, normal_display, &name_wide);
+        defer shell_apps.CoTaskMemFree(name_wide);
+        _ = shell_item.vtable.get_display_name(shell_item, parent_relative_parsing, &id_wide);
+        defer shell_apps.CoTaskMemFree(id_wide);
+        const name_units = std.mem.span(name_wide orelse continue);
+        const id_units = std.mem.span(id_wide orelse continue);
+        if (name_units.len == 0 or id_units.len == 0) continue;
+        const name = std.unicode.wtf16LeToWtf8Alloc(allocator, name_units) catch |err| return err;
+        const id = try std.unicode.wtf16LeToWtf8Alloc(allocator, id_units);
+        const path = try std.mem.concat(allocator, u8, &.{ apps_folder_prefix, id });
+        try list.append(allocator, .{ .name = name, .id = id, .path = path });
+    }
+}
 
 fn validateText(value: []const u8) !void {
     if (value.len > max_argument_bytes) return error.ArgumentTooLong;
@@ -512,7 +664,7 @@ fn schemeSyntax(scheme: []const u8) bool {
 }
 /// A filesystem root has nothing after its root separator(s).
 fn root(path: []const u8) bool {
-    const trimmed = std.mem.trimRight(u8, path, if (builtin.os.tag == .windows) "\\/" else "/");
+    const trimmed = std.mem.trimEnd(u8, path, if (builtin.os.tag == .windows) "\\/" else "/");
     if (builtin.os.tag != .windows) return trimmed.len == 0;
     if (trimmed.len == 2 and trimmed[1] == ':') return true;
     // \\server\share with no further component.
@@ -545,7 +697,7 @@ fn requireExisting(path: anytype) !void {
             else => error.FileNotFound,
         };
     }
-    _ = std.posix.fstatatZ(std.posix.AT.FDCWD, path.ptr, std.posix.AT.SYMLINK_NOFOLLOW) catch |err| return switch (err) {
+    _ = std.Io.Dir.cwd().statFile(zio.io(), path, .{ .follow_symlinks = false }) catch |err| return switch (err) {
         error.FileNotFound => error.FileNotFound,
         error.AccessDenied => error.AccessDenied,
         else => err,
@@ -612,7 +764,7 @@ test "shell arguments are bounded UTF-8 paths and Windows quoting round trips" {
     const options: LaunchOptions = .{ .executable = path, .arguments = &.{ "", "a b", "中文🦎", "quote\"end", "slash\\", "\\\"", "$(literal);&" } };
     var buffer: [2048]u16 = undefined;
     const line = try commandLine(&buffer, options);
-    var args = try std.process.ArgIteratorWindows.init(std.testing.allocator, line);
+    var args = try std.process.Args.Iterator.Windows.init(std.testing.allocator, line);
     defer args.deinit();
     try std.testing.expectEqualStrings(path, args.next().?);
     for (options.arguments) |arg| try std.testing.expectEqualStrings(arg, args.next().?);
@@ -651,7 +803,7 @@ test "shell URLs pass only absolute allowlisted schemes" {
     for (rejected) |case| try std.testing.expectError(case[1], validateUrl(case[0], &.{}));
     try std.testing.expectError(error.InvalidScheme, validateUrl("file:///x", &.{"file"}));
     try std.testing.expectError(error.InvalidScheme, validateUrl("https://h", &.{"c"}));
-    const long = [_]u8{'a'} ** (max_url_bytes + 1);
+    const long = @as([max_url_bytes + 1]u8, @splat('a'));
     try std.testing.expectError(error.ArgumentTooLong, validateUrl(&long, &.{}));
     try std.testing.expect(root(if (builtin.os.tag == .windows) "C:\\" else "/"));
     try std.testing.expect(!root(if (builtin.os.tag == .windows) "C:\\x" else "/x"));

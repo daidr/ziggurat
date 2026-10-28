@@ -21,7 +21,12 @@ pub const Options = struct {
     /// Draw the field's border and background. Turn it off inside an
     /// editable combo box or token field, which draw their own.
     frame: bool = true,
+    /// Called once the field registered with the window, after the first
+    /// frame that placed it: from then on it can take focus and text.
+    attached: ?Callback = null,
 };
+
+pub const Callback = struct { context: ?*anyopaque = null, call: *const fn (?*anyopaque, *TextField) void };
 
 /// Keep TextField at a stable address while the view emits it and until
 /// `detach`. The Field, its Document and Engine stay owned by the caller.
@@ -36,6 +41,8 @@ pub const TextField = struct {
     pending: ?view.Rect = null,
     queued: bool = false,
     attached: bool = false,
+    /// `focus` was called before the field had a node id.
+    focus_pending: bool = false,
     /// The first error from deferred preparation or attach, for diagnostics.
     last_error: ?anyerror = null,
     /// What an enclosing form field adds for the paint that follows; its
@@ -49,7 +56,18 @@ pub const TextField = struct {
     /// The leaf to emit from a build function with `View.embed`. Give it a
     /// `Style.key` when siblings before it can change, so its id stays put.
     pub fn embed(self: *TextField) view.Embed {
-        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .annotate = annotate, .status = status };
+        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .annotate = annotate, .status = status, .cursor = cursor };
+    }
+
+    /// Give the field keyboard focus: at once when it is attached, or as
+    /// soon as the frame that attaches it lands. Call outside passes and
+    /// paint, such as from a button's branch after the pass.
+    pub fn focus(self: *TextField) void {
+        if (self.id == 0) {
+            self.focus_pending = true;
+            return;
+        }
+        self.host.focusNode(self.id);
     }
 
     /// Shows or hides the text as a password, as an eye button beside the
@@ -122,6 +140,11 @@ pub const TextField = struct {
                 return;
             };
             self.attached = true;
+            if (self.focus_pending) {
+                self.focus_pending = false;
+                self.host.focusNode(self.id);
+            }
+            if (self.options.attached) |callback| callback.call(callback.context, self);
         }
         window.invalidate();
     }
@@ -134,6 +157,10 @@ pub const TextField = struct {
         const composing = if (document.composition()) |value| value != null else |_| false;
         const empty = if (document.byteLength()) |length| length == 0 else |_| false;
         return .{ .composing = composing, .empty = empty and !composing };
+    }
+
+    fn cursor(_: *anyopaque, _: u64, _: view.Point) ?view.Cursor {
+        return .text;
     }
 
     fn annotate(ptr: *anyopaque, annotation: view.Annotation) void {

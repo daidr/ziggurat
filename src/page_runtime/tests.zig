@@ -351,7 +351,7 @@ test "plugins need valid distinct names" {
     defer f.deinit();
     try std.testing.expectError(error.DuplicateName, f.host.use(f.echo.plugin()));
     var other = f.echo.plugin();
-    for ([_][]const u8{ "", "Echo", "1echo", "echo_two", "a" ** 33 }) |name| {
+    for ([_][]const u8{ "", "Echo", "1echo", "echo_two", &@as([33]u8, @splat('a')) }) |name| {
         other.name = name;
         try std.testing.expectError(error.InvalidName, f.host.use(other));
     }

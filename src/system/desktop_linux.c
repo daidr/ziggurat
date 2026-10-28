@@ -26,6 +26,28 @@ typedef void (*ZsdChanged)(void *owner, uint32_t bits);
 static gint live_states;
 uint32_t zsd_resource_count(void) { return (uint32_t)g_atomic_int_get(&live_states); }
 
+/* The system alert sound, or the X bell. */
+int zsd_beep(void) {
+    GdkDisplay *display = gdk_display_get_default();
+    if (!display) return ZSD_UNSUPPORTED;
+    gdk_display_beep(display);
+    return 0;
+}
+
+/* The pointer in the same root coordinates as zsd_monitors. Wayland keeps
+   the global pointer position private. */
+int zsd_cursor(int32_t *x, int32_t *y) {
+    GdkDisplay *display = gdk_display_get_default();
+    if (!display || !GDK_IS_X11_DISPLAY(display)) return ZSD_UNSUPPORTED;
+    GdkSeat *seat = gdk_display_get_default_seat(display);
+    GdkDevice *pointer = seat ? gdk_seat_get_pointer(seat) : NULL;
+    if (!pointer) return ZSD_FAILED;
+    gint px = 0, py = 0;
+    gdk_device_get_position(pointer, NULL, &px, &py);
+    *x = px; *y = py;
+    return 0;
+}
+
 int zsd_monitors(ZsdMonitor *output, uint32_t capacity, uint32_t *count) {
     GdkDisplay *display = gdk_display_get_default();
     if (!display || !GDK_IS_X11_DISPLAY(display)) return ZSD_UNSUPPORTED;

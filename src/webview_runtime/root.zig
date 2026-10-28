@@ -1,11 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const win = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("objbase.h");
-}) else struct {};
+const win = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 
 const linux = if (builtin.os.tag == .linux) @import("linux.zig") else struct {};
 pub const implemented = builtin.os.tag == .windows or builtin.os.tag == .linux;

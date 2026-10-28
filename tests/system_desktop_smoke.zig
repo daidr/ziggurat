@@ -1,13 +1,10 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const system = @import("ziggurat_system");
 const desktop = system.desktop;
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn gtk_settings_get_default() ?*anyopaque;
 extern fn g_object_set(object: *anyopaque, first: [*:0]const u8, ...) void;
 extern fn g_object_get(object: *anyopaque, first: [*:0]const u8, ...) void;
@@ -55,7 +52,7 @@ const Probe = struct {
     fn fail(self: *Probe, err: anyerror) void {
         if (self.failure == null) {
             std.debug.print("desktop smoke failed at stage {d}: {s}\n", .{ self.stage, @errorName(err) });
-            if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace.*);
+            if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
         }
         self.failure = self.failure orelse err;
         self.app.quit();
@@ -250,14 +247,14 @@ fn guiObjects() u32 {
 
 const Watchdog = struct {
     app: *z.App,
-    mutex: std.Thread.Mutex = .{},
-    condition: std.Thread.Condition = .{},
+    mutex: zio.Mutex = .{},
+    condition: zio.Condition = .{},
     done: bool = false,
     expired: bool = false,
     fn run(self: *Watchdog) void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = zio.Timer.start() catch unreachable;
         const deadline = 20 * std.time.ns_per_s;
         while (!self.done) {
             const elapsed = timer.read();

@@ -239,7 +239,7 @@ fn reentrant(allocator: std.mem.Allocator) !void {
     var hook: Hook = .{ .backing = allocator };
     const surface = try offscreen.Surface.create(app, hook.allocator(), options);
     var lease = drawing.Lease.init(std.Thread.getCurrentId());
-    const bytes = [_]u8{128} ** 64;
+    const bytes = @as([64]u8, @splat(128));
     const mask: drawing.CoverageView = .{ .lease = &lease, .identity = try drawing.reserveRasterIdentity(), .coverage = .{ .pixels = &bytes, .width = 8, .height = 8, .stride = 8, .origin_x = 0, .origin_y = 0, .scale = 1 } };
     try surface.uploadCoverage(mask);
     var buffer: ui.commands.Buffer = .{};

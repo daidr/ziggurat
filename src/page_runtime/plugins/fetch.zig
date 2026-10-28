@@ -4,6 +4,7 @@
 //! `ziggurat_net`; heads and body chunks reach the main thread through
 //! `App.post` and stream to the page as they arrive.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const ipc = @import("ziggurat_ipc");
 const net = @import("ziggurat_net");
 const runtime = @import("ziggurat_page_runtime");
@@ -87,9 +88,9 @@ pub const Plugin = struct {
     host: ?*runtime.Host = null,
     jobs: [limits.max_pending]Job = @splat(.{}),
     threads: []std.Thread = &.{},
-    mutex: std.Thread.Mutex = .{},
-    queued: std.Thread.Condition = .{},
-    returned: std.Thread.Condition = .{},
+    mutex: zio.Mutex = .{},
+    queued: zio.Condition = .{},
+    returned: zio.Condition = .{},
     queue: [limits.max_pending]u16 = undefined,
     queue_head: usize = 0,
     queue_len: usize = 0,
@@ -495,11 +496,8 @@ pub const Plugin = struct {
     // Workers.
 
     fn worker(self: *Plugin) void {
-        var client: std.http.Client = .{ .allocator = self.allocator };
+        var client: std.http.Client = .{ .allocator = self.allocator, .io = zio.io() };
         defer client.deinit();
-        var proxies: std.heap.ArenaAllocator = .init(self.allocator);
-        defer proxies.deinit();
-        client.initDefaultProxies(proxies.allocator()) catch {};
         while (true) {
             self.mutex.lock();
             while (!self.stopping and self.queue_len == 0) self.queued.wait(&self.mutex);
@@ -647,7 +645,7 @@ fn wireHead(arena: std.mem.Allocator, head: *const net.Head) !Service.Head {
         headers[count] = .{ .name = try std.ascii.allocLowerString(arena, header.name), .value = header.value };
         count += 1;
     };
-    return .{ .status = @intFromEnum(head.status), .statusText = head.reason, .url = head.url, .redirected = head.redirects > 0, .headers = headers };
+    return .{ .status = @backingInt(head.status), .statusText = head.reason, .url = head.url, .redirected = head.redirects > 0, .headers = headers };
 }
 
 /// A page's Response cannot hold Set-Cookie.

@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const web = @import("ziggurat_webview");
@@ -115,7 +116,7 @@ pub fn main() !void {
     var allocations: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(allocations.deinit() == .ok);
     const allocator = allocations.allocator();
-    const local = try std.process.getEnvVarOwned(allocator, "LOCALAPPDATA");
+    const local = try zio.getEnvVarOwned(allocator, "LOCALAPPDATA");
     defer allocator.free(local);
     var profiles: [2][]u8 = undefined;
     profiles[0] = try std.fs.path.join(allocator, &.{ local, "Ziggurat", "RectangularPages", "Left" });

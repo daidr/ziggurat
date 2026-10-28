@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
@@ -79,7 +80,7 @@ const Probe = struct {
     }
     fn check(self: *Probe, request: web.ResourceRequest, responder: *web.Responder) !void {
         self.requests += 1;
-        self.methods[@intFromEnum(request.method)] += 1;
+        self.methods[@backingInt(request.method)] += 1;
         var origins: usize = 0;
         for (request.headers) |header| if (std.ascii.eqlIgnoreCase(header.name, "Origin")) {
             origins += 1;
@@ -121,7 +122,7 @@ const Probe = struct {
 
 pub fn run(allocator: std.mem.Allocator) !void {
     std.debug.print("custom_request_engine=WebKitGTK {d}.{d}.{d}\n", .{ webkit_get_major_version(), webkit_get_minor_version(), webkit_get_micro_version() });
-    const variant = std.posix.getenv("ZIGGURAT_CUSTOM_REQUEST_VARIANT") orelse "read-policy";
+    const variant = zio.getenv("ZIGGURAT_CUSTOM_REQUEST_VARIANT") orelse "read-policy";
     const xhr = std.mem.eql(u8, variant, "xhr");
     const reads = std.mem.eql(u8, variant, "read-policy");
     if (!xhr and !reads and !std.mem.eql(u8, variant, "fetch")) return error.InvalidRequestVariant;

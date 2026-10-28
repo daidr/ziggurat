@@ -38,7 +38,7 @@ fn compare(text: []const u8, pattern: []const u8, overlapping: bool) !void {
     }
 }
 test "stream search one-comparison steps agree with contiguous oracle across native chunks" {
-    try compare("x" ** 4095 ++ "😀abc" ++ "x" ** 8190 ++ "😀abc", "😀abc", false);
+    try compare(&@as([4095]u8, @splat('x')) ++ "😀abc" ++ &@as([8190]u8, @splat('x')) ++ "😀abc", "😀abc", false);
     try compare("aaaaaa", "aaa", true);
     try compare("aaaaaa", "aaa", false);
     try compare("abababababb", "abababb", false);

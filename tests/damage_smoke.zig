@@ -1,11 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn zlg_damage_clear(*anyopaque) void;
 extern fn zlg_damage_read(*anyopaque, *[4]c_int) c_int;
 

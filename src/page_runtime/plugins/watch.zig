@@ -4,6 +4,7 @@
 //! system watcher, looks again at what changed and compares it with what it
 //! saw, and hands the differences to the main thread through `App.post`.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const ipc = @import("ziggurat_ipc");
 const runtime = @import("ziggurat_page_runtime");
@@ -59,7 +60,7 @@ pub const Allow = struct {
 /// Bounds the watches of every plugin that shares it; any thread.
 pub const Quota = struct {
     max: u32 = 128,
-    mutex: std.Thread.Mutex = .{},
+    mutex: zio.Mutex = .{},
     used: u32 = 0,
 
     fn take(self: *Quota) bool {
@@ -142,8 +143,8 @@ pub const Plugin = struct {
     implementation: Implementation = .{},
     host: ?*runtime.Host = null,
     watches: [limits.max_pending]Watch = @splat(.{}),
-    mutex: std.Thread.Mutex = .{},
-    taken: std.Thread.Condition = .{},
+    mutex: zio.Mutex = .{},
+    taken: zio.Condition = .{},
     outbox: runtime.Outbox,
 
     /// Main thread. Checks and copies the roots; returns `InvalidRoot` for a
@@ -501,11 +502,11 @@ fn run(self: *Plugin, watch: *Watch) ?Service.Code {
         self.mutex.unlock();
     }
     _ = watcher.addRoot(watch.directory) catch |err| return addFailure(err);
-    var dir = std.fs.openDirAbsolute(watch.directory, .{ .iterate = true, .no_follow = true }) catch |err| return switch (err) {
+    var dir = std.Io.Dir.openDirAbsolute(zio.io(), watch.directory, .{ .iterate = true, .follow_symlinks = false }) catch |err| return switch (err) {
         error.FileNotFound => .@"not-found",
         else => .io,
     };
-    defer dir.close();
+    defer dir.close(zio.io());
     var state: scan.Scan = .{
         .allocator = self.allocator,
         .dir = dir,
@@ -629,7 +630,7 @@ fn validPath(path: []const u8) bool {
 
 fn own(allocator: std.mem.Allocator, root: Root) !Owned {
     if (!validName(root.name) or !std.fs.path.isAbsolute(root.path)) return error.InvalidRoot;
-    const resolved = std.fs.realpathAlloc(allocator, root.path) catch return error.InvalidRoot;
+    const resolved = zio.realPathAlloc(std.Io.Dir.cwd(), root.path, allocator) catch return error.InvalidRoot;
     errdefer allocator.free(resolved);
     const entry = scan.lstatAbsolute(resolved) catch return error.InvalidRoot;
     if (entry.id.kind != .directory and entry.id.kind != .file) return error.InvalidRoot;
@@ -655,8 +656,8 @@ fn locate(root: Owned, path: []const u8) !Target {
     if (root.identity == null and entry.id.kind != .file) return error.Replaced;
     if (std.mem.eql(u8, path, ".")) return .{ .directory = entry.isDir() };
     if (!entry.isDir()) return error.Denied;
-    var dir = try std.fs.openDirAbsolute(root.path, .{ .no_follow = true });
-    defer dir.close();
+    var dir = try std.Io.Dir.openDirAbsolute(zio.io(), root.path, .{ .follow_symlinks = false });
+    defer dir.close(zio.io());
     var parts = std.mem.splitScalar(u8, path, '/');
     while (parts.next()) |part| {
         const found = scan.statAt(dir, part) catch |err| return switch (err) {
@@ -669,8 +670,8 @@ fn locate(root: Owned, path: []const u8) !Target {
             return .{ .directory = found.isDir() };
         }
         if (found.id.kind != .directory) return error.Denied;
-        const next = try dir.openDir(part, .{ .no_follow = true });
-        dir.close();
+        const next = try dir.openDir(zio.io(), part, .{ .follow_symlinks = false });
+        dir.close(zio.io());
         dir = next;
     }
     unreachable;

@@ -71,19 +71,19 @@ test "native extension deployment is an explicit bounded absolute path and one-s
 }
 
 test "request credentials require distinct exact HTTPS grants and reject Authorization ambiguity" {
-    var page: Page = .{ .url = "https://example.test", .origins = &.{.{ .origin = "https://example.test" }}, .request_credentials = &.{.{ .origin = "HTTPS://EXAMPLE.test:443/", .bearer = .{0x5a} ** 32 }} };
+    var page: Page = .{ .url = "https://example.test", .origins = &.{.{ .origin = "https://example.test" }}, .request_credentials = &.{.{ .origin = "HTTPS://EXAMPLE.test:443/", .bearer = @splat(0x5a) }} };
     try r.validate(page);
     var scratch = try r.Scratch.init(std.testing.allocator, page, .{ .directory = "/app/policy" });
     defer scratch.deinit();
-    try std.testing.expectEqualSlices(u8, &(.{0x5a} ** 32), scratch.input.origins[0].bearer.?);
-    page.request_credentials = &.{.{ .origin = "https://other.test", .bearer = .{1} ** 32 }};
+    try std.testing.expectEqualSlices(u8, &@as([32]u8, @splat(0x5a)), scratch.input.origins[0].bearer.?);
+    page.request_credentials = &.{.{ .origin = "https://other.test", .bearer = @splat(1) }};
     try std.testing.expectError(error.CredentialOriginDenied, r.validate(page));
-    page.request_credentials = &.{ .{ .origin = "https://example.test", .bearer = .{1} ** 32 }, .{ .origin = "HTTPS://EXAMPLE.test:443/", .bearer = .{2} ** 32 } };
+    page.request_credentials = &.{ .{ .origin = "https://example.test", .bearer = @splat(1) }, .{ .origin = "HTTPS://EXAMPLE.test:443/", .bearer = @splat(2) } };
     try std.testing.expectError(error.DuplicateRequestCredential, r.validate(page));
     page.allow_insecure_loopback = true;
-    page.request_credentials = &.{.{ .origin = "http://127.0.0.1", .bearer = .{1} ** 32 }};
+    page.request_credentials = &.{.{ .origin = "http://127.0.0.1", .bearer = @splat(1) }};
     try std.testing.expectError(error.CredentialRequiresHttps, r.validate(page));
-    page.request_credentials = &.{.{ .origin = "https://example.test", .bearer = .{1} ** 32 }};
+    page.request_credentials = &.{.{ .origin = "https://example.test", .bearer = @splat(1) }};
     page.origins = &.{.{ .origin = "https://example.test", .request_headers = &.{.{ .name = "aUtHoRiZaTiOn" }} }};
     try std.testing.expectError(error.ConflictingRequestCredential, r.validate(page));
 }

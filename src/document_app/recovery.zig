@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const id = @import("identity.zig");
 const Files = @import("files.zig").Files;
 const RecoveryName = @import("registry.zig").RecoveryName;
@@ -80,59 +81,59 @@ fn fileName(buffer: *[32]u8, name: *const RecoveryName) []const u8 {
 /// later launch tells crashed sessions from live ones sharing the root.
 pub const Session = struct {
     files: Files,
-    dir: std.fs.Dir,
-    lock: std.fs.File,
+    dir: std.Io.Dir,
+    lock: std.Io.File,
 
-    fn openLocked(files: Files, root: std.fs.Dir, nonce: u64, create: bool) !Session {
+    fn openLocked(files: Files, root: std.Io.Dir, nonce: u64, create: bool) !Session {
         try files.worker();
         var buffer: [17]u8 = undefined;
         const name = sessionName(&buffer, nonce);
-        var dir = if (create) try root.makeOpenPath(name, .{ .iterate = true }) else try root.openDir(name, .{ .iterate = true });
-        errdefer dir.close();
-        const lock = dir.createFile(lock_name, .{ .truncate = false, .lock = .exclusive, .lock_nonblocking = true }) catch |err| switch (err) {
+        var dir = if (create) try root.createDirPathOpen(zio.io(), name, .{ .open_options = .{ .iterate = true } }) else try root.openDir(zio.io(), name, .{ .iterate = true });
+        errdefer dir.close(zio.io());
+        const lock = dir.createFile(zio.io(), lock_name, .{ .truncate = false, .lock = .exclusive, .lock_nonblocking = true }) catch |err| switch (err) {
             error.WouldBlock => return error.SessionInUse,
             else => return err,
         };
         return .{ .files = files, .dir = dir, .lock = lock };
     }
     /// Creates and locks this process's session directory under `root`.
-    pub fn open(files: Files, root: std.fs.Dir, nonce: u64) !Session {
+    pub fn open(files: Files, root: std.Io.Dir, nonce: u64) !Session {
         return openLocked(files, root, nonce, true);
     }
     /// Locks a crashed session found by `orphans` so no other instance
     /// restores it concurrently. Fails with SessionInUse while it is live.
-    pub fn adopt(files: Files, root: std.fs.Dir, nonce: u64) !Session {
+    pub fn adopt(files: Files, root: std.Io.Dir, nonce: u64) !Session {
         return openLocked(files, root, nonce, false);
     }
     /// Releases the lock and keeps the snapshots for a later launch.
     pub fn close(self: *Session) void {
-        self.lock.close();
-        self.dir.close();
+        self.lock.close(zio.io());
+        self.dir.close(zio.io());
     }
     /// Releases the lock and deletes the session with every snapshot in it,
     /// after a clean exit or once an adopted session has been restored.
-    pub fn finish(self: *Session, root: std.fs.Dir, nonce: u64) !void {
+    pub fn finish(self: *Session, root: std.Io.Dir, nonce: u64) !void {
         try self.files.worker();
         self.close();
         var buffer: [17]u8 = undefined;
-        try root.deleteTree(sessionName(&buffer, nonce));
+        try root.deleteTree(zio.io(), sessionName(&buffer, nonce));
     }
     /// Atomically replaces the snapshot file. `buffer` holds the encoding.
     pub fn write(self: *Session, name: *const RecoveryName, snapshot: Snapshot, buffer: []u8, write_buffer: []u8) !void {
         try self.files.worker();
         const bytes = try snapshot.encode(buffer);
         var file_buffer: [32]u8 = undefined;
-        var atomic = try self.dir.atomicFile(fileName(&file_buffer, name), .{ .write_buffer = write_buffer });
+        var atomic = try zio.AtomicFile.init(self.dir, fileName(&file_buffer, name), .{ .write_buffer = write_buffer });
         defer atomic.deinit();
         atomic.file_writer.interface.writeAll(bytes) catch return atomic.file_writer.err orelse error.WriteFailed;
         try atomic.flush();
-        try atomic.file_writer.file.sync();
+        try atomic.file_writer.file.sync(zio.io());
         try atomic.renameIntoPlace();
     }
     pub fn remove(self: *Session, name: *const RecoveryName) !void {
         try self.files.worker();
         var file_buffer: [32]u8 = undefined;
-        self.dir.deleteFile(fileName(&file_buffer, name)) catch |err| switch (err) {
+        self.dir.deleteFile(zio.io(), fileName(&file_buffer, name)) catch |err| switch (err) {
             error.FileNotFound => {},
             else => return err,
         };
@@ -142,7 +143,7 @@ pub const Session = struct {
         try self.files.worker();
         var length: usize = 0;
         var iterator = self.dir.iterate();
-        while (try iterator.next()) |entry| {
+        while (try iterator.next(zio.io())) |entry| {
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, extension)) continue;
             const name = RecoveryName.parse(entry.name[0 .. entry.name.len - extension.len]) catch continue;
             if (length == output.len) return error.CapacityExceeded;
@@ -155,9 +156,9 @@ pub const Session = struct {
     pub fn read(self: *Session, name: *const RecoveryName, output: []u8) !Snapshot {
         try self.files.worker();
         var file_buffer: [32]u8 = undefined;
-        const bytes = try self.dir.readFile(fileName(&file_buffer, name), output);
+        const bytes = try self.dir.readFile(zio.io(), fileName(&file_buffer, name), output);
         if (bytes.len == output.len) {
-            const size = (try self.dir.statFile(fileName(&file_buffer, name))).size;
+            const size = (try self.dir.statFile(zio.io(), fileName(&file_buffer, name), .{})).size;
             if (size > output.len) return error.CapacityExceeded;
         }
         return Snapshot.decode(bytes);
@@ -166,11 +167,11 @@ pub const Session = struct {
 
 /// Session nonces under `root` whose lock is not held: sessions of processes
 /// that ended without `finish`. `own` excludes the caller's live session.
-pub fn orphans(files: Files, root: std.fs.Dir, own: ?u64, output: []u64) ![]u64 {
+pub fn orphans(files: Files, root: std.Io.Dir, own: ?u64, output: []u64) ![]u64 {
     try files.worker();
     var length: usize = 0;
     var iterator = root.iterate();
-    while (try iterator.next()) |entry| {
+    while (try iterator.next(zio.io())) |entry| {
         if (entry.kind != .directory or entry.name.len != 17 or entry.name[0] != 's') continue;
         const nonce = std.fmt.parseInt(u64, entry.name[1..], 16) catch continue;
         if (own == nonce) continue;

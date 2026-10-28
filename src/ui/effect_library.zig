@@ -2,6 +2,7 @@
 //! 3D transform of an element) and a refracting glass material for
 //! backdrops. They are ordinary programs compiled once by `Library.create`.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const shader = @import("ziggurat_shader");
 const shader_effects = @import("shader_effects.zig");
 const geometry = @import("geometry.zig");
@@ -70,7 +71,7 @@ pub const Pose = struct {
         return self.x == 0 and self.y == 0 and self.z == 0 and self.scale_x == 1 and self.scale_y == 1 and self.rotate == 0 and self.rotate_x == 0 and self.rotate_y == 0;
     }
     pub fn valid(self: Pose) bool {
-        inline for (std.meta.fields(Pose)) |field| {
+        inline for (zio.fields(Pose)) |field| {
             if (field.type == f32 and !std.math.isFinite(@field(self, field.name))) return false;
         }
         return std.math.isFinite(self.origin[0]) and std.math.isFinite(self.origin[1]) and self.perspective >= 0;
@@ -78,7 +79,7 @@ pub const Pose = struct {
     /// Linear interpolation between two poses, for transitions.
     pub fn mix(a: Pose, b: Pose, t: f32) Pose {
         var result = a;
-        inline for (std.meta.fields(Pose)) |field| {
+        inline for (zio.fields(Pose)) |field| {
             if (field.type == f32) @field(result, field.name) = @field(a, field.name) + (@field(b, field.name) - @field(a, field.name)) * t;
         }
         result.origin = .{ a.origin[0] + (b.origin[0] - a.origin[0]) * t, a.origin[1] + (b.origin[1] - a.origin[1]) * t };
@@ -197,6 +198,15 @@ pub const Library = struct {
         self.glass_program.destroy();
         self.passthrough_program.destroy();
         self.allocator.destroy(self);
+    }
+    /// The built-in programs and how they draw, for
+    /// `Context.prepareGpuShaders`.
+    pub fn gpuShaders(self: *const Library) [3]shader_effects.GpuShader {
+        return .{
+            .{ .program = self.passthrough_program, .target = .element },
+            .{ .program = self.pose_program, .target = .element },
+            .{ .program = self.glass_program, .target = .backdrop },
+        };
     }
     /// An element effect that changes nothing, for fading content as one
     /// layer through `EffectOptions.opacity`.

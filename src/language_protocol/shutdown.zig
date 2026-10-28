@@ -49,10 +49,10 @@ pub const Stage = enum(u4) {
 pub const max_serial = std.math.maxInt(u64) >> 4;
 pub fn stamp(serial: u64, stage: Stage) u64 {
     std.debug.assert(serial <= max_serial);
-    return (serial << 4) | @intFromEnum(stage);
+    return (serial << 4) | @backingInt(stage);
 }
 pub fn stageOf(word: u64) Stage {
-    return @enumFromInt(@as(u4, @truncate(word)));
+    return @fromBackingInt(@intCast(@as(u4, @truncate(word))));
 }
 
 pub const Control = struct {

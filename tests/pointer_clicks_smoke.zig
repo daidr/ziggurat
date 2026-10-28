@@ -3,11 +3,7 @@ const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn zlg_test_paint(*anyopaque, u32, u32) void;
 extern fn zlg_resource_count() u32;
 extern fn zgpu_resource_count() u32;
@@ -406,10 +402,10 @@ fn isolatedWindows(renderer: ui.RenderMode) !void {
     if (exit_code != 0) return error.TestProcessFailed;
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var allocator: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(allocator.deinit() == .ok);
-    var args = try std.process.argsWithAllocator(allocator.allocator());
+    var args = try init.args.iterateAllocator(allocator.allocator());
     defer args.deinit();
     _ = args.next();
     var child = false;

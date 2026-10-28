@@ -7,11 +7,7 @@ const d = @import("ziggurat_document");
 const editing = @import("ziggurat_document_editor");
 const diff = @import("ziggurat_document_diff");
 const viewing = @import("ziggurat_document_diff_view");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn gtk_widget_get_scale_factor(*anyopaque) c_int;
 extern fn zlg_resource_count() u32;
 const rectangle: ui.Rect = .{ .x = 4, .y = 4, .width = 440, .height = 240 };
@@ -373,7 +369,7 @@ fn run(allocator: std.mem.Allocator, mode: viewing.editable.Mode) !usize {
 
     // Search owns no visible-row index: a match inside collapsed unchanged
     // source records is revealed by the existing selection command path.
-    const shared = "same\n" ** 30 ++ "needle\n" ++ "same\n" ** 30;
+    const shared = &@as([30 * "same\n".len]u8, @bitCast(@as([30]["same\n".len]u8, @splat("same\n".*)))) ++ "needle\n" ++ &@as([30 * "same\n".len]u8, @bitCast(@as([30]["same\n".len]u8, @splat("same\n".*))));
     const replacement = [_][]const u8{ "left\n" ++ shared ++ "old", "right\n" ++ shared ++ "new" };
     for (documents, adapters, replacement) |document, adapter, bytes| {
         try document.replace(.{ .start = 0, .end = try document.byteLength() }, bytes);

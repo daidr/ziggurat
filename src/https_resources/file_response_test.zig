@@ -56,14 +56,14 @@ test "file request requires a strong response-safe current tag and MIME" {
     for ([_][]const u8{ "", "text/plain\r\nX: bad", "\x80" }) |mime| {
         try std.testing.expectError(error.InvalidMime, FileRequest.capture(.get, &.{}, .{ .etag = "\"v\"", .mime = mime }));
     }
-    const tag = "\"" ++ "v" ** 254 ++ "\"";
-    const request = try FileRequest.capture(.get, &.{}, .{ .etag = tag, .mime = "a" ** 127 });
+    const tag = "\"" ++ &@as([254]u8, @splat('v')) ++ "\"";
+    const request = try FileRequest.capture(.get, &.{}, .{ .etag = tag, .mime = &@as([127]u8, @splat('a')) });
     try std.testing.expectEqual(@as(usize, 256), (try request.etag()).len);
     try std.testing.expectEqual(@as(usize, 127), (try request.mime()).len);
 }
 
 test "file request GET applies complete grammar and observed duplicate policy" {
-    for ([_][]const u8{ "bytes=18446744073709551616-0,bad", "bytes=0-1,broken", "bytes=5-3", "x" ** 257 }) |bad| {
+    for ([_][]const u8{ "bytes=18446744073709551616-0,bad", "bytes=0-1,broken", "bytes=5-3", &@as([257]u8, @splat('x')) }) |bad| {
         try std.testing.expectError(if (bad.len > 256) error.TooLong else error.InvalidRange, FileRequest.capture(.get, &.{.{ .name = "Range", .value = bad }}, .{ .etag = "\"v\"" }));
     }
     try std.testing.expectError(error.DuplicateRangeHeader, FileRequest.capture(.get, &.{ .{ .name = "Range", .value = "bytes=0-1" }, .{ .name = "rAnGe", .value = "bytes=0-1" } }, .{ .etag = "\"v\"" }));
@@ -121,6 +121,6 @@ test "unavailable file helper is cold before input thread or file access" {
     if ((os == .linux or os == .windows) and @import("ziggurat_https_resources_options").enabled) return;
     var request = try FileRequest.capture(.get, &.{}, .{ .etag = "\"v\"" });
     request.etag_length = 65535;
-    const file: std.fs.File = .{ .handle = if (@import("builtin").os.tag == .windows) @ptrFromInt(1) else -1 };
+    const file: std.Io.File = .{ .handle = if (@import("builtin").os.tag == .windows) @ptrFromInt(1) else -1, .flags = .{ .nonblocking = false } };
     try std.testing.expectError(error.UnsupportedCapability, PreparedFileResponse.prepare(std.Thread.getCurrentId(), file, 0, request));
 }

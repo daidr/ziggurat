@@ -54,7 +54,8 @@ fn reconstruct(allocator: std.mem.Allocator, a: []const u8, b: []const u8, hunks
 test "diff exact line endings, empty documents, Unicode and byte coordinates" {
     const cases = [_][2][]const u8{
         .{ "", "" },                               .{ "", "a\n" },                  .{ "a\n", "" },    .{ "same", "same" },
-        .{ "a", "a\n" },                           .{ "a\r\n", "a\n" },             .{ "\n\n", "\n" }, .{ "前\n😀\n後", "前\n新😀\n後\n" },
+        .{ "a", "a\n" },                           .{ "a\r\n", "a\n" },             .{ "\n\n", "\n" },
+        .{ "前\n😀\n後", "前\n新😀\n後\n" },
         .{ "a\nb\nc\nd\ne\n", "a\nx\nc\ny\ne\n" }, .{ "a\na\nb\na", "b\na\na\na" },
     };
     for (cases) |pair| {

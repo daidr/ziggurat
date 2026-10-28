@@ -178,7 +178,7 @@ test "invalid query leaves output unchanged and corrupted cycles are bounded" {
     var output: a.Polygon = .{};
     try table.visiblePolygon(.{}, .{ .width = 2, .height = 3 }, &output);
     const old = output;
-    try std.testing.expectError(error.InvalidSpace, table.visiblePolygon(.{ .space = @enumFromInt(3) }, .{}, &output));
+    try std.testing.expectError(error.InvalidSpace, table.visiblePolygon(.{ .space = @fromBackingInt(@intCast(3)) }, .{}, &output));
     try std.testing.expectEqualDeep(old.points(), output.points());
     table.clips[0].parent = clip;
     try std.testing.expectError(error.InvalidClip, table.visiblePolygon(.{ .clip = clip }, .{}, &output));

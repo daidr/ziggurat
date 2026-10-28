@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const Watchdog = @import("watchdog.zig").Watchdog;
 extern fn XOpenDisplay(?[*:0]const u8) ?*anyopaque;
@@ -26,10 +27,10 @@ pub fn driver(args: []const []const u8) !void {
     _ = XFlush(display);
     // The driver has no App or UI loop. Give the external WM time to take the
     // actual pointer grab before moving; the parent checks observed geometry.
-    std.Thread.sleep(300 * std.time.ns_per_ms);
+    zio.sleep(300 * std.time.ns_per_ms);
     if (move(display, -1, points[2], points[3], 0) == 0) return error.InputInjectionFailed;
     _ = XFlush(display);
-    std.Thread.sleep(100 * std.time.ns_per_ms);
+    zio.sleep(100 * std.time.ns_per_ms);
     if (button(display, 1, 0, 0) == 0) return error.InputInjectionFailed;
     _ = XFlush(display);
 }
@@ -53,16 +54,16 @@ const Job = struct {
     }
     fn start(self: *Job, allocator: std.mem.Allocator, bounds: z.ClientBounds) !void {
         const origin = bounds.position orelse return error.PositionUnavailable;
-        const exe = try std.fs.selfExePathAlloc(allocator);
+        const exe = try zio.executablePathAlloc(allocator);
         defer allocator.free(exe);
-        const exe_z = try allocator.dupeZ(u8, exe);
+        const exe_z = try allocator.dupeSentinel(u8, exe, 0);
         defer allocator.free(exe_z);
         var storage: [4][32]u8 = undefined;
         var values: [4][:0]u8 = undefined;
         // XTest uses root physical pixels; public X11 positions are logical.
         const scale = gtk_widget_get_scale_factor(self.probe.window.nativeHandle().?);
         const coordinates = [_]i32{ (origin.x + 100) * scale, (origin.y + 100) * scale, (origin.x + 160) * scale, (origin.y + 140) * scale };
-        for (coordinates, &storage, &values) |coordinate, *buffer, *value| value.* = try std.fmt.bufPrintZ(buffer, "{d}", .{coordinate});
+        for (coordinates, &storage, &values) |coordinate, *buffer, *value| value.* = try std.fmt.bufPrintSentinel(buffer, "{d}", .{coordinate}, 0);
         const argv = [_:null]?[*:0]const u8{ exe_z.ptr, "--x11-driver", values[0].ptr, values[1].ptr, values[2].ptr, values[3].ptr };
         if (g_spawn_async(null, &argv, null, 1 << 1, null, null, &self.pid, null) == 0) return error.DriverSpawnFailed;
         self.watch = g_child_watch_add(self.pid, exited, self);
@@ -73,7 +74,7 @@ const Job = struct {
         self.watch = 0;
         if (self.pid != 0) {
             std.posix.kill(self.pid, std.posix.SIG.TERM) catch {};
-            _ = std.posix.waitpid(self.pid, 0);
+            _ = zio.posix.waitpid(self.pid, 0);
             g_spawn_close_pid(self.pid);
             self.pid = 0;
         }

@@ -1,9 +1,7 @@
 const std = @import("std");
 const z = @import("ziggurat");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const c = @cImport({
-    @cInclude("gtk/gtk.h");
-});
+const c = @import("ziggurat_c_gtk");
 extern fn zlg_resource_count() u32;
 
 // Real registered GTK signals enter the ordinary C adapter and Core. The event

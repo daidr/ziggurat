@@ -24,7 +24,7 @@ const main_block = [89]KeyCode{
 /// less 8).
 pub fn fromEvdev(code: u32) KeyCode {
     if (code < main_block.len) return main_block[code];
-    if (code >= 183 and code <= 194) return @enumFromInt(@intFromEnum(KeyCode.f13) + code - 183);
+    if (code >= 183 and code <= 194) return @fromBackingInt(@intCast(@backingInt(KeyCode.f13) + code - 183));
     return switch (code) {
         96 => .enter,
         97 => .control,
@@ -75,7 +75,7 @@ pub fn fromScanCode(scan: u32, extended: bool) KeyCode {
     };
     if (scan == 0x45) return .pause;
     if (scan < main_block.len) return main_block[scan];
-    if (scan >= 0x64 and scan <= 0x6e) return @enumFromInt(@intFromEnum(KeyCode.f13) + scan - 0x64);
+    if (scan >= 0x64 and scan <= 0x6e) return @fromBackingInt(@intCast(@backingInt(KeyCode.f13) + scan - 0x64));
     return if (scan == 0x76) .f24 else .unknown;
 }
 
@@ -107,7 +107,7 @@ pub fn fromMacVirtualKey(code: u32) KeyCode {
         0x4e => .subtract,
         0x4f => .f18,
         0x50 => .f19,
-        0x52...0x59 => @enumFromInt(@intFromEnum(KeyCode.numpad0) + code - 0x52),
+        0x52...0x59 => @fromBackingInt(@intCast(@backingInt(KeyCode.numpad0) + code - 0x52)),
         0x5a => .f20,
         0x5b => .numpad8,
         0x5c => .numpad9,

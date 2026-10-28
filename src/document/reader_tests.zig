@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const d = @import("root.zig");
 const a = std.testing.allocator;
 test "reader leases are bounded generational and close only after atomic release" {
@@ -30,15 +31,15 @@ test "reader leases are bounded generational and close only after atomic release
     try std.testing.expectError(error.ReaderClosed, next.release());
 }
 test "snapshot reader runs concurrently with owner edits and outlives document without root destruction on worker" {
-    const source = "abc 😀 中\r\n" ** 2048;
+    const source = &@as([2048 * "abc 😀 中\r\n".len]u8, @bitCast(@as([2048]["abc 😀 中\r\n".len]u8, @splat("abc 😀 中\r\n".*))));
     const doc = try d.Document.create(a, std.Thread.getCurrentId(), source, .{ .history_entries = 8 });
     const saved = try doc.snapshot();
     defer saved.close() catch unreachable;
     const Worker = struct {
         reader: d.Reader,
         expected: u64,
-        halfway: std.Thread.ResetEvent = .{},
-        continue_reads: std.Thread.ResetEvent = .{},
+        halfway: zio.ResetEvent = .{},
+        continue_reads: zio.ResetEvent = .{},
         failure: ?anyerror = null,
         fn run(self: *@This()) void {
             self.checked() catch |err| {
@@ -81,7 +82,7 @@ test "snapshot reader runs concurrently with owner edits and outlives document w
 }
 
 fn allocationFailures(allocator: std.mem.Allocator) !void {
-    const doc = try d.Document.create(allocator, std.Thread.getCurrentId(), "a😀b\n" ** 100, .{});
+    const doc = try d.Document.create(allocator, std.Thread.getCurrentId(), &@as([100 * "a😀b\n".len]u8, @bitCast(@as([100]["a😀b\n".len]u8, @splat("a😀b\n".*)))), .{});
     defer doc.close() catch unreachable;
     const saved = try doc.snapshot();
     defer saved.close() catch unreachable;

@@ -76,7 +76,7 @@ test "exact reference comparison rejects malformed lengths parents and invalid i
     const clip = try first.addClip(.identity, null, bounds);
     const next = try other.addClip(.identity, null, bounds);
     try std.testing.expect(s.sameReferenceGeometry(&first, .{ .clip = clip }, &other, .{ .clip = next }));
-    other.clips[@intFromEnum(next)].parent = next;
+    other.clips[@backingInt(next)].parent = next;
     try std.testing.expect(!s.sameReferenceGeometry(&first, .{ .clip = clip }, &other, .{ .clip = next }));
     other = .{};
     other.space_len = other.spaces.len + 1;

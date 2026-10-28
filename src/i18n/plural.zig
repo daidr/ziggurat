@@ -178,7 +178,7 @@ pub const Categories = std.EnumSet(Category);
 /// cases for. Found by trying integers to 1100, a million and two million,
 /// and every number below 110 with one and with two fraction digits.
 pub fn cardinalCategories(rules: Rules) Categories {
-    var found: Categories = .initEmpty();
+    var found: Categories = .empty;
     for (0..1101) |i| found.insert(cardinal(rules, .fromInt(@intCast(i))));
     found.insert(cardinal(rules, .fromInt(1_000_000)));
     found.insert(cardinal(rules, .fromInt(2_000_000)));
@@ -194,7 +194,7 @@ pub fn cardinalCategories(rules: Rules) Categories {
 
 /// The categories `ordinal` selects for some integer in `locale`.
 pub fn ordinalCategories(locale: *const Locale) Categories {
-    var found: Categories = .initEmpty();
+    var found: Categories = .empty;
     for (0..1101) |i| found.insert(ordinal(locale, .fromInt(@intCast(i))));
     return found;
 }
@@ -285,6 +285,6 @@ test "category sets list what the rules select" {
     try std.testing.expect(cardinalCategories(rulesFor(&english)).eql(.initMany(&.{ .one, .other })));
     try std.testing.expect(cardinalCategories(rulesFor(&russian)).eql(.initMany(&.{ .one, .few, .many, .other })));
     try std.testing.expect(cardinalCategories(rulesFor(&japanese)).eql(.initOne(.other)));
-    try std.testing.expect(cardinalCategories(.arabic).eql(.initFull()));
+    try std.testing.expect(cardinalCategories(.arabic).eql(.full));
     try std.testing.expect(ordinalCategories(&english).eql(.initMany(&.{ .one, .two, .few, .other })));
 }

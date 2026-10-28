@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const protocol = @import("ziggurat_language_protocol");
 const codec = protocol.codec;
 const allocator = std.heap.page_allocator;
@@ -7,12 +8,12 @@ fn emit(value: anytype) !void {
     var packet = try codec.Packet.json(allocator, value, .{});
     defer packet.deinit();
     const bytes = packet.bytes.?;
-    try std.fs.File.stdout().writeAll(bytes[0..@min(7, bytes.len)]);
-    try std.fs.File.stdout().writeAll(bytes[@min(7, bytes.len)..]);
+    try std.Io.File.stdout().writeStreamingAll(zio.io(), bytes[0..@min(7, bytes.len)]);
+    try std.Io.File.stdout().writeStreamingAll(zio.io(), bytes[@min(7, bytes.len)..]);
 }
-pub fn main() !void {
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+pub fn main(init: std.process.Init.Minimal) !void {
+    const args = try zio.argsAlloc(allocator, init.args);
+    defer zio.argsFree(allocator, args);
     if (args.len != 2) return error.ExpectedMode;
     const silent = std.mem.eql(u8, args[1], "silent");
     const remote_error = std.mem.eql(u8, args[1], "remote_error");
@@ -23,7 +24,7 @@ pub fn main() !void {
     var replied = false;
     var chunk: [83]u8 = undefined;
     while (true) {
-        const count = try std.fs.File.stdin().read(&chunk);
+        const count = try std.Io.File.stdin().readStreaming(zio.io(), &.{&chunk});
         if (count == 0) return error.UnexpectedEof;
         var offset: usize = 0;
         while (offset < count) {

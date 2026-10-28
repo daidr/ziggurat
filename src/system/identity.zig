@@ -1,11 +1,7 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
-const win = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("objbase.h");
-}) else struct {};
+const win = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern "glib-2.0" fn g_set_prgname(name: [*:0]const u8) callconv(.c) void;
 extern "shell32" fn SetCurrentProcessExplicitAppUserModelID(id: [*:0]const u16) callconv(.winapi) i32;
 
@@ -109,7 +105,7 @@ pub const LinuxEnvironment = struct {
 
     pub fn current() LinuxEnvironment {
         if (builtin.os.tag != .linux) return .{};
-        const env = std.posix.getenv;
+        const env = zio.getenv;
         return .{ .home = env("HOME"), .config_home = env("XDG_CONFIG_HOME"), .data_home = env("XDG_DATA_HOME"), .cache_home = env("XDG_CACHE_HOME"), .state_home = env("XDG_STATE_HOME"), .temp = env("TMPDIR") };
     }
 };
@@ -134,7 +130,7 @@ fn write(destination: []u8, parts: []const []const u8) ![]u8 {
     return destination[0..used];
 }
 
-pub const LinuxDirectoryError = error{ DirectoryUnavailable, ResultCapacityExceeded, UserDirectoriesTooLarge } || std.fs.File.OpenError || std.fs.File.ReadError;
+pub const LinuxDirectoryError = error{ DirectoryUnavailable, ResultCapacityExceeded, UserDirectoriesTooLarge } || std.Io.File.OpenError || std.Io.File.Reader.Error;
 pub fn linuxDirectory(environment: LinuxEnvironment, kind: Directory, destination: []u8) LinuxDirectoryError![]u8 {
     const home = absoluteValue(environment.home);
     const base: struct { value: ?[]const u8, fallback: []const u8 } = switch (kind) {
@@ -166,12 +162,12 @@ fn linuxUserDirectory(environment: LinuxEnvironment, kind: Directory, destinatio
         const root = try linuxDirectory(environment, .config, &config);
         var path: [std.fs.max_path_bytes]u8 = undefined;
         const file_path = try write(&path, &.{ root, "/user-dirs.dirs" });
-        const file = std.fs.openFileAbsolute(file_path, .{}) catch |err| switch (err) {
+        const file = std.Io.Dir.openFileAbsolute(zio.io(), file_path, .{}) catch |err| switch (err) {
             error.FileNotFound => break :read "",
             else => return err,
         };
-        defer file.close();
-        const count = try file.readAll(&storage);
+        defer file.close(zio.io());
+        const count = try zio.readAll(file, &storage);
         if (count == storage.len) return error.UserDirectoriesTooLarge;
         break :read storage[0..count];
     };
@@ -266,14 +262,14 @@ fn utf16(units: []const u16, destination: []u8) ![]u8 {
 test "identity rules match desktop entry and instance names" {
     try validate("org.example.App");
     try validate("tool_1-beta");
-    for ([_][]const u8{ "", ".hidden", "trailing.", "a..b", "with space", "slash/name", "back\\slash", "中文", "x" ** 65 }) |id| {
+    for ([_][]const u8{ "", ".hidden", "trailing.", "a..b", "with space", "slash/name", "back\\slash", "中文", &@as([65]u8, @splat('x')) }) |id| {
         try std.testing.expectError(error.InvalidIdentity, validate(id));
     }
 }
 
 test "linux directories follow the base and user directory specifications" {
     var buffer: [256]u8 = undefined;
-    const environment: LinuxEnvironment = .{ .home = "/home/me/", .config_home = "relative/ignored", .data_home = "/data/", .user_dirs = 
+    const environment: LinuxEnvironment = .{ .home = "/home/me/", .config_home = "relative/ignored", .data_home = "/data/", .user_dirs =
         \\# comment
         \\XDG_DOCUMENTS_DIR="$HOME/Docs"
         \\XDG_DOWNLOAD_DIR="/mnt/down\"load"

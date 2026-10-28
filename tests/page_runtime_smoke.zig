@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
@@ -202,7 +203,7 @@ pub fn main() !void {
     var profile: []u8 = &.{};
     defer allocator.free(profile);
     if (builtin.os.tag == .windows) {
-        const local = try std.process.getEnvVarOwned(allocator, "LOCALAPPDATA");
+        const local = try zio.getEnvVarOwned(allocator, "LOCALAPPDATA");
         defer allocator.free(local);
         profile = try std.fs.path.join(allocator, &.{ local, "Ziggurat", "PageRuntimeSmoke" });
         try state.view.attach(state.window, .{ .html = html, .user_data_folder = profile });

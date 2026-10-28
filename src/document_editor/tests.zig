@@ -98,7 +98,7 @@ test "height aggregation is exact and local differences survive enormous prefixe
 }
 fn allocationScenario(allocator: std.mem.Allocator) !void {
     var storage: ix.Storage = .{ .allocator = allocator, .node_limit = 10000 };
-    const text = "a\nb\nc\nd\ne\nf\n" ** 30;
+    const text = &@as([30 * "a\nb\nc\nd\ne\nf\n".len]u8, @bitCast(@as([30]["a\nb\nc\nd\ne\nf\n".len]u8, @splat("a\nb\nc\nd\ne\nf\n".*))));
     const document = try d.Document.create(testing.allocator, std.Thread.getCurrentId(), text, .{});
     defer document.close() catch unreachable;
     var builder: ix.Builder = .{ .storage = &storage, .row_limit = 10000, .next_id = 1, .epoch = 1, .estimate = try ix.quantize(20) };
@@ -126,7 +126,7 @@ test "chunk boundaries survive random persistent splices and shared height paths
     defer ix.release(&storage, original);
     var linear: std.ArrayList(u8) = .empty;
     defer linear.deinit(testing.allocator);
-    try linear.appendSlice(testing.allocator, "x\n" ** 4096 ++ "x");
+    try linear.appendSlice(testing.allocator, &@as([4096 * "x\n".len]u8, @bitCast(@as([4096]["x\n".len]u8, @splat("x\n".*)))) ++ "x");
     var source = std.Random.DefaultPrng.init(0x53af192);
     const random = source.random();
     var next_id: u64 = 4098;
@@ -451,7 +451,7 @@ test "fold edit and undo coordinates agree with an independent paragraph array o
             const first = 1 + random.uintLessThan(usize, root.sum.rows - 2);
             const end = @min(root.sum.rows - 1, first + random.uintLessThan(usize, 3));
             const inserted = random.uintLessThan(usize, 4);
-            const text = ("x\n" ** 3)[0 .. inserted * 2];
+            const text = (&@as([3 * "x\n".len]u8, @bitCast(@as([3]["x\n".len]u8, @splat("x\n".*)))))[0 .. inserted * 2];
             const edit: d.Replacement = .{ .range = .{ .start = first * 2, .end = end * 2 }, .text = text };
             const plan = try ix.plan(&storage, root, edit.range, text, next_id, iteration + 2, 10, 1000);
             next_id = plan.next_id;

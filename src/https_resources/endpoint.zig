@@ -442,6 +442,6 @@ test "borrowed response captures descriptors without consuming any response byte
     try std.testing.expectEqualStrings("X-original", captured.response.headers[0].name);
     try std.testing.expectEqualStrings("stable", captured.response.headers[0].value);
     try std.testing.expect(captured.response.bytes.ptr == original.bytes.ptr);
-    const excessive = [_]http.Header{.{ .name = "X", .value = "x" }} ** 17;
+    const excessive = @as([17]http.Header, @splat(.{ .name = "X", .value = "x" }));
     try std.testing.expectError(error.TooManyResponseHeaders, captured.init(.{ .headers = &excessive }));
 }

@@ -1,12 +1,9 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 
 fn checkBounds(expected: z.ClientBounds, actual: z.ClientBounds) !void {
     try std.testing.expectEqual(expected.width, actual.width);
@@ -43,14 +40,14 @@ const Reentry = struct {
 };
 
 fn windowsSmoke() !void {
-    var allocator_state: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    var allocator_state: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(allocator_state.deinit() == .ok);
     const app = try z.App.init(allocator_state.allocator());
     defer app.deinit();
     var probe: Reentry = .{};
     const window = try app.createWindow(.{ .width = 720, .height = 480, .min_width = 200, .min_height = 100, .on_closed = .{ .context = &probe, .notify = Reentry.notify } });
     try window.setContent(.{ .context = &probe, .event = Reentry.event, .detach = Reentry.detach });
-    try std.testing.expectEqualDeep(z.WindowCapabilities{ .client_position = true, .fullscreen = true, .always_on_top = true, .owned_windows = true, .modal_windows = true, .custom_decoration = true, .native_move_resize = true, .system_menu = true }, try window.capabilities());
+    try std.testing.expectEqualDeep(z.WindowCapabilities{ .client_position = true, .fullscreen = true, .always_on_top = true, .owned_windows = true, .modal_windows = true, .custom_decoration = true, .native_move_resize = true, .system_menu = true, .opacity = true, .ignore_pointer = true, .content_protection = true, .attention = true, .skip_taskbar = true, .window_buttons = true }, try window.capabilities());
     const target: z.ClientBounds = .{ .position = .{ .x = 111, .y = 139 }, .width = 601, .height = 399 };
     try window.setClientBounds(target);
     try checkBounds(target, try window.clientBounds());
@@ -348,7 +345,7 @@ const LinuxProbe = struct {
 fn linuxSmoke(require_wm: bool) !void {
     try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
     {
-        var allocator_state: std.heap.GeneralPurposeAllocator(.{}) = .init;
+        var allocator_state: std.heap.DebugAllocator(.{}) = .init;
         defer std.debug.assert(allocator_state.deinit() == .ok);
         const app = try z.App.init(allocator_state.allocator());
         defer app.deinit();
@@ -388,9 +385,9 @@ fn linuxSmoke(require_wm: bool) !void {
     try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
 }
 
-pub fn main() !void {
-    const args = try std.process.argsAlloc(std.heap.page_allocator);
-    defer std.process.argsFree(std.heap.page_allocator, args);
+pub fn main(init: std.process.Init.Minimal) !void {
+    const args = try zio.argsAlloc(std.heap.page_allocator, init.args);
+    defer zio.argsFree(std.heap.page_allocator, args);
     var require_wm = false;
     for (args[1..]) |arg| {
         if (std.mem.eql(u8, arg, "--require-wm")) require_wm = true else return error.InvalidArgument;

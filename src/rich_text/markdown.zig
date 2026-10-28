@@ -85,7 +85,7 @@ pub fn write(allocator: Allocator, t: *const Text, w: *Writer) !void {
             defer h.deinit();
             try writeRuns(allocator, runs, &h.writer);
             const s = h.written();
-            const k = std.mem.trimRight(u8, s, "#").len;
+            const k = std.mem.trimEnd(u8, s, "#").len;
             try w.writeAll(s[0..k]);
             if (k < s.len) try w.writeByte('\\');
             try w.writeAll(s[k..]);
@@ -619,7 +619,7 @@ const Segments = struct {
         while (self.at < self.s.len) {
             const line_end = std.mem.indexOfScalarPos(u8, self.s, self.at, '\n') orelse self.s.len;
             const line = self.s[self.at..line_end];
-            const fence_line = std.mem.startsWith(u8, std.mem.trimLeft(u8, line, " "), "```") or std.mem.startsWith(u8, std.mem.trimLeft(u8, line, " "), "~~~");
+            const fence_line = std.mem.startsWith(u8, std.mem.trimStart(u8, line, " "), "```") or std.mem.startsWith(u8, std.mem.trimStart(u8, line, " "), "~~~");
             if (fence_line) self.fence = !self.fence;
             const blank = std.mem.trim(u8, line, " \t\r").len == 0;
             const starts_html = !self.fence and !fence_line and htmlBlockStart(line) and (self.at == 0 or self.at == start or self.previousBlank());
@@ -684,7 +684,7 @@ fn markTags(arena: Allocator, s: []const u8) ![]const u8 {
     var line_start = true;
     while (at < s.len) {
         if (line_start) {
-            const rest = std.mem.trimLeft(u8, s[at..], " ");
+            const rest = std.mem.trimStart(u8, s[at..], " ");
             if (std.mem.startsWith(u8, rest, "```") or std.mem.startsWith(u8, rest, "~~~")) fence = !fence;
             const indent = s.len - at - rest.len;
             if (fence or indent >= 4) {

@@ -214,7 +214,7 @@ const Builder = struct {
             try v.end();
             return;
         };
-        var lines = std.mem.splitScalar(u8, std.mem.trimRight(u8, node.text, "\n"), '\n');
+        var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, node.text, "\n"), '\n');
         var count: usize = 0;
         while (lines.next()) |line| : (count += 1) {
             if (count > 0 and count % chunk == 0) {
@@ -299,7 +299,7 @@ const Builder = struct {
     }
 };
 
-const equal_tracks = [_]view.Track{view.Track.fraction(1)} ** md.max_columns;
+const equal_tracks = @as([md.max_columns]view.Track, @splat(view.Track.fraction(1)));
 
 fn blockCount(tree: md.Tree, parent: u32) usize {
     var count: usize = 0;
@@ -356,7 +356,7 @@ const Line = struct {
             font.italic = false;
             return font;
         }
-        if (self.style.strong > 0 and @intFromEnum(font.weight) < @intFromEnum(view.Font.Weight.bold)) font.weight = .bold;
+        if (self.style.strong > 0 and @backingInt(font.weight) < @backingInt(view.Font.Weight.bold)) font.weight = .bold;
         if (self.style.emphasis > 0) font.italic = true;
         return if (std.meta.eql(font, view.Font.body)) null else font;
     }
@@ -383,10 +383,10 @@ const Line = struct {
         var pending: f32 = 0;
         while (at < text.len) {
             const end = nextBreak(text, at);
-            const visible = std.mem.trimRight(u8, text[at..end], " ");
+            const visible = std.mem.trimEnd(u8, text[at..end], " ");
             const visible_width = self.measure(visible, code);
             if (self.used + pending + visible_width > self.width and self.used + pending > 0) {
-                const kept = std.mem.trimRight(u8, text[start..at], " ");
+                const kept = std.mem.trimEnd(u8, text[start..at], " ");
                 if (kept.len > 0) try self.segment(kept, code);
                 try self.newLine();
                 start = at;

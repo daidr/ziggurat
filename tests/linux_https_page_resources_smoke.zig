@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const https = @import("ziggurat_https_resources");
@@ -7,12 +8,12 @@ const Watchdog = @import("watchdog.zig").Watchdog;
 const certificate = @embedFile("fixtures/profile-https/server-cert.pem");
 const private_key = @embedFile("fixtures/profile-https/server-key.pem");
 const file_length = 524325;
-const secret: [32]u8 = .{0x53} ** 32;
+const secret: [32]u8 = @splat(0x53);
 const Mode = enum { complete, file_window, range_file, range_empty, origin_guard, cancel_file, stop_file, post_closed, missing_credentials, static_routes, callback_close, final_free_close, final_free_quit, producer_fetch, producer_head, producer_cancel, producer_stop, producer_post_closed, producer_navigate, producer_recover, producer_endpoint_close };
 const generated_length = 131109;
 const generated_maximum = 32 * 1024 * 1024;
 fn isProducer(mode: Mode) bool {
-    return @intFromEnum(mode) >= @intFromEnum(Mode.producer_fetch);
+    return @backingInt(mode) >= @backingInt(Mode.producer_fetch);
 }
 extern fn zhr_page_connect_refused(c_uint) c_int;
 extern fn zhr_page_observer_new(*anyopaque) ?*anyopaque;
@@ -62,7 +63,7 @@ const Job = struct {
     file_response: ?https.PreparedFileResponse = null,
     source: ?https.files.PreparedSource = null,
     thread: ?std.Thread = null,
-    gate: std.Thread.Semaphore = .{},
+    gate: zio.Semaphore = .{},
     failure: std.atomic.Value(u16) = .init(0),
     cancelled: std.atomic.Value(bool) = .init(false),
     closed_post: std.atomic.Value(bool) = .init(false),
@@ -101,11 +102,11 @@ const Job = struct {
         }
         const descriptor = if (self.kind == .range and self.state.mode == .range_empty) zhr_page_empty_file() else zhr_page_file();
         if (descriptor < 0) return error.PrivateFileFailed;
-        const file: std.fs.File = .{ .handle = descriptor };
-        defer file.close();
+        const file: std.Io.File = .{ .handle = descriptor, .flags = .{ .nonblocking = false } };
+        defer file.close(zio.io());
         if (self.kind == .range) return self.produceRange(file);
         const is_window = self.kind == .window or self.kind == .window_head or self.kind == .empty_window;
-        const saved_position = if (is_window) try file.getPos() else 0;
+        const saved_position = if (is_window) try zio.posix.position(file.handle) else 0;
         const reads_before = zwk_file_pread_count();
         const selected_window: https.files.FileWindow = .{ .offset = if (self.kind == .empty_window) file_length else 17, .length = if (self.kind == .empty_window) 0 else 65541 };
         var prepared = if (is_window)
@@ -118,7 +119,7 @@ const Job = struct {
         prepared.source.length = 0;
         if (is_window) {
             const expected: u64 = selected_window.length;
-            if (try self.source.?.authoritativeLength() != expected or try file.getPos() != saved_position) return error.WindowPreparationChanged;
+            if (try self.source.?.authoritativeLength() != expected or try zio.posix.position(file.handle) != saved_position) return error.WindowPreparationChanged;
             self.source.?.length = 1; // Deliberately untrusted convenience cache.
         }
         self.state.app.post(.{ .context = self, .call = deliver }) catch |err| {
@@ -140,11 +141,11 @@ const Job = struct {
             return err;
         };
         if (self.kind == .stop or self.kind == .cancel) return error.CancelledPumpCompleted;
-        if (is_window and try file.getPos() != saved_position) return error.WindowPumpChangedPosition;
+        if (is_window and try zio.posix.position(file.handle) != saved_position) return error.WindowPumpChangedPosition;
         if (self.kind == .empty_window and zwk_file_pread_count() != reads_before) return error.EmptyWindowReadBody;
     }
-    fn produceRange(self: *Job, file: std.fs.File) !void {
-        const position = try file.getPos();
+    fn produceRange(self: *Job, file: std.Io.File) !void {
+        const position = try zio.posix.position(file.handle);
         const reads = zwk_file_pread_count();
         const prepared = try https.PreparedFileResponse.prepare(self.state.app.owner, file, 1024 * 1024, self.file_request.?);
         var pump = prepared.pump;
@@ -162,7 +163,7 @@ const Job = struct {
         // A successful post transfers response to the owner; only this worker
         // pump and pre-post scalar facts may be read hereafter.
         if (pump) |*value| try value.pump();
-        if (try file.getPos() != position) return error.WindowPumpChangedPosition;
+        if (try zio.posix.position(file.handle) != position) return error.WindowPumpChangedPosition;
         if ((self.method == .head or empty) and zwk_file_pread_count() != reads) return error.PreparedHeadReadBody;
     }
     fn deliver(ptr: *anyopaque) void {
@@ -211,8 +212,8 @@ const ProducerJob = struct {
     source: ?native_stream.Source = null,
     control: ?https.files.Control = null, // owner thread only
     thread: ?std.Thread = null,
-    gate: std.Thread.Semaphore = .{},
-    retire_gate: std.Thread.Semaphore = .{},
+    gate: zio.Semaphore = .{},
+    retire_gate: zio.Semaphore = .{},
     failure: std.atomic.Value(u16) = .init(0),
     generated: std.atomic.Value(u64) = .init(0),
     completed: std.atomic.Value(bool) = .init(false),
@@ -709,7 +710,7 @@ const Peer = struct {
         var out: Peer = .{};
         errdefer out.close();
         out.transport = try https.Transport.create(allocator, app, .{ .material = .{ .certificate_pem = certificate, .private_key_pem = private_key } });
-        out.site = try https.Site.createOnTransport(allocator, app, out.transport.?, .{ .mount_prefix = "/private/", .bearer = .{0x54} ** 32, .resources = &.{.{ .path = "/peer", .mime = "text/plain", .bytes = "must never reach this peer" }} });
+        out.site = try https.Site.createOnTransport(allocator, app, out.transport.?, .{ .mount_prefix = "/private/", .bearer = @splat(0x54), .resources = &.{.{ .path = "/peer", .mime = "text/plain", .bytes = "must never reach this peer" }} });
         out.observer = zhr_page_observer_new(out.transport.?.handle.?) orelse return error.PeerObserverFailed;
         return out;
     }
@@ -896,7 +897,7 @@ const DirectoryCleanup = struct {
             !std.mem.startsWith(u8, std.fs.path.basename(self.path), "https-page-")) return error.InvalidCleanupPath;
         // Only this run's exact prepared directory, after all native counts=0.
         // Never enumerate or remove the shared evidence/cache parent.
-        try std.fs.cwd().deleteTree(self.path);
+        try std.Io.Dir.cwd().deleteTree(zio.io(), self.path);
     }
     fn execute(parent: []const u8, path: []const u8) !void {
         var self: DirectoryCleanup = .{ .parent = parent, .path = path };
@@ -935,16 +936,16 @@ pub fn main() !void {
     var debug: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(debug.deinit() == .ok);
     const allocator = debug.allocator();
-    if (std.posix.getenv("ZIGGURAT_HTTPS_TRANSPORT_CONSTRUCTORS_ONLY") != null) return transportConstructors(allocator);
-    const root = std.posix.getenv("ZIGGURAT_PROFILE_TEST_ROOT") orelse return error.MissingProfileRoot;
-    const extension = std.posix.getenv("ZIGGURAT_REQUEST_POLICY_EXTENSION") orelse return error.MissingExtension;
-    const selected_mode = std.posix.getenv("ZIGGURAT_HTTPS_PAGE_MODE");
+    if (zio.getenv("ZIGGURAT_HTTPS_TRANSPORT_CONSTRUCTORS_ONLY") != null) return transportConstructors(allocator);
+    const root = zio.getenv("ZIGGURAT_PROFILE_TEST_ROOT") orelse return error.MissingProfileRoot;
+    const extension = zio.getenv("ZIGGURAT_REQUEST_POLICY_EXTENSION") orelse return error.MissingExtension;
+    const selected_mode = zio.getenv("ZIGGURAT_HTTPS_PAGE_MODE");
     if (selected_mode) |selected| {
         _ = std.meta.stringToEnum(Mode, selected) orelse return error.UnknownMode;
     }
     for (std.meta.tags(Mode)) |mode| {
         if (selected_mode) |selected| if (!std.mem.eql(u8, selected, @tagName(mode))) continue;
-        const path = try std.fmt.allocPrint(allocator, "{s}/https-page-{s}-{d}", .{ root, @tagName(mode), std.time.nanoTimestamp() });
+        const path = try std.fmt.allocPrint(allocator, "{s}/https-page-{s}-{d}", .{ root, @tagName(mode), zio.nanoTimestamp() });
         defer allocator.free(path);
         _ = try web.profile_storage.Prepared.requiredBytes(path, .{});
         var preparation: Preparation = .{ .allocator = allocator, .main = std.Thread.getCurrentId(), .path = path };

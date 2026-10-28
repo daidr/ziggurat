@@ -120,7 +120,7 @@ pub fn Storage(comptime marks: usize, comptime paths: usize, comptime legend_ite
     return struct {
         const Self = @This();
         marks: [marks]Mark = undefined,
-        slots: [paths]Slot = [_]Slot{.{}} ** paths,
+        slots: [paths]Slot = @as([paths]Slot, @splat(.{})),
         legend: [legend_items]chart.LegendSlot = undefined,
         pub fn buffers(self: *Self) Buffers {
             return .{ .marks = &self.marks, .slots = &self.slots, .legend = &self.legend };
@@ -743,19 +743,19 @@ pub fn key(mark: Mark, width: f32, height: f32, scale: f32, zoom: chart.Zoom) u6
     h.update(std.mem.asBytes(&height));
     h.update(std.mem.asBytes(&scale));
     h.update(std.mem.asBytes(&zoom));
-    h.update(&.{@intFromEnum(std.meta.activeTag(mark))});
+    h.update(&.{@backingInt(std.meta.activeTag(mark))});
     switch (mark) {
         .line => |m| {
             h.update(std.mem.sliceAsBytes(m.xs));
             h.update(std.mem.sliceAsBytes(m.ys));
-            h.update(&.{@intFromEnum(m.curve)});
+            h.update(&.{@backingInt(m.curve)});
             h.update(std.mem.asBytes(&m.width));
         },
         .area => |m| {
             h.update(std.mem.sliceAsBytes(m.xs));
             h.update(std.mem.sliceAsBytes(m.hi));
             if (m.lo) |lo| h.update(std.mem.sliceAsBytes(lo)) else h.update("bottom");
-            h.update(&.{@intFromEnum(m.curve)});
+            h.update(&.{@backingInt(m.curve)});
         },
         .sector => |m| {
             h.update(std.mem.asBytes(&m.slice));
@@ -801,7 +801,7 @@ test "the legend takes room above or below the plot" {
     try std.testing.expectEqual(@as(f32, 200 - 24), bottom.legend[1].label.y);
     c.options.legend = .none;
     try std.testing.expectEqual(@as(usize, 0), c.arrange(bounds).legend.len);
-    try std.testing.expectError(error.TooManyLegendItems, c.setLegend(&[_]chart.LegendItem{.{ .label = "x", .color = 0 }} ** 5));
+    try std.testing.expectError(error.TooManyLegendItems, c.setLegend(&@as([5]chart.LegendItem, @splat(.{ .label = "x", .color = 0 }))));
 }
 
 test "marks and paths are bounded by the storage" {

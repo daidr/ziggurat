@@ -1,15 +1,12 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const view = @import("ziggurat_view");
 const term = @import("ziggurat_terminal");
 const terminal_view = @import("ziggurat_terminal_view");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 
 extern fn zlg_test_paint(*anyopaque, u32, u32) void;
 extern fn zlg_resource_count() u32;
@@ -126,11 +123,11 @@ fn shows(screen: *const term.Screen, needle: []const u8) bool {
 
 /// Dispatch posted work until `done` or a deadline.
 fn until(app: *z.App, context: anytype, comptime done: fn (@TypeOf(context)) bool) !void {
-    const deadline = std.time.milliTimestamp() + 10_000;
+    const deadline = zio.milliTimestamp() + 10_000;
     while (!done(context)) {
-        if (std.time.milliTimestamp() > deadline) return error.Timeout;
+        if (zio.milliTimestamp() > deadline) return error.Timeout;
         try app.dispatch();
-        std.Thread.sleep(5 * std.time.ns_per_ms);
+        zio.sleep(5 * std.time.ns_per_ms);
     }
 }
 
@@ -189,6 +186,19 @@ fn run(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(usize, 0), tv.retired.items.len);
     try paint(&host, window);
     try std.testing.expect(!tv.queued);
+
+    // Box drawing, blocks and Powerline's shapes are drawn rather than
+    // taken from the font, a whole screen of them within the frame's
+    // commands, with the block cursor over one.
+    tv.feed("\x1b[2J\x1b[H");
+    for (0..terminal.screen.rows) |_| {
+        for (0..terminal.screen.cols) |i| tv.feed(([_][]const u8{ "─", "┼", "╬", "╭", "▒", "▚", "", "", "╳" })[i % 9]);
+    }
+    tv.feed("\x1b[H");
+    try paint(&host, window);
+    if (host.last_error) |err| return err;
+    tv.feed("\x1b[2J\x1b[H");
+    try paint(&host, window);
 
     // A shell in the grid's size, answering what is typed.
     const argv: []const []const u8 = if (builtin.os.tag == .windows) &.{ "cmd.exe", "/q", "/k", "prompt $G" } else &.{ "/bin/sh", "-i" };

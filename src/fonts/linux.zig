@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const zio = @import("ziggurat_io");
 const root = @import("root.zig");
 const files = @import("files.zig");
 
@@ -9,11 +10,11 @@ extern fn zfont_list(context: *anyopaque, each: *const fn (*anyopaque, [*:0]cons
 /// The user's cache directory: macOS's, or as the XDG base directories name it.
 fn cacheDir(buffer: []u8) ![]const u8 {
     if (builtin.os.tag == .macos) {
-        if (std.posix.getenv("HOME")) |home| if (home.len > 0) return std.fmt.bufPrint(buffer, "{s}/Library/Caches", .{home});
+        if (zio.getenv("HOME")) |home| if (home.len > 0) return std.fmt.bufPrint(buffer, "{s}/Library/Caches", .{home});
         return "/tmp";
     }
-    if (std.posix.getenv("XDG_CACHE_HOME")) |dir| if (dir.len > 0) return dir;
-    if (std.posix.getenv("HOME")) |home| if (home.len > 0) return std.fmt.bufPrint(buffer, "{s}/.cache", .{home});
+    if (zio.getenv("XDG_CACHE_HOME")) |dir| if (dir.len > 0) return dir;
+    if (zio.getenv("HOME")) |home| if (home.len > 0) return std.fmt.bufPrint(buffer, "{s}/.cache", .{home});
     return "/tmp";
 }
 
@@ -21,7 +22,7 @@ pub fn add(allocator: std.mem.Allocator, data: []const u8, hash: *const [16]u8) 
     var buffer: [std.fs.max_path_bytes]u8 = undefined;
     const path = try files.write(allocator, try cacheDir(&buffer), data, hash);
     defer allocator.free(path);
-    const terminated = try allocator.dupeZ(u8, path);
+    const terminated = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(terminated);
     if (zfont_add_file(terminated) != 0) return error.UnreadableFont;
 }

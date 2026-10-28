@@ -17,7 +17,18 @@ pub const WindowData = struct {
     fail_damage: bool = false,
     composing: bool = false,
     composition_epoch: u64 = 0,
-    caps: core.WindowCapabilities = .{ .client_position = true, .fullscreen = true, .always_on_top = true, .owned_windows = true, .modal_windows = true, .custom_decoration = true, .native_move_resize = true, .system_menu = true },
+    caps: core.WindowCapabilities = .{ .client_position = true, .fullscreen = true, .always_on_top = true, .owned_windows = true, .modal_windows = true, .custom_decoration = true, .native_move_resize = true, .system_menu = true, .opacity = true, .ignore_pointer = true, .content_protection = true, .attention = true, .skip_taskbar = true, .window_buttons = true },
+    traits: core.WindowTraits = .{},
+    opacity: f32 = 1,
+    ignore_pointer: bool = false,
+    content_protected: bool = false,
+    flashing: bool = false,
+    skip_taskbar: bool = false,
+    title: [256]u8 = undefined,
+    title_len: usize = 0,
+    pub fn shownTitle(self: *const WindowData) []const u8 {
+        return self.title[0..self.title_len];
+    }
 };
 pub fn pointerOperation(record: *const core.WindowRecord) u64 {
     return record.native.pointer_operation.value;
@@ -49,6 +60,8 @@ pub fn create(record: *core.WindowRecord, options: core.WindowOptions) !void {
     record.native.alive = true;
     record.native.bounds.width = options.width;
     record.native.bounds.height = options.height;
+    record.native.traits.resizable = options.resizable;
+    try setTitle(record, options.title);
     if (options.text_input_mode != .system) record.publishTextInputMode(options.text_input_mode);
 }
 pub fn run(app: *core.App) !void {
@@ -162,7 +175,35 @@ pub fn setBackdrop(record: *core.WindowRecord, material: core.WindowBackdrop) !v
     try update(record);
     record.native.backdrop = material;
 }
-pub fn setTitle(_: *core.WindowRecord, _: []const u8) !void {}
+pub fn setTitle(record: *core.WindowRecord, title: []const u8) !void {
+    if (title.len > record.native.title.len) return error.TextCapacityExceeded;
+    @memcpy(record.native.title[0..title.len], title);
+    record.native.title_len = title.len;
+}
+pub fn setTraits(record: *core.WindowRecord, traits: core.WindowTraits) !void {
+    try update(record);
+    record.native.traits = traits;
+}
+pub fn setOpacity(record: *core.WindowRecord, value: f32) !void {
+    try update(record);
+    record.native.opacity = value;
+}
+pub fn setIgnorePointer(record: *core.WindowRecord, enabled: bool) !void {
+    try update(record);
+    record.native.ignore_pointer = enabled;
+}
+pub fn setContentProtection(record: *core.WindowRecord, enabled: bool) !void {
+    try update(record);
+    record.native.content_protected = enabled;
+}
+pub fn flashFrame(record: *core.WindowRecord, enabled: bool) !void {
+    try update(record);
+    record.native.flashing = enabled;
+}
+pub fn setSkipTaskbar(record: *core.WindowRecord, enabled: bool) !void {
+    try update(record);
+    record.native.skip_taskbar = enabled;
+}
 pub fn setTextCaret(_: *core.WindowRecord, _: core.Rect) !void {}
 pub fn cancelTextForMode(record: *core.WindowRecord) !bool {
     const epoch = record.native.composition_epoch;
@@ -211,3 +252,5 @@ pub fn destroy(record: *core.WindowRecord) !void {
 pub fn handle(record: *core.WindowRecord) ?*anyopaque {
     return if (record.native.alive) record else null;
 }
+/// The shape is kept on the record, where tests read it.
+pub fn setCursor(_: *core.WindowRecord, _: core.Cursor) void {}

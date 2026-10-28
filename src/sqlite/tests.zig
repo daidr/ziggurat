@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const sqlite = @import("root.zig");
 const c = @import("c.zig");
 
@@ -228,7 +229,7 @@ test "migrations apply in order, once, and stop at the failed step" {
 test "file databases use the caller allocator, persist and honor read-only mode" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const directory = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    const directory = try zio.realPathAlloc(tmp.dir, ".", testing.allocator);
     defer testing.allocator.free(directory);
     const path = try std.fs.path.join(testing.allocator, &.{ directory, "app.db" });
     defer testing.allocator.free(path);
@@ -256,7 +257,7 @@ test "file databases use the caller allocator, persist and honor read-only mode"
 test "a second connection waits on the lock and then reports Busy" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const directory = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    const directory = try zio.realPathAlloc(tmp.dir, ".", testing.allocator);
     defer testing.allocator.free(directory);
     const path = try std.fs.path.join(testing.allocator, &.{ directory, "lock.db" });
     defer testing.allocator.free(path);
@@ -272,8 +273,8 @@ test "a second connection waits on the lock and then reports Busy" {
 }
 
 const Handoff = struct {
-    mutex: std.Thread.Mutex = .{},
-    done: std.Thread.Condition = .{},
+    mutex: zio.Mutex = .{},
+    done: zio.Condition = .{},
     finished: bool = false,
     started: std.atomic.Value(bool) = .init(false),
     result: anyerror!i64 = 0,
@@ -360,7 +361,7 @@ test "a worker owns the connection and another thread can interrupt it" {
         const finished = spin.finished;
         spin.mutex.unlock();
         if (finished) break;
-        std.Thread.sleep(std.time.ns_per_ms);
+        zio.sleep(std.time.ns_per_ms);
     }
     spinner.join();
     try testing.expectError(error.Interrupted, spin.result);

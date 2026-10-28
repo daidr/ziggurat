@@ -1,12 +1,9 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn gtk_window_get_decorated(*anyopaque) c_int;
 extern fn gtk_widget_get_mapped(*anyopaque) c_int;
 extern fn zlg_resource_count() u32;
@@ -410,9 +407,9 @@ fn windows(allocator: std.mem.Allocator, require_wm: bool) !void {
     var exit_code: c.DWORD = 0;
     if (c.GetExitCodeProcess(process.hProcess, &exit_code) == 0 or exit_code != 0) return error.TestProcessFailed;
 }
-pub fn main() !void {
-    const args = try std.process.argsAlloc(std.heap.page_allocator);
-    defer std.process.argsFree(std.heap.page_allocator, args);
+pub fn main(init: std.process.Init.Minimal) !void {
+    const args = try zio.argsAlloc(std.heap.page_allocator, init.args);
+    defer zio.argsFree(std.heap.page_allocator, args);
     if (builtin.os.tag == .linux and args.len > 1 and std.mem.eql(u8, args[1], "--x11-driver")) return @import("window_chrome_x11.zig").driver(args[2..]);
     var require_wm = false;
     var desktop_child = false;

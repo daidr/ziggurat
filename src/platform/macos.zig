@@ -50,6 +50,12 @@ extern fn zlm_window_invalidate_rect(*anyopaque, c_int, c_int, c_int, c_int) voi
 extern fn zlm_window_caret(*anyopaque, c_int, c_int, c_int, c_int) void;
 extern fn zlm_window_cancel_composition(*anyopaque) void;
 extern fn zlm_window_text_mode(*anyopaque, c_int) void;
+extern fn zlm_window_cursor(*anyopaque, c_int) void;
+extern fn zlm_window_traits(*anyopaque, c_int, c_int, c_int, c_int, c_int) c_int;
+extern fn zlm_window_opacity(*anyopaque, f32) void;
+extern fn zlm_window_ignore_pointer(*anyopaque, c_int) void;
+extern fn zlm_window_content_protection(*anyopaque, c_int) void;
+extern fn zlm_window_attention(*anyopaque, c_int) void;
 
 pub fn init(app: *core.App) !void {
     if (app.icon_policy == .required) return error.UnsupportedCapability;
@@ -80,11 +86,11 @@ fn dispatch(ptr: *anyopaque) callconv(.c) void {
 pub fn create(record: *core.WindowRecord, options: core.WindowOptions) !void {
     if (options.accessibility_host == .children) return error.UnsupportedCapability;
     const allocator = record.window.app.allocator;
-    const title = try allocator.dupeZ(u8, options.title);
+    const title = try allocator.dupeSentinel(u8, options.title, 0);
     defer allocator.free(title);
     var code: c_int = 0;
     const popup: c_int = if (options.popup) |role| 1 | @as(c_int, if (role.focusable) 2 else 0) | @as(c_int, if (role.topmost) 4 else 0) else 0;
-    record.native.native = zlm_window_create(record, event, title, options.width, options.height, options.min_width, options.min_height, if (record.owner_record) |owner| owner.native.native else null, @intFromBool(options.modal), @intFromEnum(options.decoration), @intFromBool(options.resizable), popup, &code) orelse return if (code == 1) error.UnsupportedCapability else error.OutOfMemory;
+    record.native.native = zlm_window_create(record, event, title, options.width, options.height, options.min_width, options.min_height, if (record.owner_record) |owner| owner.native.native else null, @intFromBool(options.modal), @backingInt(options.decoration), @intFromBool(options.resizable), popup, &code) orelse return if (code == 1) error.UnsupportedCapability else error.OutOfMemory;
     if (options.text_input_mode != .system) {
         zlm_window_text_mode(record.native.native.?, 1);
         record.publishTextInputMode(options.text_input_mode);
@@ -94,7 +100,7 @@ pub fn show(record: *core.WindowRecord) void {
     zlm_window_action(record.native.native.?, 0);
 }
 pub fn perform(record: *core.WindowRecord, action: core.WindowAction) !void {
-    zlm_window_action(record.native.native.?, @intFromEnum(action));
+    zlm_window_action(record.native.native.?, @backingInt(action));
 }
 pub fn state(record: *core.WindowRecord) core.WindowState {
     const flags = zlm_window_state(record.native.native.?);
@@ -102,7 +108,26 @@ pub fn state(record: *core.WindowRecord) core.WindowState {
 }
 pub fn capabilities(record: *core.WindowRecord) core.WindowCapabilities {
     const flags = zlm_window_capabilities(record.native.native.?);
-    return .{ .client_position = flags & 1 != 0, .fullscreen = flags & 2 != 0, .always_on_top = flags & 4 != 0, .owned_windows = true, .modal_windows = true, .custom_decoration = flags & 8 != 0, .native_move_resize = flags & 16 != 0, .system_menu = flags & 32 != 0 };
+    return .{ .client_position = flags & 1 != 0, .fullscreen = flags & 2 != 0, .always_on_top = flags & 4 != 0, .owned_windows = true, .modal_windows = true, .custom_decoration = flags & 8 != 0, .native_move_resize = flags & 16 != 0, .system_menu = flags & 32 != 0, .opacity = flags & 64 != 0, .ignore_pointer = flags & 128 != 0, .attention = flags & 256 != 0, .skip_taskbar = flags & 512 != 0, .window_buttons = flags & 1024 != 0, .content_protection = flags & 2048 != 0 };
+}
+pub fn setTraits(record: *core.WindowRecord, traits: core.WindowTraits) !void {
+    try checkUpdate(zlm_window_traits(record.native.native.?, @intFromBool(traits.resizable), @intFromBool(traits.movable), @intFromBool(traits.minimizable), @intFromBool(traits.maximizable), @intFromBool(traits.closable)));
+}
+pub fn setOpacity(record: *core.WindowRecord, value: f32) !void {
+    zlm_window_opacity(record.native.native.?, value);
+}
+pub fn setIgnorePointer(record: *core.WindowRecord, enabled: bool) !void {
+    zlm_window_ignore_pointer(record.native.native.?, @intFromBool(enabled));
+}
+pub fn setContentProtection(record: *core.WindowRecord, enabled: bool) !void {
+    zlm_window_content_protection(record.native.native.?, @intFromBool(enabled));
+}
+pub fn flashFrame(record: *core.WindowRecord, enabled: bool) !void {
+    zlm_window_attention(record.native.native.?, @intFromBool(enabled));
+}
+/// macOS lists apps, not windows, in the Dock.
+pub fn setSkipTaskbar(_: *core.WindowRecord, _: bool) !void {
+    return error.UnsupportedCapability;
 }
 pub fn setBackdrop(_: *core.WindowRecord, _: core.WindowBackdrop) !void {
     return error.UnsupportedCapability;
@@ -111,7 +136,7 @@ pub fn startMove(record: *core.WindowRecord) !void {
     try checkUpdate(zlm_window_interaction(record.native.native.?, -1));
 }
 pub fn startResize(record: *core.WindowRecord, edge: core.ResizeEdge) !void {
-    try checkUpdate(zlm_window_interaction(record.native.native.?, @intFromEnum(edge)));
+    try checkUpdate(zlm_window_interaction(record.native.native.?, @backingInt(edge)));
 }
 pub fn showSystemMenu(record: *core.WindowRecord) !void {
     try checkUpdate(zlm_window_interaction(record.native.native.?, 8));
@@ -153,7 +178,7 @@ pub fn setAlwaysOnTop(record: *core.WindowRecord, enabled: bool) !void {
 }
 pub fn setTitle(record: *core.WindowRecord, title: []const u8) !void {
     const allocator = record.window.app.allocator;
-    const terminated = try allocator.dupeZ(u8, title);
+    const terminated = try allocator.dupeSentinel(u8, title, 0);
     defer allocator.free(terminated);
     zlm_window_title(record.native.native.?, terminated);
 }
@@ -202,6 +227,9 @@ pub fn pointerOperation(_: *const core.WindowRecord) u64 {
 pub fn advancePointerOperation(_: *core.WindowRecord) u64 {
     return std.math.maxInt(u64);
 }
+pub fn setCursor(record: *core.WindowRecord, cursor: core.Cursor) void {
+    zlm_window_cursor(record.native.native orelse return, @backingInt(cursor));
+}
 fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
     const record: *core.WindowRecord = @ptrCast(@alignCast(ptr));
     const scope = record.enterNative();
@@ -219,7 +247,7 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
         6 => record.emit(.{ .wheel = .{ .position = point, .delta = .{ .x = @floatCast(native.dx), .y = @floatCast(native.dy) } } }),
         7 => record.emit(.{ .focus = native.flags & 1 != 0 }),
         8 => record.emit(.cancel_input),
-        9 => record.emit(.{ .edit_key = .{ .key = @enumFromInt(native.key), .shift = native.flags & 1 != 0, .control = native.flags & 2 != 0 } }),
+        9 => record.emit(.{ .edit_key = .{ .key = @fromBackingInt(@intCast(native.key)), .shift = native.flags & 1 != 0, .control = native.flags & 2 != 0 } }),
         10 => _ = record.window.requestCloseFrom(.user) catch |err| {
             record.window.report(.{ .domain = .core, .operation = .window_destroy, .err = err });
         },
@@ -236,7 +264,7 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
         17 => return @intFromBool(record.inputAllowed()),
         18 => return @intFromBool(record.keyInput(.{ .key = keyCode(@intCast(native.key), native.width), .modifiers = modifiers, .repeat = native.flags & 16 != 0, .physical = core.physical_keys.fromMacVirtualKey(native.width) })),
         26 => record.keyRelease(.{ .key = keyCode(@intCast(native.key), native.width), .modifiers = modifiers, .physical = core.physical_keys.fromMacVirtualKey(native.width) }),
-        19 => return @intFromEnum(record.hitTest(point, @floatFromInt(native.width), @floatFromInt(native.height))),
+        19 => return @backingInt(record.hitTest(point, @floatFromInt(native.width), @floatFromInt(native.height))),
         else => unreachable,
     }
     return 0;
@@ -244,8 +272,8 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
 /// The layout's character names letter, digit and punctuation keys, as the
 /// GTK keyval does; every other key is named by its position.
 fn keyCode(character: u32, virtual: u32) core.KeyCode {
-    if (character >= 'a' and character <= 'z') return @enumFromInt(@intFromEnum(core.KeyCode.a) + character - 'a');
-    if (character >= '0' and character <= '9' and !isKeypad(virtual)) return @enumFromInt(@intFromEnum(core.KeyCode.digit0) + character - '0');
+    if (character >= 'a' and character <= 'z') return @fromBackingInt(@intCast(@backingInt(core.KeyCode.a) + character - 'a'));
+    if (character >= '0' and character <= '9' and !isKeypad(virtual)) return @fromBackingInt(@intCast(@backingInt(core.KeyCode.digit0) + character - '0'));
     return switch (character) {
         '-' => if (isKeypad(virtual)) .subtract else .minus,
         '=' => .equal,

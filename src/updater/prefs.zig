@@ -3,6 +3,7 @@
 //! skipped and when the last check succeeded. A damaged or missing file reads
 //! as the defaults. Writes are atomic renames in the file's directory.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 
 pub const max_version = 64;
 
@@ -38,9 +39,9 @@ const Wire = struct {
 
 pub const file_name = "updater.json";
 
-pub fn load(dir: std.fs.Dir) Prefs {
+pub fn load(dir: std.Io.Dir) Prefs {
     var buffer: [4096]u8 = undefined;
-    const bytes = dir.readFile(file_name, &buffer) catch return .{};
+    const bytes = dir.readFile(zio.io(), file_name, &buffer) catch return .{};
     var storage: [8192]u8 = undefined;
     var fixed: std.heap.FixedBufferAllocator = .init(&storage);
     const wire = std.json.parseFromSliceLeaky(Wire, fixed.allocator(), bytes, .{ .ignore_unknown_fields = true }) catch return .{};
@@ -49,12 +50,12 @@ pub fn load(dir: std.fs.Dir) Prefs {
     return prefs;
 }
 
-pub fn save(dir: std.fs.Dir, prefs: *const Prefs) !void {
+pub fn save(dir: std.Io.Dir, prefs: *const Prefs) !void {
     var json: [512]u8 = undefined;
     var writer = std.Io.Writer.fixed(&json);
     try std.json.Stringify.value(Wire{ .automatic_checks = prefs.automatic_checks, .automatic_downloads = prefs.automatic_downloads, .skipped_version = prefs.skippedVersion(), .last_check = prefs.last_check }, .{ .emit_null_optional_fields = false }, &writer);
     var buffer: [512]u8 = undefined;
-    var atomic = try dir.atomicFile(file_name, .{ .write_buffer = &buffer });
+    var atomic = try zio.AtomicFile.init(dir, file_name, .{ .write_buffer = &buffer });
     defer atomic.deinit();
     try atomic.file_writer.interface.writeAll(writer.buffered());
     try atomic.finish();
@@ -84,9 +85,9 @@ test "preferences round-trip and damaged files read as defaults" {
     prefs.setSkipped("1.4.0.0");
     try save(temp.dir, &prefs);
     try testing.expect(load(temp.dir).eql(&prefs));
-    try temp.dir.writeFile(.{ .sub_path = file_name, .data = "{\"automatic_downloads\":tr" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = file_name, .data = "{\"automatic_downloads\":tr" });
     try testing.expect(load(temp.dir).eql(&.{}));
-    try temp.dir.writeFile(.{ .sub_path = file_name, .data = "{\"automatic_downloads\":true,\"future\":1}" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = file_name, .data = "{\"automatic_downloads\":true,\"future\":1}" });
     try testing.expect(load(temp.dir).automatic_downloads);
 }
 

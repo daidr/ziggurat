@@ -1,14 +1,19 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const download = @import("download.zig");
+const net = @import("ziggurat_net");
 
 /// `download.Source` over `std.http.Client`, for an application-managed
 /// worker thread. Resumes with a `Range` request; a 200 response restarts
 /// from zero. The client, its connection pool and CA bundle belong to the
 /// caller and must not be shared with another thread while a fetch runs.
 /// HTTPS certificate validation uses the client's system CA bundle.
+/// Requests go through the system's proxy (`net.proxy`) unless the client
+/// sets its own.
 pub const Source = struct {
     client: *std.http.Client,
     request: ?std.http.Client.Request = null,
+    route: net.tunnel.Route = .{},
     response: std.http.Client.Response = undefined,
     range_buffer: [48]u8 = undefined,
     redirect_buffer: [8 * 1024]u8 = undefined,
@@ -47,11 +52,11 @@ pub const Source = struct {
         const uri = std.Uri.parse(url) catch return error.InvalidUrl;
         const range = try std.fmt.bufPrint(&self.range_buffer, "bytes={d}-", .{offset});
         const headers = [_]std.http.Header{.{ .name = "Range", .value = range }};
-        self.request = try self.client.request(.GET, uri, .{
+        self.request = try self.route.request(self.client.allocator, self.client, &.system, .GET, uri, .{
             .keep_alive = false,
             .headers = .{ .accept_encoding = .{ .override = "identity" } },
             .extra_headers = if (offset > 0) &headers else &.{},
-        });
+        }, null);
         errdefer close(self);
         try self.request.?.sendBodiless();
         self.response = try self.request.?.receiveHead(&self.redirect_buffer);
@@ -71,14 +76,18 @@ pub const Source = struct {
         const self: *Source = @ptrCast(@alignCast(context));
         if (self.request) |*request| request.deinit();
         self.request = null;
+        self.route.deinit();
     }
 };
 
 /// Fetch a small document such as a feed into caller-owned memory, failing
-/// once it exceeds `limit` bytes.
+/// once it exceeds `limit` bytes, through the system's proxy unless the
+/// client sets its own.
 pub fn get(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, limit: usize) ![]u8 {
     const uri = std.Uri.parse(url) catch return error.InvalidUrl;
-    var request = try client.request(.GET, uri, .{ .keep_alive = false, .headers = .{ .accept_encoding = .{ .override = "identity" } } });
+    var route: net.tunnel.Route = .{};
+    defer route.deinit();
+    var request = try route.request(allocator, client, &.system, .GET, uri, .{ .keep_alive = false, .headers = .{ .accept_encoding = .{ .override = "identity" } } }, null);
     defer request.deinit();
     try request.sendBodiless();
     var redirect_buffer: [8 * 1024]u8 = undefined;
@@ -95,7 +104,7 @@ pub fn get(allocator: std.mem.Allocator, client: *std.http.Client, url: []const 
 }
 
 const TestServer = struct {
-    server: std.net.Server,
+    server: std.Io.net.Server,
     body: []const u8,
     honor_range: bool,
     requests: usize = 0,
@@ -104,13 +113,13 @@ const TestServer = struct {
         for (0..count) |_| self.one() catch return;
     }
     fn one(self: *TestServer) !void {
-        const connection = try self.server.accept();
-        defer connection.stream.close();
+        const connection = try self.server.accept(zio.io());
+        defer connection.close(zio.io());
         var receive_buffer: [4096]u8 = undefined;
         var send_buffer: [4096]u8 = undefined;
-        var reader = connection.stream.reader(&receive_buffer);
-        var writer = connection.stream.writer(&send_buffer);
-        var http: std.http.Server = .init(reader.interface(), &writer.interface);
+        var reader = connection.reader(zio.io(), &receive_buffer);
+        var writer = connection.writer(zio.io(), &send_buffer);
+        var http: std.http.Server = .init(&reader.interface, &writer.interface);
         var request = try http.receiveHead();
         self.requests += 1;
         var start: usize = 0;
@@ -129,20 +138,20 @@ test "HTTP source resumes with ranges and restarts on full responses" {
     var body: [50_000]u8 = undefined;
     for (&body, 0..) |*byte, index| byte.* = @truncate(index *% 31);
     for ([_]bool{ true, false }) |honor| {
-        const address = try std.net.Address.parseIp("127.0.0.1", 0);
-        var server: TestServer = .{ .server = try address.listen(.{ .reuse_address = true }), .body = &body, .honor_range = honor };
-        defer server.server.deinit();
+        const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+        var server: TestServer = .{ .server = try address.listen(zio.io(), .{ .reuse_address = true }), .body = &body, .honor_range = honor };
+        defer server.server.deinit(zio.io());
         const thread = try std.Thread.spawn(.{}, TestServer.serve, .{ &server, 2 });
         defer thread.join();
         var url_buffer: [64]u8 = undefined;
-        const url = try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/a.zip", .{server.server.listen_address.getPort()});
-        var client: std.http.Client = .{ .allocator = std.testing.allocator };
+        const url = try std.fmt.bufPrint(&url_buffer, "http://127.0.0.1:{d}/a.zip", .{server.server.socket.address.getPort()});
+        var client: std.http.Client = .{ .allocator = std.testing.allocator, .io = zio.io() };
         defer client.deinit();
         var temp = std.testing.tmpDir(.{});
         defer temp.cleanup();
-        var file = try temp.dir.createFile("partial", .{ .read = true });
-        defer file.close();
-        try file.writeAll(body[0..12_345]);
+        var file = try temp.dir.createFile(zio.io(), "partial", .{ .read = true });
+        defer file.close(zio.io());
+        try file.writeStreamingAll(zio.io(), body[0..12_345]);
         var manifest: update.Manifest = .{ .identity = "org.ziggurat.Http", .target = "linux-x86_64", .version = .{ .major = 1, .minor = 0, .patch = 0 }, .url = url, .bytes = body.len, .sha256 = undefined, .signature = @splat(0) };
         std.crypto.hash.sha2.Sha256.hash(&body, &manifest.sha256, .{});
         var http_source: Source = .init(&client);
