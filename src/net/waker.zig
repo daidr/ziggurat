@@ -19,9 +19,7 @@ pub const Waker = struct {
         errdefer tx.close(io);
         const rx = try server.accept(io);
         errdefer rx.close(io);
-        // The connected side reports its local address, the accepted side
-        // its peer's.
-        if (!tx.socket.address.eql(&rx.socket.address)) return error.WakerPeerMismatch;
+        if (!ownPeer(tx.socket.address, rx.socket.address)) return error.WakerPeerMismatch;
         return .{ .rx = rx, .tx = tx };
     }
 
@@ -48,6 +46,29 @@ pub const Waker = struct {
         return self.rx.socket.handle;
     }
 };
+
+/// Whether the accepted `peer` is the connection made from `local`. The
+/// connected side reports its local address, the accepted side its peer's.
+/// Windows reports the connected side's address as bound, before the
+/// connection chose an interface, so its IP is unspecified there; the port
+/// then decides, since one loopback source port reaches the listener once.
+fn ownPeer(local: std.Io.net.IpAddress, peer: std.Io.net.IpAddress) bool {
+    if (local.eql(&peer)) return true;
+    if (local.getPort() != peer.getPort()) return false;
+    return switch (local) {
+        .ip4 => |address| std.mem.allEqual(u8, &address.bytes, 0) and peer == .ip4 and std.mem.eql(u8, &peer.ip4.bytes, &.{ 127, 0, 0, 1 }),
+        .ip6 => false,
+    };
+}
+
+test "a peer matches the connection's own address or, unbound, its port" {
+    const loopback: std.Io.net.IpAddress = .{ .ip4 = .loopback(4000) };
+    try std.testing.expect(ownPeer(loopback, loopback));
+    try std.testing.expect(ownPeer(.{ .ip4 = .unspecified(4000) }, loopback));
+    try std.testing.expect(!ownPeer(.{ .ip4 = .unspecified(4001) }, loopback));
+    try std.testing.expect(!ownPeer(.{ .ip4 = .unspecified(4000) }, .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 2 }, .port = 4000 } }));
+    try std.testing.expect(!ownPeer(.{ .ip4 = .loopback(4001) }, loopback));
+}
 
 test "waker coalesces and wakes poll" {
     var waker = try Waker.init();
