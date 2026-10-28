@@ -38,7 +38,7 @@ snapshot 是单独的显式成本：占用一个 Domain 固定 slot，分配独�
 
 Domain.texture_bytes 共同约束已拥有的当前代数 Texture、完整未发布 snapshot/upload 候选，以及所有 Surface 的 workspace reservation。workspace 按 `width×height×4×(max_depth+2)` 计费；达到上限在任何 Surface allocator/native allocation 前失败。Domain 有32个 texture slot 和32个 renderer attachment，Surface 使用一个 attachment，快照使用独立 texture slot；不驱逐调用者仍拥有的快照。
 
-Domain.total_bytes 创建时已经预留基础 metadata 和完整 texture_bytes；每个 Surface 再预留其 Zig State（含固定捕获 Buffer）、native State/workspace metadata，以及 `2×resident_bytes`。后者覆盖 source 图片/A8 的旧驻留与完整上传候选；图片与 A8 共用32项缓存。零 resident_bytes 明确拒绝正大小的图片/A8上传，typed GPU texture 输入不需要这个缓存。逻辑 texels、adapter metadata 与 allocator headers、驱动布局、字体/effect 内部存储分开，不能据此推断实际显存或 RSS。
+Domain.total_bytes 创建时已经预留基础 metadata 和完整 texture_bytes；每个 Surface 再预留其 Zig State（含固定捕获 Buffer）、native State/workspace metadata，以及 `2×resident_bytes`。后者覆盖 source 图片/A8 的旧驻留与完整上传候选；图片与 A8 共用一张按需增长的缓存槽表。零 resident_bytes 明确拒绝正大小的图片/A8上传，typed GPU texture 输入不需要这个缓存。逻辑 texels、adapter metadata 与 allocator headers、驱动布局、字体/effect 内部存储分开，不能据此推断实际显存或 RSS。
 
 Domain.stats 分列 texture pixel_bytes、workspace_reservation、metadata_reservation、raster_reservation、total_reservation 及 peak_total_reservation。peak_reserved_bytes 是旧纹理、工作面和完整候选的合计 texel reservation 峰值，失败候选也可增加它。Surface.stats.workspace_actual 在其 native 平面确实存在时计逻辑像素字节，loss/stop 后为0；workspace_reserved 在壳关闭前继续保留。raster_current 是可恢复驻留描述的逻辑 charge，raster 子表的 native_objects 单独表示当前 adapter refs。reservation 不等于实际系统分配。
 

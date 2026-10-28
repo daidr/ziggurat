@@ -133,6 +133,38 @@ pub fn pngToIco(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
     return out.toOwnedSlice();
 }
 
+/// The icon types of a macOS .icns with the size of their PNG images.
+pub const icns_entries = [_]struct { kind: *const [4]u8, size: u32 }{
+    .{ .kind = "ic11", .size = 32 },  .{ .kind = "ic12", .size = 64 },
+    .{ .kind = "ic07", .size = 128 }, .{ .kind = "ic13", .size = 256 },
+    .{ .kind = "ic08", .size = 256 }, .{ .kind = "ic14", .size = 512 },
+    .{ .kind = "ic09", .size = 512 }, .{ .kind = "ic10", .size = 1024 },
+};
+
+/// A macOS .icns holding `source` at each of `icns_entries` as PNG.
+pub fn pngToIcns(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+    try validate(source);
+    const image = try png.decode(allocator, source);
+    defer image.deinit(allocator);
+    var body: std.Io.Writer.Allocating = .init(allocator);
+    defer body.deinit();
+    for (icns_entries) |entry| {
+        const scaled = try resize(allocator, image, entry.size);
+        defer scaled.deinit(allocator);
+        const bytes = try png.encode(allocator, scaled);
+        defer allocator.free(bytes);
+        try body.writer.writeAll(entry.kind);
+        try body.writer.writeInt(u32, @intCast(bytes.len + 8), .big);
+        try body.writer.writeAll(bytes);
+    }
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    try out.writer.writeAll("icns");
+    try out.writer.writeInt(u32, @intCast(body.written().len + 8), .big);
+    try out.writer.writeAll(body.written());
+    return out.toOwnedSlice();
+}
+
 test "icons are square PNGs" {
     const allocator = std.testing.allocator;
     try std.testing.expectError(error.IconNotPng, validate("not a png"));
@@ -197,4 +229,27 @@ test "the ico directory lists every size with PNG payloads" {
         try std.testing.expectEqual(size, decoded.width);
         try std.testing.expectEqual([4]u8{ 30, 120, 220, 255 }, decoded.at(size / 2, size / 2));
     }
+}
+
+test "the icns holds every entry as a PNG of its size" {
+    const allocator = std.testing.allocator;
+    var image: png.Image = try .init(allocator, 64, 64);
+    defer image.deinit(allocator);
+    for (0..64 * 64) |i| image.pixels[i * 4 ..][0..4].* = .{ 30, 120, 220, 255 };
+    const source = try png.encode(allocator, image);
+    defer allocator.free(source);
+    const icns = try pngToIcns(allocator, source);
+    defer allocator.free(icns);
+    try std.testing.expectEqualStrings("icns", icns[0..4]);
+    try std.testing.expectEqual(@as(u32, @intCast(icns.len)), std.mem.readInt(u32, icns[4..8], .big));
+    var offset: usize = 8;
+    for (icns_entries) |entry| {
+        try std.testing.expectEqualStrings(entry.kind, icns[offset..][0..4]);
+        const length = std.mem.readInt(u32, icns[offset + 4 ..][0..4], .big);
+        const decoded = try png.decode(allocator, icns[offset + 8 .. offset + length]);
+        defer decoded.deinit(allocator);
+        try std.testing.expectEqual(entry.size, decoded.width);
+        offset += length;
+    }
+    try std.testing.expectEqual(icns.len, offset);
 }

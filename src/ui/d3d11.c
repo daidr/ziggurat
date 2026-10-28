@@ -16,6 +16,7 @@
 #include "coverage_resource.h"
 #include "gradient_interpolation_native.h"
 #include "gaussian_gpu_native.h"
+#define ZG_EFFECT_SLOTS 16
 
 /* Native graphics resources only; command storage and rendering policy live in Zig. */
 #define GEOMETRY_CAPACITY 32
@@ -65,7 +66,8 @@ typedef struct State {
     ID2D1Effect *gradient;
     uint64_t gradient_previous_uploads;
     uint32_t gradient_creations,gradient_draws,gradient_restores;
-    CachedImage images[ZI_IMAGE_SLOTS],image_candidate;
+    CachedImage *images,image_candidate;
+    uint32_t image_capacity;
     uint32_t image_fault;
     BOOL image_loss_fault;
     uint32_t image_update_loss_mip;
@@ -74,6 +76,17 @@ typedef struct State {
     uint64_t coverage_creations,coverage_restores;
     size_t coverage_scratch_peak;
     ZgInterpolation *interpolation;
+    /* Shader effects: the shared vertex shader, the installed pixel
+       shaders, their constants and the copy a backdrop shader reads. */
+    ID3D11VertexShader *effect_vertex;
+    ID3D11PixelShader *effect_pixels[ZG_EFFECT_SLOTS];
+    ID3D11Buffer *effect_constants[2];
+    ID3D11RasterizerState *effect_raster;
+    ID3D11Texture2D *backdrop_copy,*backdrop_output;
+    ID3D11ShaderResourceView *backdrop_view;
+    ID3D11RenderTargetView *backdrop_target;
+    UINT backdrop_width,backdrop_height;
+    uint64_t effect_passes;
 } State;
 static LONG live_resources;
 static unsigned class_owners;
@@ -89,6 +102,7 @@ static D2D1_RECT_F rectangle(float x,float y,float width,float height);
 static HRESULT end_frame(State *s,int offscreen);
 /* Raster scopes retain their transparent guard through final sampling. */
 #include "gpu_layers.h"
+#include "gpu_effects.h"
 #include "gpu_domain.h"
 
 uint32_t zgpu_resource_count(void) { return (uint32_t)InterlockedCompareExchange(&live_resources, 0, 0); }
@@ -181,10 +195,11 @@ static void release_device(State *s) {
     finish_draw(s);
     release_target(s);
     if(s->interpolation)s->interpolation->ops->lose(s->interpolation);
+    gpu_effect_drop_objects(s);
     gpu_layer_drop_objects(s->layers);
     for (unsigned i=0;i<GEOMETRY_CAPACITY;i++) { DROP(s->shapes[i].path); s->shapes[i].used=0; }
     s->gradient_previous_uploads+=gradient_uploads(s->gradient);DROP(s->gradient);
-    for (unsigned i=0;i<ZI_IMAGE_SLOTS;i++)drop_image_objects(&s->images[i]);
+    for (unsigned i=0;i<s->image_capacity;i++)drop_image_objects(&s->images[i]);
     drop_image(&s->image_candidate);
     DROP(s->brush);
     DROP(s->context);
@@ -252,7 +267,7 @@ static HRESULT create_device(State *s) {
     s->gradient_creations++;
     /* Explicit residency retains bounded CPU descriptors across device loss.
        Recovery rebuilds that resident set; ordinary draws never upload. */
-    for(unsigned i=0;i<ZI_IMAGE_SLOTS;i++)if(s->images[i].count){hr=create_image_objects(s,&s->images[i],0);if(FAILED(hr))goto failed;if(s->images[i].is_coverage)s->coverage_restores++;else s->image_restores++;}
+    for(unsigned i=0;i<s->image_capacity;i++)if(s->images[i].count){hr=create_image_objects(s,&s->images[i],0);if(FAILED(hr))goto failed;if(s->images[i].is_coverage)s->coverage_restores++;else s->image_restores++;}
     if(s->layers){hr=gpu_layer_objects(s,s->layers,0);if(FAILED(hr))goto failed;s->layers->stats.native_restores++;}
     DROP(dxgi);
     s->device_creations++;
@@ -574,7 +589,7 @@ HRESULT zgpu_prepare_coverage(State *s,const ZgCoverage *coverage){
     s->image_candidate=candidate;s->image_candidate.levels=&s->image_candidate.coverage_level;return S_OK;
 }
 HRESULT zgpu_update_image(State *s,uint32_t slot,const ZiImageLevel *levels,uint32_t count){
-    if(s->drawing||slot>=ZI_IMAGE_SLOTS||!s->images[slot].dynamic||s->images[slot].count!=count)return E_INVALIDARG;
+    if(s->drawing||slot>=s->image_capacity||!s->images[slot].dynamic||s->images[slot].count!=count)return E_INVALIDARG;
     if(s->image_loss_fault){s->image_loss_fault=FALSE;return failure(s,DXGI_ERROR_DEVICE_REMOVED);}
     HRESULT hr=S_OK;if(!s->context){hr=create_device(s);if(FAILED(hr))return hr;}
     CachedImage *image=&s->images[slot];unsigned bank=1-image->active;uint32_t fault=s->image_fault,loss_mip=s->image_update_loss_mip;s->image_fault=0;s->image_update_loss_mip=0;
@@ -585,22 +600,32 @@ HRESULT zgpu_update_image(State *s,uint32_t slot,const ZiImageLevel *levels,uint
     }
     image->active=bank;image->levels=levels;return S_OK;
 }
+/* Grow the slot table; coverage entries point at their own level, so moved
+   entries are pointed at it again. */
+HRESULT zgpu_reserve_images(State *s,uint32_t capacity){
+    if(s->drawing)return E_INVALIDARG;
+    if(capacity<=s->image_capacity)return S_OK;
+    CachedImage *images=realloc(s->images,(size_t)capacity*sizeof(*images));if(!images)return E_OUTOFMEMORY;
+    memset(images+s->image_capacity,0,(size_t)(capacity-s->image_capacity)*sizeof(*images));
+    for(uint32_t i=0;i<s->image_capacity;i++)if(images[i].is_coverage)images[i].levels=&images[i].coverage_level;
+    s->images=images;s->image_capacity=capacity;return S_OK;
+}
 void zgpu_commit_image(State *s,uint32_t slot){drop_image(&s->images[slot]);s->images[slot]=s->image_candidate;if(s->images[slot].is_coverage)s->images[slot].levels=&s->images[slot].coverage_level;memset(&s->image_candidate,0,sizeof(s->image_candidate));}
-void zgpu_release_image(State *s,uint32_t slot){if(slot<ZI_IMAGE_SLOTS)drop_image(&s->images[slot]);}
+void zgpu_release_image(State *s,uint32_t slot){if(slot<s->image_capacity)drop_image(&s->images[slot]);}
 void zgpu_image_fault(State *s,uint32_t mip){s->image_fault=mip;}
 void zgpu_image_loss_fault(State *s){s->image_loss_fault=TRUE;}
 void zgpu_image_update_loss_at(State *s,uint32_t mip){s->image_update_loss_mip=mip;}
 HRESULT zgpu_image(State *s,uint32_t slot,const ZiImagePlan *plan){
-    if(!s->drawing||slot>=ZI_IMAGE_SLOTS||plan->level>=s->images[slot].count||!s->images[slot].bitmaps[s->images[slot].active][plan->level])return E_INVALIDARG;
+    if(!s->drawing||slot>=s->image_capacity||plan->level>=s->images[slot].count||!s->images[slot].bitmaps[s->images[slot].active][plan->level])return E_INVALIDARG;
     const D2D1_RECT_F destination=rectangle(plan->destination.x,plan->destination.y,plan->destination.width,plan->destination.height),source=rectangle(plan->source.x,plan->source.y,plan->source.width,plan->source.height);
     ID2D1RenderTarget_DrawBitmap(RT(s),s->images[slot].bitmaps[s->images[slot].active][plan->level],&destination,plan->opacity,plan->sampling?D2D1_BITMAP_INTERPOLATION_MODE_LINEAR:D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,&source);return S_OK;
 }
-static uint32_t raster_objects(State *s,int coverage){uint32_t n=0;for(unsigned i=0;i<ZI_IMAGE_SLOTS;i++)if(s->images[i].is_coverage==(uint32_t)coverage)for(unsigned bank=0;bank<2;bank++)for(unsigned j=0;j<s->images[i].count;j++)if(s->images[i].bitmaps[bank][j])n++;return n;}
+static uint32_t raster_objects(State *s,int coverage){uint32_t n=0;for(unsigned i=0;i<s->image_capacity;i++)if(s->images[i].is_coverage==(uint32_t)coverage)for(unsigned bank=0;bank<2;bank++)for(unsigned j=0;j<s->images[i].count;j++)if(s->images[i].bitmaps[bank][j])n++;return n;}
 void zgpu_image_stats(State *s,uint64_t *restores,uint32_t *objects,uint64_t *creations){*restores=s->image_restores;*creations=s->image_creations;*objects=raster_objects(s,0);}
 void zgpu_coverage_stats(State *s,uint64_t *restores,uint32_t *objects,uint64_t *creations){*restores=s->coverage_restores;*creations=s->coverage_creations;*objects=raster_objects(s,1);}
 size_t zgpu_coverage_scratch_peak(State *s){return s->coverage_scratch_peak;}
 HRESULT zgpu_coverage(State *s,uint32_t slot,float x,float y,float scale,uint32_t rgba){
-    if(!s->drawing||slot>=ZI_IMAGE_SLOTS||!s->images[slot].is_coverage||!s->images[slot].bitmaps[0][0])return E_INVALIDARG;
+    if(!s->drawing||slot>=s->image_capacity||!s->images[slot].is_coverage||!s->images[slot].bitmaps[0][0])return E_INVALIDARG;
     const ZiImageLevel *level=&s->images[slot].coverage_level;
     const D2D1_RECT_F destination=rectangle(x-1.0f/scale,y-1.0f/scale,(level->width+2)/scale,(level->height+2)/scale),source=rectangle(0,0,(float)(level->width+2),(float)(level->height+2));
     const D2D1_COLOR_F color={(float)(rgba>>24)/255.0f,(float)((rgba>>16)&255)/255.0f,(float)((rgba>>8)&255)/255.0f,(float)(rgba&255)/255.0f};
@@ -666,6 +691,8 @@ void zgpu_stats(State *s, uint32_t *creations, uint32_t *targets, uint32_t *resi
 void zgpu_destroy(State *s) {
     if (!s) return;
     release_device(s);
+    for(unsigned i=0;i<s->image_capacity;i++)drop_image(&s->images[i]);
+    free(s->images);s->images=NULL;s->image_capacity=0;
     zgpu_interpolation_dispose(zgpu_interpolation_take(s));
     if(s->domain){
         if(s->domain_previous)s->domain_previous->domain_next=s->domain_next;else s->domain->renderers=s->domain_next;

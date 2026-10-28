@@ -40,7 +40,7 @@ root/
 
 ## 下载、保留与回滚
 
-`download.fetch(manifest, source, partial, &control)` 把传输写入调用者的部分文件。已有前缀先重新计算摘要再续传；来源不支持续传时从零开始。`Control.cancel` 可在任意线程调用，取消保留部分文件供下次续传；完整但摘要错误的文件会被截断。进度在 worker 上回调，UI 宿主用 `App.post` 转交，`Full` 时丢弃中间值即可。`http.Source` 基于调用者持有的 `std.http.Client`，用 `Range` 续传，200 响应即从头开始；HTTPS 证书使用该客户端的系统 CA。`http.get` 读取有上限的小文档，如发布索引。模块不创建线程。
+`download.fetch(manifest, source, partial, &control)` 把传输写入调用者的部分文件。已有前缀先重新计算摘要再续传；来源不支持续传时从零开始。`Control.cancel` 可在任意线程调用，取消保留部分文件供下次续传；完整但摘要错误的文件会被截断。进度在 worker 上回调，UI 宿主用 `App.post` 转交，`Full` 时丢弃中间值即可。`http.Source` 基于调用者持有的 `std.http.Client`，用 `Range` 续传，200 响应即从头开始；HTTPS 证书使用该客户端的系统 CA，请求走系统代理（见 [net.md](net.md) “系统代理”），客户端自己设置了代理时保留其设置。`http.get` 读取有上限的小文档，如发布索引。模块不创建线程。
 
 `publishZip` 的 `retain_archive` 把验证过的归档保留为 `archives/<release>.zip`，供下一次增量使用。`retention.currentArchive` 打开并重新计算当前版本保留归档的摘要。`retention.rollback` 在更新锁内逐个文件对照该版本的 package.json 重新校验，再原子切换 `current.json`；回滚是宿主的明确决定，之后的检查仍会提供较新版本，是否跳过由宿主决定。`retention.prune(keep)` 删除最新 `keep` 个之外的旧版本及其归档，当前版本和比它新的版本始终保留；旧版本可能仍在运行时不要清理。
 

@@ -66,6 +66,12 @@ pub const PixelImage = struct {
             context.updateImage(old, next) catch |err| switch (err) {
                 // Evicted under the image budget: upload it again.
                 error.ImageNotUploaded => try context.uploadDynamicImage(next),
+                // Evicted, then made resident again as a static image by a
+                // paint that drew it.
+                error.ImageNotDynamic => {
+                    _ = try context.releaseImage(old);
+                    try context.uploadDynamicImage(next);
+                },
                 else => return err,
             };
         } else try context.uploadDynamicImage(next);
@@ -89,13 +95,16 @@ test "pictures take turns between two buffers" {
     const Uploads = struct {
         held: ?u64 = null,
         uploads: usize = 0,
+        static: bool = false,
         fn uploadDynamicImage(self: *@This(), next: drawing.ImageView) !void {
             try next.validate();
             self.held = next.identity;
+            self.static = false;
             self.uploads += 1;
         }
         fn updateImage(self: *@This(), old: u64, next: drawing.ImageView) !void {
             if (self.held != old) return error.ImageNotUploaded;
+            if (self.static) return error.ImageNotDynamic;
             try next.validate();
             self.held = next.identity;
         }
@@ -118,6 +127,11 @@ test "pictures take turns between two buffers" {
     context.held = null;
     try image.commit(&context);
     try std.testing.expectEqual(@as(usize, 2), context.uploads);
+    // So is one a paint made resident again as a static image.
+    context.static = true;
+    try image.commit(&context);
+    try std.testing.expectEqual(@as(usize, 3), context.uploads);
+    try std.testing.expectEqual(context.held.?, image.view().?.identity);
     image.release(&context);
     try std.testing.expect(context.held == null and image.view() == null);
     try std.testing.expectError(error.InvalidImageResource, PixelImage.init(std.testing.allocator, 0, 1));

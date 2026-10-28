@@ -89,14 +89,22 @@ HRESULT zgpu_layer_begin_group(State *s,const ZgLayerGroup *group){
     const D2D1_COLOR_F transparent={0,0,0,0};ID2D1RenderTarget_Clear(RT(s),&transparent);
     layer->stats.groups++;layer->stats.clear_pixels+=pixels;return S_OK;
 }
-HRESULT zgpu_layer_end_group(State *s){
+/* A pass that replaces a capture's filter, run between EndDraw and the
+   composite; NULL `run` composites the capture as drawn. */
+typedef struct GpuCapturePass {HRESULT (*run)(State *,uint32_t,const ZgGaussianCapture *,const void *);const void *context;} GpuCapturePass;
+static HRESULT gpu_layer_end(State *s,const GpuCapturePass *pass){
     GpuLayers *layer=s->layers;if(!s->drawing||!layer||!layer->depth||s->clips!=1||(layer->groups[layer->depth-1].kind!=0&&layer->groups[layer->depth-1].kind!=2))return E_UNEXPECTED;
+    if(pass&&layer->groups[layer->depth-1].kind!=2)return E_UNEXPECTED;
     unsigned child=layer->depth+1;GpuGroup *frame=&layer->groups[layer->depth-1];const ZgLayerGroup *group=&frame->group;
     const int filtered=frame->kind==2;
     gpu_layer_pop_clips(s);HRESULT hr;
     if(filtered){
         hr=ID2D1RenderTarget_EndDraw(RT(s),NULL,NULL);s->drawing=FALSE;
-        if(SUCCEEDED(hr)){s->context->lpVtbl->SetTarget(s->context,NULL);const ZgGaussianFrame *filter=&layer->gaussian->frames[layer->depth-1];hr=layer->gaussian->ops->filter(layer->gaussian,layer->depth-1,&filter->capture,&filter->kernel);}
+        if(SUCCEEDED(hr)){
+            s->context->lpVtbl->SetTarget(s->context,NULL);const ZgGaussianFrame *filter=&layer->gaussian->frames[layer->depth-1];
+            if(!pass)hr=layer->gaussian->ops->filter(layer->gaussian,layer->depth-1,&filter->capture,&filter->kernel);
+            else if(pass->run)hr=pass->run(s,layer->depth-1,&filter->capture,pass->context);
+        }
         if(FAILED(hr)){gpu_layer_abort_metadata(s);return failure(s,hr);}
     }else{hr=ID2D1RenderTarget_Flush(RT(s),NULL,NULL);if(FAILED(hr))return failure(s,hr);}
     layer->depth--;s->context->lpVtbl->SetTarget(s->context,(ID2D1Image *)gpu_layer_current(layer));
@@ -110,7 +118,7 @@ HRESULT zgpu_layer_end_group(State *s){
     const float ox=layer->origins[child][0]/layer->scale,oy=layer->origins[child][1]/layer->scale;const D2D1_RECT_F child_destination=rectangle(-ox,-oy,(float)layer->pool_width/layer->scale,(float)layer->pool_height/layer->scale);
     if(group->mask_slot==UINT32_MAX)ID2D1RenderTarget_DrawBitmap(RT(s),(ID2D1Bitmap *)layer->targets[child],&child_destination,opacity,D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,NULL);
     else{
-        if(group->mask_slot>=ZI_IMAGE_SLOTS||!s->images[group->mask_slot].is_coverage){ID2D1RenderTarget_PopAxisAlignedClip(RT(s));return E_INVALIDARG;}
+        if(group->mask_slot>=s->image_capacity||!s->images[group->mask_slot].is_coverage){ID2D1RenderTarget_PopAxisAlignedClip(RT(s));return E_INVALIDARG;}
         CachedImage *mask=&s->images[group->mask_slot];const ZiImageLevel *level=&mask->coverage_level;
         const D2D1_RECT_F destination=rectangle((float)((double)group->mask_x+((double)group->mask_left-1)/group->mask_scale),(float)((double)group->mask_y+((double)group->mask_top-1)/group->mask_scale),(level->width+2)/group->mask_scale,(level->height+2)/group->mask_scale),source=rectangle(0,0,(float)(level->width+2),(float)(level->height+2));
         ID2D1Brush_SetOpacity((ID2D1Brush *)layer->brushes[child],opacity);
@@ -122,6 +130,7 @@ HRESULT zgpu_layer_end_group(State *s){
     gpu_layer_restore_clips(s,frame->clips,frame->count);
     for(UINT i=0;i<s->clips;i++){bounds.left=fmaxf(bounds.left,s->clip_rects[i].left);bounds.top=fmaxf(bounds.top,s->clip_rects[i].top);bounds.right=fminf(bounds.right,s->clip_rects[i].right);bounds.bottom=fminf(bounds.bottom,s->clip_rects[i].bottom);}uint64_t pixels;D2D1_RECT_F box;gpu_layer_box(layer,&bounds,&box,&pixels);layer->stats.composite_pixels+=pixels;return S_OK;
 }
+HRESULT zgpu_layer_end_group(State *s){return gpu_layer_end(s,NULL);}
 size_t zgpu_layer_metadata_size(void){return sizeof(GpuLayers);}
 int zgpu_layer_gaussian_capacity(State *s,ZgGaussianCapacity *out){if(!s->layers||!s->layers->gaussian||!s->layers->gaussian->ready)return 0;*out=s->layers->gaussian->capacity;return 1;}
 size_t zgpu_layer_gaussian_reserved(State *s){return s->layers&&s->layers->gaussian?s->layers->gaussian->metadata_bytes:0;}

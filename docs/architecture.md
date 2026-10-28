@@ -230,7 +230,7 @@ GDI 复用 DC、位图和字体；Linux 复用 Cairo surface 并通过 Pango 系
 
 透明分组由 Context 在 paint 外显式预留 front/work/group 平面，软件与可用 GPU 的候选全部成功才替换旧工作面。分组在透明平面完成子项后一次应用 opacity/mask/parent clip。回放和结束失败或 GPU 暂缓呈现保留已提交前帧及输入/语义快照；软件 fallback 成功后才替换可见后端和提交新快照。关闭/资源替换先撤销借用的 ready watch。默认未启用的 Context 不分配这些平面，详见[分组工作面](layers.md)。
 
-独立 `ziggurat_shader` 只依赖标准库：源文本在绘制之前编译为有界寄存器字节码，最坏单像素步数在编译期确定。Context 在 paint 外显式准备着色器工作区，Frame 记录元素效果与背景着色器时复制参数；软件 renderer 用高斯捕获或目标上两遍隔离执行，含此类命令的帧在 D3D11 下整帧软件回放，正常绘制不分配、不编译。见[着色器与元素效果](shader-effects.md)。
+独立 `ziggurat_shader` 只依赖标准库：源文本在绘制之前编译为有界寄存器字节码，最坏单像素步数在编译期确定。Context 在 paint 外显式准备着色器工作区，Frame 记录元素效果与背景着色器时复制参数；软件 renderer 用高斯捕获或目标上两遍隔离执行；D3D11 在 paint 之外显式编译并装入程序，绘制时在高斯捕获或目标复制上执行，无法执行时整帧软件回放；正常绘制不分配、不编译。见[着色器与元素效果](shader-effects.md)。
 
 编辑模块拥有显式预分配的 UTF-8 文档、历史、preedit 和显示缓冲，支持选择、插入删除、剪贴板注入、撤销重做、逻辑行导航与滚动。应用提供 Surface.measure/paint 和剪贴板回调；不是自动加入 Frame 的成熟文本控件。左右按 Unicode scalar 移动，无完整 grapheme、bidi、soft wrap 或 shaping caret 模型。Windows 处理 UTF-16 surrogate、WM_UNICHAR、IMM preedit/result/cancel 与候选位置；Linux 接 GTK IM。真实语言引擎与视觉效果另行验证。
 
@@ -240,7 +240,7 @@ GDI 复用 DC、位图和字体；Linux 复用 Cairo surface 并通过 Pango 系
 
 core 的保留 TextClient 只持有 opaque owner 与窗口代数，不引入第二份编辑文档。原生查询在 callback pin 内写入调用者缓冲，平台适配器验证 UTF-8/全局 UTF-16/revision，再转换 IMM 或 GTK surrounding 坐标。解绑先撤入口，原生取消失败也不恢复旧 owner；关闭等活动回调退栈后再通知 unbound。连续 Editor 通过显式 TextBinding 接入；可选 `ziggurat_document` 使用聚合 byte/UTF-16/LF 的持久 chunk 树、预算内历史和拥有型 Snapshot，为大文档提供同一 TextClient。可选 DocumentEditor 直接使用同一 Document 的文本、选区、历史和组合状态，以持久段落高度索引及有界系统 Layout 快照准备可见区域；draw 只读缓存，未知 revision 明确要求重建索引，不按猜测的 delta 改状态。成熟编辑控件继续分项实施，见[原生文本上下文](text-input.md)与[大文档视图](document-editor.md)。
 
-独立 `ziggurat_image_drawing` 在布局或显式 worker 阶段复制、裁切并生成不可变预乘 BGRA/mip 快照。Frame 只固定本次回放借用；Cairo/D2D 的显式上传另持有驻留借用，按 32 项 LRU 和像素预算释放。候选的全部 mip 上传成功后才淘汰旧资源，失败保留旧驻留；设备丢失保留有界 CPU 描述，重建设备时恢复。显式 dynamic 上传预留两套 native bank，同尺寸更新完整写入 inactive 后才发布新 identity；CPU 快照仍不可变，静态使用不承担双 bank 像素成本。普通回放只查找缓存，GDI 直接读取像素；不在 paint 解码、生成 mip 或驱逐资源。Context 在可能关闭 GPU 等待句柄的资源操作前撤销 watch。跨后端分别提交，只保留最后一次精确 transition 以支持部分失败后的幂等重试，详见[图片绘制](image-drawing.md)。
+独立 `ziggurat_image_drawing` 在布局或显式 worker 阶段复制、裁切并生成不可变预乘 BGRA/mip 快照。Frame 只固定本次回放借用；Cairo/D2D 的显式上传另持有驻留借用，槽表按需增长，按 LRU 和像素预算释放。候选的全部 mip 上传成功后才淘汰旧资源，失败保留旧驻留；设备丢失保留有界 CPU 描述，重建设备时恢复。显式 dynamic 上传预留两套 native bank，同尺寸更新完整写入 inactive 后才发布新 identity；CPU 快照仍不可变，静态使用不承担双 bank 像素成本。渲染器回放只查找缓存，GDI 直接读取像素；不在 paint 解码或生成 mip。窗口 Context 在回放前补传这一帧缺的图片，只淘汰这一帧没画到的项，Direct3D 11 缺图的帧改在 GDI 画完再上传。Context 在可能关闭 GPU 等待句柄的资源操作前撤销 watch。跨后端分别提交，只保留最后一次精确 transition 以支持部分失败后的幂等重试，详见[图片绘制](image-drawing.md)。
 
 基础 widget UIA 使用固定 128 节点/32 KiB 文本语义快照，支持 Name/Role、Invoke、Value、Text selection 与逻辑范围；它不提供精确 glyph bounds、point-to-range 或 ScrollIntoView。可选 `ziggurat_document_accessibility` 另以完整文档不可变文本、同一 Prepared 几何和有界 owner 动作提供文档查询，不将视口冒充全文。MTA 不访问活的 Document/UI；关闭先撤销 Zig 入口，外部 provider/range 持有独立 refcount 状态，失效查询和动作返回 ElementNotAvailable。缓存的 Options/host/runtime identity 保留到原生断连。完整语言单位、其他平台和屏幕阅读器兼容继续分别验收。
 

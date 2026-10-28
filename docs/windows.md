@@ -44,11 +44,11 @@ try window.setFullscreen(false);
 
 `capabilities()` 按窗口当前显示环境查询 `client_position/fullscreen/always_on_top`。X11 每次检查 WM 公布的能力；无 WM 时不会把全屏或置顶当作成功。Wayland 支持标准全屏请求，但不提供任意置顶能力。macOS 后端尚未实现。
 
-全屏不隐式设置置顶。置顶策略可在全屏中独立修改，退出全屏后保留修改后的值。全屏期间禁止 `resize`、`setClientBounds` 和 `perform(.minimize/.maximize/.restore)`，以保持退出时的还原边界；show/hide、enable/disable、focus 和显式关闭仍可使用。
+全屏不隐式设置置顶。置顶策略可在全屏中独立修改，退出全屏后保留修改后的值。全屏期间禁止 `resize`、`setClientBounds` 和 `perform(.minimize/.maximize/.restore)`，以保持退出时的还原边界；show/hide、enable/disable、focus 和显式关闭仍可使用。唯一例外：`setFullscreen(false)` 之后、WM 尚未确认离开全屏时可以 `perform(.restore)`，表示离开全屏后回到普通状态，不再还原进入前的最大化/最小化。
 
 Windows 保存原生 `WINDOWPLACEMENT`、窗口样式与扩展样式，进入所在显示器完整区域的无边框全屏；退出时还原普通几何和之前的最大化/最小化状态。隐藏普通窗口进入/退出全屏仍保持隐藏。为了避免在原生还原中显示一个被隐藏的最小化窗口，这一组合进入全屏返回 `InvalidWindowState`；先 restore 或 show 后重试。原生菜单句柄保持其所有权，全屏时客户区覆盖完整显示器，退出后菜单恢复。隐藏、启用和置顶在全屏期间的显式修改不会被旧快照覆盖。
 
-GTK 保存普通几何及已观测的最大化/最小化状态，使用原生 fullscreen/unfullscreen 请求；WM 确认离开全屏后恢复几何与状态。调用不阻塞等待 WM，不启动轮询，也不运行嵌套消息循环。连续 enter/exit 可取消尚未应用的请求，窗口管理器保留最终决定权。
+GTK 保存普通几何及已观测的最大化/最小化状态，使用原生 fullscreen/unfullscreen 请求；WM 确认离开全屏后恢复几何与状态。WM 自己在全屏期间保留了最大化时，直接沿用它，不再取消最大化、移动后重新最大化。普通几何只取自单个 configure 事件（位置取 WM 的合成事件），不混用实时读数；框架请求的最大化/最小化在 WM 确认状态之前、以及 `_NET_WM_STATE` 已是特殊模式时的 configure 都不计入普通几何。调用不阻塞等待 WM，不启动轮询，也不运行嵌套消息循环。连续 enter/exit 可取消尚未应用的请求，窗口管理器保留最终决定权。
 
 ## 请求、观测与回调
 
@@ -139,6 +139,15 @@ const window = try app.createWindow(.{
 `Window.setBackdrop(material)` 选择合成器在原生系统框架后绘制的材质：`.mica`、`.acrylic`、`.mica_alt`、`.none`，或 `.system` 恢复平台默认。Windows 用 DWM 的 system backdrop 窗口属性实现，在主线程同步提交；能力按进程读取一次的真实系统版本与窗口装饰判断，不支持时在任何原生调用前返回 `UnsupportedCapability`，原生拒绝返回 `WindowUpdateFailed` 并保留 HRESULT 诊断。框架不保存所选材质，也不在关闭后恢复；宿主需要跨启动保留时自己存储。材质只出现在系统标题栏/边框等非客户区，客户区仍由现有渲染器不透明绘制；`.borderless/.custom` 没有系统框架，因而报告不支持。系统可能因电源模式、透明效果设置或窗口失焦以纯色替代材质，这属于系统策略。
 
 客户区透明（`transparent`）仍未实现：它需要渲染器输出预乘 alpha 并改变整窗合成方式，不能只靠窗口属性完成。无边框能力不表示具备透明合成、模糊或背景材质。X11 无 WM 时仍可创建无边框窗口，但不能据此认为原生拖动、缩放或系统菜单可用；调用前查询每窗口的 capabilities。不支持的操作明确返回 `UnsupportedCapability`。Openbox 验证环境支持移动/缩放，未公布系统窗口菜单协议。
+
+## 指针形状
+
+`Window.setCursor(shape)` 设置指针在客户区上的形状，直到再次改变；`currentCursor()` 返回最近一次设置的形状，窗口关闭后形状随之丢弃。`z.Cursor` 有 `default`、`pointer`、`text`、`move`、四种双向缩放、`not_allowed`、`crosshair`、`grab`/`grabbing`、四个单向缩放、`resize_column`/`resize_row`、`vertical_text`、`copy`、`alias`、`context_menu` 和隐藏指针的 `none`。
+
+- **Windows**：在 `WM_SETCURSOR` 中对客户区（`HTCLIENT`）设置对应的系统光标；标题栏、边框与自定义框架的缩放边缘仍由系统决定。没有的形状取最接近的：单向缩放与列/行缩放用双向缩放，竖排文字用 I 形，`copy`、`alias`、`context_menu` 用箭头；`grab` 是手形，`grabbing` 是四向移动。指针正在客户区内时立即生效。
+- **Linux**：按 CSS 名称用 `gdk_cursor_new_from_name` 创建，设置在绘制区域的 GdkWindow 上；`default` 恢复默认箭头。自定义框架的缩放边缘保留自己的形状，指针回到客户区时显示应用的形状。主题没有该名称时由 GDK 回退。
+
+声明式视图用 `Style.cursor` 设置形状，Host 在指针移动和每帧之后调用它，见[声明式视图](view.md#指针区域与指针形状)。
 
 ## 原生交互与重入
 

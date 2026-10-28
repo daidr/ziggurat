@@ -198,6 +198,15 @@ pub const Library = struct {
         self.passthrough_program.destroy();
         self.allocator.destroy(self);
     }
+    /// The built-in programs and how they draw, for
+    /// `Context.prepareGpuShaders`.
+    pub fn gpuShaders(self: *const Library) [3]shader_effects.GpuShader {
+        return .{
+            .{ .program = self.passthrough_program, .target = .element },
+            .{ .program = self.pose_program, .target = .element },
+            .{ .program = self.glass_program, .target = .backdrop },
+        };
+    }
     /// An element effect that changes nothing, for fading content as one
     /// layer through `EffectOptions.opacity`.
     pub fn passthrough(self: *const Library) Effect {

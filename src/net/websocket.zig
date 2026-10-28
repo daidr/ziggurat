@@ -4,6 +4,8 @@ const Cancel = @import("cancel.zig").Cancel;
 const shutdownSocket = @import("cancel.zig").shutdownSocket;
 const guard = @import("cancel.zig").guard;
 const Waker = @import("waker.zig").Waker;
+const proxy_api = @import("proxy.zig");
+const tunnel = @import("tunnel.zig");
 
 pub const Header = std.http.Header;
 pub const Kind = enum { text, binary };
@@ -45,6 +47,9 @@ pub const ConnectOptions = struct {
     /// Offered subprotocols; the accepted one is `Socket.protocol`.
     protocols: []const []const u8 = &.{},
     limits: Limits = .{},
+    /// The system's proxy by default (`proxy.forUrl`), reached through a
+    /// tunnel. A client whose own `http_proxy`/`https_proxy` is set keeps it.
+    proxy: proxy_api.Choice = .system,
 };
 
 pub const close_code = struct {
@@ -166,21 +171,14 @@ pub const Socket = struct {
         const port = uri.port orelse @as(u16, if (tls) 443 else 80);
         if (handshake_cancel) |token| if (token.isCancelled()) return error.Cancelled;
 
-        if (tls and @atomicLoad(bool, &client.next_https_rescan_certs, .acquire)) {
-            // As std.http.Client.request does before its first HTTPS request.
-            client.ca_bundle_mutex.lock();
-            defer client.ca_bundle_mutex.unlock();
-            if (client.next_https_rescan_certs) {
-                client.ca_bundle.rescan(client.allocator) catch return error.TlsFailed;
-                @atomicStore(bool, &client.next_https_rescan_certs, false, .release);
-            }
-        }
+        if (tls) tunnel.loadCertificates(client) catch return error.TlsFailed;
         const ring = try allocator.alloc(u8, options.limits.send_buffer_bytes);
         errdefer allocator.free(ring);
         var waker = Waker.init() catch return error.SystemResources;
         errdefer waker.deinit();
-        const connection = client.connect(host, port, if (tls) .tls else .plain) catch |err| return switch (err) {
+        const connection = tunnel.connect(client, &options.proxy, uri, host, port, if (tls) .tls else .plain, handshake_cancel) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
+            error.Cancelled => error.Cancelled,
             error.TlsInitializationFailed => error.TlsFailed,
             else => error.ConnectionFailed,
         };
