@@ -49,12 +49,12 @@ pub fn build(b: *std.Build) void {
         b.step("test-document-word-units", "Run independent system ICU word and grapheme boundary corpora").dependOn(&b.addRunArtifact(word_units).step);
     }
     if (target.result.os.tag == .windows) {
+        // Its checks return errors; the trace names the one that failed in
+        // release builds too.
         const runtime_smoke = b.addExecutable(.{ .name = "smoke-webview-runtime", .root_module = b.createModule(.{
             .root_source_file = b.path("tests/webview_runtime_smoke.zig"),
             .target = target,
             .optimize = optimize,
-            // Its checks return errors; the trace names the one that failed
-            // in release builds too.
             .error_tracing = true,
             .imports = &.{.{ .name = "ziggurat_webview_runtime", .module = webview_runtime }},
         }) });
