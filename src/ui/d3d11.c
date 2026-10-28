@@ -87,6 +87,10 @@ typedef struct State {
     ID3D11RenderTargetView *backdrop_target;
     UINT backdrop_width,backdrop_height;
     uint64_t effect_passes;
+    /* Composed frames (Paint.transparent) show on the parent window through
+       DirectComposition with their premultiplied alpha. */
+    int composed;
+    void *dcomp, *dcomp_target, *dcomp_visual;
 } State;
 static LONG live_resources;
 static unsigned class_owners;
@@ -97,6 +101,7 @@ static const WCHAR surface_class[] = L"Ziggurat.Graphics.Surface.0";
 #include "gradient_effect.h"
 static HRESULT create_device(State *s);
 static void release_device(State *s);
+static void release_composition(State *s);
 static HRESULT failure(State *s,HRESULT hr);
 static D2D1_RECT_F rectangle(float x,float y,float width,float height);
 static HRESULT end_frame(State *s,int offscreen);
@@ -206,6 +211,7 @@ static void release_device(State *s) {
     DROP(s->device);
     if (s->frame_ready) { CloseHandle(s->frame_ready); s->frame_ready=NULL; InterlockedDecrement(&live_resources); }
     DROP(s->swapchain2);
+    release_composition(s);
     DROP(s->swapchain);
     if (s->d3d) {
         ID3D11DeviceContext *context = NULL;
@@ -360,6 +366,37 @@ State *zgpu_create_in_domain(GpuDomain *domain,HRESULT *out){
 }
 #include "gpu_offscreen.h"
 
+/* DirectComposition declares C++ interfaces only; these are the vtable
+   slots of IDCompositionDevice, IDCompositionTarget and IDCompositionVisual
+   that a composed swap chain needs. */
+#define DCOMP_COMMIT 3
+#define DCOMP_CREATE_TARGET_FOR_HWND 6
+#define DCOMP_CREATE_VISUAL 7
+#define DCOMP_TARGET_SET_ROOT 3
+#define DCOMP_VISUAL_SET_CONTENT 15
+static const GUID iid_dcomposition_device={0xc37ea93a,0xe7aa,0x450d,{0xb1,0x6f,0x97,0x46,0xcb,0x04,0x07,0xf3}};
+static void **dcomp_vtbl(void *object){return *(void ***)object;}
+static void release_composition(State *s){
+    DROP(s->dcomp_visual);DROP(s->dcomp_target);DROP(s->dcomp);
+}
+static HRESULT create_composition(State *s, IDXGIDevice *dxgi){
+    typedef HRESULT (WINAPI *Create)(IDXGIDevice *,REFIID,void **);
+    HMODULE module=GetModuleHandleW(L"dcomp.dll");
+    if(!module)module=LoadLibraryExW(L"dcomp.dll",NULL,LOAD_LIBRARY_SEARCH_SYSTEM32);
+    Create create=module?(Create)(void *)GetProcAddress(module,"DCompositionCreateDevice"):NULL;
+    if(!create)return HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
+    HRESULT hr=create(dxgi,&iid_dcomposition_device,&s->dcomp);OWN(s->dcomp);
+    if(FAILED(hr))return hr;
+    hr=((HRESULT (STDMETHODCALLTYPE *)(void *,HWND,BOOL,void **))dcomp_vtbl(s->dcomp)[DCOMP_CREATE_TARGET_FOR_HWND])(s->dcomp,s->parent,TRUE,&s->dcomp_target);OWN(s->dcomp_target);
+    if(FAILED(hr))return hr;
+    hr=((HRESULT (STDMETHODCALLTYPE *)(void *,void **))dcomp_vtbl(s->dcomp)[DCOMP_CREATE_VISUAL])(s->dcomp,&s->dcomp_visual);OWN(s->dcomp_visual);
+    if(FAILED(hr))return hr;
+    hr=((HRESULT (STDMETHODCALLTYPE *)(void *,IUnknown *))dcomp_vtbl(s->dcomp_visual)[DCOMP_VISUAL_SET_CONTENT])(s->dcomp_visual,(IUnknown *)s->swapchain);
+    if(FAILED(hr))return hr;
+    hr=((HRESULT (STDMETHODCALLTYPE *)(void *,void *))dcomp_vtbl(s->dcomp_target)[DCOMP_TARGET_SET_ROOT])(s->dcomp_target,s->dcomp_visual);
+    if(FAILED(hr))return hr;
+    return ((HRESULT (STDMETHODCALLTYPE *)(void *))dcomp_vtbl(s->dcomp)[DCOMP_COMMIT])(s->dcomp);
+}
 static HRESULT create_swapchain(State *s, UINT width, UINT height) {
     IDXGIDevice *dxgi = NULL;
     IDXGIAdapter *adapter = NULL;
@@ -375,12 +412,22 @@ static HRESULT create_swapchain(State *s, UINT width, UINT height) {
     desc.Width = width; desc.Height = height; desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     desc.SampleDesc.Count = 1; desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     desc.BufferCount = 2; desc.Scaling = DXGI_SCALING_STRETCH;
-    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL; desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL; desc.AlphaMode = s->composed ? DXGI_ALPHA_MODE_PREMULTIPLIED : DXGI_ALPHA_MODE_IGNORE;
     desc.Flags=DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
-    /* The parent remains a GDI window. Flip presentation targets only this child. */
-    hr = IDXGIFactory2_CreateSwapChainForHwnd(factory, (IUnknown *)s->d3d, s->surface, &desc, NULL, NULL, &s->swapchain);
-    OWN(s->swapchain);
-    if (FAILED(hr)) goto done;
+    if (s->composed) {
+        /* A window without a redirection bitmap shows its material where the
+           composed frames are transparent. */
+        hr = IDXGIFactory2_CreateSwapChainForComposition(factory, (IUnknown *)s->d3d, &desc, NULL, &s->swapchain);
+        OWN(s->swapchain);
+        if (FAILED(hr)) goto done;
+        hr = create_composition(s, dxgi);
+        if (FAILED(hr)) goto done;
+    } else {
+        /* The parent remains a GDI window. Flip presentation targets only this child. */
+        hr = IDXGIFactory2_CreateSwapChainForHwnd(factory, (IUnknown *)s->d3d, s->surface, &desc, NULL, NULL, &s->swapchain);
+        OWN(s->swapchain);
+        if (FAILED(hr)) goto done;
+    }
     hr=IDXGISwapChain1_QueryInterface(s->swapchain,&IID_IDXGISwapChain2,(void **)&s->swapchain2); OWN(s->swapchain2);
     if (FAILED(hr)) goto done;
     hr=IDXGISwapChain2_SetMaximumFrameLatency(s->swapchain2,1);
@@ -391,19 +438,21 @@ static HRESULT create_swapchain(State *s, UINT width, UINT height) {
     s->width = width; s->height = height; IDXGIFactory2_MakeWindowAssociation(factory, s->surface, DXGI_MWA_NO_ALT_ENTER);
 done:
     DROP(factory); DROP(adapter); DROP(dxgi);
-    if(FAILED(hr)) { if(s->frame_ready){CloseHandle(s->frame_ready);s->frame_ready=NULL;InterlockedDecrement(&live_resources);} DROP(s->swapchain2);DROP(s->swapchain); }
+    if(FAILED(hr)) { if(s->frame_ready){CloseHandle(s->frame_ready);s->frame_ready=NULL;InterlockedDecrement(&live_resources);} DROP(s->swapchain2);release_composition(s);DROP(s->swapchain); }
     return hr;
 }
 
-HRESULT zgpu_begin(State *s, HWND hwnd, UINT width, UINT height, FLOAT dpi) {
+HRESULT zgpu_begin_composed(State *s, HWND hwnd, UINT width, UINT height, FLOAT dpi, int composed) {
     if (!s || s->drawing || s->offscreen) return E_UNEXPECTED;
     if (!hwnd || !IsWindow(hwnd) || !width || !height || !(dpi > 0)) return E_INVALIDARG;
     HRESULT hr = S_OK;
     if (!s->d3d) { hr = create_device(s); if (FAILED(hr)) return hr; }
-    if (s->parent != hwnd || !s->surface) {
+    composed = composed != 0;
+    if (s->parent != hwnd || !s->surface || s->composed != composed) {
         release_target(s);
         if(s->frame_ready){CloseHandle(s->frame_ready);s->frame_ready=NULL;InterlockedDecrement(&live_resources);}
-        DROP(s->swapchain2);DROP(s->swapchain); destroy_surface(s);
+        DROP(s->swapchain2);release_composition(s);DROP(s->swapchain); destroy_surface(s);
+        s->composed = composed;
         s->parent = hwnd;
         s->surface = CreateWindowExW(WS_EX_NOPARENTNOTIFY | WS_EX_NOACTIVATE, surface_class, NULL,
             WS_CHILD | WS_DISABLED, 0,0,width,height,hwnd,NULL,GetModuleHandleW(NULL),s);
@@ -428,7 +477,7 @@ HRESULT zgpu_begin(State *s, HWND hwnd, UINT width, UINT height, FLOAT dpi) {
         if (FAILED(hr)) { DROP(surface); return failure(s, hr); }
         D2D1_BITMAP_PROPERTIES1 properties = {0};
         properties.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        properties.pixelFormat.alphaMode = D2D1_ALPHA_MODE_IGNORE;
+        properties.pixelFormat.alphaMode = s->composed ? D2D1_ALPHA_MODE_PREMULTIPLIED : D2D1_ALPHA_MODE_IGNORE;
         properties.dpiX = properties.dpiY = dpi;
         properties.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
         hr = s->context->lpVtbl->CreateBitmapFromDxgiSurface(s->context, surface, &properties, &s->target); OWN(s->target);
@@ -442,10 +491,11 @@ HRESULT zgpu_begin(State *s, HWND hwnd, UINT width, UINT height, FLOAT dpi) {
     ID2D1RenderTarget_SetDpi(RT(s), dpi, dpi);
     s->dpi = dpi; s->clips = 0;
     ID2D1RenderTarget_BeginDraw(RT(s)); s->drawing = TRUE;
-    const D2D1_COLOR_F background = {1,1,1,1};
-    ID2D1RenderTarget_Clear(RT(s), &background);
+    const D2D1_COLOR_F background = {1,1,1,1}, clear = {0,0,0,0};
+    ID2D1RenderTarget_Clear(RT(s), s->composed ? &clear : &background);
     return S_OK;
 }
+HRESULT zgpu_begin(State *s, HWND hwnd, UINT width, UINT height, FLOAT dpi) {return zgpu_begin_composed(s,hwnd,width,height,dpi,0);}
 
 static D2D1_RECT_F rectangle(float x, float y, float width, float height) {
     const D2D1_RECT_F r = {x,y,x+width,y+height}; return r;

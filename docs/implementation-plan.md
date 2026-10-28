@@ -197,7 +197,7 @@ B02 分项：
 | S02 | 部分完成 | shell 打开 URL/文件、定位、回收站、文件图标、应用发现/启动 | S02.1 executable 启动、S02.2 URL（https/http/mailto 默认白名单）/关联文件/定位、S02.3 回收站（Windows/Linux）及 S02.4 Windows 16/32px 不透明图标已实现；完整图标（Linux/高分辨率/透明）与安装应用发现/按身份启动待实现；真实关联程序/资源管理器显示未自动验证 |
 | S03 | 部分完成 | 多显示器、主题/accent/可访问性偏好、网络、电源与文件监视 | 显示器/偏好/电源/网络快照与合并变化订阅（Windows/Linux）、粗模式文件监视（inotify/ReadDirectoryChangesW）已实现；详细文件监视（快照/rename 匹配）、Linux 电源来源变化、Wayland 显示器、portal 配色待实现；Windows 路径首次运行在 CI |
 | S04 | 部分完成（密钥存储；登录启动、深链、文件关联 Windows/Linux） | 密钥存储、登录启动、深链和文件关联 | OS 权限/用户作用域、安装与运行时分工、卸载和参数转发；依赖 W05/R01；S04.1 `system.integration` 按用户注册/卸载并供安装程序调用；Windows 设置中的默认应用确认与 macOS 继续 |
-| S05 | 部分完成 | 多格式剪贴板、transfer、惰性 provider、原生拖放 | Board 的 text/HTML/PNG/文件/自定义事务写入、异步读取、惰性 provider、变化事件、Windows 有界占用重试及 Windows/Linux 放置目标已实现；拖动源（需模态拖动循环）未提供；真实跨进程拖放、他进程占用重试与退出渲染未自动验证 |
+| S05 | 部分完成 | 多格式剪贴板、transfer、惰性 provider、原生拖放 | Board 的 text/HTML/PNG/文件/自定义事务写入、异步读取、惰性 provider、变化事件、Windows 有界占用重试、Windows/Linux 放置目标、多格式 transfer 与惰性 provider、拖动源和多格式放置目标已实现，真实同进程与跨进程拖放由 smoke-drag 注入输入验证；他进程占用重试与退出渲染未自动验证 |
 | S06 | 部分完成（Windows/Linux） | 异步消息对话框、上下文菜单与菜单快捷键 | S06.1 两平台上下文菜单与异步消息框、Windows 菜单栏快捷键已验；非嵌套循环（Windows 菜单在私有安全点进入系统菜单循环）、取消/关闭、禁用祖先、旧消息隔离分别验证；Linux 菜单栏与快捷键分发、物理输入与视觉验收继续；依赖 W02/U02 |
 | S07 | 部分完成（Windows/Linux） | 应用身份/系统目录、任务栏或 Dock badge/progress/menu、阻止休眠 | 按平台 capability、用户作用域、原生引用/电源断言配对与最后 owner 回收；依赖 S03/P03；S07.1 身份、目录、任务栏进度/叠加图标/launcher 计数与提醒、休眠断言已实现；任务栏/Dock 菜单与 macOS 继续 |
 | S08 | 部分完成（Windows） | 独立托盘/status item、多图标、菜单与popover锚定 | 窗口Owner单托盘/任务栏重建恢复，及 S08.1 App 独立多 item、可选稳定 GUID、锚定托盘菜单、App 停止回收已验；标题与popover亮态（无 Windows 对应）、Linux/macOS 继续；其余平台依赖 P02/P04 |
@@ -1733,7 +1733,7 @@ TextLayout 新增构造期开关 Options.word_ranges 与 Layout.wordRangeAt(Care
 ### S05.1 多格式剪贴板 Board 与放置目标
 
 - `clipboard.Board` 每个 App 一个原生连接：Windows 用私有 message-only HWND 作为 owner、更新监听、延迟渲染与重试 timer；GTK 用 CLIPBOARD selection。写入先校验全部条目并在打开剪贴板前构造原生块，失败不留部分内容；lazy offer 的 released 恰好一次。读取经调用者 Request 槽异步交付，取消/停机后无回调；GTK 同 selection 的同步应答改由 idle 交付，保持“启动调用内不回调”。
-- `drop.Target` 为窗口注册原生放置目标：Windows `IDropTarget`（嵌套 OleInitialize、subclass 在 WM_DESTROY 撤销），GTK 扩展 GtkWindow 既有 root-window target 列表并在 detach 还原。悬停 leave 总先于 drop；payload 复制到调用者 buffer，超出报告所需字节。拖动源因两平台都需要模态拖动循环而不提供。
+- `drop.Target` 为窗口注册原生放置目标：Windows `IDropTarget`（嵌套 OleInitialize、subclass 在 WM_DESTROY 撤销），GTK 扩展 GtkWindow 既有 root-window target 列表并在 detach 还原。悬停 leave 总先于 drop；payload 复制到调用者 buffer，超出报告所需字节。`drag.Source` 在输入回调返回后启动原生拖动（Windows `DoDragDrop` 在系统模态跟踪循环中，与菜单循环相同；GTK 异步），`drop.DataTarget` 接收多格式数据。
 - Linux Xvfb 1x/2x 下 `smoke-clipboard`、`smoke-drop` 通过；Windows 路径只交叉编译。未自动验证：真实跨进程拖放、另一进程占用剪贴板时的重试、`WM_RENDERALLFORMATS` 退出渲染。见[系统工具](system.md)。
 
 ### S03.1 桌面环境快照、订阅与粗模式文件监视

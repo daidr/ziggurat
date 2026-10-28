@@ -17,6 +17,7 @@ extern fn zsc_board_destroy(board: *anyopaque) void;
 extern fn zsc_board_write(board: *anyopaque, items: [*]const Item, count: usize) c_int;
 extern fn zsc_board_offer(board: *anyopaque, items: [*]const Item, count: usize) c_int;
 extern fn zsc_board_revoke(board: *anyopaque) void;
+extern fn zsc_board_clear(board: *anyopaque) void;
 extern fn zsc_read_start(board: *anyopaque, request: *anyopaque, formats: c_int, kind: c_int, name: [*]const u8, name_len: usize) ?*anyopaque;
 extern fn zsc_read_cancel(read: *anyopaque) void;
 extern fn zsc_sink_set(sink: *anyopaque, data: [*]const u8, len: usize) c_int;
@@ -77,6 +78,9 @@ pub fn offer(owner: *api.Board, formats: []const api.Format) !void {
     var storage: [api.max_formats]Item = undefined;
     const list = items(&storage, formats, null);
     if (zsc_board_offer(owner.native.handle.?, list.ptr, list.len) == 0) return error.ClipboardWriteFailed;
+}
+pub fn clear(owner: *api.Board) !void {
+    zsc_board_clear(owner.native.handle.?);
 }
 pub fn revoke(owner: *api.Board) void {
     zsc_board_revoke(owner.native.handle orelse return);
