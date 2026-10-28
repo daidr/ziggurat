@@ -28,6 +28,7 @@ pub const decodeAt = text.decodeAt;
 const document = @import("document.zig");
 pub const Document = document.Document;
 pub const Edit = document.Edit;
+pub const Namer = document.Namer;
 pub const Selection = document.Selection;
 pub const StepMode = document.StepMode;
 pub const FormatState = document.FormatState;
