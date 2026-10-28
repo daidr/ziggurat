@@ -27,7 +27,7 @@ jobs:
     # WINDOWS_RUNS_ON overrides the labels with a JSON value, for example
     # '"windows-2022"' to return to a hosted runner.
     runs-on: ${{ fromJSON(vars.WINDOWS_RUNS_ON || '["self-hosted", "windows", "x64"]') }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -51,16 +51,17 @@ jobs:
           ./scripts/ci-zig-cache.ps1 | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Format, compile, unit and native integration checks
         run: |
+          Write-Output "zig build jobs: $env:NUMBER_OF_PROCESSORS"
           zig fmt --check build.zig build_support src examples tests tools
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/test-native-header-cache.ps1
-          zig build test check update-tool smoke smoke-lifecycle smoke-window-registry smoke-app-stop smoke-composition smoke-composition-ui smoke-window-state smoke-window-relationships smoke-window-chrome smoke-window-policy smoke-system-extras smoke-system-session smoke-key-input smoke-pointer-press smoke-pointer-focus smoke-pointer-clicks smoke-pointer-accessibility smoke-drawing smoke-gradients smoke-gradient-analytic smoke-conic-gradients smoke-gradient-interpolation smoke-coverage smoke-layers smoke-offscreen smoke-gaussian smoke-gaussian-scope smoke-document-fields smoke-svg smoke-svg-text smoke-svg-image smoke-text-layout smoke-text-layout-capture smoke-text-words smoke-text-words-fault smoke-text-clusters smoke-text-outlines smoke-text-cells smoke-text-drawing smoke-shaped-editor smoke-shaped-editor-native smoke-editor-caret smoke-editor-line-backgrounds smoke-editor-pre-input smoke-editor-range-markers smoke-text-input-mode smoke-text-client smoke-document smoke-document-editor smoke-code-editor smoke-document-diff-view smoke-virtual-list smoke-images smoke-image-prepare smoke-image-drawing smoke-image-update smoke-diagnostics smoke-waitables smoke-damage smoke-wake smoke-animation-ui smoke-affine-renderer smoke-affine-ui smoke-affine-document smoke-affine-text-binding smoke-affine-document-diff smoke-affine-diff-controls smoke-document-provider smoke-document-point-latch smoke-document-accessibility smoke-document-diff-accessibility smoke-document-geometry smoke-window-placement smoke-snippets smoke-native-reentry smoke-ime-cancel smoke-editor smoke-editor-routing smoke-packaging smoke-ui-config smoke-system smoke-system-events smoke-system-menus smoke-shell smoke-file-watch smoke-clipboard smoke-drop smoke-desktop smoke-widgets smoke-widget-ranges smoke-theme smoke-backdrop smoke-shader-effects smoke-view smoke-view-text smoke-chart smoke-terminal smoke-view-pickers smoke-view-collections smoke-picker smoke-picker-result smoke-secrets smoke-flyout smoke-now-playing-commands smoke-os-integration smoke-cleanup smoke-audio -Daccessibility=true -Doptimize=${{ matrix.optimize }}
+          zig build "-j$env:NUMBER_OF_PROCESSORS" test check update-tool smoke smoke-lifecycle smoke-window-registry smoke-app-stop smoke-composition smoke-composition-ui smoke-window-state smoke-window-relationships smoke-window-chrome smoke-window-policy smoke-system-extras smoke-system-session smoke-key-input smoke-pointer-press smoke-pointer-focus smoke-pointer-clicks smoke-pointer-accessibility smoke-drawing smoke-gradients smoke-gradient-analytic smoke-conic-gradients smoke-gradient-interpolation smoke-coverage smoke-layers smoke-offscreen smoke-gaussian smoke-gaussian-scope smoke-document-fields smoke-svg smoke-svg-text smoke-svg-image smoke-text-layout smoke-text-layout-capture smoke-text-words smoke-text-words-fault smoke-text-clusters smoke-text-outlines smoke-text-cells smoke-text-drawing smoke-shaped-editor smoke-shaped-editor-native smoke-editor-caret smoke-editor-line-backgrounds smoke-editor-pre-input smoke-editor-range-markers smoke-text-input-mode smoke-text-client smoke-document smoke-document-editor smoke-code-editor smoke-document-diff-view smoke-virtual-list smoke-images smoke-image-prepare smoke-image-drawing smoke-image-update smoke-diagnostics smoke-waitables smoke-damage smoke-wake smoke-animation-ui smoke-affine-renderer smoke-affine-ui smoke-affine-document smoke-affine-text-binding smoke-affine-document-diff smoke-affine-diff-controls smoke-document-provider smoke-document-point-latch smoke-document-accessibility smoke-document-diff-accessibility smoke-document-geometry smoke-window-placement smoke-snippets smoke-native-reentry smoke-ime-cancel smoke-editor smoke-editor-routing smoke-packaging smoke-ui-config smoke-system smoke-system-events smoke-system-menus smoke-shell smoke-file-watch smoke-clipboard smoke-drop smoke-desktop smoke-widgets smoke-widget-ranges smoke-theme smoke-backdrop smoke-shader-effects smoke-view smoke-view-text smoke-chart smoke-terminal smoke-view-pickers smoke-view-collections smoke-picker smoke-picker-result smoke-secrets smoke-flyout smoke-now-playing-commands smoke-os-integration smoke-cleanup smoke-audio -Daccessibility=true -Doptimize=${{ matrix.optimize }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          zig build smoke-accessibility -Daccessibility=true -Doptimize=${{ matrix.optimize }}
+          zig build "-j$env:NUMBER_OF_PROCESSORS" smoke-accessibility -Daccessibility=true -Doptimize=${{ matrix.optimize }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          zig build smoke-language-protocol smoke-language-protocol-shutdown smoke-completion-resolve smoke-completion-details smoke-diff-caret smoke-diff-commands smoke-diff-find -Doptimize=${{ matrix.optimize }}
+          zig build "-j$env:NUMBER_OF_PROCESSORS" smoke-language-protocol smoke-language-protocol-shutdown smoke-completion-resolve smoke-completion-details smoke-diff-caret smoke-diff-commands smoke-diff-find -Doptimize=${{ matrix.optimize }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          zig build smoke-shortcut-scopes smoke-accessibility-host -Daccessibility=true -Doptimize=${{ matrix.optimize }}
+          zig build "-j$env:NUMBER_OF_PROCESSORS" smoke-shortcut-scopes smoke-accessibility-host -Daccessibility=true -Doptimize=${{ matrix.optimize }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Packaging and real Authenticode test certificate checks
         run: |
@@ -68,25 +69,25 @@ jobs:
           ./tests/packaging.ps1 -ExecutablePath ./zig-out/bin/smoke-packaging.exe -LicensePath $license
           ./tests/signing.ps1 -ExecutablePath ./zig-out/bin/smoke-packaging.exe -LicensePath $license
           ./tests/update_package_smoke.ps1
-          zig build build-setup-smoke -Doptimize=${{ matrix.optimize }}
+          zig build "-j$env:NUMBER_OF_PROCESSORS" build-setup-smoke -Doptimize=${{ matrix.optimize }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./tests/setup_smoke.ps1
       - name: Direct3D 11 shader effects on WARP
         run: |
-          zig build smoke-shader-effects-gpu -Dgpu=true -Doptimize=${{ matrix.optimize }}
+          zig build "-j$env:NUMBER_OF_PROCESSORS" smoke-shader-effects-gpu -Dgpu=true -Doptimize=${{ matrix.optimize }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Optional pinned WebP decoder
         run: |
           ./scripts/fetch-webp.ps1
-          zig build smoke-images -Dwebp=true -Doptimize=${{ matrix.optimize }}
+          zig build "-j$env:NUMBER_OF_PROCESSORS" smoke-images -Dwebp=true -Doptimize=${{ matrix.optimize }}
       - name: Optional pinned SQLite amalgamation
         run: |
           python scripts/fetch-sqlite.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          zig build test-sqlite -Doptimize=${{ matrix.optimize }}
+          zig build "-j$env:NUMBER_OF_PROCESSORS" test-sqlite -Doptimize=${{ matrix.optimize }}
       - name: Application font registration
         run: |
-          zig build smoke-fonts -Doptimize=${{ matrix.optimize }}
+          zig build "-j$env:NUMBER_OF_PROCESSORS" smoke-fonts -Doptimize=${{ matrix.optimize }}
       # Hardware GPU coverage is a separate local driver check. Hosted runner
       # measurements below explicitly record any GPU fallback and deferred work.
       - name: Capture reproducible benchmark evidence
@@ -277,24 +278,24 @@ jobs:
           bun test packages
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # These fail when the system Runtime is unavailable; no Runtime is downloaded.
-          zig build test test-remote-origin smoke-webview smoke-composition-webview smoke-page-host smoke-page-session smoke-webview-policy smoke-page smoke-page-remote smoke-page-authorization smoke-script smoke-browser-tools smoke-request-policy smoke-resource-async smoke-resource-file smoke-scheme smoke-resource-producer smoke-permission smoke-download smoke-browser-policy smoke-ipc smoke-assets smoke-page-runtime smoke-plugin-fetch smoke-plugin-watch smoke-plugin-sqlite smoke-plugin-websocket smoke-embedded-webview -Dwebview=true -Doptimize=ReleaseSafe
+          zig build "-j$env:NUMBER_OF_PROCESSORS" test test-remote-origin smoke-webview smoke-composition-webview smoke-page-host smoke-page-session smoke-webview-policy smoke-page smoke-page-remote smoke-page-authorization smoke-script smoke-browser-tools smoke-request-policy smoke-resource-async smoke-resource-file smoke-scheme smoke-resource-producer smoke-permission smoke-download smoke-browser-policy smoke-ipc smoke-assets smoke-page-runtime smoke-plugin-fetch smoke-plugin-watch smoke-plugin-sqlite smoke-plugin-websocket smoke-embedded-webview -Dwebview=true -Doptimize=ReleaseSafe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Standalone engine discovery without a page
         run: |
-          zig build test-webview-runtime build-smoke-webview-runtime -Doptimize=ReleaseSafe
+          zig build "-j$env:NUMBER_OF_PROCESSORS" test-webview-runtime build-smoke-webview-runtime -Doptimize=ReleaseSafe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $loader = (Resolve-Path -LiteralPath '.deps/webview2/build/native/x64/WebView2Loader.dll').Path
           ./zig-out/bin/smoke-webview-runtime.exe $loader
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Exact-origin HTTPS credential lifecycle and redirect checks
         run: |
-          zig build build-smoke-request-credentials -Dwebview=true -Doptimize=ReleaseSafe
+          zig build "-j$env:NUMBER_OF_PROCESSORS" build-smoke-request-credentials -Dwebview=true -Doptimize=ReleaseSafe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -B tests/windows_https_credentials_host.py --exe zig-out/bin/smoke-request-credentials.exe --cache .zig-cache/managed/windows-credentials-ci --log .validation/ci/windows-credentials.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Document-start initializer lifecycle and wire checks
         run: |
-          zig build test-document-initializers test-document-initializers-native build-initializer-semantics-emitter build-smoke-document-initializers -Dwebview=true -Doptimize=ReleaseSafe
+          zig build "-j$env:NUMBER_OF_PROCESSORS" test-document-initializers test-document-initializers-native build-initializer-semantics-emitter build-smoke-document-initializers -Dwebview=true -Doptimize=ReleaseSafe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/document_initializers_semantics.mjs zig-out/bin/initializer-semantics-source.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
