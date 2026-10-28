@@ -22,7 +22,7 @@ for linkage in object archive; do
     if [[ "$linkage" == archive ]]; then archive=true; fi
     for expected in 17 29; do
         printf '#define ZIGGURAT_HEADER_VALUE %s\n' "$expected" > fixture/second.h
-        if ! "$zig_bin" build run "-Darchive=$archive" -j1 --cache-dir "$ZIG_LOCAL_CACHE_DIR" --global-cache-dir "$ZIG_GLOBAL_CACHE_DIR" --summary all > "$linkage-value-$expected.log" 2>&1; then
+        if ! "$zig_bin" build run "-Darchive=$archive" -j1 --cache-dir "$ZIG_LOCAL_CACHE_DIR" --summary all > "$linkage-value-$expected.log" 2>&1; then
             printf 'Native %s header build failed; inspect %s\n' "$linkage" "$work" >&2
             exit 1
         fi

@@ -24,5 +24,5 @@ linux_cache_filesystem "$ZIGGURAT_PROFILE_TEST_ROOT"
 mkdir -p -- "$ZIGGURAT_PROFILE_TEST_ROOT"
 cd "$project"
 exec "$zig_bin" build test-profile-storage test-profile-storage-files \
-    -j1 --cache-dir "$ZIG_LOCAL_CACHE_DIR" --global-cache-dir "$ZIG_GLOBAL_CACHE_DIR" \
+    -j1 --cache-dir "$ZIG_LOCAL_CACHE_DIR" \
     --prefix .zig-cache/managed/profile-storage-out --summary all "$@"

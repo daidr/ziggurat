@@ -19,7 +19,7 @@ for name in trusted untrusted; do
         -keyout "$work/$name-key.pem" -out "$work/$name-cert.pem" 2>/dev/null
 done
 cd "$project"
-"$zig" build install-net-tls-probe --cache-dir "$ZIG_LOCAL_CACHE_DIR" --global-cache-dir "$ZIG_GLOBAL_CACHE_DIR" --prefix "$work/out" "$@"
+"$zig" build install-net-tls-probe --cache-dir "$ZIG_LOCAL_CACHE_DIR" --prefix "$work/out" "$@"
 mkfifo "$work/port"
 python3 tests/net_tls_peer.py "$work/trusted-cert.pem" "$work/trusted-key.pem" >"$work/port" &
 peer=$!

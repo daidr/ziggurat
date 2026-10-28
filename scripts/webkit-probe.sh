@@ -78,7 +78,7 @@ if [[ "$probe" == zig || "$probe" == zig-test || "$probe" == remote-zig || "$pro
     fi
     optimize="${P01_OPTIMIZE:-ReleaseSafe}"
     case "$optimize" in Debug|ReleaseSafe|ReleaseFast|ReleaseSmall) ;; *) printf 'Invalid optimize mode\n' >&2; exit 2 ;; esac
-    command=("$zig_bin" build "$target" -Dwebview=true "-Doptimize=$optimize" -j1 --cache-dir "$build_cache" --global-cache-dir "$global_cache" --prefix "$build_prefix" --summary all)
+    command=("$zig_bin" build "$target" -Dwebview=true "-Doptimize=$optimize" -j1 --cache-dir "$build_cache" --prefix "$build_prefix" --summary all)
     if [[ "$probe" == https-pages-zig ]]; then command+=(-Dhttps-resources=true); fi
     cd "$project"
 else

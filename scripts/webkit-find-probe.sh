@@ -34,7 +34,7 @@ export PKG_CONFIG="$project/scripts/pkg-config-prefix.sh"
 export PKG_CONFIG_PATH="$sdk/usr/lib/x86_64-linux-gnu/pkgconfig:$gtk/usr/lib/x86_64-linux-gnu/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 mkdir -p -- "$build_cache" "$global_cache" "$prefix" "$runtime/data" "$output"
 "$zig" build build-smoke-find -Dwebview=true "-Doptimize=$optimize" -j1 \
-    --cache-dir "$build_cache" --global-cache-dir "$global_cache" --prefix "$prefix" --summary all
+    --cache-dir "$build_cache" --prefix "$prefix" --summary all
 executable="$prefix/bin/smoke-find"
 [[ -x "$executable" ]] || { printf '%s\n' 'Find executable was not installed.' >&2; exit 2; }
 export LD_LIBRARY_PATH="${tls_lib:+$tls_lib:}$sdk/usr/lib/x86_64-linux-gnu:$gtk/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
