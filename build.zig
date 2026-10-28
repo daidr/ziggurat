@@ -764,6 +764,24 @@ pub fn build(b: *std.Build) void {
     const view_options = b.addOptions();
     view_options.addOption(bool, "inspector", b.option(bool, "inspector", "Build the views' inspector (default: Debug builds only)") orelse (optimize == .debug));
     declarative_view.addOptions("ziggurat_view_options", view_options);
+    // Drives a running app from another process; apps link it in test builds.
+    const automation_options = b.addOptions();
+    automation_options.addOption(bool, "webview", web);
+    const automation = b.addModule("ziggurat_automation", .{ .root_source_file = b.path("src/automation/root.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui }, .{ .name = "ziggurat_view", .module = declarative_view },
+    } });
+    automation.addOptions("ziggurat_automation_options", automation_options);
+    const automation_tests = b.addTest(.{ .root_module = automation });
+    check.dependOn(&automation_tests.step);
+    const run_automation_tests = b.addRunArtifact(automation_tests);
+    test_step.dependOn(&run_automation_tests.step);
+    b.step("test-automation", "Run the automation protocol, input and socket tests").dependOn(&run_automation_tests.step);
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux) addSmoke(b, "smoke-automation", "tests/automation_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_view", .module = declarative_view },
+        .{ .name = "ziggurat_system", .module = system },
+        .{ .name = "ziggurat_automation", .module = automation },
+    });
     const view_graphics = b.addModule("ziggurat_view_graphics", .{ .root_source_file = b.path("src/view/graphics.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
         .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_vector", .module = vector },
@@ -1681,6 +1699,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_file_stream", .module = file_stream }, .{ .name = "ziggurat_http_response", .module = http_response } },
             .link_libc = true,
         });
+        automation.addImport("ziggurat_webview", view);
         view.addImport("ziggurat_tls_pem", tls_pem);
         for ([_][]const u8{ "webview2.c", "page_host.c" }) |file| {
             const native = native_support.add(b, view, b.fmt("webview-{s}", .{file}), b.fmt("src/webview/{s}", .{file}), &.{"-std=c11"}, target, optimize);
@@ -1942,6 +1961,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_file_stream", .module = file_stream }, .{ .name = "ziggurat_http_response", .module = http_response } },
             .link_libc = true,
         });
+        automation.addImport("ziggurat_webview", view);
         view.addImport("ziggurat_tls_pem", tls_pem);
         for ([_][]const u8{ "webkit_native.c", "webkit_profile.c", "webkit_cookies.c" }) |file| {
             const native = native_support.add(b, view, b.fmt("webview-{s}", .{file}), b.fmt("src/webview/{s}", .{file}), &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);

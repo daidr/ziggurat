@@ -933,6 +933,13 @@ pub const Context = struct {
         return .{ .workspace = if (self.backdrop_workspace) |workspace| workspace.stats else .{}, .unprepared = self.backdrop_unprepared, .software_frames = self.backdrop_software_frames };
     }
 
+    /// The Context attached to `window` with `attach`, if its content is
+    /// one, as tools that drive a window from outside find it.
+    pub fn ofWindow(window: z.Window) ?*Context {
+        const content = window.attachedContent() orelse return null;
+        if (content.event != &event) return null;
+        return @ptrCast(@alignCast(content.context));
+    }
     /// Keep this Context at a stable address through its actual detach callback.
     pub fn attach(self: *Context, window: z.Window) !void {
         if (self.window != null or self.attachment_phase != .detached) return error.AlreadyAttached;

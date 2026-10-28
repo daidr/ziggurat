@@ -1309,6 +1309,17 @@ pub const View = struct {
         return edges;
     }
 
+    /// The View attached to `window` with `attach`, if its content is one,
+    /// as tools that drive a window from outside find it.
+    pub fn ofWindow(window: z.Window) ?*View {
+        const content = window.attachedContent() orelse return null;
+        if (content.event != &event) return null;
+        return @ptrCast(@alignCast(content.context));
+    }
+    /// True while the page has started a navigation that has not finished.
+    pub fn isLoading(self: *const View) bool {
+        return self.loading;
+    }
     /// Address must remain stable through detach. No nested message pumping.
     pub fn attach(self: *View, window: z.Window, options: Options) !void {
         if (self.session != null) return error.ManagedSession;
