@@ -8,7 +8,7 @@
 
 `Lexer` 是可配置的通用词法器：行注释、可嵌套或不嵌套的块注释、多种字符串（含原始串、多行串和插值）、按大小写或不区分大小写的关键字表、首字母大写即类型、调用即函数、`key:` 即属性、装饰器、预处理指令、正则字面量和 `$变量`。JSON、TOML、CSS、HTML/XML（含内嵌 script/style）、Markdown（围栏代码按语言名委托）与 diff 有专用词法器。
 
-`languages` 内置 28 种语言：Go、JavaScript、TypeScript、JSON、Python、Rust、C、C++、Java、Kotlin、Swift、C#、Shell、YAML、TOML、SQL、Ruby、Lua、PHP、CSS、HTML、XML、Markdown、diff、Dockerfile、Makefile、Protobuf 和 Zig。`Language` 还带注释记号、括号对（可声明在哪些 token 中不算括号）、自动闭合对、单词字符和缩进习惯。`forFile(name)` 按扩展名或完整文件名查找，`named(name)` 接受常见别名。
+`languages` 内置 32 种语言：Go、JavaScript、TypeScript、JSON、Python、Rust、C、C++、Java、Kotlin、Scala、Swift、Dart、C#、Shell、YAML、TOML、SQL、R、Ruby、Lua、PHP、CSS、HTML、XML、Markdown、diff、Dockerfile、Makefile、Protobuf、GraphQL 和 Zig。Dart 识别单、双、三引号字符串中的 `$name` 与 `${}` 插值和 `r'…'` 原始串；Scala 识别 `s`、`f`、`raw` 插值串与反引号标识符；R 识别跨行字符串、`r"(…)"` 一类原始串、`%in%` 一类运算符和带点的名字；GraphQL 识别块字符串、`$变量`、`@指令`、展开 `...` 与键名。`Language` 还带注释记号、括号对（可声明在哪些 token 中不算括号）、自动闭合对、单词字符和缩进习惯。`forFile(name)` 按扩展名或完整文件名查找，`named(name)` 接受常见别名。
 
 `Theme.light()` 与 `Theme.dark()` 是两套默认配色，`Theme.default(dark, background, text, accent)` 按应用的底色、文字色与强调色派生一套；`color(kind)` 与 `style(kind)` 给出每类 token 的颜色与粗细/斜体，`added`/`modified`/`deleted` 供变更标记使用。
 
