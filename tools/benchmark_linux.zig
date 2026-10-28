@@ -39,6 +39,13 @@ fn memoryBytes(status: []const u8, key: []const u8) !u64 {
     }
     return error.InvalidProcStatus;
 }
+/// Proc files report a size of zero, which readFileAlloc takes at its word.
+fn procFile(allocator: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
+    const file = try std.Io.Dir.openFileAbsolute(zio.io(), path, .{});
+    defer file.close(zio.io());
+    var reader = file.readerStreaming(zio.io(), &.{});
+    return reader.interface.allocRemaining(allocator, .limited(limit));
+}
 fn cpuModel(info: []const u8) []const u8 {
     var lines = std.mem.tokenizeScalar(u8, info, '\n');
     while (lines.next()) |line| {
@@ -146,14 +153,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (context.frames != 217 or context.gdi_frames != 217) return error.PaintWorkloadIncomplete;
     const workload_frames = context.frames;
     const workload_cairo_frames = context.gdi_frames;
-    const status = try std.Io.Dir.cwd().readFileAlloc(zio.io(), "/proc/self/status", allocator, .limited(64 * 1024));
+    const status = try procFile(allocator, "/proc/self/status", 64 * 1024);
     defer allocator.free(status);
     const resident = try memoryBytes(status, "VmRSS:");
     const data_memory = try memoryBytes(status, "VmData:");
     const virtual_memory = try memoryBytes(status, "VmSize:");
-    const cpu_info = try std.Io.Dir.cwd().readFileAlloc(zio.io(), "/proc/cpuinfo", allocator, .limited(1024 * 1024));
+    const cpu_info = try procFile(allocator, "/proc/cpuinfo", 1024 * 1024);
     defer allocator.free(cpu_info);
-    const kernel = try std.Io.Dir.cwd().readFileAlloc(zio.io(), "/proc/sys/kernel/osrelease", allocator, .limited(4096));
+    const kernel = try procFile(allocator, "/proc/sys/kernel/osrelease", 4096);
     defer allocator.free(kernel);
     state.idle_timer = try zio.Timer.start();
     state.idle_start_cpu = try cpuTime();
