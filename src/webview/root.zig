@@ -67,6 +67,22 @@ pub const Rgba = page_facts.Rgba;
 pub const ContentSize = page_facts.ContentSize;
 pub const FitContent = page_facts.FitContent;
 pub const http_auth = @import("http_auth.zig");
+pub const context_menu = @import("context_menu.zig");
+pub const ContextMenu = context_menu.Menu;
+pub const ContextMenuHandler = struct {
+    context: *anyopaque,
+    /// Synchronous, on the App owner thread while the menu waits: change
+    /// the menu, or prevent it. The menu and its strings cannot escape.
+    open: *const fn (*anyopaque, *View, *ContextMenu) void,
+};
+pub const ContextMenuPolicy = union(enum) {
+    /// No menu, the default; the page's own contextmenu event still fires.
+    none,
+    /// The engine's menu as it is.
+    engine,
+    /// The engine's menu as the handler changes it.
+    handler: ContextMenuHandler,
+};
 pub const AuthChallenge = http_auth.Challenge;
 pub const Credentials = http_auth.Credentials;
 pub const CertificateError = http_auth.CertificateError;
@@ -76,6 +92,7 @@ test {
     _ = policy_store;
     _ = page_facts;
     _ = http_auth;
+    _ = context_menu;
     _ = custom_local;
 }
 pub const DownloadDestination = downloads.Destination;
@@ -191,6 +208,8 @@ pub const PageEvent = union(enum) {
     /// Options.fit_content: the size of the page's content changed, in its
     /// CSS pixels. A View attached to a window has resized it already.
     content_size_changed: struct { id: PageId, size: ContentSize },
+    /// Options.context_menu: an item the handler added was chosen.
+    context_menu_command: struct { id: PageId, command: u32 },
 };
 pub const PageListener = struct {
     /// Stable until detach. Strings are borrowed until return. Null metadata
@@ -410,6 +429,8 @@ pub const Options = struct {
     /// Decides about server certificates of a remote page that do not
     /// verify. Without it, or when it says no, the load fails.
     certificate_errors: ?CertificateHandler = null,
+    /// The page's context menu, on a right click or the menu key.
+    context_menu: ContextMenuPolicy = .none,
 };
 pub const AuthHandler = struct {
     context: *anyopaque,
@@ -469,7 +490,9 @@ const NativeActions = extern struct {
     download_offer: ?*const fn (*anyopaque, [*:0]const u16, [*:0]const u16, [*:0]const u16, i64, *anyopaque) callconv(.c) void = null,
     download_notify: ?*const fn (*anyopaque, u64, u32, u64, i64, i32) callconv(.c) void = null,
 };
-const NativeSettings = extern struct { zoom: f64, user_agent: ?[*:0]const u16, devtools: bool, tool_flags: u32, tool_limit: u32, max_cookies: u32, max_cookie_bytes: u32, max_capture_bytes: u32, schemes: ?[*]const NativeScheme, scheme_count: u32, local_ipc: bool, actions: ?*const NativeActions, initializers: ?*const initializer_owner.NativeInput, owned_context: ?*anyopaque, facts: ?[*:0]const u16 = null, browser_arguments: ?[*:0]const u16 = null, auth: ?*const fn (*anyopaque, [*:0]const u16, [*:0]const u16, *anyopaque) callconv(.c) void = null, certificate: ?*const fn (*anyopaque, [*:0]const u16, i32, [*:0]const u16) callconv(.c) c_int = null };
+const NativeSettings = extern struct { zoom: f64, user_agent: ?[*:0]const u16, devtools: bool, tool_flags: u32, tool_limit: u32, max_cookies: u32, max_cookie_bytes: u32, max_capture_bytes: u32, schemes: ?[*]const NativeScheme, scheme_count: u32, local_ipc: bool, actions: ?*const NativeActions, initializers: ?*const initializer_owner.NativeInput, owned_context: ?*anyopaque, facts: ?[*:0]const u16 = null, browser_arguments: ?[*:0]const u16 = null, auth: ?*const fn (*anyopaque, [*:0]const u16, [*:0]const u16, *anyopaque) callconv(.c) void = null, certificate: ?*const fn (*anyopaque, [*:0]const u16, i32, [*:0]const u16) callconv(.c) c_int = null, context_menu: u32 = 0, context_offer: ?*const fn (*anyopaque, *const NativeContextTarget, [*]const NativeContextItem, u32, [*]u8, *anyopaque) callconv(.c) c_int = null };
+const NativeContextItem = extern struct { name: [*:0]const u16, label: [*:0]const u16, kind: u32, flags: u32 };
+const NativeContextTarget = extern struct { link: ?[*:0]const u16, link_text: ?[*:0]const u16, image: ?[*:0]const u16, media: ?[*:0]const u16, selection: ?[*:0]const u16, frame: ?[*:0]const u16, editable: u32 };
 const PermissionScratch = struct {
     rows: [permissions.origin_capacity]NativePermissionGrant = undefined,
     text: [permissions.origin_capacity][schemes.origin_limit + 1:0]u16 = undefined,
@@ -573,6 +596,8 @@ extern fn zwv_action_budget_limit(*anyopaque, u32, u32) void;
 extern fn zwv_action_budget_release(*anyopaque) void;
 extern fn zwv_action_counts(*u32, *u32, *u32) void;
 extern fn zwv_auth_answer(*anyopaque, [*:0]const u16, [*:0]const u16) i32;
+extern fn zwv_context_menu_append(*anyopaque, [*:0]const u16, u32, u32, u32) i32;
+extern fn zwk_context_menu_append(*anyopaque, [*:0]const u8, u32, u32, u32) c_int;
 extern fn zwk_auth_answer(*anyopaque, [*:0]const u8, [*:0]const u8) c_int;
 extern fn zwv_permission_defer(*anyopaque, u64) i32;
 extern fn zwv_permission_decide(*anyopaque, u64, bool) i32;
@@ -1517,7 +1542,7 @@ pub const View = struct {
         const initializer_input = if (config.initializer_config) |source| source.input() else null;
         const facts = try self.factsScript(.windows);
         defer if (facts) |value| self.allocator.free(value);
-        const settings: NativeSettings = .{ .auth = if (config.options.http_auth != null) View.windowsAuth else null, .certificate = if (config.options.certificate_errors != null) View.windowsCertificate else null, .facts = if (facts) |value| value.ptr else null, .browser_arguments = if (config.options.autoplay == .allow) std.unicode.utf8ToUtf16LeStringLiteral("--autoplay-policy=no-user-gesture-required") else null, .zoom = self.zoom_override orelse config.options.zoom, .user_agent = if (agent) |value| value.ptr else null, .devtools = self.devtools_override orelse config.options.devtools_enabled, .tool_flags = tool_flags, .tool_limit = limits.max_pending, .max_cookies = limits.max_cookies, .max_cookie_bytes = limits.max_cookie_bytes, .max_capture_bytes = limits.max_capture_bytes, .schemes = if (config.options.custom_schemes.len == 0) null else &scheme_scratch.items, .scheme_count = @intCast(config.options.custom_schemes.len), .local_ipc = if (config.options.local) |site| std.mem.eql(u8, site.scheme, "https") or site.scheme_ipc else true, .actions = if (actions) |*value| value else null, .initializers = if (initializer_input) |*value| value else null, .owned_context = if (config.profile_state) |state| try state.context.windowsContext() else null };
+        const settings: NativeSettings = .{ .context_menu = @backingInt(config.options.context_menu), .context_offer = if (config.options.context_menu == .handler) View.windowsContextMenu else null, .auth = if (config.options.http_auth != null) View.windowsAuth else null, .certificate = if (config.options.certificate_errors != null) View.windowsCertificate else null, .facts = if (facts) |value| value.ptr else null, .browser_arguments = if (config.options.autoplay == .allow) std.unicode.utf8ToUtf16LeStringLiteral("--autoplay-policy=no-user-gesture-required") else null, .zoom = self.zoom_override orelse config.options.zoom, .user_agent = if (agent) |value| value.ptr else null, .devtools = self.devtools_override orelse config.options.devtools_enabled, .tool_flags = tool_flags, .tool_limit = limits.max_pending, .max_cookies = limits.max_cookies, .max_cookie_bytes = limits.max_cookie_bytes, .max_capture_bytes = limits.max_capture_bytes, .schemes = if (config.options.custom_schemes.len == 0) null else &scheme_scratch.items, .scheme_count = @intCast(config.options.custom_schemes.len), .local_ipc = if (config.options.local) |site| std.mem.eql(u8, site.scheme, "https") or site.scheme_ipc else true, .actions = if (actions) |*value| value else null, .initializers = if (initializer_input) |*value| value else null, .owned_context = if (config.profile_state) |state| try state.context.windowsContext() else null };
         self.native = zwv_create(window.nativeHandle(), if (html) |value| value.ptr else std.unicode.utf8ToUtf16LeStringLiteral(""), profile.ptr, if (url) |value| value.ptr else null, if (prefix) |value| value.ptr else null, if (remote) |*value| value else null, &settings, policy, config.options.max_cached_permissions, config.options.scripts.max_pending, config.options.allow_local_navigation, config.options.page_listener != null, notify, pageNotify, scriptNotify, toolNotify, resource, self, &self.last_hresult) orelse return error.WebViewCreationFailed;
         errdefer {
             nativeClose(self.native.?);
@@ -1595,7 +1620,7 @@ pub const View = struct {
         const initializer_input = if (self.config.?.initializer_config) |source| source.input() else null;
         const facts = try self.factsScript(.linux);
         defer if (facts) |value| self.allocator.free(value);
-        const native_options: webkit.Options = .{ .auth = if (options.http_auth != null) View.webkitAuth else null, .certificate = if (options.certificate_errors != null) View.webkitCertificate else null, .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled) };
+        const native_options: webkit.Options = .{ .context_menu = @backingInt(options.context_menu), .context_offer = if (options.context_menu == .handler) View.webkitContextMenu else null, .auth = if (options.http_auth != null) View.webkitAuth else null, .certificate = if (options.certificate_errors != null) View.webkitCertificate else null, .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled) };
         var candidate: ?*anyopaque = null;
         if (self.session) |session| {
             try webkit.check(webkit.zwk_session_create(&native_options, session.last_size.width, session.last_size.height, webkitNotify, pageNotify, webkitScriptNotify, webkitTimeout, self, &candidate));
@@ -2234,6 +2259,106 @@ pub const View = struct {
         const scope = self.beginNativeAttachment() orelse return 0;
         defer scope.end();
         return @intFromBool(handler.allow(handler.context, self, .{ .uri = uri, .host = place.host, .reason = http_auth.gtlsReason(flags), .certificate = der[0..length] }));
+    }
+    /// The page's context menu, changed by the app's handler before the
+    /// engine shows it; nonzero shows none.
+    fn openContextMenu(self: *View, target: context_menu.Target, items: []const context_menu.Item, keep_native: [*]u8, native_menu: context_menu.Backend) c_int {
+        const handler = switch (self.config.?.options.context_menu) {
+            .handler => |value| value,
+            else => return 0,
+        };
+        var keep: [context_menu.max_items]bool = @splat(true);
+        var menu: ContextMenu = .{ .target = target, .items = items, .keep = &keep, .backend = native_menu };
+        const scope = self.beginNativeAttachment() orelse return 1;
+        defer scope.end();
+        handler.open(handler.context, self, &menu);
+        if (menu.prevented or self.attachmentClosed()) return 1;
+        for (items, 0..) |_, i| keep_native[i] = @intFromBool(keep[i]);
+        return 0;
+    }
+    const ContextAppend = struct {
+        call: *anyopaque,
+        fn windows(ptr: *anyopaque, addition: context_menu.Addition) error{ TooManyItems, InvalidLabel, OutOfMemory, NativeFailure }!void {
+            const self: *ContextAppend = @ptrCast(@alignCast(ptr));
+            var label: [context_menu.max_label_bytes + 1:0]u16 = undefined;
+            const text, const command, const kind: u32, const flags: u32 = switch (addition) {
+                .command => |value| .{ value.label, value.command, 0, @intFromBool(value.enabled) },
+                .check => |value| .{ value.label, value.command, 1, @as(u32, @intFromBool(value.enabled)) | @as(u32, @intFromBool(value.checked)) << 1 },
+                .separator => .{ "", 0, 3, 0 },
+            };
+            const length = std.unicode.utf8ToUtf16Le(&label, text) catch return error.InvalidLabel;
+            label[length] = 0;
+            if (zwv_context_menu_append(self.call, &label, command, kind, flags) < 0) return error.NativeFailure;
+        }
+        fn webkit(ptr: *anyopaque, addition: context_menu.Addition) error{ TooManyItems, InvalidLabel, OutOfMemory, NativeFailure }!void {
+            const self: *ContextAppend = @ptrCast(@alignCast(ptr));
+            var label: [context_menu.max_label_bytes + 1:0]u8 = undefined;
+            const text, const command, const kind: u32, const flags: u32 = switch (addition) {
+                .command => |value| .{ value.label, value.command, 0, @intFromBool(value.enabled) },
+                .check => |value| .{ value.label, value.command, 1, @as(u32, @intFromBool(value.enabled)) | @as(u32, @intFromBool(value.checked)) << 1 },
+                .separator => .{ "", 0, 3, 0 },
+            };
+            @memcpy(label[0..text.len], text);
+            label[text.len] = 0;
+            const result = zwk_context_menu_append(self.call, &label, command, kind, flags);
+            if (result == 2) return error.TooManyItems;
+            if (result == 3) return error.OutOfMemory;
+            if (result != 0) return error.NativeFailure;
+        }
+    };
+    fn windowsContextMenu(ptr: *anyopaque, native_target: *const NativeContextTarget, native_items: [*]const NativeContextItem, count: u32, keep: [*]u8, call: *anyopaque) callconv(.c) c_int {
+        if (is_linux) return 1;
+        const self = authView(ptr) orelse return 1;
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const narrow = struct {
+            fn of(a: std.mem.Allocator, wide: ?[*:0]const u16) error{ OutOfMemory, InvalidUtf16 }!?[]const u8 {
+                const value = wide orelse return null;
+                return std.unicode.utf16LeToUtf8Alloc(a, std.mem.span(value)) catch |err| switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => error.InvalidUtf16,
+                };
+            }
+        }.of;
+        const items = allocator.alloc(context_menu.Item, @min(count, context_menu.max_items)) catch return 1;
+        for (items, 0..) |*item, i| {
+            const native = native_items[i];
+            const name = (narrow(allocator, native.name) catch return 1).?;
+            const raw = (narrow(allocator, native.label) catch return 1).?;
+            const storage = allocator.alloc(u8, raw.len) catch return 1;
+            item.* = .{ .id = context_menu.webview2Id(name), .label = context_menu.plainLabel(raw, '&', storage), .kind = std.enums.fromInt(context_menu.Kind, native.kind) orelse .command, .enabled = native.flags & 1 != 0, .checked = native.flags & 2 != 0 };
+        }
+        const target: context_menu.Target = .{
+            .link_uri = narrow(allocator, native_target.link) catch return 1,
+            .link_text = narrow(allocator, native_target.link_text) catch return 1,
+            .image_uri = narrow(allocator, native_target.image) catch return 1,
+            .media_uri = narrow(allocator, native_target.media) catch return 1,
+            .selection = narrow(allocator, native_target.selection) catch return 1,
+            .frame_uri = narrow(allocator, native_target.frame) catch return 1,
+            .editable = native_target.editable != 0,
+        };
+        var append: ContextAppend = .{ .call = call };
+        return self.openContextMenu(target, items, keep, .{ .context = &append, .append = ContextAppend.windows });
+    }
+    fn webkitContextMenu(ptr: *anyopaque, native_target: *const webkit.ContextTarget, native_items: [*]const webkit.ContextItem, count: u32, keep: [*]u8, call: *anyopaque) callconv(.c) c_int {
+        if (!is_linux) return 1;
+        const self = authView(ptr) orelse return 1;
+        var items: [context_menu.max_items]context_menu.Item = undefined;
+        var labels: [context_menu.max_items][context_menu.max_label_bytes]u8 = undefined;
+        const listed = @min(count, context_menu.max_items);
+        for (items[0..listed], 0..) |*item, i| {
+            const native = native_items[i];
+            item.* = .{ .id = context_menu.webkitId(native.action) orelse std.mem.span(native.name), .label = context_menu.plainLabel(std.mem.span(native.label), '_', &labels[i]), .kind = std.enums.fromInt(context_menu.Kind, native.kind) orelse .command, .enabled = native.flags & 1 != 0, .checked = native.flags & 2 != 0 };
+        }
+        const span = struct {
+            fn of(value: ?[*:0]const u8) ?[]const u8 {
+                return if (value) |text| std.mem.span(text) else null;
+            }
+        }.of;
+        const target: context_menu.Target = .{ .link_uri = span(native_target.link), .link_text = span(native_target.link_text), .image_uri = span(native_target.image), .media_uri = span(native_target.media), .selection = span(native_target.selection), .frame_uri = span(native_target.frame), .editable = native_target.editable != 0 };
+        var append: ContextAppend = .{ .call = call };
+        return self.openContextMenu(target, items[0..listed], keep, .{ .context = &append, .append = ContextAppend.webkit });
     }
     fn downloadOffer(ptr: *anyopaque, uri_wide: [*:0]const u16, mime_wide: [*:0]const u16, name_wide: [*:0]const u16, total: i64, native_call: *anyopaque) callconv(.c) void {
         const self: *View = @ptrCast(@alignCast(ptr));
@@ -3156,12 +3281,16 @@ pub const View = struct {
     fn factsScript(self: *View, comptime backend_kind: enum { windows, linux }) !?(if (backend_kind == .windows) [:0]u16 else [:0]u8) {
         const options = self.config.?.options;
         const config: page_facts.Config = .{ .theme = options.theme_color, .fit = options.fit_content, .zoom = self.zoom_override orelse options.zoom };
-        if (!config.any()) return null;
         if (backend_kind == .linux) {
-            const text = try page_facts.script(self.allocator, config, "v=>send('F'+v)");
+            // WebKitGTK's hit test tells no selection: the page's
+            // contextmenu event, just before the menu, does.
+            const selection = if (options.context_menu == .handler) "addEventListener('contextmenu',()=>{try{send('S'+String(getSelection()).slice(0,4096))}catch(e){}},true);" else "";
+            if (!config.any() and selection.len == 0) return null;
+            const text = if (config.any()) try page_facts.script(self.allocator, config, "v=>send('F'+v)") else try self.allocator.dupe(u8, "");
             defer self.allocator.free(text);
-            return try self.allocator.dupeSentinel(u8, text, 0);
+            return try std.mem.concatWithSentinel(self.allocator, u8, &.{ text, selection }, 0);
         }
+        if (!config.any()) return null;
         const text = try page_facts.script(self.allocator, config, "v=>p('\\u0001ziggurat-facts:'+v)");
         defer self.allocator.free(text);
         const whole = try std.mem.concat(self.allocator, u8, &.{ "(()=>{if(window!==top||!window.chrome||!chrome.webview)return;const p=chrome.webview.postMessage.bind(chrome.webview);", text, "})();" });
@@ -3441,6 +3570,11 @@ pub const View = struct {
         if ((native.kind == 0 and native.flags & 1 == 0) or ((native.kind == 1 or native.kind == 3) and native.flags & 1 == 0)) self.finishRequests(.page_changed, .page_changed, .page_changed, .page, null, true);
         if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != id.generation) return 0;
         if (native.kind == 10) return self.pageFactNotify(window, id, native.value);
+        if (native.kind == 11) {
+            const listener = self.config.?.options.page_listener orelse return 1;
+            listener.event(listener.context, self, .{ .context_menu_command = .{ .id = id, .command = @bitCast(native.status) } });
+            return if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != id.generation) 0 else 1;
+        }
         // A page that never told a theme color, as an image, has none once loaded.
         if (native.kind == 1 and self.config.?.options.theme_color and self.theme_told != id.generation and self.theme_color_value != null) {
             self.theme_color_value = null;

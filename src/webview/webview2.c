@@ -40,7 +40,14 @@ typedef void (*AuthOffer)(void *,const WCHAR *,const WCHAR *,void *);
 /* A certificate error: URI, COREWEBVIEW2_WEB_ERROR_STATUS and the PEM
    certificate. Nonzero allows it for the host until the browser ends. */
 typedef int (*CertificateOffer)(void *,const WCHAR *,int32_t,const WCHAR *);
-typedef struct ViewSettings { double zoom; const WCHAR *user_agent; _Bool devtools; uint32_t tool_flags,tool_limit,max_cookies,max_cookie_bytes,max_capture_bytes; const SchemeInput *schemes;uint32_t scheme_count;_Bool local_ipc;const ActionInput *actions;const InitializerInput *initializers; ZwpwContext *owned_context; const WCHAR *facts; const WCHAR *browser_arguments; AuthOffer auth; CertificateOffer certificate_offer; } ViewSettings;
+/* A page's context menu: what was clicked, the engine's top-level items
+   (flags 1 enabled, 2 checked) and keep, one per item, which the app clears
+   to leave one out. zwv_context_menu_append adds the app's items during the
+   call. Nonzero shows no menu. */
+typedef struct ContextItemInput { const WCHAR *name; const WCHAR *label; uint32_t kind; uint32_t flags; } ContextItemInput;
+typedef struct ContextTargetInput { const WCHAR *link, *link_text, *image, *media, *selection, *frame; uint32_t editable; } ContextTargetInput;
+typedef int (*ContextMenuOffer)(void *,const ContextTargetInput *,const ContextItemInput *,uint32_t,uint8_t *,void *);
+typedef struct ViewSettings { double zoom; const WCHAR *user_agent; _Bool devtools; uint32_t tool_flags,tool_limit,max_cookies,max_cookie_bytes,max_capture_bytes; const SchemeInput *schemes;uint32_t scheme_count;_Bool local_ipc;const ActionInput *actions;const InitializerInput *initializers; ZwpwContext *owned_context; const WCHAR *facts; const WCHAR *browser_arguments; AuthOffer auth; CertificateOffer certificate_offer; uint32_t context_menu; ContextMenuOffer context_offer; } ViewSettings;
 typedef void (*Resource)(void *, const WCHAR *, const WCHAR *, const NativeHeader *, uint32_t, void *);
 typedef struct PageEvent {
     int kind;
@@ -105,6 +112,15 @@ struct State {
     BOOL facts_added;
     AuthOffer auth;
     CertificateOffer certificate_offer;
+    /* 0 no menu, 1 the engine's, 2 the app's offer changes it. */
+    uint32_t context_menu;
+    ContextMenuOffer context_offer;
+    ICoreWebView2_11 *webview11;
+    EventRegistrationToken context_token;
+    BOOL has_context;
+    /* WebView2's command ids of the app's items in the menu shown last. */
+    INT32 context_native[32];
+    uint32_t context_command[32], context_count;
     WCHAR *html;
     WCHAR *document_source;
     WCHAR *initial_url, *local_prefix;
@@ -190,11 +206,14 @@ HANDLER(FrameHandler, ICoreWebView2NavigationStartingEventHandler, IID_ICoreWebV
 HANDLER(ResourceHandler, ICoreWebView2WebResourceRequestedEventHandler, IID_ICoreWebView2WebResourceRequestedEventHandler)
 HANDLER(PopupHandler, ICoreWebView2NewWindowRequestedEventHandler, IID_ICoreWebView2NewWindowRequestedEventHandler)
 HANDLER(PermissionHandler, ICoreWebView2PermissionRequestedEventHandler, IID_ICoreWebView2PermissionRequestedEventHandler)
+HANDLER(ContextMenuHandler, ICoreWebView2ContextMenuRequestedEventHandler, IID_ICoreWebView2ContextMenuRequestedEventHandler)
+HANDLER(ContextItemHandler, ICoreWebView2CustomItemSelectedEventHandler, IID_ICoreWebView2CustomItemSelectedEventHandler)
 HANDLER(DownloadHandler, ICoreWebView2DownloadStartingEventHandler, IID_ICoreWebView2DownloadStartingEventHandler)
 HANDLER(ProcessHandler, ICoreWebView2ProcessFailedEventHandler, IID_ICoreWebView2ProcessFailedEventHandler)
 HANDLER(PermissionsHandler, ICoreWebView2GetNonDefaultPermissionSettingsCompletedHandler, IID_ICoreWebView2GetNonDefaultPermissionSettingsCompletedHandler)
 HANDLER(ResetPermissionHandler, ICoreWebView2SetPermissionStateCompletedHandler, IID_ICoreWebView2SetPermissionStateCompletedHandler)
 HANDLER(SeedPermissionHandler, ICoreWebView2SetPermissionStateCompletedHandler, IID_ICoreWebView2SetPermissionStateCompletedHandler)
+HANDLER(TestInputHandler, ICoreWebView2CallDevToolsProtocolMethodCompletedHandler, IID_ICoreWebView2CallDevToolsProtocolMethodCompletedHandler)
 HANDLER(CompletedHandler, ICoreWebView2NavigationCompletedEventHandler, IID_ICoreWebView2NavigationCompletedEventHandler)
 HANDLER(DomHandler, ICoreWebView2DOMContentLoadedEventHandler, IID_ICoreWebView2DOMContentLoadedEventHandler)
 HANDLER(SourceHandler, ICoreWebView2SourceChangedEventHandler, IID_ICoreWebView2SourceChangedEventHandler)
@@ -215,12 +234,15 @@ static HRESULT STDMETHODCALLTYPE navigation_invoke(ICoreWebView2NavigationStarti
 static HRESULT STDMETHODCALLTYPE frame_invoke(ICoreWebView2NavigationStartingEventHandler *, ICoreWebView2 *, ICoreWebView2NavigationStartingEventArgs *);
 static HRESULT STDMETHODCALLTYPE resource_invoke(ICoreWebView2WebResourceRequestedEventHandler *, ICoreWebView2 *, ICoreWebView2WebResourceRequestedEventArgs *);
 static HRESULT STDMETHODCALLTYPE popup_invoke(ICoreWebView2NewWindowRequestedEventHandler *, ICoreWebView2 *, ICoreWebView2NewWindowRequestedEventArgs *);
+static HRESULT STDMETHODCALLTYPE context_menu_invoke(ICoreWebView2ContextMenuRequestedEventHandler *,ICoreWebView2 *,ICoreWebView2ContextMenuRequestedEventArgs *);
+static HRESULT STDMETHODCALLTYPE context_item_invoke(ICoreWebView2CustomItemSelectedEventHandler *,ICoreWebView2ContextMenuItem *,IUnknown *);
 static HRESULT STDMETHODCALLTYPE permission_invoke(ICoreWebView2PermissionRequestedEventHandler *, ICoreWebView2 *, ICoreWebView2PermissionRequestedEventArgs *);
 static HRESULT STDMETHODCALLTYPE download_invoke(ICoreWebView2DownloadStartingEventHandler *, ICoreWebView2 *, ICoreWebView2DownloadStartingEventArgs *);
 static HRESULT STDMETHODCALLTYPE process_invoke(ICoreWebView2ProcessFailedEventHandler *, ICoreWebView2 *, ICoreWebView2ProcessFailedEventArgs *);
 static HRESULT STDMETHODCALLTYPE permissions_invoke(ICoreWebView2GetNonDefaultPermissionSettingsCompletedHandler *, HRESULT, ICoreWebView2PermissionSettingCollectionView *);
 static HRESULT STDMETHODCALLTYPE reset_permission_invoke(ICoreWebView2SetPermissionStateCompletedHandler *, HRESULT);
 static HRESULT STDMETHODCALLTYPE seed_permission_invoke(ICoreWebView2SetPermissionStateCompletedHandler *, HRESULT);
+static HRESULT STDMETHODCALLTYPE test_input_invoke(ICoreWebView2CallDevToolsProtocolMethodCompletedHandler *,HRESULT,LPCWSTR);
 static HRESULT STDMETHODCALLTYPE completed_invoke(ICoreWebView2NavigationCompletedEventHandler *, ICoreWebView2 *, ICoreWebView2NavigationCompletedEventArgs *);
 static HRESULT STDMETHODCALLTYPE dom_invoke(ICoreWebView2DOMContentLoadedEventHandler *, ICoreWebView2 *, ICoreWebView2DOMContentLoadedEventArgs *);
 static HRESULT STDMETHODCALLTYPE source_invoke(ICoreWebView2SourceChangedEventHandler *, ICoreWebView2 *, ICoreWebView2SourceChangedEventArgs *);
@@ -247,12 +269,15 @@ VTABLE(NavigationHandler, ICoreWebView2NavigationStartingEventHandler, navigatio
 VTABLE(FrameHandler, ICoreWebView2NavigationStartingEventHandler, frame_invoke)
 VTABLE(ResourceHandler, ICoreWebView2WebResourceRequestedEventHandler, resource_invoke)
 VTABLE(PopupHandler, ICoreWebView2NewWindowRequestedEventHandler, popup_invoke)
+VTABLE(ContextMenuHandler, ICoreWebView2ContextMenuRequestedEventHandler, context_menu_invoke)
+VTABLE(ContextItemHandler, ICoreWebView2CustomItemSelectedEventHandler, context_item_invoke)
 VTABLE(PermissionHandler, ICoreWebView2PermissionRequestedEventHandler, permission_invoke)
 VTABLE(DownloadHandler, ICoreWebView2DownloadStartingEventHandler, download_invoke)
 VTABLE(ProcessHandler, ICoreWebView2ProcessFailedEventHandler, process_invoke)
 VTABLE(PermissionsHandler, ICoreWebView2GetNonDefaultPermissionSettingsCompletedHandler, permissions_invoke)
 VTABLE(ResetPermissionHandler, ICoreWebView2SetPermissionStateCompletedHandler, reset_permission_invoke)
 VTABLE(SeedPermissionHandler, ICoreWebView2SetPermissionStateCompletedHandler, seed_permission_invoke)
+VTABLE(TestInputHandler, ICoreWebView2CallDevToolsProtocolMethodCompletedHandler, test_input_invoke)
 VTABLE(CompletedHandler, ICoreWebView2NavigationCompletedEventHandler, completed_invoke)
 VTABLE(DomHandler, ICoreWebView2DOMContentLoadedEventHandler, dom_invoke)
 VTABLE(SourceHandler, ICoreWebView2SourceChangedEventHandler, source_invoke)
@@ -401,6 +426,25 @@ HRESULT zwv_test_seed_permission(State *s, const WCHAR *origin, SeedNotify done,
     HRESULT hr = ICoreWebView2Profile4_SetPermissionState(s->profile, COREWEBVIEW2_PERMISSION_KIND_GEOLOCATION, origin, COREWEBVIEW2_PERMISSION_STATE_ALLOW, &handler->iface);
     SeedPermissionHandler_release(&handler->iface);
     if (FAILED(hr)) { s->seed_notify = NULL; s->seed_context = NULL; }
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE test_input_invoke(ICoreWebView2CallDevToolsProtocolMethodCompletedHandler *p,HRESULT hr,LPCWSTR result) {
+    (void)p; (void)hr; (void)result; return S_OK;
+}
+/* Native integration input: a right click of the page at x, y in CSS
+   pixels, as the DevTools protocol sends a mouse's. Not a public Zig API. */
+HRESULT zwv_test_right_click(State *s, int32_t x, int32_t y) {
+    if (s->closed || !s->webview) return E_ABORT;
+    HRESULT hr=S_OK;
+    for (int release=0;release<2&&SUCCEEDED(hr);release++) {
+        WCHAR params[160];
+        swprintf(params,160,L"{\"type\":\"%ls\",\"x\":%d,\"y\":%d,\"button\":\"right\",\"buttons\":%d,\"clickCount\":1}",release?L"mouseReleased":L"mousePressed",(int)x,(int)y,release?0:2);
+        TestInputHandler *handler=TestInputHandler_new(s);
+        if (!handler) return E_OUTOFMEMORY;
+        hr=ICoreWebView2_CallDevToolsProtocolMethod(s->webview,L"Input.dispatchMouseEvent",params,&handler->iface);
+        TestInputHandler_release(&handler->iface);
+    }
     return hr;
 }
 
@@ -591,7 +635,7 @@ static HRESULT STDMETHODCALLTYPE controller_invoke(ICoreWebView2CreateCoreWebVie
     State *s=((ControllerHandler *)p)->state;retain(s);
     ICoreWebView2 *view=NULL;
     ICoreWebView2_4 *view4=NULL;ICoreWebView2_22 *view22=NULL;
-    ICoreWebView2_10 *view10=NULL;ICoreWebView2_5 *view5=NULL;ICoreWebView2_14 *view14=NULL;
+    ICoreWebView2_10 *view10=NULL;ICoreWebView2_5 *view5=NULL;ICoreWebView2_14 *view14=NULL;ICoreWebView2_11 *view11=NULL;
     ICoreWebView2Settings *settings=NULL;ICoreWebView2Settings2 *settings2=NULL;
     BOOL controller_pin=FALSE;
     if (s->closed) { if (controller) ICoreWebView2Controller_Close(controller);goto done; }
@@ -651,6 +695,10 @@ static HRESULT STDMETHODCALLTYPE controller_invoke(ICoreWebView2CreateCoreWebVie
     REGISTER_HANDLER(HistoryHandler,ICoreWebView2,view,add_HistoryChanged,remove_HistoryChanged,history_token,has_history);
     REGISTER_HANDLER(ContentHandler,ICoreWebView2,view,add_ContentLoading,remove_ContentLoading,content_token,has_content);
     REGISTER_HANDLER(DownloadHandler,ICoreWebView2_4,view4,add_DownloadStarting,remove_DownloadStarting,download_token,has_download);
+    if (s->context_menu==2&&s->context_offer) {
+        QUERY_INTERFACE(ICoreWebView2_11,IID_ICoreWebView2_11,view11,webview11);
+        REGISTER_HANDLER(ContextMenuHandler,ICoreWebView2_11,view11,add_ContextMenuRequested,remove_ContextMenuRequested,context_token,has_context);
+    }
 #undef REGISTER_HANDLER
 #undef QUERY_INTERFACE
     hr=ICoreWebView2_22_AddWebResourceRequestedFilterWithRequestSourceKinds(view22,L"*",COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_ALL);
@@ -660,7 +708,7 @@ static HRESULT STDMETHODCALLTYPE controller_invoke(ICoreWebView2CreateCoreWebVie
 #define SETTING(Name,Value) do {     if (s->closed) goto done;     hr=ICoreWebView2Settings_##Name(settings,Value);     if (FAILED(hr)||s->closed) goto failed; } while (0)
     SETTING(put_AreHostObjectsAllowed,FALSE);
     SETTING(put_AreDefaultScriptDialogsEnabled,FALSE);
-    SETTING(put_AreDefaultContextMenusEnabled,FALSE);
+    SETTING(put_AreDefaultContextMenusEnabled,s->context_menu!=0);
     SETTING(put_AreDevToolsEnabled,s->devtools);
 #undef SETTING
     if (s->user_agent) {
@@ -691,6 +739,7 @@ done:
     if (view5) ICoreWebView2_5_Release(view5);
     if (view10) ICoreWebView2_10_Release(view10);
     if (view14) ICoreWebView2_14_Release(view14);
+    if (view11) ICoreWebView2_11_Release(view11);
     if (view22) ICoreWebView2_22_Release(view22);
     if (view4) ICoreWebView2_4_Release(view4);
     if (view) ICoreWebView2_Release(view);
@@ -954,6 +1003,135 @@ static HRESULT STDMETHODCALLTYPE process_invoke(ICoreWebView2ProcessFailedEventH
     if (SUCCEEDED(ICoreWebView2ProcessFailedEventArgs_get_ProcessFailedKind(args, &kind)) && !s->closed) { file_controls_close(s);notify(s, 8, NULL, (HRESULT)kind); }
     release(s); return S_OK;
 }
+/* The app's offer changes WebView2's menu in place, which WebView2 then
+   shows: its own items keep doing what they do. */
+typedef struct ContextCall { State *state; ICoreWebView2ContextMenuItemCollection *items; ICoreWebView2Environment9 *environment; } ContextCall;
+HRESULT zwv_context_menu_append(void *call_pointer,const WCHAR *label,uint32_t command,uint32_t kind,uint32_t flags) {
+    ContextCall *call=call_pointer;
+    if (!call||!call->environment||(kind!=3&&!label)) return E_INVALIDARG;
+    State *s=call->state;
+    if (kind!=3&&s->context_count==32) return HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_QUOTA);
+    const COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND native=kind==1?COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_CHECK_BOX:kind==3?COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SEPARATOR:COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND;
+    ICoreWebView2ContextMenuItem *item=NULL;
+    HRESULT hr=ICoreWebView2Environment9_CreateContextMenuItem(call->environment,kind==3?L"":label,NULL,native,&item);
+    if (SUCCEEDED(hr)&&!item) hr=E_POINTER;
+    if (SUCCEEDED(hr)&&kind!=3) hr=ICoreWebView2ContextMenuItem_put_IsEnabled(item,(flags&1)!=0);
+    if (SUCCEEDED(hr)&&kind==1) hr=ICoreWebView2ContextMenuItem_put_IsChecked(item,(flags&2)!=0);
+    INT32 id=0;
+    if (SUCCEEDED(hr)&&kind!=3) hr=ICoreWebView2ContextMenuItem_get_CommandId(item,&id);
+    if (SUCCEEDED(hr)&&kind!=3) {
+        ContextItemHandler *handler=ContextItemHandler_new(s);
+        EventRegistrationToken token;
+        if (!handler) hr=E_OUTOFMEMORY;
+        else { hr=ICoreWebView2ContextMenuItem_add_CustomItemSelected(item,&handler->iface,&token); ContextItemHandler_release(&handler->iface); }
+    }
+    UINT32 count=0;
+    if (SUCCEEDED(hr)) hr=ICoreWebView2ContextMenuItemCollection_get_Count(call->items,&count);
+    if (SUCCEEDED(hr)) hr=ICoreWebView2ContextMenuItemCollection_InsertValueAtIndex(call->items,count,item);
+    if (SUCCEEDED(hr)&&kind!=3) { s->context_native[s->context_count]=id; s->context_command[s->context_count]=command; s->context_count++; }
+    if (item) ICoreWebView2ContextMenuItem_Release(item);
+    return hr;
+}
+static WCHAR *context_target_text(ICoreWebView2ContextMenuTarget *target,HRESULT (STDMETHODCALLTYPE *has)(ICoreWebView2ContextMenuTarget *,BOOL *),HRESULT (STDMETHODCALLTYPE *get)(ICoreWebView2ContextMenuTarget *,LPWSTR *)) {
+    BOOL present=FALSE; LPWSTR value=NULL;
+    if (has&&(FAILED(has(target,&present))||!present)) return NULL;
+    if (FAILED(get(target,&value))) return NULL;
+    if (value&&!*value) { CoTaskMemFree(value); return NULL; }
+    return value;
+}
+static BOOL context_item_separator(ICoreWebView2ContextMenuItemCollection *items,UINT32 index,BOOL *separator) {
+    ICoreWebView2ContextMenuItem *item=NULL;
+    COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND kind=COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND;
+    if (FAILED(ICoreWebView2ContextMenuItemCollection_GetValueAtIndex(items,index,&item))||!item) return FALSE;
+    (void)ICoreWebView2ContextMenuItem_get_Kind(item,&kind);
+    ICoreWebView2ContextMenuItem_Release(item);
+    *separator=kind==COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SEPARATOR;
+    return TRUE;
+}
+/* Separators first, last or after another go with the items around them. */
+static void context_menu_tidy(ICoreWebView2ContextMenuItemCollection *items) {
+    UINT32 count=0;
+    BOOL previous=TRUE,separator=FALSE;
+    if (FAILED(ICoreWebView2ContextMenuItemCollection_get_Count(items,&count))) return;
+    for (UINT32 i=0;i<count;) {
+        if (!context_item_separator(items,i,&separator)) return;
+        if (separator&&previous) {
+            if (FAILED(ICoreWebView2ContextMenuItemCollection_RemoveValueAtIndex(items,i))) return;
+            count--; continue;
+        }
+        previous=separator; i++;
+    }
+    while (count>0&&context_item_separator(items,count-1,&separator)&&separator) {
+        if (FAILED(ICoreWebView2ContextMenuItemCollection_RemoveValueAtIndex(items,count-1))) return;
+        count--;
+    }
+}
+static HRESULT STDMETHODCALLTYPE context_menu_invoke(ICoreWebView2ContextMenuRequestedEventHandler *p,ICoreWebView2 *sender,ICoreWebView2ContextMenuRequestedEventArgs *args) {
+    (void)sender; State *s=((ContextMenuHandler *)p)->state; retain(s);
+    ICoreWebView2ContextMenuItemCollection *items=NULL; ICoreWebView2ContextMenuTarget *target=NULL; ICoreWebView2Environment9 *environment=NULL;
+    ContextItemInput inputs[64]; LPWSTR names[64],labels[64]; uint8_t keep[64]; UINT32 count=0,listed=0;
+    ContextTargetInput in={0}; LPWSTR frame=NULL,source=NULL,selection=NULL,link=NULL,link_text=NULL;
+    BOOL prevented=FALSE;
+    HRESULT hr=s->closed||!s->context_offer?E_ABORT:ICoreWebView2ContextMenuRequestedEventArgs_get_MenuItems(args,&items);
+    if (SUCCEEDED(hr)&&!items) hr=E_POINTER;
+    if (SUCCEEDED(hr)) hr=ICoreWebView2ContextMenuRequestedEventArgs_get_ContextMenuTarget(args,&target);
+    if (SUCCEEDED(hr)&&!target) hr=E_POINTER;
+    if (SUCCEEDED(hr)) hr=ICoreWebView2Environment_QueryInterface(s->environment,&IID_ICoreWebView2Environment9,(void **)&environment);
+    if (SUCCEEDED(hr)) hr=ICoreWebView2ContextMenuItemCollection_get_Count(items,&count);
+    for (UINT32 i=0;SUCCEEDED(hr)&&i<count&&i<64;i++) {
+        ICoreWebView2ContextMenuItem *item=NULL;
+        COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND kind=COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND; BOOL enabled=FALSE,checked=FALSE;
+        names[i]=labels[i]=NULL;
+        if (FAILED(ICoreWebView2ContextMenuItemCollection_GetValueAtIndex(items,i,&item))||!item) break;
+        (void)ICoreWebView2ContextMenuItem_get_Name(item,&names[i]);
+        (void)ICoreWebView2ContextMenuItem_get_Label(item,&labels[i]);
+        (void)ICoreWebView2ContextMenuItem_get_Kind(item,&kind);
+        (void)ICoreWebView2ContextMenuItem_get_IsEnabled(item,&enabled);
+        (void)ICoreWebView2ContextMenuItem_get_IsChecked(item,&checked);
+        ICoreWebView2ContextMenuItem_Release(item);
+        inputs[i]=(ContextItemInput){names[i]?names[i]:L"",labels[i]?labels[i]:L"",kind==COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_CHECK_BOX?1u:kind==COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_RADIO?2u:kind==COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SEPARATOR?3u:kind==COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SUBMENU?4u:0u,(enabled?1u:0u)|(checked?2u:0u)};
+        keep[i]=1; listed=i+1;
+    }
+    if (SUCCEEDED(hr)&&!s->closed) {
+        COREWEBVIEW2_CONTEXT_MENU_TARGET_KIND kind=COREWEBVIEW2_CONTEXT_MENU_TARGET_KIND_PAGE;
+        BOOL editable=FALSE,main=TRUE;
+        (void)ICoreWebView2ContextMenuTarget_get_Kind(target,&kind);
+        (void)ICoreWebView2ContextMenuTarget_get_IsEditable(target,&editable);
+        (void)ICoreWebView2ContextMenuTarget_get_IsRequestedForMainFrame(target,&main);
+        link=context_target_text(target,target->lpVtbl->get_HasLinkUri,target->lpVtbl->get_LinkUri);
+        link_text=context_target_text(target,target->lpVtbl->get_HasLinkText,target->lpVtbl->get_LinkText);
+        source=context_target_text(target,target->lpVtbl->get_HasSourceUri,target->lpVtbl->get_SourceUri);
+        selection=context_target_text(target,target->lpVtbl->get_HasSelection,target->lpVtbl->get_SelectionText);
+        if (!main) frame=context_target_text(target,NULL,target->lpVtbl->get_FrameUri);
+        in.link=link; in.link_text=link_text; in.selection=selection; in.frame=frame; in.editable=editable?1u:0u;
+        if (kind==COREWEBVIEW2_CONTEXT_MENU_TARGET_KIND_IMAGE) in.image=source;
+        else if (kind==COREWEBVIEW2_CONTEXT_MENU_TARGET_KIND_AUDIO||kind==COREWEBVIEW2_CONTEXT_MENU_TARGET_KIND_VIDEO) in.media=source;
+        s->context_count=0;
+        ContextCall call={s,items,environment};
+        prevented=s->context_offer(s->context,&in,inputs,listed,keep,&call)!=0;
+        if (!s->closed&&!prevented) {
+            for (UINT32 i=listed;i>0;i--) if (!keep[i-1]) (void)ICoreWebView2ContextMenuItemCollection_RemoveValueAtIndex(items,i-1);
+            context_menu_tidy(items);
+            UINT32 left=0;
+            /* A menu the app emptied shows nothing. */
+            if (SUCCEEDED(ICoreWebView2ContextMenuItemCollection_get_Count(items,&left))&&!left) prevented=TRUE;
+        }
+    }
+    if (prevented||s->closed) (void)ICoreWebView2ContextMenuRequestedEventArgs_put_Handled(args,TRUE);
+    for (UINT32 i=0;i<listed;i++) { CoTaskMemFree(names[i]); CoTaskMemFree(labels[i]); }
+    CoTaskMemFree(frame); CoTaskMemFree(source); CoTaskMemFree(selection); CoTaskMemFree(link); CoTaskMemFree(link_text);
+    if (environment) ICoreWebView2Environment9_Release(environment);
+    if (target) ICoreWebView2ContextMenuTarget_Release(target);
+    if (items) ICoreWebView2ContextMenuItemCollection_Release(items);
+    release(s); return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE context_item_invoke(ICoreWebView2CustomItemSelectedEventHandler *p,ICoreWebView2ContextMenuItem *sender,IUnknown *args) {
+    (void)args; State *s=((ContextItemHandler *)p)->state; retain(s);
+    INT32 id=0;
+    if (!s->closed&&sender&&SUCCEEDED(ICoreWebView2ContextMenuItem_get_CommandId(sender,&id)))
+        for (uint32_t i=0;i<s->context_count;i++) if (s->context_native[i]==id) { (void)page_notify(s,11,0,0,(int32_t)s->context_command[i],NULL); break; }
+    release(s); return S_OK;
+}
 typedef struct AuthCall { ICoreWebView2BasicAuthenticationRequestedEventArgs *args; BOOL answered; } AuthCall;
 HRESULT zwv_auth_answer(void *call_pointer,const WCHAR *user,const WCHAR *password) {
     AuthCall *call=call_pointer;
@@ -1135,7 +1313,7 @@ State *zwv_create(HWND hwnd, const WCHAR *html, const WCHAR *profile, const WCHA
     if (!s->tool_limit || s->tool_limit>8 || !s->max_cookies || s->max_cookies>128 || !s->max_cookie_bytes || s->max_cookie_bytes>262144 || !s->max_capture_bytes || s->max_capture_bytes>16777216) { release(s); *out=E_INVALIDARG; return NULL; }
     if (s->zoom!=s->zoom || s->zoom<0.25 || s->zoom>5.0) { release(s); *out=E_INVALIDARG; return NULL; }
     if (settings && settings->user_agent) { s->user_agent=_wcsdup(settings->user_agent); if (!s->user_agent) { release(s); *out=E_OUTOFMEMORY; return NULL; } }
-    if (settings) { s->auth=settings->auth; s->certificate_offer=settings->certificate_offer; }
+    if (settings) { s->auth=settings->auth; s->certificate_offer=settings->certificate_offer; s->context_menu=settings->context_menu; s->context_offer=settings->context_offer; }
     if (settings && settings->facts) { s->facts_script=_wcsdup(settings->facts); if (!s->facts_script) { release(s); *out=E_OUTOFMEMORY; return NULL; } }
     *out=remote_init(&s->remote,remote);
     if (FAILED(*out)) { release(s); return NULL; }
@@ -1364,6 +1542,9 @@ static void state_cleanup(State *s) {
         if (s->has_authentication) ICoreWebView2_10_remove_BasicAuthenticationRequested(s->webview10,s->authentication_token);
         if (s->has_certificate) ICoreWebView2_5_remove_ClientCertificateRequested(s->webview5,s->certificate_token);
         if (s->webview10) { ICoreWebView2_10_Release(s->webview10); s->webview10=NULL; }
+        if (s->has_context) ICoreWebView2_11_remove_ContextMenuRequested(s->webview11,s->context_token);
+        s->has_context=FALSE;
+        if (s->webview11) { ICoreWebView2_11_Release(s->webview11); s->webview11=NULL; }
         if (s->webview5) { ICoreWebView2_5_Release(s->webview5); s->webview5=NULL; }
         if (s->has_dom) ICoreWebView2_22_remove_DOMContentLoaded(s->webview22, s->dom_token);
         if (s->webview22) { ICoreWebView2_22_Release(s->webview22); s->webview22 = NULL; }

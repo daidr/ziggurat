@@ -71,6 +71,10 @@ struct ZwkState {
        load finished. */
     char *tls_retry;
     unsigned tls_retries;
+    uint32_t context_policy;
+    ZwkContextMenu context_offer;
+    /* The selection of the page's latest contextmenu event. */
+    char *context_selection;
     gboolean closed, committed, failed, dom_ready, recovering,load_started,inspector;
 };
 static gint live_states, live_callbacks, live_views, inspectors_shown;
@@ -91,7 +95,7 @@ static void release(gpointer data) {
     initializers_free(s->initializers);
     if(s->private_bootstrap)webkit_user_script_unref(s->private_bootstrap);
     if(s->public_bootstrap)webkit_user_script_unref(s->public_bootstrap);
-    local_finish(&s->local); remote_free(s->remote); g_free(s->facts); g_free(s->tls_retry); g_free(s->html);g_free(s->current_uri);g_free(s->resources); g_free(s); g_atomic_int_add(&live_states,-1);
+    local_finish(&s->local); remote_free(s->remote); g_free(s->facts); g_free(s->tls_retry); g_free(s->context_selection); g_free(s->html);g_free(s->current_uri);g_free(s->resources); g_free(s); g_atomic_int_add(&live_states,-1);
 }
 static gboolean live(ZwkState *s) { return !s->closed && !s->recovering && s->owner; }
 static size_t bounded_length(const char *text,size_t limit) {
@@ -322,8 +326,110 @@ static WebKitWebView *popup(WebKitWebView *view,WebKitNavigationAction *action,g
     if (live(s) && uri && (s->policy&2u)) notify(s,4,uri,webkit_navigation_action_is_user_gesture(action)?1:0,NULL);
     release(s); return NULL;
 }
+/* The app's offer changes WebKitGTK's menu in place: its own items keep
+   doing what they do, the app's are GSimpleActions that tell page kind 11. */
+typedef struct ContextCall { ZwkState *state; WebKitContextMenu *menu; unsigned added; } ContextCall;
+typedef struct ContextAction { ZwkState *state; uint32_t command; } ContextAction;
+static void context_action_free(gpointer data,GClosure *closure) { (void)closure; ContextAction *a=data; release(a->state); g_free(a); }
+static void context_activate(GSimpleAction *action,GVariant *parameter,gpointer data) {
+    (void)action; (void)parameter; ContextAction *a=data; ZwkState *s=a->state; retain(s);
+    if (live(s) && document(s)) (void)page(s,11,0,(int32_t)a->command,NULL);
+    release(s);
+}
+static char *mnemonic_label(const char *label) {
+    GString *out=g_string_sized_new(strlen(label)+4);
+    for (const char *c=label;*c;c++) { if (*c=='_') g_string_append_c(out,'_'); g_string_append_c(out,*c); }
+    return g_string_free(out,FALSE);
+}
+int zwk_context_menu_append(void *call_pointer,const char *label,uint32_t command,uint32_t kind,uint32_t flags) {
+    ContextCall *call=call_pointer;
+    if (!call || (kind!=3 && !label)) return ZWK_INVALID;
+    if (call->added>=32) return ZWK_FULL;
+    WebKitContextMenuItem *item=NULL;
+    if (kind==3) item=webkit_context_menu_item_new_separator();
+    else {
+        char name[32]; g_snprintf(name,sizeof(name),"ziggurat-%u",call->added);
+        GSimpleAction *action=kind==1?g_simple_action_new_stateful(name,NULL,g_variant_new_boolean((flags&2)!=0)):g_simple_action_new(name,NULL);
+        if (!action) return ZWK_OOM;
+        g_simple_action_set_enabled(action,(flags&1)!=0);
+        ContextAction *data=g_try_new0(ContextAction,1);
+        if (!data) { g_object_unref(action); return ZWK_OOM; }
+        data->state=call->state; data->command=command; retain(call->state);
+        g_signal_connect_data(action,"activate",G_CALLBACK(context_activate),data,context_action_free,0);
+        char *text=mnemonic_label(label);
+        item=webkit_context_menu_item_new_from_gaction(G_ACTION(action),text,NULL);
+        g_free(text); g_object_unref(action);
+    }
+    if (!item) return ZWK_OOM;
+    webkit_context_menu_append(call->menu,item);
+    call->added++;
+    return ZWK_OK;
+}
+static const char *context_action_nick(WebKitContextMenuAction action) {
+    static GEnumClass *actions;
+    if (!actions) actions=g_type_class_ref(WEBKIT_TYPE_CONTEXT_MENU_ACTION);
+    GEnumValue *value=g_enum_get_value(actions,(gint)action);
+    return value&&value->value_nick?value->value_nick:"";
+}
+/* Separators first, last or after another go with the items around them. */
+static void context_menu_tidy(WebKitContextMenu *menu) {
+    gboolean previous=TRUE;
+    for (GList *link=webkit_context_menu_get_items(menu);link;) {
+        WebKitContextMenuItem *item=link->data; link=link->next;
+        const gboolean separator=webkit_context_menu_item_is_separator(item);
+        if (separator && previous) { webkit_context_menu_remove(menu,item); continue; }
+        previous=separator;
+    }
+    for (GList *last=g_list_last(webkit_context_menu_get_items(menu));last && webkit_context_menu_item_is_separator(last->data);last=g_list_last(webkit_context_menu_get_items(menu)))
+        webkit_context_menu_remove(menu,last->data);
+}
 static gboolean context_menu(WebKitWebView *view,WebKitContextMenu *menu,GdkEvent *event,WebKitHitTestResult *hit,gpointer data) {
-    (void)view; (void)menu; (void)event; (void)hit; (void)data; return TRUE;
+    (void)view; (void)event; ZwkState *s=data;
+    if (s->context_policy==1) return FALSE;
+    if (s->context_policy!=2 || !s->context_offer || !menu) return TRUE;
+    retain(s);
+    gboolean prevented=TRUE;
+    char *selection=s->context_selection; s->context_selection=NULL;
+    if (live(s) && document(s)) {
+        WebKitContextMenuItem *items[64]; ZwkContextItem inputs[64]; uint8_t keep[64]; uint32_t count=0;
+        G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+        for (GList *link=webkit_context_menu_get_items(menu);link && count<64;link=link->next) {
+            WebKitContextMenuItem *item=link->data;
+            GtkAction *action=webkit_context_menu_item_get_action(item);
+            const WebKitContextMenuAction stock=webkit_context_menu_item_get_stock_action(item);
+            const gboolean separator=webkit_context_menu_item_is_separator(item);
+            const gboolean toggle=action && GTK_IS_TOGGLE_ACTION(action);
+            uint32_t kind=separator?3u:webkit_context_menu_item_get_submenu(item)?4u:toggle?(GTK_IS_RADIO_ACTION(action)?2u:1u):0u;
+            uint32_t flags=(separator || (action && gtk_action_get_sensitive(action)))?1u:0u;
+            if (toggle && gtk_toggle_action_get_active(GTK_TOGGLE_ACTION(action))) flags|=2u;
+            const char *label=action?gtk_action_get_label(action):NULL;
+            items[count]=item;
+            inputs[count]=(ZwkContextItem){separator?"":context_action_nick(stock),label?label:"",kind,flags,(uint32_t)stock};
+            keep[count]=1; count++;
+        }
+        G_GNUC_END_IGNORE_DEPRECATIONS
+        ZwkContextTarget target={0};
+        target.selection=selection && *selection?selection:NULL;
+        if (hit) {
+            target.link=webkit_hit_test_result_context_is_link(hit)?webkit_hit_test_result_get_link_uri(hit):NULL;
+            target.link_text=webkit_hit_test_result_context_is_link(hit)?webkit_hit_test_result_get_link_label(hit):NULL;
+            target.image=webkit_hit_test_result_context_is_image(hit)?webkit_hit_test_result_get_image_uri(hit):NULL;
+            target.media=webkit_hit_test_result_context_is_media(hit)?webkit_hit_test_result_get_media_uri(hit):NULL;
+            target.editable=webkit_hit_test_result_context_is_editable(hit)?1u:0u;
+        }
+        for (uint32_t i=0;i<count;i++) g_object_ref(items[i]);
+        ContextCall call={s,menu,0};
+        prevented=s->context_offer(s->owner,&target,inputs,count,keep,&call)!=0;
+        if (live(s) && !prevented) {
+            for (uint32_t i=0;i<count;i++) if (!keep[i]) webkit_context_menu_remove(menu,items[i]);
+            context_menu_tidy(menu);
+            /* A menu the app emptied shows nothing. */
+            if (!webkit_context_menu_get_n_items(menu)) prevented=TRUE;
+        } else prevented=TRUE;
+        for (uint32_t i=0;i<count;i++) g_object_unref(items[i]);
+    }
+    g_free(selection);
+    release(s); return prevented;
 }
 static gboolean policy(WebKitWebView *view,WebKitPolicyDecision *decision,WebKitPolicyDecisionType kind,gpointer data) {
     (void)view; ZwkState *s=data; retain(s); g_object_ref(decision);
@@ -552,6 +658,9 @@ static void message(WebKitUserContentManager *manager,WebKitJavascriptResult *re
     if (body[0]=='F' && s->facts && body_length<=257) {
         char fact[257]; memcpy(fact,body+1,body_length-1); fact[body_length-1]=0;
         if (live(s) && s->committed && !s->failed) (void)page(s,10,0,0,fact);
+    } else if (body[0]=='S' && s->context_offer && body_length<=16385) {
+        char *copy=g_strndup(body+1,body_length-1);
+        g_free(s->context_selection); s->context_selection=copy;
     } else if (body_length==1 && body[0]=='D') {
         s->dom_ready=TRUE;
         if (document(s)) (void)page(s,2,0,0,NULL);
@@ -754,6 +863,7 @@ static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t
     if (options->facts && !(s->facts=g_strdup(options->facts))) { zwk_close(s); return ZWK_OOM; }
     s->autoplay=options->autoplay!=0;
     s->auth=options->auth; s->certificate=options->certificate;
+    s->context_policy=options->context_menu; s->context_offer=options->context_offer;
     s->owner=owner; s->notify=callback; s->page=page_callback; s->script=script_callback; s->deadline=deadline;
     s->limit=options->max_pending; s->result_limit=options->max_result_bytes; s->policy=options->policy_flags;
     if(options->initializers){

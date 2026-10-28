@@ -21,7 +21,11 @@ pub const Options = extern struct {
     autoplay: u32 = 0,
     auth: ?*const fn (*anyopaque, [*:0]const u8, u32, [*:0]const u8, u32, c_int, *anyopaque) callconv(.c) void = null,
     certificate: ?*const fn (*anyopaque, [*:0]const u8, u32, [*]const u8, usize) callconv(.c) c_int = null,
+    context_menu: u32 = 0,
+    context_offer: ?*const fn (*anyopaque, *const ContextTarget, [*]const ContextItem, u32, [*]u8, *anyopaque) callconv(.c) c_int = null,
 };
+pub const ContextItem = extern struct { name: [*:0]const u8, label: [*:0]const u8, kind: u32, flags: u32, action: u32 };
+pub const ContextTarget = extern struct { link: ?[*:0]const u8, link_text: ?[*:0]const u8, image: ?[*:0]const u8, media: ?[*:0]const u8, selection: ?[*:0]const u8, frame: ?[*:0]const u8, editable: u32 };
 pub const LocalResource = extern struct {
     path: [*]const u8,
     mime: [*]const u8,

@@ -124,7 +124,7 @@ const State = struct {
                 const expected = if (self.step == 0 or self.step == 2) "Root 文档" else "Second 文档";
                 if (std.mem.eql(u8, change.title orelse return self.fail(error.MissingTitle), expected)) self.title = true;
             },
-            .history_changed, .theme_color_changed, .content_size_changed => {},
+            .history_changed, .theme_color_changed, .content_size_changed, .context_menu_command => {},
         }
         self.check();
     }

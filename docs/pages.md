@@ -258,6 +258,23 @@ frame 文档导航、弹窗、下载、权限仍默认拒绝。资源入口额�
 
 `smoke-webview-http-auth` 由 `tests/http_auth_host.py` 启动两个回环服务器：一个 HTTP 服务器按两个 realm 要求 Basic 认证，一个 HTTPS 服务器出示无人信任的公开测试证书。smoke 依次检查：用凭据登录并看到欢迎页；另一个 realm 返回 null，看到服务器的拒绝页；第一次拒绝证书时加载失败；第二次按 DER 放行后页面加载成功。Linux（WebKitGTK 2.52.6，xvfb）本地通过，Windows 在 CI 的 WebView2 任务中运行。
 
+## 页面上下文菜单
+
+`Options.context_menu` 决定页面右键或按菜单键时的菜单。默认是 `.none`，不显示任何菜单，页面自己的 `contextmenu` 事件仍会触发。`.engine` 原样显示引擎自己的菜单。`.handler` 在菜单打开前同步调用处理器，处理器在原地修改引擎的菜单，引擎显示改完的菜单，所以引擎自带的项（复制、检查元素等）照常工作。
+
+处理器拿到 `ContextMenu`：
+- `target`：链接 URI 与文字、图片、音视频的 URI、选中的文本、是否可编辑，以及被点的 iframe 的 URI（只有 WebView2 提供）。
+- `items`：引擎即将显示的顶层项，含 id、去掉助记符的标签、类型、是否可用、是否勾选。子菜单只列一项，其内容保持引擎原样。id 在两个引擎都有该项时取 `context_menu.ids` 中的共同名字（`copy`、`reload`、`copyLink`、`inspect` 等），否则保留引擎自己的名字：WebView2 的 Name（如 `createQrCode`），或 WebKitGTK 原生动作的 nick（如 `spelling-guess`）。
+
+处理器可以：
+- 用 `remove(id)`、`removeAt`、`removeAll` 去掉引擎的项，开头、结尾或连续的分隔线会随之去掉。
+- 用 `append` 在末尾加最多 32 个应用自己的项：命令、勾选项或分隔线，标签是纯文本，最长 256 字节。应用项被选中时发出 `PageEvent.context_menu_command`，带应用自己定的 command。
+- 用 `prevent` 不显示菜单。删空的菜单也不显示。
+
+Windows 用 `ICoreWebView2_11` 的 `ContextMenuRequested` 在原地修改菜单项集合，应用项由 `ICoreWebView2Environment9.CreateContextMenuItem` 创建，选中时由它的 `CustomItemSelected` 报告。Linux 在 `context-menu` 信号里修改 `WebKitContextMenu`，应用项是各带一个 `GSimpleAction` 的项，WebKitGTK 不为它们显示快捷键或图标。WebKitGTK 的命中测试不提供选区，选区来自页面 `contextmenu` 事件里私有 world 记录的文本；子 frame 里的选区不记录。
+
+`smoke-webview-context-menu` 在可见窗口的真实页面上测试。先右键点一个链接：处理器拿到链接 URI 与文字以及引擎的项，去掉 Copy Link，加一条分隔线和一个应用项。Linux 上测试在菜单弹出前读取改完的菜单，选中应用项，并检查 `context_menu_command`。WebView2 自己绘制菜单，测试读不到，所以 Windows 只检查处理器拿到的内容和添加是否成功。然后选中一段文字，Linux 按菜单键、Windows 右键，处理器拿到选区并阻止菜单。最后确认页面两次都收到了 `contextmenu` 事件。Linux 用 GTK 事件和 `popup-menu` 信号触发，Windows 通过 DevTools 协议的鼠标事件触发（`zwv_test_right_click`，只用于测试）。
+
 ## 请求头与有界异步响应
 
 `OriginGrant.request_headers` 只校验观察到的请求头，不修改或注入它们。名称用不区分大小写的 ASCII token，最多 64 字节；值为最多 2048 字节的可打印 ASCII。每个 grant 最多 16 项、8 KiB，不允许同名重复规则。`.{ .name = "Authorization", .exact_value = "Bearer private-token" }` 精确按值字节匹配；省略 exact_value 明确允许该名称的任意合规值。所有未列入下述固定集合的头都必须匹配规则，包括 Content-Type、Range、Authorization 和非 X 前缀自定义头；不会只检查 X-*。禁止将 framing/hop、Proxy-* 或固定集合伪装成可控 grant。

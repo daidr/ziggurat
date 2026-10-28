@@ -1886,6 +1886,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
         });
         _ = addHttpAuthSmoke(b, target, optimize, core, view);
+        addSmoke(b, "smoke-webview-context-menu", "tests/context_menu_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
         addSmoke(b, "smoke-page-remote", "tests/remote_page_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
@@ -2030,6 +2033,11 @@ pub fn build(b: *std.Build) void {
         http_auth_run.step.dependOn(&install_extension.step);
         http_auth_run.addArg("--extension");
         http_auth_run.addDirectoryArg(b.graph.path(.install_lib, ""));
+        const context_menu_module = addSmokeModule(b, "smoke-webview-context-menu", "tests/context_menu_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
+        context_menu_module.addCSourceFile(.{ .file = b.path("tests/context_menu_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        context_menu_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
         addSmoke(b, "smoke-webview-dynamic-linux", "tests/linux_dynamic_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
