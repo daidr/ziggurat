@@ -558,6 +558,8 @@ pub fn build(b: *std.Build) void {
         native.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
         const secrets_native = native_support.add(b, system, "system-secrets-native", "src/system/secrets_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         secrets_native.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
+        const now_playing_native = native_support.add(b, system, "system-now-playing-native", "src/system/now_playing_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        now_playing_native.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
         system.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
         system.link_libc = true;
     }
@@ -593,6 +595,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_system", .module = system },
         });
         addSmoke(b, "smoke-flyout", "tests/system_flyout_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        addSmoke(b, "smoke-now-playing-commands", "tests/now_playing_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
         });
@@ -632,6 +638,14 @@ pub fn build(b: *std.Build) void {
         fixture.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
         desktop_smoke.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
         desktop_smoke.linkSystemLibrary("x11", .{ .use_pkg_config = .force });
+        // Needs a session bus and an X11 display: dbus-run-session -- xvfb-run.
+        const now_playing_smoke = addSmokeModule(b, "smoke-now-playing", "tests/now_playing_linux_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        const now_playing_fixture = native_support.add(b, now_playing_smoke, "now-playing-fixture", "tests/now_playing_linux_fixture.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        now_playing_fixture.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
+        now_playing_smoke.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
         // Needs an isolated Xvfb with a window manager: shrinks its only output.
         const displays_smoke = addSmokeModule(b, "smoke-window-placement-displays", "tests/window_placement_displays_linux.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
