@@ -920,6 +920,24 @@ static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t
     webkit_settings_set_allow_file_access_from_file_urls(settings,FALSE);
     webkit_settings_set_allow_universal_access_from_file_urls(settings,FALSE);
     if (options->user_agent) webkit_settings_set_user_agent(settings,options->user_agent);
+    webkit_settings_set_enable_back_forward_navigation_gestures(settings,(options->gestures&1u)!=0);
+    if (!(options->gestures&2u)) {
+        /* No setting turns WebKitGTK's pinch zoom off: its zoom gesture,
+           kept in the view's data from 2.38, takes no more events. */
+        GtkEventController *zoom=g_object_get_data(G_OBJECT(s->view),"wk-view-zoom-gesture");
+        if (GTK_IS_EVENT_CONTROLLER(zoom)) gtk_event_controller_set_propagation_phase(zoom,GTK_PHASE_NONE);
+    }
+#if WEBKIT_CHECK_VERSION(2,42,0)
+    if (!options->throttling) {
+        WebKitFeatureList *features=webkit_settings_get_all_features();
+        for (gsize i=0;i<webkit_feature_list_get_length(features);i++) {
+            WebKitFeature *feature=webkit_feature_list_get(features,i);
+            const char *name=webkit_feature_get_identifier(feature);
+            if (!g_strcmp0(name,"HiddenPageDOMTimerThrottling") || !g_strcmp0(name,"HiddenPageCSSAnimationSuspension")) webkit_settings_set_feature_enabled(settings,feature,FALSE);
+        }
+        webkit_feature_list_unref(features);
+    }
+#endif
     webkit_web_view_set_zoom_level(WEBKIT_WEB_VIEW(s->view),options->zoom);
     g_signal_connect(s->manager,"script-message-received::ziggurat",G_CALLBACK(message),s);
     g_signal_connect(s->context,"download-started",G_CALLBACK(downloaded),s);

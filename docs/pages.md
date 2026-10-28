@@ -382,6 +382,14 @@ Starting 到本次 ContentLoading 期间抑制页面消息；之后消息必须�
 
 `smoke-webview-page-facts` 在隐藏窗口的真实页面中检查：初始主题色和脚本修改后的颜色、内容尺寸与窗口按内容调整为 266×136、自动播放不被策略拒绝、全部 frame 与任意来源的初始化器在顶层和子 frame 各运行一次、宿主脚本 `window.open` 的手势报告、进程 ID，以及 reload 为不受信任页面后消息被丢弃而主题色仍然报告。Linux 在 WebKitGTK 2.52.6（xvfb）本地通过；Windows 在 CI 的 WebView2 任务中运行。
 
+## 滑动、双指缩放与后台节流
+
+`Options.swipe_navigation` 与 `Options.pinch_zoom` 打开平台的滑动前进后退与双指缩放，默认都关闭。Linux 设置 WebKitSettings 的 `enable-back-forward-navigation-gestures`；WebKitGTK 没有关闭双指缩放的设置，未开 `pinch_zoom` 时它保存在 view data `wk-view-zoom-gesture` 中的 GtkGestureZoom（2.38 起）不再接收事件。Windows 在首次导航前设置 `ICoreWebView2Settings5.IsPinchZoomEnabled` 与 `ICoreWebView2Settings6.IsSwipeNavigationEnabled`，这两项在 WebView2 中原本默认开启，所以 Linux 和 Windows 的页面现在只在要求时才响应双指缩放和触屏滑动。
+
+`Options.background_throttling = false` 让窗口隐藏、最小化或被遮挡时页面继续运行：定时器保持频率，CSS 动画不暂停。Linux 关闭 WebKitGTK 的 `HiddenPageDOMTimerThrottling` 与 `HiddenPageCSSAnimationSuspension` 功能（2.42 起）；隐藏的页面仍然不绘制帧，`requestAnimationFrame` 会等待。Windows 以 `--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows` 启动浏览器，与 `autoplay` 一样是 WebView2 环境的参数：同一 user data folder（包括同一应用的两个进程）的 View 必须一致，Windows Profile owner 暂不接受（`UnsupportedCapability`）。
+
+`smoke-webview-page-options` 在两个从未显示的窗口中各放一个页面，检查手势设置，并数 1.5 秒内 10 ms 定时器的触发次数：不节流的页面约 126 次，默认页面在 Linux 上 7 次。Linux 在 WebKitGTK 2.52.6（xvfb）本地通过；Windows 在 CI 的 WebView2 任务中运行。
+
 ## 文档初始化器
 
 Windows 的 `Options.document_initializers` 在首个文档前安装已拥有的初始化器，`View.replaceDocumentInitializers` 用一次有界事务替换未来文档配置。每项是宿主信任、语法有效的普通函数体，在页面 world 的 document start、精确 HTTPS 来源守卫通过后按序调用；`frames = .all` 让它在子 frame 中也运行（每个 frame 检查自己的来源），`origins` 只写 `"*"` 时任何来源的文档都运行；return 结束自身，throw 中断后续。默认空表不创建预算、注册或事务。它不授予导航、TLS、请求或 IPC 权限，也不是不可信代码 sandbox。

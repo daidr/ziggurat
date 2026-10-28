@@ -431,6 +431,23 @@ pub const Options = struct {
     certificate_errors: ?CertificateHandler = null,
     /// The page's context menu, on a right click or the menu key.
     context_menu: ContextMenuPolicy = .none,
+    /// Go back and forward with the platform's swipe: Linux's
+    /// enable-back-forward-navigation-gestures, WebView2's
+    /// IsSwipeNavigationEnabled (a touchscreen's swipe).
+    swipe_navigation: bool = false,
+    /// Magnify the page with a pinch on a touchscreen or a touchpad.
+    /// WebKitGTK has no setting for it: without this, its zoom gesture
+    /// takes no events (2.38 and later).
+    pinch_zoom: bool = false,
+    /// false keeps a page running while its window is hidden, minimized or
+    /// covered: its timers keep their rate and its CSS animations go on.
+    /// Linux turns WebKitGTK's HiddenPageDOMTimerThrottling and
+    /// HiddenPageCSSAnimationSuspension off (2.42 and later); a hidden page
+    /// still draws no frames, so requestAnimationFrame waits. Windows starts
+    /// the browser with --disable-background-timer-throttling
+    /// --disable-renderer-backgrounding --disable-backgrounding-occluded-windows,
+    /// arguments of the WebView2 environment as Autoplay.allow's are.
+    background_throttling: bool = true,
 };
 pub const AuthHandler = struct {
     context: *anyopaque,
@@ -453,6 +470,21 @@ pub const CertificateHandler = struct {
     /// the host in the View's web context and loads the page again.
     allow: *const fn (*anyopaque, *View, CertificateError) bool,
 };
+fn gestureFlags(options: Options) u32 {
+    return @as(u32, @intFromBool(options.swipe_navigation)) | @as(u32, @intFromBool(options.pinch_zoom)) << 1;
+}
+/// The WebView2 environment's arguments the options ask for.
+fn browserArguments(options: Options) ?[*:0]const u16 {
+    const autoplay = "--autoplay-policy=no-user-gesture-required";
+    const unthrottled = "--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows";
+    const utf16 = std.unicode.utf8ToUtf16LeStringLiteral;
+    return switch (@as(u2, @intFromBool(options.autoplay == .allow)) | @as(u2, @intFromBool(!options.background_throttling)) << 1) {
+        0 => null,
+        1 => utf16(autoplay),
+        2 => utf16(unthrottled),
+        3 => utf16(autoplay ++ " " ++ unthrottled),
+    };
+}
 pub const Autoplay = enum {
     /// The engine's own policy: sound only after a user's gesture.
     user_gesture,
@@ -490,7 +522,7 @@ const NativeActions = extern struct {
     download_offer: ?*const fn (*anyopaque, [*:0]const u16, [*:0]const u16, [*:0]const u16, i64, *anyopaque) callconv(.c) void = null,
     download_notify: ?*const fn (*anyopaque, u64, u32, u64, i64, i32) callconv(.c) void = null,
 };
-const NativeSettings = extern struct { zoom: f64, user_agent: ?[*:0]const u16, devtools: bool, tool_flags: u32, tool_limit: u32, max_cookies: u32, max_cookie_bytes: u32, max_capture_bytes: u32, schemes: ?[*]const NativeScheme, scheme_count: u32, local_ipc: bool, actions: ?*const NativeActions, initializers: ?*const initializer_owner.NativeInput, owned_context: ?*anyopaque, facts: ?[*:0]const u16 = null, browser_arguments: ?[*:0]const u16 = null, auth: ?*const fn (*anyopaque, [*:0]const u16, [*:0]const u16, *anyopaque) callconv(.c) void = null, certificate: ?*const fn (*anyopaque, [*:0]const u16, i32, [*:0]const u16) callconv(.c) c_int = null, context_menu: u32 = 0, context_offer: ?*const fn (*anyopaque, *const NativeContextTarget, [*]const NativeContextItem, u32, [*]u8, *anyopaque) callconv(.c) c_int = null };
+const NativeSettings = extern struct { zoom: f64, user_agent: ?[*:0]const u16, devtools: bool, tool_flags: u32, tool_limit: u32, max_cookies: u32, max_cookie_bytes: u32, max_capture_bytes: u32, schemes: ?[*]const NativeScheme, scheme_count: u32, local_ipc: bool, actions: ?*const NativeActions, initializers: ?*const initializer_owner.NativeInput, owned_context: ?*anyopaque, facts: ?[*:0]const u16 = null, browser_arguments: ?[*:0]const u16 = null, auth: ?*const fn (*anyopaque, [*:0]const u16, [*:0]const u16, *anyopaque) callconv(.c) void = null, certificate: ?*const fn (*anyopaque, [*:0]const u16, i32, [*:0]const u16) callconv(.c) c_int = null, context_menu: u32 = 0, context_offer: ?*const fn (*anyopaque, *const NativeContextTarget, [*]const NativeContextItem, u32, [*]u8, *anyopaque) callconv(.c) c_int = null, gestures: u32 = 0 };
 const NativeContextItem = extern struct { name: [*:0]const u16, label: [*:0]const u16, kind: u32, flags: u32 };
 const NativeContextTarget = extern struct { link: ?[*:0]const u16, link_text: ?[*:0]const u16, image: ?[*:0]const u16, media: ?[*:0]const u16, selection: ?[*:0]const u16, frame: ?[*:0]const u16, editable: u32 };
 const PermissionScratch = struct {
@@ -912,7 +944,7 @@ const OwnedConfig = struct {
         if (options.file_streams) |limits| try limits.validate();
         if (!std.math.isFinite(options.zoom) or options.zoom < 0.25 or options.zoom > 5) return error.InvalidZoom;
         if (options.fit_content) |limits| try limits.validate();
-        if (!is_linux and options.autoplay == .allow and options.profile != null) return error.UnsupportedCapability;
+        if (!is_linux and (options.autoplay == .allow or !options.background_throttling) and options.profile != null) return error.UnsupportedCapability;
         if (options.user_agent) |agent| if (!validUserAgent(agent)) return error.InvalidUserAgent;
         if (options.remote != null and (options.local != null or options.html.len != 0)) return error.ConflictingPageSources;
         if (options.allow_local_navigation and options.local == null) return error.LocalSiteRequired;
@@ -1542,7 +1574,7 @@ pub const View = struct {
         const initializer_input = if (config.initializer_config) |source| source.input() else null;
         const facts = try self.factsScript(.windows);
         defer if (facts) |value| self.allocator.free(value);
-        const settings: NativeSettings = .{ .context_menu = @backingInt(config.options.context_menu), .context_offer = if (config.options.context_menu == .handler) View.windowsContextMenu else null, .auth = if (config.options.http_auth != null) View.windowsAuth else null, .certificate = if (config.options.certificate_errors != null) View.windowsCertificate else null, .facts = if (facts) |value| value.ptr else null, .browser_arguments = if (config.options.autoplay == .allow) std.unicode.utf8ToUtf16LeStringLiteral("--autoplay-policy=no-user-gesture-required") else null, .zoom = self.zoom_override orelse config.options.zoom, .user_agent = if (agent) |value| value.ptr else null, .devtools = self.devtools_override orelse config.options.devtools_enabled, .tool_flags = tool_flags, .tool_limit = limits.max_pending, .max_cookies = limits.max_cookies, .max_cookie_bytes = limits.max_cookie_bytes, .max_capture_bytes = limits.max_capture_bytes, .schemes = if (config.options.custom_schemes.len == 0) null else &scheme_scratch.items, .scheme_count = @intCast(config.options.custom_schemes.len), .local_ipc = if (config.options.local) |site| std.mem.eql(u8, site.scheme, "https") or site.scheme_ipc else true, .actions = if (actions) |*value| value else null, .initializers = if (initializer_input) |*value| value else null, .owned_context = if (config.profile_state) |state| try state.context.windowsContext() else null };
+        const settings: NativeSettings = .{ .context_menu = @backingInt(config.options.context_menu), .context_offer = if (config.options.context_menu == .handler) View.windowsContextMenu else null, .auth = if (config.options.http_auth != null) View.windowsAuth else null, .certificate = if (config.options.certificate_errors != null) View.windowsCertificate else null, .facts = if (facts) |value| value.ptr else null, .browser_arguments = browserArguments(config.options), .gestures = gestureFlags(config.options), .zoom = self.zoom_override orelse config.options.zoom, .user_agent = if (agent) |value| value.ptr else null, .devtools = self.devtools_override orelse config.options.devtools_enabled, .tool_flags = tool_flags, .tool_limit = limits.max_pending, .max_cookies = limits.max_cookies, .max_cookie_bytes = limits.max_cookie_bytes, .max_capture_bytes = limits.max_capture_bytes, .schemes = if (config.options.custom_schemes.len == 0) null else &scheme_scratch.items, .scheme_count = @intCast(config.options.custom_schemes.len), .local_ipc = if (config.options.local) |site| std.mem.eql(u8, site.scheme, "https") or site.scheme_ipc else true, .actions = if (actions) |*value| value else null, .initializers = if (initializer_input) |*value| value else null, .owned_context = if (config.profile_state) |state| try state.context.windowsContext() else null };
         self.native = zwv_create(window.nativeHandle(), if (html) |value| value.ptr else std.unicode.utf8ToUtf16LeStringLiteral(""), profile.ptr, if (url) |value| value.ptr else null, if (prefix) |value| value.ptr else null, if (remote) |*value| value else null, &settings, policy, config.options.max_cached_permissions, config.options.scripts.max_pending, config.options.allow_local_navigation, config.options.page_listener != null, notify, pageNotify, scriptNotify, toolNotify, resource, self, &self.last_hresult) orelse return error.WebViewCreationFailed;
         errdefer {
             nativeClose(self.native.?);
@@ -1620,7 +1652,7 @@ pub const View = struct {
         const initializer_input = if (self.config.?.initializer_config) |source| source.input() else null;
         const facts = try self.factsScript(.linux);
         defer if (facts) |value| self.allocator.free(value);
-        const native_options: webkit.Options = .{ .context_menu = @backingInt(options.context_menu), .context_offer = if (options.context_menu == .handler) View.webkitContextMenu else null, .auth = if (options.http_auth != null) View.webkitAuth else null, .certificate = if (options.certificate_errors != null) View.webkitCertificate else null, .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled) };
+        const native_options: webkit.Options = .{ .context_menu = @backingInt(options.context_menu), .context_offer = if (options.context_menu == .handler) View.webkitContextMenu else null, .auth = if (options.http_auth != null) View.webkitAuth else null, .certificate = if (options.certificate_errors != null) View.webkitCertificate else null, .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .gestures = gestureFlags(options), .throttling = @intFromBool(options.background_throttling), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled) };
         var candidate: ?*anyopaque = null;
         if (self.session) |session| {
             try webkit.check(webkit.zwk_session_create(&native_options, session.last_size.width, session.last_size.height, webkitNotify, pageNotify, webkitScriptNotify, webkitTimeout, self, &candidate));

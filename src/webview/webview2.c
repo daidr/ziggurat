@@ -47,7 +47,7 @@ typedef int (*CertificateOffer)(void *,const WCHAR *,int32_t,const WCHAR *);
 typedef struct ContextItemInput { const WCHAR *name; const WCHAR *label; uint32_t kind; uint32_t flags; } ContextItemInput;
 typedef struct ContextTargetInput { const WCHAR *link, *link_text, *image, *media, *selection, *frame; uint32_t editable; } ContextTargetInput;
 typedef int (*ContextMenuOffer)(void *,const ContextTargetInput *,const ContextItemInput *,uint32_t,uint8_t *,void *);
-typedef struct ViewSettings { double zoom; const WCHAR *user_agent; _Bool devtools; uint32_t tool_flags,tool_limit,max_cookies,max_cookie_bytes,max_capture_bytes; const SchemeInput *schemes;uint32_t scheme_count;_Bool local_ipc;const ActionInput *actions;const InitializerInput *initializers; ZwpwContext *owned_context; const WCHAR *facts; const WCHAR *browser_arguments; AuthOffer auth; CertificateOffer certificate_offer; uint32_t context_menu; ContextMenuOffer context_offer; } ViewSettings;
+typedef struct ViewSettings { double zoom; const WCHAR *user_agent; _Bool devtools; uint32_t tool_flags,tool_limit,max_cookies,max_cookie_bytes,max_capture_bytes; const SchemeInput *schemes;uint32_t scheme_count;_Bool local_ipc;const ActionInput *actions;const InitializerInput *initializers; ZwpwContext *owned_context; const WCHAR *facts; const WCHAR *browser_arguments; AuthOffer auth; CertificateOffer certificate_offer; uint32_t context_menu; ContextMenuOffer context_offer; uint32_t gestures; } ViewSettings;
 typedef void (*Resource)(void *, const WCHAR *, const WCHAR *, const NativeHeader *, uint32_t, void *);
 typedef struct PageEvent {
     int kind;
@@ -112,6 +112,8 @@ struct State {
     BOOL facts_added;
     AuthOffer auth;
     CertificateOffer certificate_offer;
+    /* 1 swipe between pages, 2 pinch zoom; both off unless asked. */
+    uint32_t gestures;
     /* 0 no menu, 1 the engine's, 2 the app's offer changes it. */
     uint32_t context_menu;
     ContextMenuOffer context_offer;
@@ -434,6 +436,22 @@ static HRESULT STDMETHODCALLTYPE test_input_invoke(ICoreWebView2CallDevToolsProt
 }
 /* Native integration input: a right click of the page at x, y in CSS
    pixels, as the DevTools protocol sends a mouse's. Not a public Zig API. */
+/* Whether the page swipes between pages and pinches, as WebView2 says. */
+HRESULT zwv_test_gestures(State *s, int32_t *swipe, int32_t *pinch) {
+    if (s->closed || !s->webview) return E_ABORT;
+    ICoreWebView2Settings *settings=NULL;ICoreWebView2Settings5 *settings5=NULL;ICoreWebView2Settings6 *settings6=NULL;
+    BOOL value=FALSE;
+    HRESULT hr=ICoreWebView2_get_Settings(s->webview,&settings);
+    if (SUCCEEDED(hr)) hr=ICoreWebView2Settings_QueryInterface(settings,&IID_ICoreWebView2Settings5,(void **)&settings5);
+    if (SUCCEEDED(hr)) hr=ICoreWebView2Settings5_get_IsPinchZoomEnabled(settings5,&value);
+    if (SUCCEEDED(hr)) { *pinch=value?1:0; hr=ICoreWebView2Settings_QueryInterface(settings,&IID_ICoreWebView2Settings6,(void **)&settings6); }
+    if (SUCCEEDED(hr)) hr=ICoreWebView2Settings6_get_IsSwipeNavigationEnabled(settings6,&value);
+    if (SUCCEEDED(hr)) *swipe=value?1:0;
+    if (settings6) ICoreWebView2Settings6_Release(settings6);
+    if (settings5) ICoreWebView2Settings5_Release(settings5);
+    if (settings) ICoreWebView2Settings_Release(settings);
+    return hr;
+}
 HRESULT zwv_test_right_click(State *s, int32_t x, int32_t y) {
     if (s->closed || !s->webview) return E_ABORT;
     HRESULT hr=S_OK;
@@ -636,7 +654,7 @@ static HRESULT STDMETHODCALLTYPE controller_invoke(ICoreWebView2CreateCoreWebVie
     ICoreWebView2 *view=NULL;
     ICoreWebView2_4 *view4=NULL;ICoreWebView2_22 *view22=NULL;
     ICoreWebView2_10 *view10=NULL;ICoreWebView2_5 *view5=NULL;ICoreWebView2_14 *view14=NULL;ICoreWebView2_11 *view11=NULL;
-    ICoreWebView2Settings *settings=NULL;ICoreWebView2Settings2 *settings2=NULL;
+    ICoreWebView2Settings *settings=NULL;ICoreWebView2Settings2 *settings2=NULL;ICoreWebView2Settings5 *settings5=NULL;ICoreWebView2Settings6 *settings6=NULL;
     BOOL controller_pin=FALSE;
     if (s->closed) { if (controller) ICoreWebView2Controller_Close(controller);goto done; }
     if (FAILED(hr)||!controller) { owned_initialization_failed(s,FAILED(hr)?hr:E_FAIL);goto done; }
@@ -720,6 +738,15 @@ static HRESULT STDMETHODCALLTYPE controller_invoke(ICoreWebView2CreateCoreWebVie
         hr=ICoreWebView2Settings2_put_UserAgent(settings2,s->user_agent);
         if (FAILED(hr)||s->closed) goto failed;
     }
+    /* WebView2 swipes and pinches by default; a page does only when asked. */
+    hr=ICoreWebView2Settings_QueryInterface(settings,&IID_ICoreWebView2Settings5,(void **)&settings5);
+    if (FAILED(hr)||!settings5) { if (SUCCEEDED(hr)) hr=E_POINTER;goto failed; }
+    hr=ICoreWebView2Settings5_put_IsPinchZoomEnabled(settings5,(s->gestures&2u)!=0);
+    if (FAILED(hr)||s->closed) goto failed;
+    hr=ICoreWebView2Settings_QueryInterface(settings,&IID_ICoreWebView2Settings6,(void **)&settings6);
+    if (FAILED(hr)||!settings6) { if (SUCCEEDED(hr)) hr=E_POINTER;goto failed; }
+    hr=ICoreWebView2Settings6_put_IsSwipeNavigationEnabled(settings6,(s->gestures&1u)!=0);
+    if (FAILED(hr)||s->closed) goto failed;
     hr=ICoreWebView2Controller_put_ZoomFactor(controller,s->zoom);
     if (FAILED(hr)||s->closed) goto failed;
     RECT bounds;
@@ -735,6 +762,8 @@ failed:
     if (!s->closed) owned_initialization_failed(s,hr);
 done:
     if (settings2) ICoreWebView2Settings2_Release(settings2);
+    if (settings5) ICoreWebView2Settings5_Release(settings5);
+    if (settings6) ICoreWebView2Settings6_Release(settings6);
     if (settings) ICoreWebView2Settings_Release(settings);
     if (view5) ICoreWebView2_5_Release(view5);
     if (view10) ICoreWebView2_10_Release(view10);
@@ -1313,7 +1342,7 @@ State *zwv_create(HWND hwnd, const WCHAR *html, const WCHAR *profile, const WCHA
     if (!s->tool_limit || s->tool_limit>8 || !s->max_cookies || s->max_cookies>128 || !s->max_cookie_bytes || s->max_cookie_bytes>262144 || !s->max_capture_bytes || s->max_capture_bytes>16777216) { release(s); *out=E_INVALIDARG; return NULL; }
     if (s->zoom!=s->zoom || s->zoom<0.25 || s->zoom>5.0) { release(s); *out=E_INVALIDARG; return NULL; }
     if (settings && settings->user_agent) { s->user_agent=_wcsdup(settings->user_agent); if (!s->user_agent) { release(s); *out=E_OUTOFMEMORY; return NULL; } }
-    if (settings) { s->auth=settings->auth; s->certificate_offer=settings->certificate_offer; s->context_menu=settings->context_menu; s->context_offer=settings->context_offer; }
+    if (settings) { s->auth=settings->auth; s->certificate_offer=settings->certificate_offer; s->context_menu=settings->context_menu; s->context_offer=settings->context_offer; s->gestures=settings->gestures; }
     if (settings && settings->facts) { s->facts_script=_wcsdup(settings->facts); if (!s->facts_script) { release(s); *out=E_OUTOFMEMORY; return NULL; } }
     *out=remote_init(&s->remote,remote);
     if (FAILED(*out)) { release(s); return NULL; }

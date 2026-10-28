@@ -80,6 +80,10 @@ typedef struct ZwkOptions {
     const char *facts;
     /* Nonzero lets audible media play without a user gesture. */
     uint32_t autoplay;
+    /* 1 swipe between pages, 2 pinch zoom. */
+    uint32_t gestures;
+    /* 0 keeps a hidden page's timers and animations going. */
+    uint32_t throttling;
     /* NULL cancels every sign-in and fails every certificate error. */
     ZwkAuth auth;
     ZwkCertificate certificate;
