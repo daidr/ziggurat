@@ -6,6 +6,11 @@
 //! images keep the view's text and link nodes, so their links stay
 //! reachable from the keyboard.
 //!
+//! Math within text (`md.ParseOptions.math`) shows as its TeX in a
+//! fixed-pitch font, or, with `Options.inline_math`, as an object the
+//! application draws, standing on the text's baseline and reaching below
+//! it as far as the formula does.
+//!
 //! `prepare` measures and allocates, so it runs on the main thread outside
 //! the view build and paint: after parsing, and again when the theme or the
 //! measurer changes. The view build then only wraps prepared blocks at the
@@ -15,6 +20,16 @@ const md = @import("ziggurat_markdown");
 const mv = @import("ziggurat_markdown_view");
 const view = @import("ziggurat_view");
 const rich = @import("ziggurat_view_rich_text");
+
+/// Draws math within text: `measure` gives the box of a formula from its
+/// TeX and the size of the text around it in DIP, or null to show the TeX;
+/// `paint` draws it in that box. Both run on the main thread; `measure`
+/// runs in `prepare`, `paint` as the view paints.
+pub const InlineMath = struct {
+    context: *anyopaque,
+    measure: *const fn (context: *anyopaque, tex: []const u8, size: f32) ?rich.Object,
+    paint: *const fn (context: *anyopaque, frame: *rich.Frame, tex: []const u8, box: view.Rect) anyerror!void,
+};
 
 pub const Options = struct {
     /// Measures runs; use the one the view host uses.
@@ -29,6 +44,11 @@ pub const Options = struct {
     /// Inline code colors; null takes the theme's text and field colors.
     code: ?u32 = null,
     code_background: ?u32 = null,
+    /// Draws math within text; without it, math shows as its TeX.
+    inline_math: ?InlineMath = null,
+    /// The color of math shown as its TeX; null takes the theme's muted
+    /// text color.
+    math: ?u32 = null,
 };
 
 pub const RichBlocks = struct {
@@ -38,6 +58,16 @@ pub const RichBlocks = struct {
         hash: u64,
         spans: []rich.Span,
         text: rich.RichText,
+        /// The TeX of each span that is drawn math, by span; empty for the
+        /// others.
+        tex: [][]const u8,
+        math: ?InlineMath,
+
+        fn paintObject(context: *anyopaque, frame: *rich.Frame, span: usize, box: view.Rect) anyerror!void {
+            const self: *Entry = @ptrCast(@alignCast(context));
+            const math = self.math orelse return;
+            if (span < self.tex.len and self.tex[span].len > 0) try math.paint(math.context, frame, self.tex[span], box);
+        }
     };
     allocator: std.mem.Allocator,
     entries: std.ArrayList(*Entry) = .empty,
@@ -56,6 +86,7 @@ pub const RichBlocks = struct {
         for (self.entries.items) |entry| {
             entry.text.deinit();
             self.allocator.free(entry.spans);
+            self.allocator.free(entry.tex);
             self.allocator.destroy(entry);
         }
         self.entries.clearRetainingCapacity();
@@ -68,21 +99,27 @@ pub const RichBlocks = struct {
         errdefer self.release();
         var spans: std.ArrayList(rich.Span) = .empty;
         defer spans.deinit(self.allocator);
+        var tex: std.ArrayList([]const u8) = .empty;
+        defer tex.deinit(self.allocator);
         for (tree.nodes, 0..) |node, index| {
             switch (node.kind) {
                 .paragraph, .heading, .table_cell => {},
                 else => continue,
             }
             spans.clearRetainingCapacity();
-            if (!try collect(self.allocator, tree, @intCast(index), options, &spans)) continue;
+            tex.clearRetainingCapacity();
             var font = options.font;
             if (node.kind == .heading) {
                 font.size = options.heading_sizes[@min(@max(node.level, 1), 6) - 1];
                 font.weight = options.heading_weight;
             }
+            if (!try collect(self.allocator, tree, @intCast(index), options, font.size, &spans, &tex)) continue;
             const entry = try self.allocator.create(Entry);
             errdefer self.allocator.destroy(entry);
-            entry.* = .{ .node = @intCast(index), .hash = hashOf(tree, @intCast(index)), .spans = try self.allocator.dupe(rich.Span, spans.items), .text = rich.RichText.init(self.allocator, .{ .measurer = options.measurer, .font = font }) };
+            const owned_tex = try self.allocator.dupe([]const u8, tex.items);
+            errdefer self.allocator.free(owned_tex);
+            entry.* = .{ .node = @intCast(index), .hash = hashOf(tree, @intCast(index)), .spans = try self.allocator.dupe(rich.Span, spans.items), .tex = owned_tex, .math = options.inline_math, .text = rich.RichText.init(self.allocator, .{ .measurer = options.measurer, .font = font }) };
+            if (options.inline_math != null) entry.text.options.objects = .{ .context = entry, .paint = Entry.paintObject };
             errdefer {
                 entry.text.deinit();
                 self.allocator.free(entry.spans);
@@ -117,9 +154,9 @@ pub const RichBlocks = struct {
     }
 };
 
-/// Append the spans of block `index`'s inline content; false when it holds
-/// a link or image.
-fn collect(allocator: std.mem.Allocator, tree: md.Tree, index: u32, options: Options, spans: *std.ArrayList(rich.Span)) !bool {
+/// Append the spans of block `index`'s inline content, and the TeX of each
+/// that is drawn math; false when it holds a link or image.
+fn collect(allocator: std.mem.Allocator, tree: md.Tree, index: u32, options: Options, size: f32, spans: *std.ArrayList(rich.Span), tex: *std.ArrayList([]const u8)) !bool {
     var emphasis: i32 = 0;
     var strong: i32 = 0;
     var struck: i32 = 0;
@@ -145,12 +182,33 @@ fn collect(allocator: std.mem.Allocator, tree: md.Tree, index: u32, options: Opt
                 span.background = options.code_background orelse options.theme.palette.field;
                 span.radius = 3;
             },
+            .math => {
+                // An object on the baseline the application draws, or the
+                // TeX.
+                const object = if (options.inline_math) |math| math.measure(math.context, node.text, size) else null;
+                if (object) |o| if (o.width > 0 and std.math.isFinite(o.width)) {
+                    span.text = object_replacement;
+                    span.object = .{ .width = o.width, .height = @max(o.height, 0), .descent = @max(o.descent, 0) };
+                    try spans.append(allocator, span);
+                    try tex.append(allocator, node.text);
+                    continue;
+                };
+                span.text = node.text;
+                span.monospace = true;
+                span.size = size * 0.875;
+                span.color = options.math orelse options.theme.palette.disabled_text;
+            },
             else => {},
         }
-        if (span.text.len != 0) try spans.append(allocator, span);
+        if (span.text.len != 0) {
+            try spans.append(allocator, span);
+            try tex.append(allocator, "");
+        }
     }
     return true;
 }
+
+const object_replacement = "\u{fffc}";
 
 fn hashOf(tree: md.Tree, index: u32) u64 {
     var hasher = std.hash.Wyhash.init(0);
@@ -212,4 +270,43 @@ test "inline styles become spans and links keep view nodes" {
     doc.tree = try md.parse("## Head *two*\n", other.buffers());
     try h.render();
     try std.testing.expectEqual(@as(usize, 0), h.count(.{ .kind = .embed }));
+}
+
+test "math within text stands on the baseline as the application draws it, or shows its TeX" {
+    var parsed: md.Storage(256, 4096) = .{};
+    const tree = try md.parseWith("water $H_2O$ boils", parsed.buffers(), .{ .math = true, .dollar_math = true });
+    const Math = struct {
+        painted: usize = 0,
+        fn measure(_: *anyopaque, tex: []const u8, size: f32) ?rich.Object {
+            if (std.mem.eql(u8, tex, "skip")) return null;
+            return .{ .width = 30, .height = size, .descent = 10 };
+        }
+        fn paint(context: *anyopaque, _: *rich.Frame, tex: []const u8, box: view.Rect) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            try std.testing.expectEqualStrings("H_2O", tex);
+            try std.testing.expectEqual(@as(f32, 30), box.width);
+            try std.testing.expectEqual(@as(f32, 16 + 10), box.height);
+            self.painted += 1;
+        }
+    };
+    var math: Math = .{};
+    var blocks = RichBlocks.init(std.testing.allocator);
+    defer blocks.deinit();
+    try blocks.prepare(tree, .{ .inline_math = .{ .context = &math, .measure = Math.measure, .paint = Math.paint } });
+    const entry = blocks.entries.items[0];
+    try std.testing.expectEqual(@as(usize, 3), entry.spans.len);
+    try std.testing.expectEqualStrings("\u{fffc}", entry.spans[1].text);
+    const line = entry.text.textLines()[0];
+    // The formula reaches 10 below the baseline, deeper than the text.
+    try std.testing.expectEqual(@as(f32, 10), line.descent);
+    var box: ?view.Rect = null;
+    for (entry.text.runs.items) |run| if (entry.text.objectBox(run)) |b| {
+        box = b;
+    };
+    try std.testing.expectEqual(line.baseline - 16, box.?.y);
+
+    // Without the application's drawing, the TeX shows.
+    try blocks.prepare(tree, .{});
+    try std.testing.expectEqualStrings("H_2O", blocks.entries.items[0].spans[1].text);
+    try std.testing.expect(blocks.entries.items[0].spans[1].monospace);
 }

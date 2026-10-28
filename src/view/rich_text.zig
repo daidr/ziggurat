@@ -26,6 +26,18 @@ pub const Font = view.Font;
 pub const Rect = view.Rect;
 pub const Point = view.Point;
 pub const Size = view.Size;
+pub const Frame = ui.Frame;
+
+/// The box of an inline object: `width` wide, `height` above the baseline
+/// and `descent` below it, as math's subscripts and fractions reach.
+pub const Object = struct { width: f32, height: f32, descent: f32 = 0 };
+
+/// Draws the inline objects of a RichText (`Span.object`) in their boxes,
+/// after its text: an image, a formula. `span` is the object's span.
+pub const ObjectPainter = struct {
+    context: *anyopaque,
+    paint: *const fn (context: *anyopaque, frame: *Frame, span: usize, box: Rect) anyerror!void,
+};
 
 /// A run of a RichText with a style of its own. What it leaves null takes
 /// the style of the text around it; `italic`, `monospace` and the lines
@@ -56,6 +68,10 @@ pub const Span = struct {
     /// `size` are: footnote references, exponents, chemical formulas. The
     /// line makes room for it, and its lines and background go with it.
     baseline_shift: f32 = 0,
+    /// Makes the span an inline object: a box of this size standing on the
+    /// baseline in place of its text, which lines break around and which
+    /// `Options.objects` draws. Give it one U+FFFC as its text.
+    object: ?Object = null,
 };
 
 pub const Options = struct {
@@ -82,6 +98,9 @@ pub const Options = struct {
     /// that much narrower, as a book indents its paragraphs. Lines after a
     /// newline are not indented.
     indent: f32 = 0,
+    /// Draws the spans that are inline objects; without it they draw
+    /// nothing and keep their room.
+    objects: ?ObjectPainter = null,
 };
 
 /// A wrapped piece of one span on one line, in DIP from the text's top
@@ -226,6 +245,15 @@ pub const RichText = struct {
         return font;
     }
 
+    /// The box of the inline object of `run`, local to the text, or null
+    /// when its span is no object.
+    pub fn objectBox(self: *const RichText, run: Run) ?Rect {
+        const span = self.spans[run.span];
+        const o = span.object orelse return null;
+        const line = self.lines.items[run.line];
+        return .{ .x = run.x, .y = line.y + line.baseline - span.baseline_shift - o.height, .width = o.width, .height = o.height + o.descent };
+    }
+
     /// The lines of the text as last wrapped, from the top.
     pub fn textLines(self: *const RichText) []const Line {
         return self.lines.items;
@@ -251,6 +279,11 @@ pub const RichText = struct {
     fn split(self: *RichText, span: Span, index: u32) !void {
         const font = self.fontOf(span);
         const text = span.text;
+        if (span.object) |o| {
+            if (text.len == 0) return;
+            try self.words.append(self.allocator, .{ .span = index, .start = 0, .end = @intCast(text.len), .width = o.width, .visible = o.width, .hard_break = false, .glued = false, .cluster = o.width });
+            return;
+        }
         var at: usize = 0;
         while (at < text.len) {
             const start = at;
@@ -297,6 +330,7 @@ pub const RichText = struct {
             const next = words[index + 1];
             const next_text = self.spanText(next);
             if (next.span == word.span or next_text.len == 0) continue;
+            if (self.spans[word.span].object != null or self.spans[next.span].object != null) continue;
             const last = lastCodepoint(text);
             word.glued = !isSpace(text[text.len - 1]) and !breaksAround(last) and !isSpace(next_text[0]) and !breaksAround(decode(next_text[0..@min(next_text.len, sequenceLength(next_text[0]))]));
         }
@@ -388,7 +422,15 @@ pub const RichText = struct {
         var descent: f32 = if (runs.len == 0) base.height - base.ascent else 0;
         for (runs) |run| {
             const m = self.metrics.items[run.span];
-            const shift = self.spans[run.span].baseline_shift;
+            const span = self.spans[run.span];
+            const shift = span.baseline_shift;
+            // An object stands on the baseline, as high and as deep as it
+            // is, whatever the font of its span.
+            if (span.object) |o| {
+                ascent = @max(ascent, o.height + shift);
+                descent = @max(descent, o.descent - shift);
+                continue;
+            }
             ascent = @max(ascent, m.ascent + shift);
             descent = @max(descent, m.height - m.ascent - shift);
         }
@@ -432,6 +474,7 @@ pub const RichText = struct {
     /// Whether justification widens the room after a run: the word it
     /// ends with ends with spaces or a character that stretches.
     fn runStretches(self: *const RichText, run: Run) bool {
+        if (self.spans[run.span].object != null) return false;
         const text = self.spans[run.span].text[run.start..run.end];
         if (text.len == 0) return false;
         if (isSpace(text[text.len - 1])) return true;
@@ -445,6 +488,7 @@ pub const RichText = struct {
         const base_color = self.options.color orelse self.theme_text;
         for (self.runs.items) |run| {
             const span = self.spans[run.span];
+            if (span.object != null) continue;
             const color = span.background orelse continue;
             const line = self.lines.items[run.line];
             const size = self.metrics.items[run.span].size;
@@ -456,6 +500,7 @@ pub const RichText = struct {
         }
         for (self.runs.items) |run| {
             const span = self.spans[run.span];
+            if (span.object != null) continue;
             const line = self.lines.items[run.line];
             const m = self.metrics.items[run.span];
             const color = span.color orelse base_color;
@@ -498,6 +543,11 @@ pub const RichText = struct {
         try frame.pushClip(bounds);
         defer frame.popClip() catch {};
         self.paintTo(frame, .{ .x = bounds.x, .y = bounds.y });
+        const painter = self.options.objects orelse return;
+        for (self.runs.items) |run| {
+            const box = self.objectBox(run) orelse continue;
+            try painter.paint(painter.context, frame, run.span, .{ .x = bounds.x + box.x, .y = bounds.y + box.y, .width = box.width, .height = box.height });
+        }
     }
 };
 

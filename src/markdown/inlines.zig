@@ -49,6 +49,13 @@ const Parser = struct {
     delimiter_len: usize = 0,
     brackets: [max_brackets]Bracket = undefined,
     bracket_len: usize = 0,
+    /// Offsets from which nothing closes math opened by `$$`, `$`, `\(`
+    /// or `\[`: a scan that found no closer after an opener finds none
+    /// after a later one, so repeated openers stay linear.
+    no_double: usize = std.math.maxInt(usize),
+    no_dollar: usize = std.math.maxInt(usize),
+    no_paren: usize = std.math.maxInt(usize),
+    no_bracket: usize = std.math.maxInt(usize),
 
     fn add(self: *Parser, node: md.Node) Error!u32 {
         return self.b.add(self.block, node);
@@ -74,6 +81,7 @@ const Parser = struct {
                     self.pos += 1;
                 },
                 '&' => try self.entity(),
+                '$' => if (!self.b.options.math or !try self.dollar()) try self.plain(),
                 else => try self.plain(),
             }
         }
@@ -81,9 +89,10 @@ const Parser = struct {
         self.removeEmpty();
     }
 
-    fn special(byte: u8) bool {
+    fn special(self: *const Parser, byte: u8) bool {
         return switch (byte) {
             '\n', '\\', '`', '*', '_', '~', '[', ']', '!', '<', '&' => true,
+            '$' => self.b.options.math,
             else => false,
         };
     }
@@ -94,7 +103,7 @@ const Parser = struct {
         const start = self.pos;
         if (try self.extendedAutolink(start)) return;
         var at = start + 1;
-        while (at < raw.len and !special(raw[at])) : (at += 1) {
+        while (at < raw.len and !self.special(raw[at])) : (at += 1) {
             if (isAutolinkBoundary(raw[at - 1]) and std.ascii.isAlphanumeric(raw[at]) and extendedLength(raw, at) != null) break;
         }
         self.pos = at;
@@ -120,6 +129,9 @@ const Parser = struct {
 
     fn escape(self: *Parser) Error!void {
         const raw = self.raw;
+        if (self.b.options.math and self.pos + 1 < raw.len and (raw[self.pos + 1] == '(' or raw[self.pos + 1] == '[')) {
+            if (try self.parenMath()) return;
+        }
         if (self.pos + 1 < raw.len and raw[self.pos + 1] == '\n') {
             _ = try self.add(.{ .kind = .hard_break });
             self.pos += 2;
@@ -133,6 +145,67 @@ const Parser = struct {
         }
         _ = try self.text(raw[self.pos..][0..1]);
         self.pos += 1;
+    }
+
+    /// Math between `$$` and `$$`, or with `dollar_math` between single
+    /// dollars, at the dollar at `pos`; false when none closes there.
+    fn dollar(self: *Parser) Error!bool {
+        const raw = self.raw;
+        const start = self.pos;
+        if (start + 1 < raw.len and raw[start + 1] == '$') {
+            if (start < self.no_double) {
+                if (std.mem.indexOfPos(u8, raw, start + 2, "$$")) |close| {
+                    if (close > start + 2) {
+                        _ = try self.add(.{ .kind = .math, .text = raw[start + 2 .. close], .level = 1 });
+                        self.pos = close + 2;
+                        return true;
+                    }
+                } else self.no_double = start;
+            }
+            // Two dollars that open nothing stay text together.
+            _ = try self.text(raw[start .. start + 2]);
+            self.pos += 2;
+            return true;
+        }
+        if (!self.b.options.dollar_math or start + 1 >= raw.len or start >= self.no_dollar) return false;
+        // A dollar followed by a space or a digit is money, not math.
+        const after = raw[start + 1];
+        if (isSpaceByte(after) or std.ascii.isDigit(after)) return false;
+        var at = start + 1;
+        while (at < raw.len) : (at += 1) {
+            switch (raw[at]) {
+                '\\' => at += 1,
+                '$' => {
+                    // Nor is one after a space or before a digit a closer.
+                    const closes = !isSpaceByte(raw[at - 1]) and !(at + 1 < raw.len and std.ascii.isDigit(raw[at + 1]));
+                    if (closes) {
+                        _ = try self.add(.{ .kind = .math, .text = raw[start + 1 .. at] });
+                        self.pos = at + 1;
+                        return true;
+                    }
+                },
+                else => {},
+            }
+        }
+        self.no_dollar = start;
+        return false;
+    }
+
+    /// Math between `\(` and `\)`, or `\[` and `\]` for display, at the
+    /// backslash at `pos`; false when none closes.
+    fn parenMath(self: *Parser) Error!bool {
+        const raw = self.raw;
+        const start = self.pos;
+        const display = raw[start + 1] == '[';
+        const no = if (display) &self.no_bracket else &self.no_paren;
+        if (start >= no.*) return false;
+        const close = std.mem.indexOfPos(u8, raw, start + 2, if (display) "\\]" else "\\)") orelse {
+            no.* = start;
+            return false;
+        };
+        _ = try self.add(.{ .kind = .math, .text = raw[start + 2 .. close], .level = @intFromBool(display) });
+        self.pos = close + 2;
+        return true;
     }
 
     fn codeSpan(self: *Parser) Error!void {
@@ -722,4 +795,8 @@ fn decodeEntity(b: *Builder, raw: []const u8, at: usize) Error!?usize {
     const value = entities.lookup(name) orelse return null;
     try b.write(value);
     return semicolon + 1;
+}
+
+fn isSpaceByte(byte: u8) bool {
+    return byte == ' ' or byte == '\t' or byte == '\n' or byte == '\r';
 }

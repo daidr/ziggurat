@@ -1,6 +1,7 @@
 //! Markdown documents as a bounded node tree: the CommonMark block and
 //! inline structure plus the GitHub tables, task list items,
-//! strikethrough and extended autolinks. Pure Zig with caller-owned fixed
+//! strikethrough and extended autolinks, and TeX math when asked
+//! (`ParseOptions`). Pure Zig with caller-owned fixed
 //! storage; parsing never allocates, recurses over input nesting or reads
 //! anything but its source. Raw HTML is kept as literal text.
 const std = @import("std");
@@ -41,11 +42,14 @@ pub const Kind = enum(u8) {
     code,
     link,
     image,
+    /// TeX within a paragraph, its source in `text` without delimiters;
+    /// `level` 1 for display math, between `$$` or `\[ \]`.
+    math,
 
     /// True for kinds that hold child nodes, even when a node has none.
     pub fn isContainer(self: Kind) bool {
         return switch (self) {
-            .thematic_break, .code_block, .text, .soft_break, .hard_break, .code => false,
+            .thematic_break, .code_block, .text, .soft_break, .hard_break, .code, .math => false,
             else => true,
         };
     }
@@ -73,7 +77,8 @@ pub const Node = struct {
     url: []const u8 = "",
     /// Title of a link or image; the full info string of a code block.
     title: []const u8 = "",
-    /// Heading level, 1 to 6.
+    /// Heading level, 1 to 6; 1 for display math, 0 for math within the
+    /// line.
     level: u8 = 0,
     /// List numbering, its first number and marker character (`-`, `+`,
     /// `*`, `.` or `)`).
@@ -147,7 +152,7 @@ pub const Tree = struct {
             if (!event.entering) continue;
             const node = self.get(event.index);
             const piece = switch (node.kind) {
-                .text, .code, .code_block => node.text,
+                .text, .code, .code_block, .math => node.text,
                 .soft_break, .hard_break => " ",
                 else => continue,
             };
@@ -227,6 +232,18 @@ pub const Walker = struct {
 
 pub const Definition = struct { label: []const u8, url: []const u8, title: []const u8 };
 
+/// Syntax beyond CommonMark and GitHub's that a parse reads.
+pub const ParseOptions = struct {
+    /// TeX math between `$$` and `$$` (display), `\[` and `\]` (display),
+    /// or `\(` and `\)`, within a paragraph, heading or table cell.
+    math: bool = false,
+    /// With `math`, TeX between single dollars too, as `$x^2$`, except
+    /// where the dollars read as amounts of money: not after an opening
+    /// dollar followed by a space or a digit, nor before a closing one
+    /// that follows a space or is followed by a digit.
+    dollar_math: bool = false,
+};
+
 /// Parse state shared by the block and inline passes.
 pub const Builder = struct {
     nodes: []Node,
@@ -235,6 +252,7 @@ pub const Builder = struct {
     text_len: usize = 0,
     definitions: [max_definitions]Definition = undefined,
     definition_len: usize = 0,
+    options: ParseOptions = .{},
 
     pub fn add(self: *Builder, parent: u32, node: Node) Error!u32 {
         if (self.len == self.nodes.len) return error.TooManyNodes;
@@ -333,8 +351,13 @@ const LabelIterator = struct {
 /// Parse UTF-8 `source` into `buffers`. A line feed, carriage return or
 /// both end a line; NUL becomes U+FFFD.
 pub fn parse(source: []const u8, buffers: Buffers) Error!Tree {
+    return parseWith(source, buffers, .{});
+}
+
+/// Parse as `parse` does, reading the syntax `options` adds.
+pub fn parseWith(source: []const u8, buffers: Buffers, options: ParseOptions) Error!Tree {
     if (!std.unicode.utf8ValidateSlice(source)) return error.InvalidText;
-    var builder: Builder = .{ .nodes = buffers.nodes, .text = buffers.text };
+    var builder: Builder = .{ .nodes = buffers.nodes, .text = buffers.text, .options = options };
     _ = try builder.add(none, .{ .kind = .document });
     try blocks.parse(&builder, source);
     const block_count = builder.len;
