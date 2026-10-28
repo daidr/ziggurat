@@ -2,6 +2,7 @@
 //! icons, the forced and followed appearance, clipboard clear and bitmaps,
 //! opening a URL off the owner thread, and an App that keeps running after its last window closed.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const system = @import("ziggurat_system");
@@ -27,9 +28,21 @@ const State = struct {
     open: system.OpenUrl = .{},
     open_result: ?anyerror!void = null,
     all_closed: usize = 0,
+    busy_retries: usize = 0,
     failure: ?anyerror = null,
 
     fn fail(self: *State, err: anyerror) void {
+        // Other smokes beside this one open the system clipboard too: a
+        // busy clipboard asks again shortly, as an application would.
+        if (err == error.ClipboardBusy and self.busy_retries < 300) switch (self.step) {
+            .clipboard_written, .clipboard_cleared, .bitmap => {
+                self.busy_retries += 1;
+                const thread = std.Thread.spawn(.{}, retryLater, .{self}) catch return self.fail(error.SpawnFailed);
+                thread.detach();
+                return;
+            },
+            else => {},
+        };
         std.debug.print("step {s} failed: {s}\n", .{ @tagName(self.step), @errorName(err) });
         if (self.failure == null) self.failure = err;
         self.app.quit();
@@ -62,6 +75,23 @@ const State = struct {
                 try self.openUrl();
             },
             else => return error.UnexpectedResult,
+        }
+    }
+    fn retryLater(self: *State) void {
+        zio.sleep(20 * std.time.ns_per_ms);
+        self.app.post(.{ .context = self, .call = retry }) catch {};
+    }
+    /// Repeats the clipboard request of the current step.
+    fn retry(ptr: *anyopaque) void {
+        const self: *State = @ptrCast(@alignCast(ptr));
+        if (self.request.pending()) return;
+        switch (self.step) {
+            .clipboard_written, .clipboard_cleared => self.board.formats(&self.request, self, result) catch |err| self.fail(err),
+            .bitmap => if (windows) {
+                putBitmap(self.window) catch |err| return self.fail(err);
+                self.board.read(&self.request, .{ .kind = .png }, &self.buffer, self, result, .{}) catch |err| self.fail(err);
+            },
+            else => {},
         }
     }
     fn openUrl(self: *State) !void {
@@ -171,7 +201,16 @@ pub fn main() !void {
 
     try state.board.init(app, .{});
     defer state.board.deinit();
-    try state.board.write(&.{.{ .format = .{ .kind = .text }, .data = "details" }});
+    // Another smoke may hold the clipboard for a moment.
+    var attempts: usize = 0;
+    while (true) : (attempts += 1) {
+        state.board.write(&.{.{ .format = .{ .kind = .text }, .data = "details" }}) catch |err| {
+            if (err != error.ClipboardBusy or attempts >= 300) return err;
+            zio.sleep(20 * std.time.ns_per_ms);
+            continue;
+        };
+        break;
+    }
     try state.board.formats(&state.request, &state, State.result);
 
     try app.run();
