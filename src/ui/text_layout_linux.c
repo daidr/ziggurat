@@ -1,3 +1,4 @@
+#include <math.h>
 #include <pango/pangocairo.h>
 #include <string.h>
 #include "text_layout_native.h"
@@ -36,7 +37,10 @@ int ztl_layout_init(void *storage,void *engine,const char *text,uint32_t length,
     pango_layout_set_font_description(s->layout,font);pango_font_description_free(font);
     pango_layout_set_auto_dir(s->layout,FALSE);
     pango_layout_set_alignment(s->layout,options->rtl?PANGO_ALIGN_RIGHT:PANGO_ALIGN_LEFT);
-    pango_layout_set_width(s->layout,options->wrap?(int)(options->width*PANGO_SCALE):-1);
+    /* A line as wide as the width fits it: the layout that measured the width
+       summed the same advances and may come out a rounding under them. Lines
+       wrap a thousandth of a pixel past the width, rounded up to Pango units. */
+    pango_layout_set_width(s->layout,options->wrap?(int)ceil((options->width+1e-3)*PANGO_SCALE):-1);
     pango_layout_set_wrap(s->layout,options->wrap==1?PANGO_WRAP_WORD:PANGO_WRAP_WORD_CHAR);
     pango_layout_set_text(s->layout,text,(int)length);s->length=length;
     /* Materialize the native runs during explicit creation, before queries. */

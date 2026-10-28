@@ -61,7 +61,7 @@ pub const Owner = struct {
             self.hwnd = null;
         }
         self.taskbar_created = registered;
-        self.barless = (window.capabilities() catch return error.Closed).vibrancy;
+        self.barless = (window.capabilities() catch return error.Closed).transparent;
         try window.setService(.{ .context = self, .message = message, .native_destroying = nativeDestroying });
     }
     pub fn detach(self: *Owner) !void {

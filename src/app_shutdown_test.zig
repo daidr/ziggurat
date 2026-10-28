@@ -366,3 +366,29 @@ test "provisional composition participant gets early native notification once an
         try std.testing.expectEqual(@as(usize, 0), app.resourceStats().allocated_records);
     }
 }
+
+test "a quit after the quit sequence ran asks a loop that goes on to stop again" {
+    const Probe = struct {
+        app: *z.App,
+        fn quit(ptr: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.app.quit();
+            std.debug.assert(self.app.native.quit_requests == 1);
+            // The loop goes on, as after a modal loop that swallowed the
+            // request: every later quit reaches the backend again.
+            self.app.quit();
+            std.debug.assert(self.app.requestQuit() == .already_stopped);
+            std.debug.assert(self.app.native.quit_requests == 3);
+        }
+    };
+    const app = try z.App.init(std.testing.allocator);
+    defer app.deinit();
+    var probe: Probe = .{ .app = app };
+    _ = try app.createWindow(.{});
+    try app.post(.{ .context = &probe, .call = Probe.quit });
+    try app.run();
+    try std.testing.expectEqual(3, app.native.quit_requests);
+    // Outside the loop nothing is asked to stop.
+    app.quit();
+    try std.testing.expectEqual(3, app.native.quit_requests);
+}

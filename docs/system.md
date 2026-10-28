@@ -302,7 +302,7 @@ try now.set(.{ .title = "Spring", .artist = "Vivaldi", .album = "The Four Season
 
 ## 外观跟随
 
-`system.theme.Follower` 决定应用的明暗外观：`.system` 跟随桌面，`.light`/`.dark` 强制。`start(app, .{ .source, .on_change })` 读取桌面偏好、应用外观并订阅偏好变化；`setSource` 随时切换；`isDark()` 是生效的外观，`preferences()` 是最近一次读到的桌面偏好（accent、高对比度、减少动态/透明、文字缩放）。外观或偏好变化后调用 `on_change`，应用在这里切换自己绘制内容的主题（例如 `ui.Context.setTheme(.dark())`）。系统自己绘制的部分由 Follower 处理：Windows 上 `track(window)` 的窗口标题栏随外观切换（`DWMWA_USE_IMMERSIVE_DARK_MODE`），弹出菜单经 uxtheme 的 preferred app mode（Windows 10 1903 起）跟随；Linux 设置 `gtk-application-prefer-dark-theme`，强制浅色时名字以 `-dark` 结尾的主题换成去掉后缀的同名主题，跟随桌面时恢复 GTK 自己的设置。属性只在值变化时写入，所以桌面 Watch 收到的通知都是真实变化。单独的 `theme.setWindowDark(window, dark)` 只在 Windows 可用。
+`system.theme.Follower` 决定应用的明暗外观：`.system` 跟随桌面，`.light`/`.dark` 强制。`start(app, .{ .source, .on_change })` 读取桌面偏好、应用外观并订阅偏好变化；`setSource` 随时切换；`isDark()` 是生效的外观，`preferences()` 是最近一次读到的桌面偏好（accent、高对比度、减少动态/透明、文字缩放）。外观或偏好变化后调用 `on_change`，应用在这里切换自己绘制内容的主题（例如 `ui.Context.setTheme(.dark())`）。系统自己绘制的部分由 Follower 处理：Windows 上 `track(window)` 的窗口标题栏随外观切换（`DWMWA_USE_IMMERSIVE_DARK_MODE`），弹出菜单经 uxtheme 的 preferred app mode（Windows 10 1903 起）跟随；Linux 设置 `gtk-application-prefer-dark-theme`，强制浅色时名字以 `-dark` 结尾的主题换成去掉后缀的同名主题，跟随桌面时恢复 GTK 自己的设置。属性只在值变化时写入，所以桌面 Watch 收到的通知都是真实变化。`setWindowButtons(window, source)` 让某个窗口的边框与标题栏按钮不管应用外观、按深色或浅色背景绘制（例如浅色应用里标题区是深色的页面），`.system` 恢复跟随应用；菜单和应用内容仍是应用的外观，Linux 上 GTK 的按钮始终跟随应用。单独的 `theme.setWindowDark(window, dark)` 只在 Windows 可用。
 
 ## 无窗口常驻
 

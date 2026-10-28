@@ -1,6 +1,6 @@
 const core = @import("../root.zig");
 const pointer_press = @import("pointer_press.zig");
-pub const AppData = struct { fail_text_cancel: bool = false, emit_text_cancel: bool = false, fail_create: bool = false, fail_destroy: bool = false, fail_update: bool = false, fail_fullscreen_after_event: bool = false, fail_show: bool = false, destroy_countdown: ?usize = null };
+pub const AppData = struct { fail_text_cancel: bool = false, emit_text_cancel: bool = false, fail_create: bool = false, fail_destroy: bool = false, fail_update: bool = false, fail_fullscreen_after_event: bool = false, fail_show: bool = false, destroy_countdown: ?usize = null, quit_requests: usize = 0 };
 pub const WindowData = struct {
     pointer_operation: pointer_press.Operation = .{},
     alive: bool = false,
@@ -71,7 +71,9 @@ pub fn run(app: *core.App) !void {
     }
 }
 pub fn wake(_: *core.App) void {}
-pub fn quit(_: *core.App) void {}
+pub fn quit(app: *core.App) void {
+    app.native.quit_requests += 1;
+}
 pub fn show(_: *core.WindowRecord) void {}
 pub fn perform(record: *core.WindowRecord, action: core.WindowAction) !void {
     if (action == .show and record.window.app.native.fail_show) {

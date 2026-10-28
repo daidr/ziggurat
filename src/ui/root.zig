@@ -3611,6 +3611,13 @@ pub const Frame = struct {
         }
     }
 
+    /// Tells the window the opaque color this content fills it with, or
+    /// null when it is not opaque, so the window shows that color where it
+    /// grows before the frame of its new size presents.
+    pub fn setWindowBackground(self: *Frame, rgb: ?u32) void {
+        const window = self.context.window orelse return;
+        window.setBackground(rgb) catch {};
+    }
     pub fn clear(self: *Frame, rgb: u32) void {
         self.rect(.{ .x = 0, .y = 0, .width = @as(f32, @floatFromInt(self.size.width)) / self.size.scale, .height = @as(f32, @floatFromInt(self.size.height)) / self.size.scale }, rgb);
     }

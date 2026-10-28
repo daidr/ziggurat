@@ -166,6 +166,13 @@ pub fn main() !void {
     try std.testing.expect(!follower.isDark());
     if (windows) try std.testing.expect(!try frameDark(state.window));
     if (linux) try std.testing.expectEqual(0, zsx_theme_prefers_dark());
+    // A window's buttons keep their own appearance through the app's.
+    try follower.setWindowButtons(state.window, .dark);
+    if (windows) try std.testing.expect(try frameDark(state.window));
+    follower.setSource(.light);
+    if (windows) try std.testing.expect(try frameDark(state.window));
+    try follower.setWindowButtons(state.window, .system);
+    if (windows) try std.testing.expect(!try frameDark(state.window));
     follower.setSource(.system);
     try std.testing.expectEqual(follower.preferences().color_scheme == .dark, follower.isDark());
 
