@@ -94,7 +94,7 @@ pub const Harness = struct {
     fn restoreFocus(self: *Harness) void {
         if (self.view.restore == null) self.view.restore = self.view.focus_request;
         self.view.focus_request = null;
-        const id = self.view.restore orelse return;
+        const id = self.view.focusTarget(self.view.restore orelse return);
         self.view.restore = null;
         self.setFocus(id);
     }
@@ -242,7 +242,7 @@ pub const Harness = struct {
     pub fn focus(self: *Harness, query: Query) anyerror!void {
         const node = try self.find(query);
         try self.check(node);
-        self.setFocus(node.id);
+        self.setFocus(self.view.focusTarget(node.id));
         try self.render();
     }
 
