@@ -1892,6 +1892,12 @@ pub fn build(b: *std.Build) void {
         addSmoke(b, "smoke-webview-page-options", "tests/page_options_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
         });
+        addSmoke(b, "smoke-webview-session-state", "tests/session_state_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-picture-in-picture", "tests/picture_in_picture_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
         addSmoke(b, "smoke-page-remote", "tests/remote_page_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
@@ -2046,6 +2052,9 @@ pub fn build(b: *std.Build) void {
         });
         page_options_module.addCSourceFile(.{ .file = b.path("tests/page_options_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
         page_options_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
+        addSmoke(b, "smoke-webview-session-state", "tests/session_state_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
         addSmoke(b, "smoke-webview-dynamic-linux", "tests/linux_dynamic_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },

@@ -527,12 +527,14 @@ static void loaded(WebKitWebView *view,WebKitLoadEvent event,gpointer data) {
     } else if (event==WEBKIT_LOAD_FINISHED) {
         if (s->load_started && s->loading_generation==generation && s->loading_serial==s->navigation_serial && (!op || (op->started && op->serial==s->loading_serial))) {
             const int32_t status=s->failed?s->loading_failure.code:0;
+            /* Another navigation, a stop or a download took its place. */
+            const gboolean cancelled=s->failed&&s->loading_failure.domain==(uint32_t)WEBKIT_NETWORK_ERROR&&status==WEBKIT_NETWORK_ERROR_CANCELLED;
             s->load_started=FALSE;
             s->loading_serial=0; s->revoked_load_serial=0; s->loading_failure=(ZwkFailure){0};
             const gboolean success=document(s);
             if (success) s->tls_retries=0;
             if (op) { op->finished=TRUE; navigation_clear(s); }
-            (void)page(s,1,success?1:0,status,NULL);
+            (void)page(s,1,(success?1u:0u)|(!success&&cancelled?2u:0u),status,NULL);
             if (live(s) && s->generation==generation) history_notify(s);
         }
         if (s->tls_retry && live(s)) { retain(s); g_idle_add(tls_retry,s); }
@@ -1205,6 +1207,56 @@ int zwk_history(ZwkState *s,int forward) {
         WebKitBackForwardListItem *item=forward?webkit_back_forward_list_get_forward_item(s->history):webkit_back_forward_list_get_back_item(s->history);
         const char *uri=item?webkit_back_forward_list_item_get_uri(item):NULL;
         result=!item?ZWK_NO_HISTORY:!trusted_uri(s,uri)?ZWK_IPC_DENIED:navigation_submit(s,NAV_HISTORY,uri,item);
+    }
+    release(s); return result;
+}
+/* The page's back/forward list, serialized, and its URI. */
+int zwk_session_state(ZwkState *s,char **uri,void **data,size_t *length) {
+    *uri=NULL; *data=NULL; *length=0;
+    if (!live(s)) return ZWK_CLOSED;
+    if (!document(s) || !s->current_uri) return ZWK_NOT_READY;
+    WebKitWebViewSessionState *state=webkit_web_view_get_session_state(WEBKIT_WEB_VIEW(s->view));
+    GBytes *bytes=state?webkit_web_view_session_state_serialize(state):NULL;
+    if (state) webkit_web_view_session_state_unref(state);
+    if (!bytes) return ZWK_NATIVE_FAILED;
+    gsize size=0; const void *value=g_bytes_get_data(bytes,&size);
+    *data=size?g_memdup2(value,size):NULL; *length=size;
+    *uri=g_strdup(s->current_uri);
+    g_bytes_unref(bytes);
+    return ZWK_OK;
+}
+/* Replaces the back/forward list with a saved one and loads its current
+   item, which must be the page's own: ZWK_INVALID when the engine cannot
+   read the state, ZWK_IPC_DENIED for an item of another site, and the
+   list is left as it was. */
+int zwk_session_restore(ZwkState *s,const void *data,size_t length) {
+    retain(s); int result;
+    if (!live(s)) result=ZWK_CLOSED;
+    else if (!s->history || (!s->local.budget && !s->remote)) result=ZWK_NOT_READY;
+    else if (s->navigation || s->load_started || webkit_web_view_is_loading(WEBKIT_WEB_VIEW(s->view))) result=ZWK_NAVIGATION_PENDING;
+    else {
+        GBytes *bytes=g_bytes_new(data,length);
+        WebKitWebViewSessionState *state=webkit_web_view_session_state_new(bytes);
+        g_bytes_unref(bytes);
+        if (!state) result=ZWK_INVALID;
+        else {
+            /* A throwaway view tells the state's current item before the
+               page's list is replaced. */
+            WebKitWebView *probe=WEBKIT_WEB_VIEW(webkit_web_view_new_with_context(s->context));
+            g_object_ref_sink(probe);
+            webkit_web_view_restore_session_state(probe,state);
+            WebKitBackForwardListItem *saved=webkit_back_forward_list_get_current_item(webkit_web_view_get_back_forward_list(probe));
+            const gboolean trusted=saved && trusted_uri(s,webkit_back_forward_list_item_get_uri(saved));
+            gtk_widget_destroy(GTK_WIDGET(probe)); g_object_unref(probe);
+            if (!trusted) result=ZWK_IPC_DENIED;
+            else {
+                webkit_web_view_restore_session_state(WEBKIT_WEB_VIEW(s->view),state);
+                WebKitBackForwardListItem *item=webkit_back_forward_list_get_current_item(s->history);
+                const char *uri=item?webkit_back_forward_list_item_get_uri(item):NULL;
+                result=!trusted_uri(s,uri)?ZWK_IPC_DENIED:navigation_submit(s,NAV_HISTORY,uri,item);
+            }
+            webkit_web_view_session_state_unref(state);
+        }
     }
     release(s); return result;
 }

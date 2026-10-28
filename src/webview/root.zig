@@ -67,6 +67,7 @@ pub const Rgba = page_facts.Rgba;
 pub const ContentSize = page_facts.ContentSize;
 pub const FitContent = page_facts.FitContent;
 pub const http_auth = @import("http_auth.zig");
+pub const session_state = @import("session_state.zig");
 pub const context_menu = @import("context_menu.zig");
 pub const ContextMenu = context_menu.Menu;
 pub const ContextMenuHandler = struct {
@@ -93,6 +94,7 @@ test {
     _ = page_facts;
     _ = http_auth;
     _ = context_menu;
+    _ = session_state;
     _ = custom_local;
 }
 pub const DownloadDestination = downloads.Destination;
@@ -197,7 +199,10 @@ pub const ProcessFailure = struct { native_kind: i32 };
 pub const PageId = struct { view: *const View, generation: u64 };
 pub const PageEvent = union(enum) {
     started: struct { id: PageId, navigation_id: u64, uri: ?[]const u8, redirected: bool },
-    completed: struct { id: PageId, navigation_id: u64, success: bool, native_status: i32 },
+    /// cancelled: it failed as another navigation, a stop or a download
+    /// took its place (WebView2's OPERATION_CANCELED, 14; WebKitGTK's
+    /// WEBKIT_NETWORK_ERROR_CANCELLED), not as the page failed to load.
+    completed: struct { id: PageId, navigation_id: u64, success: bool, native_status: i32, cancelled: bool = false },
     dom_ready: PageId,
     source_changed: struct { id: PageId, uri: ?[]const u8 },
     title_changed: struct { id: PageId, title: ?[]const u8 },
@@ -676,6 +681,8 @@ extern fn zwv_zoom(*anyopaque, *f64, bool) i32;
 extern fn zwv_process_id(*anyopaque, *u32) i32;
 extern fn zwv_user_agent(*anyopaque, ?[*:0]const u16, ?*?[*:0]u16) i32;
 extern fn zwv_string_free([*:0]u16) void;
+extern fn zwv_document_source(*anyopaque, *?[*:0]u16) i32;
+extern fn zwv_toggle_picture_in_picture(*anyopaque) i32;
 extern fn zwv_devtools(*anyopaque, *bool, bool, bool) i32;
 extern fn zwv_tool_start(*anyopaque, *const NativeToolRequest) i32;
 extern fn zwv_tool_cancel(*anyopaque, u64) void;
@@ -3486,6 +3493,85 @@ pub const View = struct {
         try self.navigationResult(window);
     }
 
+    /// Moves the page's video into picture in picture, the playing one or
+    /// else the largest, or back when one is out, as a user's
+    /// requestPictureInPicture() or exitPictureInPicture() would; a video
+    /// with disablePictureInPicture stays. Windows runs them through the
+    /// DevTools protocol as a user's gesture, which Chromium needs; whether
+    /// a video is out is the page's document.pictureInPictureElement, and
+    /// its enterpictureinpicture and leavepictureinpicture events tell.
+    /// WebKitGTK has no picture in picture: UnsupportedCapability.
+    pub fn togglePictureInPicture(self: *View) !void {
+        _ = try self.propertyWindow();
+        if (is_linux) return error.UnsupportedCapability;
+        const scope = self.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        try self.propertyResult(zwv_toggle_picture_in_picture(self.native.?));
+    }
+    /// The page's session to save, for restoreSessionState in another
+    /// View, at the next launch or after the app closed a page it was not
+    /// showing; caller-owned. Linux keeps WebKitGTK's back/forward list
+    /// with the scroll positions and form fields it saved: it saves a
+    /// page's scroll position a moment after scrolling stops and its form
+    /// fields as the page goes out of view. Windows keeps the page's URI
+    /// alone, WebView2 having no such state.
+    pub fn sessionState(self: *View, allocator: std.mem.Allocator) ![]u8 {
+        _ = try self.propertyWindow();
+        if (self.config.?.options.local == null and self.config.?.options.remote == null) return error.LocalSiteRequired;
+        const scope = self.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        if (is_linux) {
+            var uri: ?[*:0]u8 = null;
+            var data: ?*anyopaque = null;
+            var length: usize = 0;
+            const result = webkit.zwk_session_state(self.native.?, &uri, &data, &length);
+            defer if (uri) |value| webkit.zwk_string_free(value);
+            defer if (data) |value| webkit.zwk_string_free(@ptrCast(value));
+            try webkit.check(result);
+            const native: []const u8 = if (data) |value| @as([*]const u8, @ptrCast(value))[0..length] else "";
+            return session_state.encode(allocator, .linux, std.mem.span(uri orelse return error.NotReady), native);
+        }
+        var wide: ?[*:0]u16 = null;
+        const hr = zwv_document_source(self.native.?, &wide);
+        defer if (wide) |value| zwv_string_free(value);
+        try self.propertyResult(hr);
+        const value = wide orelse return error.NotReady;
+        const uri = try std.unicode.utf16LeToUtf8Alloc(allocator, std.mem.span(value));
+        defer allocator.free(uri);
+        return session_state.encode(allocator, .windows, uri, "");
+    }
+    /// Brings back a session that sessionState saved, in place of the
+    /// page: on Linux the back/forward list and the current item's scroll
+    /// position and form fields, whose current item loads, once ready with
+    /// no navigation pending. A state of another platform, or one the
+    /// engine cannot read, loads the URI it saved, as navigateLocal or
+    /// navigateRemote would, which the page's site must allow (OriginDenied,
+    /// InvalidResourcePath otherwise).
+    pub fn restoreSessionState(self: *View, state: []const u8) !void {
+        const parsed = try session_state.parse(state);
+        const window = self.access() orelse return error.Closed;
+        window.app.assertOwner();
+        if (self.attachmentClosed() or appStopping(window)) return error.Closed;
+        if (!self.ready or self.recovering) return error.NotReady;
+        if (!self.initializerNavigationAllowed()) return error.Busy;
+        const options = self.config.?.options;
+        if (options.local == null and options.remote == null) return error.LocalSiteRequired;
+        if (is_linux and parsed.platform == .linux and parsed.native.len != 0) {
+            const scope = self.beginCallback() orelse return error.Closed;
+            defer scope.end();
+            switch (webkit.zwk_session_restore(self.native.?, parsed.native.ptr, parsed.native.len)) {
+                0 => return,
+                4 => {}, // The engine cannot read it: the URI loads.
+                8 => return error.OriginDenied,
+                else => |result| return webkit.check(result),
+            }
+        }
+        if (options.local) |site| {
+            const path = session_state.localPath(parsed.uri, site.scheme, site.host) orelse return error.InvalidResourcePath;
+            return self.navigateLocal(path);
+        }
+        return self.navigateRemote(parsed.uri);
+    }
     pub fn goBack(self: *View) !void {
         try self.pageAction(0);
     }
@@ -3633,7 +3719,7 @@ pub const View = struct {
         if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != id.generation) return 0;
         const ev: PageEvent = switch (native.kind) {
             0 => .{ .started = .{ .id = id, .navigation_id = native.navigation_id, .uri = utf8, .redirected = native.flags & 1 != 0 } },
-            1 => .{ .completed = .{ .id = id, .navigation_id = native.navigation_id, .success = native.flags & 1 != 0, .native_status = native.status } },
+            1 => .{ .completed = .{ .id = id, .navigation_id = native.navigation_id, .success = native.flags & 1 != 0, .native_status = native.status, .cancelled = native.flags & 2 != 0 } },
             2 => .{ .dom_ready = id },
             3 => .{ .source_changed = .{ .id = id, .uri = utf8 } },
             4 => .{ .title_changed = .{ .id = id, .title = utf8 } },

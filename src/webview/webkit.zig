@@ -194,6 +194,8 @@ pub extern fn zwk_user_agent(*anyopaque, ?[*:0]const u8, ?*?[*:0]u8) c_int;
 pub extern fn zwk_devtools(*anyopaque, c_int, ?*c_int, ?*c_int) c_int;
 pub extern fn zwk_devtools_counts(*u32) void;
 pub extern fn zwk_string_free([*:0]u8) void;
+pub extern fn zwk_session_state(*anyopaque, *?[*:0]u8, *?*anyopaque, *usize) c_int;
+pub extern fn zwk_session_restore(*anyopaque, [*]const u8, usize) c_int;
 pub extern fn zwk_deadline_arm(*anyopaque, u64) c_int;
 pub extern fn zwk_deadline_cancel(*anyopaque) void;
 pub extern fn zwk_refresh(*anyopaque) c_int;

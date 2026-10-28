@@ -344,7 +344,7 @@ HEAD 使用文件 representation 长度生成 Content-Length，不建物理文�
 
 设置 `Options.page_listener` 接收独立 `PageEvent`。监听上下文从 attach/reload 成功后保持稳定，直到相应配置释放或 detach；旧资源释放顺序沿用 `resources_released`。所有回调在主线程，持有核心 callback pin；回调内关闭只在安全点 detach。
 
-事件包括 started、completed、dom_ready、source_changed、title_changed、history_changed。controller 的 ready 不表示 DOM 已就绪。completed 带原生导航 ID、成功标志和 WebErrorStatus；它不把 HTTP 错误状态等同于传输失败。source/title/history 在变化时通知，并在加载完成时发布快照，因此可能有相同值的重复事件，刷新也能得到当前元数据。
+事件包括 started、completed、dom_ready、source_changed、title_changed、history_changed。controller 的 ready 不表示 DOM 已就绪。completed 带原生导航 ID、成功标志和 WebErrorStatus；它不把 HTTP 错误状态等同于传输失败。completed 的 `cancelled` 表示失败是因为加载被另一次导航、停止或下载取代，而不是页面加载失败：Windows 为 WebErrorStatus `OPERATION_CANCELED`（14，13 是主机名无法解析），Linux 为 `WEBKIT_NETWORK_ERROR_CANCELLED`。source/title/history 在变化时通知，并在加载完成时发布快照，因此可能有相同值的重复事件，刷新也能得到当前元数据。
 
 每次新文档的 accepted Starting 增加 `PageId.generation`；同一原生导航的重定向沿用代数。`PageId` 还包含所属 View 地址，不能跨 View 使用。View 从 attach 开始必须保持地址稳定，并覆盖 PageId 的使用期。页面代数在 detach/re-attach 或恢复后继续增加，不复活旧页面。
 
@@ -389,6 +389,20 @@ Starting 到本次 ContentLoading 期间抑制页面消息；之后消息必须�
 `Options.background_throttling = false` 让窗口隐藏、最小化或被遮挡时页面继续运行：定时器保持频率，CSS 动画不暂停。Linux 关闭 WebKitGTK 的 `HiddenPageDOMTimerThrottling` 与 `HiddenPageCSSAnimationSuspension` 功能（2.42 起）；隐藏的页面仍然不绘制帧，`requestAnimationFrame` 会等待。Windows 以 `--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows` 启动浏览器，与 `autoplay` 一样是 WebView2 环境的参数：同一 user data folder（包括同一应用的两个进程）的 View 必须一致，Windows Profile owner 暂不接受（`UnsupportedCapability`）。
 
 `smoke-webview-page-options` 在两个从未显示的窗口中各放一个页面，检查手势设置，并数 1.5 秒内 10 ms 定时器的触发次数：不节流的页面约 126 次，默认页面在 Linux 上 7 次。Linux 在 WebKitGTK 2.52.6（xvfb）本地通过；Windows 在 CI 的 WebView2 任务中运行。
+
+## 保存与恢复会话
+
+`View.sessionState(allocator)` 返回页面会话的字节（调用者拥有），`View.restoreSessionState(bytes)` 在另一个 View 中恢复它：下次启动时，或应用关闭了一个没在显示的页面之后。字节是版本化的封装：保存它的平台、页面 URI 和引擎自己的状态。只有本地站点和远程页面有会话，纯 `html` 页面返回 `LocalSiteRequired`。
+
+Linux 保存 WebKitGTK 序列化的前进后退列表，包括它保存的滚动位置和表单内容；恢复时替换列表并加载当前项，之后 Back 回到之前的页面。WebKit 在滚动停止片刻后才保存页面的滚动位置，表单内容只在页面离开视图时保存。当前项必须属于页面自己的站点，否则返回 `OriginDenied` 且列表不变。Windows 的 WebView2 没有这种状态，只保存 URI。另一平台的状态或引擎读不了的状态会加载其中保存的 URI，像 `navigateLocal`/`navigateRemote` 一样受站点规则约束。恢复要求 View 已就绪且没有进行中的导航。
+
+`smoke-webview-session-state` 从 `/` 导航到 `/long`、滚动到 1200 后保存，在第二个 View 恢复：Linux 回到 `/long`、滚动位置 1200、`history.length` 为 2，Back 回到 `/`；Windows 回到 `/long`。Linux 在 WebKitGTK 2.52.6（xvfb）本地通过。
+
+## 画中画
+
+`View.togglePictureInPicture()` 把页面中正在播放的视频（没有则取最大的一个，设置了 `disablePictureInPicture` 的除外）移入画中画，已有视频在画中画中时移回，相当于用户手势下调用 `requestPictureInPicture()`/`exitPictureInPicture()`。Windows 的 Chromium 默认允许页面自己的画中画按钮、菜单项和脚本调用；宿主切换经 DevTools 协议的 `Runtime.evaluate` 以用户手势运行，因为 ExecuteScript 不算手势。是否已有视频在画中画中由页面的 `document.pictureInPictureElement` 与 `enterpictureinpicture`/`leavepictureinpicture` 事件得知。WebKitGTK 没有画中画，Linux 返回 `UnsupportedCapability`。
+
+`smoke-webview-picture-in-picture`（仅 Windows）播放 canvas 的流，从宿主移出再移回，检查页面收到的两个事件。
 
 ## 文档初始化器
 

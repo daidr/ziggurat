@@ -215,7 +215,7 @@ HANDLER(ProcessHandler, ICoreWebView2ProcessFailedEventHandler, IID_ICoreWebView
 HANDLER(PermissionsHandler, ICoreWebView2GetNonDefaultPermissionSettingsCompletedHandler, IID_ICoreWebView2GetNonDefaultPermissionSettingsCompletedHandler)
 HANDLER(ResetPermissionHandler, ICoreWebView2SetPermissionStateCompletedHandler, IID_ICoreWebView2SetPermissionStateCompletedHandler)
 HANDLER(SeedPermissionHandler, ICoreWebView2SetPermissionStateCompletedHandler, IID_ICoreWebView2SetPermissionStateCompletedHandler)
-HANDLER(TestInputHandler, ICoreWebView2CallDevToolsProtocolMethodCompletedHandler, IID_ICoreWebView2CallDevToolsProtocolMethodCompletedHandler)
+HANDLER(DevToolsCallHandler, ICoreWebView2CallDevToolsProtocolMethodCompletedHandler, IID_ICoreWebView2CallDevToolsProtocolMethodCompletedHandler)
 HANDLER(CompletedHandler, ICoreWebView2NavigationCompletedEventHandler, IID_ICoreWebView2NavigationCompletedEventHandler)
 HANDLER(DomHandler, ICoreWebView2DOMContentLoadedEventHandler, IID_ICoreWebView2DOMContentLoadedEventHandler)
 HANDLER(SourceHandler, ICoreWebView2SourceChangedEventHandler, IID_ICoreWebView2SourceChangedEventHandler)
@@ -244,7 +244,7 @@ static HRESULT STDMETHODCALLTYPE process_invoke(ICoreWebView2ProcessFailedEventH
 static HRESULT STDMETHODCALLTYPE permissions_invoke(ICoreWebView2GetNonDefaultPermissionSettingsCompletedHandler *, HRESULT, ICoreWebView2PermissionSettingCollectionView *);
 static HRESULT STDMETHODCALLTYPE reset_permission_invoke(ICoreWebView2SetPermissionStateCompletedHandler *, HRESULT);
 static HRESULT STDMETHODCALLTYPE seed_permission_invoke(ICoreWebView2SetPermissionStateCompletedHandler *, HRESULT);
-static HRESULT STDMETHODCALLTYPE test_input_invoke(ICoreWebView2CallDevToolsProtocolMethodCompletedHandler *,HRESULT,LPCWSTR);
+static HRESULT STDMETHODCALLTYPE devtools_call_invoke(ICoreWebView2CallDevToolsProtocolMethodCompletedHandler *,HRESULT,LPCWSTR);
 static HRESULT STDMETHODCALLTYPE completed_invoke(ICoreWebView2NavigationCompletedEventHandler *, ICoreWebView2 *, ICoreWebView2NavigationCompletedEventArgs *);
 static HRESULT STDMETHODCALLTYPE dom_invoke(ICoreWebView2DOMContentLoadedEventHandler *, ICoreWebView2 *, ICoreWebView2DOMContentLoadedEventArgs *);
 static HRESULT STDMETHODCALLTYPE source_invoke(ICoreWebView2SourceChangedEventHandler *, ICoreWebView2 *, ICoreWebView2SourceChangedEventArgs *);
@@ -279,7 +279,7 @@ VTABLE(ProcessHandler, ICoreWebView2ProcessFailedEventHandler, process_invoke)
 VTABLE(PermissionsHandler, ICoreWebView2GetNonDefaultPermissionSettingsCompletedHandler, permissions_invoke)
 VTABLE(ResetPermissionHandler, ICoreWebView2SetPermissionStateCompletedHandler, reset_permission_invoke)
 VTABLE(SeedPermissionHandler, ICoreWebView2SetPermissionStateCompletedHandler, seed_permission_invoke)
-VTABLE(TestInputHandler, ICoreWebView2CallDevToolsProtocolMethodCompletedHandler, test_input_invoke)
+VTABLE(DevToolsCallHandler, ICoreWebView2CallDevToolsProtocolMethodCompletedHandler, devtools_call_invoke)
 VTABLE(CompletedHandler, ICoreWebView2NavigationCompletedEventHandler, completed_invoke)
 VTABLE(DomHandler, ICoreWebView2DOMContentLoadedEventHandler, dom_invoke)
 VTABLE(SourceHandler, ICoreWebView2SourceChangedEventHandler, source_invoke)
@@ -431,11 +431,26 @@ HRESULT zwv_test_seed_permission(State *s, const WCHAR *origin, SeedNotify done,
     return hr;
 }
 
-static HRESULT STDMETHODCALLTYPE test_input_invoke(ICoreWebView2CallDevToolsProtocolMethodCompletedHandler *p,HRESULT hr,LPCWSTR result) {
+static HRESULT STDMETHODCALLTYPE devtools_call_invoke(ICoreWebView2CallDevToolsProtocolMethodCompletedHandler *p,HRESULT hr,LPCWSTR result) {
     (void)p; (void)hr; (void)result; return S_OK;
 }
 /* Native integration input: a right click of the page at x, y in CSS
    pixels, as the DevTools protocol sends a mouse's. Not a public Zig API. */
+/* Moves the page's video out into picture in picture, the playing one or
+   else the largest, or back, as a user's gesture: requestPictureInPicture()
+   needs one, which ExecuteScript is not. */
+HRESULT zwv_toggle_picture_in_picture(State *s) {
+    if (s->closed || s->recovering || !s->webview) return E_ABORT;
+    static const WCHAR params[]=L"{\"expression\":\"(()=>{if(document.pictureInPictureElement)return document.exitPictureInPicture();"
+        L"const all=[...document.querySelectorAll('video')].filter(v=>!v.disablePictureInPicture);"
+        L"const v=all.find(v=>!v.paused)||all.sort((a,b)=>b.clientWidth*b.clientHeight-a.clientWidth*a.clientHeight)[0];"
+        L"if(v)return v.requestPictureInPicture()})()\",\"userGesture\":true,\"awaitPromise\":false}";
+    DevToolsCallHandler *handler=DevToolsCallHandler_new(s);
+    if (!handler) return E_OUTOFMEMORY;
+    HRESULT hr=ICoreWebView2_CallDevToolsProtocolMethod(s->webview,L"Runtime.evaluate",params,&handler->iface);
+    DevToolsCallHandler_release(&handler->iface);
+    return hr;
+}
 /* Whether the page swipes between pages and pinches, as WebView2 says. */
 HRESULT zwv_test_gestures(State *s, int32_t *swipe, int32_t *pinch) {
     if (s->closed || !s->webview) return E_ABORT;
@@ -458,10 +473,10 @@ HRESULT zwv_test_right_click(State *s, int32_t x, int32_t y) {
     for (int release=0;release<2&&SUCCEEDED(hr);release++) {
         WCHAR params[160];
         swprintf(params,160,L"{\"type\":\"%ls\",\"x\":%d,\"y\":%d,\"button\":\"right\",\"buttons\":%d,\"clickCount\":1}",release?L"mouseReleased":L"mousePressed",(int)x,(int)y,release?0:2);
-        TestInputHandler *handler=TestInputHandler_new(s);
+        DevToolsCallHandler *handler=DevToolsCallHandler_new(s);
         if (!handler) return E_OUTOFMEMORY;
         hr=ICoreWebView2_CallDevToolsProtocolMethod(s->webview,L"Input.dispatchMouseEvent",params,&handler->iface);
-        TestInputHandler_release(&handler->iface);
+        DevToolsCallHandler_release(&handler->iface);
     }
     return hr;
 }
@@ -915,7 +930,7 @@ static HRESULT STDMETHODCALLTYPE completed_invoke(ICoreWebView2NavigationComplet
         if (!s->closed && !s->recovering && id == s->navigation_id && SUCCEEDED(history_hr))
             page_notify(s, 5, id, (back ? 1 : 0) | (forward ? 2 : 0), 0, NULL);
         if (!s->closed && !s->recovering && id == s->navigation_id)
-            page_notify(s, 1, id, success ? 1 : 0, (int32_t)status, NULL);
+            page_notify(s, 1, id, (success ? 1u : 0u) | (!success && status == COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED ? 2u : 0u), (int32_t)status, NULL);
         CoTaskMemFree(current); CoTaskMemFree(title);
     }
     release(s); return S_OK;
@@ -1430,6 +1445,17 @@ HRESULT zwv_user_agent(State *s,const WCHAR *value,WCHAR **out) {
     return hr;
 }
 void zwv_string_free(WCHAR *value) { CoTaskMemFree(value); }
+/* The URI of the page's own document that last loaded, for a session
+   state; NULL before one did. */
+HRESULT zwv_document_source(State *s,WCHAR **out) {
+    *out=NULL;
+    if (s->closed || s->recovering || !s->webview) return E_ABORT;
+    if (!s->document_source) return S_FALSE;
+    const size_t bytes=(wcslen(s->document_source)+1)*sizeof(WCHAR);
+    if (!(*out=CoTaskMemAlloc(bytes))) return E_OUTOFMEMORY;
+    memcpy(*out,s->document_source,bytes);
+    return S_OK;
+}
 HRESULT zwv_devtools(State *s,_Bool *enabled,_Bool set,_Bool open) {
     if (s->closed || s->recovering || !s->webview) return E_ABORT;
     ICoreWebView2Settings *settings=NULL;

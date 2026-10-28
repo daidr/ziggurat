@@ -113,6 +113,8 @@ int zwk_user_agent(ZwkState *,const char *set,char **get);
 int zwk_devtools(ZwkState *,int op,int *enabled,int *visible);
 void zwk_devtools_counts(uint32_t *shown);
 void zwk_string_free(char *);
+int zwk_session_state(ZwkState *,char **uri,void **data,size_t *length);
+int zwk_session_restore(ZwkState *,const void *data,size_t length);
 int zwk_deadline_arm(ZwkState *,uint64_t nanoseconds);
 void zwk_deadline_cancel(ZwkState *);
 int zwk_refresh(ZwkState *);
