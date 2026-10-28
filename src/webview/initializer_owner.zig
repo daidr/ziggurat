@@ -27,6 +27,8 @@ pub const NativeInput = extern struct {
     budget: *anyopaque,
     source: ?[*:0]const u16,
     units: u32,
+    /// Nonzero injects the batch into every frame, not only the top one.
+    frames: u32 = 0,
 };
 comptime {
     if (@sizeOf(usize) == 8 and @sizeOf(NativeInput) != 24) @compileError("Native initializer descriptor ABI mismatch");
@@ -89,7 +91,7 @@ pub const Config = struct {
     pub fn input(self: *const Config) NativeInput {
         if (comptime !supported) unreachable;
         const encoded = self.owned.encoded.?;
-        return .{ .budget = self.domain, .source = encoded.ptr, .units = @intCast(encoded.len) };
+        return .{ .budget = self.domain, .source = encoded.ptr, .units = @intCast(encoded.len), .frames = @intFromBool(self.owned.allFrames()) };
     }
     pub fn destroy(self: *Config) void {
         // Unsupported adapters cannot create these owners. Keep the native

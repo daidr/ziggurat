@@ -19,6 +19,7 @@ struct ZwkInitializerOperation {
     uint64_t token;
     char *source;
     size_t bytes;
+    gboolean all_frames;
     gboolean submitted,cancelled;
 };
 static atomic_uint initializer_budgets,initializer_owners,initializer_operations;
@@ -126,7 +127,7 @@ int zwk_initializers_prepare(ZwkState *s,const ZwkInitializerInput *input,uint64
         }
         *out=0;g_assert((size_t)(out-op->source)+1==length);
     }
-    op->state=s;op->budget=input->budget;op->token=token;op->notify=done;op->bytes=bytes;
+    op->state=s;op->budget=input->budget;op->token=token;op->all_frames=input->frames!=0;op->notify=done;op->bytes=bytes;
     retain(s);zwk_initializer_budget_retain(op->budget);s->initializers->pending=op;atomic_fetch_add(&initializer_operations,1);return ZWK_OK;
 }
 void zwk_initializers_abandon(ZwkState *s) {
@@ -156,7 +157,7 @@ void zwk_initializers_activate(ZwkState *s) {
     WebKitUserScript *candidate=NULL;WebKitUserContentManager *manager=NULL;
     if(live(s) && !op->cancelled){
         manager=g_object_ref(s->manager);
-        if(op->source)candidate=webkit_user_script_new(op->source,WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START,NULL,NULL);
+        if(op->source)candidate=webkit_user_script_new(op->source,op->all_frames?WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES:WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START,NULL,NULL);
         if(op->source && !candidate){kind=2;result=ZWK_NATIVE_FAILED;}
         else {
             /* Both Add and individual Remove are synchronous void calls. The
