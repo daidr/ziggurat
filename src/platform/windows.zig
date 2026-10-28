@@ -322,13 +322,7 @@ fn dispatchMessage(app: *core.App, message: *c.MSG) bool {
     if (message.message == c.WM_QUIT) return false;
     // The main loop already dispatches from the kernel event once per turn.
     // The window procedure remains usable by native resize/modal loops.
-    // A wake raised during this turn's dispatch is still pending: its message
-    // is the only signal a native modal loop entered later this turn can see,
-    // so handle it now rather than leave the flag set with nothing queued.
-    if (message.hwnd == app.native.dispatcher and message.message == wake_message) {
-        if (app.native.wake_pending.load(.acquire)) consumeWake(app);
-        return true;
-    }
+    if (message.hwnd == app.native.dispatcher and message.message == wake_message) return true;
     if (message.message == c.WM_KEYDOWN or message.message == c.WM_SYSKEYDOWN) {
         if (keyRecord(app, message.hwnd)) |record| {
             const scope = record.enterNative();
@@ -1116,7 +1110,14 @@ fn pointerContinuation(window: *core.WindowRecord, hwnd: c.HWND, operation: u64)
 }
 const NativeNotification = enum(u8) { ordinary, own_up_capture, focus_echo };
 fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, wp: c.WPARAM, lp: c.LPARAM, delegation: *?NativeDelegate, operation: u64, sequence: u64, modifiers: core.KeyModifiers, delivered: ?*bool, notification: NativeNotification, capture_owned: bool) c.LRESULT {
-    if (message == c.WM_ENTERSIZEMOVE or message == c.WM_ENTERMENULOOP) window.native.native_loop_depth += 1;
+    if (message == c.WM_ENTERSIZEMOVE or message == c.WM_ENTERMENULOOP) {
+        window.native.native_loop_depth += 1;
+        // The main loop drops queued wake messages and answers the kernel
+        // event instead. A wake still pending when a native loop starts may
+        // have had its message dropped this turn; the loop only sees messages.
+        const app = window.window.app;
+        if (app.native.wake_pending.load(.acquire)) _ = c.PostMessageW(app.native.dispatcher, wake_message, 0, 0);
+    }
     if (message == c.WM_EXITSIZEMOVE or message == c.WM_EXITMENULOOP) {
         if (window.native.native_loop_depth != 0) window.native.native_loop_depth -= 1;
     }
