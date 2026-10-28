@@ -842,6 +842,8 @@ fn keyval(key: types.Key) u32 {
         .up => 0xff52,
         .right => 0xff53,
         .down => 0xff54,
+        .plus => 0x3d,
+        .minus => 0x2d,
         else => unreachable,
     };
 }

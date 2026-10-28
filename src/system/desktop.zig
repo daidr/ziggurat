@@ -32,6 +32,9 @@ pub const capabilities = .{
     .watch_power_source = os == .windows,
     .watch_power_saver = os == .windows or os == .linux,
     .watch_network = os == .windows or os == .linux,
+    .beep = os == .windows or os == .linux,
+    // Linux X11 only; Wayland keeps the global pointer position private.
+    .cursor_position = os == .windows or os == .linux,
 };
 
 /// Native desktop coordinates, the same convention as core `ScreenPoint`:
@@ -147,6 +150,24 @@ pub fn network(app: *z.App) !Network {
         },
         .metered = if (native.metered < 0) null else native.metered != 0,
     };
+}
+
+/// Plays the system alert sound.
+pub fn beep(app: *z.App) !void {
+    app.assertOwner();
+    if (comptime !enabled) return error.UnsupportedCapability;
+    if (os == .windows) return windows.beep();
+    try check(zsd_beep());
+}
+
+/// The pointer position in native desktop coordinates, those of `Monitor`.
+pub fn cursorPosition(app: *z.App) !z.ScreenPoint {
+    app.assertOwner();
+    if (comptime !enabled) return error.UnsupportedCapability;
+    if (os == .windows) return windows.cursorPosition();
+    var point: z.ScreenPoint = .{ .x = 0, .y = 0 };
+    try check(zsd_cursor(&point.x, &point.y));
+    return point;
 }
 
 /// Live native watch states owned by this module: Windows hidden windows and
@@ -285,6 +306,8 @@ extern fn zsd_network(*NativeNetwork) c_int;
 extern fn zsd_watch_start(u32, *anyopaque, *const fn (?*anyopaque, u32) callconv(.c) void, *?*anyopaque) c_int;
 extern fn zsd_watch_stop(*anyopaque) void;
 extern fn zsd_resource_count() u32;
+extern fn zsd_beep() c_int;
+extern fn zsd_cursor(*i32, *i32) c_int;
 
 fn linuxMonitors(staging: *[max_monitors]Monitor) !usize {
     var native: [max_monitors]NativeMonitor = undefined;

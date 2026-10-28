@@ -96,7 +96,7 @@ _ = try system.integration.register(allocator, app, .{});
 
 Windows 使用一个 `ITaskbarList3`，状态按窗口生效，窗口销毁后由 shell 丢弃；任务栏按钮存在之后 shell 才接受设置，隐藏窗口上可能返回 `TaskbarUnavailable`。Windows 只向打包应用开放数字 badge，因此 `capabilities.taskbar.badge_count` 在 Windows 为 false。Linux 在 init 时同步连接 session bus，每次变化发出 `com.canonical.Unity.LauncherEntry.Update`，对象为 `application://<id>.desktop`，作用于整个应用；该协议没有 indeterminate/错误状态，indeterminate 显示为 0。发出信号只表示已交给 bus，dock 是否支持该协议由桌面决定；之后才启动的 dock 只能看到下一次变化。GDBus 自身的 worker 线程属于系统库成本。
 
-任务栏菜单（Jump List、dock menu）尚未实现，见 D03。
+Windows Jump List 的任务和 Recent 类别、最近文档和重启见[系统集成](system.md#最近文档jump-list-与重启)。Linux 的 dock 菜单与 macOS 不在本片。
 
 ## 验证
 

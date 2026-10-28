@@ -203,7 +203,7 @@ B02 分项：
 | S08 | 部分完成（Windows） | 独立托盘/status item、多图标、菜单与popover锚定 | 窗口Owner单托盘/任务栏重建恢复，及 S08.1 App 独立多 item、可选稳定 GUID、锚定托盘菜单、App 停止回收已验；标题与popover亮态（无 Windows 对应）、Linux/macOS 继续；其余平台依赖 P02/P04 |
 | D01 | 待实现 | document 模型、每文件窗口与最近文档 | 文档身份/重复打开、保存/另存、dirty/关闭/quit 预检；依赖 W02/S02 |
 | D02 | 待实现 | 自动保存、外部修改、冲突检测与崩溃恢复 | 原子保存、版本戳/恢复副本、后台 I/O、丢失与权限错误；依赖 D01 |
-| D03 | 待实现 | Jump List/最近文档平台集成与文档菜单 | 隐私/删除失效项、菜单状态与多窗口；依赖 D01/S04 |
+| D03 | 部分完成 | Jump List/最近文档平台集成与文档菜单（Windows Tasks/Recent、最近文档列表与系统登记、重启已实现；Linux dock 菜单未做） | 隐私/删除失效项、菜单状态与多窗口；依赖 D01/S04 |
 
 S03 的网络状态使用明确的online/metered/unknown类型化快照和变化订阅；online只描述本地连接状态，不保证目标服务器可达，不添加隐式HTTP探测。首个订阅者启动原生监视，最后一个订阅者/owner关闭即撤销；线程交付、旧generation和队列Full/Closed责任明确。主题、accent可空、text scale、reduce motion/transparency等偏好由宿主显式桥接页面初始脚本和变化事件，reload/恢复不得沿用旧页回调，默认不启动额外监视或轮询。
 
