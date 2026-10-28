@@ -170,7 +170,7 @@ pub fn build(b: *std.Build) void {
         check.dependOn(&smoke.step);
         const install_smoke = b.addInstallArtifact(smoke, .{});
         b.step("check-https-resources-smoke", "Link and copy host-owned HTTPS integration checks without starting them").dependOn(&install_smoke.step);
-        const run_smoke = b.addRunFile(b.graph.path(.install_bin, "smoke-https-resources"));
+        const run_smoke = runInstalled(b, b.graph.path(.install_bin, "smoke-https-resources"));
         run_smoke.step.dependOn(&install_smoke.step);
         b.step("smoke-https-resources", "Verify explicit HTTPS resource ownership, authentication and shutdown").dependOn(&run_smoke.step);
         // Fault-injected implementations stay in this separate test process;
@@ -902,7 +902,7 @@ pub fn build(b: *std.Build) void {
         check.dependOn(&list_smoke.step);
         const install = b.addInstallArtifact(list_smoke, .{});
         b.step("build-smoke-virtual-list-control", "Build the isolated native complete-list UI Automation fixture").dependOn(&install.step);
-        const run = b.addRunFile(b.graph.path(.install_bin, "smoke-virtual-list-control.exe"));
+        const run = runInstalled(b, b.graph.path(.install_bin, "smoke-virtual-list-control.exe"));
         run.step.dependOn(&install.step);
         b.step("smoke-virtual-list-control", "Verify native complete-list selection, offscreen rows and captured action retirement").dependOn(&run.step);
     } else if (target.result.os.tag == .linux) {
@@ -1345,7 +1345,7 @@ pub fn build(b: *std.Build) void {
         check.dependOn(&gaussian_smoke.step);
         b.step("check-gaussian-smoke", "Compile composed-image Gaussian checks without starting native graphics").dependOn(&gaussian_smoke.step);
         const install_gaussian = b.addInstallArtifact(gaussian_smoke, .{});
-        const run_gaussian = b.addRunFile(b.graph.path(.install_bin, b.fmt("smoke-gaussian{s}", .{if (target.result.os.tag == .windows) ".exe" else ""})));
+        const run_gaussian = runInstalled(b, b.graph.path(.install_bin, b.fmt("smoke-gaussian{s}", .{if (target.result.os.tag == .windows) ".exe" else ""})));
         run_gaussian.step.dependOn(&install_gaussian.step);
         b.step("smoke-gaussian", "Verify composed subtree filtering, image replay and resource lifetime").dependOn(&run_gaussian.step);
         const shadow_benchmark = b.addExecutable(.{ .name = "benchmark-shadows", .root_module = b.createModule(.{
@@ -1431,7 +1431,7 @@ pub fn build(b: *std.Build) void {
         check.dependOn(&program_smoke.step);
         const install_program_smoke = b.addInstallArtifact(program_smoke, .{});
         b.step("check-gradient-program-smoke", "Link and copy interpolation program integration checks without starting graphics").dependOn(&install_program_smoke.step);
-        const run_program_smoke = b.addRunFile(b.graph.path(.install_bin, "smoke-gradient-program.exe"));
+        const run_program_smoke = runInstalled(b, b.graph.path(.install_bin, "smoke-gradient-program.exe"));
         run_program_smoke.step.dependOn(&install_program_smoke.step);
         b.step("smoke-gradient-program", "Verify explicitly prepared interpolation programs, rollback and resource ownership").dependOn(&run_program_smoke.step);
         addSmoke(b, "smoke-shader-effects-gpu", "tests/shader_effects_gpu_smoke.zig", target, optimize, &.{
@@ -1510,7 +1510,7 @@ pub fn build(b: *std.Build) void {
         }) });
         check.dependOn(&benchmark.step);
         const benchmark_install = b.addInstallArtifact(benchmark, .{});
-        const benchmark_run = b.addRunFile(b.graph.path(.install_bin, "benchmark"));
+        const benchmark_run = runInstalled(b, b.graph.path(.install_bin, "benchmark"));
         benchmark_run.step.dependOn(&benchmark_install.step);
         benchmark_run.addPassthruArgs();
         b.step("benchmark", "Run measured GTK/Cairo submission and idle workload").dependOn(&benchmark_run.step);
@@ -1618,7 +1618,7 @@ pub fn build(b: *std.Build) void {
         addResources(b, benchmark);
         check.dependOn(&benchmark.step);
         const benchmark_install = b.addInstallArtifact(benchmark, .{});
-        const benchmark_run = b.addRunFile(b.graph.path(.install_bin, "benchmark.exe"));
+        const benchmark_run = runInstalled(b, b.graph.path(.install_bin, "benchmark.exe"));
         benchmark_run.step.dependOn(&benchmark_install.step);
         benchmark_run.addPassthruArgs();
         b.step("benchmark", "Run measured paint submission, input, idle CPU and memory workload").dependOn(&benchmark_run.step);
@@ -2360,7 +2360,7 @@ pub fn build(b: *std.Build) void {
         check.dependOn(&input_latency.step);
         const input_latency_install = b.addInstallArtifact(input_latency, .{});
         // Installed first: each run starts the installed tool again.
-        const input_latency_run = b.addRunFile(b.graph.path(.install_bin, if (target.result.os.tag == .windows) "input-latency.exe" else "input-latency"));
+        const input_latency_run = runInstalled(b, b.graph.path(.install_bin, if (target.result.os.tag == .windows) "input-latency.exe" else "input-latency"));
         input_latency_run.step.dependOn(&input_latency_install.step);
         input_latency_run.addPassthruArgs();
         b.step("input-latency", "Measure how long typing, scrolling, dragging and animation take to be painted: zig build input-latency -- [--mode LIST] [--runs N] [--events N]").dependOn(&input_latency_run.step);
@@ -3012,7 +3012,7 @@ fn addExample(b: *std.Build, name: []const u8, path: []const u8, target: std.Bui
     addResources(b, exe);
     b.installArtifact(exe);
     b.top_level_steps.get("check").?.step.dependOn(&exe.step);
-    const run = b.addRunFile(b.graph.path(.install_bin, b.fmt("{s}{s}", .{ name, if (target.result.os.tag == .windows) ".exe" else "" })));
+    const run = runInstalled(b, b.graph.path(.install_bin, b.fmt("{s}{s}", .{ name, if (target.result.os.tag == .windows) ".exe" else "" })));
     run.step.dependOn(b.getInstallStep());
     run.addPassthruArgs();
     b.step(b.fmt("run-{s}", .{name}), b.fmt("Run {s}", .{name})).dependOn(&run.step);
@@ -3032,7 +3032,7 @@ fn addLinuxPointerCoreSmoke(b: *std.Build, check: *std.Build.Step, core: *std.Bu
     check.dependOn(&smoke.step);
     const install = b.addInstallArtifact(smoke, .{});
     b.step("build-smoke-pointer-core-linux", "Build the real GTK-to-Core pointer boundary check").dependOn(&install.step);
-    const run = b.addRunFile(b.graph.path(.install_bin, "smoke-pointer-core-linux"));
+    const run = runInstalled(b, b.graph.path(.install_bin, "smoke-pointer-core-linux"));
     run.step.dependOn(&install.step);
     b.step("smoke-pointer-core-linux", "Verify real GTK/Core pointer facts and independent callback scopes").dependOn(&run.step);
 }
@@ -3051,7 +3051,7 @@ fn addPointerCostSmoke(b: *std.Build, target: std.Build.ResolvedTarget, optimize
     b.top_level_steps.get("check").?.step.dependOn(&exe.step);
     const install = b.addInstallArtifact(exe, .{});
     b.step("build-" ++ name, "Build the isolated native pointer cost probe").dependOn(&install.step);
-    const run = b.addRunFile(b.graph.path(.install_bin, name ++ ".exe"));
+    const run = runInstalled(b, b.graph.path(.install_bin, name ++ ".exe"));
     run.step.dependOn(&install.step);
     run.addPassthruArgs();
     b.step(name, "Measure caller allocations and selected real native pointer calls").dependOn(&run.step);
@@ -3073,7 +3073,7 @@ fn addWebNativeBoundarySmoke(b: *std.Build, target: std.Build.ResolvedTarget, op
     const build_step = b.step("build-" ++ name, "Build the independent SDK callback ownership probe");
     build_step.dependOn(&install.step);
     build_step.dependOn(&b.top_level_steps.get("webview-runtime").?.step);
-    const run = b.addRunFile(b.graph.path(.install_bin, b.fmt("{s}{s}", .{ name, if (target.result.os.tag == .windows) ".exe" else "" })));
+    const run = runInstalled(b, b.graph.path(.install_bin, b.fmt("{s}{s}", .{ name, if (target.result.os.tag == .windows) ".exe" else "" })));
     run.step.dependOn(&install.step);
     run.step.dependOn(&b.top_level_steps.get("webview-runtime").?.step);
     run.addPassthruArgs();
@@ -3230,7 +3230,7 @@ fn addSmokeExecutable(b: *std.Build, name: []const u8, path: []const u8, target:
     addResources(b, exe);
     const install = b.addInstallArtifact(exe, .{});
     b.step(b.fmt("build-{s}", .{name}), "Build a hidden-window integration executable without running it").dependOn(&install.step);
-    const run = b.addRunFile(b.graph.path(.install_bin, b.fmt("{s}{s}", .{ name, if (target.result.os.tag == .windows) ".exe" else "" })));
+    const run = runInstalled(b, b.graph.path(.install_bin, b.fmt("{s}{s}", .{ name, if (target.result.os.tag == .windows) ".exe" else "" })));
     run.step.dependOn(&install.step);
     for (imports) |dependency| {
         if (std.mem.eql(u8, dependency.name, "ziggurat_webview")) run.step.dependOn(&b.top_level_steps.get("webview-runtime").?.step);
@@ -3276,6 +3276,17 @@ fn iconFile(b: *std.Build, tool_source: std.Build.LazyPath, default: std.Build.L
             break :blk run.addOutputFileArg("application.ico");
         },
     };
+}
+
+/// Runs an installed executable. The build runner forks children while other
+/// steps write their files; until such a child execs it still holds those
+/// write handles, so starting a file installed a moment ago can fail with
+/// ETXTBSY. On POSIX hosts a shell retries only that failure (status 126).
+fn runInstalled(b: *std.Build, executable: std.Build.LazyPath) *std.Build.Step.Run {
+    if (b.graph.host.result.os.tag == .windows) return b.addRunFile(executable);
+    const run = b.addSystemCommand(&.{ "/bin/sh", "-c", "n=0; while :; do \"$0\" \"$@\"; s=$?; if [ $s -ne 126 ] || [ $n -ge 20 ]; then exit $s; fi; n=$((n + 1)); sleep 0.1; done" });
+    run.addFileArg(executable);
+    return run;
 }
 
 fn addResources(b: *std.Build, exe: *std.Build.Step.Compile) void {
