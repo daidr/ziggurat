@@ -289,7 +289,7 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
             } else if (phase == .down) record.emit(.{ .pointer_down = input }) else record.emit(.{ .pointer_up = input });
         },
         5 => record.emit(.{ .pointer_move = point }),
-        6 => record.emit(.{ .wheel = .{ .position = point, .delta = .{ .x = @floatCast(native.dx), .y = @floatCast(native.dy) } } }),
+        6 => record.emit(.{ .wheel = .{ .position = point, .delta = .{ .x = @floatCast(native.dx), .y = @floatCast(native.dy) }, .precise = native.flags & 1 != 0 } }),
         7 => pointerLifecycle(record, native, .{ .focus = native.flags & 1 != 0 }),
         8 => {
             if (native.flags & 0x100 != 0) {

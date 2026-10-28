@@ -230,7 +230,10 @@ pub const Event = union(enum) {
     pointer_down: PointerButtonInput,
     pointer_up: PointerButtonInput,
     pointer_move: Point,
-    wheel: struct { position: Point, delta: Point },
+    /// `delta` in DIPs, 48 a notch of a mouse wheel. `precise` marks a
+    /// device that scrolls by distance, as a touchpad does, and `momentum`
+    /// scrolling that goes on after the fingers left it.
+    wheel: struct { position: Point, delta: Point, precise: bool = false, momentum: bool = false },
     focus: bool,
     /// Text slices are borrowed for the duration of the content callback.
     text_input: TextInput,

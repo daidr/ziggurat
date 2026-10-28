@@ -61,7 +61,7 @@ fn lineSuffix(text: []const u8, i: usize) usize {
 }
 
 /// A file path at `text[i..]`: absolute, from `~`, `./` or `../`, with a
-/// slash, or a file name with a `:line`; each may end in `:line` or
+/// slash, or a file name with an extension; each may end in `:line` or
 /// `:line:col`. Its end, or null.
 fn pathAt(text: []const u8, i: usize) ?usize {
     // Absolute, or from ~, ../ or ./.
@@ -89,14 +89,21 @@ fn pathAt(text: []const u8, i: usize) ?usize {
             return lineSuffix(text, end);
         }
     }
-    // A file name with an extension and a line.
-    if (name_end > i and text[i] != '.') {
-        const dot = std.mem.lastIndexOfScalar(u8, text[i + 1 .. name_end], '.') orelse return null;
-        const ext = text[i + 1 + dot + 1 .. name_end];
+    // A file name with an extension, and maybe a line.
+    var stem_end = name_end;
+    while (stem_end > i and !word(text[stem_end - 1])) stem_end -= 1;
+    if (stem_end > i and text[i] != '.') {
+        const dot = std.mem.lastIndexOfScalar(u8, text[i + 1 .. stem_end], '.') orelse return null;
+        const ext = text[i + 1 + dot + 1 .. stem_end];
         if (ext.len == 0) return null;
         for (ext) |b| if (!word(b)) return null;
-        const suffix = lineSuffix(text, name_end);
-        if (suffix > name_end) return suffix;
+        const suffix = lineSuffix(text, stem_end);
+        // Dotted numbers, such as version 1.2.3, are no file names.
+        if (suffix == stem_end) {
+            for (text[i..stem_end]) |b| if (std.ascii.isAlphabetic(b)) return suffix;
+            return null;
+        }
+        return suffix;
     }
     return null;
 }
@@ -225,13 +232,23 @@ test "file paths under a column" {
         .{ .line = "main.go:250 here", .col = 2, .path = "main.go:250" },
         .{ .line = "dir/sub/ end", .col = 1, .path = "dir/sub/" },
         .{ .line = "just words here", .col = 6, .path = null },
-        .{ .line = "main.go alone", .col = 2, .path = null },
+        .{ .line = "main.go alone", .col = 2, .path = "main.go" },
+        .{ .line = "write(notes.md)", .col = 8, .path = "notes.md" },
+        .{ .line = "notes.md (new file +2)", .col = 2, .path = "notes.md" },
+        .{ .line = "See notes.md.", .col = 7, .path = "notes.md" },
+        .{ .line = "notes.md:2:3", .col = 2, .path = "notes.md:2:3" },
+        .{ .line = "version 1.2.3 ok", .col = 9, .path = null },
+        .{ .line = "v1.2 ok", .col = 1, .path = "v1.2" },
         .{ .line = "(see /tmp/x)", .col = 7, .path = "/tmp/x" },
     };
     for (cases) |case| {
         const found = pathUnder(cellsOf(case.line, &cells), case.col, &buffer);
         if (case.path) |path| {
             try std.testing.expectEqualStrings(path, found.?.uri);
+            if (std.mem.eql(u8, case.line, "write(notes.md)")) {
+                try std.testing.expectEqual(@as(u16, 6), found.?.start);
+                try std.testing.expectEqual(@as(u16, 14), found.?.end);
+            }
         } else try std.testing.expect(found == null);
     }
 }

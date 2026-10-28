@@ -655,6 +655,9 @@ static gboolean scroll(GtkWidget *widget, GdkEventScroll *native, gpointer data)
         if (native->direction==GDK_SCROLL_LEFT) event.dx=-1;
         if (native->direction==GDK_SCROLL_RIGHT) event.dx=1;
     }
+    /* A touchpad scrolls by distance (precise). */
+    GdkDevice *device=gdk_event_get_source_device((GdkEvent *)native);
+    if (device && gdk_device_get_source(device)==GDK_SOURCE_TOUCHPAD) event.flags|=1;
     event.dx*=48; event.dy*=48; emit(data,&event); return TRUE;
 }
 /* A popup that does not take the keyboard. X without a window manager moves

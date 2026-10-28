@@ -342,11 +342,25 @@ pub const Mirror = struct {
         try self.sent.appendNTimes(self.allocator, null, rows);
     }
 
+    /// Delete from the other terminal the images sent of a screen, with
+    /// their placements, wherever they are.
+    fn deleteImages(self: *Mirror, out: *Out, sent: *const Images) !void {
+        for (sent.gens.items) |entry| try out.print(self.allocator, "\x1b_Ga=d,d=I,i={d},q=2\x1b\\", .{entry.id});
+    }
+
     /// Start the other terminal over: no images, an empty screen and
     /// scrollback, then this one's, row by row.
     fn restart(self: *Mirror, out: *Out, arena: std.mem.Allocator, screen: []const Line, alternate: bool) !void {
+        // Both screens' images go, which frames send again: also by their
+        // ids, as a terminal that deletes only the placements that show
+        // (d=A) keeps those of its scrollback, and then over its screen
+        // once the scrollback is cleared under them.
         const no_images = "\x1b_Ga=d,d=A,q=2\x1b\\";
-        try out.appendSlice(self.allocator, "\x1b[?1049h" ++ no_images ++ "\x1b[?1049l" ++ no_images ++ "\x1b[0m\x1b[H\x1b[2J\x1b[3J");
+        try out.appendSlice(self.allocator, "\x1b[?1049h" ++ no_images);
+        try self.deleteImages(out, &self.images[1]);
+        try out.appendSlice(self.allocator, "\x1b[?1049l" ++ no_images);
+        try self.deleteImages(out, &self.images[0]);
+        try out.appendSlice(self.allocator, "\x1b[0m\x1b[H\x1b[2J\x1b[3J");
         self.modes.clearRetainingCapacity();
         self.cursor.clearRetainingCapacity();
         for (&self.images) |*i| i.clear();
@@ -853,6 +867,23 @@ test "frames send images, place them and delete them" {
     try std.testing.expectEqualStrings("", try p.step(""));
     _ = try p.step("\x1b_Ga=d,d=I,i=4,q=2\x1b\\");
     try std.testing.expectEqual(@as(usize, 0), p.client.images[0].images.items.len);
+}
+
+test "starting over deletes the images sent, by their ids" {
+    var p: Pair = undefined;
+    try p.init(10, 3);
+    defer p.deinit();
+    p.server.cell_width = 8;
+    p.server.cell_height = 16;
+    p.client.cell_width = 8;
+    p.client.cell_height = 16;
+    _ = try p.step("\x1b[2;1H\x1b_Ga=T,f=24,s=1,v=1,i=9,C=1,q=2;AAAA\x1b\\");
+    // The placement scrolls into the scrollback.
+    _ = try p.step("\x1b[3;1H\r\n\r\n\r\n\r\n");
+    try std.testing.expectEqual(@as(usize, 1), p.client.images[0].placements.items.len);
+    p.mirror.reset();
+    const frame = try p.step("");
+    try std.testing.expect(std.mem.indexOf(u8, frame, "\x1b_Ga=d,d=I,i=9,q=2\x1b\\") != null);
 }
 
 test "a snapshot shows the same in a new terminal, and history stops at the cursor" {
