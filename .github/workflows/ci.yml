@@ -26,6 +26,10 @@ jobs:
     # PATH, running in an interactive desktop session. The repository variable
     # WINDOWS_RUNS_ON overrides the labels with a JSON value, for example
     # '"windows-2022"' to return to a hosted runner.
+    #
+    # Windows checks are paused while Linux and macOS come first: they run
+    # only when the repository variable WINDOWS_CI is 'true'.
+    if: vars.WINDOWS_CI == 'true'
     runs-on: ${{ fromJSON(vars.WINDOWS_RUNS_ON || '["self-hosted", "windows", "x64"]') }}
     timeout-minutes: 90
     strategy:
@@ -282,7 +286,8 @@ jobs:
           zig build smoke-macos -Doptimize=${{ matrix.optimize }} --summary failures
 
   webview:
-    if: (github.event_name == 'workflow_dispatch' && inputs.webview) || contains(github.event.pull_request.labels.*.name, 'webview')
+    # Paused with the Windows job; see WINDOWS_CI there.
+    if: vars.WINDOWS_CI == 'true' && ((github.event_name == 'workflow_dispatch' && inputs.webview) || contains(github.event.pull_request.labels.*.name, 'webview'))
     # Also needs Node.js and an installed WebView2 Runtime on the runner.
     runs-on: ${{ fromJSON(vars.WINDOWS_RUNS_ON || '["self-hosted", "windows", "x64"]') }}
     timeout-minutes: 20
