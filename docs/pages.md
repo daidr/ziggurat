@@ -351,7 +351,7 @@ Starting 到本次 ContentLoading 期间抑制页面消息；之后消息必须�
 
 `Options.untrusted = true` 把页面当作别人的页面，例如从自定义 scheme 显示插件界面：无论来源的授权（`OriginGrant.ipc`、`LocalSite.scheme_ipc`、普通 html）如何，页面的消息都不会成为 `Event.message`；`post` 仍能把消息送达页面。页面通往应用的通道是它向自己 scheme 发出的请求：`on_resource` 收到的 `ResourceRequest.page` 是发出请求的文档的 `PageId`，处理器据此判断是哪一个页面、哪一代文档在请求，再用 `postFor` 回复。权限、下载、新窗口和跨来源导航仍按各自的显式策略处理，默认全部拒绝。
 
-`PolicyRequest.user_gesture` 说明导航或新窗口请求是否由用户手势发起：点击链接，或在点击、按键的处理函数里设置 `location.href`、调用 `window.open()`；页面脚本自己（定时器、加载时）发起的为 false。Windows 来自事件参数的 `IsUserInitiated`；Linux 来自 `webkit_navigation_action_is_user_gesture`，`window.open()` 经 `create` 信号报告。WebKitGTK 自己会先拒绝没有手势的 `window.open()`，所以 Linux 只会报告有手势的那些；WebKit 把宿主 `evaluateJS` 运行的脚本视为用户手势，WebView2 的 ExecuteScript 不是。frame 导航不提供该信息，为 null。Linux 现在也接受 `policy.new_window = .notify`。
+`PolicyRequest.user_gesture` 说明导航或新窗口请求是否由用户手势发起：点击链接，或在点击、按键的处理函数里设置 `location.href`、调用 `window.open()`；页面脚本自己（定时器、加载时）发起的为 false。Windows 来自事件参数的 `IsUserInitiated`；Linux 来自 `webkit_navigation_action_is_user_gesture`，`window.open()` 经 `create` 信号报告。WebKitGTK 自己会先拒绝没有手势的 `window.open()`，所以 Linux 只会报告有手势的那些；WebKit 和 WebView2 都把宿主 `evaluateJS` 运行的脚本视为用户手势。frame 导航不提供该信息，为 null。Linux 现在也接受 `policy.new_window = .notify`。
 
 `Options.autoplay = .allow` 让页面在用户点击或输入之前就能播放有声媒体，隐藏窗口里的页面也一样：默认情况下没有手势时，有声的 `<audio>`/`<video>` 的 `play()` 以 `NotAllowedError` 拒绝。Linux 在每次主 frame 导航的 website policies 中设置 `WEBKIT_AUTOPLAY_ALLOW`。Windows 以 `--autoplay-policy=no-user-gesture-required` 启动浏览器：这是 WebView2 环境的参数，同一 user data folder 的所有 View 共享环境并且必须一致，否则后创建的 View 失败；Windows Profile owner 暂不接受这个选项（`UnsupportedCapability`）。
 

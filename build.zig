@@ -3258,9 +3258,10 @@ fn addSmokeModule(b: *std.Build, name: []const u8, path: []const u8, target: std
 
 /// addSmoke that returns the executable for test-only native additions.
 fn addSmokeExecutable(b: *std.Build, name: []const u8, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) *std.Build.Step.Compile {
+    // Error return traces name the check that failed in release builds too.
     const exe = b.addExecutable(.{
         .name = name,
-        .root_module = b.createModule(.{ .root_source_file = b.path(path), .target = target, .optimize = optimize, .imports = imports }),
+        .root_module = b.createModule(.{ .root_source_file = b.path(path), .target = target, .optimize = optimize, .error_tracing = true, .imports = imports }),
     });
     addResources(b, exe);
     const install = b.addInstallArtifact(exe, .{});
