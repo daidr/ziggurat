@@ -67,10 +67,10 @@
 - `editing.Field` 需要同步剪贴板，而系统剪贴板读取是异步的（同步 `readText`/`writeText` 只在 Windows 提供）。
 
 **系统设施**
-- 只能接收拖放，不能从窗口发起拖出（`drag_source` 为 false）。
-- 菜单项没有单选（radio）类型，`native` 用两个勾选项和 `setItemState` 模拟互斥。
-- 最后一个窗口关闭时 `App.run` 返回，没有“只留托盘继续运行”的选项；`native` 在关闭时改为隐藏窗口。
-- 主题不会自动跟随系统外观；`native` 用 `desktop.Watch` 监听偏好变化后调用 `setTheme`。
+- 系统层已有 `system.drag.Source` 和多格式 `drop.DataTarget`，但示例与视图还没有接入，拖出仍只在窗口内。
+- 菜单项已有单选（`radio`）类型，`native` 仍用两个勾选项和 `setItemState` 模拟互斥，尚未改用。
+- `AppOptions.on_all_windows_closed` 已能在最后一个窗口关闭后继续运行，`native` 仍在关闭时改为隐藏窗口。
+- `system.theme.Follower` 已能跟随系统外观，`native` 仍用 `desktop.Watch` 监听偏好变化后调用 `setTheme`。
 - 同步剪贴板读写只在 Windows 提供，`terminal` 的复制粘贴在 Linux 上不可用；终端里 Ctrl+点击链接需要应用自建 `shell.Worker`，示例没有接入。
 - 一帧最多绘制 `ui.loading.max_entries`（16）个加载指示器，视图不做裁剪，`loading` 因此分页显示。
 - 目录监视器只能在自建线程上使用；被删除的监视根不会自动恢复，`notes` 在打开的笔记集合变化时才重新添加。

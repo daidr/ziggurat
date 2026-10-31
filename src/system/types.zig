@@ -8,6 +8,11 @@ pub const Item = struct {
     label: []const u8 = "",
     enabled: bool = true,
     checked: bool = false,
+    /// Command items only. Shows a radio mark instead of a check mark. Radio
+    /// commands next to each other under the same parent form one group, of
+    /// which at most one is checked; `setItemState` checking one unchecks the
+    /// rest of its group. The app keeps the state, as for check marks.
+    radio: bool = false,
     /// Command items only. Shown beside the label; a menu bar also dispatches
     /// it as `Action.menu` when the window's content leaves the key unconsumed.
     accelerator: ?Accelerator = null,

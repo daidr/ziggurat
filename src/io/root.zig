@@ -554,6 +554,37 @@ pub fn modeOf(permissions: std.Io.File.Permissions) u32 {
 
 /// One row of a struct, enum or union's fields, in declaration order. `type`
 /// is `void` for enums and `value` is zero for structs and unions.
+/// `value` as the unsigned integer of its width, checked to be non-negative.
+/// Write `@intCast(zio.asUnsigned(value))` to cast a signed value to a
+/// narrower unsigned type: Zig 0.17.0's optimizing builds lower that cast
+/// directly as a truncation that must also fit the signed type of the
+/// destination's width, so results with the top bit set become undefined and
+/// comparisons on them fold wrongly
+/// (https://codeberg.org/ziglang/zig/issues/37127). Narrowing from an
+/// unsigned type is lowered correctly.
+pub inline fn asUnsigned(value: anytype) @Int(.unsigned, @typeInfo(@TypeOf(value)).int.bits) {
+    comptime std.debug.assert(@typeInfo(@TypeOf(value)).int.signedness == .signed);
+    return @intCast(value);
+}
+
+test "asUnsigned keeps narrow unsigned results whose top bit is set" {
+    const Probe = struct {
+        noinline fn late(days: i64) bool {
+            const weekday: u3 = @intCast(asUnsigned(@mod(days + 4, 7)));
+            return weekday >= 4;
+        }
+    };
+    var count: usize = 0;
+    var days: i64 = 0;
+    while (days < 7) : (days += 1) {
+        if (Probe.late(days)) count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), count);
+    var wide: i32 = 200;
+    _ = &wide;
+    try std.testing.expectEqual(@as(u8, 200), @as(u8, @intCast(asUnsigned(wide))));
+}
+
 pub const Field = struct {
     name: [:0]const u8,
     type: type,

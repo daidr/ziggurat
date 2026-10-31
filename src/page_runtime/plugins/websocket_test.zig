@@ -148,7 +148,7 @@ const Fixture = struct {
         const object = packet.value.object;
         if (object.get("id").?.integer != call) return error.UnexpectedCall;
         const kind = object.get("kind").?.string;
-        if (std.mem.eql(u8, kind, "chunk")) try self.page.ack(service, @intCast(call % 32), call, @intCast(object.get("sequence").?.integer));
+        if (std.mem.eql(u8, kind, "chunk")) try self.page.ack(service, @intCast(call % 32), call, @intCast(zio.asUnsigned(object.get("sequence").?.integer)));
         return .{ .parsed = packet };
     }
 

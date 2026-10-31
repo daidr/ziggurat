@@ -10,9 +10,9 @@ const usage =
     \\ziggurat-update current ROOT ID TARGET
     \\ziggurat-update pack OUTPUT_ZIP NAME ID TARGET VERSION EXECUTABLE FILE...
     \\ziggurat-update endorse TRUSTED_SEED_FILE NEW_PUBLIC_KEY_FILE ID ENDORSEMENT
-    \\ziggurat-update release DIR ID TARGET VERSION ZIP PRIVATE_SEED_FILE BASE_HTTPS_URL [--endorsement FILE] [--notes FILE] [--from OLD_ZIP OLD_VERSION]...
-    \\ziggurat-update check FEED PUBLIC_KEY_FILE ID TARGET ROOT
-    \\ziggurat-update fetch FEED PUBLIC_KEY_FILE ID TARGET ROOT
+    \\ziggurat-update release DIR ID TARGET VERSION ZIP PRIVATE_SEED_FILE BASE_HTTPS_URL [--endorsement FILE] [--notes FILE] [--prerelease] [--from OLD_ZIP OLD_VERSION]...
+    \\ziggurat-update check FEED PUBLIC_KEY_FILE ID TARGET ROOT [--prereleases]
+    \\ziggurat-update fetch FEED PUBLIC_KEY_FILE ID TARGET ROOT [--prereleases]
     \\ziggurat-update rollback ROOT ID TARGET VERSION
     \\ziggurat-update prune ROOT ID TARGET KEEP
     \\Versions have four decimal components. Key files contain exactly 32 raw bytes.
@@ -22,7 +22,9 @@ const usage =
     \\release writes signed manifests, patches and feed.json for static hosting;
     \\rerunning with the same inputs is a no-op and conflicting assets fail.
     \\--notes adds plain-text release notes for VERSION, which the feed lists
-    \\and the update window shows.
+    \\and the update window shows. --prerelease lists VERSION as a prerelease,
+    \\which only check and fetch with --prereleases, and apps that offer
+    \\prereleases, take.
     \\Publication performs blocking disk I/O and never overwrites a running release.
     \\Application shutdown and restart belong to the host.
     \\
@@ -121,7 +123,7 @@ fn run(process_args: std.process.Args) !void {
     } else if (std.mem.eql(u8, command, "release")) {
         try release(allocator, args);
     } else if (std.mem.eql(u8, command, "check") or std.mem.eql(u8, command, "fetch")) {
-        if (args.len != 7) return error.InvalidArguments;
+        if (args.len != 7 and !(args.len == 8 and std.mem.eql(u8, args[7], "--prereleases"))) return error.InvalidArguments;
         try checkOrFetch(allocator, args, std.mem.eql(u8, command, "fetch"));
     } else if (std.mem.eql(u8, command, "rollback")) {
         if (args.len != 6) return error.InvalidArguments;
@@ -186,6 +188,7 @@ fn joinUrl(allocator: std.mem.Allocator, base: []const u8, name: []const u8) ![]
 }
 
 const notes_suffix = ".notes.txt";
+const prerelease_suffix = ".prerelease";
 
 fn release(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len < 9) return error.InvalidArguments;
@@ -198,6 +201,7 @@ fn release(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const base = args[8];
     var endorsement: ?update.Endorsement = null;
     var notes_path: ?[]const u8 = null;
+    var prerelease = false;
     var previous: std.ArrayList(struct { path: []const u8, version: update.Version }) = .empty;
     var index: usize = 9;
     while (index < args.len) : (index += 1) {
@@ -207,6 +211,8 @@ fn release(allocator: std.mem.Allocator, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, args[index], "--notes") and index + 1 < args.len) {
             notes_path = args[index + 1];
             index += 1;
+        } else if (std.mem.eql(u8, args[index], "--prerelease")) {
+            prerelease = true;
         } else if (std.mem.eql(u8, args[index], "--from") and index + 2 < args.len) {
             try previous.append(allocator, .{ .path = args[index + 1], .version = try update.retention.parseVersion(args[index + 2]) });
             index += 2;
@@ -226,6 +232,7 @@ fn release(allocator: std.mem.Allocator, args: []const []const u8) !void {
         if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidNotes;
         _ = try writeAsset(dir, try std.fmt.allocPrint(allocator, "{s}-{s}{s}", .{ identity, v, notes_suffix }), text);
     }
+    if (prerelease) _ = try writeAsset(dir, try std.fmt.allocPrint(allocator, "{s}-{s}{s}", .{ identity, v, prerelease_suffix }), "");
     _ = try writeAsset(dir, try std.fmt.allocPrint(allocator, "{s}-{s}-{s}.json", .{ identity, target, v }), full_json);
     for (previous.items) |old| {
         if (old.version.order(version) != .lt) return error.InvalidArguments;
@@ -247,6 +254,7 @@ fn release(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var deltas: std.ArrayList([]const u8) = .empty;
     var names: std.ArrayList([]const u8) = .empty;
     var notes: std.ArrayList(update.feed.Note) = .empty;
+    var prereleases: std.ArrayList(update.Version) = .empty;
     var iterator = dir.iterate();
     while (try iterator.next(zio.io())) |entry| {
         if (entry.kind != .file or std.mem.eql(u8, entry.name, "feed.json")) continue;
@@ -257,12 +265,22 @@ fn release(allocator: std.mem.Allocator, args: []const []const u8) !void {
             try notes.append(allocator, .{ .version = noted, .text = try dir.readFileAlloc(zio.io(), entry.name, allocator, .limited(update.feed.max_notes_bytes)) });
             continue;
         }
+        if (std.mem.endsWith(u8, entry.name, prerelease_suffix)) {
+            const text = entry.name[identity.len + 1 .. entry.name.len - prerelease_suffix.len];
+            try prereleases.append(allocator, update.retention.parseVersion(text) catch continue);
+            continue;
+        }
         if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
         try names.append(allocator, try allocator.dupe(u8, entry.name));
     }
     std.mem.sort(update.feed.Note, notes.items, {}, struct {
         fn lessThan(_: void, a: update.feed.Note, b: update.feed.Note) bool {
             return a.version.order(b.version) == .lt;
+        }
+    }.lessThan);
+    std.mem.sort(update.Version, prereleases.items, {}, struct {
+        fn lessThan(_: void, a: update.Version, b: update.Version) bool {
+            return a.order(b) == .lt;
         }
     }.lessThan);
     std.mem.sort([]const u8, names.items, {}, struct {
@@ -274,7 +292,7 @@ fn release(allocator: std.mem.Allocator, args: []const []const u8) !void {
         const text = try dir.readFileAlloc(zio.io(), name, allocator, .limited(16384));
         if (std.mem.endsWith(u8, name, ".patch.json")) try deltas.append(allocator, text) else try releases.append(allocator, text);
     }
-    const feed_json = try update.feed.buildWithNotes(allocator, identity, releases.items, deltas.items, notes.items);
+    const feed_json = try update.feed.buildWith(allocator, identity, releases.items, deltas.items, .{ .notes = notes.items, .prereleases = prereleases.items });
     var atomic_buffer: [16 * 1024]u8 = undefined;
     var atomic = try zio.AtomicFile.init(dir, "feed.json", .{ .write_buffer = &atomic_buffer });
     defer atomic.deinit();
@@ -309,7 +327,8 @@ fn checkOrFetch(allocator: std.mem.Allocator, args: []const []const u8, fetch: b
         retained = try update.retention.currentArchive(allocator, root, identity, target);
     } else |err| if (err != error.FileNotFound) return err;
     const feed_bytes = try readFeed(allocator, &client, args[2]);
-    const result = try update.feed.check(allocator, feed_bytes, policy, if (retained) |value| .{ .sha256 = value.sha256 } else null);
+    const prereleases = args.len > 7 and std.mem.eql(u8, args[7], "--prereleases");
+    const result = try update.feed.checkChannel(allocator, feed_bytes, policy, if (retained) |value| .{ .sha256 = value.sha256 } else null, .{ .prereleases = prereleases });
     defer result.deinit();
     const available = switch (result) {
         .current => return out("current\n"),

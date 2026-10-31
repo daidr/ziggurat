@@ -1,6 +1,7 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
-const backend = if (builtin.is_test) @import("platform/testing.zig") else if (builtin.os.tag == .windows) @import("platform/windows.zig") else if (builtin.os.tag == .linux) @import("platform/linux.zig") else @import("platform/unsupported.zig");
+const backend = if (builtin.is_test) @import("platform/testing.zig") else if (builtin.os.tag == .windows) @import("platform/windows.zig") else if (builtin.os.tag == .linux) @import("platform/linux.zig") else if (builtin.os.tag == .macos) @import("platform/macos.zig") else @import("platform/unsupported.zig");
 const mailbox = @import("mailbox.zig");
 const registry = @import("registry.zig");
 const app_stop = @import("app_stop.zig");
@@ -27,6 +28,17 @@ pub const AppOptions = struct {
     stop_capacity: usize = 256,
     /// Borrowed until deinit.
     activation: ?ActivationHandler = null,
+    /// Borrowed until deinit. Set, the App keeps running without windows,
+    /// as an app living in the notification area does, until requestQuit or
+    /// quit: the last window closing calls it instead of quitting, and run
+    /// does not return when it starts without windows.
+    on_all_windows_closed: ?AllWindowsClosedHandler = null,
+};
+/// Runs on the owner thread at the dispatch safe point after the last
+/// window closed. It may create windows or quit. Context outlives the App.
+pub const AllWindowsClosedHandler = struct {
+    context: *anyopaque,
+    closed: *const fn (*anyopaque, *App) void,
 };
 
 pub const Task = mailbox.Task;
@@ -39,10 +51,10 @@ pub const StopToken = app_stop.Token;
 pub const Cleanup = struct { task: Task, next: ?*Cleanup = null, queued: bool = false };
 pub const NativeWaitToken = struct { index: u8, generation: u64 };
 pub const platform_capabilities = .{
-    .native_windows = builtin.os.tag == .windows or builtin.os.tag == .linux,
+    .native_windows = builtin.os.tag == .windows or builtin.os.tag == .linux or builtin.os.tag == .macos,
     .native_waits = builtin.os.tag == .windows,
     .application_icon = builtin.os.tag == .windows,
-    .text_input = builtin.os.tag == .windows or builtin.os.tag == .linux,
+    .text_input = builtin.os.tag == .windows or builtin.os.tag == .linux or builtin.os.tag == .macos,
 };
 pub const Point = struct { x: f32, y: f32 };
 pub const Rect = struct {
@@ -55,11 +67,13 @@ pub const Rect = struct {
     }
 };
 pub const Size = struct { width: u32, height: u32, scale: f32 };
-pub const Paint = struct { native_context: *anyopaque, native_window: ?*anyopaque = null, size: Size };
+/// `transparent` frames start clear and keep their alpha (see
+/// `WindowCapabilities.transparent`).
+pub const Paint = struct { native_context: *anyopaque, native_window: ?*anyopaque = null, size: Size, transparent: bool = false };
 pub const TextPreedit = struct { text: []const u8, selection_start: usize, selection_end: usize };
 /// Native delivery path, not an assertion about a physical keyboard or a
 /// language engine. A GTK text-service commit can include keyboard translation.
-pub const TextProducer = enum { win32_character, imm_result, gtk_text_service_commit, gtk_keyval_fallback, application };
+pub const TextProducer = enum { win32_character, imm_result, gtk_text_service_commit, gtk_keyval_fallback, appkit_text_input, application };
 pub const TextInput = struct { text: []const u8, producer: TextProducer };
 pub const EditKeyCode = enum { left, right, up, down, home, end, backspace, delete, a, c, x, v, z, y };
 pub const EditKey = struct { key: EditKeyCode, shift: bool = false, control: bool = false };
@@ -230,7 +244,10 @@ pub const Event = union(enum) {
     pointer_down: PointerButtonInput,
     pointer_up: PointerButtonInput,
     pointer_move: Point,
-    wheel: struct { position: Point, delta: Point },
+    /// `delta` in DIPs, 48 a notch of a mouse wheel. `precise` marks a
+    /// device that scrolls by distance, as a touchpad does, and `momentum`
+    /// scrolling that goes on after the fingers left it.
+    wheel: struct { position: Point, delta: Point, precise: bool = false, momentum: bool = false },
     focus: bool,
     /// Text slices are borrowed for the duration of the content callback.
     text_input: TextInput,
@@ -309,7 +326,13 @@ pub const WindowCapabilities = struct {
     custom_decoration: bool = false,
     native_move_resize: bool = false,
     system_menu: bool = false,
+    /// Paint frames start transparent and keep their alpha: a window created
+    /// with `transparent` on GTK with an RGBA visual, or one that can show a
+    /// material on Windows.
     transparent: bool = false,
+    /// What paint frames leave transparent shows the window's `Vibrancy`:
+    /// Windows 11 22H2 and later, in a window created with a material.
+    vibrancy: bool = false,
     backdrop_material: bool = false,
     /// `setOpacity` changes whole-window translucency. GTK needs a compositor.
     opacity: bool = false,
@@ -347,6 +370,31 @@ pub const WindowDecoration = enum { system, borderless, custom };
 /// System backdrop material drawn by the compositor behind the native frame.
 /// `.system` restores the platform default; client content stays opaque.
 pub const WindowBackdrop = enum { system, none, mica, acrylic, mica_alt };
+/// A translucent material that blurs what is behind a window, shown where its
+/// paint frames are transparent (see `WindowOptions.vibrancy`). Windows 11
+/// has the Mica, Acrylic and Tabbed system backdrops; the other materials use
+/// the closest one: Acrylic for transient UI (menu, popover, hud, sheet,
+/// tooltip, selection, fullscreen_ui), Mica otherwise. Linux has none.
+pub const Vibrancy = enum {
+    none,
+    window,
+    content,
+    sidebar,
+    header,
+    titlebar,
+    under_window,
+    under_page,
+    menu,
+    popover,
+    hud,
+    sheet,
+    tooltip,
+    selection,
+    fullscreen_ui,
+    mica,
+    acrylic,
+    tabbed,
+};
 /// Construction-time native accessibility hosting policy.
 pub const AccessibilityHost = enum { platform, children };
 pub const ResizeEdge = enum(u8) { north_west, north, north_east, west, east, south_west, south, south_east };
@@ -364,7 +412,7 @@ pub const WindowHit = enum(c_int) {
     south_east,
     pub fn resizeEdge(self: WindowHit) ?ResizeEdge {
         const value = @backingInt(self);
-        return if (value >= @backingInt(WindowHit.north_west)) @fromBackingInt(@intCast(value - @backingInt(WindowHit.north_west))) else null;
+        return if (value >= @backingInt(WindowHit.north_west)) @fromBackingInt(@intCast(zio.asUnsigned(value - @backingInt(WindowHit.north_west)))) else null;
     }
 };
 /// The shape of the pointer over the client area. Shapes a platform lacks
@@ -441,6 +489,9 @@ pub const WindowOptions = struct {
     /// unless left at its default.
     opacity: f32 = 1,
     skip_taskbar: bool = false,
+    /// False shows the window without taking the keyboard from the window
+    /// that has it, as a prompt raised by background work should.
+    focus_on_show: bool = true,
     /// Reserved client edge in DIP for .custom; .borderless has no auto edges.
     resize_border: f32 = 6,
     /// Borrowed context remains valid through on_closed, like close handlers.
@@ -457,6 +508,16 @@ pub const WindowOptions = struct {
     /// Other native backends reject it with UnsupportedCapability.
     accessibility_host: AccessibilityHost = .platform,
     popup: ?PopupRole = null,
+    /// Makes the window background transparent, so what paint frames leave
+    /// transparent shows the desktop through. GTK needs a compositing
+    /// desktop; `capabilities().transparent` tells whether frames keep alpha.
+    transparent: bool = false,
+    /// Puts a material behind what paint frames leave transparent. On
+    /// Windows only a window created with a material can show one (Windows
+    /// 11 22H2 and later, `capabilities().vibrancy`); its frames are then
+    /// composed with their alpha and it has no menu bar: Alt and F10 open the
+    /// menus in a popup. Linux shows none.
+    vibrancy: Vibrancy = .none,
     on_close: ?CloseHandler = null,
     on_closed: ?ClosedHandler = null,
 };
@@ -504,6 +565,9 @@ pub const App = struct {
     icon_policy: @FieldType(AppOptions, "icon_policy") = .automatic,
     reporting_diagnostic: bool = false,
     activation: ?ActivationHandler = null,
+    all_windows_closed: ?AllWindowsClosedHandler = null,
+    /// A window was created since the handler last ran.
+    windows_seen: bool = false,
     active: bool = false,
     activation_dirty: bool = false,
     activation_notifying: bool = false,
@@ -522,7 +586,7 @@ pub const App = struct {
             return err;
         };
         errdefer allocator.destroy(self);
-        self.* = .{ .allocator = allocator, .owner = std.Thread.getCurrentId(), .diagnostics_sink = options.diagnostics_sink, .icon_policy = options.icon_policy, .stop_resources = stops, .activation = options.activation };
+        self.* = .{ .allocator = allocator, .owner = std.Thread.getCurrentId(), .diagnostics_sink = options.diagnostics_sink, .icon_policy = options.icon_policy, .stop_resources = stops, .activation = options.activation, .all_windows_closed = options.on_all_windows_closed };
         backend.init(self) catch |err| {
             self.report(self.failureDiagnostic(.app_init, err, null));
             return err;
@@ -675,7 +739,7 @@ pub const App = struct {
             self.allocator.free(title);
             return err;
         };
-        record.* = .{ .window = .{ .app = self, .key = key }, .options = options, .next = self.first, .pins = 1, .title = title };
+        record.* = .{ .window = .{ .app = self, .key = key }, .options = options, .vibrancy = options.vibrancy, .next = self.first, .pins = 1, .title = title };
         if (owner) |parent| record.linkOwner(parent);
         if (self.first) |first| first.previous = record;
         self.first = record;
@@ -698,6 +762,7 @@ pub const App = struct {
         };
         if (record.phase != .open) return error.CreateWindowFailed;
         record.created = true;
+        self.windows_seen = true;
         // The native API has copied the title. Do not retain its borrowed slice.
         record.options.title = "";
         return record.window;
@@ -1052,10 +1117,16 @@ pub const App = struct {
     fn leaveActivity(self: *App) void {
         std.debug.assert(self.activity_depth != 0);
         self.activity_depth -= 1;
-        if (self.activity_depth == 0 and (self.relations_dirty or (self.activation_dirty and self.activationLive()) or self.focus_restore != null or self.pending_head != null or self.cleanup_head != null or self.queue.pending() or (self.windows.count == 0 and self.phase == .running))) backend.wake(self);
+        if (self.activity_depth == 0 and (self.relations_dirty or (self.activation_dirty and self.activationLive()) or self.focus_restore != null or self.pending_head != null or self.cleanup_head != null or self.queue.pending() or (self.windows.count == 0 and self.phase == .running and (self.all_windows_closed == null or self.windows_seen)))) backend.wake(self);
     }
     fn maybeQuit(self: *App) void {
-        if (self.phase == .running and self.windows.count == 0 and self.pending_head == null and self.activity_depth <= 1) self.quit();
+        if (self.phase != .running or self.windows.count != 0 or self.pending_head != null or self.activity_depth > 1) return;
+        const handler = self.all_windows_closed orelse return self.quit();
+        if (!self.windows_seen) return;
+        self.windows_seen = false;
+        self.activity_depth += 1;
+        defer self.leaveActivity();
+        handler.closed(handler.context, self);
     }
 };
 
@@ -1335,6 +1406,28 @@ pub const Window = struct {
             self.reportUpdateFailure(scope.record, err);
             return err;
         };
+    }
+    /// Sets the material behind what paint frames leave transparent; `.none`
+    /// removes it. A window created without a material, or where materials
+    /// are unavailable, keeps the value and shows none.
+    pub fn setVibrancy(self: Window, material: Vibrancy) !void {
+        const scope = try self.beginUpdate();
+        defer endUpdate(scope);
+        scope.record.vibrancy = material;
+        backend.setVibrancy(scope.record, material);
+    }
+    pub fn vibrancy(self: Window) !Vibrancy {
+        const record = self.resolve() orelse return error.Closed;
+        if (record.phase != .open) return error.Closed;
+        return record.vibrancy;
+    }
+    /// Whether the window shows its material wherever paint frames are
+    /// transparent. Elsewhere, transparent frames show no material: paint a
+    /// background there instead.
+    pub fn showsVibrancy(self: Window) bool {
+        const scope = self.beginCallback() orelse return false;
+        defer scope.end();
+        return scope.record.vibrancy != .none and backend.capabilities(scope.record).vibrancy;
     }
     pub fn traits(self: Window) !WindowTraits {
         const record = self.resolve() orelse return error.Closed;
@@ -1796,6 +1889,7 @@ pub const WindowRecord = struct {
     window: Window,
     options: WindowOptions,
     native: backend.WindowData = .{},
+    vibrancy: Vibrancy = .none,
     pointer_state: ?*PointerState = null,
     content: ?Content = null,
     parent_destroy_notified: bool = false,

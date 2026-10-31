@@ -17,6 +17,9 @@ pub const Options = extern struct {
     profile_context: ?*anyopaque = null,
     initializers: ?*const @import("initializer_owner.zig").NativeInput = null,
     developer_tools: u32 = 0,
+    content_filters: ?[*]const *anyopaque = null,
+    content_filter_count: u32 = 0,
+    audio_muted: u32 = 0,
     facts: ?[*:0]const u8 = null,
     autoplay: u32 = 0,
     gestures: u32 = 0,
@@ -166,6 +169,13 @@ pub extern fn zwk_pdf_start(*anyopaque, u64, [*:0]const u8, *const PdfRequest) c
 pub extern fn zwk_clear_start(*anyopaque, u64) c_int;
 pub extern fn zwk_capture_cancel(*anyopaque, u64) void;
 pub extern fn zwk_capture_counts(*u32, *u32, *usize, *usize) void;
+pub extern fn zwk_audio(*anyopaque, c_int, *c_int) c_int;
+pub extern fn zwk_content_filters(*anyopaque, ?[*]const *anyopaque, u32) c_int;
+pub const ContentDone = *const fn (?*anyopaque, ?*anyopaque, c_int, u32, i32) callconv(.c) void;
+pub extern fn zwk_content_compile([*:0]const u8, [*:0]const u8, [*:0]const u8, [*]const u8, usize, ContentDone, *anyopaque, *?*anyopaque) c_int;
+pub extern fn zwk_content_cancel(*anyopaque) void;
+pub extern fn zwk_content_filter_unref(*anyopaque) void;
+pub extern fn zwk_content_compile_count() u32;
 pub extern fn zwk_create(*anyopaque, *const Options, Notify, PageNotify, ScriptNotify, *const fn (*anyopaque) callconv(.c) void, *anyopaque, *?*anyopaque) c_int;
 pub extern fn zwk_session_create(*const Options, u32, u32, Notify, PageNotify, ScriptNotify, *const fn (*anyopaque) callconv(.c) void, *anyopaque, *?*anyopaque) c_int;
 pub extern fn zwk_session_mount(*anyopaque, *anyopaque, i32, i32, i32, i32, c_int, u64) c_int;

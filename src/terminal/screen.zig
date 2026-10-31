@@ -2,6 +2,7 @@
 //! screen allocates once for its size and scrollback budget and again only
 //! on `resize`; printing, scrolling and erasing never allocate.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const width = @import("width.zig");
 
 /// A cell color: the default foreground or background, one of the 256
@@ -575,7 +576,7 @@ pub const Screen = struct {
     /// Move up, stopping at the top margin when inside the region.
     pub fn up(self: *Screen, n: usize) void {
         const limit: u16 = if (self.cursor.y >= self.top) self.top else 0;
-        self.cursor.y = @intCast(@max(@as(isize, limit), @as(isize, self.cursor.y) - @as(isize, @intCast(@min(n, self.rows)))));
+        self.cursor.y = @intCast(zio.asUnsigned(@max(@as(isize, limit), @as(isize, self.cursor.y) - @as(isize, @intCast(@min(n, self.rows))))));
         self.cursor.pending_wrap = false;
         self.changed();
     }
@@ -996,12 +997,12 @@ pub const Screen = struct {
         self.bottom = rows - 1;
         if (!self.on_alternate) {
             const moved = @as(isize, self.cursor.y) - shift;
-            self.cursor.y = @intCast(std.math.clamp(moved, 0, @as(isize, rows - 1)));
+            self.cursor.y = @intCast(zio.asUnsigned(std.math.clamp(moved, 0, @as(isize, rows - 1))));
         } else {
             self.cursor.y = @min(self.cursor.y, rows - 1);
             const saved = &self.saved[0].cursor;
             const moved = @as(isize, saved.y) - shift;
-            saved.y = @intCast(std.math.clamp(moved, 0, @as(isize, rows - 1)));
+            saved.y = @intCast(zio.asUnsigned(std.math.clamp(moved, 0, @as(isize, rows - 1))));
         }
         self.cursor.x = @min(self.cursor.x, cols - 1);
         self.cursor.pending_wrap = false;

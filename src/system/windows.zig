@@ -36,6 +36,11 @@ pub const Owner = struct {
     picker: picker_api.Picker = .{},
     popup: native_menu.Host = .{ .context = undefined, .done = popupDone },
     message_dialog: message_api.Message = .{},
+    /// A window that shows a material has no menu bar: the menu stays here
+    /// and Alt or F10 open it in a popup.
+    barless: bool = false,
+    /// The letter of Alt and a letter that opened the bar popup, and the popup.
+    menu_key: struct { popup: c.HMENU = null, key: usize = 0 } = .{},
 
     pub fn init(context: *anyopaque, on_action: *const fn (*anyopaque, z.Window, types.Action) void) Owner {
         return .{ .context = context, .on_action = on_action };
@@ -56,6 +61,7 @@ pub const Owner = struct {
             self.hwnd = null;
         }
         self.taskbar_created = registered;
+        self.barless = (window.capabilities() catch return error.Closed).vibrancy;
         try window.setService(.{ .context = self, .message = message, .native_destroying = nativeDestroying });
     }
     pub fn detach(self: *Owner) !void {
@@ -210,7 +216,7 @@ pub const Owner = struct {
         var entries: [types.max_menu_items]Entry = undefined;
         const built = native_menu.build(items, &plan, false, first_command, &entries) catch |err| return self.failed(err);
         const menu = built.menu;
-        if (c.SetMenu(self.hwnd, menu) == 0) {
+        if (!self.barless and c.SetMenu(self.hwnd, menu) == 0) {
             _ = c.DestroyMenu(menu);
             return self.failed(error.MenuAttachFailed);
         }
@@ -226,13 +232,14 @@ pub const Owner = struct {
         const scope = window.beginCallback() orelse return error.Closed;
         defer scope.end();
         const menu = self.menu orelse return;
-        if (c.SetMenu(self.hwnd, null) == 0) return self.failed(error.MenuDetachFailed);
+        if (!self.barless and c.SetMenu(self.hwnd, null) == 0) return self.failed(error.MenuDetachFailed);
         self.menu = null;
         self.entry_count = 0;
         _ = c.DestroyMenu(menu);
         _ = c.DrawMenuBar(self.hwnd);
     }
     /// Updates a command item. Submenu state changes use a new setMenu snapshot.
+    /// Checking a radio item unchecks the rest of its group.
     pub fn setItemState(self: *Owner, id: u64, enabled: bool, checked: bool) !void {
         const window = try self.require();
         const scope = window.beginCallback() orelse return error.Closed;
@@ -243,6 +250,7 @@ pub const Owner = struct {
             info.fMask = c.MIIM_STATE;
             info.fState = @as(c.UINT, @intCast(if (enabled) c.MFS_ENABLED else c.MFS_DISABLED)) | @as(c.UINT, @intCast(if (checked) c.MFS_CHECKED else c.MFS_UNCHECKED));
             if (c.SetMenuItemInfoW(entry.menu, entry.command, c.FALSE, &info) == 0) return self.failed(error.MenuUpdateFailed);
+            if (checked and entry.radio_last != 0 and c.CheckMenuRadioItem(entry.menu, entry.radio_first, entry.radio_last, entry.command, c.MF_BYCOMMAND) == 0) return self.failed(error.MenuUpdateFailed);
             entry.enabled = enabled and entry.ancestor_enabled;
             _ = c.DrawMenuBar(self.hwnd);
             return;
@@ -398,11 +406,54 @@ pub const Owner = struct {
             self.menu = null;
             // A menu still assigned to a dying HWND is destroyed by Win32.
             // Once detached (including explicit service removal), we own it.
-            if (c.SetMenu(self.hwnd, null) != 0) _ = c.DestroyMenu(menu);
+            if (self.barless or c.SetMenu(self.hwnd, null) != 0) _ = c.DestroyMenu(menu);
         }
         self.entry_count = 0;
         self.window = null;
         self.hwnd = null;
+    }
+    /// Shows the bar's menus in a popup at the top of the client area. The
+    /// submenus are the bar's own, taken back before the popup is destroyed.
+    fn popupMenuBar(self: *Owner, window: z.Window, key: usize) void {
+        const bar = self.menu orelse return;
+        const count = c.GetMenuItemCount(bar);
+        if (count <= 0) return;
+        const popup = c.CreatePopupMenu() orelse return;
+        defer {
+            var index = count;
+            while (index > 0) {
+                index -= 1;
+                _ = c.RemoveMenu(popup, @intCast(index), c.MF_BYPOSITION);
+            }
+            _ = c.DestroyMenu(popup);
+        }
+        for (0..@intCast(count)) |index| {
+            var label: [256]u16 = undefined;
+            if (c.GetMenuStringW(bar, @intCast(index), &label, label.len, c.MF_BYPOSITION) < 0) label[0] = 0;
+            const state: c.UINT = c.GetMenuState(bar, @intCast(index), c.MF_BYPOSITION);
+            var flags: c.UINT = @as(c.UINT, c.MF_STRING) | (state & @as(c.UINT, c.MF_GRAYED));
+            var item: usize = 0;
+            if (c.GetSubMenu(bar, @intCast(index))) |submenu| {
+                flags |= @as(c.UINT, c.MF_POPUP);
+                item = @intFromPtr(submenu);
+            } else item = c.GetMenuItemID(bar, @intCast(index));
+            if (state & @as(c.UINT, c.MF_SEPARATOR) != 0) flags = c.MF_SEPARATOR;
+            _ = c.AppendMenuW(popup, flags, item, &label);
+        }
+        var point: c.POINT = .{ .x = 0, .y = 0 };
+        _ = c.ClientToScreen(self.hwnd, &point);
+        if (key != 0) {
+            // The menu loop takes the letter as typed in the popup.
+            self.menu_key = .{ .popup = popup, .key = key };
+            _ = c.PostMessageW(self.hwnd, c.WM_CHAR, key, 0);
+        }
+        const command = c.TrackPopupMenuEx(popup, c.TPM_RETURNCMD | c.TPM_NONOTIFY | c.TPM_LEFTALIGN | c.TPM_TOPALIGN, point.x, point.y, self.hwnd, null);
+        self.menu_key = .{};
+        if (command <= 0 or window.isClosed() or self.window == null) return;
+        for (self.entries[0..self.entry_count]) |entry| if (entry.command == command) {
+            if (entry.enabled) self.on_action(self.context, window, .{ .menu = entry.id });
+            return;
+        };
     }
     fn message(ptr: *anyopaque, window: z.Window, native_message: u32, wp: usize, lp: isize) ?isize {
         const self: *Owner = @ptrCast(@alignCast(ptr));
@@ -413,6 +464,19 @@ pub const Owner = struct {
                 self.on_action(self.context, window, .{ .menu = entry.id });
                 return 0;
             };
+            return null;
+        }
+        if (native_message == c.WM_SYSCOMMAND and wp & 0xfff0 == c.SC_KEYMENU and lp != ' ' and self.barless and self.menu != null) {
+            // Alt or F10 alone (lp 0) take the keyboard to the menus, and Alt
+            // and a letter (lp the letter) open the menu of the letter; Alt
+            // and Space keep opening the window menu.
+            self.popupMenuBar(window, @bitCast(lp));
+            return 0;
+        }
+        if (native_message == c.WM_MENUCHAR) {
+            // Alt and a letter that names no menu of the bar open none, as in
+            // the bar: the popup closes.
+            if (self.menu_key.popup != null and @intFromPtr(self.menu_key.popup) == @as(usize, @bitCast(lp)) and wp & 0xffff == self.menu_key.key) return c.MNC_CLOSE << 16;
             return null;
         }
         if (native_message == c.WM_HOTKEY) {

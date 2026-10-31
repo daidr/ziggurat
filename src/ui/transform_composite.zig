@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const affine = @import("affine.zig");
 const composite = @import("composite.zig");
 
@@ -164,8 +165,8 @@ fn drawGrid(source: Plane, destination: Plane, grid: Grid, bounds: [4]u32, clip:
             const full_left = @max(@as(i64, @intFromFloat(@ceil(@max(@as(f64, @floatFromInt(bounds[0])), clip[0])))), source_left);
             const full_right = @min(@as(i64, @intFromFloat(@floor(@min(@as(f64, @floatFromInt(bounds[2])), clip[2])))), source_right);
             if (full_left < full_right) {
-                const left: u32 = @intCast(full_left);
-                const right: u32 = @intCast(full_right);
+                const left: u32 = @intCast(zio.asUnsigned(full_left));
+                const right: u32 = @intCast(zio.asUnsigned(full_right));
                 drawGridRun(source, destination, grid, y, bounds[0], left, row_amount, clip);
                 const sx = grid.xx * full_left + grid.x0;
                 overRow(destination.pixels[y * destination.stride + left ..][0 .. right - left], source.pixels, @as(usize, @intCast(sy)) * source.stride + @as(usize, @intCast(sx)), grid.xx);

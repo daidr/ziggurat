@@ -26,8 +26,9 @@ pub fn resize(allocator: std.mem.Allocator, image: png.Image, size: u32) !png.Im
     const Sample = struct { r: f64, g: f64, b: f64, a: f64 };
     const at = struct {
         fn get(img: png.Image, x: i64, y: i64) Sample {
-            const cx: u32 = @intCast(std.math.clamp(x, 0, @as(i64, img.width) - 1));
-            const cy: u32 = @intCast(std.math.clamp(y, 0, @as(i64, img.height) - 1));
+            // Narrowed through u64, as `ziggurat_io.asUnsigned` explains.
+            const cx: u32 = @intCast(@as(u64, @intCast(std.math.clamp(x, 0, @as(i64, img.width) - 1))));
+            const cy: u32 = @intCast(@as(u64, @intCast(std.math.clamp(y, 0, @as(i64, img.height) - 1))));
             const p = img.at(cx, cy);
             const a: f64 = @floatFromInt(p[3]);
             return .{ .r = @as(f64, @floatFromInt(p[0])) * a, .g = @as(f64, @floatFromInt(p[1])) * a, .b = @as(f64, @floatFromInt(p[2])) * a, .a = a };

@@ -20,6 +20,14 @@ const bar_items = [_]system.Item{
     .{ .id = 14, .parent = 13, .label = "&Undo", .accelerator = .{ .key = .z, .modifiers = .{ .alt = true } } },
 };
 
+fn menuType(menu: c.HMENU, position: c.UINT) c.UINT {
+    var info = std.mem.zeroes(c.MENUITEMINFOW);
+    info.cbSize = @sizeOf(c.MENUITEMINFOW);
+    info.fMask = c.MIIM_FTYPE;
+    if (c.GetMenuItemInfoW(menu, position, c.TRUE, &info) == 0) return 0;
+    return info.fType;
+}
+
 /// What the next timer tick does inside the system menu loop.
 const Driver = enum { idle, choose_first, cancel, detach, tray_choose };
 
@@ -209,6 +217,27 @@ pub fn main() !void {
             .{ .id = 2, .label = "B", .accelerator = .{ .key = .f2 } },
         }));
         try std.testing.expectError(error.InvalidAccelerator, probe.owner.setMenu(&.{.{ .id = 1, .label = "A", .accelerator = .{ .key = .a } }}));
+
+        // Radio commands carry the radio mark; checking one unchecks its group.
+        try probe.owner.setMenu(&.{
+            .{ .id = 20, .kind = .submenu, .label = "&View" },
+            .{ .id = 21, .parent = 20, .label = "Small", .radio = true, .checked = true },
+            .{ .id = 22, .parent = 20, .label = "Large", .radio = true },
+            .{ .id = 23, .parent = 20, .label = "Wrap", .checked = true },
+        });
+        const view = c.GetSubMenu(c.GetMenu(hwnd), 0);
+        try std.testing.expect(menuType(view, 0) & c.MFT_RADIOCHECK != 0);
+        try std.testing.expect(menuType(view, 2) & c.MFT_RADIOCHECK == 0);
+        try std.testing.expect(c.GetMenuState(view, 0, c.MF_BYPOSITION) & c.MF_CHECKED != 0);
+        try probe.owner.setItemState(22, true, true);
+        try std.testing.expect(c.GetMenuState(view, 0, c.MF_BYPOSITION) & c.MF_CHECKED == 0);
+        try std.testing.expect(c.GetMenuState(view, 1, c.MF_BYPOSITION) & c.MF_CHECKED != 0);
+        try std.testing.expect(c.GetMenuState(view, 2, c.MF_BYPOSITION) & c.MF_CHECKED != 0);
+        try std.testing.expectError(error.MultipleRadioChecked, probe.owner.setMenu(&.{
+            .{ .id = 1, .label = "A", .radio = true, .checked = true },
+            .{ .id = 2, .label = "B", .radio = true, .checked = true },
+        }));
+        try probe.owner.setMenu(&bar_items);
 
         // A standalone tray item: shell add, events, anchored menu, recovery.
         probe.tray = system.Tray.init(&probe, Probe.trayAction);

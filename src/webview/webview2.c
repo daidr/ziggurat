@@ -47,7 +47,10 @@ typedef int (*CertificateOffer)(void *,const WCHAR *,int32_t,const WCHAR *);
 typedef struct ContextItemInput { const WCHAR *name; const WCHAR *label; uint32_t kind; uint32_t flags; } ContextItemInput;
 typedef struct ContextTargetInput { const WCHAR *link, *link_text, *image, *media, *selection, *frame; uint32_t editable; } ContextTargetInput;
 typedef int (*ContextMenuOffer)(void *,const ContextTargetInput *,const ContextItemInput *,uint32_t,uint8_t *,void *);
-typedef struct ViewSettings { double zoom; const WCHAR *user_agent; _Bool devtools; uint32_t tool_flags,tool_limit,max_cookies,max_cookie_bytes,max_capture_bytes; const SchemeInput *schemes;uint32_t scheme_count;_Bool local_ipc;const ActionInput *actions;const InitializerInput *initializers; ZwpwContext *owned_context; const WCHAR *facts; const WCHAR *browser_arguments; AuthOffer auth; CertificateOffer certificate_offer; uint32_t context_menu; ContextMenuOffer context_offer; uint32_t gestures; } ViewSettings;
+/* What a page's content rules do to a load: bit 0 blocks it, bit 1 sends it
+   without cookies, bit 2 makes it secure. top is NULL for the page itself. */
+typedef uint32_t (*ContentVerdict)(void *,const WCHAR *uri,const WCHAR *top,int resource_context);
+typedef struct ViewSettings { double zoom; const WCHAR *user_agent; _Bool devtools; uint32_t tool_flags,tool_limit,max_cookies,max_cookie_bytes,max_capture_bytes; const SchemeInput *schemes;uint32_t scheme_count;_Bool local_ipc;const ActionInput *actions;const InitializerInput *initializers; ZwpwContext *owned_context; const WCHAR *facts; const WCHAR *browser_arguments; _Bool audio_muted; ContentVerdict content_verdict; const WCHAR *content_style; AuthOffer auth; CertificateOffer certificate_offer; uint32_t context_menu; ContextMenuOffer context_offer; uint32_t gestures; } ViewSettings;
 typedef void (*Resource)(void *, const WCHAR *, const WCHAR *, const NativeHeader *, uint32_t, void *);
 typedef struct PageEvent {
     int kind;
@@ -77,6 +80,15 @@ struct State {
     ICoreWebView2_22 *webview22;
     ICoreWebView2_10 *webview10;
     ICoreWebView2_5 *webview5;
+    ICoreWebView2_8 *webview8; /* NULL on Runtimes without audio control */
+    EventRegistrationToken audible_token, muted_token;
+    BOOL has_audible, has_muted;
+    BOOL muted;                /* the state wanted, kept until webview8 exists */
+    ULONGLONG mute_put;        /* tick of the IsMuted put in flight, 0 for none */
+    ContentVerdict content_verdict;
+    WCHAR *content_style;      /* the hiding script every document runs */
+    WCHAR *style_id;           /* its id once added */
+    uint64_t style_serial;
     RemotePolicy remote;
     ActionPolicy *actions;
     PermissionPending *permission_requests;
@@ -158,7 +170,7 @@ static void release(State *s) {
         action_policy_free(s->actions);
         if (s->environment_options) ICoreWebView2EnvironmentOptions_Release(s->environment_options);
         if (s->owned_context) zwpw_context_unref(s->owned_context);
-        free(s->facts_script); free(s->html); free(s->document_source); free(s->initial_url); free(s->local_prefix); free(s->expected_url); free(s->user_agent); free(s);
+        free(s->facts_script); free(s->html); free(s->document_source); free(s->initial_url); free(s->local_prefix); free(s->expected_url); free(s->user_agent); free(s->content_style); free(s->style_id); free(s);
         InterlockedDecrement(&live_states);
     }
 }
@@ -227,6 +239,8 @@ HANDLER(CertificateHandler, ICoreWebView2ClientCertificateRequestedEventHandler,
 HANDLER(ServerCertificateHandler, ICoreWebView2ServerCertificateErrorDetectedEventHandler, IID_ICoreWebView2ServerCertificateErrorDetectedEventHandler)
 HANDLER(FindMatchHandler, ICoreWebView2FindMatchCountChangedEventHandler, IID_ICoreWebView2FindMatchCountChangedEventHandler)
 HANDLER(FindIndexHandler, ICoreWebView2FindActiveMatchIndexChangedEventHandler, IID_ICoreWebView2FindActiveMatchIndexChangedEventHandler)
+HANDLER(AudibleHandler, ICoreWebView2IsDocumentPlayingAudioChangedEventHandler, IID_ICoreWebView2IsDocumentPlayingAudioChangedEventHandler)
+HANDLER(MutedHandler, ICoreWebView2IsMutedChangedEventHandler, IID_ICoreWebView2IsMutedChangedEventHandler)
 HANDLER(FactsHandler, ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler, IID_ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler)
 
 static HRESULT STDMETHODCALLTYPE environment_invoke(ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler *, HRESULT, ICoreWebView2Environment *);
@@ -256,6 +270,8 @@ static HRESULT STDMETHODCALLTYPE certificate_invoke(ICoreWebView2ClientCertifica
 static HRESULT STDMETHODCALLTYPE server_certificate_invoke(ICoreWebView2ServerCertificateErrorDetectedEventHandler *,ICoreWebView2 *,ICoreWebView2ServerCertificateErrorDetectedEventArgs *);
 static HRESULT STDMETHODCALLTYPE find_match_invoke(ICoreWebView2FindMatchCountChangedEventHandler *,ICoreWebView2Find *,IUnknown *);
 static HRESULT STDMETHODCALLTYPE find_index_invoke(ICoreWebView2FindActiveMatchIndexChangedEventHandler *,ICoreWebView2Find *,IUnknown *);
+static HRESULT STDMETHODCALLTYPE audible_invoke(ICoreWebView2IsDocumentPlayingAudioChangedEventHandler *,ICoreWebView2 *,IUnknown *);
+static HRESULT STDMETHODCALLTYPE muted_invoke(ICoreWebView2IsMutedChangedEventHandler *,ICoreWebView2 *,IUnknown *);
 static HRESULT STDMETHODCALLTYPE facts_invoke(ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler *,HRESULT,LPCWSTR);
 
 #define VTABLE(Name, Interface, Invoke) \
@@ -291,6 +307,9 @@ VTABLE(CertificateHandler, ICoreWebView2ClientCertificateRequestedEventHandler, 
 VTABLE(ServerCertificateHandler, ICoreWebView2ServerCertificateErrorDetectedEventHandler, server_certificate_invoke)
 VTABLE(FindMatchHandler, ICoreWebView2FindMatchCountChangedEventHandler, find_match_invoke)
 VTABLE(FindIndexHandler, ICoreWebView2FindActiveMatchIndexChangedEventHandler, find_index_invoke)
+VTABLE(AudibleHandler, ICoreWebView2IsDocumentPlayingAudioChangedEventHandler, audible_invoke)
+VTABLE(MutedHandler, ICoreWebView2IsMutedChangedEventHandler, muted_invoke)
+#include "audio_native.h"
 VTABLE(FactsHandler, ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler, facts_invoke)
 #include "evaluations.h"
 #include "browser_tools.h"
@@ -668,7 +687,7 @@ static HRESULT STDMETHODCALLTYPE controller_invoke(ICoreWebView2CreateCoreWebVie
     State *s=((ControllerHandler *)p)->state;retain(s);
     ICoreWebView2 *view=NULL;
     ICoreWebView2_4 *view4=NULL;ICoreWebView2_22 *view22=NULL;
-    ICoreWebView2_10 *view10=NULL;ICoreWebView2_5 *view5=NULL;ICoreWebView2_14 *view14=NULL;ICoreWebView2_11 *view11=NULL;
+    ICoreWebView2_10 *view10=NULL;ICoreWebView2_5 *view5=NULL;ICoreWebView2_14 *view14=NULL;ICoreWebView2_11 *view11=NULL;ICoreWebView2_8 *view8=NULL;
     ICoreWebView2Settings *settings=NULL;ICoreWebView2Settings2 *settings2=NULL;ICoreWebView2Settings5 *settings5=NULL;ICoreWebView2Settings6 *settings6=NULL;
     BOOL controller_pin=FALSE;
     if (s->closed) { if (controller) ICoreWebView2Controller_Close(controller);goto done; }
@@ -732,6 +751,20 @@ static HRESULT STDMETHODCALLTYPE controller_invoke(ICoreWebView2CreateCoreWebVie
         QUERY_INTERFACE(ICoreWebView2_11,IID_ICoreWebView2_11,view11,webview11);
         REGISTER_HANDLER(ContextMenuHandler,ICoreWebView2_11,view11,add_ContextMenuRequested,remove_ContextMenuRequested,context_token,has_context);
     }
+    /* Audio control is optional: older Runtimes keep playing and report
+       nothing. */
+    if (SUCCEEDED(ICoreWebView2_QueryInterface(view,&IID_ICoreWebView2_8,(void **)&view8))&&view8) {
+        if (s->closed) goto done;
+        ICoreWebView2_8_AddRef(view8);
+        if (s->closed) { ICoreWebView2_8_Release(view8);goto done; }
+        s->webview8=view8;
+        REGISTER_HANDLER(MutedHandler,ICoreWebView2_8,view8,add_IsMutedChanged,remove_IsMutedChanged,muted_token,has_muted);
+        if (s->observe_metadata) REGISTER_HANDLER(AudibleHandler,ICoreWebView2_8,view8,add_IsDocumentPlayingAudioChanged,remove_IsDocumentPlayingAudioChanged,audible_token,has_audible);
+        if (s->muted) mute_put(s);
+        if (s->closed) goto done;
+    } else view8=NULL;
+    hr=style_apply(s);
+    if (FAILED(hr)||s->closed) goto failed;
 #undef REGISTER_HANDLER
 #undef QUERY_INTERFACE
     hr=ICoreWebView2_22_AddWebResourceRequestedFilterWithRequestSourceKinds(view22,L"*",COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_ALL);
@@ -781,6 +814,7 @@ done:
     if (settings6) ICoreWebView2Settings6_Release(settings6);
     if (settings) ICoreWebView2Settings_Release(settings);
     if (view5) ICoreWebView2_5_Release(view5);
+    if (view8) ICoreWebView2_8_Release(view8);
     if (view10) ICoreWebView2_10_Release(view10);
     if (view14) ICoreWebView2_14_Release(view14);
     if (view11) ICoreWebView2_11_Release(view11);
@@ -1272,6 +1306,7 @@ HRESULT zwv_respond(ResourceCall *call, unsigned status, const char *mime, size_
 }
 #include "resource_deferrals.h"
 #include "file_stream.h"
+#include "content_filter_native.h"
 static HRESULT STDMETHODCALLTYPE resource_invoke(ICoreWebView2WebResourceRequestedEventHandler *p, ICoreWebView2 *sender, ICoreWebView2WebResourceRequestedEventArgs *args) {
     (void)sender;
     State *s = ((ResourceHandler *)p)->state; retain(s);
@@ -1283,6 +1318,11 @@ static HRESULT STDMETHODCALLTYPE resource_invoke(ICoreWebView2WebResourceRequest
         ICoreWebView2WebResourceRequest_get_Method(request, &method);
         call.head = method && wcscmp(method, L"HEAD") == 0;
         int parsed=request_method(method);
+        if (!s->closed && content_filter(s,sender,args,request,uri,&call)) {
+            if (!call.responded && !s->closed && s->denied_response) ICoreWebView2WebResourceRequestedEventArgs_put_Response(args,s->denied_response);
+            ICoreWebView2WebResourceRequest_Release(request);
+            CoTaskMemFree(uri); CoTaskMemFree(method); release(s); return S_OK;
+        }
         ICoreWebView2HttpRequestHeaders *sending_headers=NULL;
         HRESULT headers_hr=S_OK;
         if(s->remote.credentials){
@@ -1357,7 +1397,8 @@ State *zwv_create(HWND hwnd, const WCHAR *html, const WCHAR *profile, const WCHA
     if (!s->tool_limit || s->tool_limit>8 || !s->max_cookies || s->max_cookies>128 || !s->max_cookie_bytes || s->max_cookie_bytes>262144 || !s->max_capture_bytes || s->max_capture_bytes>16777216) { release(s); *out=E_INVALIDARG; return NULL; }
     if (s->zoom!=s->zoom || s->zoom<0.25 || s->zoom>5.0) { release(s); *out=E_INVALIDARG; return NULL; }
     if (settings && settings->user_agent) { s->user_agent=_wcsdup(settings->user_agent); if (!s->user_agent) { release(s); *out=E_OUTOFMEMORY; return NULL; } }
-    if (settings) { s->auth=settings->auth; s->certificate_offer=settings->certificate_offer; s->context_menu=settings->context_menu; s->context_offer=settings->context_offer; s->gestures=settings->gestures; }
+    if (settings) { s->auth=settings->auth; s->certificate_offer=settings->certificate_offer; s->context_menu=settings->context_menu; s->context_offer=settings->context_offer; s->gestures=settings->gestures; s->muted=settings->audio_muted; s->content_verdict=settings->content_verdict; }
+    if (settings && settings->content_style) { s->content_style=_wcsdup(settings->content_style); if (!s->content_style) { release(s); *out=E_OUTOFMEMORY; return NULL; } }
     if (settings && settings->facts) { s->facts_script=_wcsdup(settings->facts); if (!s->facts_script) { release(s); *out=E_OUTOFMEMORY; return NULL; } }
     *out=remote_init(&s->remote,remote);
     if (FAILED(*out)) { release(s); return NULL; }
@@ -1596,6 +1637,10 @@ static void state_cleanup(State *s) {
         if (s->has_content) ICoreWebView2_remove_ContentLoading(s->webview, s->content_token);
         if (s->has_authentication) ICoreWebView2_10_remove_BasicAuthenticationRequested(s->webview10,s->authentication_token);
         if (s->has_certificate) ICoreWebView2_5_remove_ClientCertificateRequested(s->webview5,s->certificate_token);
+        if (s->has_audible) ICoreWebView2_8_remove_IsDocumentPlayingAudioChanged(s->webview8,s->audible_token);
+        if (s->has_muted) ICoreWebView2_8_remove_IsMutedChanged(s->webview8,s->muted_token);
+        s->has_audible=s->has_muted=FALSE;
+        if (s->webview8) { ICoreWebView2_8_Release(s->webview8); s->webview8=NULL; }
         if (s->webview10) { ICoreWebView2_10_Release(s->webview10); s->webview10=NULL; }
         if (s->has_context) ICoreWebView2_11_remove_ContextMenuRequested(s->webview11,s->context_token);
         s->has_context=FALSE;
@@ -1610,6 +1655,9 @@ static void state_cleanup(State *s) {
     free(s->initial_url); s->initial_url = NULL;
     free(s->local_prefix); s->local_prefix = NULL;
     free(s->user_agent); s->user_agent=NULL;
+    s->content_verdict=NULL;
+    free(s->content_style); s->content_style=NULL;
+    free(s->style_id); s->style_id=NULL;
     if (s->permissions) { ICoreWebView2PermissionSettingCollectionView_Release(s->permissions); s->permissions = NULL; }
     if (s->profile) { ICoreWebView2Profile4_Release(s->profile); s->profile = NULL; }
     if (s->controller) {

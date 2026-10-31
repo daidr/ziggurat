@@ -14,6 +14,7 @@ const Fixture = struct {
     enabled: bool = true,
     entries: [64]Entry = undefined,
     count: usize = 0,
+    other_buttons: usize = 0,
     depth: usize = 0,
     expected_events: usize = 0,
     queue_mode: bool = false,
@@ -116,7 +117,12 @@ const Fixture = struct {
         };
         if (self.count == self.entries.len) return error.CapacityExceeded;
         const input = if (phase == .down) value.pointer_down else value.pointer_up;
-        try std.testing.expectEqual(z.PointerButton.primary, input.button);
+        if (input.button != .primary) {
+            // Other buttons reach content without joining the primary history.
+            if (self.enabled and input.press.sequence != 0) try std.testing.expectEqual(input.button, (try window.pointerPressSnapshot(input.press, phase)).button);
+            self.other_buttons += 1;
+            return;
+        }
         const snapshot: ?z.PointerPressSnapshot = if (self.enabled and input.press.sequence != 0) try window.pointerPressSnapshot(input.press, phase) else null;
         if (snapshot) |original| {
             try std.testing.expectEqual(input.button, original.button);
@@ -226,7 +232,7 @@ fn synchronous(allocator: std.mem.Allocator) !void {
     try std.testing.expect(fixture.item().pointerOperation() > before);
     try std.testing.expectError(error.StalePointerInput, fixture.window.pointerPressSnapshot(fixture.entries[0].input.press, .down));
 
-    // Observation includes buttons consumed by the legacy primary-only route.
+    // Observation includes every button; content sees only the four known ones.
     for ([_]struct { down: c.UINT, up: c.UINT, wp: c.WPARAM, button: z.PointerButton }{
         .{ .down = c.WM_RBUTTONDOWN, .up = c.WM_RBUTTONUP, .wp = 0, .button = .secondary },
         .{ .down = c.WM_MBUTTONDOWN, .up = c.WM_MBUTTONUP, .wp = 0, .button = .middle },
@@ -245,6 +251,7 @@ fn synchronous(allocator: std.mem.Allocator) !void {
     fixture.send(c.WM_XBUTTONUP, @as(usize, 3) << 16);
     try std.testing.expectEqual(sequence, fixture.item().pointer_state.?.owner.last_sequence);
     try std.testing.expectEqual(@as(usize, 2), fixture.count);
+    try std.testing.expectEqual(@as(usize, 8), fixture.other_buttons);
     try fixture.check();
 }
 
@@ -361,6 +368,7 @@ fn observedButtons(allocator: std.mem.Allocator) !void {
     try fixture.app.run();
     try fixture.check();
     try std.testing.expectEqual(@as(usize, 20), fixture.count);
+    try std.testing.expectEqual(@as(usize, 8), fixture.other_buttons);
     for (fixture.entries[0..fixture.count]) |entry| try std.testing.expectEqual(@as(u8, 1), entry.input.press.window_count);
 }
 

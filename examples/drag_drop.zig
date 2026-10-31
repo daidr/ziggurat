@@ -8,8 +8,8 @@
 //! caller-allocated buffer, which the example copies into its own storage
 //! and lists.
 //!
-//! Dragging *out* of the window is not offered by the framework
-//! (`drop.capabilities.drag_source` is false), so this example only receives.
+//! This example only receives; `ziggurat_system.drag.Source` drags data out
+//! of a window and `drop.DataTarget` takes multi-format drags.
 //!
 //! Run with `zig build run-drag-drop`, then drag files from a file manager or
 //! selected text from another program onto the window.

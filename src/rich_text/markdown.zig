@@ -1,6 +1,7 @@
 //! Markdown for attributed text, CommonMark with GitHub's extensions, and
 //! attributed text from Markdown.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const tx = @import("text.zig");
 const md = @import("ziggurat_markdown");
 const html = @import("html.zig");
@@ -880,7 +881,7 @@ const Reader = struct {
     }
 
     fn levelOf(depth: i32) u8 {
-        return @intCast(std.math.clamp(depth, 0, tx.max_indent));
+        return @intCast(zio.asUnsigned(std.math.clamp(depth, 0, tx.max_indent)));
     }
 
     /// A list item: its first paragraph in the item's style, and what
