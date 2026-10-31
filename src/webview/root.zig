@@ -3416,7 +3416,7 @@ pub const View = struct {
                 };
                 defer self.allocator.free(text);
                 if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != page) return;
-                self.on_event(self.context, self, .{ .policy_request = .{ .kind = @fromBackingInt(@intCast(kind - 3)), .uri = text, .native_detail = hr, .user_gesture = if (kind == 3 or kind == 4) hr != 0 else null } });
+                self.on_event(self.context, self, .{ .policy_request = .{ .kind = @fromBackingInt(@intCast(zio.asUnsigned(kind - 3))), .uri = text, .native_detail = hr, .user_gesture = if (kind == 3 or kind == 4) hr != 0 else null } });
             },
             8 => {
                 self.ready = false;

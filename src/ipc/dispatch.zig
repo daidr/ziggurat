@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const schema = @import("schema.zig");
 const protocol = @import("protocol.zig");
 const Router = @import("router.zig").Router;
@@ -144,7 +145,7 @@ pub fn Dispatcher(comptime Service: type, comptime Impl: type, comptime Context:
                     return .{ .cancel = token };
                 },
                 .ack => |token| {
-                    const sequence: u32 = @intCast(received.parsed.value.object.get("sequence").?.integer);
+                    const sequence: u32 = @intCast(zio.asUnsigned(received.parsed.value.object.get("sequence").?.integer));
                     received.deinit();
                     return .{ .ack = .{ .token = token, .sequence = sequence } };
                 },

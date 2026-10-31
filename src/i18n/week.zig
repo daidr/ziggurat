@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const Locale = @import("locale.zig").Locale;
 const date = @import("date.zig");
 
@@ -72,7 +73,7 @@ pub fn weekOfYear(year: i32, month: u4, day: u5, week: Week) YearWeek {
             start = next;
         }
     }
-    return .{ .year = owner, .week = @intCast(@divFloor(days - start, 7) + 1) };
+    return .{ .year = owner, .week = @intCast(zio.asUnsigned(@divFloor(days - start, 7) + 1)) };
 }
 
 /// The day the first week of `year` starts on, in days since 1970-01-01.

@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const native = if (builtin.is_test) Unsupported else if (builtin.os.tag == .windows) @import("drop_windows.zig") else if (builtin.os.tag == .linux) Linux else Unsupported;
@@ -130,7 +131,7 @@ const Linux = struct {
         return @ptrCast(@alignCast(pointer.?));
     }
     fn hoverNative(pointer: ?*anyopaque, phase: c_int, x: f64, y: f64, files: c_int, text: c_int) callconv(.c) c_int {
-        const value: Hover = .{ .phase = @fromBackingInt(@intCast(phase)), .point = .{ .x = @floatCast(x), .y = @floatCast(y) }, .files = files != 0, .text = text != 0 };
+        const value: Hover = .{ .phase = @fromBackingInt(@intCast(zio.asUnsigned(phase))), .point = .{ .x = @floatCast(x), .y = @floatCast(y) }, .files = files != 0, .text = text != 0 };
         return @intFromBool(owner(pointer).hover(value));
     }
     fn dropNative(pointer: ?*anyopaque, x: f64, y: f64, status: c_int, data: ?[*]const u8, len: usize) callconv(.c) void {

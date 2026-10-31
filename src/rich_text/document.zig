@@ -717,7 +717,7 @@ pub const Document = struct {
     const Indent = struct {
         levels: i32,
         pub fn change(self: Indent, p: *ParagraphStyle) void {
-            p.indent = @intCast(std.math.clamp(@as(i32, p.indent) + self.levels, 0, tx.max_indent));
+            p.indent = @intCast(zio.asUnsigned(std.math.clamp(@as(i32, p.indent) + self.levels, 0, tx.max_indent)));
         }
     };
 
@@ -870,7 +870,7 @@ pub const Edit = struct {
         const d = self.doc;
         const st = self.step();
         const after = d.text.paragraphCount();
-        st.count = @intCast(@as(i64, st.count) + @as(i64, after) - @as(i64, paragraphs_before));
+        st.count = @intCast(zio.asUnsigned(@as(i64, st.count) + @as(i64, after) - @as(i64, paragraphs_before)));
         st.changed = true;
         d.replaced(start, removed, inserted);
     }

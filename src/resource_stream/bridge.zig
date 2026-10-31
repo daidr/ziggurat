@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ipc = @import("ziggurat_ipc");
 const bytes = @import("ziggurat_resource_stream");
@@ -411,7 +412,7 @@ pub fn Type(comptime Params: type, comptime Backend: type) type {
                 .ack => |token| {
                     defer received.deinit();
                     const flow = self.findFlow(token) orelse return error.StaleRequest;
-                    const wire_ack: u32 = @intCast(received.parsed.value.object.get("sequence").?.integer);
+                    const wire_ack: u32 = @intCast(zio.asUnsigned(received.parsed.value.object.get("sequence").?.integer));
                     const body_ack = flow.sequence.acknowledge(wire_ack) catch |err| {
                         self.closeInternal(.transport_failed);
                         return err;
@@ -698,7 +699,7 @@ const TestBackend = struct {
         const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, packet, .{});
         defer parsed.deinit();
         if (page.auto_ack and std.mem.eql(u8, parsed.value.object.get("kind").?.string, "chunk")) {
-            const sequence: u32 = @intCast(parsed.value.object.get("sequence").?.integer);
+            const sequence: u32 = @intCast(zio.asUnsigned(parsed.value.object.get("sequence").?.integer));
             try testAck(page.bridge.?, sequence);
             if (sequence > 1) if (page.writer) |writer| {
                 if (!writer.finished) {

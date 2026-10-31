@@ -4,6 +4,7 @@
 //! scrolls; `update` searches again when the screen changed, and the
 //! selected match stays selected while it is there.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const screen_module = @import("screen.zig");
 
 const Screen = screen_module.Screen;
@@ -163,7 +164,7 @@ pub const Search = struct {
         const half: u64 = screen.rows / 2;
         // The offset that puts the match's first row at the middle.
         const wanted: i128 = @as(i128, screen.pushed) + half - match.start.row;
-        const clamped: usize = @intCast(std.math.clamp(wanted, 0, @as(i128, screen.historyCount())));
+        const clamped: usize = @intCast(zio.asUnsigned(std.math.clamp(wanted, 0, @as(i128, screen.historyCount()))));
         _ = screen.scrollView(@as(isize, @intCast(clamped)) - @as(isize, @intCast(screen.viewportOffset())));
     }
 

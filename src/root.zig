@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const backend = if (builtin.is_test) @import("platform/testing.zig") else if (builtin.os.tag == .windows) @import("platform/windows.zig") else if (builtin.os.tag == .linux) @import("platform/linux.zig") else @import("platform/unsupported.zig");
 const mailbox = @import("mailbox.zig");
@@ -364,7 +365,7 @@ pub const WindowHit = enum(c_int) {
     south_east,
     pub fn resizeEdge(self: WindowHit) ?ResizeEdge {
         const value = @backingInt(self);
-        return if (value >= @backingInt(WindowHit.north_west)) @fromBackingInt(@intCast(value - @backingInt(WindowHit.north_west))) else null;
+        return if (value >= @backingInt(WindowHit.north_west)) @fromBackingInt(@intCast(zio.asUnsigned(value - @backingInt(WindowHit.north_west)))) else null;
     }
 };
 /// The shape of the pointer over the client area. Shapes a platform lacks

@@ -239,6 +239,31 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  linux-release-tests:
+    # Unit tests built ReleaseSafe on every pull request. Zig 0.17.0 has
+    # optimizer-only miscompiles (see zio.asUnsigned) that Debug runs miss,
+    # and main publishes ReleaseSafe builds.
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ fromJSON(vars.LINUX_RUNS_ON || '["self-hosted", "linux", "x64"]') }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Native GTK/Pango dependencies
+        run: |
+          sh scripts/ci-linux-deps.sh ca-certificates curl xz-utils python3 libgtk-3-dev libpango1.0-dev libicu-dev pkg-config xvfb xauth openbox x11-utils libxtst6 libatspi2.0-dev at-spi2-core dbus dbus-x11 shared-mime-info fonts-dejavu-core fonts-noto-cjk libepoxy-dev libegl-dev libgl1-mesa-dri
+      - name: Use cached Zig 0.17.0 and build caches
+        run: |
+          zig_bin=$(sh scripts/fetch-zig.sh)
+          printf '%s\n' "$(dirname "$zig_bin")" >> "$GITHUB_PATH"
+          sh scripts/ci-zig-cache.sh >> "$GITHUB_ENV"
+      - name: ReleaseSafe unit tests
+        env:
+          G_DEBUG: fatal-criticals
+          GDK_BACKEND: x11
+        run: zig build test -Doptimize=ReleaseSafe
+
   webview:
     if: github.event_name == 'workflow_dispatch' && inputs.webview
     # Also needs Node.js and an installed WebView2 Runtime on the runner.

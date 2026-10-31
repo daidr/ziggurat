@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const core = @import("../root.zig");
 const keys = @import("ziggurat_c_gtk");
 pub const AppData = struct { native: ?*anyopaque = null };
@@ -299,7 +300,7 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
                 if (ticket.button <= 4 and ticket.sequence != 0) record.emitPointerCancel(ticket.operation, ticket.sequence, @fromBackingInt(@intCast(ticket.button)));
             } else record.emit(.cancel_input);
         },
-        9 => record.emit(.{ .edit_key = .{ .key = @fromBackingInt(@intCast(native.key)), .shift = native.flags & 1 != 0, .control = native.flags & 2 != 0 } }),
+        9 => record.emit(.{ .edit_key = .{ .key = @fromBackingInt(@intCast(zio.asUnsigned(native.key))), .shift = native.flags & 1 != 0, .control = native.flags & 2 != 0 } }),
         10 => _ = record.window.requestCloseFrom(.user) catch |err| {
             record.window.report(.{ .domain = .core, .operation = .window_destroy, .err = err });
         },
