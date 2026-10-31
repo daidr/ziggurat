@@ -22,10 +22,7 @@ if [[ "$ZIGGURAT_PROFILE_TEST_ROOT" != /* ]]; then
 fi
 linux_cache_filesystem "$ZIGGURAT_PROFILE_TEST_ROOT"
 mkdir -p -- "$ZIGGURAT_PROFILE_TEST_ROOT"
-# The checks refuse to follow symlinks above the profile: give them the
-# real path, as where a runner's home or cache is linked onto another disk.
 ZIGGURAT_PROFILE_TEST_ROOT="$(cd -- "$ZIGGURAT_PROFILE_TEST_ROOT" && pwd -P)"
-export ZIGGURAT_PROFILE_TEST_ROOT
 cd "$project"
 exec "$zig_bin" build test-profile-storage test-profile-storage-files \
     -j1 --cache-dir "$ZIG_LOCAL_CACHE_DIR" \

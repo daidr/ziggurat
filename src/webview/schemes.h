@@ -17,6 +17,7 @@ typedef struct SchemeOptions {
     LONG refs;
     UINT32 count;
     SchemeRegistration *items[SCHEME_LIMIT];
+    WCHAR *arguments;
 } SchemeOptions;
 static BOOL scheme_request_origin_allowed(ICoreWebView2EnvironmentOptions *p,const WCHAR *prefix,int method,const NativeHeader *headers,uint32_t count) {
     if (!p||!prefix||method<0||method>6) return FALSE;
@@ -115,7 +116,7 @@ static ICoreWebView2CustomSchemeRegistrationVtbl scheme_vtable={scheme_query,sch
 static ULONG STDMETHODCALLTYPE scheme_options_add(ICoreWebView2EnvironmentOptions *p) { return InterlockedIncrement(&((SchemeOptions *)p)->refs); }
 static ULONG STDMETHODCALLTYPE scheme_options_release(ICoreWebView2EnvironmentOptions *p) {
     SchemeOptions *options=(SchemeOptions *)p;LONG refs=InterlockedDecrement(&options->refs);
-    if (!refs) { for (UINT32 i=0;i<options->count;i++) scheme_release(&options->items[i]->iface);free(options);InterlockedDecrement(&live_handlers); }
+    if (!refs) { for (UINT32 i=0;i<options->count;i++) scheme_release(&options->items[i]->iface);free(options->arguments);free(options);InterlockedDecrement(&live_handlers); }
     return refs;
 }
 static HRESULT STDMETHODCALLTYPE scheme_options_query(ICoreWebView2EnvironmentOptions *p,REFIID iid,void **out) {
@@ -126,13 +127,14 @@ static HRESULT STDMETHODCALLTYPE scheme_options_query(ICoreWebView2EnvironmentOp
     scheme_options_add(p);return S_OK;
 }
 static HRESULT STDMETHODCALLTYPE scheme_options_string(ICoreWebView2EnvironmentOptions *p,WCHAR **out) { (void)p;return scheme_string(NULL,out); }
+static HRESULT STDMETHODCALLTYPE scheme_options_arguments(ICoreWebView2EnvironmentOptions *p,WCHAR **out) { return scheme_string(((SchemeOptions *)p)->arguments,out); }
 /* Matches CORE_WEBVIEW_TARGET_PRODUCT_VERSION in the pinned SDK options header.
    The loader requires a valid version when an options object is supplied. */
 static HRESULT STDMETHODCALLTYPE scheme_options_version(ICoreWebView2EnvironmentOptions *p,WCHAR **out) { (void)p;return scheme_string(L"154.0.4258.31",out); }
 static HRESULT STDMETHODCALLTYPE scheme_options_put_string(ICoreWebView2EnvironmentOptions *p,LPCWSTR value) { (void)p;(void)value;return E_ACCESSDENIED; }
 static HRESULT STDMETHODCALLTYPE scheme_options_sso(ICoreWebView2EnvironmentOptions *p,BOOL *out) { (void)p;if (!out) return E_POINTER;*out=FALSE;return S_OK; }
 static HRESULT STDMETHODCALLTYPE scheme_options_put_sso(ICoreWebView2EnvironmentOptions *p,BOOL value) { (void)p;(void)value;return E_ACCESSDENIED; }
-static ICoreWebView2EnvironmentOptionsVtbl scheme_options_vtable={scheme_options_query,scheme_options_add,scheme_options_release,scheme_options_string,scheme_options_put_string,scheme_options_string,scheme_options_put_string,scheme_options_version,scheme_options_put_string,scheme_options_sso,scheme_options_put_sso};
+static ICoreWebView2EnvironmentOptionsVtbl scheme_options_vtable={scheme_options_query,scheme_options_add,scheme_options_release,scheme_options_arguments,scheme_options_put_string,scheme_options_string,scheme_options_put_string,scheme_options_version,scheme_options_put_string,scheme_options_sso,scheme_options_put_sso};
 static SchemeOptions *scheme_options_self(ICoreWebView2EnvironmentOptions4 *p) { return (SchemeOptions *)((char *)p - offsetof(SchemeOptions,extended)); }
 static HRESULT STDMETHODCALLTYPE scheme_options4_query(ICoreWebView2EnvironmentOptions4 *p,REFIID iid,void **out) { return scheme_options_query(&scheme_options_self(p)->iface,iid,out); }
 static ULONG STDMETHODCALLTYPE scheme_options4_add(ICoreWebView2EnvironmentOptions4 *p) { return scheme_options_add(&scheme_options_self(p)->iface); }
@@ -146,13 +148,16 @@ static HRESULT STDMETHODCALLTYPE scheme_options4_get(ICoreWebView2EnvironmentOpt
 }
 static HRESULT STDMETHODCALLTYPE scheme_options4_set(ICoreWebView2EnvironmentOptions4 *p,UINT32 count,ICoreWebView2CustomSchemeRegistration **items) { (void)p;(void)count;(void)items;return E_ACCESSDENIED; }
 static ICoreWebView2EnvironmentOptions4Vtbl scheme_options4_vtable={scheme_options4_query,scheme_options4_add,scheme_options4_release,scheme_options4_get,scheme_options4_set};
-static HRESULT scheme_options_new(const SchemeInput *input,uint32_t count,ICoreWebView2EnvironmentOptions **out) {
+/* arguments: the browser's command line switches, which all Views of one
+   user data folder must agree on, or NULL. */
+static HRESULT scheme_options_new(const SchemeInput *input,uint32_t count,const WCHAR *arguments,ICoreWebView2EnvironmentOptions **out) {
     *out=NULL;
-    if (count>SCHEME_LIMIT || (count&&!input)) return E_INVALIDARG;
-    if (!count) return S_OK;
+    if (count>SCHEME_LIMIT || (count&&!input) || (arguments&&wcsnlen(arguments,1025)>1024)) return E_INVALIDARG;
+    if (!count && !arguments) return S_OK;
     SchemeOptions *options=calloc(1,sizeof(*options));if (!options) return E_OUTOFMEMORY;
     options->iface.lpVtbl=&scheme_options_vtable;options->extended.lpVtbl=&scheme_options4_vtable;options->refs=1;InterlockedIncrement(&live_handlers);
     HRESULT hr=S_OK;
+    if (arguments && !(options->arguments=_wcsdup(arguments))) { hr=E_OUTOFMEMORY;goto failed; }
     for (uint32_t i=0;i<count;i++) {
         const SchemeInput *source=&input[i];
         if (!scheme_name(source->name)||source->origin_count>SCHEME_ORIGIN_LIMIT||(source->origin_count&&!source->origins)) { hr=E_INVALIDARG;goto failed; }
