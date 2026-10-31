@@ -78,7 +78,7 @@ static void failure_set(ZwkPage *s,NSError *error) {
     if (error) s->failure=(ZwkFailure){domain_code(error.domain),(int32_t)error.code};
 }
 /* A NUL-terminated UTF-16 copy of text, or NULL past limit UTF-8 bytes. */
-static uint16_t *wide(NSString *text,size_t limit) {
+static uint16_t *utf16_copy(NSString *text,size_t limit) {
     if (!text || [text lengthOfBytesUsingEncoding:NSUTF8StringEncoding]>limit) return NULL;
     const NSUInteger length=text.length;
     uint16_t *value=malloc((length+1)*sizeof(uint16_t));
@@ -89,13 +89,13 @@ static uint16_t *wide(NSString *text,size_t limit) {
 }
 static void notify(ZwkPage *s,int kind,NSString *text,int32_t code,const ZwkFailure *failure) {
     if (!live(s) || !s->notify_fn) return;
-    uint16_t *value=wide(text,65536);
+    uint16_t *value=utf16_copy(text,65536);
     s->notify_fn(s->owner,kind,value,code,failure);
     free(value);
 }
 static BOOL page(ZwkPage *s,int kind,uint32_t flags,int32_t status,NSString *text) {
     if (!live(s) || !s->page_fn) return NO;
-    uint16_t *value=wide(text,16384);
+    uint16_t *value=utf16_copy(text,16384);
     ZwkPageEvent event={kind,s->generation,flags,status,value};
     const BOOL accepted=s->page_fn(s->owner,&event)!=0;
     free(value);
@@ -356,7 +356,7 @@ static void *audio_context=&audio_context;
         dom_ready=YES;
         if (document(self)) (void)page(self,2,0,0,nil);
     } else if (kind=='M' && bytes<=65536 && document(self) && notify_fn) {
-        uint16_t *value=wide(rest,65536);
+        uint16_t *value=utf16_copy(rest,65536);
         if (value) { notify_fn(owner,1,value,0,NULL); free(value); }
     }
 }
@@ -495,7 +495,7 @@ int zwk_evaluate(ZwkState *state,const char *source,uint64_t token) {
                         id body=[value count]>1?value[1]:nil;
                         if (![body isKindOfClass:[NSString class]]) status=3;
                         else if ([body lengthOfBytesUsingEncoding:NSUTF8StringEncoding]>s->result_limit) status=2;
-                        else if (!(utf16=wide(body,s->result_limit))) status=3;
+                        else if (!(utf16=utf16_copy(body,s->result_limit))) status=3;
                     }
                 }
                 s->script_fn(s->owner,token,status,error?(int32_t)error.code:0,utf16,error?&s->failure:NULL);
