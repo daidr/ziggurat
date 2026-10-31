@@ -11,6 +11,9 @@ const fixture = "<!doctype html><title>macOS fixture</title><script>chrome.webvi
 /// title and completion, JSON scripts and a script error with its native
 /// code, zoom, user agent, mute, an IPC round trip, a script deadline and
 /// detach of a pending script when the window closes.
+/// Refuses every allocation, without recording where.
+const refusing: std.mem.Allocator.VTable = .{ .alloc = std.mem.Allocator.noAlloc, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap, .free = std.mem.Allocator.noFree };
+
 const Probe = struct {
     app: *z.App,
     window: z.Window,
@@ -99,8 +102,9 @@ const Probe = struct {
         const agent = try self.view.userAgent(self.view.allocator);
         defer self.view.allocator.free(agent);
         try std.testing.expectEqualStrings("Ziggurat macOS smoke", agent);
-        var fault = std.testing.FailingAllocator.init(self.view.allocator, .{ .fail_index = 0 });
-        try std.testing.expectError(error.OutOfMemory, self.view.userAgent(fault.allocator()));
+        // Not std.testing.FailingAllocator: it records a stack trace on
+        // failure, and that walk panics through WebKit frames on Zig 0.17.
+        try std.testing.expectError(error.OutOfMemory, self.view.userAgent(std.mem.Allocator{ .ptr = undefined, .vtable = &refusing }));
         try std.testing.expect(!(try self.view.audioMuted()));
         try self.view.setAudioMuted(true);
         try std.testing.expect(try self.view.audioMuted());
