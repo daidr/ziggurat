@@ -17,6 +17,8 @@ pub const Options = extern struct {
     profile_context: ?*anyopaque = null,
     initializers: ?*const @import("initializer_owner.zig").NativeInput = null,
     developer_tools: u32 = 0,
+    facts: ?[*:0]const u8 = null,
+    autoplay: u32 = 0,
 };
 pub const LocalResource = extern struct {
     path: [*]const u8,

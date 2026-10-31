@@ -86,7 +86,7 @@ static void done(void *ptr,uint64_t token,uint32_t kind,int32_t code) {
     g_assert(!s->initializers->pending);
     if(reenter_on_notify){
         reenter_on_notify=FALSE;
-        ZwkInitializerInput input={s->initializers->budget,alpha,4};
+        ZwkInitializerInput input={s->initializers->budget,alpha,4,0};
         g_assert_cmpint(zwk_initializers_prepare(s,&input,token+1,done),==,ZWK_OK);
         zwk_initializers_activate(s);
     }
@@ -104,16 +104,16 @@ static void cold_and_input(void) {
     int32_t status;allocation_fail=0;g_assert(!zwk_initializer_budget_create(4096,&status) && status==ZWK_OOM);allocation_fail=-1;
     g_assert(!zwk_initializer_budget_create(1,&status) && status==ZWK_INITIALIZER_BUDGET);
     void *budget=zwk_initializer_budget_create(4096,&status);g_assert(budget && status==ZWK_OK);s=new_state();
-    uint16_t invalid[]={0xd800,0};ZwkInitializerInput input={budget,invalid,1};
+    uint16_t invalid[]={0xd800,0};ZwkInitializerInput input={budget,invalid,1,0};
     g_assert_cmpint(zwk_initializers_prepare(s,&input,1,done),==,ZWK_INVALID);g_assert(!s->initializers && !adds);
-    input=(ZwkInitializerInput){budget,(void *)(uintptr_t)4096,512u*1024u+1};
+    input=(ZwkInitializerInput){budget,(void *)(uintptr_t)4096,512u*1024u+1,0};
     g_assert_cmpint(zwk_initializers_prepare(s,&input,1,done),==,ZWK_INVALID);
     close_state(s);zwk_initializer_budget_unref(budget);reset();
 }
 static void allocation_failures(void) {
     for(int failure=0;failure<3;++failure){
         reset();int32_t status;void *budget=zwk_initializer_budget_create(4096,&status);ZwkState *s=new_state();
-        ZwkInitializerInput input={budget,alpha,4};allocation_fail=failure;
+        ZwkInitializerInput input={budget,alpha,4,0};allocation_fail=failure;
         int result=zwk_initializers_prepare(s,&input,1,done);allocation_fail=-1;
         g_assert_cmpint(result,==,ZWK_OOM);g_assert(!adds && !notifications && initializers_allow_navigation(s));
         close_state(s);zwk_initializer_budget_unref(budget);reset();
@@ -121,21 +121,21 @@ static void allocation_failures(void) {
 }
 static void capture_cancel_and_clear(void) {
     reset();int32_t status;void *budget=zwk_initializer_budget_create(4096,&status);ZwkState *s=new_state();
-    uint16_t text[]={0x41,0xd83d,0xde00,0x7532,0};ZwkInitializerInput input={budget,text,4};
+    uint16_t text[]={0x41,0xd83d,0xde00,0x7532,0};ZwkInitializerInput input={budget,text,4,0};
     g_assert_cmpint(zwk_initializers_prepare(s,&input,1,done),==,ZWK_OK);memset(text,0,sizeof(text));
     g_assert_cmpstr(s->initializers->pending->source,==,"A\xf0\x9f\x98\x80\xe7\x94\xb2");
     g_assert(!adds && !notifications && !initializers_allow_navigation(s));
     g_assert_cmpint(zwk_initializers_prepare(s,&input,2,done),==,ZWK_NAVIGATION_PENDING);
     g_assert(zwk_initializers_try_cancel(s,1));zwk_initializers_activate(s);
     g_assert(notifications==1 && last_kind==1 && !adds && initializers_allow_navigation(s));
-    input=(ZwkInitializerInput){budget,alpha,4};g_assert_cmpint(zwk_initializers_prepare(s,&input,2,done),==,ZWK_OK);zwk_initializers_activate(s);
+    input=(ZwkInitializerInput){budget,alpha,4,0};g_assert_cmpint(zwk_initializers_prepare(s,&input,2,done),==,ZWK_OK);zwk_initializers_activate(s);
     g_assert(notifications==2 && last_kind==0 && adds==1 && registered_count==1);
     input.source=NULL;input.units=0;current_token=3;cancel_on_mutation=TRUE;
     g_assert_cmpint(zwk_initializers_prepare(s,&input,3,done),==,ZWK_OK);zwk_initializers_activate(s);
     g_assert(notifications==3 && last_kind==0 && removes==1 && !registered_count);close_state(s);zwk_initializer_budget_unref(budget);reset();
 }
 static void install_failure_and_abandon(void) {
-    reset();int32_t status;void *budget=zwk_initializer_budget_create(4096,&status);ZwkState *s=new_state();ZwkInitializerInput input={budget,alpha,4};
+    reset();int32_t status;void *budget=zwk_initializer_budget_create(4096,&status);ZwkState *s=new_state();ZwkInitializerInput input={budget,alpha,4,0};
     g_assert_cmpint(zwk_initializers_prepare(s,&input,1,done),==,ZWK_OK);zwk_initializers_abandon(s);g_assert(!notifications && initializers_allow_navigation(s));
     g_assert_cmpint(zwk_initializers_prepare(s,&input,2,done),==,ZWK_OK);zwk_initializers_activate(s);WebKitUserScript *old=s->initializers->current;
     g_assert_cmpint(zwk_initializers_prepare(s,&input,3,done),==,ZWK_OK);fail_script=TRUE;zwk_initializers_activate(s);fail_script=FALSE;
@@ -143,18 +143,18 @@ static void install_failure_and_abandon(void) {
     close_state(s);zwk_initializer_budget_unref(budget);reset();
 }
 static void mutation_close(void) {
-    reset();int32_t status;void *budget=zwk_initializer_budget_create(4096,&status);ZwkState *s=new_state();ZwkInitializerInput input={budget,alpha,4};
+    reset();int32_t status;void *budget=zwk_initializer_budget_create(4096,&status);ZwkState *s=new_state();ZwkInitializerInput input={budget,alpha,4,0};
     g_assert_cmpint(zwk_initializers_prepare(s,&input,1,done),==,ZWK_OK);close_on_add=TRUE;cancel_on_mutation=TRUE;current_token=1;zwk_initializers_activate(s);
     g_assert(!states && !notifications && adds==1 && removes==1 && !registered_count);zwk_initializer_budget_unref(budget);reset();
 }
 static void synchronous_reentry_close(void) {
-    reset();int32_t status;void *budget=zwk_initializer_budget_create(4096,&status);ZwkState *s=new_state();ZwkInitializerInput input={budget,alpha,4};
+    reset();int32_t status;void *budget=zwk_initializer_budget_create(4096,&status);ZwkState *s=new_state();ZwkInitializerInput input={budget,alpha,4,0};
     g_assert_cmpint(zwk_initializers_prepare(s,&input,1,done),==,ZWK_OK);reenter_on_notify=close_on_notify=TRUE;zwk_initializers_activate(s);
     g_assert(!states && notifications==2 && last_token==2 && last_kind==0);zwk_initializer_budget_unref(budget);reset();
 }
 static void shared_budget_and_initial_close(void) {
     reset();int32_t status;ZwkInitializerBudget *budget=zwk_initializer_budget_create(512,&status);ZwkState *s=new_state();
-    ZwkInitializerInput input={budget,alpha,4};g_assert_cmpint(zwk_initializers_prepare(s,&input,0,NULL),==,ZWK_OK);
+    ZwkInitializerInput input={budget,alpha,4,0};g_assert_cmpint(zwk_initializers_prepare(s,&input,0,NULL),==,ZWK_OK);
     close_state(s);g_assert(!states && !adds && !notifications && atomic_load(&budget->used)==sizeof(*budget));
     size_t held=budget->limit-sizeof(*budget);g_assert(zwk_initializer_budget_reserve(budget,held));
     s=new_state();g_assert_cmpint(zwk_initializers_prepare(s,&input,1,done),==,ZWK_INITIALIZER_BUDGET);

@@ -333,9 +333,33 @@ HEAD 使用文件 representation 长度生成 Content-Length，不建物理文�
 
 Starting 到本次 ContentLoading 期间抑制页面消息；之后消息必须来自当前顶层文档的可信来源。同地址刷新无法只凭消息的 Source 区分全部旧代数消息，所以应用必须重置 IPC session，并按 session/任务代数处理迟到结果。页面载入失败或停止也不能证明旧 JS 业务已经撤销。
 
+## 主题色、按内容定尺寸与页面进程
+
+`Options.theme_color = true` 让 View 跟踪页面的主题色：页面 `<head>` 中第一个 `media` 为空或匹配、内容是颜色的 `<meta name="theme-color">`，与浏览器的选法相同。颜色由页面引擎解析，任何 CSS 颜色（`dodgerblue`、`rgb(30 144 255 / 50%)`、`oklch(…)`）都可以，得到 8 位 sRGB 和直通 alpha 的 `web.Rgba`。`View.themeColor()` 返回当前值，`PageEvent.theme_color_changed` 只在颜色变化时通知：页面增删或修改 meta、外观变化让另一个 `media` 匹配、或新页面的颜色不同。刚开始加载的页面在 DOM 就绪前沿用上一页的颜色，所以同色页面之间切换不产生事件；从未报告颜色的文档（例如图片）在加载完成时变为 null。应用可以据此给标题栏、工具栏或窗口背景着色：
+
+```zig
+.theme_color_changed => |change| toolbar.setBackground(change.color orelse default_color),
+```
+
+`Options.fit_content = .{ .max_width = 400, .max_height = 600 }` 让窗口跟随页面内容的尺寸，像浏览器扩展的弹出页面：页面根元素按内容宽度（`width: max-content`）在限制内布局，文字在最大宽度处换行，高度超过最大高度时页面滚动，此时滚动条的宽度计入窗口宽度。限制以 DIP 给出，0 表示不限，按文档开始时的缩放换算成页面的 CSS 像素；缩放改变后的新限制在下一次 reload 生效。规则没有特异性，页面自己给 `html` 的尺寸（如 `height: 100%`）优先，所以要让 `html` 和 `body` 取内容的尺寸。`PageEvent.content_size_changed` 以 CSS 像素报告根元素尺寸和可见滚动条的空间，`View.contentSize()` 返回最近一次的值。附着在窗口上且 `resize_window = true`（默认）时，View 用 `page_facts.fit` 把尺寸换算成 DIP 并调用 `Window.resize`：只改变真正变化的那一维，用户调整过的另一维保持不变，最大化和全屏时不改变。区域、PageSession 和 `resize_window = false` 只报告尺寸，由应用调用 `web.page_facts.fit` 再交给 `Flyout.setSize` 或自己的布局。
+
+两项都由 View 在每个顶层文档开始时运行的同一段脚本完成（`src/webview/page_facts.js`），与页面来源和信任无关：Linux 运行在私有 script world 中，经私有消息通道只到达 View；Windows 用 `AddScriptToExecuteOnDocumentCreated` 在页面脚本之前取得 `chrome.webview.postMessage`，消息带 `\x01ziggurat-facts:` 前缀，在来源与 IPC 授权检查之前交给 View，不会成为 `Event.message`。页面也能发出同样前缀的消息，但只能谎报自己的主题色和内容尺寸，窗口尺寸仍受应用给的限制。两项都关闭时不注入脚本。
+
+`View.processId()` 返回运行页面的操作系统进程 ID，供应用自己的任务管理器或内存报告使用：Windows 是同一 App 的页面共用的 WebView2 浏览器进程（`msedgewebview2.exe`），WebKitGTK 没有对应 API，Linux 总是 null。
+
+## 不受信任页面、开窗手势与自动播放
+
+`Options.untrusted = true` 把页面当作别人的页面，例如从自定义 scheme 显示插件界面：无论来源的授权（`OriginGrant.ipc`、`LocalSite.scheme_ipc`、普通 html）如何，页面的消息都不会成为 `Event.message`；`post` 仍能把消息送达页面。页面通往应用的通道是它向自己 scheme 发出的请求：`on_resource` 收到的 `ResourceRequest.page` 是发出请求的文档的 `PageId`，处理器据此判断是哪一个页面、哪一代文档在请求，再用 `postFor` 回复。权限、下载、新窗口和跨来源导航仍按各自的显式策略处理，默认全部拒绝。
+
+`PolicyRequest.user_gesture` 说明导航或新窗口请求是否由用户手势发起：点击链接，或在点击、按键的处理函数里设置 `location.href`、调用 `window.open()`；页面脚本自己（定时器、加载时）发起的为 false。Windows 来自事件参数的 `IsUserInitiated`；Linux 来自 `webkit_navigation_action_is_user_gesture`，`window.open()` 经 `create` 信号报告。WebKitGTK 自己会先拒绝没有手势的 `window.open()`，所以 Linux 只会报告有手势的那些；WebKit 把宿主 `evaluateJS` 运行的脚本视为用户手势，WebView2 的 ExecuteScript 不是。frame 导航不提供该信息，为 null。Linux 现在也接受 `policy.new_window = .notify`。
+
+`Options.autoplay = .allow` 让页面在用户点击或输入之前就能播放有声媒体，隐藏窗口里的页面也一样：默认情况下没有手势时，有声的 `<audio>`/`<video>` 的 `play()` 以 `NotAllowedError` 拒绝。Linux 在每次主 frame 导航的 website policies 中设置 `WEBKIT_AUTOPLAY_ALLOW`。Windows 以 `--autoplay-policy=no-user-gesture-required` 启动浏览器：这是 WebView2 环境的参数，同一 user data folder 的所有 View 共享环境并且必须一致，否则后创建的 View 失败；Windows Profile owner 暂不接受这个选项（`UnsupportedCapability`）。
+
+`smoke-webview-page-facts` 在隐藏窗口的真实页面中检查：初始主题色和脚本修改后的颜色、内容尺寸与窗口按内容调整为 266×136、自动播放不被策略拒绝、全部 frame 与任意来源的初始化器在顶层和子 frame 各运行一次、宿主脚本 `window.open` 的手势报告、进程 ID，以及 reload 为不受信任页面后消息被丢弃而主题色仍然报告。Linux 在 WebKitGTK 2.52.6（xvfb）本地通过；Windows 在 CI 的 WebView2 任务中运行。
+
 ## 文档初始化器
 
-Windows 的 `Options.document_initializers` 在首个文档前安装已拥有的初始化器，`View.replaceDocumentInitializers` 用一次有界事务替换未来文档配置。每项是宿主信任、语法有效的普通函数体，只在顶层页面 world 的 document start、精确 HTTPS 来源守卫通过后按序调用；return 结束自身，throw 中断后续。默认空表不创建预算、注册或事务。它不授予导航、TLS、请求或 IPC 权限，也不是不可信代码 sandbox。
+Windows 的 `Options.document_initializers` 在首个文档前安装已拥有的初始化器，`View.replaceDocumentInitializers` 用一次有界事务替换未来文档配置。每项是宿主信任、语法有效的普通函数体，在页面 world 的 document start、精确 HTTPS 来源守卫通过后按序调用；`frames = .all` 让它在子 frame 中也运行（每个 frame 检查自己的来源），`origins` 只写 `"*"` 时任何来源的文档都运行；return 结束自身，throw 中断后续。默认空表不创建预算、注册或事务。它不授予导航、TLS、请求或 IPC 权限，也不是不可信代码 sandbox。
 
 替换期间包括逻辑取消后尚未退休的原生 Add 都阻断新导航；Remove 结果不确定时封锁页面，只有显式 recover 可以恢复。关闭先撤去 Zig 回调，迟到操作只持独立 C 状态；最后原生引用释放后才归还预算。Windows Debug/ReleaseSafe 四模式真实验证覆盖顺序、拥有/reload、frame/opaque/CSP、取消、恢复、关闭、Stop、错误证书和服务端精确请求计数。Linux 目前明确 `UnsupportedCapability`，普通空表页面的两优化窄回归已通过。完整限制、预算和复验命令见[文档初始化器](document-initializers.md)。
 

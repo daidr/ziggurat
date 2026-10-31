@@ -22,6 +22,7 @@ if [[ "$ZIGGURAT_PROFILE_TEST_ROOT" != /* ]]; then
 fi
 linux_cache_filesystem "$ZIGGURAT_PROFILE_TEST_ROOT"
 mkdir -p -- "$ZIGGURAT_PROFILE_TEST_ROOT"
+ZIGGURAT_PROFILE_TEST_ROOT="$(cd -- "$ZIGGURAT_PROFILE_TEST_ROOT" && pwd -P)"
 cd "$project"
 exec "$zig_bin" build test-profile-storage test-profile-storage-files \
     -j1 --cache-dir "$ZIG_LOCAL_CACHE_DIR" \
