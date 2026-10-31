@@ -8,7 +8,11 @@ pub const total_body_limit = capacity * body_limit;
 pub const total_origin_limit = 8 * 1024;
 
 pub const Timing = enum { document_start, document_end };
+/// `all` also runs the body in every iframe whose origin is listed.
 pub const Frames = enum { top, all };
+/// The only entry of `origins` that runs the body in documents of every
+/// origin, opaque ones and about:blank included.
+pub const any_origin = "*";
 pub const World = enum { page, isolated };
 /// A trusted, syntactically valid ordinary function body, not a global script
 /// or JavaScript module. This wrapper is not an untrusted-code sandbox. Inputs
@@ -138,7 +142,7 @@ pub const Owned = struct {
         var origin_bytes: usize = 0;
         var canonical_bytes: usize = 0;
         for (input, 0..) |item, index| {
-            if (item.timing != .document_start or item.frames != .top or item.world != .page) return error.UnsupportedInitializerCapability;
+            if (item.timing != .document_start or item.world != .page) return error.UnsupportedInitializerCapability;
             if (item.body.len > body_limit) return error.InitializerBodyTooLarge;
             if (item.origins.len == 0 or item.origins.len > origin_capacity) return error.InvalidInitializerOrigins;
             captured[index] = item;
@@ -196,8 +200,13 @@ pub const Owned = struct {
         for (rows) |row| {
             for (row.origins, 0..) |raw, index| {
                 const room = @max(raw.len, 64);
-                const canonical = schemes.canonicalOrigin(storage[cursor..][0..room], raw, &.{}) catch return error.InvalidInitializerOrigin;
-                if (!std.mem.startsWith(u8, canonical, "https://")) return error.InvalidInitializerOrigin;
+                // "*" alone runs the body in documents of every origin.
+                const canonical = if (std.mem.eql(u8, raw, any_origin)) blk: {
+                    if (row.origins.len != 1) return error.InvalidInitializerOrigin;
+                    @memcpy(storage[cursor..][0..1], any_origin);
+                    break :blk storage[cursor..][0..1];
+                } else schemes.canonicalOrigin(storage[cursor..][0..room], raw, &.{}) catch return error.InvalidInitializerOrigin;
+                if (canonical.ptr[0] != '*' and !std.mem.startsWith(u8, canonical, "https://")) return error.InvalidInitializerOrigin;
                 for (row.origins[0..index]) |earlier| if (std.mem.eql(u8, canonical, earlier)) return error.DuplicateInitializerOrigin;
                 origins[origin_index] = canonical;
                 origin_index += 1;
@@ -218,6 +227,12 @@ pub const Owned = struct {
         const rendered = try renderBatch(rows, wide);
         std.debug.assert(rendered == units);
         return owned;
+    }
+    /// Whether a body runs in iframes too, which the native script then
+    /// reaches; each body still checks its own frame.
+    pub fn allFrames(self: *const Owned) bool {
+        for (self.entries) |entry| if (entry.frames == .all) return true;
+        return false;
     }
     pub fn bytes(self: *const Owned) usize {
         return self.storage_bytes + self.encoded_bytes;
@@ -265,14 +280,20 @@ fn renderBatch(entries: []const Initializer, output: ?[]u16) !usize {
     for (entries) |entry| {
         // No eval/Function constructors or shared global program concatenation.
         // Re-read the actual document/frame/origin before each separate body.
-        try encoder.append("if(window===window.top&&location.protocol==='https:'&&(");
-        for (entry.origins, 0..) |origin, index| {
-            if (index != 0) try encoder.append("||");
-            try encoder.append("location.origin==='");
-            try encoder.append(origin);
-            try encoder.append("'");
+        try encoder.append(if (entry.frames == .top) "if(window===window.top&&" else "if(");
+        if (entry.origins.len == 1 and std.mem.eql(u8, entry.origins[0], any_origin)) {
+            try encoder.append("true");
+        } else {
+            try encoder.append("location.protocol==='https:'&&(");
+            for (entry.origins, 0..) |origin, index| {
+                if (index != 0) try encoder.append("||");
+                try encoder.append("location.origin==='");
+                try encoder.append(origin);
+                try encoder.append("'");
+            }
+            try encoder.append(")");
         }
-        try encoder.append("))(function(){\n");
+        try encoder.append(")(function(){\n");
         try encoder.append(entry.body);
         try encoder.append("\n})();\n");
     }
@@ -309,6 +330,28 @@ fn ownedInputs(allocator: std.mem.Allocator) !void {
     try std.testing.expect(budget.used == owned.bytes() and budget.used != 0);
 }
 
+test "all-frame and any-origin initializers drop only the checks they lift" {
+    var budget = try Budget.init(.{});
+    defer std.debug.assert(budget.used == 0 and budget.refs == 1);
+    var owned = try Owned.init(std.testing.allocator, &budget, &.{
+        .{ .body = "a()", .origins = &.{"https://player.test"}, .frames = .all },
+        .{ .body = "b()", .origins = &.{any_origin}, .frames = .all },
+        .{ .body = "c()", .origins = &.{any_origin} },
+    });
+    defer owned.deinit();
+    try std.testing.expect(owned.allFrames());
+    const encoded = try std.unicode.utf16LeToUtf8Alloc(std.testing.allocator, owned.encoded.?);
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "if(location.protocol==='https:'&&(location.origin==='https://player.test'))(function(){\na()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "if(true)(function(){\nb()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "if(window===window.top&&true)(function(){\nc()") != null);
+    try std.testing.expectError(error.InvalidInitializerOrigin, Owned.init(std.testing.allocator, &budget, &.{.{ .body = "", .origins = &.{ any_origin, "https://a.test" } }}));
+    try std.testing.expectError(error.InvalidInitializerOrigin, Owned.init(std.testing.allocator, &budget, &.{.{ .body = "", .origins = &.{"http://a.test"}, .frames = .all }}));
+    var top = try Owned.init(std.testing.allocator, &budget, &.{.{ .body = "", .origins = &.{"https://a.test"} }});
+    defer top.deinit();
+    try std.testing.expect(!top.allFrames());
+}
+
 test "initializers own bodies and canonical scopes and unwind every allocation" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, ownedInputs, .{});
 }
@@ -322,7 +365,6 @@ test "owned batch rejects capabilities, invalid text and ambiguous or duplicate 
     try std.testing.expectError(error.InvalidUtf8, Owned.init(std.testing.allocator, &budget, &.{.{ .body = "\xff", .origins = &.{"https://example.test"} }}));
     try std.testing.expectError(error.UnsupportedInitializerCapability, Owned.init(std.testing.failing_allocator, &budget, &.{.{ .body = "", .origins = &.{"https://example.test"}, .world = .isolated }}));
     try std.testing.expectError(error.UnsupportedInitializerCapability, Owned.init(std.testing.failing_allocator, &budget, &.{.{ .body = "", .origins = &.{"https://example.test"}, .timing = .document_end }}));
-    try std.testing.expectError(error.UnsupportedInitializerCapability, Owned.init(std.testing.failing_allocator, &budget, &.{.{ .body = "", .origins = &.{"https://example.test"}, .frames = .all }}));
     try std.testing.expectEqual(@as(usize, 0), budget.used);
 }
 

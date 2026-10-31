@@ -51,6 +51,13 @@ Host 拥有一个 `ui.Context`，从 attach 到 Context 的 detach 回调期间�
 - 容器：`gap`、`padding`、`alignment`（子项交叉轴对齐）、`justify`、`clip`、`background`、`border`、`border_width`、`radius`。
 - 参与：`grow`、`shrink`、`self_align`、`width`/`height`（固定尺寸）、`min_*`/`max_*`，网格子项另有 `column_span`。
 - 内容：文本的 `color`，`enabled`（容器上为 false 时其下所有节点都禁用），没有可见标签的控件或具名容器的可访问名称 `name`。
+- 隐藏：`hidden = true` 让节点和其中构建的一切隐藏并让出位置，相邻节点合拢，也不为它留间距；它不绘制、不接收指针与焦点，也不暴露给可访问性客户端。与不构建它不同，其中的内容照常构建，应用绑定给它们的状态（滚动偏移、正在编辑的文本、动画）保留到再次显示。隐藏时其中的焦点离开；锚定在它上面的浮层、弹出列表和提示随它隐藏，其中的对话框不遮罩窗口。
+
+```zig
+try v.column(.{ .hidden = !self.show_details, .gap = 8 });
+try v.embed(self.notes.embed(), .{});
+try v.end();
+```
 
 `spacer` 默认 `grow = 1`。叶子的固有尺寸来自文本宽度与主题 metrics：按钮在文本两侧留出内边距，复选框与开关加上指示器和标签间距，进度条与滑块有默认宽度且可以收缩到零，步进器宽度是高度的四倍，两端按钮为正方形。
 
@@ -393,7 +400,7 @@ if (row.right_clicked) self.showMenu(item, row.bounds.?);
 
 `Options.keys` 是应用自己的按键处理：`key` 收到视图、按键绑定、嵌入叶子和控件（快捷键、Tab、方向键、Home/End、Enter/Space）都没有处理的按下，返回 true 表示已处理，随后运行一遍并重绘；`key_up` 收到持有焦点的嵌入叶子没有消费的每次松开（窗口有键盘时）。两者在主线程、绘制之外运行；焦点在文本字段中时按键交给文本字段。Harness 的 `key` 与 `keyUp` 按同样的顺序调用它们。
 
-文本字段（`ziggurat_view_text`）的 `TextField.focus()` 把键盘焦点交给字段：字段已注册时立即生效，否则在注册它的帧之后生效；`Options.attached` 在字段首次注册到窗口后调用。`Host.focusNode(id)` 对任意节点做同样的事。
+文本字段（`ziggurat_view_text`）的 `TextField.focus()` 把键盘焦点交给字段：字段已注册时立即生效，否则在注册它的帧之后生效；`Options.attached` 在字段首次注册到窗口后调用。`Host.focusNode(id)` 对任意节点做同样的事。围着输入的字段外框（`search` 区域、`editableComboBox` 与 `tokenField`）把交给它的焦点转给其中的输入，`v.restore`、`initialFocus` 与 Harness 的 `focus` 相同；`hasKeyboard` 对外框报告其中输入的焦点。
 
 ## 嵌入与文本输入
 
@@ -405,7 +412,7 @@ if (row.right_clicked) self.showMenu(item, row.bounds.?);
 - `annotate(context, annotation)`（可选）：每次 `paint` 前调用，传入外层表单字段的标签、说明、错误与必填状态；不在字段内时传空值。规则与 `place` 相同。
 - `status(context)`（可选）：返回 `EmbedStatus`（是否正在输入法组合、内容是否为空），在构建和路由按键时读取，不能分配或阻塞。
 - `focusable`（默认 false）：以节点 ID 登记为 Tab 停靠点，叶子自己绘制的控件仍在它上面。
-- `input(context, id, EmbedInput)`（可选）：叶子上的指针与按键输入，坐标相对叶子边界。`pointer_move` 与 `pointer_leave` 跟随指针（窗口失去焦点也算离开），`pointer_down` 是主键按下（`PointerPress` 带位置、修饰键和连击次数：同一叶子上 500 ms 内、相距 4 DIP 内的按下依次计为 2、3……），`wheel` 是叶子上的滚轮（DIP，正 y 向下；不消费时交给外层滚动容器），`key` 是叶子持有焦点时其他控件都不处理的按键，`key_up` 是叶子持有焦点时松开的键（不论按下是否被它消费；窗口没有键盘时按下的键不会有松开）。返回 true 表示已消费并重绘窗口；消费按下的可聚焦叶子随即获得焦点。不消费的按键（例如 Tab）照常路由。它在主线程、绘制之外运行；被禁用、被裁剪遮住或位于打开的列表下面的叶子收不到输入，每帧最多 16 个叶子参与路由。
+- `input(context, id, EmbedInput)`（可选）：叶子上的指针与按键输入，坐标相对叶子边界。`pointer_move` 与 `pointer_leave` 跟随指针（窗口失去焦点也算离开），`pointer_down` 是主键按下（`PointerPress` 带位置、修饰键和连击次数：同一叶子上 500 ms 内、相距 4 DIP 内的按下依次计为 2、3……），`wheel` 是叶子上的滚轮（DIP，正 y 向下；指针下的所有叶子从最后绘制的开始依次收到它，直到有一个消费，例如编辑器上方挡住按下的注释不消费时滚轮落到编辑器；都不消费时才交给外层滚动容器），`key` 是叶子持有焦点时其他控件都不处理的按键，`key_up` 是叶子持有焦点时松开的键（不论按下是否被它消费；窗口没有键盘时按下的键不会有松开）。返回 true 表示已消费并重绘窗口；消费按下的可聚焦叶子随即获得焦点。不消费的按键（例如 Tab）照常路由。它在主线程、绘制之外运行；被禁用、被裁剪遮住或位于打开的列表下面的叶子收不到输入，每帧最多 16 个叶子参与路由。
 - `View.focusLeaf(id)` 在这一遍之后把键盘焦点交给可聚焦叶子 `id`（`place` 或 `paint` 得到的节点 ID），`View.hasKeyboard(id)` 表示该叶子持有焦点且窗口有键盘；游戏循环用它们在叶子出现时取得焦点、失去键盘时暂停。
 - 消费 `pointer_down` 即捕获指针：直到松开，移动都以 `pointer_drag`（带起点、相对上一次的位移，以及是否已移出 `drag_threshold` 4 DIP）送到这个叶子，松开以 `pointer_up` 送达，指针离开叶子甚至窗口也一样。窗口失去焦点或原生捕获被取消时改为 `pointer_cancel`。下一次构建不再产生该叶子时捕获随之丢弃，之后不再调用它。
 

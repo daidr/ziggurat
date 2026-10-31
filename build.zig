@@ -1900,6 +1900,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
         });
+        addSmoke(b, "smoke-webview-page-facts", "tests/page_facts_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
         addSmoke(b, "smoke-page-remote", "tests/remote_page_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
@@ -2036,6 +2039,9 @@ pub fn build(b: *std.Build) void {
         addSmoke(b, "smoke-webview-linux", "tests/linux_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-page-facts", "tests/page_facts_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
         });
         addSmoke(b, "smoke-webview-dynamic-linux", "tests/linux_dynamic_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
