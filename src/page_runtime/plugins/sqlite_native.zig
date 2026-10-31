@@ -10,7 +10,9 @@ const Db = opaque {};
 const Stmt = opaque {};
 const Busy = *const fn (?*anyopaque, c_int) callconv(.c) c_int;
 const Authorizer = *const fn (?*anyopaque, c_int, ?[*:0]const u8, ?[*:0]const u8, ?[*:0]const u8, ?[*:0]const u8) callconv(.c) c_int;
-const Destructor = ?*const fn (?*anyopaque) callconv(.c) void;
+// Byte-aligned so the SQLITE_TRANSIENT sentinel (-1) is a valid value on
+// targets that require aligned function addresses.
+const Destructor = ?*align(1) const fn (?*anyopaque) callconv(.c) void;
 
 pub const ok = 0;
 const row = 100;

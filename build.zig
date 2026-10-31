@@ -6,6 +6,7 @@ pub fn build(b: *std.Build) void {
     b.installFile("LICENSE", "share/ziggurat/LICENSE");
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    native_support.apple_sdk = b.option([]const u8, "macos-sdk", "macOS SDK root for cross-compiling to macOS");
     const web = b.option(bool, "webview", "Build the optional system WebView (Windows SDK or Linux WebKitGTK)") orelse false;
     const https_resources_enabled = b.option(bool, "https-resources", "Build the optional HTTPS resource transport on Windows or Linux") orelse false;
     const gpu = b.option(bool, "gpu", "Build the optional D3D11 renderer with GDI fallback") orelse false;
@@ -420,6 +421,10 @@ pub fn build(b: *std.Build) void {
         }
         fonts.link_libc = true;
     }
+    if (target.result.os.tag == .macos) {
+        _ = native_support.add(b, fonts, "fonts-native", "src/fonts/macos.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native_support.linkFrameworks(b, fonts, &.{ "CoreFoundation", "CoreText" });
+    }
     if (target.result.os.tag == .windows) {
         _ = native_support.add(b, fonts, "fonts-native", "src/fonts/windows.c", &.{"-std=c11"}, target, optimize);
         fonts.linkSystemLibrary("dwrite", .{});
@@ -464,6 +469,10 @@ pub fn build(b: *std.Build) void {
         text_layout.linkSystemLibrary("dwrite", .{});
         text_layout.linkSystemLibrary("gdi32", .{});
         text_layout.link_libc = true;
+    }
+    if (target.result.os.tag == .macos) {
+        _ = native_support.add(b, text_layout, "text-layout-native", "src/ui/text_layout_macos.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native_support.linkFrameworks(b, text_layout, &.{ "CoreFoundation", "CoreGraphics", "CoreText" });
     }
     if (target.result.os.tag == .linux) {
         const native = native_support.add(b, text_layout, "text-layout-native", "src/ui/text_layout_linux.c", &.{"-std=c11"}, target, optimize);
@@ -709,6 +718,11 @@ pub fn build(b: *std.Build) void {
         core.linkSystemLibrary("imm32", .{});
         core.linkSystemLibrary("dwmapi", .{});
         core.link_libc = true;
+    }
+    if (target.result.os.tag == .macos) {
+        _ = native_support.add(b, core, "core-native", "src/platform/macos.m", &.{ "-fno-objc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native_support.linkFrameworks(b, core, &.{ "AppKit", "Foundation", "CoreFoundation", "CoreGraphics" });
+        core.linkSystemLibrary("objc", .{ .use_pkg_config = .no });
     }
     if (target.result.os.tag == .linux) {
         const native = native_support.add(b, core, "core-native", "src/platform/linux.c", &.{"-std=c11"}, target, optimize);
@@ -1462,6 +1476,22 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .windows) {
         ui.linkSystemLibrary("gdi32", .{});
         ui.link_libc = true;
+    }
+    if (target.result.os.tag == .macos) {
+        _ = native_support.add(b, ui, "ui-core-graphics-native", "src/ui/macos.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native_support.linkFrameworks(b, ui, &.{ "CoreFoundation", "CoreGraphics", "CoreText" });
+        _ = addExample(b, "counter", "examples/counter.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        _ = addExample(b, "view-counter", "examples/view_counter.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_view", .module = declarative_view },
+        });
+        addSmoke(b, "smoke-macos", "tests/macos_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
     }
     if (target.result.os.tag == .linux) {
         const native = native_support.add(b, ui, "ui-cairo-native", "src/ui/linux.c", &.{"-std=c11"}, target, optimize);
@@ -2623,7 +2653,7 @@ pub fn build(b: *std.Build) void {
     const test_terminal = b.step("test-terminal", "Run escape sequence parsing, screen, scrollback, key and mouse encoding, selection, link, PTY session and terminal view tests");
     test_terminal.dependOn(&run_terminal_tests.step);
     test_terminal.dependOn(&run_terminal_view_tests.step);
-    addSmoke(b, "smoke-terminal", "tests/terminal_smoke.zig", target, optimize, &.{
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux) addSmoke(b, "smoke-terminal", "tests/terminal_smoke.zig", target, optimize, &.{
         .{ .name = "ziggurat", .module = core },
         .{ .name = "ziggurat_ui", .module = ui },
         .{ .name = "ziggurat_view", .module = declarative_view },

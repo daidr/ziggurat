@@ -2131,6 +2131,9 @@ fn testView(host: *view.Host, terminal: *term.Terminal, sent: *Sent, board: *Boa
     with.send = .{ .context = sent, .call = Sent.call };
     with.clipboard = .{ .context = board, .read = Board.read, .write = Board.write };
     var tv = TerminalView.init(host, std.testing.allocator, terminal, with);
+    // The tests press the Linux and Windows keys on every host; keybind.zig
+    // covers the macOS defaults.
+    tv.bindings = .init(.linux, with.keybinds, with.no_default_keybinds);
     tv.bounds = .{ .x = 0, .y = 0, .width = 100, .height = 80 };
     return tv;
 }

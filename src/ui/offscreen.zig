@@ -7,7 +7,7 @@ const geometry = @import("geometry.zig");
 const layout = @import("layout.zig");
 const layers = @import("layers.zig");
 const gaussian_scope = @import("gaussian_scope.zig");
-const Software = if (builtin.os.tag == .linux) @import("linux.zig").Renderer else @import("windows.zig").Renderer;
+const Software = if (builtin.os.tag == .windows) @import("windows.zig").Renderer else @import("linux.zig").Renderer;
 
 pub const Options = struct {
     size: z.Size,
@@ -356,7 +356,7 @@ const Plan = struct {
         if (options.transform_source != null and options.render_work > 512 * 1024 * 1024) return error.InvalidOffscreenLimits;
         if (options.size.width > 16384 or options.size.height > 16384 or @as(u64, options.size.width) * options.size.height > 16 * 1024 * 1024) return error.InvalidGeometry;
         const layer_options: layers.Options = .{ .size = options.size, .max_depth = options.max_depth, .legacy_text = options.legacy_text, .bytes = options.workspace_bytes, .total_bytes = options.total_bytes };
-        const layer_plan = if (filter) |value| value.layers else if (options.transform_source) |source| try layers.Plan.initTransforms(.{ .layers = layer_options, .source_size = source, .render_work = @min(options.render_work, 512 * 1024 * 1024) }, if (builtin.os.tag == .linux) .cairo else .gdi) else try layers.Plan.init(layer_options, if (builtin.os.tag == .linux) .cairo else .gdi);
+        const layer_plan = if (filter) |value| value.layers else if (options.transform_source) |source| try layers.Plan.initTransforms(.{ .layers = layer_options, .source_size = source, .render_work = @min(options.render_work, 512 * 1024 * 1024) }, if (builtin.os.tag == .windows) .gdi else .cairo) else try layers.Plan.init(layer_options, if (builtin.os.tag == .windows) .gdi else .cairo);
         const workspace_bytes = if (filter) |value| value.pixel_bytes else layer_plan.pixel_bytes;
         const metadata = try add(try add(try add(@sizeOf(State), @sizeOf(Account)), Software.layerMetadataBytes()), (if (options.transform_source != null) @as(usize, @sizeOf(commands.TransformStorage)) else 0) + (if (filter != null) @sizeOf(commands.FilterStorage) + Software.gaussianMetadataBytes() else 0));
         const reserve = try add(try add(try add(workspace_bytes, metadata), options.resident_bytes * 2), options.output_bytes);
@@ -391,12 +391,12 @@ fn stop(context: *anyopaque) !void {
 fn preflight(buffer: *const commands.Buffer, options: Options, filter_options: ?gaussian_scope.FilterOptions) !u64 {
     const layer_options: layers.Options = .{ .size = options.size, .max_depth = options.max_depth, .legacy_text = options.legacy_text, .bytes = options.workspace_bytes, .total_bytes = options.total_bytes };
     const filter = if (filter_options) |value| try filterPlan(options, value) else null;
-    const plan: ?layers.Plan = if (filter) |value| value.layers else if (options.transform_source) |source| try layers.Plan.initTransforms(.{ .layers = layer_options, .source_size = source, .render_work = @min(options.render_work, 512 * 1024 * 1024) }, if (builtin.os.tag == .linux) .cairo else .gdi) else null;
+    const plan: ?layers.Plan = if (filter) |value| value.layers else if (options.transform_source) |source| try layers.Plan.initTransforms(.{ .layers = layer_options, .source_size = source, .render_work = @min(options.render_work, 512 * 1024 * 1024) }, if (builtin.os.tag == .windows) .gdi else .cairo) else null;
     return @import("render_batch.zig").preflight(buffer, .{ .size = options.size, .max_depth = options.max_depth, .legacy_text = options.legacy_text, .render_work = options.render_work, .transform_plan = plan, .gaussian_capacity = if (filter) |value| value.capacity else null });
 }
 fn filterPlan(options: Options, filter: gaussian_scope.FilterOptions) !gaussian_scope.Plan {
     const layer_options: layers.Options = .{ .size = options.size, .max_depth = options.max_depth, .legacy_text = options.legacy_text, .bytes = options.workspace_bytes, .total_bytes = options.total_bytes };
     const transforms: ?layers.TransformOptions = if (options.transform_source) |source| .{ .layers = layer_options, .source_size = source, .render_work = @min(options.render_work, 512 * 1024 * 1024) } else null;
-    return try gaussian_scope.Plan.init(gaussian_scope.withLayers(filter, layer_options, @min(options.render_work, 512 * 1024 * 1024)), if (builtin.os.tag == .linux) .cairo else .gdi, transforms);
+    return try gaussian_scope.Plan.init(gaussian_scope.withLayers(filter, layer_options, @min(options.render_work, 512 * 1024 * 1024)), if (builtin.os.tag == .windows) .gdi else .cairo, transforms);
 }
 const capture = @import("render_batch.zig").capture;

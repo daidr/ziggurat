@@ -2,7 +2,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const input = @import("input.zig");
-const gdi = if (builtin.os.tag == .linux) @import("linux.zig") else @import("windows.zig");
+// Every platform except Windows replays through the same software renderer
+// ABI (`zlc_*`), implemented natively by `linux.c` and `macos.c`.
+const gdi = if (builtin.os.tag == .windows) @import("windows.zig") else @import("linux.zig");
 pub const SoftwareRenderer = gdi.Renderer;
 const build_options = @import("ziggurat_ui_options");
 pub const d3d11 = if (builtin.os.tag == .windows) @import("d3d11.zig") else struct {};
@@ -138,7 +140,11 @@ comptime {
 pub const capabilities = .{
     .gpu = build_options.gpu,
     .accessibility = build_options.accessibility,
-    .software_backend = if (builtin.os.tag == .linux) "cairo-pango" else "gdi",
+    .software_backend = switch (builtin.os.tag) {
+        .windows => "gdi",
+        .macos => "core-graphics",
+        else => "cairo-pango",
+    },
 };
 pub const LayerCacheStats = struct { software: layers.Stats, gpu: ?layers.Stats, current_bytes: usize, ordinary_front_bytes: usize, candidate_peak_bytes: usize };
 pub const TransformCacheStats = struct { layers: LayerCacheStats, metadata_bytes: usize, generation: u64, accepted_scopes: usize, accepted_captures: usize };
@@ -1880,7 +1886,7 @@ pub const Context = struct {
         self.layer_mutating = true;
         defer self.layer_mutating = false;
         const gpu = build_options.gpu and !self.gpu_unavailable and self.attached_render_mode != .gdi;
-        const total = try layers.Plan.checkContext(options, if (builtin.os.tag == .linux) .cairo else .gdi, gpu);
+        const total = try layers.Plan.checkContext(options, if (builtin.os.tag == .windows) .gdi else .cairo, gpu);
         self.cancelGpuWait();
         const old = self.renderer.layerSurfaceBytes() + (if (build_options.gpu) self.gpu_renderer.layerStats().pixel_bytes else 0);
         self.layer_candidate_peak = @max(self.layer_candidate_peak, old + total);
@@ -1908,7 +1914,7 @@ pub const Context = struct {
         self.layer_mutating = true;
         defer self.layer_mutating = false;
         const gpu = build_options.gpu and !self.gpu_unavailable and self.attached_render_mode != .gdi;
-        const software_plan = try gaussian_scope.Plan.init(options, if (builtin.os.tag == .linux) .cairo else .gdi, self.renderer.transformOptions());
+        const software_plan = try gaussian_scope.Plan.init(options, if (builtin.os.tag == .windows) .gdi else .cairo, self.renderer.transformOptions());
         const gpu_plan: ?gaussian_scope.Plan = if (build_options.gpu and gpu) try gaussian_scope.Plan.init(options, .gpu, self.gpu_renderer.transformOptions()) else null;
         const old = self.renderer.layerSurfaceBytes() + self.renderer.layerStats().metadata_bytes + (if (build_options.gpu) self.gpu_renderer.layerStats().pixel_bytes + self.gpu_renderer.layerStats().metadata_bytes else 0) + (if (self.gaussian_workspace != null) @as(usize, @sizeOf(GaussianWorkspace)) else 0) + (try self.transformStats()).metadata_bytes;
         const metadata = @sizeOf(GaussianWorkspace) + gdi.Renderer.layerMetadataBytes() + gdi.Renderer.gaussianMetadataBytes() + (if (build_options.gpu and gpu) d3d11.Renderer.layerMetadataBytes() + d3d11.Renderer.gaussianMetadataBytes() else 0);
@@ -2030,7 +2036,7 @@ pub const Context = struct {
         self.layer_mutating = true;
         defer self.layer_mutating = false;
         const gpu = build_options.gpu and !self.gpu_unavailable and self.attached_render_mode != .gdi;
-        const total = try layers.Plan.checkTransformContext(options, if (builtin.os.tag == .linux) .cairo else .gdi, gpu);
+        const total = try layers.Plan.checkTransformContext(options, if (builtin.os.tag == .windows) .gdi else .cairo, gpu);
         const old = self.renderer.layerSurfaceBytes() + (if (build_options.gpu) self.gpu_renderer.layerStats().pixel_bytes else 0);
         const peak = std.math.add(usize, old, total) catch return error.LayerAggregateBudgetExceeded;
         const native_geometry_bytes: usize = if (build_options.accessibility and self.attached_semantics_enabled) @sizeOf(accessibility.NativeGeometry) else 0;
@@ -2887,7 +2893,7 @@ pub const Context = struct {
                 clock.markBuild();
                 const layer_options = if (build_options.gpu and using_gpu) self.gpu_renderer.layerOptions() else self.renderer.layerOptions();
                 const transform_options = if (build_options.gpu and using_gpu) self.gpu_renderer.transformOptions() else self.renderer.transformOptions();
-                const transform_plan: ?layers.Plan = if (transform_options) |value| layers.Plan.initTransforms(value, if (build_options.gpu and using_gpu) .gpu else if (builtin.os.tag == .linux) .cairo else .gdi) catch |err| {
+                const transform_plan: ?layers.Plan = if (transform_options) |value| layers.Plan.initTransforms(value, if (build_options.gpu and using_gpu) .gpu else if (builtin.os.tag == .windows) .gdi else .cairo) catch |err| {
                     window.report(.{ .domain = .renderer, .operation = .paint, .err = err });
                     return;
                 } else null;
@@ -3314,7 +3320,7 @@ pub const Frame = struct {
         // coefficients, including the parent's current pushOffset.
         const positioned = try to_parent.then(try affine.Affine.translation(affine.Point.from(self.offset)));
         const descriptor = try layers.NativeTransform.init(positioned, source_size, self.size.scale);
-        const plan = try layers.Plan.initTransforms(options, if (builtin.os.tag == .linux) .cairo else .gdi);
+        const plan = try layers.Plan.initTransforms(options, if (builtin.os.tag == .windows) .gdi else .cairo);
         try plan.validateTransform(descriptor);
         const child_space = try snapshot.geometry.addChild(workspace.reference.space, descriptor.matrix());
         const source: Rect = .{ .x = 0, .y = 0, .width = source_size.width, .height = source_size.height };
@@ -5784,7 +5790,7 @@ test "Gaussian Context preparation preserves coordinate authority and failed can
     short.layers.total_bytes = 1;
     try std.testing.expectError(error.LayerAggregateBudgetExceeded, context.prepareGaussianWorkspace(failing.allocator(), short));
     try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
-    const plan = try gaussian_scope.Plan.init(options, if (builtin.os.tag == .linux) .cairo else .gdi, null);
+    const plan = try gaussian_scope.Plan.init(options, if (builtin.os.tag == .windows) .gdi else .cairo, null);
     const old_layers = context.renderer.layerSurfaceBytes() + context.renderer.layerStats().metadata_bytes + @sizeOf(GaussianWorkspace);
     const next_metadata = @sizeOf(GaussianWorkspace) + gdi.Renderer.layerMetadataBytes() + gdi.Renderer.gaussianMetadataBytes();
     short.layers.total_bytes = plan.pixel_bytes + old_layers + next_metadata + (try context.transformStats()).metadata_bytes - 1;

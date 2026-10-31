@@ -79,6 +79,69 @@ pub fn fromScanCode(scan: u32, extended: bool) KeyCode {
     return if (scan == 0x76) .f24 else .unknown;
 }
 
+/// The key at macOS virtual key code `code`, as NSEvent's keyCode gives it
+/// (the kVK_ constants of Carbon's Events.h, numbered by ANSI position).
+pub fn fromMacVirtualKey(code: u32) KeyCode {
+    const ansi = [_]KeyCode{
+        .a,     .s,            .d,         .f,         .h,       .g,      .z,             .x,
+        .c,     .v,            .unknown,   .b,         .q,       .w,      .e,             .r,
+        .y,     .t,            .digit1,    .digit2,    .digit3,  .digit4, .digit6,        .digit5,
+        .equal, .digit9,       .digit7,    .minus,     .digit8,  .digit0, .right_bracket, .o,
+        .u,     .left_bracket, .i,         .p,         .enter,   .l,      .j,             .apostrophe,
+        .k,     .semicolon,    .backslash, .comma,     .slash,   .n,      .m,             .period,
+        .tab,   .space,        .grave,     .backspace, .unknown, .escape, .super,         .super,
+        .shift, .caps_lock,    .alt,       .control,   .shift,   .alt,    .control,       .unknown,
+    };
+    if (code < ansi.len) return ansi[code];
+    return switch (code) {
+        0x40 => .f17,
+        0x41 => .decimal,
+        0x43 => .multiply,
+        0x45 => .add,
+        0x47 => .num_lock,
+        0x48 => .volume_up,
+        0x49 => .volume_down,
+        0x4a => .volume_mute,
+        0x4b => .divide,
+        0x4c => .enter,
+        0x4e => .subtract,
+        0x4f => .f18,
+        0x50 => .f19,
+        0x52...0x59 => @fromBackingInt(@intCast(@backingInt(KeyCode.numpad0) + code - 0x52)),
+        0x5a => .f20,
+        0x5b => .numpad8,
+        0x5c => .numpad9,
+        0x60 => .f5,
+        0x61 => .f6,
+        0x62 => .f7,
+        0x63 => .f3,
+        0x64 => .f8,
+        0x65 => .f9,
+        0x67 => .f11,
+        0x69 => .f13,
+        0x6a => .f16,
+        0x6b => .f14,
+        0x6d => .f10,
+        0x6e => .context_menu,
+        0x6f => .f12,
+        0x71 => .f15,
+        0x72 => .insert,
+        0x73 => .home,
+        0x74 => .page_up,
+        0x75 => .delete,
+        0x76 => .f4,
+        0x77 => .end,
+        0x78 => .f2,
+        0x79 => .page_down,
+        0x7a => .f1,
+        0x7b => .left,
+        0x7c => .right,
+        0x7d => .down,
+        0x7e => .up,
+        else => .unknown,
+    };
+}
+
 const std = @import("std");
 
 test "letters keep their place across layouts" {
@@ -99,4 +162,13 @@ test "navigation keys need the extended flag or their evdev codes" {
     try std.testing.expectEqual(KeyCode.f13, fromEvdev(183));
     try std.testing.expectEqual(KeyCode.f24, fromScanCode(0x76, false));
     try std.testing.expectEqual(KeyCode.unknown, fromEvdev(500));
+}
+
+test "macOS virtual keys follow ANSI positions" {
+    try std.testing.expectEqual(KeyCode.w, fromMacVirtualKey(0x0d));
+    try std.testing.expectEqual(KeyCode.a, fromMacVirtualKey(0x00));
+    try std.testing.expectEqual(KeyCode.digit5, fromMacVirtualKey(0x17));
+    try std.testing.expectEqual(KeyCode.numpad7, fromMacVirtualKey(0x59));
+    try std.testing.expectEqual(KeyCode.up, fromMacVirtualKey(0x7e));
+    try std.testing.expectEqual(KeyCode.unknown, fromMacVirtualKey(500));
 }

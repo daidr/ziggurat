@@ -37,7 +37,8 @@ pub const Exit = union(enum) {
 pub const Error = error{ Unsupported, SpawnFailed, OutOfMemory, InvalidCommand, SystemResources };
 
 pub const Pty = switch (builtin.os.tag) {
-    .linux => @import("pty_linux.zig").Pty,
+    // POSIX pseudo-terminals: Linux and macOS share one implementation.
+    .linux, .macos => @import("pty_linux.zig").Pty,
     .windows => @import("pty_windows.zig").Pty,
     else => Unsupported,
 };
