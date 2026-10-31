@@ -343,6 +343,63 @@ pub const languages = [_]Language{
         .speech = "語音",
         .clear_recent = "清除選單",
     } },
+    .{ .tag = "ja", .strings = .{
+        .undo = "取り消す",
+        .redo = "やり直す",
+        .cut = "カット",
+        .copy = "コピー",
+        .paste = "ペースト",
+        .paste_and_match_style = "ペーストしてスタイルを合わせる",
+        .delete = "削除",
+        .select_all = "すべてを選択",
+        .reload = "再読み込み",
+        .force_reload = "強制再読み込み",
+        .toggle_dev_tools = "開発者ツールの切り替え",
+        .actual_size = "実際のサイズ",
+        .zoom_in = "拡大",
+        .zoom_out = "縮小",
+        .toggle_full_screen = "フルスクリーンの切り替え",
+        .minimize = "しまう",
+        .zoom = "拡大/縮小",
+        .bring_all_to_front = "すべてを手前に移動",
+        .close = "閉じる",
+        .close_window = "ウインドウを閉じる",
+        .new = "新規",
+        .open = "開く…",
+        .open_recent = "最近使った項目を開く",
+        .save = "保存",
+        .save_as = "別名で保存…",
+        .duplicate = "複製",
+        .rename = "名称変更…",
+        .move_to = "移動…",
+        .revert = "復帰",
+        .revert_to_saved = "保存時の状態に戻す",
+        .quit_app = "{app}を終了",
+        .about = "{app}について",
+        .hide = "{app}を隠す",
+        .quit = "終了",
+        .exit = "終了",
+        .hide_others = "ほかを隠す",
+        .show_all = "すべてを表示",
+        .services = "サービス",
+        .start_speaking = "読み上げを開始",
+        .stop_speaking = "読み上げを停止",
+        .file = "ファイル",
+        .edit = "編集",
+        .view = "表示",
+        .format = "フォーマット",
+        .window = "ウインドウ",
+        .help = "ヘルプ",
+        .bold = "太字",
+        .italic = "斜体",
+        .underline = "下線",
+        .strikethrough = "取り消し線",
+        .align_left = "左揃え",
+        .center = "中央揃え",
+        .align_right = "右揃え",
+        .speech = "スピーチ",
+        .clear_recent = "メニューを消去",
+    } },
 };
 
 /// The shipped language closest to `locale`, such as "zh-TW" or "de_AT":
@@ -630,6 +687,9 @@ test "role labels follow the language and the platform" {
     try testing.expectEqualStrings("撤销", defaults(.undo, .{ .strings = zh }).label);
     try testing.expectEqualStrings("復原", defaults(.undo, .{ .strings = resolve("zh_TW.UTF-8", &.{}) }).label);
     try testing.expectEqualStrings("Undo", defaults(.undo, .{ .strings = resolve("de-DE", &.{}) }).label);
+    const ja = resolve("ja-JP", &.{});
+    try testing.expectEqualStrings("取り消す", defaults(.undo, .{ .strings = ja }).label);
+    try testing.expectEqualStrings("{app}を終了", defaults(.quit, .{ .strings = ja, .platform = .macos }).label);
     const custom = resolve("de", &.{.{ .tag = "de", .strings = .{ .undo = "Rückgängig" } }});
     try testing.expectEqualStrings("Rückgängig", defaults(.undo, .{ .strings = custom }).label);
     try testing.expectEqualStrings("Redo", defaults(.redo, .{ .strings = custom }).label);

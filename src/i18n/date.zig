@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const Locale = @import("locale.zig").Locale;
 
 /// A point in time and the caller-chosen UTC offset to display it in. The
@@ -31,7 +32,7 @@ pub fn civil(instant: Instant) Error!Civil {
     const local = instant.unix_seconds +| @as(i64, instant.utc_offset_minutes) * 60;
     if (local < min_unix_seconds or local > max_unix_seconds) return error.OutOfRange;
     const days = @divFloor(local, 86400);
-    const seconds: u32 = @intCast(local - days * 86400);
+    const seconds: u32 = @intCast(zio.asUnsigned(local - days * 86400));
     // Days to civil date, era-based (400-year cycles from 0000-03-01).
     const z = days + 719468;
     const era = @divFloor(z, 146097);
@@ -43,13 +44,13 @@ pub fn civil(instant: Instant) Error!Civil {
     const month = if (mp < 10) mp + 3 else mp - 9;
     const year = yoe + era * 400 + @as(i64, if (month <= 2) 1 else 0);
     return .{
-        .year = @intCast(year),
-        .month = @intCast(month),
-        .day = @intCast(day),
+        .year = @intCast(zio.asUnsigned(year)),
+        .month = @intCast(zio.asUnsigned(month)),
+        .day = @intCast(zio.asUnsigned(day)),
         .hour = @intCast(seconds / 3600),
         .minute = @intCast(seconds / 60 % 60),
         .second = @intCast(seconds % 60),
-        .weekday = @intCast(@mod(days + 4, 7)),
+        .weekday = @intCast(zio.asUnsigned(@mod(days + 4, 7))),
     };
 }
 

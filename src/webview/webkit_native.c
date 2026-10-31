@@ -63,6 +63,18 @@ struct ZwkState {
     int32_t session_left,session_top,session_right,session_bottom;
     gboolean session,placement_busy,parent_destroying,session_visible;
     uint32_t policy;
+    char *facts;
+    gboolean autoplay;
+    ZwkAuth auth;
+    ZwkCertificate certificate;
+    /* A page whose certificate the app allowed loads again once the failed
+       load finished. */
+    char *tls_retry;
+    unsigned tls_retries;
+    uint32_t context_policy;
+    ZwkContextMenu context_offer;
+    /* The selection of the page's latest contextmenu event. */
+    char *context_selection;
     gboolean closed, committed, failed, dom_ready, recovering,load_started,inspector;
 };
 static gint live_states, live_callbacks, live_views, inspectors_shown;
@@ -83,7 +95,7 @@ static void release(gpointer data) {
     initializers_free(s->initializers);
     if(s->private_bootstrap)webkit_user_script_unref(s->private_bootstrap);
     if(s->public_bootstrap)webkit_user_script_unref(s->public_bootstrap);
-    local_finish(&s->local); remote_free(s->remote); g_free(s->html);g_free(s->current_uri);g_free(s->resources); g_free(s); g_atomic_int_add(&live_states,-1);
+    local_finish(&s->local); remote_free(s->remote); g_free(s->facts); g_free(s->tls_retry); g_free(s->context_selection); g_free(s->html);g_free(s->current_uri);g_free(s->resources); g_free(s); g_atomic_int_add(&live_states,-1);
 }
 static gboolean live(ZwkState *s) { return !s->closed && !s->recovering && s->owner; }
 static size_t bounded_length(const char *text,size_t limit) {
@@ -239,8 +251,55 @@ static void view_finalized(gpointer data,GObject *object) {
 static gboolean permission(WebKitWebView *view,WebKitPermissionRequest *request,gpointer data) {
     (void)view; (void)data; webkit_permission_request_deny(request); return TRUE;
 }
+typedef struct AuthCall { WebKitAuthenticationRequest *request; gboolean answered; } AuthCall;
+int zwk_auth_answer(void *call_pointer,const char *user,const char *password) {
+    AuthCall *call=call_pointer;
+    if (!call || call->answered || !user || !password) return ZWK_INVALID;
+    WebKitCredential *credential=webkit_credential_new(user,password,WEBKIT_CREDENTIAL_PERSISTENCE_FOR_SESSION);
+    if (!credential) return ZWK_OOM;
+    webkit_authentication_request_authenticate(call->request,credential);
+    webkit_credential_free(credential);
+    call->answered=TRUE; return ZWK_OK;
+}
+/* Without the app's handler a sign-in is canceled, and its load with it.
+   The handler's no is a sign-in without credentials: the server's refusal. */
 static gboolean authentication(WebKitWebView *view,WebKitAuthenticationRequest *request,gpointer data) {
-    (void)view; (void)data; webkit_authentication_request_cancel(request); return TRUE;
+    (void)view; ZwkState *s=data; retain(s);
+    const WebKitAuthenticationScheme scheme=webkit_authentication_request_get_scheme(request);
+    const gboolean http=scheme==WEBKIT_AUTHENTICATION_SCHEME_DEFAULT || scheme==WEBKIT_AUTHENTICATION_SCHEME_HTTP_BASIC || scheme==WEBKIT_AUTHENTICATION_SCHEME_HTTP_DIGEST ||
+        scheme==WEBKIT_AUTHENTICATION_SCHEME_NTLM || scheme==WEBKIT_AUTHENTICATION_SCHEME_NEGOTIATE;
+    if (live(s) && s->auth && http) {
+        AuthCall call={request,FALSE};
+        const char *host=webkit_authentication_request_get_host(request),*realm=webkit_authentication_request_get_realm(request);
+        s->auth(s->owner,host?host:"",webkit_authentication_request_get_port(request),realm?realm:"",(uint32_t)scheme,webkit_authentication_request_is_for_proxy(request)?1:0,&call);
+        call.request=NULL;
+        if (!call.answered) webkit_authentication_request_authenticate(request,NULL);
+    } else webkit_authentication_request_cancel(request);
+    release(s); return TRUE;
+}
+/* WebKitGTK tells the page's certificate errors only: what it loads from
+   such a server fails without asking. An allowed certificate is the
+   context's for its host until it ends, and the page loads again. */
+static gboolean tls_errors(WebKitWebView *view,const char *uri,GTlsCertificate *certificate,GTlsCertificateFlags flags,gpointer data) {
+    ZwkState *s=data; retain(s);
+    if (live(s) && s->certificate && s->remote && uri && certificate && !s->tls_retry && s->tls_retries<3) {
+        GUri *parsed=g_uri_parse(uri,G_URI_FLAGS_NONE,NULL);
+        const char *host=parsed?g_uri_get_host(parsed):NULL;
+        GByteArray *der=NULL;
+        g_object_get(certificate,"certificate",&der,NULL);
+        if (host && *host && der && der->len && s->certificate(s->owner,uri,(uint32_t)flags,der->data,der->len) && live(s) && !s->tls_retry) {
+            webkit_web_context_allow_tls_certificate_for_host(webkit_web_view_get_context(view),certificate,host);
+            s->tls_retry=g_strdup(uri);
+        }
+        if (der) g_byte_array_unref(der);
+        if (parsed) g_uri_unref(parsed);
+    }
+    release(s); return FALSE;
+}
+static gboolean tls_retry(gpointer data) {
+    ZwkState *s=data; char *uri=s->tls_retry; s->tls_retry=NULL;
+    if (uri && live(s)) { s->tls_retries++; (void)zwk_navigate_remote(s,uri); }
+    g_free(uri); release(s); return G_SOURCE_REMOVE;
 }
 static gboolean dialog(WebKitWebView *view,WebKitScriptDialog *dialog_value,gpointer data) {
     (void)view; (void)data;
@@ -260,11 +319,117 @@ static gboolean color_chooser(WebKitWebView *view,WebKitColorChooserRequest *req
 static gboolean notification(WebKitWebView *view,WebKitNotification *request,gpointer data) {
     (void)view; (void)data; webkit_notification_close(request); return TRUE;
 }
+/* window.open reaches create without a NEW_WINDOW_ACTION decision. */
 static WebKitWebView *popup(WebKitWebView *view,WebKitNavigationAction *action,gpointer data) {
-    (void)view; (void)action; (void)data; return NULL;
+    (void)view; ZwkState *s=data; retain(s);
+    const char *uri=action?webkit_uri_request_get_uri(webkit_navigation_action_get_request(action)):NULL;
+    if (live(s) && uri && (s->policy&2u)) notify(s,4,uri,webkit_navigation_action_is_user_gesture(action)?1:0,NULL);
+    release(s); return NULL;
+}
+/* The app's offer changes WebKitGTK's menu in place: its own items keep
+   doing what they do, the app's are GSimpleActions that tell page kind 11. */
+typedef struct ContextCall { ZwkState *state; WebKitContextMenu *menu; unsigned added; } ContextCall;
+typedef struct ContextAction { ZwkState *state; uint32_t command; } ContextAction;
+static void context_action_free(gpointer data,GClosure *closure) { (void)closure; ContextAction *a=data; release(a->state); g_free(a); }
+static void context_activate(GSimpleAction *action,GVariant *parameter,gpointer data) {
+    (void)action; (void)parameter; ContextAction *a=data; ZwkState *s=a->state; retain(s);
+    if (live(s) && document(s)) (void)page(s,11,0,(int32_t)a->command,NULL);
+    release(s);
+}
+static char *mnemonic_label(const char *label) {
+    GString *out=g_string_sized_new(strlen(label)+4);
+    for (const char *c=label;*c;c++) { if (*c=='_') g_string_append_c(out,'_'); g_string_append_c(out,*c); }
+    return g_string_free(out,FALSE);
+}
+int zwk_context_menu_append(void *call_pointer,const char *label,uint32_t command,uint32_t kind,uint32_t flags) {
+    ContextCall *call=call_pointer;
+    if (!call || (kind!=3 && !label)) return ZWK_INVALID;
+    if (call->added>=32) return ZWK_FULL;
+    WebKitContextMenuItem *item=NULL;
+    if (kind==3) item=webkit_context_menu_item_new_separator();
+    else {
+        char name[32]; g_snprintf(name,sizeof(name),"ziggurat-%u",call->added);
+        GSimpleAction *action=kind==1?g_simple_action_new_stateful(name,NULL,g_variant_new_boolean((flags&2)!=0)):g_simple_action_new(name,NULL);
+        if (!action) return ZWK_OOM;
+        g_simple_action_set_enabled(action,(flags&1)!=0);
+        ContextAction *data=g_try_new0(ContextAction,1);
+        if (!data) { g_object_unref(action); return ZWK_OOM; }
+        data->state=call->state; data->command=command; retain(call->state);
+        g_signal_connect_data(action,"activate",G_CALLBACK(context_activate),data,context_action_free,0);
+        char *text=mnemonic_label(label);
+        item=webkit_context_menu_item_new_from_gaction(G_ACTION(action),text,NULL);
+        g_free(text); g_object_unref(action);
+    }
+    if (!item) return ZWK_OOM;
+    webkit_context_menu_append(call->menu,item);
+    call->added++;
+    return ZWK_OK;
+}
+static const char *context_action_nick(WebKitContextMenuAction action) {
+    static GEnumClass *actions;
+    if (!actions) actions=g_type_class_ref(WEBKIT_TYPE_CONTEXT_MENU_ACTION);
+    GEnumValue *value=g_enum_get_value(actions,(gint)action);
+    return value&&value->value_nick?value->value_nick:"";
+}
+/* Separators first, last or after another go with the items around them. */
+static void context_menu_tidy(WebKitContextMenu *menu) {
+    gboolean previous=TRUE;
+    for (GList *link=webkit_context_menu_get_items(menu);link;) {
+        WebKitContextMenuItem *item=link->data; link=link->next;
+        const gboolean separator=webkit_context_menu_item_is_separator(item);
+        if (separator && previous) { webkit_context_menu_remove(menu,item); continue; }
+        previous=separator;
+    }
+    for (GList *last=g_list_last(webkit_context_menu_get_items(menu));last && webkit_context_menu_item_is_separator(last->data);last=g_list_last(webkit_context_menu_get_items(menu)))
+        webkit_context_menu_remove(menu,last->data);
 }
 static gboolean context_menu(WebKitWebView *view,WebKitContextMenu *menu,GdkEvent *event,WebKitHitTestResult *hit,gpointer data) {
-    (void)view; (void)menu; (void)event; (void)hit; (void)data; return TRUE;
+    (void)view; (void)event; ZwkState *s=data;
+    if (s->context_policy==1) return FALSE;
+    if (s->context_policy!=2 || !s->context_offer || !menu) return TRUE;
+    retain(s);
+    gboolean prevented=TRUE;
+    char *selection=s->context_selection; s->context_selection=NULL;
+    if (live(s) && document(s)) {
+        WebKitContextMenuItem *items[64]; ZwkContextItem inputs[64]; uint8_t keep[64]; uint32_t count=0;
+        G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+        for (GList *link=webkit_context_menu_get_items(menu);link && count<64;link=link->next) {
+            WebKitContextMenuItem *item=link->data;
+            GtkAction *action=webkit_context_menu_item_get_action(item);
+            const WebKitContextMenuAction stock=webkit_context_menu_item_get_stock_action(item);
+            const gboolean separator=webkit_context_menu_item_is_separator(item);
+            const gboolean toggle=action && GTK_IS_TOGGLE_ACTION(action);
+            uint32_t kind=separator?3u:webkit_context_menu_item_get_submenu(item)?4u:toggle?(GTK_IS_RADIO_ACTION(action)?2u:1u):0u;
+            uint32_t flags=(separator || (action && gtk_action_get_sensitive(action)))?1u:0u;
+            if (toggle && gtk_toggle_action_get_active(GTK_TOGGLE_ACTION(action))) flags|=2u;
+            const char *label=action?gtk_action_get_label(action):NULL;
+            items[count]=item;
+            inputs[count]=(ZwkContextItem){separator?"":context_action_nick(stock),label?label:"",kind,flags,(uint32_t)stock};
+            keep[count]=1; count++;
+        }
+        G_GNUC_END_IGNORE_DEPRECATIONS
+        ZwkContextTarget target={0};
+        target.selection=selection && *selection?selection:NULL;
+        if (hit) {
+            target.link=webkit_hit_test_result_context_is_link(hit)?webkit_hit_test_result_get_link_uri(hit):NULL;
+            target.link_text=webkit_hit_test_result_context_is_link(hit)?webkit_hit_test_result_get_link_label(hit):NULL;
+            target.image=webkit_hit_test_result_context_is_image(hit)?webkit_hit_test_result_get_image_uri(hit):NULL;
+            target.media=webkit_hit_test_result_context_is_media(hit)?webkit_hit_test_result_get_media_uri(hit):NULL;
+            target.editable=webkit_hit_test_result_context_is_editable(hit)?1u:0u;
+        }
+        for (uint32_t i=0;i<count;i++) g_object_ref(items[i]);
+        ContextCall call={s,menu,0};
+        prevented=s->context_offer(s->owner,&target,inputs,count,keep,&call)!=0;
+        if (live(s) && !prevented) {
+            for (uint32_t i=0;i<count;i++) if (!keep[i]) webkit_context_menu_remove(menu,items[i]);
+            context_menu_tidy(menu);
+            /* A menu the app emptied shows nothing. */
+            if (!webkit_context_menu_get_n_items(menu)) prevented=TRUE;
+        } else prevented=TRUE;
+        for (uint32_t i=0;i<count;i++) g_object_unref(items[i]);
+    }
+    g_free(selection);
+    release(s); return prevented;
 }
 static gboolean policy(WebKitWebView *view,WebKitPolicyDecision *decision,WebKitPolicyDecisionType kind,gpointer data) {
     (void)view; ZwkState *s=data; retain(s); g_object_ref(decision);
@@ -302,11 +467,18 @@ static gboolean policy(WebKitWebView *view,WebKitPolicyDecision *decision,WebKit
             }
         }
         if (allowed && navigation_current(s,op)) {
-            op->authorized=TRUE; webkit_policy_decision_use(decision);
+            op->authorized=TRUE;
+            /* WebKitGTK decides autoplay from a main-frame navigation's
+             * website policies, sound only after a gesture by default. */
+            if (s->autoplay) {
+                WebKitWebsitePolicies *policies=webkit_website_policies_new_with_policies("autoplay",WEBKIT_AUTOPLAY_ALLOW,NULL);
+                webkit_policy_decision_use_with_policies(decision,policies);
+                g_object_unref(policies);
+            } else webkit_policy_decision_use(decision);
         } else {
             webkit_policy_decision_ignore(decision);
             unsigned bit=kind==WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION?1:0;
-            if (s->policy&(1u<<bit)) notify(s,3+(int)bit,uri,0,NULL);
+            if (s->policy&(1u<<bit)) notify(s,3+(int)bit,uri,action&&webkit_navigation_action_is_user_gesture(action)?1:0,NULL);
         }
         if (op) navigation_release(op);
     } else if (kind==WEBKIT_POLICY_DECISION_TYPE_RESPONSE) {
@@ -355,13 +527,17 @@ static void loaded(WebKitWebView *view,WebKitLoadEvent event,gpointer data) {
     } else if (event==WEBKIT_LOAD_FINISHED) {
         if (s->load_started && s->loading_generation==generation && s->loading_serial==s->navigation_serial && (!op || (op->started && op->serial==s->loading_serial))) {
             const int32_t status=s->failed?s->loading_failure.code:0;
+            /* Another navigation, a stop or a download took its place. */
+            const gboolean cancelled=s->failed&&s->loading_failure.domain==(uint32_t)WEBKIT_NETWORK_ERROR&&status==WEBKIT_NETWORK_ERROR_CANCELLED;
             s->load_started=FALSE;
             s->loading_serial=0; s->revoked_load_serial=0; s->loading_failure=(ZwkFailure){0};
             const gboolean success=document(s);
+            if (success) s->tls_retries=0;
             if (op) { op->finished=TRUE; navigation_clear(s); }
-            (void)page(s,1,success?1:0,status,NULL);
+            (void)page(s,1,(success?1u:0u)|(!success&&cancelled?2u:0u),status,NULL);
             if (live(s) && s->generation==generation) history_notify(s);
         }
+        if (s->tls_retry && live(s)) { retain(s); g_idle_add(tls_retry,s); }
     }
 op_done:
     if (op) navigation_release(op);
@@ -392,6 +568,13 @@ static void process_failed(WebKitWebView *view,WebKitWebProcessTerminationReason
 static void title_changed(GObject *view,GParamSpec *property,gpointer data) {
     (void)property; ZwkState *s=data; retain(s);
     if (document(s)) (void)page(s,4,0,0,webkit_web_view_get_title(WEBKIT_WEB_VIEW(view)));
+    release(s);
+}
+/* Audibility belongs to the view, not a document: it is told between
+   documents too, under the current generation. */
+static void audible_changed(GObject *view,GParamSpec *property,gpointer data) {
+    (void)property; ZwkState *s=data; retain(s);
+    if (live(s)) (void)page(s,7,webkit_web_view_is_playing_audio(WEBKIT_WEB_VIEW(view))?1u:0u,0,NULL);
     release(s);
 }
 static void source_changed(GObject *view,GParamSpec *property,gpointer data) {
@@ -481,7 +664,13 @@ static void message(WebKitUserContentManager *manager,WebKitJavascriptResult *re
     if (count<0 || (size_t)count>=sizeof(prefix) || length<=(size_t)count || memcmp(text,prefix,(size_t)count)) goto done;
     const char *body=text+count;
     size_t body_length=length-(size_t)count;
-    if (body_length==1 && body[0]=='D') {
+    if (body[0]=='F' && s->facts && body_length<=257) {
+        char fact[257]; memcpy(fact,body+1,body_length-1); fact[body_length-1]=0;
+        if (live(s) && s->committed && !s->failed) (void)page(s,10,0,0,fact);
+    } else if (body[0]=='S' && s->context_offer && body_length<=16385) {
+        char *copy=g_strndup(body+1,body_length-1);
+        g_free(s->context_selection); s->context_selection=copy;
+    } else if (body_length==1 && body[0]=='D') {
         s->dom_ready=TRUE;
         if (document(s)) (void)page(s,2,0,0,NULL);
     } else if (body[0]=='M' && body_length-1<=65536 && document(s) && s->notify && ipc_allowed(s)) {
@@ -531,20 +720,20 @@ static int prepare_document(ZwkState *s) {
         "if(bytes>65536)return false}return true};"
         "addEventListener('message',e=>{if(e.isTrusted&&e.source===window&&window===top&&%s&&"
         "e.data&&valid(e.data.__ziggurat))send('M'+e.data.__ziggurat)});"
-        "addEventListener('DOMContentLoaded',()=>send('D'),{once:true})})()";
-    char ordinary[2048];char *private_script=ordinary,*preamble=NULL;
+        "addEventListener('DOMContentLoaded',()=>send('D'),{once:true});%s})()";
+    char *preamble=NULL;
     if(s->remote){
         preamble=try_format("const trusted=new Set(%s.map(x=>new URL(x).origin));",s->remote->ipc_json);
         if(!preamble)return ZWK_OOM;
-        private_script=try_format(format,preamble,(unsigned long long)(s->generation+1),source_check);g_free(preamble);
-    }else{
-        int length=snprintf(ordinary,sizeof(ordinary),format,"",(unsigned long long)(s->generation+1),source_check);
-        if(length<0||(size_t)length>=sizeof(ordinary))return ZWK_INVALID;
     }
+    /* The page-facts script runs in this private world too, whatever the
+     * page's origin, and reaches the View alone. */
+    char *private_script=try_format(format,preamble?preamble:"",(unsigned long long)(s->generation+1),source_check,s->facts?s->facts:"");
+    g_free(preamble);
     if (!private_script) return ZWK_OOM;
     WebKitUserScript *private_value=webkit_user_script_new_for_world(private_script,WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
         WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START,"ziggurat-private",NULL,NULL);
-    if(s->remote)g_free(private_script);
+    g_free(private_script);
     static const char public_script[]=
         "(()=>{const listeners=new Map;const transport=Object.freeze({"
         "postMessage(value){if(typeof value!=='string'||value.length>65536||value.includes('\\0'))throw TypeError('InvalidMessage');"
@@ -680,6 +869,10 @@ static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t
     s->html=g_try_malloc(strlen(options->html)+1);
     if (!s->html) { zwk_close(s); return ZWK_OOM; }
     strcpy(s->html,options->html);
+    if (options->facts && !(s->facts=g_strdup(options->facts))) { zwk_close(s); return ZWK_OOM; }
+    s->autoplay=options->autoplay!=0;
+    s->auth=options->auth; s->certificate=options->certificate;
+    s->context_policy=options->context_menu; s->context_offer=options->context_offer;
     s->owner=owner; s->notify=callback; s->page=page_callback; s->script=script_callback; s->deadline=deadline;
     s->limit=options->max_pending; s->result_limit=options->max_result_bytes; s->policy=options->policy_flags;
     if(options->initializers){
@@ -710,6 +903,7 @@ static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t
     if (!webkit_user_content_manager_register_script_message_handler_in_world(s->manager,"ziggurat","ziggurat-private")) {
         zwk_close(s); return ZWK_NATIVE_FAILED;
     }
+    for (uint32_t i=0;i<options->content_filter_count;i++) webkit_user_content_manager_add_filter(s->manager,options->content_filters[i]);
     static const char csp[]="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; "
         "connect-src 'none'; frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
     s->view=g_object_new(WEBKIT_TYPE_WEB_VIEW,"web-context",s->context,"user-content-manager",s->manager,
@@ -736,15 +930,36 @@ static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t
     webkit_settings_set_allow_file_access_from_file_urls(settings,FALSE);
     webkit_settings_set_allow_universal_access_from_file_urls(settings,FALSE);
     if (options->user_agent) webkit_settings_set_user_agent(settings,options->user_agent);
+    webkit_settings_set_enable_back_forward_navigation_gestures(settings,(options->gestures&1u)!=0);
+    if (!(options->gestures&2u)) {
+        /* No setting turns WebKitGTK's pinch zoom off: its zoom gesture,
+           kept in the view's data from 2.38, takes no more events. */
+        GtkEventController *zoom=g_object_get_data(G_OBJECT(s->view),"wk-view-zoom-gesture");
+        if (GTK_IS_EVENT_CONTROLLER(zoom)) gtk_event_controller_set_propagation_phase(zoom,GTK_PHASE_NONE);
+    }
+#if WEBKIT_CHECK_VERSION(2,42,0)
+    if (!options->throttling) {
+        WebKitFeatureList *features=webkit_settings_get_all_features();
+        for (gsize i=0;i<webkit_feature_list_get_length(features);i++) {
+            WebKitFeature *feature=webkit_feature_list_get(features,i);
+            const char *name=webkit_feature_get_identifier(feature);
+            if (!g_strcmp0(name,"HiddenPageDOMTimerThrottling") || !g_strcmp0(name,"HiddenPageCSSAnimationSuspension")) webkit_settings_set_feature_enabled(settings,feature,FALSE);
+        }
+        webkit_feature_list_unref(features);
+    }
+#endif
     webkit_web_view_set_zoom_level(WEBKIT_WEB_VIEW(s->view),options->zoom);
+    webkit_web_view_set_is_muted(WEBKIT_WEB_VIEW(s->view),options->audio_muted!=0);
     g_signal_connect(s->manager,"script-message-received::ziggurat",G_CALLBACK(message),s);
     g_signal_connect(s->context,"download-started",G_CALLBACK(downloaded),s);
     g_signal_connect(s->view,"decide-policy",G_CALLBACK(policy),s);
     if(s->remote)g_signal_connect(s->view,"user-message-received",G_CALLBACK(remote_message),s);
     g_signal_connect(s->view,"load-changed",G_CALLBACK(loaded),s);
     g_signal_connect(s->view,"load-failed",G_CALLBACK(load_failed),s);
+    g_signal_connect(s->view,"load-failed-with-tls-errors",G_CALLBACK(tls_errors),s);
     g_signal_connect(s->view,"web-process-terminated",G_CALLBACK(process_failed),s);
     g_signal_connect(s->view,"notify::title",G_CALLBACK(title_changed),s);
+    g_signal_connect(s->view,"notify::is-playing-audio",G_CALLBACK(audible_changed),s);
     if (s->local.budget || s->remote) {
         g_signal_connect(s->view,"notify::uri",G_CALLBACK(source_changed),s);
         g_signal_connect(s->view,"notify::is-loading",G_CALLBACK(loading_changed),s);
@@ -899,6 +1114,23 @@ int zwk_zoom(ZwkState *s,double *value,int write) {
     else *value=webkit_web_view_get_zoom_level(WEBKIT_WEB_VIEW(s->view));
     return ZWK_OK;
 }
+int zwk_audio(ZwkState *s,int op,int *value) {
+    if (!live(s)) return ZWK_CLOSED;
+    WebKitWebView *view=WEBKIT_WEB_VIEW(s->view);
+    switch (op) {
+    case 0: *value=webkit_web_view_get_is_muted(view)?1:0; return ZWK_OK;
+    case 1: webkit_web_view_set_is_muted(view,*value!=0); return ZWK_OK;
+    case 2: *value=webkit_web_view_is_playing_audio(view)?1:0; return ZWK_OK;
+    }
+    return ZWK_INVALID;
+}
+int zwk_content_filters(ZwkState *s,void *const *filters,uint32_t count) {
+    if (!live(s)) return ZWK_CLOSED;
+    if (count && !filters) return ZWK_INVALID;
+    webkit_user_content_manager_remove_all_filters(s->manager);
+    for (uint32_t i=0;i<count;i++) webkit_user_content_manager_add_filter(s->manager,filters[i]);
+    return ZWK_OK;
+}
 int zwk_user_agent(ZwkState *s,const char *set,char **get) {
     if (!live(s)) return ZWK_CLOSED;
     WebKitSettings *settings=webkit_web_view_get_settings(WEBKIT_WEB_VIEW(s->view));
@@ -1002,6 +1234,56 @@ int zwk_history(ZwkState *s,int forward) {
         WebKitBackForwardListItem *item=forward?webkit_back_forward_list_get_forward_item(s->history):webkit_back_forward_list_get_back_item(s->history);
         const char *uri=item?webkit_back_forward_list_item_get_uri(item):NULL;
         result=!item?ZWK_NO_HISTORY:!trusted_uri(s,uri)?ZWK_IPC_DENIED:navigation_submit(s,NAV_HISTORY,uri,item);
+    }
+    release(s); return result;
+}
+/* The page's back/forward list, serialized, and its URI. */
+int zwk_session_state(ZwkState *s,char **uri,void **data,size_t *length) {
+    *uri=NULL; *data=NULL; *length=0;
+    if (!live(s)) return ZWK_CLOSED;
+    if (!document(s) || !s->current_uri) return ZWK_NOT_READY;
+    WebKitWebViewSessionState *state=webkit_web_view_get_session_state(WEBKIT_WEB_VIEW(s->view));
+    GBytes *bytes=state?webkit_web_view_session_state_serialize(state):NULL;
+    if (state) webkit_web_view_session_state_unref(state);
+    if (!bytes) return ZWK_NATIVE_FAILED;
+    gsize size=0; const void *value=g_bytes_get_data(bytes,&size);
+    *data=size?g_memdup2(value,size):NULL; *length=size;
+    *uri=g_strdup(s->current_uri);
+    g_bytes_unref(bytes);
+    return ZWK_OK;
+}
+/* Replaces the back/forward list with a saved one and loads its current
+   item, which must be the page's own: ZWK_INVALID when the engine cannot
+   read the state, ZWK_IPC_DENIED for an item of another site, and the
+   list is left as it was. */
+int zwk_session_restore(ZwkState *s,const void *data,size_t length) {
+    retain(s); int result;
+    if (!live(s)) result=ZWK_CLOSED;
+    else if (!s->history || (!s->local.budget && !s->remote)) result=ZWK_NOT_READY;
+    else if (s->navigation || s->load_started || webkit_web_view_is_loading(WEBKIT_WEB_VIEW(s->view))) result=ZWK_NAVIGATION_PENDING;
+    else {
+        GBytes *bytes=g_bytes_new(data,length);
+        WebKitWebViewSessionState *state=webkit_web_view_session_state_new(bytes);
+        g_bytes_unref(bytes);
+        if (!state) result=ZWK_INVALID;
+        else {
+            /* A throwaway view tells the state's current item before the
+               page's list is replaced. */
+            WebKitWebView *probe=WEBKIT_WEB_VIEW(webkit_web_view_new_with_context(s->context));
+            g_object_ref_sink(probe);
+            webkit_web_view_restore_session_state(probe,state);
+            WebKitBackForwardListItem *saved=webkit_back_forward_list_get_current_item(webkit_web_view_get_back_forward_list(probe));
+            const gboolean trusted=saved && trusted_uri(s,webkit_back_forward_list_item_get_uri(saved));
+            gtk_widget_destroy(GTK_WIDGET(probe)); g_object_unref(probe);
+            if (!trusted) result=ZWK_IPC_DENIED;
+            else {
+                webkit_web_view_restore_session_state(WEBKIT_WEB_VIEW(s->view),state);
+                WebKitBackForwardListItem *item=webkit_back_forward_list_get_current_item(s->history);
+                const char *uri=item?webkit_back_forward_list_item_get_uri(item):NULL;
+                result=!trusted_uri(s,uri)?ZWK_IPC_DENIED:navigation_submit(s,NAV_HISTORY,uri,item);
+            }
+            webkit_web_view_session_state_unref(state);
+        }
     }
     release(s); return result;
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const core = @import("../root.zig");
 const keys = @import("ziggurat_c_gtk");
 pub const AppData = struct { native: ?*anyopaque = null };
@@ -70,6 +71,9 @@ extern fn zlg_window_state(*anyopaque) u32;
 extern fn zlg_window_capabilities(*anyopaque) u32;
 extern fn zlg_window_bounds(*anyopaque, *NativeBounds) void;
 extern fn zlg_window_size(*anyopaque, *u32, *u32, *u32) void;
+extern fn zlg_window_capture(*anyopaque, *c_int, *c_int, *c_int, *c_int, *?[*]const u8) ?*anyopaque;
+extern fn zlg_capture_free(*anyopaque) void;
+extern fn zlg_window_menu_activate(*anyopaque, [*]const [*:0]const u8, c_int) c_int;
 extern fn zlg_window_set_bounds(*anyopaque, *const NativeBounds) c_int;
 extern fn zlg_window_fullscreen(*anyopaque, c_int) c_int;
 extern fn zlg_window_topmost(*anyopaque, c_int) c_int;
@@ -78,6 +82,7 @@ extern fn zlg_window_opacity(*anyopaque, f64) void;
 extern fn zlg_window_ignore_pointer(*anyopaque, c_int) void;
 extern fn zlg_window_urgent(*anyopaque, c_int) void;
 extern fn zlg_window_skip_taskbar(*anyopaque, c_int) void;
+extern fn zlg_window_focus_on_map(*anyopaque, c_int) void;
 extern fn zlg_window_title(*anyopaque, [*:0]const u8) void;
 extern fn zlg_window_cursor(*anyopaque, ?[*:0]const u8) void;
 extern fn zlg_window_resize(*anyopaque, u32, u32) void;
@@ -122,6 +127,7 @@ pub fn create(record: *core.WindowRecord, options: core.WindowOptions) !void {
     const popup: c_int = if (options.popup) |role| 1 | @as(c_int, if (role.focusable) 2 else 0) | @as(c_int, if (role.topmost) 4 else 0) else 0;
     record.native.native = zlg_window_create_transparent(record, event, title, options.width, options.height, options.min_width, options.min_height, if (record.owner_record) |owner| owner.native.native else null, @intFromBool(options.modal), @backingInt(options.decoration), @intFromBool(options.resizable), @intFromBool(options.text_input_mode == .keyboard_compose), @intFromBool(options.accessibility_host == .children), @intFromBool(options.native_pointer_clicks), popup, @intFromBool(options.transparent), &code) orelse return if (code == 1) error.UnsupportedCapability else error.OutOfMemory;
     if (options.text_input_mode != .system) record.publishTextInputMode(options.text_input_mode);
+    if (!options.focus_on_show) zlg_window_focus_on_map(record.native.native.?, 0);
 }
 pub fn show(record: *core.WindowRecord) void {
     zlg_window_action(record.native.native.?, 0);
@@ -183,6 +189,49 @@ pub fn contentSize(record: *core.WindowRecord) !core.Size {
     var scale: u32 = 1;
     zlg_window_size(record.native.native.?, &width, &height, &scale);
     return .{ .width = width, .height = height, .scale = @floatFromInt(scale) };
+}
+pub fn capture(record: *core.WindowRecord, allocator: std.mem.Allocator) !core.Capture {
+    var width: c_int = 0;
+    var height: c_int = 0;
+    var stride: c_int = 0;
+    var channels: c_int = 0;
+    var source: ?[*]const u8 = null;
+    const image = zlg_window_capture(record.native.native.?, &width, &height, &stride, &channels, &source) orelse return error.CaptureFailed;
+    defer zlg_capture_free(image);
+    if (width <= 0 or height <= 0 or (channels != 3 and channels != 4) or stride < width * channels) return error.CaptureFailed;
+    const w: usize = @intCast(width);
+    const h: usize = @intCast(height);
+    const pixels = try allocator.alloc(u8, w * h * 4);
+    const from = source.?;
+    for (0..h) |row| {
+        const line = from[row * @as(usize, @intCast(stride)) ..];
+        for (0..w) |column| {
+            const at = line[column * @as(usize, @intCast(channels)) ..];
+            const alpha: u32 = if (channels == 4) at[3] else 255;
+            const out = pixels[(row * w + column) * 4 ..][0..4];
+            // RGBA, straight alpha, to premultiplied BGRA.
+            out.* = .{ @intCast(at[2] * alpha / 255), @intCast(at[1] * alpha / 255), @intCast(at[0] * alpha / 255), @intCast(alpha) };
+        }
+    }
+    return .{ .width = @intCast(width), .height = @intCast(height), .pixels = pixels };
+}
+pub fn activateMenuItem(record: *core.WindowRecord, path: []const []const u8) !void {
+    const allocator = record.window.app.allocator;
+    const labels = try allocator.alloc([*:0]const u8, path.len);
+    defer allocator.free(labels);
+    var made: usize = 0;
+    defer for (labels[0..made]) |label| allocator.free(std.mem.span(label));
+    for (path) |label| {
+        labels[made] = try allocator.dupeSentinel(u8, label, 0);
+        made += 1;
+    }
+    return switch (zlg_window_menu_activate(record.native.native.?, labels.ptr, @intCast(labels.len))) {
+        0 => {},
+        1 => error.NoMenu,
+        2 => error.NoMenuItem,
+        3 => error.MenuItemDisabled,
+        else => error.MenuItemIsSubmenu,
+    };
 }
 fn checkUpdate(result: c_int) !void {
     return switch (result) {
@@ -280,7 +329,9 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
         23 => record.publishTextInputMode(if (native.flags == 0) .system else .keyboard_compose),
         3, 4 => {
             const phase: core.PointerPhase = if (native.kind == 3) .down else .up;
-            const input: core.PointerButtonInput = .{ .position = point, .modifiers = pointerModifiers(@intCast(native.flags)) };
+            // `key` carries a button other than the primary one.
+            if (native.key < 0 or native.key > 4) return 0;
+            const input: core.PointerButtonInput = .{ .position = point, .modifiers = pointerModifiers(@intCast(native.flags)), .button = @fromBackingInt(@intCast(zio.asUnsigned(native.key))) };
             if (record.pointerEnabled()) {
                 if (native.context) |context| {
                     const ticket: *const PointerTicket = @ptrCast(@alignCast(context));
@@ -293,7 +344,7 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
             } else if (phase == .down) record.emit(.{ .pointer_down = input }) else record.emit(.{ .pointer_up = input });
         },
         5 => record.emit(.{ .pointer_move = point }),
-        6 => record.emit(.{ .wheel = .{ .position = point, .delta = .{ .x = @floatCast(native.dx), .y = @floatCast(native.dy) } } }),
+        6 => record.emit(.{ .wheel = .{ .position = point, .delta = .{ .x = @floatCast(native.dx), .y = @floatCast(native.dy) }, .precise = native.flags & 1 != 0 } }),
         7 => pointerLifecycle(record, native, .{ .focus = native.flags & 1 != 0 }),
         8 => {
             if (native.flags & 0x100 != 0) {
@@ -303,7 +354,7 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
                 if (ticket.button <= 4 and ticket.sequence != 0) record.emitPointerCancel(ticket.operation, ticket.sequence, @fromBackingInt(@intCast(ticket.button)));
             } else record.emit(.cancel_input);
         },
-        9 => record.emit(.{ .edit_key = .{ .key = @fromBackingInt(@intCast(native.key)), .shift = native.flags & 1 != 0, .control = native.flags & 2 != 0 } }),
+        9 => record.emit(.{ .edit_key = .{ .key = @fromBackingInt(@intCast(zio.asUnsigned(native.key))), .shift = native.flags & 1 != 0, .control = native.flags & 2 != 0 } }),
         10 => _ = record.window.requestCloseFrom(.user) catch |err| {
             record.window.report(.{ .domain = .core, .operation = .window_destroy, .err = err });
         },

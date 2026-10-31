@@ -98,17 +98,17 @@ fn text(message: ?[*:0]const u8) []const u8 {
     return if (message) |value| std.mem.span(value) else "unknown error";
 }
 
-pub fn open(storage: *Storage, detail: *Detail) OpenError!output.Device {
+pub fn open(storage: *Storage, ahead: u64, detail: *Detail) OpenError!output.Device {
     var name_buffer: [128]u8 = undefined;
     const name = applicationName(&name_buffer);
     var result: OpenError = error.BackendUnavailable;
     if (loadPulse()) |pulse| {
         const spec = SampleSpec{ .format = pa_sample_float32le, .rate = output.sample_rate, .channels = output.channels };
-        // About 40 ms ahead, asking for more every 10 ms.
+        // `ahead`, asking for more every 10 ms.
         const frame_bytes = output.channels * @sizeOf(f32);
         const attributes = BufferAttr{
             .maxlength = std.math.maxInt(u32),
-            .tlength = output.sample_rate / 25 * frame_bytes,
+            .tlength = @intCast(ahead * output.sample_rate / std.time.ns_per_s * frame_bytes),
             .prebuf = std.math.maxInt(u32),
             .minreq = output.period_frames * frame_bytes,
             .fragsize = std.math.maxInt(u32),
@@ -124,7 +124,7 @@ pub fn open(storage: *Storage, detail: *Detail) OpenError!output.Device {
         var pcm: ?*anyopaque = null;
         var code = alsa.snd_pcm_open(&pcm, "default", snd_pcm_stream_playback, 0);
         if (code >= 0) {
-            code = alsa.snd_pcm_set_params(pcm.?, snd_pcm_format_float_le, snd_pcm_access_rw_interleaved, output.channels, output.sample_rate, 1, 40_000);
+            code = alsa.snd_pcm_set_params(pcm.?, snd_pcm_format_float_le, snd_pcm_access_rw_interleaved, output.channels, output.sample_rate, 1, @intCast(ahead / std.time.ns_per_us));
             if (code >= 0) {
                 storage.alsa = pcm;
                 detail.len = 0;
@@ -133,7 +133,7 @@ pub fn open(storage: *Storage, detail: *Detail) OpenError!output.Device {
             _ = alsa.snd_pcm_close(pcm.?);
             result = error.DeviceFailed;
         } else {
-            const errno: std.posix.E = @fromBackingInt(@intCast(-code));
+            const errno: std.posix.E = @fromBackingInt(@intCast(zio.asUnsigned(-code)));
             result = switch (errno) {
                 .NOENT, .NODEV, .NXIO => error.NoDevice,
                 else => error.DeviceFailed,

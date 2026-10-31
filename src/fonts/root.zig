@@ -33,7 +33,9 @@ pub const FontFamily = struct {
 };
 
 const native = switch (builtin.os.tag) {
-    .linux => @import("linux.zig"),
+    // The file cache and family listing are shared; each links its own
+    // native registration (fontconfig, Core Text).
+    .linux, .macos => @import("linux.zig"),
     .windows => @import("windows.zig"),
     else => @import("unsupported.zig"),
 };

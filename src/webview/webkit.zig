@@ -17,7 +17,20 @@ pub const Options = extern struct {
     profile_context: ?*anyopaque = null,
     initializers: ?*const @import("initializer_owner.zig").NativeInput = null,
     developer_tools: u32 = 0,
+    content_filters: ?[*]const *anyopaque = null,
+    content_filter_count: u32 = 0,
+    audio_muted: u32 = 0,
+    facts: ?[*:0]const u8 = null,
+    autoplay: u32 = 0,
+    gestures: u32 = 0,
+    throttling: u32 = 1,
+    auth: ?*const fn (*anyopaque, [*:0]const u8, u32, [*:0]const u8, u32, c_int, *anyopaque) callconv(.c) void = null,
+    certificate: ?*const fn (*anyopaque, [*:0]const u8, u32, [*]const u8, usize) callconv(.c) c_int = null,
+    context_menu: u32 = 0,
+    context_offer: ?*const fn (*anyopaque, *const ContextTarget, [*]const ContextItem, u32, [*]u8, *anyopaque) callconv(.c) c_int = null,
 };
+pub const ContextItem = extern struct { name: [*:0]const u8, label: [*:0]const u8, kind: u32, flags: u32, action: u32 };
+pub const ContextTarget = extern struct { link: ?[*:0]const u8, link_text: ?[*:0]const u8, image: ?[*:0]const u8, media: ?[*:0]const u8, selection: ?[*:0]const u8, frame: ?[*:0]const u8, editable: u32 };
 pub const LocalResource = extern struct {
     path: [*]const u8,
     mime: [*]const u8,
@@ -156,6 +169,13 @@ pub extern fn zwk_pdf_start(*anyopaque, u64, [*:0]const u8, *const PdfRequest) c
 pub extern fn zwk_clear_start(*anyopaque, u64) c_int;
 pub extern fn zwk_capture_cancel(*anyopaque, u64) void;
 pub extern fn zwk_capture_counts(*u32, *u32, *usize, *usize) void;
+pub extern fn zwk_audio(*anyopaque, c_int, *c_int) c_int;
+pub extern fn zwk_content_filters(*anyopaque, ?[*]const *anyopaque, u32) c_int;
+pub const ContentDone = *const fn (?*anyopaque, ?*anyopaque, c_int, u32, i32) callconv(.c) void;
+pub extern fn zwk_content_compile([*:0]const u8, [*:0]const u8, [*:0]const u8, [*]const u8, usize, ContentDone, *anyopaque, *?*anyopaque) c_int;
+pub extern fn zwk_content_cancel(*anyopaque) void;
+pub extern fn zwk_content_filter_unref(*anyopaque) void;
+pub extern fn zwk_content_compile_count() u32;
 pub extern fn zwk_create(*anyopaque, *const Options, Notify, PageNotify, ScriptNotify, *const fn (*anyopaque) callconv(.c) void, *anyopaque, *?*anyopaque) c_int;
 pub extern fn zwk_session_create(*const Options, u32, u32, Notify, PageNotify, ScriptNotify, *const fn (*anyopaque) callconv(.c) void, *anyopaque, *?*anyopaque) c_int;
 pub extern fn zwk_session_mount(*anyopaque, *anyopaque, i32, i32, i32, i32, c_int, u64) c_int;
@@ -184,6 +204,8 @@ pub extern fn zwk_user_agent(*anyopaque, ?[*:0]const u8, ?*?[*:0]u8) c_int;
 pub extern fn zwk_devtools(*anyopaque, c_int, ?*c_int, ?*c_int) c_int;
 pub extern fn zwk_devtools_counts(*u32) void;
 pub extern fn zwk_string_free([*:0]u8) void;
+pub extern fn zwk_session_state(*anyopaque, *?[*:0]u8, *?*anyopaque, *usize) c_int;
+pub extern fn zwk_session_restore(*anyopaque, [*]const u8, usize) c_int;
 pub extern fn zwk_deadline_arm(*anyopaque, u64) c_int;
 pub extern fn zwk_deadline_cancel(*anyopaque) void;
 pub extern fn zwk_refresh(*anyopaque) c_int;

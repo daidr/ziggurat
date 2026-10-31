@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zio = @import("ziggurat_io");
 const root = @import("root.zig");
 const files = @import("files.zig");
@@ -6,8 +7,12 @@ const files = @import("files.zig");
 extern fn zfont_add_file(path: [*:0]const u8) c_int;
 extern fn zfont_list(context: *anyopaque, each: *const fn (*anyopaque, [*:0]const u8, c_int) callconv(.c) void) c_int;
 
-/// The user's cache directory, as the XDG base directories name it.
+/// The user's cache directory: macOS's, or as the XDG base directories name it.
 fn cacheDir(buffer: []u8) ![]const u8 {
+    if (builtin.os.tag == .macos) {
+        if (zio.getenv("HOME")) |home| if (home.len > 0) return std.fmt.bufPrint(buffer, "{s}/Library/Caches", .{home});
+        return "/tmp";
+    }
     if (zio.getenv("XDG_CACHE_HOME")) |dir| if (dir.len > 0) return dir;
     if (zio.getenv("HOME")) |home| if (home.len > 0) return std.fmt.bufPrint(buffer, "{s}/.cache", .{home});
     return "/tmp";

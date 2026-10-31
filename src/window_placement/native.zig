@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const m = @import("model.zig");
@@ -21,7 +22,7 @@ fn failed(window: z.Window) error{DisplayQueryFailed} {
 }
 fn rect(value: c.RECT) !m.Rect {
     if (value.right <= value.left or value.bottom <= value.top) return error.InvalidRectangle;
-    return .{ .x = value.left, .y = value.top, .width = @intCast(@as(i64, value.right) - value.left), .height = @intCast(@as(i64, value.bottom) - value.top) };
+    return .{ .x = value.left, .y = value.top, .width = @intCast(zio.asUnsigned(@as(i64, value.right) - value.left)), .height = @intCast(zio.asUnsigned(@as(i64, value.bottom) - value.top)) };
 }
 const Enumeration = struct {
     monitors: [m.max_monitors]m.Monitor = undefined,

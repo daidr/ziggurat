@@ -613,7 +613,15 @@ static gboolean button(GtkWidget *widget, GdkEventButton *native, gpointer data)
         if (native_button==3 && down && (hit==1 || hit==2)) {
             handled=start_interaction(s,native,8,FALSE)==0;
             if (handled) disposition=ZLG_POINTER_CONSUMED;
+            goto done;
         }
+        /* Other buttons over the content reach the window with no grab or
+         * focus change, as a context menu or history button needs. */
+        if (ticket.button==ZLG_POINTER_UNKNOWN || !pointer_allowed(s,ticket.operation)) goto done;
+        NativeEvent other={0}; other.kind=down?3:4; other.key=(int)ticket.button; other.x=x; other.y=y; other.flags=(int)ticket.modifiers;
+        other.context=s->pointer_enabled?&ticket:NULL;
+        emit(s,&other);
+        if (!pointer_allowed(s,ticket.operation)) disposition=ZLG_POINTER_DENIED;
         goto done;
     }
     if (down && hit>0 && start_interaction(s,native,hit==1?-1:hit==2?8:hit-3,FALSE)==0) {
@@ -673,6 +681,9 @@ static gboolean scroll(GtkWidget *widget, GdkEventScroll *native, gpointer data)
         if (native->direction==GDK_SCROLL_LEFT) event.dx=-1;
         if (native->direction==GDK_SCROLL_RIGHT) event.dx=1;
     }
+    /* A touchpad scrolls by distance (precise). */
+    GdkDevice *device=gdk_event_get_source_device((GdkEvent *)native);
+    if (device && gdk_device_get_source(device)==GDK_SOURCE_TOUCHPAD) event.flags|=1;
     event.dx*=48; event.dy*=48; emit(data,&event); return TRUE;
 }
 /* A tap clicks where the finger landed: a press and a release through the
@@ -1030,6 +1041,72 @@ void zlg_window_size(NativeWindow *s, uint32_t *width, uint32_t *height, uint32_
     *height=(uint32_t)MAX(0,gtk_widget_get_allocated_height(s->area))*factor;
     *scale=factor;
 }
+/* The content area as the screen shows it, read from the toplevel so that
+   native children such as web views are in it; NULL while it is unmapped.
+   The caller copies the pixels and frees the pixbuf with zlg_capture_free. */
+void *zlg_window_capture(NativeWindow *s, int *width, int *height, int *stride, int *channels, const unsigned char **pixels) {
+    if (s->destroyed || !gtk_widget_get_mapped(s->area)) return NULL;
+    GdkWindow *top=gtk_widget_get_window(s->window);
+    int x=0,y=0;
+    if (!top || !gtk_widget_translate_coordinates(s->area,s->window,0,0,&x,&y)) return NULL;
+    int w=gtk_widget_get_allocated_width(s->area), h=gtk_widget_get_allocated_height(s->area);
+    if (w<=0 || h<=0) return NULL;
+    GdkPixbuf *image=gdk_pixbuf_get_from_window(top,x,y,w,h);
+    if (!image) return NULL;
+    *width=gdk_pixbuf_get_width(image); *height=gdk_pixbuf_get_height(image);
+    *stride=gdk_pixbuf_get_rowstride(image); *channels=gdk_pixbuf_get_n_channels(image);
+    *pixels=gdk_pixbuf_read_pixels(image);
+    return image;
+}
+void zlg_capture_free(void *image) { g_object_unref(image); }
+static GtkWidget *find_menu_bar(GtkWidget *widget) {
+    if (GTK_IS_MENU_BAR(widget)) return widget;
+    if (!GTK_IS_CONTAINER(widget)) return NULL;
+    GList *children=gtk_container_get_children(GTK_CONTAINER(widget));
+    GtkWidget *found=NULL;
+    for (GList *at=children; at && !found; at=at->next) found=find_menu_bar(at->data);
+    g_list_free(children);
+    return found;
+}
+/* A label as people read it: without mnemonic underscores. */
+static gboolean same_label(const char *shown, const char *wanted) {
+    if (!shown) return FALSE;
+    for (;;) {
+        if (*shown=='_') { shown++; if (*shown!='_') continue; }
+        if (*shown!=*wanted) return FALSE;
+        if (!*shown) return TRUE;
+        shown++; wanted++;
+    }
+}
+/* Activates the item of the window's menu bar at the labels of `path`, as
+   a click on it does. 0 on success, 1 without a menu bar, 2 without such an
+   item, 3 for a disabled item, 4 for an item that opens a submenu. */
+int zlg_window_menu_activate(NativeWindow *s, const char *const *path, int count) {
+    if (s->destroyed) return 1;
+    GtkWidget *shell=find_menu_bar(s->window);
+    if (!shell) return 1;
+    for (int depth=0; depth<count; depth++) {
+        GList *children=gtk_container_get_children(GTK_CONTAINER(shell));
+        GtkWidget *item=NULL;
+        for (GList *at=children; at; at=at->next) {
+            if (GTK_IS_MENU_ITEM(at->data) && same_label(gtk_menu_item_get_label(GTK_MENU_ITEM(at->data)),path[depth])) { item=at->data; break; }
+        }
+        g_list_free(children);
+        if (!item) return 2;
+        GtkWidget *submenu=gtk_menu_item_get_submenu(GTK_MENU_ITEM(item));
+        if (depth+1<count) {
+            if (!submenu) return 2;
+            shell=submenu;
+            continue;
+        }
+        if (submenu) return 4;
+        if (!gtk_widget_is_sensitive(item)) return 3;
+        retain(s);
+        gtk_menu_item_activate(GTK_MENU_ITEM(item));
+        release(s);
+    }
+    return 0;
+}
 int zlg_window_set_bounds(NativeWindow *s, const NativeBounds *bounds) {
     if (bounds->positioned && !(zlg_window_capabilities(s)&1u)) return 1;
     if (s->restore_pending) return 3;
@@ -1158,6 +1235,7 @@ void zlg_window_ignore_pointer(NativeWindow *s, int enabled) {
     release(s);
 }
 void zlg_window_urgent(NativeWindow *s, int enabled) { retain(s);gtk_window_set_urgency_hint(GTK_WINDOW(s->window),enabled);release(s); }
+void zlg_window_focus_on_map(NativeWindow *s, int enabled) { retain(s);gtk_window_set_focus_on_map(GTK_WINDOW(s->window),enabled);release(s); }
 void zlg_window_skip_taskbar(NativeWindow *s, int enabled) { retain(s);gtk_window_set_skip_taskbar_hint(GTK_WINDOW(s->window),enabled);release(s); }
 void zlg_window_title(NativeWindow *s, const char *title) { retain(s);gtk_window_set_title(GTK_WINDOW(s->window),title);release(s); }
 /* NULL name restores the default arrow. A resize edge of a custom frame

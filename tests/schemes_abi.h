@@ -4,8 +4,18 @@ static int scheme_abi_cases(void) {
     WCHAR name[]=L"asset";
     SchemeInput input={name,TRUE,origins,2};
     ICoreWebView2EnvironmentOptions *options=NULL;
-    if (FAILED(scheme_options_new(NULL,0,&options))||options||live_handlers!=before) return 1;
-    if (FAILED(scheme_options_new(&input,1,&options))||!options) return 1;
+    if (FAILED(scheme_options_new(NULL,0,NULL,&options))||options||live_handlers!=before) return 1;
+    if (FAILED(scheme_options_new(&input,1,NULL,&options))||!options) return 1;
+    {
+        /* Browser arguments alone still make options, and only they report them. */
+        ICoreWebView2EnvironmentOptions *arguments=NULL;WCHAR *text=NULL;
+        if (FAILED(scheme_options_new(NULL,0,L"--autoplay-policy=no-user-gesture-required",&arguments))||!arguments) return 1;
+        if (FAILED(ICoreWebView2EnvironmentOptions_get_AdditionalBrowserArguments(arguments,&text))||!text||wcscmp(text,L"--autoplay-policy=no-user-gesture-required")) failed++;
+        CoTaskMemFree(text);text=NULL;
+        if (FAILED(ICoreWebView2EnvironmentOptions_get_AdditionalBrowserArguments(options,&text))||text) failed++;
+        CoTaskMemFree(text);
+        ICoreWebView2EnvironmentOptions_Release(arguments);
+    }
     NativeHeader own_origin[]={ {L"Origin",L"asset://fixture"} }, foreign[]={ {L"Origin",L"asset://other"} }, opaque[]={ {L"Origin",L"null"} }, repeated[]={ {L"Origin",L"asset://fixture"},{L"origin",L"asset://fixture"} };
     if (!scheme_request_origin_allowed(options,L"asset://fixture/",0,NULL,0)||scheme_request_origin_allowed(options,L"asset://fixture/",2,NULL,0)||!scheme_request_origin_allowed(options,L"asset://fixture/",2,own_origin,1)||scheme_request_origin_allowed(options,L"asset://fixture/",0,foreign,1)||scheme_request_origin_allowed(options,L"asset://fixture/",0,opaque,1)||scheme_request_origin_allowed(options,L"asset://fixture/",0,repeated,2)||scheme_request_origin_allowed(options,L"unknown://fixture/",2,own_origin,1)) failed++;
     const WCHAR *nonexact[]={L"ASSET://fixture",L"asset://FIXTURE",L"asset://fixture/",L" asset://fixture",L"asset://fixture ",L"asset://fixture:123",L"asset://user@fixture"};
@@ -38,9 +48,9 @@ static int scheme_abi_cases(void) {
     ICoreWebView2CustomSchemeRegistration_Release(items[0]);CoTaskMemFree(items);
     for (UINT32 i=0;i<origin_count;i++) CoTaskMemFree(copied_origins[i]);CoTaskMemFree(copied_origins);
     if (live_handlers!=before) failed++;
-    input.name=L"https";if (scheme_options_new(&input,1,&options)!=E_INVALIDARG||options||live_handlers!=before) failed++;
+    input.name=L"https";if (scheme_options_new(&input,1,NULL,&options)!=E_INVALIDARG||options||live_handlers!=before) failed++;
     const WCHAR *pattern[]={L"https://*.example.test"};input.name=L"asset";input.origins=pattern;input.origin_count=1;
-    if (scheme_options_new(&input,1,&options)!=E_INVALIDARG||options||live_handlers!=before) failed++;
+    if (scheme_options_new(&input,1,NULL,&options)!=E_INVALIDARG||options||live_handlers!=before) failed++;
     const struct { const WCHAR *uri;BOOL allowed; } cases[]={
         {L"asset://fixture/",TRUE},{L"asset://fixture/file?q=1#fragment",TRUE},
         {L"asset://other/",FALSE},{L"asset://fixture.evil/",FALSE},{L"asset://fixture:80/",FALSE},

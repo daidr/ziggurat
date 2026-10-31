@@ -1044,7 +1044,7 @@ const Notes = struct {
         if (self.armed) |token| _ = timer.cancel(token) catch {};
         self.armed = null;
         const deadline = self.registry.nextDeadline() orelse return;
-        const delay: u64 = @intCast(std.math.clamp(deadline - self.now(), 1, std.time.ns_per_hour));
+        const delay: u64 = @intCast(zio.asUnsigned(std.math.clamp(deadline - self.now(), 1, std.time.ns_per_hour)));
         self.armed = timer.armAfter(delay) catch null;
     }
 

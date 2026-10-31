@@ -3,6 +3,10 @@ const zio = @import("ziggurat_io");
 const download = @import("download.zig");
 const net = @import("ziggurat_net");
 
+/// The User-Agent of update requests: a fixed ASCII name, never the app's,
+/// as some release hosts refuse a User-Agent with bytes outside ASCII.
+pub const user_agent = "ziggurat-updater";
+
 /// `download.Source` over `std.http.Client`, for an application-managed
 /// worker thread. Resumes with a `Range` request; a 200 response restarts
 /// from zero. The client, its connection pool and CA bundle belong to the
@@ -54,7 +58,7 @@ pub const Source = struct {
         const headers = [_]std.http.Header{.{ .name = "Range", .value = range }};
         self.request = try self.route.request(self.client.allocator, self.client, &.system, .GET, uri, .{
             .keep_alive = false,
-            .headers = .{ .accept_encoding = .{ .override = "identity" } },
+            .headers = .{ .accept_encoding = .{ .override = "identity" }, .user_agent = .{ .override = user_agent } },
             .extra_headers = if (offset > 0) &headers else &.{},
         }, null);
         errdefer close(self);
@@ -87,7 +91,7 @@ pub fn get(allocator: std.mem.Allocator, client: *std.http.Client, url: []const 
     const uri = std.Uri.parse(url) catch return error.InvalidUrl;
     var route: net.tunnel.Route = .{};
     defer route.deinit();
-    var request = try route.request(allocator, client, &.system, .GET, uri, .{ .keep_alive = false, .headers = .{ .accept_encoding = .{ .override = "identity" } } }, null);
+    var request = try route.request(allocator, client, &.system, .GET, uri, .{ .keep_alive = false, .headers = .{ .accept_encoding = .{ .override = "identity" }, .user_agent = .{ .override = user_agent } } }, null);
     defer request.deinit();
     try request.sendBodiless();
     var redirect_buffer: [8 * 1024]u8 = undefined;

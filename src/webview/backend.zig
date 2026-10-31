@@ -89,6 +89,16 @@ pub fn capabilities() Capabilities {
             .regions = true,
             .page_sessions = true,
         },
+        // WKWebView: trusted HTML pages in ephemeral storage, for now.
+        .macos => .{
+            .trusted_html = true,
+            .ephemeral_profile = true,
+            .page_lifecycle = true,
+            .top_level_ipc = true,
+            .evaluate_javascript = true,
+            .zoom = true,
+            .user_agent = true,
+        },
         else => .{},
     };
 }
