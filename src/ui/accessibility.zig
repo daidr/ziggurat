@@ -469,7 +469,8 @@ pub const Bridge = struct {
         var origin: c.POINT = .{ .x = 0, .y = 0 };
         const hwnd: c.HWND = @ptrCast(window.nativeHandle());
         if (hwnd == null or c.ClientToScreen(hwnd, &origin) == 0) return error.Closed;
-        const scale = @as(f64, @floatFromInt(c.GetDpiForWindow(hwnd))) / 96;
+        // Semantic bounds are in the content's DIPs, zoomed as it draws.
+        const scale = @as(f64, @floatFromInt(c.GetDpiForWindow(hwnd))) / 96 * window.zoom();
         const visible = c.IsWindowVisible(hwnd) != 0 and c.IsIconic(hwnd) == 0;
         const enabled = c.IsWindowEnabled(hwnd) != 0;
         const focused = c.GetFocus() == hwnd;

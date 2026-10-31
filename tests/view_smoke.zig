@@ -793,6 +793,38 @@ fn runVideo(allocator: std.mem.Allocator) !void {
     try paint(&host, window);
 }
 
+/// A window zoomed twice: the view is laid out in half the window's DIPs,
+/// and a native press lands on the button drawn twice as large.
+const Zoomed = struct {
+    clicks: usize = 0,
+    fn build(self: *Zoomed, v: *view.View) anyerror!void {
+        if (try v.button("Zoomed", .{})) self.clicks += 1;
+    }
+};
+
+fn runZoom(allocator: std.mem.Allocator) !void {
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    var state: Zoomed = .{};
+    var storage: view.Storage(8, 64) = .{};
+    var host = view.Host.init(&state, Zoomed.build, storage.buffers(), .{});
+    host.context.render_mode = .gdi;
+    const window = try app.createWindow(.{ .width = width, .height = height });
+    try host.attach(window);
+    try paint(&host, window);
+    const unzoomed = host.view.root().bounds.width;
+    try window.setZoom(2);
+    try paint(&host, window);
+    try std.testing.expectApproxEqAbs(unzoomed / 2, host.view.root().bounds.width, 0.5);
+    const button = boundsOfText(&host, .button, "Zoomed").?;
+    const x = (button.x + button.width / 2) * 2;
+    const y = (button.y + button.height / 2) * 2;
+    Native.pointer(window, true, x, y);
+    Native.pointer(window, false, x, y);
+    try paint(&host, window);
+    try std.testing.expectEqual(@as(usize, 1), state.clicks);
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
@@ -803,11 +835,12 @@ pub fn main() !void {
     try runImage(gpa.allocator());
     try runMenu(gpa.allocator());
     try runVideo(gpa.allocator());
+    try runZoom(gpa.allocator());
     if (view.inspector.enabled) try runInspector(gpa.allocator());
     if (builtin.os.tag == .windows) {
         try @import("view_uia.zig").run(gpa.allocator());
         try @import("view_uia.zig").runCollections(gpa.allocator());
     }
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, embedded leaf input, routed pages with history buttons, deferred icon and SVG preparation, timed toast expiry, context menu with submenu, video frames committed after paint, keyed identity and harness frames drawn to pixels and the inspector panel passed\n", .{});
+    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, embedded leaf input, routed pages with history buttons, deferred icon and SVG preparation, timed toast expiry, context menu with submenu, video frames committed after paint, a zoomed window laid out and pressed in its own DIPs, keyed identity and harness frames drawn to pixels and the inspector panel passed\n", .{});
 }

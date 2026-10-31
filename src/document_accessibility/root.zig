@@ -850,13 +850,14 @@ pub const Bridge = struct {
             defer unpinNative(native);
             var scale: f64 = undefined;
             try n.linuxCheck(n.zda_linux_position(native, &scale));
+            scale *= self.window.zoom();
             try self.currentNative(native);
             self.native_scale = scale;
         } else {
             var origin: c.POINT = .{ .x = 0, .y = 0 };
             const hwnd: c.HWND = @ptrCast(self.window.nativeHandle());
             if (hwnd == null or c.ClientToScreen(hwnd, &origin) == 0) return error.Closed;
-            const scale = @as(f64, @floatFromInt(c.GetDpiForWindow(hwnd))) / 96;
+            const scale = @as(f64, @floatFromInt(c.GetDpiForWindow(hwnd))) / 96 * self.window.zoom();
             try n.check(n.zda_native_position(native, @floatFromInt(origin.x), @floatFromInt(origin.y), scale));
             self.native_scale = scale;
         }

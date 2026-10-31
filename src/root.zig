@@ -67,6 +67,32 @@ pub const Rect = struct {
     }
 };
 pub const Size = struct { width: u32, height: u32, scale: f32 };
+/// The range of `Window.setZoom`.
+pub const min_zoom: f32 = 0.25;
+pub const max_zoom: f32 = 5;
+/// A native event as zoomed content sees it: positions and distances in
+/// its DIPs, and frames at the scale it rasterizes at.
+pub fn zoomEvent(event: Event, zoom: f32) Event {
+    if (zoom == 1) return event;
+    var mapped = event;
+    switch (mapped) {
+        .paint => |*paint| paint.size.scale *= zoom,
+        .resize => |*size| size.scale *= zoom,
+        .pointer_down, .pointer_up => |*input| input.position = .{ .x = input.position.x / zoom, .y = input.position.y / zoom },
+        .pointer_move => |*position| position.* = .{ .x = position.x / zoom, .y = position.y / zoom },
+        .wheel => |*wheel| {
+            wheel.position = .{ .x = wheel.position.x / zoom, .y = wheel.position.y / zoom };
+            wheel.delta = .{ .x = wheel.delta.x / zoom, .y = wheel.delta.y / zoom };
+        },
+        else => {},
+    }
+    return mapped;
+}
+/// A rectangle in zoomed content's DIPs, in the window's.
+pub fn zoomRect(bounds: Rect, zoom: f32) Rect {
+    if (zoom == 1) return bounds;
+    return .{ .x = bounds.x * zoom, .y = bounds.y * zoom, .width = bounds.width * zoom, .height = bounds.height * zoom };
+}
 /// `transparent` frames start clear and keep their alpha (see
 /// `WindowCapabilities.transparent`).
 pub const Paint = struct { native_context: *anyopaque, native_window: ?*anyopaque = null, size: Size, transparent: bool = false };
@@ -1286,7 +1312,8 @@ pub const Window = struct {
         defer scope.end();
         if (!std.math.isFinite(position.x) or !std.math.isFinite(position.y)) return error.InvalidGeometry;
         const bounds = try backend.clientBounds(scope.record);
-        return scope.record.hitTest(position, @floatFromInt(bounds.width), @floatFromInt(bounds.height));
+        const zoomed: Point = .{ .x = position.x * scope.record.zoom, .y = position.y * scope.record.zoom };
+        return scope.record.hitTest(zoomed, @floatFromInt(bounds.width), @floatFromInt(bounds.height));
     }
     fn beginInteraction(self: Window, is_resize: bool) !CallbackScope {
         const scope = self.beginCallback() orelse return error.Closed;
@@ -1349,7 +1376,32 @@ pub const Window = struct {
     pub fn contentSize(self: Window) !Size {
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
-        return backend.contentSize(scope.record);
+        var size = try backend.contentSize(scope.record);
+        size.scale *= scope.record.zoom;
+        return size;
+    }
+    /// Draw the content `value` times its size, sharply: it is laid out in
+    /// a client area 1/`value` of the window's in DIPs and rasterized at the
+    /// screen's scale times `value`, so text, vectors and images are drawn
+    /// at the zoomed size rather than scaled up. Every size, position and
+    /// rectangle the content gives or is given is in its own DIPs; the
+    /// window maps them to and from its own. Between 0.25 and 5; 1 draws
+    /// as an unzoomed window. Repaints at the new size.
+    pub fn setZoom(self: Window, value: f32) !void {
+        if (!std.math.isFinite(value) or value < min_zoom or value > max_zoom) return error.InvalidValue;
+        const scope = self.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        if (scope.record.zoom == value) return;
+        scope.record.zoom = value;
+        // The next paint carries the new size; nothing is delivered now,
+        // so a build may zoom its own window.
+        self.invalidate();
+    }
+    /// The zoom `setZoom` set, 1 by default.
+    pub fn zoom(self: Window) f32 {
+        const scope = self.beginCallback() orelse return 1;
+        defer scope.end();
+        return scope.record.zoom;
     }
     /// Changes normal client geometry. Restore and leave fullscreen first.
     pub fn setClientBounds(self: Window, bounds: ClientBounds) !void {
@@ -1722,7 +1774,7 @@ pub const Window = struct {
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
         if (!std.math.isFinite(bounds.x) or !std.math.isFinite(bounds.y) or !std.math.isFinite(bounds.width) or !std.math.isFinite(bounds.height) or bounds.width < 0 or bounds.height < 0 or @abs(bounds.x) > 1_000_000 or @abs(bounds.y) > 1_000_000 or bounds.width > 1_000_000 or bounds.height > 1_000_000) return error.InvalidGeometry;
-        try backend.setTextCaret(scope.record, bounds);
+        try backend.setTextCaret(scope.record, zoomRect(bounds, scope.record.zoom));
     }
     pub fn cancelTextComposition(self: Window) !void {
         const scope = self.beginCallback() orelse return error.Closed;
@@ -1785,7 +1837,7 @@ pub const Window = struct {
         if (bounds.width == 0 or bounds.height == 0) return;
         self.app.native_failure = null;
         scope.record.frame_requested = true;
-        backend.invalidateRect(scope.record, bounds) catch |err| {
+        backend.invalidateRect(scope.record, zoomRect(bounds, scope.record.zoom)) catch |err| {
             self.app.report(self.app.failureDiagnostic(.window_update, err, self));
             return err;
         };
@@ -1942,6 +1994,8 @@ pub const WindowRecord = struct {
     pub const Phase = enum { creating, open, closing, closed };
     window: Window,
     options: WindowOptions,
+    /// How much larger the content draws than its own DIPs; see `Window.setZoom`.
+    zoom: f32 = 1,
     native: backend.WindowData = .{},
     vibrancy: Vibrancy = .none,
     pointer_state: ?*PointerState = null,
@@ -2418,8 +2472,9 @@ pub const WindowRecord = struct {
         }
         self.emitInternal(event, false);
     }
-    fn emitInternal(self: *WindowRecord, event: Event, comptime native_pointer: bool) void {
+    fn emitInternal(self: *WindowRecord, native_event: Event, comptime native_pointer: bool) void {
         if (self.phase != .open) return;
+        const event = zoomEvent(native_event, self.zoom);
         const scope = self.enter();
         defer scope.end();
         const pointer = if (native_pointer) null else self.window.app.suspendPointer();
@@ -2622,4 +2677,5 @@ test {
     _ = @import("platform/decoration_test.zig");
     _ = @import("pointer_press_test.zig");
     _ = @import("window_policy_test.zig");
+    _ = @import("zoom_test.zig");
 }
