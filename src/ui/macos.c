@@ -321,6 +321,8 @@ int zlc_begin(Renderer *s,uint32_t width,uint32_t height,float scale){
     s->width=width;s->height=height;s->scale=scale;s->generation++;s->origin[0]=s->origin[1]=0;
     s->gradient_clip_depth=0;s->gradient_clips[0][0]=s->gradient_clips[0][1]=0;s->gradient_clips[0][2]=width;s->gradient_clips[0][3]=height;return 0;
 }
+/* Windows here have opaque planes, so a transparent frame begins as an opaque one. */
+int zlc_begin_mode(Renderer *s,uint32_t width,uint32_t height,float scale,int transparent){(void)transparent;return zlc_begin(s,width,height,scale);}
 void zlc_fill(Renderer *s,float x,float y,float width,float height,uint32_t color){
     CGContextRef c=s->target->context;
     CGContextSetRGBFillColor(c,(double)((color>>16)&255)/255,(double)((color>>8)&255)/255,(double)(color&255)/255,1);
