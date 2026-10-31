@@ -5049,6 +5049,11 @@ pub const Options = struct {
     root: Style = .{ .padding = Insets.all(24), .gap = 12, .alignment = .start },
     /// Window background; defaults to the theme background.
     background: ?u32 = null,
+    /// The window paints no background, so what the view leaves transparent
+    /// shows the window's material (`Window.showsVibrancy`) or, in a
+    /// transparent window, what is behind it. Meant for windows whose frames
+    /// start transparent (`WindowCapabilities.transparent`).
+    transparent_background: bool = false,
     measurer: Measurer = .{},
     /// Hover or focus time before a tooltip appears, in nanoseconds.
     tooltip_delay: u64 = 500 * std.time.ns_per_ms,
@@ -5581,7 +5586,7 @@ pub const Host = struct {
     fn draw(ptr: *anyopaque, frame: *ui.Frame) void {
         const self: *Host = @ptrCast(@alignCast(ptr));
         const theme = frame.currentTheme();
-        frame.clear(self.options.background orelse theme.palette.background);
+        if (!self.options.transparent_background) frame.clear(self.options.background orelse theme.palette.background);
         self.render(frame, theme) catch |err| {
             self.last_error = err;
             // A failed frame keeps the previously committed one.

@@ -129,3 +129,35 @@ test "app activation reports focus entering and leaving the app, not moves betwe
     try equal(4, probe.count);
     try expect(probe.changes[2] and !probe.changes[3]);
 }
+
+test "an app with an all-windows-closed handler keeps running without windows" {
+    const Probe = struct {
+        app: *z.App = undefined,
+        calls: usize = 0,
+        window: ?z.Window = null,
+        fn closed(ptr: *anyopaque, app: *z.App) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.calls += 1;
+            if (self.calls == 2) return app.quit();
+            // The App runs on: a later task opens and closes another window.
+            app.post(.{ .context = self, .call = reopen }) catch unreachable;
+        }
+        fn reopen(ptr: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            const window = self.app.createWindow(.{}) catch unreachable;
+            _ = window.destroy() catch unreachable;
+        }
+        fn close(ptr: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            _ = self.window.?.destroy() catch unreachable;
+        }
+    };
+    var probe: Probe = .{};
+    const app = try z.App.initWithOptions(std.testing.allocator, .{ .on_all_windows_closed = .{ .context = &probe, .closed = Probe.closed } });
+    defer app.deinit();
+    probe.app = app;
+    probe.window = try app.createWindow(.{});
+    try app.post(.{ .context = &probe, .call = Probe.close });
+    try app.run();
+    try equal(2, probe.calls);
+}

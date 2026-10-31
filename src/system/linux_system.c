@@ -31,7 +31,7 @@ typedef struct Item {
     uint8_t kind;
     uint8_t enabled;
     uint8_t checked;
-    uint8_t padding;
+    uint8_t radio;
     uint32_t keyval;
     uint32_t modifiers;
     int32_t command;
@@ -169,8 +169,10 @@ Link *zsl_popup_show(GtkWidget *window, const Item *items, uint32_t count, int a
         GtkWidget *entry;
         if (item->kind == 2) entry = gtk_separator_menu_item_new();
         else {
-            entry = item->checked && item->kind == 0 ? gtk_check_menu_item_new_with_mnemonic(item->label) : gtk_menu_item_new_with_mnemonic(item->label);
-            if (item->checked && item->kind == 0) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(entry), TRUE);
+            gboolean check = (item->checked || item->radio) && item->kind == 0;
+            entry = check ? gtk_check_menu_item_new_with_mnemonic(item->label) : gtk_menu_item_new_with_mnemonic(item->label);
+            if (check && item->radio) gtk_check_menu_item_set_draw_as_radio(GTK_CHECK_MENU_ITEM(entry), TRUE);
+            if (check && item->checked) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(entry), TRUE);
             if (item->keyval) {
                 GtkWidget *label = gtk_bin_get_child(GTK_BIN(entry));
                 if (GTK_IS_ACCEL_LABEL(label)) gtk_accel_label_set_accel(GTK_ACCEL_LABEL(label), item->keyval, item->modifiers);
@@ -301,7 +303,7 @@ typedef struct Bar {
     uint32_t count;
     GtkWidget *commands[128];
     uint32_t keyvals[128], modifiers[128];
-    uint8_t enabled[128], checked[128];
+    uint8_t enabled[128], checked[128], radio[128];
 } Bar;
 typedef struct Activation { Bar *bar; int32_t command; } Activation;
 static gint live_bars;
@@ -339,8 +341,13 @@ static void bar_item_activated(GtkMenuItem *item, gpointer data) {
     }
     if (bar->enabled[command]) bar_schedule(bar, command);
 }
+/* Radio commands are always check items drawn as radios, so an unchecked
+ * one still shows its empty mark; other commands get a check item only
+ * while checked. */
 static GtkWidget *bar_command_new(Bar *bar, const char *label, int32_t command, gboolean checked, gboolean sensitive) {
-    GtkWidget *entry = checked ? gtk_check_menu_item_new_with_mnemonic(label) : gtk_menu_item_new_with_mnemonic(label);
+    gboolean check = checked || bar->radio[command];
+    GtkWidget *entry = check ? gtk_check_menu_item_new_with_mnemonic(label) : gtk_menu_item_new_with_mnemonic(label);
+    if (bar->radio[command]) gtk_check_menu_item_set_draw_as_radio(GTK_CHECK_MENU_ITEM(entry), TRUE);
     if (checked) gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(entry), TRUE);
     if (bar->keyvals[command]) {
         GtkWidget *child = gtk_bin_get_child(GTK_BIN(entry));
@@ -411,6 +418,7 @@ Bar *zsl_menubar_set(GtkWidget *window, const Item *items, uint32_t count, const
             bar->modifiers[command] = item->modifiers;
             bar->enabled[command] = enabled[command];
             bar->checked[command] = item->checked;
+            bar->radio[command] = item->radio;
             if ((uint32_t)command + 1 > bar->count) bar->count = (uint32_t)command + 1;
             entry = bar_command_new(bar, item->label, command, item->checked != 0, item->enabled != 0);
             bar->commands[command] = entry;
@@ -436,7 +444,7 @@ int zsl_menubar_state(Bar *bar, int32_t command, int enabled, int effective, int
     GtkWidget *entry = bar->commands[command];
     bar->enabled[command] = effective != 0;
     bar->checked[command] = checked != 0;
-    if (GTK_IS_CHECK_MENU_ITEM(entry) != (checked != 0)) {
+    if (GTK_IS_CHECK_MENU_ITEM(entry) != (checked != 0 || bar->radio[command] != 0)) {
         GtkWidget *shell = gtk_widget_get_parent(entry);
         GList *children = gtk_container_get_children(GTK_CONTAINER(shell));
         gint position = g_list_index(children, entry);
@@ -452,9 +460,9 @@ int zsl_menubar_state(Bar *bar, int32_t command, int enabled, int effective, int
         return 1;
     }
     gtk_widget_set_sensitive(entry, enabled != 0);
-    if (checked) {
+    if (GTK_IS_CHECK_MENU_ITEM(entry)) {
         g_signal_handlers_block_by_func(entry, bar_item_activated, bar);
-        gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(entry), TRUE);
+        gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(entry), checked != 0);
         g_signal_handlers_unblock_by_func(entry, bar_item_activated, bar);
     }
     return 1;

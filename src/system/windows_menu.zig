@@ -7,7 +7,8 @@ const types = @import("types.zig");
 const menus = @import("menus.zig");
 const c = @import("ziggurat_c_win32");
 
-pub const Entry = struct { id: u64, command: u16, menu: c.HMENU, enabled: bool, ancestor_enabled: bool, accelerator: ?types.Accelerator };
+/// `radio_first`/`radio_last` are the command IDs bounding a radio item's group.
+pub const Entry = struct { id: u64, command: u16, menu: c.HMENU, enabled: bool, ancestor_enabled: bool, accelerator: ?types.Accelerator, radio_first: u16 = 0, radio_last: u16 = 0 };
 pub const Built = struct { menu: c.HMENU, count: usize };
 
 /// Builds a menu bar (`popup == false`) or a popup root. Labels are copied by
@@ -40,6 +41,20 @@ pub fn build(items: []const types.Item, plan: *const menus.Plan, popup: bool, fi
         } else {
             if (c.AppendMenuW(parent_menu, flags, command, text.ptr) == 0) return error.MenuCreationFailed;
             entries[count] = .{ .id = item.id, .command = @intCast(command), .menu = parent_menu, .enabled = plan.enabled[index], .ancestor_enabled = plan.ancestors_enabled[index], .accelerator = item.accelerator };
+            if (plan.radio_group[index]) |group| {
+                var info = std.mem.zeroes(c.MENUITEMINFOW);
+                info.cbSize = @sizeOf(c.MENUITEMINFOW);
+                info.fMask = c.MIIM_FTYPE;
+                info.fType = c.MFT_STRING | c.MFT_RADIOCHECK;
+                if (c.SetMenuItemInfoW(parent_menu, command, c.FALSE, &info) == 0) return error.MenuCreationFailed;
+                // Commands of a group are consecutive: the group's first
+                // entry is the earliest one with the same first command.
+                const first: u16 = if (group != index) entries[count - 1].radio_first else @intCast(command);
+                entries[count].radio_first = first;
+                var at = count;
+                while (at > 0 and entries[at - 1].radio_first == first and entries[at - 1].radio_last != 0) : (at -= 1) entries[at - 1].radio_last = @intCast(command);
+                entries[count].radio_last = @intCast(command);
+            }
             count += 1;
             command += 1;
         }
