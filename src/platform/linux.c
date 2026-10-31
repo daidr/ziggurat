@@ -655,6 +655,9 @@ static gboolean scroll(GtkWidget *widget, GdkEventScroll *native, gpointer data)
         if (native->direction==GDK_SCROLL_LEFT) event.dx=-1;
         if (native->direction==GDK_SCROLL_RIGHT) event.dx=1;
     }
+    /* A touchpad scrolls by distance (precise). */
+    GdkDevice *device=gdk_event_get_source_device((GdkEvent *)native);
+    if (device && gdk_device_get_source(device)==GDK_SOURCE_TOUCHPAD) event.flags|=1;
     event.dx*=48; event.dy*=48; emit(data,&event); return TRUE;
 }
 /* A popup that does not take the keyboard. X without a window manager moves
@@ -1085,6 +1088,7 @@ void zlg_window_ignore_pointer(NativeWindow *s, int enabled) {
     release(s);
 }
 void zlg_window_urgent(NativeWindow *s, int enabled) { retain(s);gtk_window_set_urgency_hint(GTK_WINDOW(s->window),enabled);release(s); }
+void zlg_window_focus_on_map(NativeWindow *s, int enabled) { retain(s);gtk_window_set_focus_on_map(GTK_WINDOW(s->window),enabled);release(s); }
 void zlg_window_skip_taskbar(NativeWindow *s, int enabled) { retain(s);gtk_window_set_skip_taskbar_hint(GTK_WINDOW(s->window),enabled);release(s); }
 void zlg_window_title(NativeWindow *s, const char *title) { retain(s);gtk_window_set_title(GTK_WINDOW(s->window),title);release(s); }
 /* NULL name restores the default arrow. A resize edge of a custom frame

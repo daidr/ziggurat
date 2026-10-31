@@ -563,7 +563,7 @@ pub fn show(window: *core.WindowRecord) void {
         _ = c.ShowWindow(window.native.hwnd, c.SW_SHOWNOACTIVATE);
         return;
     }
-    _ = c.ShowWindow(window.native.hwnd, c.SW_SHOW);
+    _ = c.ShowWindow(window.native.hwnd, if (window.options.focus_on_show) c.SW_SHOW else c.SW_SHOWNOACTIVATE);
     // A focusable popup takes the keyboard as it shows, as a menu does.
     if (window.options.popup != null) _ = c.SetForegroundWindow(window.native.hwnd);
 }

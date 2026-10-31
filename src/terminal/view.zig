@@ -16,12 +16,19 @@
 //! without allocating. The window's Context needs `prepareTextFields`
 //! before the leaf is shown.
 const std = @import("std");
+const builtin = @import("builtin");
 const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const view = @import("ziggurat_view");
 const term = @import("ziggurat_terminal");
 const box = @import("box.zig");
+
+const win = struct {
+    const SPI_GETWHEELSCROLLLINES: u32 = 0x0068;
+    const WHEEL_PAGESCROLL: u32 = 0xffff_ffff;
+    extern "user32" fn SystemParametersInfoW(action: u32, param: u32, value: ?*anyopaque, ini: u32) callconv(.winapi) c_int;
+};
 
 const Screen = term.Screen;
 const Cell = term.Cell;
@@ -190,8 +197,10 @@ pub const Options = struct {
     /// Bindings over the platform's defaults (`term.keybind`).
     keybinds: []const Keybind = &.{},
     no_default_keybinds: bool = false,
-    /// Lines per wheel notch.
-    scroll_lines: u16 = 3,
+    /// Rows a notch of a mouse wheel scrolls. By default three, and on
+    /// Windows as many as its "lines to scroll" setting asks (3 unless
+    /// changed).
+    scroll_lines: ?u16 = null,
     /// Largest paste, in bytes.
     paste_bytes: usize = 64 * 1024,
 };
@@ -233,6 +242,14 @@ pub const max_value = 512;
 const max_preedit = 256;
 const wheel_notch: f32 = 48;
 const double_click_ms = 500;
+/// How wide the strip at the right edge is over which the scroll bar takes
+/// the pointer, in DIPs.
+const scrollbar_strip: f32 = 12;
+/// How long the scroll bar stays after the viewport last moved, or the
+/// pointer left it, and how long it then takes to fade out, in ns.
+const bar_linger: u64 = std.time.ns_per_s;
+const bar_fade: u64 = 300 * std.time.ns_per_ms;
+const bar_frame: u64 = 16 * std.time.ns_per_ms;
 
 pub const TerminalView = struct {
     host: *view.Host,
@@ -275,6 +292,19 @@ pub const TerminalView = struct {
     clicks: u8 = 0,
     wheel: f32 = 0,
     zoom_wheel: f32 = 0,
+    /// A touchpad gesture zooms, as it began: its momentum keeps that.
+    scroll_zoom: bool = false,
+    /// The primary button drags the scroll bar, held `bar_grab` DIPs below
+    /// the thumb's top; `over_bar` that the pointer is over the bar's strip.
+    /// `bar_lit` is whether the last paint showed it hovered or held,
+    /// `bar_back` how many rows the viewport was above the bottom, and
+    /// `bar_seen` when either last changed, from which the bar fades out.
+    bar_held: bool = false,
+    bar_grab: f32 = 0,
+    over_bar: bool = false,
+    bar_lit: bool = false,
+    bar_back: usize = 0,
+    bar_seen: ?u64 = null,
     /// The font's size after zooms; null at `options.font.size`.
     zoom_size: ?f32 = null,
     /// Whether the window's appearance is dark, and the theme in use.
@@ -691,6 +721,8 @@ pub const TerminalView = struct {
     /// program takes the mouse, unless Shift is held to select; else the
     /// I-beam.
     pub fn pointerShape(self: *const TerminalView, shift: bool) PointerShape {
+        // The scroll bar's, not the text's.
+        if (self.bar_held or self.over_bar) return .arrow;
         if (self.hover != null) return .link;
         const takes_mouse = self.terminal.screen.modes.mouse != .none;
         if (takes_mouse and shift) return .text;
@@ -1129,13 +1161,7 @@ pub const TerminalView = struct {
                 .bar => frame.rect(.{ .x = rect.x, .y = rect.y, .width = 2, .height = rect.height }, t.cursor_color),
             }
         }
-        // Where the scrollback is in view, a thumb on the right edge.
-        if (offset > 0) {
-            const total: f32 = @floatFromInt(s.historyCount() + s.rows);
-            const height = @max(8, bounds.height * @as(f32, @floatFromInt(s.rows)) / total);
-            const along = @as(f32, @floatFromInt(s.historyCount() - offset)) / @as(f32, @floatFromInt(s.historyCount()));
-            frame.roundedRect(.{ .x = bounds.x + bounds.width - 5, .y = bounds.y + (bounds.height - height) * along, .width = 4, .height = height }, 2, ui.Color.rgb(blend(t.foreground, background)));
-        }
+        self.paintScrollbar(frame, bounds, offset);
         try frame.popClip();
         // Output moved the cursor, changed what a search finds or which
         // images show: the posted task follows.
@@ -1144,6 +1170,92 @@ pub const TerminalView = struct {
         // Until the leaf is a registered text field nothing can take input
         // for it, so the box reads as read-only.
         try frame.semantic(.{ .id = id, .role = .text_box, .name = self.options.name, .value = self.cursorLine(), .bounds = bounds, .focused = focused, .read_only = self.token == null });
+    }
+
+    /// Where the viewport is in the scrollback, as overlay scroll bars show
+    /// it: as the viewport moves, and while the pointer is over the bar's
+    /// strip or drags it, when it widens; a while after, it fades out.
+    fn paintScrollbar(self: *TerminalView, frame: *ui.Frame, bounds: view.Rect, offset: usize) void {
+        const v = &self.host.view;
+        const shown = self.scrollbarShown(v.time(), offset);
+        if (shown.wake) |deadline| v.wakeAt(deadline);
+        const alpha = shown.alpha orelse return;
+        const thumb = self.thumbOf(bounds.height);
+        var width: f32 = 4;
+        var inset: f32 = 3;
+        var color = ui.Color.rgb(self.terminal.foreground).withAlpha(0.35 * alpha);
+        if (self.bar_lit) {
+            width = 8;
+            inset = 2;
+            if (self.bar_held) color = ui.Color.rgb(self.terminal.foreground).withAlpha(0.5);
+        }
+        frame.roundedRect(.{ .x = bounds.x + bounds.width - inset - width, .y = bounds.y + thumb.y + 2, .width = width, .height = thumb.height - 4 }, width / 2, color);
+    }
+
+    /// How the scroll bar shows at `now`, with the viewport `offset` rows
+    /// above the bottom: its opacity, null when hidden, and when the next
+    /// paint should come as it fades.
+    fn scrollbarShown(self: *TerminalView, now: u64, offset: usize) struct { alpha: ?f32, wake: ?u64 = null } {
+        if (offset != self.bar_back) {
+            self.bar_back = offset;
+            self.bar_seen = now;
+        }
+        const lit = self.bar_held or self.over_bar;
+        if (self.bar_lit and !lit) self.bar_seen = now;
+        self.bar_lit = lit;
+        if (self.terminal.screen.historyCount() == 0) return .{ .alpha = null };
+        if (lit) return .{ .alpha = 1 };
+        const seen = self.bar_seen orelse return .{ .alpha = null };
+        const since = now -| seen;
+        if (since < bar_linger) return .{ .alpha = 1, .wake = seen + bar_linger };
+        if (since < bar_linger + bar_fade) return .{ .alpha = 1 - @as(f32, @floatFromInt(since - bar_linger)) / @as(f32, @floatFromInt(bar_fade)), .wake = now + bar_frame };
+        return .{ .alpha = null };
+    }
+
+    /// The scroll bar's thumb in a track `track` DIPs high: its top and
+    /// height. The scrollback is not empty.
+    fn thumbOf(self: *const TerminalView, track: f32) struct { y: f32, height: f32 } {
+        const s = &self.terminal.screen;
+        const history: f32 = @floatFromInt(s.historyCount());
+        const rows: f32 = @floatFromInt(s.rows);
+        const height = @max(track * rows / (history + rows), 24);
+        const from_top = history - @as(f32, @floatFromInt(s.viewportOffset()));
+        return .{ .y = (track - height) * from_top / @max(history, 1), .height = height };
+    }
+
+    /// Whether the scroll bar takes the pointer at a window point: over its
+    /// strip while there is a scrollback, which shows the bar, or while it
+    /// is dragged.
+    fn overScrollbar(self: *const TerminalView, point: z.Point) bool {
+        if (self.bar_held) return true;
+        const b = self.bounds;
+        if (point.x < b.x + b.width - scrollbar_strip or point.x >= b.x + b.width or point.y < b.y or point.y >= b.y + b.height) return false;
+        return self.terminal.screen.historyCount() > 0;
+    }
+
+    /// The pointer moved to `point`, or left: whether it is over the bar
+    /// changed, which the bar and the pointer's shape show.
+    fn trackScrollbar(self: *TerminalView, point: ?z.Point) bool {
+        const over = if (point) |p| self.overScrollbar(p) else self.bar_held;
+        if (over == self.over_bar) return false;
+        self.over_bar = over;
+        self.invalidate();
+        return true;
+    }
+
+    /// Scroll the scrollback so that the thumb's top is `bar_grab` above
+    /// `y`, a window coordinate.
+    fn dragScrollbar(self: *TerminalView, y: f32) void {
+        const s = &self.terminal.screen;
+        const history = s.historyCount();
+        if (history == 0) return;
+        const height = self.thumbOf(self.bounds.height).height;
+        const travel = self.bounds.height - height;
+        if (travel <= 0) return;
+        const f = std.math.clamp((y - self.bounds.y - self.bar_grab) / travel, 0, 1);
+        const to: usize = @intFromFloat(@round(f * @as(f32, @floatFromInt(history))));
+        const delta = @as(isize, @intCast(history - to)) - @as(isize, @intCast(s.viewportOffset()));
+        if (delta != 0 and s.scrollView(delta)) self.invalidate();
     }
 
     /// Paint the padding with the backgrounds of the cells nearest to it:
@@ -1425,7 +1537,7 @@ pub const TerminalView = struct {
             .pointer_down => |press| return self.pointerDown(press),
             .pointer_up => |press| return self.pointerUp(press),
             .pointer_move => |point| return self.pointerMove(point),
-            .wheel => |wheel| return self.scrollWheel(wheel.position, wheel.delta.y, .{ .control = self.link_held }),
+            .wheel => |wheel| return self.scrollWheel(wheel.position, wheel.delta.y, .{ .control = self.link_held }, wheel.precise, wheel.momentum),
             else => return false,
         }
     }
@@ -1537,6 +1649,19 @@ pub const TerminalView = struct {
 
     fn pointerDown(self: *TerminalView, press: z.PointerButtonInput) bool {
         self.pointer = press.position;
+        _ = self.trackScrollbar(press.position);
+        // A press on the thumb holds it where it is pressed, and one on the
+        // rest of the strip by its middle, which comes to the pointer.
+        if (press.button == .primary and self.over_bar and self.reported_press == null) {
+            const thumb = self.thumbOf(self.bounds.height);
+            const y = press.position.y - self.bounds.y;
+            self.bar_grab = if (y >= thumb.y and y < thumb.y + thumb.height) y - thumb.y else thumb.height / 2;
+            self.bar_held = true;
+            self.hover = null;
+            self.dragScrollbar(press.position.y);
+            self.invalidate();
+            return true;
+        }
         self.setLinkHeld(press.modifiers.control);
         // Ctrl over a link: a click opens it, before a program that takes
         // the mouse sees it.
@@ -1600,6 +1725,11 @@ pub const TerminalView = struct {
 
     fn pointerMove(self: *TerminalView, point: z.Point) bool {
         self.pointer = point;
+        if (self.bar_held) {
+            self.dragScrollbar(point.y);
+            return true;
+        }
+        const bar_changed = self.trackScrollbar(point);
         if (self.link_press) return true;
         if (self.link_held) self.updateHover();
         if (self.reported_press) |button| {
@@ -1608,8 +1738,8 @@ pub const TerminalView = struct {
         if (self.terminal.screen.modes.mouse == .any) {
             if (self.cellAt(point).inside) return self.report(.none, .motion, point, .{});
         }
-        const selection = &(self.selection orelse return false);
-        if (!selection.dragging) return false;
+        const selection = &(self.selection orelse return bar_changed);
+        if (!selection.dragging) return bar_changed;
         const s = &self.terminal.screen;
         // Dragging past the top or bottom scrolls the view.
         const cell = self.cellSize();
@@ -1625,6 +1755,12 @@ pub const TerminalView = struct {
     }
 
     fn pointerUp(self: *TerminalView, press: z.PointerButtonInput) bool {
+        if (self.bar_held and press.button == .primary) {
+            self.bar_held = false;
+            _ = self.trackScrollbar(press.position);
+            self.invalidate();
+            return true;
+        }
         if (self.link_press) {
             self.link_press = false;
             return true;
@@ -1645,9 +1781,16 @@ pub const TerminalView = struct {
         return true;
     }
 
-    fn scrollWheel(self: *TerminalView, position: z.Point, delta: f32, modifiers: z.KeyModifiers) bool {
+    fn scrollWheel(self: *TerminalView, position: z.Point, delta: f32, modifiers: z.KeyModifiers, precise: bool, momentum: bool) bool {
         const s = &self.terminal.screen;
-        if (modifiers.control) {
+        var zooming = modifiers.control;
+        if (precise) {
+            // A touchpad gesture keeps what it began as, even if Control
+            // comes down while its momentum still runs.
+            if (!momentum) self.scroll_zoom = zooming;
+            zooming = self.scroll_zoom;
+        }
+        if (zooming) {
             // The wheel with Control held zooms, up larger.
             self.zoom_wheel -= delta;
             const steps: i32 = @intFromFloat(@trunc(self.zoom_wheel / wheel_notch));
@@ -1657,7 +1800,7 @@ pub const TerminalView = struct {
             }
             return true;
         }
-        self.wheel += delta / wheel_notch * @as(f32, @floatFromInt(self.options.scroll_lines));
+        self.wheel += delta / wheel_notch * self.notchRows();
         const lines: isize = @intFromFloat(@trunc(self.wheel));
         if (lines == 0) return true;
         self.wheel -= @floatFromInt(lines);
@@ -1677,6 +1820,20 @@ pub const TerminalView = struct {
         return true;
     }
 
+    /// Rows a notch of the wheel scrolls.
+    fn notchRows(self: *const TerminalView) f32 {
+        if (self.options.scroll_lines) |lines| return @floatFromInt(lines);
+        if (builtin.os.tag == .windows) {
+            var lines: u32 = 3;
+            if (win.SystemParametersInfoW(win.SPI_GETWHEELSCROLLLINES, 0, &lines, 0) != 0) {
+                // "One screen at a time" scrolls a page.
+                if (lines == win.WHEEL_PAGESCROLL) return @floatFromInt(@max(self.terminal.screen.rows, 2) - 1);
+                return @floatFromInt(lines);
+            }
+        }
+        return 3;
+    }
+
     /// Ctrl, the link modifier, is held or let go of: the link under a
     /// still pointer follows.
     fn setLinkHeld(self: *TerminalView, held: bool) void {
@@ -1693,6 +1850,7 @@ pub const TerminalView = struct {
         if (!self.link_held or self.reported_press != null) return;
         if (self.selection) |s| if (s.dragging) return;
         const point = self.pointer orelse return;
+        if (self.bar_held or self.overScrollbar(point)) return;
         const at = self.cellAt(point);
         if (!at.inside) return;
         const s = &self.terminal.screen;
@@ -1727,14 +1885,17 @@ pub const TerminalView = struct {
     fn hoverInput(ptr: *anyopaque, _: u64, event: view.EmbedInput) bool {
         const self: *TerminalView = @ptrCast(@alignCast(ptr));
         const before = self.hover;
+        var bar_changed = false;
         switch (event) {
             .pointer_move => |local| {
                 self.pointer = .{ .x = self.bounds.x + local.x, .y = self.bounds.y + local.y };
+                bar_changed = self.trackScrollbar(self.pointer);
                 self.updateHover();
             },
             .pointer_leave => {
                 self.pointer = null;
                 self.hover = null;
+                bar_changed = self.trackScrollbar(null);
             },
             .key_up => |k| {
                 if (k.key == .control) self.setLinkHeld(false);
@@ -1746,7 +1907,7 @@ pub const TerminalView = struct {
         }
         const was = before != null;
         const is = self.hover != null;
-        return was != is or (was and is and (before.?.row != self.hover.?.row or before.?.start != self.hover.?.start));
+        return bar_changed or was != is or (was and is and (before.?.row != self.hover.?.row or before.?.start != self.hover.?.start));
     }
 };
 
@@ -2331,4 +2492,72 @@ test "a terminal shown from a server tells its stream the theme, and resizes whe
 test {
     std.testing.refAllDecls(TerminalView);
     _ = box;
+}
+
+test "the scroll bar shows as the viewport moves, fades, and drags the scrollback" {
+    var state: u8 = 0;
+    var storage: view.Storage(4, 64) = .{};
+    var host = view.Host.init(&state, Empty.build, storage.buffers(), .{});
+    var terminal = try term.Terminal.init(std.testing.allocator, .{ .screen = .{ .cols = 10, .rows = 4, .scrollback = 100 } });
+    defer terminal.deinit();
+    var sent: Sent = .{};
+    var board: Board = .{};
+    var tv = testView(&host, &terminal, &sent, &board, .{});
+    defer tv.deinit();
+    tv.bind();
+    const ms = std.time.ns_per_ms;
+    // No scrollback, no bar.
+    try std.testing.expect(tv.scrollbarShown(1000 * ms, 0).alpha == null);
+    try std.testing.expect(!tv.overScrollbar(.{ .x = 95, .y = 40 }));
+    for (0..20) |_| tv.feed("line\r\n");
+    try std.testing.expect(tv.scrollbarShown(1000 * ms, 0).alpha == null);
+    // The viewport moves: the bar shows, lingers, then fades out.
+    try std.testing.expect(tv.handle(.{ .wheel = .{ .position = .{ .x = 5, .y = 5 }, .delta = .{ .x = 0, .y = -48 } } }));
+    const moved = tv.scrollbarShown(2000 * ms, terminal.screen.viewportOffset());
+    try std.testing.expectEqual(@as(?f32, 1), moved.alpha);
+    try std.testing.expectEqual(@as(?u64, 3000 * ms), moved.wake);
+    const fading = tv.scrollbarShown(3150 * ms, terminal.screen.viewportOffset());
+    try std.testing.expect(fading.alpha.? > 0.4 and fading.alpha.? < 0.6);
+    try std.testing.expectEqual(@as(?u64, 3166 * ms), fading.wake);
+    try std.testing.expect(tv.scrollbarShown(3400 * ms, terminal.screen.viewportOffset()).alpha == null);
+    // Over its strip it shows, wide, with the arrow, and links do not.
+    try std.testing.expect(tv.handle(.{ .pointer_move = .{ .x = 95, .y = 40 } }));
+    try std.testing.expect(tv.over_bar);
+    try std.testing.expectEqual(PointerShape.arrow, tv.pointerShape(false));
+    try std.testing.expectEqual(@as(?f32, 1), tv.scrollbarShown(5000 * ms, terminal.screen.viewportOffset()).alpha);
+    // A press at the top of the track drags to the oldest rows, at the
+    // bottom to the newest.
+    try std.testing.expect(tv.handle(.{ .pointer_down = .{ .position = .{ .x = 95, .y = 0 } } }));
+    try std.testing.expect(tv.bar_held);
+    try std.testing.expectEqual(terminal.screen.historyCount(), terminal.screen.viewportOffset());
+    try std.testing.expect(tv.handle(.{ .pointer_move = .{ .x = 40, .y = 79 } }));
+    try std.testing.expectEqual(@as(usize, 0), terminal.screen.viewportOffset());
+    try std.testing.expect(tv.selection == null);
+    try std.testing.expect(tv.handle(.{ .pointer_up = .{ .position = .{ .x = 40, .y = 79 } } }));
+    try std.testing.expect(!tv.bar_held and !tv.over_bar);
+    try std.testing.expect(sent.len == 0);
+}
+
+test "a touchpad's momentum does not turn its scroll into a zoom" {
+    var state: u8 = 0;
+    var storage: view.Storage(4, 64) = .{};
+    var host = view.Host.init(&state, Empty.build, storage.buffers(), .{});
+    var terminal = try term.Terminal.init(std.testing.allocator, .{ .screen = .{ .cols = 10, .rows = 2, .scrollback = 100 } });
+    defer terminal.deinit();
+    var sent: Sent = .{};
+    var board: Board = .{};
+    var tv = testView(&host, &terminal, &sent, &board, .{ .font = .{ .size = 12 } });
+    defer tv.deinit();
+    tv.bind();
+    for (0..20) |_| tv.feed("line\r\n");
+    try std.testing.expect(tv.handle(.{ .wheel = .{ .position = .{ .x = 5, .y = 5 }, .delta = .{ .x = 0, .y = -48 }, .precise = true } }));
+    try std.testing.expectEqual(@as(usize, 3), terminal.screen.viewportOffset());
+    // Control comes down while the momentum runs: it still scrolls.
+    _ = tv.handle(.{ .key_input = .{ .key = .control, .modifiers = .{ .control = true } } });
+    try std.testing.expect(tv.handle(.{ .wheel = .{ .position = .{ .x = 5, .y = 5 }, .delta = .{ .x = 0, .y = -48 }, .precise = true, .momentum = true } }));
+    try std.testing.expectEqual(@as(usize, 6), terminal.screen.viewportOffset());
+    try std.testing.expectEqual(@as(f32, 12), tv.fontSize());
+    // A new gesture with Control held zooms.
+    try std.testing.expect(tv.handle(.{ .wheel = .{ .position = .{ .x = 5, .y = 5 }, .delta = .{ .x = 0, .y = -48 }, .precise = true } }));
+    try std.testing.expectEqual(@as(f32, 13), tv.fontSize());
 }

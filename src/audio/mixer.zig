@@ -83,6 +83,18 @@ pub const Outcome = enum {
     faded,
 };
 
+/// The voice at output frame `out`: at frame `at` of its source, counted on
+/// past its loop's end. Between two marks the voice moved evenly, or stood
+/// still where both are at the same frame.
+pub const Mark = struct {
+    out: i64,
+    at: f64,
+};
+
+/// Marks a voice keeps: a mix call adds at most two, and the output holds
+/// about 25 of its periods at the playback latency.
+const max_marks = 128;
+
 pub const Voice = struct {
     source: Source,
     /// The source's frames per second.
@@ -116,6 +128,11 @@ pub const Voice = struct {
     phase: f64 = 0,
     /// The frame after the last, once the source ended, or -1.
     end: i64 = -1,
+
+    /// Where the voice was in its source as the output mixed its frames,
+    /// oldest first, for `heardAt` to say where it is heard.
+    marks: [max_marks]Mark = undefined,
+    mark_count: usize = 0,
 
     /// Frames read from the source and not yet used.
     input: [256 * 2]f32 = undefined,
@@ -160,25 +177,65 @@ pub const Voice = struct {
         self.end = -1;
         self.input_position = 0;
         self.input_len = 0;
+        // What it mixed before is not where it is any more, even while heard.
+        self.mark_count = 0;
     }
 
     pub fn ended(self: *const Voice) bool {
         return self.end >= 0 and self.index >= self.end;
     }
 
-    /// The source frame the voice is at.
-    pub fn position(self: *const Voice) f64 {
-        var at = @max(@as(f64, @floatFromInt(self.index)) + self.phase, 0);
+    /// The source frame the voice mixes next, counted on past its loop's
+    /// end.
+    pub fn at(self: *const Voice) f64 {
+        return @as(f64, @floatFromInt(self.index)) + self.phase;
+    }
+
+    /// Notes that the output mixes frame `out` with the voice where it is,
+    /// and forgets the marks before the frame heard.
+    fn mark(self: *Voice, out: i64, heard: i64) void {
+        const new = Mark{ .out = out, .at = self.at() };
+        const marks = self.marks[0..self.mark_count];
+        if (marks.len > 0 and std.meta.eql(marks[marks.len - 1], new)) return;
+        var first: usize = 0;
+        while (first + 1 < marks.len and marks[first + 1].out <= heard) first += 1;
+        // Full, as when mixed in many small pieces: the oldest goes.
+        if (marks.len - first == max_marks) first += 1;
+        std.mem.copyForwards(Mark, self.marks[0 .. marks.len - first], marks[first..]);
+        self.mark_count = marks.len - first;
+        self.marks[self.mark_count] = new;
+        self.mark_count += 1;
+    }
+
+    /// The source frame the voice was at when the output mixed frame
+    /// `heard`, counted on past its loop's end. Until the output plays what
+    /// it mixed since a seek, that is where it seeked to.
+    pub fn heardAt(self: *const Voice, heard: i64) f64 {
+        const marks = self.marks[0..self.mark_count];
+        for (marks, 0..) |later, index| {
+            if (later.out <= heard) continue;
+            if (index == 0) return later.at;
+            const earlier = marks[index - 1];
+            const through = @as(f64, @floatFromInt(heard - earlier.out)) / @as(f64, @floatFromInt(later.out - earlier.out));
+            return earlier.at + (later.at - earlier.at) * through;
+        }
+        return self.at();
+    }
+
+    /// Source frame `frame`, counted on past the loop's end, as a frame of
+    /// the source.
+    pub fn position(self: *const Voice, frame: f64) f64 {
+        var at_frame = @max(frame, 0);
         if (self.length == 0) return 0;
         if (self.loop) {
             var end: f64 = @floatFromInt(self.loop_end);
             if (end <= 0) end = @floatFromInt(self.length);
             const start: f64 = @floatFromInt(self.loop_start);
-            if (end > start and at >= end) at = start + @mod(at - start, end - start);
-            return at;
+            if (end > start and at_frame >= end) at_frame = start + @mod(at_frame - start, end - start);
+            return at_frame;
         }
-        if (self.length > 0) at = @min(at, @as(f64, @floatFromInt(self.length)));
-        return at;
+        if (self.length > 0) at_frame = @min(at_frame, @as(f64, @floatFromInt(self.length)));
+        return at_frame;
     }
 
     fn channelCount(self: *const Voice) usize {
@@ -258,32 +315,43 @@ pub const Voice = struct {
         self.ramp_left = ramp_frames;
     }
 
-    /// Adds the voice's next frames to `out`, interleaved stereo.
-    pub fn mix(self: *Voice, out: []f32, master: f64) Outcome {
+    /// Adds the voice's next frames to `out`, interleaved stereo, which the
+    /// output mixes from its frame `out_at`; the output's frame `heard` is
+    /// heard now.
+    pub fn mix(self: *Voice, out: []f32, master: f64, out_at: i64, heard: i64) Outcome {
+        self.mark(out_at, heard);
+        const played = self.play(out, master);
+        self.mark(out_at + @as(i64, @intCast(played.frames)), heard);
+        return played.outcome;
+    }
+
+    /// Adds the voice's next frames to `out`, and says for how many output
+    /// frames it moved through its source.
+    fn play(self: *Voice, out: []f32, master: f64) struct { outcome: Outcome, frames: usize } {
         self.retarget(self.gains(master));
         const step = self.rate / output.sample_rate * self.speed;
         var index: usize = 0;
         while (index < out.len) : (index += 2) {
             while (self.phase >= 1) {
                 // The stream is late: silence until it catches up.
-                if (!self.next()) return .playing;
+                if (!self.next()) return .{ .outcome = .playing, .frames = index / 2 };
                 self.phase -= 1;
             }
             if (self.ended()) {
                 self.playing = false;
-                return .ended;
+                return .{ .outcome = .ended, .frames = index / 2 };
             }
             if (self.ramp_left > 0) {
                 for (&self.gain, self.step) |*gain, step_by| gain.* += step_by;
                 self.ramp_left -= 1;
                 if (self.ramp_left == 0) self.gain = self.target;
-            } else if (!self.playing) return .faded;
+            } else if (!self.playing) return .{ .outcome = .faded, .frames = index / 2 };
             const left, const right = self.sample();
             out[index] += left * self.gain[0] + right * self.gain[2];
             out[index + 1] += left * self.gain[1] + right * self.gain[3];
             self.phase += step;
         }
-        return .playing;
+        return .{ .outcome = .playing, .frames = out.len / 2 };
     }
 
     /// Interpolates between the second and third frames with a

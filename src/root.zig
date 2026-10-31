@@ -230,7 +230,10 @@ pub const Event = union(enum) {
     pointer_down: PointerButtonInput,
     pointer_up: PointerButtonInput,
     pointer_move: Point,
-    wheel: struct { position: Point, delta: Point },
+    /// `delta` in DIPs, 48 a notch of a mouse wheel. `precise` marks a
+    /// device that scrolls by distance, as a touchpad does, and `momentum`
+    /// scrolling that goes on after the fingers left it.
+    wheel: struct { position: Point, delta: Point, precise: bool = false, momentum: bool = false },
     focus: bool,
     /// Text slices are borrowed for the duration of the content callback.
     text_input: TextInput,
@@ -441,6 +444,9 @@ pub const WindowOptions = struct {
     /// unless left at its default.
     opacity: f32 = 1,
     skip_taskbar: bool = false,
+    /// False shows the window without taking the keyboard from the window
+    /// that has it, as a prompt raised by background work should.
+    focus_on_show: bool = true,
     /// Reserved client edge in DIP for .custom; .borderless has no auto edges.
     resize_border: f32 = 6,
     /// Borrowed context remains valid through on_closed, like close handlers.

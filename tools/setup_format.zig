@@ -19,7 +19,45 @@ pub const Config = struct {
     categories: []const u8 = "Utility;",
     /// Optional PNG file in the package used as the Linux menu icon.
     icon: ?[]const u8 = null,
+    /// The Windows install folder's name instead of the identity, as
+    /// `%LOCALAPPDATA%\Programs\<name>`; see `validInstallDirName`.
+    install_dir_name: ?[]const u8 = null,
+    hooks: Hooks = .{},
 };
+
+/// Commands of the app's own that the setup program runs, with the shell
+/// (a batch file's line on Windows, `/bin/sh -c` elsewhere), in silent
+/// installs too. They see ZIGGURAT_INSTALL_DIR, ZIGGURAT_SCOPE (user or
+/// machine), ZIGGURAT_VERSION and ZIGGURAT_SILENT (1 or 0); `install` and
+/// `uninstall` also ZIGGURAT_APP, the launcher.
+pub const Hooks = struct {
+    /// Before anything is written; failing stops the install.
+    init: ?[]const u8 = null,
+    /// Once the app is installed and integrated.
+    install: ?[]const u8 = null,
+    /// Before the uninstaller removes the app's folder; failing does not
+    /// stop it.
+    uninstall: ?[]const u8 = null,
+};
+
+/// One folder's name: not empty, ".", "..", a path, a name with :*?"<>|
+/// or control characters, one ending with a dot or a space, or a device's
+/// name such as CON or COM1.
+pub fn validInstallDirName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 128 or !std.unicode.utf8ValidateSlice(name)) return false;
+    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return false;
+    if (name[name.len - 1] == '.' or name[name.len - 1] == ' ' or name[0] == ' ') return false;
+    for (name) |byte| if (byte < 0x20 or std.mem.indexOfScalar(u8, "/\\:*?\"<>|", byte) != null) return false;
+    const stem = name[0 .. std.mem.indexOfScalar(u8, name, '.') orelse name.len];
+    for ([_][]const u8{ "CON", "PRN", "AUX", "NUL" }) |device| if (std.ascii.eqlIgnoreCase(stem, device)) return false;
+    if (stem.len == 4 and (std.ascii.startsWithIgnoreCase(stem, "COM") or std.ascii.startsWithIgnoreCase(stem, "LPT")) and stem[3] >= '0' and stem[3] <= '9') return false;
+    return true;
+}
+
+test "install folder names are one plain folder" {
+    for ([_][]const u8{ "ZhiLian", "My App", "智链", "app.v2" }) |name| try std.testing.expect(validInstallDirName(name));
+    for ([_][]const u8{ "", ".", "..", "a/b", "a\\b", "C:", "what?", "end.", "end ", " start", "con", "Com1", "nul.txt", "tab\tname" }) |name| try std.testing.expect(!validInstallDirName(name));
+}
 
 pub const Located = struct {
     stub_bytes: u64,
