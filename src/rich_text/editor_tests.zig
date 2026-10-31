@@ -602,3 +602,69 @@ test "font families of runs come from the first family of a CSS list" {
     ed.applyFamily(&font, "sans-serif");
     try testing.expectEqual(@as(u8, 0), font.family);
 }
+
+test "each ideograph and kana is a word to the word keys" {
+    var doc = try Document.initString(gpa, "中文abc かな def");
+    defer doc.deinit();
+    var e = try tester(&doc, .{});
+    defer e.deinit();
+    try select(&e, &doc, 0, 0);
+    ctrl(&e, .right);
+    try testing.expectEqual(@as(u32, 1), doc.caret);
+    ctrl(&e, .right);
+    try testing.expectEqual(@as(u32, 2), doc.caret);
+    ctrl(&e, .right);
+    try testing.expectEqual(@as(u32, 5), doc.caret);
+    ctrl(&e, .right);
+    try testing.expectEqual(@as(u32, 7), doc.caret);
+    ctrl(&e, .left);
+    try testing.expectEqual(@as(u32, 6), doc.caret);
+    // Back to the start of "abc", over the space.
+    ctrl(&e, .backspace);
+    try expectString(&doc, "中文かな def");
+    try testing.expectEqual(@as(u32, 2), doc.caret);
+    ctrl(&e, .left);
+    try testing.expectEqual(@as(u32, 1), doc.caret);
+}
+
+test "body paragraphs indent their first lines and take room between them" {
+    var doc = Document.init(gpa, try Text.of(gpa, &.{
+        .{ .runs = &.{.{ .text = "one" }} },
+        .{ .runs = &.{.{ .text = "two" }} },
+        .{ .style = .{ .heading = 2 }, .runs = &.{.{ .text = "Heading" }} },
+        .{ .runs = &.{.{ .text = "three" }} },
+        .{},
+        .{ .runs = &.{.{ .text = "four" }} },
+        .{ .style = .{ .@"align" = .center }, .runs = &.{.{ .text = "* * *" }} },
+        .{ .runs = &.{.{ .text = "five" }} },
+        .{ .runs = &.{.{ .text = "six" }} },
+    }));
+    defer doc.deinit();
+    var e = try tester(&doc, .{ .theme = .{ .first_line_indent = 2, .paragraph_spacing = 1 } });
+    defer e.deinit();
+    const starts = [_]u32{ 0, 4, 8, 16, 22, 23, 28, 34, 39 };
+    var xs: [starts.len]f32 = undefined;
+    for (starts, &xs) |at, *x| {
+        try select(&e, &doc, at, at);
+        x.* = e.caret_rect.?.x;
+    }
+    // 2 ems of 14 DIP, after another body paragraph only.
+    try testing.expectEqual(xs[0] + 28, xs[1]);
+    for ([_]usize{ 3, 5, 7 }) |k| try testing.expectEqual(xs[0], xs[k]);
+    try testing.expectEqual(xs[0] + 28, xs[8]);
+    // Home and a click at the line's left go to the paragraph's start.
+    try select(&e, &doc, 6, 6);
+    press(&e, .home);
+    try testing.expectEqual(@as(u32, 4), doc.caret);
+
+    // The boxes of the paragraphs in view leave the room between them out.
+    const boxes = try e.visibleParagraphs();
+    try testing.expect(boxes.len >= 4);
+    try testing.expectEqual(@as(usize, 0), boxes[0].index);
+    try testing.expectEqual(@as(u32, 4), boxes[1].start);
+    try testing.expectEqual(boxes[0].top + boxes[0].height + 14, boxes[1].top);
+    // A body paragraph after a heading takes no spacing; the heading its
+    // own room.
+    try testing.expect(boxes[3].top > boxes[2].top + boxes[2].height);
+    try testing.expectEqual(e.pad_y, boxes[0].top);
+}

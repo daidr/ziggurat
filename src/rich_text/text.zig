@@ -163,6 +163,16 @@ pub const ParagraphStyle = struct {
     @"align": Align = .start,
     quote: bool = false,
     code_block: bool = false,
+    /// The application's name for the paragraph, the key of what it keeps
+    /// about it, which the editor does not show. It stays with the
+    /// paragraph's text as it is edited (see `Text.replace`): a paragraph
+    /// split keeps it in its first half (the second when split at its
+    /// start), paragraphs joined keep the first's, and the paragraphs an
+    /// edit makes have none, unless the document names them
+    /// (`Document.identifyParagraphs`). Undo brings it back with the text,
+    /// saved JSON keeps it, and the clipboard, Markdown, HTML and RTF leave
+    /// it out. Interned in the paragraph's text.
+    id: []const u8 = "",
 
     /// The style with its levels in range.
     pub fn normalized(self: ParagraphStyle) ParagraphStyle {
@@ -173,7 +183,19 @@ pub const ParagraphStyle = struct {
         return s;
     }
     pub fn eql(a: ParagraphStyle, b: ParagraphStyle) bool {
-        return std.meta.eql(a, b);
+        return a.looksLike(b) and std.mem.eql(u8, a.id, b.id);
+    }
+    /// Whether the styles look the same, whatever their IDs.
+    pub fn looksLike(a: ParagraphStyle, b: ParagraphStyle) bool {
+        var x = a;
+        x.id = b.id;
+        return std.meta.eql(x, b);
+    }
+    /// The style without its ID.
+    pub fn anonymous(self: ParagraphStyle) ParagraphStyle {
+        var s = self;
+        s.id = "";
+        return s;
     }
 };
 
@@ -184,7 +206,8 @@ pub const Run = struct {
 };
 
 /// A paragraph to build a Text of: its style and its runs, without its
-/// newline. A newline in a run starts another paragraph of the same style.
+/// newline. A newline in a run starts another paragraph of the same style,
+/// without its ID.
 pub const Paragraph = struct {
     style: ParagraphStyle = .{},
     runs: []const Run = &.{},
@@ -417,7 +440,7 @@ pub const Text = struct {
     }
 
     /// A text of paragraphs; a newline in a run starts another paragraph
-    /// of the same style.
+    /// of the same style, without its ID.
     pub fn of(allocator: Allocator, paragraphs: []const Paragraph) !Text {
         var t: Text = .{ .allocator = allocator };
         errdefer t.deinit();
@@ -426,7 +449,7 @@ pub const Text = struct {
             return init(allocator);
         }
         for (paragraphs) |p| {
-            var cur = t.newPara(p.style);
+            var cur = t.newPara(try t.internStyle(p.style));
             errdefer cur.deinit(allocator);
             var last: Attributes = .{};
             for (p.runs) |r| {
@@ -442,7 +465,7 @@ pub const Text = struct {
                     try appendRun(allocator, &cur.runs, .{ .n = 1, .a = a.extending() });
                     cur.n = runeCount(cur.bytes.items);
                     try t.paras.append(allocator, cur);
-                    cur = t.newPara(p.style);
+                    cur = t.newPara(p.style.anonymous());
                     rest = rest[nl.? + 1 ..];
                 }
             }
@@ -468,7 +491,7 @@ pub const Text = struct {
         errdefer out.deinit();
         try out.paras.ensureTotalCapacity(allocator, self.paras.items.len);
         for (self.paras.items) |*q| {
-            var np: Para = .{ .id = q.id, .revision = q.revision, .style = q.style, .n = q.n };
+            var np: Para = .{ .id = q.id, .revision = q.revision, .style = try out.internStyle(q.style), .n = q.n };
             errdefer np.deinit(allocator);
             try np.bytes.appendSlice(allocator, q.bytes.items);
             try np.runs.ensureTotalCapacity(allocator, q.runs.items.len);
@@ -477,6 +500,13 @@ pub const Text = struct {
         }
         out.index();
         return out;
+    }
+
+    /// `style` with its ID interned here.
+    fn internStyle(self: *Text, style: ParagraphStyle) !ParagraphStyle {
+        var s = style;
+        if (s.id.len > 0) s.id = try self.pool.intern(self.allocator, s.id);
+        return s;
     }
 
     fn newPara(self: *Text, style: ParagraphStyle) Para {
@@ -692,7 +722,7 @@ pub const Text = struct {
             const from = if (p == pa) a - sa else 0;
             const last = p == pz;
             const to = if (last) z - sz else q.n + 1;
-            var np = out.newPara(q.style);
+            var np = out.newPara(try out.internStyle(q.style));
             np.id = q.id;
             errdefer np.deinit(allocator);
             var cut: std.ArrayList(AttrRun) = .empty;
@@ -744,6 +774,13 @@ pub const Text = struct {
     /// or split take the style of the one their first rune comes from:
     /// deleting the newline after a heading keeps the heading, and text put
     /// at the start of a paragraph brings its own paragraph's style.
+    ///
+    /// The IDs of paragraphs follow their text instead, and never come
+    /// from `with`, so that no two paragraphs get one ID: a paragraph split
+    /// keeps its ID in the first half, or in the second when split at its
+    /// start, as Enter there moves the paragraph down; the new paragraphs
+    /// have none; and paragraphs joined keep the first's, unless nothing of
+    /// it is left.
     pub fn replace(self: *Text, start: u32, end: u32, with: *const Text) !void {
         const allocator = self.allocator;
         const n = self.len();
@@ -775,7 +812,9 @@ pub const Text = struct {
         const frags = with.paras.items;
         if (frags.len == 1) {
             const f = &frags[0];
-            var np = self.newPara(if (head_n > 0) first.style else if (f.n > 0) f.style else last.style);
+            var style = if (head_n > 0) first.style else if (f.n > 0) f.style else last.style;
+            style.id = if (head_n > 0 or f.n > 0) first.style.id else last.style.id;
+            var np = self.newPara(style);
             np.id = first.id;
             errdefer np.deinit(allocator);
             try self.appendCut(&np.runs, head.items, 0, head_n, null);
@@ -788,7 +827,12 @@ pub const Text = struct {
             try out.append(allocator, np);
         } else {
             const f0 = &frags[0];
-            var np = self.newPara(if (head_n > 0) first.style else f0.style);
+            // Split at its start, the paragraph's text goes to the last
+            // part, with its ID.
+            const moved = pa == pz and head_n == 0;
+            var style = if (head_n > 0) first.style else f0.style;
+            style.id = if (moved) "" else first.style.id;
+            var np = self.newPara(style);
             np.id = first.id;
             {
                 errdefer np.deinit(allocator);
@@ -800,7 +844,7 @@ pub const Text = struct {
                 try out.append(allocator, np);
             }
             for (frags[1 .. frags.len - 1]) |*f| {
-                var mid = self.newPara(f.style);
+                var mid = self.newPara(f.style.anonymous());
                 errdefer mid.deinit(allocator);
                 try self.appendCut(&mid.runs, f.runs.items, 0, f.n + 1, with);
                 try mid.bytes.appendSlice(allocator, f.bytes.items);
@@ -808,7 +852,9 @@ pub const Text = struct {
                 try out.append(allocator, mid);
             }
             const fl = &frags[frags.len - 1];
-            var lp = self.newPara(if (fl.n > 0) fl.style else last.style);
+            var last_style = if (fl.n > 0) fl.style else last.style;
+            last_style.id = if (pz != pa) last.style.id else if (moved) first.style.id else "";
+            var lp = self.newPara(last_style);
             if (pz != pa) lp.id = last.id;
             errdefer lp.deinit(allocator);
             try self.appendCut(&lp.runs, fl.runs.items, 0, fl.n, with);
@@ -938,8 +984,9 @@ pub const Text = struct {
 
     /// Changes the styles of the paragraphs from the one holding start to
     /// the one holding end, but for a paragraph end only starts, with
-    /// `changer.change(*ParagraphStyle)`. Returns whether any changed.
-    pub fn formatParagraphs(self: *Text, start: u32, end: u32, changer: anytype) bool {
+    /// `changer.change(*ParagraphStyle)`; an ID it gives is interned. Returns
+    /// whether any changed.
+    pub fn formatParagraphs(self: *Text, start: u32, end: u32, changer: anytype) !bool {
         const span = self.paragraphSpan(start, end);
         var changed = false;
         var p = span.first;
@@ -948,6 +995,7 @@ pub const Text = struct {
             var s = q.style;
             changer.change(&s);
             s = s.normalized();
+            if (s.id.ptr != q.style.id.ptr) s = try self.internStyle(s);
             if (!s.eql(q.style)) {
                 q.style = s;
                 q.revision = self.revise();

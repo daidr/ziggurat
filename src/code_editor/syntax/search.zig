@@ -15,12 +15,13 @@ pub fn classOf(c: u21, extra: []const u8) Class {
     return .punctuation;
 }
 
-fn scalarAt(text: []const u8, at: usize) struct { c: u21, size: usize } {
+const Scalar = struct { c: u21, size: usize };
+fn scalarAt(text: []const u8, at: usize) Scalar {
     const size = @min(lex.sequenceLength(text[at]), text.len - at);
     const c = std.unicode.utf8Decode(text[at .. at + size]) catch return .{ .c = 0xfffd, .size = 1 };
     return .{ .c = c, .size = size };
 }
-fn scalarBefore(text: []const u8, at: usize) struct { c: u21, size: usize } {
+fn scalarBefore(text: []const u8, at: usize) Scalar {
     var start = at - 1;
     while (start > 0 and at - start < 4 and text[start] & 0xc0 == 0x80) start -= 1;
     const value = scalarAt(text, start);
@@ -28,27 +29,51 @@ fn scalarBefore(text: []const u8, at: usize) struct { c: u21, size: usize } {
     return .{ .c = value.c, .size = at - start };
 }
 
+/// Whether `c` is a word on its own: a Han ideograph (with the iteration
+/// marks 々 and 〇), a Hiragana or a Katakana (with the prolonged sound
+/// mark ー). Chinese and Japanese are written without spaces, and only a
+/// dictionary finds their words; a character at a time is what platforms
+/// do without one.
+pub fn standsAlone(c: u21) bool {
+    return switch (c) {
+        0x2e80...0x2fdf, 0x3005, 0x3007, 0x3021...0x3029, 0x3038...0x303b, 0x3400...0x4dbf, 0x4e00...0x9fff, 0xf900...0xfaff, 0x20000...0x3fffd => true,
+        0x3041...0x3096, 0x309d...0x309f, 0x30a1...0x30fa, 0x30fc...0x30ff, 0x31f0...0x31ff, 0xff66...0xff9d, 0x1b000...0x1b16f => true,
+        else => false,
+    };
+}
+
 /// The run of one class around `at` in a line: the class of the scalar at
-/// it, or of the one before it at the end of a word.
+/// it, or of the one before it at the end of a word. Each ideograph and
+/// kana is a word alone.
 pub fn wordAt(line: []const u8, at_input: usize, extra: []const u8) struct { start: usize, end: usize } {
     const at = @min(at_input, line.len);
     var class: Class = undefined;
+    // The word holding `at` starts at it, or ends there.
+    var from_before = false;
     if (at < line.len) {
         class = classOf(scalarAt(line, at).c, extra);
-        if (class != .word and at > 0 and classOf(scalarBefore(line, at).c, extra) == .word) class = .word;
+        if (class != .word and at > 0 and classOf(scalarBefore(line, at).c, extra) == .word) {
+            class = .word;
+            from_before = true;
+        }
     } else if (at > 0) {
         class = classOf(scalarBefore(line, at).c, extra);
+        from_before = true;
     } else return .{ .start = at, .end = at };
+    if (class == .word) {
+        const c = if (from_before) scalarBefore(line, at) else scalarAt(line, at);
+        if (standsAlone(c.c)) return if (from_before) .{ .start = at - c.size, .end = at } else .{ .start = at, .end = at + c.size };
+    }
     var start = at;
     while (start > 0) {
         const previous = scalarBefore(line, start);
-        if (classOf(previous.c, extra) != class) break;
+        if (classOf(previous.c, extra) != class or (class == .word and standsAlone(previous.c))) break;
         start -= previous.size;
     }
     var end = at;
     while (end < line.len) {
         const next = scalarAt(line, end);
-        if (classOf(next.c, extra) != class) break;
+        if (classOf(next.c, extra) != class or (class == .word and standsAlone(next.c))) break;
         end += next.size;
     }
     return .{ .start = start, .end = end };
@@ -126,4 +151,20 @@ test "words and whole-word searches wrap and filter" {
     try std.testing.expect(isWholeWord("a-b", 0, 1, ""));
     try std.testing.expect(!isWholeWord("a-b", 0, 1, "-"));
     try std.testing.expectEqual(Class.space, classOf(0x3000, ""));
+}
+
+test "each ideograph and kana is a word of its own" {
+    // "日本語text", 3 bytes an ideograph.
+    const line = "日本語text";
+    try std.testing.expectEqual(@as(usize, 3), wordAt(line, 3, "").start);
+    try std.testing.expectEqual(@as(usize, 6), wordAt(line, 3, "").end);
+    // At the end of an ideograph before a space, that ideograph.
+    try std.testing.expectEqual(@as(usize, 6), wordAt("日本語 x", 9, "").start);
+    try std.testing.expectEqual(@as(usize, 9), wordAt("日本語 x", 9, "").end);
+    // Latin after Han is a word of its own.
+    try std.testing.expectEqual(@as(usize, 9), wordAt(line, 9, "").start);
+    try std.testing.expectEqual(@as(usize, 9), wordAt(line, 10, "").start);
+    try std.testing.expectEqual(@as(usize, 13), wordAt(line, 10, "").end);
+    // Hangul keeps its runs.
+    try std.testing.expectEqual(@as(usize, 6), wordAt("한국 말", 3, "").end);
 }

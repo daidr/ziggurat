@@ -145,6 +145,16 @@ pub fn typingAttributesOf(t: *const Text, start: u32, end: u32) Attributes {
     return a;
 }
 
+/// Gives the application's name to a paragraph that has none: `name`
+/// writes it into the buffer, or elsewhere that stays valid until it
+/// returns, and returns it; the document keeps a copy. It must not call
+/// the document.
+pub const Namer = struct {
+    pub const max = 128;
+    context: ?*anyopaque = null,
+    name: *const fn (context: ?*anyopaque, buffer: *[max]u8) []const u8,
+};
+
 pub const Document = struct {
     allocator: Allocator,
     text: Text,
@@ -165,6 +175,8 @@ pub const Document = struct {
     coalesce: bool = false,
     /// Milliseconds now, for the coalescing of typing.
     clock: *const fn () i64 = zio.milliTimestamp,
+    /// Names the paragraphs edits make (`identifyParagraphs`).
+    namer: ?Namer = null,
 
     /// A document of `text`, which it takes, its caret at the end.
     pub fn init(allocator: Allocator, text: Text) Document {
@@ -195,6 +207,8 @@ pub const Document = struct {
     pub fn setText(self: *Document, text: Text) void {
         self.text.deinit();
         self.text = text;
+        // Out of memory leaves paragraphs unnamed, as an edit names them.
+        _ = self.identify(0, self.text.paragraphCount() - 1) catch false;
         self.clearHistory();
         self.coalesce = false;
         self.version += 1;
@@ -413,6 +427,41 @@ pub const Document = struct {
         self.setSelectionRaw(sel.anchor, sel.caret);
     }
 
+    /// Has `namer` give an ID (`ParagraphStyle.id`) to each paragraph
+    /// without one: those of the text now and of `setText`, and those edits
+    /// make, as a paragraph split or text pasted, in the step of undo that
+    /// makes them, so that undo and redo bring them back with their IDs and
+    /// the application finds every paragraph by its ID when it saves:
+    ///
+    ///     doc.identifyParagraphs(.{ .context = &store, .name = Store.newId });
+    ///
+    /// Call it before the document is edited: the steps of undo before it
+    /// keep their texts. null stops naming paragraphs.
+    pub fn identifyParagraphs(self: *Document, namer: ?Namer) !void {
+        self.namer = namer;
+        if (try self.identify(0, self.text.paragraphCount() - 1)) self.version += 1;
+    }
+
+    /// Names the paragraphs from first to last without an ID, when the
+    /// document names paragraphs; true when it named any.
+    fn identify(self: *Document, first: u32, last: u32) !bool {
+        const namer = self.namer orelse return false;
+        var named = false;
+        var p = first;
+        while (p <= last) : (p += 1) {
+            const q = &self.text.paras.items[p];
+            if (q.style.id.len > 0) continue;
+            var buffer: [Namer.max]u8 = undefined;
+            const id = namer.name(namer.context, &buffer);
+            if (id.len == 0) continue;
+            q.style.id = try self.text.internString(id);
+            q.revision = self.text.next_revision;
+            self.text.next_revision += 1;
+            named = true;
+        }
+        return named;
+    }
+
     /// Ends the step typing adds to, as at a save, so that what is typed
     /// next undoes on its own.
     pub fn breakUndoCoalescing(self: *Document) void {
@@ -458,7 +507,8 @@ pub const Document = struct {
         f.paragraph = self.text.para(ps.first).style;
         var p = ps.first + 1;
         while (p <= ps.last) : (p += 1) {
-            if (!self.text.para(p).style.eql(f.paragraph)) f.paragraphs_mixed = true;
+            // Paragraphs of other IDs look the same.
+            if (!self.text.para(p).style.looksLike(f.paragraph)) f.paragraphs_mixed = true;
         }
         return f;
     }
@@ -850,7 +900,7 @@ pub const Edit = struct {
         const s = d.text.replaceSpan(a, z);
         try d.cover(self.step(), s.first, s.last);
         try d.text.replace(a, z, with);
-        self.finishReplace(before, a, z - a, d.text.len() + (z - a) - n);
+        try self.finishReplace(before, a, z - a, d.text.len() + (z - a) - n);
     }
 
     /// Replaces the runes from start to end with `s` in attributes `a`.
@@ -863,16 +913,18 @@ pub const Edit = struct {
         const span = d.text.replaceSpan(lo, hi);
         try d.cover(self.step(), span.first, span.last);
         try d.text.replaceString(lo, hi, s, a);
-        self.finishReplace(before, lo, hi - lo, d.text.len() + (hi - lo) - n);
+        try self.finishReplace(before, lo, hi - lo, d.text.len() + (hi - lo) - n);
     }
 
-    fn finishReplace(self: *Edit, paragraphs_before: u32, start: u32, removed: u32, inserted: u32) void {
+    fn finishReplace(self: *Edit, paragraphs_before: u32, start: u32, removed: u32, inserted: u32) !void {
         const d = self.doc;
         const st = self.step();
         const after = d.text.paragraphCount();
         st.count = @intCast(zio.asUnsigned(@as(i64, st.count) + @as(i64, after) - @as(i64, paragraphs_before)));
         st.changed = true;
         d.replaced(start, removed, inserted);
+        // The paragraphs the replacement made, in the step that covers them.
+        _ = try d.identify(d.text.paraAt(start), d.text.paraAt(start + inserted));
     }
 
     /// Changes the attributes of the runes from start to end with
@@ -897,7 +949,7 @@ pub const Edit = struct {
         const d = self.doc;
         const s = d.text.paragraphSpan(start, end);
         try d.cover(self.step(), s.first, s.last);
-        if (d.text.formatParagraphs(start, end, changer)) {
+        if (try d.text.formatParagraphs(start, end, changer)) {
             self.step().changed = true;
             d.version += 1;
         }
