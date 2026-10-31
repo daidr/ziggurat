@@ -71,6 +71,9 @@ extern fn zlg_window_state(*anyopaque) u32;
 extern fn zlg_window_capabilities(*anyopaque) u32;
 extern fn zlg_window_bounds(*anyopaque, *NativeBounds) void;
 extern fn zlg_window_size(*anyopaque, *u32, *u32, *u32) void;
+extern fn zlg_window_capture(*anyopaque, *c_int, *c_int, *c_int, *c_int, *?[*]const u8) ?*anyopaque;
+extern fn zlg_capture_free(*anyopaque) void;
+extern fn zlg_window_menu_activate(*anyopaque, [*]const [*:0]const u8, c_int) c_int;
 extern fn zlg_window_set_bounds(*anyopaque, *const NativeBounds) c_int;
 extern fn zlg_window_fullscreen(*anyopaque, c_int) c_int;
 extern fn zlg_window_topmost(*anyopaque, c_int) c_int;
@@ -186,6 +189,49 @@ pub fn contentSize(record: *core.WindowRecord) !core.Size {
     var scale: u32 = 1;
     zlg_window_size(record.native.native.?, &width, &height, &scale);
     return .{ .width = width, .height = height, .scale = @floatFromInt(scale) };
+}
+pub fn capture(record: *core.WindowRecord, allocator: std.mem.Allocator) !core.Capture {
+    var width: c_int = 0;
+    var height: c_int = 0;
+    var stride: c_int = 0;
+    var channels: c_int = 0;
+    var source: ?[*]const u8 = null;
+    const image = zlg_window_capture(record.native.native.?, &width, &height, &stride, &channels, &source) orelse return error.CaptureFailed;
+    defer zlg_capture_free(image);
+    if (width <= 0 or height <= 0 or (channels != 3 and channels != 4) or stride < width * channels) return error.CaptureFailed;
+    const w: usize = @intCast(width);
+    const h: usize = @intCast(height);
+    const pixels = try allocator.alloc(u8, w * h * 4);
+    const from = source.?;
+    for (0..h) |row| {
+        const line = from[row * @as(usize, @intCast(stride)) ..];
+        for (0..w) |column| {
+            const at = line[column * @as(usize, @intCast(channels)) ..];
+            const alpha: u32 = if (channels == 4) at[3] else 255;
+            const out = pixels[(row * w + column) * 4 ..][0..4];
+            // RGBA, straight alpha, to premultiplied BGRA.
+            out.* = .{ @intCast(at[2] * alpha / 255), @intCast(at[1] * alpha / 255), @intCast(at[0] * alpha / 255), @intCast(alpha) };
+        }
+    }
+    return .{ .width = @intCast(width), .height = @intCast(height), .pixels = pixels };
+}
+pub fn activateMenuItem(record: *core.WindowRecord, path: []const []const u8) !void {
+    const allocator = record.window.app.allocator;
+    const labels = try allocator.alloc([*:0]const u8, path.len);
+    defer allocator.free(labels);
+    var made: usize = 0;
+    defer for (labels[0..made]) |label| allocator.free(std.mem.span(label));
+    for (path) |label| {
+        labels[made] = try allocator.dupeSentinel(u8, label, 0);
+        made += 1;
+    }
+    return switch (zlg_window_menu_activate(record.native.native.?, labels.ptr, @intCast(labels.len))) {
+        0 => {},
+        1 => error.NoMenu,
+        2 => error.NoMenuItem,
+        3 => error.MenuItemDisabled,
+        else => error.MenuItemIsSubmenu,
+    };
 }
 fn checkUpdate(result: c_int) !void {
     return switch (result) {

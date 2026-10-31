@@ -1,3 +1,4 @@
+const std = @import("std");
 const core = @import("../root.zig");
 pub fn contentSize(_: *core.WindowRecord) !core.Size {
     return error.UnsupportedPlatform;
@@ -89,6 +90,12 @@ pub fn setTextInputMode(_: *core.WindowRecord, _: core.TextInputMode) !core.Text
 }
 pub fn resize(_: *core.WindowRecord, _: u32, _: u32) !void {
     return error.UnsupportedPlatform;
+}
+pub fn capture(_: *core.WindowRecord, _: std.mem.Allocator) !core.Capture {
+    return error.UnsupportedCapability;
+}
+pub fn activateMenuItem(_: *core.WindowRecord, _: []const []const u8) !void {
+    return error.UnsupportedCapability;
 }
 pub fn invalidate(_: *core.WindowRecord) void {}
 pub fn invalidateRect(_: *core.WindowRecord, _: core.Rect) !void {
