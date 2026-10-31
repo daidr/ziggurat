@@ -279,6 +279,24 @@ jobs:
         run: |
           zig build-exe tests/macos_thread_probe.zig -lc -femit-bin="$RUNNER_TEMP/thread-probe"
           perl -e 'alarm 60; exec @ARGV' "$RUNNER_TEMP/thread-probe"
+      - name: Sample the stuck websocket worker (diagnostic)
+        continue-on-error: true
+        run: |
+          zig build test-plugin-websocket -Doptimize=${{ matrix.optimize }} --summary failures > "$RUNNER_TEMP/ws.log" 2>&1 &
+          build=$!
+          for i in $(seq 1 60); do
+            if grep -q 'panic' "$RUNNER_TEMP/ws.log" 2>/dev/null; then break; fi
+            if ! kill -0 $build 2>/dev/null; then break; fi
+            sleep 5
+          done
+          sleep 10
+          cat "$RUNNER_TEMP/ws.log"
+          for pid in $(pgrep -f -- '--listen=-' | grep -v $build); do
+            ps -o pid,command -p $pid | tail -1
+            sample $pid 1 -mayDie 2>&1 | sed -n '1,200p'
+          done
+          pkill -f -- '--listen=-' || true
+          kill $build 2>/dev/null || true
       - name: Compile everything for macOS
         # The unit tests do not pass on macOS yet: cross-thread wakes panic
         # inside std.Io, the watch plugin has no macOS backend and two SVG
