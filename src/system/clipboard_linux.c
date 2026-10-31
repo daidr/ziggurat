@@ -150,6 +150,13 @@ int zsc_board_offer(ZscBoard *board, const ZscItem *items, size_t count) { retur
 void zsc_board_revoke(ZscBoard *board) {
     if (board->current && board->current->lazy) gtk_clipboard_clear(board->clipboard);
 }
+/* Ends this Board's own content, eager or lazy, then gives up the
+ * selection whoever owns it, which X11 lets any client do. */
+void zsc_board_clear(ZscBoard *board) {
+    gtk_clipboard_clear(board->clipboard);
+    GdkDisplay *display = gtk_clipboard_get_display(board->clipboard);
+    if (display) gdk_selection_owner_set_for_display(display, NULL, GDK_SELECTION_CLIPBOARD, GDK_CURRENT_TIME, TRUE);
+}
 /* Eager data keeps serving from its own copy after the Board closes; a lazy
  * offer cannot render without its provider and is cleared. */
 void zsc_board_destroy(ZscBoard *board) {

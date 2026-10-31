@@ -66,6 +66,8 @@ typedef struct NativeWindow {
        focusable one takes the keyboard through a seat grab while it shows. */
     int popup;
     gboolean popup_override, popup_grabbed;
+    /* WindowOptions.transparent with an RGBA visual: frames keep their alpha. */
+    gboolean transparent;
 } NativeWindow;
 enum { ZLG_POPUP=1, ZLG_POPUP_FOCUSABLE=2, ZLG_POPUP_TOPMOST=4 };
 typedef struct NativeBounds { int32_t x,y; uint32_t width,height; int positioned; } NativeBounds;
@@ -225,19 +227,20 @@ static void size_event(NativeWindow *s, NativeEvent *event) {
     event->height=(uint32_t)MAX(0,gtk_widget_get_allocated_height(s->area))*event->scale;
     event->window=s->window;
 }
+int zlg_window_transparent(NativeWindow *s) { return s->transparent; }
 uint32_t zlg_window_capabilities(NativeWindow *s) {
     GdkDisplay *display=gtk_widget_get_display(s->window);
 #ifdef GDK_WINDOWING_X11
     if (GDK_IS_X11_DISPLAY(display)) {
         GdkScreen *screen=gtk_widget_get_screen(s->window);
-        return 1u | 8u | 128u | 256u | 512u | 1024u | (gdk_screen_is_composited(screen)?64u:0u) | (gdk_x11_screen_supports_net_wm_hint(screen,gdk_atom_intern_static_string("_NET_WM_STATE_FULLSCREEN"))?2u:0u) |
+        return 1u | 8u | 128u | 256u | 512u | 1024u | (s->transparent?2048u:0u) | (gdk_screen_is_composited(screen)?64u:0u) | (gdk_x11_screen_supports_net_wm_hint(screen,gdk_atom_intern_static_string("_NET_WM_STATE_FULLSCREEN"))?2u:0u) |
             (gdk_x11_screen_supports_net_wm_hint(screen,gdk_atom_intern_static_string("_NET_WM_STATE_ABOVE"))?4u:0u) |
             (gdk_x11_screen_supports_net_wm_hint(screen,gdk_atom_intern_static_string("_NET_WM_MOVERESIZE"))?16u:0u) |
             (gdk_x11_screen_supports_net_wm_hint(screen,gdk_atom_intern_static_string("_GTK_SHOW_WINDOW_MENU"))?32u:0u);
     }
 #endif
 #ifdef GDK_WINDOWING_WAYLAND
-    if (GDK_IS_WAYLAND_DISPLAY(display)) return 2u | 64u | 128u | 256u;
+    if (GDK_IS_WAYLAND_DISPLAY(display)) return 2u | 64u | 128u | 256u | (s->transparent?2048u:0u);
 #endif
     return 0;
 }
@@ -597,7 +600,15 @@ static gboolean button(GtkWidget *widget, GdkEventButton *native, gpointer data)
         if (native_button==3 && down && (hit==1 || hit==2)) {
             handled=start_interaction(s,native,8,FALSE)==0;
             if (handled) disposition=ZLG_POINTER_CONSUMED;
+            goto done;
         }
+        /* Other buttons over the content reach the window with no grab or
+         * focus change, as a context menu or history button needs. */
+        if (ticket.button==ZLG_POINTER_UNKNOWN || !pointer_allowed(s,ticket.operation)) goto done;
+        NativeEvent other={0}; other.kind=down?3:4; other.key=(int)ticket.button; other.x=x; other.y=y; other.flags=(int)ticket.modifiers;
+        other.context=s->pointer_enabled?&ticket:NULL;
+        emit(s,&other);
+        if (!pointer_allowed(s,ticket.operation)) disposition=ZLG_POINTER_DENIED;
         goto done;
     }
     if (down && hit>0 && start_interaction(s,native,hit==1?-1:hit==2?8:hit-3,FALSE)==0) {
@@ -831,7 +842,7 @@ static gboolean key(GtkWidget *widget, GdkEventKey *native, gpointer data) {
     }
     release(s); return handled;
 }
-NativeWindow *zlg_window_create_popup(void *owner, Emit callback, const char *title, uint32_t width, uint32_t height, uint32_t min_width, uint32_t min_height, NativeWindow *parent, int modal, int decoration, int resizable, int text_mode, int accessibility_host, int pointer_enabled, int popup, int *error) {
+NativeWindow *zlg_window_create_transparent(void *owner, Emit callback, const char *title, uint32_t width, uint32_t height, uint32_t min_width, uint32_t min_height, NativeWindow *parent, int modal, int decoration, int resizable, int text_mode, int accessibility_host, int pointer_enabled, int popup, int transparent, int *error) {
     *error=0;
     if (decoration) {
 #ifdef GDK_WINDOWING_X11
@@ -857,6 +868,13 @@ NativeWindow *zlg_window_create_popup(void *owner, Emit callback, const char *ti
         gtk_window_set_focus_on_map(window,(popup&ZLG_POPUP_FOCUSABLE)!=0);
         if (popup&ZLG_POPUP_TOPMOST) gtk_window_set_keep_above(window,TRUE);
         resizable=TRUE; /* its size is the one asked for, smaller than natural too */
+    }
+    if (transparent) {
+        /* What the frames leave transparent shows what is behind the window,
+           where a compositor blends it; the window paints no background. */
+        GdkVisual *visual=gdk_screen_get_rgba_visual(gtk_widget_get_screen(s->window));
+        if (visual) { gtk_widget_set_visual(s->window,visual); s->transparent=TRUE; }
+        gtk_widget_set_app_paintable(s->window,TRUE);
     }
     gtk_window_set_decorated(GTK_WINDOW(s->window),decoration==0);
     gtk_window_set_resizable(GTK_WINDOW(s->window),resizable);
@@ -908,6 +926,9 @@ NativeWindow *zlg_window_create_popup(void *owner, Emit callback, const char *ti
     }
     connect_im(s,s->im);
     return s;
+}
+NativeWindow *zlg_window_create_popup(void *owner, Emit callback, const char *title, uint32_t width, uint32_t height, uint32_t min_width, uint32_t min_height, NativeWindow *parent, int modal, int decoration, int resizable, int text_mode, int accessibility_host, int pointer_enabled, int popup, int *error) {
+    return zlg_window_create_transparent(owner,callback,title,width,height,min_width,min_height,parent,modal,decoration,resizable,text_mode,accessibility_host,pointer_enabled,popup,0,error);
 }
 NativeWindow *zlg_window_create_mode_host_pointer(void *owner, Emit callback, const char *title, uint32_t width, uint32_t height, uint32_t min_width, uint32_t min_height, NativeWindow *parent, int modal, int decoration, int resizable, int text_mode, int accessibility_host, int pointer_enabled, int *error) {
     return zlg_window_create_popup(owner,callback,title,width,height,min_width,min_height,parent,modal,decoration,resizable,text_mode,accessibility_host,pointer_enabled,0,error);

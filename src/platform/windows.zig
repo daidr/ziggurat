@@ -32,7 +32,7 @@ const PointerDispatch = struct {
 const Wait = struct { handle: c.HANDLE = null, task: core.Task = undefined, generation: u64 = 1, retired: bool = false };
 pub const AppData = struct { popup_shadow_class: c.ATOM = 0, taskbar_created: c.UINT = 0, taskbar: ?*TaskbarList = null, dispatcher: c.HWND = null, wake_event: c.HANDLE = null, wake_pending: std.atomic.Value(bool) = .init(false), class_icons: icons.Icons = .{}, waits: [16]Wait = @splat(.{}), window_class: c.ATOM = 0, key_dispatch: ?*KeyDispatch = null, pointer_dispatch: ?*PointerDispatch = null, pointer_windows: usize = 0 };
 const FullscreenPlacement = struct { style: isize, ex_style: isize, placement: c.WINDOWPLACEMENT };
-pub const WindowData = struct { hwnd: c.HWND = null, icons: icons.Icons = .{}, text: text_input.Handler = .{}, fullscreen: bool = false, restoring_placement: bool = false, saved: ?FullscreenPlacement = null, identity: usize = 0, gesture_active: bool = false, gesture_used: bool = false, gesture_point: c.LPARAM = 0, pending_interaction: ?PendingInteraction = null, interaction_handoff: bool = false, native_loop_depth: usize = 0, pointer_operation: pointer_press.Operation = .{}, pointer_counted: bool = false, opacity: f32 = 1, ignore_pointer: bool = false, skip_taskbar: bool = false };
+pub const WindowData = struct { hwnd: c.HWND = null, icons: icons.Icons = .{}, text: text_input.Handler = .{}, fullscreen: bool = false, restoring_placement: bool = false, saved: ?FullscreenPlacement = null, identity: usize = 0, gesture_active: bool = false, gesture_used: bool = false, gesture_point: c.LPARAM = 0, pending_interaction: ?PendingInteraction = null, interaction_handoff: bool = false, native_loop_depth: usize = 0, pointer_operation: pointer_press.Operation = .{}, pointer_counted: bool = false, opacity: f32 = 1, ignore_pointer: bool = false, skip_taskbar: bool = false, no_redirect: bool = false };
 var active_app: std.atomic.Value(bool) = .init(false);
 
 pub fn init(app: *core.App) !void {
@@ -151,12 +151,21 @@ pub fn create(window: *core.WindowRecord, options: core.WindowOptions) !void {
         // Popups are placed before they show; CW_USEDEFAULT means 0 here.
         origin = 0;
     }
+    // A material behind the frames needs a window without a redirection
+    // bitmap, whose opaque surface would cover the system backdrop. GDI
+    // draws nothing there: frames show through DirectComposition with their
+    // alpha, and menus open in a popup. The style is the window's for life.
+    if (options.vibrancy != .none and systemBackdropAvailable()) {
+        ex_style |= ws_ex_no_redirection_bitmap;
+        window.native.no_redirect = true;
+    }
     window.native.hwnd = c.CreateWindowExW(ex_style, class, title.ptr, native_style, origin, origin, rect.right - rect.left, rect.bottom - rect.top, owner, null, c.GetModuleHandleW(null), window);
     if (window.native.hwnd == null) {
         if (app.native_failure == null) app.captureNativeFailure(.win32, c.GetLastError());
         return error.CreateWindowFailed;
     }
     window.native.icons.apply(window.native.hwnd);
+    if (options.vibrancy != .none) setVibrancy(window, options.vibrancy);
     if (options.popup) |role| if (role.shadow) {
         // Windows 11 rounds, outlines and shades it as it does its menus;
         // earlier versions ignore the attribute and keep the class shadow.
@@ -596,7 +605,7 @@ pub fn state(window: *core.WindowRecord) core.WindowState {
     return .{ .visible = c.IsWindowVisible(hwnd) != 0, .minimized = c.IsIconic(hwnd) != 0, .maximized = c.IsZoomed(hwnd) != 0, .focused = c.GetFocus() == hwnd, .enabled = c.IsWindowEnabled(hwnd) != 0, .fullscreen = window.native.fullscreen, .fullscreen_requested = window.native.fullscreen, .always_on_top = topmost, .always_on_top_requested = topmost };
 }
 pub fn capabilities(window: *core.WindowRecord) core.WindowCapabilities {
-    return .{ .client_position = true, .fullscreen = true, .always_on_top = true, .owned_windows = true, .modal_windows = true, .custom_decoration = true, .native_move_resize = true, .system_menu = true, .backdrop_material = window.options.decoration == .system and systemBackdropAvailable(), .opacity = true, .ignore_pointer = true, .content_protection = true, .attention = true, .skip_taskbar = true, .window_buttons = true };
+    return .{ .client_position = true, .fullscreen = true, .always_on_top = true, .owned_windows = true, .modal_windows = true, .custom_decoration = true, .native_move_resize = true, .system_menu = true, .backdrop_material = window.options.decoration == .system and systemBackdropAvailable(), .opacity = true, .ignore_pointer = true, .content_protection = true, .attention = true, .skip_taskbar = true, .window_buttons = true, .transparent = window.native.no_redirect, .vibrancy = window.native.no_redirect };
 }
 /// Style bits owned by WindowTraits. A window without resize has no maximize
 /// box, as at creation.
@@ -725,6 +734,29 @@ fn systemBackdropAvailable() bool {
     const available = std.os.windows.ntdll.RtlGetVersion(&info) == .SUCCESS and (info.dwMajorVersion > 10 or (info.dwMajorVersion == 10 and info.dwBuildNumber >= 22621));
     Cache.value.store(if (available) 2 else 1, .release);
     return available;
+}
+const ws_ex_no_redirection_bitmap = 0x00200000;
+const Margins = extern struct { left: c_int, right: c_int, top: c_int, bottom: c_int };
+extern "dwmapi" fn DwmExtendFrameIntoClientArea(c.HWND, *const Margins) callconv(.winapi) c.HRESULT;
+/// The system backdrop of a material: Acrylic for transient UI, Mica (or
+/// Mica Alt for tabbed windows) otherwise.
+fn backdropFor(material: core.Vibrancy) u32 {
+    return switch (material) {
+        .none => 1,
+        .tabbed => 4,
+        .acrylic, .menu, .popover, .hud, .sheet, .tooltip, .selection, .fullscreen_ui => 3,
+        else => 2,
+    };
+}
+/// The material shows where the frame extends, behind the client area.
+/// Windows before 11 22H2 ignore the backdrop attribute.
+pub fn setVibrancy(window: *core.WindowRecord, material: core.Vibrancy) void {
+    const hwnd = window.native.hwnd;
+    const margins: Margins = if (material == .none) .{ .left = 0, .right = 0, .top = 0, .bottom = 0 } else .{ .left = -1, .right = -1, .top = -1, .bottom = -1 };
+    _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+    const backdrop = backdropFor(material);
+    _ = DwmSetWindowAttribute(hwnd, dwm_system_backdrop_type, &backdrop, @sizeOf(u32));
+    _ = c.InvalidateRect(hwnd, null, c.FALSE);
 }
 pub fn setBackdrop(window: *core.WindowRecord, material: core.WindowBackdrop) !void {
     const hwnd = window.native.hwnd;
@@ -1061,7 +1093,7 @@ fn windowMessage(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, wp: 
         // action, even when no new button operation was needed to acquire it.
         const capture_owned = message == c.WM_LBUTTONUP and c.GetCapture() == hwnd;
         if (window.pointerEnabled()) return pointerButtonMessage(window, hwnd, message, wp, lp, delegation, operation, phase, capture_owned);
-        return windowMessageBody(window, hwnd, message, wp, lp, delegation, operation, 0, if (message == c.WM_LBUTTONDOWN or message == c.WM_LBUTTONUP) pointerModifiers(wp, message) else .{}, null, .ordinary, capture_owned);
+        return windowMessageBody(window, hwnd, message, wp, lp, delegation, operation, 0, if (message >= c.WM_MOUSEFIRST and message <= c.WM_MOUSELAST) pointerModifiers(wp, message) else .{}, null, .ordinary, capture_owned);
     }
     if (message == c.WM_CAPTURECHANGED and (window.pointerEnabled() or window.native.interaction_handoff)) return pointerCaptureMessage(window, hwnd, message, wp, lp, delegation);
     if ((message == c.WM_MOUSEMOVE or message == c.WM_NCMOUSEMOVE) and window.pointerEnabled()) pointerMotionMessage(window, hwnd, message, wp, lp);
@@ -1234,7 +1266,7 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
             var ps: c.PAINTSTRUCT = undefined;
             const dc = c.BeginPaint(hwnd, &ps);
             defer _ = c.EndPaint(hwnd, &ps);
-            if (dc) |context| window.emit(.{ .paint = .{ .native_context = @ptrCast(context), .native_window = hwnd, .size = size(hwnd) } });
+            if (dc) |context| window.emit(.{ .paint = .{ .native_context = @ptrCast(context), .native_window = hwnd, .size = size(hwnd), .transparent = window.native.no_redirect } });
             return 0;
         },
         c.WM_ERASEBKGND => return 1,
@@ -1342,6 +1374,19 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
                 if (window.pointerEnabled()) _ = releasePointerCapture(window, hwnd, operation, sequence, true) else _ = c.ReleaseCapture();
             }
             return 0;
+        },
+        // Other client buttons reach content without taking focus or capture,
+        // so a secondary press can open a context menu where it lands.
+        c.WM_RBUTTONDOWN, c.WM_RBUTTONDBLCLK, c.WM_MBUTTONDOWN, c.WM_MBUTTONDBLCLK, c.WM_XBUTTONDOWN, c.WM_XBUTTONDBLCLK, c.WM_RBUTTONUP, c.WM_MBUTTONUP, c.WM_XBUTTONUP => {
+            const button = nativeButton(message, wp) orelse return delegate(delegation, message, wp, lp);
+            if (!pointerContinuation(window, hwnd, operation)) return 0;
+            const input: core.PointerButtonInput = .{ .position = point(hwnd, lp), .button = button, .modifiers = modifiers };
+            if (delivered) |value| value.* = true;
+            const down = buttonPhase(message) == .down;
+            if (window.pointerEnabled()) window.emitPointer(operation, sequence, if (down) .down else .up, input) else if (down) window.emit(.{ .pointer_down = input }) else window.emit(.{ .pointer_up = input });
+            // The default procedure still turns a secondary release into WM_CONTEXTMENU.
+            if (!pointerContinuation(window, hwnd, operation)) return 0;
+            return delegate(delegation, message, wp, lp);
         },
         c.WM_MOUSEMOVE => {
             window.emit(.{ .pointer_move = point(hwnd, lp) });

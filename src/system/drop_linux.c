@@ -134,8 +134,10 @@ void *zsd_attach(GtkWidget *widget, void *owner, const ZsdCallbacks *callbacks, 
     target->refs = 2; target->widget = widget; target->owner = owner; target->callbacks = *callbacks;
     target->want_files = files; target->want_text = text;
     if (g_object_get_data(G_OBJECT(widget), "ziggurat-system-drop")) { g_free(target); return NULL; }
-    /* GtkWindow already registers a manual site for root-window drops. Extend
-     * that list and restore it on detach instead of replacing the site. */
+    /* GtkWindow's own site takes root-window drops with GTK's default motion
+     * and drop handling, which would request data a second time. A manual
+     * site with the same list plus ours replaces it while attached; detach
+     * restores it. */
     GtkTargetList *list = gtk_target_list_new(NULL, 0);
     target->previous = gtk_drag_dest_get_target_list(widget);
     if (target->previous) {
@@ -144,10 +146,8 @@ void *zsd_attach(GtkWidget *widget, void *owner, const ZsdCallbacks *callbacks, 
         GtkTargetEntry *entries = gtk_target_table_new_from_list(target->previous, &n);
         gtk_target_list_add_table(list, entries, (guint)n);
         gtk_target_table_free(entries, n);
-    } else {
-        gtk_drag_dest_set(widget, 0, NULL, 0, GDK_ACTION_COPY);
-        target->created_site = TRUE;
-    }
+    } else target->created_site = TRUE;
+    gtk_drag_dest_set(widget, 0, NULL, 0, GDK_ACTION_COPY);
     if (files) gtk_target_list_add_uri_targets(list, INFO_FILES);
     if (text) gtk_target_list_add_text_targets(list, INFO_TEXT);
     gtk_drag_dest_set_target_list(widget, list);
@@ -168,7 +168,12 @@ void zsd_detach(void *pointer) {
         memset(target->handlers, 0, sizeof target->handlers);
         g_object_set_data(G_OBJECT(widget), "ziggurat-system-drop", NULL);
         if (target->created_site) gtk_drag_dest_unset(widget);
-        else gtk_drag_dest_set_target_list(widget, target->previous);
+        else {
+            gint n = 0;
+            GtkTargetEntry *entries = gtk_target_table_new_from_list(target->previous, &n);
+            gtk_drag_dest_set(widget, GTK_DEST_DEFAULT_MOTION | GTK_DEST_DEFAULT_DROP, entries, n, GDK_ACTION_MOVE);
+            gtk_target_table_free(entries, n);
+        }
         target->widget = NULL;
         target_release(target);
     }

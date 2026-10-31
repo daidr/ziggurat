@@ -53,6 +53,7 @@ pub fn setAlwaysOnTop(_: *core.WindowRecord, _: bool) !void {
 pub fn setBackdrop(_: *core.WindowRecord, _: core.WindowBackdrop) !void {
     return error.UnsupportedPlatform;
 }
+pub fn setVibrancy(_: *core.WindowRecord, _: core.Vibrancy) void {}
 pub fn setTitle(_: *core.WindowRecord, _: []const u8) !void {
     return error.UnsupportedPlatform;
 }

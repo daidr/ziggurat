@@ -151,6 +151,37 @@ try v.end();
 
 启用 `-Daccessibility=true` 时，Windows UIA 把 `popupButton` 映射为 ComboBox / ExpandCollapse，把浮层映射为本地化类型为 "popup" 的 Pane。日历、日期/时间/数字输入与颜色选择器见[选择器](pickers.md)。
 
+### 菜单
+
+窗口里自绘的菜单，例如右键菜单，带普通项、复选项、单选项、分隔线与子菜单：
+
+```zig
+try v.column(.{ .padding = .all(8) });
+try v.text(document.name, .{});
+try v.end();
+if (try v.popoverMenu(.{ .name = "Document" })) {
+    if (try v.menuItem("Copy", .{ .shortcut = "Ctrl+C" }, .{})) copy();
+    _ = try v.menuItem("Paste", .{}, .{ .enabled = can_paste });
+    try v.menuSeparator();
+    if (try v.menuItem("Wrap lines", .{ .checked = wrap }, .{})) wrap = !wrap;
+    if (try v.submenu("Zoom", .{})) {
+        for (levels, 0..) |label, i| {
+            if (try v.menuItem(label, .{ .checked = zoom == i, .radio = true }, .{ .key = i })) zoom = i;
+        }
+    }
+    try v.end();
+}
+try v.end();
+```
+
+- `popoverMenu(style)` 与 `end` 配对，以前一个节点为锚点，菜单打开时返回 true，只在这时构建菜单项，无论返回什么都要 `end`。在锚点上按下次键（右键）时菜单在指针处打开；焦点在锚点内时按菜单键或 Shift+F10，菜单在锚点下方打开并高亮第一项。锚点嵌套时最内层的锚点打开自己的菜单，右键落在锚点里的控件上也一样。
+- `menuItem(label, options, style)` 在选中它的那一遍返回 true（按下、Enter 或 Space），菜单随之关闭，焦点回到打开菜单之前的控件。`MenuItemOptions.checked` 非空时是复选项，加上 `radio` 画成单选的圆点；`shortcut` 只显示在项的末端并作为描述朗读，快捷键本身用 `bindKey` 绑定。禁用的项画成灰色，不能高亮，也不能选择。
+- `submenu(label, style)` 加一项并开始它的子菜单，与 `end` 配对，子菜单显示时返回 true。子菜单放在这一项的末端一侧、与它顶部对齐，放不下时翻到另一侧；顶层菜单在右下放不下时向左、向上翻，并夹在窗口内。`menuSeparator()` 在两组项之间画一条线。面板最窄 160 DIP，内边距默认 4 DIP，最多 8 层。
+- 打开期间菜单接管按键：Up、Down、Home、End 在最深一层的可用项之间移动高亮并循环，字母移到下一个以它开头的项；Right、Enter 或 Space 打开子菜单并高亮其第一项，Left 或 Escape 关闭最深一层子菜单，顶层的 Escape 与 Tab 关闭菜单并交还焦点。从右到左时 Left 与 Right 互换。指针移到项上会高亮它并打开它的子菜单、关闭更深的子菜单；在所有面板之外按下会关闭菜单，并照常交给下面的控件；面板上的滚轮不会滚动下面的内容。
+- 焦点跟随高亮，辅助技术读出键盘所在的项；用指针打开时焦点在第一项上但不高亮。同一时间最多打开一个菜单；锚点不再构建或被禁用时菜单关闭。
+
+启用 `-Daccessibility=true` 时，Windows UIA 把菜单映射为 Menu，把项映射为 MenuItem：普通项提供 Invoke，打开子菜单的项另提供 ExpandCollapse（展开即打开子菜单），复选项与单选项提供 Toggle。
+
 ### 提示、通知、导航按钮与头像
 
 - `tooltip(text)` 给刚加入的节点（在组合框选项列表 `end` 之后则是组合框）加提示。指针停在控件上或控件持有焦点超过 `Options.tooltip_delay`（默认 500 ms）后，提示出现在控件下方（下方放不下时在上方），悬停优先于焦点。按下或 Escape 会隐藏它，直到指针或焦点移到另一个控件；窗口失去焦点时也会隐藏。提示文字同时作为控件的可访问说明（已有字段说明时保留字段说明）。没有前一个节点时返回 `NotContainer`。
@@ -448,7 +479,7 @@ fn dropped(ptr: *anyopaque, _: z.Window, d: drop.Drop) void {
 }
 ```
 
-`systemDragOver` 返回该点是否有目标接受所提供的内容；`systemDrop` 把数据在一遍内交给那里的目标，字节只在该遍中借用。窗口内拖动只在本窗口内进行，没有原生拖动源。
+`systemDragOver` 返回该点是否有目标接受所提供的内容；`systemDrop` 把数据在一遍内交给那里的目标，字节只在该遍中借用。窗口内拖动只在本窗口内进行；视图尚未接入 `system.drag.Source` 的原生拖出。
 
 叶子的状态变化需要告诉辅助技术时，调用 `host.announce(text)`（或在构建中调用 `View.announce`）：文字作为一个没有可见内容的状态节点礼貌播报，每次调用都是新的状态，超过 256 字节时在字符边界截断。
 

@@ -57,6 +57,8 @@ extern fn zlg_window_create(*anyopaque, *const fn (*anyopaque, *const NativeEven
 extern fn zlg_window_create_mode(*anyopaque, *const fn (*anyopaque, *const NativeEvent) callconv(.c) c_int, [*:0]const u8, u32, u32, u32, u32, ?*anyopaque, c_int, c_int, c_int, c_int, *c_int) ?*anyopaque;
 extern fn zlg_window_create_mode_host(*anyopaque, *const fn (*anyopaque, *const NativeEvent) callconv(.c) c_int, [*:0]const u8, u32, u32, u32, u32, ?*anyopaque, c_int, c_int, c_int, c_int, c_int, *c_int) ?*anyopaque;
 extern fn zlg_window_create_mode_host_pointer(*anyopaque, *const fn (*anyopaque, *const NativeEvent) callconv(.c) c_int, [*:0]const u8, u32, u32, u32, u32, ?*anyopaque, c_int, c_int, c_int, c_int, c_int, c_int, *c_int) ?*anyopaque;
+extern fn zlg_window_transparent(*anyopaque) c_int;
+extern fn zlg_window_create_transparent(*anyopaque, *const fn (*anyopaque, *const NativeEvent) callconv(.c) c_int, [*:0]const u8, u32, u32, u32, u32, ?*anyopaque, c_int, c_int, c_int, c_int, c_int, c_int, c_int, c_int, *c_int) ?*anyopaque;
 extern fn zlg_window_create_popup(*anyopaque, *const fn (*anyopaque, *const NativeEvent) callconv(.c) c_int, [*:0]const u8, u32, u32, u32, u32, ?*anyopaque, c_int, c_int, c_int, c_int, c_int, c_int, c_int, *c_int) ?*anyopaque;
 extern fn zlg_window_pointer_operation(*anyopaque) u64;
 extern fn zlg_window_advance_pointer_operation(*anyopaque) u64;
@@ -119,7 +121,7 @@ pub fn create(record: *core.WindowRecord, options: core.WindowOptions) !void {
     defer allocator.free(title);
     var code: c_int = 0;
     const popup: c_int = if (options.popup) |role| 1 | @as(c_int, if (role.focusable) 2 else 0) | @as(c_int, if (role.topmost) 4 else 0) else 0;
-    record.native.native = zlg_window_create_popup(record, event, title, options.width, options.height, options.min_width, options.min_height, if (record.owner_record) |owner| owner.native.native else null, @intFromBool(options.modal), @backingInt(options.decoration), @intFromBool(options.resizable), @intFromBool(options.text_input_mode == .keyboard_compose), @intFromBool(options.accessibility_host == .children), @intFromBool(options.native_pointer_clicks), popup, &code) orelse return if (code == 1) error.UnsupportedCapability else error.OutOfMemory;
+    record.native.native = zlg_window_create_transparent(record, event, title, options.width, options.height, options.min_width, options.min_height, if (record.owner_record) |owner| owner.native.native else null, @intFromBool(options.modal), @backingInt(options.decoration), @intFromBool(options.resizable), @intFromBool(options.text_input_mode == .keyboard_compose), @intFromBool(options.accessibility_host == .children), @intFromBool(options.native_pointer_clicks), popup, @intFromBool(options.transparent), &code) orelse return if (code == 1) error.UnsupportedCapability else error.OutOfMemory;
     if (options.text_input_mode != .system) record.publishTextInputMode(options.text_input_mode);
     if (!options.focus_on_show) zlg_window_focus_on_map(record.native.native.?, 0);
 }
@@ -135,7 +137,7 @@ pub fn state(record: *core.WindowRecord) core.WindowState {
 }
 pub fn capabilities(record: *core.WindowRecord) core.WindowCapabilities {
     const flags = zlg_window_capabilities(record.native.native.?);
-    return .{ .client_position = flags & 1 != 0, .fullscreen = flags & 2 != 0, .always_on_top = flags & 4 != 0, .owned_windows = true, .modal_windows = true, .custom_decoration = flags & 8 != 0, .native_move_resize = flags & 16 != 0, .system_menu = flags & 32 != 0, .opacity = flags & 64 != 0, .ignore_pointer = flags & 128 != 0, .attention = flags & 256 != 0, .skip_taskbar = flags & 512 != 0, .window_buttons = flags & 1024 != 0 };
+    return .{ .client_position = flags & 1 != 0, .fullscreen = flags & 2 != 0, .always_on_top = flags & 4 != 0, .owned_windows = true, .modal_windows = true, .custom_decoration = flags & 8 != 0, .native_move_resize = flags & 16 != 0, .system_menu = flags & 32 != 0, .opacity = flags & 64 != 0, .ignore_pointer = flags & 128 != 0, .attention = flags & 256 != 0, .skip_taskbar = flags & 512 != 0, .window_buttons = flags & 1024 != 0, .transparent = flags & 2048 != 0 };
 }
 pub fn setTraits(record: *core.WindowRecord, traits: core.WindowTraits) !void {
     try checkUpdate(zlg_window_traits(record.native.native.?, @intFromBool(traits.resizable), @intFromBool(traits.movable), @intFromBool(traits.minimizable), @intFromBool(traits.maximizable), @intFromBool(traits.closable)));
@@ -158,6 +160,8 @@ pub fn setSkipTaskbar(record: *core.WindowRecord, enabled: bool) !void {
 pub fn setBackdrop(_: *core.WindowRecord, _: core.WindowBackdrop) !void {
     return error.UnsupportedCapability;
 }
+/// GTK has no materials; the value is kept by the window record.
+pub fn setVibrancy(_: *core.WindowRecord, _: core.Vibrancy) void {}
 pub fn startMove(record: *core.WindowRecord) !void {
     try checkUpdate(zlg_window_interaction(record.native.native.?, -1));
 }
@@ -269,7 +273,7 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
     defer scope.end();
     const point: core.Point = .{ .x = @floatCast(native.x), .y = @floatCast(native.y) };
     switch (native.kind) {
-        1 => record.emit(.{ .paint = .{ .native_context = native.context.?, .native_window = native.window, .size = .{ .width = native.width, .height = native.height, .scale = @floatFromInt(native.scale) } } }),
+        1 => record.emit(.{ .paint = .{ .native_context = native.context.?, .native_window = native.window, .size = .{ .width = native.width, .height = native.height, .scale = @floatFromInt(native.scale) }, .transparent = zlg_window_transparent(record.native.native.?) != 0 } }),
         2 => pointerLifecycle(record, native, .{ .resize = .{ .width = native.width, .height = native.height, .scale = @floatFromInt(native.scale) } }),
         22 => pointerLifecycle(record, native, .window_position),
         25 => record.popupDismissed(),
@@ -278,7 +282,9 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
         23 => record.publishTextInputMode(if (native.flags == 0) .system else .keyboard_compose),
         3, 4 => {
             const phase: core.PointerPhase = if (native.kind == 3) .down else .up;
-            const input: core.PointerButtonInput = .{ .position = point, .modifiers = pointerModifiers(@intCast(native.flags)) };
+            // `key` carries a button other than the primary one.
+            if (native.key < 0 or native.key > 4) return 0;
+            const input: core.PointerButtonInput = .{ .position = point, .modifiers = pointerModifiers(@intCast(native.flags)), .button = @fromBackingInt(@intCast(native.key)) };
             if (record.pointerEnabled()) {
                 if (native.context) |context| {
                     const ticket: *const PointerTicket = @ptrCast(@alignCast(context));

@@ -37,19 +37,24 @@ const Native = struct {
         }
     }
     fn pointer(window: z.Window, down: bool, x: f32, y: f32) void {
+        button(window, down, false, x, y);
+    }
+    /// The primary button, or with `secondary` the secondary one.
+    fn button(window: z.Window, down: bool, secondary: bool, x: f32, y: f32) void {
         if (builtin.os.tag == .windows) {
             const hwnd: c.HWND = window.nativeHandle();
             const scale = @as(f32, @floatFromInt(c.GetDpiForWindow(hwnd))) / 96;
             const px: u16 = @bitCast(@as(i16, @intFromFloat(x * scale)));
             const py: u16 = @bitCast(@as(i16, @intFromFloat(y * scale)));
             const point: c.LPARAM = @intCast(@as(u32, px) | (@as(u32, py) << 16));
-            _ = c.SendMessageW(hwnd, if (down) c.WM_LBUTTONDOWN else c.WM_LBUTTONUP, 0, point);
+            const message: c.UINT = if (secondary) (if (down) c.WM_RBUTTONDOWN else c.WM_RBUTTONUP) else if (down) c.WM_LBUTTONDOWN else c.WM_LBUTTONUP;
+            _ = c.SendMessageW(hwnd, message, 0, point);
         } else {
             const widget = gtk_bin_get_child(window.nativeHandle().?).?;
             const event = gdk_event_new(if (down) 4 else 7).?;
             defer gdk_event_free(event);
             const native: *ButtonEvent = @ptrCast(@alignCast(event));
-            native.* = .{ .kind = if (down) 4 else 7, .window = g_object_ref(gtk_widget_get_window(widget).?), .send_event = 1, .time = 0, .x = x, .y = y, .axes = null, .state = 0, .button = 1, .device = null, .x_root = 0, .y_root = 0 };
+            native.* = .{ .kind = if (down) 4 else 7, .window = g_object_ref(gtk_widget_get_window(widget).?), .send_event = 1, .time = 0, .x = x, .y = y, .axes = null, .state = 0, .button = if (secondary) 3 else 1, .device = null, .x_root = 0, .y_root = 0 };
             var handled: c_int = 0;
             g_signal_emit_by_name(widget, if (down) @as([*:0]const u8, "button-press-event") else @as([*:0]const u8, "button-release-event"), native, &handled);
         }
@@ -634,6 +639,75 @@ fn runImage(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(u32, 0xffffff), pixelAt(panel_level, 600 - 200, 290));
 }
 
+/// A menu that a native secondary press opens over its anchor, hovered
+/// open to a submenu and chosen from with a native press.
+const Menu = struct {
+    chosen: usize = 0,
+    level: usize = 0,
+    fn build(self: *Menu, v: *view.View) anyerror!void {
+        try v.column(.{ .height = 120, .self_align = .stretch, .padding = .all(8) });
+        try v.text("Document", .{});
+        try v.end();
+        if (try v.popoverMenu(.{ .name = "Document" })) {
+            if (try v.menuItem("Rename", .{ .shortcut = "F2" }, .{})) self.chosen += 1;
+            try v.menuSeparator();
+            if (try v.submenu("Zoom", .{})) {
+                for ([_][]const u8{ "Small", "Large" }, 0..) |label, i| {
+                    if (try v.menuItem(label, .{ .checked = self.level == i, .radio = true }, .{ .key = i })) self.level = i;
+                }
+            }
+            try v.end();
+        }
+        try v.end();
+    }
+};
+
+fn boundsOfText(host: *view.Host, kind: view.Kind, text: []const u8) ?view.Rect {
+    for (host.view.nodes()) |*node| if (node.kind == kind and std.mem.eql(u8, node.text, text)) return node.bounds;
+    return null;
+}
+
+fn runMenu(allocator: std.mem.Allocator) !void {
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    var state: Menu = .{};
+    var storage: view.Storage(32, 512) = .{};
+    var host = view.Host.init(&state, Menu.build, storage.buffers(), .{});
+    host.context.render_mode = .gdi;
+    // Secondary presses travel the native press path on every platform.
+    const window = try app.createWindow(.{ .width = width, .height = height, .native_pointer_clicks = true });
+    try host.attach(window);
+    try paint(&host, window);
+    try std.testing.expect(boundsOfText(&host, .menu_item, "Rename") == null);
+    const anchor = boundsOfText(&host, .text, "Document").?;
+    Native.button(window, true, true, anchor.x + 2, anchor.y + 30);
+    Native.button(window, false, true, anchor.x + 2, anchor.y + 30);
+    try paint(&host, window);
+    const rename = boundsOfText(&host, .menu_item, "Rename") orelse return error.MenuNotOpen;
+    try std.testing.expect(rename.x >= anchor.x + 2 and rename.y >= anchor.y + 30);
+    // The pointer over the submenu's item opens it beside the item.
+    const zoom = boundsOfText(&host, .menu_item, "Zoom").?;
+    Native.move(window, zoom.x + 10, zoom.y + zoom.height / 2);
+    try paint(&host, window);
+    const large = boundsOfText(&host, .menu_item, "Large") orelse return error.SubmenuNotOpen;
+    try std.testing.expect(large.x >= zoom.x + zoom.width);
+    Native.click(window, large);
+    try paint(&host, window);
+    try std.testing.expectEqual(@as(usize, 1), state.level);
+    try std.testing.expect(boundsOfText(&host, .menu_item, "Rename") == null);
+    // Opened again, a press outside closes it and chooses nothing.
+    Native.button(window, true, true, anchor.x + 2, anchor.y + 30);
+    Native.button(window, false, true, anchor.x + 2, anchor.y + 30);
+    try paint(&host, window);
+    try std.testing.expect(boundsOfText(&host, .menu_item, "Rename") != null);
+    Native.click(window, .{ .x = 4, .y = height - 40, .width = 4, .height = 4 });
+    try paint(&host, window);
+    try std.testing.expect(boundsOfText(&host, .menu_item, "Rename") == null);
+    try std.testing.expectEqual(@as(usize, 0), state.chosen);
+    _ = try window.destroy();
+    try app.dispatch();
+}
+
 /// The inspector in a window: open, the content narrower, and a click on
 /// its close button closes it through the Host's routing.
 fn runInspector(allocator: std.mem.Allocator) !void {
@@ -668,11 +742,12 @@ pub fn main() !void {
     try runPictures(gpa.allocator());
     try runTimer(gpa.allocator());
     try runImage(gpa.allocator());
+    try runMenu(gpa.allocator());
     if (view.inspector.enabled) try runInspector(gpa.allocator());
     if (builtin.os.tag == .windows) {
         try @import("view_uia.zig").run(gpa.allocator());
         try @import("view_uia.zig").runCollections(gpa.allocator());
     }
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, embedded leaf input, routed pages with history buttons, deferred icon and SVG preparation, timed toast expiry, keyed identity and harness frames drawn to pixels and the inspector panel passed\n", .{});
+    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, embedded leaf input, routed pages with history buttons, deferred icon and SVG preparation, timed toast expiry, context menu with submenu, keyed identity and harness frames drawn to pixels and the inspector panel passed\n", .{});
 }
