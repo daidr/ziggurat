@@ -1,12 +1,14 @@
 # 文档初始化器
 
-Windows 与 Linux 的 `backendCapabilities().document_initializers` 为 true，只支持 `document_start`、顶层 frame 和页面 world；其他组合明确拒绝，不回退成不同的执行方式。两端复用同一拥有层、可信函数体编译器和事务簿。Windows 使用 WebView2 Add/Remove；Linux 使用 WebKitGTK 2.40 基线已有的精确 user-script 对象接口，内部 bridge 与用户 batch 分别拥有，逐对象移除，不调用 `remove_all_scripts`。引擎验证的范围分别列在下文。
+Windows 与 Linux 的 `backendCapabilities().document_initializers` 为 true，支持 `document_start` 和页面 world，frame 可以是顶层（默认）或 `all`；其他组合明确拒绝，不回退成不同的执行方式。两端复用同一拥有层、可信函数体编译器和事务簿。Windows 使用 WebView2 Add/Remove；Linux 使用 WebKitGTK 2.40 基线已有的精确 user-script 对象接口，内部 bridge 与用户 batch 分别拥有，逐对象移除，不调用 `remove_all_scripts`。引擎验证的范围分别列在下文。
 
 每项初始化器包含宿主信任、语法有效的普通函数体 `body` 和精确 HTTPS `origins`。有效函数体按列表顺序分别调用，局部声明属于自己的函数作用域，`return` 只结束这一项；未捕获的 `throw` 终止后续项。它不是多个独立全局程序或模块的拼接，不支持顶层 `import` 或 `await`。代码直接编入一个原生 batch，不使用 `eval` 或 `Function` 构造；安装接受不证明 JavaScript 语法或运行成功，也不承诺绕过页面 CSP、sandbox 或其他引擎限制。
 
 本包装不是不可信代码 sandbox，也不包含 JavaScript parser。origin、return 和 throw 的包装语义只约束语法有效的 ordinary function body；无效 body 可以闭合括号逃出包装，甚至让整个拼接程序仍然有效。宿主不能把未审定的外部文本视作受守卫约束的不可信脚本；接收这种输入需要将来独立的解析或隔离能力。VM oracle 特别保留了这个负例，不把字符串守卫断言当作安全证明。
 
-每份函数体调用前，batch 都重新检查当前仍为顶层、协议为 HTTPS、实际 origin 等于其中一个规范化来源。iframe、opaque origin 和 `about:blank` 不执行函数体；不会为了它们放宽为 URL 前缀匹配。这只是用户代码的执行范围，不授予导航、TLS 例外、网络请求或 IPC。页面 world 与页面共享对象，不是隔离执行环境；可信宿主代码自行决定向页面暴露什么。
+每份函数体调用前，batch 都重新检查当前仍为顶层、协议为 HTTPS、实际 origin 等于其中一个规范化来源。iframe、opaque origin 和 `about:blank` 不执行函数体；不会为了它们放宽为 URL 前缀匹配。
+
+`frames = .all` 的项去掉顶层检查，在每个 frame 中按该 frame 自己的 origin 检查；只要有一项是 `all`，Linux 就把整个 batch 注册为 `WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES`（WebView2 的脚本本来就进入所有 frame），`top` 的项仍只在顶层运行。`origins` 只写一个 `"*"`（`document_initializers.any_origin`）时去掉来源检查，任何来源的文档都运行，包括 opaque 和 `about:blank`；`"*"` 不能与其他来源并列。注意 Linux 页面默认 CSP 的 `frame-src 'none'` 与两个后端对子 frame 导航的拒绝，让子 frame 只能是同一文档创建的空白 frame。这只是用户代码的执行范围，不授予导航、TLS 例外、网络请求或 IPC。页面 world 与页面共享对象，不是隔离执行环境；可信宿主代码自行决定向页面暴露什么。
 
 默认空表没有拥有存储、UTF-16 batch、原生 script ID 或事务簿。非空入口只在独立 noinline 栈帧捕获最多八项及每项八个来源的 slice 描述符；没有正文大小的栈副本。调用者的输入字节须稳定到入口返回。实现先复制全部正文和原始来源，再检查 UTF-8/NUL、精确来源、重复及大小，并派生 UTF-16。入口描述符即使在 caller allocator 重入时被替换，也不改变捕获的项；入口返回后可释放或修改原始存储。
 

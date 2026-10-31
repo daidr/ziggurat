@@ -62,10 +62,15 @@ pub const SchemeRegistration = schemes.Registration;
 pub const permissions = @import("permissions.zig");
 pub const downloads = @import("downloads.zig");
 pub const policy_store = @import("policy_store.zig");
+pub const page_facts = @import("page_facts.zig");
+pub const Rgba = page_facts.Rgba;
+pub const ContentSize = page_facts.ContentSize;
+pub const FitContent = page_facts.FitContent;
 const page_sessions = @import("page_session.zig");
 pub const PageSession = page_sessions.Type(View, SessionHooks);
 test {
     _ = policy_store;
+    _ = page_facts;
     _ = custom_local;
 }
 pub const DownloadDestination = downloads.Destination;
@@ -154,7 +159,17 @@ pub const Policy = struct {
     permission: PolicyAction = .deny,
     frame_navigation: PolicyAction = .deny,
 };
-pub const PolicyRequest = struct { kind: PolicyKind, uri: []const u8, native_detail: i32 };
+pub const PolicyRequest = struct {
+    kind: PolicyKind,
+    uri: []const u8,
+    native_detail: i32,
+    /// For navigation and new_window: whether a user's gesture started it, a
+    /// click on a link or a click or key press whose handler navigates or
+    /// calls window.open, rather than the page's script on its own. Null when
+    /// the engine does not tell (frame navigations). WebKitGTK refuses a
+    /// window.open without a gesture itself before asking.
+    user_gesture: ?bool = null,
+};
 pub const ProcessFailure = struct { native_kind: i32 };
 /// A document generation belongs to one stable View. The View must outlive use.
 pub const PageId = struct { view: *const View, generation: u64 };
@@ -165,6 +180,12 @@ pub const PageEvent = union(enum) {
     source_changed: struct { id: PageId, uri: ?[]const u8 },
     title_changed: struct { id: PageId, title: ?[]const u8 },
     history_changed: struct { id: PageId, can_go_back: bool, can_go_forward: bool },
+    /// Options.theme_color: the page's theme color changed; null when it has
+    /// none any more. See View.themeColor.
+    theme_color_changed: struct { id: PageId, color: ?Rgba },
+    /// Options.fit_content: the size of the page's content changed, in its
+    /// CSS pixels. A View attached to a window has resized it already.
+    content_size_changed: struct { id: PageId, size: ContentSize },
 };
 pub const PageListener = struct {
     /// Stable until detach. Strings are borrowed until return. Null metadata
@@ -175,7 +196,15 @@ pub const PageListener = struct {
 };
 pub const Resource = snapshots.Resource;
 pub const Response = resources.Response;
-pub const ResourceRequest = struct { uri: []const u8, path: []const u8, method: resources.Method, headers: []const resources.Header = &.{} };
+pub const ResourceRequest = struct {
+    uri: []const u8,
+    path: []const u8,
+    method: resources.Method,
+    headers: []const resources.Header = &.{},
+    /// The document that made the request, the channel of an untrusted page
+    /// to the app; null before the View's first document.
+    page: ?PageId = null,
+};
 pub const ResourceHandler = struct {
     /// Stable caller storage, borrowed until detach.
     context: *anyopaque,
@@ -355,6 +384,30 @@ pub const Options = struct {
     /// Remote/file/frame navigation remains denied. Host navigateLocal is explicit.
     allow_local_navigation: bool = false,
     page_listener: ?PageListener = null,
+    /// Watch the page's theme color, its first `<meta name="theme-color">`
+    /// whose media matches (View.themeColor, PageEvent.theme_color_changed),
+    /// in pages of any origin, trusted or not.
+    theme_color: bool = false,
+    /// Size the window to the page's content and follow it as it changes.
+    fit_content: ?FitContent = null,
+    /// Show someone else's page, as a plugin's UI from a custom scheme: its
+    /// messages never reach Event.message, whatever its origin's grants say
+    /// (OriginGrant.ipc, LocalSite.scheme_ipc, plain html). post still
+    /// reaches it, and its requests to on_resource carry its PageId.
+    untrusted: bool = false,
+    /// Whether the page may play audible media before the user clicked or
+    /// typed in it, as a hidden window's page never can.
+    autoplay: Autoplay = .user_gesture,
+};
+pub const Autoplay = enum {
+    /// The engine's own policy: sound only after a user's gesture.
+    user_gesture,
+    /// Linux allows it on every main-frame navigation's website policies.
+    /// Windows starts the browser with --autoplay-policy=no-user-gesture-required:
+    /// an argument of the WebView2 environment, which every View of the same
+    /// user data folder shares and must agree on, and which a Windows
+    /// Profile owner does not take (UnsupportedCapability).
+    allow,
 };
 
 const NativePageEvent = webkit.PageEvent;
@@ -383,7 +436,7 @@ const NativeActions = extern struct {
     download_offer: ?*const fn (*anyopaque, [*:0]const u16, [*:0]const u16, [*:0]const u16, i64, *anyopaque) callconv(.c) void = null,
     download_notify: ?*const fn (*anyopaque, u64, u32, u64, i64, i32) callconv(.c) void = null,
 };
-const NativeSettings = extern struct { zoom: f64, user_agent: ?[*:0]const u16, devtools: bool, tool_flags: u32, tool_limit: u32, max_cookies: u32, max_cookie_bytes: u32, max_capture_bytes: u32, schemes: ?[*]const NativeScheme, scheme_count: u32, local_ipc: bool, actions: ?*const NativeActions, initializers: ?*const initializer_owner.NativeInput, owned_context: ?*anyopaque };
+const NativeSettings = extern struct { zoom: f64, user_agent: ?[*:0]const u16, devtools: bool, tool_flags: u32, tool_limit: u32, max_cookies: u32, max_cookie_bytes: u32, max_capture_bytes: u32, schemes: ?[*]const NativeScheme, scheme_count: u32, local_ipc: bool, actions: ?*const NativeActions, initializers: ?*const initializer_owner.NativeInput, owned_context: ?*anyopaque, facts: ?[*:0]const u16 = null, browser_arguments: ?[*:0]const u16 = null };
 const PermissionScratch = struct {
     rows: [permissions.origin_capacity]NativePermissionGrant = undefined,
     text: [permissions.origin_capacity][schemes.origin_limit + 1:0]u16 = undefined,
@@ -528,6 +581,7 @@ extern fn zwv_eval_timer_create(*?*anyopaque) i32;
 extern fn zwv_eval_timer_arm(*anyopaque, u64) i32;
 extern fn zwv_eval_timer_close(*anyopaque) void;
 extern fn zwv_zoom(*anyopaque, *f64, bool) i32;
+extern fn zwv_process_id(*anyopaque, *u32) i32;
 extern fn zwv_user_agent(*anyopaque, ?[*:0]const u16, ?*?[*:0]u16) i32;
 extern fn zwv_string_free([*:0]u16) void;
 extern fn zwv_devtools(*anyopaque, *bool, bool, bool) i32;
@@ -645,7 +699,7 @@ fn validateBackendOptions(options: Options) !void {
             if (options.file_streams != null and site.on_resource == null) return error.ResourceHandlerRequired;
         } else if (options.custom_schemes.len != 0 or !std.meta.eql(options.custom_local_limits, CustomLocalLimits{})) return error.UnsupportedCapability;
         if (options.file_streams != null and options.local == null) return error.LocalSiteRequired;
-        if (options.policy.new_window != .deny or options.policy.download != .deny or options.policy.permission != .deny or options.policy.frame_navigation != .deny or
+        if (options.policy.download != .deny or options.policy.permission != .deny or options.policy.frame_navigation != .deny or
             options.max_cached_permissions != 256 or options.tool_limits.max_cookies != (tools.Limits{}).max_cookies or options.tool_limits.max_cookie_bytes != (tools.Limits{}).max_cookie_bytes) return error.UnsupportedCapability;
         if (options.max_resource_bytes > 16 * 1024 * 1024) return error.InvalidResourceLimit;
         inline for (zio.fields(tools.Policy)) |field| if (!std.mem.eql(u8, field.name, "capture") and !std.mem.eql(u8, field.name, "find") and !std.mem.eql(u8, field.name, "clear_entire_profile") and !std.mem.eql(u8, field.name, "pdf") and @field(options.tools, field.name)) return error.UnsupportedCapability;
@@ -797,6 +851,8 @@ const OwnedConfig = struct {
         try options.resource_limits.validate();
         if (options.file_streams) |limits| try limits.validate();
         if (!std.math.isFinite(options.zoom) or options.zoom < 0.25 or options.zoom > 5) return error.InvalidZoom;
+        if (options.fit_content) |limits| try limits.validate();
+        if (!is_linux and options.autoplay == .allow and options.profile != null) return error.UnsupportedCapability;
         if (options.user_agent) |agent| if (!validUserAgent(agent)) return error.InvalidUserAgent;
         if (options.remote != null and (options.local != null or options.html.len != 0)) return error.ConflictingPageSources;
         if (options.allow_local_navigation and options.local == null) return error.LocalSiteRequired;
@@ -1091,6 +1147,11 @@ pub const View = struct {
     eval_watch: ?z.NativeWaitToken = null,
     eval_accepting: bool = true,
     zoom_override: ?f64 = null,
+    /// The page's facts, kept from its script's messages.
+    theme_color_value: ?Rgba = null,
+    theme_told: u64 = 0,
+    content_size_value: ?ContentSize = null,
+    fitted: ?page_facts.Size = null,
     agent_override: ?[]u8 = null,
     devtools_override: ?bool = null,
     tool_book: tools.Book = .{},
@@ -1419,7 +1480,9 @@ pub const View = struct {
         if (config.options.permissions) |permission_policy| actions = permission_scratch.prepare(permission_policy, self.action_budget.?);
         if (config.options.downloads) |download_policy| download_scratch.prepare(download_policy, &actions.?);
         const initializer_input = if (config.initializer_config) |source| source.input() else null;
-        const settings: NativeSettings = .{ .zoom = self.zoom_override orelse config.options.zoom, .user_agent = if (agent) |value| value.ptr else null, .devtools = self.devtools_override orelse config.options.devtools_enabled, .tool_flags = tool_flags, .tool_limit = limits.max_pending, .max_cookies = limits.max_cookies, .max_cookie_bytes = limits.max_cookie_bytes, .max_capture_bytes = limits.max_capture_bytes, .schemes = if (config.options.custom_schemes.len == 0) null else &scheme_scratch.items, .scheme_count = @intCast(config.options.custom_schemes.len), .local_ipc = if (config.options.local) |site| std.mem.eql(u8, site.scheme, "https") or site.scheme_ipc else true, .actions = if (actions) |*value| value else null, .initializers = if (initializer_input) |*value| value else null, .owned_context = if (config.profile_state) |state| try state.context.windowsContext() else null };
+        const facts = try self.factsScript(.windows);
+        defer if (facts) |value| self.allocator.free(value);
+        const settings: NativeSettings = .{ .facts = if (facts) |value| value.ptr else null, .browser_arguments = if (config.options.autoplay == .allow) std.unicode.utf8ToUtf16LeStringLiteral("--autoplay-policy=no-user-gesture-required") else null, .zoom = self.zoom_override orelse config.options.zoom, .user_agent = if (agent) |value| value.ptr else null, .devtools = self.devtools_override orelse config.options.devtools_enabled, .tool_flags = tool_flags, .tool_limit = limits.max_pending, .max_cookies = limits.max_cookies, .max_cookie_bytes = limits.max_cookie_bytes, .max_capture_bytes = limits.max_capture_bytes, .schemes = if (config.options.custom_schemes.len == 0) null else &scheme_scratch.items, .scheme_count = @intCast(config.options.custom_schemes.len), .local_ipc = if (config.options.local) |site| std.mem.eql(u8, site.scheme, "https") or site.scheme_ipc else true, .actions = if (actions) |*value| value else null, .initializers = if (initializer_input) |*value| value else null, .owned_context = if (config.profile_state) |state| try state.context.windowsContext() else null };
         self.native = zwv_create(window.nativeHandle(), if (html) |value| value.ptr else std.unicode.utf8ToUtf16LeStringLiteral(""), profile.ptr, if (url) |value| value.ptr else null, if (prefix) |value| value.ptr else null, if (remote) |*value| value else null, &settings, policy, config.options.max_cached_permissions, config.options.scripts.max_pending, config.options.allow_local_navigation, config.options.page_listener != null, notify, pageNotify, scriptNotify, toolNotify, resource, self, &self.last_hresult) orelse return error.WebViewCreationFailed;
         errdefer {
             nativeClose(self.native.?);
@@ -1495,7 +1558,9 @@ pub const View = struct {
             flags |= @as(u32, 1) << @intCast(i);
         };
         const initializer_input = if (self.config.?.initializer_config) |source| source.input() else null;
-        const native_options: webkit.Options = .{ .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled) };
+        const facts = try self.factsScript(.linux);
+        defer if (facts) |value| self.allocator.free(value);
+        const native_options: webkit.Options = .{ .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled) };
         var candidate: ?*anyopaque = null;
         if (self.session) |session| {
             try webkit.check(webkit.zwk_session_create(&native_options, session.last_size.width, session.last_size.height, webkitNotify, pageNotify, webkitScriptNotify, webkitTimeout, self, &candidate));
@@ -2967,11 +3032,98 @@ pub const View = struct {
         if (@as(u32, @bitCast(hr)) == 0x80070005) return error.DevToolsDisabled;
         try self.propertyResult(hr);
     }
+    /// The page-facts script for a backend, owned by the caller (UTF-16 on
+    /// Windows), or null when Options asks for no fact.
+    fn factsScript(self: *View, comptime backend_kind: enum { windows, linux }) !?(if (backend_kind == .windows) [:0]u16 else [:0]u8) {
+        const options = self.config.?.options;
+        const config: page_facts.Config = .{ .theme = options.theme_color, .fit = options.fit_content, .zoom = self.zoom_override orelse options.zoom };
+        if (!config.any()) return null;
+        if (backend_kind == .linux) {
+            const text = try page_facts.script(self.allocator, config, "v=>send('F'+v)");
+            defer self.allocator.free(text);
+            return try self.allocator.dupeSentinel(u8, text, 0);
+        }
+        const text = try page_facts.script(self.allocator, config, "v=>p('\\u0001ziggurat-facts:'+v)");
+        defer self.allocator.free(text);
+        const whole = try std.mem.concat(self.allocator, u8, &.{ "(()=>{if(window!==top||!window.chrome||!chrome.webview)return;const p=chrome.webview.postMessage.bind(chrome.webview);", text, "})();" });
+        defer self.allocator.free(whole);
+        return try std.unicode.utf8ToUtf16LeAllocZ(self.allocator, whole);
+    }
+    /// The page's theme color (Options.theme_color): the content of the first
+    /// `<meta name="theme-color">` in its head whose media is absent or
+    /// matches and whose content is a color, as 8-bit sRGB; null for none.
+    /// The page's engine parses it, so any CSS color works. A page that just
+    /// started loading keeps the previous page's color until its DOM is
+    /// ready, so going between pages of one color changes nothing; one that
+    /// never tells, as an image, has none once it loaded.
+    pub fn themeColor(self: *const View) ?Rgba {
+        return self.theme_color_value;
+    }
+    /// The size of the page's content in CSS pixels (Options.fit_content),
+    /// null until the page told it.
+    pub fn contentSize(self: *const View) ?ContentSize {
+        return self.content_size_value;
+    }
+    /// The operating system's process that runs the page, for an app's own
+    /// task manager or memory report; null when unknown. Windows: WebView2's
+    /// browser process, which the app's views share and whose children
+    /// render the pages. Linux: WebKitGTK has no API for it, always null.
+    pub fn processId(self: *View) !?u32 {
+        _ = try self.propertyWindow();
+        if (is_linux) return null;
+        const scope = self.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        var pid: u32 = 0;
+        try self.propertyResult(zwv_process_id(self.native.?, &pid));
+        return if (pid == 0) null else pid;
+    }
+    /// A fact the page's script told; false when the event is gone stale.
+    fn pageFact(self: *View, window: Access, id: PageId, text: []const u8) ?PageEvent {
+        const options = self.config.?.options;
+        const fact = page_facts.parse(text) orelse return null;
+        switch (fact) {
+            .theme_color => |color| {
+                if (!options.theme_color) return null;
+                self.theme_told = id.generation;
+                if (Rgba.eql(color, self.theme_color_value)) return null;
+                self.theme_color_value = color;
+                return .{ .theme_color_changed = .{ .id = id, .color = color } };
+            },
+            .content_size => |size| {
+                const limits = options.fit_content orelse return null;
+                self.content_size_value = size;
+                if (limits.resize_window and self.region == null and self.session == null) self.fitWindow(window, limits, size);
+                return .{ .content_size_changed = .{ .id = id, .size = size } };
+            },
+        }
+    }
+    /// Resizes the window to the content, only in the dimension that changed,
+    /// and not while it is maximized or in full screen.
+    fn fitWindow(self: *View, window: Access, limits: FitContent, size: ContentSize) void {
+        const handle = window.window orelse return;
+        const zoom_factor = self.zoom_override orelse self.config.?.options.zoom;
+        const fitted = page_facts.fit(limits, size, zoom_factor, 0) orelse return;
+        const previous = self.fitted;
+        if (previous != null and previous.?.width == fitted.width and previous.?.height == fitted.height) return;
+        const state = handle.state() catch return;
+        if (state.maximized or state.fullscreen or state.fullscreen_requested) return;
+        const bounds = handle.clientBounds() catch return;
+        var width = bounds.width;
+        var height = bounds.height;
+        if (previous == null or previous.?.width != fitted.width) width = fitted.width;
+        if (previous == null or previous.?.height != fitted.height) height = fitted.height;
+        self.fitted = fitted;
+        if (width != bounds.width or height != bounds.height) handle.resize(width, height) catch |err| window.report(.{ .domain = .webview, .operation = .webview_navigate, .err = err });
+    }
     fn clearPropertyOverrides(self: *View) void {
         if (self.agent_override) |agent| self.allocator.free(agent);
         self.agent_override = null;
         self.zoom_override = null;
         self.devtools_override = null;
+        self.theme_color_value = null;
+        self.theme_told = 0;
+        self.content_size_value = null;
+        self.fitted = null;
     }
 
     pub fn post(self: *View, message: []const u8) !void {
@@ -3169,6 +3321,15 @@ pub const View = struct {
         }
         if ((native.kind == 0 and native.flags & 1 == 0) or ((native.kind == 1 or native.kind == 3) and native.flags & 1 == 0)) self.finishRequests(.page_changed, .page_changed, .page_changed, .page, null, true);
         if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != id.generation) return 0;
+        if (native.kind == 10) return self.pageFactNotify(window, id, native.value);
+        // A page that never told a theme color, as an image, has none once loaded.
+        if (native.kind == 1 and self.config.?.options.theme_color and self.theme_told != id.generation and self.theme_color_value != null) {
+            self.theme_color_value = null;
+            if (self.config.?.options.page_listener) |listener| {
+                listener.event(listener.context, self, .{ .theme_color_changed = .{ .id = id, .color = null } });
+                if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != id.generation) return 0;
+            }
+        }
         const listener = self.config.?.options.page_listener orelse return 1;
         var utf8: ?[]u8 = null;
         defer if (utf8) |text| self.allocator.free(text);
@@ -3198,6 +3359,20 @@ pub const View = struct {
         return if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != id.generation) 0 else 1;
     }
 
+    fn pageFactNotify(self: *View, window: Access, id: PageId, value: ?[*:0]const u16) c_int {
+        const wide = value orelse return 1;
+        var text: [256]u8 = undefined;
+        var length: usize = 0;
+        while (wide[length] != 0) : (length += 1) {
+            if (length == text.len or wide[length] >= 128) return 1;
+            text[length] = @intCast(wide[length]);
+        }
+        const ev = self.pageFact(window, id, text[0..length]) orelse return 1;
+        if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != id.generation) return 0;
+        const listener = self.config.?.options.page_listener orelse return 1;
+        listener.event(listener.context, self, ev);
+        return if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != id.generation) 0 else 1;
+    }
     fn notify(ptr: *anyopaque, kind: c_int, value: ?[*:0]const u16, hr: i32) callconv(.c) void {
         const self: *View = @ptrCast(@alignCast(ptr));
         const window = self.access() orelse return;
@@ -3213,7 +3388,7 @@ pub const View = struct {
                 self.on_event(self.context, self, .ready);
             },
             1 => {
-                if (!self.ready) return;
+                if (!self.ready or self.config.?.options.untrusted) return;
                 const text = std.unicode.utf16LeToUtf8Alloc(self.allocator, std.mem.span(value.?)) catch |err| {
                     if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != page) return;
                     window.report(.{ .domain = .webview, .operation = .utf8, .err = err });
@@ -3241,7 +3416,7 @@ pub const View = struct {
                 };
                 defer self.allocator.free(text);
                 if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != page) return;
-                self.on_event(self.context, self, .{ .policy_request = .{ .kind = @fromBackingInt(@intCast(kind - 3)), .uri = text, .native_detail = hr } });
+                self.on_event(self.context, self, .{ .policy_request = .{ .kind = @fromBackingInt(@intCast(kind - 3)), .uri = text, .native_detail = hr, .user_gesture = if (kind == 3 or kind == 4) hr != 0 else null } });
             },
             8 => {
                 self.ready = false;
@@ -3400,7 +3575,7 @@ pub const View = struct {
             }
         }
         if (site.on_resource) |handler| {
-            handler.handle(handler.context, .{ .uri = uri, .path = path, .method = verb, .headers = headers }, &responder);
+            handler.handle(handler.context, .{ .uri = uri, .path = path, .method = verb, .headers = headers, .page = self.pageId() }, &responder);
         }
         if (!responder.responded) responder.respond(.{ .status = 404, .mime = "text/plain; charset=utf-8", .bytes = "Not found" }) catch {};
     }
