@@ -250,7 +250,9 @@ pub const Watcher = struct {
 
     /// Watches an absolute directory. Return means ready: native watches are
     /// established, and later changes under the root are reported. Changes
-    /// before return are not. The path is copied; reported paths begin with it
+    /// before return are not, except that macOS can still deliver hints for
+    /// writes made just before it, since fseventsd numbers events only as it
+    /// receives them. The path is copied; reported paths begin with it
     /// unchanged (no canonicalization). Linux rejects overlapping roots.
     pub fn addRoot(self: *Watcher, path: []const u8) !Root {
         try self.require();
