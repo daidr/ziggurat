@@ -1549,7 +1549,9 @@ pub const Context = struct {
         const marked = if (index) |i| fields.marked(i) else false;
         var entry: ?FieldEntry = null;
         if (marked) if (fields.accepted(index.?, self.input_state.hits[index.?].id)) |key| {
-            entry = undefined;
+            // Non-null with its fields still unset: a bare `undefined` would
+            // leave whether it is null undefined too.
+            entry = @as(FieldEntry, undefined);
             if (entry.?.initKind(self, window, fields, key, fields.kind(key) catch return true)) |_| {
                 switch (ev) {
                     .pointer_down => |value| {
