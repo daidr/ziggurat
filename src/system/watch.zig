@@ -777,17 +777,22 @@ pub const Watcher = struct {
         } else return;
         const list: [*]const [*:0]const u8 = @ptrCast(@alignCast(paths.?));
         for (0..count) |at| self.darwinEvent(index, std.mem.span(list[at]), flags[at]);
+        // Without per-file events, deleting the root itself only shows up as
+        // a change inside it, so every delivery rechecks the root.
+        self.checkDarwinRoot(index);
+    }
+    fn checkDarwinRoot(self: *Watcher, index: u32) void {
+        const root = &self.roots[index];
+        if (root.state != .active) return;
+        const text = join(self.scratch[0 .. max_path_bytes + 1], self.directories.path(root.directory), "") catch unreachable;
+        var st: std.c.Stat = undefined;
+        const same = std.c.fstatat(std.c.AT.FDCWD, text.ptr, &st, 0) == 0 and st.mode & std.c.S.IFMT == std.c.S.IFDIR and st.dev == root.native.device and st.ino == root.native.inode;
+        if (!same) self.rootLost(index);
     }
     fn darwinEvent(self: *Watcher, index: u32, reported: []const u8, flags: u32) void {
         const root = &self.roots[index];
         if (root.state != .active) return;
-        if (flags & cf.event_root_changed != 0) {
-            const text = join(self.scratch[0 .. max_path_bytes + 1], self.directories.path(root.directory), "") catch unreachable;
-            var st: std.c.Stat = undefined;
-            const same = std.c.fstatat(std.c.AT.FDCWD, text.ptr, &st, 0) == 0 and st.mode & std.c.S.IFMT == std.c.S.IFDIR and st.dev == root.native.device and st.ino == root.native.inode;
-            if (!same) self.rootLost(index);
-            return;
-        }
+        if (flags & cf.event_root_changed != 0) return self.checkDarwinRoot(index);
         if (flags & (cf.event_must_scan_subdirs | cf.event_user_dropped | cf.event_kernel_dropped) != 0) return self.overflow(index, .native_queue);
         if (flags & cf.event_unmount != 0) return;
         var path = reported;
