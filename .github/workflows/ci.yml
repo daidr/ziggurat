@@ -305,7 +305,7 @@ jobs:
           zig build check -Doptimize=${{ matrix.optimize }} --summary failures
       - name: AppKit window smoke
         run: |
-          zig build smoke-macos -Doptimize=${{ matrix.optimize }} --summary failures
+          zig build smoke-macos smoke-file-watch -Doptimize=${{ matrix.optimize }} --summary failures
       - name: WKWebView compile and page smokes
         timeout-minutes: 15
         run: |

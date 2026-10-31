@@ -6,26 +6,30 @@ const win = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else str
 
 const is_linux = builtin.os.tag == .linux;
 const is_windows = builtin.os.tag == .windows;
+const is_darwin = builtin.os.tag == .macos;
 /// coarse: directory-level hints of what to recheck, never file identity.
 pub const capabilities = .{
-    .coarse = is_linux or is_windows,
+    .coarse = is_linux or is_windows or is_darwin,
     .detailed = false,
 };
-/// Longest root or reported path in UTF-8 bytes (Linux PATH_MAX without NUL;
-/// Windows 32767 UTF-16 units at three bytes each).
-pub const max_path_bytes: usize = if (is_windows) 32767 * 3 else 4095;
+/// Longest root or reported path in UTF-8 bytes (Linux and macOS PATH_MAX
+/// without NUL; Windows 32767 UTF-16 units at three bytes each).
+pub const max_path_bytes: usize = if (is_windows) 32767 * 3 else if (is_darwin) 1023 else 4095;
 pub const max_roots_limit: u16 = if (is_windows) 63 else 1024;
 
 pub const Options = struct {
     /// Linux walks subdirectories within max_directories; Windows uses the
-    /// native subtree flag with one handle per root.
+    /// native subtree flag with one handle per root; macOS one FSEvents
+    /// stream per root, which always covers the subtree and is filtered to
+    /// the root itself when false.
     recursive: bool = true,
     /// Quiet interval after the latest native event before a batch is due.
     debounce_ms: u32 = 50,
     /// Upper bound from the first undelivered event until the batch is due.
     max_latency_ms: u32 = 500,
     max_roots: u16 = 8,
-    /// Linux: inotify watches, one per watched directory. Windows: one per root.
+    /// Linux: inotify watches, one per watched directory. Windows and macOS:
+    /// one per root.
     max_directories: u32 = 4096,
     /// Distinct undelivered (root, directory) pairs; coalescing is a linear scan.
     max_pending: u32 = 512,
@@ -77,7 +81,14 @@ const RootState = struct {
     directory: u32 = 0,
     overflow: ?OverflowReason = null,
     incomplete: bool = false,
-    native: if (is_windows) WindowsRoot else void = if (is_windows) .{} else {},
+    native: if (is_windows) WindowsRoot else if (is_darwin) DarwinRoot else void = if (is_windows or is_darwin) .{} else {},
+};
+const DarwinRoot = struct {
+    stream: ?cf.Ref = null,
+    /// Directory slot holding the resolved path FSEvents reports under.
+    canonical: u32 = 0,
+    device: i64 = 0,
+    inode: u64 = 0,
 };
 const WindowsRoot = struct {
     handle: win.HANDLE = null,
@@ -104,6 +115,12 @@ pub const Watcher = struct {
     inotify: if (is_linux) i32 else void,
     wake_fd: if (is_linux) i32 else void,
     wake_event: if (is_windows) win.HANDLE else void,
+    run_loop: if (is_darwin) cf.Ref else void,
+    run_mode: if (is_darwin) cf.Ref else void,
+    wake_source: if (is_darwin) cf.Ref else void,
+    /// Heap flag the wake source sets on the watcher thread, so init can
+    /// return the watcher by value.
+    woken: if (is_darwin) *bool else void,
     first: ?zio.Instant = null,
     last: ?zio.Instant = null,
     due: bool = false,
@@ -117,7 +134,10 @@ pub const Watcher = struct {
         const roots = try allocator.alloc(RootState, options.max_roots);
         errdefer allocator.free(roots);
         @memset(roots, .{});
-        var directories = try Directories.init(allocator, options.max_directories, options.directory_path_bytes);
+        // macOS keeps each root's resolved path beside the path it was given.
+        const extra_slots: u32 = if (is_darwin) options.max_roots else 0;
+        const path_bytes: u32 = if (is_darwin) options.directory_path_bytes *| 2 else options.directory_path_bytes;
+        var directories = try Directories.init(allocator, options.max_directories + extra_slots, path_bytes);
         errdefer directories.deinit(allocator);
         var pending = try Pending.init(allocator, options.max_pending, options.pending_path_bytes);
         errdefer pending.deinit(allocator);
@@ -142,6 +162,10 @@ pub const Watcher = struct {
             .inotify = undefined,
             .wake_fd = undefined,
             .wake_event = undefined,
+            .run_loop = undefined,
+            .run_mode = undefined,
+            .wake_source = undefined,
+            .woken = undefined,
         };
         if (is_linux) {
             self.descriptors = try DescriptorTable.init(allocator, options.max_directories);
@@ -153,6 +177,17 @@ pub const Watcher = struct {
             const wake = linux.eventfd(0, linux.EFD.CLOEXEC | linux.EFD.NONBLOCK);
             if (linux.errno(wake) != .SUCCESS) return errnoError(linux.errno(wake));
             self.wake_fd = @intCast(wake);
+        } else if (is_darwin) {
+            self.woken = try allocator.create(bool);
+            errdefer allocator.destroy(self.woken);
+            self.woken.* = false;
+            const mode_name = "ziggurat.watch";
+            self.run_mode = cf.CFStringCreateWithBytes(null, mode_name, mode_name.len, cf.utf8, 0) orelse return error.SystemResources;
+            errdefer cf.CFRelease(self.run_mode);
+            var context: cf.SourceContext = .{ .info = self.woken, .perform = cf.performWake };
+            self.wake_source = cf.CFRunLoopSourceCreate(null, 0, &context) orelse return error.SystemResources;
+            self.run_loop = cf.CFRunLoopGetCurrent();
+            cf.CFRunLoopAddSource(self.run_loop, self.wake_source, self.run_mode);
         } else {
             self.wake_event = win.CreateEventW(null, 1, 0, null) orelse return error.SystemResources;
         }
@@ -168,6 +203,11 @@ pub const Watcher = struct {
             _ = linux.close(self.inotify);
             _ = linux.close(self.wake_fd);
             self.descriptors.deinit(self.allocator);
+        } else if (is_darwin) {
+            cf.CFRunLoopSourceInvalidate(self.wake_source);
+            cf.CFRelease(self.wake_source);
+            cf.CFRelease(self.run_mode);
+            self.allocator.destroy(self.woken);
         } else _ = win.CloseHandle(self.wake_event);
         self.allocator.free(self.walk);
         self.allocator.free(self.native_buffer);
@@ -183,7 +223,12 @@ pub const Watcher = struct {
         if (is_linux) {
             const one: u64 = 1;
             _ = linux.write(self.wake_fd, std.mem.asBytes(&one), @sizeOf(u64));
-        } else if (is_windows) _ = win.SetEvent(self.wake_event);
+        } else if (is_windows) {
+            _ = win.SetEvent(self.wake_event);
+        } else if (is_darwin) {
+            cf.CFRunLoopSourceSignal(self.wake_source);
+            cf.CFRunLoopWakeUp(self.run_loop);
+        }
     }
     fn require(self: *Watcher) !void {
         if (self.thread != std.Thread.getCurrentId()) return error.WrongThread;
@@ -216,6 +261,9 @@ pub const Watcher = struct {
             const text = try join(self.scratch[0 .. max_path_bytes + 1], trimmed, "");
             root.directory = (try self.watchDirectory(index, text, true)) orelse return error.FileNotFound;
             if (self.options.recursive) try self.walkTree(index, root.directory, false);
+        } else if (is_darwin) {
+            root.directory = try self.directories.add(index, 0, trimmed);
+            try self.openDarwin(index, trimmed);
         } else {
             root.directory = try self.directories.add(index, 0, trimmed);
             try self.openWindows(index, trimmed);
@@ -397,6 +445,17 @@ pub const Watcher = struct {
             for (self.directories.slots, 0..) |slot, at| {
                 if (slot.live and slot.root == index) self.directories.release(@intCast(at));
             }
+        } else if (is_darwin) {
+            const native = &self.roots[index].native;
+            if (native.stream) |stream| {
+                cf.FSEventStreamStop(stream);
+                cf.FSEventStreamInvalidate(stream);
+                cf.FSEventStreamRelease(stream);
+            }
+            native.* = .{};
+            for (self.directories.slots, 0..) |slot, at| {
+                if (slot.live and slot.root == index) self.directories.release(@intCast(at));
+            }
         }
     }
 
@@ -416,6 +475,13 @@ pub const Watcher = struct {
                 return true;
             }
             return false;
+        } else if (is_darwin) {
+            // Both callbacks stop this run, so it returns once anything was handled.
+            const seconds: f64 = if (limit_ns) |ns| @as(f64, @floatFromInt(ns)) / std.time.ns_per_s else 1.0e10;
+            _ = cf.CFRunLoopRunInMode(self.run_mode, seconds, 1);
+            if (!self.woken.*) return false;
+            self.woken.* = false;
+            return true;
         } else {
             var handles: [64]win.HANDLE = undefined;
             var owners: [64]u32 = undefined;
@@ -649,6 +715,144 @@ pub const Watcher = struct {
             offset += info.NextEntryOffset;
         }
     }
+
+    // macOS FSEvents, one stream per root on this thread's run loop.
+    fn openDarwin(self: *Watcher, index: u32, path: []const u8) !void {
+        const native = &self.roots[index].native;
+        const text = try join(self.scratch[0 .. max_path_bytes + 1], path, "");
+        var st: std.c.Stat = undefined;
+        if (std.c.fstatat(std.c.AT.FDCWD, text.ptr, &st, 0) != 0) return self.darwinErrno();
+        if (st.mode & std.c.S.IFMT != std.c.S.IFDIR) return error.NotDir;
+        native.device = st.dev;
+        native.inode = st.ino;
+        var resolved: [std.c.PATH_MAX]u8 = undefined;
+        const real = std.c.realpath(text.ptr, &resolved) orelse return self.darwinErrno();
+        native.canonical = try self.directories.add(index, 0, try rootPath(std.mem.span(real)));
+        const canonical = self.directories.path(native.canonical);
+        const string = cf.CFStringCreateWithBytes(null, canonical.ptr, @intCast(canonical.len), cf.utf8, 0) orelse return error.SystemResources;
+        defer cf.CFRelease(string);
+        const values = [_]?*const anyopaque{string};
+        const paths = cf.CFArrayCreate(null, &values, 1, null) orelse return error.SystemResources;
+        defer cf.CFRelease(paths);
+        var context: cf.StreamContext = .{ .info = self };
+        const stream = cf.FSEventStreamCreate(null, onDarwinEvents, &context, paths, cf.since_now, 0.0, cf.create_no_defer | cf.create_watch_root) orelse return error.WatchFailed;
+        native.stream = stream;
+        cf.FSEventStreamScheduleWithRunLoop(stream, self.run_loop, self.run_mode);
+        if (cf.FSEventStreamStart(stream) == 0) return error.WatchFailed;
+    }
+    fn darwinErrno(self: *Watcher) anyerror {
+        const code = std.c.errno(-1);
+        self.last_failure = .{ .domain = .errno, .code = @intCast(@intFromEnum(code)) };
+        return switch (code) {
+            .ACCES, .PERM => error.AccessDenied,
+            .NOENT => error.FileNotFound,
+            .NOTDIR => error.NotDir,
+            .LOOP => error.SymLinkLoop,
+            .NAMETOOLONG => error.NameTooLong,
+            .MFILE, .NFILE => error.ProcessFdQuotaExceeded,
+            .NOMEM => error.SystemResources,
+            else => error.Unexpected,
+        };
+    }
+    fn onDarwinEvents(stream: ?*const anyopaque, info: ?*anyopaque, count: usize, paths: ?*anyopaque, flags: [*]const u32, ids: [*]const u64) callconv(.c) void {
+        _ = ids;
+        const self: *Watcher = @ptrCast(@alignCast(info.?));
+        cf.CFRunLoopStop(cf.CFRunLoopGetCurrent());
+        const index: u32 = for (self.roots, 0..) |root, at| {
+            if (root.state == .active and root.native.stream != null and @intFromPtr(root.native.stream.?) == @intFromPtr(stream)) break @intCast(at);
+        } else return;
+        const list: [*]const [*:0]const u8 = @ptrCast(@alignCast(paths.?));
+        for (0..count) |at| self.darwinEvent(index, std.mem.span(list[at]), flags[at]);
+    }
+    fn darwinEvent(self: *Watcher, index: u32, reported: []const u8, flags: u32) void {
+        const root = &self.roots[index];
+        if (root.state != .active) return;
+        if (flags & cf.event_root_changed != 0) {
+            const text = join(self.scratch[0 .. max_path_bytes + 1], self.directories.path(root.directory), "") catch unreachable;
+            var st: std.c.Stat = undefined;
+            const same = std.c.fstatat(std.c.AT.FDCWD, text.ptr, &st, 0) == 0 and st.mode & std.c.S.IFMT == std.c.S.IFDIR and st.dev == root.native.device and st.ino == root.native.inode;
+            if (!same) self.rootLost(index);
+            return;
+        }
+        if (flags & (cf.event_must_scan_subdirs | cf.event_user_dropped | cf.event_kernel_dropped) != 0) return self.overflow(index, .native_queue);
+        if (flags & cf.event_unmount != 0) return;
+        var path = reported;
+        while (path.len > 1 and path[path.len - 1] == '/') path = path[0 .. path.len - 1];
+        const canonical = self.directories.path(root.native.canonical);
+        if (!std.mem.startsWith(u8, path, canonical)) return;
+        var rest = path[canonical.len..];
+        if (canonical.len == 1) {
+            rest = if (path.len == 1) "" else path;
+        } else if (rest.len != 0 and rest[0] != '/') return;
+        if (!self.options.recursive and rest.len != 0) return;
+        const given = self.directories.path(root.directory);
+        const destination = self.scratch[0 .. max_path_bytes + 1];
+        @memcpy(destination[0..given.len], given);
+        // A root of "/" already ends with the separator `rest` begins with.
+        const skip: usize = if (rest.len != 0 and given.len != 0 and given[given.len - 1] == '/') 1 else 0;
+        const tail = rest[skip..];
+        if (given.len + tail.len > max_path_bytes) return self.overflow(index, .incomplete_tree);
+        @memcpy(destination[given.len..][0..tail.len], tail);
+        self.changed(index, destination[0 .. given.len + tail.len]);
+    }
+};
+
+/// CoreFoundation and FSEvents (CoreServices) declarations for macOS.
+const cf = if (is_darwin) struct {
+    const Ref = *anyopaque;
+    const utf8: u32 = 0x08000100;
+    const since_now: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+    const create_no_defer: u32 = 0x02;
+    const create_watch_root: u32 = 0x04;
+    const event_must_scan_subdirs: u32 = 0x01;
+    const event_user_dropped: u32 = 0x02;
+    const event_kernel_dropped: u32 = 0x04;
+    const event_root_changed: u32 = 0x20;
+    const event_unmount: u32 = 0x80;
+    const SourceContext = extern struct {
+        version: isize = 0,
+        info: ?*anyopaque,
+        retain: ?*const anyopaque = null,
+        release: ?*const anyopaque = null,
+        copy_description: ?*const anyopaque = null,
+        equal: ?*const anyopaque = null,
+        hash: ?*const anyopaque = null,
+        schedule: ?*const anyopaque = null,
+        cancel: ?*const anyopaque = null,
+        perform: ?*const fn (?*anyopaque) callconv(.c) void,
+    };
+    const StreamContext = extern struct {
+        version: isize = 0,
+        info: ?*anyopaque,
+        retain: ?*const anyopaque = null,
+        release: ?*const anyopaque = null,
+        copy_description: ?*const anyopaque = null,
+    };
+    const StreamCallback = fn (?*const anyopaque, ?*anyopaque, usize, ?*anyopaque, [*]const u32, [*]const u64) callconv(.c) void;
+    fn performWake(info: ?*anyopaque) callconv(.c) void {
+        const woken: *bool = @ptrCast(@alignCast(info.?));
+        woken.* = true;
+        CFRunLoopStop(CFRunLoopGetCurrent());
+    }
+    extern fn CFRelease(ref: *const anyopaque) void;
+    extern fn CFStringCreateWithBytes(allocator: ?Ref, bytes: [*]const u8, len: isize, encoding: u32, external: u8) ?Ref;
+    extern fn CFArrayCreate(allocator: ?Ref, values: [*]const ?*const anyopaque, count: isize, callbacks: ?*const anyopaque) ?Ref;
+    extern fn CFRunLoopGetCurrent() Ref;
+    extern fn CFRunLoopRunInMode(mode: Ref, seconds: f64, return_after_source_handled: u8) i32;
+    extern fn CFRunLoopStop(run_loop: Ref) void;
+    extern fn CFRunLoopWakeUp(run_loop: Ref) void;
+    extern fn CFRunLoopSourceCreate(allocator: ?Ref, order: isize, context: *SourceContext) ?Ref;
+    extern fn CFRunLoopAddSource(run_loop: Ref, source: Ref, mode: Ref) void;
+    extern fn CFRunLoopSourceSignal(source: Ref) void;
+    extern fn CFRunLoopSourceInvalidate(source: Ref) void;
+    extern fn FSEventStreamCreate(allocator: ?Ref, callback: *const StreamCallback, context: *StreamContext, paths: Ref, since: u64, latency: f64, flags: u32) ?Ref;
+    extern fn FSEventStreamScheduleWithRunLoop(stream: Ref, run_loop: Ref, mode: Ref) void;
+    extern fn FSEventStreamStart(stream: Ref) u8;
+    extern fn FSEventStreamStop(stream: Ref) void;
+    extern fn FSEventStreamInvalidate(stream: Ref) void;
+    extern fn FSEventStreamRelease(stream: Ref) void;
+} else struct {
+    const Ref = *anyopaque;
 };
 
 fn validate(options: Options) !void {

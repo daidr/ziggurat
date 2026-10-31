@@ -78,7 +78,7 @@ pub const capabilities = .{
     .power = power.capabilities,
     .taskbar = taskbar.capabilities,
     .desktop = desktop.capabilities,
-    .file_watch = builtin.os.tag == .windows or builtin.os.tag == .linux,
+    .file_watch = builtin.os.tag == .windows or builtin.os.tag == .linux or builtin.os.tag == .macos,
     .quit_on_signals = signals.capabilities.quit_on_signals,
     .jump_list = jump_list.capabilities,
     .recent = recent.capabilities,

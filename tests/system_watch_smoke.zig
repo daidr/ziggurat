@@ -382,7 +382,8 @@ fn handles() !usize {
         if (c.GetProcessHandleCount(c.GetCurrentProcess(), &count) == 0) return error.HandleCountUnavailable;
         return count;
     }
-    var directory = try std.Io.Dir.openDirAbsolute(zio.io(), "/proc/self/fd", .{ .iterate = true });
+    const listing = if (builtin.os.tag == .macos) "/dev/fd" else "/proc/self/fd";
+    var directory = try std.Io.Dir.openDirAbsolute(zio.io(), listing, .{ .iterate = true });
     defer directory.close(zio.io());
     var iterator = directory.iterate();
     var count: usize = 0;

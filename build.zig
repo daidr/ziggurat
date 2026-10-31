@@ -312,6 +312,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_plugin_websocket_tests.step);
     b.step("test-plugin-websocket", "Run the WebSocket plugin's message, piece, close, refusal and page-leave tests against local servers").dependOn(&run_plugin_websocket_tests.step);
     const system_watch = b.createModule(.{ .root_source_file = b.path("src/system/watch.zig"), .target = target, .optimize = optimize, .link_libc = target.result.os.tag == .windows });
+    if (target.result.os.tag == .macos) native_support.linkFrameworks(b, system_watch, &.{ "CoreServices", "CoreFoundation" });
     const plugin_watch = b.addModule("ziggurat_plugin_watch", .{ .root_source_file = b.path("src/page_runtime/plugins/watch.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat_ipc", .module = ipc },
         .{ .name = "ziggurat_page_runtime", .module = page_runtime },
@@ -562,6 +563,8 @@ pub fn build(b: *std.Build) void {
         });
     }
     const system = b.addModule("ziggurat_system", .{ .root_source_file = b.path("src/system/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
+    // The file watcher uses FSEvents on macOS.
+    if (target.result.os.tag == .macos) native_support.linkFrameworks(b, system, &.{ "CoreServices", "CoreFoundation" });
     if (target.result.os.tag == .linux) {
         const native = native_support.add(b, system, "system-shell-native", "src/system/shell_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         native.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
@@ -1510,6 +1513,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
         });
+        addSmoke(b, "smoke-file-watch", "tests/system_watch_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat_system", .module = system },
+        });
     }
     if (target.result.os.tag == .linux) {
         const native = native_support.add(b, ui, "ui-cairo-native", "src/ui/linux.c", &.{"-std=c11"}, target, optimize);
@@ -2359,6 +2365,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "ziggurat", .module = core }},
     }) });
     const watch_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/system/watch.zig"), .target = target, .optimize = optimize, .link_libc = target.result.os.tag == .windows }) });
+    if (target.result.os.tag == .macos) native_support.linkFrameworks(b, watch_tests.root_module, &.{ "CoreServices", "CoreFoundation" });
     b.step("test-file-watch", "Run coarse file-watch unit tests").dependOn(&b.addRunArtifact(watch_tests).step);
     const menu_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/system/menus.zig"), .target = target, .optimize = optimize }) });
     const system_extra_tests = b.addTest(.{ .root_module = b.createModule(.{
