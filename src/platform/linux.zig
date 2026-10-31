@@ -281,7 +281,7 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
             const phase: core.PointerPhase = if (native.kind == 3) .down else .up;
             // `key` carries a button other than the primary one.
             if (native.key < 0 or native.key > 4) return 0;
-            const input: core.PointerButtonInput = .{ .position = point, .modifiers = pointerModifiers(@intCast(native.flags)), .button = @fromBackingInt(@intCast(native.key)) };
+            const input: core.PointerButtonInput = .{ .position = point, .modifiers = pointerModifiers(@intCast(native.flags)), .button = @fromBackingInt(@intCast(zio.asUnsigned(native.key))) };
             if (record.pointerEnabled()) {
                 if (native.context) |context| {
                     const ticket: *const PointerTicket = @ptrCast(@alignCast(context));
