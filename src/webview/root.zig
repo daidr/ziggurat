@@ -5,7 +5,13 @@ const backend = @import("backend.zig");
 const webkit = @import("webkit.zig");
 const webkit_remote = @import("webkit_remote.zig");
 pub const RequestPolicyExtension = webkit_remote.Extension;
-const is_linux = @import("builtin").os.tag == .linux;
+const is_webkit = switch (@import("builtin").os.tag) {
+    .linux, .macos => true,
+    else => false,
+};
+/// The WKWebView backend implements the same native contract as WebKitGTK
+/// for trusted HTML pages; the other page sources and tools are refused.
+const is_macos = @import("builtin").os.tag == .macos;
 const native_profiles = @import("profile.zig");
 pub const profile_storage = native_profiles.storage;
 pub const Profile = @import("profile_app.zig").Type(z);
@@ -14,7 +20,7 @@ pub const cookies = @import("cookies.zig");
 pub const CookieStore = @import("cookie_store.zig").Type(z, Profile);
 pub const cookieStoreNativeCounts = @import("cookie_store.zig").nativeCounts;
 test "independent cookie store rejects unsupported platforms before any owner access" {
-    if (!is_linux) {
+    if (!is_webkit) {
         const app: *z.App = @ptrFromInt(4096);
         const profile: *Profile = @ptrFromInt(4096);
         try std.testing.expectError(error.UnsupportedCapability, CookieStore.create(std.testing.failing_allocator, app, profile, .{}));
@@ -546,7 +552,7 @@ extern fn zwv_initializer_counts(*u32, *u32, *u32, *u64) void;
 pub const InitializerNativeCounts = struct { budgets: u32 = 0, owners: u32 = 0, handlers: u32 = 0, bytes: u64 = 0 };
 pub fn initializerNativeCounts() InitializerNativeCounts {
     var counts: InitializerNativeCounts = .{};
-    if (is_linux) webkit.zwk_initializer_counts(&counts.budgets, &counts.owners, &counts.handlers, &counts.bytes) else zwv_initializer_counts(&counts.budgets, &counts.owners, &counts.handlers, &counts.bytes);
+    if (is_webkit) webkit.zwk_initializer_counts(&counts.budgets, &counts.owners, &counts.handlers, &counts.bytes) else zwv_initializer_counts(&counts.budgets, &counts.owners, &counts.handlers, &counts.bytes);
     return counts;
 }
 extern fn zwv_action_budget_create(u32, u32) ?*anyopaque;
@@ -634,7 +640,7 @@ pub const Responder = struct {
         try resources.validateResponse(response, self.max_bytes);
         var headers: [16]NativeResponseHeader = undefined;
         for (response.headers, 0..) |header, i| headers[i] = .{ .name = header.name.ptr, .name_len = @intCast(header.name.len), .value = header.value.ptr, .value_len = @intCast(header.value.len) };
-        if (is_linux) {
+        if (is_webkit) {
             try self.view.resourceResult(webkit.zwk_resource_respond(self.native, response.status, response.mime.ptr, response.mime.len, response.bytes.ptr, response.bytes.len, &headers, @intCast(response.headers.len)));
             self.responded = true;
             return;
@@ -657,8 +663,8 @@ pub const Responder = struct {
         var headers: [16]NativeResponseHeader = undefined;
         for (response.headers, 0..) |header, i| headers[i] = .{ .name = header.name.ptr, .name_len = @intCast(header.name.len), .value = header.value.ptr, .value_len = @intCast(header.value.len) };
         var ticket: ?*anyopaque = null;
-        const hr = if (is_linux) webkit.zwk_resource_respond_file(self.native, owned.native.?, owned.length, budget, response.status, response.mime.ptr, response.mime.len, &headers, @intCast(response.headers.len), @intFromBool(options.ticket), &ticket) else zwv_respond_file(self.native, owned.native.?, owned.length, budget, response.status, response.mime.ptr, response.mime.len, &headers, @intCast(response.headers.len), @intFromBool(options.ticket), &ticket);
-        if (is_linux) try self.view.resourceResult(hr) else {
+        const hr = if (is_webkit) webkit.zwk_resource_respond_file(self.native, owned.native.?, owned.length, budget, response.status, response.mime.ptr, response.mime.len, &headers, @intCast(response.headers.len), @intFromBool(options.ticket), &ticket) else zwv_respond_file(self.native, owned.native.?, owned.length, budget, response.status, response.mime.ptr, response.mime.len, &headers, @intCast(response.headers.len), @intFromBool(options.ticket), &ticket);
+        if (is_webkit) try self.view.resourceResult(hr) else {
             self.view.last_hresult = hr;
             if (hr < 0) return fileResponseError(hr);
         }
@@ -678,13 +684,18 @@ fn appStopping(window: anytype) bool {
     return window.app.phase == .stopping or window.app.phase == .stopped;
 }
 fn nativeClose(native: *anyopaque) void {
-    if (is_linux) webkit.zwk_close(native) else zwv_close(native);
+    if (is_webkit) webkit.zwk_close(native) else zwv_close(native);
 }
 fn nativeCancelScript(native: *anyopaque, token: u64) void {
-    if (is_linux) webkit.zwk_evaluate_cancel(native, token) else zwv_evaluate_cancel(native, token);
+    if (is_webkit) webkit.zwk_evaluate_cancel(native, token) else zwv_evaluate_cancel(native, token);
 }
 fn validateBackendOptions(options: Options) !void {
-    if (is_linux) {
+    if (is_macos) {
+        if (options.storage != .ephemeral or options.remote != null or options.local != null or options.request_policy_extension != null or
+            options.custom_schemes.len != 0 or options.file_streams != null or options.document_initializers.len != 0) return error.UnsupportedCapability;
+        inline for (zio.fields(tools.Policy)) |field| if (@field(options.tools, field.name)) return error.UnsupportedCapability;
+    }
+    if (is_webkit) {
         switch (options.storage) {
             .ephemeral => {
                 if (options.profile != null) return error.ConflictingProfileStorage;
@@ -886,7 +897,7 @@ const OwnedConfig = struct {
         if (options.file_streams) |limits| try limits.validate();
         if (!std.math.isFinite(options.zoom) or options.zoom < 0.25 or options.zoom > 5) return error.InvalidZoom;
         if (options.fit_content) |limits| try limits.validate();
-        if (!is_linux and options.autoplay == .allow and options.profile != null) return error.UnsupportedCapability;
+        if (!is_webkit and options.autoplay == .allow and options.profile != null) return error.UnsupportedCapability;
         if (options.user_agent) |agent| if (!validUserAgent(agent)) return error.InvalidUserAgent;
         if (options.remote != null and (options.local != null or options.html.len != 0)) return error.ConflictingPageSources;
         if (options.allow_local_navigation and options.local == null) return error.LocalSiteRequired;
@@ -906,7 +917,7 @@ const OwnedConfig = struct {
         const origin_count = if (options.remote) |remote| remote.origins.len else 0;
         const credential_count = if (options.remote) |remote| remote.request_credentials.len else 0;
         if (options.remote) |remote| {
-            if (is_linux) {
+            if (is_webkit) {
                 try webkit_remote.validate(remote);
             } else {
                 var scratch: RemoteScratch = undefined;
@@ -1112,19 +1123,19 @@ const OwnedConfig = struct {
 pub const ResourceCounts = struct { states: u32, handlers: u32, controllers: u32 };
 pub const ActionResourceCounts = struct { budgets: u32, permissions: u32, downloads: u32 };
 pub fn actionResourceCounts() ActionResourceCounts {
-    if (is_linux) return .{ .budgets = 0, .permissions = 0, .downloads = 0 };
+    if (is_webkit) return .{ .budgets = 0, .permissions = 0, .downloads = 0 };
     var counts: ActionResourceCounts = undefined;
     zwv_action_counts(&counts.budgets, &counts.permissions, &counts.downloads);
     return counts;
 }
 pub fn resourceCounts() ResourceCounts {
     var counts: ResourceCounts = undefined;
-    if (is_linux) webkit.zwk_counts(&counts.states, &counts.handlers, &counts.controllers) else zwv_resource_counts(&counts.states, &counts.handlers, &counts.controllers);
+    if (is_webkit) webkit.zwk_counts(&counts.states, &counts.handlers, &counts.controllers) else zwv_resource_counts(&counts.states, &counts.handlers, &counts.controllers);
     return counts;
 }
 /// Adapter-owned physical memory streams, independent of late View callbacks.
 pub fn customLocalResourceCounts() custom_local.ResourceCounts {
-    if (!is_linux) return .{ .budgets = 0, .streams = 0, .body_bytes = 0 };
+    if (!is_webkit) return .{ .budgets = 0, .streams = 0, .body_bytes = 0 };
     var result: custom_local.ResourceCounts = undefined;
     webkit.zwk_local_counts(&result.budgets, &result.streams, &result.body_bytes);
     return result;
@@ -1132,26 +1143,26 @@ pub fn customLocalResourceCounts() custom_local.ResourceCounts {
 /// Linux inspectors explicitly shown and not yet closed by disable, detach,
 /// recover or close. Windows tool windows belong to the Runtime and report 0.
 pub fn devToolsResourceCount() u32 {
-    if (!is_linux) return 0;
+    if (!is_webkit) return 0;
     var shown: u32 = undefined;
     webkit.zwk_devtools_counts(&shown);
     return shown;
 }
 pub const ToolResourceCounts = struct { streams: u32, pending: u32 };
 pub fn toolResourceCounts() ToolResourceCounts {
-    if (is_linux) return .{ .streams = 0, .pending = 0 };
+    if (is_webkit) return .{ .streams = 0, .pending = 0 };
     var value: ToolResourceCounts = undefined;
     zwv_tool_counts(&value.streams, &value.pending);
     return value;
 }
 pub fn deferredResourceCount() u32 {
-    if (is_linux) return webkit.zwk_resources_pending();
+    if (is_webkit) return webkit.zwk_resources_pending();
     return zwv_resource_pending();
 }
 pub const FileResourceCounts = struct { streams: u32, controls: u32, budgets: u32 };
 pub fn fileResourceCounts() FileResourceCounts {
     var counts: FileResourceCounts = undefined;
-    if (is_linux) {
+    if (is_webkit) {
         var candidates: u32 = undefined;
         webkit.zwk_file_counts(&counts.streams, &counts.controls, &counts.budgets, &candidates);
         return counts;
@@ -1222,7 +1233,7 @@ pub const View = struct {
     /// Last real native failure. Local validation/capacity errors create none.
     /// Strings/results remain borrowed under their ordinary callback contract.
     pub fn nativeFailure(self: *const View) ?NativeFailure {
-        if (is_linux) return self.last_native_failure;
+        if (is_webkit) return self.last_native_failure;
         return if (self.last_hresult < 0) .{ .hresult = self.last_hresult } else null;
     }
 
@@ -1376,7 +1387,7 @@ pub const View = struct {
         };
     }
     fn parentPosition(self: *View) void {
-        if (is_linux) return;
+        if (is_webkit) return;
         const window = self.access() orelse return;
         if (self.attachmentClosed() or appStopping(window)) return;
         const scope = self.beginCallback() orelse return;
@@ -1390,7 +1401,7 @@ pub const View = struct {
         const native = self.native orelse return error.Closed;
         const b = viewport.bounds;
         const edges = try viewportPixels(b, scale);
-        if (is_linux) {
+        if (is_webkit) {
             try webkit.check(webkit.zwk_viewport(native, edges[0], edges[1], edges[2], edges[3], @intFromBool(viewport.visible and b.width > 0 and b.height > 0)));
             if (self.attachmentClosed()) return error.Closed;
             return;
@@ -1447,10 +1458,10 @@ pub const View = struct {
     fn discardNativeAttachment(self: *View) void {
         const find_budget = self.find_budget;
         self.find_budget = null;
-        if (is_linux) if (find_budget) |value| webkit.zwk_find_budget_close(value);
+        if (is_webkit) if (find_budget) |value| webkit.zwk_find_budget_close(value);
         const capture_budget = self.capture_budget;
         self.capture_budget = null;
-        if (is_linux) if (capture_budget) |value| webkit.zwk_capture_budget_close(value);
+        if (is_webkit) if (capture_budget) |value| webkit.zwk_capture_budget_close(value);
         const initializer_controller = self.initializer_controller;
         self.initializer_controller = null;
         const initializer_domain = self.initializer_domain;
@@ -1458,19 +1469,19 @@ pub const View = struct {
         const native = self.native;
         self.native = null;
         if (native) |value| nativeClose(value);
-        if (is_linux) if (find_budget) |value| webkit.zwk_find_budget_release(value);
-        if (is_linux) if (capture_budget) |value| webkit.zwk_capture_budget_release(value);
+        if (is_webkit) if (find_budget) |value| webkit.zwk_find_budget_release(value);
+        if (is_webkit) if (capture_budget) |value| webkit.zwk_capture_budget_release(value);
         const file_budget = self.file_budget;
         self.file_budget = null;
         if (file_budget) |value| {
-            if (is_linux) webkit.zwk_file_budget_release(value) else zwv_file_budget_release(value);
+            if (is_webkit) webkit.zwk_file_budget_release(value) else zwv_file_budget_release(value);
         }
         const local_budget = self.custom_local_budget;
         self.custom_local_budget = null;
-        if (is_linux) if (local_budget) |value| webkit.zwk_local_budget_release(value);
+        if (is_webkit) if (local_budget) |value| webkit.zwk_local_budget_release(value);
         const action_budget = self.action_budget;
         self.action_budget = null;
-        if (!is_linux) if (action_budget) |value| zwv_action_budget_release(value);
+        if (!is_webkit) if (action_budget) |value| zwv_action_budget_release(value);
         if (initializer_controller) |controller| controller.release();
         if (initializer_domain) |domain| initializer_owner.releaseDomain(domain);
     }
@@ -1478,7 +1489,7 @@ pub const View = struct {
     fn startNative(self: *View, window: Access) !void {
         if (self.config.?.initializer_config) |source| self.pinInitializerDomain(source.domain);
         try self.config.?.admitProfile();
-        if (is_linux) return self.startWebKit(window);
+        if (is_webkit) return self.startWebKit(window);
         const config = self.config.?;
         const html = if (config.url == null) try std.unicode.utf8ToUtf16LeAllocZ(self.allocator, config.options.html) else null;
         defer if (html) |value| self.allocator.free(value);
@@ -1731,7 +1742,7 @@ pub const View = struct {
     }
     fn initializersUnavailable(self: *const View) bool {
         if (self.initializer_controller) |controller| if (controller.book.unavailable) return true;
-        return self.initializer_domain != null and (if (self.native) |native| (if (is_linux) webkit.zwk_initializers_blocked(native) else zwv_initializers_blocked(native)) else false);
+        return self.initializer_domain != null and (if (self.native) |native| (if (is_webkit) webkit.zwk_initializers_blocked(native) else zwv_initializers_blocked(native)) else false);
     }
     fn initializerNavigationAllowed(self: *const View) bool {
         return !self.initializer_preparing and (if (self.initializer_controller) |controller| controller.book.allowsNavigation() else true);
@@ -1775,7 +1786,7 @@ pub const View = struct {
         controller.candidate = candidate;
         errdefer controller.candidate = null;
         const input = controller.input();
-        if (is_linux) {
+        if (is_webkit) {
             const result = webkit.zwk_initializers_prepare(native, &input, token, initializerNotify);
             if (result == 7) return error.Busy;
             try webkit.check(result);
@@ -1784,12 +1795,12 @@ pub const View = struct {
             if (self.last_hresult == @as(i32, @bitCast(@as(u32, 0x8000000a)))) return error.Busy;
             if (self.last_hresult < 0) return error.InitializerPreparationFailed;
         }
-        errdefer if (is_linux) webkit.zwk_initializers_abandon(native) else zwv_initializers_abandon(native);
+        errdefer if (is_webkit) webkit.zwk_initializers_abandon(native) else zwv_initializers_abandon(native);
         try controller.book.accept(token, completion);
         const replacement: InitializerReplacement = .{ .view = self, .token = token };
         // No View access after activation: native calls may complete synchronously and
         // the accepted completion may close/reload the attachment.
-        if (is_linux) webkit.zwk_initializers_activate(native) else zwv_initializers_activate(native);
+        if (is_webkit) webkit.zwk_initializers_activate(native) else zwv_initializers_activate(native);
         return replacement;
     }
     fn cancelDocumentInitializers(self: *View, token: u64) !bool {
@@ -1802,7 +1813,7 @@ pub const View = struct {
         const pending = controller.book.pending orelse return false;
         if (pending.token != token or !pending.accepted or pending.cancelled) return false;
         const native = self.native orelse return false;
-        if (!(if (is_linux) webkit.zwk_initializers_try_cancel(native, token) else zwv_initializers_try_cancel(native, token))) return false;
+        if (!(if (is_webkit) webkit.zwk_initializers_try_cancel(native, token) else zwv_initializers_try_cancel(native, token))) return false;
         const delivery = controller.book.cancel(token).?;
         delivery.invoke();
         return true;
@@ -1853,21 +1864,21 @@ pub const View = struct {
         const native = self.native orelse blk: {
             // A new anchor can itself fail to allocate; retain the owned config
             // and return OutOfMemory so the caller can retry or close the window.
-            const anchor = (if (is_linux) webkit.zwk_recovery_anchor(webkitNotify, self) else zwv_recovery_anchor(notify, self)) orelse return error.OutOfMemory;
+            const anchor = (if (is_webkit) webkit.zwk_recovery_anchor(webkitNotify, self) else zwv_recovery_anchor(notify, self)) orelse return error.OutOfMemory;
             self.native = anchor;
             break :blk anchor;
         };
-        if (is_linux) {
+        if (is_webkit) {
             try webkit.check(webkit.zwk_recovery_begin(native));
         } else {
             self.last_hresult = zwv_recovery_begin(native);
             if (self.last_hresult < 0) return error.RecoveryFailed;
         }
         window.app.post(.{ .context = native, .call = recoveryDispatch }) catch |err| {
-            if (is_linux) webkit.zwk_recovery_cancel(native) else zwv_recovery_cancel(native);
+            if (is_webkit) webkit.zwk_recovery_cancel(native) else zwv_recovery_cancel(native);
             return err;
         };
-        if (is_linux) webkit.zwk_resource_cancel_all(native) else zwv_file_cancel_all(native);
+        if (is_webkit) webkit.zwk_resource_cancel_all(native) else zwv_file_cancel_all(native);
         self.ready = false;
         self.page_active = false;
         self.loading = false;
@@ -1877,7 +1888,7 @@ pub const View = struct {
         self.finishRequests(.page_changed, .page_changed, .page_changed, null, null, false);
     }
     fn recoveryDispatch(native: *anyopaque) void {
-        if (is_linux) webkit.zwk_recovery_dispatch(native) else zwv_recovery_dispatch(native);
+        if (is_webkit) webkit.zwk_recovery_dispatch(native) else zwv_recovery_dispatch(native);
     }
 
     /// Success transfers completion responsibility exactly once. Failure does
@@ -1895,7 +1906,7 @@ pub const View = struct {
         if (std.mem.indexOfScalar(u8, script, 0) != null) return error.EmbeddedNul;
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
-        const wide = if (is_linux) try self.allocator.dupeSentinel(u8, script, 0) else try std.unicode.utf8ToUtf16LeAllocZ(self.allocator, script);
+        const wide = if (is_webkit) try self.allocator.dupeSentinel(u8, script, 0) else try std.unicode.utf8ToUtf16LeAllocZ(self.allocator, script);
         defer self.allocator.free(wide);
         _ = try self.propertyWindow();
         if (!self.page_active or self.page_generation != page) return error.StalePage;
@@ -1913,13 +1924,13 @@ pub const View = struct {
             self.syncEvalTimer() catch self.failEvalTimer();
             return err;
         };
-        const submitted = if (is_linux) webkit.zwk_evaluate(self.native.?, wide.ptr, token) else zwv_evaluate(self.native.?, wide.ptr, token);
-        if (!is_linux) self.last_hresult = submitted;
-        if ((is_linux and submitted != 0) or (!is_linux and submitted < 0)) {
+        const submitted = if (is_webkit) webkit.zwk_evaluate(self.native.?, wide.ptr, token) else zwv_evaluate(self.native.?, wide.ptr, token);
+        if (!is_webkit) self.last_hresult = submitted;
+        if ((is_webkit and submitted != 0) or (!is_webkit and submitted < 0)) {
             const hr = self.last_hresult;
             _ = self.eval_book.take(token);
             self.syncEvalTimer() catch self.failEvalTimer();
-            if (is_linux) {
+            if (is_webkit) {
                 webkit.check(submitted) catch |err| return err;
                 unreachable;
             }
@@ -1945,7 +1956,7 @@ pub const View = struct {
     }
     fn syncEvalTimer(self: *View) !void {
         const window = self.access() orelse return;
-        if (is_linux) {
+        if (is_webkit) {
             if (self.native) |native| webkit.zwk_deadline_cancel(native);
         }
         if (self.eval_watch) |watch| _ = window.app.unwatchNative(watch);
@@ -1956,7 +1967,7 @@ pub const View = struct {
             earliest_at = if (earliest_at) |other| @min(at, other) else at;
         };
         const deadline = earliest_at orelse return;
-        if (is_linux) {
+        if (is_webkit) {
             const now = self.eval_clock.?.read();
             try webkit.check(webkit.zwk_deadline_arm(self.native orelse return error.Closed, if (deadline > now) deadline - now else 1));
             return;
@@ -2006,7 +2017,7 @@ pub const View = struct {
         const download_ids = if (tool_scope == .page) download_tokens[0..0] else self.download_book.tokens(&download_tokens, expired_at);
         for (download_ids, 0..) |token, i| download_slots[i] = self.download_book.take(token).?;
         for (script_ids) |token| if (self.native) |native| nativeCancelScript(native, token);
-        if (is_linux) {
+        if (is_webkit) {
             for (resource_ids) |token| if (self.native) |native| webkit.zwk_resource_cancel(native, token);
             for (tool_slots[0..tool_ids.len]) |slot| {
                 if (slot.kind == .find and slot.token == self.find_token) {
@@ -2016,7 +2027,7 @@ pub const View = struct {
                 }
             }
         }
-        if (!is_linux) {
+        if (!is_webkit) {
             for (tool_ids) |token| {
                 if (self.native) |native| zwv_tool_cancel(native, token);
                 if (token == self.find_token) self.clearFind();
@@ -2030,7 +2041,7 @@ pub const View = struct {
             _ = window.app.unwatchNative(watch);
         };
         self.eval_watch = null;
-        if (is_linux) if (self.native) |native| webkit.zwk_deadline_cancel(native);
+        if (is_webkit) if (self.native) |native| webkit.zwk_deadline_cancel(native);
         if (rearm) self.syncEvalTimer() catch self.failEvalTimer();
         for (script_slots[0..script_ids.len]) |slot| slot.completion.complete(slot.completion.context, script_result);
         for (tool_slots[0..tool_ids.len]) |slot| self.completeToolSlot(slot, tool_result);
@@ -2094,7 +2105,7 @@ pub const View = struct {
         policy.handler.handle(policy.handler.context, .{ .origin = text[0..length], .kind = kind, .user_initiated = user, .page = page }, &responder);
     }
     fn deferPermission(self: *View, native_call: *anyopaque, page: u64, options: permissions.DeferOptions) !PermissionId {
-        if (is_linux) return self.unavailableBackend();
+        if (is_webkit) return self.unavailableBackend();
         const window = try self.propertyWindow();
         if (!self.permission_accepting) return error.PermissionUnavailable;
         if (!self.page_active or page != self.page_generation) return error.StalePage;
@@ -2131,7 +2142,7 @@ pub const View = struct {
         return if (self.attachmentClosed() or appStopping(window)) error.Closed else error.StalePermission;
     }
     pub fn decidePermission(self: *View, id: PermissionId, decision: permissions.Decision) !void {
-        if (is_linux) return self.unavailableBackend();
+        if (is_webkit) return self.unavailableBackend();
         const window = try self.propertyWindow();
         if (id.view != self or id.page != self.page_generation or !self.page_active) return error.StalePermission;
         const scope = self.beginCallback() orelse return error.Closed;
@@ -2144,7 +2155,7 @@ pub const View = struct {
         if (slot.completion) |completion| completion.complete(completion.context, result);
     }
     fn cancelPermission(self: *View, id: PermissionId) !bool {
-        if (is_linux) return self.unavailableBackend();
+        if (is_webkit) return self.unavailableBackend();
         const window = self.access() orelse return error.Closed;
         window.app.assertOwner();
         if (self.attachmentClosed() or appStopping(window)) return error.Closed;
@@ -2184,7 +2195,7 @@ pub const View = struct {
         policy.handler.handle(policy.handler.context, .{ .uri = uri_storage[0..uri_length], .mime = mime_storage[0..mime_length], .suggested_name = name_storage[0..name_length], .total_bytes = if (total >= 0) @intCast(total) else null, .observed_page = if (self.page_active) .{ .view = self, .generation = self.page_generation } else null }, &responder);
     }
     fn deferDownload(self: *View, native_call: *anyopaque, options: downloads.DeferOptions) !DownloadId {
-        if (is_linux) return self.unavailableBackend();
+        if (is_webkit) return self.unavailableBackend();
         const window = try self.propertyWindow();
         if (!self.download_accepting) return error.DownloadUnavailable;
         const policy = self.config.?.options.downloads orelse return error.DownloadDenied;
@@ -2220,7 +2231,7 @@ pub const View = struct {
     /// Success consumes destination; any failure retains it. Native acceptance
     /// failure terminates the already accepted offer with native_failure.
     pub fn resolveDownload(self: *View, id: DownloadId, destination: *DownloadDestination, listener: ?downloads.Listener) !void {
-        if (is_linux) return self.unavailableBackend();
+        if (is_webkit) return self.unavailableBackend();
         const window = try self.propertyWindow();
         if (id.view != self) return error.StaleDownload;
         const slot = self.download_book.find(id.token) orelse return error.StaleDownload;
@@ -2249,7 +2260,7 @@ pub const View = struct {
         if (!self.attachmentClosed() and !appStopping(window) and !self.recovering) if (self.native) |native| zwv_download_activate(native, id.token);
     }
     fn cancelDownload(self: *View, id: DownloadId) !bool {
-        if (is_linux) return self.unavailableBackend();
+        if (is_webkit) return self.unavailableBackend();
         const window = self.access() orelse return error.Closed;
         window.app.assertOwner();
         if (self.attachmentClosed() or appStopping(window)) return error.Closed;
@@ -2263,7 +2274,7 @@ pub const View = struct {
         return true;
     }
     fn pauseDownload(self: *View, id: DownloadId, pause: bool) !void {
-        if (is_linux) return self.unavailableBackend();
+        if (is_webkit) return self.unavailableBackend();
         _ = try self.propertyWindow();
         if (id.view != self) return error.StaleDownload;
         const slot = self.download_book.find(id.token) orelse return error.StaleDownload;
@@ -2275,7 +2286,7 @@ pub const View = struct {
         if (hr < 0) return error.DownloadControlFailed;
     }
     fn downloadSnapshot(self: *View, id: DownloadId) !downloads.Snapshot {
-        if (is_linux) return self.unavailableBackend();
+        if (is_webkit) return self.unavailableBackend();
         const window = try self.propertyWindow();
         if (id.view != self) return error.StaleDownload;
         const slot = self.download_book.find(id.token) orelse return error.StaleDownload;
@@ -2331,12 +2342,12 @@ pub const View = struct {
             self.syncEvalTimer() catch self.failEvalTimer();
             return err;
         };
-        const hr = if (is_linux) webkit.zwk_resource_defer(native_call, token) else zwv_defer_resource(native_call, token);
-        if (!is_linux) self.last_hresult = hr;
-        if (if (is_linux) hr != 0 else hr < 0) {
+        const hr = if (is_webkit) webkit.zwk_resource_defer(native_call, token) else zwv_defer_resource(native_call, token);
+        if (!is_webkit) self.last_hresult = hr;
+        if (if (is_webkit) hr != 0 else hr < 0) {
             _ = self.resource_book.take(token);
             self.syncEvalTimer() catch self.failEvalTimer();
-            if (is_linux) {
+            if (is_webkit) {
                 try webkit.check(hr);
                 unreachable;
             }
@@ -2353,7 +2364,7 @@ pub const View = struct {
             };
         }
         _ = self.resource_book.take(token);
-        if (self.native) |native| if (is_linux) webkit.zwk_resource_cancel(native, token) else zwv_cancel_resource(native, token);
+        if (self.native) |native| if (is_webkit) webkit.zwk_resource_cancel(native, token) else zwv_cancel_resource(native, token);
         self.syncEvalTimer() catch self.failEvalTimer();
         return error.StaleRequest;
     }
@@ -2371,14 +2382,14 @@ pub const View = struct {
         for (owned.response.headers, 0..) |header, i| headers[i] = .{ .name = header.name.ptr, .name_len = @intCast(header.name.len), .value = header.value.ptr, .value_len = @intCast(header.value.len) };
         const slot = self.resource_book.take(id.token) orelse return error.StaleRequest;
         const response = owned.response;
-        const hr = if (is_linux) webkit.zwk_resource_respond_deferred(self.native.?, id.token, response.status, response.mime.ptr, response.mime.len, response.bytes.ptr, response.bytes.len, &headers, @intCast(response.headers.len)) else zwv_respond_deferred(self.native.?, id.token, response.status, response.mime.ptr, response.mime.len, response.bytes.ptr, response.bytes.len, &headers, @intCast(response.headers.len));
+        const hr = if (is_webkit) webkit.zwk_resource_respond_deferred(self.native.?, id.token, response.status, response.mime.ptr, response.mime.len, response.bytes.ptr, response.bytes.len, &headers, @intCast(response.headers.len)) else zwv_respond_deferred(self.native.?, id.token, response.status, response.mime.ptr, response.mime.len, response.bytes.ptr, response.bytes.len, &headers, @intCast(response.headers.len));
         self.recordResourceFailure(hr);
-        if (!is_linux) self.last_hresult = hr;
-        const succeeded = if (is_linux) hr == 0 else hr >= 0;
+        if (!is_webkit) self.last_hresult = hr;
+        const succeeded = if (is_webkit) hr == 0 else hr >= 0;
         if (succeeded) owned.deinit();
         self.syncEvalTimer() catch self.failEvalTimer();
-        if (slot.completion) |completion| completion.complete(completion.context, if (self.attachmentClosed() or appStopping(window)) .detached else if (self.recovering or self.page_generation != slot.page or !self.page_active) .page_changed else if (!succeeded) (if (is_linux) .unavailable else .{ .native_failure = hr }) else .responded);
-        if (is_linux) return webkit.check(hr);
+        if (slot.completion) |completion| completion.complete(completion.context, if (self.attachmentClosed() or appStopping(window)) .detached else if (self.recovering or self.page_generation != slot.page or !self.page_active) .page_changed else if (!succeeded) (if (is_webkit) .unavailable else .{ .native_failure = hr }) else .responded);
+        if (is_webkit) return webkit.check(hr);
         if (!succeeded) return error.ResourceResponseFailed;
     }
     fn fileBudget(self: *View, owned: *const OwnedFileResponse) !*anyopaque {
@@ -2386,10 +2397,10 @@ pub const View = struct {
         const limits = self.config.?.options.file_streams orelse return error.FileStreamsDenied;
         try owned.validate(limits.max_file_bytes);
         if (self.file_budget) |budget| {
-            if (is_linux) webkit.zwk_file_budget_limit(budget, limits.max_live) else zwv_file_budget_limit(budget, limits.max_live);
+            if (is_webkit) webkit.zwk_file_budget_limit(budget, limits.max_live) else zwv_file_budget_limit(budget, limits.max_live);
             return budget;
         }
-        const budget = (if (is_linux) webkit.zwk_file_budget_create(limits.max_live) else zwv_file_budget_create(limits.max_live)) orelse return error.OutOfMemory;
+        const budget = (if (is_webkit) webkit.zwk_file_budget_create(limits.max_live) else zwv_file_budget_create(limits.max_live)) orelse return error.OutOfMemory;
         self.file_budget = budget;
         return budget;
     }
@@ -2398,7 +2409,7 @@ pub const View = struct {
         return webkit.check(result);
     }
     fn recordResourceFailure(self: *View, result: c_int) void {
-        if (is_linux and result == 5) if (self.native) |native| {
+        if (is_webkit and result == 5) if (self.native) |native| {
             var failure: webkit.Failure = undefined;
             webkit.zwk_last_failure(native, &failure);
             if (failure.domain != 0) self.last_native_failure = .{ .glib = failure };
@@ -2418,14 +2429,14 @@ pub const View = struct {
         for (response.headers, 0..) |header, i| headers[i] = .{ .name = header.name.ptr, .name_len = @intCast(header.name.len), .value = header.value.ptr, .value_len = @intCast(header.value.len) };
         const slot = self.resource_book.take(id.token) orelse return error.StaleRequest;
         var ticket: ?*anyopaque = null;
-        const hr = if (is_linux) webkit.zwk_resource_respond_file_deferred(self.native.?, id.token, owned.native.?, owned.length, budget, response.status, response.mime.ptr, response.mime.len, &headers, @intCast(response.headers.len), @intFromBool(options.ticket), &ticket) else zwv_respond_file_deferred(self.native.?, id.token, owned.native.?, owned.length, budget, response.status, response.mime.ptr, response.mime.len, &headers, @intCast(response.headers.len), @intFromBool(options.ticket), &ticket);
+        const hr = if (is_webkit) webkit.zwk_resource_respond_file_deferred(self.native.?, id.token, owned.native.?, owned.length, budget, response.status, response.mime.ptr, response.mime.len, &headers, @intCast(response.headers.len), @intFromBool(options.ticket), &ticket) else zwv_respond_file_deferred(self.native.?, id.token, owned.native.?, owned.length, budget, response.status, response.mime.ptr, response.mime.len, &headers, @intCast(response.headers.len), @intFromBool(options.ticket), &ticket);
         self.recordResourceFailure(hr);
-        if (!is_linux) self.last_hresult = hr;
-        const succeeded = if (is_linux) hr == 0 else hr >= 0;
+        if (!is_webkit) self.last_hresult = hr;
+        const succeeded = if (is_webkit) hr == 0 else hr >= 0;
         if (succeeded) owned.deinit();
         self.syncEvalTimer() catch self.failEvalTimer();
-        if (slot.completion) |completion| completion.complete(completion.context, if (self.attachmentClosed() or appStopping(window)) .detached else if (self.recovering or self.page_generation != slot.page or !self.page_active) .page_changed else if (!succeeded) (if (is_linux) .unavailable else .{ .native_failure = hr }) else .responded);
-        if (is_linux) try webkit.check(hr) else if (!succeeded) return fileResponseError(hr);
+        if (slot.completion) |completion| completion.complete(completion.context, if (self.attachmentClosed() or appStopping(window)) .detached else if (self.recovering or self.page_generation != slot.page or !self.page_active) .page_changed else if (!succeeded) (if (is_webkit) .unavailable else .{ .native_failure = hr }) else .responded);
+        if (is_webkit) try webkit.check(hr) else if (!succeeded) return fileResponseError(hr);
         return if (ticket) |control| .{ .native = control } else null;
     }
     fn cancelRequest(self: *View, id: ResourceRequestId) !bool {
@@ -2436,7 +2447,7 @@ pub const View = struct {
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
         const slot = self.resource_book.take(id.token) orelse return false;
-        if (self.native) |native| if (is_linux) webkit.zwk_resource_cancel(native, id.token) else zwv_cancel_resource(native, id.token);
+        if (self.native) |native| if (is_webkit) webkit.zwk_resource_cancel(native, id.token) else zwv_cancel_resource(native, id.token);
         self.syncEvalTimer() catch self.failEvalTimer();
         if (slot.completion) |completion| completion.complete(completion.context, if (self.attachmentClosed() or appStopping(window)) .detached else .cancelled);
         return true;
@@ -2449,7 +2460,7 @@ pub const View = struct {
         defer scope.end();
         const slot = self.tool_book.take(token) orelse return false;
         if (self.native) |native| {
-            if (is_linux) {
+            if (is_webkit) {
                 if (slot.kind == .find) webkit.zwk_find_cancel(native, token) else webkit.zwk_capture_cancel(native, token);
             } else zwv_tool_cancel(native, token);
         }
@@ -2459,7 +2470,7 @@ pub const View = struct {
         return true;
     }
     fn toolWindow(self: *View, kind: tools.Kind, page: ?PageId) !Access {
-        if (is_linux and kind != .capture and kind != .find and kind != .clear and kind != .pdf) return self.unavailableBackend();
+        if (is_webkit and kind != .capture and kind != .find and kind != .clear and kind != .pdf) return self.unavailableBackend();
         const window = try self.propertyWindow();
         if (!self.tool_accepting) return error.ToolUnavailable;
         const policy = self.config.?.options.tools;
@@ -2501,8 +2512,8 @@ pub const View = struct {
             self.find_token = token;
             self.find_listener = listener;
         }
-        const hr = if (!is_linux) zwv_tool_start(self.native.?, &request) else if (kind == .clear) webkit.zwk_clear_start(self.native.?, token) else webkit.zwk_capture_start(self.native.?, token);
-        if (is_linux) {
+        const hr = if (!is_webkit) zwv_tool_start(self.native.?, &request) else if (kind == .clear) webkit.zwk_clear_start(self.native.?, token) else webkit.zwk_capture_start(self.native.?, token);
+        if (is_webkit) {
             if (hr != 0) {
                 _ = self.tool_book.take(token);
                 self.syncEvalTimer() catch self.failEvalTimer();
@@ -2530,7 +2541,7 @@ pub const View = struct {
         return .{ .view = self, .token = token };
     }
     pub fn getCookies(self: *View, uri: []const u8, options: tools.RequestOptions, completion: tools.Completion) !ToolOperation {
-        if (is_linux) return self.unavailableBackend();
+        if (is_webkit) return self.unavailableBackend();
         _ = try self.toolWindow(.cookies, null);
         var wide: [16385:0]u16 = undefined;
         wide[try uriWide(&wide, uri)] = 0;
@@ -2561,7 +2572,7 @@ pub const View = struct {
         defer scope.end();
         const geometry = [6]f64{ pdf.page_size.width, pdf.page_size.height, pdf.margins.top, pdf.margins.right, pdf.margins.bottom, pdf.margins.left };
         const flags = @as(u32, @intFromBool(pdf.landscape)) | @as(u32, @intFromBool(pdf.print_backgrounds)) << 1;
-        if (is_linux) {
+        if (is_webkit) {
             const path = try self.allocator.dupeSentinel(u8, pdf.path, 0);
             defer self.allocator.free(path);
             const owned = try self.allocator.dupe(u8, pdf.path);
@@ -2585,7 +2596,7 @@ pub const View = struct {
         return self.submitTool(.pdf, .page, .{ .kind = 4, .text = wide.ptr, .first_page = pdf.first_page, .last_page = pdf.last_page orelse 0, .flags = flags, .page = geometry }, options, completion, owned, null, page);
     }
     pub fn startFind(self: *View, page: PageId, find: tools.FindOptions, options: tools.RequestOptions, completion: tools.Completion) !ToolOperation {
-        if (is_linux) {
+        if (is_webkit) {
             _ = try self.toolWindow(.find, page);
             if (find.whole_word or !find.highlight_all) return error.UnsupportedCapability;
             if (find.term.len == 0 or find.term.len > 4096) return error.InvalidFindTerm;
@@ -2666,7 +2677,7 @@ pub const View = struct {
         self.find_token = 0;
         self.find_listener = null;
         if (token != 0) if (self.native) |native| {
-            if (is_linux) webkit.zwk_find_cancel(native, token) else zwv_tool_cancel(native, token);
+            if (is_webkit) webkit.zwk_find_cancel(native, token) else zwv_tool_cancel(native, token);
         };
     }
     fn findAction(self: *View, page: PageId, action: c_int) !tools.FindState {
@@ -2674,7 +2685,7 @@ pub const View = struct {
         if (self.find_token == 0) return error.FindInactive;
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
-        if (is_linux) {
+        if (is_webkit) {
             var snapshot: webkit.FindSnapshot = .{ .known = 0, .matches = 0, .active_index = 0 };
             try webkit.check(webkit.zwk_find_action(self.native.?, action, &snapshot));
             return findSnapshot(snapshot);
@@ -2847,7 +2858,7 @@ pub const View = struct {
         return true;
     }
     pub fn setCookie(self: *View, uri: []const u8, cookie: tools.CookieWrite) !void {
-        if (is_linux) return self.unavailableBackend();
+        if (is_webkit) return self.unavailableBackend();
         _ = try self.toolWindow(.cookies, null);
         if (!cookie.accept_cookie_scope) return error.CookieScopeNotAccepted;
         if (!validCookieName(cookie.name) or cookie.value.len > 4096 or cookie.path.len == 0 or cookie.path.len > 4096 or cookie.path[0] != '/') return error.InvalidCookie;
@@ -2872,7 +2883,7 @@ pub const View = struct {
         try self.propertyResult(hr);
     }
     pub fn deleteCookie(self: *View, uri: []const u8, cookie: tools.CookieDelete) !void {
-        if (is_linux) return self.unavailableBackend();
+        if (is_webkit) return self.unavailableBackend();
         _ = try self.toolWindow(.cookies, null);
         if (!cookie.accept_cookie_scope) return error.CookieScopeNotAccepted;
         if (!validCookieName(cookie.name) or cookie.path.len == 0 or cookie.path.len > 4096 or cookie.path[0] != '/') return error.InvalidCookie;
@@ -2979,7 +2990,7 @@ pub const View = struct {
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
         var value = factor;
-        if (is_linux) try webkit.check(webkit.zwk_zoom(self.native.?, &value, 1)) else try self.propertyResult(zwv_zoom(self.native.?, &value, true));
+        if (is_webkit) try webkit.check(webkit.zwk_zoom(self.native.?, &value, 1)) else try self.propertyResult(zwv_zoom(self.native.?, &value, true));
         _ = try self.propertyWindow();
         self.zoom_override = factor;
     }
@@ -2988,7 +2999,7 @@ pub const View = struct {
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
         var value: f64 = 0;
-        if (is_linux) try webkit.check(webkit.zwk_zoom(self.native.?, &value, 0)) else try self.propertyResult(zwv_zoom(self.native.?, &value, false));
+        if (is_webkit) try webkit.check(webkit.zwk_zoom(self.native.?, &value, 0)) else try self.propertyResult(zwv_zoom(self.native.?, &value, false));
         _ = try self.propertyWindow();
         return value;
     }
@@ -3002,10 +3013,10 @@ pub const View = struct {
         const owned = try self.allocator.dupe(u8, agent);
         var transferred = false;
         errdefer if (!transferred) self.allocator.free(owned);
-        const wide = if (is_linux) try self.allocator.dupeSentinel(u8, agent, 0) else try std.unicode.utf8ToUtf16LeAllocZ(self.allocator, agent);
+        const wide = if (is_webkit) try self.allocator.dupeSentinel(u8, agent, 0) else try std.unicode.utf8ToUtf16LeAllocZ(self.allocator, agent);
         defer self.allocator.free(wide);
         _ = try self.propertyWindow();
-        if (is_linux) try webkit.check(webkit.zwk_user_agent(self.native.?, wide.ptr, null)) else try self.propertyResult(zwv_user_agent(self.native.?, wide.ptr, null));
+        if (is_webkit) try webkit.check(webkit.zwk_user_agent(self.native.?, wide.ptr, null)) else try self.propertyResult(zwv_user_agent(self.native.?, wide.ptr, null));
         _ = try self.propertyWindow();
         const previous = self.agent_override;
         self.agent_override = owned;
@@ -3017,7 +3028,7 @@ pub const View = struct {
         _ = try self.propertyWindow();
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
-        if (is_linux) {
+        if (is_webkit) {
             var text: ?[*:0]u8 = null;
             try webkit.check(webkit.zwk_user_agent(self.native.?, null, &text));
             defer if (text) |value| webkit.zwk_string_free(value);
@@ -3044,7 +3055,7 @@ pub const View = struct {
         _ = try self.propertyWindow();
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
-        if (is_linux) {
+        if (is_webkit) {
             try webkit.check(webkit.zwk_devtools(self.native.?, if (enabled) 1 else 2, null, null));
             _ = try self.propertyWindow();
             self.devtools_override = enabled;
@@ -3058,7 +3069,7 @@ pub const View = struct {
         _ = try self.propertyWindow();
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
-        if (is_linux) {
+        if (is_webkit) {
             var enabled: c_int = 0;
             try webkit.check(webkit.zwk_devtools(self.native.?, 0, &enabled, null));
             _ = try self.propertyWindow();
@@ -3073,7 +3084,7 @@ pub const View = struct {
         _ = try self.propertyWindow();
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
-        if (is_linux) {
+        if (is_webkit) {
             try webkit.check(webkit.zwk_devtools(self.native.?, 3, null, null));
             _ = try self.propertyWindow();
             return;
@@ -3125,7 +3136,7 @@ pub const View = struct {
     }
     fn applyContentRules(self: *View) !void {
         const rules = self.activeRules();
-        if (is_linux) {
+        if (is_webkit) {
             const filters = try self.allocator.alloc(*anyopaque, rules.len);
             defer self.allocator.free(filters);
             var count: u32 = 0;
@@ -3211,7 +3222,7 @@ pub const View = struct {
         defer scope.end();
         if (self.native != null and !self.recovering) {
             var value: c_int = @intFromBool(muted);
-            if (is_linux) try webkit.check(webkit.zwk_audio(self.native.?, 1, &value)) else try self.audioResult(zwv_audio(self.native.?, 1, &value));
+            if (is_webkit) try webkit.check(webkit.zwk_audio(self.native.?, 1, &value)) else try self.audioResult(zwv_audio(self.native.?, 1, &value));
         }
         self.muted_override = muted;
     }
@@ -3222,7 +3233,7 @@ pub const View = struct {
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
         var value: c_int = 0;
-        if (is_linux) try webkit.check(webkit.zwk_audio(self.native.?, 0, &value)) else try self.audioResult(zwv_audio(self.native.?, 0, &value));
+        if (is_webkit) try webkit.check(webkit.zwk_audio(self.native.?, 0, &value)) else try self.audioResult(zwv_audio(self.native.?, 0, &value));
         return value != 0;
     }
     /// Whether the page is making sound: a media element playing or Web
@@ -3237,7 +3248,7 @@ pub const View = struct {
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
         var value: c_int = 0;
-        if (is_linux) try webkit.check(webkit.zwk_audio(self.native.?, 2, &value)) else try self.audioResult(zwv_audio(self.native.?, 2, &value));
+        if (is_webkit) try webkit.check(webkit.zwk_audio(self.native.?, 2, &value)) else try self.audioResult(zwv_audio(self.native.?, 2, &value));
         return value != 0;
     }
     fn audioResult(self: *View, hr: i32) !void {
@@ -3283,7 +3294,7 @@ pub const View = struct {
     /// render the pages. Linux: WebKitGTK has no API for it, always null.
     pub fn processId(self: *View) !?u32 {
         _ = try self.propertyWindow();
-        if (is_linux) return null;
+        if (is_webkit) return null;
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
         var pid: u32 = 0;
@@ -3353,7 +3364,7 @@ pub const View = struct {
         if (std.mem.indexOfScalar(u8, message, 0) != null) return error.EmbeddedNul;
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
-        const utf16 = (if (is_linux) self.allocator.dupeSentinel(u8, message, 0) else std.unicode.utf8ToUtf16LeAllocZ(self.allocator, message)) catch |err| {
+        const utf16 = (if (is_webkit) self.allocator.dupeSentinel(u8, message, 0) else std.unicode.utf8ToUtf16LeAllocZ(self.allocator, message)) catch |err| {
             window.report(.{ .domain = .webview, .operation = .webview_post, .err = err });
             return err;
         };
@@ -3364,7 +3375,7 @@ pub const View = struct {
             if (self.loading) return error.PageLoading;
         }
         _ = try self.propertyWindow();
-        if (is_linux) return webkit.check(webkit.zwk_post(self.native.?, utf16.ptr));
+        if (is_webkit) return webkit.check(webkit.zwk_post(self.native.?, utf16.ptr));
         self.last_hresult = zwv_post(self.native.?, utf16.ptr);
         if (@as(u32, @bitCast(self.last_hresult)) == 0x80070005) return error.IpcOriginDenied;
         if (self.last_hresult < 0) {
@@ -3405,7 +3416,7 @@ pub const View = struct {
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
         const generation = self.page_generation;
-        if (is_linux) {
+        if (is_webkit) {
             const value = try self.allocator.dupeSentinel(u8, path, 0);
             defer self.allocator.free(value);
             _ = try self.propertyWindow();
@@ -3431,7 +3442,7 @@ pub const View = struct {
         if (!self.ready or self.recovering) return error.NotReady;
         if (!self.initializerNavigationAllowed()) return error.Busy;
         if (self.config.?.options.remote == null) return error.RemotePageRequired;
-        if (is_linux) {
+        if (is_webkit) {
             var origin: [1024]u8 = undefined;
             _ = try webkit_remote.canonicalUriOrigin(&origin, uri, false, self.config.?.options.remote.?.allow_insecure_loopback);
             const scope = self.beginCallback() orelse return error.Closed;
@@ -3470,7 +3481,7 @@ pub const View = struct {
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
         if (action <= 1 and self.config.?.options.local == null and self.config.?.options.remote == null) return error.LocalSiteRequired;
-        if (is_linux) return webkit.check(switch (action) {
+        if (is_webkit) return webkit.check(switch (action) {
             0 => webkit.zwk_history(self.native.?, 0),
             1 => webkit.zwk_history(self.native.?, 1),
             2 => webkit.zwk_refresh(self.native.?),
@@ -3494,14 +3505,14 @@ pub const View = struct {
         const scope = self.beginNativeAttachment() orelse return 0;
         defer scope.end();
         if (self.recovering or self.attachmentClosed() or appStopping(window)) return 0;
-        if (is_linux and native.kind == 6) {
+        if (is_webkit and native.kind == 6) {
             // A native full-document transaction revokes the old logical page
             // before LOAD_STARTED. Stopping here must still finish its books.
             self.page_active = false;
             self.finishRequests(.page_changed, .page_changed, .page_changed, .page, null, true);
             return if (self.attachmentClosed() or appStopping(window) or self.recovering) 0 else 1;
         }
-        if (is_linux and native.kind == 1 and native.flags & 1 == 0) if (self.native) |handle| {
+        if (is_webkit and native.kind == 1 and native.flags & 1 == 0) if (self.native) |handle| {
             var failure: webkit.Failure = undefined;
             webkit.zwk_last_failure(handle, &failure);
             if (failure.domain != 0) self.last_native_failure = .{ .glib = failure };
@@ -3609,7 +3620,7 @@ pub const View = struct {
                     if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != page) return;
                     window.report(.{ .domain = .webview, .operation = .utf8, .err = err });
                     if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != page) return;
-                    if (!is_linux) {
+                    if (!is_webkit) {
                         self.last_hresult = @bitCast(@as(u32, if (err == error.OutOfMemory) 0x8007000e else 0x8007000d));
                         self.on_event(self.context, self, .{ .failed = self.last_hresult });
                     }
@@ -3669,7 +3680,7 @@ pub const View = struct {
                 self.startNative(window) catch |err| {
                     self.recovering = false;
                     self.failed = true;
-                    if (is_linux) {
+                    if (is_webkit) {
                         window.report(.{ .domain = .webview, .operation = .webview_create, .err = err });
                         return;
                     }
@@ -3679,7 +3690,7 @@ pub const View = struct {
                 };
             },
             else => {
-                if (!is_linux) self.last_hresult = hr;
+                if (!is_webkit) self.last_hresult = hr;
                 self.ready = false;
                 self.page_active = false;
                 self.loading = false;
@@ -3689,7 +3700,7 @@ pub const View = struct {
                 self.recovering = false;
                 self.finishRequests(.unavailable, .unavailable, .unavailable, null, null, false);
                 if (self.attachmentClosed() or appStopping(window) or self.recovering) return;
-                window.report(.{ .domain = if (is_linux) .webview else .hresult, .operation = .webview_create, .code = @bitCast(hr) });
+                window.report(.{ .domain = if (is_webkit) .webview else .hresult, .operation = .webview_create, .code = @bitCast(hr) });
                 if (self.attachmentClosed() or appStopping(window) or self.recovering) return;
                 self.on_event(self.context, self, .{ .failed = hr });
             },
@@ -3797,7 +3808,7 @@ pub const View = struct {
     }
     fn event(ptr: *anyopaque, _: z.Window, ev: z.Event) void {
         const self: *View = @ptrCast(@alignCast(ptr));
-        if (is_linux) return;
+        if (is_webkit) return;
         switch (ev) {
             .resize => if (self.native) |native| {
                 self.last_hresult = zwv_resize(native);
@@ -3816,33 +3827,33 @@ pub const View = struct {
         self.initializer_domain = null;
         const initializer_delivery = if (initializer_controller) |controller| controller.book.detach() else null;
         if (initializer_controller) |controller| if (controller.book.pending) |pending| if (self.native) |native| {
-            if (is_linux) webkit.zwk_initializers_cancel(native, pending.token) else zwv_initializers_cancel(native, pending.token);
+            if (is_webkit) webkit.zwk_initializers_cancel(native, pending.token) else zwv_initializers_cancel(native, pending.token);
         };
         self.eval_accepting = false;
         self.tool_accepting = false;
         self.resource_accepting = false;
         self.permission_accepting = false;
         self.download_accepting = false;
-        if (is_linux) if (self.find_budget) |budget| webkit.zwk_find_budget_close(budget);
-        if (is_linux) if (self.capture_budget) |budget| webkit.zwk_capture_budget_close(budget);
+        if (is_webkit) if (self.find_budget) |budget| webkit.zwk_find_budget_close(budget);
+        if (is_webkit) if (self.capture_budget) |budget| webkit.zwk_capture_budget_close(budget);
         self.finishRequests(.detached, .detached, .detached, null, null, false);
-        if (!is_linux) if (self.eval_timer) |timer| zwv_eval_timer_close(timer);
+        if (!is_webkit) if (self.eval_timer) |timer| zwv_eval_timer_close(timer);
         self.eval_timer = null;
         self.eval_watch = null;
         self.clearPropertyOverrides();
         if (self.native) |native| nativeClose(native);
         self.native = null;
-        if (is_linux) if (self.find_budget) |budget| webkit.zwk_find_budget_release(budget);
+        if (is_webkit) if (self.find_budget) |budget| webkit.zwk_find_budget_release(budget);
         self.find_budget = null;
-        if (is_linux) if (self.capture_budget) |budget| webkit.zwk_capture_budget_release(budget);
+        if (is_webkit) if (self.capture_budget) |budget| webkit.zwk_capture_budget_release(budget);
         self.capture_budget = null;
         if (self.file_budget) |budget| {
-            if (is_linux) webkit.zwk_file_budget_release(budget) else zwv_file_budget_release(budget);
+            if (is_webkit) webkit.zwk_file_budget_release(budget) else zwv_file_budget_release(budget);
         }
         self.file_budget = null;
-        if (is_linux) if (self.custom_local_budget) |budget| webkit.zwk_local_budget_release(budget);
+        if (is_webkit) if (self.custom_local_budget) |budget| webkit.zwk_local_budget_release(budget);
         self.custom_local_budget = null;
-        if (!is_linux) if (self.action_budget) |budget| zwv_action_budget_release(budget);
+        if (!is_webkit) if (self.action_budget) |budget| zwv_action_budget_release(budget);
         self.action_budget = null;
         self.region = null;
         self.window = null;
@@ -3888,8 +3899,8 @@ test "optional initializer source owns and encodes input and every allocation fa
 }
 test "initializer configuration is cold by default and unsupported platforms reject before allocation" {
     try std.testing.expect((try initializer_owner.Config.create(std.testing.failing_allocator, &.{}, .{}, null)) == null);
-    try std.testing.expectEqual(@import("builtin").os.tag == .windows or is_linux, backendCapabilities().document_initializers);
-    if (@import("builtin").os.tag != .windows and !is_linux) {
+    try std.testing.expectEqual(@import("builtin").os.tag == .windows or @import("builtin").os.tag == .linux, backendCapabilities().document_initializers);
+    if (@import("builtin").os.tag != .windows and @import("builtin").os.tag != .linux) {
         try std.testing.expectError(error.UnsupportedCapability, initializer_owner.Config.create(std.testing.failing_allocator, &.{.{ .body = "return;", .origins = &.{"https://example.test"} }}, .{}, null));
         try std.testing.expectError(error.UnsupportedCapability, initializer_owner.Controller.create(std.testing.failing_allocator, .{}, null, 0));
         try std.testing.expectError(error.UnsupportedCapability, OwnedConfig.init(std.testing.failing_allocator, .{ .html = "", .document_initializers = &.{.{ .body = "return;", .origins = &.{"https://example.test"} }} }));
@@ -4025,7 +4036,7 @@ const SessionHooks = struct {
     pub const Options = SessionOptions;
     pub const Event = SessionEvent;
     pub fn open(session: *PageSession, options: SessionOptions, size: PageSession.PixelSize) anyerror!void {
-        if (@import("builtin").os.tag != .windows and !is_linux) return error.UnsupportedCapability;
+        if (@import("builtin").os.tag != .windows and !is_webkit) return error.UnsupportedCapability;
         session.page.session = session;
         session.page.attachment_phase = .attaching;
         if (size.width == 0 or size.height == 0 or size.width > std.math.maxInt(i32) or size.height > std.math.maxInt(i32)) return error.InvalidViewport;
@@ -4039,7 +4050,7 @@ const SessionHooks = struct {
         View.detach(&session.page);
     }
     pub fn closeHost(session: *PageSession) anyerror!void {
-        if (is_linux) {
+        if (is_webkit) {
             if (session.native_host != null) return error.UnsupportedCapability;
             return;
         }
@@ -4102,7 +4113,7 @@ const SessionHooks = struct {
         if (previous) |native| nativeClose(native);
         page.finishRequests(.unavailable, .unavailable, .unavailable, null, null, false);
         if (!session.accepts() or page.recovering) return;
-        session.app.?.report(.{ .domain = if (is_linux) .webview else .hresult, .operation = .webview_geometry, .err = error.PageHostFailed, .code = if (is_linux) null else @as(u32, @bitCast(hr)) });
+        session.app.?.report(.{ .domain = if (is_webkit) .webview else .hresult, .operation = .webview_geometry, .err = error.PageHostFailed, .code = if (is_webkit) null else @as(u32, @bitCast(hr)) });
         if (session.accepts() and !page.recovering) page.on_event(page.context, page, .{ .failed = hr });
     }
     fn rollback(session: *PageSession, old: HostSnapshot, size: PageSession.PixelSize) void {
@@ -4142,7 +4153,7 @@ const SessionHooks = struct {
         try update(session, region, value.viewport, value);
     }
     pub fn update(session: *PageSession, region: z.composition.Region, viewport: z.composition.Viewport, value: z.composition.Snapshot) anyerror!void {
-        if (is_linux) {
+        if (is_webkit) {
             const window_scope = value.window.beginCallback() orelse return error.Closed;
             defer window_scope.end();
             const native_window = window_scope.record.native.native orelse return error.Closed;
@@ -4177,7 +4188,7 @@ const SessionHooks = struct {
         session.last_size = size;
     }
     pub fn park(session: *PageSession) anyerror!void {
-        if (is_linux) {
+        if (is_webkit) {
             if (session.page.native) |native| try webkit.check(webkit.zwk_session_park(native, session.attachment_epoch));
             return;
         }
@@ -4197,7 +4208,7 @@ const SessionHooks = struct {
         try pageViewport(session, size, false);
     }
     pub fn detach(session: *PageSession) void {
-        if (!session.native_closed and !session.page_closed and (session.native_host != null or (is_linux and session.page.native != null))) {
+        if (!session.native_closed and !session.page_closed and (session.native_host != null or (is_webkit and session.page.native != null))) {
             if (session.parent_loss) |hr| {
                 unavailable(session, hr);
             } else park(session) catch {
@@ -4210,7 +4221,7 @@ const SessionHooks = struct {
     pub fn parentDestroying(session: *PageSession, _: z.composition.Region) void {
         session.page.window = null;
         session.page.region = null;
-        if (is_linux) {
+        if (is_webkit) {
             if (session.page.native) |native| webkit.zwk_session_parent_destroying(native, session.attachment_epoch);
             return;
         }
@@ -4227,7 +4238,7 @@ const SessionHooks = struct {
 };
 
 fn testProfilePath() []const u8 {
-    return if (is_linux) "/ZigguratTest" else "C:\\ZigguratTest";
+    return if (is_webkit) "/ZigguratTest" else "C:\\ZigguratTest";
 }
 
 const TestSessionAllocation = struct {
@@ -4243,7 +4254,7 @@ const TestSessionAllocation = struct {
         return .{ .ptr = self, .vtable = &.{ .alloc = allocate, .resize = resize, .remap = remap, .free = free } };
     }
     fn options() Options {
-        if (is_linux) return .{ .html = "candidate", .storage = .ephemeral };
+        if (is_webkit) return .{ .html = "candidate", .storage = .ephemeral };
         return .{ .html = "candidate", .user_data_folder = testProfilePath() };
     }
     fn event(_: *anyopaque, _: *View, _: Event) void {}
@@ -4496,7 +4507,7 @@ test "Find optional snapshots distinguish unknown from known zero and native abs
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(NativeFind));
 }
 test "Linux Find unsupported options reject before term reads allocation or existing session mutation" {
-    if (!is_linux) return error.SkipZigTest;
+    if (!is_webkit) return error.SkipZigTest;
     const app = try z.App.init(std.testing.allocator);
     defer app.deinit();
     var probe: TestAllocationReentry = .{};
@@ -4516,7 +4527,7 @@ test "Linux Find unsupported options reject before term reads allocation or exis
     try std.testing.expect(view.tool_book.take(token) != null);
 }
 test "Linux expired Find withdraws its logical session independently of physical native retirement" {
-    if (!is_linux) return error.SkipZigTest;
+    if (!is_webkit) return error.SkipZigTest;
     const app = try z.App.init(std.testing.allocator);
     defer app.deinit();
     var probe: TestAllocationReentry = .{ .expected_tool = .timed_out };
@@ -4539,7 +4550,7 @@ test "allocator remove or close rejects submissions before native calls and perm
     const Operation = enum { reload, script, initializers, post, reply, navigate, agent, pdf, find, set_cookie, delete_cookie };
     const operations = comptime std.meta.tags(Operation);
     for ([_]bool{ false, true }) |close| inline for (operations) |operation| {
-        if (comptime is_linux and (operation == .navigate or operation == .pdf or operation == .find or operation == .set_cookie or operation == .delete_cookie)) continue;
+        if (comptime is_webkit and (operation == .navigate or operation == .pdf or operation == .find or operation == .set_cookie or operation == .delete_cookie)) continue;
         const app = try z.App.init(std.testing.allocator);
         defer app.deinit();
         var probe: TestAllocationReentry = .{ .action = if (close) .close else .remove, .free_on_closed = true };
@@ -4549,7 +4560,7 @@ test "allocator remove or close rejects submissions before native calls and perm
         const page = view.pageId().?;
         probe.armed = true;
         switch (operation) {
-            .reload => try std.testing.expectError(error.Closed, view.reload(if (is_linux) .{ .html = "candidate", .storage = .ephemeral } else probe.options())),
+            .reload => try std.testing.expectError(error.Closed, view.reload(if (is_webkit) .{ .html = "candidate", .storage = .ephemeral } else probe.options())),
             .script => try std.testing.expectError(error.Closed, view.evaluateJS("42", .{}, .{ .context = &probe, .complete = TestAllocationReentry.script })),
             .initializers => try std.testing.expectError(error.Closed, view.replaceDocumentInitializers(&.{.{ .body = "return;", .origins = &.{"https://example.test"} }}, .{ .context = &probe, .complete = TestAllocationReentry.initializer })),
             .post => try std.testing.expectError(error.Closed, view.post("late")),
@@ -4569,7 +4580,7 @@ test "allocator remove or close rejects submissions before native calls and perm
 }
 
 test "allocator cannot attach a second owner during installation or teardown" {
-    if (is_linux) return error.SkipZigTest;
+    if (is_webkit) return error.SkipZigTest;
     @setEvalBranchQuota(20000);
     const app = try z.App.init(std.testing.allocator);
     defer app.deinit();
@@ -4594,7 +4605,7 @@ test "allocator cannot attach a second owner during installation or teardown" {
 }
 
 test "outer attachment scopes finish construction rollback before on_closed releases their owners" {
-    if (is_linux) return error.SkipZigTest;
+    if (is_webkit) return error.SkipZigTest;
     for ([_]bool{ false, true }) |region_mode| {
         const app = try z.App.init(std.testing.allocator);
         defer app.deinit();
@@ -4650,7 +4661,7 @@ test "page-bound submissions reject allocator navigation before accepting a new 
     const Kind = enum { script, reply, pdf, find };
     const kinds = comptime std.meta.tags(Kind);
     inline for (kinds) |kind| {
-        if (comptime is_linux and (kind == .pdf or kind == .find)) continue;
+        if (comptime is_webkit and (kind == .pdf or kind == .find)) continue;
         const app = try z.App.init(std.testing.allocator);
         defer app.deinit();
         var probe: TestAllocationReentry = .{ .action = .page };
@@ -4679,7 +4690,7 @@ test "viewport conversion rounds edges at DPI and rejects native integer overflo
 }
 
 test "removed region rejects every entry while its callback keeps all five books alive" {
-    if (is_linux) return error.SkipZigTest;
+    if (is_webkit) return error.SkipZigTest;
     const Probe = struct {
         view: *View,
         calls: [5]u8 = @splat(0),
@@ -4771,7 +4782,7 @@ test "removed region rejects every entry while its callback keeps all five books
 }
 
 test "region attach allocation failures roll back without taking the Content slot" {
-    if (is_linux) return error.SkipZigTest;
+    if (is_webkit) return error.SkipZigTest;
     const app = try z.App.init(std.testing.allocator);
     defer app.deinit();
     const window = try app.createWindow(.{});
@@ -4870,7 +4881,7 @@ test "script timer preparation failure preserves submitted context ownership" {
     view.loading = false;
     // The test backend intentionally has no native waits. Timer preparation
     // fails before any controller or script submission can be touched.
-    try std.testing.expectError(if (is_linux) error.Closed else error.UnsupportedCapability, view.evaluateJS("42", .{ .timeout_ms = 5 }, .{ .context = &probe, .complete = Probe.complete }));
+    try std.testing.expectError(if (is_webkit) error.Closed else error.UnsupportedCapability, view.evaluateJS("42", .{ .timeout_ms = 5 }, .{ .context = &probe, .complete = Probe.complete }));
     try std.testing.expectEqual(0, probe.calls);
     try std.testing.expect(view.eval_accepting);
     var tokens: [evaluations.capacity]u64 = undefined;
@@ -4905,7 +4916,7 @@ test "production page notify cancels old script slots before application callbac
 }
 
 test "private document preparation takes logical books without a public page generation" {
-    if (!is_linux) return error.SkipZigTest;
+    if (!is_webkit) return error.SkipZigTest;
     const Probe = struct {
         view: *View,
         generation: u64 = 0,
@@ -4985,7 +4996,7 @@ test "page cancellation completion close reload or quit suppresses the old liste
             std.debug.assert(result == .page_changed);
             self.completed += 1;
             switch (self.action) {
-                .reload => self.view.reload(if (is_linux) .{ .html = "", .storage = .ephemeral } else .{ .html = "", .user_data_folder = testProfilePath() }) catch unreachable,
+                .reload => self.view.reload(if (is_webkit) .{ .html = "", .storage = .ephemeral } else .{ .html = "", .user_data_folder = testProfilePath() }) catch unreachable,
                 .destroy => _ = self.view.window.?.destroy() catch unreachable,
                 .quit => self.view.window.?.app.quit(),
             }
@@ -5163,7 +5174,7 @@ test "native completion after quit before window destruction preserves detached 
         const resource = try view.resource_book.reserve(.{ .page = view.page_generation, .deadline = 1000, .completion = .{ .context = &probe, .complete = Probe.resourceComplete } }, 1);
         if (arrival == .recovery) {
             view.recovering = true;
-            view.pending_config = try OwnedConfig.initPortable(std.testing.allocator, .{ .html = "pending body", .user_data_folder = if (is_linux) "/ZigguratPendingTest" else "C:\\ZigguratPendingTest" });
+            view.pending_config = try OwnedConfig.initPortable(std.testing.allocator, .{ .html = "pending body", .user_data_folder = if (is_webkit) "/ZigguratPendingTest" else "C:\\ZigguratPendingTest" });
         }
         var delivery: Delivery = .{ .view = &view, .arrival = arrival, .script = script, .tool = tool };
         try app.post(.{ .context = &delivery, .call = Delivery.run });
@@ -5346,7 +5357,7 @@ test "resource preparation during initial loading fails without taking context o
     var view = View.init(std.testing.allocator, &probe, Probe.event);
     const window = try prepareTestView(&view, app, null);
     view.loading = true;
-    try std.testing.expectError(if (is_linux) error.Closed else error.UnsupportedCapability, view.deferResource(@ptrFromInt(1), .{ .timeout_ms = 5, .completion = .{ .context = &probe, .complete = Probe.complete } }));
+    try std.testing.expectError(if (is_webkit) error.Closed else error.UnsupportedCapability, view.deferResource(@ptrFromInt(1), .{ .timeout_ms = 5, .completion = .{ .context = &probe, .complete = Probe.complete } }));
     try std.testing.expectEqual(0, probe.calls);
     for (view.resource_book.slots) |slot| try std.testing.expect(slot == null);
     try std.testing.expect(view.resource_accepting and view.eval_watch == null);
@@ -5428,7 +5439,7 @@ test "scheme configuration copies metadata and rolls every allocation back" {
     try std.testing.expectError(error.InvalidSchemeOrigin, OwnedConfig.initPortable(std.testing.allocator, .{ .html = "", .user_data_folder = testProfilePath(), .custom_schemes = &.{.{ .name = "asset" }}, .local = .{ .scheme = "asset", .host = "2130706433" } }));
 }
 test "reload cannot alter an attached environment registration set even with a different profile path" {
-    if (is_linux) return error.SkipZigTest;
+    if (is_webkit) return error.SkipZigTest;
     const app = try z.App.init(std.testing.allocator);
     defer app.deinit();
     var marker: u8 = 0;
@@ -5585,7 +5596,7 @@ test "ordinary page change leaves View-scoped downloads alive and cancels permis
 }
 
 test "Linux custom local policy reaches public attach capture before any SDK operation" {
-    if (!is_linux) return error.SkipZigTest;
+    if (!is_webkit) return error.SkipZigTest;
     const app = try z.App.init(std.testing.allocator);
     defer app.deinit();
     const window = try app.createWindow(.{});
@@ -5606,7 +5617,7 @@ test "Linux custom local policy reaches public attach capture before any SDK ope
 }
 
 test "Linux custom local raw header aggregate rejects before scanning or allocating" {
-    if (!is_linux) return error.SkipZigTest;
+    if (!is_webkit) return error.SkipZigTest;
     const unreadable: []const u8 = @as([*]const u8, @ptrFromInt(4096))[0..2048];
     const rows = @as([16]resources.HeaderGrant, @splat(.{ .name = "X-Budget", .exact_value = unreadable }));
     var fault = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
@@ -5620,7 +5631,7 @@ test "Linux custom local raw header aggregate rejects before scanning or allocat
 }
 
 test "Linux local scratch owns policy bytes and leaves default metadata layout unchanged" {
-    if (!is_linux) return error.SkipZigTest;
+    if (!is_webkit) return error.SkipZigTest;
     var name = "X-Explicit".*;
     var value = "allowed".*;
     var origin = "asset://app.ziggurat.invalid".*;
@@ -5650,7 +5661,7 @@ test "Linux local scratch owns policy bytes and leaves default metadata layout u
 }
 
 test "Linux capability preflight rejects unsupported configuration before allocation" {
-    if (!is_linux) return error.SkipZigTest;
+    if (!is_webkit) return error.SkipZigTest;
     const cases = [_]Options{
         .{ .html = "", .storage = .ephemeral, .local = .{} },
         .{ .html = "", .storage = .ephemeral, .remote = .{ .url = "https://example.test", .origins = &.{}, .credentials = .profile } },
@@ -5685,7 +5696,7 @@ fn testEphemeralConfig(allocator: std.mem.Allocator) !void {
     try std.testing.expect(candidate.options.storage == .ephemeral and candidate.options.user_data_folder.len == 0);
 }
 test "Linux ephemeral configuration owns metadata and rolls every allocation back" {
-    if (!is_linux) return error.SkipZigTest;
+    if (!is_webkit) return error.SkipZigTest;
     try std.testing.checkAllAllocationFailures(std.testing.allocator, testEphemeralConfig, .{});
 }
 
@@ -5715,12 +5726,12 @@ fn testRemoteEphemeralConfig(allocator: std.mem.Allocator) !void {
 }
 
 test "Linux remote configuration owns policy deployment and all grants with complete OOM rollback" {
-    if (!is_linux) return error.SkipZigTest;
+    if (!is_webkit) return error.SkipZigTest;
     try std.testing.checkAllAllocationFailures(std.testing.allocator, testRemoteEphemeralConfig, .{});
 }
 
 test "Linux remote policy preflight rejects missing native deployment before allocating" {
-    if (!is_linux) return error.SkipZigTest;
+    if (!is_webkit) return error.SkipZigTest;
     const options: Options = .{ .html = "", .storage = .ephemeral, .remote = .{ .url = "https://example.test", .origins = &.{.{ .origin = "https://example.test" }}, .credentials = .ephemeral } };
     var fault = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     try std.testing.expectError(error.RequestPolicyExtensionRequired, OwnedConfig.init(fault.allocator(), options));
@@ -5754,7 +5765,7 @@ test "request credentials are captured before caller allocation and wiped before
     var origin = "https://example.test".*;
     var entries = [_]RequestCredential{.{ .origin = &origin, .bearer = @splat(0x5a) }};
     var gate: Gate = .{ .input = &entries[0], .origin = &origin };
-    const candidate = try OwnedConfig.init(gate.allocator(), .{ .html = "", .storage = if (is_linux) .ephemeral else .profile, .user_data_folder = if (is_linux) "" else testProfilePath(), .remote = .{ .url = "https://example.test/start", .origins = &.{.{ .origin = "https://example.test" }}, .credentials = if (is_linux) .ephemeral else .profile, .request_credentials = &entries }, .request_policy_extension = if (is_linux) .{ .directory = "/app/policy" } else null });
+    const candidate = try OwnedConfig.init(gate.allocator(), .{ .html = "", .storage = if (is_webkit) .ephemeral else .profile, .user_data_folder = if (is_webkit) "" else testProfilePath(), .remote = .{ .url = "https://example.test/start", .origins = &.{.{ .origin = "https://example.test" }}, .credentials = if (is_webkit) .ephemeral else .profile, .request_credentials = &entries }, .request_policy_extension = if (is_webkit) .{ .directory = "/app/policy" } else null });
     try std.testing.expectEqualStrings("https://example.test", candidate.options.remote.?.request_credentials[0].origin);
     try std.testing.expectEqualSlices(u8, &@as([32]u8, @splat(0x5a)), &candidate.options.remote.?.request_credentials[0].bearer);
     candidate.deinit(gate.allocator());
@@ -5762,7 +5773,7 @@ test "request credentials are captured before caller allocation and wiped before
 }
 
 test "Windows request credential validation reaches caller allocation after native policy preflight" {
-    if (is_linux) return error.SkipZigTest;
+    if (is_webkit) return error.SkipZigTest;
     var fault = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     try std.testing.expectError(error.OutOfMemory, OwnedConfig.init(fault.allocator(), .{ .html = "", .user_data_folder = testProfilePath(), .remote = .{ .url = "https://example.test", .origins = &.{.{ .origin = "https://example.test" }}, .credentials = .profile, .request_credentials = &.{.{ .origin = "https://example.test", .bearer = @splat(1) }} } }));
     try std.testing.expect(fault.has_induced_failure and fault.alloc_index == 0);
@@ -5780,6 +5791,6 @@ fn testWindowsRequestCredentials(allocator: std.mem.Allocator) !void {
 }
 
 test "Windows exact request credentials own input and roll every caller allocation back" {
-    if (is_linux) return error.SkipZigTest;
+    if (is_webkit) return error.SkipZigTest;
     try std.testing.checkAllAllocationFailures(std.testing.allocator, testWindowsRequestCredentials, .{});
 }

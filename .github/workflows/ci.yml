@@ -288,6 +288,13 @@ jobs:
       - name: AppKit window smoke
         run: |
           zig build smoke-macos -Doptimize=${{ matrix.optimize }} --summary failures
+      - name: WKWebView compile and page smokes
+        timeout-minutes: 15
+        run: |
+          zig build check -Dwebview=true -Doptimize=${{ matrix.optimize }} --summary failures
+          zig build build-smoke-webview-macos build-smoke-webview-content-rules -Dwebview=true -Doptimize=${{ matrix.optimize }} --summary failures
+          sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-macos
+          sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-content-rules
 
   webview:
     # Paused with the Windows job; see WINDOWS_CI there.

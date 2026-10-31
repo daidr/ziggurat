@@ -4,8 +4,12 @@ const builtin = @import("builtin");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
+pub const panic = std.debug.FullPanic(@import("macos_panic.zig").panic);
 
 const linux = builtin.os.tag == .linux;
+/// macOS pages are trusted HTML only, without a site to load scripts from:
+/// the check there is the hidden element and the audio state.
+const macos = builtin.os.tag == .macos;
 const document =
     \\<!doctype html><title>page</title>
     \\<div class="banner" id="banner">ad</div><div id="text">text</div>
@@ -90,10 +94,10 @@ const Probe = struct {
     fn options(self: *Probe) web.Options {
         return .{
             .html = document,
-            .storage = if (linux) .ephemeral else .profile,
-            .user_data_folder = if (linux) "" else self.store,
+            .storage = if (linux or macos) .ephemeral else .profile,
+            .user_data_folder = if (linux or macos) "" else self.store,
             .custom_schemes = if (linux) &registrations else &.{},
-            .local = .{ .scheme = if (linux) "asset" else "https", .resources = &site_resources },
+            .local = if (macos) null else .{ .scheme = if (linux) "asset" else "https", .resources = &site_resources },
             .content_rules = &self.applied,
             .audio_muted = true,
             .page_listener = .{ .context = self, .event = page },
@@ -117,8 +121,8 @@ const Probe = struct {
         const self: *Probe = @ptrCast(@alignCast(ptr));
         if (result != .json) return self.fail(error.ScriptFailed);
         const want = switch (self.step) {
-            .with_rules => "\"true false none block loaded\"",
-            .without_rules => "\"true true block block loaded\"",
+            .with_rules => if (macos) "\"false false none block loaded\"" else "\"true false none block loaded\"",
+            .without_rules => if (macos) "\"false false block block loaded\"" else "\"true true block block loaded\"",
             else => return self.fail(error.UnexpectedScript),
         };
         if (!std.mem.eql(u8, result.json, want)) {
@@ -143,7 +147,7 @@ const Probe = struct {
 };
 
 pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    var gpa: std.heap.DebugAllocator(@import("macos_panic.zig").allocator_config) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
     if (!web.backendCapabilities().page_lifecycle) return error.SkipZigTest;
