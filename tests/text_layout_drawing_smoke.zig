@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
@@ -126,7 +127,7 @@ fn solidProbe(view: drawing.PreparedTextView) !struct { x: u32, y: u32 } {
             for (y - 2..y + 3) |yy| for (x - 2..x + 3) |xx| {
                 if (mask.pixels[yy * mask.stride + xx] != 255) full = false;
             };
-            if (full) return .{ .x = @intCast(@as(i64, @intCast(x)) + mask.origin_x + @as(i64, @intFromFloat(12 * mask.scale))), .y = @intCast(@as(i64, @intCast(y)) + mask.origin_y + @as(i64, @intFromFloat(12 * mask.scale))) };
+            if (full) return .{ .x = @intCast(zio.asUnsigned(@as(i64, @intCast(x)) + mask.origin_x + @as(i64, @intFromFloat(12 * mask.scale)))), .y = @intCast(zio.asUnsigned(@as(i64, @intCast(y)) + mask.origin_y + @as(i64, @intFromFloat(12 * mask.scale)))) };
         }
     };
     return error.NoInteriorGlyphPixel;

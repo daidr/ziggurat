@@ -53,7 +53,7 @@ const Fixture = struct {
                     try body.resize(allocator, start + try std.base64.standard.Decoder.calcSizeForSlice(text));
                     try std.base64.standard.Decoder.decode(body.items[start..], text);
                 }
-                try self.page.ack(service, @intCast(id % 32), id, @intCast(object.get("sequence").?.integer));
+                try self.page.ack(service, @intCast(id % 32), id, @intCast(zio.asUnsigned(object.get("sequence").?.integer)));
             } else if (std.mem.eql(u8, kind, "result")) {
                 return outcome;
             } else if (std.mem.eql(u8, kind, "error")) {

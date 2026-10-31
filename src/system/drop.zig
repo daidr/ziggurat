@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const transfer = @import("transfer.zig");
@@ -359,7 +360,7 @@ const Linux = struct {
         return @ptrCast(@alignCast(pointer.?));
     }
     fn hoverNative(pointer: ?*anyopaque, phase: c_int, x: f64, y: f64, files: c_int, text: c_int) callconv(.c) c_int {
-        const value: Hover = .{ .phase = @fromBackingInt(@intCast(phase)), .point = .{ .x = @floatCast(x), .y = @floatCast(y) }, .files = files != 0, .text = text != 0 };
+        const value: Hover = .{ .phase = @fromBackingInt(@intCast(zio.asUnsigned(phase))), .point = .{ .x = @floatCast(x), .y = @floatCast(y) }, .files = files != 0, .text = text != 0 };
         return @intFromBool(owner(pointer).hover(value));
     }
     const DataCallbacks = extern struct {
@@ -429,7 +430,7 @@ const Linux = struct {
     }
     fn dataHover(pointer: ?*anyopaque, phase: c_int, x: f64, y: f64, names: [*]const u8, len: usize, actions: c_int, suggested: c_int, session: ?*anyopaque) callconv(.c) c_int {
         const target = dataOwner(pointer);
-        const value: Phase = @fromBackingInt(@intCast(phase));
+        const value: Phase = @fromBackingInt(@intCast(zio.asUnsigned(phase)));
         if (value != .leave) setOffer(target, names[0..len]);
         return actionOf(target.hover(value, .{ .x = @floatCast(x), .y = @floatCast(y) }, operationsOf(actions), operationOf(suggested), session));
     }
