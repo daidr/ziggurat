@@ -21,3 +21,9 @@ pub fn panic(msg: []const u8, first_trace_addr: ?usize) noreturn {
     }
     std.c.abort();
 }
+
+/// DebugAllocator configuration for smokes. On macOS a free inside an
+/// engine callback makes the allocator walk the stack through system
+/// frameworks, whose unwind entries the Zig 0.17 unwinder misreads as a
+/// corrupt value; the macOS smokes record no allocation stack traces.
+pub const allocator_config: std.heap.DebugAllocatorConfig = if (builtin.os.tag == .macos) .{ .stack_trace_frames = 0 } else .{};

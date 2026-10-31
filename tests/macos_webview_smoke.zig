@@ -280,7 +280,7 @@ const Drain = struct {
     }
 };
 pub fn main() !void {
-    var allocator: std.heap.DebugAllocator(.{}) = .init;
+    var allocator: std.heap.DebugAllocator(@import("macos_panic.zig").allocator_config) = .init;
     defer std.debug.assert(allocator.deinit() == .ok);
     if (!web.backendCapabilities().page_lifecycle) return error.SkipZigTest;
     std.debug.print("macOS WebView: {s}\n", .{"allocation failures"});
