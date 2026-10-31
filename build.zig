@@ -1698,8 +1698,30 @@ pub fn build(b: *std.Build) void {
             });
         }
     }
-    if (web and target.result.os.tag != .windows and target.result.os.tag != .linux)
-        @panic("WebView currently requires Windows x86_64 or Linux GTK3");
+    if (web and target.result.os.tag != .windows and target.result.os.tag != .linux and target.result.os.tag != .macos)
+        @panic("WebView currently requires Windows x86_64, Linux GTK3 or macOS");
+    if (web and target.result.os.tag == .macos) {
+        const view = b.addModule("ziggurat_webview", .{
+            .root_source_file = b.path("src/webview/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_file_stream", .module = file_stream }, .{ .name = "ziggurat_http_response", .module = http_response } },
+            .link_libc = true,
+        });
+        view.addImport("ziggurat_tls_pem", tls_pem);
+        _ = native_support.add(b, view, "webview-webkit-macos", "src/webview/webkit_macos.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native_support.linkFrameworks(b, view, &.{ "WebKit", "AppKit", "Foundation", "CoreFoundation" });
+        view_tests = b.addTest(.{ .root_module = view });
+        _ = b.step("webview-runtime", "Use the system WKWebView");
+        addSmoke(b, "smoke-webview-macos", "tests/macos_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-content-rules", "tests/content_rules_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+    }
     if (web and target.result.os.tag == .windows) {
         if (target.result.cpu.arch != .x86_64)
             @panic("The first WebView2 backend supports Windows x86_64 only");

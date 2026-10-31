@@ -328,6 +328,8 @@ int zlm_window_destroy(NativeWindow *s){
     release_window(s);release_window(s);return 1;
 }
 void *zlm_window_handle(NativeWindow *s){return s->window;}
+/* The flipped content view that hosts native child views such as a page. */
+void *zlm_window_content(NativeWindow *s){return s->destroyed?NULL:s->view;}
 void zlm_window_action(NativeWindow *s,int action){
     @autoreleasepool{
         NSWindow *window=s->window;
