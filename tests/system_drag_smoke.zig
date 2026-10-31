@@ -55,35 +55,72 @@ const X11 = struct {
         _ = self.button(self.display, 1, @intFromBool(down), 0);
         _ = XFlush(self.display);
     }
+    fn raise(_: *X11, _: z.Window) void {}
+    fn report(_: *X11, _: z.ScreenPoint) void {}
 };
 extern fn gtk_widget_get_scale_factor(*anyopaque) c_int;
 
 const win = @import("ziggurat_c_win32");
 /// SetCursorPos moves and SendInput presses, as a user would.
 const Win32 = struct {
+    sent: u32 = 0,
+    refused: u32 = 0,
+    last_error: u32 = 0,
+
     fn open() !Win32 {
         return .{};
     }
     fn close(_: *Win32) void {}
-    fn send(input: win.INPUT) void {
+    fn send(self: *Win32, input: win.INPUT) void {
         var copy = input;
-        _ = win.SendInput(1, &copy, @sizeOf(win.INPUT));
+        if (win.SendInput(1, &copy, @sizeOf(win.INPUT)) == 1) {
+            self.sent += 1;
+        } else {
+            self.refused += 1;
+            self.last_error = win.GetLastError();
+        }
     }
-    fn keyEvent(_: *Win32, keysym: c_ulong, down: bool) void {
+    fn keyEvent(self: *Win32, keysym: c_ulong, down: bool) void {
         var input = std.mem.zeroes(win.INPUT);
         input.type = win.INPUT_KEYBOARD;
         input.unnamed_0.ki.wVk = if (keysym == 0xff1b) win.VK_ESCAPE else win.VK_SHIFT;
         input.unnamed_0.ki.dwFlags = if (down) 0 else win.KEYEVENTF_KEYUP;
-        send(input);
+        self.send(input);
     }
     fn pointer(_: *Win32, point: z.ScreenPoint) void {
         _ = win.SetCursorPos(point.x, point.y);
     }
-    fn press(_: *Win32, down: bool) void {
+    fn press(self: *Win32, down: bool) void {
         var input = std.mem.zeroes(win.INPUT);
         input.type = win.INPUT_MOUSE;
         input.unnamed_0.mi.dwFlags = if (down) win.MOUSEEVENTF_LEFTDOWN else win.MOUSEEVENTF_LEFTUP;
-        send(input);
+        self.send(input);
+    }
+    /// Windows left behind by other processes may cover the smoke's own.
+    fn raise(_: *Win32, window: z.Window) void {
+        const hwnd: win.HWND = @ptrCast(window.nativeHandle() orelse return);
+        const flags = win.SWP_NOMOVE | win.SWP_NOSIZE | win.SWP_NOACTIVATE;
+        _ = win.SetWindowPos(hwnd, win.HWND_TOPMOST, 0, 0, 0, 0, flags);
+        _ = win.SetWindowPos(hwnd, win.HWND_NOTOPMOST, 0, 0, 0, 0, flags);
+        _ = win.SetForegroundWindow(hwnd);
+    }
+    /// What real input meets at `point`: whether the session takes input at
+    /// all, where the cursor is and which window is under the point.
+    fn report(self: *Win32, point: z.ScreenPoint) void {
+        const desktop = win.OpenInputDesktop(0, 0, win.GENERIC_READ);
+        defer if (desktop != null) {
+            _ = win.CloseDesktop(desktop);
+        };
+        var cursor: win.POINT = .{ .x = 0, .y = 0 };
+        _ = win.GetCursorPos(&cursor);
+        const under = win.WindowFromPoint(.{ .x = point.x, .y = point.y });
+        var class: [64]u16 = @splat(0);
+        const class_len: usize = if (under != null) @intCast(@max(0, win.GetClassNameW(under, &class, class.len))) else 0;
+        var class_utf8: [192]u8 = undefined;
+        const class_name = class_utf8[0 .. std.unicode.utf16LeToUtf8(&class_utf8, class[0..class_len]) catch 0];
+        var pid: win.DWORD = 0;
+        if (under != null) _ = win.GetWindowThreadProcessId(under, &pid);
+        std.debug.print("drag smoke input: input desktop={}, SendInput sent={d} refused={d} last_error={d}, cursor={d},{d} want={d},{d}, window under point class=\"{s}\" pid={d} (self {d})\n", .{ desktop != null, self.sent, self.refused, self.last_error, cursor.x, cursor.y, point.x, point.y, class_name, pid, win.GetCurrentProcessId() });
     }
 };
 const Input = if (linux) X11 else Win32;
@@ -243,7 +280,8 @@ const Smoke = struct {
         self.advance() catch |err| return self.finish(err);
         self.waited += 1;
         if (self.waited > 800) {
-            std.debug.print("drag smoke: stuck in round {s} at {s}; source {s}, hovers {d}, left {d}\n", .{ @tagName(self.round), @tagName(self.stage), @tagName(self.source.state), self.hovers, self.left });
+            std.debug.print("drag smoke: stuck in round {s} at {s}; source {s}, held {}, hovers {d}, left {d}\n", .{ @tagName(self.round), @tagName(self.stage), @tagName(self.source.state), self.held, self.hovers, self.left });
+            if (self.center(self.source_window)) |start| self.input.report(start) else |_| {}
             self.finish(error.Timeout);
         }
     }
@@ -278,6 +316,8 @@ const Smoke = struct {
         switch (self.stage) {
             .settle => if (self.waited > 12) self.to(.press),
             .press => {
+                self.input.raise(self.target_window);
+                self.input.raise(self.source_window);
                 const start = try self.center(self.source_window);
                 self.input.pointer(start);
                 self.input.press(true);
@@ -289,6 +329,13 @@ const Smoke = struct {
                 // Small moves inside the source until it starts the drag.
                 const start = try self.center(self.source_window);
                 self.step += 1;
+                // A press the window never saw is pressed again.
+                if (!self.held and self.step % 100 == 0) {
+                    self.input.press(false);
+                    self.input.raise(self.source_window);
+                    self.input.pointer(start);
+                    self.input.press(true);
+                }
                 self.input.pointer(.{ .x = start.x + @as(i32, @intCast(self.step % 8)) * 3, .y = start.y });
                 if (self.source.running() and self.source.state == .running) self.to(.travel);
             },
