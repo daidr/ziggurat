@@ -89,6 +89,14 @@ pub const Role = enum {
 };
 
 pub const id_base: u64 = 0xffff_0000_0000_0000;
+/// The Open Recent submenu's items, from `Builder.recentDocuments`.
+pub const recent_document_base: u64 = id_base + 0x1_0000;
+pub const clear_recent_id: u64 = id_base + 0x2_0000;
+/// The index into the paths `recentDocuments` was given, for a chosen item.
+pub fn recentDocumentIndex(value: u64) ?usize {
+    if (value < recent_document_base or value >= recent_document_base + 0x1_0000) return null;
+    return @intCast(value - recent_document_base);
+}
 
 /// One language. Empty fields fall back to English. `{app}` is the
 /// application name.
@@ -335,6 +343,63 @@ pub const languages = [_]Language{
         .speech = "語音",
         .clear_recent = "清除選單",
     } },
+    .{ .tag = "ja", .strings = .{
+        .undo = "取り消す",
+        .redo = "やり直す",
+        .cut = "カット",
+        .copy = "コピー",
+        .paste = "ペースト",
+        .paste_and_match_style = "ペーストしてスタイルを合わせる",
+        .delete = "削除",
+        .select_all = "すべてを選択",
+        .reload = "再読み込み",
+        .force_reload = "強制再読み込み",
+        .toggle_dev_tools = "開発者ツールの切り替え",
+        .actual_size = "実際のサイズ",
+        .zoom_in = "拡大",
+        .zoom_out = "縮小",
+        .toggle_full_screen = "フルスクリーンの切り替え",
+        .minimize = "しまう",
+        .zoom = "拡大/縮小",
+        .bring_all_to_front = "すべてを手前に移動",
+        .close = "閉じる",
+        .close_window = "ウインドウを閉じる",
+        .new = "新規",
+        .open = "開く…",
+        .open_recent = "最近使った項目を開く",
+        .save = "保存",
+        .save_as = "別名で保存…",
+        .duplicate = "複製",
+        .rename = "名称変更…",
+        .move_to = "移動…",
+        .revert = "復帰",
+        .revert_to_saved = "保存時の状態に戻す",
+        .quit_app = "{app}を終了",
+        .about = "{app}について",
+        .hide = "{app}を隠す",
+        .quit = "終了",
+        .exit = "終了",
+        .hide_others = "ほかを隠す",
+        .show_all = "すべてを表示",
+        .services = "サービス",
+        .start_speaking = "読み上げを開始",
+        .stop_speaking = "読み上げを停止",
+        .file = "ファイル",
+        .edit = "編集",
+        .view = "表示",
+        .format = "フォーマット",
+        .window = "ウインドウ",
+        .help = "ヘルプ",
+        .bold = "太字",
+        .italic = "斜体",
+        .underline = "下線",
+        .strikethrough = "取り消し線",
+        .align_left = "左揃え",
+        .center = "中央揃え",
+        .align_right = "右揃え",
+        .speech = "スピーチ",
+        .clear_recent = "メニューを消去",
+    } },
 };
 
 /// The shipped language closest to `locale`, such as "zh-TW" or "de_AT":
@@ -562,6 +627,40 @@ pub const Builder = struct {
             },
         };
     }
+    /// Fills an Open Recent submenu (`parent`, the ID `role(.open_recent)`
+    /// returned): an item per document, newest first, labeled with its file
+    /// name, then a separator and Clear Menu, which is disabled while there
+    /// are none. Map a chosen item back with `recentDocumentIndex`; Clear
+    /// Menu is `clear_recent_id`.
+    pub fn recentDocuments(self: *Builder, parent: u64, paths: []const []const u8) Error!void {
+        for (paths, 0..) |path, index| {
+            const name = std.fs.path.basename(path);
+            // A file name keeps its ampersands, which menus read as mnemonics.
+            var escaped: [512]u8 = undefined;
+            var length: usize = 0;
+            for (name) |byte| {
+                if (length + 2 > escaped.len) return error.TextCapacityExceeded;
+                escaped[length] = byte;
+                length += 1;
+                if (byte == '&') {
+                    escaped[length] = '&';
+                    length += 1;
+                }
+            }
+            try self.add(.{ .id = recent_document_base + index, .parent = parent, .label = try self.copy(escaped[0..length]) });
+        }
+        if (paths.len > 0) try self.separator(parent);
+        const label = self.context.strings.clear_recent;
+        try self.add(.{ .id = clear_recent_id, .parent = parent, .label = try self.format(if (label.len > 0) label else english.clear_recent), .enabled = paths.len > 0 });
+    }
+    fn copy(self: *Builder, label: []const u8) Error![]const u8 {
+        if (self.labels.len - self.label_bytes < label.len) return error.TextCapacityExceeded;
+        try menus.validateLabel(label);
+        const written = self.labels[self.label_bytes..][0..label.len];
+        @memcpy(written, label);
+        self.label_bytes += label.len;
+        return written;
+    }
     pub fn result(self: *const Builder) []const types.Item {
         return self.items[0..self.count];
     }
@@ -588,6 +687,9 @@ test "role labels follow the language and the platform" {
     try testing.expectEqualStrings("撤销", defaults(.undo, .{ .strings = zh }).label);
     try testing.expectEqualStrings("復原", defaults(.undo, .{ .strings = resolve("zh_TW.UTF-8", &.{}) }).label);
     try testing.expectEqualStrings("Undo", defaults(.undo, .{ .strings = resolve("de-DE", &.{}) }).label);
+    const ja = resolve("ja-JP", &.{});
+    try testing.expectEqualStrings("取り消す", defaults(.undo, .{ .strings = ja }).label);
+    try testing.expectEqualStrings("{app}を終了", defaults(.quit, .{ .strings = ja, .platform = .macos }).label);
     const custom = resolve("de", &.{.{ .tag = "de", .strings = .{ .undo = "Rückgängig" } }});
     try testing.expectEqualStrings("Rückgängig", defaults(.undo, .{ .strings = custom }).label);
     try testing.expectEqualStrings("Redo", defaults(.redo, .{ .strings = custom }).label);
@@ -646,4 +748,28 @@ test "builder writes standard menus that pass menu validation" {
     try testing.expectError(error.TooManyMenuItems, tiny.role(null, .edit_menu));
     var short = Builder.init(&items, labels[0..3], .{});
     try testing.expectError(error.TextCapacityExceeded, short.role(null, .edit_menu));
+}
+
+test "open recent lists the documents by file name, then clear menu" {
+    var items: [16]types.Item = undefined;
+    var labels: [512]u8 = undefined;
+    var builder = Builder.init(&items, &labels, .{ .strings = resolve("zh-CN", &.{}) });
+    const recent = try builder.role(null, .open_recent);
+    try builder.recentDocuments(recent, &.{ "/home/a/notes.md", "/home/a/R&D.txt" });
+    const built = builder.result();
+    try testing.expectEqual(5, built.len);
+    try testing.expectEqualStrings("notes.md", built[1].label);
+    try testing.expectEqualStrings("R&&D.txt", built[2].label);
+    try testing.expectEqual(@as(?usize, 1), recentDocumentIndex(built[2].id));
+    try testing.expect(built[3].kind == .separator);
+    try testing.expectEqualStrings("清除菜单", built[4].label);
+    try testing.expect(built[4].enabled and built[4].id == clear_recent_id);
+    try testing.expectEqual(@as(?Role, null), Role.fromId(built[1].id));
+    try testing.expectEqual(@as(?usize, null), recentDocumentIndex(Role.open.id()));
+    _ = try menus.validate(built, false);
+
+    var empty = Builder.init(&items, &labels, .{});
+    try empty.recentDocuments(try empty.role(null, .open_recent), &.{});
+    try testing.expectEqual(2, empty.result().len);
+    try testing.expect(!empty.result()[1].enabled);
 }

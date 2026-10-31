@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const d = @import("ziggurat_document");
 const code = @import("ziggurat_code_editor");
 const positions = @import("positions.zig");
@@ -24,7 +25,7 @@ fn optionalString(value: std.json.Value, key: []const u8) ![]const u8 {
 fn integer(value: std.json.Value) !u32 {
     const number = codec.integerValue(value) catch return error.InvalidPosition;
     if (number < 0 or number > 0x7fffffff) return error.InvalidPosition;
-    return @intCast(number);
+    return @intCast(zio.asUnsigned(number));
 }
 fn position(value: std.json.Value) !positions.Position {
     return .{ .line = try integer(try required(value, "line")), .character = try integer(try required(value, "character")) };

@@ -42,7 +42,8 @@ pub const capabilities = .{
 };
 
 /// Byte conventions are identical on every platform. text/html are UTF-8;
-/// png is a complete PNG stream; files are absolute UTF-8 paths separated by
+/// png is a complete PNG stream, which Windows reads from a bitmap (CF_DIB)
+/// when no PNG stream is on the clipboard; files are absolute UTF-8 paths separated by
 /// one NUL byte without a trailing separator; custom is opaque bytes.
 pub const Kind = enum(u8) { text, html, png, files, custom };
 pub const Format = struct {
@@ -245,6 +246,14 @@ pub const Board = struct {
             self.offered[index] = copied[index];
             self.offered[index].name = self.offered_names[index][0..copied[index].name.len];
         }
+    }
+    /// Empties the system clipboard, whoever owns it. A live offer of this
+    /// Board ends; released runs before return. Busy fails as `write` does.
+    pub fn clear(self: *Board) !void {
+        try self.require();
+        self.last_error = 0;
+        try native.clear(self);
+        self.endOffer();
     }
     /// Ends a live lazy offer and empties the clipboard if this Board still owns
     /// it. Idempotent; released runs before return when an offer was live.

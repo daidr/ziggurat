@@ -112,7 +112,7 @@ fn fail(storage: *Storage, detail: *Detail, err: OpenError, call: []const u8, re
     return err;
 }
 
-pub fn open(storage: *Storage, detail: *Detail) OpenError!output.Device {
+pub fn open(storage: *Storage, ahead: u64, detail: *Detail) OpenError!output.Device {
     storage.* = .{};
     var result = CoCreateInstance(&clsid_device_enumerator, null, clsctx_all, &iid_device_enumerator, &storage.enumerator);
     if (failed(result)) return fail(storage, detail, error.BackendUnavailable, "CoCreateInstance(MMDeviceEnumerator)", result);
@@ -147,8 +147,8 @@ pub fn open(storage: *Storage, detail: *Detail) OpenError!output.Device {
         .channel_mask = 0x1 | 0x2,
         .sub_format = subtype_float,
     };
-    // 40 ms, converted to the device's own format by WASAPI's resampler.
-    const duration: i64 = 40 * 10_000;
+    // `ahead`, converted to the device's own format by WASAPI's resampler.
+    const duration: i64 = @intCast(ahead / 100); // in 100 ns
     const flags: u32 = stream_flags_event_callback | stream_flags_no_persist | stream_flags_auto_convert | stream_flags_src_default_quality;
     const initialize = method(client, 3, *const fn (*anyopaque, i32, u32, i64, i64, *const WaveFormatExtensible, ?*const GUID) callconv(.winapi) HRESULT);
     result = initialize(client, share_mode_shared, flags, duration, 0, &format, null);

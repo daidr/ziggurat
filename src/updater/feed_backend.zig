@@ -11,6 +11,24 @@ const z = @import("ziggurat");
 const update = @import("ziggurat_update");
 const root = @import("root.zig");
 
+/// Where updates come from instead of `Config.feed`: an update service the
+/// app has, an endpoint that needs the user's credentials, or a channel the
+/// app chooses while it runs. It serves what `ziggurat-update release`
+/// publishes, and the backend checks it as it checks the feed's: every
+/// release and patch must be signed with `Config.public_key`, or it is not
+/// installed. Both functions run on the backend's worker thread.
+pub const Source = struct {
+    context: *anyopaque,
+    /// The feed, as `ziggurat-update release` writes feed.json, of at most
+    /// `update.feed.max_feed_bytes`, allocated with `allocator`.
+    /// `prereleases` is the Updater's choice (`Updater.setPrereleases`), for
+    /// a source with a beta channel of its own.
+    feed: *const fn (context: *anyopaque, allocator: std.mem.Allocator, prereleases: bool) anyerror![]u8,
+    /// The transport for the archives and patches the feed names, by the
+    /// feed's URLs.
+    files: update.download.Source,
+};
+
 pub const Config = struct {
     /// An https:// URL, such as a GitHub release's
     /// `https://github.com/OWNER/NAME/releases/latest/download/feed.json`,
@@ -25,6 +43,9 @@ pub const Config = struct {
     /// False for builds that must not update themselves, such as
     /// development builds or an installation a package manager owns.
     enabled: bool = true,
+    /// Updates from the app's own source instead of `feed`; `setSource`
+    /// changes it.
+    source: ?Source = null,
 };
 
 /// Keep at a stable address from init() until deinit(), which must run
@@ -52,6 +73,12 @@ pub const FeedBackend = struct {
     version_len: usize = 0,
     notes: []u8 = &.{},
     relaunch_requested: bool = false,
+    /// The source and channel of the running job, taken as it starts;
+    /// an install keeps those of the check that found its release.
+    job_source: ?Source = null,
+    job_prereleases: bool = false,
+    checked_source: ?Source = null,
+    checked_prereleases: bool = false,
 
     const Outcome = union(enum) { none, current, available, failed: anyerror, installed };
 
@@ -95,6 +122,13 @@ pub const FeedBackend = struct {
         return true;
     }
 
+    /// Read updates from `source`, or from `Config.feed` again with null.
+    /// Main thread; a running job keeps the source it started with, and an
+    /// install the one of the check that found its release.
+    pub fn setSource(self: *FeedBackend, source: ?Source) void {
+        self.config.source = source;
+    }
+
     fn enabled(ptr: *anyopaque) bool {
         const self: *FeedBackend = @ptrCast(@alignCast(ptr));
         return self.config.enabled and self.writable;
@@ -117,6 +151,10 @@ pub const FeedBackend = struct {
         self.updater = updater;
         self.token = token;
         self.job = .check;
+        self.job_source = self.config.source;
+        self.job_prereleases = updater.prereleases();
+        self.checked_source = self.job_source;
+        self.checked_prereleases = self.job_prereleases;
         self.done.store(false, .release);
         self.thread = std.Thread.spawn(.{}, runCheck, .{self}) catch |err| {
             self.done.store(true, .release);
@@ -131,6 +169,8 @@ pub const FeedBackend = struct {
         self.updater = updater;
         self.token = token;
         self.job = .install;
+        self.job_source = self.checked_source;
+        self.job_prereleases = self.checked_prereleases;
         self.done.store(false, .release);
         self.thread = std.Thread.spawn(.{}, runInstall, .{self}) catch |err| {
             self.done.store(true, .release);
@@ -166,6 +206,11 @@ pub const FeedBackend = struct {
     }
 
     fn readFeed(self: *FeedBackend, allocator: std.mem.Allocator, client: *std.http.Client) ![]u8 {
+        if (self.job_source) |source| {
+            const bytes = try source.feed(source.context, allocator, self.job_prereleases);
+            if (bytes.len > update.feed.max_feed_bytes) return error.FeedTooLarge;
+            return bytes;
+        }
         if (std.mem.startsWith(u8, self.config.feed, "https://")) return update.http.get(allocator, client, self.config.feed, update.feed.max_feed_bytes);
         return std.Io.Dir.cwd().readFileAlloc(zio.io(), self.config.feed, allocator, .limited(update.feed.max_feed_bytes));
     }
@@ -178,7 +223,7 @@ pub const FeedBackend = struct {
         defer client.deinit();
         const bytes = try self.readFeed(allocator, &client);
         if (self.control.isCancelled()) return error.Cancelled;
-        const result = try update.feed.check(allocator, bytes, self.policy(), null);
+        const result = try update.feed.checkChannel(allocator, bytes, self.policy(), null, .{ .prereleases = self.job_prereleases });
         defer result.deinit();
         const available = switch (result) {
             .current => return .current,
@@ -211,7 +256,7 @@ pub const FeedBackend = struct {
             retained = update.retention.currentArchive(allocator, install_root, self.config.identity, self.config.target) catch null;
         } else |err| if (err != error.FileNotFound) return err;
         const bytes = try self.readFeed(allocator, &client);
-        const result = try update.feed.check(allocator, bytes, current, if (retained) |value| .{ .sha256 = value.sha256 } else null);
+        const result = try update.feed.checkChannel(allocator, bytes, current, if (retained) |value| .{ .sha256 = value.sha256 } else null, .{ .prereleases = self.job_prereleases });
         defer result.deinit();
         const available = switch (result) {
             // Another process already published this version.
@@ -222,6 +267,7 @@ pub const FeedBackend = struct {
         var downloads = try install_root.createDirPathOpen(zio.io(), "downloads", .{ .open_options = .{ .follow_symlinks = false } });
         defer downloads.close(zio.io());
         var http_source: update.http.Source = .init(&client);
+        const files = if (self.job_source) |source| source.files else http_source.source();
         const v = self.version;
         const archive_name = try std.fmt.allocPrint(allocator, "{s}-{d}.{d}.{d}.{d}.zip", .{ self.config.target, v.major, v.minor, v.patch, v.revision });
         var archive = try downloads.createFile(zio.io(), archive_name, .{ .read = true, .truncate = false });
@@ -232,7 +278,7 @@ pub const FeedBackend = struct {
             var patch_file = try downloads.createFile(zio.io(), patch_name, .{ .read = true, .truncate = false });
             defer patch_file.close(zio.io());
             defer downloads.deleteFile(zio.io(), patch_name) catch {};
-            _ = update.download.fetch(patch.manifest.artifact(), http_source.source(), patch_file, &self.control) catch |err| {
+            _ = update.download.fetch(patch.manifest.artifact(), files, patch_file, &self.control) catch |err| {
                 if (err == error.Cancelled) return err;
                 break :delta;
             };
@@ -245,7 +291,7 @@ pub const FeedBackend = struct {
             };
             rebuilt = true;
         }
-        if (!rebuilt) _ = try update.download.fetch(available.full.manifest, http_source.source(), archive, &self.control);
+        if (!rebuilt) _ = try update.download.fetch(available.full.manifest, files, archive, &self.control);
         if (self.control.isCancelled()) return error.Cancelled;
         self.post(.{ .received = available.full.manifest.bytes, .total = available.full.manifest.bytes });
         _ = try update.publication.publishZip(allocator, install_root, archive, &available.full, .{ .retain_archive = true });

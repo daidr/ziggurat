@@ -63,6 +63,8 @@ struct ZwkState {
     int32_t session_left,session_top,session_right,session_bottom;
     gboolean session,placement_busy,parent_destroying,session_visible;
     uint32_t policy;
+    char *facts;
+    gboolean autoplay;
     gboolean closed, committed, failed, dom_ready, recovering,load_started,inspector;
 };
 static gint live_states, live_callbacks, live_views, inspectors_shown;
@@ -83,7 +85,7 @@ static void release(gpointer data) {
     initializers_free(s->initializers);
     if(s->private_bootstrap)webkit_user_script_unref(s->private_bootstrap);
     if(s->public_bootstrap)webkit_user_script_unref(s->public_bootstrap);
-    local_finish(&s->local); remote_free(s->remote); g_free(s->html);g_free(s->current_uri);g_free(s->resources); g_free(s); g_atomic_int_add(&live_states,-1);
+    local_finish(&s->local); remote_free(s->remote); g_free(s->facts); g_free(s->html);g_free(s->current_uri);g_free(s->resources); g_free(s); g_atomic_int_add(&live_states,-1);
 }
 static gboolean live(ZwkState *s) { return !s->closed && !s->recovering && s->owner; }
 static size_t bounded_length(const char *text,size_t limit) {
@@ -260,8 +262,12 @@ static gboolean color_chooser(WebKitWebView *view,WebKitColorChooserRequest *req
 static gboolean notification(WebKitWebView *view,WebKitNotification *request,gpointer data) {
     (void)view; (void)data; webkit_notification_close(request); return TRUE;
 }
+/* window.open reaches create without a NEW_WINDOW_ACTION decision. */
 static WebKitWebView *popup(WebKitWebView *view,WebKitNavigationAction *action,gpointer data) {
-    (void)view; (void)action; (void)data; return NULL;
+    (void)view; ZwkState *s=data; retain(s);
+    const char *uri=action?webkit_uri_request_get_uri(webkit_navigation_action_get_request(action)):NULL;
+    if (live(s) && uri && (s->policy&2u)) notify(s,4,uri,webkit_navigation_action_is_user_gesture(action)?1:0,NULL);
+    release(s); return NULL;
 }
 static gboolean context_menu(WebKitWebView *view,WebKitContextMenu *menu,GdkEvent *event,WebKitHitTestResult *hit,gpointer data) {
     (void)view; (void)menu; (void)event; (void)hit; (void)data; return TRUE;
@@ -302,11 +308,18 @@ static gboolean policy(WebKitWebView *view,WebKitPolicyDecision *decision,WebKit
             }
         }
         if (allowed && navigation_current(s,op)) {
-            op->authorized=TRUE; webkit_policy_decision_use(decision);
+            op->authorized=TRUE;
+            /* WebKitGTK decides autoplay from a main-frame navigation's
+             * website policies, sound only after a gesture by default. */
+            if (s->autoplay) {
+                WebKitWebsitePolicies *policies=webkit_website_policies_new_with_policies("autoplay",WEBKIT_AUTOPLAY_ALLOW,NULL);
+                webkit_policy_decision_use_with_policies(decision,policies);
+                g_object_unref(policies);
+            } else webkit_policy_decision_use(decision);
         } else {
             webkit_policy_decision_ignore(decision);
             unsigned bit=kind==WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION?1:0;
-            if (s->policy&(1u<<bit)) notify(s,3+(int)bit,uri,0,NULL);
+            if (s->policy&(1u<<bit)) notify(s,3+(int)bit,uri,action&&webkit_navigation_action_is_user_gesture(action)?1:0,NULL);
         }
         if (op) navigation_release(op);
     } else if (kind==WEBKIT_POLICY_DECISION_TYPE_RESPONSE) {
@@ -392,6 +405,13 @@ static void process_failed(WebKitWebView *view,WebKitWebProcessTerminationReason
 static void title_changed(GObject *view,GParamSpec *property,gpointer data) {
     (void)property; ZwkState *s=data; retain(s);
     if (document(s)) (void)page(s,4,0,0,webkit_web_view_get_title(WEBKIT_WEB_VIEW(view)));
+    release(s);
+}
+/* Audibility belongs to the view, not a document: it is told between
+   documents too, under the current generation. */
+static void audible_changed(GObject *view,GParamSpec *property,gpointer data) {
+    (void)property; ZwkState *s=data; retain(s);
+    if (live(s)) (void)page(s,7,webkit_web_view_is_playing_audio(WEBKIT_WEB_VIEW(view))?1u:0u,0,NULL);
     release(s);
 }
 static void source_changed(GObject *view,GParamSpec *property,gpointer data) {
@@ -481,7 +501,10 @@ static void message(WebKitUserContentManager *manager,WebKitJavascriptResult *re
     if (count<0 || (size_t)count>=sizeof(prefix) || length<=(size_t)count || memcmp(text,prefix,(size_t)count)) goto done;
     const char *body=text+count;
     size_t body_length=length-(size_t)count;
-    if (body_length==1 && body[0]=='D') {
+    if (body[0]=='F' && s->facts && body_length<=257) {
+        char fact[257]; memcpy(fact,body+1,body_length-1); fact[body_length-1]=0;
+        if (live(s) && s->committed && !s->failed) (void)page(s,10,0,0,fact);
+    } else if (body_length==1 && body[0]=='D') {
         s->dom_ready=TRUE;
         if (document(s)) (void)page(s,2,0,0,NULL);
     } else if (body[0]=='M' && body_length-1<=65536 && document(s) && s->notify && ipc_allowed(s)) {
@@ -531,20 +554,20 @@ static int prepare_document(ZwkState *s) {
         "if(bytes>65536)return false}return true};"
         "addEventListener('message',e=>{if(e.isTrusted&&e.source===window&&window===top&&%s&&"
         "e.data&&valid(e.data.__ziggurat))send('M'+e.data.__ziggurat)});"
-        "addEventListener('DOMContentLoaded',()=>send('D'),{once:true})})()";
-    char ordinary[2048];char *private_script=ordinary,*preamble=NULL;
+        "addEventListener('DOMContentLoaded',()=>send('D'),{once:true});%s})()";
+    char *preamble=NULL;
     if(s->remote){
         preamble=try_format("const trusted=new Set(%s.map(x=>new URL(x).origin));",s->remote->ipc_json);
         if(!preamble)return ZWK_OOM;
-        private_script=try_format(format,preamble,(unsigned long long)(s->generation+1),source_check);g_free(preamble);
-    }else{
-        int length=snprintf(ordinary,sizeof(ordinary),format,"",(unsigned long long)(s->generation+1),source_check);
-        if(length<0||(size_t)length>=sizeof(ordinary))return ZWK_INVALID;
     }
+    /* The page-facts script runs in this private world too, whatever the
+     * page's origin, and reaches the View alone. */
+    char *private_script=try_format(format,preamble?preamble:"",(unsigned long long)(s->generation+1),source_check,s->facts?s->facts:"");
+    g_free(preamble);
     if (!private_script) return ZWK_OOM;
     WebKitUserScript *private_value=webkit_user_script_new_for_world(private_script,WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
         WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START,"ziggurat-private",NULL,NULL);
-    if(s->remote)g_free(private_script);
+    g_free(private_script);
     static const char public_script[]=
         "(()=>{const listeners=new Map;const transport=Object.freeze({"
         "postMessage(value){if(typeof value!=='string'||value.length>65536||value.includes('\\0'))throw TypeError('InvalidMessage');"
@@ -680,6 +703,8 @@ static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t
     s->html=g_try_malloc(strlen(options->html)+1);
     if (!s->html) { zwk_close(s); return ZWK_OOM; }
     strcpy(s->html,options->html);
+    if (options->facts && !(s->facts=g_strdup(options->facts))) { zwk_close(s); return ZWK_OOM; }
+    s->autoplay=options->autoplay!=0;
     s->owner=owner; s->notify=callback; s->page=page_callback; s->script=script_callback; s->deadline=deadline;
     s->limit=options->max_pending; s->result_limit=options->max_result_bytes; s->policy=options->policy_flags;
     if(options->initializers){
@@ -710,6 +735,7 @@ static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t
     if (!webkit_user_content_manager_register_script_message_handler_in_world(s->manager,"ziggurat","ziggurat-private")) {
         zwk_close(s); return ZWK_NATIVE_FAILED;
     }
+    for (uint32_t i=0;i<options->content_filter_count;i++) webkit_user_content_manager_add_filter(s->manager,options->content_filters[i]);
     static const char csp[]="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; "
         "connect-src 'none'; frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
     s->view=g_object_new(WEBKIT_TYPE_WEB_VIEW,"web-context",s->context,"user-content-manager",s->manager,
@@ -737,6 +763,7 @@ static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t
     webkit_settings_set_allow_universal_access_from_file_urls(settings,FALSE);
     if (options->user_agent) webkit_settings_set_user_agent(settings,options->user_agent);
     webkit_web_view_set_zoom_level(WEBKIT_WEB_VIEW(s->view),options->zoom);
+    webkit_web_view_set_is_muted(WEBKIT_WEB_VIEW(s->view),options->audio_muted!=0);
     g_signal_connect(s->manager,"script-message-received::ziggurat",G_CALLBACK(message),s);
     g_signal_connect(s->context,"download-started",G_CALLBACK(downloaded),s);
     g_signal_connect(s->view,"decide-policy",G_CALLBACK(policy),s);
@@ -745,6 +772,7 @@ static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t
     g_signal_connect(s->view,"load-failed",G_CALLBACK(load_failed),s);
     g_signal_connect(s->view,"web-process-terminated",G_CALLBACK(process_failed),s);
     g_signal_connect(s->view,"notify::title",G_CALLBACK(title_changed),s);
+    g_signal_connect(s->view,"notify::is-playing-audio",G_CALLBACK(audible_changed),s);
     if (s->local.budget || s->remote) {
         g_signal_connect(s->view,"notify::uri",G_CALLBACK(source_changed),s);
         g_signal_connect(s->view,"notify::is-loading",G_CALLBACK(loading_changed),s);
@@ -897,6 +925,23 @@ int zwk_zoom(ZwkState *s,double *value,int write) {
     if (!live(s)) return ZWK_CLOSED;
     if (write) webkit_web_view_set_zoom_level(WEBKIT_WEB_VIEW(s->view),*value);
     else *value=webkit_web_view_get_zoom_level(WEBKIT_WEB_VIEW(s->view));
+    return ZWK_OK;
+}
+int zwk_audio(ZwkState *s,int op,int *value) {
+    if (!live(s)) return ZWK_CLOSED;
+    WebKitWebView *view=WEBKIT_WEB_VIEW(s->view);
+    switch (op) {
+    case 0: *value=webkit_web_view_get_is_muted(view)?1:0; return ZWK_OK;
+    case 1: webkit_web_view_set_is_muted(view,*value!=0); return ZWK_OK;
+    case 2: *value=webkit_web_view_is_playing_audio(view)?1:0; return ZWK_OK;
+    }
+    return ZWK_INVALID;
+}
+int zwk_content_filters(ZwkState *s,void *const *filters,uint32_t count) {
+    if (!live(s)) return ZWK_CLOSED;
+    if (count && !filters) return ZWK_INVALID;
+    webkit_user_content_manager_remove_all_filters(s->manager);
+    for (uint32_t i=0;i<count;i++) webkit_user_content_manager_add_filter(s->manager,filters[i]);
     return ZWK_OK;
 }
 int zwk_user_agent(ZwkState *s,const char *set,char **get) {

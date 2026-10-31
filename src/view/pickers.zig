@@ -8,6 +8,7 @@
 //! from `Texts`, which the application localizes. A control returns true in
 //! the pass that applies a change to its value. Nothing here allocates.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const view = @import("ziggurat_view");
@@ -93,13 +94,13 @@ pub const Date = struct {
     /// is shorter, kept within the calendar.
     pub fn addMonths(self: Date, count: i32) Date {
         const index = std.math.clamp(@as(i64, self.year) * 12 + self.month - 1 + count, 12, 9999 * 12 + 11);
-        const year: u16 = @intCast(@divFloor(index, 12));
-        const month: u4 = @intCast(@mod(index, 12) + 1);
+        const year: u16 = @intCast(zio.asUnsigned(@divFloor(index, 12)));
+        const month: u4 = @intCast(zio.asUnsigned(@mod(index, 12) + 1));
         return .{ .year = year, .month = month, .day = @min(self.day, daysIn(year, month)) };
     }
     /// 0 is Sunday.
     pub fn weekday(self: Date) u3 {
-        return @intCast(@mod(self.days() + 4, 7));
+        return @intCast(zio.asUnsigned(@mod(self.days() + 4, 7)));
     }
     pub fn order(a: Date, b: Date) std.math.Order {
         return std.math.order(a.days(), b.days());
@@ -993,12 +994,12 @@ fn step(value: TimeOfDay, segment: Segment, delta: i32, twelve: bool) TimeOfDay 
     switch (segment) {
         .hour => if (twelve) {
             const half = @as(i32, value.hour) - @mod(@as(i32, value.hour), 12);
-            next.hour = @intCast(half + @mod(@mod(@as(i32, value.hour), 12) + delta, 12));
+            next.hour = @intCast(zio.asUnsigned(half + @mod(@mod(@as(i32, value.hour), 12) + delta, 12)));
         } else {
-            next.hour = @intCast(@mod(@as(i32, value.hour) + delta, 24));
+            next.hour = @intCast(zio.asUnsigned(@mod(@as(i32, value.hour) + delta, 24)));
         },
-        .minute => next.minute = @intCast(@mod(@as(i32, value.minute) + delta, 60)),
-        .period => next.hour = @intCast(@mod(@as(i32, value.hour) + 12, 24)),
+        .minute => next.minute = @intCast(zio.asUnsigned(@mod(@as(i32, value.minute) + delta, 60))),
+        .period => next.hour = @intCast(zio.asUnsigned(@mod(@as(i32, value.hour) + 12, 24))),
     }
     return next;
 }

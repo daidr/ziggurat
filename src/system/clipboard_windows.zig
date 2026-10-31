@@ -1,5 +1,6 @@
 const std = @import("std");
 const api = @import("clipboard.zig");
+const bitmap = @import("bitmap.zig");
 const c = @import("ziggurat_c_win32");
 
 pub const supported = true;
@@ -115,6 +116,11 @@ pub fn offer(board: *api.Board, formats: []const api.Format) !void {
     }
     @memcpy(board.native.ids[0..formats.len], ids[0..formats.len]);
 }
+pub fn clear(board: *api.Board) !void {
+    try openClipboard(board);
+    defer _ = c.CloseClipboard();
+    if (c.EmptyClipboard() == 0) return failed(board, error.ClipboardWriteFailed);
+}
 pub fn revoke(board: *api.Board) void {
     const hwnd = board.native.hwnd orelse return;
     if (c.GetClipboardOwner() != hwnd) return;
@@ -215,7 +221,7 @@ fn available(board: *api.Board) api.Available {
     return .{
         .text = c.IsClipboardFormatAvailable(c.CF_UNICODETEXT) != 0,
         .html = if (formatId(board, .{ .kind = .html })) |id| c.IsClipboardFormatAvailable(id) != 0 else |_| false,
-        .png = if (formatId(board, .{ .kind = .png })) |id| c.IsClipboardFormatAvailable(id) != 0 else |_| false,
+        .png = c.IsClipboardFormatAvailable(c.CF_DIB) != 0 or if (formatId(board, .{ .kind = .png })) |id| c.IsClipboardFormatAvailable(id) != 0 else |_| false,
         .files = c.IsClipboardFormatAvailable(c.CF_HDROP) != 0,
     };
 }
@@ -246,7 +252,12 @@ fn registered(board: *api.Board, name: [*:0]const u16) !c.UINT {
 fn readFormat(board: *api.Board, request: *api.Request) api.Result {
     const item = request.format();
     const id = formatId(board, item) catch return .{ .failed = .{ .err = error.NativeFailure, .code = board.last_error } };
-    const handle = c.GetClipboardData(id) orelse return .unavailable;
+    const handle = c.GetClipboardData(id) orelse {
+        // Bitmaps, as most programs copy images, convert when no PNG stream
+        // comes with them. Windows synthesizes CF_DIB from the other kinds.
+        if (item.kind == .png) if (c.GetClipboardData(c.CF_DIB)) |dib| return readBitmap(@ptrCast(dib), request.destination);
+        return .unavailable;
+    };
     if (item.kind == .files) return readFiles(@ptrCast(handle), request.destination);
     const size = c.GlobalSize(handle);
     const pointer = c.GlobalLock(handle) orelse return .{ .failed = .{ .err = error.NativeFailure, .code = c.GetLastError() } };
@@ -259,6 +270,15 @@ fn readFormat(board: *api.Board, request: *api.Request) api.Result {
         .custom => copyResult(bytes[0..size], request.destination),
         .files => unreachable,
     };
+}
+fn readBitmap(handle: c.HGLOBAL, destination: []u8) api.Result {
+    const size = c.GlobalSize(handle);
+    const pointer = c.GlobalLock(handle) orelse return .{ .failed = .{ .err = error.NativeFailure, .code = c.GetLastError() } };
+    defer _ = c.GlobalUnlock(handle);
+    const dib = @as([*]const u8, @ptrCast(pointer))[0..size];
+    const needed = bitmap.pngLength(dib) catch return malformed();
+    if (needed > destination.len) return .{ .capacity_exceeded = needed };
+    return .{ .data = bitmap.dibToPng(dib, destination) catch return malformed() };
 }
 fn malformed() api.Result {
     return .{ .failed = .{ .err = error.ClipboardMalformed } };
@@ -321,6 +341,14 @@ fn readHtml(bytes: []const u8, destination: []u8) api.Result {
     if (first > last or last > data.len) return malformed();
     if (!std.unicode.utf8ValidateSlice(data[first..last])) return malformed();
     return copyResult(data[first..last], destination);
+}
+/// The fragment of a CF_HTML document, borrowed, or null when malformed.
+pub fn htmlFragment(bytes: []const u8) ?[]const u8 {
+    const data = bytes[0 .. std.mem.indexOfScalar(u8, bytes, 0) orelse bytes.len];
+    const first = headerValue(data, "StartFragment:") orelse return null;
+    const last = headerValue(data, "EndFragment:") orelse return null;
+    if (first > last or last > data.len) return null;
+    return data[first..last];
 }
 fn headerValue(data: []const u8, key: []const u8) ?usize {
     const header_end = std.mem.indexOf(u8, data, "<") orelse data.len;
@@ -419,7 +447,7 @@ comptime {
 const html_prefix = "<html><body>\r\n<!--StartFragment-->";
 const html_suffix = "<!--EndFragment-->\r\n</body></html>";
 const html_header = "Version:0.9\r\nStartHTML:0000000000\r\nEndHTML:0000000000\r\nStartFragment:0000000000\r\nEndFragment:0000000000\r\n";
-fn htmlSize(fragment: usize) usize {
+pub fn htmlSize(fragment: usize) usize {
     return html_header.len + html_prefix.len + fragment + html_suffix.len + 1;
 }
 pub fn writeHtml(destination: []u8, fragment: []const u8) void {
@@ -430,13 +458,13 @@ pub fn writeHtml(destination: []u8, fragment: []const u8) void {
     _ = std.fmt.bufPrint(destination, "Version:0.9\r\nStartHTML:{d:0>10}\r\nEndHTML:{d:0>10}\r\nStartFragment:{d:0>10}\r\nEndFragment:{d:0>10}\r\n" ++ html_prefix ++ "{s}" ++ html_suffix, .{ start_html, end_html, start_fragment, end_fragment, fragment }) catch unreachable;
     destination[end_html] = 0;
 }
-fn filesSize(data: []const u8) !usize {
+pub fn filesSize(data: []const u8) !usize {
     var total: usize = @sizeOf(DropFiles) + 2;
     var iterator = api.paths(data);
     while (iterator.next()) |path| total += ((std.unicode.calcUtf16LeLen(path) catch return error.InvalidPath) + 1) * 2;
     return total;
 }
-fn writeFiles(destination: []u8, data: []const u8) void {
+pub fn writeFiles(destination: []u8, data: []const u8) void {
     const header: *align(1) DropFiles = @ptrCast(destination.ptr);
     header.pFiles = @sizeOf(DropFiles);
     header.fWide = c.TRUE;

@@ -1,5 +1,6 @@
 //! A time scale whose ticks fall on round calendar times.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const scale = @import("scale.zig");
 const Span = scale.Span;
 const Tick = scale.Tick;
@@ -67,14 +68,14 @@ pub fn toCivil(ms: i64, offset: i32) Civil {
     const y = yoe + era * 400 + @as(i64, if (m <= 2) 1 else 0);
     return .{
         .year = y,
-        .month = @intCast(m),
-        .day = @intCast(d),
-        .hour = @intCast(@divFloor(rest, ms_hour)),
-        .minute = @intCast(@divFloor(@mod(rest, ms_hour), ms_minute)),
-        .second = @intCast(@divFloor(@mod(rest, ms_minute), ms_second)),
-        .millisecond = @intCast(@mod(rest, ms_second)),
-        .weekday = @intCast(@mod(days + 4, 7)),
-        .year_day = @intCast(days - daysFromCivil(y, 1) + 1),
+        .month = @intCast(zio.asUnsigned(m)),
+        .day = @intCast(zio.asUnsigned(d)),
+        .hour = @intCast(zio.asUnsigned(@divFloor(rest, ms_hour))),
+        .minute = @intCast(zio.asUnsigned(@divFloor(@mod(rest, ms_hour), ms_minute))),
+        .second = @intCast(zio.asUnsigned(@divFloor(@mod(rest, ms_minute), ms_second))),
+        .millisecond = @intCast(zio.asUnsigned(@mod(rest, ms_second))),
+        .weekday = @intCast(zio.asUnsigned(@mod(days + 4, 7))),
+        .year_day = @intCast(zio.asUnsigned(days - daysFromCivil(y, 1) + 1)),
     };
 }
 

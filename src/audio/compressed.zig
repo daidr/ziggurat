@@ -106,7 +106,7 @@ pub fn openMp3(allocator: std.mem.Allocator, input: Input) Error!Decoder {
     zg_mp3_info(self.handle, &rate, &channels, &samples);
     self.channels = @intCast(channels);
     self.frames = if (samples > 0) samples / self.channels else null;
-    return .{ .context = self, .vtable = &Mp3.vtable, .sample_rate = @intCast(rate), .channels = @intCast(channels), .frames = self.frames };
+    return .{ .context = self, .vtable = &Mp3.vtable, .sample_rate = @intCast(rate), .channels = @intCast(zio.asUnsigned(channels)), .frames = self.frames };
 }
 
 const Vorbis = struct {
@@ -164,7 +164,7 @@ pub fn openVorbis(allocator: std.mem.Allocator, input: Input) Error!Decoder {
         return error.InvalidData;
     }
     self.* = .{ .allocator = allocator, .data = data, .handle = handle, .channels = @intCast(channels), .frames = if (frames > 0) frames else null };
-    return .{ .context = self, .vtable = &Vorbis.vtable, .sample_rate = @intCast(rate), .channels = @intCast(channels), .frames = self.frames };
+    return .{ .context = self, .vtable = &Vorbis.vtable, .sample_rate = @intCast(rate), .channels = @intCast(zio.asUnsigned(channels)), .frames = self.frames };
 }
 
 /// The pinned third-party sources, checked against their recorded hashes.

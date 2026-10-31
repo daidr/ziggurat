@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const Watchdog = @import("watchdog.zig").Watchdog;
@@ -110,7 +111,7 @@ fn send(window: z.Window, code: u32, unshifted: u32, modifiers: z.KeyModifiers, 
             defer g_free(entries);
             for (entries.?[0..@intCast(count)]) |entry| if (entry.level == 0 and entry.keycode > 0 and entry.keycode < 1024 and entry.group >= 0 and entry.group <= 255) {
                 hardware = @intCast(entry.keycode);
-                group = @intCast(entry.group);
+                group = @intCast(zio.asUnsigned(entry.group));
                 break;
             };
             if (hardware == 0) return error.UnshiftedKeyMissing;

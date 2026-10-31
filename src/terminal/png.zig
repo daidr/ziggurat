@@ -4,6 +4,7 @@
 //! palette's alpha or the color that is transparent; checksums are not
 //! checked.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 
 pub const Error = error{ InvalidPng, UnsupportedPng, TooLarge, OutOfMemory };
 
@@ -222,7 +223,7 @@ fn unfilter(filter: u8, line: []u8, previous: []const u8, bpp: usize) Error!void
             const pb = @abs(p - up);
             const pc = @abs(p - corner);
             const predicted = if (pa <= pb and pa <= pc) left else if (pb <= pc) up else corner;
-            b.* +%= @intCast(predicted);
+            b.* +%= @intCast(zio.asUnsigned(predicted));
         },
         else => return error.InvalidPng,
     }

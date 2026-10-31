@@ -14,6 +14,8 @@ pub const Plan = struct {
     enabled: [max_items]bool = @splat(false),
     /// Every ancestor submenu is enabled; the item's own state is excluded.
     ancestors_enabled: [max_items]bool = @splat(false),
+    /// The first item of a radio command's group; null for other items.
+    radio_group: [max_items]?u8 = @splat(null),
 
     pub fn lookup(self: *const Plan, items: []const types.Item, id: u64) ?usize {
         for (items[0..self.count], 0..) |item, index| if (item.kind == .command and item.id == id) return index;
@@ -47,6 +49,12 @@ pub fn validate(items: []const types.Item, popup: bool) !Plan {
             if (item.kind != .command) return error.InvalidAccelerator;
             try validateAccelerator(accelerator);
             for (items[0..index]) |previous| if (previous.accelerator) |other| if (sameAccelerator(other, accelerator)) return error.DuplicateAccelerator;
+        }
+        if (item.radio) {
+            if (item.kind != .command) return error.InvalidRadioItem;
+            const group: u8 = if (index > 0 and items[index - 1].radio and std.meta.eql(items[index - 1].parent, item.parent)) plan.radio_group[index - 1].? else @intCast(index);
+            plan.radio_group[index] = group;
+            if (item.checked) for (items[group..index]) |previous| if (previous.checked) return error.MultipleRadioChecked;
         }
         if (item.kind == .command) plan.commands += 1;
     }
@@ -294,6 +302,32 @@ test "disabled ancestors disable every descendant command" {
     try testing.expectEqual(@as(?u64, null), matchAccelerator(&items, &plan, .{ .key = .f6 }));
     try testing.expectEqual(@as(?usize, 3), plan.lookup(&items, 4));
     try testing.expectEqual(@as(?usize, null), plan.lookup(&items, 1));
+}
+
+test "adjacent radio commands under one parent form a group with one checked item" {
+    const items = [_]types.Item{
+        .{ .id = 1, .label = "Small", .radio = true, .checked = true },
+        .{ .id = 2, .label = "Large", .radio = true },
+        .{ .kind = .separator },
+        .{ .id = 3, .label = "Light", .radio = true },
+        .{ .id = 4, .label = "Dark", .radio = true, .checked = true },
+        .{ .id = 5, .label = "Plain", .checked = true },
+    };
+    const plan = try validate(&items, true);
+    try testing.expectEqual(@as(?u8, 0), plan.radio_group[1]);
+    try testing.expectEqual(@as(?u8, null), plan.radio_group[2]);
+    try testing.expectEqual(@as(?u8, 3), plan.radio_group[4]);
+    try testing.expectEqual(@as(?u8, null), plan.radio_group[5]);
+    try testing.expectError(error.MultipleRadioChecked, validate(&.{ .{ .id = 1, .label = "A", .radio = true, .checked = true }, .{ .id = 2, .label = "B", .radio = true, .checked = true } }, true));
+    try testing.expectError(error.InvalidRadioItem, validate(&.{.{ .id = 1, .label = "A", .kind = .submenu, .radio = true }}, true));
+    // A different parent starts another group.
+    const nested = [_]types.Item{
+        .{ .id = 1, .label = "A", .radio = true, .checked = true },
+        .{ .id = 2, .label = "Menu", .kind = .submenu },
+        .{ .id = 3, .label = "B", .parent = 2, .radio = true, .checked = true },
+    };
+    const nested_plan = try validate(&nested, false);
+    try testing.expectEqual(@as(?u8, 2), nested_plan.radio_group[2]);
 }
 
 test "accelerators must not capture typing and must be unique" {

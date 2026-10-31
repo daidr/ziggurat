@@ -40,3 +40,16 @@ pub const Watchdog = struct {
         self.app.quit();
     }
 };
+
+/// Ends the process if it is still running after `seconds`, for a smoke that
+/// can be held in a native modal loop where App tasks no longer quit it.
+pub fn exitAfter(name: []const u8, seconds: u64) !void {
+    const thread = try std.Thread.spawn(.{}, struct {
+        fn run(label: []const u8, limit: u64) void {
+            zio.sleep(limit * std.time.ns_per_s);
+            std.debug.print("{s}: still running after {d}s, exiting\n", .{ label, limit });
+            std.process.exit(3);
+        }
+    }.run, .{ name, seconds });
+    thread.detach();
+}

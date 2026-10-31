@@ -319,7 +319,7 @@ HEAD 使用文件 representation 长度生成 Content-Length，不建物理文�
 
 设置 `Options.page_listener` 接收独立 `PageEvent`。监听上下文从 attach/reload 成功后保持稳定，直到相应配置释放或 detach；旧资源释放顺序沿用 `resources_released`。所有回调在主线程，持有核心 callback pin；回调内关闭只在安全点 detach。
 
-事件包括 started、completed、dom_ready、source_changed、title_changed、history_changed。controller 的 ready 不表示 DOM 已就绪。completed 带原生导航 ID、成功标志和 WebErrorStatus；它不把 HTTP 错误状态等同于传输失败。source/title/history 在变化时通知，并在加载完成时发布快照，因此可能有相同值的重复事件，刷新也能得到当前元数据。
+事件包括 started、completed、dom_ready、source_changed、title_changed、history_changed、audible_changed。controller 的 ready 不表示 DOM 已就绪。completed 带原生导航 ID、成功标志和 WebErrorStatus；它不把 HTTP 错误状态等同于传输失败。source/title/history 在变化时通知，并在加载完成时发布快照，因此可能有相同值的重复事件，刷新也能得到当前元数据。
 
 每次新文档的 accepted Starting 增加 `PageId.generation`；同一原生导航的重定向沿用代数。`PageId` 还包含所属 View 地址，不能跨 View 使用。View 从 attach 开始必须保持地址稳定，并覆盖 PageId 的使用期。页面代数在 detach/re-attach 或恢复后继续增加，不复活旧页面。
 
@@ -333,9 +333,33 @@ HEAD 使用文件 representation 长度生成 Content-Length，不建物理文�
 
 Starting 到本次 ContentLoading 期间抑制页面消息；之后消息必须来自当前顶层文档的可信来源。同地址刷新无法只凭消息的 Source 区分全部旧代数消息，所以应用必须重置 IPC session，并按 session/任务代数处理迟到结果。页面载入失败或停止也不能证明旧 JS 业务已经撤销。
 
+## 主题色、按内容定尺寸与页面进程
+
+`Options.theme_color = true` 让 View 跟踪页面的主题色：页面 `<head>` 中第一个 `media` 为空或匹配、内容是颜色的 `<meta name="theme-color">`，与浏览器的选法相同。颜色由页面引擎解析，任何 CSS 颜色（`dodgerblue`、`rgb(30 144 255 / 50%)`、`oklch(…)`）都可以，得到 8 位 sRGB 和直通 alpha 的 `web.Rgba`。`View.themeColor()` 返回当前值，`PageEvent.theme_color_changed` 只在颜色变化时通知：页面增删或修改 meta、外观变化让另一个 `media` 匹配、或新页面的颜色不同。刚开始加载的页面在 DOM 就绪前沿用上一页的颜色，所以同色页面之间切换不产生事件；从未报告颜色的文档（例如图片）在加载完成时变为 null。应用可以据此给标题栏、工具栏或窗口背景着色：
+
+```zig
+.theme_color_changed => |change| toolbar.setBackground(change.color orelse default_color),
+```
+
+`Options.fit_content = .{ .max_width = 400, .max_height = 600 }` 让窗口跟随页面内容的尺寸，像浏览器扩展的弹出页面：页面根元素按内容宽度（`width: max-content`）在限制内布局，文字在最大宽度处换行，高度超过最大高度时页面滚动，此时滚动条的宽度计入窗口宽度。限制以 DIP 给出，0 表示不限，按文档开始时的缩放换算成页面的 CSS 像素；缩放改变后的新限制在下一次 reload 生效。规则没有特异性，页面自己给 `html` 的尺寸（如 `height: 100%`）优先，所以要让 `html` 和 `body` 取内容的尺寸。`PageEvent.content_size_changed` 以 CSS 像素报告根元素尺寸和可见滚动条的空间，`View.contentSize()` 返回最近一次的值。附着在窗口上且 `resize_window = true`（默认）时，View 用 `page_facts.fit` 把尺寸换算成 DIP 并调用 `Window.resize`：只改变真正变化的那一维，用户调整过的另一维保持不变，最大化和全屏时不改变。区域、PageSession 和 `resize_window = false` 只报告尺寸，由应用调用 `web.page_facts.fit` 再交给 `Flyout.setSize` 或自己的布局。
+
+两项都由 View 在每个顶层文档开始时运行的同一段脚本完成（`src/webview/page_facts.js`），与页面来源和信任无关：Linux 运行在私有 script world 中，经私有消息通道只到达 View；Windows 用 `AddScriptToExecuteOnDocumentCreated` 在页面脚本之前取得 `chrome.webview.postMessage`，消息带 `\x01ziggurat-facts:` 前缀，在来源与 IPC 授权检查之前交给 View，不会成为 `Event.message`。页面也能发出同样前缀的消息，但只能谎报自己的主题色和内容尺寸，窗口尺寸仍受应用给的限制。两项都关闭时不注入脚本。
+
+`View.processId()` 返回运行页面的操作系统进程 ID，供应用自己的任务管理器或内存报告使用：Windows 是同一 App 的页面共用的 WebView2 浏览器进程（`msedgewebview2.exe`），WebKitGTK 没有对应 API，Linux 总是 null。
+
+## 不受信任页面、开窗手势与自动播放
+
+`Options.untrusted = true` 把页面当作别人的页面，例如从自定义 scheme 显示插件界面：无论来源的授权（`OriginGrant.ipc`、`LocalSite.scheme_ipc`、普通 html）如何，页面的消息都不会成为 `Event.message`；`post` 仍能把消息送达页面。页面通往应用的通道是它向自己 scheme 发出的请求：`on_resource` 收到的 `ResourceRequest.page` 是发出请求的文档的 `PageId`，处理器据此判断是哪一个页面、哪一代文档在请求，再用 `postFor` 回复。权限、下载、新窗口和跨来源导航仍按各自的显式策略处理，默认全部拒绝。
+
+`PolicyRequest.user_gesture` 说明导航或新窗口请求是否由用户手势发起：点击链接，或在点击、按键的处理函数里设置 `location.href`、调用 `window.open()`；页面脚本自己（定时器、加载时）发起的为 false。Windows 来自事件参数的 `IsUserInitiated`；Linux 来自 `webkit_navigation_action_is_user_gesture`，`window.open()` 经 `create` 信号报告。WebKitGTK 自己会先拒绝没有手势的 `window.open()`，所以 Linux 只会报告有手势的那些；WebKit 把宿主 `evaluateJS` 运行的脚本视为用户手势，WebView2 的 ExecuteScript 不是。frame 导航不提供该信息，为 null。Linux 现在也接受 `policy.new_window = .notify`。
+
+`Options.autoplay = .allow` 让页面在用户点击或输入之前就能播放有声媒体，隐藏窗口里的页面也一样：默认情况下没有手势时，有声的 `<audio>`/`<video>` 的 `play()` 以 `NotAllowedError` 拒绝。Linux 在每次主 frame 导航的 website policies 中设置 `WEBKIT_AUTOPLAY_ALLOW`。Windows 以 `--autoplay-policy=no-user-gesture-required` 启动浏览器：这是 WebView2 环境的参数，同一 user data folder 的所有 View 共享环境并且必须一致，否则后创建的 View 失败；Windows Profile owner 暂不接受这个选项（`UnsupportedCapability`）。
+
+`smoke-webview-page-facts` 在隐藏窗口的真实页面中检查：初始主题色和脚本修改后的颜色、内容尺寸与窗口按内容调整为 266×136、自动播放不被策略拒绝、全部 frame 与任意来源的初始化器在顶层和子 frame 各运行一次、宿主脚本 `window.open` 的手势报告、进程 ID，以及 reload 为不受信任页面后消息被丢弃而主题色仍然报告。Linux 在 WebKitGTK 2.52.6（xvfb）本地通过；Windows 在 CI 的 WebView2 任务中运行。
+
 ## 文档初始化器
 
-Windows 的 `Options.document_initializers` 在首个文档前安装已拥有的初始化器，`View.replaceDocumentInitializers` 用一次有界事务替换未来文档配置。每项是宿主信任、语法有效的普通函数体，只在顶层页面 world 的 document start、精确 HTTPS 来源守卫通过后按序调用；return 结束自身，throw 中断后续。默认空表不创建预算、注册或事务。它不授予导航、TLS、请求或 IPC 权限，也不是不可信代码 sandbox。
+Windows 的 `Options.document_initializers` 在首个文档前安装已拥有的初始化器，`View.replaceDocumentInitializers` 用一次有界事务替换未来文档配置。每项是宿主信任、语法有效的普通函数体，在页面 world 的 document start、精确 HTTPS 来源守卫通过后按序调用；`frames = .all` 让它在子 frame 中也运行（每个 frame 检查自己的来源），`origins` 只写 `"*"` 时任何来源的文档都运行；return 结束自身，throw 中断后续。默认空表不创建预算、注册或事务。它不授予导航、TLS、请求或 IPC 权限，也不是不可信代码 sandbox。
 
 替换期间包括逻辑取消后尚未退休的原生 Add 都阻断新导航；Remove 结果不确定时封锁页面，只有显式 recover 可以恢复。关闭先撤去 Zig 回调，迟到操作只持独立 C 状态；最后原生引用释放后才归还预算。Windows Debug/ReleaseSafe 四模式真实验证覆盖顺序、拥有/reload、frame/opaque/CSP、取消、恢复、关闭、Stop、错误证书和服务端精确请求计数。Linux 目前明确 `UnsupportedCapability`，普通空表页面的两优化窄回归已通过。完整限制、预算和复验命令见[文档初始化器](document-initializers.md)。
 
@@ -360,6 +384,36 @@ timeout 可省略，设定时范围 1 ms 到 10 分钟。每 View 惰性创建�
 `Options.devtools_enabled` 默认 false；`setDevToolsEnabled`/`devToolsEnabled` 显式修改/读取开关，`openDevTools` 仅在启用时打开原生工具窗口，否则返回 `DevToolsDisabled`。不会自动打开工具窗口。三个 setter 成功后保留 override，`recover` 复用它们；事务 `reload(options)` 应用新 Options 并清除旧 override，detach 释放复制的 UA。属性操作在主线程、受窗口 pin 保护，未 ready/正在重建时返回 `NotReady`，失败不修改已保存配置。
 
 Linux 同样接受 `devtools_enabled` 和三个 DevTools 方法，对应 WebKit 的 developer extras 设置。`openDevTools` 只在启用时显示引擎拥有的独立 inspector 顶层窗口；它拒绝停靠进 Content host，不改变 GtkOverlay/区域/PageSession 的 widget 层级。重复打开不新增窗口。`setDevToolsEnabled(false)`、detach、reload/recover 替换原生页面和关闭均同步关闭已显示的 inspector；`devToolsResourceCount()` 统计尚未关闭的已显示 inspector，Windows 工具窗属于 Runtime，固定返回 0。网页上下文菜单仍被拒绝，因此启用开关不会额外打开“检查元素”入口。inspector 运行在同一主线程和引擎进程中，没有新增框架 worker、轮询或嵌套循环；`smoke-webview-linux` 与 `P01_PROBE=backend` 覆盖默认关闭、关闭时拒绝打开、显示/重复显示、禁用关闭、recover 保留 override、reload 清除 override 和最终计数归零，不建立人眼工具窗展示结论。
+
+## 页面声音
+
+`isAudible()` 报告页面是否正在发声：任一 frame（含其他站点的 frame）里播放的音视频元素或 Web Audio。它像浏览器标签页的喇叭图标，静音时也可能仍为 true；暂停或无声的来源何时不再算发声由引擎决定。设置了 `page_listener` 时，`PageEvent.audible_changed`（带当前 `PageId` 与新值）通知变化；它属于 View 而不是某个文档，也可能在两次导航之间出现。引擎未就绪时 `isAudible()` 返回 false。
+
+`setAudioMuted(true)` 像浏览器静音标签页一样静音整个页面（媒体元素、Web Audio 和其他站点的 frame），页面看不到自己的元素被静音；`setAudioMuted(false)` 恢复。静音跨导航保持，`recover` 保留，`reload(options)` 应用新 Options 并清除它；`Options.audio_muted` 让页面从第一次加载起就静音。attach 之后、引擎就绪之前也可以设置，就绪时生效。`audioMuted()` 返回当前状态，就绪前返回所设的值。
+
+- Linux：`webkit_web_view_is_playing_audio`、`notify::is-playing-audio` 与 `webkit_web_view_set_is_muted`。
+- Windows：`ICoreWebView2_8` 的 `IsDocumentPlayingAudio`、`IsDocumentPlayingAudioChanged` 与 `IsMuted`。没有 `ICoreWebView2_8` 的旧 Runtime 不能静音，也不报告发声（始终 false）。WebView2 在一次 `IsMuted` 写入的 `IsMutedChanged` 到来前收到另一次写入时，可能丢失或乱序应用，所以适配器同一时间只让一次写入在途：其余只记录目标状态，`IsMutedChanged` 到来后若与目标不同再写；没有变化的写入不会有事件，最多压住下一次写入 1 秒。
+
+## 内容拦截规则
+
+内容拦截规则阻止页面加载某些资源并隐藏页面的某些部分，就像广告或跟踪器拦截器。规则使用 WebKit 内容拦截器的 JSON 格式：一个规则数组，每条规则有 trigger 和 action，按顺序应用。
+
+```json
+[{"trigger": {"url-filter": "^https?://ads\\.example\\.com/"}, "action": {"type": "block"}},
+ {"trigger": {"url-filter": ".*", "if-domain": ["*example.com"]},
+  "action": {"type": "css-display-none", "selector": ".banner"}}]
+```
+
+trigger 用 `url-filter`（URL 的正则表达式，除非 `url-filter-is-case-sensitive` 否则不区分大小写）匹配一次加载，并可用以下之一缩小范围：`if-domain`/`unless-domain`（页面的域名，小写 punycode，前面的 `*` 包含子域名）或 `if-top-url`/`unless-top-url`（页面 URL 的正则表达式）；另外可用 `resource-type`（`document`、`image`、`style-sheet`、`script`、`font`、`raw`（fetch、XMLHttpRequest、WebSocket）、`svg-document`、`media`、`popup`、`ping`、`fetch`、`websocket`、`other`）与 `load-type`（`first-party` 或 `third-party`，加载是否来自页面自己的站点，按公共后缀表的可注册域名判断）。action 是 `block`（不加载）、`block-cookies`（不带 Cookie 加载）、`make-https`（http 改用 https）、`css-display-none`（在 trigger 匹配的页面里隐藏 selector 选中的元素）或 `ignore-previous-rules`（撤销本列表之前规则对这次加载的作用）。正则表达式是 WebKit 的子集：ASCII，没有 `|`、`{n}` 计数重复和 `\d` 之类的字符类，`^` 只能在开头。引擎无法解析 selector 的规则被跳过；其他错误（以及空列表）使整个列表失败。
+
+`ContentRules.compile(allocator, app, id, rules, .{ .store_directory = dir }, completion)` 在主线程编译规则，completion 稍后在主线程收到 `Result`：`.compiled`（调用者持有一个引用，不再需要时 `release()`）、`.invalid`（`content_rules.Failure`，带原因与规则序号）、`.failed`、`.out_of_memory` 或 App 先停止时的 `.closed`。`Compilation.cancel()` 撤回 completion。id 由 1 到 64 个字母、数字、`-`、`_`、`.` 组成。
+
+- Linux（WebKitGTK）用引擎的内容过滤器在主线程之外编译。`store_directory` 必须是绝对路径（不存在时创建），引擎把编译结果按 id 加规则哈希保存在里面：之后以同样的规则启动直接加载已编译的列表，同一 id 编译了别的规则则删除旧列表。WebKit 限制每个列表的规则数（15 万条，旧版本 5 万条），更长的列表请拆分后一起应用。规则错误时引擎只报告整个列表，`Failure.reason` 为 `rejected_by_engine`、没有规则序号。
+- Windows（WebView2）没有内容拦截器：`compile` 在调用线程解析规则（EasyList 那样长的列表约需零点几秒），经 `App.post` 交付结果。应用规则的页面所见的每个请求都在宿主里匹配；被拦截的子资源得到指向 `data:,` 的 307 重定向，fetch 和 XMLHttpRequest 因此像网络错误一样失败，页面本身得到空的 403。`css-display-none` 通过每个文档（含 frame）都采用的一张样式表隐藏元素，页面重设 `adoptedStyleSheets` 后仍保留；它是页面自己的样式表，所以元素带 `!important` 的内联样式会胜过它。WebView2 不暴露 WebSocket 请求，WebSocket 不会被拦截。规则不存储，`store_directory` 被忽略。
+
+`Options.content_rules` 让页面从第一次加载起应用规则，配置持有自己的引用。`View.setContentRules(rules)` 替换页面应用的规则（空切片移除全部）；此后的加载经过新规则，已加载的页面保留已加载与已隐藏的内容，直到重新加载。setContentRules 的规则跨 `recover` 保留，`reload(options)` 应用新 Options 时清除，detach 释放引用。一个 `ContentRules` 可同时供多个页面使用。
+
+规则的解析、正则子集、公共后缀与隐藏脚本在 `content_rules.zig` 中实现，可在任意线程纯计算，`zig build test-content-rules` 不依赖引擎验证；公共后缀表由 `scripts/update-public-suffix.py` 从公共后缀表重新生成。`smoke-webview-content-rules`（Linux 与 Windows）编译、重复加载已编译列表、拒绝 `a|b` 与空列表，验证页面从首次加载起阻止脚本、隐藏元素，移除规则重新加载后恢复，并验证页面从一开始就静音、取消静音后保持。是否真正听到声音需要音频设备，自动检查只验证状态与无声页面不发声。
 
 ## Cookie、Profile 与页面工具
 

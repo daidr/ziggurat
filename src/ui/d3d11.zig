@@ -50,7 +50,7 @@ extern fn zgpu_end_offscreen(*anyopaque) i32;
 extern fn zgpu_commit_offscreen(*anyopaque) void;
 extern fn zgpu_offscreen_metadata_size() usize;
 extern fn zgpu_texture(*anyopaque, *const drawing.GpuTextureToken, *const drawing.ImagePlan) i32;
-extern fn zgpu_begin(*anyopaque, ?*anyopaque, u32, u32, f32) i32;
+extern fn zgpu_begin_composed(*anyopaque, ?*anyopaque, u32, u32, f32, c_int) i32;
 extern fn zgpu_fill(*anyopaque, f32, f32, f32, f32, u32) void;
 extern fn zgpu_shape(*anyopaque, f32, f32, f32, f32, f32, f32, u32) i32;
 extern fn zgpu_gradient(*anyopaque, f32, f32, f32, f32, f32, f32, *const commands.brushes.Native) i32;
@@ -799,7 +799,7 @@ pub const Renderer = struct {
         _ = try geometry.validateSurface(paint.size.width, paint.size.height, paint.size.scale);
         if (self.layer_plan) |plan| if (!plan.matches(paint.size)) return error.LayersRequired;
         const hwnd = paint.native_window orelse c.WindowFromDC(paint.native_context);
-        try self.result(zgpu_begin(native, hwnd, paint.size.width, paint.size.height, 96.0 * paint.size.scale));
+        try self.result(zgpu_begin_composed(native, hwnd, paint.size.width, paint.size.height, 96.0 * paint.size.scale, @intFromBool(paint.transparent)));
         self.render_scope = scope;
         self.active = true;
     }

@@ -20,7 +20,7 @@ const usage =
     \\ziggurat init DIR [--template native|web|hybrid] [--name NAME] [--id IDENTITY] [--framework PATH]
     \\ziggurat dev [--watch DIR]... [--frontend COMMAND] [-- ZIG_BUILD_ARGS...]
     \\ziggurat build [--debug] [--target TRIPLE | --platform LIST] [--package] [--sign IDENTITY] [--skip-dmg] [--skip-notarize] [-- ZIG_BUILD_ARGS...]
-    \\ziggurat package setup --zip PACKAGE [--stub SETUP_STUB] [--publisher NAME] [--comment TEXT] [--categories LIST] [--icon PNG] [--output FILE]
+    \\ziggurat package setup --zip PACKAGE [--stub SETUP_STUB] [--publisher NAME] [--comment TEXT] [--categories LIST] [--icon PNG] [--install-dir-name NAME] [--hook-init CMD] [--hook-install CMD] [--hook-uninstall CMD] [--output FILE]
     \\ziggurat package deb --zip PACKAGE --maintainer "NAME <EMAIL>" [--depends LIST] [--webview] [--comment TEXT] [--categories LIST] [--icon PNG] [--output FILE]
     \\ziggurat package app --zip PACKAGE [--sign IDENTITY] [--dmg [--skip-notarize]] [--output DIR]
     \\ziggurat package install-script --zip PACKAGE [--github OWNER/REPO [--tag-prefix PREFIX]] [--url BASE] [--webview] [--output FILE]
@@ -49,6 +49,11 @@ const usage =
     \\package app writes the .app of a macOS update package, and with --dmg its disk image.
     \\package setup appends an update package to the setup stub, producing one
     \\installer file (Windows or Linux, matching the stub), signed as the executable is.
+    \\--install-dir-name (windows.installDirName) names the Windows install folder
+    \\instead of the identity; --hook-init, --hook-install and --hook-uninstall
+    \\(installerHooks) are shell commands the installer runs before installing,
+    \\after it, and before uninstalling, with ZIGGURAT_INSTALL_DIR, ZIGGURAT_APP,
+    \\ZIGGURAT_SCOPE, ZIGGURAT_VERSION and ZIGGURAT_SILENT set.
     \\package deb writes a Debian package that installs under /usr/lib/EXECUTABLE.
     \\--icon names a PNG inside the package for the Linux menu (default: the package's icon.png).
     \\package install-script writes install.sh, which installs a Linux app for the
@@ -106,6 +111,9 @@ pub const Project = struct {
     urlSchemes: []const []const u8 = &.{},
     /// The types of file the app opens, which the macOS bundle declares.
     fileAssociations: []const macos.FileAssociation = &.{},
+    /// Commands the setup installer runs: `init` before it installs,
+    /// `install` after, `uninstall` before the app's folder is removed.
+    installerHooks: ?setup_format.Hooks = null,
 
     /// `dir` under src/ lets the app import `catalog.zig` from its sources.
     pub const I18n = struct { dir: []const u8 = "src/locales", source: []const u8 = "en" };
@@ -322,6 +330,7 @@ pub fn readProject(allocator: std.mem.Allocator, dir: std.Io.Dir) !Project {
     };
     const project = std.json.parseFromSliceLeaky(Project, allocator, bytes, .{ .allocate = .alloc_always }) catch return error.InvalidProjectFile;
     if (!validIdentity(project.identity) or !validDisplayName(project.name)) return error.InvalidProjectFile;
+    if (project.windows) |config| if (config.installDirName) |name| if (!setup_format.validInstallDirName(std.mem.trim(u8, name, " "))) return error.InvalidInstallDirName;
     update.publication.validateFilename(project.executable) catch return error.InvalidProjectFile;
     _ = update.retention.parseVersion(project.version) catch return error.InvalidProjectFile;
     try validateMacOS(project);
@@ -699,6 +708,8 @@ const PackageOptions = struct {
     sign: ?[]const u8 = null,
     dmg: bool = false,
     skip_notarize: bool = false,
+    install_dir_name: ?[]const u8 = null,
+    hooks: setup_format.Hooks = .{},
 };
 
 const Inventory = struct { schema_version: u16, name: []const u8 = "", identity: []const u8, version: []const u8, target: []const u8, executable: []const u8 };
@@ -757,7 +768,23 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         if (index + 1 >= args.len) return error.InvalidArguments;
         const value = args[index + 1];
         index += 1;
-        if (std.mem.eql(u8, arg, "--zip")) package_options.zip = value else if (std.mem.eql(u8, arg, "--stub")) package_options.stub = value else if (std.mem.eql(u8, arg, "--output")) package_options.output = value else if (std.mem.eql(u8, arg, "--publisher")) package_options.publisher = value else if (std.mem.eql(u8, arg, "--comment")) package_options.comment = value else if (std.mem.eql(u8, arg, "--categories")) package_options.categories = value else if (std.mem.eql(u8, arg, "--icon")) package_options.icon = value else if (std.mem.eql(u8, arg, "--maintainer")) package_options.maintainer = value else if (std.mem.eql(u8, arg, "--depends")) package_options.depends = value else if (std.mem.eql(u8, arg, "--github")) package_options.github = value else if (std.mem.eql(u8, arg, "--tag-prefix")) package_options.tag_prefix = value else if (std.mem.eql(u8, arg, "--url")) package_options.url = value else if (std.mem.eql(u8, arg, "--sign")) package_options.sign = value else return error.InvalidArguments;
+        if (std.mem.eql(u8, arg, "--zip")) package_options.zip = value else if (std.mem.eql(u8, arg, "--stub")) package_options.stub = value else if (std.mem.eql(u8, arg, "--output")) package_options.output = value else if (std.mem.eql(u8, arg, "--publisher")) package_options.publisher = value else if (std.mem.eql(u8, arg, "--comment")) package_options.comment = value else if (std.mem.eql(u8, arg, "--categories")) package_options.categories = value else if (std.mem.eql(u8, arg, "--icon")) package_options.icon = value else if (std.mem.eql(u8, arg, "--maintainer")) package_options.maintainer = value else if (std.mem.eql(u8, arg, "--depends")) package_options.depends = value else if (std.mem.eql(u8, arg, "--github")) package_options.github = value else if (std.mem.eql(u8, arg, "--tag-prefix")) package_options.tag_prefix = value else if (std.mem.eql(u8, arg, "--url")) package_options.url = value else if (std.mem.eql(u8, arg, "--sign")) package_options.sign = value else if (std.mem.eql(u8, arg, "--install-dir-name")) package_options.install_dir_name = value else if (std.mem.eql(u8, arg, "--hook-init")) package_options.hooks.init = value else if (std.mem.eql(u8, arg, "--hook-install")) package_options.hooks.install = value else if (std.mem.eql(u8, arg, "--hook-uninstall")) package_options.hooks.uninstall = value else return error.InvalidArguments;
+    }
+    // ziggurat.json, where the command runs in the project, fills what the
+    // options leave out.
+    const project_file = if (std.mem.eql(u8, kind, "setup") or std.mem.eql(u8, kind, "install-ps1")) readProject(allocator, std.Io.Dir.cwd()) catch null else null;
+    if (project_file) |project| {
+        if (package_options.install_dir_name == null) if (project.windows) |config| {
+            package_options.install_dir_name = config.installDirName;
+        };
+        if (project.installerHooks) |hooks| inline for (zio.fields(setup_format.Hooks)) |field| {
+            if (@field(package_options.hooks, field.name) == null) @field(package_options.hooks, field.name) = @field(hooks, field.name);
+        };
+    }
+    if (package_options.install_dir_name) |value| {
+        const trimmed = std.mem.trim(u8, value, " ");
+        if (!setup_format.validInstallDirName(trimmed)) return error.InvalidInstallDirName;
+        package_options.install_dir_name = trimmed;
     }
     const zip_path = package_options.zip orelse return error.InvalidArguments;
     const package = try readPackage(allocator, zip_path);
@@ -771,7 +798,7 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         for (package.files) |entry| found = found or std.mem.eql(u8, entry.name, icon);
         if (!found) return error.IconNotInPackage;
     }
-    const config: setup_format.Config = .{ .name = name, .identity = info.identity, .version = info.version, .target = info.target, .executable = info.executable, .publisher = package_options.publisher, .comment = package_options.comment, .categories = package_options.categories, .icon = package_options.icon };
+    const config: setup_format.Config = .{ .name = name, .identity = info.identity, .version = info.version, .target = info.target, .executable = info.executable, .publisher = package_options.publisher, .comment = package_options.comment, .categories = package_options.categories, .icon = package_options.icon, .install_dir_name = if (std.mem.startsWith(u8, info.target, "windows-")) package_options.install_dir_name else null, .hooks = package_options.hooks };
     const stem = std.fs.path.stem(info.executable);
     if (std.mem.eql(u8, kind, "setup")) {
         const windows = std.mem.startsWith(u8, info.target, "windows-");
@@ -793,7 +820,7 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         try std.Io.Dir.cwd().writeFile(zio.io(), .{ .sub_path = output, .data = bytes.written(), .flags = .{ .permissions = zio.mode(0o755) } });
         // The stub skips the certificate table, so the installer is signed
         // after the package is appended.
-        if (windows) if (readProject(allocator, std.Io.Dir.cwd()) catch null) |project| if (project.windows) |signing| if (signing.signs()) {
+        if (windows) if (project_file) |project| if (project.windows) |signing| if (signing.signs()) {
             if (try signFile(allocator, signing, output) != 0) return 1;
         };
         try std.Io.File.stdout().writeStreamingAll(zio.io(), try std.fmt.allocPrint(allocator, "{s}\n", .{output}));
@@ -827,7 +854,7 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         if (package_options.github) |repository| if (!publish.validRepository(repository)) return error.InvalidRepository;
         if (package_options.url) |url| if (!std.mem.endsWith(u8, url, "/") or !(std.mem.startsWith(u8, url, "https://") or std.mem.startsWith(u8, url, "http://"))) return error.InvalidUrl;
         var script: std.Io.Writer.Allocating = .init(allocator);
-        try install_ps1.write(&script.writer, .{ .app_name = name, .identity = info.identity, .stem = stem, .version = info.version, .github = package_options.github, .tag_prefix = package_options.tag_prefix, .url = package_options.url });
+        try install_ps1.write(&script.writer, .{ .app_name = name, .identity = info.identity, .stem = stem, .version = info.version, .github = package_options.github, .tag_prefix = package_options.tag_prefix, .url = package_options.url, .install_dir_name = package_options.install_dir_name });
         const output = package_options.output orelse "dist/" ++ install_ps1.name;
         if (std.fs.path.dirname(output)) |parent| try std.Io.Dir.cwd().createDirPath(zio.io(), parent);
         try std.Io.Dir.cwd().writeFile(zio.io(), .{ .sub_path = output, .data = script.written() });

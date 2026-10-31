@@ -323,7 +323,7 @@ const Flac = struct {
                 var coefficients: [32]i64 = undefined;
                 for (coefficients[0..order]) |*coefficient| coefficient.* = try self.reader.signed(@intCast(precision));
                 try self.residual(out, order);
-                lpcPredict(out, coefficients[0..order], @intCast(shift_bits));
+                lpcPredict(out, coefficients[0..order], @intCast(zio.asUnsigned(shift_bits)));
             },
             else => return error.InvalidData,
         }

@@ -27,6 +27,8 @@ try owner.setMenu(&.{
 
 标签只借用到 `setMenu` 返回，由系统复制；最多 128 项，每个标签最多 255 个 UTF-16 单元。配置失败保留原菜单；已经预留的原生命令 ID 不回退。选择命令产生 `Action.menu: u64`，禁用命令不调用业务回调。
 
+`radio = true` 的命令项显示单选标记而不是勾选标记：同一 parent 下相邻的单选命令组成一组，组内最多一项 checked（否则 `MultipleRadioChecked`），非命令项不能是单选（`InvalidRadioItem`）。`setItemState` 勾选单选项时同组其余项取消勾选；状态与勾选项一样由应用保存，用户选择只产生 `Action.menu`。Windows 用 `MFT_RADIOCHECK` 与 `CheckMenuRadioItem`，GTK 用画成单选样式的 `GtkCheckMenuItem`，未勾选时也显示空的单选圈。
+
 `setItemState(id, enabled, checked)` 更新命令项；submenu 状态变化用新的 `setMenu` 快照。`clearMenu()` 移除菜单栏。禁用的 submenu 使其下所有命令（含快捷键）失效。
 
 Linux 菜单栏是 `GtkMenuBar`。附加时平台层把窗口原有子控件（绘制区或内容宿主）移进一个纵向 `GtkBox`，菜单栏在上；`clearMenu`、detach 时移回原位，并重新实现绘制区、重新绑定输入法。替换快照时新菜单栏先占位再销毁旧菜单栏。客户区和内容尺寸不含菜单栏高度。命令激活与快捷键都在一次性 idle 中报告，不在 GTK 信号发射期间调用业务代码；带勾选的项是 `GtkCheckMenuItem`，GTK 激活时自行切换的勾选状态会被还原，状态只由 `setItemState` 决定。
@@ -135,7 +137,23 @@ Linux 调用会话总线上的 `org.freedesktop.Notifications.Notify`，带一�
 
 `system.drop.Target` 为一个窗口注册原生放置目标：`.{ .context, .on_drop, .on_hover, .kinds, .buffer }` 后 `try target.attach(window)`，地址和 context 保持到 `detach` 或窗口 `on_closed`。kinds 选择 files 和/或 text；`on_hover(context, window, Hover)` 返回是否接受，null 表示接受所提供的已选种类。每段悬停以 enter/over 开始、以 leave 结束，leave 也先于 `on_drop`（GTK 本身如此，Windows 显式对齐）。坐标为客户区 DIP。Drop 的 payload 为 files（剪贴板相同的 NUL 分隔约定）或 text，只在 on_drop 期间借用调用者 buffer；更大的 payload 报告 `capacity_exceeded` 所需字节，不部分发布。接受时报告 copy 效果。
 
-Windows 在 attach 时嵌套 `OleInitialize` 并 `RegisterDragDrop` 一个引用计数的原生 `IDropTarget`，使用 `CF_HDROP`/`CF_UNICODETEXT`；窗口 subclass 在 `WM_DESTROY` 撤销注册，晚到的 OLE 引用只访问已经脱离 Zig 的原生记录。GTK 在顶层 GtkWindow 上扩展其既有的 root-window 放置 target 列表（detach 时还原），解析 `text/uri-list` 的本地路径和文本；内容区坐标扣除客户端装饰。WebView 等原生子控件可能自己处理落在它们上面的拖放。`detach()` 幂等；窗口关闭后 detach 只释放 Target 的原生引用。不提供拖动源：两平台启动原生拖动都需要模态拖动循环或嵌套分发，违反无嵌套事件循环规则，`capabilities.drop.drag_source` 为 false。
+Windows 在 attach 时嵌套 `OleInitialize` 并 `RegisterDragDrop` 一个引用计数的原生 `IDropTarget`，使用 `CF_HDROP`/`CF_UNICODETEXT`；窗口 subclass 在 `WM_DESTROY` 撤销注册，晚到的 OLE 引用只访问已经脱离 Zig 的原生记录。GTK 在顶层 GtkWindow 上以手动放置站点替换其自带的 root-window 站点（自带站点的默认 motion/drop 处理会在 `drag-motion` 前拒绝其他 target，并再次请求数据），列表沿用原有 target 再加上 uri/text，detach 时还原；解析 `text/uri-list` 的本地路径和文本；内容区坐标扣除客户端装饰。WebView 等原生子控件可能自己处理落在它们上面的拖放。`detach()` 幂等；窗口关闭后 detach 只释放 Target 的原生引用。
+
+### 拖动数据
+
+`system.transfer` 描述拖放携带的序列化内容。`Data` 是有序的 `Item`，每个 item 是同一内容的多种表示（`Representation`，格式是 MIME 名，编码由应用明确约定），不同 item 是不同的值。`Representation.fromBytes` 借用字节，`Representation.lazy(format, provider)` 只声明格式：provider 在 owner 线程上、目标真正请求该格式时运行，每次拖动最多一次，错误也被缓存，必须快速返回且不得等待其他 owner 线程工作，耗时内容应事先准备好。`text`、`html`、`uri_list`、`file_list`、`png`、`markdown` 是常用格式；`TextData`、`UrlData` 和 `fileData(allocator, paths)`（绝对路径转义为 `file://` URL，每个路径一个 item，同时提供 file list 和 URI list；不读也不删文件）构造常见内容，`files(allocator, data)` 只返回本地路径（远端主机和其他 scheme 被忽略），`UriIterator` 跳过注释和空行。`Data.read` 按单一选择对象的约定合并：text 用换行连接、URI/file list 用 CRLF，其余格式取第一个提供它的 item。`preferredFormat`/`Offer.preferred` 按接收方的偏好顺序协商，不请求任何字节。`Snapshot` 用显式 allocator 复制 Data 并持有 provider 缓存，`materialize` 把选定格式复制成不含 provider 的 `Owned`。
+
+`Operations` 是 copy/move 集合，空集表示 copy；`negotiate(source, destination, suggested)` 在两端都允许时采用修饰键建议（Ctrl 为 copy，Shift 为 move），否则 copy 先于 move。
+
+### 拖动源
+
+`system.drag.Source` 从窗口当前的指针手势启动系统拖动：在处理按下或按住按钮的移动时调用 `source.start(allocator, window, data, .{ .operations, .preview, .context, .on_done })`。data 被复制成 Snapshot；原生会话在输入回调返回后才开始（Windows 经辅助窗口消息，GTK 经 `App.post`），所以输入和帧不会在中途被挂起。同时只有一个拖动（`DragActive`），`start` 立即返回的错误不启动任何东西也不调用 on_done。`on_done(context, source, Result)` 在 owner 线程上恰好运行一次，包括取消、原生启动失败、源窗口关闭和 App 停机；`Result.operation` 是目标最终的效果，`canceled` 表示没有放下，`escaped` 区分放弃（Escape、`cancel()`、源窗口关闭、停机）与在无目标处松开，`point` 是结束时的桌面坐标（与 `desktop.cursorPosition` 相同），`err` 报告原生或 provider 失败。只有 `.move` 成功后才移除原件，框架从不删除文件。`preview` 是直通 alpha 的 RGBA8，一个像素一个 DIP，最大 4096，hotspot 以像素计，开始时复制；不给则使用系统默认反馈。Source 从 start 到 on_done 保持地址稳定，lazy provider 的 context 也一样。
+
+Windows 用延迟渲染的 `IDataObject`、`IDropSource` 和 `DoDragDrop`：每种格式以同名注册格式提供原始字节，text 另提供 `CF_UNICODETEXT`，html 提供 `HTML Format`（CF_HTML），png 提供 `PNG`，URI list 提供 `UniformResourceLocatorW`（第一个 URL），file list 提供 `CF_HDROP`；请求流时给出精确长度的 IStream。`IDragSourceHelper` 显示按窗口 DPI 缩放的预览，Shell 写入的私有格式存放在数据对象里。`DoDragDrop` 在系统的模态跟踪循环中运行，与移动、调整大小和菜单循环一样，App 的唤醒在其中照常分发；`cancel()` 让下一次 `QueryContinueDrag` 返回取消，源窗口销毁也取消。GTK 用 `gtk_drag_begin_with_coordinates` 和异步 selection：text 另提供 `UTF8_STRING` 和 `text/plain;charset=utf-8`，file list 提供 `text/uri-list`；`drag-failed` 区分无目标与 Escape，源窗口销毁视为放弃，GTK 的拖动不需要嵌套循环。
+
+### 多格式放置目标
+
+`system.drop.DataTarget` 是多格式的放置目标：`.{ .context, .on_drop, .on_hover, .formats, .operations, .allocator }` 后 `attach(window)`。来源至少提供一个 `formats` 中的格式、且两端有共同的操作时才接受；悬停（`DataHover`：phase、point、`Offer` 和协商出的 operation、`local`）不读取字节，on_hover 仍可拒绝。放下时只请求被接受的格式，`DataDrop.data` 在 on_drop 期间借用目标的存储，`on_drop` 返回是否接受，来源据此得到 operation 或 none。来自本进程的拖动保留全部 item（`local`），其他来源合并成一个 item；Windows/GTK 原生格式按上面的映射还原（CF_HDROP 还原为 file list 和 URI list，CF_HTML 取片段，UTF-16 转 UTF-8），每种表示最多 64 MiB，URI list 中没有本地文件时不算 file list。一个窗口只能有一个放置目标（`Target` 或 `DataTarget`），否则 `AlreadyAttached`。
 
 ## 异步文件选择器
 
@@ -207,7 +225,7 @@ S02 当前仍为部分实现：Windows/Linux 已提供 `launchExecutable`、`ope
 
 ## 菜单标准角色
 
-`menu_roles.Role` 列出常用命令（撤销、重做、剪切、复制、粘贴、全选、重新载入、缩放、全屏、最小化、关闭、新建、打开、保存、另存为、退出等）和标准子菜单（文件、编辑、显示、窗口、格式、应用菜单）。`defaults(role, context)` 给出按语言的标签与快捷键：内置英文、简体中文、繁体中文，`resolve(locale, overrides)` 先取应用覆盖、再取内置语言、最后英文；Windows 上重做是 Ctrl+Y、退出叫“退出/Exit”且无快捷键，Linux 重做是 Ctrl+Shift+Z、退出是 Ctrl+Q；`documents = true` 时文件菜单带文档命令，关闭项称“关闭”而非“关闭窗口”。
+`menu_roles.Role` 列出常用命令（撤销、重做、剪切、复制、粘贴、全选、重新载入、缩放、全屏、最小化、关闭、新建、打开、保存、另存为、退出等）和标准子菜单（文件、编辑、显示、窗口、格式、应用菜单）。`defaults(role, context)` 给出按语言的标签与快捷键：内置英文、简体中文、繁体中文、日文，`resolve(locale, overrides)` 先取应用覆盖、再取内置语言、最后英文；Windows 上重做是 Ctrl+Y、退出叫“退出/Exit”且无快捷键，Linux 重做是 Ctrl+Shift+Z、退出是 Ctrl+Q；`documents = true` 时文件菜单带文档命令，关闭项称“关闭”而非“关闭窗口”。
 
 `Builder.init(items, labels, context)` 把角色写成普通 `Item`，标签写入调用者提供的存储，子菜单角色带出默认条目，同一角色重复出现时（如文件与窗口菜单中的关闭）分配下一个出现序号，只有第一个带快捷键。角色项 ID 位于 `menu_roles.id_base` 之上，`Role.fromId` 还原角色；应用自己的 ID 保持在其下。切换语言时用新 locale 重新构建并再次 `setMenu`。`menu_role_actions.perform(app, window, id)` 执行窗口与应用类角色的默认动作（退出走 `requestQuit`，关闭走用户关闭请求，最小化、缩放、全屏切换），编辑、视图与文档类角色返回 `unhandled`，交给当前内容处理。快捷键键名新增 `plus`（主键盘区的 =/+ 键）与 `minus`。
 
@@ -278,7 +296,33 @@ try now.set(.{ .title = "Spring", .artist = "Vivaldi", .album = "The Four Season
 
 `zig build smoke-now-playing`（需要 `dbus-run-session` 与 X11）用另一条总线连接作为 MPRIS 客户端，验证总线名、元数据与封面文件、可用命令、播放/暂停键、未提供的命令被忽略、`SetPosition` 与 `Seek`、`OpenUri` 拒绝、清除后离开总线并删除封面。`zig build smoke-now-playing-commands` 在两个平台经各自后端的主线程路径（Windows 为窗口消息）交付命令，验证播放/暂停键按状态、未提供的命令、跳转位置与清除后不再交付；Windows 上的系统控件显示与真实媒体键没有自动验证。
 
+## 图标
+
+`system.Icon.fromPng(app, png)` 把 PNG 字节（最大 1024×1024，先读头部尺寸再解码）变成平台图标：Windows 是 `CreateIconFromResourceEx` 得到的 HICON，Linux 是 GdkPixbuf。`icon.handle()` 就是 `TrayOptions.icon`/`TrayItemOptions.icon` 借用的原生图标，所以托盘可以直接用 PNG。`system.icon.setWindowIcon(window, &icon)` 设置窗口标题栏和任务栏图标，null 恢复应用图标；Windows 的 `WM_SETICON` 不复制图标，Icon 必须在所有显示它的窗口换掉图标或关闭后才 `deinit`，GTK 自己持有引用。
+
+## 外观跟随
+
+`system.theme.Follower` 决定应用的明暗外观：`.system` 跟随桌面，`.light`/`.dark` 强制。`start(app, .{ .source, .on_change })` 读取桌面偏好、应用外观并订阅偏好变化；`setSource` 随时切换；`isDark()` 是生效的外观，`preferences()` 是最近一次读到的桌面偏好（accent、高对比度、减少动态/透明、文字缩放）。外观或偏好变化后调用 `on_change`，应用在这里切换自己绘制内容的主题（例如 `ui.Context.setTheme(.dark())`）。系统自己绘制的部分由 Follower 处理：Windows 上 `track(window)` 的窗口标题栏随外观切换（`DWMWA_USE_IMMERSIVE_DARK_MODE`），弹出菜单经 uxtheme 的 preferred app mode（Windows 10 1903 起）跟随；Linux 设置 `gtk-application-prefer-dark-theme`，强制浅色时名字以 `-dark` 结尾的主题换成去掉后缀的同名主题，跟随桌面时恢复 GTK 自己的设置。属性只在值变化时写入，所以桌面 Watch 收到的通知都是真实变化。单独的 `theme.setWindowDark(window, dark)` 只在 Windows 可用。
+
+## 无窗口常驻
+
+`AppOptions.on_all_windows_closed` 设置后，App 在没有窗口时继续运行，直到 `requestQuit`/`quit`，适合常驻通知区的应用：最后一个窗口关闭时在 dispatch 安全点调用它而不是退出，`run` 在没有窗口时启动也不返回。它可以创建新窗口或退出。没有窗口时事件循环保持空闲，不会反复唤醒。
+
+## 剪贴板清空与位图
+
+`board.clear()` 清空系统剪贴板，不论 owner 是谁；本 Board 仍在的 offer 随之结束。Windows 在一次 `OpenClipboard` 中 `EmptyClipboard`，被占用时与 write 一样返回 `ClipboardBusy`；GTK 先清除本 Board 的内容，再把 CLIPBOARD selection 的 owner 设为空，X11 允许任何客户端这样做。
+
+Windows 上大多数程序把图片作为位图（`CF_DIB`，系统也会从其他位图格式合成）放进剪贴板：没有 `PNG` 流时，读取 `png` 把未压缩的 24/32 位位图转换成 8 位 RGBA PNG（`system.bitmap.dibToPng`，纯 Zig，用 stored deflate 块），formats 也报告 png 可用。只有 BITMAPINFOHEADER 之后更新的头部才使用 alpha 字节；位图尺寸按不可信输入检查，输出最多 64 MiB。
+
+## 异步打开 URL
+
+`system.OpenUrl` 在 owner 线程上打开一个 URL 而不阻塞它：`start(app, url, options, context, on_done)` 校验并复制 URL，为这一次请求启动一个线程，用 `shell.Worker.openUrl` 交给系统，然后在 owner 线程调用 `on_done`，结果在 `request.result`。线程属于请求本身，没有线程池。请求从 start 到 on_done 或 App 停机结束期间地址稳定；停机等待该线程结束，之后不再调用 on_done。`options.extra_schemes` 借用同样长的时间。
+
 ## 已验证范围
+
+`zig build smoke-drag` 用真实输入（X11 上 XTest，Windows 上 SetCursorPos/SendInput）在两个窗口间拖动：同进程的多 item、多格式（含一个 lazy 表示）拖动完整到达 DataTarget，copy 与 Shift 的 move 协商一致且 provider 每次拖动只渲染一次；Escape、`cancel()`、在无目标处松开、目标拒绝格式都只结束一次且结果正确；files/text 的 `Target` 收到同一拖动的文本；另一个进程拖入的文本、自定义格式和文件作为一个 item 到达。
+
+`zig build smoke-system-details` 在隐藏窗口下检查：位图编码成的 PNG 由系统解码为图标并设为窗口图标（Windows 另用于托盘项）；强制深色/浅色时 Windows 标题栏属性与 GTK 的 prefer-dark 设置随之变化，切回跟随后与桌面偏好一致；写入文本后 `clear` 使剪贴板为空；Windows 上手工放入 `CF_DIB` 后读到可解码的 PNG；Linux 上用未关联的 scheme 异步打开 URL，在 owner 线程收到失败结果；关闭唯一窗口后 App 继续运行，由 `on_all_windows_closed` 之后的任务退出。`smoke-system-menus` 另检查单选项的原生标记与同组互斥。
 
 `zig build smoke-system-session` 在隐藏窗口的事件循环中经 `Relaunch` 退出，再真实启动自身。被启动的子进程在 Linux 上把私有 `XDG_DATA_HOME` 下的文件两次登记到最近文档，读回 `recently-used.xbel`，确认只有一条记录且带应用名。在 Windows 上，子进程登记最近文档，设置含两个任务和 Recent 类别的 Jump List 后再删除；再按 Jump List 的参数串用 `CreateProcessW` 启动自身，确认空参数、空格、引号、尾部反斜杠、UNC 前缀和非 ASCII 参数都原样往返。这些检查不打开或点击任务栏菜单，也不检查 shell 的显示效果。
 
@@ -314,4 +358,4 @@ try now.set(.{ .title = "Spring", .artist = "Vivaldi", .album = "The Four Season
 
 `zig build smoke-clipboard` 在一个 App 内用真实系统剪贴板写入 text/html/png/custom/files 五种格式，再异步查询格式并逐一读回比较（Unicode 与 surrogate 文本、CF_HTML/`text/html` 片段、PNG 流、路径列表；Windows custom 只比较前缀，因为 GlobalSize 可含填充），覆盖容量不足报告所需字节、缺失格式、重复启动拒绝、取消后无回调、lazy offer 只在读取时渲染且每次只能 set 一次、eager 写入与 revoke 各释放 provider 一次、revoke 后读取为空，以及 App 停机时 pending 读取无回调且 live offer 被释放；另做 12 轮 Board 创建/写入/读取/销毁。Linux 最后检查只剩最后一次 eager offer 的原生记录。测试不模拟另一进程占用剪贴板，Windows 有界重试与 `WM_RENDERALLFORMATS` 退出渲染尚未自动验证。
 
-`zig build smoke-drop` 12 轮验证放置目标的真实原生注册（Windows OLE 窗口属性、GTK target 列表标记）、重复 attach 拒绝、detach 幂等与重新 attach、窗口销毁时注册在原生销毁前撤销且之后不再回调；悬停接受/拒绝与 payload 复制/容量报告通过 adapter 入口驱动。**尚未自动执行真实跨进程拖放**，OLE `DragEnter/Drop` 与 GTK `drag-motion/drag-data-received` 的完整链路仍需人工或原生注入验证。Linux 上述 smoke 在 Xvfb 1x/2x 运行；Windows 路径本次只在 Linux 上交叉编译，首次运行在 CI。
+`zig build smoke-drop` 12 轮验证放置目标的真实原生注册（Windows OLE 窗口属性、GTK target 列表标记）、重复 attach 拒绝、detach 幂等与重新 attach、窗口销毁时注册在原生销毁前撤销且之后不再回调；悬停接受/拒绝与 payload 复制/容量报告通过 adapter 入口驱动。真实拖放链路（OLE `DragEnter/Drop`、GTK `drag-motion/drag-data-received`）由 `smoke-drag` 的注入输入覆盖。
