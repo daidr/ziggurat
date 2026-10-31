@@ -8,6 +8,7 @@ const std = @import("std");
 pub fn add(b: *std.Build, owner: *std.Build.Module, name: []const u8, path: []const u8, flags: []const []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     const native = b.addObject(.{ .name = name, .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }) });
     native.root_module.addCSourceFile(.{ .file = b.path(path), .flags = flags });
+    if (target.result.os.tag == .macos) appleSdk(b, native.root_module);
     owner.addObject(native);
     return native.root_module;
 }
@@ -20,4 +21,23 @@ pub fn addArchive(b: *std.Build, owner: *std.Build.Module, name: []const u8, pat
     native.root_module.addCSourceFile(.{ .file = b.path(path), .flags = flags });
     owner.linkLibrary(native);
     return native.root_module;
+}
+
+/// The macOS SDK for cross-compiling, from `-Dmacos-sdk`; a native macOS
+/// build finds it through the installed developer tools instead.
+pub var apple_sdk: ?[]const u8 = null;
+
+/// Adds the cross-compilation SDK's framework, include and library paths.
+pub fn appleSdk(b: *std.Build, module: *std.Build.Module) void {
+    const sdk = apple_sdk orelse return;
+    module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System/Library/Frameworks" }) });
+    module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/include" }) });
+    module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/lib" }) });
+}
+
+/// Links Apple frameworks on a module, with the cross-compilation SDK paths.
+pub fn linkFrameworks(b: *std.Build, module: *std.Build.Module, frameworks: []const []const u8) void {
+    appleSdk(b, module);
+    for (frameworks) |framework| module.linkFramework(framework, .{});
+    module.link_libc = true;
 }

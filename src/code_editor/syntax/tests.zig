@@ -110,6 +110,50 @@ test "dedicated lexers for data, styles, markup, Markdown and diffs" {
     _ = try expectRuns(&languages.diff, "--- a/file", 0, &.{.{ "--- a/file", .meta }});
 }
 
+test "Dart, Scala, R and GraphQL" {
+    var state = try expectRuns(&languages.dart, "final s = r'\\d' + \"a${b}c$d\"; // c", 0, &.{
+        .{ "final", .keyword }, .{ "s", .variable }, .{ "=", .operator }, .{ "r'\\d'", .string }, .{ "+", .operator }, .{ "\"a", .string }, .{ "${", .escape }, .{ "b", .variable }, .{ "}", .escape }, .{ "c", .string }, .{ "$d", .variable }, .{ "\"", .string }, .{ ";", .punctuation }, .{ "// c", .comment },
+    });
+    state = try expectRuns(&languages.dart, "/* a /* b */ c */ var t = '''x", 0, &.{ .{ "/* a /* b */ c */", .comment }, .{ "var", .keyword }, .{ "t", .variable }, .{ "=", .operator }, .{ "'''x", .string } });
+    state = try expectRuns(&languages.dart, "y''';", state, &.{ .{ "y'''", .string }, .{ ";", .punctuation } });
+    try std.testing.expectEqual(@as(u64, 0), state);
+
+    _ = try expectRuns(&languages.scala, "val s = s\"Hi $name ${a + 1}\" + raw\"\\d\" // c", 0, &.{
+        .{ "val", .keyword }, .{ "s", .variable }, .{ "=", .operator }, .{ "s\"Hi ", .string }, .{ "$name", .variable }, .{ " ", .string }, .{ "${", .escape }, .{ "a", .variable }, .{ "+", .operator }, .{ "1", .number }, .{ "}", .escape }, .{ "\"", .string }, .{ "+", .operator }, .{ "raw\"\\d\"", .string }, .{ "// c", .comment },
+    });
+    state = try expectRuns(&languages.scala, "/* a /* b */ c */ def f[T](x: T): Unit = \"\"\"multi", 0, &.{
+        .{ "/* a /* b */ c */", .comment }, .{ "def", .keyword }, .{ "f", .variable }, .{ "[", .punctuation }, .{ "T", .type }, .{ "](", .punctuation }, .{ "x", .variable }, .{ ":", .operator }, .{ "T", .type }, .{ ")", .punctuation }, .{ ":", .operator }, .{ "Unit", .type }, .{ "=", .operator }, .{ "\"\"\"multi", .string },
+    });
+    state = try expectRuns(&languages.scala, "line\"\"\"", state, &.{.{ "line\"\"\"", .string }});
+    try std.testing.expectEqual(@as(u64, 0), state);
+
+    _ = try expectRuns(&languages.r, "x <- c(1L, NA) %in% r\"(a\\b)\" # c", 0, &.{
+        .{ "x", .variable }, .{ "<-", .operator }, .{ "c", .function }, .{ "(", .punctuation }, .{ "1L", .number }, .{ ",", .punctuation }, .{ "NA", .constant }, .{ ")", .punctuation }, .{ "%in%", .operator }, .{ "r\"(a\\b)\"", .string }, .{ "# c", .comment },
+    });
+    _ = try expectRuns(&languages.r, "if (TRUE) df$col.name |> is.na()", 0, &.{
+        .{ "if", .keyword }, .{ "(", .punctuation }, .{ "TRUE", .constant }, .{ ")", .punctuation }, .{ "df", .variable }, .{ "$", .operator }, .{ "col.name", .variable }, .{ "|>", .operator }, .{ "is.na", .function }, .{ "()", .punctuation },
+    });
+
+    state = try expectRuns(&languages.graphql, "query Get($id: ID!) @cached { user(id: $id) { ...F ... on User { name } } } # c", 0, &.{
+        .{ "query", .keyword }, .{ "Get", .type },      .{ "(", .punctuation }, .{ "$id", .variable },  .{ ":", .operator },    .{ "ID", .type },       .{ "!", .operator },    .{ ")", .punctuation },   .{ "@cached", .meta }, .{ "{", .punctuation },
+        .{ "user", .variable }, .{ "(", .punctuation }, .{ "id", .property },   .{ ":", .operator },    .{ "$id", .variable },  .{ ")", .punctuation }, .{ "{", .punctuation }, .{ "...", .punctuation }, .{ "F", .type },       .{ "...", .punctuation },
+        .{ "on", .keyword },    .{ "User", .type },     .{ "{", .punctuation }, .{ "name", .variable }, .{ "}", .punctuation }, .{ "}", .punctuation }, .{ "}", .punctuation }, .{ "# c", .comment },
+    });
+    state = try expectRuns(&languages.graphql, "\"\"\"Doc", 0, &.{.{ "\"\"\"Doc", .string }});
+    state = try expectRuns(&languages.graphql, "\"\"\"", state, &.{.{ "\"\"\"", .string }});
+    try std.testing.expectEqual(@as(u64, 0), state);
+
+    const files = [_]struct { []const u8, *const syntax.Language }{
+        .{ "main.dart", &languages.dart }, .{ "schema.graphql", &languages.graphql }, .{ "q.gql", &languages.graphql },  .{ "plot.r", &languages.r },
+        .{ "plot.R", &languages.r },       .{ "Main.scala", &languages.scala },       .{ "build.sc", &languages.scala }, .{ "a/.Rprofile", &languages.r },
+    };
+    for (files) |file| try std.testing.expectEqual(file[1], syntax.forFile(file[0]).?);
+    const names = [_]struct { []const u8, *const syntax.Language }{
+        .{ "dart", &languages.dart }, .{ "GraphQL", &languages.graphql }, .{ "gql", &languages.graphql }, .{ "r", &languages.r }, .{ " R ", &languages.r }, .{ "Scala", &languages.scala }, .{ "sc", &languages.scala },
+    };
+    for (names) |name| try std.testing.expectEqual(name[1], syntax.named(name[0]).?);
+}
+
 test "languages are found by file name, extension, name and alias" {
     try std.testing.expectEqual(&languages.go, syntax.forFile("src/main.go").?);
     try std.testing.expectEqual(&languages.makefile, syntax.forFile("C:\\proj\\Makefile").?);

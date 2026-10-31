@@ -73,7 +73,7 @@ macOS 上脚本安装磁盘映像中的应用：给定的映像，否则脚本�
 irm https://github.com/OWNER/REPO/releases/latest/download/install.ps1 | iex
 ```
 
-脚本在 Windows PowerShell 5.1 与 PowerShell 7 中运行，内容全为 ASCII（5.1 把 GitHub 不带字符集的下载按 Latin-1 解码，非 ASCII 字符写成 `[char]` 码）。它按处理器架构（x64 PowerShell 跑在 Arm 电脑上时按 Arm）选择 `<可执行文件>-…-windows-<arch>-setup.exe`：`--github` 从最新的合格发布中查找，`--url` 用生成时的版本拼出文件名。同一发布有 `SHA256SUMS` 时，安装程序必须列在其中且 SHA-256 一致，否则不安装。安装位置取 HKCU 卸载项的 `InstallLocation`，没有时为 `%LOCALAPPDATA%\Programs\<identity>`；若应用正在从该目录运行，先请窗口关闭，10 秒后结束仍在运行的进程；然后以 `--silent --scope user --dir` 运行安装程序并打开应用。测试用 `$env:<可执行文件大写>_DOWNLOAD_URL` 与 `_NO_OPEN`。Windows CI 用真实安装程序与本机 HTTP 服务在 5.1 和 7 中各安装一次，并检查错误摘要被拒绝。
+脚本在 Windows PowerShell 5.1 与 PowerShell 7 中运行，内容全为 ASCII（5.1 把 GitHub 不带字符集的下载按 Latin-1 解码，非 ASCII 字符写成 `[char]` 码）。它按处理器架构（x64 PowerShell 跑在 Arm 电脑上时按 Arm）选择 `<可执行文件>-…-windows-<arch>-setup.exe`：`--github` 从最新的合格发布中查找，`--url` 用生成时的版本拼出文件名。同一发布有 `SHA256SUMS` 时，安装程序必须列在其中且 SHA-256 一致，否则不安装。安装位置取 HKCU 卸载项的 `InstallLocation`，没有时为 `%LOCALAPPDATA%\Programs\<identity>`（设了 `windows.installDirName` 时用它）；若应用正在从该目录运行，先请窗口关闭，10 秒后结束仍在运行的进程；然后以 `--silent --scope user --dir` 运行安装程序并打开应用。测试用 `$env:<可执行文件大写>_DOWNLOAD_URL` 与 `_NO_OPEN`。Windows CI 用真实安装程序与本机 HTTP 服务在 5.1 和 7 中各安装一次，并检查错误摘要被拒绝。
 
 ## publish
 

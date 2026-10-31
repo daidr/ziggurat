@@ -417,7 +417,9 @@ pub const Text = struct {
     pool: Pool = .{},
     next_id: u64 = 1,
     next_revision: u64 = 1,
-    /// Rune each paragraph starts at, while `starts_valid`.
+    /// Rune each paragraph starts at, while `starts_valid`. Rebuilt
+    /// whenever the paragraphs change, never by the readers: they take the
+    /// text as const, and writing through that pointer is undefined.
     starts: std.ArrayList(u32) = .empty,
     starts_valid: bool = false,
     total: u32 = 0,
@@ -428,6 +430,7 @@ pub const Text = struct {
         errdefer t.deinit();
         try t.paras.append(allocator, t.newPara(.{}));
         try t.paras.items[0].runs.append(allocator, .{ .n = 1, .a = .{} });
+        t.index();
         return t;
     }
 
@@ -470,6 +473,7 @@ pub const Text = struct {
             cur.n = runeCount(cur.bytes.items);
             try t.paras.append(allocator, cur);
         }
+        t.index();
         return t;
     }
 
@@ -494,6 +498,7 @@ pub const Text = struct {
             for (q.runs.items) |r| np.runs.appendAssumeCapacity(.{ .n = r.n, .a = try out.pool.internAttributes(allocator, r.a) });
             out.paras.appendAssumeCapacity(np);
         }
+        out.index();
         return out;
     }
 
@@ -539,13 +544,12 @@ pub const Text = struct {
     /// Notes that paragraphs changed.
     pub fn invalidate(self: *Text) void {
         self.starts_valid = false;
+        self.index();
     }
 
     /// Runes of the text, newlines included.
     pub fn len(self: *const Text) u32 {
-        const mutable: *Text = @constCast(self);
-        mutable.index();
-        return if (mutable.starts_valid) self.total else self.scanTotal();
+        return if (self.starts_valid) self.total else self.scanTotal();
     }
 
     /// One more than the newlines.
@@ -559,9 +563,7 @@ pub const Text = struct {
 
     /// The paragraph holding rune i, whose newline is its.
     pub fn paraAt(self: *const Text, i: u32) u32 {
-        const mutable: *Text = @constCast(self);
-        mutable.index();
-        if (mutable.starts_valid) {
+        if (self.starts_valid) {
             const starts = self.starts.items;
             // The last start at or before i.
             var lo: usize = 0;
@@ -582,9 +584,7 @@ pub const Text = struct {
 
     /// The rune paragraph p starts at.
     pub fn paraStart(self: *const Text, p: u32) u32 {
-        const mutable: *Text = @constCast(self);
-        mutable.index();
-        if (mutable.starts_valid) return self.starts.items[@min(p, self.starts.items.len - 1)];
+        if (self.starts_valid) return self.starts.items[@min(p, self.starts.items.len - 1)];
         var at: u32 = 0;
         for (self.paras.items[0..@min(p, self.paras.items.len)]) |q| at += q.n + 1;
         return at;
@@ -735,6 +735,7 @@ pub const Text = struct {
             try out.paras.append(allocator, np);
         }
         out.next_id = @max(out.next_id, self.next_id);
+        out.index();
         return out;
     }
 

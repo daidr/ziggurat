@@ -185,7 +185,7 @@ pub const Console = struct {
         var left = room -| codePoints(title.text) -| @as(usize, if (title.cut) codePoints(symbols.ellipsis) else 0);
         var elapsed_buffer: [16]u8 = undefined;
         const seconds = @divTrunc(zio.nanoTimestamp() - task.started, std.time.ns_per_s);
-        var elapsed: []const u8 = if (seconds >= 1) formatElapsed(&elapsed_buffer, @intCast(seconds)) else "";
+        var elapsed: []const u8 = if (seconds >= 1) formatElapsed(&elapsed_buffer, @intCast(zio.asUnsigned(seconds))) else "";
         if (elapsed.len + 1 > left) elapsed = "";
         left -|= elapsed.len + 1;
         // Without wrapping, so a long line cannot scroll the screen.

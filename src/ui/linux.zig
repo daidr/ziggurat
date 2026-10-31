@@ -21,7 +21,7 @@ comptime {
 }
 extern fn zlc_create() ?*anyopaque;
 extern fn zlc_has_surface(*anyopaque) c_int;
-extern fn zlc_begin(*anyopaque, u32, u32, f32) c_int;
+extern fn zlc_begin_mode(*anyopaque, u32, u32, f32, c_int) c_int;
 extern fn zlc_fill(*anyopaque, f32, f32, f32, f32, u32) void;
 extern fn zlc_shape(*anyopaque, f32, f32, f32, f32, f32, f32, u32) c_int;
 extern fn zlc_gradient_surface(*anyopaque, *cpu_gradient.Surface) c_int;
@@ -603,7 +603,7 @@ pub const Renderer = struct {
         _ = try geometry.validateSurface(paint.size.width, paint.size.height, paint.size.scale);
         if (self.native == null) self.native = zlc_create() orelse return error.OutOfMemory;
         if (self.layer_plan) |plan| if (!plan.matches(paint.size)) return error.LayersRequired;
-        const result = zlc_begin(self.native.?, paint.size.width, paint.size.height, paint.size.scale);
+        const result = zlc_begin_mode(self.native.?, paint.size.width, paint.size.height, paint.size.scale, @intFromBool(paint.transparent));
         if (result == 4) return error.SurfaceModeMismatch;
         if (result != 0) return error.CreateSurfaceFailed;
         if (self.layer_plan != null) self.layer_active = true;

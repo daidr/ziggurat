@@ -88,7 +88,7 @@ static int sink(void *context, const NativeEvent *event) {
         test->delivered_x=event->x; test->delivered_y=event->y;
         if (event->context) {
             const ZlgPointerTicket *ticket=event->context;
-            CHECK(ticket->button==ZLG_POINTER_PRIMARY);
+            CHECK(ticket->button<5);
             test->delivered_sequence=ticket->sequence;
         } else test->delivered_sequence=0;
         if (test->nest_on_up && event->kind==4) {
@@ -162,12 +162,13 @@ static void every_button_and_decorations(void) {
         uint64_t sequence=test.pair[i]; inject(&test,GDK_BUTTON_RELEASE,buttons[i],30+i,4,5);
         CHECK(test.last_begin.button==i && sequence!=0);
     }
-    CHECK(test.began==10 && test.finished==10 && test.down==1 && test.up==1);
+    /* Every known button reaches the window; only the primary one grabs. */
+    CHECK(test.began==10 && test.finished==10 && test.down==5 && test.up==5);
     unsigned began=test.began;
     inject(&test,GDK_2BUTTON_PRESS,1,50,4,5); inject(&test,GDK_3BUTTON_PRESS,1,51,4,5);
-    CHECK(test.began==began && test.down==1);
+    CHECK(test.began==began && test.down==5);
     inject(&test,GDK_BUTTON_PRESS,6,60,4,5);
-    CHECK(test.last_begin.button==UINT32_MAX && test.down==1);
+    CHECK(test.last_begin.button==UINT32_MAX && test.down==5);
     window_done(&test);
 }
 static void settings_reentry_and_close(void) {

@@ -188,12 +188,46 @@ const kotlin_lexer = Lexer{ .line_comments = &slash_comments, .block_comments = 
     .type,     "Any Boolean Byte Char Double Float Int Long Nothing Short String Unit",
 }), .calls = true, .capital_types = true, .decorator = '@', .operators = c_operators };
 pub const kotlin = Language{ .name = "Kotlin", .extensions = &.{ ".kt", ".kts" }, .line_comment = "//", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq_sq, .tab_size = 4, .tokenizer = kotlin_lexer.tokenizer() };
+// Scala's interpolated strings first, as the lexer's state holds the index
+// of a string with interpolations in five bits.
+const scala_strings = blk: {
+    const prefixes = [_][]const u8{ "s", "f", "raw" };
+    const quotes = [_][]const u8{ "\"\"\"", "\"" };
+    var list: [prefixes.len * quotes.len + 4]LexString = undefined;
+    for (prefixes, 0..) |prefix, p| for (quotes, 0..) |quote, q| {
+        list[p * quotes.len + q] = .{ .open = quote, .close = quote, .prefix = prefix, .multiline = quote.len == 3, .escape = if (std.mem.eql(u8, prefix, "raw")) 0 else '\\', .interp_open = "${", .interp_close = "}", .dollar = true };
+    };
+    list[prefixes.len * quotes.len ..].* = .{ .{ .open = "\"\"\"", .close = "\"\"\"", .multiline = true }, cString("\""), cString("'"), .{ .open = "`", .close = "`", .kind = .variable } };
+    break :blk list;
+};
+const scala_lexer = Lexer{ .line_comments = &slash_comments, .block_comments = &c_block, .nest_comments = true, .strings = &scala_strings, .words = words(.{
+    .keyword,  "abstract case catch class def derives do else end enum export extends extension final finally for forSome given if implicit import inline lazy match new object opaque override package private protected return sealed super then this throw trait transparent try type using val var while with yield",
+    .type,     "Any AnyRef AnyVal Boolean Byte Char Double Float Int Long Nothing Null Short String Unit",
+    .constant, "true false null None Some Nil",
+}), .calls = true, .capital_types = true, .decorator = '@', .operators = c_operators };
+pub const scala = Language{ .name = "Scala", .extensions = &.{ ".scala", ".sc", ".sbt" }, .line_comment = "//", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq_sq, .tab_size = 2, .tokenizer = scala_lexer.tokenizer() };
 const swift_lexer = Lexer{ .line_comments = &slash_comments, .block_comments = &c_block, .nest_comments = true, .strings = &.{ .{ .open = "\"\"\"", .close = "\"\"\"", .escape = '\\', .multiline = true }, cString("\"") }, .words = words(.{
     .keyword,  "associatedtype class deinit enum extension fileprivate func import init inout internal let open operator private precedencegroup protocol public rethrows static struct subscript typealias var break case catch continue default defer do else fallthrough for guard if in repeat return throw switch where while as is try await async throws some any self Self super actor nonisolated isolated mutating nonmutating override weak unowned lazy final required convenience",
     .constant, "true false nil",
     .type,     "Int Double Float String Bool Character Array Dictionary Set Optional Void",
 }), .calls = true, .capital_types = true, .decorator = '@', .directives = true, .operators = c_operators };
 pub const swift = Language{ .name = "Swift", .extensions = &.{".swift"}, .line_comment = "//", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq, .tab_size = 4, .tokenizer = swift_lexer.tokenizer() };
+// Dart's interpolated strings first, then its raw ones, r'…'.
+const dart_strings = blk: {
+    const quotes = [_][]const u8{ "\"\"\"", "'''", "\"", "'" };
+    var list: [2 * quotes.len]LexString = undefined;
+    for (quotes, 0..) |quote, q| {
+        list[q] = .{ .open = quote, .close = quote, .multiline = quote.len == 3, .escape = '\\', .interp_open = "${", .interp_close = "}", .dollar = true };
+        list[quotes.len + q] = .{ .open = quote, .close = quote, .multiline = quote.len == 3, .prefix = "r" };
+    }
+    break :blk list;
+};
+const dart_lexer = Lexer{ .line_comments = &slash_comments, .block_comments = &c_block, .nest_comments = true, .strings = &dart_strings, .words = words(.{
+    .keyword,  "abstract as assert async await base break case catch class const continue covariant default deferred do else enum export extends extension external factory final finally for get hide if implements import in interface is late library mixin new on operator part required rethrow return sealed set show static super switch sync this throw try typedef var when while with yield",
+    .type,     "bool double dynamic int num void Never Null Object String List Map Set Iterable Future FutureOr Stream Function Record Symbol Type",
+    .constant, "true false null",
+}), .ident_chars = "$", .calls = true, .capital_types = true, .decorator = '@', .operators = c_operators };
+pub const dart = Language{ .name = "Dart", .extensions = &.{".dart"}, .line_comment = "//", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq_sq, .word_chars = "$", .tab_size = 2, .tokenizer = dart_lexer.tokenizer() };
 const csharp_lexer = Lexer{ .line_comments = &slash_comments, .block_comments = &c_block, .strings = &.{
     .{ .open = "@\"", .close = "\"", .multiline = true },
     .{ .open = "$\"", .close = "\"", .escape = '\\', .interp_open = "{", .interp_close = "}" },
@@ -235,6 +269,34 @@ const sql_lexer = Lexer{ .line_comments = &.{"--"}, .block_comments = &c_block, 
     .constant, "true false null",
 }), .calls = true, .operators = "+-*/%=<>!|" };
 pub const sql = Language{ .name = "SQL", .extensions = &.{".sql"}, .line_comment = "--", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq_sq, .tab_size = 2, .tokenizer = sql_lexer.tokenizer() };
+
+// R's strings go on over lines; its raw strings, r"(…)", R'[…]' and the
+// like, have no escapes; and its %op% operators, as %in% and %>%, are lexed
+// as strings are.
+const r_strings = blk: {
+    const prefixes = [_][]const u8{ "r", "R" };
+    const quotes = [_][]const u8{ "\"", "'" };
+    const pairs = [_][2][]const u8{ .{ "(", ")" }, .{ "[", "]" }, .{ "{", "}" } };
+    var list: [4 + prefixes.len * quotes.len * pairs.len]LexString = undefined;
+    list[0..4].* = .{
+        .{ .open = "\"", .close = "\"", .escape = '\\', .multiline = true },
+        .{ .open = "'", .close = "'", .escape = '\\', .multiline = true },
+        .{ .open = "%", .close = "%", .kind = .operator },
+        .{ .open = "`", .close = "`", .kind = .variable },
+    };
+    var at: usize = 4;
+    for (prefixes) |prefix| for (quotes) |quote| for (pairs) |pair| {
+        list[at] = .{ .open = quote ++ pair[0], .close = pair[1] ++ quote, .prefix = prefix, .multiline = true };
+        at += 1;
+    };
+    break :blk list;
+};
+const r_lexer = Lexer{ .line_comments = &hash_comments, .strings = &r_strings, .words = words(.{
+    .keyword,  "if else repeat while function for in next break return",
+    .constant, "TRUE FALSE NULL NA NA_integer_ NA_real_ NA_complex_ NA_character_ Inf NaN",
+    .function, "library require source print cat paste paste0 stop warning message invisible",
+}), .ident_chars = ".", .calls = true, .operators = "+-*/^=&|!<>~?:$@\\" };
+pub const r = Language{ .name = "R", .extensions = &.{".r"}, .filenames = &.{".Rprofile"}, .line_comment = "#", .auto_close = &auto_dq_sq_bt, .word_chars = ".", .tab_size = 2, .tokenizer = r_lexer.tokenizer() };
 
 // Ruby, Lua, PHP.
 const ruby_lexer = Lexer{ .line_comments = &hash_comments, .strings = &.{
@@ -281,6 +343,14 @@ const protobuf_lexer = Lexer{ .line_comments = &slash_comments, .block_comments 
     .constant, "true false",
 }), .capital_types = true, .operators = "=<>" };
 pub const protobuf = Language{ .name = "Protobuf", .extensions = &.{".proto"}, .line_comment = "//", .block_comment = .{ "/*", "*/" }, .auto_close = &auto_dq, .tab_size = 2, .tokenizer = protobuf_lexer.tokenizer() };
+// GraphQL. A spread, ..., is a string that ends where it starts, so that
+// the name after it is no property, as one after a dot is.
+const graphql_lexer = Lexer{ .line_comments = &hash_comments, .strings = &.{ .{ .open = "\"\"\"", .close = "\"\"\"", .multiline = true }, cString("\""), .{ .open = "...", .close = "", .kind = .punctuation } }, .words = words(.{
+    .keyword,  "query mutation subscription fragment on type interface union enum input scalar schema extend implements directive repeatable",
+    .type,     "Int Float String Boolean ID",
+    .constant, "true false null",
+}), .capital_types = true, .keys = true, .variables = true, .decorator = '@', .operators = "!=:|&" };
+pub const graphql = Language{ .name = "GraphQL", .extensions = &.{ ".graphql", ".gql", ".graphqls" }, .line_comment = "#", .auto_close = &auto_dq, .tab_size = 2, .tokenizer = graphql_lexer.tokenizer() };
 
 // Zig: \\ starts a multiline string line that runs to the end of the line.
 const zig_lexer = Lexer{ .line_comments = &slash_comments, .strings = &.{ cString("\""), cString("'"), .{ .open = "\\\\", .close = "\x00" } }, .words = words(.{
@@ -291,7 +361,7 @@ const zig_lexer = Lexer{ .line_comments = &slash_comments, .strings = &.{ cStrin
 pub const zig = Language{ .name = "Zig", .extensions = &.{ ".zig", ".zon" }, .line_comment = "//", .auto_close = &auto_dq_sq, .tab_size = 4, .tokenizer = zig_lexer.tokenizer() };
 
 /// Every known language, in the order lookups try them.
-pub const all = [_]*const Language{ &go, &javascript, &typescript, &json, &python, &rust, &c, &cpp, &java, &kotlin, &swift, &csharp, &shell, &yaml, &toml, &sql, &ruby, &lua, &php, &css, &html, &xml, &markdown, &diff, &dockerfile, &makefile, &protobuf, &zig };
+pub const all = [_]*const Language{ &go, &javascript, &typescript, &json, &python, &rust, &c, &cpp, &java, &kotlin, &scala, &swift, &dart, &csharp, &shell, &yaml, &toml, &sql, &r, &ruby, &lua, &php, &css, &html, &xml, &markdown, &diff, &dockerfile, &makefile, &protobuf, &graphql, &zig };
 
 /// The language of a file by its name, as "main.go" or "Makefile", or null.
 /// A full file name match wins over an extension.

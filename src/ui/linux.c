@@ -35,6 +35,9 @@ typedef struct Renderer {
     uint64_t image_creations;
     uint64_t coverage_creations;
     CairoLayers *layers;
+    /* The window frame starts transparent and is presented with its alpha
+       (Paint.transparent), not over an opaque white plane. */
+    int window_transparent;
 } Renderer;
 #include "linux_layers.h"
 static void destroy(Renderer *s) {
@@ -64,10 +67,14 @@ int zlc_layer_release(Renderer *s){
 void zlc_layer_abort(Renderer *s){layer_abort(s);}
 Renderer *zlc_create(void) { return g_try_new0(Renderer,1); }
 int zlc_has_surface(Renderer *s) {return s && s->surface && s->context;}
-int zlc_begin(Renderer *s,uint32_t width,uint32_t height,float scale) {
+static void clear_transparent(Renderer *s){
+    cairo_save(s->context);cairo_identity_matrix(s->context);cairo_set_operator(s->context,CAIRO_OPERATOR_CLEAR);cairo_paint(s->context);cairo_restore(s->context);
+}
+int zlc_begin_mode(Renderer *s,uint32_t width,uint32_t height,float scale,int transparent) {
+    s->window_transparent=transparent!=0;
     if(s->layers)return layer_begin(s,width,height,scale);
     if(!width||!height||!isfinite(scale)||scale<=0)return 1;
-    if(s->surface && s->width==width && s->height==height && s->scale==scale)return 0;
+    if(s->surface && s->width==width && s->height==height && s->scale==scale){if(s->window_transparent)clear_transparent(s);return 0;}
     destroy(s);
     s->surface=cairo_image_surface_create(CAIRO_FORMAT_ARGB32,width,height);
     if(cairo_surface_status(s->surface)!=CAIRO_STATUS_SUCCESS) { destroy(s);return 2; }
@@ -75,7 +82,7 @@ int zlc_begin(Renderer *s,uint32_t width,uint32_t height,float scale) {
     if(cairo_status(s->context)!=CAIRO_STATUS_SUCCESS) { destroy(s);return 2; }
     /* The renderer owns an opaque window plane. Initialize it once, including
        when the first frame contains only translucent shapes or gradients. */
-    cairo_set_source_rgb(s->context,1,1,1);cairo_paint(s->context);
+    if(s->window_transparent)clear_transparent(s);else{cairo_set_source_rgb(s->context,1,1,1);cairo_paint(s->context);}
     cairo_scale(s->context,scale,scale);
     s->layout=pango_cairo_create_layout(s->context);
     s->font=pango_font_description_new();pango_font_description_set_family(s->font,"Sans");
@@ -168,8 +175,9 @@ void zlc_push_clip(Renderer *s,float x,float y,float width,float height) {
 void zlc_pop_clip(Renderer *s) { if(s->gradient_clip_depth){s->gradient_clip_depth--;cairo_restore(s->context);if(s->layers&&s->layers->active)layer_current(s->layers)->saves--;} }
 int zlc_end_checked(Renderer *s,cairo_t *destination){
     if(s->layers)return layer_end(s,destination);
-    cairo_save(destination);cairo_scale(destination,1.0/s->scale,1.0/s->scale);cairo_set_source_surface(destination,s->surface,0,0);cairo_paint(destination);cairo_restore(destination);return cairo_status(destination)==CAIRO_STATUS_SUCCESS?0:2;
+    cairo_save(destination);if(s->window_transparent)cairo_set_operator(destination,CAIRO_OPERATOR_SOURCE);cairo_scale(destination,1.0/s->scale,1.0/s->scale);cairo_set_source_surface(destination,s->surface,0,0);cairo_paint(destination);cairo_restore(destination);return cairo_status(destination)==CAIRO_STATUS_SUCCESS?0:2;
 }
+int zlc_begin(Renderer *s,uint32_t width,uint32_t height,float scale) {return zlc_begin_mode(s,width,height,scale,0);}
 void zlc_end(Renderer *s,cairo_t *destination) {
     (void)zlc_end_checked(s,destination);
 }
@@ -270,6 +278,11 @@ uint32_t zlc_test_pixel(Renderer *s,uint32_t x,uint32_t y) {
     cairo_surface_flush(s->surface);
     const unsigned char *pixel=cairo_image_surface_get_data(s->surface)+y*cairo_image_surface_get_stride(s->surface)+x*4;
     return ((uint32_t)pixel[2]<<16)|((uint32_t)pixel[1]<<8)|pixel[0];
+}
+uint32_t zlc_test_raw_argb(Renderer *s,uint32_t x,uint32_t y) {
+    if(!s->surface||x>=s->width||y>=s->height)return 0;cairo_surface_flush(s->surface);
+    const unsigned char *pixel=cairo_image_surface_get_data(s->surface)+y*cairo_image_surface_get_stride(s->surface)+x*4;
+    return ((uint32_t)pixel[3]<<24)|((uint32_t)pixel[2]<<16)|((uint32_t)pixel[1]<<8)|pixel[0];
 }
 uint32_t zlc_test_raw_pixel(Renderer *s,uint32_t x,uint32_t y) {
     if(x>=s->width||y>=s->height)return 0xffffffff;cairo_surface_flush(s->surface);

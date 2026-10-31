@@ -3,6 +3,7 @@
 //! also save texts in it. A copy names itself, so that the editor that
 //! made it pastes back the text it holds, attachments included.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const tx = @import("text.zig");
 const html = @import("html.zig");
 
@@ -160,7 +161,7 @@ pub fn parse(allocator: Allocator, bytes: []const u8) !?Parsed {
             var a: tx.Attributes = .{
                 .font = ja.font,
                 .size = if (std.math.isFinite(ja.size) and ja.size > 0 and ja.size < 1e4) ja.size else 0,
-                .weight = @intCast(std.math.clamp(ja.weight, 0, 900)),
+                .weight = @intCast(zio.asUnsigned(std.math.clamp(ja.weight, 0, 900))),
                 .italic = ja.italic,
                 .underline = ja.underline,
                 .strikethrough = ja.strikethrough,
@@ -179,11 +180,11 @@ pub fn parse(allocator: Allocator, bytes: []const u8) !?Parsed {
         }
         const js = jp.style;
         paras[k] = .{ .style = .{
-            .heading = @intCast(std.math.clamp(js.heading, 0, 6)),
-            .list = if (js.list >= 0 and js.list <= 3) @fromBackingInt(@intCast(js.list)) else .none,
+            .heading = @intCast(zio.asUnsigned(std.math.clamp(js.heading, 0, 6))),
+            .list = if (js.list >= 0 and js.list <= 3) @fromBackingInt(@intCast(zio.asUnsigned(js.list))) else .none,
             .checked = js.checked,
-            .indent = @intCast(std.math.clamp(js.indent, 0, tx.max_indent)),
-            .@"align" = if (js.@"align" >= 0 and js.@"align" <= 2) @fromBackingInt(@intCast(js.@"align")) else .start,
+            .indent = @intCast(zio.asUnsigned(std.math.clamp(js.indent, 0, tx.max_indent))),
+            .@"align" = if (js.@"align" >= 0 and js.@"align" <= 2) @fromBackingInt(@intCast(zio.asUnsigned(js.@"align"))) else .start,
             .quote = js.quote,
             .code_block = js.codeBlock,
             .id = js.id,

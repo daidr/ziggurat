@@ -60,7 +60,7 @@ const Fixture = struct {
                 if (value.object.get("columns").? != .null) result.columns = value.object.get("columns").?;
                 try rows.appendSlice(arena, value.object.get("rows").?.array.items);
                 result.parts += 1;
-                try self.page.ack(service, @intCast(id % 32), id, @intCast(object.get("sequence").?.integer));
+                try self.page.ack(service, @intCast(id % 32), id, @intCast(zio.asUnsigned(object.get("sequence").?.integer)));
             } else if (std.mem.eql(u8, kind, "result")) {
                 if (object.get("value")) |value| result.value = try clone(arena, value);
                 result.rows = rows.items;
@@ -85,7 +85,7 @@ const Fixture = struct {
             std.debug.print("open {s}: {s} {s}\n", .{ name, @tagName(code), result.message });
             return error.OpenFailed;
         }
-        return @intCast(result.value.integer);
+        return @intCast(zio.asUnsigned(result.value.integer));
     }
 
     fn execute(self: *Fixture, connection: u32, sql: []const u8, params: []const Service.Value) !Outcome {

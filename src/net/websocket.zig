@@ -332,7 +332,7 @@ pub const Socket = struct {
                 if (self.close_deadline) |deadline| {
                     const left = deadline - zio.milliTimestamp();
                     if (left <= 0) return error.CloseTimedOut;
-                    timeout = @intCast(@min(left, std.math.maxInt(i32)));
+                    timeout = @intCast(zio.asUnsigned(@min(left, std.math.maxInt(i32))));
                 }
                 const ready = zio.net.pollReadable(fds[0..count], timeout) catch return self.lost();
                 if (ready == 0 and self.close_deadline != null) return error.CloseTimedOut;

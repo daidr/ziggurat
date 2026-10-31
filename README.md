@@ -131,7 +131,7 @@ zig build update-tool -Doptimize=ReleaseSafe
 
 `test` 使用测试后端验证核心不变量，并运行纯 Zig 布局、编辑、协议、资源、打包和更新测试；不创建原生窗口。`check` 编译普通目标后端探针与选中功能的所有示例/检查。原生 smoke 使用真实系统 API；多数窗口隐藏，GPU 就绪检查使用屏幕外窗口，文件选择测试会短暂启动并取消系统对话框。它们不证明视觉质量、真实输入法语言引擎输入或文件选择成功路径。WebView smoke 需要已安装 Runtime。
 
-Linux 上使用 `zig build test check smoke-linux`，包括 GTK 生命周期、绘制、Unicode 输入、调度和外部原生销毁；X11 下另以 `GDK_SCALE=2` 验证实际 2x。CI 定义位于 `.github/workflows/ci.yml`，覆盖 Windows/Linux；Linux 任务默认跑在标签为 `self-hosted, linux, x64` 的自托管 runner（需 apt，缺包时需 root 或免密 sudo，见 `scripts/ci-linux-deps.sh`），Windows 任务默认跑在 `self-hosted, windows, x64`（需 PowerShell 7、Python 3、tar 和交互式桌面会话；WebView 检查另需 Node.js 与 WebView2 Runtime）；Zig 缓存在 runner 用户目录跨任务复用；仓库变量 `LINUX_RUNS_ON` / `WINDOWS_RUNS_ON`（JSON，如 `"ubuntu-24.04"`、`"windows-2022"`）可改回托管 runner；WebView 运行检查按需启用。本轮已验证配置和本地等价命令，远端 workflow 尚未执行。
+Linux 上使用 `zig build test check smoke-linux`，包括 GTK 生命周期、绘制、Unicode 输入、调度和外部原生销毁；X11 下另以 `GDK_SCALE=2` 验证实际 2x。CI 定义位于 `.github/workflows/ci.yml`，覆盖 Windows/Linux；Windows 任务（含 WebView 任务）目前暂停，仓库变量 `WINDOWS_CI` 设为 `true` 时才运行；Linux 任务默认跑在标签为 `self-hosted, linux, x64` 的自托管 runner（需 apt，缺包时需 root 或免密 sudo，见 `scripts/ci-linux-deps.sh`），Windows 任务默认跑在 `self-hosted, windows, x64`（需 PowerShell 7、Python 3、tar 和交互式桌面会话；WebView 检查另需 Node.js 与 WebView2 Runtime）；Zig 缓存在 runner 用户目录跨任务复用；仓库变量 `LINUX_RUNS_ON` / `WINDOWS_RUNS_ON`（JSON，如 `"ubuntu-24.04"`、`"windows-2022"`）可改回托管 runner；WebView 运行检查按需启用。本轮已验证配置和本地等价命令，远端 workflow 尚未执行。
 
 Ziggurat 使用 [MIT 许可证](LICENSE)。源码包包含 LICENSE，构建安装到 `share/ziggurat/LICENSE`。打包本仓库示例时传入 `-LicensePath LICENSE`；下游应用仍显式提供自己的许可文件。签名、更新和基准工具见以下文档。
 

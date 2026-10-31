@@ -45,16 +45,30 @@ uninstall [--silent] [--purge]
 
 | | 用户范围（默认） | 机器范围 |
 | --- | --- | --- |
-| Windows 根目录 | `%LOCALAPPDATA%\Programs\<identity>` | `%ProgramFiles%\<identity>`，需管理员 |
+| Windows 根目录 | `%LOCALAPPDATA%\Programs\<identity>`（或 `installDirName`） | `%ProgramFiles%\<identity>`（或 `installDirName`），需管理员 |
 | Windows 集成 | 开始菜单快捷方式、HKCU 卸载项 | ProgramData 开始菜单、HKLM 卸载项 |
 | Linux 根目录 | `$XDG_DATA_HOME/<identity>/install` | `/opt/<identity>`，需 root |
 | Linux 集成 | `applications/<identity>.desktop`、可选 hicolor 图标、`~/.local/bin` 链接 | `/usr/share` 与 `/usr/local/bin` |
 
 安装复用更新发布事务：包内容先复制到私有 stage 并校验摘要与清单，再原子切换 `current.json`，并保留归档供以后的增量更新。根目录同时放入启动器（存根副本，以应用可执行文件命名）、`uninstall` 和 `install.json`。启动器读取 `current.json` 启动当前版本并转发参数：Linux 直接替换进程，Windows 分离启动后立即退出，以免占用自身文件。同版本重新运行等于修复启动器和集成；更旧版本返回 `NewerVersionInstalled`；首次安装失败会删除根目录和已写的集成，升级在发布后失败会回滚到原版本。卸载删除集成和根目录，保留 `LOCALAPPDATA`（Linux 为 `$XDG_DATA_HOME`）下 `<identity>` 的用户数据，`--purge` 一并删除（Windows 还删除 `APPDATA\<identity>`）。Windows 卸载器先把自己复制到 `%TEMP%`，等原进程退出后再删除安装目录，临时副本在允许时登记为重启后删除。
 
+`ziggurat.json` 的 `windows.installDirName`（或 `package setup --install-dir-name`）只改 Windows 安装目录的名字，例如 identity 为 `com.example.zhilian` 的应用装到 `%LOCALAPPDATA%\Programs\ZhiLian`；快捷方式、“设置 > 应用”中的条目、可执行文件和 `install.ps1` 的默认目录跟着它，应用名照旧。它必须是单个目录名：去掉首尾空格后不能为空、`.`、`..`，不能含路径分隔符、`:*?"<>|` 或控制字符，不能以点结尾，也不能是 `CON`、`NUL`、`COM1` 这类设备名。
+
+`ziggurat.json` 的 `installerHooks`（或 `--hook-init`、`--hook-install`、`--hook-uninstall`）是安装程序运行的应用自己的命令，静默安装也运行：`init` 在写入任何内容之前运行，失败（非 0 退出）则什么都不安装；`install` 在应用装好并完成集成后运行，失败时安装保留、安装程序以 1 退出；`uninstall` 在卸载器删除安装目录之前运行，失败只提示、照常卸载。命令在 Linux 上由 `/bin/sh -c` 运行，在 Windows 上写成临时批处理文件的一行运行（引号按 cmd.exe 的规则），环境变量有 `ZIGGURAT_INSTALL_DIR`、`ZIGGURAT_SCOPE`（`user` 或 `machine`）、`ZIGGURAT_VERSION`、`ZIGGURAT_SILENT`（`1` 或 `0`），`install` 与 `uninstall` 另有启动器路径 `ZIGGURAT_APP`。卸载命令记在 `install.json` 中，所以卸载器运行安装时那个版本的命令。应用内更新只替换文件，不运行这些命令。
+
+```json
+{
+  "windows": { "installDirName": "ZhiLian" },
+  "installerHooks": {
+    "install": "\"%ZIGGURAT_APP%\" --register-helper",
+    "uninstall": "\"%ZIGGURAT_APP%\" --unregister-helper"
+  }
+}
+```
+
 用户范围安装的目录由当前用户写入，应用内更新可以直接发布到该根目录。机器范围和 deb 安装的目录对普通用户只读，应通过新的安装程序或系统包管理器升级。安装程序是命令行程序，没有图形向导，不关闭正在运行的应用。启动器带有存根自己的资源（Windows 图标与版本信息），快捷方式图标因此也来自存根。文件关联不在本工具内注册。
 
-`tests/setup_smoke.sh`（Linux）和 `tests/setup_smoke.ps1`（Windows）在私有 HOME 或重定向的 `LOCALAPPDATA`/`APPDATA` 中用真实安装程序完成安装、经启动器运行并检查参数、升级、拒绝降级、卸载保留用户数据和 `--purge`。Windows 脚本另检查 HKCU 卸载项和快捷方式目标，唯一的共享状态是测试 identity 的卸载项，结束时再次删除。
+`tests/setup_smoke.sh`（Linux）和 `tests/setup_smoke.ps1`（Windows）在私有 HOME 或重定向的 `LOCALAPPDATA`/`APPDATA` 中用真实安装程序完成安装、经启动器运行并检查参数、升级、拒绝降级、卸载保留用户数据和 `--purge`，并检查安装钩子（`init` 失败时不安装、`install` 与 `uninstall` 按序运行并拿到环境变量）；Windows 脚本另检查 HKCU 卸载项、快捷方式目标和 `installDirName` 指定的安装目录，唯一的共享状态是测试 identity 的卸载项，结束时再次删除。
 
 ## Debian 包
 

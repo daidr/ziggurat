@@ -175,6 +175,7 @@ pub fn setBackdrop(record: *core.WindowRecord, material: core.WindowBackdrop) !v
     try update(record);
     record.native.backdrop = material;
 }
+pub fn setVibrancy(_: *core.WindowRecord, _: core.Vibrancy) void {}
 pub fn setTitle(record: *core.WindowRecord, title: []const u8) !void {
     if (title.len > record.native.title.len) return error.TextCapacityExceeded;
     @memcpy(record.native.title[0..title.len], title);

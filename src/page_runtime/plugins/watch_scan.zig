@@ -8,6 +8,7 @@ const builtin = @import("builtin");
 const Service = @import("watch_service.zig").Service;
 
 const is_windows = builtin.os.tag == .windows;
+const is_darwin = builtin.os.tag.isDarwin();
 
 pub const Kind = enum(u8) { file, directory, symlink, other };
 
@@ -375,6 +376,16 @@ pub fn statAt(dir: std.Io.Dir, name: []const u8) !Entry {
     if (is_windows) {
         return fromStat(try dir.statFile(zio.io(), name, .{ .follow_symlinks = false }));
     }
+    if (is_darwin) {
+        const path = try std.posix.toPosixPath(name);
+        var st: std.c.Stat = undefined;
+        if (std.c.fstatat(dir.handle, &path, &st, std.c.AT.SYMLINK_NOFOLLOW) == 0) return fromCStat(st);
+        return switch (std.c.errno(-1)) {
+            .NOENT, .NOTDIR => error.FileNotFound,
+            .ACCES, .PERM => error.AccessDenied,
+            else => error.Unexpected,
+        };
+    }
     const linux = std.os.linux;
     const path = try std.posix.toPosixPath(name);
     var stx = std.mem.zeroes(linux.Statx);
@@ -392,6 +403,11 @@ pub fn statSelf(dir: std.Io.Dir) !Entry {
     if (is_windows) {
         const file: std.Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
         return fromStat(try file.stat(zio.io()));
+    }
+    if (is_darwin) {
+        var st: std.c.Stat = undefined;
+        if (std.c.fstat(dir.handle, &st) == 0) return fromCStat(st);
+        return error.Unexpected;
     }
     const linux = std.os.linux;
     var stx = std.mem.zeroes(linux.Statx);
@@ -414,6 +430,22 @@ fn fromStatx(stx: std.os.linux.Statx) Entry {
         .id = .{ .device = (@as(u64, stx.dev_major) << 32) | stx.dev_minor, .inode = stx.ino, .kind = kind },
         .size = stx.size,
         .mtime = @as(i128, stx.mtime.sec) * std.time.ns_per_s + stx.mtime.nsec,
+    };
+}
+
+fn fromCStat(st: std.c.Stat) Entry {
+    const S = std.c.S;
+    const kind: Kind = switch (st.mode & S.IFMT) {
+        S.IFREG => .file,
+        S.IFDIR => .directory,
+        S.IFLNK => .symlink,
+        else => .other,
+    };
+    const mtime = st.mtime();
+    return .{
+        .id = .{ .device = @bitCast(@as(i64, st.dev)), .inode = st.ino, .kind = kind },
+        .size = @intCast(st.size),
+        .mtime = @as(i128, mtime.sec) * std.time.ns_per_s + mtime.nsec,
     };
 }
 
