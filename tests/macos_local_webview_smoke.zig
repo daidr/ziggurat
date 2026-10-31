@@ -54,7 +54,7 @@ const Probe = struct {
 
     fn fail(self: *@This(), err: anyerror) void {
         if (self.err == null) self.err = err;
-        std.debug.print("macOS local site stage={d} started={d} completed={d} boots={d} boot={s} source={s}: {s}\n", .{ self.stage, self.started, self.completed, self.boots, self.boot[0..self.boot_len], self.source[0..self.source_len], @errorName(err) });
+        std.debug.print("macOS local site stage={d} started={d} completed={d} boots={d} back={} forward={} boot={s} source={s}: {s}\n", .{ self.stage, self.started, self.completed, self.boots, self.can_go_back, self.can_go_forward, self.boot[0..self.boot_len], self.source[0..self.source_len], @errorName(err) });
         self.app.quit();
     }
     fn enqueue(self: *@This()) void {
@@ -86,6 +86,7 @@ const Probe = struct {
     }
     fn page(ptr: *anyopaque, _: *web.View, value: web.PageEvent) void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
+        std.debug.print("  stage {d} page {s}\n", .{ self.stage, @tagName(value) });
         switch (value) {
             .started => |info| {
                 self.started += 1;
@@ -196,7 +197,7 @@ fn run(allocator: std.mem.Allocator) !void {
     defer watchdog.stop();
     try app.run();
     watchdog.stop();
-    try std.testing.expect(!watchdog.expired);
+    if (watchdog.expired) probe.fail(error.Timeout);
     if (probe.err) |err| return err;
     try std.testing.expect(probe.stage == 8);
 }
