@@ -235,6 +235,10 @@ jobs:
           P01_PROBE=session-zig bash scripts/webkit-probe.sh
           GDK_SCALE=2 P01_PROBE=session-zig bash scripts/webkit-probe.sh
           P01_PROBE=page-facts-zig bash scripts/webkit-probe.sh
+          P01_PROBE=http-auth-zig bash scripts/webkit-probe.sh
+          P01_PROBE=context-menu-zig bash scripts/webkit-probe.sh
+          P01_PROBE=page-options-zig bash scripts/webkit-probe.sh
+          P01_PROBE=session-state-zig bash scripts/webkit-probe.sh
       - name: WebKitGTK content rules and audio
         if: (github.event_name == 'workflow_dispatch' && inputs.webview) || contains(github.event.pull_request.labels.*.name, 'webview')
         run: |
@@ -358,7 +362,7 @@ jobs:
           bun test packages
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # These fail when the system Runtime is unavailable; no Runtime is downloaded.
-          zig build "-j$env:NUMBER_OF_PROCESSORS" test test-remote-origin smoke-webview smoke-composition-webview smoke-page-host smoke-page-session smoke-webview-policy smoke-page smoke-page-remote smoke-page-authorization smoke-script smoke-browser-tools smoke-request-policy smoke-resource-async smoke-resource-file smoke-scheme smoke-resource-producer smoke-permission smoke-download smoke-browser-policy smoke-ipc smoke-assets smoke-page-runtime smoke-plugin-fetch smoke-plugin-watch smoke-plugin-sqlite smoke-plugin-websocket smoke-embedded-webview smoke-webview-content-rules smoke-webview-page-facts -Dwebview=true -Doptimize=ReleaseSafe
+          zig build "-j$env:NUMBER_OF_PROCESSORS" test test-remote-origin smoke-webview smoke-composition-webview smoke-page-host smoke-page-session smoke-webview-policy smoke-page smoke-page-remote smoke-page-authorization smoke-script smoke-browser-tools smoke-request-policy smoke-resource-async smoke-resource-file smoke-scheme smoke-resource-producer smoke-permission smoke-download smoke-browser-policy smoke-ipc smoke-assets smoke-page-runtime smoke-plugin-fetch smoke-plugin-watch smoke-plugin-sqlite smoke-plugin-websocket smoke-embedded-webview smoke-webview-content-rules smoke-webview-page-facts smoke-webview-http-auth smoke-webview-context-menu smoke-webview-page-options smoke-webview-session-state smoke-webview-picture-in-picture -Dwebview=true -Doptimize=ReleaseSafe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Standalone engine discovery without a page
         run: |

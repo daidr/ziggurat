@@ -244,11 +244,36 @@ Windows 通过 [CreateUri/IUri](https://learn.microsoft.com/en-us/previous-versi
 
 常规远程只允许 HTTPS。开发用 HTTP 仅支持标准 127/8、`::1`、`localhost` 及 `.localhost` 名称，并需显式 `allow_insecure_loopback = true`；HTTPS loopback 也需该开关。它们仍须逐个列入精确 origin 表，端口没有隐式放行，也不自动获得 IPC 信任。不做 DNS 查询，因此不声称阻止域名解析变化或 DNS 重绑定；TLS 校验沿用 Runtime，不忽略证书错误。
 
-`credentials = .profile` 明确使用所选 profile 的浏览器 cookies、缓存和可能已有的认证状态，不提供匿名/无凭据保证。框架默认不注入密码或 token；显式 `request_credentials` 只按[独立请求凭据合同](request-credentials.md)注入本模块的 Bearer。URL 凭据仍拒绝，并取消 Runtime 发出的 Basic/代理认证和客户端证书选择请求，避免弹出认证选择窗口。使用应用独占 profile；不同信任域是否共用 profile 由应用决定。
+`credentials = .profile` 明确使用所选 profile 的浏览器 cookies、缓存和可能已有的认证状态，不提供匿名/无凭据保证。框架默认不注入密码或 token；显式 `request_credentials` 只按[独立请求凭据合同](request-credentials.md)注入本模块的 Bearer。URL 凭据仍拒绝，并取消 Runtime 发出的 Basic/代理认证（设置了 `Options.http_auth` 时改由它回答）和客户端证书选择请求，避免弹出认证选择窗口。使用应用独占 profile；不同信任域是否共用 profile 由应用决定。
 
 frame 文档导航、弹窗、下载、权限仍默认拒绝。资源入口额外限制 DOCUMENT 请求只能匹配正在加载的顶层地址，非文档资源必须有对应请求 grant。每个 `OriginGrant.methods` 默认仅 GET/HEAD；POST、PUT、PATCH、DELETE、OPTIONS 分别显式开启，不存在 allow-all。写请求的 body 由 Runtime 原样发送，框架不在 UI 读取它，也没有请求体大小/上传耗时预算。OPTIONS 和后续实际请求各自检查权限，不自动放行 CORS preflight。`WebResourceRequested` 的覆盖范围由 [Runtime 请求拦截 API](https://learn.microsoft.com/en-us/microsoft-edge/webview2/how-to/webresourcerequested) 决定：这不是整个浏览器的网络沙箱，不保证覆盖 WebSocket/WebRTC、DNS、Runtime 自身流量或全部缓存行为；严格网络隔离需由宿主另行部署。
 
 远程双向 IPC 都要求显式 `ipc` grant。接收还要求当前已提交的顶层 Source、controller 当前地址与保存来源一致；新文档 Starting 到 ContentLoading 之间不接收。`post`/`postFor` 向未信任或未提交的远程来源返回 `IpcOriginDenied`。授予某 origin IPC 就信任它的全部页面，路径不是权限边界；应用继续使用 session 和 PageId，不能把 origin 许可等同于业务授权。
+
+## HTTP 登录与证书错误
+
+`Options.http_auth` 回答远程页面及其加载内容遇到的 HTTP 认证质询（Basic、Digest、NTLM、Negotiate），质询可以来自服务器，也可以来自代理。处理器在 App 所有者线程上同步运行，加载会等它返回。`AuthChallenge` 包含 host、port、realm、小写 scheme，以及是否由代理提出。WebView2 不区分代理，所以 Windows 上 `proxy` 恒为 false，此时 host 就是代理的 host。处理器返回 `Credentials` 就用它登录；返回 null 表示不带凭据继续，页面会看到服务器的拒绝（401 或 407 页）。服务器拒绝凭据时会再次质询。引擎在本会话内按服务器和 realm 记住它接受的凭据，所以不会每个请求都询问一次。凭据只借用到处理器返回，原生层复制后，Zig 侧会清零密码缓冲区；长于 1024 字节或含 NUL 的凭据会被拒绝，并按不带凭据处理。没有处理器时，每个质询都会被取消，两端都不会显示引擎自己的登录框。客户端证书仍然一律取消。
+
+`Options.certificate_errors` 决定无法验证的服务器证书。`CertificateError` 包含正在加载的 URI、其中的 host、引擎给出的原因，以及 DER 编码的证书。处理器返回 true 时继续加载；没有处理器或返回 false 时，加载失败。只应放行预期的那张证书（比较 DER 或其哈希），不要按 host 一律放行，因为中间任何人都能出示一张证书。Windows 来自 `ICoreWebView2_14` 的 `ServerCertificateErrorDetected`，覆盖页面及其子资源，放行后在浏览器进程结束前对该 host 一直有效。Windows Profile owner 自己的回环证书仍按原规则放行，其余证书交给处理器。Linux 来自 `load-failed-with-tls-errors`，WebKitGTK 只报告主文档：子资源遇到这样的服务器会直接失败，不会询问。放行后调用 `webkit_web_context_allow_tls_certificate_for_host`，在 View 的 web context 结束前对该 host 有效，等失败的加载结束后重新导航到同一 URI（仍需该来源的导航授权）；同一页面连续重试最多三次。两项都只对远程页面生效。
+
+`smoke-webview-http-auth` 由 `tests/http_auth_host.py` 启动两个回环服务器：一个 HTTP 服务器按两个 realm 要求 Basic 认证，一个 HTTPS 服务器出示无人信任的公开测试证书。smoke 依次检查：用凭据登录并看到欢迎页；另一个 realm 返回 null，看到服务器的拒绝页；第一次拒绝证书时加载失败；第二次按 DER 放行后页面加载成功。Linux（WebKitGTK 2.52.6，xvfb）本地通过，Windows 在 CI 的 WebView2 任务中运行。
+
+## 页面上下文菜单
+
+`Options.context_menu` 决定页面右键或按菜单键时的菜单。默认是 `.none`，不显示任何菜单，页面自己的 `contextmenu` 事件仍会触发。`.engine` 原样显示引擎自己的菜单。`.handler` 在菜单打开前同步调用处理器，处理器在原地修改引擎的菜单，引擎显示改完的菜单，所以引擎自带的项（复制、检查元素等）照常工作。
+
+处理器拿到 `ContextMenu`：
+- `target`：链接 URI 与文字、图片、音视频的 URI、选中的文本、是否可编辑，以及被点的 iframe 的 URI（只有 WebView2 提供）。
+- `items`：引擎即将显示的顶层项，含 id、去掉助记符的标签、类型、是否可用、是否勾选。子菜单只列一项，其内容保持引擎原样。id 在两个引擎都有该项时取 `context_menu.ids` 中的共同名字（`copy`、`reload`、`copyLink`、`inspect` 等），否则保留引擎自己的名字：WebView2 的 Name（如 `createQrCode`），或 WebKitGTK 原生动作的 nick（如 `spelling-guess`）。
+
+处理器可以：
+- 用 `remove(id)`、`removeAt`、`removeAll` 去掉引擎的项，开头、结尾或连续的分隔线会随之去掉。
+- 用 `append` 在末尾加最多 32 个应用自己的项：命令、勾选项或分隔线，标签是纯文本，最长 256 字节。应用项被选中时发出 `PageEvent.context_menu_command`，带应用自己定的 command。
+- 用 `prevent` 不显示菜单。删空的菜单也不显示。
+
+Windows 用 `ICoreWebView2_11` 的 `ContextMenuRequested` 在原地修改菜单项集合，应用项由 `ICoreWebView2Environment9.CreateContextMenuItem` 创建，选中时由它的 `CustomItemSelected` 报告。Linux 在 `context-menu` 信号里修改 `WebKitContextMenu`，应用项是各带一个 `GSimpleAction` 的项，WebKitGTK 不为它们显示快捷键或图标。WebKitGTK 的命中测试不提供选区，选区来自页面 `contextmenu` 事件里私有 world 记录的文本；子 frame 里的选区不记录。
+
+`smoke-webview-context-menu` 在可见窗口的真实页面上测试。先右键点一个链接：处理器拿到链接 URI 与文字以及引擎的项，去掉 Copy Link，加一条分隔线和一个应用项。Linux 上测试在菜单弹出前读取改完的菜单，选中应用项，并检查 `context_menu_command`。WebView2 自己绘制菜单，测试读不到，所以 Windows 只检查处理器拿到的内容和添加是否成功。然后选中一段文字，Linux 按菜单键、Windows 右键，处理器拿到选区并阻止菜单。最后确认页面两次都收到了 `contextmenu` 事件。Linux 用 GTK 事件和 `popup-menu` 信号触发，Windows 通过 DevTools 协议的鼠标事件触发（`zwv_test_right_click`，只用于测试）。
 
 ## 请求头与有界异步响应
 
@@ -319,7 +344,7 @@ HEAD 使用文件 representation 长度生成 Content-Length，不建物理文�
 
 设置 `Options.page_listener` 接收独立 `PageEvent`。监听上下文从 attach/reload 成功后保持稳定，直到相应配置释放或 detach；旧资源释放顺序沿用 `resources_released`。所有回调在主线程，持有核心 callback pin；回调内关闭只在安全点 detach。
 
-事件包括 started、completed、dom_ready、source_changed、title_changed、history_changed、audible_changed。controller 的 ready 不表示 DOM 已就绪。completed 带原生导航 ID、成功标志和 WebErrorStatus；它不把 HTTP 错误状态等同于传输失败。source/title/history 在变化时通知，并在加载完成时发布快照，因此可能有相同值的重复事件，刷新也能得到当前元数据。
+事件包括 started、completed、dom_ready、source_changed、title_changed、history_changed、audible_changed。controller 的 ready 不表示 DOM 已就绪。completed 带原生导航 ID、成功标志和 WebErrorStatus；它不把 HTTP 错误状态等同于传输失败。completed 的 `cancelled` 表示失败是因为加载被另一次导航、停止或下载取代，而不是页面加载失败：Windows 为 WebErrorStatus `OPERATION_CANCELED`（14，13 是主机名无法解析），Linux 为 `WEBKIT_NETWORK_ERROR_CANCELLED`。source/title/history 在变化时通知，并在加载完成时发布快照，因此可能有相同值的重复事件，刷新也能得到当前元数据。
 
 每次新文档的 accepted Starting 增加 `PageId.generation`；同一原生导航的重定向沿用代数。`PageId` 还包含所属 View 地址，不能跨 View 使用。View 从 attach 开始必须保持地址稳定，并覆盖 PageId 的使用期。页面代数在 detach/re-attach 或恢复后继续增加，不复活旧页面。
 
@@ -356,6 +381,28 @@ Starting 到本次 ContentLoading 期间抑制页面消息；之后消息必须�
 `Options.autoplay = .allow` 让页面在用户点击或输入之前就能播放有声媒体，隐藏窗口里的页面也一样：默认情况下没有手势时，有声的 `<audio>`/`<video>` 的 `play()` 以 `NotAllowedError` 拒绝。Linux 在每次主 frame 导航的 website policies 中设置 `WEBKIT_AUTOPLAY_ALLOW`。Windows 以 `--autoplay-policy=no-user-gesture-required` 启动浏览器：这是 WebView2 环境的参数，同一 user data folder 的所有 View 共享环境并且必须一致，否则后创建的 View 失败；Windows Profile owner 暂不接受这个选项（`UnsupportedCapability`）。
 
 `smoke-webview-page-facts` 在隐藏窗口的真实页面中检查：初始主题色和脚本修改后的颜色、内容尺寸与窗口按内容调整为 266×136、自动播放不被策略拒绝、全部 frame 与任意来源的初始化器在顶层和子 frame 各运行一次、宿主脚本 `window.open` 的手势报告、进程 ID，以及 reload 为不受信任页面后消息被丢弃而主题色仍然报告。Linux 在 WebKitGTK 2.52.6（xvfb）本地通过；Windows 在 CI 的 WebView2 任务中运行。
+
+## 滑动、双指缩放与后台节流
+
+`Options.swipe_navigation` 与 `Options.pinch_zoom` 打开平台的滑动前进后退与双指缩放，默认都关闭。Linux 设置 WebKitSettings 的 `enable-back-forward-navigation-gestures`；WebKitGTK 没有关闭双指缩放的设置，未开 `pinch_zoom` 时它保存在 view data `wk-view-zoom-gesture` 中的 GtkGestureZoom（2.38 起）不再接收事件。Windows 在首次导航前设置 `ICoreWebView2Settings5.IsPinchZoomEnabled` 与 `ICoreWebView2Settings6.IsSwipeNavigationEnabled`，这两项在 WebView2 中原本默认开启，所以 Linux 和 Windows 的页面现在只在要求时才响应双指缩放和触屏滑动。
+
+`Options.background_throttling = false` 让窗口隐藏、最小化或被遮挡时页面继续运行：定时器保持频率，CSS 动画不暂停。Linux 关闭 WebKitGTK 的 `HiddenPageDOMTimerThrottling` 与 `HiddenPageCSSAnimationSuspension` 功能（2.42 起）；隐藏的页面仍然不绘制帧，`requestAnimationFrame` 会等待。Windows 以 `--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows` 启动浏览器，与 `autoplay` 一样是 WebView2 环境的参数：同一 user data folder（包括同一应用的两个进程）的 View 必须一致，Windows Profile owner 暂不接受（`UnsupportedCapability`）。
+
+`smoke-webview-page-options` 在两个从未显示的窗口中各放一个页面，检查手势设置，并数 1.5 秒内 10 ms 定时器的触发次数：不节流的页面约 126 次，默认页面在 Linux 上 7 次。Linux 在 WebKitGTK 2.52.6（xvfb）本地通过；Windows 在 CI 的 WebView2 任务中运行。
+
+## 保存与恢复会话
+
+`View.sessionState(allocator)` 返回页面会话的字节（调用者拥有），`View.restoreSessionState(bytes)` 在另一个 View 中恢复它：下次启动时，或应用关闭了一个没在显示的页面之后。字节是版本化的封装：保存它的平台、页面 URI 和引擎自己的状态。只有本地站点和远程页面有会话，纯 `html` 页面返回 `LocalSiteRequired`。
+
+Linux 保存 WebKitGTK 序列化的前进后退列表，包括它保存的滚动位置和表单内容；恢复时替换列表并加载当前项，之后 Back 回到之前的页面。WebKit 在滚动停止片刻后才保存页面的滚动位置，表单内容只在页面离开视图时保存。当前项必须属于页面自己的站点，否则返回 `OriginDenied` 且列表不变。Windows 的 WebView2 没有这种状态，只保存 URI。另一平台的状态或引擎读不了的状态会加载其中保存的 URI，像 `navigateLocal`/`navigateRemote` 一样受站点规则约束。恢复要求 View 已就绪且没有进行中的导航。
+
+`smoke-webview-session-state` 从 `/` 导航到 `/long`、滚动到 1200 后保存，在第二个 View 恢复：Linux 回到 `/long`、滚动位置 1200、`history.length` 为 2，Back 回到 `/`；Windows 回到 `/long`。Linux 在 WebKitGTK 2.52.6（xvfb）本地通过。
+
+## 画中画
+
+`View.togglePictureInPicture()` 把页面中正在播放的视频（没有则取最大的一个，设置了 `disablePictureInPicture` 的除外）移入画中画，已有视频在画中画中时移回，相当于用户手势下调用 `requestPictureInPicture()`/`exitPictureInPicture()`。Windows 的 Chromium 默认允许页面自己的画中画按钮、菜单项和脚本调用；宿主切换经 DevTools 协议的 `Runtime.evaluate` 以用户手势运行，因为 ExecuteScript 不算手势。是否已有视频在画中画中由页面的 `document.pictureInPictureElement` 与 `enterpictureinpicture`/`leavepictureinpicture` 事件得知。WebKitGTK 没有画中画，Linux 返回 `UnsupportedCapability`。
+
+`smoke-webview-picture-in-picture`（仅 Windows）播放 canvas 的流，从宿主移出再移回，检查页面收到的两个事件。
 
 ## 文档初始化器
 

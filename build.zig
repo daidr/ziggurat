@@ -1978,6 +1978,19 @@ pub fn build(b: *std.Build) void {
         addSmoke(b, "smoke-webview-page-facts", "tests/page_facts_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
         });
+        _ = addHttpAuthSmoke(b, target, optimize, core, view);
+        addSmoke(b, "smoke-webview-context-menu", "tests/context_menu_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-page-options", "tests/page_options_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-session-state", "tests/session_state_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-picture-in-picture", "tests/picture_in_picture_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
         addSmoke(b, "smoke-page-remote", "tests/remote_page_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
@@ -2121,6 +2134,23 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_webview", .module = view },
         });
         addSmoke(b, "smoke-webview-page-facts", "tests/page_facts_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
+        const http_auth_run = addHttpAuthSmoke(b, target, optimize, core, view);
+        http_auth_run.step.dependOn(&install_extension.step);
+        http_auth_run.addArg("--extension");
+        http_auth_run.addDirectoryArg(b.graph.path(.install_lib, ""));
+        const context_menu_module = addSmokeModule(b, "smoke-webview-context-menu", "tests/context_menu_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
+        context_menu_module.addCSourceFile(.{ .file = b.path("tests/context_menu_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        context_menu_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
+        const page_options_module = addSmokeModule(b, "smoke-webview-page-options", "tests/page_options_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
+        page_options_module.addCSourceFile(.{ .file = b.path("tests/page_options_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        page_options_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
+        addSmoke(b, "smoke-webview-session-state", "tests/session_state_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
         });
         addSmoke(b, "smoke-webview-dynamic-linux", "tests/linux_dynamic_webview_smoke.zig", target, optimize, &.{
@@ -3417,6 +3447,24 @@ fn iconFile(b: *std.Build, tool_source: std.Build.LazyPath, default: std.Build.L
 /// steps write their files; until such a child execs it still holds those
 /// write handles, so starting a file installed a moment ago can fail with
 /// ETXTBSY. On POSIX hosts a shell retries only that failure (status 126).
+/// The HTTP sign-in and certificate error smoke, which its Python host runs
+/// with the loopback servers it starts.
+fn addHttpAuthSmoke(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module, view: *std.Build.Module) *std.Build.Step.Run {
+    const name = "smoke-webview-http-auth";
+    const exe = b.addExecutable(.{ .name = name, .root_module = b.createModule(.{ .root_source_file = b.path("tests/http_auth_webview_smoke.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view } } }) });
+    addResources(b, exe);
+    const install = b.addInstallArtifact(exe, .{});
+    b.step("build-" ++ name, "Build the HTTP sign-in smoke without running it").dependOn(&install.step);
+    const python = if (b.graph.host.result.os.tag == .windows) "python" else "python3";
+    const run = b.addSystemCommand(&.{ python, "-B", "tests/http_auth_host.py", "--exe" });
+    run.addFileArg(b.graph.path(.install_bin, b.fmt("{s}{s}", .{ name, if (target.result.os.tag == .windows) ".exe" else "" })));
+    run.step.dependOn(&install.step);
+    run.step.dependOn(&b.top_level_steps.get("webview-runtime").?.step);
+    b.step(name, "Answer HTTP sign-ins and certificate errors of loopback pages").dependOn(&run.step);
+    b.top_level_steps.get("check").?.step.dependOn(&exe.step);
+    return run;
+}
+
 fn runInstalled(b: *std.Build, executable: std.Build.LazyPath) *std.Build.Step.Run {
     if (b.graph.host.result.os.tag == .windows) return b.addRunFile(executable);
     const run = b.addSystemCommand(&.{ "/bin/sh", "-c", "n=0; while :; do \"$0\" \"$@\"; s=$?; if [ $s -ne 126 ] || [ $n -ge 20 ]; then exit $s; fi; n=$((n + 1)); sleep 0.1; done" });
