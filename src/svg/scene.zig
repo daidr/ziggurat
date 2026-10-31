@@ -6,7 +6,10 @@ pub const Gradient = @import("gradient.zig").Resolved;
 pub const Color = sample.Color;
 const full_samples: [sample.width_limit]u16 = @splat(0xffff);
 pub const Range = struct { start: usize = 0, len: usize = 0 };
-pub const Brush = union(enum) { solid: Color, gradient: usize, image: *const @import("image.zig").Paint };
+// Zig 0.17 lays out constant aggregates holding a 32-byte vector wrongly
+// when the target aligns it to 16, as arm64 does; the explicit alignment
+// keeps literal programs intact there.
+pub const Brush = union(enum) { solid: Color align(32), gradient: usize, image: *const @import("image.zig").Paint };
 const Pair = struct { a: usize, b: usize };
 pub const Clip = union(enum) { empty, geometry: usize, union_of: Pair, intersection: Pair };
 pub const Node = union(enum) {

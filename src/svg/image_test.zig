@@ -190,7 +190,7 @@ test "embedded image budgets and every allocation failure release all leases" {
 test "embedded image default record sizes keep common scene payloads unchanged" {
     const scene = @import("scene.zig");
     // The image union payload is a pointer, never the affine or pixel metadata.
-    const PreviousBrush = union(enum) { solid: scene.Color, gradient: usize };
+    const PreviousBrush = union(enum) { solid: scene.Color align(32), gradient: usize };
     try std.testing.expectEqual(@sizeOf(PreviousBrush), @sizeOf(scene.Brush));
     std.debug.print("svg_image_source_sizes style={d} provider={d} captured_optional={d}\n", .{ @sizeOf(@import("style.zig").Style), @sizeOf(svg.image.Provider), @sizeOf(?svg.image.Provider) });
     std.debug.print("svg_image_sizes options={d} work={d} brush={d} node={d} program={d} prepared={d} cache={d} snapshot={d} paint={d}\n", .{ @sizeOf(svg.PrepareOptions), @sizeOf(@import("prepare.zig").Work), @sizeOf(scene.Brush), @sizeOf(scene.Node), @sizeOf(scene.Program), @sizeOf(svg.Prepared), @sizeOf(@import("prepare_resources.zig").Resources), @sizeOf(@import("image.zig").Snapshot), @sizeOf(@import("image.zig").Paint) });
