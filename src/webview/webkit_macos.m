@@ -366,7 +366,6 @@ static void *history_context=&history_context;
         return;
     }
     BOOL allowed=NO;
-    if (getenv("ZIGGURAT_WK_TRACE")) fprintf(stderr,"wk policy %s type=%ld pending=%d kind=%d prepared=%d\n",uri.UTF8String,(long)action.navigationType,pending_navigation,nav_kind,nav_prepared);
     if (live(self) && pending_navigation && !authorized) {
         if (!local) allowed=action.navigationType==WKNavigationTypeOther && [uri isEqualToString:@"about:blank"];
         else {
@@ -425,13 +424,14 @@ static void *history_context=&history_context;
     if (started && live(self) && generation==current) history_notify(self);
 }
 /* pushState, replaceState, fragments and history within one document. Only
- * the page's own history navigation or a URI of the site is accepted. */
+ * the page's own history navigation or a URI of the site is accepted. The
+ * engine names a same-document history step with a navigation of its own,
+ * not the one goToBackForwardListItem returned: the item tells it. */
 - (void)_webView:(WKWebView *)webView navigation:(WKNavigation *)value didSameDocumentNavigation:(NSInteger)type {
-    ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep; (void)type;
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep; (void)type; (void)value;
     if (!live(self)) return;
     NSString *uri=webView.URL.absoluteString;
-    if (getenv("ZIGGURAT_WK_TRACE")) fprintf(stderr,"wk same-document %s type=%ld pending=%d authorized=%d match=%d nil=%d item=%d\n",uri.UTF8String,(long)type,pending_navigation,authorized,value==navigation,!value,webView.backForwardList.currentItem==nav_item);
-    if (pending_navigation && nav_kind==NAV_HISTORY && !authorized && !load_started && (!value || value==navigation)) {
+    if (pending_navigation && nav_kind==NAV_HISTORY && !authorized && !load_started) {
         if (!trusted_uri(self,uri) || ![uri isEqualToString:nav_uri] || webView.backForwardList.currentItem!=nav_item) {
             navigation_fail(self,ZWK_POLICY_PREPARATION,@"Unexpected history navigation sequence");
             return;
