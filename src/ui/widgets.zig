@@ -603,6 +603,94 @@ pub const RowOptions = struct {
     heading: bool = false,
 };
 pub const SortDirection = enum { ascending, descending };
+/// What marks a menu item: none, a check box's check or a radio's dot.
+pub const MenuMark = enum { none, check, radio };
+pub const MenuItemOptions = struct {
+    control: Options = .{},
+    mark: MenuMark = .none,
+    /// A check box item is checked, or a radio item is the one chosen.
+    checked: bool = false,
+    /// Whether the submenu of an item that opens one shows; null for an
+    /// item without one.
+    expanded: ?bool = null,
+    /// Drawn with the accent behind it, as the keys or the pointer are on it.
+    highlighted: bool = false,
+    /// The shortcut shown at the end of the item, which is also announced
+    /// as its description, and its width in DIP.
+    shortcut: []const u8 = "",
+    shortcut_width: f32 = 0,
+    /// Right to left: the mark at the right, the shortcut and the submenu
+    /// arrow at the left.
+    rtl: bool = false,
+};
+/// Room a menu item keeps for its mark, and for its submenu arrow.
+pub const menu_mark_width: f32 = 20;
+
+/// One item of a menu drawn in the window: a mark when checked, its label,
+/// the shortcut at its end and an arrow when it opens a submenu. A
+/// focusable control announced as a menu item, a check box item or a radio
+/// item; the caller moves the highlight and the focus with it, and the
+/// highlight is what shows where the keys are.
+pub fn emitMenuItem(frame: anytype, id: u64, bounds: layout.Rect, label: []const u8, options: MenuItemOptions) !void {
+    if (id == access.root_id) return error.ReservedControlId;
+    if (!layout.validRect(bounds) or !layout.validRect(absolute(frame, bounds))) return error.InvalidGeometry;
+    const snapshot = Snapshot.init(frame);
+    errdefer snapshot.restore(frame);
+    const control = options.control;
+    try frame.addControl(id, bounds, .{ .enabled = control.enabled, .shortcut = control.shortcut });
+    const visible = visibleBounds(frame, bounds);
+    const focused = control.enabled and visible.width > 0 and visible.height > 0 and frame.context.input_state.focused == id;
+    try frame.semantic(.{
+        .id = id,
+        .parent = control.semantic_parent,
+        .role = switch (options.mark) {
+            .none => .menu_item,
+            .check => .menu_item_checkbox,
+            .radio => .menu_item_radio,
+        },
+        .name = label,
+        .description = if (control.description.len > 0) control.description else options.shortcut,
+        .bounds = bounds,
+        .enabled = control.enabled,
+        .focused = focused,
+        .checked = options.mark != .none and options.checked,
+        .expanded = options.expanded,
+    });
+    const style = frame.currentTheme();
+    const colors = style.palette;
+    const metrics = style.metrics;
+    const lit = options.highlighted and control.enabled;
+    if (lit) try fill(frame, bounds, colors.accent);
+    const foreground: u32 = if (!control.enabled) colors.disabled_text else if (lit) colors.on_accent else colors.text;
+    const muted: u32 = if (lit) colors.on_accent else colors.disabled_text;
+    const pad = metrics.content_inset;
+    const height = bounds.height;
+    const start_edge = if (options.rtl) bounds.x + bounds.width - pad - menu_mark_width else bounds.x + pad;
+    const mark: layout.Rect = .{ .x = start_edge, .y = bounds.y, .width = menu_mark_width, .height = height };
+    if (options.checked) switch (options.mark) {
+        .none => {},
+        .check => try frame.context.command_buffer.text(absolute(frame, .{ .x = mark.x + 3, .y = mark.y, .width = mark.width - 3, .height = mark.height }), "\u{2713}", foreground),
+        .radio => {
+            const side = @min(menu_mark_width, height) * 0.35;
+            try disk(frame, .{ .x = mark.x + (mark.width - side) / 2, .y = mark.y + (height - side) / 2, .width = side, .height = side }, foreground);
+        },
+    };
+    const arrow_room: f32 = if (options.expanded != null) menu_mark_width else 0;
+    const trailing = arrow_room + (if (options.shortcut.len > 0) options.shortcut_width + metrics.label_gap else 0);
+    const label_width = @max(0, bounds.width - 2 * pad - menu_mark_width - metrics.label_gap / 2 - trailing);
+    const label_x = if (options.rtl) mark.x - metrics.label_gap / 2 - label_width else mark.x + menu_mark_width + metrics.label_gap / 2;
+    try frame.context.command_buffer.text(absolute(frame, .{ .x = label_x, .y = bounds.y, .width = label_width, .height = height }), label, foreground);
+    const end_edge = if (options.rtl) bounds.x + pad else bounds.x + bounds.width - pad;
+    if (options.shortcut.len > 0) {
+        const x = if (options.rtl) end_edge + arrow_room else end_edge - arrow_room - options.shortcut_width;
+        try frame.context.command_buffer.text(absolute(frame, .{ .x = x, .y = bounds.y, .width = options.shortcut_width + 1, .height = height }), options.shortcut, muted);
+    }
+    if (options.expanded != null) {
+        const side = @min(menu_mark_width, height) * 0.45;
+        const x = if (options.rtl) end_edge + (arrow_room - side) / 2 else end_edge - arrow_room + (arrow_room - side) / 2;
+        try chevron(frame, .{ .x = x, .y = bounds.y + (height - side) / 2, .width = side * 0.6, .height = side }, if (options.rtl) .back else .forward, if (control.enabled) muted else colors.disabled_text);
+    }
+}
 pub const TokenOptions = struct {
     control: Options = .{},
     /// Accessible name of the remove button.

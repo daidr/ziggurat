@@ -44,6 +44,9 @@ pub const IconPainter = image_nodes.IconPainter;
 pub const Graphic = image_nodes.Graphic;
 pub const icons = @import("icons.zig");
 const pointer_controls = @import("pointer_area.zig");
+const menu_controls = @import("menu.zig");
+pub const MenuItemOptions = menu_controls.ItemOptions;
+pub const MenuState = menu_controls.State;
 const wrap_text = @import("wrap.zig");
 const inspector_panel = @import("inspector.zig");
 const view_options = @import("ziggurat_view_options");
@@ -497,7 +500,7 @@ pub const Measurer = struct {
     }
 };
 
-pub const Kind = enum { column, row, radio_group, segmented, tab_list, list_box, toolbar, breadcrumbs, accordion, field, fieldset, split, scroll, grid, search, popup, popover, toasts, toast, dialog, tree, tree_item, table, table_header, table_row, token_field, combo_field, drag_area, drag_source, drop_target, text, note, badge, spacer, button, link, nav_button, combo_box, popup_button, checkbox, radio, segment, tab, list_item, disclosure, toggle_switch, progress, meter, slider, stepper, rating, avatar, embed, tree_row, column_header, token, combo_toggle, loading, editable_text, route, image, svg, icon, pointer_area };
+pub const Kind = enum { column, row, radio_group, segmented, tab_list, list_box, toolbar, breadcrumbs, accordion, field, fieldset, split, scroll, grid, search, popup, popover, toasts, toast, dialog, tree, tree_item, table, table_header, table_row, token_field, combo_field, drag_area, drag_source, drop_target, menu, text, note, badge, spacer, button, link, nav_button, combo_box, popup_button, checkbox, radio, segment, tab, list_item, disclosure, toggle_switch, progress, meter, slider, stepper, rating, avatar, embed, tree_row, column_header, token, combo_toggle, loading, editable_text, route, image, svg, icon, pointer_area, menu_item, menu_separator };
 
 /// Where a popover goes beside its anchor: below it by default, starting
 /// at its left edge. It moves to the opposite side when that side has more
@@ -803,8 +806,11 @@ pub const Node = struct {
     /// selecting it. On a tree, a letter or digit moves its cursor to the
     /// next row whose label starts with it.
     heading: bool = false,
-    /// A count or short status drawn at the end of a tree row.
+    /// A count or short status drawn at the end of a tree row, or the
+    /// shortcut shown at the end of a menu item.
     badge: []const u8 = "",
+    /// What marks a menu item; see `MenuItemOptions`.
+    mark: ui.widgets.MenuMark = .none,
     /// How a dialog is placed and dismissed.
     modal: DialogOptions = .{},
     /// Laid out right to left: a container mirrors its children.
@@ -832,7 +838,7 @@ pub const Node = struct {
 
     pub fn isContainer(self: *const Node) bool {
         return switch (self.kind) {
-            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .dialog, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target, .route, .pointer_area => true,
+            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .dialog, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target, .route, .pointer_area, .menu => true,
             else => false,
         };
     }
@@ -843,17 +849,17 @@ pub const Node = struct {
     }
     /// True when the node clips its descendants to its bounds.
     pub fn clips(self: *const Node) bool {
-        return self.kind == .scroll or self.kind == .popup or self.kind == .popover or self.kind == .dialog or (self.style.clip and self.isContainer());
+        return self.kind == .scroll or self.kind == .popup or self.kind == .popover or self.kind == .dialog or self.kind == .menu or (self.style.clip and self.isContainer());
     }
-    /// True for a popup, popover, dialog or toast stack, placed over the
-    /// flow instead of in it.
+    /// True for a popup, popover, dialog, menu or toast stack, placed over
+    /// the flow instead of in it.
     pub fn floats(self: *const Node) bool {
-        return self.kind == .popup or self.kind == .popover or self.kind == .dialog or self.kind == .toasts;
+        return self.kind == .popup or self.kind == .popover or self.kind == .dialog or self.kind == .menu or self.kind == .toasts;
     }
-    /// True for a popup, popover or dialog that is not shown in this pass,
-    /// and for a node that `Style.hidden` conceals.
+    /// True for a popup, popover, dialog or menu that is not shown in this
+    /// pass, and for a node that `Style.hidden` conceals.
     pub fn hidden(self: *const Node) bool {
-        return self.concealed or ((self.kind == .popup or self.kind == .popover or self.kind == .dialog) and !self.checked);
+        return self.concealed or ((self.kind == .popup or self.kind == .popover or self.kind == .dialog or self.kind == .menu) and !self.checked);
     }
     /// True for a node its parent lays out: neither floating over the flow
     /// nor concealed.
@@ -1065,6 +1071,8 @@ pub const Overlay = struct {
     pub const Dialog = struct { id: u64, rect: Rect, opener: ?u64, escape: bool, scrim: bool };
     popup: ?Popup = null,
     dialog: ?Dialog = null,
+    /// Menu anchors, and the panels and items of the open menu.
+    menu: menu_controls.Overlay = .{},
     /// Key bindings that input can reach, in build order.
     bindings: [max_key_bindings]KeyBinding = undefined,
     binding_count: usize = 0,
@@ -1214,6 +1222,7 @@ pub const View = struct {
     /// by `Host.prepareShaderEffects`.
     effects: ?*const ui.effects.Library = null,
     popup: PopupState = .{},
+    menu: MenuState = .{},
     tip: TooltipState = .{},
     overlay: Overlay = .{},
     /// The interactive embedded leaf under the pointer.
@@ -1479,6 +1488,11 @@ pub const View = struct {
     /// A label that becomes a text field; see `editable.zig`.
     pub const editableText = editable_controls.editableText;
     pub const pointerArea = pointer_controls.pointerArea;
+    pub const popoverMenu = menu_controls.popoverMenu;
+    pub const menuItem = menu_controls.menuItem;
+    pub const submenu = menu_controls.submenu;
+    pub const menuSeparator = menu_controls.menuSeparator;
+    pub const openMenuAt = menu_controls.openAt;
     pub const areaPress = pointer_controls.press;
     pub const areaRelease = pointer_controls.release;
     pub const areaCancel = pointer_controls.cancel;
@@ -2610,6 +2624,8 @@ pub const View = struct {
         if (anchor) |focused| if (focused.embed) |content| if (content.status) |status| {
             if (status(content.context).composing) return .ignored;
         };
+        // An open menu holds the keys; the menu key opens one.
+        if (menu_controls.routeKey(self, input)) |route_value| return route_value;
         const alt_arrow = mods.alt and !mods.control and !mods.super and (input.key == .down or input.key == .up);
         const f4 = input.key == .f4 and !mods.control and !mods.alt and !mods.super;
         if (self.overlay.popup) |list| {
@@ -2949,6 +2965,11 @@ pub const View = struct {
             self.tip.dismissed = true;
             if (self.tip_index != none) result = .changed;
         }
+        // A press on an open menu stays with it; one elsewhere closes it.
+        if (menu_controls.pointerDown(self, point)) |route_value| {
+            if (route_value != .changed) return route_value;
+            result = .changed;
+        }
         // A press on the scrim around a dialog reaches nothing behind it.
         // It closes a list or popover open in the dialog first, then the
         // dialog itself when the dialog allows it.
@@ -2994,8 +3015,9 @@ pub const View = struct {
         return null;
     }
     /// The topmost interactive embedded leaf at `point`; none while an
-    /// open list covers it.
+    /// open list or menu covers it.
     fn embedAt(self: *const View, point: Point) ?*const Overlay.Interactive {
+        if (menu_controls.panelAt(self, point)) return null;
         if (self.overlay.popup) |list| if (contains(list.rect, point)) return null;
         const panel = self.popoverAt(point);
         var index = self.overlay.embed_count;
@@ -3057,7 +3079,8 @@ pub const View = struct {
                 return result;
             }
         } else self.last_press.id = 0;
-        if (adjusting) return result;
+        // Nothing under an open menu drags.
+        if (adjusting or menu_controls.panelAt(self, point)) return result;
         const target = self.pressTarget(point, modifiers) orelse return result;
         self.capture = .{ .target = target, .origin = point, .position = point, .modifiers = modifiers };
         return result;
@@ -3220,6 +3243,7 @@ pub const View = struct {
     /// its text; true when one took it. Scroll containers move only when
     /// none did.
     pub fn embedWheel(self: *View, point: Point, delta: Point) bool {
+        if (menu_controls.panelAt(self, point)) return false;
         if (self.overlay.popup) |list| if (contains(list.rect, point)) return false;
         const panel = self.popoverAt(point);
         var index = self.overlay.embed_count;
@@ -3236,6 +3260,8 @@ pub const View = struct {
 
     /// The innermost visible scroll container at `point`.
     pub fn scrollAt(self: *const View, point: Point) ?u64 {
+        // A menu's panels scroll nothing under them.
+        if (menu_controls.panelAt(self, point)) return null;
         var index = self.overlay.scroll_count;
         while (index > 0) {
             index -= 1;
@@ -3372,8 +3398,10 @@ pub const View = struct {
         self.announcement_serial +%= 1;
     }
     pub fn hoverAt(self: *View, point: ?Point) bool {
+        const highlighted = menu_controls.hover(self, point);
         var target: ?u64 = null;
         if (point) |at| find: {
+            if (menu_controls.panelAt(self, at)) break :find;
             if (self.overlay.popup) |list| if (contains(list.rect, at)) break :find;
             const panel = self.popoverAt(at);
             var index = self.overlay.tip_count;
@@ -3387,7 +3415,7 @@ pub const View = struct {
                 }
             }
         }
-        if (std.meta.eql(target, self.tip.hover)) return false;
+        if (std.meta.eql(target, self.tip.hover)) return highlighted;
         self.tip.hover = target;
         return true;
     }
@@ -3550,6 +3578,7 @@ pub const View = struct {
             self.capture = null;
             self.drop_over = null;
         };
+        menu_controls.finish(self);
         // A combo box that is no longer built cannot keep its list open.
         if (self.popup.open) |owner| {
             const present = for (self.buffers.nodes[0..self.len]) |*node| {
@@ -3590,6 +3619,13 @@ pub const View = struct {
             .text, .note => text_size,
             .spacer => .{},
             .list_item => .{ .width = text_size.width + 2 * metrics.content_inset, .height = text_size.height + metrics.content_inset },
+            .menu_item => blk: {
+                // Room for the mark, the label, the shortcut and the arrow.
+                const mark = ui.widgets.menu_mark_width;
+                const shortcut = if (node.badge.len > 0) measurer.textSize(node.badge, null).width + metrics.label_gap else 0;
+                break :blk .{ .width = 2 * metrics.content_inset + mark + metrics.label_gap / 2 + text_size.width + shortcut + (if (node.expanded != null) mark else 0), .height = text_size.height + metrics.content_inset + 4 };
+            },
+            .menu_separator => .{ .width = 0, .height = menu_controls.separator_height },
             .button, .tab, .segment => .{ .width = text_size.width + 2 * (metrics.content_inset + 8), .height = @max(text_size.height, metrics.indicator_size) + 2 * metrics.content_inset },
             .nav_button => blk: {
                 const side = @max(Measurer.line_height, metrics.indicator_size) + 2 * metrics.content_inset;
@@ -3611,7 +3647,7 @@ pub const View = struct {
             .rating => .{ .width = @as(f32, @floatCast(node.range.maximum)) * Measurer.line_height, .height = Measurer.line_height + metrics.content_inset },
             .slider => .{ .width = 200, .height = metrics.thumb_size + 2 * metrics.content_inset },
             .stepper => .{ .width = 4 * (Measurer.line_height + metrics.content_inset), .height = Measurer.line_height + metrics.content_inset },
-            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .dialog, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target, .route, .pointer_area, .embed, .image, .svg, .icon => unreachable,
+            .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .dialog, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target, .route, .pointer_area, .menu, .embed, .image, .svg, .icon => unreachable,
         };
         const minimum: Size = switch (node.kind) {
             .progress, .meter, .slider, .spacer => .{ .width = 0, .height = size.height },
@@ -3904,6 +3940,7 @@ pub const View = struct {
         overlay.cursor_count = 0;
         overlay.dialog = null;
         overlay.binding_count = 0;
+        overlay.menu.clear();
         const zero: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
         // While a dialog is shown, input reaches only what is inside it.
         const modal = self.shownDialog();
@@ -3921,6 +3958,7 @@ pub const View = struct {
             if (index < inside_start or index >= inside_end) continue;
             if (node.concealed) continue;
             self.recordCursor(node, @intCast(index));
+            if (node.kind == .menu or node.kind == .menu_item) menu_controls.record(self, node);
             switch (node.kind) {
                 .pointer_area => if (node.style.enabled and overlay.area_count < max_pointer_areas) if (self.visible(node)) |rect| {
                     overlay.areas[overlay.area_count] = .{ .id = node.id, .index = @intCast(index), .bounds = node.bounds, .rect = rect, .track = node.track };
@@ -4069,7 +4107,7 @@ pub const View = struct {
             .embed => if (node.embed.?.cursor != null and cursor == null) {
                 embed_answer = node.embed;
             },
-            .button, .nav_button, .combo_box, .popup_button, .checkbox, .radio, .segment, .tab, .list_item, .disclosure, .toggle_switch, .slider, .stepper, .rating, .tree_row, .table_row, .column_header, .token, .combo_toggle, .editable_text, .pointer_area => {},
+            .button, .nav_button, .combo_box, .popup_button, .checkbox, .radio, .segment, .tab, .list_item, .disclosure, .toggle_switch, .slider, .stepper, .rating, .tree_row, .table_row, .column_header, .token, .combo_toggle, .editable_text, .pointer_area, .menu_item => {},
             else => if (cursor == null) return,
         }
         const rect = intersect(bounds, self.visible(node) orelse return) orelse return;
@@ -4280,6 +4318,7 @@ pub const View = struct {
         }
         const anchor = self.buffers.nodes[node.anchor].bounds;
         if (!node.checked) return .{ .x = anchor.x, .y = anchor.y + anchor.height, .width = 0, .height = 0 };
+        if (node.kind == .menu) return menu_controls.bounds(self, node, root_bounds);
         if (node.kind == .popover) {
             // Right to left, a popover's start is the anchor's right edge.
             var placement = node.placement;
@@ -4375,7 +4414,7 @@ pub const View = struct {
                 continue;
             }
             var ignored: Floating = .{};
-            try self.paintFloat(target, theme, index, &ignored);
+            try self.paintFloats(target, theme, index, &ignored);
         }
         if (modal != none) {
             // Everything painted so far takes no input or focus while the
@@ -4385,10 +4424,10 @@ pub const View = struct {
             scrim.a = 0x66;
             target.roundedRect(all[0].bounds, 0, scrim);
             var nested: Floating = .{};
-            try self.paintFloat(target, theme, modal, &nested);
+            try self.paintFloats(target, theme, modal, &nested);
             for (nested.items[0..nested.len]) |index| {
                 var ignored: Floating = .{};
-                try self.paintFloat(target, theme, index, &ignored);
+                try self.paintFloats(target, theme, index, &ignored);
             }
         }
         try self.paintDrag(target, theme);
@@ -4401,8 +4440,28 @@ pub const View = struct {
     }
 
     const Floating = struct { items: [max_floating]u32 = undefined, len: usize = 0 };
+    /// Paint the floating node at `index`, its content and the menus shown
+    /// inside it, over it; other floating nodes inside it, which only a
+    /// dialog holds, are added to `nested`.
+    fn paintFloats(self: *const View, target: anytype, theme: Theme, index: u32, nested: *Floating) !void {
+        const all = self.buffers.nodes[0..self.len];
+        var queue: Floating = .{};
+        queue.items[0] = index;
+        queue.len = 1;
+        var at: usize = 0;
+        while (at < queue.len) : (at += 1) {
+            var inner: Floating = .{};
+            try self.paintFloat(target, theme, queue.items[at], &inner);
+            for (inner.items[0..inner.len]) |child| {
+                const list = if (all[child].kind == .menu) &queue else nested;
+                if (list.len == max_floating) return error.TooManyItems;
+                list.items[list.len] = child;
+                list.len += 1;
+            }
+        }
+    }
     /// Paint the floating node at `index` and its content; floating nodes
-    /// inside it, which only a dialog holds, are added to `nested`.
+    /// inside it are added to `nested`.
     fn paintFloat(self: *const View, target: anytype, theme: Theme, index: u32, nested: *Floating) !void {
         const all = self.buffers.nodes[0..self.len];
         const node = &all[index];
@@ -4414,6 +4473,13 @@ pub const View = struct {
             // The anchor may publish its semantics later, so the panel
             // stays at the root, like a text input's list.
             if (node.kind == .popover) try target.popover(node.id, bounds, node.style.name, ui.accessibility.root_id) else try target.dialog(node.id, bounds, node.style.name, node.modal.description, node.modal.role == .alert, ui.accessibility.root_id);
+        }
+        if (node.kind == .menu) {
+            target.roundedRect(bounds, 6, ui.Color.rgb(node.style.border orelse theme.palette.border));
+            target.roundedRect(inset(bounds, theme.metrics.border / 2), @max(0, 6 - theme.metrics.border / 2), ui.Color.rgb(node.style.background orelse theme.palette.background));
+            // A submenu belongs to the menu it opens from; the top menu
+            // stays at the root, like a popover.
+            try target.menu(node.id, bounds, node.style.name, if (node.level == 0) ui.accessibility.root_id else node.semantic_parent);
         }
         if (node.kind == .popup) {
             const anchor = &all[node.anchor];
@@ -4500,7 +4566,7 @@ pub const View = struct {
             if (control.name.len == 0) control.name = annotation.name;
             if (control.description.len == 0) control.description = node.tooltip;
             switch (node.kind) {
-                .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .dialog, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target, .route, .pointer_area => {
+                .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .dialog, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target, .route, .pointer_area, .menu => {
                     switch (node.kind) {
                         .radio_group, .segmented => try target.radioGroup(node.id, bounds, style.name),
                         .list_box => try target.listBox(node.id, bounds, style.name),
@@ -4607,6 +4673,21 @@ pub const View = struct {
                     item_options.radio_group = node.radio_group;
                     try target.listItem(node.id, bounds, node.text, node.checked, item_options);
                     if (node.highlighted) target.strokeRect(bounds, 0, theme.metrics.border, ui.Color.rgb(if (node.checked) theme.palette.on_accent else theme.palette.focus));
+                },
+                .menu_item => try target.menuItem(node.id, bounds, node.text, .{
+                    .control = control,
+                    .mark = node.mark,
+                    .checked = node.checked,
+                    .expanded = node.expanded,
+                    .highlighted = node.highlighted,
+                    .shortcut = node.badge,
+                    .shortcut_width = if (node.badge.len > 0) self.measurer.textSize(node.badge, null).width else 0,
+                    .rtl = node.rtl,
+                }),
+                .menu_separator => {
+                    const pad = theme.metrics.content_inset;
+                    const line = theme.metrics.border / 2;
+                    target.roundedRect(.{ .x = bounds.x + pad, .y = bounds.y + (bounds.height - line) / 2, .width = @max(0, bounds.width - 2 * pad), .height = line }, 0, ui.Color.rgb(theme.palette.border));
                 },
                 .tab => {
                     var tab_options = control;
@@ -5272,6 +5353,12 @@ pub const Host = struct {
                         self.invalidate();
                         return true;
                     }
+                    // A secondary press opens the menu of the innermost
+                    // menu anchor under it, over any control there.
+                    if (press.button == .secondary and self.view.openMenuAt(point)) {
+                        self.invalidate();
+                        return true;
+                    }
                     if (self.context.input_state.hit(.{ .x = point.x, .y = point.y }) != null) return false;
                     return self.deliverArea(self.view.areaPress(point, button, press.modifiers, self.time()));
                 }
@@ -5727,6 +5814,12 @@ const Recorder = struct {
     pub fn popover(self: *Recorder, id: u64, bounds: Rect, _: []const u8, _: u64) !void {
         self.push(.popover, id, bounds, false);
     }
+    pub fn menu(self: *Recorder, id: u64, bounds: Rect, _: []const u8, _: u64) !void {
+        self.push(.menu, id, bounds, false);
+    }
+    pub fn menuItem(self: *Recorder, id: u64, bounds: Rect, _: []const u8, options: ui.widgets.MenuItemOptions) !void {
+        self.push(.menu_item, id, bounds, options.checked);
+    }
     pub fn navButton(self: *Recorder, id: u64, bounds: Rect, _: NavDirection, _: []const u8, _: ui.widgets.Options) !void {
         self.push(.nav_button, id, bounds, false);
     }
@@ -6110,6 +6203,7 @@ test {
     _ = @import("harness.zig");
     _ = @import("controls_tests.zig");
     _ = @import("hidden_tests.zig");
+    _ = @import("menu_tests.zig");
     _ = @import("router.zig");
     _ = @import("image.zig");
     _ = @import("icons.zig");

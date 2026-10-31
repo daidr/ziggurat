@@ -622,6 +622,10 @@ pub const Harness = struct {
             try self.render();
             return true;
         }
+        if (button == .secondary and self.view.openMenuAt(point)) {
+            try self.render();
+            return true;
+        }
         if (self.at(x, y) != null) return false;
         const event = self.view.areaPress(point, button, modifiers, self.clock) orelse return false;
         try self.deliver(event);
@@ -738,7 +742,7 @@ pub const Harness = struct {
 
     fn activate(self: *Harness, node: *const Node) anyerror!void {
         switch (node.kind) {
-            .button, .link, .nav_button, .combo_box, .popup_button, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .column_header, .token, .combo_toggle, .editable_text => {},
+            .button, .link, .nav_button, .combo_box, .popup_button, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .column_header, .token, .combo_toggle, .editable_text, .menu_item => {},
             else => return error.NotActivatable,
         }
         try self.check(node);
@@ -785,7 +789,12 @@ pub const Harness = struct {
             if (node.style.name.len > 0) try writer.print(" name=\"{s}\"", .{node.style.name});
             switch (node.kind) {
                 .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure => try writer.writeAll(if (node.checked) " on" else if (node.mixed) " mixed" else " off"),
-                .combo_box, .popup, .combo_field, .dialog => try writer.writeAll(if (node.checked) " open" else " closed"),
+                .combo_box, .popup, .combo_field, .dialog, .menu => try writer.writeAll(if (node.checked) " open" else " closed"),
+                .menu_item => {
+                    if (node.mark != .none) try writer.print(" {s}={s}", .{ @tagName(node.mark), if (node.checked) "on" else "off" });
+                    if (node.expanded) |open| try writer.writeAll(if (open) " expanded" else " collapsed");
+                    if (node.badge.len > 0) try writer.print(" shortcut=\"{s}\"", .{node.badge});
+                },
                 .tree_row, .table_row => {
                     if (node.kind == .tree_row) try writer.print(" level={d}", .{node.level});
                     if (node.expanded) |open| try writer.writeAll(if (open) " expanded" else " collapsed");
@@ -819,7 +828,7 @@ pub const Harness = struct {
 
 fn interactive(kind: Kind) bool {
     return switch (kind) {
-        .button, .link, .nav_button, .combo_box, .popup_button, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .slider, .stepper, .rating, .tree_row, .table_row, .column_header, .token, .combo_toggle, .editable_text => true,
+        .button, .link, .nav_button, .combo_box, .popup_button, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .slider, .stepper, .rating, .tree_row, .table_row, .column_header, .token, .combo_toggle, .editable_text, .menu_item => true,
         else => false,
     };
 }

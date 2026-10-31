@@ -597,7 +597,15 @@ static gboolean button(GtkWidget *widget, GdkEventButton *native, gpointer data)
         if (native_button==3 && down && (hit==1 || hit==2)) {
             handled=start_interaction(s,native,8,FALSE)==0;
             if (handled) disposition=ZLG_POINTER_CONSUMED;
+            goto done;
         }
+        /* Other buttons over the content reach the window with no grab or
+         * focus change, as a context menu or history button needs. */
+        if (ticket.button==ZLG_POINTER_UNKNOWN || !pointer_allowed(s,ticket.operation)) goto done;
+        NativeEvent other={0}; other.kind=down?3:4; other.key=(int)ticket.button; other.x=x; other.y=y; other.flags=(int)ticket.modifiers;
+        other.context=s->pointer_enabled?&ticket:NULL;
+        emit(s,&other);
+        if (!pointer_allowed(s,ticket.operation)) disposition=ZLG_POINTER_DENIED;
         goto done;
     }
     if (down && hit>0 && start_interaction(s,native,hit==1?-1:hit==2?8:hit-3,FALSE)==0) {
