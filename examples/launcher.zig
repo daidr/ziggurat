@@ -10,6 +10,7 @@
 //!
 //! Run with `zig build run-launcher`.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
@@ -68,7 +69,7 @@ const Launcher = struct {
         return std.mem.trim(u8, buffer[0..count], " ");
     }
     fn setStatus(self: *Launcher, comptime format: []const u8, arguments: anytype) void {
-        self.status_len = (std.fmt.bufPrint(&self.status, format, arguments) catch self.status[0..0]).len;
+        self.status_len = (std.fmt.bufPrint(&self.status, format, arguments) catch @as([]const u8, self.status[0..0])).len;
     }
 
     fn build(self: *Launcher, v: *view.View) anyerror!void {
@@ -79,7 +80,7 @@ const Launcher = struct {
         var buffer: [256]u8 = undefined;
         const current = self.query(&buffer);
         self.match_count = 0;
-        for (entries, 0..) |entry, index| if (std.ascii.indexOfIgnoreCase(entry.title, current) != null) {
+        for (entries, 0..) |entry, index| if (std.ascii.findIgnoreCase(entry.title, current) != null) {
             self.matches[self.match_count] = index;
             self.match_count += 1;
         };
@@ -138,12 +139,12 @@ const Launcher = struct {
                 };
             },
             .home => {
-                const home = std.process.getEnvVarOwned(self.allocator, if (builtin.os.tag == .windows) "USERPROFILE" else "HOME") catch return self.setStatus("No home folder is set.", .{});
+                const home = zio.getEnvVarOwned(self.allocator, if (builtin.os.tag == .windows) "USERPROFILE" else "HOME") catch return self.setStatus("No home folder is set.", .{});
                 defer self.allocator.free(home);
                 writer.writeAll(home) catch return;
             },
             .working_folder => {
-                const path = std.fs.cwd().realpath(".", &self.target) catch return self.setStatus("The working folder is unavailable.", .{});
+                const path = zio.realpath(std.Io.Dir.cwd(), ".", &self.target) catch return self.setStatus("The working folder is unavailable.", .{});
                 writer.end = path.len;
             },
         }

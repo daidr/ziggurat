@@ -3,13 +3,7 @@ const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const shared = @import("widget_ranges_shared.zig");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("uiautomation.h");
-    @cInclude("oleauto.h");
-});
+const c = @import("ziggurat_c_win32");
 fn check(hr: c.HRESULT) !void {
     if (hr < 0) {
         std.debug.print("range UIA HRESULT 0x{x}\n", .{@as(u32, @bitCast(hr))});

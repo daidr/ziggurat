@@ -2,6 +2,7 @@
 //! 4 to 32 bits per sample, header CRC-8 and frame CRC-16 checks, and
 //! seeking by bisection over frame headers, so no seek table is needed.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const decoding = @import("decoder.zig");
 const Error = decoding.Error;
 const Input = decoding.Input;

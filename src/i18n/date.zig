@@ -74,7 +74,7 @@ pub const Data = struct {
     months_standalone: ?[12][]const u8 = null,
 
     pub fn datePattern(self: *const Data, style: Style) []const u8 {
-        return self.date[@intFromEnum(style)];
+        return self.date[@backingInt(style)];
     }
     /// Long and full time styles would add a zone name; without zone data
     /// they use the medium pattern.

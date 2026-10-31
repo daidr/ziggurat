@@ -2,11 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const m = @import("model.zig");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 const NativeRect = extern struct { x: i32, y: i32, width: u32, height: u32 };
 const NativeMonitor = extern struct { bounds: NativeRect, work: NativeRect, key: [96]u8, key_length: u32, primary: u32 };
 extern fn zwp_query(*anyopaque, [*]NativeMonitor, u32, *u32) c_int;

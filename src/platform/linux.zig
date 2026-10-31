@@ -1,8 +1,6 @@
 const std = @import("std");
 const core = @import("../root.zig");
-const keys = @cImport({
-    @cInclude("gdk/gdkkeysyms.h");
-});
+const keys = @import("ziggurat_c_gtk");
 pub const AppData = struct { native: ?*anyopaque = null };
 pub const WindowData = struct { native: ?*anyopaque = null };
 const NativeEvent = extern struct {
@@ -116,18 +114,18 @@ fn dispatch(ptr: *anyopaque) callconv(.c) void {
 }
 pub fn create(record: *core.WindowRecord, options: core.WindowOptions) !void {
     const allocator = record.window.app.allocator;
-    const title = try allocator.dupeZ(u8, options.title);
+    const title = try allocator.dupeSentinel(u8, options.title, 0);
     defer allocator.free(title);
     var code: c_int = 0;
     const popup: c_int = if (options.popup) |role| 1 | @as(c_int, if (role.focusable) 2 else 0) | @as(c_int, if (role.topmost) 4 else 0) else 0;
-    record.native.native = zlg_window_create_popup(record, event, title, options.width, options.height, options.min_width, options.min_height, if (record.owner_record) |owner| owner.native.native else null, @intFromBool(options.modal), @intFromEnum(options.decoration), @intFromBool(options.resizable), @intFromBool(options.text_input_mode == .keyboard_compose), @intFromBool(options.accessibility_host == .children), @intFromBool(options.native_pointer_clicks), popup, &code) orelse return if (code == 1) error.UnsupportedCapability else error.OutOfMemory;
+    record.native.native = zlg_window_create_popup(record, event, title, options.width, options.height, options.min_width, options.min_height, if (record.owner_record) |owner| owner.native.native else null, @intFromBool(options.modal), @backingInt(options.decoration), @intFromBool(options.resizable), @intFromBool(options.text_input_mode == .keyboard_compose), @intFromBool(options.accessibility_host == .children), @intFromBool(options.native_pointer_clicks), popup, &code) orelse return if (code == 1) error.UnsupportedCapability else error.OutOfMemory;
     if (options.text_input_mode != .system) record.publishTextInputMode(options.text_input_mode);
 }
 pub fn show(record: *core.WindowRecord) void {
     zlg_window_action(record.native.native.?, 0);
 }
 pub fn perform(record: *core.WindowRecord, action: core.WindowAction) !void {
-    zlg_window_action(record.native.native.?, @intFromEnum(action));
+    zlg_window_action(record.native.native.?, @backingInt(action));
 }
 pub fn state(record: *core.WindowRecord) core.WindowState {
     const flags = zlg_window_state(record.native.native.?);
@@ -162,7 +160,7 @@ pub fn startMove(record: *core.WindowRecord) !void {
     try checkUpdate(zlg_window_interaction(record.native.native.?, -1));
 }
 pub fn startResize(record: *core.WindowRecord, edge: core.ResizeEdge) !void {
-    try checkUpdate(zlg_window_interaction(record.native.native.?, @intFromEnum(edge)));
+    try checkUpdate(zlg_window_interaction(record.native.native.?, @backingInt(edge)));
 }
 pub fn showSystemMenu(record: *core.WindowRecord) !void {
     try checkUpdate(zlg_window_interaction(record.native.native.?, 8));
@@ -204,7 +202,7 @@ pub fn setAlwaysOnTop(record: *core.WindowRecord, enabled: bool) !void {
 }
 pub fn setTitle(record: *core.WindowRecord, title: []const u8) !void {
     const allocator = record.window.app.allocator;
-    const terminated = try allocator.dupeZ(u8, title);
+    const terminated = try allocator.dupeSentinel(u8, title, 0);
     defer allocator.free(terminated);
     zlg_window_title(record.native.native.?, terminated);
 }
@@ -284,7 +282,7 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
                     const ticket: *const PointerTicket = @ptrCast(@alignCast(context));
                     if (ticket.button > 4 or ticket.modifiers & ~@as(u32, 15) != 0) return 0;
                     var captured = input;
-                    captured.button = @enumFromInt(ticket.button);
+                    captured.button = @fromBackingInt(@intCast(ticket.button));
                     captured.modifiers = pointerModifiers(ticket.modifiers);
                     record.emitPointer(ticket.operation, ticket.sequence, phase, captured);
                 }
@@ -298,10 +296,10 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
                 pointerLifecycle(record, native, .cancel_input);
             } else if (native.context) |context| {
                 const ticket: *const PointerTicket = @ptrCast(@alignCast(context));
-                if (ticket.button <= 4 and ticket.sequence != 0) record.emitPointerCancel(ticket.operation, ticket.sequence, @enumFromInt(ticket.button));
+                if (ticket.button <= 4 and ticket.sequence != 0) record.emitPointerCancel(ticket.operation, ticket.sequence, @fromBackingInt(@intCast(ticket.button)));
             } else record.emit(.cancel_input);
         },
-        9 => record.emit(.{ .edit_key = .{ .key = @enumFromInt(native.key), .shift = native.flags & 1 != 0, .control = native.flags & 2 != 0 } }),
+        9 => record.emit(.{ .edit_key = .{ .key = @fromBackingInt(@intCast(native.key)), .shift = native.flags & 1 != 0, .control = native.flags & 2 != 0 } }),
         10 => _ = record.window.requestCloseFrom(.user) catch |err| {
             record.window.report(.{ .domain = .core, .operation = .window_destroy, .err = err });
         },
@@ -323,7 +321,7 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
         17 => return @intFromBool(record.inputAllowed()),
         18 => return @intFromBool(record.keyInput(.{ .key = keyCode(@intCast(native.key)), .modifiers = .{ .shift = native.flags & 1 != 0, .control = native.flags & 2 != 0, .alt = native.flags & 4 != 0, .super = native.flags & 8 != 0 }, .repeat = native.flags & 16 != 0, .physical = core.physical_keys.fromEvdev(native.width) })),
         26 => record.keyRelease(.{ .key = keyCode(@intCast(native.key)), .modifiers = .{ .shift = native.flags & 1 != 0, .control = native.flags & 2 != 0, .alt = native.flags & 4 != 0, .super = native.flags & 8 != 0 }, .physical = core.physical_keys.fromEvdev(native.width) }),
-        19 => return @intFromEnum(record.hitTest(point, @floatFromInt(native.width), @floatFromInt(native.height))),
+        19 => return @backingInt(record.hitTest(point, @floatFromInt(native.width), @floatFromInt(native.height))),
         20, 21 => return textContext(record, native) catch |err| {
             if (err != error.StaleTextClient and err != error.CompositionActive) record.window.report(.{ .domain = .core, .operation = .text_input, .err = err });
             return 0;
@@ -346,7 +344,7 @@ noinline fn pointerFacts(record: *core.WindowRecord, context: *anyopaque) c_int 
     const facts: *PointerFacts = @ptrCast(@alignCast(context));
     if (facts.phase > 6 or facts.modifiers & ~@as(u32, 15) != 0 or facts.qualified > 1 or
         facts.edges & ~@as(u32, 31) != 0 or facts.disposition > 2) return 0;
-    const button: ?core.PointerButton = if (facts.button == std.math.maxInt(u32)) null else if (facts.button <= 4) @enumFromInt(facts.button) else return 0;
+    const button: ?core.PointerButton = if (facts.button == std.math.maxInt(u32)) null else if (facts.button <= 4) @fromBackingInt(@intCast(facts.button)) else return 0;
     if (pointerOperation(record) != facts.operation) return 0;
     if (facts.phase == 5 or facts.phase == 6) {
         record.pointerRevoke(facts.operation, facts.phase == 6);
@@ -376,7 +374,7 @@ noinline fn pointerFacts(record: *core.WindowRecord, context: *anyopaque) c_int 
             facts.sequence = transition.press.sequence;
             return 1;
         },
-        1, 3 => return @intFromBool(record.pointerFinish(facts.operation, facts.sequence, button, if (facts.phase == 1) .down else .up, @enumFromInt(facts.disposition))),
+        1, 3 => return @intFromBool(record.pointerFinish(facts.operation, facts.sequence, button, if (facts.phase == 1) .down else .up, @fromBackingInt(@intCast(facts.disposition)))),
         4 => {
             record.pointerMotion(facts.operation, if (facts.qualified == 0) null else .{ .x = facts.sample_x, .y = facts.sample_y, .domain = record.pointerDomain() });
             return 1;
@@ -426,10 +424,10 @@ fn scalarOffset(text_value: []const u8, cursor: usize, delta: i32) !usize {
     return position;
 }
 fn keyCode(code: u32) core.KeyCode {
-    if (code >= 'a' and code <= 'z') return @enumFromInt(@intFromEnum(core.KeyCode.a) + code - 'a');
-    if (code >= '0' and code <= '9') return @enumFromInt(@intFromEnum(core.KeyCode.digit0) + code - '0');
-    if (code >= keys.GDK_KEY_F1 and code <= keys.GDK_KEY_F24) return @enumFromInt(@intFromEnum(core.KeyCode.f1) + code - keys.GDK_KEY_F1);
-    if (code >= keys.GDK_KEY_KP_0 and code <= keys.GDK_KEY_KP_9) return @enumFromInt(@intFromEnum(core.KeyCode.numpad0) + code - keys.GDK_KEY_KP_0);
+    if (code >= 'a' and code <= 'z') return @fromBackingInt(@intCast(@backingInt(core.KeyCode.a) + code - 'a'));
+    if (code >= '0' and code <= '9') return @fromBackingInt(@intCast(@backingInt(core.KeyCode.digit0) + code - '0'));
+    if (code >= keys.GDK_KEY_F1 and code <= keys.GDK_KEY_F24) return @fromBackingInt(@intCast(@backingInt(core.KeyCode.f1) + code - keys.GDK_KEY_F1));
+    if (code >= keys.GDK_KEY_KP_0 and code <= keys.GDK_KEY_KP_9) return @fromBackingInt(@intCast(@backingInt(core.KeyCode.numpad0) + code - keys.GDK_KEY_KP_0));
     return switch (code) {
         keys.GDK_KEY_Tab, keys.GDK_KEY_ISO_Left_Tab, keys.GDK_KEY_KP_Tab => .tab,
         keys.GDK_KEY_Return, keys.GDK_KEY_KP_Enter => .enter,

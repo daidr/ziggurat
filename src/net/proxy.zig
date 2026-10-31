@@ -24,6 +24,7 @@
 //! the system lists. A proxy's password is sent only when the setting holds
 //! it, as GNOME's settings and proxy URLs can.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 
 pub const Kind = enum { http, socks5 };
@@ -90,8 +91,8 @@ pub const Choice = union(enum) {
 /// directly. Safe from any thread; it may block while the system runs a PAC
 /// file, so call it on a worker.
 pub fn forUrl(uri: std.Uri) ?Proxy {
-    var host_buffer: [std.Uri.host_name_max]u8 = undefined;
-    const host_name = uri.getHost(&host_buffer) catch return null;
+    var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host_name = (std.Io.net.HostName.fromUri(uri, &host_buffer) catch return null).bytes;
     if (isLoopback(host_name)) return null;
     const secure = isSecure(uri.scheme);
     var env_buffer: [4096]u8 = undefined;
@@ -109,14 +110,14 @@ fn defaultPort(secure: bool) u16 {
 }
 
 pub fn isLoopback(host_name: []const u8) bool {
-    var lower_buffer: [std.Uri.host_name_max]u8 = undefined;
+    var lower_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
     if (host_name.len > lower_buffer.len) return false;
     const host_value = std.ascii.lowerString(&lower_buffer, trimHost(host_name));
     if (std.mem.eql(u8, host_value, "localhost") or std.mem.endsWith(u8, host_value, ".localhost")) return true;
     const address = parseIp(host_value) orelse return false;
     return switch (address) {
         .v4 => |bytes| bytes[0] == 127,
-        .v6 => |bytes| std.mem.eql(u8, &bytes, &(([_]u8{0} ** 15) ++ [_]u8{1})) or (isMapped(bytes) and bytes[12] == 127),
+        .v6 => |bytes| (std.mem.allEqual(u8, bytes[0..15], 0) and bytes[15] == 1) or (isMapped(bytes) and bytes[12] == 127),
     };
 }
 
@@ -133,15 +134,15 @@ const Ip = union(enum) { v4: [4]u8, v6: [16]u8 };
 
 fn parseIp(text: []const u8) ?Ip {
     const value = trimHost(text);
-    if (std.net.Ip4Address.parse(value, 0)) |address| {
-        return .{ .v4 = @bitCast(address.sa.addr) };
+    if (std.Io.net.Ip4Address.parse(value, 0)) |address| {
+        return .{ .v4 = address.bytes };
     } else |_| {}
     if (std.mem.indexOfScalar(u8, value, '%') != null) return null;
-    if (std.net.Ip6Address.parse(value, 0)) |address| return .{ .v6 = address.sa.addr } else |_| return null;
+    if (std.Io.net.Ip6Address.parse(value, 0)) |address| return .{ .v6 = address.bytes } else |_| return null;
 }
 
 fn isMapped(bytes: [16]u8) bool {
-    return std.mem.eql(u8, bytes[0..12], &([_]u8{0} ** 10 ++ [_]u8{ 0xff, 0xff }));
+    return std.mem.allEqual(u8, bytes[0..10], 0) and bytes[10] == 0xff and bytes[11] == 0xff;
 }
 
 /// An IPv4-mapped IPv6 address as IPv4.
@@ -293,7 +294,7 @@ pub fn windowsStatic(proxy_list: []const u8, bypass: []const u8, secure: bool, h
 /// (`.example.com`), an address prefix (`10.0.0.0/8`), or `<local>`, the
 /// host names without a dot.
 pub fn windowsBypassed(list: []const u8, raw_host: []const u8) bool {
-    var host_buffer: [std.Uri.host_name_max]u8 = undefined;
+    var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
     if (raw_host.len > host_buffer.len) return false;
     const host_name = std.ascii.lowerString(&host_buffer, trimHost(raw_host));
     if (host_name.len == 0) return false;
@@ -360,10 +361,10 @@ pub const Environment = struct {
         if (self.lookup) |lookup| return nonEmpty(lookup(name));
         if (builtin.os.tag == .windows) {
             var fixed: std.heap.FixedBufferAllocator = .init(self.buffer);
-            return nonEmpty(std.process.getEnvVarOwned(fixed.allocator(), name) catch null);
+            return nonEmpty(zio.getEnvVarOwned(fixed.allocator(), name) catch null);
         }
         if (!builtin.link_libc and builtin.os.tag != .linux) return null;
-        return nonEmpty(std.posix.getenv(name));
+        return nonEmpty(zio.getenv(name));
     }
 
     fn nonEmpty(value: ?[]const u8) ?[]const u8 {
@@ -403,7 +404,7 @@ pub fn fromEnvironment(env: *Environment, secure: bool, host_name: []const u8, p
 /// matches itself and its subdomains (`.example.com` and `*.example.com`
 /// only the subdomains), any of them with a port that must match too.
 pub fn noProxy(list: []const u8, raw_host: []const u8, port: u16) bool {
-    var host_buffer: [std.Uri.host_name_max]u8 = undefined;
+    var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
     if (raw_host.len > host_buffer.len) return false;
     const host_name = std.ascii.lowerString(&host_buffer, trimHost(raw_host));
     const address = parseIp(host_name);
@@ -445,21 +446,21 @@ const cache_capacity = 32;
 
 const CacheEntry = struct {
     key_len: u16 = 0,
-    key: [std.Uri.host_name_max + 16]u8 = undefined,
+    key: [std.Io.net.HostName.max_len + 16]u8 = undefined,
     proxy: ?Proxy = null,
     until: i64 = 0,
 };
 
-var cache_mutex: std.Thread.Mutex = .{};
+var cache_mutex: zio.Mutex = .{};
 var cache_entries: [cache_capacity]CacheEntry = @splat(.{});
 var cache_len: usize = 0;
 
 /// Replaced by tests.
 var system_resolver: *const fn (secure: bool, host_name: []const u8, port: u16) ?Proxy = system;
-var clock: *const fn () i64 = std.time.milliTimestamp;
+var clock: *const fn () i64 = zio.milliTimestamp;
 
 fn cached(secure: bool, host_name: []const u8, port: u16) ?Proxy {
-    var key_buffer: [std.Uri.host_name_max + 16]u8 = undefined;
+    var key_buffer: [std.Io.net.HostName.max_len + 16]u8 = undefined;
     const key = std.fmt.bufPrint(&key_buffer, "{s}://{s}:{d}", .{ if (secure) "https" else "http", host_name, port }) catch return null;
     const now = clock();
     {
@@ -485,7 +486,7 @@ fn cached(secure: bool, host_name: []const u8, port: u16) ?Proxy {
 }
 
 fn system(secure: bool, host_name: []const u8, port: u16) ?Proxy {
-    var url_buffer: [std.Uri.host_name_max + 32]u8 = undefined;
+    var url_buffer: [std.Io.net.HostName.max_len + 32]u8 = undefined;
     const bracket = std.mem.indexOfScalar(u8, host_name, ':') != null and !std.mem.startsWith(u8, host_name, "[");
     const url = std.fmt.bufPrint(&url_buffer, "{s}://{s}{s}{s}:{d}/", .{ if (secure) "https" else "http", if (bracket) "[" else "", host_name, if (bracket) "]" else "", port }) catch return null;
     return switch (builtin.os.tag) {

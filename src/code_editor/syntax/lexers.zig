@@ -131,7 +131,7 @@ pub const Toml = struct {
         defer out.base = base;
         const next = self.lexer.tokenize(line, state, out);
         if (state != 0) return next;
-        const trimmed = std.mem.trimLeft(u8, line, " \t");
+        const trimmed = std.mem.trimStart(u8, line, " \t");
         const start = line.len - trimmed.len;
         if (std.mem.startsWith(u8, trimmed, "[")) {
             if (std.mem.lastIndexOfScalar(u8, line, ']')) |end| {
@@ -139,7 +139,7 @@ pub const Toml = struct {
             }
         } else if (std.mem.indexOfScalar(u8, line, '=')) |eq| {
             if (eq > start and std.mem.indexOfAny(u8, line[start..eq], "\"'#") == null) {
-                const key = std.mem.trimRight(u8, line[start..eq], " \t");
+                const key = std.mem.trimEnd(u8, line[start..eq], " \t");
                 relabel(out, start, start + key.len, .property);
             }
         }
@@ -481,7 +481,7 @@ const md_inner: u64 = (1 << 40) - 1;
 fn markdownTokenize(_: *const anyopaque, line: []const u8, start_state: u64, out: *Output) u64 {
     var state = start_state;
     const n = line.len;
-    const trimmed = std.mem.trimLeft(u8, line, " ");
+    const trimmed = std.mem.trimStart(u8, line, " ");
     const indent = n - trimmed.len;
     if (state & md_comment != 0) {
         const end = std.mem.indexOf(u8, line, "-->") orelse {
@@ -573,7 +573,7 @@ fn markdownTokenize(_: *const anyopaque, line: []const u8, start_state: u64, out
         }
     }
     const rest = line[i..];
-    const lead = std.mem.trimLeft(u8, rest, " ");
+    const lead = std.mem.trimStart(u8, rest, " ");
     if (std.mem.startsWith(u8, lead, "[ ] ") or std.mem.startsWith(u8, lead, "[x] ") or std.mem.startsWith(u8, lead, "[X] ")) {
         const k = i + std.mem.indexOfScalar(u8, rest, '[').?;
         out.add(k, .text);

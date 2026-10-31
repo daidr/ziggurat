@@ -104,7 +104,7 @@ pub fn Type(comptime z: type, comptime Profile: type) type {
             try self.checkIngress();
             try cookies.validateCookie(cookie);
             if (!self.options.allow_write) return error.PermissionDenied;
-            return self.submit(.{ .kind = 1, .name = slice(cookie.name), .value = slice(cookie.value), .domain = slice(cookie.domain), .path = slice(cookie.path), .expires = cookie.expires orelse 0, .flags = @as(u32, if (cookie.secure) 1 else 0) | @as(u32, if (cookie.http_only) 2 else 0) | @as(u32, if (cookie.expires != null) 4 else 0), .same_site = @intFromEnum(cookie.same_site) }, completion);
+            return self.submit(.{ .kind = 1, .name = slice(cookie.name), .value = slice(cookie.value), .domain = slice(cookie.domain), .path = slice(cookie.path), .expires = cookie.expires orelse 0, .flags = @as(u32, if (cookie.secure) 1 else 0) | @as(u32, if (cookie.http_only) 2 else 0) | @as(u32, if (cookie.expires != null) 4 else 0), .same_site = @backingInt(cookie.same_site) }, completion);
         }
         /// Uses an observed cookie's native identity and expected value. This
         /// is not an atomic compare-delete or unconditional key-only deletion.
@@ -157,7 +157,7 @@ pub fn Type(comptime z: type, comptime Profile: type) type {
             _ = try cookies.measureReplacement(input, self.options.limits.max_rows, @sizeOf(NativeRow) + @sizeOf(NativeList));
             try cookies.validateReplacement(input, self.options.limits.max_rows);
             var captured: [cookies.row_capacity]NativeRow = undefined;
-            for (input, captured[0..input.len]) |row, *out| out.* = .{ .name = slice(row.name), .value = slice(row.value), .domain = slice(row.domain), .path = slice(row.path), .expires = row.expires orelse 0, .flags = @as(u32, if (row.secure) 1 else 0) | @as(u32, if (row.http_only) 2 else 0) | @as(u32, if (row.expires != null) 4 else 0), .same_site = @intFromEnum(row.same_site) };
+            for (input, captured[0..input.len]) |row, *out| out.* = .{ .name = slice(row.name), .value = slice(row.value), .domain = slice(row.domain), .path = slice(row.path), .expires = row.expires orelse 0, .flags = @as(u32, if (row.secure) 1 else 0) | @as(u32, if (row.http_only) 2 else 0) | @as(u32, if (row.expires != null) 4 else 0), .same_site = @backingInt(row.same_site) };
             return self.submitCandidate(.{ .replacement = captured[0..input.len] }, completion);
         }
         pub fn stats(self: *Self) !Stats {
@@ -280,7 +280,7 @@ pub fn Type(comptime z: type, comptime Profile: type) type {
             for (values[0..count], 0..) |*out, i| {
                 const row = rows.?[i];
                 if (row.same_site > 2 or row.flags > 7) return error.InvalidCookieResult;
-                out.* = .{ .name = row.name.bytes(), .value = row.value.bytes(), .domain = row.domain.bytes(), .path = row.path.bytes(), .expires = if (row.flags & 4 != 0) row.expires else null, .secure = row.flags & 1 != 0, .http_only = row.flags & 2 != 0, .same_site = @enumFromInt(row.same_site) };
+                out.* = .{ .name = row.name.bytes(), .value = row.value.bytes(), .domain = row.domain.bytes(), .path = row.path.bytes(), .expires = if (row.flags & 4 != 0) row.expires else null, .secure = row.flags & 1 != 0, .http_only = row.flags & 2 != 0, .same_site = @fromBackingInt(@intCast(row.same_site)) };
             }
             const bytes = try cookies.Batch.measure(values[0..count], self.options.limits);
             var native: NativeStats = undefined;

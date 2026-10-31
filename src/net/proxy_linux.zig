@@ -3,6 +3,7 @@
 //! sandbox. GIO is loaded on first use, so apps that never make a request
 //! through a proxy decision do not load it; without GIO, requests go direct.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const proxy = @import("proxy.zig");
 
 const Api = struct {
@@ -12,7 +13,7 @@ const Api = struct {
     error_free: *const fn (err: *anyopaque) callconv(.c) void,
 };
 
-var once = std.once(load);
+var once = zio.once(load);
 var api: ?Api = null;
 
 fn load() void {
@@ -29,7 +30,7 @@ fn load() void {
 pub fn system(url: []const u8) ?proxy.Proxy {
     once.call();
     const gio = api orelse return null;
-    var url_buffer: [std.Uri.host_name_max + 64]u8 = undefined;
+    var url_buffer: [std.Io.net.HostName.max_len + 64]u8 = undefined;
     if (url.len >= url_buffer.len) return null;
     @memcpy(url_buffer[0..url.len], url);
     url_buffer[url.len] = 0;

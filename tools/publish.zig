@@ -5,6 +5,7 @@
 //! finds it pointing at a file that is not there yet. A new release is
 //! created as a draft: installed apps see it once it is published.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const s3 = @import("s3.zig");
 const console_mod = @import("console.zig");
 
@@ -64,12 +65,12 @@ const Wire = struct { url: ?[]const u8 = null };
 /// Sorts the directory's files into upload groups and checks that every
 /// signed manifest names an asset of this release under `base`. Hidden
 /// files and subdirectories are skipped. Allocations belong to `allocator`.
-pub fn plan(allocator: std.mem.Allocator, dir: std.fs.Dir, base: []const u8) !Plan {
+pub fn plan(allocator: std.mem.Allocator, dir: std.Io.Dir, base: []const u8) !Plan {
     var files: std.ArrayList([]const u8) = .empty;
     var manifests: std.ArrayList([]const u8) = .empty;
     var feed: ?[]const u8 = null;
     var iterator = dir.iterate();
-    while (try iterator.next()) |entry| {
+    while (try iterator.next(zio.io())) |entry| {
         if (entry.kind != .file or entry.name.len == 0 or entry.name[0] == '.') continue;
         const name = try allocator.dupe(u8, entry.name);
         if (std.mem.eql(u8, name, "feed.json")) {
@@ -82,7 +83,7 @@ pub fn plan(allocator: std.mem.Allocator, dir: std.fs.Dir, base: []const u8) !Pl
     std.mem.sort([]const u8, files.items, {}, lessThan);
     std.mem.sort([]const u8, manifests.items, {}, lessThan);
     for (manifests.items) |name| {
-        const bytes = try dir.readFileAlloc(allocator, name, 16384);
+        const bytes = try dir.readFileAlloc(zio.io(), name, allocator, .limited(16384));
         const parsed = std.json.parseFromSliceLeaky(Wire, allocator, bytes, .{ .ignore_unknown_fields = true }) catch return error.InvalidManifest;
         const url = parsed.url orelse return error.InvalidManifest;
         if (!std.mem.startsWith(u8, url, base)) {
@@ -128,14 +129,14 @@ pub fn uploadArgs(allocator: std.mem.Allocator, options: Options, names: []const
 const Ran = struct { ok: bool, output: []const u8 };
 
 fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8) !Ran {
-    const result = std.process.Child.run(.{ .allocator = allocator, .argv = argv, .max_output_bytes = 1024 * 1024 }) catch |err| switch (err) {
+    const result = zio.run(allocator, .{ .argv = argv, .stdout_limit = .limited(1024 * 1024), .stderr_limit = .limited(1024 * 1024) }) catch |err| switch (err) {
         error.FileNotFound => {
             std.debug.print("publish: {s} was not found; install the GitHub CLI and sign in with `gh auth login` or GH_TOKEN\n", .{argv[0]});
             return error.GitHubCliUnavailable;
         },
         else => return err,
     };
-    const ok = result.term == .Exited and result.term.Exited == 0;
+    const ok = result.term == .exited and result.term.exited == 0;
     return .{ .ok = ok, .output = try std.mem.concat(allocator, u8, &.{ result.stdout, result.stderr }) };
 }
 
@@ -144,8 +145,8 @@ fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8) !Ran {
 pub fn github(allocator: std.mem.Allocator, options: Options, out: *std.Io.Writer) !void {
     if (!validRepository(options.repository)) return error.InvalidRepository;
     if (!validTag(options.tag)) return error.InvalidTag;
-    var dir = try std.fs.cwd().openDir(options.directory, .{ .iterate = true });
-    defer dir.close();
+    var dir = try std.Io.Dir.cwd().openDir(zio.io(), options.directory, .{ .iterate = true });
+    defer dir.close(zio.io());
     const base = try downloadBase(allocator, options.repository, options.tag);
     const assets = try plan(allocator, dir, base);
     const viewed = try runCommand(allocator, try viewArgs(allocator, options));
@@ -186,18 +187,18 @@ pub const S3Options = struct {
 /// Blocking: puts every file of the release directory into the bucket, in
 /// the order of `plan`, one request each, and stops at the first failure.
 /// install.sh and feed.json are served with `Cache-Control: no-cache`.
-pub fn toS3(allocator: std.mem.Allocator, options: S3Options, environment: *const std.process.EnvMap, console: *console_mod.Console) !void {
+pub fn toS3(allocator: std.mem.Allocator, options: S3Options, environment: *const std.process.Environ.Map, console: *console_mod.Console) !void {
     if (!std.mem.endsWith(u8, options.url, "/")) return error.InvalidUrl;
     const client = try s3.Client.fromEnvironment(options.bucket, environment);
-    var dir = try std.fs.cwd().openDir(options.directory, .{ .iterate = true });
-    defer dir.close();
+    var dir = try std.Io.Dir.cwd().openDir(zio.io(), options.directory, .{ .iterate = true });
+    defer dir.close(zio.io());
     const assets = try plan(allocator, dir, options.url);
-    var http: std.http.Client = .{ .allocator = allocator };
+    var http: std.http.Client = .{ .allocator = allocator, .io = zio.io() };
     defer http.deinit();
-    try http.initDefaultProxies(allocator);
+    try http.initDefaultProxies(allocator, environment);
     const feed: []const []const u8 = if (assets.feed) |name| &.{name} else &.{};
     for ([_][]const []const u8{ assets.files, assets.manifests, feed }) |group| for (group) |name| {
-        const bytes = try dir.readFileAlloc(allocator, name, 4 * 1024 * 1024 * 1024);
+        const bytes = try dir.readFileAlloc(zio.io(), name, allocator, .limited(4 * 1024 * 1024 * 1024));
         var task: console_mod.Task = undefined;
         var title: [256]u8 = undefined;
         console.start(&task, std.fmt.bufPrint(&title, "Uploading {s}", .{name}) catch name);
@@ -264,13 +265,13 @@ test "plans upload archives first, manifests next and the feed last" {
     const base = try downloadBase(allocator, "owner/app", "v1.1.0");
     try testing.expectEqualStrings("https://github.com/owner/app/releases/download/v1.1.0/", base);
     try testing.expectError(error.NothingToUpload, plan(allocator, temp.dir, base));
-    try temp.dir.writeFile(.{ .sub_path = "app-linux-1.1.0.0.zip", .data = "zip" });
-    try temp.dir.writeFile(.{ .sub_path = "app-linux-1.0.0.0-to-1.1.0.0.patch", .data = "patch" });
-    try temp.dir.writeFile(.{ .sub_path = "app-linux-1.1.0.0.json", .data = "{\"format\":1,\"url\":\"https://github.com/owner/app/releases/download/v1.1.0/app-linux-1.1.0.0.zip\"}" });
-    try temp.dir.writeFile(.{ .sub_path = "app-linux-1.0.0.0-to-1.1.0.0.patch.json", .data = "{\"url\":\"https://github.com/owner/app/releases/download/v1.1.0/app-linux-1.0.0.0-to-1.1.0.0.patch\"}" });
-    try temp.dir.writeFile(.{ .sub_path = "feed.json", .data = "{}" });
-    try temp.dir.writeFile(.{ .sub_path = ".DS_Store", .data = "" });
-    try temp.dir.makeDir("downloads");
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "app-linux-1.1.0.0.zip", .data = "zip" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "app-linux-1.0.0.0-to-1.1.0.0.patch", .data = "patch" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "app-linux-1.1.0.0.json", .data = "{\"format\":1,\"url\":\"https://github.com/owner/app/releases/download/v1.1.0/app-linux-1.1.0.0.zip\"}" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "app-linux-1.0.0.0-to-1.1.0.0.patch.json", .data = "{\"url\":\"https://github.com/owner/app/releases/download/v1.1.0/app-linux-1.0.0.0-to-1.1.0.0.patch\"}" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "feed.json", .data = "{}" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = ".DS_Store", .data = "" });
+    try temp.dir.createDir(zio.io(), "downloads", .default_dir);
     const result = try plan(allocator, temp.dir, base);
     try testing.expectEqual(2, result.files.len);
     try testing.expectEqualStrings("app-linux-1.0.0.0-to-1.1.0.0.patch", result.files[0]);
@@ -295,14 +296,14 @@ test "manifests must point at assets of the same release" {
     var temp = testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
     const base = try downloadBase(allocator, "owner/app", "v2");
-    try temp.dir.writeFile(.{ .sub_path = "app.zip", .data = "zip" });
-    try temp.dir.writeFile(.{ .sub_path = "app.json", .data = "{\"url\":\"https://downloads.example.com/app.zip\"}" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "app.zip", .data = "zip" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "app.json", .data = "{\"url\":\"https://downloads.example.com/app.zip\"}" });
     try testing.expectError(error.ManifestOutsideRelease, plan(allocator, temp.dir, base));
-    try temp.dir.writeFile(.{ .sub_path = "app.json", .data = "{\"url\":\"https://github.com/owner/app/releases/download/v2/other.zip\"}" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "app.json", .data = "{\"url\":\"https://github.com/owner/app/releases/download/v2/other.zip\"}" });
     try testing.expectError(error.MissingAsset, plan(allocator, temp.dir, base));
-    try temp.dir.writeFile(.{ .sub_path = "app.json", .data = "not json" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "app.json", .data = "not json" });
     try testing.expectError(error.InvalidManifest, plan(allocator, temp.dir, base));
-    try temp.dir.writeFile(.{ .sub_path = "app.json", .data = "{\"url\":\"https://github.com/owner/app/releases/download/v2/app.zip\"}" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "app.json", .data = "{\"url\":\"https://github.com/owner/app/releases/download/v2/app.zip\"}" });
     _ = try plan(allocator, temp.dir, base);
 }
 
@@ -313,20 +314,20 @@ test "uploads run in order through the GitHub CLI" {
     const allocator = arena.allocator();
     var temp = testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
-    const root = try temp.dir.realpathAlloc(allocator, ".");
-    try temp.dir.makeDir("dist");
-    try temp.dir.writeFile(.{ .sub_path = "dist/app.zip", .data = "zip" });
-    try temp.dir.writeFile(.{ .sub_path = "dist/app.json", .data = "{\"url\":\"https://github.com/owner/app/releases/download/v3/app.zip\"}" });
-    try temp.dir.writeFile(.{ .sub_path = "dist/feed.json", .data = "{}" });
+    const root = try zio.realPathAlloc(temp.dir, ".", allocator);
+    try temp.dir.createDir(zio.io(), "dist", .default_dir);
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "dist/app.zip", .data = "zip" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "dist/app.json", .data = "{\"url\":\"https://github.com/owner/app/releases/download/v3/app.zip\"}" });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "dist/feed.json", .data = "{}" });
     // Records each call; `release view` fails as for a release that does not exist yet.
     const log = try std.fs.path.join(allocator, &.{ root, "calls" });
     const script = try std.fmt.allocPrint(allocator, "#!/bin/sh\necho \"$@\" >> '{s}'\n[ \"$2\" = view ] && exit 1\nexit 0\n", .{log});
-    try temp.dir.writeFile(.{ .sub_path = "gh", .data = script, .flags = .{ .mode = 0o755 } });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "gh", .data = script, .flags = .{ .permissions = zio.mode(0o755) } });
     const options: Options = .{ .directory = try std.fs.path.join(allocator, &.{ root, "dist" }), .repository = "owner/app", .tag = "v3", .gh = try std.fs.path.join(allocator, &.{ root, "gh" }) };
     var discard: std.Io.Writer.Discarding = .init(&.{});
     try github(allocator, options, &discard.writer);
-    const calls = try temp.dir.readFileAlloc(allocator, "calls", 4096);
-    var lines = std.mem.splitScalar(u8, std.mem.trimRight(u8, calls, "\n"), '\n');
+    const calls = try temp.dir.readFileAlloc(zio.io(), "calls", allocator, .limited(4096));
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, calls, "\n"), '\n');
     try testing.expect(std.mem.startsWith(u8, lines.next().?, "release view v3 --repo owner/app"));
     try testing.expect(std.mem.startsWith(u8, lines.next().?, "release create v3 --repo owner/app --draft"));
     try testing.expect(std.mem.endsWith(u8, lines.next().?, "dist/app.zip"));
@@ -334,6 +335,6 @@ test "uploads run in order through the GitHub CLI" {
     try testing.expect(std.mem.endsWith(u8, lines.next().?, "dist/feed.json"));
     try testing.expectEqual(null, lines.next());
     // A failing upload stops before the manifests.
-    try temp.dir.writeFile(.{ .sub_path = "gh", .data = "#!/bin/sh\nexit 1\n", .flags = .{ .mode = 0o755 } });
+    try temp.dir.writeFile(zio.io(), .{ .sub_path = "gh", .data = "#!/bin/sh\nexit 1\n", .flags = .{ .permissions = zio.mode(0o755) } });
     try testing.expectError(error.ReleaseCreationFailed, github(allocator, options, &discard.writer));
 }

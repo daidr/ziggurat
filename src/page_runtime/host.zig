@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const ipc = @import("ziggurat_ipc");
 const i18n = @import("ziggurat_i18n");
@@ -191,7 +192,7 @@ pub const Host = struct {
             .allocator = allocator,
             .transport = options.transport,
             .controls = options.controls,
-            .random = options.random orelse std.crypto.random,
+            .random = options.random orelse zio.random,
             .window_id = options.window_id,
             .version = options.version,
             .locale = options.locale,

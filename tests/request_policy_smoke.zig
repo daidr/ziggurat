@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
@@ -19,7 +20,7 @@ const template =
     \\</script>
 ;
 const Server = struct {
-    listener: std.net.Server,
+    listener: std.Io.net.Server,
     html: []const u8 = "",
     thread: ?std.Thread = null,
     stop_requested: std.atomic.Value(bool) = .init(false),
@@ -35,28 +36,28 @@ const Server = struct {
     fn stop(self: *Server) void {
         if (self.thread) |thread| {
             self.stop_requested.store(true, .release);
-            const wake = std.net.tcpConnectToAddress(self.listener.listen_address) catch unreachable;
-            wake.close();
+            const wake = self.listener.socket.address.connect(zio.io(), .{ .mode = .stream }) catch unreachable;
+            wake.close(zio.io());
             thread.join();
         }
-        self.listener.deinit();
+        self.listener.deinit(zio.io());
     }
     fn run(self: *Server) void {
         while (true) {
-            const connection = self.listener.accept() catch return;
-            defer connection.stream.close();
+            const connection = self.listener.accept(zio.io()) catch return;
+            defer connection.close(zio.io());
             if (self.stop_requested.load(.acquire)) return;
-            self.serve(connection.stream) catch {
+            self.serve(connection) catch {
                 self.bad.store(true, .release);
             };
         }
     }
-    fn serve(self: *Server, stream: std.net.Stream) !void {
+    fn serve(self: *Server, stream: std.Io.net.Stream) !void {
         var buffer: [16384]u8 = undefined;
         var used: usize = 0;
         while (std.mem.indexOf(u8, buffer[0..used], "\r\n\r\n") == null) {
             if (used == buffer.len) return error.RequestTooLarge;
-            const n = try std.posix.recv(stream.handle, buffer[used..], 0);
+            const n = try zio.net.receive(stream.socket.handle, buffer[used..]);
             if (n == 0) return;
             used += n;
         }
@@ -78,7 +79,7 @@ const Server = struct {
         }
         if (length > 4096 or end + length > buffer.len) return error.RequestTooLarge;
         while (used < end + length) {
-            const n = try std.posix.recv(stream.handle, buffer[used..], 0);
+            const n = try zio.net.receive(stream.socket.handle, buffer[used..]);
             if (n == 0) return error.TruncatedBody;
             used += n;
         }
@@ -108,8 +109,8 @@ const Server = struct {
         }
         var header: [512]u8 = undefined;
         const text = try std.fmt.bufPrint(&header, "HTTP/1.1 {d} Fixture\r\nContent-Type: text/html\r\nCache-Control: no-store\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{ status, body.len });
-        try stream.writeAll(text);
-        try stream.writeAll(body);
+        try zio.net.sendAll(stream.socket.handle, text);
+        try zio.net.sendAll(stream.socket.handle, body);
     }
 };
 const State = struct {
@@ -139,13 +140,13 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    const bind = try std.net.Address.parseIp4("127.0.0.1", 0);
-    var allowed: Server = .{ .listener = try bind.listen(.{}) };
-    var other: Server = .{ .listener = try bind.listen(.{}) };
+    const bind = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var allowed: Server = .{ .listener = try bind.listen(zio.io(), .{}) };
+    var other: Server = .{ .listener = try bind.listen(zio.io(), .{}) };
     defer other.stop();
-    const origin = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{allowed.listener.listen_address.getPort()});
+    const origin = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{allowed.listener.socket.address.getPort()});
     defer allocator.free(origin);
-    const other_origin = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{other.listener.listen_address.getPort()});
+    const other_origin = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{other.listener.socket.address.getPort()});
     defer allocator.free(other_origin);
     const url = try std.fmt.allocPrint(allocator, "{s}/start", .{origin});
     defer allocator.free(url);
@@ -155,7 +156,7 @@ pub fn main() !void {
     defer allowed.stop();
     try allowed.start();
     try other.start();
-    const local = try std.process.getEnvVarOwned(allocator, "LOCALAPPDATA");
+    const local = try zio.getEnvVarOwned(allocator, "LOCALAPPDATA");
     defer allocator.free(local);
     const profile = try std.fs.path.join(allocator, &.{ local, "Ziggurat", "RequestPolicySmoke" });
     defer allocator.free(profile);

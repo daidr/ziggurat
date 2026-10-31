@@ -5,12 +5,7 @@ const ui = @import("ziggurat_ui");
 const expect = std.testing.expect;
 const equal = std.testing.expectEqual;
 const expectError = std.testing.expectError;
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("uiautomation.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn zlg_test_paint(*anyopaque, u32, u32) void;
 extern fn zlg_resource_count() u32;
 extern fn zlc_test_pixel(*anyopaque, u32, u32) u32;
@@ -183,7 +178,7 @@ fn normal(allocator: std.mem.Allocator) !void {
     try expectError(error.UnsupportedBackdropRenderMode, state.context.attachBackdrop(owner));
     state.context.render_mode = .gdi;
     if (ui.capabilities.accessibility) {
-        state.context.semantic_name = "x" ** 257;
+        state.context.semantic_name = &@as([257]u8, @splat('x'));
         try expectError(error.SemanticNameTooLong, state.context.attachBackdrop(owner));
         try expect(state.context.window == null and state.context.backdrop_region == null);
         state.context.semantic_name = "Backdrop";

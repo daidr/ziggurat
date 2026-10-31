@@ -4,12 +4,7 @@ const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const text = @import("ziggurat_text_layout");
 const drawing = ui.drawing;
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("uiautomation.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn cairo_image_surface_create(c_int, c_int, c_int) ?*anyopaque;
 extern fn cairo_create(*anyopaque) ?*anyopaque;
 extern fn cairo_destroy(*anyopaque) void;
@@ -77,7 +72,7 @@ fn mixed(renderer: anytype, allocator: std.mem.Allocator, paint: z.Paint) !void 
     const prepared = try shaped.prepare(paint.size.scale, .{ .viewport = .{ .x = 0, .y = 0, .width = 60, .height = 24 } });
     defer prepared.close() catch unreachable;
     var lease = drawing.Lease.init(std.Thread.getCurrentId());
-    const image_bytes = [_]u8{ 0, 128, 0, 128 } ** 4;
+    const image_bytes = @as([16]u8, @bitCast(@as([4][4]u8, @splat(.{ 0, 128, 0, 128 }))));
     const levels = [_]drawing.ImageLevel{.{ .pixels = &image_bytes, .byte_len = image_bytes.len, .width = 2, .height = 2, .stride = 8 }};
     const image: drawing.ImageView = .{ .lease = &lease, .identity = try drawing.reserveRasterIdentity(), .levels = &levels };
     try renderer.uploadImage(image);
@@ -155,7 +150,7 @@ fn run(renderer: anytype, allocator: std.mem.Allocator, base: z.Paint) !void {
             try finish(renderer, paint);
         }
         var lease = drawing.Lease.init(std.Thread.getCurrentId());
-        const mask_bytes = [_]u8{255} ** 16;
+        const mask_bytes = @as([16]u8, @splat(255));
         const mask: drawing.CoverageView = .{ .lease = &lease, .identity = try drawing.reserveRasterIdentity(), .coverage = .{ .pixels = &mask_bytes, .width = 4, .height = 4, .stride = 4, .origin_x = 0, .origin_y = 0, .scale = scale } };
         try renderer.uploadCoverage(mask);
         for ([_]bool{ false, true }) |same_edge| {
@@ -329,7 +324,7 @@ fn integrated(allocator: std.mem.Allocator, gpu: bool, pending_close: bool) !voi
     const scale: f32 = if (builtin.os.tag == .windows) @as(f32, @floatFromInt(c.GetDpiForWindow(window.nativeHandle()))) / 96 else @floatFromInt(gtk_widget_get_scale_factor(window.nativeHandle().?));
     state.options = .{ .size = .{ .width = bounds.width, .height = bounds.height, .scale = scale } };
     var lease = drawing.Lease.init(std.Thread.getCurrentId());
-    const bytes = [_]u8{255} ** 64;
+    const bytes = @as([64]u8, @splat(255));
     state.mask = .{ .lease = &lease, .identity = try drawing.reserveRasterIdentity(), .coverage = .{ .pixels = &bytes, .width = 8, .height = 8, .stride = 8, .origin_x = 0, .origin_y = 0, .scale = scale } };
     var context = ui.Context.init(&state, State.draw, State.action);
     state.context = &context;

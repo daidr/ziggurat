@@ -106,11 +106,11 @@ pub fn Type(comptime z: type) type {
             if (linux) {
                 var name_buffer: [rules_format.max_identifier_bytes]u8 = undefined;
                 const name = rules_format.identifier(id_text, rules, &name_buffer);
-                const directory = try allocator.dupeZ(u8, options.store_directory);
+                const directory = try allocator.dupeSentinel(u8, options.store_directory, 0);
                 defer allocator.free(directory);
-                const id_z = try allocator.dupeZ(u8, id_text);
+                const id_z = try allocator.dupeSentinel(u8, id_text, 0);
                 defer allocator.free(id_z);
-                const name_z = try allocator.dupeZ(u8, name);
+                const name_z = try allocator.dupeSentinel(u8, name, 0);
                 defer allocator.free(name_z);
                 pending.stop_token = try app.registerStop(&pending.stop_node);
                 errdefer _ = app.cancelStop(pending.stop_token.?) catch {};

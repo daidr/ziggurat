@@ -1,13 +1,9 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const system = @import("ziggurat_system");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("shellapi.h");
-});
+const c = @import("ziggurat_c_win32");
 
 const popup_items = [_]system.Item{
     .{ .id = 1, .label = "&Open", .accelerator = .{ .key = .o, .modifiers = .{ .control = true } } },
@@ -112,7 +108,7 @@ fn pump(done: *const fn (*Probe) bool, probe: *Probe) !void {
             _ = c.DispatchMessageW(&message);
         }
         if (done(probe)) return;
-        std.Thread.sleep(2 * std.time.ns_per_ms);
+        zio.sleep(2 * std.time.ns_per_ms);
     }
     return error.Timeout;
 }

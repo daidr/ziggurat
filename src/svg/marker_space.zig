@@ -1,10 +1,11 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const v = @import("ziggurat_vector");
 
 // The two exact conformal forms are closed under the existing matrix builder's
 // rotation/uniform-scale/reflection products. No tolerance admits shear.
 pub fn pose(host: v.Transform, point: v.Point, angle: f64, width: f64, reference: v.Point) !v.Transform {
-    inline for (std.meta.fields(v.Transform)) |field| if (!std.math.isFinite(@field(host, field.name))) return error.InvalidTransform;
+    inline for (zio.fields(v.Transform)) |field| if (!std.math.isFinite(@field(host, field.name))) return error.InvalidTransform;
     const direct = host.xx == host.yy and host.xy == -host.yx;
     const reflected = host.xx == -host.yy and host.xy == host.yx;
     if (!direct and !reflected) return error.UnsupportedMarkerStrokeSpace;
@@ -29,6 +30,6 @@ pub fn pose(host: v.Transform, point: v.Point, angle: f64, width: f64, reference
         .then(.{ .xx = cosine, .yx = sine, .xy = -sine, .yy = cosine })
         .then(unit)
         .then(.{ .x0 = at.x, .y0 = at.y });
-    inline for (std.meta.fields(v.Transform)) |field| if (!std.math.isFinite(@field(result, field.name))) return error.InvalidTransform;
+    inline for (zio.fields(v.Transform)) |field| if (!std.math.isFinite(@field(result, field.name))) return error.InvalidTransform;
     return result;
 }

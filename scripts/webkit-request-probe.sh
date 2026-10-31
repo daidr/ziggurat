@@ -4,7 +4,7 @@ project="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 work="${P01_DEPS:-$HOME/.cache/ziggurat/webkit-p01-deps}"
 root="$work/root"
 gtk="${GTK_DEPS:-$HOME/.cache/ziggurat/window-state-deps/root}"
-zig_bin="${ZIG_BIN:-$HOME/.cache/ziggurat/zig-x86_64-linux-0.15.2/zig}"
+zig_bin="${ZIG_BIN:-$HOME/.cache/ziggurat/zig-x86_64-linux-0.17.0/zig}"
 source "$project/scripts/linux-cache-env.sh"
 configure_linux_cache "$project" webkit-request
 export ZIG_GLOBAL_CACHE_DIR="${P01_GLOBAL_CACHE:-$ZIG_GLOBAL_CACHE_DIR}"

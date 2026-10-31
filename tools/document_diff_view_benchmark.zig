@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const text = @import("ziggurat_text_layout");
@@ -54,7 +55,7 @@ fn measure(allocator: std.mem.Allocator, records: usize) !void {
     defer view.close() catch unreachable;
     const bounds: ui.Rect = .{ .x = 0, .y = 0, .width = 800, .height = 480 };
     const parameters: viewing.Parameters = .{ .font = .{ .size = 16, .wrap = .word_character } };
-    var timer = try std.time.Timer.start();
+    var timer = try zio.Timer.start();
     try view.prepare(bounds, parameters);
     const first_ns = timer.read();
     const first = try view.stats();

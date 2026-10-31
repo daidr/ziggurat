@@ -4,11 +4,7 @@ const std = @import("std");
 const z = @import("ziggurat");
 const picker_api = @import("picker_api");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 const Filter = extern struct { text: [*]const u16, length: u32 };
 const Path = []const u16;
 const Driver = struct {

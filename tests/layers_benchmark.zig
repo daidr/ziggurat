@@ -1,12 +1,9 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn cairo_image_surface_create(c_int, c_int, c_int) ?*anyopaque;
 extern fn cairo_create(*anyopaque) ?*anyopaque;
 extern fn cairo_destroy(*anyopaque) void;
@@ -48,7 +45,7 @@ fn measure(allocator: std.mem.Allocator, name: []const u8, renderer: anytype, pa
     if (mode != .ordinary) {
         var values: [samples]u64 = undefined;
         for (&values) |*value| {
-            var timer = try std.time.Timer.start();
+            var timer = try zio.Timer.start();
             try renderer.prepareLayers(allocator, options);
             value.* = timer.read();
             try renderer.releaseLayers();
@@ -69,7 +66,7 @@ fn measure(allocator: std.mem.Allocator, name: []const u8, renderer: anytype, pa
     var accepted: usize = 0;
     for (0..samples) |index| {
         try renderer.begin(paint);
-        var timer = try std.time.Timer.start();
+        var timer = try zio.Timer.start();
         for (0..iterations) |_| try renderer.replayBuffer(&buffer);
         replay_values[index] = timer.read() / iterations;
         timer.reset();

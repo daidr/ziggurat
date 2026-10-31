@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const update = @import("root.zig");
 
 pub const Progress = struct { received: u64, total: u64 };
@@ -44,10 +45,10 @@ pub const Source = struct {
 /// partial file for a later resume and returns `error.Cancelled`. A complete
 /// transfer with the wrong size or digest truncates `partial` so a retry
 /// starts clean. Blocking: run on an application-managed worker.
-pub fn fetch(manifest: update.Manifest, source: Source, partial: std.fs.File, control: *Control) !update.Receipt {
-    var existing = (try partial.stat()).size;
+pub fn fetch(manifest: update.Manifest, source: Source, partial: std.Io.File, control: *Control) !update.Receipt {
+    var existing = (try partial.stat(zio.io())).size;
     if (existing > manifest.bytes) {
-        try partial.setEndPos(0);
+        try partial.setLength(zio.io(), 0);
         existing = 0;
     }
     var hasher: std.crypto.hash.sha2.Sha256 = .init(.{});
@@ -56,7 +57,7 @@ pub fn fetch(manifest: update.Manifest, source: Source, partial: std.fs.File, co
     while (hashed < existing) {
         if (control.isCancelled()) return error.Cancelled;
         const part: usize = @intCast(@min(buffer.len, existing - hashed));
-        const n = try partial.preadAll(buffer[0..part], hashed);
+        const n = try partial.readPositionalAll(zio.io(), buffer[0..part], hashed);
         if (n != part) return error.SizeMismatch;
         hasher.update(buffer[0..n]);
         hashed += n;
@@ -68,7 +69,7 @@ pub fn fetch(manifest: update.Manifest, source: Source, partial: std.fs.File, co
         defer source.close(source.context);
         if (body.offset != received) {
             if (body.offset != 0) return error.UnexpectedRange;
-            try partial.setEndPos(0);
+            try partial.setLength(zio.io(), 0);
             hasher = .init(.{});
             received = 0;
         }
@@ -79,10 +80,10 @@ pub fn fetch(manifest: update.Manifest, source: Source, partial: std.fs.File, co
             const n = try body.reader.readSliceShort(&buffer);
             if (n == 0) break;
             if (n > manifest.bytes - received) {
-                try partial.setEndPos(0);
+                try partial.setLength(zio.io(), 0);
                 return error.SizeMismatch;
             }
-            try partial.pwriteAll(buffer[0..n], received);
+            try partial.writePositionalAll(zio.io(), buffer[0..n], received);
             hasher.update(buffer[0..n]);
             received += n;
             if (received - reported >= control.report_interval or received == manifest.bytes) {
@@ -96,10 +97,10 @@ pub fn fetch(manifest: update.Manifest, source: Source, partial: std.fs.File, co
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
     if (!std.crypto.timing_safe.eql([32]u8, digest, manifest.sha256)) {
-        try partial.setEndPos(0);
+        try partial.setLength(zio.io(), 0);
         return error.HashMismatch;
     }
-    try partial.sync();
+    try partial.sync(zio.io());
     control.report(.{ .received = received, .total = manifest.bytes });
     return .{ .bytes = received, .sha256 = digest };
 }
@@ -153,22 +154,22 @@ test "downloads resume after cancellation and short bodies, restart without rang
     var prng: std.Random.DefaultPrng = .init(3);
     prng.random().bytes(&payload);
     const manifest = testManifest(&payload);
-    var file = try temp.dir.createFile("partial", .{ .read = true });
-    defer file.close();
+    var file = try temp.dir.createFile(zio.io(), "partial", .{ .read = true });
+    defer file.close(zio.io());
 
     var memory: MemorySource = .{ .bytes = &payload };
     var recorder: Recorder = .{ .cancel_at = 40 * 1024 };
     var control: Control = .{ .context = &recorder, .on_progress = Recorder.record, .report_interval = 16 * 1024 };
     recorder.control = &control;
     try std.testing.expectError(error.Cancelled, fetch(manifest, memory.source(), file, &control));
-    const kept = (try file.stat()).size;
+    const kept = (try file.stat(zio.io())).size;
     try std.testing.expect(kept >= 40 * 1024 and kept < payload.len);
 
     control.cancelled.store(false, .release);
     recorder.cancel_at = null;
     memory.limit = 10 * 1024;
     try std.testing.expectError(error.Incomplete, fetch(manifest, memory.source(), file, &control));
-    try std.testing.expectEqual(kept + 10 * 1024, (try file.stat()).size);
+    try std.testing.expectEqual(kept + 10 * 1024, (try file.stat(zio.io())).size);
 
     memory.limit = null;
     const receipt = try fetch(manifest, memory.source(), file, &control);
@@ -180,13 +181,13 @@ test "downloads resume after cancellation and short bodies, restart without rang
     try std.testing.expectEqual(opened, memory.opened);
 
     // A source without ranges restarts; corrupted prefixes are discarded.
-    try file.pwriteAll("corrupt", 0);
-    try file.setEndPos(5000);
+    try file.writePositionalAll(zio.io(), "corrupt", 0);
+    try file.setLength(zio.io(), 5000);
     var plain: MemorySource = .{ .bytes = &payload, .resumable = false };
     _ = try fetch(manifest, plain.source(), file, &control);
-    try file.pwriteAll("corrupt", 0);
+    try file.writePositionalAll(zio.io(), "corrupt", 0);
     try std.testing.expectError(error.HashMismatch, fetch(manifest, memory.source(), file, &control));
-    try std.testing.expectEqual(0, (try file.stat()).size);
+    try std.testing.expectEqual(0, (try file.stat(zio.io())).size);
     _ = try fetch(manifest, memory.source(), file, &control);
 
     // Copy instead of `payload ++ ...`: concatenating a runtime array lowers to
@@ -195,7 +196,7 @@ test "downloads resume after cancellation and short bodies, restart without rang
     @memcpy(extended[0..payload.len], &payload);
     extended[payload.len] = 'x';
     var longer: MemorySource = .{ .bytes = &extended };
-    try file.setEndPos(0);
+    try file.setLength(zio.io(), 0);
     try std.testing.expectError(error.SizeMismatch, fetch(manifest, longer.source(), file, &control));
-    try std.testing.expectEqual(0, (try file.stat()).size);
+    try std.testing.expectEqual(0, (try file.stat(zio.io())).size);
 }

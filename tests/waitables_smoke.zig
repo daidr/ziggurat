@@ -1,10 +1,7 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 const State = struct {
     app: *z.App,
     window: z.Window,
@@ -31,7 +28,7 @@ const State = struct {
         }
     }
     fn producer(self: *@This()) void {
-        std.Thread.sleep(10 * std.time.ns_per_ms);
+        zio.sleep(10 * std.time.ns_per_ms);
         std.debug.assert(c.SetEvent(self.event) != 0);
     }
 };

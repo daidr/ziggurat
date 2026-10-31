@@ -27,7 +27,7 @@ fn setInts(program: *const shader.Program, values: *shader.Values) anyerror!void
 }
 
 pub const cases = [_]Case{
-    .{ .name = "tint", .setup = setTint, .source = 
+    .{ .name = "tint", .setup = setTint, .source =
     \\uniform float amount;
     \\uniform vec4 tint;
     \\uniform float weights[3];
@@ -37,7 +37,7 @@ pub const cases = [_]Case{
     \\    return mixed * (weights[0] + weights[1] + weights[2]) + vec4(step(0.0, position.x) * 0.1);
     \\}
     },
-    .{ .name = "wave", .setup = setTime, .source = 
+    .{ .name = "wave", .setup = setTime, .source =
     \\uniform float time;
     \\const float tau = 6.2831853;
     \\vec2 distort(vec2 position) {
@@ -45,7 +45,7 @@ pub const cases = [_]Case{
     \\    return position + vec2(wave, cos(position.x * 0.3)) * scale;
     \\}
     },
-    .{ .name = "blur", .source = 
+    .{ .name = "blur", .source =
     \\vec4 layer(vec2 position) {
     \\    vec4 sum = vec4(0.0);
     \\    for (int i = -2; i <= 2; i++) {
@@ -57,7 +57,7 @@ pub const cases = [_]Case{
     \\    return sum / 14.0;
     \\}
     },
-    .{ .name = "functions", .source = 
+    .{ .name = "functions", .source =
     \\float weight(int i) {
     \\    float w[3];
     \\    w[0] = 0.25; w[1] = 0.5; w[2] = 0.25;
@@ -81,7 +81,7 @@ pub const cases = [_]Case{
     \\    return result;
     \\}
     },
-    .{ .name = "math", .source = 
+    .{ .name = "math", .source =
     \\vec4 color(vec2 position, vec4 pixel) {
     \\    float a = pow(position.x, 2.0) + pow(-2.0, 3.0) + atan(position.y, position.x);
     \\    float b = round(position.x * 0.5) + sign(position.y) + fract(position.x) + mod(position.x, 2.5);
@@ -94,7 +94,7 @@ pub const cases = [_]Case{
     \\    return vec4(a * 0.1, b, d + e, f.x + f.y * 0.5 + f.z * 0.25 + sqrt(abs(position.x)) + inversesqrt(1.0 + abs(position.y)) + floor(position.y) + ceil(position.x) + exp2(position.x * 0.1) + log2(2.0 + position.y) + tan(position.x * 0.1) + asin(0.3) + acos(0.4) + atan(position.y));
     \\}
     },
-    .{ .name = "ints", .setup = setInts, .source = 
+    .{ .name = "ints", .setup = setInts, .source =
     \\uniform int divisor;
     \\uniform int big;
     \\vec4 color(vec2 position, vec4 pixel) {
@@ -108,7 +108,7 @@ pub const cases = [_]Case{
     \\    return vec4(float(q), float(r), float(s + t - big), flag ? 1.0 : 0.0);
     \\}
     },
-    .{ .name = "arrays", .source = 
+    .{ .name = "arrays", .source =
     \\vec2 distort(vec2 position) {
     \\    vec2 points[4];
     \\    points[0] = vec2(1.0, 0.0); points[1] = vec2(0.0, 1.0); points[2] = vec2(-1.0, 0.0); points[3] = vec2(0.0, -1.0);

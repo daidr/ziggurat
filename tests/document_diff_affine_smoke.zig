@@ -11,13 +11,7 @@ const a = @import("ziggurat_document_accessibility");
 const paired = @import("ziggurat_document_diff_accessibility");
 const fold_checks = @import("document_fold_pair_smoke.zig");
 const point_oracle = @import("document_accessibility_point_oracle.zig");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-    @cInclude("objbase.h");
-    @cInclude("imm.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn zlg_test_paint(*anyopaque, u32, u32) void;
 extern fn zlg_resource_count() u32;
 extern fn zda_probe_all_rectangles(*anyopaque, [*]f64, u32, *u32) i32;

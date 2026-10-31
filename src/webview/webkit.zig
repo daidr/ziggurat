@@ -20,6 +20,8 @@ pub const Options = extern struct {
     content_filters: ?[*]const *anyopaque = null,
     content_filter_count: u32 = 0,
     audio_muted: u32 = 0,
+    facts: ?[*:0]const u8 = null,
+    autoplay: u32 = 0,
 };
 pub const LocalResource = extern struct {
     path: [*]const u8,

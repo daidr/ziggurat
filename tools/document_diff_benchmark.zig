@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const doc = @import("ziggurat_document");
 const diff = @import("ziggurat_document_diff");
 
@@ -26,7 +27,7 @@ fn measure(allocator: std.mem.Allocator, records: usize, changed: bool) !void {
     var samples: [7]u64 = undefined;
     var stats: diff.Stats = undefined;
     for (&samples) |*sample| {
-        var timer = try std.time.Timer.start();
+        var timer = try zio.Timer.start();
         var result = try diff.compare(allocator, ra, rb, .{});
         sample.* = timer.read();
         defer result.deinit();

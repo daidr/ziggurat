@@ -18,7 +18,7 @@ if [[ -n "$tls_root" ]]; then
         exit 2
     fi
 fi
-zig_bin="${ZIG_BIN:-$HOME/.cache/ziggurat/zig-x86_64-linux-0.15.2/zig}"
+zig_bin="${ZIG_BIN:-$HOME/.cache/ziggurat/zig-x86_64-linux-0.17.0/zig}"
 source "$project/scripts/linux-cache-env.sh"
 configure_linux_cache "$project" webkit
 build_cache="${P01_BUILD_CACHE:-$ZIG_LOCAL_CACHE_DIR}"
@@ -48,11 +48,11 @@ case "$probe" in
     local) sources=("$project/tests/webkit_local_smoke.c" "$project/src/platform/linux.c" "$project/src/webview/webkit_native.c") ;;
     history-events) sources=("$project/tests/webkit_history_events.c") ;;
     session-host) sources=("$project/tests/webkit_session_host.c" "$project/src/platform/linux.c") ;;
-    zig|zig-test|remote-zig|dynamic-zig|capture-zig|capture-owner|find-owner|initializers-zig|initializers-owner|navigation-zig|regions-zig|session-zig|profile-owner|profile-zig|cookies-zig|cookies-owner|https-zig|https-pages-zig|profile-tls-owner) sources=() ;;
+    zig|zig-test|remote-zig|dynamic-zig|capture-zig|capture-owner|find-owner|initializers-zig|initializers-owner|navigation-zig|regions-zig|session-zig|page-facts-zig|profile-owner|profile-zig|cookies-zig|cookies-owner|https-zig|https-pages-zig|profile-tls-owner) sources=() ;;
     *) printf 'Unknown probe: %s\n' "$probe" >&2; exit 2 ;;
 esac
 executable="$output/webkit-$probe-probe"
-if [[ "$probe" == zig || "$probe" == zig-test || "$probe" == remote-zig || "$probe" == dynamic-zig || "$probe" == capture-zig || "$probe" == capture-owner || "$probe" == find-owner || "$probe" == initializers-zig || "$probe" == initializers-owner || "$probe" == navigation-zig || "$probe" == regions-zig || "$probe" == session-zig || "$probe" == profile-owner || "$probe" == profile-zig || "$probe" == cookies-zig || "$probe" == cookies-owner || "$probe" == https-zig || "$probe" == https-pages-zig || "$probe" == profile-tls-owner ]]; then
+if [[ "$probe" == zig || "$probe" == zig-test || "$probe" == remote-zig || "$probe" == dynamic-zig || "$probe" == capture-zig || "$probe" == capture-owner || "$probe" == find-owner || "$probe" == initializers-zig || "$probe" == initializers-owner || "$probe" == navigation-zig || "$probe" == regions-zig || "$probe" == session-zig || "$probe" == page-facts-zig || "$probe" == profile-owner || "$probe" == profile-zig || "$probe" == cookies-zig || "$probe" == cookies-owner || "$probe" == https-zig || "$probe" == https-pages-zig || "$probe" == profile-tls-owner ]]; then
     export PKG_CONFIG="$project/scripts/pkg-config-prefix.sh"
     target=smoke-webview-linux
     if [[ "$probe" == zig-test ]]; then target=test-webview; fi
@@ -66,6 +66,7 @@ if [[ "$probe" == zig || "$probe" == zig-test || "$probe" == remote-zig || "$pro
     if [[ "$probe" == navigation-zig ]]; then target=smoke-webview-navigation-linux; fi
     if [[ "$probe" == regions-zig ]]; then target=smoke-webview-regions-linux; fi
     if [[ "$probe" == session-zig ]]; then target=smoke-webview-session-linux; fi
+    if [[ "$probe" == page-facts-zig ]]; then target=smoke-webview-page-facts; fi
     if [[ "$probe" == initializers-zig || "$probe" == profile-owner || "$probe" == profile-zig || "$probe" == cookies-zig || "$probe" == cookies-owner || "$probe" == https-zig || "$probe" == https-pages-zig || "$probe" == profile-tls-owner ]]; then
         if [[ "$probe" == initializers-zig ]]; then target=smoke-webview-initializers-linux; elif [[ "$probe" == profile-owner ]]; then target=test-webkit-profile; elif [[ "$probe" == profile-zig ]]; then target=smoke-webview-profile-linux; elif [[ "$probe" == cookies-owner ]]; then target=test-webkit-cookies; elif [[ "$probe" == https-zig ]]; then target=smoke-webview-https-linux; elif [[ "$probe" == https-pages-zig ]]; then target=smoke-https-pages; elif [[ "$probe" == profile-tls-owner ]]; then target=test-webkit-profile-tls; else target=smoke-webview-cookies-linux; fi
         export ZIGGURAT_PROFILE_TEST_ROOT="${ZIGGURAT_PROFILE_TEST_ROOT:-$build_cache/profile-owner-evidence}"
@@ -78,7 +79,7 @@ if [[ "$probe" == zig || "$probe" == zig-test || "$probe" == remote-zig || "$pro
     fi
     optimize="${P01_OPTIMIZE:-ReleaseSafe}"
     case "$optimize" in Debug|ReleaseSafe|ReleaseFast|ReleaseSmall) ;; *) printf 'Invalid optimize mode\n' >&2; exit 2 ;; esac
-    command=("$zig_bin" build "$target" -Dwebview=true "-Doptimize=$optimize" -j1 --cache-dir "$build_cache" --global-cache-dir "$global_cache" --prefix "$build_prefix" --summary all)
+    command=("$zig_bin" build "$target" -Dwebview=true "-Doptimize=$optimize" -j1 --cache-dir "$build_cache" --prefix "$build_prefix" --summary all)
     if [[ "$probe" == https-pages-zig ]]; then command+=(-Dhttps-resources=true); fi
     cd "$project"
 else

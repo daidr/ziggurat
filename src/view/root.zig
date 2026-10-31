@@ -3,6 +3,7 @@
 //! flex layout and records the resulting frame. Widgets bind directly to
 //! application values and report activation as ordinary return values.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const animation = @import("ziggurat_animation");
@@ -183,6 +184,15 @@ pub const Style = struct {
     /// Lines a wrapping text shows at most; the last one shown ends in an
     /// ellipsis when text remains. 0 shows them all.
     max_lines: u16 = 0,
+    /// Hide the node and what is built inside it, and take its room away:
+    /// its siblings close up with no gap left for it, and it draws
+    /// nothing, takes neither the pointer nor the focus and is not exposed
+    /// to accessibility clients. Unlike not building it, its content is
+    /// still built, so the state the application binds to it (a scroll
+    /// offset, text being edited, an animation) stays for when it shows
+    /// again. Focus inside it leaves as it hides, and a popover, popup
+    /// list or tooltip anchored to it hides with it.
+    hidden: bool = false,
 };
 
 /// How `View.presentColumn` brings content in and takes it out.
@@ -805,6 +815,9 @@ pub const Node = struct {
     graphic: ?Graphic = null,
     /// A pointer area repaints as the pointer moves over it.
     track: bool = false,
+    /// The node or one around it is `Style.hidden`, or it floats from an
+    /// anchor that is: it takes no room, paints nothing and takes no input.
+    concealed: bool = false,
     parent: u32 = none,
     first_child: u32 = none,
     last_child: u32 = none,
@@ -837,9 +850,15 @@ pub const Node = struct {
     pub fn floats(self: *const Node) bool {
         return self.kind == .popup or self.kind == .popover or self.kind == .dialog or self.kind == .toasts;
     }
-    /// True for a popup, popover or dialog that is not shown in this pass.
+    /// True for a popup, popover or dialog that is not shown in this pass,
+    /// and for a node that `Style.hidden` conceals.
     pub fn hidden(self: *const Node) bool {
-        return (self.kind == .popup or self.kind == .popover or self.kind == .dialog) and !self.checked;
+        return self.concealed or ((self.kind == .popup or self.kind == .popover or self.kind == .dialog) and !self.checked);
+    }
+    /// True for a node its parent lays out: neither floating over the flow
+    /// nor concealed.
+    pub fn inFlow(self: *const Node) bool {
+        return !self.floats() and !self.concealed;
     }
 };
 
@@ -1375,7 +1394,7 @@ pub const View = struct {
         self.buffers.nodes[index] = .{ .kind = kind, .id = self.identity(parent, kind, style), .style = effective, .parent = parent_index, .end = index + 1, .semantic_parent = switch (parent.kind) {
             .toolbar, .breadcrumbs, .accordion, .fieldset, .search, .toast, .dialog, .table_header, .table_row, .token_field, .combo_field, .route => parent.id,
             else => parent.semantic_parent,
-        }, .rtl = if (style.direction) |value| value == .rtl else parent.rtl, .field = if (parent.kind == .field) parent_index else parent.field, .collection = if (parent.kind == .tree or parent.kind == .table) parent_index else parent.collection, .row = if (parent.kind == .table_row) parent_index else parent.row };
+        }, .rtl = if (style.direction) |value| value == .rtl else parent.rtl, .field = if (parent.kind == .field) parent_index else parent.field, .collection = if (parent.kind == .tree or parent.kind == .table) parent_index else parent.collection, .row = if (parent.kind == .table_row) parent_index else parent.row, .concealed = style.hidden or parent.concealed };
         if (parent.last_child == none) parent.first_child = index else self.buffers.nodes[parent.last_child].next_sibling = index;
         parent.last_child = index;
         parent.child_count += 1;
@@ -1386,9 +1405,8 @@ pub const View = struct {
 
     /// Note the calls that are building the element the inspector shows.
     noinline fn noteSource(self: *View) void {
-        var trace: std.builtin.StackTrace = .{ .instruction_addresses = &self.source_trace, .index = 0 };
-        std.debug.captureStackTrace(@returnAddress(), &trace);
-        self.source_len = @min(trace.index, self.source_trace.len);
+        const trace = std.debug.captureCurrentStackTrace(.{ .first_address = @returnAddress() }, &self.source_trace);
+        self.source_len = trace.return_addresses.len;
     }
 
     fn copy(self: *View, value: []const u8) Error![]const u8 {
@@ -1501,7 +1519,7 @@ pub const View = struct {
     }
     /// Index of the dialog this pass shows, if any.
     fn shownDialog(self: *const View) ?u32 {
-        for (self.buffers.nodes[0..self.len], 0..) |*node, index| if (node.kind == .dialog and node.checked) return @intCast(index);
+        for (self.buffers.nodes[0..self.len], 0..) |*node, index| if (node.kind == .dialog and node.checked and !node.concealed) return @intCast(index);
         return null;
     }
     fn take(self: *View, id: u64) ?Event {
@@ -2079,12 +2097,12 @@ pub const View = struct {
             },
             .value => |value| if (node.style.enabled and value.change == .set) {
                 const code = value.change.set;
-                if (code == @intFromEnum(ItemRequest.deselect)) {
+                if (code == @backingInt(ItemRequest.deselect)) {
                     _ = selection.remove(id);
-                } else if (code == @intFromEnum(ItemRequest.add)) {
+                } else if (code == @backingInt(ItemRequest.add)) {
                     try selection.add(id);
-                } else if (code == @intFromEnum(ItemRequest.collapse) or code == @intFromEnum(ItemRequest.expand)) {
-                    if (expanded) |flag| flag.* = code == @intFromEnum(ItemRequest.expand);
+                } else if (code == @backingInt(ItemRequest.collapse) or code == @backingInt(ItemRequest.expand)) {
+                    if (expanded) |flag| flag.* = code == @backingInt(ItemRequest.expand);
                 }
             },
             else => {},
@@ -2280,6 +2298,7 @@ pub const View = struct {
         }
         const list = try self.open(.popup, .{ .padding = Insets.all(4), .name = style.name });
         list.anchor = anchor_index;
+        list.concealed = list.concealed or self.buffers.nodes[anchor_index].concealed;
     }
     /// An option of the open `comboBox` list: activation selects `value`,
     /// closes the list and returns focus to the combo box. True when the
@@ -2335,6 +2354,7 @@ pub const View = struct {
         const node = try self.open(.popover, value);
         node.anchor = anchor_index;
         node.placement = placement;
+        node.concealed = node.concealed or self.buffers.nodes[anchor_index].concealed;
         const id = node.id;
         const anchor = &self.buffers.nodes[anchor_index];
         if (self.popover_dismiss) |target| if (target == id) {
@@ -2387,6 +2407,7 @@ pub const View = struct {
         if (value.padding.top == 0 and value.padding.bottom == 0 and value.padding.left == 0 and value.padding.right == 0) value.padding = Insets.all(4);
         const list = try self.open(.popup, value);
         list.anchor = anchor_index;
+        list.concealed = list.concealed or self.buffers.nodes[anchor_index].concealed;
     }
     /// One suggestion. True once for the pass that picks it, by pointer or
     /// by Enter on the highlight; apply it to the input in that branch. The
@@ -2762,9 +2783,9 @@ pub const View = struct {
     }
     /// The lowercased letter or digit a key types, if any.
     fn keyInitial(code: z.KeyCode) ?u8 {
-        const value = @intFromEnum(code);
-        if (value >= @intFromEnum(z.KeyCode.a) and value <= @intFromEnum(z.KeyCode.z)) return 'a' + @as(u8, @intCast(value - @intFromEnum(z.KeyCode.a)));
-        if (value >= @intFromEnum(z.KeyCode.digit0) and value <= @intFromEnum(z.KeyCode.digit9)) return '0' + @as(u8, @intCast(value - @intFromEnum(z.KeyCode.digit0)));
+        const value = @backingInt(code);
+        if (value >= @backingInt(z.KeyCode.a) and value <= @backingInt(z.KeyCode.z)) return 'a' + @as(u8, @intCast(value - @backingInt(z.KeyCode.a)));
+        if (value >= @backingInt(z.KeyCode.digit0) and value <= @backingInt(z.KeyCode.digit9)) return '0' + @as(u8, @intCast(value - @backingInt(z.KeyCode.digit0)));
         return null;
     }
     fn rowEvent(_: *const View, target: Overlay.Row, op: ItemOp, anchor: ?u64) KeyRoute {
@@ -3193,11 +3214,24 @@ pub const View = struct {
         return result;
     }
 
-    /// Wheel movement at `point`: the interactive leaf under it sees it
-    /// first; true when it took it.
+    /// Wheel movement at `point`: the interactive leaves under it see it
+    /// first, the one painted last first, and one that leaves it passes it
+    /// on to those beneath, as an editor scrolls under what it shows over
+    /// its text; true when one took it. Scroll containers move only when
+    /// none did.
     pub fn embedWheel(self: *View, point: Point, delta: Point) bool {
-        const entry = self.embedAt(point) orelse return false;
-        return entry.embed.input.?(entry.embed.context, entry.id, .{ .wheel = .{ .position = local(entry, point), .delta = delta } });
+        if (self.overlay.popup) |list| if (contains(list.rect, point)) return false;
+        const panel = self.popoverAt(point);
+        var index = self.overlay.embed_count;
+        while (index > 0) {
+            index -= 1;
+            const entry = &self.overlay.embeds[index];
+            if (!contains(entry.rect, point)) continue;
+            // A shown popover covers the leaves under it.
+            if (panel) |rect| if (!inside(entry.rect, rect)) continue;
+            if (entry.embed.input.?(entry.embed.context, entry.id, .{ .wheel = .{ .position = local(entry, point), .delta = delta } })) return true;
+        }
+        return false;
     }
 
     /// The innermost visible scroll container at `point`.
@@ -3309,9 +3343,23 @@ pub const View = struct {
     pub fn focusLeaf(self: *View, id: u64) void {
         self.focus_request = id;
     }
-    /// Node `id` holds keyboard focus and its window has the keyboard.
+    /// Node `id` holds keyboard focus and its window has the keyboard; for
+    /// a field's box around its input, its input does.
     pub fn hasKeyboard(self: *const View, id: u64) bool {
-        return self.window_focused and self.focus == id;
+        return self.window_focused and self.focus != null and self.focus == self.focusTarget(id);
+    }
+    /// The node that takes the focus given to `id`: the input of a box
+    /// around one (a `search` area, an `editableComboBox` or a
+    /// `tokenField`), where typing goes, otherwise `id` itself.
+    pub fn focusTarget(self: *const View, id: u64) u64 {
+        for (self.buffers.nodes[0..self.len], 0..) |*node, index| if (node.id == id) {
+            switch (node.kind) {
+                .search, .combo_field, .token_field => if (self.firstEmbed(@intCast(index))) |at| return self.buffers.nodes[at].id,
+                else => {},
+            }
+            return id;
+        };
+        return id;
     }
     /// Ask assistive technology to announce `message` politely, as a status
     /// update with no visible text; longer text is cut at a character
@@ -3594,7 +3642,7 @@ pub const View = struct {
         var i: usize = 0;
         while (child != none) : (child = self.buffers.nodes[child].next_sibling) {
             const node = &self.buffers.nodes[child];
-            if (node.floats()) continue;
+            if (!node.inFlow()) continue;
             const value = items[i];
             out[i] = .{
                 .column_span = .{ .count = @max(1, node.style.column_span) },
@@ -3620,7 +3668,7 @@ pub const View = struct {
         var track_index: usize = 0;
         while (child != none) : (child = self.buffers.nodes[child].next_sibling) {
             const cell = &self.buffers.nodes[child];
-            if (cell.floats()) continue;
+            if (!cell.inFlow()) continue;
             const span = @max(1, cell.style.column_span);
             if (span == 1 and track_index < node.tracks.len) {
                 self.track_minimum[offset + track_index] = @max(self.track_minimum[offset + track_index], items[i].content_minimum.width);
@@ -3699,8 +3747,8 @@ pub const View = struct {
         var at = start;
         while (child != none) : (child = self.buffers.nodes[child].next_sibling) {
             const node = &self.buffers.nodes[child];
-            // Popups and toast stacks take no room in the flow.
-            if (node.floats()) continue;
+            // Popups, toast stacks and hidden nodes take no room in the flow.
+            if (!node.inFlow()) continue;
             self.buffers.items[at] = item(node);
             at += 1;
         }
@@ -3871,6 +3919,7 @@ pub const View = struct {
         for (all[0..self.placed_len], self.buffers.placed[0..self.placed_len]) |*node, *entry| entry.* = .{ .id = node.id, .bounds = node.bounds };
         for (all, 0..) |*node, index| {
             if (index < inside_start or index >= inside_end) continue;
+            if (node.concealed) continue;
             self.recordCursor(node, @intCast(index));
             switch (node.kind) {
                 .pointer_area => if (node.style.enabled and overlay.area_count < max_pointer_areas) if (self.visible(node)) |rect| {
@@ -4137,6 +4186,8 @@ pub const View = struct {
         const target = for (all) |*node| {
             if (node.id == id) break node;
         } else return false;
+        // A hidden node has no box to bring into view.
+        if (target.concealed) return false;
         var moved = false;
         var parent = target.parent;
         while (parent < all.len) : (parent = all[parent].parent) {
@@ -4156,7 +4207,7 @@ pub const View = struct {
         var index: usize = 0;
         while (index < all.len) : (index += 1) {
             const node = &all[index];
-            // A closed popup's options keep no place.
+            // A closed popup's options and what is hidden keep no place.
             if (node.hidden()) {
                 index = node.end - 1;
                 continue;
@@ -4195,14 +4246,14 @@ pub const View = struct {
             var child = node.first_child;
             var i: usize = 0;
             while (child != none) : (child = all[child].next_sibling) {
-                if (all[child].floats()) continue;
+                if (!all[child].inFlow()) continue;
                 all[child].bounds = rects[i];
                 i += 1;
             }
             // Floating children go over the flow once their anchors are placed.
             child = node.first_child;
             while (child != none) : (child = all[child].next_sibling) {
-                if (all[child].floats()) all[child].bounds = self.floatingBounds(&all[child]);
+                if (all[child].floats() and !all[child].concealed) all[child].bounds = self.floatingBounds(&all[child]);
             }
         }
     }
@@ -4415,6 +4466,10 @@ pub const View = struct {
                 try closeScope(&all[scopes[scope_depth].index], scopes[scope_depth].clip, target, theme);
             }
             const node = &all[at];
+            if (node.concealed) {
+                at = node.end;
+                continue;
+            }
             if (node.floats()) {
                 if (!node.hidden()) {
                     if (floating_len.* == max_floating) return error.TooManyItems;
@@ -4975,7 +5030,7 @@ pub const Host = struct {
     /// The first error from the most recent pass, kept for diagnostics.
     last_error: ?anyerror = null,
     frames: usize = 0,
-    timer: ?std.time.Timer = null,
+    timer: ?zio.Timer = null,
     scheduler: ?Scheduler = null,
     /// The deadline last handed to the scheduler.
     scheduled: ?u64 = null,
@@ -5005,7 +5060,7 @@ pub const Host = struct {
     /// The time the next pass will see, in nanoseconds.
     pub fn time(self: *Host) u64 {
         if (self.options.clock) |clock| return clock.now(clock.context);
-        if (self.timer == null) self.timer = std.time.Timer.start() catch return 0;
+        if (self.timer == null) self.timer = zio.Timer.start() catch return 0;
         return self.timer.?.read();
     }
     /// Install or remove the timer that serves the build's deadlines; the
@@ -5113,7 +5168,7 @@ pub const Host = struct {
             self.view.restore = self.view.focus_request;
         }
         self.view.focus_request = null;
-        const id = self.view.restore orelse return;
+        const id = self.view.focusTarget(self.view.restore orelse return);
         self.view.restore = null;
         if (self.context.input_state.focused == id) return;
         if (self.context.window != null and !self.context.input_state.available(id)) {
@@ -5449,7 +5504,7 @@ pub const Host = struct {
         self.frames += 1;
     }
     fn render(self: *Host, frame: *ui.Frame, theme: Theme) anyerror!void {
-        var lap: ?std.time.Timer = if (self.options.tools()) |tools| if (tools.open) std.time.Timer.start() catch null else null else null;
+        var lap = if (self.options.tools()) |tools| if (tools.open) zio.Timer.start() catch null else null else null;
         const built: u64 = blk: {
             if (self.options.tools()) |tools| {
                 self.view.layout_direction = tools.direction_override orelse self.options.direction;
@@ -6054,6 +6109,7 @@ test "capacity and balance failures are reported" {
 test {
     _ = @import("harness.zig");
     _ = @import("controls_tests.zig");
+    _ = @import("hidden_tests.zig");
     _ = @import("router.zig");
     _ = @import("image.zig");
     _ = @import("icons.zig");

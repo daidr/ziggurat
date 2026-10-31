@@ -1,11 +1,12 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 
 /// Cancels promptly on completion. The worker never touches a window.
 pub const Watchdog = struct {
     app: *z.App,
-    mutex: std.Thread.Mutex = .{},
-    condition: std.Thread.Condition = .{},
+    mutex: zio.Mutex = .{},
+    condition: zio.Condition = .{},
     done: bool = false,
     expired: bool = false,
     thread: ?std.Thread = null,
@@ -24,7 +25,7 @@ pub const Watchdog = struct {
     fn wait(self: *Watchdog) void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = zio.Timer.start() catch unreachable;
         const deadline = 15 * std.time.ns_per_s;
         while (!self.done) {
             const elapsed = timer.read();

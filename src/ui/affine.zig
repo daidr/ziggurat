@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 
 /// Double-precision DIP geometry, independent of a renderer or native window.
 /// These numerical limits do not replace physical surface/work budgets.
@@ -72,7 +73,7 @@ pub const Affine = struct {
         _ = try self.inverse();
     }
     fn validateComponents(self: Affine) Error!void {
-        inline for (std.meta.fields(Affine)) |field| if (!bounded(@field(self, field.name))) return error.InvalidTransform;
+        inline for (zio.fields(Affine)) |field| if (!bounded(@field(self, field.name))) return error.InvalidTransform;
     }
     pub fn inverse(self: Affine) Error!Affine {
         try self.validateComponents();
@@ -115,7 +116,7 @@ pub const Affine = struct {
     pub fn narrowed(self: Affine) Error!Affine {
         try self.validate();
         var result: Affine = undefined;
-        inline for (std.meta.fields(Affine)) |field| {
+        inline for (zio.fields(Affine)) |field| {
             const value: f32 = @floatCast(@field(self, field.name));
             @field(result, field.name) = value;
         }
@@ -275,7 +276,7 @@ pub fn GeometryTable(comptime space_capacity: usize, comptime clip_capacity: usi
         pub fn rollback(self: *Self, mark: Checkpoint) Error!void {
             try self.validLengths();
             if (mark.spaces == 0 or mark.spaces > self.space_len or mark.clips > self.clip_len) return error.InvalidCheckpoint;
-            for (self.clips[0..mark.clips]) |clip| if (@intFromEnum(clip.space) >= mark.spaces) return error.InvalidCheckpoint;
+            for (self.clips[0..mark.clips]) |clip| if (@backingInt(clip.space) >= mark.spaces) return error.InvalidCheckpoint;
             self.space_len = mark.spaces;
             self.clip_len = mark.clips;
         }
@@ -283,7 +284,7 @@ pub fn GeometryTable(comptime space_capacity: usize, comptime clip_capacity: usi
             try self.validLengths();
             const candidate = try Space.init(to_window);
             if (self.space_len == space_capacity) return error.SpacesFull;
-            const id: SpaceId = @enumFromInt(self.space_len);
+            const id: SpaceId = @fromBackingInt(@intCast(self.space_len));
             self.spaces[self.space_len] = candidate;
             self.space_len += 1;
             return id;
@@ -299,20 +300,20 @@ pub fn GeometryTable(comptime space_capacity: usize, comptime clip_capacity: usi
             const depth = if (parent) |id| (try self.getClip(id)).depth + @as(usize, 1) else 1;
             if (depth > max_clip_depth) return error.ClipDepthExceeded;
             if (self.clip_len == clip_capacity) return error.ClipsFull;
-            const id: ClipId = @enumFromInt(self.clip_len);
+            const id: ClipId = @fromBackingInt(@intCast(self.clip_len));
             if (clip_capacity > 0) self.clips[self.clip_len] = .{ .bounds = bounds, .space = space_id, .parent = parent, .depth = @intCast(depth) } else return error.ClipsFull;
             self.clip_len += 1;
             return id;
         }
         pub fn getSpace(self: *const Self, id: SpaceId) Error!Space {
             try self.validLengths();
-            const index = @intFromEnum(id);
+            const index = @backingInt(id);
             if (index >= self.space_len) return error.InvalidSpace;
             return self.spaces[index];
         }
         fn getClip(self: *const Self, id: ClipId) Error!Clip {
             try self.validLengths();
-            const index = @intFromEnum(id);
+            const index = @backingInt(id);
             if (index >= self.clip_len) return error.InvalidClip;
             return if (clip_capacity > 0) self.clips[index] else error.InvalidClip;
         }
@@ -327,7 +328,7 @@ pub fn GeometryTable(comptime space_capacity: usize, comptime clip_capacity: usi
                 if (len == output.len) return error.ClipDepthExceeded;
                 const clip = try self.getClip(id);
                 _ = try self.getSpace(clip.space);
-                if (clip.parent) |parent| if (@intFromEnum(parent) >= @intFromEnum(id)) return error.InvalidClip;
+                if (clip.parent) |parent| if (@backingInt(parent) >= @backingInt(id)) return error.InvalidClip;
                 output[len] = id;
                 len += 1;
                 current = clip.parent;

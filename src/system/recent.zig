@@ -5,6 +5,7 @@
 //! jump list (see `jump_list`); Linux adds it to the recently used files that
 //! file choosers and file managers show.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 
 const windows = builtin.os.tag == .windows;
@@ -32,9 +33,9 @@ pub fn addToSystem(allocator: std.mem.Allocator, path: []const u8, app_name: []c
         defer allocator.free(wide);
         ziggurat_system_recent_add(wide.ptr);
     } else if (comptime linux) {
-        const path_z = try allocator.dupeZ(u8, path);
+        const path_z = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(path_z);
-        const name_z = try allocator.dupeZ(u8, app_name);
+        const name_z = try allocator.dupeSentinel(u8, app_name, 0);
         defer allocator.free(name_z);
         switch (zsr_recent_add(path_z.ptr, name_z.ptr)) {
             0 => {},
@@ -62,7 +63,7 @@ pub const RecentDocuments = struct {
         if (capacity == 0) return error.InvalidCapacity;
         var self: RecentDocuments = .{ .allocator = allocator, .file = try allocator.dupe(u8, file), .capacity = capacity };
         errdefer self.deinit();
-        const data = std.fs.cwd().readFileAlloc(allocator, file, 1024 * 1024) catch |err| switch (err) {
+        const data = std.Io.Dir.cwd().readFileAlloc(zio.io(), file, allocator, .limited(1024 * 1024)) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => return self,
         };
@@ -131,19 +132,18 @@ pub const RecentDocuments = struct {
         var out: std.Io.Writer.Allocating = .init(self.allocator);
         defer out.deinit();
         try std.json.Stringify.value(self.paths.items, .{}, &out.writer);
-        if (std.fs.path.dirname(self.file)) |directory| try std.fs.cwd().makePath(directory);
-        var buffer: [512]u8 = undefined;
-        var atomic = try std.fs.cwd().atomicFile(self.file, .{ .write_buffer = &buffer });
-        defer atomic.deinit();
-        try atomic.file_writer.interface.writeAll(out.written());
-        try atomic.finish();
+        if (std.fs.path.dirname(self.file)) |directory| try std.Io.Dir.cwd().createDirPath(zio.io(), directory);
+        var atomic = try std.Io.Dir.cwd().createFileAtomic(zio.io(), self.file, .{ .replace = true });
+        defer atomic.deinit(zio.io());
+        try atomic.file.writeStreamingAll(zio.io(), out.written());
+        try atomic.replace(zio.io());
     }
 };
 
 test "recent documents keep newest first, unique and bounded, and persist" {
     var dir = std.testing.tmpDir(.{});
     defer dir.cleanup();
-    const root = try dir.dir.realpathAlloc(std.testing.allocator, ".");
+    const root = try zio.realPathAlloc(dir.dir, ".", std.testing.allocator);
     defer std.testing.allocator.free(root);
     const file = try std.fs.path.join(std.testing.allocator, &.{ root, "state", "recent.json" });
     defer std.testing.allocator.free(file);
@@ -177,7 +177,7 @@ test "recent documents keep newest first, unique and bounded, and persist" {
     var recent = try RecentDocuments.load(std.testing.allocator, file, 10);
     defer recent.deinit();
     try std.testing.expectEqual(@as(usize, 0), recent.items().len);
-    try dir.dir.writeFile(.{ .sub_path = "state/recent.json", .data = "{not json" });
+    try dir.dir.writeFile(zio.io(), .{ .sub_path = "state/recent.json", .data = "{not json" });
     var damaged = try RecentDocuments.load(std.testing.allocator, file, 10);
     defer damaged.deinit();
     try std.testing.expectEqual(@as(usize, 0), damaged.items().len);

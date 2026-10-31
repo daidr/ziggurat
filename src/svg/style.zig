@@ -10,7 +10,7 @@ pub const PaintOperation = enum { fill, stroke, markers };
 const normal_order: [3]PaintOperation = .{ .fill, .stroke, .markers };
 pub const Interpolation = enum { srgb, linear_rgb };
 pub fn property(name: []const u8) ?Property {
-    for (property_names, 0..) |key, index| if (std.ascii.eqlIgnoreCase(name, key)) return @enumFromInt(index);
+    for (property_names, 0..) |key, index| if (std.ascii.eqlIgnoreCase(name, key)) return @fromBackingInt(@intCast(index));
     return null;
 }
 pub const Style = struct {
@@ -85,7 +85,7 @@ pub const Style = struct {
             .stroke_dasharray => if (std.ascii.eqlIgnoreCase(value, "none")) "none" else value,
             else => value,
         };
-        const applied = try self.apply(property_names[@intFromEnum(kind)], normalized);
+        const applied = try self.apply(property_names[@backingInt(kind)], normalized);
         std.debug.assert(applied);
     }
     fn copyProperty(self: *Style, source: Style, kind: Property) void {
@@ -257,14 +257,14 @@ fn parsePaintOrder(value: []const u8) ![3]PaintOperation {
     var seen: [3]bool = @splat(false);
     while (tokens.next()) |token| {
         const operation: PaintOperation = if (std.ascii.eqlIgnoreCase(token, "fill")) .fill else if (std.ascii.eqlIgnoreCase(token, "stroke")) .stroke else if (std.ascii.eqlIgnoreCase(token, "markers")) .markers else return error.InvalidPaintOrder;
-        const index = @intFromEnum(operation);
+        const index = @backingInt(operation);
         if (seen[index]) return error.InvalidPaintOrder;
         seen[index] = true;
         result[count] = operation;
         count += 1;
     }
     if (count == 0) return error.InvalidPaintOrder;
-    for (normal_order) |operation| if (!seen[@intFromEnum(operation)]) {
+    for (normal_order) |operation| if (!seen[@backingInt(operation)]) {
         result[count] = operation;
         count += 1;
     };

@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 
 /// How plugin workers reach the main thread: `App.post`, or a test queue.
@@ -25,7 +26,7 @@ pub const Post = struct {
 pub const Outbox = struct {
     post: Post,
     drain: z.Task,
-    mutex: std.Thread.Mutex = .{},
+    mutex: zio.Mutex = .{},
     scheduled: bool = false,
     stopped: bool = false,
 
@@ -42,7 +43,7 @@ pub const Outbox = struct {
         while (true) {
             self.post.post(self.post.context, self.drain) catch |err| switch (err) {
                 error.Full => {
-                    std.Thread.sleep(std.time.ns_per_ms);
+                    zio.sleep(std.time.ns_per_ms);
                     self.mutex.lock();
                     const stopped = self.stopped;
                     self.mutex.unlock();

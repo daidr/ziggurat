@@ -6,6 +6,7 @@
 //! report X as BTN_X, the code of BTN_NORTH, and Y as BTN_Y, that of
 //! BTN_WEST.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const linux = std.os.linux;
 const gamepad = @import("gamepad.zig");
@@ -56,7 +57,7 @@ fn ioc(nr: u32, size: usize) u32 {
     return 2 << 30 | @as(u32, @intCast(size)) << 16 | 'E' << 8 | nr;
 }
 fn ioctl(fd: i32, request: u32, arg: *anyopaque) bool {
-    return linux.E.init(linux.ioctl(fd, request, @intFromPtr(arg))) == .SUCCESS;
+    return linux.errno(linux.ioctl(fd, request, @intFromPtr(arg))) == .SUCCESS;
 }
 
 fn bit(bytes: []const u8, index: usize) bool {
@@ -75,8 +76,8 @@ pub const Backend = struct {
         /// triggers as buttons only.
         right_on_z: bool = false,
         abs: [abs_max + 1]AbsInfo = undefined,
-        has_abs: std.StaticBitSet(abs_max + 1) = .initEmpty(),
-        keys: std.StaticBitSet(key_max + 1) = .initEmpty(),
+        has_abs: std.StaticBitSet(abs_max + 1) = .empty,
+        keys: std.StaticBitSet(key_max + 1) = .empty,
         axes: [abs_max + 1]i32 = @splat(0),
 
         pub fn key(self: *const Device) u64 {
@@ -119,7 +120,7 @@ pub const Backend = struct {
         fn fill(self: *const Device, state: *State) void {
             const Press = struct {
                 fn at(d: *const Device, s: *State, b: Button, code: usize) void {
-                    if (d.keys.isSet(code)) s.buttons[@intFromEnum(b)] = 1;
+                    if (d.keys.isSet(code)) s.buttons[@backingInt(b)] = 1;
                 }
             };
             const press = Press.at;
@@ -146,19 +147,19 @@ pub const Backend = struct {
             if (self.has_abs.isSet(abs_hat0x)) {
                 const hx = self.axes[abs_hat0x];
                 const hy = self.axes[abs_hat0y];
-                if (hx < 0) state.buttons[@intFromEnum(Button.left)] = 1 else if (hx > 0) state.buttons[@intFromEnum(Button.right)] = 1;
-                if (hy < 0) state.buttons[@intFromEnum(Button.up)] = 1 else if (hy > 0) state.buttons[@intFromEnum(Button.down)] = 1;
+                if (hx < 0) state.buttons[@backingInt(Button.left)] = 1 else if (hx > 0) state.buttons[@backingInt(Button.right)] = 1;
+                if (hy < 0) state.buttons[@backingInt(Button.up)] = 1 else if (hy > 0) state.buttons[@backingInt(Button.down)] = 1;
             }
-            state.axes[@intFromEnum(Axis.left_x)] = self.norm(abs_x, false);
-            state.axes[@intFromEnum(Axis.left_y)] = self.norm(abs_y, false);
+            state.axes[@backingInt(Axis.left_x)] = self.norm(abs_x, false);
+            state.axes[@backingInt(Axis.left_y)] = self.norm(abs_y, false);
             if (self.right_on_z) {
-                state.axes[@intFromEnum(Axis.right_x)] = self.norm(abs_z, false);
-                state.axes[@intFromEnum(Axis.right_y)] = self.norm(abs_rz, false);
+                state.axes[@backingInt(Axis.right_x)] = self.norm(abs_z, false);
+                state.axes[@backingInt(Axis.right_y)] = self.norm(abs_rz, false);
             } else {
-                state.axes[@intFromEnum(Axis.right_x)] = self.norm(abs_rx, false);
-                state.axes[@intFromEnum(Axis.right_y)] = self.norm(abs_ry, false);
-                state.buttons[@intFromEnum(Button.left_trigger)] = self.norm(abs_z, true);
-                state.buttons[@intFromEnum(Button.right_trigger)] = self.norm(abs_rz, true);
+                state.axes[@backingInt(Axis.right_x)] = self.norm(abs_rx, false);
+                state.axes[@backingInt(Axis.right_y)] = self.norm(abs_ry, false);
+                state.buttons[@backingInt(Button.left_trigger)] = self.norm(abs_z, true);
+                state.buttons[@backingInt(Button.right_trigger)] = self.norm(abs_rz, true);
             }
             press(self, state, .left_trigger, btn_tl2);
             press(self, state, .right_trigger, btn_tr2);
@@ -168,10 +169,10 @@ pub const Backend = struct {
     pub fn scan(_: *Backend, known: []const u64, present: []u64, fresh: []Device) gamepad.Scan {
         var result: gamepad.Scan = .{};
         if (@sizeOf(usize) != 8) return result;
-        var dir = std.fs.openDirAbsolute("/dev/input", .{ .iterate = true }) catch return result;
-        defer dir.close();
+        var dir = std.Io.Dir.openDirAbsolute(zio.io(), "/dev/input", .{ .iterate = true }) catch return result;
+        defer dir.close(zio.io());
         var entries = dir.iterate();
-        while (entries.next() catch null) |entry| {
+        while (entries.next(zio.io()) catch null) |entry| {
             if (!std.mem.startsWith(u8, entry.name, "event")) continue;
             const number = std.fmt.parseInt(u32, entry.name["event".len..], 10) catch continue;
             if (std.mem.indexOfScalar(u64, known, number) != null) {
@@ -194,18 +195,18 @@ pub const Backend = struct {
     }
 
     pub fn close(_: *Backend, device: *Device) void {
-        std.posix.close(device.fd);
+        zio.posix.close(device.fd);
     }
 };
 
 /// Open `/dev/input/event<number>` into `device` if it is a gamepad.
 fn open(number: u32, device: *Backend.Device) bool {
     var path_buffer: [32]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buffer, "/dev/input/event{d}", .{number}) catch return false;
-    const fd = std.posix.openZ(path, .{ .NONBLOCK = true, .CLOEXEC = true }, 0) catch return false;
+    const path = std.fmt.bufPrintSentinel(&path_buffer, "/dev/input/event{d}", .{number}, 0) catch return false;
+    const fd = zio.posix.open(path, .{ .NONBLOCK = true, .CLOEXEC = true }, 0) catch return false;
     var keys: [key_max / 8 + 1]u8 = @splat(0);
     if (!ioctl(fd, ioc(0x20 + ev_key, keys.len), &keys) or !bit(&keys, btn_south)) {
-        std.posix.close(fd);
+        zio.posix.close(fd);
         return false;
     }
     device.* = .{ .number = number, .fd = fd };
@@ -239,7 +240,7 @@ fn isXpad(number: u32) bool {
     var path_buffer: [64]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buffer, "/sys/class/input/event{d}/device/device/driver", .{number}) catch return false;
     var link: [std.fs.max_path_bytes]u8 = undefined;
-    const target = std.fs.readLinkAbsolute(path, &link) catch return false;
+    const target = link[0 .. std.Io.Dir.cwd().readLink(zio.io(), path, &link) catch return false];
     return std.mem.eql(u8, std.fs.path.basename(target), "xpad");
 }
 

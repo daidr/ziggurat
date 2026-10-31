@@ -1,12 +1,9 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const system = @import("ziggurat_system");
 const shell = system.shell;
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 const fake = if (builtin.os.tag == .linux) struct {
     extern fn zsf_provider_present() c_int;
     extern fn zsf_start() c_int;
@@ -66,7 +63,7 @@ const Probe = struct {
             var held = try worker.launchExecutable(std.heap.page_allocator, .{ .executable = self.executable, .arguments = &.{"--hold"} });
             errdefer _ = held.terminateAndWait() catch {};
             const stopped = try held.terminateAndWait();
-            try std.testing.expectEqual(if (builtin.os.tag == .windows) shell.Term{ .Exited = 1 } else shell.Term{ .Signal = std.posix.SIG.KILL }, stopped);
+            try std.testing.expectEqual(if (builtin.os.tag == .windows) shell.Term{ .Exited = 1 } else shell.Term{ .Signal = @backingInt(std.posix.SIG.KILL) }, stopped);
             try std.testing.expectEqual(stopped, try held.wait());
         }
         try expectHandles("process", baseline, 12);
@@ -173,27 +170,27 @@ const Probe = struct {
             defer allocator.free(name);
             const victim = try std.fs.path.join(allocator, &.{ self.cwd, name });
             defer allocator.free(victim);
-            try std.fs.cwd().writeFile(.{ .sub_path = victim, .data = name });
+            try std.Io.Dir.cwd().writeFile(zio.io(), .{ .sub_path = victim, .data = name });
             worker.trash(victim, .{}) catch |err| switch (err) {
                 error.TrashUnsupported => {
                     self.trash_note = "unsupported here (distinct error asserted)";
-                    try std.fs.deleteFileAbsolute(victim);
+                    try std.Io.Dir.deleteFileAbsolute(zio.io(), victim);
                     break;
                 },
                 else => return err,
             };
-            try std.testing.expectError(error.FileNotFound, std.fs.accessAbsolute(victim, .{}));
+            try std.testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(zio.io(), victim, .{}));
             if (builtin.os.tag == .linux) {
                 const stored = try std.fs.path.join(allocator, &.{ self.data_home, "Trash", "files", name });
                 defer allocator.free(stored);
-                const contents = try std.fs.cwd().readFileAlloc(allocator, stored, 1024);
+                const contents = try std.Io.Dir.cwd().readFileAlloc(zio.io(), stored, allocator, .limited(1024));
                 defer allocator.free(contents);
                 try std.testing.expectEqualStrings(name, contents);
                 const info_name = try std.fmt.allocPrint(allocator, "{s}.trashinfo", .{name});
                 defer allocator.free(info_name);
                 const info = try std.fs.path.join(allocator, &.{ self.data_home, "Trash", "info", info_name });
                 defer allocator.free(info);
-                try std.fs.accessAbsolute(info, .{});
+                try std.Io.Dir.accessAbsolute(zio.io(), info, .{});
             }
             trashed += 1;
             // The first call may initialize process-wide system state.
@@ -217,7 +214,7 @@ const Probe = struct {
         }
     }
     fn revealProvider(self: *Probe, worker: *shell.Worker, existing: []const u8) !void {
-        const address = std.posix.getenv("DBUS_SESSION_BUS_ADDRESS") orelse {
+        const address = zio.getenv("DBUS_SESSION_BUS_ADDRESS") orelse {
             self.reveal_note = "skipped: no DBUS_SESSION_BUS_ADDRESS";
             return;
         };
@@ -304,56 +301,56 @@ fn handles() !usize {
         if (c.GetProcessHandleCount(c.GetCurrentProcess(), &count) == 0) return error.HandleCountUnavailable;
         return count;
     }
-    var directory = try std.fs.openDirAbsolute("/proc/self/fd", .{ .iterate = true });
-    defer directory.close();
+    var directory = try std.Io.Dir.openDirAbsolute(zio.io(), "/proc/self/fd", .{ .iterate = true });
+    defer directory.close(zio.io());
     var iterator = directory.iterate();
     var count: usize = 0;
-    while (try iterator.next()) |_| count += 1;
+    while (try iterator.next(zio.io())) |_| count += 1;
     return count;
 }
 fn helper(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len != words.len + 3) return error.ArgumentCountChanged;
     for (words, args[3..]) |word, arg| try std.testing.expectEqualStrings(word, arg);
-    const cwd = try std.process.getCwdAlloc(allocator);
+    const cwd = try std.process.currentPathAlloc(zio.io(), allocator);
     defer allocator.free(cwd);
-    var file = try std.fs.createFileAbsolute(args[2], .{});
-    defer file.close();
-    try file.writeAll(cwd);
+    var file = try std.Io.Dir.createFileAbsolute(zio.io(), args[2], .{});
+    defer file.close(zio.io());
+    try file.writeStreamingAll(zio.io(), cwd);
 }
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var allocator: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(allocator.deinit() == .ok);
     const memory = allocator.allocator();
-    const args = try std.process.argsAlloc(memory);
-    defer std.process.argsFree(memory, args);
+    const args = try zio.argsAlloc(memory, init.args);
+    defer zio.argsFree(memory, args);
     if (builtin.os.tag == .windows and args.len > 1 and std.mem.eql(u8, args[1], "--high-exit")) c.ExitProcess(0x12345678);
     if (args.len > 1 and std.mem.eql(u8, args[1], "--hold")) {
         var parked = std.atomic.Value(u32).init(0);
-        while (true) std.Thread.Futex.wait(&parked, 0);
+        while (true) zio.Futex.wait(&parked, 0);
     }
     if (args.len > 1 and std.mem.eql(u8, args[1], "--helper")) return helper(memory, args);
     try std.testing.expectError(error.UiThreadForbidden, shell.Worker.init(std.Thread.getCurrentId()));
-    var temporary = std.testing.tmpDir(.{});
+    var temporary = zio.tmpDir(.{});
     defer temporary.cleanup();
-    try temporary.dir.makeDir("cwd 空格");
-    if (builtin.os.tag == .windows) try temporary.dir.writeFile(.{ .sub_path = "cwd 空格/missing.exe.cmd", .data = "@exit /b 77\r\n" });
-    const cwd = try temporary.dir.realpathAlloc(memory, "cwd 空格");
+    try temporary.dir.createDir(zio.io(), "cwd 空格", .default_dir);
+    if (builtin.os.tag == .windows) try temporary.dir.writeFile(zio.io(), .{ .sub_path = "cwd 空格/missing.exe.cmd", .data = "@exit /b 77\r\n" });
+    const cwd = try zio.realPathAlloc(temporary.dir, "cwd 空格", memory);
     defer memory.free(cwd);
     const output = try std.fs.path.join(memory, &.{ cwd, "receipt.txt" });
     defer memory.free(output);
-    const executable = try std.fs.selfExePathAlloc(memory);
+    const executable = try zio.executablePathAlloc(memory);
     defer memory.free(executable);
     // Linux: a private HOME and XDG data home on the test directory's device,
     // set before the first GLib call, so trash goes to <temp>/data/Trash.
-    try temporary.dir.makePath("home/data");
-    const home = try temporary.dir.realpathAlloc(memory, "home");
+    try temporary.dir.createDirPath(zio.io(), "home/data");
+    const home = try zio.realPathAlloc(temporary.dir, "home", memory);
     defer memory.free(home);
     const data_home = try std.fs.path.join(memory, &.{ home, "data" });
     defer memory.free(data_home);
     if (builtin.os.tag == .linux) {
-        const home_z = try memory.dupeZ(u8, home);
+        const home_z = try memory.dupeSentinel(u8, home, 0);
         defer memory.free(home_z);
-        const data_z = try memory.dupeZ(u8, data_home);
+        const data_z = try memory.dupeSentinel(u8, data_home, 0);
         defer memory.free(data_z);
         if (fake.setenv("HOME", home_z, 1) != 0 or fake.setenv("XDG_DATA_HOME", data_z, 1) != 0) return error.EnvironmentUnavailable;
     }
@@ -361,7 +358,7 @@ pub fn main() !void {
     const thread = try std.Thread.spawn(.{}, Probe.run, .{&probe});
     thread.join();
     if (probe.err) |err| return err;
-    const result = try std.fs.cwd().readFileAlloc(memory, output, 32 * 1024);
+    const result = try std.Io.Dir.cwd().readFileAlloc(zio.io(), output, memory, .limited(32 * 1024));
     defer memory.free(result);
     try std.testing.expectEqualStrings(cwd, result);
     std.debug.print("shell smoke passed: exact Unicode argv/cwd, cancellation/failure, owned child termination/reap, resources stable; file icon={any}; open/reveal/trash validation; trash: {s}; reveal: {s}\n", .{ shell.capabilities.file_icon, probe.trash_note, probe.reveal_note });

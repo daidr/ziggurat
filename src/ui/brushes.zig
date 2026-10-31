@@ -135,7 +135,7 @@ pub const Stored = struct {
         return true;
     }
     pub fn native(self: *const Stored) Native {
-        var result: Native = .{ .kind = @intFromEnum(self.kind), .x0 = self.a.x, .y0 = self.a.y, .x1 = self.b.x, .y1 = self.b.y, .len = self.len, .stops = @splat(.{ .offset = 0, .rgba = 0 }) };
+        var result: Native = .{ .kind = @backingInt(self.kind), .x0 = self.a.x, .y0 = self.a.y, .x1 = self.b.x, .y1 = self.b.y, .len = self.len, .stops = @splat(.{ .offset = 0, .rgba = 0 }) };
         for (self.stops[0..self.len], result.stops[0..self.len]) |stop, *out| out.* = .{ .offset = stop.offset, .rgba = stop.color.rgba() };
         return result;
     }

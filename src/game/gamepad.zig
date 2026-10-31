@@ -17,6 +17,7 @@
 //! read. Other targets report no pads. Everything runs on the thread that
 //! owns the `Gamepads`, normally the main thread; nothing allocates.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 
 /// A button of the standard layout, named by place: `south` is A on an Xbox
@@ -43,12 +44,12 @@ pub const Button = enum(u8) {
     /// The Xbox, PlayStation or Home button, where the system leaves it.
     guide,
 };
-pub const button_count = @typeInfo(Button).@"enum".fields.len;
+pub const button_count = zio.fields(Button).len;
 
 /// An axis of the sticks, from -1 to 1: right and down are positive, as on
 /// the screen.
 pub const Axis = enum(u8) { left_x, left_y, right_x, right_y };
-pub const axis_count = @typeInfo(Axis).@"enum".fields.len;
+pub const axis_count = zio.fields(Axis).len;
 
 /// How far from the middle a stick must move to count, as a fraction of its
 /// reach: sticks rest a little off their middle.
@@ -69,7 +70,7 @@ pub const State = struct {
 
     /// How far `b` is pressed, from 0 to 1.
     pub fn value(self: State, b: Button) f32 {
-        return self.buttons[@intFromEnum(b)];
+        return self.buttons[@backingInt(b)];
     }
     /// `b` is pressed: a trigger a quarter of the way.
     pub fn pressed(self: State, b: Button) bool {
@@ -85,7 +86,7 @@ pub const State = struct {
     }
     /// The raw value of `a`, from -1 to 1.
     pub fn axis(self: State, a: Axis) f32 {
-        return self.axes[@intFromEnum(a)];
+        return self.axes[@backingInt(a)];
     }
     pub const Stick = struct { x: f32, y: f32 };
     /// Where the left stick is, each coordinate from -1 to 1, right and down
@@ -99,10 +100,10 @@ pub const State = struct {
         return stick(self.axis(.right_x), self.axis(.right_y));
     }
     fn set(self: *State, b: Button, v: f32) void {
-        self.buttons[@intFromEnum(b)] = v;
+        self.buttons[@backingInt(b)] = v;
     }
     fn setAxis(self: *State, a: Axis, v: f32) void {
-        self.axes[@intFromEnum(a)] = v;
+        self.axes[@backingInt(a)] = v;
     }
 };
 
@@ -321,7 +322,7 @@ test "pads connect in order, scan at most once a second and disconnect" {
     try testing.expectEqual(@as(usize, 2), found.len);
     try testing.expectEqualStrings("Fake Pad", found[0].name());
     const first = found[0];
-    set.backend.readings[0].buttons[@intFromEnum(Button.south)] = 1;
+    set.backend.readings[0].buttons[@backingInt(Button.south)] = 1;
     try testing.expect(first.state().pressed(.south));
 
     // Unplugged: the read finds it gone, and the pad disconnects at once.

@@ -1,51 +1,52 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
 const tools = web.tools;
 const Server = struct {
-    listener: std.net.Server,
+    listener: std.Io.net.Server,
     thread: ?std.Thread = null,
     stopped: std.atomic.Value(bool) = .init(false),
     failure: ?anyerror = null,
     closed: bool = false,
     fn worker(self: *Server) void {
         while (true) {
-            const connection = self.listener.accept() catch return;
-            defer connection.stream.close();
+            const connection = self.listener.accept(zio.io()) catch return;
+            defer connection.close(zio.io());
             if (self.stopped.load(.acquire)) return;
-            serve(connection.stream) catch |err| {
+            serve(connection) catch |err| {
                 self.failure = err;
                 return;
             };
         }
     }
-    fn serve(stream: std.net.Stream) !void {
+    fn serve(stream: std.Io.net.Stream) !void {
         var request: [8192]u8 = undefined;
         var used: usize = 0;
         while (std.mem.indexOf(u8, request[0..used], "\r\n\r\n") == null) {
             if (used == request.len) return error.RequestTooLarge;
-            const n = try stream.read(request[used..]);
+            const n = try zio.net.receive(stream.socket.handle, request[used..]);
             if (n == 0) return;
             used += n;
         }
         const body = "<!doctype html><title>Clear fixture</title><body>profile data</body>";
         var buffer: [256]u8 = undefined;
         const header = try std.fmt.bufPrint(&buffer, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{body.len});
-        try stream.writeAll(header);
-        try stream.writeAll(body);
+        try zio.net.sendAll(stream.socket.handle, header);
+        try zio.net.sendAll(stream.socket.handle, body);
     }
     fn close(self: *Server) void {
         if (self.closed) return;
         self.closed = true;
         self.stopped.store(true, .release);
         if (self.thread) |thread| {
-            const connection = std.net.tcpConnectToAddress(self.listener.listen_address) catch unreachable;
-            connection.close();
+            const connection = self.listener.socket.address.connect(zio.io(), .{ .mode = .stream }) catch unreachable;
+            connection.close(zio.io());
             thread.join();
             self.thread = null;
         }
-        self.listener.deinit();
+        self.listener.deinit(zio.io());
     }
 };
 const Preparation = struct {
@@ -184,8 +185,8 @@ const State = struct {
     }
 };
 pub fn run(allocator: std.mem.Allocator, base: []const u8) !void {
-    const bind = try std.net.Address.parseIp("127.0.0.1", 0);
-    var server: Server = .{ .listener = try bind.listen(.{}) };
+    const bind = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    var server: Server = .{ .listener = try bind.listen(zio.io(), .{}) };
     server.thread = try std.Thread.spawn(.{}, Server.worker, .{&server});
     defer server.close();
     const path = try std.fmt.allocPrint(allocator, "{s}-view-clear", .{base});
@@ -202,11 +203,11 @@ pub fn run(allocator: std.mem.Allocator, base: []const u8) !void {
     defer profile.close() catch unreachable;
     const store = try web.CookieStore.create(allocator, app, profile, .{ .allow_write = true });
     defer _ = store.close() catch unreachable;
-    const origin = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{server.listener.listen_address.getPort()});
+    const origin = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{server.listener.socket.address.getPort()});
     defer allocator.free(origin);
     const url = try std.fmt.allocPrint(allocator, "{s}/page", .{origin});
     defer allocator.free(url);
-    const extension = try std.process.getEnvVarOwned(allocator, "ZIGGURAT_REQUEST_POLICY_EXTENSION");
+    const extension = try zio.getEnvVarOwned(allocator, "ZIGGURAT_REQUEST_POLICY_EXTENSION");
     defer allocator.free(extension);
     var state: State = .{ .allocator = allocator, .app = app, .profile = profile, .store = store, .url = url, .extension = extension, .grants = .{.{ .origin = origin, .ipc = true }} };
     state.window = try app.createWindow(.{ .width = 320, .height = 200 });

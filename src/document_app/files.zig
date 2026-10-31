@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const id = @import("identity.zig");
 
@@ -32,9 +33,9 @@ pub const Files = struct {
         try self.worker();
         try absolute(path);
         var buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const canonical = try std.fs.cwd().realpath(path, &buffer);
-        const file = try std.fs.cwd().openFile(canonical, .{});
-        defer file.close();
+        const canonical = try zio.realpath(std.Io.Dir.cwd(), path, &buffer);
+        const file = try std.Io.Dir.cwd().openFile(zio.io(), canonical, .{});
+        defer file.close(zio.io());
         const observed = try id.stamp(file);
         return .{ .path = try id.Path.init(canonical), .key = observed.key };
     }
@@ -52,7 +53,7 @@ pub const Files = struct {
         const name = std.fs.path.basename(path);
         if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return error.InvalidPath;
         var buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const directory = try std.fs.cwd().realpath(parent, &buffer);
+        const directory = try zio.realpath(std.Io.Dir.cwd(), parent, &buffer);
         var joined: [id.max_path]u8 = undefined;
         const separator = std.fs.path.sep_str;
         const full = std.fmt.bufPrint(&joined, "{s}{s}{s}", .{ directory, if (std.mem.endsWith(u8, directory, separator)) "" else separator, name }) catch return error.PathTooLong;
@@ -62,13 +63,13 @@ pub const Files = struct {
     pub fn read(self: Files, path: []const u8, output: []u8) !Loaded {
         try self.worker();
         try absolute(path);
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
+        const file = try std.Io.Dir.cwd().openFile(zio.io(), path, .{});
+        defer file.close(zio.io());
         const before = try id.stamp(file);
         if (before.size > output.len) return error.CapacityExceeded;
-        const length = try file.readAll(output[0..@intCast(before.size)]);
+        const length = try zio.readAll(file, output[0..@intCast(before.size)]);
         var extra: [1]u8 = undefined;
-        if (length != before.size or try file.read(&extra) != 0) return error.FileChanged;
+        if (length != before.size or try zio.read(file, &extra) != 0) return error.FileChanged;
         const after = try id.stamp(file);
         if (!after.eql(before)) return error.FileChanged;
         return .{ .bytes = output[0..length], .stamp = before };
@@ -81,11 +82,11 @@ pub const Files = struct {
         return if (current.eql(known)) .unchanged else .{ .modified = current };
     }
     fn observe(path: []const u8) !?id.Stamp {
-        const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+        const file = std.Io.Dir.cwd().openFile(zio.io(), path, .{}) catch |err| switch (err) {
             error.FileNotFound => return null,
             else => return err,
         };
-        defer file.close();
+        defer file.close(zio.io());
         return try id.stamp(file);
     }
     fn conflict(path: []const u8, expected: ?id.Stamp) !?Probe {
@@ -102,12 +103,12 @@ pub const Files = struct {
         try self.worker();
         try absolute(path);
         if (try conflict(path, options.expected)) |found| return .{ .conflict = found };
-        const mode: std.fs.File.Mode = if (builtin.os.tag == .windows) std.fs.File.default_mode else if (try observe(path)) |current| current.mode & 0o7777 else std.fs.File.default_mode;
-        var atomic = try std.fs.cwd().atomicFile(path, .{ .mode = mode, .write_buffer = write_buffer });
+        const permissions: std.Io.File.Permissions = if (builtin.os.tag == .windows) .default_file else if (try observe(path)) |current| zio.mode(current.mode & 0o7777) else .default_file;
+        var atomic = try zio.AtomicFile.init(std.Io.Dir.cwd(), path, .{ .permissions = permissions, .write_buffer = write_buffer });
         defer atomic.deinit();
         atomic.file_writer.interface.writeAll(input) catch return atomic.file_writer.err orelse error.WriteFailed;
         try atomic.flush();
-        try atomic.file_writer.file.sync();
+        try atomic.file_writer.file.sync(zio.io());
         if (try conflict(path, options.expected)) |found| return .{ .conflict = found };
         try atomic.renameIntoPlace();
         if (options.durable_directory and builtin.os.tag != .windows) syncParent(path);
@@ -117,10 +118,10 @@ pub const Files = struct {
     }
     fn syncParent(path: []const u8) void {
         const parent = std.fs.path.dirname(path) orelse return;
-        var dir = std.fs.cwd().openDir(parent, .{ .iterate = true }) catch return;
-        defer dir.close();
+        var dir = std.Io.Dir.cwd().openDir(zio.io(), parent, .{ .iterate = true }) catch return;
+        defer dir.close(zio.io());
         // Raw call: some filesystems reject directory fsync with EINVAL, which
         // std.posix treats as unreachable. The rename already succeeded.
-        _ = std.posix.system.fsync(dir.fd);
+        _ = std.posix.system.fsync(dir.handle);
     }
 };

@@ -6,12 +6,9 @@
 //! the command on the owner thread. The window, the controls and the
 //! handlers are made on first use and kept for the process.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const now_playing = @import("now_playing.zig");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 const L = std.unicode.utf8ToUtf16LeStringLiteral;
 
 const HRESULT = i32;
@@ -91,12 +88,12 @@ fn call(object: Object, index: usize, args: anytype) HRESULT {
 
 /// `HRESULT (this, args...)`, as the Windows Runtime's methods are.
 fn MethodType(comptime Args: type) type {
-    const fields = std.meta.fields(Args);
-    comptime var params: [fields.len + 1]std.builtin.Type.Fn.Param = undefined;
-    params[0] = .{ .is_generic = false, .is_noalias = false, .type = Object };
-    inline for (fields, 1..) |field, i| params[i] = .{ .is_generic = false, .is_noalias = false, .type = field.type };
+    const fields = zio.fields(Args);
+    comptime var params: [fields.len + 1]type = undefined;
+    params[0] = Object;
+    inline for (fields, 1..) |field, i| params[i] = field.type;
     const final = params;
-    return @Type(.{ .@"fn" = .{ .calling_convention = .winapi, .is_generic = false, .is_var_args = false, .return_type = HRESULT, .params = &final } });
+    return @Fn(&final, &@splat(.{}), HRESULT, .{ .@"callconv" = .winapi });
 }
 
 fn release(object: ?Object) void {

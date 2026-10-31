@@ -2,7 +2,7 @@
 set -euo pipefail
 project="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 gtk="${GTK_DEPS:-$HOME/.cache/ziggurat/window-state-deps/root}"
-zig_bin="${ZIG_BIN:-$HOME/.cache/ziggurat/zig-x86_64-linux-0.15.2/zig}"
+zig_bin="${ZIG_BIN:-$HOME/.cache/ziggurat/zig-x86_64-linux-0.17.0/zig}"
 source "$project/scripts/linux-cache-env.sh"
 configure_linux_cache "$project" content
 export PKG_CONFIG_PATH="$gtk/usr/lib/x86_64-linux-gnu/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"

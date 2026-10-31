@@ -196,7 +196,26 @@ static void initializers_fail_before_submit(State *s) {
     InitializerHandler *h=s->initializers?s->initializers->pending:NULL;
     if (h && h->initial && !h->submitted) zwv_initializers_abandon(s);
 }
+/* The page-facts script is registered before initializers and the first
+   document, and stays for the controller's life. */
+static HRESULT facts_start(State *s) {
+    FactsHandler *handler=FactsHandler_new(s);
+    if (!handler) return E_OUTOFMEMORY;
+    HRESULT hr=ICoreWebView2_AddScriptToExecuteOnDocumentCreated(s->webview,s->facts_script,&handler->iface);
+    FactsHandler_release(&handler->iface);
+    return hr;
+}
+static HRESULT initializers_start(State *s);
+static HRESULT STDMETHODCALLTYPE facts_invoke(ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler *p,HRESULT hr,LPCWSTR id) {
+    (void)id;State *s=((FactsHandler *)p)->state;retain(s);
+    if (!s->closed && !s->facts_added) {
+        if (SUCCEEDED(hr)) { s->facts_added=TRUE;hr=initializers_start(s); }
+        if (FAILED(hr) && !s->closed) owned_initialization_failed(s,hr);
+    }
+    release(s);return S_OK;
+}
 static HRESULT initializers_start(State *s) {
+    if (s->facts_script && !s->facts_added) return facts_start(s);
     if (s->initializers && s->initializers->pending) { zwv_initializers_activate(s);return S_OK; }
     return start_document(s);
 }

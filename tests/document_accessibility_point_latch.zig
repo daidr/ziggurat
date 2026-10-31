@@ -3,12 +3,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("objbase.h");
-});
+const c = @import("ziggurat_c_win32");
 extern fn zda_root_latch_create(?*anyopaque, u32, u32, *const fn (*anyopaque, u32) callconv(.c) c_int, *anyopaque, *?*anyopaque) c_int;
 extern fn zda_root_latch_worker(*anyopaque) void;
 extern fn zda_root_latch_owner(*anyopaque, u32) void;

@@ -149,7 +149,12 @@ pub const Workspace = struct {
         self.stack_len = 0;
     }
     pub fn beginScope(self: *Workspace, id: u64, options: ScopeOptions) anyerror!void {
-        errdefer |err| self.failure = self.failure orelse err;
+        return self.beginScopeBody(id, options) catch |err| {
+            self.failure = self.failure orelse err;
+            return err;
+        };
+    }
+    fn beginScopeBody(self: *Workspace, id: u64, options: ScopeOptions) anyerror!void {
         if (self.closed) return error.ShortcutScopesClosed;
         if (self.failure) |err| return @as(anyerror!void, err);
         if (id == 0) return error.ReservedShortcutScope;
@@ -172,7 +177,12 @@ pub const Workspace = struct {
         self.current = index;
     }
     pub fn endScope(self: *Workspace) !void {
-        errdefer |err| self.failure = self.failure orelse err;
+        return self.endScopeBody() catch |err| {
+            self.failure = self.failure orelse err;
+            return err;
+        };
+    }
+    fn endScopeBody(self: *Workspace) !void {
         if (self.closed) return error.ShortcutScopesClosed;
         if (self.stack_len == 0) return error.UnbalancedShortcutScopes;
         self.stack_len -= 1;

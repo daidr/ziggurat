@@ -5,6 +5,7 @@
 //! Changing language means building again with the new locale and setting
 //! the menu again.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const types = @import("types.zig");
 const menus = @import("menus.zig");
@@ -77,13 +78,13 @@ pub const Role = enum {
         return self.occurrenceId(0);
     }
     pub fn occurrenceId(self: Role, occurrence: u8) u64 {
-        return id_base + (@as(u64, occurrence) << 8) + @intFromEnum(self);
+        return id_base + (@as(u64, occurrence) << 8) + @backingInt(self);
     }
     pub fn fromId(value: u64) ?Role {
         if (value < id_base) return null;
         const offset = value - id_base;
-        if (offset >> 16 != 0 or offset & 0xff >= std.meta.fields(Role).len) return null;
-        return @enumFromInt(offset & 0xff);
+        if (offset >> 16 != 0 or offset & 0xff >= zio.fields(Role).len) return null;
+        return @fromBackingInt(@intCast(offset & 0xff));
     }
 };
 
@@ -150,7 +151,7 @@ pub const Strings = struct {
 
     pub fn merge(self: Strings, fallback: Strings) Strings {
         var result = self;
-        inline for (std.meta.fields(Strings)) |field| {
+        inline for (zio.fields(Strings)) |field| {
             if (@field(result, field.name).len == 0) @field(result, field.name) = @field(fallback, field.name);
         }
         return result;
@@ -347,7 +348,7 @@ pub fn shipped(locale: []const u8) Language {
     if (std.mem.eql(u8, primary, "zh")) {
         const rest = locale[end..];
         const traditional = for ([_][]const u8{ "hant", "tw", "hk", "mo" }) |needle| {
-            if (std.ascii.indexOfIgnoreCase(rest, needle) != null) break true;
+            if (std.ascii.findIgnoreCase(rest, needle) != null) break true;
         } else false;
         return find(if (traditional) "zh-Hant" else "zh-Hans").?;
     }
@@ -607,7 +608,7 @@ test "role labels follow the language and the platform" {
 test "every role and accelerator validates as a menu item" {
     for ([_]Platform{ .windows, .linux, .macos }) |platform| for (languages) |language| {
         const context: Context = .{ .strings = language.strings.merge(english), .app_name = "Notes", .platform = platform };
-        inline for (std.meta.fields(Role)) |field| {
+        inline for (zio.fields(Role)) |field| {
             const value = defaults(@field(Role, field.name), context);
             try testing.expect(value.label.len != 0);
             if (value.accelerator) |accelerator| try menus.validateAccelerator(accelerator);

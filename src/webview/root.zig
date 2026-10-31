@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const backend = @import("backend.zig");
 const webkit = @import("webkit.zig");
@@ -65,10 +66,15 @@ pub const content_rules = @import("content_rules.zig");
 const content_rule_lists = @import("content_rule_lists.zig");
 pub const ContentRules = content_rule_lists.Type(z);
 pub const contentRulesCompileCount = content_rule_lists.nativeCompileCount;
+pub const page_facts = @import("page_facts.zig");
+pub const Rgba = page_facts.Rgba;
+pub const ContentSize = page_facts.ContentSize;
+pub const FitContent = page_facts.FitContent;
 const page_sessions = @import("page_session.zig");
 pub const PageSession = page_sessions.Type(View, SessionHooks);
 test {
     _ = policy_store;
+    _ = page_facts;
     _ = custom_local;
     _ = content_rules;
 }
@@ -158,7 +164,17 @@ pub const Policy = struct {
     permission: PolicyAction = .deny,
     frame_navigation: PolicyAction = .deny,
 };
-pub const PolicyRequest = struct { kind: PolicyKind, uri: []const u8, native_detail: i32 };
+pub const PolicyRequest = struct {
+    kind: PolicyKind,
+    uri: []const u8,
+    native_detail: i32,
+    /// For navigation and new_window: whether a user's gesture started it, a
+    /// click on a link or a click or key press whose handler navigates or
+    /// calls window.open, rather than the page's script on its own. Null when
+    /// the engine does not tell (frame navigations). WebKitGTK refuses a
+    /// window.open without a gesture itself before asking.
+    user_gesture: ?bool = null,
+};
 pub const ProcessFailure = struct { native_kind: i32 };
 /// A document generation belongs to one stable View. The View must outlive use.
 pub const PageId = struct { view: *const View, generation: u64 };
@@ -172,6 +188,12 @@ pub const PageEvent = union(enum) {
     /// The page started or stopped making sound (isAudible). It belongs to
     /// the view rather than a document, and carries the current page id.
     audible_changed: struct { id: PageId, audible: bool },
+    /// Options.theme_color: the page's theme color changed; null when it has
+    /// none any more. See View.themeColor.
+    theme_color_changed: struct { id: PageId, color: ?Rgba },
+    /// Options.fit_content: the size of the page's content changed, in its
+    /// CSS pixels. A View attached to a window has resized it already.
+    content_size_changed: struct { id: PageId, size: ContentSize },
 };
 pub const PageListener = struct {
     /// Stable until detach. Strings are borrowed until return. Null metadata
@@ -182,7 +204,15 @@ pub const PageListener = struct {
 };
 pub const Resource = snapshots.Resource;
 pub const Response = resources.Response;
-pub const ResourceRequest = struct { uri: []const u8, path: []const u8, method: resources.Method, headers: []const resources.Header = &.{} };
+pub const ResourceRequest = struct {
+    uri: []const u8,
+    path: []const u8,
+    method: resources.Method,
+    headers: []const resources.Header = &.{},
+    /// The document that made the request, the channel of an untrusted page
+    /// to the app; null before the View's first document.
+    page: ?PageId = null,
+};
 pub const ResourceHandler = struct {
     /// Stable caller storage, borrowed until detach.
     context: *anyopaque,
@@ -368,6 +398,30 @@ pub const Options = struct {
     content_rules: []const *ContentRules = &.{},
     /// The page starts muted, as setAudioMuted(true) does.
     audio_muted: bool = false,
+    /// Watch the page's theme color, its first `<meta name="theme-color">`
+    /// whose media matches (View.themeColor, PageEvent.theme_color_changed),
+    /// in pages of any origin, trusted or not.
+    theme_color: bool = false,
+    /// Size the window to the page's content and follow it as it changes.
+    fit_content: ?FitContent = null,
+    /// Show someone else's page, as a plugin's UI from a custom scheme: its
+    /// messages never reach Event.message, whatever its origin's grants say
+    /// (OriginGrant.ipc, LocalSite.scheme_ipc, plain html). post still
+    /// reaches it, and its requests to on_resource carry its PageId.
+    untrusted: bool = false,
+    /// Whether the page may play audible media before the user clicked or
+    /// typed in it, as a hidden window's page never can.
+    autoplay: Autoplay = .user_gesture,
+};
+pub const Autoplay = enum {
+    /// The engine's own policy: sound only after a user's gesture.
+    user_gesture,
+    /// Linux allows it on every main-frame navigation's website policies.
+    /// Windows starts the browser with --autoplay-policy=no-user-gesture-required:
+    /// an argument of the WebView2 environment, which every View of the same
+    /// user data folder shares and must agree on, and which a Windows
+    /// Profile owner does not take (UnsupportedCapability).
+    allow,
 };
 
 const NativePageEvent = webkit.PageEvent;
@@ -396,7 +450,7 @@ const NativeActions = extern struct {
     download_offer: ?*const fn (*anyopaque, [*:0]const u16, [*:0]const u16, [*:0]const u16, i64, *anyopaque) callconv(.c) void = null,
     download_notify: ?*const fn (*anyopaque, u64, u32, u64, i64, i32) callconv(.c) void = null,
 };
-const NativeSettings = extern struct { zoom: f64, user_agent: ?[*:0]const u16, devtools: bool, tool_flags: u32, tool_limit: u32, max_cookies: u32, max_cookie_bytes: u32, max_capture_bytes: u32, schemes: ?[*]const NativeScheme, scheme_count: u32, local_ipc: bool, actions: ?*const NativeActions, initializers: ?*const initializer_owner.NativeInput, owned_context: ?*anyopaque, audio_muted: bool, content_verdict: ?ContentVerdict, content_style: ?[*:0]const u16 };
+const NativeSettings = extern struct { zoom: f64, user_agent: ?[*:0]const u16, devtools: bool, tool_flags: u32, tool_limit: u32, max_cookies: u32, max_cookie_bytes: u32, max_capture_bytes: u32, schemes: ?[*]const NativeScheme, scheme_count: u32, local_ipc: bool, actions: ?*const NativeActions, initializers: ?*const initializer_owner.NativeInput, owned_context: ?*anyopaque, facts: ?[*:0]const u16 = null, browser_arguments: ?[*:0]const u16 = null, audio_muted: bool = false, content_verdict: ?ContentVerdict = null, content_style: ?[*:0]const u16 = null };
 const PermissionScratch = struct {
     rows: [permissions.origin_capacity]NativePermissionGrant = undefined,
     text: [permissions.origin_capacity][schemes.origin_limit + 1:0]u16 = undefined,
@@ -544,6 +598,7 @@ extern fn zwv_zoom(*anyopaque, *f64, bool) i32;
 extern fn zwv_audio(*anyopaque, c_int, *c_int) i32;
 const ContentVerdict = *const fn (*anyopaque, [*:0]const u16, ?[*:0]const u16, c_int) callconv(.c) u32;
 extern fn zwv_content_rules(*anyopaque, ?ContentVerdict, ?[*:0]const u16) i32;
+extern fn zwv_process_id(*anyopaque, *u32) i32;
 extern fn zwv_user_agent(*anyopaque, ?[*:0]const u16, ?*?[*:0]u16) i32;
 extern fn zwv_string_free([*:0]u16) void;
 extern fn zwv_devtools(*anyopaque, *bool, bool, bool) i32;
@@ -661,10 +716,10 @@ fn validateBackendOptions(options: Options) !void {
             if (options.file_streams != null and site.on_resource == null) return error.ResourceHandlerRequired;
         } else if (options.custom_schemes.len != 0 or !std.meta.eql(options.custom_local_limits, CustomLocalLimits{})) return error.UnsupportedCapability;
         if (options.file_streams != null and options.local == null) return error.LocalSiteRequired;
-        if (options.policy.new_window != .deny or options.policy.download != .deny or options.policy.permission != .deny or options.policy.frame_navigation != .deny or
+        if (options.policy.download != .deny or options.policy.permission != .deny or options.policy.frame_navigation != .deny or
             options.max_cached_permissions != 256 or options.tool_limits.max_cookies != (tools.Limits{}).max_cookies or options.tool_limits.max_cookie_bytes != (tools.Limits{}).max_cookie_bytes) return error.UnsupportedCapability;
         if (options.max_resource_bytes > 16 * 1024 * 1024) return error.InvalidResourceLimit;
-        inline for (std.meta.fields(tools.Policy)) |field| if (!std.mem.eql(u8, field.name, "capture") and !std.mem.eql(u8, field.name, "find") and !std.mem.eql(u8, field.name, "clear_entire_profile") and !std.mem.eql(u8, field.name, "pdf") and @field(options.tools, field.name)) return error.UnsupportedCapability;
+        inline for (zio.fields(tools.Policy)) |field| if (!std.mem.eql(u8, field.name, "capture") and !std.mem.eql(u8, field.name, "find") and !std.mem.eql(u8, field.name, "clear_entire_profile") and !std.mem.eql(u8, field.name, "pdf") and @field(options.tools, field.name)) return error.UnsupportedCapability;
     } else {
         if (options.storage != .profile or !std.meta.eql(options.custom_local_limits, CustomLocalLimits{}) or options.request_policy_extension != null) return error.UnsupportedCapability;
         if (options.profile != null) {
@@ -830,6 +885,8 @@ const OwnedConfig = struct {
         try options.resource_limits.validate();
         if (options.file_streams) |limits| try limits.validate();
         if (!std.math.isFinite(options.zoom) or options.zoom < 0.25 or options.zoom > 5) return error.InvalidZoom;
+        if (options.fit_content) |limits| try limits.validate();
+        if (!is_linux and options.autoplay == .allow and options.profile != null) return error.UnsupportedCapability;
         if (options.user_agent) |agent| if (!validUserAgent(agent)) return error.InvalidUserAgent;
         if (options.remote != null and (options.local != null or options.html.len != 0)) return error.ConflictingPageSources;
         if (options.allow_local_navigation and options.local == null) return error.LocalSiteRequired;
@@ -1123,11 +1180,16 @@ pub const View = struct {
     initializer_domain: ?*anyopaque = null,
     initializer_preparing: bool = false,
     eval_book: evaluations.Book = .{},
-    eval_clock: ?std.time.Timer = null,
+    eval_clock: ?zio.Timer = null,
     eval_timer: ?*anyopaque = null,
     eval_watch: ?z.NativeWaitToken = null,
     eval_accepting: bool = true,
     zoom_override: ?f64 = null,
+    /// The page's facts, kept from its script's messages.
+    theme_color_value: ?Rgba = null,
+    theme_told: u64 = 0,
+    content_size_value: ?ContentSize = null,
+    fitted: ?page_facts.Size = null,
     agent_override: ?[]u8 = null,
     devtools_override: ?bool = null,
     /// setContentRules' references, which replace the configuration's.
@@ -1427,7 +1489,7 @@ pub const View = struct {
         const prefix = if (config.prefix) |value| try std.unicode.utf8ToUtf16LeAllocZ(self.allocator, value) else null;
         defer if (prefix) |value| self.allocator.free(value);
         var policy: u32 = 0;
-        inline for (std.meta.fields(Policy), 0..) |field, index| {
+        inline for (zio.fields(Policy), 0..) |field, index| {
             if (@field(config.options.policy, field.name) == .notify) policy |= @as(u32, 1) << @intCast(index);
         }
         var scratch: RemoteScratch = undefined;
@@ -1438,7 +1500,7 @@ pub const View = struct {
         if (self.attachmentClosed() or appStopping(window)) return error.Closed;
         if (self.native != null) return error.RecoveryInProgress;
         var tool_flags: u32 = 0;
-        inline for (std.meta.fields(tools.Policy), 0..) |field, i| if (@field(config.options.tools, field.name)) {
+        inline for (zio.fields(tools.Policy), 0..) |field, i| if (@field(config.options.tools, field.name)) {
             tool_flags |= @as(u32, 1) << @intCast(i);
         };
         const limits = config.options.tool_limits;
@@ -1461,7 +1523,9 @@ pub const View = struct {
         const initializer_input = if (config.initializer_config) |source| source.input() else null;
         const content_style = try self.hidingScript();
         defer if (content_style) |value| self.allocator.free(value);
-        const settings: NativeSettings = .{ .zoom = self.zoom_override orelse config.options.zoom, .user_agent = if (agent) |value| value.ptr else null, .devtools = self.devtools_override orelse config.options.devtools_enabled, .tool_flags = tool_flags, .tool_limit = limits.max_pending, .max_cookies = limits.max_cookies, .max_cookie_bytes = limits.max_cookie_bytes, .max_capture_bytes = limits.max_capture_bytes, .schemes = if (config.options.custom_schemes.len == 0) null else &scheme_scratch.items, .scheme_count = @intCast(config.options.custom_schemes.len), .local_ipc = if (config.options.local) |site| std.mem.eql(u8, site.scheme, "https") or site.scheme_ipc else true, .actions = if (actions) |*value| value else null, .initializers = if (initializer_input) |*value| value else null, .owned_context = if (config.profile_state) |state| try state.context.windowsContext() else null, .audio_muted = self.mutedWanted(), .content_verdict = if (self.activeRules().len != 0) contentVerdict else null, .content_style = if (content_style) |value| value.ptr else null };
+        const facts = try self.factsScript(.windows);
+        defer if (facts) |value| self.allocator.free(value);
+        const settings: NativeSettings = .{ .facts = if (facts) |value| value.ptr else null, .browser_arguments = if (config.options.autoplay == .allow) std.unicode.utf8ToUtf16LeStringLiteral("--autoplay-policy=no-user-gesture-required") else null, .zoom = self.zoom_override orelse config.options.zoom, .user_agent = if (agent) |value| value.ptr else null, .devtools = self.devtools_override orelse config.options.devtools_enabled, .tool_flags = tool_flags, .tool_limit = limits.max_pending, .max_cookies = limits.max_cookies, .max_cookie_bytes = limits.max_cookie_bytes, .max_capture_bytes = limits.max_capture_bytes, .schemes = if (config.options.custom_schemes.len == 0) null else &scheme_scratch.items, .scheme_count = @intCast(config.options.custom_schemes.len), .local_ipc = if (config.options.local) |site| std.mem.eql(u8, site.scheme, "https") or site.scheme_ipc else true, .actions = if (actions) |*value| value else null, .initializers = if (initializer_input) |*value| value else null, .owned_context = if (config.profile_state) |state| try state.context.windowsContext() else null, .audio_muted = self.mutedWanted(), .content_verdict = if (self.activeRules().len != 0) contentVerdict else null, .content_style = if (content_style) |value| value.ptr else null };
         self.native = zwv_create(window.nativeHandle(), if (html) |value| value.ptr else std.unicode.utf8ToUtf16LeStringLiteral(""), profile.ptr, if (url) |value| value.ptr else null, if (prefix) |value| value.ptr else null, if (remote) |*value| value else null, &settings, policy, config.options.max_cached_permissions, config.options.scripts.max_pending, config.options.allow_local_navigation, config.options.page_listener != null, notify, pageNotify, scriptNotify, toolNotify, resource, self, &self.last_hresult) orelse return error.WebViewCreationFailed;
         errdefer {
             nativeClose(self.native.?);
@@ -1482,9 +1546,9 @@ pub const View = struct {
     fn startWebKit(self: *View, window: Access) !void {
         if (@import("builtin").is_test) return error.UnsupportedCapability;
         const options = self.config.?.options;
-        const html = try self.allocator.dupeZ(u8, options.html);
+        const html = try self.allocator.dupeSentinel(u8, options.html, 0);
         defer self.allocator.free(html);
-        const agent = if (self.agent_override orelse options.user_agent) |value| try self.allocator.dupeZ(u8, value) else null;
+        const agent = if (self.agent_override orelse options.user_agent) |value| try self.allocator.dupeSentinel(u8, value, 0) else null;
         defer if (agent) |value| self.allocator.free(value);
         if (self.attachmentClosed() or appStopping(window)) return error.Closed;
         var new_capture_budget = false;
@@ -1533,7 +1597,7 @@ pub const View = struct {
         const callback_scope = if (self.session == null) (window.window.?.beginCallback() orelse return error.Closed) else null;
         defer if (callback_scope) |scope| scope.end();
         var flags: u32 = 0;
-        inline for (std.meta.fields(Policy), 0..) |field, i| if (@field(options.policy, field.name) == .notify) {
+        inline for (zio.fields(Policy), 0..) |field, i| if (@field(options.policy, field.name) == .notify) {
             flags |= @as(u32, 1) << @intCast(i);
         };
         const initializer_input = if (self.config.?.initializer_config) |source| source.input() else null;
@@ -1545,7 +1609,9 @@ pub const View = struct {
             filters[filter_count] = filter;
             filter_count += 1;
         };
-        const native_options: webkit.Options = .{ .content_filters = filters.ptr, .content_filter_count = filter_count, .audio_muted = @intFromBool(self.mutedWanted()), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled) };
+        const facts = try self.factsScript(.linux);
+        defer if (facts) |value| self.allocator.free(value);
+        const native_options: webkit.Options = .{ .content_filters = filters.ptr, .content_filter_count = filter_count, .audio_muted = @intFromBool(self.mutedWanted()), .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled) };
         var candidate: ?*anyopaque = null;
         if (self.session) |session| {
             try webkit.check(webkit.zwk_session_create(&native_options, session.last_size.width, session.last_size.height, webkitNotify, pageNotify, webkitScriptNotify, webkitTimeout, self, &candidate));
@@ -1829,7 +1895,7 @@ pub const View = struct {
         if (std.mem.indexOfScalar(u8, script, 0) != null) return error.EmbeddedNul;
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
-        const wide = if (is_linux) try self.allocator.dupeZ(u8, script) else try std.unicode.utf8ToUtf16LeAllocZ(self.allocator, script);
+        const wide = if (is_linux) try self.allocator.dupeSentinel(u8, script, 0) else try std.unicode.utf8ToUtf16LeAllocZ(self.allocator, script);
         defer self.allocator.free(wide);
         _ = try self.propertyWindow();
         if (!self.page_active or self.page_generation != page) return error.StalePage;
@@ -1838,7 +1904,7 @@ pub const View = struct {
         var deadline: ?u64 = null;
         if (options.timeout_ms) |milliseconds| {
             if (milliseconds == 0 or milliseconds > 600_000) return error.InvalidTimeout;
-            if (self.eval_clock == null) self.eval_clock = try std.time.Timer.start();
+            if (self.eval_clock == null) self.eval_clock = try zio.Timer.start();
             deadline = try std.math.add(u64, self.eval_clock.?.read(), @as(u64, milliseconds) * std.time.ns_per_ms);
         }
         const token = try self.eval_book.reserve(page, deadline, completion, limits.max_pending);
@@ -2034,7 +2100,7 @@ pub const View = struct {
         if (!self.page_active or page != self.page_generation) return error.StalePage;
         const policy = self.config.?.options.permissions orelse return error.PermissionDenied;
         if (options.timeout_ms == 0 or options.timeout_ms > 600_000) return error.InvalidTimeout;
-        if (self.eval_clock == null) self.eval_clock = try std.time.Timer.start();
+        if (self.eval_clock == null) self.eval_clock = try zio.Timer.start();
         const deadline = try std.math.add(u64, self.eval_clock.?.read(), @as(u64, options.timeout_ms) * std.time.ns_per_ms);
         const token = try self.permission_book.reserve(.{ .page = page, .deadline = deadline }, policy.limits.max_pending);
         self.syncEvalTimer() catch |err| {
@@ -2123,7 +2189,7 @@ pub const View = struct {
         if (!self.download_accepting) return error.DownloadUnavailable;
         const policy = self.config.?.options.downloads orelse return error.DownloadDenied;
         if (options.timeout_ms == 0 or options.timeout_ms > 600_000) return error.InvalidTimeout;
-        if (self.eval_clock == null) self.eval_clock = try std.time.Timer.start();
+        if (self.eval_clock == null) self.eval_clock = try zio.Timer.start();
         const deadline = try std.math.add(u64, self.eval_clock.?.read(), @as(u64, options.timeout_ms) * std.time.ns_per_ms);
         const token = try self.download_book.reserve(.{ .observed_page = if (self.page_active) self.page_generation else null, .deadline = deadline }, policy.limits.max_active);
         self.syncEvalTimer() catch |err| {
@@ -2254,7 +2320,7 @@ pub const View = struct {
         if (!self.page_active) return error.StalePage;
         if (window.app.phase == .stopping or window.app.phase == .stopped) return error.Closed;
         if (options.timeout_ms == 0 or options.timeout_ms > 600_000) return error.InvalidTimeout;
-        if (self.eval_clock == null) self.eval_clock = try std.time.Timer.start();
+        if (self.eval_clock == null) self.eval_clock = try zio.Timer.start();
         const deadline = try std.math.add(u64, self.eval_clock.?.read(), @as(u64, options.timeout_ms) * std.time.ns_per_ms);
         const page = self.page_generation;
         // Provisional slots cannot call the new context if native preparation
@@ -2416,7 +2482,7 @@ pub const View = struct {
         var deadline: ?u64 = null;
         if (options.timeout_ms) |milliseconds| {
             if (milliseconds == 0 or milliseconds > 600_000) return error.InvalidTimeout;
-            if (self.eval_clock == null) self.eval_clock = try std.time.Timer.start();
+            if (self.eval_clock == null) self.eval_clock = try zio.Timer.start();
             deadline = try std.math.add(u64, self.eval_clock.?.read(), @as(u64, milliseconds) * std.time.ns_per_ms);
         }
         const token = try self.tool_book.reserve(.{ .token = 0, .kind = kind, .scope = request_scope, .page = self.page_generation, .deadline = deadline, .completion = completion, .owned = owned }, self.config.?.options.tool_limits.max_pending);
@@ -2496,7 +2562,7 @@ pub const View = struct {
         const geometry = [6]f64{ pdf.page_size.width, pdf.page_size.height, pdf.margins.top, pdf.margins.right, pdf.margins.bottom, pdf.margins.left };
         const flags = @as(u32, @intFromBool(pdf.landscape)) | @as(u32, @intFromBool(pdf.print_backgrounds)) << 1;
         if (is_linux) {
-            const path = try self.allocator.dupeZ(u8, pdf.path);
+            const path = try self.allocator.dupeSentinel(u8, pdf.path, 0);
             defer self.allocator.free(path);
             const owned = try self.allocator.dupe(u8, pdf.path);
             errdefer self.allocator.free(owned);
@@ -2679,7 +2745,7 @@ pub const View = struct {
         self.syncEvalTimer() catch self.failEvalTimer();
         if (self.attachmentClosed() or appStopping(window)) return self.completeToolSlot(slot, .detached);
         if (self.recovering or (slot.scope == .page and (slot.page != self.page_generation or !self.page_active))) return self.completeToolSlot(slot, .page_changed);
-        if (kind != @intFromEnum(slot.kind)) return self.completeToolSlot(slot, .invalid_result);
+        if (kind != @backingInt(slot.kind)) return self.completeToolSlot(slot, .invalid_result);
         if (hr < 0) {
             if (slot.kind == .find and self.find_token == token) self.clearFind();
             return self.completeToolSlot(slot, if (@as(u32, @bitCast(hr)) == 0x8007007a or @as(u32, @bitCast(hr)) == 0x80030070) .limit_exceeded else .{ .native_failure = hr });
@@ -2771,7 +2837,7 @@ pub const View = struct {
         var remaining = available;
         for (output, input) |*cookie, native| {
             if (native.same_site > 2 or native.flags & ~@as(u32, 7) != 0 or !std.math.isFinite(native.expires)) return error.InvalidCookieResult;
-            cookie.* = .{ .name = try cookieText(allocator, native.name, &remaining), .value = try cookieText(allocator, native.value, &remaining), .domain = try cookieText(allocator, native.domain, &remaining), .path = try cookieText(allocator, native.path, &remaining), .expires = native.expires, .secure = native.flags & 1 != 0, .http_only = native.flags & 2 != 0, .session = native.flags & 4 != 0, .same_site = @enumFromInt(native.same_site) };
+            cookie.* = .{ .name = try cookieText(allocator, native.name, &remaining), .value = try cookieText(allocator, native.value, &remaining), .domain = try cookieText(allocator, native.domain, &remaining), .path = try cookieText(allocator, native.path, &remaining), .expires = native.expires, .secure = native.flags & 1 != 0, .http_only = native.flags & 2 != 0, .session = native.flags & 4 != 0, .same_site = @fromBackingInt(@intCast(native.same_site)) };
         }
         return output;
     }
@@ -2800,7 +2866,7 @@ pub const View = struct {
         const path = try std.unicode.utf8ToUtf16LeAllocZ(self.allocator, cookie.path);
         defer self.allocator.free(path);
         _ = try self.toolWindow(.cookies, null);
-        const native: NativeCookieWrite = .{ .name = name.ptr, .value = value.ptr, .path = path.ptr, .expires = cookie.expires orelse 0, .flags = @as(u32, @intFromBool(cookie.secure)) | @as(u32, @intFromBool(cookie.http_only)) << 1 | @as(u32, @intFromBool(cookie.expires == null)) << 2, .same_site = @intFromEnum(cookie.same_site) };
+        const native: NativeCookieWrite = .{ .name = name.ptr, .value = value.ptr, .path = path.ptr, .expires = cookie.expires orelse 0, .flags = @as(u32, @intFromBool(cookie.secure)) | @as(u32, @intFromBool(cookie.http_only)) << 1 | @as(u32, @intFromBool(cookie.expires == null)) << 2, .same_site = @backingInt(cookie.same_site) };
         const hr = zwv_cookie_write(self.native.?, &wide_uri, &native, false);
         if (@as(u32, @bitCast(hr)) == 0x80070005) return error.OriginDenied;
         try self.propertyResult(hr);
@@ -2936,7 +3002,7 @@ pub const View = struct {
         const owned = try self.allocator.dupe(u8, agent);
         var transferred = false;
         errdefer if (!transferred) self.allocator.free(owned);
-        const wide = if (is_linux) try self.allocator.dupeZ(u8, agent) else try std.unicode.utf8ToUtf16LeAllocZ(self.allocator, agent);
+        const wide = if (is_linux) try self.allocator.dupeSentinel(u8, agent, 0) else try std.unicode.utf8ToUtf16LeAllocZ(self.allocator, agent);
         defer self.allocator.free(wide);
         _ = try self.propertyWindow();
         if (is_linux) try webkit.check(webkit.zwk_user_agent(self.native.?, wide.ptr, null)) else try self.propertyResult(zwv_user_agent(self.native.?, wide.ptr, null));
@@ -3179,6 +3245,89 @@ pub const View = struct {
         if (self.attachmentClosed()) return error.Closed;
         if (hr < 0) return error.WebViewPropertyFailed;
     }
+    /// The page-facts script for a backend, owned by the caller (UTF-16 on
+    /// Windows), or null when Options asks for no fact.
+    fn factsScript(self: *View, comptime backend_kind: enum { windows, linux }) !?(if (backend_kind == .windows) [:0]u16 else [:0]u8) {
+        const options = self.config.?.options;
+        const config: page_facts.Config = .{ .theme = options.theme_color, .fit = options.fit_content, .zoom = self.zoom_override orelse options.zoom };
+        if (!config.any()) return null;
+        if (backend_kind == .linux) {
+            const text = try page_facts.script(self.allocator, config, "v=>send('F'+v)");
+            defer self.allocator.free(text);
+            return try self.allocator.dupeSentinel(u8, text, 0);
+        }
+        const text = try page_facts.script(self.allocator, config, "v=>p('\\u0001ziggurat-facts:'+v)");
+        defer self.allocator.free(text);
+        const whole = try std.mem.concat(self.allocator, u8, &.{ "(()=>{if(window!==top||!window.chrome||!chrome.webview)return;const p=chrome.webview.postMessage.bind(chrome.webview);", text, "})();" });
+        defer self.allocator.free(whole);
+        return try std.unicode.utf8ToUtf16LeAllocZ(self.allocator, whole);
+    }
+    /// The page's theme color (Options.theme_color): the content of the first
+    /// `<meta name="theme-color">` in its head whose media is absent or
+    /// matches and whose content is a color, as 8-bit sRGB; null for none.
+    /// The page's engine parses it, so any CSS color works. A page that just
+    /// started loading keeps the previous page's color until its DOM is
+    /// ready, so going between pages of one color changes nothing; one that
+    /// never tells, as an image, has none once it loaded.
+    pub fn themeColor(self: *const View) ?Rgba {
+        return self.theme_color_value;
+    }
+    /// The size of the page's content in CSS pixels (Options.fit_content),
+    /// null until the page told it.
+    pub fn contentSize(self: *const View) ?ContentSize {
+        return self.content_size_value;
+    }
+    /// The operating system's process that runs the page, for an app's own
+    /// task manager or memory report; null when unknown. Windows: WebView2's
+    /// browser process, which the app's views share and whose children
+    /// render the pages. Linux: WebKitGTK has no API for it, always null.
+    pub fn processId(self: *View) !?u32 {
+        _ = try self.propertyWindow();
+        if (is_linux) return null;
+        const scope = self.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        var pid: u32 = 0;
+        try self.propertyResult(zwv_process_id(self.native.?, &pid));
+        return if (pid == 0) null else pid;
+    }
+    /// A fact the page's script told; false when the event is gone stale.
+    fn pageFact(self: *View, window: Access, id: PageId, text: []const u8) ?PageEvent {
+        const options = self.config.?.options;
+        const fact = page_facts.parse(text) orelse return null;
+        switch (fact) {
+            .theme_color => |color| {
+                if (!options.theme_color) return null;
+                self.theme_told = id.generation;
+                if (Rgba.eql(color, self.theme_color_value)) return null;
+                self.theme_color_value = color;
+                return .{ .theme_color_changed = .{ .id = id, .color = color } };
+            },
+            .content_size => |size| {
+                const limits = options.fit_content orelse return null;
+                self.content_size_value = size;
+                if (limits.resize_window and self.region == null and self.session == null) self.fitWindow(window, limits, size);
+                return .{ .content_size_changed = .{ .id = id, .size = size } };
+            },
+        }
+    }
+    /// Resizes the window to the content, only in the dimension that changed,
+    /// and not while it is maximized or in full screen.
+    fn fitWindow(self: *View, window: Access, limits: FitContent, size: ContentSize) void {
+        const handle = window.window orelse return;
+        const zoom_factor = self.zoom_override orelse self.config.?.options.zoom;
+        const fitted = page_facts.fit(limits, size, zoom_factor, 0) orelse return;
+        const previous = self.fitted;
+        if (previous != null and previous.?.width == fitted.width and previous.?.height == fitted.height) return;
+        const state = handle.state() catch return;
+        if (state.maximized or state.fullscreen or state.fullscreen_requested) return;
+        const bounds = handle.clientBounds() catch return;
+        var width = bounds.width;
+        var height = bounds.height;
+        if (previous == null or previous.?.width != fitted.width) width = fitted.width;
+        if (previous == null or previous.?.height != fitted.height) height = fitted.height;
+        self.fitted = fitted;
+        if (width != bounds.width or height != bounds.height) handle.resize(width, height) catch |err| window.report(.{ .domain = .webview, .operation = .webview_navigate, .err = err });
+    }
     fn clearPropertyOverrides(self: *View) void {
         if (self.agent_override) |agent| self.allocator.free(agent);
         self.agent_override = null;
@@ -3186,6 +3335,10 @@ pub const View = struct {
         self.muted_override = null;
         self.zoom_override = null;
         self.devtools_override = null;
+        self.theme_color_value = null;
+        self.theme_told = 0;
+        self.content_size_value = null;
+        self.fitted = null;
     }
 
     pub fn post(self: *View, message: []const u8) !void {
@@ -3200,7 +3353,7 @@ pub const View = struct {
         if (std.mem.indexOfScalar(u8, message, 0) != null) return error.EmbeddedNul;
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
-        const utf16 = (if (is_linux) self.allocator.dupeZ(u8, message) else std.unicode.utf8ToUtf16LeAllocZ(self.allocator, message)) catch |err| {
+        const utf16 = (if (is_linux) self.allocator.dupeSentinel(u8, message, 0) else std.unicode.utf8ToUtf16LeAllocZ(self.allocator, message)) catch |err| {
             window.report(.{ .domain = .webview, .operation = .webview_post, .err = err });
             return err;
         };
@@ -3253,7 +3406,7 @@ pub const View = struct {
         defer scope.end();
         const generation = self.page_generation;
         if (is_linux) {
-            const value = try self.allocator.dupeZ(u8, path);
+            const value = try self.allocator.dupeSentinel(u8, path, 0);
             defer self.allocator.free(value);
             _ = try self.propertyWindow();
             if (self.page_generation != generation) return error.PageChanged;
@@ -3283,7 +3436,7 @@ pub const View = struct {
             _ = try webkit_remote.canonicalUriOrigin(&origin, uri, false, self.config.?.options.remote.?.allow_insecure_loopback);
             const scope = self.beginCallback() orelse return error.Closed;
             defer scope.end();
-            const text = try self.allocator.dupeZ(u8, uri);
+            const text = try self.allocator.dupeSentinel(u8, uri, 0);
             defer self.allocator.free(text);
             if (self.attachmentClosed() or appStopping(window)) return error.Closed;
             const result = webkit.zwk_navigate_remote(self.native.?, text);
@@ -3383,6 +3536,15 @@ pub const View = struct {
         }
         if ((native.kind == 0 and native.flags & 1 == 0) or ((native.kind == 1 or native.kind == 3) and native.flags & 1 == 0)) self.finishRequests(.page_changed, .page_changed, .page_changed, .page, null, true);
         if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != id.generation) return 0;
+        if (native.kind == 10) return self.pageFactNotify(window, id, native.value);
+        // A page that never told a theme color, as an image, has none once loaded.
+        if (native.kind == 1 and self.config.?.options.theme_color and self.theme_told != id.generation and self.theme_color_value != null) {
+            self.theme_color_value = null;
+            if (self.config.?.options.page_listener) |listener| {
+                listener.event(listener.context, self, .{ .theme_color_changed = .{ .id = id, .color = null } });
+                if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != id.generation) return 0;
+            }
+        }
         const listener = self.config.?.options.page_listener orelse return 1;
         var utf8: ?[]u8 = null;
         defer if (utf8) |text| self.allocator.free(text);
@@ -3413,6 +3575,20 @@ pub const View = struct {
         return if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != id.generation) 0 else 1;
     }
 
+    fn pageFactNotify(self: *View, window: Access, id: PageId, value: ?[*:0]const u16) c_int {
+        const wide = value orelse return 1;
+        var text: [256]u8 = undefined;
+        var length: usize = 0;
+        while (wide[length] != 0) : (length += 1) {
+            if (length == text.len or wide[length] >= 128) return 1;
+            text[length] = @intCast(wide[length]);
+        }
+        const ev = self.pageFact(window, id, text[0..length]) orelse return 1;
+        if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != id.generation) return 0;
+        const listener = self.config.?.options.page_listener orelse return 1;
+        listener.event(listener.context, self, ev);
+        return if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != id.generation) 0 else 1;
+    }
     fn notify(ptr: *anyopaque, kind: c_int, value: ?[*:0]const u16, hr: i32) callconv(.c) void {
         const self: *View = @ptrCast(@alignCast(ptr));
         const window = self.access() orelse return;
@@ -3428,7 +3604,7 @@ pub const View = struct {
                 self.on_event(self.context, self, .ready);
             },
             1 => {
-                if (!self.ready) return;
+                if (!self.ready or self.config.?.options.untrusted) return;
                 const text = std.unicode.utf16LeToUtf8Alloc(self.allocator, std.mem.span(value.?)) catch |err| {
                     if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != page) return;
                     window.report(.{ .domain = .webview, .operation = .utf8, .err = err });
@@ -3456,7 +3632,7 @@ pub const View = struct {
                 };
                 defer self.allocator.free(text);
                 if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != page) return;
-                self.on_event(self.context, self, .{ .policy_request = .{ .kind = @enumFromInt(kind - 3), .uri = text, .native_detail = hr } });
+                self.on_event(self.context, self, .{ .policy_request = .{ .kind = @fromBackingInt(@intCast(kind - 3)), .uri = text, .native_detail = hr, .user_gesture = if (kind == 3 or kind == 4) hr != 0 else null } });
             },
             8 => {
                 self.ready = false;
@@ -3530,7 +3706,7 @@ pub const View = struct {
         const site = config.options.local orelse return;
         var parsed: ?resources.Method = null;
         inline for (.{ "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS" }, 0..) |name, i| if (std.mem.eql(u16, std.mem.span(method), std.unicode.utf8ToUtf16LeStringLiteral(name))) {
-            parsed = @enumFromInt(i);
+            parsed = @fromBackingInt(@intCast(i));
         };
         const verb = parsed orelse return;
         if (!site.methods.allows(verb) or header_count > 64) return;
@@ -3572,7 +3748,7 @@ pub const View = struct {
         const site = config.options.local orelse return;
         var parsed: ?resources.Method = null;
         inline for (.{ "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS" }, 0..) |name, i| if (std.mem.eql(u8, std.mem.span(method), name)) {
-            parsed = @enumFromInt(i);
+            parsed = @fromBackingInt(@intCast(i));
         };
         const verb = parsed orelse return;
         if (!site.methods.allows(verb)) return;
@@ -3615,7 +3791,7 @@ pub const View = struct {
             }
         }
         if (site.on_resource) |handler| {
-            handler.handle(handler.context, .{ .uri = uri, .path = path, .method = verb, .headers = headers }, &responder);
+            handler.handle(handler.context, .{ .uri = uri, .path = path, .method = verb, .headers = headers, .page = self.pageId() }, &responder);
         }
         if (!responder.responded) responder.respond(.{ .status = 404, .mime = "text/plain; charset=utf-8", .bytes = "Not found" }) catch {};
     }
@@ -3787,7 +3963,7 @@ test "empty logical initializer configuration retains the View domain and charge
         view.config.?.options.document_initializers = &.{};
         original.destroy();
         try std.testing.expect(view.initializer_controller == null and view.initializerDomain() == domain);
-        const body = [_]u8{'a'} ** 2048;
+        const body = @as([2048]u8, @splat('a'));
         try std.testing.expectError(error.InitializerBudgetExceeded, initializer_owner.Config.create(view.allocator, &.{.{ .body = &body, .origins = &.{"https://example.test"} }}, limits, view.initializerDomain()));
         try std.testing.expectEqual(@as(u32, 1), initializerNativeCounts().budgets);
     }
@@ -4568,7 +4744,7 @@ test "removed region rejects every entry while its callback keeps all five books
     view.ready = true;
     view.page_active = true;
     view.page_generation = 1;
-    view.eval_clock = try std.time.Timer.start();
+    view.eval_clock = try zio.Timer.start();
     const script = try view.eval_book.reserve(1, 100, .{ .context = &probe, .complete = Probe.script }, 1);
     const tool = try view.tool_book.reserve(.{ .token = 0, .kind = .cookies, .scope = .profile, .page = 1, .deadline = 100, .completion = .{ .context = &probe, .complete = Probe.tool } }, 1);
     const resource_id = try view.resource_book.reserve(.{ .page = 1, .deadline = 100, .completion = .{ .context = &probe, .complete = Probe.resource } }, 1);
@@ -4866,7 +5042,7 @@ test "script rearm failure completion close prevents another stale success" {
         view = View.init(std.testing.allocator, &probe, Probe.event);
         _ = try prepareTestView(&view, app, null);
         view.loading = false;
-        view.eval_clock = try std.time.Timer.start();
+        view.eval_clock = try zio.Timer.start();
         const token = try view.eval_book.reserve(view.page_generation, null, .{ .context = &probe, .complete = Probe.currentComplete }, 2);
         _ = try view.eval_book.reserve(view.page_generation, 0, .{ .context = &probe, .complete = Probe.otherComplete }, 2);
         // Unsupported test-backend native waits force the production rearm path.
@@ -4911,7 +5087,7 @@ test "quit detaches all deadline books without trying to rearm a stopping App" {
     var probe: Probe = .{ .view = &view };
     view = View.init(std.testing.allocator, &probe, Probe.event);
     _ = try prepareTestView(&view, app, null);
-    view.eval_clock = try std.time.Timer.start();
+    view.eval_clock = try zio.Timer.start();
     _ = try view.eval_book.reserve(view.page_generation, 1000, .{ .context = &probe, .complete = Probe.scriptComplete }, 1);
     _ = try view.tool_book.reserve(.{ .token = 0, .kind = .cookies, .scope = .profile, .page = view.page_generation, .deadline = 1000, .completion = .{ .context = &probe, .complete = Probe.toolComplete } }, 1);
     _ = try view.resource_book.reserve(.{ .page = view.page_generation, .deadline = 1000, .completion = .{ .context = &probe, .complete = Probe.resourceComplete } }, 1);
@@ -4981,7 +5157,7 @@ test "native completion after quit before window destruction preserves detached 
         var probe: Probe = .{};
         var view = View.init(std.testing.allocator, &probe, Probe.event);
         const window = try prepareTestView(&view, app, .{ .context = &probe, .event = Probe.page });
-        view.eval_clock = try std.time.Timer.start();
+        view.eval_clock = try zio.Timer.start();
         const script = try view.eval_book.reserve(view.page_generation, 1000, .{ .context = &probe, .complete = Probe.scriptComplete }, 1);
         const tool = try view.tool_book.reserve(.{ .token = 0, .kind = .cookies, .scope = .profile, .page = view.page_generation, .deadline = 1000, .completion = .{ .context = &probe, .complete = Probe.toolComplete } }, 1);
         const resource = try view.resource_book.reserve(.{ .page = view.page_generation, .deadline = 1000, .completion = .{ .context = &probe, .complete = Probe.resourceComplete } }, 1);
@@ -5048,7 +5224,7 @@ test "tool rearm failure completion close suppresses the current native result" 
     var probe: Probe = .{ .view = &view };
     view = View.init(std.testing.allocator, &probe, Probe.event);
     _ = try prepareTestView(&view, app, null);
-    view.eval_clock = try std.time.Timer.start();
+    view.eval_clock = try zio.Timer.start();
     _ = try view.eval_book.reserve(view.page_generation, 0, .{ .context = &probe, .complete = Probe.scriptComplete }, 1);
     const token = try view.tool_book.reserve(.{ .token = 0, .kind = .clear, .scope = .profile, .page = view.page_generation, .deadline = null, .completion = .{ .context = &probe, .complete = Probe.toolComplete } }, 1);
     View.toolNotify(&view, token, 1, 0, null, 0);
@@ -5120,7 +5296,7 @@ test "expired tool is timed out even when another deadline cannot rearm" {
     var probe: Probe = .{};
     var view = View.init(std.testing.allocator, &probe, Probe.event);
     const window = try prepareTestView(&view, app, null);
-    view.eval_clock = try std.time.Timer.start();
+    view.eval_clock = try zio.Timer.start();
     _ = try view.tool_book.reserve(.{ .token = 0, .kind = .cookies, .scope = .profile, .page = view.page_generation, .deadline = 0, .completion = .{ .context = &probe, .complete = Probe.expired } }, 2);
     _ = try view.tool_book.reserve(.{ .token = 0, .kind = .cookies, .scope = .profile, .page = view.page_generation, .deadline = std.math.maxInt(u64), .completion = .{ .context = &probe, .complete = Probe.future } }, 2);
     View.evalTimeout(&view);
@@ -5208,7 +5384,7 @@ test "three request books isolate expiry from rearm failure callbacks that close
     var probe: Probe = .{ .view = &view };
     view = View.init(std.testing.allocator, &probe, Probe.event);
     _ = try prepareTestView(&view, app, null);
-    view.eval_clock = try std.time.Timer.start();
+    view.eval_clock = try zio.Timer.start();
     _ = try view.eval_book.reserve(view.page_generation, 0, .{ .context = &probe, .complete = Probe.scriptComplete }, 1);
     _ = try view.tool_book.reserve(.{ .token = 0, .kind = .cookies, .scope = .profile, .page = view.page_generation, .deadline = std.math.maxInt(u64), .completion = .{ .context = &probe, .complete = Probe.toolComplete } }, 1);
     _ = try view.resource_book.reserve(.{ .page = view.page_generation, .deadline = 0, .completion = .{ .context = &probe, .complete = Probe.resourceComplete } }, 1);
@@ -5362,7 +5538,7 @@ test "shutdown takes all five request books before any application completion" {
     var probe: Probe = .{ .view = &view };
     view = View.init(std.testing.allocator, &probe, Probe.event);
     _ = try prepareTestView(&view, app, null);
-    view.eval_clock = try std.time.Timer.start();
+    view.eval_clock = try zio.Timer.start();
     _ = try view.eval_book.reserve(1, 100, .{ .context = &probe, .complete = Probe.script }, 1);
     _ = try view.tool_book.reserve(.{ .token = 0, .kind = .cookies, .scope = .profile, .page = 1, .deadline = 100, .completion = .{ .context = &probe, .complete = Probe.tool } }, 1);
     _ = try view.resource_book.reserve(.{ .page = 1, .deadline = 100, .completion = .{ .context = &probe, .complete = Probe.resource } }, 1);
@@ -5432,7 +5608,7 @@ test "Linux custom local policy reaches public attach capture before any SDK ope
 test "Linux custom local raw header aggregate rejects before scanning or allocating" {
     if (!is_linux) return error.SkipZigTest;
     const unreadable: []const u8 = @as([*]const u8, @ptrFromInt(4096))[0..2048];
-    const rows = [_]resources.HeaderGrant{.{ .name = "X-Budget", .exact_value = unreadable }} ** 16;
+    const rows = @as([16]resources.HeaderGrant, @splat(.{ .name = "X-Budget", .exact_value = unreadable }));
     var fault = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     try std.testing.expectError(error.HeaderBudgetExceeded, OwnedConfig.init(fault.allocator(), .{
         .html = "",
@@ -5521,7 +5697,7 @@ fn testRemoteEphemeralConfig(allocator: std.mem.Allocator) !void {
     var exact = "known".*;
     const headers = [_]resources.HeaderGrant{.{ .name = &name, .exact_value = &exact }};
     const origins = [_]OriginGrant{.{ .origin = &origin, .request_headers = &headers, .ipc = true }};
-    var credentials = [_]RequestCredential{.{ .origin = "https://example.test", .bearer = .{0x5a} ** 32 }};
+    var credentials = [_]RequestCredential{.{ .origin = "https://example.test", .bearer = @splat(0x5a) }};
     var owned = try OwnedConfig.init(allocator, .{ .html = "", .storage = .ephemeral, .remote = .{ .url = &url, .origins = &origins, .credentials = .ephemeral, .request_credentials = &credentials }, .request_policy_extension = .{ .directory = &directory } });
     defer owned.deinit(allocator);
     @memset(&url, '?');
@@ -5529,13 +5705,13 @@ fn testRemoteEphemeralConfig(allocator: std.mem.Allocator) !void {
     @memset(&directory, '?');
     @memset(&name, '?');
     @memset(&exact, '?');
-    credentials[0].bearer = .{0} ** 32;
+    credentials[0].bearer = @splat(0);
     try std.testing.expectEqualStrings("https://example.test/start", owned.options.remote.?.url);
     try std.testing.expectEqualStrings("https://example.test", owned.options.remote.?.origins[0].origin);
     try std.testing.expectEqualStrings("/application/request-policy", owned.options.request_policy_extension.?.directory);
     try std.testing.expectEqualStrings("X-Application", owned.options.remote.?.origins[0].request_headers[0].name);
     try std.testing.expectEqualStrings("known", owned.options.remote.?.origins[0].request_headers[0].exact_value.?);
-    try std.testing.expectEqualSlices(u8, &(.{0x5a} ** 32), &owned.options.remote.?.request_credentials[0].bearer);
+    try std.testing.expectEqualSlices(u8, &@as([32]u8, @splat(0x5a)), &owned.options.remote.?.request_credentials[0].bearer);
 }
 
 test "Linux remote configuration owns policy deployment and all grants with complete OOM rollback" {
@@ -5565,7 +5741,7 @@ test "request credentials are captured before caller allocation and wiped before
             const self: *@This() = @ptrCast(@alignCast(ptr));
             self.allocated += 1;
             @memset(self.origin, '?');
-            self.input.bearer = .{0} ** 32;
+            self.input.bearer = @splat(0);
             return std.testing.allocator.rawAlloc(len, alignment, ra);
         }
         fn free(ptr: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ra: usize) void {
@@ -5576,11 +5752,11 @@ test "request credentials are captured before caller allocation and wiped before
         }
     };
     var origin = "https://example.test".*;
-    var entries = [_]RequestCredential{.{ .origin = &origin, .bearer = .{0x5a} ** 32 }};
+    var entries = [_]RequestCredential{.{ .origin = &origin, .bearer = @splat(0x5a) }};
     var gate: Gate = .{ .input = &entries[0], .origin = &origin };
     const candidate = try OwnedConfig.init(gate.allocator(), .{ .html = "", .storage = if (is_linux) .ephemeral else .profile, .user_data_folder = if (is_linux) "" else testProfilePath(), .remote = .{ .url = "https://example.test/start", .origins = &.{.{ .origin = "https://example.test" }}, .credentials = if (is_linux) .ephemeral else .profile, .request_credentials = &entries }, .request_policy_extension = if (is_linux) .{ .directory = "/app/policy" } else null });
     try std.testing.expectEqualStrings("https://example.test", candidate.options.remote.?.request_credentials[0].origin);
-    try std.testing.expectEqualSlices(u8, &(.{0x5a} ** 32), &candidate.options.remote.?.request_credentials[0].bearer);
+    try std.testing.expectEqualSlices(u8, &@as([32]u8, @splat(0x5a)), &candidate.options.remote.?.request_credentials[0].bearer);
     candidate.deinit(gate.allocator());
     try std.testing.expect(gate.allocated == 1 and gate.freed == 1 and gate.all_zero);
 }
@@ -5588,7 +5764,7 @@ test "request credentials are captured before caller allocation and wiped before
 test "Windows request credential validation reaches caller allocation after native policy preflight" {
     if (is_linux) return error.SkipZigTest;
     var fault = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    try std.testing.expectError(error.OutOfMemory, OwnedConfig.init(fault.allocator(), .{ .html = "", .user_data_folder = testProfilePath(), .remote = .{ .url = "https://example.test", .origins = &.{.{ .origin = "https://example.test" }}, .credentials = .profile, .request_credentials = &.{.{ .origin = "https://example.test", .bearer = .{1} ** 32 }} } }));
+    try std.testing.expectError(error.OutOfMemory, OwnedConfig.init(fault.allocator(), .{ .html = "", .user_data_folder = testProfilePath(), .remote = .{ .url = "https://example.test", .origins = &.{.{ .origin = "https://example.test" }}, .credentials = .profile, .request_credentials = &.{.{ .origin = "https://example.test", .bearer = @splat(1) }} } }));
     try std.testing.expect(fault.has_induced_failure and fault.alloc_index == 0);
 }
 
@@ -5600,7 +5776,7 @@ fn testWindowsRequestCredentials(allocator: std.mem.Allocator) !void {
     @memset(&origin, '?');
     entries[0].bearer = @splat(0);
     try std.testing.expectEqualStrings("https://example.test", owned.options.remote.?.request_credentials[0].origin);
-    try std.testing.expectEqualSlices(u8, &([_]u8{0x5a} ** 32), &owned.options.remote.?.request_credentials[0].bearer);
+    try std.testing.expectEqualSlices(u8, &(@as([32]u8, @splat(0x5a))), &owned.options.remote.?.request_credentials[0].bearer);
 }
 
 test "Windows exact request credentials own input and roll every caller allocation back" {

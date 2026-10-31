@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const root = @import("root.zig");
 const files = @import("files.zig");
 
@@ -8,7 +9,7 @@ extern fn zfont_add_file(path: [*:0]const u16) c_int;
 extern fn zfont_list(context: *anyopaque, each: *const fn (*anyopaque, [*]const u16, u32, c_int) callconv(.c) void) c_int;
 
 pub fn add(allocator: std.mem.Allocator, data: []const u8, hash: *const [16]u8) !void {
-    const local = std.process.getEnvVarOwned(allocator, "LOCALAPPDATA") catch try std.process.getEnvVarOwned(allocator, "TEMP");
+    const local = zio.getEnvVarOwned(allocator, "LOCALAPPDATA") catch try zio.getEnvVarOwned(allocator, "TEMP");
     defer allocator.free(local);
     const path = try files.write(allocator, local, data, hash);
     defer allocator.free(path);

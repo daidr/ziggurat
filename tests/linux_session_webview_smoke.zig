@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
@@ -302,7 +303,7 @@ pub fn main() !void {
     try @import("linux_session_file_stop.zig").run(allocations.allocator());
     try @import("linux_session_lifetime.zig").run(allocations.allocator());
     try @import("linux_session_stop.zig").run(allocations.allocator());
-    const extension = try std.process.getEnvVarOwned(allocations.allocator(), "ZIGGURAT_REQUEST_POLICY_EXTENSION");
+    const extension = try zio.getEnvVarOwned(allocations.allocator(), "ZIGGURAT_REQUEST_POLICY_EXTENSION");
     defer allocations.allocator().free(extension);
     try @import("linux_session_remote.zig").run(allocations.allocator(), extension);
     try std.testing.expect(zlg_resource_count() == 0);

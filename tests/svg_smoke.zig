@@ -1,13 +1,10 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const svg = @import("ziggurat_svg");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("NO_STRICT", "1");
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn cairo_image_surface_create(c_int, c_int, c_int) ?*anyopaque;
 extern fn cairo_create(*anyopaque) ?*anyopaque;
 extern fn cairo_destroy(*anyopaque) void;
@@ -294,7 +291,7 @@ pub fn main() !void {
     var debug: std.heap.DebugAllocator(.{ .thread_safe = true }) = .init;
     defer std.debug.assert(debug.deinit() == .ok);
     const allocator = debug.allocator();
-    const selected_name = std.process.getEnvVarOwned(allocator, "ZIGGURAT_SVG_FIXTURE") catch |err| switch (err) {
+    const selected_name = zio.getEnvVarOwned(allocator, "ZIGGURAT_SVG_FIXTURE") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => null,
         else => return err,
     };

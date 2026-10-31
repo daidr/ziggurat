@@ -1,12 +1,9 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 
 fn checkBounds(expected: z.ClientBounds, actual: z.ClientBounds) !void {
     try std.testing.expectEqual(expected.width, actual.width);
@@ -43,7 +40,7 @@ const Reentry = struct {
 };
 
 fn windowsSmoke() !void {
-    var allocator_state: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    var allocator_state: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(allocator_state.deinit() == .ok);
     const app = try z.App.init(allocator_state.allocator());
     defer app.deinit();
@@ -348,7 +345,7 @@ const LinuxProbe = struct {
 fn linuxSmoke(require_wm: bool) !void {
     try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
     {
-        var allocator_state: std.heap.GeneralPurposeAllocator(.{}) = .init;
+        var allocator_state: std.heap.DebugAllocator(.{}) = .init;
         defer std.debug.assert(allocator_state.deinit() == .ok);
         const app = try z.App.init(allocator_state.allocator());
         defer app.deinit();
@@ -388,9 +385,9 @@ fn linuxSmoke(require_wm: bool) !void {
     try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
 }
 
-pub fn main() !void {
-    const args = try std.process.argsAlloc(std.heap.page_allocator);
-    defer std.process.argsFree(std.heap.page_allocator, args);
+pub fn main(init: std.process.Init.Minimal) !void {
+    const args = try zio.argsAlloc(std.heap.page_allocator, init.args);
+    defer zio.argsFree(std.heap.page_allocator, args);
     var require_wm = false;
     for (args[1..]) |arg| {
         if (std.mem.eql(u8, arg, "--require-wm")) require_wm = true else return error.InvalidArgument;

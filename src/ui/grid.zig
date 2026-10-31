@@ -533,7 +533,7 @@ test "grid span content limits overflow and transactional errors" {
     const invalid = [_]Item{.{ .row = 0, .column = 0, .column_span = std.math.maxInt(usize) }};
     try std.testing.expectError(error.InvalidPlacement, compute(result.inner, &columns, &rows, &invalid, .{}, &output));
     try std.testing.expectEqualSlices(Rect, &previous, &output);
-    const too_large = [_]Track{Track.fixed(std.math.floatMax(f32))} ** 2;
+    const too_large = @as([2]Track, @splat(Track.fixed(std.math.floatMax(f32))));
     try std.testing.expectError(error.GeometryOverflow, compute(result.inner, &too_large, &rows, &items, .{}, &output));
     try std.testing.expectEqualSlices(Rect, &previous, &output);
 }

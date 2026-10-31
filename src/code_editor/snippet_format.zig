@@ -307,8 +307,8 @@ test "format candidate allocation failure and UTF16 output publication bounds" {
     var work: regex.Work = .{ .limit = 100 };
     const broken: Output = .{ .buffer = @constCast(&[_]u16{0xd83d}), .len = 1 };
     try std.testing.expectError(error.UnsupportedSurrogateResult, broken.utf8Into(&bytes, &work));
-    try std.testing.expectEqual([_]u8{0xaa} ** 8, bytes);
+    try std.testing.expectEqual(@as([8]u8, @splat(0xaa)), bytes);
     const valid: Output = .{ .buffer = @constCast(&[_]u16{ 0xd83d, 0xde00 }), .len = 2 };
     try std.testing.expectError(error.OutputCapacityExceeded, valid.utf8Into(bytes[0..3], &work));
-    try std.testing.expectEqual([_]u8{0xaa} ** 8, bytes);
+    try std.testing.expectEqual(@as([8]u8, @splat(0xaa)), bytes);
 }

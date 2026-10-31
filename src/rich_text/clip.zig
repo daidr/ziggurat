@@ -30,10 +30,10 @@ pub fn write(t: *const Text, w: *Writer, copy: []const u8) Writer.Error!void {
         var fields = Fields{ .w = w };
         const s = q.style;
         if (s.heading > 0) try fields.number("heading", s.heading);
-        if (s.list != .none) try fields.number("list", @intFromEnum(s.list));
+        if (s.list != .none) try fields.number("list", @backingInt(s.list));
         if (s.checked) try fields.boolean("checked");
         if (s.indent > 0) try fields.number("indent", s.indent);
-        if (s.@"align" != .start) try fields.number("align", @intFromEnum(s.@"align"));
+        if (s.@"align" != .start) try fields.number("align", @backingInt(s.@"align"));
         if (s.quote) try fields.boolean("quote");
         if (s.code_block) try fields.boolean("codeBlock");
         try w.writeByte('}');
@@ -177,10 +177,10 @@ pub fn parse(allocator: Allocator, bytes: []const u8) !?Parsed {
         const js = jp.style;
         paras[k] = .{ .style = .{
             .heading = @intCast(std.math.clamp(js.heading, 0, 6)),
-            .list = if (js.list >= 0 and js.list <= 3) @enumFromInt(js.list) else .none,
+            .list = if (js.list >= 0 and js.list <= 3) @fromBackingInt(@intCast(js.list)) else .none,
             .checked = js.checked,
             .indent = @intCast(std.math.clamp(js.indent, 0, tx.max_indent)),
-            .@"align" = if (js.@"align" >= 0 and js.@"align" <= 2) @enumFromInt(js.@"align") else .start,
+            .@"align" = if (js.@"align" >= 0 and js.@"align" <= 2) @fromBackingInt(@intCast(js.@"align")) else .start,
             .quote = js.quote,
             .code_block = js.codeBlock,
         }, .runs = runs };

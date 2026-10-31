@@ -1,6 +1,7 @@
 //! Fixtures for plugin tests: a Host connected to a recorded page, and a
 //! queue that stands in for the main thread's mailbox.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ipc = @import("ziggurat_ipc");
 const host_api = @import("host.zig");
@@ -9,8 +10,8 @@ const outbox = @import("outbox.zig");
 
 /// Posted tasks run when the test drains, on the test's thread.
 pub const Queue = struct {
-    mutex: std.Thread.Mutex = .{},
-    posted: std.Thread.Condition = .{},
+    mutex: zio.Mutex = .{},
+    posted: zio.Condition = .{},
     tasks: [16]z.Task = undefined,
     len: usize = 0,
     full: bool = false,

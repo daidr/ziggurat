@@ -27,6 +27,7 @@
 //! The summary gives the median of the runs' figures: compare medians of
 //! several runs, alternating builds.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 
@@ -53,11 +54,11 @@ pub const Result = struct {
     paint: f64 = 0,
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const args = try std.process.argsAlloc(allocator);
+    const args = try zio.argsAlloc(allocator, init.args);
     var options: Options = .{};
     var child_mode: ?Mode = null;
     var index: usize = 1;
@@ -81,17 +82,17 @@ pub fn main() !void {
     if (options.runs == 0 or options.events == 0 or options.modes.len == 0) return usage();
     if (child_mode) |mode| {
         const result = try runOnce(allocator, mode, options.events, options.warmup);
-        try std.fs.File.stdout().writeAll(try std.json.Stringify.valueAlloc(allocator, result, .{}));
-        try std.fs.File.stdout().writeAll("\n");
+        try std.Io.File.stdout().writeStreamingAll(zio.io(), try std.json.Stringify.valueAlloc(allocator, result, .{}));
+        try std.Io.File.stdout().writeStreamingAll(zio.io(), "\n");
         return;
     }
-    const self = try std.fs.selfExePathAlloc(allocator);
+    const self = try zio.executablePathAlloc(allocator);
     for (options.modes) |mode| {
         const results = try allocator.alloc(Result, options.runs);
         for (results, 0..) |*result, run| {
-            const output = try std.process.Child.run(.{ .allocator = allocator, .argv = &.{ self, "--run", @tagName(mode), "--events", try std.fmt.allocPrint(allocator, "{d}", .{options.events}), "--warmup", try std.fmt.allocPrint(allocator, "{d}", .{options.warmup}) }, .max_output_bytes = 64 * 1024 });
+            const output = try zio.run(allocator, .{ .argv = &.{ self, "--run", @tagName(mode), "--events", try std.fmt.allocPrint(allocator, "{d}", .{options.events}), "--warmup", try std.fmt.allocPrint(allocator, "{d}", .{options.warmup}) }, .stdout_limit = .limited(64 * 1024), .stderr_limit = .limited(64 * 1024) });
             const ok = switch (output.term) {
-                .Exited => |code| code == 0,
+                .exited => |code| code == 0,
                 else => false,
             };
             if (!ok) {
@@ -176,7 +177,7 @@ const Bench = struct {
     window: z.Window = undefined,
     app: *z.App = undefined,
     content: ui.Context = undefined,
-    start: std.time.Instant,
+    start: zio.Instant,
     samples: []Sample,
     warmup: usize,
     /// Samples handled and not yet painted start here.
@@ -196,7 +197,7 @@ const Bench = struct {
     allocator: std.mem.Allocator,
 
     fn now(self: *const Bench) u64 {
-        const instant = std.time.Instant.now() catch return 0;
+        const instant = zio.Instant.now() catch return 0;
         return instant.since(self.start);
     }
 
@@ -290,11 +291,11 @@ const Bench = struct {
 
     /// The other thread: post the events at random intervals.
     fn produce(self: *Bench) void {
-        var prng: std.Random.DefaultPrng = .init(std.crypto.random.int(u64));
+        var prng: std.Random.DefaultPrng = .init(zio.random.int(u64));
         const random = prng.random();
         const low: u64, const high: u64 = if (self.mode == .type) .{ 60, 140 } else .{ 4, 12 };
         for (self.samples) |*sample| {
-            std.Thread.sleep(random.intRangeAtMost(u64, low * std.time.ns_per_ms, high * std.time.ns_per_ms));
+            zio.sleep(random.intRangeAtMost(u64, low * std.time.ns_per_ms, high * std.time.ns_per_ms));
             sample.posted = self.now();
             self.app.post(.{ .context = sample, .call = deliver }) catch return;
         }
@@ -353,7 +354,7 @@ fn events(samples: []Sample, mode: Mode) void {
 
 fn runOnce(allocator: std.mem.Allocator, mode: Mode, count: usize, warmup: usize) !Result {
     const samples = try allocator.alloc(Sample, if (mode == .anim) count else count + warmup);
-    var bench: Bench = .{ .mode = mode, .start = try std.time.Instant.now(), .samples = samples, .warmup = warmup, .allocator = allocator };
+    var bench: Bench = .{ .mode = mode, .start = try zio.Instant.now(), .samples = samples, .warmup = warmup, .allocator = allocator };
     for (samples, 0..) |*sample, i| sample.* = .{ .bench = &bench, .index = i };
     events(samples, mode);
     bench.content = ui.Context.init(&bench, Bench.draw, Bench.action);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
@@ -123,7 +124,7 @@ const State = struct {
                 const expected = if (self.step == 0 or self.step == 2) "Root 文档" else "Second 文档";
                 if (std.mem.eql(u8, change.title orelse return self.fail(error.MissingTitle), expected)) self.title = true;
             },
-            .history_changed, .audible_changed => {},
+            .history_changed, .theme_color_changed, .content_size_changed, .audible_changed => {},
         }
         self.check();
     }
@@ -180,7 +181,7 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    const local = try std.process.getEnvVarOwned(allocator, "LOCALAPPDATA");
+    const local = try zio.getEnvVarOwned(allocator, "LOCALAPPDATA");
     defer allocator.free(local);
     const profile = try std.fs.path.join(allocator, &.{ local, "Ziggurat", "PageSmoke" });
     defer allocator.free(profile);

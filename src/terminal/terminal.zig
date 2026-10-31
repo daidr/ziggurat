@@ -97,7 +97,7 @@ pub const Terminal = struct {
     base_foreground: u24,
     base_background: u24,
     base_cursor: u24,
-    palette_set: std.StaticBitSet(256) = .initEmpty(),
+    palette_set: std.StaticBitSet(256) = .empty,
     foreground_set: bool = false,
     background_set: bool = false,
     cursor_set: bool = false,
@@ -181,7 +181,7 @@ pub const Terminal = struct {
         self.foreground = self.base_foreground;
         self.background = self.base_background;
         self.cursor_color = self.base_cursor;
-        self.palette_set = .initEmpty();
+        self.palette_set = .empty;
         self.foreground_set = false;
         self.background_set = false;
         self.cursor_set = false;
@@ -625,7 +625,7 @@ pub const Terminal = struct {
             104 => {
                 if (rest.len == 0) {
                     self.palette = self.base_palette;
-                    self.palette_set = .initEmpty();
+                    self.palette_set = .empty;
                 } else {
                     var parts = std.mem.splitScalar(u8, rest, ';');
                     while (parts.next()) |index_text| {

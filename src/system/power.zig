@@ -1,10 +1,7 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
-const win = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const win = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn ziggurat_system_logind_inhibit(what: [*:0]const u8, who: [*:0]const u8, why: [*:0]const u8, timeout_ms: c_int, fd: *c_int) callconv(.c) c_int;
 
 pub const max_reason_bytes = 255;
@@ -91,7 +88,7 @@ pub const Assertion = struct {
                 _ = win.CloseHandle(self.native);
             },
             // logind drops the inhibitor when the last descriptor closes.
-            .linux => std.posix.close(self.native),
+            .linux => zio.posix.close(self.native),
             else => {},
         }
     }
@@ -114,6 +111,6 @@ test "power assertion input is validated before the OS is called" {
     try std.testing.expectError(error.InvalidReason, Assertion.acquire(.{ .reason = "" }));
     try std.testing.expectError(error.InvalidReason, Assertion.acquire(.{ .reason = "line\nbreak" }));
     try std.testing.expectError(error.InvalidReason, Assertion.acquire(.{ .reason = "ok", .application = "\xff" }));
-    try std.testing.expectError(error.InvalidReason, Assertion.acquire(.{ .reason = "x" ** 256 }));
+    try std.testing.expectError(error.InvalidReason, Assertion.acquire(.{ .reason = &@as([256]u8, @splat('x')) }));
     try std.testing.expectError(error.InvalidTimeout, Assertion.acquire(.{ .reason = "ok", .timeout_ms = 0 }));
 }

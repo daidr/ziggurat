@@ -1,11 +1,8 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const linux = std.os.linux;
-const win = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const win = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 
 const is_linux = builtin.os.tag == .linux;
 const is_windows = builtin.os.tag == .windows;
@@ -107,8 +104,8 @@ pub const Watcher = struct {
     inotify: if (is_linux) i32 else void,
     wake_fd: if (is_linux) i32 else void,
     wake_event: if (is_windows) win.HANDLE else void,
-    first: ?std.time.Instant = null,
-    last: ?std.time.Instant = null,
+    first: ?zio.Instant = null,
+    last: ?zio.Instant = null,
     due: bool = false,
     last_failure: ?NativeFailure = null,
 
@@ -150,11 +147,11 @@ pub const Watcher = struct {
             self.descriptors = try DescriptorTable.init(allocator, options.max_directories);
             errdefer self.descriptors.deinit(allocator);
             const fd = linux.inotify_init1(linux.IN.CLOEXEC | linux.IN.NONBLOCK);
-            if (linux.E.init(fd) != .SUCCESS) return errnoError(linux.E.init(fd));
+            if (linux.errno(fd) != .SUCCESS) return errnoError(linux.errno(fd));
             self.inotify = @intCast(fd);
             errdefer _ = linux.close(self.inotify);
             const wake = linux.eventfd(0, linux.EFD.CLOEXEC | linux.EFD.NONBLOCK);
-            if (linux.E.init(wake) != .SUCCESS) return errnoError(linux.E.init(wake));
+            if (linux.errno(wake) != .SUCCESS) return errnoError(linux.errno(wake));
             self.wake_fd = @intCast(wake);
         } else {
             self.wake_event = win.CreateEventW(null, 1, 0, null) orelse return error.SystemResources;
@@ -453,11 +450,11 @@ pub const Watcher = struct {
     const watch_mask: u32 = if (is_linux) linux.IN.CREATE | linux.IN.DELETE | linux.IN.MODIFY | linux.IN.ATTRIB | linux.IN.CLOSE_WRITE | linux.IN.MOVED_FROM | linux.IN.MOVED_TO | linux.IN.DELETE_SELF | linux.IN.MOVE_SELF | linux.IN.ONLYDIR | linux.IN.EXCL_UNLINK else 0;
     fn readLinux(self: *Watcher) !void {
         const rc = linux.read(self.inotify, self.native_buffer.ptr, self.native_buffer.len);
-        switch (linux.E.init(rc)) {
+        switch (linux.errno(rc)) {
             .SUCCESS => {},
             .AGAIN, .INTR => return,
             else => |code| {
-                self.last_failure = .{ .domain = .errno, .code = @intFromEnum(code) };
+                self.last_failure = .{ .domain = .errno, .code = @backingInt(code) };
                 return error.WatchReadFailed;
             },
         }
@@ -503,11 +500,11 @@ pub const Watcher = struct {
     fn watchDirectory(self: *Watcher, index: u32, path: [:0]const u8, top: bool) !?u32 {
         const mask = if (top) watch_mask else watch_mask | linux.IN.DONT_FOLLOW;
         const rc = linux.inotify_add_watch(self.inotify, path.ptr, mask);
-        switch (linux.E.init(rc)) {
+        switch (linux.errno(rc)) {
             .SUCCESS => {},
-            .NOENT, .NOTDIR, .LOOP => return if (top) errnoError(linux.E.init(rc)) else null,
+            .NOENT, .NOTDIR, .LOOP => return if (top) errnoError(linux.errno(rc)) else null,
             else => |code| {
-                self.last_failure = .{ .domain = .errno, .code = @intFromEnum(code) };
+                self.last_failure = .{ .domain = .errno, .code = @backingInt(code) };
                 return errnoError(code);
             },
         }
@@ -535,13 +532,13 @@ pub const Watcher = struct {
             const slot = self.walk[depth];
             if (!self.directories.slots[slot].live) continue;
             const directory = try join(parent, self.directories.path(slot), "");
-            var dir = std.fs.openDirAbsoluteZ(directory, .{ .iterate = true, .no_follow = true }) catch |err| switch (err) {
+            var dir = std.Io.Dir.openDirAbsolute(zio.io(), directory, .{ .iterate = true, .follow_symlinks = false }) catch |err| switch (err) {
                 error.FileNotFound, error.NotDir, error.SymLinkLoop => continue,
                 else => return err,
             };
-            defer dir.close();
+            defer dir.close(zio.io());
             var entries = dir.iterate();
-            while (try entries.next()) |entry| {
+            while (try entries.next(zio.io())) |entry| {
                 if (entry.kind != .directory and entry.kind != .unknown) continue;
                 const path = try join(child, directory, entry.name);
                 const added = (try self.watchDirectory(index, path, false)) orelse continue;
@@ -661,8 +658,8 @@ fn validate(options: Options) !void {
     if (options.native_buffer_bytes < 4096 or options.native_buffer_bytes > 1024 * 1024 or options.native_buffer_bytes % 8 != 0) return error.InvalidOptions;
     if (options.directory_path_bytes == 0 or options.pending_path_bytes == 0) return error.InvalidOptions;
 }
-fn monotonic() ?std.time.Instant {
-    return std.time.Instant.now() catch null;
+fn monotonic() ?zio.Instant {
+    return zio.Instant.now() catch null;
 }
 fn errnoError(code: linux.E) anyerror {
     return switch (code) {

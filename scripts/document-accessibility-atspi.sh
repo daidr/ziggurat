@@ -47,7 +47,7 @@ if [[ "$prefix" != /* || "$evidence" != /* ]]; then
 fi
 cd "$project"
 "${ZIG_BIN:-zig}" build build-smoke-document-accessibility-linux build-document-accessibility-atspi-client \
-    -j1 --cache-dir "$ZIG_LOCAL_CACHE_DIR" --global-cache-dir "$ZIG_GLOBAL_CACHE_DIR" \
+    -j1 --cache-dir "$ZIG_LOCAL_CACHE_DIR" \
     --prefix "$prefix" --summary all "$@"
 mkdir -p -- "$(dirname -- "$evidence")"
 mkdir -- "$evidence"

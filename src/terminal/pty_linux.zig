@@ -2,6 +2,7 @@
 //! secondary side as its controlling terminal, and this process keeps the
 //! primary side, non-blocking, for the session's workers.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const posix = std.posix;
 const pty = @import("pty.zig");
 
@@ -24,27 +25,27 @@ pub const Pty = struct {
 
         // Everything the child needs is prepared before fork, which leaves
         // it only async-signal-safe calls.
-        const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
+        const shell = zio.getenv("SHELL") orelse "/bin/sh";
         const args: []const []const u8 = if (command.argv.len > 0) command.argv else &.{shell};
         const argv = try arena.allocSentinel(?[*:0]const u8, args.len, null);
-        for (args, 0..) |arg, i| argv[i] = try arena.dupeZ(u8, arg);
+        for (args, 0..) |arg, i| argv[i] = try arena.dupeSentinel(u8, arg, 0);
         const envp = try environment(arena, command);
-        const cwd: ?[*:0]const u8 = if (command.cwd) |dir| try arena.dupeZ(u8, dir) else null;
+        const cwd: ?[*:0]const u8 = if (command.cwd) |dir| try arena.dupeSentinel(u8, dir, 0) else null;
 
         const master = posix_openpt(@bitCast(posix.O{ .ACCMODE = .RDWR, .NOCTTY = true, .CLOEXEC = true }));
         if (master < 0) return error.SystemResources;
-        errdefer posix.close(master);
+        errdefer zio.posix.close(master);
         if (grantpt(master) != 0 or unlockpt(master) != 0) return error.SystemResources;
         var name: [128]u8 = undefined;
         if (ptsname_r(master, &name, name.len) != 0) return error.SystemResources;
         const secondary: [*:0]const u8 = @ptrCast(&name);
         setSize(master, command.size);
 
-        const pid = posix.fork() catch return error.SpawnFailed;
+        const pid = zio.posix.fork() catch return error.SpawnFailed;
         if (pid == 0) child(secondary, argv, envp, cwd);
         // Workers wait on the primary side with poll.
-        const flags = posix.fcntl(master, posix.F.GETFL, 0) catch return error.SystemResources;
-        _ = posix.fcntl(master, posix.F.SETFL, flags | @as(usize, @as(u32, @bitCast(posix.O{ .NONBLOCK = true })))) catch return error.SystemResources;
+        const flags = zio.posix.fcntl(master, posix.F.GETFL, 0) catch return error.SystemResources;
+        _ = zio.posix.fcntl(master, posix.F.SETFL, flags | @as(usize, @as(u32, @bitCast(posix.O{ .NONBLOCK = true })))) catch return error.SystemResources;
         return .{ .master = master, .pid = pid };
     }
 
@@ -52,7 +53,7 @@ pub const Pty = struct {
         // Signal dispositions and the mask are inherited across exec.
         var empty = posix.sigemptyset();
         _ = sigprocmask(posix.SIG.SETMASK, &empty, null);
-        for ([_]u8{ posix.SIG.PIPE, posix.SIG.INT, posix.SIG.QUIT, posix.SIG.CHLD, posix.SIG.HUP, posix.SIG.TERM }) |sig| {
+        for ([_]posix.SIG{ .PIPE, .INT, .QUIT, .CHLD, .HUP, .TERM }) |sig| {
             const default: posix.Sigaction = .{ .handler = .{ .handler = posix.SIG.DFL }, .mask = posix.sigemptyset(), .flags = 0 };
             posix.sigaction(sig, &default, null);
         }
@@ -76,7 +77,7 @@ pub const Pty = struct {
     }
 
     pub fn write(self: *const Pty, bytes: []const u8) !usize {
-        return posix.write(self.master, bytes);
+        return zio.posix.write(self.master, bytes);
     }
 
     pub fn resize(self: *const Pty, size: pty.Size) void {
@@ -85,7 +86,7 @@ pub const Pty = struct {
 
     /// Signal the program's process group, and the program itself in case
     /// it left the group.
-    pub fn signal(self: *const Pty, sig: u8) void {
+    pub fn signal(self: *const Pty, sig: posix.SIG) void {
         posix.kill(-self.pid, sig) catch {};
         posix.kill(self.pid, sig) catch {};
     }
@@ -93,17 +94,17 @@ pub const Pty = struct {
     /// The exit once the program ended, waiting for it when `block`.
     pub fn wait(self: *Pty, block: bool) ?pty.Exit {
         if (self.reaped) return null;
-        const result = posix.waitpid(self.pid, if (block) 0 else posix.W.NOHANG);
+        const result = zio.posix.waitpid(self.pid, if (block) 0 else posix.W.NOHANG);
         if (result.pid == 0) return null;
         self.reaped = true;
         const status = result.status;
         if (posix.W.IFEXITED(status)) return .{ .code = posix.W.EXITSTATUS(status) };
-        if (posix.W.IFSIGNALED(status)) return .{ .signal = posix.W.TERMSIG(status) };
+        if (posix.W.IFSIGNALED(status)) return .{ .signal = @intCast(@backingInt(posix.W.TERMSIG(status))) };
         return .{ .code = 0 };
     }
 
     pub fn close(self: *Pty) void {
-        posix.close(self.master);
+        zio.posix.close(self.master);
     }
 };
 

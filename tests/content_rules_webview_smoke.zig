@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
@@ -146,9 +147,9 @@ pub fn main() !void {
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
     if (!web.backendCapabilities().page_lifecycle) return error.SkipZigTest;
-    var private = std.testing.tmpDir(.{});
+    var private = zio.tmpDir(.{});
     defer private.cleanup();
-    const store = try private.dir.realpathAlloc(allocator, ".");
+    const store = try zio.realPathAlloc(private.dir, ".", allocator);
     defer allocator.free(store);
     const app = try z.App.init(allocator);
     defer app.deinit();

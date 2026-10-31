@@ -5,11 +5,7 @@ const text = @import("ziggurat_text_layout");
 const resources = ui.gpu_resources;
 const Surface = ui.gpu_offscreen.Surface;
 const gpu = ui.d3d11;
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 const expect = std.testing.expect;
 const equal = std.testing.expectEqual;
 const expectError = std.testing.expectError;
@@ -135,7 +131,7 @@ fn mixed(allocator: std.mem.Allocator, driver: resources.Driver, scale: f32) !vo
     @memset(mask_pixels, 128);
     const mask: ui.drawing.CoverageView = .{ .lease = &mask_lease, .identity = try ui.drawing.reserveRasterIdentity(), .coverage = .{ .pixels = mask_pixels, .width = size.width, .height = size.height, .stride = size.width, .origin_x = 0, .origin_y = 0, .scale = scale } };
     var image_lease = ui.drawing.Lease.init(std.Thread.getCurrentId());
-    var green = [_]u8{ 0, 128, 0, 128 } ** 4;
+    var green = @as([16]u8, @bitCast(@as([4][4]u8, @splat(.{ 0, 128, 0, 128 }))));
     const levels = [_]ui.drawing.ImageLevel{.{ .pixels = &green, .width = 2, .height = 2, .stride = 8, .byte_len = 16 }};
     const image: ui.drawing.ImageView = .{ .lease = &image_lease, .identity = try ui.drawing.reserveRasterIdentity(), .levels = &levels };
     const engine = try text.Engine.create(allocator, std.Thread.getCurrentId(), .{});

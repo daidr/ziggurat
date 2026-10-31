@@ -1,19 +1,16 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const system = @import("ziggurat_system");
 const watch = system.watch;
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 const fast: watch.Options = .{ .debounce_ms = 20, .max_latency_ms = 200, .max_roots = 4, .max_directories = 256, .max_pending = 64, .pending_path_bytes = 16 * 1024, .directory_path_bytes = 32 * 1024, .native_buffer_bytes = 16 * 1024 };
 
 const Probe = struct {
     allocator: std.mem.Allocator,
     main_thread: std.Thread.Id,
     base: []const u8,
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     err: ?anyerror = null,
     burst_batches: usize = 0,
     stream_ms: u64 = 0,
@@ -32,12 +29,12 @@ const Probe = struct {
         return std.fs.path.join(self.allocator, all[0 .. parts.len + 1]);
     }
     fn write(self: *Probe, sub_path: []const u8, data: []const u8) !void {
-        try self.dir.writeFile(.{ .sub_path = sub_path, .data = data });
+        try self.dir.writeFile(zio.io(), .{ .sub_path = sub_path, .data = data });
     }
     fn checked(self: *Probe) !void {
         const allocator = self.allocator;
-        try self.dir.makePath("tree/a/b");
-        try self.dir.makePath("tree/burst");
+        try self.dir.createDirPath(zio.io(), "tree/a/b");
+        try self.dir.createDirPath(zio.io(), "tree/burst");
         try self.write("tree/a/b/x.txt", "x");
         const tree = try self.path(&.{"tree"});
         defer allocator.free(tree);
@@ -50,9 +47,9 @@ const Probe = struct {
         try std.testing.expectEqual(@as(usize, 0), quiet.events.len);
         // A zero timeout still reads native events; the batch is due after debounce.
         try self.write("tree/zero.txt", "0");
-        std.Thread.sleep(30 * std.time.ns_per_ms);
+        zio.sleep(30 * std.time.ns_per_ms);
         try std.testing.expectEqual(watch.Wake.timeout, (try watcher.wait(&self.events, &self.storage, 0)).wake);
-        std.Thread.sleep(60 * std.time.ns_per_ms);
+        zio.sleep(60 * std.time.ns_per_ms);
         const zero = try watcher.wait(&self.events, &self.storage, 0);
         try std.testing.expectEqual(watch.Wake.batch, zero.wake);
         try std.testing.expectEqual(@as(usize, 1), zero.events.len);
@@ -63,23 +60,23 @@ const Probe = struct {
         try self.write("tree/a/b/x.txt", "modified");
         try self.expectChanges(&watcher, root, tree, &.{&.{ "a", "b" }}, null);
 
-        try self.dir.makePath("tree/new/deep");
+        try self.dir.createDirPath(zio.io(), "tree/new/deep");
         try self.write("tree/new/deep/file.txt", "deep");
         try self.expectChanges(&watcher, root, tree, &.{ &.{}, &.{"new"}, &.{ "new", "deep" } }, null);
         try self.drain(&watcher);
         try self.write("tree/new/deep/later.txt", "later");
         try self.expectChanges(&watcher, root, tree, &.{&.{ "new", "deep" }}, null);
 
-        try self.dir.rename("tree/a", "tree/renamed");
+        try self.dir.rename("tree/a", self.dir, "tree/renamed", zio.io());
         try self.expectChanges(&watcher, root, tree, &.{&.{}}, null);
         try self.drain(&watcher);
         const old = try self.path(&.{ "tree", "a" });
         defer allocator.free(old);
         try self.write("tree/renamed/b/y.txt", "y");
         try self.expectChanges(&watcher, root, tree, &.{&.{ "renamed", "b" }}, old);
-        try self.dir.deleteFile("tree/renamed/b/y.txt");
+        try self.dir.deleteFile(zio.io(), "tree/renamed/b/y.txt");
         try self.expectChanges(&watcher, root, tree, &.{&.{ "renamed", "b" }}, old);
-        try self.dir.deleteTree("tree/renamed");
+        try self.dir.deleteTree(zio.io(), "tree/renamed");
         try self.expectChanges(&watcher, root, tree, &.{&.{}}, old);
         try self.drain(&watcher);
 
@@ -91,10 +88,10 @@ const Probe = struct {
         }
         const burst = try self.path(&.{ "tree", "burst" });
         defer allocator.free(burst);
-        const burst_start = try std.time.Instant.now();
-        var burst_seen: ?std.time.Instant = null;
+        const burst_start = try zio.Instant.now();
+        var burst_seen: ?zio.Instant = null;
         while (true) {
-            const now = try std.time.Instant.now();
+            const now = try zio.Instant.now();
             if (burst_seen) |seen| if (now.since(seen) > 300 * std.time.ns_per_ms) break;
             if (now.since(burst_start) > 5 * std.time.ns_per_s) return error.MissingEvent;
             const batch = try watcher.wait(&self.events, &self.storage, 100);
@@ -102,7 +99,7 @@ const Probe = struct {
             for (batch.events) |event| {
                 if (event == .changed and std.mem.eql(u8, event.changed.path, burst)) {
                     burst_count += 1;
-                    if (burst_seen == null) burst_seen = try std.time.Instant.now();
+                    if (burst_seen == null) burst_seen = try zio.Instant.now();
                 }
             }
         }
@@ -110,15 +107,15 @@ const Probe = struct {
         self.burst_batches = burst_count;
 
         // Continuous writes never go quiet; max_latency still bounds the batch.
-        try self.dir.makePath("tree/stream");
+        try self.dir.createDirPath(zio.io(), "tree/stream");
         try self.drain(&watcher);
         var writer: Writer = .{ .dir = self.dir };
         const writing = try std.Thread.spawn(.{}, Writer.run, .{&writer});
-        const stream_start = try std.time.Instant.now();
+        const stream_start = try zio.Instant.now();
         var first_batch: ?u64 = null;
         while (first_batch == null) {
             const batch = try watcher.wait(&self.events, &self.storage, 2000);
-            if (batch.events.len != 0) first_batch = (try std.time.Instant.now()).since(stream_start);
+            if (batch.events.len != 0) first_batch = (try zio.Instant.now()).since(stream_start);
             if (batch.wake == .timeout) break;
         }
         writing.join();
@@ -131,7 +128,7 @@ const Probe = struct {
         for ([_][]const u8{ "c1", "c2", "c3", "c4", "c5" }) |name| {
             const directory = try std.fmt.allocPrint(allocator, "tree/{s}", .{name});
             defer allocator.free(directory);
-            try self.dir.makePath(directory);
+            try self.dir.createDirPath(zio.io(), directory);
         }
         try self.drain(&watcher);
         for ([_][]const u8{ "c1", "c2", "c3", "c4", "c5" }) |name| {
@@ -147,7 +144,7 @@ const Probe = struct {
         while (true) {
             if (first) {
                 // Nothing fits: error without consuming anything.
-                std.Thread.sleep(150 * std.time.ns_per_ms);
+                zio.sleep(150 * std.time.ns_per_ms);
                 try std.testing.expectError(error.ResultCapacityExceeded, watcher.wait(&one, &tiny, 1000));
                 first = false;
             }
@@ -176,7 +173,7 @@ const Probe = struct {
         try std.testing.expectEqual(watch.Wake.timeout, (try watcher.wait(&self.events, &self.storage, 30)).wake);
 
         // Root removal releases the root; its id becomes stale.
-        try self.dir.makePath("doomed/inner");
+        try self.dir.createDirPath(zio.io(), "doomed/inner");
         const doomed_path = try self.path(&.{"doomed"});
         defer allocator.free(doomed_path);
         const doomed = try watcher.addRoot(doomed_path);
@@ -185,7 +182,7 @@ const Probe = struct {
             defer allocator.free(inner);
             try std.testing.expectError(error.OverlappingRoot, watcher.addRoot(inner));
         }
-        try self.dir.deleteTree("doomed");
+        try self.dir.deleteTree(zio.io(), "doomed");
         try self.expectRemoved(&watcher, doomed);
         try std.testing.expectError(error.UnknownRoot, watcher.removeRoot(doomed));
         try std.testing.expectError(error.UnknownRoot, watcher.isIncomplete(doomed));
@@ -205,10 +202,10 @@ const Probe = struct {
         try self.handlesStable();
     }
     fn pendingOverflow(self: *Probe) !void {
-        try self.dir.makePath("pending/p1");
-        try self.dir.makePath("pending/p2");
-        try self.dir.makePath("pending/p3");
-        try self.dir.makePath("pending/p4");
+        try self.dir.createDirPath(zio.io(), "pending/p1");
+        try self.dir.createDirPath(zio.io(), "pending/p2");
+        try self.dir.createDirPath(zio.io(), "pending/p3");
+        try self.dir.createDirPath(zio.io(), "pending/p4");
         const pending = try self.path(&.{"pending"});
         defer self.allocator.free(pending);
         var options = fast;
@@ -227,8 +224,8 @@ const Probe = struct {
         try std.testing.expect(!try watcher.isIncomplete(root));
     }
     fn directoryBudget(self: *Probe) !void {
-        try self.dir.makePath("budget/s1");
-        try self.dir.makePath("budget/s2");
+        try self.dir.createDirPath(zio.io(), "budget/s1");
+        try self.dir.createDirPath(zio.io(), "budget/s2");
         const budget = try self.path(&.{"budget"});
         defer self.allocator.free(budget);
         var options = fast;
@@ -241,17 +238,17 @@ const Probe = struct {
         var watcher = try watch.Watcher.init(self.allocator, self.main_thread, options);
         defer watcher.deinit();
         const root = try watcher.addRoot(budget);
-        try self.dir.makePath("budget/s3");
+        try self.dir.createDirPath(zio.io(), "budget/s3");
         try self.expectOverflow(&watcher, root, .incomplete_tree);
         try std.testing.expect(try watcher.isIncomplete(root));
         // Released watches are reusable after the host removes and re-adds.
         try watcher.removeRoot(root);
-        try self.dir.deleteTree("budget/s3");
+        try self.dir.deleteTree(zio.io(), "budget/s3");
         const again = try watcher.addRoot(budget);
         try std.testing.expect(!try watcher.isIncomplete(again));
     }
     fn nonRecursive(self: *Probe) !void {
-        try self.dir.makePath("flat/child");
+        try self.dir.createDirPath(zio.io(), "flat/child");
         const flat = try self.path(&.{"flat"});
         defer self.allocator.free(flat);
         var options = fast;
@@ -266,7 +263,7 @@ const Probe = struct {
         try self.expectChanges(&watcher, root, flat, &.{&.{}}, null);
     }
     fn handlesStable(self: *Probe) !void {
-        try self.dir.makePath("rounds/a/b");
+        try self.dir.createDirPath(zio.io(), "rounds/a/b");
         const rounds = try self.path(&.{"rounds"});
         defer self.allocator.free(rounds);
         const baseline = try handles();
@@ -301,9 +298,9 @@ const Probe = struct {
         }
         defer for (wanted[0..expected.len]) |text| self.allocator.free(text);
         var seen: [8]bool = @splat(false);
-        const start = try std.time.Instant.now();
+        const start = try zio.Instant.now();
         while (std.mem.indexOfScalar(bool, seen[0..expected.len], false) != null) {
-            if ((try std.time.Instant.now()).since(start) > 5 * std.time.ns_per_s) {
+            if ((try zio.Instant.now()).since(start) > 5 * std.time.ns_per_s) {
                 for (wanted[0..expected.len], seen[0..expected.len]) |text, hit| if (!hit) std.debug.print("missing changed: {s}\n", .{text});
                 return error.MissingEvent;
             }
@@ -328,8 +325,8 @@ const Probe = struct {
         }
     }
     fn expectOverflow(self: *Probe, watcher: *watch.Watcher, root: watch.Root, reason: watch.OverflowReason) !void {
-        const start = try std.time.Instant.now();
-        while ((try std.time.Instant.now()).since(start) < 5 * std.time.ns_per_s) {
+        const start = try zio.Instant.now();
+        while ((try zio.Instant.now()).since(start) < 5 * std.time.ns_per_s) {
             const batch = try watcher.wait(&self.events, &self.storage, 250);
             for (batch.events) |event| if (event == .overflow and event.overflow.root.eql(root)) {
                 try std.testing.expectEqual(reason, event.overflow.reason);
@@ -339,8 +336,8 @@ const Probe = struct {
         return error.MissingOverflow;
     }
     fn expectRemoved(self: *Probe, watcher: *watch.Watcher, root: watch.Root) !void {
-        const start = try std.time.Instant.now();
-        while ((try std.time.Instant.now()).since(start) < 5 * std.time.ns_per_s) {
+        const start = try zio.Instant.now();
+        while ((try zio.Instant.now()).since(start) < 5 * std.time.ns_per_s) {
             const batch = try watcher.wait(&self.events, &self.storage, 250);
             for (batch.events) |event| if (event == .root_removed and event.root_removed.root.eql(root)) return;
         }
@@ -356,13 +353,13 @@ fn expectUnique(events: []const watch.Event) !void {
     }
 }
 const Writer = struct {
-    dir: std.fs.Dir,
+    dir: std.Io.Dir,
     fn run(self: *Writer) void {
         for (0..120) |index| {
             var name: [48]u8 = undefined;
             const sub_path = std.fmt.bufPrint(&name, "tree/stream/{d}.txt", .{index % 8}) catch return;
-            self.dir.writeFile(.{ .sub_path = sub_path, .data = "stream" }) catch return;
-            std.Thread.sleep(5 * std.time.ns_per_ms);
+            self.dir.writeFile(zio.io(), .{ .sub_path = sub_path, .data = "stream" }) catch return;
+            zio.sleep(5 * std.time.ns_per_ms);
         }
     }
 };
@@ -375,7 +372,7 @@ const Waker = struct {
         _ = self.watcher.wait(&events, &storage, 0) catch |err| {
             self.wait_error = err;
         };
-        std.Thread.sleep(80 * std.time.ns_per_ms);
+        zio.sleep(80 * std.time.ns_per_ms);
         self.watcher.interrupt();
     }
 };
@@ -385,11 +382,11 @@ fn handles() !usize {
         if (c.GetProcessHandleCount(c.GetCurrentProcess(), &count) == 0) return error.HandleCountUnavailable;
         return count;
     }
-    var directory = try std.fs.openDirAbsolute("/proc/self/fd", .{ .iterate = true });
-    defer directory.close();
+    var directory = try std.Io.Dir.openDirAbsolute(zio.io(), "/proc/self/fd", .{ .iterate = true });
+    defer directory.close(zio.io());
     var iterator = directory.iterate();
     var count: usize = 0;
-    while (try iterator.next()) |_| count += 1;
+    while (try iterator.next(zio.io())) |_| count += 1;
     return count;
 }
 pub fn main() !void {
@@ -398,9 +395,9 @@ pub fn main() !void {
     const allocator = debug.allocator();
     try std.testing.expect(system.capabilities.file_watch and watch.capabilities.coarse and !watch.capabilities.detailed);
     try std.testing.expectError(error.UiThreadForbidden, watch.Watcher.init(allocator, std.Thread.getCurrentId(), .{}));
-    var temporary = std.testing.tmpDir(.{});
+    var temporary = zio.tmpDir(.{});
     defer temporary.cleanup();
-    const base = try temporary.dir.realpathAlloc(allocator, ".");
+    const base = try zio.realPathAlloc(temporary.dir, ".", allocator);
     defer allocator.free(base);
     var probe: Probe = .{ .allocator = allocator, .main_thread = std.Thread.getCurrentId(), .base = base, .dir = temporary.dir };
     const thread = try std.Thread.spawn(.{}, Probe.run, .{&probe});

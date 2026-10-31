@@ -709,8 +709,8 @@ const Core = struct {
     fn noteKey(self: *Core, press: z.KeyInput) bool {
         if (press.modifiers.control or press.modifiers.alt or press.modifiers.super) return false;
         const char: u8 = switch (press.key) {
-            .a, .b, .c, .d, .e, .f, .g, .h, .i, .j, .k, .l, .m, .n, .o, .p, .q, .r, .s, .t, .u, .v, .w, .x, .y, .z => 'a' + @as(u8, @intCast(@intFromEnum(press.key) - @intFromEnum(z.KeyCode.a))),
-            .digit0, .digit1, .digit2, .digit3, .digit4, .digit5, .digit6, .digit7, .digit8, .digit9 => '0' + @as(u8, @intCast(@intFromEnum(press.key) - @intFromEnum(z.KeyCode.digit0))),
+            .a, .b, .c, .d, .e, .f, .g, .h, .i, .j, .k, .l, .m, .n, .o, .p, .q, .r, .s, .t, .u, .v, .w, .x, .y, .z => 'a' + @as(u8, @intCast(@backingInt(press.key) - @backingInt(z.KeyCode.a))),
+            .digit0, .digit1, .digit2, .digit3, .digit4, .digit5, .digit6, .digit7, .digit8, .digit9 => '0' + @as(u8, @intCast(@backingInt(press.key) - @backingInt(z.KeyCode.digit0))),
             .space => if (self.typed_len > 0) ' ' else return false,
             else => return false,
         };
@@ -755,10 +755,10 @@ const Core = struct {
                     const selection = self.selection orelse continue;
                     const before = selection.version;
                     switch (code) {
-                        @intFromEnum(view.ItemRequest.deselect) => _ = selection.remove(key),
-                        @intFromEnum(view.ItemRequest.add) => selection.add(key) catch |err| self.fail(err),
-                        @intFromEnum(view.ItemRequest.collapse), @intFromEnum(view.ItemRequest.expand) => if (self.shape != .grid) {
-                            if (self.table().outline) |outline_state| outline_state.setOpen(index, code == @intFromEnum(view.ItemRequest.expand), false);
+                        @backingInt(view.ItemRequest.deselect) => _ = selection.remove(key),
+                        @backingInt(view.ItemRequest.add) => selection.add(key) catch |err| self.fail(err),
+                        @backingInt(view.ItemRequest.collapse), @backingInt(view.ItemRequest.expand) => if (self.shape != .grid) {
+                            if (self.table().outline) |outline_state| outline_state.setOpen(index, code == @backingInt(view.ItemRequest.expand), false);
                         },
                         else => {},
                     }

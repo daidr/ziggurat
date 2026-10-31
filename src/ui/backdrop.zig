@@ -712,7 +712,7 @@ test "uniform blur averages a hard edge only inside the rounded pane" {
 }
 
 test "a region larger than the workspace draws the fallback and counts it" {
-    var pixels = [_]u32{0xff000000} ** (16 * 16);
+    var pixels = @as([16 * 16]u32, @splat(0xff000000));
     const workspace = try Workspace.create(std.testing.allocator, .{ .max_pixels = 16 });
     defer workspace.destroy();
     _ = apply(testSurface(&pixels, 16, 16, 1), false, .{ .bounds = .{ .x = 0, .y = 0, .width = 16, .height = 16 }, .kind = .glass, .fallback = .rgb(0x336699) }, workspace);
@@ -737,7 +737,7 @@ test "workspace allocation failures leave nothing allocated" {
 }
 
 test "regular glass lightens dark content in light mode and rims the edge" {
-    var pixels = [_]u32{0xff202020} ** (64 * 40);
+    var pixels = @as([64 * 40]u32, @splat(0xff202020));
     const workspace = try Workspace.create(std.testing.allocator, .{ .max_pixels = 64 * 40 });
     defer workspace.destroy();
     _ = apply(testSurface(&pixels, 64, 40, 1), false, .{ .bounds = .{ .x = 8, .y = 8, .width = 48, .height = 24 }, .radius = 12, .kind = .glass, .fallback = .rgb(0) }, workspace);
@@ -749,7 +749,7 @@ test "regular glass lightens dark content in light mode and rims the edge" {
     const side = pixels[20 * 64 + 8] & 255;
     try std.testing.expect(top > side);
     // Dark mode darkens light content.
-    var white = [_]u32{0xffffffff} ** (64 * 40);
+    var white = @as([64 * 40]u32, @splat(0xffffffff));
     _ = apply(testSurface(&white, 64, 40, 1), false, .{ .bounds = .{ .x = 8, .y = 8, .width = 48, .height = 24 }, .radius = 12, .kind = .glass, .dark = true, .fallback = .rgb(0) }, workspace);
     try std.testing.expect((white[20 * 64 + 32] & 255) < 0xa0);
 }
@@ -771,7 +771,7 @@ test "a progressive blur leaves its unmasked end sharp" {
 }
 
 test "hard scroll edge tones content toward the background" {
-    var pixels = [_]u32{0xff000000} ** (32 * 16);
+    var pixels = @as([32 * 16]u32, @splat(0xff000000));
     const workspace = try Workspace.create(std.testing.allocator, .{ .max_pixels = 32 * 16 });
     defer workspace.destroy();
     _ = apply(testSurface(&pixels, 32, 16, 1), false, .{ .bounds = .{ .x = 0, .y = 0, .width = 32, .height = 8 }, .kind = .edge, .background = 0xffffff, .fallback = .rgb(0xffffff) }, workspace);
@@ -780,7 +780,7 @@ test "hard scroll edge tones content toward the background" {
 }
 
 test "clip bounds the written pixels and a transparent layer keeps its alpha" {
-    var pixels = [_]u32{0} ** (16 * 16);
+    var pixels = @as([16 * 16]u32, @splat(0));
     pixels[0] = 0x80808080;
     const workspace = try Workspace.create(std.testing.allocator, .{ .max_pixels = 16 * 16 });
     defer workspace.destroy();

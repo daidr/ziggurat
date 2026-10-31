@@ -35,12 +35,12 @@ pub fn draw(source: surface, destination: surface, capture: scope.Capture, group
 test "Gaussian parent clip opacity and mask apply once after outside-parent influence" {
     const kernel = try @import("gaussian_kernel.zig").Kernel.prepare(.{ .sigma = 0.5 });
     const capture = try scope.Capture.init(.{ .x = 0, .y = 0, .width = 2, .height = 2 }, &kernel);
-    var source = [_]u32{0} ** 36;
-    var scratch = [_]u32{0} ** 36;
+    var source = @as([36]u32, @splat(0));
+    var scratch = @as([36]u32, @splat(0));
     source[2 * 6 + 2] = 0x80800000;
     var visits: u64 = 0;
     try @import("gaussian_kernel.zig").apply(&kernel, .{ .pixels = &source, .width = 6, .height = 6, .stride = 6 }, .{ .pixels = &scratch, .width = 6, .height = 6, .stride = 6 }, .{ .pixels = &source, .width = 6, .height = 6, .stride = 6 }, 360, null, &visits);
-    var destination = [_]u32{0xffffffff} ** 16;
+    var destination = @as([16]u32, @splat(0xffffffff));
     const result = try draw(.{ .pixels = &source, .width = 6, .height = 6, .stride = 6, .scale = 1, .origin = capture.origin(), .clip = .{ 0, 0, 6, 6 } }, .{ .pixels = &destination, .width = 4, .height = 4, .stride = 4, .scale = 1, .clip = .{ 1.25, 0, 2, 2 } }, capture, .{ .opacity = 128 });
     try std.testing.expectEqualDeep([4]u32{ 1, 0, 2, 2 }, result.bounds);
     try std.testing.expectEqual(composite.over(source[2 * 6 + 3], 0xffffffff, @as(f64, 128) / 255 * 0.75), destination[1]);

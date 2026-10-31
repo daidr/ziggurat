@@ -9,6 +9,7 @@
 //!
 //! Run with `zig build run-i18n`.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const view = @import("ziggurat_view");
 const i18n = @import("ziggurat_i18n");
@@ -99,7 +100,7 @@ const Demo = struct {
     /// does not allocate.
     fn select(self: *Demo, language: Language) void {
         self.language = language;
-        const locale = i18n.Locale.parse(languages[@intFromEnum(language)].tag) catch unreachable;
+        const locale = i18n.Locale.parse(languages[@backingInt(language)].tag) catch unreachable;
         self.localizer = i18n.Localizer.init(self.catalog, locale, .{});
     }
 
@@ -122,7 +123,7 @@ const Demo = struct {
         const rtl = self.localizer.direction() == .rtl;
         const text_style: view.Style = .{ .self_align = if (rtl) .end else .start };
         const count: i64 = @intFromFloat(self.files);
-        const now: i18n.Instant = .{ .unix_seconds = std.time.timestamp() };
+        const now: i18n.Instant = .{ .unix_seconds = zio.timestamp() };
 
         try self.line(v, "language", &.{}, text_style);
         try v.segmented(.{ .name = "Language" });

@@ -1,11 +1,8 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 
 const Probe = struct {
     window: z.Window = undefined,
@@ -191,7 +188,7 @@ const Fairness = struct {
         } else self.app.post(.{ .context = self, .call = task }) catch unreachable;
     }
     fn finish(self: *Fairness) void {
-        std.Thread.sleep(300 * std.time.ns_per_ms);
+        zio.sleep(300 * std.time.ns_per_ms);
         self.stop.store(true, .release);
     }
     fn timer(_: c.HWND, _: c.UINT, _: c.UINT_PTR, _: c.DWORD) callconv(.winapi) void {

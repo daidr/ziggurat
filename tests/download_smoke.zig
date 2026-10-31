@@ -1,15 +1,16 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Fixture = @import("scheme_smoke.zig").Fixture;
 const Watchdog = @import("watchdog.zig").Watchdog;
 const Phase = enum { default_deny, completed, timeout, navigation, cancelled, limit, paused, closing };
-const payload = [_]u8{0x6d} ** (256 * 1024);
+const payload = @as([256 * 1024]u8, @splat(0x6d));
 const Server = struct {
-    listener: std.net.Server,
+    listener: std.Io.net.Server,
     thread: ?std.Thread = null,
     stop_requested: std.atomic.Value(bool) = .init(false),
-    gate: std.Thread.ResetEvent = .{},
+    gate: zio.ResetEvent = .{},
     downloads: std.atomic.Value(u32) = .init(0),
     fn start(self: *Server) !void {
         self.thread = try std.Thread.spawn(.{}, run, .{self});
@@ -17,25 +18,25 @@ const Server = struct {
     fn stop(self: *Server) void {
         self.stop_requested.store(true, .release);
         self.gate.set();
-        const wake = std.net.tcpConnectToAddress(self.listener.listen_address) catch unreachable;
-        wake.close();
+        const wake = self.listener.socket.address.connect(zio.io(), .{ .mode = .stream }) catch unreachable;
+        wake.close(zio.io());
         self.thread.?.join();
-        self.listener.deinit();
+        self.listener.deinit(zio.io());
     }
     fn run(self: *Server) void {
         while (true) {
-            const connection = self.listener.accept() catch return;
-            defer connection.stream.close();
+            const connection = self.listener.accept(zio.io()) catch return;
+            defer connection.close(zio.io());
             if (self.stop_requested.load(.acquire)) return;
-            self.serve(connection.stream) catch {};
+            self.serve(connection) catch {};
         }
     }
-    fn serve(self: *Server, stream: std.net.Stream) !void {
+    fn serve(self: *Server, stream: std.Io.net.Stream) !void {
         var request: [8192]u8 = undefined;
         var used: usize = 0;
         while (std.mem.indexOf(u8, request[0..used], "\r\n\r\n") == null) {
             if (used == request.len) return error.RequestTooLarge;
-            const n = try std.posix.recv(stream.handle, request[used..], 0);
+            const n = try zio.net.receive(stream.socket.handle, request[used..]);
             if (n == 0) return;
             used += n;
         }
@@ -46,16 +47,16 @@ const Server = struct {
         if (std.mem.startsWith(u8, path, "/download")) {
             _ = self.downloads.fetchAdd(1, .monotonic);
             const head = try std.fmt.bufPrint(&storage, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=private.bin\r\nContent-Length: {d}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", .{payload.len});
-            try stream.writeAll(head);
-            try stream.writeAll(payload[0..4096]);
+            try zio.net.sendAll(stream.socket.handle, head);
+            try zio.net.sendAll(stream.socket.handle, payload[0..4096]);
             if (std.mem.indexOf(u8, path, "pause") != null) self.gate.wait();
             if (self.stop_requested.load(.acquire)) return;
-            try stream.writeAll(payload[4096..]);
+            try zio.net.sendAll(stream.socket.handle, payload[4096..]);
         } else {
             const body = "<title>private download fixture</title><script>chrome.webview.postMessage('boot')</script>";
             const head = try std.fmt.bufPrint(&storage, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {d}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", .{body.len});
-            try stream.writeAll(head);
-            try stream.writeAll(body);
+            try zio.net.sendAll(stream.socket.handle, head);
+            try zio.net.sendAll(stream.socket.handle, body);
         }
     }
 };
@@ -231,7 +232,7 @@ const State = struct {
     fn advance(ptr: *anyopaque) void {
         const self: *State = @ptrCast(@alignCast(ptr));
         self.queued = false;
-        self.phase = @enumFromInt(@intFromEnum(self.phase) + 1);
+        self.phase = @fromBackingInt(@intCast(@backingInt(self.phase) + 1));
         self.started = false;
         self.view.reload(self.options()) catch |err| self.fail(err);
     }
@@ -239,7 +240,7 @@ const State = struct {
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
-    var temporary = std.testing.tmpDir(.{});
+    var temporary = zio.tmpDir(.{});
     var fixture: Fixture = .{ .allocator = gpa.allocator(), .temporary = &temporary };
     defer {
         if (!fixture.closed) {
@@ -254,12 +255,12 @@ pub fn main() !void {
     if (fixture.err) |err| return err;
     // Preparation and final byte validation run on an explicit worker.
     const Prepare = struct {
-        temporary: *std.testing.TmpDir,
+        temporary: *zio.TmpDir,
         allocator: std.mem.Allocator,
         directory: ?[]u8 = null,
         err: ?anyerror = null,
         fn run(self: *@This()) void {
-            self.directory = self.temporary.dir.realpathAlloc(self.allocator, ".") catch |err| {
+            self.directory = zio.realPathAlloc(self.temporary.dir, ".", self.allocator) catch |err| {
                 self.err = err;
                 return;
             };
@@ -270,12 +271,12 @@ pub fn main() !void {
     worker.join();
     if (prepare.err) |err| return err;
     defer gpa.allocator().free(prepare.directory.?);
-    const address = try std.net.Address.parseIp4("127.0.0.1", 0);
-    var server: Server = .{ .listener = try address.listen(.{}) };
+    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server: Server = .{ .listener = try address.listen(zio.io(), .{}) };
     try server.start();
     defer server.stop();
     var base_storage: [128]u8 = undefined;
-    const base = try std.fmt.bufPrint(&base_storage, "http://127.0.0.1:{d}", .{server.listener.listen_address.getPort()});
+    const base = try std.fmt.bufPrint(&base_storage, "http://127.0.0.1:{d}", .{server.listener.socket.address.getPort()});
     var start_storage: [160]u8 = undefined;
     const start_url = try std.fmt.bufPrint(&start_storage, "{s}/start", .{base});
     var next_storage: [160]u8 = undefined;
@@ -305,7 +306,7 @@ pub fn main() !void {
     try std.testing.expect(refs.states + refs.handlers + refs.controllers == 0);
     try std.testing.expect(app.resourceStats().allocated_records == 0);
     const Validate = struct {
-        temporary: *std.testing.TmpDir,
+        temporary: *zio.TmpDir,
         allocator: std.mem.Allocator,
         err: ?anyerror = null,
         fn run(self: *@This()) void {
@@ -315,7 +316,7 @@ pub fn main() !void {
         }
         fn work(self: *@This()) !void {
             for ([_][]const u8{ "completed.bin", "navigation.bin", "paused.bin" }) |name| {
-                const bytes = try self.temporary.dir.readFileAlloc(self.allocator, name, payload.len + 1);
+                const bytes = try self.temporary.dir.readFileAlloc(zio.io(), name, self.allocator, .limited(payload.len + 1));
                 defer self.allocator.free(bytes);
                 if (!std.mem.eql(u8, bytes, &payload)) return error.DownloadBytesMismatch;
             }

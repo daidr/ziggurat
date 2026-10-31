@@ -6,6 +6,7 @@
 //! Parsing is pure and may run on any thread. A parsed `List` is immutable
 //! except for its matching scratch: match a list from one thread at a time.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 
 pub const max_id_bytes = 64;
 /// Hexadecimal digits of the rules' hash in a list's identifier.
@@ -257,7 +258,7 @@ const Compiler = struct {
 
     fn class(self: *Compiler) Error!void {
         self.pos += 1;
-        var set = [_]u8{0} ** 32;
+        var set: [32]u8 = @splat(0);
         var negate = false;
         if (self.pos < self.source.len and self.source[self.pos] == '^') {
             negate = true;
@@ -954,7 +955,7 @@ pub fn urlHost(url: []const u8) []const u8 {
 
 const suffix_data = @embedFile("public_suffix.dat");
 const SuffixKind = enum(u8) { normal, wildcard, exception };
-var suffix_once = std.once(loadSuffixes);
+var suffix_once = zio.once(loadSuffixes);
 var suffixes: std.StringHashMapUnmanaged(SuffixKind) = .empty;
 /// The parents of wildcard rules ("*.ck" as "ck"), apart: a parent may be a
 /// rule of its own too.
@@ -1069,7 +1070,7 @@ test "ids and identifiers" {
     try testing.expect(validId("easy-list_1.0"));
     try testing.expect(!validId(""));
     try testing.expect(!validId("a b"));
-    try testing.expect(!validId("x" ** 65));
+    try testing.expect(!validId(&@as([65]u8, @splat('x'))));
     var buffer: [max_identifier_bytes]u8 = undefined;
     const name = identifier("ads", "[]", &buffer);
     try testing.expectEqual(@as(usize, 3 + 1 + hash_digits), name.len);

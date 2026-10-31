@@ -2,11 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 const width = 32;
 const height = 24;
 // Independent 60-decimal normalization and symmetric Q24 quantization of
@@ -151,8 +147,8 @@ fn collection(app: *z.App, comptime gpu: bool, driver: if (gpu) ui.gpu_resources
     if (!identity) try std.testing.expectEqualSlices(u32, &weights, (try kernel.view()).descriptor.weights[0..7]);
     var mask_lease = ui.drawing.Lease.init(std.Thread.getCurrentId());
     var image_lease = ui.drawing.Lease.init(std.Thread.getCurrentId());
-    const mask_bytes = [_]u8{128} ** (width * height);
-    const image_bytes = [_]u8{ 64, 0, 0, 64 } ** 4;
+    const mask_bytes = @as([width * height]u8, @splat(128));
+    const image_bytes = @as([16]u8, @bitCast(@as([4][4]u8, @splat(.{ 64, 0, 0, 64 }))));
     const image_levels = [_]ui.drawing.ImageLevel{.{ .pixels = &image_bytes, .width = 2, .height = 2, .stride = 8, .byte_len = 16 }};
     const mask: ui.drawing.CoverageView = .{ .lease = &mask_lease, .identity = try ui.drawing.reserveRasterIdentity(), .coverage = .{ .pixels = &mask_bytes, .width = width, .height = height, .stride = width, .origin_x = 0, .origin_y = 0, .scale = scale } };
     var scene: Scene = .{ .kernel = kernel, .mask = mask, .image = .{ .lease = &image_lease, .identity = try ui.drawing.reserveRasterIdentity(), .levels = &image_levels } };

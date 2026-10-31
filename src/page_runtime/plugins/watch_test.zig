@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const runtime = @import("ziggurat_page_runtime");
 const watch = @import("watch.zig");
 const allocator = std.testing.allocator;
@@ -132,17 +133,17 @@ fn all(seen: []const []u8, expected: []const []const u8) bool {
     return true;
 }
 
-fn write(dir: std.fs.Dir, path: []const u8, data: []const u8) !void {
-    try dir.writeFile(.{ .sub_path = path, .data = data });
+fn write(dir: std.Io.Dir, path: []const u8, data: []const u8) !void {
+    try dir.writeFile(zio.io(), .{ .sub_path = path, .data = data });
 }
 
 test "a recursive watch reports what changed, pairs renames and ends when its directory goes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("project/src");
+    try tmp.dir.createDirPath(zio.io(), "project/src");
     try write(tmp.dir, "project/a.txt", "a");
     try write(tmp.dir, "project/src/x.txt", "x");
-    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    const base = try zio.realPathAlloc(tmp.dir, ".", allocator);
     defer allocator.free(base);
     const project = try std.fs.path.join(allocator, &.{ base, "project" });
     defer allocator.free(project);
@@ -152,23 +153,23 @@ test "a recursive watch reports what changed, pairs renames and ends when its di
     try f.start(1, "project", .{ .recursive = true });
     try std.testing.expectEqual(null, try f.ready(1));
 
-    var dir = try tmp.dir.openDir("project", .{});
-    defer dir.close();
+    var dir = try tmp.dir.openDir(zio.io(), "project", .{});
+    defer dir.close(zio.io());
     try write(dir, "b.txt", "b");
     try write(dir, "a.txt", "longer");
-    try dir.rename("src", "lib");
-    try dir.makePath("new");
+    try dir.rename("src", dir, "lib", zio.io());
+    try dir.createDirPath(zio.io(), "new");
     try write(dir, "new/n.txt", "n");
     try std.testing.expectEqual(.running, try f.expect(1, &.{ "create b.txt", "write a.txt", "rename src lib", "create new", "create new/n.txt" }));
 
     try write(dir, "lib/x.txt", "changed");
-    try dir.deleteFile("b.txt");
+    try dir.deleteFile(zio.io(), "b.txt");
     try std.testing.expectEqual(.running, try f.expect(1, &.{ "write lib/x.txt", "remove b.txt" }));
 
     // What is watched going away ends the watch.
-    dir.close();
-    dir = try tmp.dir.openDir(".", .{});
-    try tmp.dir.deleteTree("project");
+    dir.close(zio.io());
+    dir = try tmp.dir.openDir(zio.io(), ".", .{});
+    try tmp.dir.deleteTree(zio.io(), "project");
     // Changes seen before the directory went are reported first.
     const last = try f.expectSome(1, &.{"remove ."}, &.{ "remove a.txt", "remove lib", "remove lib/x.txt", "remove new", "remove new/n.txt" });
     if (last == .running) try std.testing.expectEqual(.complete, try f.end(1));
@@ -179,7 +180,7 @@ test "a watched file reports writes, replacement, removal and return" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try write(tmp.dir, "settings.json", "{}");
-    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    const base = try zio.realPathAlloc(tmp.dir, ".", allocator);
     defer allocator.free(base);
     const settings = try std.fs.path.join(allocator, &.{ base, "settings.json" });
     defer allocator.free(settings);
@@ -193,11 +194,11 @@ test "a watched file reports writes, replacement, removal and return" {
     _ = try f.expect(1, &.{"write ."});
     // Editors save by replacing the file.
     try write(tmp.dir, "settings.tmp", "{\"a\":2}");
-    try tmp.dir.rename("settings.tmp", "settings.json");
+    try tmp.dir.rename("settings.tmp", tmp.dir, "settings.json", zio.io());
     _ = try f.expect(1, &.{"write ."});
     // Other files in its directory are not its concern.
     try write(tmp.dir, "other.txt", "x");
-    try tmp.dir.deleteFile("settings.json");
+    try tmp.dir.deleteFile(zio.io(), "settings.json");
     _ = try f.expect(1, &.{"remove ."});
     try write(tmp.dir, "settings.json", "{}");
     _ = try f.expect(1, &.{"create ."});
@@ -208,9 +209,9 @@ test "a watched file reports writes, replacement, removal and return" {
 test "requests outside what the app allows are refused" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makePath("flat/sub");
+    try tmp.dir.createDirPath(zio.io(), "flat/sub");
     try write(tmp.dir, "flat/file.txt", "x");
-    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    const base = try zio.realPathAlloc(tmp.dir, ".", allocator);
     defer allocator.free(base);
     const flat = try std.fs.path.join(allocator, &.{ base, "flat" });
     defer allocator.free(flat);
@@ -253,7 +254,7 @@ test "requests outside what the app allows are refused" {
 test "a shared quota bounds watches and a new document stops the old one's" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    const base = try zio.realPathAlloc(tmp.dir, ".", allocator);
     defer allocator.free(base);
     var quota: watch.Quota = .{ .max = 1 };
     var f: Fixture = .{};
@@ -276,7 +277,7 @@ test "a shared quota bounds watches and a new document stops the old one's" {
 test "roots are checked when the plugin starts" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    const base = try zio.realPathAlloc(tmp.dir, ".", allocator);
     defer allocator.free(base);
     var queue: runtime.testing.Queue = .{};
     var plugin: watch.Plugin = undefined;

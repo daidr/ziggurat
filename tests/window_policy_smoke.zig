@@ -5,11 +5,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = @import("ziggurat_c_win32");
 extern fn gtk_window_get_resizable(*anyopaque) c_int;
 extern fn gtk_window_get_deletable(*anyopaque) c_int;
 extern fn gtk_window_get_urgency_hint(*anyopaque) c_int;

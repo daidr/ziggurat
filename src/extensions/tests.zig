@@ -61,7 +61,7 @@ test "dependency validation is transactional and bounded" {
     try expectError(error.InvalidName, ext.Graph.init(&.{ctx.plugin("A", &.{})}));
     try expectError(error.InvalidName, ext.Graph.init(&.{ctx.plugin("9bad", &.{})}));
     try expectError(error.InvalidName, ext.Graph.init(&.{ctx.plugin("a_b", &.{})}));
-    try expectError(error.InvalidName, ext.Graph.init(&.{ctx.plugin("a" ** (ext.max_name_bytes + 1), &.{})}));
+    try expectError(error.InvalidName, ext.Graph.init(&.{ctx.plugin(&@as([ext.max_name_bytes + 1]u8, @splat('a')), &.{})}));
     try expectError(error.DuplicatePlugin, ext.Graph.init(&.{ ctx.plugin("a", &.{}), ctx.plugin("a", &.{}) }));
     try expectError(error.MissingDependency, ext.Graph.init(&.{ctx.plugin("a", &.{"absent"})}));
     try expectError(error.DuplicateDependency, ext.Graph.init(&.{ ctx.plugin("a", &.{}), ctx.plugin("b", &.{ "a", "a" }) }));

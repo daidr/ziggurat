@@ -5,12 +5,7 @@ const ui = @import("ziggurat_ui");
 const text = @import("ziggurat_text_layout");
 const shaped = @import("ziggurat_shaped_editor");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-    @cInclude("imm.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn zlg_test_paint(*anyopaque, u32, u32) void;
 extern fn zlg_test_commit(*anyopaque, [*:0]const u8) void;
 extern fn zlg_resource_count() u32;

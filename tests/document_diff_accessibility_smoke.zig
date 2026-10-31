@@ -8,11 +8,7 @@ const diff = @import("ziggurat_document_diff");
 const v = @import("ziggurat_document_diff_view");
 const a = @import("ziggurat_document_accessibility");
 const paired = @import("ziggurat_document_diff_accessibility");
-const c = @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-});
+const c = @import("ziggurat_c_win32");
 extern fn zda_probe_read_mta(*anyopaque, [*]u16, u32, *u32) i32;
 extern fn zda_probe_match_rectangles(*anyopaque, [*]const u16, u32, *u32) i32;
 extern fn zda_probe_release(*anyopaque) void;

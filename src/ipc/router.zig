@@ -73,16 +73,22 @@ pub fn Router(comptime Service: type, comptime limits: protocol.Limits) type {
             if (!std.mem.eql(u8, envelope.session, &self.session.bytes)) return error.StaleSession;
             if (envelope.slot >= limits.max_pending or envelope.id == 0) return error.InvalidRequest;
             const token: protocol.Token = .{ .session = self.session, .slot = envelope.slot, .id = envelope.id };
-            errdefer |err| if (rejected) |out| {
-                // Replying to a replay of an active ID would reject the original
-                // page promise while its original work is still running.
-                if (envelope.kind == .call and err != error.OutOfMemory and err != error.DuplicateRequest) out.* = .{ .token = token, .code = switch (@as(anyerror, err)) {
-                    error.Full => .full,
-                    error.UnknownMethod => .unknown_method,
-                    error.InvalidParams => .invalid_params,
-                    else => .invalid_request,
-                } };
+            return self.dispatch(parsed, envelope, token) catch |err| {
+                if (rejected) |out| {
+                    // Replying to a replay of an active ID would reject the original
+                    // page promise while its original work is still running.
+                    if (envelope.kind == .call and err != error.OutOfMemory and err != error.DuplicateRequest) out.* = .{ .token = token, .code = switch (@as(anyerror, err)) {
+                        error.Full => .full,
+                        error.UnknownMethod => .unknown_method,
+                        error.InvalidParams => .invalid_params,
+                        else => .invalid_request,
+                    } };
+                }
+                return err;
             };
+        }
+
+        fn dispatch(self: *Self, parsed: std.json.Parsed(std.json.Value), envelope: protocol.Envelope, token: protocol.Token) !Received {
             switch (envelope.kind) {
                 .call => {
                     if (envelope.sequence != null or envelope.method == null) return error.InvalidRequest;

@@ -5,11 +5,7 @@ const ui = @import("ziggurat_ui");
 const shadows = @import("ziggurat_shadows");
 const vector = @import("ziggurat_vector");
 const drawing = shadows.drawing;
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn cairo_image_surface_create(c_int, c_int, c_int) ?*anyopaque;
 extern fn cairo_create(*anyopaque) ?*anyopaque;
 extern fn cairo_destroy(*anyopaque) void;
@@ -118,7 +114,7 @@ fn render(renderer: anytype, allocator: std.mem.Allocator, base: z.Paint) !void 
         const unaligned: drawing.CoverageView = .{ .lease = &raw_lease, .identity = try drawing.reserveRasterIdentity(), .coverage = .{ .pixels = &raw, .width = 5, .height = 3, .stride = 7, .origin_x = 0, .origin_y = 0, .scale = scale } };
         var edge_leases: [3]drawing.Lease = undefined;
         var edges: [3]drawing.CoverageView = undefined;
-        const solid = [_]u8{255} ** 4;
+        const solid = @as([4]u8, @splat(255));
         for (&edge_leases, &edges) |*lease, *view| {
             lease.* = drawing.Lease.init(main_thread);
             view.* = .{ .lease = lease, .identity = try drawing.reserveRasterIdentity(), .coverage = .{ .pixels = &solid, .width = 2, .height = 2, .stride = 2, .origin_x = 0, .origin_y = 0, .scale = scale } };

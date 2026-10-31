@@ -143,7 +143,7 @@ pub const Tile = struct {
         if (output.len < self.width * 4) return error.OutputFull;
         try work.charge(self.width * (sample_count + 1));
         for (0..self.width) |pixel| {
-            const color = self.meanPixel(pixel);
+            const color: [4]f64 = self.meanPixel(pixel);
             const alpha = quantize(color[3]);
             for (0..3) |channel| output[pixel * 4 + channel] = @min(alpha, quantize(color[channel]));
             output[pixel * 4 + 3] = alpha;
@@ -166,7 +166,7 @@ fn factor(value: f64) !void {
 }
 fn validColor(color: Color) !void {
     try factor(color[3]);
-    for (0..3) |index| if (!std.math.isFinite(color[index]) or color[index] < 0 or color[index] > color[3]) return error.InvalidPremultipliedColor;
+    inline for (0..3) |index| if (!std.math.isFinite(color[index]) or color[index] < 0 or color[index] > color[3]) return error.InvalidPremultipliedColor;
 }
 fn over(target: *Color, source: Color) void {
     target.* = source + target.* * @as(Color, @splat(1 - source[3]));

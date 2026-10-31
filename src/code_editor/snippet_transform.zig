@@ -189,11 +189,11 @@ test "transform aggregate construction OOM and runtime failure keep destination"
     var bytes: [8]u8 = @splat(0xaa);
     var work: regex.Work = .{ .limit = 1024 * 1024 };
     try std.testing.expectError(error.OutputCapacityExceeded, runtime.applyInto(&transform, "ab", &bytes, &work));
-    try std.testing.expectEqual([_]u8{0xaa} ** 8, bytes);
+    try std.testing.expectEqual(@as([8]u8, @splat(0xaa)), bytes);
     work.limit = 1;
     work.used = 0;
     try std.testing.expectError(error.WorkExceeded, runtime.applyInto(&transform, "ab", &bytes, &work));
-    try std.testing.expectEqual([_]u8{0xaa} ** 8, bytes);
+    try std.testing.expectEqual(@as([8]u8, @splat(0xaa)), bytes);
 }
 
 const CancelOnFree = struct {

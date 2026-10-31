@@ -17,11 +17,7 @@ pub const AuxiliaryHandler = struct {
 };
 pub const AcceptedAuxiliary = struct { key: auxiliary.Key, frame_id: u64, epoch: u64, enabled: bool, visible: bool, focused: bool, focusable: bool, expanded: bool };
 pub const AuxiliaryOptions = struct { limits: auxiliary.Limits = .{}, handler: AuxiliaryHandler };
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 
 pub const NativeStorage = if (builtin.os.tag == .linux) enum { glib } else enum { system_com };
 pub const Options = struct {
@@ -522,7 +518,7 @@ pub const Bridge = struct {
             for (exported.cells, copied) |cell, *target| target.* = .{ .start = @intCast(try source.document.utf16Offset(cell.range.start)), .end = @intCast(try source.document.utf16Offset(cell.range.end)), .rectangle = rect(cell.rect) };
             const copied_carets = try self.budget.allocator().alloc(n.Caret, positions.carets.len);
             defer self.budget.allocator().free(copied_carets);
-            for (positions.carets, copied_carets) |caret, *target| target.* = .{ .position = @intCast(try source.document.utf16Offset(caret.position)), .affinity = @intFromEnum(caret.affinity), .rectangle = rect(caret.rect) };
+            for (positions.carets, copied_carets) |caret, *target| target.* = .{ .position = @intCast(try source.document.utf16Offset(caret.position)), .affinity = @backingInt(caret.affinity), .rectangle = rect(caret.rect) };
             const copied_lines = try self.budget.allocator().alloc(n.Line, positions.lines.len);
             defer self.budget.allocator().free(copied_lines);
             for (positions.lines, copied_lines) |line, *target| target.* = .{ .first = @intCast(line.first), .count = @intCast(line.count), .rectangle = rect(line.rect) };
@@ -692,7 +688,12 @@ pub const Bridge = struct {
         return self.recordAuxiliaryInner(frame, expected_bounds);
     }
     fn recordAuxiliaryInner(self: *Bridge, frame: *ui.Frame, expected_bounds: ?[]const ui.Rect) anyerror!void {
-        errdefer |err| frame.failure = frame.failure orelse err;
+        return self.recordAuxiliaryInnerBody(frame, expected_bounds) catch |err| {
+            frame.failure = frame.failure orelse err;
+            return err;
+        };
+    }
+    fn recordAuxiliaryInnerBody(self: *Bridge, frame: *ui.Frame, expected_bounds: ?[]const ui.Rect) anyerror!void {
         if (!ui.capabilities.accessibility) return error.UnsupportedCapability;
         try self.checked();
         _ = try self.live();

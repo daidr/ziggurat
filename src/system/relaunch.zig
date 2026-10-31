@@ -10,6 +10,7 @@
 //! The new process starts only after this one has released its windows,
 //! single-instance lock and files, so it does not find them held.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 
@@ -59,28 +60,46 @@ pub const Relaunch = struct {
     }
 };
 
+extern "kernel32" fn GetCommandLineW() callconv(.winapi) [*:0]const u16;
+
+/// This process's command line, program first. Zig 0.17 hands it only to
+/// `main`, so it is read back from the system.
+fn ownArguments(arena: std.mem.Allocator) ![]const []const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    if (comptime windows) {
+        const args: std.process.Args = .{ .vector = std.mem.span(GetCommandLineW()) };
+        var it = try args.iterateAllocator(arena);
+        while (it.next()) |arg| try list.append(arena, try arena.dupe(u8, arg));
+    } else {
+        const file = try std.Io.Dir.openFileAbsolute(zio.io(), "/proc/self/cmdline", .{});
+        defer file.close(zio.io());
+        var reader = file.readerStreaming(zio.io(), &.{});
+        const bytes = try reader.interface.allocRemaining(arena, .limited(1 << 20));
+        var parts = std.mem.splitScalar(u8, bytes, 0);
+        while (parts.next()) |arg| if (parts.index != null or arg.len != 0) try list.append(arena, arg);
+    }
+    return list.items;
+}
+
 /// Starts the program detached from this process's lifetime.
 pub fn spawn(allocator: std.mem.Allocator, options: Options) !void {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const executable = options.executable orelse try std.fs.selfExePathAlloc(arena);
+    const executable = options.executable orelse try zio.executablePathAlloc(arena);
     if (!std.fs.path.isAbsolute(executable)) return error.RelativePath;
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.append(arena, executable);
     if (options.arguments) |arguments| {
         try argv.appendSlice(arena, arguments);
     } else {
-        const own = try std.process.argsAlloc(arena);
+        const own = try ownArguments(arena);
         if (own.len > 1) try argv.appendSlice(arena, own[1..]);
     }
-    var child = std.process.Child.init(argv.items, arena);
-    child.cwd = options.cwd;
-    child.stdin_behavior = .Ignore;
-    try child.spawn();
+    const child = try zio.spawn(.{ .argv = argv.items, .cwd = zio.cwd(options.cwd), .stdin = .ignore });
     // Not waited for. Windows: release the handles; the process runs on.
     if (comptime windows) {
-        std.os.windows.CloseHandle(child.id);
+        std.os.windows.CloseHandle(child.id.?);
         std.os.windows.CloseHandle(child.thread_handle);
     }
 }

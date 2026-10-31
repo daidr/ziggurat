@@ -320,9 +320,9 @@ fn plain(input: z.KeyInput) bool {
 }
 fn digitOf(input: z.KeyInput) ?u8 {
     if (input.modifiers.shift or !plain(input)) return null;
-    const code = @intFromEnum(input.key);
-    if (code >= @intFromEnum(z.KeyCode.digit0) and code <= @intFromEnum(z.KeyCode.digit9)) return @intCast(code - @intFromEnum(z.KeyCode.digit0));
-    if (code >= @intFromEnum(z.KeyCode.numpad0) and code <= @intFromEnum(z.KeyCode.numpad9)) return @intCast(code - @intFromEnum(z.KeyCode.numpad0));
+    const code = @backingInt(input.key);
+    if (code >= @backingInt(z.KeyCode.digit0) and code <= @backingInt(z.KeyCode.digit9)) return @intCast(code - @backingInt(z.KeyCode.digit0));
+    if (code >= @backingInt(z.KeyCode.numpad0) and code <= @backingInt(z.KeyCode.numpad9)) return @intCast(code - @backingInt(z.KeyCode.numpad0));
     return null;
 }
 /// A field's frame: its border, in the focus color while it has focus,
@@ -856,10 +856,10 @@ const TimeLeaf = struct {
     fn segmentRect(self: *const TimeLeaf, index: usize) Rect {
         var x: f32 = field_pad;
         for (0..index) |at| {
-            x += self.widths[@intFromEnum(self.order[at])] + 2 * segment_pad;
+            x += self.widths[@backingInt(self.order[at])] + 2 * segment_pad;
             x += if (self.order[at + 1] == .minute) self.separator_width else segment_pad;
         }
-        return .{ .x = x, .y = 8, .width = self.widths[@intFromEnum(self.order[index])] + 2 * segment_pad, .height = field_height - 16 };
+        return .{ .x = x, .y = 8, .width = self.widths[@backingInt(self.order[index])] + 2 * segment_pad, .height = field_height - 16 };
     }
     fn paint(ptr: *anyopaque, frame: *ui.Frame, id: u64, bounds: Rect) anyerror!void {
         const self: *TimeLeaf = @ptrCast(@alignCast(ptr));
@@ -874,7 +874,7 @@ const TimeLeaf = struct {
             const active = focused and index == self.active;
             if (active) frame.roundedRect(rect, 4, ui.Color.rgb(palette.accent));
             const color = if (!self.enabled) palette.disabled_text else if (active) palette.on_accent else palette.text;
-            centered(frame, rect, self.texts[@intFromEnum(segment)], color, font);
+            centered(frame, rect, self.texts[@backingInt(segment)], color, font);
             if (index + 1 < self.count and self.order[index + 1] == .minute) {
                 centered(frame, .{ .x = rect.x + rect.width, .y = rect.y, .width = self.separator_width, .height = rect.height }, self.separator, palette.disabled_text, font);
             }
@@ -883,7 +883,7 @@ const TimeLeaf = struct {
                 .minute => .{ @floatFromInt(self.value.minute), 0, 59 },
                 .period => .{ if (self.value.hour >= 12) 1 else 0, 0, 1 },
             };
-            try frame.semantic(.{ .id = partId(id, @intFromEnum(segment)), .parent = id, .role = .stepper, .name = self.names[@intFromEnum(segment)], .value = self.texts[@intFromEnum(segment)], .bounds = rect, .enabled = self.enabled, .focused = active, .range_value = value, .range_minimum = low, .range_maximum = high, .range_small_change = 1, .range_large_change = 1 });
+            try frame.semantic(.{ .id = partId(id, @backingInt(segment)), .parent = id, .role = .stepper, .name = self.names[@backingInt(segment)], .value = self.texts[@backingInt(segment)], .bounds = rect, .enabled = self.enabled, .focused = active, .range_value = value, .range_minimum = low, .range_maximum = high, .range_small_change = 1, .range_large_change = 1 });
         }
     }
     fn current(self: *const TimeLeaf) TimeOfDay {
@@ -1099,7 +1099,7 @@ pub fn timeInput(v: *View, state: *TimeInput, time: *TimeOfDay, options: TimeOpt
     leaf.enabled = node.style.enabled;
     // Assistive technology sets a segment's value by its own id.
     inline for (.{ Segment.hour, Segment.minute, Segment.period }) |segment| {
-        if (v.takeEvent(partId(node.id, @intFromEnum(segment)))) |event| if (event == .value and leaf.enabled and (segment != .period or twelve)) {
+        if (v.takeEvent(partId(node.id, @backingInt(segment)))) |event| if (event == .value and leaf.enabled and (segment != .period or twelve)) {
             const next = setSegment(time.*, segment, event.value.change, twelve);
             if (!std.meta.eql(next, time.*)) {
                 time.* = next;
@@ -1119,7 +1119,7 @@ pub fn timeInput(v: *View, state: *TimeInput, time: *TimeOfDay, options: TimeOpt
     leaf.separator_width = textWidth(leaf.separator, 16) + 2;
     var width: f32 = 2 * field_pad;
     for (leaf.order[0..leaf.count], 0..) |segment, index| {
-        width += leaf.widths[@intFromEnum(segment)] + 2 * segment_pad;
+        width += leaf.widths[@backingInt(segment)] + 2 * segment_pad;
         if (index + 1 < leaf.count) width += if (leaf.order[index + 1] == .minute) leaf.separator_width else segment_pad;
     }
     leaf.extent = .{ .width = width, .height = field_height };

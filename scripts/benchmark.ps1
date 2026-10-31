@@ -17,7 +17,7 @@ $output = [IO.Path]::GetFullPath($OutputDirectory)
 [void][IO.Directory]::CreateDirectory($output)
 $zig = (Get-Command $ZigPath -ErrorAction Stop).Source
 $version = (& $zig version | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $version -cne '0.15.2') { throw 'Benchmark requires Zig 0.15.2.' }
+if ($LASTEXITCODE -ne 0 -or $version -cne '0.17.0') { throw 'Benchmark requires Zig 0.17.0.' }
 $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
 $system = Get-CimInstance Win32_ComputerSystem
 $graphics = @(Get-CimInstance Win32_VideoController | ForEach-Object { [ordered]@{ name = $_.Name; driver_version = $_.DriverVersion } })

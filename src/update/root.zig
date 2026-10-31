@@ -80,9 +80,9 @@ fn validate(manifest: Manifest) !void {
     for (manifest.url) |byte| if (byte <= 0x20 or byte >= 0x7f or byte == '\\') return error.InvalidUrl;
     const uri = std.Uri.parse(manifest.url) catch return error.InvalidUrl;
     if (!std.mem.eql(u8, uri.scheme, "https") or uri.host == null or uri.user != null or uri.password != null or uri.fragment != null) return error.InvalidUrl;
-    var host_buffer: [std.Uri.host_name_max]u8 = undefined;
-    const host = uri.getHost(&host_buffer) catch return error.InvalidUrl;
-    if (host.len == 0) return error.InvalidUrl;
+    var host_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host = std.Io.net.HostName.fromUri(uri, &host_buffer) catch return error.InvalidUrl;
+    if (host.bytes.len == 0) return error.InvalidUrl;
 }
 
 /// Canonical signing payload. Caller storage owns the returned slice.

@@ -52,7 +52,7 @@ pub const Kind = enum(u8) {
     /// True for kinds that describe document structure rather than runs
     /// of text inside a paragraph, heading or table cell.
     pub fn isBlock(self: Kind) bool {
-        return @intFromEnum(self) <= @intFromEnum(Kind.table_cell);
+        return @backingInt(self) <= @backingInt(Kind.table_cell);
     }
 };
 

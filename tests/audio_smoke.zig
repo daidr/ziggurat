@@ -2,6 +2,7 @@
 //! and reports which. Passes either way: a machine with no audio device
 //! exercises the failure path, one with a device the real backend.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const audio = @import("ziggurat_audio");
 
 pub fn main() !void {
@@ -17,14 +18,14 @@ pub fn main() !void {
     }
     const tone = try audio.Sound.fromSamples(allocator, audio.sample_rate, 1, &samples);
     defer tone.release();
-    const started = std.time.nanoTimestamp();
+    const started = zio.nanoTimestamp();
     const player = try engine.play(tone);
     var waited: u32 = 0;
     while (player.isPlaying()) : (waited += 1) {
         if (waited > 10_000) return error.PlayerNeverEnded;
-        std.Thread.sleep(std.time.ns_per_ms);
+        zio.sleep(std.time.ns_per_ms);
     }
-    const elapsed = std.time.nanoTimestamp() - started;
+    const elapsed = zio.nanoTimestamp() - started;
     // 200 ms of sound plays for about as long, heard or not.
     if (elapsed < 150 * std.time.ns_per_ms) return error.EndedEarly;
     var buffer: [256]u8 = undefined;
@@ -45,6 +46,6 @@ pub fn main() !void {
     for (samples) |sample| try writer.writeInt(i16, @intFromFloat(sample * 32767), .little);
     const stream = try engine.openStreamBytes(&wav);
     stream.play();
-    std.Thread.sleep(50 * std.time.ns_per_ms);
+    zio.sleep(50 * std.time.ns_per_ms);
     if (stream.position() == 0) return error.StreamDidNotAdvance;
 }

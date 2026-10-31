@@ -4,11 +4,7 @@ const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const b = ui.commands.brushes;
 const reference = @import("gradient_interpolation_oracle.zig");
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn cairo_image_surface_create(c_int, c_int, c_int) ?*anyopaque;
 extern fn cairo_create(*anyopaque) ?*anyopaque;
 extern fn cairo_destroy(*anyopaque) void;
@@ -106,7 +102,7 @@ fn software(context: *anyopaque, window: ?*anyopaque) !void {
         const paint: z.Paint = .{ .native_context = context, .native_window = window, .size = .{ .width = w, .height = h, .scale = scale } };
         try renderer.begin(paint);
         for ([_]b.InterpolationSpace{ .srgb, .srgb_linear, .oklab }) |space| for (0..3) |kind| for (0..4) |index| {
-            const palette = reference.Palette.init(@intFromEnum(space), stops(index));
+            const palette = reference.Palette.init(@backingInt(space), stops(index));
             for (0..3) |shape| {
                 try record(&buffer, space, kind, index, shape);
                 try renderer.replayBuffer(&buffer);
@@ -153,7 +149,7 @@ fn bufferContracts() !void {
         var pair: [2]b.Stop = undefined;
         for (&pair, 0..) |*stop, index| stop.* = .{ .offset = @floatFromInt(index), .color = .{ .r = random.random().int(u8), .g = random.random().int(u8), .b = random.random().int(u8), .a = random.random().int(u8) } };
         for ([_]b.InterpolationSpace{ .srgb, .srgb_linear, .oklab }) |space| {
-            const palette = reference.Palette.init(@intFromEnum(space), &pair);
+            const palette = reference.Palette.init(@backingInt(space), &pair);
             const stored = try b.Stored.init(.{ .linear = .{ .start = .{}, .end = .{ .x = 1 }, .stops = &pair, .interpolation = space } });
             for (1..16) |step| {
                 const t = @as(f64, @floatFromInt(step)) / 16;
@@ -190,7 +186,7 @@ fn offscreen(app: *z.App) !void {
             defer snapshot.close() catch unreachable;
             const view = try snapshot.view();
             const layer = view.levels[0];
-            const palette = reference.Palette.init(@intFromEnum(space), &stops_alpha);
+            const palette = reference.Palette.init(@backingInt(space), &stops_alpha);
             const before = try surface.stats();
             failing.fail_index = failing.alloc_index;
             try std.testing.expectError(error.OutOfMemory, surface.render(&buffer));
@@ -295,7 +291,7 @@ fn contextFallback(app: *z.App, mode: ui.RenderMode) !void {
         try std.testing.expectEqual(index + 1, context.fallbacks);
         try std.testing.expectEqual(@as(usize, 1), context.gpu_frames);
         try std.testing.expectEqual(old_draws, context.gpu_renderer.gradientStats().draws);
-        const palette = reference.Palette.init(@intFromEnum(space), &stops_bw);
+        const palette = reference.Palette.init(@backingInt(space), &stops_bw);
         _ = c.GdiFlush();
         for (0..context.renderer.width) |x| {
             const px = (@as(f64, @floatFromInt(x)) + 0.5) / context.renderer.scale;

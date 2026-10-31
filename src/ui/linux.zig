@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const gaussian = @import("gaussian_filter.zig");
 const gaussian_scope = @import("gaussian_scope.zig");
 const gaussian_kernel = @import("gaussian_kernel.zig");
@@ -81,7 +82,7 @@ pub const GlMode = shader_effects.GlMode;
 /// The mode `ZIGGURAT_GL` selects: `0`/`off`/`false`/`no` or `1`/`on`/
 /// `true`/`yes`; anything else is automatic.
 pub fn glModeFromEnvironment() GlMode {
-    const value = std.posix.getenv("ZIGGURAT_GL") orelse return .automatic;
+    const value = zio.getenv("ZIGGURAT_GL") orelse return .automatic;
     for ([_][]const u8{ "0", "off", "false", "no" }) |word| if (std.ascii.eqlIgnoreCase(value, word)) return .off;
     for ([_][]const u8{ "1", "on", "true", "yes" }) |word| if (std.ascii.eqlIgnoreCase(value, word)) return .on;
     return .automatic;

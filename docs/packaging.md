@@ -84,7 +84,7 @@ uninstall [--silent] [--purge]
   "fileAssociations": [{ "ext": ["myd"], "name": "My document", "role": "Editor", "mimeType": "application/x-myd" }],
   "macos": {
     "icon": "assets/AppIcon.icon",
-    "minimumSystemVersion": "13.0",
+    "minimumSystemVersion": "15.0",
     "signingIdentity": "Developer ID Application: Example (TEAMID)",
     "entitlements": "entitlements.plist",
     "provisioningProfile": "embedded.provisionprofile",
@@ -95,7 +95,7 @@ uninstall [--silent] [--purge]
 }
 ```
 
-Info.plist 写出 `CFBundleName`/`CFBundleDisplayName`（`name`）、`CFBundleIdentifier`（`identity`）、`CFBundleExecutable`、`CFBundlePackageType APPL`、`LSMinimumSystemVersion`（默认 `13.0`，即 Zig 0.15.2 生成的 Mach-O 所声明的最低版本）、`NSPrincipalClass NSApplication`、`NSHighResolutionCapable`、`NSSupportsAutomaticGraphicsSwitching`、`NSHumanReadableCopyright`、`CFBundleDocumentTypes`（每个文件关联一项，`role` 默认 Editor，`name` 默认“扩展名大写 + file”，`LSHandlerRank Default`）与 `CFBundleURLTypes`。版本取四段版本的前三段作 `CFBundleShortVersionString`；第四段不为 0 时 `CFBundleVersion` 保留四段，否则同为三段。`macos.infoPlist` 的键覆盖以上任何键，值按 JSON 类型写成 string、integer（整数值的数字）、real、true/false、array 或 dict。键按字典序写出，同样配置得到同样字节。
+Info.plist 写出 `CFBundleName`/`CFBundleDisplayName`（`name`）、`CFBundleIdentifier`（`identity`）、`CFBundleExecutable`、`CFBundlePackageType APPL`、`LSMinimumSystemVersion`（默认 `15.0`，即 Zig 0.17.0 生成的 Mach-O 所声明的最低版本）、`NSPrincipalClass NSApplication`、`NSHighResolutionCapable`、`NSSupportsAutomaticGraphicsSwitching`、`NSHumanReadableCopyright`、`CFBundleDocumentTypes`（每个文件关联一项，`role` 默认 Editor，`name` 默认“扩展名大写 + file”，`LSHandlerRank Default`）与 `CFBundleURLTypes`。版本取四段版本的前三段作 `CFBundleShortVersionString`；第四段不为 0 时 `CFBundleVersion` 保留四段，否则同为三段。`macos.infoPlist` 的键覆盖以上任何键，值按 JSON 类型写成 string、integer（整数值的数字）、real、true/false、array 或 dict。键按字典序写出，同样配置得到同样字节。
 
 有 `i18n` 时，消息目录的每种语言得到一个 `.lproj` 目录，按 Xcode 的命名（`zh-Hans`、`zh-Hant`、`zh-HK`、`sr-Latn`、`pt-BR`），`CFBundleDevelopmentRegion` 为源语言，`CFBundleLocalizations` 列出全部，AppKit 因此用这些语言显示自己的菜单与面板文字，系统设置也会为应用列出这些语言。目录中的 `appName` 消息若与 `name` 不同，写进该语言的 `InfoPlist.strings`，Finder 与程序坞按系统语言显示应用名。
 

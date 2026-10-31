@@ -116,8 +116,8 @@ pub fn matches(filter: Filter, cookie: Cookie) bool {
 /// leading dot on either: "example.com" holds ".example.com" and
 /// "www.example.com" but not "badexample.com".
 pub fn inDomain(cookie_domain: []const u8, domain: []const u8) bool {
-    const host = std.mem.trimLeft(u8, cookie_domain, ".");
-    const want = std.mem.trimLeft(u8, domain, ".");
+    const host = std.mem.trimStart(u8, cookie_domain, ".");
+    const want = std.mem.trimStart(u8, domain, ".");
     if (want.len == 0) return true;
     if (host.len < want.len or !std.ascii.eqlIgnoreCase(host[host.len - want.len ..], want)) return false;
     return host.len == want.len or host[host.len - want.len - 1] == '.';

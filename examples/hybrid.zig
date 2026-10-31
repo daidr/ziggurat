@@ -10,6 +10,7 @@
 //!
 //! Run with `zig build run-hybrid -Dwebview=true`.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
@@ -120,9 +121,9 @@ const Hybrid = struct {
         frame.labelFont(.{ .x = x, .y = 20, .width = w, .height = 30 }, "Native sidebar", 0x202b35, ui.Font.heading4);
         var buffer: [96]u8 = undefined;
         frame.labelFont(.{ .x = x, .y = 60, .width = w, .height = 44 }, std.fmt.bufPrint(&buffer, "Count: {d}", .{self.count}) catch unreachable, 0x202b35, ui.Font.heading2);
-        frame.button(@intFromEnum(Action.increment), .{ .x = x, .y = 116, .width = w, .height = 34 }, "+ 1 from Zig") catch return;
-        frame.buttonWithOptions(@intFromEnum(Action.reset), .{ .x = x, .y = 158, .width = w, .height = 34 }, "Reset", .{ .enabled = self.count != 0 }) catch return;
-        frame.buttonWithOptions(@intFromEnum(Action.greet), .{ .x = x, .y = 200, .width = w, .height = 34 }, "Greet the page", .{ .enabled = self.ready }) catch return;
+        frame.button(@backingInt(Action.increment), .{ .x = x, .y = 116, .width = w, .height = 34 }, "+ 1 from Zig") catch return;
+        frame.buttonWithOptions(@backingInt(Action.reset), .{ .x = x, .y = 158, .width = w, .height = 34 }, "Reset", .{ .enabled = self.count != 0 }) catch return;
+        frame.buttonWithOptions(@backingInt(Action.greet), .{ .x = x, .y = 200, .width = w, .height = 34 }, "Greet the page", .{ .enabled = self.ready }) catch return;
         frame.label(.{ .x = x, .y = 248, .width = w, .height = 24 }, std.fmt.bufPrint(&buffer, "Page: {s}", .{self.status}) catch unreachable, 0x3f5260);
         frame.label(.{ .x = x, .y = 288, .width = w, .height = 24 }, "Notes from the page", 0x202b35);
         if (self.note_count == 0) frame.label(.{ .x = x, .y = 316, .width = w, .height = 24 }, "(none yet)", 0x7e8790);
@@ -135,7 +136,7 @@ const Hybrid = struct {
 
     fn action(context: *anyopaque, id: u64) void {
         const self: *Hybrid = @ptrCast(@alignCast(context));
-        switch (std.meta.intToEnum(Action, id) catch return) {
+        switch (std.enums.fromInt(Action, id) orelse return) {
             .increment => {
                 self.count +|= 1;
                 self.publish();
@@ -180,7 +181,7 @@ pub fn main() !void {
     // WebView2 on Windows keeps its profile in an absolute folder; WebKitGTK
     // on Linux can run this trusted page in an ephemeral session instead.
     const profile: []u8 = if (builtin.os.tag == .windows) blk: {
-        const local = try std.process.getEnvVarOwned(allocator, "LOCALAPPDATA");
+        const local = try zio.getEnvVarOwned(allocator, "LOCALAPPDATA");
         defer allocator.free(local);
         break :blk try std.fs.path.join(allocator, &.{ local, "Ziggurat", "Hybrid" });
     } else &.{};

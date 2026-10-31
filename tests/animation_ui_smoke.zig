@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const animation = @import("ziggurat_animation");
@@ -11,7 +12,7 @@ const State = struct {
     app: *z.App,
     window: z.Window = undefined,
     context: ui.Context = undefined,
-    clock: std.time.Timer,
+    clock: zio.Timer,
     timeline: animation.Timeline,
     playhead: animation.Playhead,
     timer: ?*wake.OneShot = null,

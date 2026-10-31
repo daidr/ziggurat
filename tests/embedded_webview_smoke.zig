@@ -1,15 +1,12 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const view = @import("ziggurat_view");
 const web = @import("ziggurat_webview");
 const embedded = @import("ziggurat_webview_view");
 const Watchdog = @import("watchdog.zig").Watchdog;
-const c = if (builtin.os.tag == .windows) @cImport({
-    @cDefine("WIN32_LEAN_AND_MEAN", "1");
-    @cDefine("NO_STRICT", "1");
-    @cInclude("windows.h");
-}) else struct {};
+const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn zlg_test_paint(*anyopaque, u32, u32) void;
 extern fn g_timeout_add(c_uint, *const fn (*anyopaque) callconv(.c) c_int, *anyopaque) c_uint;
 var active: ?*State = null;
@@ -121,14 +118,14 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     // WebView2 keeps its profile in an absolute folder, prepared off the
     // main thread; WebKitGTK runs the page in an ephemeral session.
-    var temporary = std.testing.tmpDir(.{});
+    var temporary = zio.tmpDir(.{});
     defer temporary.cleanup();
     var profile: ?[]u8 = null;
     defer if (profile) |path| allocator.free(path);
     if (builtin.os.tag == .windows) {
         const Prepare = struct {
-            fn run(dir: std.fs.Dir, gpa_allocator: std.mem.Allocator, out: *?[]u8) void {
-                out.* = dir.realpathAlloc(gpa_allocator, ".") catch null;
+            fn run(dir: std.Io.Dir, gpa_allocator: std.mem.Allocator, out: *?[]u8) void {
+                out.* = zio.realPathAlloc(dir, ".", gpa_allocator) catch null;
             }
         };
         const worker = try std.Thread.spawn(.{}, Prepare.run, .{ temporary.dir, allocator, &profile });

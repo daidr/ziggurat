@@ -4,8 +4,6 @@ const native_support = @import("native.zig");
 /// Optional worker-owned TLS transport. Core, UI, WebView and file consumers
 /// do not import this build helper or acquire its dependency.
 pub fn add(b: *std.Build, owner: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
-    b.build_root.handle.access(".deps/mbedtls-3.6.7/include/mbedtls/ssl.h", .{}) catch
-        @panic("Optional Windows HTTPS source missing; run python scripts/fetch-mbedtls.py first");
     owner.link_libc = true;
     for (sources, 0..) |path, index| {
         const unit = native_support.add(b, owner, b.fmt("https-windows-{d}", .{index}), path, &.{ "-std=c11", "-DMBEDTLS_CONFIG_FILE=\"windows_tls_config.h\"" }, target, optimize);

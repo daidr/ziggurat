@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const images = @import("ziggurat_images");
 const prepared = @import("ziggurat_image_drawing");
 const fixture = @embedFile("image_fixture/colors.png");
@@ -98,8 +99,8 @@ pub fn run(allocator: std.mem.Allocator, worker: *images.Worker) !void {
 const Handoff = struct {
     allocator: std.mem.Allocator,
     main_thread: std.Thread.Id,
-    mutex: std.Thread.Mutex = .{},
-    changed: std.Thread.Condition = .{},
+    mutex: zio.Mutex = .{},
+    changed: zio.Condition = .{},
     ready: bool = false,
     released: bool = false,
     image: ?*images.Image = null,
