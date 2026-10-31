@@ -160,6 +160,13 @@ const Output = struct {
 pub fn decode(info: Info, pixels: []u8, cancellation: ?*const std.atomic.Value(bool)) !void {
     if (pixels.len != @as(usize, info.width) * info.height * 4) return error.InvalidImage;
     @memset(pixels, 0);
+    try compose(info, pixels, cancellation);
+}
+
+/// Decode one graphic over the RGBA canvas: its transparent pixels leave
+/// what the canvas held, as an animation's later frames do.
+pub fn compose(info: Info, pixels: []u8, cancellation: ?*const std.atomic.Value(bool)) !void {
+    if (pixels.len != @as(usize, info.width) * info.height * 4) return error.InvalidImage;
     var prefix: [4096]u16 = undefined;
     var suffix: [4096]u8 = undefined;
     var stack: [4096]u8 = undefined;
@@ -215,6 +222,171 @@ pub fn decode(info: Info, pixels: []u8, cancellation: ?*const std.atomic.Value(b
     return error.InvalidImage;
 }
 
+/// What happens to a frame's area before the next frame draws.
+pub const Disposal = enum(u2) {
+    /// Left as it is, as `keep` is.
+    none,
+    keep,
+    /// Cleared to transparent, as browsers show a GIF's background.
+    background,
+    /// Put back as it was before the frame drew.
+    previous,
+};
+/// One graphic of an animation: where it draws, how long it shows in
+/// hundredths of a second, and its disposal.
+pub const Frame = struct { info: Info, delay: u16, disposal: Disposal };
+
+/// The graphics of a GIF one after another. Plain-text graphics and unknown
+/// extensions are passed over, as browsers do.
+pub const Frames = struct {
+    bytes: []const u8,
+    width: u32,
+    height: u32,
+    global: []const u8,
+    /// Where the first block after the header and global table starts.
+    start: usize,
+    offset: usize,
+
+    pub fn init(bytes: []const u8) !Frames {
+        if (bytes.len < 13 or (!std.mem.eql(u8, bytes[0..6], "GIF87a") and !std.mem.eql(u8, bytes[0..6], "GIF89a"))) return error.InvalidImage;
+        const width = word(bytes, 6);
+        const height = word(bytes, 8);
+        if (width == 0 or height == 0) return error.InvalidImage;
+        if (width > 16384 or height > 16384 or @as(u64, width) * height > 16 * 1024 * 1024) return error.CapacityExceeded;
+        var offset: usize = 13;
+        const global = try table(bytes, &offset, bytes[10]);
+        return .{ .bytes = bytes, .width = width, .height = height, .global = global, .start = offset, .offset = offset };
+    }
+    pub fn reset(self: *Frames) void {
+        self.offset = self.start;
+    }
+    /// The next graphic, or null at the trailer.
+    pub fn next(self: *Frames) !?Frame {
+        const bytes = self.bytes;
+        var offset = self.offset;
+        defer self.offset = offset;
+        var transparent: ?u8 = null;
+        var delay: u16 = 0;
+        var disposal: Disposal = .none;
+        while (offset < bytes.len) {
+            const tag = bytes[offset];
+            offset += 1;
+            switch (tag) {
+                0x21 => {
+                    if (offset == bytes.len) return error.InvalidImage;
+                    const label = bytes[offset];
+                    offset += 1;
+                    if (label == 0xf9) {
+                        if (bytes.len - offset < 6 or bytes[offset] != 4 or bytes[offset + 5] != 0) return error.InvalidImage;
+                        const flags = bytes[offset + 1];
+                        transparent = if (flags & 1 != 0) bytes[offset + 4] else null;
+                        delay = word(bytes, offset + 2);
+                        // Undefined disposals act as none, as browsers do.
+                        disposal = switch ((flags >> 2) & 7) {
+                            1 => .keep,
+                            2 => .background,
+                            3 => .previous,
+                            else => .none,
+                        };
+                        offset += 6;
+                    } else {
+                        try blocks(bytes, &offset);
+                        // A graphic control before a plain-text graphic is its own.
+                        if (label == 0x01) {
+                            transparent = null;
+                            delay = 0;
+                            disposal = .none;
+                        }
+                    }
+                },
+                0x2c => {
+                    if (bytes.len - offset < 9) return error.InvalidImage;
+                    const left = word(bytes, offset);
+                    const top = word(bytes, offset + 2);
+                    const frame_width = word(bytes, offset + 4);
+                    const frame_height = word(bytes, offset + 6);
+                    const flags = bytes[offset + 8];
+                    if (frame_width == 0 or frame_height == 0 or @as(u32, left) + frame_width > self.width or @as(u32, top) + frame_height > self.height or flags & 0x18 != 0) return error.InvalidImage;
+                    offset += 9;
+                    const local = try table(bytes, &offset, flags);
+                    const palette = if (local.len == 0) self.global else local;
+                    if (palette.len == 0 or (transparent != null and transparent.? >= palette.len / 3)) return error.InvalidImage;
+                    if (offset == bytes.len or bytes[offset] < 2 or bytes[offset] > 8) return error.InvalidImage;
+                    const minimum: u4 = @intCast(bytes[offset]);
+                    offset += 1;
+                    const start = offset;
+                    try blocks(bytes, &offset);
+                    const info: Info = .{ .width = self.width, .height = self.height, .left = left, .top = top, .frame_width = frame_width, .frame_height = frame_height, .interlaced = flags & 0x40 != 0, .palette = palette, .transparent = transparent, .minimum = minimum, .data = bytes[start..offset] };
+                    return .{ .info = info, .delay = delay, .disposal = disposal };
+                },
+                0x3b => return null,
+                else => return error.InvalidImage,
+            }
+        }
+        // A stream cut short after a whole graphic ends there.
+        return null;
+    }
+};
+
+/// An animated GIF drawn frame after frame onto one RGBA canvas, each frame
+/// over what the ones before it left, as its disposal says.
+pub const Animation = struct {
+    allocator: std.mem.Allocator,
+    frames: Frames,
+    /// The picture so far: straight RGBA rows, alpha 0 or 255.
+    canvas: []u8,
+    /// The canvas before a frame that is put back after it, else empty.
+    saved: []u8 = &.{},
+    /// What the frame drawn last leaves for the next one to undo.
+    pending: ?struct { info: Info, disposal: Disposal } = null,
+
+    pub fn init(allocator: std.mem.Allocator, bytes: []const u8) !Animation {
+        const frames = try Frames.init(bytes);
+        const canvas = try allocator.alloc(u8, @as(usize, frames.width) * frames.height * 4);
+        @memset(canvas, 0);
+        return .{ .allocator = allocator, .frames = frames, .canvas = canvas };
+    }
+    pub fn deinit(self: *Animation) void {
+        self.allocator.free(self.canvas);
+        if (self.saved.len != 0) self.allocator.free(self.saved);
+        self.* = undefined;
+    }
+    /// Draw the next frame onto `canvas`, returning how long it shows in
+    /// nanoseconds, or null after the last. A delay of 10 ms or less shows
+    /// for 100 ms, as browsers do.
+    pub fn next(self: *Animation) !?u64 {
+        if (self.pending) |done| {
+            self.pending = null;
+            switch (done.disposal) {
+                .none, .keep => {},
+                .background => self.clear(done.info),
+                .previous => @memcpy(self.canvas, self.saved),
+            }
+        }
+        const frame = (try self.frames.next()) orelse return null;
+        if (frame.disposal == .previous) {
+            if (self.saved.len == 0) self.saved = try self.allocator.alloc(u8, self.canvas.len);
+            @memcpy(self.saved, self.canvas);
+        }
+        try compose(frame.info, self.canvas, null);
+        self.pending = .{ .info = frame.info, .disposal = frame.disposal };
+        const delay: u64 = if (frame.delay <= 1) 10 else frame.delay;
+        return delay * 10 * std.time.ns_per_ms;
+    }
+    /// Go back to before the first frame, with a clear canvas.
+    pub fn rewind(self: *Animation) void {
+        self.frames.reset();
+        @memset(self.canvas, 0);
+        self.pending = null;
+    }
+    fn clear(self: *Animation, info: Info) void {
+        for (0..info.frame_height) |row| {
+            const at = ((info.top + row) * @as(usize, info.width) + info.left) * 4;
+            @memset(self.canvas[at..][0 .. @as(usize, info.frame_width) * 4], 0);
+        }
+    }
+};
+
 test "first GIF graphic validates dimensions, tables, bounded blocks and LZW termination" {
     const bytes = "GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\x00\x00\x00\xff\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00;";
     const info = try inspect(bytes);
@@ -254,4 +426,38 @@ test "GIF malformed dimensions, graphic control, codes and mutated streams stay 
         var storage: [16 * 16 * 4]u8 = undefined;
         decode(current, storage[0 .. current.width * current.height * 4], null) catch continue;
     }
+}
+
+test "animation frames draw over each other as their disposals say" {
+    const red = "\x02\x02\x44\x01\x00";
+    const green = "\x02\x02\x4c\x01\x00";
+    const bytes = "GIF89a\x02\x00\x01\x00\x80\x00\x00\xff\x00\x00\x00\xff\x00" ++
+        "\x21\xf9\x04\x08\x05\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00" ++ red ++
+        "\x21\xfe\x01x\x00" ++
+        "\x21\xf9\x04\x00\x00\x00\x00\x00,\x01\x00\x00\x00\x01\x00\x01\x00\x00" ++ green ++
+        "\x21\xf9\x04\x0c\x02\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00" ++ green ++
+        ",\x01\x00\x00\x00\x01\x00\x01\x00\x00" ++ red ++ ";";
+    var animation = try Animation.init(std.testing.allocator, bytes);
+    defer animation.deinit();
+    const clear = [_]u8{ 0, 0, 0, 0 };
+    const r = [_]u8{ 255, 0, 0, 255 };
+    const g = [_]u8{ 0, 255, 0, 255 };
+    for (0..2) |_| {
+        try std.testing.expectEqual(@as(?u64, 50 * std.time.ns_per_ms), try animation.next());
+        try std.testing.expectEqualSlices(u8, &(r ++ clear), animation.canvas);
+        // The first frame's area is cleared; a delay of none shows 100 ms.
+        try std.testing.expectEqual(@as(?u64, 100 * std.time.ns_per_ms), try animation.next());
+        try std.testing.expectEqualSlices(u8, &(clear ++ g), animation.canvas);
+        try std.testing.expectEqual(@as(?u64, 20 * std.time.ns_per_ms), try animation.next());
+        try std.testing.expectEqualSlices(u8, &(g ++ g), animation.canvas);
+        // The third frame is put back before the fourth draws.
+        _ = try animation.next();
+        try std.testing.expectEqualSlices(u8, &(clear ++ r), animation.canvas);
+        try std.testing.expectEqual(@as(?u64, null), try animation.next());
+        animation.rewind();
+    }
+    var cut = try Animation.init(std.testing.allocator, bytes[0..44]);
+    defer cut.deinit();
+    _ = try cut.next();
+    try std.testing.expectError(error.InvalidImage, cut.next());
 }

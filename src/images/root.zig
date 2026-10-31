@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const bitmap = @import("bitmap.zig");
-const gif = @import("gif.zig");
+const gif = @import("ziggurat_gif");
 const webp = @import("webp.zig");
 const image_options = @import("ziggurat_image_options");
 pub const drawing = @import("ziggurat_drawing_resources");

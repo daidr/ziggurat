@@ -442,7 +442,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_text_layout", .module = text_layout },
         .{ .name = "ziggurat_text_outlines", .module = text_outlines },
     } });
-    const images = b.addModule("ziggurat_images", .{ .root_source_file = b.path("src/images/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_drawing_resources", .module = drawing_resources }} });
+    const gif = b.addModule("ziggurat_gif", .{ .root_source_file = b.path("src/images/gif.zig"), .target = target, .optimize = optimize });
+    const images = b.addModule("ziggurat_images", .{ .root_source_file = b.path("src/images/root.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat_drawing_resources", .module = drawing_resources }, .{ .name = "ziggurat_gif", .module = gif } } });
     const image_options = b.addOptions();
     image_options.addOption(bool, "webp", webp);
     images.addOptions("ziggurat_image_options", image_options);
@@ -813,6 +814,10 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_vector", .module = vector },
         .{ .name = "ziggurat_svg", .module = svg },
     } });
+    const view_video = b.addModule("ziggurat_view_video", .{ .root_source_file = b.path("src/view/video.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat_ui", .module = ui },   .{ .name = "ziggurat_view", .module = declarative_view },
+        .{ .name = "ziggurat_gif", .module = gif },
+    } });
     const view_timer = b.addModule("ziggurat_view_timer", .{ .root_source_file = b.path("src/view/timer.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat", .module = core },      .{ .name = "ziggurat_view", .module = declarative_view },
         .{ .name = "ziggurat_wake", .module = wake },
@@ -894,6 +899,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_wake", .module = wake },
             .{ .name = "ziggurat_view_timer", .module = view_timer },
             .{ .name = "ziggurat_view_graphics", .module = view_graphics },
+            .{ .name = "ziggurat_view_video", .module = view_video },
         });
         addSmoke(b, "smoke-animation-ui", "tests/animation_ui_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
@@ -2914,6 +2920,11 @@ pub fn build(b: *std.Build) void {
         const drawing_tests = b.addTest(.{ .root_module = drawing_resources });
         check.dependOn(&drawing_tests.step);
         test_step.dependOn(&b.addRunArtifact(drawing_tests).step);
+        const gif_tests = b.addTest(.{ .root_module = gif });
+        check.dependOn(&gif_tests.step);
+        const run_gif_tests = b.addRunArtifact(gif_tests);
+        test_step.dependOn(&run_gif_tests.step);
+        b.step("test-gif", "Run GIF graphic decoding and animation frame tests").dependOn(&run_gif_tests.step);
         const image_tests = b.addTest(.{ .root_module = images });
         check.dependOn(&image_tests.step);
         test_step.dependOn(&b.addRunArtifact(image_tests).step);
@@ -2953,6 +2964,11 @@ pub fn build(b: *std.Build) void {
         const run_chart_view_tests = b.addRunArtifact(chart_view_tests);
         test_step.dependOn(&run_chart_view_tests.step);
         b.step("test-chart-view", "Run chart view arrangement, storage and preparation key tests").dependOn(&run_chart_view_tests.step);
+        const view_video_tests = b.addTest(.{ .root_module = view_video });
+        check.dependOn(&view_video_tests.step);
+        const run_view_video_tests = b.addRunArtifact(view_video_tests);
+        test_step.dependOn(&run_view_video_tests.step);
+        b.step("test-view-video", "Run view video playback, frame timing and GIF decoder tests").dependOn(&run_view_video_tests.step);
         const view_graphics_tests = b.addTest(.{ .root_module = view_graphics });
         check.dependOn(&view_graphics_tests.step);
         const run_view_graphics_tests = b.addRunArtifact(view_graphics_tests);
@@ -3094,7 +3110,7 @@ const app_example_imports = [_][]const u8{
     "ziggurat_text_layout",   "ziggurat_window_placement", "ziggurat_game",             "ziggurat_terminal",
     "ziggurat_terminal_view", "ziggurat_rich_text",        "ziggurat_rich_text_editor", "ziggurat_rich_text_clipboard",
     "ziggurat_text_measure",  "ziggurat_markdown",         "ziggurat_markdown_view",    "ziggurat_vector",
-    "ziggurat_text_outlines",
+    "ziggurat_text_outlines", "ziggurat_view_video",
 };
 
 const Example = struct { name: []const u8, path: []const u8, web: bool = false };
@@ -3130,6 +3146,7 @@ const app_examples = [_]Example{
     .{ .name = "wind", .path = "examples/wind.zig" },
     .{ .name = "mayoi", .path = "examples/mayoi.zig" },
     .{ .name = "rich-text", .path = "examples/rich_text.zig" },
+    .{ .name = "video", .path = "examples/video.zig" },
     .{ .name = "hybrid", .path = "examples/hybrid.zig", .web = true },
 };
 
