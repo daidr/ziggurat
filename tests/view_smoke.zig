@@ -674,8 +674,7 @@ fn runMenu(allocator: std.mem.Allocator) !void {
     var storage: view.Storage(32, 512) = .{};
     var host = view.Host.init(&state, Menu.build, storage.buffers(), .{});
     host.context.render_mode = .gdi;
-    // GTK reports buttons other than the primary one to windows that ask
-    // for native pointer presses.
+    // Secondary presses travel the native press path on every platform.
     const window = try app.createWindow(.{ .width = width, .height = height, .native_pointer_clicks = true });
     try host.attach(window);
     try paint(&host, window);
