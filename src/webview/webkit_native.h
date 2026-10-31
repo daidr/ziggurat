@@ -61,6 +61,10 @@ typedef struct ZwkOptions {
     ZwkProfileContext *profile_context;
     const ZwkInitializerInput *initializers;
     uint32_t developer_tools;
+    /* WebKitUserContentFilter references the manager adds before any load. */
+    void *const *content_filters;
+    uint32_t content_filter_count;
+    uint32_t audio_muted;
     /* The page-facts script's call, a JavaScript expression, or NULL. */
     const char *facts;
     /* Nonzero lets audible media play without a user gesture. */
@@ -78,6 +82,10 @@ int zwk_session_park(ZwkState *,uint64_t epoch);
 int zwk_session_size(ZwkState *,uint32_t *width,uint32_t *height);
 void zwk_session_parent_destroying(ZwkState *,uint64_t epoch);
 void zwk_close(ZwkState *);
+/* op 0 reads muted, 1 sets muted from *value, 2 reads whether the page plays audio. */
+int zwk_audio(ZwkState *,int op,int *value);
+/* Replaces the content filters of the view's user content manager. */
+int zwk_content_filters(ZwkState *,void *const *filters,uint32_t count);
 int zwk_evaluate(ZwkState *,const char *,uint64_t);
 void zwk_evaluate_cancel(ZwkState *,uint64_t);
 int zwk_post(ZwkState *,const char *);

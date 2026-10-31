@@ -242,7 +242,7 @@ const Unsupported = struct {
     }
     fn requestStop(_: *@This().Primary) void {}
     fn deinitPrimary(_: *@This().Primary) void {}
-    fn forward(_: *@This().Secondary, _: u32, _: []const u8) !void {
+    fn forward(_: *@This().Secondary, _: u32, _: []const u8) error{ UnsupportedCapability, PrimaryUnavailable }!void {
         return error.UnsupportedCapability;
     }
     fn deinitSecondary(_: *@This().Secondary) void {}

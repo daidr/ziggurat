@@ -40,6 +40,7 @@ pub const Sound = @import("sound.zig").Sound;
 
 pub const Engine = engine.Engine;
 pub const Options = engine.Options;
+pub const Latency = engine.Latency;
 pub const Output = engine.Output;
 pub const Player = engine.Player;
 pub const EndedCallback = engine.EndedCallback;

@@ -207,7 +207,7 @@ S02 当前仍为部分实现：Windows/Linux 已提供 `launchExecutable`、`ope
 
 ## 菜单标准角色
 
-`menu_roles.Role` 列出常用命令（撤销、重做、剪切、复制、粘贴、全选、重新载入、缩放、全屏、最小化、关闭、新建、打开、保存、另存为、退出等）和标准子菜单（文件、编辑、显示、窗口、格式、应用菜单）。`defaults(role, context)` 给出按语言的标签与快捷键：内置英文、简体中文、繁体中文，`resolve(locale, overrides)` 先取应用覆盖、再取内置语言、最后英文；Windows 上重做是 Ctrl+Y、退出叫“退出/Exit”且无快捷键，Linux 重做是 Ctrl+Shift+Z、退出是 Ctrl+Q；`documents = true` 时文件菜单带文档命令，关闭项称“关闭”而非“关闭窗口”。
+`menu_roles.Role` 列出常用命令（撤销、重做、剪切、复制、粘贴、全选、重新载入、缩放、全屏、最小化、关闭、新建、打开、保存、另存为、退出等）和标准子菜单（文件、编辑、显示、窗口、格式、应用菜单）。`defaults(role, context)` 给出按语言的标签与快捷键：内置英文、简体中文、繁体中文、日文，`resolve(locale, overrides)` 先取应用覆盖、再取内置语言、最后英文；Windows 上重做是 Ctrl+Y、退出叫“退出/Exit”且无快捷键，Linux 重做是 Ctrl+Shift+Z、退出是 Ctrl+Q；`documents = true` 时文件菜单带文档命令，关闭项称“关闭”而非“关闭窗口”。
 
 `Builder.init(items, labels, context)` 把角色写成普通 `Item`，标签写入调用者提供的存储，子菜单角色带出默认条目，同一角色重复出现时（如文件与窗口菜单中的关闭）分配下一个出现序号，只有第一个带快捷键。角色项 ID 位于 `menu_roles.id_base` 之上，`Role.fromId` 还原角色；应用自己的 ID 保持在其下。切换语言时用新 locale 重新构建并再次 `setMenu`。`menu_role_actions.perform(app, window, id)` 执行窗口与应用类角色的默认动作（退出走 `requestQuit`，关闭走用户关闭请求，最小化、缩放、全屏切换），编辑、视图与文档类角色返回 `unhandled`，交给当前内容处理。快捷键键名新增 `plus`（主键盘区的 =/+ 键）与 `minus`。
 

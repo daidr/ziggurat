@@ -632,16 +632,18 @@ const TestBackend = struct {
     fail_writes_after: ?u32 = null,
     writes: u32 = 0,
     heard: f32 = 0,
+    ahead: u64 = 0,
 
     fn opener(self: *TestBackend) audio.Opener {
         return .{ .context = self, .open = open };
     }
 
-    fn open(context: *anyopaque, detail: *audio.Detail) audio.OpenError!audio.Device {
+    fn open(context: *anyopaque, ahead: u64, detail: *audio.Detail) audio.OpenError!audio.Device {
         const self: *TestBackend = @ptrCast(@alignCast(context));
         self.mutex.lock();
         defer self.mutex.unlock();
         self.opens += 1;
+        self.ahead = ahead;
         if (self.fail_open) |err| {
             detail.set("test backend: {s}", .{@errorName(err)});
             return err;
@@ -739,4 +741,167 @@ test "threads decode streams ahead on their own" {
         if (waited > 10_000) return error.Timeout;
         zio.sleep(std.time.ns_per_ms);
     }
+}
+
+test "the output opens again to hold as far ahead as the latency asks" {
+    var backend = TestBackend{};
+    const engine = try Engine.init(allocator, .{ .output = .{ .custom = backend.opener() }, .latency = .playback });
+    defer engine.deinit();
+    const samples = try allocator.alloc(f32, rate);
+    defer allocator.free(samples);
+    @memset(samples, 0.25);
+    const tone = try sound(1, samples);
+    defer tone.release();
+    const player = try engine.play(tone);
+    try waitForOpens(&backend, 1);
+    backend.mutex.lock();
+    try testing.expectEqual(@as(u64, 250 * std.time.ns_per_ms), backend.ahead);
+    backend.mutex.unlock();
+    engine.setLatency(.interactive);
+    try testing.expectEqual(audio.Latency.interactive, engine.latency());
+    try waitForOpens(&backend, 2);
+    player.stop();
+    backend.mutex.lock();
+    defer backend.mutex.unlock();
+    try testing.expectEqual(@as(u64, 40 * std.time.ns_per_ms), backend.ahead);
+    try testing.expectEqual(@as(u32, 1), backend.closes);
+}
+
+fn waitForOpens(backend: *TestBackend, count: u32) !void {
+    var waited: u32 = 0;
+    while (true) : (waited += 1) {
+        backend.mutex.lock();
+        const opens = backend.opens;
+        backend.mutex.unlock();
+        if (opens >= count) return;
+        if (waited > 10_000) return error.Timeout;
+        zio.sleep(std.time.ns_per_ms);
+    }
+}
+
+/// What the output holds ahead in the position tests: 100 ms.
+const held_frames = rate / 10;
+
+/// Makes a manual engine's output hold `frames` ahead of what is heard, as
+/// a device that just opened.
+fn hold(engine: *Engine, frames: i64) void {
+    engine.mutex.lock();
+    defer engine.mutex.unlock();
+    engine.held = frames;
+    engine.unheard = 0;
+}
+
+fn mix(engine: *Engine, count: usize) !void {
+    allocator.free(try render(engine, count));
+}
+
+fn expectHeardAt(player: Player, frame: u64) !void {
+    const got: i64 = @intCast(player.position());
+    const want: i64 = @intCast(nanoseconds(frame));
+    if (@abs(got - want) > std.time.ns_per_us) {
+        std.debug.print("position {d} ns, want {d} ns (frame {d})\n", .{ got, want, frame });
+        return error.TestUnexpectedResult;
+    }
+}
+
+fn longSound() !*Sound {
+    const samples = try allocator.alloc(f32, 10 * rate);
+    defer allocator.free(samples);
+    @memset(samples, 0);
+    return sound(1, samples);
+}
+
+test "a player's position is what is heard, behind what was mixed" {
+    const engine = try manual();
+    defer engine.deinit();
+    hold(engine, held_frames);
+    const long = try longSound();
+    defer long.release();
+    const player = try engine.play(long);
+    try mix(engine, held_frames / 2);
+    try expectHeardAt(player, 0);
+    try mix(engine, held_frames / 2);
+    try expectHeardAt(player, 0);
+    try mix(engine, 3000);
+    try expectHeardAt(player, 3000);
+    // A device opening again holds nothing of what was mixed before, which
+    // it dropped: the position goes on from what was mixed.
+    hold(engine, held_frames);
+    try expectHeardAt(player, held_frames + 3000);
+}
+
+test "right after a seek the position is where it moved to" {
+    const engine = try manual();
+    defer engine.deinit();
+    hold(engine, held_frames);
+    const long = try longSound();
+    defer long.release();
+    const player = try engine.play(long);
+    try mix(engine, 2 * held_frames);
+    player.seek(2 * std.time.ns_per_s);
+    try expectHeardAt(player, 2 * rate);
+    try mix(engine, held_frames - 100);
+    try expectHeardAt(player, 2 * rate);
+    try mix(engine, 600);
+    try expectHeardAt(player, 2 * rate + 500);
+    player.stop();
+    try expectHeardAt(player, 0);
+}
+
+test "paused, a player goes on for as long as the output holds" {
+    const engine = try manual();
+    defer engine.deinit();
+    hold(engine, held_frames);
+    const long = try longSound();
+    defer long.release();
+    const player = try engine.play(long);
+    try mix(engine, 10000);
+    player.pause();
+    try expectHeardAt(player, 10000 - held_frames);
+    try mix(engine, 2000);
+    try expectHeardAt(player, 12000 - held_frames);
+    // It faded out over ramp_frames after the pause.
+    try mix(engine, 2 * held_frames);
+    try expectHeardAt(player, 10000 + ramp_frames);
+    try mix(engine, 1000);
+    try expectHeardAt(player, 10000 + ramp_frames);
+    player.play();
+    try mix(engine, held_frames - 100);
+    try expectHeardAt(player, 10000 + ramp_frames);
+    try mix(engine, 600);
+    try expectHeardAt(player, 10000 + ramp_frames + 500);
+}
+
+test "at a speed, what the output holds is that much more of the source" {
+    const engine = try manual();
+    defer engine.deinit();
+    hold(engine, held_frames);
+    const long = try longSound();
+    defer long.release();
+    const player = try engine.createPlayer(long);
+    player.setSpeed(2);
+    player.play();
+    try mix(engine, 3 * held_frames);
+    try expectHeardAt(player, 4 * held_frames);
+    player.setSpeed(0.5);
+    try mix(engine, held_frames * 3 / 2);
+    // Of the 150 ms heard since, 100 ms were mixed at 2, 50 ms at 0.5.
+    try expectHeardAt(player, 4 * held_frames + 2 * held_frames + held_frames / 4);
+}
+
+test "a looping player's position heard comes back to the loop's start" {
+    const engine = try manual();
+    defer engine.deinit();
+    hold(engine, 50);
+    const samples = ramp(100);
+    const looped = try sound(1, &samples);
+    defer looped.release();
+    const player = try engine.createPlayer(looped);
+    player.setLoopRange(nanoseconds(30), nanoseconds(60));
+    player.play();
+    try mix(engine, 160);
+    try expectHeardAt(player, 50);
+    try mix(engine, 10);
+    // 120 heard: 60, then two loops of 30.
+    try expectHeardAt(player, 30);
 }

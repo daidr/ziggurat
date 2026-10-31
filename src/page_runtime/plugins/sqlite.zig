@@ -669,7 +669,7 @@ fn denied(item: *Connection, comptime message: []const u8) RunError {
 }
 
 fn statAt(dir: std.Io.Dir, name: []const u8) !std.Io.File.Kind {
-    if (is_windows) {
+    if (is_windows or builtin.os.tag.isDarwin()) {
         return (try dir.statFile(zio.io(), name, .{ .follow_symlinks = false })).kind;
     }
     const linux = std.os.linux;

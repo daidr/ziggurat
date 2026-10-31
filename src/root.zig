@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const backend = if (builtin.is_test) @import("platform/testing.zig") else if (builtin.os.tag == .windows) @import("platform/windows.zig") else if (builtin.os.tag == .linux) @import("platform/linux.zig") else @import("platform/unsupported.zig");
+const backend = if (builtin.is_test) @import("platform/testing.zig") else if (builtin.os.tag == .windows) @import("platform/windows.zig") else if (builtin.os.tag == .linux) @import("platform/linux.zig") else if (builtin.os.tag == .macos) @import("platform/macos.zig") else @import("platform/unsupported.zig");
 const mailbox = @import("mailbox.zig");
 const registry = @import("registry.zig");
 const app_stop = @import("app_stop.zig");
@@ -39,10 +39,10 @@ pub const StopToken = app_stop.Token;
 pub const Cleanup = struct { task: Task, next: ?*Cleanup = null, queued: bool = false };
 pub const NativeWaitToken = struct { index: u8, generation: u64 };
 pub const platform_capabilities = .{
-    .native_windows = builtin.os.tag == .windows or builtin.os.tag == .linux,
+    .native_windows = builtin.os.tag == .windows or builtin.os.tag == .linux or builtin.os.tag == .macos,
     .native_waits = builtin.os.tag == .windows,
     .application_icon = builtin.os.tag == .windows,
-    .text_input = builtin.os.tag == .windows or builtin.os.tag == .linux,
+    .text_input = builtin.os.tag == .windows or builtin.os.tag == .linux or builtin.os.tag == .macos,
 };
 pub const Point = struct { x: f32, y: f32 };
 pub const Rect = struct {
@@ -59,7 +59,7 @@ pub const Paint = struct { native_context: *anyopaque, native_window: ?*anyopaqu
 pub const TextPreedit = struct { text: []const u8, selection_start: usize, selection_end: usize };
 /// Native delivery path, not an assertion about a physical keyboard or a
 /// language engine. A GTK text-service commit can include keyboard translation.
-pub const TextProducer = enum { win32_character, imm_result, gtk_text_service_commit, gtk_keyval_fallback, application };
+pub const TextProducer = enum { win32_character, imm_result, gtk_text_service_commit, gtk_keyval_fallback, appkit_text_input, application };
 pub const TextInput = struct { text: []const u8, producer: TextProducer };
 pub const EditKeyCode = enum { left, right, up, down, home, end, backspace, delete, a, c, x, v, z, y };
 pub const EditKey = struct { key: EditKeyCode, shift: bool = false, control: bool = false };
@@ -230,7 +230,10 @@ pub const Event = union(enum) {
     pointer_down: PointerButtonInput,
     pointer_up: PointerButtonInput,
     pointer_move: Point,
-    wheel: struct { position: Point, delta: Point },
+    /// `delta` in DIPs, 48 a notch of a mouse wheel. `precise` marks a
+    /// device that scrolls by distance, as a touchpad does, and `momentum`
+    /// scrolling that goes on after the fingers left it.
+    wheel: struct { position: Point, delta: Point, precise: bool = false, momentum: bool = false },
     focus: bool,
     /// Text slices are borrowed for the duration of the content callback.
     text_input: TextInput,
@@ -441,6 +444,9 @@ pub const WindowOptions = struct {
     /// unless left at its default.
     opacity: f32 = 1,
     skip_taskbar: bool = false,
+    /// False shows the window without taking the keyboard from the window
+    /// that has it, as a prompt raised by background work should.
+    focus_on_show: bool = true,
     /// Reserved client edge in DIP for .custom; .borderless has no auto edges.
     resize_border: f32 = 6,
     /// Borrowed context remains valid through on_closed, like close handlers.

@@ -77,6 +77,18 @@ try {
     Wait-Until { -not (Test-Path $root) -and -not (Test-Path "$work/local/$id") } 'purge'
     if (Test-Path $key) { throw 'purge left the uninstall entry' }
 
+    # windows.installDirName names the folder; the hooks run as batch file lines
+    # (no quotes here, which PowerShell 5.1 passes on its own way).
+    $hooks = Join-Path $work 'hooks.txt'
+    Invoke-Checked "$Bin/ziggurat.exe" @('package', 'setup', '--zip', "$work/v2.zip", '--stub', "$Bin/ziggurat-setup.exe", '--install-dir-name', 'SmokeFolder', '--hook-install', "echo install %ZIGGURAT_SCOPE%>> $hooks", '--hook-uninstall', "echo uninstall>> $hooks", '--output', "$work/setup-folder.exe")
+    Invoke-Checked "$work/setup-folder.exe" @('--silent')
+    $folder = "$work/local/Programs/SmokeFolder"
+    if (-not (Test-Path "$folder/fixture.exe") -or (Test-Path $root)) { throw 'installDirName did not name the install folder' }
+    Invoke-Checked "$folder/uninstall.exe" @('--silent', '--purge')
+    Wait-Until { -not (Test-Path $folder) } 'uninstall from the named folder'
+    $lines = @(Get-Content $hooks | ForEach-Object { $_.Trim() })
+    if (($lines -join '|') -ne 'install user|uninstall') { throw "hooks ran as: $($lines -join '|')" }
+
     # install.ps1 downloads the newest installer, checks it against
     # SHA256SUMS and runs it silently, in Windows PowerShell 5.1 and in
     # PowerShell 7; a wrong SHA-256 installs nothing.

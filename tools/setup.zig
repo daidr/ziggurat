@@ -31,6 +31,7 @@ const InstallRecord = struct {
     icon: ?[]const u8 = null,
     link: ?[]const u8 = null,
     shortcut: ?[]const u8 = null,
+    uninstall_hook: ?[]const u8 = null,
 };
 
 pub fn main(init: std.process.Init.Minimal) void {
@@ -120,13 +121,14 @@ fn linuxDataHome(allocator: std.mem.Allocator) ![]const u8 {
 fn locations(allocator: std.mem.Allocator, config: format.Config, scope: Scope, directory: ?[]const u8) !Locations {
     const id = config.identity;
     if (windows) {
+        const folder = config.install_dir_name orelse id;
         const local = try env(allocator, "LOCALAPPDATA");
         const menu_base = if (scope == .user)
             try std.fs.path.join(allocator, &.{ try env(allocator, "APPDATA"), "Microsoft", "Windows", "Start Menu", "Programs" })
         else
             try std.fs.path.join(allocator, &.{ try env(allocator, "ProgramData"), "Microsoft", "Windows", "Start Menu", "Programs" });
         return .{
-            .root = directory orelse if (scope == .user) try std.fs.path.join(allocator, &.{ local, "Programs", id }) else try std.fs.path.join(allocator, &.{ try env(allocator, "ProgramFiles"), id }),
+            .root = directory orelse if (scope == .user) try std.fs.path.join(allocator, &.{ local, "Programs", folder }) else try std.fs.path.join(allocator, &.{ try env(allocator, "ProgramFiles"), folder }),
             .data = try std.fs.path.join(allocator, &.{ local, id }),
             .shortcut = try std.fs.path.join(allocator, &.{ menu_base, try std.fmt.allocPrint(allocator, "{s}.lnk", .{config.name}) }),
         };
@@ -144,6 +146,51 @@ fn locations(allocator: std.mem.Allocator, config: format.Config, scope: Scope, 
 
 fn say(silent: bool, comptime fmt: []const u8, args: anytype) void {
     if (!silent) std.debug.print(fmt ++ "\n", args);
+}
+
+const HookContext = struct {
+    root: []const u8,
+    scope: []const u8,
+    version: []const u8,
+    silent: bool,
+    launcher: ?[]const u8 = null,
+};
+
+/// Runs one of the app's hooks with the shell and reports whether it
+/// succeeded. Its output goes where the setup program's does.
+fn runHook(allocator: std.mem.Allocator, kind: []const u8, command: []const u8, context: HookContext) bool {
+    return runHookChecked(allocator, command, context) catch |err| {
+        std.debug.print("setup: the {s} hook could not run: {s}\n", .{ kind, @errorName(err) });
+        return false;
+    };
+}
+
+fn runHookChecked(allocator: std.mem.Allocator, command: []const u8, context: HookContext) !bool {
+    var map = try zio.getEnvMap(allocator);
+    try map.put("ZIGGURAT_INSTALL_DIR", context.root);
+    try map.put("ZIGGURAT_SCOPE", context.scope);
+    try map.put("ZIGGURAT_VERSION", context.version);
+    try map.put("ZIGGURAT_SILENT", if (context.silent) "1" else "0");
+    if (context.launcher) |path| try map.put("ZIGGURAT_APP", path);
+    if (!windows) {
+        var child = try zio.spawn(.{ .argv = &.{ "/bin/sh", "-c", command }, .environ_map = &map });
+        return switch (try child.wait(zio.io())) {
+            .exited => |code| code == 0,
+            else => false,
+        };
+    }
+    // cmd.exe reads quotes its own way, which no argument quoting gives it:
+    // the command runs as a batch file's line instead.
+    var random: [8]u8 = undefined;
+    zio.random.bytes(&random);
+    const script = try std.fs.path.join(allocator, &.{ try env(allocator, "TEMP"), try std.fmt.allocPrint(allocator, "ziggurat-hook-{s}.cmd", .{std.fmt.bytesToHex(random, .lower)}) });
+    try std.Io.Dir.cwd().writeFile(zio.io(), .{ .sub_path = script, .data = try std.fmt.allocPrint(allocator, "@echo off\r\n{s}\r\n", .{command}) });
+    defer std.Io.Dir.cwd().deleteFile(zio.io(), script) catch {};
+    var child = try zio.spawn(.{ .argv = &.{script}, .environ_map = &map });
+    return switch (try child.wait(zio.io())) {
+        .exited => |code| code == 0,
+        else => false,
+    };
 }
 
 fn install(allocator: std.mem.Allocator, args: []const []const u8, self: std.Io.File, located: format.Located) !u8 {
@@ -175,8 +222,14 @@ fn install(allocator: std.mem.Allocator, args: []const []const u8, self: std.Io.
     if (!std.mem.eql(u8, &digest, &located.config_sha256)) return error.InvalidSetupPayload;
     const config = std.json.parseFromSliceLeaky(format.Config, allocator, config_bytes, .{ .allocate = .alloc_always }) catch return error.InvalidSetupPayload;
     try update.publication.validateFilename(config.executable);
+    if (config.install_dir_name) |name| if (!format.validInstallDirName(name)) return error.InvalidSetupPayload;
     const version = try update.retention.parseVersion(config.version);
     const where = try locations(allocator, config, scope, directory);
+    const hook_context: HookContext = .{ .root = where.root, .scope = @tagName(scope), .version = config.version, .silent = silent };
+    if (config.hooks.init) |command| if (!runHook(allocator, "init", command, hook_context)) {
+        std.debug.print("setup: the app's init hook failed; nothing was installed\n", .{});
+        return 1;
+    };
     say(silent, "Installing {s} {s} into {s}", .{ config.name, config.version, where.root });
 
     // The root is dedicated to this application: uninstalling deletes it whole,
@@ -237,9 +290,18 @@ fn install(allocator: std.mem.Allocator, args: []const []const u8, self: std.Io.
         .icon = where.icon,
         .link = where.link,
         .shortcut = where.shortcut,
+        .uninstall_hook = config.hooks.uninstall,
     };
     try atomicWrite(root, "install.json", try std.json.Stringify.valueAlloc(allocator, record, .{ .whitespace = .indent_2, .emit_null_optional_fields = false }));
     if (windows) try integrateWindows(allocator, config, where, scope, launcher, located.zip_bytes) else try integrateLinux(allocator, config, where, root, launcher, version);
+    if (config.hooks.install) |command| {
+        var context = hook_context;
+        context.launcher = launcher;
+        if (!runHook(allocator, "install", command, context)) {
+            std.debug.print("setup: {s} is installed, but the app's install hook failed\n", .{config.name});
+            return 1;
+        }
+    }
     say(silent, "Installed. Start {s}; uninstall with {s}", .{ launcher, try std.fs.path.join(allocator, &.{ where.root, "uninstall" ++ exe_suffix }) });
     return 0;
 }
@@ -365,6 +427,11 @@ fn removeInstallation(allocator: std.mem.Allocator, record: InstallRecord, direc
         if (std.mem.eql(u8, arg, "--silent") or std.mem.eql(u8, arg, "/S")) silent = true else if (std.mem.eql(u8, arg, "--purge")) purge = true;
     }
     if (std.mem.eql(u8, std.fs.path.basename(directory), "") or std.mem.eql(u8, directory, "/")) return error.InvalidInstallRecord;
+    if (record.uninstall_hook) |command| {
+        const launcher = try std.fs.path.join(allocator, &.{ directory, try std.fmt.allocPrint(allocator, "{s}{s}", .{ std.fs.path.stem(record.executable), exe_suffix }) });
+        if (!runHook(allocator, "uninstall", command, .{ .root = directory, .scope = record.scope, .version = record.version, .silent = silent, .launcher = launcher }))
+            std.debug.print("setup: the app's uninstall hook failed; removing {s} anyway\n", .{record.name});
+    }
     removeIntegration(.{ .root = directory, .data = "", .desktop = record.desktop, .icon = record.icon, .link = record.link, .shortcut = record.shortcut });
     if (windows) try unregisterWindows(allocator, record);
     try std.Io.Dir.cwd().deleteTree(zio.io(), directory);
