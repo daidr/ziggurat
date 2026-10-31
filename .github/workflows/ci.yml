@@ -275,6 +275,10 @@ jobs:
           zig_bin=$(sh scripts/fetch-zig.sh)
           printf '%s\n' "$(dirname "$zig_bin")" >> "$GITHUB_PATH"
           sh scripts/ci-zig-cache.sh >> "$GITHUB_ENV"
+      - name: Cross-thread wakes through std.Io
+        run: |
+          zig build-exe tests/macos_thread_probe.zig -lc -femit-bin="$RUNNER_TEMP/thread-probe"
+          perl -e 'alarm 60; exec @ARGV' "$RUNNER_TEMP/thread-probe"
       - name: Compile everything for macOS
         # The unit tests do not pass on macOS yet: cross-thread wakes panic
         # inside std.Io, the watch plugin has no macOS backend and two SVG
