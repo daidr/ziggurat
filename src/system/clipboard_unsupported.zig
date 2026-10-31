@@ -13,6 +13,9 @@ pub fn write(_: *api.Board, _: []const api.Entry) !void {
 pub fn offer(_: *api.Board, _: []const api.Format) !void {
     return error.UnsupportedCapability;
 }
+pub fn clear(_: *api.Board) !void {
+    return error.UnsupportedCapability;
+}
 pub fn revoke(_: *api.Board) void {}
 pub fn start(_: *api.Board, _: *api.Request) !void {
     return error.UnsupportedCapability;

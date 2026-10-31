@@ -154,12 +154,23 @@ const window = try app.createWindow(.{
 | `custom_decoration` | 支持 | 支持 | 不支持，创建非 system 装饰返回 `UnsupportedCapability` |
 | `native_move_resize` | 支持 | 由 WM 的 `_NET_WM_MOVERESIZE` 决定 | 不支持 |
 | `system_menu` | 支持 | 由 WM 的 `_GTK_SHOW_WINDOW_MENU` 决定 | 不支持 |
-| `transparent` | 未实现，false | 未实现，false | 未实现，false |
+| `transparent` | 以材质创建且能显示材质的窗口 | 以 `transparent` 创建且屏幕有 RGBA visual | 同 X11 |
+| `vibrancy` | 以材质创建，Windows 11 build 22621 及以上 | 不支持 | 不支持 |
 | `backdrop_material` | `.system` 装饰且 Windows 11 build 22621 及以上 | 不支持 | 不支持 |
 
 `Window.setBackdrop(material)` 选择合成器在原生系统框架后绘制的材质：`.mica`、`.acrylic`、`.mica_alt`、`.none`，或 `.system` 恢复平台默认。Windows 用 DWM 的 system backdrop 窗口属性实现，在主线程同步提交；能力按进程读取一次的真实系统版本与窗口装饰判断，不支持时在任何原生调用前返回 `UnsupportedCapability`，原生拒绝返回 `WindowUpdateFailed` 并保留 HRESULT 诊断。框架不保存所选材质，也不在关闭后恢复；宿主需要跨启动保留时自己存储。材质只出现在系统标题栏/边框等非客户区，客户区仍由现有渲染器不透明绘制；`.borderless/.custom` 没有系统框架，因而报告不支持。系统可能因电源模式、透明效果设置或窗口失焦以纯色替代材质，这属于系统策略。
 
-客户区透明（`transparent`）仍未实现：它需要渲染器输出预乘 alpha 并改变整窗合成方式，不能只靠窗口属性完成。无边框能力不表示具备透明合成、模糊或背景材质。X11 无 WM 时仍可创建无边框窗口，但不能据此认为原生拖动、缩放或系统菜单可用；调用前查询每窗口的 capabilities。不支持的操作明确返回 `UnsupportedCapability`。Openbox 验证环境支持移动/缩放，未公布系统窗口菜单协议。
+### 透明窗口与材质
+
+`WindowOptions.transparent` 让窗口背景透明，`WindowOptions.vibrancy` 在帧留空的地方垫一层半透明、模糊身后内容的材质，`Window.setVibrancy(material)` 之后可以更换或用 `.none` 去掉，`Window.vibrancy()` 读回当前值。材质名称与 `Vibrancy` 枚举一一对应：区域材质 `window/content/sidebar/header/titlebar/under_window/under_page`，临时界面材质 `menu/popover/hud/sheet/tooltip/selection/fullscreen_ui`，以及 Windows 11 的三种系统背景 `mica/acrylic/tabbed`。
+
+Windows 11 build 22621 及以上，只有创建时就带材质的窗口能显示材质：它没有重定向位图（`WS_EX_NOREDIRECTIONBITMAP`），这一样式终生不变。材质映射到 DWM system backdrop：`tabbed` 为 Mica Alt，`acrylic` 与全部临时界面材质为 Acrylic，其余为 Mica；设置材质时客户区整体扩展为框架（`DwmExtendFrameIntoClientArea` 四边 -1），`.none` 收回框架并把背景设为无。这样的窗口里 GDI 什么也画不出：UI 的 GPU 渲染器改用 DirectComposition 合成交换链，帧以预乘 alpha 输出，每帧先清成全透明；GDI 回退帧在这种窗口里不可见。它也没有菜单栏：系统菜单仍在，Alt 或 F10 单按把菜单以弹出菜单打开在客户区左上角，Alt 加字母直接打开对应菜单，Alt 加空格仍是窗口菜单。没有带材质创建的窗口、更早的系统或其他平台调用 `setVibrancy` 只保存取值，不显示材质。`Window.showsVibrancy()` 报告材质此刻是否会在透明处显示，不显示时应自己画背景。Windows 的 `transparent` 不单独生效，窗口背景只在带材质时透明。
+
+GTK 没有材质。`transparent` 在屏幕提供 RGBA visual 时给窗口换上该 visual 并取消背景绘制，Cairo 渲染器每帧先清成透明再以 SOURCE 方式贴到窗口，留空处由合成器透出桌面；没有合成器时透明处显示为黑色。`capabilities().transparent` 为 true 时 `Paint.transparent` 也为 true，表示帧从透明开始。
+
+`ui` 的帧照常绘制；`view.Options.transparent_background = true` 让根节点不画主题背景，留空处显示材质或窗口后方。只在 `capabilities().transparent` 为 true 的窗口里使用它。
+
+无边框能力不表示具备透明合成、模糊或背景材质。X11 无 WM 时仍可创建无边框窗口，但不能据此认为原生拖动、缩放或系统菜单可用；调用前查询每窗口的 capabilities。不支持的操作明确返回 `UnsupportedCapability`。Openbox 验证环境支持移动/缩放，未公布系统窗口菜单协议。
 
 ## 指针形状
 

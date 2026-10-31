@@ -626,7 +626,7 @@ fn absolute(path: []const u8) bool {
 /// two characters. http/https need a non-empty "//authority" host. Bytes below
 /// 0x21, DEL and " < > \ ^ ` { | } are rejected; '%' needs two hex digits.
 /// Non-ASCII UTF-8 (IRI text) is passed to the system unchanged.
-fn validateUrl(url: []const u8, extra_schemes: []const []const u8) !void {
+pub fn validateUrl(url: []const u8, extra_schemes: []const []const u8) !void {
     if (url.len > max_url_bytes) return error.ArgumentTooLong;
     try validateText(url);
     if (extra_schemes.len > max_extra_schemes) return error.TooManySchemes;
@@ -726,28 +726,41 @@ fn wideZ(storage: []u16, text: []const u8) ![:0]u16 {
 }
 fn commandLine(storage: []u16, options: LaunchOptions) ![:0]u16 {
     var used: usize = 0;
-    var argument: [max_argument_bytes]u16 = undefined;
     for (0..options.arguments.len + 1) |index| {
         if (index > 0) try unit(storage, &used, ' ');
-        const text = if (index == 0) options.executable else options.arguments[index - 1];
-        const length = std.unicode.utf8ToUtf16Le(&argument, text) catch return error.ArgumentTooLong;
-        try unit(storage, &used, '"');
-        var at: usize = 0;
-        while (at < length) {
-            var slashes: usize = 0;
-            while (at < length and argument[at] == '\\') : (at += 1) slashes += 1;
-            const quote = at < length and argument[at] == '"';
-            const count = if (at == length or quote) slashes * 2 else slashes;
-            for (0..count) |_| try unit(storage, &used, '\\');
-            if (at == length) break;
-            if (quote) try unit(storage, &used, '\\');
-            try unit(storage, &used, argument[at]);
-            at += 1;
-        }
-        try unit(storage, &used, '"');
+        try appendQuoted(storage, &used, if (index == 0) options.executable else options.arguments[index - 1]);
     }
     storage[used] = 0;
     return storage[0..used :0];
+}
+/// Arguments alone, quoted so that CommandLineToArgvW splits them back.
+pub fn argumentLine(storage: []u16, arguments: []const []const u8) ![:0]u16 {
+    var used: usize = 0;
+    for (arguments, 0..) |text, index| {
+        try validateText(text);
+        if (index > 0) try unit(storage, &used, ' ');
+        try appendQuoted(storage, &used, text);
+    }
+    storage[used] = 0;
+    return storage[0..used :0];
+}
+fn appendQuoted(storage: []u16, used: *usize, text: []const u8) !void {
+    var argument: [max_argument_bytes]u16 = undefined;
+    const length = std.unicode.utf8ToUtf16Le(&argument, text) catch return error.ArgumentTooLong;
+    try unit(storage, used, '"');
+    var at: usize = 0;
+    while (at < length) {
+        var slashes: usize = 0;
+        while (at < length and argument[at] == '\\') : (at += 1) slashes += 1;
+        const quote = at < length and argument[at] == '"';
+        const count = if (at == length or quote) slashes * 2 else slashes;
+        for (0..count) |_| try unit(storage, used, '\\');
+        if (at == length) break;
+        if (quote) try unit(storage, used, '\\');
+        try unit(storage, used, argument[at]);
+        at += 1;
+    }
+    try unit(storage, used, '"');
 }
 fn unit(storage: []u16, used: *usize, value: u16) !void {
     if (used.* >= @min(max_command_units - 1, storage.len - 1)) return error.CommandTooLong;

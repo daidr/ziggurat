@@ -15,6 +15,9 @@ const layers = @import("layers.zig");
 const windows_layers = @import("windows_layers.zig");
 const composite = @import("composite.zig");
 const c = @import("ziggurat_c_win32");
+extern fn zwc_create(?*anyopaque) ?*anyopaque;
+extern fn zwc_present(*anyopaque, [*]const u32, u32, u32) c_long;
+extern fn zwc_destroy(?*anyopaque) void;
 
 pub const Renderer = struct {
     dc: c.HDC = null,
@@ -39,6 +42,14 @@ pub const Renderer = struct {
     /// kept until deinit; the oldest is replaced when all are taken.
     variant_fonts: [8]VariantFont = @splat(.{}),
     variant_next: u8 = 0,
+    /// Paint.transparent: frames start clear, keep their alpha and show on
+    /// the window through DirectComposition, since GDI draws nothing on a
+    /// window without a redirection bitmap.
+    window_transparent: bool = false,
+    composed: ?*anyopaque = null,
+    composed_window: ?*anyopaque = null,
+    /// Text of a transparent frame is drawn here as a mask, then blended.
+    glyph_surface: ?windows_layers.Surface = null,
     const VariantFont = struct { key: u32 = 0, scale: f32 = 0, font: c.HFONT = null };
     pub const LayerCandidate = *windows_layers.Workspace;
     pub fn layerMetadataBytes() usize {
@@ -255,7 +266,7 @@ pub const Renderer = struct {
         return if (self.layer_workspace) |workspace| workspace.physicalRect(rect) else windows_layers.physical(rect, self.scale);
     }
     fn transparent(self: *const Renderer) bool {
-        return if (self.layer_workspace) |workspace| workspace.active and (workspace.depth != 0 or workspace.transparent_root) else false;
+        return if (self.layer_workspace) |workspace| workspace.active and (workspace.depth != 0 or workspace.transparent_root) else self.window_transparent;
     }
     fn physicalClip(self: *const Renderer) ![4]f64 {
         if (self.layer_workspace) |workspace| if (workspace.active) {
@@ -390,11 +401,20 @@ pub const Renderer = struct {
 
     pub fn begin(self: *Renderer, paint: z.Paint) !void {
         _ = try geometry.validateSurface(paint.size.width, paint.size.height, paint.size.scale);
+        if (paint.transparent != self.window_transparent) {
+            self.window_transparent = paint.transparent;
+            if (self.layer_workspace == null) self.releaseSurface();
+        }
+        if (paint.transparent) try self.prepareGlyphs(paint.size);
         if (self.layer_workspace) |workspace| {
-            try workspace.begin(paint.size);
+            if (paint.transparent) try workspace.beginTransparent(paint.size) else try workspace.begin(paint.size);
             self.bindSurface(workspace.current());
             return;
         }
+        defer if (self.window_transparent and self.pixels != null) {
+            _ = c.GdiFlush();
+            @memset(self.pixels.?[0 .. @as(usize, self.width) * self.height], 0);
+        };
         if (self.width != paint.size.width or self.height != paint.size.height or self.scale != paint.size.scale) {
             self.releaseSurface();
             errdefer self.releaseSurface();
@@ -431,14 +451,40 @@ pub const Renderer = struct {
     }
     pub fn endChecked(self: *Renderer, paint: z.Paint) !void {
         if (self.layer_workspace) |workspace| {
+            if (self.window_transparent) {
+                const pixels = try workspace.commitTransparent();
+                self.bindSurface(workspace.front());
+                return self.presentComposed(paint, pixels);
+            }
             try workspace.commit(paint.native_context);
             self.bindSurface(workspace.front());
             return;
+        }
+        if (self.window_transparent) {
+            if (c.GdiFlush() == 0) return error.FlushSurfaceFailed;
+            return self.presentComposed(paint, self.pixels.?[0 .. @as(usize, self.width) * self.height]);
         }
         var clip: c.RECT = undefined;
         const region = c.GetClipBox(paint.native_context, &clip);
         if (region == c.ERROR) return error.PresentSurfaceFailed;
         if (region != c.NULLREGION and c.BitBlt(@ptrCast(@alignCast(paint.native_context)), 0, 0, @intCast(self.width), @intCast(self.height), self.dc, 0, 0, c.SRCCOPY) == 0) return error.PresentSurfaceFailed;
+    }
+    fn presentComposed(self: *Renderer, paint: z.Paint, pixels: []const u32) !void {
+        const hwnd = paint.native_window orelse c.WindowFromDC(@ptrCast(@alignCast(paint.native_context)));
+        if (self.composed == null or self.composed_window != hwnd) {
+            zwc_destroy(self.composed);
+            self.composed = zwc_create(hwnd) orelse return error.OutOfMemory;
+            self.composed_window = hwnd;
+        }
+        if (zwc_present(self.composed.?, pixels.ptr, paint.size.width, paint.size.height) < 0) return error.PresentSurfaceFailed;
+    }
+    fn prepareGlyphs(self: *Renderer, size: z.Size) !void {
+        if (self.glyph_surface) |*surface| {
+            if (surface.width == size.width and surface.height == size.height) return;
+            surface.deinit();
+            self.glyph_surface = null;
+        }
+        self.glyph_surface = try windows_layers.Surface.init(size, c.ANTIALIASED_QUALITY, null);
     }
     fn bounds(self: *const Renderer, r: Rect) !c.RECT {
         if (!layout.validRect(r) or !std.math.isFinite(self.scale) or self.scale <= 0) return error.InvalidGeometry;
@@ -452,7 +498,8 @@ pub const Renderer = struct {
         return ((rgb >> 16) & 0xff) | (rgb & 0xff00) | ((rgb & 0xff) << 16);
     }
     pub fn fill(self: *Renderer, r: Rect, rgb: u32) !void {
-        if (self.layer_workspace != null) {
+        // GDI writes no alpha: a transparent frame fills its own pixels.
+        if (self.layer_workspace != null or self.window_transparent) {
             const p = try geometry.plan(.{ .bounds = r, .color = geometry.Color.rgb(rgb) });
             _ = try self.bounds(r);
             const rect = self.physicalRect(.{ .x = r.x, .y = r.y, .width = r.width, .height = r.height });
@@ -525,8 +572,8 @@ pub const Renderer = struct {
         if (utf8.len > buffer.len) return error.TextTooLong;
         const count = try std.unicode.utf8ToUtf16Le(&buffer, utf8);
         const variant: c.HFONT = if (key.isDefault()) null else try self.variantFont(key);
-        if (self.layer_workspace) |workspace| {
-            const scratch = try workspace.glyph();
+        const glyphs: ?*windows_layers.Surface = if (self.layer_workspace) |workspace| try workspace.glyph() else if (self.window_transparent) &self.glyph_surface.? else null;
+        if (glyphs) |scratch| {
             const previous = if (variant) |font| c.SelectObject(scratch.dc, font) else null;
             defer if (previous) |font| {
                 _ = c.SelectObject(scratch.dc, font);
@@ -829,6 +876,8 @@ pub const Renderer = struct {
     }
     pub fn deinit(self: *Renderer) void {
         self.releaseVariantFonts();
+        zwc_destroy(self.composed);
+        if (self.glyph_surface) |*surface| surface.deinit();
         if (self.layer_workspace) |workspace| {
             workspace.deinit();
             self.layer_workspace = null;

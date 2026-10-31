@@ -32,12 +32,14 @@ const bar_items = [_]system.Item{
     .{ .id = 34, .parent = 30, .label = "Unavailable", .enabled = false, .accelerator = .{ .key = .f5 } },
     .{ .id = 35, .kind = .submenu, .label = "&Tools", .enabled = false },
     .{ .id = 36, .parent = 35, .label = "Locked", .accelerator = .{ .key = .f7 } },
+    .{ .id = 37, .parent = 30, .label = "Small", .radio = true, .checked = true },
+    .{ .id = 38, .parent = 30, .label = "Large", .radio = true },
 };
 // Ctrl in GDK's state mask.
 const control_mask = 1 << 2;
 const buttons = [_]system.MessageButton{ .{ .id = 21, .label = "&Save" }, .{ .id = 22, .label = "_Discard" }, .{ .id = 23, .label = "Cancel" } };
 
-const Step = enum { bar_command, bar_accelerator, bar_consumed, bar_disabled, bar_check, bar_replace, popup_select, popup_nested, popup_locked, popup_cancel, popup_detach, bar_clear, message_press, message_close, message_cancel, message_close_window, done };
+const Step = enum { bar_command, bar_accelerator, bar_consumed, bar_disabled, bar_check, bar_radio, bar_replace, popup_select, popup_nested, popup_locked, popup_cancel, popup_detach, bar_clear, message_press, message_close, message_cancel, message_close_window, done };
 
 const State = struct {
     app: *z.App,
@@ -153,7 +155,20 @@ const State = struct {
                 try std.testing.expectEqual(1, zsl_menubar_checked(self.owner.bar.?, 2));
                 try std.testing.expect(zsl_menubar_activate(self.owner.bar.?, 2) == 1);
             },
+            .bar_radio => {
+                // Radio commands are check items drawn as radios, checked or not.
+                try std.testing.expectEqual(1, zsl_menubar_checked(self.owner.bar.?, 5));
+                try std.testing.expectEqual(0, zsl_menubar_checked(self.owner.bar.?, 6));
+                try self.owner.setItemState(38, true, true);
+                try std.testing.expectEqual(0, zsl_menubar_checked(self.owner.bar.?, 5));
+                try std.testing.expectEqual(1, zsl_menubar_checked(self.owner.bar.?, 6));
+                try std.testing.expect(zsl_menubar_activate(self.owner.bar.?, 5) == 1);
+            },
             .bar_replace => {
+                // GTK toggled the radio on activation; the bar keeps the
+                // application's choice.
+                try std.testing.expectEqual(0, zsl_menubar_checked(self.owner.bar.?, 5));
+                try std.testing.expectEqual(1, zsl_menubar_checked(self.owner.bar.?, 6));
                 // GTK toggled the item on activation; the bar keeps the
                 // application's state.
                 try std.testing.expectEqual(1, zsl_menubar_checked(self.owner.bar.?, 2));
@@ -251,10 +266,10 @@ pub fn main() !void {
     try std.testing.expectEqual(system.PopupResult{ .request = 3, .selected = null }, state.popups[2].?);
     try std.testing.expectEqual(system.PopupResult{ .request = 4, .selected = null }, state.popups[3].?);
     try std.testing.expectEqual(3, state.message_count);
-    try std.testing.expectEqualSlices(u64, &.{ 31, 31, 31, 32, 33, 32 }, state.commands[0..state.command_count]);
+    try std.testing.expectEqualSlices(u64, &.{ 31, 31, 31, 32, 33, 37, 32 }, state.commands[0..state.command_count]);
     try std.testing.expectEqual(1, state.consumed_keys);
     try std.testing.expectEqual(system.MessageResult{ .request = 10, .response = .{ .button = 22 } }, state.messages[0].?);
     try std.testing.expectEqual(system.MessageResult{ .request = 11, .response = .{ .button = 23 } }, state.messages[1].?);
     try std.testing.expectEqual(system.MessageResult{ .request = 12, .response = .dismissed }, state.messages[2].?);
-    std.debug.print("GTK system menus smoke passed: menu bar command/accelerator/content-first/disabled/check/replace/clear, popup select/nested/disabled-ancestor/cancel/detach, message press/close/cancel/window-closure; native links left={d}\n", .{system.message.resourceCount()});
+    std.debug.print("GTK system menus smoke passed: menu bar command/accelerator/content-first/disabled/check/radio/replace/clear, popup select/nested/disabled-ancestor/cancel/detach, message press/close/cancel/window-closure; native links left={d}\n", .{system.message.resourceCount()});
 }

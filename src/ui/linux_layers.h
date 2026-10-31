@@ -74,7 +74,7 @@ static int layer_begin_mode(Renderer *s,uint32_t width,uint32_t height,float sca
     if(layer->active)return layer->transparent_root==(uint32_t)transparent_root?0:4;
     layer->active=1;layer->depth=0;layer->transparent_root=transparent_root;CairoTarget *target=layer_current(layer);layer_reset_target(target);layer_origin(layer,target,0,0);layer_alias(s,target);layer_reset_gradient_clip(s);
     if(layer->gaussian)layer->gaussian->visits=0;
-    cairo_save(target->context);cairo_set_operator(target->context,CAIRO_OPERATOR_SOURCE);if(transparent_root)cairo_set_source_rgba(target->context,0,0,0,0);else cairo_set_source_rgb(target->context,1,1,1);cairo_paint(target->context);cairo_restore(target->context);
+    cairo_save(target->context);cairo_set_operator(target->context,CAIRO_OPERATOR_SOURCE);if(transparent_root||s->window_transparent)cairo_set_source_rgba(target->context,0,0,0,0);else cairo_set_source_rgb(target->context,1,1,1);cairo_paint(target->context);cairo_restore(target->context);
     layer->stats.clear_pixels+=(uint64_t)width*height;return cairo_status(target->context)==CAIRO_STATUS_SUCCESS?0:2;
 }
 static int layer_begin(Renderer *s,uint32_t width,uint32_t height,float scale){return layer_begin_mode(s,width,height,scale,0);}
@@ -145,7 +145,7 @@ int zlc_layer_gaussian_planes(Renderer *s,GradientSurface *source,GradientSurfac
 static int layer_end(Renderer *s,cairo_t *destination){
     CairoLayers *layer=s->layers;if(!layer->active)return 1;if(layer->transparent_root)return 4;if(layer->depth){layer_abort(s);return 1;}
     CairoTarget *work=layer_current(layer);if(cairo_status(work->context)!=CAIRO_STATUS_SUCCESS){layer_abort(s);return 2;}
-    cairo_save(destination);cairo_scale(destination,1.0/layer->scale,1.0/layer->scale);cairo_matrix_t identity;cairo_matrix_init_identity(&identity);cairo_pattern_set_matrix(work->pattern,&identity);cairo_set_source(destination,work->pattern);cairo_paint(destination);layer_pattern_scale(layer,work->pattern);cairo_restore(destination);
+    cairo_save(destination);if(s->window_transparent)cairo_set_operator(destination,CAIRO_OPERATOR_SOURCE);cairo_scale(destination,1.0/layer->scale,1.0/layer->scale);cairo_matrix_t identity;cairo_matrix_init_identity(&identity);cairo_pattern_set_matrix(work->pattern,&identity);cairo_set_source(destination,work->pattern);cairo_paint(destination);layer_pattern_scale(layer,work->pattern);cairo_restore(destination);
     if(cairo_status(destination)!=CAIRO_STATUS_SUCCESS){layer_abort(s);return 2;}
     uint32_t previous=layer->front;layer->front=layer->work;layer->work=previous;layer->active=0;layer->front_transparent=0;layer->stats.committed_frames++;layer_alias(s,&layer->targets[layer->front]);return 0;
 }
@@ -187,7 +187,7 @@ int zlc_layer_finish_transform(Renderer *s,uint64_t visits,uint32_t left,uint32_
     layer->stats.composite_pixels+=visits;return 0;
 }
 void zlc_layer_stats(Renderer *s,ZgLayerStats *out){*out=s->layers?s->layers->stats:(ZgLayerStats){0};}
-int zlc_layer_transparent(Renderer *s){return s->layers&&s->layers->active&&(s->layers->depth||s->layers->transparent_root);}
+int zlc_layer_transparent(Renderer *s){return s->layers&&s->layers->active?(s->layers->depth||s->layers->transparent_root||s->window_transparent):s->window_transparent;}
 size_t zlc_layer_metadata_bytes(void){return sizeof(Renderer)+sizeof(CairoLayers);}
 int zlc_offscreen_prepare(Renderer *s){
     if(!s->layers||s->layers->active)return 1;

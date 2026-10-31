@@ -597,7 +597,15 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
         });
+        addSmoke(b, "smoke-drag", "tests/system_drag_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
         addSmoke(b, "smoke-desktop", "tests/system_desktop_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        addSmoke(b, "smoke-system-details", "tests/system_details_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
         });
@@ -632,6 +640,8 @@ pub fn build(b: *std.Build) void {
         clipboard_native.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
         const drop_native = native_support.add(b, system, "system-drop-native", "src/system/drop_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         drop_native.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        const transfer_native = native_support.add(b, system, "system-transfer-native", "src/system/transfer_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        transfer_native.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
         system.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
         system.link_libc = true;
     }
@@ -686,6 +696,8 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .linux) {
         const native = native_support.add(b, system, "system-linux-native", "src/system/linux_system.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         native.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        const details = native_support.add(b, system, "system-linux-details", "src/system/details_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        details.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
         const desktop = native_support.add(b, system, "system-linux-desktop", "src/system/linux_desktop.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         desktop.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
         desktop.linkSystemLibrary("x11", .{ .use_pkg_config = .force });
@@ -843,6 +855,11 @@ pub fn build(b: *std.Build) void {
         addSmoke(b, "smoke-backdrop", "tests/backdrop_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-vibrancy", "tests/vibrancy_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_system", .module = system },
         });
         addSmoke(b, "smoke-shader-effects", "tests/shader_effects_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
@@ -1474,6 +1491,7 @@ pub fn build(b: *std.Build) void {
         ui.linkSystemLibrary("oleaut32", .{});
     }
     if (target.result.os.tag == .windows) {
+        _ = native_support.add(b, ui, "ui-composed-native", "src/ui/windows_composed.c", &.{"-std=c11"}, target, optimize);
         ui.linkSystemLibrary("gdi32", .{});
         ui.link_libc = true;
     }

@@ -147,6 +147,10 @@ pub const Workspace = struct {
     pub fn begin(self: *Workspace, size: z.Size) !void {
         try self.beginMode(size, false);
     }
+    /// A window frame that starts transparent and keeps its alpha.
+    pub fn beginTransparent(self: *Workspace, size: z.Size) !void {
+        try self.beginMode(size, true);
+    }
     pub fn beginOffscreen(self: *Workspace) !void {
         if (self.active) return error.AlreadyDrawing;
         try self.beginMode(self.plan.options.size, true);
@@ -183,6 +187,23 @@ pub const Workspace = struct {
         self.front_transparent = true;
         self.active = false;
         self.stats.committed_frames +%= 1;
+    }
+    /// Commits a transparent window frame; its pixels stay the front until
+    /// the next commit.
+    pub fn commitTransparent(self: *Workspace) ![]const u32 {
+        if (!self.active) return error.NotDrawing;
+        if (!self.transparent_root) return error.SurfaceModeMismatch;
+        if (self.depth != 0 or self.current().clip_depth != 0) {
+            self.abort();
+            return error.UnbalancedGroups;
+        }
+        if (c.GdiFlush() == 0) return error.FlushSurfaceFailed;
+        const pixels = self.current().pixels.?[0 .. self.plan.plane_bytes / 4];
+        std.mem.swap(usize, &self.front_index, &self.work_index);
+        self.front_transparent = true;
+        self.active = false;
+        self.stats.committed_frames +%= 1;
+        return pixels;
     }
     pub fn abort(self: *Workspace) void {
         if (self.active) {

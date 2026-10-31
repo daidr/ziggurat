@@ -9,7 +9,7 @@ const menus = @import("menus.zig");
 const picker = @import("picker.zig");
 const desktop = @import("desktop.zig");
 
-const NativeItem = extern struct { label: [*:0]const u8, parent: i32, kind: u8, enabled: u8, checked: u8, padding: u8 = 0, keyval: u32, modifiers: u32, command: i32 };
+const NativeItem = extern struct { label: [*:0]const u8, parent: i32, kind: u8, enabled: u8, checked: u8, radio: u8 = 0, keyval: u32, modifiers: u32, command: i32 };
 const Done = *const fn (?*anyopaque, u64, i32) callconv(.c) void;
 const TrayEvent = *const fn (?*anyopaque, u64, i32, i32, i32) callconv(.c) void;
 extern fn zsl_popup_show(?*anyopaque, [*]const NativeItem, u32, c_int, f64, f64, ?*anyopaque, u64, Done, *c_int) ?*anyopaque;
@@ -60,7 +60,8 @@ const Pending = struct {
     request: u64 = 0,
     serial: u64 = 0,
 };
-const BarEntry = struct { id: u64, enabled: bool, ancestors: bool };
+/// `group` is the first item index of a radio command's group.
+const BarEntry = struct { id: u64, enabled: bool, ancestors: bool, own: bool = true, group: ?u8 = null };
 const HotkeyEntry = struct { id: u64, native: *anyopaque, serial: u64 };
 const Notification = struct { id: u64, native: *anyopaque, serial: u64 };
 const Chooser = struct {
@@ -239,7 +240,7 @@ pub const Owner = struct {
         var command: usize = 0;
         for (items, 0..) |item, index| if (item.kind == .command) {
             effective[command] = @intFromBool(enabled[command]);
-            entries[command] = .{ .id = ids[command], .enabled = enabled[command], .ancestors = plan.ancestors_enabled[index] };
+            entries[command] = .{ .id = ids[command], .enabled = enabled[command], .ancestors = plan.ancestors_enabled[index], .own = item.enabled, .group = plan.radio_group[index] };
             command += 1;
         };
         const serial = try self.nextSerial();
@@ -262,6 +263,7 @@ pub const Owner = struct {
         zsl_menubar_remove(bar, 1);
     }
     /// Updates a command item. Submenu state changes use a new setMenu snapshot.
+    /// Checking a radio item unchecks the rest of its group.
     pub fn setItemState(self: *Owner, id: u64, enabled: bool, checked: bool) !void {
         const window = try self.require();
         const scope = window.beginCallback() orelse return error.Closed;
@@ -271,6 +273,11 @@ pub const Owner = struct {
             const effective = enabled and entry.ancestors;
             if (zsl_menubar_state(bar, @intCast(index), @intFromBool(enabled), @intFromBool(effective), @intFromBool(checked)) == 0) return error.MenuUpdateFailed;
             entry.enabled = effective;
+            entry.own = enabled;
+            if (checked) if (entry.group) |group| for (self.bar_entries[0..self.bar_count], 0..) |sibling, other| {
+                if (other == index or sibling.group != group) continue;
+                if (zsl_menubar_state(bar, @intCast(other), @intFromBool(sibling.own), @intFromBool(sibling.enabled), 0) == 0) return error.MenuUpdateFailed;
+            };
             return;
         };
         return error.MenuItemNotFound;
@@ -770,6 +777,7 @@ fn nativeItems(items: []const types.Item, plan: *const menus.Plan, labels: *[typ
             .kind = @backingInt(item.kind),
             .enabled = @intFromBool(item.enabled),
             .checked = @intFromBool(item.checked),
+            .radio = @intFromBool(item.radio),
             .keyval = if (accelerator) |value| keyval(value.key) else 0,
             .modifiers = if (accelerator) |value| modifierMask(value.modifiers) else 0,
             .command = command,
