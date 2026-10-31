@@ -3,6 +3,7 @@ const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
+pub const panic = std.debug.FullPanic(@import("macos_panic.zig").panic);
 
 const fixture = "<!doctype html><title>macOS fixture</title><script>chrome.webview.addEventListener('message',e=>{if(e.data==='ping')chrome.webview.postMessage('roundtrip')});</script>";
 
@@ -282,9 +283,13 @@ pub fn main() !void {
     var allocator: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(allocator.deinit() == .ok);
     if (!web.backendCapabilities().page_lifecycle) return error.SkipZigTest;
+    std.debug.print("macOS WebView: {s}\n", .{"allocation failures"});
     try std.testing.checkAllAllocationFailures(allocator.allocator(), attachAllocationFailure, .{allocator.allocator()});
+    std.debug.print("macOS WebView: {s}\n", .{"close before ready"});
     try closeBeforeReady(allocator.allocator());
+    std.debug.print("macOS WebView: {s}\n", .{"page"});
     try run(allocator.allocator());
+    std.debug.print("macOS WebView: {s}\n", .{"reload"});
     try reload(allocator.allocator());
     const app = try z.App.init(allocator.allocator());
     defer app.deinit();

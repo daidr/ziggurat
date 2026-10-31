@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
+pub const panic = std.debug.FullPanic(@import("macos_panic.zig").panic);
 
 const linux = builtin.os.tag == .linux;
 /// macOS pages are trusted HTML only, without a site to load scripts from:
