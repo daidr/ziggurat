@@ -430,7 +430,7 @@ const Linux = struct {
     }
     fn dataHover(pointer: ?*anyopaque, phase: c_int, x: f64, y: f64, names: [*]const u8, len: usize, actions: c_int, suggested: c_int, session: ?*anyopaque) callconv(.c) c_int {
         const target = dataOwner(pointer);
-        const value: Phase = @fromBackingInt(@intCast(phase));
+        const value: Phase = @fromBackingInt(@intCast(zio.asUnsigned(phase)));
         if (value != .leave) setOffer(target, names[0..len]);
         return actionOf(target.hover(value, .{ .x = @floatCast(x), .y = @floatCast(y) }, operationsOf(actions), operationOf(suggested), session));
     }
