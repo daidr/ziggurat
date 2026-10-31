@@ -326,9 +326,10 @@ jobs:
         timeout-minutes: 15
         run: |
           zig build check -Dwebview=true -Doptimize=${{ matrix.optimize }} --summary failures
-          zig build build-smoke-webview-macos build-smoke-webview-content-rules -Dwebview=true -Doptimize=${{ matrix.optimize }} --summary failures
+          zig build build-smoke-webview-macos build-smoke-webview-content-rules build-smoke-webview-local-macos -Dwebview=true -Doptimize=${{ matrix.optimize }} --summary failures
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-macos
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-content-rules
+          sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-local-macos
 
   webview:
     # Paused with the Windows job; see WINDOWS_CI there.
