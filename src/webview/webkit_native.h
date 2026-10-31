@@ -46,6 +46,8 @@ typedef struct ZwkInitializerInput {
     void *budget;
     const uint16_t *source;
     uint32_t units;
+    /* Nonzero injects into every frame; each body checks its own frame. */
+    uint32_t frames;
 } ZwkInitializerInput;
 typedef void (*ZwkInitializerNotify)(void *,uint64_t,uint32_t,int32_t);
 typedef struct ZwkOptions {
@@ -59,6 +61,10 @@ typedef struct ZwkOptions {
     ZwkProfileContext *profile_context;
     const ZwkInitializerInput *initializers;
     uint32_t developer_tools;
+    /* The page-facts script's call, a JavaScript expression, or NULL. */
+    const char *facts;
+    /* Nonzero lets audible media play without a user gesture. */
+    uint32_t autoplay;
 } ZwkOptions;
 enum ZwkResult { ZWK_OK=0, ZWK_CLOSED=1, ZWK_FULL=2, ZWK_OOM=3, ZWK_INVALID=4, ZWK_NATIVE_FAILED=5, ZWK_NOT_READY=6, ZWK_NAVIGATION_PENDING=7, ZWK_IPC_DENIED=8, ZWK_NO_HISTORY=9, ZWK_NAVIGATION_CANCELLED=10, ZWK_GEOMETRY_NOT_APPLIED=11, ZWK_INITIALIZER_BUDGET=12, ZWK_DEVTOOLS_DISABLED=13 };
 enum ZwkPolicyFailure { ZWK_POLICY_MISMATCH=1, ZWK_POLICY_TIMEOUT=2, ZWK_POLICY_PREPARATION=3 };

@@ -224,6 +224,7 @@ jobs:
           GDK_SCALE=2 P01_PROBE=session-host bash scripts/webkit-probe.sh
           P01_PROBE=session-zig bash scripts/webkit-probe.sh
           GDK_SCALE=2 P01_PROBE=session-zig bash scripts/webkit-probe.sh
+          P01_PROBE=page-facts-zig bash scripts/webkit-probe.sh
       - name: Capture Cairo submission and idle evidence
         if: matrix.optimize == 'ReleaseSafe'
         run: |
@@ -280,7 +281,7 @@ jobs:
           bun test packages
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # These fail when the system Runtime is unavailable; no Runtime is downloaded.
-          $smokes = @('smoke-webview', 'smoke-composition-webview', 'smoke-page-session', 'smoke-webview-policy', 'smoke-page', 'smoke-page-remote', 'smoke-script', 'smoke-browser-tools', 'smoke-request-policy', 'smoke-resource-async', 'smoke-resource-file', 'smoke-scheme', 'smoke-resource-producer', 'smoke-permission', 'smoke-download', 'smoke-browser-policy', 'smoke-ipc', 'smoke-assets', 'smoke-page-runtime', 'smoke-plugin-fetch', 'smoke-plugin-watch', 'smoke-plugin-sqlite', 'smoke-plugin-websocket', 'smoke-embedded-webview')
+          $smokes = @('smoke-webview', 'smoke-composition-webview', 'smoke-page-session', 'smoke-webview-policy', 'smoke-page', 'smoke-page-remote', 'smoke-script', 'smoke-browser-tools', 'smoke-request-policy', 'smoke-resource-async', 'smoke-resource-file', 'smoke-scheme', 'smoke-resource-producer', 'smoke-permission', 'smoke-download', 'smoke-browser-policy', 'smoke-ipc', 'smoke-assets', 'smoke-page-runtime', 'smoke-plugin-fetch', 'smoke-plugin-watch', 'smoke-plugin-sqlite', 'smoke-plugin-websocket', 'smoke-embedded-webview', 'smoke-webview-page-facts')
           $failed = @()
           zig build "-j$env:NUMBER_OF_PROCESSORS" test test-remote-origin smoke-page-host smoke-page-authorization -Dwebview=true -Doptimize=ReleaseSafe
           if ($LASTEXITCODE -ne 0) { $failed += 'test' }

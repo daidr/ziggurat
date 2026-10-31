@@ -72,6 +72,7 @@ typedef struct InitializerInput {
     InitializerBudget *budget;
     const WCHAR *source;
     uint32_t units;
+    uint32_t frames;
 } InitializerInput;
 typedef struct InitializerState InitializerState;
 static void initializers_free(InitializerState *);
