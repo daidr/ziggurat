@@ -5504,7 +5504,7 @@ pub const Host = struct {
         self.frames += 1;
     }
     fn render(self: *Host, frame: *ui.Frame, theme: Theme) anyerror!void {
-        var lap = if (self.options.tools()) |tools| if (tools.open) zio.Timer.start() catch null else null else null;
+        var lap: ?zio.Timer = if (self.options.tools()) |tools| if (tools.open) zio.Timer.start() catch null else null else null;
         const built: u64 = blk: {
             if (self.options.tools()) |tools| {
                 self.view.layout_direction = tools.direction_override orelse self.options.direction;

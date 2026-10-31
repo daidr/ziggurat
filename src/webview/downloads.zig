@@ -69,23 +69,37 @@ pub fn safeName(buffer: []u8, suggested: []const u8) []const u8 {
     if (builtin.os.tag == .windows) name = std.mem.trimEnd(u8, name, ". ");
     if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) name = "download";
     var length: usize = 0;
-    if (builtin.os.tag == .windows and !validOutputName(name)) {
-        buffer[0] = '_';
-        length = 1;
-    }
-    var taken: usize = 0;
     for (name) |byte| {
         if (length == buffer.len) break;
         buffer[length] = if (byte == 0 or (builtin.os.tag == .windows and (byte < 32 or std.mem.indexOfScalar(u8, "<>:\"|?*", byte) != null))) '_' else byte;
         length += 1;
-        taken += 1;
     }
-    // A cut never splits a UTF-8 sequence.
-    while (length > 0 and taken < name.len and name[taken] & 0xc0 == 0x80) {
-        taken -= 1;
-        length -= 1;
+    length = utf8Cut(buffer[0..length], name.len);
+    if (builtin.os.tag != .windows) return buffer[0..length];
+    // A cut can leave a trailing dot or space, which Windows would drop.
+    length = std.mem.trimEnd(u8, buffer[0..length], ". ").len;
+    if (length == 0) return buffer[0..0];
+    // Only a device name is left invalid once the characters are replaced.
+    if (!validOutputName(buffer[0..length])) {
+        if (length == buffer.len) length = utf8Cut(buffer[0 .. length - 1], length);
+        std.mem.copyBackwards(u8, buffer[1 .. length + 1], buffer[0..length]);
+        buffer[0] = '_';
+        length += 1;
     }
     return buffer[0..length];
+}
+/// The length of `bytes`, a prefix of a `whole` long UTF-8 text, without a
+/// trailing partial sequence when the prefix is a cut.
+fn utf8Cut(bytes: []const u8, whole: usize) usize {
+    if (bytes.len == whole) return bytes.len;
+    var length = bytes.len;
+    while (length > 0 and bytes[length - 1] & 0xc0 == 0x80) length -= 1;
+    if (length > 0 and bytes[length - 1] & 0x80 != 0) {
+        const lead = bytes[length - 1];
+        const size: usize = if (lead & 0xe0 == 0xc0) 2 else if (lead & 0xf0 == 0xe0) 3 else 4;
+        if (bytes.len - (length - 1) < size) return length - 1;
+    }
+    return bytes.len;
 }
 /// Worker only: `directory/name`, numbered "name (2).ext", "name (3).ext"
 /// and so on when a file already has the name, as browsers save downloads.

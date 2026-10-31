@@ -75,6 +75,7 @@ const State = struct {
     phase: enum { main, after_nav, quit, allocator },
     fault: ClosingAllocator = undefined,
     park_wait: bool = false,
+    pause_wait: bool = false,
     loaded: bool = false,
     boot: bool = false,
     done: bool = false,
@@ -152,7 +153,21 @@ const State = struct {
     }
     fn readyTask(context: *anyopaque, _: *Bridge) void {
         const self: *State = @ptrCast(@alignCast(context));
-        self.drain() catch |err| self.fail(err);
+        self.drain() catch |err| return self.fail(err);
+        self.maybeResume() catch |err| self.fail(err);
+    }
+    /// The page pauses before reading; resume once the worker has met the
+    /// full queue. A busy machine can schedule the worker after the pause
+    /// message arrives, and its wake task then runs this again.
+    fn maybeResume(self: *State) !void {
+        if (!self.pause_wait) return;
+        var blocked = false;
+        for (self.works[0..self.work_count]) |*work| blocked = blocked or work.full.load(.acquire) > 0;
+        if (!blocked) return;
+        self.pause_wait = false;
+        try std.testing.expectEqual(@as(u32, 1), self.bridge.flows[0].?.control.produced.load(.acquire));
+        const page = &self.session.?.page;
+        try page.postFor(page.pageId().?, "resume");
     }
     fn maybePark(self: *State) !void {
         if (!self.park_wait or self.pending_workers != 0) return;
@@ -175,10 +190,8 @@ const State = struct {
             return self.maybeBind();
         }
         if (std.mem.eql(u8, message_value, "paused")) {
-            var blocked = false;
-            for (self.works[0..self.work_count]) |*work| blocked = blocked or work.full.load(.acquire) > 0;
-            try std.testing.expect(blocked and self.bridge.flows[0].?.control.produced.load(.acquire) == 1);
-            return page.postFor(page.pageId().?, "resume");
+            self.pause_wait = true;
+            return self.maybeResume();
         }
         if (std.mem.eql(u8, message_value, "zero-head") or std.mem.eql(u8, message_value, "head-only")) return page.postFor(page.pageId().?, "resume");
         if (std.mem.eql(u8, message_value, "park-now")) {

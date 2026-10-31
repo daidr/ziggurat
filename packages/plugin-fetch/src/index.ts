@@ -188,6 +188,19 @@ export async function fetch(input: RequestInfo | URL, init: RequestInit = {}): P
   own("url", head.url || url.href);
   own("redirected", head.redirected);
   if (!valid) own("status", status);
+  // Reading an aborted body rejects with the signal's reason, as fetch's
+  // own does; a WebView may instead report its stream error as its own.
+  if (readable && signal) {
+    for (const name of ["arrayBuffer", "blob", "bytes", "formData", "json", "text"] as const) {
+      const read = (res as unknown as Record<string, unknown>)[name];
+      if (typeof read !== "function") continue;
+      own(name, (...args: unknown[]) =>
+        (read.apply(res, args) as Promise<unknown>).catch((error: unknown) => {
+          throw aborted ? signal.reason : error;
+        }),
+      );
+    }
+  }
   return res;
 }
 

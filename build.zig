@@ -50,10 +50,13 @@ pub fn build(b: *std.Build) void {
         b.step("test-document-word-units", "Run independent system ICU word and grapheme boundary corpora").dependOn(&b.addRunArtifact(word_units).step);
     }
     if (target.result.os.tag == .windows) {
+        // Its checks return errors; the trace names the one that failed in
+        // release builds too.
         const runtime_smoke = b.addExecutable(.{ .name = "smoke-webview-runtime", .root_module = b.createModule(.{
             .root_source_file = b.path("tests/webview_runtime_smoke.zig"),
             .target = target,
             .optimize = optimize,
+            .error_tracing = true,
             .imports = &.{.{ .name = "ziggurat_webview_runtime", .module = webview_runtime }},
         }) });
         check.dependOn(&runtime_smoke.step);
@@ -3298,9 +3301,10 @@ fn addSmokeModule(b: *std.Build, name: []const u8, path: []const u8, target: std
 
 /// addSmoke that returns the executable for test-only native additions.
 fn addSmokeExecutable(b: *std.Build, name: []const u8, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) *std.Build.Step.Compile {
+    // Error return traces name the check that failed in release builds too.
     const exe = b.addExecutable(.{
         .name = name,
-        .root_module = b.createModule(.{ .root_source_file = b.path(path), .target = target, .optimize = optimize, .imports = imports }),
+        .root_module = b.createModule(.{ .root_source_file = b.path(path), .target = target, .optimize = optimize, .error_tracing = true, .imports = imports }),
     });
     addResources(b, exe);
     const install = b.addInstallArtifact(exe, .{});

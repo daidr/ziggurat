@@ -13,6 +13,10 @@ pub const Server = struct {
     frames: std.atomic.Value(u32) = .init(0),
     writes: std.atomic.Value(u32) = .init(0),
     start_html: []const u8 = "",
+    // A connection the browser opens ahead and leaves idle must not hold up
+    // the next page, so each connection gets its own thread.
+    connections: [64]?std.Thread = @splat(null),
+    connection_count: usize = 0,
     pub fn start(self: *Server) !void {
         self.thread = try std.Thread.spawn(.{}, run, .{self});
     }
@@ -24,17 +28,32 @@ pub const Server = struct {
             thread.join();
             self.thread = null;
         }
+        for (self.connections[0..self.connection_count]) |connection| connection.?.join();
+        self.connection_count = 0;
         self.listener.deinit(zio.io());
     }
     fn run(self: *Server) void {
         while (true) {
             const connection = self.listener.accept(zio.io()) catch return;
-            defer connection.close(zio.io());
-            if (self.stop_requested.load(.acquire)) return;
-            self.serve(connection) catch |err| {
-                std.debug.print("private server: {s}\n", .{@errorName(err)});
-            };
+            if (self.stop_requested.load(.acquire)) {
+                connection.close(zio.io());
+                return;
+            }
+            if (self.connection_count < self.connections.len) {
+                if (std.Thread.spawn(.{}, serveConnection, .{ self, connection })) |thread| {
+                    self.connections[self.connection_count] = thread;
+                    self.connection_count += 1;
+                    continue;
+                } else |_| {}
+            }
+            serveConnection(self, connection);
         }
+    }
+    fn serveConnection(self: *Server, stream: std.Io.net.Stream) void {
+        defer stream.close(zio.io());
+        self.serve(stream) catch |err| {
+            std.debug.print("private server: {s}\n", .{@errorName(err)});
+        };
     }
     fn serve(self: *Server, stream: std.Io.net.Stream) !void {
         var buffer: [8192]u8 = undefined;

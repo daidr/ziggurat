@@ -73,6 +73,6 @@ let stage = "connect";
   const reading = stalled.text();
   controller.abort(new Error("aborted"));
   const aborted = await reading.catch((error: unknown) => error);
-  check(aborted instanceof Error && aborted.message === "aborted", "Abort");
+  check(aborted instanceof Error && aborted.message === "aborted", `Abort (${String(aborted)})`);
   say("pf-done");
 })().catch((error) => say(`pf-failed:${stage}: ${String(error)}`));

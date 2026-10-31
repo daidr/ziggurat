@@ -279,7 +279,9 @@ jobs:
     if: (github.event_name == 'workflow_dispatch' && inputs.webview) || contains(github.event.pull_request.labels.*.name, 'webview')
     # Also needs Node.js and an installed WebView2 Runtime on the runner.
     runs-on: ${{ fromJSON(vars.WINDOWS_RUNS_ON || '["self-hosted", "windows", "x64"]') }}
-    timeout-minutes: 20
+    # The ReleaseSafe unit build alone takes about 20 minutes, more on a cold
+    # build cache.
+    timeout-minutes: 90
     defaults:
       run:
         shell: pwsh
@@ -315,9 +317,25 @@ jobs:
           bun test packages
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # These fail when the system Runtime is unavailable; no Runtime is downloaded.
-          zig build "-j$env:NUMBER_OF_PROCESSORS" test test-remote-origin smoke-webview smoke-composition-webview smoke-page-host smoke-page-session smoke-webview-policy smoke-page smoke-page-remote smoke-page-authorization smoke-script smoke-browser-tools smoke-request-policy smoke-resource-async smoke-resource-file smoke-scheme smoke-resource-producer smoke-permission smoke-download smoke-browser-policy smoke-ipc smoke-assets smoke-page-runtime smoke-plugin-fetch smoke-plugin-watch smoke-plugin-sqlite smoke-plugin-websocket smoke-embedded-webview smoke-webview-content-rules smoke-webview-page-facts -Dwebview=true -Doptimize=ReleaseSafe
+          $smokes = @('smoke-webview', 'smoke-composition-webview', 'smoke-page-session', 'smoke-webview-policy', 'smoke-page', 'smoke-page-remote', 'smoke-script', 'smoke-browser-tools', 'smoke-request-policy', 'smoke-resource-async', 'smoke-resource-file', 'smoke-scheme', 'smoke-resource-producer', 'smoke-permission', 'smoke-download', 'smoke-browser-policy', 'smoke-ipc', 'smoke-assets', 'smoke-page-runtime', 'smoke-plugin-fetch', 'smoke-plugin-watch', 'smoke-plugin-sqlite', 'smoke-plugin-websocket', 'smoke-embedded-webview', 'smoke-webview-content-rules', 'smoke-webview-page-facts')
+          $failed = @()
+          zig build "-j$env:NUMBER_OF_PROCESSORS" test test-remote-origin smoke-page-host smoke-page-authorization -Dwebview=true -Doptimize=ReleaseSafe
+          if ($LASTEXITCODE -ne 0) { $failed += 'test' }
+          zig build "-j$env:NUMBER_OF_PROCESSORS" webview-runtime @($smokes | ForEach-Object { "build-$_" }) -Dwebview=true -Doptimize=ReleaseSafe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # One page at a time: each smoke has a 15 s watchdog that a machine
+          # still compiling or running other Runtimes can exhaust.
+          foreach ($smoke in $smokes) {
+            $timer = [Diagnostics.Stopwatch]::StartNew()
+            & "./zig-out/bin/$smoke.exe"
+            $code = $LASTEXITCODE
+            Write-Host "$smoke exit=$code seconds=$([int]$timer.Elapsed.TotalSeconds)"
+            if ($code -ne 0) { $failed += $smoke }
+          }
+          if ($failed.Count -ne 0) { throw "Failed: $($failed -join ', ')" }
       - name: Standalone engine discovery without a page
+        # Independent of the page checks above, so a failure there still shows these.
+        if: ${{ !cancelled() }}
         run: |
           zig build "-j$env:NUMBER_OF_PROCESSORS" test-webview-runtime build-smoke-webview-runtime -Doptimize=ReleaseSafe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -325,12 +343,14 @@ jobs:
           ./zig-out/bin/smoke-webview-runtime.exe $loader
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Exact-origin HTTPS credential lifecycle and redirect checks
+        if: ${{ !cancelled() }}
         run: |
           zig build "-j$env:NUMBER_OF_PROCESSORS" build-smoke-request-credentials -Dwebview=true -Doptimize=ReleaseSafe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -B tests/windows_https_credentials_host.py --exe zig-out/bin/smoke-request-credentials.exe --cache .zig-cache/managed/windows-credentials-ci --log .validation/ci/windows-credentials.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Document-start initializer lifecycle and wire checks
+        if: ${{ !cancelled() }}
         run: |
           zig build "-j$env:NUMBER_OF_PROCESSORS" test-document-initializers test-document-initializers-native build-initializer-semantics-emitter build-smoke-document-initializers -Dwebview=true -Doptimize=ReleaseSafe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
