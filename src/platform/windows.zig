@@ -563,7 +563,7 @@ pub fn show(window: *core.WindowRecord) void {
         _ = c.ShowWindow(window.native.hwnd, c.SW_SHOWNOACTIVATE);
         return;
     }
-    _ = c.ShowWindow(window.native.hwnd, c.SW_SHOW);
+    _ = c.ShowWindow(window.native.hwnd, if (window.options.focus_on_show) c.SW_SHOW else c.SW_SHOWNOACTIVATE);
     // A focusable popup takes the keyboard as it shows, as a menu does.
     if (window.options.popup != null) _ = c.SetForegroundWindow(window.native.hwnd);
 }
@@ -1061,7 +1061,7 @@ fn windowMessage(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, wp: 
         // action, even when no new button operation was needed to acquire it.
         const capture_owned = message == c.WM_LBUTTONUP and c.GetCapture() == hwnd;
         if (window.pointerEnabled()) return pointerButtonMessage(window, hwnd, message, wp, lp, delegation, operation, phase, capture_owned);
-        return windowMessageBody(window, hwnd, message, wp, lp, delegation, operation, 0, if (message == c.WM_LBUTTONDOWN or message == c.WM_LBUTTONUP) pointerModifiers(wp, message) else .{}, null, .ordinary, capture_owned);
+        return windowMessageBody(window, hwnd, message, wp, lp, delegation, operation, 0, if (message >= c.WM_MOUSEFIRST and message <= c.WM_MOUSELAST) pointerModifiers(wp, message) else .{}, null, .ordinary, capture_owned);
     }
     if (message == c.WM_CAPTURECHANGED and (window.pointerEnabled() or window.native.interaction_handoff)) return pointerCaptureMessage(window, hwnd, message, wp, lp, delegation);
     if ((message == c.WM_MOUSEMOVE or message == c.WM_NCMOUSEMOVE) and window.pointerEnabled()) pointerMotionMessage(window, hwnd, message, wp, lp);
@@ -1342,6 +1342,19 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
                 if (window.pointerEnabled()) _ = releasePointerCapture(window, hwnd, operation, sequence, true) else _ = c.ReleaseCapture();
             }
             return 0;
+        },
+        // Other client buttons reach content without taking focus or capture,
+        // so a secondary press can open a context menu where it lands.
+        c.WM_RBUTTONDOWN, c.WM_RBUTTONDBLCLK, c.WM_MBUTTONDOWN, c.WM_MBUTTONDBLCLK, c.WM_XBUTTONDOWN, c.WM_XBUTTONDBLCLK, c.WM_RBUTTONUP, c.WM_MBUTTONUP, c.WM_XBUTTONUP => {
+            const button = nativeButton(message, wp) orelse return delegate(delegation, message, wp, lp);
+            if (!pointerContinuation(window, hwnd, operation)) return 0;
+            const input: core.PointerButtonInput = .{ .position = point(hwnd, lp), .button = button, .modifiers = modifiers };
+            if (delivered) |value| value.* = true;
+            const down = buttonPhase(message) == .down;
+            if (window.pointerEnabled()) window.emitPointer(operation, sequence, if (down) .down else .up, input) else if (down) window.emit(.{ .pointer_down = input }) else window.emit(.{ .pointer_up = input });
+            // The default procedure still turns a secondary release into WM_CONTEXTMENU.
+            if (!pointerContinuation(window, hwnd, operation)) return 0;
+            return delegate(delegation, message, wp, lp);
         },
         c.WM_MOUSEMOVE => {
             window.emit(.{ .pointer_move = point(hwnd, lp) });

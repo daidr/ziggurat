@@ -53,6 +53,18 @@ root/
 - 文字跟随 `locale`：内置英语、简体与繁体中文、荷兰语、法语、德语、意大利语、日语、韩语、波兰语、葡萄牙语（pt-BR）、俄语、西班牙语、土耳其语和乌克兰语；只为一个地区提供的语言（如 pt-BR）也用于同语言的其他地区。`languages` 覆盖内置文字或增加语言。
 - 更新说明按 Markdown 显示（标题、列表、强调、代码、引用、链接），无法解析时按纯文本换行显示，超过 16 KiB 在行尾截断。链接经 `open_link` 交给宿主打开，未设置时不响应。
 - `icon` 是宿主已上传的应用图标，显示在文字左侧 64 DIP，窗口相应加宽。
+- 后台检查发现新版本时，像 Sparkle 的更新提示那样显示窗口：应用正处于激活状态或用户主动检查时窗口在前并获得键盘，否则显示但不从其他应用夺走键盘（`WindowOptions.focus_on_show = false`）。
+- 检查或安装失败时，错误详情完整换行显示在说明下方，不截断、不用遮住标题的提示框。
+
+### 预发布版（beta 通道）
+
+`release --prerelease` 把该版本记作预发布版：静态目录里多一个 `<identity>-<version>.prerelease` 标记，重建的 `feed.json` 在 `prereleases` 中列出它。默认的检查跳过这些版本，`feed.checkChannel(..., .{ .prereleases = true })` 才会选中。更新窗口里由 `Updater.setPrereleases(true)` 为选择了 beta 的用户打开，下一次检查起生效；关闭后不会降级，直到有比当前预发布版更新的正式版才再次更新。这个选择只在本次运行内有效，应用自己保存（例如在设置里）并在启动时设置。命令行的 `check` 与 `fetch` 以 `--prereleases` 打开。
+
+### 应用自己的更新源
+
+有自己更新服务、需要用户凭据的接口或运行时切换通道的应用，可以给 `FeedBackend` 一个 `UpdateSource`（`Config.source`，或运行时 `FeedBackend.setSource`，传 null 恢复 `Config.feed`）：`feed(context, allocator, prereleases)` 返回发布索引（`release` 写出的 feed.json，至多 1 MiB），`files` 是下载归档与补丁的 `download.Source`，按索引里的 URL 取文件。两者都在后台工作线程上调用。来源只替换传输：解析与上限、大小、对构建内公钥的签名校验、暂存与发布都与默认索引相同，未用该公钥签名的版本或补丁被拒绝，应用保持原样。一次安装沿用找到该版本的那次检查的来源与通道。
+
+默认的 HTTP 传输以固定的 `ziggurat-updater` 作为 User-Agent，不带应用名：有的发布主机对含非 ASCII 字节的 User-Agent 返回 400。
 
 ## 命令行工具
 
@@ -69,9 +81,9 @@ ziggurat-update publish MANIFEST PUBLIC_KEY_FILE ID TARGET 1.2.2.0 ZIP ROOT
 ziggurat-update current ROOT ID TARGET
 ziggurat-update pack OUTPUT_ZIP NAME ID TARGET VERSION EXECUTABLE FILE...
 ziggurat-update endorse TRUSTED_SEED_FILE NEW_PUBLIC_KEY_FILE ID ENDORSEMENT
-ziggurat-update release DIR ID TARGET VERSION ZIP PRIVATE_SEED_FILE BASE_HTTPS_URL [--endorsement FILE] [--from OLD_ZIP OLD_VERSION]...
-ziggurat-update check FEED PUBLIC_KEY_FILE ID TARGET ROOT
-ziggurat-update fetch FEED PUBLIC_KEY_FILE ID TARGET ROOT
+ziggurat-update release DIR ID TARGET VERSION ZIP PRIVATE_SEED_FILE BASE_HTTPS_URL [--endorsement FILE] [--notes FILE] [--prerelease] [--from OLD_ZIP OLD_VERSION]...
+ziggurat-update check FEED PUBLIC_KEY_FILE ID TARGET ROOT [--prereleases]
+ziggurat-update fetch FEED PUBLIC_KEY_FILE ID TARGET ROOT [--prereleases]
 ziggurat-update rollback ROOT ID TARGET VERSION
 ziggurat-update prune ROOT ID TARGET KEEP
 ```

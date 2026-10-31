@@ -44,6 +44,26 @@ test -d "$HOME/.local/share/$id/settings"
 "$root/uninstall" --silent --purge
 test ! -e "$HOME/.local/share/$id"
 
+# The app's hooks: init can stop the install, install runs once the app is
+# in place, uninstall before its folder goes.
+hooks="$work/hooks"
+"$bin/ziggurat" package setup --zip "$work/v2.zip" --stub "$bin/ziggurat-setup" --output "$work/setup-refused" \
+  --hook-init 'test ! -e "$(dirname "$ZIGGURAT_INSTALL_DIR")/refuse"' >/dev/null
+mkdir -p "$HOME/.local/share/$id" && touch "$HOME/.local/share/$id/refuse"
+if "$work/setup-refused" --silent 2>/dev/null; then echo "a failing init hook did not stop the install" >&2; exit 1; fi
+test ! -e "$root"
+rm "$HOME/.local/share/$id/refuse"
+"$bin/ziggurat" package setup --zip "$work/v2.zip" --stub "$bin/ziggurat-setup" --output "$work/setup-hooks" \
+  --hook-init "echo init \$ZIGGURAT_SCOPE \$ZIGGURAT_VERSION \$ZIGGURAT_SILENT >> '$hooks'" \
+  --hook-install "test -x \"\$ZIGGURAT_APP\" && echo install \$(basename \"\$ZIGGURAT_INSTALL_DIR\") >> '$hooks'" \
+  --hook-uninstall "test -x \"\$ZIGGURAT_APP\" && echo uninstall >> '$hooks'" >/dev/null
+"$work/setup-hooks" --silent
+test "$(cat "$hooks")" = "init user 1.1.0.0 1
+install install"
+"$root/uninstall" --silent --purge
+test "$(tail -n 1 "$hooks")" = uninstall
+test ! -e "$root"
+
 # Debian package of the same release: inspect it, and install it only when
 # passwordless root is available (CI runners); the check removes it again.
 "$bin/ziggurat" package deb --zip "$work/v2.zip" --maintainer "Ziggurat tests <tests@example.invalid>" --output "$work/fixture.deb" >/dev/null

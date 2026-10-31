@@ -34,6 +34,9 @@ pub const Options = struct {
     tag_prefix: []const u8 = "",
     /// Where the installers are served, ending in `/`.
     url: ?[]const u8 = null,
+    /// The install folder's name, as the setup program's: the identity
+    /// when null.
+    install_dir_name: ?[]const u8 = null,
 };
 
 /// Quotes `text` for PowerShell, in ASCII: other characters are [char]
@@ -124,6 +127,7 @@ pub fn write(writer: *std.Io.Writer, options: Options) !void {
     );
     try assign(writer, "appName", options.app_name);
     try assign(writer, "identity", options.identity);
+    try assign(writer, "installDirName", options.install_dir_name orelse options.identity);
     try assign(writer, "stem", options.stem);
     try assign(writer, "version", options.version);
     try writer.writeAll("# Where the installers are: the newest release of the repository tagged\n# with the prefix, or a download URL.\n");
@@ -146,7 +150,7 @@ const body =
     \\    $baseUrl = $downloadUrl.TrimEnd('/') + '/'
     \\    $repository = ''
     \\}
-    \\$defaultFolder = Join-Path $env:LOCALAPPDATA ('Programs\' + $identity)
+    \\$defaultFolder = Join-Path $env:LOCALAPPDATA ('Programs\' + $installDirName)
     \\
     \\function Get-Arch {
     \\    $arch = $env:PROCESSOR_ARCHITEW6432

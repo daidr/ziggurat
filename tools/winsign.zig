@@ -21,6 +21,10 @@ pub const Windows = struct {
     signCommand: ?[]const u8 = null,
     /// The RFC 3161 time stamping server of `certificate`.
     timestampUrl: ?[]const u8 = null,
+    /// The install folder's name instead of the identity, as
+    /// `%LOCALAPPDATA%\Programs\ZhiLian`; the shortcuts, the entry in
+    /// Settings > Apps and the executable keep their names.
+    installDirName: ?[]const u8 = null,
 
     pub fn signs(self: Windows) bool {
         return self.certificate != null or self.signCommand != null;

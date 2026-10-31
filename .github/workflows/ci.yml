@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       webview:
-        description: Run optional Windows and Linux system WebView checks
+        description: Run optional Windows and Linux system WebView checks (pull requests run them when labelled webview)
         type: boolean
         default: false
 
@@ -225,6 +225,11 @@ jobs:
           P01_PROBE=session-zig bash scripts/webkit-probe.sh
           GDK_SCALE=2 P01_PROBE=session-zig bash scripts/webkit-probe.sh
           P01_PROBE=page-facts-zig bash scripts/webkit-probe.sh
+      - name: WebKitGTK content rules and audio
+        if: (github.event_name == 'workflow_dispatch' && inputs.webview) || contains(github.event.pull_request.labels.*.name, 'webview')
+        run: |
+          sh scripts/ci-linux-deps.sh libwebkit2gtk-4.1-dev glib-networking dbus-x11
+          xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-webview-content-rules -Dwebview=true -Doptimize=${{ matrix.optimize }}
       - name: Capture Cairo submission and idle evidence
         if: matrix.optimize == 'ReleaseSafe'
         run: |
@@ -264,8 +269,39 @@ jobs:
           GDK_BACKEND: x11
         run: zig build test -Doptimize=ReleaseSafe
 
+  macos:
+    # Self-hosted macOS runner with the Xcode command line tools, which give
+    # Zig the SDK. The repository variable MACOS_RUNS_ON overrides the labels
+    # with a JSON value, for example '"macos-15"' for a hosted runner.
+    runs-on: ${{ fromJSON(vars.MACOS_RUNS_ON || '["self-hosted", "macOS"]') }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Pull requests run Debug only; ReleaseSafe runs on main and manual runs.
+        optimize: ${{ fromJSON(github.event_name == 'pull_request' && '["Debug"]' || '["Debug", "ReleaseSafe"]') }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Use cached Zig 0.17.0 and build caches
+        run: |
+          xcrun --sdk macosx --show-sdk-path
+          zig_bin=$(sh scripts/fetch-zig.sh)
+          printf '%s\n' "$(dirname "$zig_bin")" >> "$GITHUB_PATH"
+          sh scripts/ci-zig-cache.sh >> "$GITHUB_ENV"
+      - name: Compile everything for macOS
+        # The unit tests do not pass on macOS yet: cross-thread wakes panic
+        # inside std.Io, the watch plugin has no macOS backend and two SVG
+        # scene tests differ on arm64. They join this job once fixed.
+        run: |
+          zig build check -Doptimize=${{ matrix.optimize }} --summary failures
+      - name: AppKit window smoke
+        run: |
+          zig build smoke-macos -Doptimize=${{ matrix.optimize }} --summary failures
+
   webview:
-    if: github.event_name == 'workflow_dispatch' && inputs.webview
+    if: (github.event_name == 'workflow_dispatch' && inputs.webview) || contains(github.event.pull_request.labels.*.name, 'webview')
     # Also needs Node.js and an installed WebView2 Runtime on the runner.
     runs-on: ${{ fromJSON(vars.WINDOWS_RUNS_ON || '["self-hosted", "windows", "x64"]') }}
     timeout-minutes: 20
@@ -304,7 +340,7 @@ jobs:
           bun test packages
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # These fail when the system Runtime is unavailable; no Runtime is downloaded.
-          zig build "-j$env:NUMBER_OF_PROCESSORS" test test-remote-origin smoke-webview smoke-composition-webview smoke-page-host smoke-page-session smoke-webview-policy smoke-page smoke-page-remote smoke-page-authorization smoke-script smoke-browser-tools smoke-request-policy smoke-resource-async smoke-resource-file smoke-scheme smoke-resource-producer smoke-permission smoke-download smoke-browser-policy smoke-ipc smoke-assets smoke-page-runtime smoke-plugin-fetch smoke-plugin-watch smoke-plugin-sqlite smoke-plugin-websocket smoke-embedded-webview smoke-webview-page-facts -Dwebview=true -Doptimize=ReleaseSafe
+          zig build "-j$env:NUMBER_OF_PROCESSORS" test test-remote-origin smoke-webview smoke-composition-webview smoke-page-host smoke-page-session smoke-webview-policy smoke-page smoke-page-remote smoke-page-authorization smoke-script smoke-browser-tools smoke-request-policy smoke-resource-async smoke-resource-file smoke-scheme smoke-resource-producer smoke-permission smoke-download smoke-browser-policy smoke-ipc smoke-assets smoke-page-runtime smoke-plugin-fetch smoke-plugin-watch smoke-plugin-sqlite smoke-plugin-websocket smoke-embedded-webview smoke-webview-content-rules smoke-webview-page-facts -Dwebview=true -Doptimize=ReleaseSafe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Standalone engine discovery without a page
         run: |
