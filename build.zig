@@ -22,7 +22,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const classifier_tests = b.addTest(.{ .root_module = pointer_classifier });
+    const classifier_tests = addTest(b, .{ .root_module = pointer_classifier });
     check.dependOn(&classifier_tests.step);
     const run_classifier_tests = b.addRunArtifact(classifier_tests);
     test_step.dependOn(&run_classifier_tests.step);
@@ -37,7 +37,7 @@ pub fn build(b: *std.Build) void {
     const webview_runtime = b.addModule("ziggurat_webview_runtime", .{ .root_source_file = b.path("src/webview_runtime/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     if (target.result.os.tag == .windows) webview_runtime.linkSystemLibrary("ole32", .{});
     if (target.result.os.tag == .linux) webview_runtime.linkSystemLibrary("dl", .{ .use_pkg_config = .no });
-    const runtime_tests = b.addTest(.{ .root_module = webview_runtime });
+    const runtime_tests = addTest(b, .{ .root_module = webview_runtime });
     check.dependOn(&runtime_tests.step);
     const run_runtime_tests = b.addRunArtifact(runtime_tests);
     b.step("test-webview-runtime", "Verify explicit worker runtime discovery contracts without a page").dependOn(&run_runtime_tests.step);
@@ -176,7 +176,7 @@ pub fn build(b: *std.Build) void {
         b.step("smoke-https-resources", "Verify explicit HTTPS resource ownership, authentication and shutdown").dependOn(&run_smoke.step);
         // Fault-injected implementations stay in this separate test process;
         // consumers never link these copies alongside production file state.
-        const native_tests = b.addTest(.{ .root_module = b.createModule(.{
+        const native_tests = addTest(b, .{ .root_module = b.createModule(.{
             .root_source_file = b.path("tests/https_resources_native.zig"),
             .target = target,
             .optimize = optimize,
@@ -190,7 +190,7 @@ pub fn build(b: *std.Build) void {
         for ([_][]const u8{ "curl", "pthread" }) |library| native_tests.root_module.linkSystemLibrary(library, .{ .use_pkg_config = .no });
         check.dependOn(&native_tests.step);
         b.step("test-https-resources-native", "Verify real TLS failure paths and shared physical request capacity").dependOn(&b.addRunArtifact(native_tests).step);
-        const transport_tests = b.addTest(.{ .root_module = b.createModule(.{
+        const transport_tests = addTest(b, .{ .root_module = b.createModule(.{
             .root_source_file = b.path("tests/https_transport_native.zig"),
             .target = target,
             .optimize = optimize,
@@ -204,11 +204,11 @@ pub fn build(b: *std.Build) void {
         check.dependOn(&transport_tests.step);
         b.step("test-https-transport-native", "Verify explicit TLS listener ownership, sealing and independent native references").dependOn(&b.addRunArtifact(transport_tests).step);
     }
-    const file_stream_tests = b.addTest(.{ .root_module = file_stream });
+    const file_stream_tests = addTest(b, .{ .root_module = file_stream });
     const run_file_stream_tests = b.addRunArtifact(file_stream_tests);
     check.dependOn(&file_stream_tests.step);
     b.step("test-file-stream", "Verify consumer-neutral file preparation, cancellation and ownership contracts").dependOn(&run_file_stream_tests.step);
-    const native_stream_tests = b.addTest(.{ .root_module = native_stream });
+    const native_stream_tests = addTest(b, .{ .root_module = native_stream });
     const run_native_stream_tests = b.addRunArtifact(native_stream_tests);
     check.dependOn(&native_stream_tests.step);
     test_step.dependOn(&run_native_stream_tests.step);
@@ -227,7 +227,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{.{ .name = "ziggurat_file_stream", .module = fixture_file_stream }},
         });
-        const native_tests = b.addTest(.{ .root_module = b.createModule(.{
+        const native_tests = addTest(b, .{ .root_module = b.createModule(.{
             .root_source_file = b.path("tests/native_stream_native.zig"),
             .target = target,
             .optimize = optimize,
@@ -248,7 +248,7 @@ pub fn build(b: *std.Build) void {
     }
     const animation = b.addModule("ziggurat_animation", .{ .root_source_file = b.path("src/animation/root.zig"), .target = target, .optimize = optimize });
     const i18n = b.addModule("ziggurat_i18n", .{ .root_source_file = b.path("src/i18n/root.zig"), .target = target, .optimize = optimize });
-    const i18n_tests = b.addTest(.{ .root_module = i18n });
+    const i18n_tests = addTest(b, .{ .root_module = i18n });
     check.dependOn(&i18n_tests.step);
     const run_i18n_tests = b.addRunArtifact(i18n_tests);
     test_step.dependOn(&run_i18n_tests.step);
@@ -258,13 +258,13 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_ipc", .module = ipc },
         .{ .name = "ziggurat_i18n", .module = i18n },
     } });
-    const page_runtime_tests = b.addTest(.{ .root_module = page_runtime });
+    const page_runtime_tests = addTest(b, .{ .root_module = page_runtime });
     check.dependOn(&page_runtime_tests.step);
     const run_page_runtime_tests = b.addRunArtifact(page_runtime_tests);
     test_step.dependOn(&run_page_runtime_tests.step);
     b.step("test-page-runtime", "Run page handshake, runtime service, plugin routing, find script and plugin manifest tests").dependOn(&run_page_runtime_tests.step);
     const markdown = b.addModule("ziggurat_markdown", .{ .root_source_file = b.path("src/markdown/root.zig"), .target = target, .optimize = optimize });
-    const markdown_tests = b.addTest(.{ .root_module = markdown });
+    const markdown_tests = addTest(b, .{ .root_module = markdown });
     check.dependOn(&markdown_tests.step);
     const run_markdown_tests = b.addRunArtifact(markdown_tests);
     test_step.dependOn(&run_markdown_tests.step);
@@ -272,7 +272,7 @@ pub fn build(b: *std.Build) void {
     // Optional: needs `python scripts/fetch-sqlite.py`, so it stays out of `test` and `check`.
     const sqlite = b.addModule("ziggurat_sqlite", .{ .root_source_file = b.path("src/sqlite/root.zig"), .target = target, .optimize = optimize });
     @import("build_support/sqlite.zig").add(b, sqlite, target, optimize);
-    const sqlite_tests = b.addTest(.{ .root_module = sqlite });
+    const sqlite_tests = addTest(b, .{ .root_module = sqlite });
     b.step("test-sqlite", "Run SQLite connection, binding, row, transaction, migration and thread tests (fetch source first)").dependOn(&b.addRunArtifact(sqlite_tests).step);
     const wake = b.addModule("ziggurat_wake", .{ .root_source_file = b.path("src/wake/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
@@ -296,7 +296,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_net", .module = net },
         .{ .name = "ziggurat_page_runtime", .module = page_runtime },
     } });
-    const plugin_fetch_tests = b.addTest(.{ .root_module = plugin_fetch });
+    const plugin_fetch_tests = addTest(b, .{ .root_module = plugin_fetch });
     check.dependOn(&plugin_fetch_tests.step);
     const run_plugin_fetch_tests = b.addRunArtifact(plugin_fetch_tests);
     test_step.dependOn(&run_plugin_fetch_tests.step);
@@ -306,7 +306,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_net", .module = net },
         .{ .name = "ziggurat_page_runtime", .module = page_runtime },
     } });
-    const plugin_websocket_tests = b.addTest(.{ .root_module = plugin_websocket });
+    const plugin_websocket_tests = addTest(b, .{ .root_module = plugin_websocket });
     check.dependOn(&plugin_websocket_tests.step);
     const run_plugin_websocket_tests = b.addRunArtifact(plugin_websocket_tests);
     test_step.dependOn(&run_plugin_websocket_tests.step);
@@ -318,7 +318,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_page_runtime", .module = page_runtime },
         .{ .name = "ziggurat_system_watch", .module = system_watch },
     } });
-    const plugin_watch_tests = b.addTest(.{ .root_module = plugin_watch });
+    const plugin_watch_tests = addTest(b, .{ .root_module = plugin_watch });
     check.dependOn(&plugin_watch_tests.step);
     const run_plugin_watch_tests = b.addRunArtifact(plugin_watch_tests);
     test_step.dependOn(&run_plugin_watch_tests.step);
@@ -328,7 +328,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_ipc", .module = ipc },
         .{ .name = "ziggurat_page_runtime", .module = page_runtime },
     } });
-    const plugin_sqlite_tests = b.addTest(.{ .root_module = plugin_sqlite });
+    const plugin_sqlite_tests = addTest(b, .{ .root_module = plugin_sqlite });
     check.dependOn(&plugin_sqlite_tests.step);
     const run_plugin_sqlite_tests = b.addRunArtifact(plugin_sqlite_tests);
     test_step.dependOn(&run_plugin_sqlite_tests.step);
@@ -709,7 +709,7 @@ pub fn build(b: *std.Build) void {
         system.link_libc = true;
     }
     addSystemIntegrationNative(b, system, target, optimize);
-    const system_unit_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/system/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} }) });
+    const system_unit_tests = addTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("src/system/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} }) });
     addSystemIntegrationNative(b, system_unit_tests.root_module, target, optimize);
     if (target.result.os.tag == .windows) {
         for ([_][]const u8{ "user32", "gdi32", "shell32", "ole32" }) |library| system_unit_tests.root_module.linkSystemLibrary(library, .{});
@@ -814,7 +814,7 @@ pub fn build(b: *std.Build) void {
     const view_rich_text = b.addModule("ziggurat_view_rich_text", .{ .root_source_file = b.path("src/view/rich_text.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat_ui", .module = ui }, .{ .name = "ziggurat_view", .module = declarative_view },
     } });
-    const view_rich_text_tests = b.addTest(.{ .root_module = view_rich_text });
+    const view_rich_text_tests = addTest(b, .{ .root_module = view_rich_text });
     check.dependOn(&view_rich_text_tests.step);
     const run_view_rich_text_tests = b.addRunArtifact(view_rich_text_tests);
     test_step.dependOn(&run_view_rich_text_tests.step);
@@ -823,13 +823,13 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_markdown", .module = markdown },     .{ .name = "ziggurat_markdown_view", .module = markdown_view },
         .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_view_rich_text", .module = view_rich_text },
     } });
-    const markdown_rich_tests = b.addTest(.{ .root_module = markdown_rich });
+    const markdown_rich_tests = addTest(b, .{ .root_module = markdown_rich });
     check.dependOn(&markdown_rich_tests.step);
     const run_markdown_rich_tests = b.addRunArtifact(markdown_rich_tests);
     test_step.dependOn(&run_markdown_rich_tests.step);
     b.step("test-markdown-rich", "Run Markdown inline style to rich text span tests").dependOn(&run_markdown_rich_tests.step);
     const chart = b.addModule("ziggurat_chart", .{ .root_source_file = b.path("src/chart/root.zig"), .target = target, .optimize = optimize });
-    const chart_tests = b.addTest(.{ .root_module = chart });
+    const chart_tests = addTest(b, .{ .root_module = chart });
     check.dependOn(&chart_tests.step);
     const run_chart_tests = b.addRunArtifact(chart_tests);
     test_step.dependOn(&run_chart_tests.step);
@@ -900,7 +900,7 @@ pub fn build(b: *std.Build) void {
     ui.addImport("ziggurat_drawing_resources", drawing_resources);
     const shader = b.addModule("ziggurat_shader", .{ .root_source_file = b.path("src/shader/root.zig"), .target = target, .optimize = optimize });
     ui.addImport("ziggurat_shader", shader);
-    const shader_tests = b.addTest(.{ .root_module = shader });
+    const shader_tests = addTest(b, .{ .root_module = shader });
     check.dependOn(&shader_tests.step);
     const run_shader_tests = b.addRunArtifact(shader_tests);
     test_step.dependOn(&run_shader_tests.step);
@@ -908,7 +908,7 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .linux) {
         // Translated programs against the CPU machine on OpenGL (Mesa
         // draws without a GPU); needs EGL and libepoxy.
-        const gl_parity = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/shader_gpu_gl.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "ziggurat_shader", .module = shader }} }) });
+        const gl_parity = addTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/shader_gpu_gl.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "ziggurat_shader", .module = shader }} }) });
         gl_parity.root_module.addCSourceFile(.{ .file = b.path("tests/shader_gpu_gl.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
         gl_parity.root_module.linkSystemLibrary("epoxy", .{});
         check.dependOn(&gl_parity.step);
@@ -917,7 +917,7 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .windows) {
         // Translated programs against the CPU machine on Direct3D 11 WARP,
         // compiled by the system's HLSL compiler.
-        const d3d_parity = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/shader_gpu_d3d.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "ziggurat_shader", .module = shader }} }) });
+        const d3d_parity = addTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/shader_gpu_d3d.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "ziggurat_shader", .module = shader }} }) });
         d3d_parity.root_module.addCSourceFiles(.{ .files = &.{ "tests/shader_gpu_d3d.c", "src/ui/hlsl_compile.c" }, .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
         d3d_parity.root_module.linkSystemLibrary("d3d11", .{});
         check.dependOn(&d3d_parity.step);
@@ -960,7 +960,7 @@ pub fn build(b: *std.Build) void {
         });
     }
     const prepared_hit = b.createModule(.{ .root_source_file = b.path("src/document_editor/prepared_hit.zig"), .target = target, .optimize = optimize });
-    const prepared_hit_tests = b.addTest(.{ .root_module = prepared_hit });
+    const prepared_hit_tests = addTest(b, .{ .root_module = prepared_hit });
     const run_prepared_hit_tests = b.addRunArtifact(prepared_hit_tests);
     check.dependOn(&prepared_hit_tests.step);
     test_step.dependOn(&run_prepared_hit_tests.step);
@@ -1070,7 +1070,7 @@ pub fn build(b: *std.Build) void {
         check.dependOn(&point_latch.step);
         b.step("build-smoke-document-point-latch", "Build the isolated UIA final-release oracle").dependOn(&b.addInstallArtifact(point_latch, .{}).step);
         b.step("smoke-document-point-latch", "Verify UIA final-release currentness with the normal main-thread FIFO").dependOn(&b.addRunArtifact(point_latch).step);
-        const provider_tests = b.addTest(.{ .root_module = b.createModule(.{
+        const provider_tests = addTest(b, .{ .root_module = b.createModule(.{
             .root_source_file = b.path("tests/document_accessibility_provider.zig"),
             .target = target,
             .optimize = optimize,
@@ -1735,7 +1735,7 @@ pub fn build(b: *std.Build) void {
         view.addImport("ziggurat_tls_pem", tls_pem);
         _ = native_support.add(b, view, "webview-webkit-macos", "src/webview/webkit_macos.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         native_support.linkFrameworks(b, view, &.{ "WebKit", "AppKit", "Foundation", "CoreFoundation" });
-        view_tests = b.addTest(.{ .root_module = view });
+        view_tests = addTest(b, .{ .root_module = view });
         _ = b.step("webview-runtime", "Use the system WKWebView");
         addSmoke(b, "smoke-webview-macos", "tests/macos_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
@@ -1779,7 +1779,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "ziggurat_resource_stream", .module = resource_stream },
             },
         });
-        view_tests = b.addTest(.{ .root_module = view });
+        view_tests = addTest(b, .{ .root_module = view });
         const web_runtime = b.step("webview-runtime", "Install the optional WebView2 loader and SDK license");
         web_runtime.dependOn(&b.addInstallFileWithDir(sourcePath(b, b.pathJoin(&.{ sdk, "build/native/x64/WebView2Loader.dll" })), .bin, "WebView2Loader.dll").step);
         web_runtime.dependOn(&b.addInstallFileWithDir(sourcePath(b, b.pathJoin(&.{ sdk, "LICENSE.txt" })), .bin, "WebView2-SDK-LICENSE.txt").step);
@@ -2037,7 +2037,7 @@ pub fn build(b: *std.Build) void {
         test_file_native.linkSystemLibrary("gio-unix-2.0", .{ .use_pkg_config = .force });
         test_file_stream.linkSystemLibrary("gio-unix-2.0", .{ .use_pkg_config = .force });
         const file_response_module = b.createModule(.{ .root_source_file = b.path("src/webview/file_responses.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat_file_stream", .module = test_file_stream }, .{ .name = "ziggurat_http_response", .module = http_response } } });
-        const file_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/webkit_file_test.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "file_responses", .module = file_response_module }, .{ .name = "ziggurat_file_stream", .module = test_file_stream } } }) });
+        const file_tests = addTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/webkit_file_test.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "file_responses", .module = file_response_module }, .{ .name = "ziggurat_file_stream", .module = test_file_stream } } }) });
         const file_test_helper = native_support.add(b, file_tests.root_module, "file-stream-test-helper", "tests/webkit_file_test.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZWK_FILE_TESTING" }, target, optimize);
         file_test_helper.linkSystemLibrary("gio-unix-2.0", .{ .use_pkg_config = .force });
         file_tests.root_module.linkSystemLibrary("gio-unix-2.0", .{ .use_pkg_config = .force });
@@ -2045,7 +2045,7 @@ pub fn build(b: *std.Build) void {
         webkit_file_run = b.addRunArtifact(file_tests);
         b.step("test-webkit-file", "Verify explicit file pumps, socket readiness, cancellation and physical lifetime without a browser").dependOn(&webkit_file_run.?.step);
         const profile_module = b.createModule(.{ .root_source_file = b.path("src/webview/profile.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_tls_pem", .module = tls_pem }} });
-        const profile_tests = b.addTest(.{ .root_module = b.createModule(.{
+        const profile_tests = addTest(b, .{ .root_module = b.createModule(.{
             .root_source_file = b.path("tests/profile_owner_linux.zig"),
             .target = target,
             .optimize = optimize,
@@ -2058,7 +2058,7 @@ pub fn build(b: *std.Build) void {
         profile_tests.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
         check.dependOn(&profile_tests.step);
         b.step("test-webkit-profile", "Verify private profile manager ownership, native finalization and exclusive storage without a page").dependOn(&b.addRunArtifact(profile_tests).step);
-        const profile_tls_owner_tests = b.addTest(.{ .root_module = b.createModule(.{
+        const profile_tls_owner_tests = addTest(b, .{ .root_module = b.createModule(.{
             .root_source_file = b.path("tests/profile_tls_owner_linux.zig"),
             .target = target,
             .optimize = optimize,
@@ -2071,7 +2071,7 @@ pub fn build(b: *std.Build) void {
         profile_tls_owner_tests.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
         check.dependOn(&profile_tls_owner_tests.step);
         b.step("test-webkit-profile-tls", "Verify frozen TLS profile construction, allocation failure and late native ownership without a page").dependOn(&b.addRunArtifact(profile_tls_owner_tests).step);
-        const cookies_owner_tests = b.addTest(.{ .root_module = b.createModule(.{
+        const cookies_owner_tests = addTest(b, .{ .root_module = b.createModule(.{
             .root_source_file = b.path("tests/cookie_owner_linux.zig"),
             .target = target,
             .optimize = optimize,
@@ -2093,7 +2093,7 @@ pub fn build(b: *std.Build) void {
         const install_extension = b.addInstallArtifact(request_extension, .{});
         b.step("webview-request-extension", "Install the optional WebProcess request policy adapter for explicit deployment").dependOn(&install_extension.step);
         check.dependOn(&request_extension.step);
-        view_tests = b.addTest(.{ .root_module = view });
+        view_tests = addTest(b, .{ .root_module = view });
         _ = b.step("webview-runtime", "Use the installed WebKitGTK 4.1 runtime");
         addWebNativeBoundarySmoke(b, target, optimize, core, view);
         addPageRuntimeSmoke(b, target, optimize, core, view, ipc, i18n, page_runtime, net, plugin_fetch, plugin_watch, plugin_sqlite, plugin_websocket);
@@ -2263,8 +2263,8 @@ pub fn build(b: *std.Build) void {
             b.step("smoke-https-pages", "Verify WebKit credentials and host HTTPS memory and file resources together").dependOn(&pages_run.step);
         }
     }
-    const tests = b.addTest(.{ .root_module = core });
-    const webkit_remote_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/webview/webkit_remote.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_http_response", .module = http_response }} }) });
+    const tests = addTest(b, .{ .root_module = core });
+    const webkit_remote_tests = addTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("src/webview/webkit_remote.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_http_response", .module = http_response }} }) });
     check.dependOn(&webkit_remote_tests.step);
     const run_webkit_remote = b.addRunArtifact(webkit_remote_tests);
     b.step("test-webkit-remote", "Run remote origin policy and owned native descriptor invariants").dependOn(&run_webkit_remote.step);
@@ -2315,35 +2315,35 @@ pub fn build(b: *std.Build) void {
     check_page_clients.addFileInput(b.path("packages/plugin-websocket/src/generated/websocket.ts"));
     test_step.dependOn(&check_page_clients.step);
     b.step("check-page-runtime-clients", "Fail when a generated page runtime client under packages/ differs from its Zig schema").dependOn(&check_page_clients.step);
-    const ipc_tests = b.addTest(.{ .root_module = ipc });
+    const ipc_tests = addTest(b, .{ .root_module = ipc });
     const ipc_fixture = b.createModule(.{ .root_source_file = b.path("src/ipc/fixture.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ipc", .module = ipc }} });
-    const ipc_fixture_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const ipc_fixture_tests = addTest(b, .{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/ipc_fixture_check.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{ .{ .name = "ipc", .module = ipc }, .{ .name = "fixture", .module = ipc_fixture } },
     }) });
-    const update_tests = b.addTest(.{ .root_module = update });
-    const net_tests = b.addTest(.{ .root_module = net });
+    const update_tests = addTest(b, .{ .root_module = update });
+    const net_tests = addTest(b, .{ .root_module = net });
     const producer_service = b.createModule(.{ .root_source_file = b.path("tests/resource_producer_service.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat_ipc", .module = ipc }, .{ .name = "ziggurat_resource_stream", .module = resource_stream } } });
-    const producer_fixture_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const producer_fixture_tests = addTest(b, .{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/resource_producer_fixture_check.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{ .{ .name = "ziggurat_ipc", .module = ipc }, .{ .name = "producer_service", .module = producer_service } },
     }) });
-    const asset_tests = b.addTest(.{ .root_module = assets });
-    const extension_tests = b.addTest(.{ .root_module = extensions });
-    const vector_tests = b.addTest(.{ .root_module = vector });
-    const svg_tests = b.addTest(.{ .root_module = svg });
-    const shadow_tests = b.addTest(.{ .root_module = shadows });
-    const document_tests = b.addTest(.{ .root_module = document });
-    const document_diff_tests = b.addTest(.{ .root_module = document_diff });
-    const document_diff_view_tests = b.addTest(.{ .root_module = document_diff_view });
-    const code_editor_tests = b.addTest(.{ .root_module = code_editor });
-    const resource_stream_tests = b.addTest(.{ .root_module = resource_stream });
-    const animation_tests = b.addTest(.{ .root_module = animation });
-    const producer_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const asset_tests = addTest(b, .{ .root_module = assets });
+    const extension_tests = addTest(b, .{ .root_module = extensions });
+    const vector_tests = addTest(b, .{ .root_module = vector });
+    const svg_tests = addTest(b, .{ .root_module = svg });
+    const shadow_tests = addTest(b, .{ .root_module = shadows });
+    const document_tests = addTest(b, .{ .root_module = document });
+    const document_diff_tests = addTest(b, .{ .root_module = document_diff });
+    const document_diff_view_tests = addTest(b, .{ .root_module = document_diff_view });
+    const code_editor_tests = addTest(b, .{ .root_module = code_editor });
+    const resource_stream_tests = addTest(b, .{ .root_module = resource_stream });
+    const animation_tests = addTest(b, .{ .root_module = animation });
+    const producer_tests = addTest(b, .{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/resource_stream/bridge.zig"),
         .target = target,
         .optimize = optimize,
@@ -2357,18 +2357,18 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .windows) {
         for ([_][]const u8{ "user32", "gdi32", "shell32", "ole32" }) |library| shell_test_module.linkSystemLibrary(library, .{});
     }
-    const shell_tests = b.addTest(.{ .root_module = shell_test_module });
-    const clipboard_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const shell_tests = addTest(b, .{ .root_module = shell_test_module });
+    const clipboard_tests = addTest(b, .{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/system/clipboard.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "ziggurat", .module = core }},
     }) });
-    const watch_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/system/watch.zig"), .target = target, .optimize = optimize, .link_libc = target.result.os.tag == .windows }) });
+    const watch_tests = addTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("src/system/watch.zig"), .target = target, .optimize = optimize, .link_libc = target.result.os.tag == .windows }) });
     if (target.result.os.tag == .macos) native_support.linkFrameworks(b, watch_tests.root_module, &.{ "CoreServices", "CoreFoundation" });
     b.step("test-file-watch", "Run coarse file-watch unit tests").dependOn(&b.addRunArtifact(watch_tests).step);
-    const menu_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/system/menus.zig"), .target = target, .optimize = optimize }) });
-    const system_extra_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const menu_tests = addTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("src/system/menus.zig"), .target = target, .optimize = optimize }) });
+    const system_extra_tests = addTest(b, .{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/system/extras_test.zig"),
         .target = target,
         .optimize = optimize,
@@ -2378,7 +2378,7 @@ pub fn build(b: *std.Build) void {
     const run_system_extra_tests = b.addRunArtifact(system_extra_tests);
     test_step.dependOn(&run_system_extra_tests.step);
     b.step("test-system-extras", "Run application paths, menu role, role action, signal quit, jump list, recent document and relaunch tests").dependOn(&run_system_extra_tests.step);
-    const system_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const system_tests = addTest(b, .{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/system_capabilities.zig"),
         .target = target,
         .optimize = optimize,
@@ -2413,7 +2413,7 @@ pub fn build(b: *std.Build) void {
     b.step("setup-stub", "Build the self-extracting setup, launcher and uninstaller stub").dependOn(&install_setup_stub.step);
     check.dependOn(&setup_stub.step);
     for ([_]*std.Build.Module{ setup_format_module, deb_module }) |module| {
-        const module_tests = b.addTest(.{ .root_module = module });
+        const module_tests = addTest(b, .{ .root_module = module });
         check.dependOn(&module_tests.step);
         test_step.dependOn(&b.addRunArtifact(module_tests).step);
     }
@@ -2456,7 +2456,7 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&cli.step);
     // LLVM, as release builds use: the Linux Debug self-hosted backend keeps
     // constants writable and hid a write to `std.Io.Reader.ending`.
-    const cli_tests = b.addTest(.{ .root_module = cli_module, .use_llvm = true });
+    const cli_tests = addTest(b, .{ .root_module = cli_module, .use_llvm = true });
     check.dependOn(&cli_tests.step);
     const run_cli_tests = b.addRunArtifact(cli_tests);
     test_step.dependOn(&run_cli_tests.step);
@@ -2482,7 +2482,7 @@ pub fn build(b: *std.Build) void {
         b.step("input-latency", "Measure how long typing, scrolling, dragging and animation take to be painted: zig build input-latency -- [--mode LIST] [--runs N] [--events N]").dependOn(&input_latency_run.step);
         const measurement_tests = b.step("test-measurement-tools", "Run the idle-memory and input-latency tools' tests");
         inline for (.{ idle_memory_module, input_latency_module }) |module| {
-            const tool_tests = b.addTest(.{ .root_module = module });
+            const tool_tests = addTest(b, .{ .root_module = module });
             check.dependOn(&tool_tests.step);
             const run_tool_tests = b.addRunArtifact(tool_tests);
             measurement_tests.dependOn(&run_tool_tests.step);
@@ -2502,7 +2502,7 @@ pub fn build(b: *std.Build) void {
     const generate_catalog = b.addRunArtifact(catalog_generator);
     generate_catalog.addDirectoryArg(b.path("tests/i18n_fixture"));
     const fixture_catalog = generate_catalog.addOutputFileArg("catalog.zig");
-    const generated_catalog_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const generated_catalog_tests = addTest(b, .{ .root_module = b.createModule(.{
         .root_source_file = b.path("tests/i18n_generated_check.zig"),
         .target = target,
         .optimize = optimize,
@@ -2537,7 +2537,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "web_assets", .module = embedded }},
     }) });
-    const packaging_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("build_support/packaging.zig"), .target = target, .optimize = optimize }) });
+    const packaging_tests = addTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("build_support/packaging.zig"), .target = target, .optimize = optimize }) });
     const platform_probe = b.addExecutable(.{
         .name = "platform-check",
         .root_module = b.createModule(.{ .root_source_file = b.path("tests/platform_check.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} }),
@@ -2573,12 +2573,12 @@ pub fn build(b: *std.Build) void {
     b.step("test-core", "Run core lifecycle and composition invariant tests").dependOn(&run_tests.step);
     test_step.dependOn(&run_runtime_tests.step);
     test_step.dependOn(&run_file_stream_tests.step);
-    const https_resources_tests = b.addTest(.{ .root_module = https_resources });
+    const https_resources_tests = addTest(b, .{ .root_module = https_resources });
     const run_https_resources_tests = b.addRunArtifact(https_resources_tests);
     check.dependOn(&https_resources_tests.step);
     test_step.dependOn(&run_https_resources_tests.step);
     b.step("test-https-resources", "Verify optional HTTPS resource admission, limits and cold capability rejection").dependOn(&run_https_resources_tests.step);
-    const site_routes_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const site_routes_tests = addTest(b, .{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/https_resources/site_routes.zig"),
         .target = target,
         .optimize = optimize,
@@ -2588,50 +2588,50 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&site_routes_tests.step);
     test_step.dependOn(&run_site_routes_tests.step);
     b.step("test-https-site-routes", "Run owned HTTPS route, static response and explicit header policy contracts").dependOn(&run_site_routes_tests.step);
-    const http_response_tests = b.addTest(.{ .root_module = http_response });
+    const http_response_tests = addTest(b, .{ .root_module = http_response });
     const run_http_response_tests = b.addRunArtifact(http_response_tests);
     check.dependOn(&http_response_tests.step);
     test_step.dependOn(&run_http_response_tests.step);
     b.step("test-http-response", "Verify shared HTTP response validation and owned metadata without a browser or server").dependOn(&run_http_response_tests.step);
-    const caret_tests = b.addTest(.{ .root_module = caret });
+    const caret_tests = addTest(b, .{ .root_module = caret });
     const run_caret_tests = b.addRunArtifact(caret_tests);
     check.dependOn(&caret_tests.step);
     test_step.dependOn(&run_caret_tests.step);
     b.step("test-caret", "Verify bounded visual caret geometry independently of shaping and native rendering").dependOn(&run_caret_tests.step);
-    const gaussian_tests = b.addTest(.{ .root_module = gaussian });
+    const gaussian_tests = addTest(b, .{ .root_module = gaussian });
     const run_gaussian_tests = b.addRunArtifact(gaussian_tests);
     check.dependOn(&gaussian_tests.step);
     test_step.dependOn(&run_gaussian_tests.step);
     b.step("test-gaussian", "Verify bounded composed-image Gaussian preparation, worker handoff and resource leases").dependOn(&run_gaussian_tests.step);
     const profile_storage_module = b.createModule(.{ .root_source_file = b.path("src/webview/profile_storage.zig"), .target = target, .optimize = optimize, .link_libc = target.result.os.tag == .windows });
     if (target.result.os.tag == .windows) addWindowsProfileStorageNative(b, profile_storage_module, "profile-storage-test", target, optimize);
-    const profile_storage_tests = b.addTest(.{ .root_module = profile_storage_module });
+    const profile_storage_tests = addTest(b, .{ .root_module = profile_storage_module });
     const run_profile_storage_tests = b.addRunArtifact(profile_storage_tests);
     check.dependOn(&profile_storage_tests.step);
     test_step.dependOn(&run_profile_storage_tests.step);
     b.step("test-profile-storage", "Verify private profile preparation metadata, handoff and ownership without an engine").dependOn(&run_profile_storage_tests.step);
-    const profile_tls_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/webview/profile_tls_policy.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_tls_pem", .module = tls_pem }} }) });
+    const profile_tls_tests = addTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("src/webview/profile_tls_policy.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_tls_pem", .module = tls_pem }} }) });
     const run_profile_tls_tests = b.addRunArtifact(profile_tls_tests);
     check.dependOn(&profile_tls_tests.step);
     test_step.dependOn(&run_profile_tls_tests.step);
     b.step("test-profile-tls", "Verify bounded certificate-only profile policy without TLS or an engine").dependOn(&run_profile_tls_tests.step);
-    const pem_tests = b.addTest(.{ .root_module = tls_pem });
+    const pem_tests = addTest(b, .{ .root_module = tls_pem });
     const run_pem_tests = b.addRunArtifact(pem_tests);
     check.dependOn(&pem_tests.step);
     test_step.dependOn(&run_pem_tests.step);
     b.step("test-tls-pem", "Verify bounded shared certificate and private-key framing without native TLS").dependOn(&run_pem_tests.step);
-    const cookies_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/webview/cookies.zig"), .target = target, .optimize = optimize }) });
+    const cookies_tests = addTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("src/webview/cookies.zig"), .target = target, .optimize = optimize }) });
     const run_cookies_tests = b.addRunArtifact(cookies_tests);
     check.dependOn(&cookies_tests.step);
     test_step.dependOn(&run_cookies_tests.step);
     b.step("test-cookies", "Verify cookie identity, owned result batches and bounded operation tokens without an engine").dependOn(&run_cookies_tests.step);
-    const content_rules_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/webview/content_rules.zig"), .target = target, .optimize = optimize }) });
+    const content_rules_tests = addTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("src/webview/content_rules.zig"), .target = target, .optimize = optimize }) });
     const run_content_rules_tests = b.addRunArtifact(content_rules_tests);
     check.dependOn(&content_rules_tests.step);
     test_step.dependOn(&run_content_rules_tests.step);
     b.step("test-content-rules", "Verify content rule parsing, WebKit regular expressions, public suffixes and hiding scripts without an engine").dependOn(&run_content_rules_tests.step);
     if (target.result.os.tag == .linux) {
-        const file_tests = b.addTest(.{ .root_module = b.createModule(.{
+        const file_tests = addTest(b, .{ .root_module = b.createModule(.{
             .root_source_file = b.path("tests/profile_storage_linux.zig"),
             .target = target,
             .optimize = optimize,
@@ -2642,17 +2642,17 @@ pub fn build(b: *std.Build) void {
     }
     if (webkit_file_run) |run| test_step.dependOn(&run.step);
     if (initializer_native_run) |run| test_step.dependOn(&run.step);
-    const language_protocol_tests = b.addTest(.{ .root_module = language_protocol });
+    const language_protocol_tests = addTest(b, .{ .root_module = language_protocol });
     const run_language_protocol_tests = b.addRunArtifact(language_protocol_tests);
     check.dependOn(&language_protocol_tests.step);
     test_step.dependOn(&run_language_protocol_tests.step);
     b.step("test-language-protocol", "Verify bounded framing, versioned synchronization and explicit language client ownership").dependOn(&run_language_protocol_tests.step);
-    const window_placement_tests = b.addTest(.{ .root_module = window_placement });
+    const window_placement_tests = addTest(b, .{ .root_module = window_placement });
     const run_window_placement_tests = b.addRunArtifact(window_placement_tests);
     check.dependOn(&window_placement_tests.step);
     test_step.dependOn(&run_window_placement_tests.step);
     b.step("test-window-placement", "Run monitor placement, versioned encoding and explicit worker storage invariants").dependOn(&run_window_placement_tests.step);
-    const document_app_tests = b.addTest(.{ .root_module = document_app });
+    const document_app_tests = addTest(b, .{ .root_module = document_app });
     const run_document_app_tests = b.addRunArtifact(document_app_tests);
     check.dependOn(&document_app_tests.step);
     test_step.dependOn(&run_document_app_tests.step);
@@ -2665,7 +2665,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_markdown", .module = markdown },
         .{ .name = "ziggurat_markdown_view", .module = markdown_view },
     } });
-    const updater_tests = b.addTest(.{ .root_module = updater });
+    const updater_tests = addTest(b, .{ .root_module = updater });
     const run_updater_tests = b.addRunArtifact(updater_tests);
     check.dependOn(&updater_tests.step);
     test_step.dependOn(&run_updater_tests.step);
@@ -2677,7 +2677,7 @@ pub fn build(b: *std.Build) void {
     // Pinned third-party decoders: their own warnings and undefined-behavior
     // checks are not this project's to enforce.
     for ([_][]const u8{ "mp3", "vorbis" }) |codec| _ = native_support.add(b, audio, b.fmt("audio-{s}-native", .{codec}), b.fmt("src/audio/{s}.c", .{codec}), &.{ "-std=c99", "-w", "-fno-sanitize=undefined" }, target, optimize);
-    const audio_tests = b.addTest(.{ .root_module = audio });
+    const audio_tests = addTest(b, .{ .root_module = audio });
     const run_audio_tests = b.addRunArtifact(audio_tests);
     check.dependOn(&audio_tests.step);
     test_step.dependOn(&run_audio_tests.step);
@@ -2685,7 +2685,7 @@ pub fn build(b: *std.Build) void {
     addSmoke(b, "smoke-audio", "tests/audio_smoke.zig", target, optimize, &.{.{ .name = "ziggurat_audio", .module = audio }});
     const terminal = b.addModule("ziggurat_terminal", .{ .root_source_file = b.path("src/terminal/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
     terminal.link_libc = true;
-    const terminal_tests = b.addTest(.{ .root_module = terminal });
+    const terminal_tests = addTest(b, .{ .root_module = terminal });
     const run_terminal_tests = b.addRunArtifact(terminal_tests);
     check.dependOn(&terminal_tests.step);
     test_step.dependOn(&run_terminal_tests.step);
@@ -2693,7 +2693,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
         .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_terminal", .module = terminal },
     } });
-    const terminal_view_tests = b.addTest(.{ .root_module = terminal_view });
+    const terminal_view_tests = addTest(b, .{ .root_module = terminal_view });
     const run_terminal_view_tests = b.addRunArtifact(terminal_view_tests);
     check.dependOn(&terminal_view_tests.step);
     test_step.dependOn(&run_terminal_view_tests.step);
@@ -2707,7 +2707,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_terminal", .module = terminal },
         .{ .name = "ziggurat_terminal_view", .module = terminal_view },
     });
-    const snippets_tests = b.addTest(.{ .root_module = b.createModule(.{
+    const snippets_tests = addTest(b, .{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/code_editor/snippet.zig"),
         .target = target,
         .optimize = optimize,
@@ -2719,12 +2719,12 @@ pub fn build(b: *std.Build) void {
     }) });
     check.dependOn(&snippets_tests.step);
     b.step("test-snippets", "Run bounded snippet parsing and document session invariants").dependOn(&b.addRunArtifact(snippets_tests).step);
-    const document_accessibility_tests = b.addTest(.{ .root_module = document_accessibility });
+    const document_accessibility_tests = addTest(b, .{ .root_module = document_accessibility });
     const run_document_accessibility_tests = b.addRunArtifact(document_accessibility_tests);
     test_step.dependOn(&run_document_accessibility_tests.step);
     check.dependOn(&document_accessibility_tests.step);
     b.step("test-document-accessibility", "Run complete document text snapshot and ownership invariants").dependOn(&run_document_accessibility_tests.step);
-    const diff_accessibility_tests = b.addTest(.{ .root_module = document_diff_accessibility });
+    const diff_accessibility_tests = addTest(b, .{ .root_module = document_diff_accessibility });
     const run_diff_accessibility_tests = b.addRunArtifact(diff_accessibility_tests);
     test_step.dependOn(&run_diff_accessibility_tests.step);
     check.dependOn(&diff_accessibility_tests.step);
@@ -2734,13 +2734,13 @@ pub fn build(b: *std.Build) void {
         .{ "test-affine-state", "affine_state", "src/ui/affine_state.zig", "tests/ui_affine_state.zig" },
     }) |entry| {
         const math_module = b.createModule(.{ .root_source_file = b.path(entry[2]), .target = target, .optimize = optimize });
-        const math_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(entry[3]), .target = target, .optimize = optimize, .imports = &.{.{ .name = entry[1], .module = math_module }} }) });
+        const math_tests = addTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path(entry[3]), .target = target, .optimize = optimize, .imports = &.{.{ .name = entry[1], .module = math_module }} }) });
         const run_math_tests = b.addRunArtifact(math_tests);
         test_step.dependOn(&run_math_tests.step);
         check.dependOn(&math_tests.step);
         b.step(entry[0], "Run pure coordinate and committed-frame geometry invariants").dependOn(&run_math_tests.step);
     }
-    const code_syntax_tests = b.addTest(.{ .root_module = code_syntax });
+    const code_syntax_tests = addTest(b, .{ .root_module = code_syntax });
     const run_code_syntax_tests = b.addRunArtifact(code_syntax_tests);
     test_step.dependOn(&run_code_syntax_tests.step);
     check.dependOn(&code_syntax_tests.step);
@@ -2763,7 +2763,7 @@ pub fn build(b: *std.Build) void {
     producer_test_step.dependOn(&run_producer_fixture_tests.step);
     const initializer_test_step = b.step("test-document-initializers", "Run owned document initializer and replacement responsibility contracts without a Runtime");
     for ([_][]const u8{ "src/webview/document_initializers.zig", "src/webview/initializer_transaction.zig" }) |source| {
-        const initializer_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = target, .optimize = optimize }) });
+        const initializer_tests = addTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = target, .optimize = optimize }) });
         const run_initializer_tests = b.addRunArtifact(initializer_tests);
         test_step.dependOn(&run_initializer_tests.step);
         check.dependOn(&initializer_tests.step);
@@ -2836,12 +2836,12 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(embed_probe).step);
     test_step.dependOn(&b.addRunArtifact(packaging_tests).step);
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
-        const ui_tests = b.addTest(.{ .root_module = ui });
+        const ui_tests = addTest(b, .{ .root_module = ui });
         check.dependOn(&ui_tests.step);
         const run_ui_tests = b.addRunArtifact(ui_tests);
         test_step.dependOn(&run_ui_tests.step);
         b.step("test-ui", "Run UI frame, geometry, widgets and theme contracts").dependOn(&run_ui_tests.step);
-        const pointer_controls_tests = b.addTest(.{ .root_module = b.createModule(.{
+        const pointer_controls_tests = addTest(b, .{ .root_module = b.createModule(.{
             .root_source_file = b.path("tests/pointer_clicks_test.zig"),
             .target = target,
             .optimize = optimize,
@@ -2852,7 +2852,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_pointer_controls_tests.step);
         b.step("test-ui-pointer-clicks", "Run registered pointer controls, frame authority and lifetime contracts").dependOn(&run_pointer_controls_tests.step);
         addSmoke(b, "smoke-pointer-clicks", "tests/pointer_clicks_smoke.zig", target, optimize, &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui } });
-        const shortcut_scopes_tests = b.addTest(.{ .root_module = b.createModule(.{
+        const shortcut_scopes_tests = addTest(b, .{ .root_module = b.createModule(.{
             .root_source_file = b.path("tests/shortcut_scopes_contract.zig"),
             .target = target,
             .optimize = optimize,
@@ -2863,39 +2863,39 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_shortcut_scopes_tests.step);
         b.step("test-shortcut-scopes", "Run scoped key routing, front authority and bounded continuation contracts").dependOn(&run_shortcut_scopes_tests.step);
         addSmoke(b, "smoke-shortcut-scopes", "tests/shortcut_scopes_smoke.zig", target, optimize, &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui } });
-        const text_tests = b.addTest(.{ .root_module = text_layout });
+        const text_tests = addTest(b, .{ .root_module = text_layout });
         check.dependOn(&text_tests.step);
         const run_text_tests = b.addRunArtifact(text_tests);
         test_step.dependOn(&run_text_tests.step);
         b.step("test-text-layout", "Run immutable text layout and ownership invariants").dependOn(&run_text_tests.step);
-        const drawing_tests = b.addTest(.{ .root_module = drawing_resources });
+        const drawing_tests = addTest(b, .{ .root_module = drawing_resources });
         check.dependOn(&drawing_tests.step);
         test_step.dependOn(&b.addRunArtifact(drawing_tests).step);
-        const image_tests = b.addTest(.{ .root_module = images });
+        const image_tests = addTest(b, .{ .root_module = images });
         check.dependOn(&image_tests.step);
         test_step.dependOn(&b.addRunArtifact(image_tests).step);
-        const image_drawing_tests = b.addTest(.{ .root_module = image_drawing });
+        const image_drawing_tests = addTest(b, .{ .root_module = image_drawing });
         check.dependOn(&image_drawing_tests.step);
         test_step.dependOn(&b.addRunArtifact(image_drawing_tests).step);
-        const shaped_tests = b.addTest(.{ .root_module = shaped_editor });
-        const document_editor_tests = b.addTest(.{ .root_module = document_editor });
+        const shaped_tests = addTest(b, .{ .root_module = shaped_editor });
+        const document_editor_tests = addTest(b, .{ .root_module = document_editor });
         check.dependOn(&document_editor_tests.step);
         const run_document_editor_tests = b.addRunArtifact(document_editor_tests);
         test_step.dependOn(&run_document_editor_tests.step);
         b.step("test-document-editor", "Run indexed document editor invariant tests").dependOn(&run_document_editor_tests.step);
         check.dependOn(&shaped_tests.step);
         test_step.dependOn(&b.addRunArtifact(shaped_tests).step);
-        const list_tests = b.addTest(.{ .root_module = virtual_list });
+        const list_tests = addTest(b, .{ .root_module = virtual_list });
         check.dependOn(&list_tests.step);
         const run_list_tests = b.addRunArtifact(list_tests);
         test_step.dependOn(&run_list_tests.step);
         b.step("test-virtual-list", "Run virtual list model and control invariant tests").dependOn(&run_list_tests.step);
-        const declarative_view_tests = b.addTest(.{ .root_module = declarative_view });
+        const declarative_view_tests = addTest(b, .{ .root_module = declarative_view });
         check.dependOn(&declarative_view_tests.step);
         const run_declarative_view_tests = b.addRunArtifact(declarative_view_tests);
         test_step.dependOn(&run_declarative_view_tests.step);
         b.step("test-view", "Run declarative view build, identity and layout tests").dependOn(&run_declarative_view_tests.step);
-        const markdown_view_tests = b.addTest(.{ .root_module = markdown_view });
+        const markdown_view_tests = addTest(b, .{ .root_module = markdown_view });
         check.dependOn(&markdown_view_tests.step);
         const run_markdown_view_tests = b.addRunArtifact(markdown_view_tests);
         test_step.dependOn(&run_markdown_view_tests.step);
@@ -2905,12 +2905,12 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_vector", .module = vector },
             .{ .name = "ziggurat_chart", .module = chart },
         } });
-        const chart_view_tests = b.addTest(.{ .root_module = chart_view });
+        const chart_view_tests = addTest(b, .{ .root_module = chart_view });
         check.dependOn(&chart_view_tests.step);
         const run_chart_view_tests = b.addRunArtifact(chart_view_tests);
         test_step.dependOn(&run_chart_view_tests.step);
         b.step("test-chart-view", "Run chart view arrangement, storage and preparation key tests").dependOn(&run_chart_view_tests.step);
-        const view_graphics_tests = b.addTest(.{ .root_module = view_graphics });
+        const view_graphics_tests = addTest(b, .{ .root_module = view_graphics });
         check.dependOn(&view_graphics_tests.step);
         const run_view_graphics_tests = b.addRunArtifact(view_graphics_tests);
         test_step.dependOn(&run_view_graphics_tests.step);
@@ -2919,7 +2919,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
             .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_i18n", .module = i18n },
         } });
-        const view_pickers_tests = b.addTest(.{ .root_module = view_pickers });
+        const view_pickers_tests = addTest(b, .{ .root_module = view_pickers });
         check.dependOn(&view_pickers_tests.step);
         const run_view_pickers_tests = b.addRunArtifact(view_pickers_tests);
         test_step.dependOn(&run_view_pickers_tests.step);
@@ -2928,7 +2928,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
             .{ .name = "ziggurat_view", .module = declarative_view },
         } });
-        const view_collections_tests = b.addTest(.{ .root_module = view_collections });
+        const view_collections_tests = addTest(b, .{ .root_module = view_collections });
         check.dependOn(&view_collections_tests.step);
         const run_view_collections_tests = b.addRunArtifact(view_collections_tests);
         test_step.dependOn(&run_view_collections_tests.step);
@@ -2955,14 +2955,14 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
             .{ .name = "ziggurat_view", .module = declarative_view },
         } });
-        const game_tests = b.addTest(.{ .root_module = game });
+        const game_tests = addTest(b, .{ .root_module = game });
         check.dependOn(&game_tests.step);
         const run_game_tests = b.addRunArtifact(game_tests);
         test_step.dependOn(&run_game_tests.step);
         b.step("test-game", "Run game loop, camera, scaling and gamepad tests").dependOn(&run_game_tests.step);
     }
     const rich_text = b.addModule("ziggurat_rich_text", .{ .root_source_file = b.path("src/rich_text/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_markdown", .module = markdown }} });
-    const rich_text_tests = b.addTest(.{ .root_module = rich_text });
+    const rich_text_tests = addTest(b, .{ .root_module = rich_text });
     const run_rich_text_tests = b.addRunArtifact(rich_text_tests);
     check.dependOn(&rich_text_tests.step);
     test_step.dependOn(&run_rich_text_tests.step);
@@ -2972,7 +2972,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
         .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_rich_text", .module = rich_text },
     } });
-    const rich_text_editor_tests = b.addTest(.{ .root_module = rich_text_editor });
+    const rich_text_editor_tests = addTest(b, .{ .root_module = rich_text_editor });
     const run_rich_text_editor_tests = b.addRunArtifact(rich_text_editor_tests);
     check.dependOn(&rich_text_editor_tests.step);
     test_step.dependOn(&run_rich_text_editor_tests.step);
@@ -2988,7 +2988,7 @@ pub fn build(b: *std.Build) void {
     text_layout.addImport("ziggurat_fonts", fonts);
     text_measure.addImport("ziggurat_fonts", fonts);
     rich_text_editor.addImport("ziggurat_fonts", fonts);
-    const fonts_tests = b.addTest(.{ .root_module = fonts });
+    const fonts_tests = addTest(b, .{ .root_module = fonts });
     const run_fonts_tests = b.addRunArtifact(fonts_tests);
     check.dependOn(&fonts_tests.step);
     test_step.dependOn(&run_fonts_tests.step);
@@ -3006,7 +3006,7 @@ pub fn build(b: *std.Build) void {
 fn shareCommonModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, check: *std.Build.Step, test_step: *std.Build.Step) void {
     // Shared modules leave target and optimization to the module importing them.
     const io = b.addModule("ziggurat_io", .{ .root_source_file = b.path("src/io/root.zig") });
-    const io_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/io/root.zig"), .target = target, .optimize = optimize }) });
+    const io_tests = addTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("src/io/root.zig"), .target = target, .optimize = optimize }) });
     check.dependOn(&io_tests.step);
     test_step.dependOn(&b.addRunArtifact(io_tests).step);
     const win32 = b.addTranslateC(.{ .root_source_file = b.path("build_support/c/win32.h"), .target = target, .optimize = optimize });
@@ -3108,7 +3108,7 @@ fn addExamples(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         }
         const exe = addExample(b, example.name, example.path, target, optimize, b.allocator.dupe(std.Build.Module.Import, imports[0..count]) catch @panic("OOM"));
         all.dependOn(&exe.step);
-        const example_tests = b.addTest(.{ .name = b.fmt("example-{s}-test", .{example.name}), .root_module = exe.root_module });
+        const example_tests = addTest(b, .{ .name = b.fmt("example-{s}-test", .{example.name}), .root_module = exe.root_module });
         b.top_level_steps.get("check").?.step.dependOn(&example_tests.step);
         const run_example_tests = b.addRunArtifact(example_tests);
         tests.dependOn(&run_example_tests.step);
@@ -3426,4 +3426,13 @@ fn addResources(b: *std.Build, exe: *std.Build.Step.Compile) void {
         // The packaging smoke checks icons rendered from a PNG.
         .icon = if (special) iconFile(b, b.path("tools/icon_main.zig"), b.path("assets/application.ico"), .{ .png = b.path("assets/application.png") }) else b.path("assets/application.ico"),
     }) catch |err| std.debug.panic("invalid application resources: {s}", .{@errorName(err)});
+}
+
+/// b.addTest with build_support/macos_test_runner.zig on macOS targets.
+fn addTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.Step.Compile {
+    var with = options;
+    if (with.test_runner == null) if (with.root_module.resolved_target) |target| if (target.result.os.tag == .macos) {
+        with.test_runner = .{ .path = b.path("build_support/macos_test_runner.zig"), .mode = .server };
+    };
+    return b.addTest(with);
 }

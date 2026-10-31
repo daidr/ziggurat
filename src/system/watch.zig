@@ -121,6 +121,10 @@ pub const Watcher = struct {
     /// Heap flag the wake source sets on the watcher thread, so init can
     /// return the watcher by value.
     woken: if (is_darwin) *bool else void,
+    /// Inside block's run of the loop; callbacks outside it must not stop it.
+    in_run: bool = false,
+    /// Events FSEvents flushes while a root is being added predate it.
+    priming: bool = false,
     first: ?zio.Instant = null,
     last: ?zio.Instant = null,
     due: bool = false,
@@ -478,7 +482,9 @@ pub const Watcher = struct {
         } else if (is_darwin) {
             // Both callbacks stop this run, so it returns once anything was handled.
             const seconds: f64 = if (limit_ns) |ns| @as(f64, @floatFromInt(ns)) / std.time.ns_per_s else 1.0e10;
+            self.in_run = true;
             _ = cf.CFRunLoopRunInMode(self.run_mode, seconds, 1);
+            self.in_run = false;
             if (!self.woken.*) return false;
             self.woken.* = false;
             return true;
@@ -739,6 +745,11 @@ pub const Watcher = struct {
         native.stream = stream;
         cf.FSEventStreamScheduleWithRunLoop(stream, self.run_loop, self.run_mode);
         if (cf.FSEventStreamStart(stream) == 0) return error.WatchFailed;
+        // Writes made just before the stream started can still be queued in
+        // fseventsd; flushing delivers them now so they are not reported.
+        self.priming = true;
+        cf.FSEventStreamFlushSync(stream);
+        self.priming = false;
     }
     fn darwinErrno(self: *Watcher) anyerror {
         const code = std.c.errno(-1);
@@ -757,7 +768,8 @@ pub const Watcher = struct {
     fn onDarwinEvents(stream: ?*const anyopaque, info: ?*anyopaque, count: usize, paths: ?*anyopaque, flags: [*]const u32, ids: [*]const u64) callconv(.c) void {
         _ = ids;
         const self: *Watcher = @ptrCast(@alignCast(info.?));
-        cf.CFRunLoopStop(cf.CFRunLoopGetCurrent());
+        if (self.in_run) cf.CFRunLoopStop(cf.CFRunLoopGetCurrent());
+        if (self.priming) return;
         const index: u32 = for (self.roots, 0..) |root, at| {
             if (root.state == .active and root.native.stream != null and @intFromPtr(root.native.stream.?) == @intFromPtr(stream)) break @intCast(at);
         } else return;
@@ -849,6 +861,7 @@ const cf = if (is_darwin) struct {
     extern fn FSEventStreamScheduleWithRunLoop(stream: Ref, run_loop: Ref, mode: Ref) void;
     extern fn FSEventStreamStart(stream: Ref) u8;
     extern fn FSEventStreamStop(stream: Ref) void;
+    extern fn FSEventStreamFlushSync(stream: Ref) void;
     extern fn FSEventStreamInvalidate(stream: Ref) void;
     extern fn FSEventStreamRelease(stream: Ref) void;
 } else struct {

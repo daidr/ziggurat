@@ -1,6 +1,10 @@
 const std = @import("std");
 const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
+/// Zig 0.17's macOS arm64 unwinder panics on the compact-unwind encoding of
+/// the system's thread-start frames, so allocation traces on the probe
+/// thread are turned off there.
+pub const std_options: std.Options = .{ .allow_stack_tracing = builtin.os.tag != .macos };
 const system = @import("ziggurat_system");
 const watch = system.watch;
 const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
