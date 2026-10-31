@@ -742,7 +742,7 @@ pub const Watcher = struct {
     }
     fn darwinErrno(self: *Watcher) anyerror {
         const code = std.c.errno(-1);
-        self.last_failure = .{ .domain = .errno, .code = @intCast(@intFromEnum(code)) };
+        self.last_failure = .{ .domain = .errno, .code = @intCast(@backingInt(code)) };
         return switch (code) {
             .ACCES, .PERM => error.AccessDenied,
             .NOENT => error.FileNotFound,
