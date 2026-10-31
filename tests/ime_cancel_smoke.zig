@@ -147,7 +147,7 @@ const Fixture = struct {
         try std.testing.expect(required >= @sizeOf(c.RECONVERTSTRING) and required <= 256);
         var storage: [256]u8 align(@alignOf(c.RECONVERTSTRING)) = @splat(0);
         const header: *c.RECONVERTSTRING = @ptrCast(&storage);
-        header.dwSize = @intCast(required);
+        header.dwSize = @intCast(zio.asUnsigned(required));
         try std.testing.expectEqual(required, c.SendMessageW(self.hwnd, c.WM_IME_REQUEST, c.IMR_RECONVERTSTRING, @bitCast(@intFromPtr(&storage))));
         try std.testing.expect(self.record().native.text.reconversion != null);
     }

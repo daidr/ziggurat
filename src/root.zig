@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const backend = if (builtin.is_test) @import("platform/testing.zig") else if (builtin.os.tag == .windows) @import("platform/windows.zig") else if (builtin.os.tag == .linux) @import("platform/linux.zig") else if (builtin.os.tag == .macos) @import("platform/macos.zig") else @import("platform/unsupported.zig");
 const mailbox = @import("mailbox.zig");
@@ -311,6 +312,8 @@ pub const WindowState = struct {
     enabled_requested: bool = true,
     modal_blocked: bool = false,
 };
+/// A window's client area as `Window.capture` read it.
+pub const Capture = struct { width: u32, height: u32, pixels: []u8 };
 /// Client origin in native desktop coordinates: physical pixels on Windows,
 /// desktop logical coordinates on GTK/X11. Position is unavailable on Wayland.
 pub const ScreenPoint = struct { x: i32, y: i32 };
@@ -411,7 +414,7 @@ pub const WindowHit = enum(c_int) {
     south_east,
     pub fn resizeEdge(self: WindowHit) ?ResizeEdge {
         const value = @backingInt(self);
-        return if (value >= @backingInt(WindowHit.north_west)) @fromBackingInt(@intCast(value - @backingInt(WindowHit.north_west))) else null;
+        return if (value >= @backingInt(WindowHit.north_west)) @fromBackingInt(@intCast(zio.asUnsigned(value - @backingInt(WindowHit.north_west)))) else null;
     }
 };
 /// The shape of the pointer over the client area. Shapes a platform lacks
@@ -1177,6 +1180,12 @@ pub const Window = struct {
         if (record.content != null) return error.ContentAlreadyAttached;
         record.content = content;
     }
+    /// The content attached to this window, if any, so that tools can
+    /// recognize the module that owns it by its callbacks. Main thread only.
+    pub fn attachedContent(self: Window) ?Content {
+        const record = self.resolve() orelse return null;
+        return if (record.phase == .open) record.content else null;
+    }
     pub fn setService(self: Window, service: WindowService) !void {
         const record = self.resolve() orelse return error.Closed;
         if (record.phase != .open) return error.Closed;
@@ -1753,7 +1762,18 @@ pub const Window = struct {
     }
     pub fn invalidate(self: Window) void {
         const record = self.resolve() orelse return;
-        if (record.phase == .open) backend.invalidate(record);
+        if (record.phase != .open) return;
+        record.frame_requested = true;
+        backend.invalidate(record);
+    }
+    /// True while the content asked for a frame, through `invalidate` or
+    /// `invalidateRect`, that the window has not painted yet. A hidden or
+    /// minimized window paints nothing, so it has none pending.
+    pub fn framePending(self: Window) bool {
+        const record = self.resolve() orelse return false;
+        if (record.phase != .open or !record.frame_requested) return false;
+        const current = record.observedState();
+        return current.visible and !current.minimized;
     }
     /// Queue client-area damage in DIP. The native update region coalesces
     /// requests; this does not promise partial command generation or GPU replay.
@@ -1764,6 +1784,7 @@ pub const Window = struct {
         if (!std.math.isFinite(bounds.x) or !std.math.isFinite(bounds.y) or !std.math.isFinite(bounds.width) or !std.math.isFinite(bounds.height) or bounds.width < 0 or bounds.height < 0 or @abs(bounds.x) > 1_000_000 or @abs(bounds.y) > 1_000_000 or bounds.width > 1_000_000 or bounds.height > 1_000_000) return error.InvalidGeometry;
         if (bounds.width == 0 or bounds.height == 0) return;
         self.app.native_failure = null;
+        scope.record.frame_requested = true;
         backend.invalidateRect(scope.record, bounds) catch |err| {
             self.app.report(self.app.failureDiagnostic(.window_update, err, self));
             return err;
@@ -1778,6 +1799,40 @@ pub const Window = struct {
         const record = self.resolve() orelse return error.Closed;
         if (record.phase != .open) return error.Closed;
         record.emit(event);
+    }
+    /// Offer a key press to the content as the platform adapter does
+    /// before translating it to text, and report whether the content
+    /// consumed it, or the release when `released` is set. Main thread
+    /// only, outside the content's own callbacks.
+    pub fn emitKey(self: Window, input: KeyInput, released: bool) !bool {
+        if (std.Thread.getCurrentId() != self.app.owner) return error.WrongThread;
+        const record = self.resolve() orelse return error.Closed;
+        if (record.phase != .open) return error.Closed;
+        if (released) {
+            record.keyRelease(input);
+            return false;
+        }
+        return record.keyInput(input);
+    }
+    /// Choose the item of the window's menu bar at the labels of `path`,
+    /// as a click on it does, and return once its handler returned. Labels
+    /// compare without mnemonic markers. Main thread only, outside the
+    /// window's own callbacks; for tools that drive a running app.
+    pub fn activateMenuItem(self: Window, path: []const []const u8) !void {
+        if (std.Thread.getCurrentId() != self.app.owner) return error.WrongThread;
+        if (path.len == 0) return error.NoMenuItem;
+        const scope = self.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        return backend.activateMenuItem(scope.record, path);
+    }
+    /// The client area as the screen shows it, in physical pixels, as
+    /// premultiplied BGRA rows from the top. The caller frees `pixels`
+    /// with `allocator`. Main thread only.
+    pub fn capture(self: Window, allocator: std.mem.Allocator) !Capture {
+        if (std.Thread.getCurrentId() != self.app.owner) return error.WrongThread;
+        const scope = self.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        return backend.capture(scope.record, allocator);
     }
     pub fn nativeHandle(self: Window) ?*anyopaque {
         const record = self.resolve() orelse return null;
@@ -1891,6 +1946,8 @@ pub const WindowRecord = struct {
     vibrancy: Vibrancy = .none,
     pointer_state: ?*PointerState = null,
     content: ?Content = null,
+    /// Set by invalidate, cleared once the content is given a paint.
+    frame_requested: bool = false,
     parent_destroy_notified: bool = false,
     service: ?WindowService = null,
     next_native_id: u32 = 1,
@@ -2376,6 +2433,7 @@ pub const WindowRecord = struct {
             if (self.text_busy) self.text_blur_pending = true else self.revokeTextClient(.focus_lost, true) catch |err| self.window.report(.{ .domain = .core, .operation = .text_input, .err = err });
             if (self.phase != .open) return;
         }
+        if (event == .paint) self.frame_requested = false;
         switch (event) {
             .pointer_down, .pointer_up, .pointer_move, .wheel, .text_input, .text_preedit, .edit_key, .key, .key_input => if (!self.inputAllowed()) return,
             else => {},

@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const schema = @import("schema.zig");
 const protocol = @import("protocol.zig");
 
@@ -61,7 +62,7 @@ pub fn EventSession(comptime Schema: type, comptime limits: Limits) type {
             if (v.integer != protocol.version) return error.UnsupportedVersion;
             if (!std.mem.eql(u8, session.string, &self.session.bytes)) return error.StaleSession;
             if (subscription.integer < 1 or subscription.integer > std.math.maxInt(u32)) return error.InvalidRequest;
-            const id: u32 = @intCast(subscription.integer);
+            const id: u32 = @intCast(zio.asUnsigned(subscription.integer));
             const subscribe = std.mem.eql(u8, kind.string, "subscribe");
             if (!subscribe and !std.mem.eql(u8, kind.string, "unsubscribe")) return error.InvalidRequest;
             inline for (fields, 0..) |field, index| {

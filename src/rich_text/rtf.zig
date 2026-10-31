@@ -3,6 +3,7 @@
 //! strikethrough and links. Fonts, sizes and colors are left out, as the
 //! HTML reader leaves them.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const tx = @import("text.zig");
 const html = @import("html.zig");
 
@@ -218,7 +219,7 @@ const Reader = struct {
         } else if (eq(w, "ls")) {
             self.listed = true;
         } else if (eq(w, "ilvl")) {
-            self.level = @intCast(std.math.clamp(num, 0, tx.max_indent));
+            self.level = @intCast(zio.asUnsigned(std.math.clamp(num, 0, tx.max_indent)));
         } else if (eq(w, "par") or eq(w, "line") or eq(w, "sect") or eq(w, "page") or eq(w, "row")) {
             if (!st.skip and !st.list and st.field != .inst) try self.endParagraph(true);
         } else if (eq(w, "pard")) {

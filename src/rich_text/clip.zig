@@ -3,6 +3,7 @@
 //! also save texts in it. A copy names itself, so that the editor that
 //! made it pastes back the text it holds, attachments included.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const tx = @import("text.zig");
 const html = @import("html.zig");
 
@@ -13,7 +14,9 @@ const Text = tx.Text;
 /// The clipboard format of attributed text.
 pub const format = "application/x-ziggurat-rich-text";
 
-/// Writes `t` as JSON; `copy` names the copy, or is empty.
+/// Writes `t` as JSON; `copy` names the copy, or is empty. A copy leaves
+/// the paragraphs' IDs out, which are the application's names of
+/// paragraphs where they are: a paste makes new ones.
 pub fn write(t: *const Text, w: *Writer, copy: []const u8) Writer.Error!void {
     try w.writeByte('{');
     if (copy.len > 0) {
@@ -36,6 +39,7 @@ pub fn write(t: *const Text, w: *Writer, copy: []const u8) Writer.Error!void {
         if (s.@"align" != .start) try fields.number("align", @backingInt(s.@"align"));
         if (s.quote) try fields.boolean("quote");
         if (s.code_block) try fields.boolean("codeBlock");
+        if (s.id.len > 0 and copy.len == 0) try fields.string("id", s.id);
         try w.writeByte('}');
         var it = q.iterator();
         var first = true;
@@ -127,7 +131,7 @@ const JsonAttributes = struct {
 };
 const JsonAttachment = struct { name: []const u8 = "", url: []const u8 = "", width: f32 = 0, height: f32 = 0 };
 const JsonRun = struct { text: []const u8 = "", attributes: JsonAttributes = .{}, attachment: ?JsonAttachment = null };
-const JsonStyle = struct { heading: i64 = 0, list: i64 = 0, checked: bool = false, indent: i64 = 0, @"align": i64 = 0, quote: bool = false, codeBlock: bool = false };
+const JsonStyle = struct { heading: i64 = 0, list: i64 = 0, checked: bool = false, indent: i64 = 0, @"align": i64 = 0, quote: bool = false, codeBlock: bool = false, id: []const u8 = "" };
 const JsonParagraph = struct { style: JsonStyle = .{}, runs: []const JsonRun = &.{} };
 const JsonText = struct { copy: []const u8 = "", paragraphs: []const JsonParagraph = &.{} };
 
@@ -157,7 +161,7 @@ pub fn parse(allocator: Allocator, bytes: []const u8) !?Parsed {
             var a: tx.Attributes = .{
                 .font = ja.font,
                 .size = if (std.math.isFinite(ja.size) and ja.size > 0 and ja.size < 1e4) ja.size else 0,
-                .weight = @intCast(std.math.clamp(ja.weight, 0, 900)),
+                .weight = @intCast(zio.asUnsigned(std.math.clamp(ja.weight, 0, 900))),
                 .italic = ja.italic,
                 .underline = ja.underline,
                 .strikethrough = ja.strikethrough,
@@ -176,13 +180,14 @@ pub fn parse(allocator: Allocator, bytes: []const u8) !?Parsed {
         }
         const js = jp.style;
         paras[k] = .{ .style = .{
-            .heading = @intCast(std.math.clamp(js.heading, 0, 6)),
-            .list = if (js.list >= 0 and js.list <= 3) @fromBackingInt(@intCast(js.list)) else .none,
+            .heading = @intCast(zio.asUnsigned(std.math.clamp(js.heading, 0, 6))),
+            .list = if (js.list >= 0 and js.list <= 3) @fromBackingInt(@intCast(zio.asUnsigned(js.list))) else .none,
             .checked = js.checked,
-            .indent = @intCast(std.math.clamp(js.indent, 0, tx.max_indent)),
-            .@"align" = if (js.@"align" >= 0 and js.@"align" <= 2) @fromBackingInt(@intCast(js.@"align")) else .start,
+            .indent = @intCast(zio.asUnsigned(std.math.clamp(js.indent, 0, tx.max_indent))),
+            .@"align" = if (js.@"align" >= 0 and js.@"align" <= 2) @fromBackingInt(@intCast(zio.asUnsigned(js.@"align"))) else .start,
             .quote = js.quote,
             .code_block = js.codeBlock,
+            .id = js.id,
         }, .runs = runs };
     }
     var out: Parsed = .{ .text = if (paras.len == 0) try Text.init(allocator) else try Text.of(allocator, paras) };

@@ -126,7 +126,7 @@ pub const NullDevice = struct {
         if (now - self.next > 100 * std.time.ns_per_ms) self.next = now;
         self.next += @divFloor(@as(i128, samples.len / channels) * std.time.ns_per_s, sample_rate);
         const wait = self.next - self.clock.now(self.clock.context);
-        if (wait > 0) self.clock.sleep(self.clock.context, @intCast(wait));
+        if (wait > 0) self.clock.sleep(self.clock.context, @intCast(zio.asUnsigned(wait)));
     }
 
     fn closeFn(_: *anyopaque) void {}

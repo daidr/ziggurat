@@ -133,7 +133,7 @@ pub fn open(storage: *Storage, ahead: u64, detail: *Detail) OpenError!output.Dev
             _ = alsa.snd_pcm_close(pcm.?);
             result = error.DeviceFailed;
         } else {
-            const errno: std.posix.E = @fromBackingInt(@intCast(-code));
+            const errno: std.posix.E = @fromBackingInt(@intCast(zio.asUnsigned(-code)));
             result = switch (errno) {
                 .NOENT, .NODEV, .NXIO => error.NoDevice,
                 else => error.DeviceFailed,

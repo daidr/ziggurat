@@ -5,6 +5,7 @@
 //! 14 preedit cancel, 15 tab/activate, 16 state, 17 input gate, 18 key down,
 //! 19 hit test, 22 moved, 25 popup dismissed and 26 key release.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const core = @import("../root.zig");
 pub const AppData = struct { native: ?*anyopaque = null };
 pub const WindowData = struct { native: ?*anyopaque = null };
@@ -247,7 +248,7 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
         6 => record.emit(.{ .wheel = .{ .position = point, .delta = .{ .x = @floatCast(native.dx), .y = @floatCast(native.dy) } } }),
         7 => record.emit(.{ .focus = native.flags & 1 != 0 }),
         8 => record.emit(.cancel_input),
-        9 => record.emit(.{ .edit_key = .{ .key = @fromBackingInt(@intCast(native.key)), .shift = native.flags & 1 != 0, .control = native.flags & 2 != 0 } }),
+        9 => record.emit(.{ .edit_key = .{ .key = @fromBackingInt(@intCast(zio.asUnsigned(native.key))), .shift = native.flags & 1 != 0, .control = native.flags & 2 != 0 } }),
         10 => _ = record.window.requestCloseFrom(.user) catch |err| {
             record.window.report(.{ .domain = .core, .operation = .window_destroy, .err = err });
         },

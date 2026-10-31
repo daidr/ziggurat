@@ -553,8 +553,8 @@ fn consumeWake(app: *core.App) void {
 pub fn quit(app: *core.App) void {
     // A native move/size loop must release capture before the outer loop can
     // reach Stop and deferred destruction. Other hosts retain their capture.
-    const capture = c.GetCapture();
-    const owns_capture = capture != null and keyRecord(app, c.GetAncestor(capture, c.GA_ROOT)) != null;
+    const holder = c.GetCapture();
+    const owns_capture = holder != null and keyRecord(app, c.GetAncestor(holder, c.GA_ROOT)) != null;
     // ReleaseCapture can reenter; do not retain a record across this call.
     if (owns_capture) _ = c.ReleaseCapture();
     var cursor = app.first;
@@ -990,6 +990,88 @@ pub fn setTextInputMode(window: *core.WindowRecord, mode: core.TextInputMode) !c
     window.native.text.system_enabled = mode == .system;
     window.publishTextInputMode(mode);
     return .applied;
+}
+/// The client area through PrintWindow, which asks DirectComposition
+/// content such as a swap chain or WebView2 for its pixels too.
+pub fn capture(window: *core.WindowRecord, allocator: std.mem.Allocator) !core.Capture {
+    const hwnd = window.native.hwnd orelse return error.Closed;
+    const client = size(hwnd);
+    if (client.width == 0 or client.height == 0) return error.CaptureFailed;
+    const screen = c.GetDC(null) orelse return error.CaptureFailed;
+    defer _ = c.ReleaseDC(null, screen);
+    const memory = c.CreateCompatibleDC(screen) orelse return error.CaptureFailed;
+    defer _ = c.DeleteDC(memory);
+    var info = std.mem.zeroes(c.BITMAPINFO);
+    info.bmiHeader.biSize = @sizeOf(c.BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = @intCast(client.width);
+    info.bmiHeader.biHeight = -@as(c_long, @intCast(client.height));
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = c.BI_RGB;
+    var bits: ?*anyopaque = null;
+    const bitmap = c.CreateDIBSection(memory, &info, c.DIB_RGB_COLORS, &bits, null, 0) orelse return error.CaptureFailed;
+    defer _ = c.DeleteObject(bitmap);
+    const previous = c.SelectObject(memory, bitmap);
+    defer _ = c.SelectObject(memory, previous);
+    // PW_CLIENTONLY | PW_RENDERFULLCONTENT
+    if (c.PrintWindow(hwnd, memory, 1 | 2) == 0) return error.CaptureFailed;
+    _ = c.GdiFlush();
+    const count = @as(usize, client.width) * client.height * 4;
+    const pixels = try allocator.alloc(u8, count);
+    @memcpy(pixels, @as([*]const u8, @ptrCast(bits.?))[0..count]);
+    // GDI leaves the alpha byte undefined; the client area is opaque.
+    var at: usize = 3;
+    while (at < count) : (at += 4) pixels[at] = 0xff;
+    return .{ .width = client.width, .height = client.height, .pixels = pixels };
+}
+/// Sends the command of the menu bar item at the labels of `path`, as a
+/// click on it does. Labels compare without "&" mnemonics and without the
+/// accelerator after a tab.
+pub fn activateMenuItem(window: *core.WindowRecord, path: []const []const u8) !void {
+    const hwnd = window.native.hwnd orelse return error.Closed;
+    var menu = c.GetMenu(hwnd) orelse return error.NoMenu;
+    for (path, 0..) |wanted, depth| {
+        const count = c.GetMenuItemCount(menu);
+        if (count < 0) return error.NoMenu;
+        var found: ?c_int = null;
+        var index: c_int = 0;
+        while (index < count) : (index += 1) {
+            var wide: [512]u16 = undefined;
+            const length = c.GetMenuStringW(menu, @intCast(index), &wide, wide.len, c.MF_BYPOSITION);
+            if (length <= 0) continue;
+            if (sameMenuLabel(wide[0..@intCast(length)], wanted)) {
+                found = index;
+                break;
+            }
+        }
+        const at = found orelse return error.NoMenuItem;
+        const submenu = c.GetSubMenu(menu, at);
+        if (depth + 1 < path.len) {
+            menu = submenu orelse return error.NoMenuItem;
+            continue;
+        }
+        if (submenu != null) return error.MenuItemIsSubmenu;
+        const flags = c.GetMenuState(menu, @intCast(at), c.MF_BYPOSITION);
+        if (flags & (c.MF_DISABLED | c.MF_GRAYED) != 0) return error.MenuItemDisabled;
+        const command = c.GetMenuItemID(menu, at);
+        _ = c.SendMessageW(hwnd, c.WM_COMMAND, command & 0xffff, 0);
+    }
+}
+fn sameMenuLabel(shown: []const u16, wanted: []const u8) bool {
+    var label: [512]u16 = undefined;
+    var len: usize = 0;
+    var at: usize = 0;
+    while (at < shown.len and shown[at] != '\t') : (at += 1) {
+        if (shown[at] == '&') {
+            at += 1;
+            if (at == shown.len) break;
+        }
+        label[len] = shown[at];
+        len += 1;
+    }
+    var expected: [512]u16 = undefined;
+    const count = std.unicode.utf8ToUtf16Le(&expected, wanted) catch return false;
+    return std.mem.eql(u16, label[0..len], expected[0..count]);
 }
 pub fn invalidate(window: *core.WindowRecord) void {
     if (window.phase != .open) return;

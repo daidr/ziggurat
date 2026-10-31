@@ -2,7 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const rules_format = @import("content_rules.zig");
 const webkit = @import("webkit.zig");
-const linux = builtin.os.tag == .linux;
+const linux = builtin.os.tag == .linux or builtin.os.tag == .macos;
 
 /// Content rules compiled for pages to apply: rules that block what pages
 /// load and hide parts of them, as an ad or tracker blocker does. One value

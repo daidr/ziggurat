@@ -72,6 +72,17 @@ pub const Theme = struct {
     code_block_radius: f32 = 0,
     code_block_padding: [2]f32 = .{ 0, 0 },
     headings: [6]HeadingStyle = @splat(.{}),
+    /// Indents the first line of a body paragraph by that many ems, as
+    /// printed prose sets paragraphs apart (about 1.2), but for the first
+    /// after a heading, a list, a block of code, a paragraph aligned
+    /// otherwise (a centered scene break) or an empty one, or the first of
+    /// a quotation, which nothing needs to set apart. Only paragraphs
+    /// aligned at the start take it. 0, none.
+    first_line_indent: f32 = 0,
+    /// The room between two body paragraphs, in ems, as prose on screens
+    /// sets paragraphs apart instead. A body paragraph is one that is not
+    /// a heading, an item of a list or code. 0, none.
+    paragraph_spacing: f32 = 0,
     /// How far a level of a list or of indentation goes, in ems: 1.7.
     indent: f32 = 0,
     /// Bullets and numbers; the fill and check of tasks done.
@@ -103,6 +114,8 @@ pub const Look = struct {
     code_block_radius: f32,
     code_block_padding: [2]f32,
     headings: [6]struct { size: f32, weight: u16, color: u32, top: f32, bottom: f32 },
+    first_line_indent: f32,
+    paragraph_spacing: f32,
     indent: f32,
     marker: u32,
     checkbox: u32,
@@ -138,6 +151,8 @@ pub fn resolve(theme: Theme, window: ui.Theme) Look {
         .code_block_radius = if (theme.code_block_radius > 0) theme.code_block_radius else 0.3,
         .code_block_padding = .{ if (theme.code_block_padding[0] > 0) theme.code_block_padding[0] else 0.7, if (theme.code_block_padding[1] > 0) theme.code_block_padding[1] else 0.5 },
         .headings = undefined,
+        .first_line_indent = @max(theme.first_line_indent, 0),
+        .paragraph_spacing = @max(theme.paragraph_spacing, 0),
         .indent = if (theme.indent > 0) theme.indent else 1.7,
         .marker = theme.marker orelse text,
         .checkbox = theme.checkbox orelse p.accent,
@@ -315,12 +330,30 @@ const ParaView = struct {
     /// Its height with the room around it, 0 until laid out, and the room.
     h: f32 = 0,
     space: f32 = 0,
+    /// How far its first line goes in (`Theme.first_line_indent`), as laid
+    /// out.
+    indent: f32 = 0,
     /// A marker of a list laid out for it.
     marker: [24]u8 = undefined,
     marker_len: u8 = 0,
 };
 
 const LookKey = struct { width: f32, font: view.Font, theme: ui.Theme, tags: bool };
+
+/// Where a paragraph is in an editor, as `Editor.visibleParagraphs` gives
+/// it.
+pub const ParagraphBox = struct {
+    /// The paragraph's index, from 0, and the rune it starts at.
+    index: usize,
+    start: u32,
+    /// The top and height of its lines, in DIP from the top of the
+    /// editor's leaf, scrolled: the room above and below the paragraph (a
+    /// heading's margins, the spacing between paragraphs) is left out, so
+    /// that a mark at `top` lines up with its first line. `top` is below 0
+    /// for a paragraph scrolled partly out at the top.
+    top: f32,
+    height: f32,
+};
 
 /// Keep an Editor at a stable address while the view emits it and until
 /// `detach`. The Document stays the application's.
@@ -397,6 +430,10 @@ pub const Editor = struct {
     last_error: ?anyerror = null,
     /// The user edited the text since `takeChanged`.
     changed: bool = false,
+    /// The paragraphs in view as the application last read them, and
+    /// whether it read them since the last paint.
+    boxes: std.ArrayList(ParagraphBox) = .empty,
+    boxes_read: bool = false,
 
     pub fn init(host: *view.Host, allocator: Allocator, doc: *Document, options: Options) Editor {
         var e: Editor = .{ .host = host, .allocator = allocator, .doc = doc, .options = options, .look = resolve(options.theme, .{}) };
@@ -412,6 +449,7 @@ pub const Editor = struct {
         self.press_link.deinit(self.allocator);
         self.numbers.deinit(self.allocator);
         self.value.deinit(self.allocator);
+        self.boxes.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -607,11 +645,29 @@ pub const Editor = struct {
         return .{ .left = left, .right = right };
     }
 
+    /// How far the first line of paragraph p goes in: a body paragraph
+    /// aligned at the start after another of the same quotation and level
+    /// takes `Theme.first_line_indent`, as printed prose indents all but
+    /// the first paragraph after a heading, a list, a centered scene break
+    /// or an empty line. It looks at the paragraph before only.
+    fn firstLine(self: *const Editor, p: usize, st: ParagraphStyle) f32 {
+        if (self.look.first_line_indent <= 0 or p == 0 or !body(st) or st.@"align" != .start) return 0;
+        const prev = self.paras.items[p - 1];
+        const ps = prev.style;
+        if (prev.n == 0 or !body(ps) or ps.@"align" != .start or ps.quote != st.quote or ps.indent != st.indent) return 0;
+        return self.options.font.size * self.look.first_line_indent;
+    }
+
     /// The room above and below paragraph p: a heading's margins, a block
-    /// of code's padding at its ends.
+    /// of code's padding at its ends, the spacing between body paragraphs,
+    /// above the second.
     fn space(self: *const Editor, p: usize, st: ParagraphStyle) struct { above: f32, below: f32 } {
         const size = self.options.font.size;
         const paras = self.paras.items;
+        if (body(st)) {
+            const spaced = self.look.paragraph_spacing > 0 and p > 0 and body(paras[p - 1].style);
+            return .{ .above = if (spaced) size * self.look.paragraph_spacing else 0, .below = 0 };
+        }
         if (st.heading > 0) {
             const h = self.heading(st.heading);
             return .{ .above = if (p > 0) size * h.size * h.top else 0, .below = size * h.bottom };
@@ -682,10 +738,11 @@ pub const Editor = struct {
         const caret_para = self.paraAt(self.sel_caret);
         const composed = self.compose.items.len > 0 and caret_para == p;
         const at: u32 = if (composed) self.sel_caret - pv.start else 0;
-        if (pv.laid and pv.composed == composed and (!composed or (pv.compose_revision == self.compose_revision and pv.compose_at == at))) {
+        const indent = self.firstLine(p, pv.style);
+        if (pv.laid and pv.indent == indent and pv.composed == composed and (!composed or (pv.compose_revision == self.compose_revision and pv.compose_at == at))) {
             // The room around it follows its neighbours, which may have
             // changed without it: a block of code's last line, the first
-            // heading.
+            // heading, a body paragraph after one that became a heading.
             const sp = self.space(p, pv.style);
             if (sp.above + sp.below != pv.space) {
                 const h = pv.h - pv.space + sp.above + sp.below;
@@ -719,7 +776,7 @@ pub const Editor = struct {
             done += n;
         }
         if (!placed) try spans.append(self.allocator, .{ .text = self.compose.items, .style = self.spanStyle(typing, pv.style, base, room) });
-        try pv.layout.build(spans.items, .{ .measurer = self.options.measurer, .font = base, .width = room, .@"align" = switch (pv.style.@"align") {
+        try pv.layout.build(spans.items, .{ .measurer = self.options.measurer, .font = base, .width = room, .indent = indent, .@"align" = switch (pv.style.@"align") {
             .start => .start,
             .center => .center,
             .end => .end,
@@ -730,6 +787,7 @@ pub const Editor = struct {
         if (pv.h > 0) self.heights.add(p, h - pv.h, 0) else self.heights.add(p, h, -1);
         pv.h = h;
         pv.space = sp.above + sp.below;
+        pv.indent = indent;
         pv.laid = true;
         pv.composed = composed;
         pv.compose_revision = self.compose_revision;
@@ -940,6 +998,50 @@ pub const Editor = struct {
         }
     }
 
+    /// The paragraphs in view, from the first to the last, those partly in
+    /// view included, where the editor paints them: an application lines
+    /// up a gutter beside the editor with them, as a timeline, notes in the
+    /// margin or the numbers of paragraphs. Put the gutter beside the
+    /// editor with the same top, and draw at its top plus each paragraph's.
+    /// When a frame paints them elsewhere than read, as the editor scrolls,
+    /// its width changes or it reveals the caret, the window draws another,
+    /// whose build reads them again. Read it as the view builds, on the
+    /// main thread; it is empty until the editor laid the text out, and
+    /// valid until the next call.
+    pub fn visibleParagraphs(self: *Editor) ![]const ParagraphBox {
+        self.boxes.clearRetainingCapacity();
+        self.boxes_read = true;
+        if (self.laid_look == null or self.paras.items.len == 0) return self.boxes.items;
+        var i = self.first;
+        while (i <= self.last and i < self.paras.items.len) : (i += 1) {
+            if (self.paraBox(i)) |box| try self.boxes.append(self.allocator, box);
+        }
+        return self.boxes.items;
+    }
+
+    fn paraBox(self: *const Editor, i: usize) ?ParagraphBox {
+        const pv = &self.paras.items[i];
+        if (!pv.laid) return null;
+        const o = self.origin(i);
+        return .{ .index = i, .start = pv.start, .top = self.pad_y + @as(f32, @floatCast(o.y - self.scroll)), .height = pv.h - pv.space };
+    }
+
+    /// Asks for another frame when the application read the paragraphs in
+    /// view and this paint placed them otherwise.
+    fn checkBoxes(self: *Editor) void {
+        if (!self.boxes_read) return;
+        self.boxes_read = false;
+        var moved = false;
+        var k: usize = 0;
+        var i = self.first;
+        while (i <= self.last and i < self.paras.items.len) : (i += 1) {
+            const box = self.paraBox(i) orelse continue;
+            if (k >= self.boxes.items.len or !std.meta.eql(self.boxes.items[k], box)) moved = true;
+            k += 1;
+        }
+        if (moved or k != self.boxes.items.len) if (self.host.context.window) |window| window.invalidate();
+    }
+
     fn contentPoint(self: *const Editor, point: z.Point) struct { x: f32, y: f64 } {
         return .{ .x = point.x - self.bounds.x - self.pad_x, .y = @as(f64, point.y - self.bounds.y - self.pad_y) + self.scroll };
     }
@@ -1046,6 +1148,7 @@ pub const Editor = struct {
         if (self.token) |token| try frame.textField(token, bounds, true);
         try frame.semantic(.{ .id = id, .role = .text_box, .name = self.options.name, .value = self.value.items, .bounds = bounds, .focused = focused, .read_only = self.options.read_only or self.token == null, .selection_start = self.valueByte(self.selection()[0]), .selection_end = self.valueByte(self.selection()[1]) });
         if (self.paras.items.len == 0 or self.laid_look == null) return;
+        defer self.checkBoxes();
         try frame.pushClip(bounds);
         defer frame.popClip() catch {};
         try self.paintText(frame, bounds, focused);
@@ -1132,11 +1235,11 @@ pub const Editor = struct {
             const bg = s.background orelse continue;
             if (s.object != null) continue;
             const line = l.lines.items[p.line];
-            const width = l.options.measurer.textSize(std.mem.trimEnd(u8, l.pieceText(p), " \t"), s.font).width;
+            const width = l.options.measurer.textSize(l.visibleText(p), s.font).width;
             if (s.radius > 0) {
                 const size = s.font.size;
                 const pad = @min(size * 0.22, s.radius);
-                const baseline = y + line.y + line.baseline;
+                const baseline = y + line.y + line.baseline - s.baseline_shift;
                 frame.roundedRect(.{ .x = x + line.x + p.x - pad, .y = baseline - size * 0.98, .width = width + 2 * pad, .height = size * 1.32 }, s.radius, bg);
             } else frame.roundedRect(.{ .x = x + line.x + p.x, .y = y + line.y, .width = p.width, .height = line.height }, 0, bg);
         }
@@ -1146,15 +1249,19 @@ pub const Editor = struct {
             const line = l.lines.items[p.line];
             const m = l.fontMetrics(p.span);
             const color = s.color orelse base;
-            const t = std.mem.trimEnd(u8, l.pieceText(p), " \t");
-            const width = if (t.len > 0) l.options.measurer.textSize(t, s.font).width else 0;
-            if (t.len > 0) {
-                const top = y + line.y + line.baseline - m.ascent;
-                frame.labelFont(.{ .x = x + line.x + p.x, .y = top, .width = width + m.size, .height = m.height }, t, color, s.font);
+            const t = l.visibleText(p);
+            var width = if (t.len > 0) l.options.measurer.textSize(t, s.font).width else 0;
+            const baseline = y + line.y + line.baseline - s.baseline_shift;
+            const top = baseline - m.ascent;
+            if (t.len > 0) frame.labelFont(.{ .x = x + line.x + p.x, .y = top, .width = width + m.size, .height = m.height }, t, color, s.font);
+            if (p.hyphen) {
+                // The soft hyphen the line breaks at.
+                const hyphen = l.hyphenWidth(p.span);
+                frame.labelFont(.{ .x = x + line.x + p.x + width, .y = top, .width = hyphen + m.size, .height = m.height }, "-", color, s.font);
+                width += hyphen;
             }
             if (!(s.underline or s.strikethrough) or width <= 0) continue;
             const thickness = @max(1, @round(m.size / 14));
-            const baseline = y + line.y + line.baseline;
             if (s.underline) frame.rect(.{ .x = x + line.x + p.x, .y = baseline + @max(1, m.size * 0.08), .width = width, .height = thickness }, color);
             if (s.strikethrough) frame.rect(.{ .x = x + line.x + p.x, .y = baseline - m.size * 0.3 - thickness / 2, .width = width, .height = thickness }, color);
         }
@@ -1182,8 +1289,17 @@ pub const Editor = struct {
             } else frame.roundedRect(box, 0, look.code_block_background);
         }
         if (st.quote) {
+            var bar_top = top;
+            var bar_height = height;
+            if (i == 0 or !self.paras.items[i - 1].style.quote) {
+                // The spacing above the first paragraph of a quotation is
+                // outside it.
+                const above = self.space(i, st).above;
+                bar_top += above;
+                bar_height -= above;
+            }
             const w = look.quote_bar_width;
-            frame.roundedRect(.{ .x = x + indent, .y = top, .width = w, .height = height }, w / 2, ui.Color.rgb(look.quote_bar));
+            frame.roundedRect(.{ .x = x + indent, .y = bar_top, .width = w, .height = bar_height }, w / 2, ui.Color.rgb(look.quote_bar));
         }
     }
 
@@ -1481,46 +1597,50 @@ pub const Editor = struct {
         return self.text().runeAt(i);
     }
 
+    /// The end of the word after `from`, skipping what is between: each
+    /// ideograph and kana is a word (see `rt.words`).
     fn nextWord(self: *const Editor, from: u32) u32 {
         const n = self.textLen();
         var i = from;
-        var word = false;
-        while (i < n) : (i += 1) {
-            if (isWord(self.runeAt(i))) {
-                word = true;
-            } else if (word) break;
+        while (i < n and !isWord(self.runeAt(i))) i += 1;
+        if (i < n) {
+            i += 1;
+            while (i < n and !rt.words.boundary(self.runeAt(i - 1), self.runeAt(i))) i += 1;
         }
         return i;
     }
 
+    /// The start of the word before `from`.
     fn prevWord(self: *const Editor, from: u32) u32 {
         var i = from;
-        var word = false;
-        while (i > 0) : (i -= 1) {
-            if (isWord(self.runeAt(i - 1))) {
-                word = true;
-            } else if (word) break;
+        while (i > 0 and !isWord(self.runeAt(i - 1))) i -= 1;
+        if (i > 0) {
+            i -= 1;
+            while (i > 0 and !rt.words.boundary(self.runeAt(i - 1), self.runeAt(i))) i -= 1;
         }
         return i;
     }
 
-    /// The word, or the run of other runes, around i, within its paragraph.
+    /// The word, or the run of other runes, around i, within its
+    /// paragraph: an ideograph or a kana is a word alone.
     fn wordAt(self: *const Editor, i_: u32) [2]u32 {
         const n = self.textLen();
         if (n == 0) return .{ 0, 0 };
         const i = @min(i_, n - 1);
-        const word = isWord(self.runeAt(i));
         var a = i;
         var b = i;
         while (a > 0) {
             const r = self.runeAt(a - 1);
-            if (r == '\n' or isWord(r) != word) break;
+            if (r == '\n' or rt.words.boundary(r, self.runeAt(a))) break;
             a -= 1;
         }
-        while (b < n) {
-            const r = self.runeAt(b);
-            if (r == '\n' or isWord(r) != word) break;
-            b += 1;
+        if (self.runeAt(i) != '\n') {
+            b = i + 1;
+            while (b < n) {
+                const r = self.runeAt(b);
+                if (r == '\n' or rt.words.boundary(self.runeAt(b - 1), r)) break;
+                b += 1;
+            }
         }
         return .{ a, b };
     }
@@ -2039,7 +2159,7 @@ pub const Editor = struct {
     };
     const MakeCode = struct {
         pub fn change(_: MakeCode, s: *ParagraphStyle) void {
-            s.* = .{ .code_block = true, .indent = s.indent };
+            s.* = .{ .code_block = true, .indent = s.indent, .id = s.id };
         }
     };
     const AfterEnter = struct {
@@ -2621,29 +2741,14 @@ fn uiColor(c: rt.Color) ui.Color {
     return .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a };
 }
 
-fn isWord(r: u21) bool {
-    if (r < 0x80) return std.ascii.isAlphanumeric(@intCast(r)) or r == '_';
-    return !isSpaceRune(r) and !isPunctuation(r);
-}
+const isWord = rt.words.isWordRune;
 
 fn isAlnum(r: u21) bool {
     if (r < 0x80) return std.ascii.isAlphanumeric(@intCast(r));
     return isWord(r);
 }
 
-fn isSpaceRune(r: u21) bool {
-    return switch (r) {
-        ' ', '\t', '\n', '\r', 0x0b, 0x0c, 0x85, 0xa0, 0x1680, 0x2000...0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000 => true,
-        else => false,
-    };
-}
-
-fn isPunctuation(r: u21) bool {
-    return switch (r) {
-        0x2010...0x2027, 0x2030...0x205e, 0x3001...0x3003, 0x3008...0x3011, 0x3014...0x301f, 0xff01...0xff0f, 0xff1a...0xff20, 0xff3b...0xff40, 0xff5b...0xff65, 0xfffc => true,
-        else => false,
-    };
-}
+const isSpaceRune = rt.words.isSpace;
 
 fn eqlAny(s: []const u8, options: []const []const u8) bool {
     for (options) |o| if (std.mem.eql(u8, s, o)) return true;
@@ -2679,6 +2784,13 @@ fn normalizeNewlines(allocator: Allocator, s: []const u8) ![]const u8 {
 
 /// Whether a paragraph of style st is more than a body paragraph, which
 /// Backspace at its start makes it before joining.
+/// Whether a paragraph of style st is of the body's text, which
+/// `Theme.first_line_indent` and `paragraph_spacing` set apart: not a
+/// heading, an item of a list or code.
+fn body(st: ParagraphStyle) bool {
+    return st.heading == 0 and st.list == .none and !st.code_block;
+}
+
 fn special(st: ParagraphStyle) bool {
     return st.list != .none or st.heading > 0 or st.quote or st.code_block or st.indent > 0;
 }
@@ -2793,4 +2905,5 @@ pub fn romanNumber(n_: u32, out: []u8) []const u8 {
 test {
     _ = @import("heights.zig");
     _ = @import("editor_tests.zig");
+    _ = @import("layout_tests.zig");
 }

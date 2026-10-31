@@ -22,7 +22,7 @@ pub fn write(tree: md.Tree, writer: *Writer) Writer.Error!void {
                     image_depth -= 1;
                     if (image_depth == 0) try imageEnd(&out, node);
                 },
-                .text, .code => try out.escaped(node.text),
+                .text, .code, .math => try out.escaped(node.text),
                 .soft_break, .hard_break => try out.raw(" "),
                 else => {},
             }
@@ -123,6 +123,11 @@ pub fn write(tree: md.Tree, writer: *Writer) Writer.Error!void {
                 try out.raw("<code>");
                 try out.escaped(node.text);
                 try out.raw("</code>");
+            },
+            .math => {
+                try out.raw(if (node.level == 1) "<span class=\"math math-display\">\\[" else "<span class=\"math math-inline\">\\(");
+                try out.escaped(node.text);
+                try out.raw(if (node.level == 1) "\\]</span>" else "\\)</span>");
             },
             .link => if (entering) {
                 try out.raw("<a href=\"");

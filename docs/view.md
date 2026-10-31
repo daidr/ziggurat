@@ -644,6 +644,8 @@ var host = view.Host.init(&app, App.build, storage.buffers(), .{ .inspector = &i
 - 性能与问题：Performance 显示最近 120 帧构建、排列与绘制的耗时柱状图，以及最近一帧、平均、最慢、显示器刷新率（`refresh_hz`，默认 60）和元素数，参考线是一帧的预算。Issues 列出构建中发现的问题，工具栏显示其数量：同一父元素下两个元素给了同一个 `key` 时它们共享一个身份，点击、焦点或滚动会落到另一个上；每个问题只记一次。Harness 默认（`Config.strict`）在这种构建上直接让 `render` 返回 `error.DuplicateKey`，`issue()` 给出说明，测试因此在出错的地方失败。帧的元素超过 `max_elements`（1024）时树只显示前面的部分并记为问题。
 - 工具栏的 RTL 按钮把窗口按从右到左布局，再点恢复，用来在翻译之前检查界面；它设置 `direction_override`，Host 与 Harness 在下一遍应用它。
 
+带 inspector 的构建也带[自动化](automation.md)：设置 `ZIGGURAT_AUTOMATION` 后，另一个进程可以通过套接字读取视图的元素并操作它们。
+
 inspector 在视图之后绘制在同一帧上，并先于视图接收落在面板上的指针、滚轮以及它自己的按键，因此不向视图增加节点、控件或可访问性元素，也不占用视图的存储。它显示上一帧排列后的元素，复制在自身的固定存储里（约 300 KB），不分配；应用把它放在稳定的地址。Harness 的 `key`、`clickAt`、`press`/`moveTo`/`release`、`hoverAt`、`wheel`、`cursor()` 与 `image` 按 Host 相同的顺序经过它。显示器刷新率需要应用设置 `refresh_hz`，Host 不从显示器读取。
 
 ## 当前范围

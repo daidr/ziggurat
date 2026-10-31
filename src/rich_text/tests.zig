@@ -465,7 +465,7 @@ test "random edits keep a text as a naive one of a cell a rune" {
                 else => {
                     const style = test_styles[rng.uintLessThan(usize, test_styles.len)];
                     const span = at.paragraphSpan(a, z);
-                    _ = at.formatParagraphs(a, z, SetStyle{ .s = style });
+                    _ = try at.formatParagraphs(a, z, SetStyle{ .s = style });
                     var p: u32 = 0;
                     for (model.items) |*c| {
                         if (p >= span.first and p <= span.last) c.style = style;
@@ -511,4 +511,89 @@ test "putting a slice back where it came from changes nothing" {
             return error.TestUnexpectedResult;
         }
     }
+}
+
+fn idOf(t: *const Text, p: u32) []const u8 {
+    return t.para(p).style.id;
+}
+
+test "paragraph IDs follow their text through splits and joins" {
+    var t = try Text.of(testing.allocator, &.{
+        .{ .style = .{ .id = "a" }, .runs = &.{.{ .text = "one\ntwo" }} },
+        .{ .style = .{ .id = "b" }, .runs = &.{.{ .text = "three" }} },
+    });
+    defer t.deinit();
+    // A newline in a run starts a paragraph without the ID.
+    try testing.expectEqualStrings("a", idOf(&t, 0));
+    try testing.expectEqualStrings("", idOf(&t, 1));
+    try testing.expectEqualStrings("b", idOf(&t, 2));
+    // Split in the middle, the first half keeps it.
+    try t.replaceString(10, 10, "\n", .{});
+    try expectString(&t, "one\ntwo\nth\nree");
+    try testing.expectEqualStrings("b", idOf(&t, 2));
+    try testing.expectEqualStrings("", idOf(&t, 3));
+    // Split at its start, the paragraph moves down with its ID.
+    try t.replaceString(8, 8, "\n", .{});
+    try testing.expectEqualStrings("", idOf(&t, 2));
+    try testing.expectEqualStrings("b", idOf(&t, 3));
+    // Joined, the first keeps its own; emptied, the second's.
+    try t.delete(3, 4);
+    try testing.expectEqualStrings("a", idOf(&t, 0));
+    try t.delete(0, 7);
+    try expectString(&t, "\nth\nree");
+    try testing.expectEqualStrings("", idOf(&t, 0));
+    try t.delete(0, 1);
+    try testing.expectEqualStrings("b", idOf(&t, 0));
+    // A text put in never brings its IDs.
+    var with = try Text.of(testing.allocator, &.{ .{ .style = .{ .id = "x" }, .runs = &.{.{ .text = "p" }} }, .{ .style = .{ .id = "y" }, .runs = &.{.{ .text = "q" }} } });
+    defer with.deinit();
+    try t.replace(2, 2, &with);
+    try expectString(&t, "thp\nq\nree");
+    try testing.expectEqualStrings("b", idOf(&t, 0));
+    try testing.expectEqualStrings("", idOf(&t, 1));
+    // The style looks the same with another ID.
+    try testing.expect((rt.ParagraphStyle{ .id = "x" }).looksLike(.{ .id = "y" }));
+    try testing.expect(!(rt.ParagraphStyle{ .id = "x" }).eql(.{ .id = "y" }));
+}
+
+const Counter = struct {
+    next: u32 = 0,
+    fn name(context: ?*anyopaque, buffer: *[rt.Namer.max]u8) []const u8 {
+        const self: *Counter = @ptrCast(@alignCast(context.?));
+        self.next += 1;
+        return std.fmt.bufPrint(buffer, "p{d}", .{self.next}) catch unreachable;
+    }
+};
+
+test "a document names the paragraphs edits make, and undo brings their IDs back" {
+    var doc = rt.Document.init(testing.allocator, try Text.of(testing.allocator, &.{
+        .{ .style = .{ .id = "kept" }, .runs = &.{.{ .text = "first" }} },
+        .{ .runs = &.{.{ .text = "second" }} },
+    }));
+    defer doc.deinit();
+    var counter: Counter = .{};
+    try doc.identifyParagraphs(.{ .context = &counter, .name = Counter.name });
+    try testing.expectEqualStrings("kept", idOf(&doc.text, 0));
+    try testing.expectEqualStrings("p1", idOf(&doc.text, 1));
+    doc.setSelection(2, 2);
+    try doc.insertText("\n");
+    try testing.expectEqualStrings("kept", idOf(&doc.text, 0));
+    try testing.expectEqualStrings("p2", idOf(&doc.text, 1));
+    try doc.undo();
+    try testing.expectEqual(@as(u32, 2), doc.text.paragraphCount());
+    try doc.redo();
+    try testing.expectEqualStrings("p2", idOf(&doc.text, 1));
+    // Saved JSON keeps them; a copy leaves them out.
+    const saved = try rt.toJson(testing.allocator, &doc.text, "");
+    defer testing.allocator.free(saved);
+    try testing.expect(std.mem.indexOf(u8, saved, "\"id\":\"p2\"") != null);
+    const copied = try rt.toJson(testing.allocator, &doc.text, "copy-1");
+    defer testing.allocator.free(copied);
+    try testing.expect(std.mem.indexOf(u8, copied, "\"id\"") == null);
+    var parsed = (try rt.clip.parse(testing.allocator, saved)).?;
+    defer parsed.text.deinit();
+    try testing.expectEqualStrings("p2", idOf(&parsed.text, 1));
+    // Formats see paragraphs of other IDs alike.
+    doc.setSelection(0, doc.text.len());
+    try testing.expect(!doc.formatting().paragraphs_mixed);
 }

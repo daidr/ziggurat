@@ -5113,6 +5113,9 @@ pub const Host = struct {
     build: Build,
     options: Options,
     building: bool = false,
+    /// The nodes of the last pass were laid out and painted; a pass for an
+    /// event clears it until the next frame arranges them again.
+    arranged: bool = false,
     /// The first error from the most recent pass, kept for diagnostics.
     last_error: ?anyerror = null,
     frames: usize = 0,
@@ -5193,6 +5196,113 @@ pub const Host = struct {
         self.view.effects = library;
         _ = try self.context.prepareGpuShaders(allocator, &library.gpuShaders());
     }
+    /// The Host whose Context `context` is, as tools that drive a window
+    /// from outside find it.
+    pub fn ofContext(context: *ui.Context) ?*Host {
+        if (context.draw != &draw) return null;
+        return @alignCast(@fieldParentPtr("context", context));
+    }
+
+    /// What assistive technology asks of an element; see `perform`.
+    pub const Action = union(enum) {
+        /// Activate a button, check box, tab or row, as a click does.
+        press,
+        focus,
+        /// Step a slider, stepper or rating by one step.
+        increment,
+        decrement,
+        /// Replace a text box's text, or set a slider's or stepper's value
+        /// from a number.
+        set_value: []const u8,
+        /// Type at the caret of a text box.
+        insert_text: []const u8,
+        /// Open or close a tree row or a disclosure.
+        expand,
+        collapse,
+    };
+    pub const PerformError = error{ NoElement, Disabled, Hidden, Inert, NotSupported, NotAttached, InvalidValue };
+
+    /// Perform `action` on the node `id` of the last pass, as assistive
+    /// technology does: through the same events a click, a key or typing
+    /// gives the build, followed by a repaint. Outside passes and paint.
+    pub fn perform(self: *Host, id: u64, action: Action) anyerror!void {
+        if (self.building) return error.Busy;
+        const node = for (self.view.nodes()) |*candidate| {
+            if (candidate.id == id) break candidate;
+        } else return error.NoElement;
+        if (!node.style.enabled) return error.Disabled;
+        if (self.view.visible(node) == null) return error.Hidden;
+        if (self.view.inert(node)) return error.Inert;
+        const window = self.context.window orelse return error.NotAttached;
+        defer window.invalidate();
+        switch (action) {
+            .focus => self.focusNode(id),
+            .press => switch (node.kind) {
+                .button, .link, .nav_button, .combo_box, .popup_button, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .column_header, .token, .combo_toggle, .editable_text => {
+                    // A press focuses the control it lands on, as in a window.
+                    self.focusNode(id);
+                    self.deliver(.{ .action = id });
+                },
+                .tree_row, .table_row => {
+                    const rect = self.view.visible(node).?;
+                    // The right end of a row is clear of a tree row's triangle.
+                    try self.pressRow(node, .{ .x = rect.x + rect.width - 1, .y = rect.y + rect.height / 2 });
+                },
+                else => return error.NotSupported,
+            },
+            .increment, .decrement => switch (node.kind) {
+                .slider, .stepper, .rating, .split => self.deliver(.{ .value = .{ .id = id, .change = .{ .steps = if (action == .increment) 1 else -1 } } }),
+                else => return error.NotSupported,
+            },
+            .expand, .collapse => {
+                const open = action == .expand;
+                switch (node.kind) {
+                    .tree_row => {
+                        const expanded = node.expanded orelse return error.NotSupported;
+                        if (expanded == open) return;
+                        const mark = ui.widgets.treeExpander(node.bounds, node.level, self.context.currentTheme().metrics.indicator_size);
+                        try self.pressRow(node, .{ .x = mark.x + mark.width / 2, .y = mark.y + mark.height / 2 });
+                    },
+                    .disclosure => if (node.checked != open) self.deliver(.{ .action = id }),
+                    else => return error.NotSupported,
+                }
+            },
+            .set_value => |text| switch (node.kind) {
+                .slider, .stepper, .rating => {
+                    const value = std.fmt.parseFloat(f64, std.mem.trim(u8, text, " ")) catch return error.InvalidValue;
+                    if (!std.math.isFinite(value)) return error.InvalidValue;
+                    self.deliver(.{ .value = .{ .id = id, .change = .{ .set = value } } });
+                },
+                .embed, .editable_text => {
+                    try self.focusText(id);
+                    // Select everything, then type over it or delete it.
+                    _ = try window.emitKey(.{ .key = .a, .modifiers = .{ .control = true } }, false);
+                    if (text.len == 0) {
+                        _ = try window.emitKey(.{ .key = .delete }, false);
+                    } else try window.emitEvent(.{ .text_input = .{ .text = text, .producer = .application } });
+                },
+                else => return error.NotSupported,
+            },
+            .insert_text => |text| switch (node.kind) {
+                .embed, .editable_text => {
+                    try self.focusText(id);
+                    if (text.len != 0) try window.emitEvent(.{ .text_input = .{ .text = text, .producer = .application } });
+                },
+                else => return error.NotSupported,
+            },
+        }
+    }
+    fn focusText(self: *Host, id: u64) !void {
+        if (self.context.input_state.focused == id) return;
+        if (!self.context.input_state.available(id)) return error.NotSupported;
+        self.focusNode(id);
+        if (self.context.input_state.focused != id) return error.NotSupported;
+    }
+    fn pressRow(self: *Host, node: *const Node, point: Point) !void {
+        const event = self.view.rowPress(point, .{}, node.id, self.context.currentTheme()) orelse return error.Hidden;
+        self.deliver(event);
+    }
+
     /// Give keyboard focus to the node `id`, such as a text field's, now
     /// when the window registered it, otherwise after the next frame that
     /// does. Outside passes and paint.
@@ -5235,6 +5345,7 @@ pub const Host = struct {
     pub fn pass(self: *Host, event: ?Event) anyerror!void {
         if (self.building) return error.Busy;
         self.building = true;
+        self.arranged = false;
         defer self.building = false;
         self.view.now = self.time();
         self.view.focus = self.context.input_state.focused;
@@ -5596,7 +5707,7 @@ pub const Host = struct {
         self.frames += 1;
     }
     fn render(self: *Host, frame: *ui.Frame, theme: Theme) anyerror!void {
-        var lap = if (self.options.tools()) |tools| if (tools.open) zio.Timer.start() catch null else null else null;
+        var lap: ?zio.Timer = if (self.options.tools()) |tools| if (tools.open) zio.Timer.start() catch null else null else null;
         const built: u64 = blk: {
             if (self.options.tools()) |tools| {
                 self.view.layout_direction = tools.direction_override orelse self.options.direction;
@@ -5609,6 +5720,7 @@ pub const Host = struct {
         const whole = frame.sourceBounds();
         const content = if (self.options.tools()) |tools| tools.contentBounds(whole) else whole;
         try self.view.arrange(content, theme, self.options.measurer);
+        self.arranged = true;
         const laid = if (lap) |*timer| timer.lap() else 0;
         try self.view.paint(frame);
         for (self.view.nodes()) |*node| {
