@@ -294,6 +294,8 @@ pub fn build(b: *std.Build) void {
     }
     // Linux loads GIO for the system proxy settings with dlopen.
     const net = b.addModule("ziggurat_net", .{ .root_source_file = b.path("src/net/root.zig"), .target = target, .optimize = optimize, .link_libc = target.result.os.tag == .linux });
+    // macOS reads the network settings and runs PAC files with CFNetwork.
+    if (target.result.os.tag == .macos) native_support.linkFrameworks(b, net, &.{ "CoreFoundation", "CFNetwork" });
     const update = b.addModule("ziggurat_update", .{ .root_source_file = b.path("src/update/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_net", .module = net }} });
     const plugin_fetch = b.addModule("ziggurat_plugin_fetch", .{ .root_source_file = b.path("src/page_runtime/plugins/fetch.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat_ipc", .module = ipc },
@@ -725,12 +727,13 @@ pub fn build(b: *std.Build) void {
         for ([_][]const u8{ "user32", "gdi32", "shell32", "ole32" }) |library| system_unit_tests.root_module.linkSystemLibrary(library, .{});
         _ = native_support.add(b, system_unit_tests.root_module, "system-picker-native-test", "src/system/picker.c", &.{"-std=c11"}, target, optimize);
     }
-    if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux or target.result.os.tag == .macos) {
+        // macOS runs the single-instance part only; the probe stays unlinked.
         const integration_probe = b.createModule(.{ .root_source_file = b.path("tests/os_integration_probe.zig"), .target = target, .optimize = optimize, .link_libc = true });
         if (target.result.os.tag == .linux) {
             integration_probe.addCSourceFile(.{ .file = b.path("tests/os_integration_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
             for ([_][]const u8{ "gio-2.0", "gio-unix-2.0" }) |library| integration_probe.linkSystemLibrary(library, .{ .use_pkg_config = .yes });
-        } else integration_probe.linkSystemLibrary("shlwapi", .{});
+        } else if (target.result.os.tag == .windows) integration_probe.linkSystemLibrary("shlwapi", .{});
         addSmoke(b, "smoke-os-integration", "tests/os_integration_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
@@ -1580,6 +1583,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_system", .module = system },
         });
         addSmoke(b, "smoke-drop", "tests/system_drop_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        addSmoke(b, "smoke-now-playing-commands", "tests/now_playing_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
         });
@@ -3413,7 +3420,8 @@ fn addSystemIntegrationNative(b: *std.Build, module: *std.Build.Module, target: 
             _ = native_support.add(b, module, "system-services-native", "src/system/macos_services.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
             _ = native_support.add(b, module, "system-clipboard-native", "src/system/macos_clipboard.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
             _ = native_support.add(b, module, "system-drag-native", "src/system/macos_drag.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
-            native_support.linkFrameworks(b, module, &.{ "AppKit", "Foundation", "Security", "ServiceManagement", "IOKit", "Network", "CoreServices", "CoreFoundation", "UniformTypeIdentifiers" });
+            _ = native_support.add(b, module, "system-media-native", "src/system/macos_media.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+            native_support.linkFrameworks(b, module, &.{ "AppKit", "Foundation", "Security", "ServiceManagement", "IOKit", "Network", "CoreServices", "CoreFoundation", "UniformTypeIdentifiers", "MediaPlayer" });
         },
         else => {},
     }
