@@ -153,7 +153,7 @@ const State = struct {
         const stale = a.region;
         try std.testing.expect(try a.region.remove());
         if (a.view.native != null or a.view.config != null or self.detached != 1) return error.RemovedRegionStillOpen;
-        try std.testing.expectError(error.StalePage, a.view.postFor(a.original.?, "stale"));
+        try std.testing.expectError(error.Closed, a.view.postFor(a.original.?, "removed"));
         try std.testing.expect(self.nodes[1].view.pageId() != null);
         a.region = try self.owner.reserve(.{ .bounds = a_bounds });
         try std.testing.expect(a.region.index == stale.index and a.region.generation != stale.generation);
