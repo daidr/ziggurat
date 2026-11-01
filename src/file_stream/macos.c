@@ -113,7 +113,9 @@ void zwk_file_response_release(ZwkFile *file){
 uint64_t zwk_file_length(ZwkFile *file){return file->length;}
 void zwk_file_pump_release(ZwkFile *file){
     if(!file)return;
-    if(!atomic_load_explicit(&file->finished,memory_order_acquire))zwk_file_control_cancel(file->control);
+    /* A pump let go before it finished ends the body now: the reader, which
+       waits only on its socket, sees the writer's end and fails the load. */
+    if(!atomic_load_explicit(&file->finished,memory_order_acquire)){zwk_file_control_cancel(file->control);shutdown(file->writer,SHUT_WR);}
     physical_release(file);
 }
 static int native_error(int *output,int result){if(output)*output=errno;return result;}
