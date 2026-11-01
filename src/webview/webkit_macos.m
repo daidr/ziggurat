@@ -133,6 +133,12 @@ typedef struct ZwkInitializerState ZwkInitializerState;
     /* File responses: their controls, cancelled at close, and transfers. */
     ZwkFileControl *file_controls[ZWK_FILE_VIEW_LIMIT];
     NSMutableArray *transfers;
+    /* A region's view is placed by zwk_viewport; a session's lives parked,
+     * without a window, until zwk_session_mount places it in one. */
+    BOOL region_mode, session, placement_busy;
+    void *session_parent;
+    uint64_t session_epoch;
+    uint32_t session_width, session_height;
     /* The remote page, when the page is one: its grants and rule list. A
      * navigation the page starts itself is adopted when the engine names it. */
     BOOL remote, remote_loopback, remote_script_navigation, remote_redirects, waiting_remote, nav_adopt;
@@ -2308,16 +2314,28 @@ void zwk_cookies_counts(uint32_t *stores,uint32_t *ops,size_t *bytes) {
     if (bytes) *bytes=atomic_load(&live_cookie_bytes);
 }
 
-int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPageNotify page_callback,ZwkScriptNotify script_callback,ZwkDeadline deadline,void *owner,ZwkState **out) {
+/* Backing pixels per point where a view is, or would be shown. */
+static CGFloat view_scale(NSView *view) {
+    const CGFloat scale=view.window?view.window.backingScaleFactor:NSScreen.mainScreen.backingScaleFactor;
+    return scale>0?scale:1;
+}
+/* A page in window, filling its content; in a region of it, placed later; or
+ * a session's, without a window, width x height pixels until mounted. */
+static int page_create(void *window,BOOL session,uint32_t width,uint32_t height,const ZwkOptions *options,ZwkNotify callback,ZwkPageNotify page_callback,ZwkScriptNotify script_callback,ZwkDeadline deadline,void *owner,ZwkState **out) {
     *out=NULL;
-    if (!options || !options->html || !window || options->max_pending==0 || options->max_pending>16 || options->max_result_bytes==0 ||
-        options->max_result_bytes>1024*1024 || strlen(options->html)>16*1024*1024) return ZWK_INVALID;
-    if ((options->remote && (options->local || *options->html)) || options->region) return ZWK_INVALID;
+    if (!options || !options->html || (!window && !session) || options->max_pending==0 || options->max_pending>16 || options->max_result_bytes==0 ||
+        options->max_result_bytes>1024*1024 || strlen(options->html)>16*1024*1024 || options->region>1) return ZWK_INVALID;
+    if ((options->remote && (options->local || *options->html)) || (session && options->region)) return ZWK_INVALID;
+    if (session) {
+        /* Whole points only, as WebKitGTK allocates them. */
+        const uint32_t scale=(uint32_t)MAX(1,lround(view_scale(nil)));
+        if (!width || !height || width%scale || height%scale || width/scale>32768 || height/scale>32768) return ZWK_GEOMETRY_NOT_APPLIED;
+    }
     void *profile_store_ref=NULL;
     if (options->profile_context && zwk_profile_context_get(options->profile_context,&profile_store_ref)) return ZWK_CLOSED;
     @autoreleasepool {
-        NSView *host=(__bridge NSView *)zlm_window_content(window);
-        if (!host) return ZWK_CLOSED;
+        NSView *host=window?(__bridge NSView *)zlm_window_content(window):nil;
+        if (window && !host) return ZWK_CLOSED;
         NSString *html=[NSString stringWithUTF8String:options->html];
         if (!html) return ZWK_INVALID;
         ZwkPage *s=[[ZwkPage alloc] init];
@@ -2368,7 +2386,9 @@ int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPage
             const int result=zwk_initializers_prepare((__bridge ZwkState *)s,options->initializers,0,NULL);
             if (result!=ZWK_OK) { [s->controller removeAllScriptMessageHandlers]; local_free(s); remote_free(s); return result; }
         }
-        ZwkWebView *view=[[ZwkWebView alloc] initWithFrame:host.bounds configuration:configuration];
+        const CGFloat scale=host?view_scale(host):view_scale(nil);
+        const NSRect frame=session?NSMakeRect(0,0,width/scale,height/scale):options->region?NSZeroRect:host.bounds;
+        ZwkWebView *view=[[ZwkWebView alloc] initWithFrame:frame configuration:configuration];
         if (!view) {
             zwk_initializers_abandon((__bridge ZwkState *)s);
             [s->controller removeAllScriptMessageHandlers]; local_free(s); remote_free(s); return ZWK_NATIVE_FAILED;
@@ -2376,7 +2396,9 @@ int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPage
         s->view=view; atomic_fetch_add(&live_views,1);
         /* A failed registration blocks the first document. */
         if (options->initializers) zwk_initializers_activate((__bridge ZwkState *)s);
-        view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
+        if (session) { s->session=YES; s->session_width=width; s->session_height=height; }
+        else if (options->region) { s->region_mode=YES; view.hidden=YES; }
+        else view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
         view.navigationDelegate=s; view.UIDelegate=s;
         /* 1 swipes between pages, 2 pinches; both off unless asked. */
         view.allowsBackForwardNavigationGestures=(options->gestures&1u)!=0;
@@ -2392,22 +2414,96 @@ int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPage
             [view addObserver:s forKeyPath:@"canGoForward" options:0 context:history_context];
         }
         s->observing=YES;
-        [host addSubview:view];
+        if (host) [host addSubview:view];
         dispatch_async(dispatch_get_main_queue(),^{ initialize(s); });
         *out=(__bridge_retained void *)s;
     }
     return ZWK_OK;
 }
+int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPageNotify page_callback,ZwkScriptNotify script_callback,ZwkDeadline deadline,void *owner,ZwkState **out) {
+    return page_create(window,NO,0,0,options,callback,page_callback,script_callback,deadline,owner,out);
+}
 int zwk_session_create(const ZwkOptions *options,uint32_t width,uint32_t height,ZwkNotify callback,ZwkPageNotify page_callback,ZwkScriptNotify script_callback,ZwkDeadline deadline,void *owner,ZwkState **out) {
-    (void)options; (void)width; (void)height; (void)callback; (void)page_callback; (void)script_callback; (void)deadline; (void)owner;
-    *out=NULL; return ZWK_INVALID;
+    return page_create(NULL,YES,width,height,options,callback,page_callback,script_callback,deadline,owner,out);
 }
-int zwk_session_mount(ZwkState *s,void *window,int32_t left,int32_t top,int32_t right,int32_t bottom,int visible,uint64_t epoch) {
-    (void)s; (void)window; (void)left; (void)top; (void)right; (void)bottom; (void)visible; (void)epoch; return ZWK_INVALID;
+static int floor_scale(int32_t value,int32_t scale) { const int32_t q=value/scale, r=value%scale; return q-(r<0); }
+static int ceil_scale(int32_t value,int32_t scale) { const int32_t q=value/scale, r=value%scale; return q+(r>0); }
+/* Places the view at pixel edges of its window's content, which is flipped:
+ * whole points covering the pixels, as on Linux. An empty or hidden viewport
+ * hides the view and keeps its last size. */
+static int place_view(ZwkPage *s,int32_t left,int32_t top,int32_t right,int32_t bottom,int visible) {
+    NSView *view=s->view;
+    if (!view.superview) return ZWK_CLOSED;
+    const int32_t scale=(int32_t)MAX(1,lround(view_scale(view)));
+    const int32_t x=floor_scale(left,scale), y=floor_scale(top,scale);
+    const int64_t width=(int64_t)ceil_scale(right,scale)-x, height=(int64_t)ceil_scale(bottom,scale)-y;
+    if (right<left || bottom<top || width>32768 || height>32768) return ZWK_INVALID;
+    const BOOL shown=visible && width>0 && height>0;
+    if (width>0 && height>0) view.frame=NSMakeRect(x,y,(CGFloat)width,(CGFloat)height);
+    view.hidden=!shown;
+    return ZWK_OK;
 }
-int zwk_session_park(ZwkState *s,uint64_t epoch) { (void)s; (void)epoch; return ZWK_INVALID; }
-int zwk_session_size(ZwkState *s,uint32_t *width,uint32_t *height) { (void)s; *width=0; *height=0; return ZWK_INVALID; }
-void zwk_session_parent_destroying(ZwkState *s,uint64_t epoch) { (void)s; (void)epoch; }
+int zwk_session_mount(ZwkState *state,void *window,int32_t left,int32_t top,int32_t right,int32_t bottom,int visible,uint64_t epoch) {
+    ZwkPage *s=page_of(state);
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=s; (void)keep;
+    if (!live(s) || !s->session || !s->view) return ZWK_CLOSED;
+    if (s->placement_busy) return ZWK_FULL;
+    if (!epoch || (s->session_parent?(s->session_epoch!=epoch || s->session_parent!=window):epoch<s->session_epoch)) return ZWK_INVALID;
+    s->placement_busy=YES;
+    int result=ZWK_OK;
+    @autoreleasepool {
+        const BOOL attaching=!s->session_parent;
+        const NSRect old_frame=s->view.frame; const BOOL old_hidden=s->view.hidden;
+        if (attaching) {
+            NSView *host=window?(__bridge NSView *)zlm_window_content(window):nil;
+            if (!host) { s->placement_busy=NO; return ZWK_CLOSED; }
+            s->view.hidden=YES;
+            [host addSubview:s->view];
+            s->session_parent=window; s->session_epoch=epoch;
+        }
+        result=place_view(s,left,top,right,bottom,visible);
+        if (result!=ZWK_OK) {
+            if (attaching) { [s->view removeFromSuperview]; s->session_parent=NULL; s->view.frame=old_frame; }
+            else s->view.frame=old_frame;
+            s->view.hidden=old_hidden;
+        } else if (right>left && bottom>top) {
+            const CGFloat scale=view_scale(s->view);
+            s->session_width=(uint32_t)MAX(1,lround(s->view.frame.size.width*scale));
+            s->session_height=(uint32_t)MAX(1,lround(s->view.frame.size.height*scale));
+        }
+    }
+    s->placement_busy=NO;
+    return live(s)?result:ZWK_CLOSED;
+}
+int zwk_session_park(ZwkState *state,uint64_t epoch) {
+    ZwkPage *s=page_of(state);
+    if (!live(s) || !s->session || !s->view) return ZWK_CLOSED;
+    if (s->placement_busy) return ZWK_FULL;
+    if (s->session_parent && epoch!=s->session_epoch) return ZWK_INVALID;
+    @autoreleasepool {
+        [s->view removeFromSuperview];
+        s->session_parent=NULL;
+        const CGFloat scale=view_scale(s->view);
+        s->view.frame=NSMakeRect(0,0,s->session_width/scale,s->session_height/scale);
+        s->view.hidden=NO;
+    }
+    return ZWK_OK;
+}
+int zwk_session_size(ZwkState *state,uint32_t *width,uint32_t *height) {
+    ZwkPage *s=page_of(state);
+    if (!live(s) || !s->session || !s->view) return ZWK_CLOSED;
+    const CGFloat scale=view_scale(s->view);
+    const double w=round(s->view.frame.size.width*scale), h=round(s->view.frame.size.height*scale);
+    if (w<1 || h<1 || w>UINT32_MAX || h>UINT32_MAX) return ZWK_GEOMETRY_NOT_APPLIED;
+    *width=(uint32_t)w; *height=(uint32_t)h;
+    return ZWK_OK;
+}
+/* The window goes: its content takes the view with it unless it leaves now. */
+void zwk_session_parent_destroying(ZwkState *state,uint64_t epoch) {
+    ZwkPage *s=page_of(state);
+    if (!live(s) || !s->session || !s->session_parent || s->session_epoch!=epoch) return;
+    @autoreleasepool { [s->view removeFromSuperview]; s->session_parent=NULL; }
+}
 
 int zwk_permission_defer(void *call_pointer,uint64_t token) {
     ZwkPermissionCall *call=call_pointer;
@@ -2701,8 +2797,22 @@ int zwk_focus(ZwkState *state) {
     if (!live(s) || !s->view.window) return ZWK_CLOSED;
     return [s->view.window makeFirstResponder:s->view]?ZWK_OK:ZWK_NATIVE_FAILED;
 }
+/* Test hook: where the view is, in its window's content pixels, and whether
+ * it is shown there. */
+int zwk_test_frame(ZwkState *state,int32_t *x,int32_t *y,int32_t *width,int32_t *height,int *shown) {
+    ZwkPage *s=page_of(state);
+    if (!live(s) || !s->view) return ZWK_CLOSED;
+    const CGFloat scale=view_scale(s->view);
+    const NSRect frame=s->view.frame;
+    *x=(int32_t)lround(frame.origin.x*scale); *y=(int32_t)lround(frame.origin.y*scale);
+    *width=(int32_t)lround(frame.size.width*scale); *height=(int32_t)lround(frame.size.height*scale);
+    *shown=s->view.superview!=nil && !s->view.hidden;
+    return ZWK_OK;
+}
 int zwk_viewport(ZwkState *state,int32_t left,int32_t top,int32_t right,int32_t bottom,int visible) {
-    (void)state; (void)left; (void)top; (void)right; (void)bottom; (void)visible; return ZWK_CLOSED;
+    ZwkPage *s=page_of(state);
+    if (!live(s) || !s->region_mode || !s->view) return ZWK_CLOSED;
+    @autoreleasepool { return place_view(s,left,top,right,bottom,visible); }
 }
 
 int zwk_recovery_begin(ZwkState *state) {
