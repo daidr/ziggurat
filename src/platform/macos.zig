@@ -57,6 +57,8 @@ extern fn zlm_window_opacity(*anyopaque, f32) void;
 extern fn zlm_window_ignore_pointer(*anyopaque, c_int) void;
 extern fn zlm_window_content_protection(*anyopaque, c_int) void;
 extern fn zlm_window_attention(*anyopaque, c_int) void;
+extern fn zlm_window_capture(*anyopaque, *c_int, *c_int, *c_int, *?[*]const u8) ?*anyopaque;
+extern fn zlm_capture_free(*anyopaque) void;
 
 pub fn init(app: *core.App) !void {
     if (app.icon_policy == .required) return error.UnsupportedCapability;
@@ -227,6 +229,32 @@ pub fn pointerOperation(_: *const core.WindowRecord) u64 {
 }
 pub fn advancePointerOperation(_: *core.WindowRecord) u64 {
     return std.math.maxInt(u64);
+}
+pub fn capture(record: *core.WindowRecord, allocator: std.mem.Allocator) !core.Capture {
+    var width: c_int = 0;
+    var height: c_int = 0;
+    var stride: c_int = 0;
+    var source: ?[*]const u8 = null;
+    const image = zlm_window_capture(record.native.native orelse return error.Closed, &width, &height, &stride, &source) orelse return error.CaptureFailed;
+    defer zlm_capture_free(image);
+    if (width <= 0 or height <= 0 or stride < width * 4) return error.CaptureFailed;
+    const w: usize = @intCast(width);
+    const h: usize = @intCast(height);
+    const pixels = try allocator.alloc(u8, w * h * 4);
+    for (0..h) |row| {
+        const line = source.?[row * @as(usize, @intCast(stride)) ..];
+        for (0..w) |column| {
+            const at = line[column * 4 ..][0..4];
+            // Premultiplied RGBA to premultiplied BGRA.
+            pixels[(row * w + column) * 4 ..][0..4].* = .{ at[2], at[1], at[0], at[3] };
+        }
+    }
+    return .{ .width = @intCast(width), .height = @intCast(height), .pixels = pixels };
+}
+/// The application menu comes with the macOS menu bar; until then there
+/// is none to choose from.
+pub fn activateMenuItem(_: *core.WindowRecord, _: []const []const u8) !void {
+    return error.NoMenu;
 }
 pub fn setCursor(record: *core.WindowRecord, cursor: core.Cursor) void {
     zlm_window_cursor(record.native.native orelse return, @backingInt(cursor));
