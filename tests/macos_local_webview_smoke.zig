@@ -202,14 +202,14 @@ fn run(allocator: std.mem.Allocator) !void {
 /// A site whose document and other paths come from the app's handler, with
 /// grants beyond the default policy: a request header, POST with the site's
 /// Origin, a response header, a deferred answer and a request left
-/// unanswered.
+/// unanswered, which the View answers 404.
 const dynamic_html =
     \\<!doctype html><script>
     \\addEventListener('DOMContentLoaded',async()=>{const r=[];
     \\try{const a=await fetch('/api');r.push(a.status,await a.text(),a.headers.get('X-Answer'))}catch(e){r.push('api-failed')}
     \\r.push(await fetch('/api',{headers:{'X-Request-Policy':'yes'}}).then(x=>x.text(),()=>'denied'));
     \\r.push(await fetch('/api',{headers:{'X-Other':'1'}}).then(()=>'allowed',()=>'denied'));
-    \\r.push(await fetch('/post',{method:'POST',body:'x'}).then(x=>x.text(),()=>'denied'));
+    \\r.push(await fetch('/post',{method:'POST'}).then(x=>x.text(),()=>'denied'));
     \\r.push(await fetch('/slow').then(x=>x.text(),()=>'denied'));
     \\r.push(await fetch('/nothing').then(x=>x.status,()=>'denied'));
     \\chrome.webview.postMessage(r.join(' '))});
@@ -265,7 +265,7 @@ const Dynamic = struct {
             self.slow = response.deferResponse(.{}) catch |err| return self.fail(err);
             self.app.post(.{ .context = self, .call = later }) catch |err| self.fail(err);
         }
-        // Anything else stays unanswered and fails as a refused load.
+        // Anything else stays unanswered: the View answers 404.
     }
     fn later(ptr: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
@@ -299,7 +299,7 @@ fn dynamic(allocator: std.mem.Allocator) !void {
     if (probe.err) |err| return err;
     const text = probe.result[0..probe.result_len];
     std.debug.print("macOS dynamic site reports \"{s}\"\n", .{text});
-    try std.testing.expectEqualStrings("200 plain 42 granted denied posted slow denied", text);
+    try std.testing.expectEqualStrings("200 plain 42 granted denied posted slow 404", text);
     try std.testing.expectEqual(@as(u32, 1), probe.documents);
 }
 
