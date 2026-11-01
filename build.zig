@@ -1005,6 +1005,11 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
         .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_document_editor", .module = document_editor },
     } });
+    const view_text_tests = addTest(b, .{ .root_module = view_text });
+    check.dependOn(&view_text_tests.step);
+    const run_view_text_tests = b.addRunArtifact(view_text_tests);
+    test_step.dependOn(&run_view_text_tests.step);
+    b.step("test-view-text", "Run view text field placeholder and caret tests").dependOn(&run_view_text_tests.step);
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
         addSmoke(b, "smoke-view-text", "tests/view_text_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },

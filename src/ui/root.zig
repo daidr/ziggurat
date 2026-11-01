@@ -3142,6 +3142,9 @@ pub const Frame = struct {
     /// Open element effects; false marks one drawn without its program.
     effect_scopes: [16]bool = undefined,
     effect_depth: usize = 0,
+    /// The theme of the subtree being drawn, in place of the window's; see
+    /// `pushTheme`.
+    theme_override: ?*const Theme = null,
 
     pub fn beginShortcutScope(self: *Frame, id: u64, options: ShortcutScopeOptions) !void {
         return self.beginShortcutScopeBody(id, options) catch |err| {
@@ -3183,7 +3186,19 @@ pub const Frame = struct {
     }
 
     pub fn currentTheme(self: *const Frame) Theme {
+        if (self.theme_override) |value| return value.*;
         return self.context.currentTheme();
+    }
+    /// Draw what follows with `value` in place of the window's theme, until
+    /// `popTheme` gets back the value this returns: widgets take their
+    /// colors and metrics from it. `value` is borrowed until then.
+    pub fn pushTheme(self: *Frame, value: *const Theme) ?*const Theme {
+        const previous = self.theme_override;
+        self.theme_override = value;
+        return previous;
+    }
+    pub fn popTheme(self: *Frame, previous: ?*const Theme) void {
+        self.theme_override = previous;
     }
     pub fn windowSize(self: *const Frame) z.Size {
         return if (self.transforms) |workspace| workspace.window_size else self.size;
@@ -4014,6 +4029,29 @@ pub const Frame = struct {
             const end = @min(to.semantics, tree.len);
             if (start < end) for (tree.entries[start..end]) |*entry| {
                 entry.enabled = false;
+                entry.focused = false;
+            };
+        }
+    }
+    /// Takes the controls added between two marks out of the pointer's and
+    /// the keyboard's way: presses go to what lies beneath, Tab passes over
+    /// them and focus on one leaves at the end of the frame. Their semantic
+    /// nodes stay enabled, so assistive technology still reads and invokes
+    /// them, but no longer report focus.
+    pub fn passThrough(self: *Frame, from: InertMark, to: InertMark) void {
+        const state = &self.context.input_state;
+        const hits = if (state.building) state.pending[0..state.pending_len] else state.hits[0..state.len];
+        for (hits[@min(from.controls, hits.len)..@min(to.controls, hits.len)]) |*hit| {
+            hit.options.pass_through = true;
+            hit.options.pointer_enabled = false;
+            hit.options.focusable = false;
+            hit.options.shortcut = null;
+        }
+        if (comptime @TypeOf(self.context.semantic_tree) != void) {
+            const tree = &self.context.semantic_tree;
+            const start = @max(@min(from.semantics, tree.len), 1);
+            const end = @min(to.semantics, tree.len);
+            if (start < end) for (tree.entries[start..end]) |*entry| {
                 entry.focused = false;
             };
         }
