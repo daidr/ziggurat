@@ -66,7 +66,7 @@ pub const capabilities = .{
     .message_dialog = windows or linux,
     .tray = windows or linux,
     .standalone_tray = windows or linux,
-    .clipboard_text = windows,
+    .clipboard_text = windows or builtin.os.tag == .macos,
     .clipboard = clipboard.capabilities,
     .drop = drop.capabilities,
     .drag = drag.capabilities,
