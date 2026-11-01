@@ -175,6 +175,18 @@ void zlc_push_clip(Renderer *s,float x,float y,float width,float height) {
     cairo_save(s->context);cairo_rectangle(s->context,x,y,width,height);cairo_clip(s->context);
     if(s->layers&&s->layers->active)layer_current(s->layers)->saves++;
 }
+/* Clips to device pixels x0..x1, y0..y1 of the plane, exactly on pixel
+   edges whatever the scale; popped by zlc_pop_clip. */
+void zlc_push_device_clip(Renderer *s,int32_t x0,int32_t y0,int32_t x1,int32_t y1){
+    if(s->gradient_clip_depth>=32)return;
+    double *before=s->gradient_clips[s->gradient_clip_depth],*after=s->gradient_clips[++s->gradient_clip_depth];
+    after[0]=fmax(before[0],(double)x0+s->origin[0]);after[1]=fmax(before[1],(double)y0+s->origin[1]);
+    after[2]=fmin(before[2],(double)x1+s->origin[0]);after[3]=fmin(before[3],(double)y1+s->origin[1]);
+    cairo_save(s->context);cairo_matrix_t matrix;cairo_get_matrix(s->context,&matrix);cairo_identity_matrix(s->context);
+    cairo_new_path(s->context);cairo_rectangle(s->context,(double)x0+s->origin[0],(double)y0+s->origin[1],(double)x1-x0,(double)y1-y0);cairo_clip(s->context);
+    cairo_set_matrix(s->context,&matrix);
+    if(s->layers&&s->layers->active)layer_current(s->layers)->saves++;
+}
 /* Clears a rectangle in DIP to transparent, within the current clip. */
 void zlc_clear_rect(Renderer *s,float x,float y,float width,float height){
     if(width>=FLT_MAX){clear_transparent(s);return;}

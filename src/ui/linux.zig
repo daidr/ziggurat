@@ -35,6 +35,7 @@ extern fn zlc_scale(*anyopaque) f32;
 extern fn zlc_push_clip(*anyopaque, f32, f32, f32, f32) void;
 extern fn zlc_pop_clip(*anyopaque) void;
 extern fn zlc_clear_rect(*anyopaque, f32, f32, f32, f32) void;
+extern fn zlc_push_device_clip(*anyopaque, i32, i32, i32, i32) void;
 extern fn zlc_test_generation(*anyopaque) u32;
 extern fn zlc_end(*anyopaque, *anyopaque) void;
 extern fn zlc_destroy(*anyopaque) void;
@@ -677,9 +678,12 @@ pub const Renderer = struct {
         const scale = zlc_scale(native);
         defer self.cull = null;
         for (region.slice()) |box| {
-            const rect = box.dip(scale);
-            zlc_push_clip(native, rect.x, rect.y, rect.width, rect.height);
+            // On pixel edges: a clip off them would be antialiased, and
+            // Cairo draws subpixel text differently under such a clip.
+            zlc_push_device_clip(native, box.x0, box.y0, box.x1, box.y1);
             defer zlc_pop_clip(native);
+            // The clip bounds the clear to the box's pixels exactly.
+            const rect = (damage.Box{ .x0 = box.x0 - 1, .y0 = box.y0 - 1, .x1 = box.x1 + 1, .y1 = box.y1 + 1 }).dip(scale);
             if (transparent) zlc_clear_rect(native, rect.x, rect.y, rect.width, rect.height);
             self.cull = box;
             try self.replayBuffer(buffer);
@@ -1001,7 +1005,10 @@ test "drawing only the damaged rectangles leaves the plane as drawing it whole" 
             var a: cpu_gradient.Surface = undefined;
             var b: cpu_gradient.Surface = undefined;
             if (zlc_gradient_surface(whole.native.?, &a) != 0 or zlc_gradient_surface(partial.native.?, &b) != 0) return error.DrawGradientFailed;
-            for (0..a.height) |y| try std.testing.expectEqualSlices(u32, a.pixels[y * a.stride ..][0..a.width], b.pixels[y * b.stride ..][0..b.width]);
+            for (0..a.height) |y| std.testing.expectEqualSlices(u32, a.pixels[y * a.stride ..][0..a.width], b.pixels[y * b.stride ..][0..b.width]) catch |err| {
+                std.debug.print("frame {d} transparent={} row {d} damage {any}\n", .{ frame, transparent, y, region.slice() });
+                return err;
+            };
         }
         try std.testing.expectEqual(@as(usize, 5), drawn_partly);
     }
