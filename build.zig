@@ -1575,6 +1575,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
         });
+        addSmoke(b, "smoke-now-playing-commands", "tests/now_playing_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
     }
     if (target.result.os.tag == .linux) {
         const native = native_support.add(b, ui, "ui-cairo-native", "src/ui/linux.c", &.{"-std=c11"}, target, optimize);
@@ -3405,7 +3409,8 @@ fn addSystemIntegrationNative(b: *std.Build, module: *std.Build.Module, target: 
             _ = native_support.add(b, module, "system-services-native", "src/system/macos_services.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
             _ = native_support.add(b, module, "system-clipboard-native", "src/system/macos_clipboard.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
             _ = native_support.add(b, module, "system-drag-native", "src/system/macos_drag.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
-            native_support.linkFrameworks(b, module, &.{ "AppKit", "Foundation", "Security", "ServiceManagement", "IOKit", "Network", "CoreServices", "CoreFoundation", "UniformTypeIdentifiers" });
+            _ = native_support.add(b, module, "system-media-native", "src/system/macos_media.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+            native_support.linkFrameworks(b, module, &.{ "AppKit", "Foundation", "Security", "ServiceManagement", "IOKit", "Network", "CoreServices", "CoreFoundation", "UniformTypeIdentifiers", "MediaPlayer" });
         },
         else => {},
     }

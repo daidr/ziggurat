@@ -298,7 +298,7 @@ Linux 首次使用时才 `dlopen("libsecret-1.so.0")`（需要 0.19 起的二进
 
 ## Now Playing 与媒体键
 
-`system.NowPlaying` 把应用正在播放的内容放到系统显示媒体的地方：Windows 是音量浮出面板与锁屏上的媒体控件（SystemMediaTransportControls），Linux 是 MPRIS 客户端（GNOME、KDE 的媒体控件与锁屏、playerctl）。显示期间，键盘与耳机的媒体键以及这些控件把命令交给应用：
+`system.NowPlaying` 把应用正在播放的内容放到系统显示媒体的地方：Windows 是音量浮出面板与锁屏上的媒体控件（SystemMediaTransportControls），Linux 是 MPRIS 客户端（GNOME、KDE 的媒体控件与锁屏、playerctl），macOS 是 MPNowPlayingInfoCenter（控制中心与菜单栏的正在播放、锁屏）。显示期间，键盘与耳机的媒体键以及这些控件把命令交给应用：
 
 ```zig
 var now = system.NowPlaying.init(allocator, &state, onCommand);
@@ -314,8 +314,9 @@ try now.set(.{ .title = "Spring", .artist = "Vivaldi", .album = "The Four Season
 - `control(Player)` 让媒体键直接驱动播放器（`Player.of(&audio_player)` 适配 `ziggurat_audio` 的 Player 或任何有 `play`/`pause`/`stop`/`isPlaying`/`seek`/`position`/`duration` 的值）：播放、暂停、停止与跳转作用于播放器，显示的状态、位置和时长取自播放器，并额外提供播放、暂停、停止以及（时长已知时）跳转；`next`/`previous` 仍交给 `on_command` 换曲，其他命令在播放器处理后也照常交给 `on_command`。应用自己操作播放器或播放结束后调用 `sync()`。
 - Windows：控件属于一个从不显示的顶层窗口（经 `ISystemMediaTransportControlsInterop`），设置播放状态、各按钮可用性、音乐元数据、缩略图、时间线与速率；控件在自己的线程调用敏捷委托，委托只向该窗口投递消息，命令在主线程交付。窗口、控件与委托首次使用时创建并保留到进程结束。
 - Linux：会话总线上的 MPRIS 播放器（`/org/mpris/MediaPlayer2`），只在显示期间持有总线名 `org.mpris.MediaPlayer2.<程序名>.instance<pid>`，清除后离开桌面控件。`Identity` 是 GLib 应用名，`DesktopEntry` 是程序名（与 `identity.setProcessIdentity` 一致）。曲目变化时换 trackid；位置跳变超过半秒发 `Seeked`；`Seek` 与 `SetPosition`（只接受当前曲目、曲目内的位置）作为 `seek`；封面写到 `$XDG_RUNTIME_DIR/<程序名>/` 下的文件并以 `file://` 给出，封面变化或清除时删除；`OpenUri` 返回 NotSupported。没有会话总线时不显示，也不报错。
+- macOS：`MPNowPlayingInfoCenter` 的 nowPlayingInfo 写标题、艺术家、专辑、时长（0 为直播流）、当前位置和速率（暂停时为 0），`playbackState` 跟随状态；封面用 NSImage 解码成 `MPMediaItemArtwork`。`MPRemoteCommandCenter` 只启用提供的命令，play/pause 任一提供时也启用播放/暂停键；`changePlaybackPositionCommand` 作为 `seek`。命令处理程序排到主队列交付，从不在处理程序里调用应用。清除时移除命令处理程序并清空 nowPlayingInfo。
 
-`zig build smoke-now-playing`（需要 `dbus-run-session` 与 X11）用另一条总线连接作为 MPRIS 客户端，验证总线名、元数据与封面文件、可用命令、播放/暂停键、未提供的命令被忽略、`SetPosition` 与 `Seek`、`OpenUri` 拒绝、清除后离开总线并删除封面。`zig build smoke-now-playing-commands` 在两个平台经各自后端的主线程路径（Windows 为窗口消息）交付命令，验证播放/暂停键按状态、未提供的命令、跳转位置与清除后不再交付；Windows 上的系统控件显示与真实媒体键没有自动验证。
+`zig build smoke-now-playing`（需要 `dbus-run-session` 与 X11）用另一条总线连接作为 MPRIS 客户端，验证总线名、元数据与封面文件、可用命令、播放/暂停键、未提供的命令被忽略、`SetPosition` 与 `Seek`、`OpenUri` 拒绝、清除后离开总线并删除封面。`zig build smoke-now-playing-commands` 在三个平台经各自后端的主线程路径（Windows 为窗口消息，macOS 为主队列）交付命令，macOS 另读回系统显示的标题，验证播放/暂停键按状态、未提供的命令、跳转位置与清除后不再交付；Windows 与 macOS 上的系统控件显示与真实媒体键没有自动验证。
 
 ## 图标
 
