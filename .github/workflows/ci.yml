@@ -249,7 +249,7 @@ jobs:
         if: (github.event_name == 'workflow_dispatch' && inputs.webview) || contains(github.event.pull_request.labels.*.name, 'webview')
         run: |
           sh scripts/ci-linux-deps.sh libwebkit2gtk-4.1-dev glib-networking dbus-x11
-          xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-webview-content-rules -Dwebview=true -Doptimize=${{ matrix.optimize }}
+          xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-webview-content-rules smoke-webview-scroll-linux smoke-webview-media-linux -Dwebview=true -Doptimize=${{ matrix.optimize }}
       - name: Capture Cairo submission and idle evidence
         if: matrix.optimize == 'ReleaseSafe'
         run: |
@@ -317,19 +317,24 @@ jobs:
         timeout-minutes: 30
         run: |
           zig build test check --test-timeout 5m -Doptimize=${{ matrix.optimize }} --summary failures
-      - name: AppKit window and file-watch smokes
+      - name: AppKit window, file-watch, audio and automation smokes
         timeout-minutes: 10
         run: |
-          zig build smoke-macos smoke-macos-chrome smoke-file-watch -Doptimize=${{ matrix.optimize }} --summary failures
+          zig build smoke-macos smoke-macos-chrome smoke-file-watch smoke-audio smoke-automation smoke-macos-services -Doptimize=${{ matrix.optimize }} --summary failures
+      - name: NSAccessibility compile and smoke
+        timeout-minutes: 15
+        run: |
+          zig build check smoke-accessibility-macos -Daccessibility=true -Doptimize=${{ matrix.optimize }} --summary failures
       - name: WKWebView compile and page smokes
         timeout-minutes: 15
         run: |
           zig build check -Dwebview=true -Doptimize=${{ matrix.optimize }} --summary failures
-          zig build build-smoke-webview-macos build-smoke-webview-content-rules build-smoke-webview-local-macos build-smoke-webview-remote-macos -Dwebview=true -Doptimize=${{ matrix.optimize }} --summary failures
+          zig build build-smoke-webview-macos build-smoke-webview-content-rules build-smoke-webview-local-macos build-smoke-webview-remote-macos build-smoke-webview-find-macos -Dwebview=true -Doptimize=${{ matrix.optimize }} --summary failures
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-macos
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-content-rules
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-local-macos
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-remote-macos
+          sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-find-macos
 
   webview:
     # Paused with the Windows job; see WINDOWS_CI there.

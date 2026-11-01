@@ -14,7 +14,7 @@ struct ZlgRegionHost {
     GtkWidget *child;
     ZlgRegionHost *previous, *next;
     unsigned refs;
-    gulong destroy_handler;
+    gulong destroy_handler, scroll_handler;
     int x, y, width, height;
     gboolean visible, closed, child_destroyed;
 };
@@ -175,6 +175,31 @@ void zlg_region_parent_destroying(ZlgRegionHost *host) {
         content_remove(layer->overlay,layer->window->window);
     region_release(host);
 }
+static gboolean scroll(GtkWidget *widget, GdkEventScroll *native, gpointer data);
+/* The child's scroll event, given to the drawing area at the same point on
+   the screen: the native UI around the page scrolls, the page never does. */
+static gboolean region_scroll(GtkWidget *widget, GdkEventScroll *native, gpointer data) {
+    (void)widget;
+    ZlgRegionHost *host=data;
+    if (!region_live(host) || !host->scroll_handler) return FALSE;
+    NativeWindow *s=host->layer->window;
+    GdkWindow *area=gtk_widget_get_window(s->area);
+    if (!area) return FALSE;
+    gint ox=0, oy=0;
+    gdk_window_get_origin(area,&ox,&oy);
+    GdkEvent *event=gdk_event_copy((GdkEvent *)native);
+    event->scroll.x=native->x_root-ox; event->scroll.y=native->y_root-oy;
+    region_retain(host); retain(s);
+    scroll(s->area,&event->scroll,s);
+    release(s); region_release(host);
+    gdk_event_free(event);
+    return TRUE;
+}
+void zlg_region_scroll_to_container(ZlgRegionHost *host, int on) {
+    if (!region_live(host)) return;
+    if (on && !host->scroll_handler) host->scroll_handler=g_signal_connect(host->child,"scroll-event",G_CALLBACK(region_scroll),host);
+    else if (!on && host->scroll_handler) { g_signal_handler_disconnect(host->child,host->scroll_handler); host->scroll_handler=0; }
+}
 int zlg_region_attach(NativeWindow *s, void *widget, ZlgRegionHost **out) {
     ZlgRegionHost *host=NULL;
     *out=NULL;
@@ -197,6 +222,7 @@ void zlg_region_detach(ZlgRegionHost *host) {
     if (host->previous) host->previous->next=host->next; else layer->first=host->next;
     if (host->next) host->next->previous=host->previous;
     host->previous=NULL; host->next=NULL;
+    if (host->scroll_handler) { g_signal_handler_disconnect(host->child,host->scroll_handler); host->scroll_handler=0; }
     content_remove(host->child,layer->overlay);
     if (!layer->first) region_restore(layer);
     s->content_busy=was_busy;

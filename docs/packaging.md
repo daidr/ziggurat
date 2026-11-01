@@ -72,7 +72,11 @@ uninstall [--silent] [--purge]
 
 ## Debian 包
 
-`ziggurat package deb --zip PACKAGE --maintainer "NAME <EMAIL>"` 写出 Linux 更新包对应的 `.deb`：文件位于 `/usr/lib/<executable>/`，`/usr/bin/<executable>` 是相对链接，另有 desktop 条目、`/usr/share/doc/<executable>/copyright`（来自包内 LICENSE.txt）和可选 `--icon` PNG。控制文件包含 Installed-Size 与 md5sums；默认依赖 GTK 3 与 Pango，`--webview` 加入 WebKitGTK 4.1 与 libsoup 3，`--depends` 可完全替换。postinst/postrm 在工具存在时刷新菜单与图标缓存，失败不阻止安装。成员是未压缩的 tar，时间戳取 `SOURCE_DATE_EPOCH`（默认 0），同样输入得到同样字节。包未签名；仓库签名属于发布者的 APT 仓库配置。Linux 冒烟检查用 `dpkg-deb` 核对控制信息与内容，在有无密码 root 的环境中再实际安装、运行并移除。
+`ziggurat package deb --zip PACKAGE --maintainer "NAME <EMAIL>"` 写出 Linux 更新包对应的 `.deb`：文件位于 `/usr/lib/<executable>/`，`/usr/bin/` 下每个命令名一个相对链接（见下文 `linux.command`），另有按路径运行应用的 desktop 条目、`/usr/share/doc/<executable>/copyright`（来自包内 LICENSE.txt）和可选 `--icon` PNG。控制文件包含 Installed-Size 与 md5sums；默认依赖 GTK 3 与 Pango，`--webview` 加入 WebKitGTK 4.1 与 libsoup 3，`--depends` 可完全替换。postinst/postrm 在工具存在时刷新菜单与图标缓存，失败不阻止安装。成员是未压缩的 tar，时间戳取 `SOURCE_DATE_EPOCH`（默认 0），同样输入得到同样字节。包未签名；仓库签名属于发布者的 APT 仓库配置。Linux 冒烟检查用 `dpkg-deb` 核对控制信息与内容，在有无密码 root 的环境中再实际安装、运行并移除。
+
+`ziggurat.json` 的 `linux.command`（或 `--command a,b`）是运行应用的命令名：一个名字，或像 `["my-app", "ma"]` 这样的列表以加一个短名；默认是可执行文件名。名字以字母或数字开头，其后只有字母、数字和 `._+-`，不得重复。deb 与 PKGBUILD 在 `/usr/bin` 为每个名字建链接；安装程序在 `~/.local/bin`（机器范围为 `/usr/local/bin`）为每个名字建链接，但某个名字已被别的程序占用（不是指向本安装的链接）时保留那个程序、跳过该名字；新版本换了名字时删去旧版本的链接，卸载删去所有仍指向本安装的链接。安装完成提示用第一个名字运行应用。
+
+`ziggurat package pkgbuild --zip PACKAGE` 在更新包旁边写出 Arch Linux 的 `PKGBUILD`（`--output` 可改位置），在该目录运行 `makepkg -si` 即打包并安装。它以更新包本身为 source 并带其 SHA-256，`package()` 安装与 deb 相同的内容：`/usr/lib/<executable>/` 下的文件（可执行文件 755，其他 644）、每个命令名的 `/usr/bin` 链接、desktop 条目、图标，以及包内 LICENSE.txt 放到 `/usr/share/licenses/<name>/LICENSE`。`pkgver` 由版本去掉连字符得到，使 vercmp 把预发布排在正式版之前（`1.2.0-beta.1` → `1.2.0beta.1`，以数字开头的预发布加 `pre`，构建元数据接 `_`）；`depends` 把 deb 的依赖（默认值，或 `--webview`、`--depends` 给出的 Debian 依赖）映射成 Arch Linux 包名，没有已知对应的会提示并略去；`url` 与 `license` 取 `--homepage`/`--license` 或 `ziggurat.json` 的 `homepage`、`license`（SPDX 表达式，缺省 `LicenseRef-custom`）；`options` 关闭 strip 与调试包，保持与发布的可执行文件一致。pacman 钩子会刷新菜单和图标缓存，所以不需要 install 脚本。
 
 ## macOS 应用包、签名与磁盘映像
 
@@ -125,7 +129,7 @@ Info.plist 写出 `CFBundleName`/`CFBundleDisplayName`（`name`）、`CFBundleId
 
 ### 磁盘映像
 
-磁盘映像只用 macOS 自带的 hdiutil：把应用以 `ditto --noclone` 复制到暂存目录（保持签名原样，并避免稀疏文件让 hdiutil 低估 HFS+ 所需块数），旁边放 `/Applications` 符号链接、窗口布局 `.DS_Store` 和由应用图标而来的 `.VolumeIcon.icns`；`hdiutil create -fs HFS+ -format UDRW` 生成可写映像，挂载后设置卷的“有自定义图标”Finder 标志并删去系统生成的 `.fseventsd`、`.Trashes`，卸载后 `hdiutil convert -format ULMO` 压缩为只读的 LZMA 映像。create 与 detach 遇到 “Resource busy”（Spotlight、杀毒软件占用）时依次等待 2、4、8、16 秒重试，最终失败时同时报告第一次的错误。卷名为 `macos.dmgTitle`，默认 `name`。不以 Finder 标志隐藏 `.app` 扩展名，因为那会使签名的严格校验失败（Finder 默认已隐藏）。
+磁盘映像只用 macOS 自带的 hdiutil：把应用以 `ditto --noclone` 复制到暂存目录（保持签名原样，并避免稀疏文件让 hdiutil 低估 HFS+ 所需块数），旁边放 `/Applications` 符号链接、窗口布局 `.DS_Store` 和由应用图标而来的 `.VolumeIcon.icns`；`hdiutil create -fs HFS+ -format UDRW` 生成可写映像，挂载后设置卷的“有自定义图标”Finder 标志并删去系统生成的 `.fseventsd`、`.Trashes`，卸载后压缩为只读的 LZMA（ULMO）映像：较新的 macOS 上 `hdiutil convert` 会以 “Resource temporarily unavailable” 失败并提示改用 `diskutil image create from`，所以 diskutil 有 `image` 子命令时用它（与 `-ov` 一样覆盖输出），否则用 `hdiutil convert -format ULMO -ov`。create 与 detach 遇到 “Resource busy”（Spotlight、杀毒软件占用）时依次等待 2、4、8、16 秒重试，最终失败时同时报告第一次的错误。卷名为 `macos.dmgTitle`，默认 `name`。不以 Finder 标志隐藏 `.app` 扩展名，因为那会使签名的严格校验失败（Finder 默认已隐藏）。
 
 窗口布局不经 AppleScript 或 Finder 自动化，无需授权，可在无界面的构建机上生成：`.DS_Store` 由 CLI 直接写出——伙伴分配的地址空间、`DSDB` B 树头和单个叶节点，记录窗口位置与大小（屏幕左下 200,400 起 660×400，隐藏工具栏、侧栏、路径栏与状态栏）、白色背景、128 点图标、底部标签，以及应用（180,190）和 Applications 链接（480,185）的图标中心。窗口属性是 `bplist00` 二进制 plist，排布与 Python plistlib 相同（键排序、相同标量共享一个对象）。单元测试把输出与 dmgbuild 所用 `ds_store` 包对相同记录写出的文件逐字节比较。
 

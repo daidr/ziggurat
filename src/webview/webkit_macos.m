@@ -74,6 +74,13 @@ typedef struct ZwkRemoteGrant {
     char host[256];
     char **names, **values;
 } ZwkRemoteGrant;
+/* The engine's own find, which WebKitGTK's find controller wraps too: one
+ * search of a string reports its match count, or that it found none. */
+@interface WKWebView (ZigguratFind)
+- (void)_findString:(NSString *)string options:(NSUInteger)options maxCount:(NSUInteger)count;
+- (void)_hideFindUI;
+- (void)_setFindDelegate:(id)delegate;
+@end
 @interface ZwkPage : NSObject <WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler> {
 @public
     void *owner;
@@ -125,6 +132,8 @@ typedef struct ZwkRemoteGrant {
     ZwkRemoteGrant *remote_grants;
     NSString *remote_url, *remote_ipc, *remote_source, *remote_identifier;
     WKContentRuleList *remote_rules;
+    /* The page's text search, once the app first searches it. */
+    ZwkFindGate *find;
 }
 @end
 static void resources_cancel_all(ZwkPage *s);
@@ -135,6 +144,8 @@ static BOOL header_name(const char *name);
 static BOOL header_value(const char *value);
 static int method_index(NSString *method);
 static void remote_free(ZwkPage *s);
+static void find_gate_close(ZwkFindGate *g);
+static void find_terminal(ZwkPage *s,BOOL found,NSUInteger count);
 
 static BOOL live(ZwkPage *s) { return !s->closed && !s->recovering && s->owner; }
 static ZwkPage *page_of(ZwkState *s) { return (__bridge ZwkPage *)(void *)s; }
@@ -637,6 +648,15 @@ static void *history_context=&history_context;
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)value { (void)webView; [self finish:value error:nil]; }
 - (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)value withError:(NSError *)error { (void)webView; [self finish:value error:error]; }
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)value withError:(NSError *)error { (void)webView; [self finish:value error:error]; }
+/* _WKFindDelegate: the answer to the search in progress. */
+- (void)_webView:(WKWebView *)webView didFindMatches:(NSUInteger)matches forString:(NSString *)string withMatchIndex:(NSInteger)index {
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep; (void)webView; (void)string; (void)index;
+    find_terminal(self,YES,matches);
+}
+- (void)_webView:(WKWebView *)webView didFailToFindString:(NSString *)string {
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep; (void)webView; (void)string;
+    find_terminal(self,NO,0);
+}
 - (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
     ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep; (void)webView;
     failed=YES; committed=NO;
@@ -1324,8 +1344,10 @@ void zwk_close(ZwkState *state) {
             if (!s->waiting_remote) [rule_store() removeContentRuleListForIdentifier:s->remote_identifier completionHandler:^(NSError *removed) { (void)removed; }];
             s->waiting_remote=NO; s->remote_identifier=nil;
         }
+        if (s->find) find_gate_close(s->find);
         ZwkWebView *view=s->view; s->view=nil;
         if (view) {
+            if ([view respondsToSelector:@selector(_setFindDelegate:)]) [view _setFindDelegate:nil];
             if (s->observing) {
                 [view removeObserver:s forKeyPath:@"title" context:title_context];
                 if (engine_has(view,@selector(_isPlayingAudio))) [view removeObserver:s forKeyPath:@"_isPlayingAudio" context:audio_context];
@@ -1668,18 +1690,246 @@ void zwk_initializer_budget_unref(void *budget) { (void)budget; }
 _Bool zwk_initializer_budget_reserve(void *budget,size_t bytes) { (void)budget; (void)bytes; return 0; }
 void zwk_initializer_budget_release(void *budget,size_t bytes) { (void)budget; (void)bytes; }
 
-ZwkFindBudget *zwk_find_budget_new(uint32_t limit) { (void)limit; return NULL; }
-int zwk_find_budget_limit(ZwkFindBudget *budget,uint32_t limit) { (void)budget; (void)limit; return ZWK_INVALID; }
-void zwk_find_budget_close(ZwkFindBudget *budget) { (void)budget; }
-void zwk_find_budget_release(ZwkFindBudget *budget) { (void)budget; }
-int zwk_find_prepare(ZwkState *s,ZwkFindBudget *budget,ZwkFindNotify callback,const char *text,size_t length,uint32_t flags,ZwkFindCommand **out) {
-    (void)s; (void)budget; (void)callback; (void)text; (void)length; (void)flags; *out=NULL; return ZWK_INVALID;
+/* Text search, as the Linux backend's find controller keeps it: a budget the
+ * View owns bounds the pages searching and their commands; each page has one
+ * gate, which holds the search in progress and the command the engine has
+ * not answered yet. Every record is counted, for the leak checks. */
+enum { FIND_LIMIT=8u, FIND_TERM_BYTES=4096u };
+enum { FIND_START, FIND_NEXT, FIND_PREVIOUS };
+/* _WKFindOptions */
+enum { FIND_CASE_INSENSITIVE=1u<<0, FIND_BACKWARDS=1u<<3, FIND_WRAP_AROUND=1u<<4, FIND_INDICATOR=1u<<6, FIND_HIGHLIGHT=1u<<7 };
+struct ZwkFindBudget {
+    ZwkFindGate *gates;
+    unsigned refs, limit, gate_count, command_count;
+    size_t bytes;
+    BOOL closed;
+};
+struct ZwkFindGate {
+    ZwkFindGate *next;
+    ZwkFindBudget *budget;
+    void *page; /* Borrowed while the page holds this gate. */
+    ZwkFindNotify notify;
+    ZwkFindCommand *pending;
+    ZwkFindSnapshot snapshot;
+    uint64_t token;
+    unsigned refs;
+    BOOL closed, finish_requested;
+    char *term;
+    uint32_t flags;
+};
+struct ZwkFindCommand {
+    ZwkFindGate *gate;
+    void *page; /* A Core Foundation reference of its own. */
+    ZwkFindBudget *budget;
+    uint64_t token;
+    size_t bytes;
+    uint32_t flags;
+    unsigned refs, kind;
+    BOOL cancelled;
+    /* A start owns its UTF-8 term directly after this record. */
+};
+static atomic_uint find_budgets, find_gates, find_commands;
+static atomic_size_t find_bytes, find_peak;
+static void find_account(ZwkFindBudget *b,size_t bytes) {
+    b->bytes+=bytes;
+    const size_t current=atomic_fetch_add(&find_bytes,bytes)+bytes;
+    size_t peak=atomic_load(&find_peak);
+    while (peak<current && !atomic_compare_exchange_weak(&find_peak,&peak,current)) { }
 }
-int zwk_find_commit(ZwkFindCommand *command,uint64_t token) { (void)command; (void)token; return ZWK_INVALID; }
-void zwk_find_abort(ZwkFindCommand *command) { (void)command; }
-int zwk_find_action(ZwkState *s,int action,ZwkFindSnapshot *snapshot) { (void)s; (void)action; (void)snapshot; return ZWK_INVALID; }
-void zwk_find_cancel(ZwkState *s,uint64_t token) { (void)s; (void)token; }
-void zwk_find_counts(uint32_t *a,uint32_t *b,uint32_t *c,size_t *d,size_t *e) { *a=0; *b=0; *c=0; *d=0; *e=0; }
+static void find_credit(ZwkFindBudget *b,size_t bytes) { b->bytes-=bytes; atomic_fetch_sub(&find_bytes,bytes); }
+static void find_budget_ref(ZwkFindBudget *b) { ++b->refs; }
+void zwk_find_budget_release(ZwkFindBudget *b) {
+    if (--b->refs) return;
+    free(b);
+    atomic_fetch_sub(&find_budgets,1); atomic_fetch_sub(&find_bytes,sizeof(*b));
+}
+ZwkFindBudget *zwk_find_budget_new(uint32_t limit) {
+    if (!limit || limit>FIND_LIMIT) return NULL;
+    ZwkFindBudget *b=calloc(1,sizeof(*b));
+    if (!b) return NULL;
+    b->refs=1; b->limit=limit;
+    atomic_fetch_add(&find_budgets,1); find_account(b,sizeof(*b));
+    return b;
+}
+int zwk_find_budget_limit(ZwkFindBudget *b,uint32_t limit) {
+    if (!b || !limit || limit>FIND_LIMIT) return ZWK_INVALID;
+    if (b->closed) return ZWK_CLOSED;
+    b->limit=limit; return ZWK_OK;
+}
+static void find_gate_ref(ZwkFindGate *g) { ++g->refs; }
+static void find_gate_unref(ZwkFindGate *g) {
+    if (--g->refs) return;
+    ZwkFindBudget *b=g->budget;
+    for (ZwkFindGate **link=&b->gates;*link;link=&(*link)->next) if (*link==g) { *link=g->next; break; }
+    free(g->term); free(g);
+    --b->gate_count; find_credit(b,sizeof(*g));
+    atomic_fetch_sub(&find_gates,1);
+    zwk_find_budget_release(b);
+}
+static void find_command_unref(ZwkFindCommand *command) {
+    if (--command->refs) return;
+    ZwkFindBudget *b=command->budget; ZwkFindGate *g=command->gate; void *page=command->page;
+    const size_t bytes=command->bytes;
+    free(command);
+    --b->command_count; find_credit(b,bytes);
+    atomic_fetch_sub(&find_commands,1);
+    find_gate_unref(g); CFRelease(page); zwk_find_budget_release(b);
+}
+static void find_gate_close(ZwkFindGate *g) {
+    if (g->closed) return;
+    find_gate_ref(g);
+    g->closed=YES; g->notify=NULL;
+    ZwkPage *s=(__bridge ZwkPage *)g->page; g->page=NULL;
+    const BOOL owned=s && s->find==g;
+    if (owned) s->find=NULL;
+    const BOOL stop=g->token && !g->finish_requested;
+    g->token=0; g->finish_requested=YES;
+    ZwkFindCommand *command=g->pending; g->pending=NULL;
+    if (command) { command->cancelled=YES; find_command_unref(command); }
+    if (stop && s && s->view && [s->view respondsToSelector:@selector(_hideFindUI)]) [s->view _hideFindUI];
+    if (owned) find_gate_unref(g);
+    find_gate_unref(g);
+}
+/* The engine's answer to the command in progress. */
+static void find_terminal(ZwkPage *s,BOOL found,NSUInteger count) {
+    ZwkFindGate *g=s->find;
+    if (!g || g->closed || !g->pending) return;
+    find_gate_ref(g);
+    ZwkFindCommand *command=g->pending; g->pending=NULL;
+    ZwkFindSnapshot snapshot={0,0,0}; int status=0;
+    if (command->kind==FIND_START) {
+        if (found && count>INT32_MAX) status=1;
+        else { snapshot.known=1; snapshot.matches=found?(int32_t)count:0; }
+    }
+    g->snapshot=snapshot;
+    if (!command->cancelled && !g->budget->closed && live(s) && g->page==(__bridge void *)s && g->token==command->token && g->notify)
+        g->notify(s->owner,command->token,command->kind==FIND_START?0:1,status,&snapshot);
+    find_command_unref(command); find_gate_unref(g);
+}
+static int find_document_status(ZwkPage *s,ZwkFindGate *g) {
+    if (!live(s) || !s->view || (g && (g->closed || g->budget->closed || s->find!=g))) return ZWK_CLOSED;
+    return document(s)?ZWK_OK:ZWK_NOT_READY;
+}
+void zwk_find_budget_close(ZwkFindBudget *b) {
+    find_budget_ref(b); b->closed=YES;
+    ZwkFindGate *gates[FIND_LIMIT]; unsigned count=0;
+    for (ZwkFindGate *g=b->gates;g && count<FIND_LIMIT;g=g->next) { find_gate_ref(g); gates[count++]=g; }
+    for (unsigned i=0;i<count;++i) { find_gate_close(gates[i]); find_gate_unref(gates[i]); }
+    zwk_find_budget_release(b);
+}
+static int find_gate_get(ZwkPage *s,ZwkFindBudget *b,ZwkFindNotify notify,ZwkFindGate **out) {
+    if (s->find) {
+        ZwkFindGate *g=s->find;
+        if (g->budget!=b || g->notify!=notify) return ZWK_INVALID;
+        if (g->closed) return ZWK_CLOSED;
+        find_gate_ref(g); *out=g; return ZWK_OK;
+    }
+    if (![s->view respondsToSelector:@selector(_findString:options:maxCount:)] || ![s->view respondsToSelector:@selector(_setFindDelegate:)]) return ZWK_NATIVE_FAILED;
+    if (b->gate_count>=b->limit) return ZWK_FULL;
+    ZwkFindGate *g=calloc(1,sizeof(*g));
+    if (!g) return ZWK_OOM;
+    ++b->gate_count; find_budget_ref(b);
+    g->budget=b; g->refs=2; /* The page's, and the caller's. */
+    g->next=b->gates; b->gates=g;
+    atomic_fetch_add(&find_gates,1); find_account(b,sizeof(*g));
+    g->page=(__bridge void *)s; g->notify=notify; s->find=g;
+    [s->view _setFindDelegate:s];
+    *out=g; return ZWK_OK;
+}
+static int find_command_new(ZwkPage *s,ZwkFindGate *g,const char *term,size_t length,uint32_t flags,unsigned kind,ZwkFindCommand **out) {
+    ZwkFindBudget *b=g->budget;
+    if (g->closed || b->closed || !live(s) || s->find!=g) return ZWK_CLOSED;
+    if (g->pending || b->command_count>=b->limit) return ZWK_FULL;
+    const size_t bytes=sizeof(ZwkFindCommand)+(kind==FIND_START?length+1:0);
+    ZwkFindCommand *command=calloc(1,bytes);
+    if (!command) return ZWK_OOM;
+    ++b->command_count; find_budget_ref(b); find_gate_ref(g);
+    command->gate=g; command->page=(void *)CFBridgingRetain(s); command->budget=b; command->refs=1; command->bytes=bytes; command->flags=flags; command->kind=kind;
+    if (kind==FIND_START) memcpy(command+1,term,length);
+    atomic_fetch_add(&find_commands,1); find_account(b,bytes);
+    *out=command; return ZWK_OK;
+}
+static BOOL find_utf8(const char *text,size_t length) {
+    NSString *value=[[NSString alloc] initWithBytes:text length:length encoding:NSUTF8StringEncoding];
+    return value!=nil;
+}
+int zwk_find_prepare(ZwkState *state,ZwkFindBudget *b,ZwkFindNotify notify,const char *term,size_t length,uint32_t flags,ZwkFindCommand **out) {
+    if (!state || !b || !out || !notify) return ZWK_INVALID;
+    *out=NULL;
+    ZwkPage *s=page_of(state);
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=s; (void)keep;
+    if (!live(s) || b->closed) return ZWK_CLOSED;
+    if (!term || !length || length>FIND_TERM_BYTES || memchr(term,0,length) || !find_utf8(term,length) || (flags&~7u) || (flags&2u) || !(flags&4u)) return ZWK_INVALID;
+    int status=find_document_status(s,NULL);
+    ZwkFindGate *g=NULL;
+    if (status==ZWK_OK) status=find_gate_get(s,b,notify,&g);
+    if (status==ZWK_OK) { status=find_command_new(s,g,term,length,flags,FIND_START,out); find_gate_unref(g); }
+    return status;
+}
+void zwk_find_abort(ZwkFindCommand *command) { find_command_unref(command); }
+int zwk_find_commit(ZwkFindCommand *command,uint64_t token) {
+    ZwkFindGate *g=command->gate;
+    ZwkPage *s=(__bridge ZwkPage *)command->page;
+    int status=ZWK_OK;
+    if (!token) status=ZWK_INVALID;
+    else if (g->closed || command->budget->closed || !live(s) || s->find!=g) status=ZWK_CLOSED;
+    else status=find_document_status(s,g);
+    if (status==ZWK_OK && g->pending) status=ZWK_FULL;
+    if (status==ZWK_OK && command->kind!=FIND_START && g->token!=token) status=ZWK_NOT_READY;
+    if (status==ZWK_OK && command->kind==FIND_START) {
+        char *term=strdup((const char *)(command+1));
+        if (!term) status=ZWK_OOM;
+        else { free(g->term); g->term=term; g->flags=command->flags; }
+    }
+    if (status!=ZWK_OK) { find_command_unref(command); return status; }
+    command->token=token; g->pending=command; g->snapshot=(ZwkFindSnapshot){0,0,0};
+    if (command->kind==FIND_START) { g->token=token; g->finish_requested=NO; }
+    @autoreleasepool {
+        NSUInteger options=FIND_WRAP_AROUND|FIND_INDICATOR|FIND_HIGHLIGHT;
+        if (!(g->flags&1u)) options|=FIND_CASE_INSENSITIVE;
+        if (command->kind==FIND_PREVIOUS) options|=FIND_BACKWARDS;
+        NSString *text=[NSString stringWithUTF8String:g->term];
+        [s->view _findString:text options:options maxCount:INT32_MAX];
+    }
+    return ZWK_OK;
+}
+int zwk_find_action(ZwkState *state,int action,ZwkFindSnapshot *out) {
+    if (!state || action<0 || action>2) return ZWK_INVALID;
+    ZwkPage *s=page_of(state);
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=s; (void)keep;
+    if (!live(s)) return ZWK_CLOSED;
+    ZwkFindGate *g=s->find;
+    if (!g || g->closed || !g->token) return ZWK_NOT_READY;
+    find_gate_ref(g);
+    const uint64_t token=g->token;
+    int status=find_document_status(s,g);
+    if (status==ZWK_OK && g->token!=token) status=ZWK_NOT_READY;
+    if (status==ZWK_OK && action==0) {
+        if (!out) status=ZWK_INVALID; else *out=g->snapshot;
+    } else if (status==ZWK_OK) {
+        ZwkFindCommand *command=NULL;
+        status=find_command_new(s,g,NULL,0,0,action==1?FIND_NEXT:FIND_PREVIOUS,&command);
+        if (status==ZWK_OK) status=zwk_find_commit(command,token);
+    }
+    find_gate_unref(g);
+    return status;
+}
+void zwk_find_cancel(ZwkState *state,uint64_t token) {
+    ZwkPage *s=page_of(state);
+    ZwkFindGate *g=s->find;
+    if (!g || g->closed || g->token!=token || !token) return;
+    g->token=0; g->snapshot=(ZwkFindSnapshot){0,0,0};
+    if (g->pending && g->pending->token==token) g->pending->cancelled=YES;
+    const BOOL stop=!g->finish_requested; g->finish_requested=YES;
+    if (stop && s->view && [s->view respondsToSelector:@selector(_hideFindUI)]) [s->view _hideFindUI];
+}
+void zwk_find_counts(uint32_t *budgets,uint32_t *gates,uint32_t *commands,size_t *bytes,size_t *peak) {
+    if (budgets) *budgets=atomic_load(&find_budgets);
+    if (gates) *gates=atomic_load(&find_gates);
+    if (commands) *commands=atomic_load(&find_commands);
+    if (bytes) *bytes=atomic_load(&find_bytes);
+    if (peak) *peak=atomic_load(&find_peak);
+}
 
 ZwkCaptureBudget *zwk_capture_budget_new(uint32_t pending,uint32_t bytes,ZwkCaptureNotify callback) { (void)pending; (void)bytes; (void)callback; return NULL; }
 int zwk_capture_budget_limit(ZwkCaptureBudget *budget,uint32_t pending,uint32_t bytes) { (void)budget; (void)pending; (void)bytes; return ZWK_CAPTURE_INVALID; }

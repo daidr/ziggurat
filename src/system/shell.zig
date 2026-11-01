@@ -3,7 +3,9 @@ const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const win = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 const NativeShellFailure = extern struct { domain: u32 = 0, code: u32 = 0 };
-const gio = if (builtin.os.tag == .linux) struct {
+/// GIO on Linux; macOS implements the same entry points with NSWorkspace
+/// and NSFileManager (src/system/macos_services.m).
+const gio = if (builtin.os.tag == .linux or builtin.os.tag == .macos) struct {
     extern fn zsh_open_uri(uri: [*:0]const u8, failure: *NativeShellFailure) c_int;
     extern fn zsh_open_path(path: [*:0]const u8, failure: *NativeShellFailure) c_int;
     extern fn zsh_reveal(path: [*:0]const u8, timeout_ms: c_int, failure: *NativeShellFailure) c_int;
@@ -36,8 +38,10 @@ pub const LaunchOptions = struct {
 pub const Term = union(enum) { Exited: u32, Signal: u32, Stopped: u32, Unknown: u32 };
 /// win32: GetLastError. hresult: COM/Shell HRESULT. shell_file_operation:
 /// SHFileOperationW's own return code (not a Win32 error). gio/dbus/glib:
-/// GError code in G_IO_ERROR, G_DBUS_ERROR or another GLib domain.
-pub const NativeFailure = struct { domain: enum { win32, hresult, shell_file_operation, gio, dbus, glib }, code: u32 };
+/// GError code in G_IO_ERROR, G_DBUS_ERROR or another GLib domain. cocoa:
+/// NSError code (NSCocoaErrorDomain or NSPOSIXErrorDomain). osstatus: macOS
+/// OSStatus, such as a Launch Services error.
+pub const NativeFailure = struct { domain: enum { win32, hresult, shell_file_operation, gio, dbus, glib, cocoa, osstatus }, code: u32 };
 pub const max_url_bytes = 8 * 1024;
 pub const max_extra_schemes = 32;
 pub const max_reveal_timeout_ms = 60_000;
@@ -72,21 +76,23 @@ pub const FileIcon = struct {
     /// icon transparency was composited against IconOptions.background.
     pixels: []const u8,
 };
+const posix_shell = builtin.os.tag == .linux or builtin.os.tag == .macos;
 pub const capabilities = .{
-    .launch_executable = builtin.os.tag == .windows or builtin.os.tag == .linux,
-    .open_url = builtin.os.tag == .windows or builtin.os.tag == .linux,
-    .open_path = builtin.os.tag == .windows or builtin.os.tag == .linux,
-    .reveal = builtin.os.tag == .windows or builtin.os.tag == .linux,
-    .trash = builtin.os.tag == .windows or builtin.os.tag == .linux,
+    .launch_executable = builtin.os.tag == .windows or posix_shell,
+    .open_url = builtin.os.tag == .windows or posix_shell,
+    .open_path = builtin.os.tag == .windows or posix_shell,
+    .reveal = builtin.os.tag == .windows or posix_shell,
+    .trash = builtin.os.tag == .windows or posix_shell,
     .file_icon = builtin.os.tag == .windows,
-    .installed_applications = builtin.os.tag == .windows or builtin.os.tag == .linux,
-    .launch_application = builtin.os.tag == .windows or builtin.os.tag == .linux,
+    .installed_applications = builtin.os.tag == .windows or posix_shell,
+    .launch_application = builtin.os.tag == .windows or posix_shell,
 };
 
 /// An application as a launcher lists it. `id` is the AppUserModelID (or a
-/// known-folder path for a desktop app without one) on Windows and the
-/// desktop file ID on Linux; `path` is `shell:AppsFolder\<id>` on Windows and
-/// the desktop entry on Linux, which `launchApp` starts.
+/// known-folder path for a desktop app without one) on Windows, the desktop
+/// file ID on Linux and the bundle identifier (or the bundle path without
+/// one) on macOS; `path` is `shell:AppsFolder\<id>` on Windows, the desktop
+/// entry on Linux and the .app bundle on macOS, which `launchApp` starts.
 pub const InstalledApp = struct { name: []const u8, id: []const u8, path: []const u8 };
 /// Owns the strings of every listed app.
 pub const InstalledApps = struct {
@@ -211,7 +217,7 @@ pub const Worker = struct {
             try self.ensureApartment();
             if (options.cancellation) |cancel| try cancel.check();
             return self.shellExecute(target.ptr);
-        } else if (builtin.os.tag == .linux) {
+        } else if (posix_shell) {
             var storage: [max_url_bytes + 1]u8 = undefined;
             const target = narrowZ(&storage, url);
             if (options.cancellation) |cancel| try cancel.check();
@@ -234,7 +240,7 @@ pub const Worker = struct {
             try self.ensureApartment();
             if (options.cancellation) |cancel| try cancel.check();
             return self.shellExecute(target.ptr);
-        } else if (builtin.os.tag == .linux) {
+        } else if (posix_shell) {
             var storage: [max_argument_bytes + 1]u8 = undefined;
             const target = narrowZ(&storage, path);
             try requireExisting(target);
@@ -246,7 +252,8 @@ pub const Worker = struct {
     /// Shows an existing absolute item selected in the system file manager.
     /// Linux asks org.freedesktop.FileManager1.ShowItems on the session bus and
     /// returns FileManagerUnavailable when no bus or provider answers; there is
-    /// no fallback to opening the parent directory.
+    /// no fallback to opening the parent directory. macOS asks Finder, which
+    /// does not reply, so RevealOptions.timeout_ms is not used there.
     pub fn reveal(self: *Worker, path: []const u8, options: RevealOptions) !void {
         try self.require();
         if (options.cancellation) |cancel| try cancel.check();
@@ -271,7 +278,7 @@ pub const Worker = struct {
                 self.last_failure = .{ .domain = .hresult, .code = @bitCast(shown) };
                 return error.RevealFailed;
             }
-        } else if (builtin.os.tag == .linux) {
+        } else if (posix_shell) {
             var storage: [max_argument_bytes + 1]u8 = undefined;
             const target = narrowZ(&storage, path);
             try requireExisting(target);
@@ -321,7 +328,7 @@ pub const Worker = struct {
                 return error.TrashFailed;
             }
             if (operation.fAnyOperationsAborted != 0) return error.TrashAborted;
-        } else if (builtin.os.tag == .linux) {
+        } else if (posix_shell) {
             var storage: [max_argument_bytes + 1]u8 = undefined;
             const target = narrowZ(&storage, path);
             if (options.cancellation) |cancel| try cancel.check();
@@ -338,8 +345,11 @@ pub const Worker = struct {
         } else return error.UnsupportedCapability;
     }
     /// Lists installed applications, sorted by name: the Start menu's All
-    /// apps (packaged and desktop apps alike) on Windows, and the desktop
-    /// entries menus show on Linux. Reads the disk; owned by the caller.
+    /// apps (packaged and desktop apps alike) on Windows, the desktop
+    /// entries menus show on Linux, and on macOS the .app bundles in
+    /// /Applications, /System/Applications, ~/Applications and CoreServices'
+    /// Applications (and one folder level below them) plus Finder. Reads the
+    /// disk; owned by the caller.
     pub fn installedApps(self: *Worker, allocator: std.mem.Allocator) !InstalledApps {
         try self.require();
         var result: InstalledApps = .{ .arena = .init(allocator), .items = &.{} };
@@ -349,7 +359,7 @@ pub const Worker = struct {
         if (builtin.os.tag == .windows) {
             try self.ensureApartment();
             try appsFolder(self, arena, &list);
-        } else if (builtin.os.tag == .linux) {
+        } else if (posix_shell) {
             var collector: AppCollector = .{ .allocator = arena, .list = &list };
             if (gio.zsh_apps(AppCollector.visit, &collector) != 0) return collector.failure orelse error.OutOfMemory;
         } else return error.UnsupportedCapability;
@@ -369,7 +379,7 @@ pub const Worker = struct {
             const target = try wideZ(&storage, path);
             try self.ensureApartment();
             return self.shellExecute(target.ptr);
-        } else if (builtin.os.tag == .linux) {
+        } else if (posix_shell) {
             if (!absolute(path)) return error.AbsolutePathRequired;
             var storage: [max_argument_bytes + 1]u8 = undefined;
             const target = narrowZ(&storage, path);
@@ -418,6 +428,8 @@ pub const Worker = struct {
             1 => .{ .domain = .gio, .code = failure.code },
             2 => .{ .domain = .dbus, .code = failure.code },
             3 => .{ .domain = .glib, .code = failure.code },
+            4 => .{ .domain = .cocoa, .code = failure.code },
+            5 => .{ .domain = .osstatus, .code = failure.code },
             else => null,
         };
     }
@@ -445,7 +457,7 @@ pub const Worker = struct {
             }
             _ = win.CloseHandle(info.hThread);
             return .{ .thread = self.thread, .native = info.hProcess };
-        } else if (builtin.os.tag == .linux) {
+        } else if (posix_shell) {
             var argv: [max_arguments + 1][]const u8 = undefined;
             argv[0] = options.executable;
             @memcpy(argv[1..][0..options.arguments.len], options.arguments);
@@ -460,7 +472,7 @@ pub const Worker = struct {
 /// terminateAndWait close/reap exactly once; later calls return the saved term.
 pub const Child = struct {
     thread: std.Thread.Id,
-    native: if (builtin.os.tag == .windows) win.HANDLE else if (builtin.os.tag == .linux) std.process.Child else void,
+    native: if (builtin.os.tag == .windows) win.HANDLE else if (posix_shell) std.process.Child else void,
     term: ?Term = null,
     last_failure: ?NativeFailure = null,
     fn require(self: *Child) !void {
@@ -482,7 +494,7 @@ pub const Child = struct {
             _ = win.CloseHandle(self.native);
             self.native = null;
             self.term = .{ .Exited = code };
-        } else if (builtin.os.tag == .linux) self.term = switch (try self.native.wait(zio.io())) {
+        } else if (posix_shell) self.term = switch (try self.native.wait(zio.io())) {
             .exited => |code| .{ .Exited = code },
             .signal => |signal| .{ .Signal = @backingInt(signal) },
             .stopped => |signal| .{ .Stopped = @backingInt(signal) },
@@ -501,7 +513,7 @@ pub const Child = struct {
                     return error.ProcessTerminationFailed;
                 }
             }
-        } else if (builtin.os.tag == .linux) {
+        } else if (posix_shell) {
             std.posix.kill(self.native.id.?, .KILL) catch |err| switch (err) {
                 error.ProcessNotFound => {},
                 else => return err,

@@ -49,6 +49,22 @@ if (self.tab == .docs) try self.docs.show(v, .{ .grow = 1 }) else try self.chang
 
 每一帧结束、所有叶子的位置确定后，`after_frame` 钩子比较每个页面想要的视口与已经应用的视口；有变化时投递一个主线程任务，在绘制之外更新原生区域的位置、大小和可见性。没有变化的帧不做任何事，也没有计时器或轮询。更新失败记录在 `WebViews.last_error`，可用 `takeError()` 取出。
 
+## 滚动外面的原生 UI
+
+阅读类界面常把文档放在原生滚动容器里：文章夹在原生的标题与评论之间、邮件串里的一封邮件、原生卡片中渲染好的笔记。此时页面与内容一样高，自己没有可滚的东西，滚轮在页面上应当滚动外面的容器，就像在周围的原生元素上一样。`web.Options.scroll_to_container = true` 做到这一点：页面上的滚轮和触摸板滚动交给指针下的原生 UI（鼠标滚轮按行、触摸板按距离，方向与修饰键不变），页面本身永不随之滚动，但仍接收按下、键盘与选择。默认关闭，页面自己接收滚轮，适合会自行滚动的页面（文档站点、浏览器标签页、编辑器）。
+
+```zig
+try web_views.add(&article, &page, .{ .html = html, .scroll_to_container = true });
+// 构建时：
+try v.scroll(&list, .{ .grow = 1 });
+try v.text("标题", .{});
+try article.show(v, .{ .height = article_height }); // 页面告诉应用的高度
+try v.text("评论", .{});
+try v.end();
+```
+
+Linux 上 WebKitGTK 部件的滚动事件在 WebKitGTK 处理之前转给窗口的绘制区域（屏幕上同一点），组合层再把该区域上的滚轮交给背景（`Region.passWheel`），即 Host 的原生 UI。Windows 与 macOS 暂未实现，页面仍自己接收滚轮。
+
 ## 限制
 
 页面是窗口内的原生矩形子窗口（Windows 为 WebView2 controller，Linux 为 WebKitGTK widget），位于 Host 绘制的背景之上：
@@ -60,4 +76,4 @@ if (self.tab == .docs) try self.docs.show(v, .{ .grow = 1 }) else try self.chang
 
 ## 验证
 
-`zig build smoke-embedded-webview -Dwebview=true` 在真实窗口中检查：页面区域与叶子 bounds 一致，不构建时隐藏，再次构建时以同一个 PageId 显示，退出时原生资源与分配归零。Linux 在 Xvfb 下运行，Windows 在 CI 的 WebView 任务中运行。
+`zig build smoke-embedded-webview -Dwebview=true` 在真实窗口中检查：页面区域与叶子 bounds 一致，不构建时隐藏，再次构建时以同一个 PageId 显示，退出时原生资源与分配归零。Linux 在 Xvfb 下运行，Windows 在 CI 的 WebView 任务中运行。`zig build smoke-webview-scroll-linux -Dwebview=true` 把带 `scroll_to_container` 的页面放进原生滚动容器，经 GTK 事件路径向页面发送触摸板滚动，确认滚动的是外面的容器。

@@ -19,6 +19,7 @@ pub fn add(b: *std.Build, owner: *std.Build.Module, name: []const u8, path: []co
 pub fn addArchive(b: *std.Build, owner: *std.Build.Module, name: []const u8, path: []const u8, flags: []const []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     const native = b.addLibrary(.{ .name = name, .linkage = .static, .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }) });
     native.root_module.addCSourceFile(.{ .file = b.path(path), .flags = flags });
+    if (target.result.os.tag == .macos) appleSdk(b, native.root_module);
     owner.linkLibrary(native);
     return native.root_module;
 }

@@ -1672,6 +1672,16 @@ pub const Context = struct {
         if (next) |id| try self.focusControl(id) else try self.blurControls();
         if (self.live(window)) window.invalidate();
     }
+    /// Perform `action` on the registered text field it names, as an
+    /// assistive technology request does. False when no registered text
+    /// field of the attached window has that id.
+    pub fn performTextFieldAction(self: *Context, action: accessibility.Action) bool {
+        const window = self.window orelse return false;
+        const scope = self.callbackScope(window) orelse return false;
+        defer scope.end();
+        if (self.input_state.fields == null) return false;
+        return self.textFieldAction(window, action);
+    }
     noinline fn textFieldAction(self: *Context, window: z.Window, action: accessibility.Action) bool {
         const id: u64 = switch (action) {
             .set_value => |value| value.id,

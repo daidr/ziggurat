@@ -120,8 +120,17 @@ static void emit_edit(NativeWindow *s,int key,uint32_t flags){NativeEvent event=
 - (BOOL)canBecomeMainWindow{return self.takesKeyboard;}
 @end
 
+/* What the content's accessibility answers for the view. */
+@protocol ZigViewAccessibility <NSObject>
+- (NSArray *)zigAccessibilityChildren;
+- (id)zigAccessibilityHitTest:(NSPoint)point;
+- (id)zigAccessibilityFocusedElement;
+@end
 @interface ZigView : NSView <NSTextInputClient>{
 @public NativeWindow *native;
+    /* The content's semantic tree as accessibility elements, which
+       src/ui/accessibility_macos.m sets (retained). */
+    id<ZigViewAccessibility> zigAccessibility;
 }
 @end
 @interface ZigDelegate : NSObject <NSWindowDelegate>{
@@ -147,6 +156,23 @@ static int edit_for_selector(SEL selector,uint32_t *flags){
 }
 
 @implementation ZigView
+- (void)dealloc{[zigAccessibility release];[super dealloc];}
+- (void)setZigAccessibility:(id<ZigViewAccessibility>)provider{[provider retain];[zigAccessibility release];zigAccessibility=provider;}
+/* The view contains the elements of the content's semantic tree. */
+- (NSArray *)accessibilityChildren{
+    if(!zigAccessibility)return [super accessibilityChildren];
+    NSArray *elements=[zigAccessibility zigAccessibilityChildren];
+    NSArray *views=[super accessibilityChildren];
+    return views.count?[views arrayByAddingObjectsFromArray:elements]:elements;
+}
+- (id)accessibilityHitTest:(NSPoint)point{
+    id found=zigAccessibility?[zigAccessibility zigAccessibilityHitTest:point]:nil;
+    return found?found:[super accessibilityHitTest:point];
+}
+- (id)accessibilityFocusedUIElement{
+    id found=zigAccessibility?[zigAccessibility zigAccessibilityFocusedElement]:nil;
+    return found?found:[super accessibilityFocusedUIElement];
+}
 - (BOOL)isFlipped{return YES;}
 - (BOOL)acceptsFirstResponder{return YES;}
 - (BOOL)acceptsFirstMouse:(NSEvent *)event{(void)event;return YES;}
@@ -457,6 +483,32 @@ int zlm_window_interaction(NativeWindow *s,int edge){
     s->gesture=nil;return s->destroyed?2:started==2?4:0;
 }
 void zlm_window_text_mode(NativeWindow *s,int keyboard){zlm_window_cancel_composition(s);s->keyboard=keyboard;}
+
+/* The content view drawn into a bitmap of its backing pixels, as the
+   window shows it: premultiplied RGBA rows from the top. Returns the
+   retained bitmap, which zlm_capture_free releases, or NULL. */
+void *zlm_window_capture(NativeWindow *s,int *width,int *height,int *stride,const unsigned char **pixels){
+    if(s->destroyed)return NULL;
+    NSBitmapImageRep *bitmap=nil;
+    @autoreleasepool{
+        NSRect bounds=[s->view bounds];
+        CGFloat scale=[s->window backingScaleFactor];if(scale<1)scale=1;
+        NSInteger w=(NSInteger)lround(bounds.size.width*scale),h=(NSInteger)lround(bounds.size.height*scale);
+        if(w<=0||h<=0)return NULL;
+        bitmap=[[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:w pixelsHigh:h bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bitmapFormat:0 bytesPerRow:0 bitsPerPixel:32];
+        if(!bitmap)return NULL;
+        /* In sRGB, the space the content draws in, so colors come back as
+           they were drawn. */
+        NSBitmapImageRep *tagged=[bitmap bitmapImageRepByRetaggingWithColorSpace:[NSColorSpace sRGBColorSpace]];
+        if(tagged&&tagged!=bitmap){[tagged retain];[bitmap release];bitmap=tagged;}
+        /* Points to pixels, so the view draws at the backing scale. */
+        [bitmap setSize:bounds.size];
+        [s->view cacheDisplayInRect:bounds toBitmapImageRep:bitmap];
+        *width=(int)[bitmap pixelsWide];*height=(int)[bitmap pixelsHigh];*stride=(int)[bitmap bytesPerRow];*pixels=[bitmap bitmapData];
+    }
+    return bitmap;
+}
+void zlm_capture_free(void *bitmap){[(NSBitmapImageRep *)bitmap release];}
 
 /* Test hooks: drive a window as AppKit would, without a user at the screen. */
 uint32_t zlm_resource_count(void){return atomic_load(&live_windows);}

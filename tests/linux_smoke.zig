@@ -22,6 +22,9 @@ const Probe = struct {
     closed: usize = 0,
     calls: usize = 0,
     close_in_draw: bool = false,
+    hide_in_draw: bool = false,
+    hide_show_in_draw: bool = false,
+    visible_in_draw: ?bool = null,
     close_in_text: bool = false,
     commits: usize = 0,
     timer_fired: bool = false,
@@ -34,6 +37,13 @@ const Probe = struct {
         if (self.close_in_draw) {
             std.debug.assert((self.window.destroy() catch unreachable) == .deferred);
             std.debug.assert(self.content.window != null);
+        }
+        if (self.hide_in_draw or self.hide_show_in_draw) {
+            self.window.perform(.hide) catch unreachable;
+            if (self.hide_show_in_draw) self.window.show();
+            self.visible_in_draw = (self.window.state() catch unreachable).visible;
+            self.hide_in_draw = false;
+            self.hide_show_in_draw = false;
         }
         frame.label(.{ .x = 8, .y = 8, .width = 280, .height = 40 }, "GTK / 图形 / 日本語 / 한글", 0x123456);
         frame.pushClip(.{ .x = 8, .y = 60, .width = 100, .height = 30 }) catch unreachable;
@@ -134,6 +144,27 @@ pub fn main() !void {
         try std.testing.expectEqual(@as(usize, 0), probe.closed);
         try app.dispatch();
         try std.testing.expectEqual(@as(usize, 1), probe.closed);
+        // The window hides itself as it draws a frame, and shows again; and
+        // hides and shows itself within one frame, staying shown.
+        try probe.attach(app);
+        try probe.window.perform(.show);
+        probe.hide_in_draw = true;
+        zlg_test_paint(probe.native(), 320, 200);
+        try std.testing.expectEqual(@as(?bool, false), probe.visible_in_draw);
+        try app.dispatch();
+        try std.testing.expect(!(try probe.window.state()).visible);
+        probe.window.show();
+        try std.testing.expect((try probe.window.state()).visible);
+        zlg_test_paint(probe.native(), 320, 200);
+        probe.hide_show_in_draw = true;
+        zlg_test_paint(probe.native(), 320, 200);
+        try std.testing.expectEqual(@as(?bool, true), probe.visible_in_draw);
+        try app.dispatch();
+        try std.testing.expect((try probe.window.state()).visible);
+        zlg_test_paint(probe.native(), 320, 200);
+        _ = try probe.window.destroy();
+        try app.dispatch();
+        try std.testing.expectEqual(@as(usize, 2), probe.closed);
         const stale = probe.window;
         try probe.attach(app);
         probe.close_in_draw = true;
