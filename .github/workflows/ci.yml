@@ -321,6 +321,10 @@ jobs:
         timeout-minutes: 10
         run: |
           zig build smoke-macos smoke-file-watch smoke-audio smoke-automation -Doptimize=${{ matrix.optimize }} --summary failures
+      - name: NSAccessibility compile and smoke
+        timeout-minutes: 15
+        run: |
+          zig build check smoke-accessibility-macos -Daccessibility=true -Doptimize=${{ matrix.optimize }} --summary failures
       - name: WKWebView compile and page smokes
         timeout-minutes: 15
         run: |

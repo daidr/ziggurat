@@ -11,7 +11,7 @@ pub fn build(b: *std.Build) void {
     const https_resources_enabled = b.option(bool, "https-resources", "Build the optional HTTPS resource transport on Windows or Linux") orelse false;
     const gpu = b.option(bool, "gpu", "Build the optional D3D11 renderer with GDI fallback") orelse false;
     const webp = b.option(bool, "webp", "Build the optional pinned WebP decoder (fetch source first)") orelse false;
-    const accessibility = b.option(bool, "accessibility", "Build the optional Windows UI Automation bridge") orelse false;
+    const accessibility = b.option(bool, "accessibility", "Build the optional native accessibility bridge (Windows UI Automation, macOS NSAccessibility)") orelse false;
     const check = b.step("check", "Compile selected examples and tests without running them");
     const test_step = b.step("test", "Run invariant tests without opening windows");
     var view_tests: ?*std.Build.Step.Compile = null;
@@ -1516,8 +1516,11 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_ui", .module = ui },
         });
     }
-    if (accessibility) {
-        if (target.result.os.tag != .windows) @panic("UI Automation requires Windows");
+    if (accessibility and target.result.os.tag == .macos) {
+        _ = native_support.addArchive(b, ui, "ui-accessibility-native", "src/ui/accessibility_macos.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native_support.linkFrameworks(b, ui, &.{ "AppKit", "Foundation" });
+    } else if (accessibility) {
+        if (target.result.os.tag != .windows) @panic("UI Automation requires Windows; macOS uses NSAccessibility");
         // An archive member is linked only by programs that reference UIA.
         _ = native_support.addArchive(b, ui, "ui-accessibility-native", "src/ui/accessibility.c", &.{"-std=c11"}, target, optimize);
         ui.linkSystemLibrary("uiautomationcore", .{});
@@ -1540,6 +1543,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_view", .module = declarative_view },
         });
         addSmoke(b, "smoke-macos", "tests/macos_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-accessibility-macos", "tests/macos_accessibility_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
         });

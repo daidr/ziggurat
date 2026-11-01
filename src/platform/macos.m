@@ -106,8 +106,17 @@ static void emit_edit(NativeWindow *s,int key,uint32_t flags){NativeEvent event=
 - (BOOL)canBecomeMainWindow{return self.takesKeyboard;}
 @end
 
+/* What the content's accessibility answers for the view. */
+@protocol ZigViewAccessibility <NSObject>
+- (NSArray *)zigAccessibilityChildren;
+- (id)zigAccessibilityHitTest:(NSPoint)point;
+- (id)zigAccessibilityFocusedElement;
+@end
 @interface ZigView : NSView <NSTextInputClient>{
 @public NativeWindow *native;
+    /* The content's semantic tree as accessibility elements, which
+       src/ui/accessibility_macos.m sets (retained). */
+    id<ZigViewAccessibility> zigAccessibility;
 }
 @end
 @interface ZigDelegate : NSObject <NSWindowDelegate>{
@@ -133,6 +142,23 @@ static int edit_for_selector(SEL selector,uint32_t *flags){
 }
 
 @implementation ZigView
+- (void)dealloc{[zigAccessibility release];[super dealloc];}
+- (void)setZigAccessibility:(id<ZigViewAccessibility>)provider{[provider retain];[zigAccessibility release];zigAccessibility=provider;}
+/* The view contains the elements of the content's semantic tree. */
+- (NSArray *)accessibilityChildren{
+    if(!zigAccessibility)return [super accessibilityChildren];
+    NSArray *elements=[zigAccessibility zigAccessibilityChildren];
+    NSArray *views=[super accessibilityChildren];
+    return views.count?[views arrayByAddingObjectsFromArray:elements]:elements;
+}
+- (id)accessibilityHitTest:(NSPoint)point{
+    id found=zigAccessibility?[zigAccessibility zigAccessibilityHitTest:point]:nil;
+    return found?found:[super accessibilityHitTest:point];
+}
+- (id)accessibilityFocusedUIElement{
+    id found=zigAccessibility?[zigAccessibility zigAccessibilityFocusedElement]:nil;
+    return found?found:[super accessibilityFocusedUIElement];
+}
 - (BOOL)isFlipped{return YES;}
 - (BOOL)acceptsFirstResponder{return YES;}
 - (BOOL)acceptsFirstMouse:(NSEvent *)event{(void)event;return YES;}
