@@ -706,12 +706,15 @@ int zwk_resources_enable(ZwkState *state,ZwkResourceNotify callback,int dynamic,
     return ZWK_OK;
 }
 static ZwkDeferred *resource_take(ZwkPage *s,uint64_t token) {
-    for (ZwkDeferred *slot in s->deferred) if (slot->token==token) {
-        [s->deferred removeObjectIdenticalTo:slot];
+    /* A fast enumeration variable holds no reference: keep one before the
+     * array lets go of the slot. */
+    ZwkDeferred *found=nil;
+    for (ZwkDeferred *slot in s->deferred) if (slot->token==token) { found=slot; break; }
+    if (found) {
+        [s->deferred removeObjectIdenticalTo:found];
         atomic_fetch_sub(&live_resource_requests,1);
-        return slot;
     }
-    return nil;
+    return found;
 }
 void zwk_resource_cancel(ZwkState *state,uint64_t token) {
     ZwkPage *s=page_of(state);
@@ -827,11 +830,11 @@ static BOOL local_serve(ZwkPage *s,WKWebView *webView,id<WKURLSchemeTask> task) 
     (void)webView;
     ZwkPage *s=site_page;
     if (!s) return;
-    for (ZwkDeferred *slot in s->deferred) if (slot->task==task) {
-        [s->deferred removeObjectIdenticalTo:slot];
-        atomic_fetch_sub(&live_resource_requests,1);
-        return;
-    }
+    ZwkDeferred *found=nil;
+    for (ZwkDeferred *slot in s->deferred) if (slot->task==task) { found=slot; break; }
+    if (!found) return;
+    [s->deferred removeObjectIdenticalTo:found];
+    atomic_fetch_sub(&live_resource_requests,1);
 }
 @end
 
