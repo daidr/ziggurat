@@ -22,8 +22,35 @@ pub const Config = struct {
     /// The Windows install folder's name instead of the identity, as
     /// `%LOCALAPPDATA%\Programs\<name>`; see `validInstallDirName`.
     install_dir_name: ?[]const u8 = null,
+    /// The names of the commands that run the app on Linux: a link in
+    /// ~/.local/bin (or /usr/local/bin) for each, the first being the one
+    /// to run it by. None means the executable's name. See `validCommand`.
+    commands: []const []const u8 = &.{},
     hooks: Hooks = .{},
 };
+
+/// A command's name: a letter or digit, then letters, digits, ., _, + or -.
+pub fn validCommand(name: []const u8) bool {
+    if (name.len == 0 or name.len > 255 or !std.ascii.isAlphanumeric(name[0])) return false;
+    for (name) |byte| if (!std.ascii.isAlphanumeric(byte) and std.mem.indexOfScalar(u8, "._+-", byte) == null) return false;
+    return true;
+}
+
+/// Checks a list of command names: each valid and none twice.
+pub fn validCommands(names: []const []const u8) bool {
+    for (names, 0..) |name, index| {
+        if (!validCommand(name)) return false;
+        for (names[0..index]) |earlier| if (std.mem.eql(u8, earlier, name)) return false;
+    }
+    return true;
+}
+
+test "command names are one word a shell runs" {
+    for ([_][]const u8{ "my-app", "ma", "app2", "a.b_c+d", "9lives" }) |name| try std.testing.expect(validCommand(name));
+    for ([_][]const u8{ "", "-x", ".hidden", "a/b", "a b", "a$b", "_x" }) |name| try std.testing.expect(!validCommand(name));
+    try std.testing.expect(validCommands(&.{ "my-app", "ma" }));
+    try std.testing.expect(!validCommands(&.{ "ma", "ma" }));
+}
 
 /// Commands of the app's own that the setup program runs, with the shell
 /// (a batch file's line on Windows, `/bin/sh -c` elsewhere), in silent

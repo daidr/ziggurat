@@ -101,6 +101,7 @@ pub fn capabilities() Capabilities {
             .user_agent = true,
             .custom_local_site = true,
             .remote_pages = true,
+            .find_text = true,
         },
         else => .{},
     };

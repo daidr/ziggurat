@@ -465,15 +465,12 @@ pub const Bridge = struct {
         const scope = window.beginCallback() orelse return error.Closed;
         defer scope.end();
         if (tree.len == 0 or tree.entries[0].id != root_id) return error.InvalidSemanticRoot;
-        if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
-        var origin: c.POINT = .{ .x = 0, .y = 0 };
-        const hwnd: c.HWND = @ptrCast(window.nativeHandle());
-        if (hwnd == null or c.ClientToScreen(hwnd, &origin) == 0) return error.Closed;
-        // Semantic bounds are in the content's DIPs, zoomed as it draws.
-        const scale = @as(f64, @floatFromInt(c.GetDpiForWindow(hwnd))) / 96 * window.zoom();
-        const visible = c.IsWindowVisible(hwnd) != 0 and c.IsIconic(hwnd) == 0;
-        const enabled = c.IsWindowEnabled(hwnd) != 0;
-        const focused = c.GetFocus() == hwnd;
+        const host = try hostFrame(window);
+        const origin = host.origin;
+        const scale = host.scale;
+        const visible = host.visible;
+        const enabled = host.enabled;
+        const focused = host.focused;
         var native_nodes: [max_nodes]NativeNode = undefined;
         var native_text: [text_capacity]u16 = undefined;
         var used: usize = 0;
@@ -501,8 +498,8 @@ pub const Bridge = struct {
                 .selection_end = @intCast(try std.unicode.calcUtf16LeLen(value[0..entry.selection_end])),
                 .description_start = @intCast(description_start),
                 .description_len = @intCast(description_len),
-                .x = @as(f64, entry.bounds.x) * scale + @as(f64, @floatFromInt(origin.x)),
-                .y = @as(f64, entry.bounds.y) * scale + @as(f64, @floatFromInt(origin.y)),
+                .x = @as(f64, entry.bounds.x) * scale + origin.x,
+                .y = @as(f64, entry.bounds.y) * scale + origin.y,
                 .width = @as(f64, entry.bounds.width) * scale,
                 .height = @as(f64, entry.bounds.height) * scale,
                 .range_value = entry.range_value,
@@ -513,7 +510,7 @@ pub const Bridge = struct {
             };
         }
         if (window.isClosed() or self.native == null) return error.Closed;
-        const origin_point: affine.Point = .{ .x = @floatFromInt(origin.x), .y = @floatFromInt(origin.y) };
+        const origin_point: affine.Point = .{ .x = origin.x, .y = origin.y };
         const hr = if (tree.mapped) |snapshot| blk: {
             const scratch = self.geometry_scratch orelse return error.SemanticGeometryRequired;
             if (snapshot.semantic_len != tree.len) return error.InvalidSemanticGeometry;
@@ -620,6 +617,9 @@ pub const Bridge = struct {
     pub fn positionChanged(self: *Bridge) !void {
         const window = self.window orelse return error.Closed;
         window.app.assertOwner();
+        // macOS elements turn their view's points into screen coordinates
+        // as they are asked for.
+        if (builtin.os.tag != .windows) return;
         const scope = window.beginCallback() orelse return error.Closed;
         defer scope.end();
         const previous = self.last_origin orelse return;
@@ -635,6 +635,7 @@ pub const Bridge = struct {
     }
     pub fn getObject(self: *Bridge, window: z.Window, wp: usize, lp: isize) ?isize {
         window.app.assertOwner();
+        if (builtin.os.tag != .windows) return null;
         if (lp != -25) return null;
         const native = self.native orelse return null;
         return zua_get_object(native, wp, lp);
@@ -645,6 +646,7 @@ pub const Bridge = struct {
     pub fn retainProvider(self: *Bridge, id: u64) !*anyopaque {
         const window = self.window orelse return error.Closed;
         window.app.assertOwner();
+        if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
         return zua_retain_provider(self.native.?, id) orelse error.NativeProviderUnavailable;
     }
     /// Revoke Zig entry points now and queue native disconnection at a safe point.
@@ -724,6 +726,34 @@ pub const Bridge = struct {
         callback(self.context, window, .{ .key = key, .publication = captured.publication, .kind = .control, .action = .{ .collection = &request } });
     }
 };
+
+/// Where a window's content is for the native host, and how it shows.
+const HostFrame = struct { origin: struct { x: f64, y: f64 }, scale: f64, visible: bool, enabled: bool, focused: bool };
+
+fn hostFrame(window: z.Window) !HostFrame {
+    switch (builtin.os.tag) {
+        .windows => {
+            var origin: c.POINT = .{ .x = 0, .y = 0 };
+            const hwnd: c.HWND = @ptrCast(window.nativeHandle());
+            if (hwnd == null or c.ClientToScreen(hwnd, &origin) == 0) return error.Closed;
+            return .{
+                .origin = .{ .x = @floatFromInt(origin.x), .y = @floatFromInt(origin.y) },
+                // Semantic bounds are in the content's DIPs, zoomed as it draws.
+                .scale = @as(f64, @floatFromInt(c.GetDpiForWindow(hwnd))) / 96 * window.zoom(),
+                .visible = c.IsWindowVisible(hwnd) != 0 and c.IsIconic(hwnd) == 0,
+                .enabled = c.IsWindowEnabled(hwnd) != 0,
+                .focused = c.GetFocus() == hwnd,
+            };
+        },
+        // In the content view's points: the elements place themselves on
+        // the screen as they are asked.
+        .macos => {
+            const state = try window.state();
+            return .{ .origin = .{ .x = 0, .y = 0 }, .scale = window.zoom(), .visible = state.visible and !state.minimized, .enabled = state.enabled, .focused = state.focused };
+        },
+        else => return error.UnsupportedPlatform,
+    }
+}
 
 fn geometryRef(bounds: affine.Rect, reference: affine.Ref) NativeGeometryRef {
     return .{ .x = bounds.x, .y = bounds.y, .width = bounds.width, .height = bounds.height, .space = @backingInt(reference.space), .clip = if (reference.clip) |id| @backingInt(id) else std.math.maxInt(u32) };

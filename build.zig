@@ -11,7 +11,7 @@ pub fn build(b: *std.Build) void {
     const https_resources_enabled = b.option(bool, "https-resources", "Build the optional HTTPS resource transport on Windows or Linux") orelse false;
     const gpu = b.option(bool, "gpu", "Build the optional D3D11 renderer with GDI fallback") orelse false;
     const webp = b.option(bool, "webp", "Build the optional pinned WebP decoder (fetch source first)") orelse false;
-    const accessibility = b.option(bool, "accessibility", "Build the optional Windows UI Automation bridge") orelse false;
+    const accessibility = b.option(bool, "accessibility", "Build the optional native accessibility bridge (Windows UI Automation, macOS NSAccessibility)") orelse false;
     const check = b.step("check", "Compile selected examples and tests without running them");
     const test_step = b.step("test", "Run invariant tests without opening windows");
     var view_tests: ?*std.Build.Step.Compile = null;
@@ -812,7 +812,7 @@ pub fn build(b: *std.Build) void {
     const run_automation_tests = b.addRunArtifact(automation_tests);
     test_step.dependOn(&run_automation_tests.step);
     b.step("test-automation", "Run the automation protocol, input and socket tests").dependOn(&run_automation_tests.step);
-    if (target.result.os.tag == .windows or target.result.os.tag == .linux) addSmoke(b, "smoke-automation", "tests/automation_smoke.zig", target, optimize, &.{
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux or target.result.os.tag == .macos) addSmoke(b, "smoke-automation", "tests/automation_smoke.zig", target, optimize, &.{
         .{ .name = "ziggurat", .module = core },
         .{ .name = "ziggurat_view", .module = declarative_view },
         .{ .name = "ziggurat_system", .module = system },
@@ -1516,8 +1516,11 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_ui", .module = ui },
         });
     }
-    if (accessibility) {
-        if (target.result.os.tag != .windows) @panic("UI Automation requires Windows");
+    if (accessibility and target.result.os.tag == .macos) {
+        _ = native_support.addArchive(b, ui, "ui-accessibility-native", "src/ui/accessibility_macos.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native_support.linkFrameworks(b, ui, &.{ "AppKit", "Foundation" });
+    } else if (accessibility) {
+        if (target.result.os.tag != .windows) @panic("UI Automation requires Windows; macOS uses NSAccessibility");
         // An archive member is linked only by programs that reference UIA.
         _ = native_support.addArchive(b, ui, "ui-accessibility-native", "src/ui/accessibility.c", &.{"-std=c11"}, target, optimize);
         ui.linkSystemLibrary("uiautomationcore", .{});
@@ -1540,6 +1543,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_view", .module = declarative_view },
         });
         addSmoke(b, "smoke-macos", "tests/macos_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-accessibility-macos", "tests/macos_accessibility_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
         });
@@ -1767,6 +1774,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_file_stream", .module = file_stream }, .{ .name = "ziggurat_http_response", .module = http_response } },
             .link_libc = true,
         });
+        automation.addImport("ziggurat_webview", view);
         view.addImport("ziggurat_tls_pem", tls_pem);
         _ = native_support.add(b, view, "webview-webkit-macos", "src/webview/webkit_macos.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         native_support.linkFrameworks(b, view, &.{ "WebKit", "AppKit", "Foundation", "CoreFoundation" });
@@ -1790,6 +1798,10 @@ pub fn build(b: *std.Build) void {
         });
         remote_smoke.link_libc = true;
         remote_smoke.addCSourceFile(.{ .file = b.path("tests/macos_remote_fixture.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        addSmoke(b, "smoke-webview-find-macos", "tests/macos_find_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
     }
     if (web and target.result.os.tag == .windows) {
         if (target.result.cpu.arch != .x86_64)
@@ -2751,6 +2763,7 @@ pub fn build(b: *std.Build) void {
     const audio = b.addModule("ziggurat_audio", .{ .root_source_file = b.path("src/audio/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
     audio.link_libc = true;
     if (target.result.os.tag == .windows) audio.linkSystemLibrary("ole32", .{});
+    if (target.result.os.tag == .macos) native_support.linkFrameworks(b, audio, &.{"AudioToolbox"});
     // Pinned third-party decoders: their own warnings and undefined-behavior
     // checks are not this project's to enforce.
     for ([_][]const u8{ "mp3", "vorbis" }) |codec| _ = native_support.add(b, audio, b.fmt("audio-{s}-native", .{codec}), b.fmt("src/audio/{s}.c", .{codec}), &.{ "-std=c99", "-w", "-fno-sanitize=undefined" }, target, optimize);
@@ -3038,10 +3051,17 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_chart", .module = chart },
             .{ .name = "ziggurat_chart_view", .module = chart_view },
         });
+    }
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux or target.result.os.tag == .macos) {
         const game = b.addModule("ziggurat_game", .{ .root_source_file = b.path("src/game/root.zig"), .target = target, .optimize = optimize, .imports = &.{
             .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
             .{ .name = "ziggurat_view", .module = declarative_view },
         } });
+        if (target.result.os.tag == .macos) {
+            _ = native_support.add(b, game, "game-gamepad-macos", "src/game/gamepad_macos.m", &.{ "-fno-objc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+            native_support.linkFrameworks(b, game, &.{ "GameController", "Foundation" });
+            game.linkSystemLibrary("objc", .{ .use_pkg_config = .no });
+        }
         const game_tests = addTest(b, .{ .root_module = game });
         check.dependOn(&game_tests.step);
         const run_game_tests = b.addRunArtifact(game_tests);
