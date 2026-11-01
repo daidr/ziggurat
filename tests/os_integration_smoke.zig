@@ -16,6 +16,9 @@ const words = [_][]const u8{ "", "two words", "中文🦎", "embedded\"quote", "
 const handler_id = "org.zg.OsSmoke";
 const allocator = std.heap.page_allocator;
 
+pub const panic = std.debug.FullPanic(@import("macos_panic.zig").panic);
+pub const std_options: std.Options = .{ .allow_stack_tracing = builtin.os.tag != .macos };
+
 pub fn main(init: std.process.Init.Minimal) !void {
     const arguments = try zio.argsAlloc(allocator, init.args);
     defer zio.argsFree(allocator, arguments);
@@ -43,9 +46,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const executable = try zio.executablePathAlloc(allocator);
     try directories();
     try singleInstance(executable);
-    try registration(executable);
-    try power(require_dbus);
-    try taskbar(require_dbus);
+    // Registration, login items, power and the dock belong to the app
+    // bundle on macOS; smoke-macos-services covers what runs without one.
+    if (comptime builtin.os.tag == .macos) {
+        try longIdentity();
+    } else {
+        try registration(executable);
+        try power(require_dbus);
+        try taskbar(require_dbus);
+    }
     std.debug.print("os integration smoke passed\n", .{});
 }
 
@@ -162,7 +171,7 @@ fn resourceCount() !usize {
         if (win.GetProcessHandleCount(win.GetCurrentProcess(), &count) == 0) return error.HandleCount;
         return count;
     }
-    var directory = try std.Io.Dir.openDirAbsolute(zio.io(), "/proc/self/fd", .{ .iterate = true });
+    var directory = try std.Io.Dir.openDirAbsolute(zio.io(), if (builtin.os.tag == .macos) "/dev/fd" else "/proc/self/fd", .{ .iterate = true });
     defer directory.close(zio.io());
     var iterator = directory.iterate();
     var count: usize = 0;
@@ -171,7 +180,7 @@ fn resourceCount() !usize {
 }
 
 fn processId() u32 {
-    return if (builtin.os.tag == .windows) win.GetCurrentProcessId() else @intCast(std.os.linux.getpid());
+    return if (builtin.os.tag == .windows) win.GetCurrentProcessId() else if (builtin.os.tag == .macos) @intCast(std.c.getpid()) else @intCast(std.os.linux.getpid());
 }
 fn uniqueId(buffer: []u8, label: []const u8) ![]const u8 {
     const pid = processId();
@@ -295,6 +304,28 @@ fn singleInstance(executable: []const u8) !void {
     if (final != baseline) return error.ResourceGrowth;
     if (builtin.os.tag == .linux) try unsafeRuntimeDirectory(id);
     std.debug.print("single instance: {d} forwarded messages, rejections malformed={d} too_large={d} timeout={d}\n", .{ collector.messages.items.len, collector.rejections[0], collector.rejections[1], collector.rejections[2] });
+}
+/// macOS socket paths hold 103 bytes: an ID of the maximum length still
+/// claims and forwards.
+fn longIdentity() !void {
+    var id_storage: [200]u8 = undefined;
+    const prefix = try uniqueId(&id_storage, "long");
+    var id_buffer: [200]u8 = undefined;
+    const filler: [64]u8 = @splat('a');
+    const full = try std.fmt.bufPrint(&id_buffer, "{s}.{s}", .{ prefix, &filler });
+    const id = full[0..system.identity.max_id_bytes];
+    var claim = try instance.claim(.{ .id = id });
+    if (claim != .primary) return error.ExpectedPrimary;
+    var collector: Collector = .{ .primary = &claim.primary };
+    const worker = try std.Thread.spawn(.{}, Collector.run, .{&collector});
+    var peer = try instance.claim(.{ .id = id });
+    if (peer != .secondary) return error.ExpectedSecondary;
+    try peer.secondary.forward(.{ .cwd = "/", .arguments = &.{"long"} });
+    peer.secondary.deinit();
+    try collector.waitMessages(1);
+    claim.primary.requestStop();
+    worker.join();
+    claim.primary.deinit();
 }
 fn rawPeer(id: []const u8, bytes: []const u8, expected: anyerror) !void {
     var claim = try instance.claim(.{ .id = id, .timeout_ms = 5000 });

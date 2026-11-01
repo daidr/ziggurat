@@ -1,6 +1,6 @@
 # 单实例与系统集成
 
-`ziggurat_system` 中的 `identity`、`instance`、`integration`、`power` 与 `taskbar` 提供应用身份、单实例与参数转发、按用户注册的登录启动/深链/文件关联、阻止休眠，以及任务栏或 dock 状态。它们不持有 App、不创建线程、不轮询；能力分别见 `system.capabilities.identity/instance/integration/power/taskbar`。macOS 已实现系统目录、登录启动、URL scheme 默认处理程序与阻止休眠（见各节）；单实例与任务栏状态尚未实现，在 macOS 和其他目标返回 `UnsupportedCapability`。
+`ziggurat_system` 中的 `identity`、`instance`、`integration`、`power` 与 `taskbar` 提供应用身份、单实例与参数转发、按用户注册的登录启动/深链/文件关联、阻止休眠，以及任务栏或 dock 状态。它们不持有 App、不创建线程、不轮询；能力分别见 `system.capabilities.identity/instance/integration/power/taskbar`。macOS 已实现系统目录、单实例与参数转发、系统发来的 URL 与文件打开请求、登录启动、URL scheme 默认处理程序与阻止休眠（见各节）；任务栏状态尚未实现，在 macOS 和其他目标返回 `UnsupportedCapability`。
 
 ## 应用身份
 
@@ -49,9 +49,14 @@ Primary 不可复制。`receive(storage, arguments)` 由应用自己创建的一
 ### 平台实现
 
 - **Linux**：锁是 `$XDG_RUNTIME_DIR/ziggurat-instance-<id>.lock` 上的 `flock`，端点是同目录的 Unix stream socket。运行目录必须存在、属于当前用户且对其他用户关闭（mode 无 group/other 位），否则返回 `RuntimeDirectoryUnavailable` 或 `RuntimeDirectoryUnsafe`，不回退到共享位置。primary 持锁后替换崩溃留下的 socket；每个连接另用 `SO_PEERCRED` 核对 uid。进程退出时内核释放锁；lock 文件保留，避免并发 claim 锁住已删除的 inode。同一用户的多个会话共享运行目录，因此共享一个 primary。
+- **macOS**：与 Linux 相同的 `flock` 和 Unix stream socket，放在 `confstr(_CS_DARWIN_USER_TEMP_DIR)` 给出的每用户临时目录（`/var/folders/…/T`，属于当前用户且为 0700）；目录不满足同样的条件时返回同样的错误。macOS 的 socket 路径最多 103 字节，放不下 `<id>` 时文件名改用 ID 的 64 位哈希。每个连接用 `getpeereid` 核对 uid，用 `LOCAL_PEERPID` 取得 `sender_process`；没有 `MSG_NOSIGNAL`，socket 设 `SO_NOSIGPIPE`。
 - **Windows**：端点名为 `\\.\pipe\ziggurat-instance-<用户 SID>-<会话>-<id>`，每用户每会话一个。以 `FILE_FLAG_FIRST_PIPE_INSTANCE`、单实例、拒绝远程客户端创建，DACL 只授予当前用户；管道句柄本身就是锁，进程结束即释放。primary 用 `GetNamedPipeClientProcessId` 核对客户端进程的用户 SID，secondary 同样核对服务端进程，防止他人抢注名称。所有 I/O 为 overlapped，等待同时监听停止事件，超时或停止时取消并回收 I/O。secondary 确认前调用 `AllowSetForegroundWindow(primary)`，使 primary 能把窗口带到前台。
 
 `instance.testing.sendRaw` 只供集成检查发送未校验字节，不用于应用。
+
+### macOS 的打开请求
+
+macOS 不把深链和要打开的文件作为进程参数传给应用：点击 bundle 声明的 scheme 的链接、在 Finder 中用应用打开文件或把文件拖到 dock 图标上，系统都向正在运行（或为此刚启动）的实例发送 Apple Event。`instance.OpenListener{ .context, .on_open }` 的 `start(app)` 安装 `GURL`（`kInternetEventClass`/`kAEGetURL`）和 `odoc`（`kCoreEventClass`/`kAEOpenDocuments`）处理程序，`on_open(context, Open)` 在 owner 线程上收到 `.urls` 或 `.files`（绝对路径，只取本地文件），`items` 只在回调期间借用，`sender_process` 是发送方进程 ID。启动应用的那次请求在 run loop 开始时才发出，所以要在 `App.run` 之前 start。每个进程一个 listener，第二个返回 `ListenerActive`；`stop()` 幂等，之后的请求交回系统默认处理。Linux 和 Windows 上同样的请求是第二个进程的参数，经 `claimOrForward` 到达 primary，这里返回 `UnsupportedCapability`（`capabilities.instance.open_events`）。`simulateOpenForTesting` 只供集成检查把同样的 Apple Event 经本进程的处理程序表分发，处理程序在调用期间运行。
 
 ## 登录启动
 
@@ -107,7 +112,7 @@ Windows Jump List 的任务和 Recent 类别、最近文档和重启见[系统�
 
 `zig build test-system-integration` 覆盖转发帧的往返与恶意输入（截断、多余字节、魔数、超长、计数、越界长度、NUL、容量）、身份规则、XDG 与 user-dirs 解析、desktop entry/autostart/MIME XML 转义、mimeapps.list 编辑的幂等与外来行保留、Windows argv 引号往返、file URL 解码和电源参数校验。
 
-`zig build smoke-os-integration` 启动真实子进程：8 个并发 secondary 与最大长度参数的转发、恶意/超长/停滞对端被拒后 listener 仍可用、primary 停止后旧 secondary 得到 `PrimaryUnavailable` 并可重新成为 primary、被杀死的 primary 释放锁、12 轮 claim/转发/停止后文件描述符或句柄数不变；Linux 另验开放权限的运行目录被拒。注册部分在隔离的 XDG 根中写入 scheme 与文件类型，用 GIO 独立解析默认处理程序和扩展名类型，再由 GIO 真正启动注册的 `%U` 命令，验证深链与文件参数经单实例转发到 primary，最后 unregister 并确认无关的 mimeapps 行保留；登录项写入、查询与删除。Windows 对应用 `AssocQueryStringW` 与 `ShellExecuteExW` 走同样的链路。Linux 用私有 bus 上的 logind 替身核对 Inhibit 参数和 release 后描述符真正关闭（12 轮），并用独立订阅者核对 launcher entry 的进度、计数和提醒；Windows 做 12 轮成对电源请求，句柄数不变。D-Bus 部分需要 session bus 且把同一地址作为 `DBUS_SYSTEM_BUS_ADDRESS`；`-- --require-dbus` 在缺失时失败而不是跳过。
+`zig build smoke-os-integration` 启动真实子进程：8 个并发 secondary 与最大长度参数的转发、恶意/超长/停滞对端被拒后 listener 仍可用、primary 停止后旧 secondary 得到 `PrimaryUnavailable` 并可重新成为 primary、被杀死的 primary 释放锁、12 轮 claim/转发/停止后文件描述符或句柄数不变；Linux 另验开放权限的运行目录被拒。注册部分在隔离的 XDG 根中写入 scheme 与文件类型，用 GIO 独立解析默认处理程序和扩展名类型，再由 GIO 真正启动注册的 `%U` 命令，验证深链与文件参数经单实例转发到 primary，最后 unregister 并确认无关的 mimeapps 行保留；登录项写入、查询与删除。Windows 对应用 `AssocQueryStringW` 与 `ShellExecuteExW` 走同样的链路。macOS 运行其中的目录和单实例部分，并用最长的 ID 验证哈希后的 socket 名仍能 claim 与转发；`smoke-macos-services` 经处理程序表分发 `GURL` 与 `odoc` 事件，确认 OpenListener 收到 URL、文件路径和发送方进程 ID。Linux 用私有 bus 上的 logind 替身核对 Inhibit 参数和 release 后描述符真正关闭（12 轮），并用独立订阅者核对 launcher entry 的进度、计数和提醒；Windows 做 12 轮成对电源请求，句柄数不变。D-Bus 部分需要 session bus 且把同一地址作为 `DBUS_SYSTEM_BUS_ADDRESS`；`-- --require-dbus` 在缺失时失败而不是跳过。
 
 Linux 与 Windows Debug CI 都实际运行这个 smoke。Windows 命令行上限为 32767 个 UTF-16 单元，所以最大长度参数用例在 Windows 只传一个 16 KiB 参数，帧上限本身由单元测试覆盖。
 
