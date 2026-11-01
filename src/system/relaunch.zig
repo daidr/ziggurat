@@ -8,15 +8,18 @@
 //!     _ = try relaunch.finish(allocator, .{});
 //!
 //! The new process starts only after this one has released its windows,
-//! single-instance lock and files, so it does not find them held.
+//! single-instance lock and files, so it does not find them held. On macOS a
+//! program inside an .app bundle starts again through Launch Services
+//! (`open -n`), so it comes up as an application with its Dock icon.
 const std = @import("std");
 const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 
 const windows = builtin.os.tag == .windows;
+const macos = builtin.os.tag == .macos;
 
-pub const capabilities = .{ .relaunch = windows or builtin.os.tag == .linux };
+pub const capabilities = .{ .relaunch = windows or builtin.os.tag == .linux or macos };
 
 extern "user32" fn AllowSetForegroundWindow(process: u32) callconv(.winapi) c_int;
 const any_process: u32 = 0xffff_ffff;
@@ -26,7 +29,8 @@ pub const Options = struct {
     executable: ?[]const u8 = null,
     /// Arguments after the program; null repeats this process's own.
     arguments: ?[]const []const u8 = null,
-    /// Working directory; null keeps the current one.
+    /// Working directory; null keeps the current one. Launch Services does
+    /// not take one, so a macOS bundle starts where it always does.
     cwd: ?[]const u8 = null,
 };
 
@@ -61,6 +65,8 @@ pub const Relaunch = struct {
 };
 
 extern "kernel32" fn GetCommandLineW() callconv(.winapi) [*:0]const u16;
+extern "c" fn _NSGetArgc() *c_int;
+extern "c" fn _NSGetArgv() *[*]const [*:0]const u8;
 
 /// This process's command line, program first. Zig 0.17 hands it only to
 /// `main`, so it is read back from the system.
@@ -70,6 +76,9 @@ fn ownArguments(arena: std.mem.Allocator) ![]const []const u8 {
         const args: std.process.Args = .{ .vector = std.mem.span(GetCommandLineW()) };
         var it = try args.iterateAllocator(arena);
         while (it.next()) |arg| try list.append(arena, try arena.dupe(u8, arg));
+    } else if (comptime macos) {
+        const count: usize = @intCast(_NSGetArgc().*);
+        for (_NSGetArgv().*[0..count]) |arg| try list.append(arena, try arena.dupe(u8, std.mem.span(arg)));
     } else {
         const file = try std.Io.Dir.openFileAbsolute(zio.io(), "/proc/self/cmdline", .{});
         defer file.close(zio.io());
@@ -89,14 +98,18 @@ pub fn spawn(allocator: std.mem.Allocator, options: Options) !void {
     const executable = options.executable orelse try zio.executablePathAlloc(arena);
     if (!std.fs.path.isAbsolute(executable)) return error.RelativePath;
     var argv: std.ArrayList([]const u8) = .empty;
-    try argv.append(arena, executable);
+    const bundle = if (comptime macos) zio.appBundle(executable) else null;
+    if (bundle) |path| {
+        // -n: a new instance even while this one is still quitting.
+        try argv.appendSlice(arena, &.{ "/usr/bin/open", "-n", path, "--args" });
+    } else try argv.append(arena, executable);
     if (options.arguments) |arguments| {
         try argv.appendSlice(arena, arguments);
     } else {
         const own = try ownArguments(arena);
         if (own.len > 1) try argv.appendSlice(arena, own[1..]);
     }
-    const child = try zio.spawn(.{ .argv = argv.items, .cwd = zio.cwd(options.cwd), .stdin = .ignore });
+    const child = try zio.spawn(.{ .argv = argv.items, .cwd = zio.cwd(if (bundle != null) null else options.cwd), .stdin = .ignore });
     // Not waited for. Windows: release the handles; the process runs on.
     if (comptime windows) {
         std.os.windows.CloseHandle(child.id.?);

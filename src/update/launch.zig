@@ -19,9 +19,18 @@ pub fn currentExecutable(allocator: std.mem.Allocator, root_path: []const u8, id
 /// Start `argv` without waiting for it and without inheriting standard I/O.
 /// Used to start a newly published release after the running App has
 /// finished shutting down (after `App.run` returns), so no window, callback
-/// or update lock of the old process is still live.
-pub fn spawnDetached(_: std.mem.Allocator, argv: []const []const u8, cwd: ?[]const u8) !void {
-    const child = try zio.spawn(.{ .argv = argv, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore, .cwd = zio.cwd(cwd), .pgid = if (builtin.os.tag != .windows) 0 else null });
+/// or update lock of the old process is still live. On macOS a release that
+/// is an .app bundle starts through Launch Services (`open -n`), so the new
+/// version comes up with its Dock icon rather than as a bare process.
+pub fn spawnDetached(allocator: std.mem.Allocator, argv: []const []const u8, cwd: ?[]const u8) !void {
+    var opened: std.ArrayList([]const u8) = .empty;
+    defer opened.deinit(allocator);
+    const command = if (builtin.os.tag == .macos and argv.len != 0) if (zio.appBundle(argv[0])) |bundle| blk: {
+        try opened.appendSlice(allocator, &.{ "/usr/bin/open", "-n", bundle, "--args" });
+        try opened.appendSlice(allocator, argv[1..]);
+        break :blk opened.items;
+    } else argv else argv;
+    const child = try zio.spawn(.{ .argv = command, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore, .cwd = zio.cwd(cwd), .pgid = if (builtin.os.tag != .windows) 0 else null });
     if (builtin.os.tag == .windows) {
         std.os.windows.CloseHandle(child.id.?);
         std.os.windows.CloseHandle(child.thread_handle);

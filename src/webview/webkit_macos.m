@@ -227,6 +227,10 @@ void zwk_counts(uint32_t *states,uint32_t *callbacks,uint32_t *views) {
     *states=atomic_load(&live_states); *callbacks=atomic_load(&live_callbacks); *views=atomic_load(&live_views);
 }
 void zwk_last_failure(ZwkState *s,ZwkFailure *value) { *value=page_of(s)->failure; }
+/* Test hook: whether the page swipes between pages and pinches. */
+void zwk_test_gestures(ZwkState *s,int *swipe,int *pinch) {
+    WKWebView *view=page_of(s)->view; *swipe=view.allowsBackForwardNavigationGestures?1:0; *pinch=view.allowsMagnification?1:0;
+}
 
 static void failure_set(ZwkPage *s,NSError *error) {
     if (error) s->failure=(ZwkFailure){domain_code(error.domain),(int32_t)error.code};
@@ -1271,8 +1275,9 @@ int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPage
         s->view=view; atomic_fetch_add(&live_views,1);
         view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
         view.navigationDelegate=s; view.UIDelegate=s;
-        view.allowsBackForwardNavigationGestures=NO;
-        view.allowsMagnification=NO;
+        /* 1 swipes between pages, 2 pinches; both off unless asked. */
+        view.allowsBackForwardNavigationGestures=(options->gestures&1u)!=0;
+        view.allowsMagnification=(options->gestures&2u)!=0;
         if (options->user_agent) view.customUserAgent=[NSString stringWithUTF8String:options->user_agent];
         view.pageZoom=options->zoom;
         if (@available(macOS 13.3,*)) view.inspectable=options->developer_tools!=0;
