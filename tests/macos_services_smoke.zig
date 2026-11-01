@@ -18,7 +18,17 @@ fn checkSecrets() !void {
     const service = "dev.ziggurat.smoke.macos-services";
     const key = "token \u{79d8}\u{5bc6}";
     var buffer: [secrets.max_secret_bytes]u8 = undefined;
-    try secrets.delete(service, key);
+    // A runner started outside the user's login session has no unlocked
+    // login keychain: every operation must then say so.
+    secrets.delete(service, key) catch |err| switch (err) {
+        error.CredentialStoreUnavailable => {
+            try std.testing.expectError(error.CredentialStoreUnavailable, secrets.set(service, key, "x"));
+            try std.testing.expectError(error.CredentialStoreUnavailable, secrets.get(service, key, &buffer));
+            std.debug.print("login keychain unavailable in this session; checked the refusal only\n", .{});
+            return;
+        },
+        else => return err,
+    };
     try std.testing.expectError(error.SecretNotFound, secrets.get(service, key, &buffer));
     try secrets.set(service, key, "first");
     try std.testing.expectEqualStrings("first", try secrets.get(service, key, &buffer));
