@@ -19,11 +19,11 @@ var api: ?Api = null;
 fn load() void {
     const library = std.c.dlopen("libgio-2.0.so.0", .{ .NOW = true, .GLOBAL = true }) orelse return;
     api = .{
-        .get_default = @ptrCast(std.c.dlsym(library, "g_proxy_resolver_get_default") orelse return),
-        .lookup = @ptrCast(std.c.dlsym(library, "g_proxy_resolver_lookup") orelse return),
+        .get_default = @ptrCast(@alignCast(std.c.dlsym(library, "g_proxy_resolver_get_default") orelse return)),
+        .lookup = @ptrCast(@alignCast(std.c.dlsym(library, "g_proxy_resolver_lookup") orelse return)),
         // GLib's functions are found through GIO, which links it.
-        .strfreev = @ptrCast(std.c.dlsym(library, "g_strfreev") orelse return),
-        .error_free = @ptrCast(std.c.dlsym(library, "g_error_free") orelse return),
+        .strfreev = @ptrCast(@alignCast(std.c.dlsym(library, "g_strfreev") orelse return)),
+        .error_free = @ptrCast(@alignCast(std.c.dlsym(library, "g_error_free") orelse return)),
     };
 }
 

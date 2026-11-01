@@ -313,15 +313,14 @@ jobs:
           zig_bin=$(sh scripts/fetch-zig.sh)
           printf '%s\n' "$(dirname "$zig_bin")" >> "$GITHUB_PATH"
           sh scripts/ci-zig-cache.sh >> "$GITHUB_ENV"
-      - name: Compile everything for macOS
-        # The unit tests do not pass on macOS yet: cross-thread wakes panic
-        # inside std.Io, the watch plugin has no macOS backend and two SVG
-        # scene tests differ on arm64. They join this job once fixed.
+      - name: Unit tests and compile everything for macOS
+        timeout-minutes: 30
         run: |
-          zig build check -Doptimize=${{ matrix.optimize }} --summary failures
-      - name: AppKit window smoke
+          zig build test check --test-timeout 5m -Doptimize=${{ matrix.optimize }} --summary failures
+      - name: AppKit window and file-watch smokes
+        timeout-minutes: 10
         run: |
-          zig build smoke-macos -Doptimize=${{ matrix.optimize }} --summary failures
+          zig build smoke-macos smoke-file-watch -Doptimize=${{ matrix.optimize }} --summary failures
       - name: WKWebView compile and page smokes
         timeout-minutes: 15
         run: |

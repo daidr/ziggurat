@@ -1,6 +1,10 @@
 const std = @import("std");
 const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
+/// Zig 0.17's macOS arm64 unwinder panics on the compact-unwind encoding of
+/// the system's thread-start frames, so allocation traces on the probe
+/// thread are turned off there.
+pub const std_options: std.Options = .{ .allow_stack_tracing = builtin.os.tag != .macos };
 const system = @import("ziggurat_system");
 const watch = system.watch;
 const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
@@ -42,9 +46,19 @@ const Probe = struct {
         defer watcher.deinit();
         const root = try watcher.addRoot(tree);
 
-        const quiet = try watcher.wait(&self.events, &self.storage, 60);
-        try std.testing.expectEqual(watch.Wake.timeout, quiet.wake);
-        try std.testing.expectEqual(@as(usize, 0), quiet.events.len);
+        if (builtin.os.tag == .macos) {
+            // fseventsd numbers events as it receives them, so the writes
+            // above can still arrive as hints after addRoot returns.
+            while (true) {
+                const early = try watcher.wait(&self.events, &self.storage, 120);
+                for (early.events) |event| std.debug.print("pre-root hint: {any}\n", .{event});
+                if (early.wake == .timeout and !early.more) break;
+            }
+        } else {
+            const quiet = try watcher.wait(&self.events, &self.storage, 60);
+            try std.testing.expectEqual(watch.Wake.timeout, quiet.wake);
+            try std.testing.expectEqual(@as(usize, 0), quiet.events.len);
+        }
         // A zero timeout still reads native events; the batch is due after debounce.
         try self.write("tree/zero.txt", "0");
         zio.sleep(30 * std.time.ns_per_ms);
@@ -382,7 +396,8 @@ fn handles() !usize {
         if (c.GetProcessHandleCount(c.GetCurrentProcess(), &count) == 0) return error.HandleCountUnavailable;
         return count;
     }
-    var directory = try std.Io.Dir.openDirAbsolute(zio.io(), "/proc/self/fd", .{ .iterate = true });
+    const listing = if (builtin.os.tag == .macos) "/dev/fd" else "/proc/self/fd";
+    var directory = try std.Io.Dir.openDirAbsolute(zio.io(), listing, .{ .iterate = true });
     defer directory.close(zio.io());
     var iterator = directory.iterate();
     var count: usize = 0;
