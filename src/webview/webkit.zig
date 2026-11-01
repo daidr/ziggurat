@@ -31,6 +31,13 @@ pub const Options = extern struct {
     scroll_to_container: u32 = 0,
     permission: ?*const fn (*anyopaque, [*:0]const u8, u32, u32, *anyopaque) callconv(.c) void = null,
     media: u32 = 0,
+    download_origins: ?[*]const [*:0]const u8 = null,
+    download_origin_count: u32 = 0,
+    download_unknown: u32 = 0,
+    download_known_limit: u64 = 0,
+    download_received_limit: u64 = 0,
+    download_offer: ?*const fn (*anyopaque, [*:0]const u8, [*:0]const u8, [*:0]const u8, i64, *anyopaque) callconv(.c) void = null,
+    download_notify: ?*const fn (*anyopaque, u64, u32, u64, i64, i32) callconv(.c) void = null,
 };
 pub const ContextItem = extern struct { name: [*:0]const u8, label: [*:0]const u8, kind: u32, flags: u32, action: u32 };
 pub const ContextTarget = extern struct { link: ?[*:0]const u8, link_text: ?[*:0]const u8, image: ?[*:0]const u8, media: ?[*:0]const u8, selection: ?[*:0]const u8, frame: ?[*:0]const u8, editable: u32 };

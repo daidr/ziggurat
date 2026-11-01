@@ -28,6 +28,7 @@
 #include "webkit_native.h"
 #include "webkit_content_rules.h"
 #include "webkit_cookies.h"
+#include "../file_stream/macos.h"
 
 void *zlm_window_content(void *window);
 
@@ -84,7 +85,9 @@ typedef struct ZwkRemoteGrant {
 - (void)_hideFindUI;
 - (void)_setFindDelegate:(id)delegate;
 @end
-@interface ZwkPage : NSObject <WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler> {
+typedef struct ZwkInitializerState ZwkInitializerState;
+@class ZwkPendingDownload;
+@interface ZwkPage : NSObject <WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, WKDownloadDelegate> {
 @public
     void *owner;
     ZwkNotify notify_fn;
@@ -128,6 +131,18 @@ typedef struct ZwkRemoteGrant {
     uint32_t resource_limit;
     BOOL dynamic_document;
     NSMutableArray *deferred;
+    /* File responses: their controls, cancelled at close, and transfers. */
+    ZwkFileControl *file_controls[ZWK_FILE_VIEW_LIMIT];
+    NSMutableArray *transfers;
+    /* A region's view is placed by zwk_viewport; a session's lives parked,
+     * without a window, until zwk_session_mount places it in one. */
+    BOOL region_mode, session, placement_busy;
+    /* The load the engine is still ending became a download: it no longer
+     * holds the next navigation back. */
+    BOOL download_load;
+    void *session_parent;
+    uint64_t session_epoch;
+    uint32_t session_width, session_height;
     /* The remote page, when the page is one: its grants and rule list. A
      * navigation the page starts itself is adopted when the engine names it. */
     BOOL remote, remote_loopback, remote_script_navigation, remote_redirects, waiting_remote, nav_adopt;
@@ -139,6 +154,26 @@ typedef struct ZwkRemoteGrant {
     ZwkFindGate *find;
     /* The budget of captures, PDFs and clears, when the app allows them. */
     ZwkCaptureBudget *capture;
+    /* The document's bootstrap scripts, and the app's initializer. */
+    WKUserScript *private_bootstrap, *public_bootstrap;
+    struct ZwkInitializerState *initializers;
+    ZwkPermission permission_offer;
+    NSMutableArray *permissions;
+    ZwkAuth auth_fn;
+    ZwkCertificate certificate_fn;
+    /* host + DER of each certificate the app allowed, for the page's life. */
+    NSMutableSet *allowed_certificates;
+    /* Certificates the app refused during the document being loaded: the
+     * engine retries a refused connection, and the app is asked once. */
+    NSMutableSet *refused_certificates;
+    uint64_t refused_generation;
+    /* Downloads: the origins and limits the app granted, and those it took. */
+    ZwkDownloadOffer download_offer;
+    ZwkDownloadNotify download_notify;
+    NSArray<NSString *> *download_origins;
+    BOOL download_unknown;
+    uint64_t download_known_limit, download_received_limit;
+    NSMutableArray *downloads;
 }
 @end
 static void resources_cancel_all(ZwkPage *s);
@@ -152,6 +187,105 @@ static void remote_free(ZwkPage *s);
 static void find_gate_close(ZwkFindGate *g);
 static void capture_cancel_all(ZwkPage *s);
 static void find_terminal(ZwkPage *s,BOOL found,NSUInteger count);
+static void initializers_free(ZwkInitializerState *owner);
+static void initializers_cancel_all(ZwkPage *s);
+static BOOL initializers_allow_navigation(ZwkPage *s);
+static void scripts_install(ZwkPage *s);
+static void download_emit(ZwkPage *s,ZwkPendingDownload *pending);
+static ZwkPendingDownload *download_find(ZwkPage *s,WKDownload *download);
+static void download_unlink(ZwkPage *s,ZwkPendingDownload *pending);
+
+/* The URI of the load a certificate failed: the page's when its host is the
+ * server's, else the server's root. */
+static NSString *certificate_uri(ZwkPage *s,NSURLProtectionSpace *space) {
+    NSURL *url=s->view.URL;
+    if (url && [url.host caseInsensitiveCompare:space.host]==NSOrderedSame && (url.port?url.port.integerValue:443)==space.port) return url.absoluteString;
+    NSString *host=[space.host containsString:@":"]?[NSString stringWithFormat:@"[%@]",space.host]:space.host;
+    return space.port==443?[NSString stringWithFormat:@"https://%@/",host]:[NSString stringWithFormat:@"https://%@:%ld/",host,(long)space.port];
+}
+/* A permission request the app keeps past its offer, answered once. */
+@interface ZwkPendingPermission : NSObject {
+@public
+    uint64_t token;
+    void (^decision)(WKPermissionDecision);
+}
+@end
+@implementation ZwkPendingPermission
+@end
+/* A download the app took: the engine waits for its file until accepted,
+ * then it transfers, reported once ready. */
+@interface ZwkPendingDownload : NSObject {
+@public
+    uint64_t token;
+    WKDownload *download;
+    void (^decide)(NSURL *);
+    NSProgress *progress;
+    BOOL ready;
+}
+@end
+@implementation ZwkPendingDownload
+@end
+static atomic_uint live_downloads;
+typedef struct ZwkDownloadCall { __unsafe_unretained ZwkPage *page; __unsafe_unretained WKDownload *download; __unsafe_unretained void (^decide)(NSURL *); BOOL deferred; } ZwkDownloadCall;
+typedef struct ZwkPermissionCall { __unsafe_unretained ZwkPage *page; __unsafe_unretained void (^decision)(WKPermissionDecision); BOOL deferred; } ZwkPermissionCall;
+/* scheme://host[:port] of the page's document, as the engine names origins. */
+static NSString *permission_origin(NSURL *url) {
+    NSString *scheme=url.scheme.lowercaseString, *host=url.host.lowercaseString;
+    if (!scheme.length || !host.length) return nil;
+    if ([host containsString:@":"]) host=[NSString stringWithFormat:@"[%@]",host];
+    return url.port?[NSString stringWithFormat:@"%@://%@:%@",scheme,host,url.port]:[NSString stringWithFormat:@"%@://%@",scheme,host];
+}
+/* http(s)://host[:port] as the Zig side canonicalizes a download origin:
+ * the default port left out. */
+static NSString *download_origin(NSURL *url) {
+    NSString *scheme=url.scheme.lowercaseString, *host=url.host.lowercaseString;
+    const BOOL https=[scheme isEqualToString:@"https"];
+    if ((!https && ![scheme isEqualToString:@"http"]) || !host.length) return nil;
+    if ([host containsString:@":"]) host=[NSString stringWithFormat:@"[%@]",host];
+    const long port=url.port?url.port.longValue:-1;
+    return port<0 || port==(https?443:80)?[NSString stringWithFormat:@"%@://%@",scheme,host]:[NSString stringWithFormat:@"%@://%@:%ld",scheme,host,port];
+}
+/* The sign-in a ZwkAuth call carries; zwk_auth_answer fills it. */
+typedef struct ZwkAuthCall { void *credential; BOOL answered; } ZwkAuthCall;
+/* WebKitAuthenticationScheme numbers, which the Zig side reads; 0 for a
+ * method that is not an HTTP sign-in, such as a client certificate. */
+static uint32_t auth_scheme(NSString *method) {
+    if ([method isEqualToString:NSURLAuthenticationMethodDefault]) return 1;
+    if ([method isEqualToString:NSURLAuthenticationMethodHTTPBasic]) return 2;
+    if ([method isEqualToString:NSURLAuthenticationMethodHTTPDigest]) return 3;
+    if ([method isEqualToString:NSURLAuthenticationMethodNTLM]) return 5;
+    if ([method isEqualToString:NSURLAuthenticationMethodNegotiate]) return 6;
+    return 0;
+}
+/* GTlsCertificateFlags bits for why a trust does not verify. */
+static uint32_t certificate_flags(CFErrorRef error) {
+    switch (error?CFErrorGetCode(error):0) {
+    case errSecHostNameMismatch: return 1u<<1;
+    case errSecCertificateNotValidYet: return 1u<<2;
+    case errSecCertificateExpired: return 1u<<3;
+    case errSecCertificateRevoked: return 1u<<4;
+    case errSecNotTrusted: case errSecCreateChainFailed: case errSecMissingRequiredExtension: return 1u<<0;
+    default: return 1u<<6;
+    }
+}
+static NSData *certificate_der(SecTrustRef trust) {
+    CFArrayRef chain=SecTrustCopyCertificateChain(trust);
+    if (!chain) return nil;
+    NSData *der=nil;
+    if (CFArrayGetCount(chain)>0) der=(__bridge_transfer NSData *)SecCertificateCopyData((SecCertificateRef)CFArrayGetValueAtIndex(chain,0));
+    CFRelease(chain);
+    return der;
+}
+int zwk_auth_answer(void *call_pointer,const char *user,const char *password) {
+    ZwkAuthCall *call=call_pointer;
+    if (!call || call->answered || !user || !password) return ZWK_INVALID;
+    NSString *name=[NSString stringWithUTF8String:user], *secret=[NSString stringWithUTF8String:password];
+    if (!name || !secret) return ZWK_INVALID;
+    NSURLCredential *credential=[NSURLCredential credentialWithUser:name password:secret persistence:NSURLCredentialPersistenceForSession];
+    if (!credential) return ZWK_OOM;
+    call->credential=(void *)CFBridgingRetain(credential); call->answered=YES;
+    return ZWK_OK;
+}
 
 static BOOL live(ZwkPage *s) { return !s->closed && !s->recovering && s->owner; }
 static ZwkPage *page_of(ZwkState *s) { return (__bridge ZwkPage *)(void *)s; }
@@ -253,6 +387,16 @@ void zwk_test_gestures(ZwkState *s,int *swipe,int *pinch) {
     WKWebView *view=page_of(s)->view; *swipe=view.allowsBackForwardNavigationGestures?1:0; *pinch=view.allowsMagnification?1:0;
 }
 
+/* Test hook: the engine's mock camera and microphone, so a request reaches
+ * the delegate on a machine without devices and never asks the system. */
+int zwk_test_mock_capture(ZwkState *s) {
+    WKPreferences *preferences=page_of(s)->view.configuration.preferences;
+    SEL mock=sel_registerName("_setMockCaptureDevicesEnabled:"), focus=sel_registerName("_setGetUserMediaRequiresFocus:");
+    if (![preferences respondsToSelector:mock]) return 0;
+    ((void (*)(id,SEL,BOOL))objc_msgSend)(preferences,mock,YES);
+    if ([preferences respondsToSelector:focus]) ((void (*)(id,SEL,BOOL))objc_msgSend)(preferences,focus,NO);
+    return 1;
+}
 static void failure_set(ZwkPage *s,NSError *error) {
     if (error) s->failure=(ZwkFailure){domain_code(error.domain),(int32_t)error.code};
 }
@@ -444,9 +588,9 @@ static int prepare_document(ZwkPage *s) {
     resources_cancel_all(s);
     if (!s->pending_navigation || s->generation!=generation) return live(s)?ZWK_NAVIGATION_CANCELLED:ZWK_CLOSED;
     ++s->generation; s->failed=NO; s->dom_ready=NO;
-    [s->controller removeAllUserScripts];
-    [s->controller addUserScript:[[WKUserScript alloc] initWithSource:private_script injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES inContentWorld:s->world]];
-    [s->controller addUserScript:[[WKUserScript alloc] initWithSource:public_script injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES inContentWorld:WKContentWorld.pageWorld]];
+    s->private_bootstrap=[[WKUserScript alloc] initWithSource:private_script injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES inContentWorld:s->world];
+    s->public_bootstrap=[[WKUserScript alloc] initWithSource:public_script injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES inContentWorld:WKContentWorld.pageWorld];
+    scripts_install(s);
     return ZWK_OK;
 }
 /* Starts a navigation: prepares the next document, then issues the load.
@@ -454,8 +598,10 @@ static int prepare_document(ZwkPage *s) {
  * same-document one keeps its document. ready first tells the owner the page
  * exists. */
 static int navigation_submit(ZwkPage *s,int kind,NSString *uri,WKBackForwardListItem *item,BOOL ready) {
-    if (s->pending_navigation || s->load_started || s->view.loading) return ZWK_NAVIGATION_PENDING;
+    if (!initializers_allow_navigation(s)) return ZWK_NAVIGATION_PENDING;
+    if (s->pending_navigation || s->load_started || (s->view.loading && !s->download_load)) return ZWK_NAVIGATION_PENDING;
     if (!uri || [uri lengthOfBytesUsingEncoding:NSUTF8StringEncoding]>16384) return ZWK_INVALID;
+    s->download_load=NO;
     s->pending_navigation=YES; s->authorized=NO; s->navigation=nil;
     s->nav_kind=kind; s->nav_uri=uri; s->nav_item=item; s->nav_prepared=NO;
     if (kind!=NAV_HISTORY && kind!=NAV_FRAGMENT) {
@@ -509,6 +655,7 @@ static BOOL user_gesture(WKNavigationAction *action) {
 static void *title_context=&title_context;
 static void *audio_context=&audio_context;
 static void *history_context=&history_context;
+static void *download_context=&download_context;
 
 @implementation ZwkPage
 - (instancetype)init {
@@ -516,6 +663,7 @@ static void *history_context=&history_context;
     return self;
 }
 - (void)dealloc {
+    for (unsigned i=0;i<ZWK_FILE_VIEW_LIMIT;++i) if (file_controls[i]) { zwk_file_control_cancel(file_controls[i]); zwk_file_control_release(file_controls[i]); }
     for (uint32_t i=0;i<policy_header_count;++i) { free(policy_names[i]); free(policy_values[i]); }
     for (uint32_t i=0;i<policy_origin_count;++i) free(policy_origins[i]);
     free(policy_names); free(policy_values); free(policy_origins);
@@ -523,12 +671,19 @@ static void *history_context=&history_context;
     if (local_budget) zwk_local_budget_release(local_budget);
     remote_free(self);
     if (capture) zwk_capture_budget_release(capture);
+    initializers_free(initializers);
     atomic_fetch_sub(&live_states,1);
 }
 
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)action decisionHandler:(void (^)(WKNavigationActionPolicy))decision {
     ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep; (void)webView;
     NSString *uri=action.request.URL.absoluteString;
+    /* A link with the download attribute is a download, not a navigation:
+     * the app's origins decide it once the response names its file. */
+    if (action.shouldPerformDownload) {
+        decision(live(self) && download_offer && action.targetFrame?WKNavigationActionPolicyDownload:WKNavigationActionPolicyCancel);
+        return;
+    }
     if (!action.targetFrame) { decision(WKNavigationActionPolicyAllow); return; } /* createWebView decides */
     if (!action.targetFrame.mainFrame) {
         /* Frames of the document itself; no frame reaches another source. */
@@ -572,9 +727,64 @@ static void *history_context=&history_context;
     decision(WKNavigationActionPolicyCancel);
     if (live(self) && (policy&1u)) notify(self,3,uri,user_gesture(action)?1:0,NULL);
 }
+/* A response sent as an attachment, or one the engine cannot show, is a
+ * download when the app takes downloads, else the load is cancelled. */
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationResponse:(WKNavigationResponse *)response decisionHandler:(void (^)(WKNavigationResponsePolicy))decision {
     (void)webView;
-    decision(live(self) && response.canShowMIMEType?WKNavigationResponsePolicyAllow:WKNavigationResponsePolicyCancel);
+    if (!live(self)) { decision(WKNavigationResponsePolicyCancel); return; }
+    NSString *disposition=[response.response isKindOfClass:[NSHTTPURLResponse class]]?[(NSHTTPURLResponse *)response.response valueForHTTPHeaderField:@"Content-Disposition"]:nil;
+    const BOOL attachment=[[disposition stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet].lowercaseString hasPrefix:@"attachment"];
+    if (!attachment && response.canShowMIMEType) decision(WKNavigationResponsePolicyAllow);
+    else decision(download_offer && response.forMainFrame && download_origin(response.response.URL)?WKNavigationResponsePolicyDownload:WKNavigationResponsePolicyCancel);
+}
+- (void)webView:(WKWebView *)webView navigationAction:(WKNavigationAction *)action didBecomeDownload:(WKDownload *)download {
+    (void)webView; (void)action;
+    download.delegate=self;
+}
+- (void)webView:(WKWebView *)webView navigationResponse:(WKNavigationResponse *)response didBecomeDownload:(WKDownload *)download {
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep; (void)response;
+    download.delegate=self;
+    /* The load became the download: it ends now, as the engine's own
+     * interruption would end it later, so the app can navigate at once. */
+    if (live(self) && navigation) {
+        [self finish:navigation error:[NSError errorWithDomain:@"WebKitErrorDomain" code:102 userInfo:@{NSLocalizedDescriptionKey:@"Frame load interrupted by a download"}]];
+        /* The download goes on without the frame's load. */
+        if (live(self) && !pending_navigation) { download_load=YES; [webView stopLoading]; }
+    }
+}
+/* The offer: a download from a granted origin whose known size is within the
+ * limit goes to the app, which keeps it or lets it be cancelled. */
+- (void)download:(WKDownload *)download decideDestinationUsingResponse:(NSURLResponse *)response suggestedFilename:(NSString *)name completionHandler:(void (^)(NSURL *))decide {
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep;
+    const int64_t total=response.expectedContentLength>=0?response.expectedContentLength:-1;
+    NSURL *url=download.originalRequest.URL;
+    NSString *origin=download_origin(url);
+    BOOL allowed=live(self) && download_offer && origin && [download_origins containsObject:origin];
+    if (allowed && total<0) allowed=download_unknown;
+    if (allowed && total>=0) allowed=(uint64_t)total<=download_known_limit;
+    ZwkDownloadCall call={self,download,decide,NO};
+    const char *uri=url.absoluteString.UTF8String, *mime=(response.MIMEType?:@"").UTF8String, *file=(name?:@"").UTF8String;
+    if (allowed && uri && mime && file && strlen(uri)<=65536 && strlen(mime)<=508 && strlen(file)<=1020) download_offer(owner,uri,mime,file,total,&call);
+    call.page=nil;
+    if (!call.deferred) decide(nil);
+}
+- (void)downloadDidFinish:(WKDownload *)download {
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep;
+    ZwkPendingDownload *taken=download_find(self,download);
+    if (!taken) return;
+    const uint64_t received=(uint64_t)MAX(0,taken->progress.completedUnitCount);
+    const int64_t total=taken->progress.totalUnitCount>=0?taken->progress.totalUnitCount:-1;
+    download_unlink(self,taken);
+    if (live(self) && download_notify) download_notify(owner,taken->token,1,received,total,0);
+}
+- (void)download:(WKDownload *)download didFailWithError:(NSError *)error resumeData:(NSData *)resume {
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep; (void)resume;
+    ZwkPendingDownload *taken=download_find(self,download);
+    if (!taken) return;
+    const uint64_t received=(uint64_t)MAX(0,taken->progress.completedUnitCount);
+    const int64_t total=taken->progress.totalUnitCount>=0?taken->progress.totalUnitCount:-1;
+    download_unlink(self,taken);
+    if (live(self) && download_notify) download_notify(owner,taken->token,2,received,total,(int32_t)error.code);
 }
 /* Whether a navigation the engine names is the one in progress. The page's
  * own navigation is known by the first one named after its policy. */
@@ -671,9 +881,50 @@ static void *history_context=&history_context;
     resources_cancel_all(self);
     notify(self,8,nil,0,NULL);
 }
+/* Sign-ins and server certificates, as on Linux. Without the app's
+ * handler a sign-in is canceled, and its load with it; the handler's no is
+ * a sign-in without credentials, which gets the server's refusal. A
+ * certificate that does not verify fails its load unless the app's handler
+ * allows it for a remote page; then it is the page's for its host. */
 - (void)webView:(WKWebView *)webView didReceiveAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition,NSURLCredential *))completion {
-    (void)webView;
-    completion([challenge.protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust]?NSURLSessionAuthChallengePerformDefaultHandling:NSURLSessionAuthChallengeCancelAuthenticationChallenge,nil);
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep; (void)webView;
+    NSURLProtectionSpace *space=challenge.protectionSpace;
+    NSString *method=space.authenticationMethod;
+    if ([method isEqualToString:NSURLAuthenticationMethodServerTrust]) {
+        SecTrustRef trust=space.serverTrust;
+        CFErrorRef error=NULL;
+        if (!trust || SecTrustEvaluateWithError(trust,&error)) { completion(NSURLSessionAuthChallengePerformDefaultHandling,nil); return; }
+        const uint32_t flags=certificate_flags(error);
+        if (error) CFRelease(error);
+        NSData *der=certificate_der(trust);
+        NSString *host=space.host.lowercaseString;
+        if (!der.length || !host.length || !live(self) || !remote || !certificate_fn) { completion(NSURLSessionAuthChallengeCancelAuthenticationChallenge,nil); return; }
+        NSArray *key=@[host,der];
+        BOOL allowed=[allowed_certificates containsObject:key];
+        if (refused_generation!=generation) { refused_certificates=nil; refused_generation=generation; }
+        if (!allowed && [refused_certificates containsObject:key]) { completion(NSURLSessionAuthChallengeCancelAuthenticationChallenge,nil); return; }
+        if (!allowed) {
+            NSString *uri=certificate_uri(self,space);
+            allowed=uri.UTF8String && certificate_fn(owner,uri.UTF8String,flags,der.bytes,der.length) && live(self);
+            if (allowed) {
+                if (!allowed_certificates) allowed_certificates=[NSMutableSet new];
+                [allowed_certificates addObject:key];
+            } else if (live(self)) {
+                if (!refused_certificates) refused_certificates=[NSMutableSet new];
+                [refused_certificates addObject:key];
+            }
+        }
+        completion(allowed?NSURLSessionAuthChallengeUseCredential:NSURLSessionAuthChallengeCancelAuthenticationChallenge,allowed?[NSURLCredential credentialForTrust:trust]:nil);
+        return;
+    }
+    const uint32_t scheme=auth_scheme(method);
+    if (!scheme || !live(self) || !auth_fn) { completion(NSURLSessionAuthChallengeCancelAuthenticationChallenge,nil); return; }
+    ZwkAuthCall call={NULL,NO};
+    const char *host=space.host.UTF8String, *realm=space.realm.UTF8String;
+    auth_fn(owner,host?host:"",(uint32_t)MAX(space.port,0),realm?realm:"",scheme,space.isProxy?1:0,&call);
+    NSURLCredential *credential=call.credential?(__bridge_transfer NSURLCredential *)call.credential:nil;
+    if (!live(self)) { completion(NSURLSessionAuthChallengeCancelAuthenticationChallenge,nil); return; }
+    completion(NSURLSessionAuthChallengeUseCredential,credential);
 }
 
 - (WKWebView *)webView:(WKWebView *)webView createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration forNavigationAction:(WKNavigationAction *)action windowFeatures:(WKWindowFeatures *)features {
@@ -694,8 +945,21 @@ static void *history_context=&history_context;
 - (void)webView:(WKWebView *)webView runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(NSArray<NSURL *> *))completion {
     (void)webView; (void)parameters; (void)frame; completion(nil);
 }
+/* Camera and microphone, the requests the engine asks the app about. The
+ * offer names the document's origin; a request the app does not defer in the
+ * call is denied, as one that no grant covers is. */
 - (void)webView:(WKWebView *)webView requestMediaCapturePermissionForOrigin:(WKSecurityOrigin *)origin initiatedByFrame:(WKFrameInfo *)frame type:(WKMediaCaptureType)type decisionHandler:(void (^)(WKPermissionDecision))decision API_AVAILABLE(macos(12.0)) {
-    (void)webView; (void)origin; (void)frame; (void)type; decision(WKPermissionDecisionDeny);
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep; (void)webView; (void)origin; (void)frame;
+    uint32_t kind=0, needs=0;
+    if (type==WKMediaCaptureTypeMicrophone) { kind=1; needs=1; }
+    else if (type==WKMediaCaptureTypeCamera) { kind=2; needs=2; }
+    else if (type==WKMediaCaptureTypeCameraAndMicrophone) { kind=2; needs=3; }
+    ZwkPermissionCall call={self,decision,NO};
+    /* The document's origin, as on Linux: grants name the page. */
+    NSString *text=kind && document(self) && permission_offer?permission_origin(view.URL):nil;
+    if (text.UTF8String) permission_offer(owner,text.UTF8String,kind,needs,&call);
+    call.page=nil;
+    if (!call.deferred) decision(WKPermissionDecisionDeny);
 }
 
 - (void)userContentController:(WKUserContentController *)controller_value didReceiveScriptMessage:(WKScriptMessage *)message {
@@ -729,6 +993,11 @@ static void *history_context=&history_context;
         if (live(self)) (void)page(self,7,[object _isPlayingAudio]?1u:0u,0,nil);
     } else if (context==history_context) {
         if (!pending_navigation) history_notify(self);
+    } else if (context==download_context) {
+        for (ZwkPendingDownload *taken in [downloads copy]) if (taken->progress==object) {
+            if ([NSThread isMainThread]) download_emit(self,taken);
+            else dispatch_async(dispatch_get_main_queue(),^{ download_emit(self,taken); });
+        }
     } else [super observeValueForKeyPath:path ofObject:object change:change context:context];
 }
 @end
@@ -858,13 +1127,13 @@ static BOOL response_reserved(const char *name) {
     for (size_t i=0;i<sizeof(reserved)/sizeof(*reserved);++i) if (!strcasecmp(name,reserved[i])) return YES;
     return NO;
 }
-/* One response of the site, with its security headers. The body holds its
- * budget while it is handed to the engine. */
-static int local_respond(ZwkPage *s,id<WKURLSchemeTask> task,BOOL head,uint32_t status,const uint8_t *mime,size_t mime_length,
-    const uint8_t *body,size_t length,const ZwkResponseHeader *rows,uint32_t count) {
+/* The response head of the site, with its security headers. */
+static int local_response(ZwkPage *s,id<WKURLSchemeTask> task,uint32_t status,const uint8_t *mime,size_t mime_length,
+    uint64_t length,const ZwkResponseHeader *rows,uint32_t count,NSHTTPURLResponse **out) {
     char mime_text[128];
+    *out=nil;
     if (status<200 || status>599 || !mime_length || !response_text(mime_text,mime,mime_length,127,NO) || count>16 || (count && !rows) ||
-        (length && !body) || length>s->local_limit || ((status==204 || status==205 || status==304) && length)) return ZWK_INVALID;
+        ((status==204 || status==205 || status==304) && length)) return ZWK_INVALID;
     NSMutableDictionary<NSString *,NSString *> *headers=[NSMutableDictionary dictionaryWithCapacity:count+5];
     size_t bytes=0;
     for (uint32_t i=0;i<count;++i) {
@@ -877,14 +1146,23 @@ static int local_respond(ZwkPage *s,id<WKURLSchemeTask> task,BOOL head,uint32_t 
         headers[key]=[NSString stringWithUTF8String:value];
     }
     headers[@"Content-Type"]=[NSString stringWithUTF8String:mime_text];
-    headers[@"Content-Length"]=[NSString stringWithFormat:@"%zu",length];
+    headers[@"Content-Length"]=[NSString stringWithFormat:@"%llu",(unsigned long long)length];
     headers[@"Content-Security-Policy"]=s->local_csp;
     headers[@"Cache-Control"]=@"no-store";
     headers[@"X-Content-Type-Options"]=@"nosniff";
+    *out=[[NSHTTPURLResponse alloc] initWithURL:task.request.URL statusCode:(NSInteger)status HTTPVersion:@"HTTP/1.1" headerFields:headers];
+    return *out?ZWK_OK:ZWK_OOM;
+}
+/* One response of the site. The body holds its budget while it is handed to
+ * the engine. */
+static int local_respond(ZwkPage *s,id<WKURLSchemeTask> task,BOOL head,uint32_t status,const uint8_t *mime,size_t mime_length,
+    const uint8_t *body,size_t length,const ZwkResponseHeader *rows,uint32_t count) {
+    if ((length && !body) || length>s->local_limit) return ZWK_INVALID;
+    NSHTTPURLResponse *response=nil;
+    const int made=local_response(s,task,status,mime,mime_length,length,rows,count,&response);
+    if (made!=ZWK_OK) return made;
     const int reserved=head?0:(int)length;
     if (!local_body_reserve(s->local_budget,reserved)) return ZWK_FULL;
-    NSHTTPURLResponse *response=[[NSHTTPURLResponse alloc] initWithURL:task.request.URL statusCode:(NSInteger)status HTTPVersion:@"HTTP/1.1" headerFields:headers];
-    if (!response) { local_body_release(s->local_budget,reserved); return ZWK_OOM; }
     [task didReceiveResponse:response];
     if (reserved) [task didReceiveData:[NSData dataWithBytes:body length:length]];
     [task didFinish];
@@ -921,6 +1199,7 @@ void zwk_resource_cancel(ZwkState *state,uint64_t token) {
         if (slot) [slot->task didFailWithError:local_denied()];
     }
 }
+static void transfers_stop(ZwkPage *s,id<WKURLSchemeTask> task);
 static void resources_cancel_all(ZwkPage *s) {
     while (s->deferred.count) {
         ZwkDeferred *slot=s->deferred.lastObject;
@@ -928,6 +1207,11 @@ static void resources_cancel_all(ZwkPage *s) {
         atomic_fetch_sub(&live_resource_requests,1);
         [slot->task didFailWithError:local_denied()];
     }
+    for (unsigned i=0;i<ZWK_FILE_VIEW_LIMIT;++i) {
+        ZwkFileControl *control=s->file_controls[i]; s->file_controls[i]=NULL;
+        if (control) { zwk_file_control_cancel(control); zwk_file_control_release(control); }
+    }
+    transfers_stop(s,nil);
 }
 void zwk_resource_cancel_all(ZwkState *state) { @autoreleasepool { resources_cancel_all(page_of(state)); } }
 int zwk_resource_respond(void *opaque,uint32_t status,const uint8_t *mime,size_t mime_length,const uint8_t *body,size_t length,const ZwkResponseHeader *headers,uint32_t count) {
@@ -964,12 +1248,110 @@ int zwk_resource_respond_deferred(ZwkState *state,uint64_t token,uint32_t status
         return result;
     }
 }
-/* File streams are of the Linux backend; macOS sites answer with bytes. */
-int zwk_resource_respond_file(void *request,ZwkFile *file,uint64_t length,ZwkFileBudget *budget,uint32_t status,const uint8_t *mime,size_t mime_length,const ZwkResponseHeader *headers,uint32_t count,int ticket,ZwkFileControl **out) {
-    (void)request; (void)file; (void)length; (void)budget; (void)status; (void)mime; (void)mime_length; (void)headers; (void)count; (void)ticket; *out=NULL; return ZWK_INVALID;
+/* A file response: the head now, then the body as the app's pump writes it
+ * to the private socket, read on the main queue whenever it is readable. A
+ * stopped request cancels the transfer; a failed or short one fails. */
+@interface ZwkFileTransfer : NSObject {
+@public
+    id<WKURLSchemeTask> task;
+    dispatch_source_t source;
+    BOOL done;
 }
-int zwk_resource_respond_file_deferred(ZwkState *s,uint64_t token,ZwkFile *file,uint64_t length,ZwkFileBudget *budget,uint32_t status,const uint8_t *mime,size_t mime_length,const ZwkResponseHeader *headers,uint32_t count,int ticket,ZwkFileControl **out) {
-    (void)s; (void)token; (void)file; (void)length; (void)budget; (void)status; (void)mime; (void)mime_length; (void)headers; (void)count; (void)ticket; *out=NULL; return ZWK_INVALID;
+@end
+@implementation ZwkFileTransfer
+@end
+static NSError *file_failed(void) {
+    return [NSError errorWithDomain:@"ziggurat-local-resource" code:2 userInfo:@{NSLocalizedDescriptionKey:@"File response failed"}];
+}
+/* Ends a transfer once: tells the task unless it was stopped, and lets the
+ * source go, whose cancel handler closes the reader. */
+static void transfer_end(ZwkPage *s,ZwkFileTransfer *transfer,int outcome) {
+    if (transfer->done) return;
+    transfer->done=YES;
+    if (outcome==1) [transfer->task didFinish];
+    else if (outcome==0) [transfer->task didFailWithError:file_failed()];
+    dispatch_source_cancel(transfer->source);
+    transfer->source=nil;
+    [s->transfers removeObjectIdenticalTo:transfer];
+}
+static void transfer_read(ZwkPage *s,ZwkFileTransfer *transfer,ZwkFileReader *reader) {
+    uint8_t bytes[ZWK_FILE_CHUNK_BYTES];
+    /* A bounded batch per wakeup keeps the main queue responsive. */
+    for (int round=0;round<8 && !transfer->done;++round) {
+        const ssize_t n=zwk_file_reader_read(reader,bytes,sizeof(bytes));
+        if (n==ZWK_FILE_READ_WAIT) return;
+        if (n>0) { [transfer->task didReceiveData:[NSData dataWithBytes:bytes length:(NSUInteger)n]]; continue; }
+        transfer_end(s,transfer,n==0?1:0);
+    }
+}
+static void transfers_stop(ZwkPage *s,id<WKURLSchemeTask> task) {
+    for (ZwkFileTransfer *transfer in [s->transfers copy]) if (!task || transfer->task==task) transfer_end(s,transfer,task?2:0);
+}
+static int resource_file(ZwkPage *s,id<WKURLSchemeTask> task,BOOL head,uint64_t generation,
+    ZwkFile *file,uint64_t length,ZwkFileBudget *budget,uint32_t status,const uint8_t *mime,size_t mime_length,
+    const ZwkResponseHeader *headers,uint32_t count,int want_ticket,ZwkFileControl **ticket) {
+    *ticket=NULL;
+    if (!live(s) || generation!=s->generation || !s->resource_fn) return ZWK_CLOSED;
+    if (!file || !budget || length!=zwk_file_length(file) || length>ZWK_FILE_MAX_BYTES) return ZWK_INVALID;
+    unsigned slot=ZWK_FILE_VIEW_LIMIT;
+    for (unsigned i=0;i<ZWK_FILE_VIEW_LIMIT;++i) {
+        ZwkFileControl *control=s->file_controls[i];
+        if (control && !zwk_file_control_alive(control)) { s->file_controls[i]=NULL; zwk_file_control_release(control); }
+        if (!s->file_controls[i] && slot==ZWK_FILE_VIEW_LIMIT) slot=i;
+    }
+    if (slot==ZWK_FILE_VIEW_LIMIT) return ZWK_FULL;
+    NSHTTPURLResponse *response=nil;
+    int result=local_response(s,task,status,mime,mime_length,length,headers,count,&response);
+    if (result!=ZWK_OK) return result;
+    ZwkFileCandidate *candidate=NULL; int native_errno=0;
+    const int file_result=zwk_file_prepare_stream(file,budget,head,&candidate,&native_errno);
+    if (file_result!=ZWK_FILE_OK) {
+        if (native_errno) s->failure=(ZwkFailure){domain_code(NSPOSIXErrorDomain),native_errno};
+        return file_result==ZWK_FILE_FULL?ZWK_FULL:file_result==ZWK_FILE_OOM?ZWK_OOM:file_result==ZWK_FILE_CANCELLED?ZWK_CLOSED:file_result==ZWK_FILE_IO?ZWK_NATIVE_FAILED:ZWK_INVALID;
+    }
+    ZwkFileReader *reader=zwk_file_candidate_reader(candidate);
+    ZwkFileTransfer *transfer=[ZwkFileTransfer new];
+    dispatch_source_t source=transfer?dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,(uintptr_t)zwk_file_reader_fd(reader),0,dispatch_get_main_queue()):nil;
+    if (!source) { zwk_file_candidate_abort(candidate); return ZWK_OOM; }
+    ZwkFileControl *control=zwk_file_candidate_control(candidate);
+    zwk_file_control_add(control); s->file_controls[slot]=control;
+    zwk_file_reader_add(reader);
+    transfer->task=task; transfer->source=source;
+    if (!s->transfers) s->transfers=[NSMutableArray new];
+    [s->transfers addObject:transfer];
+    __weak ZwkPage *weak_page=s;
+    __weak ZwkFileTransfer *weak_transfer=transfer;
+    dispatch_source_set_event_handler(source,^{
+        ZwkPage *page_value=weak_page; ZwkFileTransfer *current=weak_transfer;
+        if (page_value && current && !current->done) transfer_read(page_value,current,reader);
+    });
+    /* Closing the reader before its end cancels the pump. */
+    dispatch_source_set_cancel_handler(source,^{ zwk_file_reader_release(reader); });
+    [task didReceiveResponse:response];
+    zwk_file_candidate_admit(candidate,!live(s) || generation!=s->generation,want_ticket,ticket);
+    dispatch_resume(source);
+    return ZWK_OK;
+}
+int zwk_resource_respond_file(void *opaque,ZwkFile *file,uint64_t length,ZwkFileBudget *budget,uint32_t status,const uint8_t *mime,size_t mime_length,const ZwkResponseHeader *headers,uint32_t count,int ticket,ZwkFileControl **out) {
+    ResourceCall *call=opaque; ZwkPage *s=(__bridge ZwkPage *)call->page;
+    *out=NULL;
+    if (call->responded) return ZWK_INVALID;
+    @autoreleasepool {
+        const int result=resource_file(s,call->task,call->head,call->generation,file,length,budget,status,mime,mime_length,headers,count,ticket,out);
+        if (result==ZWK_OK) call->responded=YES;
+        return result;
+    }
+}
+int zwk_resource_respond_file_deferred(ZwkState *state,uint64_t token,ZwkFile *file,uint64_t length,ZwkFileBudget *budget,uint32_t status,const uint8_t *mime,size_t mime_length,const ZwkResponseHeader *headers,uint32_t count,int ticket,ZwkFileControl **out) {
+    ZwkPage *s=page_of(state);
+    *out=NULL;
+    @autoreleasepool {
+        ZwkDeferred *slot=resource_take(s,token);
+        if (!slot) return ZWK_CLOSED;
+        const int result=resource_file(s,slot->task,slot->head,slot->generation,file,length,budget,status,mime,mime_length,headers,count,ticket,out);
+        if (result!=ZWK_OK) [slot->task didFailWithError:local_denied()];
+        return result;
+    }
 }
 /* Hands one request to the app's handler. What it neither answers nor
  * defers fails as a refused load. */
@@ -1031,6 +1413,7 @@ static BOOL local_serve(ZwkPage *s,WKWebView *webView,id<WKURLSchemeTask> task) 
     (void)webView;
     ZwkPage *s=site_page;
     if (!s) return;
+    transfers_stop(s,task);
     ZwkDeferred *found=nil;
     for (ZwkDeferred *slot in s->deferred) if (slot->task==task) { found=slot; break; }
     if (!found) return;
@@ -1245,6 +1628,203 @@ static void set_muted(ZwkPage *s,BOOL value) {
     if (!engine_has(s->view,@selector(_setPageMuted:))) return;
     NSUInteger state=engine_has(s->view,@selector(_mediaMutedState))?[s->view _mediaMutedState]:0;
     [s->view _setPageMuted:value?(state|MEDIA_AUDIO_MUTED):(state&~(NSUInteger)MEDIA_AUDIO_MUTED)];
+}
+
+/* Document initializers: the app's trusted script for every future document,
+ * as the Linux backend registers it. The page keeps the current script and
+ * installs it after its own bootstrap scripts whenever it prepares a
+ * document; replacing it takes effect from the next document. WKWebView
+ * removes user scripts only all together, so a change reinstalls the set. */
+typedef struct ZwkInitializerBudget {
+    atomic_uint refs;
+    size_t limit;
+    _Atomic size_t used,peak;
+} ZwkInitializerBudget;
+typedef struct ZwkInitializerOperation ZwkInitializerOperation;
+struct ZwkInitializerState {
+    ZwkInitializerBudget *budget;
+    void *current; /* A retained WKUserScript, or NULL. */
+    ZwkInitializerOperation *pending;
+    BOOL blocked;
+};
+struct ZwkInitializerOperation {
+    ZwkState *state;
+    ZwkInitializerBudget *budget;
+    ZwkInitializerNotify notify;
+    uint64_t token;
+    char *source;
+    size_t bytes;
+    BOOL all_frames,submitted,cancelled;
+};
+static atomic_uint initializer_budgets,initializer_owners,initializer_operations;
+static _Atomic size_t initializer_bytes;
+void zwk_initializer_budget_retain(void *context) {
+    ZwkInitializerBudget *budget=context; atomic_fetch_add(&budget->refs,1);
+}
+void zwk_initializer_budget_unref(void *context) {
+    ZwkInitializerBudget *budget=context;
+    if (atomic_fetch_sub(&budget->refs,1)!=1) return;
+    atomic_fetch_sub(&initializer_bytes,sizeof(*budget)); free(budget); atomic_fetch_sub(&initializer_budgets,1);
+}
+_Bool zwk_initializer_budget_reserve(void *context,size_t bytes) {
+    ZwkInitializerBudget *budget=context; size_t used=atomic_load(&budget->used),next;
+    do {
+        if (bytes>budget->limit || used>budget->limit-bytes) return 0;
+        next=used+bytes;
+    } while (!atomic_compare_exchange_weak(&budget->used,&used,next));
+    size_t peak=atomic_load(&budget->peak);
+    while (peak<next && !atomic_compare_exchange_weak(&budget->peak,&peak,next)) {}
+    atomic_fetch_add(&initializer_bytes,bytes); return 1;
+}
+void zwk_initializer_budget_release(void *context,size_t bytes) {
+    ZwkInitializerBudget *budget=context;
+    atomic_fetch_sub(&budget->used,bytes); atomic_fetch_sub(&initializer_bytes,bytes);
+}
+void *zwk_initializer_budget_create(size_t limit,int32_t *status) {
+    *status=ZWK_INVALID;
+    if (!limit || limit>8u*1024u*1024u) return NULL;
+    if (limit<sizeof(ZwkInitializerBudget)) { *status=ZWK_INITIALIZER_BUDGET; return NULL; }
+    ZwkInitializerBudget *budget=calloc(1,sizeof(*budget)); if (!budget) { *status=ZWK_OOM; return NULL; }
+    atomic_init(&budget->refs,1); budget->limit=limit; atomic_init(&budget->used,sizeof(*budget)); atomic_init(&budget->peak,sizeof(*budget));
+    atomic_fetch_add(&initializer_budgets,1); atomic_fetch_add(&initializer_bytes,sizeof(*budget)); *status=ZWK_OK; return budget;
+}
+size_t zwk_initializer_budget_limit(void *context) { return ((ZwkInitializerBudget *)context)->limit; }
+void zwk_initializer_counts(uint32_t *budgets,uint32_t *owners,uint32_t *operations,uint64_t *bytes) {
+    *budgets=atomic_load(&initializer_budgets); *owners=atomic_load(&initializer_owners);
+    *operations=atomic_load(&initializer_operations); *bytes=atomic_load(&initializer_bytes);
+}
+static void initializers_free(ZwkInitializerState *owner) {
+    if (!owner) return;
+    ZwkInitializerBudget *budget=owner->budget;
+    if (owner->current) CFRelease(owner->current);
+    free(owner); zwk_initializer_budget_release(budget,sizeof(*owner)); atomic_fetch_sub(&initializer_owners,1); zwk_initializer_budget_unref(budget);
+}
+static int initializers_owner(ZwkPage *s,ZwkInitializerBudget *budget) {
+    if (s->initializers) return s->initializers->budget==budget?ZWK_OK:ZWK_INVALID;
+    if (!zwk_initializer_budget_reserve(budget,sizeof(ZwkInitializerState))) return ZWK_INITIALIZER_BUDGET;
+    ZwkInitializerState *owner=calloc(1,sizeof(*owner));
+    if (!owner) { zwk_initializer_budget_release(budget,sizeof(*owner)); return ZWK_OOM; }
+    zwk_initializer_budget_retain(budget); owner->budget=budget; s->initializers=owner; atomic_fetch_add(&initializer_owners,1); return ZWK_OK;
+}
+static BOOL initializers_allow_navigation(ZwkPage *s) {
+    return !s->initializers || (!s->initializers->pending && !s->initializers->blocked);
+}
+_Bool zwk_initializers_blocked(ZwkState *state) { ZwkPage *s=page_of(state); return s->initializers && s->initializers->blocked; }
+static void initializer_operation_free(ZwkInitializerOperation *op) {
+    ZwkState *state=op->state; ZwkInitializerBudget *budget=op->budget; const size_t bytes=op->bytes;
+    free(op->source); free(op); zwk_initializer_budget_release(budget,bytes); atomic_fetch_sub(&initializer_operations,1);
+    CFRelease(state); zwk_initializer_budget_unref(budget);
+}
+static BOOL initializer_scalar(const uint16_t *source,uint32_t units,uint32_t *index,uint32_t *scalar) {
+    uint32_t value=source[(*index)++];
+    if (!value || (value>=0xdc00 && value<=0xdfff)) return NO;
+    if (value>=0xd800 && value<=0xdbff) {
+        if (*index==units) return NO;
+        const uint32_t low=source[(*index)++]; if (low<0xdc00 || low>0xdfff) return NO;
+        value=0x10000+((value-0xd800)<<10)+(low-0xdc00);
+    }
+    *scalar=value; return YES;
+}
+/* Removes every user script, then installs the document's bootstrap scripts
+ * and the app's initializer after them. */
+static void scripts_install(ZwkPage *s) {
+    if (!s->controller) return;
+    [s->controller removeAllUserScripts];
+    if (s->private_bootstrap) [s->controller addUserScript:s->private_bootstrap];
+    if (s->public_bootstrap) [s->controller addUserScript:s->public_bootstrap];
+    if (s->initializers && s->initializers->current) [s->controller addUserScript:(__bridge WKUserScript *)s->initializers->current];
+}
+int zwk_initializers_prepare(ZwkState *state,const ZwkInitializerInput *input,uint64_t token,ZwkInitializerNotify done) {
+    ZwkPage *s=page_of(state);
+    if (!live(s)) return ZWK_CLOSED;
+    if (!input || !input->budget) return ZWK_INVALID;
+    if (!initializers_allow_navigation(s)) return ZWK_NAVIGATION_PENDING;
+    if (token && (!s->view || s->pending_navigation || s->load_started || s->view.loading)) return ZWK_NAVIGATION_PENDING;
+    if (input->units>512u*1024u || (!input->source && input->units)) return ZWK_INVALID;
+    size_t length=0;
+    if (input->source) {
+        if (input->source[input->units]) return ZWK_INVALID;
+        for (uint32_t index=0;index<input->units;) {
+            uint32_t scalar; if (!initializer_scalar(input->source,input->units,&index,&scalar)) return ZWK_INVALID;
+            length+=scalar<0x80?1:scalar<0x800?2:scalar<0x10000?3:4;
+        }
+        ++length;
+    }
+    int result=initializers_owner(s,input->budget); if (result!=ZWK_OK) return result;
+    const size_t bytes=sizeof(ZwkInitializerOperation)+length;
+    if (!zwk_initializer_budget_reserve(input->budget,bytes)) return ZWK_INITIALIZER_BUDGET;
+    ZwkInitializerOperation *op=calloc(1,sizeof(*op));
+    if (!op) { zwk_initializer_budget_release(input->budget,bytes); return ZWK_OOM; }
+    if (length) {
+        op->source=malloc(length);
+        if (!op->source) { free(op); zwk_initializer_budget_release(input->budget,bytes); return ZWK_OOM; }
+        char *out=op->source;
+        for (uint32_t index=0;index<input->units;) {
+            uint32_t scalar; initializer_scalar(input->source,input->units,&index,&scalar);
+            if (scalar<0x80) *out++=(char)scalar;
+            else if (scalar<0x800) { *out++=(char)(0xc0|(scalar>>6)); *out++=(char)(0x80|(scalar&63)); }
+            else if (scalar<0x10000) { *out++=(char)(0xe0|(scalar>>12)); *out++=(char)(0x80|((scalar>>6)&63)); *out++=(char)(0x80|(scalar&63)); }
+            else { *out++=(char)(0xf0|(scalar>>18)); *out++=(char)(0x80|((scalar>>12)&63)); *out++=(char)(0x80|((scalar>>6)&63)); *out++=(char)(0x80|(scalar&63)); }
+        }
+        *out=0;
+    }
+    op->state=state; op->budget=input->budget; op->token=token; op->all_frames=input->frames!=0; op->notify=done; op->bytes=bytes;
+    CFRetain(state); zwk_initializer_budget_retain(op->budget); s->initializers->pending=op; atomic_fetch_add(&initializer_operations,1);
+    return ZWK_OK;
+}
+void zwk_initializers_abandon(ZwkState *state) {
+    ZwkPage *s=page_of(state);
+    ZwkInitializerOperation *op=s->initializers?s->initializers->pending:NULL;
+    if (!op || op->submitted) return;
+    s->initializers->pending=NULL; initializer_operation_free(op);
+}
+void zwk_initializers_cancel(ZwkState *state,uint64_t token) {
+    ZwkPage *s=page_of(state);
+    ZwkInitializerOperation *op=s->initializers?s->initializers->pending:NULL;
+    if (op && op->token==token) op->cancelled=YES;
+}
+_Bool zwk_initializers_try_cancel(ZwkState *state,uint64_t token) {
+    ZwkPage *s=page_of(state);
+    ZwkInitializerOperation *op=s->initializers?s->initializers->pending:NULL;
+    if (!op || op->token!=token || op->submitted || op->cancelled) return 0;
+    op->cancelled=YES; return 1;
+}
+static void initializers_cancel_all(ZwkPage *s) {
+    ZwkInitializerOperation *op=s->initializers?s->initializers->pending:NULL;
+    if (!op) return;
+    op->cancelled=YES;
+    if (!op->submitted) { s->initializers->pending=NULL; initializer_operation_free(op); }
+}
+void zwk_initializers_activate(ZwkState *state) {
+    ZwkPage *s=page_of(state);
+    ZwkInitializerOperation *op=s->initializers?s->initializers->pending:NULL;
+    if (!op || op->submitted) return;
+    CFRetain(state);
+    ZwkInitializerState *owner=s->initializers; uint32_t kind=1; int32_t result=ZWK_OK;
+    @autoreleasepool {
+        if (live(s) && !op->cancelled) {
+            WKUserScript *candidate=nil;
+            NSString *source=op->source?[NSString stringWithUTF8String:op->source]:nil;
+            if (source) candidate=[[WKUserScript alloc] initWithSource:source injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:!op->all_frames inContentWorld:WKContentWorld.pageWorld];
+            if (op->source && !candidate) { kind=2; result=ZWK_NATIVE_FAILED; }
+            else {
+                op->submitted=YES;
+                void *old=owner->current;
+                owner->current=candidate?(void *)CFBridgingRetain(candidate):NULL;
+                if (old) CFRelease(old);
+                /* The current document keeps the scripts it started with in
+                 * effect; the set changes for the next one. */
+                scripts_install(s);
+                kind=0;
+            }
+        }
+    }
+    owner->pending=NULL;
+    const uint64_t token=op->token; ZwkInitializerNotify done=op->notify;
+    initializer_operation_free(op);
+    if (live(s) && token && done) done(s->owner,token,kind,result);
+    else if (!token && kind!=0 && live(s)) owner->blocked=YES;
+    CFRelease(state);
 }
 
 /* Persistent profiles. A profile's WKWebsiteDataStore keeps its data under
@@ -1850,16 +2430,28 @@ void zwk_cookies_counts(uint32_t *stores,uint32_t *ops,size_t *bytes) {
     if (bytes) *bytes=atomic_load(&live_cookie_bytes);
 }
 
-int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPageNotify page_callback,ZwkScriptNotify script_callback,ZwkDeadline deadline,void *owner,ZwkState **out) {
+/* Backing pixels per point where a view is, or would be shown. */
+static CGFloat view_scale(NSView *view) {
+    const CGFloat scale=view.window?view.window.backingScaleFactor:NSScreen.mainScreen.backingScaleFactor;
+    return scale>0?scale:1;
+}
+/* A page in window, filling its content; in a region of it, placed later; or
+ * a session's, without a window, width x height pixels until mounted. */
+static int page_create(void *window,BOOL session,uint32_t width,uint32_t height,const ZwkOptions *options,ZwkNotify callback,ZwkPageNotify page_callback,ZwkScriptNotify script_callback,ZwkDeadline deadline,void *owner,ZwkState **out) {
     *out=NULL;
-    if (!options || !options->html || !window || options->max_pending==0 || options->max_pending>16 || options->max_result_bytes==0 ||
-        options->max_result_bytes>1024*1024 || strlen(options->html)>16*1024*1024) return ZWK_INVALID;
-    if ((options->remote && (options->local || *options->html)) || options->region || options->initializers) return ZWK_INVALID;
+    if (!options || !options->html || (!window && !session) || options->max_pending==0 || options->max_pending>16 || options->max_result_bytes==0 ||
+        options->max_result_bytes>1024*1024 || strlen(options->html)>16*1024*1024 || options->region>1) return ZWK_INVALID;
+    if ((options->remote && (options->local || *options->html)) || (session && options->region)) return ZWK_INVALID;
+    if (session) {
+        /* Whole points only, as WebKitGTK allocates them. */
+        const uint32_t scale=(uint32_t)MAX(1,lround(view_scale(nil)));
+        if (!width || !height || width%scale || height%scale || width/scale>32768 || height/scale>32768) return ZWK_GEOMETRY_NOT_APPLIED;
+    }
     void *profile_store_ref=NULL;
     if (options->profile_context && zwk_profile_context_get(options->profile_context,&profile_store_ref)) return ZWK_CLOSED;
     @autoreleasepool {
-        NSView *host=(__bridge NSView *)zlm_window_content(window);
-        if (!host) return ZWK_CLOSED;
+        NSView *host=window?(__bridge NSView *)zlm_window_content(window):nil;
+        if (window && !host) return ZWK_CLOSED;
         NSString *html=[NSString stringWithUTF8String:options->html];
         if (!html) return ZWK_INVALID;
         ZwkPage *s=[[ZwkPage alloc] init];
@@ -1877,7 +2469,16 @@ int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPage
         if (options->facts && !(s->facts=[NSString stringWithUTF8String:options->facts])) return ZWK_INVALID;
         s->autoplay=options->autoplay!=0;
         s->owner=owner; s->notify_fn=callback; s->page_fn=page_callback; s->script_fn=script_callback; s->deadline_fn=deadline;
-        s->limit=options->max_pending; s->result_limit=options->max_result_bytes; s->policy=options->policy_flags;
+        s->limit=options->max_pending; s->result_limit=options->max_result_bytes; s->policy=options->policy_flags; s->permission_offer=options->permission;
+        if (options->download_offer && options->download_notify && options->download_origin_count && options->download_origin_count<=8 && options->download_origins) {
+            NSMutableArray *origins=[NSMutableArray arrayWithCapacity:options->download_origin_count];
+            for (uint32_t i=0;i<options->download_origin_count;++i) {
+                NSString *origin=options->download_origins[i]?[NSString stringWithUTF8String:options->download_origins[i]]:nil;
+                if (origin) [origins addObject:origin.lowercaseString];
+            }
+            s->download_origins=origins; s->download_offer=options->download_offer; s->download_notify=options->download_notify;
+            s->download_unknown=options->download_unknown!=0; s->download_known_limit=options->download_known_limit; s->download_received_limit=options->download_received_limit;
+        } s->auth_fn=options->auth; s->certificate_fn=options->certificate;
         NSMutableArray<WKContentRuleList *> *filters=[NSMutableArray arrayWithCapacity:options->content_filter_count];
         for (uint32_t i=0;i<options->content_filter_count;i++) [filters addObject:(__bridge WKContentRuleList *)options->content_filters[i]];
         s->filters=filters;
@@ -1890,6 +2491,11 @@ int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPage
         /* History loads documents anew, with new generations, as on Linux:
          * a cached page would come back with its old scripts. */
         if ([configuration.preferences respondsToSelector:@selector(_setUsesPageCache:)]) [configuration.preferences _setUsesPageCache:NO];
+        /* An app that answers permissions gets the page's getUserMedia. */
+        if (options->permission) {
+            SEL devices=sel_registerName("_setMediaDevicesEnabled:");
+            if ([configuration.preferences respondsToSelector:devices]) ((void (*)(id,SEL,BOOL))objc_msgSend)(configuration.preferences,devices,YES);
+        }
         s->controller=configuration.userContentController;
         s->world=[WKContentWorld worldWithName:@"ziggurat-private"];
         if (s->local) {
@@ -1906,10 +2512,23 @@ int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPage
 #pragma clang diagnostic pop
         }
         [s->controller addScriptMessageHandler:s contentWorld:s->world name:@"ziggurat"];
-        ZwkWebView *view=[[ZwkWebView alloc] initWithFrame:host.bounds configuration:configuration];
-        if (!view) { [s->controller removeAllScriptMessageHandlers]; local_free(s); remote_free(s); return ZWK_NATIVE_FAILED; }
+        if (options->initializers) {
+            const int result=zwk_initializers_prepare((__bridge ZwkState *)s,options->initializers,0,NULL);
+            if (result!=ZWK_OK) { [s->controller removeAllScriptMessageHandlers]; local_free(s); remote_free(s); return result; }
+        }
+        const CGFloat scale=host?view_scale(host):view_scale(nil);
+        const NSRect frame=session?NSMakeRect(0,0,width/scale,height/scale):options->region?NSZeroRect:host.bounds;
+        ZwkWebView *view=[[ZwkWebView alloc] initWithFrame:frame configuration:configuration];
+        if (!view) {
+            zwk_initializers_abandon((__bridge ZwkState *)s);
+            [s->controller removeAllScriptMessageHandlers]; local_free(s); remote_free(s); return ZWK_NATIVE_FAILED;
+        }
         s->view=view; atomic_fetch_add(&live_views,1);
-        view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
+        /* A failed registration blocks the first document. */
+        if (options->initializers) zwk_initializers_activate((__bridge ZwkState *)s);
+        if (session) { s->session=YES; s->session_width=width; s->session_height=height; }
+        else if (options->region) { s->region_mode=YES; view.hidden=YES; }
+        else view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
         view.navigationDelegate=s; view.UIDelegate=s;
         /* 1 swipes between pages, 2 pinches; both off unless asked. */
         view.allowsBackForwardNavigationGestures=(options->gestures&1u)!=0;
@@ -1925,23 +2544,234 @@ int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPage
             [view addObserver:s forKeyPath:@"canGoForward" options:0 context:history_context];
         }
         s->observing=YES;
-        [host addSubview:view];
+        if (host) [host addSubview:view];
         dispatch_async(dispatch_get_main_queue(),^{ initialize(s); });
         *out=(__bridge_retained void *)s;
     }
     return ZWK_OK;
 }
+int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPageNotify page_callback,ZwkScriptNotify script_callback,ZwkDeadline deadline,void *owner,ZwkState **out) {
+    return page_create(window,NO,0,0,options,callback,page_callback,script_callback,deadline,owner,out);
+}
 int zwk_session_create(const ZwkOptions *options,uint32_t width,uint32_t height,ZwkNotify callback,ZwkPageNotify page_callback,ZwkScriptNotify script_callback,ZwkDeadline deadline,void *owner,ZwkState **out) {
-    (void)options; (void)width; (void)height; (void)callback; (void)page_callback; (void)script_callback; (void)deadline; (void)owner;
-    *out=NULL; return ZWK_INVALID;
+    return page_create(NULL,YES,width,height,options,callback,page_callback,script_callback,deadline,owner,out);
 }
-int zwk_session_mount(ZwkState *s,void *window,int32_t left,int32_t top,int32_t right,int32_t bottom,int visible,uint64_t epoch) {
-    (void)s; (void)window; (void)left; (void)top; (void)right; (void)bottom; (void)visible; (void)epoch; return ZWK_INVALID;
+static int floor_scale(int32_t value,int32_t scale) { const int32_t q=value/scale, r=value%scale; return q-(r<0); }
+static int ceil_scale(int32_t value,int32_t scale) { const int32_t q=value/scale, r=value%scale; return q+(r>0); }
+/* Places the view at pixel edges of its window's content, which is flipped:
+ * whole points covering the pixels, as on Linux. An empty or hidden viewport
+ * hides the view and keeps its last size. */
+static int place_view(ZwkPage *s,int32_t left,int32_t top,int32_t right,int32_t bottom,int visible) {
+    NSView *view=s->view;
+    if (!view.superview) return ZWK_CLOSED;
+    const int32_t scale=(int32_t)MAX(1,lround(view_scale(view)));
+    const int32_t x=floor_scale(left,scale), y=floor_scale(top,scale);
+    const int64_t width=(int64_t)ceil_scale(right,scale)-x, height=(int64_t)ceil_scale(bottom,scale)-y;
+    if (right<left || bottom<top || width>32768 || height>32768) return ZWK_INVALID;
+    const BOOL shown=visible && width>0 && height>0;
+    if (width>0 && height>0) view.frame=NSMakeRect(x,y,(CGFloat)width,(CGFloat)height);
+    view.hidden=!shown;
+    return ZWK_OK;
 }
-int zwk_session_park(ZwkState *s,uint64_t epoch) { (void)s; (void)epoch; return ZWK_INVALID; }
-int zwk_session_size(ZwkState *s,uint32_t *width,uint32_t *height) { (void)s; *width=0; *height=0; return ZWK_INVALID; }
-void zwk_session_parent_destroying(ZwkState *s,uint64_t epoch) { (void)s; (void)epoch; }
+int zwk_session_mount(ZwkState *state,void *window,int32_t left,int32_t top,int32_t right,int32_t bottom,int visible,uint64_t epoch) {
+    ZwkPage *s=page_of(state);
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=s; (void)keep;
+    if (!live(s) || !s->session || !s->view) return ZWK_CLOSED;
+    if (s->placement_busy) return ZWK_FULL;
+    if (!epoch || (s->session_parent?(s->session_epoch!=epoch || s->session_parent!=window):epoch<s->session_epoch)) return ZWK_INVALID;
+    s->placement_busy=YES;
+    int result=ZWK_OK;
+    @autoreleasepool {
+        const BOOL attaching=!s->session_parent;
+        const NSRect old_frame=s->view.frame; const BOOL old_hidden=s->view.hidden;
+        if (attaching) {
+            NSView *host=window?(__bridge NSView *)zlm_window_content(window):nil;
+            if (!host) { s->placement_busy=NO; return ZWK_CLOSED; }
+            s->view.hidden=YES;
+            [host addSubview:s->view];
+            s->session_parent=window; s->session_epoch=epoch;
+        }
+        result=place_view(s,left,top,right,bottom,visible);
+        if (result!=ZWK_OK) {
+            if (attaching) { [s->view removeFromSuperview]; s->session_parent=NULL; s->view.frame=old_frame; }
+            else s->view.frame=old_frame;
+            s->view.hidden=old_hidden;
+        } else if (right>left && bottom>top) {
+            const CGFloat scale=view_scale(s->view);
+            s->session_width=(uint32_t)MAX(1,lround(s->view.frame.size.width*scale));
+            s->session_height=(uint32_t)MAX(1,lround(s->view.frame.size.height*scale));
+        }
+    }
+    s->placement_busy=NO;
+    return live(s)?result:ZWK_CLOSED;
+}
+int zwk_session_park(ZwkState *state,uint64_t epoch) {
+    ZwkPage *s=page_of(state);
+    if (!live(s) || !s->session || !s->view) return ZWK_CLOSED;
+    if (s->placement_busy) return ZWK_FULL;
+    if (s->session_parent && epoch!=s->session_epoch) return ZWK_INVALID;
+    @autoreleasepool {
+        [s->view removeFromSuperview];
+        s->session_parent=NULL;
+        const CGFloat scale=view_scale(s->view);
+        s->view.frame=NSMakeRect(0,0,s->session_width/scale,s->session_height/scale);
+        s->view.hidden=NO;
+    }
+    return ZWK_OK;
+}
+int zwk_session_size(ZwkState *state,uint32_t *width,uint32_t *height) {
+    ZwkPage *s=page_of(state);
+    if (!live(s) || !s->session || !s->view) return ZWK_CLOSED;
+    const CGFloat scale=view_scale(s->view);
+    const double w=round(s->view.frame.size.width*scale), h=round(s->view.frame.size.height*scale);
+    if (w<1 || h<1 || w>UINT32_MAX || h>UINT32_MAX) return ZWK_GEOMETRY_NOT_APPLIED;
+    *width=(uint32_t)w; *height=(uint32_t)h;
+    return ZWK_OK;
+}
+/* The window goes: its content takes the view with it unless it leaves now. */
+void zwk_session_parent_destroying(ZwkState *state,uint64_t epoch) {
+    ZwkPage *s=page_of(state);
+    if (!live(s) || !s->session || !s->session_parent || s->session_epoch!=epoch) return;
+    @autoreleasepool { [s->view removeFromSuperview]; s->session_parent=NULL; }
+}
 
+int zwk_permission_defer(void *call_pointer,uint64_t token) {
+    ZwkPermissionCall *call=call_pointer;
+    if (!call || !call->page || call->deferred || !token) return ZWK_INVALID;
+    ZwkPage *s=call->page;
+    if (!live(s)) return ZWK_CLOSED;
+    for (ZwkPendingPermission *at in s->permissions) if (at->token==token) return ZWK_INVALID;
+    ZwkPendingPermission *pending=[ZwkPendingPermission new];
+    if (!pending) return ZWK_OOM;
+    pending->token=token; pending->decision=call->decision;
+    if (!s->permissions) s->permissions=[NSMutableArray new];
+    [s->permissions addObject:pending];
+    call->deferred=YES;
+    return ZWK_OK;
+}
+static ZwkPendingPermission *permission_take(ZwkPage *s,uint64_t token) {
+    for (NSUInteger i=0;i<s->permissions.count;++i) {
+        ZwkPendingPermission *found=s->permissions[i];
+        if (found->token!=token) continue;
+        [s->permissions removeObjectAtIndex:i];
+        return found;
+    }
+    return nil;
+}
+int zwk_permission_decide(ZwkState *state,uint64_t token,int allow) {
+    if (!state || ![NSThread isMainThread]) return ZWK_INVALID;
+    ZwkPage *s=page_of(state);
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=s; (void)keep;
+    ZwkPendingPermission *pending=permission_take(s,token);
+    if (!pending) return ZWK_INVALID;
+    pending->decision(allow && live(s)?WKPermissionDecisionGrant:WKPermissionDecisionDeny);
+    return live(s)?ZWK_OK:ZWK_CLOSED;
+}
+int zwk_permission_cancel(ZwkState *state,uint64_t token) {
+    if (!state || ![NSThread isMainThread]) return ZWK_INVALID;
+    ZwkPage *s=page_of(state);
+    ZwkPendingPermission *pending=permission_take(s,token);
+    if (pending) pending->decision(WKPermissionDecisionDeny);
+    return ZWK_OK;
+}
+static void permissions_deny_all(ZwkPage *s) {
+    NSArray *pending=s->permissions; s->permissions=nil;
+    for (ZwkPendingPermission *at in pending) at->decision(WKPermissionDecisionDeny);
+}
+
+uint32_t zwk_download_count(void) { return atomic_load(&live_downloads); }
+static ZwkPendingDownload *download_find(ZwkPage *s,WKDownload *download) {
+    for (ZwkPendingDownload *pending in s->downloads) if (pending->download==download) return pending;
+    return nil;
+}
+static ZwkPendingDownload *download_token(ZwkPage *s,uint64_t token) {
+    for (ZwkPendingDownload *pending in s->downloads) if (pending->token==token) return pending;
+    return nil;
+}
+/* Out of the list, no longer observed; the engine's download is untouched. */
+static void download_unlink(ZwkPage *s,ZwkPendingDownload *pending) {
+    if (![s->downloads containsObject:pending]) return;
+    [s->downloads removeObject:pending];
+    if (pending->progress) [pending->progress removeObserver:s forKeyPath:@"completedUnitCount" context:download_context];
+    pending->progress=nil; pending->ready=NO;
+    atomic_fetch_sub(&live_downloads,1);
+}
+/* Ends it: a decision still waiting gets no file, a transfer stops. */
+static void download_stop(ZwkPage *s,ZwkPendingDownload *pending) {
+    download_unlink(s,pending);
+    void (^decide)(NSURL *)=pending->decide; pending->decide=nil;
+    if (decide) decide(nil);
+    else [pending->download cancel:^(NSData *resume) { (void)resume; }];
+}
+/* Progress once ready; past the received limit it stops and says so. */
+static void download_emit(ZwkPage *s,ZwkPendingDownload *pending) {
+    if (!pending->ready || !live(s) || !s->download_notify || ![s->downloads containsObject:pending]) return;
+    const uint64_t received=(uint64_t)MAX(0,pending->progress.completedUnitCount);
+    const int64_t total=pending->progress.totalUnitCount>=0?pending->progress.totalUnitCount:-1;
+    uint32_t kind=0;
+    if (received>s->download_received_limit) { kind=3; download_stop(s,pending); }
+    s->download_notify(s->owner,pending->token,kind,received,total,0);
+}
+int zwk_download_defer(void *call_pointer,uint64_t token) {
+    ZwkDownloadCall *call=call_pointer;
+    if (!call || !call->page || call->deferred || !token) return ZWK_INVALID;
+    ZwkPage *s=call->page;
+    if (!live(s)) return ZWK_CLOSED;
+    if (download_token(s,token)) return ZWK_INVALID;
+    if (s->downloads.count>=8) return ZWK_FULL;
+    ZwkPendingDownload *pending=[ZwkPendingDownload new];
+    if (!pending) return ZWK_OOM;
+    pending->token=token; pending->download=call->download; pending->decide=call->decide;
+    if (!s->downloads) s->downloads=[NSMutableArray new];
+    [s->downloads addObject:pending];
+    atomic_fetch_add(&live_downloads,1);
+    call->deferred=YES;
+    return ZWK_OK;
+}
+int zwk_download_accept(ZwkState *state,uint64_t token,const char *path) {
+    if (!state || !path || path[0]!='/' || ![NSThread isMainThread]) return ZWK_INVALID;
+    ZwkPage *s=page_of(state);
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=s; (void)keep;
+    ZwkPendingDownload *pending=download_token(s,token);
+    if (!pending || !pending->decide) return ZWK_INVALID;
+    if (!live(s)) return ZWK_CLOSED;
+    @autoreleasepool {
+        NSString *text=[NSString stringWithUTF8String:path];
+        if (!text) return ZWK_INVALID;
+        NSURL *file=[NSURL fileURLWithPath:text isDirectory:NO];
+        if (!file) return ZWK_OOM;
+        pending->progress=pending->download.progress;
+        [pending->progress addObserver:s forKeyPath:@"completedUnitCount" options:0 context:download_context];
+        void (^decide)(NSURL *)=pending->decide; pending->decide=nil;
+        decide(file);
+    }
+    return live(s)?ZWK_OK:ZWK_CLOSED;
+}
+void zwk_download_activate(ZwkState *state,uint64_t token) {
+    ZwkPage *s=page_of(state);
+    ZwkPendingDownload *pending=download_token(s,token);
+    if (!pending || pending->decide) return;
+    pending->ready=YES;
+    download_emit(s,pending);
+}
+int zwk_download_cancel(ZwkState *state,uint64_t token) {
+    if (!state || ![NSThread isMainThread]) return ZWK_INVALID;
+    ZwkPage *s=page_of(state);
+    ZwkPendingDownload *pending=download_token(s,token);
+    if (pending) { @autoreleasepool { download_stop(s,pending); } }
+    return ZWK_OK;
+}
+int zwk_download_snapshot(ZwkState *state,uint64_t token,uint64_t *received,int64_t *total) {
+    ZwkPage *s=page_of(state);
+    ZwkPendingDownload *pending=download_token(s,token);
+    if (!pending || !pending->ready) return ZWK_INVALID;
+    *received=(uint64_t)MAX(0,pending->progress.completedUnitCount);
+    *total=pending->progress.totalUnitCount>=0?pending->progress.totalUnitCount:-1;
+    return ZWK_OK;
+}
+static void downloads_stop_all(ZwkPage *s) {
+    for (ZwkPendingDownload *pending in [s->downloads copy]) download_stop(s,pending);
+}
 void zwk_close(ZwkState *state) {
     ZwkPage *s=page_of(state);
     if (s->closed) return;
@@ -1958,6 +2788,9 @@ void zwk_close(ZwkState *state) {
         }
         if (s->find) find_gate_close(s->find);
         capture_cancel_all(s);
+        initializers_cancel_all(s);
+        permissions_deny_all(s);
+        downloads_stop_all(s);
         ZwkWebView *view=s->view; s->view=nil;
         if (view) {
             if ([view respondsToSelector:@selector(_setFindDelegate:)]) [view _setFindDelegate:nil];
@@ -2116,6 +2949,16 @@ int zwk_devtools(ZwkState *state,int op,int *enabled,int *visible) {
 }
 void zwk_devtools_counts(uint32_t *shown) { *shown=0; }
 void zwk_string_free(char *value) { free(value); }
+/* The page's URI alone: WKWebView's own session state cannot be restored
+ * under the page's navigation policy, so the URI loads again. */
+int zwk_session_state(ZwkState *state,char **uri,void **data,size_t *length) {
+    ZwkPage *s=page_of(state);
+    *uri=NULL; *data=NULL; *length=0;
+    if (!live(s)) return ZWK_CLOSED;
+    if (!document(s) || !s->current_uri.UTF8String) return ZWK_NOT_READY;
+    *uri=strdup(s->current_uri.UTF8String);
+    return *uri?ZWK_OK:ZWK_OOM;
+}
 int zwk_deadline_arm(ZwkState *state,uint64_t nanoseconds) {
     ZwkPage *s=page_of(state);
     if (!live(s)) return ZWK_CLOSED;
@@ -2189,13 +3032,28 @@ int zwk_focus(ZwkState *state) {
     if (!live(s) || !s->view.window) return ZWK_CLOSED;
     return [s->view.window makeFirstResponder:s->view]?ZWK_OK:ZWK_NATIVE_FAILED;
 }
+/* Test hook: where the view is, in its window's content pixels, and whether
+ * it is shown there. */
+int zwk_test_frame(ZwkState *state,int32_t *x,int32_t *y,int32_t *width,int32_t *height,int *shown) {
+    ZwkPage *s=page_of(state);
+    if (!live(s) || !s->view) return ZWK_CLOSED;
+    const CGFloat scale=view_scale(s->view);
+    const NSRect frame=s->view.frame;
+    *x=(int32_t)lround(frame.origin.x*scale); *y=(int32_t)lround(frame.origin.y*scale);
+    *width=(int32_t)lround(frame.size.width*scale); *height=(int32_t)lround(frame.size.height*scale);
+    *shown=s->view.superview!=nil && !s->view.hidden;
+    return ZWK_OK;
+}
 int zwk_viewport(ZwkState *state,int32_t left,int32_t top,int32_t right,int32_t bottom,int visible) {
-    (void)state; (void)left; (void)top; (void)right; (void)bottom; (void)visible; return ZWK_CLOSED;
+    ZwkPage *s=page_of(state);
+    if (!live(s) || !s->region_mode || !s->view) return ZWK_CLOSED;
+    @autoreleasepool { return place_view(s,left,top,right,bottom,visible); }
 }
 
 int zwk_recovery_begin(ZwkState *state) {
     ZwkPage *s=page_of(state);
     if (s->closed) return ZWK_CLOSED;
+    if (s->initializers && s->initializers->pending) return ZWK_NAVIGATION_PENDING;
     if (s->recovering) return ZWK_FULL;
     s->recovering=YES; CFRetain(state); return ZWK_OK;
 }
@@ -2287,21 +3145,6 @@ void zwk_content_filter_unref(void *filter) { if (filter) CFRelease(filter); }
 const char *zwk_content_filter_identifier(void *filter) { return ((__bridge WKContentRuleList *)filter).identifier.UTF8String; }
 uint32_t zwk_content_compile_count(void) { return atomic_load(&live_compiles); }
 
-/* Contracts this backend does not implement yet. Each refuses or reports
- * nothing; the Zig side refuses the options that would reach them. */
-void zwk_initializer_counts(uint32_t *budgets,uint32_t *owners,uint32_t *handlers,uint64_t *bytes) { *budgets=0; *owners=0; *handlers=0; *bytes=0; }
-int zwk_initializers_prepare(ZwkState *s,const ZwkInitializerInput *input,uint64_t token,ZwkInitializerNotify callback) { (void)s; (void)input; (void)token; (void)callback; return ZWK_INVALID; }
-void zwk_initializers_activate(ZwkState *s) { (void)s; }
-void zwk_initializers_abandon(ZwkState *s) { (void)s; }
-void zwk_initializers_cancel(ZwkState *s,uint64_t token) { (void)s; (void)token; }
-_Bool zwk_initializers_try_cancel(ZwkState *s,uint64_t token) { (void)s; (void)token; return 0; }
-_Bool zwk_initializers_blocked(ZwkState *s) { (void)s; return 0; }
-void *zwk_initializer_budget_create(size_t limit,int32_t *status) { (void)limit; *status=0; return NULL; }
-size_t zwk_initializer_budget_limit(void *budget) { (void)budget; return 0; }
-void zwk_initializer_budget_retain(void *budget) { (void)budget; }
-void zwk_initializer_budget_unref(void *budget) { (void)budget; }
-_Bool zwk_initializer_budget_reserve(void *budget,size_t bytes) { (void)budget; (void)bytes; return 0; }
-void zwk_initializer_budget_release(void *budget,size_t bytes) { (void)budget; (void)bytes; }
 
 /* Text search, as the Linux backend's find controller keeps it: a budget the
  * View owns bounds the pages searching and their commands; each page has one
@@ -2766,8 +3609,4 @@ void zwk_capture_counts(uint32_t *budgets,uint32_t *operations,size_t *bytes,siz
     if (peak) *peak=atomic_load(&capture_peak);
 }
 
-ZwkFileBudget *zwk_file_budget_create(uint32_t limit) { (void)limit; return NULL; }
-void zwk_file_budget_limit(ZwkFileBudget *budget,uint32_t limit) { (void)budget; (void)limit; }
-void zwk_file_budget_release(ZwkFileBudget *budget) { (void)budget; }
-void zwk_file_counts(uint32_t *a,uint32_t *b,uint32_t *c,uint32_t *d) { *a=0; *b=0; *c=0; *d=0; }
 

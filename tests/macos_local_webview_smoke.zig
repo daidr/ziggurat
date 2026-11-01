@@ -186,8 +186,8 @@ fn run(allocator: std.mem.Allocator) !void {
     var probe: Probe = .{ .app = app, .window = try app.createWindow(.{ .width = 320, .height = 240 }) };
     probe.view = web.View.init(allocator, &probe, Probe.event);
     const site: web.LocalSite = .{ .scheme = "asset", .scheme_ipc = true, .resources = &resources };
-    // File streams are of the Linux backend.
-    try std.testing.expectError(error.UnsupportedCapability, probe.view.attach(probe.window, .{ .html = page_html, .storage = .ephemeral, .custom_schemes = &registrations, .file_streams = .{}, .local = site }));
+    // File responses answer through the app's handler.
+    try std.testing.expectError(error.ResourceHandlerRequired, probe.view.attach(probe.window, .{ .html = page_html, .storage = .ephemeral, .custom_schemes = &registrations, .file_streams = .{}, .local = site }));
     try probe.view.attach(probe.window, .{ .html = page_html, .storage = .ephemeral, .custom_schemes = &registrations, .local = site, .page_listener = .{ .context = &probe, .event = Probe.page } });
     var watchdog: Watchdog = .{ .app = app };
     try watchdog.start();
