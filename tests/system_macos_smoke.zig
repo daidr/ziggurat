@@ -60,6 +60,12 @@ const popup_items = [_]system.Item{
 };
 const buttons = [_]system.MessageButton{ .{ .id = 21, .label = "&Save" }, .{ .id = 22, .label = "Discard", .destructive = true }, .{ .id = 23, .label = "Cancel" } };
 
+fn expectAt(src: std.builtin.SourceLocation, ok: bool) !void {
+    if (!ok) {
+        std.debug.print("check failed at line {d}\n", .{src.line});
+        return error.TestUnexpectedResult;
+    }
+}
 const Step = enum { bar, edit, popup_choose, popup_cancel_early, popup_cancel_open, message_escape, message_no_cancel, message_return, message_cancelled, message_period, open_file, open_files, save_file, pick_folder, tray, dock, detach, done };
 
 const State = struct {
@@ -214,15 +220,15 @@ const State = struct {
                 try std.testing.expectEqual(@as(?*anyopaque, menu), zsm_test_main_menu());
                 const save = try item(menu, &.{ 1, 0 });
                 try std.testing.expectEqualStrings("Save", titleOf(&save));
-                try std.testing.expect(save.key == 's' and save.modifiers == command and save.image and save.enabled);
+                try expectAt(@src(), save.key == 's' and save.modifiers == command and save.image and save.enabled);
                 const open = try item(menu, &.{ 1, 1 });
                 try std.testing.expectEqualStrings("Open…", titleOf(&open));
                 const quit = try item(menu, &.{ 0, 8 });
                 try std.testing.expectEqualStrings("Quit Smoke", titleOf(&quit));
-                try std.testing.expect(quit.key == 'q' and quit.modifiers == command);
-                try std.testing.expect(zsm_test_menu_action_is(menu, &.{ 2, 4 }, 2, "copy:") != 0);
-                try std.testing.expect(zsm_test_menu_action_is(menu, &.{ 0, 4 }, 2, "hide:") != 0);
-                try std.testing.expect(zsm_test_services_menu_is(menu, &.{ 0, 2 }, 2) != 0);
+                try expectAt(@src(), quit.key == 'q' and quit.modifiers == command);
+                try expectAt(@src(), zsm_test_menu_action_is(menu, &.{ 2, 4 }, 2, "copy:") != 0);
+                try expectAt(@src(), zsm_test_menu_action_is(menu, &.{ 0, 4 }, 2, "hide:") != 0);
+                try expectAt(@src(), zsm_test_services_menu_is(menu, &.{ 0, 2 }, 2) != 0);
                 // A click and the key equivalent run the command.
                 try std.testing.expectEqual(1, zsm_test_menu_perform(menu, &.{ 1, 0 }, 2));
                 try std.testing.expectEqual(1, zsm_test_menu_key(menu, "s", command));
@@ -240,9 +246,9 @@ const State = struct {
                 try std.testing.expectEqual(0, (try item(menu, &.{ 1, 5 })).state);
                 try std.testing.expectEqual(1, (try item(menu, &.{ 1, 6 })).state);
                 try self.owner.setItemState(32, false, false);
-                try std.testing.expect(!(try item(menu, &.{ 1, 1 })).enabled);
+                try expectAt(@src(), !(try item(menu, &.{ 1, 1 })).enabled);
                 try self.owner.setItemIcon(31, null);
-                try std.testing.expect(!(try item(menu, &.{ 1, 0 })).image);
+                try expectAt(@src(), !(try item(menu, &.{ 1, 0 })).image);
                 try std.testing.expectError(error.MenuItemNotFound, self.owner.setItemState(99, true, false));
                 // Quit is the application's to run.
                 try std.testing.expectEqual(1, zsm_test_menu_perform(menu, &.{ 0, 8 }, 2));
@@ -253,17 +259,17 @@ const State = struct {
                 try self.owner.clearMenu();
                 // The bar gives way to an empty menu.
                 const empty = zsm_test_main_menu() orelse return error.MissingMainMenu;
-                try std.testing.expect(empty != replaced and zsm_test_menu_count(empty) == 0);
+                try expectAt(@src(), empty != replaced and zsm_test_menu_count(empty) == 0);
                 try self.owner.setMenu(builder.result());
                 self.advance();
             },
             .edit => {
                 // The Edit menu's actions run as their Command shortcuts.
                 const view = zsm_test_window_view(self.window.nativeHandle().?);
-                try std.testing.expect(zsm_test_send_action("copy:", view) != 0);
-                try std.testing.expect(zsm_test_send_action("paste:", view) != 0);
-                try std.testing.expect(zsm_test_send_action("redo:", view) != 0);
-                try std.testing.expect(zsm_test_send_action("delete:", view) != 0);
+                try expectAt(@src(), zsm_test_send_action("copy:", view) != 0);
+                try expectAt(@src(), zsm_test_send_action("paste:", view) != 0);
+                try expectAt(@src(), zsm_test_send_action("redo:", view) != 0);
+                try expectAt(@src(), zsm_test_send_action("delete:", view) != 0);
                 self.advance();
             },
             .popup_choose => {
@@ -273,7 +279,7 @@ const State = struct {
                 }
                 const native = self.owner.popup.pending.native.?;
                 if (zsm_popup_is_open(native) == 0) return self.again();
-                try std.testing.expect(zsm_popup_choose(native, 1) == 1);
+                try expectAt(@src(), zsm_popup_choose(native, 1) == 1);
             },
             .popup_cancel_early => {
                 try self.owner.popupMenu(2, &popup_items, .pointer);
@@ -301,13 +307,13 @@ const State = struct {
                     try self.owner.showMessage(11, .{ .message = "Nothing to cancel", .buttons = buttons[0..2], .kind = .warning });
                     var default: c_int = 0;
                     var destructive: c_int = 0;
-                    try std.testing.expect(zsm_message_button(self.owner.message_dialog.native.?, 0, &default, &destructive) != 0 and default == 0);
+                    try expectAt(@src(), zsm_message_button(self.owner.message_dialog.native.?, 0, &default, &destructive) != 0 and default == 0);
                 }
-                try std.testing.expect(zsm_message_key(self.owner.message_dialog.native.?, "\x1b", 0) == 1);
+                try expectAt(@src(), zsm_message_key(self.owner.message_dialog.native.?, "\x1b", 0) == 1);
             },
             .message_return => {
                 try self.owner.showMessage(12, .{ .message = "Return answers the default", .buttons = &buttons, .default_button = 1, .cancel_button = 2, .kind = .err });
-                try std.testing.expect(zsm_message_key(self.owner.message_dialog.native.?, "\r", 0) == 1);
+                try expectAt(@src(), zsm_message_key(self.owner.message_dialog.native.?, "\r", 0) == 1);
             },
             .message_cancelled => {
                 try self.owner.showMessage(13, .{ .message = "Cancelled by the application", .buttons = buttons[0..1] });
@@ -315,7 +321,7 @@ const State = struct {
             },
             .message_period => {
                 try self.owner.showMessage(14, .{ .message = "Command-period", .buttons = &buttons, .default_button = 2, .cancel_button = 2 });
-                try std.testing.expect(zsm_message_key(self.owner.message_dialog.native.?, ".", command) == 1);
+                try expectAt(@src(), zsm_message_key(self.owner.message_dialog.native.?, ".", command) == 1);
             },
             .open_file => try self.choose(.open_file, &.{"/tmp/one.txt"}, .{ .extensions = &.{".txt"} }, 1, 0, 0, null),
             .open_files => try self.choose(.open_files, &.{ "/tmp/a.md", "/tmp/b.md" }, .{}, 0, 1, 0, null),
@@ -328,22 +334,22 @@ const State = struct {
                 if (self.tray.native == null) {
                     try self.tray.show(self.app, .{ .icon = icon.handle, .template = true, .tooltip = "Smoke", .title = "12 MB/s", .guid = @splat(0x5a) });
                     const native = self.tray.native.?;
-                    try std.testing.expect(zsm_tray_test_title_is(native, "12 MB/s") != 0);
-                    try std.testing.expect(zsm_tray_test_monospaced_digits(native) != 0);
+                    try expectAt(@src(), zsm_tray_test_title_is(native, "12 MB/s") != 0);
+                    try expectAt(@src(), zsm_tray_test_monospaced_digits(native) != 0);
                     try self.tray.show(self.app, .{ .icon = icon.handle, .tooltip = "Smoke", .title = "3 MB/s", .guid = @splat(0x5a) });
-                    try std.testing.expect(zsm_tray_test_title_is(native, "3 MB/s") != 0);
+                    try expectAt(@src(), zsm_tray_test_title_is(native, "3 MB/s") != 0);
                     try std.testing.expectError(error.TrayIdentityChanged, self.tray.show(self.app, .{ .icon = icon.handle }));
                     zsm_tray_test_click(native, 0, 0);
                     zsm_tray_test_click(native, 0, 1);
                     zsm_tray_test_click(native, 1, 0);
                     try std.testing.expectEqual(3, self.tray_count);
-                    try std.testing.expect(self.tray_actions[0].? == .activate and self.tray_actions[1].? == .context and self.tray_actions[2].? == .context);
+                    try expectAt(@src(), self.tray_actions[0].? == .activate and self.tray_actions[1].? == .context and self.tray_actions[2].? == .context);
                     try self.tray.setMenu(&.{ .{ .id = 51, .label = "&Show" }, .{ .kind = .separator }, .{ .id = 52, .label = "Quit" } });
                     const menu = zsm_tray_test_menu(native).?;
                     try std.testing.expectEqual(1, zsm_test_menu_perform(menu, &.{2}, 1));
-                    try std.testing.expect(self.tray_actions[3].?.menu == 52);
+                    try expectAt(@src(), self.tray_actions[3].?.menu == 52);
                     try self.tray.setMenu(&.{});
-                    try std.testing.expect(zsm_tray_test_menu(native) == null);
+                    try expectAt(@src(), zsm_tray_test_menu(native) == null);
                     try self.tray.popupMenu(4, &popup_items, .icon);
                     try self.owner.setTray(.{ .icon = icon.handle, .tooltip = "Owner" });
                     try self.owner.setTray(.{ .tooltip = "Owner again" });
@@ -351,7 +357,7 @@ const State = struct {
                 }
                 const native = self.tray.popup.pending.native orelse return;
                 if (zsm_popup_is_open(native) == 0) return self.again();
-                try std.testing.expect(zsm_popup_choose(native, 0) == 1);
+                try expectAt(@src(), zsm_popup_choose(native, 0) == 1);
             },
             .dock => {
                 try self.dock.setMenu(self.app, &.{ .{ .id = 61, .label = "New &Window" }, .{ .id = 62, .label = "Off", .enabled = false } });
@@ -364,14 +370,14 @@ const State = struct {
                 var taskbar = try system.taskbar.Taskbar.init("dev.ziggurat.smoke");
                 defer taskbar.deinit();
                 try taskbar.setBadgeCount(self.window, 3);
-                try std.testing.expect(zsm_dock_test_badge_is("3") != 0);
+                try expectAt(@src(), zsm_dock_test_badge_is("3") != 0);
                 try taskbar.setProgress(self.window, .{ .normal = 0.5 });
                 try std.testing.expectEqual(@as(f64, 0.5), zsm_dock_test_progress());
                 try taskbar.setProgress(self.window, .{ .failed = 0.25 });
                 try taskbar.setProgress(self.window, .none);
                 try std.testing.expectEqual(@as(f64, -1), zsm_dock_test_progress());
                 try taskbar.setBadgeCount(self.window, null);
-                try std.testing.expect(zsm_dock_test_badge_is("") != 0);
+                try expectAt(@src(), zsm_dock_test_badge_is("") != 0);
                 try taskbar.setAttention(self.window, true);
                 try taskbar.setAttention(self.window, false);
                 self.advance();
@@ -411,7 +417,7 @@ const State = struct {
         try std.testing.expectEqual(directories, folders);
         if (name) |expected| try std.testing.expectEqualStrings(expected, std.mem.sliceTo(&field, 0));
         if (paths.len == 0) return self.owner.cancelFileDialog();
-        try std.testing.expect(zsm_chooser_accept(native, paths.ptr, @intCast(paths.len)) == 1);
+        try expectAt(@src(), zsm_chooser_accept(native, paths.ptr, @intCast(paths.len)) == 1);
     }
 };
 
@@ -435,15 +441,15 @@ pub fn main() !void {
     try watchdog.start();
     defer watchdog.stop();
     try app.run();
-    try std.testing.expect(!watchdog.expired);
+    try expectAt(@src(), !watchdog.expired);
     if (state.failure) |err| return err;
-    try std.testing.expect(state.window_closed);
+    try expectAt(@src(), state.window_closed);
     try std.testing.expectEqualSlices(u64, &.{ 31, 31, 39, 39, system.menu_roles.Role.quit.id() }, state.commands[0..state.command_count]);
     // Copy, Paste and Redo reach the content as Cmd+C, Cmd+V and
     // Cmd+Shift+Z; the content takes Cmd+V. Delete is an edit key alone.
     try std.testing.expectEqual(3, state.key_count);
-    try std.testing.expect(state.keys[0].?.key == .c and state.keys[0].?.modifiers.super);
-    try std.testing.expect(state.keys[2].?.key == .z and state.keys[2].?.modifiers.super and state.keys[2].?.modifiers.shift);
+    try expectAt(@src(), state.keys[0].?.key == .c and state.keys[0].?.modifiers.super);
+    try expectAt(@src(), state.keys[2].?.key == .z and state.keys[2].?.modifiers.super and state.keys[2].?.modifiers.shift);
     try std.testing.expectEqual(3, state.edit_count);
     try std.testing.expectEqual(z.EditKey{ .key = .c, .control = true }, state.edits[0].?);
     try std.testing.expectEqual(z.EditKey{ .key = .z, .shift = true, .control = true }, state.edits[1].?);
