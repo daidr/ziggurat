@@ -110,8 +110,8 @@ extern fn zsm_open_stop() void;
 extern fn zsm_open_simulate(kind: c_int, item: [*:0]const u8) c_int;
 
 /// Integration checks: sends this process the Apple Event the system sends
-/// for a URL or a file, which reaches a started OpenListener on a later run
-/// loop turn.
+/// for a URL or a file. An event to the own process can reach a started
+/// OpenListener during this call, so call it from inside App.run.
 pub fn simulateOpenForTesting(kind: @FieldType(Open, "kind"), item: [:0]const u8) !void {
     if (comptime !capabilities.open_events) return error.UnsupportedCapability;
     if (zsm_open_simulate(@intFromBool(kind == .files), item.ptr) == 0) return error.SimulationFailed;
