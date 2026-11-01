@@ -223,4 +223,5 @@ test "family ids are stable, case-insensitive and bounded" {
 
 test {
     _ = sfnt;
+    _ = @import("files.zig");
 }

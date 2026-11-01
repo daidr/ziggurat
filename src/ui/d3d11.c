@@ -91,6 +91,10 @@ typedef struct State {
        DirectComposition with their premultiplied alpha. */
     int composed;
     void *dcomp, *dcomp_target, *dcomp_visual;
+    /* The content's opaque background (0xRRGGBB) while has_background:
+       an unscaled swap chain shows it beyond a frame of an older size. */
+    int has_background, unscaled;
+    UINT background;
 } State;
 static LONG live_resources;
 static unsigned class_owners;
@@ -397,6 +401,19 @@ static HRESULT create_composition(State *s, IDXGIDevice *dxgi){
     if(FAILED(hr))return hr;
     return ((HRESULT (STDMETHODCALLTYPE *)(void *))dcomp_vtbl(s->dcomp)[DCOMP_COMMIT])(s->dcomp);
 }
+static void apply_background(State *s) {
+    if (!s->swapchain || s->composed || !s->has_background) return;
+    DXGI_RGBA color = { ((s->background >> 16) & 0xff) / 255.0f, ((s->background >> 8) & 0xff) / 255.0f, (s->background & 0xff) / 255.0f, 1.0f };
+    IDXGISwapChain1_SetBackgroundColor(s->swapchain, &color);
+}
+void zgpu_set_background(State *s, int has, UINT rgb) {
+    if (!s) return;
+    has = has != 0;
+    if (s->has_background == has && (!has || s->background == rgb)) return;
+    s->has_background = has; s->background = rgb;
+    apply_background(s);
+}
+int zgpu_test_unscaled(State *s) { return s && s->unscaled; }
 static HRESULT create_swapchain(State *s, UINT width, UINT height) {
     IDXGIDevice *dxgi = NULL;
     IDXGIAdapter *adapter = NULL;
@@ -423,10 +440,20 @@ static HRESULT create_swapchain(State *s, UINT width, UINT height) {
         hr = create_composition(s, dxgi);
         if (FAILED(hr)) goto done;
     } else {
-        /* The parent remains a GDI window. Flip presentation targets only this child. */
+        /* The parent remains a GDI window. Flip presentation targets only this child.
+           Frames show unscaled, the background beyond them, so a surface that
+           grew shows that rather than its last frame stretched until the frame
+           of its size presents; stretching is the fallback where refused. */
+        desc.Scaling = DXGI_SCALING_NONE;
         hr = IDXGIFactory2_CreateSwapChainForHwnd(factory, (IUnknown *)s->d3d, s->surface, &desc, NULL, NULL, &s->swapchain);
+        s->unscaled = SUCCEEDED(hr);
+        if (FAILED(hr)) {
+            desc.Scaling = DXGI_SCALING_STRETCH;
+            hr = IDXGIFactory2_CreateSwapChainForHwnd(factory, (IUnknown *)s->d3d, s->surface, &desc, NULL, NULL, &s->swapchain);
+        }
         OWN(s->swapchain);
         if (FAILED(hr)) goto done;
+        apply_background(s);
     }
     hr=IDXGISwapChain1_QueryInterface(s->swapchain,&IID_IDXGISwapChain2,(void **)&s->swapchain2); OWN(s->swapchain2);
     if (FAILED(hr)) goto done;

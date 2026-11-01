@@ -406,6 +406,24 @@ fn differential(engine: *t.Engine) !void {
     try compareLayouts(engine, &@as([128 * "abc אבג العربية a\u{0301} 👩‍👩‍👧‍👦\n".len]u8, @bitCast(@as([128]["abc אבג العربية a\u{0301} 👩‍👩‍👧‍👦\n".len]u8, @splat("abc אבג العربية a\u{0301} 👩‍👩‍👧‍👦\n".*)))), .{});
     std.debug.print("snapshot differential passed: reference carets/affinities, islands/selections, line geometry, native coverage and long documents\n", .{});
 }
+/// A line laid out again at the width it measured, as content sized to its
+/// text gives it, or a rounding under it, as summing the same advances in
+/// another order comes out, fits on one line.
+fn fitsItsWidth(engine: *t.Engine) !void {
+    for ([_][]const u8{ "停止翻译", "Stop translating", "翻訳を開始" }) |text| {
+        const measured = try engine.layout(text, .{ .size = 16, .weight = 700 });
+        const width = (try measured.lines())[0].width;
+        try measured.close();
+        for ([_]f32{ width, width * (1 - 1e-6) }) |at| {
+            const layout = try engine.layout(text, .{ .size = 16, .weight = 700, .width = at, .wrap = .word_character });
+            defer layout.close() catch unreachable;
+            if ((try layout.lines()).len != 1) {
+                std.debug.print("{s} at {d} of its {d}: {d} lines\n", .{ text, at, width, (try layout.lines()).len });
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+}
 pub fn main() !void {
     var debug: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(debug.deinit() == .ok);
@@ -415,6 +433,7 @@ pub fn main() !void {
         const engine = try t.Engine.create(allocator, std.Thread.getCurrentId(), .{});
         defer engine.close() catch unreachable;
         try segmentation(engine);
+        try fitsItsWidth(engine);
         try bidiAndSelection(engine);
         try multiScalarSelection(engine);
         try paragraphs(engine);

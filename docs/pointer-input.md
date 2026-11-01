@@ -17,3 +17,7 @@
 独立 C/SDK 回调必须使用 `App.beginNativeCallback()`，并在返回前结束 scope；它在保持 App 生命周期的同时，遮蔽被暂停的原始输入。窗口仍打开时可用 `Window.beginNativeCallback()`。这些 scope 不授予业务权限。普通组合与 Region 转发使用 `beginCallback()`，保留原有入口；不能把一次普通转发变成新的原生输入。
 
 Windows 已实际检查队列采样、未知时间、按钮打断、捕获重入、首次聚焦及真实失焦后返回原窗；Linux 已通过实际 GTK C 信号入口到 Core 的两种优化、1x/2x 检查。隐藏原生测试不建立物理设备来源、视觉质量或输入到显示延迟结论。UI 注册控件与编辑器桥接继续分别验收。
+
+## Linux 触摸屏
+
+GTK 窗口的绘制区接收 GDK 的触摸（`GDK_TOUCH_MASK`、`touch-event` 信号），不再让 GTK 把第一根手指当作鼠标：轻点在落点发出一次主按钮点击；手指不动按住 500 毫秒以上抬起，按右键点击处理；手指移动超过 8 DIP 后不再算点按，而是让手下的内容跟着手指滚动（`Event.wheel`，delta 为像素，方向与滚动条滑块相反）；两根手指按中点移动滚动。被合成器拿走的触摸（`GDK_TOUCH_CANCEL`）既不滚动也不点击。点按的按下与抬起走鼠标同一条原生路径，焦点、抓取和按下 receipt 与鼠标点击相同；绘制区收到过触摸后，GTK 由触摸屏模拟出的按钮与移动事件会被丢弃，手指不会再拖选文本。核心没有缩放事件，双指捏合只滚动不缩放。手势规则在 `src/platform/linux_touch.h`，不依赖 GDK，由 `test-linux-touch` 覆盖；`smoke-linux-touch` 以 GDK 的触摸事件驱动真实窗口。

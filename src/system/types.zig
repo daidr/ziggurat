@@ -16,7 +16,11 @@ pub const Item = struct {
     /// Command items only. Shown beside the label; a menu bar also dispatches
     /// it as `Action.menu` when the window's content leaves the key unconsumed.
     accelerator: ?Accelerator = null,
+    /// Commands and submenus. Shown before the label, except on the items of
+    /// a menu bar itself; borrowed while any menu shows it.
+    icon: ?*MenuIcon = null,
 };
+pub const MenuIcon = @import("menu_icon.zig").MenuIcon;
 /// Letters, digits and navigation keys need Control, Alt or Super, so typing
 /// never triggers a command. Function keys may stand alone.
 pub const Accelerator = struct { key: Key, modifiers: Modifiers = .{} };

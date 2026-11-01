@@ -346,10 +346,18 @@ pub fn autostartEntry(buffer: []u8, item: LoginItem) ![]u8 {
     try out.bytes("\nTerminal=false\nX-GNOME-Autostart-enabled=true\n");
     return out.result();
 }
+/// Whether the app defines a file type itself: an unregistered one (subtype
+/// `x-...`), which no system knows. Registered types such as `text/markdown`
+/// are the system's, and the app only says it opens them.
+pub fn definesMimeType(mime: []const u8) bool {
+    const slash = std.mem.indexOfScalar(u8, mime, '/') orelse return false;
+    return std.mem.startsWith(u8, mime[slash + 1 ..], "x-");
+}
 pub fn mimePackage(buffer: []u8, application: Application) ![]u8 {
     var out: Writer = .{ .buffer = buffer };
     try out.bytes("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<mime-info xmlns=\"http://www.freedesktop.org/standards/shared-mime-info\">\n");
     for (application.file_types) |file_type| {
+        if (!definesMimeType(file_type.mime_type)) continue;
         try out.bytes("  <mime-type type=\"");
         try out.bytes(file_type.mime_type);
         try out.bytes("\">\n    <comment>");
@@ -813,6 +821,12 @@ test "desktop entries quote Exec arguments and declare handled types" {
         \\</mime-info>
         \\
     , try mimePackage(&buffer, example));
+    // The system's own types stay the system's.
+    var mixed = example;
+    mixed.file_types = &.{ .{ .extension = ".md", .mime_type = "text/markdown", .description = "Markdown" }, .{ .extension = ".sketch", .mime_type = "application/x-example-sketch", .description = "Sketch" } };
+    const package = try mimePackage(&buffer, mixed);
+    try std.testing.expect(std.mem.indexOf(u8, package, "text/markdown") == null);
+    try std.testing.expect(std.mem.indexOf(u8, package, "<mime-type type=\"application/x-example-sketch\">\n    <comment>Sketch</comment>\n    <glob pattern=\"*.sketch\"/>") != null);
     var small: [16]u8 = undefined;
     try std.testing.expectError(error.ResultCapacityExceeded, desktopEntry(&small, example));
 }

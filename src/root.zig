@@ -69,7 +69,9 @@ pub const Rect = struct {
 pub const Size = struct { width: u32, height: u32, scale: f32 };
 /// `transparent` frames start clear and keep their alpha (see
 /// `WindowCapabilities.transparent`).
-pub const Paint = struct { native_context: *anyopaque, native_window: ?*anyopaque = null, size: Size, transparent: bool = false };
+/// `background` is the window's (`Window.setBackground`) where the backend
+/// shows it beyond the frame until a frame of the new size presents.
+pub const Paint = struct { native_context: *anyopaque, native_window: ?*anyopaque = null, size: Size, transparent: bool = false, background: ?u32 = null };
 pub const TextPreedit = struct { text: []const u8, selection_start: usize, selection_end: usize };
 /// Native delivery path, not an assertion about a physical keyboard or a
 /// language engine. A GTK text-service commit can include keyboard translation.
@@ -513,6 +515,8 @@ pub const WindowOptions = struct {
     /// Makes the window background transparent, so what paint frames leave
     /// transparent shows the desktop through. GTK needs a compositing
     /// desktop; `capabilities().transparent` tells whether frames keep alpha.
+    /// On Windows the window has no redirection bitmap, as with a material:
+    /// frames are composed with their alpha and it has no menu bar.
     transparent: bool = false,
     /// Puts a material behind what paint frames leave transparent. On
     /// Windows only a window created with a material can show one (Windows
@@ -550,6 +554,8 @@ pub const App = struct {
     activity_depth: usize = 0,
     stop_resources: app_stop.Manager,
     querying_quit: bool = false,
+    /// Inside the native event loop of `run`.
+    looping: bool = false,
     querying_close_tree: bool = false,
     relations_busy: bool = false,
     relations_dirty: bool = false,
@@ -903,16 +909,19 @@ pub const App = struct {
         var loop_error: ?anyerror = null;
         self.maybeQuit();
         self.native_failure = null;
+        self.looping = true;
         backend.run(self) catch |err| {
             self.report(self.failureDiagnostic(.run, err, null));
             loop_error = err;
         };
+        self.looping = false;
         try self.shutdown();
         if (loop_error) |err| return err;
     }
     /// Preflight handlers before accepting shutdown. No partial automatic close.
     pub fn requestQuit(self: *App) QuitResult {
         self.assertOwner();
+        if (self.phase == .stopping and self.looping) backend.quit(self);
         if (self.phase == .stopping or self.phase == .stopped) return .already_stopped;
         if (self.querying_quit or self.querying_close_tree) return .in_progress;
         self.querying_quit = true;
@@ -937,6 +946,12 @@ pub const App = struct {
     /// Unconditional shutdown for explicit termination/error paths. Bypasses vetoes.
     pub fn quit(self: *App) void {
         self.assertOwner();
+        if (self.phase == .stopping and self.looping) {
+            // The quit sequence ran but the native loop goes on, as after a
+            // modal loop that swallowed the request: ask it to stop again.
+            backend.quit(self);
+            return;
+        }
         if (self.phase == .stopping or self.phase == .stopped) return;
         const running = self.phase == .running;
         self.phase = .stopping;
@@ -1484,6 +1499,19 @@ pub const Window = struct {
         record.storeTraits(value);
         record.emitState();
     }
+    /// The opaque color the content fills the window with (0xRRGGBB), or
+    /// null for content that is not opaque. Windows shows it where the
+    /// window grows before the content's frame of the new size presents,
+    /// instead of black or the last frame stretched; other backends keep
+    /// nothing. Content calls it when its background changes, from paint
+    /// too; an unchanged value costs a comparison.
+    pub fn setBackground(self: Window, rgb: ?u32) !void {
+        const record = self.resolve() orelse return error.Closed;
+        if (record.phase != .open) return error.Closed;
+        if (record.background == rgb) return;
+        record.background = rgb;
+        if (comptime @hasDecl(backend, "setBackground")) backend.setBackground(record, rgb);
+    }
     /// Whole-window translucency from 0 (invisible) to 1 (opaque).
     pub fn setOpacity(self: Window, value: f32) !void {
         if (!std.math.isFinite(value) or value < 0 or value > 1) return error.InvalidOpacity;
@@ -1944,6 +1972,7 @@ pub const WindowRecord = struct {
     options: WindowOptions,
     native: backend.WindowData = .{},
     vibrancy: Vibrancy = .none,
+    background: ?u32 = null,
     pointer_state: ?*PointerState = null,
     content: ?Content = null,
     /// Set by invalidate, cleared once the content is given a paint.
@@ -2620,6 +2649,7 @@ test {
     _ = @import("damage_test.zig");
     _ = @import("diagnostics_test.zig");
     _ = @import("platform/decoration_test.zig");
+    _ = @import("platform/work_area.zig");
     _ = @import("pointer_press_test.zig");
     _ = @import("window_policy_test.zig");
 }

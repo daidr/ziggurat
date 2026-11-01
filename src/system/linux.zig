@@ -9,7 +9,7 @@ const menus = @import("menus.zig");
 const picker = @import("picker.zig");
 const desktop = @import("desktop.zig");
 
-const NativeItem = extern struct { label: [*:0]const u8, parent: i32, kind: u8, enabled: u8, checked: u8, radio: u8 = 0, keyval: u32, modifiers: u32, command: i32 };
+const NativeItem = extern struct { label: [*:0]const u8, parent: i32, kind: u8, enabled: u8, checked: u8, radio: u8 = 0, keyval: u32, modifiers: u32, command: i32, icon: ?*anyopaque = null };
 const Done = *const fn (?*anyopaque, u64, i32) callconv(.c) void;
 const TrayEvent = *const fn (?*anyopaque, u64, i32, i32, i32) callconv(.c) void;
 extern fn zsl_popup_show(?*anyopaque, [*]const NativeItem, u32, c_int, f64, f64, ?*anyopaque, u64, Done, *c_int) ?*anyopaque;
@@ -20,6 +20,7 @@ extern fn zsl_detach(*anyopaque) void;
 extern fn zsl_live_links() c_int;
 extern fn zsl_menubar_set(?*anyopaque, [*]const NativeItem, u32, [*]const u8, ?*anyopaque, u64, Done, *c_int) ?*anyopaque;
 extern fn zsl_menubar_state(*anyopaque, i32, c_int, c_int, c_int) c_int;
+extern fn zsl_menubar_icon(*anyopaque, i32, ?*anyopaque) c_int;
 extern fn zsl_menubar_remove(*anyopaque, c_int) void;
 extern fn zsl_chooser_show(?*anyopaque, c_int, [*]const [*:0]const u8, u32, [*:0]const u8, ?*anyopaque, u64, Done, *c_int) ?*anyopaque;
 extern fn zsl_chooser_path(*anyopaque, u32, *?[*]const u8, *usize) void;
@@ -278,6 +279,19 @@ pub const Owner = struct {
                 if (other == index or sibling.group != group) continue;
                 if (zsl_menubar_state(bar, @intCast(other), @intFromBool(sibling.own), @intFromBool(sibling.enabled), 0) == 0) return error.MenuUpdateFailed;
             };
+            return;
+        };
+        return error.MenuItemNotFound;
+    }
+    /// Replaces a command item's icon in the menu bar, or removes it with
+    /// null; the items of the bar itself show none.
+    pub fn setItemIcon(self: *Owner, id: u64, icon: ?*types.MenuIcon) !void {
+        const window = try self.require();
+        const scope = window.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        const bar = self.bar orelse return error.MenuItemNotFound;
+        for (self.bar_entries[0..self.bar_count], 0..) |entry, index| if (entry.id == id) {
+            if (zsl_menubar_icon(bar, @intCast(index), if (icon) |value| value.native else null) == 0) return error.MenuUpdateFailed;
             return;
         };
         return error.MenuItemNotFound;
@@ -781,6 +795,7 @@ fn nativeItems(items: []const types.Item, plan: *const menus.Plan, labels: *[typ
             .keyval = if (accelerator) |value| keyval(value.key) else 0,
             .modifiers = if (accelerator) |value| modifierMask(value.modifiers) else 0,
             .command = command,
+            .icon = if (item.icon) |icon| icon.native else null,
         };
     }
     return commands;

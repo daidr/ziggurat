@@ -48,7 +48,11 @@ int ztl_layout_init(void *storage,void *engine,const char *utf8,uint32_t n8,cons
     if(FAILED(hr))goto done;
     hr=IDWriteTextFormat_SetWordWrapping(format,options->wrap==0?DWRITE_WORD_WRAPPING_NO_WRAP:options->wrap==1?DWRITE_WORD_WRAPPING_WHOLE_WORD:DWRITE_WORD_WRAPPING_WRAP);if(FAILED(hr))goto done;
     hr=IDWriteTextFormat_SetReadingDirection(format,options->rtl?DWRITE_READING_DIRECTION_RIGHT_TO_LEFT:DWRITE_READING_DIRECTION_LEFT_TO_RIGHT);if(FAILED(hr))goto done;
-    hr=IDWriteFactory_CreateTextLayout(s->engine->factory,text,length,format,options->wrap?options->width:1000000.0f,10000000.0f,&s->layout);OWN(s->layout);
+    /* A line as wide as the width fits it: the layout that measured the width
+       summed the same advances and may come out a rounding under them, which
+       would wrap the line's last cluster. Lines wrap a thousandth of a pixel
+       past the width. */
+    hr=IDWriteFactory_CreateTextLayout(s->engine->factory,text,length,format,options->wrap?(options->width>0?options->width+1e-3f:options->width):1000000.0f,10000000.0f,&s->layout);OWN(s->layout);
     if(SUCCEEDED(hr)){DWRITE_TEXT_METRICS metrics;hr=IDWriteTextLayout_GetMetrics(s->layout,&metrics);if(SUCCEEDED(hr)&&!options->wrap)hr=IDWriteTextLayout_SetMaxWidth(s->layout,metrics.widthIncludingTrailingWhitespace);if(SUCCEEDED(hr))hr=IDWriteTextLayout_SetMaxHeight(s->layout,metrics.height);}
 done:DROP(format);if(FAILED(hr)){DROP(s->layout);return status(hr,error);}InterlockedIncrement(&layouts);return ZTL_OK;
 }

@@ -5697,7 +5697,11 @@ pub const Host = struct {
     fn draw(ptr: *anyopaque, frame: *ui.Frame) void {
         const self: *Host = @ptrCast(@alignCast(ptr));
         const theme = frame.currentTheme();
-        if (!self.options.transparent_background) frame.clear(self.options.background orelse theme.palette.background);
+        if (self.options.transparent_background) frame.setWindowBackground(null) else {
+            const background = self.options.background orelse theme.palette.background;
+            frame.clear(background);
+            frame.setWindowBackground(background);
+        }
         self.render(frame, theme) catch |err| {
             self.last_error = err;
             // A failed frame keeps the previously committed one.

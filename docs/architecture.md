@@ -192,7 +192,7 @@ TextClient 解绑先撤原生入口，再通知唯一旧客户端 `unbound`。�
 | Window.requestClose | 同步询问 on_close；原生关闭按钮传入 user 原因 |
 | Window.destroy | 绕过否决，重复关闭幂等 |
 | App.requestQuit | quit 原因预检所有窗口；出现否决不执行自动关闭 |
-| App.quit | 绕过否决、关闭任务入口并请求结束循环 |
+| App.quit | 绕过否决、关闭任务入口并请求结束循环；退出序列已跑完而原生循环仍在继续时（例如被吞掉退出请求的模态循环），之后每次 quit 或 requestQuit 都再次请求循环结束 |
 
 窗口请求返回 closed、cancelled、deferred 或 in_progress。deferred 表示已接受并进入关闭阶段；isClosed 包含该阶段，不是释放上下文的依据。重入关闭询问返回 in_progress；退出预检期间拒绝新建窗口，不回滚应用回调主动发起的强制关闭。
 
