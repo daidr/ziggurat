@@ -5005,9 +5005,8 @@ pub const View = struct {
         const b = node.bounds;
         if (b.width < 8 or b.height < 8) return;
         // Right to left, the indicator runs along the left edge.
-        const track: Rect = .{ .x = if (node.rtl) b.x + 2 else b.x + b.width - 6, .y = b.y + 2, .width = 4, .height = b.height - 4 };
-        const bar = (model.scrollbar(.vertical, track, 16) catch return) orelse return;
-        target.roundedRect(bar.thumb, 2, ui.Color.rgb(theme.palette.track));
+        const bar: ui.scroll.Bar = .{ .box = b, .leading = node.rtl, .view = model.viewport.height, .content = model.content.height, .offset = model.offset.y };
+        bar.paint(target, ui.Color.rgb(theme.palette.track), false);
     }
 };
 

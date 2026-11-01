@@ -23,6 +23,100 @@ pub const Scrollbar = struct {
     }
 };
 
+/// The scroll bar of a view that scrolls itself rather than through a view
+/// scroll container, as a terminal, a rich text editor or a virtual table
+/// does, laid out and painted as a container's, so that every bar of an
+/// application looks alike and follows the theme. Paint it with
+/// `Frame.scrollbar`, and map a drag of its thumb with `thumb` and
+/// `offsetAt`.
+pub const Bar = struct {
+    /// The view the bar runs along: at its right edge, or its left one when
+    /// `leading`, or its bottom for a horizontal bar.
+    box: Rect,
+    axis: Axis = .vertical,
+    /// Along the left edge, for right-to-left content.
+    leading: bool = false,
+    /// The length of the content the view shows, of all of it, and how far
+    /// it is scrolled, in any one unit, as rows of a terminal's scrollback.
+    /// The bar shows nothing unless `content` is longer than `view`.
+    view: f32,
+    content: f32,
+    offset: f32,
+
+    /// How thick a thumb is, and how much thicker while dragged, toward
+    /// the content.
+    pub const thickness: f32 = 4;
+    pub const widen: f32 = 2;
+    /// Space between the thumb and the box's edges.
+    pub const margin: f32 = 2;
+    pub const min_thumb: f32 = 16;
+    /// How far from its edge the bar takes the pointer.
+    pub const strip: f32 = 12;
+
+    /// Whether the content is longer than the view, so the bar shows.
+    pub fn scrolls(self: Bar) bool {
+        return std.math.isFinite(self.view) and std.math.isFinite(self.content) and self.content > self.view + 0.5;
+    }
+    /// The track the thumb moves along.
+    pub fn track(self: Bar) Rect {
+        const b = self.box;
+        if (self.axis == .horizontal) return .{ .x = b.x + margin, .y = b.y + b.height - margin - thickness, .width = @max(0, b.width - 2 * margin), .height = thickness };
+        return .{ .x = if (self.leading) b.x + margin else b.x + b.width - margin - thickness, .y = b.y + margin, .width = thickness, .height = @max(0, b.height - 2 * margin) };
+    }
+    /// The bar's geometry, null when it has nowhere to scroll.
+    pub fn geometry(self: Bar) ?Scrollbar {
+        if (!self.scrolls() or !std.math.isFinite(self.offset)) return null;
+        const reach = self.content - self.view;
+        var model: ScrollModel = .{};
+        const view_size: Size = if (self.axis == .horizontal) .{ .width = @max(0, self.view), .height = 0 } else .{ .width = 0, .height = @max(0, self.view) };
+        const content_size: Size = if (self.axis == .horizontal) .{ .width = self.content, .height = 0 } else .{ .width = 0, .height = self.content };
+        model.viewport = view_size;
+        model.content = content_size;
+        const at = std.math.clamp(self.offset, 0, reach);
+        if (self.axis == .horizontal) model.offset.x = at else model.offset.y = at;
+        return model.scrollbar(self.axis, self.track(), min_thumb) catch null;
+    }
+    /// The thumb's box, wider toward the content while `dragging`; null
+    /// when the bar has nowhere to scroll.
+    pub fn thumb(self: Bar, dragging: bool) ?Rect {
+        var box = (self.geometry() orelse return null).thumb;
+        if (dragging) {
+            if (self.axis == .horizontal) {
+                box.y -= widen;
+                box.height += widen;
+            } else if (self.leading) {
+                box.width += widen;
+            } else {
+                box.x -= widen;
+                box.width += widen;
+            }
+        }
+        return box;
+    }
+    /// The offset that brings the thumb's start, its top or its left, to
+    /// `start`, within the content, as the thumb is dragged.
+    pub fn offsetAt(self: Bar, start: f32) f32 {
+        const bar = self.geometry() orelse return 0;
+        return bar.offsetForThumb(start) catch self.offset;
+    }
+    /// Whether `point` is on the strip along the bar's edge, while it has
+    /// somewhere to scroll.
+    pub fn hit(self: Bar, point: Point) bool {
+        if (!self.scrolls()) return false;
+        const b = self.box;
+        if (point.x < b.x or point.x >= b.x + b.width or point.y < b.y or point.y >= b.y + b.height) return false;
+        if (self.axis == .horizontal) return point.y >= b.y + b.height - strip;
+        return if (self.leading) point.x < b.x + strip else point.x >= b.x + b.width - strip;
+    }
+    /// Paint the thumb into `target`, anything with `roundedRect`, in
+    /// `color`, if the bar has somewhere to scroll.
+    pub fn paint(self: Bar, target: anytype, color: anytype, dragging: bool) void {
+        const box = self.thumb(dragging) orelse return;
+        const across = if (self.axis == .horizontal) box.height else box.width;
+        target.roundedRect(box, across / 2, color);
+    }
+};
+
 /// Persistent DIP state. Changes are explicit; no clocks, allocations or timers.
 pub const ScrollModel = struct {
     offset: Point = .{},
@@ -129,4 +223,29 @@ test "scrollbar thumb and drag offset agree including clamped minimum thumb" {
     try std.testing.expectEqual(@as(f32, 0), try bar.offsetForThumb(-100));
     _ = try model.setSizes(.{ .height = 100 }, .{ .height = 50 });
     try std.testing.expect((try model.scrollbar(.vertical, bar.track, 20)) == null);
+}
+
+test "a self-scrolling view's bar lays out, drags and hits as a container's" {
+    const bar: Bar = .{ .box = .{ .x = 10, .y = 20, .width = 100, .height = 104 }, .view = 4, .content = 24, .offset = 20 };
+    const thumb = bar.thumb(false).?;
+    // At the bottom, a sixth of the track long, along the right edge.
+    try std.testing.expectEqual(@as(f32, 10 + 100 - 2 - 4), thumb.x);
+    try std.testing.expectEqual(@as(f32, 4), thumb.width);
+    try std.testing.expectApproxEqAbs(@as(f32, 20 + 2 + 100), thumb.y + thumb.height, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 100.0 / 6.0), thumb.height, 0.001);
+    const wide = bar.thumb(true).?;
+    try std.testing.expectEqual(thumb.x - Bar.widen, wide.x);
+    try std.testing.expectEqual(thumb.width + Bar.widen, wide.width);
+    // Dragged to its track's top, then past its bottom.
+    try std.testing.expectEqual(@as(f32, 0), bar.offsetAt(0));
+    try std.testing.expectEqual(@as(f32, 20), bar.offsetAt(500));
+    try std.testing.expectApproxEqAbs(@as(f32, 10), bar.offsetAt(22 + (100 - thumb.height) / 2), 0.001);
+    try std.testing.expect(bar.hit(.{ .x = 105, .y = 50 }));
+    try std.testing.expect(!bar.hit(.{ .x = 60, .y = 50 }));
+    const left: Bar = .{ .box = bar.box, .leading = true, .view = 4, .content = 24, .offset = 0 };
+    try std.testing.expectEqual(@as(f32, 12), left.thumb(false).?.x);
+    try std.testing.expect(left.hit(.{ .x = 12, .y = 50 }));
+    // Nowhere to scroll: nothing shows or hits.
+    const short: Bar = .{ .box = bar.box, .view = 4, .content = 4, .offset = 0 };
+    try std.testing.expect(short.thumb(false) == null and !short.hit(.{ .x = 105, .y = 50 }));
 }

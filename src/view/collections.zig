@@ -50,8 +50,6 @@ pub const resize_zone: f32 = 4;
 pub const edge_zone: f32 = view.drag_scroll_edge;
 /// Fastest drag scrolling, in DIP per second.
 pub const edge_speed: f32 = 1200;
-/// Thickness of the scroll indicators and of the zone that drags them.
-pub const scroll_bar: f32 = 6;
 const frame_interval: u64 = 16_666_667;
 const cell_padding: f32 = 8;
 const scratch_len = 512;
@@ -972,22 +970,18 @@ fn triangle(frame: *ui.Frame, bounds: Rect, direction: enum { right, down, up, l
     }
 }
 
+/// The vertical scroll bar of a collection's body, as a scroll container's.
+fn bodyBar(core: *const Core, origin: Rect, offset: f64) ui.scroll.Bar {
+    return .{ .box = .{ .x = origin.x, .y = origin.y + core.bodyTop(), .width = origin.width, .height = core.bodyHeight() }, .view = core.bodyHeight(), .content = @floatCast(core.contentHeight()), .offset = @floatCast(offset) };
+}
+
 fn paintScrollIndicators(frame: *ui.Frame, core: *const Core, origin: Rect, content_width: f32, view_width: f32, palette: ui.theme.Palette) void {
-    const body: Rect = .{ .x = origin.x, .y = origin.y + core.bodyTop(), .width = origin.width, .height = core.bodyHeight() };
-    const content = core.contentHeight();
-    if (content > body.height and body.height > 0) {
-        const track = body.height;
-        const length: f32 = @floatCast(@max(16, @as(f64, track) * @as(f64, body.height) / content));
-        const max = core.maxScroll();
-        const ratio: f32 = if (max > 0) @floatCast(core.scroll_y / max) else 0;
-        frame.roundedRect(.{ .x = body.x + body.width - scroll_bar - 1, .y = body.y + (track - length) * ratio, .width = scroll_bar, .height = length }, scroll_bar / 2, ui.Color.rgb(palette.track));
-    }
-    if (content_width > view_width and view_width > 0) {
-        const length = @max(16, view_width * view_width / content_width);
-        const max = content_width - view_width;
-        const ratio = if (max > 0) core.scroll_x / max else 0;
-        frame.roundedRect(.{ .x = body.x + (view_width - length) * ratio, .y = body.y + body.height - scroll_bar - 1, .width = length, .height = scroll_bar }, scroll_bar / 2, ui.Color.rgb(palette.track));
-    }
+    const color = ui.Color.rgb(palette.track);
+    const dragging = core.press == .thumb;
+    bodyBar(core, origin, core.scroll_y).paint(frame, color, dragging);
+    const body: Rect = .{ .x = origin.x, .y = origin.y + core.bodyTop(), .width = view_width, .height = core.bodyHeight() };
+    const across: ui.scroll.Bar = .{ .box = body, .axis = .horizontal, .view = view_width, .content = content_width, .offset = core.scroll_x };
+    across.paint(frame, color, false);
 }
 
 // ------------------------------------------------------------------ table
@@ -1690,7 +1684,7 @@ pub const TableState = struct {
         const mods = press.modifiers;
         core.pointer = point;
         // The scroll indicator drags.
-        if (point.y >= core.bodyTop() and point.x >= core.bounds.width - scroll_bar - 4 and core.maxScroll() > 0) {
+        if (core.maxScroll() > 0 and bodyBar(core, .{ .x = 0, .y = 0, .width = core.bounds.width, .height = core.bounds.height }, core.scroll_y).hit(point)) {
             core.press = .{ .thumb = .{ .vertical = true, .start_scroll = core.scroll_y, .origin = point.y } };
             return true;
         }
@@ -1783,12 +1777,10 @@ pub const TableState = struct {
         switch (core.press) {
             .none => return false,
             .thumb => |thumb| {
-                const track = core.bodyHeight();
-                const content = core.contentHeight();
-                if (track <= 0) return false;
-                const length = @max(16, @as(f64, track) * track / content);
-                const ratio = core.maxScroll() / @max(1, @as(f64, track) - length);
-                core.scroll_y = thumb.start_scroll + @as(f64, drag.position.y - thumb.origin) * ratio;
+                // The thumb follows the pointer from where it was pressed.
+                const bar = bodyBar(core, .{ .x = 0, .y = 0, .width = core.bounds.width, .height = core.bounds.height }, thumb.start_scroll);
+                const start = (bar.thumb(false) orelse return false).y;
+                core.scroll_y = bar.offsetAt(start + drag.position.y - thumb.origin);
                 core.clampScroll();
                 return true;
             },

@@ -3710,6 +3710,15 @@ pub const Frame = struct {
             return err;
         };
     }
+    /// Paint the thumb of `bar`, a self-scrolling view's scroll bar, as a
+    /// view scroll container paints its own: in the theme's track color,
+    /// or `state.color` for a view whose colors are not the theme's, as a
+    /// terminal's; wider while `state.dragging`. Nothing shows when the bar
+    /// has nowhere to scroll.
+    pub fn scrollbar(self: *Frame, bar: scroll.Bar, state: ScrollbarState) void {
+        bar.paint(self, state.color orelse Color.rgb(self.currentTheme().palette.track), state.dragging);
+    }
+    pub const ScrollbarState = struct { dragging: bool = false, color: ?Color = null };
     pub fn roundedRect(self: *Frame, bounds: Rect, radius: f32, color: Color) void {
         self.context.command_buffer.roundedRect(self.absolute(bounds), radius, color) catch |err| {
             self.failure = self.failure orelse err;

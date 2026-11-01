@@ -86,6 +86,8 @@ try v.column(.{ .width = 240, .height = 140, .radius = 16, .gradient = .{ .radia
 
 `Style.scrollbars = false` 时不画这条滑块，其余滚动行为不变。
 
+自己滚动、不经滚动容器的视图（终端、富文本编辑器、虚拟表格与大纲）用 `ui.scroll.Bar` 画滚动条，外观与滚动容器一致，跟随主题：`box` 是滑块所沿的视图（右边缘，`leading` 时左边缘，横向时底边），`view`、`content`、`offset` 是可见长度、总长度与偏移，单位任意（终端用行数）。`Frame.scrollbar(bar, .{ .dragging, .color })` 画滑块：默认主题的 `track` 色，`color` 给自有配色的视图（如终端）替换；拖动时向内容一侧加宽 2 DIP；无处可滚时什么也不画。`thumb` 给出滑块矩形，`offsetAt(start)` 把拖动中滑块起点换算成偏移，`hit(point)` 判断指针是否在边缘 12 DIP 的条带上。终端与富文本编辑器只在指针位于其上或拖动滑块时显示滚动条；虚拟集合与滚动容器一样常显。
+
 Host 在每帧绘制后记录可见的滚动容器（最多 `max_scroll_regions` 个，按绘制顺序），滚轮事件落在其中时交给最内层的那个，作为一个携带 `Event.scroll` 的构建遍立即作用于模型并消费该事件；不在任何滚动容器内的滚轮照常交给 Context。目前没有滚动条拖动、键盘滚动、焦点自动显露和横向滚动。
 
 ### 标签页、分栏与工具栏
