@@ -861,6 +861,60 @@ fn runDamage(allocator: std.mem.Allocator) !void {
     try std.testing.expect(stats.last.pixels(size.width, size.height) * 4 < @as(u64, size.width) * size.height);
 }
 
+/// A card kept as one image beside a label that counts frames: the card
+/// is drawn into its image once, and again only when its content changes,
+/// while its button still takes presses.
+const Kept = struct {
+    cache: *ui.Cache,
+    count: usize = 0,
+    title: []const u8 = "Kept card",
+    clicks: usize = 0,
+    label: [32]u8 = undefined,
+    fn build(self: *Kept, v: *view.View) anyerror!void {
+        try v.column(.{ .grow = 1, .gap = 8, .padding = .all(12) });
+        try v.column(.{ .gap = 6, .padding = .all(10), .background = 0x2050a0, .border = 0x102850, .radius = 8, .cache = self.cache });
+        try v.text(self.title, .{ .color = 0xffffff });
+        if (try v.button("Inside", .{})) self.clicks += 1;
+        try v.end();
+        try v.text(try std.fmt.bufPrint(&self.label, "Frame {d}", .{self.count}), .{});
+        try v.end();
+    }
+};
+
+fn runCache(allocator: std.mem.Allocator) !void {
+    if (builtin.os.tag == .windows) return;
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    var state: Kept = .{ .cache = try ui.Cache.create(app, allocator) };
+    var storage: view.Storage(16, 128) = .{};
+    var host = view.Host.init(&state, Kept.build, storage.buffers(), .{});
+    host.context.render_mode = .gdi;
+    const window = try app.createWindow(.{ .width = width, .height = height });
+    try host.attach(window);
+    defer state.cache.destroy() catch unreachable;
+    try paint(&host, window);
+    try paint(&host, window);
+    state.count += 1;
+    try paint(&host, window);
+    var stats = state.cache.stats();
+    try std.testing.expectEqual(@as(u64, 1), stats.renders);
+    try std.testing.expectEqual(@as(u64, 2), stats.reuses);
+    try std.testing.expect(stats.width > 0 and stats.height > 0);
+    // The label changed, not the card: the frame drew the label alone.
+    try std.testing.expect(!host.context.damageStats().last.full);
+    state.title = "Changed card";
+    try paint(&host, window);
+    try paint(&host, window);
+    stats = state.cache.stats();
+    try std.testing.expectEqual(@as(u64, 2), stats.renders);
+    try std.testing.expectEqual(@as(u64, 3), stats.reuses);
+    const button = boundsOfText(&host, .button, "Inside").?;
+    Native.pointer(window, true, button.x + button.width / 2, button.y + button.height / 2);
+    Native.pointer(window, false, button.x + button.width / 2, button.y + button.height / 2);
+    try paint(&host, window);
+    try std.testing.expectEqual(@as(usize, 1), state.clicks);
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
@@ -872,6 +926,7 @@ pub fn main() !void {
     try runMenu(gpa.allocator());
     try runVideo(gpa.allocator());
     try runDamage(gpa.allocator());
+    try runCache(gpa.allocator());
     try runZoom(gpa.allocator());
     if (view.inspector.enabled) try runInspector(gpa.allocator());
     if (builtin.os.tag == .windows) {
@@ -879,5 +934,5 @@ pub fn main() !void {
         try @import("view_uia.zig").runCollections(gpa.allocator());
     }
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, embedded leaf input, routed pages with history buttons, deferred icon and SVG preparation, timed toast expiry, context menu with submenu, video frames committed after paint, a zoomed window laid out and pressed in its own DIPs, a changed label redrawn alone, keyed identity and harness frames drawn to pixels and the inspector panel passed\n", .{});
+    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, embedded leaf input, routed pages with history buttons, deferred icon and SVG preparation, timed toast expiry, context menu with submenu, video frames committed after paint, a zoomed window laid out and pressed in its own DIPs, a changed label redrawn alone, a card kept as one image, keyed identity and harness frames drawn to pixels and the inspector panel passed\n", .{});
 }
