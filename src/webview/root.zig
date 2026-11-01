@@ -394,10 +394,10 @@ pub const Options = struct {
     /// cached ALLOW permissions are asynchronously reset to DEFAULT so current
     /// denial policy applies. Missing APIs or too many cached settings fail.
     user_data_folder: []const u8 = "",
-    /// Linux persistent storage requires an explicit owner from this App and
-    /// an empty folder. Copied configurations retain only its C-native state.
+    /// Linux and macOS persistent storage requires an explicit owner from this
+    /// App and an empty folder. Copied configurations retain only its C-native state.
     profile: ?*Profile = null,
-    /// Ephemeral storage is currently Linux-only and requires an empty folder.
+    /// Ephemeral storage is Linux and macOS only and requires an empty folder.
     /// The default preserves the explicit persistent profile contract.
     storage: Storage = .profile,
     local: ?LocalSite = null,
@@ -819,8 +819,7 @@ fn nativeCancelScript(native: *anyopaque, token: u64) void {
 }
 fn validateBackendOptions(options: Options) !void {
     if (is_macos) {
-        if (options.storage != .ephemeral or options.request_policy_extension != null or
-            options.file_streams != null or options.document_initializers.len != 0) return error.UnsupportedCapability;
+        if (options.request_policy_extension != null or options.file_streams != null or options.document_initializers.len != 0) return error.UnsupportedCapability;
         // WKWebView never lets the app add a request header: no Bearer credential.
         if (options.remote) |remote| if (remote.request_credentials.len != 0) return error.UnsupportedCapability;
         // The engine's sign-in and certificate answers are not taken here yet.

@@ -1566,6 +1566,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
         });
+        addSmoke(b, "smoke-drop", "tests/system_drop_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
     }
     if (target.result.os.tag == .linux) {
         const native = native_support.add(b, ui, "ui-cairo-native", "src/ui/linux.c", &.{"-std=c11"}, target, optimize);
@@ -1812,6 +1816,14 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_webview", .module = view },
         });
         addSmoke(b, "smoke-webview-capture-macos", "tests/macos_capture_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-profile-macos", "tests/macos_profile_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-cookies-macos", "tests/macos_cookie_store_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
         });
@@ -3362,6 +3374,7 @@ fn addSystemIntegrationNative(b: *std.Build, module: *std.Build.Module, target: 
             // shell hand-offs, login items, URL schemes and desktop state.
             _ = native_support.add(b, module, "system-services-native", "src/system/macos_services.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
             _ = native_support.add(b, module, "system-clipboard-native", "src/system/macos_clipboard.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+            _ = native_support.add(b, module, "system-drag-native", "src/system/macos_drag.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
             native_support.linkFrameworks(b, module, &.{ "AppKit", "Foundation", "Security", "ServiceManagement", "IOKit", "Network", "CoreServices", "CoreFoundation", "UniformTypeIdentifiers" });
         },
         else => {},

@@ -154,6 +154,9 @@ pub const DamageStats = struct {
     software_frames: usize,
     /// Software frames that drew only the rectangles that changed.
     partial_frames: usize,
+    /// Transform scopes that only moved their content, drawn moved under a
+    /// clip rather than through a raster transform.
+    folded_transforms: usize,
     /// What the last software frame drew again.
     last: damage.Damage,
 };
@@ -540,6 +543,8 @@ pub const Context = struct {
     gdi_frames: usize = 0,
     /// Software frames that drew only the rectangles that changed.
     partial_frames: usize = 0,
+    /// Transform scopes drawn as moved content under a clip.
+    folded_transforms: usize = 0,
     /// What the last software frame drew again.
     last_damage: damage.Damage = .whole,
     damage_tracker: damage.Tracker = .{},
@@ -941,7 +946,7 @@ pub const Context = struct {
     /// How the software frames drew: whole, or only the rectangles that
     /// changed since the last one (see `damage`).
     pub fn damageStats(self: *const Context) DamageStats {
-        return .{ .software_frames = self.gdi_frames, .partial_frames = self.partial_frames, .last = self.last_damage };
+        return .{ .software_frames = self.gdi_frames, .partial_frames = self.partial_frames, .folded_transforms = self.folded_transforms, .last = self.last_damage };
     }
     pub fn shaderEffectStats(self: *const Context) ShaderEffectStats {
         return .{ .workspace = if (self.shader_workspace) |workspace| workspace.stats else .{}, .unprepared = self.shader_unprepared };
@@ -2967,6 +2972,9 @@ pub const Context = struct {
                     window.report(.{ .domain = .renderer, .operation = .paint, .err = err });
                     return;
                 };
+                // Transforms that only move their content draw it moved
+                // under a clip, not through a raster transform.
+                self.folded_transforms +%= self.command_buffer.foldTranslations();
                 clock.markBuild();
                 const layer_options = if (build_options.gpu and using_gpu) self.gpu_renderer.layerOptions() else self.renderer.layerOptions();
                 const transform_options = if (build_options.gpu and using_gpu) self.gpu_renderer.transformOptions() else self.renderer.transformOptions();

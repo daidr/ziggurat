@@ -14,6 +14,8 @@ pub const backdrop = @import("backdrop.zig");
 pub const loading = @import("loading.zig");
 pub const shader_effects = @import("shader_effects.zig");
 pub const no_filter: u8 = 255;
+/// Clips a Buffer nests at most.
+pub const max_clip_depth = 32;
 pub const GroupCommand = struct { bounds: Rect, mask_origin: drawing.Point = .{}, opacity: u8 = 255, mask_resource: ?u8 = null, filter_slot: u8 = no_filter };
 pub const GradientShape = struct { bounds: Rect, radius: f32 = 0, stroke_width: f32 = 0, brush: u8 };
 /// Font of a text command: size in DIP, weight, slant and whether to use
@@ -628,6 +630,105 @@ pub const Buffer = struct {
         if (self.depth == 0 or (self.group_depth != 0 and self.depth == self.group_clips[self.group_depth - 1])) return error.ClipStackEmpty;
         try self.append(.pop_clip);
         self.depth -= 1;
+    }
+    /// Draws each transform scope that only moves its content (a
+    /// translation) as that content moved, under a clip to the scope's
+    /// source rectangle, in place of a raster transform: `begin_transform`
+    /// becomes `push_clip` and `end_transform` `pop_clip`. Scopes holding
+    /// effects, backdrops, filters or transforms that do more are left as
+    /// they are. Call after `finish`; returns how many scopes it folded.
+    pub fn foldTranslations(self: *Buffer) usize {
+        const storage = self.transform_storage orelse return 0;
+        var folded: usize = 0;
+        var index = self.len;
+        // Innermost scopes first, so an outer one sees them folded.
+        while (index > 0) {
+            index -= 1;
+            const slot = switch (self.storage[index]) {
+                .begin_transform => |value| value,
+                else => continue,
+            };
+            if (slot >= storage.len) continue;
+            const t = storage.storage[slot];
+            if (t.xx != 1 or t.yy != 1 or t.yx != 0 or t.xy != 0) continue;
+            if (self.foldScope(index, t)) folded += 1;
+        }
+        return folded;
+    }
+    fn foldScope(self: *Buffer, start: usize, t: layers.NativeTransform) bool {
+        const delta: drawing.Point = .{ .x = @floatCast(t.x0), .y = @floatCast(t.y0) };
+        if (!std.math.isFinite(delta.x) or !std.math.isFinite(delta.y)) return false;
+        // Clip depth where the scope opens, and the deepest inside it.
+        var depth: usize = 0;
+        for (self.storage[0..start]) |command| switch (command) {
+            .push_clip => depth += 1,
+            .pop_clip => depth -|= 1,
+            else => {},
+        };
+        var inner: usize = 0;
+        var deepest: usize = 0;
+        var gradients: usize = 0;
+        var nesting: usize = 0;
+        var end: usize = start + 1;
+        while (end < self.len) : (end += 1) {
+            switch (self.storage[end]) {
+                .end_transform => {
+                    if (nesting == 0) break;
+                    nesting -= 1;
+                },
+                .push_clip => {
+                    inner += 1;
+                    deepest = @max(deepest, inner);
+                },
+                .pop_clip => inner -|= 1,
+                .gradient => gradients += 1,
+                .fill, .shape, .text, .prepared_text, .coverage, .image, .texture, .indicator, .end_group => {},
+                .begin_group => |value| if (value.filter_slot != no_filter) return false,
+                else => return false,
+            }
+        } else return false;
+        if (depth + deepest + 1 > max_clip_depth) return false;
+        if (gradients > self.brush_storage.len - self.brush_len) return false;
+        const moved = struct {
+            fn rect(r: Rect, d: drawing.Point) Rect {
+                return .{ .x = r.x + d.x, .y = r.y + d.y, .width = r.width, .height = r.height };
+            }
+            fn point(p: anytype, d: drawing.Point) @TypeOf(p) {
+                return .{ .x = p.x + d.x, .y = p.y + d.y };
+            }
+        };
+        for (self.storage[start + 1 .. end]) |*command| switch (command.*) {
+            .fill => |*value| value.bounds = moved.rect(value.bounds, delta),
+            .shape => |*value| value.bounds = moved.rect(value.bounds, delta),
+            .text => |*value| value.bounds = moved.rect(value.bounds, delta),
+            .prepared_text => |*value| value.origin = moved.point(value.origin, delta),
+            .coverage => |*value| value.origin = moved.point(value.origin, delta),
+            .image, .texture => |*value| value.destination = moved.rect(value.destination, delta),
+            .push_clip => |*rect| rect.* = moved.rect(rect.*, delta),
+            .indicator => |slot| self.indicator_storage[slot].bounds = moved.rect(self.indicator_storage[slot].bounds, delta),
+            .begin_group => |*value| {
+                value.bounds = moved.rect(value.bounds, delta);
+                value.mask_origin = moved.point(value.mask_origin, delta);
+            },
+            .gradient => |*value| {
+                value.bounds = moved.rect(value.bounds, delta);
+                // Brushes are shared between commands: move a copy.
+                var resource = self.brush_storage[value.brush];
+                resource.a = moved.point(resource.a, delta);
+                if (resource.kind == .linear) resource.b = moved.point(resource.b, delta);
+                var brush: usize = 0;
+                while (brush < self.brush_len) : (brush += 1) if (brushes.Stored.eql(&resource, &self.brush_storage[brush])) break;
+                if (brush == self.brush_len) {
+                    self.brush_storage[brush] = resource;
+                    self.brush_len += 1;
+                }
+                value.brush = @intCast(brush);
+            },
+            else => {},
+        };
+        self.storage[start] = .{ .push_clip = .{ .x = delta.x, .y = delta.y, .width = t.source_width, .height = t.source_height } };
+        self.storage[end] = .pop_clip;
+        return true;
     }
     /// Whether `appendTranslated` copies the command: plain drawings, clips,
     /// indicators and groups without a filter. Transforms, effects,

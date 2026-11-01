@@ -131,6 +131,9 @@ static void emit_edit(NativeWindow *s,int key,uint32_t flags){NativeEvent event=
     /* The content's semantic tree as accessibility elements, which
        src/ui/accessibility_macos.m sets (retained). */
     id<ZigViewAccessibility> zigAccessibility;
+    /* The window's drop target, which src/system/macos_drag.m sets
+       (retained); dragging messages go to it. */
+    id<NSDraggingDestination> zigDrop;
 }
 @end
 @interface ZigDelegate : NSObject <NSWindowDelegate>{
@@ -156,7 +159,15 @@ static int edit_for_selector(SEL selector,uint32_t *flags){
 }
 
 @implementation ZigView
-- (void)dealloc{[zigAccessibility release];[super dealloc];}
+- (void)dealloc{[zigAccessibility release];[zigDrop release];[super dealloc];}
+- (void)setZigDropTarget:(id<NSDraggingDestination>)target{[target retain];[zigDrop release];zigDrop=target;}
+- (id<NSDraggingDestination>)zigDropTarget{return zigDrop;}
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)info{return zigDrop?[zigDrop draggingEntered:info]:NSDragOperationNone;}
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)info{return zigDrop?[zigDrop draggingUpdated:info]:NSDragOperationNone;}
+- (void)draggingExited:(id<NSDraggingInfo>)info{if(zigDrop)[zigDrop draggingExited:info];}
+- (void)draggingEnded:(id<NSDraggingInfo>)info{if(zigDrop)[zigDrop draggingEnded:info];}
+- (BOOL)prepareForDragOperation:(id<NSDraggingInfo>)info{return zigDrop?[zigDrop prepareForDragOperation:info]:NO;}
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)info{return zigDrop?[zigDrop performDragOperation:info]:NO;}
 - (void)setZigAccessibility:(id<ZigViewAccessibility>)provider{[provider retain];[zigAccessibility release];zigAccessibility=provider;}
 /* The view contains the elements of the content's semantic tree. */
 - (NSArray *)accessibilityChildren{
@@ -391,6 +402,8 @@ int zlm_window_destroy(NativeWindow *s){
         NSWindow *window=s->window;
         zlmw_drag_forget(window);
         s->view->native=NULL;s->delegate->native=NULL;
+        /* Native destruction revokes the drop registration. */
+        [s->view unregisterDraggedTypes];[s->view setZigDropTarget:nil];
         [window setDelegate:nil];
         NSWindow *parent=[window parentWindow];if(parent)[parent removeChildWindow:window];
         [window orderOut:nil];[window close];
