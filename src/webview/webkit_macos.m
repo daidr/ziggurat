@@ -92,8 +92,18 @@ static uint32_t domain_code(NSString *domain) {
     NSString *local_url, *local_csp;
     NSData *html_bytes;
     id local_handler;
+    /* The site's grants beyond the default policy, when it has them. */
+    BOOL policy_extended;
+    uint32_t policy_methods, policy_header_count, policy_origin_count;
+    char **policy_names, **policy_values, **policy_origins;
+    /* The app's resource handler, and the requests it deferred. */
+    ZwkResourceNotify resource_fn;
+    uint32_t resource_limit;
+    BOOL dynamic_document;
+    NSMutableArray *deferred;
 }
 @end
+static void resources_cancel_all(ZwkPage *s);
 enum { NAV_INITIAL, NAV_REFRESH, NAV_LOCAL, NAV_HISTORY };
 
 static BOOL live(ZwkPage *s) { return !s->closed && !s->recovering && s->owner; }
@@ -247,6 +257,7 @@ static void navigation_fail(ZwkPage *s,int code,NSString *reason) {
     failure_set(s,[NSError errorWithDomain:@"ziggurat-webkit-navigation" code:code userInfo:@{NSLocalizedDescriptionKey:reason}]);
     const ZwkFailure failure=s->failure;
     s->committed=NO; s->failed=YES; navigation_revoke(s);
+    if (live(s) && s->generation==generation) resources_cancel_all(s);
     if (live(s) && s->generation==generation) (void)page(s,6,0,0,nil);
     if (live(s) && s->generation==generation) [s->view stopLoading];
     if (live(s) && s->generation==generation) notify(s,2,nil,code,&failure);
@@ -280,6 +291,8 @@ static int prepare_document(ZwkPage *s) {
     s->committed=NO;
     /* Private invalidation never manufactures a public start or page. */
     if (generation && !page(s,6,0,0,nil)) return live(s)?ZWK_NAVIGATION_CANCELLED:ZWK_CLOSED;
+    if (!s->pending_navigation || s->generation!=generation) return live(s)?ZWK_NAVIGATION_CANCELLED:ZWK_CLOSED;
+    resources_cancel_all(s);
     if (!s->pending_navigation || s->generation!=generation) return live(s)?ZWK_NAVIGATION_CANCELLED:ZWK_CLOSED;
     ++s->generation; s->failed=NO; s->dom_ready=NO;
     [s->controller removeAllUserScripts];
@@ -351,6 +364,9 @@ static void *history_context=&history_context;
     return self;
 }
 - (void)dealloc {
+    for (uint32_t i=0;i<policy_header_count;++i) { free(policy_names[i]); free(policy_values[i]); }
+    for (uint32_t i=0;i<policy_origin_count;++i) free(policy_origins[i]);
+    free(policy_names); free(policy_values); free(policy_origins);
     free(local_storage);
     if (local_budget) zwk_local_budget_release(local_budget);
     atomic_fetch_sub(&live_states,1);
@@ -416,7 +432,7 @@ static void *history_context=&history_context;
     if (!live(self) || !value || value!=navigation) return;
     const BOOL started=load_started;
     int32_t status=0;
-    if (error) { failure_set(self,error); status=failure.code; failed=YES; committed=NO; }
+    if (error) { failure_set(self,error); status=failure.code; failed=YES; committed=NO; resources_cancel_all(self); }
     const BOOL success=document(self);
     const uint64_t current=generation;
     navigation_clear(self);
@@ -454,6 +470,7 @@ static void *history_context=&history_context;
     ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep; (void)webView;
     failed=YES; committed=NO;
     navigation_clear(self);
+    resources_cancel_all(self);
     notify(self,8,nil,0,NULL);
 }
 - (void)webView:(WKWebView *)webView didReceiveAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition,NSURLCredential *))completion {
@@ -572,15 +589,44 @@ static BOOL managed_header(const char *name) {
     for (size_t i=0;i<sizeof(names)/sizeof(*names);++i) if (!strcasecmp(name,names[i])) return YES;
     return NO;
 }
-static BOOL local_headers_default(NSDictionary<NSString *,NSString *> *headers) {
-    if (headers.count>64) return NO;
-    size_t bytes=0;
+static BOOL header_name(const char *name) {
+    if (!name || !*name) return NO;
+    for (const char *p=name;*p;++p) if (!isalnum((unsigned char)*p) && !strchr("!#$%&'*+-.^_`|~",*p)) return NO;
+    return YES;
+}
+static BOOL header_value(const char *value) {
+    if (!value) return NO;
+    for (const char *p=value;*p;++p) if (((unsigned char)*p<32 && *p!='\t') || (unsigned char)*p==127) return NO;
+    return YES;
+}
+static int method_index(NSString *method) {
+    static NSString *const methods[]={@"GET",@"HEAD",@"POST",@"PUT",@"PATCH",@"DELETE",@"OPTIONS"};
+    for (int i=0;i<7;i++) if ([method isEqualToString:methods[i]]) return i;
+    return -1;
+}
+/* The site's policy for one request: its method, its headers and its Origin,
+ * as the Linux backend checks them. */
+static BOOL local_request_allowed(ZwkPage *s,int verb,NSDictionary<NSString *,NSString *> *headers) {
+    if (verb<0 || headers.count>64) return NO;
+    size_t bytes=0; BOOL saw_origin=NO;
+    if (s->policy_extended && !(s->policy_methods&(1u<<(unsigned)verb))) return NO;
     for (NSString *key in headers) {
         const char *name=key.UTF8String, *value=headers[key].UTF8String;
-        if (!name || !*name || !value || (bytes+=strlen(name)+strlen(value))>16384 || !managed_header(name) || !strcasecmp(name,"origin")) return NO;
-        for (const char *p=value;*p;++p) if ((unsigned char)*p<32 && *p!='\t') return NO;
+        if (!header_name(name) || !header_value(value) || (bytes+=strlen(name)+strlen(value))>16384) return NO;
+        if (!strcasecmp(name,"origin")) {
+            if (!s->policy_extended) return NO;
+            BOOL allowed=NO;
+            for (uint32_t i=0;i<s->policy_origin_count;++i) if (!strcmp(value,s->policy_origins[i])) { allowed=YES; break; }
+            if (!allowed) return NO;
+            saw_origin=YES;
+        }
+        if (managed_header(name)) continue;
+        if (!s->policy_extended) return NO;
+        BOOL allowed=NO;
+        for (uint32_t i=0;i<s->policy_header_count;++i) if (!strcasecmp(name,s->policy_names[i]) && (!s->policy_values[i] || !strcmp(value,s->policy_values[i]))) { allowed=YES; break; }
+        if (!allowed) return NO;
     }
-    return YES;
+    return verb<2 || (s->policy_extended && saw_origin);
 }
 
 @interface ZwkLocalHandler : NSObject <WKURLSchemeHandler> {
@@ -588,22 +634,174 @@ static BOOL local_headers_default(NSDictionary<NSString *,NSString *> *headers) 
     __weak ZwkPage *site_page;
 }
 @end
+@interface ZwkDeferred : NSObject {
+@public
+    id<WKURLSchemeTask> task;
+    uint64_t token, generation;
+    BOOL head;
+}
+@end
+@implementation ZwkDeferred
+@end
+static atomic_int live_resource_requests;
+uint32_t zwk_resources_pending(void) { return (uint32_t)atomic_load(&live_resource_requests); }
 static NSError *local_denied(void) {
     return [NSError errorWithDomain:@"ziggurat-local-resource" code:1 userInfo:@{NSLocalizedDescriptionKey:@"Local resource denied or full"}];
 }
+static BOOL response_text(char *out,const uint8_t *input,size_t length,size_t limit,BOOL name) {
+    if (length>limit || (length && !input) || (name && !length)) return NO;
+    for (size_t i=0;i<length;++i) if (input[i]<32 || input[i]>126) return NO;
+    if (length) memcpy(out,input,length);
+    out[length]=0;
+    return !name || header_name(out);
+}
+static BOOL response_reserved(const char *name) {
+    static const char *const reserved[]={"content-type","content-length","transfer-encoding","connection","keep-alive","te","trailer","upgrade","proxy-authenticate","proxy-authorization"};
+    for (size_t i=0;i<sizeof(reserved)/sizeof(*reserved);++i) if (!strcasecmp(name,reserved[i])) return YES;
+    return NO;
+}
+/* One response of the site, with its security headers. The body holds its
+ * budget while it is handed to the engine. */
+static int local_respond(ZwkPage *s,id<WKURLSchemeTask> task,BOOL head,uint32_t status,const uint8_t *mime,size_t mime_length,
+    const uint8_t *body,size_t length,const ZwkResponseHeader *rows,uint32_t count) {
+    char mime_text[128];
+    if (status<200 || status>599 || !mime_length || !response_text(mime_text,mime,mime_length,127,NO) || count>16 || (count && !rows) ||
+        (length && !body) || length>s->local_limit || ((status==204 || status==205 || status==304) && length)) return ZWK_INVALID;
+    NSMutableDictionary<NSString *,NSString *> *headers=[NSMutableDictionary dictionaryWithCapacity:count+5];
+    size_t bytes=0;
+    for (uint32_t i=0;i<count;++i) {
+        char name[65], value[2049];
+        if (!response_text(name,rows[i].name,rows[i].name_length,64,YES) || !response_text(value,rows[i].value,rows[i].value_length,2048,NO) || response_reserved(name)) return ZWK_INVALID;
+        bytes+=rows[i].name_length+rows[i].value_length+4;
+        if (bytes>8192) return ZWK_INVALID;
+        NSString *key=[NSString stringWithUTF8String:name];
+        for (NSString *earlier in headers) if ([earlier caseInsensitiveCompare:key]==NSOrderedSame) return ZWK_INVALID;
+        headers[key]=[NSString stringWithUTF8String:value];
+    }
+    headers[@"Content-Type"]=[NSString stringWithUTF8String:mime_text];
+    headers[@"Content-Length"]=[NSString stringWithFormat:@"%zu",length];
+    headers[@"Content-Security-Policy"]=s->local_csp;
+    headers[@"Cache-Control"]=@"no-store";
+    headers[@"X-Content-Type-Options"]=@"nosniff";
+    const int reserved=head?0:(int)length;
+    if (!local_body_reserve(s->local_budget,reserved)) return ZWK_FULL;
+    NSHTTPURLResponse *response=[[NSHTTPURLResponse alloc] initWithURL:task.request.URL statusCode:(NSInteger)status HTTPVersion:@"HTTP/1.1" headerFields:headers];
+    if (!response) { local_body_release(s->local_budget,reserved); return ZWK_OOM; }
+    [task didReceiveResponse:response];
+    if (reserved) [task didReceiveData:[NSData dataWithBytes:body length:length]];
+    [task didFinish];
+    local_body_release(s->local_budget,reserved);
+    return ZWK_OK;
+}
+
+/* A request in the app's handler: valid only during the callback, under
+ * the generation that asked. */
+typedef struct ResourceCall { void *page; id<WKURLSchemeTask> __unsafe_unretained task; uint64_t generation; BOOL head, responded; } ResourceCall;
+int zwk_resources_enable(ZwkState *state,ZwkResourceNotify callback,int dynamic,uint32_t limit) {
+    ZwkPage *s=page_of(state);
+    if (!live(s)) return ZWK_CLOSED;
+    if (!s->local || s->resource_fn || !callback || !limit || limit>8) return ZWK_INVALID;
+    s->resource_fn=callback; s->resource_limit=limit; s->dynamic_document=dynamic!=0;
+    s->deferred=[NSMutableArray arrayWithCapacity:limit];
+    return ZWK_OK;
+}
+static ZwkDeferred *resource_take(ZwkPage *s,uint64_t token) {
+    for (ZwkDeferred *slot in s->deferred) if (slot->token==token) {
+        [s->deferred removeObjectIdenticalTo:slot];
+        atomic_fetch_sub(&live_resource_requests,1);
+        return slot;
+    }
+    return nil;
+}
+void zwk_resource_cancel(ZwkState *state,uint64_t token) {
+    ZwkPage *s=page_of(state);
+    @autoreleasepool {
+        ZwkDeferred *slot=resource_take(s,token);
+        if (slot) [slot->task didFailWithError:local_denied()];
+    }
+}
+static void resources_cancel_all(ZwkPage *s) {
+    while (s->deferred.count) {
+        ZwkDeferred *slot=s->deferred.lastObject;
+        [s->deferred removeLastObject];
+        atomic_fetch_sub(&live_resource_requests,1);
+        [slot->task didFailWithError:local_denied()];
+    }
+}
+void zwk_resource_cancel_all(ZwkState *state) { @autoreleasepool { resources_cancel_all(page_of(state)); } }
+int zwk_resource_respond(void *opaque,uint32_t status,const uint8_t *mime,size_t mime_length,const uint8_t *body,size_t length,const ZwkResponseHeader *headers,uint32_t count) {
+    ResourceCall *call=opaque; ZwkPage *s=(__bridge ZwkPage *)call->page;
+    if (!live(s) || call->generation!=s->generation) return ZWK_CLOSED;
+    if (call->responded) return ZWK_INVALID;
+    @autoreleasepool {
+        const int result=local_respond(s,call->task,call->head,status,mime,mime_length,body,length,headers,count);
+        if (result==ZWK_OK) call->responded=YES;
+        return result;
+    }
+}
+int zwk_resource_defer(void *opaque,uint64_t token) {
+    ResourceCall *call=opaque; ZwkPage *s=(__bridge ZwkPage *)call->page;
+    if (!live(s) || call->generation!=s->generation) return ZWK_CLOSED;
+    if (!s->resource_fn || call->responded || !token) return ZWK_INVALID;
+    for (ZwkDeferred *slot in s->deferred) if (slot->token==token) return ZWK_INVALID;
+    if (s->deferred.count>=s->resource_limit) return ZWK_FULL;
+    ZwkDeferred *slot=[[ZwkDeferred alloc] init];
+    slot->task=call->task; slot->token=token; slot->generation=call->generation; slot->head=call->head;
+    [s->deferred addObject:slot];
+    atomic_fetch_add(&live_resource_requests,1);
+    call->responded=YES;
+    return ZWK_OK;
+}
+int zwk_resource_respond_deferred(ZwkState *state,uint64_t token,uint32_t status,const uint8_t *mime,size_t mime_length,const uint8_t *body,size_t length,const ZwkResponseHeader *headers,uint32_t count) {
+    ZwkPage *s=page_of(state);
+    @autoreleasepool {
+        ZwkDeferred *slot=resource_take(s,token);
+        if (!slot) return ZWK_CLOSED;
+        int result=ZWK_CLOSED;
+        if (live(s) && slot->generation==s->generation) result=local_respond(s,slot->task,slot->head,status,mime,mime_length,body,length,headers,count);
+        if (result!=ZWK_OK) [slot->task didFailWithError:local_denied()];
+        return result;
+    }
+}
+/* File streams are of the Linux backend; macOS sites answer with bytes. */
+int zwk_resource_respond_file(void *request,ZwkFile *file,uint64_t length,ZwkFileBudget *budget,uint32_t status,const uint8_t *mime,size_t mime_length,const ZwkResponseHeader *headers,uint32_t count,int ticket,ZwkFileControl **out) {
+    (void)request; (void)file; (void)length; (void)budget; (void)status; (void)mime; (void)mime_length; (void)headers; (void)count; (void)ticket; *out=NULL; return ZWK_INVALID;
+}
+int zwk_resource_respond_file_deferred(ZwkState *s,uint64_t token,ZwkFile *file,uint64_t length,ZwkFileBudget *budget,uint32_t status,const uint8_t *mime,size_t mime_length,const ZwkResponseHeader *headers,uint32_t count,int ticket,ZwkFileControl **out) {
+    (void)s; (void)token; (void)file; (void)length; (void)budget; (void)status; (void)mime; (void)mime_length; (void)headers; (void)count; (void)ticket; *out=NULL; return ZWK_INVALID;
+}
+/* Hands one request to the app's handler. What it neither answers nor
+ * defers fails as a refused load. */
+static BOOL resource_notify(ZwkPage *s,id<WKURLSchemeTask> task,NSString *method) {
+    if (!s->resource_fn) return NO;
+    NSDictionary<NSString *,NSString *> *fields=task.request.allHTTPHeaderFields?:@{};
+    ZwkResourceHeader headers[64]; uint32_t count=0;
+    for (NSString *key in fields) {
+        if (count==64) { [task didFailWithError:local_denied()]; return YES; }
+        headers[count++]=(ZwkResourceHeader){key.UTF8String,fields[key].UTF8String};
+    }
+    ResourceCall call={(__bridge void *)s,task,s->generation,[method isEqualToString:@"HEAD"],NO};
+    s->resource_fn(s->owner,task.request.URL.absoluteString.UTF8String,method.UTF8String,headers,count,&call);
+    if (!call.responded) [task didFailWithError:local_denied()];
+    return YES;
+}
 /* The site's reply to one request: the page's HTML at the start path, a
- * resource, or 404. Whatever the policy refuses fails as a network error. */
+ * resource, the app's handler, or 404. Whatever the policy refuses fails as
+ * a network error. */
 static BOOL local_serve(ZwkPage *s,WKWebView *webView,id<WKURLSchemeTask> task) {
     if (!live(s) || s->failed || webView!=s->view) return NO;
     NSURLRequest *request=task.request;
     char path[4097];
     if (!local_uri(s,request.URL.absoluteString.UTF8String,path)) return NO;
     NSString *method=request.HTTPMethod?:@"GET";
-    const BOOL head=[method isEqualToString:@"HEAD"];
-    if ((!head && ![method isEqualToString:@"GET"]) || !local_headers_default(request.allHTTPHeaderFields?:@{})) return NO;
-    const void *body="Not found"; size_t length=9; const char *mime="text/plain; charset=utf-8"; NSInteger status=404;
-    if (!strcmp(path,s->local_start)) { body=s->html_bytes.bytes; length=s->html_bytes.length; mime="text/html; charset=utf-8"; status=200; }
-    else {
+    const int verb=method_index(method);
+    if (!local_request_allowed(s,verb,request.allHTTPHeaderFields?:@{})) return NO;
+    const BOOL read=verb<2, head=verb==1;
+    const uint8_t *body=(const uint8_t *)"Not found"; size_t length=9; const char *mime="text/plain; charset=utf-8"; uint32_t status=404;
+    if (read && !strcmp(path,s->local_start)) {
+        if (s->dynamic_document) return resource_notify(s,task,method);
+        body=s->html_bytes.bytes; length=s->html_bytes.length; mime="text/html; charset=utf-8"; status=200;
+    } else if (read) {
         uint32_t low=0, high=s->local_count;
         while (low<high) {
             const uint32_t middle=low+(high-low)/2;
@@ -614,20 +812,8 @@ static BOOL local_serve(ZwkPage *s,WKWebView *webView,id<WKURLSchemeTask> task) 
             else { body=resource->bytes; length=resource->length; mime=resource->mime; status=200; break; }
         }
     }
-    if (length>s->local_limit) return NO;
-    const int reserved=head?0:(int)length;
-    ZwkLocalBudget *budget=s->local_budget;
-    if (!local_body_reserve(budget,reserved)) return NO;
-    NSString *type=[NSString stringWithUTF8String:mime];
-    NSDictionary *headers=@{@"Content-Type":type?:@"application/octet-stream",@"Content-Length":[NSString stringWithFormat:@"%zu",length],
-        @"Content-Security-Policy":s->local_csp,@"Cache-Control":@"no-store",@"X-Content-Type-Options":@"nosniff"};
-    NSHTTPURLResponse *response=[[NSHTTPURLResponse alloc] initWithURL:request.URL statusCode:status HTTPVersion:@"HTTP/1.1" headerFields:headers];
-    if (!response || !type) { local_body_release(budget,reserved); return NO; }
-    [task didReceiveResponse:response];
-    if (reserved) [task didReceiveData:[NSData dataWithBytes:body length:length]];
-    [task didFinish];
-    local_body_release(budget,reserved);
-    return YES;
+    if (status==404 && resource_notify(s,task,method)) return YES;
+    return local_respond(s,task,head,status,(const uint8_t *)mime,strlen(mime),body,length,NULL,0)==ZWK_OK;
 }
 @implementation ZwkLocalHandler
 - (void)webView:(WKWebView *)webView startURLSchemeTask:(id<WKURLSchemeTask>)task {
@@ -636,10 +822,27 @@ static BOOL local_serve(ZwkPage *s,WKWebView *webView,id<WKURLSchemeTask> task) 
         if (!s || !local_serve(s,webView,task)) [task didFailWithError:local_denied()];
     }
 }
-- (void)webView:(WKWebView *)webView stopURLSchemeTask:(id<WKURLSchemeTask>)task { (void)webView; (void)task; }
+/* A stopped request takes no answer: its deferral is dropped. */
+- (void)webView:(WKWebView *)webView stopURLSchemeTask:(id<WKURLSchemeTask>)task {
+    (void)webView;
+    ZwkPage *s=site_page;
+    if (!s) return;
+    for (ZwkDeferred *slot in s->deferred) if (slot->task==task) {
+        [s->deferred removeObjectIdenticalTo:slot];
+        atomic_fetch_sub(&live_resource_requests,1);
+        return;
+    }
+}
 @end
 
+static void policy_free(ZwkPage *s) {
+    for (uint32_t i=0;i<s->policy_header_count;++i) { free(s->policy_names[i]); free(s->policy_values[i]); }
+    for (uint32_t i=0;i<s->policy_origin_count;++i) free(s->policy_origins[i]);
+    free(s->policy_names); free(s->policy_values); free(s->policy_origins);
+    s->policy_names=s->policy_values=s->policy_origins=NULL; s->policy_header_count=s->policy_origin_count=0; s->policy_extended=NO;
+}
 static void local_free(ZwkPage *s) {
+    policy_free(s);
     free(s->local_storage); s->local_storage=NULL; s->local_resources=NULL; s->local_count=0;
     if (s->local_budget) zwk_local_budget_release(s->local_budget);
     s->local_budget=NULL;
@@ -651,7 +854,28 @@ static char *local_copy(char **cursor,const char *text,size_t length) {
  * bodies stay the owner's, as on Linux. */
 static int local_prepare(ZwkPage *s,const ZwkLocalOptions *options) {
     if (!options->budget || options->count>4096 || (options->count && !options->resources) || !options->max_response_bytes ||
-        options->max_response_bytes>16*1024*1024 || options->policy) return ZWK_INVALID;
+        options->max_response_bytes>16*1024*1024) return ZWK_INVALID;
+    if (options->policy) {
+        /* The View checked and made canonical every grant. */
+        const ZwkLocalPolicy *policy=options->policy;
+        if (!policy->methods || (policy->methods&~127u) || policy->header_count>16 || policy->origin_count>8 ||
+            (policy->header_count && !policy->headers) || (policy->origin_count && !policy->origins)) return ZWK_INVALID;
+        s->policy_extended=YES; s->policy_methods=policy->methods;
+        s->policy_names=calloc(policy->header_count+1,sizeof(char *)); s->policy_values=calloc(policy->header_count+1,sizeof(char *));
+        s->policy_origins=calloc(policy->origin_count+1,sizeof(char *));
+        if (!s->policy_names || !s->policy_values || !s->policy_origins) return ZWK_OOM;
+        for (uint32_t i=0;i<policy->header_count;++i) {
+            const ZwkLocalHeaderGrant *row=&policy->headers[i];
+            if (!header_name(row->name) || (row->value && !header_value(row->value))) return ZWK_INVALID;
+            ++s->policy_header_count;
+            if (!(s->policy_names[i]=strdup(row->name)) || (row->value && !(s->policy_values[i]=strdup(row->value)))) return ZWK_OOM;
+        }
+        for (uint32_t i=0;i<policy->origin_count;++i) {
+            if (!policy->origins[i] || strnlen(policy->origins[i],1025)>1024) return ZWK_INVALID;
+            ++s->policy_origin_count;
+            if (!(s->policy_origins[i]=strdup(policy->origins[i]))) return ZWK_OOM;
+        }
+    }
     const size_t scheme_length=options->scheme?strnlen(options->scheme,33):0, host_length=options->host?strnlen(options->host,254):0;
     const size_t start_length=options->start_path?strnlen(options->start_path,4097):0;
     if (!scheme_length || scheme_length>32 || !host_length || host_length>253 || start_length>4096 || !local_route(options->start_path)) return ZWK_INVALID;
@@ -795,6 +1019,7 @@ void zwk_close(ZwkState *state) {
     ZwkPage *s=page_of(state);
     if (s->closed) return;
     @autoreleasepool {
+        resources_cancel_all(s);
         s->closed=YES; s->owner=NULL;
         [s->timer invalidate]; s->timer=nil;
         navigation_clear(s);
@@ -1154,23 +1379,6 @@ int zwk_pdf_start(ZwkState *s,uint64_t token,const char *path,const ZwkPdfReques
 void zwk_capture_cancel(ZwkState *s,uint64_t token) { (void)s; (void)token; }
 void zwk_capture_counts(uint32_t *a,uint32_t *b,size_t *c,size_t *d) { *a=0; *b=0; *c=0; *d=0; }
 
-int zwk_resources_enable(ZwkState *s,ZwkResourceNotify callback,int dynamic,uint32_t limit) { (void)s; (void)callback; (void)dynamic; (void)limit; return ZWK_INVALID; }
-int zwk_resource_respond(void *request,uint32_t status,const uint8_t *mime,size_t mime_length,const uint8_t *body,size_t length,const ZwkResponseHeader *headers,uint32_t count) {
-    (void)request; (void)status; (void)mime; (void)mime_length; (void)body; (void)length; (void)headers; (void)count; return ZWK_INVALID;
-}
-int zwk_resource_defer(void *request,uint64_t token) { (void)request; (void)token; return ZWK_INVALID; }
-int zwk_resource_respond_deferred(ZwkState *s,uint64_t token,uint32_t status,const uint8_t *mime,size_t mime_length,const uint8_t *body,size_t length,const ZwkResponseHeader *headers,uint32_t count) {
-    (void)s; (void)token; (void)status; (void)mime; (void)mime_length; (void)body; (void)length; (void)headers; (void)count; return ZWK_INVALID;
-}
-void zwk_resource_cancel(ZwkState *s,uint64_t token) { (void)s; (void)token; }
-void zwk_resource_cancel_all(ZwkState *s) { (void)s; }
-uint32_t zwk_resources_pending(void) { return 0; }
-int zwk_resource_respond_file(void *request,ZwkFile *file,uint64_t length,ZwkFileBudget *budget,uint32_t status,const uint8_t *mime,size_t mime_length,const ZwkResponseHeader *headers,uint32_t count,int ticket,ZwkFileControl **out) {
-    (void)request; (void)file; (void)length; (void)budget; (void)status; (void)mime; (void)mime_length; (void)headers; (void)count; (void)ticket; *out=NULL; return ZWK_INVALID;
-}
-int zwk_resource_respond_file_deferred(ZwkState *s,uint64_t token,ZwkFile *file,uint64_t length,ZwkFileBudget *budget,uint32_t status,const uint8_t *mime,size_t mime_length,const ZwkResponseHeader *headers,uint32_t count,int ticket,ZwkFileControl **out) {
-    (void)s; (void)token; (void)file; (void)length; (void)budget; (void)status; (void)mime; (void)mime_length; (void)headers; (void)count; (void)ticket; *out=NULL; return ZWK_INVALID;
-}
 ZwkFileBudget *zwk_file_budget_create(uint32_t limit) { (void)limit; return NULL; }
 void zwk_file_budget_limit(ZwkFileBudget *budget,uint32_t limit) { (void)budget; (void)limit; }
 void zwk_file_budget_release(ZwkFileBudget *budget) { (void)budget; }

@@ -792,12 +792,6 @@ fn validateBackendOptions(options: Options) !void {
     if (is_macos) {
         if (options.storage != .ephemeral or options.remote != null or options.request_policy_extension != null or
             options.file_streams != null or options.document_initializers.len != 0) return error.UnsupportedCapability;
-        // A local site serves its fixed resources with the default policy:
-        // GET and HEAD, browser headers only, no request Origin.
-        if (options.local) |site| {
-            if (site.on_resource != null or site.dynamic_document or options.custom_schemes.len != 1) return error.UnsupportedCapability;
-            if (try webkit.localPolicyBytes(site, options.custom_schemes[0]) != 0) return error.UnsupportedCapability;
-        }
         // Sign-ins and certificates are of remote pages, which WKWebView does not show here yet.
         if (options.http_auth != null or options.certificate_errors != null or options.context_menu == .handler) return error.UnsupportedCapability;
         inline for (zio.fields(tools.Policy)) |field| if (@field(options.tools, field.name)) return error.UnsupportedCapability;
