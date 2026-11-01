@@ -137,6 +137,9 @@ typedef struct ZwkInitializerState ZwkInitializerState;
     /* A region's view is placed by zwk_viewport; a session's lives parked,
      * without a window, until zwk_session_mount places it in one. */
     BOOL region_mode, session, placement_busy;
+    /* The load the engine is still ending became a download: it no longer
+     * holds the next navigation back. */
+    BOOL download_load;
     void *session_parent;
     uint64_t session_epoch;
     uint32_t session_width, session_height;
@@ -592,8 +595,9 @@ static int prepare_document(ZwkPage *s) {
  * exists. */
 static int navigation_submit(ZwkPage *s,int kind,NSString *uri,WKBackForwardListItem *item,BOOL ready) {
     if (!initializers_allow_navigation(s)) return ZWK_NAVIGATION_PENDING;
-    if (s->pending_navigation || s->load_started || s->view.loading) return ZWK_NAVIGATION_PENDING;
+    if (s->pending_navigation || s->load_started || (s->view.loading && !s->download_load)) return ZWK_NAVIGATION_PENDING;
     if (!uri || [uri lengthOfBytesUsingEncoding:NSUTF8StringEncoding]>16384) return ZWK_INVALID;
+    s->download_load=NO;
     s->pending_navigation=YES; s->authorized=NO; s->navigation=nil;
     s->nav_kind=kind; s->nav_uri=uri; s->nav_item=item; s->nav_prepared=NO;
     if (kind!=NAV_HISTORY && kind!=NAV_FRAGMENT) {
@@ -741,7 +745,7 @@ static void *download_context=&download_context;
     if (live(self) && navigation) {
         [self finish:navigation error:[NSError errorWithDomain:@"WebKitErrorDomain" code:102 userInfo:@{NSLocalizedDescriptionKey:@"Frame load interrupted by a download"}]];
         /* The download goes on without the frame's load. */
-        if (live(self) && !pending_navigation) [webView stopLoading];
+        if (live(self) && !pending_navigation) { download_load=YES; [webView stopLoading]; }
     }
 }
 /* The offer: a download from a granted origin whose known size is within the
