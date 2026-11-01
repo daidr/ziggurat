@@ -105,7 +105,7 @@ const Probe = struct {
             .completed => |info| {
                 if (self.step != .refused or info.success) return;
                 if (self.certificates != 1) {
-                    std.debug.print("refused load: status {d} cancelled {}\n", .{ info.native_status, info.cancelled });
+                    std.debug.print("refused load: status {d}, asked {d} times\n", .{ info.native_status, self.certificates });
                     return self.fail(error.CertificateNotAsked);
                 }
                 self.step = .trusted;

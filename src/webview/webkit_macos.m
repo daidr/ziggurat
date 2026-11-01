@@ -163,6 +163,10 @@ typedef struct ZwkInitializerState ZwkInitializerState;
     ZwkCertificate certificate_fn;
     /* host + DER of each certificate the app allowed, for the page's life. */
     NSMutableSet *allowed_certificates;
+    /* Certificates the app refused during the document being loaded: the
+     * engine retries a refused connection, and the app is asked once. */
+    NSMutableSet *refused_certificates;
+    uint64_t refused_generation;
     /* Downloads: the origins and limits the app granted, and those it took. */
     ZwkDownloadOffer download_offer;
     ZwkDownloadNotify download_notify;
@@ -886,7 +890,6 @@ static void *download_context=&download_context;
     ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep; (void)webView;
     NSURLProtectionSpace *space=challenge.protectionSpace;
     NSString *method=space.authenticationMethod;
-    fprintf(stderr,"zwk challenge %s %s:%ld\n",method.UTF8String,space.host.UTF8String,(long)space.port);
     if ([method isEqualToString:NSURLAuthenticationMethodServerTrust]) {
         SecTrustRef trust=space.serverTrust;
         CFErrorRef error=NULL;
@@ -895,16 +898,20 @@ static void *download_context=&download_context;
         if (error) CFRelease(error);
         NSData *der=certificate_der(trust);
         NSString *host=space.host.lowercaseString;
-        fprintf(stderr,"zwk trust %s:%ld der=%lu live=%d remote=%d fn=%d\n",space.host.UTF8String,(long)space.port,(unsigned long)der.length,live(self),remote,certificate_fn!=NULL);
         if (!der.length || !host.length || !live(self) || !remote || !certificate_fn) { completion(NSURLSessionAuthChallengeCancelAuthenticationChallenge,nil); return; }
         NSArray *key=@[host,der];
         BOOL allowed=[allowed_certificates containsObject:key];
+        if (refused_generation!=generation) { refused_certificates=nil; refused_generation=generation; }
+        if (!allowed && [refused_certificates containsObject:key]) { completion(NSURLSessionAuthChallengeCancelAuthenticationChallenge,nil); return; }
         if (!allowed) {
             NSString *uri=certificate_uri(self,space);
             allowed=uri.UTF8String && certificate_fn(owner,uri.UTF8String,flags,der.bytes,der.length) && live(self);
             if (allowed) {
                 if (!allowed_certificates) allowed_certificates=[NSMutableSet new];
                 [allowed_certificates addObject:key];
+            } else if (live(self)) {
+                if (!refused_certificates) refused_certificates=[NSMutableSet new];
+                [refused_certificates addObject:key];
             }
         }
         completion(allowed?NSURLSessionAuthChallengeUseCredential:NSURLSessionAuthChallengeCancelAuthenticationChallenge,allowed?[NSURLCredential credentialForTrust:trust]:nil);
