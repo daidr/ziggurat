@@ -199,9 +199,13 @@ static NSMutableArray<ZsmBar *> *bars;
 static uint64_t bar_order;
 static id main_observer;
 
+static int menu_is_ours(NSMenu *menu);
 static void install(ZsmBar *bar) {
     if (!bar) {
-        if ([NSApp mainMenu]) [NSApp setMainMenu:nil];
+        /* AppKit keeps the old menu bar for setMainMenu:nil, so an empty
+           menu takes its place. */
+        NSMenu *current = [NSApp mainMenu];
+        if (!current || menu_is_ours(current) || [current numberOfItems]) [NSApp setMainMenu:[[NSMenu alloc] initWithTitle:@""]];
         return;
     }
     if ([NSApp mainMenu] != bar->menu) [NSApp setMainMenu:bar->menu];
@@ -595,6 +599,7 @@ int zsm_test_menu_item(void *menu, const int32_t *path, uint32_t depth, char *ti
     }
 }
 void *zsm_test_main_menu(void) { return (__bridge void *)[NSApp mainMenu]; }
+int zsm_test_menu_count(void *menu) { return (int)[(__bridge NSMenu *)menu numberOfItems]; }
 
 /* ---- the Dock ---- */
 

@@ -11,6 +11,7 @@ const Watchdog = @import("watchdog.zig").Watchdog;
 pub const std_options: std.Options = .{ .allow_stack_tracing = builtin.os.tag != .macos };
 
 extern fn zsm_bar_menu(*anyopaque) *anyopaque;
+extern fn zsm_test_menu_count(*anyopaque) c_int;
 extern fn zsm_test_main_menu() ?*anyopaque;
 extern fn zsm_test_menu_perform(*anyopaque, [*]const i32, u32) c_int;
 extern fn zsm_test_menu_key(*anyopaque, [*:0]const u8, u32) c_int;
@@ -242,8 +243,11 @@ const State = struct {
                 // A replacement takes the main menu.
                 try self.owner.setMenu(builder.result()[0..9]);
                 try std.testing.expectEqual(@as(?*anyopaque, zsm_bar_menu(self.owner.bar.?)), zsm_test_main_menu());
+                const replaced = zsm_bar_menu(self.owner.bar.?);
                 try self.owner.clearMenu();
-                try std.testing.expectEqual(@as(?*anyopaque, null), zsm_test_main_menu());
+                // The bar gives way to an empty menu.
+                const empty = zsm_test_main_menu() orelse return error.MissingMainMenu;
+                try std.testing.expect(empty != replaced and zsm_test_menu_count(empty) == 0);
                 try self.owner.setMenu(builder.result());
                 self.advance();
             },
