@@ -2,8 +2,12 @@
 //! and reports which. Passes either way: a machine with no audio device
 //! exercises the failure path, one with a device the real backend.
 const std = @import("std");
+const builtin = @import("builtin");
 const zio = @import("ziggurat_io");
 const audio = @import("ziggurat_audio");
+
+// The macOS unwinder cannot walk the output thread's shallow stack.
+pub const std_options: std.Options = .{ .allow_stack_tracing = builtin.os.tag != .macos };
 
 pub fn main() !void {
     var debug_allocator: std.heap.DebugAllocator(.{ .thread_safe = true }) = .init;

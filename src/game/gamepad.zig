@@ -14,7 +14,8 @@
 //!
 //! Windows reads XInput (Xbox controllers and those that act as one);
 //! Linux reads evdev, `/dev/input/event*`, which the user at the seat may
-//! read. Other targets report no pads. Everything runs on the thread that
+//! read; macOS reads GameController.framework's controllers with an
+//! extended gamepad profile. Other targets report no pads. Everything runs on the thread that
 //! owns the `Gamepads`, normally the main thread; nothing allocates.
 const std = @import("std");
 const zio = @import("ziggurat_io");
@@ -118,6 +119,7 @@ fn stick(x: f32, y: f32) State.Stick {
 pub const Gamepads = Set(switch (builtin.os.tag) {
     .windows => @import("gamepad_windows.zig").Backend,
     .linux => @import("gamepad_linux.zig").Backend,
+    .macos => @import("gamepad_macos.zig").Backend,
     else => NoPads,
 });
 

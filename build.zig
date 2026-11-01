@@ -2747,6 +2747,7 @@ pub fn build(b: *std.Build) void {
     const audio = b.addModule("ziggurat_audio", .{ .root_source_file = b.path("src/audio/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
     audio.link_libc = true;
     if (target.result.os.tag == .windows) audio.linkSystemLibrary("ole32", .{});
+    if (target.result.os.tag == .macos) native_support.linkFrameworks(b, audio, &.{"AudioToolbox"});
     // Pinned third-party decoders: their own warnings and undefined-behavior
     // checks are not this project's to enforce.
     for ([_][]const u8{ "mp3", "vorbis" }) |codec| _ = native_support.add(b, audio, b.fmt("audio-{s}-native", .{codec}), b.fmt("src/audio/{s}.c", .{codec}), &.{ "-std=c99", "-w", "-fno-sanitize=undefined" }, target, optimize);
@@ -3034,10 +3035,17 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_chart", .module = chart },
             .{ .name = "ziggurat_chart_view", .module = chart_view },
         });
+    }
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux or target.result.os.tag == .macos) {
         const game = b.addModule("ziggurat_game", .{ .root_source_file = b.path("src/game/root.zig"), .target = target, .optimize = optimize, .imports = &.{
             .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
             .{ .name = "ziggurat_view", .module = declarative_view },
         } });
+        if (target.result.os.tag == .macos) {
+            _ = native_support.add(b, game, "game-gamepad-macos", "src/game/gamepad_macos.m", &.{ "-fno-objc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+            native_support.linkFrameworks(b, game, &.{ "GameController", "Foundation" });
+            game.linkSystemLibrary("objc", .{ .use_pkg_config = .no });
+        }
         const game_tests = addTest(b, .{ .root_module = game });
         check.dependOn(&game_tests.step);
         const run_game_tests = b.addRunArtifact(game_tests);
