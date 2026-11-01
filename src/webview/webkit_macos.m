@@ -143,6 +143,8 @@ typedef struct ZwkInitializerState ZwkInitializerState;
     /* The document's bootstrap scripts, and the app's initializer. */
     WKUserScript *private_bootstrap, *public_bootstrap;
     struct ZwkInitializerState *initializers;
+    ZwkPermission permission_offer;
+    NSMutableArray *permissions;
 }
 @end
 static void resources_cancel_all(ZwkPage *s);
@@ -160,6 +162,24 @@ static void initializers_free(ZwkInitializerState *owner);
 static void initializers_cancel_all(ZwkPage *s);
 static BOOL initializers_allow_navigation(ZwkPage *s);
 static void scripts_install(ZwkPage *s);
+
+/* A permission request the app keeps past its offer, answered once. */
+@interface ZwkPendingPermission : NSObject {
+@public
+    uint64_t token;
+    void (^decision)(WKPermissionDecision);
+}
+@end
+@implementation ZwkPendingPermission
+@end
+typedef struct ZwkPermissionCall { __unsafe_unretained ZwkPage *page; __unsafe_unretained void (^decision)(WKPermissionDecision); BOOL deferred; } ZwkPermissionCall;
+/* scheme://host[:port] of the page's document, as the engine names origins. */
+static NSString *permission_origin(NSURL *url) {
+    NSString *scheme=url.scheme.lowercaseString, *host=url.host.lowercaseString;
+    if (!scheme.length || !host.length) return nil;
+    if ([host containsString:@":"]) host=[NSString stringWithFormat:@"[%@]",host];
+    return url.port?[NSString stringWithFormat:@"%@://%@:%@",scheme,host,url.port]:[NSString stringWithFormat:@"%@://%@",scheme,host];
+}
 
 static BOOL live(ZwkPage *s) { return !s->closed && !s->recovering && s->owner; }
 static ZwkPage *page_of(ZwkState *s) { return (__bridge ZwkPage *)(void *)s; }
@@ -261,6 +281,16 @@ void zwk_test_gestures(ZwkState *s,int *swipe,int *pinch) {
     WKWebView *view=page_of(s)->view; *swipe=view.allowsBackForwardNavigationGestures?1:0; *pinch=view.allowsMagnification?1:0;
 }
 
+/* Test hook: the engine's mock camera and microphone, so a request reaches
+ * the delegate on a machine without devices and never asks the system. */
+int zwk_test_mock_capture(ZwkState *s) {
+    WKPreferences *preferences=page_of(s)->view.configuration.preferences;
+    SEL mock=sel_registerName("_setMockCaptureDevicesEnabled:"), focus=sel_registerName("_setGetUserMediaRequiresFocus:");
+    if (![preferences respondsToSelector:mock]) return 0;
+    ((void (*)(id,SEL,BOOL))objc_msgSend)(preferences,mock,YES);
+    if ([preferences respondsToSelector:focus]) ((void (*)(id,SEL,BOOL))objc_msgSend)(preferences,focus,NO);
+    return 1;
+}
 static void failure_set(ZwkPage *s,NSError *error) {
     if (error) s->failure=(ZwkFailure){domain_code(error.domain),(int32_t)error.code};
 }
@@ -704,8 +734,21 @@ static void *history_context=&history_context;
 - (void)webView:(WKWebView *)webView runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(NSArray<NSURL *> *))completion {
     (void)webView; (void)parameters; (void)frame; completion(nil);
 }
+/* Camera and microphone, the requests the engine asks the app about. The
+ * offer names the document's origin; a request the app does not defer in the
+ * call is denied, as one that no grant covers is. */
 - (void)webView:(WKWebView *)webView requestMediaCapturePermissionForOrigin:(WKSecurityOrigin *)origin initiatedByFrame:(WKFrameInfo *)frame type:(WKMediaCaptureType)type decisionHandler:(void (^)(WKPermissionDecision))decision API_AVAILABLE(macos(12.0)) {
-    (void)webView; (void)origin; (void)frame; (void)type; decision(WKPermissionDecisionDeny);
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep; (void)webView; (void)origin; (void)frame;
+    uint32_t kind=0, needs=0;
+    if (type==WKMediaCaptureTypeMicrophone) { kind=1; needs=1; }
+    else if (type==WKMediaCaptureTypeCamera) { kind=2; needs=2; }
+    else if (type==WKMediaCaptureTypeCameraAndMicrophone) { kind=2; needs=3; }
+    ZwkPermissionCall call={self,decision,NO};
+    /* The document's origin, as on Linux: grants name the page. */
+    NSString *text=kind && document(self) && permission_offer?permission_origin(view.URL):nil;
+    if (text.UTF8String) permission_offer(owner,text.UTF8String,kind,needs,&call);
+    call.page=nil;
+    if (!call.deferred) decision(WKPermissionDecisionDeny);
 }
 
 - (void)userContentController:(WKUserContentController *)controller_value didReceiveScriptMessage:(WKScriptMessage *)message {
@@ -2084,7 +2127,7 @@ int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPage
         if (options->facts && !(s->facts=[NSString stringWithUTF8String:options->facts])) return ZWK_INVALID;
         s->autoplay=options->autoplay!=0;
         s->owner=owner; s->notify_fn=callback; s->page_fn=page_callback; s->script_fn=script_callback; s->deadline_fn=deadline;
-        s->limit=options->max_pending; s->result_limit=options->max_result_bytes; s->policy=options->policy_flags;
+        s->limit=options->max_pending; s->result_limit=options->max_result_bytes; s->policy=options->policy_flags; s->permission_offer=options->permission;
         NSMutableArray<WKContentRuleList *> *filters=[NSMutableArray arrayWithCapacity:options->content_filter_count];
         for (uint32_t i=0;i<options->content_filter_count;i++) [filters addObject:(__bridge WKContentRuleList *)options->content_filters[i]];
         s->filters=filters;
@@ -2158,6 +2201,49 @@ int zwk_session_park(ZwkState *s,uint64_t epoch) { (void)s; (void)epoch; return 
 int zwk_session_size(ZwkState *s,uint32_t *width,uint32_t *height) { (void)s; *width=0; *height=0; return ZWK_INVALID; }
 void zwk_session_parent_destroying(ZwkState *s,uint64_t epoch) { (void)s; (void)epoch; }
 
+int zwk_permission_defer(void *call_pointer,uint64_t token) {
+    ZwkPermissionCall *call=call_pointer;
+    if (!call || !call->page || call->deferred || !token) return ZWK_INVALID;
+    ZwkPage *s=call->page;
+    if (!live(s)) return ZWK_CLOSED;
+    for (ZwkPendingPermission *at in s->permissions) if (at->token==token) return ZWK_INVALID;
+    ZwkPendingPermission *pending=[ZwkPendingPermission new];
+    if (!pending) return ZWK_OOM;
+    pending->token=token; pending->decision=call->decision;
+    if (!s->permissions) s->permissions=[NSMutableArray new];
+    [s->permissions addObject:pending];
+    call->deferred=YES;
+    return ZWK_OK;
+}
+static ZwkPendingPermission *permission_take(ZwkPage *s,uint64_t token) {
+    for (NSUInteger i=0;i<s->permissions.count;++i) {
+        ZwkPendingPermission *found=s->permissions[i];
+        if (found->token!=token) continue;
+        [s->permissions removeObjectAtIndex:i];
+        return found;
+    }
+    return nil;
+}
+int zwk_permission_decide(ZwkState *state,uint64_t token,int allow) {
+    if (!state || ![NSThread isMainThread]) return ZWK_INVALID;
+    ZwkPage *s=page_of(state);
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=s; (void)keep;
+    ZwkPendingPermission *pending=permission_take(s,token);
+    if (!pending) return ZWK_INVALID;
+    pending->decision(allow && live(s)?WKPermissionDecisionGrant:WKPermissionDecisionDeny);
+    return live(s)?ZWK_OK:ZWK_CLOSED;
+}
+int zwk_permission_cancel(ZwkState *state,uint64_t token) {
+    if (!state || ![NSThread isMainThread]) return ZWK_INVALID;
+    ZwkPage *s=page_of(state);
+    ZwkPendingPermission *pending=permission_take(s,token);
+    if (pending) pending->decision(WKPermissionDecisionDeny);
+    return ZWK_OK;
+}
+static void permissions_deny_all(ZwkPage *s) {
+    NSArray *pending=s->permissions; s->permissions=nil;
+    for (ZwkPendingPermission *at in pending) at->decision(WKPermissionDecisionDeny);
+}
 void zwk_close(ZwkState *state) {
     ZwkPage *s=page_of(state);
     if (s->closed) return;
@@ -2175,6 +2261,7 @@ void zwk_close(ZwkState *state) {
         if (s->find) find_gate_close(s->find);
         capture_cancel_all(s);
         initializers_cancel_all(s);
+        permissions_deny_all(s);
         ZwkWebView *view=s->view; s->view=nil;
         if (view) {
             if ([view respondsToSelector:@selector(_setFindDelegate:)]) [view _setFindDelegate:nil];

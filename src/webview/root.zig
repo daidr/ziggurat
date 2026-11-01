@@ -838,7 +838,7 @@ fn validateBackendOptions(options: Options) !void {
                 if (options.user_data_folder.len != 0) return error.ProfilePathForbidden;
             },
         }
-        if ((is_macos and options.permissions != null) or options.downloads != null or options.allow_local_navigation)
+        if (options.downloads != null or options.allow_local_navigation)
             return error.UnsupportedCapability;
         if (options.remote) |remote| {
             if ((options.storage == .ephemeral and remote.credentials != .ephemeral) or
@@ -1770,7 +1770,7 @@ pub const View = struct {
         };
         const facts = try self.factsScript(.linux);
         defer if (facts) |value| self.allocator.free(value);
-        const native_options: webkit.Options = .{ .context_menu = @backingInt(options.context_menu), .context_offer = if (!is_macos and options.context_menu == .handler) View.webkitContextMenu else null, .auth = if (!is_macos and options.http_auth != null) View.webkitAuth else null, .certificate = if (!is_macos and options.certificate_errors != null) View.webkitCertificate else null, .content_filters = filters.ptr, .content_filter_count = filter_count, .audio_muted = @intFromBool(self.mutedWanted()), .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .gestures = gestureFlags(options), .throttling = @intFromBool(options.background_throttling), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled), .scroll_to_container = @intFromBool(options.scroll_to_container), .permission = if (!is_macos and options.permissions != null) View.webkitPermission else null, .media = if (is_macos) 0 else mediaKinds(options.permissions) };
+        const native_options: webkit.Options = .{ .context_menu = @backingInt(options.context_menu), .context_offer = if (!is_macos and options.context_menu == .handler) View.webkitContextMenu else null, .auth = if (!is_macos and options.http_auth != null) View.webkitAuth else null, .certificate = if (!is_macos and options.certificate_errors != null) View.webkitCertificate else null, .content_filters = filters.ptr, .content_filter_count = filter_count, .audio_muted = @intFromBool(self.mutedWanted()), .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .gestures = gestureFlags(options), .throttling = @intFromBool(options.background_throttling), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled), .scroll_to_container = @intFromBool(options.scroll_to_container), .permission = if (options.permissions != null) View.webkitPermission else null, .media = if (is_macos) 0 else mediaKinds(options.permissions) };
         var candidate: ?*anyopaque = null;
         if (self.session) |session| {
             try webkit.check(webkit.zwk_session_create(&native_options, session.last_size.width, session.last_size.height, webkitNotify, pageNotify, webkitScriptNotify, webkitTimeout, self, &candidate));
@@ -1811,7 +1811,7 @@ pub const View = struct {
         self.eval_accepting = true;
         self.tool_accepting = true;
         self.resource_accepting = if (options.local) |site| site.on_resource != null else false;
-        self.permission_accepting = !is_macos and options.permissions != null;
+        self.permission_accepting = options.permissions != null;
         self.download_accepting = false;
     }
     /// The media devices any grant lets a page ask for: 1 microphone, 2
@@ -2177,7 +2177,7 @@ pub const View = struct {
         for (script_ids) |token| if (self.native) |native| nativeCancelScript(native, token);
         if (is_webkit) {
             for (resource_ids) |token| if (self.native) |native| webkit.zwk_resource_cancel(native, token);
-            if (!is_macos) for (permission_ids) |token| if (self.native) |native| {
+            for (permission_ids) |token| if (self.native) |native| {
                 _ = zwk_permission_cancel(native, token);
             };
             for (tool_slots[0..tool_ids.len]) |slot| {
@@ -2265,12 +2265,13 @@ pub const View = struct {
         var responder: PermissionResponder = .{ .view = self, .native = native_call, .page = page.generation };
         policy.handler.handle(policy.handler.context, .{ .origin = text[0..length], .kind = kind, .user_initiated = user, .page = page }, &responder);
     }
-    /// A WebKitGTK page's permission request. The engine tells no user
+    /// A WebKit page's permission request. The engine tells no user
     /// gesture, so a policy that requires one is never offered a request;
-    /// the origin is that of the page's committed document, as the engine
-    /// does not tell a frame's.
+    /// the origin is that of the page's committed document, as WebKitGTK
+    /// does not tell a frame's. WKWebView asks only for the camera and the
+    /// microphone; it denies geolocation and notifications itself.
     fn webkitPermission(ptr: *anyopaque, origin_z: [*:0]const u8, native_kind: u32, needs: u32, native_call: *anyopaque) callconv(.c) void {
-        if (!is_webkit or is_macos) return;
+        if (!is_webkit) return;
         const self: *View = @ptrCast(@alignCast(ptr));
         const window = self.access() orelse return;
         if (self.attachmentClosed() or appStopping(window) or !self.ready or self.recovering or !self.page_active) return;
@@ -2292,7 +2293,6 @@ pub const View = struct {
         policy.handler.handle(policy.handler.context, .{ .origin = origin, .kind = kind, .user_initiated = false, .page = page }, &responder);
     }
     fn deferPermission(self: *View, native_call: *anyopaque, page: u64, options: permissions.DeferOptions) !PermissionId {
-        if (is_macos) return self.unavailableBackend();
         const window = try self.propertyWindow();
         if (!self.permission_accepting) return error.PermissionUnavailable;
         if (!self.page_active or page != self.page_generation) return error.StalePage;
@@ -2338,7 +2338,6 @@ pub const View = struct {
         return if (self.attachmentClosed() or appStopping(window)) error.Closed else error.StalePermission;
     }
     pub fn decidePermission(self: *View, id: PermissionId, decision: permissions.Decision) !void {
-        if (is_macos) return self.unavailableBackend();
         const window = try self.propertyWindow();
         if (id.view != self or id.page != self.page_generation or !self.page_active) return error.StalePermission;
         const scope = self.beginCallback() orelse return error.Closed;
@@ -2352,7 +2351,6 @@ pub const View = struct {
         if (slot.completion) |completion| completion.complete(completion.context, result);
     }
     fn cancelPermission(self: *View, id: PermissionId) !bool {
-        if (is_macos) return self.unavailableBackend();
         const window = self.access() orelse return error.Closed;
         window.app.assertOwner();
         if (self.attachmentClosed() or appStopping(window)) return error.Closed;
