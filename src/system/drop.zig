@@ -4,7 +4,7 @@ const builtin = @import("builtin");
 const z = @import("ziggurat");
 const transfer = @import("transfer.zig");
 const drag = @import("drag.zig");
-const native = if (builtin.is_test) Unsupported else if (builtin.os.tag == .windows) @import("drop_windows.zig") else if (builtin.os.tag == .linux) Linux else Unsupported;
+const native = if (builtin.is_test) Unsupported else if (builtin.os.tag == .windows) @import("drop_windows.zig") else if (builtin.os.tag == .linux or builtin.os.tag == .macos) Linux else Unsupported;
 
 pub const capabilities = .{
     .drop_target = native.supported,
@@ -337,8 +337,11 @@ const Unsupported = struct {
     fn dataDetach(_: *anyopaque) void {}
 };
 
+/// GTK, and AppKit through src/system/macos_drag.m, which implements the
+/// same entry points with MIME names for pasteboard types.
 const Linux = struct {
     const supported = true;
+    const macos = builtin.os.tag == .macos;
     const Callbacks = extern struct {
         hover: *const fn (?*anyopaque, c_int, f64, f64, c_int, c_int) callconv(.c) c_int,
         drop: *const fn (?*anyopaque, f64, f64, c_int, ?[*]const u8, usize) callconv(.c) void,
@@ -370,10 +373,22 @@ const Linux = struct {
         complete: *const fn (?*anyopaque) callconv(.c) c_int,
     };
     extern fn zst_target_attach(widget: *anyopaque, owner: *anyopaque, callbacks: *const DataCallbacks) ?*anyopaque;
+    /// macOS registers the view for the pasteboard types of these formats.
+    extern fn zst_target_attach_types(window: *anyopaque, owner: *anyopaque, callbacks: *const DataCallbacks, names: [*]const u8, len: usize) ?*anyopaque;
     extern fn zst_target_detach(target: *anyopaque) void;
     extern fn zst_target_request(record: *anyopaque, name: [*:0]const u8) void;
     const data_callbacks: DataCallbacks = .{ .hover = dataHover, .drop = dataDrop, .received = dataReceived, .complete = dataComplete };
     fn dataAttach(target: *DataTarget, handle: *anyopaque) !*anyopaque {
+        if (comptime macos) {
+            var names: [transfer.max_formats * (transfer.max_format_bytes + 1)]u8 = undefined;
+            var len: usize = 0;
+            for (target.formats) |format| {
+                @memcpy(names[len..][0..format.len], format);
+                names[len + format.len] = 0;
+                len += format.len + 1;
+            }
+            return zst_target_attach_types(handle, target, &data_callbacks, &names, len) orelse error.AlreadyAttached;
+        }
         return zst_target_attach(handle, target, &data_callbacks) orelse error.AlreadyAttached;
     }
     fn dataDetach(state: *anyopaque) void {
@@ -406,8 +421,13 @@ const Linux = struct {
         while (split.next()) |existing| if (std.mem.eql(u8, existing, name)) return true;
         return false;
     }
-    /// The GTK target to request for a format: UTF-8 text first.
+    /// The GTK target to request for a format: UTF-8 text first. macOS
+    /// already names the offer by format.
     fn nativeFor(_: *DataTarget, format: transfer.Format) ?[]const u8 {
+        if (comptime macos) {
+            if (std.mem.eql(u8, format, transfer.file_list)) return if (offeredName(transfer.uri_list)) transfer.uri_list else null;
+            return if (offeredName(format)) format else null;
+        }
         if (std.mem.eql(u8, format, transfer.text)) {
             for ([_][]const u8{ "UTF8_STRING", "text/plain;charset=utf-8", "text/plain" }) |name| if (offeredName(name)) return name;
             return null;
