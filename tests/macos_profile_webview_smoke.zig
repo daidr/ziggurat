@@ -221,10 +221,7 @@ const Drain = struct {
     }
 };
 
-fn child(allocator: std.mem.Allocator, mode: Mode, path: []const u8, origin: []const u8) !void {
-    var prepared: Preparation = .{ .allocator = allocator, .main_thread = std.Thread.getCurrentId(), .path = path };
-    if (mode != .ephemeral) try prepared.open();
-    defer if (prepared.value) |*value| value.close() catch unreachable;
+fn run(allocator: std.mem.Allocator, mode: Mode, prepared: *Preparation, origin: []const u8) !usize {
     const app = try z.App.init(allocator);
     defer app.deinit();
     const owner: ?*web.Profile = if (mode == .ephemeral) null else try web.Profile.create(allocator, app, &prepared.value.?, .{ .contexts = 3 });
@@ -254,6 +251,17 @@ fn child(allocator: std.mem.Allocator, mode: Mode, path: []const u8, origin: []c
     }
     if (probe.failure) |err| return err;
     try std.testing.expect(probe.phase == .complete);
+    return probe.loads;
+}
+
+fn child(allocator: std.mem.Allocator, mode: Mode, path: []const u8, origin: []const u8) !void {
+    var prepared: Preparation = .{ .allocator = allocator, .main_thread = std.Thread.getCurrentId(), .path = path };
+    if (mode != .ephemeral) try prepared.open();
+    defer if (prepared.value) |*value| value.close() catch unreachable;
+    const loads = try run(allocator, mode, &prepared, origin);
+    // A stopped App takes no more tasks: a new one waits for the engine.
+    const app = try z.App.init(allocator);
+    defer app.deinit();
     var drain: Drain = .{ .app = app };
     try app.post(.{ .context = &drain, .call = Drain.tick });
     var watchdog: Watchdog = .{ .app = app };
@@ -269,7 +277,7 @@ fn child(allocator: std.mem.Allocator, mode: Mode, path: []const u8, origin: []c
         std.debug.print("macOS profile {s}: records left profiles={d} contexts={d} bytes={d}\n", .{ @tagName(mode), profiles, contexts, bytes });
         return error.ProfileRecordsLeft;
     }
-    std.debug.print("macOS profile child {s}: loads={d}, records released\n", .{ @tagName(mode), probe.loads });
+    std.debug.print("macOS profile child {s}: loads={d}, records released\n", .{ @tagName(mode), loads });
 }
 
 fn spawn(executable: []const u8, mode: Mode, path: []const u8, origin: []const u8) !void {

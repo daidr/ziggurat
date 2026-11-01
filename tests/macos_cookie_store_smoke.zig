@@ -285,35 +285,40 @@ pub fn main() !void {
     var preparation: Preparation = .{ .allocator = allocator, .main = std.Thread.getCurrentId(), .path = path };
     try preparation.open();
     defer preparation.value.?.close() catch unreachable;
+    {
+        const app = try z.App.init(allocator);
+        defer app.deinit();
+        var state: State = .{ .app = app, .server = &server, .origin = origin, .profile = try web.Profile.create(allocator, app, &preparation.value.?, .{}) };
+        defer if (state.profile) |profile| profile.close() catch unreachable;
+        state.store = try CookieStore.create(allocator, app, state.profile.?, .{ .allow_write = true, .allow_clear = true, .allow_read_all = true, .allow_replace_all = true });
+        defer if (state.store) |store| {
+            _ = store.close() catch unreachable;
+        };
+        const reader = try CookieStore.create(allocator, app, state.profile.?, .{});
+        try std.testing.expectError(error.PermissionDenied, reader.set(.{ .name = "denied", .value = "no", .domain = "127.0.0.1", .path = "/" }, state.completion()));
+        try std.testing.expectError(error.PermissionDenied, reader.listAll(state.completion()));
+        try std.testing.expectEqual(CookieStore.CloseResult.closed, try reader.close());
+        state.window = try app.createWindow(.{ .width = 320, .height = 200 });
+        state.view = web.View.init(allocator, &state, State.event);
+        try app.post(.{ .context = &state, .call = State.drive });
+        {
+            var watchdog: Watchdog = .{ .app = app };
+            try watchdog.start();
+            defer watchdog.stop();
+            try app.run();
+            watchdog.stop();
+            if (watchdog.expired) state.fail(error.Timeout);
+        }
+        if (state.failure) |err| return err;
+        try std.testing.expectEqual(@as(usize, 16), state.stage);
+        _ = try state.store.?.close();
+        state.store = null;
+        try state.profile.?.close();
+        state.profile = null;
+    }
+    // A stopped App takes no more tasks: a new one waits for the engine.
     const app = try z.App.init(allocator);
     defer app.deinit();
-    var state: State = .{ .app = app, .server = &server, .origin = origin, .profile = try web.Profile.create(allocator, app, &preparation.value.?, .{}) };
-    defer if (state.profile) |profile| profile.close() catch unreachable;
-    state.store = try CookieStore.create(allocator, app, state.profile.?, .{ .allow_write = true, .allow_clear = true, .allow_read_all = true, .allow_replace_all = true });
-    defer if (state.store) |store| {
-        _ = store.close() catch unreachable;
-    };
-    const reader = try CookieStore.create(allocator, app, state.profile.?, .{});
-    try std.testing.expectError(error.PermissionDenied, reader.set(.{ .name = "denied", .value = "no", .domain = "127.0.0.1", .path = "/" }, state.completion()));
-    try std.testing.expectError(error.PermissionDenied, reader.listAll(state.completion()));
-    try std.testing.expectEqual(CookieStore.CloseResult.closed, try reader.close());
-    state.window = try app.createWindow(.{ .width = 320, .height = 200 });
-    state.view = web.View.init(allocator, &state, State.event);
-    try app.post(.{ .context = &state, .call = State.drive });
-    {
-        var watchdog: Watchdog = .{ .app = app };
-        try watchdog.start();
-        defer watchdog.stop();
-        try app.run();
-        watchdog.stop();
-        if (watchdog.expired) state.fail(error.Timeout);
-    }
-    if (state.failure) |err| return err;
-    try std.testing.expectEqual(@as(usize, 16), state.stage);
-    _ = try state.store.?.close();
-    state.store = null;
-    try state.profile.?.close();
-    state.profile = null;
     var drain: Drain = .{ .app = app };
     try app.post(.{ .context = &drain, .call = Drain.tick });
     var watchdog: Watchdog = .{ .app = app };
