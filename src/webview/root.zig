@@ -804,8 +804,8 @@ fn validateBackendOptions(options: Options) !void {
         if (options.remote) |remote| if (remote.request_credentials.len != 0) return error.UnsupportedCapability;
         // The engine's sign-in and certificate answers are not taken here yet.
         if (options.http_auth != null or options.certificate_errors != null or options.context_menu == .handler) return error.UnsupportedCapability;
-        // Text find is the engine's own; the other browser tools are not yet here.
-        inline for (zio.fields(tools.Policy)) |field| if (!std.mem.eql(u8, field.name, "find") and @field(options.tools, field.name)) return error.UnsupportedCapability;
+        // Find, capture, PDF and clear are the engine's own; cookies are not yet here.
+        if (options.tools.cookies) return error.UnsupportedCapability;
     }
     if (is_webkit) {
         switch (options.storage) {
