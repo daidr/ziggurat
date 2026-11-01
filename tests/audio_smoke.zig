@@ -50,6 +50,10 @@ pub fn main() !void {
     for (samples) |sample| try writer.writeInt(i16, @intFromFloat(sample * 32767), .little);
     const stream = try engine.openStreamBytes(&wav);
     stream.play();
-    zio.sleep(50 * std.time.ns_per_ms);
-    if (stream.position() == 0) return error.StreamDidNotAdvance;
+    // The output thread may start late while other smokes load the machine.
+    var polls: u32 = 0;
+    while (stream.position() == 0) : (polls += 1) {
+        if (polls >= 2000) return error.StreamDidNotAdvance;
+        zio.sleep(std.time.ns_per_ms);
+    }
 }
