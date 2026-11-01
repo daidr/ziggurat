@@ -120,6 +120,10 @@ pub fn build(b: *std.Build) void {
         _ = native_support.add(b, file_stream, "file-stream-file-native", "src/file_stream/windows_file.c", &.{"-std=c11"}, target, optimize);
         file_stream.linkSystemLibrary("kernel32", .{});
     }
+    if (target.result.os.tag == .macos) {
+        file_stream.link_libc = true;
+        _ = native_support.add(b, file_stream, "file-stream-native", "src/file_stream/macos.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+    }
     if (target.result.os.tag == .linux) {
         file_stream.link_libc = true;
         const native = native_support.add(b, file_stream, "file-stream-native", "src/file_stream/linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
@@ -1823,6 +1827,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_webview", .module = view },
         });
         _ = addHttpAuthSmoke(b, target, optimize, core, view);
+        addSmoke(b, "smoke-webview-files-macos", "tests/macos_file_response_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
         addSmoke(b, "smoke-webview-permissions-macos", "tests/macos_permission_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },

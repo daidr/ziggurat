@@ -819,7 +819,7 @@ fn nativeCancelScript(native: *anyopaque, token: u64) void {
 }
 fn validateBackendOptions(options: Options) !void {
     if (is_macos) {
-        if (options.request_policy_extension != null or options.file_streams != null) return error.UnsupportedCapability;
+        if (options.request_policy_extension != null) return error.UnsupportedCapability;
         // WKWebView never lets the app add a request header: no Bearer credential.
         if (options.remote) |remote| if (remote.request_credentials.len != 0) return error.UnsupportedCapability;
         // The engine's context menu is not offered to a handler here yet.

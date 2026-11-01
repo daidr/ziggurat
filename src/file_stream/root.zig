@@ -1,5 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
+/// Linux and macOS share the socket channel; only the consumer end differs.
+const posix = builtin.os.tag == .linux or builtin.os.tag == .macos;
 
 pub const hard_max_bytes: u64 = 256 * 1024 * 1024;
 pub const process_capacity = 32;
@@ -31,7 +33,7 @@ pub const PreparedSource = struct {
         if (std.Thread.getCurrentId() == main_thread) return error.UiThreadForbidden;
         if (maximum == 0 or maximum > hard_max_bytes) return error.InvalidFileStreamLimit;
         if (builtin.os.tag == .windows) return prepareWindows(main_thread, file, maximum, null, native_failure);
-        if (builtin.os.tag != .linux) return error.UnsupportedCapability;
+        if (!posix) return error.UnsupportedCapability;
         var source: ?*anyopaque = null;
         var pump: ?*anyopaque = null;
         var length: u64 = 0;
@@ -57,7 +59,7 @@ pub const PreparedSource = struct {
         if (std.Thread.getCurrentId() == main_thread) return error.UiThreadForbidden;
         if (maximum == 0 or maximum > hard_max_bytes) return error.InvalidFileStreamLimit;
         if (builtin.os.tag == .windows) return prepareWindows(main_thread, file, maximum, window, native_failure);
-        if (builtin.os.tag != .linux) return error.UnsupportedCapability;
+        if (!posix) return error.UnsupportedCapability;
         var source: ?*anyopaque = null;
         var pump: ?*anyopaque = null;
         var length: u64 = 0;
@@ -88,7 +90,7 @@ pub const PreparedSource = struct {
     pub fn authoritativeLength(self: PreparedSource) !u64 {
         const handle = self.native orelse return error.ResponseMoved;
         if (builtin.os.tag == .windows) return zws_channel_length(handle);
-        if (builtin.os.tag != .linux) return error.UnsupportedCapability;
+        if (!posix) return error.UnsupportedCapability;
         return zwk_file_length(handle);
     }
     /// Owner setup transaction. The budget's explicit owner is the main thread
@@ -103,7 +105,7 @@ pub const PreparedSource = struct {
             if (result != 0) return nativeError(result);
             return .{ .native = candidate, .owner = budget.owner };
         }
-        if (builtin.os.tag != .linux) return error.UnsupportedCapability;
+        if (!posix) return error.UnsupportedCapability;
         var candidate: ?*anyopaque = null;
         var code: c_int = 0;
         const result = zwk_file_prepare_stream(source, ledger, @intFromBool(head), &candidate, &code);
@@ -121,7 +123,7 @@ pub const PreparedSource = struct {
         const handle = self.native;
         self.native = null;
         self.length = 0;
-        if (builtin.os.tag == .linux) if (handle) |value| zwk_file_response_release(value);
+        if (posix) if (handle) |value| zwk_file_response_release(value);
         if (builtin.os.tag == .windows) if (handle) |value| zws_source_release(value);
     }
 };
@@ -148,7 +150,7 @@ pub const Pump = struct {
             }
             return;
         }
-        if (builtin.os.tag != .linux) return error.UnsupportedCapability;
+        if (!posix) return error.UnsupportedCapability;
         var code: c_int = 0;
         const result = zwk_file_pump(handle, &code);
         if (result != 0) {
@@ -161,7 +163,7 @@ pub const Pump = struct {
     pub fn deinit(self: *Pump) void {
         const handle = self.native;
         self.native = null;
-        if (builtin.os.tag == .linux) if (handle) |value| zwk_file_pump_release(value);
+        if (posix) if (handle) |value| zwk_file_pump_release(value);
         if (builtin.os.tag == .windows) if (handle) |value| zws_file_pump_release(value);
     }
 };
@@ -171,7 +173,7 @@ pub const Pump = struct {
 pub const Control = struct {
     native: ?*anyopaque,
     pub fn cancel(self: Control) void {
-        if (builtin.os.tag == .linux) if (self.native) |handle| zwk_file_control_cancel(handle);
+        if (posix) if (self.native) |handle| zwk_file_control_cancel(handle);
         if (builtin.os.tag == .windows) if (self.native) |handle| zws_control_cancel(handle);
     }
     pub fn clone(self: Control) !Control {
@@ -180,19 +182,19 @@ pub const Control = struct {
             zws_control_add(handle);
             return .{ .native = handle };
         }
-        if (builtin.os.tag != .linux) return error.UnsupportedCapability;
+        if (!posix) return error.UnsupportedCapability;
         zwk_file_control_add(handle);
         return .{ .native = handle };
     }
     pub fn alive(self: Control) bool {
         if (builtin.os.tag == .windows) return if (self.native) |handle| zws_control_alive(handle) != 0 else false;
-        if (builtin.os.tag != .linux) return false;
+        if (!posix) return false;
         return if (self.native) |handle| zwk_file_control_alive(handle) != 0 else false;
     }
     pub fn deinit(self: *Control) void {
         const handle = self.native;
         self.native = null;
-        if (builtin.os.tag == .linux) if (handle) |value| zwk_file_control_release(value);
+        if (posix) if (handle) |value| zwk_file_control_release(value);
         if (builtin.os.tag == .windows) if (handle) |value| zws_control_release(value);
     }
 };
@@ -206,7 +208,7 @@ pub const Budget = struct {
         if (std.Thread.getCurrentId() != owner) return error.WrongThread;
         if (limit == 0 or limit > consumer_capacity) return error.InvalidFileStreamLimits;
         if (builtin.os.tag == .windows) return .{ .native = zws_budget_create(limit) orelse return error.OutOfMemory, .owner = owner };
-        if (builtin.os.tag != .linux) return error.UnsupportedCapability;
+        if (!posix) return error.UnsupportedCapability;
         return .{ .native = zwk_file_budget_create(limit) orelse return error.OutOfMemory, .owner = owner };
     }
     fn checked(self: Budget) !*anyopaque {
@@ -216,7 +218,7 @@ pub const Budget = struct {
     pub fn live(self: Budget) !u32 {
         const handle = try self.checked();
         if (builtin.os.tag == .windows) return zws_budget_live(handle);
-        if (builtin.os.tag != .linux) return error.UnsupportedCapability;
+        if (!posix) return error.UnsupportedCapability;
         return zwk_file_budget_live(handle);
     }
     pub fn setLimit(self: Budget, limit: u8) !void {
@@ -227,13 +229,13 @@ pub const Budget = struct {
             if (result != 0) return nativeError(result);
             return;
         }
-        if (builtin.os.tag != .linux) return error.UnsupportedCapability;
+        if (!posix) return error.UnsupportedCapability;
         zwk_file_budget_limit(handle, limit);
     }
     pub fn deinit(self: *Budget) void {
         const handle = self.native;
         self.native = null;
-        if (builtin.os.tag == .linux) if (handle) |value| zwk_file_budget_release(value);
+        if (posix) if (handle) |value| zwk_file_budget_release(value);
         if (builtin.os.tag == .windows) if (handle) |value| zws_budget_release(value);
     }
 };
@@ -260,7 +262,7 @@ pub const ConsumerCandidate = struct {
             zws_control_add(control);
             return .{ .native = control };
         }
-        if (builtin.os.tag != .linux) return error.UnsupportedCapability;
+        if (!posix) return error.UnsupportedCapability;
         const control = zwk_file_candidate_control(handle);
         zwk_file_control_add(control);
         return .{ .native = control };
@@ -272,7 +274,7 @@ pub const ConsumerCandidate = struct {
             zws_candidate_abort(handle);
             return;
         }
-        if (builtin.os.tag != .linux) return error.UnsupportedCapability;
+        if (!posix) return error.UnsupportedCapability;
         self.native = null;
         zwk_file_candidate_abort(handle);
     }
@@ -287,7 +289,7 @@ pub const ConsumerCandidate = struct {
             zws_candidate_admit(handle, @intFromBool(accepted_cancelled), if (want_control) &control else null);
             return if (control) |value| .{ .native = value } else null;
         }
-        if (builtin.os.tag != .linux) return error.UnsupportedCapability;
+        if (!posix) return error.UnsupportedCapability;
         self.native = null;
         var control: ?*anyopaque = null;
         zwk_file_candidate_admit(handle, @intFromBool(accepted_cancelled), @intFromBool(want_control), &control);
@@ -298,7 +300,7 @@ pub const ConsumerCandidate = struct {
 pub const Counts = struct { physical: u32 = 0, controls: u32 = 0, budgets: u32 = 0, candidates: u32 = 0 };
 pub fn counts() Counts {
     var value: Counts = .{};
-    if (builtin.os.tag == .linux) zwk_file_counts(&value.physical, &value.controls, &value.budgets, &value.candidates);
+    if (posix) zwk_file_counts(&value.physical, &value.controls, &value.budgets, &value.candidates);
     if (builtin.os.tag == .windows) {
         var native: WindowsCounts = undefined;
         zws_counts(&native);
@@ -386,7 +388,7 @@ test "owner preparation rejects UI thread before borrowing a file" {
 }
 
 test "file window unsupported platform is cold before file access" {
-    if (builtin.os.tag == .linux or builtin.os.tag == .windows) return;
+    if (posix or builtin.os.tag == .windows) return;
     const current = std.Thread.getCurrentId();
     const other: std.Thread.Id = if (current == 1) 2 else 1;
     const file: std.Io.File = undefined;
