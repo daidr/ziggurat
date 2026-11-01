@@ -18,7 +18,7 @@ enum { ZSD_OK = 0, ZSD_UNSUPPORTED = 1, ZSD_FAILED = 2, ZSD_CAPACITY = 3, ZSD_NO
 
 typedef struct ZsdRect { int32_t x, y; uint32_t width, height; } ZsdRect;
 typedef struct ZsdMonitor { ZsdRect bounds, work; float scale; uint32_t primary, refresh_millihz; } ZsdMonitor;
-typedef struct ZsdPreferences { int32_t scheme; uint32_t high_contrast, reduce_motion; float text_scale; } ZsdPreferences;
+typedef struct ZsdPreferences { int32_t scheme; uint32_t high_contrast, reduce_motion; float text_scale; int32_t accent, reduce_transparency; } ZsdPreferences;
 typedef struct ZsdPower { int32_t source, percent, saver; } ZsdPower;
 typedef struct ZsdNetwork { int32_t state, metered; } ZsdNetwork;
 typedef void (*ZsdChanged)(void *owner, uint32_t bits);
@@ -95,6 +95,8 @@ int zsd_preferences(ZsdPreferences *out) {
     g_object_get(settings, "gtk-application-prefer-dark-theme", &dark, "gtk-enable-animations", &animations,
                  "gtk-theme-name", &theme, "gtk-xft-dpi", &dpi, NULL);
     memset(out, 0, sizeof(*out));
+    out->accent = -1;
+    out->reduce_transparency = -1;
     out->high_contrast = contains(theme, "contrast") ? 1u : 0u;
     if (dark || contains(theme, "dark") || contains(theme, "inverse")) out->scheme = 2;
     else out->scheme = theme && theme[0] ? 1 : 0;

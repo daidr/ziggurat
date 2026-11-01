@@ -617,6 +617,16 @@ if (try v.presentColumn(&state.panel, state.open, .{ .hidden = .{ .y = 12, .scal
 
 运动期间每遍请求下一帧唤醒，静止时不请求；减少动态效果时立即出现与消失。没有 `prepareShaderEffects` 时不透明度与位姿被忽略。语言、隔离方式与预算见[着色器与元素效果](shader-effects.md)。
 
+## 子树缓存
+
+`Style.cache = cache`（`ui.Cache.create(app, allocator)` 创建，Host 销毁前 `cache.destroy()`）把节点及其后代画进一张图片，每帧比较它们记录的命令（移到图片原点后哈希），相同就直接画这张图片，不再光栅化子树；内容、尺寸、DPI 或主题变化时才在离屏工作面重画（`src/ui/cache.zig`，底层是 `Frame.beginCache` / `endCache`）。
+
+- 图片覆盖子树实际画到的范围（含阴影、外描边），按设备像素对齐，所以整像素平移也复用同一张图片；与 Linux/macOS 的局部重画配合，图片不变时其所在区域不会被重画。
+- 命中、焦点和语义照常记录，按钮等控件在缓存里仍可交互。
+- 只缓存普通绘制、裁剪、加载指示器和不带滤镜的分组；子树含变换、元素效果、背景效果、滤镜、GPU 纹理，或超过 4096 像素宽高、200 万像素时照常绘制（`cache.stats().direct` 计数）。
+- 图片在透明离屏工作面上画，文字为灰阶抗锯齿；边缘半透明处与直接绘制可能差一两个色阶。
+- 被替换的旧图片由 Context 在下一帧开始时释放。
+
 ## 加载动画
 
 `loadingIndicator(kind, options, style)` 加入 29 种加载动画之一，作为以 `Style.name` 命名的不确定进度条暴露（Windows UIA 上是没有 RangeValue 的 ProgressBar）。`LoadingOptions` 有 `size`（高度，默认 20 DIP，宽度按宽高比）、`color`（默认主题文字色，禁用时为禁用文字色）、`duration`（0 为自身周期）、`paused`、`timer`、`frame_rate`（每秒帧数，null 为每次刷新，见 `animationFrameRate`）与 `variant`（`ui.loading.Options`）。没有 `timer` 时姿态取 `View.time()`，同一窗口的指示器同步转动；应用持有的 `LoadingTimer` 记录各自的起点，`paused` 时保持当前姿态，恢复后从该处继续。

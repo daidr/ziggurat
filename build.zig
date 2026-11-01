@@ -1562,6 +1562,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
         });
+        addSmoke(b, "smoke-macos-services", "tests/macos_services_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
     }
     if (target.result.os.tag == .linux) {
         const native = native_support.add(b, ui, "ui-cairo-native", "src/ui/linux.c", &.{"-std=c11"}, target, optimize);
@@ -1803,6 +1807,10 @@ pub fn build(b: *std.Build) void {
         });
         remote_smoke.link_libc = true;
         remote_smoke.addCSourceFile(.{ .file = b.path("tests/macos_remote_fixture.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        addSmoke(b, "smoke-webview-find-macos", "tests/macos_find_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
     }
     if (web and target.result.os.tag == .windows) {
         if (target.result.cpu.arch != .x86_64)
@@ -3345,6 +3353,12 @@ fn addSystemIntegrationNative(b: *std.Build, module: *std.Build.Module, target: 
             }
             module.link_libc = true;
         },
+        .macos => {
+            // Keychain, sleep assertions, recent documents, appearance,
+            // shell hand-offs, login items, URL schemes and desktop state.
+            _ = native_support.add(b, module, "system-services-native", "src/system/macos_services.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+            native_support.linkFrameworks(b, module, &.{ "AppKit", "Foundation", "Security", "ServiceManagement", "IOKit", "Network", "CoreServices", "CoreFoundation" });
+        },
         else => {},
     }
 }
@@ -3441,6 +3455,18 @@ fn addEmbeddedWebView(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
         .{ .name = "ziggurat_webview", .module = view },
         .{ .name = "ziggurat_webview_view", .module = embedded },
     });
+    if (target.result.os.tag == .linux) {
+        const scroll_smoke = b.addExecutable(.{ .name = "smoke-webview-scroll-linux", .root_module = b.createModule(.{ .root_source_file = b.path("tests/linux_webview_scroll_smoke.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_webview", .module = view }, .{ .name = "ziggurat_webview_view", .module = embedded } } }) });
+        scroll_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/linux_webview_scroll_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        scroll_smoke.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
+        b.top_level_steps.get("check").?.step.dependOn(&scroll_smoke.step);
+        b.step("smoke-webview-scroll-linux", "Verify that the wheel over a web view with scroll_to_container scrolls the native container").dependOn(&b.addRunArtifact(scroll_smoke).step);
+        const media_smoke = b.addExecutable(.{ .name = "smoke-webview-media-linux", .root_module = b.createModule(.{ .root_source_file = b.path("tests/linux_media_webview_smoke.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view } } }) });
+        media_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/linux_media_webview_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        media_smoke.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
+        b.top_level_steps.get("check").?.step.dependOn(&media_smoke.step);
+        b.step("smoke-webview-media-linux", "Verify camera and microphone permission offers and capture state through WebKitGTK's mock devices").dependOn(&b.addRunArtifact(media_smoke).step);
+    }
 }
 
 fn addSmoke(b: *std.Build, name: []const u8, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) void {

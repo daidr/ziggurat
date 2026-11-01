@@ -150,7 +150,7 @@ fn run(allocator: std.mem.Allocator) !void {
     probe.window = try app.createWindow(.{ .width = 320, .height = 200, .on_closed = .{ .context = &probe, .notify = Probe.closedWindow } });
     probe.view = web.View.init(allocator, &probe, Probe.event);
     try std.testing.expectError(error.UnsupportedCapability, probe.view.attach(probe.window, .{ .html = "", .user_data_folder = "/tmp/never" }));
-    try std.testing.expectError(error.UnsupportedCapability, probe.view.attach(probe.window, .{ .html = "", .storage = .ephemeral, .tools = .{ .find = true } }));
+    try std.testing.expectError(error.UnsupportedCapability, probe.view.attach(probe.window, .{ .html = "", .storage = .ephemeral, .tools = .{ .capture = true } }));
     try std.testing.expect(probe.view.window == null);
     try probe.view.attach(probe.window, .{ .html = fixture, .storage = .ephemeral, .swipe_navigation = true, .scripts = .{ .max_pending = 1 }, .page_listener = .{ .context = &probe, .event = Probe.page } });
     var watchdog: Watchdog = .{ .app = app };

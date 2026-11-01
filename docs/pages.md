@@ -508,6 +508,10 @@ App 已进入 stopping/stopped、原生窗口尚未销毁时，同样停止接�
 
 原生显式设置 [SavesInProfile=false](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2permissionrequestedeventargs3)，不写入持久许可。公开名称使用 ephemeral，不承诺每次站点调用都再问宿主，也不把此选项解释为清空 Runtime 的会话状态。当前未提供持久许可管理或 OS 许可对话框包装。
 
+Linux（WebKitGTK）同样支持 `Options.permissions`，种类限于 microphone、camera、geolocation 与 notifications；屏幕共享（getDisplayMedia）和其他请求一律拒绝，macOS 仍返回 `UnsupportedCapability`。WebKitGTK 不告诉请求是否来自用户手势，`PermissionOffer.user_initiated` 恒为 false，所以策略必须设 `require_user_gesture = false`，否则请求不会交给 handler、直接拒绝。它也不告诉请求来自哪个 frame：origin 取已提交顶层文档的来源，iframe 的请求按顶层来源核对。只有某项 grant 含 camera 或 microphone 时才打开 WebKitSettings 的 `enable-media-stream`。同时要摄像头和麦克风的请求以 camera 交给 handler，但同一 grant 必须两种都含。决定由原生请求对象的 allow/deny 完成，不写入持久许可；timeout、cancel、导航和关闭都拒绝仍待决的请求。
+
+`View.captureState(.camera/.microphone/.display)` 读页面是否正在采集该设备（`none`、`active`、`muted`），`PageEvent.capture_changed` 报告变化：与有声状态一样属于 View，携带当前 PageId，同一状态不重复报告。`View.setCaptureState(device, .muted/.active)` 像浏览器的采集指示器那样暂停或恢复采集，`.none` 停止采集（页面的 track 随之 ended）；页面没有在采集的设备不能设为 active（`error.NotCapturing`）。目前只有 Linux 实现，Windows 与 macOS 返回 `UnsupportedCapability`。`smoke-webview-media-linux` 用 WebKitGTK 的模拟设备验证：摄像头请求经 handler 延后再允许，采集状态依次为 active、muted、none 且页面 track 结束，未授权的麦克风不经 handler 直接拒绝。
+
 `Options.downloads` 也默认 null：Cancel=true、Handled=true，不显示下载 UI、不自动选择路径。开启时明确 `lifetime = .view`、最多 8 个 HTTP(S) 精确目标 origin、handler 和 `downloads.Limits`。这只控制 Runtime 已提供的 DownloadStarting，不额外授权导航、HTTP method/header 或请求。现有 DOCUMENT 门禁继续适用：跳过 NavigationStarting 的 `download` 属性请求可能得到默认 403；宿主可显式 `navigateRemote` 到受信附件 URL，普通链接仍遵循导航配置。blob/data/custom 下载不属于本片授权范围。
 
 `DownloadOffer` 借用受限 URI、MIME、建议 basename、可选总长度，以及仅供审计的 `observed_page`。建议名称是未信任元数据，不能直接决定目标路径。`deny()` 不接管上下文；`deferDecision(options)` 成功返回 `DownloadId`，之后保持 completion context 到其终结回调。Options 中的 handler context 和稳定地址的 View 保持到 detach，ID 的使用也不能超过 View 生存期。普通导航和附件导致的导航失败不取消 View 作用域下载；reload/recover/进程失败终结为 `unavailable`，detach 为 `detached`。默认最多 4 个待决或活动下载，默认拒绝未知长度，已知长度上限 64 MiB；接收事件超过默认 64 MiB 阈值则取消为 `limit_exceeded`，这是观察后的软限制，不能限制 Runtime 预取或构成硬磁盘/网络配额。

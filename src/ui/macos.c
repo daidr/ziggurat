@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <float.h>
 #include <string.h>
 #include "brushes.h"
 #include "image_resource.h"
@@ -439,6 +440,22 @@ void zlc_push_clip(Renderer *s,float x,float y,float width,float height){
     after[0]=fmax(before[0],(double)x*s->scale+s->origin[0]);after[1]=fmax(before[1],(double)y*s->scale+s->origin[1]);
     after[2]=fmin(before[2],((double)x+width)*s->scale+s->origin[0]);after[3]=fmin(before[3],((double)y+height)*s->scale+s->origin[1]);
     CGContextSaveGState(s->target->context);CGContextClipToRect(s->target->context,CGRectMake(x,y,width,height));s->target->saves++;
+}
+/* Clips to device pixels x0..x1, y0..y1 of the plane, exactly on pixel
+   edges whatever the scale; popped by zlc_pop_clip. */
+void zlc_push_device_clip(Renderer *s,int32_t x0,int32_t y0,int32_t x1,int32_t y1){
+    if(s->gradient_clip_depth>=32)return;
+    double *before=s->gradient_clips[s->gradient_clip_depth],*after=s->gradient_clips[++s->gradient_clip_depth];
+    after[0]=fmax(before[0],(double)x0+s->origin[0]);after[1]=fmax(before[1],(double)y0+s->origin[1]);
+    after[2]=fmin(before[2],(double)x1+s->origin[0]);after[3]=fmin(before[3],(double)y1+s->origin[1]);
+    double scale=s->scale;
+    CGContextSaveGState(s->target->context);CGContextClipToRect(s->target->context,CGRectMake((double)x0/scale,(double)y0/scale,(double)(x1-x0)/scale,(double)(y1-y0)/scale));s->target->saves++;
+}
+/* Clears a rectangle in DIP to transparent, within the current clip. */
+void zlc_clear_rect(Renderer *s,float x,float y,float width,float height){
+    CGContextRef c=s->target->context;
+    if(width>=FLT_MAX){target_clear(s->target,0,0,s->target->width,s->target->height,0);return;}
+    CGContextClearRect(c,CGRectMake(x,y,width,height));
 }
 void zlc_pop_clip(Renderer *s){if(s->gradient_clip_depth){s->gradient_clip_depth--;CGContextRestoreGState(s->target->context);s->target->saves--;}}
 /* destination is a y-down context in points, such as a flipped view's. */

@@ -112,7 +112,7 @@ pub const Act = struct {
     action: Action,
     /// setValue's and insertText's.
     text: []const u8 = "",
-    /// selectText's, in characters.
+    /// selectText's, in UTF-16 code units, as JavaScript counts a string.
     from: u64 = 0,
     to: u64 = 0,
 };

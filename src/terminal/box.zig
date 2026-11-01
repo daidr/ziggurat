@@ -1,6 +1,7 @@
-//! Characters of box drawing, blocks and Powerline's separators, drawn
-//! rather than taken from the font: fonts leave gaps between the lines of
-//! cells taller than their glyphs, and many lack the separators. Shapes are
+//! Characters of box drawing, blocks, legacy-computing sextants and
+//! Powerline's separators, drawn rather than taken from the font: fonts
+//! leave gaps between the lines of cells taller than their glyphs, and many
+//! lack the separators and the sextants. Shapes are
 //! rectangles on device pixels, so lines of neighboring cells meet exactly;
 //! curves, diagonals and Powerline's shapes are scanned row by row into
 //! spans whose edge pixels take partial coverage.
@@ -33,7 +34,7 @@ const box_arms = [128][]const u8{
 pub fn drawn(cp: u21) bool {
     return switch (cp) {
         0x2500...0x257f => box_arms[cp - 0x2500].len != 0 or (cp >= 0x256d and cp <= 0x2573),
-        0x2580...0x259f, 0xe0b0...0xe0b7 => true,
+        0x2580...0x259f, 0x1fb00...0x1fb3b, 0xe0b0...0xe0b7 => true,
         else => false,
     };
 }
@@ -53,6 +54,7 @@ pub fn draw(cp: u21, x0: f32, y0: f32, x1: f32, y1: f32, scale: f32, sink: anyty
     const light = @max(1, @round(scale));
     switch (cp) {
         0x2580...0x259f => return drawBlock(cp, x0, y0, w, h, sink),
+        0x1fb00...0x1fb3b => return drawSextant(cp, x0, y0, w, h, sink),
         0xe0b0...0xe0b3 => {
             // Powerline's triangles: filled, or their outline.
             const ym = y0 + h / 2;
@@ -258,6 +260,23 @@ fn drawBlock(cp: u21, x0: f32, y0: f32, w: f32, h: f32, sink: anytype) void {
     }
 }
 
+/// Draw one of U+1FB00 to U+1FB3B across the whole cell. The sixty
+/// patterns are the six-bit masks except 0, 21, 42 and 63, which are a
+/// space, ▌, ▐ and █. Bit 0 is the upper left, then across and down;
+/// neighbors share an edge, as the quadrants of `drawBlock` do.
+fn drawSextant(cp: u21, x0: f32, y0: f32, w: f32, h: f32, sink: anytype) void {
+    const index: u32 = cp - 0x1fb00;
+    const pattern = index + index / 20 + 1;
+    const xs = [3]f32{ x0, x0 + @round(w * 0.5), x0 + w };
+    const ys = [4]f32{ y0, y0 + @round(h / 3), y0 + @round(h * 2 / 3), y0 + h };
+    for (0..6) |bit| {
+        if (pattern & (@as(u32, 1) << @intCast(bit)) == 0) continue;
+        const column = bit % 2;
+        const row = bit / 2;
+        fill(sink, xs[column], ys[row], xs[column + 1], ys[row + 1]);
+    }
+}
+
 /// Points along a curve, per quarter turn.
 const arc_steps = 12;
 
@@ -447,6 +466,35 @@ test "blocks fill their part of the cell, shades a fraction" {
     try std.testing.expectEqual(@as(f32, 1), r.covers(0, 0));
     try std.testing.expectEqual(@as(f32, 0), r.covers(9, 0));
     try std.testing.expectEqual(@as(f32, 1), r.covers(9, 19));
+}
+
+test "sextants fill their sixths of the cell, solid between neighbors" {
+    try std.testing.expect(drawn(0x1fb00) and drawn(0x1fb3b) and !drawn(0x1fb3c));
+    var r: Recorder = .{};
+    draw(0x1fb00, 0, 0, 10, 21, 1, &r); // 🬀: upper left only
+    try std.testing.expectEqual(@as(f32, 1), r.covers(0, 0));
+    try std.testing.expectEqual(@as(f32, 1), r.covers(4, 6));
+    try std.testing.expectEqual(@as(f32, 0), r.covers(5, 0));
+    try std.testing.expectEqual(@as(f32, 0), r.covers(0, 7));
+    // U+1FB14 follows the skipped mask 21 (▌): it is mask 22, upper right,
+    // middle left and lower left.
+    r = .{};
+    draw(0x1fb14, 0, 0, 10, 21, 1, &r);
+    try std.testing.expectEqual(@as(f32, 0), r.covers(0, 0));
+    try std.testing.expectEqual(@as(f32, 1), r.covers(9, 0));
+    try std.testing.expectEqual(@as(f32, 1), r.covers(0, 10));
+    try std.testing.expectEqual(@as(f32, 0), r.covers(9, 10));
+    try std.testing.expectEqual(@as(f32, 1), r.covers(0, 20));
+    // U+1FB3B, the last, is mask 62: everything but the upper left, with
+    // no gaps or overlaps where the sixths meet.
+    r = .{};
+    draw(0x1fb3b, 0, 0, 10, 21, 1, &r);
+    try std.testing.expectEqual(@as(f32, 0), r.covers(4, 6));
+    var y: f32 = 7;
+    while (y < 21) : (y += 1) {
+        var x: f32 = 0;
+        while (x < 10) : (x += 1) try std.testing.expectEqual(@as(f32, 1), r.covers(x, y));
+    }
 }
 
 test "curves, diagonals and Powerline's shapes cover their rows smoothly" {

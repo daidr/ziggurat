@@ -1,6 +1,6 @@
 # 系统工具
 
-按需导入 `ziggurat_system`。应用身份、系统目录、单实例与参数转发、登录启动、URL scheme/文件关联、阻止休眠和任务栏状态见 [单实例与系统集成](os-integration.md)。原生菜单栏、菜单快捷键、上下文菜单、异步消息框、窗口托盘、独立托盘和异步文件选择器实现 Windows、Linux 和 macOS（见下文“macOS”一节），全局快捷键和通知实现 Windows 和 Linux；同步文本剪贴板 helper 目前仅 Windows；多格式剪贴板 Board、放置目标、桌面环境快照/订阅、粗模式文件监视、密钥存储和浮出窗口支持 Windows/Linux。`system.capabilities` 分别报告编译目标的支持状态，未实现的窗口扩展返回 `UnsupportedCapability`。Linux 的托盘与通知走会话总线，全局快捷键只在 X11 上可用，运行时缺少对应服务或显示协议时按下文各节明确报告。独立的无 UI `shell.Worker` 已支持 Windows/Linux 显式程序启动，以及 Windows 有界文件图标，能力见 `system.capabilities.shell`。
+按需导入 `ziggurat_system`。应用身份、系统目录、单实例与参数转发、登录启动、URL scheme/文件关联、阻止休眠和任务栏状态见 [单实例与系统集成](os-integration.md)。原生菜单栏、菜单快捷键、上下文菜单、异步消息框、窗口托盘、独立托盘和异步文件选择器实现 Windows、Linux 和 macOS（见下文“macOS”一节），全局快捷键和通知实现 Windows 和 Linux；同步文本剪贴板 helper 目前仅 Windows；多格式剪贴板 Board、放置目标和浮出窗口支持 Windows/Linux；桌面环境快照/订阅、密钥存储、外观跟随和最近文档登记支持 Windows/Linux/macOS；粗模式文件监视另支持 macOS FSEvents。`system.capabilities` 分别报告编译目标的支持状态，未实现的窗口扩展返回 `UnsupportedCapability`。Linux 的托盘与通知走会话总线，全局快捷键只在 X11 上可用，运行时缺少对应服务或显示协议时按下文各节明确报告。独立的无 UI `shell.Worker` 已支持 Windows/Linux/macOS 显式程序启动、打开 URL/路径、在文件管理器中显示、移到废纸篓与已安装应用，以及 Windows 有界文件图标，能力见 `system.capabilities.shell`。
 
 ## 窗口 owner
 
@@ -270,11 +270,13 @@ S02 当前仍为部分实现：Windows/Linux 已提供 `launchExecutable`、`ope
 
 `desktop.beep(app)` 播放系统提示音（Windows `MessageBeep`，GTK `gdk_display_beep`）。`desktop.cursorPosition(app)` 返回与 `Monitor` 相同坐标系的指针位置；Wayland 不公开全局指针位置，返回 `UnsupportedCapability`。
 
-`shell.Worker.installedApps(allocator)` 在后台 worker 上列出启动器可见的应用，按名称（忽略大小写）再按路径排序，结果由 `InstalledApps.deinit` 一次释放。Windows 枚举 Shell 的 Applications 文件夹（开始菜单“所有应用”，打包应用与桌面应用都在内），id 是 AppUserModelID（或已知文件夹下的路径），path 是 `shell:AppsFolder\<id>`；Linux 列出菜单会显示的桌面条目（排除 NoDisplay/Hidden 和不属于当前桌面的条目），id 是桌面文件 ID，path 是 `.desktop` 文件。`launchApp(path)` 启动其中一项：Windows 交给 `ShellExecuteEx`（也接受任意程序路径），Linux 用 `GDesktopAppInfo` 启动；worker 线程上没有 GTK 启动上下文，因此没有启动通知。
+`shell.Worker.installedApps(allocator)` 在后台 worker 上列出启动器可见的应用，按名称（忽略大小写）再按路径排序，结果由 `InstalledApps.deinit` 一次释放。Windows 枚举 Shell 的 Applications 文件夹（开始菜单“所有应用”，打包应用与桌面应用都在内），id 是 AppUserModelID（或已知文件夹下的路径），path 是 `shell:AppsFolder\<id>`；Linux 列出菜单会显示的桌面条目（排除 NoDisplay/Hidden 和不属于当前桌面的条目），id 是桌面文件 ID，path 是 `.desktop` 文件。`launchApp(path)` 启动其中一项：Windows 交给 `ShellExecuteEx`（也接受任意程序路径），Linux 用 `GDesktopAppInfo` 启动；worker 线程上没有 GTK 启动上下文，因此没有启动通知。macOS 列出 `/Applications`、`/System/Applications`、`/System/Library/CoreServices/Applications`、`~/Applications` 及其下一层文件夹（如 Utilities）中的 `.app`，不进入 bundle 内部，另加 Finder；符号链接指向的应用只在链接处列出一次。name 是 Finder 显示的名字（去掉 `.app`），id 是 bundle identifier（没有时为路径），path 是 bundle；`launchApp` 经 `NSWorkspace` 打开它，已在运行则带到前台。
+
+macOS 的 `openUrl`/`openPath`/`launchApp` 先用 `URLForApplicationToOpenURL:` 找处理程序，没有时返回 `NoAssociation`（`last_failure` 为 osstatus `kLSApplicationNotFoundErr`），再交给 `NSWorkspace openURL:`。`reveal` 用 `activateFileViewerSelectingURLs:` 让 Finder 选中该项，Finder 不回复，`timeout_ms` 不使用。`trash` 用 `NSFileManager trashItemAtURL:`，失败的 NSError 码记在 `last_failure`（domain `cocoa`）。`launchExecutable` 与 Linux 相同，直接 spawn。
 
 ## 最近文档、Jump List 与重启
 
-`recent.RecentDocuments.load(allocator, file, capacity)` 读取应用自己的最近文档列表（JSON，新的在前），文件缺失或损坏时从空列表开始；`add` 把路径移到最前、去重并截到容量，`remove`、`clear` 修改列表，每次修改都先写同目录临时文件再改名替换。它只管理应用自己的 Open Recent 列表（菜单角色 `open_recent`），不登记到系统。`recent.addToSystem(allocator, path, app_name)` 把绝对路径登记到系统：Windows 调用 `SHAddToRecentDocs`，进入用户的最近项目和本应用 Jump List 的 Recent 类别（仅限应用已注册处理程序的文件类型）；Linux 用 GLib 同步编辑 GTK 使用的 `recently-used.xbel`，写入 MIME 类型和应用名，文件选择器和文件管理器的“最近”会显示它。两者都会阻塞，不适合放在逐帧路径上。
+`recent.RecentDocuments.load(allocator, file, capacity)` 读取应用自己的最近文档列表（JSON，新的在前），文件缺失或损坏时从空列表开始；`add` 把路径移到最前、去重并截到容量，`remove`、`clear` 修改列表，每次修改都先写同目录临时文件再改名替换。它只管理应用自己的 Open Recent 列表（菜单角色 `open_recent`），不登记到系统。`recent.addToSystem(allocator, path, app_name)` 把绝对路径登记到系统：Windows 调用 `SHAddToRecentDocs`，进入用户的最近项目和本应用 Jump List 的 Recent 类别（仅限应用已注册处理程序的文件类型）；Linux 用 GLib 同步编辑 GTK 使用的 `recently-used.xbel`，写入 MIME 类型和应用名，文件选择器和文件管理器的“最近”会显示它。两者都会阻塞，不适合放在逐帧路径上。macOS 交给共享的 `NSDocumentController noteNewRecentDocumentURL:`，出现在「苹果菜单 > 最近使用的项目」和应用的 Dock 菜单里；它属于主线程，其他线程的调用排到主队列后立即返回。
 
 `jump_list.setTasks(allocator, tasks, .{ .app_id, .recent })`（仅 Windows）用 `ICustomDestinationList` 一次替换整个 Jump List：每个任务是一个 shell link，有标题、提示、程序（默认本程序）、参数、工作目录和图标，`recent = true` 另加 Recent 类别。参数按常规 argv 规则逐项加引号，`argumentLine` 给出与 shell link 相同的字符串。所有输入先校验（标题必填、最多 32 个任务、文本不超过 259 字节且不含控制字符、程序须为绝对路径）再调用系统；任何一步失败都会放弃新列表，原列表保持不变。没有任务也不要 Recent 时删除整个列表。Windows 在应用退出后仍保留列表，通常启动时设置一次。需要作用于正在运行的应用时，把本应用的 URL scheme 作为参数，再由单实例转发给 primary。Linux 没有对应的任务菜单，返回 `UnsupportedCapability`。
 
@@ -286,9 +288,9 @@ S02 当前仍为部分实现：Windows/Linux 已提供 `launchExecutable`、`ope
 
 ## 密钥存储
 
-`system.secrets` 把访问令牌、API 密钥等小块机密交给系统凭据存储：Windows 是 Credential Manager，Linux 是会话总线上的 Secret Service（GNOME Keyring、KWallet、KeePassXC 等，经 libsecret）。系统替当前用户加密，不同于应用自己写的文件。每个机密以“服务名 + key”标识：服务名把一个应用的机密分成一组，通常是应用的反向域名标识；同一用户的其他程序给出相同服务名和 key 时读到同一个机密。Windows 写入 generic credential，target 为 `service/key`，用户名为 key，`CRED_PERSIST_ENTERPRISE`；Linux 写入 `org.freedesktop.Secret.Generic` schema 的条目，`service`/`account` 属性为服务名和 key，标签为 `service/key`。按这种约定保存机密的其他程序可以互读。
+`system.secrets` 把访问令牌、API 密钥等小块机密交给系统凭据存储：Windows 是 Credential Manager，Linux 是会话总线上的 Secret Service（GNOME Keyring、KWallet、KeePassXC 等，经 libsecret）。系统替当前用户加密，不同于应用自己写的文件。每个机密以“服务名 + key”标识：服务名把一个应用的机密分成一组，通常是应用的反向域名标识；同一用户的其他程序给出相同服务名和 key 时读到同一个机密。Windows 写入 generic credential，target 为 `service/key`，用户名为 key，`CRED_PERSIST_ENTERPRISE`；Linux 写入 `org.freedesktop.Secret.Generic` schema 的条目，`service`/`account` 属性为服务名和 key，标签为 `service/key`；macOS 在登录钥匙串写入 generic password，`kSecAttrService`/`kSecAttrAccount` 为服务名和 key，标签为服务名。macOS 用基于文件的钥匙串：数据保护钥匙串要求 `keychain-access-groups` entitlement，未签名的构建没有。按这种约定保存机密的其他程序可以互读。
 
-`set(service, key, value)` 存入或替换，`get(service, key, destination)` 写入调用者缓冲并返回切片，`delete(service, key)` 删除（不存在也算成功）。服务名与 key 为 1–256 字节、不含 NUL 的 UTF-8，机密最多 `max_secret_bytes`（2560 字节，即 Credential Manager 的上限，两个平台行为一致），可以为空或含任意字节。错误：没有该机密为 `SecretNotFound`；目标缓冲不够为 `SecretTooLarge`；会话里没有可用存储为 `CredentialStoreUnavailable`；存储拒绝或失败为 `CredentialStoreFailed`，`secrets.lastFailure()` 给出本线程最近一次的 Win32 错误码或 GError 码。
+`set(service, key, value)` 存入或替换，`get(service, key, destination)` 写入调用者缓冲并返回切片，`delete(service, key)` 删除（不存在也算成功）。服务名与 key 为 1–256 字节、不含 NUL 的 UTF-8，机密最多 `max_secret_bytes`（2560 字节，即 Credential Manager 的上限，两个平台行为一致），可以为空或含任意字节。错误：没有该机密为 `SecretNotFound`；目标缓冲不够为 `SecretTooLarge`；会话里没有可用存储为 `CredentialStoreUnavailable`；存储拒绝或失败为 `CredentialStoreFailed`，`secrets.lastFailure()` 给出本线程最近一次的 Win32 错误码、GError 码或钥匙串 OSStatus。
 
 三个函数都会阻塞（存储可能要求用户解锁），只能在宿主创建的 worker 上调用，App 运行时不要在主线程调用。模块不创建线程、不分配。`secrets.Request` 把一次操作带到 worker：主线程 `Request.init(app, .get, service, key, "", context, on_done)` 校验并复制输入；请求保持稳定地址，worker 调用 `request.run()` 完成阻塞调用后经 `App.post` 把 `on_done` 交回主线程，恰好一次；投递失败（`Full`/`Closed`）时 `run` 返回该错误、不调用 `on_done`，结果留在请求里，由调用者重试 `post()` 或丢弃。`on_done` 里用 `err()` 和 `value()` 读取结果，`wipe()` 擦除请求持有的机密明文。
 
@@ -335,7 +337,7 @@ try now.set(.{ .title = "Spring", .artist = "Vivaldi", .album = "The Four Season
 
 ## 外观跟随
 
-`system.theme.Follower` 决定应用的明暗外观：`.system` 跟随桌面，`.light`/`.dark` 强制。`start(app, .{ .source, .on_change })` 读取桌面偏好、应用外观并订阅偏好变化；`setSource` 随时切换；`isDark()` 是生效的外观，`preferences()` 是最近一次读到的桌面偏好（accent、高对比度、减少动态/透明、文字缩放）。外观或偏好变化后调用 `on_change`，应用在这里切换自己绘制内容的主题（例如 `ui.Context.setTheme(.dark())`）。系统自己绘制的部分由 Follower 处理：Windows 上 `track(window)` 的窗口标题栏随外观切换（`DWMWA_USE_IMMERSIVE_DARK_MODE`），弹出菜单经 uxtheme 的 preferred app mode（Windows 10 1903 起）跟随；Linux 设置 `gtk-application-prefer-dark-theme`，强制浅色时名字以 `-dark` 结尾的主题换成去掉后缀的同名主题，跟随桌面时恢复 GTK 自己的设置。属性只在值变化时写入，所以桌面 Watch 收到的通知都是真实变化。`setWindowButtons(window, source)` 让某个窗口的边框与标题栏按钮不管应用外观、按深色或浅色背景绘制（例如浅色应用里标题区是深色的页面），`.system` 恢复跟随应用；菜单和应用内容仍是应用的外观，Linux 上 GTK 的按钮始终跟随应用。单独的 `theme.setWindowDark(window, dark)` 只在 Windows 可用。
+`system.theme.Follower` 决定应用的明暗外观：`.system` 跟随桌面，`.light`/`.dark` 强制。`start(app, .{ .source, .on_change })` 读取桌面偏好、应用外观并订阅偏好变化；`setSource` 随时切换；`isDark()` 是生效的外观，`preferences()` 是最近一次读到的桌面偏好（accent、高对比度、减少动态/透明、文字缩放）。外观或偏好变化后调用 `on_change`，应用在这里切换自己绘制内容的主题（例如 `ui.Context.setTheme(.dark())`）。系统自己绘制的部分由 Follower 处理：Windows 上 `track(window)` 的窗口标题栏随外观切换（`DWMWA_USE_IMMERSIVE_DARK_MODE`），弹出菜单经 uxtheme 的 preferred app mode（Windows 10 1903 起）跟随；Linux 设置 `gtk-application-prefer-dark-theme`，强制浅色时名字以 `-dark` 结尾的主题换成去掉后缀的同名主题，跟随桌面时恢复 GTK 自己的设置。属性只在值变化时写入，所以桌面 Watch 收到的通知都是真实变化。`setWindowButtons(window, source)` 让某个窗口的边框与标题栏按钮不管应用外观、按深色或浅色背景绘制（例如浅色应用里标题区是深色的页面），`.system` 恢复跟随应用；菜单和应用内容仍是应用的外观，Linux 上 GTK 的按钮始终跟随应用。macOS 设置应用的 `NSApp.appearance`（Aqua、Dark Aqua，跟随桌面时为 nil），所有未自行指定外观的窗口和菜单随之切换；只在值变化时设置。单独的 `theme.setWindowDark(window, dark)` 只在 Windows 可用。
 
 ## 无窗口常驻
 

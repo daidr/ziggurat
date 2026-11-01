@@ -3,17 +3,20 @@
 //! Recent menu, and the system's record of them. Windows adds the file to
 //! the user's recent items and to the Recent category of the application's
 //! jump list (see `jump_list`); Linux adds it to the recently used files that
-//! file choosers and file managers show.
+//! file choosers and file managers show; macOS notes it with the shared
+//! NSDocumentController, which lists it under Apple menu > Recent Items and
+//! in the app's Dock menu.
 const std = @import("std");
 const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 
 const windows = builtin.os.tag == .windows;
 const linux = builtin.os.tag == .linux;
+const macos = builtin.os.tag == .macos;
 // Unit tests link no native objects.
 const native = !builtin.is_test;
 
-pub const capabilities = .{ .system_recent = windows or linux };
+pub const capabilities = .{ .system_recent = windows or linux or macos };
 
 /// As many documents as the list keeps.
 pub const default_capacity = 10;
@@ -24,6 +27,8 @@ extern fn zsr_recent_add(path: [*:0]const u8, app_name: [*:0]const u8) callconv(
 /// Records an absolute path with the system. `app_name` names the
 /// application in the Linux list. A blocking file or shell call: use it from
 /// the owner thread only when the delay is acceptable, otherwise a worker.
+/// macOS records it on the main thread; another thread's call is queued
+/// there and returns at once.
 pub fn addToSystem(allocator: std.mem.Allocator, path: []const u8, app_name: []const u8) !void {
     try validatePath(path);
     if (app_name.len == 0 or std.mem.indexOfScalar(u8, app_name, 0) != null or !std.unicode.utf8ValidateSlice(app_name)) return error.InvalidName;
@@ -32,7 +37,7 @@ pub fn addToSystem(allocator: std.mem.Allocator, path: []const u8, app_name: []c
         const wide = try std.unicode.utf8ToUtf16LeAllocZ(allocator, path);
         defer allocator.free(wide);
         ziggurat_system_recent_add(wide.ptr);
-    } else if (comptime linux) {
+    } else if (comptime linux or macos) {
         const path_z = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(path_z);
         const name_z = try allocator.dupeSentinel(u8, app_name, 0);

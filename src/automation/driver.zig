@@ -266,7 +266,11 @@ pub const Driver = struct {
             .insertText => .{ .insert_text = request.text },
             .expand => .expand,
             .collapse => .collapse,
-            .selectText, .scrollIntoView => return fail(failure, arena, .unsupported, "views do not take {s} from automation", .{@tagName(request.action)}),
+            .selectText => .{ .select_text = .{
+                .start = std.math.cast(usize, request.from) orelse return fail(failure, arena, .invalid_request, "from is out of range", .{}),
+                .end = std.math.cast(usize, request.to) orelse return fail(failure, arena, .invalid_request, "to is out of range", .{}),
+            } },
+            .scrollIntoView => .scroll_into_view,
         };
         const State = struct {
             arena: std.mem.Allocator,
@@ -280,7 +284,10 @@ pub const Driver = struct {
                     error.OutOfMemory => error.OutOfMemory,
                     error.NoElement => fail(state.failure, state.arena, .no_element, "window {d} shows no element {d}", .{ shown, element }),
                     error.NotSupported => fail(state.failure, state.arena, .unsupported, "element {d} cannot {s}", .{ element, @tagName(state.request.action) }),
-                    error.InvalidValue => fail(state.failure, state.arena, .invalid_request, "element {d} takes a number, not \"{s}\"", .{ element, state.request.text }),
+                    error.InvalidValue => if (state.action == .select_text)
+                        fail(state.failure, state.arena, .invalid_request, "from {d} comes after to {d}", .{ state.request.from, state.request.to })
+                    else
+                        fail(state.failure, state.arena, .invalid_request, "element {d} takes a number, not \"{s}\"", .{ element, state.request.text }),
                     error.Disabled => fail(state.failure, state.arena, .failed, "element {d} is disabled", .{element}),
                     error.Hidden => fail(state.failure, state.arena, .failed, "element {d} is not shown", .{element}),
                     error.Inert => fail(state.failure, state.arena, .failed, "element {d} is behind a dialog", .{element}),
