@@ -3416,6 +3416,13 @@ fn addEmbeddedWebView(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
         .{ .name = "ziggurat_webview", .module = view },
         .{ .name = "ziggurat_webview_view", .module = embedded },
     });
+    if (target.result.os.tag == .linux) {
+        const scroll_smoke = b.addExecutable(.{ .name = "smoke-webview-scroll-linux", .root_module = b.createModule(.{ .root_source_file = b.path("tests/linux_webview_scroll_smoke.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_webview", .module = view }, .{ .name = "ziggurat_webview_view", .module = embedded } } }) });
+        scroll_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/linux_webview_scroll_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        scroll_smoke.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
+        b.top_level_steps.get("check").?.step.dependOn(&scroll_smoke.step);
+        b.step("smoke-webview-scroll-linux", "Verify that the wheel over a web view with scroll_to_container scrolls the native container").dependOn(&b.addRunArtifact(scroll_smoke).step);
+    }
 }
 
 fn addSmoke(b: *std.Build, name: []const u8, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) void {

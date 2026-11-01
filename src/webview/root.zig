@@ -481,6 +481,14 @@ pub const Options = struct {
     /// --disable-renderer-backgrounding --disable-backgrounding-occluded-windows,
     /// arguments of the WebView2 environment as Autoplay.allow's are.
     background_throttling: bool = true,
+    /// A web view in native UI (`attachRegion`) gives the wheel and the
+    /// touchpad over its page to the native UI around it, as over any of
+    /// its elements: a document shown at its full height in a native scroll
+    /// container scrolls with it. The page never scrolls with them; it
+    /// still takes presses, the keyboard and selection. Linux sends the web
+    /// view's scroll events to the window's content before WebKitGTK sees
+    /// them; elsewhere the page keeps the wheel for now.
+    scroll_to_container: bool = false,
 };
 pub const AuthHandler = struct {
     context: *anyopaque,
@@ -1465,6 +1473,9 @@ pub const View = struct {
         }
         try region.attach(.{ .context = self, .attach = regionAttach, .update = regionUpdate, .detach = regionDetach, .event = regionEvent });
         self.attachment_phase = .attached;
+        // The page's wheel, which the native side sends to the window, goes
+        // to the native UI around it.
+        if (options.scroll_to_container) region.passWheel(true) catch {};
     }
     fn regionAttach(ptr: *anyopaque, region: z.composition.Region) !void {
         const self: *View = @ptrCast(@alignCast(ptr));
@@ -1746,7 +1757,7 @@ pub const View = struct {
         };
         const facts = try self.factsScript(.linux);
         defer if (facts) |value| self.allocator.free(value);
-        const native_options: webkit.Options = .{ .context_menu = @backingInt(options.context_menu), .context_offer = if (!is_macos and options.context_menu == .handler) View.webkitContextMenu else null, .auth = if (!is_macos and options.http_auth != null) View.webkitAuth else null, .certificate = if (!is_macos and options.certificate_errors != null) View.webkitCertificate else null, .content_filters = filters.ptr, .content_filter_count = filter_count, .audio_muted = @intFromBool(self.mutedWanted()), .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .gestures = gestureFlags(options), .throttling = @intFromBool(options.background_throttling), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled) };
+        const native_options: webkit.Options = .{ .context_menu = @backingInt(options.context_menu), .context_offer = if (!is_macos and options.context_menu == .handler) View.webkitContextMenu else null, .auth = if (!is_macos and options.http_auth != null) View.webkitAuth else null, .certificate = if (!is_macos and options.certificate_errors != null) View.webkitCertificate else null, .content_filters = filters.ptr, .content_filter_count = filter_count, .audio_muted = @intFromBool(self.mutedWanted()), .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .gestures = gestureFlags(options), .throttling = @intFromBool(options.background_throttling), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled), .scroll_to_container = @intFromBool(options.scroll_to_container) };
         var candidate: ?*anyopaque = null;
         if (self.session) |session| {
             try webkit.check(webkit.zwk_session_create(&native_options, session.last_size.width, session.last_size.height, webkitNotify, pageNotify, webkitScriptNotify, webkitTimeout, self, &candidate));
