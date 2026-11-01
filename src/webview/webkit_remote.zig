@@ -106,11 +106,13 @@ pub const Scratch = struct {
     storage: ?[]align(@alignOf(Origin)) u8,
     input: Input,
     has_credentials: bool = false,
-    pub fn init(allocator: std.mem.Allocator, remote: anytype, extension: Extension) !Scratch {
+    /// macOS has no WebProcess adapter: there the extension is null and the
+    /// descriptor carries an empty directory and no handshake deadline.
+    pub fn init(allocator: std.mem.Allocator, remote: anytype, extension: ?Extension) !Scratch {
         if (remote.request_credentials.len != 0) return initCredential(allocator, remote, extension);
         return initCommon(allocator, remote, extension);
     }
-    noinline fn initCredential(allocator: std.mem.Allocator, source_remote: anytype, extension: Extension) !Scratch {
+    noinline fn initCredential(allocator: std.mem.Allocator, source_remote: anytype, extension: ?Extension) !Scratch {
         var capture: credentials.Capture = .{};
         defer capture.deinit();
         try capture.init(source_remote.request_credentials);
@@ -118,8 +120,9 @@ pub const Scratch = struct {
         remote.request_credentials = capture.entries[0..capture.count];
         return initCommon(allocator, remote, extension);
     }
-    fn initCommon(allocator: std.mem.Allocator, remote: anytype, extension: Extension) !Scratch {
-        try validateExtension(extension);
+    fn initCommon(allocator: std.mem.Allocator, remote: anytype, deployment: ?Extension) !Scratch {
+        if (deployment) |value| try validateExtension(value);
+        const extension: Extension = deployment orelse .{ .directory = "", .handshake_timeout_ms = 0 };
         try validate(remote);
         var headers: usize = 0;
         var bytes: usize = remote.origins.len * @sizeOf(Origin) + remote.url.len + extension.directory.len + 2;

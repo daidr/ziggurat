@@ -281,6 +281,11 @@ pub const OriginGrant = struct {
     ipc: bool = false,
 };
 pub const RequestCredential = @import("request_credentials.zig").Entry;
+/// macOS enforces each grant by origin: navigations by their method and
+/// headers too, and the page's own loads of images, scripts, styles, fonts
+/// and media by GET. WKWebView never shows the app a script's request, so
+/// there fetch, XHR, beacons and WebSockets reach a granted origin whatever
+/// their method and headers; request_credentials is refused.
 pub const RemotePage = struct {
     url: []const u8,
     origins: []const OriginGrant,
@@ -392,7 +397,8 @@ pub const Options = struct {
     custom_local_limits: CustomLocalLimits = .{},
     /// Mutually exclusive with local and nonempty html. Default has no network grant.
     remote: ?RemotePage = null,
-    /// Linux remote pages require an explicitly deployed native request adapter.
+    /// Linux remote pages require an explicitly deployed native request adapter;
+    /// Windows and macOS refuse one.
     request_policy_extension: ?RequestPolicyExtension = null,
     /// Environment-wide immutable registrations. Reload must keep this set.
     /// Custom request_origins filters Origin independently of method/header
@@ -790,9 +796,11 @@ fn nativeCancelScript(native: *anyopaque, token: u64) void {
 }
 fn validateBackendOptions(options: Options) !void {
     if (is_macos) {
-        if (options.storage != .ephemeral or options.remote != null or options.request_policy_extension != null or
+        if (options.storage != .ephemeral or options.request_policy_extension != null or
             options.file_streams != null or options.document_initializers.len != 0) return error.UnsupportedCapability;
-        // Sign-ins and certificates are of remote pages, which WKWebView does not show here yet.
+        // WKWebView never lets the app add a request header: no Bearer credential.
+        if (options.remote) |remote| if (remote.request_credentials.len != 0) return error.UnsupportedCapability;
+        // The engine's sign-in and certificate answers are not taken here yet.
         if (options.http_auth != null or options.certificate_errors != null or options.context_menu == .handler) return error.UnsupportedCapability;
         inline for (zio.fields(tools.Policy)) |field| if (@field(options.tools, field.name)) return error.UnsupportedCapability;
     }
@@ -812,8 +820,10 @@ fn validateBackendOptions(options: Options) !void {
         if (options.remote) |remote| {
             if ((options.storage == .ephemeral and remote.credentials != .ephemeral) or
                 (options.storage == .profile and remote.credentials != .profile)) return error.UnsupportedCapability;
-            const extension = options.request_policy_extension orelse return error.RequestPolicyExtensionRequired;
-            try webkit_remote.validateExtension(extension);
+            if (!is_macos) {
+                const extension = options.request_policy_extension orelse return error.RequestPolicyExtensionRequired;
+                try webkit_remote.validateExtension(extension);
+            }
             try webkit_remote.validate(remote);
         } else if (options.request_policy_extension != null) return error.RemotePageRequired;
         try options.custom_local_limits.validate();
@@ -1698,7 +1708,7 @@ pub const View = struct {
         defer if (local) |*scratch| scratch.deinit(self.allocator);
         var remote: ?webkit_remote.Scratch = null;
         defer if (remote) |*scratch| scratch.deinit();
-        if (options.remote) |page| remote = try webkit_remote.Scratch.init(self.allocator, page, options.request_policy_extension.?);
+        if (options.remote) |page| remote = try webkit_remote.Scratch.init(self.allocator, page, options.request_policy_extension);
         var new_local_budget = false;
         errdefer if (new_local_budget) {
             const budget = self.custom_local_budget;
