@@ -40,11 +40,20 @@ static NSString *const mime_html = @"text/html";
 static NSString *const mime_png = @"image/png";
 static NSString *const mime_uri_list = @"text/uri-list";
 
+/* The window's ZigView: the content view itself, or a view inside it when
+   the content view is a material container. */
+static NSView *find_zig_view(NSView *view) {
+    if (!view) return nil;
+    if ([view respondsToSelector:@selector(setZigDropTarget:)]) return view;
+    for (NSView *child in [view subviews]) {
+        NSView *found = find_zig_view(child);
+        if (found) return found;
+    }
+    return nil;
+}
 static NSView *content_view(void *handle) {
     NSWindow *window = (__bridge NSWindow *)handle;
-    NSView *view = [window contentView];
-    if (!view || ![view respondsToSelector:@selector(setZigDropTarget:)]) return nil;
-    return view;
+    return find_zig_view([window contentView]);
 }
 /* The view's client point, top-left origin in points (ZigView is flipped). */
 static NSPoint view_point(NSView *view, id<NSDraggingInfo> info) {
@@ -486,8 +495,7 @@ static NSArray<NSString *> *uri_lines(NSData *data) {
 void *zst_source_begin(void *handle, void *event_pointer, const char *names, size_t names_len, int actions,
                        const uint8_t *rgba, int width, int height, int hot_x, int hot_y,
                        void *owner, const ZstSourceCallbacks *callbacks) {
-    NSWindow *window = (__bridge NSWindow *)handle;
-    NSView *view = [window contentView];
+    NSView *view = content_view(handle);
     NSEvent *event = (__bridge NSEvent *)event_pointer;
     if (!view) return NULL;
     ZstSource *source = [[ZstSource alloc] init];
