@@ -734,8 +734,11 @@ static void *download_context=&download_context;
     download.delegate=self;
 }
 - (void)webView:(WKWebView *)webView navigationResponse:(WKNavigationResponse *)response didBecomeDownload:(WKDownload *)download {
-    (void)webView; (void)response;
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep; (void)webView; (void)response;
     download.delegate=self;
+    /* The load became the download: it ends now, as the engine's own
+     * interruption would end it later, so the app can navigate at once. */
+    if (live(self) && navigation) [self finish:navigation error:[NSError errorWithDomain:@"WebKitErrorDomain" code:102 userInfo:@{NSLocalizedDescriptionKey:@"Frame load interrupted by a download"}]];
 }
 /* The offer: a download from a granted origin whose known size is within the
  * limit goes to the app, which keeps it or lets it be cancelled. */
