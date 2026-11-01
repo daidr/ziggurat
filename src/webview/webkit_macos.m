@@ -86,6 +86,7 @@ typedef struct ZwkRemoteGrant {
 - (void)_setFindDelegate:(id)delegate;
 @end
 typedef struct ZwkInitializerState ZwkInitializerState;
+@class ZwkPendingDownload;
 @interface ZwkPage : NSObject <WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, WKDownloadDelegate> {
 @public
     void *owner;
@@ -754,21 +755,21 @@ static void *download_context=&download_context;
 }
 - (void)downloadDidFinish:(WKDownload *)download {
     ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep;
-    ZwkPendingDownload *pending=download_find(self,download);
-    if (!pending) return;
-    const uint64_t received=(uint64_t)MAX(0,pending->progress.completedUnitCount);
-    const int64_t total=pending->progress.totalUnitCount>=0?pending->progress.totalUnitCount:-1;
-    download_unlink(self,pending);
-    if (live(self) && download_notify) download_notify(owner,pending->token,1,received,total,0);
+    ZwkPendingDownload *taken=download_find(self,download);
+    if (!taken) return;
+    const uint64_t received=(uint64_t)MAX(0,taken->progress.completedUnitCount);
+    const int64_t total=taken->progress.totalUnitCount>=0?taken->progress.totalUnitCount:-1;
+    download_unlink(self,taken);
+    if (live(self) && download_notify) download_notify(owner,taken->token,1,received,total,0);
 }
 - (void)download:(WKDownload *)download didFailWithError:(NSError *)error resumeData:(NSData *)resume {
     ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep; (void)resume;
-    ZwkPendingDownload *pending=download_find(self,download);
-    if (!pending) return;
-    const uint64_t received=(uint64_t)MAX(0,pending->progress.completedUnitCount);
-    const int64_t total=pending->progress.totalUnitCount>=0?pending->progress.totalUnitCount:-1;
-    download_unlink(self,pending);
-    if (live(self) && download_notify) download_notify(owner,pending->token,2,received,total,(int32_t)error.code);
+    ZwkPendingDownload *taken=download_find(self,download);
+    if (!taken) return;
+    const uint64_t received=(uint64_t)MAX(0,taken->progress.completedUnitCount);
+    const int64_t total=taken->progress.totalUnitCount>=0?taken->progress.totalUnitCount:-1;
+    download_unlink(self,taken);
+    if (live(self) && download_notify) download_notify(owner,taken->token,2,received,total,(int32_t)error.code);
 }
 /* Whether a navigation the engine names is the one in progress. The page's
  * own navigation is known by the first one named after its policy. */
@@ -973,9 +974,9 @@ static void *download_context=&download_context;
     } else if (context==history_context) {
         if (!pending_navigation) history_notify(self);
     } else if (context==download_context) {
-        for (ZwkPendingDownload *pending in [downloads copy]) if (pending->progress==object) {
-            if ([NSThread isMainThread]) download_emit(self,pending);
-            else dispatch_async(dispatch_get_main_queue(),^{ download_emit(self,pending); });
+        for (ZwkPendingDownload *taken in [downloads copy]) if (taken->progress==object) {
+            if ([NSThread isMainThread]) download_emit(self,taken);
+            else dispatch_async(dispatch_get_main_queue(),^{ download_emit(self,taken); });
         }
     } else [super observeValueForKeyPath:path ofObject:object change:change context:context];
 }
@@ -2732,7 +2733,7 @@ int zwk_download_cancel(ZwkState *state,uint64_t token) {
     if (!state || ![NSThread isMainThread]) return ZWK_INVALID;
     ZwkPage *s=page_of(state);
     ZwkPendingDownload *pending=download_token(s,token);
-    if (pending) @autoreleasepool { download_stop(s,pending); }
+    if (pending) { @autoreleasepool { download_stop(s,pending); } }
     return ZWK_OK;
 }
 int zwk_download_snapshot(ZwkState *state,uint64_t token,uint64_t *received,int64_t *total) {
