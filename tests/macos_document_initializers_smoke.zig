@@ -180,7 +180,7 @@ fn drain(allocator: std.mem.Allocator) !void {
 }
 
 pub fn main() !void {
-    var debug: std.heap.DebugAllocator(.{}) = .init;
+    var debug: std.heap.DebugAllocator(@import("macos_panic.zig").allocator_config) = .init;
     defer std.debug.assert(debug.deinit() == .ok);
     const allocator = debug.allocator();
     try run(allocator);
