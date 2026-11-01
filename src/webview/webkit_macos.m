@@ -86,7 +86,7 @@ typedef struct ZwkRemoteGrant {
 - (void)_setFindDelegate:(id)delegate;
 @end
 typedef struct ZwkInitializerState ZwkInitializerState;
-@interface ZwkPage : NSObject <WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler> {
+@interface ZwkPage : NSObject <WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, WKDownloadDelegate> {
 @public
     void *owner;
     ZwkNotify notify_fn;
@@ -159,6 +159,13 @@ typedef struct ZwkInitializerState ZwkInitializerState;
     ZwkCertificate certificate_fn;
     /* host + DER of each certificate the app allowed, for the page's life. */
     NSMutableSet *allowed_certificates;
+    /* Downloads: the origins and limits the app granted, and those it took. */
+    ZwkDownloadOffer download_offer;
+    ZwkDownloadNotify download_notify;
+    NSArray<NSString *> *download_origins;
+    BOOL download_unknown;
+    uint64_t download_known_limit, download_received_limit;
+    NSMutableArray *downloads;
 }
 @end
 static void resources_cancel_all(ZwkPage *s);
@@ -176,6 +183,9 @@ static void initializers_free(ZwkInitializerState *owner);
 static void initializers_cancel_all(ZwkPage *s);
 static BOOL initializers_allow_navigation(ZwkPage *s);
 static void scripts_install(ZwkPage *s);
+static void download_emit(ZwkPage *s,ZwkPendingDownload *pending);
+static ZwkPendingDownload *download_find(ZwkPage *s,WKDownload *download);
+static void download_unlink(ZwkPage *s,ZwkPendingDownload *pending);
 
 /* The URI of the load a certificate failed: the page's when its host is the
  * server's, else the server's root. */
@@ -194,6 +204,21 @@ static NSString *certificate_uri(ZwkPage *s,NSURLProtectionSpace *space) {
 @end
 @implementation ZwkPendingPermission
 @end
+/* A download the app took: the engine waits for its file until accepted,
+ * then it transfers, reported once ready. */
+@interface ZwkPendingDownload : NSObject {
+@public
+    uint64_t token;
+    WKDownload *download;
+    void (^decide)(NSURL *);
+    NSProgress *progress;
+    BOOL ready;
+}
+@end
+@implementation ZwkPendingDownload
+@end
+static atomic_uint live_downloads;
+typedef struct ZwkDownloadCall { __unsafe_unretained ZwkPage *page; __unsafe_unretained WKDownload *download; __unsafe_unretained void (^decide)(NSURL *); BOOL deferred; } ZwkDownloadCall;
 typedef struct ZwkPermissionCall { __unsafe_unretained ZwkPage *page; __unsafe_unretained void (^decision)(WKPermissionDecision); BOOL deferred; } ZwkPermissionCall;
 /* scheme://host[:port] of the page's document, as the engine names origins. */
 static NSString *permission_origin(NSURL *url) {
@@ -201,6 +226,16 @@ static NSString *permission_origin(NSURL *url) {
     if (!scheme.length || !host.length) return nil;
     if ([host containsString:@":"]) host=[NSString stringWithFormat:@"[%@]",host];
     return url.port?[NSString stringWithFormat:@"%@://%@:%@",scheme,host,url.port]:[NSString stringWithFormat:@"%@://%@",scheme,host];
+}
+/* http(s)://host[:port] as the Zig side canonicalizes a download origin:
+ * the default port left out. */
+static NSString *download_origin(NSURL *url) {
+    NSString *scheme=url.scheme.lowercaseString, *host=url.host.lowercaseString;
+    const BOOL https=[scheme isEqualToString:@"https"];
+    if ((!https && ![scheme isEqualToString:@"http"]) || !host.length) return nil;
+    if ([host containsString:@":"]) host=[NSString stringWithFormat:@"[%@]",host];
+    const long port=url.port?url.port.longValue:-1;
+    return port<0 || port==(https?443:80)?[NSString stringWithFormat:@"%@://%@",scheme,host]:[NSString stringWithFormat:@"%@://%@:%ld",scheme,host,port];
 }
 /* The sign-in a ZwkAuth call carries; zwk_auth_answer fills it. */
 typedef struct ZwkAuthCall { void *credential; BOOL answered; } ZwkAuthCall;
@@ -611,6 +646,7 @@ static BOOL user_gesture(WKNavigationAction *action) {
 static void *title_context=&title_context;
 static void *audio_context=&audio_context;
 static void *history_context=&history_context;
+static void *download_context=&download_context;
 
 @implementation ZwkPage
 - (instancetype)init {
@@ -633,6 +669,12 @@ static void *history_context=&history_context;
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)action decisionHandler:(void (^)(WKNavigationActionPolicy))decision {
     ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep; (void)webView;
     NSString *uri=action.request.URL.absoluteString;
+    /* A link with the download attribute is a download, not a navigation:
+     * the app's origins decide it once the response names its file. */
+    if (action.shouldPerformDownload) {
+        decision(live(self) && download_offer && action.targetFrame?WKNavigationActionPolicyDownload:WKNavigationActionPolicyCancel);
+        return;
+    }
     if (!action.targetFrame) { decision(WKNavigationActionPolicyAllow); return; } /* createWebView decides */
     if (!action.targetFrame.mainFrame) {
         /* Frames of the document itself; no frame reaches another source. */
@@ -676,9 +718,57 @@ static void *history_context=&history_context;
     decision(WKNavigationActionPolicyCancel);
     if (live(self) && (policy&1u)) notify(self,3,uri,user_gesture(action)?1:0,NULL);
 }
+/* A response sent as an attachment, or one the engine cannot show, is a
+ * download when the app takes downloads, else the load is cancelled. */
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationResponse:(WKNavigationResponse *)response decisionHandler:(void (^)(WKNavigationResponsePolicy))decision {
     (void)webView;
-    decision(live(self) && response.canShowMIMEType?WKNavigationResponsePolicyAllow:WKNavigationResponsePolicyCancel);
+    if (!live(self)) { decision(WKNavigationResponsePolicyCancel); return; }
+    NSString *disposition=[response.response isKindOfClass:[NSHTTPURLResponse class]]?[(NSHTTPURLResponse *)response.response valueForHTTPHeaderField:@"Content-Disposition"]:nil;
+    const BOOL attachment=[[disposition stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet].lowercaseString hasPrefix:@"attachment"];
+    if (!attachment && response.canShowMIMEType) decision(WKNavigationResponsePolicyAllow);
+    else decision(download_offer && response.forMainFrame && download_origin(response.response.URL)?WKNavigationResponsePolicyDownload:WKNavigationResponsePolicyCancel);
+}
+- (void)webView:(WKWebView *)webView navigationAction:(WKNavigationAction *)action didBecomeDownload:(WKDownload *)download {
+    (void)webView; (void)action;
+    download.delegate=self;
+}
+- (void)webView:(WKWebView *)webView navigationResponse:(WKNavigationResponse *)response didBecomeDownload:(WKDownload *)download {
+    (void)webView; (void)response;
+    download.delegate=self;
+}
+/* The offer: a download from a granted origin whose known size is within the
+ * limit goes to the app, which keeps it or lets it be cancelled. */
+- (void)download:(WKDownload *)download decideDestinationUsingResponse:(NSURLResponse *)response suggestedFilename:(NSString *)name completionHandler:(void (^)(NSURL *))decide {
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep;
+    const int64_t total=response.expectedContentLength>=0?response.expectedContentLength:-1;
+    NSURL *url=download.originalRequest.URL;
+    NSString *origin=download_origin(url);
+    BOOL allowed=live(self) && download_offer && origin && [download_origins containsObject:origin];
+    if (allowed && total<0) allowed=download_unknown;
+    if (allowed && total>=0) allowed=(uint64_t)total<=download_known_limit;
+    ZwkDownloadCall call={self,download,decide,NO};
+    const char *uri=url.absoluteString.UTF8String, *mime=(response.MIMEType?:@"").UTF8String, *file=(name?:@"").UTF8String;
+    if (allowed && uri && mime && file && strlen(uri)<=65536 && strlen(mime)<=508 && strlen(file)<=1020) download_offer(owner,uri,mime,file,total,&call);
+    call.page=nil;
+    if (!call.deferred) decide(nil);
+}
+- (void)downloadDidFinish:(WKDownload *)download {
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep;
+    ZwkPendingDownload *pending=download_find(self,download);
+    if (!pending) return;
+    const uint64_t received=(uint64_t)MAX(0,pending->progress.completedUnitCount);
+    const int64_t total=pending->progress.totalUnitCount>=0?pending->progress.totalUnitCount:-1;
+    download_unlink(self,pending);
+    if (live(self) && download_notify) download_notify(owner,pending->token,1,received,total,0);
+}
+- (void)download:(WKDownload *)download didFailWithError:(NSError *)error resumeData:(NSData *)resume {
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep; (void)resume;
+    ZwkPendingDownload *pending=download_find(self,download);
+    if (!pending) return;
+    const uint64_t received=(uint64_t)MAX(0,pending->progress.completedUnitCount);
+    const int64_t total=pending->progress.totalUnitCount>=0?pending->progress.totalUnitCount:-1;
+    download_unlink(self,pending);
+    if (live(self) && download_notify) download_notify(owner,pending->token,2,received,total,(int32_t)error.code);
 }
 /* Whether a navigation the engine names is the one in progress. The page's
  * own navigation is known by the first one named after its policy. */
@@ -882,6 +972,11 @@ static void *history_context=&history_context;
         if (live(self)) (void)page(self,7,[object _isPlayingAudio]?1u:0u,0,nil);
     } else if (context==history_context) {
         if (!pending_navigation) history_notify(self);
+    } else if (context==download_context) {
+        for (ZwkPendingDownload *pending in [downloads copy]) if (pending->progress==object) {
+            if ([NSThread isMainThread]) download_emit(self,pending);
+            else dispatch_async(dispatch_get_main_queue(),^{ download_emit(self,pending); });
+        }
     } else [super observeValueForKeyPath:path ofObject:object change:change context:context];
 }
 @end
@@ -2353,7 +2448,16 @@ static int page_create(void *window,BOOL session,uint32_t width,uint32_t height,
         if (options->facts && !(s->facts=[NSString stringWithUTF8String:options->facts])) return ZWK_INVALID;
         s->autoplay=options->autoplay!=0;
         s->owner=owner; s->notify_fn=callback; s->page_fn=page_callback; s->script_fn=script_callback; s->deadline_fn=deadline;
-        s->limit=options->max_pending; s->result_limit=options->max_result_bytes; s->policy=options->policy_flags; s->permission_offer=options->permission; s->auth_fn=options->auth; s->certificate_fn=options->certificate;
+        s->limit=options->max_pending; s->result_limit=options->max_result_bytes; s->policy=options->policy_flags; s->permission_offer=options->permission;
+        if (options->download_offer && options->download_notify && options->download_origin_count && options->download_origin_count<=8 && options->download_origins) {
+            NSMutableArray *origins=[NSMutableArray arrayWithCapacity:options->download_origin_count];
+            for (uint32_t i=0;i<options->download_origin_count;++i) {
+                NSString *origin=options->download_origins[i]?[NSString stringWithUTF8String:options->download_origins[i]]:nil;
+                if (origin) [origins addObject:origin.lowercaseString];
+            }
+            s->download_origins=origins; s->download_offer=options->download_offer; s->download_notify=options->download_notify;
+            s->download_unknown=options->download_unknown!=0; s->download_known_limit=options->download_known_limit; s->download_received_limit=options->download_received_limit;
+        } s->auth_fn=options->auth; s->certificate_fn=options->certificate;
         NSMutableArray<WKContentRuleList *> *filters=[NSMutableArray arrayWithCapacity:options->content_filter_count];
         for (uint32_t i=0;i<options->content_filter_count;i++) [filters addObject:(__bridge WKContentRuleList *)options->content_filters[i]];
         s->filters=filters;
@@ -2548,6 +2652,100 @@ static void permissions_deny_all(ZwkPage *s) {
     NSArray *pending=s->permissions; s->permissions=nil;
     for (ZwkPendingPermission *at in pending) at->decision(WKPermissionDecisionDeny);
 }
+
+uint32_t zwk_download_count(void) { return atomic_load(&live_downloads); }
+static ZwkPendingDownload *download_find(ZwkPage *s,WKDownload *download) {
+    for (ZwkPendingDownload *pending in s->downloads) if (pending->download==download) return pending;
+    return nil;
+}
+static ZwkPendingDownload *download_token(ZwkPage *s,uint64_t token) {
+    for (ZwkPendingDownload *pending in s->downloads) if (pending->token==token) return pending;
+    return nil;
+}
+/* Out of the list, no longer observed; the engine's download is untouched. */
+static void download_unlink(ZwkPage *s,ZwkPendingDownload *pending) {
+    if (![s->downloads containsObject:pending]) return;
+    [s->downloads removeObject:pending];
+    if (pending->progress) [pending->progress removeObserver:s forKeyPath:@"completedUnitCount" context:download_context];
+    pending->progress=nil; pending->ready=NO;
+    atomic_fetch_sub(&live_downloads,1);
+}
+/* Ends it: a decision still waiting gets no file, a transfer stops. */
+static void download_stop(ZwkPage *s,ZwkPendingDownload *pending) {
+    download_unlink(s,pending);
+    void (^decide)(NSURL *)=pending->decide; pending->decide=nil;
+    if (decide) decide(nil);
+    else [pending->download cancel:^(NSData *resume) { (void)resume; }];
+}
+/* Progress once ready; past the received limit it stops and says so. */
+static void download_emit(ZwkPage *s,ZwkPendingDownload *pending) {
+    if (!pending->ready || !live(s) || !s->download_notify || ![s->downloads containsObject:pending]) return;
+    const uint64_t received=(uint64_t)MAX(0,pending->progress.completedUnitCount);
+    const int64_t total=pending->progress.totalUnitCount>=0?pending->progress.totalUnitCount:-1;
+    uint32_t kind=0;
+    if (received>s->download_received_limit) { kind=3; download_stop(s,pending); }
+    s->download_notify(s->owner,pending->token,kind,received,total,0);
+}
+int zwk_download_defer(void *call_pointer,uint64_t token) {
+    ZwkDownloadCall *call=call_pointer;
+    if (!call || !call->page || call->deferred || !token) return ZWK_INVALID;
+    ZwkPage *s=call->page;
+    if (!live(s)) return ZWK_CLOSED;
+    if (download_token(s,token)) return ZWK_INVALID;
+    if (s->downloads.count>=8) return ZWK_FULL;
+    ZwkPendingDownload *pending=[ZwkPendingDownload new];
+    if (!pending) return ZWK_OOM;
+    pending->token=token; pending->download=call->download; pending->decide=call->decide;
+    if (!s->downloads) s->downloads=[NSMutableArray new];
+    [s->downloads addObject:pending];
+    atomic_fetch_add(&live_downloads,1);
+    call->deferred=YES;
+    return ZWK_OK;
+}
+int zwk_download_accept(ZwkState *state,uint64_t token,const char *path) {
+    if (!state || !path || path[0]!='/' || ![NSThread isMainThread]) return ZWK_INVALID;
+    ZwkPage *s=page_of(state);
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=s; (void)keep;
+    ZwkPendingDownload *pending=download_token(s,token);
+    if (!pending || !pending->decide) return ZWK_INVALID;
+    if (!live(s)) return ZWK_CLOSED;
+    @autoreleasepool {
+        NSString *text=[NSString stringWithUTF8String:path];
+        if (!text) return ZWK_INVALID;
+        NSURL *file=[NSURL fileURLWithPath:text isDirectory:NO];
+        if (!file) return ZWK_OOM;
+        pending->progress=pending->download.progress;
+        [pending->progress addObserver:s forKeyPath:@"completedUnitCount" options:0 context:download_context];
+        void (^decide)(NSURL *)=pending->decide; pending->decide=nil;
+        decide(file);
+    }
+    return live(s)?ZWK_OK:ZWK_CLOSED;
+}
+void zwk_download_activate(ZwkState *state,uint64_t token) {
+    ZwkPage *s=page_of(state);
+    ZwkPendingDownload *pending=download_token(s,token);
+    if (!pending || pending->decide) return;
+    pending->ready=YES;
+    download_emit(s,pending);
+}
+int zwk_download_cancel(ZwkState *state,uint64_t token) {
+    if (!state || ![NSThread isMainThread]) return ZWK_INVALID;
+    ZwkPage *s=page_of(state);
+    ZwkPendingDownload *pending=download_token(s,token);
+    if (pending) @autoreleasepool { download_stop(s,pending); }
+    return ZWK_OK;
+}
+int zwk_download_snapshot(ZwkState *state,uint64_t token,uint64_t *received,int64_t *total) {
+    ZwkPage *s=page_of(state);
+    ZwkPendingDownload *pending=download_token(s,token);
+    if (!pending || !pending->ready) return ZWK_INVALID;
+    *received=(uint64_t)MAX(0,pending->progress.completedUnitCount);
+    *total=pending->progress.totalUnitCount>=0?pending->progress.totalUnitCount:-1;
+    return ZWK_OK;
+}
+static void downloads_stop_all(ZwkPage *s) {
+    for (ZwkPendingDownload *pending in [s->downloads copy]) download_stop(s,pending);
+}
 void zwk_close(ZwkState *state) {
     ZwkPage *s=page_of(state);
     if (s->closed) return;
@@ -2566,6 +2764,7 @@ void zwk_close(ZwkState *state) {
         capture_cancel_all(s);
         initializers_cancel_all(s);
         permissions_deny_all(s);
+        downloads_stop_all(s);
         ZwkWebView *view=s->view; s->view=nil;
         if (view) {
             if ([view respondsToSelector:@selector(_setFindDelegate:)]) [view _setFindDelegate:nil];
