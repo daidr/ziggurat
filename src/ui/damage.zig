@@ -208,7 +208,7 @@ pub const Tracker = struct {
             return .whole;
         }
         if (!self.valid) return .whole;
-        return self.collect(self.tiles[self.front][0..count], tiles);
+        return self.collect(buffer, self.tiles[self.front][0..count], tiles);
     }
 
     /// The plane now shows the frame the last `plan` hashed.
@@ -271,7 +271,7 @@ pub const Tracker = struct {
         return depth == 0;
     }
 
-    fn collect(self: *Tracker, before: []const u64, after: []const u64) Damage {
+    fn collect(self: *Tracker, buffer: *const commands.Buffer, before: []const u64, after: []const u64) Damage {
         var runs: [max_runs]Box = undefined;
         var len: usize = 0;
         const tile: i32 = @intCast(self.tile);
@@ -301,6 +301,7 @@ pub const Tracker = struct {
         }
         const surface: Box = .{ .x1 = @intCast(self.width), .y1 = @intCast(self.height) };
         len = merge(runs[0..len], max_rects);
+        len = self.containText(buffer, runs[0..len]) orelse return .whole;
         var result: Damage = .{ .full = false };
         var total: u64 = 0;
         for (runs[0..len]) |box| {
@@ -312,6 +313,45 @@ pub const Tracker = struct {
         }
         if (total * 2 > surface.area()) return .whole;
         return result;
+    }
+    /// Grows the rectangles until each text command they touch lies
+    /// inside one, as drawn under its clips, and merges those that then
+    /// overlap. Text drawn by the platform under a clip that cuts through
+    /// it is not drawn as it is unclipped (Cairo drops subpixel glyphs
+    /// under some such clips); inside a rectangle that holds it, the text's
+    /// own clip is the only one that cuts it, as when the frame is drawn
+    /// whole. Null when that takes too many passes.
+    fn containText(self: *const Tracker, buffer: *const commands.Buffer, boxes: []Box) ?usize {
+        var len = boxes.len;
+        const sources = Sources.of(buffer);
+        var pass: usize = 0;
+        while (pass < 8) : (pass += 1) {
+            var grown = false;
+            var clips: [max_clips + 1]Box = undefined;
+            clips[0] = .{ .x1 = @intCast(self.width), .y1 = @intCast(self.height) };
+            var depth: usize = 0;
+            for (buffer.commands()) |command| switch (command) {
+                .push_clip => |rect| {
+                    if (depth == max_clips) return null;
+                    depth += 1;
+                    clips[depth] = clips[depth - 1].intersect(clipBox(rect, self.scale) orelse return null);
+                },
+                .pop_clip => depth -|= 1,
+                .text => {
+                    const box = (commandBox(command, sources, self.scale) orelse return null).intersect(clips[depth]);
+                    if (box.isEmpty()) continue;
+                    for (boxes[0..len]) |*target| {
+                        if (!target.intersects(box) or std.meta.eql(target.unite(box), target.*)) continue;
+                        target.* = target.unite(box);
+                        grown = true;
+                    }
+                },
+                else => {},
+            };
+            if (!grown) return len;
+            len = merge(boxes[0..len], max_rects);
+        }
+        return null;
     }
 };
 
@@ -508,6 +548,26 @@ test "groups, transforms and effects draw the frame whole, as does damage over h
     buffer.reset();
     try buffer.fill(.{ .x = 0, .y = 0, .width = 256, .height = 128 }, 0x000000);
     try std.testing.expect(testPlan(&tracker, &buffer).full);
+}
+
+test "damage that touches text grows to hold the whole text" {
+    var tracker: Tracker = .{};
+    var buffer: commands.Buffer = .{};
+    const Frame = struct {
+        fn draw(target: *commands.Buffer, color: u32) !void {
+            target.reset();
+            try target.fill(.{ .x = 0, .y = 0, .width = 256, .height = 128 }, 0xffffff);
+            try target.fill(.{ .x = 40, .y = 30, .width = 10, .height = 30 }, color);
+            try target.text(.{ .x = 8, .y = 20, .width = 160, .height = 20 }, "Across", 0);
+        }
+    };
+    try Frame.draw(&buffer, 1);
+    _ = testPlan(&tracker, &buffer);
+    try Frame.draw(&buffer, 2);
+    const region = testPlan(&tracker, &buffer);
+    try std.testing.expectEqual(@as(u8, 1), region.len);
+    const text = toBox(.{ .x = 8, .y = 20, .width = 160, .height = 20 }, 1).?;
+    try std.testing.expectEqual(region.rects[0], region.rects[0].unite(text.intersect(.{ .x1 = 256, .y1 = 128 })));
 }
 
 test "merging keeps rectangles apart and within the limit" {

@@ -972,7 +972,7 @@ test "Cairo element effects rewrite a Gaussian capture or an isolation on the ta
 }
 
 test "drawing only the damaged rectangles leaves the plane as drawing it whole" {
-    const size: z.Size = .{ .width = 200, .height = 120, .scale = 1.5 };
+    const size: z.Size = .{ .width = 400, .height = 240, .scale = 1.5 };
     var dummy: u8 = 0;
     for ([_]bool{ false, true }) |transparent| {
         var whole: Renderer = .{};
