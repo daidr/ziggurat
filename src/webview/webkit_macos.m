@@ -1724,7 +1724,15 @@ static int cookie_start(CookieOp *op) {
     else if (op->kind==ZWK_COOKIE_SET)
         [cookie_engine(s) setCookie:(__bridge NSHTTPCookie *)op->input completionHandler:^{ cookie_op_finish(op,ZWK_COOKIES_OK,nil); }];
     else if (op->kind==ZWK_COOKIE_DELETE || op->kind==ZWK_COOKIE_DELETE_KEY)
-        [cookie_engine(s) deleteCookie:(__bridge NSHTTPCookie *)op->input completionHandler:^{ cookie_op_finish(op,ZWK_COOKIES_OK,nil); }];
+        /* The engine deletes only a cookie as it holds it, attributes and
+         * all: find it by name, domain and path first. */
+        [cookie_engine(s) getAllCookies:^(NSArray<NSHTTPCookie *> *all) {
+            NSHTTPCookie *found=nil;
+            for (NSHTTPCookie *cookie in all) if (!strcmp(op->name,cookie.name.UTF8String?:"") && !strcmp(op->domain,cookie.domain.UTF8String?:"") &&
+                !strcmp(op->path,cookie.path.UTF8String?:"") && (op->kind==ZWK_COOKIE_DELETE_KEY || !strcmp(op->value,cookie.value.UTF8String?:""))) { found=cookie; break; }
+            if (!found) { cookie_op_finish(op,ZWK_COOKIES_OK,nil); return; }
+            [cookie_engine(op->store) deleteCookie:found completionHandler:^{ cookie_op_finish(op,ZWK_COOKIES_OK,nil); }];
+        }];
     else if (op->kind==ZWK_COOKIE_REPLACE_ALL)
         [store removeDataOfTypes:types modifiedSince:[NSDate distantPast] completionHandler:^{ cookie_replace_next(op,0); }];
     else
