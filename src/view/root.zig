@@ -1505,6 +1505,13 @@ pub const View = struct {
     pub fn lastNode(self: *View) *Node {
         return &self.buffers.nodes[self.len - 1];
     }
+    /// Scroll the containers around the node with `id` as little as shows
+    /// it, once this pass is arranged: a node added in this pass comes into
+    /// view with it. Ask in the pass it should come into view; asking in
+    /// every pass keeps the reader from scrolling it away.
+    pub fn scrollIntoView(self: *View, id: u64) void {
+        self.reveal = id;
+    }
     /// Bind `chord` to an action under `action`: while the node just added
     /// holds focus, or anywhere in the window when `window` is set, the
     /// chord delivers `.action = action` in a pass of its own, before any
@@ -3697,7 +3704,7 @@ pub const View = struct {
         if (node.embed) |content| return content.measure(content.context, theme);
         if (node.graphic != null) return image_nodes.measure(node);
         const metrics = theme.metrics;
-        const font = if (node.kind == .text) node.style.font else null;
+        const font = if (node.kind == .text or node.kind == .link) node.style.font else null;
         const text_size = if (node.text.len > 0) measurer.textSize(node.text, font) else if (font) |value| measurer.textSize("", value) else Size{ .width = 0, .height = Measurer.line_height };
         const size: Size = switch (node.kind) {
             .text, .note => text_size,
@@ -4749,7 +4756,11 @@ pub const View = struct {
                 .note => target.label(if (node.rtl) trailing(bounds, node.measured.preferred.width) else bounds, node.text, if (node.invalid) theme.palette.caution else theme.palette.disabled_text),
                 .spacer => {},
                 .button => try target.buttonWithOptions(node.id, bounds, node.text, control),
-                .link => try target.link(node.id, bounds, node.text, control),
+                .link => {
+                    var look = control;
+                    look.font = style.font;
+                    try target.link(node.id, bounds, node.text, look);
+                },
                 .nav_button => try target.navButton(node.id, bounds, if (node.rtl) switch (node.direction) {
                     .back => .forward,
                     .forward => .back,

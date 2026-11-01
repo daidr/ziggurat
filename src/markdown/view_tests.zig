@@ -201,3 +201,114 @@ test "long documents nest containers below the child limit" {
     try h.render();
     try equal(@as(usize, 300), h.count(.{ .kind = .text }));
 }
+
+const Scrolled = struct {
+    tree: md.Tree,
+    options: mv.Options = .{},
+    model: view.ScrollModel = .{},
+    state: mv.AnchorState = .{},
+    last: ?mv.Activation = null,
+    fn build(self: *Scrolled, v: *view.View) anyerror!void {
+        var options = self.options;
+        options.anchor_state = &self.state;
+        try v.scroll(&self.model, .{ .height = 160 });
+        if (try mv.build(v, self.tree, options, .{})) |activation| self.last = activation;
+        try v.end();
+    }
+};
+
+var long_source: [4096]u8 = undefined;
+fn document(first: []const u8, filler: []const u8, count: usize, last: []const u8) ![]const u8 {
+    var len: usize = 0;
+    for ([_][]const u8{ first, "\n\n" }) |piece| {
+        @memcpy(long_source[len..][0..piece.len], piece);
+        len += piece.len;
+    }
+    for (0..count) |_| {
+        @memcpy(long_source[len..][0..filler.len], filler);
+        len += filler.len;
+    }
+    @memcpy(long_source[len..][0..last.len], last);
+    len += last.len;
+    return long_source[0..len];
+}
+
+test "headings take GitHub's slugs" {
+    var buffer: [mv.max_slug]u8 = undefined;
+    try equalStrings("getting-started", mv.slug("Getting Started", &buffer));
+    try equalStrings("whats-new-in-v2_0", mv.slug(" What's new in v2_0? ", &buffer));
+    try equalStrings("安装-zig", mv.slug("安装 Zig", &buffer));
+    const tree = try md.parse("# Intro\n\n## Getting *Started*\n\ntext", parsed.buffers());
+    try equal(@as(?u32, null), mv.headingNamed(tree, "#text"));
+    const index = mv.headingNamed(tree, "#getting-started").?;
+    try equal(@as(u8, 2), tree.get(index).level);
+    try equal(index, mv.headingNamed(tree, "Getting-Started").?);
+}
+
+test "an anchor scrolls to its heading when the document shows, changes or is asked again" {
+    var doc: Scrolled = .{ .tree = try md.parse(try document("# Intro", "A paragraph before the destination.\n\n", 30, "# Target\n\nDestination.\n"), parsed.buffers()), .options = .{ .anchor = "#target" } };
+    var h = view.Harness.init(&doc, Scrolled.build, storage.buffers(), .{ .bounds = .{ .x = 0, .y = 0, .width = 400, .height = 160 } });
+    try h.render();
+    try expect(doc.model.offset.y > 0);
+    // The heading comes just into view.
+    const target = try h.boundsOf(.{ .kind = .text, .text = "Target" });
+    const port = try h.boundsOf(.{ .kind = .scroll });
+    try expect(target.y >= port.y and target.y + target.height <= port.y + port.height);
+
+    // An unchanged anchor lets the reader scroll away.
+    doc.model.offset.y = 0;
+    try h.render();
+    try equal(@as(f32, 0), doc.model.offset.y);
+    doc.options.anchor_version += 1;
+    try h.render();
+    try expect(doc.model.offset.y > 0);
+
+    // Another document takes the same anchor.
+    doc.model.offset.y = 0;
+    doc.tree = try md.parse(try document("# Another document", "Different text before the target.\n\n", 20, "# Target\n\nNew destination.\n"), parsed.buffers());
+    try h.render();
+    try expect(doc.model.offset.y > 0);
+
+    // An anchor naming no heading moves nothing.
+    doc.model.offset.y = 0;
+    doc.options.anchor = "missing";
+    try h.render();
+    try equal(@as(f32, 0), doc.model.offset.y);
+}
+
+test "a #heading link reaches the application, which routes it to the anchor" {
+    var doc: Scrolled = .{ .tree = try md.parse(try document("[Jump](#target) [File](next.md)", "A paragraph before the destination.\n\n", 30, "# Target\n\nDestination.\n"), parsed.buffers()) };
+    var h = view.Harness.init(&doc, Scrolled.build, storage.buffers(), .{ .bounds = .{ .x = 0, .y = 0, .width = 400, .height = 160 } });
+    try h.render();
+    try h.click(.{ .kind = .link, .text = "File" });
+    try equalStrings("next.md", doc.last.?.link);
+    try equal(@as(f32, 0), doc.model.offset.y);
+    try h.click(.{ .kind = .link, .text = "Jump" });
+    try equalStrings("#target", doc.last.?.link);
+    doc.options.anchor = doc.last.?.link;
+    try h.render();
+    try expect(doc.model.offset.y > 0);
+}
+
+test "link text keeps its block's font and takes the link weight as its least" {
+    var doc: Doc = .{ .tree = try md.parse("## A [head](/h)\n\nSome [plain](/p), **[strong](/s)** and [`code`](/c).", parsed.buffers()) };
+    var h = harness(&doc);
+    try h.render();
+    try expect(std.meta.eql(view.Font.heading2, (try h.find(.{ .kind = .link, .text = "head" })).style.font.?));
+    try equal(@as(?view.Font, null), (try h.find(.{ .kind = .link, .text = "plain" })).style.font);
+    const code = try h.find(.{ .kind = .link, .text = "code" });
+    try expect(code.style.font.?.monospace);
+    try expect(code.style.background != null);
+
+    doc.options.link_weight = .semibold;
+    try h.render();
+    const heading = (try h.find(.{ .kind = .link, .text = "head" })).style.font.?;
+    // Already bold: kept.
+    try equal(view.Font.Weight.bold, heading.weight);
+    try equal(view.Font.Weight.semibold, (try h.find(.{ .kind = .link, .text = "plain" })).style.font.?.weight);
+    try equal(view.Font.Weight.bold, (try h.find(.{ .kind = .link, .text = "strong" })).style.font.?.weight);
+    const lifted = (try h.find(.{ .kind = .link, .text = "code" })).style.font.?;
+    try expect(lifted.monospace and lifted.weight == .semibold);
+    // Plain text is not lifted.
+    try equal(@as(?view.Font, null), (try h.find(.{ .kind = .text, .text = "Some " })).style.font);
+}
