@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const is_windows = builtin.os.tag == .windows;
-pub const supported = builtin.os.tag == .linux or is_windows;
+pub const supported = builtin.os.tag == .linux or builtin.os.tag == .macos or is_windows;
 pub const storage = @import("profile_storage.zig");
 pub const tls_policy = @import("profile_tls_policy.zig");
 pub const LoopbackHttps = tls_policy.LoopbackHttps;
@@ -323,7 +323,7 @@ pub const Context = struct {
 /// Adapter-only metadata, not all allocations owned by the browser engine.
 pub fn nativeCounts() NativeCounts {
     var value: NativeCounts = .{};
-    if (builtin.os.tag == .linux) zwk_profile_counts(&value.profiles, &value.contexts, &value.bytes) else if (is_windows) zwpw_profile_counts(&value.profiles, &value.contexts, &value.bytes);
+    if (builtin.os.tag == .linux or builtin.os.tag == .macos) zwk_profile_counts(&value.profiles, &value.contexts, &value.bytes) else if (is_windows) zwpw_profile_counts(&value.profiles, &value.contexts, &value.bytes);
     return value;
 }
 const NativeOptions = extern struct { contexts: u32, bytes: usize, leases: u32 };

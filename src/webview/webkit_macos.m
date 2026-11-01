@@ -1,11 +1,10 @@
 /* The WKWebView backend: the WebKitGTK native contract of webkit_native.h on
  * macOS, for trusted HTML pages, custom-scheme local sites and remote pages
- * in ephemeral storage. A local site serves the page's HTML and resources
+ * in ephemeral or persistent profile storage. A local site serves the page's HTML and resources
  * through a WKURLSchemeHandler. A remote page's grants hold by origin: the
  * navigation policy checks each navigation, and a content rule list of its
- * own blocks every load but those of granted origins. Profiles, sessions,
- * regions and the browser tools are refused here and before they reach
- * this file.
+ * own blocks every load but those of granted origins. Sessions, regions and
+ * cookie stores are refused here and before they reach this file.
  *
  * Every function runs on the main thread. A page object is reference counted
  * by Core Foundation: zwk_create and zwk_recovery_anchor return one reference
@@ -14,6 +13,9 @@
 #import <AppKit/AppKit.h>
 #import <WebKit/WebKit.h>
 #include <objc/message.h>
+#include <objc/runtime.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <stdatomic.h>
@@ -33,6 +35,9 @@ void *zlm_window_content(void *window);
 - (NSUInteger)_mediaMutedState;
 - (BOOL)_isPlayingAudio;
 - (NSString *)_userAgent;
+@end
+@interface WKHTTPCookieStore (ZigguratEngine)
+- (void)_flushCookiesToDiskWithCompletionHandler:(void (^)(void))done;
 @end
 @interface WKPreferences (ZigguratEngine)
 - (void)_setUsesPageCache:(BOOL)value;
@@ -1240,11 +1245,274 @@ static void set_muted(ZwkPage *s,BOOL value) {
     [s->view _setPageMuted:value?(state|MEDIA_AUDIO_MUTED):(state&~(NSUInteger)MEDIA_AUDIO_MUTED)];
 }
 
+/* Persistent profiles. A profile's WKWebsiteDataStore keeps its data under
+ * the prepared directories through the engine's data store configuration;
+ * every View of the profile shares the one store. The store carries a keeper
+ * whose release gives back the profile reference that holds the storage
+ * lock, so the lock outlives the last engine reference, as a GObject's
+ * finalizer keeps it on Linux. The engine stores cookies inside the data
+ * directory in its own format; the prepared cookie file stays unused. */
+#define ZWK_PROFILE_PATH 4096u
+#define ZWK_PROFILE_CONTEXTS 64u
+#define ZWK_PROFILE_LEASES 256u
+#define ZWK_PROFILE_BYTES (1024u*1024u)
+struct ZwkProfile {
+    void *store; /* A retained WKWebsiteDataStore. */
+    char *data,*cache,*cookies;
+    size_t owned_bytes,peak_bytes,limit,allocation_bytes;
+    uint32_t contexts,capacity,leases,lease_capacity;
+    atomic_int refs;
+    int lock_fd;
+    int accepting,owner_closed;
+};
+struct ZwkProfileContext {
+    ZwkProfile *profile;
+    void *store;
+    int owner_closed,admitted;
+};
+static atomic_uint live_profiles,live_profile_contexts;
+static atomic_size_t live_profile_bytes;
+static int profile_owner(ZwkProfile *p) {
+    if (!p) return ZWK_PROFILE_INVALID;
+    return [NSThread isMainThread]?ZWK_PROFILE_OK:ZWK_PROFILE_WRONG_THREAD;
+}
+static int profile_path_size(const char *path,size_t *size) {
+    if (!path || path[0]!='/') return ZWK_PROFILE_INVALID;
+    const size_t n=strnlen(path,ZWK_PROFILE_PATH);
+    if (!n || n==ZWK_PROFILE_PATH) return ZWK_PROFILE_INVALID;
+    NSString *text=[[NSString alloc] initWithBytes:path length:n encoding:NSUTF8StringEncoding];
+    if (!text) return ZWK_PROFILE_INVALID;
+    *size=n+1;
+    return ZWK_PROFILE_OK;
+}
+int zwk_profile_measure(const char *data,const char *cache,const char *cookies,size_t *bytes) {
+    if (!bytes) return ZWK_PROFILE_INVALID;
+    *bytes=0;
+    size_t a,b,c;
+    if (profile_path_size(data,&a) || profile_path_size(cache,&b) || profile_path_size(cookies,&c)) return ZWK_PROFILE_INVALID;
+    *bytes=sizeof(ZwkProfile)+a+b+c;
+    return ZWK_PROFILE_OK;
+}
+/* The loopback certificate exception is GLib's; the engine here takes none. */
+int zwk_profile_measure_tls(const char *data,const char *cache,const char *cookies,const ZwkProfileTls *tls,size_t *bytes) {
+    const int result=zwk_profile_measure(data,cache,cookies,bytes);
+    if (result) return result;
+    if (bytes) *bytes=0;
+    return tls?ZWK_PROFILE_TLS_UNAVAILABLE:ZWK_PROFILE_INVALID;
+}
+int zwk_profile_create_tls(int borrowed_lock,const char *data,const char *cache,const char *cookies,const ZwkProfileOptions *options,const ZwkProfileTls *tls,
+                          ZwkProfile **out,int *system_errno,ZwkProfileGlibFailure *failure) {
+    (void)borrowed_lock; (void)data; (void)cache; (void)cookies; (void)options;
+    if (system_errno) *system_errno=0;
+    if (failure) *failure=(ZwkProfileGlibFailure){0,0};
+    if (out) *out=NULL;
+    return tls?ZWK_PROFILE_TLS_UNAVAILABLE:ZWK_PROFILE_INVALID;
+}
+static void profile_unref(ZwkProfile *p) {
+    if (atomic_fetch_sub(&p->refs,1)!=1) return;
+    /* Final native-only release: no engine object, App or Zig state. */
+    const int fd=p->lock_fd;
+    const size_t bytes=p->allocation_bytes;
+    p->lock_fd=-1;
+    if (fd>=0) close(fd);
+    free(p);
+    atomic_fetch_sub(&live_profile_bytes,bytes);
+    atomic_fetch_sub(&live_profiles,1);
+}
+@interface ZwkProfileKeeper : NSObject { @public ZwkProfile *profile; }
+@end
+@implementation ZwkProfileKeeper
+- (void)dealloc { if (profile) profile_unref(profile); }
+@end
+static char profile_keeper_key;
+static void profile_set(id target,const char *name,NSURL *url) {
+    SEL selector=sel_registerName(name);
+    if ([target respondsToSelector:selector]) ((void (*)(id,SEL,id))objc_msgSend)(target,selector,url);
+}
+static WKWebsiteDataStore *profile_store(ZwkProfile *p) {
+    Class type=NSClassFromString(@"_WKWebsiteDataStoreConfiguration");
+    SEL make=sel_registerName("_initWithConfiguration:");
+    if (!type || ![WKWebsiteDataStore instancesRespondToSelector:make]) return nil;
+    id configuration=[[type alloc] init];
+    /* The directories the engine has no setter for stay unset; the four it
+     * keeps a page's own data in are required. */
+    static const char *const required[]={"_setWebStorageDirectory:","_setIndexedDBDatabaseDirectory:","_setCookieStorageFile:","setNetworkCacheDirectory:"};
+    for (size_t i=0;i<sizeof(required)/sizeof(*required);i++) if (![configuration respondsToSelector:sel_registerName(required[i])]) return nil;
+    NSString *data=[NSString stringWithUTF8String:p->data];
+    NSString *cache=[NSString stringWithUTF8String:p->cache];
+    if (!data || !cache) return nil;
+    NSURL *(^under)(NSString *,NSString *)=^NSURL *(NSString *base,NSString *child) {
+        return [NSURL fileURLWithPath:[base stringByAppendingPathComponent:child] isDirectory:YES];
+    };
+    static const struct { const char *setter,*child; } in_data[]={
+        {"_setWebStorageDirectory:","LocalStorage"},{"_setIndexedDBDatabaseDirectory:","IndexedDB"},
+        {"_setWebSQLDatabaseDirectory:","WebSQL"},{"_setResourceLoadStatisticsDirectory:","ResourceLoadStatistics"},
+        {"_setCacheStorageDirectory:","CacheStorage"},{"_setServiceWorkerRegistrationDirectory:","ServiceWorkers"},
+        {"setDeviceIdHashSaltsStorageDirectory:","DeviceIdHashSalts"},{"setMediaKeysStorageDirectory:","MediaKeys"},
+        {"setHSTSStorageDirectory:","HSTS"},{"setHstsStorageDirectory:","HSTS"},{"setAlternativeServicesDirectory:","AlternativeServices"},
+        {"setGeneralStorageDirectory:","Storage"},{"setApplicationCacheDirectory:","ApplicationCache"},
+    };
+    for (size_t i=0;i<sizeof(in_data)/sizeof(*in_data);i++)
+        profile_set(configuration,in_data[i].setter,under(data,[NSString stringWithUTF8String:in_data[i].child]));
+    profile_set(configuration,"setNetworkCacheDirectory:",under(cache,@"NetworkCache"));
+    profile_set(configuration,"_setCookieStorageFile:",[NSURL fileURLWithPath:[data stringByAppendingPathComponent:@"Cookies.binarycookies"] isDirectory:NO]);
+    WKWebsiteDataStore *store=((id (*)(id,SEL,id))objc_msgSend)([WKWebsiteDataStore alloc],make,configuration);
+    return store;
+}
+int zwk_profile_create(int borrowed_lock,const char *data,const char *cache,const char *cookies,const ZwkProfileOptions *options,ZwkProfile **out,int *system_errno) {
+    if (system_errno) *system_errno=0;
+    if (!out) return ZWK_PROFILE_INVALID;
+    *out=NULL;
+    if (![NSThread isMainThread]) return ZWK_PROFILE_WRONG_THREAD;
+    size_t bytes;
+    if (!options || !options->contexts || options->contexts>ZWK_PROFILE_CONTEXTS ||
+        !options->leases || options->leases>ZWK_PROFILE_LEASES ||
+        !options->bytes || options->bytes>ZWK_PROFILE_BYTES ||
+        zwk_profile_measure(data,cache,cookies,&bytes)) return ZWK_PROFILE_INVALID;
+    if (bytes>options->bytes) return ZWK_PROFILE_CAPACITY;
+    const int lock_fd=fcntl(borrowed_lock,F_DUPFD_CLOEXEC,0);
+    if (lock_fd<0) {
+        if (system_errno) *system_errno=errno;
+        return ZWK_PROFILE_SYSTEM;
+    }
+    ZwkProfile *p=malloc(bytes);
+    if (!p) { close(lock_fd); return ZWK_PROFILE_OOM; }
+    memset(p,0,sizeof(*p));
+    atomic_init(&p->refs,1); p->lock_fd=lock_fd;
+    p->allocation_bytes=p->owned_bytes=p->peak_bytes=bytes;
+    p->capacity=options->contexts; p->lease_capacity=options->leases;
+    p->limit=options->bytes; p->accepting=1;
+    char *at=(char *)(p+1);
+    size_t n=strlen(data)+1; p->data=at; memcpy(at,data,n); at+=n;
+    n=strlen(cache)+1; p->cache=at; memcpy(at,cache,n); at+=n;
+    n=strlen(cookies)+1; p->cookies=at; memcpy(at,cookies,n);
+    atomic_fetch_add(&live_profiles,1);
+    atomic_fetch_add(&live_profile_bytes,bytes);
+    @autoreleasepool {
+        WKWebsiteDataStore *store=profile_store(p);
+        ZwkProfileKeeper *keeper=store?[[ZwkProfileKeeper alloc] init]:nil;
+        if (!keeper) { p->owner_closed=1; profile_unref(p); return ZWK_PROFILE_NATIVE_FAILED; }
+        atomic_fetch_add(&p->refs,1);
+        keeper->profile=p;
+        objc_setAssociatedObject(store,&profile_keeper_key,keeper,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        p->store=(void *)CFBridgingRetain(store);
+    }
+    *out=p;
+    return ZWK_PROFILE_OK;
+}
+int zwk_profile_seal(ZwkProfile *p) {
+    const int result=profile_owner(p); if (result) return result;
+    p->accepting=0;
+    return ZWK_PROFILE_OK;
+}
+int zwk_profile_stats(ZwkProfile *p,ZwkProfileStats *stats) {
+    const int result=profile_owner(p); if (result) return result;
+    if (!stats) return ZWK_PROFILE_INVALID;
+    *stats=(ZwkProfileStats){p->owned_bytes,p->peak_bytes,p->contexts,p->capacity,p->accepting,p->leases,p->lease_capacity};
+    return ZWK_PROFILE_OK;
+}
+int zwk_profile_close(ZwkProfile *p) {
+    const int result=profile_owner(p); if (result) return result;
+    if (p->owner_closed) return ZWK_PROFILE_CLOSED;
+    p->accepting=0; p->owner_closed=1;
+    void *retained=p->store; p->store=NULL;
+    if (retained) @autoreleasepool {
+        /* The engine writes its cookies to disk now; the store, and with it
+         * the storage lock, lasts until it has. */
+        WKWebsiteDataStore *store=CFBridgingRelease(retained);
+        WKHTTPCookieStore *cookies=store.httpCookieStore;
+        if ([cookies respondsToSelector:@selector(_flushCookiesToDiskWithCompletionHandler:)])
+            [cookies _flushCookiesToDiskWithCompletionHandler:^{ (void)store; }];
+    }
+    profile_unref(p);
+    return ZWK_PROFILE_OK;
+}
+int zwk_profile_lease_check(ZwkProfile *p) {
+    const int result=profile_owner(p); if (result) return result;
+    return p->accepting && !p->owner_closed?ZWK_PROFILE_OK:ZWK_PROFILE_CLOSED;
+}
+int zwk_profile_lease_retain(ZwkProfile *p) {
+    const int result=zwk_profile_lease_check(p); if (result) return result;
+    if (p->leases==p->lease_capacity) return ZWK_PROFILE_FULL;
+    ++p->leases; atomic_fetch_add(&p->refs,1);
+    return ZWK_PROFILE_OK;
+}
+int zwk_profile_lease_release(ZwkProfile *p) {
+    const int result=profile_owner(p); if (result) return result;
+    if (!p->leases) return ZWK_PROFILE_INVALID;
+    --p->leases; profile_unref(p);
+    return ZWK_PROFILE_OK;
+}
+/* A retained WKWebsiteDataStore, given back with CFRelease. */
+int zwk_profile_manager_ref(ZwkProfile *p,void **out) {
+    if (!out) return ZWK_PROFILE_INVALID;
+    *out=NULL;
+    const int result=zwk_profile_lease_check(p); if (result) return result;
+    *out=(void *)CFRetain(p->store);
+    return ZWK_PROFILE_OK;
+}
+int zwk_profile_context_create(ZwkProfile *p,ZwkProfileContext **out) {
+    if (!out) return ZWK_PROFILE_INVALID;
+    *out=NULL;
+    const int result=profile_owner(p); if (result) return result;
+    if (!p->accepting || p->owner_closed) return ZWK_PROFILE_CLOSED;
+    if (p->contexts==p->capacity) return ZWK_PROFILE_FULL;
+    if (sizeof(ZwkProfileContext)>p->limit-p->owned_bytes) return ZWK_PROFILE_CAPACITY;
+    ZwkProfileContext *c=malloc(sizeof(*c));
+    if (!c) return ZWK_PROFILE_OOM;
+    *c=(ZwkProfileContext){p,(void *)CFRetain(p->store),0,0};
+    atomic_fetch_add(&p->refs,1); ++p->contexts; p->owned_bytes+=sizeof(*c);
+    if (p->peak_bytes<p->owned_bytes) p->peak_bytes=p->owned_bytes;
+    atomic_fetch_add(&live_profile_contexts,1);
+    atomic_fetch_add(&live_profile_bytes,sizeof(*c));
+    *out=c;
+    return ZWK_PROFILE_OK;
+}
+/* The profile's WKWebsiteDataStore, borrowed. */
+int zwk_profile_context_get(ZwkProfileContext *c,void **out) {
+    if (!out || !c) return ZWK_PROFILE_INVALID;
+    *out=NULL;
+    const int result=profile_owner(c->profile); if (result) return result;
+    if (c->owner_closed || (!c->profile->accepting && !c->admitted)) return ZWK_PROFILE_CLOSED;
+    *out=c->store;
+    return ZWK_PROFILE_OK;
+}
+int zwk_profile_context_admit(ZwkProfileContext *c) {
+    if (!c) return ZWK_PROFILE_INVALID;
+    const int result=profile_owner(c->profile); if (result) return result;
+    if (c->owner_closed || !c->profile->accepting) return ZWK_PROFILE_CLOSED;
+    if (c->admitted) return ZWK_PROFILE_INVALID;
+    c->admitted=1;
+    return ZWK_PROFILE_OK;
+}
+int zwk_profile_context_close(ZwkProfileContext *c) {
+    if (!c) return ZWK_PROFILE_INVALID;
+    const int result=profile_owner(c->profile); if (result) return result;
+    if (c->owner_closed) return ZWK_PROFILE_CLOSED;
+    ZwkProfile *p=c->profile;
+    void *store=c->store;
+    c->owner_closed=1; c->store=NULL;
+    --p->contexts; p->owned_bytes-=sizeof(*c);
+    free(c);
+    atomic_fetch_sub(&live_profile_bytes,sizeof(ZwkProfileContext));
+    atomic_fetch_sub(&live_profile_contexts,1);
+    if (store) CFRelease(store);
+    profile_unref(p);
+    return ZWK_PROFILE_OK;
+}
+void zwk_profile_counts(uint32_t *profiles,uint32_t *contexts,size_t *bytes) {
+    if (profiles) *profiles=atomic_load(&live_profiles);
+    if (contexts) *contexts=atomic_load(&live_profile_contexts);
+    if (bytes) *bytes=atomic_load(&live_profile_bytes);
+}
+
 int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPageNotify page_callback,ZwkScriptNotify script_callback,ZwkDeadline deadline,void *owner,ZwkState **out) {
     *out=NULL;
     if (!options || !options->html || !window || options->max_pending==0 || options->max_pending>16 || options->max_result_bytes==0 ||
         options->max_result_bytes>1024*1024 || strlen(options->html)>16*1024*1024) return ZWK_INVALID;
-    if ((options->remote && (options->local || *options->html)) || options->region || options->profile_context || options->initializers) return ZWK_INVALID;
+    if ((options->remote && (options->local || *options->html)) || options->region || options->initializers) return ZWK_INVALID;
+    void *profile_store_ref=NULL;
+    if (options->profile_context && zwk_profile_context_get(options->profile_context,&profile_store_ref)) return ZWK_CLOSED;
     @autoreleasepool {
         NSView *host=(__bridge NSView *)zlm_window_content(window);
         if (!host) return ZWK_CLOSED;
@@ -1270,7 +1538,7 @@ int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPage
         for (uint32_t i=0;i<options->content_filter_count;i++) [filters addObject:(__bridge WKContentRuleList *)options->content_filters[i]];
         s->filters=filters;
         WKWebViewConfiguration *configuration=[[WKWebViewConfiguration alloc] init];
-        configuration.websiteDataStore=[WKWebsiteDataStore nonPersistentDataStore];
+        configuration.websiteDataStore=profile_store_ref?(__bridge WKWebsiteDataStore *)profile_store_ref:[WKWebsiteDataStore nonPersistentDataStore];
         /* By default sound plays only after a gesture, as on Linux. */
         configuration.mediaTypesRequiringUserActionForPlayback=s->autoplay?WKAudiovisualMediaTypeNone:WKAudiovisualMediaTypeAudio;
         configuration.preferences.javaScriptCanOpenWindowsAutomatically=NO;
