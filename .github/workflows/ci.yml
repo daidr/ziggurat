@@ -340,6 +340,7 @@ jobs:
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-cookies-macos
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-initializers-macos
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-permissions-macos
+          zig build smoke-webview-http-auth -Dwebview=true -Doptimize=${{ matrix.optimize }} --summary failures
 
   webview:
     # Paused with the Windows job; see WINDOWS_CI there.

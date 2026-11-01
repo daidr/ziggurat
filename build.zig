@@ -1781,7 +1781,7 @@ pub fn build(b: *std.Build) void {
         automation.addImport("ziggurat_webview", view);
         view.addImport("ziggurat_tls_pem", tls_pem);
         _ = native_support.add(b, view, "webview-webkit-macos", "src/webview/webkit_macos.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
-        native_support.linkFrameworks(b, view, &.{ "WebKit", "AppKit", "Foundation", "CoreFoundation" });
+        native_support.linkFrameworks(b, view, &.{ "WebKit", "AppKit", "Foundation", "CoreFoundation", "Security" });
         view_tests = addTest(b, .{ .root_module = view });
         _ = b.step("webview-runtime", "Use the system WKWebView");
         addSmoke(b, "smoke-webview-macos", "tests/macos_webview_smoke.zig", target, optimize, &.{
@@ -1822,6 +1822,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
         });
+        _ = addHttpAuthSmoke(b, target, optimize, core, view);
         addSmoke(b, "smoke-webview-permissions-macos", "tests/macos_permission_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },

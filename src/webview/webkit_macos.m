@@ -145,6 +145,10 @@ typedef struct ZwkInitializerState ZwkInitializerState;
     struct ZwkInitializerState *initializers;
     ZwkPermission permission_offer;
     NSMutableArray *permissions;
+    ZwkAuth auth_fn;
+    ZwkCertificate certificate_fn;
+    /* host + DER of each certificate the app allowed, for the page's life. */
+    NSMutableSet *allowed_certificates;
 }
 @end
 static void resources_cancel_all(ZwkPage *s);
@@ -163,6 +167,14 @@ static void initializers_cancel_all(ZwkPage *s);
 static BOOL initializers_allow_navigation(ZwkPage *s);
 static void scripts_install(ZwkPage *s);
 
+/* The URI of the load a certificate failed: the page's when its host is the
+ * server's, else the server's root. */
+static NSString *certificate_uri(ZwkPage *s,NSURLProtectionSpace *space) {
+    NSURL *url=s->view.URL;
+    if (url && [url.host caseInsensitiveCompare:space.host]==NSOrderedSame && (url.port?url.port.integerValue:443)==space.port) return url.absoluteString;
+    NSString *host=[space.host containsString:@":"]?[NSString stringWithFormat:@"[%@]",space.host]:space.host;
+    return space.port==443?[NSString stringWithFormat:@"https://%@/",host]:[NSString stringWithFormat:@"https://%@:%ld/",host,(long)space.port];
+}
 /* A permission request the app keeps past its offer, answered once. */
 @interface ZwkPendingPermission : NSObject {
 @public
@@ -179,6 +191,47 @@ static NSString *permission_origin(NSURL *url) {
     if (!scheme.length || !host.length) return nil;
     if ([host containsString:@":"]) host=[NSString stringWithFormat:@"[%@]",host];
     return url.port?[NSString stringWithFormat:@"%@://%@:%@",scheme,host,url.port]:[NSString stringWithFormat:@"%@://%@",scheme,host];
+}
+/* The sign-in a ZwkAuth call carries; zwk_auth_answer fills it. */
+typedef struct ZwkAuthCall { void *credential; BOOL answered; } ZwkAuthCall;
+/* WebKitAuthenticationScheme numbers, which the Zig side reads; 0 for a
+ * method that is not an HTTP sign-in, such as a client certificate. */
+static uint32_t auth_scheme(NSString *method) {
+    if ([method isEqualToString:NSURLAuthenticationMethodDefault]) return 1;
+    if ([method isEqualToString:NSURLAuthenticationMethodHTTPBasic]) return 2;
+    if ([method isEqualToString:NSURLAuthenticationMethodHTTPDigest]) return 3;
+    if ([method isEqualToString:NSURLAuthenticationMethodNTLM]) return 5;
+    if ([method isEqualToString:NSURLAuthenticationMethodNegotiate]) return 6;
+    return 0;
+}
+/* GTlsCertificateFlags bits for why a trust does not verify. */
+static uint32_t certificate_flags(CFErrorRef error) {
+    switch (error?CFErrorGetCode(error):0) {
+    case errSecHostNameMismatch: return 1u<<1;
+    case errSecCertificateNotValidYet: return 1u<<2;
+    case errSecCertificateExpired: return 1u<<3;
+    case errSecCertificateRevoked: return 1u<<4;
+    case errSecNotTrusted: case errSecCreateChainFailed: case errSecMissingRequiredExtension: return 1u<<0;
+    default: return 1u<<6;
+    }
+}
+static NSData *certificate_der(SecTrustRef trust) {
+    CFArrayRef chain=SecTrustCopyCertificateChain(trust);
+    if (!chain) return nil;
+    NSData *der=nil;
+    if (CFArrayGetCount(chain)>0) der=(__bridge_transfer NSData *)SecCertificateCopyData((SecCertificateRef)CFArrayGetValueAtIndex(chain,0));
+    CFRelease(chain);
+    return der;
+}
+int zwk_auth_answer(void *call_pointer,const char *user,const char *password) {
+    ZwkAuthCall *call=call_pointer;
+    if (!call || call->answered || !user || !password) return ZWK_INVALID;
+    NSString *name=[NSString stringWithUTF8String:user], *secret=[NSString stringWithUTF8String:password];
+    if (!name || !secret) return ZWK_INVALID;
+    NSURLCredential *credential=[NSURLCredential credentialWithUser:name password:secret persistence:NSURLCredentialPersistenceForSession];
+    if (!credential) return ZWK_OOM;
+    call->credential=(void *)CFBridgingRetain(credential); call->answered=YES;
+    return ZWK_OK;
 }
 
 static BOOL live(ZwkPage *s) { return !s->closed && !s->recovering && s->owner; }
@@ -711,9 +764,45 @@ static void *history_context=&history_context;
     resources_cancel_all(self);
     notify(self,8,nil,0,NULL);
 }
+/* Sign-ins and server certificates, as on Linux. Without the app's
+ * handler a sign-in is canceled, and its load with it; the handler's no is
+ * a sign-in without credentials, which gets the server's refusal. A
+ * certificate that does not verify fails its load unless the app's handler
+ * allows it for a remote page; then it is the page's for its host. */
 - (void)webView:(WKWebView *)webView didReceiveAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition,NSURLCredential *))completion {
-    (void)webView;
-    completion([challenge.protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust]?NSURLSessionAuthChallengePerformDefaultHandling:NSURLSessionAuthChallengeCancelAuthenticationChallenge,nil);
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep; (void)webView;
+    NSURLProtectionSpace *space=challenge.protectionSpace;
+    NSString *method=space.authenticationMethod;
+    if ([method isEqualToString:NSURLAuthenticationMethodServerTrust]) {
+        SecTrustRef trust=space.serverTrust;
+        CFErrorRef error=NULL;
+        if (!trust || SecTrustEvaluateWithError(trust,&error)) { completion(NSURLSessionAuthChallengePerformDefaultHandling,nil); return; }
+        const uint32_t flags=certificate_flags(error);
+        if (error) CFRelease(error);
+        NSData *der=certificate_der(trust);
+        NSString *host=space.host.lowercaseString;
+        if (!der.length || !host.length || !live(self) || !remote || !certificate_fn) { completion(NSURLSessionAuthChallengeCancelAuthenticationChallenge,nil); return; }
+        NSArray *key=@[host,der];
+        BOOL allowed=[allowed_certificates containsObject:key];
+        if (!allowed) {
+            NSString *uri=certificate_uri(self,space);
+            allowed=uri.UTF8String && certificate_fn(owner,uri.UTF8String,flags,der.bytes,der.length) && live(self);
+            if (allowed) {
+                if (!allowed_certificates) allowed_certificates=[NSMutableSet new];
+                [allowed_certificates addObject:key];
+            }
+        }
+        completion(allowed?NSURLSessionAuthChallengeUseCredential:NSURLSessionAuthChallengeCancelAuthenticationChallenge,allowed?[NSURLCredential credentialForTrust:trust]:nil);
+        return;
+    }
+    const uint32_t scheme=auth_scheme(method);
+    if (!scheme || !live(self) || !auth_fn) { completion(NSURLSessionAuthChallengeCancelAuthenticationChallenge,nil); return; }
+    ZwkAuthCall call={NULL,NO};
+    const char *host=space.host.UTF8String, *realm=space.realm.UTF8String;
+    auth_fn(owner,host?host:"",(uint32_t)MAX(space.port,0),realm?realm:"",scheme,space.isProxy?1:0,&call);
+    NSURLCredential *credential=call.credential?(__bridge_transfer NSURLCredential *)call.credential:nil;
+    if (!live(self)) { completion(NSURLSessionAuthChallengeCancelAuthenticationChallenge,nil); return; }
+    completion(NSURLSessionAuthChallengeUseCredential,credential);
 }
 
 - (WKWebView *)webView:(WKWebView *)webView createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration forNavigationAction:(WKNavigationAction *)action windowFeatures:(WKWindowFeatures *)features {
@@ -2127,7 +2216,7 @@ int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPage
         if (options->facts && !(s->facts=[NSString stringWithUTF8String:options->facts])) return ZWK_INVALID;
         s->autoplay=options->autoplay!=0;
         s->owner=owner; s->notify_fn=callback; s->page_fn=page_callback; s->script_fn=script_callback; s->deadline_fn=deadline;
-        s->limit=options->max_pending; s->result_limit=options->max_result_bytes; s->policy=options->policy_flags; s->permission_offer=options->permission;
+        s->limit=options->max_pending; s->result_limit=options->max_result_bytes; s->policy=options->policy_flags; s->permission_offer=options->permission; s->auth_fn=options->auth; s->certificate_fn=options->certificate;
         NSMutableArray<WKContentRuleList *> *filters=[NSMutableArray arrayWithCapacity:options->content_filter_count];
         for (uint32_t i=0;i<options->content_filter_count;i++) [filters addObject:(__bridge WKContentRuleList *)options->content_filters[i]];
         s->filters=filters;
