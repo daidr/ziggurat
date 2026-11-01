@@ -35,7 +35,47 @@ typedef struct Item {
     uint32_t keyval;
     uint32_t modifiers;
     int32_t command;
+    void *icon;
 } Item;
+
+GtkWidget *zsx_menu_icon_image(void *icon, int scale);
+/* The label of an item, beside its icon or not. */
+static GtkWidget *item_label(GtkWidget *entry) {
+    GtkWidget *label = g_object_get_data(G_OBJECT(entry), "ziggurat-label");
+    return label ? label : gtk_bin_get_child(GTK_BIN(entry));
+}
+/* Shows icon before an item's label, or removes the icon it shows with
+   NULL: the label moves into a box after the image, as GTK's own icon
+   items lay out. */
+static void item_set_icon(GtkWidget *entry, void *icon, int scale) {
+    GtkWidget *label = item_label(entry), *box = gtk_bin_get_child(GTK_BIN(entry));
+    GtkWidget *image = g_object_get_data(G_OBJECT(entry), "ziggurat-image");
+    if (image) { gtk_widget_destroy(image); g_object_set_data(G_OBJECT(entry), "ziggurat-image", NULL); }
+    gboolean boxed = box != label;
+    if (!icon) {
+        if (!boxed) return;
+        g_object_ref(label);
+        gtk_container_remove(GTK_CONTAINER(box), label);
+        gtk_container_remove(GTK_CONTAINER(entry), box);
+        gtk_container_add(GTK_CONTAINER(entry), label);
+        g_object_unref(label);
+        g_object_set_data(G_OBJECT(entry), "ziggurat-label", NULL);
+        return;
+    }
+    if (!boxed) {
+        g_object_ref(label);
+        gtk_container_remove(GTK_CONTAINER(entry), label);
+        box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+        gtk_box_pack_end(GTK_BOX(box), label, TRUE, TRUE, 0);
+        gtk_container_add(GTK_CONTAINER(entry), box);
+        g_object_unref(label);
+        g_object_set_data(G_OBJECT(entry), "ziggurat-label", label);
+    }
+    image = zsx_menu_icon_image(icon, scale);
+    gtk_box_pack_start(GTK_BOX(box), image, FALSE, FALSE, 0);
+    g_object_set_data(G_OBJECT(entry), "ziggurat-image", image);
+    gtk_widget_show_all(box);
+}
 
 static gint live_links;
 
@@ -177,6 +217,7 @@ Link *zsl_popup_show(GtkWidget *window, const Item *items, uint32_t count, int a
                 GtkWidget *label = gtk_bin_get_child(GTK_BIN(entry));
                 if (GTK_IS_ACCEL_LABEL(label)) gtk_accel_label_set_accel(GTK_ACCEL_LABEL(label), item->keyval, item->modifiers);
             }
+            if (item->icon) item_set_icon(entry, item->icon, gdk_window_get_scale_factor(target));
             gtk_widget_set_sensitive(entry, item->enabled != 0);
             if (item->kind == 1) {
                 menus[i] = gtk_menu_new();
@@ -304,6 +345,10 @@ typedef struct Bar {
     GtkWidget *commands[128];
     uint32_t keyvals[128], modifiers[128];
     uint8_t enabled[128], checked[128], radio[128];
+    /* The icons of commands, kept for items made again; scale is the
+       window's when the bar was set. */
+    void *icons[128];
+    int scale;
 } Bar;
 typedef struct Activation { Bar *bar; int32_t command; } Activation;
 static gint live_bars;
@@ -353,6 +398,7 @@ static GtkWidget *bar_command_new(Bar *bar, const char *label, int32_t command, 
         GtkWidget *child = gtk_bin_get_child(GTK_BIN(entry));
         if (GTK_IS_ACCEL_LABEL(child)) gtk_accel_label_set_accel(GTK_ACCEL_LABEL(child), bar->keyvals[command], bar->modifiers[command]);
     }
+    if (bar->icons[command]) item_set_icon(entry, bar->icons[command], bar->scale);
     gtk_widget_set_sensitive(entry, sensitive);
     g_object_set_data(G_OBJECT(entry), "ziggurat-command", GINT_TO_POINTER(command));
     g_signal_connect(entry, "activate", G_CALLBACK(bar_item_activated), bar);
@@ -399,6 +445,7 @@ Bar *zsl_menubar_set(GtkWidget *window, const Item *items, uint32_t count, const
     bar->serial = serial;
     bar->done = done;
     g_atomic_int_inc(&live_bars);
+    bar->scale = gtk_widget_get_scale_factor(window);
     GtkWidget *menus[128] = {0};
     GtkWidget *root = gtk_menu_bar_new();
     bar->widget = g_object_ref_sink(root);
@@ -409,11 +456,13 @@ Bar *zsl_menubar_set(GtkWidget *window, const Item *items, uint32_t count, const
         if (item->kind == 2) entry = gtk_separator_menu_item_new();
         else if (item->kind == 1) {
             entry = gtk_menu_item_new_with_mnemonic(item->label);
+            if (item->icon && item->parent >= 0) item_set_icon(entry, item->icon, bar->scale);
             gtk_widget_set_sensitive(entry, item->enabled != 0);
             menus[i] = gtk_menu_new();
             gtk_menu_item_set_submenu(GTK_MENU_ITEM(entry), menus[i]);
         } else {
             int32_t command = item->command;
+            if (item->parent >= 0) bar->icons[command] = item->icon;
             bar->keyvals[command] = item->keyval;
             bar->modifiers[command] = item->modifiers;
             bar->enabled[command] = enabled[command];
@@ -449,7 +498,7 @@ int zsl_menubar_state(Bar *bar, int32_t command, int enabled, int effective, int
         GList *children = gtk_container_get_children(GTK_CONTAINER(shell));
         gint position = g_list_index(children, entry);
         g_list_free(children);
-        GtkWidget *child = gtk_bin_get_child(GTK_BIN(entry));
+        GtkWidget *child = item_label(entry);
         gchar *label = g_strdup(GTK_IS_LABEL(child) ? gtk_label_get_label(GTK_LABEL(child)) : "");
         GtkWidget *replacement = bar_command_new(bar, label, command, checked != 0, enabled != 0);
         g_free(label);
@@ -466,6 +515,25 @@ int zsl_menubar_state(Bar *bar, int32_t command, int enabled, int effective, int
         g_signal_handlers_unblock_by_func(entry, bar_item_activated, bar);
     }
     return 1;
+}
+/* Replaces or removes a command's icon; the items of the bar itself show
+   none, and stay as they are. */
+int zsl_menubar_icon(Bar *bar, int32_t command, void *icon) {
+    if (!bar->owner || command < 0 || (uint32_t)command >= bar->count || !bar->commands[command]) return 0;
+    GtkWidget *entry = bar->commands[command];
+    if (gtk_widget_get_parent(entry) == bar->widget) return 1;
+    bar->icons[command] = icon;
+    item_set_icon(entry, icon, bar->scale);
+    return 1;
+}
+/* For checks: 1 when a command shows an icon beside a label that kept its
+   text, 0 when it shows none, -1 for no such command. */
+int zsl_test_menubar_icon(Bar *bar, int32_t command) {
+    if (command < 0 || (uint32_t)command >= bar->count || !bar->commands[command]) return -1;
+    GtkWidget *entry = bar->commands[command], *label = item_label(entry);
+    if (!GTK_IS_LABEL(label) || !gtk_label_get_text(GTK_LABEL(label))[0]) return -1;
+    GtkWidget *image = g_object_get_data(G_OBJECT(entry), "ziggurat-image");
+    return image && GTK_IS_IMAGE(image) && gtk_widget_get_visible(image);
 }
 /* Silent: removes the bar, restores the window's child when the window is
    still open, and cancels idle reports. */

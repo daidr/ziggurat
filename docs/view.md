@@ -385,6 +385,36 @@ try v.image(photo.view(), .{ .fit = .cover, .alt = "封面" }, .{ .width = 120, 
 
 启用 `-Daccessibility=true` 时，有名称的图片、SVG 与图标在 UIA 上是 Image。
 
+### 视频
+
+`ziggurat_view_video` 播放动画：`Player` 播放 `Decoder` 给出的帧，`player.show(v, options, style)` 像 `image` 显示位图那样布局、填充并命名当前帧（`ImageOptions` 的 `fit`、`alt` 与 `decorative` 照常生效，自然尺寸是帧的像素数作为 DIP）。
+
+```zig
+const video = @import("ziggurat_view_video");
+
+var decoder = try video.GifDecoder.init(allocator, waves_gif);
+defer decoder.deinit();
+var waves = try video.Player.init(allocator, &host, decoder.decoder());
+waves.setLoop(true);
+// 在 Context 分离之前、绘制之外：
+defer waves.deinit();
+
+// 构建中：
+try waves.show(v, .{ .fit = .cover, .alt = "海浪" }, .{ .grow = 1, .self_align = .stretch });
+if (try v.button(if (waves.playing()) "暂停" else "播放", .{})) {
+    if (waves.playing()) waves.pause() else waves.play();
+}
+```
+
+- `Player.init` 立即解码第一帧，没有帧的视频返回 `error.EmptyVideo`。播放器只创建一次（不要在构建中创建），保持地址稳定，同一时间只在一处显示。新播放器在第一次显示时开始播放。`pause` 停在当前帧，`play` 从停下处继续；视频结束或某帧解码失败后，`play` 从头再播。`playing()` 说明是否在播放，`setLoop(true)` 让视频每次结束时无间隔地从头再播。结束的视频停在最后一帧；`failure` 记录在结尾之前让它停下的错误，`last_error` 记录上传或投递失败。视频没有声音。
+- 一切都在主线程上进行，不开隐藏线程：播放中的视频在构建时用 `wakeAt` 请求当前帧结束时的下一遍；发现帧已到期的那一遍投递一个任务，在绘制之后把下一帧解码进播放器的 `ui.PixelImage`、提交并重绘。窗口有一段时间没有绘制时，期间到期的帧会被解码后跳过，只显示最后一帧，视频跟着时钟走而不是越落越远（一次最多跳 `max_skipped` 帧）。
+- 视频只在视图构建它时前进：离开视图（例如切到别的标签页），或窗口停止绘制超过 `resume_gap`（250 ms）后再回来，视频从停下处继续，期间什么也不解码。系统要求减弱动态（`Preferences.reduce_motion`）时，视频显示第一帧且不请求任何帧；不再要求时从停下处继续。
+- `GifDecoder` 解码动画 GIF：每帧画在前面各帧留下的画面之上，并按帧的处置方式（保留、清为透明背景、恢复为绘制前）处理，与浏览器一致；10 ms 及以下的帧显示 100 ms。循环与否只看 `setLoop`，不看 GIF 自带的循环次数。
+- 其他格式实现自己的 `Decoder`：`next(context, pixels)` 把下一帧以预乘 BGRA、自上而下的行写入 `width * height * 4` 字节并返回显示时长（纳秒，0 表示 100 ms），最后一帧之后返回 null；`rewind(context)` 回到第一帧之前。系统编解码器（H.264、HEVC、VP9、AV1）的解码器暂未提供。
+- 视频与图片一样默认是装饰性的；有 `alt` 时对可访问性客户端是名为它的 Image。
+
+示例 `zig build run-video` 循环播放一段 GIF，带暂停/播放按钮与循环开关（GIF 由 `scripts/make-waves-gif.py` 生成）。
+
 ### 从右到左布局
 
 - `Options.direction`（`.ltr` 或 `.rtl`）给出视图的方向，通常来自应用的语言区域：`view.Direction.of(locale.direction())` 接受 `ziggurat_i18n` 的方向，视图模块本身不依赖它。`host.setDirection(value)` 改变方向并重绘；`currentDirection()` 在构建中读出根的方向。任何容器可以用 `Style.direction` 指定自己的方向，其中构建的节点继承它，例如在从右到左的界面中放一段从左到右的代码或数字。
@@ -614,8 +644,10 @@ var host = view.Host.init(&app, App.build, storage.buffers(), .{ .inspector = &i
 - 性能与问题：Performance 显示最近 120 帧构建、排列与绘制的耗时柱状图，以及最近一帧、平均、最慢、显示器刷新率（`refresh_hz`，默认 60）和元素数，参考线是一帧的预算。Issues 列出构建中发现的问题，工具栏显示其数量：同一父元素下两个元素给了同一个 `key` 时它们共享一个身份，点击、焦点或滚动会落到另一个上；每个问题只记一次。Harness 默认（`Config.strict`）在这种构建上直接让 `render` 返回 `error.DuplicateKey`，`issue()` 给出说明，测试因此在出错的地方失败。帧的元素超过 `max_elements`（1024）时树只显示前面的部分并记为问题。
 - 工具栏的 RTL 按钮把窗口按从右到左布局，再点恢复，用来在翻译之前检查界面；它设置 `direction_override`，Host 与 Harness 在下一遍应用它。
 
+带 inspector 的构建也带[自动化](automation.md)：设置 `ZIGGURAT_AUTOMATION` 后，另一个进程可以通过套接字读取视图的元素并操作它们。
+
 inspector 在视图之后绘制在同一帧上，并先于视图接收落在面板上的指针、滚轮以及它自己的按键，因此不向视图增加节点、控件或可访问性元素，也不占用视图的存储。它显示上一帧排列后的元素，复制在自身的固定存储里（约 300 KB），不分配；应用把它放在稳定的地址。Harness 的 `key`、`clickAt`、`press`/`moveTo`/`release`、`hoverAt`、`wheel`、`cursor()` 与 `image` 按 Host 相同的顺序经过它。显示器刷新率需要应用设置 `refresh_hz`，Host 不从显示器读取。
 
 ## 当前范围
 
-已提供列、行、网格、纵向滚动容器、浮层与弹出字段、对话框、警告对话框与表单页、侧边栏、可编辑文本、查找栏、三态复选框与复选框组、按键绑定、路由与历史按钮、图片、SVG 与图标、从右到左布局、标签页、分栏、工具栏、分段控件、折叠区、手风琴、面包屑、列表框、树、表格、组合框、可编辑组合框、建议列表、标记输入框、搜索区域、表单字段与字段集、链接、徽标、度量条、评分、导航按钮、头像、提示、通知、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子（通过 `ziggurat_view_text`）可编辑文本字段，以及（通过 `ziggurat_view_pickers`）日历、日期/时间/数字输入与颜色选择器。分栏只接受比例偏好，没有 DIP 偏好和折叠，从右到左时也不镜像；从右到左时基础控件内部（复选框标记的位置、滑块的填充方向、树的缩进与三角）不镜像；路由没有页面过渡动画、历史菜单和转义解码，页面状态由应用持有；工具栏没有溢出菜单。只读组合框不按输入筛选；建议列表与可编辑组合框的筛选由应用完成；表格没有列宽拖动、列重排、冻结列和行头，排序由应用完成；树与表格不做虚拟化，也没有行内编辑；树不能拖动重排，重排一次只移动一项，拖动边缘的自动滚动只随指针移动发生；内置控件本身没有悬停外观（自绘控件可用指针区域的 `hovered`）；通知没有进出动画；对话框没有进出动画，一次只显示一个，也不能拖动或改变大小；可编辑文本单击即开始编辑；查找栏不自己搜索，也不高亮匹配；侧边栏的选中行在失去焦点时外观不变。没有虚拟列表和通用动画；玻璃没有按压放大动效。需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。Linux 没有普通控件的 AT-SPI 层，上述可访问性只在 Windows UIA 上提供。
+已提供列、行、网格、纵向滚动容器、浮层与弹出字段、对话框、警告对话框与表单页、侧边栏、可编辑文本、查找栏、三态复选框与复选框组、按键绑定、路由与历史按钮、图片、SVG 与图标、视频（通过 `ziggurat_view_video`，目前只有 GIF 解码器）、从右到左布局、标签页、分栏、工具栏、分段控件、折叠区、手风琴、面包屑、列表框、树、表格、组合框、可编辑组合框、建议列表、标记输入框、搜索区域、表单字段与字段集、链接、徽标、度量条、评分、导航按钮、头像、提示、通知、文本、间隔、按钮、复选框、单选组、开关、确定进度、滑块、步进器、嵌入叶子（通过 `ziggurat_view_text`）可编辑文本字段，以及（通过 `ziggurat_view_pickers`）日历、日期/时间/数字输入与颜色选择器。分栏只接受比例偏好，没有 DIP 偏好和折叠，从右到左时也不镜像；从右到左时基础控件内部（复选框标记的位置、滑块的填充方向、树的缩进与三角）不镜像；路由没有页面过渡动画、历史菜单和转义解码，页面状态由应用持有；工具栏没有溢出菜单。只读组合框不按输入筛选；建议列表与可编辑组合框的筛选由应用完成；表格没有列宽拖动、列重排、冻结列和行头，排序由应用完成；树与表格不做虚拟化，也没有行内编辑；树不能拖动重排，重排一次只移动一项，拖动边缘的自动滚动只随指针移动发生；内置控件本身没有悬停外观（自绘控件可用指针区域的 `hovered`）；通知没有进出动画；对话框没有进出动画，一次只显示一个，也不能拖动或改变大小；可编辑文本单击即开始编辑；查找栏不自己搜索，也不高亮匹配；侧边栏的选中行在失去焦点时外观不变。没有虚拟列表和通用动画；玻璃没有按压放大动效。需要它们时可以直接使用 `ziggurat_ui` 的 Frame API。Linux 没有普通控件的 AT-SPI 层，上述可访问性只在 Windows UIA 上提供。

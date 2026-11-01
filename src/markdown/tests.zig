@@ -319,3 +319,40 @@ test "tree shape and limits" {
     const brackets = &@as([200]u8, @splat('[')) ++ "x" ++ &@as([200]u8, @splat(']'));
     _ = try render(brackets, &out);
 }
+
+fn expectMathHtml(source: []const u8, options: md.ParseOptions, expected: []const u8) !void {
+    const tree = try md.parseWith(source, storage.buffers(), options);
+    var out: [8192]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&out);
+    try md.html.write(tree, &writer);
+    std.testing.expectEqualStrings(expected, writer.buffered()) catch |err| {
+        std.debug.print("source:\n{s}\n", .{source});
+        return err;
+    };
+}
+
+test "math between dollars, and money that stays text" {
+    const both: md.ParseOptions = .{ .math = true, .dollar_math = true };
+    try expectMathHtml("$$x^2$$ and \\(a_i\\) and \\[b\\]", .{ .math = true }, "<p><span class=\"math math-display\">\\[x^2\\]</span> and <span class=\"math math-inline\">\\(a_i\\)</span> and <span class=\"math math-display\">\\[b\\]</span></p>\n");
+    // Without dollar math, single dollars are text.
+    try expectMathHtml("$x$", .{ .math = true }, "<p>$x$</p>\n");
+    try expectMathHtml("so $x_i$ and *y*", both, "<p>so <span class=\"math math-inline\">\\(x_i\\)</span> and <em>y</em></p>\n");
+    // Emphasis marks inside math are TeX.
+    try expectMathHtml("$a*b*c$", both, "<p><span class=\"math math-inline\">\\(a*b*c\\)</span></p>\n");
+    try expectMathHtml("costs $5 and $10", both, "<p>costs $5 and $10</p>\n");
+    try expectMathHtml("$ x$ and $x $ y", both, "<p>$ x$ and $x $ y</p>\n");
+    try expectMathHtml("\\$x$", both, "<p>$x$</p>\n");
+    try expectMathHtml("$$ unclosed", both, "<p>$$ unclosed</p>\n");
+    // Without math, dollars and \( are as CommonMark reads them.
+    try expectHtml("$$x$$ \\(y\\)", "<p>$$x$$ (y)</p>\n");
+    const tree = try md.parseWith("a $$\\sum$$ b", storage.buffers(), both);
+    const math = tree.get(tree.get(tree.root().first_child).first_child + 1);
+    try std.testing.expectEqual(md.Kind.math, math.kind);
+    try std.testing.expectEqualStrings("\\sum", math.text);
+    try std.testing.expectEqual(@as(u8, 1), math.level);
+    // Openers that nothing closes stay linear.
+    const dollars = &@as([1000]u8, @splat('$'));
+    _ = try md.parseWith(dollars, storage.buffers(), both);
+    const singles = &@as([800 * "$a ".len]u8, @bitCast(@as([800]["$a ".len]u8, @splat("$a ".*))));
+    _ = try md.parseWith(singles, storage.buffers(), both);
+}

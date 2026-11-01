@@ -154,7 +154,7 @@ const window = try app.createWindow(.{
 | `custom_decoration` | 支持 | 支持 | 不支持，创建非 system 装饰返回 `UnsupportedCapability` |
 | `native_move_resize` | 支持 | 由 WM 的 `_NET_WM_MOVERESIZE` 决定 | 不支持 |
 | `system_menu` | 支持 | 由 WM 的 `_GTK_SHOW_WINDOW_MENU` 决定 | 不支持 |
-| `transparent` | 以材质创建且能显示材质的窗口 | 以 `transparent` 创建且屏幕有 RGBA visual | 同 X11 |
+| `transparent` | 以 `transparent` 或材质创建、没有重定向位图的窗口 | 以 `transparent` 创建且屏幕有 RGBA visual | 同 X11 |
 | `vibrancy` | 以材质创建，Windows 11 build 22621 及以上 | 不支持 | 不支持 |
 | `backdrop_material` | `.system` 装饰且 Windows 11 build 22621 及以上 | 不支持 | 不支持 |
 
@@ -164,11 +164,17 @@ const window = try app.createWindow(.{
 
 `WindowOptions.transparent` 让窗口背景透明，`WindowOptions.vibrancy` 在帧留空的地方垫一层半透明、模糊身后内容的材质，`Window.setVibrancy(material)` 之后可以更换或用 `.none` 去掉，`Window.vibrancy()` 读回当前值。材质名称与 `Vibrancy` 枚举一一对应：区域材质 `window/content/sidebar/header/titlebar/under_window/under_page`，临时界面材质 `menu/popover/hud/sheet/tooltip/selection/fullscreen_ui`，以及 Windows 11 的三种系统背景 `mica/acrylic/tabbed`。
 
-Windows 11 build 22621 及以上，只有创建时就带材质的窗口能显示材质：它没有重定向位图（`WS_EX_NOREDIRECTIONBITMAP`），这一样式终生不变。材质映射到 DWM system backdrop：`tabbed` 为 Mica Alt，`acrylic` 与全部临时界面材质为 Acrylic，其余为 Mica；设置材质时客户区整体扩展为框架（`DwmExtendFrameIntoClientArea` 四边 -1），`.none` 收回框架并把背景设为无。这样的窗口里 GDI 什么也画不出：UI 的 GPU 渲染器改用 DirectComposition 合成交换链，帧以预乘 alpha 输出，每帧先清成全透明；GDI 回退帧在这种窗口里不可见。它也没有菜单栏：系统菜单仍在，Alt 或 F10 单按把菜单以弹出菜单打开在客户区左上角，Alt 加字母直接打开对应菜单，Alt 加空格仍是窗口菜单。没有带材质创建的窗口、更早的系统或其他平台调用 `setVibrancy` 只保存取值，不显示材质。`Window.showsVibrancy()` 报告材质此刻是否会在透明处显示，不显示时应自己画背景。Windows 的 `transparent` 不单独生效，窗口背景只在带材质时透明。
+Windows 11 build 22621 及以上，只有创建时就带材质的窗口能显示材质：它没有重定向位图（`WS_EX_NOREDIRECTIONBITMAP`），这一样式终生不变。材质映射到 DWM system backdrop：`tabbed` 为 Mica Alt，`acrylic` 与全部临时界面材质为 Acrylic，其余为 Mica；设置材质时客户区整体扩展为框架（`DwmExtendFrameIntoClientArea` 四边 -1），`.none` 收回框架并把背景设为无。这样的窗口里 GDI 什么也画不出：UI 的 GPU 渲染器改用 DirectComposition 合成交换链，帧以预乘 alpha 输出，每帧先清成全透明；GDI 回退帧在这种窗口里不可见。它也没有菜单栏：系统菜单仍在，Alt 或 F10 单按把菜单以弹出菜单打开在客户区左上角，Alt 加字母直接打开对应菜单，Alt 加空格仍是窗口菜单。没有带材质创建的窗口、更早的系统或其他平台调用 `setVibrancy` 只保存取值，不显示材质。`Window.showsVibrancy()` 报告材质此刻是否会在透明处显示，不显示时应自己画背景。Windows 上以 `transparent` 创建的窗口同样不带重定向位图：帧经 DirectComposition 以 alpha 合成，留空处显示窗口后方的内容而不是黑色；它也没有菜单栏，菜单同样以弹出菜单打开。
 
 GTK 没有材质。`transparent` 在屏幕提供 RGBA visual 时给窗口换上该 visual 并取消背景绘制，Cairo 渲染器每帧先清成透明再以 SOURCE 方式贴到窗口，留空处由合成器透出桌面；没有合成器时透明处显示为黑色。`capabilities().transparent` 为 true 时 `Paint.transparent` 也为 true，表示帧从透明开始。
 
 `ui` 的帧照常绘制；`view.Options.transparent_background = true` 让根节点不画主题背景，留空处显示材质或窗口后方。只在 `capabilities().transparent` 为 true 的窗口里使用它。
+
+`Window.setBackground(rgb)` 告诉窗口内容铺满窗口用的不透明颜色（内容不是不透明时为 `null`）。`view` 每帧按根节点背景设置它，`ui.Frame.setWindowBackground` 供自己绘制的内容使用；值不变时只是一次比较。Windows 上快速拖大窗口时，新尺寸的帧还没画出来以前 DWM 已经按新尺寸合成窗口：窗口在 `WM_SIZE` 里立刻用这个颜色填上新增的区域（每次尺寸变化一次，不画到图形表面底下），`WM_ERASEBKGND` 也用它擦除；D3D11 交换链不拉伸帧（`DXGI_SCALING_NONE`，被拒绝时退回拉伸），帧外显示这个背景色（`SetBackgroundColor`）。所以新增区域显示内容背景，而不是黑块或上一帧被拉伸。没有重定向位图的窗口（透明或带材质）不填，那里显示材质或窗口后方。其他平台只记录这个值。
+
+以 `.system` 装饰创建且没有最大化按钮的窗口（`resizable` 或 `maximizable` 为 false）被应用最大化时，Windows 默认把它铺满整个显示器、盖住任务栏；Ziggurat 在 `WM_WINDOWPOSCHANGING` 里把它挪进工作区，并在最大化完成后按 DWM 实际显示的范围（`DWMWA_EXTENDED_FRAME_BOUNDS`）再校正一次，保留窗口在屏幕外的不可见边框。全屏仍然铺满显示器；自定义装饰本来就最大化到工作区。
+
+Windows 11 打开“在标题栏和窗口边框上显示强调色”时，系统会把标题栏涂成强调色；自定义装饰的顶层窗口创建时设置 `DWMWA_CAPTION_COLOR` 为无颜色，框架扩展进客户区（材质）时顶部不再出现一条强调色。
 
 无边框能力不表示具备透明合成、模糊或背景材质。X11 无 WM 时仍可创建无边框窗口，但不能据此认为原生拖动、缩放或系统菜单可用；调用前查询每窗口的 capabilities。不支持的操作明确返回 `UnsupportedCapability`。Openbox 验证环境支持移动/缩放，未公布系统窗口菜单协议。
 

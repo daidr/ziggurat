@@ -9,26 +9,17 @@ const z = @import("ziggurat");
 const os = builtin.os.tag;
 const native_supported = !builtin.is_test and (os == .windows or os == .linux);
 pub const capabilities = .{ .png = native_supported, .window_icon = native_supported };
+const header = @import("png_header.zig");
 /// Larger images are rejected before they are decoded.
-pub const max_size = 1024;
+pub const max_size = header.max_size;
+pub const Size = header.Size;
+pub const pngSize = header.pngSize;
 
 const c = @import("ziggurat_c_win32");
 
 extern fn zsx_icon_from_png(data: [*]const u8, length: usize) ?*anyopaque;
 extern fn zsx_icon_release(pixbuf: *anyopaque) void;
 extern fn zsx_window_set_icon(window: *anyopaque, pixbuf: ?*anyopaque) void;
-
-pub const Size = struct { width: u32, height: u32 };
-
-/// Reads the size of a PNG stream from its header, without decoding it.
-pub fn pngSize(png: []const u8) !Size {
-    if (png.len < 33 or !std.mem.eql(u8, png[0..8], "\x89PNG\r\n\x1a\n") or !std.mem.eql(u8, png[12..16], "IHDR")) return error.InvalidPng;
-    const width = std.mem.readInt(u32, png[16..20], .big);
-    const height = std.mem.readInt(u32, png[20..24], .big);
-    if (width == 0 or height == 0) return error.InvalidPng;
-    if (width > max_size or height > max_size) return error.IconTooLarge;
-    return .{ .width = width, .height = height };
-}
 
 pub const Icon = struct {
     native: *anyopaque,
@@ -74,15 +65,4 @@ pub fn setWindowIcon(window: z.Window, icon: ?*const Icon) !void {
         return;
     }
     zsx_window_set_icon(handle, if (icon) |value| value.native else null);
-}
-
-test "png sizes come from the header and are bounded" {
-    var png = "\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x20\x00\x00\x00\x10\x08\x06\x00\x00\x00\x00\x00\x00\x00".*;
-    try std.testing.expectEqual(Size{ .width = 32, .height = 16 }, try pngSize(&png));
-    png[18] = 0x10;
-    try std.testing.expectError(error.IconTooLarge, pngSize(&png));
-    png[18] = 0;
-    png[19] = 0;
-    try std.testing.expectError(error.InvalidPng, pngSize(&png));
-    try std.testing.expectError(error.InvalidPng, pngSize("GIF89a"));
 }

@@ -52,6 +52,8 @@ pub const secrets = @import("secrets.zig");
 pub const icon = @import("icon.zig");
 pub const theme = @import("theme.zig");
 pub const Icon = icon.Icon;
+pub const menu_icon = @import("menu_icon.zig");
+pub const MenuIcon = menu_icon.MenuIcon;
 pub const flyout = @import("flyout.zig");
 pub const Flyout = flyout.Flyout;
 pub const TrayIcon = @import("tray_icon.zig").TrayIcon;
@@ -86,6 +88,7 @@ pub const capabilities = .{
     .secrets = secrets.capabilities,
     .now_playing = now_playing.capabilities.now_playing,
     .icon = icon.capabilities,
+    .menu_icon = menu_icon.capabilities,
     .theme = theme.capabilities,
 };
 
@@ -95,6 +98,8 @@ test {
     _ = drag;
     _ = drop;
     _ = icon;
+    _ = menu_icon;
+    _ = @import("png_header.zig");
     _ = theme;
     _ = identity;
     _ = instance;

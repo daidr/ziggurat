@@ -288,7 +288,7 @@ const Builder = struct {
                 .image => line.style.image += delta,
                 .link => line.link = if (event.entering) event.index else none,
                 .text => try line.add(node.text, false),
-                .code => try line.add(node.text, true),
+                .code, .math => try line.add(node.text, true),
                 .soft_break => try line.add(" ", false),
                 .hard_break => try line.newLine(),
                 else => {},

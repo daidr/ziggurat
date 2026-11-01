@@ -6,6 +6,7 @@ const ui = @import("ziggurat_ui");
 const wake = @import("ziggurat_wake");
 const view_timer = @import("ziggurat_view_timer");
 const graphics = @import("ziggurat_view_graphics");
+const video = @import("ziggurat_view_video");
 const Watchdog = @import("watchdog.zig").Watchdog;
 const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 
@@ -734,6 +735,64 @@ fn runInspector(allocator: std.mem.Allocator) !void {
     try app.dispatch();
 }
 
+/// A video in a window: its first frame uploads in the task posted after
+/// the first paint, and the next one when the host clock reaches it.
+const Clip = struct {
+    player: *video.Player = undefined,
+    now: u64 = 0,
+    at: u8 = 0,
+    fn build(self: *Clip, v: *view.View) anyerror!void {
+        try self.player.show(v, .{ .alt = "Clip" }, .{ .width = 60, .height = 40 });
+    }
+    fn time(ptr: ?*anyopaque) u64 {
+        const self: *Clip = @ptrCast(@alignCast(ptr.?));
+        return self.now;
+    }
+    fn decoder(self: *Clip) video.Decoder {
+        return .{ .context = self, .width = 3, .height = 2, .next = next, .rewind = rewind };
+    }
+    fn next(ptr: *anyopaque, pixels: []u8) anyerror!?u64 {
+        const self: *Clip = @ptrCast(@alignCast(ptr));
+        if (self.at == 3) return null;
+        @memset(pixels, 0x40 * (self.at + 1));
+        self.at += 1;
+        return 40 * std.time.ns_per_ms;
+    }
+    fn rewind(ptr: *anyopaque) anyerror!void {
+        const self: *Clip = @ptrCast(@alignCast(ptr));
+        self.at = 0;
+    }
+};
+
+fn runVideo(allocator: std.mem.Allocator) !void {
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    var state: Clip = .{};
+    var storage: view.Storage(8, 64) = .{};
+    var host = view.Host.init(&state, Clip.build, storage.buffers(), .{ .clock = .{ .context = &state, .now = Clip.time } });
+    host.context.render_mode = .gdi;
+    var player = try video.Player.init(allocator, &host, state.decoder());
+    state.player = &player;
+    const window = try app.createWindow(.{ .width = width, .height = height });
+    try host.attach(window);
+    defer player.deinit();
+    try paint(&host, window);
+    try std.testing.expectEqual(view.Kind.svg, host.view.nodes()[1].kind);
+    try app.dispatch();
+    if (player.last_error) |err| return err;
+    try std.testing.expect(player.image.view() != null);
+    try paint(&host, window);
+    try std.testing.expectEqual(view.Kind.image, host.view.nodes()[1].kind);
+    const first = player.image.committed;
+    state.now = 45 * std.time.ns_per_ms;
+    try paint(&host, window);
+    try app.dispatch();
+    if (player.last_error) |err| return err;
+    try std.testing.expectEqual(@as(u8, 2), state.at);
+    try std.testing.expect(player.image.committed != first);
+    try paint(&host, window);
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
@@ -743,11 +802,12 @@ pub fn main() !void {
     try runTimer(gpa.allocator());
     try runImage(gpa.allocator());
     try runMenu(gpa.allocator());
+    try runVideo(gpa.allocator());
     if (view.inspector.enabled) try runInspector(gpa.allocator());
     if (builtin.os.tag == .windows) {
         try @import("view_uia.zig").run(gpa.allocator());
         try @import("view_uia.zig").runCollections(gpa.allocator());
     }
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, embedded leaf input, routed pages with history buttons, deferred icon and SVG preparation, timed toast expiry, context menu with submenu, keyed identity and harness frames drawn to pixels and the inspector panel passed\n", .{});
+    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, embedded leaf input, routed pages with history buttons, deferred icon and SVG preparation, timed toast expiry, context menu with submenu, video frames committed after paint, keyed identity and harness frames drawn to pixels and the inspector panel passed\n", .{});
 }

@@ -5,7 +5,8 @@ const c = @import("ziggurat_c_win32");
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("Ziggurat.Graphics.Smoke");
 
 fn paint(hwnd: c.HWND, dc: c.HDC, width: u32, height: u32, scale: f32) z.Paint {
-    return .{ .native_window = hwnd, .native_context = dc.?, .size = .{ .width = width, .height = height, .scale = scale } };
+    // The content's background shows beyond a frame of an older size.
+    return .{ .native_window = hwnd, .native_context = dc.?, .size = .{ .width = width, .height = height, .scale = scale }, .background = 0x202428 };
 }
 fn finish(renderer: *gpu.Renderer) !void {
     renderer.end() catch |err| {
@@ -40,6 +41,7 @@ fn cycle(driver: gpu.Driver, hwnd: c.HWND, dc: c.HDC) !void {
     try std.testing.expect(surface != hwnd);
     try std.testing.expectEqual(hwnd, c.GetParent(surface));
     try std.testing.expectEqual(surface, renderer.swapchainWindowForTest());
+    try std.testing.expect(renderer.unscaledForTest());
     try std.testing.expect(c.IsWindowEnabled(surface) == 0);
     try std.testing.expectEqual(@as(c.LRESULT, c.HTTRANSPARENT), c.SendMessageW(surface, c.WM_NCHITTEST, 0, 0));
     try std.testing.expectEqual(hwnd, c.ChildWindowFromPointEx(hwnd, .{ .x = 15, .y = 15 }, c.CWP_SKIPDISABLED));

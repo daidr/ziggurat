@@ -939,6 +939,13 @@ pub const Context = struct {
         return .{ .workspace = if (self.backdrop_workspace) |workspace| workspace.stats else .{}, .unprepared = self.backdrop_unprepared, .software_frames = self.backdrop_software_frames };
     }
 
+    /// The Context attached to `window` with `attach`, if its content is
+    /// one, as tools that drive a window from outside find it.
+    pub fn ofWindow(window: z.Window) ?*Context {
+        const content = window.attachedContent() orelse return null;
+        if (content.event != &event) return null;
+        return @ptrCast(@alignCast(content.context));
+    }
     /// Keep this Context at a stable address through its actual detach callback.
     pub fn attach(self: *Context, window: z.Window) !void {
         if (self.window != null or self.attachment_phase != .detached) return error.AlreadyAttached;
@@ -1555,7 +1562,9 @@ pub const Context = struct {
         const marked = if (index) |i| fields.marked(i) else false;
         var entry: ?FieldEntry = null;
         if (marked) if (fields.accepted(index.?, self.input_state.hits[index.?].id)) |key| {
-            entry = undefined;
+            // Non-null with its fields still unset: a bare `undefined` would
+            // leave whether it is null undefined too.
+            entry = @as(FieldEntry, undefined);
             if (entry.?.initKind(self, window, fields, key, fields.kind(key) catch return true)) |_| {
                 switch (ev) {
                     .pointer_down => |value| {
@@ -3617,6 +3626,13 @@ pub const Frame = struct {
         }
     }
 
+    /// Tells the window the opaque color this content fills it with, or
+    /// null when it is not opaque, so the window shows that color where it
+    /// grows before the frame of its new size presents.
+    pub fn setWindowBackground(self: *Frame, rgb: ?u32) void {
+        const window = self.context.window orelse return;
+        window.setBackground(rgb) catch {};
+    }
     pub fn clear(self: *Frame, rgb: u32) void {
         self.rect(.{ .x = 0, .y = 0, .width = @as(f32, @floatFromInt(self.size.width)) / self.size.scale, .height = @as(f32, @floatFromInt(self.size.height)) / self.size.scale }, rgb);
     }

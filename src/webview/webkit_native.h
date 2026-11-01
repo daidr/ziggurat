@@ -50,6 +50,21 @@ typedef struct ZwkInitializerInput {
     uint32_t frames;
 } ZwkInitializerInput;
 typedef void (*ZwkInitializerNotify)(void *,uint64_t,uint32_t,int32_t);
+/* An HTTP sign-in: host, port, realm, WebKitAuthenticationScheme and
+ * whether a proxy asks. zwk_auth_answer answers it during the call; not
+ * answered, it is canceled and the page gets the server's refusal. */
+typedef void (*ZwkAuth)(void *,const char *,uint32_t,const char *,uint32_t,int,void *);
+/* A page's certificate error: URI, GTlsCertificateFlags and the DER
+ * certificate. Nonzero allows the certificate for the URI's host. */
+typedef int (*ZwkCertificate)(void *,const char *,uint32_t,const uint8_t *,size_t);
+/* A page's context menu: what was clicked, the engine's top-level items
+ * (WebKitContextMenuAction and its nick; flags 1 enabled, 2 checked) and
+ * keep, one per item, which the app clears to leave one out.
+ * zwk_context_menu_append adds the app's items during the call. Nonzero
+ * shows no menu. */
+typedef struct ZwkContextItem { const char *name; const char *label; uint32_t kind; uint32_t flags; uint32_t action; } ZwkContextItem;
+typedef struct ZwkContextTarget { const char *link,*link_text,*image,*media,*selection,*frame; uint32_t editable; } ZwkContextTarget;
+typedef int (*ZwkContextMenu)(void *,const ZwkContextTarget *,const ZwkContextItem *,uint32_t,uint8_t *,void *);
 typedef struct ZwkOptions {
     const char *html;
     const char *user_agent;
@@ -69,6 +84,16 @@ typedef struct ZwkOptions {
     const char *facts;
     /* Nonzero lets audible media play without a user gesture. */
     uint32_t autoplay;
+    /* 1 swipe between pages, 2 pinch zoom. */
+    uint32_t gestures;
+    /* 0 keeps a hidden page's timers and animations going. */
+    uint32_t throttling;
+    /* NULL cancels every sign-in and fails every certificate error. */
+    ZwkAuth auth;
+    ZwkCertificate certificate;
+    /* 0 no menu, 1 the engine's, 2 context_offer changes it. */
+    uint32_t context_menu;
+    ZwkContextMenu context_offer;
 } ZwkOptions;
 enum ZwkResult { ZWK_OK=0, ZWK_CLOSED=1, ZWK_FULL=2, ZWK_OOM=3, ZWK_INVALID=4, ZWK_NATIVE_FAILED=5, ZWK_NOT_READY=6, ZWK_NAVIGATION_PENDING=7, ZWK_IPC_DENIED=8, ZWK_NO_HISTORY=9, ZWK_NAVIGATION_CANCELLED=10, ZWK_GEOMETRY_NOT_APPLIED=11, ZWK_INITIALIZER_BUDGET=12, ZWK_DEVTOOLS_DISABLED=13 };
 enum ZwkPolicyFailure { ZWK_POLICY_MISMATCH=1, ZWK_POLICY_TIMEOUT=2, ZWK_POLICY_PREPARATION=3 };
@@ -96,9 +121,15 @@ int zwk_user_agent(ZwkState *,const char *set,char **get);
 int zwk_devtools(ZwkState *,int op,int *enabled,int *visible);
 void zwk_devtools_counts(uint32_t *shown);
 void zwk_string_free(char *);
+int zwk_session_state(ZwkState *,char **uri,void **data,size_t *length);
+int zwk_session_restore(ZwkState *,const void *data,size_t length);
 int zwk_deadline_arm(ZwkState *,uint64_t nanoseconds);
 void zwk_deadline_cancel(ZwkState *);
 int zwk_refresh(ZwkState *);
+/* Credentials for the sign-in a ZwkAuth call carries, kept for the session. */
+int zwk_auth_answer(void *request,const char *user,const char *password);
+/* kind 0 command, 1 check, 3 separator; flags 1 enabled, 2 checked. */
+int zwk_context_menu_append(void *call,const char *label,uint32_t command,uint32_t kind,uint32_t flags);
 int zwk_navigate_remote(ZwkState *,const char *);
 int zwk_navigate_local(ZwkState *,const char *);
 int zwk_history(ZwkState *,int forward);

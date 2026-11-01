@@ -60,7 +60,7 @@ jobs:
           zig fmt --check build.zig build_support src examples tests tools
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/test-native-header-cache.ps1
-          zig build "-j$env:NUMBER_OF_PROCESSORS" test check update-tool smoke smoke-lifecycle smoke-window-registry smoke-app-stop smoke-composition smoke-composition-ui smoke-window-state smoke-window-relationships smoke-window-chrome smoke-window-policy smoke-system-extras smoke-system-details smoke-vibrancy smoke-system-session smoke-key-input smoke-pointer-press smoke-pointer-focus smoke-pointer-clicks smoke-pointer-accessibility smoke-drawing smoke-gradients smoke-gradient-analytic smoke-conic-gradients smoke-gradient-interpolation smoke-coverage smoke-layers smoke-offscreen smoke-gaussian smoke-gaussian-scope smoke-document-fields smoke-svg smoke-svg-text smoke-svg-image smoke-text-layout smoke-text-layout-capture smoke-text-words smoke-text-words-fault smoke-text-clusters smoke-text-outlines smoke-text-cells smoke-text-drawing smoke-shaped-editor smoke-shaped-editor-native smoke-editor-caret smoke-editor-line-backgrounds smoke-editor-pre-input smoke-editor-range-markers smoke-text-input-mode smoke-text-client smoke-document smoke-document-editor smoke-code-editor smoke-document-diff-view smoke-virtual-list smoke-images smoke-image-prepare smoke-image-drawing smoke-image-update smoke-diagnostics smoke-waitables smoke-damage smoke-wake smoke-animation-ui smoke-affine-renderer smoke-affine-ui smoke-affine-document smoke-affine-text-binding smoke-affine-document-diff smoke-affine-diff-controls smoke-document-provider smoke-document-point-latch smoke-document-accessibility smoke-document-diff-accessibility smoke-document-geometry smoke-window-placement smoke-snippets smoke-native-reentry smoke-ime-cancel smoke-editor smoke-editor-routing smoke-packaging smoke-ui-config smoke-system smoke-system-events smoke-system-menus smoke-shell smoke-file-watch smoke-clipboard smoke-drop smoke-desktop smoke-widgets smoke-widget-ranges smoke-theme smoke-backdrop smoke-shader-effects smoke-view smoke-view-text smoke-chart smoke-terminal smoke-view-pickers smoke-view-collections smoke-picker smoke-picker-result smoke-secrets smoke-flyout smoke-now-playing-commands smoke-os-integration smoke-cleanup smoke-audio -Daccessibility=true -Doptimize=${{ matrix.optimize }}
+          zig build "-j$env:NUMBER_OF_PROCESSORS" test check update-tool smoke smoke-lifecycle smoke-window-registry smoke-app-stop smoke-composition smoke-composition-ui smoke-window-state smoke-window-relationships smoke-window-chrome smoke-window-policy smoke-system-extras smoke-system-details smoke-vibrancy smoke-system-session smoke-key-input smoke-pointer-press smoke-pointer-focus smoke-pointer-clicks smoke-pointer-accessibility smoke-drawing smoke-gradients smoke-gradient-analytic smoke-conic-gradients smoke-gradient-interpolation smoke-coverage smoke-layers smoke-offscreen smoke-gaussian smoke-gaussian-scope smoke-document-fields smoke-svg smoke-svg-text smoke-svg-image smoke-text-layout smoke-text-layout-capture smoke-text-words smoke-text-words-fault smoke-text-clusters smoke-text-outlines smoke-text-cells smoke-text-drawing smoke-shaped-editor smoke-shaped-editor-native smoke-editor-caret smoke-editor-line-backgrounds smoke-editor-pre-input smoke-editor-range-markers smoke-text-input-mode smoke-text-client smoke-document smoke-document-editor smoke-code-editor smoke-document-diff-view smoke-virtual-list smoke-images smoke-image-prepare smoke-image-drawing smoke-image-update smoke-diagnostics smoke-waitables smoke-damage smoke-wake smoke-animation-ui smoke-affine-renderer smoke-affine-ui smoke-affine-document smoke-affine-text-binding smoke-affine-document-diff smoke-affine-diff-controls smoke-document-provider smoke-document-point-latch smoke-document-accessibility smoke-document-diff-accessibility smoke-document-geometry smoke-window-placement smoke-snippets smoke-native-reentry smoke-ime-cancel smoke-editor smoke-editor-routing smoke-packaging smoke-ui-config smoke-system smoke-system-events smoke-system-menus smoke-shell smoke-file-watch smoke-clipboard smoke-drop smoke-desktop smoke-widgets smoke-widget-ranges smoke-theme smoke-backdrop smoke-shader-effects smoke-view smoke-view-text smoke-automation smoke-chart smoke-terminal smoke-view-pickers smoke-view-collections smoke-picker smoke-picker-result smoke-secrets smoke-flyout smoke-now-playing-commands smoke-os-integration smoke-cleanup smoke-audio -Daccessibility=true -Doptimize=${{ matrix.optimize }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # Real mouse input moves the one desktop cursor: no other smoke runs beside it.
           zig build smoke-drag -Daccessibility=true -Doptimize=${{ matrix.optimize }}
@@ -121,6 +121,12 @@ jobs:
       matrix:
         # Pull requests run Debug only; ReleaseSafe runs on main and manual runs.
         optimize: ${{ fromJSON(github.event_name == 'pull_request' && '["Debug"]' || '["Debug", "ReleaseSafe"]') }}
+    env:
+      # Each job adds several GB to the shared Zig caches and the script wipes
+      # them whole once they pass the cap, so a small cap made most jobs start
+      # cold. The runner keeps them on its 60 GB data disk; the free space
+      # floor in scripts/ci-zig-cache.sh still applies.
+      ZIGGURAT_CI_CACHE_MAX_MB: 40960
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -153,9 +159,9 @@ jobs:
           bash scripts/test-profile-storage.sh -Doptimize=${{ matrix.optimize }}
           xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-language-protocol smoke-language-protocol-shutdown smoke-completion-resolve smoke-completion-details smoke-diff-caret smoke-diff-commands smoke-diff-find -Doptimize=${{ matrix.optimize }}
           xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-text-layout smoke-text-layout-capture smoke-text-words smoke-text-words-fault smoke-text-clusters smoke-text-outlines smoke-text-cells smoke-text-drawing smoke-shaped-editor smoke-images smoke-image-prepare smoke-image-drawing smoke-image-update smoke-shell smoke-file-watch smoke-clipboard smoke-drop smoke-desktop -Doptimize=${{ matrix.optimize }}
-          xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-linux smoke-window-policy smoke-system-extras smoke-system-details smoke-vibrancy smoke-system-session smoke-system-menus test-pointer-gtk smoke-pointer-core-linux smoke-pointer-clicks smoke-content-host smoke-damage smoke-wake smoke-animation-ui smoke-window-registry smoke-app-stop smoke-composition smoke-composition-ui smoke-key-input smoke-widgets smoke-widget-ranges smoke-theme smoke-backdrop smoke-shader-effects smoke-shader-effects-gl smoke-view smoke-view-text smoke-chart smoke-terminal smoke-view-pickers smoke-view-collections smoke-affine-renderer smoke-affine-ui smoke-affine-document smoke-affine-text-binding smoke-affine-document-diff smoke-document-geometry smoke-snippets smoke-drawing smoke-gradients smoke-gradient-analytic smoke-conic-gradients smoke-gradient-interpolation smoke-coverage smoke-layers smoke-offscreen smoke-gaussian smoke-gaussian-scope smoke-document-fields smoke-svg smoke-svg-text smoke-svg-image smoke-shaped-editor-native smoke-editor-caret smoke-editor-line-backgrounds smoke-editor-pre-input smoke-editor-range-markers smoke-text-input-mode smoke-text-client smoke-document smoke-document-editor smoke-code-editor smoke-document-diff-view smoke-virtual-list smoke-desktop smoke-flyout smoke-now-playing-commands -Doptimize=${{ matrix.optimize }}
+          xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-linux smoke-linux-touch test-linux-touch smoke-window-policy smoke-system-extras smoke-system-details smoke-vibrancy smoke-system-session smoke-system-menus test-pointer-gtk smoke-pointer-core-linux smoke-pointer-clicks smoke-content-host smoke-damage smoke-wake smoke-animation-ui smoke-window-registry smoke-app-stop smoke-composition smoke-composition-ui smoke-key-input smoke-widgets smoke-widget-ranges smoke-theme smoke-backdrop smoke-shader-effects smoke-shader-effects-gl smoke-view smoke-view-text smoke-automation smoke-chart smoke-terminal smoke-view-pickers smoke-view-collections smoke-affine-renderer smoke-affine-ui smoke-affine-document smoke-affine-text-binding smoke-affine-document-diff smoke-document-geometry smoke-snippets smoke-drawing smoke-gradients smoke-gradient-analytic smoke-conic-gradients smoke-gradient-interpolation smoke-coverage smoke-layers smoke-offscreen smoke-gaussian smoke-gaussian-scope smoke-document-fields smoke-svg smoke-svg-text smoke-svg-image smoke-shaped-editor-native smoke-editor-caret smoke-editor-line-backgrounds smoke-editor-pre-input smoke-editor-range-markers smoke-text-input-mode smoke-text-client smoke-document smoke-document-editor smoke-code-editor smoke-document-diff-view smoke-virtual-list smoke-desktop smoke-flyout smoke-now-playing-commands -Doptimize=${{ matrix.optimize }}
           xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-drag -Doptimize=${{ matrix.optimize }}
-          GDK_SCALE=2 xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-linux smoke-system-menus test-pointer-gtk smoke-pointer-core-linux smoke-pointer-clicks smoke-content-host smoke-damage smoke-wake smoke-animation-ui smoke-window-registry smoke-app-stop smoke-composition smoke-composition-ui smoke-key-input smoke-widgets smoke-widget-ranges smoke-theme smoke-backdrop smoke-shader-effects smoke-shader-effects-gl smoke-view smoke-view-text smoke-chart smoke-terminal smoke-view-pickers smoke-view-collections smoke-affine-renderer smoke-affine-ui smoke-affine-document smoke-affine-text-binding smoke-affine-document-diff smoke-document-geometry smoke-snippets smoke-drawing smoke-gradients smoke-gradient-analytic smoke-conic-gradients smoke-gradient-interpolation smoke-coverage smoke-layers smoke-offscreen smoke-gaussian smoke-gaussian-scope smoke-document-fields smoke-svg smoke-svg-text smoke-svg-image smoke-shaped-editor-native smoke-editor-caret smoke-editor-line-backgrounds smoke-editor-pre-input smoke-editor-range-markers smoke-text-input-mode smoke-text-client smoke-document smoke-document-editor smoke-code-editor smoke-document-diff-view smoke-virtual-list smoke-desktop smoke-flyout smoke-now-playing-commands -Doptimize=${{ matrix.optimize }}
+          GDK_SCALE=2 xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-linux smoke-system-menus test-pointer-gtk smoke-pointer-core-linux smoke-pointer-clicks smoke-content-host smoke-damage smoke-wake smoke-animation-ui smoke-window-registry smoke-app-stop smoke-composition smoke-composition-ui smoke-key-input smoke-widgets smoke-widget-ranges smoke-theme smoke-backdrop smoke-shader-effects smoke-shader-effects-gl smoke-view smoke-view-text smoke-automation smoke-chart smoke-terminal smoke-view-pickers smoke-view-collections smoke-affine-renderer smoke-affine-ui smoke-affine-document smoke-affine-text-binding smoke-affine-document-diff smoke-document-geometry smoke-snippets smoke-drawing smoke-gradients smoke-gradient-analytic smoke-conic-gradients smoke-gradient-interpolation smoke-coverage smoke-layers smoke-offscreen smoke-gaussian smoke-gaussian-scope smoke-document-fields smoke-svg smoke-svg-text smoke-svg-image smoke-shaped-editor-native smoke-editor-caret smoke-editor-line-backgrounds smoke-editor-pre-input smoke-editor-range-markers smoke-text-input-mode smoke-text-client smoke-document smoke-document-editor smoke-code-editor smoke-document-diff-view smoke-virtual-list smoke-desktop smoke-flyout smoke-now-playing-commands -Doptimize=${{ matrix.optimize }}
           XDG_RUNTIME_DIR=$(mktemp -d) NO_AT_BRIDGE=1 dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-system-desktop -Doptimize=${{ matrix.optimize }}
           GDK_SCALE=2 XDG_RUNTIME_DIR=$(mktemp -d) NO_AT_BRIDGE=1 dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-system-desktop -Doptimize=${{ matrix.optimize }}
           XDG_RUNTIME_DIR=$(mktemp -d) NO_AT_BRIDGE=1 dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-now-playing -Doptimize=${{ matrix.optimize }}
@@ -235,6 +241,10 @@ jobs:
           P01_PROBE=session-zig bash scripts/webkit-probe.sh
           GDK_SCALE=2 P01_PROBE=session-zig bash scripts/webkit-probe.sh
           P01_PROBE=page-facts-zig bash scripts/webkit-probe.sh
+          P01_PROBE=http-auth-zig bash scripts/webkit-probe.sh
+          P01_PROBE=context-menu-zig bash scripts/webkit-probe.sh
+          P01_PROBE=page-options-zig bash scripts/webkit-probe.sh
+          P01_PROBE=session-state-zig bash scripts/webkit-probe.sh
       - name: WebKitGTK content rules and audio
         if: (github.event_name == 'workflow_dispatch' && inputs.webview) || contains(github.event.pull_request.labels.*.name, 'webview')
         run: |
@@ -253,6 +263,34 @@ jobs:
           path: zig-out/ci-benchmarks/*
           if-no-files-found: error
           retention-days: 7
+
+  linux-release-tests:
+    # Unit tests built ReleaseSafe on every pull request. Zig 0.17.0 has
+    # optimizer-only miscompiles (see zio.asUnsigned) that Debug runs miss,
+    # and main publishes ReleaseSafe builds.
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ fromJSON(vars.LINUX_RUNS_ON || '["self-hosted", "linux", "x64"]') }}
+    timeout-minutes: 75
+    env:
+      # See the linux job.
+      ZIGGURAT_CI_CACHE_MAX_MB: 40960
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Native GTK/Pango dependencies
+        run: |
+          sh scripts/ci-linux-deps.sh ca-certificates curl xz-utils python3 libgtk-3-dev libpango1.0-dev libicu-dev pkg-config xvfb xauth openbox x11-utils libxtst6 libatspi2.0-dev at-spi2-core dbus dbus-x11 shared-mime-info fonts-dejavu-core fonts-noto-cjk libepoxy-dev libegl-dev libgl1-mesa-dri
+      - name: Use cached Zig 0.17.0 and build caches
+        run: |
+          zig_bin=$(sh scripts/fetch-zig.sh)
+          printf '%s\n' "$(dirname "$zig_bin")" >> "$GITHUB_PATH"
+          sh scripts/ci-zig-cache.sh >> "$GITHUB_ENV"
+      - name: ReleaseSafe unit tests
+        env:
+          G_DEBUG: fatal-criticals
+          GDK_BACKEND: x11
+        run: zig build test -Doptimize=ReleaseSafe
 
   macos:
     # Self-hosted macOS runner with the Xcode command line tools, which give
@@ -287,9 +325,10 @@ jobs:
         timeout-minutes: 15
         run: |
           zig build check -Dwebview=true -Doptimize=${{ matrix.optimize }} --summary failures
-          zig build build-smoke-webview-macos build-smoke-webview-content-rules -Dwebview=true -Doptimize=${{ matrix.optimize }} --summary failures
+          zig build build-smoke-webview-macos build-smoke-webview-content-rules build-smoke-webview-local-macos -Dwebview=true -Doptimize=${{ matrix.optimize }} --summary failures
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-macos
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-content-rules
+          sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-local-macos
 
   webview:
     # Paused with the Windows job; see WINDOWS_CI there.
@@ -332,7 +371,7 @@ jobs:
           bun test packages
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # These fail when the system Runtime is unavailable; no Runtime is downloaded.
-          zig build "-j$env:NUMBER_OF_PROCESSORS" test test-remote-origin smoke-webview smoke-composition-webview smoke-page-host smoke-page-session smoke-webview-policy smoke-page smoke-page-remote smoke-page-authorization smoke-script smoke-browser-tools smoke-request-policy smoke-resource-async smoke-resource-file smoke-scheme smoke-resource-producer smoke-permission smoke-download smoke-browser-policy smoke-ipc smoke-assets smoke-page-runtime smoke-plugin-fetch smoke-plugin-watch smoke-plugin-sqlite smoke-plugin-websocket smoke-embedded-webview smoke-webview-content-rules smoke-webview-page-facts -Dwebview=true -Doptimize=ReleaseSafe
+          zig build "-j$env:NUMBER_OF_PROCESSORS" test test-remote-origin smoke-webview smoke-composition-webview smoke-page-host smoke-page-session smoke-webview-policy smoke-page smoke-page-remote smoke-page-authorization smoke-script smoke-browser-tools smoke-request-policy smoke-resource-async smoke-resource-file smoke-scheme smoke-resource-producer smoke-permission smoke-download smoke-browser-policy smoke-ipc smoke-assets smoke-page-runtime smoke-plugin-fetch smoke-plugin-watch smoke-plugin-sqlite smoke-plugin-websocket smoke-embedded-webview smoke-webview-content-rules smoke-webview-page-facts smoke-webview-http-auth smoke-webview-context-menu smoke-webview-page-options smoke-webview-session-state smoke-webview-picture-in-picture -Dwebview=true -Doptimize=ReleaseSafe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Standalone engine discovery without a page
         run: |

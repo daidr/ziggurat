@@ -443,7 +443,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_text_layout", .module = text_layout },
         .{ .name = "ziggurat_text_outlines", .module = text_outlines },
     } });
-    const images = b.addModule("ziggurat_images", .{ .root_source_file = b.path("src/images/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_drawing_resources", .module = drawing_resources }} });
+    const gif = b.addModule("ziggurat_gif", .{ .root_source_file = b.path("src/images/gif.zig"), .target = target, .optimize = optimize });
+    const images = b.addModule("ziggurat_images", .{ .root_source_file = b.path("src/images/root.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat_drawing_resources", .module = drawing_resources }, .{ .name = "ziggurat_gif", .module = gif } } });
     const image_options = b.addOptions();
     image_options.addOption(bool, "webp", webp);
     images.addOptions("ziggurat_image_options", image_options);
@@ -732,6 +733,7 @@ pub fn build(b: *std.Build) void {
         core.linkSystemLibrary("ole32", .{});
         core.linkSystemLibrary("imm32", .{});
         core.linkSystemLibrary("dwmapi", .{});
+        core.linkSystemLibrary("gdi32", .{});
         core.link_libc = true;
     }
     if (target.result.os.tag == .macos) {
@@ -765,6 +767,11 @@ pub fn build(b: *std.Build) void {
         pointer_gtk_test.root_module.linkSystemLibrary("x11", .{ .use_pkg_config = .force });
         check.dependOn(&pointer_gtk_test.step);
         b.step("test-pointer-gtk", "Verify native GTK pointer facts, pairing and callback continuation authority").dependOn(&b.addRunArtifact(pointer_gtk_test).step);
+        const touch_test = b.addExecutable(.{ .name = "test-linux-touch", .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }) });
+        touch_test.root_module.addCSourceFile(.{ .file = b.path("tests/linux_touch_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        touch_test.root_module.linkSystemLibrary("m", .{});
+        check.dependOn(&touch_test.step);
+        b.step("test-linux-touch", "Verify touchscreen taps, long presses and scrolls").dependOn(&b.addRunArtifact(touch_test).step);
     }
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
         const damage = b.addExecutable(.{ .name = "smoke-damage", .root_module = b.createModule(.{
@@ -793,10 +800,32 @@ pub fn build(b: *std.Build) void {
     const view_options = b.addOptions();
     view_options.addOption(bool, "inspector", b.option(bool, "inspector", "Build the views' inspector (default: Debug builds only)") orelse (optimize == .debug));
     declarative_view.addOptions("ziggurat_view_options", view_options);
+    // Drives a running app from another process; apps link it in test builds.
+    const automation_options = b.addOptions();
+    automation_options.addOption(bool, "webview", web);
+    const automation = b.addModule("ziggurat_automation", .{ .root_source_file = b.path("src/automation/root.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui }, .{ .name = "ziggurat_view", .module = declarative_view },
+    } });
+    automation.addOptions("ziggurat_automation_options", automation_options);
+    const automation_tests = addTest(b, .{ .root_module = automation });
+    check.dependOn(&automation_tests.step);
+    const run_automation_tests = b.addRunArtifact(automation_tests);
+    test_step.dependOn(&run_automation_tests.step);
+    b.step("test-automation", "Run the automation protocol, input and socket tests").dependOn(&run_automation_tests.step);
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux) addSmoke(b, "smoke-automation", "tests/automation_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_view", .module = declarative_view },
+        .{ .name = "ziggurat_system", .module = system },
+        .{ .name = "ziggurat_automation", .module = automation },
+    });
     const view_graphics = b.addModule("ziggurat_view_graphics", .{ .root_source_file = b.path("src/view/graphics.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
         .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_vector", .module = vector },
         .{ .name = "ziggurat_svg", .module = svg },
+    } });
+    const view_video = b.addModule("ziggurat_view_video", .{ .root_source_file = b.path("src/view/video.zig"), .target = target, .optimize = optimize, .imports = &.{
+        .{ .name = "ziggurat_ui", .module = ui },   .{ .name = "ziggurat_view", .module = declarative_view },
+        .{ .name = "ziggurat_gif", .module = gif },
     } });
     const view_timer = b.addModule("ziggurat_view_timer", .{ .root_source_file = b.path("src/view/timer.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat", .module = core },      .{ .name = "ziggurat_view", .module = declarative_view },
@@ -879,6 +908,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_wake", .module = wake },
             .{ .name = "ziggurat_view_timer", .module = view_timer },
             .{ .name = "ziggurat_view_graphics", .module = view_graphics },
+            .{ .name = "ziggurat_view_video", .module = view_video },
         });
         addSmoke(b, "smoke-animation-ui", "tests/animation_ui_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
@@ -1549,6 +1579,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_ui", .module = ui },
         });
         addLinuxPointerCoreSmoke(b, check, core, target, optimize);
+        addSmoke(b, "smoke-linux-touch", "tests/linux_touch_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-window-state", "tests/window_state_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-window-relationships", "tests/window_relationship_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-key-input", "tests/key_input_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
@@ -1745,6 +1776,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
         });
+        addSmoke(b, "smoke-webview-local-macos", "tests/macos_local_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
     }
     if (web and target.result.os.tag == .windows) {
         if (target.result.cpu.arch != .x86_64)
@@ -1757,6 +1792,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_file_stream", .module = file_stream }, .{ .name = "ziggurat_http_response", .module = http_response } },
             .link_libc = true,
         });
+        automation.addImport("ziggurat_webview", view);
         view.addImport("ziggurat_tls_pem", tls_pem);
         for ([_][]const u8{ "webview2.c", "page_host.c" }) |file| {
             const native = native_support.add(b, view, b.fmt("webview-{s}", .{file}), b.fmt("src/webview/{s}", .{file}), &.{"-std=c11"}, target, optimize);
@@ -1965,6 +2001,19 @@ pub fn build(b: *std.Build) void {
         addSmoke(b, "smoke-webview-page-facts", "tests/page_facts_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
         });
+        _ = addHttpAuthSmoke(b, target, optimize, core, view);
+        addSmoke(b, "smoke-webview-context-menu", "tests/context_menu_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-page-options", "tests/page_options_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-session-state", "tests/session_state_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-picture-in-picture", "tests/picture_in_picture_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
         addSmoke(b, "smoke-page-remote", "tests/remote_page_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
@@ -2025,6 +2074,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_file_stream", .module = file_stream }, .{ .name = "ziggurat_http_response", .module = http_response } },
             .link_libc = true,
         });
+        automation.addImport("ziggurat_webview", view);
         view.addImport("ziggurat_tls_pem", tls_pem);
         for ([_][]const u8{ "webkit_native.c", "webkit_profile.c", "webkit_cookies.c", "webkit_content_rules.c" }) |file| {
             const native = native_support.add(b, view, b.fmt("webview-{s}", .{file}), b.fmt("src/webview/{s}", .{file}), &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
@@ -2107,6 +2157,23 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_webview", .module = view },
         });
         addSmoke(b, "smoke-webview-page-facts", "tests/page_facts_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
+        const http_auth_run = addHttpAuthSmoke(b, target, optimize, core, view);
+        http_auth_run.step.dependOn(&install_extension.step);
+        http_auth_run.addArg("--extension");
+        http_auth_run.addDirectoryArg(b.graph.path(.install_lib, ""));
+        const context_menu_module = addSmokeModule(b, "smoke-webview-context-menu", "tests/context_menu_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
+        context_menu_module.addCSourceFile(.{ .file = b.path("tests/context_menu_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        context_menu_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
+        const page_options_module = addSmokeModule(b, "smoke-webview-page-options", "tests/page_options_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
+        });
+        page_options_module.addCSourceFile(.{ .file = b.path("tests/page_options_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        page_options_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
+        addSmoke(b, "smoke-webview-session-state", "tests/session_state_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view },
         });
         addSmoke(b, "smoke-webview-dynamic-linux", "tests/linux_dynamic_webview_smoke.zig", target, optimize, &.{
@@ -2871,6 +2938,11 @@ pub fn build(b: *std.Build) void {
         const drawing_tests = addTest(b, .{ .root_module = drawing_resources });
         check.dependOn(&drawing_tests.step);
         test_step.dependOn(&b.addRunArtifact(drawing_tests).step);
+        const gif_tests = addTest(b, .{ .root_module = gif });
+        check.dependOn(&gif_tests.step);
+        const run_gif_tests = b.addRunArtifact(gif_tests);
+        test_step.dependOn(&run_gif_tests.step);
+        b.step("test-gif", "Run GIF graphic decoding and animation frame tests").dependOn(&run_gif_tests.step);
         const image_tests = addTest(b, .{ .root_module = images });
         check.dependOn(&image_tests.step);
         test_step.dependOn(&b.addRunArtifact(image_tests).step);
@@ -2910,6 +2982,11 @@ pub fn build(b: *std.Build) void {
         const run_chart_view_tests = b.addRunArtifact(chart_view_tests);
         test_step.dependOn(&run_chart_view_tests.step);
         b.step("test-chart-view", "Run chart view arrangement, storage and preparation key tests").dependOn(&run_chart_view_tests.step);
+        const view_video_tests = addTest(b, .{ .root_module = view_video });
+        check.dependOn(&view_video_tests.step);
+        const run_view_video_tests = b.addRunArtifact(view_video_tests);
+        test_step.dependOn(&run_view_video_tests.step);
+        b.step("test-view-video", "Run view video playback, frame timing and GIF decoder tests").dependOn(&run_view_video_tests.step);
         const view_graphics_tests = addTest(b, .{ .root_module = view_graphics });
         check.dependOn(&view_graphics_tests.step);
         const run_view_graphics_tests = b.addRunArtifact(view_graphics_tests);
@@ -3051,7 +3128,7 @@ const app_example_imports = [_][]const u8{
     "ziggurat_text_layout",   "ziggurat_window_placement", "ziggurat_game",             "ziggurat_terminal",
     "ziggurat_terminal_view", "ziggurat_rich_text",        "ziggurat_rich_text_editor", "ziggurat_rich_text_clipboard",
     "ziggurat_text_measure",  "ziggurat_markdown",         "ziggurat_markdown_view",    "ziggurat_vector",
-    "ziggurat_text_outlines",
+    "ziggurat_text_outlines", "ziggurat_view_video",
 };
 
 const Example = struct { name: []const u8, path: []const u8, web: bool = false };
@@ -3087,6 +3164,7 @@ const app_examples = [_]Example{
     .{ .name = "wind", .path = "examples/wind.zig" },
     .{ .name = "mayoi", .path = "examples/mayoi.zig" },
     .{ .name = "rich-text", .path = "examples/rich_text.zig" },
+    .{ .name = "video", .path = "examples/video.zig" },
     .{ .name = "hybrid", .path = "examples/hybrid.zig", .web = true },
 };
 
@@ -3404,6 +3482,24 @@ fn iconFile(b: *std.Build, tool_source: std.Build.LazyPath, default: std.Build.L
 /// steps write their files; until such a child execs it still holds those
 /// write handles, so starting a file installed a moment ago can fail with
 /// ETXTBSY. On POSIX hosts a shell retries only that failure (status 126).
+/// The HTTP sign-in and certificate error smoke, which its Python host runs
+/// with the loopback servers it starts.
+fn addHttpAuthSmoke(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module, view: *std.Build.Module) *std.Build.Step.Run {
+    const name = "smoke-webview-http-auth";
+    const exe = b.addExecutable(.{ .name = name, .root_module = b.createModule(.{ .root_source_file = b.path("tests/http_auth_webview_smoke.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view } } }) });
+    addResources(b, exe);
+    const install = b.addInstallArtifact(exe, .{});
+    b.step("build-" ++ name, "Build the HTTP sign-in smoke without running it").dependOn(&install.step);
+    const python = if (b.graph.host.result.os.tag == .windows) "python" else "python3";
+    const run = b.addSystemCommand(&.{ python, "-B", "tests/http_auth_host.py", "--exe" });
+    run.addFileArg(b.graph.path(.install_bin, b.fmt("{s}{s}", .{ name, if (target.result.os.tag == .windows) ".exe" else "" })));
+    run.step.dependOn(&install.step);
+    run.step.dependOn(&b.top_level_steps.get("webview-runtime").?.step);
+    b.step(name, "Answer HTTP sign-ins and certificate errors of loopback pages").dependOn(&run.step);
+    b.top_level_steps.get("check").?.step.dependOn(&exe.step);
+    return run;
+}
+
 fn runInstalled(b: *std.Build, executable: std.Build.LazyPath) *std.Build.Step.Run {
     if (b.graph.host.result.os.tag == .windows) return b.addRunFile(executable);
     const run = b.addSystemCommand(&.{ "/bin/sh", "-c", "n=0; while :; do \"$0\" \"$@\"; s=$?; if [ $s -ne 126 ] || [ $n -ge 20 ]; then exit $s; fi; n=$((n + 1)); sleep 0.1; done" });

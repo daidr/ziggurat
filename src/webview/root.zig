@@ -76,11 +76,35 @@ pub const page_facts = @import("page_facts.zig");
 pub const Rgba = page_facts.Rgba;
 pub const ContentSize = page_facts.ContentSize;
 pub const FitContent = page_facts.FitContent;
+pub const http_auth = @import("http_auth.zig");
+pub const session_state = @import("session_state.zig");
+pub const context_menu = @import("context_menu.zig");
+pub const ContextMenu = context_menu.Menu;
+pub const ContextMenuHandler = struct {
+    context: *anyopaque,
+    /// Synchronous, on the App owner thread while the menu waits: change
+    /// the menu, or prevent it. The menu and its strings cannot escape.
+    open: *const fn (*anyopaque, *View, *ContextMenu) void,
+};
+pub const ContextMenuPolicy = union(enum) {
+    /// No menu, the default; the page's own contextmenu event still fires.
+    none,
+    /// The engine's menu as it is.
+    engine,
+    /// The engine's menu as the handler changes it.
+    handler: ContextMenuHandler,
+};
+pub const AuthChallenge = http_auth.Challenge;
+pub const Credentials = http_auth.Credentials;
+pub const CertificateError = http_auth.CertificateError;
 const page_sessions = @import("page_session.zig");
 pub const PageSession = page_sessions.Type(View, SessionHooks);
 test {
     _ = policy_store;
     _ = page_facts;
+    _ = http_auth;
+    _ = context_menu;
+    _ = session_state;
     _ = custom_local;
     _ = content_rules;
 }
@@ -186,7 +210,10 @@ pub const ProcessFailure = struct { native_kind: i32 };
 pub const PageId = struct { view: *const View, generation: u64 };
 pub const PageEvent = union(enum) {
     started: struct { id: PageId, navigation_id: u64, uri: ?[]const u8, redirected: bool },
-    completed: struct { id: PageId, navigation_id: u64, success: bool, native_status: i32 },
+    /// cancelled: it failed as another navigation, a stop or a download
+    /// took its place (WebView2's OPERATION_CANCELED, 14; WebKitGTK's
+    /// WEBKIT_NETWORK_ERROR_CANCELLED), not as the page failed to load.
+    completed: struct { id: PageId, navigation_id: u64, success: bool, native_status: i32, cancelled: bool = false },
     dom_ready: PageId,
     source_changed: struct { id: PageId, uri: ?[]const u8 },
     title_changed: struct { id: PageId, title: ?[]const u8 },
@@ -200,6 +227,8 @@ pub const PageEvent = union(enum) {
     /// Options.fit_content: the size of the page's content changed, in its
     /// CSS pixels. A View attached to a window has resized it already.
     content_size_changed: struct { id: PageId, size: ContentSize },
+    /// Options.context_menu: an item the handler added was chosen.
+    context_menu_command: struct { id: PageId, command: u32 },
 };
 pub const PageListener = struct {
     /// Stable until detach. Strings are borrowed until return. Null metadata
@@ -418,7 +447,69 @@ pub const Options = struct {
     /// Whether the page may play audible media before the user clicked or
     /// typed in it, as a hidden window's page never can.
     autoplay: Autoplay = .user_gesture,
+    /// Answers the HTTP sign-ins (Basic, Digest, NTLM, Negotiate) of a
+    /// remote page and what it loads, the server's or a proxy's. Without
+    /// it every sign-in is canceled; no engine's dialog ever shows.
+    http_auth: ?AuthHandler = null,
+    /// Decides about server certificates of a remote page that do not
+    /// verify. Without it, or when it says no, the load fails.
+    certificate_errors: ?CertificateHandler = null,
+    /// The page's context menu, on a right click or the menu key.
+    context_menu: ContextMenuPolicy = .none,
+    /// Go back and forward with the platform's swipe: Linux's
+    /// enable-back-forward-navigation-gestures, WebView2's
+    /// IsSwipeNavigationEnabled (a touchscreen's swipe).
+    swipe_navigation: bool = false,
+    /// Magnify the page with a pinch on a touchscreen or a touchpad.
+    /// WebKitGTK has no setting for it: without this, its zoom gesture
+    /// takes no events (2.38 and later).
+    pinch_zoom: bool = false,
+    /// false keeps a page running while its window is hidden, minimized or
+    /// covered: its timers keep their rate and its CSS animations go on.
+    /// Linux turns WebKitGTK's HiddenPageDOMTimerThrottling and
+    /// HiddenPageCSSAnimationSuspension off (2.42 and later); a hidden page
+    /// still draws no frames, so requestAnimationFrame waits. Windows starts
+    /// the browser with --disable-background-timer-throttling
+    /// --disable-renderer-backgrounding --disable-backgrounding-occluded-windows,
+    /// arguments of the WebView2 environment as Autoplay.allow's are.
+    background_throttling: bool = true,
 };
+pub const AuthHandler = struct {
+    context: *anyopaque,
+    /// Synchronous, on the App owner thread while the load waits: the
+    /// credentials to sign in with, or null to go without, which shows the
+    /// server's refusal (its 401 or 407 page). A server that refuses them
+    /// asks again; the engine keeps those it accepts for the session, for
+    /// that server and realm, so this is not asked for every request. To ask
+    /// the user, return null, prompt, and reload once there is an answer.
+    answer: *const fn (*anyopaque, *View, AuthChallenge) ?Credentials,
+};
+pub const CertificateHandler = struct {
+    context: *anyopaque,
+    /// Synchronous, on the App owner thread while the load waits: true
+    /// loads it anyway. Allow only the certificate expected, never a host
+    /// whatever its certificate, which anyone in between can present.
+    /// Windows asks for the page and what it loads, and a yes holds for the
+    /// host until the browser process ends. Linux asks for the page only,
+    /// as WebKitGTK tells no more, and on a yes allows the certificate for
+    /// the host in the View's web context and loads the page again.
+    allow: *const fn (*anyopaque, *View, CertificateError) bool,
+};
+fn gestureFlags(options: Options) u32 {
+    return @as(u32, @intFromBool(options.swipe_navigation)) | @as(u32, @intFromBool(options.pinch_zoom)) << 1;
+}
+/// The WebView2 environment's arguments the options ask for.
+fn browserArguments(options: Options) ?[*:0]const u16 {
+    const autoplay = "--autoplay-policy=no-user-gesture-required";
+    const unthrottled = "--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows";
+    const utf16 = std.unicode.utf8ToUtf16LeStringLiteral;
+    return switch (@as(u2, @intFromBool(options.autoplay == .allow)) | @as(u2, @intFromBool(!options.background_throttling)) << 1) {
+        0 => null,
+        1 => utf16(autoplay),
+        2 => utf16(unthrottled),
+        3 => utf16(autoplay ++ " " ++ unthrottled),
+    };
+}
 pub const Autoplay = enum {
     /// The engine's own policy: sound only after a user's gesture.
     user_gesture,
@@ -456,7 +547,9 @@ const NativeActions = extern struct {
     download_offer: ?*const fn (*anyopaque, [*:0]const u16, [*:0]const u16, [*:0]const u16, i64, *anyopaque) callconv(.c) void = null,
     download_notify: ?*const fn (*anyopaque, u64, u32, u64, i64, i32) callconv(.c) void = null,
 };
-const NativeSettings = extern struct { zoom: f64, user_agent: ?[*:0]const u16, devtools: bool, tool_flags: u32, tool_limit: u32, max_cookies: u32, max_cookie_bytes: u32, max_capture_bytes: u32, schemes: ?[*]const NativeScheme, scheme_count: u32, local_ipc: bool, actions: ?*const NativeActions, initializers: ?*const initializer_owner.NativeInput, owned_context: ?*anyopaque, facts: ?[*:0]const u16 = null, browser_arguments: ?[*:0]const u16 = null, audio_muted: bool = false, content_verdict: ?ContentVerdict = null, content_style: ?[*:0]const u16 = null };
+const NativeSettings = extern struct { zoom: f64, user_agent: ?[*:0]const u16, devtools: bool, tool_flags: u32, tool_limit: u32, max_cookies: u32, max_cookie_bytes: u32, max_capture_bytes: u32, schemes: ?[*]const NativeScheme, scheme_count: u32, local_ipc: bool, actions: ?*const NativeActions, initializers: ?*const initializer_owner.NativeInput, owned_context: ?*anyopaque, facts: ?[*:0]const u16 = null, browser_arguments: ?[*:0]const u16 = null, audio_muted: bool = false, content_verdict: ?ContentVerdict = null, content_style: ?[*:0]const u16 = null, auth: ?*const fn (*anyopaque, [*:0]const u16, [*:0]const u16, *anyopaque) callconv(.c) void = null, certificate: ?*const fn (*anyopaque, [*:0]const u16, i32, [*:0]const u16) callconv(.c) c_int = null, context_menu: u32 = 0, context_offer: ?*const fn (*anyopaque, *const NativeContextTarget, [*]const NativeContextItem, u32, [*]u8, *anyopaque) callconv(.c) c_int = null, gestures: u32 = 0 };
+const NativeContextItem = extern struct { name: [*:0]const u16, label: [*:0]const u16, kind: u32, flags: u32 };
+const NativeContextTarget = extern struct { link: ?[*:0]const u16, link_text: ?[*:0]const u16, image: ?[*:0]const u16, media: ?[*:0]const u16, selection: ?[*:0]const u16, frame: ?[*:0]const u16, editable: u32 };
 const PermissionScratch = struct {
     rows: [permissions.origin_capacity]NativePermissionGrant = undefined,
     text: [permissions.origin_capacity][schemes.origin_limit + 1:0]u16 = undefined,
@@ -559,6 +652,10 @@ extern fn zwv_action_budget_create(u32, u32) ?*anyopaque;
 extern fn zwv_action_budget_limit(*anyopaque, u32, u32) void;
 extern fn zwv_action_budget_release(*anyopaque) void;
 extern fn zwv_action_counts(*u32, *u32, *u32) void;
+extern fn zwv_auth_answer(*anyopaque, [*:0]const u16, [*:0]const u16) i32;
+extern fn zwv_context_menu_append(*anyopaque, [*:0]const u16, u32, u32, u32) i32;
+extern fn zwk_context_menu_append(*anyopaque, [*:0]const u8, u32, u32, u32) c_int;
+extern fn zwk_auth_answer(*anyopaque, [*:0]const u8, [*:0]const u8) c_int;
 extern fn zwv_permission_defer(*anyopaque, u64) i32;
 extern fn zwv_permission_decide(*anyopaque, u64, bool) i32;
 extern fn zwv_permission_cancel(*anyopaque, u64) i32;
@@ -607,6 +704,8 @@ extern fn zwv_content_rules(*anyopaque, ?ContentVerdict, ?[*:0]const u16) i32;
 extern fn zwv_process_id(*anyopaque, *u32) i32;
 extern fn zwv_user_agent(*anyopaque, ?[*:0]const u16, ?*?[*:0]u16) i32;
 extern fn zwv_string_free([*:0]u16) void;
+extern fn zwv_document_source(*anyopaque, *?[*:0]u16) i32;
+extern fn zwv_toggle_picture_in_picture(*anyopaque) i32;
 extern fn zwv_devtools(*anyopaque, *bool, bool, bool) i32;
 extern fn zwv_tool_start(*anyopaque, *const NativeToolRequest) i32;
 extern fn zwv_tool_cancel(*anyopaque, u64) void;
@@ -691,8 +790,16 @@ fn nativeCancelScript(native: *anyopaque, token: u64) void {
 }
 fn validateBackendOptions(options: Options) !void {
     if (is_macos) {
-        if (options.storage != .ephemeral or options.remote != null or options.local != null or options.request_policy_extension != null or
-            options.custom_schemes.len != 0 or options.file_streams != null or options.document_initializers.len != 0) return error.UnsupportedCapability;
+        if (options.storage != .ephemeral or options.remote != null or options.request_policy_extension != null or
+            options.file_streams != null or options.document_initializers.len != 0) return error.UnsupportedCapability;
+        // A local site serves its fixed resources with the default policy:
+        // GET and HEAD, browser headers only, no request Origin.
+        if (options.local) |site| {
+            if (site.on_resource != null or site.dynamic_document or options.custom_schemes.len != 1) return error.UnsupportedCapability;
+            if (try webkit.localPolicyBytes(site, options.custom_schemes[0]) != 0) return error.UnsupportedCapability;
+        }
+        // Sign-ins and certificates are of remote pages, which WKWebView does not show here yet.
+        if (options.http_auth != null or options.certificate_errors != null or options.context_menu == .handler) return error.UnsupportedCapability;
         inline for (zio.fields(tools.Policy)) |field| if (@field(options.tools, field.name)) return error.UnsupportedCapability;
     }
     if (is_webkit) {
@@ -897,7 +1004,7 @@ const OwnedConfig = struct {
         if (options.file_streams) |limits| try limits.validate();
         if (!std.math.isFinite(options.zoom) or options.zoom < 0.25 or options.zoom > 5) return error.InvalidZoom;
         if (options.fit_content) |limits| try limits.validate();
-        if (!is_webkit and options.autoplay == .allow and options.profile != null) return error.UnsupportedCapability;
+        if (!is_webkit and (options.autoplay == .allow or !options.background_throttling) and options.profile != null) return error.UnsupportedCapability;
         if (options.user_agent) |agent| if (!validUserAgent(agent)) return error.InvalidUserAgent;
         if (options.remote != null and (options.local != null or options.html.len != 0)) return error.ConflictingPageSources;
         if (options.allow_local_navigation and options.local == null) return error.LocalSiteRequired;
@@ -1422,6 +1529,17 @@ pub const View = struct {
         return edges;
     }
 
+    /// The View attached to `window` with `attach`, if its content is one,
+    /// as tools that drive a window from outside find it.
+    pub fn ofWindow(window: z.Window) ?*View {
+        const content = window.attachedContent() orelse return null;
+        if (content.event != &event) return null;
+        return @ptrCast(@alignCast(content.context));
+    }
+    /// True while the page has started a navigation that has not finished.
+    pub fn isLoading(self: *const View) bool {
+        return self.loading;
+    }
     /// Address must remain stable through detach. No nested message pumping.
     pub fn attach(self: *View, window: z.Window, options: Options) !void {
         if (self.session != null) return error.ManagedSession;
@@ -1536,7 +1654,7 @@ pub const View = struct {
         defer if (content_style) |value| self.allocator.free(value);
         const facts = try self.factsScript(.windows);
         defer if (facts) |value| self.allocator.free(value);
-        const settings: NativeSettings = .{ .facts = if (facts) |value| value.ptr else null, .browser_arguments = if (config.options.autoplay == .allow) std.unicode.utf8ToUtf16LeStringLiteral("--autoplay-policy=no-user-gesture-required") else null, .zoom = self.zoom_override orelse config.options.zoom, .user_agent = if (agent) |value| value.ptr else null, .devtools = self.devtools_override orelse config.options.devtools_enabled, .tool_flags = tool_flags, .tool_limit = limits.max_pending, .max_cookies = limits.max_cookies, .max_cookie_bytes = limits.max_cookie_bytes, .max_capture_bytes = limits.max_capture_bytes, .schemes = if (config.options.custom_schemes.len == 0) null else &scheme_scratch.items, .scheme_count = @intCast(config.options.custom_schemes.len), .local_ipc = if (config.options.local) |site| std.mem.eql(u8, site.scheme, "https") or site.scheme_ipc else true, .actions = if (actions) |*value| value else null, .initializers = if (initializer_input) |*value| value else null, .owned_context = if (config.profile_state) |state| try state.context.windowsContext() else null, .audio_muted = self.mutedWanted(), .content_verdict = if (self.activeRules().len != 0) contentVerdict else null, .content_style = if (content_style) |value| value.ptr else null };
+        const settings: NativeSettings = .{ .context_menu = @backingInt(config.options.context_menu), .context_offer = if (config.options.context_menu == .handler) View.windowsContextMenu else null, .auth = if (config.options.http_auth != null) View.windowsAuth else null, .certificate = if (config.options.certificate_errors != null) View.windowsCertificate else null, .facts = if (facts) |value| value.ptr else null, .browser_arguments = browserArguments(config.options), .gestures = gestureFlags(config.options), .zoom = self.zoom_override orelse config.options.zoom, .user_agent = if (agent) |value| value.ptr else null, .devtools = self.devtools_override orelse config.options.devtools_enabled, .tool_flags = tool_flags, .tool_limit = limits.max_pending, .max_cookies = limits.max_cookies, .max_cookie_bytes = limits.max_cookie_bytes, .max_capture_bytes = limits.max_capture_bytes, .schemes = if (config.options.custom_schemes.len == 0) null else &scheme_scratch.items, .scheme_count = @intCast(config.options.custom_schemes.len), .local_ipc = if (config.options.local) |site| std.mem.eql(u8, site.scheme, "https") or site.scheme_ipc else true, .actions = if (actions) |*value| value else null, .initializers = if (initializer_input) |*value| value else null, .owned_context = if (config.profile_state) |state| try state.context.windowsContext() else null, .audio_muted = self.mutedWanted(), .content_verdict = if (self.activeRules().len != 0) contentVerdict else null, .content_style = if (content_style) |value| value.ptr else null };
         self.native = zwv_create(window.nativeHandle(), if (html) |value| value.ptr else std.unicode.utf8ToUtf16LeStringLiteral(""), profile.ptr, if (url) |value| value.ptr else null, if (prefix) |value| value.ptr else null, if (remote) |*value| value else null, &settings, policy, config.options.max_cached_permissions, config.options.scripts.max_pending, config.options.allow_local_navigation, config.options.page_listener != null, notify, pageNotify, scriptNotify, toolNotify, resource, self, &self.last_hresult) orelse return error.WebViewCreationFailed;
         errdefer {
             nativeClose(self.native.?);
@@ -1622,7 +1740,7 @@ pub const View = struct {
         };
         const facts = try self.factsScript(.linux);
         defer if (facts) |value| self.allocator.free(value);
-        const native_options: webkit.Options = .{ .content_filters = filters.ptr, .content_filter_count = filter_count, .audio_muted = @intFromBool(self.mutedWanted()), .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled) };
+        const native_options: webkit.Options = .{ .context_menu = @backingInt(options.context_menu), .context_offer = if (!is_macos and options.context_menu == .handler) View.webkitContextMenu else null, .auth = if (!is_macos and options.http_auth != null) View.webkitAuth else null, .certificate = if (!is_macos and options.certificate_errors != null) View.webkitCertificate else null, .content_filters = filters.ptr, .content_filter_count = filter_count, .audio_muted = @intFromBool(self.mutedWanted()), .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .gestures = gestureFlags(options), .throttling = @intFromBool(options.background_throttling), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled) };
         var candidate: ?*anyopaque = null;
         if (self.session) |session| {
             try webkit.check(webkit.zwk_session_create(&native_options, session.last_size.width, session.last_size.height, webkitNotify, pageNotify, webkitScriptNotify, webkitTimeout, self, &candidate));
@@ -2177,6 +2295,190 @@ pub const View = struct {
         var destination = slot.destination;
         defer if (destination) |*owned| owned.deinit();
         if (slot.completion) |completion| completion.complete(completion.context, result);
+    }
+    /// The View's pages' sign-ins and certificate errors, answered by the
+    /// app's handlers while the engine waits; see Options.http_auth.
+    fn authView(ptr: *anyopaque) ?*View {
+        const self: *View = @ptrCast(@alignCast(ptr));
+        const window = self.access() orelse return null;
+        if (self.attachmentClosed() or appStopping(window) or self.recovering) return null;
+        return self;
+    }
+    fn windowsAuth(ptr: *anyopaque, uri_wide: [*:0]const u16, challenge_wide: [*:0]const u16, call: *anyopaque) callconv(.c) void {
+        if (is_webkit) return;
+        const self = authView(ptr) orelse return;
+        const handler = self.config.?.options.http_auth orelse return;
+        var uri_storage: [16384]u8 = undefined;
+        var challenge_storage: [4096]u8 = undefined;
+        const uri = uri_storage[0 .. std.unicode.utf16LeToUtf8(&uri_storage, std.mem.span(uri_wide)) catch return];
+        const challenge = challenge_storage[0 .. std.unicode.utf16LeToUtf8(&challenge_storage, std.mem.span(challenge_wide)) catch return];
+        const place = http_auth.authority(uri) orelse return;
+        var parsed: http_auth.Parsed = .{ .scheme = "", .realm = "" };
+        http_auth.parseChallenge(challenge, &parsed);
+        const scheme = http_auth.schemeNamed(parsed.scheme) orelse return;
+        const scope = self.beginNativeAttachment() orelse return;
+        defer scope.end();
+        const credentials = handler.answer(handler.context, self, .{ .host = place.host, .port = place.port, .realm = parsed.realm, .scheme = scheme, .proxy = false }) orelse return;
+        var user: [http_auth.limits.credential_bytes + 1:0]u16 = undefined;
+        var password: [http_auth.limits.credential_bytes + 1:0]u16 = undefined;
+        if (!wideCredential(&user, credentials.username) or !wideCredential(&password, credentials.password)) return;
+        defer std.crypto.secureZero(u16, &password);
+        _ = zwv_auth_answer(call, &user, &password);
+    }
+    fn wideCredential(out: *[http_auth.limits.credential_bytes + 1:0]u16, text: []const u8) bool {
+        if (text.len > http_auth.limits.credential_bytes) return false;
+        const length = std.unicode.utf8ToUtf16Le(out, text) catch return false;
+        out[length] = 0;
+        return true;
+    }
+    fn credentialZ(out: *[http_auth.limits.credential_bytes + 1:0]u8, text: []const u8) ?[*:0]const u8 {
+        if (text.len > http_auth.limits.credential_bytes or std.mem.indexOfScalar(u8, text, 0) != null) return null;
+        @memcpy(out[0..text.len], text);
+        out[text.len] = 0;
+        return out;
+    }
+    fn windowsCertificate(ptr: *anyopaque, uri_wide: [*:0]const u16, status: i32, pem_wide: [*:0]const u16) callconv(.c) c_int {
+        if (is_webkit) return 0;
+        const self = authView(ptr) orelse return 0;
+        const handler = self.config.?.options.certificate_errors orelse return 0;
+        var uri_storage: [16384]u8 = undefined;
+        const uri = uri_storage[0 .. std.unicode.utf16LeToUtf8(&uri_storage, std.mem.span(uri_wide)) catch return 0];
+        const place = http_auth.authority(uri) orelse return 0;
+        const pem_text = std.mem.span(pem_wide);
+        if (pem_text.len > http_auth.limits.certificate_bytes * 2) return 0;
+        var pem_storage: [http_auth.limits.certificate_bytes * 2]u8 = undefined;
+        var der_storage: [http_auth.limits.certificate_bytes]u8 = undefined;
+        const pem = pem_storage[0 .. std.unicode.utf16LeToUtf8(&pem_storage, pem_text) catch return 0];
+        const der = http_auth.pemCertificate(pem, &der_storage) orelse return 0;
+        const scope = self.beginNativeAttachment() orelse return 0;
+        defer scope.end();
+        return @intFromBool(handler.allow(handler.context, self, .{ .uri = uri, .host = place.host, .reason = http_auth.webview2Reason(status), .certificate = der }));
+    }
+    fn webkitAuth(ptr: *anyopaque, host: [*:0]const u8, port: u32, realm: [*:0]const u8, native_scheme: u32, proxy: c_int, call: *anyopaque) callconv(.c) void {
+        if (!is_webkit) return;
+        const self = authView(ptr) orelse return;
+        const handler = self.config.?.options.http_auth orelse return;
+        const scheme = http_auth.webkitScheme(native_scheme) orelse return;
+        const scope = self.beginNativeAttachment() orelse return;
+        defer scope.end();
+        const credentials = handler.answer(handler.context, self, .{ .host = std.mem.span(host), .port = std.math.cast(u16, port) orelse return, .realm = std.mem.span(realm), .scheme = scheme, .proxy = proxy != 0 }) orelse return;
+        var user: [http_auth.limits.credential_bytes + 1:0]u8 = undefined;
+        var password: [http_auth.limits.credential_bytes + 1:0]u8 = undefined;
+        defer std.crypto.secureZero(u8, &password);
+        const user_z = credentialZ(&user, credentials.username) orelse return;
+        const password_z = credentialZ(&password, credentials.password) orelse return;
+        _ = zwk_auth_answer(call, user_z, password_z);
+    }
+    fn webkitCertificate(ptr: *anyopaque, uri_z: [*:0]const u8, flags: u32, der: [*]const u8, length: usize) callconv(.c) c_int {
+        if (!is_webkit) return 0;
+        const self = authView(ptr) orelse return 0;
+        const handler = self.config.?.options.certificate_errors orelse return 0;
+        const uri = std.mem.span(uri_z);
+        const place = http_auth.authority(uri) orelse return 0;
+        if (length > http_auth.limits.certificate_bytes) return 0;
+        const scope = self.beginNativeAttachment() orelse return 0;
+        defer scope.end();
+        return @intFromBool(handler.allow(handler.context, self, .{ .uri = uri, .host = place.host, .reason = http_auth.gtlsReason(flags), .certificate = der[0..length] }));
+    }
+    /// The page's context menu, changed by the app's handler before the
+    /// engine shows it; nonzero shows none.
+    fn openContextMenu(self: *View, target: context_menu.Target, items: []const context_menu.Item, keep_native: [*]u8, native_menu: context_menu.Backend) c_int {
+        const handler = switch (self.config.?.options.context_menu) {
+            .handler => |value| value,
+            else => return 0,
+        };
+        var keep: [context_menu.max_items]bool = @splat(true);
+        var menu: ContextMenu = .{ .target = target, .items = items, .keep = &keep, .backend = native_menu };
+        const scope = self.beginNativeAttachment() orelse return 1;
+        defer scope.end();
+        handler.open(handler.context, self, &menu);
+        if (menu.prevented or self.attachmentClosed()) return 1;
+        for (items, 0..) |_, i| keep_native[i] = @intFromBool(keep[i]);
+        return 0;
+    }
+    const ContextAppend = struct {
+        call: *anyopaque,
+        fn windows(ptr: *anyopaque, addition: context_menu.Addition) error{ TooManyItems, InvalidLabel, OutOfMemory, NativeFailure }!void {
+            const self: *ContextAppend = @ptrCast(@alignCast(ptr));
+            var label: [context_menu.max_label_bytes + 1:0]u16 = undefined;
+            const text, const command, const kind: u32, const flags: u32 = switch (addition) {
+                .command => |value| .{ value.label, value.command, 0, @intFromBool(value.enabled) },
+                .check => |value| .{ value.label, value.command, 1, @as(u32, @intFromBool(value.enabled)) | @as(u32, @intFromBool(value.checked)) << 1 },
+                .separator => .{ "", 0, 3, 0 },
+            };
+            const length = std.unicode.utf8ToUtf16Le(&label, text) catch return error.InvalidLabel;
+            label[length] = 0;
+            if (zwv_context_menu_append(self.call, &label, command, kind, flags) < 0) return error.NativeFailure;
+        }
+        fn webkit(ptr: *anyopaque, addition: context_menu.Addition) error{ TooManyItems, InvalidLabel, OutOfMemory, NativeFailure }!void {
+            const self: *ContextAppend = @ptrCast(@alignCast(ptr));
+            var label: [context_menu.max_label_bytes + 1:0]u8 = undefined;
+            const text, const command, const kind: u32, const flags: u32 = switch (addition) {
+                .command => |value| .{ value.label, value.command, 0, @intFromBool(value.enabled) },
+                .check => |value| .{ value.label, value.command, 1, @as(u32, @intFromBool(value.enabled)) | @as(u32, @intFromBool(value.checked)) << 1 },
+                .separator => .{ "", 0, 3, 0 },
+            };
+            @memcpy(label[0..text.len], text);
+            label[text.len] = 0;
+            const result = zwk_context_menu_append(self.call, &label, command, kind, flags);
+            if (result == 2) return error.TooManyItems;
+            if (result == 3) return error.OutOfMemory;
+            if (result != 0) return error.NativeFailure;
+        }
+    };
+    fn windowsContextMenu(ptr: *anyopaque, native_target: *const NativeContextTarget, native_items: [*]const NativeContextItem, count: u32, keep: [*]u8, call: *anyopaque) callconv(.c) c_int {
+        if (is_webkit) return 1;
+        const self = authView(ptr) orelse return 1;
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const narrow = struct {
+            fn of(a: std.mem.Allocator, wide: ?[*:0]const u16) error{ OutOfMemory, InvalidUtf16 }!?[]const u8 {
+                const value = wide orelse return null;
+                return std.unicode.utf16LeToUtf8Alloc(a, std.mem.span(value)) catch |err| switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => error.InvalidUtf16,
+                };
+            }
+        }.of;
+        const items = allocator.alloc(context_menu.Item, @min(count, context_menu.max_items)) catch return 1;
+        for (items, 0..) |*item, i| {
+            const native = native_items[i];
+            const name = (narrow(allocator, native.name) catch return 1).?;
+            const raw = (narrow(allocator, native.label) catch return 1).?;
+            const storage = allocator.alloc(u8, raw.len) catch return 1;
+            item.* = .{ .id = context_menu.webview2Id(name), .label = context_menu.plainLabel(raw, '&', storage), .kind = std.enums.fromInt(context_menu.Kind, native.kind) orelse .command, .enabled = native.flags & 1 != 0, .checked = native.flags & 2 != 0 };
+        }
+        const target: context_menu.Target = .{
+            .link_uri = narrow(allocator, native_target.link) catch return 1,
+            .link_text = narrow(allocator, native_target.link_text) catch return 1,
+            .image_uri = narrow(allocator, native_target.image) catch return 1,
+            .media_uri = narrow(allocator, native_target.media) catch return 1,
+            .selection = narrow(allocator, native_target.selection) catch return 1,
+            .frame_uri = narrow(allocator, native_target.frame) catch return 1,
+            .editable = native_target.editable != 0,
+        };
+        var append: ContextAppend = .{ .call = call };
+        return self.openContextMenu(target, items, keep, .{ .context = &append, .append = ContextAppend.windows });
+    }
+    fn webkitContextMenu(ptr: *anyopaque, native_target: *const webkit.ContextTarget, native_items: [*]const webkit.ContextItem, count: u32, keep: [*]u8, call: *anyopaque) callconv(.c) c_int {
+        if (!is_webkit) return 1;
+        const self = authView(ptr) orelse return 1;
+        var items: [context_menu.max_items]context_menu.Item = undefined;
+        var labels: [context_menu.max_items][context_menu.max_label_bytes]u8 = undefined;
+        const listed = @min(count, context_menu.max_items);
+        for (items[0..listed], 0..) |*item, i| {
+            const native = native_items[i];
+            item.* = .{ .id = context_menu.webkitId(native.action) orelse std.mem.span(native.name), .label = context_menu.plainLabel(std.mem.span(native.label), '_', &labels[i]), .kind = std.enums.fromInt(context_menu.Kind, native.kind) orelse .command, .enabled = native.flags & 1 != 0, .checked = native.flags & 2 != 0 };
+        }
+        const span = struct {
+            fn of(value: ?[*:0]const u8) ?[]const u8 {
+                return if (value) |text| std.mem.span(text) else null;
+            }
+        }.of;
+        const target: context_menu.Target = .{ .link_uri = span(native_target.link), .link_text = span(native_target.link_text), .image_uri = span(native_target.image), .media_uri = span(native_target.media), .selection = span(native_target.selection), .frame_uri = span(native_target.frame), .editable = native_target.editable != 0 };
+        var append: ContextAppend = .{ .call = call };
+        return self.openContextMenu(target, items[0..listed], keep, .{ .context = &append, .append = ContextAppend.webkit });
     }
     fn downloadOffer(ptr: *anyopaque, uri_wide: [*:0]const u16, mime_wide: [*:0]const u16, name_wide: [*:0]const u16, total: i64, native_call: *anyopaque) callconv(.c) void {
         const self: *View = @ptrCast(@alignCast(ptr));
@@ -3261,12 +3563,16 @@ pub const View = struct {
     fn factsScript(self: *View, comptime backend_kind: enum { windows, linux }) !?(if (backend_kind == .windows) [:0]u16 else [:0]u8) {
         const options = self.config.?.options;
         const config: page_facts.Config = .{ .theme = options.theme_color, .fit = options.fit_content, .zoom = self.zoom_override orelse options.zoom };
-        if (!config.any()) return null;
         if (backend_kind == .linux) {
-            const text = try page_facts.script(self.allocator, config, "v=>send('F'+v)");
+            // WebKitGTK's hit test tells no selection: the page's
+            // contextmenu event, just before the menu, does.
+            const selection = if (options.context_menu == .handler) "addEventListener('contextmenu',()=>{try{send('S'+String(getSelection()).slice(0,4096))}catch(e){}},true);" else "";
+            if (!config.any() and selection.len == 0) return null;
+            const text = if (config.any()) try page_facts.script(self.allocator, config, "v=>send('F'+v)") else try self.allocator.dupe(u8, "");
             defer self.allocator.free(text);
-            return try self.allocator.dupeSentinel(u8, text, 0);
+            return try std.mem.concatWithSentinel(self.allocator, u8, &.{ text, selection }, 0);
         }
+        if (!config.any()) return null;
         const text = try page_facts.script(self.allocator, config, "v=>p('\\u0001ziggurat-facts:'+v)");
         defer self.allocator.free(text);
         const whole = try std.mem.concat(self.allocator, u8, &.{ "(()=>{if(window!==top||!window.chrome||!chrome.webview)return;const p=chrome.webview.postMessage.bind(chrome.webview);", text, "})();" });
@@ -3432,6 +3738,87 @@ pub const View = struct {
         try self.navigationResult(window);
     }
 
+    /// Moves the page's video into picture in picture, the playing one or
+    /// else the largest, or back when one is out, as a user's
+    /// requestPictureInPicture() or exitPictureInPicture() would; a video
+    /// with disablePictureInPicture stays. Windows runs them through the
+    /// DevTools protocol as a user's gesture, which Chromium needs; whether
+    /// a video is out is the page's document.pictureInPictureElement, and
+    /// its enterpictureinpicture and leavepictureinpicture events tell.
+    /// WebKitGTK has no picture in picture: UnsupportedCapability.
+    pub fn togglePictureInPicture(self: *View) !void {
+        _ = try self.propertyWindow();
+        if (is_webkit) return error.UnsupportedCapability;
+        const scope = self.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        try self.propertyResult(zwv_toggle_picture_in_picture(self.native.?));
+    }
+    /// The page's session to save, for restoreSessionState in another
+    /// View, at the next launch or after the app closed a page it was not
+    /// showing; caller-owned. Linux keeps WebKitGTK's back/forward list
+    /// with the scroll positions and form fields it saved: it saves a
+    /// page's scroll position a moment after scrolling stops and its form
+    /// fields as the page goes out of view. Windows keeps the page's URI
+    /// alone, WebView2 having no such state.
+    pub fn sessionState(self: *View, allocator: std.mem.Allocator) ![]u8 {
+        _ = try self.propertyWindow();
+        if (is_macos) return error.UnsupportedCapability;
+        if (self.config.?.options.local == null and self.config.?.options.remote == null) return error.LocalSiteRequired;
+        const scope = self.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        if (is_webkit) {
+            var uri: ?[*:0]u8 = null;
+            var data: ?*anyopaque = null;
+            var length: usize = 0;
+            const result = webkit.zwk_session_state(self.native.?, &uri, &data, &length);
+            defer if (uri) |value| webkit.zwk_string_free(value);
+            defer if (data) |value| webkit.zwk_string_free(@ptrCast(value));
+            try webkit.check(result);
+            const native: []const u8 = if (data) |value| @as([*]const u8, @ptrCast(value))[0..length] else "";
+            return session_state.encode(allocator, .linux, std.mem.span(uri orelse return error.NotReady), native);
+        }
+        var wide: ?[*:0]u16 = null;
+        const hr = zwv_document_source(self.native.?, &wide);
+        defer if (wide) |value| zwv_string_free(value);
+        try self.propertyResult(hr);
+        const value = wide orelse return error.NotReady;
+        const uri = try std.unicode.utf16LeToUtf8Alloc(allocator, std.mem.span(value));
+        defer allocator.free(uri);
+        return session_state.encode(allocator, .windows, uri, "");
+    }
+    /// Brings back a session that sessionState saved, in place of the
+    /// page: on Linux the back/forward list and the current item's scroll
+    /// position and form fields, whose current item loads, once ready with
+    /// no navigation pending. A state of another platform, or one the
+    /// engine cannot read, loads the URI it saved, as navigateLocal or
+    /// navigateRemote would, which the page's site must allow (OriginDenied,
+    /// InvalidResourcePath otherwise).
+    pub fn restoreSessionState(self: *View, state: []const u8) !void {
+        if (is_macos) return error.UnsupportedCapability;
+        const parsed = try session_state.parse(state);
+        const window = self.access() orelse return error.Closed;
+        window.app.assertOwner();
+        if (self.attachmentClosed() or appStopping(window)) return error.Closed;
+        if (!self.ready or self.recovering) return error.NotReady;
+        if (!self.initializerNavigationAllowed()) return error.Busy;
+        const options = self.config.?.options;
+        if (options.local == null and options.remote == null) return error.LocalSiteRequired;
+        if (is_webkit and parsed.platform == .linux and parsed.native.len != 0) {
+            const scope = self.beginCallback() orelse return error.Closed;
+            defer scope.end();
+            switch (webkit.zwk_session_restore(self.native.?, parsed.native.ptr, parsed.native.len)) {
+                0 => return,
+                4 => {}, // The engine cannot read it: the URI loads.
+                8 => return error.OriginDenied,
+                else => |result| return webkit.check(result),
+            }
+        }
+        if (options.local) |site| {
+            const path = session_state.localPath(parsed.uri, site.scheme, site.host) orelse return error.InvalidResourcePath;
+            return self.navigateLocal(path);
+        }
+        return self.navigateRemote(parsed.uri);
+    }
     pub fn goBack(self: *View) !void {
         try self.pageAction(0);
     }
@@ -3548,6 +3935,11 @@ pub const View = struct {
         if ((native.kind == 0 and native.flags & 1 == 0) or ((native.kind == 1 or native.kind == 3) and native.flags & 1 == 0)) self.finishRequests(.page_changed, .page_changed, .page_changed, .page, null, true);
         if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != id.generation) return 0;
         if (native.kind == 10) return self.pageFactNotify(window, id, native.value);
+        if (native.kind == 11) {
+            const listener = self.config.?.options.page_listener orelse return 1;
+            listener.event(listener.context, self, .{ .context_menu_command = .{ .id = id, .command = @bitCast(native.status) } });
+            return if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != id.generation) 0 else 1;
+        }
         // A page that never told a theme color, as an image, has none once loaded.
         if (native.kind == 1 and self.config.?.options.theme_color and self.theme_told != id.generation and self.theme_color_value != null) {
             self.theme_color_value = null;
@@ -3574,7 +3966,7 @@ pub const View = struct {
         if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != id.generation) return 0;
         const ev: PageEvent = switch (native.kind) {
             0 => .{ .started = .{ .id = id, .navigation_id = native.navigation_id, .uri = utf8, .redirected = native.flags & 1 != 0 } },
-            1 => .{ .completed = .{ .id = id, .navigation_id = native.navigation_id, .success = native.flags & 1 != 0, .native_status = native.status } },
+            1 => .{ .completed = .{ .id = id, .navigation_id = native.navigation_id, .success = native.flags & 1 != 0, .native_status = native.status, .cancelled = native.flags & 2 != 0 } },
             2 => .{ .dom_ready = id },
             3 => .{ .source_changed = .{ .id = id, .uri = utf8 } },
             4 => .{ .title_changed = .{ .id = id, .title = utf8 } },
@@ -3643,7 +4035,7 @@ pub const View = struct {
                 };
                 defer self.allocator.free(text);
                 if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != page) return;
-                self.on_event(self.context, self, .{ .policy_request = .{ .kind = @fromBackingInt(@intCast(kind - 3)), .uri = text, .native_detail = hr, .user_gesture = if (kind == 3 or kind == 4) hr != 0 else null } });
+                self.on_event(self.context, self, .{ .policy_request = .{ .kind = @fromBackingInt(@intCast(zio.asUnsigned(kind - 3))), .uri = text, .native_detail = hr, .user_gesture = if (kind == 3 or kind == 4) hr != 0 else null } });
             },
             8 => {
                 self.ready = false;

@@ -3,6 +3,7 @@ const core = @import("../root.zig");
 const icons = @import("windows_icons.zig");
 const text_input = @import("windows_text.zig");
 const pointer_press = @import("pointer_press.zig");
+const work_area = @import("work_area.zig");
 const c = @import("ziggurat_c_win32");
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("Ziggurat.Window.0");
 const dispatch_name = std.unicode.utf8ToUtf16LeStringLiteral("Ziggurat.Dispatch.0");
@@ -32,7 +33,7 @@ const PointerDispatch = struct {
 const Wait = struct { handle: c.HANDLE = null, task: core.Task = undefined, generation: u64 = 1, retired: bool = false };
 pub const AppData = struct { popup_shadow_class: c.ATOM = 0, taskbar_created: c.UINT = 0, taskbar: ?*TaskbarList = null, dispatcher: c.HWND = null, wake_event: c.HANDLE = null, wake_pending: std.atomic.Value(bool) = .init(false), class_icons: icons.Icons = .{}, waits: [16]Wait = @splat(.{}), window_class: c.ATOM = 0, key_dispatch: ?*KeyDispatch = null, pointer_dispatch: ?*PointerDispatch = null, pointer_windows: usize = 0 };
 const FullscreenPlacement = struct { style: isize, ex_style: isize, placement: c.WINDOWPLACEMENT };
-pub const WindowData = struct { hwnd: c.HWND = null, icons: icons.Icons = .{}, text: text_input.Handler = .{}, fullscreen: bool = false, restoring_placement: bool = false, saved: ?FullscreenPlacement = null, identity: usize = 0, gesture_active: bool = false, gesture_used: bool = false, gesture_point: c.LPARAM = 0, pending_interaction: ?PendingInteraction = null, interaction_handoff: bool = false, native_loop_depth: usize = 0, pointer_operation: pointer_press.Operation = .{}, pointer_counted: bool = false, opacity: f32 = 1, ignore_pointer: bool = false, skip_taskbar: bool = false, no_redirect: bool = false };
+pub const WindowData = struct { hwnd: c.HWND = null, icons: icons.Icons = .{}, text: text_input.Handler = .{}, fullscreen: bool = false, restoring_placement: bool = false, saved: ?FullscreenPlacement = null, identity: usize = 0, gesture_active: bool = false, gesture_used: bool = false, gesture_point: c.LPARAM = 0, pending_interaction: ?PendingInteraction = null, interaction_handoff: bool = false, native_loop_depth: usize = 0, pointer_operation: pointer_press.Operation = .{}, pointer_counted: bool = false, opacity: f32 = 1, ignore_pointer: bool = false, skip_taskbar: bool = false, no_redirect: bool = false, background: ?u32 = null, background_brush: c.HBRUSH = null, filled: c.SIZE = .{ .cx = 0, .cy = 0 } };
 var active_app: std.atomic.Value(bool) = .init(false);
 
 pub fn init(app: *core.App) !void {
@@ -155,7 +156,9 @@ pub fn create(window: *core.WindowRecord, options: core.WindowOptions) !void {
     // bitmap, whose opaque surface would cover the system backdrop. GDI
     // draws nothing there: frames show through DirectComposition with their
     // alpha, and menus open in a popup. The style is the window's for life.
-    if (options.vibrancy != .none and systemBackdropAvailable()) {
+    // A transparent window goes without one too: what its frames leave
+    // transparent shows what is behind it, not the bitmap's black.
+    if ((options.vibrancy != .none and systemBackdropAvailable()) or options.transparent) {
         ex_style |= ws_ex_no_redirection_bitmap;
         window.native.no_redirect = true;
     }
@@ -165,6 +168,7 @@ pub fn create(window: *core.WindowRecord, options: core.WindowOptions) !void {
         return error.CreateWindowFailed;
     }
     window.native.icons.apply(window.native.hwnd);
+    if (options.decoration != .system and options.popup == null) plainCaption(window.native.hwnd);
     if (options.vibrancy != .none) setVibrancy(window, options.vibrancy);
     if (options.popup) |role| if (role.shadow) {
         // Windows 11 rounds, outlines and shades it as it does its menus;
@@ -176,6 +180,18 @@ pub fn create(window: *core.WindowRecord, options: core.WindowOptions) !void {
         errdefer _ = c.DestroyWindow(window.native.hwnd);
         _ = try setTextInputMode(window, options.text_input_mode);
     }
+}
+const dwm_caption_color = 35;
+/// DWMWA_COLOR_NONE: no caption color at all, not the accent.
+const dwm_color_none: u32 = 0xFFFFFFFE;
+/// Keeps the accent color off the top of a window without a system caption.
+/// With "Show accent color on title bars and window borders" on, Windows 11
+/// paints the caption in the accent, and where the frame extends into the
+/// client area (a material) it shows as a strip over the content. Windows 10
+/// knows no caption color and rejects the attribute.
+fn plainCaption(hwnd: c.HWND) void {
+    const none = dwm_color_none;
+    _ = DwmSetWindowAttribute(hwnd, dwm_caption_color, &none, @sizeOf(u32));
 }
 const dwm_window_corner_preference = 33;
 const dwm_corner_round = 2;
@@ -553,8 +569,8 @@ fn consumeWake(app: *core.App) void {
 pub fn quit(app: *core.App) void {
     // A native move/size loop must release capture before the outer loop can
     // reach Stop and deferred destruction. Other hosts retain their capture.
-    const capture = c.GetCapture();
-    const owns_capture = capture != null and keyRecord(app, c.GetAncestor(capture, c.GA_ROOT)) != null;
+    const holder = c.GetCapture();
+    const owns_capture = holder != null and keyRecord(app, c.GetAncestor(holder, c.GA_ROOT)) != null;
     // ReleaseCapture can reenter; do not retain a record across this call.
     if (owns_capture) _ = c.ReleaseCapture();
     var cursor = app.first;
@@ -605,7 +621,7 @@ pub fn state(window: *core.WindowRecord) core.WindowState {
     return .{ .visible = c.IsWindowVisible(hwnd) != 0, .minimized = c.IsIconic(hwnd) != 0, .maximized = c.IsZoomed(hwnd) != 0, .focused = c.GetFocus() == hwnd, .enabled = c.IsWindowEnabled(hwnd) != 0, .fullscreen = window.native.fullscreen, .fullscreen_requested = window.native.fullscreen, .always_on_top = topmost, .always_on_top_requested = topmost };
 }
 pub fn capabilities(window: *core.WindowRecord) core.WindowCapabilities {
-    return .{ .client_position = true, .fullscreen = true, .always_on_top = true, .owned_windows = true, .modal_windows = true, .custom_decoration = true, .native_move_resize = true, .system_menu = true, .backdrop_material = window.options.decoration == .system and systemBackdropAvailable(), .opacity = true, .ignore_pointer = true, .content_protection = true, .attention = true, .skip_taskbar = true, .window_buttons = true, .transparent = window.native.no_redirect, .vibrancy = window.native.no_redirect };
+    return .{ .client_position = true, .fullscreen = true, .always_on_top = true, .owned_windows = true, .modal_windows = true, .custom_decoration = true, .native_move_resize = true, .system_menu = true, .backdrop_material = window.options.decoration == .system and systemBackdropAvailable(), .opacity = true, .ignore_pointer = true, .content_protection = true, .attention = true, .skip_taskbar = true, .window_buttons = true, .transparent = window.native.no_redirect, .vibrancy = window.native.no_redirect and window.options.vibrancy != .none and systemBackdropAvailable() };
 }
 /// Style bits owned by WindowTraits. A window without resize has no maximize
 /// box, as at creation.
@@ -874,6 +890,75 @@ pub fn setClientBounds(window: *core.WindowRecord, bounds: core.ClientBounds) !v
     }
     if (!sameWindow(window, hwnd)) return error.Closed;
 }
+pub fn setBackground(window: *core.WindowRecord, rgb: ?u32) void {
+    if (window.native.background_brush) |brush| _ = c.DeleteObject(brush);
+    window.native.background_brush = null;
+    window.native.background = rgb;
+    const value = rgb orelse return;
+    // COLORREF is 0x00BBGGRR.
+    window.native.background_brush = c.CreateSolidBrush((value & 0xff) << 16 | (value & 0xff00) | (value >> 16 & 0xff));
+}
+/// Fills what the window grew by with the content's background at once,
+/// before the frame of the new size draws: until then DWM shows the window
+/// at its new size, and the area nothing painted shows black. Once per
+/// change of size; the graphics surface, still at the old size, covers the
+/// rest. Windows without a redirection bitmap show their material there.
+fn fillUncovered(window: *core.WindowRecord, hwnd: c.HWND, lp: c.LPARAM) void {
+    const bits: usize = @bitCast(lp);
+    const now: c.SIZE = .{ .cx = @intCast(bits & 0xffff), .cy = @intCast(bits >> 16 & 0xffff) };
+    const before = window.native.filled;
+    window.native.filled = now;
+    const brush = window.native.background_brush orelse return;
+    if (window.native.no_redirect or (now.cx <= before.cx and now.cy <= before.cy)) return;
+    const dc = c.GetDC(hwnd) orelse return;
+    defer _ = c.ReleaseDC(hwnd, dc);
+    if (now.cx > before.cx) _ = c.FillRect(dc, &.{ .left = before.cx, .top = 0, .right = now.cx, .bottom = now.cy }, brush);
+    if (now.cy > before.cy) _ = c.FillRect(dc, &.{ .left = 0, .top = before.cy, .right = @min(before.cx, now.cx), .bottom = now.cy }, brush);
+}
+extern "dwmapi" fn DwmGetWindowAttribute(c.HWND, u32, *anyopaque, u32) callconv(.winapi) c.HRESULT;
+const dwm_extended_frame_bounds = 9;
+fn areaRect(r: c.RECT) work_area.Rect {
+    return .{ .left = r.left, .top = r.top, .right = r.right, .bottom = r.bottom };
+}
+/// Windows maximizes a top-level window into the work area only when it has
+/// a maximize box, and over the whole monitor, taskbar included, otherwise.
+/// A system-framed window the user cannot maximize, maximized by the app,
+/// moves into the work area as the maximize applies, in screen coordinates:
+/// WM_GETMINMAXINFO's are given for the primary monitor. Custom decoration
+/// already maximizes into the work area there; full screen covers the
+/// monitor on purpose.
+fn workAreaApplies(window: *core.WindowRecord, hwnd: c.HWND) bool {
+    return window.options.decoration == .system and !window.native.fullscreen and style(hwnd, c.GWL_STYLE) & c.WS_MAXIMIZEBOX == 0 and c.IsZoomed(hwnd) != 0;
+}
+fn maximizeInWorkArea(window: *core.WindowRecord, hwnd: c.HWND, pos: *c.WINDOWPOS) void {
+    if (pos.flags & (c.SWP_NOMOVE | c.SWP_NOSIZE) != 0 or !workAreaApplies(window, hwnd)) return;
+    var r: c.RECT = .{ .left = pos.x, .top = pos.y, .right = pos.x + pos.cx, .bottom = pos.y + pos.cy };
+    var monitor = std.mem.zeroes(c.MONITORINFO);
+    monitor.cbSize = @sizeOf(c.MONITORINFO);
+    if (c.GetMonitorInfoW(c.MonitorFromRect(&r, c.MONITOR_DEFAULTTONULL), &monitor) == 0) return;
+    if (work_area.maximized(areaRect(r), areaRect(monitor.rcMonitor), areaRect(monitor.rcWork))) |next| {
+        r = .{ .left = next.left, .top = next.top, .right = next.right, .bottom = next.bottom };
+        pos.x = r.left;
+        pos.y = r.top;
+        pos.cx = r.right - r.left;
+        pos.cy = r.bottom - r.top;
+    }
+}
+/// Fits a maximized window into the work area once it is maximized, where
+/// WM_WINDOWPOSCHANGING came before the window was zoomed: it overhangs the
+/// work area by its invisible borders, what lies outside the part DWM shows.
+fn fitWorkArea(window: *core.WindowRecord, hwnd: c.HWND) void {
+    if (!workAreaApplies(window, hwnd)) return;
+    var r: c.RECT = undefined;
+    if (c.GetWindowRect(hwnd, &r) == 0) return;
+    var shown = std.mem.zeroes(c.RECT);
+    _ = DwmGetWindowAttribute(hwnd, dwm_extended_frame_bounds, &shown, @sizeOf(c.RECT));
+    var monitor = std.mem.zeroes(c.MONITORINFO);
+    monitor.cbSize = @sizeOf(c.MONITORINFO);
+    if (c.GetMonitorInfoW(c.MonitorFromWindow(hwnd, c.MONITOR_DEFAULTTONEAREST), &monitor) == 0) return;
+    const next = work_area.fit(areaRect(r), areaRect(shown), areaRect(monitor.rcMonitor), areaRect(monitor.rcWork)) orelse return;
+    _ = c.SetWindowPos(hwnd, null, next.left, next.top, next.right - next.left, next.bottom - next.top, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+}
 fn monitorRect(hwnd: c.HWND) ?c.RECT {
     var monitor = std.mem.zeroes(c.MONITORINFO);
     monitor.cbSize = @sizeOf(c.MONITORINFO);
@@ -990,6 +1075,88 @@ pub fn setTextInputMode(window: *core.WindowRecord, mode: core.TextInputMode) !c
     window.native.text.system_enabled = mode == .system;
     window.publishTextInputMode(mode);
     return .applied;
+}
+/// The client area through PrintWindow, which asks DirectComposition
+/// content such as a swap chain or WebView2 for its pixels too.
+pub fn capture(window: *core.WindowRecord, allocator: std.mem.Allocator) !core.Capture {
+    const hwnd = window.native.hwnd orelse return error.Closed;
+    const client = size(hwnd);
+    if (client.width == 0 or client.height == 0) return error.CaptureFailed;
+    const screen = c.GetDC(null) orelse return error.CaptureFailed;
+    defer _ = c.ReleaseDC(null, screen);
+    const memory = c.CreateCompatibleDC(screen) orelse return error.CaptureFailed;
+    defer _ = c.DeleteDC(memory);
+    var info = std.mem.zeroes(c.BITMAPINFO);
+    info.bmiHeader.biSize = @sizeOf(c.BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = @intCast(client.width);
+    info.bmiHeader.biHeight = -@as(c_long, @intCast(client.height));
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = c.BI_RGB;
+    var bits: ?*anyopaque = null;
+    const bitmap = c.CreateDIBSection(memory, &info, c.DIB_RGB_COLORS, &bits, null, 0) orelse return error.CaptureFailed;
+    defer _ = c.DeleteObject(bitmap);
+    const previous = c.SelectObject(memory, bitmap);
+    defer _ = c.SelectObject(memory, previous);
+    // PW_CLIENTONLY | PW_RENDERFULLCONTENT
+    if (c.PrintWindow(hwnd, memory, 1 | 2) == 0) return error.CaptureFailed;
+    _ = c.GdiFlush();
+    const count = @as(usize, client.width) * client.height * 4;
+    const pixels = try allocator.alloc(u8, count);
+    @memcpy(pixels, @as([*]const u8, @ptrCast(bits.?))[0..count]);
+    // GDI leaves the alpha byte undefined; the client area is opaque.
+    var at: usize = 3;
+    while (at < count) : (at += 4) pixels[at] = 0xff;
+    return .{ .width = client.width, .height = client.height, .pixels = pixels };
+}
+/// Sends the command of the menu bar item at the labels of `path`, as a
+/// click on it does. Labels compare without "&" mnemonics and without the
+/// accelerator after a tab.
+pub fn activateMenuItem(window: *core.WindowRecord, path: []const []const u8) !void {
+    const hwnd = window.native.hwnd orelse return error.Closed;
+    var menu = c.GetMenu(hwnd) orelse return error.NoMenu;
+    for (path, 0..) |wanted, depth| {
+        const count = c.GetMenuItemCount(menu);
+        if (count < 0) return error.NoMenu;
+        var found: ?c_int = null;
+        var index: c_int = 0;
+        while (index < count) : (index += 1) {
+            var wide: [512]u16 = undefined;
+            const length = c.GetMenuStringW(menu, @intCast(index), &wide, wide.len, c.MF_BYPOSITION);
+            if (length <= 0) continue;
+            if (sameMenuLabel(wide[0..@intCast(length)], wanted)) {
+                found = index;
+                break;
+            }
+        }
+        const at = found orelse return error.NoMenuItem;
+        const submenu = c.GetSubMenu(menu, at);
+        if (depth + 1 < path.len) {
+            menu = submenu orelse return error.NoMenuItem;
+            continue;
+        }
+        if (submenu != null) return error.MenuItemIsSubmenu;
+        const flags = c.GetMenuState(menu, @intCast(at), c.MF_BYPOSITION);
+        if (flags & (c.MF_DISABLED | c.MF_GRAYED) != 0) return error.MenuItemDisabled;
+        const command = c.GetMenuItemID(menu, at);
+        _ = c.SendMessageW(hwnd, c.WM_COMMAND, command & 0xffff, 0);
+    }
+}
+fn sameMenuLabel(shown: []const u16, wanted: []const u8) bool {
+    var label: [512]u16 = undefined;
+    var len: usize = 0;
+    var at: usize = 0;
+    while (at < shown.len and shown[at] != '\t') : (at += 1) {
+        if (shown[at] == '&') {
+            at += 1;
+            if (at == shown.len) break;
+        }
+        label[len] = shown[at];
+        len += 1;
+    }
+    var expected: [512]u16 = undefined;
+    const count = std.unicode.utf8ToUtf16Le(&expected, wanted) catch return false;
+    return std.mem.eql(u16, label[0..len], expected[0..count]);
 }
 pub fn invalidate(window: *core.WindowRecord) void {
     if (window.phase != .open) return;
@@ -1266,10 +1433,18 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
             var ps: c.PAINTSTRUCT = undefined;
             const dc = c.BeginPaint(hwnd, &ps);
             defer _ = c.EndPaint(hwnd, &ps);
-            if (dc) |context| window.emit(.{ .paint = .{ .native_context = @ptrCast(context), .native_window = hwnd, .size = size(hwnd), .transparent = window.native.no_redirect } });
+            if (dc) |context| window.emit(.{ .paint = .{ .native_context = @ptrCast(context), .native_window = hwnd, .size = size(hwnd), .transparent = window.native.no_redirect, .background = if (window.native.no_redirect) null else window.native.background } });
             return 0;
         },
-        c.WM_ERASEBKGND => return 1,
+        c.WM_ERASEBKGND => {
+            // What a resize exposes shows the content's background until
+            // its frame paints; under the graphics surface nothing shows.
+            if (window.native.background_brush) |brush| if (!window.native.no_redirect) {
+                var client: c.RECT = undefined;
+                if (c.GetClientRect(hwnd, &client) != 0) _ = c.FillRect(@ptrFromInt(wp), &client, brush);
+            };
+            return 1;
+        },
         c.WM_MOUSEACTIVATE => {
             if (quietPopup(window)) return c.MA_NOACTIVATE;
             if (ownsFocusablePopup(window)) return c.MA_ACTIVATEANDEAT;
@@ -1304,7 +1479,11 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
             }
             return 0;
         },
+        c.WM_WINDOWPOSCHANGING => maximizeInWorkArea(window, hwnd, @ptrFromInt(@as(usize, @bitCast(lp)))),
         c.WM_SIZE => {
+            if (wp == c.SIZE_MAXIMIZED) fitWorkArea(window, hwnd);
+            if (!sameWindow(window, hwnd)) return 0;
+            if (wp != c.SIZE_MINIMIZED) fillUncovered(window, hwnd, lp);
             window.emitPointerLifecycle(operation, .{ .resize = size(hwnd) });
             window.emitPointerState(operation);
             invalidate(window);
@@ -1439,6 +1618,8 @@ fn windowMessageBody(window: *core.WindowRecord, hwnd: c.HWND, message: c.UINT, 
         },
         c.WM_NCDESTROY => {
             uncountPointer(window);
+            if (window.native.background_brush) |brush| _ = c.DeleteObject(brush);
+            window.native.background_brush = null;
             _ = c.RemovePropW(hwnd, identity_property);
             _ = c.SetWindowLongPtrW(hwnd, c.GWLP_USERDATA, 0);
             const result = c.DefWindowProcW(hwnd, message, wp, lp);

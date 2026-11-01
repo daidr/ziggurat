@@ -39,7 +39,7 @@ const Fixture = struct {
         if (std.mem.eql(u8, kind, "error")) return std.meta.stringToEnum(watch.Service.Code, object.get("error").?.object.get("code").?.string).?;
         if (!std.mem.eql(u8, kind, "chunk")) return error.UnexpectedKind;
         if (!object.get("value").?.object.get("ready").?.bool) return error.NotReady;
-        try self.page.ack(service, @intCast(id % 8), id, @intCast(object.get("sequence").?.integer));
+        try self.page.ack(service, @intCast(id % 8), id, @intCast(zio.asUnsigned(object.get("sequence").?.integer)));
         return null;
     }
 
@@ -82,7 +82,7 @@ const Fixture = struct {
                 }
                 try seen.append(allocator, text);
             }
-            try self.page.ack(service, @intCast(id % 8), id, @intCast(object.get("sequence").?.integer));
+            try self.page.ack(service, @intCast(id % 8), id, @intCast(zio.asUnsigned(object.get("sequence").?.integer)));
         }
         for (expected) |want| if (!has(seen.items, want)) {
             std.debug.print("missing event: {s}\n", .{want});

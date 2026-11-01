@@ -12,6 +12,7 @@
 #include "linux_content.h"
 #include "linux_pointer.h"
 
+#include "linux_touch.h"
 typedef struct NativeEvent {
     int kind, key, flags;
     void *context, *window;
@@ -68,6 +69,11 @@ typedef struct NativeWindow {
     gboolean popup_override, popup_grabbed;
     /* WindowOptions.transparent with an RGBA visual: frames keep their alpha. */
     gboolean transparent;
+    /* The touchscreen's fingers (linux_touch.h). touched: GDK gave the area
+       touches, so the mouse GTK makes of them is dropped; synthetic: a tap
+       is being delivered as a click. */
+    ZlgTouch touch;
+    gboolean touched, synthetic;
 } NativeWindow;
 enum { ZLG_POPUP=1, ZLG_POPUP_FOCUSABLE=2, ZLG_POPUP_TOPMOST=4 };
 typedef struct NativeBounds { int32_t x,y; uint32_t width,height; int positioned; } NativeBounds;
@@ -558,8 +564,15 @@ int zlg_window_interaction(NativeWindow *s, int edge) {
     retain(s); int result=start_interaction(s,s->gesture,edge,TRUE);
     release(s); return result;
 }
+/* The mouse GTK makes of a finger, once the area has touches of its own. */
+static gboolean emulated(NativeWindow *s, GdkEvent *native) {
+    if (!s->touched || s->synthetic) return FALSE;
+    GdkDevice *device=gdk_event_get_source_device(native);
+    return device && gdk_device_get_source(device)==GDK_SOURCE_TOUCHSCREEN;
+}
 static gboolean button(GtkWidget *widget, GdkEventButton *native, gpointer data) {
     NativeWindow *s=data;
+    if (emulated(s,(GdkEvent *)native)) return TRUE;
     retain(s);
     const GdkEventType type=native->type;
     const guint native_button=native->button;
@@ -642,7 +655,9 @@ done:
     release(s); return handled;
 }
 static gboolean motion(GtkWidget *widget, GdkEventMotion *native, gpointer data) {
-    (void)widget; NativeWindow *s=data; retain(s);
+    (void)widget; NativeWindow *s=data;
+    if (emulated(s,(GdkEvent *)native)) return TRUE;
+    retain(s);
     const double x=native->x,y=native->y;
     uint64_t operation=s->pointer_operation;
     if (s->pointer_enabled) pointer_motion_enabled(s,native,operation);
@@ -670,6 +685,50 @@ static gboolean scroll(GtkWidget *widget, GdkEventScroll *native, gpointer data)
     GdkDevice *device=gdk_event_get_source_device((GdkEvent *)native);
     if (device && gdk_device_get_source(device)==GDK_SOURCE_TOUCHPAD) event.flags|=1;
     event.dx*=48; event.dy*=48; emit(data,&event); return TRUE;
+}
+/* A tap clicks where the finger landed: a press and a release through the
+   mouse's own path, so focus, grabs and press receipts behave as a click's. */
+static void tap(NativeWindow *s, GdkEventTouch *native, const ZlgTouchOutput *out) {
+    for (int phase=0;phase<2 && !s->destroyed;phase++) {
+        GdkEvent *event=gdk_event_new(phase?GDK_BUTTON_RELEASE:GDK_BUTTON_PRESS);
+        event->button.window=native->window?g_object_ref(native->window):NULL;
+        event->button.send_event=TRUE; event->button.time=native->time;
+        event->button.x=out->x; event->button.y=out->y;
+        event->button.x_root=native->x_root-native->x+out->x; event->button.y_root=native->y_root-native->y+out->y;
+        event->button.state=native->state|(phase?(out->button==3?GDK_BUTTON3_MASK:GDK_BUTTON1_MASK):0);
+        event->button.button=(guint)out->button;
+        GdkDevice *device=gdk_event_get_device((GdkEvent *)native);
+        if (device) gdk_event_set_device(event,device);
+        GdkDevice *source=gdk_event_get_source_device((GdkEvent *)native);
+        if (source) gdk_event_set_source_device(event,source);
+        s->synthetic=TRUE; button(s->area,&event->button,s); s->synthetic=FALSE;
+        gdk_event_free(event);
+    }
+}
+/* The touchscreen's touches, taken before GTK's own handling makes the first
+   finger the mouse: taps click, held fingers right-click, fingers scroll. */
+static gboolean touch_event(GtkWidget *widget, GdkEventTouch *native, gpointer data) {
+    (void)widget; NativeWindow *s=data;
+    if (s->destroyed) return TRUE;
+    retain(s);
+    s->touched=TRUE;
+    uint64_t sequence=(uint64_t)(uintptr_t)native->sequence;
+    ZlgTouchOutput out[2]; int count=0;
+    switch (native->type) {
+    case GDK_TOUCH_BEGIN:
+        /* The first finger of new touches: none is down beside it, whatever
+           ended unseen, as under a grab. */
+        if (native->emulating_pointer) zlg_touch_reset(&s->touch);
+        zlg_touch_begin(&s->touch,sequence,native->x,native->y,native->time);
+        break;
+    case GDK_TOUCH_UPDATE: count=zlg_touch_move(&s->touch,sequence,native->x,native->y,out); break;
+    default: count=zlg_touch_end(&s->touch,sequence,native->x,native->y,native->time,native->type==GDK_TOUCH_CANCEL,out); break;
+    }
+    for (int i=0;i<count && !s->destroyed;i++) {
+        if (out[i].kind==ZLG_TOUCH_TAP) { tap(s,native,&out[i]); continue; }
+        NativeEvent event={0}; event.kind=6; event.x=out[i].x; event.y=out[i].y; event.dx=out[i].dx; event.dy=out[i].dy; emit(s,&event);
+    }
+    release(s); return TRUE;
 }
 /* A popup that does not take the keyboard. X without a window manager moves
    focus with the pointer, so such a popup can still be handed focus. */
@@ -893,7 +952,7 @@ NativeWindow *zlg_window_create_transparent(void *owner, Emit callback, const ch
     gtk_container_add(GTK_CONTAINER(s->window),s->area);
     g_object_set_data(G_OBJECT(s->window),"ziggurat-native-window",s);
     gtk_widget_set_can_focus(s->area,TRUE);
-    gtk_widget_add_events(s->area,GDK_BUTTON_PRESS_MASK|GDK_BUTTON_RELEASE_MASK|GDK_POINTER_MOTION_MASK|GDK_SCROLL_MASK|GDK_SMOOTH_SCROLL_MASK|GDK_FOCUS_CHANGE_MASK|GDK_KEY_PRESS_MASK|GDK_KEY_RELEASE_MASK);
+    gtk_widget_add_events(s->area,GDK_BUTTON_PRESS_MASK|GDK_BUTTON_RELEASE_MASK|GDK_POINTER_MOTION_MASK|GDK_SCROLL_MASK|GDK_SMOOTH_SCROLL_MASK|GDK_FOCUS_CHANGE_MASK|GDK_KEY_PRESS_MASK|GDK_KEY_RELEASE_MASK|GDK_TOUCH_MASK);
     gtk_widget_add_events(s->window,GDK_PROPERTY_CHANGE_MASK);
     gtk_window_set_title(GTK_WINDOW(s->window),title); gtk_window_set_default_size(GTK_WINDOW(s->window),width,height);
     gtk_window_set_gravity(GTK_WINDOW(s->window),GDK_GRAVITY_STATIC);
@@ -909,6 +968,7 @@ NativeWindow *zlg_window_create_transparent(void *owner, Emit callback, const ch
     g_signal_connect(s->window,"property-notify-event",G_CALLBACK(property_changed),s);
     g_signal_connect(s->area,"button-press-event",G_CALLBACK(button),s); g_signal_connect(s->area,"button-release-event",G_CALLBACK(button),s);
     g_signal_connect(s->area,"motion-notify-event",G_CALLBACK(motion),s); g_signal_connect(s->area,"scroll-event",G_CALLBACK(scroll),s);
+    g_signal_connect(s->area,"touch-event",G_CALLBACK(touch_event),s);
     g_signal_connect(s->area,"focus-in-event",G_CALLBACK(focus),s); g_signal_connect(s->area,"focus-out-event",G_CALLBACK(focus),s);
     g_signal_connect(s->area,"grab-broken-event",G_CALLBACK(grab_broken),s);
     if (s->pointer_enabled) {
@@ -980,6 +1040,72 @@ void zlg_window_size(NativeWindow *s, uint32_t *width, uint32_t *height, uint32_
     *width=(uint32_t)MAX(0,gtk_widget_get_allocated_width(s->area))*factor;
     *height=(uint32_t)MAX(0,gtk_widget_get_allocated_height(s->area))*factor;
     *scale=factor;
+}
+/* The content area as the screen shows it, read from the toplevel so that
+   native children such as web views are in it; NULL while it is unmapped.
+   The caller copies the pixels and frees the pixbuf with zlg_capture_free. */
+void *zlg_window_capture(NativeWindow *s, int *width, int *height, int *stride, int *channels, const unsigned char **pixels) {
+    if (s->destroyed || !gtk_widget_get_mapped(s->area)) return NULL;
+    GdkWindow *top=gtk_widget_get_window(s->window);
+    int x=0,y=0;
+    if (!top || !gtk_widget_translate_coordinates(s->area,s->window,0,0,&x,&y)) return NULL;
+    int w=gtk_widget_get_allocated_width(s->area), h=gtk_widget_get_allocated_height(s->area);
+    if (w<=0 || h<=0) return NULL;
+    GdkPixbuf *image=gdk_pixbuf_get_from_window(top,x,y,w,h);
+    if (!image) return NULL;
+    *width=gdk_pixbuf_get_width(image); *height=gdk_pixbuf_get_height(image);
+    *stride=gdk_pixbuf_get_rowstride(image); *channels=gdk_pixbuf_get_n_channels(image);
+    *pixels=gdk_pixbuf_read_pixels(image);
+    return image;
+}
+void zlg_capture_free(void *image) { g_object_unref(image); }
+static GtkWidget *find_menu_bar(GtkWidget *widget) {
+    if (GTK_IS_MENU_BAR(widget)) return widget;
+    if (!GTK_IS_CONTAINER(widget)) return NULL;
+    GList *children=gtk_container_get_children(GTK_CONTAINER(widget));
+    GtkWidget *found=NULL;
+    for (GList *at=children; at && !found; at=at->next) found=find_menu_bar(at->data);
+    g_list_free(children);
+    return found;
+}
+/* A label as people read it: without mnemonic underscores. */
+static gboolean same_label(const char *shown, const char *wanted) {
+    if (!shown) return FALSE;
+    for (;;) {
+        if (*shown=='_') { shown++; if (*shown!='_') continue; }
+        if (*shown!=*wanted) return FALSE;
+        if (!*shown) return TRUE;
+        shown++; wanted++;
+    }
+}
+/* Activates the item of the window's menu bar at the labels of `path`, as
+   a click on it does. 0 on success, 1 without a menu bar, 2 without such an
+   item, 3 for a disabled item, 4 for an item that opens a submenu. */
+int zlg_window_menu_activate(NativeWindow *s, const char *const *path, int count) {
+    if (s->destroyed) return 1;
+    GtkWidget *shell=find_menu_bar(s->window);
+    if (!shell) return 1;
+    for (int depth=0; depth<count; depth++) {
+        GList *children=gtk_container_get_children(GTK_CONTAINER(shell));
+        GtkWidget *item=NULL;
+        for (GList *at=children; at; at=at->next) {
+            if (GTK_IS_MENU_ITEM(at->data) && same_label(gtk_menu_item_get_label(GTK_MENU_ITEM(at->data)),path[depth])) { item=at->data; break; }
+        }
+        g_list_free(children);
+        if (!item) return 2;
+        GtkWidget *submenu=gtk_menu_item_get_submenu(GTK_MENU_ITEM(item));
+        if (depth+1<count) {
+            if (!submenu) return 2;
+            shell=submenu;
+            continue;
+        }
+        if (submenu) return 4;
+        if (!gtk_widget_is_sensitive(item)) return 3;
+        retain(s);
+        gtk_menu_item_activate(GTK_MENU_ITEM(item));
+        release(s);
+    }
+    return 0;
 }
 int zlg_window_set_bounds(NativeWindow *s, const NativeBounds *bounds) {
     if (bounds->positioned && !(zlg_window_capabilities(s)&1u)) return 1;
@@ -1170,6 +1296,19 @@ void zlg_test_paint(NativeWindow *s, uint32_t width, uint32_t height) {
     retain(s); GtkAllocation allocation={0,0,width,height}; gtk_widget_size_allocate(s->area,&allocation);
     cairo_surface_t *surface=cairo_image_surface_create(CAIRO_FORMAT_ARGB32,width,height); cairo_t *cr=cairo_create(surface);
     gboolean handled=FALSE; g_signal_emit_by_name(s->area,"draw",cr,&handled); cairo_destroy(cr); cairo_surface_destroy(surface); release(s);
+}
+/* A touch as GDK delivers one: type 0 begins, 1 moves, 2 ends, 3 cancels. */
+void zlg_test_touch(NativeWindow *s, int type, uint64_t sequence, double x, double y, uint32_t time, int emulating) {
+    static const GdkEventType types[]={GDK_TOUCH_BEGIN,GDK_TOUCH_UPDATE,GDK_TOUCH_END,GDK_TOUCH_CANCEL};
+    GdkEvent *event=gdk_event_new(types[type]);
+    GdkWindow *window=gtk_widget_get_window(s->area);
+    event->touch.window=window?g_object_ref(window):NULL;
+    event->touch.time=time; event->touch.x=x; event->touch.y=y; event->touch.x_root=x; event->touch.y_root=y;
+    event->touch.sequence=(GdkEventSequence *)(uintptr_t)sequence; event->touch.emulating_pointer=emulating;
+    GdkSeat *seat=gdk_display_get_default_seat(gdk_display_get_default());
+    if (seat) gdk_event_set_device(event,gdk_seat_get_pointer(seat));
+    touch_event(s->area,&event->touch,s);
+    gdk_event_free(event);
 }
 void zlg_test_close(NativeWindow *s) { NativeEvent event={0}; event.kind=10; emit(s,&event); }
 void zlg_test_commit(NativeWindow *s, const char *text) { retain(s);GtkIMContext *im=g_object_ref(s->im);g_signal_emit_by_name(im,"commit",text);g_object_unref(im);release(s); }

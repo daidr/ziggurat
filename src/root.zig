@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const backend = if (builtin.is_test) @import("platform/testing.zig") else if (builtin.os.tag == .windows) @import("platform/windows.zig") else if (builtin.os.tag == .linux) @import("platform/linux.zig") else if (builtin.os.tag == .macos) @import("platform/macos.zig") else @import("platform/unsupported.zig");
 const mailbox = @import("mailbox.zig");
@@ -68,7 +69,9 @@ pub const Rect = struct {
 pub const Size = struct { width: u32, height: u32, scale: f32 };
 /// `transparent` frames start clear and keep their alpha (see
 /// `WindowCapabilities.transparent`).
-pub const Paint = struct { native_context: *anyopaque, native_window: ?*anyopaque = null, size: Size, transparent: bool = false };
+/// `background` is the window's (`Window.setBackground`) where the backend
+/// shows it beyond the frame until a frame of the new size presents.
+pub const Paint = struct { native_context: *anyopaque, native_window: ?*anyopaque = null, size: Size, transparent: bool = false, background: ?u32 = null };
 pub const TextPreedit = struct { text: []const u8, selection_start: usize, selection_end: usize };
 /// Native delivery path, not an assertion about a physical keyboard or a
 /// language engine. A GTK text-service commit can include keyboard translation.
@@ -311,6 +314,8 @@ pub const WindowState = struct {
     enabled_requested: bool = true,
     modal_blocked: bool = false,
 };
+/// A window's client area as `Window.capture` read it.
+pub const Capture = struct { width: u32, height: u32, pixels: []u8 };
 /// Client origin in native desktop coordinates: physical pixels on Windows,
 /// desktop logical coordinates on GTK/X11. Position is unavailable on Wayland.
 pub const ScreenPoint = struct { x: i32, y: i32 };
@@ -411,7 +416,7 @@ pub const WindowHit = enum(c_int) {
     south_east,
     pub fn resizeEdge(self: WindowHit) ?ResizeEdge {
         const value = @backingInt(self);
-        return if (value >= @backingInt(WindowHit.north_west)) @fromBackingInt(@intCast(value - @backingInt(WindowHit.north_west))) else null;
+        return if (value >= @backingInt(WindowHit.north_west)) @fromBackingInt(@intCast(zio.asUnsigned(value - @backingInt(WindowHit.north_west)))) else null;
     }
 };
 /// The shape of the pointer over the client area. Shapes a platform lacks
@@ -510,6 +515,8 @@ pub const WindowOptions = struct {
     /// Makes the window background transparent, so what paint frames leave
     /// transparent shows the desktop through. GTK needs a compositing
     /// desktop; `capabilities().transparent` tells whether frames keep alpha.
+    /// On Windows the window has no redirection bitmap, as with a material:
+    /// frames are composed with their alpha and it has no menu bar.
     transparent: bool = false,
     /// Puts a material behind what paint frames leave transparent. On
     /// Windows only a window created with a material can show one (Windows
@@ -547,6 +554,8 @@ pub const App = struct {
     activity_depth: usize = 0,
     stop_resources: app_stop.Manager,
     querying_quit: bool = false,
+    /// Inside the native event loop of `run`.
+    looping: bool = false,
     querying_close_tree: bool = false,
     relations_busy: bool = false,
     relations_dirty: bool = false,
@@ -900,16 +909,19 @@ pub const App = struct {
         var loop_error: ?anyerror = null;
         self.maybeQuit();
         self.native_failure = null;
+        self.looping = true;
         backend.run(self) catch |err| {
             self.report(self.failureDiagnostic(.run, err, null));
             loop_error = err;
         };
+        self.looping = false;
         try self.shutdown();
         if (loop_error) |err| return err;
     }
     /// Preflight handlers before accepting shutdown. No partial automatic close.
     pub fn requestQuit(self: *App) QuitResult {
         self.assertOwner();
+        if (self.phase == .stopping and self.looping) backend.quit(self);
         if (self.phase == .stopping or self.phase == .stopped) return .already_stopped;
         if (self.querying_quit or self.querying_close_tree) return .in_progress;
         self.querying_quit = true;
@@ -934,6 +946,12 @@ pub const App = struct {
     /// Unconditional shutdown for explicit termination/error paths. Bypasses vetoes.
     pub fn quit(self: *App) void {
         self.assertOwner();
+        if (self.phase == .stopping and self.looping) {
+            // The quit sequence ran but the native loop goes on, as after a
+            // modal loop that swallowed the request: ask it to stop again.
+            backend.quit(self);
+            return;
+        }
         if (self.phase == .stopping or self.phase == .stopped) return;
         const running = self.phase == .running;
         self.phase = .stopping;
@@ -1176,6 +1194,12 @@ pub const Window = struct {
         if (record.phase != .open) return error.Closed;
         if (record.content != null) return error.ContentAlreadyAttached;
         record.content = content;
+    }
+    /// The content attached to this window, if any, so that tools can
+    /// recognize the module that owns it by its callbacks. Main thread only.
+    pub fn attachedContent(self: Window) ?Content {
+        const record = self.resolve() orelse return null;
+        return if (record.phase == .open) record.content else null;
     }
     pub fn setService(self: Window, service: WindowService) !void {
         const record = self.resolve() orelse return error.Closed;
@@ -1475,6 +1499,19 @@ pub const Window = struct {
         record.storeTraits(value);
         record.emitState();
     }
+    /// The opaque color the content fills the window with (0xRRGGBB), or
+    /// null for content that is not opaque. Windows shows it where the
+    /// window grows before the content's frame of the new size presents,
+    /// instead of black or the last frame stretched; other backends keep
+    /// nothing. Content calls it when its background changes, from paint
+    /// too; an unchanged value costs a comparison.
+    pub fn setBackground(self: Window, rgb: ?u32) !void {
+        const record = self.resolve() orelse return error.Closed;
+        if (record.phase != .open) return error.Closed;
+        if (record.background == rgb) return;
+        record.background = rgb;
+        if (comptime @hasDecl(backend, "setBackground")) backend.setBackground(record, rgb);
+    }
     /// Whole-window translucency from 0 (invisible) to 1 (opaque).
     pub fn setOpacity(self: Window, value: f32) !void {
         if (!std.math.isFinite(value) or value < 0 or value > 1) return error.InvalidOpacity;
@@ -1753,7 +1790,18 @@ pub const Window = struct {
     }
     pub fn invalidate(self: Window) void {
         const record = self.resolve() orelse return;
-        if (record.phase == .open) backend.invalidate(record);
+        if (record.phase != .open) return;
+        record.frame_requested = true;
+        backend.invalidate(record);
+    }
+    /// True while the content asked for a frame, through `invalidate` or
+    /// `invalidateRect`, that the window has not painted yet. A hidden or
+    /// minimized window paints nothing, so it has none pending.
+    pub fn framePending(self: Window) bool {
+        const record = self.resolve() orelse return false;
+        if (record.phase != .open or !record.frame_requested) return false;
+        const current = record.observedState();
+        return current.visible and !current.minimized;
     }
     /// Queue client-area damage in DIP. The native update region coalesces
     /// requests; this does not promise partial command generation or GPU replay.
@@ -1764,6 +1812,7 @@ pub const Window = struct {
         if (!std.math.isFinite(bounds.x) or !std.math.isFinite(bounds.y) or !std.math.isFinite(bounds.width) or !std.math.isFinite(bounds.height) or bounds.width < 0 or bounds.height < 0 or @abs(bounds.x) > 1_000_000 or @abs(bounds.y) > 1_000_000 or bounds.width > 1_000_000 or bounds.height > 1_000_000) return error.InvalidGeometry;
         if (bounds.width == 0 or bounds.height == 0) return;
         self.app.native_failure = null;
+        scope.record.frame_requested = true;
         backend.invalidateRect(scope.record, bounds) catch |err| {
             self.app.report(self.app.failureDiagnostic(.window_update, err, self));
             return err;
@@ -1778,6 +1827,40 @@ pub const Window = struct {
         const record = self.resolve() orelse return error.Closed;
         if (record.phase != .open) return error.Closed;
         record.emit(event);
+    }
+    /// Offer a key press to the content as the platform adapter does
+    /// before translating it to text, and report whether the content
+    /// consumed it, or the release when `released` is set. Main thread
+    /// only, outside the content's own callbacks.
+    pub fn emitKey(self: Window, input: KeyInput, released: bool) !bool {
+        if (std.Thread.getCurrentId() != self.app.owner) return error.WrongThread;
+        const record = self.resolve() orelse return error.Closed;
+        if (record.phase != .open) return error.Closed;
+        if (released) {
+            record.keyRelease(input);
+            return false;
+        }
+        return record.keyInput(input);
+    }
+    /// Choose the item of the window's menu bar at the labels of `path`,
+    /// as a click on it does, and return once its handler returned. Labels
+    /// compare without mnemonic markers. Main thread only, outside the
+    /// window's own callbacks; for tools that drive a running app.
+    pub fn activateMenuItem(self: Window, path: []const []const u8) !void {
+        if (std.Thread.getCurrentId() != self.app.owner) return error.WrongThread;
+        if (path.len == 0) return error.NoMenuItem;
+        const scope = self.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        return backend.activateMenuItem(scope.record, path);
+    }
+    /// The client area as the screen shows it, in physical pixels, as
+    /// premultiplied BGRA rows from the top. The caller frees `pixels`
+    /// with `allocator`. Main thread only.
+    pub fn capture(self: Window, allocator: std.mem.Allocator) !Capture {
+        if (std.Thread.getCurrentId() != self.app.owner) return error.WrongThread;
+        const scope = self.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        return backend.capture(scope.record, allocator);
     }
     pub fn nativeHandle(self: Window) ?*anyopaque {
         const record = self.resolve() orelse return null;
@@ -1889,8 +1972,11 @@ pub const WindowRecord = struct {
     options: WindowOptions,
     native: backend.WindowData = .{},
     vibrancy: Vibrancy = .none,
+    background: ?u32 = null,
     pointer_state: ?*PointerState = null,
     content: ?Content = null,
+    /// Set by invalidate, cleared once the content is given a paint.
+    frame_requested: bool = false,
     parent_destroy_notified: bool = false,
     service: ?WindowService = null,
     next_native_id: u32 = 1,
@@ -2376,6 +2462,7 @@ pub const WindowRecord = struct {
             if (self.text_busy) self.text_blur_pending = true else self.revokeTextClient(.focus_lost, true) catch |err| self.window.report(.{ .domain = .core, .operation = .text_input, .err = err });
             if (self.phase != .open) return;
         }
+        if (event == .paint) self.frame_requested = false;
         switch (event) {
             .pointer_down, .pointer_up, .pointer_move, .wheel, .text_input, .text_preedit, .edit_key, .key, .key_input => if (!self.inputAllowed()) return,
             else => {},
@@ -2562,6 +2649,7 @@ test {
     _ = @import("damage_test.zig");
     _ = @import("diagnostics_test.zig");
     _ = @import("platform/decoration_test.zig");
+    _ = @import("platform/work_area.zig");
     _ = @import("pointer_press_test.zig");
     _ = @import("window_policy_test.zig");
 }

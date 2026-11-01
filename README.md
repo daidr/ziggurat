@@ -137,7 +137,7 @@ Ziggurat 使用 [MIT 许可证](LICENSE)。源码包包含 LICENSE，构建安�
 
 - [架构](docs/architecture.md)、[设计原则](docs/philosophy.md)、[路线图](docs/roadmap.md)、[完整实施计划](docs/implementation-plan.md)
 - [窗口状态与关系](docs/windows.md)、[内容组合](docs/composition.md)、[视图中的 WebView](docs/embedded-webview.md)、[布局](docs/layout.md)、[声明式视图](docs/view.md)、[基础控件](docs/widgets.md)、[虚拟列表](docs/virtual-list.md)、[基础绘制](docs/drawing.md)、[透明分组](docs/layers.md)、[离屏快照](docs/offscreen.md)、[路径资源](docs/vector.md)、[SVG 文档](docs/svg.md)、[系统文本布局](docs/text-layout.md)、[编辑器桥接](docs/editor.md)、[索引文档](docs/document.md)、[文档视图](docs/document-editor.md)、[编辑前输入门](docs/editor-pre-input.md)、[区间标记](docs/editor-range-markers.md)、[原生文本上下文](docs/text-input.md)、[窗口输入模式](docs/text-input-mode.md)、[图片解码](docs/images.md)、[图片绘制](docs/image-drawing.md)
-- [错误诊断](docs/diagnostics.md)、[图标、打包与安装程序](docs/packaging.md)
+- [错误诊断](docs/diagnostics.md)、[自动化](docs/automation.md)、[图标、打包与安装程序](docs/packaging.md)
 - [应用资源与停止](docs/application-resources.md)、[代码编辑服务](docs/code-editor.md)、[Snippet 会话](docs/snippets.md)、[完整文档辅助功能](docs/document-accessibility.md)、[快照差异](docs/document-diff.md)、[双栏比较](docs/document-diff-view.md)
 - [窗口位置恢复](docs/window-placement.md)、[文档应用模型](docs/document-app.md)、[语言协议](docs/language-protocol.md)
 - [Diff 文档辅助功能](docs/document-diff-accessibility.md)、[SVG 文字排版](docs/svg-text.md)

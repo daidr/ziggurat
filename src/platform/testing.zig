@@ -1,6 +1,7 @@
+const std = @import("std");
 const core = @import("../root.zig");
 const pointer_press = @import("pointer_press.zig");
-pub const AppData = struct { fail_text_cancel: bool = false, emit_text_cancel: bool = false, fail_create: bool = false, fail_destroy: bool = false, fail_update: bool = false, fail_fullscreen_after_event: bool = false, fail_show: bool = false, destroy_countdown: ?usize = null };
+pub const AppData = struct { fail_text_cancel: bool = false, emit_text_cancel: bool = false, fail_create: bool = false, fail_destroy: bool = false, fail_update: bool = false, fail_fullscreen_after_event: bool = false, fail_show: bool = false, destroy_countdown: ?usize = null, quit_requests: usize = 0 };
 pub const WindowData = struct {
     pointer_operation: pointer_press.Operation = .{},
     alive: bool = false,
@@ -71,7 +72,9 @@ pub fn run(app: *core.App) !void {
     }
 }
 pub fn wake(_: *core.App) void {}
-pub fn quit(_: *core.App) void {}
+pub fn quit(app: *core.App) void {
+    app.native.quit_requests += 1;
+}
 pub fn show(_: *core.WindowRecord) void {}
 pub fn perform(record: *core.WindowRecord, action: core.WindowAction) !void {
     if (action == .show and record.window.app.native.fail_show) {
@@ -116,6 +119,18 @@ pub fn clientBounds(record: *core.WindowRecord) !core.ClientBounds {
     var result = record.native.bounds;
     if (!record.native.caps.client_position) result.position = null;
     return result;
+}
+/// An opaque white client area of the window's size; the test backend
+/// draws nothing.
+pub fn capture(record: *core.WindowRecord, allocator: std.mem.Allocator) !core.Capture {
+    const width = record.native.bounds.width;
+    const height = record.native.bounds.height;
+    const pixels = try allocator.alloc(u8, @as(usize, width) * height * 4);
+    @memset(pixels, 0xff);
+    return .{ .width = width, .height = height, .pixels = pixels };
+}
+pub fn activateMenuItem(_: *core.WindowRecord, _: []const []const u8) !void {
+    return error.NoMenu;
 }
 pub fn contentSize(record: *core.WindowRecord) !core.Size {
     return .{ .width = record.native.bounds.width, .height = record.native.bounds.height, .scale = 1 };

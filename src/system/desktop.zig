@@ -3,6 +3,7 @@
 //! a Watch owns one native subscription from start until stop or App shutdown.
 //! There is no polling timer: changes come from native notifications only.
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 
@@ -131,7 +132,7 @@ pub fn power(app: *z.App) !Power {
             2 => .battery,
             else => .unknown,
         },
-        .battery_percent = if (native.percent >= 0 and native.percent <= 100) @intCast(native.percent) else null,
+        .battery_percent = if (native.percent >= 0 and native.percent <= 100) @intCast(zio.asUnsigned(native.percent)) else null,
         .saver = if (native.saver < 0) null else native.saver != 0,
     };
 }

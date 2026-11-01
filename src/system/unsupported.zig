@@ -23,6 +23,9 @@ pub const Owner = struct {
     pub fn setItemState(_: *Owner, _: u64, _: bool, _: bool) !void {
         return error.UnsupportedCapability;
     }
+    pub fn setItemIcon(_: *Owner, _: u64, _: ?*types.MenuIcon) !void {
+        return error.UnsupportedCapability;
+    }
     pub fn setTray(_: *Owner, _: types.TrayOptions) !void {
         return error.UnsupportedCapability;
     }
