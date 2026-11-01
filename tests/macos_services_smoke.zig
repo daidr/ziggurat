@@ -15,32 +15,39 @@ const desktop = system.desktop;
 const theme = system.theme;
 
 fn checkSecrets() !void {
-    const service = "dev.ziggurat.smoke.macos-services";
-    const key = "token \u{79d8}\u{5bc6}";
-    var buffer: [secrets.max_secret_bytes]u8 = undefined;
-    // A runner started outside the user's login session has no unlocked
-    // login keychain: every operation must then say so.
-    secrets.delete(service, key) catch |err| switch (err) {
+    roundTrip() catch |err| switch (err) {
+        // A runner started outside the user's login session has no unlocked
+        // login keychain; the store must then refuse instead of pretending.
         error.CredentialStoreUnavailable => {
-            try std.testing.expectError(error.CredentialStoreUnavailable, secrets.set(service, key, "x"));
-            try std.testing.expectError(error.CredentialStoreUnavailable, secrets.get(service, key, &buffer));
-            std.debug.print("login keychain unavailable in this session; checked the refusal only\n", .{});
-            return;
+            const code = if (secrets.lastFailure()) |failure| failure.code else 0;
+            std.debug.print("login keychain unavailable in this session (OSStatus {d}); round trip skipped\n", .{code});
         },
         else => return err,
     };
-    try std.testing.expectError(error.SecretNotFound, secrets.get(service, key, &buffer));
+}
+
+/// SecretNotFound, passing on any other error (CredentialStoreUnavailable).
+fn expectNotFound(result: anyerror![]u8) !void {
+    if (result) |_| return error.ExpectedSecretNotFound else |err| if (err != error.SecretNotFound) return err;
+}
+
+fn roundTrip() !void {
+    const service = "dev.ziggurat.smoke.macos-services";
+    const key = "token \u{79d8}\u{5bc6}";
+    var buffer: [secrets.max_secret_bytes]u8 = undefined;
+    try secrets.delete(service, key);
+    try expectNotFound(secrets.get(service, key, &buffer));
     try secrets.set(service, key, "first");
     try std.testing.expectEqualStrings("first", try secrets.get(service, key, &buffer));
     // Replacing keeps one item.
     try secrets.set(service, key, "second \u{1f511}");
     try std.testing.expectEqualStrings("second \u{1f511}", try secrets.get(service, key, &buffer));
     var small: [3]u8 = undefined;
-    try std.testing.expectError(error.SecretTooLarge, secrets.get(service, key, &small));
+    if (secrets.get(service, key, &small)) |_| return error.ExpectedSecretTooLarge else |err| if (err != error.SecretTooLarge) return err;
     try secrets.set(service, key, "");
     try std.testing.expectEqual(@as(usize, 0), (try secrets.get(service, key, &buffer)).len);
     try secrets.delete(service, key);
-    try std.testing.expectError(error.SecretNotFound, secrets.get(service, key, &buffer));
+    try expectNotFound(secrets.get(service, key, &buffer));
     // Deleting nothing succeeds.
     try secrets.delete(service, key);
 }

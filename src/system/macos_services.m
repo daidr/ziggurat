@@ -39,7 +39,7 @@ static int secret_status(OSStatus status, int *code) {
     switch (status) {
     case errSecSuccess: return 0;
     case errSecItemNotFound: return 1;
-    case errSecNotAvailable: case errSecNoSuchKeychain: case errSecInteractionNotAllowed: return 2;
+    case errSecNotAvailable: case errSecNoSuchKeychain: case errSecInteractionNotAllowed: *code = (int)status; return 2;
     default: *code = (int)status; return 3;
     }
 }

@@ -229,7 +229,11 @@ fn linuxCall(result: c_int) Error!void {
     return switch (result) {
         0 => {},
         1 => error.SecretNotFound,
-        2 => error.CredentialStoreUnavailable,
+        2 => {
+            // macOS says which keychain status made the store unreachable.
+            if (os == .macos) last_failure = .{ .domain = .osstatus, .code = linux_code };
+            return error.CredentialStoreUnavailable;
+        },
         4 => error.SecretTooLarge,
         else => {
             last_failure = .{ .domain = if (os == .macos) .osstatus else .glib, .code = linux_code };
