@@ -132,6 +132,12 @@ fn hasState(node: std.json.ObjectMap, name: []const u8) bool {
     return false;
 }
 
+fn hasAction(node: std.json.ObjectMap, name: []const u8) bool {
+    const actions = node.get("actions") orelse return false;
+    for (actions.array.items) |action| if (std.mem.eql(u8, action.string, name)) return true;
+    return false;
+}
+
 fn expectCount(client: *Client, count: u32) !void {
     try client.idle();
     var expected: [32]u8 = undefined;
@@ -207,7 +213,9 @@ fn drive(path: []const u8) !void {
 
     // The last row of the scroll is out of sight until scrollIntoView, and
     // a press needs it in sight.
-    try std.testing.expect(hasState(try nodeOf(try client.tree(), "far"), "offscreen"));
+    const far = try nodeOf(try client.tree(), "far");
+    try std.testing.expect(hasState(far, "offscreen") and hasAction(far, "scrollIntoView"));
+    try std.testing.expect(!hasAction(try nodeOf(try client.tree(), "add"), "scrollIntoView"));
     try client.expectError("act", "{\"key\":\"far\",\"action\":\"press\"}", "failed");
     _ = try client.result("act", "{\"key\":\"far\",\"action\":\"scrollIntoView\"}");
     try client.idle();
