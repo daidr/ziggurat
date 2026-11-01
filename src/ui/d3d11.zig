@@ -51,6 +51,7 @@ extern fn zgpu_commit_offscreen(*anyopaque) void;
 extern fn zgpu_offscreen_metadata_size() usize;
 extern fn zgpu_texture(*anyopaque, *const drawing.GpuTextureToken, *const drawing.ImagePlan) i32;
 extern fn zgpu_begin_composed(*anyopaque, ?*anyopaque, u32, u32, f32, c_int) i32;
+extern fn zgpu_set_background(*anyopaque, c_int, u32) void;
 extern fn zgpu_fill(*anyopaque, f32, f32, f32, f32, u32) void;
 extern fn zgpu_shape(*anyopaque, f32, f32, f32, f32, f32, f32, u32) i32;
 extern fn zgpu_gradient(*anyopaque, f32, f32, f32, f32, f32, f32, *const commands.brushes.Native) i32;
@@ -85,6 +86,7 @@ extern fn zgpu_test_pixel(*anyopaque, u32, u32, *u32) i32;
 extern fn zgpu_test_pixels(*anyopaque, u32, u32, [*]u32) i32;
 extern fn zgpu_test_text_pixels(*anyopaque, u32, u32, u32, u32, u32, *u32) i32;
 extern fn zgpu_test_surface(*anyopaque) ?*anyopaque;
+extern fn zgpu_test_unscaled(*anyopaque) c_int;
 extern fn zgpu_test_swapchain_window(*anyopaque) ?*anyopaque;
 extern fn zgpu_frame_ready(*anyopaque) ?*anyopaque;
 extern fn zgpu_prepare_image(*anyopaque, [*]const drawing.ImageLevel, u32) i32;
@@ -799,6 +801,7 @@ pub const Renderer = struct {
         _ = try geometry.validateSurface(paint.size.width, paint.size.height, paint.size.scale);
         if (self.layer_plan) |plan| if (!plan.matches(paint.size)) return error.LayersRequired;
         const hwnd = paint.native_window orelse c.WindowFromDC(paint.native_context);
+        zgpu_set_background(native, @intFromBool(paint.background != null), paint.background orelse 0);
         try self.result(zgpu_begin_composed(native, hwnd, paint.size.width, paint.size.height, 96.0 * paint.size.scale, @intFromBool(paint.transparent)));
         self.render_scope = scope;
         self.active = true;
@@ -1345,6 +1348,11 @@ pub const Renderer = struct {
     }
     pub fn surfaceForTest(self: *const Renderer) ?*anyopaque {
         return if (self.native) |native| zgpu_test_surface(native) else null;
+    }
+    /// Whether the window's swap chain shows frames unscaled, with the
+    /// content's background beyond them.
+    pub fn unscaledForTest(self: *const Renderer) bool {
+        return if (self.native) |native| zgpu_test_unscaled(native) != 0 else false;
     }
     pub fn swapchainWindowForTest(self: *const Renderer) ?*anyopaque {
         return if (self.native) |native| zgpu_test_swapchain_window(native) else null;

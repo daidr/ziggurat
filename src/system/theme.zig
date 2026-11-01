@@ -38,6 +38,7 @@ pub fn apply(app: *z.App, source: Source, dark: bool) void {
     app.assertOwner();
     if (comptime !native_supported) return;
     if (os == .linux) return zsx_theme_set_source(@backingInt(source));
+    @import("windows_menu.zig").dark_menus = dark;
     menuMode(dark);
 }
 
@@ -80,6 +81,9 @@ pub const Follower = struct {
     prefs: desktop.Preferences = .{},
     watch: desktop.Watch = undefined,
     windows: [max_windows]?z.Window = @splat(null),
+    /// Per tracked window: the appearance its frame and caption buttons
+    /// keep whatever the app's (`.system` follows the app).
+    buttons: [max_windows]Source = @splat(.system),
 
     /// Reads the desktop's preferences, applies the source and starts
     /// following the desktop's changes.
@@ -122,18 +126,41 @@ pub const Follower = struct {
     /// (Windows; a no-op on Linux, where GTK follows `apply`). Closed
     /// windows leave the list by themselves.
     pub fn track(self: *Follower, window: z.Window) !void {
+        _ = try self.slotOf(window);
+    }
+    /// Draws the window's frame and caption buttons for a dark or a light
+    /// background whatever the app's appearance, for content with a dark
+    /// title area in a light app, or follows the app again with `.system`.
+    /// Menus and the app's own content keep the app's appearance, which
+    /// `setSource` would change. Tracks the window. Windows only; GTK
+    /// draws every window in the app's variant.
+    pub fn setWindowButtons(self: *Follower, window: z.Window, source: Source) !void {
+        const index = try self.slotOf(window);
+        self.buttons[index] = source;
+        if (comptime os == .windows) try setWindowDark(window, self.frameDark(index));
+    }
+    fn frameDark(self: *const Follower, index: usize) bool {
+        return switch (self.buttons[index]) {
+            .system => self.dark,
+            .light => false,
+            .dark => true,
+        };
+    }
+    fn slotOf(self: *Follower, window: z.Window) !usize {
         _ = self.app orelse return error.Closed;
         window.app.assertOwner();
         var free: ?usize = null;
-        for (&self.windows, 0..) |*slot, index| {
-            if (slot.*) |existing| {
-                if (existing.isClosed()) slot.* = null else if (std.meta.eql(existing.key, window.key)) return;
+        for (&self.windows, 0..) |*entry, index| {
+            if (entry.*) |existing| {
+                if (existing.isClosed()) entry.* = null else if (std.meta.eql(existing.key, window.key)) return index;
             }
-            if (slot.* == null and free == null) free = index;
+            if (entry.* == null and free == null) free = index;
         }
         const index = free orelse return error.CapacityExceeded;
+        self.buttons[index] = .system;
         if (comptime os == .windows) try setWindowDark(window, self.dark);
         self.windows[index] = window;
+        return index;
     }
     pub fn untrack(self: *Follower, window: z.Window) void {
         for (&self.windows) |*slot| if (slot.*) |existing| if (std.meta.eql(existing.key, window.key)) {
@@ -159,9 +186,9 @@ pub const Follower = struct {
             .system => self.prefs.color_scheme == .dark,
         };
         apply(app, self.source, self.dark);
-        if (comptime os == .windows) for (&self.windows) |*slot| if (slot.*) |window| {
-            setWindowDark(window, self.dark) catch {
-                slot.* = null;
+        if (comptime os == .windows) for (&self.windows, 0..) |*entry, index| if (entry.*) |window| {
+            setWindowDark(window, self.frameDark(index)) catch {
+                entry.* = null;
             };
         };
         if (!notify or (was == self.dark and std.meta.eql(old_prefs, self.prefs))) return;

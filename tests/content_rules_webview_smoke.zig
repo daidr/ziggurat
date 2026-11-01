@@ -6,10 +6,8 @@ const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
 pub const panic = std.debug.FullPanic(@import("macos_panic.zig").panic);
 
-const linux = builtin.os.tag == .linux;
-/// macOS pages are trusted HTML only, without a site to load scripts from:
-/// the check there is the hidden element and the audio state.
-const macos = builtin.os.tag == .macos;
+/// WebKit pages, on Linux and macOS, load from a custom-scheme site.
+const webkit = builtin.os.tag == .linux or builtin.os.tag == .macos;
 const document =
     \\<!doctype html><title>page</title>
     \\<div class="banner" id="banner">ad</div><div id="text">text</div>
@@ -94,10 +92,10 @@ const Probe = struct {
     fn options(self: *Probe) web.Options {
         return .{
             .html = document,
-            .storage = if (linux or macos) .ephemeral else .profile,
-            .user_data_folder = if (linux or macos) "" else self.store,
-            .custom_schemes = if (linux) &registrations else &.{},
-            .local = if (macos) null else .{ .scheme = if (linux) "asset" else "https", .resources = &site_resources },
+            .storage = if (webkit) .ephemeral else .profile,
+            .user_data_folder = if (webkit) "" else self.store,
+            .custom_schemes = if (webkit) &registrations else &.{},
+            .local = .{ .scheme = if (webkit) "asset" else "https", .resources = &site_resources },
             .content_rules = &self.applied,
             .audio_muted = true,
             .page_listener = .{ .context = self, .event = page },
@@ -121,8 +119,8 @@ const Probe = struct {
         const self: *Probe = @ptrCast(@alignCast(ptr));
         if (result != .json) return self.fail(error.ScriptFailed);
         const want = switch (self.step) {
-            .with_rules => if (macos) "\"false false none block loaded\"" else "\"true false none block loaded\"",
-            .without_rules => if (macos) "\"false false block block loaded\"" else "\"true true block block loaded\"",
+            .with_rules => "\"true false none block loaded\"",
+            .without_rules => "\"true true block block loaded\"",
             else => return self.fail(error.UnexpectedScript),
         };
         if (!std.mem.eql(u8, result.json, want)) {

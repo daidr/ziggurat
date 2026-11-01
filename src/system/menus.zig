@@ -56,6 +56,7 @@ pub fn validate(items: []const types.Item, popup: bool) !Plan {
             plan.radio_group[index] = group;
             if (item.checked) for (items[group..index]) |previous| if (previous.checked) return error.MultipleRadioChecked;
         }
+        if (item.icon != null and item.kind == .separator) return error.InvalidMenuIcon;
         if (item.kind == .command) plan.commands += 1;
     }
     return plan;
@@ -320,6 +321,9 @@ test "adjacent radio commands under one parent form a group with one checked ite
     try testing.expectEqual(@as(?u8, null), plan.radio_group[5]);
     try testing.expectError(error.MultipleRadioChecked, validate(&.{ .{ .id = 1, .label = "A", .radio = true, .checked = true }, .{ .id = 2, .label = "B", .radio = true, .checked = true } }, true));
     try testing.expectError(error.InvalidRadioItem, validate(&.{.{ .id = 1, .label = "A", .kind = .submenu, .radio = true }}, true));
+    var icon: types.MenuIcon = undefined;
+    try testing.expectError(error.InvalidMenuIcon, validate(&.{.{ .kind = .separator, .icon = &icon }}, true));
+    _ = try validate(&.{ .{ .id = 1, .label = "A", .kind = .submenu, .icon = &icon }, .{ .id = 2, .parent = 1, .label = "B", .icon = &icon } }, false);
     // A different parent starts another group.
     const nested = [_]types.Item{
         .{ .id = 1, .label = "A", .radio = true, .checked = true },

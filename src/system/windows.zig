@@ -61,7 +61,7 @@ pub const Owner = struct {
             self.hwnd = null;
         }
         self.taskbar_created = registered;
-        self.barless = (window.capabilities() catch return error.Closed).vibrancy;
+        self.barless = (window.capabilities() catch return error.Closed).transparent;
         try window.setService(.{ .context = self, .message = message, .native_destroying = nativeDestroying });
     }
     pub fn detach(self: *Owner) !void {
@@ -214,7 +214,7 @@ pub const Owner = struct {
         const plan = try menus.validate(items, false);
         const first_command = if (plan.commands == 0) @as(u16, 0) else try window.reserveNativeIds(@intCast(plan.commands));
         var entries: [types.max_menu_items]Entry = undefined;
-        const built = native_menu.build(items, &plan, false, first_command, &entries) catch |err| return self.failed(err);
+        const built = native_menu.build(items, &plan, false, first_command, &entries, self.windowDpi()) catch |err| return self.failed(err);
         const menu = built.menu;
         if (!self.barless and c.SetMenu(self.hwnd, menu) == 0) {
             _ = c.DestroyMenu(menu);
@@ -256,6 +256,25 @@ pub const Owner = struct {
             return;
         };
         return error.MenuItemNotFound;
+    }
+
+    /// Replaces a command item's icon in the menu bar, or removes it with
+    /// null; the items of the bar itself show none.
+    pub fn setItemIcon(self: *Owner, id: u64, icon: ?*types.MenuIcon) !void {
+        const window = try self.require();
+        const scope = window.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        for (self.entries[0..self.entry_count]) |entry| if (entry.id == id) {
+            if (entry.top) return;
+            native_menu.setIcon(entry.menu, entry.command, false, icon, self.windowDpi(), native_menu.iconTint()) catch |err| return self.failed(err);
+            _ = c.DrawMenuBar(self.hwnd);
+            return;
+        };
+        return error.MenuItemNotFound;
+    }
+    fn windowDpi(self: *const Owner) u32 {
+        const value = c.GetDpiForWindow(self.hwnd);
+        return if (value == 0) 96 else value;
     }
 
     /// Opens a context menu after this call returns. The request completes

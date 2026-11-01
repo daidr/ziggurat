@@ -730,6 +730,7 @@ pub fn build(b: *std.Build) void {
         core.linkSystemLibrary("ole32", .{});
         core.linkSystemLibrary("imm32", .{});
         core.linkSystemLibrary("dwmapi", .{});
+        core.linkSystemLibrary("gdi32", .{});
         core.link_libc = true;
     }
     if (target.result.os.tag == .macos) {
@@ -763,6 +764,11 @@ pub fn build(b: *std.Build) void {
         pointer_gtk_test.root_module.linkSystemLibrary("x11", .{ .use_pkg_config = .force });
         check.dependOn(&pointer_gtk_test.step);
         b.step("test-pointer-gtk", "Verify native GTK pointer facts, pairing and callback continuation authority").dependOn(&b.addRunArtifact(pointer_gtk_test).step);
+        const touch_test = b.addExecutable(.{ .name = "test-linux-touch", .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }) });
+        touch_test.root_module.addCSourceFile(.{ .file = b.path("tests/linux_touch_test.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        touch_test.root_module.linkSystemLibrary("m", .{});
+        check.dependOn(&touch_test.step);
+        b.step("test-linux-touch", "Verify touchscreen taps, long presses and scrolls").dependOn(&b.addRunArtifact(touch_test).step);
     }
     if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
         const damage = b.addExecutable(.{ .name = "smoke-damage", .root_module = b.createModule(.{
@@ -1567,6 +1573,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_ui", .module = ui },
         });
         addLinuxPointerCoreSmoke(b, check, core, target, optimize);
+        addSmoke(b, "smoke-linux-touch", "tests/linux_touch_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-window-state", "tests/window_state_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-window-relationships", "tests/window_relationship_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
         addSmoke(b, "smoke-key-input", "tests/key_input_smoke.zig", target, optimize, &.{.{ .name = "ziggurat", .module = core }});
@@ -1760,6 +1767,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_webview", .module = view },
         });
         addSmoke(b, "smoke-webview-content-rules", "tests/content_rules_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-local-macos", "tests/macos_local_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
         });
