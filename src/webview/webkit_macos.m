@@ -1700,10 +1700,13 @@ static NSHTTPCookie *cookie_make(const char *name,const char *value,const char *
     properties[NSHTTPCookieName]=n; properties[NSHTTPCookieValue]=v;
     return [NSHTTPCookie cookieWithProperties:properties];
 }
-static void cookie_replace_next(CookieOp *op,WKHTTPCookieStore *cookies,NSUInteger at) {
+static WKHTTPCookieStore *cookie_engine(ZwkCookies *s) {
+    return ((__bridge WKWebsiteDataStore *)s->store).httpCookieStore;
+}
+static void cookie_replace_next(CookieOp *op,NSUInteger at) {
     NSArray<NSHTTPCookie *> *input=(__bridge NSArray<NSHTTPCookie *> *)op->input;
     if (at==input.count) { cookie_op_finish(op,ZWK_COOKIES_OK,nil); return; }
-    [cookies setCookie:input[at] completionHandler:^{ cookie_replace_next(op,cookies,at+1); }];
+    [cookie_engine(op->store) setCookie:input[at] completionHandler:^{ cookie_replace_next(op,at+1); }];
 }
 /* Publishes the operation before the engine call; nothing may fail after. */
 static int cookie_start(CookieOp *op) {
@@ -1715,24 +1718,17 @@ static int cookie_start(CookieOp *op) {
     atomic_fetch_add(&live_cookie_ops,1);
     atomic_fetch_add(&live_cookie_bytes,op->bytes);
     WKWebsiteDataStore *store=(__bridge WKWebsiteDataStore *)s->store;
-    WKHTTPCookieStore *cookies=store.httpCookieStore;
-    switch (op->kind) {
-    case ZWK_COOKIE_QUERY: case ZWK_COOKIE_LIST_ALL:
-        [cookies getAllCookies:^(NSArray<NSHTTPCookie *> *all) { cookie_op_finish(op,ZWK_COOKIES_OK,all); }];
-        break;
-    case ZWK_COOKIE_SET:
-        [cookies setCookie:(__bridge NSHTTPCookie *)op->input completionHandler:^{ cookie_op_finish(op,ZWK_COOKIES_OK,nil); }];
-        break;
-    case ZWK_COOKIE_DELETE: case ZWK_COOKIE_DELETE_KEY:
-        [cookies deleteCookie:(__bridge NSHTTPCookie *)op->input completionHandler:^{ cookie_op_finish(op,ZWK_COOKIES_OK,nil); }];
-        break;
-    case ZWK_COOKIE_REPLACE_ALL:
-        [store removeDataOfTypes:[NSSet setWithObject:WKWebsiteDataTypeCookies] modifiedSince:[NSDate distantPast] completionHandler:^{ cookie_replace_next(op,cookies,0); }];
-        break;
-    default:
-        [store removeDataOfTypes:[NSSet setWithObject:WKWebsiteDataTypeCookies] modifiedSince:[NSDate distantPast] completionHandler:^{ cookie_op_finish(op,ZWK_COOKIES_OK,nil); }];
-        break;
-    }
+    NSSet<NSString *> *types=[NSSet setWithObject:WKWebsiteDataTypeCookies];
+    if (op->kind==ZWK_COOKIE_QUERY || op->kind==ZWK_COOKIE_LIST_ALL)
+        [cookie_engine(s) getAllCookies:^(NSArray<NSHTTPCookie *> *all) { cookie_op_finish(op,ZWK_COOKIES_OK,all); }];
+    else if (op->kind==ZWK_COOKIE_SET)
+        [cookie_engine(s) setCookie:(__bridge NSHTTPCookie *)op->input completionHandler:^{ cookie_op_finish(op,ZWK_COOKIES_OK,nil); }];
+    else if (op->kind==ZWK_COOKIE_DELETE || op->kind==ZWK_COOKIE_DELETE_KEY)
+        [cookie_engine(s) deleteCookie:(__bridge NSHTTPCookie *)op->input completionHandler:^{ cookie_op_finish(op,ZWK_COOKIES_OK,nil); }];
+    else if (op->kind==ZWK_COOKIE_REPLACE_ALL)
+        [store removeDataOfTypes:types modifiedSince:[NSDate distantPast] completionHandler:^{ cookie_replace_next(op,0); }];
+    else
+        [store removeDataOfTypes:types modifiedSince:[NSDate distantPast] completionHandler:^{ cookie_op_finish(op,ZWK_COOKIES_OK,nil); }];
     return ZWK_COOKIES_OK;
 }
 static int cookie_slot(ZwkCookies *s,uint64_t token,size_t *index) {
