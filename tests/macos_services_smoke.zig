@@ -140,9 +140,56 @@ const Flip = struct {
 
 fn stayOpen(_: *anyopaque, _: *z.App) void {}
 
+/// A deep link and an opened file arrive as the Apple Events the system
+/// sends, on the owner thread.
+const Opens = struct {
+    app: *z.App,
+    url: bool = false,
+    file: bool = false,
+    failure: ?anyerror = null,
+    fn received(ptr: *anyopaque, open: system.instance.Open) void {
+        const self: *Opens = @ptrCast(@alignCast(ptr));
+        self.check(open) catch |err| {
+            self.failure = err;
+        };
+        if (self.failure != null or (self.url and self.file)) self.app.quit();
+    }
+    fn check(self: *Opens, open: system.instance.Open) !void {
+        try std.testing.expectEqual(@as(usize, 1), open.items.len);
+        try std.testing.expectEqual(@as(u32, @intCast(std.c.getpid())), open.sender_process);
+        switch (open.kind) {
+            .urls => {
+                try std.testing.expectEqualStrings("zigsmoke://open?x=1&y=%20", open.items[0]);
+                self.url = true;
+            },
+            .files => {
+                try std.testing.expect(std.mem.endsWith(u8, open.items[0], "/ziggurat open \u{1f98e}.txt"));
+                self.file = true;
+            },
+        }
+    }
+};
+
+fn checkOpens(allocator: std.mem.Allocator) !void {
+    var keep: u8 = 0;
+    const app = try z.App.initWithOptions(allocator, .{ .on_all_windows_closed = .{ .context = &keep, .closed = stayOpen } });
+    defer app.deinit();
+    var opens: Opens = .{ .app = app };
+    var listener: system.instance.OpenListener = .{ .context = &opens, .on_open = Opens.received };
+    try listener.start(app);
+    defer listener.stop();
+    var second: system.instance.OpenListener = .{ .context = &opens, .on_open = Opens.received };
+    try std.testing.expectError(error.ListenerActive, second.start(app));
+    try system.instance.simulateOpenForTesting(.urls, "zigsmoke://open?x=1&y=%20");
+    try system.instance.simulateOpenForTesting(.files, "/tmp/ziggurat open \u{1f98e}.txt");
+    try app.run();
+    if (opens.failure) |err| return err;
+    try std.testing.expect(opens.url and opens.file);
+}
+
 fn watchdog() void {
     zio.sleep(20 * std.time.ns_per_s);
-    std.debug.print("macOS services smoke timed out waiting for appearance changes\n", .{});
+    std.debug.print("macOS services smoke timed out waiting for open requests or appearance changes\n", .{});
     std.process.exit(1);
 }
 
@@ -160,6 +207,9 @@ pub fn main() !void {
     const shell_thread = try std.Thread.spawn(.{}, runShell, .{ allocator, &shell_result });
     shell_thread.join();
     try shell_result;
+    const guard = try std.Thread.spawn(.{}, watchdog, .{});
+    guard.detach();
+    try checkOpens(allocator);
 
     // No windows: keep running until the appearance flips finish.
     var keep: u8 = 0;
@@ -193,8 +243,6 @@ pub fn main() !void {
     try flip.watch.start(app, .{ .preferences = true });
     try std.testing.expectEqual(@as(usize, 1), desktop.resourceCount());
     theme.apply(app, .dark, true);
-    const guard = try std.Thread.spawn(.{}, watchdog, .{});
-    guard.detach();
     try app.run();
     if (flip.failure) |err| return err;
     try std.testing.expectEqual(@as(u8, 2), flip.step);

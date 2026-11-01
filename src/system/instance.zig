@@ -2,6 +2,7 @@ const std = @import("std");
 const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const identity = @import("identity.zig");
+const z = @import("ziggurat");
 const win = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 
 pub const max_arguments = 128;
@@ -16,7 +17,10 @@ const magic = [4]u8{ 'Z', 'G', 'I', 1 };
 const ack_accepted: u8 = 'A';
 const ack_rejected: u8 = 'R';
 
-pub const capabilities = .{ .single_instance = builtin.os.tag == .windows or builtin.os.tag == .linux };
+pub const capabilities = .{
+    .single_instance = builtin.os.tag == .windows or builtin.os.tag == .linux or builtin.os.tag == .macos,
+    .open_events = builtin.os.tag == .macos and !builtin.is_test,
+};
 
 pub const Options = struct {
     /// Application identity, see identity.validate. The OS adapter adds the
@@ -46,6 +50,72 @@ pub const Received = union(enum) {
     stopped,
 };
 pub const Claim = union(enum) { primary: Primary, secondary: Secondary };
+
+/// What the system asks a running macOS app to open: a URL of a scheme the
+/// bundle declares (a deep link) or files (Finder's Open, a drop on the
+/// dock icon). macOS sends these as Apple Events, never as process
+/// arguments; on Linux and Windows the same requests arrive as arguments of
+/// a second process and reach the primary through claimOrForward.
+pub const Open = struct {
+    kind: enum { urls, files },
+    /// Absolute URLs or absolute file paths, borrowed during on_open.
+    items: []const []const u8,
+    /// Process ID of the sender, 0 when the system did not say.
+    sender_process: u32,
+};
+
+/// Receives Open requests on the App's owner thread. Start it before
+/// App.run so the URLs and files that launched the app arrive too: the
+/// system sends them while the run loop starts. One listener per process;
+/// keep it at a stable address until stop. Linux and Windows return
+/// UnsupportedCapability.
+pub const OpenListener = struct {
+    context: *anyopaque,
+    on_open: *const fn (*anyopaque, Open) void,
+    app: ?*z.App = null,
+
+    pub fn start(self: *OpenListener, app: *z.App) !void {
+        app.assertOwner();
+        if (comptime !capabilities.open_events) return error.UnsupportedCapability;
+        if (self.app != null) return error.AlreadyStarted;
+        if (active_listener != null or zsm_open_start(self, delivered) == 0) return error.ListenerActive;
+        active_listener = self;
+        self.app = app;
+    }
+    /// Idempotent. Later requests go to the system's default handling.
+    pub fn stop(self: *OpenListener) void {
+        const app = self.app orelse return;
+        app.assertOwner();
+        if (comptime capabilities.open_events) zsm_open_stop();
+        active_listener = null;
+        self.app = null;
+    }
+
+    fn delivered(owner: ?*anyopaque, kind: c_int, items: [*]const [*:0]const u8, count: usize, sender: c_int) callconv(.c) void {
+        const self: *OpenListener = @ptrCast(@alignCast(owner.?));
+        if (self.app == null) return;
+        var slices: [max_arguments][]const u8 = undefined;
+        var at: usize = 0;
+        while (at < count) {
+            const batch = @min(count - at, slices.len);
+            for (items[at..][0..batch], slices[0..batch]) |item, *slice| slice.* = std.mem.span(item);
+            self.on_open(self.context, .{ .kind = if (kind == 0) .urls else .files, .items = slices[0..batch], .sender_process = if (sender > 0) @intCast(sender) else 0 });
+            at += batch;
+        }
+    }
+};
+var active_listener: ?*OpenListener = null;
+extern fn zsm_open_start(owner: *anyopaque, callback: *const fn (?*anyopaque, c_int, [*]const [*:0]const u8, usize, c_int) callconv(.c) void) c_int;
+extern fn zsm_open_stop() void;
+extern fn zsm_open_simulate(kind: c_int, item: [*:0]const u8) c_int;
+
+/// Integration checks: sends this process the Apple Event the system sends
+/// for a URL or a file, which reaches a started OpenListener on a later run
+/// loop turn.
+pub fn simulateOpenForTesting(kind: @FieldType(Open, "kind"), item: [:0]const u8) !void {
+    if (comptime !capabilities.open_events) return error.UnsupportedCapability;
+    if (zsm_open_simulate(@intFromBool(kind == .files), item.ptr) == 0) return error.SimulationFailed;
+}
 
 /// Acquire the per-user lock for `options.id`. Exactly one live process is the
 /// primary; others receive a Secondary that can forward once. Call this before
@@ -226,7 +296,7 @@ fn rejection(err: anyerror) ?Rejection {
 }
 
 const backend = switch (builtin.os.tag) {
-    .linux => Linux,
+    .linux, .macos => Linux,
     .windows => Windows,
     else => Unsupported,
 };
@@ -248,20 +318,91 @@ const Unsupported = struct {
     fn deinitSecondary(_: *@This().Secondary) void {}
 };
 
+/// Unix sockets and flock, on Linux and macOS.
 const Linux = struct {
     const posix = std.posix;
     const linux = std.os.linux;
+    const darwin = builtin.os.tag == .macos;
     const Primary = struct {
         lock: posix.fd_t,
         listener: posix.fd_t,
         stop_read: posix.fd_t,
         stop_write: posix.fd_t,
-        socket_path: [108]u8,
+        socket_path: @FieldType(posix.sockaddr.un, "path"),
         socket_path_len: usize,
     };
     const Secondary = struct { address: posix.sockaddr.un, length: posix.socklen_t };
     /// struct ucred from SO_PEERCRED.
     const Credentials = extern struct { pid: i32, uid: u32, gid: u32 };
+
+    fn uid() posix.uid_t {
+        return if (darwin) std.c.getuid() else linux.getuid();
+    }
+    /// The per-user runtime directory: $XDG_RUNTIME_DIR on Linux, the
+    /// confstr(_CS_DARWIN_USER_TEMP_DIR) folder on macOS.
+    fn runtimeDirectory(buffer: *[std.fs.max_path_bytes]u8) ![]const u8 {
+        if (darwin) {
+            const darwin_user_temp_dir = 65537;
+            const length = confstr(darwin_user_temp_dir, buffer, buffer.len);
+            if (length == 0 or length > buffer.len) return error.RuntimeDirectoryUnavailable;
+            var path = buffer[0 .. length - 1];
+            while (path.len > 1 and path[path.len - 1] == '/') path.len -= 1;
+            return path;
+        }
+        return zio.getenv("XDG_RUNTIME_DIR") orelse error.RuntimeDirectoryUnavailable;
+    }
+    extern "c" fn confstr(name: c_int, buffer: [*]u8, length: usize) usize;
+    extern "c" fn getpeereid(socket: c_int, euid: *posix.uid_t, egid: *posix.gid_t) c_int;
+    /// A non-blocking, close-on-exec Unix stream socket; on macOS without
+    /// SIGPIPE, since send there has no MSG_NOSIGNAL.
+    fn streamSocket() !posix.fd_t {
+        if (comptime darwin) {
+            const socket = try zio.posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+            errdefer zio.posix.close(socket);
+            try configure(socket);
+            return socket;
+        }
+        return zio.posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0);
+    }
+    fn configure(socket: posix.fd_t) !void {
+        _ = try zio.posix.fcntl(socket, posix.F.SETFD, posix.FD_CLOEXEC);
+        const flags = try zio.posix.fcntl(socket, posix.F.GETFL, 0);
+        _ = try zio.posix.fcntl(socket, posix.F.SETFL, flags | @as(usize, @as(u32, @bitCast(posix.O{ .NONBLOCK = true }))));
+        const on: c_int = 1;
+        if (std.c.setsockopt(socket, posix.SOL.SOCKET, std.c.SO.NOSIGPIPE, std.mem.asBytes(&on), @sizeOf(c_int)) != 0) return error.SocketConfigurationFailed;
+    }
+    fn acceptPeer(listener: posix.fd_t) !posix.fd_t {
+        if (comptime darwin) {
+            const rc = std.c.accept(listener, null, null);
+            if (rc < 0) return switch (std.c.errno(rc)) {
+                .AGAIN, .INTR => error.WouldBlock,
+                .CONNABORTED => error.ConnectionAborted,
+                else => error.Unexpected,
+            };
+            errdefer zio.posix.close(rc);
+            try configure(rc);
+            return rc;
+        }
+        return zio.posix.accept(listener, posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK);
+    }
+    /// The peer's uid and process ID.
+    fn peerOf(socket: posix.fd_t) !struct { uid: posix.uid_t, pid: u32 } {
+        if (comptime darwin) {
+            var euid: posix.uid_t = undefined;
+            var egid: posix.gid_t = undefined;
+            if (getpeereid(socket, &euid, &egid) != 0) return error.PeerCredentialsUnavailable;
+            // SOL_LOCAL, LOCAL_PEERPID
+            var pid: c_int = 0;
+            var size: posix.socklen_t = @sizeOf(c_int);
+            if (std.c.getsockopt(socket, 0, 2, @ptrCast(&pid), &size) != 0) return error.PeerCredentialsUnavailable;
+            return .{ .uid = euid, .pid = @intCast(pid) };
+        }
+        var credentials: Credentials = undefined;
+        var size: posix.socklen_t = @sizeOf(Credentials);
+        if (linux.errno(linux.getsockopt(socket, posix.SOL.SOCKET, posix.SO.PEERCRED, @ptrCast(&credentials), &size)) != .SUCCESS) return error.PeerCredentialsUnavailable;
+        return .{ .uid = credentials.uid, .pid = @intCast(credentials.pid) };
+    }
+    const send_flags: u32 = if (darwin) 0 else posix.MSG.NOSIGNAL;
 
     const Paths = struct {
         lock: [std.fs.max_path_bytes:0]u8 = undefined,
@@ -269,18 +410,23 @@ const Linux = struct {
         socket_len: usize = 0,
     };
     fn paths(id: []const u8) !Paths {
-        const runtime = zio.getenv("XDG_RUNTIME_DIR") orelse return error.RuntimeDirectoryUnavailable;
+        var runtime_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const runtime = try runtimeDirectory(&runtime_buffer);
         if (runtime.len == 0 or runtime[0] != '/') return error.RuntimeDirectoryUnavailable;
         // The runtime directory is the user isolation boundary: it must be a
         // directory owned by this user and closed to everyone else.
         const directory = zio.posix.open(runtime, .{ .DIRECTORY = true, .CLOEXEC = true }, 0) catch return error.RuntimeDirectoryUnavailable;
         defer zio.posix.close(directory);
         const status = zio.posix.fstat(directory) catch return error.RuntimeDirectoryUnavailable;
-        if (status.uid != linux.getuid() or status.mode & 0o077 != 0) return error.RuntimeDirectoryUnsafe;
+        if (status.uid != uid() or status.mode & 0o077 != 0) return error.RuntimeDirectoryUnsafe;
         var result: Paths = .{};
         const lock = std.fmt.bufPrintSentinel(&result.lock, "{s}/ziggurat-instance-{s}.lock", .{ runtime, id }, 0) catch return error.PathTooLong;
         _ = lock;
-        const socket = std.fmt.bufPrint(&result.socket.path, "{s}/ziggurat-instance-{s}.sock", .{ runtime, id }) catch return error.PathTooLong;
+        // macOS socket paths hold 103 bytes; a longer one names the ID by hash.
+        const socket = std.fmt.bufPrint(&result.socket.path, "{s}/ziggurat-instance-{s}.sock", .{ runtime, id }) catch if (darwin)
+            std.fmt.bufPrint(&result.socket.path, "{s}/ziggurat-instance-{x:0>16}.sock", .{ runtime, std.hash.Wyhash.hash(0, id) }) catch return error.PathTooLong
+        else
+            return error.PathTooLong;
         if (socket.len >= result.socket.path.len) return error.PathTooLong;
         result.socket_len = socket.len;
         return result;
@@ -302,7 +448,7 @@ const Linux = struct {
             error.FileNotFound => {},
             else => return err,
         };
-        const listener = try zio.posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0);
+        const listener = try streamSocket();
         errdefer zio.posix.close(listener);
         try zio.posix.bind(listener, @ptrCast(&p.socket), @intCast(@offsetOf(posix.sockaddr.un, "path") + p.socket_len + 1));
         errdefer std.Io.Dir.cwd().deleteFile(zio.io(), p.socket.path[0..p.socket_len]) catch {};
@@ -337,23 +483,21 @@ const Linux = struct {
             _ = try posix.poll(&fds, -1);
             if (fds[1].revents != 0) return .stopped;
             if (fds[0].revents == 0) continue;
-            const peer = zio.posix.accept(self.listener, posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK) catch |err| switch (err) {
+            const connection = acceptPeer(self.listener) catch |err| switch (err) {
                 error.WouldBlock, error.ConnectionAborted => continue,
                 else => return err,
             };
-            defer zio.posix.close(peer);
-            var credentials: Credentials = undefined;
-            var size: posix.socklen_t = @sizeOf(Credentials);
-            if (linux.errno(linux.getsockopt(peer, posix.SOL.SOCKET, posix.SO.PEERCRED, @ptrCast(&credentials), &size)) != .SUCCESS) return error.PeerCredentialsUnavailable;
-            if (credentials.uid != linux.getuid()) return .{ .rejected = .foreign_user };
+            defer zio.posix.close(connection);
+            const credentials = try peerOf(connection);
+            if (credentials.uid != uid()) return .{ .rejected = .foreign_user };
             const deadline = zio.milliTimestamp() + timeout_ms;
-            const message = exchange(self, peer, deadline, storage, arguments, @intCast(credentials.pid)) catch |err| {
+            const message = exchange(self, connection, deadline, storage, arguments, credentials.pid) catch |err| {
                 if (err == error.Stopped) return .stopped;
                 const reason = rejection(err) orelse return err;
-                if (reason != .disconnected and reason != .timeout) writeAll(self, peer, &.{ack_rejected}, deadline) catch {};
+                if (reason != .disconnected and reason != .timeout) writeAll(self, connection, &.{ack_rejected}, deadline) catch {};
                 return .{ .rejected = reason };
             };
-            writeAll(self, peer, &.{ack_accepted}, deadline) catch |err| {
+            writeAll(self, connection, &.{ack_accepted}, deadline) catch |err| {
                 if (err == error.Stopped) return .stopped;
                 return .{ .rejected = rejection(err) orelse return err };
             };
@@ -396,7 +540,7 @@ const Linux = struct {
         var at: usize = 0;
         while (at < bytes.len) {
             try waitFor(self, fd, posix.POLL.OUT, deadline);
-            at += zio.posix.send(fd, bytes[at..], posix.MSG.NOSIGNAL) catch |err| switch (err) {
+            at += zio.posix.send(fd, bytes[at..], send_flags) catch |err| switch (err) {
                 error.WouldBlock => continue,
                 error.BrokenPipe, error.ConnectionResetByPeer => return error.Disconnected,
                 else => return err,
@@ -404,7 +548,7 @@ const Linux = struct {
         }
     }
     fn forward(self: *@This().Secondary, timeout_ms: u32, frame: []const u8) !void {
-        const socket = try zio.posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK, 0);
+        const socket = try streamSocket();
         defer zio.posix.close(socket);
         const deadline = zio.milliTimestamp() + timeout_ms;
         // A full backlog makes a non-blocking Unix connect fail with EAGAIN

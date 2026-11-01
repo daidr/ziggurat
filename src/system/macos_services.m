@@ -15,6 +15,8 @@
 #import <IOKit/ps/IOPSKeys.h>
 #import <Network/Network.h>
 #include <stdatomic.h>
+#include <stdlib.h>
+#include <unistd.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -635,4 +637,94 @@ void zsd_watch_stop(void *handle) {
         [watches removeObject:watch];
         atomic_fetch_sub(&desktop_live, 1);
     }
+}
+
+/* ---- URLs and documents the system asks the app to open ---- */
+
+/* kind: 0 URLs, 1 file paths. Items are UTF-8, valid during the call. */
+typedef void (*ZsmOpenCallback)(void *owner, int kind, const char *const *items, size_t count, int sender);
+
+@interface ZsmOpenHandler : NSObject {
+@public
+    void *owner;
+    ZsmOpenCallback callback;
+}
+@end
+
+static int sender_of(NSAppleEventDescriptor *event) {
+    NSAppleEventDescriptor *pid = [event attributeDescriptorForKeyword:keySenderPIDAttr];
+    return pid ? [pid int32Value] : 0;
+}
+static void deliver_open(ZsmOpenHandler *handler, int kind, NSArray<NSString *> *items, int sender) {
+    if (!handler->owner || [items count] == 0) return;
+    const char **values = calloc([items count], sizeof *values);
+    if (!values) return;
+    size_t count = 0;
+    for (NSString *item in items) {
+        const char *value = [item UTF8String];
+        if (value) values[count++] = value;
+    }
+    if (count) handler->callback(handler->owner, kind, values, count, sender);
+    free(values);
+}
+
+@implementation ZsmOpenHandler
+- (void)url:(NSAppleEventDescriptor *)event reply:(NSAppleEventDescriptor *)reply {
+    (void)reply;
+    NSString *url = [[event paramDescriptorForKeyword:keyDirectObject] stringValue];
+    if (url) deliver_open(self, 0, @[url], sender_of(event));
+}
+- (void)documents:(NSAppleEventDescriptor *)event reply:(NSAppleEventDescriptor *)reply {
+    (void)reply;
+    NSAppleEventDescriptor *list = [[event paramDescriptorForKeyword:keyDirectObject] coerceToDescriptorType:typeAEList];
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    for (NSInteger i = 1; i <= [list numberOfItems]; i++) {
+        NSData *data = [[[list descriptorAtIndex:i] coerceToDescriptorType:typeFileURL] data];
+        NSString *text = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+        NSURL *url = text ? [NSURL URLWithString:text] : nil;
+        NSString *path = [url isFileURL] ? [[url filePathURL] path] : nil;
+        if (path) [paths addObject:path];
+    }
+    deliver_open(self, 1, paths, sender_of(event));
+}
+@end
+
+static ZsmOpenHandler *open_handler;
+
+/* Installs the GURL and odoc handlers; at most one listener. */
+int zsm_open_start(void *owner, ZsmOpenCallback callback) {
+    if (open_handler) return 0;
+    open_handler = [[ZsmOpenHandler alloc] init];
+    open_handler->owner = owner;
+    open_handler->callback = callback;
+    NSAppleEventManager *manager = [NSAppleEventManager sharedAppleEventManager];
+    [manager setEventHandler:open_handler andSelector:@selector(url:reply:) forEventClass:kInternetEventClass andEventID:kAEGetURL];
+    [manager setEventHandler:open_handler andSelector:@selector(documents:reply:) forEventClass:kCoreEventClass andEventID:kAEOpenDocuments];
+    return 1;
+}
+void zsm_open_stop(void) {
+    if (!open_handler) return;
+    NSAppleEventManager *manager = [NSAppleEventManager sharedAppleEventManager];
+    [manager removeEventHandlerForEventClass:kInternetEventClass andEventID:kAEGetURL];
+    [manager removeEventHandlerForEventClass:kCoreEventClass andEventID:kAEOpenDocuments];
+    open_handler->owner = NULL;
+    open_handler = nil;
+}
+/* Integration checks: delivers an event to the installed handler as the
+   system would. kind 0 sends a GURL with `item`, 1 an odoc with one file. */
+int zsm_open_simulate(int kind, const char *item) {
+    NSString *value = [NSString stringWithUTF8String:item];
+    if (!value) return 0;
+    pid_t pid = getpid();
+    NSAppleEventDescriptor *target = [NSAppleEventDescriptor descriptorWithDescriptorType:typeKernelProcessID bytes:&pid length:sizeof pid];
+    NSAppleEventDescriptor *event = [NSAppleEventDescriptor appleEventWithEventClass:kind ? kCoreEventClass : kInternetEventClass eventID:kind ? kAEOpenDocuments : kAEGetURL targetDescriptor:target returnID:kAutoGenerateReturnID transactionID:kAnyTransactionID];
+    if (kind) {
+        NSAppleEventDescriptor *list = [NSAppleEventDescriptor listDescriptor];
+        NSData *url = [[[NSURL fileURLWithPath:value] absoluteString] dataUsingEncoding:NSUTF8StringEncoding];
+        [list insertDescriptor:[NSAppleEventDescriptor descriptorWithDescriptorType:typeFileURL data:url] atIndex:1];
+        [event setParamDescriptor:list forKeyword:keyDirectObject];
+    } else [event setParamDescriptor:[NSAppleEventDescriptor descriptorWithString:value] forKeyword:keyDirectObject];
+    NSError *error = nil;
+    [event sendEventWithOptions:NSAppleEventSendNoReply timeout:5 error:&error];
+    return error == nil;
 }

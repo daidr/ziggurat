@@ -716,12 +716,13 @@ pub fn build(b: *std.Build) void {
         for ([_][]const u8{ "user32", "gdi32", "shell32", "ole32" }) |library| system_unit_tests.root_module.linkSystemLibrary(library, .{});
         _ = native_support.add(b, system_unit_tests.root_module, "system-picker-native-test", "src/system/picker.c", &.{"-std=c11"}, target, optimize);
     }
-    if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux or target.result.os.tag == .macos) {
+        // macOS runs the single-instance part only; the probe stays unlinked.
         const integration_probe = b.createModule(.{ .root_source_file = b.path("tests/os_integration_probe.zig"), .target = target, .optimize = optimize, .link_libc = true });
         if (target.result.os.tag == .linux) {
             integration_probe.addCSourceFile(.{ .file = b.path("tests/os_integration_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
             for ([_][]const u8{ "gio-2.0", "gio-unix-2.0" }) |library| integration_probe.linkSystemLibrary(library, .{ .use_pkg_config = .yes });
-        } else integration_probe.linkSystemLibrary("shlwapi", .{});
+        } else if (target.result.os.tag == .windows) integration_probe.linkSystemLibrary("shlwapi", .{});
         addSmoke(b, "smoke-os-integration", "tests/os_integration_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
