@@ -1,6 +1,7 @@
 //! Small secrets, such as access tokens and API keys, in the system's
-//! credential store: the Credential Manager on Windows and the Secret Service
-//! on Linux (GNOME Keyring, KWallet, KeePassXC and others, through libsecret).
+//! credential store: the Credential Manager on Windows, the Secret Service
+//! on Linux (GNOME Keyring, KWallet, KeePassXC and others, through libsecret)
+//! and the login Keychain on macOS.
 //! The system encrypts them for the user, unlike a file the application writes.
 //!
 //! A store keeps each secret under a service and a key. The service groups an
@@ -8,7 +9,10 @@
 //! of the same user that names the same service and key reads the same secret.
 //! Windows keeps a generic credential whose target is "service/key" and whose
 //! user name is the key; Linux keeps an item of the generic secret schema
-//! whose `service` and `account` attributes are the service and the key.
+//! whose `service` and `account` attributes are the service and the key;
+//! macOS keeps a generic password whose service and account are the service
+//! and the key, in the file-based login keychain (the data protection
+//! keychain needs a keychain-access-groups entitlement unsigned builds lack).
 //!
 //! `set`, `get` and `delete` block: the store may ask the user to unlock it.
 //! Call them on a caller-created worker thread, never on the App's main thread
@@ -27,11 +31,13 @@ const z = @import("ziggurat");
 const os = builtin.os.tag;
 const native_windows = !builtin.is_test and os == .windows;
 const native_linux = !builtin.is_test and os == .linux;
+/// macOS implements the same zss_* entry points with the Security framework.
+const native_macos = !builtin.is_test and os == .macos;
 
 /// Whether this build has a credential store to try. A Linux session may
 /// still lack one at run time (CredentialStoreUnavailable).
 pub const capabilities = .{
-    .credential_store = os == .windows or os == .linux,
+    .credential_store = os == .windows or os == .linux or os == .macos,
 };
 
 /// The largest secret `set` stores, in bytes: the most the Windows Credential
@@ -55,8 +61,8 @@ pub const Error = error{
 pub const NameError = error{ EmptyName, NameTooLong, EmbeddedNul, InvalidUtf8 };
 
 /// The native code of the last failure on the calling thread: a Win32 error,
-/// or the GError code of a Secret Service failure.
-pub const Failure = struct { domain: enum { win32, glib }, code: i32 };
+/// the GError code of a Secret Service failure, or a Keychain OSStatus.
+pub const Failure = struct { domain: enum { win32, glib, osstatus }, code: i32 };
 threadlocal var last_failure: ?Failure = null;
 pub fn lastFailure() ?Failure {
     return last_failure;
@@ -78,7 +84,7 @@ pub fn set(service: []const u8, key: []const u8, value: []const u8) !void {
     if (value.len > max_secret_bytes) return error.SecretTooLarge;
     last_failure = null;
     if (native_windows) return windows.set(service, key, value);
-    if (native_linux) return linuxCall(zss_secret_set(service.ptr, service.len, key.ptr, key.len, value.ptr, value.len, &linux_code));
+    if (native_linux or native_macos) return linuxCall(zss_secret_set(service.ptr, service.len, key.ptr, key.len, value.ptr, value.len, &linux_code));
     if (builtin.is_test) return memory.set(service, key, value);
     return error.UnsupportedCapability;
 }
@@ -90,7 +96,7 @@ pub fn get(service: []const u8, key: []const u8, destination: []u8) ![]u8 {
     try validateName(key);
     last_failure = null;
     if (native_windows) return windows.get(service, key, destination);
-    if (native_linux) {
+    if (native_linux or native_macos) {
         var length: usize = 0;
         try linuxCall(zss_secret_get(service.ptr, service.len, key.ptr, key.len, destination.ptr, destination.len, &length, &linux_code));
         return destination[0..length];
@@ -106,7 +112,7 @@ pub fn delete(service: []const u8, key: []const u8) !void {
     try validateName(key);
     last_failure = null;
     if (native_windows) return windows.delete(service, key);
-    if (native_linux) return linuxCall(zss_secret_delete(service.ptr, service.len, key.ptr, key.len, &linux_code));
+    if (native_linux or native_macos) return linuxCall(zss_secret_delete(service.ptr, service.len, key.ptr, key.len, &linux_code));
     if (builtin.is_test) return memory.delete(service, key);
     return error.UnsupportedCapability;
 }
@@ -223,10 +229,14 @@ fn linuxCall(result: c_int) Error!void {
     return switch (result) {
         0 => {},
         1 => error.SecretNotFound,
-        2 => error.CredentialStoreUnavailable,
+        2 => {
+            // macOS says which keychain status made the store unreachable.
+            if (os == .macos) last_failure = .{ .domain = .osstatus, .code = linux_code };
+            return error.CredentialStoreUnavailable;
+        },
         4 => error.SecretTooLarge,
         else => {
-            last_failure = .{ .domain = .glib, .code = linux_code };
+            last_failure = .{ .domain = if (os == .macos) .osstatus else .glib, .code = linux_code };
             return error.CredentialStoreFailed;
         },
     };

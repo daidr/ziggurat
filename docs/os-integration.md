@@ -1,6 +1,6 @@
 # 单实例与系统集成
 
-`ziggurat_system` 中的 `identity`、`instance`、`integration`、`power` 与 `taskbar` 提供应用身份、单实例与参数转发、按用户注册的登录启动/深链/文件关联、阻止休眠，以及任务栏或 dock 状态。它们不持有 App、不创建线程、不轮询；能力分别见 `system.capabilities.identity/instance/integration/power/taskbar`。macOS 不在当前范围内，所有入口在其他目标返回 `UnsupportedCapability`。
+`ziggurat_system` 中的 `identity`、`instance`、`integration`、`power` 与 `taskbar` 提供应用身份、单实例与参数转发、按用户注册的登录启动/深链/文件关联、阻止休眠，以及任务栏或 dock 状态。它们不持有 App、不创建线程、不轮询；能力分别见 `system.capabilities.identity/instance/integration/power/taskbar`。macOS 已实现系统目录、登录启动、URL scheme 默认处理程序与阻止休眠（见各节）；单实例与任务栏状态尚未实现，在 macOS 和其他目标返回 `UnsupportedCapability`。
 
 ## 应用身份
 
@@ -12,13 +12,13 @@
 
 `identity.directory(kind, destination)` 把绝对路径写入调用者缓冲，不创建目录，不追加分隔符。`applicationDirectory(kind, id, destination)` 只用于 `config/data/cache/state`，在其后拼上应用 ID。
 
-| kind | Windows | Linux |
-| --- | --- | --- |
-| home | Profile | `$HOME` |
-| config / data | Roaming AppData | `XDG_CONFIG_HOME` / `XDG_DATA_HOME`，默认 `~/.config`、`~/.local/share` |
-| cache / state | Local AppData | `XDG_CACHE_HOME` / `XDG_STATE_HOME`，默认 `~/.cache`、`~/.local/state` |
-| temp | `GetTempPathW` | `TMPDIR`，默认 `/tmp` |
-| desktop、documents、downloads、pictures、music、videos | Known Folder（不验证存在） | `user-dirs.dirs` |
+| kind | Windows | Linux | macOS |
+| --- | --- | --- | --- |
+| home | Profile | `$HOME` | `$HOME` |
+| config / data | Roaming AppData | `XDG_CONFIG_HOME` / `XDG_DATA_HOME`，默认 `~/.config`、`~/.local/share` | `~/Library/Application Support` |
+| cache / state | Local AppData | `XDG_CACHE_HOME` / `XDG_STATE_HOME`，默认 `~/.cache`、`~/.local/state` | `~/Library/Caches` / `~/Library/Application Support` |
+| temp | `GetTempPathW` | `TMPDIR`，默认 `/tmp` | `TMPDIR`（每用户的临时目录），默认 `/tmp` |
+| desktop、documents、downloads、pictures、music、videos | Known Folder（不验证存在） | `user-dirs.dirs` | `~/Desktop`、`~/Documents`、`~/Downloads`、`~/Pictures`、`~/Music`、`~/Movies` |
 
 Linux 只接受绝对的环境值，相对值按规范忽略。用户目录未配置或指向 `$HOME` 本身（xdg-user-dirs 的禁用写法）时返回 `DirectoryUnavailable`，不猜测位置；唯一例外是规范给出默认值的桌面目录 `~/Desktop`。`LinuxEnvironment` 允许测试或打包工具显式提供全部输入。缓冲不足返回 `ResultCapacityExceeded`，不截断。
 
@@ -57,6 +57,8 @@ Primary 不可复制。`receive(storage, arguments)` 由应用自己创建的一
 
 `integration.setLoginItem(.{ .id, .name, .executable, .arguments }, scope)` 让应用在用户登录时启动：Windows 写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 中名为 ID 的值，命令行按常规 argv 规则加引号；Linux 写 `$XDG_CONFIG_HOME/autostart/<id>.desktop`，Exec 按 Desktop Entry 规范转义。`removeLoginItem(id, scope)` 删除，重复删除无副作用；`loginItemRegistered(id, scope)` 只报告本应用自己的条目是否存在，不读取 Windows「启动应用」等桌面开关。可执行文件必须是绝对路径（Windows 为 `.exe`），参数最多 32 项、单项 1024 字节，拒绝控制字符。
 
+macOS 要求进程从 `.app` bundle 运行（否则返回 `AppBundleRequired`），启动的是这个 bundle 而不是 `executable`。macOS 13 起用 `SMAppService.mainAppService` 把 bundle 登记为用户的登录项（「系统设置 > 通用 > 登录项」中列出），此时 `arguments` 不生效；返回 `ApprovalRequired` 表示已登记但要用户在那里允许。更早的系统写 `~/Library/LaunchAgents/<id>.plist`，由 `/usr/bin/open -a <bundle> --args …` 打开。`loginItemRegistered` 在 macOS 报告登录项是否已启用，等待批准的不算。失败时 `integration.last_macos_status` 是本线程最近的 NSError/OSStatus 码。
+
 ## URL scheme 与文件关联
 
 ```zig
@@ -77,6 +79,8 @@ _ = try system.integration.register(allocator, app, .{});
 - **Windows**：scheme 写 `HKCU\Software\Classes\<scheme>`（`URL Protocol`、`DefaultIcon`、`shell\open\command` 为 `"exe" "%1"`）；文件类型写 ProgID `<id>.<ext>`（ID 加扩展名不超过 39 字符），并加入 `.<ext>\OpenWithProgids`。每个键带 `ZigguratApplicationId` 值，unregister 只删除标记属于本 ID 的键；扩展名的默认 ProgID 仅在等于本 ProgID 时清除。`make_default`（默认 true）设置扩展名默认 ProgID 并接管已存在的 scheme；为 false 时不覆盖其他应用的 scheme。Windows 在「设置」中保存的、受哈希保护的用户选择优先，任何注册 API 都不能覆盖，`register` 不尝试绕过。完成后发送 `SHCNE_ASSOCCHANGED`。
 - **Linux**：写 `$XDG_DATA_HOME/applications/<id>.desktop`（`MimeType` 包含 `x-scheme-handler/<scheme>` 与各 MIME，Exec 为 `<exe> %U`），文件类型另写 `$XDG_DATA_HOME/mime/packages/<id>.xml` 声明扩展名 glob：只定义应用自己的未注册类型（子类型以 `x-` 开头，如 `application/x-notes-sketch`），`text/markdown` 这类系统已登记的类型只写进 `MimeType`，不重新定义。`$XDG_CONFIG_HOME/mimeapps.list` 只改本 desktop ID 自己的条目：加入 `[Added Associations]` 首位，`make_default` 时加入 `[Default Applications]` 首位，并从 `[Removed Associations]` 移除；其他行逐字节保留，unregister 只移除本 ID。文件均先写同目录临时文件、fsync 后 rename。`refresh_caches`（默认 true）在 `/usr/bin` 或 `/bin` 存在时运行 `update-desktop-database` 与 `update-mime-database`，结果见返回的 `Report`；缺工具时扩展名 glob 要等系统下次重建 MIME 数据库才生效。
 
+- **macOS**：bundle 在 Info.plist 的 `CFBundleURLTypes`/`CFBundleDocumentTypes` 中声明 scheme 与文档类型（`ziggurat` CLI 打包时写入），Launch Services 随 bundle 登记它们。运行时 `register` 只检查每个 scheme 已声明（否则 `SchemeNotDeclared`，不在 bundle 中运行为 `AppBundleRequired`），`make_default` 时用 `LSSetDefaultHandlerForURLScheme` 成为默认处理程序；`isDefaultSchemeHandler(scheme)` 查询当前默认处理程序是否是本 bundle。`file_types` 和 `unregister` 返回 `UnsupportedCapability`：它们属于 bundle，`capabilities.integration.file_associations` 在 macOS 为 false。
+
 `Scope.data_home/config_home` 只在 Linux 替换 XDG 根，用于打包暂存或隔离测试。这里写的 `<id>.desktop` 就是应用的按用户 desktop entry，`Application.icon`、`categories` 也写入其中；打包工具可直接调用 `register` 安装它。
 
 ## 阻止休眠
@@ -85,6 +89,7 @@ _ = try system.integration.register(allocator, app, .{});
 
 - **Windows**：`PowerCreateRequest` 加 `PowerRequestSystemRequired`（display 另加 `PowerRequestDisplayRequired`），reason 显示在 `powercfg /requests`。release 清除请求并关闭句柄。
 - **Linux**：在 system bus 上调用 systemd-logind `Inhibit`，`what` 为 `sleep` 或 `sleep:idle`，mode 为 `block`；返回的文件描述符就是 inhibitor，release 关闭它。这是一次阻塞调用，受 `timeout_ms`（默认 1000）约束；不能接受这段延迟时在 worker 上获取。错误区分 `ServiceUnavailable`（无 bus 或无 logind）、`AccessDenied`、`Timeout` 与其他失败。桌面是否因 `idle` inhibitor 停止熄屏取决于桌面环境。
+- **macOS**：`NSProcessInfo beginActivityWithOptions:reason:`，选项为 `NSActivityIdleSystemSleepDisabled`（display 另加 `NSActivityIdleDisplaySleepDisabled`），reason 显示在 `pmset -g assertions`；release 调用 `endActivity:`。不阻塞，可在任意线程。
 
 ## 任务栏与 dock
 
