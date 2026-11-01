@@ -320,7 +320,7 @@ jobs:
       - name: AppKit window, file-watch, audio and automation smokes
         timeout-minutes: 10
         run: |
-          zig build smoke-macos smoke-macos-chrome smoke-file-watch smoke-audio smoke-automation smoke-macos-services smoke-clipboard smoke-drop smoke-os-integration -Doptimize=${{ matrix.optimize }} --summary failures
+          zig build smoke-macos smoke-macos-chrome smoke-file-watch smoke-audio smoke-automation smoke-macos-services smoke-clipboard smoke-drop smoke-os-integration smoke-now-playing-commands -Doptimize=${{ matrix.optimize }} --summary failures
       - name: NSAccessibility compile and smoke
         timeout-minutes: 15
         run: |

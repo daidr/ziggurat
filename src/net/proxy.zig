@@ -11,9 +11,10 @@
 //!     ranges go direct. An explicit setting wins over the system's.
 //!  3. Otherwise the system's settings for the URL do: WinHTTP's reading of
 //!     the user's settings on Windows, with automatic detection and PAC
-//!     files; GIO's default proxy resolver on Linux, which reads GNOME's
-//!     settings, or KDE's and PAC files through libproxy. Where none
-//!     answers, requests go direct.
+//!     files; CFNetwork's reading of the network settings on macOS, with
+//!     automatic discovery and PAC files; GIO's default proxy resolver on
+//!     Linux, which reads GNOME's settings, or KDE's and PAC files through
+//!     libproxy. Where none answers, requests go direct.
 //!
 //! The system's answer for a scheme and host is kept for 5 seconds, so a
 //! change of the settings applies to the requests that follow without
@@ -492,6 +493,7 @@ fn system(secure: bool, host_name: []const u8, port: u16) ?Proxy {
     return switch (builtin.os.tag) {
         .linux => if (builtin.link_libc) @import("proxy_linux.zig").system(url) else null,
         .windows => @import("proxy_windows.zig").system(url, secure, host_name),
+        .macos => @import("proxy_macos.zig").system(url),
         else => null,
     };
 }
