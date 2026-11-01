@@ -5,6 +5,8 @@ const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
 pub const panic = std.debug.FullPanic(@import("macos_panic.zig").panic);
 
+extern fn zwk_test_gestures(native: *anyopaque, swipe: *c_int, pinch: *c_int) void;
+
 const fixture = "<!doctype html><title>macOS fixture</title><script>chrome.webview.addEventListener('message',e=>{if(e.data==='ping')chrome.webview.postMessage('roundtrip')});</script>";
 
 /// One page through its life: ready before the document, start, commit,
@@ -74,6 +76,10 @@ const Probe = struct {
             .completed => |completed| {
                 self.completed += 1;
                 if (!completed.success) return self.fail(error.LoadFailed);
+                var swipe: c_int = -1;
+                var pinch: c_int = -1;
+                zwk_test_gestures(view.native.?, &swipe, &pinch);
+                if (swipe != 1 or pinch != 0) return self.fail(error.WrongGestures);
                 _ = view.evaluateJS("({value:42,text:'你好',title:document.title})", .{}, .{ .context = self, .complete = script }) catch |err| self.fail(err);
             },
             else => {},
@@ -146,7 +152,7 @@ fn run(allocator: std.mem.Allocator) !void {
     try std.testing.expectError(error.UnsupportedCapability, probe.view.attach(probe.window, .{ .html = "", .user_data_folder = "/tmp/never" }));
     try std.testing.expectError(error.UnsupportedCapability, probe.view.attach(probe.window, .{ .html = "", .storage = .ephemeral, .tools = .{ .find = true } }));
     try std.testing.expect(probe.view.window == null);
-    try probe.view.attach(probe.window, .{ .html = fixture, .storage = .ephemeral, .scripts = .{ .max_pending = 1 }, .page_listener = .{ .context = &probe, .event = Probe.page } });
+    try probe.view.attach(probe.window, .{ .html = fixture, .storage = .ephemeral, .swipe_navigation = true, .scripts = .{ .max_pending = 1 }, .page_listener = .{ .context = &probe, .event = Probe.page } });
     var watchdog: Watchdog = .{ .app = app };
     try watchdog.start();
     defer watchdog.stop();

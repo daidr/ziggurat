@@ -458,9 +458,11 @@ pub const Options = struct {
     context_menu: ContextMenuPolicy = .none,
     /// Go back and forward with the platform's swipe: Linux's
     /// enable-back-forward-navigation-gestures, WebView2's
-    /// IsSwipeNavigationEnabled (a touchscreen's swipe).
+    /// IsSwipeNavigationEnabled (a touchscreen's swipe), WKWebView's
+    /// allowsBackForwardNavigationGestures (a two-finger trackpad swipe).
     swipe_navigation: bool = false,
-    /// Magnify the page with a pinch on a touchscreen or a touchpad.
+    /// Magnify the page with a pinch on a touchscreen or a touchpad (macOS:
+    /// WKWebView's allowsMagnification).
     /// WebKitGTK has no setting for it: without this, its zoom gesture
     /// takes no events (2.38 and later).
     pinch_zoom: bool = false,

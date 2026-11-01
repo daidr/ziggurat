@@ -386,6 +386,19 @@ pub fn executablePathAlloc(allocator: std.mem.Allocator) ![]u8 {
     return allocator.dupe(u8, terminated);
 }
 
+/// The .app directory when `executable` is a macOS bundle's main program
+/// (`<name>.app/Contents/MacOS/<program>`). Such a program starts again
+/// through Launch Services (`open -n`), which gives it its Dock icon.
+pub fn appBundle(executable: []const u8) ?[]const u8 {
+    const program_dir = std.fs.path.dirname(executable) orelse return null;
+    if (!std.mem.eql(u8, std.fs.path.basename(program_dir), "MacOS")) return null;
+    const contents = std.fs.path.dirname(program_dir) orelse return null;
+    if (!std.mem.eql(u8, std.fs.path.basename(contents), "Contents")) return null;
+    const bundle = std.fs.path.dirname(contents) orelse return null;
+    if (!std.mem.endsWith(u8, bundle, ".app")) return null;
+    return bundle;
+}
+
 /// A child's working directory: `path`, or this process's when null.
 pub fn cwd(path: ?[]const u8) std.process.Child.Cwd {
     return if (path) |value| .{ .path = value } else .inherit;
@@ -622,6 +635,13 @@ fn rows(
     };
     const final = result;
     return &final;
+}
+
+test "a bundle's main program names its .app directory" {
+    try std.testing.expectEqualStrings("/Applications/Demo.app", appBundle("/Applications/Demo.app/Contents/MacOS/demo").?);
+    try std.testing.expectEqual(@as(?[]const u8, null), appBundle("/usr/local/bin/demo"));
+    try std.testing.expectEqual(@as(?[]const u8, null), appBundle("/opt/Demo/Contents/MacOS/demo"));
+    try std.testing.expectEqual(@as(?[]const u8, null), appBundle("/Demo.app/MacOS/demo"));
 }
 
 test "timers and clocks advance" {

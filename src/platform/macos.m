@@ -33,6 +33,10 @@ NativeApp *zlm_app_create(void *owner,void (*dispatch)(void *),int *error){
     NativeApp *app=calloc(1,sizeof(NativeApp));if(!app){*error=3;return NULL;}
     @autoreleasepool{
         [NSApplication sharedApplication];
+        /* AppKit's autofill heuristics inspect every text view that takes
+           focus and offer contacts and passwords; the framework's own text
+           input is not a form, so they stay off unless the app says so. */
+        [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"NSAutoFillHeuristicControllerEnabled":@NO}];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
         [NSApp finishLaunching];
     }
