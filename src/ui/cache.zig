@@ -250,3 +250,54 @@ test "a kept subtree draws the pixels it would draw itself, and again only when 
     kept.retire = null;
     try kept.destroy();
 }
+
+test "a transform that only moves its content draws as that content moved under a clip" {
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const layers = @import("layers.zig");
+    const allocator = std.testing.allocator;
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    const size: z.Size = .{ .width = 60, .height = 40, .scale = 1.5 };
+    const surface = try offscreen.Surface.create(app, allocator, .{ .size = size, .transform_source = .{ .width = 40, .height = 30 } });
+    defer surface.close() catch unreachable;
+    const Scene = struct {
+        fn draw(buffer: *commands.Buffer, storage: *commands.TransformStorage, matrix: @import("affine.zig").Affine) !void {
+            try buffer.bindTransformStorage(storage);
+            try buffer.fill(.{ .x = 0, .y = 0, .width = 40, .height = 27 }, 0xf0f0f0);
+            try buffer.beginTransform(try layers.NativeTransform.init(matrix, .{ .width = 20, .height = 12 }, 1.5));
+            // Beyond the source on the right: the transform's clip cuts it.
+            try buffer.roundedRect(.{ .x = 2, .y = 2, .width = 30, .height = 8 }, 3, .{ .r = 200, .g = 30, .b = 30, .a = 180 });
+            try buffer.gradientRect(.{ .x = 0, .y = 6, .width = 10, .height = 6 }, 0, .{ .linear = .{ .start = .{ .x = 0, .y = 6 }, .end = .{ .x = 10, .y = 12 }, .stops = &.{ .{ .offset = 0, .color = .rgb(0x00ff00) }, .{ .offset = 1, .color = .rgb(0x0000ff) } } } });
+            try buffer.endTransform();
+            try buffer.finish();
+        }
+    };
+    const translate = try @import("affine.zig").Affine.translation(.{ .x = 6, .y = 4 });
+    var raster_storage: commands.TransformStorage = .{ .scale = 1.5 };
+    var raster: commands.Buffer = .{};
+    defer raster.reset();
+    try Scene.draw(&raster, &raster_storage, translate);
+    var folded_storage: commands.TransformStorage = .{ .scale = 1.5 };
+    var folded: commands.Buffer = .{};
+    defer folded.reset();
+    try Scene.draw(&folded, &folded_storage, translate);
+    try std.testing.expectEqual(@as(usize, 1), folded.foldTranslations());
+    for (folded.commands()) |command| try std.testing.expect(command != .begin_transform and command != .end_transform);
+    const want = try surface.render(&raster);
+    defer want.close() catch unreachable;
+    const got = try surface.render(&folded);
+    defer got.close() catch unreachable;
+    const a = (try want.view()).levels[0];
+    const b = (try got.view()).levels[0];
+    var differ: usize = 0;
+    for (a.pixels[0..a.byte_len], b.pixels[0..b.byte_len]) |x, y| {
+        if (@abs(@as(i32, x) - y) > 3) differ += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), differ);
+    // A rotation stays a raster transform.
+    var turned_storage: commands.TransformStorage = .{ .scale = 1.5 };
+    var turned: commands.Buffer = .{};
+    defer turned.reset();
+    try Scene.draw(&turned, &turned_storage, try (try @import("affine.zig").Affine.rotation(0.3)).then(translate));
+    try std.testing.expectEqual(@as(usize, 0), turned.foldTranslations());
+}

@@ -50,7 +50,7 @@ pub fn main() !void {
     for (samples) |sample| try writer.writeInt(i16, @intFromFloat(sample * 32767), .little);
     const stream = try engine.openStreamBytes(&wav);
     stream.play();
-    // The output thread may start late while other smokes load the machine.
+    // The output's first callback can lag on a busy machine: wait up to 2 s.
     var polls: u32 = 0;
     while (stream.position() == 0) : (polls += 1) {
         if (polls >= 2000) return error.StreamDidNotAdvance;
