@@ -303,7 +303,6 @@ pub const Command = union(enum) {
 /// scroll bar, a hand over links, an I-beam over text.
 pub const Cursor = enum { text, arrow, pointer };
 
-const scrollbar_width = 10;
 const blink_ns: u64 = 530 * std.time.ns_per_ms;
 const blink_for_ns: u64 = 30 * std.time.ns_per_s;
 /// How many paragraphs keep their layouts out of view.
@@ -412,8 +411,12 @@ pub const Editor = struct {
     drag_unit: u8 = 1,
     drag_start: [2]u32 = .{ 0, 0 },
     press_link: std.ArrayList(u8) = .empty,
+    /// The primary button drags the scroll bar's thumb, held `thumb_grab`
+    /// DIPs below its top; `hovered` that the pointer is over the editor,
+    /// which shows the bar.
     thumb: bool = false,
     thumb_grab: f32 = 0,
+    hovered: bool = false,
     cursor: Cursor = .text,
     focused: bool = false,
     /// When the caret last moved, in the view's clock, and the time of the
@@ -1220,10 +1223,12 @@ pub const Editor = struct {
                 }
             }
         }
-        const total = self.heights.top(self.paras.items.len);
-        if (total > self.view_height) {
-            const box = self.thumbBox();
-            frame.roundedRect(.{ .x = bounds.x + bounds.width - 8, .y = bounds.y + box[0], .width = 5, .height = box[1] }, 2.5, alpha(look.text, 0.3));
+        // The scroll bar, as a scroll container's, while the pointer is
+        // over the editor or drags the thumb.
+        if (self.hovered or self.thumb) {
+            var bar = self.scrollbar();
+            bar.box = bounds;
+            frame.scrollbar(bar, .{ .dragging = self.thumb });
         }
     }
 
@@ -1409,30 +1414,19 @@ pub const Editor = struct {
         }
     }
 
-    /// The top and height of the scroll bar's thumb, in the leaf.
-    fn thumbBox(self: *const Editor) [2]f32 {
-        const total = self.heights.top(self.paras.items.len);
-        const track = self.bounds.height - 4;
-        const size = @max(24, track * @as(f32, @floatCast(@as(f64, self.view_height) / @max(total, 1))));
-        const room: f64 = track - size;
-        var at: f64 = 0;
-        const most = total - self.view_height;
-        if (most > 0) at = self.scroll / most;
-        return .{ 2 + @as(f32, @floatCast(room * at)), size };
+    /// The scroll bar along the editor's right edge, in window coordinates.
+    fn scrollbar(self: *const Editor) ui.scroll.Bar {
+        return .{ .box = self.bounds, .view = self.view_height, .content = @floatCast(self.heights.top(self.paras.items.len)), .offset = @floatCast(self.scroll) };
     }
 
-    fn overScrollbar(self: *const Editor, x: f32) bool {
-        return self.heights.top(self.paras.items.len) > self.view_height and x - self.bounds.x >= self.bounds.width - scrollbar_width;
+    fn overScrollbar(self: *const Editor, point: z.Point) bool {
+        return self.scrollbar().hit(.{ .x = point.x, .y = point.y });
     }
 
     fn dragThumb(self: *Editor, y_window: f32) void {
-        const y = y_window - self.bounds.y;
-        const box = self.thumbBox();
-        const track = self.bounds.height - 4 - box[1];
-        const total = self.heights.top(self.paras.items.len) - self.view_height;
-        if (track <= 0 or total <= 0) return;
-        const f: f64 = (y - self.thumb_grab - 2) / track;
-        self.setScroll(std.math.clamp(f, 0, 1) * total);
+        const bar = self.scrollbar();
+        if (!bar.scrolls()) return;
+        self.setScroll(bar.offsetAt(y_window - self.thumb_grab));
     }
 
     // ---- Input -----------------------------------------------------------
@@ -1492,8 +1486,15 @@ pub const Editor = struct {
         switch (event) {
             .pointer_move => |local_point| {
                 const before = self.cursor;
+                const entered = !self.hovered;
+                self.hovered = true;
                 self.hover(.{ .x = self.bounds.x + local_point.x, .y = self.bounds.y + local_point.y }) catch |err| self.fail(err);
-                return before != self.cursor;
+                return before != self.cursor or (entered and self.scrollbar().scrolls());
+            },
+            .pointer_leave => {
+                const left = self.hovered;
+                self.hovered = false;
+                return left and self.scrollbar().scrolls();
             },
             else => return false,
         }
@@ -2394,14 +2395,14 @@ pub const Editor = struct {
     fn press(self: *Editor, p: z.PointerButtonInput) !bool {
         if (p.button != .primary) return false;
         self.press_link.clearRetainingCapacity();
-        if (self.overScrollbar(p.position.x)) {
+        if (self.overScrollbar(p.position)) {
+            const box = self.scrollbar().thumb(false) orelse return false;
             self.thumb = true;
-            const box = self.thumbBox();
-            const y = p.position.y - self.bounds.y;
-            if (y >= box[0] and y < box[0] + box[1]) {
-                self.thumb_grab = y - box[0];
+            const y = p.position.y;
+            if (y >= box.y and y < box.y + box.height) {
+                self.thumb_grab = y - box.y;
             } else {
-                self.thumb_grab = box[1] / 2;
+                self.thumb_grab = box.height / 2;
                 self.dragThumb(p.position.y);
             }
             return true;
@@ -2438,7 +2439,7 @@ pub const Editor = struct {
         if (self.paras.items.len == 0 or self.laid_look == null) return;
         const c = self.contentPoint(point);
         var cursor: Cursor = .text;
-        if ((try self.taskBox(c.x, c.y)) != null or self.overScrollbar(point.x)) {
+        if ((try self.taskBox(c.x, c.y)) != null or self.overScrollbar(point)) {
             cursor = .arrow;
         } else {
             const at = try self.positionAt(c.x, c.y);

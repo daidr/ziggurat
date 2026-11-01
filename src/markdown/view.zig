@@ -67,7 +67,83 @@ pub const Options = struct {
     interactive_tasks: bool = false,
     code: ?CodeFace = null,
     rich: ?RichFace = null,
+    /// The least weight of link text, so links read as links where color
+    /// alone does not, in a gray print theme or to a colorblind reader;
+    /// stronger text keeps its weight. `.regular` sets no floor.
+    link_weight: view.Font.Weight = .regular,
+    /// Scroll to the heading with this slug, with or without its `#`, when
+    /// the document first shows, when another document replaces it and
+    /// when the anchor changes: a docs reader opens `guide.md#install` at
+    /// its heading. `anchor_state` remembers what was shown; without it the
+    /// anchor is ignored. An app routing `#a-heading` links sets this from
+    /// the link's activation.
+    anchor: []const u8 = "",
+    /// Scrolls to `anchor` again when it changes, for the same heading
+    /// asked for twice.
+    anchor_version: u64 = 0,
+    anchor_state: ?*AnchorState = null,
 };
+
+/// What a view's anchor last applied to, kept by the application with the
+/// view across passes.
+pub const AnchorState = struct {
+    shown: bool = false,
+    anchor: u64 = 0,
+    version: u64 = 0,
+    /// The document's text when the anchor was last weighed, as a hash and
+    /// a length, to tell more of it from another one.
+    text: u64 = 0,
+    length: usize = 0,
+
+    /// Whether `options` asks to scroll for `tree`, remembering it.
+    fn due(self: *AnchorState, tree: md.Tree, options: Options) bool {
+        const anchor = std.hash.Wyhash.hash(0, options.anchor);
+        // Another text, not more of the same one, as a streamed document.
+        const replaced = !self.shown or tree.text.len < self.length or std.hash.Wyhash.hash(0, tree.text[0..self.length]) != self.text;
+        const changed = replaced or anchor != self.anchor or options.anchor_version != self.version;
+        self.* = .{ .shown = true, .anchor = anchor, .version = options.anchor_version, .text = std.hash.Wyhash.hash(0, tree.text), .length = tree.text.len };
+        return changed and options.anchor.len > 0;
+    }
+};
+
+/// The longest heading slug compared; longer ones are cut there.
+pub const max_slug = 256;
+
+/// The anchor of a heading of `text`, as GitHub makes it, written into
+/// `buffer`: in lower case, spaces as hyphens, without ASCII punctuation.
+pub fn slug(text: []const u8, buffer: *[max_slug]u8) []const u8 {
+    var len: usize = 0;
+    for (std.mem.trim(u8, text, " \t")) |byte| {
+        if (len == buffer.len) break;
+        const out: ?u8 = switch (byte) {
+            ' ' => '-',
+            '-', '_', '0'...'9', 'a'...'z' => byte,
+            'A'...'Z' => byte + 32,
+            // Letters of other scripts stay as they are.
+            0x80...0xff => byte,
+            else => null,
+        };
+        if (out) |value| {
+            buffer[len] = value;
+            len += 1;
+        }
+    }
+    return buffer[0..len];
+}
+
+/// The index of the first heading of `tree` whose slug is `name`, with or
+/// without its `#`.
+pub fn headingNamed(tree: md.Tree, name: []const u8) ?u32 {
+    const wanted = if (std.mem.startsWith(u8, name, "#")) name[1..] else name;
+    for (tree.nodes, 0..) |node, index| {
+        if (node.kind != .heading) continue;
+        var text: [max_slug]u8 = undefined;
+        var buffer: [max_slug]u8 = undefined;
+        if (std.ascii.eqlIgnoreCase(slug(tree.plainText(@intCast(index), &text), &buffer), wanted[0..@min(wanted.len, max_slug)])) return @intCast(index);
+    }
+    return null;
+}
+
 
 pub const Activation = union(enum) {
     /// Destination of the activated link, borrowed from the tree.
@@ -84,6 +160,9 @@ const chunk = 128;
 /// delivered, if any.
 pub fn build(v: *View, tree: md.Tree, options: Options, style: Style) Error!?Activation {
     var builder: Builder = .{ .v = v, .tree = tree, .options = options, .colors = resolve(options) };
+    if (options.anchor_state) |state| if (state.due(tree, options)) {
+        builder.reveal = headingNamed(tree, options.anchor) orelse none;
+    };
     var outer = style;
     if (outer.gap == 0) outer.gap = options.gap;
     try v.column(outer);
@@ -121,6 +200,8 @@ const Builder = struct {
     colors: Resolved,
     activation: ?Activation = null,
     list_depth: usize = 0,
+    /// The heading to scroll into view, or none.
+    reveal: u32 = none,
 
     /// The blocks below `parent`, nested in columns of `chunk` when long.
     fn children(self: *Builder, parent: u32, width: f32, gap: f32) Error!void {
@@ -272,10 +353,12 @@ const Builder = struct {
     fn flow(self: *Builder, index: u32, width: f32, color: u32, font: view.Font) Error!void {
         if (self.options.rich) |face| if (face.embed(face.context, self.tree, index, width, color)) |content| {
             try self.v.embed(content, .{});
+            if (index == self.reveal) self.v.scrollIntoView(self.v.lastNode().id);
             return;
         };
         var line: Line = .{ .b = self, .width = width, .base = color, .font = font };
         try self.v.column(.{ .gap = 2 });
+        if (index == self.reveal) self.v.scrollIntoView(self.v.lastNode().id);
         var walker = self.tree.walk(index);
         _ = walker.next();
         while (walker.next()) |event| {
@@ -345,20 +428,27 @@ const Line = struct {
     fn measure(self: *Line, text: []const u8, code: bool) f32 {
         return self.b.options.measurer.textSize(text, self.fontFor(code)).width;
     }
-    /// The font of the current run; null for links, which draw in the
-    /// label font.
+    /// Whether the current run is a link's.
+    fn linked(self: *Line) bool {
+        return self.link != none and self.style.image == 0;
+    }
+    /// The font of the current run; null for the body font. Link text is
+    /// at least `Options.link_weight`.
     fn fontFor(self: *Line, code: bool) ?view.Font {
-        if (self.link != none and self.style.image == 0) return null;
         var font = self.font;
         if (code) {
             font.size = font.size * view.Font.code.size / view.Font.body.size;
             font.monospace = true;
             font.italic = false;
-            return font;
+        } else {
+            if (self.style.strong > 0) lift(&font, .bold);
+            if (self.style.emphasis > 0) font.italic = true;
         }
-        if (self.style.strong > 0 and @backingInt(font.weight) < @backingInt(view.Font.Weight.bold)) font.weight = .bold;
-        if (self.style.emphasis > 0) font.italic = true;
+        if (self.linked()) lift(&font, self.b.options.link_weight);
         return if (std.meta.eql(font, view.Font.body)) null else font;
+    }
+    fn lift(font: *view.Font, weight: view.Font.Weight) void {
+        if (@backingInt(font.weight) < @backingInt(weight)) font.weight = weight;
     }
     fn color(self: *Line, code: bool) u32 {
         const c = self.b.colors;
@@ -443,8 +533,10 @@ const Line = struct {
         self.segments += 1;
         self.used += self.measure(text, code);
         const color_value = self.color(code);
-        if (self.link != none and self.style.image == 0) {
-            if (try v.link(text, .{ .shrink = 0 })) self.b.activation = .{ .link = self.b.tree.get(self.link).url };
+        if (self.linked()) {
+            // Code in a link keeps its face and wash.
+            const style: view.Style = if (code) .{ .font = self.fontFor(true), .background = self.b.colors.code_background, .radius = 3, .shrink = 0 } else .{ .font = self.fontFor(false), .shrink = 0 };
+            if (try v.link(text, style)) self.b.activation = .{ .link = self.b.tree.get(self.link).url };
         } else if (code) {
             try v.row(.{ .background = self.b.colors.code_background, .radius = 3, .padding = .{ .left = 3, .right = 3 }, .shrink = 0 });
             try v.text(text, .{ .color = color_value, .font = self.fontFor(true) });

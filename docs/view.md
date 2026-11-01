@@ -59,6 +59,21 @@ try v.embed(self.notes.embed(), .{});
 try v.end();
 ```
 
+- 渐变：`gradient` 以渐变代替 `background` 填充容器（按 `radius` 圆角），`border_gradient` 以渐变代替 `border` 的颜色描边 `border_width` 宽的边框；材质与折射仍优先。`Gradient` 有三种，位置都按节点盒子的比例给出，盒子变化时跟着走，色标 `GradientStop{ color, at }` 按 0 到 1 的位置排列（乱序的色标上移到前一个的位置，与 CSS 相同），最多 16 个，`oklab = true` 时在 Oklab 色彩空间混色：
+  - `linear{ angle, stops }`：沿穿过盒子中心的直线，`angle` 是从正上方顺时针的角度（180 自上而下，90 自左向右），直线长度等于盒子在该方向上的跨度，同 CSS 的 `linear-gradient()`。
+  - `conic{ center, angle, stops }`：绕 `center` 从 `angle`（从正上方顺时针）转一整圈，同 CSS 的 `conic-gradient()`。
+  - `radial{ center, radius, stops }`：从 `center` 呈圆形向外扩散，`radius` DIP 处到达 1；`radius` 为 0 时到达离中心最远的角，同 CSS 的 `radial-gradient()` 默认的 `farthest-corner`。中心之前显示第一个颜色、半径之外显示最后一个颜色，用于光晕、聚光与暗角。`center` 为 null 时是盒子中心。
+
+```zig
+const stops = [_]view.GradientStop{ .{ .color = ui.Color.rgb(0xa5b4fc), .at = 0 }, .{ .color = ui.Color.rgb(0x312e81), .at = 1 } };
+try v.column(.{ .width = 240, .height = 140, .radius = 16, .gradient = .{ .radial = .{ .center = .{ .x = 0.3, .y = 0.2 }, .stops = &stops, .oklab = true } } });
+```
+
+- 局部主题：`themed(&theme, style)` 与 `end` 配对，开始一个其中的节点以 `theme` 构建的列（等价于 `Style.theme`）：它们按该主题的 metrics 测量，按它的配色绘制（控件、焦点环、文字），列本身在没有 `background` 时填充该主题的背景色，与根节点填充窗口主题相同。其中打开的浮层、菜单、对话框和提示同样用这个主题；根节点与它之后的节点仍是窗口主题。`v.scopeTheme()` 返回正在构建处的局部主题（窗口主题时为 null）。主题按指针借用，到本遍绘制完成前有效。
+- 忽略输入：`ignore_input = true` 让节点及其中的一切不挡指针与键盘：按下、滚轮和悬停落到下面的内容，Tab 跳过它们，其中的焦点离开；但它们照常绘制并留在可访问性树中，屏幕阅读器的按下与点击一样生效。悬停才显示的按钮可以以 `opacity = 0` 常驻供读屏使用，而不抢所在行的按下。
+- 滚动指示器：滚动容器的 `scrollbars = false` 不画滚动指示器，滚轮、按键和辅助技术照常滚动，适合自己绘制指示的表面。
+- 占位符：`search`、`tokenField` 与 `editableComboBox` 的 `placeholder` 与 `placeholder_color` 交给直接放在其中的文本输入，输入为空且没有输入法组合时显示（见下文 `TextField` 的同名选项）。
+
 `spacer` 默认 `grow = 1`。叶子的固有尺寸来自文本宽度与主题 metrics：按钮在文本两侧留出内边距，复选框与开关加上指示器和标签间距，进度条与滑块有默认宽度且可以收缩到零，步进器宽度是高度的四倍，两端按钮为正方形。
 
 ### 网格
@@ -68,6 +83,10 @@ try v.end();
 ### 滚动
 
 `scroll(&model, style)` 与 `end` 配对，开始一个纵向滚动、始终裁剪的列。`ui.scroll.ScrollModel` 由应用持有，跨帧保存偏移。它的最小高度为零，首选高度是内容高度，所以要让它出现滚动，需给它固定 `height`，或者在受限的父容器里用 `grow`/收缩。每次排列都会以视口和内容尺寸调用 `model.setSizes`，偏移随内容变化被夹回有效范围；子项按内容坐标排列后整体上移 `offset.y`，因此节点边界始终是窗口坐标。内容溢出时，右侧画一条不可交互的细滑块指示位置。
+
+`Style.scrollbars = false` 时不画这条滑块，其余滚动行为不变。
+
+自己滚动、不经滚动容器的视图（终端、富文本编辑器、虚拟表格与大纲）用 `ui.scroll.Bar` 画滚动条，外观与滚动容器一致，跟随主题：`box` 是滑块所沿的视图（右边缘，`leading` 时左边缘，横向时底边），`view`、`content`、`offset` 是可见长度、总长度与偏移，单位任意（终端用行数）。`Frame.scrollbar(bar, .{ .dragging, .color })` 画滑块：默认主题的 `track` 色，`color` 给自有配色的视图（如终端）替换；拖动时向内容一侧加宽 2 DIP；无处可滚时什么也不画。`thumb` 给出滑块矩形，`offsetAt(start)` 把拖动中滑块起点换算成偏移，`hit(point)` 判断指针是否在边缘 12 DIP 的条带上。终端与富文本编辑器只在指针位于其上或拖动滑块时显示滚动条；虚拟集合与滚动容器一样常显。
 
 Host 在每帧绘制后记录可见的滚动容器（最多 `max_scroll_regions` 个，按绘制顺序），滚轮事件落在其中时交给最内层的那个，作为一个携带 `Event.scroll` 的构建遍立即作用于模型并消费该事件；不在任何滚动容器内的滚轮照常交给 Context。目前没有滚动条拖动、键盘滚动、焦点自动显露和横向滚动。
 
@@ -178,6 +197,8 @@ try v.end();
 - `menuItem(label, options, style)` 在选中它的那一遍返回 true（按下、Enter 或 Space），菜单随之关闭，焦点回到打开菜单之前的控件。`MenuItemOptions.checked` 非空时是复选项，加上 `radio` 画成单选的圆点；`shortcut` 只显示在项的末端并作为描述朗读，快捷键本身用 `bindKey` 绑定。禁用的项画成灰色，不能高亮，也不能选择。
 - `submenu(label, style)` 加一项并开始它的子菜单，与 `end` 配对，子菜单显示时返回 true。子菜单放在这一项的末端一侧、与它顶部对齐，放不下时翻到另一侧；顶层菜单在右下放不下时向左、向上翻，并夹在窗口内。`menuSeparator()` 在两组项之间画一条线。面板最窄 160 DIP，内边距默认 4 DIP，最多 8 层。
 - 打开期间菜单接管按键：Up、Down、Home、End 在最深一层的可用项之间移动高亮并循环，字母移到下一个以它开头的项；Right、Enter 或 Space 打开子菜单并高亮其第一项，Left 或 Escape 关闭最深一层子菜单，顶层的 Escape 与 Tab 关闭菜单并交还焦点。从右到左时 Left 与 Right 互换。指针移到项上会高亮它并打开它的子菜单、关闭更深的子菜单；在所有面板之外按下会关闭菜单，并照常交给下面的控件；面板上的滚轮不会滚动下面的内容。
+- `popoverMenuButton(label, style)` 是一个菜单按钮：画法像带箭头的组合框，菜单画在窗口里、它的下方并与它的起始边对齐，下方放不下时翻到上方。按下、Enter、Space 或 Down 打开菜单并高亮第一项，菜单显示时再按按钮会关闭它，期间按钮读作已展开。菜单的按键、首字母跳转、子菜单和焦点交还都与 `popoverMenu` 相同，选中或 Escape 后焦点回到按钮。与 `end` 配对，菜单打开时返回 true，只在这时构建菜单项。名称取 `Style.name`，否则取 `label`。
+- 右键菜单的位置相对锚点的整个盒子计算，所以锚点部分滚出视野时菜单仍在指针处打开。
 - 焦点跟随高亮，辅助技术读出键盘所在的项；用指针打开时焦点在第一项上但不高亮。同一时间最多打开一个菜单；锚点不再构建或被禁用时菜单关闭。
 
 启用 `-Daccessibility=true` 时，Windows UIA 把菜单映射为 Menu，把项映射为 MenuItem：普通项提供 Invoke，打开子菜单的项另提供 ExpandCollapse（展开即打开子菜单），复选项与单选项提供 Toggle。
@@ -528,6 +549,8 @@ try v.embed(field.embed(), .{ .grow = 1, .key = 7 });
 字段的边界变化时（第一次出现、窗口尺寸或布局改变），`place` 只记录新边界并向 App 投递一个任务；该任务在绘制之外调用 `Field.prepare`，第一次还会以节点 ID `attach` 到 Host 的 Context，然后使窗口失效。在准备完成之前，字段沿用上一次准备时的位置绘制，因此焦点和命中与文本保持一致，最多滞后一帧。键盘、输入法、剪贴板、焦点切换和 text_box 语义都由 Field 与 Context 处理，视图层不转发这些输入。
 
 放在 `field` 里时，文本框把字段的帮助或错误作为说明，错误时标为无效，`Options.name` 为空时用字段标签作为名称。
+
+`Options.placeholder` 是输入为空且没有输入法组合时显示的文字（例如“搜索”），为空时取外层 `search`、`tokenField` 或 `editableComboBox` 的 `Style.placeholder`；没有名称和字段标签时它也作为文本框的可访问名称。`placeholder_color` 是它的颜色，默认是主题的弱化文字色，只影响绘制，不改变输入的文字与主题。`Options.caret_width` 以 DIP 设定光标宽度，按设备像素取整、至少一个像素，用于块状光标、大字号主题或演示；0 或负数隐藏光标而字段仍可编辑。它只影响绘制，布局、输入法候选位置和闪烁不变；为 null 时沿用 `colors.caret_style` 或平台的一像素光标。
 
 TextField 与 Field 的地址必须保持稳定。节点 ID 用于注册，所以当前面的兄弟节点可能变化时要给它 `Style.key`；ID 改变会记录 `TextFieldIdChanged` 而不是静默重新注册。关闭时先调用 `field.detach()` 停止推迟的工作，再按 Field 的规则 `close`。投递或准备的失败记录在 `last_error`。
 

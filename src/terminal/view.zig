@@ -242,14 +242,6 @@ pub const max_value = 512;
 const max_preedit = 256;
 const wheel_notch: f32 = 48;
 const double_click_ms = 500;
-/// How wide the strip at the right edge is over which the scroll bar takes
-/// the pointer, in DIPs.
-const scrollbar_strip: f32 = 12;
-/// How long the scroll bar stays after the viewport last moved, or the
-/// pointer left it, and how long it then takes to fade out, in ns.
-const bar_linger: u64 = std.time.ns_per_s;
-const bar_fade: u64 = 300 * std.time.ns_per_ms;
-const bar_frame: u64 = 16 * std.time.ns_per_ms;
 
 pub const TerminalView = struct {
     host: *view.Host,
@@ -296,15 +288,11 @@ pub const TerminalView = struct {
     scroll_zoom: bool = false,
     /// The primary button drags the scroll bar, held `bar_grab` DIPs below
     /// the thumb's top; `over_bar` that the pointer is over the bar's strip.
-    /// `bar_lit` is whether the last paint showed it hovered or held,
-    /// `bar_back` how many rows the viewport was above the bottom, and
-    /// `bar_seen` when either last changed, from which the bar fades out.
     bar_held: bool = false,
     bar_grab: f32 = 0,
     over_bar: bool = false,
-    bar_lit: bool = false,
-    bar_back: usize = 0,
-    bar_seen: ?u64 = null,
+    /// Whether the bar showed when the pointer last moved.
+    bar_shown: bool = false,
     /// The font's size after zooms; null at `options.font.size`.
     zoom_size: ?f32 = null,
     /// Whether the window's appearance is dark, and the theme in use.
@@ -1161,7 +1149,7 @@ pub const TerminalView = struct {
                 .bar => frame.rect(.{ .x = rect.x, .y = rect.y, .width = 2, .height = rect.height }, t.cursor_color),
             }
         }
-        self.paintScrollbar(frame, bounds, offset);
+        self.paintScrollbar(frame, bounds);
         try frame.popClip();
         // Output moved the cursor, changed what a search finds or which
         // images show: the posted task follows.
@@ -1172,55 +1160,33 @@ pub const TerminalView = struct {
         try frame.semantic(.{ .id = id, .role = .text_box, .name = self.options.name, .value = self.cursorLine(), .bounds = bounds, .focused = focused, .read_only = self.token == null });
     }
 
-    /// Where the viewport is in the scrollback, as overlay scroll bars show
-    /// it: as the viewport moves, and while the pointer is over the bar's
-    /// strip or drags it, when it widens; a while after, it fades out.
-    fn paintScrollbar(self: *TerminalView, frame: *ui.Frame, bounds: view.Rect, offset: usize) void {
-        const v = &self.host.view;
-        const shown = self.scrollbarShown(v.time(), offset);
-        if (shown.wake) |deadline| v.wakeAt(deadline);
-        const alpha = shown.alpha orelse return;
-        const thumb = self.thumbOf(bounds.height);
-        var width: f32 = 4;
-        var inset: f32 = 3;
-        var color = ui.Color.rgb(self.terminal.foreground).withAlpha(0.35 * alpha);
-        if (self.bar_lit) {
-            width = 8;
-            inset = 2;
-            if (self.bar_held) color = ui.Color.rgb(self.terminal.foreground).withAlpha(0.5);
-        }
-        frame.roundedRect(.{ .x = bounds.x + bounds.width - inset - width, .y = bounds.y + thumb.y + 2, .width = width, .height = thumb.height - 4 }, width / 2, color);
+    /// Where the viewport is in the scrollback, as a scroll container's bar
+    /// shows it: while the pointer is over the terminal or drags the thumb,
+    /// in the terminal's text color, as faint as the theme's bars.
+    fn paintScrollbar(self: *TerminalView, frame: *ui.Frame, bounds: view.Rect) void {
+        if (!self.scrollbarShown()) return;
+        var bar = self.scrollbar();
+        bar.box = bounds;
+        frame.scrollbar(bar, .{ .dragging = self.bar_held, .color = ui.Color.rgb(self.terminal.foreground).withAlpha(0.35) });
     }
 
-    /// How the scroll bar shows at `now`, with the viewport `offset` rows
-    /// above the bottom: its opacity, null when hidden, and when the next
-    /// paint should come as it fades.
-    fn scrollbarShown(self: *TerminalView, now: u64, offset: usize) struct { alpha: ?f32, wake: ?u64 = null } {
-        if (offset != self.bar_back) {
-            self.bar_back = offset;
-            self.bar_seen = now;
-        }
-        const lit = self.bar_held or self.over_bar;
-        if (self.bar_lit and !lit) self.bar_seen = now;
-        self.bar_lit = lit;
-        if (self.terminal.screen.historyCount() == 0) return .{ .alpha = null };
-        if (lit) return .{ .alpha = 1 };
-        const seen = self.bar_seen orelse return .{ .alpha = null };
-        const since = now -| seen;
-        if (since < bar_linger) return .{ .alpha = 1, .wake = seen + bar_linger };
-        if (since < bar_linger + bar_fade) return .{ .alpha = 1 - @as(f32, @floatFromInt(since - bar_linger)) / @as(f32, @floatFromInt(bar_fade)), .wake = now + bar_frame };
-        return .{ .alpha = null };
+    /// Whether the scroll bar shows: there is a scrollback, and the pointer
+    /// is over the terminal or drags the thumb.
+    fn scrollbarShown(self: *const TerminalView) bool {
+        if (self.terminal.screen.historyCount() == 0) return false;
+        if (self.bar_held) return true;
+        const point = self.pointer orelse return false;
+        const b = self.bounds;
+        return point.x >= b.x and point.x < b.x + b.width and point.y >= b.y and point.y < b.y + b.height;
     }
 
-    /// The scroll bar's thumb in a track `track` DIPs high: its top and
-    /// height. The scrollback is not empty.
-    fn thumbOf(self: *const TerminalView, track: f32) struct { y: f32, height: f32 } {
+    /// The scroll bar over the terminal's bounds, in rows: the viewport's
+    /// rows of the scrollback's and the screen's.
+    fn scrollbar(self: *const TerminalView) ui.scroll.Bar {
         const s = &self.terminal.screen;
         const history: f32 = @floatFromInt(s.historyCount());
         const rows: f32 = @floatFromInt(s.rows);
-        const height = @max(track * rows / (history + rows), 24);
-        const from_top = history - @as(f32, @floatFromInt(s.viewportOffset()));
-        return .{ .y = (track - height) * from_top / @max(history, 1), .height = height };
+        return .{ .box = self.bounds, .view = rows, .content = history + rows, .offset = history - @as(f32, @floatFromInt(s.viewportOffset())) };
     }
 
     /// Whether the scroll bar takes the pointer at a window point: over its
@@ -1228,17 +1194,18 @@ pub const TerminalView = struct {
     /// is dragged.
     fn overScrollbar(self: *const TerminalView, point: z.Point) bool {
         if (self.bar_held) return true;
-        const b = self.bounds;
-        if (point.x < b.x + b.width - scrollbar_strip or point.x >= b.x + b.width or point.y < b.y or point.y >= b.y + b.height) return false;
-        return self.terminal.screen.historyCount() > 0;
+        return self.scrollbar().hit(.{ .x = point.x, .y = point.y });
     }
 
     /// The pointer moved to `point`, or left: whether it is over the bar
     /// changed, which the bar and the pointer's shape show.
     fn trackScrollbar(self: *TerminalView, point: ?z.Point) bool {
         const over = if (point) |p| self.overScrollbar(p) else self.bar_held;
-        if (over == self.over_bar) return false;
+        // The bar shows as the pointer comes over the terminal.
+        const shown = self.scrollbarShown();
+        if (over == self.over_bar and shown == self.bar_shown) return false;
         self.over_bar = over;
+        self.bar_shown = shown;
         self.invalidate();
         return true;
     }
@@ -1249,12 +1216,8 @@ pub const TerminalView = struct {
         const s = &self.terminal.screen;
         const history = s.historyCount();
         if (history == 0) return;
-        const height = self.thumbOf(self.bounds.height).height;
-        const travel = self.bounds.height - height;
-        if (travel <= 0) return;
-        const f = std.math.clamp((y - self.bounds.y - self.bar_grab) / travel, 0, 1);
-        const to: usize = @intFromFloat(@round(f * @as(f32, @floatFromInt(history))));
-        const delta = @as(isize, @intCast(history - to)) - @as(isize, @intCast(s.viewportOffset()));
+        const from_top: usize = @intFromFloat(@round(std.math.clamp(self.scrollbar().offsetAt(y - self.bar_grab), 0, @as(f32, @floatFromInt(history)))));
+        const delta = @as(isize, @intCast(history - from_top)) - @as(isize, @intCast(s.viewportOffset()));
         if (delta != 0 and s.scrollView(delta)) self.invalidate();
     }
 
@@ -1653,8 +1616,8 @@ pub const TerminalView = struct {
         // A press on the thumb holds it where it is pressed, and one on the
         // rest of the strip by its middle, which comes to the pointer.
         if (press.button == .primary and self.over_bar and self.reported_press == null) {
-            const thumb = self.thumbOf(self.bounds.height);
-            const y = press.position.y - self.bounds.y;
+            const thumb = self.scrollbar().thumb(false) orelse return false;
+            const y = press.position.y;
             self.bar_grab = if (y >= thumb.y and y < thumb.y + thumb.height) y - thumb.y else thumb.height / 2;
             self.bar_held = true;
             self.hover = null;
@@ -2497,7 +2460,7 @@ test {
     _ = box;
 }
 
-test "the scroll bar shows as the viewport moves, fades, and drags the scrollback" {
+test "the scroll bar shows while the pointer is over the terminal, and drags the scrollback" {
     var state: u8 = 0;
     var storage: view.Storage(4, 64) = .{};
     var host = view.Host.init(&state, Empty.build, storage.buffers(), .{});
@@ -2508,26 +2471,22 @@ test "the scroll bar shows as the viewport moves, fades, and drags the scrollbac
     var tv = testView(&host, &terminal, &sent, &board, .{});
     defer tv.deinit();
     tv.bind();
-    const ms = std.time.ns_per_ms;
-    // No scrollback, no bar.
-    try std.testing.expect(tv.scrollbarShown(1000 * ms, 0).alpha == null);
+    // No scrollback, no bar, even under the pointer.
+    tv.pointer = .{ .x = 5, .y = 5 };
+    try std.testing.expect(!tv.scrollbarShown());
     try std.testing.expect(!tv.overScrollbar(.{ .x = 95, .y = 40 }));
     for (0..20) |_| tv.feed("line\r\n");
-    try std.testing.expect(tv.scrollbarShown(1000 * ms, 0).alpha == null);
-    // The viewport moves: the bar shows, lingers, then fades out.
-    try std.testing.expect(tv.handle(.{ .wheel = .{ .position = .{ .x = 5, .y = 5 }, .delta = .{ .x = 0, .y = -48 } } }));
-    const moved = tv.scrollbarShown(2000 * ms, terminal.screen.viewportOffset());
-    try std.testing.expectEqual(@as(?f32, 1), moved.alpha);
-    try std.testing.expectEqual(@as(?u64, 3000 * ms), moved.wake);
-    const fading = tv.scrollbarShown(3150 * ms, terminal.screen.viewportOffset());
-    try std.testing.expect(fading.alpha.? > 0.4 and fading.alpha.? < 0.6);
-    try std.testing.expectEqual(@as(?u64, 3166 * ms), fading.wake);
-    try std.testing.expect(tv.scrollbarShown(3400 * ms, terminal.screen.viewportOffset()).alpha == null);
-    // Over its strip it shows, wide, with the arrow, and links do not.
+    try std.testing.expect(tv.scrollbarShown());
+    tv.pointer = null;
+    try std.testing.expect(!tv.scrollbarShown());
+    // It lays out as a container's: at the right edge, at the bottom.
+    const thumb = tv.scrollbar().thumb(false).?;
+    try std.testing.expectEqual(tv.bounds.x + tv.bounds.width - ui.scroll.Bar.margin - ui.scroll.Bar.thickness, thumb.x);
+    try std.testing.expectApproxEqAbs(tv.bounds.y + tv.bounds.height - ui.scroll.Bar.margin, thumb.y + thumb.height, 0.001);
+    // Over its strip it shows, with the arrow, and links do not.
     try std.testing.expect(tv.handle(.{ .pointer_move = .{ .x = 95, .y = 40 } }));
-    try std.testing.expect(tv.over_bar);
+    try std.testing.expect(tv.over_bar and tv.scrollbarShown());
     try std.testing.expectEqual(PointerShape.arrow, tv.pointerShape(false));
-    try std.testing.expectEqual(@as(?f32, 1), tv.scrollbarShown(5000 * ms, terminal.screen.viewportOffset()).alpha);
     // A press at the top of the track drags to the oldest rows, at the
     // bottom to the newest.
     try std.testing.expect(tv.handle(.{ .pointer_down = .{ .position = .{ .x = 95, .y = 0 } } }));

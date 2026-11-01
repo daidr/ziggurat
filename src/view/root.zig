@@ -196,7 +196,41 @@ pub const Style = struct {
     /// again. Focus inside it leaves as it hides, and a popover, popup
     /// list or tooltip anchored to it hides with it.
     hidden: bool = false,
+    /// A gradient painted in place of `background`, shaped by `radius`:
+    /// along a line, around a point or out from it in circles; see
+    /// `Gradient`. A material or refraction still paints instead.
+    gradient: ?Gradient = null,
+    /// A gradient painted in place of `border`'s color, `border_width`
+    /// wide inside the edge.
+    border_gradient: ?Gradient = null,
+    /// Keep the node and those inside it out of the pointer's and the
+    /// keyboard's way: presses, wheel and hover go to what lies beneath,
+    /// Tab passes over them and focus inside leaves, but they still paint
+    /// and stay exposed to assistive technology, whose presses act as a
+    /// click would. A button revealed on hover can stay built at
+    /// `opacity` 0 for a screen reader without taking its row's press.
+    ignore_input: bool = false,
+    /// A scroll container shows its scroll indicator while its content
+    /// overflows; false hides it, keeping the wheel, keys and assistive
+    /// technology scrolling, for a surface that draws its own.
+    scrollbars: bool = true,
+    /// Text a search, token field or editable combo box gives the text
+    /// input inside it to show while it is empty; see
+    /// `text_field.Options.placeholder`.
+    placeholder: []const u8 = "",
+    /// Color of that placeholder; null is the theme's muted text.
+    placeholder_color: ?u32 = null,
+    /// Build the node's descendants with another theme: they measure with
+    /// its metrics and paint with its colors, and the node paints its
+    /// background unless `background` is set, as the window's root does.
+    /// Popovers, menus and dialogs opened inside take it too. The theme is
+    /// borrowed until the pass is painted. See `View.themed`.
+    theme: ?*const Theme = null,
 };
+
+pub const gradients = @import("gradient.zig");
+pub const Gradient = gradients.Gradient;
+pub const GradientStop = gradients.Stop;
 
 /// How `View.presentColumn` brings content in and takes it out.
 pub const Transition = struct {
@@ -325,6 +359,10 @@ pub const Annotation = struct {
     description: []const u8 = "",
     invalid: bool = false,
     required: bool = false,
+    /// What the search, token field or editable combo box around a text
+    /// input asks it to show while empty; see `Style.placeholder`.
+    placeholder: []const u8 = "",
+    placeholder_color: ?u32 = null,
 };
 
 pub const ToastOptions = struct {
@@ -836,6 +874,10 @@ pub const Node = struct {
     /// The node or one around it is `Style.hidden`, or it floats from an
     /// anchor that is: it takes no room, paints nothing and takes no input.
     concealed: bool = false,
+    /// The node or one around it is `Style.ignore_input`.
+    passthrough: bool = false,
+    /// The theme of the innermost `Style.theme` around or on the node.
+    theme: ?*const Theme = null,
     parent: u32 = none,
     first_child: u32 = none,
     last_child: u32 = none,
@@ -1359,7 +1401,7 @@ pub const View = struct {
         self.track_len = 0;
         self.tip_index = none;
         self.routes = .{};
-        self.buffers.nodes[0] = .{ .kind = .column, .id = root_seed, .style = root_style, .end = 1, .rtl = (root_style.direction orelse self.layout_direction) == .rtl };
+        self.buffers.nodes[0] = .{ .kind = .column, .id = root_seed, .style = root_style, .end = 1, .rtl = (root_style.direction orelse self.layout_direction) == .rtl, .passthrough = root_style.ignore_input, .theme = root_style.theme };
     }
 
     pub fn root(self: *const View) *const Node {
@@ -1415,7 +1457,7 @@ pub const View = struct {
         self.buffers.nodes[index] = .{ .kind = kind, .id = self.identity(parent, kind, style), .style = effective, .parent = parent_index, .end = index + 1, .semantic_parent = switch (parent.kind) {
             .toolbar, .breadcrumbs, .accordion, .fieldset, .search, .toast, .dialog, .table_header, .table_row, .token_field, .combo_field, .route => parent.id,
             else => parent.semantic_parent,
-        }, .rtl = if (style.direction) |value| value == .rtl else parent.rtl, .field = if (parent.kind == .field) parent_index else parent.field, .collection = if (parent.kind == .tree or parent.kind == .table) parent_index else parent.collection, .row = if (parent.kind == .table_row) parent_index else parent.row, .concealed = style.hidden or parent.concealed };
+        }, .rtl = if (style.direction) |value| value == .rtl else parent.rtl, .field = if (parent.kind == .field) parent_index else parent.field, .collection = if (parent.kind == .tree or parent.kind == .table) parent_index else parent.collection, .row = if (parent.kind == .table_row) parent_index else parent.row, .concealed = style.hidden or parent.concealed, .passthrough = style.ignore_input or parent.passthrough, .theme = style.theme orelse parent.theme };
         if (parent.last_child == none) parent.first_child = index else self.buffers.nodes[parent.last_child].next_sibling = index;
         parent.last_child = index;
         parent.child_count += 1;
@@ -1463,6 +1505,13 @@ pub const View = struct {
     pub fn lastNode(self: *View) *Node {
         return &self.buffers.nodes[self.len - 1];
     }
+    /// Scroll the containers around the node with `id` as little as shows
+    /// it, once this pass is arranged: a node added in this pass comes into
+    /// view with it. Ask in the pass it should come into view; asking in
+    /// every pass keeps the reader from scrolling it away.
+    pub fn scrollIntoView(self: *View, id: u64) void {
+        self.reveal = id;
+    }
     /// Bind `chord` to an action under `action`: while the node just added
     /// holds focus, or anywhere in the window when `window` is set, the
     /// chord delivers `.action = action` in a pass of its own, before any
@@ -1501,6 +1550,7 @@ pub const View = struct {
     pub const editableText = editable_controls.editableText;
     pub const pointerArea = pointer_controls.pointerArea;
     pub const popoverMenu = menu_controls.popoverMenu;
+    pub const popoverMenuButton = menu_controls.popoverMenuButton;
     pub const menuItem = menu_controls.menuItem;
     pub const submenu = menu_controls.submenu;
     pub const menuSeparator = menu_controls.menuSeparator;
@@ -1584,6 +1634,20 @@ pub const View = struct {
     }
     pub fn column(self: *View, style: Style) Error!void {
         return self.begin(.column, style);
+    }
+    /// Open a column whose children build with `theme`, as a light card on
+    /// a dark window or a destructive panel in red; `end` closes it. It
+    /// fills with the theme's background unless `style.background` is set.
+    /// The theme is borrowed until the pass is painted. See `Style.theme`.
+    pub fn themed(self: *View, theme: *const Theme, style: Style) Error!void {
+        var value = style;
+        value.theme = theme;
+        return self.begin(.column, value);
+    }
+    /// The theme the node being built takes: the innermost `Style.theme`
+    /// around it, or null for the window's.
+    pub fn scopeTheme(self: *const View) ?*const Theme {
+        return self.buffers.nodes[self.stack[self.depth - 1]].theme;
     }
     /// Open a column that enters while `show` and exits after it turns
     /// false, moving between `transition.hidden` and `style`. Returns false
@@ -3640,7 +3704,7 @@ pub const View = struct {
         if (node.embed) |content| return content.measure(content.context, theme);
         if (node.graphic != null) return image_nodes.measure(node);
         const metrics = theme.metrics;
-        const font = if (node.kind == .text) node.style.font else null;
+        const font = if (node.kind == .text or node.kind == .link) node.style.font else null;
         const text_size = if (node.text.len > 0) measurer.textSize(node.text, font) else if (font) |value| measurer.textSize("", value) else Size{ .width = 0, .height = Measurer.line_height };
         const size: Size = switch (node.kind) {
             .text, .note => text_size,
@@ -3840,13 +3904,14 @@ pub const View = struct {
         }
         self.record(measurer);
     }
-    fn measure(self: *View, theme: Theme, measurer: Measurer) Error!void {
+    fn measure(self: *View, window_theme: Theme, measurer: Measurer) Error!void {
         const all = self.buffers.nodes[0..self.len];
         // Children always follow their parent, so reverse order is post-order.
         var index = all.len;
         while (index > 0) {
             index -= 1;
             const node = &all[index];
+            const theme = if (node.theme) |inner| inner.* else window_theme;
             if (!node.isContainer()) {
                 // A tree row's badge keeps its width for paint.
                 if (node.kind == .tree_row) node.fraction = if (node.badge.len > 0) measurer.textSize(node.badge, null).width + 2 * (theme.metrics.content_inset / 2 + 4) + theme.metrics.content_inset / 2 else 0;
@@ -3983,7 +4048,9 @@ pub const View = struct {
         for (all[0..self.placed_len], self.buffers.placed[0..self.placed_len]) |*node, *entry| entry.* = .{ .id = node.id, .bounds = node.bounds };
         for (all, 0..) |*node, index| {
             if (index < inside_start or index >= inside_end) continue;
-            if (node.concealed) continue;
+            // What ignores input takes no part in routing it; assistive
+            // technology still reaches its controls through the frame.
+            if (node.concealed or node.passthrough) continue;
             self.recordCursor(node, @intCast(index));
             if (node.kind == .menu or node.kind == .menu_item) menu_controls.record(self, node);
             switch (node.kind) {
@@ -4489,10 +4556,18 @@ pub const View = struct {
     }
     /// Paint the floating node at `index` and its content; floating nodes
     /// inside it are added to `nested`.
-    fn paintFloat(self: *const View, target: anytype, theme: Theme, index: u32, nested: *Floating) !void {
+    fn paintFloat(self: *const View, target: anytype, window_theme: Theme, index: u32, nested: *Floating) !void {
         const all = self.buffers.nodes[0..self.len];
         const node = &all[index];
         const bounds = node.bounds;
+        // A float opened inside a themed scope takes its theme, and one
+        // inside a scope ignoring input ignores it too.
+        const theme = if (node.theme) |inner| inner.* else window_theme;
+        const frame = @TypeOf(target) == *ui.Frame;
+        const previous = if (frame) (if (node.theme) |inner| target.pushTheme(inner) else target.theme_override) else {};
+        defer if (frame) target.popTheme(previous);
+        const mark = if (frame) target.inertMark() else {};
+        defer if (frame and node.passthrough) target.passThrough(mark, target.inertMark());
         if (node.kind == .popover or node.kind == .dialog) {
             const radius: f32 = if (node.style.radius > 0) node.style.radius else if (node.kind == .dialog) 8 else 6;
             target.roundedRect(bounds, radius, ui.Color.rgb(node.style.border orelse theme.palette.border));
@@ -4546,19 +4621,20 @@ pub const View = struct {
 
     /// Paint nodes `start..stop` in order, skipping floating subtrees, whose
     /// indices are added to `floating` when they are shown.
-    fn paintRange(self: *const View, target: anytype, theme: Theme, start: usize, stop: usize, floating: *[max_floating]u32, floating_len: *usize) !void {
+    fn paintRange(self: *const View, target: anytype, window_theme: Theme, start: usize, stop: usize, floating: *[max_floating]u32, floating_len: *usize) !void {
         const all = self.buffers.nodes[0..self.len];
-        // Clips and effects open in node order and close, innermost first,
-        // where their node's subtree ends.
-        var scopes: [3 * (max_depth + 1)]Scope = undefined;
+        // Clips, effects, themes and input scopes open in node order and
+        // close, innermost first, where their node's subtree ends.
+        var scopes: [5 * (max_depth + 1)]Scope = undefined;
         var scope_depth: usize = 0;
         var at = start;
         while (at < stop) {
             while (scope_depth > 0 and all[scopes[scope_depth - 1].index].end <= at) {
                 scope_depth -= 1;
-                try closeScope(&all[scopes[scope_depth].index], scopes[scope_depth].clip, target, theme);
+                try closeScope(&all[scopes[scope_depth].index], scopes[scope_depth], target, window_theme);
             }
             const node = &all[at];
+            const theme = if (node.theme) |inner| inner.* else window_theme;
             if (node.concealed) {
                 at = node.end;
                 continue;
@@ -4581,8 +4657,18 @@ pub const View = struct {
             }
             const bounds = node.bounds;
             const style = node.style;
+            if (@TypeOf(target) == *ui.Frame) {
+                if (style.theme) |inner| {
+                    scopes[scope_depth] = .{ .index = @intCast(at), .kind = .{ .theme = target.pushTheme(inner) } };
+                    scope_depth += 1;
+                }
+                if (node.passthrough and (node.parent == none or !all[node.parent].passthrough)) {
+                    scopes[scope_depth] = .{ .index = @intCast(at), .kind = .{ .passthrough = target.inertMark() } };
+                    scope_depth += 1;
+                }
+            }
             for (0..try self.openEffects(target, style, bounds)) |_| {
-                scopes[scope_depth] = .{ .index = @intCast(at), .clip = false };
+                scopes[scope_depth] = .{ .index = @intCast(at), .kind = .effect };
                 scope_depth += 1;
             }
             var control: ui.widgets.Options = .{ .enabled = style.enabled, .name = style.name, .semantic_parent = node.semantic_parent };
@@ -4625,8 +4711,14 @@ pub const View = struct {
                         },
                         else => {},
                     }
-                    if (try self.paintRefraction(target, style, bounds)) {} else if (style.material) |material| target.material(bounds, style.radius, material) else if (node.kind != .toast) if (style.background) |color| target.roundedRect(bounds, style.radius, ui.Color.rgb(color));
-                    if (style.border) |color| target.strokeRect(bounds, style.radius, style.border_width, ui.Color.rgb(color));
+                    if (try self.paintRefraction(target, style, bounds)) {} else if (style.material) |material| target.material(bounds, style.radius, material) else if (node.kind != .toast) {
+                        if (style.gradient) |fill| paintGradient(target, bounds, style.radius, null, fill) else if (style.background) |color| target.roundedRect(bounds, style.radius, ui.Color.rgb(color)) else if (style.theme) |inner| {
+                            // A themed scope fills with its theme, as the root
+                            // does with the window's.
+                            if (node.kind == .column or node.kind == .row) target.roundedRect(bounds, style.radius, ui.Color.rgb(inner.palette.background));
+                        }
+                    }
+                    if (style.border_gradient) |line| paintGradient(target, bounds, style.radius, style.border_width, line) else if (style.border) |color| target.strokeRect(bounds, style.radius, style.border_width, ui.Color.rgb(color));
                     if (node.kind == .breadcrumbs) self.paintSeparators(node, target, theme);
                     if (node.kind == .split) {
                         const p = style.padding;
@@ -4635,7 +4727,7 @@ pub const View = struct {
                     }
                     if (node.clips() and node.child_count > 0) {
                         try target.pushClip(bounds);
-                        scopes[scope_depth] = .{ .index = @intCast(at), .clip = true };
+                        scopes[scope_depth] = .{ .index = @intCast(at), .kind = .clip };
                         scope_depth += 1;
                     }
                 },
@@ -4664,7 +4756,11 @@ pub const View = struct {
                 .note => target.label(if (node.rtl) trailing(bounds, node.measured.preferred.width) else bounds, node.text, if (node.invalid) theme.palette.caution else theme.palette.disabled_text),
                 .spacer => {},
                 .button => try target.buttonWithOptions(node.id, bounds, node.text, control),
-                .link => try target.link(node.id, bounds, node.text, control),
+                .link => {
+                    var look = control;
+                    look.font = style.font;
+                    try target.link(node.id, bounds, node.text, look);
+                },
                 .nav_button => try target.navButton(node.id, bounds, if (node.rtl) switch (node.direction) {
                     .back => .forward,
                     .forward => .back,
@@ -4749,15 +4845,39 @@ pub const View = struct {
         }
         while (scope_depth > 0) {
             scope_depth -= 1;
-            try closeScope(&all[scopes[scope_depth].index], scopes[scope_depth].clip, target, theme);
+            try closeScope(&all[scopes[scope_depth].index], scopes[scope_depth], target, window_theme);
         }
     }
-    const Scope = struct { index: u32, clip: bool };
-    fn closeScope(node: *const Node, clip: bool, target: anytype, theme: Theme) !void {
-        if (!clip) return target.endEffect();
-        paintEdges(node, target);
-        try target.popClip();
-        paintScrollIndicator(node, target, theme);
+    const Scope = struct {
+        index: u32,
+        kind: union(enum) {
+            effect,
+            clip,
+            /// The theme the frame drew with before the node's.
+            theme: ?*const Theme,
+            /// Where the controls of a node ignoring input began.
+            passthrough: ui.Frame.InertMark,
+        },
+    };
+    fn closeScope(node: *const Node, scope: Scope, target: anytype, window_theme: Theme) !void {
+        switch (scope.kind) {
+            .effect => return target.endEffect(),
+            .theme => |previous| if (@TypeOf(target) == *ui.Frame) target.popTheme(previous),
+            .passthrough => |mark| if (@TypeOf(target) == *ui.Frame) target.passThrough(mark, target.inertMark()),
+            .clip => {
+                paintEdges(node, target);
+                try target.popClip();
+                paintScrollIndicator(node, target, if (node.theme) |inner| inner.* else window_theme);
+            },
+        }
+    }
+    /// Fill a rounded box with a gradient, or stroke its edge `width` wide.
+    fn paintGradient(target: anytype, bounds: Rect, radius: f32, width: ?f32, fill: Gradient) void {
+        var stops: [gradients.max_stops]ui.commands.brushes.Stop = undefined;
+        const resolved = gradients.resolve(fill, bounds, &stops) orelse return;
+        if (width) |line| {
+            if (std.math.isFinite(line) and line > 0) target.gradientStrokeRect(bounds, radius, line, resolved);
+        } else target.gradientRect(bounds, radius, resolved);
     }
     /// Open the pose, effect and opacity of a node, outermost first, and
     /// return how many opened. Opacity applies to the outermost one.
@@ -4831,9 +4951,22 @@ pub const View = struct {
     /// What the enclosing field adds to a control's semantics; empty outside
     /// a field and for the field's own label and note.
     fn annotationOf(self: *const View, node: *const Node) Annotation {
-        if (node.field == none or node.kind == .text or node.kind == .note) return .{};
-        const owner = &self.buffers.nodes[node.field];
-        return .{ .name = owner.text, .description = owner.note, .invalid = owner.invalid, .required = owner.required };
+        if (node.kind == .text or node.kind == .note) return .{};
+        var about: Annotation = .{};
+        if (node.field != none) {
+            const owner = &self.buffers.nodes[node.field];
+            about = .{ .name = owner.text, .description = owner.note, .invalid = owner.invalid, .required = owner.required };
+        }
+        // A search, token field or editable combo box hands its placeholder
+        // to the text input inside it.
+        if (node.kind == .embed and node.parent != none) {
+            const parent = &self.buffers.nodes[node.parent];
+            if (parent.kind == .search or parent.kind == .token_field or parent.kind == .combo_field) {
+                about.placeholder = parent.style.placeholder;
+                about.placeholder_color = parent.style.placeholder_color;
+            }
+        }
+        return about;
     }
 
     /// A muted slash centred in each gap between breadcrumb items.
@@ -4868,12 +5001,12 @@ pub const View = struct {
     }
     fn paintScrollIndicator(node: *const Node, target: anytype, theme: Theme) void {
         const model = node.scroll orelse return;
+        if (!node.style.scrollbars) return;
         const b = node.bounds;
         if (b.width < 8 or b.height < 8) return;
         // Right to left, the indicator runs along the left edge.
-        const track: Rect = .{ .x = if (node.rtl) b.x + 2 else b.x + b.width - 6, .y = b.y + 2, .width = 4, .height = b.height - 4 };
-        const bar = (model.scrollbar(.vertical, track, 16) catch return) orelse return;
-        target.roundedRect(bar.thumb, 2, ui.Color.rgb(theme.palette.track));
+        const bar: ui.scroll.Bar = .{ .box = b, .leading = node.rtl, .view = model.viewport.height, .content = model.content.height, .offset = model.offset.y };
+        bar.paint(target, ui.Color.rgb(theme.palette.track), false);
     }
 };
 
@@ -5820,6 +5953,7 @@ const Recorder = struct {
     max_clip_depth: usize = 0,
     fills: usize = 0,
     effects: usize = 0,
+    gradients: usize = 0,
     opened_effects: [16]struct { margin: f32, opacity: u8 } = undefined,
     effect_depth: usize = 0,
     effect_count: usize = 0,
@@ -5837,6 +5971,12 @@ const Recorder = struct {
     }
     pub fn strokeRect(self: *Recorder, _: Rect, _: f32, _: f32, _: ui.Color) void {
         self.fills += 1;
+    }
+    pub fn gradientRect(self: *Recorder, _: Rect, _: f32, _: ui.commands.Gradient) void {
+        self.gradients += 1;
+    }
+    pub fn gradientStrokeRect(self: *Recorder, _: Rect, _: f32, _: f32, _: ui.commands.Gradient) void {
+        self.gradients += 1;
     }
     pub fn backdropEffect(self: *Recorder, _: Rect, _: f32, _: ui.BackdropEffect) void {
         self.effects += 1;
@@ -6383,6 +6523,8 @@ test {
     _ = @import("navigation_tests.zig");
     _ = @import("pointer_tests.zig");
     _ = @import("inspector_tests.zig");
+    _ = @import("gradient.zig");
+    _ = @import("style_tests.zig");
 }
 
 test "embedded leaves measure themselves and paint in order" {

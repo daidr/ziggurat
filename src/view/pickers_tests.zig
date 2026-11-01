@@ -482,3 +482,143 @@ test "popovers flip above an anchor without room below" {
     try testing.expect(below.y >= 40);
     try testing.expectEqual(@as(f32, 10), below.x);
 }
+
+const DecimalApp = struct {
+    state: pickers.DecimalInput = .{},
+    value: pickers.Decimal = pickers.Decimal.init("1234.50") catch unreachable,
+    limits: pickers.DecimalLimits = .{ .minimum = "0", .maximum = "", .step = "0.01" },
+    changes: usize = 0,
+    fn build(self: *DecimalApp, v: *View) anyerror!void {
+        try v.column(.{});
+        if (try pickers.decimalInput(v, &self.state, &self.value, self.limits, .{ .style = .{ .name = "Amount" } })) self.changes += 1;
+        _ = try v.button("Other", .{});
+        try v.end();
+    }
+};
+
+fn decimalText(app: *const DecimalApp) []const u8 {
+    return app.state.leaf.edit.text();
+}
+
+fn typeKeys(h: *Harness, keys: []const z.KeyCode) !void {
+    for (keys) |code| try testing.expect(try h.key(press(code)));
+}
+
+test "decimal parsing and formatting are exact and never round" {
+    try testing.expectEqual(@as(i128, 123450), try pickers.parseDecimal("1,234.5", 2));
+    try testing.expectEqual(@as(i128, 150), try pickers.parseDecimal("1.500", 2));
+    try testing.expectEqual(@as(i128, -5), try pickers.parseDecimal("-0.05", 2));
+    try testing.expectEqual(@as(i128, 700), try pickers.parseDecimal("+7", 2));
+    try testing.expectError(error.TooExact, pickers.parseDecimal("1.005", 2));
+    try testing.expectError(error.NotANumber, pickers.parseDecimal("1,50", 2));
+    try testing.expectError(error.NotANumber, pickers.parseDecimal("12,34", 2));
+    try testing.expectError(error.NotANumber, pickers.parseDecimal("abc", 2));
+    try testing.expectError(error.NotANumber, pickers.parseDecimal("-", 2));
+    try testing.expectError(error.TooExact, pickers.parseDecimal("2.5", 0));
+    // Far past what a float holds exactly.
+    try testing.expectEqual(@as(i128, 12345678901234567890123), try pickers.parseDecimal("123456789012345678901.23", 2));
+    var buffer: [pickers.Decimal.capacity]u8 = undefined;
+    try testing.expectEqualStrings("1234.50", pickers.formatDecimal(&buffer, 123450, 2));
+    try testing.expectEqualStrings("-0.05", pickers.formatDecimal(&buffer, -5, 2));
+    try testing.expectEqualStrings("0.00", pickers.formatDecimal(&buffer, 0, 2));
+    try testing.expectEqualStrings("42", pickers.formatDecimal(&buffer, 42, 0));
+    try testing.expectEqualStrings("123456789012345678901.23", pickers.formatDecimal(&buffer, 12345678901234567890123, 2));
+}
+
+test "decimal input steps, takes what is typed exactly and marks what it cannot take" {
+    var storage: Storage = .{};
+    var app: DecimalApp = .{};
+    var h = Harness.init(&app, DecimalApp.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    try testing.expectEqualStrings("1234.50", decimalText(&app));
+    // The stepper's steps add a step.
+    try h.send(.{ .value = .{ .id = app.state.leaf.id, .change = .{ .steps = 1 } } });
+    try testing.expectEqualStrings("1234.51", app.value.text());
+    try testing.expectEqual(@as(usize, 1), app.changes);
+    try h.focus(.{ .kind = .embed });
+    // Typing replaces the text; it applies as soon as it is a number.
+    try typeKeys(&h, &.{ .digit1, .comma, .digit2, .digit3, .digit4, .period, .digit5 });
+    try testing.expectEqualStrings("1234.50", app.value.text());
+    try testing.expectEqualStrings("1,234.5", decimalText(&app));
+    try testing.expectEqual(pickers.DecimalFault.fine, app.state.fault);
+    // A decimal past the step's is not rounded but marked.
+    try typeKeys(&h, &.{ .digit0, .digit5 });
+    try testing.expectEqual(pickers.DecimalFault.too_exact, app.state.fault);
+    try testing.expectEqualStrings("1234.50", app.value.text());
+    try testing.expectEqualStrings("Use at most 2 decimal places", app.state.message(.{}));
+    // The mark stays when focus leaves, with the text as typed.
+    try h.focus(.{ .text = "Other" });
+    try testing.expectEqualStrings("1,234.505", decimalText(&app));
+    try testing.expectEqual(pickers.DecimalFault.too_exact, app.state.fault);
+    // A value the application sets replaces it.
+    try app.value.set("10");
+    try h.render();
+    try testing.expectEqualStrings("10.00", decimalText(&app));
+    try testing.expectEqual(pickers.DecimalFault.fine, app.state.fault);
+    // Below the minimum is marked, not clamped.
+    try h.focus(.{ .kind = .embed });
+    try typeKeys(&h, &.{ .minus, .digit3 });
+    try testing.expectEqual(pickers.DecimalFault.below, app.state.fault);
+    try testing.expectEqualStrings("Enter 0.00 or more", app.state.message(.{}));
+    try testing.expectEqualStrings("10", app.value.text());
+    // Escape shows the value again.
+    try testing.expect(try h.key(press(.escape)));
+    try testing.expectEqualStrings("10.00", decimalText(&app));
+    try testing.expectEqual(pickers.DecimalFault.fine, app.state.fault);
+    // Written another way is no change.
+    const before = app.changes;
+    try h.send(.{ .value = .{ .id = app.state.leaf.id, .change = .{ .set = 10 } } });
+    try testing.expectEqualStrings("10.00", app.value.text());
+    try testing.expectEqual(before, app.changes);
+    // Leaving shows what was typed in full.
+    try typeKeys(&h, &.{ .digit7, .period, .digit5 });
+    try testing.expectEqualStrings("7.50", app.value.text());
+    try testing.expectEqualStrings("7.5", decimalText(&app));
+    try h.focus(.{ .text = "Other" });
+    try testing.expectEqualStrings("7.50", decimalText(&app));
+    // Steps stop at the bounds.
+    try h.send(.{ .value = .{ .id = app.state.leaf.id, .change = .minimum } });
+    try testing.expectEqualStrings("0.00", app.value.text());
+    try h.send(.{ .value = .{ .id = app.state.leaf.id, .change = .{ .steps = -1 } } });
+    try testing.expectEqualStrings("0.00", app.value.text());
+}
+
+const BrowseApp = struct {
+    calendar: pickers.Calendar = .{},
+    date: pickers.Date = .{ .year = 2026, .month = 3, .day = 14 },
+    browse: bool = true,
+    fn build(self: *BrowseApp, v: *View) anyerror!void {
+        _ = try pickers.calendar(v, &self.calendar, &self.date, .{ .browse = self.browse, .region = .{ .locale = locale("en-US") } });
+    }
+};
+
+test "a browsing calendar pages through months without choosing" {
+    var storage: Storage = .{};
+    var app: BrowseApp = .{};
+    var h = Harness.init(&app, BrowseApp.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    try h.click(.{ .kind = .nav_button, .nth = 1 });
+    try testing.expectEqual(@as(u4, 3), app.date.month);
+    try testing.expectEqual(@as(u4, 4), app.calendar.cursor.?.month);
+    try h.focus(.{ .kind = .embed });
+    try testing.expect(try h.key(press(.page_down)));
+    try testing.expect(try h.key(press(.right)));
+    try testing.expect(app.date.eql(.{ .year = 2026, .month = 3, .day = 14 }));
+    try testing.expect(app.calendar.cursor.?.eql(.{ .year = 2026, .month = 5, .day = 15 }));
+    // Enter chooses the day the keys are on.
+    try testing.expect(try h.key(press(.enter)));
+    try testing.expect(app.date.eql(.{ .year = 2026, .month = 5, .day = 15 }));
+    // The cursor follows a date the application sets.
+    app.date = .{ .year = 2025, .month = 1, .day = 2 };
+    try h.render();
+    try testing.expect(app.calendar.cursor.?.eql(app.date));
+    // Without browsing, the month buttons choose.
+    app.browse = false;
+    try h.render();
+    try h.click(.{ .kind = .nav_button, .nth = 1 });
+    try testing.expectEqual(@as(u4, 2), app.date.month);
+}

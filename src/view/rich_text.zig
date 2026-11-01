@@ -52,6 +52,9 @@ pub const Span = struct {
     color: ?u32 = null,
     underline: bool = false,
     wavy_underline: bool = false,
+    /// Underline with a line of square dots as thick as the line, every
+    /// three DIP, or two dots apart when thicker, as a link marks hover.
+    dotted_underline: bool = false,
     strikethrough: bool = false,
     /// Color and thickness of the span's lines; by default its text color
     /// and a thickness that grows with the font size.
@@ -518,11 +521,11 @@ pub const RichText = struct {
                 target.labelFont(.{ .x = origin.x + run.x + run.width, .y = top, .width = hyphen + m.size, .height = m.height }, "-", color, self.fontOf(span));
                 width += hyphen;
             }
-            if (!(span.underline or span.wavy_underline or span.strikethrough) or width <= 0) continue;
+            if (!(span.underline or span.wavy_underline or span.dotted_underline or span.strikethrough) or width <= 0) continue;
             const thickness = if (span.decoration_thickness > 0) span.decoration_thickness else @max(1, @round(m.size / 14));
             const line_color = span.decoration_color orelse color;
             const x = origin.x + run.x;
-            if (span.wavy_underline) wave(target, x, baseline + @max(1, m.size * 0.08), width, thickness, line_color) else if (span.underline)
+            if (span.wavy_underline) wave(target, x, baseline + @max(1, m.size * 0.08), width, thickness, line_color) else if (span.dotted_underline) dots(target, x, baseline + @max(1, m.size * 0.08), width, thickness, line_color) else if (span.underline)
                 target.rect(.{ .x = x, .y = baseline + @max(1, m.size * 0.08), .width = width, .height = thickness }, line_color);
             if (span.strikethrough) target.rect(.{ .x = x, .y = baseline - m.size * 0.3 - thickness / 2, .width = width, .height = thickness }, line_color);
         }
@@ -562,6 +565,15 @@ fn wave(target: anytype, x: f32, y: f32, width: f32, thickness: f32, color: u32)
         at += step;
         phase = (phase + 1) % offsets.len;
     }) target.rect(.{ .x = x + at, .y = y + offsets[phase] * thickness * 0.75, .width = @min(step, width - at), .height = thickness }, color);
+}
+
+/// Square dots as thick as the line whose top sits at `y`, `width` long,
+/// every three DIP or two dots' widths apart when they are thicker.
+fn dots(target: anytype, x: f32, y: f32, width: f32, thickness: f32, color: u32) void {
+    const size = @max(1, @round(thickness));
+    const step = @max(3, 2 * size);
+    var at: f32 = 0;
+    while (at < width) : (at += step) target.rect(.{ .x = x + at, .y = y, .width = @min(size, width - at), .height = size }, color);
 }
 
 fn isSpace(byte: u8) bool {

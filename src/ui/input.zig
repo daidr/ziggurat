@@ -90,6 +90,9 @@ pub const Options = struct {
     focusable: bool = true,
     /// A non-interactive display may still occlude controls behind its bounds.
     pointer_enabled: bool = true,
+    /// Neither takes nor occludes the pointer: a press goes to what lies
+    /// beneath, as for a control that is not there.
+    pass_through: bool = false,
     radio_group: ?u64 = null,
     selected: bool = false,
     focus_rect: ?Rect = null,
@@ -104,6 +107,7 @@ fn resolve(view: HitView, point: z.Point) ?usize {
     while (i > 0) {
         i -= 1;
         const item = view.hits[i];
+        if (item.options.pass_through) continue;
         // The exact existing reverse traversal includes disabled occluders.
         const contains = if (view.mapped) |mapped| mapped.hitContains(i, affine.Rect.from(item.rect), affine.Point.from(point)) catch false else item.rect.contains(point);
         if (contains) return i;
