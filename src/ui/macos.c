@@ -99,6 +99,9 @@ typedef struct Renderer {
     uint64_t image_creations;
     uint64_t coverage_creations;
     Layers *layers;
+    /* The window frame starts transparent and is presented with its alpha
+       (Paint.transparent), not over an opaque white plane. */
+    int window_transparent;
 } Renderer;
 
 typedef struct LayerGaussian {ZgGaussianCapacity capacity;ZgGaussianFrame frames[4];uint32_t *scratch;uint64_t visits;} LayerGaussian;
@@ -148,7 +151,7 @@ static int layer_begin_mode(Renderer *s,uint32_t width,uint32_t height,float sca
     if(layer->active)return layer->transparent_root==(uint32_t)transparent_root?0:4;
     layer->active=1;layer->depth=0;layer->transparent_root=transparent_root;Target *target=layer_current(layer);target_reset(target);layer_origin(layer,target,0,0);layer_alias(s,target);layer_reset_gradient_clip(s);
     if(layer->gaussian)layer->gaussian->visits=0;
-    target_clear(target,0,0,target->width,target->height,transparent_root?0:255);
+    target_clear(target,0,0,target->width,target->height,transparent_root||s->window_transparent?0:255);
     layer->stats.clear_pixels+=(uint64_t)width*height;return 0;
 }
 static int layer_begin(Renderer *s,uint32_t width,uint32_t height,float scale){return layer_begin_mode(s,width,height,scale,0);}
@@ -259,7 +262,7 @@ int zlc_layer_finish_transform(Renderer *s,uint64_t visits,uint32_t left,uint32_
     layer->stats.composite_pixels+=visits;return 0;
 }
 void zlc_layer_stats(Renderer *s,ZgLayerStats *out){*out=s->layers?s->layers->stats:(ZgLayerStats){0};}
-int zlc_layer_transparent(Renderer *s){return s->layers&&s->layers->active&&(s->layers->depth||s->layers->transparent_root);}
+int zlc_layer_transparent(Renderer *s){return s->layers&&s->layers->active?(s->layers->depth||s->layers->transparent_root||s->window_transparent):s->window_transparent;}
 size_t zlc_layer_metadata_bytes(void){return sizeof(Renderer)+sizeof(Layers);}
 int zlc_offscreen_prepare(Renderer *s){
     if(!s->layers||s->layers->active)return 1;
@@ -307,26 +310,33 @@ int zlc_layer_release(Renderer *s){
 void zlc_layer_abort(Renderer *s){layer_abort(s);}
 Renderer *zlc_create(void){return calloc(1,sizeof(Renderer));}
 int zlc_has_surface(Renderer *s){return s&&s->target&&s->target->context;}
-int zlc_begin(Renderer *s,uint32_t width,uint32_t height,float scale){
+static int begin_plane(Renderer *s,uint32_t width,uint32_t height,float scale){
     if(s->layers)return layer_begin(s,width,height,scale);
     if(!width||!height||!isfinite(scale)||scale<=0)return 1;
-    if(s->target&&s->width==width&&s->height==height&&s->scale==scale)return 0;
+    if(s->target&&s->width==width&&s->height==height&&s->scale==scale){
+        /* A transparent frame starts clear every time. */
+        if(s->window_transparent)target_clear(&s->own,0,0,width,height,0);
+        return 0;
+    }
     destroy(s);
     if(target_create(&s->own,width,height)){destroy(s);return 2;}
     s->target=&s->own;
     /* The renderer owns an opaque window plane. Initialize it once, including
-       when the first frame contains only translucent shapes or gradients. */
-    target_clear(&s->own,0,0,width,height,255);
+       when the first frame contains only translucent shapes or gradients. A
+       transparent one starts clear. */
+    target_clear(&s->own,0,0,width,height,s->window_transparent?0:255);
     target_matrix(&s->own,scale,0,0);
     s->width=width;s->height=height;s->scale=scale;s->generation++;s->origin[0]=s->origin[1]=0;
     s->gradient_clip_depth=0;s->gradient_clips[0][0]=s->gradient_clips[0][1]=0;s->gradient_clips[0][2]=width;s->gradient_clips[0][3]=height;return 0;
 }
-/* Transparent window planes are not drawn on macOS yet; such a frame is a
-   surface mode mismatch, as for a renderer that cannot change mode. */
+/* A transparent window plane starts clear and is drawn over what the view
+   shows behind it, which AppKit clears: the desktop through a clear
+   window, or a material. */
 int zlc_begin_mode(Renderer *s,uint32_t width,uint32_t height,float scale,int transparent){
-    if(transparent)return 4;
-    return zlc_begin(s,width,height,scale);
+    s->window_transparent=transparent!=0;
+    return begin_plane(s,width,height,scale);
 }
+int zlc_begin(Renderer *s,uint32_t width,uint32_t height,float scale){return zlc_begin_mode(s,width,height,scale,0);}
 void zlc_fill(Renderer *s,float x,float y,float width,float height,uint32_t color){
     CGContextRef c=s->target->context;
     CGContextSetRGBFillColor(c,(double)((color>>16)&255)/255,(double)((color>>8)&255)/255,(double)(color&255)/255,1);

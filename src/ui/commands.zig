@@ -461,7 +461,7 @@ pub const Buffer = struct {
     /// Record a backdrop effect in absolute DIP. It reads the target plane
     /// as drawn so far, so only software replay can draw it.
     pub fn backdropEffect(self: *Buffer, entry: backdrop.Entry) !void {
-        if (!layout.validRect(entry.bounds) or !std.math.isFinite(entry.bounds.x + entry.bounds.width) or !std.math.isFinite(entry.bounds.y + entry.bounds.height) or !std.math.isFinite(entry.radius) or entry.radius < 0 or !std.math.isFinite(entry.sigma) or entry.sigma < 0 or !std.math.isFinite(entry.noise)) return error.InvalidGeometry;
+        if (!layout.validRect(entry.bounds) or !std.math.isFinite(entry.bounds.x + entry.bounds.width) or !std.math.isFinite(entry.bounds.y + entry.bounds.height) or !std.math.isFinite(entry.radius) or entry.radius < 0 or !std.math.isFinite(entry.sigma) or entry.sigma < 0 or !std.math.isFinite(entry.noise) or !std.math.isFinite(entry.clarity)) return error.InvalidGeometry;
         if (entry.mask) |mask| if (!std.math.isFinite(mask.angle) or !std.math.isFinite(mask.start) or !std.math.isFinite(mask.end)) return error.InvalidGeometry;
         if (self.len == self.storage.len) return error.CommandsFull;
         const table = &self.backdrop_storage;

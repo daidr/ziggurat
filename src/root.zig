@@ -361,7 +361,8 @@ pub const WindowCapabilities = struct {
     /// material on Windows.
     transparent: bool = false,
     /// What paint frames leave transparent shows the window's `Vibrancy`:
-    /// Windows 11 22H2 and later, in a window created with a material.
+    /// Windows 11 22H2 and later, in a window created with a material, and
+    /// every macOS window.
     vibrancy: bool = false,
     backdrop_material: bool = false,
     /// `setOpacity` changes whole-window translucency. GTK needs a compositor.
@@ -401,10 +402,13 @@ pub const WindowDecoration = enum { system, borderless, custom };
 /// `.system` restores the platform default; client content stays opaque.
 pub const WindowBackdrop = enum { system, none, mica, acrylic, mica_alt };
 /// A translucent material that blurs what is behind a window, shown where its
-/// paint frames are transparent (see `WindowOptions.vibrancy`). Windows 11
-/// has the Mica, Acrylic and Tabbed system backdrops; the other materials use
-/// the closest one: Acrylic for transient UI (menu, popover, hud, sheet,
-/// tooltip, selection, fullscreen_ui), Mica otherwise. Linux has none.
+/// paint frames are transparent (see `WindowOptions.vibrancy`). macOS has
+/// all of them (NSVisualEffectView materials, and from macOS 26 Liquid
+/// Glass); there Mica and Tabbed use the under-window material and Acrylic
+/// the HUD one. Windows 11 has the Mica, Acrylic and Tabbed system
+/// backdrops; the other materials use the closest one: Acrylic for transient
+/// UI (menu, popover, hud, sheet, tooltip, selection, fullscreen_ui) and the
+/// glass, Mica otherwise. Linux has none.
 pub const Vibrancy = enum {
     none,
     window,
@@ -421,6 +425,18 @@ pub const Vibrancy = enum {
     tooltip,
     selection,
     fullscreen_ui,
+    /// Liquid Glass as macOS 26 draws it (NSGlassEffectView): what is behind
+    /// the window shows through, frosted and bent along its edges under a
+    /// lit rim. It fills the window, rounded as `WindowOptions.corner_radius`
+    /// rounds a frameless one. The regular glass is frosted so that what is
+    /// on it reads over anything: bars, panels, launchers. Before macOS 26
+    /// it is the popover material.
+    glass,
+    /// The clear glass, barely frosted, for content that brings its own
+    /// contrast, such as photos and video. It looks clear only in a window
+    /// drawn as active (see `Window.setActiveAppearance`). Before macOS 26
+    /// it is the HUD material.
+    glass_clear,
     mica,
     acrylic,
     tabbed,
@@ -548,8 +564,16 @@ pub const WindowOptions = struct {
     /// Windows only a window created with a material can show one (Windows
     /// 11 22H2 and later, `capabilities().vibrancy`); its frames are then
     /// composed with their alpha and it has no menu bar: Alt and F10 open the
-    /// menus in a popup. Linux shows none.
+    /// menus in a popup. On macOS any window shows one, set at creation or
+    /// later with `setVibrancy`, and its frames are then transparent. Linux
+    /// shows none.
     vibrancy: Vibrancy = .none,
+    /// Rounds the corners of a `.borderless` or `.custom` window, in DIP: on
+    /// macOS its content and material are cut to them, a continuous curve
+    /// of this radius, and its shadow follows them; Windows 11 gives it its
+    /// own rounded corners whatever the radius. Zero keeps the platform's
+    /// corners.
+    corner_radius: f32 = 0,
     on_close: ?CloseHandler = null,
     on_closed: ?ClosedHandler = null,
 };
@@ -763,6 +787,7 @@ pub const App = struct {
         if (options.decoration == .system and options.hit_test != null) return error.InvalidWindowDecoration;
         if (options.popup != null and (options.decoration != .borderless or options.modal)) return error.InvalidPopup;
         if (!std.math.isFinite(options.opacity) or options.opacity < 0 or options.opacity > 1) return error.InvalidOpacity;
+        if (!std.math.isFinite(options.corner_radius) or options.corner_radius < 0) return error.InvalidGeometry;
         const title = try self.allocator.dupe(u8, options.title);
         const record = self.allocator.create(WindowRecord) catch |err| {
             self.allocator.free(title);
@@ -1490,6 +1515,16 @@ pub const Window = struct {
         defer endUpdate(scope);
         scope.record.vibrancy = material;
         backend.setVibrancy(scope.record, material);
+    }
+    /// Keeps the window drawn as active, as the key window of the app in
+    /// front is, while another window or app has the keyboard: its controls
+    /// and materials keep their active look, and the clear glass
+    /// (`Vibrancy.glass_clear`) stays clear, as a floating panel over another
+    /// app needs. macOS only; elsewhere it does nothing.
+    pub fn setActiveAppearance(self: Window, enabled: bool) !void {
+        const scope = try self.beginUpdate();
+        defer endUpdate(scope);
+        if (comptime @hasDecl(backend, "setActiveAppearance")) backend.setActiveAppearance(scope.record, enabled);
     }
     pub fn vibrancy(self: Window) !Vibrancy {
         const record = self.resolve() orelse return error.Closed;
