@@ -92,6 +92,8 @@ pub const ShaderEffectStats = struct {
 pub const EffectOptions = struct { opacity: u8 = 255 };
 pub const offscreen = @import("offscreen.zig");
 pub const canvas = @import("canvas.zig");
+pub const cache = @import("cache.zig");
+pub const Cache = cache.Cache;
 pub const PixelImage = @import("pixel_image.zig").PixelImage;
 pub const frame_stats = @import("frame_stats.zig");
 pub const FrameStats = frame_stats.Stats;
@@ -541,6 +543,9 @@ pub const Context = struct {
     /// What the last software frame drew again.
     last_damage: damage.Damage = .whole,
     damage_tracker: damage.Tracker = .{},
+    /// Images caches replaced, released once no frame holds them.
+    retired_snapshots: [16]*offscreen.Snapshot = undefined,
+    retired_len: usize = 0,
     fallbacks: usize = 0,
     command_buffer: commands.Buffer = .{},
     painting: bool = false,
@@ -2586,6 +2591,28 @@ pub const Context = struct {
             if (!retained) if (borrow.control() catch null) |callback| callback.blur(callback.context, window) catch |err| reportFieldResult(window, .{ .input_error = err });
         }
     }
+    fn retireSnapshot(ptr: *anyopaque, snapshot: *offscreen.Snapshot) bool {
+        const self: *Context = @ptrCast(@alignCast(ptr));
+        if (self.retired_len == self.retired_snapshots.len) return false;
+        self.retired_snapshots[self.retired_len] = snapshot;
+        self.retired_len += 1;
+        return true;
+    }
+    /// Releases the images caches replaced: no frame holds them now.
+    fn releaseRetired(self: *Context) void {
+        var kept: usize = 0;
+        for (self.retired_snapshots[0..self.retired_len]) |snapshot| {
+            if (snapshot.view()) |view| {
+                _ = self.renderer.releaseImage(view.identity) catch {};
+                if (build_options.gpu) _ = self.gpu_renderer.releaseImage(view.identity) catch {};
+            } else |_| {}
+            snapshot.close() catch {
+                self.retired_snapshots[kept] = snapshot;
+                kept += 1;
+            };
+        }
+        self.retired_len = kept;
+    }
     fn software(self: *Context, paint: z.Paint) !void {
         errdefer self.damage_tracker.invalidate();
         try self.renderer.begin(paint);
@@ -2842,6 +2869,7 @@ pub const Context = struct {
                     self.repaint_pending = true;
                     return;
                 }
+                if (self.retired_len != 0) self.releaseRetired();
                 self.painting = true;
                 self.frame_accessibility_source = null;
                 defer {
@@ -3118,6 +3146,7 @@ pub const Context = struct {
         if (build_options.accessibility and self.attached_semantics_enabled) self.accessibility_bridge.detach();
         self.attached_semantics_enabled = false;
         self.renderer.deinit();
+        self.releaseRetired();
         self.damage_tracker.invalidate();
         if (build_options.gpu) self.gpu_renderer.deinit();
         self.window = null;
@@ -3185,6 +3214,36 @@ pub const Frame = struct {
     /// Open element effects; false marks one drawn without its program.
     effect_scopes: [16]bool = undefined,
     effect_depth: usize = 0,
+    /// Open `beginCache` scopes, innermost last.
+    cache_scopes: [4]CacheScope = undefined,
+    cache_depth: usize = 0,
+    const CacheScope = struct { cache: *Cache, mark: commands.Buffer.Checkpoint, clips: usize, group_depth: usize, offset_depth: usize, effect_depth: usize };
+
+    /// Keeps what is drawn until the matching `endCache` as one image in
+    /// `value`, drawn again only when it changes; see `cache`. Hits, focus
+    /// and semantics inside are recorded as without it.
+    pub fn beginCache(self: *Frame, value: *Cache) !void {
+        if (self.cache_depth == self.cache_scopes.len) {
+            self.failure = self.failure orelse error.CacheStackFull;
+            return error.CacheStackFull;
+        }
+        self.cache_scopes[self.cache_depth] = .{ .cache = value, .mark = self.context.command_buffer.checkpoint(), .clips = self.clips.len, .group_depth = self.group_depth, .offset_depth = self.offset_depth, .effect_depth = self.effect_depth };
+        self.cache_depth += 1;
+    }
+    pub fn endCache(self: *Frame) !void {
+        return self.endCacheBody() catch |err| {
+            self.failure = self.failure orelse err;
+            return err;
+        };
+    }
+    fn endCacheBody(self: *Frame) !void {
+        if (self.cache_depth == 0) return error.CacheStackEmpty;
+        self.cache_depth -= 1;
+        const scope = self.cache_scopes[self.cache_depth];
+        if (self.clips.len != scope.clips or self.group_depth != scope.group_depth or self.offset_depth != scope.offset_depth or self.effect_depth != scope.effect_depth) return error.UnbalancedCache;
+        if (self.failure != null or self.transforms != null) return;
+        _ = try scope.cache.resolve(&self.context.command_buffer, scope.mark, self.size.scale, .{ .context = self.context, .call = Context.retireSnapshot });
+    }
 
     pub fn beginShortcutScope(self: *Frame, id: u64, options: ShortcutScopeOptions) !void {
         return self.beginShortcutScopeBody(id, options) catch |err| {
@@ -4346,6 +4405,7 @@ test {
     _ = @import("gpu_effect_host.zig");
     _ = effects;
     _ = canvas;
+    _ = cache;
     _ = @import("pixel_image.zig");
     _ = frame_stats;
     _ = input;

@@ -234,7 +234,7 @@ pub const Tracker = struct {
                 .push_clip => |rect| {
                     if (depth == max_clips) return false;
                     const box = clipBox(rect, self.scale) orelse return false;
-                    var hasher = std.hash.Wyhash.init(states[depth]);
+                    var hasher = Hasher.init(states[depth]);
                     put(&hasher, rect);
                     depth += 1;
                     clips[depth] = clips[depth - 1].intersect(box);
@@ -251,7 +251,7 @@ pub const Tracker = struct {
             }
             const box = (commandBox(command, sources, self.scale) orelse return false).intersect(clips[depth]);
             if (box.isEmpty()) continue;
-            var hasher = std.hash.Wyhash.init(states[depth]);
+            var hasher = Hasher.init(states[depth]);
             if (!hashCommand(&hasher, command, sources)) return false;
             const value = hasher.final();
             const tile: i32 = @intCast(self.tile);
@@ -388,7 +388,79 @@ pub fn merge(boxes: []Box, limit: usize) usize {
     return len;
 }
 
-fn hashCommand(hasher: *std.hash.Wyhash, command: Command, sources: Sources) bool {
+/// The device pixels `list` can change at `scale`: the union of its
+/// drawings under the clips it opens, or null when one has no bounds.
+/// Groups add nothing of their own; what they hold is counted.
+pub fn extent(list: []const Command, sources: Sources, scale: f32) ?Box {
+    const unbounded: Box = .{ .x0 = -(1 << 30), .y0 = -(1 << 30), .x1 = 1 << 30, .y1 = 1 << 30 };
+    var clips: [max_clips + 1]Box = undefined;
+    clips[0] = unbounded;
+    var depth: usize = 0;
+    var result: ?Box = null;
+    for (list) |command| switch (command) {
+        .push_clip => |rect| {
+            if (depth == max_clips) return null;
+            depth += 1;
+            clips[depth] = clips[depth - 1].intersect(clipBox(rect, scale) orelse return null);
+        },
+        .pop_clip => {
+            if (depth == 0) return null;
+            depth -= 1;
+        },
+        .begin_group, .end_group => {},
+        else => {
+            const box = (commandBox(command, sources, scale) orelse return null).intersect(clips[depth]);
+            if (box.isEmpty()) continue;
+            result = if (result) |value| value.unite(box) else box;
+        },
+    };
+    return result;
+}
+
+/// A hash of everything `buffer` draws, as the tracker folds it into
+/// tiles, or null for a command it cannot hash. Coordinates are rounded to
+/// `quantum` DIP when set, so content moved by whole pixels, whose
+/// coordinates differ in their last bits, hashes the same.
+pub fn hashCommands(buffer: *const commands.Buffer, quantum: ?f64) ?u64 {
+    var hasher = Hasher.init(0xcac4e);
+    hasher.quantum = quantum;
+    const sources = Sources.of(buffer);
+    for (buffer.commands()) |command| switch (command) {
+        .push_clip => |rect| {
+            put(&hasher, 1);
+            put(&hasher, rect);
+        },
+        .pop_clip => put(&hasher, 2),
+        .end_group => put(&hasher, 3),
+        .begin_group => |value| {
+            put(&hasher, 4);
+            put(&hasher, .{ value.bounds, value.mask_origin, value.opacity, value.filter_slot, value.mask_resource != null });
+            if (value.mask_resource) |index| {
+                if (index >= sources.coverage.len) return null;
+                put(&hasher, sources.coverage[index].identity);
+            }
+        },
+        else => if (!hashCommand(&hasher, command, sources)) return null,
+    };
+    return hasher.final();
+}
+
+/// Wyhash fed field by field; floats are rounded to `quantum` when set.
+const Hasher = struct {
+    inner: std.hash.Wyhash,
+    quantum: ?f64 = null,
+    fn init(seed: u64) Hasher {
+        return .{ .inner = std.hash.Wyhash.init(seed) };
+    }
+    fn update(self: *Hasher, bytes: []const u8) void {
+        self.inner.update(bytes);
+    }
+    fn final(self: *Hasher) u64 {
+        return self.inner.final();
+    }
+};
+
+fn hashCommand(hasher: *Hasher, command: Command, sources: Sources) bool {
     put(hasher, @backingInt(std.meta.activeTag(command)));
     switch (command) {
         .fill => |value| put(hasher, value),
@@ -435,12 +507,13 @@ fn hashCommand(hasher: *std.hash.Wyhash, command: Command, sources: Sources) boo
 }
 
 /// Feeds a value field by field, so padding never reaches the hash.
-fn put(hasher: *std.hash.Wyhash, value: anytype) void {
+fn put(hasher: *Hasher, value: anytype) void {
     const T = @TypeOf(value);
     switch (@typeInfo(T)) {
         .float => {
             // -0 and 0 draw the same; NaN never reaches a plane.
-            const widened: f64 = if (value == 0) 0 else value;
+            var widened: f64 = if (value == 0) 0 else value;
+            if (hasher.quantum) |quantum| widened = @round(widened / quantum) + 0;
             hasher.update(std.mem.asBytes(&widened));
         },
         .int, .comptime_int => {

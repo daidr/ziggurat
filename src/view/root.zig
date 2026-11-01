@@ -175,6 +175,12 @@ pub const Style = struct {
     /// `Host.prepareShaderEffects`; without it they and `effect` draw the
     /// content as it is.
     effect: ?ui.ShaderEffect = null,
+    /// Keeps what the node and its descendants draw as one image in this
+    /// cache, drawn again only when it changes: a still card of gradients
+    /// and shadows then costs one image wherever a frame draws over it.
+    /// See `ui.cache`; create it with `ui.Cache.create` and destroy it
+    /// before the Host.
+    cache: ?*ui.Cache = null,
     /// The pointer's shape over the node, and over its descendants unless
     /// they set their own; a control inside without one shows the default
     /// arrow. Null takes the shape around it. Needs a Host attached to a
@@ -4560,13 +4566,13 @@ pub const View = struct {
         const all = self.buffers.nodes[0..self.len];
         // Clips and effects open in node order and close, innermost first,
         // where their node's subtree ends.
-        var scopes: [3 * (max_depth + 1)]Scope = undefined;
+        var scopes: [5 * (max_depth + 1)]Scope = undefined;
         var scope_depth: usize = 0;
         var at = start;
         while (at < stop) {
             while (scope_depth > 0 and all[scopes[scope_depth - 1].index].end <= at) {
                 scope_depth -= 1;
-                try closeScope(&all[scopes[scope_depth].index], scopes[scope_depth].clip, target, theme);
+                try closeScope(&all[scopes[scope_depth].index], scopes[scope_depth].kind, target, theme);
             }
             const node = &all[at];
             if (node.concealed) {
@@ -4592,9 +4598,14 @@ pub const View = struct {
             const bounds = node.bounds;
             const style = node.style;
             for (0..try self.openEffects(target, style, bounds)) |_| {
-                scopes[scope_depth] = .{ .index = @intCast(at), .clip = false };
+                scopes[scope_depth] = .{ .index = @intCast(at), .kind = .effect };
                 scope_depth += 1;
             }
+            if (@TypeOf(target) == *ui.Frame) if (style.cache) |kept| {
+                try target.beginCache(kept);
+                scopes[scope_depth] = .{ .index = @intCast(at), .kind = .cache };
+                scope_depth += 1;
+            };
             var control: ui.widgets.Options = .{ .enabled = style.enabled, .name = style.name, .semantic_parent = node.semantic_parent };
             const annotation = self.annotationOf(node);
             control.description = annotation.description;
@@ -4645,7 +4656,7 @@ pub const View = struct {
                     }
                     if (node.clips() and node.child_count > 0) {
                         try target.pushClip(bounds);
-                        scopes[scope_depth] = .{ .index = @intCast(at), .clip = true };
+                        scopes[scope_depth] = .{ .index = @intCast(at), .kind = .clip };
                         scope_depth += 1;
                     }
                 },
@@ -4759,12 +4770,16 @@ pub const View = struct {
         }
         while (scope_depth > 0) {
             scope_depth -= 1;
-            try closeScope(&all[scopes[scope_depth].index], scopes[scope_depth].clip, target, theme);
+            try closeScope(&all[scopes[scope_depth].index], scopes[scope_depth].kind, target, theme);
         }
     }
-    const Scope = struct { index: u32, clip: bool };
-    fn closeScope(node: *const Node, clip: bool, target: anytype, theme: Theme) !void {
-        if (!clip) return target.endEffect();
+    const Scope = struct { index: u32, kind: enum { clip, effect, cache } };
+    fn closeScope(node: *const Node, kind: @FieldType(Scope, "kind"), target: anytype, theme: Theme) !void {
+        switch (kind) {
+            .effect => return target.endEffect(),
+            .cache => return if (@TypeOf(target) == *ui.Frame) target.endCache(),
+            .clip => {},
+        }
         paintEdges(node, target);
         try target.popClip();
         paintScrollIndicator(node, target, theme);

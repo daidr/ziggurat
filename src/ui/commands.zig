@@ -629,6 +629,87 @@ pub const Buffer = struct {
         try self.append(.pop_clip);
         self.depth -= 1;
     }
+    /// Whether `appendTranslated` copies the command: plain drawings, clips,
+    /// indicators and groups without a filter. Transforms, effects,
+    /// backdrops, filters and textures stay where they were recorded.
+    pub fn translatable(command: Command) bool {
+        return switch (command) {
+            .fill, .shape, .gradient, .text, .prepared_text, .coverage, .image, .push_clip, .pop_clip, .indicator, .end_group => true,
+            .begin_group => |value| value.filter_slot == no_filter,
+            else => false,
+        };
+    }
+    /// Copies `source`'s commands `start..end`, moved by `delta`, with the
+    /// resources they read; each resource view is pinned again here.
+    /// `error.Untranslatable` for a command `translatable` refuses.
+    pub fn appendTranslated(self: *Buffer, source: *const Buffer, start: usize, end: usize, delta: drawing.Point) !void {
+        const moved = struct {
+            fn rect(r: Rect, d: drawing.Point) Rect {
+                return .{ .x = r.x + d.x, .y = r.y + d.y, .width = r.width, .height = r.height };
+            }
+            fn point(p: anytype, d: drawing.Point) @TypeOf(p) {
+                return .{ .x = p.x + d.x, .y = p.y + d.y };
+            }
+        };
+        for (source.commands()[start..end]) |command| switch (command) {
+            .fill => |value| try self.fill(moved.rect(value.bounds, delta), value.color),
+            .shape => |value| {
+                var shape = value;
+                shape.bounds = moved.rect(value.bounds, delta);
+                try self.append(.{ .shape = shape });
+            },
+            .gradient => |value| {
+                if (value.brush >= source.brush_len) return error.MissingResources;
+                var resource = source.brush_storage[value.brush];
+                resource.a = moved.point(resource.a, delta);
+                if (resource.kind == .linear) resource.b = moved.point(resource.b, delta);
+                var index: usize = 0;
+                while (index < self.brush_len) : (index += 1) if (brushes.Stored.eql(&resource, &self.brush_storage[index])) break;
+                if (index == self.brush_len) {
+                    if (index == self.brush_storage.len) return error.BrushesFull;
+                    self.brush_storage[index] = resource;
+                    self.brush_len += 1;
+                }
+                try self.append(.{ .gradient = .{ .bounds = moved.rect(value.bounds, delta), .radius = value.radius, .stroke_width = value.stroke_width, .brush = @intCast(index) } });
+            },
+            .text => |value| {
+                if (value.offset > source.text_len or value.len > source.text_len - value.offset) return error.InvalidTextRange;
+                if (value.len > self.text_storage.len - self.text_len) return error.TextStorageFull;
+                const offset: u16 = if (value.len == 0) 0 else @intCast(self.text_len);
+                try self.append(.{ .text = .{ .bounds = moved.rect(value.bounds, delta), .color = value.color, .offset = offset, .len = value.len, .font = value.font } });
+                @memcpy(self.text_storage[self.text_len..][0..value.len], source.text_storage[value.offset..][0..value.len]);
+                self.text_len += value.len;
+            },
+            .prepared_text => |value| {
+                if (value.resource >= source.prepared_text_len) return error.MissingResources;
+                try self.preparedText(moved.point(value.origin, delta), source.prepared_text_storage[value.resource], value.color);
+            },
+            .coverage => |value| {
+                if (value.resource >= source.coverage_len) return error.MissingResources;
+                try self.coverage(moved.point(value.origin, delta), source.coverage_storage[value.resource], value.color);
+            },
+            .image => |value| {
+                if (value.resource >= source.image_len) return error.MissingResources;
+                try self.image(moved.rect(value.destination, delta), source.image_storage[value.resource], value.options());
+            },
+            .push_clip => |rect| try self.pushClip(moved.rect(rect, delta)),
+            .pop_clip => try self.popClip(),
+            .indicator => |slot| {
+                if (slot >= source.indicator_len) return error.MissingResources;
+                var entry = source.indicator_storage[slot];
+                entry.bounds = moved.rect(entry.bounds, delta);
+                try self.loadingIndicator(entry);
+            },
+            .begin_group => |value| {
+                if (value.filter_slot != no_filter) return error.Untranslatable;
+                var options = try groupOptions(value, source.coverageResources());
+                options.mask_origin = moved.point(options.mask_origin, delta);
+                try self.beginGroup(moved.rect(value.bounds, delta), options);
+            },
+            .end_group => try self.endGroup(),
+            else => return error.Untranslatable,
+        };
+    }
 };
 
 fn gradientCoverageBounds(origin: drawing.Point, mask: drawing.Coverage) error{InvalidGeometry}!Rect {

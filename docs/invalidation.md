@@ -21,6 +21,8 @@ Linux（Cairo）和 macOS（Core Graphics）的软件工作面跨帧保留像素
 - 下列情况整帧重画：首帧、尺寸/DPI/透明模式变化、平面重建或分离；帧里有分组、变换、元素效果、背景效果或背景着色器（其像素依赖周围内容）；启用了图层；损坏面积超过一半；上一帧失败或走了GPU。
 - 帧完全相同则不重放任何命令，只呈现保留的平面。
 
+子树可以用 `Style.cache` 保持为一张图片（见[视图](view.md)「子树缓存」），不变时图片身份不变，不产生损坏区。
+
 `Context.damageStats()` 返回软件帧数、局部重画帧数和上一帧的损坏矩形。Windows 的 GDI 与 Direct3D 11 路径目前仍整帧重画。
 
 `zig build smoke-damage` 通过屏幕外实际窗口读取系统更新区域，覆盖分数DIP、裁剪、合并、无效/空请求和关闭代数；Linux另在GDK_SCALE=2运行。核心测试还验证实际worker先返回WrongThread、旧句柄不能使复用槽失效。Windows/Linux ReleaseSafe均通过，未使用截图。

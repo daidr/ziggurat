@@ -661,6 +661,10 @@ pub const Renderer = struct {
     pub fn planeKept(self: *const Renderer) bool {
         return self.layer_plan == null and self.hasSurface();
     }
+    /// The plane's pixels, for tests.
+    pub fn testSurface(self: *Renderer, out: *cpu_gradient.Surface) c_int {
+        return zlc_gradient_surface(self.native.?, out);
+    }
     /// Changes whenever the plane is created again.
     pub fn planeGeneration(self: *const Renderer) u64 {
         const native = self.native orelse return 0;
