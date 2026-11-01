@@ -42,7 +42,8 @@ const Command = enum(u64) {
     }
 };
 
-const ctrl: system.Modifiers = .{ .control = true };
+/// Command on macOS, Control elsewhere.
+const ctrl = system.Modifiers.primary;
 const context_request = 1;
 const tray_request = 2;
 const about_request = 3;
@@ -178,7 +179,7 @@ const Menus = struct {
 
     fn build(self: *Menus, v: *view.View) anyerror!void {
         try v.text("Menus, accelerators and tray", .{ .font = view.Font.heading3 });
-        try v.text("Use the menu bar or its shortcuts (Ctrl+N, Ctrl+B, Ctrl+1/2/0, F1, Ctrl+Q).", .{});
+        try v.text("Use the menu bar or its shortcuts (Ctrl+N, Ctrl+B, Ctrl+1/2/0, F1, Ctrl+Q; Command on macOS).", .{});
         try v.text("Right-click anywhere in this area for a context menu.", .{});
         try v.textf("Documents created: {d}", .{self.documents}, .{});
         try v.textf("Zoom: {d}%", .{self.zoom}, .{ .font = .{ .size = @floatFromInt(@divTrunc(16 * self.zoom, 100)) } });

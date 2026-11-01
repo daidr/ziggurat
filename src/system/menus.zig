@@ -2,6 +2,7 @@
 //! menus. Nothing here allocates or touches native state.
 const std = @import("std");
 const types = @import("types.zig");
+const Key = types.Key;
 
 pub const max_items = types.max_menu_items;
 
@@ -212,6 +213,78 @@ pub fn gtkMnemonic(destination: []u8, label: []const u8) ![:0]const u8 {
     }
     destination[used] = 0;
     return destination[0..used :0];
+}
+
+/// The label as AppKit shows it: macOS menus have no mnemonics, so `&`
+/// marks are dropped and `&&` becomes one ampersand.
+pub fn plainLabel(destination: []u8, label: []const u8) ![:0]const u8 {
+    var used: usize = 0;
+    var index: usize = 0;
+    while (index < label.len) : (index += 1) {
+        const byte = label[index];
+        if (byte == '&') {
+            if (index + 1 < label.len and label[index + 1] == '&') index += 1 else continue;
+        }
+        if (used + 1 >= destination.len) return error.TextCapacityExceeded;
+        destination[used] = byte;
+        used += 1;
+    }
+    if (used >= destination.len) return error.TextCapacityExceeded;
+    destination[used] = 0;
+    return destination[0..used :0];
+}
+
+/// The character of an NSMenuItem key equivalent for a key: the key's own
+/// character, or AppKit's function-key character (NSUpArrowFunctionKey and
+/// the others). `.plus` is "+"; macOS menus also take the "=" it shares the
+/// key with, through a hidden twin item.
+pub fn appleKeyEquivalent(key: Key) u21 {
+    const index = @backingInt(key);
+    if (index >= @backingInt(Key.a) and index <= @backingInt(Key.z)) return 'a' + @as(u21, index - @backingInt(Key.a));
+    if (index >= @backingInt(Key.digit0) and index <= @backingInt(Key.digit9)) return '0' + @as(u21, index - @backingInt(Key.digit0));
+    if (index >= @backingInt(Key.f1) and index <= @backingInt(Key.f24)) return 0xF704 + @as(u21, index - @backingInt(Key.f1));
+    return switch (key) {
+        .space => ' ',
+        .enter => '\r',
+        .escape => 0x1b,
+        .tab => '\t',
+        .backspace => 0x08,
+        .delete => 0xF728,
+        .insert => 0xF727,
+        .home => 0xF729,
+        .end => 0xF72B,
+        .page_up => 0xF72C,
+        .page_down => 0xF72D,
+        .up => 0xF700,
+        .down => 0xF701,
+        .left => 0xF702,
+        .right => 0xF703,
+        .plus => '+',
+        .minus => '-',
+        else => unreachable,
+    };
+}
+
+/// NSEventModifierFlags of an accelerator: `super` is Command and
+/// `control` the Control key, as key events report them.
+pub fn appleModifierMask(modifiers: types.Modifiers) u32 {
+    return @as(u32, if (modifiers.shift) 1 << 17 else 0) | @as(u32, if (modifiers.control) 1 << 18 else 0) | @as(u32, if (modifiers.alt) 1 << 19 else 0) | @as(u32, if (modifiers.super) 1 << 20 else 0);
+}
+
+test "macOS labels drop mnemonics and accelerators become key equivalents" {
+    var buffer: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("Save As…", try plainLabel(&buffer, "Save &As…"));
+    try std.testing.expectEqualStrings("R&D", try plainLabel(&buffer, "R&&D"));
+    try std.testing.expectEqualStrings("Trailing", try plainLabel(&buffer, "Trailing&"));
+    try std.testing.expectError(error.TextCapacityExceeded, plainLabel(buffer[0..4], "Long"));
+    try std.testing.expectEqual(@as(u21, 's'), appleKeyEquivalent(.s));
+    try std.testing.expectEqual(@as(u21, '7'), appleKeyEquivalent(.digit7));
+    try std.testing.expectEqual(@as(u21, 0xF704), appleKeyEquivalent(.f1));
+    try std.testing.expectEqual(@as(u21, 0xF71B), appleKeyEquivalent(.f24));
+    try std.testing.expectEqual(@as(u21, 0xF702), appleKeyEquivalent(.left));
+    try std.testing.expectEqual(@as(u21, '+'), appleKeyEquivalent(.plus));
+    try std.testing.expectEqual(@as(u32, 1 << 20 | 1 << 17), appleModifierMask(.{ .super = true, .shift = true }));
+    try std.testing.expectEqual(@as(u32, 1 << 18 | 1 << 19), appleModifierMask(.{ .control = true, .alt = true }));
 }
 
 /// An owned copy of a menu, for menus a platform opens later on its own,

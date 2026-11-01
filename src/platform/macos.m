@@ -23,6 +23,18 @@ typedef struct NativeBounds {int32_t x,y;uint32_t width,height;int positioned;} 
 typedef struct NativeApp {void *owner;void (*dispatch)(void *);atomic_int pending,stopped;} NativeApp;
 static NativeApp *current_app;
 
+/* The application delegate. It answers the Dock's question for the menu
+   the system module set (zlm_app_set_dock_menu). */
+@interface ZigAppDelegate : NSObject <NSApplicationDelegate>
+@end
+static NSMenu *dock_menu;
+static ZigAppDelegate *app_delegate;
+@implementation ZigAppDelegate
+- (NSMenu *)applicationDockMenu:(NSApplication *)sender{(void)sender;return dock_menu;}
+- (BOOL)applicationSupportsSecureRestorableState:(NSApplication *)app{(void)app;return YES;}
+@end
+void zlm_app_set_dock_menu(void *menu){NSMenu *value=(NSMenu *)menu;[value retain];[dock_menu release];dock_menu=value;}
+
 static void wake_main(void *unused){
     (void)unused;NativeApp *app=current_app;int expected=1;
     if(app&&atomic_compare_exchange_strong(&app->pending,&expected,0)&&app->owner)app->dispatch(app->owner);
@@ -38,6 +50,8 @@ NativeApp *zlm_app_create(void *owner,void (*dispatch)(void *),int *error){
            input is not a form, so they stay off unless the app says so. */
         [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"NSAutoFillHeuristicControllerEnabled":@NO}];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        if(!app_delegate)app_delegate=[[ZigAppDelegate alloc] init];
+        [NSApp setDelegate:app_delegate];
         [NSApp finishLaunching];
     }
     app->owner=owner;app->dispatch=dispatch;current_app=app;*error=0;return app;
@@ -49,7 +63,7 @@ static void post_wake_event(void){
 }
 void zlm_app_quit(NativeApp *app){atomic_store(&app->stopped,1);@autoreleasepool{[NSApp stop:nil];post_wake_event();}}
 void zlm_app_run(NativeApp *app){if(!atomic_load(&app->stopped))@autoreleasepool{[NSApp run];}}
-void zlm_app_destroy(NativeApp *app){app->owner=NULL;if(current_app==app)current_app=NULL;free(app);}
+void zlm_app_destroy(NativeApp *app){app->owner=NULL;if(current_app==app)current_app=NULL;zlm_app_set_dock_menu(NULL);free(app);}
 
 @class ZigView;
 @class ZigDelegate;
@@ -220,6 +234,26 @@ static void keyboard_key(NativeWindow *s,NSEvent *event){
     [self interpretKeyEvents:@[event]];
     release_window(s);
 }
+/* The Edit menu's actions (copy: and the others, which its roles send to
+   the first responder) do what their Command shortcuts do: the menu takes
+   the key before the window, so content that binds the key sees it first,
+   then the text edit. */
+static void menu_edit(NativeWindow *s,unichar key,unsigned short code,uint32_t extra,int edit){
+    if(!s)return;retain_window(s);
+    if(!input_allowed(s)){release_window(s);return;}
+    NativeEvent press={0};press.kind=18;press.key=key;press.width=code;press.flags=(int)(8u|extra);
+    if(!emit(s,&press)&&!s->destroyed)emit_edit(s,edit,2u|(extra&1u));
+    release_window(s);
+}
+- (void)selectAll:(id)sender{(void)sender;menu_edit(native,'a',0x00,0,8);}
+- (void)copy:(id)sender{(void)sender;menu_edit(native,'c',0x08,0,9);}
+- (void)cut:(id)sender{(void)sender;menu_edit(native,'x',0x07,0,10);}
+- (void)paste:(id)sender{(void)sender;menu_edit(native,'v',0x09,0,11);}
+- (void)pasteAsPlainText:(id)sender{(void)sender;menu_edit(native,'v',0x09,1u|4u,11);}
+- (void)undo:(id)sender{(void)sender;menu_edit(native,'z',0x06,0,12);}
+- (void)redo:(id)sender{(void)sender;menu_edit(native,'z',0x06,1u,12);}
+- (void)delete:(id)sender{(void)sender;NativeWindow *s=native;if(s&&input_allowed(s))emit_edit(s,7,0);}
+- (BOOL)validateMenuItem:(NSMenuItem *)item{(void)item;NativeWindow *s=native;return s&&!s->destroyed&&s->enabled;}
 - (void)keyUp:(NSEvent *)event{NativeWindow *s=native;if(s&&input_allowed(s))key_event(s,event,26);}
 - (void)flagsChanged:(NSEvent *)event{
     NativeWindow *s=native;if(!s||!input_allowed(s))return;
