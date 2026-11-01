@@ -15,6 +15,7 @@ pub const scroll = @import("scroll.zig");
 pub const text_buffer = @import("text_buffer.zig");
 pub const editor = @import("editor.zig");
 pub const commands = @import("commands.zig");
+pub const damage = @import("damage.zig");
 pub const Font = commands.Font;
 pub const drawing = @import("ziggurat_drawing_resources");
 pub const ImageOptions = drawing.ImageOptions;
@@ -147,6 +148,13 @@ pub const capabilities = .{
     },
 };
 pub const LayerCacheStats = struct { software: layers.Stats, gpu: ?layers.Stats, current_bytes: usize, ordinary_front_bytes: usize, candidate_peak_bytes: usize };
+pub const DamageStats = struct {
+    software_frames: usize,
+    /// Software frames that drew only the rectangles that changed.
+    partial_frames: usize,
+    /// What the last software frame drew again.
+    last: damage.Damage,
+};
 pub const TransformCacheStats = struct { layers: LayerCacheStats, metadata_bytes: usize, generation: u64, accepted_scopes: usize, accepted_captures: usize };
 /// Fixed coordinate banks and, when attached semantics are enabled, their
 /// native geometry owner. Excludes renderer surfaces and opaque SDK allocations.
@@ -528,6 +536,11 @@ pub const Context = struct {
     deferred_frames: usize = 0,
     gpu_frames: usize = 0,
     gdi_frames: usize = 0,
+    /// Software frames that drew only the rectangles that changed.
+    partial_frames: usize = 0,
+    /// What the last software frame drew again.
+    last_damage: damage.Damage = .whole,
+    damage_tracker: damage.Tracker = .{},
     fallbacks: usize = 0,
     command_buffer: commands.Buffer = .{},
     painting: bool = false,
@@ -919,6 +932,11 @@ pub const Context = struct {
     }
     pub fn frameStats(self: *const Context) frame_stats.Stats {
         return self.frame_stats_totals;
+    }
+    /// How the software frames drew: whole, or only the rectangles that
+    /// changed since the last one (see `damage`).
+    pub fn damageStats(self: *const Context) DamageStats {
+        return .{ .software_frames = self.gdi_frames, .partial_frames = self.partial_frames, .last = self.last_damage };
     }
     pub fn shaderEffectStats(self: *const Context) ShaderEffectStats {
         return .{ .workspace = if (self.shader_workspace) |workspace| workspace.stats else .{}, .unprepared = self.shader_unprepared };
@@ -2559,13 +2577,24 @@ pub const Context = struct {
         }
     }
     fn software(self: *Context, paint: z.Paint) !void {
+        errdefer self.damage_tracker.invalidate();
         try self.renderer.begin(paint);
         errdefer self.renderer.abort();
         try self.renderer.residentFrame(&self.command_buffer);
-        try self.renderer.replayBuffer(&self.command_buffer);
+        if (comptime @hasDecl(gdi.Renderer, "replayDamage")) {
+            // The plane keeps the last frame: draw again only what changed.
+            const region = if (self.renderer.planeKept()) self.damage_tracker.plan(&self.command_buffer, self.renderer.planeGeneration(), paint.size.width, paint.size.height, paint.size.scale, paint.transparent) else whole: {
+                self.damage_tracker.invalidate();
+                break :whole damage.Damage.whole;
+            };
+            try self.renderer.replayDamage(&self.command_buffer, &region, paint.transparent);
+            self.last_damage = region;
+        } else try self.renderer.replayBuffer(&self.command_buffer);
         const restore_gpu = if (build_options.gpu) self.gpu_renderer.suspendSurface() else false;
         errdefer if (build_options.gpu and restore_gpu) self.gpu_renderer.restoreSurface();
         try self.renderer.endChecked(paint);
+        self.damage_tracker.commit();
+        if (!self.last_damage.full) self.partial_frames += 1;
         self.gdi_frames += 1;
     }
     fn cancelGpuWait(self: *Context) void {
@@ -2833,6 +2862,7 @@ pub const Context = struct {
                 }
                 defer if (build_options.gpu and self.gpu_renderer.active) self.gpu_renderer.discard();
                 if (!self.live(window)) return;
+                if (comptime @hasField(gdi.Renderer, "keep_plane")) self.renderer.keep_plane = true;
                 if (!using_gpu) self.renderer.begin(paint) catch |err| {
                     window.report(.{ .domain = .renderer, .operation = .paint, .err = err });
                     return;
@@ -2984,6 +3014,8 @@ pub const Context = struct {
                         break :rendered false;
                     };
                     if (rendered) {
+                        // The software plane no longer shows the window.
+                        self.damage_tracker.invalidate();
                         self.commitFrame(window);
                         self.gpu_frames += 1;
                         self.frames += 1;
@@ -3076,6 +3108,7 @@ pub const Context = struct {
         if (build_options.accessibility and self.attached_semantics_enabled) self.accessibility_bridge.detach();
         self.attached_semantics_enabled = false;
         self.renderer.deinit();
+        self.damage_tracker.invalidate();
         if (build_options.gpu) self.gpu_renderer.deinit();
         self.window = null;
         self.last_paint_size = null;
@@ -4312,6 +4345,7 @@ test {
     _ = text_buffer;
     _ = editor;
     _ = commands;
+    _ = damage;
     _ = accessibility;
     _ = widgets;
     _ = theme;

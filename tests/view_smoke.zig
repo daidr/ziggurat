@@ -825,6 +825,42 @@ fn runZoom(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(usize, 1), state.clicks);
 }
 
+/// A label that counts frames over a still page: after the first frame the
+/// software plane draws again only the label's rectangle.
+const Counter = struct {
+    count: usize = 0,
+    label: [32]u8 = undefined,
+    fn build(self: *Counter, v: *view.View) anyerror!void {
+        try v.column(.{ .grow = 1, .gap = 8, .padding = .all(12) });
+        try v.text("A page that stays the same", .{});
+        _ = try v.button("Still", .{});
+        try v.text(try std.fmt.bufPrint(&self.label, "Frame {d}", .{self.count}), .{});
+        try v.end();
+    }
+};
+
+fn runDamage(allocator: std.mem.Allocator) !void {
+    if (builtin.os.tag == .windows) return;
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    var state: Counter = .{};
+    var storage: view.Storage(16, 128) = .{};
+    var host = view.Host.init(&state, Counter.build, storage.buffers(), .{});
+    host.context.render_mode = .gdi;
+    const window = try app.createWindow(.{ .width = width, .height = height });
+    try host.attach(window);
+    try paint(&host, window);
+    try paint(&host, window);
+    try std.testing.expect(host.context.damageStats().last.isNone());
+    state.count += 1;
+    try paint(&host, window);
+    const stats = host.context.damageStats();
+    try std.testing.expect(stats.partial_frames >= 2);
+    try std.testing.expect(!stats.last.full and stats.last.len >= 1);
+    const size = try window.contentSize();
+    try std.testing.expect(stats.last.pixels(size.width, size.height) * 4 < @as(u64, size.width) * size.height);
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
@@ -835,6 +871,7 @@ pub fn main() !void {
     try runImage(gpa.allocator());
     try runMenu(gpa.allocator());
     try runVideo(gpa.allocator());
+    try runDamage(gpa.allocator());
     try runZoom(gpa.allocator());
     if (view.inspector.enabled) try runInspector(gpa.allocator());
     if (builtin.os.tag == .windows) {
@@ -842,5 +879,5 @@ pub fn main() !void {
         try @import("view_uia.zig").runCollections(gpa.allocator());
     }
     if (builtin.os.tag == .linux) try std.testing.expectEqual(@as(u32, 0), zlg_resource_count());
-    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, embedded leaf input, routed pages with history buttons, deferred icon and SVG preparation, timed toast expiry, context menu with submenu, video frames committed after paint, a zoomed window laid out and pressed in its own DIPs, keyed identity and harness frames drawn to pixels and the inspector panel passed\n", .{});
+    std.debug.print("view native: build, flex layout, immediate activation, bound values, radio group, stepper, wheel scrolling, grid, tabs, split drag, toolbar, segments, link, disclosure, rating, meter, combo box, navigation button, tree, sortable table, token removal, embedded leaf input, routed pages with history buttons, deferred icon and SVG preparation, timed toast expiry, context menu with submenu, video frames committed after paint, a zoomed window laid out and pressed in its own DIPs, a changed label redrawn alone, keyed identity and harness frames drawn to pixels and the inspector panel passed\n", .{});
 }
