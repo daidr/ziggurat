@@ -114,9 +114,10 @@ _ = try v.slider(&self.level, .{ .minimum = 0, .maximum = 10, .step = 1 }, .{ .k
 | `setValue` | 滑块、步进器、评分取 `text` 表示的数值；文本字段全选后用 `text` 替换（空文本时删除）。 |
 | `insertText` | 在文本字段的光标处输入 `text`。 |
 | `expand`、`collapse` | 展开或收起树行、折叠区。 |
-| `selectText`、`scrollIntoView` | 协议接受，目前回答 `unsupported`。 |
+| `selectText` | 聚焦文本字段并选中 `from` 到 `to`（UTF-16 码元，与 JavaScript 字符串下标一致），光标落在 `to`；`from` 大于 `to` 时回答 `invalid_request`。 |
+| `scrollIntoView` | 滚动元素外面的每个滚动容器，让它进入视野；对被滚出视野或禁用的元素也有效，下一帧显示新的位置。 |
 
-操作经过与点击、按键、输入相同的事件到达视图的构建函数，之后窗口重绘。禁用的、被模态层挡住的或完全不可见的元素回答 `failed`；元素不支持的操作回答 `unsupported`；滑块等收到的不是数值时回答 `invalid_request`。
+操作经过与点击、按键、输入相同的事件到达视图的构建函数，之后窗口重绘。禁用的、被模态层挡住的或完全不可见的元素回答 `failed`（`scrollIntoView` 只对隐藏的元素这样回答）；元素不支持的操作回答 `unsupported`；滑块等收到的不是数值时回答 `invalid_request`。
 
 ### input
 

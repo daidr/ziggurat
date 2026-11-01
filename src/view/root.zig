@@ -1388,6 +1388,16 @@ pub const View = struct {
         return rect;
     }
 
+    /// True when `node` or an ancestor is hidden, such as an option of a
+    /// closed popup: it has no place to scroll into view.
+    fn hiddenAt(self: *const View, node: *const Node) bool {
+        const all = self.nodes();
+        if (node.hidden()) return true;
+        var parent = node.parent;
+        while (parent < all.len) : (parent = all[parent].parent) if (all[parent].hidden()) return true;
+        return false;
+    }
+
     fn identity(self: *View, parent: *const Node, kind: Kind, style: Style) u64 {
         _ = self;
         var hasher = std.hash.Wyhash.init(parent.id);
@@ -5246,6 +5256,13 @@ pub const Host = struct {
         /// Open or close a tree row or a disclosure.
         expand,
         collapse,
+        /// Select a range of a text box's text, in UTF-16 code units, as
+        /// JavaScript string indices count; the caret goes to `end`.
+        select_text: struct { start: usize, end: usize },
+        /// Scroll every scroll container around the element so it is in
+        /// view. It applies to elements scrolled out of sight and to
+        /// disabled ones; the next frame shows the new offsets.
+        scroll_into_view,
     };
     pub const PerformError = error{ NoElement, Disabled, Hidden, Inert, NotSupported, NotAttached, InvalidValue };
 
@@ -5257,6 +5274,16 @@ pub const Host = struct {
         const node = for (self.view.nodes()) |*candidate| {
             if (candidate.id == id) break candidate;
         } else return error.NoElement;
+        if (action == .scroll_into_view) {
+            if (self.view.hiddenAt(node)) return error.Hidden;
+            const window = self.context.window orelse return error.NotAttached;
+            if (try self.view.revealNode(id)) {
+                // The tree waits for the frame that places the new offsets.
+                self.arranged = false;
+                window.invalidate();
+            }
+            return;
+        }
         if (!node.style.enabled) return error.Disabled;
         if (self.view.visible(node) == null) return error.Hidden;
         if (self.view.inert(node)) return error.Inert;
@@ -5317,6 +5344,16 @@ pub const Host = struct {
                 },
                 else => return error.NotSupported,
             },
+            .select_text => |range| switch (node.kind) {
+                .embed => {
+                    if (range.start > range.end) return error.InvalidValue;
+                    try self.focusText(id);
+                    const request: ui.accessibility.Action = .{ .select_text = .{ .id = id, .start_utf16 = range.start, .end_utf16 = range.end } };
+                    if (!self.context.performTextFieldAction(request)) return error.NotSupported;
+                },
+                else => return error.NotSupported,
+            },
+            .scroll_into_view => unreachable,
         }
     }
     fn focusText(self: *Host, id: u64) !void {
