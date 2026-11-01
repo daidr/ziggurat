@@ -29,6 +29,8 @@ pub const Options = extern struct {
     context_menu: u32 = 0,
     context_offer: ?*const fn (*anyopaque, *const ContextTarget, [*]const ContextItem, u32, [*]u8, *anyopaque) callconv(.c) c_int = null,
     scroll_to_container: u32 = 0,
+    permission: ?*const fn (*anyopaque, [*:0]const u8, u32, u32, *anyopaque) callconv(.c) void = null,
+    media: u32 = 0,
 };
 pub const ContextItem = extern struct { name: [*:0]const u8, label: [*:0]const u8, kind: u32, flags: u32, action: u32 };
 pub const ContextTarget = extern struct { link: ?[*:0]const u8, link_text: ?[*:0]const u8, image: ?[*:0]const u8, media: ?[*:0]const u8, selection: ?[*:0]const u8, frame: ?[*:0]const u8, editable: u32 };
