@@ -201,9 +201,44 @@ pub const Options = struct {
     /// Windows as many as its "lines to scroll" setting asks (3 unless
     /// changed).
     scroll_lines: ?u16 = null,
+    /// Scales how far the wheel and the touchpad scroll, as Ghostty's
+    /// mouse-scroll-multiplier; `setScrollMultiplier` changes it.
+    scroll_multiplier: ScrollMultiplier = .{},
     /// Largest paste, in bytes.
     paste_bytes: usize = 64 * 1024,
 };
+
+/// Scales scrolling (`Options.scroll_multiplier`), as Ghostty's
+/// mouse-scroll-multiplier = precision:…,discrete:….
+pub const ScrollMultiplier = struct {
+    /// Scales a touchpad's scrolling, and other scrolling by distance,
+    /// which otherwise moves a row per cell height: 1 when zero.
+    precision: f32 = 0,
+    /// Rows a notch of a mouse wheel scrolls: 3 when zero. Where the
+    /// notch scrolls the platform's lines instead (`scroll_lines`, or the
+    /// "lines to scroll" setting of Windows), it scales those as 3 would be
+    /// theirs.
+    discrete: f32 = 0,
+
+    /// The rows a scroll of `delta` DIPs moves, with cells `cell` DIPs high
+    /// and a notch of the wheel `notch` rows.
+    pub fn rows(self: ScrollMultiplier, delta: f32, cell: f32, notch: f32, precise: bool) f32 {
+        if (precise) return delta * (if (self.precision > 0) self.precision else 1) / @max(cell, 1);
+        const notches = delta / wheel_notch;
+        return notches * notch * (if (self.discrete > 0) self.discrete / 3 else 1);
+    }
+};
+
+test "the scroll multiplier scales notches and distances" {
+    const default: ScrollMultiplier = .{};
+    try std.testing.expectEqual(@as(f32, -3), default.rows(-48, 16, 3, false));
+    try std.testing.expectEqual(@as(f32, -2), default.rows(-32, 16, 3, true));
+    const scaled: ScrollMultiplier = .{ .precision = 0.5, .discrete = 1 };
+    try std.testing.expectEqual(@as(f32, -1), scaled.rows(-48, 16, 3, false));
+    try std.testing.expectEqual(@as(f32, -1), scaled.rows(-32, 16, 3, true));
+    // Windows set to 6 lines a notch, with discrete 9: 18 rows.
+    try std.testing.expectEqual(@as(f32, 18), (ScrollMultiplier{ .discrete = 9 }).rows(48, 16, 6, false));
+}
 
 /// An item of the context menu, in order, with a separator before Clear.
 pub const MenuItem = enum { copy, paste, select_all, clear };
@@ -617,6 +652,13 @@ pub const TerminalView = struct {
             self.zoom_size = @max(1, self.fontSize() + @as(f32, @floatFromInt(value.steps)));
         }
         self.invalidate();
+    }
+
+    /// Change how far the wheel and the touchpad scroll, as
+    /// `Options.scroll_multiplier`.
+    pub fn setScrollMultiplier(self: *TerminalView, multiplier: ScrollMultiplier) void {
+        self.options.scroll_multiplier = multiplier;
+        self.wheel = 0;
     }
 
     /// Change the least contrast of text with its background.
@@ -1800,7 +1842,7 @@ pub const TerminalView = struct {
             }
             return true;
         }
-        self.wheel += delta / wheel_notch * self.notchRows();
+        self.wheel += self.options.scroll_multiplier.rows(delta, self.cellSize().height, self.notchRows(), precise);
         const lines: isize = @intFromFloat(@trunc(self.wheel));
         if (lines == 0) return true;
         self.wheel -= @floatFromInt(lines);
@@ -2553,11 +2595,13 @@ test "a touchpad's momentum does not turn its scroll into a zoom" {
     defer tv.deinit();
     tv.bind();
     for (0..20) |_| tv.feed("line\r\n");
-    try std.testing.expect(tv.handle(.{ .wheel = .{ .position = .{ .x = 5, .y = 5 }, .delta = .{ .x = 0, .y = -48 }, .precise = true } }));
+    // A touchpad scrolls a row per cell height.
+    const rows3 = -3 * tv.cellSize().height;
+    try std.testing.expect(tv.handle(.{ .wheel = .{ .position = .{ .x = 5, .y = 5 }, .delta = .{ .x = 0, .y = rows3 }, .precise = true } }));
     try std.testing.expectEqual(@as(usize, 3), terminal.screen.viewportOffset());
     // Control comes down while the momentum runs: it still scrolls.
     _ = tv.handle(.{ .key_input = .{ .key = .control, .modifiers = .{ .control = true } } });
-    try std.testing.expect(tv.handle(.{ .wheel = .{ .position = .{ .x = 5, .y = 5 }, .delta = .{ .x = 0, .y = -48 }, .precise = true, .momentum = true } }));
+    try std.testing.expect(tv.handle(.{ .wheel = .{ .position = .{ .x = 5, .y = 5 }, .delta = .{ .x = 0, .y = rows3 }, .precise = true, .momentum = true } }));
     try std.testing.expectEqual(@as(usize, 6), terminal.screen.viewportOffset());
     try std.testing.expectEqual(@as(f32, 12), tv.fontSize());
     // A new gesture with Control held zooms.
