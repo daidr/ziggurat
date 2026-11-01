@@ -1,7 +1,8 @@
 //! A page's saved session (View.sessionState, View.restoreSessionState):
 //! the platform that saved it, the page's URI, and the engine's own state,
 //! WebKitGTK's serialized back/forward list with its scroll positions and
-//! form fields. WebView2 has no such state, so Windows saves the URI alone.
+//! form fields. WebView2 has no such state, so Windows saves the URI alone,
+//! as macOS does.
 const std = @import("std");
 
 const magic = "ZGSS";
@@ -11,7 +12,7 @@ pub const max_uri_bytes = 16384;
 /// The engine's state at most; WebKitGTK's grows with the list.
 pub const max_native_bytes = 8 * 1024 * 1024;
 
-pub const Platform = enum(u8) { linux = 'L', windows = 'W', _ };
+pub const Platform = enum(u8) { linux = 'L', windows = 'W', macos = 'M', _ };
 
 pub const Parsed = struct {
     platform: Platform,

@@ -40,20 +40,15 @@ static NSString *const mime_html = @"text/html";
 static NSString *const mime_png = @"image/png";
 static NSString *const mime_uri_list = @"text/uri-list";
 
-/* The window's ZigView: the content view itself, or a view inside it when
-   the content view is a material container. */
-static NSView *find_zig_view(NSView *view) {
-    if (!view) return nil;
-    if ([view respondsToSelector:@selector(setZigDropTarget:)]) return view;
-    for (NSView *child in [view subviews]) {
-        NSView *found = find_zig_view(child);
-        if (found) return found;
-    }
-    return nil;
-}
+/* The window's drawing view: its content view holds it, above the
+   material behind it. */
 static NSView *content_view(void *handle) {
     NSWindow *window = (__bridge NSWindow *)handle;
-    return find_zig_view([window contentView]);
+    NSView *content = [window contentView];
+    if ([content respondsToSelector:@selector(setZigDropTarget:)]) return content;
+    for (NSView *child in [content subviews])
+        if ([child respondsToSelector:@selector(setZigDropTarget:)]) return child;
+    return nil;
 }
 /* The view's client point, top-left origin in points (ZigView is flipped). */
 static NSPoint view_point(NSView *view, id<NSDraggingInfo> info) {

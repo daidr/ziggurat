@@ -71,6 +71,13 @@ typedef int (*ZwkContextMenu)(void *,const ZwkContextTarget *,const ZwkContextIt
  * request for camera and microphone asks for camera and needs both.
  * zwk_permission_defer keeps it during the call; otherwise it is denied. */
 typedef void (*ZwkPermission)(void *,const char *,uint32_t,uint32_t,void *);
+/* A download the page or server starts from an origin the app granted, its
+ * known size within the limit: its URI, MIME type, suggested file name and
+ * size (-1 unknown). zwk_download_defer keeps it during the call; otherwise
+ * it is cancelled. A taken download reports with ZwkDownloadNotify: kind 0
+ * progress, 1 completed, 2 failed (code), 3 over the received limit. */
+typedef void (*ZwkDownloadOffer)(void *,const char *,const char *,const char *,int64_t,void *);
+typedef void (*ZwkDownloadNotify)(void *,uint64_t,uint32_t,uint64_t,int64_t,int32_t);
 typedef struct ZwkOptions {
     const char *html;
     const char *user_agent;
@@ -107,6 +114,14 @@ typedef struct ZwkOptions {
      * getUserMedia on: 1 microphone, 2 camera. */
     ZwkPermission permission;
     uint32_t media;
+    /* Downloads (macOS): canonical origins, at most 8; NULL offer cancels
+     * every download. */
+    const char *const *download_origins;
+    uint32_t download_origin_count;
+    uint32_t download_unknown;
+    uint64_t download_known_limit, download_received_limit;
+    ZwkDownloadOffer download_offer;
+    ZwkDownloadNotify download_notify;
 } ZwkOptions;
 enum ZwkResult { ZWK_OK=0, ZWK_CLOSED=1, ZWK_FULL=2, ZWK_OOM=3, ZWK_INVALID=4, ZWK_NATIVE_FAILED=5, ZWK_NOT_READY=6, ZWK_NAVIGATION_PENDING=7, ZWK_IPC_DENIED=8, ZWK_NO_HISTORY=9, ZWK_NAVIGATION_CANCELLED=10, ZWK_GEOMETRY_NOT_APPLIED=11, ZWK_INITIALIZER_BUDGET=12, ZWK_DEVTOOLS_DISABLED=13 };
 enum ZwkPolicyFailure { ZWK_POLICY_MISMATCH=1, ZWK_POLICY_TIMEOUT=2, ZWK_POLICY_PREPARATION=3 };
@@ -146,6 +161,15 @@ int zwk_auth_answer(void *request,const char *user,const char *password);
 int zwk_permission_defer(void *call,uint64_t token);
 int zwk_permission_decide(ZwkState *,uint64_t token,int allow);
 int zwk_permission_cancel(ZwkState *,uint64_t token);
+/* macOS downloads: keep the download a ZwkDownloadOffer call carries under
+ * token; accept saves it at an absolute path, activate starts its reports,
+ * cancel ends it without a report. received and total (-1 unknown) so far. */
+int zwk_download_defer(void *call,uint64_t token);
+int zwk_download_accept(ZwkState *,uint64_t token,const char *path);
+void zwk_download_activate(ZwkState *,uint64_t token);
+int zwk_download_cancel(ZwkState *,uint64_t token);
+int zwk_download_snapshot(ZwkState *,uint64_t token,uint64_t *received,int64_t *total);
+uint32_t zwk_download_count(void);
 /* device 0 camera, 1 microphone, 2 display; *state is WebKitMediaCaptureState
  * (0 none, 1 active, 2 muted), read or written. Page event 12 tells a
  * change: flags is device | state << 8. */

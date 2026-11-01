@@ -15,13 +15,14 @@ extern fn zwk_initializer_budget_retain(*anyopaque) callconv(.c) void;
 extern fn zwk_initializer_budget_unref(*anyopaque) callconv(.c) void;
 extern fn zwk_initializer_budget_reserve(*anyopaque, usize) callconv(.c) bool;
 extern fn zwk_initializer_budget_release(*anyopaque, usize) callconv(.c) void;
-const supported = builtin.os.tag == .windows or builtin.os.tag == .linux;
-const budget_create = if (builtin.os.tag == .linux) zwk_initializer_budget_create else zwv_initializer_budget_create;
-const budget_limit = if (builtin.os.tag == .linux) zwk_initializer_budget_limit else zwv_initializer_budget_limit;
-const budget_retain = if (builtin.os.tag == .linux) zwk_initializer_budget_retain else zwv_initializer_budget_retain;
-const budget_unref = if (builtin.os.tag == .linux) zwk_initializer_budget_unref else zwv_initializer_budget_unref;
-const budget_reserve = if (builtin.os.tag == .linux) zwk_initializer_budget_reserve else zwv_initializer_budget_reserve;
-const budget_release = if (builtin.os.tag == .linux) zwk_initializer_budget_release else zwv_initializer_budget_release;
+const webkit_backend = builtin.os.tag == .linux or builtin.os.tag == .macos;
+const supported = builtin.os.tag == .windows or webkit_backend;
+const budget_create = if (webkit_backend) zwk_initializer_budget_create else zwv_initializer_budget_create;
+const budget_limit = if (webkit_backend) zwk_initializer_budget_limit else zwv_initializer_budget_limit;
+const budget_retain = if (webkit_backend) zwk_initializer_budget_retain else zwv_initializer_budget_retain;
+const budget_unref = if (webkit_backend) zwk_initializer_budget_unref else zwv_initializer_budget_unref;
+const budget_reserve = if (webkit_backend) zwk_initializer_budget_reserve else zwv_initializer_budget_reserve;
+const budget_release = if (webkit_backend) zwk_initializer_budget_release else zwv_initializer_budget_release;
 
 pub const NativeInput = extern struct {
     budget: *anyopaque,
@@ -47,7 +48,7 @@ fn pinDomain(limits: source.Limits, shared: ?*anyopaque) !*anyopaque {
     }
     var status: i32 = 0;
     return budget_create(limits.bytes, &status) orelse {
-        if (if (builtin.os.tag == .linux) status == 12 else @as(u32, @bitCast(status)) == 0x80070718) return error.InitializerBudgetExceeded;
+        if (if (webkit_backend) status == 12 else @as(u32, @bitCast(status)) == 0x80070718) return error.InitializerBudgetExceeded;
         return error.OutOfMemory;
     };
 }

@@ -170,12 +170,13 @@ pub fn create(window: *core.WindowRecord, options: core.WindowOptions) !void {
     window.native.icons.apply(window.native.hwnd);
     if (options.decoration != .system and options.popup == null) plainCaption(window.native.hwnd);
     if (options.vibrancy != .none) setVibrancy(window, options.vibrancy);
-    if (options.popup) |role| if (role.shadow) {
-        // Windows 11 rounds, outlines and shades it as it does its menus;
-        // earlier versions ignore the attribute and keep the class shadow.
+    // Windows 11 rounds, outlines and shades a popup with a shadow as it
+    // does its menus, and gives a rounded frameless window its own corners
+    // whatever the radius; earlier versions ignore the attribute.
+    if (if (options.popup) |role| role.shadow else options.decoration != .system and options.corner_radius > 0) {
         const round: u32 = dwm_corner_round;
         _ = DwmSetWindowAttribute(window.native.hwnd, dwm_window_corner_preference, &round, @sizeOf(u32));
-    };
+    }
     if (options.text_input_mode != .system) {
         errdefer _ = c.DestroyWindow(window.native.hwnd);
         _ = try setTextInputMode(window, options.text_input_mode);
@@ -760,7 +761,7 @@ fn backdropFor(material: core.Vibrancy) u32 {
     return switch (material) {
         .none => 1,
         .tabbed => 4,
-        .acrylic, .menu, .popover, .hud, .sheet, .tooltip, .selection, .fullscreen_ui => 3,
+        .acrylic, .menu, .popover, .hud, .sheet, .tooltip, .selection, .fullscreen_ui, .glass, .glass_clear => 3,
         else => 2,
     };
 }

@@ -91,7 +91,8 @@ pub fn capabilities() Capabilities {
         },
         // WKWebView: trusted HTML, custom-scheme local sites and remote
         // pages (grants by origin, no Bearer credential) in ephemeral or
-        // explicit persistent storage.
+        // explicit persistent storage, with document initializers, in regions
+        // of a window or as page sessions, and downloads without pause.
         .macos => .{
             .trusted_html = true,
             .persistent_profile = true,
@@ -99,13 +100,18 @@ pub fn capabilities() Capabilities {
             .page_lifecycle = true,
             .top_level_ipc = true,
             .evaluate_javascript = true,
+            .document_initializers = true,
             .zoom = true,
             .user_agent = true,
             .custom_local_site = true,
             .remote_pages = true,
+            .file_responses = true,
             .find_text = true,
             .capture_preview = true,
             .clear_browsing_data = true,
+            .downloads = true,
+            .regions = true,
+            .page_sessions = true,
         },
         else => .{},
     };

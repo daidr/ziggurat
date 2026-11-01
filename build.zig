@@ -120,6 +120,10 @@ pub fn build(b: *std.Build) void {
         _ = native_support.add(b, file_stream, "file-stream-file-native", "src/file_stream/windows_file.c", &.{"-std=c11"}, target, optimize);
         file_stream.linkSystemLibrary("kernel32", .{});
     }
+    if (target.result.os.tag == .macos) {
+        file_stream.link_libc = true;
+        _ = native_support.add(b, file_stream, "file-stream-native", "src/file_stream/macos.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+    }
     if (target.result.os.tag == .linux) {
         file_stream.link_libc = true;
         const native = native_support.add(b, file_stream, "file-stream-native", "src/file_stream/linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
@@ -739,7 +743,8 @@ pub fn build(b: *std.Build) void {
     }
     if (target.result.os.tag == .macos) {
         _ = native_support.add(b, core, "core-native", "src/platform/macos.m", &.{ "-fno-objc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
-        native_support.linkFrameworks(b, core, &.{ "AppKit", "Foundation", "CoreFoundation", "CoreGraphics" });
+        _ = native_support.add(b, core, "core-native-window", "src/platform/macos_window.m", &.{ "-fno-objc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native_support.linkFrameworks(b, core, &.{ "AppKit", "Foundation", "CoreFoundation", "CoreGraphics", "QuartzCore" });
         core.linkSystemLibrary("objc", .{ .use_pkg_config = .no });
     }
     if (target.result.os.tag == .linux) {
@@ -1547,6 +1552,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
         });
+        addSmoke(b, "smoke-macos-chrome", "tests/macos_chrome_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
         addSmoke(b, "smoke-accessibility-macos", "tests/macos_accessibility_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
@@ -1786,7 +1795,7 @@ pub fn build(b: *std.Build) void {
         automation.addImport("ziggurat_webview", view);
         view.addImport("ziggurat_tls_pem", tls_pem);
         _ = native_support.add(b, view, "webview-webkit-macos", "src/webview/webkit_macos.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
-        native_support.linkFrameworks(b, view, &.{ "WebKit", "AppKit", "Foundation", "CoreFoundation" });
+        native_support.linkFrameworks(b, view, &.{ "WebKit", "AppKit", "Foundation", "CoreFoundation", "Security" });
         view_tests = addTest(b, .{ .root_module = view });
         _ = b.step("webview-runtime", "Use the system WKWebView");
         addSmoke(b, "smoke-webview-macos", "tests/macos_webview_smoke.zig", target, optimize, &.{
@@ -1820,6 +1829,31 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_webview", .module = view },
         });
         addSmoke(b, "smoke-webview-cookies-macos", "tests/macos_cookie_store_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-initializers-macos", "tests/macos_document_initializers_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        _ = addHttpAuthSmoke(b, target, optimize, core, view);
+        addSmoke(b, "smoke-webview-files-macos", "tests/macos_file_response_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-permissions-macos", "tests/macos_permission_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-regions-macos", "tests/macos_regions_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-downloads-macos", "tests/macos_download_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-session-state", "tests/session_state_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
         });

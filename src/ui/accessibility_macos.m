@@ -539,10 +539,19 @@ static int publish(ZuaHost *host, const NativeNode *nodes, uint32_t count, const
     return 0;
 }
 
+/* The window's drawing view: its content view holds it, above the
+   material behind it. */
+static NSView *zua_content_view(NSWindow *window) {
+    NSView *content = window.contentView;
+    if ([content respondsToSelector:@selector(setZigAccessibility:)]) return content;
+    for (NSView *child in content.subviews)
+        if ([child respondsToSelector:@selector(setZigAccessibility:)]) return child;
+    return nil;
+}
 void *zua_create(void *handle, ZuaEnqueue enqueue, void *context) {
     NSWindow *window = (__bridge NSWindow *)handle;
-    NSView *view = window.contentView;
-    if (!view || ![view respondsToSelector:@selector(setZigAccessibility:)]) return NULL;
+    NSView *view = zua_content_view(window);
+    if (!view) return NULL;
     ZuaHost *host = [[ZuaHost alloc] init];
     host->window = window; host->view = view; host->enqueue = enqueue; host->context = context;
     [view setZigAccessibility:host];
@@ -622,7 +631,7 @@ void zua_resource_counts(uint32_t *states, uint32_t *providers, uint32_t *ranges
    ask for it. */
 void *zua_test_element(void *handle, const char *name) {
     NSWindow *window = (__bridge NSWindow *)handle;
-    NSMutableArray *queue = [NSMutableArray arrayWithArray:[window.contentView accessibilityChildren] ?: @[]];
+    NSMutableArray *queue = [NSMutableArray arrayWithArray:[zua_content_view(window) accessibilityChildren] ?: @[]];
     NSString *wanted = [NSString stringWithUTF8String:name];
     while (queue.count) {
         id element = queue[0];
@@ -654,7 +663,7 @@ int zua_test_frame_in_window(void *pointer, void *handle) {
     NSAccessibilityElement *element = (__bridge NSAccessibilityElement *)pointer;
     NSWindow *window = (__bridge NSWindow *)handle;
     NSRect frame = [element accessibilityFrame];
-    return frame.size.width > 0 && frame.size.height > 0 && NSContainsRect([window convertRectToScreen:[window.contentView convertRect:window.contentView.bounds toView:nil]], frame);
+    return frame.size.width > 0 && frame.size.height > 0 && NSContainsRect([window convertRectToScreen:[zua_content_view(window) convertRect:zua_content_view(window).bounds toView:nil]], frame);
 }
 /* Acts on an element as VoiceOver does: 1 press, 2 increment, 3 set a
    string value, 4 set a number value (as VoiceOver may for a text field),
@@ -675,5 +684,5 @@ void zua_test_act(void *pointer, int kind, double number, const char *text) {
 /* The window's content view's children as assistive technology sees them. */
 int zua_test_child_count(void *handle) {
     NSWindow *window = (__bridge NSWindow *)handle;
-    return (int)[[window.contentView accessibilityChildren] count];
+    return (int)[[zua_content_view(window) accessibilityChildren] count];
 }
