@@ -3,8 +3,8 @@
  * in ephemeral or persistent profile storage. A local site serves the page's HTML and resources
  * through a WKURLSchemeHandler. A remote page's grants hold by origin: the
  * navigation policy checks each navigation, and a content rule list of its
- * own blocks every load but those of granted origins. Sessions, regions and
- * cookie stores are refused here and before they reach this file.
+ * own blocks every load but those of granted origins. Sessions and regions
+ * are refused here and before they reach this file.
  *
  * Every function runs on the main thread. A page object is reference counted
  * by Core Foundation: zwk_create and zwk_recovery_anchor return one reference
@@ -15,6 +15,7 @@
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <errno.h>
+#include <math.h>
 #include <fcntl.h>
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -26,6 +27,7 @@
 #include <unistd.h>
 #include "webkit_native.h"
 #include "webkit_content_rules.h"
+#include "webkit_cookies.h"
 
 void *zlm_window_content(void *window);
 
@@ -1504,6 +1506,344 @@ void zwk_profile_counts(uint32_t *profiles,uint32_t *contexts,size_t *bytes) {
     if (profiles) *profiles=atomic_load(&live_profiles);
     if (contexts) *contexts=atomic_load(&live_profile_contexts);
     if (bytes) *bytes=atomic_load(&live_profile_bytes);
+}
+
+/* A profile's cookie store, through the WKHTTPCookieStore of its data store.
+ * The engine finds no cookies by URL, so a query lists them all and keeps
+ * those a request to the URL would send. Cancellation is logical: the engine
+ * still finishes the call, and the owner hears it was cancelled. A
+ * replacement clears the profile's cookies, then sets each in turn. */
+#define COOKIE_PENDING 8u
+#define COOKIE_ROWS 128u
+#define COOKIE_BYTES (4u*1024u*1024u)
+#define COOKIE_INPUT (32u*1024u)
+typedef struct CookieOp CookieOp;
+struct ZwkCookies {
+    ZwkProfile *profile;
+    void *store; /* A retained WKWebsiteDataStore. */
+    void *owner;
+    ZwkCookiesComplete complete;
+    CookieOp *ops[COOKIE_PENDING];
+    size_t bytes,peak_bytes,limit;
+    uint32_t capacity,rows,pending;
+    unsigned refs;
+    int sealed,closed;
+};
+struct CookieOp {
+    ZwkCookies *store;
+    void *input; /* A retained NSHTTPCookie, or an NSArray of them. */
+    uint64_t token;
+    uint32_t kind,filter_flags,index;
+    int cancelled;
+    size_t bytes;
+    char *url,*name,*value,*domain,*path;
+};
+static atomic_uint live_cookie_stores,live_cookie_ops;
+static atomic_size_t live_cookie_bytes;
+static int cookies_owner(ZwkCookies *s) {
+    if (!s) return ZWK_COOKIES_INVALID;
+    return [NSThread isMainThread]?ZWK_COOKIES_OK:ZWK_COOKIES_WRONG_THREAD;
+}
+static void cookies_unref(ZwkCookies *s) {
+    if (--s->refs) return;
+    /* Only native storage remains: no Zig, App or caller state. */
+    void *store=s->store; s->store=NULL;
+    if (store) CFRelease(store);
+    zwk_profile_lease_release(s->profile);
+    atomic_fetch_sub(&live_cookie_stores,1);
+    atomic_fetch_sub(&live_cookie_bytes,sizeof(*s));
+    free(s);
+}
+size_t zwk_cookies_owner_size(void) { return sizeof(ZwkCookies); }
+int zwk_cookies_create(ZwkProfile *p,const ZwkCookiesOptions *options,ZwkCookies **out) {
+    if (!out) return ZWK_COOKIES_INVALID;
+    *out=NULL;
+    if (!options || !options->pending || options->pending>COOKIE_PENDING || !options->rows || options->rows>COOKIE_ROWS || options->bytes<sizeof(ZwkCookies) || options->bytes>COOKIE_BYTES) return ZWK_COOKIES_INVALID;
+    int status=zwk_profile_lease_retain(p);
+    if (status) return status;
+    void *store=NULL;
+    status=zwk_profile_manager_ref(p,&store);
+    if (status) { zwk_profile_lease_release(p); return status; }
+    ZwkCookies *s=malloc(sizeof(*s));
+    if (!s) { CFRelease(store); zwk_profile_lease_release(p); return ZWK_COOKIES_OOM; }
+    memset(s,0,sizeof(*s));
+    s->refs=1; s->profile=p; s->store=store;
+    s->bytes=s->peak_bytes=sizeof(*s); s->limit=options->bytes;
+    s->capacity=options->pending; s->rows=options->rows;
+    atomic_fetch_add(&live_cookie_stores,1);
+    atomic_fetch_add(&live_cookie_bytes,sizeof(*s));
+    *out=s;
+    return ZWK_COOKIES_OK;
+}
+int zwk_cookies_check(ZwkCookies *s) {
+    const int status=cookies_owner(s); if (status) return status;
+    if (s->sealed || s->closed) return ZWK_COOKIES_CLOSED;
+    return zwk_profile_lease_check(s->profile);
+}
+int zwk_cookies_bind(ZwkCookies *s,void *context,ZwkCookiesComplete complete) {
+    const int status=zwk_cookies_check(s); if (status) return status;
+    if (s->owner || !context || !complete) return ZWK_COOKIES_INVALID;
+    s->owner=context; s->complete=complete;
+    return ZWK_COOKIES_OK;
+}
+static void cookie_op_free(CookieOp *op) {
+    ZwkCookies *s=op->store;
+    s->ops[op->index]=NULL; --s->pending; s->bytes-=op->bytes;
+    if (op->input) CFRelease(op->input);
+    atomic_fetch_sub(&live_cookie_ops,1);
+    atomic_fetch_sub(&live_cookie_bytes,op->bytes);
+    free(op);
+    cookies_unref(s);
+}
+static ZwkCookieSlice cookie_slice(const char *text) {
+    return (ZwkCookieSlice){(const unsigned char *)(text?text:""),text?strlen(text):0};
+}
+/* RFC 6265 domain and path matching, and Secure only over https. */
+static int cookie_for_url(NSHTTPCookie *cookie,NSURL *url) {
+    NSString *host=url.host.lowercaseString,*domain=cookie.domain.lowercaseString;
+    if (!host.length || !domain.length) return 0;
+    if ([domain hasPrefix:@"."]) {
+        NSString *bare=[domain substringFromIndex:1];
+        if (![host isEqualToString:bare] && ![host hasSuffix:domain]) return 0;
+    } else if (![host isEqualToString:domain]) return 0;
+    NSString *path=url.path.length?url.path:@"/",*prefix=cookie.path.length?cookie.path:@"/";
+    if (![path isEqualToString:prefix]) {
+        if (![path hasPrefix:prefix]) return 0;
+        if (![prefix hasSuffix:@"/"] && [path characterAtIndex:prefix.length]!='/') return 0;
+    }
+    if (cookie.isSecure && [url.scheme caseInsensitiveCompare:@"https"]!=NSOrderedSame) return 0;
+    return 1;
+}
+static int cookie_selected(CookieOp *op,NSHTTPCookie *cookie) {
+    if ((op->filter_flags&1) && strcmp(op->name,cookie.name.UTF8String?:"")) return 0;
+    if ((op->filter_flags&2) && strcmp(op->domain,cookie.domain.UTF8String?:"")) return 0;
+    if ((op->filter_flags&4) && strcmp(op->path,cookie.path.UTF8String?:"")) return 0;
+    if (op->kind==ZWK_COOKIE_QUERY) {
+        NSURL *url=[NSURL URLWithString:[NSString stringWithUTF8String:op->url]];
+        if (!url || !cookie_for_url(cookie,url)) return 0;
+    }
+    return 1;
+}
+static void cookie_op_finish(CookieOp *op,int status,NSArray<NSHTTPCookie *> *all) {
+    ZwkCookies *s=op->store;
+    if (op->cancelled) status=ZWK_COOKIES_CANCELLED;
+    @autoreleasepool {
+        ZwkCookieRow rows[COOKIE_ROWS]; size_t count=0;
+        if (status==ZWK_COOKIES_OK && (op->kind==ZWK_COOKIE_QUERY || op->kind==ZWK_COOKIE_LIST_ALL)) for (NSHTTPCookie *cookie in all) {
+            if (!cookie_selected(op,cookie)) continue;
+            if (count==s->rows) { status=ZWK_COOKIES_CAPACITY; count=0; break; }
+            uint32_t same_site=0;
+            if (@available(macOS 10.15,*)) {
+                NSHTTPCookieStringPolicy policy=cookie.sameSitePolicy;
+                same_site=[policy isEqualToString:NSHTTPCookieSameSiteLax]?1:[policy isEqualToString:NSHTTPCookieSameSiteStrict]?2:0;
+            }
+            const int lasting=!cookie.isSessionOnly && cookie.expiresDate;
+            rows[count++]=(ZwkCookieRow){cookie_slice(cookie.name.UTF8String),cookie_slice(cookie.value.UTF8String),cookie_slice(cookie.domain.UTF8String),cookie_slice(cookie.path.UTF8String),
+                lasting?(int64_t)floor(cookie.expiresDate.timeIntervalSince1970):0,
+                (cookie.isSecure?ZWK_COOKIE_SECURE:0)|(cookie.isHTTPOnly?ZWK_COOKIE_HTTP_ONLY:0)|(lasting?ZWK_COOKIE_EXPIRES:0),same_site};
+        }
+        if (s->owner) s->complete(s->owner,op->token,status,0,0,rows,count);
+    }
+    cookie_op_free(op);
+}
+static int utf8_valid(const unsigned char *p,size_t n) {
+    for (size_t i=0;i<n;) {
+        const unsigned char c=p[i];
+        size_t extra; uint32_t value;
+        if (c<0x80) { ++i; continue; }
+        else if ((c&0xe0)==0xc0) { extra=1; value=c&0x1f; }
+        else if ((c&0xf0)==0xe0) { extra=2; value=c&0x0f; }
+        else if ((c&0xf8)==0xf0) { extra=3; value=c&0x07; }
+        else return 0;
+        if (i+extra>=n) return 0;
+        for (size_t k=1;k<=extra;++k) { if ((p[i+k]&0xc0)!=0x80) return 0; value=value<<6|(p[i+k]&0x3f); }
+        if ((extra==1 && value<0x80) || (extra==2 && value<0x800) || (extra==3 && (value<0x10000 || value>0x10ffff)) || (value>=0xd800 && value<=0xdfff)) return 0;
+        i+=extra+1;
+    }
+    return 1;
+}
+static int cookie_valid_slice(ZwkCookieSlice value) {
+    return value.len<=COOKIE_INPUT && (!value.len || (value.ptr && !memchr(value.ptr,0,value.len) && utf8_valid(value.ptr,value.len)));
+}
+static char *cookie_copy(char **at,ZwkCookieSlice input) {
+    char *out=*at;
+    if (input.len) memcpy(out,input.ptr,input.len);
+    out[input.len]=0; *at+=input.len+1;
+    return out;
+}
+/* Foundation parses the attributes from a header with a stand-in name and
+ * value, which it would split at a comma; the real ones replace them. */
+static NSHTTPCookie *cookie_make(const char *name,const char *value,const char *domain,const char *path,int64_t expires,uint32_t flags,uint32_t same_site) {
+    if (flags>7 || same_site>2) return nil;
+    NSString *n=[NSString stringWithUTF8String:name],*v=[NSString stringWithUTF8String:value],*d=[NSString stringWithUTF8String:domain],*p=[NSString stringWithUTF8String:path];
+    if (!n || !v || !d.length || !p.length) return nil;
+    NSString *host=[d hasPrefix:@"."]?[d substringFromIndex:1]:d;
+    if (!host.length) return nil;
+    if ([host containsString:@":"]) host=[NSString stringWithFormat:@"[%@]",host];
+    NSURL *url=[NSURL URLWithString:[NSString stringWithFormat:@"%@://%@/",(flags&ZWK_COOKIE_SECURE)?@"https":@"http",host]];
+    if (!url) return nil;
+    static NSString *const policies[]={@"None",@"Lax",@"Strict"};
+    NSMutableString *header=[NSMutableString stringWithFormat:@"n=v; Path=%@; SameSite=%@",p,policies[same_site]];
+    if ([d hasPrefix:@"."]) [header appendFormat:@"; Domain=%@",d];
+    if (flags&ZWK_COOKIE_EXPIRES) {
+        NSDateFormatter *format=[[NSDateFormatter alloc] init];
+        format.locale=[NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+        format.timeZone=[NSTimeZone timeZoneForSecondsFromGMT:0];
+        format.dateFormat=@"EEE, dd MMM yyyy HH:mm:ss 'GMT'";
+        [header appendFormat:@"; Expires=%@",[format stringFromDate:[NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)expires]]];
+    }
+    if (flags&ZWK_COOKIE_SECURE) [header appendString:@"; Secure"];
+    if (flags&ZWK_COOKIE_HTTP_ONLY) [header appendString:@"; HttpOnly"];
+    NSArray<NSHTTPCookie *> *parsed=[NSHTTPCookie cookiesWithResponseHeaderFields:@{@"Set-Cookie":header} forURL:url];
+    if (parsed.count!=1) return nil;
+    NSMutableDictionary<NSHTTPCookiePropertyKey,id> *properties=[parsed[0].properties mutableCopy];
+    properties[NSHTTPCookieName]=n; properties[NSHTTPCookieValue]=v;
+    return [NSHTTPCookie cookieWithProperties:properties];
+}
+static void cookie_replace_next(CookieOp *op,WKHTTPCookieStore *cookies,NSUInteger at) {
+    NSArray<NSHTTPCookie *> *input=(__bridge NSArray<NSHTTPCookie *> *)op->input;
+    if (at==input.count) { cookie_op_finish(op,ZWK_COOKIES_OK,nil); return; }
+    [cookies setCookie:input[at] completionHandler:^{ cookie_replace_next(op,cookies,at+1); }];
+}
+/* Publishes the operation before the engine call; nothing may fail after. */
+static int cookie_start(CookieOp *op) {
+    ZwkCookies *s=op->store;
+    const int status=zwk_cookies_check(s);
+    if (status) { if (op->input) CFRelease(op->input); free(op); return status; }
+    s->ops[op->index]=op; ++s->pending; s->bytes+=op->bytes; ++s->refs;
+    if (s->bytes>s->peak_bytes) s->peak_bytes=s->bytes;
+    atomic_fetch_add(&live_cookie_ops,1);
+    atomic_fetch_add(&live_cookie_bytes,op->bytes);
+    WKWebsiteDataStore *store=(__bridge WKWebsiteDataStore *)s->store;
+    WKHTTPCookieStore *cookies=store.httpCookieStore;
+    switch (op->kind) {
+    case ZWK_COOKIE_QUERY: case ZWK_COOKIE_LIST_ALL:
+        [cookies getAllCookies:^(NSArray<NSHTTPCookie *> *all) { cookie_op_finish(op,ZWK_COOKIES_OK,all); }];
+        break;
+    case ZWK_COOKIE_SET:
+        [cookies setCookie:(__bridge NSHTTPCookie *)op->input completionHandler:^{ cookie_op_finish(op,ZWK_COOKIES_OK,nil); }];
+        break;
+    case ZWK_COOKIE_DELETE: case ZWK_COOKIE_DELETE_KEY:
+        [cookies deleteCookie:(__bridge NSHTTPCookie *)op->input completionHandler:^{ cookie_op_finish(op,ZWK_COOKIES_OK,nil); }];
+        break;
+    case ZWK_COOKIE_REPLACE_ALL:
+        [store removeDataOfTypes:[NSSet setWithObject:WKWebsiteDataTypeCookies] modifiedSince:[NSDate distantPast] completionHandler:^{ cookie_replace_next(op,cookies,0); }];
+        break;
+    default:
+        [store removeDataOfTypes:[NSSet setWithObject:WKWebsiteDataTypeCookies] modifiedSince:[NSDate distantPast] completionHandler:^{ cookie_op_finish(op,ZWK_COOKIES_OK,nil); }];
+        break;
+    }
+    return ZWK_COOKIES_OK;
+}
+static int cookie_slot(ZwkCookies *s,uint64_t token,size_t *index) {
+    size_t at=0; while (at<s->capacity && s->ops[at]) ++at;
+    if (at==s->capacity) return ZWK_COOKIES_FULL;
+    for (size_t i=0;i<s->capacity;++i) if (s->ops[i] && s->ops[i]->token==token) return ZWK_COOKIES_INVALID;
+    *index=at;
+    return ZWK_COOKIES_OK;
+}
+int zwk_cookies_submit(ZwkCookies *s,uint64_t token,const ZwkCookieRequest *request) {
+    int status=zwk_cookies_check(s); if (status) return status;
+    if (!s->owner || !token || !request || request->kind>ZWK_COOKIE_DELETE_KEY || request->kind==ZWK_COOKIE_REPLACE_ALL || request->filter_flags>7 || request->same_site>2 || request->flags>7) return ZWK_COOKIES_INVALID;
+    if (request->kind==ZWK_COOKIE_LIST_ALL && (request->filter_flags || request->url.len || request->name.len || request->value.len || request->domain.len || request->path.len || request->flags)) return ZWK_COOKIES_INVALID;
+    if (request->kind==ZWK_COOKIE_DELETE_KEY && (request->filter_flags || request->url.len || request->value.len || request->flags || request->same_site || request->expires)) return ZWK_COOKIES_INVALID;
+    if ((request->kind==ZWK_COOKIE_QUERY && !request->url.len) ||
+        ((request->kind==ZWK_COOKIE_SET || request->kind==ZWK_COOKIE_DELETE || request->kind==ZWK_COOKIE_DELETE_KEY) &&
+         (!request->name.len || !request->domain.len || !request->path.len))) return ZWK_COOKIES_INVALID;
+    size_t index=0;
+    if ((status=cookie_slot(s,token,&index))) return status;
+    const ZwkCookieSlice inputs[]={request->url,request->name,request->value,request->domain,request->path};
+    size_t bytes=sizeof(CookieOp);
+    for (size_t i=0;i<5;++i) { if (!cookie_valid_slice(inputs[i])) return ZWK_COOKIES_INVALID; bytes+=inputs[i].len+1; }
+    if (bytes-sizeof(CookieOp)>COOKIE_INPUT || bytes>s->limit-s->bytes) return ZWK_COOKIES_CAPACITY;
+    CookieOp *op=malloc(bytes); if (!op) return ZWK_COOKIES_OOM;
+    memset(op,0,sizeof(*op));
+    op->store=s; op->token=token; op->kind=request->kind; op->filter_flags=request->filter_flags; op->index=(uint32_t)index; op->bytes=bytes;
+    char *at=(char *)(op+1);
+    op->url=cookie_copy(&at,request->url); op->name=cookie_copy(&at,request->name); op->value=cookie_copy(&at,request->value);
+    op->domain=cookie_copy(&at,request->domain); op->path=cookie_copy(&at,request->path);
+    if (request->kind==ZWK_COOKIE_QUERY) {
+        NSURL *url=[NSURL URLWithString:[NSString stringWithUTF8String:op->url]];
+        if (!url.host.length) { free(op); return ZWK_COOKIES_INVALID; }
+    }
+    if (request->kind==ZWK_COOKIE_SET || request->kind==ZWK_COOKIE_DELETE || request->kind==ZWK_COOKIE_DELETE_KEY) @autoreleasepool {
+        const int set=request->kind==ZWK_COOKIE_SET;
+        NSHTTPCookie *cookie=cookie_make(op->name,op->value,op->domain,op->path,set?request->expires:0,set?request->flags:0,set?request->same_site:1);
+        if (!cookie) { free(op); return ZWK_COOKIES_INVALID; }
+        op->input=(void *)CFBridgingRetain(cookie);
+    }
+    return cookie_start(op);
+}
+int zwk_cookies_replace(ZwkCookies *s,uint64_t token,const ZwkCookieRow *input,size_t count) {
+    int status=zwk_cookies_check(s); if (status) return status;
+    if (!s->owner || !token || !input || !count || count>s->rows) return ZWK_COOKIES_INVALID;
+    size_t index=0;
+    if ((status=cookie_slot(s,token,&index))) return status;
+    ZwkCookieRow captured[COOKIE_ROWS]; memcpy(captured,input,count*sizeof(*captured));
+    size_t bytes=sizeof(CookieOp);
+    for (size_t i=0;i<count;++i) {
+        const ZwkCookieRow *row=&captured[i];
+        if (!row->name.len || !row->domain.len || !row->path.len || row->flags>7 || row->same_site>2) return ZWK_COOKIES_INVALID;
+        const ZwkCookieSlice fields[]={row->name,row->value,row->domain,row->path};
+        for (size_t field=0;field<4;++field) {
+            if (fields[field].len>=COOKIE_INPUT || bytes-sizeof(CookieOp)>COOKIE_INPUT-fields[field].len-1) return ZWK_COOKIES_CAPACITY;
+            bytes+=fields[field].len+1;
+        }
+    }
+    if (bytes>s->limit-s->bytes) return ZWK_COOKIES_CAPACITY;
+    for (size_t i=0;i<count;++i) {
+        const ZwkCookieSlice fields[]={captured[i].name,captured[i].value,captured[i].domain,captured[i].path};
+        for (size_t field=0;field<4;++field) if (!cookie_valid_slice(fields[field])) return ZWK_COOKIES_INVALID;
+    }
+    CookieOp *op=malloc(bytes); if (!op) return ZWK_COOKIES_OOM;
+    memset(op,0,sizeof(*op));
+    op->store=s; op->token=token; op->kind=ZWK_COOKIE_REPLACE_ALL; op->index=(uint32_t)index; op->bytes=bytes;
+    @autoreleasepool {
+        NSMutableArray<NSHTTPCookie *> *cookies=[NSMutableArray arrayWithCapacity:count];
+        char *at=(char *)(op+1);
+        for (size_t i=0;i<count;++i) {
+            const char *name=cookie_copy(&at,captured[i].name),*value=cookie_copy(&at,captured[i].value);
+            const char *domain=cookie_copy(&at,captured[i].domain),*path=cookie_copy(&at,captured[i].path);
+            NSHTTPCookie *cookie=cookie_make(name,value,domain,path,captured[i].expires,captured[i].flags,captured[i].same_site);
+            if (!cookie) { free(op); return ZWK_COOKIES_INVALID; }
+            [cookies addObject:cookie];
+        }
+        op->input=(void *)CFBridgingRetain([cookies copy]);
+    }
+    return cookie_start(op);
+}
+int zwk_cookies_cancel(ZwkCookies *s,uint64_t token) {
+    const int status=cookies_owner(s); if (status) return status;
+    for (size_t i=0;i<s->capacity;++i) if (s->ops[i] && s->ops[i]->token==token) { s->ops[i]->cancelled=1; break; }
+    return ZWK_COOKIES_OK;
+}
+int zwk_cookies_seal(ZwkCookies *s) {
+    const int status=cookies_owner(s); if (status) return status;
+    s->sealed=1; s->owner=NULL; s->complete=NULL;
+    return ZWK_COOKIES_OK;
+}
+int zwk_cookies_cancel_all(ZwkCookies *s) {
+    const int status=cookies_owner(s); if (status) return status;
+    for (size_t i=0;i<s->capacity;++i) if (s->ops[i]) s->ops[i]->cancelled=1;
+    return ZWK_COOKIES_OK;
+}
+int zwk_cookies_close(ZwkCookies *s) {
+    const int status=cookies_owner(s); if (status) return status;
+    if (s->closed) return ZWK_COOKIES_CLOSED;
+    zwk_cookies_seal(s); zwk_cookies_cancel_all(s); s->closed=1;
+    cookies_unref(s);
+    return ZWK_COOKIES_OK;
+}
+int zwk_cookies_stats(ZwkCookies *s,ZwkCookiesStats *out) {
+    const int status=cookies_owner(s); if (status) return status;
+    if (!out) return ZWK_COOKIES_INVALID;
+    *out=(ZwkCookiesStats){s->bytes,s->peak_bytes,s->pending,!zwk_cookies_check(s)};
+    return ZWK_COOKIES_OK;
+}
+void zwk_cookies_counts(uint32_t *stores,uint32_t *ops,size_t *bytes) {
+    if (stores) *stores=atomic_load(&live_cookie_stores);
+    if (ops) *ops=atomic_load(&live_cookie_ops);
+    if (bytes) *bytes=atomic_load(&live_cookie_bytes);
 }
 
 int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPageNotify page_callback,ZwkScriptNotify script_callback,ZwkDeadline deadline,void *owner,ZwkState **out) {
