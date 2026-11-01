@@ -166,7 +166,8 @@ const Opens = struct {
     }
     fn check(self: *Opens, open: system.instance.Open) !void {
         try std.testing.expectEqual(@as(usize, 1), open.items.len);
-        try std.testing.expectEqual(@as(u32, @intCast(std.c.getpid())), open.sender_process);
+        // Dispatching without sending may leave the sender attribute out.
+        if (open.sender_process != 0) try std.testing.expectEqual(@as(u32, @intCast(std.c.getpid())), open.sender_process);
         switch (open.kind) {
             .urls => {
                 try std.testing.expectEqualStrings("zigsmoke://open?x=1&y=%20", open.items[0]);
@@ -190,8 +191,8 @@ fn checkOpens(allocator: std.mem.Allocator) !void {
     defer listener.stop();
     var second: system.instance.OpenListener = .{ .context = &opens, .on_open = Opens.received };
     try std.testing.expectError(error.ListenerActive, second.start(app));
-    // An Apple Event sent to this process can reach its handler during the
-    // send, so send from inside the run loop.
+    // The dispatched events reach the handler during the call, so send them
+    // from inside the run loop.
     try app.post(.{ .context = &opens, .call = Opens.send });
     try app.run();
     if (opens.failure) |err| return err;

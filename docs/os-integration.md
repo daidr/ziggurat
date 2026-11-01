@@ -56,7 +56,7 @@ Primary 不可复制。`receive(storage, arguments)` 由应用自己创建的一
 
 ### macOS 的打开请求
 
-macOS 不把深链和要打开的文件作为进程参数传给应用：点击 bundle 声明的 scheme 的链接、在 Finder 中用应用打开文件或把文件拖到 dock 图标上，系统都向正在运行（或为此刚启动）的实例发送 Apple Event。`instance.OpenListener{ .context, .on_open }` 的 `start(app)` 安装 `GURL`（`kInternetEventClass`/`kAEGetURL`）和 `odoc`（`kCoreEventClass`/`kAEOpenDocuments`）处理程序，`on_open(context, Open)` 在 owner 线程上收到 `.urls` 或 `.files`（绝对路径，只取本地文件），`items` 只在回调期间借用，`sender_process` 是发送方进程 ID。启动应用的那次请求在 run loop 开始时才发出，所以要在 `App.run` 之前 start。每个进程一个 listener，第二个返回 `ListenerActive`；`stop()` 幂等，之后的请求交回系统默认处理。Linux 和 Windows 上同样的请求是第二个进程的参数，经 `claimOrForward` 到达 primary，这里返回 `UnsupportedCapability`（`capabilities.instance.open_events`）。`simulateOpenForTesting` 只供集成检查向本进程发送同样的 Apple Event。
+macOS 不把深链和要打开的文件作为进程参数传给应用：点击 bundle 声明的 scheme 的链接、在 Finder 中用应用打开文件或把文件拖到 dock 图标上，系统都向正在运行（或为此刚启动）的实例发送 Apple Event。`instance.OpenListener{ .context, .on_open }` 的 `start(app)` 安装 `GURL`（`kInternetEventClass`/`kAEGetURL`）和 `odoc`（`kCoreEventClass`/`kAEOpenDocuments`）处理程序，`on_open(context, Open)` 在 owner 线程上收到 `.urls` 或 `.files`（绝对路径，只取本地文件），`items` 只在回调期间借用，`sender_process` 是发送方进程 ID。启动应用的那次请求在 run loop 开始时才发出，所以要在 `App.run` 之前 start。每个进程一个 listener，第二个返回 `ListenerActive`；`stop()` 幂等，之后的请求交回系统默认处理。Linux 和 Windows 上同样的请求是第二个进程的参数，经 `claimOrForward` 到达 primary，这里返回 `UnsupportedCapability`（`capabilities.instance.open_events`）。`simulateOpenForTesting` 只供集成检查把同样的 Apple Event 经本进程的处理程序表分发，处理程序在调用期间运行。
 
 ## 登录启动
 
@@ -112,7 +112,7 @@ Windows Jump List 的任务和 Recent 类别、最近文档和重启见[系统�
 
 `zig build test-system-integration` 覆盖转发帧的往返与恶意输入（截断、多余字节、魔数、超长、计数、越界长度、NUL、容量）、身份规则、XDG 与 user-dirs 解析、desktop entry/autostart/MIME XML 转义、mimeapps.list 编辑的幂等与外来行保留、Windows argv 引号往返、file URL 解码和电源参数校验。
 
-`zig build smoke-os-integration` 启动真实子进程：8 个并发 secondary 与最大长度参数的转发、恶意/超长/停滞对端被拒后 listener 仍可用、primary 停止后旧 secondary 得到 `PrimaryUnavailable` 并可重新成为 primary、被杀死的 primary 释放锁、12 轮 claim/转发/停止后文件描述符或句柄数不变；Linux 另验开放权限的运行目录被拒。注册部分在隔离的 XDG 根中写入 scheme 与文件类型，用 GIO 独立解析默认处理程序和扩展名类型，再由 GIO 真正启动注册的 `%U` 命令，验证深链与文件参数经单实例转发到 primary，最后 unregister 并确认无关的 mimeapps 行保留；登录项写入、查询与删除。Windows 对应用 `AssocQueryStringW` 与 `ShellExecuteExW` 走同样的链路。macOS 运行其中的目录和单实例部分，并用最长的 ID 验证哈希后的 socket 名仍能 claim 与转发；`smoke-macos-services` 向自身发送 `GURL` 与 `odoc` 事件，确认 OpenListener 收到 URL、文件路径和发送方进程 ID。Linux 用私有 bus 上的 logind 替身核对 Inhibit 参数和 release 后描述符真正关闭（12 轮），并用独立订阅者核对 launcher entry 的进度、计数和提醒；Windows 做 12 轮成对电源请求，句柄数不变。D-Bus 部分需要 session bus 且把同一地址作为 `DBUS_SYSTEM_BUS_ADDRESS`；`-- --require-dbus` 在缺失时失败而不是跳过。
+`zig build smoke-os-integration` 启动真实子进程：8 个并发 secondary 与最大长度参数的转发、恶意/超长/停滞对端被拒后 listener 仍可用、primary 停止后旧 secondary 得到 `PrimaryUnavailable` 并可重新成为 primary、被杀死的 primary 释放锁、12 轮 claim/转发/停止后文件描述符或句柄数不变；Linux 另验开放权限的运行目录被拒。注册部分在隔离的 XDG 根中写入 scheme 与文件类型，用 GIO 独立解析默认处理程序和扩展名类型，再由 GIO 真正启动注册的 `%U` 命令，验证深链与文件参数经单实例转发到 primary，最后 unregister 并确认无关的 mimeapps 行保留；登录项写入、查询与删除。Windows 对应用 `AssocQueryStringW` 与 `ShellExecuteExW` 走同样的链路。macOS 运行其中的目录和单实例部分，并用最长的 ID 验证哈希后的 socket 名仍能 claim 与转发；`smoke-macos-services` 经处理程序表分发 `GURL` 与 `odoc` 事件，确认 OpenListener 收到 URL、文件路径和发送方进程 ID。Linux 用私有 bus 上的 logind 替身核对 Inhibit 参数和 release 后描述符真正关闭（12 轮），并用独立订阅者核对 launcher entry 的进度、计数和提醒；Windows 做 12 轮成对电源请求，句柄数不变。D-Bus 部分需要 session bus 且把同一地址作为 `DBUS_SYSTEM_BUS_ADDRESS`；`-- --require-dbus` 在缺失时失败而不是跳过。
 
 Linux 与 Windows Debug CI 都实际运行这个 smoke。Windows 命令行上限为 32767 个 UTF-16 单元，所以最大长度参数用例在 Windows 只传一个 16 KiB 参数，帧上限本身由单元测试覆盖。
 

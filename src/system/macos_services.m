@@ -710,8 +710,8 @@ void zsm_open_stop(void) {
     open_handler->owner = NULL;
     open_handler = nil;
 }
-/* Integration checks: delivers an event to the installed handler as the
-   system would. kind 0 sends a GURL with `item`, 1 an odoc with one file. */
+/* Integration checks: dispatches an event to the installed handler as the
+   system's delivery does. kind 0 sends a GURL with `item`, 1 an odoc with one file. */
 int zsm_open_simulate(int kind, const char *item) {
     NSString *value = [NSString stringWithUTF8String:item];
     if (!value) return 0;
@@ -724,7 +724,12 @@ int zsm_open_simulate(int kind, const char *item) {
         [list insertDescriptor:[NSAppleEventDescriptor descriptorWithDescriptorType:typeFileURL data:url] atIndex:1];
         [event setParamDescriptor:list forKeyword:keyDirectObject];
     } else [event setParamDescriptor:[NSAppleEventDescriptor descriptorWithString:value] forKeyword:keyDirectObject];
-    NSError *error = nil;
-    [event sendEventWithOptions:NSAppleEventSendNoReply timeout:5 error:&error];
-    return error == nil;
+    /* Through the manager's handler table, as a received event is: sending
+       it would need the Automation permission in some sessions. */
+    [event setAttributeDescriptor:[NSAppleEventDescriptor descriptorWithInt32:pid] forKeyword:keySenderPIDAttr];
+    AppleEvent reply = {typeNull, NULL};
+    /* The handlers ignore the reference constant; it only must not be null. */
+    OSErr status = [[NSAppleEventManager sharedAppleEventManager] dispatchRawAppleEvent:[event aeDesc] withRawReply:&reply handlerRefCon:(SRefCon)(uintptr_t)1];
+    AEDisposeDesc(&reply);
+    return status == noErr;
 }
