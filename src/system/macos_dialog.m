@@ -92,6 +92,11 @@ void *zsm_message_show(NSWindow *window, const char *title, const char *message,
         }
         [alerts addObject:link];
         watch_alert_keys();
+        /* NSAlert hands out Return and Escape by button order and title when
+           it lays out, so the key equivalents are set again after that. */
+        void (^keys)(void) = ^{
+            for (NSButton *button in [alert buttons]) [button setKeyEquivalent:[button tag] == default_index ? @"\r" : @""];
+        };
         link->open = 1;
         if (window && [window isVisible] && ![window attachedSheet]) {
             link->sheet = 1;
@@ -101,8 +106,10 @@ void *zsm_message_show(NSWindow *window, const char *title, const char *message,
                 const int32_t value = response >= code_base + ANSWER_CANCELLED && response < code_base + 64 ? (int32_t)(response - code_base) : ANSWER_ESCAPE;
                 [strong finish:value];
             }];
+            keys();
         } else {
             [alert layout];
+            keys();
             NSWindow *panel = [alert window];
             [panel center];
             [panel makeKeyAndOrderFront:nil];

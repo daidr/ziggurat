@@ -298,7 +298,9 @@ const State = struct {
                 try check(zsm_message_is_sheet(native) != 0, "alert is a sheet");
                 var default: c_int = 0;
                 var destructive: c_int = 0;
-                try check(zsm_message_button(native, 0, &default, &destructive) != 0 and default != 0 and destructive == 0, "Save is the default");
+                const found = zsm_message_button(native, 0, &default, &destructive);
+                if (default == 0 or destructive != 0) std.debug.print("Save: found={d} default={d} destructive={d}\n", .{ found, default, destructive });
+                try check(found != 0 and default != 0 and destructive == 0, "Save is the default");
                 try check(zsm_message_button(native, 1, &default, &destructive) != 0 and default == 0 and destructive != 0, "Discard is destructive");
                 try check(zsm_message_key(native, "\x1b", 0) == 1, "Escape presses Cancel");
             },
