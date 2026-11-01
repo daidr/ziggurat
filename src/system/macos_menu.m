@@ -288,6 +288,22 @@ int zsm_bar_icon(void *handle, int32_t command, void *icon) {
 }
 void *zsm_bar_menu(void *handle) { return (__bridge void *)((__bridge ZsmBar *)handle)->menu; }
 
+/* The view that draws the window's content: the content view itself, or
+   the ZigView inside a material container. */
+static NSView *content_view(NSWindow *window) {
+    NSView *root = [window contentView];
+    Class zig = NSClassFromString(@"ZigView");
+    if (!zig || !root || [root isKindOfClass:zig]) return root;
+    NSMutableArray<NSView *> *queue = [NSMutableArray arrayWithObject:root];
+    while ([queue count]) {
+        NSView *view = [queue objectAtIndex:0];
+        [queue removeObjectAtIndex:0];
+        if ([view isKindOfClass:zig]) return view;
+        [queue addObjectsFromArray:[view subviews]];
+    }
+    return root;
+}
+
 /* ---- popup menus ----
    AppKit tracks a popup menu in a loop of its own, so a popup opens from
    the run loop after the call that asks for it returns, and reports its
@@ -337,7 +353,7 @@ void *zsm_bar_menu(void *handle) { return (__bridge void *)((__bridge ZsmBar *)h
         NSPoint location = NSZeroPoint;
         NSWindow *parent = window;
         if (parent && kind != 2) {
-            view = [parent contentView];
+            view = content_view(parent);
             if (kind == 1) {
                 location = NSMakePoint(x, y);
                 if (![view isFlipped]) location.y = [view bounds].size.height - location.y;
@@ -777,7 +793,7 @@ int zsm_test_menu_action_is(void *menu, const int32_t *path, uint32_t depth, con
         return item && [item action] == NSSelectorFromString(zsm_string(selector));
     }
 }
-void *zsm_test_window_view(void *window) { return (__bridge void *)[(__bridge NSWindow *)window contentView]; }
+void *zsm_test_window_view(void *window) { return (__bridge void *)content_view((__bridge NSWindow *)window); }
 int zsm_test_services_menu_is(void *menu, const int32_t *path, uint32_t depth) {
     NSMenu *current = (__bridge NSMenu *)menu;
     NSMenuItem *item = nil;
