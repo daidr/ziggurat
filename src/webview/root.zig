@@ -417,6 +417,8 @@ pub const Options = struct {
     /// profile; Runtime session caching is not a one-host-query-per-call promise.
     permissions: ?PermissionPolicy = null,
     /// Explicit View-scoped transfers. Default cancels without native UI.
+    /// Windows and macOS; WKDownload cannot pause, so pause and resume are
+    /// UnsupportedCapability there.
     downloads: ?DownloadPolicy = null,
     scripts: ScriptLimits = .{},
     /// Trusted, valid ordinary function bodies at document start/top/page world.
@@ -605,6 +607,32 @@ const DownloadScratch = struct {
         actions.download_notify = View.downloadNotify;
     }
 };
+/// The native options with the View's downloads, which WKWebView takes.
+fn webkitDownloads(base: webkit.Options, policy: ?DownloadPolicy, scratch: *WebkitDownloadScratch) webkit.Options {
+    var value = base;
+    _ = &value;
+    if (is_macos) if (policy) |granted| scratch.prepare(granted, &value);
+    return value;
+}
+/// The download origins as C strings for WKWebView.
+const WebkitDownloadScratch = struct {
+    pointers: [downloads.origin_capacity][*:0]const u8 = undefined,
+    text: [downloads.origin_capacity][schemes.origin_limit + 1:0]u8 = undefined,
+    fn prepare(self: *@This(), policy: DownloadPolicy, native: *webkit.Options) void {
+        for (policy.origins, 0..) |origin, i| {
+            @memcpy(self.text[i][0..origin.len], origin);
+            self.text[i][origin.len] = 0;
+            self.pointers[i] = @ptrCast(&self.text[i]);
+        }
+        native.download_origins = &self.pointers;
+        native.download_origin_count = @intCast(policy.origins.len);
+        native.download_known_limit = policy.limits.max_known_bytes;
+        native.download_received_limit = policy.limits.max_received_bytes;
+        native.download_unknown = @intFromBool(policy.limits.allow_unknown_length);
+        native.download_offer = View.webkitDownloadOffer;
+        native.download_notify = View.downloadNotify;
+    }
+};
 const SchemeScratch = struct {
     items: [schemes.capacity]NativeScheme = undefined,
     names: [schemes.capacity][schemes.name_limit + 1:0]u16 = undefined,
@@ -684,6 +712,11 @@ extern fn zwk_auth_answer(*anyopaque, [*:0]const u8, [*:0]const u8) c_int;
 extern fn zwk_permission_defer(*anyopaque, u64) c_int;
 extern fn zwk_permission_decide(*anyopaque, u64, c_int) c_int;
 extern fn zwk_permission_cancel(*anyopaque, u64) c_int;
+extern fn zwk_download_defer(*anyopaque, u64) c_int;
+extern fn zwk_download_accept(*anyopaque, u64, [*:0]const u8) c_int;
+extern fn zwk_download_activate(*anyopaque, u64) void;
+extern fn zwk_download_cancel(*anyopaque, u64) c_int;
+extern fn zwk_download_snapshot(*anyopaque, u64, *u64, *i64) c_int;
 extern fn zwk_capture_state(*anyopaque, u32, c_int, *u32) c_int;
 extern fn zwv_permission_defer(*anyopaque, u64) i32;
 extern fn zwv_permission_decide(*anyopaque, u64, bool) i32;
@@ -819,11 +852,11 @@ fn nativeCancelScript(native: *anyopaque, token: u64) void {
 }
 fn validateBackendOptions(options: Options) !void {
     if (is_macos) {
-        if (options.request_policy_extension != null or options.file_streams != null or options.document_initializers.len != 0) return error.UnsupportedCapability;
+        if (options.request_policy_extension != null) return error.UnsupportedCapability;
         // WKWebView never lets the app add a request header: no Bearer credential.
         if (options.remote) |remote| if (remote.request_credentials.len != 0) return error.UnsupportedCapability;
-        // The engine's sign-in and certificate answers are not taken here yet.
-        if (options.http_auth != null or options.certificate_errors != null or options.context_menu == .handler) return error.UnsupportedCapability;
+        // The engine's context menu is not offered to a handler here yet.
+        if (options.context_menu == .handler) return error.UnsupportedCapability;
         // Find, capture, PDF and clear are the engine's own; cookies are not yet here.
         if (options.tools.cookies) return error.UnsupportedCapability;
     }
@@ -838,8 +871,10 @@ fn validateBackendOptions(options: Options) !void {
                 if (options.user_data_folder.len != 0) return error.ProfilePathForbidden;
             },
         }
-        if ((is_macos and options.permissions != null) or options.downloads != null or options.allow_local_navigation)
+        // WKWebView downloads (WKDownload); WebKitGTK's are not offered yet.
+        if ((!is_macos and options.downloads != null) or options.allow_local_navigation)
             return error.UnsupportedCapability;
+        if (options.downloads) |policy| try policy.limits.validate();
         if (options.remote) |remote| {
             if ((options.storage == .ephemeral and remote.credentials != .ephemeral) or
                 (options.storage == .profile and remote.credentials != .profile)) return error.UnsupportedCapability;
@@ -1770,7 +1805,8 @@ pub const View = struct {
         };
         const facts = try self.factsScript(.linux);
         defer if (facts) |value| self.allocator.free(value);
-        const native_options: webkit.Options = .{ .context_menu = @backingInt(options.context_menu), .context_offer = if (!is_macos and options.context_menu == .handler) View.webkitContextMenu else null, .auth = if (!is_macos and options.http_auth != null) View.webkitAuth else null, .certificate = if (!is_macos and options.certificate_errors != null) View.webkitCertificate else null, .content_filters = filters.ptr, .content_filter_count = filter_count, .audio_muted = @intFromBool(self.mutedWanted()), .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .gestures = gestureFlags(options), .throttling = @intFromBool(options.background_throttling), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled), .scroll_to_container = @intFromBool(options.scroll_to_container), .permission = if (!is_macos and options.permissions != null) View.webkitPermission else null, .media = if (is_macos) 0 else mediaKinds(options.permissions) };
+        var download_scratch: WebkitDownloadScratch = undefined;
+        const native_options = webkitDownloads(.{ .context_menu = @backingInt(options.context_menu), .context_offer = if (!is_macos and options.context_menu == .handler) View.webkitContextMenu else null, .auth = if (options.http_auth != null) View.webkitAuth else null, .certificate = if (options.certificate_errors != null) View.webkitCertificate else null, .content_filters = filters.ptr, .content_filter_count = filter_count, .audio_muted = @intFromBool(self.mutedWanted()), .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .gestures = gestureFlags(options), .throttling = @intFromBool(options.background_throttling), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled), .scroll_to_container = @intFromBool(options.scroll_to_container), .permission = if (options.permissions != null) View.webkitPermission else null, .media = if (is_macos) 0 else mediaKinds(options.permissions) }, options.downloads, &download_scratch);
         var candidate: ?*anyopaque = null;
         if (self.session) |session| {
             try webkit.check(webkit.zwk_session_create(&native_options, session.last_size.width, session.last_size.height, webkitNotify, pageNotify, webkitScriptNotify, webkitTimeout, self, &candidate));
@@ -1811,8 +1847,8 @@ pub const View = struct {
         self.eval_accepting = true;
         self.tool_accepting = true;
         self.resource_accepting = if (options.local) |site| site.on_resource != null else false;
-        self.permission_accepting = !is_macos and options.permissions != null;
-        self.download_accepting = false;
+        self.permission_accepting = options.permissions != null;
+        self.download_accepting = is_macos and options.downloads != null;
     }
     /// The media devices any grant lets a page ask for: 1 microphone, 2
     /// camera. WebKitGTK turns getUserMedia on only for these.
@@ -2177,8 +2213,11 @@ pub const View = struct {
         for (script_ids) |token| if (self.native) |native| nativeCancelScript(native, token);
         if (is_webkit) {
             for (resource_ids) |token| if (self.native) |native| webkit.zwk_resource_cancel(native, token);
-            if (!is_macos) for (permission_ids) |token| if (self.native) |native| {
+            for (permission_ids) |token| if (self.native) |native| {
                 _ = zwk_permission_cancel(native, token);
+            };
+            if (is_macos) for (download_ids) |token| if (self.native) |native| {
+                _ = zwk_download_cancel(native, token);
             };
             for (tool_slots[0..tool_ids.len]) |slot| {
                 if (slot.kind == .find and slot.token == self.find_token) {
@@ -2265,12 +2304,13 @@ pub const View = struct {
         var responder: PermissionResponder = .{ .view = self, .native = native_call, .page = page.generation };
         policy.handler.handle(policy.handler.context, .{ .origin = text[0..length], .kind = kind, .user_initiated = user, .page = page }, &responder);
     }
-    /// A WebKitGTK page's permission request. The engine tells no user
+    /// A WebKit page's permission request. The engine tells no user
     /// gesture, so a policy that requires one is never offered a request;
-    /// the origin is that of the page's committed document, as the engine
-    /// does not tell a frame's.
+    /// the origin is that of the page's committed document, as WebKitGTK
+    /// does not tell a frame's. WKWebView asks only for the camera and the
+    /// microphone; it denies geolocation and notifications itself.
     fn webkitPermission(ptr: *anyopaque, origin_z: [*:0]const u8, native_kind: u32, needs: u32, native_call: *anyopaque) callconv(.c) void {
-        if (!is_webkit or is_macos) return;
+        if (!is_webkit) return;
         const self: *View = @ptrCast(@alignCast(ptr));
         const window = self.access() orelse return;
         if (self.attachmentClosed() or appStopping(window) or !self.ready or self.recovering or !self.page_active) return;
@@ -2292,7 +2332,6 @@ pub const View = struct {
         policy.handler.handle(policy.handler.context, .{ .origin = origin, .kind = kind, .user_initiated = false, .page = page }, &responder);
     }
     fn deferPermission(self: *View, native_call: *anyopaque, page: u64, options: permissions.DeferOptions) !PermissionId {
-        if (is_macos) return self.unavailableBackend();
         const window = try self.propertyWindow();
         if (!self.permission_accepting) return error.PermissionUnavailable;
         if (!self.page_active or page != self.page_generation) return error.StalePage;
@@ -2338,7 +2377,6 @@ pub const View = struct {
         return if (self.attachmentClosed() or appStopping(window)) error.Closed else error.StalePermission;
     }
     pub fn decidePermission(self: *View, id: PermissionId, decision: permissions.Decision) !void {
-        if (is_macos) return self.unavailableBackend();
         const window = try self.propertyWindow();
         if (id.view != self or id.page != self.page_generation or !self.page_active) return error.StalePermission;
         const scope = self.beginCallback() orelse return error.Closed;
@@ -2352,7 +2390,6 @@ pub const View = struct {
         if (slot.completion) |completion| completion.complete(completion.context, result);
     }
     fn cancelPermission(self: *View, id: PermissionId) !bool {
-        if (is_macos) return self.unavailableBackend();
         const window = self.access() orelse return error.Closed;
         window.app.assertOwner();
         if (self.attachmentClosed() or appStopping(window)) return error.Closed;
@@ -2574,11 +2611,24 @@ pub const View = struct {
         const uri_length = std.unicode.utf16LeToUtf8(&uri_storage, std.mem.span(uri_wide)) catch return;
         const mime_length = std.unicode.utf16LeToUtf8(&mime_storage, std.mem.span(mime_wide)) catch return;
         const name_length = std.unicode.utf16LeToUtf8(&name_storage, std.mem.span(name_wide)) catch return;
+        self.offerDownload(policy, uri_storage[0..uri_length], mime_storage[0..mime_length], name_storage[0..name_length], total, native_call);
+    }
+    /// WKWebView's offer, in UTF-8 already.
+    fn webkitDownloadOffer(ptr: *anyopaque, uri: [*:0]const u8, mime: [*:0]const u8, name: [*:0]const u8, total: i64, native_call: *anyopaque) callconv(.c) void {
+        const self: *View = @ptrCast(@alignCast(ptr));
+        const window = self.access() orelse return;
+        if (self.attachmentClosed() or appStopping(window) or self.recovering or !self.ready) return;
+        const scope = self.beginNativeAttachment() orelse return;
+        defer scope.end();
+        const policy = self.config.?.options.downloads orelse return;
+        self.offerDownload(policy, std.mem.span(uri), std.mem.span(mime), std.mem.span(name), total, native_call);
+    }
+    fn offerDownload(self: *View, policy: DownloadPolicy, uri: []const u8, mime: []const u8, name: []const u8, total: i64, native_call: *anyopaque) void {
         var responder: DownloadResponder = .{ .view = self, .native = native_call };
-        policy.handler.handle(policy.handler.context, .{ .uri = uri_storage[0..uri_length], .mime = mime_storage[0..mime_length], .suggested_name = name_storage[0..name_length], .total_bytes = if (total >= 0) @intCast(total) else null, .observed_page = if (self.page_active) .{ .view = self, .generation = self.page_generation } else null }, &responder);
+        policy.handler.handle(policy.handler.context, .{ .uri = uri, .mime = mime, .suggested_name = name, .total_bytes = if (total >= 0) @intCast(total) else null, .observed_page = if (self.page_active) .{ .view = self, .generation = self.page_generation } else null }, &responder);
     }
     fn deferDownload(self: *View, native_call: *anyopaque, options: downloads.DeferOptions) !DownloadId {
-        if (is_webkit) return self.unavailableBackend();
+        if (is_webkit and !is_macos) return self.unavailableBackend();
         const window = try self.propertyWindow();
         if (!self.download_accepting) return error.DownloadUnavailable;
         const policy = self.config.?.options.downloads orelse return error.DownloadDenied;
@@ -2591,7 +2641,17 @@ pub const View = struct {
             self.syncEvalTimer() catch self.failEvalTimer();
             return err;
         };
-        const hr = zwv_download_defer(native_call, token);
+        if (is_macos) {
+            const code = zwk_download_defer(native_call, token);
+            if (code != 0) {
+                _ = self.download_book.take(token);
+                self.syncEvalTimer() catch self.failEvalTimer();
+                if (code == 2) return error.Full;
+                try webkit.check(code);
+                unreachable;
+            }
+        }
+        const hr: i32 = if (is_macos) 0 else zwv_download_defer(native_call, token);
         if (hr < 0) {
             self.downloadNativeResult(hr);
             _ = self.download_book.take(token);
@@ -2607,14 +2667,14 @@ pub const View = struct {
             return .{ .view = self, .token = token };
         };
         _ = self.download_book.take(token);
-        if (self.native) |native| self.downloadNativeResult(zwv_download_cancel(native, token));
+        if (self.native) |native| self.nativeDownloadCancel(native, token);
         self.syncEvalTimer() catch self.failEvalTimer();
         return error.Closed;
     }
     /// Success consumes destination; any failure retains it. Native acceptance
     /// failure terminates the already accepted offer with native_failure.
     pub fn resolveDownload(self: *View, id: DownloadId, destination: *DownloadDestination, listener: ?downloads.Listener) !void {
-        if (is_webkit) return self.unavailableBackend();
+        if (is_webkit and !is_macos) return self.unavailableBackend();
         const window = try self.propertyWindow();
         if (id.view != self) return error.StaleDownload;
         const slot = self.download_book.find(id.token) orelse return error.StaleDownload;
@@ -2622,11 +2682,15 @@ pub const View = struct {
         try destination.validate();
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
-        const hr = zwv_download_accept(self.native.?, id.token, destination.wide.?.ptr);
+        const hr: i32 = if (is_macos) blk: {
+            const path = try self.allocator.dupeSentinel(u8, destination.path.?, 0);
+            defer self.allocator.free(path);
+            break :blk -zwk_download_accept(self.native.?, id.token, path.ptr);
+        } else zwv_download_accept(self.native.?, id.token, destination.wide.?.ptr);
         if (hr < 0) {
-            self.downloadNativeResult(hr);
+            if (!is_macos) self.downloadNativeResult(hr);
             if (self.download_book.take(id.token)) |old| {
-                if (self.native) |native| self.downloadNativeResult(zwv_download_cancel(native, id.token));
+                if (self.native) |native| self.nativeDownloadCancel(native, id.token);
                 self.syncEvalTimer() catch self.failEvalTimer();
                 completeDownloadSlot(old, if (self.attachmentClosed() or appStopping(window)) .detached else .{ .native_failure = hr });
             }
@@ -2640,10 +2704,17 @@ pub const View = struct {
         current.deadline = null;
         current.listener = listener;
         self.syncEvalTimer() catch self.failEvalTimer();
-        if (!self.attachmentClosed() and !appStopping(window) and !self.recovering) if (self.native) |native| zwv_download_activate(native, id.token);
+        if (!self.attachmentClosed() and !appStopping(window) and !self.recovering) if (self.native) |native| {
+            if (is_macos) zwk_download_activate(native, id.token) else zwv_download_activate(native, id.token);
+        };
+    }
+    fn nativeDownloadCancel(self: *View, native: *anyopaque, token: u64) void {
+        if (is_macos) {
+            _ = zwk_download_cancel(native, token);
+        } else self.downloadNativeResult(zwv_download_cancel(native, token));
     }
     fn cancelDownload(self: *View, id: DownloadId) !bool {
-        if (is_webkit) return self.unavailableBackend();
+        if (is_webkit and !is_macos) return self.unavailableBackend();
         const window = self.access() orelse return error.Closed;
         window.app.assertOwner();
         if (self.attachmentClosed() or appStopping(window)) return error.Closed;
@@ -2651,11 +2722,12 @@ pub const View = struct {
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
         const slot = self.download_book.take(id.token) orelse return false;
-        if (self.native) |native| self.downloadNativeResult(zwv_download_cancel(native, id.token));
+        if (self.native) |native| self.nativeDownloadCancel(native, id.token);
         self.syncEvalTimer() catch self.failEvalTimer();
         completeDownloadSlot(slot, if (self.attachmentClosed() or appStopping(window)) .detached else .cancelled);
         return true;
     }
+    /// WKDownload cannot pause: UnsupportedCapability on macOS.
     fn pauseDownload(self: *View, id: DownloadId, pause: bool) !void {
         if (is_webkit) return self.unavailableBackend();
         _ = try self.propertyWindow();
@@ -2669,7 +2741,7 @@ pub const View = struct {
         if (hr < 0) return error.DownloadControlFailed;
     }
     fn downloadSnapshot(self: *View, id: DownloadId) !downloads.Snapshot {
-        if (is_webkit) return self.unavailableBackend();
+        if (is_webkit and !is_macos) return self.unavailableBackend();
         const window = try self.propertyWindow();
         if (id.view != self) return error.StaleDownload;
         const slot = self.download_book.find(id.token) orelse return error.StaleDownload;
@@ -2679,8 +2751,8 @@ pub const View = struct {
         var received: u64 = 0;
         var total: i64 = -1;
         var paused = false;
-        const hr = zwv_download_snapshot(self.native.?, id.token, &received, &total, &paused);
-        self.downloadNativeResult(hr);
+        const hr: i32 = if (is_macos) -zwk_download_snapshot(self.native.?, id.token, &received, &total) else zwv_download_snapshot(self.native.?, id.token, &received, &total, &paused);
+        if (!is_macos) self.downloadNativeResult(hr);
         if (self.attachmentClosed() or appStopping(window)) return error.Closed;
         if (hr < 0) return error.DownloadSnapshotFailed;
         return .{ .received_bytes = received, .total_bytes = if (total >= 0) @intCast(total) else null, .paused = paused };
@@ -2698,7 +2770,7 @@ pub const View = struct {
             return;
         }
         const slot = self.download_book.take(token) orelse return;
-        if (kind == 4) self.downloadNativeResult(code);
+        if (kind == 4 and !is_webkit) self.downloadNativeResult(code);
         self.syncEvalTimer() catch self.failEvalTimer();
         const result: downloads.Result = if (self.attachmentClosed() or appStopping(window)) .detached else switch (kind) {
             1 => if (slot.destination) |owned| .{ .completed = .{ .snapshot = snapshot, .path = owned.path.? } } else .{ .native_failure = @bitCast(@as(u32, 0x8000ffff)) },
@@ -3870,10 +3942,9 @@ pub const View = struct {
     /// with the scroll positions and form fields it saved: it saves a
     /// page's scroll position a moment after scrolling stops and its form
     /// fields as the page goes out of view. Windows keeps the page's URI
-    /// alone, WebView2 having no such state.
+    /// alone, WebView2 having no such state; macOS keeps it alone too.
     pub fn sessionState(self: *View, allocator: std.mem.Allocator) ![]u8 {
         _ = try self.propertyWindow();
-        if (is_macos) return error.UnsupportedCapability;
         if (self.config.?.options.local == null and self.config.?.options.remote == null) return error.LocalSiteRequired;
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
@@ -3886,7 +3957,7 @@ pub const View = struct {
             defer if (data) |value| webkit.zwk_string_free(@ptrCast(value));
             try webkit.check(result);
             const native: []const u8 = if (data) |value| @as([*]const u8, @ptrCast(value))[0..length] else "";
-            return session_state.encode(allocator, .linux, std.mem.span(uri orelse return error.NotReady), native);
+            return session_state.encode(allocator, if (is_macos) .macos else .linux, std.mem.span(uri orelse return error.NotReady), native);
         }
         var wide: ?[*:0]u16 = null;
         const hr = zwv_document_source(self.native.?, &wide);
@@ -3905,7 +3976,6 @@ pub const View = struct {
     /// navigateRemote would, which the page's site must allow (OriginDenied,
     /// InvalidResourcePath otherwise).
     pub fn restoreSessionState(self: *View, state: []const u8) !void {
-        if (is_macos) return error.UnsupportedCapability;
         const parsed = try session_state.parse(state);
         const window = self.access() orelse return error.Closed;
         window.app.assertOwner();
@@ -3914,7 +3984,7 @@ pub const View = struct {
         if (!self.initializerNavigationAllowed()) return error.Busy;
         const options = self.config.?.options;
         if (options.local == null and options.remote == null) return error.LocalSiteRequired;
-        if (is_webkit and parsed.platform == .linux and parsed.native.len != 0) {
+        if (is_webkit and !is_macos and parsed.platform == .linux and parsed.native.len != 0) {
             const scope = self.beginCallback() orelse return error.Closed;
             defer scope.end();
             switch (webkit.zwk_session_restore(self.native.?, parsed.native.ptr, parsed.native.len)) {
@@ -4409,8 +4479,8 @@ test "optional initializer source owns and encodes input and every allocation fa
 }
 test "initializer configuration is cold by default and unsupported platforms reject before allocation" {
     try std.testing.expect((try initializer_owner.Config.create(std.testing.failing_allocator, &.{}, .{}, null)) == null);
-    try std.testing.expectEqual(@import("builtin").os.tag == .windows or @import("builtin").os.tag == .linux, backendCapabilities().document_initializers);
-    if (@import("builtin").os.tag != .windows and @import("builtin").os.tag != .linux) {
+    try std.testing.expectEqual(@import("builtin").os.tag == .windows or @import("builtin").os.tag == .linux or @import("builtin").os.tag == .macos, backendCapabilities().document_initializers);
+    if (@import("builtin").os.tag != .windows and @import("builtin").os.tag != .linux and @import("builtin").os.tag != .macos) {
         try std.testing.expectError(error.UnsupportedCapability, initializer_owner.Config.create(std.testing.failing_allocator, &.{.{ .body = "return;", .origins = &.{"https://example.test"} }}, .{}, null));
         try std.testing.expectError(error.UnsupportedCapability, initializer_owner.Controller.create(std.testing.failing_allocator, .{}, null, 0));
         try std.testing.expectError(error.UnsupportedCapability, OwnedConfig.init(std.testing.failing_allocator, .{ .html = "", .document_initializers = &.{.{ .body = "return;", .origins = &.{"https://example.test"} }} }));

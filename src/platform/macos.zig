@@ -58,6 +58,9 @@ extern fn zlm_window_opacity(*anyopaque, f32) void;
 extern fn zlm_window_ignore_pointer(*anyopaque, c_int) void;
 extern fn zlm_window_content_protection(*anyopaque, c_int) void;
 extern fn zlm_window_attention(*anyopaque, c_int) void;
+extern fn zlm_window_chrome(*anyopaque, c_int, f64) void;
+extern fn zlm_window_material(*anyopaque, c_int, c_int) void;
+extern fn zlm_window_active_appearance(*anyopaque, c_int) void;
 extern fn zlm_window_capture(*anyopaque, *c_int, *c_int, *c_int, *?[*]const u8) ?*anyopaque;
 extern fn zlm_capture_free(*anyopaque) void;
 
@@ -95,6 +98,8 @@ pub fn create(record: *core.WindowRecord, options: core.WindowOptions) !void {
     var code: c_int = 0;
     const popup: c_int = if (options.popup) |role| 1 | @as(c_int, if (role.focusable) 2 else 0) | @as(c_int, if (role.topmost) 4 else 0) else 0;
     record.native.native = zlm_window_create(record, event, title, options.width, options.height, options.min_width, options.min_height, if (record.owner_record) |owner| owner.native.native else null, @intFromBool(options.modal), @backingInt(options.decoration), @intFromBool(options.resizable), popup, &code) orelse return if (code == 1) error.UnsupportedCapability else error.OutOfMemory;
+    if (options.transparent or options.corner_radius > 0) zlm_window_chrome(record.native.native.?, @intFromBool(options.transparent), options.corner_radius);
+    if (options.vibrancy != .none) setVibrancy(record, options.vibrancy);
     if (options.text_input_mode != .system) {
         zlm_window_text_mode(record.native.native.?, 1);
         record.publishTextInputMode(options.text_input_mode);
@@ -112,7 +117,40 @@ pub fn state(record: *core.WindowRecord) core.WindowState {
 }
 pub fn capabilities(record: *core.WindowRecord) core.WindowCapabilities {
     const flags = zlm_window_capabilities(record.native.native.?);
-    return .{ .client_position = flags & 1 != 0, .fullscreen = flags & 2 != 0, .always_on_top = flags & 4 != 0, .owned_windows = true, .modal_windows = true, .custom_decoration = flags & 8 != 0, .native_move_resize = flags & 16 != 0, .system_menu = flags & 32 != 0, .opacity = flags & 64 != 0, .ignore_pointer = flags & 128 != 0, .attention = flags & 256 != 0, .skip_taskbar = flags & 512 != 0, .window_buttons = flags & 1024 != 0, .content_protection = flags & 2048 != 0 };
+    return .{ .client_position = flags & 1 != 0, .fullscreen = flags & 2 != 0, .always_on_top = flags & 4 != 0, .owned_windows = true, .modal_windows = true, .custom_decoration = flags & 8 != 0, .native_move_resize = flags & 16 != 0, .system_menu = flags & 32 != 0, .opacity = flags & 64 != 0, .ignore_pointer = flags & 128 != 0, .attention = flags & 256 != 0, .skip_taskbar = flags & 512 != 0, .window_buttons = flags & 1024 != 0, .content_protection = flags & 2048 != 0, .transparent = flags & 4096 != 0, .vibrancy = flags & 8192 != 0 };
+}
+/// The NSVisualEffectMaterial of each material, and the glass style
+/// (NSGlassEffectViewStyle) of the glass, which stands in with the popover
+/// and HUD materials before macOS 26. The Windows 11 backdrops take the
+/// under-window material, Acrylic the HUD one.
+pub fn materialOf(material: core.Vibrancy) struct { material: c_int, glass: c_int } {
+    return switch (material) {
+        .none => .{ .material = -1, .glass = -1 },
+        .titlebar => .{ .material = 3, .glass = -1 },
+        .selection => .{ .material = 4, .glass = -1 },
+        .menu => .{ .material = 5, .glass = -1 },
+        .popover => .{ .material = 6, .glass = -1 },
+        .sidebar => .{ .material = 7, .glass = -1 },
+        .header => .{ .material = 10, .glass = -1 },
+        .sheet => .{ .material = 11, .glass = -1 },
+        .window => .{ .material = 12, .glass = -1 },
+        .hud, .acrylic => .{ .material = 13, .glass = -1 },
+        .fullscreen_ui => .{ .material = 15, .glass = -1 },
+        .tooltip => .{ .material = 17, .glass = -1 },
+        .content => .{ .material = 18, .glass = -1 },
+        .under_window, .mica, .tabbed => .{ .material = 21, .glass = -1 },
+        .under_page => .{ .material = 22, .glass = -1 },
+        .glass => .{ .material = 6, .glass = 0 },
+        .glass_clear => .{ .material = 13, .glass = 1 },
+    };
+}
+/// Any window shows any material, behind frames that are then transparent.
+pub fn setVibrancy(record: *core.WindowRecord, material: core.Vibrancy) void {
+    const value = materialOf(material);
+    zlm_window_material(record.native.native.?, value.material, value.glass);
+}
+pub fn setActiveAppearance(record: *core.WindowRecord, enabled: bool) void {
+    zlm_window_active_appearance(record.native.native.?, @intFromBool(enabled));
 }
 pub fn setTraits(record: *core.WindowRecord, traits: core.WindowTraits) !void {
     try checkUpdate(zlm_window_traits(record.native.native.?, @intFromBool(traits.resizable), @intFromBool(traits.movable), @intFromBool(traits.minimizable), @intFromBool(traits.maximizable), @intFromBool(traits.closable)));
@@ -282,7 +320,7 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
     const point: core.Point = .{ .x = @floatCast(native.x), .y = @floatCast(native.y) };
     const modifiers: core.KeyModifiers = .{ .shift = native.flags & 1 != 0, .control = native.flags & 2 != 0, .alt = native.flags & 4 != 0, .super = native.flags & 8 != 0 };
     switch (native.kind) {
-        1 => record.emit(.{ .paint = .{ .native_context = native.context.?, .native_window = native.window, .size = .{ .width = native.width, .height = native.height, .scale = @floatFromInt(native.scale) } } }),
+        1 => record.emit(.{ .paint = .{ .native_context = native.context.?, .native_window = native.window, .size = .{ .width = native.width, .height = native.height, .scale = @floatFromInt(native.scale) }, .transparent = native.flags & 1 != 0 } }),
         2 => record.emit(.{ .resize = .{ .width = native.width, .height = native.height, .scale = @floatFromInt(native.scale) } }),
         22 => record.emit(.window_position),
         25 => record.popupDismissed(),

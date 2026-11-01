@@ -4,8 +4,11 @@ const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
+pub const panic = std.debug.FullPanic(@import("macos_panic.zig").panic);
 
 const linux = builtin.os.tag == .linux;
+/// WebKitGTK and WKWebView: explicit ephemeral storage, no WebView2 folder.
+const webkit = linux or builtin.os.tag == .macos;
 
 /// Run by tests/http_auth_host.py with its two loopback origins. The app
 /// signs in to one realm, goes without credentials in another and sees the
@@ -35,9 +38,9 @@ const Probe = struct {
         self.grants = .{ .{ .origin = self.plain }, .{ .origin = self.secure } };
         return .{
             .html = "",
-            .storage = if (linux) .ephemeral else .profile,
-            .user_data_folder = if (linux) "" else self.store,
-            .remote = .{ .url = self.at(self.plain, "/private"), .origins = &self.grants, .credentials = if (linux) .ephemeral else .profile, .allow_insecure_loopback = true },
+            .storage = if (webkit) .ephemeral else .profile,
+            .user_data_folder = if (webkit) "" else self.store,
+            .remote = .{ .url = self.at(self.plain, "/private"), .origins = &self.grants, .credentials = if (webkit) .ephemeral else .profile, .allow_insecure_loopback = true },
             .request_policy_extension = if (linux) .{ .directory = self.extension } else null,
             .http_auth = .{ .context = self, .answer = answer },
             .certificate_errors = .{ .context = self, .allow = allow },
@@ -101,7 +104,10 @@ const Probe = struct {
             },
             .completed => |info| {
                 if (self.step != .refused or info.success) return;
-                if (self.certificates != 1) return self.fail(error.CertificateNotAsked);
+                if (self.certificates != 1) {
+                    std.debug.print("refused load: status {d}, asked {d} times\n", .{ info.native_status, self.certificates });
+                    return self.fail(error.CertificateNotAsked);
+                }
                 self.step = .trusted;
                 view.navigateRemote(self.at(self.secure, "/tls")) catch |err| self.fail(err);
             },
@@ -118,7 +124,7 @@ const Probe = struct {
 };
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    var gpa: std.heap.DebugAllocator(@import("macos_panic.zig").allocator_config) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
     const args = try zio.argsAlloc(allocator, init.args);
@@ -130,7 +136,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer allocator.free(pem);
     var der_storage: [8192]u8 = undefined;
     const der = web.http_auth.pemCertificate(pem, &der_storage) orelse return error.InvalidCertificate;
-    const store = if (linux) try allocator.dupe(u8, "") else blk: {
+    const store = if (webkit) try allocator.dupe(u8, "") else blk: {
         const local = try zio.getEnvVarOwned(allocator, "LOCALAPPDATA");
         defer allocator.free(local);
         break :blk try std.fs.path.join(allocator, &.{ local, "Ziggurat", "HttpAuthSmoke" });

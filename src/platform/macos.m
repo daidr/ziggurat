@@ -18,6 +18,16 @@ typedef struct NativeEvent {
     size_t length,selection;
 } NativeEvent;
 typedef int (*Emit)(void *,const NativeEvent *);
+/* macos_window.m */
+NSView *zlmw_set_material(NSView *container,NSView *content,NSView *effect,int *glass,double radius,int material,int glass_style);
+void zlmw_round(NSWindow *window,NSView *container,NSView *effect,int glass,double radius);
+void zlmw_active_appearance(NSWindow *window,int enabled);
+int zlmw_test_material(NSView *effect,int glass,int *style,double *radius);
+int zlmw_double_click_action(void);
+void zlmw_drag_pressed(NSWindow *window,NSEvent *event);
+int zlmw_drag_start(NSWindow *window,NSEvent *press);
+void zlmw_drag_will_move(NSWindow *window);
+void zlmw_drag_forget(NSWindow *window);
 typedef struct NativeBounds {int32_t x,y;uint32_t width,height;int positioned;} NativeBounds;
 
 typedef struct NativeApp {void *owner;void (*dispatch)(void *);atomic_int pending,stopped;} NativeApp;
@@ -75,6 +85,10 @@ typedef struct NativeWindow {
     NSEvent *gesture;NSRect caret;
     NSMutableString *marked;NSRange marked_selection;
     NSCursor *cursor;
+    /* The content view holds the material (effect) behind the view. clear
+       tells that paint frames are transparent: the window is or it shows a
+       material. frameless hides the title bar and its buttons. */
+    NSView *container,*effect;int glass,clear,transparent,frameless,shadow_stale;double radius;
 } NativeWindow;
 enum {POPUP=1,POPUP_FOCUSABLE=2,POPUP_TOPMOST=4};
 
@@ -190,10 +204,15 @@ static int edit_for_selector(SEL selector,uint32_t *flags){
 - (void)drawRect:(NSRect)dirty{
     (void)dirty;NativeWindow *s=native;if(!s||s->destroyed)return;
     CGContextRef context=[[NSGraphicsContext currentContext] CGContext];if(!context)return;
-    NativeEvent event={0};event.kind=1;event.context=context;size_event(s,&event);emit(s,&event);
+    NativeEvent event={0};event.kind=1;event.context=context;event.flags=s->clear;size_event(s,&event);emit(s,&event);
+    /* The shadow of a window that is not opaque is made from what it draws. */
+    if(s->shadow_stale&&!s->destroyed&&![s->window isOpaque]){s->shadow_stale=0;[s->window performSelector:@selector(invalidateShadow) withObject:nil afterDelay:0];}
 }
+/* Drags in a hidden title bar are the content's, which moves the window
+   only from its drag regions. */
+- (BOOL)mouseDownCanMoveWindow{return NO;}
 - (void)resetCursorRects{NativeWindow *s=native;if(s&&s->cursor)[self addCursorRect:[self bounds] cursor:s->cursor];}
-- (void)setFrameSize:(NSSize)size{[super setFrameSize:size];if(native)notify_size(native);}
+- (void)setFrameSize:(NSSize)size{[super setFrameSize:size];if(native){native->shadow_stale=1;notify_size(native);}}
 - (void)viewDidChangeBackingProperties{[super viewDidChangeBackingProperties];if(native)notify_size(native);}
 - (void)updateTrackingAreas{
     for(NSTrackingArea *area in [self trackingAreas])[self removeTrackingArea:area];
@@ -205,9 +224,17 @@ static int edit_for_selector(SEL selector,uint32_t *flags){
     NativeWindow *s=native;if(!s)return;retain_window(s);
     NSPoint point=[self local:event];
     if(!input_allowed(s)){release_window(s);return;}
+    zlmw_drag_pressed(s->window,event);
     int hit=query_hit(s,point);
     if(!s->destroyed&&hit==1){
-        if([event clickCount]==2)[s->window performZoom:nil];else [s->window performWindowDragWithEvent:event];
+        if([event clickCount]==2){
+            /* As the user set the title bar's double click. */
+            switch(zlmw_double_click_action()){
+                case 0:[s->window performZoom:nil];break;
+                case 1:[s->window performMiniaturize:nil];break;
+                default:break;
+            }
+        }else if([s->window isMovable])(void)zlmw_drag_start(s->window,event);
         release_window(s);return;
     }
     if(!s->destroyed&&!(s->popup&&!(s->popup&POPUP_FOCUSABLE)))[s->window makeFirstResponder:self];
@@ -340,6 +367,7 @@ static void menu_edit(NativeWindow *s,unichar key,unsigned short code,uint32_t e
 @implementation ZigDelegate
 - (BOOL)windowShouldClose:(NSWindow *)window{(void)window;NativeWindow *s=native;if(s){NativeEvent close={0};close.kind=10;emit(s,&close);}return NO;}
 - (void)windowDidResize:(NSNotification *)note{(void)note;NativeWindow *s=native;if(s){notify_size(s);notify_state(s);}}
+- (void)windowWillMove:(NSNotification *)note{zlmw_drag_will_move([note object]);}
 - (void)windowDidMove:(NSNotification *)note{(void)note;NativeWindow *s=native;if(s){NativeEvent moved={0};moved.kind=22;emit(s,&moved);}}
 - (void)windowDidBecomeKey:(NSNotification *)note{(void)note;NativeWindow *s=native;if(!s)return;NativeEvent focus={0};focus.kind=7;focus.flags=1;emit(s,&focus);notify_state(s);}
 - (void)windowDidResignKey:(NSNotification *)note{
@@ -364,22 +392,36 @@ NativeWindow *zlm_window_create(void *owner,Emit callback,const char *title,uint
     atomic_fetch_add(&live_windows,1);
     s->refs=1;s->owner=owner;s->emit=callback;s->decoration=decoration;s->popup=popup;s->enabled=1;
     @autoreleasepool{
-        NSWindowStyleMask style=decoration||popup?NSWindowStyleMaskBorderless:(NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable);
+        /* A frameless window keeps the title bar, hidden with its buttons
+           under content that fills the window: it has the system's shadow,
+           corners and resize edges, and takes the keyboard. */
+        s->frameless=decoration&&!popup;
+        NSWindowStyleMask style=popup?NSWindowStyleMaskBorderless:(NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable);
         if(resizable&&!popup)style|=NSWindowStyleMaskResizable;
-        if(decoration&&!popup)style|=NSWindowStyleMaskMiniaturizable;
+        if(s->frameless)style|=NSWindowStyleMaskFullSizeContentView;
         ZigWindow *window=[[ZigWindow alloc] initWithContentRect:NSMakeRect(0,0,width?width:1,height?height:1) styleMask:style backing:NSBackingStoreBuffered defer:NO];
         if(!window){free(s);atomic_fetch_sub(&live_windows,1);return NULL;}
         window.takesKeyboard=!popup||(popup&POPUP_FOCUSABLE);
         [window setReleasedWhenClosed:NO];
         [window setAcceptsMouseMovedEvents:YES];
         [window setTitle:[NSString stringWithUTF8String:title]?:@""];
+        [window setTabbingMode:NSWindowTabbingModeDisallowed];
+        if(s->frameless){
+            [window setTitlebarAppearsTransparent:YES];
+            [window setTitleVisibility:NSWindowTitleHidden];
+            for(NSWindowButton button=NSWindowCloseButton;button<=NSWindowZoomButton;button++)[[window standardWindowButton:button] setHidden:YES];
+        }
         [window setContentMinSize:NSMakeSize(min_width,min_height)];
         if(!popup)[window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenPrimary];
         if(popup){[window setLevel:(popup&POPUP_TOPMOST)?NSPopUpMenuWindowLevel:NSFloatingWindowLevel];[window setHasShadow:YES];}
         ZigView *view=[[ZigView alloc] initWithFrame:NSMakeRect(0,0,width?width:1,height?height:1)];
         view->native=s;
+        [view setAutoresizingMask:NSViewWidthSizable|NSViewHeightSizable];
+        NSView *container=[[NSView alloc] initWithFrame:NSMakeRect(0,0,width?width:1,height?height:1)];
+        [container addSubview:view];
         ZigDelegate *delegate=[[ZigDelegate alloc] init];delegate->native=s;
-        [window setContentView:view];[window setDelegate:delegate];
+        [window setContentView:container];[window setDelegate:delegate];
+        s->container=container;s->shadow_stale=1;
         if(parent&&popup)[parent->window addChildWindow:window ordered:NSWindowAbove];
         if(!parent)[window center];
         else{NSRect frame=[parent->window frame];NSRect own=[window frame];[window setFrameOrigin:NSMakePoint(NSMidX(frame)-own.size.width/2,NSMidY(frame)-own.size.height/2)];}
@@ -392,14 +434,15 @@ int zlm_window_destroy(NativeWindow *s){
     retain_window(s);s->destroyed=1;void *owner=s->owner;s->owner=NULL;
     @autoreleasepool{
         NSWindow *window=s->window;
+        zlmw_drag_forget(window);
         s->view->native=NULL;s->delegate->native=NULL;
         /* Native destruction revokes the drop registration. */
         [s->view unregisterDraggedTypes];[s->view setZigDropTarget:nil];
         [window setDelegate:nil];
         NSWindow *parent=[window parentWindow];if(parent)[parent removeChildWindow:window];
         [window orderOut:nil];[window close];
-        [s->view release];[s->delegate release];[window release];
-        s->view=nil;s->delegate=nil;s->window=nil;
+        [s->view release];[s->delegate release];[s->effect release];[s->container release];[window release];
+        s->view=nil;s->delegate=nil;s->effect=nil;s->container=nil;s->window=nil;
     }
     if(owner){NativeEvent event={0};event.kind=11;s->emit(owner,&event);}
     release_window(s);release_window(s);return 1;
@@ -435,7 +478,7 @@ uint32_t zlm_window_state(NativeWindow *s){
     return ([window isVisible]?1u:0u)|([window isMiniaturized]?2u:0u)|(!fullscreen&&[window isZoomed]?4u:0u)|([window isKeyWindow]?8u:0u)|(s->enabled?16u:0u)|
         (fullscreen?32u:0u)|(s->fullscreen_requested?64u:0u)|(topmost?128u:0u)|(s->topmost_requested?256u:0u);
 }
-uint32_t zlm_window_capabilities(NativeWindow *s){(void)s;return 1u|2u|4u|8u|16u|64u|128u|256u|1024u|2048u;}
+uint32_t zlm_window_capabilities(NativeWindow *s){return 1u|2u|4u|8u|16u|64u|128u|256u|1024u|2048u|(s->clear?4096u:0u)|8192u;}
 static double primary_height(void){NSArray<NSScreen *> *screens=[NSScreen screens];return [screens count]?[[screens objectAtIndex:0] frame].size.height:0;}
 void zlm_window_bounds(NativeWindow *s,NativeBounds *out){
     NSRect content=[s->window contentRectForFrameRect:[s->window frame]];
@@ -482,8 +525,9 @@ void zlm_window_cancel_composition(NativeWindow *s){
 int zlm_window_interaction(NativeWindow *s,int edge){
     if(edge!=-1)return 1;
     if(!s->gesture)return 4;
-    @autoreleasepool{[s->window performWindowDragWithEvent:s->gesture];}
-    s->gesture=nil;return s->destroyed?2:0;
+    int started;
+    @autoreleasepool{started=zlmw_drag_start(s->window,s->gesture);}
+    s->gesture=nil;return s->destroyed?2:started==2?4:0;
 }
 void zlm_window_text_mode(NativeWindow *s,int keyboard){zlm_window_cancel_composition(s);s->keyboard=keyboard;}
 
@@ -608,6 +652,7 @@ int zlm_window_traits(NativeWindow *s,int resizable,int movable,int minimizable,
             style=closable?style|NSWindowStyleMaskClosable:style&~NSWindowStyleMaskClosable;
             [window setStyleMask:style];
             [[window standardWindowButton:NSWindowZoomButton] setEnabled:maximizable&&resizable];
+            if(s->frameless)for(NSWindowButton button=NSWindowCloseButton;button<=NSWindowZoomButton;button++)[[window standardWindowButton:button] setHidden:YES];
         }else if(!s->popup)[window setStyleMask:resizable?style|NSWindowStyleMaskResizable:style&~NSWindowStyleMaskResizable];
         [window setMovable:movable];
         if(!s->popup)[window setCollectionBehavior:maximizable?NSWindowCollectionBehaviorFullScreenPrimary:NSWindowCollectionBehaviorFullScreenNone];
@@ -625,3 +670,66 @@ void zlm_window_attention(NativeWindow *s,int enabled){
     if(attention_request){[NSApp cancelUserAttentionRequest:attention_request];attention_request=0;}
     if(enabled&&![NSApp isActive])attention_request=[NSApp requestUserAttention:NSInformationalRequest];
 }
+
+static void update_clear(NativeWindow *s){
+    s->clear=s->transparent||s->effect!=nil;
+    [s->view setNeedsDisplay:YES];
+}
+/* A transparent window's frames keep their alpha over a clear window, and
+   a frameless one is cut to corners of radius DIP. */
+void zlm_window_chrome(NativeWindow *s,int transparent,double radius){
+    if(s->destroyed)return;
+    @autoreleasepool{
+        if(transparent){[s->window setOpaque:NO];[s->window setBackgroundColor:[NSColor clearColor]];s->transparent=1;}
+        if(radius>0&&s->frameless){s->radius=radius;zlmw_round(s->window,s->container,s->effect,s->glass,radius);}
+        update_clear(s);
+    }
+}
+/* The material behind the content: an NSVisualEffectMaterial, or glass of
+   style glass_style (0 regular, 1 clear) where macOS has it, material
+   standing in for it elsewhere; a negative material and style remove it.
+   Frames are transparent while the window shows one. */
+void zlm_window_material(NativeWindow *s,int material,int glass_style){
+    if(s->destroyed)return;
+    @autoreleasepool{
+        s->effect=zlmw_set_material(s->container,s->view,s->effect,&s->glass,s->radius,material,glass_style);
+        update_clear(s);
+    }
+}
+void zlm_window_active_appearance(NativeWindow *s,int enabled){if(!s->destroyed)@autoreleasepool{zlmw_active_appearance(s->window,enabled);}}
+/* Test hooks for chrome: the material (-1 none, 0 visual effect, 1 glass)
+   with its material or style and corners; the window's opacity and
+   whether its title bar buttons show; a press of the left button at the
+   view point (x, y), delivered as AppKit delivers a click. */
+int zlm_test_material(NativeWindow *s,int *style,double *radius){*style=0;*radius=0;return zlmw_test_material(s->effect,s->glass,style,radius);}
+double zlm_test_container_radius(NativeWindow *s){return [s->container layer]?[[s->container layer] cornerRadius]:0;}
+int zlm_test_window_opaque(NativeWindow *s){return [s->window isOpaque];}
+int zlm_test_buttons_hidden(NativeWindow *s){
+    for(NSWindowButton button=NSWindowCloseButton;button<=NSWindowZoomButton;button++){NSButton *b=[s->window standardWindowButton:button];if(b&&![b isHidden])return 0;}
+    return 1;
+}
+int zlm_test_titled(NativeWindow *s){return ([s->window styleMask]&NSWindowStyleMaskTitled)!=0;}
+/* The release goes into the queue first, for a tracking loop that the
+   press may start, then the queue is drained, as the run loop would. */
+void zlm_test_press(NativeWindow *s,double x,double y,int clicks){
+    @autoreleasepool{
+        NSPoint at=[s->view convertPoint:NSMakePoint(x,y) toView:nil];
+        const NSTimeInterval now=[[NSProcessInfo processInfo] systemUptime];
+        NSEvent *down=[NSEvent mouseEventWithType:NSEventTypeLeftMouseDown location:at modifierFlags:0 timestamp:now windowNumber:[s->window windowNumber] context:nil eventNumber:0 clickCount:clicks pressure:1];
+        NSEvent *up=[NSEvent mouseEventWithType:NSEventTypeLeftMouseUp location:at modifierFlags:0 timestamp:now windowNumber:[s->window windowNumber] context:nil eventNumber:0 clickCount:clicks pressure:0];
+        [NSApp postEvent:up atStart:NO];
+        [NSApp sendEvent:down];
+        NSEvent *event;
+        while((event=[NSApp nextEventMatchingMask:NSEventMaskAny untilDate:nil inMode:NSDefaultRunLoopMode dequeue:YES]))[NSApp sendEvent:event];
+    }
+}
+/* A press of the left button at the view point (x, y) noted for a drag
+   region, without delivering it, and a drag asked for with it. */
+void zlm_test_drag_begin(NativeWindow *s,double x,double y){
+    @autoreleasepool{
+        NSPoint at=[s->view convertPoint:NSMakePoint(x,y) toView:nil];
+        NSEvent *down=[NSEvent mouseEventWithType:NSEventTypeLeftMouseDown location:at modifierFlags:0 timestamp:[[NSProcessInfo processInfo] systemUptime] windowNumber:[s->window windowNumber] context:nil eventNumber:0 clickCount:1 pressure:1];
+        zlmw_drag_pressed(s->window,down);
+    }
+}
+int zlm_test_drag_start(NativeWindow *s){return zlmw_drag_start(s->window,nil);}
