@@ -84,6 +84,7 @@ typedef struct ZwkRemoteGrant {
 - (void)_hideFindUI;
 - (void)_setFindDelegate:(id)delegate;
 @end
+typedef struct ZwkInitializerState ZwkInitializerState;
 @interface ZwkPage : NSObject <WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler> {
 @public
     void *owner;
@@ -139,6 +140,9 @@ typedef struct ZwkRemoteGrant {
     ZwkFindGate *find;
     /* The budget of captures, PDFs and clears, when the app allows them. */
     ZwkCaptureBudget *capture;
+    /* The document's bootstrap scripts, and the app's initializer. */
+    WKUserScript *private_bootstrap, *public_bootstrap;
+    struct ZwkInitializerState *initializers;
 }
 @end
 static void resources_cancel_all(ZwkPage *s);
@@ -152,6 +156,10 @@ static void remote_free(ZwkPage *s);
 static void find_gate_close(ZwkFindGate *g);
 static void capture_cancel_all(ZwkPage *s);
 static void find_terminal(ZwkPage *s,BOOL found,NSUInteger count);
+static void initializers_free(ZwkInitializerState *owner);
+static void initializers_cancel_all(ZwkPage *s);
+static BOOL initializers_allow_navigation(ZwkPage *s);
+static void scripts_install(ZwkPage *s);
 
 static BOOL live(ZwkPage *s) { return !s->closed && !s->recovering && s->owner; }
 static ZwkPage *page_of(ZwkState *s) { return (__bridge ZwkPage *)(void *)s; }
@@ -444,9 +452,9 @@ static int prepare_document(ZwkPage *s) {
     resources_cancel_all(s);
     if (!s->pending_navigation || s->generation!=generation) return live(s)?ZWK_NAVIGATION_CANCELLED:ZWK_CLOSED;
     ++s->generation; s->failed=NO; s->dom_ready=NO;
-    [s->controller removeAllUserScripts];
-    [s->controller addUserScript:[[WKUserScript alloc] initWithSource:private_script injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES inContentWorld:s->world]];
-    [s->controller addUserScript:[[WKUserScript alloc] initWithSource:public_script injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES inContentWorld:WKContentWorld.pageWorld]];
+    s->private_bootstrap=[[WKUserScript alloc] initWithSource:private_script injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES inContentWorld:s->world];
+    s->public_bootstrap=[[WKUserScript alloc] initWithSource:public_script injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES inContentWorld:WKContentWorld.pageWorld];
+    scripts_install(s);
     return ZWK_OK;
 }
 /* Starts a navigation: prepares the next document, then issues the load.
@@ -454,6 +462,7 @@ static int prepare_document(ZwkPage *s) {
  * same-document one keeps its document. ready first tells the owner the page
  * exists. */
 static int navigation_submit(ZwkPage *s,int kind,NSString *uri,WKBackForwardListItem *item,BOOL ready) {
+    if (!initializers_allow_navigation(s)) return ZWK_NAVIGATION_PENDING;
     if (s->pending_navigation || s->load_started || s->view.loading) return ZWK_NAVIGATION_PENDING;
     if (!uri || [uri lengthOfBytesUsingEncoding:NSUTF8StringEncoding]>16384) return ZWK_INVALID;
     s->pending_navigation=YES; s->authorized=NO; s->navigation=nil;
@@ -523,6 +532,7 @@ static void *history_context=&history_context;
     if (local_budget) zwk_local_budget_release(local_budget);
     remote_free(self);
     if (capture) zwk_capture_budget_release(capture);
+    initializers_free(initializers);
     atomic_fetch_sub(&live_states,1);
 }
 
@@ -1247,6 +1257,203 @@ static void set_muted(ZwkPage *s,BOOL value) {
     [s->view _setPageMuted:value?(state|MEDIA_AUDIO_MUTED):(state&~(NSUInteger)MEDIA_AUDIO_MUTED)];
 }
 
+/* Document initializers: the app's trusted script for every future document,
+ * as the Linux backend registers it. The page keeps the current script and
+ * installs it after its own bootstrap scripts whenever it prepares a
+ * document; replacing it takes effect from the next document. WKWebView
+ * removes user scripts only all together, so a change reinstalls the set. */
+typedef struct ZwkInitializerBudget {
+    atomic_uint refs;
+    size_t limit;
+    _Atomic size_t used,peak;
+} ZwkInitializerBudget;
+typedef struct ZwkInitializerOperation ZwkInitializerOperation;
+struct ZwkInitializerState {
+    ZwkInitializerBudget *budget;
+    void *current; /* A retained WKUserScript, or NULL. */
+    ZwkInitializerOperation *pending;
+    BOOL blocked;
+};
+struct ZwkInitializerOperation {
+    ZwkState *state;
+    ZwkInitializerBudget *budget;
+    ZwkInitializerNotify notify;
+    uint64_t token;
+    char *source;
+    size_t bytes;
+    BOOL all_frames,submitted,cancelled;
+};
+static atomic_uint initializer_budgets,initializer_owners,initializer_operations;
+static _Atomic size_t initializer_bytes;
+void zwk_initializer_budget_retain(void *context) {
+    ZwkInitializerBudget *budget=context; atomic_fetch_add(&budget->refs,1);
+}
+void zwk_initializer_budget_unref(void *context) {
+    ZwkInitializerBudget *budget=context;
+    if (atomic_fetch_sub(&budget->refs,1)!=1) return;
+    atomic_fetch_sub(&initializer_bytes,sizeof(*budget)); free(budget); atomic_fetch_sub(&initializer_budgets,1);
+}
+_Bool zwk_initializer_budget_reserve(void *context,size_t bytes) {
+    ZwkInitializerBudget *budget=context; size_t used=atomic_load(&budget->used),next;
+    do {
+        if (bytes>budget->limit || used>budget->limit-bytes) return 0;
+        next=used+bytes;
+    } while (!atomic_compare_exchange_weak(&budget->used,&used,next));
+    size_t peak=atomic_load(&budget->peak);
+    while (peak<next && !atomic_compare_exchange_weak(&budget->peak,&peak,next)) {}
+    atomic_fetch_add(&initializer_bytes,bytes); return 1;
+}
+void zwk_initializer_budget_release(void *context,size_t bytes) {
+    ZwkInitializerBudget *budget=context;
+    atomic_fetch_sub(&budget->used,bytes); atomic_fetch_sub(&initializer_bytes,bytes);
+}
+void *zwk_initializer_budget_create(size_t limit,int32_t *status) {
+    *status=ZWK_INVALID;
+    if (!limit || limit>8u*1024u*1024u) return NULL;
+    if (limit<sizeof(ZwkInitializerBudget)) { *status=ZWK_INITIALIZER_BUDGET; return NULL; }
+    ZwkInitializerBudget *budget=calloc(1,sizeof(*budget)); if (!budget) { *status=ZWK_OOM; return NULL; }
+    atomic_init(&budget->refs,1); budget->limit=limit; atomic_init(&budget->used,sizeof(*budget)); atomic_init(&budget->peak,sizeof(*budget));
+    atomic_fetch_add(&initializer_budgets,1); atomic_fetch_add(&initializer_bytes,sizeof(*budget)); *status=ZWK_OK; return budget;
+}
+size_t zwk_initializer_budget_limit(void *context) { return ((ZwkInitializerBudget *)context)->limit; }
+void zwk_initializer_counts(uint32_t *budgets,uint32_t *owners,uint32_t *operations,uint64_t *bytes) {
+    *budgets=atomic_load(&initializer_budgets); *owners=atomic_load(&initializer_owners);
+    *operations=atomic_load(&initializer_operations); *bytes=atomic_load(&initializer_bytes);
+}
+static void initializers_free(ZwkInitializerState *owner) {
+    if (!owner) return;
+    ZwkInitializerBudget *budget=owner->budget;
+    if (owner->current) CFRelease(owner->current);
+    free(owner); zwk_initializer_budget_release(budget,sizeof(*owner)); atomic_fetch_sub(&initializer_owners,1); zwk_initializer_budget_unref(budget);
+}
+static int initializers_owner(ZwkPage *s,ZwkInitializerBudget *budget) {
+    if (s->initializers) return s->initializers->budget==budget?ZWK_OK:ZWK_INVALID;
+    if (!zwk_initializer_budget_reserve(budget,sizeof(ZwkInitializerState))) return ZWK_INITIALIZER_BUDGET;
+    ZwkInitializerState *owner=calloc(1,sizeof(*owner));
+    if (!owner) { zwk_initializer_budget_release(budget,sizeof(*owner)); return ZWK_OOM; }
+    zwk_initializer_budget_retain(budget); owner->budget=budget; s->initializers=owner; atomic_fetch_add(&initializer_owners,1); return ZWK_OK;
+}
+static BOOL initializers_allow_navigation(ZwkPage *s) {
+    return !s->initializers || (!s->initializers->pending && !s->initializers->blocked);
+}
+_Bool zwk_initializers_blocked(ZwkState *state) { ZwkPage *s=page_of(state); return s->initializers && s->initializers->blocked; }
+static void initializer_operation_free(ZwkInitializerOperation *op) {
+    ZwkState *state=op->state; ZwkInitializerBudget *budget=op->budget; const size_t bytes=op->bytes;
+    free(op->source); free(op); zwk_initializer_budget_release(budget,bytes); atomic_fetch_sub(&initializer_operations,1);
+    CFRelease(state); zwk_initializer_budget_unref(budget);
+}
+static BOOL initializer_scalar(const uint16_t *source,uint32_t units,uint32_t *index,uint32_t *scalar) {
+    uint32_t value=source[(*index)++];
+    if (!value || (value>=0xdc00 && value<=0xdfff)) return NO;
+    if (value>=0xd800 && value<=0xdbff) {
+        if (*index==units) return NO;
+        const uint32_t low=source[(*index)++]; if (low<0xdc00 || low>0xdfff) return NO;
+        value=0x10000+((value-0xd800)<<10)+(low-0xdc00);
+    }
+    *scalar=value; return YES;
+}
+/* Removes every user script, then installs the document's bootstrap scripts
+ * and the app's initializer after them. */
+static void scripts_install(ZwkPage *s) {
+    if (!s->controller) return;
+    [s->controller removeAllUserScripts];
+    if (s->private_bootstrap) [s->controller addUserScript:s->private_bootstrap];
+    if (s->public_bootstrap) [s->controller addUserScript:s->public_bootstrap];
+    if (s->initializers && s->initializers->current) [s->controller addUserScript:(__bridge WKUserScript *)s->initializers->current];
+}
+int zwk_initializers_prepare(ZwkState *state,const ZwkInitializerInput *input,uint64_t token,ZwkInitializerNotify done) {
+    ZwkPage *s=page_of(state);
+    if (!live(s)) return ZWK_CLOSED;
+    if (!input || !input->budget) return ZWK_INVALID;
+    if (!initializers_allow_navigation(s)) return ZWK_NAVIGATION_PENDING;
+    if (token && (!s->view || s->pending_navigation || s->load_started || s->view.loading)) return ZWK_NAVIGATION_PENDING;
+    if (input->units>512u*1024u || (!input->source && input->units)) return ZWK_INVALID;
+    size_t length=0;
+    if (input->source) {
+        if (input->source[input->units]) return ZWK_INVALID;
+        for (uint32_t index=0;index<input->units;) {
+            uint32_t scalar; if (!initializer_scalar(input->source,input->units,&index,&scalar)) return ZWK_INVALID;
+            length+=scalar<0x80?1:scalar<0x800?2:scalar<0x10000?3:4;
+        }
+        ++length;
+    }
+    int result=initializers_owner(s,input->budget); if (result!=ZWK_OK) return result;
+    const size_t bytes=sizeof(ZwkInitializerOperation)+length;
+    if (!zwk_initializer_budget_reserve(input->budget,bytes)) return ZWK_INITIALIZER_BUDGET;
+    ZwkInitializerOperation *op=calloc(1,sizeof(*op));
+    if (!op) { zwk_initializer_budget_release(input->budget,bytes); return ZWK_OOM; }
+    if (length) {
+        op->source=malloc(length);
+        if (!op->source) { free(op); zwk_initializer_budget_release(input->budget,bytes); return ZWK_OOM; }
+        char *out=op->source;
+        for (uint32_t index=0;index<input->units;) {
+            uint32_t scalar; initializer_scalar(input->source,input->units,&index,&scalar);
+            if (scalar<0x80) *out++=(char)scalar;
+            else if (scalar<0x800) { *out++=(char)(0xc0|(scalar>>6)); *out++=(char)(0x80|(scalar&63)); }
+            else if (scalar<0x10000) { *out++=(char)(0xe0|(scalar>>12)); *out++=(char)(0x80|((scalar>>6)&63)); *out++=(char)(0x80|(scalar&63)); }
+            else { *out++=(char)(0xf0|(scalar>>18)); *out++=(char)(0x80|((scalar>>12)&63)); *out++=(char)(0x80|((scalar>>6)&63)); *out++=(char)(0x80|(scalar&63)); }
+        }
+        *out=0;
+    }
+    op->state=state; op->budget=input->budget; op->token=token; op->all_frames=input->frames!=0; op->notify=done; op->bytes=bytes;
+    CFRetain(state); zwk_initializer_budget_retain(op->budget); s->initializers->pending=op; atomic_fetch_add(&initializer_operations,1);
+    return ZWK_OK;
+}
+void zwk_initializers_abandon(ZwkState *state) {
+    ZwkPage *s=page_of(state);
+    ZwkInitializerOperation *op=s->initializers?s->initializers->pending:NULL;
+    if (!op || op->submitted) return;
+    s->initializers->pending=NULL; initializer_operation_free(op);
+}
+void zwk_initializers_cancel(ZwkState *state,uint64_t token) {
+    ZwkPage *s=page_of(state);
+    ZwkInitializerOperation *op=s->initializers?s->initializers->pending:NULL;
+    if (op && op->token==token) op->cancelled=YES;
+}
+_Bool zwk_initializers_try_cancel(ZwkState *state,uint64_t token) {
+    ZwkPage *s=page_of(state);
+    ZwkInitializerOperation *op=s->initializers?s->initializers->pending:NULL;
+    if (!op || op->token!=token || op->submitted || op->cancelled) return 0;
+    op->cancelled=YES; return 1;
+}
+static void initializers_cancel_all(ZwkPage *s) {
+    ZwkInitializerOperation *op=s->initializers?s->initializers->pending:NULL;
+    if (!op) return;
+    op->cancelled=YES;
+    if (!op->submitted) { s->initializers->pending=NULL; initializer_operation_free(op); }
+}
+void zwk_initializers_activate(ZwkState *state) {
+    ZwkPage *s=page_of(state);
+    ZwkInitializerOperation *op=s->initializers?s->initializers->pending:NULL;
+    if (!op || op->submitted) return;
+    CFRetain(state);
+    ZwkInitializerState *owner=s->initializers; uint32_t kind=1; int32_t result=ZWK_OK;
+    @autoreleasepool {
+        if (live(s) && !op->cancelled) {
+            WKUserScript *candidate=nil;
+            NSString *source=op->source?[NSString stringWithUTF8String:op->source]:nil;
+            if (source) candidate=[[WKUserScript alloc] initWithSource:source injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:!op->all_frames inContentWorld:WKContentWorld.pageWorld];
+            if (op->source && !candidate) { kind=2; result=ZWK_NATIVE_FAILED; }
+            else {
+                op->submitted=YES;
+                void *old=owner->current;
+                owner->current=candidate?(void *)CFBridgingRetain(candidate):NULL;
+                if (old) CFRelease(old);
+                /* The current document keeps the scripts it started with in
+                 * effect; the set changes for the next one. */
+                scripts_install(s);
+                kind=0;
+            }
+        }
+    }
+    owner->pending=NULL;
+    const uint64_t token=op->token; ZwkInitializerNotify done=op->notify;
+    initializer_operation_free(op);
+    if (live(s) && token && done) done(s->owner,token,kind,result);
+    else if (!token && kind!=0 && live(s)) owner->blocked=YES;
+    CFRelease(state);
+}
+
 /* Persistent profiles. A profile's WKWebsiteDataStore keeps its data under
  * the prepared directories through the engine's data store configuration;
  * every View of the profile shares the one store. The store carries a keeper
@@ -1854,7 +2061,7 @@ int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPage
     *out=NULL;
     if (!options || !options->html || !window || options->max_pending==0 || options->max_pending>16 || options->max_result_bytes==0 ||
         options->max_result_bytes>1024*1024 || strlen(options->html)>16*1024*1024) return ZWK_INVALID;
-    if ((options->remote && (options->local || *options->html)) || options->region || options->initializers) return ZWK_INVALID;
+    if ((options->remote && (options->local || *options->html)) || options->region) return ZWK_INVALID;
     void *profile_store_ref=NULL;
     if (options->profile_context && zwk_profile_context_get(options->profile_context,&profile_store_ref)) return ZWK_CLOSED;
     @autoreleasepool {
@@ -1906,9 +2113,18 @@ int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPage
 #pragma clang diagnostic pop
         }
         [s->controller addScriptMessageHandler:s contentWorld:s->world name:@"ziggurat"];
+        if (options->initializers) {
+            const int result=zwk_initializers_prepare((__bridge ZwkState *)s,options->initializers,0,NULL);
+            if (result!=ZWK_OK) { [s->controller removeAllScriptMessageHandlers]; local_free(s); remote_free(s); return result; }
+        }
         ZwkWebView *view=[[ZwkWebView alloc] initWithFrame:host.bounds configuration:configuration];
-        if (!view) { [s->controller removeAllScriptMessageHandlers]; local_free(s); remote_free(s); return ZWK_NATIVE_FAILED; }
+        if (!view) {
+            zwk_initializers_abandon((__bridge ZwkState *)s);
+            [s->controller removeAllScriptMessageHandlers]; local_free(s); remote_free(s); return ZWK_NATIVE_FAILED;
+        }
         s->view=view; atomic_fetch_add(&live_views,1);
+        /* A failed registration blocks the first document. */
+        if (options->initializers) zwk_initializers_activate((__bridge ZwkState *)s);
         view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
         view.navigationDelegate=s; view.UIDelegate=s;
         /* 1 swipes between pages, 2 pinches; both off unless asked. */
@@ -1958,6 +2174,7 @@ void zwk_close(ZwkState *state) {
         }
         if (s->find) find_gate_close(s->find);
         capture_cancel_all(s);
+        initializers_cancel_all(s);
         ZwkWebView *view=s->view; s->view=nil;
         if (view) {
             if ([view respondsToSelector:@selector(_setFindDelegate:)]) [view _setFindDelegate:nil];
@@ -2196,6 +2413,7 @@ int zwk_viewport(ZwkState *state,int32_t left,int32_t top,int32_t right,int32_t 
 int zwk_recovery_begin(ZwkState *state) {
     ZwkPage *s=page_of(state);
     if (s->closed) return ZWK_CLOSED;
+    if (s->initializers && s->initializers->pending) return ZWK_NAVIGATION_PENDING;
     if (s->recovering) return ZWK_FULL;
     s->recovering=YES; CFRetain(state); return ZWK_OK;
 }
@@ -2287,21 +2505,6 @@ void zwk_content_filter_unref(void *filter) { if (filter) CFRelease(filter); }
 const char *zwk_content_filter_identifier(void *filter) { return ((__bridge WKContentRuleList *)filter).identifier.UTF8String; }
 uint32_t zwk_content_compile_count(void) { return atomic_load(&live_compiles); }
 
-/* Contracts this backend does not implement yet. Each refuses or reports
- * nothing; the Zig side refuses the options that would reach them. */
-void zwk_initializer_counts(uint32_t *budgets,uint32_t *owners,uint32_t *handlers,uint64_t *bytes) { *budgets=0; *owners=0; *handlers=0; *bytes=0; }
-int zwk_initializers_prepare(ZwkState *s,const ZwkInitializerInput *input,uint64_t token,ZwkInitializerNotify callback) { (void)s; (void)input; (void)token; (void)callback; return ZWK_INVALID; }
-void zwk_initializers_activate(ZwkState *s) { (void)s; }
-void zwk_initializers_abandon(ZwkState *s) { (void)s; }
-void zwk_initializers_cancel(ZwkState *s,uint64_t token) { (void)s; (void)token; }
-_Bool zwk_initializers_try_cancel(ZwkState *s,uint64_t token) { (void)s; (void)token; return 0; }
-_Bool zwk_initializers_blocked(ZwkState *s) { (void)s; return 0; }
-void *zwk_initializer_budget_create(size_t limit,int32_t *status) { (void)limit; *status=0; return NULL; }
-size_t zwk_initializer_budget_limit(void *budget) { (void)budget; return 0; }
-void zwk_initializer_budget_retain(void *budget) { (void)budget; }
-void zwk_initializer_budget_unref(void *budget) { (void)budget; }
-_Bool zwk_initializer_budget_reserve(void *budget,size_t bytes) { (void)budget; (void)bytes; return 0; }
-void zwk_initializer_budget_release(void *budget,size_t bytes) { (void)budget; (void)bytes; }
 
 /* Text search, as the Linux backend's find controller keeps it: a budget the
  * View owns bounds the pages searching and their commands; each page has one

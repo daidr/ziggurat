@@ -819,7 +819,7 @@ fn nativeCancelScript(native: *anyopaque, token: u64) void {
 }
 fn validateBackendOptions(options: Options) !void {
     if (is_macos) {
-        if (options.request_policy_extension != null or options.file_streams != null or options.document_initializers.len != 0) return error.UnsupportedCapability;
+        if (options.request_policy_extension != null or options.file_streams != null) return error.UnsupportedCapability;
         // WKWebView never lets the app add a request header: no Bearer credential.
         if (options.remote) |remote| if (remote.request_credentials.len != 0) return error.UnsupportedCapability;
         // The engine's sign-in and certificate answers are not taken here yet.
@@ -4409,8 +4409,8 @@ test "optional initializer source owns and encodes input and every allocation fa
 }
 test "initializer configuration is cold by default and unsupported platforms reject before allocation" {
     try std.testing.expect((try initializer_owner.Config.create(std.testing.failing_allocator, &.{}, .{}, null)) == null);
-    try std.testing.expectEqual(@import("builtin").os.tag == .windows or @import("builtin").os.tag == .linux, backendCapabilities().document_initializers);
-    if (@import("builtin").os.tag != .windows and @import("builtin").os.tag != .linux) {
+    try std.testing.expectEqual(@import("builtin").os.tag == .windows or @import("builtin").os.tag == .linux or @import("builtin").os.tag == .macos, backendCapabilities().document_initializers);
+    if (@import("builtin").os.tag != .windows and @import("builtin").os.tag != .linux and @import("builtin").os.tag != .macos) {
         try std.testing.expectError(error.UnsupportedCapability, initializer_owner.Config.create(std.testing.failing_allocator, &.{.{ .body = "return;", .origins = &.{"https://example.test"} }}, .{}, null));
         try std.testing.expectError(error.UnsupportedCapability, initializer_owner.Controller.create(std.testing.failing_allocator, .{}, null, 0));
         try std.testing.expectError(error.UnsupportedCapability, OwnedConfig.init(std.testing.failing_allocator, .{ .html = "", .document_initializers = &.{.{ .body = "return;", .origins = &.{"https://example.test"} }} }));
