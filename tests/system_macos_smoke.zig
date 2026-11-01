@@ -190,6 +190,12 @@ const State = struct {
         return .{ .title = title, .key = key, .modifiers = modifiers, .state = state, .enabled = enabled != 0, .image = image != 0 };
     }
     /// Takes a pointer: a by-value parameter's title would not outlive the call.
+    fn check(ok: bool, what: []const u8) !void {
+        if (!ok) {
+            std.debug.print("check failed: {s}\n", .{what});
+            return error.TestUnexpectedResult;
+        }
+    }
     fn titleOf(value: anytype) []const u8 {
         return std.mem.sliceTo(&value.title, 0);
     }
@@ -283,12 +289,12 @@ const State = struct {
                 try self.owner.showMessage(10, .{ .title = "Unsaved", .message = "Save changes / 保存更改？", .buttons = &buttons, .default_button = 0, .cancel_button = 2, .kind = .question });
                 try std.testing.expectError(error.MessageAlreadyPending, self.owner.showMessage(99, .{ .message = "x", .buttons = &buttons }));
                 const native = self.owner.message_dialog.native.?;
-                try std.testing.expect(zsm_message_is_sheet(native) != 0);
+                try check(zsm_message_is_sheet(native) != 0, "alert is a sheet");
                 var default: c_int = 0;
                 var destructive: c_int = 0;
-                try std.testing.expect(zsm_message_button(native, 0, &default, &destructive) != 0 and default != 0 and destructive == 0);
-                try std.testing.expect(zsm_message_button(native, 1, &default, &destructive) != 0 and default == 0 and destructive != 0);
-                try std.testing.expect(zsm_message_key(native, "\x1b", 0) == 1);
+                try check(zsm_message_button(native, 0, &default, &destructive) != 0 and default != 0 and destructive == 0, "Save is the default");
+                try check(zsm_message_button(native, 1, &default, &destructive) != 0 and default == 0 and destructive != 0, "Discard is destructive");
+                try check(zsm_message_key(native, "\x1b", 0) == 1, "Escape presses Cancel");
             },
             .message_no_cancel => {
                 if (self.owner.message_dialog.native == null) {
