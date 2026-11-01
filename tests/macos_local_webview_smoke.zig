@@ -200,8 +200,8 @@ fn run(allocator: std.mem.Allocator) !void {
 }
 
 /// A site whose document and other paths come from the app's handler, with
-/// grants beyond the default policy: a request header, POST with the site's
-/// Origin, a response header, a deferred answer and a request left
+/// grants beyond the default policy: a request header, a POST that WKWebView
+/// sends without Origin and the policy so refuses, a response header, a deferred answer and a request left
 /// unanswered, which the View answers 404.
 const dynamic_html =
     \\<!doctype html><script>
@@ -299,7 +299,7 @@ fn dynamic(allocator: std.mem.Allocator) !void {
     if (probe.err) |err| return err;
     const text = probe.result[0..probe.result_len];
     std.debug.print("macOS dynamic site reports \"{s}\"\n", .{text});
-    try std.testing.expectEqualStrings("200 plain 42 granted denied posted slow 404", text);
+    try std.testing.expectEqualStrings("200 plain 42 granted denied denied slow 404", text);
     try std.testing.expectEqual(@as(u32, 1), probe.documents);
 }
 
