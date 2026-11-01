@@ -115,6 +115,8 @@ const State = struct {
     url_lengths: [3]usize = @splat(0),
     stage: usize = 0,
     failure: ?anyerror = null,
+    /// Thirty days on: the engine caps a cookie's life at about 400 days.
+    expires: i64 = 0,
 
     fn url(self: *State, which: usize, path: []const u8) []const u8 {
         const text = std.fmt.bufPrint(&self.urls[which], "{s}{s}", .{ self.origin, path }) catch unreachable;
@@ -171,7 +173,10 @@ const State = struct {
             4 => {
                 try self.expect(result, "lasting,session");
                 const row = find(result.cookies.rows, "lasting").?;
-                if (row.same_site != .strict or row.expires == null or @abs(row.expires.? - 4102444800) > 1) return error.WrongLastingCookie;
+                if (row.same_site != .strict or row.expires == null or @abs(row.expires.? - self.expires) > 1) {
+                    std.debug.print("lasting: same_site={s} expires={?d} want {d}\n", .{ @tagName(row.same_site), row.expires, self.expires });
+                    return error.WrongLastingCookie;
+                }
             },
             5 => try self.expect(result, "lasting,secure,session"),
             6 => {
@@ -210,7 +215,7 @@ const State = struct {
         const done = self.completion();
         switch (self.stage) {
             0 => _ = try store.set(.{ .name = "session", .value = "s1", .domain = "127.0.0.1", .path = "/", .http_only = true }, done),
-            1 => _ = try store.set(.{ .name = "lasting", .value = "l1", .domain = "127.0.0.1", .path = "/sub", .expires = 4102444800, .same_site = .strict }, done),
+            1 => _ = try store.set(.{ .name = "lasting", .value = "l1", .domain = "127.0.0.1", .path = "/sub", .expires = self.expires, .same_site = .strict }, done),
             2 => _ = try store.set(.{ .name = "secure", .value = "x", .domain = "127.0.0.1", .path = "/", .secure = true, .same_site = .none }, done),
             // Only the root path, and Secure only over https.
             3 => _ = try store.query(.{ .url = self.url(0, "/") }, done),
@@ -227,7 +232,7 @@ const State = struct {
             8 => _ = try store.query(.{ .url = self.url(0, "/") }, done),
             9 => _ = try store.deleteKey(.{ .name = "lasting", .domain = "127.0.0.1", .path = "/sub" }, done),
             10 => _ = try store.listAll(done),
-            11 => _ = try store.replaceAll(&.{ .{ .name = "a", .value = "1", .domain = "127.0.0.1", .path = "/" }, .{ .name = "b", .value = "2", .domain = "127.0.0.1", .path = "/", .expires = 4102444800 } }, done),
+            11 => _ = try store.replaceAll(&.{ .{ .name = "a", .value = "1", .domain = "127.0.0.1", .path = "/" }, .{ .name = "b", .value = "2", .domain = "127.0.0.1", .path = "/", .expires = self.expires } }, done),
             12 => _ = try store.listAll(done),
             13 => _ = try store.clear(.entire_profile_cookies, done),
             14 => _ = try store.listAll(done),
@@ -288,7 +293,7 @@ pub fn main() !void {
     {
         const app = try z.App.init(allocator);
         defer app.deinit();
-        var state: State = .{ .app = app, .server = &server, .origin = origin, .profile = try web.Profile.create(allocator, app, &preparation.value.?, .{}) };
+        var state: State = .{ .app = app, .server = &server, .origin = origin, .expires = zio.timestamp() + 30 * std.time.s_per_day, .profile = try web.Profile.create(allocator, app, &preparation.value.?, .{}) };
         defer if (state.profile) |profile| profile.close() catch unreachable;
         state.store = try CookieStore.create(allocator, app, state.profile.?, .{ .allow_write = true, .allow_clear = true, .allow_read_all = true, .allow_replace_all = true });
         defer if (state.store) |store| {
