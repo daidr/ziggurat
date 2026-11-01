@@ -1543,6 +1543,7 @@ pub const View = struct {
     pub const editableText = editable_controls.editableText;
     pub const pointerArea = pointer_controls.pointerArea;
     pub const popoverMenu = menu_controls.popoverMenu;
+    pub const popoverMenuButton = menu_controls.popoverMenuButton;
     pub const menuItem = menu_controls.menuItem;
     pub const submenu = menu_controls.submenu;
     pub const menuSeparator = menu_controls.menuSeparator;

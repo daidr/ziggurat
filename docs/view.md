@@ -195,6 +195,8 @@ try v.end();
 - `menuItem(label, options, style)` 在选中它的那一遍返回 true（按下、Enter 或 Space），菜单随之关闭，焦点回到打开菜单之前的控件。`MenuItemOptions.checked` 非空时是复选项，加上 `radio` 画成单选的圆点；`shortcut` 只显示在项的末端并作为描述朗读，快捷键本身用 `bindKey` 绑定。禁用的项画成灰色，不能高亮，也不能选择。
 - `submenu(label, style)` 加一项并开始它的子菜单，与 `end` 配对，子菜单显示时返回 true。子菜单放在这一项的末端一侧、与它顶部对齐，放不下时翻到另一侧；顶层菜单在右下放不下时向左、向上翻，并夹在窗口内。`menuSeparator()` 在两组项之间画一条线。面板最窄 160 DIP，内边距默认 4 DIP，最多 8 层。
 - 打开期间菜单接管按键：Up、Down、Home、End 在最深一层的可用项之间移动高亮并循环，字母移到下一个以它开头的项；Right、Enter 或 Space 打开子菜单并高亮其第一项，Left 或 Escape 关闭最深一层子菜单，顶层的 Escape 与 Tab 关闭菜单并交还焦点。从右到左时 Left 与 Right 互换。指针移到项上会高亮它并打开它的子菜单、关闭更深的子菜单；在所有面板之外按下会关闭菜单，并照常交给下面的控件；面板上的滚轮不会滚动下面的内容。
+- `popoverMenuButton(label, style)` 是一个菜单按钮：画法像带箭头的组合框，菜单画在窗口里、它的下方并与它的起始边对齐，下方放不下时翻到上方。按下、Enter、Space 或 Down 打开菜单并高亮第一项，菜单显示时再按按钮会关闭它，期间按钮读作已展开。菜单的按键、首字母跳转、子菜单和焦点交还都与 `popoverMenu` 相同，选中或 Escape 后焦点回到按钮。与 `end` 配对，菜单打开时返回 true，只在这时构建菜单项。名称取 `Style.name`，否则取 `label`。
+- 右键菜单的位置相对锚点的整个盒子计算，所以锚点部分滚出视野时菜单仍在指针处打开。
 - 焦点跟随高亮，辅助技术读出键盘所在的项；用指针打开时焦点在第一项上但不高亮。同一时间最多打开一个菜单；锚点不再构建或被禁用时菜单关闭。
 
 启用 `-Daccessibility=true` 时，Windows UIA 把菜单映射为 Menu，把项映射为 MenuItem：普通项提供 Invoke，打开子菜单的项另提供 ExpandCollapse（展开即打开子菜单），复选项与单选项提供 Toggle。
