@@ -52,6 +52,7 @@ extern fn zlm_window_caret(*anyopaque, c_int, c_int, c_int, c_int) void;
 extern fn zlm_window_cancel_composition(*anyopaque) void;
 extern fn zlm_window_text_mode(*anyopaque, c_int) void;
 extern fn zlm_window_cursor(*anyopaque, c_int) void;
+extern fn zlm_window_menu_activate(*anyopaque, [*]const [*:0]const u8, c_int) c_int;
 extern fn zlm_window_traits(*anyopaque, c_int, c_int, c_int, c_int, c_int) c_int;
 extern fn zlm_window_opacity(*anyopaque, f32) void;
 extern fn zlm_window_ignore_pointer(*anyopaque, c_int) void;
@@ -289,10 +290,25 @@ pub fn capture(record: *core.WindowRecord, allocator: std.mem.Allocator) !core.C
     }
     return .{ .width = @intCast(width), .height = @intCast(height), .pixels = pixels };
 }
-/// The application menu comes with the macOS menu bar; until then there
-/// is none to choose from.
-pub fn activateMenuItem(_: *core.WindowRecord, _: []const []const u8) !void {
-    return error.NoMenu;
+/// Chooses an item of the application menu, the menu bar macOS shows for
+/// the active application, by its titles from the bar down.
+pub fn activateMenuItem(record: *core.WindowRecord, path: []const []const u8) !void {
+    const allocator = record.window.app.allocator;
+    const labels = try allocator.alloc([*:0]const u8, path.len);
+    defer allocator.free(labels);
+    var made: usize = 0;
+    defer for (labels[0..made]) |label| allocator.free(std.mem.span(label));
+    for (path) |label| {
+        labels[made] = try allocator.dupeSentinel(u8, label, 0);
+        made += 1;
+    }
+    return switch (zlm_window_menu_activate(record.native.native orelse return error.NoMenu, labels.ptr, @intCast(labels.len))) {
+        0 => {},
+        1 => error.NoMenu,
+        2 => error.NoMenuItem,
+        3 => error.MenuItemDisabled,
+        else => error.MenuItemIsSubmenu,
+    };
 }
 pub fn setCursor(record: *core.WindowRecord, cursor: core.Cursor) void {
     zlm_window_cursor(record.native.native orelse return, @backingInt(cursor));

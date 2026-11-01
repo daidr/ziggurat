@@ -14,7 +14,7 @@ const Done = *const fn (?*anyopaque, u64, i32) callconv(.c) void;
 const TrayEvent = *const fn (?*anyopaque, u64, i32, i32, i32) callconv(.c) void;
 extern fn zsl_popup_show(?*anyopaque, [*]const NativeItem, u32, c_int, f64, f64, ?*anyopaque, u64, Done, *c_int) ?*anyopaque;
 extern fn zsl_popup_cancel(*anyopaque) void;
-extern fn zsl_message_show(?*anyopaque, [*:0]const u8, [*:0]const u8, [*]const [*:0]const u8, u32, i32, c_int, ?*anyopaque, u64, Done, *c_int) ?*anyopaque;
+extern fn zsl_message_show(?*anyopaque, [*:0]const u8, [*:0]const u8, [*]const [*:0]const u8, u32, u32, i32, c_int, ?*anyopaque, u64, Done, *c_int) ?*anyopaque;
 extern fn zsl_message_cancel(*anyopaque) void;
 extern fn zsl_detach(*anyopaque) void;
 extern fn zsl_live_links() c_int;
@@ -350,11 +350,15 @@ pub const Owner = struct {
         var text: [16384]u8 = undefined;
         var labels: [types.max_message_buttons][256]u8 = undefined;
         var buttons: [types.max_message_buttons][*:0]const u8 = undefined;
-        for (options.buttons, 0..) |button, index| buttons[index] = (try menus.gtkMnemonic(&labels[index], button.label)).ptr;
+        var destructive: u32 = 0;
+        for (options.buttons, 0..) |button, index| {
+            buttons[index] = (try menus.gtkMnemonic(&labels[index], button.label)).ptr;
+            if (button.destructive) destructive |= @as(u32, 1) << @intCast(index);
+        }
         const serial = try self.nextSerial();
         var failure: c_int = 0;
         const default_index: i32 = if (options.default_button) |index| @intCast(index) else -1;
-        const native = zsl_message_show(window.nativeHandle(), try terminated(&title, options.title), try terminated(&text, options.message), &buttons, @intCast(options.buttons.len), default_index, @backingInt(options.kind), self, serial, messageDone, &failure) orelse return error.MessageDialogCreationFailed;
+        const native = zsl_message_show(window.nativeHandle(), try terminated(&title, options.title), try terminated(&text, options.message), &buttons, @intCast(options.buttons.len), destructive, default_index, @backingInt(options.kind), self, serial, messageDone, &failure) orelse return error.MessageDialogCreationFailed;
         self.message_dialog = .{ .native = native, .request = request, .serial = serial };
         self.message_buttons = @splat(0);
         for (options.buttons, 0..) |button, index| self.message_buttons[index] = button.id;

@@ -570,8 +570,13 @@ pub fn build(b: *std.Build) void {
         });
     }
     const system = b.addModule("ziggurat_system", .{ .root_source_file = b.path("src/system/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
-    // The file watcher uses FSEvents on macOS.
-    if (target.result.os.tag == .macos) native_support.linkFrameworks(b, system, &.{ "CoreServices", "CoreFoundation" });
+    // The file watcher uses FSEvents on macOS; menus, status items, the Dock
+    // and dialogs are AppKit's.
+    if (target.result.os.tag == .macos) {
+        native_support.linkFrameworks(b, system, &.{ "CoreServices", "CoreFoundation", "AppKit", "Foundation", "UniformTypeIdentifiers" });
+        _ = native_support.add(b, system, "system-menu-macos", "src/system/macos_menu.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        _ = native_support.add(b, system, "system-dialog-macos", "src/system/macos_dialog.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+    }
     if (target.result.os.tag == .linux) {
         const native = native_support.add(b, system, "system-shell-native", "src/system/shell_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         native.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
@@ -1563,6 +1568,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_ui", .module = ui },
         });
         addSmoke(b, "smoke-file-watch", "tests/system_watch_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        addSmoke(b, "smoke-system-macos", "tests/system_macos_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
         });
         addSmoke(b, "smoke-macos-services", "tests/macos_services_smoke.zig", target, optimize, &.{

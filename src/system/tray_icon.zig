@@ -1,12 +1,16 @@
 //! A notification-area icon drawn by the application: straight RGBA pixels
 //! become the native image `TrayItemOptions.icon` borrows, a GdkPixbuf on
-//! Linux and an HICON on Windows. `Tray.show` copies it, so the icon may be
+//! Linux, an HICON on Windows and an NSImage on macOS. `Tray.show` copies
+//! it, so the icon may be
 //! released once the tray shows it.
 const std = @import("std");
 const builtin = @import("builtin");
 
 const windows = builtin.os.tag == .windows;
 const linux = builtin.os.tag == .linux and !builtin.is_test;
+const macos = builtin.os.tag == .macos and !builtin.is_test;
+extern fn zsm_image_rgba(width: u32, height: u32, pixels: [*]const u8) ?*anyopaque;
+extern fn zsm_image_release(image: ?*anyopaque) void;
 
 const c = if (windows) @import("ziggurat_c_win32") else struct {};
 
@@ -28,13 +32,15 @@ pub const TrayIcon = struct {
         if (width == 0 or height == 0 or width > 256 or height > 256 or pixels.len != @as(usize, width) * height * 4) return error.InvalidIcon;
         if (windows) return .{ .handle = try createWindows(width, height, pixels) };
         if (linux) return .{ .handle = try createLinux(width, height, pixels) };
+        // Two pixels a point, as the menu bar draws on Retina displays.
+        if (macos) return .{ .handle = zsm_image_rgba(width, height, pixels.ptr) orelse return error.IconCreateFailed };
         return error.Unsupported;
     }
 
     pub fn deinit(self: TrayIcon) void {
         if (windows) {
             _ = c.DestroyIcon(@ptrCast(self.handle));
-        } else if (linux) gdk.g_object_unref(self.handle);
+        } else if (linux) gdk.g_object_unref(self.handle) else if (macos) zsm_image_release(self.handle);
     }
 
     fn createLinux(width: u32, height: u32, pixels: []const u8) Error!*anyopaque {
@@ -87,5 +93,5 @@ test "icons check their pixels" {
     var pixels: [4 * 4 * 4]u8 = @splat(0);
     try std.testing.expectError(error.InvalidIcon, TrayIcon.init(4, 4, pixels[1..]));
     try std.testing.expectError(error.InvalidIcon, TrayIcon.init(0, 4, &pixels));
-    if (!windows and !linux) try std.testing.expectError(error.Unsupported, TrayIcon.init(4, 4, &pixels));
+    if (!windows and !linux and !macos) try std.testing.expectError(error.Unsupported, TrayIcon.init(4, 4, &pixels));
 }
