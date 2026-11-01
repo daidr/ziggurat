@@ -5,7 +5,8 @@ const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
 pub const panic = std.debug.FullPanic(@import("macos_panic.zig").panic);
 
-const origin = "https://app.ziggurat.invalid";
+/// A trusted HTML document is opaque; "*" is the origin that reaches it.
+const any = web.document_initializers.any_origin;
 const a = [_][]const u8{
     "window.__zigInitializer=['甲😀'];var bodyLocal=1;return;window.__zigInitializer.push('unreachable');",
     "window.__zigInitializer.push('A2:'+typeof bodyLocal,'bridge:'+typeof chrome.webview.postMessage);",
@@ -24,8 +25,8 @@ const Payload = struct { trace: []const []const u8, origin: []const u8, frame: b
 
 /// Document initializers through one page: the attach set at document start
 /// in the page world with the bridge, replacement for later documents only,
-/// a throwing body, an empty set, an origin that does not match, the "*"
-/// origin, and native records released after close.
+/// a throwing body, an empty set, an origin that does not match, and native
+/// records released after close.
 const State = struct {
     app: *z.App,
     allocator: std.mem.Allocator,
@@ -79,7 +80,7 @@ const State = struct {
         errdefer std.debug.print("initializer payload={s}\n", .{bytes});
         try std.testing.expect(value.frame and value.trace.len == expected.len);
         for (value.trace, expected) |actual, wanted| try std.testing.expectEqualStrings(wanted, actual);
-        try std.testing.expectEqualStrings(origin, value.origin);
+        try std.testing.expectEqualStrings("null", value.origin);
         self.messages += 1;
         if (self.queued) return error.UnexpectedMessage;
         self.queued = true;
@@ -111,11 +112,11 @@ const State = struct {
     }
     fn advanceInner(self: *State) !void {
         switch (self.phase) {
-            .a => try self.replace(self.source(b, origin), .b),
-            .b => try self.replace(self.source(throwing, origin), .throwing),
+            .a => try self.replace(self.source(b, any), .b),
+            .b => try self.replace(self.source(throwing, any), .throwing),
             .throwing => try self.replace(&.{}, .empty),
             .empty => try self.replace(self.source(b, "https://other.invalid"), .foreign),
-            .foreign => try self.replace(self.source(b, web.document_initializers.any_origin), .any),
+            .foreign => try self.replace(self.source(b, any), .any),
             .any => {
                 self.phase = .done;
                 _ = try self.window.destroy();
@@ -151,7 +152,7 @@ fn run(allocator: std.mem.Allocator) !void {
     defer app.deinit();
     var state: State = .{ .app = app, .allocator = allocator, .window = try app.createWindow(.{ .width = 160, .height = 100 }) };
     state.view = web.View.init(allocator, &state, State.event);
-    try state.view.attach(state.window, .{ .html = page_html, .storage = .ephemeral, .local = .{}, .document_initializers = state.source(a, origin) });
+    try state.view.attach(state.window, .{ .html = page_html, .storage = .ephemeral, .document_initializers = state.source(a, any) });
     // The View owns copies; later caller changes reach no document.
     state.entries[0].body = "throw Error('changed-before-first-load')";
     state.input_origins[0] = "https://changed.invalid";
