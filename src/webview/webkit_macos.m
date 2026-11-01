@@ -2923,6 +2923,16 @@ int zwk_devtools(ZwkState *state,int op,int *enabled,int *visible) {
 }
 void zwk_devtools_counts(uint32_t *shown) { *shown=0; }
 void zwk_string_free(char *value) { free(value); }
+/* The page's URI alone: WKWebView's own session state cannot be restored
+ * under the page's navigation policy, so the URI loads again. */
+int zwk_session_state(ZwkState *state,char **uri,void **data,size_t *length) {
+    ZwkPage *s=page_of(state);
+    *uri=NULL; *data=NULL; *length=0;
+    if (!live(s)) return ZWK_CLOSED;
+    if (!document(s) || !s->current_uri.UTF8String) return ZWK_NOT_READY;
+    *uri=strdup(s->current_uri.UTF8String);
+    return *uri?ZWK_OK:ZWK_OOM;
+}
 int zwk_deadline_arm(ZwkState *state,uint64_t nanoseconds) {
     ZwkPage *s=page_of(state);
     if (!live(s)) return ZWK_CLOSED;

@@ -3942,10 +3942,9 @@ pub const View = struct {
     /// with the scroll positions and form fields it saved: it saves a
     /// page's scroll position a moment after scrolling stops and its form
     /// fields as the page goes out of view. Windows keeps the page's URI
-    /// alone, WebView2 having no such state.
+    /// alone, WebView2 having no such state; macOS keeps it alone too.
     pub fn sessionState(self: *View, allocator: std.mem.Allocator) ![]u8 {
         _ = try self.propertyWindow();
-        if (is_macos) return error.UnsupportedCapability;
         if (self.config.?.options.local == null and self.config.?.options.remote == null) return error.LocalSiteRequired;
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
@@ -3958,7 +3957,7 @@ pub const View = struct {
             defer if (data) |value| webkit.zwk_string_free(@ptrCast(value));
             try webkit.check(result);
             const native: []const u8 = if (data) |value| @as([*]const u8, @ptrCast(value))[0..length] else "";
-            return session_state.encode(allocator, .linux, std.mem.span(uri orelse return error.NotReady), native);
+            return session_state.encode(allocator, if (is_macos) .macos else .linux, std.mem.span(uri orelse return error.NotReady), native);
         }
         var wide: ?[*:0]u16 = null;
         const hr = zwv_document_source(self.native.?, &wide);
@@ -3977,7 +3976,6 @@ pub const View = struct {
     /// navigateRemote would, which the page's site must allow (OriginDenied,
     /// InvalidResourcePath otherwise).
     pub fn restoreSessionState(self: *View, state: []const u8) !void {
-        if (is_macos) return error.UnsupportedCapability;
         const parsed = try session_state.parse(state);
         const window = self.access() orelse return error.Closed;
         window.app.assertOwner();
@@ -3986,7 +3984,7 @@ pub const View = struct {
         if (!self.initializerNavigationAllowed()) return error.Busy;
         const options = self.config.?.options;
         if (options.local == null and options.remote == null) return error.LocalSiteRequired;
-        if (is_webkit and parsed.platform == .linux and parsed.native.len != 0) {
+        if (is_webkit and !is_macos and parsed.platform == .linux and parsed.native.len != 0) {
             const scope = self.beginCallback() orelse return error.Closed;
             defer scope.end();
             switch (webkit.zwk_session_restore(self.native.?, parsed.native.ptr, parsed.native.len)) {
