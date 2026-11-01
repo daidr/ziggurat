@@ -2077,10 +2077,19 @@ int zwk_clear_start(ZwkState *state,uint64_t token) {
     WKPreferences *preferences;
 }
 - (void)printOperationDidRun:(NSPrintOperation *)operation success:(BOOL)success contextInfo:(void *)context;
+- (void)finish:(BOOL)success;
 @end
 @implementation ZwkPrintDone
 - (void)printOperationDidRun:(NSPrintOperation *)operation success:(BOOL)success contextInfo:(void *)context {
     (void)operation; (void)context;
+    /* AppKit may run a save job, and call this, on its own thread. */
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(),^{ [self finish:success]; });
+        return;
+    }
+    [self finish:success];
+}
+- (void)finish:(BOOL)success {
     if (set_backgrounds) { if (@available(macOS 13.3,*)) preferences.shouldPrintBackgrounds=backgrounds; }
     NSError *error=success && [file checkResourceIsReachableAndReturnError:NULL]?nil:
         [NSError errorWithDomain:@"ziggurat-webkit-print" code:success?2:1 userInfo:nil];
