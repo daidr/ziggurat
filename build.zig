@@ -812,7 +812,7 @@ pub fn build(b: *std.Build) void {
     const run_automation_tests = b.addRunArtifact(automation_tests);
     test_step.dependOn(&run_automation_tests.step);
     b.step("test-automation", "Run the automation protocol, input and socket tests").dependOn(&run_automation_tests.step);
-    if (target.result.os.tag == .windows or target.result.os.tag == .linux) addSmoke(b, "smoke-automation", "tests/automation_smoke.zig", target, optimize, &.{
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux or target.result.os.tag == .macos) addSmoke(b, "smoke-automation", "tests/automation_smoke.zig", target, optimize, &.{
         .{ .name = "ziggurat", .module = core },
         .{ .name = "ziggurat_view", .module = declarative_view },
         .{ .name = "ziggurat_system", .module = system },

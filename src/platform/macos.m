@@ -414,6 +414,32 @@ int zlm_window_interaction(NativeWindow *s,int edge){
 }
 void zlm_window_text_mode(NativeWindow *s,int keyboard){zlm_window_cancel_composition(s);s->keyboard=keyboard;}
 
+/* The content view drawn into a bitmap of its backing pixels, as the
+   window shows it: premultiplied RGBA rows from the top. Returns the
+   retained bitmap, which zlm_capture_free releases, or NULL. */
+void *zlm_window_capture(NativeWindow *s,int *width,int *height,int *stride,const unsigned char **pixels){
+    if(s->destroyed)return NULL;
+    NSBitmapImageRep *bitmap=nil;
+    @autoreleasepool{
+        NSRect bounds=[s->view bounds];
+        CGFloat scale=[s->window backingScaleFactor];if(scale<1)scale=1;
+        NSInteger w=(NSInteger)lround(bounds.size.width*scale),h=(NSInteger)lround(bounds.size.height*scale);
+        if(w<=0||h<=0)return NULL;
+        bitmap=[[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:w pixelsHigh:h bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bitmapFormat:0 bytesPerRow:0 bitsPerPixel:32];
+        if(!bitmap)return NULL;
+        /* In sRGB, the space the content draws in, so colors come back as
+           they were drawn. */
+        NSBitmapImageRep *tagged=[bitmap bitmapImageRepByRetaggingWithColorSpace:[NSColorSpace sRGBColorSpace]];
+        if(tagged&&tagged!=bitmap){[tagged retain];[bitmap release];bitmap=tagged;}
+        /* Points to pixels, so the view draws at the backing scale. */
+        [bitmap setSize:bounds.size];
+        [s->view cacheDisplayInRect:bounds toBitmapImageRep:bitmap];
+        *width=(int)[bitmap pixelsWide];*height=(int)[bitmap pixelsHigh];*stride=(int)[bitmap bytesPerRow];*pixels=[bitmap bitmapData];
+    }
+    return bitmap;
+}
+void zlm_capture_free(void *bitmap){[(NSBitmapImageRep *)bitmap release];}
+
 /* Test hooks: drive a window as AppKit would, without a user at the screen. */
 uint32_t zlm_resource_count(void){return atomic_load(&live_windows);}
 void zlm_test_paint(NativeWindow *s){

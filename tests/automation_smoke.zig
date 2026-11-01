@@ -12,6 +12,9 @@ const automation = @import("ziggurat_automation");
 
 const Value = std.json.Value;
 
+// The macOS unwinder cannot walk the driving thread's shallow stack.
+pub const std_options: std.Options = .{ .allow_stack_tracing = builtin.os.tag != .macos };
+
 const reset_command = 10;
 const quit_command = 11;
 const disabled_command = 12;
@@ -204,15 +207,32 @@ fn drive(path: []const u8) !void {
     try client.expectError("act", "{\"key\":\"add\",\"action\":\"selectText\"}", "unsupported");
     try client.expectError("tree", "{\"window\":9}", "no_window");
     try client.expectError("eval", "{\"script\":\"1\"}", "unsupported");
+    try client.expectError("fly", "{}", "unknown_method");
+
+    if (!has_menus) {
+        // No menu bar to choose from: the app quits through a task instead.
+        try client.expectError("menu", "{\"path\":[\"File\",\"Reset\"]}", "unsupported");
+        try quit_app.?.post(.{ .context = quit_app.?, .call = quitTask });
+        while ((client.send("windows", "{}") catch null) != null) zio.sleep(10 * std.time.ns_per_ms);
+        return;
+    }
     try client.expectError("menu", "{\"path\":[\"File\",\"Missing\"]}", "failed");
     try client.expectError("menu", "{\"path\":[\"Edit\",\"Disabled\"]}", "failed");
-    try client.expectError("fly", "{}", "unknown_method");
 
     _ = try client.result("menu", "{\"path\":[\"File\",\"Reset\"]}");
     try expectCount(client, 0);
     // Quitting answers, then the app ends and closes the connection.
     _ = try client.result("menu", "{\"path\":[\"File\",\"Quit\"]}");
     try std.testing.expect(try client.send("windows", "{}") == null);
+}
+
+/// Platforms with a native menu bar drive menu items too.
+const has_menus = system.capabilities.native_menu;
+var quit_app: ?*z.App = null;
+
+fn quitTask(context: *anyopaque) void {
+    const app: *z.App = @ptrCast(@alignCast(context));
+    _ = app.requestQuit();
 }
 
 const Driving = struct {
@@ -257,7 +277,7 @@ pub fn main() !void {
     const window = try app.createWindow(.{ .title = "Automation", .width = 360, .height = 240 });
     state.window = window;
     try host.attach(window);
-    try owner.attach(window);
+    quit_app = app;
     const items = [_]system.Item{
         .{ .id = 1, .kind = .submenu, .label = "&File" },
         .{ .id = reset_command, .parent = 1, .label = "&Reset" },
@@ -266,7 +286,10 @@ pub fn main() !void {
         .{ .id = 2, .kind = .submenu, .label = "&Edit" },
         .{ .id = disabled_command, .parent = 2, .label = "&Disabled", .enabled = false },
     };
-    try owner.setMenu(&items);
+    if (has_menus) {
+        try owner.attach(window);
+        try owner.setMenu(&items);
+    }
     window.show();
 
     const path = try socketPath(allocator);
@@ -278,7 +301,7 @@ pub fn main() !void {
     server.stop();
     thread.join();
     try driving.result;
-    owner.detach() catch {};
+    if (has_menus) owner.detach() catch {};
 
     // The socket goes with the server.
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(zio.io(), path, .{}));
