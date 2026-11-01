@@ -144,7 +144,6 @@ pub fn headingNamed(tree: md.Tree, name: []const u8) ?u32 {
     return null;
 }
 
-
 pub const Activation = union(enum) {
     /// Destination of the activated link, borrowed from the tree.
     link: []const u8,
