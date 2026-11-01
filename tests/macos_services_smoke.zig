@@ -154,6 +154,16 @@ const Opens = struct {
         };
         if (self.failure != null or (self.url and self.file)) self.app.quit();
     }
+    fn send(ptr: *anyopaque) void {
+        const self: *Opens = @ptrCast(@alignCast(ptr));
+        system.instance.simulateOpenForTesting(.urls, "zigsmoke://open?x=1&y=%20") catch |err| {
+            self.failure = err;
+        };
+        system.instance.simulateOpenForTesting(.files, "/tmp/ziggurat open \u{1f98e}.txt") catch |err| {
+            self.failure = err;
+        };
+        if (self.failure != null) self.app.quit();
+    }
     fn check(self: *Opens, open: system.instance.Open) !void {
         try std.testing.expectEqual(@as(usize, 1), open.items.len);
         try std.testing.expectEqual(@as(u32, @intCast(std.c.getpid())), open.sender_process);
@@ -180,8 +190,9 @@ fn checkOpens(allocator: std.mem.Allocator) !void {
     defer listener.stop();
     var second: system.instance.OpenListener = .{ .context = &opens, .on_open = Opens.received };
     try std.testing.expectError(error.ListenerActive, second.start(app));
-    try system.instance.simulateOpenForTesting(.urls, "zigsmoke://open?x=1&y=%20");
-    try system.instance.simulateOpenForTesting(.files, "/tmp/ziggurat open \u{1f98e}.txt");
+    // An Apple Event sent to this process can reach its handler during the
+    // send, so send from inside the run loop.
+    try app.post(.{ .context = &opens, .call = Opens.send });
     try app.run();
     if (opens.failure) |err| return err;
     try std.testing.expect(opens.url and opens.file);
