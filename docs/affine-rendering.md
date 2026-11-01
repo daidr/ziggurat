@@ -22,6 +22,10 @@ The public affine value is f64. Recording canonicalizes all six coefficients onc
 
 The Context owns the recording table in its explicitly allocated transform workspace. CPU and GPU offscreen resources opt in with `Options.transform_source`; each allocates its own capture table at construction and includes it in metadata accounting. Preflight validates the entire source batch before output allocation or native drawing. Capture copies descriptors and takes independent resource pins before any foreign allocator callback. Resetting/reusing the source buffer or table in such a callback cannot change the captured frame. Source and destination table aliases are rejected. No source buffer pointer survives render.
 
+## Translation-only scopes
+
+A scope whose matrix only translates (`xx = yy = 1`, `xy = yx = 0`) is not drawn through a source plane. After a frame is recorded, `commands.Buffer.foldTranslations` moves the scope's commands by the translation in place and turns `begin_transform` / `end_transform` into `push_clip` / `pop_clip` around the moved source rectangle. Gradient brushes are copied before they are moved, because commands outside the scope may share them. A scope stays a raster transform when it holds an effect, a backdrop, a filter or another transform that does more than translate, or when the extra clip would pass 32 levels. Input mapping and captured spaces are unchanged. `Context.damageStats().folded_transforms` counts the folded scopes.
+
 ## Pool and compositing
 
 The front and work planes retain the physical window/output size. Each shared depth plane uses the componentwise maximum of the window size and maximum physical source size **plus two pixels**. GDI's optional grayscale glyph scratch uses that same pool size. Thus a group inside a source larger than the window can draw the complete source. Group and transform nesting do not allocate another target during replay.
