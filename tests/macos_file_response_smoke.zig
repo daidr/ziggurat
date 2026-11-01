@@ -13,10 +13,10 @@ extern fn zwk_file_counts(*u32, *u32, *u32, *u32) void;
 
 const html =
     \\<!doctype html><script>addEventListener('DOMContentLoaded',async()=>{try{
-    \\const file=await fetch('/file');const data=new Uint8Array(await file.arrayBuffer());if(file.headers.get('X-File')!=='yes'||data.length!==524325||data[0]!==97||data[data.length-1]!==97)throw Error('file '+data.length);
-    \\const fh=await fetch('/file-head',{method:'HEAD'});if(fh.headers.get('Content-Length')!=='524325'||await fh.text()!=='')throw Error('file HEAD');
+    \\chrome.webview.postMessage('step:file');const file=await fetch('/file');chrome.webview.postMessage('step:file-head '+file.status);const data=new Uint8Array(await file.arrayBuffer());if(file.headers.get('X-File')!=='yes'||data.length!==524325||data[0]!==97||data[data.length-1]!==97)throw Error('file '+data.length);
+    \\chrome.webview.postMessage('step:head');const fh=await fetch('/file-head',{method:'HEAD'});chrome.webview.postMessage('step:truncated');if(fh.headers.get('Content-Length')!=='524325'||await fh.text()!=='')throw Error('file HEAD');
     \\let truncated=false;try{const r=await fetch('/file-truncated');await r.arrayBuffer()}catch{truncated=true}if(!truncated)throw Error('truncated file accepted');
-    \\let cancelled=false;try{const r=await fetch('/file-unstarted');await r.arrayBuffer()}catch{cancelled=true}if(!cancelled)throw Error('unstarted pump cancellation');
+    \\chrome.webview.postMessage('step:unstarted');let cancelled=false;try{const r=await fetch('/file-unstarted');await r.arrayBuffer()}catch{cancelled=true}if(!cancelled)throw Error('unstarted pump cancellation');
     \\chrome.webview.postMessage('done');
     \\}catch(e){chrome.webview.postMessage('error:'+e.message)}})</script>
 ;
@@ -49,6 +49,7 @@ const Probe = struct {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         switch (value) {
             .message => |message| {
+                if (std.mem.startsWith(u8, message, "step:")) return std.debug.print("page {s} delivered={d}\n", .{ message, self.delivered });
                 if (!std.mem.eql(u8, message, "done")) {
                     std.debug.print("page: {s}\n", .{message});
                     return self.fail(error.PageAssertion);
@@ -193,7 +194,10 @@ pub fn main() !void {
         probe.semaphore.post();
         worker.?.join();
         worker = null;
-        if (watchdog.expired) return error.DeadlineExceeded;
+        if (watchdog.expired) {
+            std.debug.print("expired: documents={d} delivered={d} messages={d} err={?}\n", .{ probe.documents, probe.delivered, probe.messages, probe.err });
+            return error.DeadlineExceeded;
+        }
         if (probe.err) |err| return err;
         if (probe.worker_error) |err| return err;
         try std.testing.expectEqual(@as(u32, 1), probe.documents);
