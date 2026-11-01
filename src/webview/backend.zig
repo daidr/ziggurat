@@ -105,6 +105,7 @@ pub fn capabilities() Capabilities {
             .user_agent = true,
             .custom_local_site = true,
             .remote_pages = true,
+            .file_responses = true,
             .find_text = true,
             .capture_preview = true,
             .clear_browsing_data = true,
