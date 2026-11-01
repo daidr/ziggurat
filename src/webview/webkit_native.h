@@ -65,6 +65,12 @@ typedef int (*ZwkCertificate)(void *,const char *,uint32_t,const uint8_t *,size_
 typedef struct ZwkContextItem { const char *name; const char *label; uint32_t kind; uint32_t flags; uint32_t action; } ZwkContextItem;
 typedef struct ZwkContextTarget { const char *link,*link_text,*image,*media,*selection,*frame; uint32_t editable; } ZwkContextTarget;
 typedef int (*ZwkContextMenu)(void *,const ZwkContextTarget *,const ZwkContextItem *,uint32_t,uint8_t *,void *);
+/* A page's permission request: the origin of the page's document, the
+ * permissions.Kind it asks for (1 microphone, 2 camera, 3 geolocation, 4
+ * notifications) and every kind it needs, as permissions.Kinds bits: a
+ * request for camera and microphone asks for camera and needs both.
+ * zwk_permission_defer keeps it during the call; otherwise it is denied. */
+typedef void (*ZwkPermission)(void *,const char *,uint32_t,uint32_t,void *);
 typedef struct ZwkOptions {
     const char *html;
     const char *user_agent;
@@ -94,6 +100,13 @@ typedef struct ZwkOptions {
     /* 0 no menu, 1 the engine's, 2 context_offer changes it. */
     uint32_t context_menu;
     ZwkContextMenu context_offer;
+    /* Nonzero gives the wheel and the touchpad over a region's page to the
+     * native UI around it (Linux). */
+    uint32_t scroll_to_container;
+    /* NULL denies every permission request. media turns the page's
+     * getUserMedia on: 1 microphone, 2 camera. */
+    ZwkPermission permission;
+    uint32_t media;
 } ZwkOptions;
 enum ZwkResult { ZWK_OK=0, ZWK_CLOSED=1, ZWK_FULL=2, ZWK_OOM=3, ZWK_INVALID=4, ZWK_NATIVE_FAILED=5, ZWK_NOT_READY=6, ZWK_NAVIGATION_PENDING=7, ZWK_IPC_DENIED=8, ZWK_NO_HISTORY=9, ZWK_NAVIGATION_CANCELLED=10, ZWK_GEOMETRY_NOT_APPLIED=11, ZWK_INITIALIZER_BUDGET=12, ZWK_DEVTOOLS_DISABLED=13 };
 enum ZwkPolicyFailure { ZWK_POLICY_MISMATCH=1, ZWK_POLICY_TIMEOUT=2, ZWK_POLICY_PREPARATION=3 };
@@ -128,6 +141,15 @@ void zwk_deadline_cancel(ZwkState *);
 int zwk_refresh(ZwkState *);
 /* Credentials for the sign-in a ZwkAuth call carries, kept for the session. */
 int zwk_auth_answer(void *request,const char *user,const char *password);
+/* Keep the request a ZwkPermission call carries under token until
+ * zwk_permission_decide, zwk_permission_cancel (denies) or close (denies). */
+int zwk_permission_defer(void *call,uint64_t token);
+int zwk_permission_decide(ZwkState *,uint64_t token,int allow);
+int zwk_permission_cancel(ZwkState *,uint64_t token);
+/* device 0 camera, 1 microphone, 2 display; *state is WebKitMediaCaptureState
+ * (0 none, 1 active, 2 muted), read or written. Page event 12 tells a
+ * change: flags is device | state << 8. */
+int zwk_capture_state(ZwkState *,uint32_t device,int write,uint32_t *state);
 /* kind 0 command, 1 check, 3 separator; flags 1 enabled, 2 checked. */
 int zwk_context_menu_append(void *call,const char *label,uint32_t command,uint32_t kind,uint32_t flags);
 int zwk_navigate_remote(ZwkState *,const char *);

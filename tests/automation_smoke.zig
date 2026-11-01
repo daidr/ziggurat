@@ -23,6 +23,7 @@ const State = struct {
     count: u32 = 0,
     level: f64 = 2,
     agree: bool = false,
+    list: view.ScrollModel = .{},
     window: ?z.Window = null,
     fn build(self: *State, v: *view.View) anyerror!void {
         var label: [32]u8 = undefined;
@@ -30,6 +31,15 @@ const State = struct {
         if (try v.button("Add", .{ .key = view.key("add") })) self.count += 1;
         _ = try v.slider(&self.level, .{ .minimum = 0, .maximum = 10, .step = 1 }, .{ .key = view.key("level"), .name = "Level" });
         _ = try v.checkbox(&self.agree, "Agree", .{ .key = view.key("agree") });
+        try v.scroll(&self.list, .{ .height = 40, .self_align = .stretch });
+        for (0..12) |row| {
+            var name: [16]u8 = undefined;
+            const last = row == 11;
+            if (try v.button(try std.fmt.bufPrint(&name, "Row {d}", .{row}), .{ .key = if (last) view.key("far") else null })) {
+                if (last) self.count += 1;
+            }
+        }
+        try v.end();
     }
     fn onMenu(context: *anyopaque, _: z.Window, action: system.Action) void {
         const self: *State = @ptrCast(@alignCast(context));
@@ -125,6 +135,12 @@ fn hasState(node: std.json.ObjectMap, name: []const u8) bool {
     return false;
 }
 
+fn hasAction(node: std.json.ObjectMap, name: []const u8) bool {
+    const actions = node.get("actions") orelse return false;
+    for (actions.array.items) |action| if (std.mem.eql(u8, action.string, name)) return true;
+    return false;
+}
+
 fn expectCount(client: *Client, count: u32) !void {
     try client.idle();
     var expected: [32]u8 = undefined;
@@ -197,6 +213,18 @@ fn drive(path: []const u8) !void {
     try client.idle();
     const after = (try client.tree()).get("focus") orelse return error.NoFocus;
     try std.testing.expect(!std.mem.eql(u8, before, after.string));
+
+    // The last row of the scroll is out of sight until scrollIntoView, and
+    // a press needs it in sight.
+    const far = try nodeOf(try client.tree(), "far");
+    try std.testing.expect(hasState(far, "offscreen") and hasAction(far, "scrollIntoView"));
+    try std.testing.expect(!hasAction(try nodeOf(try client.tree(), "add"), "scrollIntoView"));
+    try client.expectError("act", "{\"key\":\"far\",\"action\":\"press\"}", "failed");
+    _ = try client.result("act", "{\"key\":\"far\",\"action\":\"scrollIntoView\"}");
+    try client.idle();
+    try std.testing.expect(!hasState(try nodeOf(try client.tree(), "far"), "offscreen"));
+    _ = try client.result("act", "{\"key\":\"far\",\"action\":\"press\"}");
+    try expectCount(client, 4);
 
     const image = try client.result("capture", "{}");
     try std.testing.expect(image.get("width").?.integer > 0 and image.get("height").?.integer > 0);

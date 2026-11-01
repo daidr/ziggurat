@@ -229,7 +229,16 @@ pub const PageEvent = union(enum) {
     content_size_changed: struct { id: PageId, size: ContentSize },
     /// Options.context_menu: an item the handler added was chosen.
     context_menu_command: struct { id: PageId, command: u32 },
+    /// The page started, muted or stopped capturing a camera, microphone or
+    /// screen. Like audibility it belongs to the view and carries the
+    /// current page id. See View.captureState.
+    capture_changed: struct { id: PageId, device: CaptureDevice, state: CaptureState },
 };
+/// What a page captures through getUserMedia or getDisplayMedia.
+pub const CaptureDevice = enum(u8) { camera = 0, microphone = 1, display = 2 };
+/// none: the page captures nothing from the device; active: it captures;
+/// muted: it keeps the device but receives nothing, as the user paused it.
+pub const CaptureState = enum(u8) { none = 0, active = 1, muted = 2 };
 pub const PageListener = struct {
     /// Stable until detach. Strings are borrowed until return. Null metadata
     /// means conversion/size failure, also reported to diagnostics; lifecycle
@@ -481,6 +490,14 @@ pub const Options = struct {
     /// --disable-renderer-backgrounding --disable-backgrounding-occluded-windows,
     /// arguments of the WebView2 environment as Autoplay.allow's are.
     background_throttling: bool = true,
+    /// A web view in native UI (`attachRegion`) gives the wheel and the
+    /// touchpad over its page to the native UI around it, as over any of
+    /// its elements: a document shown at its full height in a native scroll
+    /// container scrolls with it. The page never scrolls with them; it
+    /// still takes presses, the keyboard and selection. Linux sends the web
+    /// view's scroll events to the window's content before WebKitGTK sees
+    /// them; elsewhere the page keeps the wheel for now.
+    scroll_to_container: bool = false,
 };
 pub const AuthHandler = struct {
     context: *anyopaque,
@@ -664,6 +681,10 @@ extern fn zwv_auth_answer(*anyopaque, [*:0]const u16, [*:0]const u16) i32;
 extern fn zwv_context_menu_append(*anyopaque, [*:0]const u16, u32, u32, u32) i32;
 extern fn zwk_context_menu_append(*anyopaque, [*:0]const u8, u32, u32, u32) c_int;
 extern fn zwk_auth_answer(*anyopaque, [*:0]const u8, [*:0]const u8) c_int;
+extern fn zwk_permission_defer(*anyopaque, u64) c_int;
+extern fn zwk_permission_decide(*anyopaque, u64, c_int) c_int;
+extern fn zwk_permission_cancel(*anyopaque, u64) c_int;
+extern fn zwk_capture_state(*anyopaque, u32, c_int, *u32) c_int;
 extern fn zwv_permission_defer(*anyopaque, u64) i32;
 extern fn zwv_permission_decide(*anyopaque, u64, bool) i32;
 extern fn zwv_permission_cancel(*anyopaque, u64) i32;
@@ -818,7 +839,7 @@ fn validateBackendOptions(options: Options) !void {
                 if (options.user_data_folder.len != 0) return error.ProfilePathForbidden;
             },
         }
-        if (options.permissions != null or options.downloads != null or options.allow_local_navigation)
+        if ((is_macos and options.permissions != null) or options.downloads != null or options.allow_local_navigation)
             return error.UnsupportedCapability;
         if (options.remote) |remote| {
             if ((options.storage == .ephemeral and remote.credentials != .ephemeral) or
@@ -1466,6 +1487,9 @@ pub const View = struct {
         }
         try region.attach(.{ .context = self, .attach = regionAttach, .update = regionUpdate, .detach = regionDetach, .event = regionEvent });
         self.attachment_phase = .attached;
+        // The page's wheel, which the native side sends to the window, goes
+        // to the native UI around it.
+        if (options.scroll_to_container) region.passWheel(true) catch {};
     }
     fn regionAttach(ptr: *anyopaque, region: z.composition.Region) !void {
         const self: *View = @ptrCast(@alignCast(ptr));
@@ -1747,7 +1771,7 @@ pub const View = struct {
         };
         const facts = try self.factsScript(.linux);
         defer if (facts) |value| self.allocator.free(value);
-        const native_options: webkit.Options = .{ .context_menu = @backingInt(options.context_menu), .context_offer = if (!is_macos and options.context_menu == .handler) View.webkitContextMenu else null, .auth = if (!is_macos and options.http_auth != null) View.webkitAuth else null, .certificate = if (!is_macos and options.certificate_errors != null) View.webkitCertificate else null, .content_filters = filters.ptr, .content_filter_count = filter_count, .audio_muted = @intFromBool(self.mutedWanted()), .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .gestures = gestureFlags(options), .throttling = @intFromBool(options.background_throttling), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled) };
+        const native_options: webkit.Options = .{ .context_menu = @backingInt(options.context_menu), .context_offer = if (!is_macos and options.context_menu == .handler) View.webkitContextMenu else null, .auth = if (!is_macos and options.http_auth != null) View.webkitAuth else null, .certificate = if (!is_macos and options.certificate_errors != null) View.webkitCertificate else null, .content_filters = filters.ptr, .content_filter_count = filter_count, .audio_muted = @intFromBool(self.mutedWanted()), .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .gestures = gestureFlags(options), .throttling = @intFromBool(options.background_throttling), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled), .scroll_to_container = @intFromBool(options.scroll_to_container), .permission = if (!is_macos and options.permissions != null) View.webkitPermission else null, .media = if (is_macos) 0 else mediaKinds(options.permissions) };
         var candidate: ?*anyopaque = null;
         if (self.session) |session| {
             try webkit.check(webkit.zwk_session_create(&native_options, session.last_size.width, session.last_size.height, webkitNotify, pageNotify, webkitScriptNotify, webkitTimeout, self, &candidate));
@@ -1788,8 +1812,18 @@ pub const View = struct {
         self.eval_accepting = true;
         self.tool_accepting = true;
         self.resource_accepting = if (options.local) |site| site.on_resource != null else false;
-        self.permission_accepting = false;
+        self.permission_accepting = !is_macos and options.permissions != null;
         self.download_accepting = false;
+    }
+    /// The media devices any grant lets a page ask for: 1 microphone, 2
+    /// camera. WebKitGTK turns getUserMedia on only for these.
+    fn mediaKinds(policy: ?PermissionPolicy) u32 {
+        var bits: u32 = 0;
+        for ((policy orelse return 0).grants) |grant| {
+            if (grant.kinds.microphone) bits |= 1;
+            if (grant.kinds.camera) bits |= 2;
+        }
+        return bits;
     }
     fn webkitNotify(ptr: *anyopaque, kind: c_int, value: ?[*:0]const u16, code: i32, failure: ?*const webkit.Failure) callconv(.c) void {
         const self: *View = @ptrCast(@alignCast(ptr));
@@ -2144,6 +2178,9 @@ pub const View = struct {
         for (script_ids) |token| if (self.native) |native| nativeCancelScript(native, token);
         if (is_webkit) {
             for (resource_ids) |token| if (self.native) |native| webkit.zwk_resource_cancel(native, token);
+            if (!is_macos) for (permission_ids) |token| if (self.native) |native| {
+                _ = zwk_permission_cancel(native, token);
+            };
             for (tool_slots[0..tool_ids.len]) |slot| {
                 if (slot.kind == .find and slot.token == self.find_token) {
                     self.clearFind();
@@ -2229,8 +2266,34 @@ pub const View = struct {
         var responder: PermissionResponder = .{ .view = self, .native = native_call, .page = page.generation };
         policy.handler.handle(policy.handler.context, .{ .origin = text[0..length], .kind = kind, .user_initiated = user, .page = page }, &responder);
     }
+    /// A WebKitGTK page's permission request. The engine tells no user
+    /// gesture, so a policy that requires one is never offered a request;
+    /// the origin is that of the page's committed document, as the engine
+    /// does not tell a frame's.
+    fn webkitPermission(ptr: *anyopaque, origin_z: [*:0]const u8, native_kind: u32, needs: u32, native_call: *anyopaque) callconv(.c) void {
+        if (!is_webkit or is_macos) return;
+        const self: *View = @ptrCast(@alignCast(ptr));
+        const window = self.access() orelse return;
+        if (self.attachmentClosed() or appStopping(window) or !self.ready or self.recovering or !self.page_active) return;
+        const scope = self.beginNativeAttachment() orelse return;
+        defer scope.end();
+        const policy = self.config.?.options.permissions orelse return;
+        if (policy.require_user_gesture) return;
+        const kind = permissions.Kind.fromNative(native_kind) orelse return;
+        var text: [schemes.origin_limit]u8 = undefined;
+        const origin = schemes.canonicalOrigin(&text, std.mem.span(origin_z), self.config.?.scheme_config.registrations) catch return;
+        const wanted: u16 = @intCast(needs & 0xffff);
+        if (wanted == 0) return;
+        const grant = for (policy.grants) |candidate| {
+            if (std.mem.eql(u8, candidate.origin, origin)) break candidate;
+        } else return;
+        if (@as(u16, @bitCast(grant.kinds)) & wanted != wanted) return;
+        const page = self.pageId() orelse return;
+        var responder: PermissionResponder = .{ .view = self, .native = native_call, .page = page.generation };
+        policy.handler.handle(policy.handler.context, .{ .origin = origin, .kind = kind, .user_initiated = false, .page = page }, &responder);
+    }
     fn deferPermission(self: *View, native_call: *anyopaque, page: u64, options: permissions.DeferOptions) !PermissionId {
-        if (is_webkit) return self.unavailableBackend();
+        if (is_macos) return self.unavailableBackend();
         const window = try self.propertyWindow();
         if (!self.permission_accepting) return error.PermissionUnavailable;
         if (!self.page_active or page != self.page_generation) return error.StalePage;
@@ -2244,8 +2307,15 @@ pub const View = struct {
             self.syncEvalTimer() catch self.failEvalTimer();
             return err;
         };
-        const hr = zwv_permission_defer(native_call, token);
-        self.last_hresult = hr;
+        if (is_webkit) {
+            webkit.check(zwk_permission_defer(native_call, token)) catch |err| {
+                _ = self.permission_book.take(token);
+                self.syncEvalTimer() catch self.failEvalTimer();
+                return err;
+            };
+        }
+        const hr: i32 = if (is_webkit) 0 else zwv_permission_defer(native_call, token);
+        if (!is_webkit) self.last_hresult = hr;
         if (hr < 0) {
             _ = self.permission_book.take(token);
             self.syncEvalTimer() catch self.failEvalTimer();
@@ -2262,25 +2332,28 @@ pub const View = struct {
             };
         }
         _ = self.permission_book.take(token);
-        if (self.native) |native| self.permissionNativeResult(zwv_permission_cancel(native, token));
+        if (self.native) |native| {
+            if (is_webkit) _ = zwk_permission_cancel(native, token) else self.permissionNativeResult(zwv_permission_cancel(native, token));
+        }
         self.syncEvalTimer() catch self.failEvalTimer();
         return if (self.attachmentClosed() or appStopping(window)) error.Closed else error.StalePermission;
     }
     pub fn decidePermission(self: *View, id: PermissionId, decision: permissions.Decision) !void {
-        if (is_webkit) return self.unavailableBackend();
+        if (is_macos) return self.unavailableBackend();
         const window = try self.propertyWindow();
         if (id.view != self or id.page != self.page_generation or !self.page_active) return error.StalePermission;
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
         const slot = self.permission_book.take(id.token) orelse return error.StalePermission;
-        const hr = zwv_permission_decide(self.native.?, id.token, decision == .allow_ephemeral);
-        self.permissionNativeResult(hr);
+        const hr: i32 = if (is_webkit) zwk_permission_decide(self.native.?, id.token, @intFromBool(decision == .allow_ephemeral)) else zwv_permission_decide(self.native.?, id.token, decision == .allow_ephemeral);
+        if (!is_webkit) self.permissionNativeResult(hr);
         self.syncEvalTimer() catch self.failEvalTimer();
-        const result: permissions.Result = if (self.attachmentClosed() or appStopping(window)) .detached else if (self.recovering or !self.page_active or slot.page != self.page_generation) .page_changed else if (hr < 0) .{ .native_failure = hr } else .{ .decided = decision };
+        const failed = if (is_webkit) hr != 0 else hr < 0;
+        const result: permissions.Result = if (self.attachmentClosed() or appStopping(window)) .detached else if (self.recovering or !self.page_active or slot.page != self.page_generation) .page_changed else if (failed) (if (is_webkit) .unavailable else .{ .native_failure = hr }) else .{ .decided = decision };
         if (slot.completion) |completion| completion.complete(completion.context, result);
     }
     fn cancelPermission(self: *View, id: PermissionId) !bool {
-        if (is_webkit) return self.unavailableBackend();
+        if (is_macos) return self.unavailableBackend();
         const window = self.access() orelse return error.Closed;
         window.app.assertOwner();
         if (self.attachmentClosed() or appStopping(window)) return error.Closed;
@@ -2288,7 +2361,9 @@ pub const View = struct {
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
         const slot = self.permission_book.take(id.token) orelse return false;
-        if (self.native) |native| self.permissionNativeResult(zwv_permission_cancel(native, id.token));
+        if (self.native) |native| {
+            if (is_webkit) _ = zwk_permission_cancel(native, id.token) else self.permissionNativeResult(zwv_permission_cancel(native, id.token));
+        }
         self.syncEvalTimer() catch self.failEvalTimer();
         if (slot.completion) |completion| completion.complete(completion.context, if (self.attachmentClosed() or appStopping(window)) .detached else .cancelled);
         return true;
@@ -3560,6 +3635,36 @@ pub const View = struct {
         if (is_webkit) try webkit.check(webkit.zwk_audio(self.native.?, 2, &value)) else try self.audioResult(zwv_audio(self.native.?, 2, &value));
         return value != 0;
     }
+    /// Whether the page captures `device`, as a browser's camera and
+    /// microphone indicators show. none until the engine is ready.
+    /// WebKitGTK only: other backends return UnsupportedCapability.
+    /// PageEvent.capture_changed tells its changes.
+    pub fn captureState(self: *View, device: CaptureDevice) !CaptureState {
+        if (!is_webkit or is_macos) return error.UnsupportedCapability;
+        _ = try self.attachedWindow();
+        if (self.native == null or self.recovering or !self.ready) return .none;
+        const scope = self.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        var value: u32 = 0;
+        try webkit.check(zwk_capture_state(self.native.?, @backingInt(device), 0, &value));
+        return std.enums.fromInt(CaptureState, value) orelse .none;
+    }
+    /// Mute or resume a capture the page holds, or stop it with none, as
+    /// a browser's indicator does; the page's tracks end when stopped. A
+    /// device the page does not capture cannot be made active. WebKitGTK
+    /// only.
+    pub fn setCaptureState(self: *View, device: CaptureDevice, state: CaptureState) !void {
+        if (!is_webkit or is_macos) return error.UnsupportedCapability;
+        _ = try self.attachedWindow();
+        if (self.native == null or self.recovering or !self.ready) return error.NotReady;
+        const scope = self.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        var current: u32 = 0;
+        try webkit.check(zwk_capture_state(self.native.?, @backingInt(device), 0, &current));
+        if (current == @backingInt(CaptureState.none) and state != .none) return error.NotCapturing;
+        var value: u32 = @backingInt(state);
+        try webkit.check(zwk_capture_state(self.native.?, @backingInt(device), 1, &value));
+    }
     fn audioResult(self: *View, hr: i32) !void {
         self.last_hresult = hr;
         if (self.attachmentClosed()) return error.Closed;
@@ -3942,6 +4047,13 @@ pub const View = struct {
         if ((native.kind == 0 and native.flags & 1 == 0) or ((native.kind == 1 or native.kind == 3) and native.flags & 1 == 0)) self.finishRequests(.page_changed, .page_changed, .page_changed, .page, null, true);
         if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != id.generation) return 0;
         if (native.kind == 10) return self.pageFactNotify(window, id, native.value);
+        if (native.kind == 12) {
+            const listener = self.config.?.options.page_listener orelse return 1;
+            const device = std.enums.fromInt(CaptureDevice, native.flags & 0xff) orelse return 1;
+            const state = std.enums.fromInt(CaptureState, (native.flags >> 8) & 0xff) orelse return 1;
+            listener.event(listener.context, self, .{ .capture_changed = .{ .id = id, .device = device, .state = state } });
+            return if (self.attachmentClosed() or appStopping(window) or self.recovering or self.page_generation != id.generation) 0 else 1;
+        }
         if (native.kind == 11) {
             const listener = self.config.?.options.page_listener orelse return 1;
             listener.event(listener.context, self, .{ .context_menu_command = .{ .id = id, .command = @bitCast(native.status) } });
