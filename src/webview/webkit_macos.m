@@ -798,7 +798,10 @@ static BOOL local_serve(ZwkPage *s,WKWebView *webView,id<WKURLSchemeTask> task) 
     if (!local_uri(s,request.URL.absoluteString.UTF8String,path)) return NO;
     NSString *method=request.HTTPMethod?:@"GET";
     const int verb=method_index(method);
-    if (!local_request_allowed(s,verb,request.allHTTPHeaderFields?:@{})) return NO;
+    if (!local_request_allowed(s,verb,request.allHTTPHeaderFields?:@{})) {
+        if (getenv("ZIGGURAT_WK_TRACE")) fprintf(stderr,"wk denied %s %s %s\n",method.UTF8String,request.URL.absoluteString.UTF8String,request.allHTTPHeaderFields.description.UTF8String);
+        return NO;
+    }
     const BOOL read=verb<2, head=verb==1;
     const uint8_t *body=(const uint8_t *)"Not found"; size_t length=9; const char *mime="text/plain; charset=utf-8"; uint32_t status=404;
     if (read && !strcmp(path,s->local_start)) {
