@@ -3943,13 +3943,13 @@ pub const Frame = struct {
                 try buffer.roundedRect(.{ .x = absolute_bounds.x, .y = y, .width = absolute_bounds.width, .height = height }, 0, alphaColor(if (dark) 0xffffff else 0, alpha));
             },
             .glass => |glass| {
-                if (!std.math.isFinite(glass.noise)) return error.InvalidGeometry;
+                if (!std.math.isFinite(glass.noise) or !std.math.isFinite(glass.clarity)) return error.InvalidGeometry;
                 if (opaque_fill) {
                     try buffer.roundedRect(absolute_bounds, radius, fallback);
                     if (preferences.high_contrast) try buffer.strokeRect(absolute_bounds, radius, 1, .rgb(palette.border));
                     return;
                 }
-                try buffer.backdropEffect(.{ .bounds = absolute_bounds, .radius = radius, .kind = .glass, .style = glass.style, .dark = dark, .tint = glass.tint orelse .{ .r = 0, .g = 0, .b = 0, .a = 0 }, .noise = glass.noise, .fallback = fallback });
+                try buffer.backdropEffect(.{ .bounds = absolute_bounds, .radius = radius, .kind = .glass, .style = glass.style, .dark = dark, .tint = glass.tint orelse .{ .r = 0, .g = 0, .b = 0, .a = 0 }, .noise = glass.noise, .clarity = glass.clarity, .fallback = fallback });
             },
             .blur => |blur| {
                 if (!std.math.isFinite(blur.radius) or blur.radius < 0) return error.InvalidGeometry;

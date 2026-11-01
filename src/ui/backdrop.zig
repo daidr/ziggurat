@@ -29,6 +29,17 @@ pub const Glass = struct {
     tint: ?Color = null,
     /// Grain amplitude from 0 to 1, fixed per physical pixel; zero has none.
     noise: f32 = 0,
+    /// From 0 to 1, makes panes as large as sidebars and inspectors clearer,
+    /// the content under them reading through: 0 is the material as frosty
+    /// as a control's; 0.5 blurs up to 5 DIP rather than 10, maps black to
+    /// 35% in light mode and white to 60% in dark mode, lights the rim more
+    /// and curves the last 48 DIP; 1 is nearly clear, blurring up to 2 DIP
+    /// and mapping black to 20% in light mode, and black to 10% and white to
+    /// 85% in dark mode. Each half of the range is a straight step between
+    /// those. Panes up to 100 DIP keep their material whatever the clarity,
+    /// which eases in up to 200 DIP. On clear glass, which barely tones
+    /// already, it only lights the rim and curves the bezel.
+    clarity: f32 = 0,
 };
 /// Varies a blur along a line by alpha: 255 applies the full radius, 0 none.
 pub const Mask = struct {
@@ -82,6 +93,8 @@ pub const Entry = struct {
     mask: ?Mask = null,
     tint: Color = .{ .r = 0, .g = 0, .b = 0, .a = 0 },
     noise: f32 = 0,
+    /// `Glass.clarity`; used by `glass` only.
+    clarity: f32 = 0,
     /// Opaque RGB for the hard scroll edge's tone.
     background: u32 = 0,
     /// Straight-alpha fill drawn when the region exceeds the workspace.
@@ -302,6 +315,64 @@ pub fn glassTone(style: Style, dark: bool) Tone {
     };
 }
 pub const rim_opacity = 0.35;
+
+/// A parameter of a large pane's glass at clarity 0 (`frost`, the
+/// control-sized material's), 0.5 (`mid`) and 1 (`clear`).
+pub const PaneTone = struct {
+    frost: f64,
+    mid: f64,
+    clear: f64,
+    /// The parameter at clarity `k` from 0 to 1: a straight step in each
+    /// half of the range.
+    pub fn at(self: PaneTone, k: f64) f64 {
+        if (k <= 0.5) return self.frost + (self.mid - self.frost) * k * 2;
+        return self.mid + (self.clear - self.mid) * (k - 0.5) * 2;
+    }
+};
+/// The most a pane blurs, in DIP.
+pub const pane_blur: PaneTone = .{ .frost = 10, .mid = 5, .clear = 2 };
+/// What black maps to in light mode, white mapping to 1.
+pub const pane_light_low: PaneTone = .{ .frost = 0.541, .mid = 0.35, .clear = 0.2 };
+/// What black and white map to in dark mode.
+pub const pane_dark_low: PaneTone = .{ .frost = 0.15, .mid = 0.15, .clear = 0.1 };
+pub const pane_dark_high: PaneTone = .{ .frost = 0.51, .mid = 0.6, .clear = 0.85 };
+/// How brightly the rim is lit.
+pub const pane_rim: PaneTone = .{ .frost = rim_opacity, .mid = 0.5, .clear = 0.5 };
+/// How wide the bezel curves, in DIP.
+pub const pane_bezel: PaneTone = .{ .frost = 36, .mid = 48, .clear = 48 };
+
+/// The glass of a pane whose shorter side is `m` DIP, of clarity `k`.
+/// Panes up to 100 DIP keep the control-sized material; from 200 theirs is
+/// clarity's; between, it eases from one to the other.
+pub const PaneMaterial = struct {
+    /// Bezel width and largest blur in DIP.
+    bezel: f64,
+    blur: f64,
+    rim: f64,
+    tone: Tone,
+    pub fn of(m: f64, clarity: f64, style: Style, dark: bool) PaneMaterial {
+        var f = std.math.clamp((m - 100) / 100, 0, 1);
+        f = f * f * (3 - 2 * f);
+        const k = if (std.math.isNan(clarity)) 0 else std.math.clamp(clarity, 0, 1);
+        const blend = struct {
+            fn at(v: PaneTone, kk: f64, ff: f64) f64 {
+                return v.frost + (v.at(kk) - v.frost) * ff;
+            }
+        }.at;
+        var tone = glassTone(style, dark);
+        var blur = std.math.clamp(m * 0.035, 1, blend(pane_blur, k, f));
+        switch (style) {
+            .clear => blur = 1,
+            .regular => if (dark) {
+                tone.low = blend(pane_dark_low, k, f);
+                tone.high = blend(pane_dark_high, k, f);
+            } else {
+                tone.low = blend(pane_light_low, k, f);
+            },
+        }
+        return .{ .bezel = @min(blend(pane_bezel, k, f), m / 2), .blur = blur, .rim = blend(pane_rim, k, f), .tone = tone };
+    }
+};
 pub const hard_edge_blur = 6.4;
 pub const soft_edge_alpha = 0.85;
 
@@ -390,6 +461,7 @@ const Shading = struct {
     tone: Tone = .{ .low = 0, .high = 1, .curve = 1, .saturation = 1 },
     tint: [4]f64 = .{ 0, 0, 0, 0 },
     noise: f64 = 0,
+    rim: f64 = rim_opacity,
     background: [3]f64 = .{ 0, 0, 0 },
     progressive: ?Line = null,
 
@@ -405,10 +477,12 @@ const Shading = struct {
             },
             .glass => {
                 const m = @min(box.x1 - box.x0, box.y1 - box.y0) / s;
-                result.bezel = @min(36, m / 2) * s;
+                const pane = PaneMaterial.of(m, entry.clarity, entry.style, entry.dark);
+                result.bezel = pane.bezel * s;
                 result.refraction = 1.6 * result.bezel;
-                result.sigma = if (entry.style == .clear) s else std.math.clamp(m * 0.035, 1, 10) * s;
-                result.tone = glassTone(entry.style, entry.dark);
+                result.sigma = pane.blur * s;
+                result.tone = pane.tone;
+                result.rim = pane.rim;
                 if (entry.tint.a != 0) result.tint = .{ @as(f64, @floatFromInt(entry.tint.r)) / 255, @as(f64, @floatFromInt(entry.tint.g)) / 255, @as(f64, @floatFromInt(entry.tint.b)) / 255, @as(f64, @floatFromInt(entry.tint.a)) / 255 * 0.88 };
                 result.noise = std.math.clamp(@as(f64, entry.noise), 0, 1);
             },
@@ -457,7 +531,7 @@ const Shading = struct {
                 };
                 if (depth < 3 * rim_width) {
                     const q = depth / rim_width;
-                    const a = rim_opacity * @exp(-q * q);
+                    const a = self.rim * @exp(-q * q);
                     // Light comes from above and below.
                     const light = @abs(ny);
                     for (0..3) |i| c[i] += (light - c[i]) * a;
@@ -797,4 +871,35 @@ test "fallback colors follow light and dark backgrounds" {
     try std.testing.expect(light.r > 0xf0);
     try std.testing.expect(dark.r < 0x40);
     try std.testing.expectEqual(Color.rgb(0x123456), fallbackColor(.{ .scroll_edge = .{ .background = 0x123456 } }, 0xffffff, 0));
+}
+
+test "glass clarity zero keeps the material of every pane" {
+    for ([_]f64{ 10, 60, 100, 150, 200, 400, 2000 }) |m| for ([_]Style{ .regular, .clear }) |style| for ([_]bool{ false, true }) |dark| {
+        const pane = PaneMaterial.of(m, 0, style, dark);
+        try std.testing.expectEqual(@min(36, m / 2), pane.bezel);
+        try std.testing.expectEqual(@as(f64, rim_opacity), pane.rim);
+        try std.testing.expectEqual(if (style == .clear) @as(f64, 1) else std.math.clamp(m * 0.035, 1, 10), pane.blur);
+        try std.testing.expectEqual(glassTone(style, dark), pane.tone);
+    };
+}
+
+test "glass clarity clears large panes and leaves small ones" {
+    const half = PaneMaterial.of(300, 0.5, .regular, false);
+    try std.testing.expectEqual(@as(f64, 5), half.blur);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.35), half.tone.low, 1e-9);
+    try std.testing.expectEqual(@as(f64, 48), half.bezel);
+    try std.testing.expectEqual(@as(f64, 0.5), half.rim);
+    const clear = PaneMaterial.of(300, 1, .regular, true);
+    try std.testing.expectEqual(@as(f64, 2), clear.blur);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.1), clear.tone.low, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.85), clear.tone.high, 1e-9);
+    // A control-sized pane keeps its material whatever the clarity.
+    try std.testing.expectEqual(PaneMaterial.of(80, 0, .regular, false), PaneMaterial.of(80, 1, .regular, false));
+    // Clear glass keeps its tone and blur; only the rim and bezel change.
+    const glass = PaneMaterial.of(300, 1, .clear, false);
+    try std.testing.expectEqual(glassTone(.clear, false), glass.tone);
+    try std.testing.expectEqual(@as(f64, 1), glass.blur);
+    try std.testing.expectEqual(@as(f64, 0.5), glass.rim);
+    // NaN is no clarity.
+    try std.testing.expectEqual(PaneMaterial.of(300, 0, .regular, false), PaneMaterial.of(300, std.math.nan(f64), .regular, false));
 }

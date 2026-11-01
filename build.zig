@@ -742,7 +742,8 @@ pub fn build(b: *std.Build) void {
     }
     if (target.result.os.tag == .macos) {
         _ = native_support.add(b, core, "core-native", "src/platform/macos.m", &.{ "-fno-objc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
-        native_support.linkFrameworks(b, core, &.{ "AppKit", "Foundation", "CoreFoundation", "CoreGraphics" });
+        _ = native_support.add(b, core, "core-native-window", "src/platform/macos_window.m", &.{ "-fno-objc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native_support.linkFrameworks(b, core, &.{ "AppKit", "Foundation", "CoreFoundation", "CoreGraphics", "QuartzCore" });
         core.linkSystemLibrary("objc", .{ .use_pkg_config = .no });
     }
     if (target.result.os.tag == .linux) {
@@ -1547,6 +1548,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_view", .module = declarative_view },
         });
         addSmoke(b, "smoke-macos", "tests/macos_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-macos-chrome", "tests/macos_chrome_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
         });

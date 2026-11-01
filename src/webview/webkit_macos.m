@@ -67,6 +67,10 @@ static uint32_t domain_code(NSString *domain) {
 @implementation ZwkWebView
 /* No engine context menu, as on Linux. */
 - (void)willOpenMenu:(NSMenu *)menu withEvent:(NSEvent *)event { [menu removeAllItems]; [super willOpenMenu:menu withEvent:event]; }
+/* The first click in a window that is not key is the page's, as it is the
+   native content's: WKWebView answers no, which spends the click on making
+   the window key, so buttons and links took two clicks. */
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { (void)event; return YES; }
 @end
 
 /* One granted origin of a remote page, with the headers its navigations may
