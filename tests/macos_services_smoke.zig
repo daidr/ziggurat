@@ -93,6 +93,10 @@ fn checkShell(allocator: std.mem.Allocator) !void {
     try std.testing.expectError(error.NoAssociation, worker.openUrl("ziggurat-smoke-none://x", .{ .extra_schemes = &.{"ziggurat-smoke-none"} }));
 }
 
+fn runShell(allocator: std.mem.Allocator, result: *anyerror!void) void {
+    result.* = checkShell(allocator);
+}
+
 var main_thread: std.Thread.Id = undefined;
 
 /// Forcing the app's appearance changes its effective appearance, which a
@@ -149,7 +153,11 @@ pub fn main() !void {
     try checkSecrets();
     try checkPower();
     try checkDirectories();
-    try checkShell(allocator);
+    // Shell workers refuse the UI thread.
+    var shell_result: anyerror!void = {};
+    const shell_thread = try std.Thread.spawn(.{}, runShell, .{ allocator, &shell_result });
+    shell_thread.join();
+    try shell_result;
 
     const app = try z.App.init(allocator);
     defer app.deinit();
