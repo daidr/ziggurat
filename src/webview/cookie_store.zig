@@ -1,5 +1,7 @@
 const std = @import("std");
-const linux = @import("builtin").os.tag == .linux;
+const os = @import("builtin").os.tag;
+/// The engine-backed store: WebKitGTK on Linux, WKHTTPCookieStore on macOS.
+const native_store = os == .linux or os == .macos;
 const cookies = @import("cookies.zig");
 
 /// Independent, explicitly Profile-owned cookie operations. There is no
@@ -57,7 +59,7 @@ pub fn Type(comptime z: type, comptime Profile: type) type {
         /// may finish later, with only C/GObject state. Profile may close first.
         /// Windows rejects this independent API before touching Profile/input.
         pub fn create(allocator: std.mem.Allocator, app: *z.App, profile: *Profile, options: Options) !*Self {
-            if (!linux) return error.UnsupportedCapability;
+            if (!native_store) return error.UnsupportedCapability;
             if (std.Thread.getCurrentId() != app.owner) return error.WrongThread;
             const app_scope = app.beginCallback() orelse return error.Closed;
             defer app_scope.end();
@@ -120,7 +122,7 @@ pub fn Type(comptime z: type, comptime Profile: type) type {
         /// Domain matching follows the engine; leading dots and exact paths are
         /// retained. Completion is not a visibility or persistence barrier.
         pub fn deleteKey(self: *Self, key: cookies.Key, completion: cookies.Completion) !Operation {
-            if (!linux) return error.UnsupportedCapability;
+            if (!native_store) return error.UnsupportedCapability;
             try self.checkOwner();
             if (self.busy) return error.Busy;
             try self.checkIngress();
@@ -138,7 +140,7 @@ pub fn Type(comptime z: type, comptime Profile: type) type {
         /// Explicitly authorized whole-Profile read, without URL eligibility.
         /// Optional native API pair: older engines reject before acceptance.
         pub fn listAll(self: *Self, completion: cookies.Completion) !Operation {
-            if (!linux) return error.UnsupportedCapability;
+            if (!native_store) return error.UnsupportedCapability;
             try self.checkOwner();
             if (self.busy) return error.Busy;
             try self.checkIngress();
@@ -149,7 +151,7 @@ pub fn Type(comptime z: type, comptime Profile: type) type {
         /// before acceptance preserve the store; native completion/cancellation
         /// has no transactional rollback or persistence guarantee.
         pub fn replaceAll(self: *Self, input: []const cookies.Cookie, completion: cookies.Completion) !Operation {
-            if (!linux) return error.UnsupportedCapability;
+            if (!native_store) return error.UnsupportedCapability;
             try self.checkOwner();
             if (self.busy) return error.Busy;
             try self.checkIngress();
@@ -164,7 +166,7 @@ pub fn Type(comptime z: type, comptime Profile: type) type {
             try self.checkOwner();
             if (self.busy) return error.Busy;
             var native: NativeStats = undefined;
-            if (linux) try nativeError(zwk_cookies_stats(self.native orelse return error.Closed, &native)) else return error.UnsupportedCapability;
+            if (native_store) try nativeError(zwk_cookies_stats(self.native orelse return error.Closed, &native)) else return error.UnsupportedCapability;
             var count: usize = 0;
             for (self.book.slots) |slot| if (slot != null) {
                 count += 1;
@@ -190,7 +192,7 @@ pub fn Type(comptime z: type, comptime Profile: type) type {
         }
         const Candidate = union(enum) { single: NativeRequest, replacement: []const NativeRow };
         fn submitCandidate(self: *Self, candidate: Candidate, completion: cookies.Completion) !Operation {
-            if (!linux) return error.UnsupportedCapability;
+            if (!native_store) return error.UnsupportedCapability;
             try self.checkOwner();
             if (self.busy) return error.Busy;
             const scope = self.beginBusiness() orelse return error.Closed;
@@ -219,14 +221,14 @@ pub fn Type(comptime z: type, comptime Profile: type) type {
             const scope = self.beginTeardown();
             defer scope.end();
             const slot = self.book.take(token) orelse return false;
-            if (linux) try nativeError(zwk_cookies_cancel(self.native.?, token));
+            if (native_store) try nativeError(zwk_cookies_cancel(self.native.?, token));
             slot.completion.complete(slot.completion.context, .cancelled);
             return true;
         }
         fn finishLogical(self: *Self, result: cookies.Result) void {
-            if (linux) _ = zwk_cookies_seal(self.native.?);
+            if (native_store) _ = zwk_cookies_seal(self.native.?);
             const batch = self.book.takeAll();
-            if (linux) _ = zwk_cookies_cancel_all(self.native.?);
+            if (native_store) _ = zwk_cookies_cancel_all(self.native.?);
             for (batch) |slot| if (slot) |value| value.completion.complete(value.completion.context, result);
         }
         fn stop(context: *anyopaque) !void {
@@ -284,7 +286,7 @@ pub fn Type(comptime z: type, comptime Profile: type) type {
             }
             const bytes = try cookies.Batch.measure(values[0..count], self.options.limits);
             var native: NativeStats = undefined;
-            if (linux) try nativeError(zwk_cookies_stats(self.native.?, &native)) else return error.UnsupportedCapability;
+            if (native_store) try nativeError(zwk_cookies_stats(self.native.?, &native)) else return error.UnsupportedCapability;
             const base = @sizeOf(Self) + native.bytes;
             if (base > self.options.limits.bytes or bytes > self.options.limits.bytes - base) return error.CapacityExceeded;
             self.peak_bytes = @max(self.peak_bytes, base + bytes);
@@ -295,7 +297,7 @@ pub fn Type(comptime z: type, comptime Profile: type) type {
         }
         fn checkIngress(self: *Self) !void {
             if (self.phase != .open or self.app.phase == .stopping or self.app.phase == .stopped) return error.Closed;
-            if (linux) try nativeError(zwk_cookies_check(self.native orelse return error.Closed)) else return error.UnsupportedCapability;
+            if (native_store) try nativeError(zwk_cookies_check(self.native orelse return error.Closed)) else return error.UnsupportedCapability;
         }
         fn beginBusiness(self: *Self) ?Scope {
             if (self.phase != .open) return null;
@@ -328,7 +330,7 @@ pub fn Type(comptime z: type, comptime Profile: type) type {
             const allocator = self.allocator;
             const handler = self.options.on_closed;
             self.options.on_closed = null;
-            if (linux) {
+            if (native_store) {
                 if (native) |pointer| _ = zwk_cookies_close(pointer);
             }
             allocator.destroy(self);
@@ -340,7 +342,7 @@ pub fn Type(comptime z: type, comptime Profile: type) type {
 pub const NativeCounts = struct { stores: u32 = 0, operations: u32 = 0, bytes: usize = 0 };
 pub fn nativeCounts() NativeCounts {
     var result: NativeCounts = .{};
-    if (linux) zwk_cookies_counts(&result.stores, &result.operations, &result.bytes);
+    if (native_store) zwk_cookies_counts(&result.stores, &result.operations, &result.bytes);
     return result;
 }
 const Slice = extern struct {
