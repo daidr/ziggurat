@@ -690,20 +690,37 @@ static void deliver_open(ZsmOpenHandler *handler, int kind, NSArray<NSString *> 
 @end
 
 static ZsmOpenHandler *open_handler;
+static NSArray *open_observers;
 
-/* Installs the GURL and odoc handlers; at most one listener. */
+static void install_open_handlers(void) {
+    if (!open_handler) return;
+    NSAppleEventManager *manager = [NSAppleEventManager sharedAppleEventManager];
+    [manager setEventHandler:open_handler andSelector:@selector(url:reply:) forEventClass:kInternetEventClass andEventID:kAEGetURL];
+    [manager setEventHandler:open_handler andSelector:@selector(documents:reply:) forEventClass:kCoreEventClass andEventID:kAEOpenDocuments];
+}
+
+/* Installs the GURL and odoc handlers; at most one listener. NSApplication
+   installs its own odoc handler whenever it finishes launching, which
+   [NSApp run] does again, so the handlers are installed again then, before
+   the launch's own requests are dispatched. */
 int zsm_open_start(void *owner, ZsmOpenCallback callback) {
     if (open_handler) return 0;
     open_handler = [[ZsmOpenHandler alloc] init];
     open_handler->owner = owner;
     open_handler->callback = callback;
-    NSAppleEventManager *manager = [NSAppleEventManager sharedAppleEventManager];
-    [manager setEventHandler:open_handler andSelector:@selector(url:reply:) forEventClass:kInternetEventClass andEventID:kAEGetURL];
-    [manager setEventHandler:open_handler andSelector:@selector(documents:reply:) forEventClass:kCoreEventClass andEventID:kAEOpenDocuments];
+    install_open_handlers();
+    NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+    void (^again)(NSNotification *) = ^(NSNotification *note) { (void)note; install_open_handlers(); };
+    open_observers = @[
+        [center addObserverForName:NSApplicationWillFinishLaunchingNotification object:nil queue:nil usingBlock:again],
+        [center addObserverForName:NSApplicationDidFinishLaunchingNotification object:nil queue:nil usingBlock:again],
+    ];
     return 1;
 }
 void zsm_open_stop(void) {
     if (!open_handler) return;
+    for (id observer in open_observers) [[NSNotificationCenter defaultCenter] removeObserver:observer];
+    open_observers = nil;
     NSAppleEventManager *manager = [NSAppleEventManager sharedAppleEventManager];
     [manager removeEventHandlerForEventClass:kInternetEventClass andEventID:kAEGetURL];
     [manager removeEventHandlerForEventClass:kCoreEventClass andEventID:kAEOpenDocuments];
@@ -724,12 +741,15 @@ int zsm_open_simulate(int kind, const char *item) {
         [list insertDescriptor:[NSAppleEventDescriptor descriptorWithDescriptorType:typeFileURL data:url] atIndex:1];
         [event setParamDescriptor:list forKeyword:keyDirectObject];
     } else [event setParamDescriptor:[NSAppleEventDescriptor descriptorWithString:value] forKeyword:keyDirectObject];
-    /* Through the manager's handler table, as a received event is: sending
-       it would need the Automation permission in some sessions. */
     [event setAttributeDescriptor:[NSAppleEventDescriptor descriptorWithInt32:pid] forKeyword:keySenderPIDAttr];
+    /* Calls the handler the process installed for the event, as the Apple
+       Event Manager does for a received event: sending it to ourselves would
+       need the Automation permission in some sessions. */
+    AEEventHandlerUPP handler = NULL;
+    SRefCon refcon = 0;
+    if (AEGetEventHandler(kind ? kCoreEventClass : kInternetEventClass, kind ? kAEOpenDocuments : kAEGetURL, &handler, &refcon, false) != noErr || !handler) return 0;
     AppleEvent reply = {typeNull, NULL};
-    /* The handlers ignore the reference constant; it only must not be null. */
-    OSErr status = [[NSAppleEventManager sharedAppleEventManager] dispatchRawAppleEvent:[event aeDesc] withRawReply:&reply handlerRefCon:(SRefCon)(uintptr_t)1];
+    OSErr status = handler([event aeDesc], &reply, refcon);
     AEDisposeDesc(&reply);
     return status == noErr;
 }

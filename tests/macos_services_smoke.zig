@@ -163,6 +163,7 @@ const Opens = struct {
             self.failure = err;
         };
         if (self.failure != null) self.app.quit();
+        if (!(self.url and self.file)) std.debug.print("open requests after dispatch: url={} file={}\n", .{ self.url, self.file });
     }
     fn check(self: *Opens, open: system.instance.Open) !void {
         try std.testing.expectEqual(@as(usize, 1), open.items.len);
