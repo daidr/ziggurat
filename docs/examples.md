@@ -12,7 +12,7 @@
 | `hello` | [hello.zig](../examples/hello.zig) | 最小应用：构建函数、固定存储、Host attach 与 `App.run` |
 | `todo` | [todo.zig](../examples/todo.zig) | 文本输入添加条目、复选框完成、分段筛选、按键保持列表项身份 |
 | `notes` | [notes.zig](../examples/notes.zig) | 文档应用模型：Markdown 与文本笔记每文件一个窗口、新建/打开/保存/另存为、标题中的未保存标记、关闭与退出前询问、定时自动保存、最近文档、字数；崩溃或强制退出后恢复未保存内容；其他程序改动文件时未编辑的笔记自动重载，已编辑的显示横幅选择保留或还原；文件 I/O 在应用自己的 worker 上，目录监视在另一个线程 |
-| `gallery` | [gallery.zig](../examples/gallery.zig) | 控件总览：侧栏列表 + 分栏 + 滚动页，覆盖按钮、选择、数值、导航、集合、表单与反馈（提示、通知）控件 |
+| `gallery` | [gallery.zig](../examples/gallery.zig) | 控件总览：侧栏列表 + 分栏 + 滚动页，覆盖按钮、选择、数值、导航、集合、表单与反馈（提示、通知）控件；Ctrl+= / Ctrl+-（macOS 上 Cmd）缩放窗口内容，Ctrl+0 复原 |
 | `frameless` | [frameless.zig](../examples/frameless.zig) | 无边框窗口与自绘标题栏：标题区命中为 caption、最小化/最大化/关闭、边缘缩放；不支持自定义边框时退回系统边框 |
 | `menubar` | [menubar.zig](../examples/menubar.zig) | 菜单栏（快捷键、勾选项、子菜单）、右键上下文菜单、托盘图标及其菜单、非阻塞消息框 |
 | `clipboard` | [clipboard.zig](../examples/clipboard.zig) | 剪贴板文本/HTML/文件写入、延迟提供、变化通知与按格式读取 |

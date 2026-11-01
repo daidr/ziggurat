@@ -13,6 +13,7 @@
 //!
 //! Run it with `zig build run-gallery`.
 const std = @import("std");
+const builtin = @import("builtin");
 const z = @import("ziggurat");
 const view = @import("ziggurat_view");
 const view_timer = @import("ziggurat_view_timer");
@@ -28,7 +29,15 @@ const Color = enum { red, green, blue };
 const File = struct { id: u64, name: []const u8, kind: []const u8, kilobytes: u32 };
 const muted: u32 = 0x6b7785;
 
+/// Browsers' zoom steps, which Ctrl+= and Ctrl+- (Cmd on macOS) go through.
+const zoom_steps = [_]f32{ 0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4, 5 };
+const zoom_in = 0x200;
+const zoom_out = 0x201;
+const zoom_reset = 0x202;
+
 const Gallery = struct {
+    /// The window the gallery zooms, once it has one.
+    window: ?z.Window = null,
     page: Page = .buttons,
     sidebar: f64 = 0.24,
     content: view.ScrollModel = .{},
@@ -79,6 +88,29 @@ const Gallery = struct {
     }
 
     fn build(self: *Gallery, v: *view.View) anyerror!void {
+        const command: z.KeyModifiers = if (builtin.os.tag == .macos) .{ .super = true } else .{ .control = true };
+        try v.bindKey(.{ .key = .equal, .modifiers = command }, true, zoom_in);
+        try v.bindKey(.{ .key = .minus, .modifiers = command }, true, zoom_out);
+        try v.bindKey(.{ .key = .digit0, .modifiers = command }, true, zoom_reset);
+        if (self.window) |window| {
+            const current = window.zoom();
+            var next = current;
+            if (v.takeEvent(zoom_in) != null) {
+                for (zoom_steps) |step| if (step > current + 0.001) {
+                    next = step;
+                    break;
+                };
+            }
+            if (v.takeEvent(zoom_out) != null) {
+                var index = zoom_steps.len;
+                while (index > 0) : (index -= 1) if (zoom_steps[index - 1] < current - 0.001) {
+                    next = zoom_steps[index - 1];
+                    break;
+                };
+            }
+            if (v.takeEvent(zoom_reset) != null) next = 1;
+            if (next != current) try window.setZoom(next);
+        }
         _ = try v.split(.row, &self.sidebar, .{ .minimum = 0.15, .maximum = 0.45 }, .{ .grow = 1, .self_align = .stretch, .name = "Sidebar" });
         try v.listBox(.{ .name = "Pages", .padding = view.Insets.all(4) });
         for (page_titles, 0..) |title, index| {
@@ -305,6 +337,7 @@ pub fn main() !void {
     defer app.deinit();
     const window = try app.createWindow(.{ .title = "Widget gallery", .width = 860, .height = 600, .min_width = 560, .min_height = 400 });
     try host.attach(window);
+    gallery.window = window;
     try timer.attach(app, allocator);
     // Runs before app.deinit: release the one-shot timer after the loop.
     defer timer.close() catch {};
