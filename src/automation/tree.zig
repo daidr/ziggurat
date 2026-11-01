@@ -162,6 +162,7 @@ pub fn build(arena: std.mem.Allocator, window: u64, host: *const view.Host) erro
                 else => {},
             }
             if (textual(node) or node.kind == .slider or node.kind == .stepper or node.kind == .rating) try actions.append(arena, "setValue");
+            if (textual(node) and node.kind == .embed) try actions.append(arena, "selectText");
             if ((node.kind == .tree_row and node.expanded != null) or node.kind == .disclosure) try actions.append(arena, "expand");
         }
         if (actions.items.len != 0) result.actions = actions.items;
