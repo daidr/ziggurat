@@ -1848,7 +1848,7 @@ pub const View = struct {
         self.tool_accepting = true;
         self.resource_accepting = if (options.local) |site| site.on_resource != null else false;
         self.permission_accepting = options.permissions != null;
-        self.download_accepting = false;
+        self.download_accepting = is_macos and options.downloads != null;
     }
     /// The media devices any grant lets a page ask for: 1 microphone, 2
     /// camera. WebKitGTK turns getUserMedia on only for these.
