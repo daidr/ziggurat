@@ -14,7 +14,7 @@ const document =
     \\<!doctype html><script>
     \\chrome.webview.addEventListener('message',async e=>{
     \\if(e.data==='video'){try{const s=await navigator.mediaDevices.getUserMedia({video:true});
-    \\chrome.webview.postMessage('video:'+s.getVideoTracks().length);s.getTracks().forEach(t=>t.stop())}catch(x){chrome.webview.postMessage('video-denied:'+x.name)}}
+    \\chrome.webview.postMessage('video:'+s.getVideoTracks().length);s.getTracks().forEach(t=>t.stop())}catch(x){chrome.webview.postMessage('video-denied:'+x.name+':'+x.message+' secure='+isSecureContext+' devices='+typeof navigator.mediaDevices)}}
     \\if(e.data==='audio'){try{await navigator.mediaDevices.getUserMedia({audio:true});chrome.webview.postMessage('audio:granted')}catch(x){chrome.webview.postMessage('audio-denied:'+x.name)}}
     \\});
     \\addEventListener('DOMContentLoaded',()=>chrome.webview.postMessage('loaded'));
@@ -95,7 +95,7 @@ const Probe = struct {
         }
         switch (self.step) {
             .deny => {
-                if (!std.mem.eql(u8, text, "video-denied:NotAllowedError") or self.offers != 1) return error.WrongDenial;
+                if (!std.mem.startsWith(u8, text, "video-denied:NotAllowedError:") or self.offers != 1) return error.WrongDenial;
                 self.step = .audio;
                 self.send("audio");
             },
@@ -105,7 +105,7 @@ const Probe = struct {
                 try view.refresh();
             },
             .timeout => {
-                if (!std.mem.eql(u8, text, "video-denied:NotAllowedError") or self.offers != 2) return error.WrongTimeout;
+                if (!std.mem.startsWith(u8, text, "video-denied:NotAllowedError:") or self.offers != 2) return error.WrongTimeout;
                 self.step = .allow;
                 try view.refresh();
             },

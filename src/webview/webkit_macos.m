@@ -2471,6 +2471,11 @@ static int page_create(void *window,BOOL session,uint32_t width,uint32_t height,
         /* History loads documents anew, with new generations, as on Linux:
          * a cached page would come back with its old scripts. */
         if ([configuration.preferences respondsToSelector:@selector(_setUsesPageCache:)]) [configuration.preferences _setUsesPageCache:NO];
+        /* An app that answers permissions gets the page's getUserMedia. */
+        if (options->permission) {
+            SEL devices=sel_registerName("_setMediaDevicesEnabled:");
+            if ([configuration.preferences respondsToSelector:devices]) ((void (*)(id,SEL,BOOL))objc_msgSend)(configuration.preferences,devices,YES);
+        }
         s->controller=configuration.userContentController;
         s->world=[WKContentWorld worldWithName:@"ziggurat-private"];
         if (s->local) {
