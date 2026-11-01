@@ -389,8 +389,10 @@ const State = struct {
                 try self.owner.popupMenu(7, &popup_items, .pointer);
                 try self.owner.showMessage(15, .{ .message = "Detached underneath", .buttons = buttons[0..1] });
                 try self.owner.openFile(.{}, &self.destination, self, picked);
+                const attached = zsm_bar_menu(self.owner.bar.?);
                 try self.owner.detach();
-                try std.testing.expectEqual(@as(?*anyopaque, null), zsm_test_main_menu());
+                const empty = zsm_test_main_menu() orelse return error.MissingMainMenu;
+                try check(empty != attached and zsm_test_menu_count(empty) == 0, "detaching leaves an empty menu bar");
                 try self.owner.attach(self.window);
                 try self.owner.setMenu(&file_items);
                 try self.owner.showMessage(16, .{ .message = "Window closes underneath", .buttons = buttons[0..2] });
