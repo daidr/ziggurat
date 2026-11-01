@@ -267,6 +267,9 @@ pub const LoadingOptions = struct {
     /// Application-owned start and hold time. Without one, every indicator
     /// keeps the host's time, so indicators move in step.
     timer: ?*LoadingTimer = null,
+    /// Frames a second it moves at; null moves at each of the display's
+    /// refreshes. See `View.animationFrameRate`.
+    frame_rate: ?f32 = null,
     variant: ui.loading.Options = .{},
 };
 /// When one indicator started and where it was paused, kept by the
@@ -293,6 +296,15 @@ pub const LoadingTimer = struct {
 };
 /// Repaint interval of a moving loading indicator.
 pub const loading_frame_interval: u64 = 16_666_667;
+/// The display refresh `View.animationFrameRate` paces frames by.
+pub const display_refresh_hz: u64 = 60;
+/// The interval between frames of `rate` a second: a whole number of
+/// display refreshes, the fewest that still give `rate` frames a second.
+pub fn frameInterval(rate: f32) u64 {
+    const hz: f32 = @floatFromInt(display_refresh_hz);
+    const refreshes: u64 = if (std.math.isFinite(rate) and rate > 0 and rate < hz) @intFromFloat(@floor(hz / rate)) else 1;
+    return (refreshes * std.time.ns_per_s + display_refresh_hz / 2) / display_refresh_hz;
+}
 const Indicator = struct { kind: LoadingKind, phase: f64, color: ?u32, size: f32, variant: ui.loading.Options };
 
 /// The label, help and error of a form field; see `View.field`.
@@ -1882,7 +1894,9 @@ pub const View = struct {
         const still = self.preferences.reduce_motion;
         const elapsed = if (still) 0 else if (look.timer) |timer| timer.elapsed(self.now, look.paused) else self.now;
         node.indicator = .{ .kind = kind, .phase = if (still) 0 else ui.loading.phase(kind, elapsed, look.duration), .color = look.color, .size = look.size, .variant = look.variant };
-        if (!still and !look.paused) self.wakeAt(self.now + loading_frame_interval);
+        if (!still and !look.paused) {
+            if (look.frame_rate) |rate| self.animationFrameRate(rate) else self.wakeAt(self.now + loading_frame_interval);
+        }
     }
     pub fn progress(self: *View, fraction: f32, style: Style) Error!void {
         if (!std.math.isFinite(fraction)) return error.InvalidValue;
@@ -2240,6 +2254,19 @@ pub const View = struct {
     /// earliest request of a pass wins; a host with a timer repaints then.
     pub fn wakeAt(self: *View, deadline: u64) void {
         self.wake = if (self.wake) |current| @min(current, deadline) else deadline;
+    }
+    /// Ask for the next frame of an animation that looks as smooth at
+    /// `rate` frames a second, such as a slow wave or a level meter, rather
+    /// than at each refresh: the pass comes a whole number of display
+    /// refreshes after the last frame of that rate, the fewest that give it
+    /// `rate` frames a second at least (60, 30, 20 or 15 at 60 Hz). Frames
+    /// of the same rate fall on one clock grid, so animations asking for it
+    /// share their passes; the window draws at the fastest rate any of them
+    /// asks for. A rate of none or less, or more than the display's,
+    /// draws at each refresh.
+    pub fn animationFrameRate(self: *View, rate: f32) void {
+        const interval = frameInterval(rate);
+        self.wakeAt((self.now / interval + 1) * interval);
     }
 
     /// Give the node just added a tooltip: `text` appears near it after the
@@ -6111,6 +6138,30 @@ test "arrange places rows and columns with flex layout" {
 fn findIndex(view: *const View, kind: Kind) usize {
     for (view.nodes(), 0..) |node, i| if (node.kind == kind) return i;
     unreachable;
+}
+
+test "animations of a lower frame rate ask for passes on a shared grid of whole refreshes" {
+    try std.testing.expectEqual(@as(u64, 16_666_667), frameInterval(60));
+    try std.testing.expectEqual(@as(u64, 16_666_667), frameInterval(120));
+    try std.testing.expectEqual(@as(u64, 16_666_667), frameInterval(0));
+    // 24 a second rounds up to 30, two refreshes a frame.
+    try std.testing.expectEqual(@as(u64, 33_333_333), frameInterval(24));
+    try std.testing.expectEqual(@as(u64, 50_000_000), frameInterval(20));
+    var storage: Storage(16, 256) = .{};
+    var view = View.init(storage.buffers());
+    view.now = 40_000_000;
+    view.reset(.{}, null);
+    try view.loadingIndicator(.arc, .{ .frame_rate = 30 }, .{});
+    try view.loadingIndicator(.ring, .{ .frame_rate = 30 }, .{});
+    try view.finish();
+    // Both share the next 30 Hz grid line after now.
+    try std.testing.expectEqual(@as(?u64, 66_666_666), view.wake);
+    view.reset(.{}, null);
+    try view.loadingIndicator(.arc, .{ .frame_rate = 30 }, .{});
+    try view.loadingIndicator(.ring, .{}, .{});
+    try view.finish();
+    // The fastest asks win.
+    try std.testing.expectEqual(@as(?u64, 40_000_000 + loading_frame_interval), view.wake);
 }
 
 test "loading indicators size by aspect, ask for frames while moving and hold still on request" {

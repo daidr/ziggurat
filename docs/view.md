@@ -193,6 +193,8 @@ try v.end();
 
 每一遍都有一个时间，`View.time()` 读取，单位纳秒；默认来自 Host 第一次构建时启动的单调计时器，`Options.clock` 可以换成应用自己的时钟。构建函数可以调用 `wakeAt(deadline)` 要求在某一时刻再运行一遍，提示延迟和通知时长也用它。一遍中最早的请求生效，没有请求就不会再唤醒。
 
+看起来以较低帧率也同样平滑的动画（缓慢的波浪、电平表、转动的唱片）用 `animationFrameRate(fps)` 代替逐帧的 `wakeAt`：下一遍落在最少整数个显示刷新之后，且仍至少有 `fps` 帧每秒。按 `display_refresh_hz`（60）计算，帧率向上取到 60、30、20、15 等能整除的档位；`frameInterval(fps)` 给出对应间隔。同一帧率的请求落在同一条时间网格上，因此多个动画共用同一遍；窗口按所有请求中最快的那个绘制。0、负数或高于刷新率的帧率按每次刷新绘制。
+
 Host 本身不持有计时器，只在 paint 之后投递一个任务，把最早的期限交给 `Host.setScheduler` 设置的调度器。`ziggurat_view_timer` 提供基于 `ziggurat_wake.OneShot` 的调度器：
 
 ```zig
@@ -617,9 +619,9 @@ if (try v.presentColumn(&state.panel, state.open, .{ .hidden = .{ .y = 12, .scal
 
 ## 加载动画
 
-`loadingIndicator(kind, options, style)` 加入 29 种加载动画之一，作为以 `Style.name` 命名的不确定进度条暴露（Windows UIA 上是没有 RangeValue 的 ProgressBar）。`LoadingOptions` 有 `size`（高度，默认 20 DIP，宽度按宽高比）、`color`（默认主题文字色，禁用时为禁用文字色）、`duration`（0 为自身周期）、`paused`、`timer` 与 `variant`（`ui.loading.Options`）。没有 `timer` 时姿态取 `View.time()`，同一窗口的指示器同步转动；应用持有的 `LoadingTimer` 记录各自的起点，`paused` 时保持当前姿态，恢复后从该处继续。
+`loadingIndicator(kind, options, style)` 加入 29 种加载动画之一，作为以 `Style.name` 命名的不确定进度条暴露（Windows UIA 上是没有 RangeValue 的 ProgressBar）。`LoadingOptions` 有 `size`（高度，默认 20 DIP，宽度按宽高比）、`color`（默认主题文字色，禁用时为禁用文字色）、`duration`（0 为自身周期）、`paused`、`timer`、`frame_rate`（每秒帧数，null 为每次刷新，见 `animationFrameRate`）与 `variant`（`ui.loading.Options`）。没有 `timer` 时姿态取 `View.time()`，同一窗口的指示器同步转动；应用持有的 `LoadingTimer` 记录各自的起点，`paused` 时保持当前姿态，恢复后从该处继续。
 
-动画中的指示器每一遍都请求 16.7 ms 后的唤醒，因此需要[调度器](#时间与唤醒)才会持续转动；暂停、减少动态效果或指示器不在树中时不请求，窗口回到完全空闲。
+动画中的指示器每一遍都请求 16.7 ms 后（设置了 `frame_rate` 时按该帧率）的唤醒，因此需要[调度器](#时间与唤醒)才会持续转动；暂停、减少动态效果或指示器不在树中时不请求，窗口回到完全空闲。
 
 ## 系统偏好
 
