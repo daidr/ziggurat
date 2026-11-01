@@ -86,7 +86,6 @@ const Probe = struct {
     }
     fn page(ptr: *anyopaque, _: *web.View, value: web.PageEvent) void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
-        std.debug.print("  stage {d} page {s}\n", .{ self.stage, @tagName(value) });
         switch (value) {
             .started => |info| {
                 self.started += 1;
@@ -187,10 +186,8 @@ fn run(allocator: std.mem.Allocator) !void {
     var probe: Probe = .{ .app = app, .window = try app.createWindow(.{ .width = 320, .height = 240 }) };
     probe.view = web.View.init(allocator, &probe, Probe.event);
     const site: web.LocalSite = .{ .scheme = "asset", .scheme_ipc = true, .resources = &resources };
-    // A handler, a dynamic document and grants beyond the default policy
-    // are not served here yet.
-    try std.testing.expectError(error.UnsupportedCapability, probe.view.attach(probe.window, .{ .html = page_html, .storage = .ephemeral, .custom_schemes = &registrations, .local = .{ .scheme = "asset", .dynamic_document = true } }));
-    try std.testing.expectError(error.UnsupportedCapability, probe.view.attach(probe.window, .{ .html = page_html, .storage = .ephemeral, .custom_schemes = &registrations, .local = .{ .scheme = "asset", .methods = .{ .get = true, .head = true, .post = true } } }));
+    // File streams are of the Linux backend.
+    try std.testing.expectError(error.UnsupportedCapability, probe.view.attach(probe.window, .{ .html = page_html, .storage = .ephemeral, .custom_schemes = &registrations, .file_streams = .{}, .local = site }));
     try probe.view.attach(probe.window, .{ .html = page_html, .storage = .ephemeral, .custom_schemes = &registrations, .local = site, .page_listener = .{ .context = &probe, .event = Probe.page } });
     var watchdog: Watchdog = .{ .app = app };
     try watchdog.start();
@@ -200,6 +197,110 @@ fn run(allocator: std.mem.Allocator) !void {
     if (watchdog.expired) probe.fail(error.Timeout);
     if (probe.err) |err| return err;
     try std.testing.expect(probe.stage == 8);
+}
+
+/// A site whose document and other paths come from the app's handler, with
+/// grants beyond the default policy: a request header, a POST that WKWebView
+/// sends without Origin and the policy so refuses, a response header, a deferred answer and a request left
+/// unanswered, which the View answers 404.
+const dynamic_html =
+    \\<!doctype html><script>
+    \\addEventListener('DOMContentLoaded',async()=>{const r=[];
+    \\try{const a=await fetch('/api');r.push(a.status,await a.text(),a.headers.get('X-Answer'))}catch(e){r.push('api-failed')}
+    \\r.push(await fetch('/api',{headers:{'X-Request-Policy':'yes'}}).then(x=>x.text(),()=>'denied'));
+    \\r.push(await fetch('/api',{headers:{'X-Other':'1'}}).then(()=>'allowed',()=>'denied'));
+    \\r.push(await fetch('/post',{method:'POST'}).then(x=>x.text(),()=>'denied'));
+    \\r.push(await fetch('/slow').then(x=>x.text(),()=>'denied'));
+    \\r.push(await fetch('/nothing').then(x=>x.status,()=>'denied'));
+    \\chrome.webview.postMessage(r.join(' '))});
+    \\</script>
+;
+const dynamic_registrations = [_]web.SchemeRegistration{.{ .name = "asset", .treat_as_secure = true, .request_origins = &.{origin} }};
+const Dynamic = struct {
+    app: *z.App,
+    allocator: std.mem.Allocator,
+    window: z.Window,
+    view: web.View = undefined,
+    err: ?anyerror = null,
+    result: [256]u8 = undefined,
+    result_len: usize = 0,
+    slow: ?web.ResourceRequestId = null,
+    documents: u32 = 0,
+    fn fail(self: *@This(), err: anyerror) void {
+        if (self.err == null) self.err = err;
+        std.debug.print("macOS dynamic site: {s}\n", .{@errorName(err)});
+        self.app.quit();
+    }
+    fn event(ptr: *anyopaque, _: *web.View, value: web.Event) void {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        switch (value) {
+            .message => |text| {
+                if (text.len > self.result.len) return self.fail(error.TooLong);
+                @memcpy(self.result[0..text.len], text);
+                self.result_len = text.len;
+                _ = self.window.destroy() catch |err| return self.fail(err);
+                self.app.quit();
+            },
+            .failed => self.fail(error.NativeFailure),
+            .process_failed => self.fail(error.ProcessFailed),
+            else => {},
+        }
+    }
+    fn has(request: web.ResourceRequest, name: []const u8) bool {
+        for (request.headers) |header| if (std.ascii.eqlIgnoreCase(header.name, name)) return true;
+        return false;
+    }
+    fn handle(ptr: *anyopaque, request: web.ResourceRequest, response: *web.Responder) void {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        const answer = [_]web.resources.Header{.{ .name = "X-Answer", .value = "42" }};
+        if (std.mem.eql(u8, request.path, "/document")) {
+            self.documents += 1;
+            response.respond(.{ .mime = "text/html", .bytes = dynamic_html }) catch |err| self.fail(err);
+        } else if (std.mem.eql(u8, request.path, "/api")) {
+            response.respond(.{ .mime = "text/plain", .headers = &answer, .bytes = if (has(request, "X-Request-Policy")) "granted" else "plain" }) catch |err| self.fail(err);
+        } else if (std.mem.eql(u8, request.path, "/post")) {
+            if (request.method != .post) return self.fail(error.WrongMethod);
+            response.respond(.{ .mime = "text/plain", .bytes = "posted" }) catch |err| self.fail(err);
+        } else if (std.mem.eql(u8, request.path, "/slow")) {
+            self.slow = response.deferResponse(.{}) catch |err| return self.fail(err);
+            self.app.post(.{ .context = self, .call = later }) catch |err| self.fail(err);
+        }
+        // Anything else stays unanswered: the View answers 404.
+    }
+    fn later(ptr: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        var owned = web.resources.OwnedResponse.init(self.allocator, .{ .mime = "text/plain", .bytes = "slow" }, 1024) catch |err| return self.fail(err);
+        self.view.respondOwned(self.slow.?, &owned) catch |err| {
+            owned.deinit();
+            self.fail(err);
+        };
+    }
+};
+fn dynamic(allocator: std.mem.Allocator) !void {
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    var probe: Dynamic = .{ .app = app, .allocator = allocator, .window = try app.createWindow(.{ .width = 320, .height = 240 }) };
+    probe.view = web.View.init(allocator, &probe, Dynamic.event);
+    try probe.view.attach(probe.window, .{ .html = "", .storage = .ephemeral, .custom_schemes = &dynamic_registrations, .local = .{
+        .scheme = "asset",
+        .start_path = "/document",
+        .scheme_ipc = true,
+        .dynamic_document = true,
+        .methods = .{ .get = true, .head = true, .post = true },
+        .request_headers = &.{.{ .name = "X-Request-Policy" }},
+        .on_resource = .{ .context = &probe, .handle = Dynamic.handle },
+    } });
+    var watchdog: Watchdog = .{ .app = app };
+    try watchdog.start();
+    defer watchdog.stop();
+    try app.run();
+    watchdog.stop();
+    if (watchdog.expired) probe.fail(error.Timeout);
+    if (probe.err) |err| return err;
+    const text = probe.result[0..probe.result_len];
+    std.debug.print("macOS dynamic site reports \"{s}\"\n", .{text});
+    try std.testing.expectEqualStrings("200 plain 42 granted denied denied slow 404", text);
+    try std.testing.expectEqual(@as(u32, 1), probe.documents);
 }
 
 /// Engine completions of closed pages still arrive after close; waits for
@@ -220,6 +321,7 @@ pub fn main() !void {
     defer std.debug.assert(allocator.deinit() == .ok);
     if (!web.backendCapabilities().page_lifecycle) return error.SkipZigTest;
     try run(allocator.allocator());
+    try dynamic(allocator.allocator());
     const app = try z.App.init(allocator.allocator());
     defer app.deinit();
     var drain: Drain = .{ .app = app };
@@ -231,5 +333,5 @@ pub fn main() !void {
     watchdog.stop();
     try std.testing.expect(!watchdog.expired);
     try std.testing.expectEqualDeep(web.ResourceCounts{ .states = 0, .handlers = 0, .controllers = 0 }, web.resourceCounts());
-    std.debug.print("macOS local site: resources, policy refusals, local navigation, history across and within documents, refresh, IPC, native records=0\n", .{});
+    std.debug.print("macOS local site: resources, policy refusals, local navigation, history across and within documents, refresh, IPC; app handler with grants, deferral and refusal; native records=0\n", .{});
 }
