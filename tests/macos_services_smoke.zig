@@ -138,6 +138,8 @@ const Flip = struct {
     }
 };
 
+fn stayOpen(_: *anyopaque, _: *z.App) void {}
+
 fn watchdog() void {
     zio.sleep(20 * std.time.ns_per_s);
     std.debug.print("macOS services smoke timed out waiting for appearance changes\n", .{});
@@ -159,7 +161,9 @@ pub fn main() !void {
     shell_thread.join();
     try shell_result;
 
-    const app = try z.App.init(allocator);
+    // No windows: keep running until the appearance flips finish.
+    var keep: u8 = 0;
+    const app = try z.App.initWithOptions(allocator, .{ .on_all_windows_closed = .{ .context = &keep, .closed = stayOpen } });
     defer app.deinit();
     var monitors: [desktop.max_monitors]desktop.Monitor = undefined;
     const count = try desktop.monitors(app, &monitors);
