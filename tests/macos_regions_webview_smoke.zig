@@ -311,7 +311,11 @@ fn drain(allocator: std.mem.Allocator) !void {
     var value: Drain = .{ .app = app };
     try app.post(.{ .context = &value, .call = Drain.tick });
     try app.run();
-    if (!Drain.clean()) return error.ViewRecordsRemain;
+    if (!Drain.clean()) {
+        const counts = web.resourceCounts();
+        std.debug.print("records remain after {d} rounds: states={d} handlers={d} controllers={d}\n", .{ value.rounds, counts.states, counts.handlers, counts.controllers });
+        return error.ViewRecordsRemain;
+    }
 }
 
 pub fn main() !void {
