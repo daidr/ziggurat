@@ -285,6 +285,9 @@ pub fn main() !void {
         // A stopped App takes no posts, so a fresh one turns the run loop.
         const app = try z.App.init(allocator);
         defer app.deinit();
+        // A window keeps the App running while it waits.
+        const keep = try app.createWindow(.{ .width = 1, .height = 1 });
+        defer _ = keep.destroy() catch {};
         var drain: Drain = .{ .app = app };
         try app.post(.{ .context = &drain, .call = Drain.tick });
         try app.run();

@@ -301,13 +301,19 @@ const Drain = struct {
         self.rounds += 1;
         if (clean() or self.rounds == 3000) return self.app.quit();
         zio.sleep(std.time.ns_per_ms);
-        self.app.post(.{ .context = self, .call = tick }) catch self.app.quit();
+        self.app.post(.{ .context = self, .call = tick }) catch |err| {
+            std.debug.print("drain post: {s}\n", .{@errorName(err)});
+            self.app.quit();
+        };
     }
 };
 fn drain(allocator: std.mem.Allocator) !void {
     // A stopped App takes no posts, so a fresh one turns the run loop.
     const app = try z.App.init(allocator);
     defer app.deinit();
+    // A window keeps the App running while it waits.
+    const keep = try app.createWindow(.{ .width = 1, .height = 1 });
+    defer _ = keep.destroy() catch {};
     var value: Drain = .{ .app = app };
     try app.post(.{ .context = &value, .call = Drain.tick });
     try app.run();
