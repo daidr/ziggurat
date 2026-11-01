@@ -886,6 +886,7 @@ static void *download_context=&download_context;
     ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep; (void)webView;
     NSURLProtectionSpace *space=challenge.protectionSpace;
     NSString *method=space.authenticationMethod;
+    fprintf(stderr,"zwk challenge %s %s:%ld\n",method.UTF8String,space.host.UTF8String,(long)space.port);
     if ([method isEqualToString:NSURLAuthenticationMethodServerTrust]) {
         SecTrustRef trust=space.serverTrust;
         CFErrorRef error=NULL;
@@ -894,6 +895,7 @@ static void *download_context=&download_context;
         if (error) CFRelease(error);
         NSData *der=certificate_der(trust);
         NSString *host=space.host.lowercaseString;
+        fprintf(stderr,"zwk trust %s:%ld der=%lu live=%d remote=%d fn=%d\n",space.host.UTF8String,(long)space.port,(unsigned long)der.length,live(self),remote,certificate_fn!=NULL);
         if (!der.length || !host.length || !live(self) || !remote || !certificate_fn) { completion(NSURLSessionAuthChallengeCancelAuthenticationChallenge,nil); return; }
         NSArray *key=@[host,der];
         BOOL allowed=[allowed_certificates containsObject:key];

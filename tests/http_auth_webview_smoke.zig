@@ -104,7 +104,10 @@ const Probe = struct {
             },
             .completed => |info| {
                 if (self.step != .refused or info.success) return;
-                if (self.certificates != 1) return self.fail(error.CertificateNotAsked);
+                if (self.certificates != 1) {
+                    std.debug.print("refused load: status {d} cancelled {}\n", .{ info.native_status, info.cancelled });
+                    return self.fail(error.CertificateNotAsked);
+                }
                 self.step = .trusted;
                 view.navigateRemote(self.at(self.secure, "/tls")) catch |err| self.fail(err);
             },
