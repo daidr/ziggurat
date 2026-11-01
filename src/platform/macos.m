@@ -120,8 +120,17 @@ static void emit_edit(NativeWindow *s,int key,uint32_t flags){NativeEvent event=
 - (BOOL)canBecomeMainWindow{return self.takesKeyboard;}
 @end
 
+/* What the content's accessibility answers for the view. */
+@protocol ZigViewAccessibility <NSObject>
+- (NSArray *)zigAccessibilityChildren;
+- (id)zigAccessibilityHitTest:(NSPoint)point;
+- (id)zigAccessibilityFocusedElement;
+@end
 @interface ZigView : NSView <NSTextInputClient>{
 @public NativeWindow *native;
+    /* The content's semantic tree as accessibility elements, which
+       src/ui/accessibility_macos.m sets (retained). */
+    id<ZigViewAccessibility> zigAccessibility;
 }
 @end
 @interface ZigDelegate : NSObject <NSWindowDelegate>{
@@ -147,6 +156,23 @@ static int edit_for_selector(SEL selector,uint32_t *flags){
 }
 
 @implementation ZigView
+- (void)dealloc{[zigAccessibility release];[super dealloc];}
+- (void)setZigAccessibility:(id<ZigViewAccessibility>)provider{[provider retain];[zigAccessibility release];zigAccessibility=provider;}
+/* The view contains the elements of the content's semantic tree. */
+- (NSArray *)accessibilityChildren{
+    if(!zigAccessibility)return [super accessibilityChildren];
+    NSArray *elements=[zigAccessibility zigAccessibilityChildren];
+    NSArray *views=[super accessibilityChildren];
+    return views.count?[views arrayByAddingObjectsFromArray:elements]:elements;
+}
+- (id)accessibilityHitTest:(NSPoint)point{
+    id found=zigAccessibility?[zigAccessibility zigAccessibilityHitTest:point]:nil;
+    return found?found:[super accessibilityHitTest:point];
+}
+- (id)accessibilityFocusedUIElement{
+    id found=zigAccessibility?[zigAccessibility zigAccessibilityFocusedElement]:nil;
+    return found?found:[super accessibilityFocusedUIElement];
+}
 - (BOOL)isFlipped{return YES;}
 - (BOOL)acceptsFirstResponder{return YES;}
 - (BOOL)acceptsFirstMouse:(NSEvent *)event{(void)event;return YES;}
@@ -448,6 +474,32 @@ int zlm_window_interaction(NativeWindow *s,int edge){
 }
 void zlm_window_text_mode(NativeWindow *s,int keyboard){zlm_window_cancel_composition(s);s->keyboard=keyboard;}
 
+/* The content view drawn into a bitmap of its backing pixels, as the
+   window shows it: premultiplied RGBA rows from the top. Returns the
+   retained bitmap, which zlm_capture_free releases, or NULL. */
+void *zlm_window_capture(NativeWindow *s,int *width,int *height,int *stride,const unsigned char **pixels){
+    if(s->destroyed)return NULL;
+    NSBitmapImageRep *bitmap=nil;
+    @autoreleasepool{
+        NSRect bounds=[s->view bounds];
+        CGFloat scale=[s->window backingScaleFactor];if(scale<1)scale=1;
+        NSInteger w=(NSInteger)lround(bounds.size.width*scale),h=(NSInteger)lround(bounds.size.height*scale);
+        if(w<=0||h<=0)return NULL;
+        bitmap=[[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:w pixelsHigh:h bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bitmapFormat:0 bytesPerRow:0 bitsPerPixel:32];
+        if(!bitmap)return NULL;
+        /* In sRGB, the space the content draws in, so colors come back as
+           they were drawn. */
+        NSBitmapImageRep *tagged=[bitmap bitmapImageRepByRetaggingWithColorSpace:[NSColorSpace sRGBColorSpace]];
+        if(tagged&&tagged!=bitmap){[tagged retain];[bitmap release];bitmap=tagged;}
+        /* Points to pixels, so the view draws at the backing scale. */
+        [bitmap setSize:bounds.size];
+        [s->view cacheDisplayInRect:bounds toBitmapImageRep:bitmap];
+        *width=(int)[bitmap pixelsWide];*height=(int)[bitmap pixelsHigh];*stride=(int)[bitmap bytesPerRow];*pixels=[bitmap bitmapData];
+    }
+    return bitmap;
+}
+void zlm_capture_free(void *bitmap){[(NSBitmapImageRep *)bitmap release];}
+
 /* Test hooks: drive a window as AppKit would, without a user at the screen. */
 uint32_t zlm_resource_count(void){return atomic_load(&live_windows);}
 void zlm_test_paint(NativeWindow *s){
@@ -460,6 +512,51 @@ void zlm_test_close(NativeWindow *s){@autoreleasepool{[s->delegate windowShouldC
 void zlm_test_commit(NativeWindow *s,const char *text){@autoreleasepool{[s->view insertText:[NSString stringWithUTF8String:text] replacementRange:NSMakeRange(NSNotFound,0)];}}
 void zlm_test_compose(NativeWindow *s,const char *text,size_t caret){@autoreleasepool{[s->view setMarkedText:[NSString stringWithUTF8String:text] selectedRange:NSMakeRange(caret,0) replacementRange:NSMakeRange(NSNotFound,0)];}}
 int zlm_test_title_is(NativeWindow *s,const char *title){@autoreleasepool{return [[s->window title] isEqualToString:[NSString stringWithUTF8String:title]];}}
+/* Chooses an item of the application menu by its titles, as a click
+   would; an ampersand in a requested title is a mnemonic and is skipped.
+   0 ran, 1 no menu, 2 no such item, 3 disabled, 4 a submenu. */
+static BOOL zlm_same_title(NSString *title,const char *label){
+    NSMutableString *plain=[NSMutableString string];
+    NSString *text=[NSString stringWithUTF8String:label]?:@"";
+    for(NSUInteger i=0;i<[text length];++i){
+        unichar c=[text characterAtIndex:i];
+        if(c=='&'){
+            if(i+1<[text length]&&[text characterAtIndex:i+1]=='&'){[plain appendString:@"&"];++i;}
+            continue;
+        }
+        [plain appendFormat:@"%C",c];
+    }
+    return [title isEqualToString:plain]||[title isEqualToString:text];
+}
+int zlm_window_menu_activate(NativeWindow *s,const char *const *path,int count){
+    if(s->destroyed)return 1;
+    @autoreleasepool{
+        NSMenu *menu=[NSApp mainMenu];
+        if(!menu||[menu numberOfItems]==0)return 1;
+        for(int depth=0;depth<count;++depth){
+            [menu update];
+            NSInteger found=-1;
+            for(NSInteger i=0;i<[menu numberOfItems];++i){
+                NSMenuItem *item=[menu itemAtIndex:i];
+                if([item isSeparatorItem]||[item isHidden]||[item isAlternate])continue;
+                /* The bar's items take their menus' titles. */
+                NSString *title=depth==0&&[item submenu]&&[[[item submenu] title] length]?[[item submenu] title]:[item title];
+                if(zlm_same_title(title,path[depth])||zlm_same_title([item title],path[depth])){found=i;break;}
+            }
+            if(found<0)return 2;
+            NSMenuItem *item=[menu itemAtIndex:found];
+            if(depth+1<count){
+                if(![item submenu])return 2;
+                menu=[item submenu];
+                continue;
+            }
+            if([item submenu])return 4;
+            if(![item isEnabled])return 3;
+            [menu performActionForItemAtIndex:found];
+        }
+        return 0;
+    }
+}
 /* The client cursor, by the order of core.Cursor. macOS has no public
    diagonal resize cursors before macOS 15, so those keep the arrow. */
 void zlm_window_cursor(NativeWindow *s,int cursor){

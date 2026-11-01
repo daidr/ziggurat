@@ -6,7 +6,7 @@
 ziggurat init DIR [--template native|web|hybrid] [--name NAME] [--id IDENTITY] [--framework PATH]
 ziggurat dev [--watch DIR]... [--frontend COMMAND] [-- ZIG_BUILD_ARGS...]
 ziggurat build [--debug] [--target TRIPLE | --platform LIST] [--package] [--sign IDENTITY] [--skip-dmg] [--skip-notarize] [-- ZIG_BUILD_ARGS...]
-ziggurat package setup|deb|app|install-script|install-ps1 --zip PACKAGE ...
+ziggurat package setup|deb|pkgbuild|app|install-script|install-ps1 --zip PACKAGE ...
 ziggurat publish DIR (--github OWNER/REPO --tag TAG ... | --s3 BUCKET --url BASE ...)
 ziggurat generate [-o FILE] [--framework PATH] [DIR]
 ziggurat i18n check [DIR]
@@ -35,7 +35,7 @@ ziggurat doctor [--webview]
 
 ## build
 
-以 ReleaseSafe（`--debug` 时为 Debug）运行 `zig build`。`--package` 读取 `ziggurat.json`，把 `zig-out/bin` 中的可执行文件、Windows 上存在的 `WebView2Loader.dll`、项目根的 LICENSE 和 `icon` 指定的 PNG（包内名为 `icon.png`）打成 `dist/<identity>-<os>-<arch>-<version>.zip`，并打印其 SHA-256。该包可直接交给 `ziggurat-update release` 签名发布，或交给 `ziggurat package` 生成安装程序与 deb，见 [打包](packaging.md) 和 [更新](updates.md)。打包确定性只针对同一组输入与工具环境；编译产物本身是否逐字节一致取决于 Zig 编译器。
+以 ReleaseSafe（`--debug` 时为 Debug）运行 `zig build`。`--package` 读取 `ziggurat.json`，把 `zig-out/bin` 中的可执行文件、Windows 上存在的 `WebView2Loader.dll`、项目根的 LICENSE 和 `icon` 指定的 PNG（包内名为 `icon.png`）打成 `dist/<identity>-<os>-<arch>-<version>.zip`，并打印其 SHA-256。该包可直接交给 `ziggurat-update release` 签名发布，或交给 `ziggurat package` 生成安装程序、deb 与 PKGBUILD，见 [打包](packaging.md) 和 [更新](updates.md)。打包确定性只针对同一组输入与工具环境；编译产物本身是否逐字节一致取决于 Zig 编译器。
 
 `--platform` 接受逗号分隔的 `OS/ARCH` 列表，依次构建到 `zig-out/<os>-<arch>`：OS 为 `macos`、`linux`、`windows`（`darwin` 同 `macos`），ARCH 为 `x86_64`、`aarch64`（`amd64`、`arm64` 亦可），另有 `macos/universal`。与本机相同的平台不传 `-Dtarget`，保留本机系统库；其他平台传 `-Dtarget=<arch>-<os>`（Linux 加 `-gnu`）。`macos/universal` 先分别构建 `aarch64` 与 `x86_64`，再把两个 Mach-O 合成一个通用可执行文件（CLI 自己写 fat 头，各切片按 16 KiB 对齐，与 lipo 相同，不需要 Xcode）。与 `--target` 互斥；`--package` 为每个平台各写一个更新包。
 
