@@ -495,6 +495,7 @@ static NSArray<NSString *> *uri_lines(NSData *data) {
 void *zst_source_begin(void *handle, void *event_pointer, const char *names, size_t names_len, int actions,
                        const uint8_t *rgba, int width, int height, int hot_x, int hot_y,
                        void *owner, const ZstSourceCallbacks *callbacks) {
+    NSWindow *window = (__bridge NSWindow *)handle;
     NSView *view = content_view(handle);
     NSEvent *event = (__bridge NSEvent *)event_pointer;
     if (!view) return NULL;
