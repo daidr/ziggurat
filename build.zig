@@ -1780,6 +1780,12 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
         });
+        const remote_smoke = addSmokeModule(b, "smoke-webview-remote-macos", "tests/macos_remote_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        remote_smoke.link_libc = true;
+        remote_smoke.addCSourceFile(.{ .file = b.path("tests/macos_remote_fixture.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
     }
     if (web and target.result.os.tag == .windows) {
         if (target.result.cpu.arch != .x86_64)

@@ -1,9 +1,11 @@
 /* The WKWebView backend: the WebKitGTK native contract of webkit_native.h on
- * macOS, for trusted HTML pages and custom-scheme local sites in ephemeral
- * storage. A local site serves the page's HTML and fixed resources through a
- * WKURLSchemeHandler with the default request policy. Remote pages,
- * profiles, sessions, regions and the browser tools are refused here and
- * before they reach this file.
+ * macOS, for trusted HTML pages, custom-scheme local sites and remote pages
+ * in ephemeral storage. A local site serves the page's HTML and resources
+ * through a WKURLSchemeHandler. A remote page's grants hold by origin: the
+ * navigation policy checks each navigation, and a content rule list of its
+ * own blocks every load but those of granted origins. Profiles, sessions,
+ * regions and the browser tools are refused here and before they reach
+ * this file.
  *
  * Every function runs on the main thread. A page object is reference counted
  * by Core Foundation: zwk_create and zwk_recovery_anchor return one reference
@@ -12,12 +14,14 @@
 #import <AppKit/AppKit.h>
 #import <WebKit/WebKit.h>
 #include <objc/message.h>
+#include <arpa/inet.h>
 #include <ctype.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 #include "webkit_native.h"
 #include "webkit_content_rules.h"
 
@@ -57,6 +61,15 @@ static uint32_t domain_code(NSString *domain) {
 - (void)willOpenMenu:(NSMenu *)menu withEvent:(NSEvent *)event { [menu removeAllItems]; [super willOpenMenu:menu withEvent:event]; }
 @end
 
+/* One granted origin of a remote page, with the headers its navigations may
+ * carry beyond the browser's own. */
+typedef struct ZwkRemoteGrant {
+    BOOL https;
+    uint16_t port;
+    uint32_t flags, methods, header_count;
+    char host[256];
+    char **names, **values;
+} ZwkRemoteGrant;
 @interface ZwkPage : NSObject <WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler> {
 @public
     void *owner;
@@ -101,13 +114,114 @@ static uint32_t domain_code(NSString *domain) {
     uint32_t resource_limit;
     BOOL dynamic_document;
     NSMutableArray *deferred;
+    /* The remote page, when the page is one: its grants and rule list. A
+     * navigation the page starts itself is adopted when the engine names it. */
+    BOOL remote, remote_loopback, remote_script_navigation, remote_redirects, waiting_remote, nav_adopt;
+    uint32_t remote_count;
+    ZwkRemoteGrant *remote_grants;
+    NSString *remote_url, *remote_ipc, *remote_source, *remote_identifier;
+    WKContentRuleList *remote_rules;
 }
 @end
 static void resources_cancel_all(ZwkPage *s);
-enum { NAV_INITIAL, NAV_REFRESH, NAV_LOCAL, NAV_HISTORY };
+enum { NAV_INITIAL, NAV_REFRESH, NAV_LOCAL, NAV_HISTORY, NAV_REMOTE, NAV_FRAGMENT };
+enum { REMOTE_NAVIGATE=1u, REMOTE_REQUESTS=2u, REMOTE_IPC=4u };
+static BOOL managed_header(const char *name);
+static BOOL header_name(const char *name);
+static BOOL header_value(const char *value);
+static int method_index(NSString *method);
+static void remote_free(ZwkPage *s);
 
 static BOOL live(ZwkPage *s) { return !s->closed && !s->recovering && s->owner; }
 static ZwkPage *page_of(ZwkState *s) { return (__bridge ZwkPage *)(void *)s; }
+
+/* Remote origins, as the Linux backend and the Zig validation name them:
+ * http only on loopback hosts, and loopback only by the page's opt-in. */
+static BOOL remote_loopback_host(const char *host) {
+    const size_t length=strlen(host);
+    if (!strcmp(host,"localhost") || (length>10 && !strcmp(host+length-10,".localhost"))) return YES;
+    struct in_addr v4; struct in6_addr v6;
+    if (inet_pton(AF_INET,host,&v4)==1) return (ntohl(v4.s_addr)>>24)==127;
+    if (inet_pton(AF_INET6,host,&v6)==1) {
+        static const uint8_t zero[12]={0};
+        if (IN6_IS_ADDR_LOOPBACK(&v6)) return YES;
+        const BOOL mapped=!memcmp(v6.s6_addr,zero,10) && v6.s6_addr[10]==255 && v6.s6_addr[11]==255;
+        return (mapped || !memcmp(v6.s6_addr,zero,12)) && v6.s6_addr[12]==127;
+    }
+    return NO;
+}
+/* One http(s) URI's origin: scheme, lowercase host without brackets, port. */
+static BOOL remote_parse(NSString *text,BOOL origin_only,BOOL loopback,ZwkRemoteGrant *out) {
+    if (!text || [text lengthOfBytesUsingEncoding:NSUTF8StringEncoding]>16384) return NO;
+    NSURLComponents *c=[NSURLComponents componentsWithString:text];
+    if (!c || !c.scheme || !c.percentEncodedHost.length || c.percentEncodedUser || c.percentEncodedPassword) return NO;
+    NSString *scheme=c.scheme.lowercaseString;
+    const BOOL https=[scheme isEqualToString:@"https"];
+    if (!https && ![scheme isEqualToString:@"http"]) return NO;
+    NSString *host=c.percentEncodedHost.lowercaseString;
+    if (host.length>2 && [host hasPrefix:@"["] && [host hasSuffix:@"]"]) host=[host substringWithRange:NSMakeRange(1,host.length-2)];
+    const char *value=host.UTF8String;
+    if (!value || !*value || strlen(value)>=sizeof(out->host) || strpbrk(value,"%/\\?#@[] ")) return NO;
+    const long port=c.port?c.port.longValue:(https?443:80);
+    if (port<1 || port>65535) return NO;
+    if (origin_only && ((c.percentEncodedPath.length && ![c.percentEncodedPath isEqualToString:@"/"]) || c.percentEncodedQuery || c.percentEncodedFragment)) return NO;
+    const BOOL local_host=remote_loopback_host(value);
+    if ((local_host && !loopback) || (!https && !local_host)) return NO;
+    memset(out,0,sizeof(*out));
+    out->https=https; out->port=(uint16_t)port; memcpy(out->host,value,strlen(value)+1);
+    return YES;
+}
+static const ZwkRemoteGrant *remote_grant(ZwkPage *s,NSString *uri) {
+    ZwkRemoteGrant parsed;
+    if (!s->remote || !remote_parse(uri,NO,s->remote_loopback,&parsed)) return NULL;
+    for (uint32_t i=0;i<s->remote_count;++i) {
+        const ZwkRemoteGrant *grant=&s->remote_grants[i];
+        if (grant->https==parsed.https && grant->port==parsed.port && !strcmp(grant->host,parsed.host)) return grant;
+    }
+    return NULL;
+}
+/* A document of the page: an origin granted navigation and its GET. */
+static BOOL remote_navigate(ZwkPage *s,NSString *uri) {
+    const ZwkRemoteGrant *grant=remote_grant(s,uri);
+    return grant && (grant->flags&(REMOTE_NAVIGATE|REMOTE_REQUESTS))==(REMOTE_NAVIGATE|REMOTE_REQUESTS) && (grant->methods&1u);
+}
+/* A navigation's own request, by its method and the headers it carries. */
+static BOOL remote_request_allowed(ZwkPage *s,NSURLRequest *request) {
+    const ZwkRemoteGrant *grant=remote_grant(s,request.URL.absoluteString);
+    const int verb=method_index(request.HTTPMethod?:@"GET");
+    if (!grant || verb<0 || !(grant->methods&(1u<<(unsigned)verb))) return NO;
+    NSDictionary<NSString *,NSString *> *headers=request.allHTTPHeaderFields;
+    if (headers.count>64) return NO;
+    for (NSString *key in headers) {
+        const char *name=key.UTF8String, *value=headers[key].UTF8String;
+        if (!header_name(name) || !header_value(value)) return NO;
+        if (managed_header(name)) continue;
+        BOOL allowed=NO;
+        for (uint32_t i=0;i<grant->header_count;++i) if (!strcasecmp(name,grant->names[i]) && (!grant->values[i] || !strcmp(value,grant->values[i]))) { allowed=YES; break; }
+        if (!allowed) return NO;
+    }
+    return YES;
+}
+/* Escapes stay encoded: decoding a query could equate a delimiter with data. */
+static BOOL remote_uri_equal(ZwkPage *s,NSString *a,NSString *b,BOOL ignore_fragment) {
+    ZwkRemoteGrant x, y;
+    if (!remote_parse(a,NO,s->remote_loopback,&x) || !remote_parse(b,NO,s->remote_loopback,&y) ||
+        x.https!=y.https || x.port!=y.port || strcmp(x.host,y.host)) return NO;
+    NSURLComponents *l=[NSURLComponents componentsWithString:a], *r=[NSURLComponents componentsWithString:b];
+    NSString *lp=l.percentEncodedPath.length?l.percentEncodedPath:@"/", *rp=r.percentEncodedPath.length?r.percentEncodedPath:@"/";
+    if (![lp isEqualToString:rp]) return NO;
+    if (l.percentEncodedQuery!=r.percentEncodedQuery && ![l.percentEncodedQuery isEqualToString:r.percentEncodedQuery]) return NO;
+    return ignore_fragment || l.percentEncodedFragment==r.percentEncodedFragment || [l.percentEncodedFragment isEqualToString:r.percentEncodedFragment];
+}
+/* The engine moves within the document to a URI with a fragment that
+ * differs from the current one at most in its fragment. */
+static BOOL remote_fragment_change(ZwkPage *s,NSString *from,NSString *to) {
+    return [NSURLComponents componentsWithString:to].percentEncodedFragment!=nil && remote_uri_equal(s,from,to,YES);
+}
+static BOOL same_uri(ZwkPage *s,NSString *a,NSString *b) {
+    if (!a || !b) return NO;
+    return s->remote?remote_uri_equal(s,a,b,NO):[a isEqualToString:b];
+}
 
 void zwk_counts(uint32_t *states,uint32_t *callbacks,uint32_t *views) {
     *states=atomic_load(&live_states); *callbacks=atomic_load(&live_callbacks); *views=atomic_load(&live_views);
@@ -179,6 +293,7 @@ static BOOL local_uri(ZwkPage *s,const char *text,char path[4097]) {
 static BOOL trusted_uri(ZwkPage *s,NSString *uri) {
     char path[4097];
     if (!uri) return NO;
+    if (s->remote) return remote_navigate(s,uri);
     return s->local?local_uri(s,uri.UTF8String,path):[uri isEqualToString:@"about:blank"];
 }
 static BOOL document(ZwkPage *s) {
@@ -186,9 +301,12 @@ static BOOL document(ZwkPage *s) {
     if (s->pending_navigation && !s->nav_prepared) return NO;
     return trusted_uri(s,s->view.URL.absoluteString);
 }
-static BOOL ipc_allowed(ZwkPage *s) { return !s->local || s->local_ipc; }
+static BOOL ipc_allowed(ZwkPage *s) {
+    if (s->remote) { const ZwkRemoteGrant *grant=remote_grant(s,s->view.URL.absoluteString); return grant && (grant->flags&REMOTE_IPC); }
+    return !s->local || s->local_ipc;
+}
 static void history_notify(ZwkPage *s) {
-    if (!live(s) || !s->committed || !s->local) return;
+    if (!live(s) || !s->committed || (!s->local && !s->remote)) return;
     (void)page(s,5,(s->view.canGoBack?1u:0u)|(s->view.canGoForward?2u:0u),0,nil);
 }
 
@@ -201,13 +319,16 @@ static NSError *sandbox_error;
 static BOOL sandbox_compiling;
 static NSMutableArray<ZwkPage *> *sandbox_waiting;
 static void initialize(ZwkPage *s);
+static WKContentRuleListStore *rule_store(void) {
+    NSURL *directory=[NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:@"ziggurat-webkit-sandbox"] isDirectory:YES];
+    [[NSFileManager defaultManager] createDirectoryAtURL:directory withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions:@0700} error:NULL];
+    return [WKContentRuleListStore storeWithURL:directory];
+}
 static void sandbox_compile(void) {
     if (sandbox || sandbox_compiling) return;
     sandbox_compiling=YES; sandbox_error=nil;
     NSString *source=@"[{\"trigger\":{\"url-filter\":\".*\",\"resource-type\":[\"image\",\"style-sheet\",\"script\",\"font\",\"raw\",\"svg-document\",\"media\"]},\"action\":{\"type\":\"block\"}}]";
-    NSURL *directory=[NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:@"ziggurat-webkit-sandbox"] isDirectory:YES];
-    [[NSFileManager defaultManager] createDirectoryAtURL:directory withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions:@0700} error:NULL];
-    WKContentRuleListStore *store=[WKContentRuleListStore storeWithURL:directory];
+    WKContentRuleListStore *store=rule_store();
     [store compileContentRuleListForIdentifier:@"ziggurat-html-sandbox-1" encodedContentRuleList:source completionHandler:^(WKContentRuleList *list,NSError *error) {
         sandbox_compiling=NO; sandbox=list; sandbox_error=list?nil:error;
         NSArray<ZwkPage *> *waiting=sandbox_waiting; sandbox_waiting=nil;
@@ -216,8 +337,10 @@ static void sandbox_compile(void) {
 }
 static void rule_lists_apply(ZwkPage *s) {
     [s->controller removeAllContentRuleLists];
-    /* A local site's own content security policy keeps it to its loads. */
-    if (sandbox && !s->local) [s->controller addContentRuleList:sandbox];
+    /* A local site's own content security policy keeps it to its loads; a
+     * remote page's list keeps it to its granted origins. */
+    if (s->remote) { if (s->remote_rules) [s->controller addContentRuleList:s->remote_rules]; }
+    else if (sandbox && !s->local) [s->controller addContentRuleList:sandbox];
     for (WKContentRuleList *list in s->filters) [s->controller addContentRuleList:list];
 }
 
@@ -239,7 +362,7 @@ static char *js_quote(const char *text) {
 }
 
 static void navigation_forget(ZwkPage *s) {
-    s->pending_navigation=NO; s->authorized=NO; s->nav_prepared=NO; s->nav_uri=nil; s->nav_item=nil;
+    s->pending_navigation=NO; s->authorized=NO; s->nav_prepared=NO; s->nav_adopt=NO; s->nav_uri=nil; s->nav_item=nil;
 }
 static void navigation_clear(ZwkPage *s) {
     navigation_forget(s); s->navigation=nil; s->load_started=NO;
@@ -267,17 +390,18 @@ static void navigation_fail(ZwkPage *s,int code,NSString *reason) {
 static int prepare_document(ZwkPage *s) {
     if (!live(s)) return ZWK_CLOSED;
     if (s->generation==UINT64_MAX) return ZWK_FULL;
-    NSString *source_check=s->local?[NSString stringWithFormat:@"location.protocol==='%s:'&&location.hostname==='%s'&&location.port===''",s->local_scheme,s->local_host]:
+    NSString *source_check=s->remote?@"trusted.has(location.origin)":s->local?[NSString stringWithFormat:@"location.protocol==='%s:'&&location.hostname==='%s'&&location.port===''",s->local_scheme,s->local_host]:
         @"location.href==='about:blank'";
+    NSString *preamble=s->remote?[NSString stringWithFormat:@"const trusted=new Set(%@.map(x=>new URL(x).origin));",s->remote_ipc]:@"";
     NSString *private_script=[NSString stringWithFormat:
-        @"(()=>{const send=x=>webkit.messageHandlers.ziggurat.postMessage('%llu|'+x);"
+        @"(()=>{%@const send=x=>webkit.messageHandlers.ziggurat.postMessage('%llu|'+x);"
         "const valid=x=>{if(typeof x!=='string'||x.length>65536)return false;let bytes=0;"
         "for(const c of x){const p=c.codePointAt(0);if(!p)return false;bytes+=p<128?1:p<2048?2:p<65536?3:4;"
         "if(bytes>65536)return false}return true};"
         "addEventListener('message',e=>{if(e.isTrusted&&e.source===window&&window===top&&%@&&"
         "e.data&&valid(e.data.__ziggurat))send('M'+e.data.__ziggurat)});"
         "addEventListener('DOMContentLoaded',()=>send('D'),{once:true});%@})()",
-        (unsigned long long)(s->generation+1),source_check,s->facts?:@""];
+        preamble,(unsigned long long)(s->generation+1),source_check,s->facts?:@""];
     static NSString *const public_script=
         @"(()=>{const listeners=new Map;const transport=Object.freeze({"
         "postMessage(value){if(typeof value!=='string'||value.length>65536||value.includes('\\0'))throw TypeError('InvalidMessage');"
@@ -309,7 +433,7 @@ static int navigation_submit(ZwkPage *s,int kind,NSString *uri,WKBackForwardList
     if (!uri || [uri lengthOfBytesUsingEncoding:NSUTF8StringEncoding]>16384) return ZWK_INVALID;
     s->pending_navigation=YES; s->authorized=NO; s->navigation=nil;
     s->nav_kind=kind; s->nav_uri=uri; s->nav_item=item; s->nav_prepared=NO;
-    if (kind!=NAV_HISTORY) {
+    if (kind!=NAV_HISTORY && kind!=NAV_FRAGMENT) {
         const int result=prepare_document(s);
         if (result!=ZWK_OK) { if (live(s)) navigation_clear(s); return result; }
         s->nav_prepared=YES;
@@ -320,18 +444,21 @@ static int navigation_submit(ZwkPage *s,int kind,NSString *uri,WKBackForwardList
     if (!s->pending_navigation || s->generation!=generation) return ZWK_NAVIGATION_CANCELLED;
     WKNavigation *value;
     if (kind==NAV_HISTORY) value=[s->view goToBackForwardListItem:item];
-    else if (!s->local) value=[s->view loadHTMLString:s->html baseURL:nil];
+    else if (!s->local && !s->remote) value=[s->view loadHTMLString:s->html baseURL:nil];
     else if (kind==NAV_REFRESH) value=[s->view reload];
     else value=[s->view loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:uri]]];
     if (!live(s)) return ZWK_CLOSED;
     if (!s->pending_navigation || s->generation!=generation) return ZWK_NAVIGATION_CANCELLED;
-    if (!value && kind!=NAV_HISTORY) { navigation_clear(s); return ZWK_NATIVE_FAILED; }
+    if (!value && kind!=NAV_HISTORY && kind!=NAV_FRAGMENT) { navigation_clear(s); return ZWK_NATIVE_FAILED; }
     s->navigation=value;
     return ZWK_OK;
 }
+static void remote_compile(ZwkPage *s);
 static void initialize(ZwkPage *s) {
     if (!live(s)) return;
-    if (!sandbox && !s->local) {
+    if (s->remote) {
+        if (!s->remote_rules) { if (!s->waiting_remote) remote_compile(s); return; }
+    } else if (!sandbox && !s->local) {
         if (sandbox_error) {
             failure_set(s,sandbox_error);
             const ZwkFailure failure=s->failure;
@@ -344,7 +471,7 @@ static void initialize(ZwkPage *s) {
         return;
     }
     rule_lists_apply(s);
-    if (navigation_submit(s,NAV_INITIAL,s->local?s->local_url:@"about:blank",nil,YES)!=ZWK_OK && live(s))
+    if (navigation_submit(s,s->remote?NAV_REMOTE:NAV_INITIAL,s->remote?s->remote_url:s->local?s->local_url:@"about:blank",nil,YES)!=ZWK_OK && live(s))
         navigation_fail(s,ZWK_POLICY_PREPARATION,@"Initial document preparation failed");
 }
 
@@ -369,6 +496,7 @@ static void *history_context=&history_context;
     free(policy_names); free(policy_values); free(policy_origins);
     free(local_storage);
     if (local_budget) zwk_local_budget_release(local_budget);
+    remote_free(self);
     atomic_fetch_sub(&live_states,1);
 }
 
@@ -383,15 +511,34 @@ static void *history_context=&history_context;
     }
     BOOL allowed=NO;
     if (live(self) && pending_navigation && !authorized) {
-        if (!local) allowed=action.navigationType==WKNavigationTypeOther && [uri isEqualToString:@"about:blank"];
+        if (!local && !remote) allowed=action.navigationType==WKNavigationTypeOther && [uri isEqualToString:@"about:blank"];
         else {
-            allowed=trusted_uri(self,uri) && [uri isEqualToString:nav_uri];
+            allowed=trusted_uri(self,uri) && same_uri(self,uri,nav_uri);
             if (allowed && nav_kind==NAV_HISTORY) allowed=action.navigationType==WKNavigationTypeBackForward;
-            if (allowed && !nav_prepared) {
+            if (allowed && remote) allowed=remote_request_allowed(self,action.request);
+            if (allowed && !nav_prepared && nav_kind!=NAV_FRAGMENT) {
                 const int result=prepare_document(self);
                 allowed=result==ZWK_OK && live(self) && pending_navigation;
                 if (allowed) nav_prepared=YES;
                 else if (live(self) && pending_navigation) navigation_fail(self,ZWK_POLICY_PREPARATION,@"Navigation document preparation failed");
+            }
+        }
+    } else if (live(self) && remote && remote_navigate(self,uri) && remote_request_allowed(self,action.request)) {
+        if (pending_navigation) {
+            /* A server redirect of the load in progress. */
+            if (authorized && load_started && nav_prepared && remote_redirects) { nav_uri=uri; decision(WKNavigationActionPolicyAllow); return; }
+        } else if (remote_script_navigation && action.navigationType!=WKNavigationTypeFormSubmitted && action.navigationType!=WKNavigationTypeFormResubmitted) {
+            /* The page's own navigation: forms stay refused, as Linux's
+             * form-action 'none' refuses them. */
+            const int kind=committed && current_uri && remote_fragment_change(self,current_uri,uri)?NAV_FRAGMENT:NAV_REMOTE;
+            pending_navigation=YES; authorized=NO; navigation=nil; load_started=NO;
+            nav_kind=kind; nav_uri=uri; nav_item=nil; nav_prepared=NO; nav_adopt=YES;
+            if (kind==NAV_FRAGMENT) allowed=YES;
+            else {
+                const int result=prepare_document(self);
+                allowed=result==ZWK_OK && live(self) && pending_navigation;
+                if (allowed) nav_prepared=YES;
+                else if (live(self) && pending_navigation) navigation_fail(self,ZWK_POLICY_PREPARATION,@"Script navigation preparation failed");
             }
         }
     }
@@ -403,10 +550,19 @@ static void *history_context=&history_context;
     (void)webView;
     decision(live(self) && response.canShowMIMEType?WKNavigationResponsePolicyAllow:WKNavigationResponsePolicyCancel);
 }
+/* Whether a navigation the engine names is the one in progress. The page's
+ * own navigation is known by the first one named after its policy. */
+- (BOOL)current:(WKNavigation *)value {
+    if (!value) return NO;
+    if (value==navigation) return YES;
+    if (!nav_adopt || navigation || !pending_navigation || !authorized) return NO;
+    navigation=value; nav_adopt=NO;
+    return YES;
+}
 - (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)value {
     ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep;
-    if (!live(self) || !value || value!=navigation) return;
-    if (!pending_navigation || !authorized) { navigation_fail(self,ZWK_POLICY_PREPARATION,@"Full document started without prepared authorization"); return; }
+    if (!live(self) || ![self current:value]) return;
+    if (!pending_navigation || !authorized || !nav_prepared) { navigation_fail(self,ZWK_POLICY_PREPARATION,@"Full document started without prepared authorization"); return; }
     const uint64_t current=generation;
     load_started=YES; committed=NO; failed=NO; dom_ready=NO;
     if (!page(self,0,0,0,webView.URL.absoluteString?:nav_uri) && live(self) && generation==current) {
@@ -414,9 +570,16 @@ static void *history_context=&history_context;
         [webView stopLoading];
     }
 }
+- (void)webView:(WKWebView *)webView didReceiveServerRedirectForProvisionalNavigation:(WKNavigation *)value {
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep;
+    if (!live(self) || ![self current:value] || !pending_navigation) return;
+    NSString *uri=webView.URL.absoluteString;
+    if (!remote || !remote_redirects || !remote_navigate(self,uri)) navigation_fail(self,ZWK_POLICY_PREPARATION,@"Redirect denied");
+    else nav_uri=uri;
+}
 - (void)webView:(WKWebView *)webView didCommitNavigation:(WKNavigation *)value {
     ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep;
-    if (!live(self) || !value || value!=navigation || !pending_navigation) return;
+    if (!live(self) || ![self current:value] || !pending_navigation) return;
     NSString *uri=webView.URL.absoluteString;
     if (!load_started || !trusted_uri(self,uri) || (nav_kind==NAV_HISTORY && webView.backForwardList.currentItem!=nav_item)) {
         navigation_fail(self,ZWK_POLICY_PREPARATION,@"Committed document has no valid current URI snapshot"); return;
@@ -429,7 +592,7 @@ static void *history_context=&history_context;
 }
 - (void)finish:(WKNavigation *)value error:(NSError *)error {
     ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep;
-    if (!live(self) || !value || value!=navigation) return;
+    if (!live(self) || ![self current:value]) return;
     const BOOL started=load_started;
     int32_t status=0;
     if (error) { failure_set(self,error); status=failure.code; failed=YES; committed=NO; resources_cancel_all(self); }
@@ -447,9 +610,9 @@ static void *history_context=&history_context;
     ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep; (void)type; (void)value;
     if (!live(self)) return;
     NSString *uri=webView.URL.absoluteString;
-    if (pending_navigation && nav_kind==NAV_HISTORY && !authorized && !load_started) {
-        if (!trusted_uri(self,uri) || ![uri isEqualToString:nav_uri] || webView.backForwardList.currentItem!=nav_item) {
-            navigation_fail(self,ZWK_POLICY_PREPARATION,@"Unexpected history navigation sequence");
+    if (pending_navigation && !load_started && ((nav_kind==NAV_HISTORY && !authorized) || nav_kind==NAV_FRAGMENT)) {
+        if (!trusted_uri(self,uri) || !same_uri(self,uri,nav_uri) || (nav_kind==NAV_HISTORY && webView.backForwardList.currentItem!=nav_item)) {
+            navigation_fail(self,ZWK_POLICY_PREPARATION,@"Unexpected same-document navigation sequence");
             return;
         }
         current_uri=uri;
@@ -928,6 +1091,119 @@ static int local_prepare(ZwkPage *s,const ZwkLocalOptions *options) {
     return ZWK_OK;
 }
 
+static void remote_free(ZwkPage *s) {
+    for (uint32_t i=0;i<s->remote_count;++i) {
+        ZwkRemoteGrant *grant=&s->remote_grants[i];
+        for (uint32_t j=0;j<grant->header_count;++j) { free(grant->names[j]); free(grant->values[j]); }
+        free(grant->names); free(grant->values);
+    }
+    free(s->remote_grants); s->remote_grants=NULL; s->remote_count=0;
+}
+static NSString *remote_origin_text(const ZwkRemoteGrant *grant,NSString *scheme) {
+    NSString *host=strchr(grant->host,':')?[NSString stringWithFormat:@"[%s]",grant->host]:[NSString stringWithUTF8String:grant->host];
+    if (grant->port==(grant->https?443:80)) return [NSString stringWithFormat:@"%@://%@",scheme,host];
+    return [NSString stringWithFormat:@"%@://%@:%u",scheme,host,(unsigned)grant->port];
+}
+/* A content rule list pattern for every URL of one origin. */
+static NSString *remote_pattern(NSString *origin) {
+    NSMutableString *pattern=[NSMutableString stringWithString:@"^"];
+    for (NSUInteger i=0;i<origin.length;++i) {
+        const unichar c=[origin characterAtIndex:i];
+        if (strchr(".[]?+*()\\$^{}|",(int)c) && c) [pattern appendString:@"\\"];
+        [pattern appendFormat:@"%C",c];
+    }
+    [pattern appendString:@"/"];
+    return pattern;
+}
+/* Copies the grants and writes the page's rule list: every load is blocked
+ * but those of origins granted requests. Their documents, images, scripts,
+ * styles, fonts and media load by GET, so need its grant; a script's own
+ * requests and sockets reach them by origin alone, as WKWebView never shows
+ * the app their method or headers. No grant may carry a Bearer credential. */
+static int remote_prepare(ZwkPage *s,const ZwkRemoteOptions *input) {
+    if (!input->url || !input->origins || !input->count || input->count>32) return ZWK_INVALID;
+    s->remote_loopback=input->loopback!=0; s->remote_script_navigation=input->script_navigation!=0; s->remote_redirects=input->redirects!=0;
+    s->remote_url=[NSString stringWithUTF8String:input->url];
+    ZwkRemoteGrant initial;
+    if (!s->remote_url || !remote_parse(s->remote_url,NO,s->remote_loopback,&initial)) return ZWK_INVALID;
+    if (!(s->remote_grants=calloc(input->count,sizeof(ZwkRemoteGrant)))) return ZWK_OOM;
+    NSDictionary *block=@{@"type":@"block"}, *ignore=@{@"type":@"ignore-previous-rules"};
+    NSMutableArray *rules=[NSMutableArray arrayWithObject:@{@"trigger":@{@"url-filter":@".*"},@"action":block}];
+    for (NSString *scheme in @[@"^blob:",@"^about:"]) [rules addObject:@{@"trigger":@{@"url-filter":scheme},@"action":ignore}];
+    NSMutableArray *ipc=[NSMutableArray array];
+    BOOL allowed=NO;
+    for (uint32_t i=0;i<input->count;++i) {
+        const ZwkRemoteOrigin *source=&input->origins[i];
+        ZwkRemoteGrant *grant=&s->remote_grants[i];
+        NSString *origin=source->origin?[NSString stringWithUTF8String:source->origin]:nil;
+        if ((source->flags&~7u) || (source->methods&~127u) || ((source->flags&REMOTE_REQUESTS) && !source->methods) || source->bearer ||
+            source->header_count>16 || (source->header_count && !source->headers) || !remote_parse(origin,YES,s->remote_loopback,grant)) return ZWK_INVALID;
+        s->remote_count=i+1;
+        grant->flags=source->flags; grant->methods=source->methods;
+        for (uint32_t j=0;j<i;++j) {
+            const ZwkRemoteGrant *other=&s->remote_grants[j];
+            if (other->https==grant->https && other->port==grant->port && !strcmp(other->host,grant->host)) return ZWK_INVALID;
+        }
+        if (source->header_count) {
+            grant->names=calloc(source->header_count,sizeof(char *)); grant->values=calloc(source->header_count,sizeof(char *));
+            if (!grant->names || !grant->values) return ZWK_OOM;
+            size_t bytes=0;
+            for (uint32_t j=0;j<source->header_count;++j) {
+                const ZwkRemoteHeader *header=&source->headers[j];
+                if (!header->name || !header_name(header->name) || managed_header(header->name) || (header->value && !header_value(header->value)) ||
+                    (bytes+=strlen(header->name)+(header->value?strlen(header->value):0))>8192) return ZWK_INVALID;
+                for (uint32_t k=0;k<j;++k) if (!strcasecmp(header->name,grant->names[k])) return ZWK_INVALID;
+                grant->names[j]=strdup(header->name); grant->values[j]=header->value?strdup(header->value):NULL;
+                grant->header_count=j+1;
+                if (!grant->names[j] || (header->value && !grant->values[j])) return ZWK_OOM;
+            }
+        }
+        if ((grant->flags&3u)==3u && (grant->methods&1u) && grant->https==initial.https && grant->port==initial.port && !strcmp(grant->host,initial.host)) allowed=YES;
+        if (grant->flags&REMOTE_IPC) [ipc addObject:remote_origin_text(grant,grant->https?@"https":@"http")];
+        if (grant->flags&REMOTE_REQUESTS) {
+            [rules addObject:@{@"trigger":@{@"url-filter":remote_pattern(remote_origin_text(grant,grant->https?@"wss":@"ws"))},@"action":ignore}];
+            NSString *pattern=remote_pattern(remote_origin_text(grant,grant->https?@"https":@"http"));
+            [rules addObject:(grant->methods&1u)?@{@"trigger":@{@"url-filter":pattern},@"action":ignore}:
+                @{@"trigger":@{@"url-filter":pattern,@"resource-type":@[@"raw"]},@"action":ignore}];
+        }
+    }
+    if (!allowed) return ZWK_INVALID;
+    NSData *rule_data=[NSJSONSerialization dataWithJSONObject:rules options:0 error:NULL];
+    NSData *ipc_data=[NSJSONSerialization dataWithJSONObject:ipc options:0 error:NULL];
+    if (!rule_data || !ipc_data) return ZWK_OOM;
+    s->remote_source=[[NSString alloc] initWithData:rule_data encoding:NSUTF8StringEncoding];
+    s->remote_ipc=[[NSString alloc] initWithData:ipc_data encoding:NSUTF8StringEncoding];
+    if (!s->remote_source || !s->remote_ipc) return ZWK_OOM;
+    static uint64_t serial;
+    s->remote_identifier=[NSString stringWithFormat:@"ziggurat-remote-%d-%llu",(int)getpid(),(unsigned long long)++serial];
+    s->remote=YES;
+    return ZWK_OK;
+}
+/* Compiles the page's rule list before its first load. Each page has a list
+ * of its own, removed from the store when the page closes. */
+static void remote_compile(ZwkPage *s) {
+    s->waiting_remote=YES;
+    __weak ZwkPage *weak=s;
+    NSString *identifier=s->remote_identifier;
+    WKContentRuleListStore *store=rule_store();
+    [store compileContentRuleListForIdentifier:identifier encodedContentRuleList:s->remote_source completionHandler:^(WKContentRuleList *list,NSError *error) {
+        ZwkPage *page=weak;
+        if (!page || !page->waiting_remote) {
+            if (list) [store removeContentRuleListForIdentifier:identifier completionHandler:^(NSError *removed) { (void)removed; }];
+            return;
+        }
+        page->waiting_remote=NO; page->remote_source=nil;
+        if (!list) {
+            if (!live(page)) return;
+            failure_set(page,error?:[NSError errorWithDomain:@"ziggurat-webkit-navigation" code:ZWK_POLICY_PREPARATION userInfo:nil]);
+            const ZwkFailure failure=page->failure;
+            page->failed=YES; notify(page,2,nil,failure.code,&failure);
+            return;
+        }
+        page->remote_rules=list;
+        initialize(page);
+    }];
+}
 static BOOL engine_has(WKWebView *view,SEL selector) { return [view respondsToSelector:selector]; }
 static void set_muted(ZwkPage *s,BOOL value) {
     s->muted=value;
@@ -940,7 +1216,7 @@ int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPage
     *out=NULL;
     if (!options || !options->html || !window || options->max_pending==0 || options->max_pending>16 || options->max_result_bytes==0 ||
         options->max_result_bytes>1024*1024 || strlen(options->html)>16*1024*1024) return ZWK_INVALID;
-    if (options->remote || options->region || options->profile_context || options->initializers) return ZWK_INVALID;
+    if ((options->remote && (options->local || *options->html)) || options->region || options->profile_context || options->initializers) return ZWK_INVALID;
     @autoreleasepool {
         NSView *host=(__bridge NSView *)zlm_window_content(window);
         if (!host) return ZWK_CLOSED;
@@ -953,6 +1229,10 @@ int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPage
         if (options->local) {
             const int result=local_prepare(s,options->local);
             if (result!=ZWK_OK) { local_free(s); return result; }
+        }
+        if (options->remote) {
+            const int result=remote_prepare(s,options->remote);
+            if (result!=ZWK_OK) { remote_free(s); return result; }
         }
         if (options->facts && !(s->facts=[NSString stringWithUTF8String:options->facts])) return ZWK_INVALID;
         s->autoplay=options->autoplay!=0;
@@ -987,7 +1267,7 @@ int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPage
         }
         [s->controller addScriptMessageHandler:s contentWorld:s->world name:@"ziggurat"];
         ZwkWebView *view=[[ZwkWebView alloc] initWithFrame:host.bounds configuration:configuration];
-        if (!view) { [s->controller removeAllScriptMessageHandlers]; local_free(s); return ZWK_NATIVE_FAILED; }
+        if (!view) { [s->controller removeAllScriptMessageHandlers]; local_free(s); remote_free(s); return ZWK_NATIVE_FAILED; }
         s->view=view; atomic_fetch_add(&live_views,1);
         view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
         view.navigationDelegate=s; view.UIDelegate=s;
@@ -999,7 +1279,7 @@ int zwk_create(void *window,const ZwkOptions *options,ZwkNotify callback,ZwkPage
         if (options->audio_muted) set_muted(s,YES);
         [view addObserver:s forKeyPath:@"title" options:0 context:title_context];
         if (engine_has(view,@selector(_isPlayingAudio))) [view addObserver:s forKeyPath:@"_isPlayingAudio" options:0 context:audio_context];
-        if (s->local) {
+        if (s->local || s->remote) {
             [view addObserver:s forKeyPath:@"canGoBack" options:0 context:history_context];
             [view addObserver:s forKeyPath:@"canGoForward" options:0 context:history_context];
         }
@@ -1030,12 +1310,17 @@ void zwk_close(ZwkState *state) {
         [s->timer invalidate]; s->timer=nil;
         navigation_clear(s);
         if (s->waiting_sandbox) { [sandbox_waiting removeObject:s]; s->waiting_sandbox=NO; }
+        if (s->remote_identifier) {
+            /* A compile still running removes its list when it ends. */
+            if (!s->waiting_remote) [rule_store() removeContentRuleListForIdentifier:s->remote_identifier completionHandler:^(NSError *removed) { (void)removed; }];
+            s->waiting_remote=NO; s->remote_identifier=nil;
+        }
         ZwkWebView *view=s->view; s->view=nil;
         if (view) {
             if (s->observing) {
                 [view removeObserver:s forKeyPath:@"title" context:title_context];
                 if (engine_has(view,@selector(_isPlayingAudio))) [view removeObserver:s forKeyPath:@"_isPlayingAudio" context:audio_context];
-                if (s->local) {
+                if (s->local || s->remote) {
                     [view removeObserver:s forKeyPath:@"canGoBack" context:history_context];
                     [view removeObserver:s forKeyPath:@"canGoForward" context:history_context];
                 }
@@ -1050,6 +1335,7 @@ void zwk_close(ZwkState *state) {
         s->controller=nil;
         if (s->local_handler) ((ZwkLocalHandler *)s->local_handler)->site_page=nil;
         local_free(s);
+        remote_free(s);
         CFRelease(state);
     }
 }
@@ -1207,9 +1493,21 @@ int zwk_refresh(ZwkState *state) {
     if (!live(s)) return ZWK_CLOSED;
     if (s->pending_navigation || s->load_started || s->view.loading) return ZWK_NAVIGATION_PENDING;
     if (!document(s) || !s->current_uri) return ZWK_NOT_READY;
-    @autoreleasepool { return navigation_submit(s,NAV_REFRESH,s->local?s->current_uri:@"about:blank",nil,NO); }
+    @autoreleasepool { return navigation_submit(s,NAV_REFRESH,s->local || s->remote?s->current_uri:@"about:blank",nil,NO); }
 }
-int zwk_navigate_remote(ZwkState *state,const char *uri) { (void)uri; return live(page_of(state))?ZWK_NOT_READY:ZWK_CLOSED; }
+int zwk_navigate_remote(ZwkState *state,const char *text) {
+    ZwkPage *s=page_of(state);
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=s; (void)keep;
+    if (!live(s)) return ZWK_CLOSED;
+    if (!s->remote || !s->remote_rules) return ZWK_NOT_READY;
+    @autoreleasepool {
+        NSString *uri=text?[NSString stringWithUTF8String:text]:nil;
+        if (!uri) return ZWK_INVALID;
+        if (!remote_navigate(s,uri)) return ZWK_IPC_DENIED;
+        const int kind=document(s) && s->current_uri && remote_fragment_change(s,s->current_uri,uri)?NAV_FRAGMENT:NAV_REMOTE;
+        return navigation_submit(s,kind,uri,nil,NO);
+    }
+}
 int zwk_navigate_local(ZwkState *state,const char *path) {
     ZwkPage *s=page_of(state);
     ZwkPage *keep __attribute__((objc_precise_lifetime))=s; (void)keep;
@@ -1223,7 +1521,7 @@ int zwk_history(ZwkState *state,int forward) {
     ZwkPage *s=page_of(state);
     ZwkPage *keep __attribute__((objc_precise_lifetime))=s; (void)keep;
     if (!live(s)) return ZWK_CLOSED;
-    if (!s->local) return ZWK_NOT_READY;
+    if (!s->local && !s->remote) return ZWK_NOT_READY;
     if (s->pending_navigation || s->load_started) return ZWK_NAVIGATION_PENDING;
     if (!document(s)) return ZWK_NOT_READY;
     if (s->view.loading) return ZWK_NAVIGATION_PENDING;
