@@ -29,7 +29,10 @@ const InstallRecord = struct {
     scope: []const u8,
     desktop: ?[]const u8 = null,
     icon: ?[]const u8 = null,
+    /// The first command link, which earlier versions recorded alone.
     link: ?[]const u8 = null,
+    /// Every command link (Linux).
+    links: []const []const u8 = &.{},
     shortcut: ?[]const u8 = null,
     uninstall_hook: ?[]const u8 = null,
 };
@@ -100,7 +103,8 @@ const Locations = struct {
     data: []const u8,
     desktop: ?[]const u8 = null,
     icon: ?[]const u8 = null,
-    link: ?[]const u8 = null,
+    /// The command links (Linux), the first being the one to run the app by.
+    links: []const []const u8 = &.{},
     shortcut: ?[]const u8 = null,
 };
 
@@ -140,8 +144,18 @@ fn locations(allocator: std.mem.Allocator, config: format.Config, scope: Scope, 
         .data = try std.fs.path.join(allocator, &.{ data_home, id }),
         .desktop = try std.fs.path.join(allocator, &.{ share, "applications", try std.fmt.allocPrint(allocator, "{s}.desktop", .{id}) }),
         .icon = if (config.icon != null) try std.fs.path.join(allocator, &.{ share, "icons", "hicolor", "256x256", "apps", try std.fmt.allocPrint(allocator, "{s}.png", .{id}) }) else null,
-        .link = if (scope == .user) try std.fs.path.join(allocator, &.{ try env(allocator, "HOME"), ".local", "bin", config.executable }) else try std.fs.path.join(allocator, &.{ "/usr/local/bin", config.executable }),
+        .links = try commandLinks(allocator, config, scope),
     };
+}
+
+/// A link in ~/.local/bin (or /usr/local/bin) for each command of the app,
+/// or for its executable without any.
+fn commandLinks(allocator: std.mem.Allocator, config: format.Config, scope: Scope) ![]const []const u8 {
+    const bin = if (scope == .user) try std.fs.path.join(allocator, &.{ try env(allocator, "HOME"), ".local", "bin" }) else "/usr/local/bin";
+    const names: []const []const u8 = if (config.commands.len > 0) config.commands else &.{config.executable};
+    const links = try allocator.alloc([]const u8, names.len);
+    for (names, links) |name, *link| link.* = try std.fs.path.join(allocator, &.{ bin, name });
+    return links;
 }
 
 fn say(silent: bool, comptime fmt: []const u8, args: anytype) void {
@@ -223,6 +237,7 @@ fn install(allocator: std.mem.Allocator, args: []const []const u8, self: std.Io.
     const config = std.json.parseFromSliceLeaky(format.Config, allocator, config_bytes, .{ .allocate = .alloc_always }) catch return error.InvalidSetupPayload;
     try update.publication.validateFilename(config.executable);
     if (config.install_dir_name) |name| if (!format.validInstallDirName(name)) return error.InvalidSetupPayload;
+    if (!format.validCommands(config.commands)) return error.InvalidSetupPayload;
     const version = try update.retention.parseVersion(config.version);
     const where = try locations(allocator, config, scope, directory);
     const hook_context: HookContext = .{ .root = where.root, .scope = @tagName(scope), .version = config.version, .silent = silent };
@@ -279,6 +294,8 @@ fn install(allocator: std.mem.Allocator, args: []const []const u8, self: std.Io.
     try writeStub(root, self, located.stub_bytes, launcher_name);
     try writeStub(root, self, located.stub_bytes, "uninstall" ++ exe_suffix);
     const launcher = try std.fs.path.join(allocator, &.{ where.root, launcher_name });
+    // The links of the installation this one replaces, whose names may differ.
+    const earlier: []const []const u8 = if (windows) &.{} else if (readRecord(allocator, where.root)) |old| try recordLinks(allocator, old) else |_| &.{};
     const record: InstallRecord = .{
         .name = config.name,
         .identity = config.identity,
@@ -288,12 +305,16 @@ fn install(allocator: std.mem.Allocator, args: []const []const u8, self: std.Io.
         .scope = @tagName(scope),
         .desktop = where.desktop,
         .icon = where.icon,
-        .link = where.link,
+        .link = if (where.links.len > 0) where.links[0] else null,
+        .links = where.links,
         .shortcut = where.shortcut,
         .uninstall_hook = config.hooks.uninstall,
     };
     try atomicWrite(root, "install.json", try std.json.Stringify.valueAlloc(allocator, record, .{ .whitespace = .indent_2, .emit_null_optional_fields = false }));
-    if (windows) try integrateWindows(allocator, config, where, scope, launcher, located.zip_bytes) else try integrateLinux(allocator, config, where, root, launcher, version);
+    if (windows) try integrateWindows(allocator, config, where, scope, launcher, located.zip_bytes) else {
+        try integrateLinux(allocator, config, where, root, launcher, version, silent);
+        removeStaleLinks(earlier, where.links, where.root);
+    }
     if (config.hooks.install) |command| {
         var context = hook_context;
         context.launcher = launcher;
@@ -302,7 +323,7 @@ fn install(allocator: std.mem.Allocator, args: []const []const u8, self: std.Io.
             return 1;
         }
     }
-    say(silent, "Installed. Start {s}; uninstall with {s}", .{ launcher, try std.fs.path.join(allocator, &.{ where.root, "uninstall" ++ exe_suffix }) });
+    say(silent, "Installed. Start {s}; uninstall with {s}", .{ if (!windows and where.links.len > 0) std.fs.path.basename(where.links[0]) else launcher, try std.fs.path.join(allocator, &.{ where.root, "uninstall" ++ exe_suffix }) });
     return 0;
 }
 
@@ -351,7 +372,7 @@ fn writePath(path: []const u8, bytes: []const u8, mode: u32) !void {
     try file.writeStreamingAll(zio.io(), bytes);
 }
 
-fn integrateLinux(allocator: std.mem.Allocator, config: format.Config, where: Locations, root: std.Io.Dir, launcher: []const u8, version: update.Version) !void {
+fn integrateLinux(allocator: std.mem.Allocator, config: format.Config, where: Locations, root: std.Io.Dir, launcher: []const u8, version: update.Version, silent: bool) !void {
     var icon_name: ?[]const u8 = null;
     if (config.icon) |icon| {
         update.publication.validateFilename(icon) catch return error.InvalidSetupPayload;
@@ -362,10 +383,42 @@ fn integrateLinux(allocator: std.mem.Allocator, config: format.Config, where: Lo
         icon_name = config.identity;
     }
     try writePath(where.desktop.?, try format.desktopEntry(allocator, config, launcher, icon_name), 0o644);
-    const link = where.link.?;
-    if (std.fs.path.dirname(link)) |parent| try std.Io.Dir.cwd().createDirPath(zio.io(), parent);
-    std.Io.Dir.cwd().deleteFile(zio.io(), link) catch {};
-    try std.Io.Dir.cwd().symLink(zio.io(), launcher, link, .{});
+    for (where.links) |link| {
+        if (std.fs.path.dirname(link)) |parent| try std.Io.Dir.cwd().createDirPath(zio.io(), parent);
+        // A name another program has keeps that program; the app's own
+        // links, of this or an earlier installation, are replaced.
+        if (!ownsOrFree(link, where.root)) {
+            say(silent, "Leaving {s} alone: another program has it", .{link});
+            continue;
+        }
+        std.Io.Dir.cwd().deleteFile(zio.io(), link) catch {};
+        try std.Io.Dir.cwd().symLink(zio.io(), launcher, link, .{});
+    }
+}
+
+/// Whether `link` is free or one of the app's links into `root`.
+fn ownsOrFree(link: []const u8, root: []const u8) bool {
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const length = std.Io.Dir.cwd().readLink(zio.io(), link, &buffer) catch |err| return switch (err) {
+        error.FileNotFound => true,
+        else => false,
+    };
+    return std.mem.startsWith(u8, buffer[0..length], root);
+}
+
+/// Removes the links of `old` that `new` no longer has, as the names an
+/// earlier version had.
+fn removeStaleLinks(old: []const []const u8, new: []const []const u8, root: []const u8) void {
+    for (old) |link| {
+        for (new) |kept| if (std.mem.eql(u8, kept, link)) break else removeLink(link, root);
+    }
+}
+
+/// Removes a command link only while it still points into this installation.
+fn removeLink(link: []const u8, root: []const u8) void {
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const length = std.Io.Dir.cwd().readLink(zio.io(), link, &buffer) catch return;
+    if (std.mem.startsWith(u8, buffer[0..length], root)) std.Io.Dir.cwd().deleteFile(zio.io(), link) catch {};
 }
 
 fn emptyDirectory(dir: std.Io.Dir) void {
@@ -375,12 +428,15 @@ fn emptyDirectory(dir: std.Io.Dir) void {
 
 fn removeIntegration(where: Locations) void {
     for ([_]?[]const u8{ where.desktop, where.icon, where.shortcut }) |path| if (path) |value| std.Io.Dir.cwd().deleteFile(zio.io(), value) catch {};
-    // Remove the command link only while it still points into this installation.
-    if (where.link) |link| {
-        var buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const target = buffer[0 .. std.Io.Dir.cwd().readLink(zio.io(), link, &buffer) catch return];
-        if (std.mem.startsWith(u8, target, where.root)) std.Io.Dir.cwd().deleteFile(zio.io(), link) catch {};
-    }
+    for (where.links) |link| removeLink(link, where.root);
+}
+
+/// Every link an install record names: `links`, and `link` of a record
+/// that earlier versions wrote.
+fn recordLinks(allocator: std.mem.Allocator, record: InstallRecord) ![]const []const u8 {
+    if (record.links.len > 0) return record.links;
+    if (record.link) |link| return allocator.dupe([]const u8, &.{link});
+    return &.{};
 }
 
 // ---------------------------------------------------------------- uninstall
@@ -432,7 +488,7 @@ fn removeInstallation(allocator: std.mem.Allocator, record: InstallRecord, direc
         if (!runHook(allocator, "uninstall", command, .{ .root = directory, .scope = record.scope, .version = record.version, .silent = silent, .launcher = launcher }))
             std.debug.print("setup: the app's uninstall hook failed; removing {s} anyway\n", .{record.name});
     }
-    removeIntegration(.{ .root = directory, .data = "", .desktop = record.desktop, .icon = record.icon, .link = record.link, .shortcut = record.shortcut });
+    removeIntegration(.{ .root = directory, .data = "", .desktop = record.desktop, .icon = record.icon, .links = try recordLinks(allocator, record), .shortcut = record.shortcut });
     if (windows) try unregisterWindows(allocator, record);
     try std.Io.Dir.cwd().deleteTree(zio.io(), directory);
     if (purge) {
