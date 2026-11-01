@@ -102,6 +102,8 @@ pub fn capabilities() Capabilities {
             .custom_local_site = true,
             .remote_pages = true,
             .find_text = true,
+            .capture_preview = true,
+            .clear_browsing_data = true,
         },
         else => .{},
     };
