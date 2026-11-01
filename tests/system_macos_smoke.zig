@@ -188,6 +188,7 @@ const State = struct {
         if (zsm_test_menu_item(menu, path.ptr, @intCast(path.len), &title, title.len, &key, &modifiers, &state, &enabled, &image) == 0) return error.MissingMenuItem;
         return .{ .title = title, .key = key, .modifiers = modifiers, .state = state, .enabled = enabled != 0, .image = image != 0 };
     }
+    /// Takes a pointer: a by-value parameter's title would not outlive the call.
     fn titleOf(value: anytype) []const u8 {
         return std.mem.sliceTo(&value.title, 0);
     }
@@ -205,11 +206,12 @@ const State = struct {
                 const menu = zsm_bar_menu(self.owner.bar.?);
                 try std.testing.expectEqual(@as(?*anyopaque, menu), zsm_test_main_menu());
                 const save = try item(menu, &.{ 1, 0 });
-                try std.testing.expectEqualStrings("Save", titleOf(save));
+                try std.testing.expectEqualStrings("Save", titleOf(&save));
                 try std.testing.expect(save.key == 's' and save.modifiers == command and save.image and save.enabled);
-                try std.testing.expectEqualStrings("Open…", titleOf(try item(menu, &.{ 1, 1 })));
+                const open = try item(menu, &.{ 1, 1 });
+                try std.testing.expectEqualStrings("Open…", titleOf(&open));
                 const quit = try item(menu, &.{ 0, 8 });
-                try std.testing.expectEqualStrings("Quit Smoke", titleOf(quit));
+                try std.testing.expectEqualStrings("Quit Smoke", titleOf(&quit));
                 try std.testing.expect(quit.key == 'q' and quit.modifiers == command);
                 try std.testing.expect(zsm_test_menu_action_is(menu, &.{ 2, 4 }, 2, "copy:") != 0);
                 try std.testing.expect(zsm_test_menu_action_is(menu, &.{ 0, 4 }, 2, "hide:") != 0);
