@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <float.h>
 #include <string.h>
 #include "brushes.h"
 #include "image_resource.h"
@@ -101,7 +102,7 @@ typedef struct Renderer {
     Layers *layers;
     /* The window frame starts transparent and is presented with its alpha
        (Paint.transparent), not over an opaque white plane. */
-    int window_transparent;
+    int window_transparent,keep_plane;
 } Renderer;
 
 typedef struct LayerGaussian {ZgGaussianCapacity capacity;ZgGaussianFrame frames[4];uint32_t *scratch;uint64_t visits;} LayerGaussian;
@@ -314,8 +315,9 @@ static int begin_plane(Renderer *s,uint32_t width,uint32_t height,float scale){
     if(s->layers)return layer_begin(s,width,height,scale);
     if(!width||!height||!isfinite(scale)||scale<=0)return 1;
     if(s->target&&s->width==width&&s->height==height&&s->scale==scale){
-        /* A transparent frame starts clear every time. */
-        if(s->window_transparent)target_clear(&s->own,0,0,width,height,0);
+        /* A transparent frame starts clear, unless it redraws only the
+           damaged rectangles of the plane it keeps (mode 2). */
+        if(s->window_transparent&&!s->keep_plane)target_clear(&s->own,0,0,width,height,0);
         return 0;
     }
     destroy(s);
@@ -332,8 +334,10 @@ static int begin_plane(Renderer *s,uint32_t width,uint32_t height,float scale){
 /* A transparent window plane starts clear and is drawn over what the view
    shows behind it, which AppKit clears: the desktop through a clear
    window, or a material. */
+/* transparent: 0 opaque, 1 transparent and cleared, 2 transparent with the
+   plane's pixels kept for a redraw of its damaged rectangles. */
 int zlc_begin_mode(Renderer *s,uint32_t width,uint32_t height,float scale,int transparent){
-    s->window_transparent=transparent!=0;
+    s->window_transparent=transparent!=0;s->keep_plane=transparent==2;
     return begin_plane(s,width,height,scale);
 }
 int zlc_begin(Renderer *s,uint32_t width,uint32_t height,float scale){return zlc_begin_mode(s,width,height,scale,0);}
@@ -449,6 +453,22 @@ void zlc_push_clip(Renderer *s,float x,float y,float width,float height){
     after[0]=fmax(before[0],(double)x*s->scale+s->origin[0]);after[1]=fmax(before[1],(double)y*s->scale+s->origin[1]);
     after[2]=fmin(before[2],((double)x+width)*s->scale+s->origin[0]);after[3]=fmin(before[3],((double)y+height)*s->scale+s->origin[1]);
     CGContextSaveGState(s->target->context);CGContextClipToRect(s->target->context,CGRectMake(x,y,width,height));s->target->saves++;
+}
+/* Clips to device pixels x0..x1, y0..y1 of the plane, exactly on pixel
+   edges whatever the scale; popped by zlc_pop_clip. */
+void zlc_push_device_clip(Renderer *s,int32_t x0,int32_t y0,int32_t x1,int32_t y1){
+    if(s->gradient_clip_depth>=32)return;
+    double *before=s->gradient_clips[s->gradient_clip_depth],*after=s->gradient_clips[++s->gradient_clip_depth];
+    after[0]=fmax(before[0],(double)x0+s->origin[0]);after[1]=fmax(before[1],(double)y0+s->origin[1]);
+    after[2]=fmin(before[2],(double)x1+s->origin[0]);after[3]=fmin(before[3],(double)y1+s->origin[1]);
+    double scale=s->scale;
+    CGContextSaveGState(s->target->context);CGContextClipToRect(s->target->context,CGRectMake((double)x0/scale,(double)y0/scale,(double)(x1-x0)/scale,(double)(y1-y0)/scale));s->target->saves++;
+}
+/* Clears a rectangle in DIP to transparent, within the current clip. */
+void zlc_clear_rect(Renderer *s,float x,float y,float width,float height){
+    CGContextRef c=s->target->context;
+    if(width>=FLT_MAX){target_clear(s->target,0,0,s->target->width,s->target->height,0);return;}
+    CGContextClearRect(c,CGRectMake(x,y,width,height));
 }
 void zlc_pop_clip(Renderer *s){if(s->gradient_clip_depth){s->gradient_clip_depth--;CGContextRestoreGState(s->target->context);s->target->saves--;}}
 /* destination is a y-down context in points, such as a flipped view's. */

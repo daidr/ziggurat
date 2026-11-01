@@ -134,6 +134,8 @@ typedef struct ZwkRemoteGrant {
     WKContentRuleList *remote_rules;
     /* The page's text search, once the app first searches it. */
     ZwkFindGate *find;
+    /* The budget of captures, PDFs and clears, when the app allows them. */
+    ZwkCaptureBudget *capture;
 }
 @end
 static void resources_cancel_all(ZwkPage *s);
@@ -145,6 +147,7 @@ static BOOL header_value(const char *value);
 static int method_index(NSString *method);
 static void remote_free(ZwkPage *s);
 static void find_gate_close(ZwkFindGate *g);
+static void capture_cancel_all(ZwkPage *s);
 static void find_terminal(ZwkPage *s,BOOL found,NSUInteger count);
 
 static BOOL live(ZwkPage *s) { return !s->closed && !s->recovering && s->owner; }
@@ -516,6 +519,7 @@ static void *history_context=&history_context;
     free(local_storage);
     if (local_budget) zwk_local_budget_release(local_budget);
     remote_free(self);
+    if (capture) zwk_capture_budget_release(capture);
     atomic_fetch_sub(&live_states,1);
 }
 
@@ -1345,6 +1349,7 @@ void zwk_close(ZwkState *state) {
             s->waiting_remote=NO; s->remote_identifier=nil;
         }
         if (s->find) find_gate_close(s->find);
+        capture_cancel_all(s);
         ZwkWebView *view=s->view; s->view=nil;
         if (view) {
             if ([view respondsToSelector:@selector(_setFindDelegate:)]) [view _setFindDelegate:nil];
@@ -1931,16 +1936,227 @@ void zwk_find_counts(uint32_t *budgets,uint32_t *gates,uint32_t *commands,size_t
     if (peak) *peak=atomic_load(&find_peak);
 }
 
-ZwkCaptureBudget *zwk_capture_budget_new(uint32_t pending,uint32_t bytes,ZwkCaptureNotify callback) { (void)pending; (void)bytes; (void)callback; return NULL; }
-int zwk_capture_budget_limit(ZwkCaptureBudget *budget,uint32_t pending,uint32_t bytes) { (void)budget; (void)pending; (void)bytes; return ZWK_CAPTURE_INVALID; }
-void zwk_capture_budget_close(ZwkCaptureBudget *budget) { (void)budget; }
-void zwk_capture_budget_release(ZwkCaptureBudget *budget) { (void)budget; }
-int zwk_capture_enable(ZwkState *s,ZwkCaptureBudget *budget) { (void)s; (void)budget; return ZWK_CAPTURE_INVALID; }
-int zwk_capture_start(ZwkState *s,uint64_t token) { (void)s; (void)token; return ZWK_CAPTURE_INVALID; }
-int zwk_clear_start(ZwkState *s,uint64_t token) { (void)s; (void)token; return ZWK_CAPTURE_INVALID; }
-int zwk_pdf_start(ZwkState *s,uint64_t token,const char *path,const ZwkPdfRequest *request) { (void)s; (void)token; (void)path; (void)request; return ZWK_CAPTURE_INVALID; }
-void zwk_capture_cancel(ZwkState *s,uint64_t token) { (void)s; (void)token; }
-void zwk_capture_counts(uint32_t *a,uint32_t *b,size_t *c,size_t *d) { *a=0; *b=0; *c=0; *d=0; }
+/* Captures, PDFs and clears, as the Linux backend keeps them: a budget the
+ * View owns bounds the operations in flight and each capture's PNG bytes. The
+ * engine cannot stop one it started: a cancelled operation ends unreported. */
+enum { CAPTURE_PENDING=8u, CAPTURE_BYTES=16u*1024u*1024u };
+typedef struct CaptureOp CaptureOp;
+struct ZwkCaptureBudget {
+    CaptureOp *ops;
+    ZwkCaptureNotify notify;
+    size_t bytes;
+    unsigned refs, pending, limit, capacity;
+    BOOL closed;
+};
+struct CaptureOp {
+    CaptureOp *next;
+    void *page; /* A Core Foundation reference of its own. */
+    ZwkCaptureBudget *budget;
+    uint64_t token;
+    BOOL cancelled, print;
+};
+static atomic_uint capture_budgets, capture_operations;
+static atomic_size_t capture_bytes, capture_peak;
+static void capture_account(size_t amount) {
+    const size_t current=atomic_fetch_add(&capture_bytes,amount)+amount;
+    size_t peak=atomic_load(&capture_peak);
+    while (peak<current && !atomic_compare_exchange_weak(&capture_peak,&peak,current)) { }
+}
+void zwk_capture_budget_release(ZwkCaptureBudget *b) {
+    if (--b->refs) return;
+    atomic_fetch_sub(&capture_budgets,1); atomic_fetch_sub(&capture_bytes,sizeof(*b));
+    free(b);
+}
+ZwkCaptureBudget *zwk_capture_budget_new(uint32_t pending,uint32_t bytes,ZwkCaptureNotify notify) {
+    if (!pending || pending>CAPTURE_PENDING || !bytes || bytes>CAPTURE_BYTES || !notify) return NULL;
+    ZwkCaptureBudget *b=calloc(1,sizeof(*b));
+    if (!b) return NULL;
+    b->refs=1; b->limit=pending; b->capacity=bytes; b->notify=notify; b->bytes=sizeof(*b);
+    atomic_fetch_add(&capture_budgets,1); capture_account(sizeof(*b));
+    return b;
+}
+int zwk_capture_budget_limit(ZwkCaptureBudget *b,uint32_t pending,uint32_t bytes) {
+    if (!b || !pending || pending>CAPTURE_PENDING || !bytes || bytes>CAPTURE_BYTES) return ZWK_INVALID;
+    if (b->closed) return ZWK_CLOSED;
+    b->limit=pending; b->capacity=bytes; return ZWK_OK;
+}
+static void capture_cancel_budget(ZwkCaptureBudget *b,ZwkPage *page,uint64_t token) {
+    for (CaptureOp *op=b->ops;op;op=op->next)
+        if ((!page || op->page==(__bridge void *)page) && (!token || op->token==token)) op->cancelled=YES;
+}
+void zwk_capture_budget_close(ZwkCaptureBudget *b) { b->closed=YES; capture_cancel_budget(b,nil,0); }
+int zwk_capture_enable(ZwkState *state,ZwkCaptureBudget *b) {
+    if (!state || !b) return ZWK_INVALID;
+    ZwkPage *s=page_of(state);
+    if (!live(s) || b->closed) return ZWK_CLOSED;
+    if (s->capture) return ZWK_INVALID;
+    ++b->refs; s->capture=b; return ZWK_OK;
+}
+static void capture_cancel_all(ZwkPage *s) { if (s->capture) capture_cancel_budget(s->capture,s,0); }
+void zwk_capture_cancel(ZwkState *state,uint64_t token) {
+    ZwkPage *s=page_of(state);
+    if (s->capture) capture_cancel_budget(s->capture,s,token);
+}
+/* Takes a slot of the page's budget, or says why there is none. */
+static int capture_begin(ZwkPage *s,uint64_t token,BOOL needs_document,BOOL print,CaptureOp **out) {
+    if (!token) return ZWK_INVALID;
+    if (!live(s)) return ZWK_CLOSED;
+    ZwkCaptureBudget *b=s->capture;
+    if (!b || b->closed) return ZWK_CLOSED;
+    if (needs_document && !document(s)) return ZWK_NOT_READY;
+    if (b->pending>=b->limit || atomic_load(&capture_operations)>=CAPTURE_PENDING) return ZWK_FULL;
+    for (CaptureOp *at=b->ops;at;at=at->next) {
+        if (at->token==token) return ZWK_INVALID;
+        if (print && at->print && at->page==(__bridge void *)s) return ZWK_FULL;
+    }
+    CaptureOp *op=calloc(1,sizeof(*op));
+    if (!op) return ZWK_OOM;
+    op->page=(void *)CFBridgingRetain(s); op->budget=b; op->token=token; op->print=print;
+    ++b->refs; op->next=b->ops; b->ops=op; ++b->pending; b->bytes+=sizeof(*op);
+    atomic_fetch_add(&capture_operations,1); capture_account(sizeof(*op));
+    *out=op; return ZWK_OK;
+}
+/* Ends an operation: reports it unless it was cancelled, then frees it. */
+static void capture_end(CaptureOp *op,int status,const unsigned char *data,size_t length,NSError *error) {
+    ZwkPage *s=CFBridgingRelease(op->page);
+    ZwkCaptureBudget *b=op->budget;
+    for (CaptureOp **link=&b->ops;*link;link=&(*link)->next) if (*link==op) { *link=op->next; break; }
+    --b->pending; b->bytes-=sizeof(*op);
+    atomic_fetch_sub(&capture_operations,1); atomic_fetch_sub(&capture_bytes,sizeof(*op));
+    const uint64_t token=op->token; const BOOL cancelled=op->cancelled;
+    free(op);
+    if (!cancelled && !b->closed && live(s) && s->capture==b && b->notify) {
+        const ZwkFailure failure=error?(ZwkFailure){domain_code(error.domain),(int32_t)error.code}:(ZwkFailure){0,0};
+        static const unsigned char empty=0;
+        b->notify(s->owner,token,status,data?data:&empty,length,error?&failure:NULL);
+    }
+    zwk_capture_budget_release(b);
+}
+/* The visible part of the page, as a PNG. */
+int zwk_capture_start(ZwkState *state,uint64_t token) {
+    ZwkPage *s=page_of(state);
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=s; (void)keep;
+    CaptureOp *op=NULL;
+    const int status=capture_begin(s,token,YES,NO,&op);
+    if (status!=ZWK_OK) return status;
+    const size_t capacity=s->capture->capacity;
+    @autoreleasepool {
+        [s->view takeSnapshotWithConfiguration:nil completionHandler:^(NSImage *image,NSError *error) {
+            if (op->cancelled || op->budget->closed) { capture_end(op,ZWK_CAPTURE_OK,NULL,0,nil); return; }
+            if (error || !image) { capture_end(op,error?ZWK_CAPTURE_NATIVE:ZWK_CAPTURE_INVALID,NULL,0,error); return; }
+            NSData *png=nil;
+            @autoreleasepool {
+                CGImageRef cg=[image CGImageForProposedRect:NULL context:nil hints:nil];
+                NSBitmapImageRep *bitmap=cg?[[NSBitmapImageRep alloc] initWithCGImage:cg]:nil;
+                png=[bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+            }
+            if (!png.length) capture_end(op,ZWK_CAPTURE_INVALID,NULL,0,nil);
+            else if (png.length>capacity) capture_end(op,ZWK_CAPTURE_LIMIT,NULL,0,nil);
+            else capture_end(op,ZWK_CAPTURE_OK,png.bytes,png.length,nil);
+        }];
+    }
+    return ZWK_OK;
+}
+/* Clears every data type of the page's own data store, for all time. */
+int zwk_clear_start(ZwkState *state,uint64_t token) {
+    ZwkPage *s=page_of(state);
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=s; (void)keep;
+    CaptureOp *op=NULL;
+    const int status=capture_begin(s,token,NO,NO,&op);
+    if (status!=ZWK_OK) return status;
+    @autoreleasepool {
+        WKWebsiteDataStore *store=s->view.configuration.websiteDataStore;
+        [store removeDataOfTypes:[WKWebsiteDataStore allWebsiteDataTypes] modifiedSince:[NSDate distantPast] completionHandler:^{
+            capture_end(op,ZWK_CAPTURE_OK,NULL,0,nil);
+        }];
+    }
+    return ZWK_OK;
+}
+/* Receives the end of a PDF's print operation. */
+@interface ZwkPrintDone : NSObject {
+@public
+    CaptureOp *op;
+    NSURL *file;
+    BOOL backgrounds, set_backgrounds;
+    WKPreferences *preferences;
+}
+- (void)printOperationDidRun:(NSPrintOperation *)operation success:(BOOL)success contextInfo:(void *)context;
+- (void)finish:(BOOL)success;
+@end
+@implementation ZwkPrintDone
+- (void)printOperationDidRun:(NSPrintOperation *)operation success:(BOOL)success contextInfo:(void *)context {
+    (void)operation; (void)context;
+    /* AppKit may run a save job, and call this, on its own thread. */
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(),^{ [self finish:success]; });
+        return;
+    }
+    [self finish:success];
+}
+- (void)finish:(BOOL)success {
+    if (set_backgrounds) { if (@available(macOS 13.3,*)) preferences.shouldPrintBackgrounds=backgrounds; }
+    NSError *error=success && [file checkResourceIsReachableAndReturnError:NULL]?nil:
+        [NSError errorWithDomain:@"ziggurat-webkit-print" code:success?2:1 userInfo:nil];
+    CaptureOp *value=op; op=NULL;
+    capture_end(value,error?ZWK_CAPTURE_NATIVE:ZWK_CAPTURE_OK,NULL,0,error);
+    CFRelease((__bridge CFTypeRef)self);
+}
+@end
+/* Prints the document to a PDF file through AppKit's print system, which
+ * paginates as the Linux backend's file printer does. One PDF runs at a time
+ * per page, since it changes the page's backgrounds setting. */
+int zwk_pdf_start(ZwkState *state,uint64_t token,const char *path,const ZwkPdfRequest *request) {
+    ZwkPage *s=page_of(state);
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=s; (void)keep;
+    if (!token || !path || path[0]!='/' || !request || !request->first_page || (request->last_page && request->last_page<request->first_page)) return ZWK_INVALID;
+    for (int i=0;i<6;++i) if (!(request->page[i]>=0) || request->page[i]>1000) return ZWK_INVALID;
+    if (!(request->page[0]>0) || !(request->page[1]>0)) return ZWK_INVALID;
+    if (live(s) && !s->view.window) return ZWK_NATIVE_FAILED;
+    CaptureOp *op=NULL;
+    const int status=capture_begin(s,token,YES,YES,&op);
+    if (status!=ZWK_OK) return status;
+    @autoreleasepool {
+        NSURL *file=[NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
+        [[NSFileManager defaultManager] removeItemAtURL:file error:NULL];
+        NSPrintInfo *info=[[NSPrintInfo alloc] initWithDictionary:@{
+            NSPrintJobDisposition:NSPrintSaveJob,
+            NSPrintJobSavingURL:file,
+        }];
+        /* The paper as given; landscape turns it, as GTK's page setup does. */
+        info.paperSize=NSMakeSize(request->page[0]*72,request->page[1]*72);
+        info.orientation=(request->flags&1u)?NSPaperOrientationLandscape:NSPaperOrientationPortrait;
+        info.topMargin=request->page[2]*72; info.rightMargin=request->page[3]*72;
+        info.bottomMargin=request->page[4]*72; info.leftMargin=request->page[5]*72;
+        info.horizontalPagination=NSPrintingPaginationModeFit;
+        info.verticalPagination=NSPrintingPaginationModeAutomatic;
+        info.horizontallyCentered=NO; info.verticallyCentered=NO;
+        if (request->first_page>1 || request->last_page) {
+            info.dictionary[NSPrintAllPages]=@NO;
+            info.dictionary[NSPrintFirstPage]=@(request->first_page);
+            info.dictionary[NSPrintLastPage]=@(request->last_page?request->last_page:INT32_MAX/2);
+        }
+        ZwkPrintDone *done=[[ZwkPrintDone alloc] init];
+        done->op=op; done->file=file;
+        if (@available(macOS 13.3,*)) {
+            done->preferences=s->view.configuration.preferences;
+            done->backgrounds=done->preferences.shouldPrintBackgrounds; done->set_backgrounds=YES;
+            done->preferences.shouldPrintBackgrounds=(request->flags&2u)!=0;
+        }
+        NSPrintOperation *operation=[s->view printOperationWithPrintInfo:info];
+        operation.showsPrintPanel=NO; operation.showsProgressPanel=NO;
+        /* WKWebView prints a view of no size blank. */
+        operation.view.frame=s->view.bounds;
+        CFBridgingRetain(done);
+        [operation runOperationModalForWindow:s->view.window delegate:done didRunSelector:@selector(printOperationDidRun:success:contextInfo:) contextInfo:NULL];
+    }
+    return ZWK_OK;
+}
+void zwk_capture_counts(uint32_t *budgets,uint32_t *operations,size_t *bytes,size_t *peak) {
+    if (budgets) *budgets=atomic_load(&capture_budgets);
+    if (operations) *operations=atomic_load(&capture_operations);
+    if (bytes) *bytes=atomic_load(&capture_bytes);
+    if (peak) *peak=atomic_load(&capture_peak);
+}
 
 ZwkFileBudget *zwk_file_budget_create(uint32_t limit) { (void)limit; return NULL; }
 void zwk_file_budget_limit(ZwkFileBudget *budget,uint32_t limit) { (void)budget; (void)limit; }
