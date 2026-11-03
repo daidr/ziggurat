@@ -1217,6 +1217,13 @@ pub const Renderer = struct {
                 depth += 1;
                 zgpu_push_clip(native, r.x, r.y, r.width, r.height);
             },
+            // A clip level that cuts nothing: the opacity is not drawn here
+            // yet.
+            .push_opacity => {
+                if (depth == 32) return error.ClipStackFull;
+                depth += 1;
+                zgpu_push_clip(native, -1e6, -1e6, 2e6, 2e6);
+            },
             .pop_clip => {
                 if (depth == 0) return error.ClipStackEmpty;
                 depth -= 1;

@@ -5287,20 +5287,20 @@ pub const View = struct {
         const look = entry.look;
         const pose = matched.poseFor(kept.bounds, look);
         const outer = try self.openEffects(target, .{ .opacity = std.math.clamp(look.opacity, 0, 1), .pose = if (pose.isIdentity()) null else pose }, kept.bounds);
-        const Open = struct { end: u8, effects: usize, clip: bool };
+        const Open = struct { end: u8, effects: Opened, clip: bool };
         var stack: [matched.copy_nodes]Open = undefined;
         var depth: usize = 0;
         for (kept.nodes[0..kept.len], 0..) |piece, at| {
             while (depth > 0 and stack[depth - 1].end <= at) {
                 depth -= 1;
                 if (stack[depth].clip) try target.popClip();
-                for (0..stack[depth].effects) |_| try target.endEffect();
+                try stack[depth].effects.close(target);
             }
             const top = at == 0;
             const background = if (top) look.background else piece.background;
             const border = if (top) look.border else piece.border;
             const radius = if (top) look.radius else piece.radius;
-            const effects = if (piece.opacity < 1) try self.openEffects(target, .{ .opacity = piece.opacity }, piece.bounds) else 0;
+            const effects: Opened = if (piece.opacity < 1) try self.openEffects(target, .{ .opacity = piece.opacity }, piece.bounds) else .{};
             if (background) |color| target.roundedRect(piece.bounds, radius, ui.Color.rgb(color));
             if (border) |color| target.strokeRect(piece.bounds, radius, piece.border_width, ui.Color.rgb(color));
             if (piece.text_len > 0) target.labelFont(piece.bounds, kept.textOf(piece), if (top) look.color orelse piece.color else piece.color, piece.font orelse .{});
@@ -5310,15 +5310,15 @@ pub const View = struct {
                 depth += 1;
             } else {
                 if (piece.clip) try target.popClip();
-                for (0..effects) |_| try target.endEffect();
+                try effects.close(target);
             }
         }
         while (depth > 0) {
             depth -= 1;
             if (stack[depth].clip) try target.popClip();
-            for (0..stack[depth].effects) |_| try target.endEffect();
+            try stack[depth].effects.close(target);
         }
-        for (0..outer) |_| try target.endEffect();
+        try outer.close(target);
     }
     /// Paint a text node whose characters morph from another text's
     /// (`Match.morph`): those the texts share go from where they were to
@@ -5544,8 +5544,13 @@ pub const View = struct {
                 scopes[scope_depth] = .{ .index = @intCast(at), .kind = .self_clip };
                 scope_depth += 1;
             }
-            for (0..try self.openEffects(target, style, bounds)) |_| {
+            const opened = try self.openEffects(target, style, bounds);
+            for (0..opened.effects) |_| {
                 scopes[scope_depth] = .{ .index = @intCast(at), .kind = .effect };
+                scope_depth += 1;
+            }
+            if (opened.faded) {
+                scopes[scope_depth] = .{ .index = @intCast(at), .kind = .opacity };
                 scope_depth += 1;
             }
             if (@TypeOf(target) == *ui.Frame) if (style.cache) |kept| {
@@ -5773,6 +5778,8 @@ pub const View = struct {
         index: u32,
         kind: union(enum) {
             effect,
+            /// `Style.opacity`, inside the node's effects.
+            opacity,
             clip,
             /// `Style.clip_inset` and `Style.mask`.
             self_clip,
@@ -5788,6 +5795,7 @@ pub const View = struct {
     fn closeScope(node: *const Node, scope: Scope, target: anytype, window_theme: Theme) !void {
         switch (scope.kind) {
             .effect => return target.endEffect(),
+            .opacity => return target.popOpacity(),
             .cache => return if (@TypeOf(target) == *ui.Frame) target.endCache(),
             .theme => |previous| if (@TypeOf(target) == *ui.Frame) target.popTheme(previous),
             .passthrough => |mark| if (@TypeOf(target) == *ui.Frame) target.passThrough(mark, target.inertMark()),
@@ -5872,38 +5880,45 @@ pub const View = struct {
         if (result.scale[0] <= 0 or result.scale[1] <= 0) return .{ .frame = leaf.bounds, .radius = leaf.style.radius };
         return result;
     }
-    /// Open the pose, effect and opacity of a node, outermost first, and
-    /// return how many opened. Opacity applies to the outermost one.
-    fn openEffects(self: *const View, target: anytype, style: Style, bounds: Rect) !usize {
+    /// What `openEffects` opened: element effects, and an opacity inside.
+    const Opened = struct {
+        effects: usize = 0,
+        faded: bool = false,
+        fn close(self: Opened, target: anytype) !void {
+            if (self.faded) try target.popOpacity();
+            for (0..self.effects) |_| try target.endEffect();
+        }
+    };
+    /// Open the pose, blur and effect of a node, outermost first, then its
+    /// opacity inside them: each drawing of the subtree fades by itself,
+    /// as if its colors were multiplied by the opacity, rather than the
+    /// subtree fading as one layer; an effect inside fades as one drawing.
+    fn openEffects(self: *const View, target: anytype, style: Style, bounds: Rect) !Opened {
         var alpha: u8 = @intFromFloat(@round(style.opacity * 255));
-        if (style.pose == null and style.effect == null and style.blur == 0 and alpha == 255) return 0;
-        var count: usize = 0;
+        var opened: Opened = .{};
         if (self.effects) |library| if (style.pose) |pose| {
             var values: ui.shader.Values = undefined;
             if (try library.pose(&values, pose, .{ bounds.width, bounds.height })) |effect| {
-                try target.beginEffect(bounds, effect, .{ .opacity = alpha });
-                alpha = 255;
-                count += 1;
+                try target.beginEffect(bounds, effect, .{});
+                opened.effects += 1;
             } else if (!pose.isIdentity()) alpha = 0; // Flattened to nothing.
         };
         if (self.effects) |library| if (style.blur > 0) {
             var values: ui.shader.Values = undefined;
             if (try library.blur(&values, style.blur)) |effect| {
-                try target.beginEffect(bounds, effect, .{ .opacity = alpha });
-                alpha = 255;
-                count += 1;
+                try target.beginEffect(bounds, effect, .{});
+                opened.effects += 1;
             }
         };
         if (style.effect) |effect| {
-            try target.beginEffect(bounds, effect, .{ .opacity = alpha });
-            alpha = 255;
-            count += 1;
+            try target.beginEffect(bounds, effect, .{});
+            opened.effects += 1;
         }
-        if (alpha != 255) if (self.effects) |library| {
-            try target.beginEffect(bounds, library.passthrough(), .{ .opacity = alpha });
-            count += 1;
-        };
-        return count;
+        if (alpha != 255) {
+            try target.pushOpacity(alpha);
+            opened.faded = true;
+        }
+        return opened;
     }
     /// Paint a container's refraction, true when it replaces the fill.
     fn paintRefraction(self: *const View, target: anytype, style: Style, bounds: Rect) !bool {
@@ -7136,6 +7151,9 @@ const Recorder = struct {
     opened_effects: [16]struct { margin: f32, opacity: u8 } = undefined,
     effect_depth: usize = 0,
     effect_count: usize = 0,
+    opacities: [16]u8 = undefined,
+    opacity_depth: usize = 0,
+    opacity_count: usize = 0,
     chooser: u64 = 0,
     tooltip_id: u64 = 0,
     fn push(self: *Recorder, kind: Kind, id: u64, bounds: Rect, checked: bool) void {
@@ -7174,6 +7192,15 @@ const Recorder = struct {
     pub fn endEffect(self: *Recorder) !void {
         if (self.effect_depth == 0) return error.EffectStackEmpty;
         self.effect_depth -= 1;
+    }
+    pub fn pushOpacity(self: *Recorder, alpha: u8) !void {
+        self.opacities[self.opacity_count] = alpha;
+        self.opacity_count += 1;
+        self.opacity_depth += 1;
+    }
+    pub fn popOpacity(self: *Recorder) !void {
+        if (self.opacity_depth == 0) return error.ClipStackEmpty;
+        self.opacity_depth -= 1;
     }
     pub fn indicator(self: *Recorder, id: u64, bounds: Rect) !void {
         self.push(.loading, id, bounds, false);
@@ -7585,17 +7612,22 @@ test "opacity, pose and effects wrap a node's subtree, closing inside out" {
     try view.arrange(.{ .x = 0, .y = 0, .width = 200, .height = 200 }, .{}, .{});
     var recorder: Recorder = .{};
     try view.paint(&recorder);
+    // Opacity fades each drawing by itself, with the library or without.
     try std.testing.expectEqual(@as(usize, 1), recorder.effect_count);
+    try std.testing.expectEqual(@as(usize, 2), recorder.opacity_count);
     view.effects = library;
     recorder = .{};
     try view.paint(&recorder);
-    // The column's pose carries its opacity; the faded text and the tinted
-    // one open one effect each.
-    try std.testing.expectEqual(@as(usize, 3), recorder.effect_count);
-    try std.testing.expectEqual(@as(u8, 128), recorder.opened_effects[0].opacity);
+    // The column's pose opens an effect with its opacity inside; the
+    // faded text fades inside it and the tinted one opens its effect.
+    try std.testing.expectEqual(@as(usize, 2), recorder.effect_count);
+    try std.testing.expectEqual(@as(u8, 255), recorder.opened_effects[0].opacity);
     try std.testing.expectEqual(@as(f32, 10), recorder.opened_effects[0].margin);
-    try std.testing.expectEqual(@as(u8, 64), recorder.opened_effects[1].opacity);
+    try std.testing.expectEqual(@as(usize, 2), recorder.opacity_count);
+    try std.testing.expectEqual(@as(u8, 128), recorder.opacities[0]);
+    try std.testing.expectEqual(@as(u8, 64), recorder.opacities[1]);
     try std.testing.expectEqual(@as(usize, 0), recorder.effect_depth);
+    try std.testing.expectEqual(@as(usize, 0), recorder.opacity_depth);
     try std.testing.expectEqual(@as(usize, 0), recorder.clip_depth);
 }
 

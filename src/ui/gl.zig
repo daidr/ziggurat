@@ -14,16 +14,24 @@
 //! and conic, padded, repeated or reflected, mixed in sRGB, linear sRGB or
 //! Oklab), text (laid out and drawn with Pango as the software renderer
 //! draws it, kept in a texture for later frames), prepared text, coverage
-//! masks, images, clips, groups (at an opacity, through a mask, or filtered
-//! with a Gaussian kernel) and raster transforms, which capture their
-//! content in textures of the frame as the software planes do; their limits
-//! are the software renderer's plan, which `Context` checks each frame
-//! against. A frame that uses anything else (shader effects, backdrop
-//! effects, loading indicators, masked clips, GPU textures without a device
-//! domain) draws on the software plane instead, as `prepareEffects` tells,
-//! where shader effects still run on OpenGL; so does a frame drawing an
-//! image or mask not yet uploaded (`holdsFrame`), which `residentFrame`
-//! uploads for the next.
+//! masks, images, clips, masked clips (each drawing masked by itself, as
+//! the software planes mix them), opacities (each drawing faded by itself),
+//! groups (at an opacity, through a mask, or filtered with a Gaussian
+//! kernel), raster transforms, shader effects (element effects over a
+//! capture of their content and backdrop shaders over a copy of the target,
+//! with programs translated to GLSL and linked outside paint by
+//! `prepareEffect`), backdrop effects (blur, glass and scroll edges,
+//! filtered from a copy of the target as the software planes filter it) and
+//! loading indicators (their scenes evaluated per pixel). Groups,
+//! transforms and effects capture their content in textures of the frame
+//! as the software planes do; their limits are the software renderer's
+//! plan, which `Context` checks each frame against. A frame that uses
+//! anything else (a shader program not prepared, GPU textures without a
+//! device domain) draws on the software plane instead, as `prepareEffects`
+//! tells; so does a frame drawing an image or mask not yet uploaded, or a
+//! program not yet linked (`holdsFrame`), which `residentFrame` uploads and
+//! links for the next: a window's renderer has its context from its first
+//! frame on.
 //!
 //! The window's frame is kept between frames: `replayDamage` draws again
 //! only the device pixels that changed (src/ui/damage.zig).
@@ -49,6 +57,10 @@ const gpu_resources = @import("gpu_resources.zig");
 const gaussian_scope = @import("gaussian_scope.zig");
 const gaussian = @import("gaussian_filter.zig");
 const damage = @import("damage.zig");
+const effect_host = @import("gpu_effect_host.zig");
+const shader_effects = commands.shader_effects;
+const backdrop = commands.backdrop;
+const loading = commands.loading;
 
 extern fn zglr_create(c_int) ?*anyopaque;
 extern fn zglr_create_own(c_int, *c_int) ?*anyopaque;
@@ -84,6 +96,17 @@ extern fn zglr_push_device_clip(*anyopaque, i32, i32, i32, i32) void;
 extern fn zglr_forget_plane(*anyopaque) void;
 extern fn zglr_push_clip(*anyopaque, f32, f32, f32, f32) void;
 extern fn zglr_pop_clip(*anyopaque) void;
+extern fn zglr_push_opacity(*anyopaque, u32) void;
+extern fn zglr_pop_opacity(*anyopaque) void;
+extern fn zglr_effect_install(*anyopaque, u32, [*]const u8, usize) c_int;
+extern fn zglr_effect_installed(*anyopaque, u32) c_int;
+extern fn zglr_effect_ready(*anyopaque) c_int;
+extern fn zglr_effect_geometry(*anyopaque, *EffectGeometry) c_int;
+extern fn zglr_begin_effect(*anyopaque, i32, i32, u32, u32, u32) c_int;
+extern fn zglr_end_effect(*anyopaque, ?*const EffectPass, u32) c_int;
+extern fn zglr_backdrop_shader(*anyopaque, *const EffectPass, *const [4]u32, *const [4]u32) c_int;
+extern fn zglr_backdrop(*anyopaque, *const Glass, u32, [*]const GlassLevel, [*]const f32, u32) c_int;
+extern fn zglr_indicator(*anyopaque, [*]const f32, u32, f32, f32, f32, *const [4]i32, u32, f32) c_int;
 extern fn zglr_text(*anyopaque, f32, f32, f32, f32, [*]const u8, u32, u32, f32, u16, c_int, c_int, ?[*:0]const u8) c_int;
 extern fn zglr_text_stats(*anyopaque, *u32, *u64, *u64) void;
 extern fn zglr_prepared(*anyopaque, *anyopaque, *const drawing.NativeCoverage, f32, f32, ?*const drawing.Rect, u32) c_int;
@@ -109,10 +132,16 @@ extern fn zglr_test_pixels(*anyopaque, [*]u32, u32, u32) c_int;
 extern fn zglr_test_backend(*anyopaque) c_int;
 extern fn zglr_test_damage(*[4]i32) u64;
 
-const NativeStats = extern struct { device_creations: u32, context_creations: u32, resizes: u32, presents: u32, memory_presents: u32, busy_presents: u32, text_rasters: u32, text_entries: u32, frames: u64, instances: u64, batches: u64, layers: u64, filter_passes: u64, partial_frames: u64, text_hits: u64, offscreen_targets: u64, device_losses: u64, damage_submissions: u64 };
+const NativeStats = extern struct { device_creations: u32, context_creations: u32, resizes: u32, presents: u32, memory_presents: u32, busy_presents: u32, text_rasters: u32, text_entries: u32, frames: u64, instances: u64, batches: u64, layers: u64, filter_passes: u64, partial_frames: u64, text_hits: u64, offscreen_targets: u64, device_losses: u64, damage_submissions: u64, effect_passes: u64, backdrops: u64, indicators: u64 };
+/// A backdrop effect's plan for src/ui/gl_renderer.c (ZlGlass).
+const Glass = extern struct { box: [4]f32, clip: [4]f32, tone: [4]f32, tint: [4]f32, line: [4]f32, line2: [4]f32, misc: [4]f32, misc2: [4]f32, background: [4]f32, fill: [4]f32, region: [4]u32, out: [4]u32 };
+const GlassLevel = extern struct { radius: u32, lo: f32, hi: f32, weights: u32 };
+const kernel_len = 2 * backdrop.max_radius_pixels + 1;
+const EffectPass = extern struct { words: [*]const u32, word_count: u32, slot: u32, params: effect_host.Params };
+const EffectGeometry = extern struct { clip: [4]f64, scale: f32, origin: [2]f32, width: u32, height: u32, transparent: u32 };
 
-/// Captures (groups and transforms) nested in one another at most, as
-/// src/ui/gl_renderer.c holds them.
+/// Captures (groups, transforms and element effects) nested in one another
+/// at most, as src/ui/gl_renderer.c holds them.
 const max_capture_depth = 8;
 /// Largest texture side a capture may have.
 const max_texture = 16384;
@@ -141,10 +170,11 @@ pub const Options = struct {
 /// from the texture kept, layers groups and transforms composited,
 /// filter_passes Gaussian filter passes, partial_frames frames that drew
 /// only their damage, offscreen_targets offscreen targets made,
-/// device_losses the devices this renderer lost with its domain and
+/// device_losses the devices this renderer lost with its domain,
 /// damage_submissions what the toplevel added to the Wayland surface's
-/// damage.
-pub const Stats = struct { device_creations: u32 = 0, context_creations: u32 = 0, resizes: u32 = 0, presents: u32 = 0, memory_presents: u32 = 0, busy_presents: u32 = 0, text_rasters: u32 = 0, text_entries: u32 = 0, frames: u64 = 0, instances: u64 = 0, batches: u64 = 0, layers: u64 = 0, filter_passes: u64 = 0, partial_frames: u64 = 0, text_hits: u64 = 0, offscreen_targets: u64 = 0, device_losses: u64 = 0, damage_submissions: u64 = 0 };
+/// damage, effect_passes shader and backdrop passes run, backdrops backdrop
+/// effects and indicators loading indicators drawn.
+pub const Stats = struct { device_creations: u32 = 0, context_creations: u32 = 0, resizes: u32 = 0, presents: u32 = 0, memory_presents: u32 = 0, busy_presents: u32 = 0, text_rasters: u32 = 0, text_entries: u32 = 0, frames: u64 = 0, instances: u64 = 0, batches: u64 = 0, layers: u64 = 0, filter_passes: u64 = 0, partial_frames: u64 = 0, text_hits: u64 = 0, offscreen_targets: u64 = 0, device_losses: u64 = 0, damage_submissions: u64 = 0, effect_passes: u64 = 0, backdrops: u64 = 0, indicators: u64 = 0 };
 
 /// Renderers and device domains alive.
 pub fn liveObjects() u32 {
@@ -193,6 +223,13 @@ pub const Renderer = struct {
     images: image_cache.Cache = .{},
     /// The cairo context of the area's draw signal the frame shows in.
     destination: ?*anyopaque = null,
+    /// Shader programs linked or waiting for the renderer's context, the
+    /// slot each of this frame's entries runs in, and the frame whose
+    /// effects replay draws.
+    effect_table: effect_host.Table = .{},
+    effect_slots: [shader_effects.max_entries]u32 = undefined,
+    effect_buffer: ?*const commands.Buffer = null,
+    effect_slots_len: usize = 0,
 
     pub fn init(self: *Renderer, options: Options) !void {
         if (self.native != null) return error.AlreadyInitialized;
@@ -264,6 +301,7 @@ pub const Renderer = struct {
         if (domain) |value| value.clearRendererWait(borrow.?.slot);
         if (self.native) |native| zglr_destroy(native);
         self.images.deinit();
+        self.effect_table.deinit();
         self.* = .{};
         if (domain) |value| {
             if (release_borrow) value.releaseRenderer(borrow.?.slot);
@@ -396,9 +434,11 @@ pub const Renderer = struct {
         return null;
     }
 
-    /// Whether OpenGL draws `buffer`; see the module's documentation.
-    /// Gaussian groups need kernels at the frame's scale; every capture
-    /// must fit a texture.
+    /// Whether OpenGL draws `buffer`; see the module's documentation. Each
+    /// shader program it uses must have been prepared with `prepareEffect`;
+    /// shader effects also need the frame's shader workspace and the
+    /// frame's scale. Gaussian groups need kernels at the frame's scale;
+    /// every capture must fit a texture.
     pub fn prepareEffects(self: *Renderer, buffer: *const commands.Buffer) bool {
         const native = self.native orelse return false;
         if (!self.active) return false;
@@ -408,13 +448,33 @@ pub const Renderer = struct {
             else => {},
         };
         for (buffer.preparedTextResources()) |view| if (view.native_coverage == null) return false;
+        const entries = buffer.shaderEntries();
         const filters = buffer.filterResources();
         const transforms = buffer.transformResources();
+        const workspace = buffer.shader_storage.workspace;
         var depth: usize = 0;
+        var uses = false;
+        // Masked clips draw as groups masked by their coverage: the clip
+        // depth of each, a bit for each depth.
+        var clip_depth: usize = 0;
+        var masked: u64 = 0;
         for (buffer.commands()) |op| switch (op) {
-            // Masked clips draw on the software plane, as the software
-            // renderer mixes them a drawable at a time (src/ui/mask_mix.zig).
-            .effect, .backdrop_shader, .backdrop, .indicator, .push_mask_clip => return false,
+            .push_clip, .push_opacity => clip_depth += 1,
+            .push_mask_clip => {
+                if (depth == max_capture_depth or clip_depth >= 64) return false;
+                masked |= @as(u64, 1) << @intCast(clip_depth);
+                clip_depth += 1;
+                depth += 1;
+            },
+            .pop_clip => {
+                if (clip_depth == 0) return false;
+                clip_depth -= 1;
+                if (masked & (@as(u64, 1) << @intCast(clip_depth)) != 0) {
+                    masked &= ~(@as(u64, 1) << @intCast(clip_depth));
+                    if (depth == 0) return false;
+                    depth -= 1;
+                }
+            },
             .begin_group => |value| {
                 if (depth == max_capture_depth) return false;
                 if (value.filter_slot != commands.no_filter) {
@@ -435,16 +495,222 @@ pub const Renderer = struct {
                 if (t.pixel_width + 2 > max_texture or t.pixel_height + 2 > max_texture) return false;
                 depth += 1;
             },
-            .end_group, .end_transform => {
+            .effect => |slot| {
+                uses = true;
+                if (depth == max_capture_depth) return false;
+                const shaders = workspace orelse return false;
+                if (slot >= entries.len) return false;
+                const entry = &entries[slot];
+                if (entry.scale != scale) return false;
+                const kernel = shaders.carrierFor(entry.scale) catch return false;
+                const capture = gaussian_scope.Capture.init(entry.captureRect(), kernel) catch return false;
+                if (capture.pixelWidth() > max_texture or capture.pixelHeight() > max_texture) return false;
+                depth += 1;
+            },
+            .end_group, .end_transform, .end_effect => {
                 if (depth == 0) return false;
                 depth -= 1;
             },
+            .backdrop_shader => |slot| {
+                uses = true;
+                if (workspace == null or slot >= entries.len) return false;
+            },
             else => {},
         };
-        return depth == 0;
+        if (depth != 0) return false;
+        self.effect_slots_len = 0;
+        if (!uses) return true;
+        if (entries.len > self.effect_slots.len) return false;
+        self.effect_table.beginFrame();
+        // A program waiting for the context is linked after this frame
+        // (`holdsFrame`, `residentFrame`).
+        for (entries, 0..) |*entry, i| self.effect_slots[i] = self.effect_table.find(entry.program.identity, entry.target) orelse return false;
+        self.effect_slots_len = entries.len;
+        return true;
+    }
+    /// Translate `program` drawn as `target` to GLSL and link it, outside a
+    /// frame. False when the compiler rejects it: frames using it draw in
+    /// software. A window's renderer before its first frame has no context
+    /// yet: the program waits, translated, for the first frame that draws
+    /// it (`residentFrame`).
+    pub fn prepareEffect(self: *Renderer, allocator: std.mem.Allocator, program: *const shader_effects.shader.Program, target: shader_effects.Target) !bool {
+        if (self.active) return error.AlreadyDrawing;
+        const native = self.native orelse return error.NotInitialized;
+        const scope = try self.enterDomain();
+        defer self.leaveDomain(scope);
+        const table = &self.effect_table;
+        table.beginFrame();
+        if (table.find(program.identity, target)) |slot| {
+            if (zglr_effect_installed(native, slot) != 0) return true;
+            return self.installEffect(slot);
+        }
+        if (table.failed(program.identity, target)) return false;
+        var translation = shader_effects.shader.gpu.translate(allocator, program, .glsl) catch |err| switch (err) {
+            error.UnsupportedProgram => {
+                table.fail(program.identity, target);
+                return false;
+            },
+            else => |e| return e,
+        };
+        defer translation.deinit();
+        const source = try effect_host.sourceRows(allocator, &translation, program.kind, target, .glsl, .bottom_up);
+        defer allocator.free(source);
+        const slot = table.victim() orelse return false;
+        const code = try allocator.dupe(u8, source[0 .. source.len + 1]);
+        errdefer allocator.free(code);
+        const inputs = try allocator.dupe(u16, translation.inputs);
+        table.fill(slot, program.identity, target, inputs, code, allocator);
+        return self.installEffect(slot);
+    }
+    /// Link the program the table holds in `slot` (its code ends with its
+    /// NUL), or leave it waiting for the context; false and forgotten when
+    /// the compiler rejects it.
+    fn installEffect(self: *Renderer, slot: u32) bool {
+        const native = self.native.?;
+        if (zglr_effect_ready(native) == 0) return true;
+        const entry = self.effect_table.entries[slot];
+        switch (zglr_effect_install(native, slot, entry.code.ptr, entry.code.len - 1)) {
+            0 => return true,
+            2 => {
+                self.effect_table.fail(entry.identity, entry.target);
+                self.effect_table.forget(slot);
+                return false;
+            },
+            else => return false,
+        }
+    }
+    const OpenEffect = struct { slot: u8, capture: gaussian_scope.Capture };
+    fn effectSource(self: *const Renderer, slot: u8) !struct { *const shader_effects.Entry, *shader_effects.Workspace } {
+        const buffer = self.effect_buffer orelse return error.SoftwareOnlyCommands;
+        if (slot >= buffer.shader_storage.len) return error.MissingResources;
+        return .{ &buffer.shader_storage.entries[slot], buffer.shader_storage.workspace orelse return error.ShaderEffectsNotPrepared };
+    }
+    /// Open an element effect's capture, as the carrier kernel bounds it.
+    fn beginEffect(self: *Renderer, slot: u8) !OpenEffect {
+        const entry, const workspace = try self.effectSource(slot);
+        const kernel = try workspace.carrierFor(entry.scale);
+        const capture = try gaussian_scope.Capture.init(entry.captureRect(), kernel);
+        switch (zglr_begin_effect(self.native.?, capture.left, capture.top, capture.width, capture.height, capture.radius)) {
+            0 => {},
+            1 => return error.LayerDepthExceeded,
+            else => return error.GraphicsFailed,
+        }
+        return .{ .slot = slot, .capture = capture };
+    }
+    /// Run the effect over its capture, or over budget or with a faulting
+    /// prologue composite the content as drawn.
+    fn endEffect(self: *Renderer, open: OpenEffect, words: []u32) !void {
+        const entry, const workspace = try self.effectSource(open.slot);
+        const capture = open.capture;
+        const status = if (!shader_effects.startElement(workspace, entry, @as(u64, capture.pixelWidth()) * capture.pixelHeight(), capture.scale))
+            zglr_end_effect(self.native.?, null, entry.opacity)
+        else status: {
+            const pass = self.effectPass(open.slot, words, effect_host.elementParams(entry, capture), workspace);
+            break :status zglr_end_effect(self.native.?, &pass, entry.opacity);
+        };
+        if (status != 0) return error.GraphicsFailed;
+    }
+    fn backdropShader(self: *Renderer, slot: u8, words: []u32) !void {
+        const entry, const workspace = try self.effectSource(slot);
+        var target: EffectGeometry = undefined;
+        if (zglr_effect_geometry(self.native.?, &target) != 0) return error.NotDrawing;
+        const origin = [2]f64{ target.origin[0], target.origin[1] };
+        const plan = shader_effects.planBackdrop(target.width, target.height, target.scale, origin, target.clip, entry) orelse return;
+        const room: ?usize = if (self.effect_buffer.?.backdrop_storage.workspace) |space| space.planes.len else null;
+        if (!shader_effects.startBackdrop(workspace, entry, plan, room, target.scale)) return;
+        const pass = self.effectPass(slot, words, effect_host.backdropParams(entry, plan, target.scale, origin, target.clip, target.transparent != 0), workspace);
+        const region = [4]u32{ @intCast(plan.region[0]), @intCast(plan.region[1]), @intCast(plan.region[2]), @intCast(plan.region[3]) };
+        const out = [4]u32{ @intCast(plan.out[0]), @intCast(plan.out[1]), @intCast(plan.out[2]), @intCast(plan.out[3]) };
+        if (zglr_backdrop_shader(self.native.?, &pass, &region, &out) != 0) return error.GraphicsFailed;
+    }
+    /// Filters the target beneath a backdrop effect as the software planes
+    /// do (src/ui/backdrop.zig), counting it in the workspace's statistics.
+    fn backdropEffect(self: *Renderer, entry: backdrop.Entry, workspace: ?*backdrop.Workspace) !void {
+        var target: EffectGeometry = undefined;
+        if (zglr_effect_geometry(self.native.?, &target) != 0) return error.NotDrawing;
+        const p = backdrop.plan(.{ .width = target.width, .height = target.height, .scale = target.scale, .origin = .{ target.origin[0], target.origin[1] }, .clip = target.clip }, entry, workspace);
+        if (p.mode == .empty) return;
+        const shading = p.shading;
+        const f = struct {
+            fn v(value: f64) f32 {
+                return @floatCast(value);
+            }
+        }.v;
+        const region = if (p.mode == .fill) p.out else p.sample;
+        var glass: Glass = .{
+            .box = .{ f(p.box.x0), f(p.box.y0), f(p.box.x1), f(p.box.y1) },
+            .clip = .{ f(p.clip[0]), f(p.clip[1]), f(p.clip[2]), f(p.clip[3]) },
+            .tone = .{ f(shading.tone.low), f(shading.tone.high), f(shading.tone.curve), f(shading.tone.saturation) },
+            .tint = .{ f(shading.tint[0]), f(shading.tint[1]), f(shading.tint[2]), f(shading.tint[3]) },
+            .line = @splat(0),
+            .line2 = @splat(0),
+            .misc = .{ f(p.box.radius), f(shading.refraction), f(shading.bezel), f(shading.noise) },
+            .misc2 = .{ f(shading.rim), if (p.mode == .fill) 3 else @floatFromInt(@backingInt(shading.kind)), @floatFromInt(target.transparent), if (shading.progressive != null) 1 else 0 },
+            .background = .{ f(shading.background[0]), f(shading.background[1]), f(shading.background[2]), 0 },
+            .fill = .{ @as(f32, @floatFromInt(p.fill.r)) / 255, @as(f32, @floatFromInt(p.fill.g)) / 255, @as(f32, @floatFromInt(p.fill.b)) / 255, @as(f32, @floatFromInt(p.fill.a)) / 255 },
+            .region = .{ @intCast(region.x0), @intCast(region.y0), @intCast(region.x1), @intCast(region.y1) },
+            .out = .{ @intCast(p.out.x0), @intCast(p.out.y0), @intCast(p.out.x1), @intCast(p.out.y1) },
+        };
+        var levels: [16]GlassLevel = undefined;
+        var weights: [16 * kernel_len]f32 = undefined;
+        var count: usize = 0;
+        if (p.mode == .filter) {
+            var kernel: [kernel_len]f64 = undefined;
+            if (shading.progressive) |line| {
+                glass.line = .{ f(line.x), f(line.y), f(line.dx), f(line.dy) };
+                glass.line2 = .{ f(line.length), f(line.from), f(line.to), 0 };
+                var planned: [16]backdrop.Level = undefined;
+                for (planned[0..backdrop.blurLevels(&planned, line.least, line.most)]) |level| {
+                    const radius = backdrop.gaussianWeights(level.blur, &kernel);
+                    for (0..2 * radius + 1) |i| weights[count * kernel_len + i] = f(kernel[i]);
+                    levels[count] = .{ .radius = @intCast(radius), .lo = f(level.lo), .hi = f(level.hi), .weights = @intCast(count * kernel_len) };
+                    count += 1;
+                }
+            } else {
+                const radius = backdrop.gaussianWeights(shading.sigma, &kernel);
+                if (radius != 0) {
+                    for (0..2 * radius + 1) |i| weights[i] = f(kernel[i]);
+                    levels[0] = .{ .radius = @intCast(radius), .lo = 0, .hi = 0, .weights = 0 };
+                    count = 1;
+                }
+            }
+        }
+        if (zglr_backdrop(self.native.?, &glass, @intCast(count), &levels, &weights, weights.len) != 0) return error.GraphicsFailed;
+    }
+    /// Draws a loading indicator, its scene evaluated per pixel as the
+    /// software planes rasterize it (src/ui/loading.zig).
+    fn indicator(self: *Renderer, entry: loading.Entry) !void {
+        var target: EffectGeometry = undefined;
+        if (zglr_effect_geometry(self.native.?, &target) != 0) return error.NotDrawing;
+        var elements: [loading.max_elements * loading.element_floats]f32 = undefined;
+        const scene = loading.encode(entry, &elements);
+        const origin = [2]f64{ target.origin[0], target.origin[1] };
+        const placed = loading.place(.{ .width = target.width, .height = target.height, .scale = target.scale, .origin = origin, .clip = target.clip }, entry, scene.width) orelse return;
+        if (scene.count == 0) return;
+        // The instances' coordinates are the target's less its origin.
+        const box = [4]i32{
+            @intFromFloat(@as(f64, @floatFromInt(placed.x0)) - origin[0]),
+            @intFromFloat(@as(f64, @floatFromInt(placed.y0)) - origin[1]),
+            @intFromFloat(@as(f64, @floatFromInt(placed.x1)) - origin[0]),
+            @intFromFloat(@as(f64, @floatFromInt(placed.y1)) - origin[1]),
+        };
+        const rgb = (@as(u32, entry.color.r) << 16) | (@as(u32, entry.color.g) << 8) | entry.color.b;
+        if (zglr_indicator(self.native.?, &elements, @intCast(scene.count), @floatCast(placed.ox - origin[0]), @floatCast(placed.oy - origin[1]), @floatCast(placed.k), &box, rgb, @as(f32, @floatFromInt(entry.color.a)) / 255) != 0) return error.GraphicsFailed;
+    }
+    fn effectPass(self: *Renderer, slot: u8, words: []u32, params: effect_host.Params, workspace: *shader_effects.Workspace) EffectPass {
+        const installed = self.effect_slots[slot];
+        const inputs = self.effect_table.entries[installed].inputs;
+        for (inputs, 0..) |register, i| words[i] = workspace.machine.registers[register];
+        return .{ .words = words.ptr, .word_count = @intCast(inputs.len), .slot = installed, .params = params };
+    }
+    /// Shader passes run on the GPU since the renderer was created.
+    pub fn effectPasses(self: *const Renderer) u64 {
+        return self.stats().effect_passes;
     }
 
     pub fn replayBuffer(self: *Renderer, buffer: *const commands.Buffer) !void {
+        self.effect_buffer = if (self.prepareEffects(buffer)) buffer else null;
+        defer self.effect_buffer = null;
         try self.replayAll(buffer.commands(), buffer.textBytes(), buffer.brushResources(), buffer.preparedTextResources(), buffer.imageResources(), buffer.coverageResources(), buffer.textureResources(), buffer.transformResources(), buffer.filterResources());
     }
     /// Whether the window's frame kept from the last one may be drawn over,
@@ -554,18 +820,130 @@ pub const Renderer = struct {
             _ = try drawing.planTexture(view, .{ .x = value.destination.x, .y = value.destination.y, .width = value.destination.width, .height = value.destination.height }, value.options(), zglr_scale(self.native.?));
         };
     }
+    /// The masked clips open while a list replays: each drawing inside is
+    /// masked by itself, as the software planes do (`mask_mix`). Drawings
+    /// that do not overlap gather into one run drawn in a group masked by
+    /// each clip of their layer; a group, transform or effect is one
+    /// drawing of the layer it composites onto.
+    const MaskRuns = struct {
+        const Scope = struct { clip: commands.MaskClip, level: usize };
+        scopes: [32]Scope = undefined,
+        len: usize = 0,
+        /// Groups open for the run now; 0 while none is.
+        groups: usize = 0,
+        boxes: [32]damage.Box = undefined,
+        box_len: usize = 0,
+        whole: bool = false,
+        /// The mask groups opened beneath each open layer, by its level.
+        spans: [max_capture_depth + 2]usize = @splat(0),
+
+        fn masked(self: *const MaskRuns, level: usize) bool {
+            for (self.scopes[0..self.len]) |scope| if (scope.level == level) return true;
+            return false;
+        }
+        fn openGroups(self: *MaskRuns, r: *Renderer, level: usize, coverage_resources: []const drawing.CoverageView, filters: []const gaussian.View) !usize {
+            var count: usize = 0;
+            for (self.scopes[0..self.len]) |scope| if (scope.level == level) {
+                try r.beginGroup(.{ .bounds = scope.clip.bounds, .mask_origin = scope.clip.origin, .mask_resource = scope.clip.mask }, coverage_resources, filters);
+                count += 1;
+            };
+            return count;
+        }
+        fn closeGroups(native: *anyopaque, count: usize) !void {
+            for (0..count) |_| if (zglr_end_group(native) != 0) return error.GraphicsFailed;
+        }
+        fn flush(self: *MaskRuns, r: *Renderer) !void {
+            const count = self.groups;
+            self.groups = 0;
+            self.box_len = 0;
+            self.whole = false;
+            try closeGroups(r.native.?, count);
+        }
+        fn draw(self: *MaskRuns, r: *Renderer, level: usize, box: ?damage.Box, coverage_resources: []const drawing.CoverageView, filters: []const gaussian.View) !void {
+            if (!self.masked(level)) return;
+            if (self.groups != 0) {
+                var overlap = self.whole or box == null or self.box_len == self.boxes.len;
+                if (!overlap) for (self.boxes[0..self.box_len]) |kept| if (kept.intersects(box.?)) {
+                    overlap = true;
+                    break;
+                };
+                if (overlap) try self.flush(r);
+            }
+            if (self.groups == 0) self.groups = try self.openGroups(r, level, coverage_resources, filters);
+            if (box) |b| {
+                self.boxes[self.box_len] = b;
+                self.box_len += 1;
+            } else self.whole = true;
+        }
+        fn beginSpan(self: *MaskRuns, r: *Renderer, level: usize, coverage_resources: []const drawing.CoverageView, filters: []const gaussian.View) !void {
+            try self.flush(r);
+            if (level + 1 >= self.spans.len) return error.LayerDepthExceeded;
+            self.spans[level + 1] = if (self.masked(level)) try self.openGroups(r, level, coverage_resources, filters) else 0;
+        }
+        /// After the layer at `level` + 1 ended.
+        fn endSpan(self: *MaskRuns, r: *Renderer, level: usize) !void {
+            if (level + 1 >= self.spans.len) return;
+            const count = self.spans[level + 1];
+            self.spans[level + 1] = 0;
+            try closeGroups(r.native.?, count);
+        }
+    };
+    const Replay = struct {
+        depth: usize = 0,
+        /// The clips open that are masked, and those that are opacities, a
+        /// bit for each depth.
+        masked: u32 = 0,
+        faded: u32 = 0,
+        runs: MaskRuns = .{},
+        effect_stack: [max_capture_depth]OpenEffect = undefined,
+        effect_depth: usize = 0,
+        transform_stack: [max_capture_depth]layers.NativeTransform = undefined,
+        transform_depth: usize = 0,
+        group_depth: usize = 0,
+        words: [shader_effects.shader.gpu.max_input_words]u32 = undefined,
+
+        fn level(self: *const Replay) usize {
+            return self.group_depth + self.transform_depth + self.effect_depth;
+        }
+    };
     fn replayAll(self: *Renderer, ops: []const commands.Command, text: []const u8, resources: []const commands.brushes.Stored, prepared: []const drawing.PreparedTextView, image_resources: []const drawing.ImageView, coverage_resources: []const drawing.CoverageView, textures: []const drawing.TextureView, transforms: []const layers.NativeTransform, filters: []const gaussian.View) !void {
         if (!self.active) return error.NotDrawing;
         const native = self.native.?;
         try self.preflightTextures(ops, textures);
         if (resources.len > commands.brushes.max_brushes) return error.BrushesFull;
         for (resources) |*resource| try resource.validate();
-        var depth: usize = 0;
-        defer while (depth != 0) : (depth -= 1) zglr_pop_clip(native);
-        var transform_stack: [max_capture_depth]layers.NativeTransform = undefined;
-        var transform_depth: usize = 0;
-        var group_depth: usize = 0;
-        for (ops) |op| switch (op) {
+        var replay_state: Replay = .{};
+        const state = &replay_state;
+        defer while (state.depth != 0) : (state.depth -= 1) {
+            if (state.faded & (@as(u32, 1) << @intCast(state.depth - 1)) != 0) zglr_pop_opacity(native);
+            zglr_pop_clip(native);
+        };
+        const runs = &state.runs;
+        const box_sources: damage.Sources = .{ .prepared = prepared, .coverage = coverage_resources, .indicators = if (self.effect_buffer) |buffer| buffer.indicator_storage[0..buffer.indicator_len] else &.{} };
+        const box_scale = zglr_scale(native);
+        for (ops) |op| {
+            const level = state.level();
+            if (runs.len != 0) switch (op) {
+                .fill, .shape, .gradient, .text, .prepared_text, .coverage, .image, .indicator, .texture => try runs.draw(self, level, damage.commandBox(op, box_sources, box_scale), coverage_resources, filters),
+                .backdrop, .backdrop_shader => {
+                    try runs.flush(self);
+                    try runs.draw(self, level, null, coverage_resources, filters);
+                },
+                .push_clip, .push_mask_clip, .push_opacity, .pop_clip, .end_group, .end_transform, .end_effect => try runs.flush(self),
+                .begin_group, .begin_transform, .effect => try runs.beginSpan(self, level, coverage_resources, filters),
+            };
+            try self.replayOne(op, text, resources, prepared, image_resources, coverage_resources, textures, transforms, filters, state);
+        }
+        try runs.flush(self);
+        if (state.depth != 0) return error.UnbalancedClips;
+        if (state.effect_depth != 0) return error.UnbalancedEffects;
+        if (state.group_depth != 0) return error.UnbalancedGroups;
+        if (state.transform_depth != 0) return error.UnbalancedTransforms;
+    }
+    fn replayOne(self: *Renderer, op: commands.Command, text: []const u8, resources: []const commands.brushes.Stored, prepared: []const drawing.PreparedTextView, image_resources: []const drawing.ImageView, coverage_resources: []const drawing.CoverageView, textures: []const drawing.TextureView, transforms: []const layers.NativeTransform, filters: []const gaussian.View, state: *Replay) !void {
+        const native = self.native.?;
+        const runs = &state.runs;
+        switch (op) {
             .fill => |fill| {
                 if (!layout.validRect(fill.bounds)) return error.InvalidGeometry;
                 const r = fill.bounds;
@@ -579,7 +957,7 @@ pub const Renderer = struct {
                 if (value.brush >= resources.len) return error.MissingResources;
                 const p = try geometry.plan(.{ .bounds = value.bounds, .radius = value.radius, .stroke_width = value.stroke_width, .color = geometry.Color.rgb(0) });
                 const brush = &resources[value.brush];
-                if (brush.isTransparent()) continue;
+                if (brush.isTransparent()) return;
                 const descriptor = brush.native();
                 const spread: u32 = switch (brush.spread) {
                     .pad => 0,
@@ -617,47 +995,102 @@ pub const Renderer = struct {
             },
             .push_clip => |r| {
                 if (!layout.validRect(r)) return error.InvalidGeometry;
-                if (depth == 32) return error.ClipStackFull;
-                depth += 1;
+                if (state.depth == 32) return error.ClipStackFull;
+                state.depth += 1;
                 zglr_push_clip(native, r.x, r.y, r.width, r.height);
             },
+            .push_mask_clip => |value| {
+                const r = value.bounds;
+                if (!layout.validRect(r)) return error.InvalidGeometry;
+                if (state.depth == 32) return error.ClipStackFull;
+                if (value.mask >= coverage_resources.len) return error.MissingResources;
+                if (runs.len == runs.scopes.len) return error.ClipStackFull;
+                zglr_push_clip(native, r.x, r.y, r.width, r.height);
+                state.masked |= @as(u32, 1) << @intCast(state.depth);
+                state.depth += 1;
+                runs.scopes[runs.len] = .{ .clip = value, .level = state.level() };
+                runs.len += 1;
+            },
+            // Each drawing until its pop fades by itself: drawn at the
+            // opacity, as a group, transform or effect composites.
+            .push_opacity => |alpha| {
+                if (state.depth == 32) return error.ClipStackFull;
+                zglr_push_device_clip(native, std.math.minInt(i32), std.math.minInt(i32), std.math.maxInt(i32), std.math.maxInt(i32));
+                zglr_push_opacity(native, alpha);
+                state.faded |= @as(u32, 1) << @intCast(state.depth);
+                state.depth += 1;
+            },
             .pop_clip => {
-                if (depth == 0) return error.ClipStackEmpty;
-                depth -= 1;
+                if (state.depth == 0) return error.ClipStackEmpty;
+                state.depth -= 1;
+                const bit = @as(u32, 1) << @intCast(state.depth);
+                if (state.masked & bit != 0) {
+                    state.masked &= ~bit;
+                    if (runs.len == 0) return error.ClipStackEmpty;
+                    runs.len -= 1;
+                }
+                if (state.faded & bit != 0) {
+                    state.faded &= ~bit;
+                    zglr_pop_opacity(native);
+                }
                 zglr_pop_clip(native);
             },
-            .effect, .end_effect, .backdrop_shader, .backdrop, .indicator, .push_mask_clip => return error.SoftwareOnlyCommands,
+            .effect => |slot| {
+                if (self.effect_buffer == null) return error.SoftwareOnlyCommands;
+                if (state.effect_depth == state.effect_stack.len) return error.LayerDepthExceeded;
+                state.effect_stack[state.effect_depth] = try self.beginEffect(slot);
+                state.effect_depth += 1;
+            },
+            .end_effect => {
+                if (state.effect_depth == 0) return error.UnbalancedEffects;
+                state.effect_depth -= 1;
+                try self.endEffect(state.effect_stack[state.effect_depth], &state.words);
+                try runs.endSpan(self, state.level());
+            },
+            .backdrop_shader => |slot| {
+                if (self.effect_buffer == null) return error.SoftwareOnlyCommands;
+                try self.backdropShader(slot, &state.words);
+            },
+            .backdrop => |slot| {
+                const buffer = self.effect_buffer orelse return error.SoftwareOnlyCommands;
+                if (slot >= buffer.backdrop_storage.len) return error.MissingResources;
+                try self.backdropEffect(buffer.backdrop_storage.entries[slot], buffer.backdrop_storage.workspace);
+            },
+            .indicator => |slot| {
+                const buffer = self.effect_buffer orelse return error.SoftwareOnlyCommands;
+                if (slot >= buffer.indicator_len) return error.MissingResources;
+                try self.indicator(buffer.indicator_storage[slot]);
+            },
             .begin_group => |value| {
                 try self.beginGroup(value, coverage_resources, filters);
-                group_depth += 1;
+                state.group_depth += 1;
             },
             .end_group => {
-                if (group_depth == 0) return error.GroupStackEmpty;
-                group_depth -= 1;
+                if (state.group_depth == 0) return error.GroupStackEmpty;
+                state.group_depth -= 1;
                 if (zglr_end_group(native) != 0) return error.GraphicsFailed;
+                try runs.endSpan(self, state.level());
             },
             .begin_transform => |slot| {
                 if (slot >= transforms.len) return error.MissingResources;
-                if (transform_depth == transform_stack.len) return error.LayerDepthExceeded;
+                if (state.transform_depth == state.transform_stack.len) return error.LayerDepthExceeded;
                 try self.beginTransform(transforms[slot]);
-                transform_stack[transform_depth] = transforms[slot];
-                transform_depth += 1;
+                state.transform_stack[state.transform_depth] = transforms[slot];
+                state.transform_depth += 1;
             },
             .end_transform => {
-                if (transform_depth == 0) return error.TransformStackEmpty;
-                transform_depth -= 1;
-                try self.endTransform(transform_stack[transform_depth]);
+                if (state.transform_depth == 0) return error.TransformStackEmpty;
+                state.transform_depth -= 1;
+                try self.endTransform(state.transform_stack[state.transform_depth]);
+                try runs.endSpan(self, state.level());
             },
             .texture => |value| {
                 const view = textures[value.resource];
                 const plan = try drawing.planTexture(view, .{ .x = value.destination.x, .y = value.destination.y, .width = value.destination.width, .height = value.destination.height }, value.options(), zglr_scale(native));
-                if (plan.destination.width == 0 or plan.destination.height == 0 or plan.opacity == 0) continue;
+                if (plan.destination.width == 0 or plan.destination.height == 0 or plan.opacity == 0) return;
                 if (zglr_texture(native, view.token, &plan) != 0) return error.DrawTextureFailed;
             },
-        };
-        if (depth != 0) return error.UnbalancedClips;
-        if (group_depth != 0) return error.UnbalancedGroups;
-        if (transform_depth != 0) return error.UnbalancedTransforms;
+        }
     }
     pub fn preparedText(self: *Renderer, view: drawing.PreparedTextView, origin: drawing.Point, tint: geometry.Color) !void {
         if (!self.active) return error.NotDrawing;
@@ -798,6 +1231,7 @@ pub const Renderer = struct {
         if (self.domain_borrow) |borrow| if (borrow.epoch.generation != self.device_generation) return false;
         for (buffer.imageResources()) |view| if (self.images.find(view.identity) == null) return false;
         for (buffer.coverageResources()) |view| if (self.images.findCoverage(view.identity) == null) return false;
+        for (self.effect_slots[0..self.effect_slots_len]) |slot| if (zglr_effect_installed(self.native.?, slot) == 0) return false;
         return true;
     }
     pub fn residentFrame(self: *Renderer, buffer: *const commands.Buffer) !void {
@@ -809,6 +1243,11 @@ pub const Renderer = struct {
         for (buffer.coverageResources()) |view| if (self.images.findCoverage(view.identity)) |slot| self.images.touch(slot);
         for (buffer.imageResources()) |view| if (self.images.find(view.identity) == null) try self.uploadImage(view);
         for (buffer.coverageResources()) |view| if (self.images.findCoverage(view.identity) == null) try self.uploadCoverage(view);
+        // Programs waiting for the context, or linked again after a loss.
+        for (self.effect_slots[0..self.effect_slots_len]) |slot| {
+            if (self.effect_table.entries[slot].identity != 0 and zglr_effect_installed(self.native.?, slot) == 0) _ = self.installEffect(slot);
+        }
+        self.effect_slots_len = 0;
     }
     pub fn releaseImage(self: *Renderer, identity: u64) !bool {
         if (self.active) return error.AlreadyDrawing;

@@ -175,6 +175,14 @@ void zlc_push_clip(Renderer *s,float x,float y,float width,float height) {
     cairo_save(s->context);cairo_rectangle(s->context,x,y,width,height);cairo_clip(s->context);
     if(s->layers&&s->layers->active)layer_current(s->layers)->saves++;
 }
+/* A clip level that cuts nothing more (an opacity's); popped by
+   zlc_pop_clip. */
+void zlc_push_keep(Renderer *s){
+    if(s->gradient_clip_depth>=32)return;
+    memcpy(s->gradient_clips[s->gradient_clip_depth+1],s->gradient_clips[s->gradient_clip_depth],sizeof(s->gradient_clips[0]));s->gradient_clip_depth++;
+    cairo_save(s->context);
+    if(s->layers&&s->layers->active)layer_current(s->layers)->saves++;
+}
 /* Clips to device pixels x0..x1, y0..y1 of the plane, exactly on pixel
    edges whatever the scale; popped by zlc_pop_clip. */
 void zlc_push_device_clip(Renderer *s,int32_t x0,int32_t y0,int32_t x1,int32_t y1){
