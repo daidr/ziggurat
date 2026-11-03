@@ -28,6 +28,16 @@ pub const Options = struct {
     mixed: bool = false,
     /// The font of a link's text; null is the interface font.
     font: ?commands.Font = null,
+    /// Where the focus ring's inner edge sits from the control's edge, in
+    /// DIP: outward when positive, inward when negative. Null takes the
+    /// theme's `Metrics.focus_ring_offset`, or for a row, which a list
+    /// around it clips, the ring's width inward.
+    focus_ring_offset: ?f32 = null,
+    /// The focus ring's color; null is the palette's `focus`.
+    focus_ring_color: ?u32 = null,
+    /// False records the control's hit, focus and semantics and draws only
+    /// its focus ring, for a control whose look its caller draws.
+    look: bool = true,
 };
 pub const RangeOptions = struct { control: Options = .{}, vertical: bool = false };
 pub const RangeSliderIds = struct { group: u64, low: u64, high: u64 };
@@ -110,6 +120,20 @@ fn inset(bounds: layout.Rect, amount: f32) layout.Rect {
 }
 fn fill(frame: anytype, bounds: layout.Rect, color: u32) !void {
     try frame.context.command_buffer.fill(absolute(frame, bounds), color);
+}
+/// The focus ring around `bounds`: `Metrics.focus_ring_width` wide, its
+/// inner edge `offset` DIP outside the edge (inside when negative), in the
+/// control's ring color or `color`. `row` puts it inside by default, for a
+/// control that a container around it clips.
+fn ring(frame: anytype, bounds: layout.Rect, options: Options, row: bool, color: u32) !void {
+    const metrics = frame.currentTheme().metrics;
+    const width = @max(0, metrics.focus_ring_width);
+    if (!(width > 0) or !std.math.isFinite(width)) return;
+    const offset = options.focus_ring_offset orelse if (row) -width else metrics.focus_ring_offset;
+    if (!std.math.isFinite(offset)) return;
+    const outer = inset(bounds, -(offset + width));
+    if (!(outer.width > 0 and outer.height > 0)) return;
+    try outline(frame, outer, width, options.focus_ring_color orelse color);
 }
 fn outline(frame: anytype, bounds: layout.Rect, width: f32, color: u32) !void {
     const w = @min(width, @min(bounds.width, bounds.height) / 2);
@@ -204,6 +228,10 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
         .read_only = kind == .progress or combo,
         .range_value = amount * 100,
     });
+    if (!options.look) {
+        if (focus) try ring(frame, bounds, options, false, frame.currentTheme().palette.focus);
+        return;
+    }
     const style = frame.currentTheme();
     const colors = style.palette;
     const metrics = style.metrics;
@@ -235,14 +263,14 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
             // into a text field when activated.
             if (options.enabled and context.input_state.active == id) try fill(frame, bounds, colors.pressed);
             try context.command_buffer.text(absolute(frame, inset(bounds, metrics.content_inset)), text, foreground);
-            if (focus) try outline(frame, bounds, metrics.border, colors.focus);
+            if (focus) try ring(frame, bounds, options, false, colors.focus);
         },
         .link => {
             const color: u32 = if (options.enabled) colors.accent else colors.disabled_text;
             const label = inset(bounds, metrics.content_inset);
             if (options.font) |font| try context.command_buffer.textFont(absolute(frame, label), text, color, font) else try context.command_buffer.text(absolute(frame, label), text, color);
             try fill(frame, .{ .x = label.x, .y = label.y + label.height - metrics.border, .width = label.width, .height = metrics.border }, color);
-            if (focus) try outline(frame, bounds, metrics.border, colors.focus);
+            if (focus) try ring(frame, bounds, options, false, colors.focus);
         },
         .disclosure => {
             const side = @min(@min(bounds.height, bounds.width), metrics.indicator_size);
@@ -250,12 +278,12 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
             try triangle(frame, inset(mark, side / 4), checked, foreground);
             const label_x = @min(bounds.width, side + metrics.label_gap);
             try context.command_buffer.text(absolute(frame, .{ .x = bounds.x + label_x, .y = bounds.y, .width = bounds.width - label_x, .height = bounds.height }), text, foreground);
-            if (focus) try outline(frame, bounds, metrics.border, colors.focus);
+            if (focus) try ring(frame, bounds, options, false, colors.focus);
         },
         .list_item => {
             // A full-width row; the selected one is filled with the accent.
             if (checked) try fill(frame, bounds, accent) else if (options.enabled and context.input_state.active == id) try fill(frame, bounds, colors.pressed);
-            if (focus) try outline(frame, bounds, metrics.border, if (checked) colors.on_accent else colors.focus);
+            if (focus) try ring(frame, bounds, options, true, if (checked) colors.on_accent else colors.focus);
             try context.command_buffer.text(absolute(frame, inset(bounds, metrics.content_inset)), text, if (checked and options.enabled) colors.on_accent else foreground);
         },
         .combo_box => {
@@ -272,7 +300,7 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
         .tab => {
             // The selected tab carries an accent bar along its bottom edge.
             if (checked) try fill(frame, bounds, colors.control);
-            if (focus) try outline(frame, bounds, metrics.border, colors.focus);
+            if (focus) try ring(frame, bounds, options, false, colors.focus);
             if (checked) {
                 const bar = @min(bounds.height, 2 * metrics.border + 1);
                 try fill(frame, .{ .x = bounds.x, .y = bounds.y + bounds.height - bar, .width = bounds.width, .height = bar }, accent);
@@ -492,7 +520,7 @@ pub fn emitRating(frame: anytype, id: u64, bounds: layout.Rect, value: f64, coun
         try disk(frame, mark, if (!options.enabled) colors.disabled_border else if (filled) colors.accent else colors.border);
         if (!filled) try disk(frame, inset(mark, style.metrics.border), colors.inset);
     }
-    if (focused) try outline(frame, bounds, style.metrics.border, colors.focus);
+    if (focused) try ring(frame, bounds, options, false, colors.focus);
 }
 
 /// A button whose chevron points along `direction`, named `name`.
@@ -659,6 +687,8 @@ pub fn emitMenuItem(frame: anytype, id: u64, bounds: layout.Rect, label: []const
         .checked = options.mark != .none and options.checked,
         .expanded = options.expanded,
     });
+    // An item without a look shows its highlight as its caller draws it.
+    if (!control.look) return;
     const style = frame.currentTheme();
     const colors = style.palette;
     const metrics = style.metrics;
@@ -719,7 +749,7 @@ fn rowRecord(frame: anytype, role: access.Role, id: u64, bounds: layout.Rect, na
     try frame.semantic(.{ .id = id, .parent = control.semantic_parent, .role = role, .name = name, .description = control.description, .bounds = bounds, .enabled = control.enabled, .focused = focused, .checked = options.selected, .multiple = options.multiple, .expanded = options.expanded });
     const colors = frame.currentTheme().palette;
     if (options.selected) try fill(frame, bounds, if (control.enabled) colors.accent else colors.disabled_accent) else if (control.enabled and frame.context.input_state.active == id) try fill(frame, bounds, colors.pressed);
-    if (focused) try outline(frame, bounds, frame.currentTheme().metrics.border, if (options.selected) colors.on_accent else colors.focus);
+    if (focused) try ring(frame, bounds, control, true, if (options.selected) colors.on_accent else colors.focus);
     return focused;
 }
 
@@ -769,7 +799,7 @@ pub fn emitColumnHeader(frame: anytype, id: u64, bounds: layout.Rect, title: []c
     if (sort) |direction| try chevron(frame, mark, if (direction == .ascending) .up else .down, foreground);
     const label_width = @max(0, (if (sort != null) mark.x - style.metrics.content_inset / 2 else bounds.x + bounds.width) - bounds.x);
     try frame.context.command_buffer.text(absolute(frame, .{ .x = bounds.x, .y = bounds.y, .width = label_width, .height = bounds.height }), title, foreground);
-    if (focused) try outline(frame, bounds, style.metrics.border, colors.focus);
+    if (focused) try ring(frame, bounds, options, true, colors.focus);
 }
 
 /// Width of a token's remove button, in DIP.

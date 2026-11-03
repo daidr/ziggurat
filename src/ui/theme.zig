@@ -35,6 +35,13 @@ pub const Metrics = struct {
     label_gap: f32 = 8,
     thumb_size: f32 = 16,
     track_width: f32 = 4,
+    /// Width of the ring that shows which control has the keyboard focus.
+    focus_ring_width: f32 = 2,
+    /// Where that ring's inner edge sits from the control's edge: outward
+    /// when positive, on the edge at 0 and inward when negative. Rows of a
+    /// list, a tree or a table, which the list clips, ring inside them
+    /// unless they set an offset of their own.
+    focus_ring_offset: f32 = 1,
 };
 
 /// A copied value with no native state, callbacks or borrowed strings. The
@@ -104,7 +111,9 @@ pub const Theme = struct {
         }
         inline for (zio.fields(Metrics)) |field| {
             const value = @field(self.metrics, field.name);
-            if (!std.math.isFinite(value) or value < 0 or value > 256) return error.InvalidThemeMetric;
+            // A focus ring may sit inside the control's edge.
+            const least: f32 = if (comptime std.mem.eql(u8, field.name, "focus_ring_offset")) -256 else 0;
+            if (!std.math.isFinite(value) or value < least or value > 256) return error.InvalidThemeMetric;
         }
         if (self.metrics.indicator_size == 0 or self.metrics.thumb_size == 0 or self.metrics.track_width == 0) return error.InvalidThemeMetric;
     }
@@ -122,7 +131,7 @@ test "themes own copied values and validate every color and metric" {
         try std.testing.expectError(error.InvalidThemeColor, invalid.validate());
     }
     inline for (zio.fields(Metrics)) |field| {
-        for ([_]f32{ -1, 257, std.math.nan(f32), std.math.inf(f32) }) |value| {
+        for ([_]f32{ if (comptime std.mem.eql(u8, field.name, "focus_ring_offset")) -257 else -1, 257, std.math.nan(f32), std.math.inf(f32) }) |value| {
             var invalid = original;
             @field(invalid.metrics, field.name) = value;
             try std.testing.expectError(error.InvalidThemeMetric, invalid.validate());

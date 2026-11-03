@@ -1,6 +1,7 @@
 const std = @import("std");
 const layout = @import("layout.zig");
 const gamut = @import("gamut.zig");
+const gradient_color = @import("gradient_color.zig");
 pub const Rect = layout.Rect;
 
 /// Explicit bound for the adapters' reusable 32-bit software surfaces.
@@ -52,6 +53,26 @@ pub const Color = struct {
         const linear = gamut.linearP3ToSrgb(gamut.decode(std.math.clamp(r, 0, 1)), gamut.decode(std.math.clamp(g, 0, 1)), gamut.decode(std.math.clamp(b, 0, 1)));
         return extended(@floatCast(gamut.encode(linear[0])), @floatCast(gamut.encode(linear[1])), @floatCast(gamut.encode(linear[2])));
     }
+    /// The color `t` of the way from `a` to `b` (0 is `a`, 1 is `b`), mixed
+    /// premultiplied in sRGB, as a transition moves colors.
+    pub fn mix(a: Color, b: Color, t: f32) Color {
+        return mixIn(.srgb, a, b, t);
+    }
+    /// `mix` in Oklab, as a gradient's `.oklab` interpolation mixes: the
+    /// way between two saturated colors keeps their lightness and
+    /// saturation instead of going through a dull, darker middle, so that
+    /// yellow and blue meet in a blue rather than in sRGB's gray.
+    pub fn mixOklab(a: Color, b: Color, t: f32) Color {
+        return mixIn(.oklab, a, b, t);
+    }
+    fn mixIn(space: gradient_color.Space, a: Color, b: Color, t: f32) Color {
+        const weight: f64 = if (std.math.isFinite(t)) std.math.clamp(t, 0, 1) else 0;
+        const mixed = gradient_color.Coordinates.mix(.fromColor(space, a), .fromColor(space, b), weight).encoded(space);
+        if (!(mixed.alpha > 0)) return .{ .r = 0, .g = 0, .b = 0, .a = 0 };
+        var bytes: [3]u8 = undefined;
+        for (&bytes, mixed.channels) |*out, value| out.* = @intFromFloat(@round(std.math.clamp(value / mixed.alpha, 0, 255)));
+        return .{ .r = bytes[0], .g = bytes[1], .b = bytes[2], .a = @intFromFloat(@round(std.math.clamp(mixed.alpha, 0, 1) * 255)) };
+    }
     /// The opaque color of extended sRGB components, mapped into sRGB when
     /// outside it; components that are not finite give opaque black.
     pub fn extended(r: f32, g: f32, b: f32) Color {
@@ -84,6 +105,24 @@ test "oklch colors match CSS's sRGB results" {
     try std.testing.expect(green.g > 200 and green.r < green.g and green.b < green.g);
     try std.testing.expectEqual(@as(u8, 128), Color.oklch(0.5, 0.1, 30).withAlpha(0.5).a);
     try std.testing.expectEqual(@as(u32, 0xff0000), Color.oklch(0.6279554, 0.2576833, 29.2338851).hex());
+}
+
+test "colors mix in sRGB and in Oklab" {
+    const yellow = Color.rgb(0xffff00);
+    const blue = Color.rgb(0x0000ff);
+    try std.testing.expectEqual(yellow, Color.mixOklab(yellow, blue, 0));
+    try std.testing.expectEqual(blue, Color.mixOklab(yellow, blue, 1));
+    try std.testing.expectEqual(blue, Color.mix(yellow, blue, 1));
+    // sRGB meets in a gray; Oklab keeps more of the colors' saturation.
+    const plain = Color.mix(yellow, blue, 0.5);
+    try std.testing.expect(plain.r == 128 and plain.g == 128 and plain.b == 128);
+    const lab = Color.mixOklab(yellow, blue, 0.5);
+    try std.testing.expect(lab.b > lab.r);
+    try std.testing.expect(lab.r != lab.g or lab.g != lab.b);
+    // Alpha mixes premultiplied: a transparent end takes the other's hue.
+    const half = Color.mixOklab(.{ .r = 0, .g = 0, .b = 0, .a = 0 }, blue, 0.5);
+    try std.testing.expectEqual(@as(u8, 128), half.a);
+    try std.testing.expectEqual(@as(u8, 255), half.b);
 }
 
 test "display P3 primaries show as the nearest sRGB colors" {

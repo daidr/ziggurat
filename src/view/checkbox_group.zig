@@ -41,6 +41,36 @@ pub fn checkboxState(v: *View, state: *CheckState, label: []const u8, style: Sty
     return changed;
 }
 
+/// A checkbox without a look bound to `checked`: opens a container, a row
+/// by default, that the application fills and draws from the value, as a
+/// box of its own and a label; close it with `end`. Activation toggles the
+/// value; true when it changed. It keeps the checkbox's focus, keys and
+/// semantics, named by `Style.name` or the text inside it, and shows the
+/// theme's focus ring.
+pub fn checkboxBase(v: *View, checked: *bool, style: Style) Error!bool {
+    const node = try v.openNode(.checkbox, style);
+    node.plain = true;
+    const changed = v.takeEvent(node.id) != null;
+    if (changed) checked.* = !checked.*;
+    node.checked = checked.*;
+    return changed;
+}
+
+/// A checkbox without a look bound to `state`, as `checkboxState` is: a
+/// press, or Space while it has the focus, checks an unchecked or mixed
+/// box and unchecks a checked one, and assistive technology reads it as
+/// mixed while it is. Opens a container as `checkboxBase` does; close it
+/// with `end`. True when the state changed.
+pub fn checkboxStateBase(v: *View, state: *CheckState, style: Style) Error!bool {
+    const node = try v.openNode(.checkbox, style);
+    node.plain = true;
+    const changed = v.takeEvent(node.id) != null;
+    if (changed) state.* = if (state.* == .checked) .unchecked else .checked;
+    node.checked = state.* == .checked;
+    node.mixed = state.* == .mixed;
+    return changed;
+}
+
 /// How far a group's boxes are indented under its head, in DIP: the
 /// width of a box and the gap after it.
 pub const group_indent: f32 = 30;

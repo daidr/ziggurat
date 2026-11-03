@@ -51,8 +51,10 @@ pub const svgSize = image_nodes.svgSize;
 pub const icons = @import("icons.zig");
 const pointer_controls = @import("pointer_area.zig");
 const menu_controls = @import("menu.zig");
+pub const menu = menu_controls;
 pub const MenuItemOptions = menu_controls.ItemOptions;
 pub const MenuState = menu_controls.State;
+pub const MenuItemState = menu_controls.ItemState;
 const wrap_text = @import("wrap.zig");
 const inspector_panel = @import("inspector.zig");
 const view_options = @import("ziggurat_view_options");
@@ -68,6 +70,9 @@ pub const AreaOptions = pointer_controls.Options;
 pub const Error = error{ InvalidField, TooManyNodes, TextFull, NestingTooDeep, UnbalancedContainer, NotContainer, Busy, InvalidRange, InvalidValue, InvalidText, InvalidSplit, SelectionFull } || layout.Error;
 
 pub const max_depth = 32;
+/// Longest name a control without a look takes from the text inside it, in
+/// bytes; text past it is left out.
+pub const max_plain_name = 256;
 /// Return addresses the view notes for the element the inspector shows.
 pub const source_depth = 24;
 /// Options of the open popup that keyboard navigation can reach.
@@ -176,6 +181,11 @@ pub const Style = struct {
     refraction: ?ui.effects.Glass = null,
     /// Opacity of the node and its descendants, composited as one layer.
     opacity: f32 = 1,
+    /// Blur the node and its descendants as one layer, as a Gaussian of
+    /// this deviation in DIP: what it draws spreads up to three times that
+    /// past its box. Needs `Host.prepareShaderEffects`, like `pose`;
+    /// without it the content draws sharp.
+    blur: f32 = 0,
     /// Where the node and its descendants are drawn, moved, scaled or turned
     /// in perspective about `pose.origin` within the node's box. Hit
     /// testing, focus and semantics keep the arranged box.
@@ -240,6 +250,28 @@ pub const Style = struct {
     /// click would. A button revealed on hover can stay built at
     /// `opacity` 0 for a screen reader without taking its row's press.
     ignore_input: bool = false,
+    /// Keep the node and those inside it out of assistive technology's
+    /// tree while they still paint and take the pointer and the keys, as
+    /// the copy of a text drawn during a cross-fade or the cards behind
+    /// the front one of a stack: their text no longer counts toward the
+    /// name of a control around them, and what a screen reader would ask
+    /// of them never reaches them. With `ignore_input` as well, the node
+    /// is inert, as content `View.presentColumn` takes out is while it
+    /// goes. Popovers, menus and tooltips anchored inside are hidden too.
+    access_hidden: bool = false,
+    /// Where content `View.presentColumn` takes out of this container in
+    /// a build goes, in place of its transition's way out: a page of a
+    /// wizard or a calendar stepping back goes the way of the step that
+    /// sent it away, though it was built going forward. Content already on
+    /// its way goes on as it went.
+    child_exit: ?Away = null,
+    /// Where the node's focus ring sits from its edge, in DIP: outward when
+    /// positive, inward when negative, as for a header in a container that
+    /// clips what goes past its edges. Null takes the theme's
+    /// `Metrics.focus_ring_offset` (rows ring inside).
+    focus_ring_offset: ?f32 = null,
+    /// The color of the node's focus ring; null is the palette's `focus`.
+    focus_ring_color: ?u32 = null,
     /// A scroll container shows its scroll indicator while its content
     /// overflows; false hides it, keeping the wheel, keys and assistive
     /// technology scrolling, for a surface that draws its own.
@@ -262,23 +294,62 @@ pub const gradients = @import("gradient.zig");
 pub const Gradient = gradients.Gradient;
 pub const GradientStop = gradients.Stop;
 
+/// Where content `View.presentColumn` shows is while it is not: a pose,
+/// an opacity and a blur it moves between and its own style.
+pub const Away = struct {
+    /// Pose of the content away; its `x_percent` and `y_percent` move by
+    /// percents of the content's own size, as a sheet sliding in by its
+    /// height (`.y_percent = 100`), however tall it is.
+    pose: ui.effects.Pose = .{ .y = 8 },
+    opacity: f32 = 0,
+    /// Blur in DIP, as `Style.blur`, which it adds to as Gaussians add up.
+    blur: f32 = 0,
+
+    fn valid(self: Away) bool {
+        return self.pose.valid() and std.math.isFinite(self.opacity) and std.math.isFinite(self.blur) and self.blur >= 0;
+    }
+};
 /// How `View.presentColumn` brings content in and takes it out.
 pub const Transition = struct {
     /// Pose and opacity of the content while hidden; it moves between them
-    /// and its own style.
+    /// and its own style. Percents of the pose move by the content's size.
     hidden: ui.effects.Pose = .{ .y = 8 },
     hidden_opacity: f32 = 0,
+    /// Blur in DIP of the content while hidden, as text or an icon crossing
+    /// over to another through a short blur.
+    hidden_blur: f32 = 0,
+    /// Where the content goes as it leaves, when that is not where it came
+    /// from: null leaves to `hidden`. The way out is fixed by the build
+    /// that takes the content out; later builds do not turn it. The
+    /// container's `Style.child_exit` takes its place.
+    exit_to: ?Away = null,
     enter: animation.Motion = .{ .tween = .{ .duration_ns = 200 * std.time.ns_per_ms, .easing = .cubic_out } },
     exit: animation.Motion = .{ .tween = .{ .duration_ns = 150 * std.time.ns_per_ms, .easing = .smoothstep } },
     /// Enter on the first pass that shows the content, rather than appear
     /// already in place.
     appear: bool = true,
+    /// One at a time: while other content of the same container is still
+    /// leaving, content appearing waits unseen in its place in the layout,
+    /// and comes in once that is gone, as a panel finishing leaving before
+    /// the next one appears. Taken out before it showed, it leaves nothing
+    /// behind.
+    after_exits: bool = false,
+
+    fn away(self: Transition) Away {
+        return .{ .pose = self.hidden, .opacity = self.hidden_opacity, .blur = self.hidden_blur };
+    }
 };
 /// Whether content shown by `View.presentColumn` is in, coming in or going out,
 /// kept by the application at a stable address across passes.
 pub const Presence = struct {
     channel: ?animation.Channel = null,
     visible: bool = false,
+    /// Where the content is going as it leaves, fixed as it starts to,
+    /// and where it comes back from when built again on its way.
+    leaving: ?Away = null,
+    /// Appearing, it waits for other content leaving; see
+    /// `Transition.after_exits`.
+    held: bool = false,
 
     /// Progress at `now` from 0 (hidden) to 1 (shown), retargeting when
     /// `visible` changes. Springs may overshoot.
@@ -291,9 +362,13 @@ pub const Presence = struct {
         if (channel.reduce_motion != reduce_motion) try channel.setReducedMotion(now, reduce_motion);
         if (visible != self.visible) {
             self.visible = visible;
+            if (!visible) self.leaving = transition.exit_to orelse transition.away();
             try channel.retarget(now, if (visible) 1 else 0, .{ .motion = if (visible) transition.enter else transition.exit });
         }
-        return (try channel.advance(now)).value;
+        const value = (try channel.advance(now)).value;
+        // Back in place, it next leaves the way the build then says.
+        if (visible and channel.run == null) self.leaving = null;
+        return value;
     }
     /// True while the content is coming in or going out.
     pub fn moving(self: *const Presence) bool {
@@ -961,6 +1036,16 @@ pub const Node = struct {
     concealed: bool = false,
     /// The node or one around it is `Style.ignore_input`.
     passthrough: bool = false,
+    /// A control without a look: a container its application fills and
+    /// draws, which keeps the control's input, focus and semantics.
+    plain: bool = false,
+    /// Laid out in its place but not drawn, nor its descendants, which
+    /// take no input either: content waiting to come in.
+    unseen: bool = false,
+    /// The node or one around it is `Style.access_hidden`, or it floats
+    /// from an anchor that is: it paints, but assistive technology does not
+    /// see it.
+    access_hidden: bool = false,
     /// The theme of the innermost `Style.theme` around or on the node.
     theme: ?*const Theme = null,
     /// A shared element flying (`Match.fly`) paints over the rest of its
@@ -980,6 +1065,7 @@ pub const Node = struct {
     bounds: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
 
     pub fn isContainer(self: *const Node) bool {
+        if (self.plain) return true;
         return switch (self.kind) {
             .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .split, .scroll, .grid, .search, .popup, .popover, .toasts, .toast, .dialog, .tree, .tree_item, .table, .table_header, .table_row, .token_field, .combo_field, .drag_area, .drag_source, .drop_target, .route, .pointer_area, .menu => true,
             else => false,
@@ -1369,6 +1455,12 @@ pub const View = struct {
     wake: ?u64 = null,
     /// Shared elements on their way; see `Style.match`.
     matches: matched.State = .{},
+    /// Containers content `presentColumn` was taking out of in the pass
+    /// before, and in this one so far; see `Transition.after_exits`.
+    exits_before: [16]u64 = undefined,
+    exits_before_len: usize = 0,
+    exits: [16]u64 = undefined,
+    exits_len: usize = 0,
     /// Poses on their way; see `Style.pose_motion`.
     poses: posed.State = .{},
     /// Keyboard focus at the start of this pass, set by the host.
@@ -1502,6 +1594,9 @@ pub const View = struct {
 
     /// Start a pass with an implicit root column.
     pub fn reset(self: *View, root_style: Style, event: ?Event) void {
+        @memcpy(self.exits_before[0..self.exits_len], self.exits[0..self.exits_len]);
+        self.exits_before_len = self.exits_len;
+        self.exits_len = 0;
         self.len = 1;
         self.text_len = 0;
         self.depth = 1;
@@ -1520,7 +1615,7 @@ pub const View = struct {
         self.track_len = 0;
         self.tip_index = none;
         self.routes = .{};
-        self.buffers.nodes[0] = .{ .kind = .column, .id = root_seed, .style = root_style, .end = 1, .rtl = (root_style.direction orelse self.layout_direction) == .rtl, .passthrough = root_style.ignore_input, .theme = root_style.theme };
+        self.buffers.nodes[0] = .{ .kind = .column, .id = root_seed, .style = root_style, .end = 1, .rtl = (root_style.direction orelse self.layout_direction) == .rtl, .passthrough = root_style.ignore_input, .access_hidden = root_style.access_hidden, .theme = root_style.theme };
     }
 
     pub fn root(self: *const View) *const Node {
@@ -1579,6 +1674,7 @@ pub const View = struct {
         const parent = &self.buffers.nodes[parent_index];
         if (parent.child_count >= layout.max_items) return error.TooManyItems;
         if (!std.math.isFinite(style.opacity) or style.opacity < 0 or style.opacity > 1) return error.InvalidValue;
+        if (!std.math.isFinite(style.blur) or style.blur < 0) return error.InvalidValue;
         if (style.pose) |pose| if (!pose.valid()) return error.InvalidValue;
         const index = self.len;
         var effective = style;
@@ -1586,7 +1682,7 @@ pub const View = struct {
         self.buffers.nodes[index] = .{ .kind = kind, .id = self.identity(parent, kind, style), .style = effective, .parent = parent_index, .end = index + 1, .semantic_parent = switch (parent.kind) {
             .toolbar, .breadcrumbs, .accordion, .fieldset, .search, .toast, .dialog, .table_header, .table_row, .token_field, .combo_field, .route => parent.id,
             else => parent.semantic_parent,
-        }, .rtl = if (style.direction) |value| value == .rtl else parent.rtl, .field = if (parent.kind == .field) parent_index else parent.field, .collection = if (parent.kind == .tree or parent.kind == .table) parent_index else parent.collection, .row = if (parent.kind == .table_row) parent_index else parent.row, .concealed = style.hidden or parent.concealed, .passthrough = style.ignore_input or parent.passthrough, .theme = style.theme orelse parent.theme };
+        }, .rtl = if (style.direction) |value| value == .rtl else parent.rtl, .field = if (parent.kind == .field) parent_index else parent.field, .collection = if (parent.kind == .tree or parent.kind == .table) parent_index else parent.collection, .row = if (parent.kind == .table_row) parent_index else parent.row, .concealed = style.hidden or parent.concealed, .passthrough = style.ignore_input or parent.passthrough, .access_hidden = style.access_hidden or parent.access_hidden, .theme = style.theme orelse parent.theme };
         if (parent.last_child == none) parent.first_child = index else self.buffers.nodes[parent.last_child].next_sibling = index;
         parent.last_child = index;
         parent.child_count += 1;
@@ -1669,6 +1765,8 @@ pub const View = struct {
     pub const alertDialog = dialog_controls.alertDialog;
     /// A checkbox showing `state`, which may be mixed.
     pub const checkboxState = checkbox_controls.checkboxState;
+    pub const checkboxBase = checkbox_controls.checkboxBase;
+    pub const checkboxStateBase = checkbox_controls.checkboxStateBase;
     /// A checkbox over a group of boxes whose state it derives.
     pub const checkboxGroup = checkbox_controls.checkboxGroup;
     /// A navigation sidebar; see `sidebar.zig`.
@@ -1683,6 +1781,11 @@ pub const View = struct {
     pub const menuItem = menu_controls.menuItem;
     pub const submenu = menu_controls.submenu;
     pub const menuSeparator = menu_controls.menuSeparator;
+    pub const menuButtonBase = menu_controls.menuButtonBase;
+    pub const popoverMenuBase = menu_controls.popoverMenuBase;
+    pub const menuItemBase = menu_controls.menuItemBase;
+    pub const submenuItemBase = menu_controls.submenuItemBase;
+    pub const submenuBase = menu_controls.submenuBase;
     pub const openMenuAt = menu_controls.openAt;
     pub const areaPress = pointer_controls.press;
     pub const areaRelease = pointer_controls.release;
@@ -1781,19 +1884,80 @@ pub const View = struct {
     /// Open a column that enters while `show` and exits after it turns
     /// false, moving between `transition.hidden` and `style`. Returns false
     /// once the content has gone; otherwise build its children and `end`
-    /// it. Under reduced motion it appears and goes at once.
+    /// it. While it goes it takes neither the pointer nor the keys and
+    /// assistive technology does not see it. Under reduced motion it
+    /// appears and goes at once.
     pub fn presentColumn(self: *View, presence: *Presence, show: bool, transition: Transition, style: Style) Error!bool {
-        if (!transition.hidden.valid() or !std.math.isFinite(transition.hidden_opacity)) return error.InvalidValue;
-        const amount = presence.update(self.now, show, transition, self.preferences.reduce_motion) catch return error.InvalidValue;
-        if (!show and !presence.moving()) return false;
+        if (!transition.away().valid()) return error.InvalidValue;
+        if (transition.exit_to) |away| if (!away.valid()) return error.InvalidValue;
+        if (self.depth == 0) return error.UnbalancedContainer;
+        const parent = &self.buffers.nodes[self.stack[self.depth - 1]];
+        const parent_id = parent.id;
+        var effective = transition;
+        if (parent.style.child_exit) |away| {
+            if (!away.valid()) return error.InvalidValue;
+            effective.exit_to = away;
+        }
+        // One at a time: content appearing waits while other content of
+        // the container leaves. It waits for its first pass too, which may
+        // come before that of content starting to leave.
+        if (show and transition.after_exits and (presence.held or (!presence.visible and !presence.moving()) or presence.channel == null)) {
+            const first = !presence.held and transition.appear;
+            if (first or self.exitsUnder(parent_id)) {
+                if (presence.channel == null) {
+                    presence.channel = animation.Channel.init(0) catch return error.InvalidValue;
+                    presence.visible = false;
+                }
+                presence.held = true;
+                var unseen = style;
+                unseen.ignore_input = true;
+                unseen.access_hidden = true;
+                const node = try self.open(.column, unseen);
+                node.unseen = true;
+                self.wakeAt(self.now + loading_frame_interval);
+                return true;
+            }
+        }
+        if (presence.held) {
+            presence.held = false;
+            // Gone before it showed, it leaves nothing behind.
+            if (!show) return false;
+        }
+        const amount = presence.update(self.now, show, effective, self.preferences.reduce_motion) catch return error.InvalidValue;
+        if (!show and !presence.moving()) {
+            // Gone, it next comes in from `hidden`.
+            presence.leaving = null;
+            return false;
+        }
+        if (!show) self.noteExit(parent_id);
+        const away = presence.leaving orelse transition.away();
         const t: f32 = @floatCast(amount);
         var shown = style;
-        shown.opacity = std.math.clamp(style.opacity * (transition.hidden_opacity + (1 - transition.hidden_opacity) * t), 0, 1);
-        const pose = ui.effects.Pose.mix(transition.hidden, style.pose orelse .{}, t);
+        shown.opacity = std.math.clamp(style.opacity * (away.opacity + (1 - away.opacity) * t), 0, 1);
+        const pose = ui.effects.Pose.mix(away.pose, style.pose orelse .{}, t);
         shown.pose = if (pose.isIdentity()) null else pose;
+        const blur = away.blur * std.math.clamp(1 - t, 0, 1);
+        if (blur > 0) shown.blur = @sqrt(style.blur * style.blur + blur * blur);
+        if (!show) {
+            shown.ignore_input = true;
+            shown.access_hidden = true;
+        }
         try self.begin(.column, shown);
         if (presence.moving()) if (presence.channel.?.nextWake(self.now, loading_frame_interval) catch null) |deadline| self.wakeAt(deadline);
         return true;
+    }
+    /// Content `presentColumn` is taking out of the container `parent`.
+    fn noteExit(self: *View, parent: u64) void {
+        if (std.mem.indexOfScalar(u64, self.exits[0..self.exits_len], parent) != null) return;
+        if (self.exits_len == self.exits.len) return;
+        self.exits[self.exits_len] = parent;
+        self.exits_len += 1;
+    }
+    fn exitsBefore(self: *const View, parent: u64) bool {
+        return std.mem.indexOfScalar(u64, self.exits_before[0..self.exits_before_len], parent) != null;
+    }
+    fn exitsUnder(self: *const View, parent: u64) bool {
+        return self.exitsBefore(parent) or std.mem.indexOfScalar(u64, self.exits[0..self.exits_len], parent) != null;
     }
     pub fn row(self: *View, style: Style) Error!void {
         return self.begin(.row, style);
@@ -1997,6 +2161,27 @@ pub const View = struct {
         const changed = self.take(node.id) != null;
         if (changed) open_section.* = if (selected) null else option;
         node.checked = if (open_section.*) |current| std.meta.eql(current, option) else false;
+        return changed;
+    }
+    /// An accordion header without a look for a section open while
+    /// `expanded`: opens a container, a row by default, that the
+    /// application fills and draws, as a title, a summary and a chevron;
+    /// close it with `end`, then build the section's content while
+    /// `expanded` is true. Activation opens and closes it; true when
+    /// `expanded` changed. Sections stay open independently. Like the
+    /// headers of `section`, Up and Down move the focus between the
+    /// accordion's headers, Home and End to its first and last; assistive
+    /// technology reads it as an expander named by `Style.name` or the
+    /// text inside it. An accordion that clips its content rings the
+    /// header's focus inside it with a negative `Style.focus_ring_offset`.
+    pub fn accordionItem(self: *View, expanded: *bool, style: Style) Error!bool {
+        const parent = &self.buffers.nodes[self.stack[self.depth - 1]];
+        if (parent.kind != .accordion) return error.NotContainer;
+        const node = try self.open(.disclosure, style);
+        node.plain = true;
+        const changed = self.take(node.id) != null;
+        if (changed) expanded.* = !expanded.*;
+        node.checked = expanded.*;
         return changed;
     }
     /// Starts a labelled form field: the label, then the content built
@@ -2534,6 +2719,7 @@ pub const View = struct {
         const list = try self.open(.popup, .{ .padding = Insets.all(4), .name = style.name });
         list.anchor = anchor_index;
         list.concealed = list.concealed or self.buffers.nodes[anchor_index].concealed;
+        list.access_hidden = list.access_hidden or self.buffers.nodes[anchor_index].access_hidden;
     }
     /// An option of the open `comboBox` list: activation selects `value`,
     /// closes the list and returns focus to the combo box. True when the
@@ -2590,6 +2776,7 @@ pub const View = struct {
         node.anchor = anchor_index;
         node.placement = placement;
         node.concealed = node.concealed or self.buffers.nodes[anchor_index].concealed;
+        node.access_hidden = node.access_hidden or self.buffers.nodes[anchor_index].access_hidden;
         const id = node.id;
         const anchor = &self.buffers.nodes[anchor_index];
         if (self.popover_dismiss) |target| if (target == id) {
@@ -2643,6 +2830,7 @@ pub const View = struct {
         const list = try self.open(.popup, value);
         list.anchor = anchor_index;
         list.concealed = list.concealed or self.buffers.nodes[anchor_index].concealed;
+        list.access_hidden = list.access_hidden or self.buffers.nodes[anchor_index].access_hidden;
     }
     /// One suggestion. True once for the pass that picks it, by pointer or
     /// by Enter on the highlight; apply it to the input in that branch. The
@@ -2911,6 +3099,7 @@ pub const View = struct {
         if (self.routeRowKey(visual)) |route_value| return route_value;
         if (self.routeTokenKey(visual)) |route_value| return route_value;
         if (direction_controls.routeGroupArrow(self, input)) |route_value| return route_value;
+        if (self.routeAccordionKey(input)) |route_value| return route_value;
         if (anchor) |focused| {
             const arrow = input.key == .down or input.key == .up;
             if (focused.combo and arrow and !mods.control and !mods.super and !mods.shift) return .{ .deliver = .{ .action = focused.id } };
@@ -2929,6 +3118,41 @@ pub const View = struct {
             return .handled;
         }
         return .ignored;
+    }
+    /// Up and Down move the focus between the headers of the accordion that
+    /// holds the focused one, Home and End to its first and last.
+    fn routeAccordionKey(self: *View, input: z.KeyInput) ?KeyRoute {
+        const mods = input.modifiers;
+        if (mods.control or mods.alt or mods.super or mods.shift) return null;
+        if (input.key != .up and input.key != .down and input.key != .home and input.key != .end) return null;
+        const focused = self.focus orelse return null;
+        const all = self.buffers.nodes[0..self.len];
+        const at = for (all, 0..) |*node, i| {
+            if (node.id == focused) break i;
+        } else return null;
+        const header = &all[at];
+        if (header.kind != .disclosure or header.parent == none or all[header.parent].kind != .accordion) return null;
+        var members: [layout.max_items]u64 = undefined;
+        var count: usize = 0;
+        var current: ?usize = null;
+        var child = all[header.parent].first_child;
+        while (child != none) : (child = all[child].next_sibling) {
+            const node = &all[child];
+            if (node.kind != .disclosure or !node.style.enabled or node.concealed or node.passthrough or node.unseen or self.inert(node)) continue;
+            if (node.id == focused) current = count;
+            if (count == members.len) break;
+            members[count] = node.id;
+            count += 1;
+        }
+        if (count == 0) return null;
+        const next: usize = switch (input.key) {
+            .home => 0,
+            .end => count - 1,
+            .down => if (current) |i| (i + 1) % count else 0,
+            else => if (current) |i| (i + count - 1) % count else count - 1,
+        };
+        if (members[next] != focused) self.restore = members[next];
+        return .handled;
     }
     /// The action of the first binding of `input`, on the focused control
     /// or, with `window`, on the whole window.
@@ -3980,7 +4204,8 @@ pub const View = struct {
         return if (node.image != null) theme.metrics.indicator_size + theme.metrics.label_gap / 2 else 0;
     }
     fn options(node: *const Node) layout.Options {
-        const axis: Axis = switch (node.kind) {
+        // Controls without a look lay their content out in a row.
+        const axis: Axis = if (node.plain) .row else switch (node.kind) {
             .row, .segmented, .tab_list, .toolbar, .breadcrumbs, .search, .toast, .combo_field, .token_field => .row,
             .split => node.axis,
             else => .column,
@@ -4786,6 +5011,11 @@ pub const View = struct {
         try self.paintDrag(target, theme);
         if (self.tip_index != none) {
             const node = &all[self.tip_index];
+            // The tip of a control assistive technology does not see is
+            // hidden from it too.
+            const hide = frame and node.access_hidden;
+            if (hide) target.beginAccessHidden();
+            defer if (hide) target.endAccessHidden();
             try target.tooltip(tooltipId(node.id), self.tip_rect, node.tooltip);
         }
         // Each announcement is a new status, so clients announce it once.
@@ -4827,6 +5057,9 @@ pub const View = struct {
         defer if (frame) target.popTheme(previous);
         const mark = if (frame) target.inertMark() else {};
         defer if (frame and node.passthrough) target.passThrough(mark, target.inertMark());
+        const hide = frame and node.access_hidden and !target.accessHidden();
+        if (hide) target.beginAccessHidden();
+        defer if (hide) target.endAccessHidden();
         if (node.kind == .popover or node.kind == .dialog) {
             const radius: f32 = if (node.style.radius > 0) node.style.radius else if (node.kind == .dialog) 8 else 6;
             target.roundedRect(bounds, radius, ui.Color.rgb(node.style.border orelse theme.palette.border));
@@ -4836,8 +5069,10 @@ pub const View = struct {
             if (node.kind == .popover) try target.popover(node.id, bounds, node.style.name, ui.accessibility.root_id) else try target.dialog(node.id, bounds, node.style.name, node.modal.description, node.modal.role == .alert, ui.accessibility.root_id);
         }
         if (node.kind == .menu) {
-            target.roundedRect(bounds, 6, ui.Color.rgb(node.style.border orelse theme.palette.border));
-            target.roundedRect(inset(bounds, theme.metrics.border / 2), @max(0, 6 - theme.metrics.border / 2), ui.Color.rgb(node.style.background orelse theme.palette.background));
+            if (node.plain) paintBox(target, node.style, bounds) else {
+                target.roundedRect(bounds, 6, ui.Color.rgb(node.style.border orelse theme.palette.border));
+                target.roundedRect(inset(bounds, theme.metrics.border / 2), @max(0, 6 - theme.metrics.border / 2), ui.Color.rgb(node.style.background orelse theme.palette.background));
+            }
             // A submenu belongs to the menu it opens from; the top menu
             // stays at the root, like a popover.
             try target.menu(node.id, bounds, node.style.name, if (node.level == 0) ui.accessibility.root_id else node.semantic_parent);
@@ -5073,7 +5308,7 @@ pub const View = struct {
         const all = self.buffers.nodes[0..self.len];
         // Clips, effects, caches, themes and input scopes open in node order
         // and close, innermost first, where their node's subtree ends.
-        var scopes: [5 * (max_depth + 1)]Scope = undefined;
+        var scopes: [8 * (max_depth + 1)]Scope = undefined;
         var scope_depth: usize = 0;
         var at = start;
         while (at < stop) {
@@ -5083,7 +5318,7 @@ pub const View = struct {
             }
             const node = &all[at];
             const theme = if (node.theme) |inner| inner.* else window_theme;
-            if (node.concealed) {
+            if (node.concealed or node.unseen) {
                 at = node.end;
                 continue;
             }
@@ -5120,6 +5355,11 @@ pub const View = struct {
                     scopes[scope_depth] = .{ .index = @intCast(at), .kind = .{ .passthrough = target.inertMark() } };
                     scope_depth += 1;
                 }
+                if (node.access_hidden and !target.accessHidden()) {
+                    target.beginAccessHidden();
+                    scopes[scope_depth] = .{ .index = @intCast(at), .kind = .access_hidden };
+                    scope_depth += 1;
+                }
             }
             for (0..try self.openEffects(target, style, bounds)) |_| {
                 scopes[scope_depth] = .{ .index = @intCast(at), .kind = .effect };
@@ -5130,7 +5370,7 @@ pub const View = struct {
                 scopes[scope_depth] = .{ .index = @intCast(at), .kind = .cache };
                 scope_depth += 1;
             };
-            var control: ui.widgets.Options = .{ .enabled = style.enabled, .name = style.name, .semantic_parent = node.semantic_parent };
+            var control: ui.widgets.Options = .{ .enabled = style.enabled, .name = style.name, .semantic_parent = node.semantic_parent, .focus_ring_offset = style.focus_ring_offset, .focus_ring_color = style.focus_ring_color };
             const annotation = self.annotationOf(node);
             control.description = annotation.description;
             control.invalid = annotation.invalid;
@@ -5226,18 +5466,38 @@ pub const View = struct {
                     else => node.direction,
                 } else node.direction, node.text, control),
                 .image, .svg, .icon => try image_nodes.paint(self, target, node, theme),
-                .combo_box, .popup_button => try target.comboBox(node.id, bounds, node.text, node.checked, control),
+                .combo_box, .popup_button => if (node.plain) {
+                    // A menu button without a look: the application draws
+                    // it with the nodes inside.
+                    var name_buffer: [max_plain_name]u8 = undefined;
+                    var plain = control;
+                    plain.look = false;
+                    if (plain.name.len == 0) plain.name = self.plainName(node, &name_buffer);
+                    paintBox(target, style, bounds);
+                    try target.comboBox(node.id, bounds, "", node.checked, plain);
+                } else try target.comboBox(node.id, bounds, node.text, node.checked, control),
                 .avatar => try target.avatar(node.id, bounds, node.text, .{ .image = node.image, .color = style.background, .semantic_parent = node.semantic_parent }),
                 .badge => {
                     const pad = theme.metrics.content_inset + 4;
                     target.roundedRect(bounds, bounds.height / 2, ui.Color.rgb(style.background orelse theme.palette.accent));
                     target.label(.{ .x = bounds.x + pad, .y = bounds.y, .width = @max(0, bounds.width - 2 * pad), .height = bounds.height }, node.text, style.color orelse theme.palette.on_accent);
                 },
-                .disclosure => try target.disclosure(node.id, bounds, node.text, node.checked, control),
+                .disclosure => if (node.plain) {
+                    var name_buffer: [max_plain_name]u8 = undefined;
+                    var plain = control;
+                    plain.look = false;
+                    paintBox(target, style, bounds);
+                    try target.disclosure(node.id, bounds, if (style.name.len > 0) style.name else self.plainName(node, &name_buffer), node.checked, plain);
+                } else try target.disclosure(node.id, bounds, node.text, node.checked, control),
                 .checkbox => {
                     var box = control;
                     box.mixed = node.mixed;
-                    try target.checkbox(node.id, bounds, node.text, node.checked, box);
+                    if (node.plain) {
+                        var name_buffer: [max_plain_name]u8 = undefined;
+                        box.look = false;
+                        paintBox(target, style, bounds);
+                        try target.checkbox(node.id, bounds, if (style.name.len > 0) style.name else self.plainName(node, &name_buffer), node.checked, box);
+                    } else try target.checkbox(node.id, bounds, node.text, node.checked, box);
                 },
                 .editable_text => try target.labelButton(node.id, bounds, node.text, control),
                 .radio => {
@@ -5256,7 +5516,19 @@ pub const View = struct {
                     try target.listItem(node.id, bounds, node.text, node.checked, item_options);
                     if (node.highlighted) target.strokeRect(bounds, 0, theme.metrics.border, ui.Color.rgb(if (node.checked) theme.palette.on_accent else theme.palette.focus));
                 },
-                .menu_item => try target.menuItem(node.id, bounds, node.text, .{
+                .menu_item => if (node.plain) {
+                    var name_buffer: [max_plain_name]u8 = undefined;
+                    var plain = control;
+                    plain.look = false;
+                    paintBox(target, style, bounds);
+                    try target.menuItem(node.id, bounds, if (node.text.len > 0) node.text else self.plainName(node, &name_buffer), .{
+                        .control = plain,
+                        .mark = node.mark,
+                        .checked = node.checked,
+                        .expanded = node.expanded,
+                        .highlighted = node.highlighted,
+                    });
+                } else try target.menuItem(node.id, bounds, node.text, .{
                     .control = control,
                     .mark = node.mark,
                     .checked = node.checked,
@@ -5324,6 +5596,8 @@ pub const View = struct {
             theme: ?*const Theme,
             /// Where the controls of a node ignoring input began.
             passthrough: ui.Frame.InertMark,
+            /// The node's subtree is out of the semantic tree.
+            access_hidden,
         },
     };
     fn closeScope(node: *const Node, scope: Scope, target: anytype, window_theme: Theme) !void {
@@ -5332,12 +5606,41 @@ pub const View = struct {
             .cache => return if (@TypeOf(target) == *ui.Frame) target.endCache(),
             .theme => |previous| if (@TypeOf(target) == *ui.Frame) target.popTheme(previous),
             .passthrough => |mark| if (@TypeOf(target) == *ui.Frame) target.passThrough(mark, target.inertMark()),
+            .access_hidden => if (@TypeOf(target) == *ui.Frame) target.endAccessHidden(),
             .clip => {
                 paintEdges(node, target);
                 try target.popClip();
                 paintScrollIndicator(node, target, if (node.theme) |inner| inner.* else window_theme);
             },
         }
+    }
+    /// The background and border a style gives a box, for a control without
+    /// a look that its application draws.
+    fn paintBox(target: anytype, style: Style, bounds: Rect) void {
+        if (style.gradient) |fill| paintGradient(target, bounds, style.radius, null, fill) else if (style.background) |color| target.roundedRect(bounds, style.radius, ui.Color.rgb(color));
+        if (style.border_gradient) |line| paintGradient(target, bounds, style.radius, style.border_width, line) else if (style.border) |color| target.strokeRect(bounds, style.radius, style.border_width, ui.Color.rgb(color));
+    }
+    /// The name of a control without a look: the text of the nodes inside
+    /// it that assistive technology sees, joined by spaces.
+    pub fn plainName(self: *const View, node: *const Node, buffer: *[max_plain_name]u8) []const u8 {
+        const all = self.buffers.nodes[0..self.len];
+        const index = (@intFromPtr(node) - @intFromPtr(all.ptr)) / @sizeOf(Node);
+        var len: usize = 0;
+        var at = index + 1;
+        while (at < node.end) : (at += 1) {
+            const inner = &all[at];
+            if (inner.access_hidden or inner.concealed or inner.floats()) {
+                at = inner.end - 1;
+                continue;
+            }
+            if (inner.kind != .text or inner.text.len == 0) continue;
+            const gap: usize = @intFromBool(len > 0);
+            if (len + gap + inner.text.len > buffer.len) break;
+            if (gap == 1) buffer[len] = ' ';
+            @memcpy(buffer[len + gap ..][0..inner.text.len], inner.text);
+            len += gap + inner.text.len;
+        }
+        return buffer[0..len];
     }
     /// Fill a rounded box with a gradient, or stroke its edge `width` wide.
     fn paintGradient(target: anytype, bounds: Rect, radius: f32, width: ?f32, fill: Gradient) void {
@@ -5362,8 +5665,8 @@ pub const View = struct {
             const ox = b.x + pose.origin[0] * b.width;
             const oy = b.y + pose.origin[1] * b.height;
             result.frame = .{
-                .x = ox + (result.frame.x - ox) * pose.scale_x + pose.x,
-                .y = oy + (result.frame.y - oy) * pose.scale_y + pose.y,
+                .x = ox + (result.frame.x - ox) * pose.scale_x + pose.offsetX(b.width),
+                .y = oy + (result.frame.y - oy) * pose.scale_y + pose.offsetY(b.height),
                 .width = result.frame.width * pose.scale_x,
                 .height = result.frame.height * pose.scale_y,
             };
@@ -5376,7 +5679,7 @@ pub const View = struct {
     /// return how many opened. Opacity applies to the outermost one.
     fn openEffects(self: *const View, target: anytype, style: Style, bounds: Rect) !usize {
         var alpha: u8 = @intFromFloat(@round(style.opacity * 255));
-        if (style.pose == null and style.effect == null and alpha == 255) return 0;
+        if (style.pose == null and style.effect == null and style.blur == 0 and alpha == 255) return 0;
         var count: usize = 0;
         if (self.effects) |library| if (style.pose) |pose| {
             var values: ui.shader.Values = undefined;
@@ -5385,6 +5688,14 @@ pub const View = struct {
                 alpha = 255;
                 count += 1;
             } else if (!pose.isIdentity()) alpha = 0; // Flattened to nothing.
+        };
+        if (self.effects) |library| if (style.blur > 0) {
+            var values: ui.shader.Values = undefined;
+            if (try library.blur(&values, style.blur)) |effect| {
+                try target.beginEffect(bounds, effect, .{ .opacity = alpha });
+                alpha = 255;
+                count += 1;
+            }
         };
         if (style.effect) |effect| {
             try target.beginEffect(bounds, effect, .{ .opacity = alpha });
@@ -7186,6 +7497,7 @@ test {
     _ = @import("harness.zig");
     _ = @import("controls_tests.zig");
     _ = @import("hidden_tests.zig");
+    _ = @import("headless_tests.zig");
     _ = @import("menu_tests.zig");
     _ = @import("router.zig");
     _ = @import("image.zig");

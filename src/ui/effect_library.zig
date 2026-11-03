@@ -22,6 +22,25 @@ pub const pose_source =
 pub const passthrough_source =
     \\vec4 color(vec2 position, vec4 pixel) { return pixel; }
 ;
+/// A Gaussian blur of the element's content by `sigma` DIP: 9 by 9 taps
+/// over three deviations each way.
+pub const blur_source =
+    \\uniform float sigma;
+    \\vec4 layer(vec2 position) {
+    \\    vec4 sum = vec4(0.0);
+    \\    float total = 0.0;
+    \\    float spacing = sigma * 0.75;
+    \\    for (int i = -4; i <= 4; i++) {
+    \\        for (int j = -4; j <= 4; j++) {
+    \\            vec2 k = vec2(float(i), float(j)) * 0.75;
+    \\            float w = exp(-0.5 * dot(k, k));
+    \\            sum += sample(position + vec2(float(i), float(j)) * spacing) * w;
+    \\            total += w;
+    \\        }
+    \\    }
+    \\    return sum / total;
+    \\}
+;
 pub const glass_source =
     \\uniform float radius;
     \\uniform float bezel;
@@ -55,9 +74,13 @@ pub const glass_source =
 /// in degrees; rotations apply about `origin` (fractions of the box) in the
 /// order scale, Z, X, Y, then translation. `perspective` is the viewer's
 /// distance in DIP for X and Y rotations and `z`; zero is orthographic.
+/// `x_percent` and `y_percent` move it further by percents of the box's own
+/// width and height, as CSS's `translate(-50%, -50%)`, following its size.
 pub const Pose = struct {
     x: f32 = 0,
     y: f32 = 0,
+    x_percent: f32 = 0,
+    y_percent: f32 = 0,
     z: f32 = 0,
     scale_x: f32 = 1,
     scale_y: f32 = 1,
@@ -68,7 +91,7 @@ pub const Pose = struct {
     origin: [2]f32 = .{ 0.5, 0.5 },
 
     pub fn isIdentity(self: Pose) bool {
-        return self.x == 0 and self.y == 0 and self.z == 0 and self.scale_x == 1 and self.scale_y == 1 and self.rotate == 0 and self.rotate_x == 0 and self.rotate_y == 0;
+        return self.x == 0 and self.y == 0 and self.x_percent == 0 and self.y_percent == 0 and self.z == 0 and self.scale_x == 1 and self.scale_y == 1 and self.rotate == 0 and self.rotate_x == 0 and self.rotate_y == 0;
     }
     pub fn valid(self: Pose) bool {
         inline for (zio.fields(Pose)) |field| {
@@ -83,6 +106,24 @@ pub const Pose = struct {
             if (field.type == f32) @field(result, field.name) = @field(a, field.name) + (@field(b, field.name) - @field(a, field.name)) * t;
         }
         result.origin = .{ a.origin[0] + (b.origin[0] - a.origin[0]) * t, a.origin[1] + (b.origin[1] - a.origin[1]) * t };
+        return result;
+    }
+    /// The move along x of a box `width` wide: `x` and `x_percent` of it.
+    pub fn offsetX(self: Pose, width: f32) f32 {
+        return self.x + self.x_percent / 100 * width;
+    }
+    /// The move along y of a box `height` tall.
+    pub fn offsetY(self: Pose, height: f32) f32 {
+        return self.y + self.y_percent / 100 * height;
+    }
+    /// The pose with its percents resolved into `x` and `y` for a box of
+    /// `size`.
+    pub fn resolved(self: Pose, size: [2]f32) Pose {
+        var result = self;
+        result.x = self.offsetX(size[0]);
+        result.y = self.offsetY(size[1]);
+        result.x_percent = 0;
+        result.y_percent = 0;
         return result;
     }
     /// Column-major homography from box-relative content DIP to box-relative
@@ -108,7 +149,9 @@ pub const Pose = struct {
             axes[i] = .{ v2[0] * cy + v2[2] * sy, v2[1], -v2[0] * sy + v2[2] * cy };
         }
         // v(x, y) = a1 x + a2 y + a0, relative to the origin.
-        const a0 = [3]f64{ self.x - axes[0][0] * ox - axes[1][0] * oy, self.y - axes[0][1] * ox - axes[1][1] * oy, self.z - axes[0][2] * ox - axes[1][2] * oy };
+        const tx = self.offsetX(size[0]);
+        const ty = self.offsetY(size[1]);
+        const a0 = [3]f64{ tx - axes[0][0] * ox - axes[1][0] * oy, ty - axes[0][1] * ox - axes[1][1] * oy, self.z - axes[0][2] * ox - axes[1][2] * oy };
         const k: f64 = if (self.perspective > 0) 1 / @as(f64, self.perspective) else 0;
         // Screen = origin + v.xy / w with w = 1 - v.z / perspective.
         return .{
@@ -171,6 +214,7 @@ pub const Library = struct {
     glass_program: *shader.Program,
     passthrough_program: *shader.Program,
     passthrough_values: shader.Values,
+    blur_program: *shader.Program,
     /// Largest margin a pose may claim around its box, in DIP; content
     /// moved farther is clipped.
     max_pose_margin: f32 = 128,
@@ -183,8 +227,10 @@ pub const Library = struct {
         errdefer glass_program.destroy();
         const passthrough_program = shader.compile(allocator, passthrough_source, .{}, &diagnostic) catch |err| return builtinFailure(err);
         errdefer passthrough_program.destroy();
+        const blur_program = shader.compile(allocator, blur_source, .{}, &diagnostic) catch |err| return builtinFailure(err);
+        errdefer blur_program.destroy();
         const self = try allocator.create(Library);
-        self.* = .{ .allocator = allocator, .pose_program = pose_program, .glass_program = glass_program, .passthrough_program = passthrough_program, .passthrough_values = shader.Values.init(passthrough_program) };
+        self.* = .{ .allocator = allocator, .pose_program = pose_program, .glass_program = glass_program, .passthrough_program = passthrough_program, .passthrough_values = shader.Values.init(passthrough_program), .blur_program = blur_program };
         return self;
     }
     fn builtinFailure(err: error{ InvalidShader, OutOfMemory }) error{OutOfMemory} {
@@ -198,16 +244,32 @@ pub const Library = struct {
         self.pose_program.destroy();
         self.glass_program.destroy();
         self.passthrough_program.destroy();
+        self.blur_program.destroy();
         self.allocator.destroy(self);
     }
     /// The built-in programs and how they draw, for
     /// `Context.prepareGpuShaders`.
-    pub fn gpuShaders(self: *const Library) [3]shader_effects.GpuShader {
+    pub fn gpuShaders(self: *const Library) [4]shader_effects.GpuShader {
         return .{
             .{ .program = self.passthrough_program, .target = .element },
             .{ .program = self.pose_program, .target = .element },
             .{ .program = self.glass_program, .target = .backdrop },
+            .{ .program = self.blur_program, .target = .element },
         };
+    }
+    /// Largest blur `blur` draws, in DIP; more blurs as much.
+    pub const max_blur: f32 = 64;
+    /// An element effect that blurs a box's content by `sigma` DIP, as a
+    /// Gaussian of that deviation, spreading it as far as three times that
+    /// past the box; null for no blur. `values` receives the uniforms and
+    /// must outlive the recording call.
+    pub fn blur(self: *const Library, values: *shader.Values, sigma: f32) !?Effect {
+        if (!std.math.isFinite(sigma) or sigma < 0) return error.InvalidBlur;
+        if (sigma < 0.05) return null;
+        const amount = @min(sigma, max_blur);
+        values.* = shader.Values.init(self.blur_program);
+        try values.set(self.blur_program.uniform("sigma").?, amount);
+        return .{ .program = self.blur_program, .values = values, .margin = @ceil(amount * 3) };
     }
     /// An element effect that changes nothing, for fading content as one
     /// layer through `EffectOptions.opacity`.
@@ -251,6 +313,36 @@ pub const Library = struct {
         return .{ .program = program, .values = values, .margin = value.bezel * @max(value.refraction, 0) * 2 + 1 };
     }
 };
+
+test "a blur spreads its content three deviations past its box" {
+    const library = try Library.create(std.testing.allocator);
+    defer library.destroy();
+    var values: shader.Values = undefined;
+    try std.testing.expect(try library.blur(&values, 0) == null);
+    try std.testing.expectError(error.InvalidBlur, library.blur(&values, -1));
+    const effect = (try library.blur(&values, 4)).?;
+    try std.testing.expectEqual(@as(f32, 12), effect.margin);
+    try std.testing.expectEqual(library.blur_program, effect.program);
+    // Larger blurs blur as much as the largest.
+    try std.testing.expectEqual(Library.max_blur * 3, (try library.blur(&values, 1000)).?.margin);
+    try std.testing.expectEqual(@as(usize, 4), library.gpuShaders().len);
+}
+
+test "percents of a pose move by the box's own size" {
+    const pose: Pose = .{ .x = 4, .x_percent = -50, .y_percent = 100 };
+    try std.testing.expect(!pose.isIdentity());
+    try std.testing.expect(!(Pose{ .y_percent = 1 }).isIdentity());
+    const h = pose.homography(.{ 40, 20 });
+    // The top left corner moves by 4 - 20 along x and by the height along y.
+    try std.testing.expectApproxEqAbs(@as(f64, -16), h[6] / h[8], 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 20), h[7] / h[8], 1e-9);
+    const flat = pose.resolved(.{ 40, 20 });
+    try std.testing.expectEqual(@as(f32, -16), flat.x);
+    try std.testing.expectEqual(@as(f32, 20), flat.y);
+    try std.testing.expectEqual(@as(f32, 0), flat.x_percent);
+    const halfway = Pose.mix(.{}, .{ .y_percent = 100 }, 0.5);
+    try std.testing.expectEqual(@as(f32, 50), halfway.y_percent);
+}
 
 test "identity and translated poses map content corners" {
     const library = try Library.create(std.testing.allocator);
