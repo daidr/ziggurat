@@ -68,11 +68,11 @@ const Probe = struct {
         const link = std.mem.eql(u8, result.json, "1");
         const items: []const [*:0]const u8 = if (link) &mac_link_items else &mac_text_items;
         var shown: [1024]u8 = @splat(0);
-        const count = zwk_test_context_menu(self.view.native.?, items.ptr, @intCast(items.len), &shown, shown.len, if (link) "Open in browser" else null);
+        const total = zwk_test_context_menu(self.view.native.?, items.ptr, @intCast(items.len), &shown, shown.len, if (link) "Open in browser" else null);
         const text = std.mem.sliceTo(&shown, 0);
         const expected = if (link) "WKMenuItemIdentifierOpenLink|WKMenuItemIdentifierOpenLink;WKMenuItemIdentifierOpenLinkInNewWindow|WKMenuItemIdentifierOpenLinkInNewWindow;WKMenuItemIdentifierDownloadLinkedFile|WKMenuItemIdentifierDownloadLinkedFile;-|;WKMenuItemIdentifierReload|WKMenuItemIdentifierReload;-|;|Open in browser;" else "";
-        if (!std.mem.eql(u8, text, expected) or count != @as(c_int, if (link) 7 else 0)) {
-            std.debug.print("menu shown ({d}): {s}\n", .{ count, text });
+        if (!std.mem.eql(u8, text, expected) or total != @as(c_int, if (link) 7 else 0)) {
+            std.debug.print("menu shown ({d}): {s}\n", .{ total, text });
             self.fail(error.MenuNotChanged);
         }
     }
