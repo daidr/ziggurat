@@ -83,6 +83,13 @@ pub const Highlighting = struct {
         self.highlighter.reset(language.tokenizer orelse plain);
         self.text_version = null;
     }
+    /// Start `lines` of the Document in state 0, as the first lines of a
+    /// patch's hunks (`patch.Partial.old_starts` and `new_starts`), so that
+    /// each hunk is highlighted on its own from the start of its first
+    /// line; see `syntax.Highlighter.setRestarts`.
+    pub fn setRestarts(self: *Highlighting, lines: []const usize) !void {
+        try self.highlighter.setRestarts(lines);
+    }
     pub fn setTheme(self: *Highlighting, theme: syntax.Theme) void {
         self.theme = theme;
     }

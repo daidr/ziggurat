@@ -119,4 +119,5 @@ test {
     _ = @import("tray_icon.zig");
     _ = now_playing;
     _ = permissions;
+    if (builtin.os.tag == .linux) _ = @import("linux.zig");
 }

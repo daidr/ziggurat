@@ -83,7 +83,9 @@ const Popup = struct {
     enabled: [types.max_menu_items]bool = undefined,
     count: usize = 0,
 
-    fn start(self: *Popup, window: ?*anyopaque, items: []const types.Item, kind: c_int, x: f64, y: f64, owner: *anyopaque, request: u64, serial: u64, done: Done) !void {
+    /// `content` is the window whose focus the Edit roles of a popup over
+    /// it act on, null for a tray's.
+    fn start(self: *Popup, window: ?*anyopaque, content: ?z.Window, items: []const types.Item, kind: c_int, x: f64, y: f64, owner: *anyopaque, request: u64, serial: u64, done: Done) !void {
         if (self.pending.native != null) return error.MenuAlreadyPending;
         if (request == 0) return error.InvalidRequestId;
         const plan = try menus.validate(items, true);
@@ -92,6 +94,9 @@ const Popup = struct {
         var ids: [types.max_menu_items]u64 = undefined;
         var enabled: [types.max_menu_items]bool = undefined;
         const commands = try nativeItems(items, &plan, &labels, &native_items, &ids, &enabled);
+        // The Edit roles are sensitive as the focus can act on them when the
+        // popup shows, which it cannot change while the popup is open.
+        if (content) |shown| grayEditRoles(items, &native_items, &enabled, shown, windowCommandEnabled);
         var failure: c_int = 0;
         const native = zsl_popup_show(window, &native_items, @intCast(items.len), kind, x, y, owner, serial, done, &failure) orelse return error.MenuStartFailed;
         self.pending = .{ .native = native, .request = request, .serial = serial };
@@ -343,7 +348,7 @@ pub const Owner = struct {
                 y = @floatFromInt(point.y);
             },
         }
-        try self.popup.start(window.nativeHandle(), items, kind, x, y, self, request, try self.nextSerial(), popupDone);
+        try self.popup.start(window.nativeHandle(), window, items, kind, x, y, self, request, try self.nextSerial(), popupDone);
     }
     /// Closes a pending popup; its request still completes with null.
     pub fn cancelPopup(self: *Owner) !void {
@@ -721,7 +726,7 @@ pub const Tray = struct {
         self.serial += 1;
         // The item keeps its own events on the earlier serial.
         const popup_serial = self.serial;
-        try self.popup.start(null, items, if (point != null) 2 else 0, if (point) |value| @floatFromInt(value.x) else 0, if (point) |value| @floatFromInt(value.y) else 0, self, request, popup_serial, popupDone);
+        try self.popup.start(null, null, items, if (point != null) 2 else 0, if (point) |value| @floatFromInt(value.x) else 0, if (point) |value| @floatFromInt(value.y) else 0, self, request, popup_serial, popupDone);
     }
     pub fn cancelPopup(self: *Tray) void {
         if (self.app) |app| app.assertOwner();
@@ -801,6 +806,45 @@ pub const Tray = struct {
 
 /// Converts menu items into the C layout. Labels become GTK mnemonics in
 /// caller storage; command indices follow declaration order.
+fn windowCommandEnabled(window: z.Window, command: z.EditCommand) bool {
+    return window.commandEnabled(command);
+}
+/// Make the command items of the Edit roles insensitive where `query`
+/// says the focus cannot act on them, keeping those the app disabled so.
+fn grayEditRoles(items: []const types.Item, native_items: []NativeItem, enabled: []bool, context: anytype, query: fn (@TypeOf(context), z.EditCommand) bool) void {
+    var command: usize = 0;
+    for (items, 0..) |item, index| {
+        if (item.kind != .command) continue;
+        defer command += 1;
+        const role = roles.Role.fromId(item.id) orelse continue;
+        const edit = role.editCommand() orelse continue;
+        if (query(context, edit)) continue;
+        native_items[index].enabled = 0;
+        enabled[command] = false;
+    }
+}
+
+test "a popup's Edit roles are sensitive as the focus can act on them" {
+    const Focus = struct {
+        fn query(_: void, command: z.EditCommand) bool {
+            return command == .paste;
+        }
+    };
+    const items = [_]types.Item{
+        .{ .id = roles.Role.copy.id(), .label = "Copy" },
+        .{ .id = roles.Role.paste.id(), .label = "Paste" },
+        .{ .id = 77, .label = "Rename" },
+    };
+    var native: [3]NativeItem = undefined;
+    for (&native) |*entry| entry.enabled = 1;
+    var enabled = [_]bool{ true, true, true };
+    grayEditRoles(&items, &native, &enabled, {}, Focus.query);
+    try std.testing.expectEqual(@as(u8, 0), native[0].enabled);
+    try std.testing.expectEqual(@as(u8, 1), native[1].enabled);
+    try std.testing.expectEqual(@as(u8, 1), native[2].enabled);
+    try std.testing.expectEqualSlices(bool, &.{ false, true, true }, &enabled);
+}
+
 fn nativeItems(items: []const types.Item, plan: *const menus.Plan, labels: *[types.max_menu_items][512]u8, native_items: *[types.max_menu_items]NativeItem, ids: *[types.max_menu_items]u64, enabled: *[types.max_menu_items]bool) !usize {
     var commands: usize = 0;
     for (items, 0..) |item, index| {

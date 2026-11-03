@@ -32,12 +32,16 @@ pub const DocumentLines = highlight.DocumentLines;
 pub const multicursor = @import("multicursor.zig");
 pub const MultiCursor = multicursor.Commands;
 pub const git_gutter = @import("git_gutter.zig");
+/// Unified diffs: parsing, applying, and the texts of a patch shown
+/// without its files, each hunk highlighted on its own.
+pub const patch = @import("patch.zig");
 pub const GitGutter = git_gutter.GitGutter;
 
 test {
     _ = results;
     _ = requests;
     _ = snippets;
+    _ = patch;
     _ = @import("completion_details.zig");
     _ = @import("editing_tests.zig");
 }
