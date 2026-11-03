@@ -165,17 +165,21 @@ pub fn main() !void {
     try std.testing.expectEqual(@as(usize, 0), try host.control.selectedCount());
     // Focusing a row of the new one gives the list the focus at that row;
     // assistive technology reads a focus only in the key window.
-    if (zlm_test_make_key(host.window.app.windows.get(host.window.key).?.native.native.?) == 0) return error.WindowNotKey;
+    // A runner's session may not let a process launched in the background
+    // take the activation; the row then reads unfocused like any row of an
+    // inactive window, and the caret shows where the focus went.
+    const key = zlm_test_make_key(host.window.app.windows.get(host.window.key).?.native.native.?) != 0;
     zua_test_row_act(new, 3);
     try host.paint();
     try std.testing.expect(host.context.input_state.focused == 7);
-    try std.testing.expect((try host.state(new)).focused);
+    try std.testing.expectEqual(@as(?u64, 257), if (try host.control.caret()) |caret| caret.id else null);
+    try std.testing.expectEqual(key, (try host.state(new)).focused);
 
     _ = try host.window.destroy();
     try app.dispatch();
     // Rows asked for after the window closed stand for nothing.
     try std.testing.expectError(error.StaleRow, host.state(new));
     const counts = ui.accessibility.resourceCounts();
-    std.debug.print("macOS complete list: 257 rows by range, offscreen choice published after the next frame, reveal without focus, old incarnation refused, row focus; changes={d} actions={d}\n", .{ host.changes, counts.actions });
+    std.debug.print("macOS complete list: 257 rows by range, offscreen choice published after the next frame, reveal without focus, old incarnation refused, row focus{s}; changes={d} actions={d}\n", .{ if (key) "" else " (by caret: the window could not become key)", host.changes, counts.actions });
     try std.testing.expectEqual(@as(u32, 0), counts.actions);
 }
