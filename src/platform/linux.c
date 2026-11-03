@@ -835,6 +835,26 @@ static void connect_im(NativeWindow *s,GtkIMContext *im) {
     g_signal_connect(im,"commit",G_CALLBACK(commit),s);g_signal_connect(im,"preedit-changed",G_CALLBACK(preedit),s);
     g_signal_connect(im,"preedit-start",G_CALLBACK(preedit_started),s);g_signal_connect(im,"preedit-end",G_CALLBACK(preedit_ended),s);
 }
+/* A key press a region's child left unhandled, as a web view's page does:
+   the content takes it as its own key (flag 32), with no text, input method
+   or release, while the child keeps the keyboard. Tab moves through the
+   page and out of it, and a modifier key alone is no key of the content's. */
+static gboolean page_key(NativeWindow *s, GdkEventKey *native) {
+    if (native->is_modifier || native->keyval==GDK_KEY_Tab || native->keyval==GDK_KEY_ISO_Left_Tab || native->keyval==GDK_KEY_KP_Tab) return FALSE;
+    NativeEvent gate={0}; gate.kind=17;
+    if (!gtk_widget_is_sensitive(s->window) || !emit(s,&gate)) return FALSE;
+    GdkKeymap *map=gdk_keymap_get_for_display(gtk_widget_get_display(s->window));
+    GdkModifierType modifiers=native->state;
+    gdk_keymap_add_virtual_modifiers(map,&modifiers);
+    guint logical=native->keyval, translated;
+    if (native->hardware_keycode && gdk_keymap_translate_keyboard_state(map,native->hardware_keycode,
+        native->state&~(GDK_SHIFT_MASK|GDK_LOCK_MASK),native->group,&translated,NULL,NULL,NULL)) logical=translated;
+    NativeEvent event={0}; event.kind=18; event.key=gdk_keyval_to_lower(logical);
+    event.flags=((modifiers&GDK_SHIFT_MASK)?1:0)|((modifiers&GDK_CONTROL_MASK)?2:0)|((modifiers&GDK_MOD1_MASK)?4:0)|
+        ((modifiers&(GDK_SUPER_MASK|GDK_META_MASK))?8:0)|32;
+    event.width=native->hardware_keycode>=8?native->hardware_keycode-8:0;
+    return emit(s,&event)!=0;
+}
 static gboolean key(GtkWidget *widget, GdkEventKey *native, gpointer data) {
     (void)widget; NativeWindow *s=data; retain(s);
     uint64_t epoch=s->im_epoch;

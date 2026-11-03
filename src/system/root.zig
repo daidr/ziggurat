@@ -8,6 +8,7 @@ pub const Key = types.Key;
 pub const Modifiers = types.Modifiers;
 pub const Hotkey = types.Hotkey;
 pub const NotificationOptions = types.NotificationOptions;
+pub const max_notification_image_bytes = types.max_notification_image_bytes;
 pub const Accelerator = types.Accelerator;
 pub const Anchor = types.Anchor;
 pub const ClientPoint = types.ClientPoint;

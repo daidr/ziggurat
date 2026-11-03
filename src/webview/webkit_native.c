@@ -1090,6 +1090,8 @@ static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t
         int result=options->region?zlg_region_attach(window,s->view,&s->region):zlg_content_attach(window,s->view,&s->host);
         if (result!=ZLG_CONTENT_OK) { zwk_close(s); return content_result(result); }
         if (s->region && options->scroll_to_container) zlg_region_scroll_to_container(s->region,1);
+        /* The keys the page leaves unhandled are the native UI's around it. */
+        if (s->region) zlg_region_forward_keys(s->region,1);
     }
     if(options->initializers)zwk_initializers_activate(s);
     s->initial=g_idle_source_new(); retain(s);

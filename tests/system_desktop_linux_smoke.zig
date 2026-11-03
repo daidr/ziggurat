@@ -13,6 +13,10 @@ extern fn zsf_item_property([*:0]const u8) void;
 extern fn zsf_property_ready() c_int;
 extern fn zsf_property_text() [*:0]const u8;
 extern fn zsf_notify_count() c_int;
+extern fn zsf_last_image_width() c_int;
+extern fn zsf_last_image_height() c_int;
+extern fn zsf_png(c_int, c_int, *usize) ?[*]u8;
+extern fn zsf_free(?*anyopaque) void;
 extern fn zsf_last_id() u32;
 extern fn zsf_closed_by_client() u32;
 extern fn zsf_last_summary() [*:0]const u8;
@@ -347,13 +351,19 @@ const State = struct {
                     try self.tray.remove();
                     try std.testing.expectError(error.EmptyNotification, self.owner.showNotification(5, .{ .title = "x", .body = "" }));
                     try std.testing.expectError(error.InvalidNotificationId, self.owner.showNotification(0, .{ .title = "x", .body = "y" }));
-                    try self.owner.showNotification(5, .{ .title = "完成", .body = "导出完成", .kind = .err });
+                    // The image is copied: the buffer goes before the bus answers.
+                    var length: usize = 0;
+                    const png = zsf_png(300, 150, &length) orelse return error.NoTestImage;
+                    defer zsf_free(png);
+                    try self.owner.showNotification(5, .{ .title = "完成", .body = "导出完成", .kind = .err, .image = png[0..length] });
                     self.waiting = true;
                 }
                 if (!try self.ready(zsf_notify_count() == 1 and self.owner.notification != null and system.message.resourceCount() > 0)) return;
                 try std.testing.expectEqualStrings("完成", std.mem.span(zsf_last_summary()));
                 try std.testing.expectEqualStrings("导出完成", std.mem.span(zsf_last_body()));
                 try std.testing.expect(zsf_last_urgency() == 2 and zsf_last_silent() == 1 and zsf_last_transient() == 1);
+                // Its pixels, fit to 256 pixels across.
+                try std.testing.expect(zsf_last_image_width() == 256 and zsf_last_image_height() == 128);
                 self.notification_id = zsf_last_id();
                 self.advance();
             },
@@ -363,10 +373,12 @@ const State = struct {
                 // withdraws the one the server already shows.
                 if (!self.waiting) {
                     try std.testing.expect(self.owner.notification == null);
-                    try self.owner.showNotification(6, .{ .title = "First", .body = "Replaced" });
+                    // An image that does not decode leaves it without one.
+                    try self.owner.showNotification(6, .{ .title = "First", .body = "Replaced", .image = "not an image" });
                     self.waiting = true;
                 }
                 if (!try self.ready(zsf_notify_count() == 2)) return;
+                try std.testing.expect(zsf_last_image_width() == -1);
                 const first = zsf_last_id();
                 try self.owner.showNotification(7, .{ .title = "Second", .body = "Closed by the server", .silent = false, .real_time = false });
                 // One replaced before the bus answers is never sent at all.
@@ -541,5 +553,5 @@ pub fn main() !void {
     try std.testing.expectEqual(2, state.hotkeys);
     try std.testing.expectEqual(6, state.results);
     try std.testing.expect(state.tray.native == null);
-    std.debug.print("Linux desktop smoke passed: tray export/register/activate/context/update/pixmap, standalone tray identity/label/dbusmenu layout/click/replace/popup, notifications hints/activate/replace/server-close/stale, X11 hotkeys press/repeat/conflict/release, choosers open/many/save/folder/cancel/capacity/detach, window closure; native records left={d}\n", .{system.message.resourceCount()});
+    std.debug.print("Linux desktop smoke passed: tray export/register/activate/context/update/pixmap, standalone tray identity/label/dbusmenu layout/click/replace/popup, notifications hints/image/activate/replace/server-close/stale, X11 hotkeys press/repeat/conflict/release, choosers open/many/save/folder/cancel/capacity/detach, window closure; native records left={d}\n", .{system.message.resourceCount()});
 }

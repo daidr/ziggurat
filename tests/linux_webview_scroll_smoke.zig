@@ -1,5 +1,7 @@
 //! A web view in a native scroll container with `scroll_to_container`:
-//! the wheel over the page scrolls the container, not the page.
+//! the wheel over the page scrolls the container, not the page. Then the
+//! keys the page leaves unhandled come to the native UI as its own
+//! (`KeyInput.from_page`), and those it handles, and Tab, do not.
 const std = @import("std");
 const z = @import("ziggurat");
 const view = @import("ziggurat_view");
@@ -7,9 +9,11 @@ const web = @import("ziggurat_webview");
 const embedded = @import("ziggurat_webview_view");
 const Watchdog = @import("watchdog.zig").Watchdog;
 extern fn zws_scroll(*anyopaque, f64, f64, f64) c_int;
+extern fn zws_focus(*anyopaque) c_int;
+extern fn zws_key(*anyopaque, c_uint) c_int;
 extern fn g_timeout_add(c_uint, *const fn (*anyopaque) callconv(.c) c_int, *anyopaque) c_uint;
 
-const Phase = enum { loading, scrolled, done };
+const Phase = enum { loading, scrolled, focusing, keys, done };
 
 const State = struct {
     app: *z.App,
@@ -22,6 +26,11 @@ const State = struct {
     loaded: bool = false,
     phase: Phase = .loading,
     ticks: u32 = 0,
+    /// The keys that came from the page, and whether any came otherwise.
+    keys: [8]z.KeyCode = undefined,
+    key_count: usize = 0,
+    other_key: bool = false,
+    keys_at: u32 = 0,
     failure: ?anyerror = null,
 
     fn build(self: *State, v: *view.View) !void {
@@ -30,6 +39,16 @@ const State = struct {
         try self.item.show(v, .{ .height = 400, .self_align = .stretch });
         try v.text("Native comments", .{ .height = 400 });
         try v.end();
+    }
+    fn key(ptr: *anyopaque, input: z.KeyInput) bool {
+        const self: *State = @ptrCast(@alignCast(ptr));
+        if (!input.from_page) {
+            self.other_key = true;
+            return false;
+        }
+        if (self.key_count < self.keys.len) self.keys[self.key_count] = input.key;
+        self.key_count += 1;
+        return true;
     }
     fn fail(self: *State, err: anyerror) void {
         if (self.failure == null) self.failure = err;
@@ -70,9 +89,30 @@ const State = struct {
             },
             .scrolled => {
                 if (self.list.offset.y > 0) {
+                    if (zws_focus(self.window.nativeHandle().?) == 0) return error.PageDidNotTakeFocus;
+                    self.phase = .focusing;
+                } else if (self.ticks > 200) return error.ContainerDidNotScroll;
+            },
+            .focusing => {
+                // H the page cancels, Tab moves through it, J it leaves.
+                const window = self.window.nativeHandle().?;
+                if (zws_key(window, 0x68) == 0) {
+                    if (self.ticks > 300) return error.PageDidNotTakeFocus;
+                    return;
+                }
+                if (zws_key(window, 0xff09) == 0 or zws_key(window, 0x6a) == 0) return error.PageLostFocus;
+                self.keys_at = self.ticks;
+                self.phase = .keys;
+            },
+            .keys => {
+                if (self.other_key) return error.KeyNotFromPage;
+                if (self.key_count > 0) {
+                    if (self.key_count != 1 or self.keys[0] != .j) return error.WrongKeysFromPage;
+                    // A while longer, for keys that should not come.
+                    if (self.ticks < self.keys_at + 25) return;
                     self.phase = .done;
                     self.app.quit();
-                } else if (self.ticks > 200) return error.ContainerDidNotScroll;
+                } else if (self.ticks > self.keys_at + 250) return error.NoKeyFromPage;
             },
             .done => {},
         }
@@ -87,7 +127,7 @@ pub fn main() !void {
     defer app.deinit();
     var state: State = .{ .app = app };
     var storage: view.Storage(32, 256) = .{};
-    var host = view.Host.init(&state, State.build, storage.buffers(), .{ .root = .{ .padding = view.Insets.all(0), .alignment = .stretch } });
+    var host = view.Host.init(&state, State.build, storage.buffers(), .{ .root = .{ .padding = view.Insets.all(0), .alignment = .stretch }, .keys = .{ .context = &state, .key = State.key } });
     host.context.render_mode = .gdi;
     state.host = &host;
     state.window = try app.createWindow(.{ .width = 360, .height = 300 });
@@ -99,7 +139,7 @@ pub fn main() !void {
     host.options.after_frame = web_views.hook();
     _ = try host.attachBackdrop(owner);
     state.page = web.View.init(allocator, &state, State.event);
-    try web_views.add(&state.item, &state.page, .{ .html = "<!doctype html><p>a page as tall as its view</p>", .storage = .ephemeral, .scroll_to_container = true, .page_listener = .{ .context = &state, .event = State.pageEvent } });
+    try web_views.add(&state.item, &state.page, .{ .html = "<!doctype html><p>a page as tall as its view</p><script>addEventListener('keydown',e=>{if(e.key==='h')e.preventDefault()})</script>", .storage = .ephemeral, .scroll_to_container = true, .page_listener = .{ .context = &state, .event = State.pageEvent } });
     state.window.show();
     _ = g_timeout_add(20, State.tick, &state);
     var watchdog: Watchdog = .{ .app = app };
@@ -111,5 +151,5 @@ pub fn main() !void {
     try std.testing.expect(!watchdog.expired and state.phase == .done);
     state.item.remove();
     _ = try state.window.destroy();
-    std.debug.print("web view scroll: the wheel over the page scrolled the native container ({d} DIPs)\n", .{state.list.offset.y});
+    std.debug.print("web view scroll: the wheel over the page scrolled the native container ({d} DIPs); the key the page left came to the native UI\n", .{state.list.offset.y});
 }

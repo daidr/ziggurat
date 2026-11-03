@@ -5546,6 +5546,7 @@ pub const Host = struct {
         self.context.on_value = onValue;
         self.context.on_input = onInput;
         self.context.on_key_release = onKeyRelease;
+        self.context.on_unhandled_key = onUnhandledKey;
         return self.context.attachBackdrop(owner);
     }
 

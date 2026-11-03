@@ -97,6 +97,10 @@ pub const Tray = struct {
     pub fn iconRect(_: *Tray) ?desktop.Rect {
         return null;
     }
+    /// No item: false.
+    pub fn dark(_: *Tray) bool {
+        return false;
+    }
     pub fn pointerOverIcon(_: *Tray) bool {
         return false;
     }

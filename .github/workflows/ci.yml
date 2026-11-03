@@ -133,7 +133,7 @@ jobs:
           persist-credentials: false
       - name: Native GTK/Pango dependencies
         run: |
-          sh scripts/ci-linux-deps.sh ca-certificates curl xz-utils python3 libgtk-3-dev libpango1.0-dev libicu-dev pkg-config xvfb xauth openbox x11-utils libxtst6 libatspi2.0-dev at-spi2-core dbus dbus-x11 shared-mime-info fonts-dejavu-core fonts-noto-cjk libepoxy-dev libegl-dev libgl1-mesa-dri
+          sh scripts/ci-linux-deps.sh ca-certificates curl xz-utils python3 libgtk-3-dev libpango1.0-dev libicu-dev pkg-config xvfb xauth openbox x11-utils libxtst6 libatspi2.0-dev at-spi2-core dbus dbus-x11 shared-mime-info fonts-dejavu-core fonts-noto-cjk libepoxy-dev libegl-dev libgl1-mesa-dri adwaita-icon-theme
       - name: Use cached Zig 0.17.0 and build caches
         run: |
           zig_bin=$(sh scripts/fetch-zig.sh)
@@ -280,7 +280,7 @@ jobs:
           persist-credentials: false
       - name: Native GTK/Pango dependencies
         run: |
-          sh scripts/ci-linux-deps.sh ca-certificates curl xz-utils python3 libgtk-3-dev libpango1.0-dev libicu-dev pkg-config xvfb xauth openbox x11-utils libxtst6 libatspi2.0-dev at-spi2-core dbus dbus-x11 shared-mime-info fonts-dejavu-core fonts-noto-cjk libepoxy-dev libegl-dev libgl1-mesa-dri
+          sh scripts/ci-linux-deps.sh ca-certificates curl xz-utils python3 libgtk-3-dev libpango1.0-dev libicu-dev pkg-config xvfb xauth openbox x11-utils libxtst6 libatspi2.0-dev at-spi2-core dbus dbus-x11 shared-mime-info fonts-dejavu-core fonts-noto-cjk libepoxy-dev libegl-dev libgl1-mesa-dri adwaita-icon-theme
       - name: Use cached Zig 0.17.0 and build caches
         run: |
           zig_bin=$(sh scripts/fetch-zig.sh)

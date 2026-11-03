@@ -97,7 +97,18 @@ pub const TrayItemOptions = struct {
 /// the pointer otherwise.
 pub const TrayAnchor = union(enum) { icon, pointer, screen: ScreenPoint };
 /// `menu` reports an enabled command of the item's own menu (setMenu).
-pub const TrayAction = union(enum) { activate, context: ScreenPoint, popup: PopupResult, menu: u64 };
+pub const TrayAction = union(enum) {
+    activate,
+    context: ScreenPoint,
+    popup: PopupResult,
+    menu: u64,
+    /// The bar the item shows on turned dark (true) or light: the macOS menu
+    /// bar, with the system's appearance or the wallpaper under it. An item
+    /// that draws in color, such as one drawing its measures in theirs,
+    /// redraws its icon for it; a template icon needs nothing. Only macOS
+    /// reports it; `Tray.dark` reads it on every platform.
+    appearance: bool,
+};
 
 pub const max_hotkeys = 32;
 pub const Key = enum {
@@ -197,4 +208,14 @@ pub const NotificationOptions = struct {
     silent: bool = true,
     /// Discard if the shell cannot show it immediately.
     real_time: bool = true,
+    /// An encoded image, PNG or JPEG, shown with the text, such as the cover
+    /// of the track that started playing: an attachment on macOS, whose
+    /// thumbnail grows as the notification expands, and the notification's
+    /// image on Linux (the spec's `image-data`, scaled down to fit 256
+    /// pixels). Copied before `showNotification` returns. An image the system
+    /// cannot decode leaves the notification without one; nothing is
+    /// fetched. Windows does not show it yet. At most
+    /// `max_notification_image_bytes`.
+    image: ?[]const u8 = null,
 };
+pub const max_notification_image_bytes = 16 * 1024 * 1024;
