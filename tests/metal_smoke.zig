@@ -1,9 +1,11 @@
 //! The Metal renderer draws what the Core Graphics renderer draws: the same
 //! commands replayed on both compare pixel for pixel (text by its ink), and
 //! a window's frames show on its CAMetalLayer, under its subviews, with
-//! frames the GPU does not draw going to the software plane, and shader
-//! effects (element captures and backdrop copies) draw what the software
-//! planes draw.
+//! frames the GPU does not draw going to the software plane, a frame drawing
+//! only what changed over the one the renderer kept, and shader effects
+//! (element captures and backdrop copies), groups (opacity, masks, Gaussian
+//! filters), raster transforms and gradients mixed in other spaces draw
+//! what the software planes draw. Pipelines come back from the disk cache.
 const std = @import("std");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
@@ -228,9 +230,27 @@ fn windowFrames(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(software_before + 1, probe.content.gdi_frames);
     try std.testing.expect(!gpu.layerShownForTest());
     const gpu_before = probe.content.gpu_frames;
+    const partial_before = probe.content.damageStats().gpu_partial_frames;
     metal.Renderer.displayForTest("Metal");
     try std.testing.expectEqual(gpu_before + 1, probe.content.gpu_frames);
     try std.testing.expect(gpu.layerShownForTest());
+    // The frame the renderer kept is the last GPU frame, without the
+    // image: only the image's pixels are drawn again over it.
+    const damaged = probe.content.damageStats();
+    std.debug.print("partial gpu frame: {d} rectangles, full {}\n", .{ damaged.gpu_last.len, damaged.gpu_last.full });
+    try std.testing.expectEqual(partial_before + 1, damaged.gpu_partial_frames);
+    try std.testing.expect(!damaged.gpu_last.full and damaged.gpu_last.len != 0);
+    try std.testing.expectEqual(@as(u32, 0xff274c77), gpu.pixelForTest(20 * scale, 20 * scale));
+    try std.testing.expectEqual(@as(u32, 0xffe04020), gpu.pixelForTest(110 * scale, 30 * scale));
+    try std.testing.expectEqual(@as(u32, 0xffffffff), gpu.pixelForTest(300 * scale, 180 * scale));
+    try std.testing.expect(near(0xff0000, gpu.pixelForTest(203 * scale, 13 * scale) & 0xffffff, 2));
+    // Nothing changed: nothing is drawn again, and the frame stays.
+    metal.Renderer.displayForTest("Metal");
+    try std.testing.expectEqual(partial_before + 2, probe.content.damageStats().gpu_partial_frames);
+    try std.testing.expect(probe.content.damageStats().gpu_last.isNone());
+    try std.testing.expectEqual(@as(u32, 0xff274c77), gpu.pixelForTest(20 * scale, 20 * scale));
+    try std.testing.expect(near(0xff0000, gpu.pixelForTest(203 * scale, 13 * scale) & 0xffffff, 2));
+    try std.testing.expect(gpu.stats().partial_frames >= 2);
 
     // A capture of the window draws in software without hiding the layer.
     const shot = try probe.window.capture(allocator);
@@ -426,6 +446,180 @@ fn effectFrames(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(@as(usize, 0), mismatches);
 }
 
+const layer_width = 200;
+const layer_height = 140;
+const LayerScene = struct {
+    kernel: *ui.gaussian.Kernel,
+    mask: drawing.CoverageView,
+    failure: ?anyerror = null,
+    paints: usize = 0,
+    fn draw(ptr: *anyopaque, frame: *ui.Frame) void {
+        const self: *LayerScene = @ptrCast(@alignCast(ptr));
+        self.paints += 1;
+        self.record(frame) catch |err| {
+            self.failure = err;
+        };
+        if (frame.failure) |err| self.failure = err;
+    }
+    fn record(self: *LayerScene, frame: *ui.Frame) !void {
+        frame.clear(0xffffff);
+        frame.rect(.{ .x = 0, .y = 60, .width = layer_width, .height = 20 }, 0x202020);
+        // Overlapping content composited once at half opacity.
+        try frame.beginGroup(.{ .x = 10, .y = 10, .width = 50, .height = 40 }, .{ .opacity = 128 });
+        frame.rect(.{ .x = 10, .y = 10, .width = 30, .height = 30 }, 0xff0000);
+        frame.rect(.{ .x = 25, .y = 20, .width = 35, .height = 30 }, 0x0000ff);
+        try frame.endGroup();
+        // Through a mask fading from left to right, under a clip.
+        try frame.pushClip(.{ .x = 66, .y = 8, .width = 26, .height = 30 });
+        try frame.beginGroup(.{ .x = 70, .y = 10, .width = 24, .height = 20 }, .{ .mask = self.mask, .mask_origin = .{ .x = 70, .y = 10 } });
+        frame.rect(.{ .x = 60, .y = 0, .width = 50, .height = 50 }, 0x208040);
+        try frame.endGroup();
+        try frame.popClip();
+        // Filtered, over the dark band.
+        try frame.gaussianScope(.{ .x = 110, .y = 40, .width = 40, .height = 30 }, try self.kernel.view(), .{ .opacity = 220 }, self, blurred);
+        // Turned and scaled, with a group inside its source.
+        const angle: f64 = 0.35;
+        try frame.beginTransform(.{ .width = 30, .height = 20 }, .{ .xx = 1.25 * @cos(angle), .yx = 1.25 * @sin(angle), .xy = -1.25 * @sin(angle), .yy = 1.25 * @cos(angle), .x0 = 30, .y0 = 85 });
+        frame.rect(.{ .x = 0, .y = 0, .width = 30, .height = 20 }, 0x3060a0);
+        try frame.beginGroup(.{ .x = 5, .y = 5, .width = 20, .height = 10 }, .{ .opacity = 160 });
+        frame.rect(.{ .x = 5, .y = 5, .width = 20, .height = 10 }, 0xffcc00);
+        try frame.endGroup();
+        try frame.endTransform();
+        // Gradients mixed in Oklab and in linear sRGB.
+        const stops = [_]commands.brushes.Stop{ .{ .offset = 0, .color = rgba(0, 0, 255, 255) }, .{ .offset = 1, .color = rgba(255, 255, 0, 255) } };
+        frame.gradientRect(.{ .x = 110, .y = 90, .width = 80, .height = 20 }, 0, .{ .linear = .{ .start = .{ .x = 110, .y = 0 }, .end = .{ .x = 190, .y = 0 }, .stops = &stops, .interpolation = .oklab } });
+        frame.gradientRect(.{ .x = 110, .y = 114, .width = 80, .height = 20 }, 0, .{ .linear = .{ .start = .{ .x = 110, .y = 0 }, .end = .{ .x = 190, .y = 0 }, .stops = &stops, .interpolation = .srgb_linear } });
+    }
+    fn blurred(_: *anyopaque, frame: *ui.Frame) !void {
+        frame.rect(.{ .x = 120, .y = 45, .width = 20, .height = 20 }, 0x40c040);
+    }
+    fn action(_: *anyopaque, _: u64) void {}
+};
+
+/// Draw the layer scene on the GPU or in software and return its pixels.
+fn renderLayers(allocator: std.mem.Allocator, app: *z.App, scene_state: *LayerScene, software: bool, pixels: *std.ArrayList(u32)) !metal.Stats {
+    const title: [*:0]const u8 = if (software) "Layers software" else "Layers metal";
+    const window = try app.createWindow(.{ .title = std.mem.span(title), .width = layer_width, .height = layer_height });
+    defer _ = window.destroy() catch unreachable;
+    var context = ui.Context.init(scene_state, LayerScene.draw, LayerScene.action);
+    if (software) context.render_mode = .gdi;
+    context.semantics_enabled = false;
+    try context.attach(window);
+    window.show();
+    const size = try window.contentSize();
+    const options: ui.layers.Options = .{ .size = size, .max_depth = 3, .legacy_text = .disabled };
+    const source: ui.layout.Size = .{ .width = @as(f32, @floatFromInt(size.width)) / size.scale, .height = @as(f32, @floatFromInt(size.height)) / size.scale };
+    try context.prepareTransforms(allocator, .{ .layers = options, .source_size = source });
+    try context.prepareGaussianWorkspace(allocator, .{ .layers = options, .source_size = source, .max_radius = 32 });
+    try context.uploadCoverage(scene_state.mask);
+    try pixels.resize(allocator, @as(usize, size.width) * size.height);
+    const before = scene_state.paints;
+    if (!software) context.gpu_renderer.captureForTest(true);
+    const stats_before = if (software) metal.Stats{} else context.gpu_renderer.stats();
+    metal.Renderer.displayForTest(title);
+    if (scene_state.failure) |err| return err;
+    try std.testing.expectEqual(before + 1, scene_state.paints);
+    if (software) {
+        try std.testing.expectEqual(@as(usize, 0), context.gpu_frames);
+        for (pixels.items, 0..) |*out, i| out.* = zlc_test_raw_pixel(context.renderer.native.?, @intCast(i % size.width), @intCast(i / size.width));
+        try context.releaseLayers();
+        return .{};
+    }
+    std.debug.print("layer frames: gpu {d}, software {d}, fallbacks {d}\n", .{ context.gpu_frames, context.gdi_frames, context.fallbacks });
+    try std.testing.expectEqual(@as(usize, 1), context.gpu_frames);
+    try std.testing.expectEqual(@as(usize, 0), context.fallbacks);
+    try context.gpu_renderer.pixelsForTest(pixels.items, size.width, size.height);
+    const after = context.gpu_renderer.stats();
+    try context.releaseLayers();
+    return .{ .layers = after.layers - stats_before.layers, .filter_passes = after.filter_passes - stats_before.filter_passes };
+}
+
+fn layerFrames(allocator: std.mem.Allocator) !void {
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    const probe = try app.createWindow(.{ .width = layer_width, .height = layer_height });
+    const size = try probe.contentSize();
+    _ = try probe.destroy();
+    const bank = try ui.gaussian.Bank.create(allocator, std.Thread.getCurrentId(), .{});
+    defer bank.close() catch unreachable;
+    const kernel = try bank.prepare(.{ .spec = .{ .sigma = 2, .scale = size.scale } });
+    defer kernel.close() catch unreachable;
+    // A mask of the group's physical pixels, clear on the left.
+    const mask_width: u32 = @intFromFloat(@ceil(24 * size.scale));
+    const mask_height: u32 = @intFromFloat(@ceil(20 * size.scale));
+    const mask_pixels = try allocator.alloc(u8, @as(usize, mask_width) * mask_height);
+    defer allocator.free(mask_pixels);
+    for (0..mask_height) |y| for (0..mask_width) |x| {
+        mask_pixels[y * mask_width + x] = @intCast((x * 255) / (mask_width - 1));
+    };
+    var lease = drawing.Lease.init(std.Thread.getCurrentId());
+    var scene_state: LayerScene = .{ .kernel = kernel, .mask = .{ .lease = &lease, .identity = try drawing.reserveRasterIdentity(), .coverage = .{ .pixels = mask_pixels, .width = mask_width, .height = mask_height, .stride = mask_width, .origin_x = 0, .origin_y = 0, .scale = size.scale } } };
+
+    var gpu: std.ArrayList(u32) = .empty;
+    defer gpu.deinit(allocator);
+    var software: std.ArrayList(u32) = .empty;
+    defer software.deinit(allocator);
+    const stats = try renderLayers(allocator, app, &scene_state, false, &gpu);
+    _ = try renderLayers(allocator, app, &scene_state, true, &software);
+    // Four groups (one filtered) and a transform; two filter passes.
+    try std.testing.expectEqual(@as(u64, 5), stats.layers);
+    try std.testing.expectEqual(@as(u64, 2), stats.filter_passes);
+    try std.testing.expectEqual(gpu.items.len, software.items.len);
+    const stride: usize = size.width;
+    // Red over blue inside the group, composited once at half opacity.
+    try std.testing.expect(near(0xff7f7f, effectAt(gpu.items, size.scale, stride, 15, 15), 2));
+    try std.testing.expect(near(0x7f7fff, effectAt(gpu.items, size.scale, stride, 30, 25), 2));
+    // The mask hides the left of its group.
+    try std.testing.expect(near(0xffffff, effectAt(gpu.items, size.scale, stride, 70.5, 20), 12));
+    try std.testing.expect(near(0x208040, effectAt(gpu.items, size.scale, stride, 93.5, 20), 12));
+    try std.testing.expect(near(0xffffff, effectAt(gpu.items, size.scale, stride, 67, 20), 0));
+
+    var worst: i32 = 0;
+    var worst_at: usize = 0;
+    var mismatches: usize = 0;
+    for (gpu.items, software.items, 0..) |g, w, i| {
+        const d = difference(g, w);
+        if (d > worst) {
+            worst = d;
+            worst_at = i;
+        }
+        if (d > 3) {
+            if (mismatches < 12) std.debug.print("pixel ({d}, {d}): metal {x:0>6} software {x:0>6}\n", .{ i % stride, i / stride, g & 0xffffff, w & 0xffffff });
+            mismatches += 1;
+        }
+    }
+    std.debug.print("metal layers: worst channel difference {d} at ({d}, {d}), {d} pixels beyond 3\n", .{ worst, worst_at % stride, worst_at / stride, mismatches });
+    try std.testing.expect(mismatches * 1000 <= gpu.items.len);
+}
+
+/// Pipelines a renderer compiled come back from the disk cache for the
+/// next one: the renderer's own and a shader effect's.
+fn pipelineCache(allocator: std.mem.Allocator) !void {
+    var dir_buffer: [256]u8 = undefined;
+    const dir = try std.mem.printSentinel(&dir_buffer, "/tmp/ziggurat-metal-cache-{d}", .{getpid()}, 0);
+    _ = setenv("XDG_CACHE_HOME", dir.ptr, 1);
+    var diagnostic: ui.shader.Diagnostic = .{};
+    const invert = try ui.shader.compile(allocator, invert_source, .{}, &diagnostic);
+    defer invert.destroy();
+    var first: metal.Renderer = .{};
+    try first.init(.{});
+    try std.testing.expect(try first.prepareEffect(allocator, invert, .element));
+    const cold = first.stats().cached_pipelines;
+    first.deinit();
+    var second: metal.Renderer = .{};
+    defer second.deinit();
+    try second.init(.{});
+    try std.testing.expect(try second.prepareEffect(allocator, invert, .element));
+    const warm = second.stats().cached_pipelines;
+    std.debug.print("metal pipeline cache: {d} pipelines from the cache cold, {d} warm\n", .{ cold, warm });
+    // The renderer's three pipelines and the effect's.
+    try std.testing.expect(warm >= cold + 4);
+    _ = unsetenv("XDG_CACHE_HOME");
+}
+extern fn setenv([*:0]const u8, [*:0]const u8, c_int) c_int;
+extern fn unsetenv([*:0]const u8) c_int;
+extern fn getpid() c_int;
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
@@ -433,8 +627,10 @@ pub fn main() !void {
     for ([_]f32{ 1, 2, 1.5 }) |scale| if (!try compare(scale)) {
         matched = false;
     };
+    try pipelineCache(gpa.allocator());
     try windowFrames(gpa.allocator());
     try effectFrames(gpa.allocator());
+    try layerFrames(gpa.allocator());
     try std.testing.expect(matched);
     try std.testing.expectEqual(@as(u32, 0), metal.liveObjects());
     std.debug.print("metal smoke ok\n", .{});

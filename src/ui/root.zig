@@ -14,6 +14,9 @@ pub const GpuRenderer = if (builtin.os.tag == .windows) d3d11.Renderer else if (
 /// Whether the GPU renderer holds its own layer planes (groups, transforms
 /// and Gaussian filters). Without them a frame using one draws in software.
 const gpu_layers = build_options.gpu and builtin.os.tag == .windows;
+/// Whether the GPU renderer keeps its frame for the next to draw only what
+/// changed (Metal).
+const gpu_damage = build_options.gpu and builtin.os.tag == .macos;
 pub const Rect = input.Rect;
 pub const layout = @import("layout.zig");
 pub const grid = @import("grid.zig");
@@ -165,6 +168,10 @@ pub const DamageStats = struct {
     folded_transforms: usize,
     /// What the last software frame drew again.
     last: damage.Damage,
+    /// GPU frames that drew only the rectangles that changed over the frame
+    /// the GPU renderer kept (Metal), and what the last GPU frame drew.
+    gpu_partial_frames: usize = 0,
+    gpu_last: damage.Damage = .whole,
 };
 pub const TransformCacheStats = struct { layers: LayerCacheStats, metadata_bytes: usize, generation: u64, accepted_scopes: usize, accepted_captures: usize };
 /// Fixed coordinate banks and, when attached semantics are enabled, their
@@ -557,6 +564,10 @@ pub const Context = struct {
     /// What the last software frame drew again.
     last_damage: damage.Damage = .whole,
     damage_tracker: damage.Tracker = .{},
+    /// The same for the frame a GPU renderer keeps between its frames.
+    gpu_partial_frames: usize = 0,
+    gpu_last_damage: damage.Damage = .whole,
+    gpu_damage_tracker: if (gpu_damage) damage.Tracker else void = if (gpu_damage) .{} else {},
     /// Images caches replaced, released once no frame holds them.
     retired_snapshots: [16]*offscreen.Snapshot = undefined,
     retired_len: usize = 0,
@@ -976,7 +987,7 @@ pub const Context = struct {
     /// How the software frames drew: whole, or only the rectangles that
     /// changed since the last one (see `damage`).
     pub fn damageStats(self: *const Context) DamageStats {
-        return .{ .software_frames = self.gdi_frames, .partial_frames = self.partial_frames, .folded_transforms = self.folded_transforms, .last = self.last_damage };
+        return .{ .software_frames = self.gdi_frames, .partial_frames = self.partial_frames, .folded_transforms = self.folded_transforms, .last = self.last_damage, .gpu_partial_frames = self.gpu_partial_frames, .gpu_last = self.gpu_last_damage };
     }
     pub fn shaderEffectStats(self: *const Context) ShaderEffectStats {
         return .{ .workspace = if (self.shader_workspace) |workspace| workspace.stats else .{}, .unprepared = self.shader_unprepared };
@@ -2689,6 +2700,19 @@ pub const Context = struct {
         if (!self.last_damage.full) self.partial_frames += 1;
         self.gdi_frames += 1;
     }
+    /// Replays the frame on the GPU renderer: only its damage over the frame
+    /// the renderer kept, where it keeps one.
+    fn gpuReplay(self: *Context, paint: z.Paint) !void {
+        if (gpu_damage) {
+            errdefer self.gpu_damage_tracker.invalidate();
+            const region = if (self.gpu_renderer.planeKept()) self.gpu_damage_tracker.plan(&self.command_buffer, self.gpu_renderer.planeGeneration(), paint.size.width, paint.size.height, paint.size.scale, paint.transparent) else whole: {
+                self.gpu_damage_tracker.invalidate();
+                break :whole damage.Damage.whole;
+            };
+            try self.gpu_renderer.replayDamage(&self.command_buffer, &region, paint.transparent);
+            self.gpu_last_damage = region;
+        } else try self.gpu_renderer.replayBuffer(&self.command_buffer);
+    }
     fn cancelGpuWait(self: *Context) void {
         if (self.gpu_wait) |token| {
             if (self.window) |window| _ = window.app.unwatchNative(token);
@@ -3104,8 +3128,15 @@ pub const Context = struct {
                     upload_gpu = true;
                 }
                 if (build_options.gpu and using_gpu) {
-                    const rendered = if (self.gpu_renderer.replayBuffer(&self.command_buffer)) rendered: {
-                        if (self.gpu_renderer.end()) break :rendered true else |err| {
+                    const rendered = if (self.gpuReplay(paint)) rendered: {
+                        if (self.gpu_renderer.end()) {
+                            if (gpu_damage) {
+                                self.gpu_damage_tracker.commit();
+                                if (!self.gpu_last_damage.full) self.gpu_partial_frames += 1;
+                            }
+                            break :rendered true;
+                        } else |err| {
+                            if (gpu_damage) self.gpu_damage_tracker.invalidate();
                             if (err == error.PresentationBusy and self.deferPresent(window)) {
                                 self.frames += 1;
                                 return;
@@ -3214,6 +3245,7 @@ pub const Context = struct {
         self.renderer.deinit();
         self.releaseRetired();
         self.damage_tracker.invalidate();
+        if (gpu_damage) self.gpu_damage_tracker.invalidate();
         if (build_options.gpu) self.gpu_renderer.deinit();
         self.window = null;
         self.last_paint_size = null;
