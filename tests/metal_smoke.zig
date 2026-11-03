@@ -522,7 +522,6 @@ fn renderLayers(allocator: std.mem.Allocator, app: *z.App, scene_state: *LayerSc
     if (software) {
         try std.testing.expectEqual(@as(usize, 0), context.gpu_frames);
         for (pixels.items, 0..) |*out, i| out.* = zlc_test_raw_pixel(context.renderer.native.?, @intCast(i % size.width), @intCast(i / size.width));
-        try context.releaseLayers();
         return .{};
     }
     std.debug.print("layer frames: gpu {d}, software {d}, fallbacks {d}\n", .{ context.gpu_frames, context.gdi_frames, context.fallbacks });
@@ -530,7 +529,6 @@ fn renderLayers(allocator: std.mem.Allocator, app: *z.App, scene_state: *LayerSc
     try std.testing.expectEqual(@as(usize, 0), context.fallbacks);
     try context.gpu_renderer.pixelsForTest(pixels.items, size.width, size.height);
     const after = context.gpu_renderer.stats();
-    try context.releaseLayers();
     return .{ .layers = after.layers - stats_before.layers, .filter_passes = after.filter_passes - stats_before.filter_passes };
 }
 
