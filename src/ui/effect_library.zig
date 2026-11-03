@@ -100,11 +100,12 @@ pub const Pose = struct {
         // Columns of R = Ry * Rx * Rz, applied to scaled unit axes.
         var axes: [2][3]f64 = undefined;
         for (0..2) |i| {
-            var v = [3]f64{ if (i == 0) self.scale_x else 0, if (i == 1) self.scale_y else 0, 0 };
-            v = .{ v[0] * cz - v[1] * sz, v[0] * sz + v[1] * cz, v[2] };
-            v = .{ v[0], v[1] * cx - v[2] * sx, v[1] * sx + v[2] * cx };
-            v = .{ v[0] * cy + v[2] * sy, v[1], -v[0] * sy + v[2] * cy };
-            axes[i] = v;
+            // Each step reads the vector before it: an array literal
+            // assigned to the array it reads would alias it.
+            const v0 = [3]f64{ if (i == 0) self.scale_x else 0, if (i == 1) self.scale_y else 0, 0 };
+            const v1 = [3]f64{ v0[0] * cz - v0[1] * sz, v0[0] * sz + v0[1] * cz, v0[2] };
+            const v2 = [3]f64{ v1[0], v1[1] * cx - v1[2] * sx, v1[1] * sx + v1[2] * cx };
+            axes[i] = .{ v2[0] * cy + v2[2] * sy, v2[1], -v2[0] * sy + v2[2] * cy };
         }
         // v(x, y) = a1 x + a2 y + a0, relative to the origin.
         const a0 = [3]f64{ self.x - axes[0][0] * ox - axes[1][0] * oy, self.y - axes[0][1] * ox - axes[1][1] * oy, self.z - axes[0][2] * ox - axes[1][2] * oy };
@@ -279,6 +280,15 @@ test "a half turn about the centre and a perspective tilt" {
     const back = inverse3(turn).?;
     const round_trip = apply(back, corner[0], corner[1]).?;
     try std.testing.expectApproxEqAbs(@as(f64, 0), round_trip[0], 1e-9);
+    // A quarter turn clockwise: the top left corner goes to the top right
+    // of the turned box, about the middle.
+    const quarter = (Pose{ .rotate = 90 }).homography(.{ 40, 20 });
+    const top_left_turned = apply(quarter, 0, 0).?;
+    try std.testing.expectApproxEqAbs(@as(f64, 30), top_left_turned[0], 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, -10), top_left_turned[1], 1e-9);
+    const right_turned = apply(quarter, 40, 0).?;
+    try std.testing.expectApproxEqAbs(@as(f64, 30), right_turned[0], 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 30), right_turned[1], 1e-9);
     // Turning about Y moves the right edge away: it projects shorter.
     const tilt = (Pose{ .rotate_y = 30, .perspective = 200 }).homography(.{ 100, 100 });
     const top_right = apply(tilt, 100, 0).?;

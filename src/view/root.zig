@@ -4886,16 +4886,16 @@ pub const View = struct {
             }
         }
     }
-    /// Where the controls of a flying node take the pointer: moved and
-    /// scaled as its pose draws it, about its origin, turns left out. Null
-    /// when it draws in place, as without `Host.prepareShaderEffects`.
+    /// Where the controls of a flying node take the pointer: moved,
+    /// scaled and turned as its pose draws it about its origin, over the
+    /// box around it when turned. Null when it draws in place, as without
+    /// `Host.prepareShaderEffects`.
     fn flightHitMap(self: *const View, node: *const Node, offset: Point) ?ui.HitMap {
         if (self.effects == null) return null;
         const pose = node.style.pose orelse return null;
         if (pose.isIdentity()) return null;
         const box = node.bounds;
-        const origin: Point = .{ .x = offset.x + box.x + pose.origin[0] * box.width, .y = offset.y + box.y + pose.origin[1] * box.height };
-        return ui.HitMap.about(origin, pose.scale_x, pose.scale_y, .{ .x = pose.x, .y = pose.y });
+        return ui.HitMap.ofPose(pose, .{ .x = offset.x + box.x, .y = offset.y + box.y, .width = box.width, .height = box.height });
     }
     /// Paint a copy of a flying node gone, as its look shows it.
     fn paintCopy(self: *const View, target: anytype, entry: matched.CopyDraw) !void {
