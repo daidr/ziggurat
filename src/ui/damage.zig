@@ -89,9 +89,10 @@ pub const Sources = struct {
     images: []const drawing.ImageView = &.{},
     coverage: []const drawing.CoverageView = &.{},
     indicators: []const loading.Entry = &.{},
+    textures: []const drawing.TextureView = &.{},
 
     pub fn of(buffer: *const commands.Buffer) Sources {
-        return .{ .text = buffer.textBytes(), .brushes = buffer.brushResources(), .prepared = buffer.preparedTextResources(), .images = buffer.imageResources(), .coverage = buffer.coverageResources(), .indicators = buffer.indicator_storage[0..buffer.indicator_len] };
+        return .{ .text = buffer.textBytes(), .brushes = buffer.brushResources(), .prepared = buffer.preparedTextResources(), .images = buffer.imageResources(), .coverage = buffer.coverageResources(), .indicators = buffer.indicator_storage[0..buffer.indicator_len], .textures = buffer.textureResources() };
     }
 };
 
@@ -105,6 +106,7 @@ pub fn commandBox(command: Command, sources: Sources, scale: f32) ?Box {
         .gradient => |value| value.bounds,
         .text => |value| value.bounds,
         .image => |value| value.destination,
+        .texture => |value| value.destination,
         .prepared_text => |value| {
             if (value.resource >= sources.prepared.len) return null;
             const view = sources.prepared[value.resource];
@@ -246,7 +248,7 @@ pub const Tracker = struct {
                     depth -= 1;
                     continue;
                 },
-                .fill, .shape, .gradient, .text, .image, .prepared_text, .coverage, .indicator => {},
+                .fill, .shape, .gradient, .text, .image, .texture, .prepared_text, .coverage, .indicator => {},
                 else => return false,
             }
             const box = (commandBox(command, sources, self.scale) orelse return false).intersect(clips[depth]);
@@ -496,6 +498,13 @@ fn hashCommand(hasher: *Hasher, command: Command, sources: Sources) bool {
         .image => |value| {
             if (value.resource >= sources.images.len) return false;
             put(hasher, .{ value.destination, value.alignment, value.fit, value.sampling, value.opacity, sources.images[value.resource].identity });
+        },
+        // A GPU texture is immutable: its identity and generation name its
+        // pixels.
+        .texture => |value| {
+            if (value.resource >= sources.textures.len) return false;
+            const view = sources.textures[value.resource];
+            put(hasher, .{ value.destination, value.alignment, value.fit, value.sampling, value.opacity, view.identity, view.generation });
         },
         .indicator => |slot| {
             if (slot >= sources.indicators.len) return false;

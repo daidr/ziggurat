@@ -334,7 +334,7 @@ jobs:
       - name: Metal renderer, shader translation and smoke
         timeout-minutes: 15
         run: |
-          zig build check smoke-metal test-shader-metal -Dgpu=true -Doptimize=${{ matrix.optimize }} --summary failures
+          zig build check smoke-metal smoke-metal-domain test-shader-metal -Dgpu=true -Doptimize=${{ matrix.optimize }} --summary failures
       - name: NSAccessibility compile and smoke
         timeout-minutes: 15
         run: |

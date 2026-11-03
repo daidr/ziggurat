@@ -1,10 +1,25 @@
+//! Device domain lifetimes on every GPU platform: budgets, reentrant
+//! allocator callbacks, threads and registration, and a window drawing a
+//! domain's textures through device loss (D3D11 on Windows, Metal on
+//! macOS).
 const std = @import("std");
+const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const resources = ui.gpu_resources;
 const drawing = ui.drawing;
-const c = @import("ziggurat_c_win32");
-const expect = std.testing.expect;
+const windows = builtin.os.tag == .windows;
+const c = if (windows) @import("ziggurat_c_win32") else struct {};
+const gpu = if (windows) ui.d3d11 else ui.metal;
+/// The driver tests that need no hardware use: Direct3D's software device,
+/// and on macOS, which has none, the system's.
+const soft: resources.Driver = if (windows) .warp else .hardware;
+/// A failed check names its line: these runs print no stack traces.
+fn verify(ok: bool, at: std.builtin.SourceLocation) !void {
+    if (ok) return;
+    std.debug.print("check failed at {s}:{d}\n", .{ at.file, at.line });
+    return error.CheckFailed;
+}
 fn equal(expected: anytype, actual: @TypeOf(expected)) !void {
     std.testing.expectEqual(expected, actual) catch |err| {
         std.debug.dumpCurrentStackTrace(.{});
@@ -45,7 +60,7 @@ const Hook = struct {
     }
     fn check(self: *Hook) !void {
         if (self.failure) |err| return err;
-        try expect(self.when == .none);
+        try verify(self.when == .none, @src());
     }
 };
 const Pixel = struct {
@@ -64,7 +79,7 @@ fn budgets(allocator: std.mem.Allocator) !void {
     var hook: Hook = .{ .backing = allocator };
     try expectError(error.CapacityExceeded, resources.DeviceDomain.create(app, hook.allocator(), .{ .total_bytes = 1 }));
     try equal(@as(usize, 0), hook.calls);
-    const domain = try resources.DeviceDomain.create(app, hook.allocator(), .{ .driver = .warp, .texture_bytes = 4 });
+    const domain = try resources.DeviceDomain.create(app, hook.allocator(), .{ .driver = soft, .texture_bytes = 4 });
     var pixel = Pixel.init();
     const texture = try domain.upload(pixel.view());
     const calls = hook.calls;
@@ -109,7 +124,7 @@ const Reentry = struct {
 fn reentrant(allocator: std.mem.Allocator) !void {
     const app = try z.App.init(allocator);
     var hook: Hook = .{ .backing = allocator };
-    const domain = try resources.DeviceDomain.create(app, hook.allocator(), .{ .driver = .warp });
+    const domain = try resources.DeviceDomain.create(app, hook.allocator(), .{ .driver = soft });
     var pixel = Pixel.init();
     var buffer: ui.commands.Buffer = .{};
     try buffer.image(.{ .x = 0, .y = 0, .width = 4, .height = 4 }, pixel.view(), .{});
@@ -134,7 +149,7 @@ fn reentrant(allocator: std.mem.Allocator) !void {
 
     const next = try z.App.init(allocator);
     var interrupted: Hook = .{ .backing = allocator };
-    const other = try resources.DeviceDomain.create(next, interrupted.allocator(), .{ .driver = .warp });
+    const other = try resources.DeviceDomain.create(next, interrupted.allocator(), .{ .driver = soft });
     reentry.domain = other;
     reentry.app = next;
     interrupted.context = &reentry;
@@ -152,7 +167,7 @@ const WrongThread = struct {
     allocator: std.mem.Allocator,
     domain: *resources.DeviceDomain,
     texture: *resources.Texture,
-    renderer: *ui.d3d11.Renderer,
+    renderer: *gpu.Renderer,
     pixel: *Pixel,
     fn run(self: *WrongThread) !void {
         try expectError(error.WrongThread, resources.DeviceDomain.create(self.app, self.allocator, .{}));
@@ -161,10 +176,12 @@ const WrongThread = struct {
         try expectError(error.WrongThread, self.texture.view());
         try expectError(error.WrongThread, self.texture.close());
         try expectError(error.WrongThread, self.renderer.begin(.{ .native_context = self.pixel, .size = .{ .width = 1, .height = 1, .scale = 1 } }));
-        try expectError(error.WrongThread, self.renderer.replay(&.{}, ""));
         try expectError(error.WrongThread, self.renderer.uploadImage(self.pixel.view()));
-        try expectError(error.WrongThread, self.renderer.releaseImage(self.pixel.view().identity));
-        try expectError(error.WrongThread, self.renderer.createLayerCandidate(self.allocator, .{ .size = .{ .width = 1, .height = 1, .scale = 1 }, .max_depth = 1 }));
+        if (windows) {
+            try expectError(error.WrongThread, self.renderer.replay(&.{}, ""));
+            try expectError(error.WrongThread, self.renderer.releaseImage(self.pixel.view().identity));
+            try expectError(error.WrongThread, self.renderer.createLayerCandidate(self.allocator, .{ .size = .{ .width = 1, .height = 1, .scale = 1 }, .max_depth = 1 }));
+        }
     }
 };
 fn threadsAndRegistration(allocator: std.mem.Allocator) !void {
@@ -174,10 +191,10 @@ fn threadsAndRegistration(allocator: std.mem.Allocator) !void {
         fn call(_: *anyopaque) !void {}
     }.call };
     const token = try app.registerStop(&node);
-    try expectError(error.Full, resources.DeviceDomain.create(app, allocator, .{ .driver = .warp }));
-    try equal(@as(u32, 0), ui.d3d11.globalResourceCount());
-    try expect(try app.cancelStop(token));
-    const domain = try resources.DeviceDomain.create(app, allocator, .{ .driver = .warp });
+    try expectError(error.Full, resources.DeviceDomain.create(app, allocator, .{ .driver = soft }));
+    try equal(@as(u32, 0), gpu.globalResourceCount());
+    try verify(try app.cancelStop(token), @src());
+    const domain = try resources.DeviceDomain.create(app, allocator, .{ .driver = soft });
     var borrows: [resources.capacity]resources.DeviceDomain.Borrow = undefined;
     for (&borrows) |*borrow| borrow.* = try domain.acquireRenderer(null);
     const window = try app.createWindow(.{ .width = 64, .height = 64 });
@@ -188,12 +205,13 @@ fn threadsAndRegistration(allocator: std.mem.Allocator) !void {
     };
     var context = ui.Context.init(&unused, callbacks.draw, callbacks.action);
     context.gpu_domain = domain;
-    context.render_mode = .hardware;
+    // The other driver than the domain's.
+    context.render_mode = if (windows) .hardware else .warp;
     try expectError(error.DomainDriverMismatch, context.attach(window));
-    try expect(context.window == null and context.gpu_renderer.native == null);
+    try verify(context.window == null and context.gpu_renderer.native == null, @src());
     context.render_mode = .automatic;
     try expectError(error.Full, context.attach(window));
-    try expect(context.window == null and context.gpu_renderer.native == null);
+    try verify(context.window == null and context.gpu_renderer.native == null, @src());
     try equal(@as(usize, resources.capacity), (try domain.stats()).attachments);
     for (borrows) |borrow| domain.releaseRenderer(borrow.slot);
     try context.attach(window);
@@ -201,7 +219,7 @@ fn threadsAndRegistration(allocator: std.mem.Allocator) !void {
     try equal(@as(usize, 0), (try domain.stats()).attachments);
     var pixel = Pixel.init();
     const texture = try domain.upload(pixel.view());
-    var renderer: ui.d3d11.Renderer = .{};
+    var renderer: gpu.Renderer = .{};
     try renderer.init(.{ .domain = domain });
     var wrong: WrongThread = .{ .app = app, .allocator = allocator, .domain = domain, .texture = texture, .renderer = &renderer, .pixel = &pixel };
     const thread = try std.Thread.spawn(.{}, WrongThread.run, .{&wrong});
@@ -227,6 +245,7 @@ const Consumer = struct {
     fn action(_: *anyopaque, _: u64) void {}
 };
 fn integrated(allocator: std.mem.Allocator) !void {
+    if (!windows) return integratedMetal(allocator);
     var diagnostics: z.diagnostics.Recorder(16) = .{};
     const app = try z.App.initWithOptions(allocator, .{ .diagnostics_sink = diagnostics.sink() });
     defer app.deinit();
@@ -253,8 +272,8 @@ fn integrated(allocator: std.mem.Allocator) !void {
     const size = context.last_paint_size.?;
     try context.prepareLayers(allocator, .{ .size = size, .max_depth = 2 });
     _ = c.SendMessageW(hwnd, c.WM_PAINT, 0, 0);
-    try expect(context.gpu_frames != 0);
-    try expect(context.input_state.available(1));
+    try verify(context.gpu_frames != 0, @src());
+    try verify(context.input_state.available(1), @src());
     const software_frames = context.gdi_frames;
     const surface = context.gpu_renderer.surfaceForTest().?;
     state.view = try other.view();
@@ -262,8 +281,8 @@ fn integrated(allocator: std.mem.Allocator) !void {
     const calls = state.calls;
     _ = c.SendMessageW(hwnd, c.WM_PAINT, 0, 0);
     try equal(calls + 1, state.calls);
-    try expect(context.input_state.available(1) and !context.input_state.available(2));
-    try expect(c.GetWindowLongW(surface, c.GWL_STYLE) & c.WS_VISIBLE != 0);
+    try verify(context.input_state.available(1) and !context.input_state.available(2), @src());
+    try verify(c.GetWindowLongW(surface, c.GWL_STYLE) & c.WS_VISIBLE != 0, @src());
     try equal(software_frames, context.gdi_frames);
     try equal(@as(usize, 0), (try other.view()).lease.pins);
     var entries: [16]z.diagnostics.Diagnostic = undefined;
@@ -280,18 +299,18 @@ fn integrated(allocator: std.mem.Allocator) !void {
             try equal(@as(?u32, null), entry.code);
         }
     };
-    try expect(mismatched and unsupported);
+    try verify(mismatched and unsupported, @src());
     state.view = try texture.view();
     state.node = 1;
     context.gpu_renderer.injectPresentationBusy();
     _ = c.SendMessageW(hwnd, c.WM_PAINT, 0, 0);
     const pending = context.gpu_wait orelse return error.MissingGpuWait;
     try domain.injectDeviceLossForTest();
-    try expect(context.gpu_wait == null);
-    try expect(!app.unwatchNative(pending));
+    try verify(context.gpu_wait == null, @src());
+    try verify(!app.unwatchNative(pending), @src());
     try equal(@as(usize, 0), state.view.lease.pins);
     _ = c.SendMessageW(hwnd, c.WM_PAINT, 0, 0);
-    try expect(context.input_state.available(1));
+    try verify(context.input_state.available(1), @src());
     try equal(software_frames, context.gdi_frames);
     try domain.recreate();
     const replacement = try domain.upload(pixel.view());
@@ -299,11 +318,101 @@ fn integrated(allocator: std.mem.Allocator) !void {
     state.view = try replacement.view();
     state.close = window;
     _ = c.SendMessageW(hwnd, c.WM_PAINT, 0, 0);
-    try expect(window.isClosed());
+    try verify(window.isClosed(), @src());
     // Callback-triggered destruction runs at the owner dispatch safe point.
     try app.dispatch();
     try equal(@as(usize, 0), state.view.lease.pins);
     try equal(@as(usize, 0), (try domain.stats()).attachments);
+}
+/// integrated on macOS: the window's frames, displayed as AppKit's display
+/// cycle does, draw the domain's texture on the GPU; one of another domain
+/// fails the frame whole, and the window keeps the last; after a loss the
+/// window draws nothing on the GPU until the domain is recreated.
+fn integratedMetal(allocator: std.mem.Allocator) !void {
+    var diagnostics: z.diagnostics.Recorder(16) = .{};
+    const app = try z.App.initWithOptions(allocator, .{ .diagnostics_sink = diagnostics.sink() });
+    defer app.deinit();
+    const domain = try resources.DeviceDomain.create(app, allocator, .{});
+    defer domain.close() catch unreachable;
+    const foreign = try resources.DeviceDomain.create(app, allocator, .{});
+    defer foreign.close() catch unreachable;
+    var pixel = Pixel.init();
+    const texture = try domain.upload(pixel.view());
+    defer texture.close() catch unreachable;
+    const other = try foreign.upload(pixel.view());
+    defer other.close() catch unreachable;
+    var state: Consumer = .{ .view = try texture.view() };
+    var context = ui.Context.init(&state, Consumer.draw, Consumer.action);
+    context.gpu_domain = domain;
+    const title = "Domain textures";
+    const window = try app.createWindow(.{ .title = title, .width = 64, .height = 64 });
+    defer {
+        _ = window.destroy() catch false;
+        app.dispatch() catch unreachable;
+    }
+    try context.attach(window);
+    window.show();
+    const renderer = &context.gpu_renderer;
+    renderer.captureForTest(true);
+    gpu.Renderer.displayForTest(title);
+    try app.dispatch();
+    try verify(context.gpu_frames != 0, @src());
+    try verify(context.input_state.available(1), @src());
+    const scale: u32 = @intFromFloat(context.last_paint_size.?.scale);
+    // 0, 128, 0, 128 (BGRA, premultiplied) over 0x204060.
+    try verify(near(0xff_10_a0_30, renderer.pixelForTest(20 * scale, 20 * scale)), @src());
+    try verify(renderer.layerShownForTest(), @src());
+    const software_frames = context.gdi_frames;
+    const gpu_frames = context.gpu_frames;
+    state.view = try other.view();
+    state.node = 2;
+    const calls = state.calls;
+    gpu.Renderer.displayForTest(title);
+    try equal(calls + 1, state.calls);
+    try verify(context.input_state.available(1) and !context.input_state.available(2), @src());
+    try equal(gpu_frames, context.gpu_frames);
+    try equal(software_frames, context.gdi_frames);
+    try verify(renderer.layerShownForTest(), @src());
+    try equal(@as(usize, 0), (try other.view()).lease.pins);
+    var entries: [16]z.diagnostics.Diagnostic = undefined;
+    const snapshot = diagnostics.snapshot(&entries);
+    var mismatched = false;
+    for (entries[0..snapshot.count]) |entry| if (entry.err) |err| {
+        if (err == error.TextureDomainMismatch) mismatched = true;
+    };
+    try verify(mismatched, @src());
+    // Lost: nothing of the domain draws until it is recreated.
+    state.view = try texture.view();
+    state.node = 1;
+    try domain.injectDeviceLossForTest();
+    try equal(@as(usize, 0), state.view.lease.pins);
+    try verify(renderer.stats().device_losses == 1, @src());
+    gpu.Renderer.displayForTest(title);
+    try equal(gpu_frames, context.gpu_frames);
+    try domain.recreate();
+    const replacement = try domain.upload(pixel.view());
+    defer replacement.close() catch unreachable;
+    state.view = try replacement.view();
+    gpu.Renderer.displayForTest(title);
+    try equal(gpu_frames + 1, context.gpu_frames);
+    try verify(near(0xff_10_a0_30, renderer.pixelForTest(20 * scale, 20 * scale)), @src());
+    state.close = window;
+    gpu.Renderer.displayForTest(title);
+    try verify(window.isClosed(), @src());
+    try app.dispatch();
+    try equal(@as(usize, 0), state.view.lease.pins);
+    try equal(@as(usize, 0), (try domain.stats()).attachments);
+}
+fn near(want: u32, got: u32) bool {
+    inline for ([_]u5{ 0, 8, 16, 24 }) |shift| {
+        const a: i32 = @intCast((want >> shift) & 255);
+        const b: i32 = @intCast((got >> shift) & 255);
+        if (@abs(a - b) > 1) {
+            std.debug.print("texture pixel expected={x}, actual={x}\n", .{ want, got });
+            return false;
+        }
+    }
+    return true;
 }
 pub fn run(allocator: std.mem.Allocator) !void {
     try budgets(allocator);

@@ -36,6 +36,10 @@
 #import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
+#import <objc/runtime.h>
+// MTLCommandBufferErrorDeviceRemoved (11) is deprecated in newer SDKs because it
+// cannot occur on Apple Silicon; Intel Macs with removable GPUs can still report it.
+#define ZM_MTL_ERROR_DEVICE_REMOVED ((NSInteger)11)
 #include <CoreText/CoreText.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -258,7 +262,7 @@ typedef struct ZmBatch {uint32_t first,count;int bind,replace;__unsafe_unretaine
    group's filter (its kernel among the words, through temp), or nothing. */
 enum {RUN_EFFECT,RUN_GROUP,RUN_GAUSSIAN,RUN_TRANSFORM};
 typedef struct ZmRun {uint32_t kind,slot,word_offset,word_count,has_pass,region[4],out[4];float origin[2];ZmEffectParams params;__unsafe_unretained id<MTLTexture> source,output,temp,extra[3];uint32_t levels,level_offset;} ZmRun;
-typedef struct ZmStats {uint32_t device_creations,layer_creations,resizes,presents,transaction_presents,busy_presents,atlas_pages,glyphs;uint64_t frames,instances,batches,effect_passes,layers,filter_passes,partial_frames,cached_pipelines,backdrops,indicators;} ZmStats;
+typedef struct ZmStats {uint32_t device_creations,layer_creations,resizes,presents,transaction_presents,busy_presents,atlas_pages,glyphs;uint64_t frames,instances,batches,effect_passes,layers,filter_passes,partial_frames,cached_pipelines,backdrops,indicators,offscreen_targets,device_losses;} ZmStats;
 typedef struct ZmGlyph {float x,y,width,height,left,top;uint32_t color;} ZmGlyph;
 #define ZM_CLIPS 33
 #define ZM_ATLAS 2048
@@ -273,6 +277,37 @@ typedef struct ZmGlyph {float x,y,width,height,left,top;uint32_t color;} ZmGlyph
 typedef struct ZmCapture {float clips[ZM_CLIPS][4];uint32_t clip_depth,run,width,height,kind,empty,opacity,mask;float bounds[4],mask_rect[4];double matrix[6];} ZmCapture;
 
 static atomic_int live_objects;
+
+/* A device domain (src/ui/gpu_resources.zig): one Metal device that
+   renderers and immutable textures share. The epoch and token layouts
+   are those of the drawing resource ABI; ownership stays in Zig. */
+typedef struct GpuDomainEpoch {uint64_t identity,generation;uint32_t status,reserved;} GpuDomainEpoch;
+typedef struct GpuTextureToken {uint64_t identity,generation;uint32_t width,height,levels,reserved;} GpuTextureToken;
+typedef struct DomainStats {uint32_t objects,devices,losses,reserved;uint64_t bitmaps;} DomainStats;
+_Static_assert(sizeof(GpuDomainEpoch)==24,"GPU epoch ABI");
+_Static_assert(sizeof(GpuTextureToken)==32,"GPU texture token ABI");
+/* Results as src/ui/gpu_resources.zig reads them (HRESULT values). */
+#define ZM_OK 0
+#define ZM_INVALID ((int32_t)0x80070057)
+#define ZM_NO_MEMORY ((int32_t)0x8007000E)
+#define ZM_UNEXPECTED ((int32_t)0x8000FFFF)
+#define ZM_DEVICE_REMOVED ((int32_t)0x887A0005)
+@class ZigMetalRenderer;
+@interface ZigMetalDomain : NSObject {
+@public
+    GpuDomainEpoch *epoch;void *callback_context;void (*release_callback)(void *,int);
+    id<MTLDevice> device;id<MTLCommandQueue> queue;
+    /* Textures by slot; their tokens stay where they are while the slot
+       holds them, as the Zig shells point at them. */
+    id<MTLTexture> textures[ZI_IMAGE_SLOTS];GpuTextureToken tokens[ZI_IMAGE_SLOTS];
+    NSHashTable<ZigMetalRenderer *> *renderers;
+    uint32_t device_creations,device_losses;uint64_t texture_creations;
+}
+@end
+@implementation ZigMetalDomain
+- (void)dealloc{atomic_fetch_sub(&live_objects,1);}
+@end
+static void domain_lose(ZigMetalDomain *domain);
 
 @interface ZigMetalRenderer : NSObject {
 @public
@@ -311,6 +346,12 @@ static atomic_int live_objects;
     ZmCapture captures[ZM_EFFECT_DEPTH];uint32_t capture_depth;
     /* Compiled pipelines kept on disk across runs (MTLBinaryArchive). */
     id archive;NSURL *archive_url;int archive_dirty;
+    /* The domain whose device this renderer draws with, if any; lost while
+       that device is gone (zmtl_rebuild takes the new one). front is an
+       offscreen surface's last committed frame; loss_fault makes the next
+       offscreen frame fail as a removed device does. */
+    __weak ZigMetalDomain *domain;int lost,loss_fault;
+    id<MTLTexture> front;
     ZmStats stats;
 }
 @end
@@ -411,6 +452,9 @@ static int create_pipeline(ZigMetalRenderer *s){
     sd.sAddressMode=sd.tAddressMode=MTLSamplerAddressModeClampToZero;
     s->mask_sampler=[s->device newSamplerStateWithDescriptor:sd];
     sd.sAddressMode=sd.tAddressMode=MTLSamplerAddressModeClampToEdge;
+    // Images pick their mip level on the CPU and pass it as an explicit lod;
+    // a NotMipmapped sampler would ignore it and always read level 0.
+    sd.mipFilter=MTLSamplerMipFilterNearest;
     s->linear_sampler=[s->device newSamplerStateWithDescriptor:sd];
     sd.minFilter=sd.magFilter=MTLSamplerMinMagFilterNearest;
     s->nearest_sampler=[s->device newSamplerStateWithDescriptor:sd];
@@ -420,19 +464,23 @@ static int create_pipeline(ZigMetalRenderer *s){
     return s->linear_sampler&&s->nearest_sampler&&s->mask_sampler&&s->blank;
 }
 
+static ZigMetalRenderer *new_renderer(id<MTLDevice> device,int *error){
+    ZigMetalRenderer *s=[[ZigMetalRenderer alloc] init];atomic_fetch_add(&live_objects,1);
+    s->device=device;s->queue=[device newCommandQueue];
+    if(!s->queue||!create_pipeline(s)){*error=2;return nil;}
+    s->free_buffers=[NSMutableArray array];s->frame_textures=[NSMutableArray array];
+    s->frame_captures=[NSMutableArray array];s->free_captures=[NSMutableArray array];
+    s->glyphs=[NSMutableDictionary dictionary];s->fonts=[NSMutableArray array];s->font_sources=[NSMutableArray array];s->font_scales=[NSMutableArray array];
+    s->slots=[NSMutableArray array];s->prepared_keys=[NSMutableArray array];s->prepared_textures=[NSMutableArray array];
+    s->hidden=1;s->stats.device_creations=1;*error=0;
+    return s;
+}
 void *zmtl_create(int *error){
     @autoreleasepool{
         id<MTLDevice> device=MTLCreateSystemDefaultDevice();
         if(!device){*error=1;return NULL;}
-        ZigMetalRenderer *s=[[ZigMetalRenderer alloc] init];atomic_fetch_add(&live_objects,1);
-        s->device=device;s->queue=[device newCommandQueue];
-        if(!s->queue||!create_pipeline(s)){*error=2;return NULL;}
-        s->free_buffers=[NSMutableArray array];s->frame_textures=[NSMutableArray array];
-        s->frame_captures=[NSMutableArray array];s->free_captures=[NSMutableArray array];
-        s->glyphs=[NSMutableDictionary dictionary];s->fonts=[NSMutableArray array];s->font_sources=[NSMutableArray array];s->font_scales=[NSMutableArray array];
-        s->slots=[NSMutableArray array];s->prepared_keys=[NSMutableArray array];s->prepared_textures=[NSMutableArray array];
-        s->hidden=1;s->stats.device_creations=1;*error=0;
-        return (__bridge_retained void *)s;
+        ZigMetalRenderer *s=new_renderer(device,error);
+        return s?(__bridge_retained void *)s:NULL;
     }
 }
 static void drop_layer(ZigMetalRenderer *s){
@@ -488,7 +536,7 @@ static int attach_layer(ZigMetalRenderer *s,NSWindow *window){
    than the screen (a capture): the software renderer draws that one, and
    the layer stays as it is. */
 int zmtl_begin(void *p,void *native_window,uint32_t width,uint32_t height,float scale,int transparent){
-    ZigMetalRenderer *s=R(p);if(s->drawing)return 1;
+    ZigMetalRenderer *s=R(p);if(s->drawing)return 1;if(s->lost)return 2;
     @autoreleasepool{
         NSGraphicsContext *current=[NSGraphicsContext currentContext];
         if(current&&![current isDrawingToScreen])return 4;
@@ -571,11 +619,12 @@ void zmtl_push_device_clip(void *p,int32_t x0,int32_t y0,int32_t x1,int32_t y1){
     a[0]=fmaxf(b[0],(float)x0);a[1]=fmaxf(b[1],(float)y0);a[2]=fminf(b[2],(float)x1);a[3]=fminf(b[3],(float)y1);
 }
 int zmtl_begin_offscreen(void *p,uint32_t width,uint32_t height,float scale,int transparent){
-    ZigMetalRenderer *s=R(p);if(s->drawing||!width||!height)return 1;
+    ZigMetalRenderer *s=R(p);if(s->drawing||!width||!height)return 1;if(s->lost)return 2;
     if(!s->offscreen_target||s->offscreen_target.width!=width||s->offscreen_target.height!=height){
         MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
         d.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;d.storageMode=MTLStorageModeShared;
         s->offscreen_target=[s->device newTextureWithDescriptor:d];if(!s->offscreen_target)return 2;
+        s->stats.offscreen_targets++;
     }
     s->width=width;s->height=height;s->scale=scale;s->transparent=transparent;s->offscreen=1;
     reset_frame(s);s->drawing=1;return 0;
@@ -827,8 +876,10 @@ int zmtl_coverage(void *p,uint32_t slot,float x,float y,uint32_t rgba){
     ZigMetalRenderer *s=R(p);id<MTLTexture> texture=slot_texture(s,slot);if(!texture||texture.pixelFormat!=MTLPixelFormatR8Unorm)return 1;
     return draw_mask(s,texture,(double)x*s->scale,(double)y*s->scale,rgba);
 }
-int zmtl_image(void *p,uint32_t slot,const ZiImagePlan *plan){
-    ZigMetalRenderer *s=R(p);id<MTLTexture> texture=slot_texture(s,slot);
+static int draw_image(ZigMetalRenderer *s,id<MTLTexture> texture,const ZiImagePlan *plan);
+int zmtl_image(void *p,uint32_t slot,const ZiImagePlan *plan){return draw_image(R(p),slot_texture(R(p),slot),plan);}
+/* An image's level drawn over plan's destination at its opacity. */
+static int draw_image(ZigMetalRenderer *s,id<MTLTexture> texture,const ZiImagePlan *plan){
     if(!texture||texture.pixelFormat!=MTLPixelFormatBGRA8Unorm||plan->level>=texture.mipmapLevelCount)return 1;
     const ZiImageRect *d=&plan->destination,*r=&plan->source;
     if(d->width<=0||d->height<=0||plan->opacity<=0||!visible(s))return 0;
@@ -1449,10 +1500,16 @@ int zmtl_end_offscreen(void *p,uint8_t *pixels,size_t stride){
     ZigMetalRenderer *s=R(p);if(!s->drawing||!s->offscreen)return 1;
     s->drawing=0;
     @autoreleasepool{
+        if(s->lost){reset_frame(s);return 2;}
         id<MTLCommandBuffer> commands=[s->queue commandBuffer];if(!commands)return 2;
         if(encode(s,commands,s->offscreen_target)){reset_frame(s);return 2;}
         [commands commit];[commands waitUntilCompleted];
         reset_frame(s);
+        /* A removed device loses the domain's, as a frame of another
+           renderer of it would find. */
+        int removed=s->loss_fault||(commands.status==MTLCommandBufferStatusError&&commands.error.code==ZM_MTL_ERROR_DEVICE_REMOVED);
+        s->loss_fault=0;
+        if(removed){ZigMetalDomain *domain=s->domain;if(domain)domain_lose(domain);return 3;}
         if(commands.status!=MTLCommandBufferStatusCompleted)return 2;
         if(pixels)[s->offscreen_target getBytes:pixels bytesPerRow:stride fromRegion:MTLRegionMake2D(0,0,s->width,s->height) mipmapLevel:0];
     }
@@ -1472,6 +1529,214 @@ int zmtl_suspend(void *p){
 }
 void zmtl_restore(void *p){set_hidden(R(p),0);}
 void zmtl_stats(void *p,ZmStats *out){*out=R(p)->stats;}
+
+/* Device domains. A domain's renderers draw with its device; its textures
+   are uploaded once and drawn by any of them (zmtl_texture). Losing the
+   device (a removed GPU, or a test's injection) drops every texture and
+   every renderer's objects of that device at once, and bumps the epoch's
+   generation; zgpu_domain_recreate takes the system's device again, and
+   each renderer takes it in zmtl_rebuild. Stop drops them for good. */
+size_t zgpu_domain_size(void){return class_getInstanceSize([ZigMetalDomain class]);}
+static ZigMetalDomain *D(void *p){return (__bridge ZigMetalDomain *)p;}
+static int domain_create_device(ZigMetalDomain *d){
+    id<MTLDevice> device=MTLCreateSystemDefaultDevice();if(!device)return 0;
+    id<MTLCommandQueue> queue=[device newCommandQueue];if(!queue)return 0;
+    d->device=device;d->queue=queue;d->device_creations++;return 1;
+}
+/* What a renderer made with its device goes with it; the layer too, as
+   one names its device. */
+static void renderer_drop_device(ZigMetalRenderer *s){
+    s->lost=1;s->stats.device_losses++;
+    drop_layer(s);s->hidden=1;
+    s->queue=nil;s->pipeline=s->replace_pipeline=s->filter_pipeline=s->glass_filter=s->glass_blend=s->glass_shade=nil;
+    s->linear_sampler=s->nearest_sampler=s->mask_sampler=nil;s->blank=nil;
+    s->back=nil;s->back_valid=0;s->generation++;s->offscreen_target=nil;s->front=nil;s->captured=nil;
+    reset_frame(s);
+    @synchronized(s->free_captures){[s->free_captures removeAllObjects];}
+    @synchronized(s->free_buffers){[s->free_buffers removeAllObjects];}
+    s->atlas=nil;[s->glyphs removeAllObjects];
+    for(NSUInteger k=0;k<[s->slots count];k++)s->slots[k]=[NSNull null];
+    s->candidate=nil;[s->prepared_keys removeAllObjects];[s->prepared_textures removeAllObjects];
+    for(int k=0;k<ZM_EFFECT_SLOTS;k++)s->effect_pipelines[k]=nil;
+    s->archive=nil;s->archive_dirty=0;
+    s->device=nil;
+}
+static void domain_drop_device(ZigMetalDomain *d){
+    for(unsigned i=0;i<ZI_IMAGE_SLOTS;i++)d->textures[i]=nil;
+    d->queue=nil;d->device=nil;
+}
+static void domain_lose(ZigMetalDomain *d){
+    if(!d||d->epoch->status!=1)return;
+    d->epoch->status=2;
+    if(d->epoch->generation==UINT64_MAX)d->epoch->status=4;else d->epoch->generation++;
+    d->device_losses++;
+    /* The owner revokes what it lent out before anything is dropped. */
+    d->release_callback(d->callback_context,1);
+    @autoreleasepool{
+        for(ZigMetalRenderer *s in [d->renderers allObjects])renderer_drop_device(s);
+        domain_drop_device(d);
+    }
+    d->release_callback(d->callback_context,0);
+}
+void *zgpu_domain_create(GpuDomainEpoch *epoch,int driver,void *context,void (*callback)(void *,int),int32_t *out){
+    /* Metal has no software device. */
+    if(driver){*out=ZM_INVALID;return NULL;}
+    @autoreleasepool{
+        ZigMetalDomain *d=[[ZigMetalDomain alloc] init];atomic_fetch_add(&live_objects,1);
+        d->epoch=epoch;d->callback_context=context;d->release_callback=callback;
+        d->renderers=[NSHashTable weakObjectsHashTable];
+        if(!domain_create_device(d)){*out=ZM_UNEXPECTED;return NULL;}
+        epoch->status=1;*out=ZM_OK;
+        return (__bridge_retained void *)d;
+    }
+}
+void zgpu_domain_stop(void *p){
+    ZigMetalDomain *d=D(p);if(!d||d->epoch->status==3)return;
+    d->epoch->status=3;
+    d->release_callback(d->callback_context,1);
+    @autoreleasepool{
+        for(ZigMetalRenderer *s in [d->renderers allObjects])renderer_drop_device(s);
+        domain_drop_device(d);
+    }
+    d->release_callback(d->callback_context,0);
+}
+void zgpu_domain_destroy(void *p){
+    if(!p)return;
+    zgpu_domain_stop(p);
+    @autoreleasepool{(void)(__bridge_transfer ZigMetalDomain *)p;}
+}
+int32_t zgpu_domain_recreate(void *p){
+    ZigMetalDomain *d=D(p);if(!d||d->epoch->status!=2)return ZM_UNEXPECTED;
+    @autoreleasepool{if(!domain_create_device(d))return ZM_DEVICE_REMOVED;}
+    d->epoch->status=1;return ZM_OK;
+}
+static id<MTLTexture> domain_texture(ZigMetalDomain *d,uint32_t width,uint32_t height,uint32_t levels){
+    MTLTextureDescriptor *t=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:levels>1];
+    t.mipmapLevelCount=levels;t.usage=MTLTextureUsageShaderRead;t.storageMode=MTLStorageModeShared;
+    id<MTLTexture> texture=[d->device newTextureWithDescriptor:t];
+    if(texture)d->texture_creations++;
+    return texture;
+}
+/* Copies the levels into a new texture in slot. fault (one-based) fails
+   that level's copy, for tests. */
+const GpuTextureToken *zgpu_domain_upload(void *p,uint32_t slot,uint64_t identity,const ZiImageLevel *levels,uint32_t count,uint32_t fault,int32_t *out){
+    ZigMetalDomain *d=D(p);
+    if(!d||d->epoch->status!=1||slot>=ZI_IMAGE_SLOTS||d->tokens[slot].identity||!identity||!count||count>ZI_IMAGE_LEVELS||levels[0].width>ZM_TEXTURE_LIMIT||levels[0].height>ZM_TEXTURE_LIMIT){*out=ZM_INVALID;return NULL;}
+    @autoreleasepool{
+        id<MTLTexture> texture=domain_texture(d,levels[0].width,levels[0].height,count);
+        if(!texture){*out=ZM_NO_MEMORY;return NULL;}
+        for(uint32_t i=0;i<count;i++){
+            if(fault==i+1){*out=ZM_NO_MEMORY;return NULL;}
+            [texture replaceRegion:MTLRegionMake2D(0,0,levels[i].width,levels[i].height) mipmapLevel:i withBytes:levels[i].pixels bytesPerRow:levels[i].stride];
+        }
+        d->textures[slot]=texture;
+    }
+    d->tokens[slot]=(GpuTextureToken){identity,d->epoch->generation,levels[0].width,levels[0].height,count,0};
+    *out=ZM_OK;return &d->tokens[slot];
+}
+void zgpu_domain_release_texture(void *p,uint32_t slot){
+    ZigMetalDomain *d=D(p);if(!d||slot>=ZI_IMAGE_SLOTS)return;
+    d->textures[slot]=nil;memset(&d->tokens[slot],0,sizeof(d->tokens[slot]));
+}
+void zgpu_domain_stats(void *p,DomainStats *stats){
+    memset(stats,0,sizeof(*stats));ZigMetalDomain *d=D(p);if(!d)return;
+    stats->objects=(d->device!=nil)+(d->queue!=nil);
+    for(unsigned i=0;i<ZI_IMAGE_SLOTS;i++)stats->objects+=d->textures[i]!=nil;
+    stats->devices=d->device_creations;stats->losses=d->device_losses;stats->bitmaps=d->texture_creations;
+}
+void zgpu_domain_inject_loss(void *p){domain_lose(D(p));}
+
+/* A renderer drawing with the domain's device. */
+void *zmtl_create_in_domain(void *p,int *error){
+    ZigMetalDomain *d=D(p);if(!d||d->epoch->status!=1||!d->device){*error=3;return NULL;}
+    @autoreleasepool{
+        ZigMetalRenderer *s=new_renderer(d->device,error);if(!s)return NULL;
+        s->domain=d;[d->renderers addObject:s];
+        return (__bridge_retained void *)s;
+    }
+}
+/* Takes the domain's device again after a loss. 0 ready, 1 no domain, 2
+   the domain has no device, 3 failed. */
+int zmtl_rebuild(void *p){
+    ZigMetalRenderer *s=R(p);ZigMetalDomain *d=s->domain;if(!d)return 1;
+    if(!s->lost)return 0;
+    if(d->epoch->status!=1||!d->device)return 2;
+    @autoreleasepool{
+        s->device=d->device;s->queue=[s->device newCommandQueue];
+        if(!s->queue||!create_pipeline(s)){s->device=nil;s->queue=nil;return 3;}
+    }
+    s->lost=0;s->stats.device_creations++;return 0;
+}
+/* A domain texture, by its token, drawn as an image is. */
+int zmtl_texture(void *p,const GpuTextureToken *token,const ZiImagePlan *plan){
+    ZigMetalRenderer *s=R(p);ZigMetalDomain *d=s->domain;
+    if(!d||!s->drawing||d->epoch->status!=1||!token||!token->identity||token->generation!=d->epoch->generation)return 1;
+    for(unsigned i=0;i<ZI_IMAGE_SLOTS;i++)if(&d->tokens[i]==token){
+        if(plan->level>=token->levels)return 1;
+        return draw_image(s,d->textures[i],plan);
+    }
+    return 1;
+}
+void zmtl_inject_loss(void *p){R(p)->loss_fault=1;}
+
+/* Offscreen surfaces (src/ui/gpu_offscreen_metal.zig): a frame drawn
+   into the work target becomes the front, which snapshots copy. */
+void zmtl_offscreen_commit(void *p){
+    ZigMetalRenderer *s=R(p);id<MTLTexture> work=s->front;s->front=s->offscreen_target;s->offscreen_target=work;
+    /* The next frame's target is made now, so that frames after the
+       first make none. */
+    if(!s->offscreen_target&&s->front&&s->device){
+        MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:s->front.width height:s->front.height mipmapped:NO];
+        d.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;d.storageMode=MTLStorageModeShared;
+        s->offscreen_target=[s->device newTextureWithDescriptor:d];
+        if(s->offscreen_target)s->stats.offscreen_targets++;
+    }
+}
+/* Both targets of a surface made up front, so that rendering makes none:
+   the first frame draws into one and the other waits as the next. */
+int zmtl_offscreen_prepare(void *p,uint32_t width,uint32_t height){
+    ZigMetalRenderer *s=R(p);if(s->drawing||s->lost||!s->device||!width||!height)return 1;
+    @autoreleasepool{
+        MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
+        d.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;d.storageMode=MTLStorageModeShared;
+        if(!s->offscreen_target||s->offscreen_target.width!=width||s->offscreen_target.height!=height){
+            s->offscreen_target=[s->device newTextureWithDescriptor:d];if(!s->offscreen_target)return 1;
+            s->stats.offscreen_targets++;
+        }
+        if(!s->front||s->front.width!=width||s->front.height!=height){
+            s->front=[s->device newTextureWithDescriptor:d];if(!s->front)return 1;
+            s->stats.offscreen_targets++;
+        }
+    }
+    return 0;
+}
+uint32_t zmtl_offscreen_objects(void *p){ZigMetalRenderer *s=R(p);return (s->front!=nil)+(s->offscreen_target!=nil);}
+int zmtl_read_front(void *p,uint32_t *pixels,uint32_t width,uint32_t height){
+    ZigMetalRenderer *s=R(p);id<MTLTexture> t=s->front;if(!t||t.width!=width||t.height!=height)return 1;
+    [t getBytes:pixels bytesPerRow:(NSUInteger)width*4 fromRegion:MTLRegionMake2D(0,0,width,height) mipmapLevel:0];
+    return 0;
+}
+/* Copies the surface's front into a new texture in slot. fault: 1 fails
+   before the texture is made, 2 after, 3 as a removed device. */
+const GpuTextureToken *zgpu_snapshot_offscreen(void *domain,void *renderer,uint32_t slot,uint64_t identity,uint32_t width,uint32_t height,uint32_t fault,int32_t *out){
+    ZigMetalDomain *d=D(domain);ZigMetalRenderer *s=R(renderer);*out=ZM_INVALID;
+    if(!d||d->epoch->status!=1||!s||s->domain!=d||s->lost||s->drawing||!s->front||s->front.width!=width||s->front.height!=height||slot>=ZI_IMAGE_SLOTS||d->tokens[slot].identity||!identity)return NULL;
+    @autoreleasepool{
+        if(fault==1){*out=ZM_NO_MEMORY;return NULL;}
+        id<MTLTexture> texture=domain_texture(d,width,height,1);
+        if(!texture||fault==2){*out=ZM_NO_MEMORY;return NULL;}
+        id<MTLCommandBuffer> commands=[d->queue commandBuffer];
+        id<MTLBlitCommandEncoder> blit=[commands blitCommandEncoder];
+        if(!commands||!blit){*out=ZM_UNEXPECTED;return NULL;}
+        [blit copyFromTexture:s->front sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(width,height,1) toTexture:texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];
+        [blit endEncoding];[commands commit];[commands waitUntilCompleted];
+        if(fault==3||(commands.status==MTLCommandBufferStatusError&&commands.error.code==ZM_MTL_ERROR_DEVICE_REMOVED)){*out=ZM_DEVICE_REMOVED;domain_lose(d);return NULL;}
+        if(commands.status!=MTLCommandBufferStatusCompleted){*out=ZM_UNEXPECTED;return NULL;}
+        d->textures[slot]=texture;
+    }
+    d->tokens[slot]=(GpuTextureToken){identity,d->epoch->generation,width,height,1,0};
+    *out=ZM_OK;return &d->tokens[slot];
+}
 
 /* Test hooks. */
 void zmtl_test_capture(void *p,int enable){ZigMetalRenderer *s=R(p);s->capture=enable;if(!enable)s->captured=nil;}

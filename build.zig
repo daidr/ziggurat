@@ -1521,6 +1521,11 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
         });
+        addSmoke(b, "smoke-metal-domain", "tests/metal_domain_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+        });
     } else if (gpu) {
         if (target.result.os.tag != .windows) @panic("The GPU renderer requires Windows (D3D11) or macOS (Metal)");
         _ = native_support.add(b, ui, "ui-d3d11-native", "src/ui/d3d11.c", &.{"-std=c11"}, target, optimize);
