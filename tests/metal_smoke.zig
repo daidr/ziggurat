@@ -5,7 +5,10 @@
 //! only what changed over the one the renderer kept, and shader effects
 //! (element captures and backdrop copies), groups (opacity, masks, Gaussian
 //! filters), raster transforms and gradients mixed in other spaces draw
-//! what the software planes draw. Pipelines come back from the disk cache.
+//! what the software planes draw, as do backdrop effects (blur, progressive
+//! blur, glass, scroll edges and their opaque fallback), loading indicators
+//! and shader effects inside a raster transform. Pipelines come back from
+//! the disk cache.
 const std = @import("std");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
@@ -593,6 +596,124 @@ fn layerFrames(allocator: std.mem.Allocator) !void {
     try std.testing.expect(mismatches * 1000 <= gpu.items.len);
 }
 
+const glass_width = 240;
+const glass_height = 160;
+const GlassScene = struct {
+    library: *ui.effects.Library,
+    failure: ?anyerror = null,
+    paints: usize = 0,
+    fn draw(ptr: *anyopaque, frame: *ui.Frame) void {
+        const self: *GlassScene = @ptrCast(@alignCast(ptr));
+        self.paints += 1;
+        self.record(frame) catch |err| {
+            self.failure = err;
+        };
+        if (frame.failure) |err| self.failure = err;
+    }
+    fn record(self: *GlassScene, frame: *ui.Frame) !void {
+        frame.clear(0xffffff);
+        // Stripes and blocks for the effects to blur and bend.
+        var x: f32 = 0;
+        var index: u32 = 0;
+        while (x < glass_width) : (x += 6) {
+            frame.rect(.{ .x = x, .y = 0, .width = 3, .height = glass_height }, if (index % 3 == 0) 0x202020 else if (index % 3 == 1) 0xd04020 else 0x2060d0);
+            index += 1;
+        }
+        frame.rect(.{ .x = 0, .y = 70, .width = glass_width, .height = 12 }, 0x10a050);
+        frame.backdropEffect(.{ .x = 8, .y = 8, .width = 60, .height = 40 }, 10, .{ .blur = .{ .radius = 3 } });
+        frame.backdropEffect(.{ .x = 76, .y = 8, .width = 70, .height = 50 }, 0, .{ .blur = .{ .radius = 6, .mask = .{ .from = 255, .to = 0, .angle = 180 } } });
+        frame.backdropEffect(.{ .x = 154, .y = 8, .width = 78, .height = 56 }, 16, .{ .glass = .{ .tint = rgba(40, 120, 255, 90), .noise = 0.5 } });
+        frame.backdropEffect(.{ .x = 8, .y = 96, .width = 90, .height = 30 }, 15, .{ .glass = .{ .style = .clear } });
+        frame.backdropEffect(.{ .x = 106, .y = 96, .width = 60, .height = 24 }, 0, .{ .scroll_edge = .{ .hard = true, .background = 0xf0f0f0 } });
+        frame.loadingIndicator(.{ .x = 176, .y = 92, .width = 24, .height = 24 }, .arc, 0.3, .rgb(0x1060ff), .{});
+        frame.loadingIndicator(.{ .x = 204, .y = 92, .width = 24, .height = 24 }, .classic, 0.6, .{ .r = 0, .g = 0, .b = 0, .a = 200 }, .{});
+        frame.loadingIndicator(.{ .x = 176, .y = 124, .width = 48, .height = 24 }, .bouncing_dots, 0.2, .rgb(0xe03030), .{});
+        // A shader effect and a backdrop effect inside a raster transform.
+        try frame.beginTransform(.{ .width = 40, .height = 24 }, .{ .xx = 1.2, .yx = 0.2, .xy = -0.2, .yy = 1.2, .x0 = 20, .y0 = 128 });
+        frame.rect(.{ .x = 0, .y = 0, .width = 40, .height = 24 }, 0x804020);
+        try frame.beginEffect(.{ .x = 4, .y = 4, .width = 20, .height = 16 }, self.library.passthrough(), .{ .opacity = 160 });
+        frame.rect(.{ .x = 4, .y = 4, .width = 20, .height = 16 }, 0xffff00);
+        try frame.endEffect();
+        frame.backdropEffect(.{ .x = 26, .y = 2, .width = 12, .height = 20 }, 3, .{ .blur = .{ .radius = 2 } });
+        try frame.endTransform();
+    }
+    fn action(_: *anyopaque, _: u64) void {}
+};
+
+fn renderGlass(allocator: std.mem.Allocator, app: *z.App, scene_state: *GlassScene, software: bool, pixels: *std.ArrayList(u32)) !metal.Stats {
+    const title: [*:0]const u8 = if (software) "Glass software" else "Glass metal";
+    const window = try app.createWindow(.{ .title = std.mem.span(title), .width = glass_width, .height = glass_height });
+    defer _ = window.destroy() catch unreachable;
+    var context = ui.Context.init(scene_state, GlassScene.draw, GlassScene.action);
+    if (software) context.render_mode = .gdi;
+    context.semantics_enabled = false;
+    try context.attach(window);
+    window.show();
+    const size = try window.contentSize();
+    const options: ui.layers.Options = .{ .size = size, .max_depth = 3, .legacy_text = .disabled };
+    const source: ui.layout.Size = .{ .width = @as(f32, @floatFromInt(size.width)) / size.scale, .height = @as(f32, @floatFromInt(size.height)) / size.scale };
+    try context.prepareTransforms(allocator, .{ .layers = options, .source_size = source });
+    try context.prepareShaderEffects(allocator, .{});
+    try context.prepareBackdropEffects(allocator, .{});
+    try context.prepareGaussianWorkspace(allocator, .{ .layers = options, .source_size = source, .max_radius = 1 });
+    if (!software) try std.testing.expect(try context.prepareGpuShaders(allocator, &scene_state.library.gpuShaders()) > 0);
+    try pixels.resize(allocator, @as(usize, size.width) * size.height);
+    const before = scene_state.paints;
+    if (!software) context.gpu_renderer.captureForTest(true);
+    const stats_before = if (software) metal.Stats{} else context.gpu_renderer.stats();
+    metal.Renderer.displayForTest(title);
+    if (scene_state.failure) |err| return err;
+    try std.testing.expectEqual(before + 1, scene_state.paints);
+    if (software) {
+        try std.testing.expectEqual(@as(usize, 0), context.gpu_frames);
+        for (pixels.items, 0..) |*out, i| out.* = zlc_test_raw_pixel(context.renderer.native.?, @intCast(i % size.width), @intCast(i / size.width));
+        return .{};
+    }
+    std.debug.print("glass frames: gpu {d}, software {d}, fallbacks {d}, backdrop software frames {d}\n", .{ context.gpu_frames, context.gdi_frames, context.fallbacks, context.backdropEffectStats().software_frames });
+    try std.testing.expectEqual(@as(usize, 1), context.gpu_frames);
+    try std.testing.expectEqual(@as(usize, 0), context.fallbacks);
+    try std.testing.expectEqual(@as(usize, 0), context.backdropEffectStats().software_frames);
+    try context.gpu_renderer.pixelsForTest(pixels.items, size.width, size.height);
+    const after = context.gpu_renderer.stats();
+    return .{ .backdrops = after.backdrops - stats_before.backdrops, .indicators = after.indicators - stats_before.indicators, .layers = after.layers - stats_before.layers };
+}
+
+fn glassFrames(allocator: std.mem.Allocator) !void {
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    var scene_state: GlassScene = .{ .library = try ui.effects.Library.create(allocator) };
+    defer scene_state.library.destroy();
+    var gpu: std.ArrayList(u32) = .empty;
+    defer gpu.deinit(allocator);
+    var software: std.ArrayList(u32) = .empty;
+    defer software.deinit(allocator);
+    const stats = try renderGlass(allocator, app, &scene_state, false, &gpu);
+    _ = try renderGlass(allocator, app, &scene_state, true, &software);
+    try std.testing.expectEqual(@as(u64, 6), stats.backdrops);
+    try std.testing.expectEqual(@as(u64, 3), stats.indicators);
+    try std.testing.expectEqual(gpu.items.len, software.items.len);
+    const probe = try app.createWindow(.{ .width = glass_width, .height = glass_height });
+    const size = try probe.contentSize();
+    _ = try probe.destroy();
+    const stride: usize = size.width;
+    var worst: i32 = 0;
+    var worst_at: usize = 0;
+    var mismatches: usize = 0;
+    for (gpu.items, software.items, 0..) |g, w, i| {
+        const d = difference(g, w);
+        if (d > worst) {
+            worst = d;
+            worst_at = i;
+        }
+        if (d > 3) {
+            if (mismatches < 12) std.debug.print("pixel ({d}, {d}): metal {x:0>6} software {x:0>6}\n", .{ i % stride, i / stride, g & 0xffffff, w & 0xffffff });
+            mismatches += 1;
+        }
+    }
+    std.debug.print("metal backdrops and indicators: worst channel difference {d} at ({d}, {d}), {d} pixels beyond 3\n", .{ worst, worst_at % stride, worst_at / stride, mismatches });
+    try std.testing.expect(mismatches * 1000 <= gpu.items.len);
+}
+
 /// Pipelines a renderer compiled come back from the disk cache for the
 /// next one: the renderer's own and a shader effect's.
 fn pipelineCache(allocator: std.mem.Allocator) !void {
@@ -632,6 +753,7 @@ pub fn main() !void {
     try windowFrames(gpa.allocator());
     try effectFrames(gpa.allocator());
     try layerFrames(gpa.allocator());
+    try glassFrames(gpa.allocator());
     try std.testing.expect(matched);
     try std.testing.expectEqual(@as(u32, 0), metal.liveObjects());
     std.debug.print("metal smoke ok\n", .{});

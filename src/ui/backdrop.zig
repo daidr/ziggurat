@@ -1,7 +1,9 @@
 //! Backdrop effects read what has already been drawn beneath an element in
 //! the current target plane, filter it and write the result back inside the
-//! element's rounded rectangle. They run on the software planes; a frame that
-//! holds one is replayed in software.
+//! element's rounded rectangle. The software planes run them through
+//! `apply`; the Metal renderer runs the same `plan` (regions, Gaussian
+//! weights and shading) in shaders. Other GPU renderers replay a frame that
+//! holds one in software.
 const std = @import("std");
 const layout = @import("layout.zig");
 const geometry = @import("geometry.zig");
@@ -189,56 +191,99 @@ pub fn maskPoints(mask: Mask, bounds: Rect) [2]layout.Point {
     };
 }
 
-const Box = struct { x0: f64, y0: f64, x1: f64, y1: f64, radius: f64 };
-const Region = struct { x0: usize, y0: usize, x1: usize, y1: usize };
+pub const Box = struct { x0: f64, y0: f64, x1: f64, y1: f64, radius: f64 };
+pub const Region = struct { x0: usize, y0: usize, x1: usize, y1: usize };
+
+/// Where the target's pixels are: physical pixel = DIP * scale + origin;
+/// the clip is physical, inside width x height.
+pub const Target = struct { width: u32, height: u32, scale: f32, origin: [2]f64 = .{ 0, 0 }, clip: [4]f64 };
+/// What an effect does to its target, as `apply` and the GPU renderers
+/// carry it out: nothing, the opaque fallback inside `box`, or the filter of
+/// `sample` written inside `box` over `out`.
+pub const Plan = struct {
+    box: Box,
+    out: Region,
+    sample: Region,
+    clip: [4]f64,
+    mode: enum { empty, fill, filter },
+    fill: Color,
+    shading: Shading,
+    pub fn dirty(self: Plan) Dirty {
+        if (self.mode == .empty) return .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+        return .{ .left = @intCast(self.out.x0), .top = @intCast(self.out.y0), .right = @intCast(self.out.x1), .bottom = @intCast(self.out.y1) };
+    }
+};
+
+/// Plans `entry` over `target`, counting it in the workspace's statistics
+/// as `apply` does.
+pub fn plan(target: Target, entry: Entry, workspace: ?*Workspace) Plan {
+    const s: f64 = target.scale;
+    const b = entry.bounds;
+    const box: Box = blk: {
+        const x0 = @round(@as(f64, b.x) * s + target.origin[0]);
+        const y0 = @round(@as(f64, b.y) * s + target.origin[1]);
+        const x1 = @round((@as(f64, b.x) + b.width) * s + target.origin[0]);
+        const y1 = @round((@as(f64, b.y) + b.height) * s + target.origin[1]);
+        break :blk .{ .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1, .radius = @min(@as(f64, entry.radius) * s, @min(x1 - x0, y1 - y0) / 2) };
+    };
+    const none: Region = .{ .x0 = 0, .y0 = 0, .x1 = 0, .y1 = 0 };
+    var result: Plan = .{ .box = box, .out = none, .sample = none, .clip = target.clip, .mode = .empty, .fill = entry.fallback, .shading = .{ .kind = entry.kind, .sigma = 0, .radius = 0 } };
+    if (!(box.x1 > box.x0 and box.y1 > box.y0)) return result;
+    const width: f64 = @floatFromInt(target.width);
+    const height: f64 = @floatFromInt(target.height);
+    const clip = target.clip;
+    const fx0 = @max(@max(box.x0, @floor(clip[0])), 0);
+    const fy0 = @max(@max(box.y0, @floor(clip[1])), 0);
+    const fx1 = @min(@min(box.x1, @ceil(clip[2])), width);
+    const fy1 = @min(@min(box.y1, @ceil(clip[3])), height);
+    if (!(fx1 > fx0 and fy1 > fy0)) return result;
+    result.out = .{ .x0 = @intFromFloat(fx0), .y0 = @intFromFloat(fy0), .x1 = @intFromFloat(fx1), .y1 = @intFromFloat(fy1) };
+    const out = result.out;
+    result.shading = Shading.init(entry, box, s);
+    const reach: usize = result.shading.radius + @as(usize, @intFromFloat(@ceil(result.shading.refraction))) + 1;
+    result.sample = .{
+        .x0 = out.x0 -| reach,
+        .y0 = out.y0 -| reach,
+        .x1 = @min(out.x1 + reach, target.width),
+        .y1 = @min(out.y1 + reach, target.height),
+    };
+    const pixels = (result.sample.x1 - result.sample.x0) * (result.sample.y1 - result.sample.y0);
+    const space = workspace orelse {
+        result.mode = .fill;
+        return result;
+    };
+    if (pixels > space.capacity) {
+        space.stats.fallbacks += 1;
+        result.mode = .fill;
+        return result;
+    }
+    space.stats.applied += 1;
+    space.stats.pixels += pixels;
+    result.mode = .filter;
+    return result;
+}
 
 /// Filter the target beneath `entry` and write the result inside it. The
 /// surface's clip bounds the written pixels; samples may come from anywhere
 /// on the plane, and beyond its edges repeat the nearest pixel.
 pub fn apply(surface: cpu.Surface, transparent: bool, entry: Entry, workspace: ?*Workspace) Dirty {
-    const empty: Dirty = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
-    const s: f64 = surface.scale;
-    const b = entry.bounds;
-    const box: Box = blk: {
-        const x0 = @round(@as(f64, b.x) * s + surface.origin[0]);
-        const y0 = @round(@as(f64, b.y) * s + surface.origin[1]);
-        const x1 = @round((@as(f64, b.x) + b.width) * s + surface.origin[0]);
-        const y1 = @round((@as(f64, b.y) + b.height) * s + surface.origin[1]);
-        break :blk .{ .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1, .radius = @min(@as(f64, entry.radius) * s, @min(x1 - x0, y1 - y0) / 2) };
-    };
-    if (!(box.x1 > box.x0 and box.y1 > box.y0)) return empty;
-    const width: f64 = @floatFromInt(surface.width);
-    const height: f64 = @floatFromInt(surface.height);
+    const p = plan(.{ .width = surface.width, .height = surface.height, .scale = surface.scale, .origin = .{ surface.origin[0], surface.origin[1] }, .clip = surface.clip }, entry, workspace);
+    switch (p.mode) {
+        .empty => return p.dirty(),
+        .fill => {
+            fill(surface, transparent, p.box, p.out, p.fill);
+            return p.dirty();
+        },
+        .filter => {},
+    }
+    const space = workspace.?;
+    const box = p.box;
+    const out = p.out;
+    const sample = p.sample;
+    const shading = p.shading;
     const clip = surface.clip;
-    const fx0 = @max(@max(box.x0, @floor(clip[0])), 0);
-    const fy0 = @max(@max(box.y0, @floor(clip[1])), 0);
-    const fx1 = @min(@min(box.x1, @ceil(clip[2])), width);
-    const fy1 = @min(@min(box.y1, @ceil(clip[3])), height);
-    if (!(fx1 > fx0 and fy1 > fy0)) return empty;
-    const out: Region = .{ .x0 = @intFromFloat(fx0), .y0 = @intFromFloat(fy0), .x1 = @intFromFloat(fx1), .y1 = @intFromFloat(fy1) };
-    const dirty: Dirty = .{ .left = @intCast(out.x0), .top = @intCast(out.y0), .right = @intCast(out.x1), .bottom = @intCast(out.y1) };
-
-    const shading = Shading.init(entry, box, s);
-    const reach: usize = shading.radius + @as(usize, @intFromFloat(@ceil(shading.refraction))) + 1;
-    const sample: Region = .{
-        .x0 = out.x0 -| reach,
-        .y0 = out.y0 -| reach,
-        .x1 = @min(out.x1 + reach, surface.width),
-        .y1 = @min(out.y1 + reach, surface.height),
-    };
     const sw = sample.x1 - sample.x0;
     const sh = sample.y1 - sample.y0;
-    const space = workspace orelse {
-        fill(surface, transparent, box, out, entry.fallback);
-        return dirty;
-    };
-    if (sw * sh > space.capacity) {
-        space.stats.fallbacks += 1;
-        fill(surface, transparent, box, out, entry.fallback);
-        return dirty;
-    }
-    space.stats.applied += 1;
-    space.stats.pixels += sw * sh;
     const current = space.plane(0, sw * sh);
     const scratch = space.plane(1, sw * sh);
     for (0..sh) |row| @memcpy(current[row * sw ..][0..sw], surface.pixels[(sample.y0 + row) * surface.stride + sample.x0 ..][0..sw]);
@@ -273,7 +318,7 @@ pub fn apply(surface: cpu.Surface, transparent: bool, entry: Entry, workspace: ?
         const at = y * surface.stride + x;
         surface.pixels[at] = composite(surface.pixels[at], color, amount, transparent);
     };
-    return dirty;
+    return p.dirty();
 }
 
 const Plane = struct {
@@ -376,7 +421,7 @@ pub const PaneMaterial = struct {
 pub const hard_edge_blur = 6.4;
 pub const soft_edge_alpha = 0.85;
 
-const Line = struct {
+pub const Line = struct {
     x: f64,
     y: f64,
     dx: f64,
@@ -386,7 +431,7 @@ const Line = struct {
     to: f64,
     least: f64,
     most: f64,
-    fn blurAt(self: Line, px: f64, py: f64) f64 {
+    pub fn blurAt(self: Line, px: f64, py: f64) f64 {
         const t = if (self.length > 0) std.math.clamp(((px - self.x) * self.dx + (py - self.y) * self.dy) / self.length, 0, 1) else @as(f64, if ((px - self.x) * self.dx + (py - self.y) * self.dy >= 0) 1 else 0);
         return self.from + (self.to - self.from) * t;
     }
@@ -452,7 +497,7 @@ pub fn blurLevels(out: *[16]Level, least_value: f64, most: f64) usize {
     return len;
 }
 
-const Shading = struct {
+pub const Shading = struct {
     kind: Kind,
     sigma: f64,
     radius: usize,
@@ -598,12 +643,12 @@ fn clipCoverage(clip: [4]f64, x: f64, y: f64) f64 {
     return @max(0, @min(x + 1, clip[2]) - @max(x, clip[0])) * @max(0, @min(y + 1, clip[3]) - @max(y, clip[1]));
 }
 
-/// Separable Gaussian over premultiplied channels; edges repeat.
-fn gaussian(plane: Plane, scratch: []u32, sigma: f64) void {
-    if (!(sigma > 0)) return;
+/// The normalized weights of the Gaussian of `sigma` pixels, from `-radius`
+/// to `radius`; the radius is 0 when it does nothing.
+pub fn gaussianWeights(sigma: f64, weights: *[2 * max_radius_pixels + 1]f64) usize {
+    if (!(sigma > 0)) return 0;
     const radius: usize = @min(max_radius_pixels, @as(usize, @intFromFloat(@ceil(3 * sigma))));
-    if (radius == 0) return;
-    var weights: [2 * max_radius_pixels + 1]f64 = undefined;
+    if (radius == 0) return 0;
     var total: f64 = 0;
     for (0..2 * radius + 1) |i| {
         const d = @as(f64, @floatFromInt(i)) - @as(f64, @floatFromInt(radius));
@@ -611,6 +656,14 @@ fn gaussian(plane: Plane, scratch: []u32, sigma: f64) void {
         total += weights[i];
     }
     for (weights[0 .. 2 * radius + 1]) |*w| w.* /= total;
+    return radius;
+}
+
+/// Separable Gaussian over premultiplied channels; edges repeat.
+fn gaussian(plane: Plane, scratch: []u32, sigma: f64) void {
+    var weights: [2 * max_radius_pixels + 1]f64 = undefined;
+    const radius = gaussianWeights(sigma, &weights);
+    if (radius == 0) return;
     const w = plane.width;
     const h = plane.height;
     for (0..h) |y| {

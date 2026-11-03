@@ -5,15 +5,17 @@
 //! and conic, padded, repeated or reflected, mixed in sRGB, linear sRGB or
 //! Oklab), text, prepared text, coverage masks, images, clips, groups (at
 //! an opacity, through a mask, or filtered with a Gaussian kernel), raster
-//! transforms and shader effects: element effects over a capture of their
+//! transforms, shader effects (element effects over a capture of their
 //! content and backdrop shaders over a copy of the target, with programs
-//! translated to MSL and compiled outside paint by `prepareEffect`. Groups
-//! and transforms capture their content in textures of the frame, as the
+//! translated to MSL and compiled outside paint by `prepareEffect`), inside
+//! raster transforms too, backdrop effects (blur, glass and scroll edges,
+//! filtered from a copy of the target as the software planes filter it) and
+//! loading indicators (their scenes evaluated per pixel). Groups and
+//! transforms capture their content in textures of the frame, as the
 //! software planes do; their limits (depth, transform sources, Gaussian
 //! capacity) are the software renderer's plan, which `Context` checks each
-//! frame against. A frame that uses anything else (backdrop effects,
-//! loading indicators, GPU textures, a shader effect inside a transform, a
-//! shader program not prepared) draws on the software plane instead, as
+//! frame against. A frame that uses anything else (GPU textures, a shader
+//! program not prepared) draws on the software plane instead, as
 //! `prepareEffects` tells; so does a frame drawing an image or mask not yet
 //! uploaded (`holdsFrame`), which `residentFrame` uploads for the next.
 //!
@@ -35,6 +37,8 @@ const effect_host = @import("gpu_effect_host.zig");
 const shader_effects = commands.shader_effects;
 const gaussian = @import("gaussian_filter.zig");
 const damage = @import("damage.zig");
+const backdrop = commands.backdrop;
+const loading = commands.loading;
 
 extern fn zmtl_create(*c_int) ?*anyopaque;
 extern fn zmtl_destroy(?*anyopaque) void;
@@ -81,6 +85,8 @@ extern fn zmtl_effect_geometry(*anyopaque, *EffectGeometry) c_int;
 extern fn zmtl_begin_effect(*anyopaque, i32, i32, u32, u32, u32) c_int;
 extern fn zmtl_end_effect(*anyopaque, ?*const EffectPass, u32) c_int;
 extern fn zmtl_backdrop_shader(*anyopaque, *const EffectPass, *const [4]u32, *const [4]u32) c_int;
+extern fn zmtl_backdrop(*anyopaque, *const Glass, u32, [*]const GlassLevel, [*]const f32, u32) c_int;
+extern fn zmtl_indicator(*anyopaque, [*]const f32, u32, f32, f32, f32, *const [4]i32, u32, f32) c_int;
 extern fn zmtl_test_display([*:0]const u8) void;
 extern fn zmtl_test_capture(*anyopaque, c_int) void;
 extern fn zmtl_test_pixel(*anyopaque, u32, u32) u32;
@@ -90,7 +96,11 @@ extern fn zmtl_test_layer_under_subviews(*anyopaque) c_int;
 extern fn zmtl_test_layer_flipped(*anyopaque) c_int;
 extern fn zmtl_test_atlas_levels(*anyopaque) u32;
 
-const NativeStats = extern struct { device_creations: u32, layer_creations: u32, resizes: u32, presents: u32, transaction_presents: u32, busy_presents: u32, atlas_pages: u32, glyphs: u32, frames: u64, instances: u64, batches: u64, effect_passes: u64, layers: u64, filter_passes: u64, partial_frames: u64, cached_pipelines: u64 };
+const NativeStats = extern struct { device_creations: u32, layer_creations: u32, resizes: u32, presents: u32, transaction_presents: u32, busy_presents: u32, atlas_pages: u32, glyphs: u32, frames: u64, instances: u64, batches: u64, effect_passes: u64, layers: u64, filter_passes: u64, partial_frames: u64, cached_pipelines: u64, backdrops: u64, indicators: u64 };
+/// A backdrop effect's plan for src/ui/metal.m (ZmGlass).
+const Glass = extern struct { box: [4]f32, clip: [4]f32, tone: [4]f32, tint: [4]f32, line: [4]f32, line2: [4]f32, misc: [4]f32, misc2: [4]f32, background: [4]f32, fill: [4]f32, region: [4]u32, out: [4]u32 };
+const GlassLevel = extern struct { radius: u32, lo: f32, hi: f32, weights: u32 };
+const kernel_len = 2 * backdrop.max_radius_pixels + 1;
 const EffectPass = extern struct { words: [*]const u32, word_count: u32, slot: u32, params: effect_host.Params };
 const EffectGeometry = extern struct { clip: [4]f64, scale: f32, origin: [2]f32, width: u32, height: u32, transparent: u32 };
 /// Captures (groups, transforms and element effects) nested in one another
@@ -112,8 +122,9 @@ pub const Options = struct {
 /// those of a live resize), busy_presents frames for which no drawable came.
 /// layers counts groups and transforms composited, filter_passes Gaussian
 /// filter passes, partial_frames frames that drew only their damage and
-/// cached_pipelines pipelines made from the disk cache's compiled code.
-pub const Stats = struct { device_creations: u32 = 0, layer_creations: u32 = 0, resizes: u32 = 0, presents: u32 = 0, transaction_presents: u32 = 0, busy_presents: u32 = 0, atlas_pages: u32 = 0, glyphs: u32 = 0, frames: u64 = 0, instances: u64 = 0, batches: u64 = 0, effect_passes: u64 = 0, layers: u64 = 0, filter_passes: u64 = 0, partial_frames: u64 = 0, cached_pipelines: u64 = 0 };
+/// cached_pipelines pipelines made from the disk cache's compiled code,
+/// backdrops backdrop effects and indicators loading indicators drawn.
+pub const Stats = struct { device_creations: u32 = 0, layer_creations: u32 = 0, resizes: u32 = 0, presents: u32 = 0, transaction_presents: u32 = 0, busy_presents: u32 = 0, atlas_pages: u32 = 0, glyphs: u32 = 0, frames: u64 = 0, instances: u64 = 0, batches: u64 = 0, effect_passes: u64 = 0, layers: u64 = 0, filter_passes: u64 = 0, partial_frames: u64 = 0, cached_pipelines: u64 = 0, backdrops: u64 = 0, indicators: u64 = 0 };
 
 pub fn liveObjects() u32 {
     return zmtl_live_objects();
@@ -221,14 +232,14 @@ pub const Renderer = struct {
     /// Whether the GPU draws `buffer`; see the module's documentation. Each
     /// shader program it uses must have been prepared with `prepareEffect`;
     /// shader effects also need the frame's shader workspace and the
-    /// frame's scale, outside raster transforms. Gaussian groups need
-    /// kernels at the frame's scale; every capture must fit a texture.
+    /// frame's scale. Gaussian groups need kernels at the frame's scale;
+    /// every capture must fit a texture.
     pub fn prepareEffects(self: *Renderer, buffer: *const commands.Buffer) bool {
         const native = self.native orelse return false;
         if (!self.active) return false;
         const scale = zmtl_scale(native);
         for (buffer.commands()) |op| switch (op) {
-            .backdrop, .indicator, .texture => return false,
+            .texture => return false,
             else => {},
         };
         for (buffer.preparedTextResources()) |view| if (view.native_coverage == null) return false;
@@ -239,7 +250,6 @@ pub const Renderer = struct {
         const Scope = enum { group, transform, effect };
         var scopes: [max_capture_depth]Scope = undefined;
         var depth: usize = 0;
-        var transformed: usize = 0;
         var uses = false;
         for (buffer.commands()) |op| switch (op) {
             .begin_group => |value| {
@@ -263,11 +273,10 @@ pub const Renderer = struct {
                 if (t.pixel_width + 2 > max_texture or t.pixel_height + 2 > max_texture) return false;
                 scopes[depth] = .transform;
                 depth += 1;
-                transformed += 1;
             },
             .effect => |slot| {
                 uses = true;
-                if (depth == scopes.len or transformed != 0) return false;
+                if (depth == scopes.len) return false;
                 const shaders = workspace orelse return false;
                 if (slot >= entries.len) return false;
                 const entry = &entries[slot];
@@ -281,11 +290,10 @@ pub const Renderer = struct {
             .end_group, .end_transform, .end_effect => {
                 if (depth == 0) return false;
                 depth -= 1;
-                if (scopes[depth] == .transform) transformed -= 1;
             },
             .backdrop_shader => |slot| {
                 uses = true;
-                if (workspace == null or slot >= entries.len or transformed != 0) return false;
+                if (workspace == null or slot >= entries.len) return false;
             },
             else => {},
         };
@@ -378,12 +386,86 @@ pub const Renderer = struct {
         if (zmtl_effect_geometry(self.native.?, &target) != 0) return error.NotDrawing;
         const origin = [2]f64{ target.origin[0], target.origin[1] };
         const plan = shader_effects.planBackdrop(target.width, target.height, target.scale, origin, target.clip, entry) orelse return;
-        const room: ?usize = if (self.effect_buffer.?.backdrop_storage.workspace) |backdrop| backdrop.planes.len else null;
+        const room: ?usize = if (self.effect_buffer.?.backdrop_storage.workspace) |space| space.planes.len else null;
         if (!shader_effects.startBackdrop(workspace, entry, plan, room, target.scale)) return;
         const pass = self.effectPass(slot, words, effect_host.backdropParams(entry, plan, target.scale, origin, target.clip, target.transparent != 0), workspace);
         const region = [4]u32{ @intCast(plan.region[0]), @intCast(plan.region[1]), @intCast(plan.region[2]), @intCast(plan.region[3]) };
         const out = [4]u32{ @intCast(plan.out[0]), @intCast(plan.out[1]), @intCast(plan.out[2]), @intCast(plan.out[3]) };
         if (zmtl_backdrop_shader(self.native.?, &pass, &region, &out) != 0) return error.GraphicsFailed;
+    }
+    /// Filters the target beneath a backdrop effect as the software planes
+    /// do (src/ui/backdrop.zig), counting it in the workspace's statistics.
+    fn backdropEffect(self: *Renderer, entry: backdrop.Entry, workspace: ?*backdrop.Workspace) !void {
+        var target: EffectGeometry = undefined;
+        if (zmtl_effect_geometry(self.native.?, &target) != 0) return error.NotDrawing;
+        const p = backdrop.plan(.{ .width = target.width, .height = target.height, .scale = target.scale, .origin = .{ target.origin[0], target.origin[1] }, .clip = target.clip }, entry, workspace);
+        if (p.mode == .empty) return;
+        const shading = p.shading;
+        const f = struct {
+            fn v(value: f64) f32 {
+                return @floatCast(value);
+            }
+        }.v;
+        const region = if (p.mode == .fill) p.out else p.sample;
+        var glass: Glass = .{
+            .box = .{ f(p.box.x0), f(p.box.y0), f(p.box.x1), f(p.box.y1) },
+            .clip = .{ f(p.clip[0]), f(p.clip[1]), f(p.clip[2]), f(p.clip[3]) },
+            .tone = .{ f(shading.tone.low), f(shading.tone.high), f(shading.tone.curve), f(shading.tone.saturation) },
+            .tint = .{ f(shading.tint[0]), f(shading.tint[1]), f(shading.tint[2]), f(shading.tint[3]) },
+            .line = @splat(0),
+            .line2 = @splat(0),
+            .misc = .{ f(p.box.radius), f(shading.refraction), f(shading.bezel), f(shading.noise) },
+            .misc2 = .{ f(shading.rim), if (p.mode == .fill) 3 else @floatFromInt(@backingInt(shading.kind)), @floatFromInt(target.transparent), if (shading.progressive != null) 1 else 0 },
+            .background = .{ f(shading.background[0]), f(shading.background[1]), f(shading.background[2]), 0 },
+            .fill = .{ @as(f32, @floatFromInt(p.fill.r)) / 255, @as(f32, @floatFromInt(p.fill.g)) / 255, @as(f32, @floatFromInt(p.fill.b)) / 255, @as(f32, @floatFromInt(p.fill.a)) / 255 },
+            .region = .{ @intCast(region.x0), @intCast(region.y0), @intCast(region.x1), @intCast(region.y1) },
+            .out = .{ @intCast(p.out.x0), @intCast(p.out.y0), @intCast(p.out.x1), @intCast(p.out.y1) },
+        };
+        var levels: [16]GlassLevel = undefined;
+        var weights: [16 * kernel_len]f32 = undefined;
+        var count: usize = 0;
+        if (p.mode == .filter) {
+            var kernel: [kernel_len]f64 = undefined;
+            if (shading.progressive) |line| {
+                glass.line = .{ f(line.x), f(line.y), f(line.dx), f(line.dy) };
+                glass.line2 = .{ f(line.length), f(line.from), f(line.to), 0 };
+                var planned: [16]backdrop.Level = undefined;
+                for (planned[0..backdrop.blurLevels(&planned, line.least, line.most)]) |level| {
+                    const radius = backdrop.gaussianWeights(level.blur, &kernel);
+                    for (0..2 * radius + 1) |i| weights[count * kernel_len + i] = f(kernel[i]);
+                    levels[count] = .{ .radius = @intCast(radius), .lo = f(level.lo), .hi = f(level.hi), .weights = @intCast(count * kernel_len) };
+                    count += 1;
+                }
+            } else {
+                const radius = backdrop.gaussianWeights(shading.sigma, &kernel);
+                if (radius != 0) {
+                    for (0..2 * radius + 1) |i| weights[i] = f(kernel[i]);
+                    levels[0] = .{ .radius = @intCast(radius), .lo = 0, .hi = 0, .weights = 0 };
+                    count = 1;
+                }
+            }
+        }
+        if (zmtl_backdrop(self.native.?, &glass, @intCast(count), &levels, &weights, weights.len) != 0) return error.GraphicsFailed;
+    }
+    /// Draws a loading indicator, its scene evaluated per pixel as the
+    /// software planes rasterize it (src/ui/loading.zig).
+    fn indicator(self: *Renderer, entry: loading.Entry) !void {
+        var target: EffectGeometry = undefined;
+        if (zmtl_effect_geometry(self.native.?, &target) != 0) return error.NotDrawing;
+        var elements: [loading.max_elements * loading.element_floats]f32 = undefined;
+        const scene = loading.encode(entry, &elements);
+        const origin = [2]f64{ target.origin[0], target.origin[1] };
+        const placed = loading.place(.{ .width = target.width, .height = target.height, .scale = target.scale, .origin = origin, .clip = target.clip }, entry, scene.width) orelse return;
+        if (scene.count == 0) return;
+        // The instances' coordinates are the target's less its origin.
+        const box = [4]i32{
+            @intFromFloat(@as(f64, @floatFromInt(placed.x0)) - origin[0]),
+            @intFromFloat(@as(f64, @floatFromInt(placed.y0)) - origin[1]),
+            @intFromFloat(@as(f64, @floatFromInt(placed.x1)) - origin[0]),
+            @intFromFloat(@as(f64, @floatFromInt(placed.y1)) - origin[1]),
+        };
+        const rgb = (@as(u32, entry.color.r) << 16) | (@as(u32, entry.color.g) << 8) | entry.color.b;
+        if (zmtl_indicator(self.native.?, &elements, @intCast(scene.count), @floatCast(placed.ox - origin[0]), @floatCast(placed.oy - origin[1]), @floatCast(placed.k), &box, rgb, @as(f32, @floatFromInt(entry.color.a)) / 255) != 0) return error.GraphicsFailed;
     }
     fn effectPass(self: *Renderer, slot: u8, words: []u32, params: effect_host.Params, workspace: *shader_effects.Workspace) EffectPass {
         const installed = self.effect_slots[slot];
@@ -585,6 +667,16 @@ pub const Renderer = struct {
                 if (self.effect_buffer == null) return error.SoftwareOnlyCommands;
                 try self.backdropShader(slot, &words);
             },
+            .backdrop => |slot| {
+                const buffer = self.effect_buffer orelse return error.SoftwareOnlyCommands;
+                if (slot >= buffer.backdrop_storage.len) return error.MissingResources;
+                try self.backdropEffect(buffer.backdrop_storage.entries[slot], buffer.backdrop_storage.workspace);
+            },
+            .indicator => |slot| {
+                const buffer = self.effect_buffer orelse return error.SoftwareOnlyCommands;
+                if (slot >= buffer.indicator_len) return error.MissingResources;
+                try self.indicator(buffer.indicator_storage[slot]);
+            },
             .begin_group => |value| {
                 try self.beginGroup(value, coverage_resources, filters);
                 group_depth += 1;
@@ -607,7 +699,7 @@ pub const Renderer = struct {
                 try self.endTransform(transform_stack[transform_depth]);
             },
             // prepareEffects leaves these frames to software.
-            .backdrop, .indicator, .texture => return error.UnsupportedCommand,
+            .texture => return error.UnsupportedCommand,
         };
         if (depth != 0) return error.UnbalancedClips;
         if (effect_depth != 0) return error.UnbalancedEffects;
