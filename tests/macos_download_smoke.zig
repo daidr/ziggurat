@@ -42,6 +42,14 @@ const Server = struct {
         var used: usize = 0;
         while (std.mem.indexOf(u8, request[0..used], "\r\n\r\n") == null) {
             if (used == request.len) return error.RequestTooLarge;
+            // WebKit may open a connection ahead of a request and leave it
+            // idle; one connection at a time, it would hold up the next
+            // load, so an idle one is dropped.
+            var fds = [_]std.posix.pollfd{.{ .fd = stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+            if (try std.posix.poll(&fds, 1000) == 0) {
+                std.debug.print("download fixture: dropped an idle connection\n", .{});
+                return error.IdleConnection;
+            }
             const n = try zio.net.receive(stream.socket.handle, request[used..]);
             if (n == 0) return;
             used += n;
