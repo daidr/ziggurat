@@ -32,7 +32,7 @@ const FakeApp = struct {
         if (window > 2) return error_line("no_window", "no such window");
         const page = window == 2;
         if (eql(method, "windows")) return
-            \\{"windows":[{"id":1,"title":"Contacts","kind":"content","focused":true,"visible":true},{"id":2,"title":"Docs","kind":"page","url":"http://localhost/","visible":true}]}
+        \\{"windows":[{"id":1,"title":"Contacts","kind":"content","focused":true,"visible":true},{"id":2,"title":"Docs","kind":"page","url":"http://localhost/","visible":true}]}
         ;
         if (eql(method, "tree")) {
             if (page) return error_line("unsupported", "window 2 shows a web page: use eval");

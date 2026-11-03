@@ -139,8 +139,8 @@ pub fn number(w: *Writer, value: f64) Writer.Error!void {
 /// The roles `snapshot -i` keeps even when they have no action now, as a
 /// disabled button.
 const controls = [_][]const u8{
-    "button",     "link",     "checkBox",     "radio",     "switch",       "slider",   "textField",        "popUpButton",   "tab",
-    "menuButton", "toggleButton", "comboBox", "disclosure", "stepper",     "colorWell", "menuItem",        "menuItemCheckBox", "menuItemRadio",
+    "button",     "link",         "checkBox", "radio",      "switch",  "slider",    "textField", "popUpButton",      "tab",
+    "menuButton", "toggleButton", "comboBox", "disclosure", "stepper", "colorWell", "menuItem",  "menuItemCheckBox", "menuItemRadio",
     "treeItem",
 };
 
