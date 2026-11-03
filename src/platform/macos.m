@@ -272,7 +272,11 @@ static int edit_for_selector(SEL selector,uint32_t *flags){
 /* Buttons other than the primary one: 1 secondary, 2 middle, 3 back and 4
    forward, the wire's numbers, as AppKit numbers them; others are none. */
 static void other_button(NSView *view,NativeWindow *s,NSEvent *event,int kind){
-    if(!s)return;const NSInteger number=[event buttonNumber];
+    if(!s)return;
+    /* Right-mouse events are the secondary button's whatever number they
+       carry, as events made without a device carry 0. */
+    const NSEventType type=[event type];
+    const NSInteger number=type==NSEventTypeRightMouseDown||type==NSEventTypeRightMouseUp?1:[event buttonNumber];
     if(number<1||number>4)return;
     retain_window(s);
     if(!input_allowed(s)){release_window(s);return;}
@@ -821,6 +825,8 @@ void zlm_test_click(NativeWindow *s,double x,double y,int how){
             CGPoint global=CGPointMake(screen.x,top-screen.y);
             CGEventRef press=CGEventCreateMouseEvent(NULL,kCGEventLeftMouseDown,global,kCGMouseButtonRight);
             CGEventRef release=CGEventCreateMouseEvent(NULL,kCGEventLeftMouseUp,global,kCGMouseButtonRight);
+            /* Left events ignore the button they are made with. */
+            CGEventSetIntegerValueField(press,kCGMouseEventButtonNumber,1);CGEventSetIntegerValueField(release,kCGMouseEventButtonNumber,1);
             down=[NSEvent eventWithCGEvent:press];up=[NSEvent eventWithCGEvent:release];
             CFRelease(press);CFRelease(release);
             [s->view mouseDown:down];[s->view mouseUp:up];

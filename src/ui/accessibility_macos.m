@@ -62,6 +62,9 @@ static unsigned live_hosts, live_elements, live_actions;
 - (void)setZigAccessibility:(id)provider;
 @end
 
+/* Announcements posted, and the last one's text, for the smoke test. */
+static uint32_t announcements;
+static NSString *last_announcement;
 static BOOL ranged(uint32_t role) { return role == ROLE_PROGRESS || role == ROLE_SLIDER || role == ROLE_STEPPER || role == ROLE_METER || role == ROLE_SPLITTER; }
 static BOOL fixed_range(uint32_t role) { return role == ROLE_PROGRESS || role == ROLE_METER; }
 static BOOL toggle(uint32_t role) { return role == ROLE_CHECKBOX || role == ROLE_RADIO || role == ROLE_SWITCH || role == ROLE_TAB || role == ROLE_MENU_ITEM_CHECKBOX || role == ROLE_MENU_ITEM_RADIO; }
@@ -456,6 +459,7 @@ static int publish(ZuaHost *host, const NativeNode *nodes, uint32_t count, const
     host->updating = YES;
     BOOL layout = NO;
     NSMutableArray<ZuaElement *> *value_changed = [NSMutableArray array];
+    NSMutableArray<NSString *> *announce = [NSMutableArray array];
     NSMutableDictionary<NSNumber *, ZuaElement *> *live = [NSMutableDictionary dictionaryWithCapacity:count];
     NSMutableDictionary<NSNumber *, NSMutableArray *> *children = [NSMutableDictionary dictionary];
     NSMutableArray *top = [NSMutableArray array];
@@ -469,6 +473,7 @@ static int publish(ZuaHost *host, const NativeNode *nodes, uint32_t count, const
         if (n->role >= ROLE_COUNT) { host->updating = NO; return -2; }
         NSNumber *key = @(n->id);
         ZuaElement *el = host->elements[key];
+        const BOOL created = el == nil;
         if (!el) {
             el = [[ZuaElement alloc] init];
             el->host = host; el->fresh = YES;
@@ -479,6 +484,9 @@ static int publish(ZuaHost *host, const NativeNode *nodes, uint32_t count, const
         NSString *value = text_at(text, text_len, n->value_start, n->value_len);
         NSString *description = text_at(text, text_len, n->description_start, n->description_len);
         if (apply(el, n, name, value, description, keys ? &keys[i] : NULL)) [value_changed addObject:el];
+        /* A status message absent from the previous tree announces itself
+           once, politely. */
+        if (created && n->role == ROLE_STATUS && (name.length || value.length)) [announce addObject:name.length ? name : value];
         live[key] = el;
         [order addObject:el];
         if ((n->flags & FOCUSED) && !has_focus) { focus = n->id; has_focus = YES; }
@@ -536,6 +544,12 @@ static int publish(ZuaHost *host, const NativeNode *nodes, uint32_t count, const
     if (view && layout) NSAccessibilityPostNotification(view, NSAccessibilityLayoutChangedNotification);
     for (ZuaElement *el in value_changed) NSAccessibilityPostNotification(el, NSAccessibilityValueChangedNotification);
     if (focus_changed && has_focus) NSAccessibilityPostNotification(live[@(focus)], NSAccessibilityFocusedUIElementChangedNotification);
+    for (NSString *message in announce) {
+        announcements++;
+        last_announcement = message;
+        NSAccessibilityPostNotificationWithUserInfo(NSApp, NSAccessibilityAnnouncementRequestedNotification,
+            @{NSAccessibilityAnnouncementKey: message, NSAccessibilityPriorityKey: @(NSAccessibilityPriorityMedium)});
+    }
     return 0;
 }
 
@@ -685,4 +699,11 @@ void zua_test_act(void *pointer, int kind, double number, const char *text) {
 int zua_test_child_count(void *handle) {
     NSWindow *window = (__bridge NSWindow *)handle;
     return (int)[[zua_content_view(window) accessibilityChildren] count];
+}
+
+/* The announcements posted so far; the last one's text into buffer. */
+int zua_test_announcements(char *buffer, int capacity) {
+    const char *utf8 = last_announcement.UTF8String ?: "";
+    snprintf(buffer, (size_t)capacity, "%s", utf8);
+    return (int)announcements;
 }

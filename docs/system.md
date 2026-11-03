@@ -364,6 +364,37 @@ Windows 上大多数程序把图片作为位图（`CF_DIB`，系统也会从其�
 
 `system.OpenUrl` 在 owner 线程上打开一个 URL 而不阻塞它：`start(app, url, options, context, on_done)` 校验并复制 URL，为这一次请求启动一个线程，用 `shell.Worker.openUrl` 交给系统，然后在 owner 线程调用 `on_done`，结果在 `request.result`。线程属于请求本身，没有线程池。请求从 start 到 on_done 或 App 停机结束期间地址稳定；停机等待该线程结束，之后不再调用 on_done。`options.extra_schemes` 借用同样长的时间。
 
+## 系统权限与设置引导
+
+`system.permissions` 检查并请求系统替用户保管的权限（辅助功能、屏幕录制、麦克风等），并把用户带到给权限的地方。
+
+| 权限 | macOS | Windows | 系统提示（`Request`） | 拖动面板（`Guide`） |
+| --- | --- | --- | --- | --- |
+| `accessibility` | 是 | — | 是 | 是 |
+| `screen_recording` | 是 | — | 是 | 是 |
+| `input_monitoring` | 是 | — | 是 | 是 |
+| `full_disk_access` | 读受保护文件判断 | — | — | 是 |
+| `app_management` | `check` 无法判断 | — | — | 是 |
+| `developer_tools` | `check` 无法判断 | — | — | 是 |
+| `microphone` | 是 | 是 | macOS | — |
+| `camera` | 是 | 是 | macOS | — |
+| `calendars` | 是 | — | 是 | — |
+| `reminders` | 是 | — | 是 | — |
+| `bluetooth` | 是 | — | 是 | 是 |
+| `media_apple_music` | `check` 无法判断 | — | — | 是 |
+
+系统不保管某项权限时（Windows 只对桌面应用管麦克风和摄像头，Linux 对沙盒外的应用都不管），函数返回 `UnsupportedCapability`；`allowed(p)` 把这种情况算作可以使用。`title(p)` 是系统设置里的英文名，macOS 27 上辅助功能叫 Device Control and Data Access。
+
+`check(p)` 在任意线程返回 `Status`，不询问用户：`.granted`、`.denied`、`.not_determined`（还没问过），系统说不清时为 `.unknown`。macOS 不告诉辅助功能、屏幕录制和输入监控是否问过，授予前都是 `.denied`；屏幕录制的变化要应用重启后才报告。Windows 读同意存储（`CapabilityAccessManager\ConsentStore`）里设备、用户和桌面应用（NonPackaged）三处开关，任一为 Deny 即拒绝，没写的开关算开。
+
+`Request.start(app, p, context, on_done)` 在 owner 线程开始，用系统自己的提示询问，在自己的线程上等用户回答，`on_done` 在 owner 线程读 `status` 与 `result`。macOS 每个应用只问一次，之后只报告；没有提示的权限（完全磁盘访问、App 管理、开发者工具、媒体与 Apple Music，以及 Windows 上的全部）报告 `check` 的结果。辅助功能、屏幕录制和输入监控提示后 macOS 把应用加进列表并自己打开系统设置，开关是关的，请求在用户打开开关前就结束。麦克风、摄像头、日历、提醒事项和蓝牙的提示需要 Info.plist 写明用途（`NSMicrophoneUsageDescription`、`NSCameraUsageDescription`、macOS 14 起的 `NSCalendarsFullAccessUsageDescription` / `NSRemindersFullAccessUsageDescription`、`NSBluetoothAlwaysUsageDescription`），缺了 macOS 会结束应用，所以请求返回 `UsageDescriptionMissing` 而不询问。不在 .app 包里运行的程序替启动它的应用（如终端）请求。
+
+`openSettings(worker, p)` 在 shell.Worker 线程打开给该权限的设置页：macOS 系统设置的隐私与安全性（`x-apple.systempreferences:com.apple.preference.security?Privacy_…`），Windows 设置的隐私和安全性（`ms-settings:privacy-microphone` / `privacy-webcam`）。`Guide.start(app, p, .{ .app, .name }, context, on_done)` 打开设置页并等用户给权限：在 macOS 上，列表接受拖入应用的页面（`draggable(p)`）还会在系统设置窗口下方显示一个面板，写着“Drag **MyApp** to the list above to allow **Accessibility**.”，下面是应用的图标和名字，拖进列表即可。面板与页面右侧（侧栏 230pt 之右）对齐，跟随窗口移动和缩放，留在屏幕内，下方没地方时盖住窗口底部；它从不取得焦点，系统设置始终在前，别的应用在前时隐藏；拖动时面板半透明并让鼠标穿过。应用默认是程序所在的 .app 包，不在包里时是程序本身。同一时间只显示一个面板，新的 Guide 结束旧的。应用得到权限（`check` 能判断时）、用户关掉面板或系统设置、`cancel()` 之后，`on_done` 在 owner 线程运行；Windows 上在得到权限或 `cancel()` 时结束。App 关闭时关掉面板，不再回调。
+
+引导与面板的做法、几何和文字参照 [PermissionFlow](https://github.com/jaywcjlove/PermissionFlow)（MIT，© 小弟调调），代码是本框架自己的。
+
+面板的几何（`panelFrame`、`screenOf`、`mainSettingsWindow`）是纯计算，在每个平台的单元测试里检查；`zig build smoke-system-macos` 检查每项权限的 `check` 与标题、完全磁盘访问的请求与 `check` 一致，并在没有系统设置的情况下摆放面板，核对文字、宽度、不成为 key 窗口和关闭按钮结束引导。
+
 ## 已验证范围
 
 `zig build smoke-drag` 用真实输入（X11 上 XTest，Windows 上 SetCursorPos/SendInput）在两个窗口间拖动：同进程的多 item、多格式（含一个 lazy 表示）拖动完整到达 DataTarget，copy 与 Shift 的 move 协商一致且 provider 每次拖动只渲染一次；Escape、`cancel()`、在无目标处松开、目标拒绝格式都只结束一次且结果正确；files/text 的 `Target` 收到同一拖动的文本；另一个进程拖入的文本、自定义格式和文件作为一个 item 到达。

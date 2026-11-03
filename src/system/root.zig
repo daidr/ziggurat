@@ -63,6 +63,11 @@ pub const Flyout = flyout.Flyout;
 pub const TrayIcon = @import("tray_icon.zig").TrayIcon;
 pub const now_playing = @import("now_playing.zig");
 pub const NowPlaying = now_playing.NowPlaying;
+pub const permissions = @import("permissions.zig");
+comptime {
+    // The native panel calls its exported geometry.
+    if (builtin.os.tag == .macos) _ = permissions;
+}
 pub const capabilities = .{
     .native_menu = windows or linux or macos,
     .menu_accelerators = windows or linux or macos,
@@ -94,6 +99,7 @@ pub const capabilities = .{
     .icon = icon.capabilities,
     .menu_icon = menu_icon.capabilities,
     .theme = theme.capabilities,
+    .permissions = permissions.capabilities,
 };
 
 test {
@@ -112,4 +118,5 @@ test {
     _ = dock;
     _ = @import("tray_icon.zig");
     _ = now_playing;
+    _ = permissions;
 }
