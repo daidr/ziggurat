@@ -218,6 +218,8 @@ fn run(allocator: std.mem.Allocator) !void {
     var state: State = .{ .app = app };
     var storage: view.Storage(32, 256) = .{};
     var host = view.Host.init(&state, State.build, storage.buffers(), .{ .root = .{ .padding = view.Insets.all(0), .alignment = .stretch } });
+    // A backdrop on the composition owner paints in software.
+    host.context.render_mode = .gdi;
     state.host = &host;
     state.window = try app.createWindow(.{ .width = 360, .height = 300 });
     defer _ = state.window.destroy() catch {};
