@@ -82,7 +82,7 @@ fn scene(buffer: *commands.Buffer, images: *Images) !void {
 }
 
 /// The frame's pixels from both renderers at `scale`, compared.
-fn compare(scale: f32) !void {
+fn compare(scale: f32) !bool {
     var images: Images = undefined;
     try images.init(scale);
     var buffer: commands.Buffer = .{};
@@ -116,6 +116,8 @@ fn compare(scale: f32) !void {
 
     const text_top: u32 = @intFromFloat(90 * scale);
     var shape_misses: usize = 0;
+    var tiles = [_]u32{0} ** (64 * 40);
+    var samples: [64 * 40][4]u32 = undefined;
     var worst: i32 = 0;
     var worst_at: [2]u32 = .{ 0, 0 };
     var software_ink: usize = 0;
@@ -135,14 +137,23 @@ fn compare(scale: f32) !void {
             worst_at = .{ @intCast(x), @intCast(y) };
         }
         // Antialiased edges may round differently; interiors may not.
-        if (d > 24) shape_misses += 1;
+        if (d > 24) {
+            shape_misses += 1;
+            const tile = (y / 8) * 64 + x / 8;
+            if (tile < tiles.len) {
+                if (tiles[tile] == 0) samples[tile] = .{ @intCast(x), @intCast(y), got, want };
+                tiles[tile] += 1;
+            }
+        }
+    };
+    for (tiles, 0..) |count, tile| if (count != 0) {
+        const sample = samples[tile];
+        std.debug.print("  tile {d},{d}: {d} misses, first at {d},{d} metal {x:0>6} software {x:0>6}\n", .{ (tile % 64) * 8, (tile / 64) * 8, count, sample[0], sample[1], sample[2], sample[3] });
     };
     software.abort();
     std.debug.print("metal parity at scale {d}: worst {d} at {d},{d}, {d} pixels beyond 24, ink {d} vs {d}\n", .{ scale, worst, worst_at[0], worst_at[1], shape_misses, software_ink, gpu_ink });
-    try std.testing.expect(shape_misses * 400 < @as(usize, pw) * text_top);
-    try std.testing.expect(software_ink > 100 and gpu_ink > 100);
     const ink_ratio = @as(f64, @floatFromInt(gpu_ink)) / @as(f64, @floatFromInt(software_ink));
-    try std.testing.expect(ink_ratio > 0.8 and ink_ratio < 1.25);
+    return shape_misses * 400 < @as(usize, pw) * text_top and software_ink > 100 and gpu_ink > 100 and ink_ratio > 0.8 and ink_ratio < 1.25;
 }
 
 const Probe = struct {
@@ -218,10 +229,12 @@ fn windowFrames(allocator: std.mem.Allocator) !void {
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
-    try compare(1);
-    try compare(2);
-    try compare(1.5);
+    var matched = true;
+    for ([_]f32{ 1, 2, 1.5 }) |scale| if (!try compare(scale)) {
+        matched = false;
+    };
     try windowFrames(gpa.allocator());
+    try std.testing.expect(matched);
     try std.testing.expectEqual(@as(u32, 0), metal.liveObjects());
     std.debug.print("metal smoke ok\n", .{});
 }
