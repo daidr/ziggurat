@@ -2705,10 +2705,11 @@ pub const Context = struct {
     fn gpuReplay(self: *Context, paint: z.Paint) !void {
         if (gpu_damage) {
             errdefer self.gpu_damage_tracker.invalidate();
-            const region = if (self.gpu_renderer.planeKept()) self.gpu_damage_tracker.plan(&self.command_buffer, self.gpu_renderer.planeGeneration(), paint.size.width, paint.size.height, paint.size.scale, paint.transparent) else whole: {
-                self.gpu_damage_tracker.invalidate();
-                break :whole damage.Damage.whole;
-            };
+            // A frame drawn whole is still hashed, so the next frame can
+            // draw only what changed over it.
+            if (!self.gpu_renderer.planeKept()) self.gpu_damage_tracker.invalidate();
+            const planned = self.gpu_damage_tracker.plan(&self.command_buffer, self.gpu_renderer.planeGeneration(), paint.size.width, paint.size.height, paint.size.scale, paint.transparent);
+            const region = if (self.gpu_renderer.planeKept()) planned else damage.Damage.whole;
             try self.gpu_renderer.replayDamage(&self.command_buffer, &region, paint.transparent);
             self.gpu_last_damage = region;
         } else try self.gpu_renderer.replayBuffer(&self.command_buffer);
