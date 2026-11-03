@@ -5579,6 +5579,7 @@ pub const Host = struct {
         self.context.on_input = onInput;
         self.context.on_key_release = onKeyRelease;
         self.context.on_unhandled_key = onUnhandledKey;
+        self.context.on_command_enabled = onCommandEnabled;
         try self.context.attach(window);
     }
     /// Attach as the full-window backdrop of a composition Owner, under the
@@ -5589,6 +5590,7 @@ pub const Host = struct {
         self.context.on_value = onValue;
         self.context.on_input = onInput;
         self.context.on_key_release = onKeyRelease;
+        self.context.on_command_enabled = onCommandEnabled;
         return self.context.attachBackdrop(owner);
     }
 
@@ -5685,6 +5687,17 @@ pub const Host = struct {
     /// Route popup, tooltip and toast input before the Context, follow
     /// presses that leaves capture or that drag, and send a wheel event to
     /// the leaf or the innermost visible scroll container under it.
+    /// Outside text fields, which answer for themselves, an Edit command
+    /// acts only on focused embedded content, which takes every key.
+    fn onCommandEnabled(ptr: *anyopaque, context: *ui.Context, _: z.EditCommand) bool {
+        const self: *Host = @ptrCast(@alignCast(ptr));
+        const focused = context.input_state.focused orelse return false;
+        for (self.view.overlay.anchors[0..self.view.overlay.anchor_count]) |anchor| {
+            if (anchor.id != focused and anchor.input != focused) continue;
+            return anchor.embed != null;
+        }
+        return false;
+    }
     fn onInput(ptr: *anyopaque, _: *ui.Context, event: z.Event) bool {
         const self: *Host = @ptrCast(@alignCast(ptr));
         if (self.building) return false;

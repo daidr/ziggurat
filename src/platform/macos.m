@@ -319,7 +319,19 @@ static void menu_edit(NativeWindow *s,unichar key,unsigned short code,uint32_t e
 - (void)undo:(id)sender{(void)sender;menu_edit(native,'z',0x06,0,12);}
 - (void)redo:(id)sender{(void)sender;menu_edit(native,'z',0x06,1u,12);}
 - (void)delete:(id)sender{(void)sender;NativeWindow *s=native;if(s&&input_allowed(s))emit_edit(s,7,0);}
-- (BOOL)validateMenuItem:(NSMenuItem *)item{(void)item;NativeWindow *s=native;return s&&!s->destroyed&&s->enabled;}
+/* The Edit roles are enabled as the focused content can act on them
+   (Window.commandEnabled); the codes are core.EditCommand's. */
+- (BOOL)validateMenuItem:(NSMenuItem *)item{
+    NativeWindow *s=native;if(!s||s->destroyed||!s->enabled)return NO;
+    SEL action=[item action];int command=-1;
+    if(action==@selector(undo:))command=0;else if(action==@selector(redo:))command=1;
+    else if(action==@selector(cut:))command=2;else if(action==@selector(copy:))command=3;
+    else if(action==@selector(paste:))command=4;else if(action==@selector(pasteAsPlainText:))command=5;
+    else if(action==@selector(delete:))command=6;else if(action==@selector(selectAll:))command=7;
+    if(command<0)return YES;
+    NativeEvent query={0};query.kind=27;query.key=command;
+    return emit(s,&query)?YES:NO;
+}
 - (void)keyUp:(NSEvent *)event{NativeWindow *s=native;if(s&&input_allowed(s))key_event(s,event,26);}
 - (void)flagsChanged:(NSEvent *)event{
     NativeWindow *s=native;if(!s||!input_allowed(s))return;

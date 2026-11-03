@@ -534,6 +534,53 @@ test "password fields shape placeholders, copy nothing, hide text from input ser
     try field.prepare(bounds, .{});
     try std.testing.expectEqualStrings("oo", try shaped.text(field.adapter));
 }
+test "the Edit menu's commands are enabled as the focused field can act on them" {
+    const app = try z.App.init(std.testing.allocator);
+    defer app.deinit();
+    const window = try app.createWindow(.{});
+    defer _ = window.destroy() catch unreachable;
+    var host: FieldTestHost = .{};
+    var context = ui.Context.init(&host, FieldTestHost.draw, FieldTestHost.action);
+    context.semantics_enabled = false;
+    try context.attach(window);
+    try context.prepareTextFields(std.testing.allocator, .{});
+    const engine = try t.Engine.create(std.testing.allocator, std.Thread.getCurrentId(), .{});
+    defer engine.close() catch unreachable;
+    const document = try d.Document.create(std.testing.allocator, std.Thread.getCurrentId(), "ab", .{});
+    defer document.close() catch unreachable;
+    const field = try Field.create(std.testing.allocator, document, engine, .{ .clipboard = .{ .context = &host, .read = FieldTestHost.read, .write = FieldTestHost.write } });
+    defer field.close() catch unreachable;
+    const bounds: Rect = .{ .x = 8, .y = 8, .width = 180, .height = 40 };
+    try field.prepare(bounds, .{});
+    try field.attach(&context, 1);
+    try FieldTestHost.front(&context, &.{field}, false);
+    // Without focus, content with no input of its own takes nothing.
+    try std.testing.expect(!window.commandEnabled(.paste));
+    try field.focus();
+    _ = try document.setSelection(.{ .anchor = 2, .caret = 2 });
+    try std.testing.expect(window.commandEnabled(.paste) and window.commandEnabled(.select_all));
+    try std.testing.expect(!window.commandEnabled(.copy) and !window.commandEnabled(.cut) and !window.commandEnabled(.delete));
+    try std.testing.expect(!window.commandEnabled(.undo) and !window.commandEnabled(.redo));
+    FieldTestHost.emit(window, .{ .text_input = .{ .text = "c", .producer = .application } });
+    try std.testing.expect(window.commandEnabled(.undo) and !window.commandEnabled(.redo));
+    _ = try document.setSelection(.{ .anchor = 0, .caret = 1 });
+    try std.testing.expect(window.commandEnabled(.copy) and window.commandEnabled(.cut) and window.commandEnabled(.delete));
+    // Read-only text is copied and selected, never changed.
+    try field.setPolicy(.{ .read_only = true });
+    try std.testing.expect(window.commandEnabled(.copy) and window.commandEnabled(.select_all));
+    try std.testing.expect(!window.commandEnabled(.cut) and !window.commandEnabled(.paste) and !window.commandEnabled(.undo));
+    try field.setPolicy(.{});
+    // A password is neither cut nor copied.
+    try field.setPassword(true);
+    try std.testing.expect(!window.commandEnabled(.copy) and !window.commandEnabled(.cut) and window.commandEnabled(.delete));
+    try field.setPassword(false);
+    // A disabled window takes no command.
+    try window.perform(.disable);
+    try std.testing.expect(!window.commandEnabled(.paste));
+    try window.perform(.enable);
+    try field.setPolicy(.{ .enabled = false });
+    try std.testing.expect(!window.commandEnabled(.select_all));
+}
 test "field callback close retires before slot reuse and old close retry never withdraws new registration" {
     const app = try z.App.init(std.testing.allocator);
     defer app.deinit();

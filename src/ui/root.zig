@@ -510,6 +510,9 @@ pub const Context = struct {
     /// A key press that on_input, shortcuts, focus movement and activation
     /// all left alone, outside text fields; true takes it and repaints.
     on_unhandled_key: ?*const fn (*anyopaque, *Context, z.KeyInput) bool = null,
+    /// Whether an Edit command would act where the focus is, outside text
+    /// fields, which answer for themselves; see `commandEnabled`.
+    on_command_enabled: ?*const fn (*anyopaque, *Context, z.EditCommand) bool = null,
     on_accessibility_action: ?*const fn (*anyopaque, *Context, accessibility.Action) void = null,
     semantic_name: []const u8 = "Ziggurat",
     semantics_enabled: bool = true,
@@ -1000,7 +1003,7 @@ pub const Context = struct {
         if (self.window != null or self.attachment_phase != .detached) return error.AlreadyAttached;
         const scope = window.beginCallback() orelse return error.Closed;
         defer scope.end();
-        try window.setContent(.{ .context = self, .event = event, .detach = detach, .accessibility = getAccessibility, .key_input = nativeKeyInput, .key_release = nativeKeyRelease });
+        try window.setContent(.{ .context = self, .event = event, .detach = detach, .accessibility = getAccessibility, .key_input = nativeKeyInput, .key_release = nativeKeyRelease, .command_enabled = nativeCommandEnabled });
         errdefer window.cancelContent(self);
         try self.initialize(window);
     }
@@ -1835,6 +1838,23 @@ pub const Context = struct {
         }
         self.attachment_phase = .attached;
         window.invalidate();
+    }
+    fn nativeCommandEnabled(ptr: *anyopaque, window: z.Window, command: z.EditCommand) bool {
+        const self: *Context = @ptrCast(@alignCast(ptr));
+        if (self.window == null or !std.meta.eql(self.window.?, window)) return false;
+        return self.commandEnabled(command);
+    }
+    /// Whether the Edit command would act where the focus is now, for a
+    /// menu to enable its item: a focused text field answers for itself,
+    /// `on_command_enabled` for the rest, and without it, content that
+    /// takes input (`on_input`) takes every command. Asking changes
+    /// nothing, the focus included.
+    pub fn commandEnabled(self: *Context, command: z.EditCommand) bool {
+        if (self.input_state.focused) |id| if (self.input_state.fields) |fields| {
+            if (fields.commandEnabled(id, command)) |enabled| return enabled;
+        };
+        if (self.on_command_enabled) |callback| return callback(self.state, self, command);
+        return self.on_input != null;
     }
     fn getAccessibility(ptr: *anyopaque, window: z.Window, wp: usize, lp: isize) ?isize {
         const self: *Context = @ptrCast(@alignCast(ptr));
