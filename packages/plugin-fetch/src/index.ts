@@ -75,6 +75,8 @@ export async function fetch(input: RequestInfo | URL, init: RequestInit = {}): P
   } else if (init.body === undefined && req?.body) {
     body = new Uint8Array(await req.arrayBuffer());
   }
+  // Reading the body yields, so an abort can arrive before the host sees it.
+  signal?.throwIfAborted();
   if (body && (method === "GET" || method === "HEAD")) {
     throw new TypeError(`fetch: a ${method} request cannot have a body`);
   }

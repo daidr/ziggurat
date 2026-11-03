@@ -239,6 +239,8 @@ pub const Mirror = struct {
     modes: Out = .empty,
     colors: Out = .empty,
     cursor: Out = .empty,
+    /// The marks of the shell's prompt (OSC 133) the last frame set.
+    prompt: Out = .empty,
     title: Out = .empty,
     images: [2]Images = .{ .{}, .{} },
     placement: u32 = 0,
@@ -263,6 +265,7 @@ pub const Mirror = struct {
         self.modes.deinit(self.allocator);
         self.colors.deinit(self.allocator);
         self.cursor.deinit(self.allocator);
+        self.prompt.deinit(self.allocator);
         self.title.deinit(self.allocator);
         for (&self.images) |*i| i.deinit(self.allocator);
     }
@@ -360,8 +363,11 @@ pub const Mirror = struct {
         try self.deleteImages(out, &self.images[1]);
         try out.appendSlice(self.allocator, "\x1b[?1049l" ++ no_images);
         try self.deleteImages(out, &self.images[0]);
-        try out.appendSlice(self.allocator, "\x1b[0m\x1b[H\x1b[2J\x1b[3J");
+        // Out of any prompt the other terminal was in.
+        try out.appendSlice(self.allocator, "\x1b[0m\x1b[H\x1b[2J\x1b[3J\x1b]133;D\x1b\\");
         self.modes.clearRetainingCapacity();
+        self.prompt.clearRetainingCapacity();
+        try self.prompt.appendSlice(self.allocator, "\x1b]133;D\x1b\\");
         self.cursor.clearRetainingCapacity();
         for (&self.images) |*i| i.clear();
         freeRows(self.allocator, &self.main);
@@ -583,6 +589,26 @@ pub const Mirror = struct {
         // Programs' reads go to the first mirror to frame.
         for (t.forwarded_reads[0..t.forwarded_len]) |selection| try out.print(allocator, "\x1b]52;{c};?\x1b\\", .{selection});
         t.forwarded_len = 0;
+
+        // The rows of the shell's prompt, for a click there to move the
+        // shell's cursor on the other terminal too: its start marked, then
+        // the cursor at the lowest row it reached there. Drawing rows moves
+        // the other terminal's cursor, which the prompt follows, so they
+        // are marked again after.
+        var prompt_bytes: [64]u8 = undefined;
+        const prompt: []const u8 = if (s.onAlternate()) "" else if (t.prompt.active) mark: {
+            const pushed = s.pushed;
+            const first = t.prompt.row orelse s.screenRow(s.cursor.y);
+            const last = @max(t.prompt.last orelse first, first);
+            const top: u64 = if (first < pushed) 0 else @min(first - pushed, s.rows - 1);
+            const bottom: u64 = if (last < pushed) 0 else @min(last - pushed, s.rows - 1);
+            break :mark try std.fmt.bufPrint(&prompt_bytes, "\x1b[{d}H\x1b]133;A\x1b\\\x1b[{d}H", .{ top + 1, bottom + 1 });
+        } else "\x1b]133;D\x1b\\";
+        if (prompt.len > 0 and (!std.mem.eql(u8, prompt, self.prompt.items) or (t.prompt.active and out.items.len > start))) {
+            try out.appendSlice(allocator, prompt);
+            self.prompt.clearRetainingCapacity();
+            try self.prompt.appendSlice(allocator, prompt);
+        }
 
         // The cursor's shape as programs left it is the other terminal's
         // default (DECSCUSR 0), which its own options make.
@@ -924,4 +950,22 @@ test "a snapshot shows the same in a new terminal, and history stops at the curs
     // Down to the cursor's row, which held "d": the cursor under it.
     try std.testing.expectEqualStrings("d", rowText(&next, next.screen.screenRow(next.screen.cursor.y - 1), &buffer));
     try std.testing.expectEqual(@as(u16, 0), next.screen.cursor.x);
+}
+
+test "frames mark the rows of the shell's prompt for the other terminal" {
+    var p: Pair = undefined;
+    try p.init(10, 4);
+    defer p.deinit();
+    _ = try p.step("out\r\n\x1b]133;A\x1b\\$ abcdefghijkl");
+    const span = p.client.prompt.rows(&p.client.screen).?;
+    try std.testing.expectEqual(@as(usize, 1), span.top);
+    try std.testing.expectEqual(@as(usize, 2), span.bottom);
+    // Drawing a row of the prompt again keeps its marks.
+    _ = try p.step("\x1b[D\x1b[Dx");
+    const again = p.client.prompt.rows(&p.client.screen).?;
+    try std.testing.expectEqual(@as(usize, 1), again.top);
+    try std.testing.expectEqual(@as(usize, 2), again.bottom);
+    // The command runs: no prompt on either side.
+    _ = try p.step("\x1b]133;C\x1b\\\r\n");
+    try std.testing.expect(!p.client.prompt.active);
 }

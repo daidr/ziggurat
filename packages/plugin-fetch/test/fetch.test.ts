@@ -202,3 +202,36 @@ test("a host without the plugin says to register it", async () => {
   host.plugin = false;
   await expect(plugin.fetch("https://api.example.com/")).rejects.toThrow("register it with Host.use");
 });
+
+test("a JSON POST aborted before its body is ready is never sent", async () => {
+  host.respond = () => ({ parts: [head()] });
+  const ctrl = new AbortController();
+  const pending = plugin.fetch("https://api.example.com/items", { method: "POST", body: JSON.stringify({ name: "Ada" }), signal: ctrl.signal });
+  ctrl.abort();
+  const result = await pending.then(() => "sent", (error: unknown) => error);
+  expect(result).toBe(ctrl.signal.reason);
+  expect(host.calls).toEqual([]);
+});
+
+for (const source of ["init", "Request"] as const) {
+  test(`a request aborted while its ${source} body is read is never sent`, async () => {
+    host.respond = () => ({ parts: [head()] });
+    let finish!: () => void;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("upload"));
+        finish = () => controller.close();
+      },
+    });
+    const ctrl = new AbortController();
+    const reason = new Error("Upload canceled");
+    const pending = source === "init"
+      ? plugin.fetch("https://api.example.com/upload", { method: "POST", body, signal: ctrl.signal })
+      : plugin.fetch(new Request("https://api.example.com/upload", { method: "POST", body, signal: ctrl.signal }));
+    ctrl.abort(reason);
+    finish();
+    const result = await pending.then(() => "sent", (error: unknown) => error);
+    expect(result).toBe(reason);
+    expect(host.calls).toEqual([]);
+  });
+}
