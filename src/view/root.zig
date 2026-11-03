@@ -272,6 +272,28 @@ pub const Style = struct {
     focus_ring_offset: ?f32 = null,
     /// The color of the node's focus ring; null is the palette's `focus`.
     focus_ring_color: ?u32 = null,
+    /// Clip the node and everything it draws, its background, shadows,
+    /// border and what is built inside it, to its box inset by these, as
+    /// CSS's `clip-path: inset()`; see `ClipInset`. The clip is not a layer,
+    /// so its insets may change every build, as a value the application
+    /// animates does: going from 100 percent to 0 wipes the node in. What
+    /// the inset hides takes no clicks.
+    clip_inset: ?ClipInset = null,
+    /// Mask the node and everything it draws by this gradient across its
+    /// box, as CSS's `mask-image`: each point shows as much as the
+    /// gradient's alpha there, whatever its colors, and nothing shows
+    /// outside the box (or outside `clip_inset`). A list whose rows fade out
+    /// at its top and bottom edges takes a linear gradient at 180 degrees
+    /// from transparent to black and back. What the node draws is masked as
+    /// one, as `opacity` fades it. Clicks are not masked.
+    mask: ?Gradient = null,
+    /// A wrapping text breaks into lines of about the same width, as CSS's
+    /// `text-wrap: balance`: a heading that takes two lines splits near its
+    /// middle instead of leaving one word alone on the second. It keeps the
+    /// number of lines wrapping at the full width takes, at the narrowest
+    /// width that still holds them, and is meant for short text: headings,
+    /// captions, labels on cards. Needs `wrap`.
+    balance: bool = false,
     /// A scroll container shows its scroll indicator while its content
     /// overflows; false hides it, keeping the wheel, keys and assistive
     /// technology scrolling, for a surface that draws its own.
@@ -290,6 +312,34 @@ pub const Style = struct {
     theme: ?*const Theme = null,
 };
 
+/// How `Style.clip_inset` cuts a node's box: by `top`, `right`, `bottom`
+/// and `left` DIP from its edges, or percent of its height (top and bottom)
+/// and width (right and left) with `percent`, with corners rounded by
+/// `radius` DIP. A negative inset reaches beyond the box on that side, so
+/// a clip of the top and bottom alone leaves a shadow whole left and right.
+pub const ClipInset = struct {
+    top: f32 = 0,
+    right: f32 = 0,
+    bottom: f32 = 0,
+    left: f32 = 0,
+    radius: f32 = 0,
+    percent: bool = false,
+
+    pub fn valid(self: ClipInset) bool {
+        return std.math.isFinite(self.top) and std.math.isFinite(self.right) and std.math.isFinite(self.bottom) and std.math.isFinite(self.left) and std.math.isFinite(self.radius);
+    }
+    /// The rectangle `box` is clipped to.
+    pub fn rect(self: ClipInset, box: Rect) Rect {
+        var in = [4]f32{ self.top, self.right, self.bottom, self.left };
+        if (self.percent) in = .{ in[0] * box.height / 100, in[1] * box.width / 100, in[2] * box.height / 100, in[3] * box.width / 100 };
+        return .{ .x = box.x + in[3], .y = box.y + in[0], .width = @max(box.width - in[1] - in[3], 0), .height = @max(box.height - in[0] - in[2], 0) };
+    }
+};
+
+/// Paths of SVG path data, for an embedded leaf to clip its drawing to
+/// (`ui.Frame.pushPathClip`) or draw; see `ui.parsePath`.
+pub const parsePath = ui.parsePath;
+pub const PathReport = ui.PathReport;
 pub const gradients = @import("gradient.zig");
 pub const Gradient = gradients.Gradient;
 pub const GradientStop = gradients.Stop;
@@ -1667,6 +1717,8 @@ pub const View = struct {
         const all = self.nodes();
         var rect = node.bounds;
         if (node.hidden()) return null;
+        // What an inset hides takes no clicks, the node's own too.
+        if (node.style.clip_inset) |inset_clip| rect = intersect(rect, inset_clip.rect(node.bounds)) orelse return null;
         // Popups and toasts are drawn over the flow, so the clips of their
         // own ancestors do not apply to them.
         var parent = if (node.floats()) none else node.parent;
@@ -1674,6 +1726,7 @@ pub const View = struct {
             const ancestor = &all[parent];
             if (ancestor.hidden()) return null;
             if (ancestor.clips()) rect = intersect(rect, ancestor.bounds) orelse return null;
+            if (ancestor.style.clip_inset) |inset_clip| rect = intersect(rect, inset_clip.rect(ancestor.bounds)) orelse return null;
             if (ancestor.floats()) break;
         }
         if (!(rect.width > 0 and rect.height > 0)) return null;
@@ -1712,6 +1765,7 @@ pub const View = struct {
         if (!std.math.isFinite(style.opacity) or style.opacity < 0 or style.opacity > 1) return error.InvalidValue;
         if (!std.math.isFinite(style.blur) or style.blur < 0) return error.InvalidValue;
         if (style.pose) |pose| if (!pose.valid()) return error.InvalidValue;
+        if (style.clip_inset) |clip| if (!clip.valid()) return error.InvalidValue;
         const index = self.len;
         var effective = style;
         effective.enabled = style.enabled and parent.style.enabled;
@@ -4496,7 +4550,9 @@ pub const View = struct {
         const narrowest = @min(full.width, wrap_text.longestWord(node.text, font, measurer));
         const width = self.wrapWidth(node) orelse return .{ .minimum = .{ .width = narrowest, .height = full.height }, .preferred = full };
         if (width + 0.5 >= full.width) return .{ .minimum = .{ .width = narrowest, .height = full.height }, .preferred = full };
-        const wrapped = wrap_text.measure(node.text, @max(width, narrowest), font, measurer, node.style.max_lines);
+        var at = @max(width, narrowest);
+        if (node.style.balance) at = wrap_text.balanced(node.text, at, font, measurer, node.style.max_lines);
+        const wrapped = wrap_text.measure(node.text, at, font, measurer, node.style.max_lines);
         return .{ .minimum = .{ .width = narrowest, .height = wrapped.height }, .preferred = .{ .width = @max(wrapped.width, narrowest), .height = wrapped.height } };
     }
     /// True when a wrapping text got less width than its single line needs,
@@ -5059,7 +5115,9 @@ pub const View = struct {
             }
         };
         const lines: Lines = .{ .target = target, .view = self, .node = node, .bounds = bounds, .color = color, .height = wrap_text.lineHeight(self.measurer, node.style.font) };
-        wrap_text.each(node.text, bounds.width, node.style.font, self.measurer, node.style.max_lines, &lines, Lines.draw);
+        // Balanced lines wrap narrower, each placed in the box as before.
+        const width = if (node.style.balance) wrap_text.balanced(node.text, bounds.width, node.style.font, self.measurer, node.style.max_lines) else bounds.width;
+        wrap_text.each(node.text, width, node.style.font, self.measurer, node.style.max_lines, &lines, Lines.draw);
     }
 
     pub fn paint(self: *const View, target: anytype) !void {
@@ -5477,6 +5535,13 @@ pub const View = struct {
                     scope_depth += 1;
                 }
             }
+            // Around its effects too, as CSS's clip-path and mask go after
+            // its filters.
+            if (style.clip_inset != null or style.mask != null) {
+                try openSelfClip(target, style, bounds);
+                scopes[scope_depth] = .{ .index = @intCast(at), .kind = .self_clip };
+                scope_depth += 1;
+            }
             for (0..try self.openEffects(target, style, bounds)) |_| {
                 scopes[scope_depth] = .{ .index = @intCast(at), .kind = .effect };
                 scope_depth += 1;
@@ -5707,6 +5772,8 @@ pub const View = struct {
         kind: union(enum) {
             effect,
             clip,
+            /// `Style.clip_inset` and `Style.mask`.
+            self_clip,
             cache,
             /// The theme the frame drew with before the node's.
             theme: ?*const Theme,
@@ -5723,12 +5790,24 @@ pub const View = struct {
             .theme => |previous| if (@TypeOf(target) == *ui.Frame) target.popTheme(previous),
             .passthrough => |mark| if (@TypeOf(target) == *ui.Frame) target.passThrough(mark, target.inertMark()),
             .access_hidden => if (@TypeOf(target) == *ui.Frame) target.endAccessHidden(),
+            .self_clip => try target.popClip(),
             .clip => {
                 paintEdges(node, target);
                 try target.popClip();
                 paintScrollIndicator(node, target, if (node.theme) |inner| inner.* else window_theme);
             },
         }
+    }
+    /// Clip what a node draws to its inset (`Style.clip_inset`) and mask
+    /// it by its gradient (`Style.mask`) across its box.
+    fn openSelfClip(target: anytype, style: Style, bounds: Rect) !void {
+        const inset_clip = style.clip_inset orelse ClipInset{};
+        const rect = inset_clip.rect(bounds);
+        if (@TypeOf(target) != *ui.Frame) return target.pushClip(rect);
+        var stops: [gradients.max_stops]ui.commands.brushes.Stop = undefined;
+        const mask = if (style.mask) |g| gradients.resolve(g, bounds, &stops) else null;
+        if (style.mask != null and mask == null) return target.pushClip(rect);
+        return target.pushRoundedClip(rect, @max(inset_clip.radius, 0), mask);
     }
     /// The background and border a style gives a box, for a control without
     /// a look that its application draws.

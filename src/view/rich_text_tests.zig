@@ -343,3 +343,19 @@ test "a rich text lists its characters in their spans' fonts and colors for a mo
     try testing.expect(text.glyphs(&short) == null);
     try testing.expect(text.embed().glyphs != null);
 }
+
+test "balanced rich text keeps its lines as many, about as wide as each other" {
+    // "aaaa bbbb cccc dd" at 150 DIP: 140 and 20 DIP lines; balanced, the
+    // first breaks after "bbbb".
+    var text = RichText.init(testing.allocator, .{ .measurer = measurer, .width = 150, .balance = true });
+    defer text.deinit();
+    try text.setSpans(&.{.{ .text = "aaaa bbbb cccc dd" }});
+    try testing.expectEqual(@as(usize, 2), text.lines.items.len);
+    try testing.expectEqual(@as(f32, 90), text.lines.items[0].width);
+    try testing.expectEqual(@as(f32, 70), text.lines.items[1].width);
+    try testing.expect(text.wrap_width < 100);
+    // Without it the second line holds one word.
+    text.options.balance = false;
+    text.setWidth(150);
+    try testing.expectEqual(@as(f32, 140), text.lines.items[0].width);
+}

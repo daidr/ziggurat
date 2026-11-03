@@ -1209,6 +1209,14 @@ pub const Renderer = struct {
                 depth += 1;
                 zgpu_push_clip(native, r.x, r.y, r.width, r.height);
             },
+            // Cut to the rectangle only: the mask is not drawn here yet.
+            .push_mask_clip => |value| {
+                const r = value.bounds;
+                if (!layout.validRect(r)) return error.InvalidGeometry;
+                if (depth == 32) return error.ClipStackFull;
+                depth += 1;
+                zgpu_push_clip(native, r.x, r.y, r.width, r.height);
+            },
             .pop_clip => {
                 if (depth == 0) return error.ClipStackEmpty;
                 depth -= 1;

@@ -16,6 +16,7 @@ const transform_composite = @import("transform_composite.zig");
 const shader_effects = commands.shader_effects;
 const effect_host = @import("gpu_effect_host.zig");
 const damage = @import("damage.zig");
+const mask_mix = @import("mask_mix.zig");
 const Rect = layout.Rect;
 comptime {
     if (@sizeOf(usize) == 8 and (@sizeOf(cpu_gradient.Surface) != 72 or @offsetOf(cpu_gradient.Surface, "clip") != 24 or @offsetOf(cpu_gradient.Surface, "origin") != 56)) @compileError("software plane ABI mismatch");
@@ -122,6 +123,8 @@ pub const Renderer = struct {
     /// While a damaged rectangle is drawn again, the device pixels outside
     /// which drawing commands are skipped.
     cull: ?damage.Box = null,
+    /// The pixels beneath the masked clips open now; see `mask_mix`.
+    masks: mask_mix.Stack = .{},
     const EffectScope = struct { slot: u8, capture: gaussian_scope.Capture };
     const Resources = struct {
         text_bytes: []const u8,
@@ -239,6 +242,7 @@ pub const Renderer = struct {
         return result;
     }
     pub fn abort(self: *Renderer) void {
+        self.masks.reset();
         if (self.native) |native| zlc_layer_abort(native);
         self.layer_active = false;
     }
@@ -732,9 +736,13 @@ pub const Renderer = struct {
         const transforms = all.transforms;
         const filters = all.filters;
         var depth: usize = 0;
+        // The clips open here that are masked, a bit for each depth.
+        var masked: u32 = 0;
+        const masks_before = self.masks.len;
         defer while (self.layer_plan == null and depth != 0) : (depth -= 1) {
             zlc_pop_clip(self.native.?);
         };
+        errdefer self.masks.len = masks_before;
         const cull_sources: damage.Sources = .{ .prepared = prepared, .coverage = coverage_resources, .indicators = if (self.backdrop_source) |source| source.indicator_storage[0..source.indicator_len] else &.{} };
         const cull_scale = if (self.cull != null) zlc_scale(self.native.?) else 1;
         var index: usize = 0;
@@ -837,16 +845,39 @@ pub const Renderer = struct {
                     zlc_push_clip(self.native.?, rect.x, rect.y, rect.width, rect.height);
                     depth += 1;
                 },
+                .push_mask_clip => |value| {
+                    if (depth == 32) return error.ClipStackFull;
+                    if (!layout.validRect(value.bounds)) return error.InvalidGeometry;
+                    if (value.mask >= coverage_resources.len) return error.MissingResources;
+                    const view = coverage_resources[value.mask];
+                    try view.validate();
+                    var surface: cpu_gradient.Surface = undefined;
+                    if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawGradientFailed;
+                    if (view.coverage.scale != surface.scale) return error.CoverageDpiMismatch;
+                    const rect = value.bounds;
+                    try self.masks.open(std.heap.smp_allocator, surface, rect, value.origin, view.coverage);
+                    zlc_push_clip(self.native.?, rect.x, rect.y, rect.width, rect.height);
+                    masked |= @as(u32, 1) << @intCast(depth);
+                    depth += 1;
+                },
                 .pop_clip => {
                     if (depth == 0) return error.ClipStackEmpty;
                     zlc_pop_clip(self.native.?);
                     depth -= 1;
+                    if (masked & (@as(u32, 1) << @intCast(depth)) != 0) {
+                        masked &= ~(@as(u32, 1) << @intCast(depth));
+                        var surface: cpu_gradient.Surface = undefined;
+                        if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawGradientFailed;
+                        const box = try self.masks.close(surface);
+                        if (box[2] > box[0] and box[3] > box[1]) zlc_gradient_dirty(self.native.?, box[0], box[1], box[2] - box[0], box[3] - box[1]);
+                    }
                 },
             }
         }
         if (depth != 0) return error.UnbalancedClips;
     }
     pub fn deinit(self: *Renderer) void {
+        self.masks.deinit(std.heap.smp_allocator);
         self.dropGl();
         if (self.native) |native| zlc_destroy(native);
         self.images.deinit();
@@ -888,6 +919,42 @@ test "Cairo text follows the command font" {
     try std.testing.expect(bold > body);
     // Returning to the default font draws the same pixels as before.
     try std.testing.expectEqual(body, try Ink.measure(&renderer, .{}));
+}
+
+test "Cairo masked clips show what is drawn inside as much as their mask, gradients too" {
+    var renderer: Renderer = .{};
+    defer renderer.deinit();
+    var dummy: u8 = 0;
+    try renderer.begin(.{ .native_context = &dummy, .size = .{ .width = 32, .height = 16, .scale = 1 } });
+    var lease = drawing.Lease.init(std.Thread.getCurrentId());
+    // Solid over columns 4 to 11, half over 12 to 19, clear after.
+    var pixels: [24 * 16]u8 = undefined;
+    for (0..16) |y| for (0..24) |x| {
+        pixels[y * 24 + x] = if (x < 8) 255 else if (x < 16) 128 else 0;
+    };
+    const mask: drawing.CoverageView = .{ .lease = &lease, .identity = try drawing.reserveRasterIdentity(), .coverage = .{ .pixels = &pixels, .width = 24, .height = 16, .stride = 24, .origin_x = 4, .origin_y = 0, .scale = 1 } };
+    var buffer: commands.Buffer = .{};
+    defer buffer.reset();
+    try buffer.fill(.{ .x = 0, .y = 0, .width = 32, .height = 16 }, 0x000000);
+    try buffer.pushMaskClip(.{ .x = 2, .y = 0, .width = 28, .height = 16 }, .{}, mask);
+    try buffer.fill(.{ .x = 0, .y = 0, .width = 32, .height = 8 }, 0xffffff);
+    const stops = [_]commands.brushes.Stop{ .{ .offset = 0, .color = .rgb(0xffffff) }, .{ .offset = 1, .color = .rgb(0xffffff) } };
+    try buffer.gradientRect(.{ .x = 0, .y = 8, .width = 32, .height = 8 }, 0, .{ .linear = .{ .start = .{ .x = 0, .y = 0 }, .end = .{ .x = 32, .y = 0 }, .stops = &stops } });
+    try buffer.popClip();
+    try renderer.replayBuffer(&buffer);
+    var surface: cpu_gradient.Surface = undefined;
+    if (zlc_gradient_surface(renderer.native.?, &surface) != 0) return error.DrawGradientFailed;
+    for ([_]usize{ 2, 12 }) |y| {
+        const row = surface.pixels[y * surface.stride ..];
+        // Outside the clip's rectangle and outside the mask: black.
+        try std.testing.expectEqual(@as(u32, 0xff000000), row[1]);
+        try std.testing.expectEqual(@as(u32, 0xff000000), row[2]);
+        // Solid mask: white; half: gray; clear: black.
+        try std.testing.expectEqual(@as(u32, 0xffffffff), row[6]);
+        const gray = row[14] & 255;
+        try std.testing.expect(gray > 120 and gray < 136);
+        try std.testing.expectEqual(@as(u32, 0xff000000), row[24]);
+    }
 }
 
 test "Cairo backdrop effects filter the plane drawn so far and fall back without a workspace" {

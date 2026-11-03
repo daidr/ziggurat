@@ -105,6 +105,11 @@ pub fn preflight(buffer: *const commands.Buffer, options: Options) !u64 {
                 try rect(value, options.size.scale);
                 break :blk 0;
             },
+            .push_mask_clip => |value| blk: {
+                if (value.mask >= buffer.coverage_len) return error.MissingResources;
+                try rect(value.bounds, options.size.scale);
+                break :blk 1; // the pixels beneath kept, then mixed by the mask
+            },
             .begin_group => |value| blk: {
                 try rect(value.bounds, options.size.scale);
                 break :blk 1;

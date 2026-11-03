@@ -146,6 +146,9 @@ pub const PrepareOptions = struct {
         if (self.cancellation) |cancel| try cancel.check();
     }
 };
+/// Where path data stops being readable (`Path.parseDataPrefix`): the
+/// error, and the offset of the byte it found it at.
+pub const ParseReport = struct { failure: ?anyerror = null, offset: usize = 0 };
 pub const ParseOptions = struct { input_bytes: usize = 1024 * 1024, limits: Limits = .{}, cancellation: ?*const Cancellation = null };
 pub const Stats = struct {
     commands: usize,
@@ -178,6 +181,39 @@ pub const Path = struct {
         const commands = try allocator.alloc(Command, count);
         errdefer allocator.free(commands);
         _ = try parser.parse(bytes, commands, options);
+        path.* = .{ .allocator = allocator, .owner = std.Thread.getCurrentId(), .commands = commands };
+        return path;
+    }
+    /// Path data as SVG draws data in error: the path up to the first
+    /// segment it cannot read, whose byte offset and error `report` gets.
+    /// Fails only for the limits and allocation; data without an error
+    /// leaves `report.failure` null.
+    pub fn parseDataPrefix(allocator: std.mem.Allocator, bytes: []const u8, options: ParseOptions, report: *ParseReport) !*Path {
+        report.* = .{};
+        try options.limits.validate();
+        if (options.input_bytes == 0 or options.input_bytes > 16 * 1024 * 1024) return error.InvalidLimits;
+        if (bytes.len > options.input_bytes) return error.CapacityExceeded;
+        const parser = @import("parser.zig");
+        var progress: parser.Progress = .{};
+        const count = parser.parseTracked(bytes, null, options, &progress) catch |err| switch (err) {
+            error.Cancelled, error.CapacityExceeded => return err,
+            else => blk: {
+                report.* = .{ .failure = err, .offset = progress.offset };
+                break :blk progress.committed;
+            },
+        };
+        if (@sizeOf(Path) > options.limits.bytes or count > (options.limits.bytes -| @sizeOf(Path)) / @sizeOf(Command)) return error.CapacityExceeded;
+        const path = try allocator.create(Path);
+        errdefer allocator.destroy(path);
+        const commands = try allocator.alloc(Command, count);
+        errdefer allocator.free(commands);
+        var again: parser.Progress = .{};
+        // The second pass writes the same segments; one cut short past them
+        // finds no room, or its error again.
+        if (count != 0) _ = parser.parseTracked(bytes, commands, .{ .input_bytes = options.input_bytes, .limits = .{ .commands = count, .bytes = options.limits.bytes }, .cancellation = options.cancellation }, &again) catch |err| switch (err) {
+            error.Cancelled => return err,
+            else => {},
+        };
         path.* = .{ .allocator = allocator, .owner = std.Thread.getCurrentId(), .commands = commands };
         return path;
     }

@@ -414,7 +414,28 @@ pub const Renderer = struct {
         var scopes: [max_capture_depth]Scope = undefined;
         var depth: usize = 0;
         var uses = false;
+        // Masked clips draw as groups masked by their coverage: the clip
+        // depth of each, a bit for each depth.
+        var clip_depth: usize = 0;
+        var masked: u64 = 0;
         for (buffer.commands()) |op| switch (op) {
+            .push_clip => clip_depth += 1,
+            .push_mask_clip => {
+                if (depth == scopes.len or clip_depth >= 64) return false;
+                masked |= @as(u64, 1) << @intCast(clip_depth);
+                clip_depth += 1;
+                scopes[depth] = .group;
+                depth += 1;
+            },
+            .pop_clip => {
+                if (clip_depth == 0) return false;
+                clip_depth -= 1;
+                if (masked & (@as(u64, 1) << @intCast(clip_depth)) != 0) {
+                    masked &= ~(@as(u64, 1) << @intCast(clip_depth));
+                    if (depth == 0) return false;
+                    depth -= 1;
+                }
+            },
             .begin_group => |value| {
                 if (depth == scopes.len) return false;
                 if (value.filter_slot != commands.no_filter) {
@@ -762,6 +783,9 @@ pub const Renderer = struct {
         for (resources) |*resource| try resource.validate();
         var depth: usize = 0;
         defer while (depth != 0) : (depth -= 1) zmtl_pop_clip(native);
+        // The clips open that are masked, a bit for each depth: each draws
+        // as a group masked by its coverage, inside its rectangle.
+        var masked: u32 = 0;
         var effect_stack: [max_capture_depth]OpenEffect = undefined;
         var effect_depth: usize = 0;
         var transform_stack: [max_capture_depth]layers.NativeTransform = undefined;
@@ -824,9 +848,26 @@ pub const Renderer = struct {
                 depth += 1;
                 zmtl_push_clip(native, r.x, r.y, r.width, r.height);
             },
+            .push_mask_clip => |value| {
+                const r = value.bounds;
+                if (!layout.validRect(r)) return error.InvalidGeometry;
+                if (depth == 32) return error.ClipStackFull;
+                if (value.mask >= coverage_resources.len) return error.MissingResources;
+                zmtl_push_clip(native, r.x, r.y, r.width, r.height);
+                masked |= @as(u32, 1) << @intCast(depth);
+                depth += 1;
+                try self.beginGroup(.{ .bounds = r, .mask_origin = value.origin, .mask_resource = value.mask }, coverage_resources, filters);
+                group_depth += 1;
+            },
             .pop_clip => {
                 if (depth == 0) return error.ClipStackEmpty;
                 depth -= 1;
+                if (masked & (@as(u32, 1) << @intCast(depth)) != 0) {
+                    masked &= ~(@as(u32, 1) << @intCast(depth));
+                    if (group_depth == 0) return error.GroupStackEmpty;
+                    group_depth -= 1;
+                    if (zmtl_end_group(native) != 0) return error.GraphicsFailed;
+                }
                 zmtl_pop_clip(native);
             },
             .effect => |slot| {

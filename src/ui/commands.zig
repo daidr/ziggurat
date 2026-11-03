@@ -17,6 +17,11 @@ pub const no_filter: u8 = 255;
 /// Clips a Buffer nests at most.
 pub const max_clip_depth = 32;
 pub const GroupCommand = struct { bounds: Rect, mask_origin: drawing.Point = .{}, opacity: u8 = 255, mask_resource: ?u8 = null, filter_slot: u8 = no_filter };
+/// A clip to `bounds` whose coverage the A8 raster `mask` (an index into
+/// the Buffer's coverage table) gives: what is drawn until its `pop_clip`
+/// shows as much as the mask there, as through a group masked by it. The
+/// mask is placed in device pixels from `origin`, as coverage is drawn.
+pub const MaskClip = struct { bounds: Rect, origin: drawing.Point = .{}, mask: u8 };
 pub const GradientShape = struct { bounds: Rect, radius: f32 = 0, stroke_width: f32 = 0, brush: u8 };
 /// Font of a text command: size in DIP, weight, slant and whether to use
 /// the platform's fixed-pitch family instead of the interface family.
@@ -98,6 +103,8 @@ pub const Command = union(enum) {
     image: ImageCommand,
     texture: ImageCommand,
     push_clip: Rect,
+    /// A clip cut by a mask beyond its rectangle; closed by `pop_clip`.
+    push_mask_clip: MaskClip,
     pop_clip,
     begin_group: GroupCommand,
     end_group,
@@ -626,6 +633,34 @@ pub const Buffer = struct {
         try self.append(.{ .push_clip = bounds });
         self.depth += 1;
     }
+    /// Clip to `bounds` and to the coverage of `view`, placed from
+    /// `origin` (DIP), until the matching `popClip`.
+    pub fn pushMaskClip(self: *Buffer, bounds: Rect, origin: drawing.Point, view: drawing.CoverageView) !void {
+        if (!layout.validRect(bounds) or !std.math.isFinite(origin.x) or !std.math.isFinite(origin.y)) return error.InvalidGeometry;
+        try view.validate();
+        if (self.depth == 32) return error.ClipStackFull;
+        if (self.len == self.storage.len) return error.CommandsFull;
+        const index = try self.coverageIndex(view);
+        self.storage[self.len] = .{ .push_mask_clip = .{ .bounds = bounds, .origin = origin, .mask = index } };
+        self.len += 1;
+        self.depth += 1;
+    }
+    /// Whether one more coverage raster than those drawn so far fits.
+    pub fn coverageRoom(self: *const Buffer, view: drawing.CoverageView) bool {
+        for (self.coverage_storage[0..self.coverage_len]) |held| if (held.lease == view.lease and held.identity == view.identity) return true;
+        return self.coverage_len < self.coverage_storage.len;
+    }
+    fn coverageIndex(self: *Buffer, view: drawing.CoverageView) !u8 {
+        var index: usize = 0;
+        while (index < self.coverage_len) : (index += 1) if (self.coverage_storage[index].lease == view.lease and self.coverage_storage[index].identity == view.identity) break;
+        if (index == self.coverage_len) {
+            if (index == self.coverage_storage.len) return error.CoverageResourcesFull;
+            try view.lease.acquire();
+            self.coverage_storage[index] = view;
+            self.coverage_len += 1;
+        }
+        return @intCast(index);
+    }
     pub fn popClip(self: *Buffer) Error!void {
         if (self.depth == 0 or (self.group_depth != 0 and self.depth == self.group_clips[self.group_depth - 1])) return error.ClipStackEmpty;
         try self.append(.pop_clip);
@@ -661,7 +696,7 @@ pub const Buffer = struct {
         // Clip depth where the scope opens, and the deepest inside it.
         var depth: usize = 0;
         for (self.storage[0..start]) |command| switch (command) {
-            .push_clip => depth += 1,
+            .push_clip, .push_mask_clip => depth += 1,
             .pop_clip => depth -|= 1,
             else => {},
         };
@@ -676,7 +711,7 @@ pub const Buffer = struct {
                     if (nesting == 0) break;
                     nesting -= 1;
                 },
-                .push_clip => {
+                .push_clip, .push_mask_clip => {
                     inner += 1;
                     deepest = @max(deepest, inner);
                 },
@@ -705,6 +740,10 @@ pub const Buffer = struct {
             .coverage => |*value| value.origin = moved.point(value.origin, delta),
             .image, .texture => |*value| value.destination = moved.rect(value.destination, delta),
             .push_clip => |*rect| rect.* = moved.rect(rect.*, delta),
+            .push_mask_clip => |*value| {
+                value.bounds = moved.rect(value.bounds, delta);
+                value.origin = moved.point(value.origin, delta);
+            },
             .indicator => |slot| self.indicator_storage[slot].bounds = moved.rect(self.indicator_storage[slot].bounds, delta),
             .begin_group => |*value| {
                 value.bounds = moved.rect(value.bounds, delta);
@@ -735,7 +774,7 @@ pub const Buffer = struct {
     /// backdrops, filters and textures stay where they were recorded.
     pub fn translatable(command: Command) bool {
         return switch (command) {
-            .fill, .shape, .gradient, .text, .prepared_text, .coverage, .image, .push_clip, .pop_clip, .indicator, .end_group => true,
+            .fill, .shape, .gradient, .text, .prepared_text, .coverage, .image, .push_clip, .push_mask_clip, .pop_clip, .indicator, .end_group => true,
             .begin_group => |value| value.filter_slot == no_filter,
             else => false,
         };
@@ -794,6 +833,10 @@ pub const Buffer = struct {
                 try self.image(moved.rect(value.destination, delta), source.image_storage[value.resource], value.options());
             },
             .push_clip => |rect| try self.pushClip(moved.rect(rect, delta)),
+            .push_mask_clip => |value| {
+                if (value.mask >= source.coverage_len) return error.MissingResources;
+                try self.pushMaskClip(moved.rect(value.bounds, delta), moved.point(value.origin, delta), source.coverage_storage[value.mask]);
+            },
             .pop_clip => try self.popClip(),
             .indicator => |slot| {
                 if (slot >= source.indicator_len) return error.MissingResources;
@@ -994,7 +1037,7 @@ pub fn preflightGaussianScopes(list: []const Command, capacity: u8, scale: f32, 
             if (clips != saved[groups - 1]) return error.UnbalancedGroupClips;
             groups -= 1;
         },
-        .push_clip => {
+        .push_clip, .push_mask_clip => {
             if (clips == 32) return error.ClipStackFull;
             clips += 1;
         },

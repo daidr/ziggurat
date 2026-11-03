@@ -236,3 +236,108 @@ test "a search hands its placeholder and its color to the text input inside it" 
     try testing.expectEqual(@as(?u32, 0xaa0000), app.search.seen.placeholder_color);
     try testing.expectEqualStrings("", app.plain.seen.placeholder);
 }
+
+const Clipped = struct {
+    inset: view.ClipInset = .{ .right = 50, .percent = true },
+    mask: ?view.Gradient = null,
+    pressed: usize = 0,
+    fn build(self: *Clipped, v: *View) anyerror!void {
+        try v.row(.{ .width = 200, .height = 40, .clip_inset = self.inset, .mask = self.mask });
+        _ = try v.button("Left", .{ .width = 100 });
+        if (try v.button("Right", .{ .width = 100 })) self.pressed += 1;
+        try v.end();
+    }
+};
+
+test "an inset clips a node and what is inside it, and what it hides takes no clicks" {
+    var storage: Storage = .{};
+    var app: Clipped = .{};
+    var h = Harness.init(&app, Clipped.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    defer if (context.clip_masks) |masks| masks.destroy(null);
+    try h.attachInput(&context);
+    var commands = try paintAgain(&h, &context);
+    // Half of its width, as a plain clip around its children.
+    var clip: ?view.Rect = null;
+    for (commands) |command| if (command == .push_clip and clip == null) {
+        clip = command.push_clip;
+    };
+    const row = try h.boundsOf(.{ .kind = .row });
+    try testing.expectEqual(row.x, clip.?.x);
+    try testing.expectEqual(@as(f32, 100), clip.?.width);
+    const right = try h.boundsOf(.{ .text = "Right" });
+    try testing.expectError(error.NotFound, h.clickAt(right.x + right.width / 2, right.y + right.height / 2));
+    try testing.expect(context.input_state.hitControl(.{ .x = right.x + right.width / 2, .y = right.y + right.height / 2 }) == null);
+    try testing.expectEqual(@as(usize, 0), app.pressed);
+    // Opened, the inset hides nothing; with a radius it is masked.
+    app.inset = .{ .radius = 8 };
+    try h.render();
+    commands = try paintAgain(&h, &context);
+    var masked = false;
+    for (commands) |command| if (command == .push_mask_clip) {
+        masked = true;
+    };
+    try testing.expect(masked);
+    try h.clickAt(right.x + right.width / 2, right.y + right.height / 2);
+    try testing.expectEqual(@as(usize, 1), app.pressed);
+    // A negative inset reaches past the box; an invalid one is refused.
+    app.inset = .{ .left = -10, .right = -10 };
+    try h.render();
+    try testing.expectEqualDeep(view.Rect{ .x = row.x - 10, .y = row.y, .width = 220, .height = 40 }, app.inset.rect(row));
+}
+
+const fade = [_]view.GradientStop{ .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 0 }, .at = 0 }, .{ .color = ui.Color.rgb(0), .at = 1 } };
+
+test "a gradient mask masks a node by its alpha across the box and leaves clicks alone" {
+    var storage: Storage = .{};
+    var app: Clipped = .{ .inset = .{}, .mask = .{ .linear = .{ .angle = 90, .stops = &fade } } };
+    var h = Harness.init(&app, Clipped.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    defer if (context.clip_masks) |masks| masks.destroy(null);
+    try h.attachInput(&context);
+    const commands = try paintAgain(&h, &context);
+    var mask: ?ui.commands.MaskClip = null;
+    for (commands) |command| if (command == .push_mask_clip) {
+        mask = command.push_mask_clip;
+    };
+    const row = try h.boundsOf(.{ .kind = .row });
+    try testing.expectEqualDeep(row, mask.?.bounds);
+    const coverage = context.command_buffer.coverageResources()[mask.?.mask].coverage;
+    // Clear at the left edge, solid at the right.
+    try testing.expect(coverage.pixels[0] < 4);
+    try testing.expect(coverage.pixels[coverage.width - 1] > 250);
+    const left = try h.boundsOf(.{ .text = "Left" });
+    try testing.expect(context.input_state.hitControl(.{ .x = left.x + 2, .y = left.y + left.height / 2 }) != null);
+}
+
+const Heading = struct {
+    balance: bool = true,
+    fn build(self: *Heading, v: *View) anyerror!void {
+        try v.column(.{ .width = 9 * 15 });
+        try v.text("aaaa bbbb cccc dd", .{ .wrap = true, .balance = self.balance });
+        try v.end();
+    }
+};
+
+test "a balanced text wraps into lines of about the same width" {
+    var storage: Storage = .{};
+    var app: Heading = .{};
+    var h = Harness.init(&app, Heading.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    const lines = struct {
+        fn first(commands: []const ui.commands.Command, bytes: []const u8) []const u8 {
+            for (commands) |command| if (command == .text) return bytes[command.text.offset..][0..command.text.len];
+            return "";
+        }
+    };
+    var commands = try paintAgain(&h, &context);
+    try testing.expectEqualStrings("aaaa bbbb", lines.first(commands, context.command_buffer.textBytes()));
+    app.balance = false;
+    try h.render();
+    commands = try paintAgain(&h, &context);
+    try testing.expectEqualStrings("aaaa bbbb cccc", lines.first(commands, context.command_buffer.textBytes()));
+}
