@@ -2808,6 +2808,78 @@ test "payloads drag to drop targets that take their kind, and files drop from ou
     try std.testing.expect(h.view.system_drag == null);
 }
 
+const Explorer = struct {
+    const file_kind = 0x66696c65;
+    dropped: ?struct { folder: usize, item: u64 } = null,
+    over: bool = false,
+    fn build(self: *Explorer, v: *View) anyerror!void {
+        try v.row(.{ .gap = 20 });
+        try v.column(.{ .key = 1, .gap = 4, .name = "Files" });
+        try v.dragRows(file_kind);
+        try v.text("a.txt", .{ .key = 10, .height = 30 });
+        // A folder among the rows takes the rows dropped on it.
+        switch (try v.dropTarget(.{ .kind = file_kind }, .{ .key = 11, .height = 30 })) {
+            .over => self.over = true,
+            .dropped => |drop| self.dropped = .{ .folder = 0, .item = drop.data.value.value },
+            .none => {},
+        }
+        try v.text("Docs", .{});
+        try v.end();
+        try v.text("b.txt", .{ .key = 12, .height = 30 });
+        try v.end();
+        switch (try v.dropTarget(.{ .kind = file_kind }, .{ .key = 2, .width = 120, .height = 120 })) {
+            .dropped => |drop| self.dropped = .{ .folder = 1, .item = drop.data.value.value },
+            else => {},
+        }
+        try v.text("Trash", .{});
+        try v.end();
+        try v.end();
+    }
+};
+
+test "rows drag out of a container for targets elsewhere to take" {
+    var storage: view.Storage(32, 256) = .{};
+    var state: Explorer = .{};
+    var h = Harness.init(&state, Explorer.build, storage.buffers(), .{});
+    try h.render();
+    const file = (try h.find(.{ .text = "a.txt" })).bounds;
+    const docs = (try h.find(.{ .text = "Docs" })).bounds;
+    // Onto a folder among the rows: no line between them, the folder
+    // outlined and given the first row.
+    try h.press(file.x + 4, file.y + 4, .{});
+    try h.moveTo(docs.x + 4, docs.y + 4);
+    try std.testing.expect(h.view.drag_ghost != null and h.view.insert_mark == null);
+    try std.testing.expectEqualStrings("a.txt", h.view.drag_label);
+    try std.testing.expect(state.over and h.view.drop_mark != null);
+    try h.release(docs.x + 4, docs.y + 4);
+    try std.testing.expectEqual(@as(usize, 0), state.dropped.?.folder);
+    try std.testing.expectEqual(@as(u64, 0), state.dropped.?.item);
+    // Out of the container, onto a target beside it: the third row.
+    const other = (try h.find(.{ .text = "b.txt" })).bounds;
+    const trash = (try h.find(.{ .text = "Trash" })).bounds;
+    try h.drag(other.x + 4, other.y + 4, trash.x + 4, trash.y + 4, 3);
+    try std.testing.expectEqual(@as(usize, 1), state.dropped.?.folder);
+    try std.testing.expectEqual(@as(u64, 2), state.dropped.?.item);
+    // Let go over the rows themselves, nothing takes them and nothing moves.
+    state.dropped = null;
+    try h.drag(file.x + 4, file.y + 4, other.x + 4, other.y + 4, 3);
+    try std.testing.expect(state.dropped == null);
+}
+
+test "a container cannot both drag its rows out and reorder them" {
+    var storage: view.Storage(8, 64) = .{};
+    var v = View.init(storage.buffers());
+    v.reset(.{}, null);
+    try v.column(.{});
+    try v.dragRows(1);
+    try std.testing.expectError(error.InvalidValue, v.reorder());
+    try v.end();
+    try v.column(.{});
+    _ = try v.reorder();
+    try std.testing.expectError(error.InvalidValue, v.dragRows(1));
+    try v.end();
+}
+
 const Sheet = struct {
     ids: [64]u64 = undefined,
     selection: view.Selection = undefined,

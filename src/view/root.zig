@@ -8,6 +8,7 @@ const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const animation = @import("ziggurat_animation");
 pub const matched = @import("matched.zig");
+pub const posed = @import("posed.zig");
 pub const morph = @import("morph.zig");
 pub const Match = matched.Match;
 
@@ -179,6 +180,15 @@ pub const Style = struct {
     /// in perspective about `pose.origin` within the node's box. Hit
     /// testing, focus and semantics keep the arranged box.
     pose: ?ui.effects.Pose = null,
+    /// Move to `pose` and fade to `opacity` along this motion as builds
+    /// change them, from where the node showed in the frame before. A node
+    /// the frame before did not pose, as one built for the first time,
+    /// shows at its pose at once: to come in from a pose, pose it there in
+    /// one build, ask for another, and pose it at its place in the next.
+    /// Under reduced motion the pose moves at once and only the opacity
+    /// fades. See `posed.zig`; needs `Host.prepareShaderEffects`, like
+    /// `pose`.
+    pose_motion: ?animation.Motion = null,
     /// An identity the node shares with another, as a photo's thumbnail
     /// and the photo in its detail view: appearing where another node with
     /// the same key showed in the frame before, it comes from there; see
@@ -917,6 +927,9 @@ pub const Node = struct {
     accept: Accept = .{},
     /// The container's items reorder by dragging; see `View.reorder`.
     reorder: bool = false,
+    /// The container's items drag out as payloads of this kind; see
+    /// `View.dragRows`.
+    drag_rows: ?u64 = null,
     /// A drag from a row of this tree or table selects the rows it crosses.
     drag_select: bool = false,
     /// A loading indicator's look and pose.
@@ -1200,7 +1213,9 @@ pub const Overlay = struct {
     };
     /// A container whose items reorder by dragging; its items are
     /// `reorder_items[first..][0..count]`.
-    pub const ReorderList = struct { id: u64, axis: Axis, rect: Rect, first: u32, count: u32, scroll: ?u64 };
+    /// With `drag_kind`, its items drag out as payloads of that kind
+    /// instead (`View.dragRows`).
+    pub const ReorderList = struct { id: u64, axis: Axis, rect: Rect, first: u32, count: u32, scroll: ?u64, drag_kind: ?u64 = null };
     pub const ReorderItem = struct { id: u64, index: u32, bounds: Rect, rect: Rect };
     /// The shown dialog, which holds input while it is open.
     pub const Dialog = struct { id: u64, rect: Rect, opener: ?u64, escape: bool, scrim: bool };
@@ -1281,6 +1296,8 @@ pub const Capture = struct {
         area: u64,
         source: struct { id: u64, payload: Payload },
         reorder: struct { list: u64, from: usize, to: usize },
+        /// An item of a `dragRows` container, dragged out as `payload`.
+        rows: struct { list: u64, from: usize, payload: Payload },
         select: struct { collection: u64, item: u64, add: bool, last: u64 },
     };
     target: Target,
@@ -1352,6 +1369,8 @@ pub const View = struct {
     wake: ?u64 = null,
     /// Shared elements on their way; see `Style.match`.
     matches: matched.State = .{},
+    /// Poses on their way; see `Style.pose_motion`.
+    poses: posed.State = .{},
     /// Keyboard focus at the start of this pass, set by the host.
     focus: ?u64 = null,
     /// A control the host should focus after this pass, such as a combo box
@@ -3312,7 +3331,7 @@ pub const View = struct {
         for (self.overlay.lists[0..self.overlay.list_count]) |list| {
             for (self.overlay.reorder_items[list.first..][0..list.count], 0..) |entry, at| {
                 if (!contains(entry.rect, point) or (best != null and entry.index < depth)) continue;
-                best = .{ .reorder = .{ .list = list.id, .from = at, .to = at } };
+                best = if (list.drag_kind) |kind| .{ .rows = .{ .list = list.id, .from = at, .payload = .{ .kind = kind, .value = at } } } else .{ .reorder = .{ .list = list.id, .from = at, .to = at } };
                 depth = entry.index;
             }
         }
@@ -3361,6 +3380,10 @@ pub const View = struct {
                 self.drop_over = self.dropTargetAt(point, .{ .value = source.payload });
                 if (self.edgeScroll(self.scrollAt(point), point)) |event| result.push(event);
             },
+            .rows => |rows| {
+                self.drop_over = self.dropTargetAt(point, .{ .value = rows.payload });
+                if (self.edgeScroll(self.scrollAt(point), point)) |event| result.push(event);
+            },
             .reorder => |*value| {
                 const list = self.reorderList(value.list) orelse {
                     self.capture = null;
@@ -3404,6 +3427,9 @@ pub const View = struct {
             .area => |id| result.push(.{ .drag = .{ .id = id, .phase = .end, .origin = capture.origin, .position = point, .delta = .{ .x = point.x - capture.position.x, .y = point.y - capture.position.y }, .modifiers = capture.modifiers } }),
             .source => |source| if (self.dropTargetAt(point, .{ .value = source.payload })) |id| {
                 result.push(.{ .drop = .{ .id = id, .data = .{ .value = source.payload }, .position = point } });
+            },
+            .rows => |rows| if (self.dropTargetAt(point, .{ .value = rows.payload })) |id| {
+                result.push(.{ .drop = .{ .id = id, .data = .{ .value = rows.payload }, .position = point } });
             },
             .reorder => |value| {
                 const list = self.reorderList(value.list) orelse return result;
@@ -3757,6 +3783,7 @@ pub const View = struct {
         if (self.take(node.id)) |event| if (event == .drop) return .{ .dropped = .{ .data = event.drop.data, .position = event.drop.position } };
         if (self.drop_over) |over| if (over == node.id) if (self.capture) |capture| switch (capture.target) {
             .source => |source| return .{ .over = .{ .value = source.payload } },
+            .rows => |rows| return .{ .over = .{ .value = rows.payload } },
             else => {},
         };
         if (self.system_drag) |drag| if (drag.over) |over| if (over == node.id) return .{ .over = .{ .files = drag.files, .text = drag.text } };
@@ -3776,11 +3803,34 @@ pub const View = struct {
         const index = self.stack[self.depth - 1];
         if (index == 0) return error.NotContainer;
         const node = &self.buffers.nodes[index];
-        if (node.kind == .tree or node.drag_select) return error.InvalidValue;
+        if (node.kind == .tree or node.drag_select or node.drag_rows != null) return error.InvalidValue;
         if (node.kind != .table and node.child_count != 0) return error.InvalidValue;
         node.reorder = true;
         if (self.take(node.id)) |event| if (event == .reorder) return event.reorder.move;
         return null;
+    }
+
+    /// Let the pointer drag the items of the container just opened out of
+    /// it, for drop targets elsewhere to take, as the files of a table
+    /// dropped on a folder: the rows of a table, the options of a list box,
+    /// or the children of a column or row. Call it before building any
+    /// item. A primary press on an item that moves `drag_threshold` drags
+    /// the payload `.{ .kind = kind, .value = i }`, `i` the item's place
+    /// among them (a table's rows count from its first row); a copy
+    /// follows the pointer, and the innermost `dropTarget` under it that
+    /// takes `kind` gets it when released, as from a `dragSource`. The
+    /// container itself takes nothing and shows no line between its items,
+    /// so a target inside it, as a folder's row, takes the payload wherever
+    /// the pointer is. Escape gives the drag up. A tree cannot drag its rows
+    /// out, and a container cannot both `dragRows` and `reorder` or
+    /// `dragSelect`.
+    pub fn dragRows(self: *View, kind: u64) Error!void {
+        const index = self.stack[self.depth - 1];
+        if (index == 0) return error.NotContainer;
+        const node = &self.buffers.nodes[index];
+        if (node.kind == .tree or node.drag_select or node.reorder) return error.InvalidValue;
+        if (node.kind != .table and node.child_count != 0) return error.InvalidValue;
+        node.drag_rows = kind;
     }
 
     /// Let a primary drag from a row of the tree or table just opened select
@@ -3791,7 +3841,7 @@ pub const View = struct {
     pub fn dragSelect(self: *View) Error!void {
         const node = &self.buffers.nodes[self.stack[self.depth - 1]];
         if (node.kind != .tree and node.kind != .table) return error.NotContainer;
-        if (node.reorder) return error.InvalidValue;
+        if (node.reorder or node.drag_rows != null) return error.InvalidValue;
         node.drag_select = true;
     }
 
@@ -3821,6 +3871,7 @@ pub const View = struct {
             .area => |id| if (node.id == id and node.kind == .drag_area) return true,
             .source => |source| if (node.id == source.id and node.kind == .drag_source) return true,
             .reorder => |value| if (node.id == value.list and node.reorder) return true,
+            .rows => |value| if (node.id == value.list and node.drag_rows != null) return true,
             .select => |value| if (node.id == value.collection and node.drag_select) return true,
         };
         return false;
@@ -4081,8 +4132,9 @@ pub const View = struct {
             if (try self.revealNode(id)) try self.place();
         }
         self.record(measurer);
-        // Shared elements move what is drawn, not the arranged boxes input
-        // routing just recorded.
+        // Animated poses and shared elements move what is drawn, not the
+        // arranged boxes input routing just recorded.
+        if (self.poses.apply(all, self.now, self.preferences.reduce_motion)) |deadline| self.wakeAt(deadline);
         if (self.matches.apply(all, self.now, self.preferences.reduce_motion)) |deadline| self.wakeAt(deadline);
         self.matches.keepCopies(all, theme, copyTextColor);
     }
@@ -4413,7 +4465,7 @@ pub const View = struct {
         const overlay = &self.overlay;
         const zero: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
         for (all, 0..) |*node, index| {
-            if (!node.reorder or !node.style.enabled or overlay.list_count == max_reorder_lists) continue;
+            if (!(node.reorder or node.drag_rows != null) or !node.style.enabled or overlay.list_count == max_reorder_lists) continue;
             const first = overlay.reorder_item_count;
             if (node.kind == .table) {
                 for (all[index + 1 .. node.end], index + 1..) |*entry, at| {
@@ -4429,7 +4481,7 @@ pub const View = struct {
                     overlay.reorder_item_count += 1;
                 }
             }
-            overlay.lists[overlay.list_count] = .{ .id = node.id, .axis = options(node).axis, .rect = self.visible(node) orelse zero, .first = @intCast(first), .count = @intCast(overlay.reorder_item_count - first), .scroll = self.scrollAround(node) };
+            overlay.lists[overlay.list_count] = .{ .id = node.id, .axis = options(node).axis, .rect = self.visible(node) orelse zero, .first = @intCast(first), .count = @intCast(overlay.reorder_item_count - first), .scroll = self.scrollAround(node), .drag_kind = node.drag_rows };
             overlay.list_count += 1;
         }
     }
@@ -4459,6 +4511,12 @@ pub const View = struct {
                 const items = self.overlay.reorder_items[list.first..][0..list.count];
                 self.insert_mark = insertion(list, items, value.to);
                 break :reorder items[value.from].index;
+            },
+            // Out of the container: no line between its items.
+            .rows => |value| rows: {
+                const list = self.reorderList(value.list) orelse break :rows null;
+                if (value.from >= list.count) break :rows null;
+                break :rows self.overlay.reorder_items[list.first..][0..list.count][value.from].index;
             },
             else => null,
         };
@@ -4828,16 +4886,16 @@ pub const View = struct {
             }
         }
     }
-    /// Where the controls of a flying node take the pointer: moved and
-    /// scaled as its pose draws it, about its origin, turns left out. Null
-    /// when it draws in place, as without `Host.prepareShaderEffects`.
+    /// Where the controls of a flying node take the pointer: moved,
+    /// scaled and turned as its pose draws it about its origin, over the
+    /// box around it when turned. Null when it draws in place, as without
+    /// `Host.prepareShaderEffects`.
     fn flightHitMap(self: *const View, node: *const Node, offset: Point) ?ui.HitMap {
         if (self.effects == null) return null;
         const pose = node.style.pose orelse return null;
         if (pose.isIdentity()) return null;
         const box = node.bounds;
-        const origin: Point = .{ .x = offset.x + box.x + pose.origin[0] * box.width, .y = offset.y + box.y + pose.origin[1] * box.height };
-        return ui.HitMap.about(origin, pose.scale_x, pose.scale_y, .{ .x = pose.x, .y = pose.y });
+        return ui.HitMap.ofPose(pose, .{ .x = offset.x + box.x, .y = offset.y + box.y, .width = box.width, .height = box.height });
     }
     /// Paint a copy of a flying node gone, as its look shows it.
     fn paintCopy(self: *const View, target: anytype, entry: matched.CopyDraw) !void {
@@ -5692,6 +5750,10 @@ pub const Options = struct {
     /// Runs once at the end of every frame the Host draws, after the
     /// embedded leaves learned their places; see `FrameHook`.
     after_frame: ?FrameHook = null,
+    /// Tells a window that takes its content's size, as a flyout does
+    /// (`ziggurat_system.Flyout`'s `fit_content`), the size the content
+    /// takes; see `FitContent`.
+    fit_content: ?FitContent = null,
 
     /// The inspector, when the build has one; known at compile time to be
     /// null otherwise, so that nothing of it is compiled in.
@@ -5712,6 +5774,47 @@ pub const KeyHandler = struct {
     /// repaints.
     key_up: ?*const fn (*anyopaque, z.KeyInput) bool = null,
 };
+/// Measures the content of a window that takes its content's size as each
+/// frame lays it out, as a page sizes `width: fit-content; height: auto`:
+/// the root's widest line of children (its preferred width), within the
+/// bounds `widths` gives, and its height at the width the frame laid it
+/// out at. Scroll containers measure as their content and `grow` as their
+/// content too, so a window with a most height scrolls past it. `tell`
+/// hears the size in the window's DIPs (the content's times the window's
+/// zoom, as `Window.setClientBounds` takes sizes), only when it changed;
+/// it runs inside paint, so
+/// the window resizes after the frame (as `Flyout.contentSized` does), and
+/// the next frame lays the content out at the new size: the first frame
+/// after a change shows it at the size the window had.
+///
+/// A frame at a new size that measures the size told before the last one
+/// holds, so that a view that builds its content after the window's size
+/// settles at the size it took rather than resizing back and forth; a
+/// frame at the same size that measures another size tells it.
+pub const FitContent = struct {
+    context: *anyopaque,
+    /// The least and the most width, in the window's DIPs, 0 for no bound.
+    widths: ?*const fn (*anyopaque) [2]f32 = null,
+    tell: *const fn (*anyopaque, f32, f32) void,
+};
+/// What content fitting remembers between frames; see `FitContent`.
+pub const FitState = struct {
+    told: [2]f32 = .{ -1, -1 },
+    before: [2]f32 = .{ -1, -1 },
+    laid: [2]f32 = .{ -1, -1 },
+
+    /// The size to tell for a frame laid out at `window` that measured
+    /// `measured`, or null to tell nothing.
+    pub fn next(self: *FitState, window: [2]f32, measured: [2]f32) ?[2]f32 {
+        const resized = !std.mem.eql(f32, &self.laid, &window);
+        self.laid = window;
+        if (std.mem.eql(f32, &measured, &self.told) or (resized and std.mem.eql(f32, &measured, &self.before))) return null;
+        self.before = self.told;
+        self.told = measured;
+        return measured;
+    }
+};
+
 /// Code that follows the Host's frames, such as native content placed with
 /// embedded leaves that must hide when a frame no longer builds them. It runs
 /// inside paint under the rules of `Embed.place`.
@@ -5747,6 +5850,8 @@ pub const Host = struct {
     /// The pending focus waited one more frame, for a text field that
     /// registers itself with the Context after the frame that placed it.
     focus_retried: bool = false,
+    /// What `Options.fit_content` told.
+    fit: FitState = .{},
 
     pub fn init(state: anytype, comptime build: fn (@TypeOf(state), *View) anyerror!void, buffers: Buffers, options: Options) Host {
         var view = View.init(buffers);
@@ -6375,6 +6480,49 @@ pub const Host = struct {
         self.invalidate();
         return self.view.consumed;
     }
+    /// Build and lay out the content now, outside a frame, and tell
+    /// `Options.fit_content` the size it takes, if it changed: a hidden
+    /// window draws no frames, so a flyout calls it before it shows
+    /// (`ziggurat_system.Flyout`'s `Options.measure`), to show at the size
+    /// of what it shows now rather than resize after the frame showing it.
+    /// Takes the Host as its context. Does nothing inside a pass or without
+    /// `fit_content`.
+    pub fn fitNow(context: *anyopaque) void {
+        const self: *Host = @ptrCast(@alignCast(context));
+        const fit = self.options.fit_content orelse return;
+        const window = self.context.window orelse return;
+        if (self.building) return;
+        const size = window.contentSize() catch return;
+        const scale = if (std.math.isFinite(size.scale) and size.scale > 0) size.scale else 1;
+        const whole: Rect = .{ .x = 0, .y = 0, .width = @as(f32, @floatFromInt(size.width)) / scale, .height = @as(f32, @floatFromInt(size.height)) / scale };
+        self.view.window_active = self.context.windowActive();
+        self.pass(null) catch |err| {
+            self.last_error = err;
+            return;
+        };
+        self.view.arrange(whole, self.context.currentTheme(), self.options.measurer) catch |err| {
+            self.last_error = err;
+            return;
+        };
+        self.arranged = true;
+        self.measureFit(fit, whole);
+        // The frame that shows it builds again.
+        self.invalidate();
+    }
+    /// Tell `fit` the size the content just laid out in `window` takes, if
+    /// it changed; see `FitContent`.
+    fn measureFit(self: *Host, fit: FitContent, window: Rect) void {
+        // The content lays out in its own DIPs, the window's divided by its
+        // zoom; the window takes sizes in its own.
+        const zoom = if (self.context.window) |handle| handle.zoom() else 1;
+        const limits = if (fit.widths) |widths| widths(fit.context) else [2]f32{ 0, 0 };
+        const preferred = self.view.nodes()[0].measured.preferred;
+        var width = @max(preferred.width * zoom, limits[0]);
+        if (limits[1] > 0) width = @min(width, limits[1]);
+        const measured: [2]f32 = .{ @ceil(width), @ceil(preferred.height * zoom) };
+        if (!std.math.isFinite(measured[0]) or !std.math.isFinite(measured[1])) return;
+        if (self.fit.next(.{ window.width, window.height }, measured)) |size| fit.tell(fit.context, size[0], size[1]);
+    }
     fn draw(ptr: *anyopaque, frame: *ui.Frame) void {
         const self: *Host = @ptrCast(@alignCast(ptr));
         const theme = frame.currentTheme();
@@ -6407,6 +6555,7 @@ pub const Host = struct {
         const content = if (self.options.tools()) |tools| tools.contentBounds(whole) else whole;
         try self.view.arrange(content, theme, self.options.measurer);
         self.arranged = true;
+        if (self.options.fit_content) |fit| if (self.options.tools() == null or !self.options.tools().?.open) self.measureFit(fit, whole);
         const laid = if (lap) |*timer| timer.lap() else 0;
         try self.view.paint(frame);
         for (self.view.nodes()) |*node| {
@@ -7441,4 +7590,86 @@ test "each announcement paints a new status node, cut at a character boundary" {
     @memcpy(long[max_announcement - 1 ..], "\xc3\xa9");
     view.announce(&long);
     try std.testing.expectEqual(max_announcement - 1, view.announcement_len);
+}
+
+test "pose_motion shows a first pose at once and moves to the next" {
+    var storage: Storage(16, 256) = .{};
+    var view = View.init(storage.buffers());
+    const tween: animation.Motion = .{ .tween = .{ .duration_ns = 100, .easing = .linear } };
+    const Pass = struct {
+        fn run(v: *View, now: u64, pose: ?ui.effects.Pose, opacity: f32, built: bool) !void {
+            v.reset(.{}, null);
+            v.now = now;
+            try v.column(.{});
+            if (built) {
+                try v.column(.{ .key = 1, .width = 40, .height = 40, .pose = pose, .opacity = opacity, .pose_motion = tween });
+                try v.end();
+            }
+            try v.end();
+            try v.finish();
+            try v.arrange(.{ .x = 0, .y = 0, .width = 200, .height = 200 }, .{}, .{});
+        }
+        fn card(v: *View) *const Node {
+            for (v.nodes()) |*node| if (node.style.key == 1) return node;
+            unreachable;
+        }
+    };
+    // Built for the first time, the card shows at its pose at once and
+    // stays there without a build that poses it elsewhere.
+    try Pass.run(&view, 1000, .{ .y = 8 }, 0, true);
+    try std.testing.expectEqual(@as(f32, 8), Pass.card(&view).style.pose.?.y);
+    try std.testing.expectEqual(@as(f32, 0), Pass.card(&view).style.opacity);
+    try std.testing.expectEqual(@as(?u64, null), view.wake);
+    try Pass.run(&view, 1050, .{ .y = 8 }, 0, true);
+    try std.testing.expectEqual(@as(f32, 8), Pass.card(&view).style.pose.?.y);
+    // Posed at its place in the next build, it comes in from there.
+    try Pass.run(&view, 1100, null, 1, true);
+    try std.testing.expectEqual(@as(f32, 8), Pass.card(&view).style.pose.?.y);
+    try std.testing.expect(view.wake != null);
+    try Pass.run(&view, 1150, null, 1, true);
+    try std.testing.expectApproxEqAbs(@as(f32, 4), Pass.card(&view).style.pose.?.y, 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), Pass.card(&view).style.opacity, 1e-4);
+    try Pass.run(&view, 1200, null, 1, true);
+    try std.testing.expect(Pass.card(&view).style.pose == null);
+    try std.testing.expectEqual(@as(f32, 1), Pass.card(&view).style.opacity);
+    try std.testing.expect(!view.poses.moving());
+    try std.testing.expectEqual(@as(?u64, null), view.wake);
+    // A frame without it forgets it: built again, it starts in place.
+    try Pass.run(&view, 1300, null, 1, false);
+    try Pass.run(&view, 1400, .{ .x = 20 }, 1, true);
+    try std.testing.expectEqual(@as(f32, 20), Pass.card(&view).style.pose.?.x);
+    // Under reduced motion the pose moves at once and the opacity fades.
+    view.preferences.reduce_motion = true;
+    try Pass.run(&view, 1500, null, 0, true);
+    try std.testing.expect(Pass.card(&view).style.pose == null);
+    try std.testing.expectEqual(@as(f32, 1), Pass.card(&view).style.opacity);
+    try Pass.run(&view, 1550, null, 0, true);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), Pass.card(&view).style.opacity, 1e-4);
+}
+
+test "fitting a window to its content tells a size once, and holds against back and forth" {
+    var fit: FitState = .{};
+    // The first frame tells what it measured; the same again tells nothing.
+    try std.testing.expectEqual([2]f32{ 120, 80 }, fit.next(.{ 200, 200 }, .{ 120, 80 }).?);
+    try std.testing.expect(fit.next(.{ 200, 200 }, .{ 120, 80 }) == null);
+    // Laid out at that size, it measures another, told.
+    try std.testing.expectEqual([2]f32{ 140, 80 }, fit.next(.{ 120, 80 }, .{ 140, 80 }).?);
+    // Resized to it, it measures the one before: a view sizing its content
+    // after the window's would go back and forth. It holds.
+    try std.testing.expect(fit.next(.{ 140, 80 }, .{ 120, 80 }) == null);
+    // At the same size, a change in the content is told.
+    try std.testing.expectEqual([2]f32{ 120, 80 }, fit.next(.{ 140, 80 }, .{ 120, 80 }).?);
+
+    // The root measures its content's preferred size, padding included.
+    var storage: Storage(16, 256) = .{};
+    var view = View.init(storage.buffers());
+    view.reset(.{ .padding = Insets.all(10), .gap = 4 }, null);
+    try view.column(.{ .width = 150, .height = 30 });
+    try view.end();
+    try view.column(.{ .width = 90, .height = 50 });
+    try view.end();
+    try view.finish();
+    try view.arrange(.{ .x = 0, .y = 0, .width = 400, .height = 400 }, .{}, .{});
+    try std.testing.expectEqual(@as(f32, 170), view.nodes()[0].measured.preferred.width);
+    try std.testing.expectEqual(@as(f32, 104), view.nodes()[0].measured.preferred.height);
 }

@@ -151,6 +151,13 @@ pub fn unregister(allocator: std.mem.Allocator, application: Application, option
 /// is registered but the user has to allow it there. Earlier versions get a
 /// launch agent, ~/Library/LaunchAgents/<id>.plist, that opens the bundle
 /// with the arguments.
+///
+/// On Windows the Run entry starts the application with the user's normal
+/// (unelevated) token, even when the user is an administrator. An
+/// application that needs administrator rights, such as a VPN client,
+/// registers a logon task in Task Scheduler with the run level
+/// HighestAvailable instead, which starts it elevated, and does not call
+/// this.
 pub fn setLoginItem(item: LoginItem, scope: Scope) !void {
     try validateLoginItem(item);
     switch (builtin.os.tag) {

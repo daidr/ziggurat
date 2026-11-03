@@ -574,7 +574,14 @@ fn run(allocator: std.mem.Allocator, unified: bool, exhaust_observer: bool) !voi
     var stops: [512]e.GeometryCaret = undefined;
     var lines: [64]e.GeometryLine = undefined;
     const prepared = try host.adapters[1].preparedCarets(try host.documents[1].version(), &stops, &lines, .{});
-    const point: ui.layout.Point = .{ .x = presentation.columns[1].x + 35, .y = prepared.lines[0].rect.y + prepared.lines[0].rect.height / 2 };
+    // Click exactly on a caret stop a few glyphs in, never halfway between
+    // two, so the transformed click cannot round to either neighbour.
+    var stop_x = presentation.columns[1].x + 35;
+    for (prepared.carets[prepared.lines[0].first..][0..prepared.lines[0].count]) |caret| if (caret.rect.x >= presentation.columns[1].x + 30) {
+        stop_x = caret.rect.x;
+        break;
+    };
+    const point: ui.layout.Point = .{ .x = stop_x, .y = prepared.lines[0].rect.y + prepared.lines[0].rect.height / 2 };
     const target_caret = try host.adapters[1].hitTest(presentation.columns[1], point);
     const transformed = try host.matrix.mapPoint(.{ .x = point.x, .y = point.y });
     const click: z.Event = .{ .pointer_down = .{ .position = .{ .x = @floatCast(transformed.x), .y = @floatCast(transformed.y) } } };

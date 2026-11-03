@@ -831,6 +831,21 @@ pub const Screen = struct {
         self.changed();
         return true;
     }
+    /// Clear a shell's prompt from absolute row `start` (the cursor's row
+    /// when null or below it, the top of the screen when it scrolled
+    /// away) to the bottom of the primary screen, and put the cursor at
+    /// its start, for the shell to draw it again.
+    pub fn clearPrompt(self: *Screen, start: ?u64) void {
+        if (self.on_alternate) return;
+        const cursor_row = self.screenRow(self.cursor.y);
+        const from_abs = @min(start orelse cursor_row, cursor_row);
+        const from: usize = if (from_abs < self.pushed) 0 else @intCast(from_abs - self.pushed);
+        for (from..self.rows) |y| self.primary.clearRow(y, Cell.blank(.{}));
+        self.cursor.x = 0;
+        self.cursor.y = @intCast(from);
+        self.cursor.pending_wrap = false;
+        self.changed();
+    }
     /// Clear the scrollback alone.
     pub fn clearScrollback(self: *Screen) void {
         self.history.clear();

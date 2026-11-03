@@ -3311,26 +3311,83 @@ pub const CoordinateMapping = struct {
 /// drawn: each point (x, y) of window DIP goes to (x * scale_x + x0,
 /// y * scale_y + y0). See `Frame.setHitMap`.
 pub const HitMap = struct {
-    scale_x: f32 = 1,
-    scale_y: f32 = 1,
-    x0: f32 = 0,
-    y0: f32 = 0,
+    /// Column-major homography from window DIP drawn in place to window
+    /// DIP where it shows.
+    matrix: [9]f64 = .{ 1, 0, 0, 0, 1, 0, 0, 0, 1 },
 
     /// The map that scales by `scale` about `origin` and then moves by
     /// `delta`, as a pose moves and scales an element about its origin.
     pub fn about(origin: layout.Point, scale_x: f32, scale_y: f32, delta: layout.Point) HitMap {
-        return .{ .scale_x = scale_x, .scale_y = scale_y, .x0 = origin.x - origin.x * scale_x + delta.x, .y0 = origin.y - origin.y * scale_y + delta.y };
+        const sx: f64 = scale_x;
+        const sy: f64 = scale_y;
+        return .{ .matrix = .{ sx, 0, 0, 0, sy, 0, origin.x - origin.x * sx + delta.x, origin.y - origin.y * sy + delta.y, 1 } };
     }
+    /// The map of `pose` drawing the box `box`, in window DIP: moved,
+    /// scaled, turned and tilted about its origin, as it draws.
+    pub fn ofPose(pose: effects.Pose, box: Rect) HitMap {
+        const h = pose.homography(.{ box.width, box.height });
+        const x: f64 = box.x;
+        const y: f64 = box.y;
+        // T(box) * H * T(-box).
+        var m: [9]f64 = undefined;
+        for (0..3) |c| {
+            m[c * 3 + 0] = h[c * 3 + 0] + x * h[c * 3 + 2];
+            m[c * 3 + 1] = h[c * 3 + 1] + y * h[c * 3 + 2];
+            m[c * 3 + 2] = h[c * 3 + 2];
+        }
+        // The last column takes the box's offset back off.
+        for (0..3) |r| m[6 + r] -= x * m[r] + y * m[3 + r];
+        return .{ .matrix = m };
+    }
+    fn point(self: HitMap, x: f64, y: f64) ?[2]f64 {
+        const m = self.matrix;
+        const w = m[2] * x + m[5] * y + m[8];
+        if (!(w > 1e-6)) return null;
+        return .{ (m[0] * x + m[3] * y + m[6]) / w, (m[1] * x + m[4] * y + m[7]) / w };
+    }
+    /// Where `rect` takes the pointer: the box around its corners as the
+    /// map moves them, so a turned element takes it over the whole of its
+    /// turned box.
     pub fn apply(self: HitMap, rect: Rect) Rect {
-        const x0 = rect.x * self.scale_x + self.x0;
-        const x1 = (rect.x + rect.width) * self.scale_x + self.x0;
-        const y0 = rect.y * self.scale_y + self.y0;
-        const y1 = (rect.y + rect.height) * self.scale_y + self.y0;
-        const result: Rect = .{ .x = @min(x0, x1), .y = @min(y0, y1), .width = @abs(x1 - x0), .height = @abs(y1 - y0) };
+        var lo: [2]f64 = .{ std.math.inf(f64), std.math.inf(f64) };
+        var hi: [2]f64 = .{ -std.math.inf(f64), -std.math.inf(f64) };
+        const xs = [2]f64{ rect.x, rect.x + rect.width };
+        const ys = [2]f64{ rect.y, rect.y + rect.height };
+        for (xs) |x| for (ys) |y| {
+            // A corner behind the eye leaves the element where it is.
+            const p = self.point(x, y) orelse return rect;
+            for (0..2) |i| {
+                lo[i] = @min(lo[i], p[i]);
+                hi[i] = @max(hi[i], p[i]);
+            }
+        };
+        const result: Rect = .{ .x = @floatCast(lo[0]), .y = @floatCast(lo[1]), .width = @floatCast(hi[0] - lo[0]), .height = @floatCast(hi[1] - lo[1]) };
         if (!std.math.isFinite(result.x) or !std.math.isFinite(result.y) or !std.math.isFinite(result.width) or !std.math.isFinite(result.height)) return rect;
         return result;
     }
 };
+
+test "a hit map moves, scales and turns rectangles as a pose draws them" {
+    const moved = HitMap.about(.{ .x = 50, .y = 50 }, 2, 2, .{ .x = 10, .y = 0 });
+    const scaled = moved.apply(.{ .x = 40, .y = 40, .width = 20, .height = 20 });
+    try std.testing.expectApproxEqAbs(@as(f32, 40), scaled.x, 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 40), scaled.width, 1e-4);
+    // The same as a pose, then turned a quarter about the box's middle.
+    const box: Rect = .{ .x = 100, .y = 100, .width = 40, .height = 20 };
+    const posed = HitMap.ofPose(.{ .x = 5, .scale_x = 2, .scale_y = 2 }, box).apply(box);
+    try std.testing.expectApproxEqAbs(@as(f32, 85), posed.x, 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 90), posed.y, 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 80), posed.width, 1e-3);
+    const turned = HitMap.ofPose(.{ .rotate = 90 }, box).apply(box);
+    try std.testing.expectApproxEqAbs(@as(f32, 110), turned.x, 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 90), turned.y, 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 20), turned.width, 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 40), turned.height, 1e-3);
+    // A part of the box maps with it: its right half, turned, is below.
+    const half = HitMap.ofPose(.{ .rotate = 90 }, box).apply(.{ .x = 120, .y = 100, .width = 20, .height = 20 });
+    try std.testing.expectApproxEqAbs(@as(f32, 110), half.y, 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 20), half.height, 1e-3);
+}
 
 pub const Frame = struct {
     context: *Context,

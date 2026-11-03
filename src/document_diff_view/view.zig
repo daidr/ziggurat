@@ -60,7 +60,9 @@ pub const RowInfo = struct { row: usize, a: ?usize, b: ?usize, hunk: ?usize, bou
 pub const Info = struct { serial: u64, selected_hunk: ?usize, rows: usize, total_rows: usize, estimated_extent: f64, anchor_row: usize, revert_button: ui.Rect };
 pub const Stats = struct { reserved_bytes: usize, peak_reserved_bytes: usize, shaped_batches: u64, shaped_bytes: u64, indexed_rows: usize, header_layouts: u64, header_prepared: u64, header_reuses: u64 };
 const Ref = struct { plane: usize, part: usize };
-const RenderRow = struct { index: usize, y: f32, height: f32, ticks: u64, hunk: ?usize, sides: [2]?Ref };
+/// `band` is the height of a segment's header over the row's text, and
+/// `header` its text, borrowed from the numbering.
+const RenderRow = struct { index: usize, y: f32, height: f32, ticks: u64, hunk: ?usize, sides: [2]?Ref, band: f32 = 0, header: []const u8 = "" };
 const HeaderResource = struct {
     budget: *cache.Budget,
     refs: usize = 1,
@@ -309,17 +311,22 @@ pub const View = struct {
                     height = @max(height, candidate.planes[ref.plane].entry.parts[ref.part].height);
                 }
             }
+            // A segment's first row has its header over it.
+            const segment_header = segmentHeader(parameters.numbering, index, row);
+            const band: f32 = if (segment_header != null) @round(parameters.font.size * 1.6) else 0;
+            height += band;
             const ticks = try ix.ticks(height);
             if (candidate.row_count == 0 and anchor.inset >= ticks) {
                 anchor.inset = ticks - 1;
                 y = -@as(f32, @floatCast(ix.dip(anchor.inset)));
             }
             const actual: @TypeOf(height) = @floatCast(ix.dip(ticks));
-            candidate.rows[candidate.row_count] = .{ .index = row, .y = y, .height = actual, .ticks = ticks, .hunk = mapped.hunk, .sides = refs };
+            candidate.rows[candidate.row_count] = .{ .index = row, .y = y, .height = actual, .ticks = ticks, .hunk = mapped.hunk, .sides = refs, .band = band, .header = segment_header orelse "" };
             for (refs) |reference| if (reference) |ref| {
                 const part = candidate.planes[ref.plane].entry.parts[ref.part];
-                const top = @max(0, -y);
-                const bottom = @min(part.height, columns[0].height - y);
+                const text_y = y + band;
+                const top = @max(0, -text_y);
+                const bottom = @min(part.height, columns[0].height - text_y);
                 if (bottom > top) candidate.planes[ref.plane].include(part.top + top, bottom - top, width);
             };
             candidate.row_count += 1;
@@ -506,32 +513,49 @@ pub const View = struct {
         frame.rect(.{ .x = bounds.x, .y = bounds.y, .width = bounds.width, .height = snapshot.columns[0].y - bounds.y }, colors.header);
         const scrolled = if (self.index) |*index| ix.dip(index.position(self.anchor)) else 0;
         for (snapshot.rows[0..snapshot.row_count]) |row| {
+            // A segment's header in a band across both sides over its first
+            // row, in the size of the line numbers.
+            if (row.band > 0) {
+                const top = snapshot.columns[0].y;
+                const band = ui.layout.intersect(.{ .x = bounds.x, .y = top + row.y, .width = bounds.width, .height = row.band }, .{ .x = bounds.x, .y = top, .width = bounds.width, .height = snapshot.columns[0].height });
+                if (band.height > 0) {
+                    frame.rect(band, colors.header);
+                    frame.rect(.{ .x = band.x, .y = band.y, .width = band.width, .height = @min(1, band.height) }, colors.divider);
+                    try frame.pushClip(band);
+                    defer frame.popClip() catch |err| {
+                        frame.failure = frame.failure orelse err;
+                    };
+                    const size = snapshot.number_size;
+                    frame.labelFont(.{ .x = bounds.x + 8, .y = top + row.y + (row.band - size * 1.5) / 2, .width = bounds.width - 16, .height = size * 1.5 }, row.header, colors.line_number, .{ .size = size, .monospace = true });
+                }
+            }
             for ([_]Side{ .a, .b }) |side| {
                 const column = snapshot.columns[@backingInt(side)];
-                const rectangle = ui.layout.intersect(.{ .x = column.x, .y = column.y + row.y, .width = column.width, .height = row.height }, column);
+                const text_y = column.y + row.y + row.band;
+                const rectangle = ui.layout.intersect(.{ .x = column.x, .y = text_y, .width = column.width, .height = row.height - row.band }, column);
                 if (rectangle.height == 0) continue;
                 const reference = row.sides[@backingInt(side)];
                 const gutter = snapshot.gutters[@backingInt(side)];
-                const number_box = ui.layout.intersect(.{ .x = gutter.x, .y = column.y + row.y, .width = gutter.width, .height = row.height }, gutter);
+                const number_box = ui.layout.intersect(.{ .x = gutter.x, .y = text_y, .width = gutter.width, .height = row.height - row.band }, gutter);
                 if (row.hunk != null) {
                     if (reference == null) hatch.fill(frame, rectangle, column.x, column.y - hatch.phase(scrolled), colors.blank, colors.hatch) else frame.rect(rectangle, if (side == .a) colors.deleted else colors.added);
                     if (reference != null and number_box.width > 0 and number_box.height > 0) frame.rect(number_box, if (side == .a) colors.deleted else colors.added);
                 }
                 if (gutter.width > 0 and number_box.height > 0) if (self.index.?.row(row.index).side(side)) |record| {
-                    try drawNumber(frame, snapshot, side, record, gutter, column.y + row.y, colors);
+                    try drawNumber(frame, snapshot, side, record, gutter, text_y, row.band > 0, colors);
                 };
                 if (row.hunk != null and row.hunk == self.selected) frame.rect(.{ .x = column.x, .y = rectangle.y, .width = 3, .height = rectangle.height }, colors.selected);
                 if (reference) |ref| {
                     const plane = snapshot.planes[ref.plane];
                     const part = plane.entry.parts[ref.part];
                     if (plane.prepared) |prepared| {
-                        const clip = ui.layout.intersect(rectangle, .{ .x = column.x, .y = column.y + row.y, .width = column.width, .height = part.height });
+                        const clip = ui.layout.intersect(rectangle, .{ .x = column.x, .y = text_y, .width = column.width, .height = part.height });
                         if (clip.height > 0) {
                             try frame.pushClip(clip);
                             defer frame.popClip() catch |err| {
                                 frame.failure = frame.failure orelse err;
                             };
-                            try frame.preparedText(.{ .x = column.x, .y = column.y + row.y - part.top }, try prepared.view(), colors.text);
+                            try frame.preparedText(.{ .x = column.x, .y = text_y - part.top }, try prepared.view(), colors.text);
                         }
                     }
                 }
@@ -540,10 +564,24 @@ pub const View = struct {
         for (snapshot.headers[0..snapshot.header_count]) |item| try frame.preparedText(item.origin, try item.resource.prepared.view(), colors.text);
         if (frame.failure) |err| return @as(anyerror!void, err);
     }
+    /// The header of the segment row `row` starts, when it is the first of
+    /// its segment, and the numbering has headers.
+    fn segmentHeader(numbering: ?gutters.Numbering, index: *const ix.Index, row: usize) ?[]const u8 {
+        const value = numbering orelse return null;
+        if (value.header == null) return null;
+        const own = rowHeader(value, index.row(row)) orelse return null;
+        if (row > 0) if (rowHeader(value, index.row(row - 1))) |before| if (before.ptr == own.ptr and before.len == own.len) return null;
+        return own;
+    }
+    fn rowHeader(numbering: gutters.Numbering, mapped: ix.Row) ?[]const u8 {
+        if (mapped.a) |record| return numbering.headerOf(.a, record);
+        if (mapped.b) |record| return numbering.headerOf(.b, record);
+        return null;
+    }
     /// The number of record `record` of `side`, right-aligned in its
     /// gutter on the row's first line, and a line over the row when the
     /// record starts a segment.
-    fn drawNumber(frame: *ui.Frame, snapshot: *const Snapshot, side: Side, record: usize, gutter: ui.Rect, y: f32, colors: Colors) !void {
+    fn drawNumber(frame: *ui.Frame, snapshot: *const Snapshot, side: Side, record: usize, gutter: ui.Rect, y: f32, headed: bool, colors: Colors) !void {
         const which: gutters.Side = @fromBackingInt(@intCast(@backingInt(side)));
         const value = if (snapshot.numbering) |numbering| numbering.lineOf(which, record) else record;
         var buffer: [24]u8 = undefined;
@@ -552,7 +590,8 @@ pub const View = struct {
         const text_width = @as(f32, @floatFromInt(text.len)) * size * gutters.advance;
         const line = size * 1.5;
         const box: ui.Rect = .{ .x = gutter.x + @max(0, gutter.width - size / 2 - text_width), .y = y, .width = text_width + size, .height = line };
-        if (snapshot.numbering) |numbering| if (numbering.startsSegment(which, record) and y >= gutter.y and y < gutter.y + gutter.height) {
+        // A header's band over the row marks the segment already.
+        if (snapshot.numbering) |numbering| if (!headed and numbering.startsSegment(which, record) and y >= gutter.y and y < gutter.y + gutter.height) {
             const half = (snapshot.bounds.width - 8) / 2;
             frame.rect(.{ .x = gutter.x, .y = y, .width = half, .height = 1 }, colors.divider);
         };
@@ -587,7 +626,7 @@ pub const View = struct {
             var content: [2]?ui.Rect = @splat(null);
             for (row.sides, 0..) |reference, side| if (reference) |ref| {
                 const part = snapshot.planes[ref.plane].entry.parts[ref.part];
-                content[side] = .{ .x = snapshot.columns[side].x, .y = snapshot.columns[side].y + row.y, .width = snapshot.columns[side].width, .height = part.height };
+                content[side] = .{ .x = snapshot.columns[side].x, .y = snapshot.columns[side].y + row.y + row.band, .width = snapshot.columns[side].width, .height = part.height };
             };
             output.* = .{ .row = row.index, .a = mapped.a, .b = mapped.b, .hunk = row.hunk, .bounds = .{ .x = snapshot.bounds.x, .y = snapshot.columns[0].y + row.y, .width = snapshot.bounds.width, .height = row.height }, .a_content = content[0], .b_content = content[1] };
         }

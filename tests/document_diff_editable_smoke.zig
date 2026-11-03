@@ -33,7 +33,7 @@ pub fn Harness(comptime Surface: type) type {
         inbox: *viewing.Inbox,
         view: *Surface = undefined,
         adapters: [2]*editing.Adapter,
-        parameters: viewing.Parameters = .{ .font = .{ .size = 16, .wrap = .word_character, .width = 200 } },
+        parameters: viewing.Parameters = .{ .font = .{ .size = 16, .wrap = .word_character, .width = 200 }, .line_numbers = false },
         failure: ?anyerror = null,
         expected: ?anyerror = null,
         fail_frame: bool = false,
@@ -353,6 +353,20 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try std.testing.expect(!(try adapter_a.status()).projection_active and !(try adapter_b.status()).projection_active);
     _ = try state.view.handleEvent(.text_preedit_cancel, bounds, state.parameters);
     try std.testing.expect(!(try state.view.info()).comparison_required);
+    {
+        // Line numbers take a gutter at the start of each side's column.
+        var rows: [96]viewing.editable.Row = undefined;
+        const plain = (try state.view.copyPresentation(&rows)).columns;
+        var numbered = state.parameters;
+        numbered.line_numbers = true;
+        try state.view.prepare(bounds, numbered);
+        const shifted = (try state.view.copyPresentation(&rows)).columns;
+        for (plain, shifted) |before, after| {
+            try std.testing.expect(after.x > before.x);
+            try std.testing.expectApproxEqAbs(before.x + before.width, after.x + after.width, 0.01);
+        }
+        try state.view.prepare(bounds, state.parameters);
+    }
     try std.testing.expect((try adapter_a.status()).projection_active and (try adapter_b.status()).projection_active);
     try state.paint();
     _ = try state.view.handleEvent(.{ .text_preedit = .{ .text = "候\n选", .selection_start = 0, .selection_end = 3 } }, bounds, state.parameters);

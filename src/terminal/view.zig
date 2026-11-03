@@ -381,6 +381,9 @@ pub const TerminalView = struct {
     /// Show `session`'s program; its output arrives through `sink`.
     pub fn attachSession(self: *TerminalView, session: ?*term.Session) void {
         self.session = session;
+        // A zsh the session prepared redraws its prompt on resize; other
+        // programs keep theirs.
+        if (session) |shown| self.terminal.options.shell_integration = shown.shellIntegrated();
         // The new program learns the grid's size on the next placement.
         self.applied = null;
         self.invalidate();

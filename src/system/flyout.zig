@@ -76,6 +76,21 @@ pub const Anchor = union(enum) {
     tray: *Tray,
 };
 
+/// Bounds of the size a flyout that takes its content's size may take, in
+/// DIPs; 0 is no bound. The work area bounds it too.
+pub const FitContent = struct {
+    min_width: u32 = 0,
+    max_width: u32 = 0,
+    min_height: u32 = 0,
+    max_height: u32 = 0,
+};
+
+/// Code that lays the content out now; see `Options.measure`.
+pub const Measure = struct {
+    context: *anyopaque,
+    call: *const fn (*anyopaque) void,
+};
+
 pub const Options = struct {
     anchor: Anchor,
     placement: Placement = .bottom_start,
@@ -84,6 +99,21 @@ pub const Options = struct {
     /// Size in DIPs.
     width: u32 = 200,
     height: u32 = 200,
+    /// Take the size of the content, as a panel of a notification-area
+    /// icon whose list, form or error line changes as the application
+    /// runs: the content tells it with `contentSized`, as a view's Host
+    /// does each frame with `fitContent` as its `Options.fit_content`
+    /// (its widest line within `min_width`, `max_width` and the work
+    /// area's width, and its height at that width), and the flyout takes
+    /// it within these bounds and the work area, placed again against its
+    /// anchor after the frame. `width` and `height` are the size until
+    /// then; a size `setSize` gives holds until the content's changes.
+    fit_content: ?FitContent = null,
+    /// With `fit_content`: lays the content out and has it tell its size
+    /// (`contentSized`) as the hidden flyout shows, since a hidden window
+    /// draws no frames, so that it shows at the size of what it shows now:
+    /// a view's `Host.fitNow`, with the Host as its context.
+    measure: ?Measure = null,
     focusable: bool = false,
     /// Creates the flyout without showing it; `show` shows it.
     hidden: bool = false,
@@ -107,6 +137,13 @@ pub const Flyout = struct {
     height: u32 = 0,
     displays: ?[]const desktop.Monitor = null,
     on_closed: ?z.ClosedHandler = null,
+    fit: ?FitContent = null,
+    measure: ?Measure = null,
+    /// The content's size `contentSized` heard, not yet taken.
+    measured: ?[2]f32 = null,
+    /// The size the content last gave the flyout.
+    fitted: ?[2]u32 = null,
+    resize_posted: bool = false,
 
     /// Creates the flyout's window, places it and, unless `hidden`, shows
     /// it. Attach content to `window` before or after it shows. Fails with
@@ -148,12 +185,14 @@ pub const Flyout = struct {
             .height = options.height,
             .displays = options.displays,
             .on_closed = options.on_closed,
+            .fit = options.fit_content,
+            .measure = options.measure,
         };
         self.place() catch |err| {
             _ = window.destroy() catch {};
             return err;
         };
-        if (!options.hidden) window.show();
+        if (!options.hidden) self.show();
         return window;
     }
 
@@ -163,8 +202,17 @@ pub const Flyout = struct {
         return !window.isClosed();
     }
 
+    /// Shows the flyout; one that takes its content's size and is hidden
+    /// first takes the size of what it shows now (`Options.measure`).
     pub fn show(self: *Flyout) void {
-        if (self.window) |window| window.show();
+        const window = self.window orelse return;
+        const visible = if (window.state()) |state| state.visible else |_| false;
+        if (self.fit != null and !visible) {
+            if (self.measure) |measure| measure.call(measure.context);
+            self.resizeToContent() catch |err| window.report(.{ .severity = .warning, .domain = .core, .operation = .window_update, .err = err });
+            if (self.window == null or window.isClosed()) return;
+        }
+        window.show();
     }
 
     /// Closes the flyout as the application, which `on_close` may cancel.
@@ -243,6 +291,69 @@ pub const Flyout = struct {
         self.width = width;
         self.height = height;
         try self.place();
+    }
+
+    /// The content-fitting hooks for a view's Host (`Options.fit_content`
+    /// of `ziggurat_view`), which take this Flyout as their context: wire
+    /// them as `.{ .context = flyout, .widths = Flyout.contentWidths,
+    /// .tell = Flyout.contentSized }`.
+    /// The least and the most width the content may take, in DIPs, 0 for
+    /// no bound: `min_width`, and `max_width` within the work area.
+    pub fn contentWidths(context: *anyopaque) [2]f32 {
+        const self: *Flyout = @ptrCast(@alignCast(context));
+        const fit = self.fit orelse return .{ 0, 0 };
+        var most: f32 = @floatFromInt(fit.max_width);
+        if (self.workArea()) |area| most = if (most > 0) @min(most, area[0]) else area[0];
+        return .{ @floatFromInt(fit.min_width), most };
+    }
+    /// The content takes `width` by `height` DIPs, as a frame measured it:
+    /// with `fit_content`, the flyout takes that size within its bounds
+    /// and the work area, and is placed again, after the frame that
+    /// measured it. Without `fit_content` it does nothing.
+    pub fn contentSized(context: *anyopaque, width: f32, height: f32) void {
+        const self: *Flyout = @ptrCast(@alignCast(context));
+        if (self.fit == null or !std.math.isFinite(width) or !std.math.isFinite(height)) return;
+        self.measured = .{ width, height };
+        const window = self.window orelse return;
+        if (self.resize_posted) return;
+        // Not inside the frame that measured it.
+        window.app.post(.{ .context = self, .call = resizeTask }) catch {
+            self.resizeToContent() catch {};
+            return;
+        };
+        self.resize_posted = true;
+    }
+    fn resizeTask(context: *anyopaque) void {
+        const self: *Flyout = @ptrCast(@alignCast(context));
+        self.resize_posted = false;
+        self.resizeToContent() catch |err| if (self.window) |window| window.report(.{ .severity = .warning, .domain = .core, .operation = .window_update, .err = err });
+    }
+    /// Take the size the content last told, within the bounds and the work
+    /// area, unless it took it already.
+    pub fn resizeToContent(self: *Flyout) !void {
+        const fit = self.fit orelse return;
+        const measured = self.measured orelse return;
+        self.measured = null;
+        if (!self.isOpen()) return;
+        const size = fitSize(fit, measured, self.workArea());
+        if (self.fitted) |last| if (std.mem.eql(u32, &last, &size)) return;
+        self.fitted = size;
+        if (size[0] == self.width and size[1] == self.height) return;
+        try self.setSize(size[0], size[1]);
+    }
+    /// The work area of the display the flyout shows on, in DIPs, where
+    /// one is known.
+    fn workArea(self: *Flyout) ?[2]f32 {
+        const window = self.window orelse return null;
+        if (window.isClosed()) return null;
+        var staging: [desktop.max_monitors]desktop.Monitor = undefined;
+        const displays = self.displays orelse staging[0 .. desktop.monitors(window.app, &staging) catch return null];
+        if (displays.len == 0) return null;
+        const bounds = window.clientBounds() catch return null;
+        const origin = bounds.position orelse return null;
+        const monitor = monitorFor(.{ .x = origin.x, .y = origin.y, .width = @intCast(@min(bounds.width, 32768)), .height = @intCast(@min(bounds.height, 32768)) }, displays);
+        const scale = nativeScale(monitor.scale);
+        return .{ @as(f32, @floatFromInt(monitor.work_area.width)) / scale, @as(f32, @floatFromInt(monitor.work_area.height)) / scale };
     }
 
     /// Places the flyout where it goes now.
@@ -324,6 +435,24 @@ fn round(value: f32) i32 {
 fn dips(native: i32, scale: f32) u32 {
     return @intFromFloat(std.math.clamp(@round(@as(f32, @floatFromInt(@max(native, 1))) / scale), 1, 32768));
 }
+/// The size a flyout takes for content of `measured` DIPs: rounded up,
+/// within the bounds, and the work area when known.
+pub fn fitSize(fit: FitContent, measured: [2]f32, work: ?[2]f32) [2]u32 {
+    var result: [2]u32 = undefined;
+    const lows = [2]u32{ fit.min_width, fit.min_height };
+    const highs = [2]u32{ fit.max_width, fit.max_height };
+    for (0..2) |i| {
+        var value: f32 = @ceil(std.math.clamp(measured[i], 1, 32768));
+        value = @max(value, @as(f32, @floatFromInt(lows[i])));
+        if (highs[i] > 0) value = @min(value, @as(f32, @floatFromInt(highs[i])));
+        if (work) |area| if (area[i] >= 1) {
+            value = @min(value, @floor(area[i]));
+        };
+        result[i] = @intFromFloat(std.math.clamp(value, 1, 32768));
+    }
+    return result;
+}
+
 fn validate(gap: f32, width: u32, height: u32) !void {
     if (!std.math.isFinite(gap) or @abs(gap) > 4096) return error.InvalidGeometry;
     if (width == 0 or height == 0 or width > 32768 or height > 32768) return error.InvalidSize;

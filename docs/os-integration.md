@@ -64,6 +64,8 @@ macOS 不把深链和要打开的文件作为进程参数传给应用：点击 b
 
 macOS 要求进程从 `.app` bundle 运行（否则返回 `AppBundleRequired`），启动的是这个 bundle 而不是 `executable`。macOS 13 起用 `SMAppService.mainAppService` 把 bundle 登记为用户的登录项（「系统设置 > 通用 > 登录项」中列出），此时 `arguments` 不生效；返回 `ApprovalRequired` 表示已登记但要用户在那里允许。更早的系统写 `~/Library/LaunchAgents/<id>.plist`，由 `/usr/bin/open -a <bundle> --args …` 打开。`loginItemRegistered` 在 macOS 报告登录项是否已启用，等待批准的不算。失败时 `integration.last_macos_status` 是本线程最近的 NSError/OSStatus 码。
 
+Windows 上 Run 项用用户的普通（未提升）令牌启动应用，即使用户是管理员也一样：应用不能创建网络适配器、改系统代理或写受保护的目录。需要管理员权限的应用（比如 VPN 客户端）不要调用 `setLoginItem`，而是在任务计划程序里登记一个运行级别为 `HighestAvailable` 的登录任务（`schtasks /Create /SC ONLOGON /RL HIGHEST`，或任务计划程序 API），它会不经询问以提升的权限启动应用。创建这个任务本身需要管理员权限，所以应用在用户打开这个设置时请求一次。`loginItemRegistered` 不认识这样登记的任务；要区分这样的启动，给任务的命令加一个应用自己的参数。
+
 ## URL scheme 与文件关联
 
 ```zig
