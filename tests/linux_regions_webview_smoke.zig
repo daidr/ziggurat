@@ -10,6 +10,7 @@ extern fn zlg_content_count() c_uint;
 extern fn zlg_resource_count() c_uint;
 extern fn gtk_widget_destroy(*anyopaque) void;
 extern fn zwk_focus(*anyopaque) c_int;
+extern fn zwk_test_present(*anyopaque, *[4]f64) f64;
 extern fn g_timeout_add(c_uint, *const fn (*anyopaque) callconv(.c) c_int, *anyopaque) c_uint;
 extern fn g_source_remove(c_uint) c_int;
 
@@ -104,6 +105,24 @@ const State = struct {
             return error.RegionGeometryMismatch;
         }
     }
+    /// A page the content shows at half size lays out at its own size and
+    /// looks smaller, cut to its corners; its own zoom is untouched.
+    fn present(self: *State, bounds: z.Rect) !void {
+        const view = &self.nodes[0].view;
+        const zoom = try view.zoom();
+        try self.nodes[0].region.update(.{ .bounds = bounds, .layout_width = bounds.width * 2, .layout_height = bounds.height * 2, .radii = .{ 8, 0, 0, 0 } });
+        try self.check("A", bounds, true);
+        var corners: [4]f64 = undefined;
+        try std.testing.expectApproxEqAbs(zoom * 0.5, zwk_test_present(view.native.?, &corners), 0.01);
+        try std.testing.expectApproxEqAbs(@as(f64, 4), corners[0], 0.01);
+        try std.testing.expectApproxEqAbs(@as(f64, 0), corners[1], 0.01);
+        try std.testing.expectApproxEqAbs(zoom, try view.zoom(), 1e-9);
+        try view.setZoom(zoom);
+        try std.testing.expectApproxEqAbs(zoom * 0.5, zwk_test_present(view.native.?, &corners), 0.01);
+        try self.nodes[0].region.update(.{ .bounds = bounds });
+        try std.testing.expectApproxEqAbs(zoom, zwk_test_present(view.native.?, &corners), 1e-9);
+        try std.testing.expectEqual(@as(f64, 0), corners[0]);
+    }
     fn update(self: *State) !void {
         if (zlg_content_count() != 0 or zlg_region_count() != 3) return error.RegionHostCountMismatch;
         try self.check("A", a_bounds, true);
@@ -136,6 +155,7 @@ const State = struct {
         try self.check("A", empty, false);
         try self.nodes[0].region.update(.{ .bounds = moved });
         try self.check("A", moved, true);
+        try self.present(moved);
         try std.testing.expectEqual(before, self.failing.alloc_index);
         self.failing.fail_index = std.math.maxInt(usize);
         for (&self.nodes) |*node| {

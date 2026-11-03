@@ -10,6 +10,7 @@ const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
 pub const panic = std.debug.FullPanic(@import("macos_panic.zig").panic);
 extern fn zwk_test_frame(*anyopaque, *i32, *i32, *i32, *i32, *c_int) c_int;
+extern fn zwk_test_present(*anyopaque, *[4]f64) f64;
 extern fn zwk_session_park(*anyopaque, u64) c_int;
 extern fn zwk_session_size(*anyopaque, *u32, *u32) c_int;
 
@@ -108,6 +109,23 @@ const State = struct {
         const self: *State = @ptrCast(@alignCast(ptr));
         self.update() catch |err| self.fail(err);
     }
+    /// A page the content shows at half size lays out at its own size and
+    /// looks smaller, cut to its corners; its own zoom is untouched.
+    fn present(self: *State, bounds: z.Rect) !void {
+        const view = &self.nodes[0].view;
+        const zoom = try view.zoom();
+        try self.nodes[0].region.update(.{ .bounds = bounds, .layout_width = bounds.width * 2, .layout_height = bounds.height * 2, .radii = .{ 8, 0, 0, 0 } });
+        try expectFrame(view.native.?, bounds, self.scale, true);
+        var corners: [4]f64 = undefined;
+        try std.testing.expectApproxEqAbs(zoom * 0.5, zwk_test_present(view.native.?, &corners), 0.01);
+        try std.testing.expectApproxEqAbs(@as(f64, 4), corners[0], 0.01);
+        try std.testing.expectApproxEqAbs(zoom, try view.zoom(), 1e-9);
+        try view.setZoom(zoom);
+        try std.testing.expectApproxEqAbs(zoom * 0.5, zwk_test_present(view.native.?, &corners), 0.01);
+        try self.nodes[0].region.update(.{ .bounds = bounds });
+        try std.testing.expectApproxEqAbs(zoom, zwk_test_present(view.native.?, &corners), 1e-9);
+        try std.testing.expectEqual(@as(f64, 0), corners[0]);
+    }
     fn update(self: *State) !void {
         const a = self.nodes[0].view.native.?;
         const b = self.nodes[1].view.native.?;
@@ -138,6 +156,7 @@ const State = struct {
         try expectFrame(a, moved, self.scale, false);
         try self.nodes[0].region.update(.{ .bounds = moved });
         try expectFrame(a, moved, self.scale, true);
+        try self.present(moved);
         for (&self.nodes) |*node| {
             try std.testing.expectEqual(node.original.?.generation, node.view.pageId().?.generation);
             _ = try node.view.evaluateJS("saved", .{}, .{ .context = node, .complete = Node.preserved });

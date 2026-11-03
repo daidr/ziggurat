@@ -75,12 +75,20 @@ Linux 上 WebKitGTK 部件的滚动事件在 WebKitGTK 处理之前转给窗口�
 - macOS：WebKit 把页面未处理的按键沿响应链交给 WKWebView 的父视图，即窗口的内容视图；它在页面持有键盘时只把按键交给内容，不经输入法、不产生文字或编辑命令。Esc（及 Cmd+.）先以 `cancelOperation:` 命令到达，同样作为 Esc 交给内容。
 - Windows：WebView2 不报告页面未处理的按键，尚未实现。
 
+## 圆角与缩放
+
+页面按叶子的 `Style.radius` 裁成圆角，并按住它的 pose 移动和缩放：`view.Embed.present` 在每次绘制前告诉叶子它显示的位置（各级平面 pose 作用后的框）、缩放和圆角。缩放时页面不重新排版，而是按叶子排版时的尺寸布局，像一张图片那样缩小或放大显示；旋转或透视的 pose 不影响页面位置。区域的 `composition.Viewport` 为此带有 `layout_width`/`layout_height`（页面排版尺寸，0 为显示尺寸）和 `radii`（页面 DIP 中、从左上起顺时针的四个圆角半径），圆角外的点不属于该区域。
+
+- Linux：GTK 3 不能变换部件，页面部件按显示尺寸放置，WebKit 以缩放倍数额外缩放页面（`webkit_web_view_set_zoom_level`），使其按原尺寸的 CSS 像素排版；绘制时按圆角以整像素行裁剪，圆角外的像素不接收指针。
+- macOS：WKWebView 以 `pageZoom` 携带缩放倍数；半径相同时用图层的连续圆角（`cornerCurve`），不同时用圆角路径的遮罩。
+- 两个平台上 `web.View.zoom`/`setZoom` 读写的都是页面自己的缩放，不含上述倍数。Windows 尚未实现。
+
 ## 限制
 
 页面是窗口内的原生矩形子窗口（Windows 为 WebView2 controller，Linux 为 WebKitGTK widget），位于 Host 绘制的背景之上：
 
 - 原生 UI 画在页面所在区域的内容（包括弹出层、菜单、对话框、提示）会被页面遮住，不会盖在页面上方；需要覆盖页面的浮层请放在页面之外，或在浮层打开期间不构建页面。
-- 叶子部分被裁剪时，页面仍按完整 bounds 显示，不做圆角或任意形状裁剪；不透明度不作用于页面。
+- 叶子部分被裁剪时，页面仍按完整 bounds 显示，不做任意形状裁剪；不透明度不作用于页面。圆角与缩放见下节。
 - 指针和键盘输入由原生页面直接接收（页面未处理的按键除外，见上节）；Tab 不会在原生控件与页面元素之间连续移动。
 - 读取窗口背后内容的效果（如玻璃、背景模糊）看不到页面；窗口截图中页面位置为背景色，`web.View.capturePreview` 可截取页面本身。
 

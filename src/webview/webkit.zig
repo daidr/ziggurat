@@ -225,6 +225,9 @@ pub extern fn zwk_history(*anyopaque, c_int) c_int;
 pub extern fn zwk_stop(*anyopaque) c_int;
 pub extern fn zwk_focus(*anyopaque) c_int;
 pub extern fn zwk_viewport(*anyopaque, i32, i32, i32, i32, c_int) c_int;
+/// Shows a region's page scaled as a picture of its layout at
+/// `layout_width` DIPs (0: unscaled), cut to corners of `radii` in its DIPs.
+pub extern fn zwk_present(*anyopaque, f64, *const [4]f64) c_int;
 pub extern fn zwk_last_failure(*anyopaque, *Failure) void;
 pub extern fn zwk_counts(*u32, *u32, *u32) void;
 pub extern fn zwk_local_budget_new(u32, u32) ?*anyopaque;

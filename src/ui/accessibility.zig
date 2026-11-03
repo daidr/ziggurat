@@ -437,10 +437,10 @@ pub const Bridge = struct {
         virtual_lists.enableMath();
         window.app.assertOwner();
         if (self.native != null) return error.AlreadyAttached;
-        const handle = window.nativeHandle() orelse return error.Closed;
+        const handle = try attachHandle(window);
         const cleanup = try window.app.allocator.create(NativeCleanup);
         errdefer window.app.allocator.destroy(cleanup);
-        const native = zua_create(handle, enqueue, self) orelse return error.AccessibilityCreationFailed;
+        const native = zua_create(handle, enqueue, self) orelse return if (builtin.os.tag == .linux) error.AccessibilityHostRequired else error.AccessibilityCreationFailed;
         cleanup.* = .{
             .node = .{ .task = .{ .context = cleanup, .call = NativeCleanup.run } },
             .native = native,
@@ -618,7 +618,13 @@ pub const Bridge = struct {
         const window = self.window orelse return error.Closed;
         window.app.assertOwner();
         // macOS elements turn their view's points into screen coordinates
-        // as they are asked for.
+        // as they are asked for; Linux reads the drawing area's origins
+        // again.
+        if (builtin.os.tag == .linux) {
+            const native = self.native orelse return error.Closed;
+            self.last_hresult = zua_position_changed(native, 0, 0);
+            return;
+        }
         if (builtin.os.tag != .windows) return;
         const scope = window.beginCallback() orelse return error.Closed;
         defer scope.end();
@@ -745,14 +751,37 @@ fn hostFrame(window: z.Window) !HostFrame {
                 .focused = c.GetFocus() == hwnd,
             };
         },
-        // In the content view's points: the elements place themselves on
-        // the screen as they are asked.
-        .macos => {
+        // In the content view's points, or the drawing area's logical
+        // pixels: the elements place themselves on the screen as they are
+        // asked.
+        .macos, .linux => {
             const state = try window.state();
             return .{ .origin = .{ .x = 0, .y = 0 }, .scale = window.zoom(), .visible = state.visible and !state.minimized, .enabled = state.enabled, .focused = state.focused };
         },
         else => return error.UnsupportedPlatform,
     }
+}
+
+extern fn zlg_accessibility_host_available(*anyopaque) c_int;
+/// Whether the window can show assistive technology a tree: on Linux, a
+/// window created with `.accessibility_host = .children`.
+pub fn hostAvailable(window: z.Window) bool {
+    if (builtin.os.tag != .linux) return true;
+    const handle = attachHandle(window) catch return false;
+    return zlg_accessibility_host_available(handle) != 0;
+}
+
+/// What `zua_create` hosts the tree in: the window's GTK record on Linux,
+/// whose drawing area must be the accessible child host
+/// (`WindowOptions.accessibility_host = .children`), else its native handle.
+fn attachHandle(window: z.Window) !*anyopaque {
+    if (builtin.os.tag == .linux) {
+        const scope = window.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        if (comptime @hasField(@TypeOf(scope.record.native), "native")) return scope.record.native.native orelse error.Closed;
+        return error.UnsupportedPlatform;
+    }
+    return window.nativeHandle() orelse error.Closed;
 }
 
 fn geometryRef(bounds: affine.Rect, reference: affine.Ref) NativeGeometryRef {

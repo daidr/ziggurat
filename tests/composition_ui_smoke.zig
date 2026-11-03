@@ -248,12 +248,12 @@ fn normal(allocator: std.mem.Allocator) !void {
     state.fail_frame = false;
     state.expected_diagnostic = null;
     var provider: ?*anyopaque = null;
-    if (ui.capabilities.accessibility) provider = try state.context.accessibility_bridge.retainProvider(1);
+    if (ui.capabilities.accessibility and builtin.os.tag == .windows) provider = try state.context.accessibility_bridge.retainProvider(1);
     state.remove_draw = true;
     try paint(window);
     try checkRemoved(&state);
     try equal(frames, state.context.frames);
-    if (ui.capabilities.accessibility) {
+    if (ui.capabilities.accessibility and builtin.os.tag == .windows) {
         const node: *c.IUnknown = @ptrCast(@alignCast(provider.?));
         defer _ = node.lpVtbl.*.Release.?(node);
         const raw: *c.IRawElementProviderSimple = @ptrCast(@alignCast(provider.?));

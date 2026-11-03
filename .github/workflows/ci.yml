@@ -156,6 +156,7 @@ jobs:
           NO_AT_BRIDGE=1 xvfb-run -a -s '-screen 0 1280x800x24' zig build test-linux-accessibility-host test-linux-accessibility-position smoke-accessibility-host smoke-shortcut-scopes test-document-accessibility-linux-owner smoke-document-accessibility-linux -Doptimize=${{ matrix.optimize }}
           GDK_SCALE=2 NO_AT_BRIDGE=1 xvfb-run -a -s '-screen 0 1280x800x24' zig build test-linux-accessibility-host test-linux-accessibility-position smoke-accessibility-host smoke-shortcut-scopes test-document-accessibility-linux-owner smoke-document-accessibility-linux -Doptimize=${{ matrix.optimize }}
           GDK_SCALE=2 bash scripts/document-accessibility-atspi.sh -Doptimize=${{ matrix.optimize }}
+          NO_AT_BRIDGE=1 xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-accessibility-linux -Daccessibility=true -Doptimize=${{ matrix.optimize }}
           bash scripts/test-profile-storage.sh -Doptimize=${{ matrix.optimize }}
           xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-language-protocol smoke-language-protocol-shutdown smoke-completion-resolve smoke-completion-details smoke-diff-caret smoke-diff-commands smoke-diff-find -Doptimize=${{ matrix.optimize }}
           xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-text-layout smoke-text-layout-capture smoke-text-words smoke-text-words-fault smoke-text-clusters smoke-text-outlines smoke-text-cells smoke-text-drawing smoke-shaped-editor smoke-images smoke-image-prepare smoke-image-drawing smoke-image-update smoke-shell smoke-file-watch smoke-clipboard smoke-drop smoke-desktop -Doptimize=${{ matrix.optimize }}
@@ -249,7 +250,7 @@ jobs:
         if: (github.event_name == 'workflow_dispatch' && inputs.webview) || contains(github.event.pull_request.labels.*.name, 'webview')
         run: |
           sh scripts/ci-linux-deps.sh libwebkit2gtk-4.1-dev glib-networking dbus-x11
-          xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-webview-content-rules smoke-webview-scroll-linux smoke-webview-media-linux -Dwebview=true -Doptimize=${{ matrix.optimize }}
+          xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-webview-content-rules smoke-webview-scroll-linux smoke-webview-media-linux smoke-webview-regions-linux -Dwebview=true -Doptimize=${{ matrix.optimize }}
       - name: Capture Cairo submission and idle evidence
         if: matrix.optimize == 'ReleaseSafe'
         run: |

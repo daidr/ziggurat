@@ -11,6 +11,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include "accessibility_geometry.h"
+
+void zua_geometry_free(ZuaGeometry *geometry);
 
 /* accessibility.zig `Role`. */
 enum {
@@ -183,6 +186,9 @@ static id value_of(const NativeNode *n, NSString *name, NSString *value) {
     BOOL has_focus;
     /* Whether actions are refused, as while a publication sets elements. */
     BOOL updating;
+    /* The precise geometry of transformed content, while published. */
+    ZuaGeometry *geometry;
+    BOOL geometry_active;
 }
 - (BOOL)request:(ZuaElement *)element kind:(uint32_t)kind value:(NSString *)value start:(uint32_t)start end:(uint32_t)end number:(double)number;
 @end
@@ -196,6 +202,7 @@ static id value_of(const NativeNode *n, NSString *name, NSString *value) {
     NSArray<NSNumber *> *child_ids;
     id parent;
     BOOL fresh;
+    uint32_t published_at; /* in its publication, for its geometry */
 }
 @end
 
@@ -215,7 +222,10 @@ typedef struct Action {
     if ((self = [super init])) { elements = [NSMutableDictionary dictionary]; top = @[]; order = @[]; live_hosts++; }
     return self;
 }
-- (void)dealloc { live_hosts--; }
+- (void)dealloc {
+    if (geometry) { zua_geometry_free(geometry); geometry = NULL; }
+    live_hosts--;
+}
 - (ZuaElement *)element:(uint64_t)identifier { return elements[@(identifier)]; }
 - (NSArray *)zigAccessibilityChildren { return closed ? @[] : top; }
 - (id)zigAccessibilityFocusedElement {
@@ -232,7 +242,11 @@ typedef struct Action {
     id found = nil;
     for (ZuaElement *element in order) {
         const NativeNode *n = &element->node;
-        if (local.x >= n->x && local.y >= n->y && local.x < n->x + n->width && local.y < n->y + n->height) found = element;
+        if (!(local.x >= n->x && local.y >= n->y && local.x < n->x + n->width && local.y < n->y + n->height)) continue;
+        /* Inside the box of a turned or clipped element: inside the
+           element itself. */
+        if (geometry_active && !zua_geometry_hit(geometry, element->published_at, local.x, local.y)) continue;
+        found = element;
     }
     return found;
 }
@@ -452,9 +466,12 @@ static BOOL apply(ZuaElement *el, const NativeNode *n, NSString *name, NSString 
     return changed;
 }
 
-static int publish(ZuaHost *host, const NativeNode *nodes, uint32_t count, const uint16_t *text, uint32_t text_len, const RecipientAuthority *keys) {
+static int publish(ZuaHost *host, const NativeNode *nodes, uint32_t count, const uint16_t *text, uint32_t text_len, const RecipientAuthority *keys, const ZuaGeometry *geometry) {
     if (host->closed) return -1;
     if (count == 0 || nodes[0].id != 0) return -2;
+    if (geometry && (!host->geometry || !zua_geometry_valid(geometry, count))) return -2;
+    if (geometry) memcpy(host->geometry, geometry, sizeof *geometry);
+    host->geometry_active = geometry != NULL;
     NSView *view = host->view;
     host->updating = YES;
     BOOL layout = NO;
@@ -483,6 +500,7 @@ static int publish(ZuaHost *host, const NativeNode *nodes, uint32_t count, const
         NSString *name = text_at(text, text_len, n->name_start, n->name_len);
         NSString *value = text_at(text, text_len, n->value_start, n->value_len);
         NSString *description = text_at(text, text_len, n->description_start, n->description_len);
+        el->published_at = i;
         if (apply(el, n, name, value, description, keys ? &keys[i] : NULL)) [value_changed addObject:el];
         /* A status message absent from the previous tree announces itself
            once, politely. */
@@ -596,26 +614,37 @@ int zua_disconnect(void *state) {
     return 0;
 }
 int zua_publish(void *state, const NativeNode *nodes, uint32_t count, const uint16_t *text, uint32_t text_len) {
-    @autoreleasepool { return publish((__bridge ZuaHost *)state, nodes, count, text, text_len, NULL); }
+    @autoreleasepool { return publish((__bridge ZuaHost *)state, nodes, count, text, text_len, NULL, NULL); }
 }
 int zua_publish_registered(void *state, const NativeNode *nodes, uint32_t count, const uint16_t *text, uint32_t text_len, const RecipientAuthority *keys) {
-    @autoreleasepool { return publish((__bridge ZuaHost *)state, nodes, count, text, text_len, keys); }
+    @autoreleasepool { return publish((__bridge ZuaHost *)state, nodes, count, text, text_len, keys, NULL); }
 }
-/* Transformed content reports the bounds of its nodes as laid out; their
-   precise geometry is not used here. */
-int zua_publish_geometry(void *state, const NativeNode *nodes, uint32_t count, const uint16_t *text, uint32_t text_len, const void *geometry) {
-    (void)geometry;
-    return zua_publish(state, nodes, count, text, text_len);
+/* Transformed content: frames as laid out, and their precise geometry for
+   finding the element at a point. */
+int zua_publish_geometry(void *state, const NativeNode *nodes, uint32_t count, const uint16_t *text, uint32_t text_len, const ZuaGeometry *geometry) {
+    if (!geometry) return -2;
+    @autoreleasepool { return publish((__bridge ZuaHost *)state, nodes, count, text, text_len, NULL, geometry); }
 }
-int zua_publish_geometry_registered(void *state, const NativeNode *nodes, uint32_t count, const uint16_t *text, uint32_t text_len, const void *geometry, const RecipientAuthority *keys) {
-    (void)geometry;
-    return zua_publish_registered(state, nodes, count, text, text_len, keys);
+int zua_publish_geometry_registered(void *state, const NativeNode *nodes, uint32_t count, const uint16_t *text, uint32_t text_len, const ZuaGeometry *geometry, const RecipientAuthority *keys) {
+    if (!geometry || !keys) return -2;
+    @autoreleasepool { return publish((__bridge ZuaHost *)state, nodes, count, text, text_len, keys, geometry); }
 }
 static unsigned live_geometry;
-void *zua_geometry_create(void) { void *g = malloc(1); if (g) live_geometry++; return g; }
-void zua_geometry_free(void *geometry) { if (geometry) { free(geometry); live_geometry--; } }
-int zua_geometry_commit(void *state, void *geometry) { (void)state; zua_geometry_free(geometry); return 0; }
-void zua_geometry_release(void *state) { (void)state; }
+ZuaGeometry *zua_geometry_create(void) { ZuaGeometry *g = calloc(1, sizeof(ZuaGeometry)); if (g) live_geometry++; return g; }
+void zua_geometry_free(ZuaGeometry *geometry) { if (geometry) { free(geometry); live_geometry--; } }
+int zua_geometry_commit(void *state, ZuaGeometry *geometry) {
+    ZuaHost *host = (__bridge ZuaHost *)state;
+    if (host->closed || host->geometry) return -1;
+    host->geometry = geometry;
+    host->geometry_active = NO;
+    return 0;
+}
+void zua_geometry_release(void *state) {
+    ZuaHost *host = (__bridge ZuaHost *)state;
+    ZuaGeometry *geometry = host->geometry;
+    host->geometry = NULL; host->geometry_active = NO;
+    zua_geometry_free(geometry);
+}
 uint32_t zua_geometry_count(void) { return live_geometry; }
 
 int zua_take_action(void *pointer, ActionView *out) {

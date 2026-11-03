@@ -3,7 +3,63 @@ const z = @import("root.zig");
 
 pub const max_regions = 256;
 pub const Options = struct { capacity: u16 = 16 };
-pub const Viewport = struct { bounds: z.Rect, visible: bool = true };
+pub const Viewport = struct {
+    /// The region's box as it shows, in the window's DIPs.
+    bounds: z.Rect,
+    visible: bool = true,
+    /// The size the region's content lays out at, in its own DIPs, such
+    /// as a page's box before a scale of the transforms around it: the
+    /// content then shows in `bounds` scaled as a picture of it. Zero is
+    /// `bounds`' size.
+    layout_width: f32 = 0,
+    layout_height: f32 = 0,
+    /// The radii of the content's corners, in its own DIPs, from its
+    /// top-left clockwise: it shows, and takes the pointer, inside them.
+    radii: [4]f32 = @splat(0),
+
+    /// The size the content lays out at.
+    pub fn layoutSize(self: Viewport) [2]f32 {
+        if (self.layout_width <= 0 or self.layout_height <= 0) return .{ self.bounds.width, self.bounds.height };
+        return .{ self.layout_width, self.layout_height };
+    }
+    /// How much `bounds` scales the content: 1, 1 unless a transform
+    /// scales it.
+    pub fn scale(self: Viewport) [2]f32 {
+        const size = self.layoutSize();
+        if (size[0] <= 0 or size[1] <= 0) return .{ 1, 1 };
+        return .{ self.bounds.width / size[0], self.bounds.height / size[1] };
+    }
+    pub fn rounded(self: Viewport) bool {
+        return !std.mem.allEqual(f32, &self.radii, 0);
+    }
+    /// Whether a point of the window is the region's: in its box and
+    /// inside its corners.
+    pub fn contains(self: Viewport, point: z.Point) bool {
+        if (!self.bounds.contains(point)) return false;
+        if (!self.rounded()) return true;
+        const size = self.layoutSize();
+        const factor = self.scale();
+        if (factor[0] <= 0 or factor[1] <= 0) return false;
+        return insideCorners(size[0], size[1], self.radii, (point.x - self.bounds.x) / factor[0], (point.y - self.bounds.y) / factor[1]);
+    }
+};
+
+/// Whether `x`, `y` is inside the corners of `radii` (from the top-left
+/// clockwise) of a box `width` by `height` at the origin.
+pub fn insideCorners(width: f32, height: f32, radii: [4]f32, x: f32, y: f32) bool {
+    const sides = [4][2]f32{ .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1 }, .{ 0, 1 } };
+    for (radii, sides) |radius, side| {
+        if (radius <= 0) continue;
+        const cx = radius + side[0] * (width - 2 * radius);
+        const cy = radius + side[1] * (height - 2 * radius);
+        const dx = x - cx;
+        const dy = y - cy;
+        // Only the corner's own square is cut.
+        if ((side[0] == 0) != (dx < 0) or (side[1] == 0) != (dy < 0)) continue;
+        if (dx * dx + dy * dy > radius * radius) return false;
+    }
+    return true;
+}
 pub const Kind = enum { native, backdrop };
 pub const Snapshot = struct { window: z.Window, viewport: Viewport, kind: Kind, size: z.Size };
 
@@ -179,11 +235,11 @@ const State = struct {
         var cursor = self.last;
         while (cursor) |index| {
             const value = &self.entries[index];
-            if (value.phase == .attached and value.kind == .native and interactive(value.viewport) and value.viewport.bounds.contains(point)) return .{ .index = index, .generation = value.generation };
+            if (value.phase == .attached and value.kind == .native and interactive(value.viewport) and value.viewport.contains(point)) return .{ .index = index, .generation = value.generation };
             cursor = value.previous;
         }
         if (self.backdrop) |key| if (self.entry(key)) |value| {
-            if (value.phase == .attached and interactive(value.viewport) and value.viewport.bounds.contains(point)) return key;
+            if (value.phase == .attached and interactive(value.viewport) and value.viewport.contains(point)) return key;
         };
         return null;
     }
@@ -297,6 +353,7 @@ fn validate(viewport: Viewport) !void {
     const b = viewport.bounds;
     for ([_]f32{ b.x, b.y, b.width, b.height, b.x + b.width, b.y + b.height }) |value| if (!std.math.isFinite(value) or @abs(value) > 1000000) return error.InvalidViewport;
     if (b.width < 0 or b.height < 0) return error.InvalidViewport;
+    for ([_]f32{ viewport.layout_width, viewport.layout_height } ++ viewport.radii) |value| if (!std.math.isFinite(value) or value < 0 or value > 1000000) return error.InvalidViewport;
 }
 
 /// Sole Window.Content owner. App and Owner outlive all copied Region handles.

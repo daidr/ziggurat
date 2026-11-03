@@ -1833,6 +1833,13 @@ pub const Context = struct {
         self.last_enabled = (try window.state()).enabled;
         self.attached_render_mode = self.render_mode;
         self.attached_semantics_enabled = build_options.accessibility and self.semantics_enabled;
+        // A Linux window hosts the tree below its drawing area only when it
+        // was created with `.accessibility_host = .children`; another shows
+        // assistive technology nothing, and says so once.
+        if (build_options.accessibility and self.attached_semantics_enabled and !accessibility.hostAvailable(window)) {
+            self.attached_semantics_enabled = false;
+            window.report(.{ .severity = .warning, .domain = .core, .operation = .content_attach, .err = error.AccessibilityHostRequired });
+        }
         errdefer self.attached_semantics_enabled = false;
         if (build_options.accessibility and self.attached_semantics_enabled) {
             if (self.semantic_name.len > self.semantic_name_storage.len) return error.SemanticNameTooLong;

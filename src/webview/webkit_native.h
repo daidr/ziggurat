@@ -182,6 +182,9 @@ int zwk_history(ZwkState *,int forward);
 int zwk_stop(ZwkState *);
 int zwk_focus(ZwkState *);
 int zwk_viewport(ZwkState *, int32_t left, int32_t top, int32_t right, int32_t bottom, int visible);
+/* Shows a region's page scaled as a picture of its layout at layout_width
+ * DIPs (0: unscaled), its drawing cut to corners of radii in its DIPs. */
+int zwk_present(ZwkState *, double layout_width, const double radii[4]);
 void zwk_last_failure(ZwkState *,ZwkFailure *);
 void zwk_counts(uint32_t *states,uint32_t *callbacks,uint32_t *views);
 /* Optional trusted future-document batch. prepare captures UTF-8 and owns the

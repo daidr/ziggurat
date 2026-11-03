@@ -641,6 +641,12 @@ pub const KeyBinding = struct {
 /// A leaf that measures, places and paints itself, for content the view
 /// layer does not model, such as an editable text field. The context must
 /// stay valid while any pass that emits it runs.
+/// Where an embedded leaf shows: `frame` is its box as the poses of it and
+/// its containers move and scale it, in window DIPs; `scale` how much they
+/// scale it from its arranged box; `radius` the node's corner radius in its
+/// own DIPs. Turned or tilted poses leave the arranged box.
+pub const Presentation = struct { frame: Rect, scale: [2]f32 = .{ 1, 1 }, radius: f32 = 0 };
+
 pub const Embed = struct {
     context: *anyopaque,
     /// Content size for the current theme; called during arrange.
@@ -660,6 +666,11 @@ pub const Embed = struct {
     /// The text of an embedded text input and its selection, for
     /// automation; called outside passes and paint.
     text: ?*const fn (*anyopaque) ?EmbedText = null,
+    /// How the leaf shows in the window, called just before each `paint`
+    /// under the same rules: native content placed over the window, such
+    /// as a web page, follows the poses that move and scale it and is cut
+    /// to the node's corners.
+    present: ?*const fn (*anyopaque, u64, Presentation) void = null,
     /// Register the leaf as a Tab stop under its node id, so it can hold
     /// focus and receive keys through `input`.
     focusable: bool = false,
@@ -5063,6 +5074,7 @@ pub const View = struct {
                     // A focusable leaf is a Tab stop under its own id; the
                     // controls it paints itself stay above it.
                     if (content.focusable and @TypeOf(target) == *ui.Frame) try target.addControl(node.id, bounds, .{ .enabled = node.style.enabled });
+                    if (content.present) |present| if (@TypeOf(target) == *ui.Frame) present(content.context, node.id, self.presentation(all, at));
                     if (@TypeOf(target) == *ui.Frame) try content.paint(content.context, target, node.id, bounds) else try target.embedded(node.id, bounds);
                 },
             }
@@ -5105,6 +5117,31 @@ pub const View = struct {
         if (width) |line| {
             if (std.math.isFinite(line) and line > 0) target.gradientStrokeRect(bounds, radius, line, resolved);
         } else target.gradientRect(bounds, radius, resolved);
+    }
+    /// How the leaf at `index` shows: its box moved and scaled by the flat
+    /// poses of it and its containers, innermost first.
+    fn presentation(self: *const View, all: []const Node, index: usize) Presentation {
+        const leaf = &all[index];
+        var result: Presentation = .{ .frame = leaf.bounds, .radius = leaf.style.radius };
+        if (self.effects == null) return result;
+        var at: u32 = @intCast(index);
+        while (at != none) : (at = all[at].parent) {
+            const node = &all[at];
+            const pose = node.style.pose orelse continue;
+            if (pose.z != 0 or pose.rotate != 0 or pose.rotate_x != 0 or pose.rotate_y != 0) return .{ .frame = leaf.bounds, .radius = leaf.style.radius };
+            const b = node.bounds;
+            const ox = b.x + pose.origin[0] * b.width;
+            const oy = b.y + pose.origin[1] * b.height;
+            result.frame = .{
+                .x = ox + (result.frame.x - ox) * pose.scale_x + pose.x,
+                .y = oy + (result.frame.y - oy) * pose.scale_y + pose.y,
+                .width = result.frame.width * pose.scale_x,
+                .height = result.frame.height * pose.scale_y,
+            };
+            result.scale = .{ result.scale[0] * pose.scale_x, result.scale[1] * pose.scale_y };
+        }
+        if (result.scale[0] <= 0 or result.scale[1] <= 0) return .{ .frame = leaf.bounds, .radius = leaf.style.radius };
+        return result;
     }
     /// Open the pose, effect and opacity of a node, outermost first, and
     /// return how many opened. Opacity applies to the outermost one.
