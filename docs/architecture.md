@@ -194,6 +194,8 @@ TextClient 解绑先撤原生入口，再通知唯一旧客户端 `unbound`。�
 | App.requestQuit | quit 原因预检所有窗口；出现否决不执行自动关闭 |
 | App.quit | 绕过否决、关闭任务入口并请求结束循环；退出序列已跑完而原生循环仍在继续时（例如被吞掉退出请求的模态循环），之后每次 quit 或 requestQuit 都再次请求循环结束 |
 
+macOS 上程序坞菜单的“退出”、⌘Q 之外的系统退出请求（如注销前询问）经 `applicationShouldTerminate:` 交给 requestQuit，AppKit 收到 NSTerminateCancel，是否退出由预检与否决决定。
+
 窗口请求返回 closed、cancelled、deferred 或 in_progress。deferred 表示已接受并进入关闭阶段；isClosed 包含该阶段，不是释放上下文的依据。重入关闭询问返回 in_progress；退出预检期间拒绝新建窗口，不回滚应用回调主动发起的强制关闭。
 
 原生/窗口内容回调固定窗口记录并进入活动作用域；独立 PageSession 的普通页面操作固定 App/Session，涉及 provider 几何时另固定 Region/Window。作用域中的关闭只加入独立待销毁链表，全部回调退栈后的安全点执行原生销毁。外部直接销毁 HWND/GtkWidget 时，仍保留既有回调使用的 Content。先清除入口再 detach，恰好一次；随后通知一次 on_closed，失败构造不通知。正常运行时 on_closed 可创建替代窗口，stopping 后不允许创建。

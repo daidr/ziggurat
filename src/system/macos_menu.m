@@ -317,6 +317,9 @@ static NSView *content_view(NSWindow *window) {
     void (*event)(void *, uint64_t, int32_t, int32_t, int32_t);
     NSRect clicked, of;
     int opening;
+    /* Whether the bar under the button is dark, as last told, and whether
+       the button's appearance is observed. */
+    int dark, observing;
 }
 @end
 
@@ -419,6 +422,14 @@ static int secondary_click(NSEvent *event) {
            ((type == NSEventTypeLeftMouseUp || type == NSEventTypeLeftMouseDown) && ([event modifierFlags] & NSEventModifierFlagControl));
 }
 
+/* Whether the menu bar under the item is dark, as AppKit draws its own
+   items: by the button's appearance, which follows the bar's. */
+static int status_dark(ZsmStatus *status) {
+    NSStatusBarButton *button = status->statusItem.button;
+    if (!button) return 0;
+    NSAppearanceName match = [[button effectiveAppearance] bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]];
+    return [match isEqualToString:NSAppearanceNameDarkAqua];
+}
 @implementation ZsmStatus
 - (void)zsmClicked:(NSMenuItem *)item {
     if (owner && event) event(owner, serial, 3, (int32_t)[item tag], 0);
@@ -437,6 +448,13 @@ static int secondary_click(NSEvent *event) {
 - (void)zsmButton:(id)sender {
     (void)sender;
     [self handleClick:[NSApp currentEvent]];
+}
+- (void)observeValueForKeyPath:(NSString *)path ofObject:(id)object change:(NSDictionary *)change context:(void *)context {
+    (void)path; (void)object; (void)change; (void)context;
+    const int now = status_dark(self);
+    if (now == dark) return;
+    dark = now;
+    if (owner && event) event(owner, serial, 4, now, 0);
 }
 - (void)handleClick:(NSEvent *)click {
     [self noteClick:click];
@@ -492,6 +510,9 @@ void *zsm_tray_show(void *icon, int template_image, const char *tooltip, const c
         [image setTemplate:template_image ? YES : NO];
         [button setImage:image];
         status_text(status, tooltip, title);
+        status->dark = status_dark(status);
+        [button addObserver:status forKeyPath:@"effectiveAppearance" options:0 context:NULL];
+        status->observing = 1;
         return (void *)CFBridgingRetain(status);
     }
 }
@@ -530,10 +551,24 @@ int zsm_tray_pointer_over(void *handle) {
     NSRect frame = [status frame];
     return frame.size.width > 0 && NSPointInRect([NSEvent mouseLocation], frame);
 }
+int zsm_tray_dark(void *handle) {
+    @autoreleasepool { return status_dark((__bridge ZsmStatus *)handle); }
+}
+/* The bar under the button turned dark or light. */
+void zsm_test_tray_appearance(void *handle, int dark) {
+    @autoreleasepool {
+        ZsmStatus *status = (__bridge ZsmStatus *)handle;
+        status->statusItem.button.appearance = [NSAppearance appearanceNamed:dark ? NSAppearanceNameDarkAqua : NSAppearanceNameAqua];
+        /* KVO may settle the change later; the check drops a repeat. */
+        [status observeValueForKeyPath:@"effectiveAppearance" ofObject:status->statusItem.button change:nil context:NULL];
+    }
+}
 void zsm_tray_remove(void *handle) {
     @autoreleasepool {
         ZsmStatus *status = CFBridgingRelease(handle);
         status->owner = NULL;
+        if (status->observing && status->statusItem) [status->statusItem.button removeObserver:status forKeyPath:@"effectiveAppearance"];
+        status->observing = 0;
         if (status->statusItem) [[NSStatusBar systemStatusBar] removeStatusItem:status->statusItem];
         status->statusItem = nil;
         status->menu = nil;

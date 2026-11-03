@@ -65,15 +65,25 @@ try v.end();
 
 Linux 上 WebKitGTK 部件的滚动事件在 WebKitGTK 处理之前转给窗口的绘制区域（屏幕上同一点），组合层再把该区域上的滚轮交给背景（`Region.passWheel`），即 Host 的原生 UI。Windows 与 macOS 暂未实现，页面仍自己接收滚轮。
 
+## 页面留下的按键
+
+邮件应用在列表旁边用 Web 视图显示一封邮件的 HTML，列表靠键盘操作：J、K 切换邮件，Ctrl+K（macOS 为 Cmd+K）打开命令面板。用户点进邮件选择文字或打开链接后键盘归页面，但 J、K 和 Ctrl+K 仍然有效：页面没有处理的按键交给原生 UI，作为窗口自己的按键（`KeyInput.from_page` 为 true），窗口的快捷键与 `view.Host.Options.keys` 都能看到。原生 UI 中原本有焦点的控件失去焦点，以免方向键、退格之类移动它的光标；键盘仍归页面，页面照常选择、复制、输入和打开链接。这类按键之后没有文字与释放事件。
+
+页面在以下情况保留按键：在 `keydown` 处理中取消它（`preventDefault`）；在文本框、textarea 或可编辑内容里用它输入或编辑，或输入法正在组字；页面自己用它做事（链接上的 Enter、可滚动时的方向键与空格等，由引擎判断）；Tab（在页面内移动并移出页面）和单独按下的修饰键。
+
+- Linux：WebKitGTK 在 Web 进程答复页面未处理后再次派发该按键，其类处理函数随后放行；区域在子部件的 `key-press-event` 上以 `G_CONNECT_AFTER` 接收这些按键（`zlg_region_forward_keys`）。
+- macOS：WebKit 把页面未处理的按键沿响应链交给 WKWebView 的父视图，即窗口的内容视图；它在页面持有键盘时只把按键交给内容，不经输入法、不产生文字或编辑命令。Esc（及 Cmd+.）先以 `cancelOperation:` 命令到达，同样作为 Esc 交给内容。
+- Windows：WebView2 不报告页面未处理的按键，尚未实现。
+
 ## 限制
 
 页面是窗口内的原生矩形子窗口（Windows 为 WebView2 controller，Linux 为 WebKitGTK widget），位于 Host 绘制的背景之上：
 
 - 原生 UI 画在页面所在区域的内容（包括弹出层、菜单、对话框、提示）会被页面遮住，不会盖在页面上方；需要覆盖页面的浮层请放在页面之外，或在浮层打开期间不构建页面。
 - 叶子部分被裁剪时，页面仍按完整 bounds 显示，不做圆角或任意形状裁剪；不透明度不作用于页面。
-- 指针和键盘输入由原生页面直接接收；Tab 不会在原生控件与页面元素之间连续移动。
+- 指针和键盘输入由原生页面直接接收（页面未处理的按键除外，见上节）；Tab 不会在原生控件与页面元素之间连续移动。
 - 读取窗口背后内容的效果（如玻璃、背景模糊）看不到页面；窗口截图中页面位置为背景色，`web.View.capturePreview` 可截取页面本身。
 
 ## 验证
 
-`zig build smoke-embedded-webview -Dwebview=true` 在真实窗口中检查：页面区域与叶子 bounds 一致，不构建时隐藏，再次构建时以同一个 PageId 显示，退出时原生资源与分配归零。Linux 在 Xvfb 下运行，Windows 在 CI 的 WebView 任务中运行。`zig build smoke-webview-scroll-linux -Dwebview=true` 把带 `scroll_to_container` 的页面放进原生滚动容器，经 GTK 事件路径向页面发送触摸板滚动，确认滚动的是外面的容器。
+`zig build smoke-embedded-webview -Dwebview=true` 在真实窗口中检查：页面区域与叶子 bounds 一致，不构建时隐藏，再次构建时以同一个 PageId 显示，退出时原生资源与分配归零。Linux 在 Xvfb 下运行，Windows 在 CI 的 WebView 任务中运行。`zig build smoke-webview-scroll-linux -Dwebview=true` 把带 `scroll_to_container` 的页面放进原生滚动容器，经 GTK 事件路径向页面发送触摸板滚动，确认滚动的是外面的容器；随后让页面取得键盘，发送页面取消的 H、Tab 与页面未处理的 J，确认只有 J 作为 `from_page` 按键到达原生 UI。

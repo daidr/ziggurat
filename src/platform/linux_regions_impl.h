@@ -14,11 +14,12 @@ struct ZlgRegionHost {
     GtkWidget *child;
     ZlgRegionHost *previous, *next;
     unsigned refs;
-    gulong destroy_handler, scroll_handler;
+    gulong destroy_handler, scroll_handler, key_handler;
     int x, y, width, height;
     gboolean visible, closed, child_destroyed;
 };
 static gint region_resources;
+static gboolean page_key(NativeWindow *s, GdkEventKey *native);
 unsigned zlg_region_count(void) { return (unsigned)g_atomic_int_get(&region_resources); }
 #ifndef ZLG_REGION_LAYER_ALLOC
 #define ZLG_REGION_LAYER_ALLOC() g_try_new0(ZlgRegionLayer,1)
@@ -200,6 +201,24 @@ void zlg_region_scroll_to_container(ZlgRegionHost *host, int on) {
     if (on && !host->scroll_handler) host->scroll_handler=g_signal_connect(host->child,"scroll-event",G_CALLBACK(region_scroll),host);
     else if (!on && host->scroll_handler) { g_signal_handler_disconnect(host->child,host->scroll_handler); host->scroll_handler=0; }
 }
+/* Runs after the child's class handler, so for the keys the child passes on:
+   WebKitGTK dispatches a key again once its web process says the page left
+   it, and its class handler then lets it through. */
+static gboolean region_key(GtkWidget *widget, GdkEventKey *native, gpointer data) {
+    (void)widget;
+    ZlgRegionHost *host=data;
+    if (!region_live(host) || native->type!=GDK_KEY_PRESS) return FALSE;
+    NativeWindow *s=host->layer->window;
+    region_retain(host); retain(s);
+    gboolean taken=page_key(s,native);
+    release(s); region_release(host);
+    return taken;
+}
+void zlg_region_forward_keys(ZlgRegionHost *host, int on) {
+    if (!region_live(host)) return;
+    if (on && !host->key_handler) host->key_handler=g_signal_connect_after(host->child,"key-press-event",G_CALLBACK(region_key),host);
+    else if (!on && host->key_handler) { g_signal_handler_disconnect(host->child,host->key_handler); host->key_handler=0; }
+}
 int zlg_region_attach(NativeWindow *s, void *widget, ZlgRegionHost **out) {
     ZlgRegionHost *host=NULL;
     *out=NULL;
@@ -223,6 +242,7 @@ void zlg_region_detach(ZlgRegionHost *host) {
     if (host->next) host->next->previous=host->previous;
     host->previous=NULL; host->next=NULL;
     if (host->scroll_handler) { g_signal_handler_disconnect(host->child,host->scroll_handler); host->scroll_handler=0; }
+    if (host->key_handler) { g_signal_handler_disconnect(host->child,host->key_handler); host->key_handler=0; }
     content_remove(host->child,layer->overlay);
     if (!layer->first) region_restore(layer);
     s->content_busy=was_busy;

@@ -128,7 +128,7 @@ Linux 托盘项是会话总线上的 status notifier item：每项在自己的�
 
 `TrayItemOptions.guid` 可选，按标识符文字的字节顺序给出 16 字节。系统据此跨运行记住用户摆放的位置；它绑定到当前可执行文件路径，换路径后添加会失败。设置后不能在同一次显示中更换（`TrayIdentityChanged`）。
 
-回调为 `on_action(context, *Tray, TrayAction)`：`.activate`（单击或键盘选择）、`.context: ScreenPoint`（右键或菜单键，屏幕像素）和 `.popup: PopupResult`。在 `.context` 中调用 `tray.popupMenu(request, items, .icon)` 打开锚定菜单：`.icon` 使用系统报告的图标矩形并避开遮挡图标，取不到时用指针位置；也可传 `.pointer` 或 `.screen`。打开前隐藏窗口取得前台，菜单在外部点击时关闭；完成语义与窗口上下文菜单相同。任务栏重建时 Tray 重新添加图标。Tray 使用回调消息 `WM_APP + 0x422`。
+回调为 `on_action(context, *Tray, TrayAction)`：`.activate`（单击或键盘选择）、`.context: ScreenPoint`（右键或菜单键，屏幕像素）、`.popup: PopupResult` 和 `.appearance: bool`（macOS 上托盘所在的菜单栏在深色与浅色之间切换，值为是否深色）。`tray.dark()` 读当前值：macOS 取状态栏按钮的生效外观（随菜单栏、系统外观或半透明菜单栏下的壁纸变化），Windows 读任务栏的 `SystemUsesLightTheme`，Linux 恒为 false。在 `.context` 中调用 `tray.popupMenu(request, items, .icon)` 打开锚定菜单：`.icon` 使用系统报告的图标矩形并避开遮挡图标，取不到时用指针位置；也可传 `.pointer` 或 `.screen`。打开前隐藏窗口取得前台，菜单在外部点击时关闭；完成语义与窗口上下文菜单相同。任务栏重建时 Tray 重新添加图标。Tray 使用回调消息 `WM_APP + 0x422`。
 
 Linux 独立托盘与窗口托盘使用同一 status notifier item 实现，`guid` 以 32 位十六进制写入项的 `Id`，供记住摆放位置的宿主使用。宿主的 `Activate`/`ContextMenu` 坐标同时记为 `.icon` 锚点；宿主不报告图标矩形，没有记录时 `.icon` 退回指针位置。弹出菜单需要一个已映射的 GDK 窗口作锚点，独立托盘在 X11 上于该点创建 1×1 的 override-redirect 窗口，菜单完成后销毁；Wayland 不允许无父表面的弹出菜单，返回 `MenuStartFailed`。失败诊断通过 `App.report` 报告。
 
@@ -153,6 +153,8 @@ macOS 用 Carbon 的 `RegisterEventHotKey` 在应用事件目标上注册，不�
 Linux 调用会话总线上的 `org.freedesktop.Notifications.Notify`，带一个 `default` 动作；文本限制与 Windows 相同。kind 映射为 urgency（info/warning 为普通，err 为紧急），silent 映射为 `suppress-sound`，real_time 映射为 `transient`（不进入通知历史）。提交在调用返回后异步完成：`showNotification` 只同步校验并复制文本，服务器拒绝或总线不可用时清除该通知并以 `dbus` 域诊断报告 `NotificationSubmissionFailed`。`ActionInvoked(id, "default")` 产生 `notification_activated`，之前先撤回该通知；`NotificationClosed` 只清理。信号只匹配本条通知自己的 `Notify` 回复给出的服务器 ID。替换或清除时已经显示的通知以 `CloseNotification` 撤回；总线尚未连上就被替换的通知不会发送。
 
 macOS 把通知交给通知中心（`UNUserNotificationCenter`），这要求进程是带 bundle identifier 的 `.app`：在 app bundle 之外 `showNotification` 校验文本后返回 `UnsupportedCapability`。文本限制与 Windows 相同。第一次显示时系统向用户请求通知权限；用户拒绝或提交失败时，在调用返回后清除该通知并以诊断报告 `NotificationSubmissionFailed`。silent 为 false 时播放默认提示音；kind 与 real_time 在 macOS 没有对应项，被忽略。应用在前台时也以横幅显示并进入通知中心。点击通知（默认动作）产生 `notification_activated`，之前先撤回该通知。替换、`clearNotification()`、detach 和窗口关闭都撤回尚未送达和已经显示的那一条。
+
+`image` 随通知显示一张图片：PNG 或 JPEG 编码字节，例如刚开始播放的曲目封面，最多 `system.max_notification_image_bytes`（16 MiB），在调用返回前复制。macOS 写入临时文件后作为附件（`UNNotificationAttachment`，格式由扩展名表示），系统添加请求时把文件移入自己的存储，提交完成后若文件仍在则删除；缩略图随通知展开而放大。Linux 用 GdkPixbuf 解码，缩小到 256 像素以内，作为规范的 `image-data` 提示（宽、高、行跨度、是否有 alpha、每样本位数、通道数与像素，最后一行不含填充）交给通知服务器。系统无法解码的图片让通知不带图片照常显示；不下载远程图片。Windows 暂不显示图片。
 
 ## 剪贴板
 
@@ -238,7 +240,11 @@ Worker 和 Child 都只有一个所有者，初始化/启动后不可复制。Ch
 
 `try worker.fileIcon(path, .{ .size = 32, .background = 0xffffff }, destination)` 在 Windows 读取系统小/大图标，size 仅允许 16 或 32。结果的 `pixels` 借用调用者 destination，格式为自顶向下 RGBA8，alpha 固定 255，图标原始透明度已经由 `DrawIconEx` 合成到指定 RGB 背景。每次最多 4096 字节输出；不提取缩略图、不解码任意图片、不承诺高分辨率透明图标。容量/取消/原生失败不发布部分像素。HICON、HBITMAP、DC 和 COM 引用都在 worker 内配对释放；不会把原生句柄交给 UI。
 
-图标首次查询在该 worker 初始化 COM，`deinit` 对称释放。查询可能触发系统图标提供者，取消在同步系统调用前后检查，不能中断正在运行的提供者，也没有固定耗时承诺。Linux 的 `fileIcon` 明确返回 `UnsupportedCapability`。
+图标首次查询在该 worker 初始化 COM，`deinit` 对称释放。查询可能触发系统图标提供者，取消在同步系统调用前后检查，不能中断正在运行的提供者，也没有固定耗时承诺。
+
+Linux 与 macOS 的 `fileIcon` 按任意尺寸（1…`shell.max_icon_size`，即 256）绘制文件管理器显示的图标，输出格式相同（自顶向下 RGBA8，透明度合成到 background，alpha 固定 255），destination 至少 size×size×4 字节。Linux 取桌面项（`.desktop`）自身的图标，否则取 GIO 的 `standard::icon`，经图标主题绘制：每次调用新建一个私有 `GtkIconTheme`（主题名取 `org.gnome.desktop.interface icon-theme`，没有该 schema 时为 Adwaita，hicolor 兜底），不碰 GTK 的默认主题、显示器或主循环，因此可以在 worker 线程上运行。macOS 用 `NSWorkspace iconForFile:` 画进一张 sRGB 位图，一像素一点。
+
+`try worker.typeIcon("pdf", .{ .size = 32 }, destination)` 返回带该扩展名（可带前导点，如 `".pdf"`）的文件在文件管理器里的图标，而不需要有这样的文件，例如尚未下载的附件。扩展名 1…64 字节，不得含路径分隔符、`:` 或控制字符。Windows 以 `SHGFI_USEFILEATTRIBUTES` 查询扩展名的系统小/大图标（16 或 32）；Linux 用 `g_content_type_guess` 猜测 `file.<扩展名>` 的内容类型，再取 `g_content_type_get_icon` 经图标主题绘制；macOS 用 `UTType typeWithFilenameExtension:` 加 `NSWorkspace iconForContentType:`（macOS 11 以前为 `iconForFileType:`）。尺寸、背景和像素格式与 `fileIcon` 相同，主题里没有对应图标时返回 `IconLookupFailed`。
 
 `openUrl`、`openPath`、`reveal`、`trash` 同样是 worker 上的阻塞调用：先检查线程与 Closed，再做提交前取消检查、参数校验，原生调用前再检查一次取消；取消不能撤回已经交给系统的请求。成功只表示系统接受请求，不返回、不拥有也不等待处理程序进程，不保证窗口出现或获得前台。失败时 `last_failure` 记录 Win32、HRESULT、`shell_file_operation`（`SHFileOperationW` 自有返回码，并非 Win32 错误）或 GLib 的 `gio`/`dbus`/`glib` 域 GError 码；纯校验失败保持 null。Windows 首次调用这些方法时与 `fileIcon` 共用该 worker 的 STA COM 初始化，`deinit` 对称释放。
 
@@ -250,7 +256,7 @@ Worker 和 Child 都只有一个所有者，初始化/启动后不可复制。Ch
 
 `try worker.trash(absolute_path, .{})` 把一个已存在的项移入回收站，自身绝不回退为永久删除。拒绝文件系统根（`/`、`C:\`、`\\server\share`）。Windows 另拒绝 `*`/`?`（`SHFileOperationW` 会展开通配符），只接受本地固定盘（UNC 和非 `DRIVE_FIXED` 返回 `TrashUnsupported`），使用双 NUL 路径与 `FO_DELETE`、`FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT`，非零返回为 `TrashFailed`，`fAnyOperationsAborted` 为 `TrashAborted`。固定盘检查只是保守前置条件：回收站被禁用、超过容量等情况下系统如何处理仍由 Windows 回收站策略决定，本模块无法从该接口区分。Linux 使用 `g_file_trash`：`G_IO_ERROR_NOT_SUPPORTED`（例如该文件系统没有可用的 trash 目录）映射为独立的 `TrashUnsupported`，不存在为 `FileNotFound`，权限为 `AccessDenied`。
 
-S02 当前仍为部分实现：Windows/Linux 已提供 `launchExecutable`、`openUrl`、`openPath`、`reveal`、`trash`，Windows 另有 16/32 像素 `fileIcon`；完整图标（Linux/高分辨率/透明）、安装应用发现及按安装身份启动尚未实现，`installed_applications`、`launch_application` 仍为 false。`launchExecutable` 是明确二进制程序启动，不代替安装应用枚举。
+S02 当前仍为部分实现：Windows/Linux/macOS 已提供 `launchExecutable`、`openUrl`、`openPath`、`reveal`、`trash`、`fileIcon` 与 `typeIcon`（Windows 仅 16/32 像素）；带透明度的图标尚未提供。`launchExecutable` 是明确二进制程序启动，不代替安装应用枚举。
 
 ## 桌面环境
 
@@ -359,6 +365,37 @@ Windows 上大多数程序把图片作为位图（`CF_DIB`，系统也会从其�
 ## 异步打开 URL
 
 `system.OpenUrl` 在 owner 线程上打开一个 URL 而不阻塞它：`start(app, url, options, context, on_done)` 校验并复制 URL，为这一次请求启动一个线程，用 `shell.Worker.openUrl` 交给系统，然后在 owner 线程调用 `on_done`，结果在 `request.result`。线程属于请求本身，没有线程池。请求从 start 到 on_done 或 App 停机结束期间地址稳定；停机等待该线程结束，之后不再调用 on_done。`options.extra_schemes` 借用同样长的时间。
+
+## 系统权限与设置引导
+
+`system.permissions` 检查并请求系统替用户保管的权限（辅助功能、屏幕录制、麦克风等），并把用户带到给权限的地方。
+
+| 权限 | macOS | Windows | 系统提示（`Request`） | 拖动面板（`Guide`） |
+| --- | --- | --- | --- | --- |
+| `accessibility` | 是 | — | 是 | 是 |
+| `screen_recording` | 是 | — | 是 | 是 |
+| `input_monitoring` | 是 | — | 是 | 是 |
+| `full_disk_access` | 读受保护文件判断 | — | — | 是 |
+| `app_management` | `check` 无法判断 | — | — | 是 |
+| `developer_tools` | `check` 无法判断 | — | — | 是 |
+| `microphone` | 是 | 是 | macOS | — |
+| `camera` | 是 | 是 | macOS | — |
+| `calendars` | 是 | — | 是 | — |
+| `reminders` | 是 | — | 是 | — |
+| `bluetooth` | 是 | — | 是 | 是 |
+| `media_apple_music` | `check` 无法判断 | — | — | 是 |
+
+系统不保管某项权限时（Windows 只对桌面应用管麦克风和摄像头，Linux 对沙盒外的应用都不管），函数返回 `UnsupportedCapability`；`allowed(p)` 把这种情况算作可以使用。`title(p)` 是系统设置里的英文名，macOS 27 上辅助功能叫 Device Control and Data Access。
+
+`check(p)` 在任意线程返回 `Status`，不询问用户：`.granted`、`.denied`、`.not_determined`（还没问过），系统说不清时为 `.unknown`。macOS 不告诉辅助功能、屏幕录制和输入监控是否问过，授予前都是 `.denied`；屏幕录制的变化要应用重启后才报告。Windows 读同意存储（`CapabilityAccessManager\ConsentStore`）里设备、用户和桌面应用（NonPackaged）三处开关，任一为 Deny 即拒绝，没写的开关算开。
+
+`Request.start(app, p, context, on_done)` 在 owner 线程开始，用系统自己的提示询问，在自己的线程上等用户回答，`on_done` 在 owner 线程读 `status` 与 `result`。macOS 每个应用只问一次，之后只报告；没有提示的权限（完全磁盘访问、App 管理、开发者工具、媒体与 Apple Music，以及 Windows 上的全部）报告 `check` 的结果。辅助功能、屏幕录制和输入监控提示后 macOS 把应用加进列表并自己打开系统设置，开关是关的，请求在用户打开开关前就结束。麦克风、摄像头、日历、提醒事项和蓝牙的提示需要 Info.plist 写明用途（`NSMicrophoneUsageDescription`、`NSCameraUsageDescription`、macOS 14 起的 `NSCalendarsFullAccessUsageDescription` / `NSRemindersFullAccessUsageDescription`、`NSBluetoothAlwaysUsageDescription`），缺了 macOS 会结束应用，所以请求返回 `UsageDescriptionMissing` 而不询问。不在 .app 包里运行的程序替启动它的应用（如终端）请求。
+
+`openSettings(worker, p)` 在 shell.Worker 线程打开给该权限的设置页：macOS 系统设置的隐私与安全性（`x-apple.systempreferences:com.apple.preference.security?Privacy_…`），Windows 设置的隐私和安全性（`ms-settings:privacy-microphone` / `privacy-webcam`）。`Guide.start(app, p, .{ .app, .name }, context, on_done)` 打开设置页并等用户给权限：在 macOS 上，列表接受拖入应用的页面（`draggable(p)`）还会在系统设置窗口下方显示一个面板，写着“Drag **MyApp** to the list above to allow **Accessibility**.”，下面是应用的图标和名字，拖进列表即可。面板与页面右侧（侧栏 230pt 之右）对齐，跟随窗口移动和缩放，留在屏幕内，下方没地方时盖住窗口底部；它从不取得焦点，系统设置始终在前，别的应用在前时隐藏；拖动时面板半透明并让鼠标穿过。应用默认是程序所在的 .app 包，不在包里时是程序本身。同一时间只显示一个面板，新的 Guide 结束旧的。应用得到权限（`check` 能判断时）、用户关掉面板或系统设置、`cancel()` 之后，`on_done` 在 owner 线程运行；Windows 上在得到权限或 `cancel()` 时结束。App 关闭时关掉面板，不再回调。
+
+引导与面板的做法、几何和文字参照 [PermissionFlow](https://github.com/jaywcjlove/PermissionFlow)（MIT，© 小弟调调），代码是本框架自己的。
+
+面板的几何（`panelFrame`、`screenOf`、`mainSettingsWindow`）是纯计算，在每个平台的单元测试里检查；`zig build smoke-system-macos` 检查每项权限的 `check` 与标题、完全磁盘访问的请求与 `check` 一致，并在没有系统设置的情况下摆放面板，核对文字、宽度、不成为 key 窗口和关闭按钮结束引导。
 
 ## 已验证范围
 

@@ -176,6 +176,13 @@ pub const Tray = struct {
         if (c.Shell_NotifyIconGetRect(&identifier, &rect) < 0 or rect.right <= rect.left or rect.bottom <= rect.top) return null;
         return .{ .x = rect.left, .y = rect.top, .width = @intCast(rect.right - rect.left), .height = @intCast(rect.bottom - rect.top) };
     }
+    /// Whether the taskbar the icon shows on is dark: the system's mode
+    /// (`SystemUsesLightTheme`), which can differ from apps'. Windows sends
+    /// no `TrayAction.appearance`.
+    pub fn dark(self: *Tray) bool {
+        if (self.app) |app| app.assertOwner();
+        return @import("desktop_windows.zig").taskbarDark();
+    }
     /// Whether the pointer is over the icon now.
     pub fn pointerOverIcon(self: *Tray) bool {
         const rect = self.iconRect() orelse return false;

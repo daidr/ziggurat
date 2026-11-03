@@ -2450,6 +2450,9 @@ pub const Context = struct {
     /// The native callback pins this Context. A mapped legacy event is offered
     /// to on_input exactly once, then consumed even when it made no change.
     pub fn handleKeyInput(self: *Context, window: z.Window, key: z.KeyInput) bool {
+        // A key a web view's page left unhandled: the page has the keyboard,
+        // so no control here keeps the focus, and the shortcuts see the key.
+        if (key.from_page and self.input_state.focused != null and self.window != null) self.blurControls() catch {};
         if (self.input_state.fields != null) return self.textFieldEvent(window, .{ .key_input = key });
         if (self.input_state.scopes) |workspace| if (!workspace.closed) return self.handleScopedKeyInput(window, key, workspace);
         return self.handleLegacyKeyInput(window, key);

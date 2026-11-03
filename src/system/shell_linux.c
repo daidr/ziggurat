@@ -1,10 +1,14 @@
 /* Blocking GIO/GDBus shell operations for shell.Worker on Linux. Every entry
    point runs on the caller's worker thread, takes NUL-terminated UTF-8 that
    Zig has already validated, keeps no state between calls and releases every
-   GLib object before return. Nothing here touches GTK or a main context. */
+   GLib object before return. Nothing here touches a main context, the
+   display or GTK's shared objects: icons come from an icon theme object of
+   the call's own, never the default one. */
 #include <gio/gio.h>
 #include <gio/gdesktopappinfo.h>
+#include <gtk/gtk.h>
 #include <stdint.h>
+#include <string.h>
 
 enum {
     ZSH_OK = 0,
@@ -159,4 +163,105 @@ int zsh_launch_app(const char *path, ZshFailure *failure) {
     g_object_unref(info);
     if (launched) return ZSH_OK;
     return classify(error, failure);
+}
+
+/* The icon theme the desktop names (org.gnome.desktop.interface icon-theme,
+   which GTK's settings follow under GNOME and most desktops), else Adwaita,
+   with hicolor behind it as every theme has. */
+static GtkIconTheme *icon_theme(void) {
+    GtkIconTheme *theme = gtk_icon_theme_new();
+    gchar *name = NULL;
+    GSettingsSchemaSource *source = g_settings_schema_source_get_default();
+    GSettingsSchema *schema = source ? g_settings_schema_source_lookup(source, "org.gnome.desktop.interface", TRUE) : NULL;
+    if (schema) {
+        if (g_settings_schema_has_key(schema, "icon-theme")) {
+            GSettings *settings = g_settings_new_full(schema, NULL, NULL);
+            name = g_settings_get_string(settings, "icon-theme");
+            g_object_unref(settings);
+        }
+        g_settings_schema_unref(schema);
+    }
+    gtk_icon_theme_set_custom_theme(theme, name && name[0] ? name : "Adwaita");
+    g_free(name);
+    return theme;
+}
+
+/* Draws icon from the icon theme at size by size pixels over background
+   (0xRRGGBB) into out, top-down RGBA8 with alpha 255, centered where the
+   theme's image is smaller. */
+static int theme_icon(GIcon *icon, int size, uint32_t background, unsigned char *out) {
+    if (!icon) return ZSH_NOT_SUPPORTED; /* no icon: not a missing file */
+    GtkIconTheme *theme = icon_theme();
+    GtkIconInfo *info = gtk_icon_theme_lookup_by_gicon(theme, icon, size, GTK_ICON_LOOKUP_FORCE_SIZE);
+    GdkPixbuf *pixbuf = info ? gtk_icon_info_load_icon(info, NULL) : NULL;
+    if (info) g_object_unref(info);
+    g_object_unref(theme);
+    if (!pixbuf) return ZSH_NOT_SUPPORTED;
+    if (gdk_pixbuf_get_width(pixbuf) > size || gdk_pixbuf_get_height(pixbuf) > size) {
+        GdkPixbuf *scaled = gdk_pixbuf_scale_simple(pixbuf, size, size, GDK_INTERP_BILINEAR);
+        g_object_unref(pixbuf);
+        if (!scaled) return ZSH_FAILED;
+        pixbuf = scaled;
+    }
+    const int width = gdk_pixbuf_get_width(pixbuf), height = gdk_pixbuf_get_height(pixbuf);
+    const int channels = gdk_pixbuf_get_n_channels(pixbuf), stride = gdk_pixbuf_get_rowstride(pixbuf);
+    const gboolean alpha = gdk_pixbuf_get_has_alpha(pixbuf);
+    if (gdk_pixbuf_get_bits_per_sample(pixbuf) != 8 || channels < 3) { g_object_unref(pixbuf); return ZSH_FAILED; }
+    const guchar *pixels = gdk_pixbuf_read_pixels(pixbuf);
+    const unsigned char back[3] = {(unsigned char)(background >> 16), (unsigned char)(background >> 8), (unsigned char)background};
+    for (int i = 0; i < size * size; i++) {
+        memcpy(out + i * 4, back, 3);
+        out[i * 4 + 3] = 255;
+    }
+    const int left = (size - width) / 2, top = (size - height) / 2;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            const guchar *from = pixels + y * stride + x * channels;
+            unsigned char *to = out + ((top + y) * size + left + x) * 4;
+            const unsigned a = alpha ? from[3] : 255;
+            for (int c = 0; c < 3; c++) to[c] = (unsigned char)((from[c] * a + to[c] * (255 - a) + 127) / 255);
+        }
+    }
+    g_object_unref(pixbuf);
+    return ZSH_OK;
+}
+
+/* The icon the file manager shows for an item: a desktop entry's own icon,
+   else GIO's standard::icon of the file. */
+int zsh_file_icon(const char *path, int size, uint32_t background, unsigned char *out, ZshFailure *failure) {
+    GIcon *icon = NULL;
+    if (g_str_has_suffix(path, ".desktop")) {
+        GDesktopAppInfo *app = g_desktop_app_info_new_from_filename(path);
+        if (app) {
+            GIcon *own = g_app_info_get_icon(G_APP_INFO(app));
+            if (own) icon = g_object_ref(own);
+            g_object_unref(app);
+        }
+    }
+    if (!icon) {
+        GError *error = NULL;
+        GFile *file = g_file_new_for_path(path);
+        GFileInfo *info = g_file_query_info(file, G_FILE_ATTRIBUTE_STANDARD_ICON, G_FILE_QUERY_INFO_NONE, NULL, &error);
+        g_object_unref(file);
+        if (!info) return classify(error, failure);
+        GIcon *own = g_file_info_get_icon(info);
+        if (own) icon = g_object_ref(own);
+        g_object_unref(info);
+    }
+    int status = theme_icon(icon, size, background, out);
+    if (icon) g_object_unref(icon);
+    return status;
+}
+
+/* The icon the file manager shows for files with an extension, though no
+   such file exists: that of the content type GIO guesses from such a name. */
+int zsh_type_icon(const char *extension, int size, uint32_t background, unsigned char *out) {
+    gchar *name = g_strconcat("file.", extension, NULL);
+    gchar *type = g_content_type_guess(name, NULL, 0, NULL);
+    g_free(name);
+    GIcon *icon = type ? g_content_type_get_icon(type) : NULL;
+    g_free(type);
+    int status = theme_icon(icon, size, background, out);
+    if (icon) g_object_unref(icon);
+    return status;
 }

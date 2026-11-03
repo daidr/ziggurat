@@ -527,6 +527,7 @@ typedef struct Note {
     gchar *app, *summary, *body;
     guchar urgency;
     gboolean silent, transient;
+    GVariant *image; /* the image-data hint's value, or NULL */
 } Note;
 
 static void note_release(Note *note) {
@@ -536,6 +537,7 @@ static void note_release(Note *note) {
     g_free(note->app);
     g_free(note->summary);
     g_free(note->body);
+    if (note->image) g_variant_unref(note->image);
     g_atomic_int_dec_and_test(&live_records);
     g_free(note);
 }
@@ -610,14 +612,51 @@ static void note_bus_ready(GObject *source, GAsyncResult *result, gpointer data)
     g_variant_builder_add(&hints, "{sv}", "urgency", g_variant_new_byte(note->urgency));
     if (note->silent) g_variant_builder_add(&hints, "{sv}", "suppress-sound", g_variant_new_boolean(TRUE));
     if (note->transient) g_variant_builder_add(&hints, "{sv}", "transient", g_variant_new_boolean(TRUE));
+    if (note->image) g_variant_builder_add(&hints, "{sv}", "image-data", note->image);
     const gchar *actions[] = {"default", "", NULL};
     g_dbus_connection_call(bus, "org.freedesktop.Notifications", "/org/freedesktop/Notifications", "org.freedesktop.Notifications", "Notify",
         g_variant_new("(susss^asa{sv}i)", note->app, (guint32)0, "", note->summary, note->body, actions, &hints, -1),
         G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, -1, NULL, note_sent, note);
 }
 
-/* kind: 0 info, 1 warning, 2 error. Text is copied before return. */
-Note *zsl_note_show(const char *summary, const char *body, int kind, int silent, int transient, void *owner, uint64_t serial, Done done) {
+/* The most pixels across of a notification's image: servers draw it a few
+   times an icon's size at most, and the bus copies every byte of it. */
+#define NOTE_IMAGE_BOX 256
+/* The spec's image-data hint of an encoded image, which it prefers to a file
+   the server would read later: the pixels GdkPixbuf decodes, fit to
+   NOTE_IMAGE_BOX, as (iiibiiay) of width, height, row stride, alpha, bits per
+   sample, channels and the bytes, the last row without its padding. NULL for
+   an image GdkPixbuf cannot decode. */
+static GVariant *note_image(const unsigned char *bytes, size_t length) {
+    GdkPixbufLoader *loader = gdk_pixbuf_loader_new();
+    gboolean written = gdk_pixbuf_loader_write(loader, bytes, length, NULL);
+    gboolean closed = gdk_pixbuf_loader_close(loader, NULL);
+    GdkPixbuf *pixbuf = written && closed ? gdk_pixbuf_loader_get_pixbuf(loader) : NULL;
+    if (pixbuf) g_object_ref(pixbuf);
+    g_object_unref(loader);
+    if (!pixbuf) return NULL;
+    int width = gdk_pixbuf_get_width(pixbuf), height = gdk_pixbuf_get_height(pixbuf);
+    if (width > NOTE_IMAGE_BOX || height > NOTE_IMAGE_BOX) {
+        int fit_width = width >= height ? NOTE_IMAGE_BOX : MAX(1, (int)((gint64)width * NOTE_IMAGE_BOX / height));
+        int fit_height = height >= width ? NOTE_IMAGE_BOX : MAX(1, (int)((gint64)height * NOTE_IMAGE_BOX / width));
+        GdkPixbuf *scaled = gdk_pixbuf_scale_simple(pixbuf, fit_width, fit_height, GDK_INTERP_HYPER);
+        g_object_unref(pixbuf);
+        if (!scaled) return NULL;
+        pixbuf = scaled;
+        width = fit_width; height = fit_height;
+    }
+    int stride = gdk_pixbuf_get_rowstride(pixbuf), bits = gdk_pixbuf_get_bits_per_sample(pixbuf), channels = gdk_pixbuf_get_n_channels(pixbuf);
+    gsize size = (gsize)(height - 1) * (gsize)stride + (gsize)width * (gsize)((channels * bits + 7) / 8);
+    GVariant *data = g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, gdk_pixbuf_read_pixels(pixbuf), size, 1);
+    GVariant *value = g_variant_ref_sink(g_variant_new("(iiibii@ay)", width, height, stride, gdk_pixbuf_get_has_alpha(pixbuf), bits, channels, data));
+    g_object_unref(pixbuf);
+    return value;
+}
+
+/* kind: 0 info, 1 warning, 2 error. Text and the image are copied before
+   return; an image GdkPixbuf cannot decode leaves the notification without
+   one. */
+Note *zsl_note_show(const char *summary, const char *body, int kind, int silent, int transient, const unsigned char *image, size_t image_length, void *owner, uint64_t serial, Done done) {
     Note *note = g_new0(Note, 1);
     note->refs = 1;
     note->owner = owner;
@@ -630,6 +669,7 @@ Note *zsl_note_show(const char *summary, const char *body, int kind, int silent,
     note->urgency = kind == 2 ? 2 : 1;
     note->silent = silent != 0;
     note->transient = transient != 0;
+    if (image && image_length) note->image = note_image(image, image_length);
     g_atomic_int_inc(&live_records);
     ++note->refs;
     g_bus_get(G_BUS_TYPE_SESSION, note->cancel, note_bus_ready, note);

@@ -8,6 +8,8 @@ const e = @import("root.zig");
 pub const Policy = struct { enabled: bool = true, read_only: bool = false };
 /// Help or error text and form state announced with the text box.
 pub const Description = struct { description: []const u8 = "", invalid: bool = false, required: bool = false };
+/// A field's text and selection (Field.report); byte offsets into value.
+pub const Report = struct { value: []const u8 = "", selection_start: usize = 0, selection_end: usize = 0, password: bool = false };
 pub const Options = struct {
     multiline: bool = false,
     /// A single-line field holding a password: it shows a bullet for every
@@ -197,6 +199,18 @@ pub fn Field(comptime Private: type) type {
             // A password reports neither its value nor a selection in it.
             const password = self.masked();
             try frame.semantic(.{ .id = token.key.id, .role = .text_box, .name = name, .value = if (password) "" else self.value[0..self.value_len], .description = about.description, .invalid = about.invalid, .required = about.required, .password = password, .bounds = self.bounds, .enabled = self.options.policy.enabled, .read_only = self.options.policy.read_only, .focused = frame.context.input_state.focused == token.key.id, .selection_start = if (password) 0 else selected.range().start, .selection_end = if (password) 0 else selected.range().end });
+        }
+        /// What the field holds as its last frame showed it, for automation:
+        /// the text and the selection's byte range, borrowed until the next
+        /// frame. A password reports neither.
+        pub fn report(self: *Self) !Report {
+            try self.enter();
+            defer self.leave();
+            if (!self.ready) return error.LayoutRequired;
+            if (self.masked()) return .{ .password = true };
+            const range = (try self.document.selection()).range();
+            const value = self.value[0..self.value_len];
+            return .{ .value = value, .selection_start = @min(range.start, value.len), .selection_end = @min(range.end, value.len) };
         }
         pub fn focus(self: *Self) !void {
             try self.enter();

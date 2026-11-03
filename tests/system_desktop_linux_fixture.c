@@ -1,4 +1,5 @@
 #include <gio/gio.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -24,6 +25,7 @@ static char item_sender[128], item_path[128];
 static int registrations;
 static guint32 next_id, last_id, closed_by_client;
 static int notify_count, last_urgency = -1, last_silent, last_transient;
+static int last_image_width = -1, last_image_height = -1, last_image_channels;
 static char last_summary[256], last_body[1024];
 static char property_text[512];
 static int property_ready;
@@ -49,6 +51,21 @@ static void method(GDBusConnection *connection, const gchar *sender, const gchar
         last_silent = g_variant_lookup(hints, "suppress-sound", "b", &flag) && flag;
         flag = FALSE;
         last_transient = g_variant_lookup(hints, "transient", "b", &flag) && flag;
+        GVariant *image = g_variant_lookup_value(hints, "image-data", G_VARIANT_TYPE("(iiibiiay)"));
+        last_image_width = last_image_height = -1;
+        if (image) {
+            gint32 width, height, stride, bits, channels;
+            gboolean alpha;
+            GVariant *data = NULL;
+            g_variant_get(image, "(iiibii@ay)", &width, &height, &stride, &alpha, &bits, &channels, &data);
+            gsize size = g_variant_get_size(data);
+            /* The bytes hold every row, the last without its padding. */
+            if (bits == 8 && size == (gsize)(height - 1) * (gsize)stride + (gsize)width * (gsize)channels) {
+                last_image_width = width; last_image_height = height; last_image_channels = channels;
+            }
+            g_variant_unref(data);
+            g_variant_unref(image);
+        }
         g_variant_unref(hints);
         ++notify_count;
         last_id = ++next_id;
@@ -126,6 +143,19 @@ const char *zsf_last_body(void) { return last_body; }
 int zsf_last_urgency(void) { return last_urgency; }
 int zsf_last_silent(void) { return last_silent; }
 int zsf_last_transient(void) { return last_transient; }
+int zsf_last_image_width(void) { return last_image_width; }
+int zsf_last_image_height(void) { return last_image_height; }
+/* A PNG of width by height opaque pixels, g_free'd by the caller. */
+unsigned char *zsf_png(int width, int height, size_t *length) {
+    GdkPixbuf *pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, width, height);
+    gdk_pixbuf_fill(pixbuf, 0x204060ff);
+    gchar *buffer = NULL; gsize size = 0;
+    gboolean saved = gdk_pixbuf_save_to_buffer(pixbuf, &buffer, &size, "png", NULL, NULL);
+    g_object_unref(pixbuf);
+    *length = saved ? size : 0;
+    return saved ? (unsigned char *)buffer : NULL;
+}
+void zsf_free(void *data) { g_free(data); }
 void zsf_invoke(uint32_t id) {
     g_dbus_connection_emit_signal(bus, NULL, "/org/freedesktop/Notifications", "org.freedesktop.Notifications", "ActionInvoked", g_variant_new("(us)", id, "default"), NULL);
 }

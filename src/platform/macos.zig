@@ -27,7 +27,7 @@ const NativeEvent = extern struct {
     selection: usize,
 };
 const NativeBounds = extern struct { x: i32, y: i32, width: u32, height: u32, positioned: c_int };
-extern fn zlm_app_create(*anyopaque, *const fn (*anyopaque) callconv(.c) void, *c_int) ?*anyopaque;
+extern fn zlm_app_create(*anyopaque, *const fn (*anyopaque) callconv(.c) void, *const fn (*anyopaque) callconv(.c) void, *c_int) ?*anyopaque;
 extern fn zlm_app_run(*anyopaque) void;
 extern fn zlm_app_quit(*anyopaque) void;
 extern fn zlm_app_wake(*anyopaque) void;
@@ -67,7 +67,7 @@ extern fn zlm_capture_free(*anyopaque) void;
 pub fn init(app: *core.App) !void {
     if (app.icon_policy == .required) return error.UnsupportedCapability;
     var code: c_int = 0;
-    app.native.native = zlm_app_create(app, dispatch, &code) orelse return switch (code) {
+    app.native.native = zlm_app_create(app, dispatch, terminate, &code) orelse return switch (code) {
         1 => error.AppAlreadyExists,
         2 => error.DisplayUnavailable,
         else => error.OutOfMemory,
@@ -85,6 +85,12 @@ pub fn wake(app: *core.App) void {
 }
 pub fn quit(app: *core.App) void {
     zlm_app_quit(app.native.native.?);
+}
+/// AppKit's terminate: (the Dock menu's Quit, a quit Apple Event): the
+/// app's quit request, which the windows may refuse.
+fn terminate(ptr: *anyopaque) callconv(.c) void {
+    const app: *core.App = @ptrCast(@alignCast(ptr));
+    _ = app.requestQuit();
 }
 fn dispatch(ptr: *anyopaque) callconv(.c) void {
     const app: *core.App = @ptrCast(@alignCast(ptr));
@@ -324,8 +330,13 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
         2 => record.emit(.{ .resize = .{ .width = native.width, .height = native.height, .scale = @floatFromInt(native.scale) } }),
         22 => record.emit(.window_position),
         25 => record.popupDismissed(),
-        3 => record.emit(.{ .pointer_down = .{ .position = point, .modifiers = modifiers } }),
-        4 => record.emit(.{ .pointer_up = .{ .position = point, .modifiers = modifiers } }),
+        // `key` is the button: 0 primary, 1 secondary (a Control-click
+        // too), 2 middle, 3 back, 4 forward.
+        3, 4 => {
+            if (native.key < 0 or native.key > 4) return 0;
+            const input: core.PointerButtonInput = .{ .position = point, .modifiers = modifiers, .button = @fromBackingInt(@intCast(zio.asUnsigned(native.key))) };
+            if (native.kind == 3) record.emit(.{ .pointer_down = input }) else record.emit(.{ .pointer_up = input });
+        },
         5 => record.emit(.{ .pointer_move = point }),
         6 => record.emit(.{ .wheel = .{ .position = point, .delta = .{ .x = @floatCast(native.dx), .y = @floatCast(native.dy) } } }),
         7 => record.emit(.{ .focus = native.flags & 1 != 0 }),
@@ -345,7 +356,7 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
         15 => record.emit(.{ .key = if (native.key == 0) .tab else .activate }),
         16 => record.emitState(),
         17 => return @intFromBool(record.inputAllowed()),
-        18 => return @intFromBool(record.keyInput(.{ .key = keyCode(@intCast(native.key), native.width), .modifiers = modifiers, .repeat = native.flags & 16 != 0, .physical = core.physical_keys.fromMacVirtualKey(native.width) })),
+        18 => return @intFromBool(record.keyInput(.{ .key = keyCode(@intCast(native.key), native.width), .modifiers = modifiers, .repeat = native.flags & 16 != 0, .physical = core.physical_keys.fromMacVirtualKey(native.width), .from_page = native.flags & 32 != 0 })),
         26 => record.keyRelease(.{ .key = keyCode(@intCast(native.key), native.width), .modifiers = modifiers, .physical = core.physical_keys.fromMacVirtualKey(native.width) }),
         27 => return @intFromBool(record.commandEnabled(@fromBackingInt(@intCast(zio.asUnsigned(native.key))))),
         19 => return @backingInt(record.hitTest(point, @floatFromInt(native.width), @floatFromInt(native.height))),

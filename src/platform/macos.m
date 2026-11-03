@@ -31,17 +31,26 @@ void zlmw_drag_will_move(NSWindow *window);
 void zlmw_drag_forget(NSWindow *window);
 typedef struct NativeBounds {int32_t x,y;uint32_t width,height;int positioned;} NativeBounds;
 
-typedef struct NativeApp {void *owner;void (*dispatch)(void *);atomic_int pending,stopped;} NativeApp;
+typedef struct NativeApp {void *owner;void (*dispatch)(void *);void (*terminate)(void *);atomic_int pending,stopped;} NativeApp;
 static NativeApp *current_app;
 
 /* The application delegate. It answers the Dock's question for the menu
-   the system module set (zlm_app_set_dock_menu). */
+   the system module set (zlm_app_set_dock_menu), and turns AppKit's
+   terminate: (the Dock menu's Quit, a quit Apple Event as at logout, Quit
+   of a menu that sends it) into the app's own quit request, which the
+   windows may refuse: AppKit never exits the process itself, so the run
+   loop returns and the app shuts down as from any quit. */
 @interface ZigAppDelegate : NSObject <NSApplicationDelegate>
 @end
 static NSMenu *dock_menu;
 static ZigAppDelegate *app_delegate;
 @implementation ZigAppDelegate
 - (NSMenu *)applicationDockMenu:(NSApplication *)sender{(void)sender;return dock_menu;}
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender{
+    (void)sender;NativeApp *app=current_app;
+    if(app&&app->owner&&app->terminate)app->terminate(app->owner);
+    return NSTerminateCancel;
+}
 - (BOOL)applicationSupportsSecureRestorableState:(NSApplication *)app{(void)app;return YES;}
 @end
 void zlm_app_set_dock_menu(void *menu){NSMenu *value=(NSMenu *)menu;[value retain];[dock_menu release];dock_menu=value;}
@@ -50,7 +59,7 @@ static void wake_main(void *unused){
     (void)unused;NativeApp *app=current_app;int expected=1;
     if(app&&atomic_compare_exchange_strong(&app->pending,&expected,0)&&app->owner)app->dispatch(app->owner);
 }
-NativeApp *zlm_app_create(void *owner,void (*dispatch)(void *),int *error){
+NativeApp *zlm_app_create(void *owner,void (*dispatch)(void *),void (*terminate)(void *),int *error){
     if(current_app){*error=1;return NULL;}
     if(![NSThread isMainThread]){*error=2;return NULL;}
     NativeApp *app=calloc(1,sizeof(NativeApp));if(!app){*error=3;return NULL;}
@@ -65,7 +74,7 @@ NativeApp *zlm_app_create(void *owner,void (*dispatch)(void *),int *error){
         [NSApp setDelegate:app_delegate];
         [NSApp finishLaunching];
     }
-    app->owner=owner;app->dispatch=dispatch;current_app=app;*error=0;return app;
+    app->owner=owner;app->dispatch=dispatch;app->terminate=terminate;current_app=app;*error=0;return app;
 }
 void zlm_app_wake(NativeApp *app){int expected=0;if(atomic_compare_exchange_strong(&app->pending,&expected,1))dispatch_async_f(dispatch_get_main_queue(),NULL,wake_main);}
 static void post_wake_event(void){
@@ -84,6 +93,11 @@ typedef struct NativeWindow {
     int decoration,popup,enabled,keyboard,fullscreen_requested,topmost_requested,shown;
     uint32_t observed_width,observed_height,observed_scale;int size_observed;
     NSEvent *gesture;NSRect caret;
+    /* The primary button is down for a secondary click: a Control-click,
+       or a press that keeps the secondary button's number, as data loss
+       prevention agents post the secondary button's events again as the
+       primary button's. Its release is secondary too. */
+    int secondary_click;
     NSMutableString *marked;NSRange marked_selection;
     NSCursor *cursor;
     /* The content view holds the material (effect) behind the view. clear
@@ -226,6 +240,13 @@ static int edit_for_selector(SEL selector,uint32_t *flags){
     NativeWindow *s=native;if(!s)return;retain_window(s);
     NSPoint point=[self local:event];
     if(!input_allowed(s)){release_window(s);return;}
+    const int secondary=([event modifierFlags]&NSEventModifierFlagControl)!=0||[event buttonNumber]==1;
+    s->secondary_click=secondary;
+    if(secondary){
+        if(!s->destroyed&&!(s->popup&&!(s->popup&POPUP_FOCUSABLE)))[s->window makeFirstResponder:self];
+        NativeEvent down={0};down.kind=3;down.key=1;down.x=point.x;down.y=point.y;down.flags=(int)modifiers([event modifierFlags]);emit(s,&down);
+        release_window(s);return;
+    }
     zlmw_drag_pressed(s->window,event);
     int hit=query_hit(s,point);
     if(!s->destroyed&&hit==1){
@@ -246,15 +267,39 @@ static int edit_for_selector(SEL selector,uint32_t *flags){
 }
 - (void)mouseUp:(NSEvent *)event{
     NativeWindow *s=native;if(!s)return;NSPoint point=[self local:event];
+    const int secondary=s->secondary_click;s->secondary_click=0;
     if(!input_allowed(s))return;
-    NativeEvent up={0};up.kind=4;up.x=point.x;up.y=point.y;up.flags=(int)modifiers([event modifierFlags]);emit(s,&up);
+    NativeEvent up={0};up.kind=4;up.key=secondary?1:0;up.x=point.x;up.y=point.y;up.flags=(int)modifiers([event modifierFlags]);emit(s,&up);
 }
+/* Buttons other than the primary one: 1 secondary, 2 middle, 3 back and 4
+   forward, the wire's numbers, as AppKit numbers them; others are none. */
+static void other_button(NSView *view,NativeWindow *s,NSEvent *event,int kind){
+    if(!s)return;
+    /* Right-mouse events are the secondary button's whatever number they
+       carry, as events made without a device carry 0. */
+    const NSEventType type=[event type];
+    const NSInteger number=type==NSEventTypeRightMouseDown||type==NSEventTypeRightMouseUp?1:[event buttonNumber];
+    if(number<1||number>4)return;
+    retain_window(s);
+    if(!input_allowed(s)){release_window(s);return;}
+    if(kind==3&&!s->destroyed&&!(s->popup&&!(s->popup&POPUP_FOCUSABLE)))[s->window makeFirstResponder:view];
+    NSPoint point=[view convertPoint:[event locationInWindow] fromView:nil];
+    NativeEvent press={0};press.kind=kind;press.key=(int)number;press.x=point.x;press.y=point.y;press.flags=(int)modifiers([event modifierFlags]);
+    if(!s->destroyed)emit(s,&press);
+    release_window(s);
+}
+- (void)rightMouseDown:(NSEvent *)event{other_button(self,native,event,3);}
+- (void)rightMouseUp:(NSEvent *)event{other_button(self,native,event,4);}
+- (void)otherMouseDown:(NSEvent *)event{other_button(self,native,event,3);}
+- (void)otherMouseUp:(NSEvent *)event{other_button(self,native,event,4);}
 - (void)moved:(NSEvent *)event{
     NativeWindow *s=native;if(!s)return;NSPoint point=[self local:event];
     NativeEvent move={0};move.kind=5;move.x=point.x;move.y=point.y;emit(s,&move);
 }
 - (void)mouseMoved:(NSEvent *)event{[self moved:event];}
 - (void)mouseDragged:(NSEvent *)event{[self moved:event];}
+- (void)rightMouseDragged:(NSEvent *)event{[self moved:event];}
+- (void)otherMouseDragged:(NSEvent *)event{[self moved:event];}
 - (void)scrollWheel:(NSEvent *)event{
     NativeWindow *s=native;if(!s)return;NSPoint point=[self local:event];
     /* Precise deltas are points; wheel deltas are lines, as GTK's are. */
@@ -279,8 +324,42 @@ static void keyboard_key(NativeWindow *s,NSEvent *event){
     if(first<0x20||first==0x7f||(first>=0xf700&&first<=0xf8ff))return;
     emit_text(s,12,text,0);
 }
+/* Whether a view inside this one, a web view's, has the keyboard: a key that
+   reaches the view then is one the page left unhandled, which WebKit sends on
+   up the responder chain. */
+static int page_has_keyboard(NSView *view){
+    NSResponder *first=[[view window] firstResponder];
+    return first!=view&&[first isKindOfClass:[NSView class]]&&[(NSView *)first isDescendantOf:view];
+}
+/* A key a page left unhandled: the content takes it as its own key (flag 32),
+   with no text, input method or edit command, as the page keeps the keyboard.
+   Tab moves through the page and out of it. */
+static void page_key(NativeWindow *s,NSEvent *event){
+    if([event keyCode]==0x30)return;
+    retain_window(s);
+    if(input_allowed(s)){
+        NSString *plain=[event charactersIgnoringModifiers];unichar c=[plain length]==1?[plain characterAtIndex:0]:0;
+        if(c>='A'&&c<='Z')c=(unichar)(c-'A'+'a');
+        NativeEvent key={0};key.kind=18;key.key=c>=0x20&&c<0x7f?c:0;key.width=[event keyCode];
+        key.flags=(int)(modifiers([event modifierFlags])|([event isARepeat]?16u:0u)|32u);
+        emit(s,&key);
+    }
+    release_window(s);
+}
+/* An Escape (or Command-period) a page left comes as the command it stands
+   for first: WebKit sends the commands its web process does not know up the
+   responder chain, and sends the key again only if no responder took it. */
+- (void)cancelOperation:(id)sender{
+    NativeWindow *s=native;
+    if(!s||!page_has_keyboard(self)){[[self nextResponder] tryToPerform:_cmd with:sender];return;}
+    retain_window(s);
+    if(input_allowed(s)){NativeEvent key={0};key.kind=18;key.key=0x1b;key.width=0x35;key.flags=32;emit(s,&key);}
+    release_window(s);
+}
 - (void)keyDown:(NSEvent *)event{
-    NativeWindow *s=native;if(!s)return;retain_window(s);
+    NativeWindow *s=native;if(!s)return;
+    if(page_has_keyboard(self)){page_key(s,event);return;}
+    retain_window(s);
     if(!input_allowed(s)){release_window(s);return;}
     const int composing=[s->marked length]>0;const uint32_t flags=modifiers([event modifierFlags]);
     if(!composing&&key_event(s,event,18)){release_window(s);return;}
@@ -751,3 +830,33 @@ void zlm_test_drag_begin(NativeWindow *s,double x,double y){
     }
 }
 int zlm_test_drag_start(NativeWindow *s){return zlmw_drag_start(s->window,nil);}
+/* A press and release at the view point (x, y), straight to the view: 0 of
+   the primary button keeping the secondary button's number, as an event tap
+   posts it again, 1 a Control-click, 2 of the secondary button. */
+void zlm_test_click(NativeWindow *s,double x,double y,int how){
+    @autoreleasepool{
+        NSPoint at=[s->view convertPoint:NSMakePoint(x,y) toView:nil];
+        NSEvent *down,*up;
+        if(how==0){
+            NSPoint screen=[s->window convertPointToScreen:at];
+            const CGFloat top=NSMaxY([[[NSScreen screens] firstObject] frame]);
+            CGPoint global=CGPointMake(screen.x,top-screen.y);
+            CGEventRef press=CGEventCreateMouseEvent(NULL,kCGEventLeftMouseDown,global,kCGMouseButtonRight);
+            CGEventRef release=CGEventCreateMouseEvent(NULL,kCGEventLeftMouseUp,global,kCGMouseButtonRight);
+            /* Left events ignore the button they are made with. */
+            CGEventSetIntegerValueField(press,kCGMouseEventButtonNumber,1);CGEventSetIntegerValueField(release,kCGMouseEventButtonNumber,1);
+            down=[NSEvent eventWithCGEvent:press];up=[NSEvent eventWithCGEvent:release];
+            CFRelease(press);CFRelease(release);
+            [s->view mouseDown:down];[s->view mouseUp:up];
+            return;
+        }
+        const NSEventType pressed=how==2?NSEventTypeRightMouseDown:NSEventTypeLeftMouseDown,released=how==2?NSEventTypeRightMouseUp:NSEventTypeLeftMouseUp;
+        const NSEventModifierFlags flags=how==1?NSEventModifierFlagControl:0;
+        down=[NSEvent mouseEventWithType:pressed location:at modifierFlags:flags timestamp:0 windowNumber:[s->window windowNumber] context:nil eventNumber:0 clickCount:1 pressure:1];
+        up=[NSEvent mouseEventWithType:released location:at modifierFlags:flags timestamp:0 windowNumber:[s->window windowNumber] context:nil eventNumber:0 clickCount:1 pressure:0];
+        if(how==2){[s->view rightMouseDown:down];[s->view rightMouseUp:up];}
+        else{[s->view mouseDown:down];[s->view mouseUp:up];}
+    }
+}
+/* AppKit's terminate:, as the Dock menu's Quit sends it. */
+void zlm_test_terminate(void){@autoreleasepool{[NSApp terminate:nil];}}

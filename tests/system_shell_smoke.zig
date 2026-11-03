@@ -90,7 +90,27 @@ const Probe = struct {
             }
             try expectHandles("icon", native_handles, 12);
             try std.testing.expectEqual(gdi, c.GetGuiResources(c.GetCurrentProcess(), c.GR_GDIOBJECTS));
-        } else try std.testing.expectError(error.UnsupportedCapability, worker.fileIcon(self.executable, .{}, &pixels));
+        } else {
+            // The icons of a folder and of a file type no file has, at any
+            // size, over the background.
+            var large: [48 * 48 * 4]u8 = undefined;
+            try std.testing.expectError(error.InvalidIconOptions, worker.fileIcon(self.cwd, .{ .size = 0 }, &large));
+            try std.testing.expectError(error.ResultCapacityExceeded, worker.typeIcon("pdf", .{ .size = 48 }, &pixels));
+            try std.testing.expectError(error.InvalidExtension, worker.typeIcon("a/b", .{}, &pixels));
+            try std.testing.expectError(error.InvalidExtension, worker.typeIcon(".", .{}, &pixels));
+            try std.testing.expectError(error.FileNotFound, worker.fileIcon("/nonexistent/ziggurat-icon", .{}, &pixels));
+            for ([_]u16{ 16, 32, 48 }, 0..) |size, index| {
+                const icon = if (index == 1) try worker.fileIcon(self.cwd, .{ .size = size, .background = 0x204060 }, &large) else try worker.typeIcon(if (index == 0) ".pdf" else "txt", .{ .size = size, .background = 0x204060 }, &large);
+                try std.testing.expectEqual(@as(usize, size) * size * 4, icon.pixels.len);
+                var differing = false;
+                var at: usize = 0;
+                while (at < icon.pixels.len) : (at += 4) {
+                    try std.testing.expectEqual(@as(u8, 255), icon.pixels[at + 3]);
+                    differing = differing or !std.mem.eql(u8, icon.pixels[at..][0..3], &.{ 0x20, 0x40, 0x60 });
+                }
+                try std.testing.expect(differing);
+            }
+        }
         const missing = try std.fs.path.join(std.heap.page_allocator, &.{ self.cwd, "missing.exe" });
         defer std.heap.page_allocator.free(missing);
         var failure_baseline: ?usize = null;
@@ -361,5 +381,5 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const result = try std.Io.Dir.cwd().readFileAlloc(zio.io(), output, memory, .limited(32 * 1024));
     defer memory.free(result);
     try std.testing.expectEqualStrings(cwd, result);
-    std.debug.print("shell smoke passed: exact Unicode argv/cwd, cancellation/failure, owned child termination/reap, resources stable; file icon={any}; open/reveal/trash validation; trash: {s}; reveal: {s}\n", .{ shell.capabilities.file_icon, probe.trash_note, probe.reveal_note });
+    std.debug.print("shell smoke passed: exact Unicode argv/cwd, cancellation/failure, owned child termination/reap, resources stable; file and type icons={any}; open/reveal/trash validation; trash: {s}; reveal: {s}\n", .{ shell.capabilities.type_icon, probe.trash_note, probe.reveal_note });
 }

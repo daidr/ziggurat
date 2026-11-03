@@ -257,6 +257,7 @@ const Tour = struct {
             .context => tray.popupMenu(tray_request, &tray_items, .icon) catch |err| self.note("tray popup: {s}", .{@errorName(err)}),
             .menu => |id| self.run(std.enums.fromInt(Command, id) orelse return),
             .popup => |result| if (result.selected) |id| self.run(std.enums.fromInt(Command, id) orelse return),
+            .appearance => {},
         }
     }
 

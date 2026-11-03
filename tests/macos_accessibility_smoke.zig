@@ -13,6 +13,7 @@ extern fn zua_test_describe(element: *anyopaque, buffer: [*]u8, capacity: c_int)
 extern fn zua_test_frame_in_window(element: *anyopaque, handle: *anyopaque) c_int;
 extern fn zua_test_act(element: *anyopaque, kind: c_int, number: f64, text: [*:0]const u8) void;
 extern fn zua_test_child_count(handle: *anyopaque) c_int;
+extern fn zua_test_announcements(buffer: [*]u8, capacity: c_int) c_int;
 
 const Probe = struct {
     window: z.Window = undefined,
@@ -24,6 +25,7 @@ const Probe = struct {
     selection: [2]usize = .{ 0, 0 },
     focused: u64 = 0,
     agree: bool = true,
+    saved: bool = false,
 
     fn draw(ptr: *anyopaque, frame: *ui.Frame) void {
         const self: *Probe = @ptrCast(@alignCast(ptr));
@@ -39,6 +41,7 @@ const Probe = struct {
         semantic.add(frame, .{ .id = 4, .role = .group, .name = "Options", .bounds = .{ .x = 10, .y = 100, .width = 200, .height = 60 } });
         semantic.add(frame, .{ .id = 5, .parent = 4, .role = .checkbox, .name = "Agree", .checked = self.agree, .bounds = .{ .x = 14, .y = 104, .width = 100, .height = 20 } });
         semantic.add(frame, .{ .id = 6, .parent = 4, .role = .button, .name = "Disabled", .enabled = false, .bounds = .{ .x = 14, .y = 130, .width = 100, .height = 20 } });
+        if (self.saved) semantic.add(frame, .{ .id = 7, .role = .status, .name = "Saved", .bounds = .{ .x = 10, .y = 170, .width = 160, .height = 20 } });
     }
     fn action(_: *anyopaque, _: u64) void {}
     fn accessibility(ptr: *anyopaque, context: *ui.Context, value: ui.accessibility.Action) void {
@@ -142,9 +145,21 @@ pub fn main() !void {
     probe.publish();
     try probe.expect("Name", "AXTextField/||Name|42|1");
 
+    // A status message announces itself once, when it appears.
+    var said: [64]u8 = @splat(0);
+    const before = zua_test_announcements(&said, said.len);
+    probe.saved = true;
+    probe.window.invalidate();
+    probe.publish();
+    try std.testing.expectEqual(before + 1, zua_test_announcements(&said, said.len));
+    try std.testing.expectEqualStrings("Saved", std.mem.sliceTo(&said, 0));
+    probe.window.invalidate();
+    probe.publish();
+    try std.testing.expectEqual(before + 1, zua_test_announcements(&said, said.len));
+
     _ = try probe.window.destroy();
     try app.dispatch();
     const counts = ui.accessibility.resourceCounts();
-    std.debug.print("macOS accessibility: roles, titles, values, frames, press/increment/value/focus/selection and an NSNumber AXValue passed; hosts={d} elements={d} actions={d}\n", .{ counts.states, counts.providers, counts.actions });
+    std.debug.print("macOS accessibility: roles, titles, values, frames, press/increment/value/focus/selection an NSNumber AXValue and a status announcement passed; hosts={d} elements={d} actions={d}\n", .{ counts.states, counts.providers, counts.actions });
     try std.testing.expectEqual(@as(u32, 0), counts.actions);
 }

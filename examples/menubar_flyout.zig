@@ -96,6 +96,7 @@ const Focus = struct {
             },
             .menu => |id| self.command(id),
             .popup => |result| if (result.selected) |id| self.command(id),
+            .appearance => {},
         }
     }
 

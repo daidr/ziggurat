@@ -583,6 +583,7 @@ pub fn build(b: *std.Build) void {
         const native = native_support.add(b, system, "system-shell-native", "src/system/shell_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         native.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
         native.linkSystemLibrary("gio-unix-2.0", .{ .use_pkg_config = .force });
+        native.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
         const secrets_native = native_support.add(b, system, "system-secrets-native", "src/system/secrets_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         secrets_native.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
         const now_playing_native = native_support.add(b, system, "system-now-playing-native", "src/system/now_playing_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
@@ -685,7 +686,9 @@ pub fn build(b: *std.Build) void {
         });
         const fixture = native_support.add(b, desktop_smoke, "system-desktop-fixture", "tests/system_desktop_linux_fixture.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         fixture.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
+        fixture.linkSystemLibrary("gdk-pixbuf-2.0", .{ .use_pkg_config = .force });
         desktop_smoke.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
+        desktop_smoke.linkSystemLibrary("gdk-pixbuf-2.0", .{ .use_pkg_config = .force });
         desktop_smoke.linkSystemLibrary("x11", .{ .use_pkg_config = .force });
         // Needs a session bus and an X11 display: dbus-run-session -- xvfb-run.
         const now_playing_smoke = addSmokeModule(b, "smoke-now-playing", "tests/now_playing_linux_smoke.zig", target, optimize, &.{
@@ -1845,6 +1848,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_webview", .module = view },
         });
         addSmoke(b, "smoke-webview-content-rules", "tests/content_rules_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-context-menu", "tests/context_menu_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
         });
@@ -3448,7 +3455,10 @@ fn addSystemIntegrationNative(b: *std.Build, module: *std.Build.Module, target: 
             _ = native_support.add(b, module, "system-clipboard-native", "src/system/macos_clipboard.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
             _ = native_support.add(b, module, "system-drag-native", "src/system/macos_drag.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
             _ = native_support.add(b, module, "system-media-native", "src/system/macos_media.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
-            native_support.linkFrameworks(b, module, &.{ "AppKit", "Foundation", "Security", "ServiceManagement", "IOKit", "Network", "CoreServices", "CoreFoundation", "UniformTypeIdentifiers", "MediaPlayer" });
+            // TCC permissions and the guide's panel; AVFoundation, EventKit
+            // and CoreBluetooth load at run time.
+            _ = native_support.add(b, module, "system-permissions-native", "src/system/macos_permissions.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+            native_support.linkFrameworks(b, module, &.{ "AppKit", "Foundation", "Security", "ServiceManagement", "IOKit", "Network", "CoreServices", "CoreFoundation", "UniformTypeIdentifiers", "MediaPlayer", "ApplicationServices", "CoreGraphics" });
         },
         else => {},
     }
@@ -3551,7 +3561,7 @@ fn addEmbeddedWebView(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
         scroll_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/linux_webview_scroll_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
         scroll_smoke.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
         b.top_level_steps.get("check").?.step.dependOn(&scroll_smoke.step);
-        b.step("smoke-webview-scroll-linux", "Verify that the wheel over a web view with scroll_to_container scrolls the native container").dependOn(&b.addRunArtifact(scroll_smoke).step);
+        b.step("smoke-webview-scroll-linux", "Verify that the wheel over a web view with scroll_to_container scrolls the native container, and that the keys its page leaves come to the native UI").dependOn(&b.addRunArtifact(scroll_smoke).step);
         const media_smoke = b.addExecutable(.{ .name = "smoke-webview-media-linux", .root_module = b.createModule(.{ .root_source_file = b.path("tests/linux_media_webview_smoke.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view } } }) });
         media_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/linux_media_webview_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
         media_smoke.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });

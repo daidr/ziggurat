@@ -32,7 +32,7 @@ extern fn zsl_tray_show(?*anyopaque, [*:0]const u8, [*:0]const u8, ?[*:0]const u
 extern fn zsl_tray_update(*anyopaque, ?*anyopaque, [*:0]const u8, [*:0]const u8) c_int;
 extern fn zsl_tray_menu(*anyopaque, [*]const NativeItem, u32) void;
 extern fn zsl_tray_remove(*anyopaque) void;
-extern fn zsl_note_show([*:0]const u8, [*:0]const u8, c_int, c_int, c_int, ?*anyopaque, u64, Done) ?*anyopaque;
+extern fn zsl_note_show([*:0]const u8, [*:0]const u8, c_int, c_int, c_int, ?[*]const u8, usize, ?*anyopaque, u64, Done) ?*anyopaque;
 extern fn zsl_note_close(*anyopaque) void;
 extern fn zsl_hotkey_register(u32, u32, c_int, ?*anyopaque, u64, Done, *c_int, *c_int) ?*anyopaque;
 extern fn zsl_hotkey_unregister(*anyopaque) void;
@@ -501,8 +501,10 @@ pub const Owner = struct {
         var body: [1024]u8 = undefined;
         const summary = try boundedText(&title, options.title, 63);
         const text = try boundedText(&body, options.body, 255);
+        const image = options.image orelse &.{};
+        if (image.len > types.max_notification_image_bytes) return error.NotificationImageTooLarge;
         const serial = try self.nextSerial();
-        const native = zsl_note_show(summary, text, @backingInt(options.kind), @intFromBool(options.silent), @intFromBool(options.real_time), self, serial, noteDone) orelse return error.NotificationSubmissionFailed;
+        const native = zsl_note_show(summary, text, @backingInt(options.kind), @intFromBool(options.silent), @intFromBool(options.real_time), image.ptr, image.len, self, serial, noteDone) orelse return error.NotificationSubmissionFailed;
         const previous = self.notification;
         self.notification = .{ .id = id, .native = native, .serial = serial };
         if (previous) |old| zsl_note_close(old.native);
@@ -736,6 +738,11 @@ pub const Tray = struct {
         return .{ .x = point.x, .y = point.y, .width = 0, .height = 0 };
     }
     /// Linux hosts report no icon rectangle to test the pointer against.
+    /// Status notifier hosts draw items on panels whose appearance they do
+    /// not tell: false.
+    pub fn dark(_: *Tray) bool {
+        return false;
+    }
     pub fn pointerOverIcon(_: *Tray) bool {
         return false;
     }

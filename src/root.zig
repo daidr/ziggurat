@@ -263,6 +263,13 @@ pub const KeyInput = struct {
     /// `.w` is the key in W's place on any layout, as games want for WASD.
     /// `.unknown` when the native event carried no position.
     physical: KeyCode = .unknown,
+    /// Pressed in the page of a web view in this window, which has the
+    /// keyboard, and left unhandled by the page: it did not cancel it, type
+    /// it into an editable element or compose with it, and it is neither
+    /// Tab nor a modifier key on its own. The window's content takes it as
+    /// its own key, for its shortcuts, while the keyboard stays with the
+    /// page. No text or release follows it.
+    from_page: bool = false,
 };
 pub const physical_keys = @import("physical_keys.zig");
 pub const Event = union(enum) {

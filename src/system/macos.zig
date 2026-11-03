@@ -47,6 +47,7 @@ extern fn zsm_tray_show(?*anyopaque, c_int, [*:0]const u8, [*:0]const u8, ?[*:0]
 extern fn zsm_tray_update(*anyopaque, ?*anyopaque, c_int, [*:0]const u8, [*:0]const u8) c_int;
 extern fn zsm_tray_menu(*anyopaque, [*]const NativeItem, u32) void;
 extern fn zsm_tray_frame(*anyopaque, *f64, *f64, *f64, *f64) c_int;
+extern fn zsm_tray_dark(*anyopaque) c_int;
 extern fn zsm_tray_pointer_over(*anyopaque) c_int;
 extern fn zsm_tray_remove(*anyopaque) void;
 extern fn zsm_message_show(?*anyopaque, [*:0]const u8, [*:0]const u8, [*]const [*:0]const u8, u32, u32, i32, i32, c_int, ?*anyopaque, u64, Done) ?*anyopaque;
@@ -59,7 +60,7 @@ extern fn zsm_chooser_detach(*anyopaque) void;
 extern fn zsm_hotkey_register(u32, u32, c_int, ?*anyopaque, u64, Done, *c_int, *i32) ?*anyopaque;
 extern fn zsm_hotkey_unregister(*anyopaque) void;
 extern fn zsm_note_available() c_int;
-extern fn zsm_note_show([*:0]const u8, [*:0]const u8, c_int, ?*anyopaque, u64, Done) ?*anyopaque;
+extern fn zsm_note_show([*:0]const u8, [*:0]const u8, c_int, ?[*]const u8, usize, ?*anyopaque, u64, Done) ?*anyopaque;
 extern fn zsm_note_close(*anyopaque) void;
 
 pub const message = struct {
@@ -501,6 +502,8 @@ pub const Owner = struct {
     /// window's diagnostic sink after this call returns. A click reports
     /// `notification_activated`. `kind` and `real_time` have no macOS
     /// counterpart and are ignored; `silent` false plays the default sound.
+    /// `image` is attached from a temporary file, which the system moves
+    /// into its store as it adds the request.
     pub fn showNotification(self: *Owner, id: u64, options: types.NotificationOptions) !void {
         const window = try self.require();
         const scope = window.beginCallback() orelse return error.Closed;
@@ -511,9 +514,11 @@ pub const Owner = struct {
         var body: [1024]u8 = undefined;
         const summary = try boundedText(&title, options.title, 63);
         const text = try boundedText(&body, options.body, 255);
+        const image = options.image orelse &.{};
+        if (image.len > types.max_notification_image_bytes) return error.NotificationImageTooLarge;
         if (zsm_note_available() == 0) return error.UnsupportedCapability;
         const serial = try self.nextSerial();
-        const native = zsm_note_show(summary, text, @intFromBool(options.silent), self, serial, noteDone) orelse return error.NotificationSubmissionFailed;
+        const native = zsm_note_show(summary, text, @intFromBool(options.silent), image.ptr, image.len, self, serial, noteDone) orelse return error.NotificationSubmissionFailed;
         const previous = self.notification;
         self.notification = .{ .id = id, .native = native, .serial = serial };
         if (previous) |old| zsm_note_close(old.native);
@@ -744,6 +749,15 @@ pub const Tray = struct {
         if (zsm_tray_frame(native, &x, &y, &width, &height) == 0) return null;
         return .{ .x = @intFromFloat(@round(x)), .y = @intFromFloat(@round(y)), .width = @intFromFloat(@max(@round(width), 1)), .height = @intFromFloat(@max(@round(height), 1)) };
     }
+    /// Whether the menu bar under the item is dark, as AppKit draws its own
+    /// items: by the status button's appearance, which follows the bar's,
+    /// with the system's appearance or the wallpaper under a translucent
+    /// bar. `TrayAction.appearance` tells of a change. False before `show`.
+    pub fn dark(self: *Tray) bool {
+        if (self.app) |app| app.assertOwner();
+        const native = self.native orelse return false;
+        return zsm_tray_dark(native) != 0;
+    }
     /// Whether the pointer is over the item now.
     pub fn pointerOverIcon(self: *Tray) bool {
         if (self.app) |app| app.assertOwner();
@@ -761,6 +775,7 @@ pub const Tray = struct {
         switch (kind) {
             0 => self.deliver(.activate),
             1 => self.deliver(.{ .context = .{ .x = x, .y = y } }),
+            4 => self.deliver(.{ .appearance = x != 0 }),
             3 => {
                 if (x < 0) return;
                 const index: usize = @intCast(x);

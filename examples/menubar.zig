@@ -161,6 +161,8 @@ const Menus = struct {
             .context => tray.popupMenu(tray_request, &tray_items, .icon) catch |err| self.note("tray popup: {s}", .{@errorName(err)}),
             .menu => |id| self.run(id),
             .popup => |result| if (result.selected) |id| self.run(id),
+            // A template icon follows the menu bar's appearance by itself.
+            .appearance => |dark| self.note("menu bar is {s}", .{if (dark) "dark" else "light"}),
         }
     }
 

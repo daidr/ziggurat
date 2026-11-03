@@ -185,7 +185,31 @@ static UNUserNotificationCenter *note_center(void) {
 
 /* Asks for permission the first time, then adds the request; a refusal or
    failure reports -1 after this call returns. NULL outside an app bundle. */
-void *zsm_note_show(const char *title, const char *body, int silent, void *owner, uint64_t serial, ZsmDone done) {
+/* A notification's image, as an attachment, which UserNotifications makes
+   only of a file, its format told by its extension: written to a temporary
+   file, which the system moves into its store as it adds the request. The
+   caller removes the file if it is still there once the request is added or
+   refused. nil, with *path nil, for an image the system does not take. */
+static UNNotificationAttachment *note_attachment(const unsigned char *bytes, size_t length, NSString **path) {
+    *path = nil;
+    const BOOL jpeg = length >= 3 && bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff;
+    NSString *name = [NSString stringWithFormat:@"ziggurat-notification-%@.%@", [[NSUUID UUID] UUIDString], jpeg ? @"jpg" : @"png"];
+    NSString *file = [NSTemporaryDirectory() stringByAppendingPathComponent:name];
+    if (![[NSData dataWithBytes:bytes length:length] writeToFile:file options:NSDataWritingAtomic error:NULL]) return nil;
+    NSError *error = nil;
+    UNNotificationAttachment *attachment = [UNNotificationAttachment attachmentWithIdentifier:@"" URL:[NSURL fileURLWithPath:file] options:nil error:&error];
+    if (!attachment) {
+        [[NSFileManager defaultManager] removeItemAtPath:file error:NULL];
+        return nil;
+    }
+    *path = file;
+    return attachment;
+}
+static void note_remove_file(NSString *path) {
+    if (path) [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
+}
+
+void *zsm_note_show(const char *title, const char *body, int silent, const unsigned char *image, size_t image_length, void *owner, uint64_t serial, ZsmDone done) {
     if (!zsm_note_available()) return NULL;
     UNUserNotificationCenter *center = note_center();
     ZsmNote *note = [[ZsmNote alloc] initWithOwner:owner serial:serial done:done];
@@ -195,14 +219,21 @@ void *zsm_note_show(const char *title, const char *body, int silent, void *owner
     content.title = zsm_string(title);
     content.body = zsm_string(body);
     if (!silent) content.sound = [UNNotificationSound defaultSound];
+    NSString *image_path = nil;
+    if (image && image_length) {
+        UNNotificationAttachment *attachment = note_attachment(image, image_length, &image_path);
+        if (attachment) content.attachments = @[attachment];
+    }
     UNNotificationRequest *request = [UNNotificationRequest requestWithIdentifier:note->identifier content:content trigger:nil];
     NSString *identifier = note->identifier;
     [center requestAuthorizationWithOptions:UNAuthorizationOptionAlert | UNAuthorizationOptionSound completionHandler:^(BOOL granted, NSError *error) {
         if (!granted || error) {
+            note_remove_file(image_path);
             dispatch_async(dispatch_get_main_queue(), ^{ note_finish(identifier, -1); });
             return;
         }
         [center addNotificationRequest:request withCompletionHandler:^(NSError *failed) {
+            note_remove_file(image_path);
             if (failed) dispatch_async(dispatch_get_main_queue(), ^{ note_finish(identifier, -1); });
         }];
     }];

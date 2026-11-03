@@ -7,6 +7,8 @@ extern fn zlm_test_close(*anyopaque) void;
 extern fn zlm_test_commit(*anyopaque, [*:0]const u8) void;
 extern fn zlm_test_compose(*anyopaque, [*:0]const u8, usize) void;
 extern fn zlm_test_title_is(*anyopaque, [*:0]const u8) c_int;
+extern fn zlm_test_terminate() void;
+extern fn zlm_test_click(*anyopaque, f64, f64, c_int) void;
 extern fn zlc_test_pixel(*anyopaque, u32, u32) u32;
 extern fn zlc_test_text_pixels(*anyopaque) u32;
 
@@ -15,10 +17,14 @@ const Probe = struct {
     content: ui.Context = undefined,
     cancel: bool = false,
     requests: usize = 0,
+    last_reason: ?z.CloseReason = null,
     closed: usize = 0,
     calls: usize = 0,
     commits: usize = 0,
     preedits: usize = 0,
+    /// Presses and releases of the secondary button, and of the primary one.
+    secondary: [2]usize = .{ 0, 0 },
+    primary: usize = 0,
     close_in_text: bool = false,
     paint_scale: f32 = 0,
     fn draw(ptr: *anyopaque, frame: *ui.Frame) void {
@@ -34,7 +40,7 @@ const Probe = struct {
     fn request(ptr: *anyopaque, _: z.Window, reason: z.CloseReason) z.CloseDecision {
         const self: *Probe = @ptrCast(@alignCast(ptr));
         self.requests += 1;
-        std.debug.assert(reason == .user);
+        self.last_reason = reason;
         return if (self.cancel) .cancel else .allow;
     }
     fn complete(ptr: *anyopaque, window: z.Window) void {
@@ -63,6 +69,10 @@ const Probe = struct {
                 std.debug.assert(value.selection_start == "にほ".len);
                 self.preedits += 1;
                 return true;
+            },
+            .pointer_down, .pointer_up => |press| {
+                if (press.button == .secondary) self.secondary[@intFromBool(event == .pointer_up)] += 1 else self.primary += 1;
+                return false;
             },
             else => return false,
         }
@@ -119,6 +129,11 @@ pub fn main() !void {
         for (blue, [_]u8{ 0x77, 0x4c, 0x27, 0xff }) |got, want| try std.testing.expect(@abs(@as(i16, got) - want) <= 2);
         zlm_test_compose(probe.native(), "にほん", 2);
         try std.testing.expectEqual(@as(usize, 1), probe.preedits);
+        // A press keeping the secondary button's number, a Control-click and
+        // the secondary button itself are secondary clicks, a refused terminate:, release and all.
+        for (0..3) |how| zlm_test_click(probe.native(), 40, 40, @intCast(how));
+        try std.testing.expectEqual([2]usize{ 3, 3 }, probe.secondary);
+        try std.testing.expectEqual(@as(usize, 0), probe.primary);
         probe.cancel = true;
         zlm_test_close(probe.native());
         try std.testing.expect(!probe.window.isClosed());
@@ -138,6 +153,13 @@ pub fn main() !void {
         try probe.attach(app);
         probe.window.show();
         try std.testing.expect((try probe.window.state()).visible);
+        // AppKit's terminate:, as the Dock menu's Quit sends it, asks the
+        // windows, which may refuse, and never exits the process.
+        probe.cancel = true;
+        zlm_test_terminate();
+        try std.testing.expectEqual(@as(?z.CloseReason, .quit), probe.last_reason);
+        try std.testing.expect(!probe.window.isClosed());
+        probe.cancel = false;
         var threads: [4]std.Thread = undefined;
         for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, Probe.produce, .{&probe});
         for (threads) |thread| thread.join();
@@ -146,7 +168,7 @@ pub fn main() !void {
         try std.testing.expect(probe.window.isClosed());
         app.deinit();
         try std.testing.expectEqual(@as(u32, 0), zlm_resource_count());
-        std.debug.print("macOS cycle {d}: AppKit/Core Graphics/Core Text, veto/closed callback, IME commit and preedit, 256 cross-thread tasks; native windows=0\n", .{cycle + 1});
+        std.debug.print("macOS cycle {d}: AppKit/Core Graphics/Core Text, veto/closed callback, IME commit and preedit, secondary clicks, 256 cross-thread tasks; native windows=0\n", .{cycle + 1});
     }
     try std.testing.expectError(error.UnsupportedCapability, z.App.initWithOptions(gpa.allocator(), .{ .icon_policy = .required }));
     std.debug.print("macOS smoke passed\n", .{});

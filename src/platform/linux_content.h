@@ -38,6 +38,10 @@ int zlg_region_focus(ZlgRegionHost *);
 /* Nonzero sends the wheel and the touchpad over the child to the drawing
  * area beneath it, at the same point, before the child sees them. */
 void zlg_region_scroll_to_container(ZlgRegionHost *, int);
+/* Nonzero gives the window's content, as its own keys (flag 32 of a key
+ * press), the key presses the child passes on: those a web view's page left
+ * unhandled. Tab and modifier keys on their own stay out. */
+void zlg_region_forward_keys(ZlgRegionHost *, int);
 void zlg_region_detach(ZlgRegionHost *);
 unsigned zlg_region_count(void);
 

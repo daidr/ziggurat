@@ -14,6 +14,7 @@
 #import <IOKit/ps/IOPowerSources.h>
 #import <IOKit/ps/IOPSKeys.h>
 #import <Network/Network.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -280,6 +281,63 @@ int zsh_launch_app(const char *path, ZshFailure *failure) {
         if (!value) return ZSH_INVALID;
         if (![[NSFileManager defaultManager] fileExistsAtPath:value]) return ZSH_NOT_FOUND;
         return shell_open([NSURL fileURLWithPath:value], failure);
+    }
+}
+
+/* Draws image at size by size pixels over background (0xRRGGBB) into out,
+   top-down RGBA8 with alpha 255, as an sRGB bitmap one pixel to the point.
+   NSWorkspace's icons and drawing into a bitmap of one's own may run off the
+   main thread. */
+static int draw_icon(NSImage *image, int size, uint32_t background, unsigned char *out) {
+    if (!image) return ZSH_NOT_SUPPORTED;
+    NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:size pixelsHigh:size bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:size * 4 bitsPerPixel:32];
+    if (!bitmap) return ZSH_FAILED;
+    bitmap = [bitmap bitmapImageRepByRetaggingWithColorSpace:[NSColorSpace sRGBColorSpace]];
+    NSGraphicsContext *context = [NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap];
+    if (!context) return ZSH_FAILED;
+    [NSGraphicsContext saveGraphicsState];
+    [NSGraphicsContext setCurrentContext:context];
+    [[NSColor colorWithSRGBRed:((background >> 16) & 0xff) / 255.0 green:((background >> 8) & 0xff) / 255.0 blue:(background & 0xff) / 255.0 alpha:1] setFill];
+    NSRectFill(NSMakeRect(0, 0, size, size));
+    [image drawInRect:NSMakeRect(0, 0, size, size) fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1];
+    [context flushGraphics];
+    [NSGraphicsContext restoreGraphicsState];
+    const unsigned char *pixels = [bitmap bitmapData];
+    const NSInteger stride = [bitmap bytesPerRow];
+    for (int y = 0; y < size; y++) {
+        for (int x = 0; x < size; x++) {
+            memcpy(out + (y * size + x) * 4, pixels + y * stride + x * 4, 3);
+            out[(y * size + x) * 4 + 3] = 255;
+        }
+    }
+    return ZSH_OK;
+}
+/* The icon Finder shows for an item. */
+int zsh_file_icon(const char *path, int size, uint32_t background, unsigned char *out, ZshFailure *failure) {
+    (void)failure;
+    @autoreleasepool {
+        NSString *value = ztext(path);
+        if (!value) return ZSH_INVALID;
+        if (![[NSFileManager defaultManager] fileExistsAtPath:value]) return ZSH_NOT_FOUND;
+        return draw_icon([[NSWorkspace sharedWorkspace] iconForFile:value], size, background, out);
+    }
+}
+/* The icon Finder shows for files with an extension, though no such file
+   exists: that of the extension's UTType (iconForFileType: before macOS 11). */
+int zsh_type_icon(const char *extension, int size, uint32_t background, unsigned char *out) {
+    @autoreleasepool {
+        NSString *value = ztext(extension);
+        if (!value) return ZSH_INVALID;
+        NSImage *image = nil;
+        if (@available(macOS 11.0, *)) {
+            UTType *type = [UTType typeWithFilenameExtension:value];
+            if (type) image = [[NSWorkspace sharedWorkspace] iconForContentType:type];
+        }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        if (!image) image = [[NSWorkspace sharedWorkspace] iconForFileType:value];
+#pragma clang diagnostic pop
+        return draw_icon(image, size, background, out);
     }
 }
 

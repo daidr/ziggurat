@@ -526,6 +526,16 @@ pub const EmbedStatus = struct {
     empty: bool = false,
 };
 
+/// What an embedded text input holds: its text, borrowed until the next
+/// pass, and the selection as byte offsets into it. A password reports
+/// neither.
+pub const EmbedText = struct {
+    value: []const u8 = "",
+    selection_start: usize = 0,
+    selection_end: usize = 0,
+    password: bool = false,
+};
+
 /// Derive a stable key from text, for example a list item's identifier.
 pub fn key(text: []const u8) u64 {
     return std.hash.Wyhash.hash(0x6b65_79, text);
@@ -646,6 +656,9 @@ pub const Embed = struct {
     /// boxes, suggestion lists and token fields; called during passes and
     /// key routing, so it must not allocate or block.
     status: ?*const fn (*anyopaque) EmbedStatus = null,
+    /// The text of an embedded text input and its selection, for
+    /// automation; called outside passes and paint.
+    text: ?*const fn (*anyopaque) ?EmbedText = null,
     /// Register the leaf as a Tab stop under its node id, so it can hold
     /// focus and receive keys through `input`.
     focusable: bool = false,
@@ -5602,6 +5615,7 @@ pub const Host = struct {
         self.context.on_value = onValue;
         self.context.on_input = onInput;
         self.context.on_key_release = onKeyRelease;
+        self.context.on_unhandled_key = onUnhandledKey;
         self.context.on_command_enabled = onCommandEnabled;
         return self.context.attachBackdrop(owner);
     }

@@ -32,6 +32,13 @@ extern fn zsm_tray_test_click(*anyopaque, c_int, c_int) void;
 extern fn zsm_tray_test_title_is(*anyopaque, [*:0]const u8) c_int;
 extern fn zsm_tray_test_monospaced_digits(*anyopaque) c_int;
 extern fn zsm_tray_test_menu(*anyopaque) ?*anyopaque;
+extern fn zsm_test_tray_appearance(*anyopaque, c_int) void;
+extern fn zsp_guide_start(c_int, c_int, [*:0]const u8, [*:0]const u8, [*:0]const u8) ?*anyopaque;
+extern fn zsp_guide_ended(*anyopaque) c_int;
+extern fn zsp_guide_stop(*anyopaque) void;
+extern fn zsp_test_guide_place(*anyopaque, f64, f64, f64, f64) c_int;
+extern fn zsp_test_guide_describe(*anyopaque, *[4]f64, [*]u8, usize) c_int;
+extern fn zsp_test_guide_close(*anyopaque) void;
 extern fn zsm_dock_test_menu(*anyopaque) *anyopaque;
 extern fn zsm_dock_test_badge_is([*:0]const u8) c_int;
 extern fn zsm_dock_test_progress() f64;
@@ -66,7 +73,7 @@ fn expectAt(src: std.builtin.SourceLocation, ok: bool) !void {
         return error.TestUnexpectedResult;
     }
 }
-const Step = enum { bar, edit, popup_choose, popup_cancel_early, popup_cancel_open, message_escape, message_no_cancel, message_return, message_cancelled, message_period, open_file, open_files, save_file, pick_folder, tray, dock, detach, done };
+const Step = enum { bar, edit, popup_choose, popup_cancel_early, popup_cancel_open, message_escape, message_no_cancel, message_return, message_cancelled, message_period, open_file, open_files, save_file, pick_folder, tray, dock, permissions, detach, done };
 
 const State = struct {
     app: *z.App,
@@ -90,6 +97,8 @@ const State = struct {
     keys: [8]?z.KeyInput = @splat(null),
     key_count: usize = 0,
     tray_actions: [8]?system.TrayAction = @splat(null),
+    permission_request: system.permissions.Request = .{},
+    permission_started: bool = false,
     tray_count: usize = 0,
     dock_commands: [4]u64 = @splat(0),
     dock_count: usize = 0,
@@ -138,6 +147,13 @@ const State = struct {
         self.tray_actions[self.tray_count] = value;
         self.tray_count += 1;
         if (value == .popup) self.advance();
+    }
+    fn permissionDone(ptr: *anyopaque, request: *system.permissions.Request) void {
+        const self: *State = @ptrCast(@alignCast(ptr));
+        request.result catch |err| return self.fail(err);
+        const now = system.permissions.check(.full_disk_access) catch |err| return self.fail(err);
+        if (request.status != now) return self.fail(error.TestUnexpectedResult);
+        self.advance();
     }
     fn dockMenu(ptr: *anyopaque, _: *system.Dock, id: u64) void {
         const self: *State = @ptrCast(@alignCast(ptr));
@@ -352,6 +368,12 @@ const State = struct {
                     try expectAt(@src(), self.tray_actions[3].?.menu == 52);
                     try self.tray.setMenu(&.{});
                     try expectAt(@src(), zsm_tray_test_menu(native) == null);
+                    const was_dark = self.tray.dark();
+                    zsm_test_tray_appearance(native, @intFromBool(!was_dark));
+                    try expectAt(@src(), self.tray_actions[4].?.appearance == !was_dark);
+                    try expectAt(@src(), self.tray.dark() == !was_dark);
+                    zsm_test_tray_appearance(native, @intFromBool(was_dark));
+                    try expectAt(@src(), self.tray_actions[5].?.appearance == was_dark);
                     try self.tray.popupMenu(4, &popup_items, .icon);
                     try self.owner.setTray(.{ .icon = icon.handle, .tooltip = "Owner" });
                     try self.owner.setTray(.{ .tooltip = "Owner again" });
@@ -383,6 +405,35 @@ const State = struct {
                 try taskbar.setAttention(self.window, true);
                 try taskbar.setAttention(self.window, false);
                 self.advance();
+            },
+            .permissions => {
+                const permissions = system.permissions;
+                if (self.permission_started) return;
+                self.permission_started = true;
+                for (permissions.all) |permission| {
+                    _ = try permissions.check(permission);
+                    try expectAt(@src(), permissions.title(permission).len > 0);
+                }
+                // Full Disk Access has no prompt: the request reports.
+                try self.permission_request.start(self.app, .full_disk_access, self, permissionDone);
+                var title_buffer: [64]u8 = undefined;
+                const title_text = permissions.title(.accessibility);
+                @memcpy(title_buffer[0..title_text.len], title_text);
+                title_buffer[title_text.len] = 0;
+                const title = title_buffer[0..title_text.len :0];
+                const guide = zsp_guide_start(@backingInt(permissions.Permission.accessibility), 1, "/System/Applications/Utilities/Terminal.app", "Smoke", title) orelse return error.OutOfMemory;
+                defer zsp_guide_stop(guide);
+                try expectAt(@src(), zsp_test_guide_place(guide, 200, 100, 715, 500) == 1);
+                var frame: [4]f64 = undefined;
+                var text: [256]u8 = @splat(0);
+                // The panel never takes the focus.
+                try expectAt(@src(), zsp_test_guide_describe(guide, &frame, &text, text.len) == 1);
+                var expected: [256]u8 = undefined;
+                try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Drag Smoke to the list above to allow {s}.", .{title}), std.mem.sliceTo(&text, 0));
+                try expectAt(@src(), frame[2] >= permissions.panel_min_width and frame[3] > 72);
+                try expectAt(@src(), zsp_guide_ended(guide) == 0);
+                zsp_test_guide_close(guide);
+                try expectAt(@src(), zsp_guide_ended(guide) == 1);
             },
             .detach => {
                 // Detaching dismisses what is pending without reporting it.
@@ -462,8 +513,8 @@ pub fn main() !void {
     try std.testing.expectEqual(system.PopupResult{ .request = 1, .selected = 2 }, state.popups[0].?);
     try std.testing.expectEqual(system.PopupResult{ .request = 2, .selected = null }, state.popups[1].?);
     try std.testing.expectEqual(system.PopupResult{ .request = 3, .selected = null }, state.popups[2].?);
-    try std.testing.expectEqual(5, state.tray_count);
-    try std.testing.expectEqual(system.PopupResult{ .request = 4, .selected = 1 }, state.tray_actions[4].?.popup);
+    try std.testing.expectEqual(7, state.tray_count);
+    try std.testing.expectEqual(system.PopupResult{ .request = 4, .selected = 1 }, state.tray_actions[6].?.popup);
     try std.testing.expectEqual(5, state.message_count);
     try std.testing.expectEqual(system.MessageResult{ .request = 10, .response = .{ .button = 23 } }, state.messages[0].?);
     try std.testing.expectEqual(system.MessageResult{ .request = 11, .response = .dismissed }, state.messages[1].?);

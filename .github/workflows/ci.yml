@@ -133,7 +133,7 @@ jobs:
           persist-credentials: false
       - name: Native GTK/Pango dependencies
         run: |
-          sh scripts/ci-linux-deps.sh ca-certificates curl xz-utils python3 libgtk-3-dev libpango1.0-dev libicu-dev pkg-config xvfb xauth openbox x11-utils libxtst6 libatspi2.0-dev at-spi2-core dbus dbus-x11 shared-mime-info fonts-dejavu-core fonts-noto-cjk libepoxy-dev libegl-dev libgl1-mesa-dri
+          sh scripts/ci-linux-deps.sh ca-certificates curl xz-utils python3 libgtk-3-dev libpango1.0-dev libicu-dev pkg-config xvfb xauth openbox x11-utils libxtst6 libatspi2.0-dev at-spi2-core dbus dbus-x11 shared-mime-info fonts-dejavu-core fonts-noto-cjk libepoxy-dev libegl-dev libgl1-mesa-dri adwaita-icon-theme
       - name: Use cached Zig 0.17.0 and build caches
         run: |
           zig_bin=$(sh scripts/fetch-zig.sh)
@@ -280,7 +280,7 @@ jobs:
           persist-credentials: false
       - name: Native GTK/Pango dependencies
         run: |
-          sh scripts/ci-linux-deps.sh ca-certificates curl xz-utils python3 libgtk-3-dev libpango1.0-dev libicu-dev pkg-config xvfb xauth openbox x11-utils libxtst6 libatspi2.0-dev at-spi2-core dbus dbus-x11 shared-mime-info fonts-dejavu-core fonts-noto-cjk libepoxy-dev libegl-dev libgl1-mesa-dri
+          sh scripts/ci-linux-deps.sh ca-certificates curl xz-utils python3 libgtk-3-dev libpango1.0-dev libicu-dev pkg-config xvfb xauth openbox x11-utils libxtst6 libatspi2.0-dev at-spi2-core dbus dbus-x11 shared-mime-info fonts-dejavu-core fonts-noto-cjk libepoxy-dev libegl-dev libgl1-mesa-dri adwaita-icon-theme
       - name: Use cached Zig 0.17.0 and build caches
         run: |
           zig_bin=$(sh scripts/fetch-zig.sh)
@@ -341,7 +341,7 @@ jobs:
         timeout-minutes: 15
         run: |
           zig build check -Dwebview=true -Doptimize=${{ matrix.optimize }} --summary failures
-          zig build build-smoke-webview-macos build-smoke-webview-content-rules build-smoke-webview-local-macos build-smoke-webview-remote-macos build-smoke-webview-find-macos build-smoke-webview-capture-macos build-smoke-webview-profile-macos build-smoke-webview-cookies-macos build-smoke-webview-initializers-macos build-smoke-webview-permissions-macos build-smoke-webview-files-macos build-smoke-webview-regions-macos build-smoke-webview-downloads-macos build-smoke-webview-session-state -Dwebview=true -Doptimize=${{ matrix.optimize }} --summary failures
+          zig build build-smoke-webview-macos build-smoke-webview-content-rules build-smoke-webview-local-macos build-smoke-webview-remote-macos build-smoke-webview-find-macos build-smoke-webview-capture-macos build-smoke-webview-profile-macos build-smoke-webview-cookies-macos build-smoke-webview-initializers-macos build-smoke-webview-permissions-macos build-smoke-webview-files-macos build-smoke-webview-regions-macos build-smoke-webview-downloads-macos build-smoke-webview-session-state build-smoke-webview-context-menu -Dwebview=true -Doptimize=${{ matrix.optimize }} --summary failures
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-macos
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-content-rules
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-local-macos
@@ -356,6 +356,7 @@ jobs:
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-downloads-macos
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-session-state
           sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-files-macos
+          sh scripts/macos-symbolize.sh zig-out/bin/smoke-webview-context-menu
           zig build smoke-webview-http-auth -Dwebview=true -Doptimize=${{ matrix.optimize }} --summary failures
 
   webview:

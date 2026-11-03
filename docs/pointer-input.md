@@ -21,3 +21,5 @@ Windows 已实际检查队列采样、未知时间、按钮打断、捕获重入
 ## Linux 触摸屏
 
 GTK 窗口的绘制区接收 GDK 的触摸（`GDK_TOUCH_MASK`、`touch-event` 信号），不再让 GTK 把第一根手指当作鼠标：轻点在落点发出一次主按钮点击；手指不动按住 500 毫秒以上抬起，按右键点击处理；手指移动超过 8 DIP 后不再算点按，而是让手下的内容跟着手指滚动（`Event.wheel`，delta 为像素，方向与滚动条滑块相反）；两根手指按中点移动滚动。被合成器拿走的触摸（`GDK_TOUCH_CANCEL`）既不滚动也不点击。点按的按下与抬起走鼠标同一条原生路径，焦点、抓取和按下 receipt 与鼠标点击相同；绘制区收到过触摸后，GTK 由触摸屏模拟出的按钮与移动事件会被丢弃，手指不会再拖选文本。核心没有缩放事件，双指捏合只滚动不缩放。手势规则在 `src/platform/linux_touch.h`，不依赖 GDK，由 `test-linux-touch` 覆盖；`smoke-linux-touch` 以 GDK 的触摸事件驱动真实窗口。
+
+macOS 的 `pointer_down`/`pointer_up` 带上按钮：右键（`rightMouseDown:`）为 `secondary`，其他按钮按 AppKit 的编号为 `middle`、`back`、`forward`。Control+左键是一次副键点击，直到释放；保留副键编号（`buttonNumber` 为 1）的左键按下也是，因为数据防泄漏代理会截获副键事件、再以主键事件重新发出，若当作主键点击，触控板双指点按就会点中所指之物而打不开上下文菜单。

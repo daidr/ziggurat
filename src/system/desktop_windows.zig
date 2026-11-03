@@ -117,6 +117,12 @@ fn dword(key: [*:0]const u16, name: [*:0]const u16) ?u32 {
     if (c.RegGetValueW(hkcu, key, name, c.RRF_RT_REG_DWORD, null, &value, &size) != 0) return null;
     return value;
 }
+/// Whether the taskbar, where notification-area icons show, is dark: the
+/// system's own mode (`SystemUsesLightTheme`), which can differ from apps'.
+pub fn taskbarDark() bool {
+    const light = dword(L("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"), L("SystemUsesLightTheme")) orelse return false;
+    return light == 0;
+}
 pub fn preferences() desktop.Preferences {
     const personalize = L("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
     var result: desktop.Preferences = .{};

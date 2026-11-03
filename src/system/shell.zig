@@ -12,6 +12,8 @@ const gio = if (builtin.os.tag == .linux or builtin.os.tag == .macos) struct {
     extern fn zsh_trash(path: [*:0]const u8, failure: *NativeShellFailure) c_int;
     extern fn zsh_apps(visit: *const fn (?*anyopaque, [*:0]const u8, [*:0]const u8, [*:0]const u8) callconv(.c) c_int, context: ?*anyopaque) c_int;
     extern fn zsh_launch_app(path: [*:0]const u8, failure: *NativeShellFailure) c_int;
+    extern fn zsh_file_icon(path: [*:0]const u8, size: c_int, background: u32, out: [*]u8, failure: *NativeShellFailure) c_int;
+    extern fn zsh_type_icon(extension: [*:0]const u8, size: c_int, background: u32, out: [*]u8) c_int;
 } else struct {};
 const GioStatus = enum(c_int) { ok = 0, failed = 1, not_supported = 2, not_found = 3, access_denied = 4, unavailable = 5, timed_out = 6, invalid = 7, _ };
 
@@ -63,11 +65,16 @@ pub const RevealOptions = struct {
     cancellation: ?*const Cancellation = null,
 };
 pub const IconOptions = struct {
-    /// Native small/large shell icon only. No thumbnail or image-file decode.
+    /// Pixels across. Windows draws its small or large shell icon, 16 or 32;
+    /// Linux and macOS draw the icon at any size from 1 to `max_icon_size`.
+    /// No thumbnail or image-file decode.
     size: u16 = 32,
     background: u32 = 0xffffff,
     cancellation: ?*const Cancellation = null,
 };
+pub const max_icon_size = 256;
+/// Longest extension `typeIcon` takes, in bytes, without its dot.
+pub const max_extension_bytes = 64;
 pub const FileIcon = struct {
     width: u16,
     height: u16,
@@ -83,7 +90,8 @@ pub const capabilities = .{
     .open_path = builtin.os.tag == .windows or posix_shell,
     .reveal = builtin.os.tag == .windows or posix_shell,
     .trash = builtin.os.tag == .windows or posix_shell,
-    .file_icon = builtin.os.tag == .windows,
+    .file_icon = builtin.os.tag == .windows or posix_shell,
+    .type_icon = builtin.os.tag == .windows or posix_shell,
     .installed_applications = builtin.os.tag == .windows or posix_shell,
     .launch_application = builtin.os.tag == .windows or posix_shell,
 };
@@ -158,19 +166,77 @@ pub const Worker = struct {
     /// resources are released before return. Pixels publish only on success.
     pub fn fileIcon(self: *Worker, path: []const u8, options: IconOptions, destination: []u8) !FileIcon {
         try self.require();
-        if (builtin.os.tag != .windows) return error.UnsupportedCapability;
+        if (!capabilities.file_icon) return error.UnsupportedCapability;
         if (options.cancellation) |cancel| try cancel.check();
         try validateText(path);
         if (!absolute(path)) return error.AbsolutePathRequired;
-        if ((options.size != 16 and options.size != 32) or options.background > 0xffffff) return error.InvalidIconOptions;
+        const bytes = try iconBytes(options, destination);
+        if (posix_shell) {
+            var storage: [max_argument_bytes + 1]u8 = undefined;
+            const target = narrowZ(&storage, path);
+            try requireExisting(target);
+            if (options.cancellation) |cancel| try cancel.check();
+            var failure: NativeShellFailure = .{};
+            const status: GioStatus = @fromBackingInt(@intCast(gio.zsh_file_icon(target.ptr, options.size, options.background, destination.ptr, &failure)));
+            return self.iconResult(status, failure, options, destination[0..bytes]);
+        }
+        var storage: [max_argument_bytes + 1]u16 = undefined;
+        return self.shellIcon(try wideZ(&storage, path), 0, options, destination[0..bytes]);
+    }
+    /// Blocking read-only lookup of the icon the file manager shows for files
+    /// with `extension` ("pdf" or ".pdf"), though no such file needs to
+    /// exist: the icon of an attachment not yet downloaded. Windows asks the
+    /// shell for the extension's icon (`SHGFI_USEFILEATTRIBUTES`), Linux the
+    /// icon theme for that of the content type GIO guesses from such a name,
+    /// macOS NSWorkspace for that of its UTType. Pixels and options as
+    /// `fileIcon`'s.
+    pub fn typeIcon(self: *Worker, extension: []const u8, options: IconOptions, destination: []u8) !FileIcon {
+        try self.require();
+        if (!capabilities.type_icon) return error.UnsupportedCapability;
+        if (options.cancellation) |cancel| try cancel.check();
+        const name = if (std.mem.startsWith(u8, extension, ".")) extension[1..] else extension;
+        try validateExtension(name);
+        const bytes = try iconBytes(options, destination);
+        if (posix_shell) {
+            var storage: [max_extension_bytes + 1]u8 = undefined;
+            const target = narrowZ(&storage, name);
+            const status: GioStatus = @fromBackingInt(@intCast(gio.zsh_type_icon(target.ptr, options.size, options.background, destination.ptr)));
+            return self.iconResult(status, .{}, options, destination[0..bytes]);
+        }
+        var storage: [max_extension_bytes + 2]u16 = undefined;
+        storage[0] = '.';
+        const wide = try wideZ(storage[1..], name);
+        return self.shellIcon(storage[0 .. wide.len + 1 :0], win.FILE_ATTRIBUTE_NORMAL, options, destination[0..bytes]);
+    }
+    fn iconBytes(options: IconOptions, destination: []const u8) !usize {
+        const sizes = if (builtin.os.tag == .windows) options.size == 16 or options.size == 32 else options.size >= 1 and options.size <= max_icon_size;
+        if (!sizes or options.background > 0xffffff) return error.InvalidIconOptions;
         const bytes = @as(usize, options.size) * options.size * 4;
         if (destination.len < bytes) return error.ResultCapacityExceeded;
+        return bytes;
+    }
+    fn iconResult(self: *Worker, status: GioStatus, failure: NativeShellFailure, options: IconOptions, pixels: []u8) !FileIcon {
+        if (status != .ok) {
+            if (failure.domain != 0) self.recordGio(failure);
+            return switch (status) {
+                .access_denied => error.AccessDenied,
+                .not_found => error.FileNotFound,
+                else => error.IconLookupFailed,
+            };
+        }
+        if (options.cancellation) |cancel| try cancel.check();
+        return .{ .width = options.size, .height = options.size, .stride = @as(usize, options.size) * 4, .pixels = pixels };
+    }
+    /// Windows: the shell's small or large icon of `target`, a path, or with
+    /// `attributes` an extension that no file needs to have.
+    fn shellIcon(self: *Worker, target: [:0]const u16, attributes: u32, options: IconOptions, destination: []u8) !FileIcon {
+        if (builtin.os.tag != .windows) return error.UnsupportedCapability;
+        const bytes = destination.len;
         try self.ensureApartment();
-        var storage: [max_argument_bytes + 1]u16 = undefined;
-        const terminated = try wideZ(&storage, path);
         var info = std.mem.zeroes(win.SHFILEINFOW);
-        const flags: win.UINT = @as(win.UINT, @intCast(win.SHGFI_ICON)) | @as(win.UINT, @intCast(if (options.size == 16) win.SHGFI_SMALLICON else win.SHGFI_LARGEICON));
-        if (win.SHGetFileInfoW(terminated.ptr, 0, &info, @sizeOf(win.SHFILEINFOW), flags) == 0) {
+        var flags: win.UINT = @as(win.UINT, @intCast(win.SHGFI_ICON)) | @as(win.UINT, @intCast(if (options.size == 16) win.SHGFI_SMALLICON else win.SHGFI_LARGEICON));
+        if (attributes != 0) flags |= @as(win.UINT, @intCast(win.SHGFI_USEFILEATTRIBUTES));
+        if (win.SHGetFileInfoW(target.ptr, attributes, &info, @sizeOf(win.SHFILEINFOW), flags) == 0) {
             return error.IconLookupFailed;
         }
         defer _ = win.DestroyIcon(info.hIcon);
@@ -614,6 +680,14 @@ fn appsFolder(worker: *Worker, allocator: std.mem.Allocator, list: *std.ArrayLis
     }
 }
 
+/// An extension without its dot: one name of 1 to `max_extension_bytes`
+/// bytes, with no separator or control character.
+fn validateExtension(value: []const u8) !void {
+    if (value.len == 0) return error.InvalidExtension;
+    if (value.len > max_extension_bytes) return error.ArgumentTooLong;
+    for (value) |c| if (c < 0x20 or c == 0x7f or c == '/' or c == '\\' or c == ':') return error.InvalidExtension;
+    if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
+}
 fn validateText(value: []const u8) !void {
     if (value.len > max_argument_bytes) return error.ArgumentTooLong;
     if (std.mem.indexOfScalar(u8, value, 0) != null) return error.EmbeddedNul;
