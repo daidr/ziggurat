@@ -30,6 +30,7 @@ const Host = struct {
     labels: [257]virtual.Control.Label = undefined,
     text: [257][16]u8 = undefined,
     changes: usize = 0,
+    last_handle: ?*anyopaque = null,
     failure: ?anyerror = null,
 
     fn action(_: *anyopaque, _: u64) void {}
@@ -47,8 +48,11 @@ const Host = struct {
             if (self.failure == null) self.failure = err;
         };
     }
+    /// The window's NSWindow, or the last one it had once it closed: a row
+    /// that stands for nothing answers before its window is asked about.
     fn handle(self: *Host) *anyopaque {
-        return self.window.nativeHandle().?;
+        if (self.window.nativeHandle()) |native| self.last_handle = native;
+        return self.last_handle.?;
     }
     /// Draws a frame, which publishes the tree and the list's model.
     fn paint(self: *Host) !void {
