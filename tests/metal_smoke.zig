@@ -1,7 +1,9 @@
 //! The Metal renderer draws what the Core Graphics renderer draws: the same
 //! commands replayed on both compare pixel for pixel (text by its ink), and
 //! a window's frames show on its CAMetalLayer, under its subviews, with
-//! frames the GPU does not draw going to the software plane.
+//! frames the GPU does not draw going to the software plane, and shader
+//! effects (element captures and backdrop copies) draw what the software
+//! planes draw.
 const std = @import("std");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
@@ -248,6 +250,182 @@ fn windowFrames(allocator: std.mem.Allocator) !void {
     try app.dispatch();
 }
 
+const effect_width = 200;
+const effect_height = 120;
+const inverted: ui.Rect = .{ .x = 10, .y = 10, .width = 40, .height = 40 };
+const moved: ui.Rect = .{ .x = 110, .y = 10, .width = 30, .height = 30 };
+const faded: ui.Rect = .{ .x = 110, .y = 70, .width = 40, .height = 30 };
+const glass: ui.Rect = .{ .x = 10, .y = 70, .width = 80, .height = 40 };
+const ripple: ui.Rect = .{ .x = 160, .y = 10, .width = 30, .height = 50 };
+const invert_source =
+    \\vec4 color(vec2 position, vec4 pixel) {
+    \\    return vec4(pixel.a - pixel.rgb, pixel.a);
+    \\}
+;
+// A layer program sampling its neighbours, with a branch the translation
+// runs as a block loop.
+const ripple_source =
+    \\uniform float strength;
+    \\vec4 layer(vec2 position) {
+    \\    vec4 sum = vec4(0.0);
+    \\    for (int i = -1; i <= 1; i++) {
+    \\        if (i == 0) continue;
+    \\        sum += sample(position + vec2(float(i) * strength, 0.0));
+    \\    }
+    \\    return sum * 0.5;
+    \\}
+;
+const EffectScene = struct {
+    library: *ui.effects.Library,
+    invert: *ui.shader.Program,
+    invert_values: ui.shader.Values,
+    ripple: *ui.shader.Program,
+    ripple_values: ui.shader.Values,
+    failure: ?anyerror = null,
+    paints: usize = 0,
+    fn draw(ptr: *anyopaque, frame: *ui.Frame) void {
+        const self: *EffectScene = @ptrCast(@alignCast(ptr));
+        self.paints += 1;
+        self.record(frame) catch |err| {
+            self.failure = err;
+        };
+        if (frame.failure) |err| self.failure = err;
+    }
+    fn record(self: *EffectScene, frame: *ui.Frame) !void {
+        frame.clear(0xffffff);
+        frame.rect(.{ .x = 0, .y = 60, .width = 100, .height = 60 }, 0x000000);
+        frame.rect(.{ .x = 150, .y = 30, .width = 50, .height = 40 }, 0x2050c0);
+        try frame.beginEffect(inverted, .{ .program = self.invert, .values = &self.invert_values }, .{});
+        frame.rect(inverted, 0xff0000);
+        try frame.endEffect();
+        var pose_values: ui.shader.Values = undefined;
+        const pose = (try self.library.pose(&pose_values, .{ .x = 20 }, .{ moved.width, moved.height })).?;
+        try frame.beginEffect(moved, pose, .{});
+        frame.rect(moved, 0x0000ff);
+        try frame.endEffect();
+        try frame.beginEffect(faded, self.library.passthrough(), .{ .opacity = 128 });
+        frame.rect(faded, 0x000000);
+        try frame.endEffect();
+        var glass_values: ui.shader.Values = undefined;
+        frame.backdropShader(glass, 12, try self.library.glass(&glass_values, .{}, 12));
+        frame.backdropShader(ripple, 6, .{ .program = self.ripple, .values = &self.ripple_values, .margin = 4 });
+    }
+    fn action(_: *anyopaque, _: u64) void {}
+};
+
+fn paintEffects(effects: *EffectScene, title: [*:0]const u8) !void {
+    const before = effects.paints;
+    metal.Renderer.displayForTest(title);
+    if (effects.failure) |err| return err;
+    try std.testing.expectEqual(before + 1, effects.paints);
+}
+
+/// Draw the effect scene on the GPU or in software and return its pixels
+/// (0xAARRGGBB) and the effect stats of the last frame.
+fn renderEffects(allocator: std.mem.Allocator, app: *z.App, effects: *EffectScene, software: bool, pixels: *std.ArrayList(u32)) !ui.shader_effects.Stats {
+    const title: [*:0]const u8 = if (software) "Effects software" else "Effects metal";
+    const window = try app.createWindow(.{ .title = std.mem.span(title), .width = effect_width, .height = effect_height });
+    defer _ = window.destroy() catch unreachable;
+    var context = ui.Context.init(effects, EffectScene.draw, EffectScene.action);
+    if (software) context.render_mode = .gdi;
+    context.semantics_enabled = false;
+    try context.attach(window);
+    window.show();
+    const size = try window.contentSize();
+    try context.prepareShaderEffects(allocator, .{});
+    try context.prepareBackdropEffects(allocator, .{});
+    try context.prepareGaussianWorkspace(allocator, .{ .layers = .{ .size = size, .max_depth = 3, .legacy_text = .disabled }, .source_size = .{ .width = @as(f32, @floatFromInt(size.width)) / size.scale, .height = @as(f32, @floatFromInt(size.height)) / size.scale }, .max_radius = 1 });
+    try pixels.resize(allocator, @as(usize, size.width) * size.height);
+    if (software) {
+        try std.testing.expectEqual(@as(usize, 0), try context.prepareGpuShaders(allocator, &effects.library.gpuShaders()));
+        try paintEffects(effects, title);
+        try std.testing.expectEqual(@as(usize, 0), context.gpu_frames);
+        for (pixels.items, 0..) |*out, i| out.* = zlc_test_raw_pixel(context.renderer.native.?, @intCast(i % size.width), @intCast(i / size.width));
+        return context.shaderEffectStats().workspace;
+    }
+    context.gpu_renderer.captureForTest(true);
+    // Until its programs are prepared the frame draws in software, without
+    // counting a device failure.
+    try paintEffects(effects, title);
+    try std.testing.expectEqual(@as(usize, 0), context.gpu_frames);
+    try std.testing.expectEqual(@as(usize, 0), context.fallbacks);
+    const library = effects.library.gpuShaders();
+    const shaders = library ++ [_]ui.GpuShader{ .{ .program = effects.invert, .target = .element }, .{ .program = effects.ripple, .target = .backdrop } };
+    try std.testing.expectEqual(@as(usize, shaders.len), try context.prepareGpuShaders(allocator, &shaders));
+    const before = context.shaderEffectStats().workspace;
+    const passes = context.gpu_renderer.effectPasses();
+    try paintEffects(effects, title);
+    try std.testing.expectEqual(@as(usize, 1), context.gpu_frames);
+    try std.testing.expectEqual(@as(usize, 0), context.fallbacks);
+    // Three element passes and two backdrop passes.
+    try std.testing.expectEqual(passes + 5, context.gpu_renderer.effectPasses());
+    try context.gpu_renderer.pixelsForTest(pixels.items, size.width, size.height);
+    const after = context.shaderEffectStats().workspace;
+    return .{ .applied = after.applied - before.applied, .skipped = after.skipped - before.skipped, .pixels = after.pixels - before.pixels, .work = after.work - before.work };
+}
+
+fn effectAt(pixels: []const u32, scale: f32, stride: usize, x: f32, y: f32) u32 {
+    const px: usize = @intFromFloat(@floor(x * scale));
+    const py: usize = @intFromFloat(@floor(y * scale));
+    return pixels[py * stride + px] & 0xffffff;
+}
+fn near(expected: u32, actual: u32, tolerance: i32) bool {
+    return difference(expected, actual) <= tolerance;
+}
+
+fn effectFrames(allocator: std.mem.Allocator) !void {
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    var diagnostic: ui.shader.Diagnostic = .{};
+    const invert = try ui.shader.compile(allocator, invert_source, .{}, &diagnostic);
+    defer invert.destroy();
+    const ripple_program = try ui.shader.compile(allocator, ripple_source, .{}, &diagnostic);
+    defer ripple_program.destroy();
+    var effect_scene: EffectScene = .{ .library = try ui.effects.Library.create(allocator), .invert = invert, .invert_values = ui.shader.Values.init(invert), .ripple = ripple_program, .ripple_values = ui.shader.Values.init(ripple_program) };
+    defer effect_scene.library.destroy();
+    try effect_scene.ripple_values.set(ripple_program.uniform("strength").?, @as(f32, 3));
+
+    var gpu: std.ArrayList(u32) = .empty;
+    defer gpu.deinit(allocator);
+    var software: std.ArrayList(u32) = .empty;
+    defer software.deinit(allocator);
+    const gpu_stats = try renderEffects(allocator, app, &effect_scene, false, &gpu);
+    const software_stats = try renderEffects(allocator, app, &effect_scene, true, &software);
+    try std.testing.expectEqual(@as(u64, 5), gpu_stats.applied);
+    try std.testing.expectEqual(software_stats.applied, gpu_stats.applied);
+    try std.testing.expectEqual(software_stats.skipped, gpu_stats.skipped);
+    try std.testing.expectEqual(software_stats.pixels, gpu_stats.pixels);
+    try std.testing.expectEqual(gpu.items.len, software.items.len);
+
+    const probe = try app.createWindow(.{ .width = effect_width, .height = effect_height });
+    const size = try probe.contentSize();
+    _ = try probe.destroy();
+    const stride: usize = size.width;
+    // Inverted inside the box, untouched outside it.
+    try std.testing.expect(near(0x00ffff, effectAt(gpu.items, size.scale, stride, 30, 30), 1));
+    try std.testing.expect(near(0xffffff, effectAt(gpu.items, size.scale, stride, 55, 30), 0));
+    // The pose moves the square right.
+    try std.testing.expect(near(0xffffff, effectAt(gpu.items, size.scale, stride, 115, 25), 1));
+    try std.testing.expect(near(0x0000ff, effectAt(gpu.items, size.scale, stride, 145, 25), 1));
+    // Half-faded black over white.
+    try std.testing.expect(near(0x7f7f7f, effectAt(gpu.items, size.scale, stride, 130, 85), 2));
+    try std.testing.expect(near(0xffffff, effectAt(gpu.items, size.scale, stride, 130, 60), 0));
+
+    // Every pixel matches the software planes up to rounding.
+    var worst: i32 = 0;
+    var mismatches: usize = 0;
+    for (gpu.items, software.items, 0..) |g, w, i| {
+        const d = difference(g, w);
+        worst = @max(worst, d);
+        if (d > 2) {
+            if (mismatches < 8) std.debug.print("pixel ({d}, {d}): metal {x:0>6} software {x:0>6}\n", .{ i % stride, i / stride, g & 0xffffff, w & 0xffffff });
+            mismatches += 1;
+        }
+    }
+    std.debug.print("metal shader effects: worst channel difference {d}, {d} pixels beyond 2\n", .{ worst, mismatches });
+    try std.testing.expectEqual(@as(usize, 0), mismatches);
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
@@ -256,6 +434,7 @@ pub fn main() !void {
         matched = false;
     };
     try windowFrames(gpa.allocator());
+    try effectFrames(gpa.allocator());
     try std.testing.expect(matched);
     try std.testing.expectEqual(@as(u32, 0), metal.liveObjects());
     std.debug.print("metal smoke ok\n", .{});
