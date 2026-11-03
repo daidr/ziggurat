@@ -330,3 +330,57 @@ test "flyouts without an owner float above others, beside a rectangle or centere
     _ = try flyout.close();
     try std.testing.expect(!flyout.isOpen());
 }
+
+test "a flyout that fits its content takes the size it tells, within its bounds and the work area" {
+    const flyout = system.flyout;
+    // Bounds and the work area, rounded up to whole DIPs.
+    try std.testing.expectEqual([2]u32{ 260, 81 }, flyout.fitSize(.{ .min_width = 260 }, .{ 120.2, 80.4 }, null));
+    try std.testing.expectEqual([2]u32{ 300, 480 }, flyout.fitSize(.{ .max_width = 300, .max_height = 480 }, .{ 900, 1200 }, .{ 1000, 700 }));
+    try std.testing.expectEqual([2]u32{ 1000, 700 }, flyout.fitSize(.{}, .{ 1500, 900 }, .{ 1000, 700 }));
+
+    const app = try z.App.init(std.testing.allocator);
+    defer app.deinit();
+    const displays = [_]system.desktop.Monitor{.{ .bounds = .{ .x = 0, .y = 0, .width = 1000, .height = 800 }, .work_area = .{ .x = 0, .y = 0, .width = 1000, .height = 760 }, .scale = 1, .primary = true, .refresh_hz = null }};
+    var panel: system.Flyout = .{};
+    // A panel under an icon in the top right corner.
+    const window = try panel.open(app, .{ .anchor = .{ .screen = .{ .x = 900, .y = 0, .width = 20, .height = 20 } }, .placement = .bottom_end, .width = 200, .height = 100, .fit_content = .{ .min_width = 160, .max_width = 400, .max_height = 300 }, .displays = &displays });
+    try std.testing.expectEqual([2]f32{ 160, 400 }, system.Flyout.contentWidths(&panel));
+    // A frame measures its content; the flyout takes it after the frame,
+    // placed again against the icon.
+    system.Flyout.contentSized(&panel, 240, 120);
+    try std.testing.expectEqual(z.ClientBounds{ .position = .{ .x = 720, .y = 20 }, .width = 200, .height = 100 }, try window.clientBounds());
+    try app.dispatch();
+    try std.testing.expectEqual(z.ClientBounds{ .position = .{ .x = 680, .y = 20 }, .width = 240, .height = 120 }, try window.clientBounds());
+    // A list too long for the most height: it stops there and scrolls.
+    system.Flyout.contentSized(&panel, 240, 900);
+    try app.dispatch();
+    try std.testing.expectEqual(@as(u32, 300), (try window.clientBounds()).height);
+    // A size the application gives holds until the content's changes.
+    try panel.setSize(500, 200);
+    system.Flyout.contentSized(&panel, 240, 900);
+    try app.dispatch();
+    try std.testing.expectEqual(@as(u32, 500), (try window.clientBounds()).width);
+    system.Flyout.contentSized(&panel, 250, 100);
+    try app.dispatch();
+    try std.testing.expectEqual(z.ClientBounds{ .position = .{ .x = 670, .y = 20 }, .width = 250, .height = 100 }, try window.clientBounds());
+    _ = try window.destroy();
+    try app.dispatch();
+
+    // Hidden, the content changes; showing lays it out first and shows the
+    // flyout at the size it takes.
+    const Content = struct {
+        flyout: *system.Flyout,
+        size: [2]f32 = .{ 300, 140 },
+        fn measure(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            system.Flyout.contentSized(self.flyout, self.size[0], self.size[1]);
+        }
+    };
+    var content: Content = .{ .flyout = &panel };
+    const hidden = try panel.open(app, .{ .anchor = .{ .screen = .{ .x = 900, .y = 0, .width = 20, .height = 20 } }, .placement = .bottom_end, .hidden = true, .fit_content = .{}, .measure = .{ .context = &content, .call = Content.measure }, .displays = &displays });
+    panel.show();
+    try std.testing.expectEqual(z.ClientBounds{ .position = .{ .x = 620, .y = 20 }, .width = 300, .height = 140 }, try hidden.clientBounds());
+    try std.testing.expect((try hidden.state()).visible);
+    _ = try hidden.destroy();
+    try app.dispatch();
+}

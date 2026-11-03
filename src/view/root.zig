@@ -5750,6 +5750,10 @@ pub const Options = struct {
     /// Runs once at the end of every frame the Host draws, after the
     /// embedded leaves learned their places; see `FrameHook`.
     after_frame: ?FrameHook = null,
+    /// Tells a window that takes its content's size, as a flyout does
+    /// (`ziggurat_system.Flyout`'s `fit_content`), the size the content
+    /// takes; see `FitContent`.
+    fit_content: ?FitContent = null,
 
     /// The inspector, when the build has one; known at compile time to be
     /// null otherwise, so that nothing of it is compiled in.
@@ -5770,6 +5774,45 @@ pub const KeyHandler = struct {
     /// repaints.
     key_up: ?*const fn (*anyopaque, z.KeyInput) bool = null,
 };
+/// Measures the content of a window that takes its content's size as each
+/// frame lays it out, as a page sizes `width: fit-content; height: auto`:
+/// the root's widest line of children (its preferred width), within the
+/// bounds `widths` gives, and its height at the width the frame laid it
+/// out at. Scroll containers measure as their content and `grow` as their
+/// content too, so a window with a most height scrolls past it. `tell`
+/// hears the size, in DIPs, only when it changed; it runs inside paint, so
+/// the window resizes after the frame (as `Flyout.contentSized` does), and
+/// the next frame lays the content out at the new size: the first frame
+/// after a change shows it at the size the window had.
+///
+/// A frame at a new size that measures the size told before the last one
+/// holds, so that a view that builds its content after the window's size
+/// settles at the size it took rather than resizing back and forth; a
+/// frame at the same size that measures another size tells it.
+pub const FitContent = struct {
+    context: *anyopaque,
+    /// The least and the most width, in DIPs, 0 for no bound.
+    widths: ?*const fn (*anyopaque) [2]f32 = null,
+    tell: *const fn (*anyopaque, f32, f32) void,
+};
+/// What content fitting remembers between frames; see `FitContent`.
+pub const FitState = struct {
+    told: [2]f32 = .{ -1, -1 },
+    before: [2]f32 = .{ -1, -1 },
+    laid: [2]f32 = .{ -1, -1 },
+
+    /// The size to tell for a frame laid out at `window` that measured
+    /// `measured`, or null to tell nothing.
+    pub fn next(self: *FitState, window: [2]f32, measured: [2]f32) ?[2]f32 {
+        const resized = !std.mem.eql(f32, &self.laid, &window);
+        self.laid = window;
+        if (std.mem.eql(f32, &measured, &self.told) or (resized and std.mem.eql(f32, &measured, &self.before))) return null;
+        self.before = self.told;
+        self.told = measured;
+        return measured;
+    }
+};
+
 /// Code that follows the Host's frames, such as native content placed with
 /// embedded leaves that must hide when a frame no longer builds them. It runs
 /// inside paint under the rules of `Embed.place`.
@@ -5805,6 +5848,8 @@ pub const Host = struct {
     /// The pending focus waited one more frame, for a text field that
     /// registers itself with the Context after the frame that placed it.
     focus_retried: bool = false,
+    /// What `Options.fit_content` told.
+    fit: FitState = .{},
 
     pub fn init(state: anytype, comptime build: fn (@TypeOf(state), *View) anyerror!void, buffers: Buffers, options: Options) Host {
         var view = View.init(buffers);
@@ -6433,6 +6478,46 @@ pub const Host = struct {
         self.invalidate();
         return self.view.consumed;
     }
+    /// Build and lay out the content now, outside a frame, and tell
+    /// `Options.fit_content` the size it takes, if it changed: a hidden
+    /// window draws no frames, so a flyout calls it before it shows
+    /// (`ziggurat_system.Flyout`'s `Options.measure`), to show at the size
+    /// of what it shows now rather than resize after the frame showing it.
+    /// Takes the Host as its context. Does nothing inside a pass or without
+    /// `fit_content`.
+    pub fn fitNow(context: *anyopaque) void {
+        const self: *Host = @ptrCast(@alignCast(context));
+        const fit = self.options.fit_content orelse return;
+        const window = self.context.window orelse return;
+        if (self.building) return;
+        const size = window.contentSize() catch return;
+        const scale = if (std.math.isFinite(size.scale) and size.scale > 0) size.scale else 1;
+        const whole: Rect = .{ .x = 0, .y = 0, .width = @as(f32, @floatFromInt(size.width)) / scale, .height = @as(f32, @floatFromInt(size.height)) / scale };
+        self.view.window_active = self.context.windowActive();
+        self.pass(null) catch |err| {
+            self.last_error = err;
+            return;
+        };
+        self.view.arrange(whole, self.context.currentTheme(), self.options.measurer) catch |err| {
+            self.last_error = err;
+            return;
+        };
+        self.arranged = true;
+        self.measureFit(fit, whole);
+        // The frame that shows it builds again.
+        self.invalidate();
+    }
+    /// Tell `fit` the size the content just laid out in `window` takes, if
+    /// it changed; see `FitContent`.
+    fn measureFit(self: *Host, fit: FitContent, window: Rect) void {
+        const limits = if (fit.widths) |widths| widths(fit.context) else [2]f32{ 0, 0 };
+        const preferred = self.view.nodes()[0].measured.preferred;
+        var width = @max(preferred.width, limits[0]);
+        if (limits[1] > 0) width = @min(width, limits[1]);
+        const measured: [2]f32 = .{ @ceil(width), @ceil(preferred.height) };
+        if (!std.math.isFinite(measured[0]) or !std.math.isFinite(measured[1])) return;
+        if (self.fit.next(.{ window.width, window.height }, measured)) |size| fit.tell(fit.context, size[0], size[1]);
+    }
     fn draw(ptr: *anyopaque, frame: *ui.Frame) void {
         const self: *Host = @ptrCast(@alignCast(ptr));
         const theme = frame.currentTheme();
@@ -6465,6 +6550,7 @@ pub const Host = struct {
         const content = if (self.options.tools()) |tools| tools.contentBounds(whole) else whole;
         try self.view.arrange(content, theme, self.options.measurer);
         self.arranged = true;
+        if (self.options.fit_content) |fit| if (self.options.tools() == null or !self.options.tools().?.open) self.measureFit(fit, whole);
         const laid = if (lap) |*timer| timer.lap() else 0;
         try self.view.paint(frame);
         for (self.view.nodes()) |*node| {
@@ -7554,4 +7640,31 @@ test "pose_motion shows a first pose at once and moves to the next" {
     try std.testing.expectEqual(@as(f32, 1), Pass.card(&view).style.opacity);
     try Pass.run(&view, 1550, null, 0, true);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), Pass.card(&view).style.opacity, 1e-4);
+}
+
+test "fitting a window to its content tells a size once, and holds against back and forth" {
+    var fit: FitState = .{};
+    // The first frame tells what it measured; the same again tells nothing.
+    try std.testing.expectEqual([2]f32{ 120, 80 }, fit.next(.{ 200, 200 }, .{ 120, 80 }).?);
+    try std.testing.expect(fit.next(.{ 200, 200 }, .{ 120, 80 }) == null);
+    // Laid out at that size, it measures another, told.
+    try std.testing.expectEqual([2]f32{ 140, 80 }, fit.next(.{ 120, 80 }, .{ 140, 80 }).?);
+    // Resized to it, it measures the one before: a view sizing its content
+    // after the window's would go back and forth. It holds.
+    try std.testing.expect(fit.next(.{ 140, 80 }, .{ 120, 80 }) == null);
+    // At the same size, a change in the content is told.
+    try std.testing.expectEqual([2]f32{ 120, 80 }, fit.next(.{ 140, 80 }, .{ 120, 80 }).?);
+
+    // The root measures its content's preferred size, padding included.
+    var storage: Storage(16, 256) = .{};
+    var view = View.init(storage.buffers());
+    view.reset(.{ .padding = Insets.all(10), .gap = 4 }, null);
+    try view.column(.{ .width = 150, .height = 30 });
+    try view.end();
+    try view.column(.{ .width = 90, .height = 50 });
+    try view.end();
+    try view.finish();
+    try view.arrange(.{ .x = 0, .y = 0, .width = 400, .height = 400 }, .{}, .{});
+    try std.testing.expectEqual(@as(f32, 170), view.nodes()[0].measured.preferred.width);
+    try std.testing.expectEqual(@as(f32, 104), view.nodes()[0].measured.preferred.height);
 }

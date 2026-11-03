@@ -316,6 +316,17 @@ Linux 首次使用时才 `dlopen("libsecret-1.so.0")`（需要 0.19 起的二进
 
 `placement` 是 12 种放置之一：`bottom_start`、`bottom`、`bottom_end`、`top_*`、`right_*`、`left_*`，即位于锚点哪一侧，以及沿该侧与锚点起始边、中心还是末尾对齐；`gap` 是与锚点的 DIP 距离。目标显示器取与锚点重叠最多的工作区，没有重叠时取离锚点中心最近的显示器。每个轴上，放不下时若翻到锚点另一侧或另一端能放下就翻转，然后沿越界的边滑回工作区，仍放不下则缩小到工作区；纯函数 `flyout.placeBeside` 公开并有单元测试。`setAnchor` 换到同类锚点（窗口锚点须同一 owner）后重新放置，`setSize(width, height)` 按内容测得的尺寸调整大小并重新放置，`place()` 按当前状态重放。Wayland 不报告窗口位置，此时只设置尺寸，由合成器放置。
 
+`Options.fit_content = .{ .min_width = 260, .max_height = 480 }` 让原生界面的浮层取内容的尺寸，比如托盘面板里随运行变化的节点列表、表单或错误提示，不必猜宽高或自己调 `setSize`。声明式视图的 Host 把浮层接到 `Options.fit_content`：
+
+```zig
+var host = view.Host.init(&state, build, buffers, .{ .fit_content = .{ .context = &panel, .widths = system.Flyout.contentWidths, .tell = system.Flyout.contentSized } });
+_ = try panel.open(app, .{ .anchor = .{ .tray = &tray }, .hidden = true, .fit_content = .{ .min_width = 260, .max_height = 480 }, .measure = .{ .context = &host, .call = view.Host.fitNow } });
+try host.attach(panel.window.?);
+panel.show();
+```
+
+每一帧排列后，Host 量出根容器内容的首选尺寸，像 CSS 的 `width: fit-content; height: auto`：最宽一行子项的宽度（限制在 `min_width`、`max_width` 与工作区宽度内）和这一宽度下的高度；`scroll` 和 `grow` 按内容计量，所以超过 `max_height` 时里面的 `scroll` 滚动。尺寸变化时才 `contentSized` 告诉浮层，浮层在这一帧之后按 `min_height`、`max_height` 和工作区夹住尺寸、调整大小并对锚点重新放置（放不下时翻转），下一帧按新尺寸排列：变化后的第一帧仍按原尺寸显示。按新尺寸排列的一帧若量出的是上上次告诉的尺寸，保持不变，所以按窗口尺寸构建内容的视图会停在当时的尺寸，而不是来回改变；同一尺寸下内容变化照常告知。量出的尺寸与上次相同时不调整，因此 `setSize` 给的尺寸保持到内容的尺寸改变为止。隐藏的窗口不画帧：隐藏期间内容变了的浮层在 `show` 时先调用 `measure`（`Host.fitNow` 在帧外构建并排列一次内容、告诉尺寸），再按这个尺寸显示，而不是显示后再改尺寸。
+
 `focusable = true` 的浮出窗口显示时取得键盘；其他窗口取得键盘（Windows：激活离开且新激活窗口不是它自己或它拥有的窗口）或在 Linux 上用户按在它外面时被“驳回”，按用户关闭处理（`requestCloseFrom(.user)`），`on_close` 可以拒绝。托盘浮出窗口在 Windows 上点自己的图标不算驳回，图标的点击交给应用切换它。非 focusable 的浮出窗口从不取得键盘：显示、聚焦和指针按下都不改变当前活动窗口，直到被关闭，适合 tooltip、悬停卡片和输入框建议。两种浮出窗口在内容未消费的 Escape（无修饰键）上都按用户关闭处理。`shadow` 使用系统弹出阴影（Windows `CS_DROPSHADOW`，Windows 11 另按菜单样式圆角和描边；Linux 不画阴影）。
 
 托盘点击弹出浮出窗口：在 `Tray` 的 `on_action` 收到 `.activate` 时调用 `flyout.toggle(app, .{ .anchor = .{ .tray = tray }, .placement = .bottom, .gap = 4, .width = 280, .height = 230, .focusable = true })`，已打开时关闭、否则打开。`Tray.iconRect()` 返回 Shell 报告的图标矩形（Windows `Shell_NotifyIconGetRect`）；Linux status notifier 宿主只报告点击坐标，作为空矩形锚点使用，没有报告时浮出窗口居中。
