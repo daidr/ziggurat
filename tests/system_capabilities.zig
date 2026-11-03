@@ -270,6 +270,40 @@ test "flyouts place beside their anchor, follow their owner and close as popups"
     try std.testing.expect(!flyout.isOpen());
 }
 
+test "a window modal to a flyout goes over it and keeps it open" {
+    const app = try z.App.init(std.testing.allocator);
+    defer app.deinit();
+    const displays = [_]system.desktop.Monitor{.{ .bounds = .{ .x = 0, .y = 0, .width = 1000, .height = 800 }, .work_area = .{ .x = 0, .y = 25, .width = 1000, .height = 775 }, .scale = 1, .primary = true, .refresh_hz = null }};
+    var probe: FlyoutProbe = .{};
+    var flyout: system.Flyout = .{};
+    try std.testing.expectError(error.Closed, flyout.createModal(.{}));
+    // A tray's flyout in the top right corner, under the menu bar.
+    const window = try flyout.open(app, .{ .anchor = .{ .screen = .{ .x = 900, .y = 0, .width = 20, .height = 25 } }, .width = 200, .height = 150, .focusable = true, .displays = &displays, .on_closed = .{ .context = &probe, .notify = FlyoutProbe.notify } });
+    try std.testing.expectEqual(z.ClientBounds{ .position = .{ .x = 720, .y = 25 }, .width = 200, .height = 150 }, try window.clientBounds());
+    // Wider than the flyout: centered on it, then moved into the work area.
+    const modal = try flyout.createModal(.{ .title = "Quit?", .width = 500, .height = 140 });
+    try std.testing.expectEqual(z.ClientBounds{ .position = .{ .x = 500, .y = 30 }, .width = 500, .height = 140 }, try modal.clientBounds());
+    const relation = try modal.relationship();
+    try std.testing.expect(relation.modal and std.meta.eql(relation.owner, window));
+    modal.show();
+    try std.testing.expectError(error.ModalBlocked, window.perform(.focus));
+    // The keyboard going to the modal window leaves the flyout open.
+    testRecord(window).popupDismissed();
+    try std.testing.expect(flyout.isOpen());
+    // Once it hides, the flyout closes as it loses the keyboard again.
+    try modal.perform(.hide);
+    testRecord(window).popupDismissed();
+    try std.testing.expect(!flyout.isOpen());
+    try app.dispatch();
+    try std.testing.expectEqual(1, probe.closed);
+    // Closing the flyout closes its modal window.
+    _ = try flyout.open(app, .{ .anchor = .{ .screen = .{ .x = 100, .y = 100, .width = 20, .height = 20 } }, .focusable = true, .displays = &displays });
+    const second = try flyout.createModal(.{ .width = 100, .height = 80 });
+    second.show();
+    _ = try flyout.window.?.destroy();
+    try std.testing.expect(second.isClosed());
+}
+
 fn ignoreTray(_: *anyopaque, _: *system.Tray, _: system.TrayAction) void {}
 test "flyouts without an owner float above others, beside a rectangle or centered" {
     const app = try z.App.init(std.testing.allocator);

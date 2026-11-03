@@ -67,6 +67,9 @@ typedef struct NativeWindow {
        focusable one takes the keyboard through a seat grab while it shows. */
     int popup;
     gboolean popup_override, popup_grabbed;
+    /* A window modal to the popup took its grab while it shows; the popup
+       grabs again as it is enabled. */
+    gboolean popup_regrab;
     /* WindowOptions.transparent with an RGBA visual: frames keep their alpha. */
     gboolean transparent;
     /* The touchscreen's fingers (linux_touch.h). touched: GDK gave the area
@@ -1029,7 +1032,7 @@ void zlg_window_action(NativeWindow *s, int action) {
     if (action==1 || action==7) s->gesture=NULL;
     switch(action) {
         case 0: if (s->popup) popup_show(s); else gtk_widget_show(s->window); break;
-        case 1: popup_ungrab(s); if(!s->destroyed)gtk_widget_hide(s->window); break;
+        case 1: s->popup_regrab=FALSE; popup_ungrab(s); if(!s->destroyed)gtk_widget_hide(s->window); break;
         case 2: request_mode(s,MODE_MINIMIZED); break; case 3: request_mode(s,MODE_MAXIMIZED); break;
         case 4:
             /* Restoring while leaving full screen asks for the normal mode, so
@@ -1038,7 +1041,16 @@ void zlg_window_action(NativeWindow *s, int action) {
             s->mode_request=0;
             gtk_window_unmaximize(GTK_WINDOW(s->window)); if(!s->destroyed)gtk_window_deiconify(GTK_WINDOW(s->window)); break;
         case 5: if (s->popup) { popup_show(s); break; } gtk_window_present(GTK_WINDOW(s->window)); if(!s->destroyed)gtk_widget_grab_focus(s->area); break;
-        case 6: gtk_widget_set_sensitive(s->window,TRUE); break; case 7: gtk_widget_set_sensitive(s->window,FALSE); break;
+        case 6:
+            gtk_widget_set_sensitive(s->window,TRUE);
+            if (s->popup_regrab && !s->destroyed) { s->popup_regrab=FALSE; if (gtk_widget_get_visible(s->window)) popup_show(s); }
+            break;
+        case 7:
+            /* A popup is disabled while a window modal to it shows: its
+               grab lets go, so that the window gets the input it would keep. */
+            if (s->popup_grabbed) { popup_ungrab(s); s->popup_regrab=TRUE; }
+            if (!s->destroyed) gtk_widget_set_sensitive(s->window,FALSE);
+            break;
     }
     release(s);
 }
