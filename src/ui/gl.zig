@@ -19,10 +19,11 @@
 //! content in textures of the frame as the software planes do; their limits
 //! are the software renderer's plan, which `Context` checks each frame
 //! against. A frame that uses anything else (shader effects, backdrop
-//! effects, loading indicators, GPU textures without a device domain) draws
-//! on the software plane instead, as `prepareEffects` tells, where shader
-//! effects still run on OpenGL; so does a frame drawing an image or mask not
-//! yet uploaded (`holdsFrame`), which `residentFrame` uploads for the next.
+//! effects, loading indicators, masked clips, GPU textures without a device
+//! domain) draws on the software plane instead, as `prepareEffects` tells,
+//! where shader effects still run on OpenGL; so does a frame drawing an
+//! image or mask not yet uploaded (`holdsFrame`), which `residentFrame`
+//! uploads for the next.
 //!
 //! The window's frame is kept between frames: `replayDamage` draws again
 //! only the device pixels that changed (src/ui/damage.zig).
@@ -411,7 +412,9 @@ pub const Renderer = struct {
         const transforms = buffer.transformResources();
         var depth: usize = 0;
         for (buffer.commands()) |op| switch (op) {
-            .effect, .backdrop_shader, .backdrop, .indicator => return false,
+            // Masked clips draw on the software plane, as the software
+            // renderer mixes them a drawable at a time (src/ui/mask_mix.zig).
+            .effect, .backdrop_shader, .backdrop, .indicator, .push_mask_clip => return false,
             .begin_group => |value| {
                 if (depth == max_capture_depth) return false;
                 if (value.filter_slot != commands.no_filter) {
@@ -623,7 +626,7 @@ pub const Renderer = struct {
                 depth -= 1;
                 zglr_pop_clip(native);
             },
-            .effect, .end_effect, .backdrop_shader, .backdrop, .indicator => return error.SoftwareOnlyCommands,
+            .effect, .end_effect, .backdrop_shader, .backdrop, .indicator, .push_mask_clip => return error.SoftwareOnlyCommands,
             .begin_group => |value| {
                 try self.beginGroup(value, coverage_resources, filters);
                 group_depth += 1;
