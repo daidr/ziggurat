@@ -145,6 +145,25 @@ test "colors, lines and backgrounds paint over and under the text" {
     try testing.expectEqual(@as(?usize, null), text.spanAt(.{ .x = 175, .y = 30 }));
 }
 
+test "a dotted underline paints square dots as thick as the line, three DIP apart" {
+    var text = RichText.init(testing.allocator, .{ .measurer = measurer, .color = 0x111111 });
+    defer text.deinit();
+    // 30 DIP: dots at 0, 3, ... 27, one DIP square.
+    try text.setSpans(&.{.{ .text = "see", .dotted_underline = true, .decoration_color = 0x00ff00 }});
+    var recorder: Recorder = .{};
+    text.paintTo(&recorder, .{ .x = 0, .y = 0 });
+    try testing.expectEqual(@as(usize, 10), recorder.fillsOf(0x00ff00));
+    for (recorder.fills[0..recorder.fill_count]) |fill| if (fill.color == 0x00ff00) {
+        try testing.expectEqual(@as(f32, 1), fill.bounds.width);
+        try testing.expectEqual(@as(f32, 1), fill.bounds.height);
+    };
+    // A thicker line spaces its dots two widths apart.
+    try text.setSpans(&.{.{ .text = "see", .dotted_underline = true, .decoration_color = 0x00ff00, .decoration_thickness = 2 }});
+    recorder = .{};
+    text.paintTo(&recorder, .{ .x = 0, .y = 0 });
+    try testing.expectEqual(@as(usize, 8), recorder.fillsOf(0x00ff00));
+}
+
 test "the leaf measures to its wrapped size and takes the theme's text color" {
     var text = RichText.init(testing.allocator, .{ .measurer = measurer, .width = 60 });
     defer text.deinit();

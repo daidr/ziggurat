@@ -242,6 +242,8 @@ pub const Harness = struct {
     pub fn focus(self: *Harness, query: Query) anyerror!void {
         const node = try self.find(query);
         try self.check(node);
+        // What ignores input offers no focus.
+        if (node.passthrough) return error.IgnoresInput;
         self.setFocus(self.view.focusTarget(node.id));
         try self.render();
     }
@@ -440,7 +442,8 @@ pub const Harness = struct {
             while (index > 0) {
                 index -= 1;
                 const node = &all[index];
-                if (!interactive(node.kind) or self.floating(node) != over or self.view.inert(node)) continue;
+                // What ignores input lets the pointer through to what is under it.
+                if (!interactive(node.kind) or node.passthrough or self.floating(node) != over or self.view.inert(node)) continue;
                 const rect = self.visible(node) orelse continue;
                 if (contains(rect, x, y)) return node;
             }

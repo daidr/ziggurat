@@ -24,6 +24,19 @@ pub const Options = struct {
     /// Called once the field registered with the window, after the first
     /// frame that placed it: from then on it can take focus and text.
     attached: ?Callback = null,
+    /// Text shown in the field while it is empty and nothing is being
+    /// composed, such as "Search". A search, token field or editable combo
+    /// box around the field gives its `Style.placeholder` when this is empty.
+    placeholder: []const u8 = "",
+    /// Color of the placeholder; null is the theme's muted text. Paint only:
+    /// the text typed and the theme are unchanged.
+    placeholder_color: ?u32 = null,
+    /// Width of the caret in DIP, rounded to device pixels and at least one
+    /// pixel wide, for a block-like caret, large print or a demonstration;
+    /// 0 or less hides it while the field stays editable. Null keeps
+    /// `colors.caret_style`, or the platform's one-pixel caret. Paint only:
+    /// layout, input method placement and blinking are unchanged.
+    caret_width: ?f32 = null,
 };
 
 pub const Callback = struct { context: ?*anyopaque = null, call: *const fn (?*anyopaque, *TextField) void };
@@ -180,6 +193,41 @@ pub const TextField = struct {
         if (!self.attached) return;
         const about = self.annotation;
         self.annotation = .{};
-        try self.field.drawDescribed(frame, self.options.colors, if (self.options.name.len > 0) self.options.name else about.name, .{ .description = about.description, .invalid = about.invalid, .required = about.required });
+        const placeholder = if (self.options.placeholder.len > 0) self.options.placeholder else about.placeholder;
+        if (placeholder.len > 0 and status(self).empty) {
+            const area = inner(theme, box);
+            const line = @min(area.height, @ceil(self.parameters.font.size * 1.5));
+            const color = self.options.placeholder_color orelse about.placeholder_color orelse theme.palette.disabled_text;
+            frame.labelFont(.{ .x = area.x, .y = area.y, .width = area.width, .height = line }, placeholder, color, .{ .size = self.parameters.font.size });
+        }
+        // A field without a name of its own is named by its placeholder.
+        const name = if (self.options.name.len > 0) self.options.name else if (about.name.len > 0) about.name else placeholder;
+        try self.field.drawDescribed(frame, colorsFor(self.options, frame.size.scale), name, .{ .description = about.description, .invalid = about.invalid, .required = about.required });
+    }
+
+    /// The colors the field draws with, its caret `caret_width` wide.
+    pub fn colorsFor(options: Options, scale: f32) editing.Colors {
+        var colors = options.colors;
+        const width = options.caret_width orelse return colors;
+        var caret = colors.caret_style orelse editing.caret_visual.Style{};
+        if (!std.math.isFinite(width) or width <= 0) {
+            caret.enabled = false;
+        } else {
+            const pixels = @max(1, @round(width * scale));
+            caret.thickness = pixels / scale;
+            caret.terminal_width = caret.thickness;
+        }
+        colors.caret_style = caret;
+        return colors;
     }
 };
+
+test "a caret width rounds to device pixels, at least one, and zero hides it" {
+    const wide = TextField.colorsFor(.{ .caret_width = 2.4 }, 2).caret_style.?;
+    try std.testing.expectEqual(@as(f32, 2.5), wide.thickness);
+    try std.testing.expect(wide.enabled);
+    const thin = TextField.colorsFor(.{ .caret_width = 0.1 }, 1).caret_style.?;
+    try std.testing.expectEqual(@as(f32, 1), thin.thickness);
+    try std.testing.expect(!TextField.colorsFor(.{ .caret_width = 0 }, 1).caret_style.?.enabled);
+    try std.testing.expect(TextField.colorsFor(.{}, 1).caret_style == null);
+}

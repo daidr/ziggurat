@@ -649,3 +649,22 @@ test "a grid view lays items in as many columns as fit and moves in both directi
     try f.h.render();
     try testing.expectEqual(@as(usize, 2), app.state.columns());
 }
+
+test "a table's scroll bar drags from where its thumb is pressed, to either end" {
+    var app: Files = .{};
+    app.init(.single);
+    var f: Fixture = .{};
+    try f.start(&app);
+    const b = (try f.leaf()).bounds;
+    const x = b.x + b.width - 3;
+    // Pressed on the thumb at the top and dragged past the bottom: the end.
+    try f.h.drag(x, b.y + 32, x, b.y + b.height + 200, 4);
+    try testing.expect(app.state.scrollOffset() > 0);
+    const most = app.state.scrollOffset();
+    try f.h.drag(x, b.y + b.height - 6, x, b.y + b.height + 100, 2);
+    try testing.expectEqual(most, app.state.scrollOffset());
+    // And back above the top: the start, no row chosen.
+    try f.h.drag(x, b.y + b.height - 6, x, b.y - 500, 4);
+    try testing.expectEqual(@as(f64, 0), app.state.scrollOffset());
+    try testing.expectEqual(@as(usize, 0), app.selection.items().len);
+}

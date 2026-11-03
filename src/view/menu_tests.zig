@@ -253,3 +253,95 @@ const Toggle = struct {
         try v.end();
     }
 };
+
+const Toolbar = struct {
+    renamed: usize = 0,
+    deleted: usize = 0,
+    bottom: bool = false,
+    fn build(self: *Toolbar, v: *View) anyerror!void {
+        if (self.bottom) try v.spacer(.{});
+        try v.row(.{ .gap = 8 });
+        _ = try v.button("Save", .{});
+        if (try v.popoverMenuButton("More", .{})) {
+            if (try v.menuItem("Rename", .{}, .{})) self.renamed += 1;
+            if (try v.menuItem("Delete", .{}, .{})) self.deleted += 1;
+        }
+        try v.end();
+        try v.end();
+    }
+};
+
+test "a menu button opens its menu below it on a press and closes it on another" {
+    var storage: Storage = .{};
+    var app: Toolbar = .{};
+    var h = Harness.init(&app, Toolbar.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    try testing.expectEqual(@as(usize, 0), h.count(.{ .text = "Rename" }));
+    try h.click(.{ .text = "More" });
+    const button = try h.find(.{ .text = "More" });
+    try testing.expect(button.checked);
+    const below = try h.boundsOf(.{ .text = "More" });
+    const panel = try h.boundsOf(.{ .kind = .menu });
+    try testing.expectApproxEqAbs(below.y + below.height, panel.y, 0.01);
+    try testing.expectApproxEqAbs(below.x, panel.x, 0.01);
+    // It opens on its first item, which holds focus.
+    try testing.expectEqualStrings("Rename", h.focused().?.text);
+    // A press on the button closes it, with focus back on the button.
+    try h.clickAt(below.x + 4, below.y + below.height / 2);
+    try testing.expectEqual(@as(usize, 0), h.count(.{ .text = "Rename" }));
+    try testing.expect(!(try h.find(.{ .text = "More" })).checked);
+    try testing.expectEqualStrings("More", h.focused().?.text);
+    // Down opens it from the keyboard; Enter chooses.
+    try testing.expect(try h.key(.{ .key = .down }));
+    try h.render();
+    try testing.expect(try h.key(.{ .key = .down }));
+    try testing.expectEqualStrings("Delete", h.focused().?.text);
+    try testing.expect(try h.key(.{ .key = .enter }));
+    try testing.expectEqual(@as(usize, 1), app.deleted);
+    try testing.expectEqual(@as(usize, 0), h.count(.{ .text = "Rename" }));
+    try testing.expectEqualStrings("More", h.focused().?.text);
+}
+
+test "a menu button at the window's bottom opens its menu above it" {
+    var storage: Storage = .{};
+    var app: Toolbar = .{ .bottom = true };
+    var h = Harness.init(&app, Toolbar.build, storage.buffers(), .{ .bounds = .{ .x = 0, .y = 0, .width = 400, .height = 200 } });
+    try h.render();
+    try h.click(.{ .text = "More" });
+    const button = try h.boundsOf(.{ .text = "More" });
+    const panel = try h.boundsOf(.{ .kind = .menu });
+    try testing.expectApproxEqAbs(button.y, panel.y + panel.height, 0.01);
+}
+
+const Scrolled = struct {
+    model: view.ScrollModel = .{},
+    opened: usize = 0,
+    fn build(self: *Scrolled, v: *View) anyerror!void {
+        try v.scroll(&self.model, .{ .height = 300, .self_align = .stretch });
+        try v.column(.{ .gap = 10 });
+        for (0..60) |i| try v.textf("Line {d}", .{i}, .{ .key = i });
+        try v.end();
+        if (try v.popoverMenu(.{})) {
+            if (try v.menuItem("Open", .{}, .{})) self.opened += 1;
+        }
+        try v.end();
+        try v.end();
+    }
+};
+
+test "a menu opens at the pointer on an anchor scrolled partly out of view" {
+    var storage: Storage = .{};
+    var app: Scrolled = .{};
+    var h = Harness.init(&app, Scrolled.build, storage.buffers(), .{});
+    try h.render();
+    try h.scroll(.{ .kind = .scroll }, .{ .x = 0, .y = 400 });
+    const area = try h.boundsOf(.{ .kind = .scroll });
+    const x = area.x + 100;
+    const y = area.y + 150;
+    try testing.expect(try h.clickButtonAt(x, y, .secondary, .{}));
+    const panel = try h.boundsOf(.{ .kind = .menu });
+    try testing.expectApproxEqAbs(x, panel.x, 0.01);
+    try testing.expectApproxEqAbs(y, panel.y, 0.01);
+}

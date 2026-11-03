@@ -90,6 +90,8 @@ pub const Overlay = struct {
         end: u32,
         rect: Rect,
         origin: Point,
+        /// The anchor is a menu button, which opens its menu below it.
+        button: bool,
     };
     pub const Item = struct {
         id: u64,
@@ -132,6 +134,38 @@ pub fn popoverMenu(self: *View, style: Style) Error!bool {
     if (state.open) |id| if (id == node.id and (!anchor.style.enabled or node.concealed)) close(self, false);
     node.checked = if (state.open) |id| id == node.id else false;
     return node.checked;
+}
+
+/// A menu button: a button showing `label` with a chevron, whose menu is
+/// drawn in the window below it, lined up with its start, or above it
+/// where the window has no room below. A press, Enter, Space or Down
+/// opens the menu on its first item, and a press on the button while the
+/// menu shows closes it; the button reads as expanded meanwhile. The menu
+/// takes the keys, type-ahead and submenus of `popoverMenu`, and focus
+/// goes back to the button as an item is chosen or Escape closes it.
+/// Build the items only when this returns true, and close the menu with
+/// `end` either way. Named by `Style.name`, or by `label`.
+pub fn popoverMenuButton(self: *View, label: []const u8, style: Style) Error!bool {
+    const button = try self.appendNode(.popup_button, style);
+    button.text = try self.copyText(label);
+    const button_id = button.id;
+    const button_index: u32 = @intCast(button - self.buffers.nodes.ptr);
+    const pressed = self.takeEvent(button_id) != null and button.style.enabled;
+    var shown = try popoverMenu(self, .{ .name = if (style.name.len > 0) style.name else label });
+    const node = &self.buffers.nodes[self.stack[self.depth - 1]];
+    if (pressed) {
+        if (shown) {
+            close(self, true);
+            shown = false;
+        } else {
+            self.menu = .{ .open = node.id, .opener = button_id, .first = 0 };
+            shown = !node.concealed;
+            if (!shown) self.menu = .{};
+        }
+        node.checked = shown;
+    }
+    self.buffers.nodes[button_index].checked = shown;
+    return shown;
 }
 
 /// An item of the menu being built. True for the pass that delivers its
@@ -304,7 +338,7 @@ pub fn record(self: *View, node: *const Node) void {
             if (node.level == 0 and overlay.anchor_count < max_anchors) {
                 const anchor = &all[node.anchor];
                 if (anchor.style.enabled) if (self.visible(anchor)) |rect| {
-                    overlay.anchors[overlay.anchor_count] = .{ .id = node.id, .index = node.anchor, .end = anchor.end, .rect = rect, .origin = .{ .x = anchor.bounds.x, .y = anchor.bounds.y } };
+                    overlay.anchors[overlay.anchor_count] = .{ .id = node.id, .index = node.anchor, .end = anchor.end, .rect = rect, .origin = .{ .x = anchor.bounds.x, .y = anchor.bounds.y }, .button = anchor.kind == .popup_button };
                     overlay.anchor_count += 1;
                 };
             }
@@ -355,11 +389,18 @@ fn itemAt(self: *const View, point: Point) ?Overlay.Item {
 /// with the menu, an item's press going on to the item, and one elsewhere
 /// closes the menu and goes on to what lies under it.
 pub fn pointerDown(self: *View, point: Point) ?PointerRoute {
-    if (self.menu.open == null) return null;
+    const open = self.menu.open orelse return null;
     if (panelAt(self, point)) {
         if (itemAt(self, point)) |entry| if (entry.enabled) return .ignored;
         return .consumed;
     }
+    // A press on the menu button whose menu shows closes it, rather than
+    // going on to the button, which would open it again.
+    const overlay = &self.overlay.menu;
+    for (overlay.anchors[0..overlay.anchor_count]) |anchor| if (anchor.id == open and anchor.button and contains(anchor.rect, point)) {
+        close(self, true);
+        return .consumed;
+    };
     close(self, false);
     return .changed;
 }
@@ -404,6 +445,7 @@ pub fn routeKey(self: *View, input: z.KeyInput) ?KeyRoute {
     const plain = !mods.control and !mods.alt and !mods.super and !mods.shift;
     const state = &self.menu;
     if (state.open == null) {
+        if (input.key == .down and plain and !input.repeat and openButtonFromFocus(self)) return .handled;
         const menu_key = (input.key == .context_menu and plain) or (input.key == .f10 and mods.shift and !mods.control and !mods.alt and !mods.super);
         if (!menu_key or input.repeat) return null;
         return if (openFromFocus(self)) .handled else null;
@@ -520,6 +562,18 @@ fn openFromFocus(self: *View) bool {
     const anchor = best orelse return false;
     self.menu = .{ .open = anchor.id, .opener = focused, .first = 0 };
     return true;
+}
+
+/// Down on a focused menu button opens its menu on its first item.
+fn openButtonFromFocus(self: *View) bool {
+    const focused = self.focus orelse return false;
+    const overlay = &self.overlay.menu;
+    for (overlay.anchors[0..overlay.anchor_count]) |anchor| {
+        if (!anchor.button or self.buffers.nodes[anchor.index].id != focused) continue;
+        self.menu = .{ .open = anchor.id, .opener = focused, .first = 0 };
+        return true;
+    }
+    return false;
 }
 
 fn keyInitial(code: z.KeyCode) ?u8 {

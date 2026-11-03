@@ -39,6 +39,7 @@ const Form = struct {
 
 - 按下某天选中它。网格有焦点时，方向键按天/周移动并直接选中，Page Up/Page Down 按月（加 Shift 按年），Home/End 到本月第一天/最后一天；Enter 或 Space 选中光标所在的天。
 - `minimum`/`maximum` 之外的天和 `disabled` 回调标出的天变暗且不能选；按键和导航按钮停在范围内，范围只有一个月时两个导航按钮都禁用。
+- `browse = true` 时翻月不选：导航按钮、Page Up/Page Down、方向键、Home/End 只移动日历自己的光标，按下、Enter 或 Space 才选中，与日期输入里的日历相同；应用设置别的日期时光标跟随它。日历放在选中即关闭的浮层里时用它，翻到下个月就不会关掉浮层。不设时每次移动都选中。
 - 光标移动时礼貌播报完整日期（`Saturday, April 1, 2023`）。Windows UIA 把网格映射为 Calendar，值为光标所在日期；每一天是带完整日期名称的子按钮（选中时 checked），辅助技术调用它就选中那一天。
 
 ## 日期输入
@@ -60,6 +61,19 @@ const Form = struct {
 - −/+ 按钮和 Up/Down 按 `range.step` 步进，Page Up/Page Down 按 `range.page_step`，结果夹在范围内。
 - 字段显示数值时键入数字、负号或小数点会替换整段文字；之后的键入、Backspace/Delete 与左右/Home/End 编辑文字。文字一旦是范围内的数字就立即生效（按步长的小数位舍入），否则保留上一个值；Enter 或失去焦点时文字重新按格式显示，Escape 放弃正在编辑的文字。解析接受 locale 的小数点和分组符，也接受 `.`（在分组符不是 `.` 时）和 ASCII 数字。
 - 辅助技术看到一个 Spinner，值为当前文字，带范围值。
+
+## 精确小数输入
+
+`decimalInput(v, &state, &value, limits, options)` 是给金额之类用的数字输入：它编辑应用持有的 `Decimal`（文本形式的精确小数，如 `"1234.50"`），可在两个界限之间用 Up/Down 和两侧的 −/+ 按钮按步长改变。`DecimalLimits` 的 `step` 是正的小数，它的小数位就是每个值写出的位数（`"0.01"` 表示分，`"1"` 表示整数）；`minimum`/`maximum` 用同样的写法，空串表示不限。内部以步长最后一位为单位的整数计数（最多 36 位整数），从不经过二进制浮点。
+
+```zig
+if (try pickers.decimalInput(v, &self.amount_state, &self.amount, .{ .minimum = "0", .step = "0.01" }, .{ .style = .{ .name = "金额" } })) save();
+```
+
+- 键入的文字一旦是范围内的数字就立即生效：`.` 在小数之前，`,` 分隔三位一组的整数，可带前导 `-` 或 `+`，在所有语言里都一样（`1,50` 不是一点五，而是无效文字）。`1,234.5` 设为 `"1234.50"`，失去焦点或按 Enter 后显示为完整写法。
+- 从不舍入：步长 0.01 时 `1.500` 是 `1.50`，但 `1.005`、不是数字的文字或超出范围的数字都保留原值，并以 `state.fault`（`DecimalFault`：`invalid`、`too_exact`、`below`、`above`）标记字段，画成警示色描边、读作无效，失去焦点后仍保留键入的文字，直到改正。`state.message(texts)` 按 `DecimalTexts` 给出提示文字（"Use at most 2 decimal places"、"Enter 0.00 or more" 等，可本地化），可作为外层 `field` 的错误；它也作为字段的可访问说明。清空字段保留原值，失去焦点后重新显示；Escape 立即恢复。
+- 应用设置的值会替换键入的文字（包括有错误的文字）；应用设置的值小数位多于步长或超出范围时按原样显示并标记。返回值只在值真正改变时为 true，同一个值换种写法（`1.5` 与 `1.50`）不算。
+- 辅助技术看到一个 Spinner，值是字段的文字（精确），按步长增减；直接设置的数值落到最近的步长上。`parseDecimal`/`formatDecimal` 是同一套解析与格式化。
 
 ## 颜色选择器与颜色按钮
 

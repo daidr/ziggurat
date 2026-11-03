@@ -3,6 +3,7 @@ const layout = @import("layout.zig");
 const access = @import("accessibility.zig");
 const input = @import("input.zig");
 const drawing = @import("ziggurat_drawing_resources");
+const commands = @import("commands.zig");
 pub const Range = input.Range;
 pub const ValueChange = input.ValueChange;
 pub const Chord = input.Chord;
@@ -25,6 +26,8 @@ pub const Options = struct {
     /// A checkbox is partly checked: it is drawn with a dash and reports
     /// the indeterminate toggle state. `checked` is then false.
     mixed: bool = false,
+    /// The font of a link's text; null is the interface font.
+    font: ?commands.Font = null,
 };
 pub const RangeOptions = struct { control: Options = .{}, vertical: bool = false };
 pub const RangeSliderIds = struct { group: u64, low: u64, high: u64 };
@@ -237,7 +240,7 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
         .link => {
             const color: u32 = if (options.enabled) colors.accent else colors.disabled_text;
             const label = inset(bounds, metrics.content_inset);
-            try context.command_buffer.text(absolute(frame, label), text, color);
+            if (options.font) |font| try context.command_buffer.textFont(absolute(frame, label), text, color, font) else try context.command_buffer.text(absolute(frame, label), text, color);
             try fill(frame, .{ .x = label.x, .y = label.y + label.height - metrics.border, .width = label.width, .height = metrics.border }, color);
             if (focus) try outline(frame, bounds, metrics.border, colors.focus);
         },

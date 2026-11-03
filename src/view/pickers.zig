@@ -463,6 +463,12 @@ pub const CalendarOptions = struct {
     /// Style of the calendar's column; `Style.name` names its grid,
     /// which is otherwise named by the month shown.
     style: view.Style = .{},
+    /// Page through months without choosing: the month buttons, Page Up
+    /// and Page Down, the arrows, Home and End move only the calendar's
+    /// cursor, and a press, Enter or Space chooses, as a date input's
+    /// calendar does. The cursor follows the date as the application sets
+    /// another. Without it, every move chooses.
+    browse: bool = false,
 };
 
 /// A calendar's state, owned by the application at a stable address.
@@ -749,9 +755,11 @@ fn buildCalendar(v: *View, state: *Calendar, date: *Date, options: CalendarOptio
 /// by years), and Home and End go to the first and the last day of the
 /// month. Days outside `options.minimum`..`options.maximum` or marked by
 /// `options.disabled` are dimmed and cannot be chosen. Assistive technology
-/// reads the day the keys reach. True when `date` changed.
+/// reads the day the keys reach. With `options.browse` the moves leave
+/// `date` alone and only a press, Enter or Space chooses. True when `date`
+/// changed.
 pub fn calendar(v: *View, state: *Calendar, date: *Date, options: CalendarOptions) Error!bool {
-    return (try buildCalendar(v, state, date, options, true)).changed;
+    return (try buildCalendar(v, state, date, options, !options.browse)).changed;
 }
 
 pub const DateInputOptions = struct {
@@ -1194,7 +1202,7 @@ const NumberLeaf = struct {
         self.annotation = annotation;
     }
     const Steps = struct { decrement: Rect, increment: Rect };
-    fn buttons(bounds: Rect) Steps {
+    pub fn buttons(bounds: Rect) Steps {
         const width = @min(bounds.width / 4, bounds.height);
         return .{ .decrement = .{ .x = bounds.x, .y = bounds.y, .width = width, .height = bounds.height }, .increment = .{ .x = bounds.x + bounds.width - width, .y = bounds.y, .width = width, .height = bounds.height } };
     }
@@ -1332,6 +1340,423 @@ pub fn numberInput(v: *View, state: *NumberInput, value: *f64, range: view.Range
         i18n.number.formatFloat(&out, locale, value.*, .{ .min_fraction = if (decimals) |d| d else 0, .max_fraction = places, .grouping = false }) catch {};
         leaf.edit.set(out.buffered());
     }
+    return changed;
+}
+
+// ---------------------------------------------------------- decimal input
+
+/// An exact decimal written as text, such as "1234.50", held by the
+/// application at a stable address: what `decimalInput` edits.
+pub const Decimal = struct {
+    pub const capacity = 48;
+    bytes: [capacity]u8 = undefined,
+    len: usize = 0,
+
+    pub fn init(value: []const u8) error{TextTooLong}!Decimal {
+        var out: Decimal = .{};
+        try out.set(value);
+        return out;
+    }
+    pub fn text(self: *const Decimal) []const u8 {
+        return self.bytes[0..self.len];
+    }
+    pub fn set(self: *Decimal, value: []const u8) error{TextTooLong}!void {
+        if (value.len > capacity) return error.TextTooLong;
+        @memcpy(self.bytes[0..value.len], value);
+        self.len = value.len;
+    }
+};
+
+/// Why the text of a decimal input is not taken as its value.
+pub const DecimalFault = enum {
+    fine,
+    /// Not a number.
+    invalid,
+    /// More decimals than the step's that are not zeros.
+    too_exact,
+    /// Below the minimum.
+    below,
+    /// Above the maximum.
+    above,
+};
+
+/// Messages of a decimal input's faults; `{d}` is the number of decimals
+/// and `{s}` the bound.
+pub const DecimalTexts = struct {
+    invalid: []const u8 = "Enter a number",
+    whole: []const u8 = "Enter a whole number",
+    places: []const u8 = "Use at most {d} decimal places",
+    at_least: []const u8 = "Enter {s} or more",
+    at_most: []const u8 = "Enter {s} or less",
+    decrease: []const u8 = "Decrease",
+    increase: []const u8 = "Increase",
+};
+
+pub const DecimalLimits = struct {
+    /// The least and greatest values, written with at most the step's
+    /// decimals; empty for no limit.
+    minimum: []const u8 = "",
+    maximum: []const u8 = "",
+    /// What Up, Down and the buttons add or take away, a positive decimal
+    /// whose decimals are those every value is written with: "0.01" for
+    /// cents, "1" for whole numbers.
+    step: []const u8 = "1",
+};
+
+pub const DecimalOptions = struct {
+    texts: DecimalTexts = .{},
+    /// Style of the field; `Style.name` names it.
+    style: view.Style = .{},
+    /// Preferred width before the parent's layout applies.
+    width: f32 = 160,
+};
+
+/// The state of a decimal input, owned by the application at a stable
+/// address.
+pub const DecimalInput = struct {
+    leaf: DecimalLeaf = .{},
+    /// Why the text typed is not the value, until it is corrected or the
+    /// application sets another value; `message` words it for a field.
+    fault: DecimalFault = .fine,
+    /// The value last shown, to tell when the application set another.
+    shown: Decimal = .{},
+    current: ?i128 = null,
+    scale: u8 = 0,
+    unit: i128 = 1,
+    minimum: ?i128 = null,
+    maximum: ?i128 = null,
+    message_buffer: [96]u8 = undefined,
+
+    /// The message for `fault` in `texts`, for a field's error; empty when
+    /// the text is fine. Valid until the next call.
+    pub fn message(self: *DecimalInput, texts: DecimalTexts) []const u8 {
+        var bound: [Decimal.capacity]u8 = undefined;
+        return switch (self.fault) {
+            .fine => "",
+            .invalid => texts.invalid,
+            .too_exact => if (self.scale == 0) texts.whole else fill(&self.message_buffer, texts.places, "{d}", std.fmt.bufPrint(&bound, "{d}", .{self.scale}) catch ""),
+            .below => fill(&self.message_buffer, texts.at_least, "{s}", formatDecimal(&bound, self.minimum orelse 0, self.scale)),
+            .above => fill(&self.message_buffer, texts.at_most, "{s}", formatDecimal(&bound, self.maximum orelse 0, self.scale)),
+        };
+    }
+    fn fill(buffer: []u8, pattern: []const u8, hole: []const u8, value: []const u8) []const u8 {
+        const at = std.mem.indexOf(u8, pattern, hole) orelse return pattern;
+        var out: std.Io.Writer = .fixed(buffer);
+        out.print("{s}{s}{s}", .{ pattern[0..at], value, pattern[at + hole.len ..] }) catch return pattern;
+        return out.buffered();
+    }
+    fn inRange(self: *const DecimalInput, value: i128) DecimalFault {
+        if (self.minimum) |low| if (value < low) return .below;
+        if (self.maximum) |high| if (value > high) return .above;
+        return .fine;
+    }
+    /// Show `value`, as the application set it: its text when it is no
+    /// number, marked.
+    fn show(self: *DecimalInput, value: []const u8) void {
+        self.shown.set(value) catch {};
+        self.leaf.editing = false;
+        self.current = null;
+        self.fault = .fine;
+        if (std.mem.trim(u8, value, " ").len == 0) {
+            self.leaf.edit.set("");
+            return;
+        }
+        const parsed = parseDecimal(value, self.scale) catch |err| {
+            self.fault = faultOf(err);
+            self.leaf.edit.set(value);
+            return;
+        };
+        self.current = parsed;
+        var buffer: [Decimal.capacity]u8 = undefined;
+        self.leaf.edit.set(formatDecimal(&buffer, parsed, self.scale));
+        self.fault = self.inRange(parsed);
+    }
+};
+
+const DecimalLeaf = struct {
+    id: u64 = 0,
+    enabled: bool = true,
+    edit: Edit = .{},
+    editing: bool = false,
+    typed: bool = false,
+    revert: bool = false,
+    invalid: bool = false,
+    at_minimum: bool = false,
+    at_maximum: bool = false,
+    range: view.Range = .{ .minimum = 0, .maximum = 1 },
+    value: f64 = 0,
+    name: [64]u8 = undefined,
+    name_len: usize = 0,
+    description: [96]u8 = undefined,
+    description_len: usize = 0,
+    width: f32 = 160,
+    annotation: view.Annotation = .{},
+
+    fn embed(self: *DecimalLeaf) view.Embed {
+        return .{ .context = self, .measure = measure, .paint = paint, .annotate = annotate, .input = input };
+    }
+    fn measure(ptr: *anyopaque, _: Theme) view.layout.Measurement {
+        const self: *DecimalLeaf = @ptrCast(@alignCast(ptr));
+        return .{ .minimum = .{ .width = 3 * field_height, .height = field_height }, .preferred = .{ .width = self.width, .height = field_height } };
+    }
+    fn annotate(ptr: *anyopaque, annotation: view.Annotation) void {
+        const self: *DecimalLeaf = @ptrCast(@alignCast(ptr));
+        self.annotation = annotation;
+    }
+    fn paint(ptr: *anyopaque, frame: *ui.Frame, id: u64, bounds: Rect) anyerror!void {
+        const self: *DecimalLeaf = @ptrCast(@alignCast(ptr));
+        const theme = frame.currentTheme();
+        const palette = theme.palette;
+        const focused = focusedOn(frame, id);
+        const steps = NumberLeaf.buttons(bounds);
+        try frame.addControl(id, bounds, .{ .enabled = self.enabled, .focus_rect = bounds, .range = .{ .spec = self.range, .track = bounds, .kind = .stepper, .step_buttons = .{ .decrement = steps.decrement, .increment = steps.increment } } });
+        const name = if (self.name_len > 0) self.name[0..self.name_len] else self.annotation.name;
+        const invalid = self.invalid or self.annotation.invalid;
+        const description = if (self.description_len > 0) self.description[0..self.description_len] else self.annotation.description;
+        // The value is read as the text shows it, exactly.
+        try frame.semantic(.{ .id = id, .role = .stepper, .name = name, .value = self.edit.text(), .description = description, .invalid = invalid, .required = self.annotation.required, .bounds = bounds, .enabled = self.enabled, .focused = focused and self.enabled, .range_value = self.value, .range_minimum = self.range.minimum, .range_maximum = self.range.maximum, .range_small_change = self.range.step, .range_large_change = self.range.largeChange() });
+        paintField(frame, bounds, focused, self.enabled);
+        if (invalid and self.enabled) frame.strokeRect(bounds, 3, theme.metrics.border, ui.Color.rgb(palette.caution));
+        const text_color = if (self.enabled) palette.text else palette.disabled_text;
+        centered(frame, steps.decrement, "−", if (!self.enabled or self.at_minimum) palette.disabled_accent else text_color, .{});
+        centered(frame, steps.increment, "+", if (!self.enabled or self.at_maximum) palette.disabled_accent else text_color, .{});
+        const left = steps.decrement.x + steps.decrement.width;
+        paintEdit(frame, .{ .x = left, .y = bounds.y, .width = @max(0, steps.increment.x - left), .height = bounds.height }, &self.edit, focused and self.enabled, self.enabled);
+    }
+    fn input(ptr: *anyopaque, _: u64, event: view.EmbedInput) bool {
+        const self: *DecimalLeaf = @ptrCast(@alignCast(ptr));
+        const press = switch (event) {
+            .key => |value| value,
+            else => return false,
+        };
+        if (self.edit.key(press)) |changed| {
+            if (changed) self.typed = true;
+            self.editing = true;
+            return true;
+        }
+        if (!plain(press)) return false;
+        switch (press.key) {
+            .enter => {
+                self.editing = false;
+                return true;
+            },
+            .escape => {
+                self.revert = true;
+                return true;
+            },
+            else => {},
+        }
+        // The same characters in every language: '.' before the decimals
+        // and ',' between groups of three digits.
+        const text: []const u8 = if (digitOf(press)) |digit| (&[_][]const u8{ "0", "1", "2", "3", "4", "5", "6", "7", "8", "9" })[digit] else switch (press.key) {
+            .minus, .subtract => if (press.modifiers.shift) return false else "-",
+            .add => "+",
+            .equal => if (press.modifiers.shift) "+" else return false,
+            .period, .decimal => if (press.modifiers.shift) return false else ".",
+            .comma => if (press.modifiers.shift) return false else ",",
+            else => return false,
+        };
+        if (!self.editing) {
+            self.edit.set("");
+            self.editing = true;
+        }
+        if (self.edit.insert(text)) self.typed = true;
+        return true;
+    }
+};
+
+/// Why text is no decimal of a given scale.
+pub const DecimalError = error{ NotANumber, TooExact };
+fn faultOf(err: DecimalError) DecimalFault {
+    return switch (err) {
+        error.NotANumber => .invalid,
+        error.TooExact => .too_exact,
+    };
+}
+
+/// Most digits a decimal input holds, sign and point aside.
+const max_decimal_digits = 36;
+
+/// `text` in units of the last of `scale` decimals: "1,234.5" at scale 2
+/// is 123450. A leading '-' or '+' is a sign, ',' separates groups of
+/// three digits before the point; decimals past `scale` must be zeros.
+pub fn parseDecimal(text: []const u8, scale: u8) DecimalError!i128 {
+    var rest = std.mem.trim(u8, text, " ");
+    const negative = rest.len > 0 and rest[0] == '-';
+    if (negative or (rest.len > 0 and rest[0] == '+')) rest = rest[1..];
+    const point = std.mem.indexOfScalar(u8, rest, '.');
+    const whole = if (point) |at| rest[0..at] else rest;
+    var fraction = if (point) |at| rest[at + 1 ..] else "";
+    if (whole.len == 0 and fraction.len == 0) return error.NotANumber;
+    if (std.mem.indexOfScalar(u8, whole, ',') != null) {
+        var groups = std.mem.splitScalar(u8, whole, ',');
+        var first = true;
+        while (groups.next()) |group| {
+            if (group.len == 0 or group.len > 3 or (!first and group.len != 3)) return error.NotANumber;
+            first = false;
+        }
+    }
+    for (fraction) |c| if (c < '0' or c > '9') return error.NotANumber;
+    if (fraction.len > scale) {
+        for (fraction[scale..]) |c| if (c != '0') return error.TooExact;
+        fraction = fraction[0..scale];
+    }
+    var value: i128 = 0;
+    var digits: usize = 0;
+    for (whole) |c| {
+        if (c == ',') continue;
+        if (c < '0' or c > '9') return error.NotANumber;
+        if (value == 0 and c == '0') continue;
+        digits += 1;
+        if (digits > max_decimal_digits) return error.NotANumber;
+        value = value * 10 + (c - '0');
+    }
+    for (0..scale) |i| {
+        value = value * 10 + if (i < fraction.len) @as(i128, fraction[i] - '0') else 0;
+        if (value != 0) digits += 1;
+    }
+    if (digits > max_decimal_digits + scale) return error.NotANumber;
+    return if (negative) -value else value;
+}
+
+/// `value` in units of `scale` decimals written with exactly that many
+/// decimals, as "1234.50".
+pub fn formatDecimal(buffer: *[Decimal.capacity]u8, value: i128, scale: u8) []const u8 {
+    const magnitude: u128 = @abs(value);
+    var digits: [48]u8 = undefined;
+    const raw = std.fmt.bufPrint(&digits, "{d}", .{magnitude}) catch return "";
+    var out: std.Io.Writer = .fixed(buffer);
+    if (value < 0) out.writeByte('-') catch return "";
+    if (scale == 0) {
+        out.writeAll(raw) catch return "";
+        return out.buffered();
+    }
+    if (raw.len <= scale) {
+        out.writeAll("0.") catch return "";
+        out.splatByteAll('0', scale - raw.len) catch return "";
+        out.writeAll(raw) catch return "";
+    } else {
+        out.print("{s}.{s}", .{ raw[0 .. raw.len - scale], raw[raw.len - scale ..] }) catch return "";
+    }
+    return out.buffered();
+}
+
+fn decimalFloat(value: i128, scale: u8) f64 {
+    return @as(f64, @floatFromInt(value)) / std.math.pow(f64, 10, @floatFromInt(scale));
+}
+
+/// A text field editing `value` as an exact decimal, as an amount of
+/// money, with buttons that step it by `limits.step`, as Up and Down do.
+/// Every value is written with exactly the step's decimals, as "1234.50",
+/// and counted in whole units of its last decimal, never in binary
+/// floating point. What is typed applies as soon as it is a number in
+/// range with '.' before its decimals, ',' between groups of three digits
+/// and an optional sign, in every language; it shows written in full once
+/// the field loses focus or on Enter. Nothing is rounded: "1.500" at a step
+/// of 0.01 is "1.50", but "1.005", text that is no number or a number out
+/// of range keeps the value as it was and marks the field with
+/// `state.fault`, which stays when focus leaves, until the text is
+/// corrected; `state.message` words it for an enclosing field's error.
+/// Emptying the field keeps the value, shown again as focus leaves, and
+/// Escape shows it at once. A value the application sets replaces what
+/// was typed. Announced as a spin button whose value is the text, exactly.
+/// True when `value` changed, not when it was only written another way.
+pub fn decimalInput(v: *View, state: *DecimalInput, value: *Decimal, limits: DecimalLimits, options: DecimalOptions) Error!bool {
+    const leaf = &state.leaf;
+    const step_text = std.mem.trim(u8, limits.step, " ");
+    const scale: u8 = if (std.mem.indexOfScalar(u8, step_text, '.')) |at| @intCast(@min(step_text.len - at - 1, 18)) else 0;
+    const unit = parseDecimal(step_text, scale) catch return error.InvalidRange;
+    if (unit <= 0) return error.InvalidRange;
+    const minimum: ?i128 = if (limits.minimum.len == 0) null else parseDecimal(limits.minimum, scale) catch return error.InvalidRange;
+    const maximum: ?i128 = if (limits.maximum.len == 0) null else parseDecimal(limits.maximum, scale) catch return error.InvalidRange;
+    if (minimum != null and maximum != null and minimum.? > maximum.?) return error.InvalidRange;
+    const limits_changed = state.scale != scale or state.unit != unit or !std.meta.eql(state.minimum, minimum) or !std.meta.eql(state.maximum, maximum);
+    state.scale = scale;
+    state.unit = unit;
+    state.minimum = minimum;
+    state.maximum = maximum;
+    if (limits_changed or !std.mem.eql(u8, value.text(), state.shown.text())) state.show(value.text());
+
+    var changed = false;
+    const set = struct {
+        fn apply(s: *DecimalInput, target: *Decimal, next_value: i128, out: *bool) void {
+            var bounded = next_value;
+            if (s.minimum) |low| bounded = @max(bounded, low);
+            if (s.maximum) |high| bounded = @min(bounded, high);
+            var buffer: [Decimal.capacity]u8 = undefined;
+            const text = formatDecimal(&buffer, bounded, s.scale);
+            if (!std.mem.eql(u8, text, target.text())) {
+                // Written another way is the same value.
+                const same = if (s.current) |old| old == bounded else false;
+                target.set(text) catch return;
+                if (!same) out.* = true;
+            }
+            s.shown.set(text) catch {};
+            s.current = bounded;
+            s.fault = .fine;
+        }
+    }.apply;
+
+    if (leaf.typed) {
+        leaf.typed = false;
+        const typed = leaf.edit.text();
+        if (std.mem.trim(u8, typed, " ").len == 0) {
+            state.fault = .fine;
+        } else if (parseDecimal(typed, scale)) |parsed| {
+            const fault = state.inRange(parsed);
+            if (fault == .fine) set(state, value, parsed, &changed) else state.fault = fault;
+        } else |err| state.fault = faultOf(err);
+    }
+    if (leaf.revert) {
+        leaf.revert = false;
+        state.show(value.text());
+    }
+
+    leaf.width = options.width;
+    leaf.name_len = @min(options.style.name.len, leaf.name.len);
+    @memcpy(leaf.name[0..leaf.name_len], options.style.name[0..leaf.name_len]);
+    try v.embed(leaf.embed(), options.style);
+    const node = lastNode(v);
+    leaf.id = node.id;
+    leaf.enabled = node.style.enabled;
+    if (v.takeEvent(node.id)) |event| if (event == .value and leaf.enabled) {
+        const now = state.current orelse 0;
+        const next_value: ?i128 = switch (event.value.change) {
+            .steps => |count| now + unit * count,
+            .pages => |count| now + unit * 10 * count,
+            .minimum => minimum orelse now,
+            .maximum => maximum orelse now,
+            // Assistive technology sets a number; it lands on a step.
+            .set => |number| if (std.math.isFinite(number) and @abs(number) < 1e30) @as(i128, @intFromFloat(@round(number * std.math.pow(f64, 10, @floatFromInt(scale)) / @as(f64, @floatFromInt(unit))))) * unit else null,
+        };
+        if (next_value) |target| {
+            set(state, value, target, &changed);
+            state.show(value.text());
+        }
+    };
+    const focused = v.focus != null and v.focus.? == node.id;
+    if (!focused and leaf.editing) {
+        leaf.editing = false;
+        // A fault stays as typed; a fine text shows the value in full.
+        if (state.fault == .fine) state.show(value.text());
+    }
+    if (!leaf.editing and state.fault == .fine) {
+        if (state.current) |current| {
+            var buffer: [Decimal.capacity]u8 = undefined;
+            leaf.edit.set(formatDecimal(&buffer, current, scale));
+        }
+    }
+    const huge: f64 = 1e15;
+    const low = if (minimum) |m| decimalFloat(m, scale) else -huge;
+    const high = if (maximum) |m| decimalFloat(m, scale) else huge;
+    leaf.range = .{ .minimum = low, .maximum = @max(low, high), .step = decimalFloat(unit, scale) };
+    leaf.value = if (state.current) |current| std.math.clamp(decimalFloat(current, scale), low, @max(low, high)) else std.math.clamp(0, low, @max(low, high));
+    leaf.at_minimum = if (minimum) |m| (state.current orelse 0) <= m else false;
+    leaf.at_maximum = if (maximum) |m| (state.current orelse 0) >= m else false;
+    leaf.invalid = state.fault != .fine;
+    const described = state.message(options.texts);
+    leaf.description_len = @min(described.len, leaf.description.len);
+    @memcpy(leaf.description[0..leaf.description_len], described[0..leaf.description_len]);
     return changed;
 }
 

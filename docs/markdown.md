@@ -52,7 +52,23 @@ fn build(self: *Reader, v: *view.View) anyerror!void {
 
 映射：标题与段落是文字行；块引用是左侧竖条加内容列；列表是标记列（`•`、`◦`、`▪` 按层级，或 `1.`/`1)` 编号）加内容列，紧凑列表的间距取 `tight_gap`；分隔线是 1 DIP 高的条；表格每行是等宽列的 `grid`，表头行带底色，单元格按列对齐；行内代码放在带底色的小行容器里；图片显示替代文字。
 
-不使用富文本嵌入（`options.rich`）时，字体通过 `Style.font` 表达：标题按级别使用 `.heading1` 到 `.heading6`，表头为半粗体，正文用标签字体；强调是斜体，加粗是粗体（已是粗体的标题保持不变），两者可以叠加；行内代码与回退显示的代码块行使用等宽字体，行内代码的字号按 `.code` 与正文的比例随所在块缩放。折行按各段文字的实际字体测量，所以标题会比正文更早换行。链接沿用链接控件的标签字体。删除线没有对应的字体变体，以 `strikethrough` 颜色区分。颜色默认取自 `options.theme` 的调色板，可以用 `options.colors` 逐项替换；强调与加粗默认使用正文颜色。
+不使用富文本嵌入（`options.rich`）时，字体通过 `Style.font` 表达：标题按级别使用 `.heading1` 到 `.heading6`，表头为半粗体，正文用标签字体；强调是斜体，加粗是粗体（已是粗体的标题保持不变），两者可以叠加；行内代码与回退显示的代码块行使用等宽字体，行内代码的字号按 `.code` 与正文的比例随所在块缩放。折行按各段文字的实际字体测量，所以标题会比正文更早换行。链接沿用所在块的字体（标题里的链接是标题字号，加粗里的链接是粗体），`options.link_weight` 给链接文字设最低字重（默认 `.regular` 不设下限），已经更粗的保持不变，使链接在灰度主题或色觉障碍读者面前不只靠颜色区分；链接里的行内代码保留等宽字体与底色，字重随链接一起提升。删除线没有对应的字体变体，以 `strikethrough` 颜色区分。颜色默认取自 `options.theme` 的调色板，可以用 `options.colors` 逐项替换；强调与加粗默认使用正文颜色。
+
+### 锚点
+
+`options.anchor` 给出标题的 slug（可带或不带 `#`），视图在文档首次显示、被另一份文档替换（新文本不是旧文本的延续）以及锚点改变时，把该标题以最小滚动量滚入视野，例如打开 `guide.md#install` 或回到读者上次的位置；`options.anchor_version` 改变时再滚一次，用于连续两次请求同一标题。需要同时传入应用持有的 `options.anchor_state: *AnchorState`，它记录上次应用的锚点、版本与文本，不传时忽略锚点。标题的 slug 与 GitHub 一致（`slug(text, buffer)`）：小写，空格变连字符，去掉 ASCII 标点，其他文字保留；`headingNamed(tree, name)` 查找第一个匹配的标题。正文里的 `#heading` 链接照常作为 `.link` 激活交给应用，应用自行把它设为锚点：
+
+```zig
+if (try mv.build(v, tree, .{ .anchor = self.anchor, .anchor_version = self.version, .anchor_state = &self.anchor_state }, .{})) |activation| switch (activation) {
+    .link => |url| if (std.mem.startsWith(u8, url, "#")) {
+        self.anchor = url;
+        self.version += 1;
+    } else self.open(url),
+    .task => {},
+};
+```
+
+视图要放在滚动容器里锚点才有作用；滚动通过 `View.scrollIntoView(id)` 完成，它在本遍排列后把节点以最小滚动量显露出来。
 
 ## 等宽代码块
 
