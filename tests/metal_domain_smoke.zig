@@ -194,7 +194,6 @@ fn lossAndStop(allocator: std.mem.Allocator) !void {
     try equal(.ready, (try domain.stats()).status);
     try expectError(error.StaleTextureGeneration, texture.view());
     const replacement = try domain.upload(source.view());
-    defer replacement.close() catch unreachable;
     buffer.reset();
     try buffer.texture(.{ .x = 0, .y = 0, .width = 32, .height = 32 }, try replacement.view(), .{});
     // The renderer takes the new device: what it held uploads again.
@@ -223,6 +222,7 @@ fn lossAndStop(allocator: std.mem.Allocator) !void {
     second.deinit();
     buffer.reset();
     try survivor.close();
+    try replacement.close();
     try image_lease.ensureUnused();
     try domain.close();
     try equal(@as(u32, 0), metal.globalResourceCount());
