@@ -367,6 +367,42 @@ pub fn run(allocator: std.mem.Allocator) !void {
         }
         try state.view.prepare(bounds, state.parameters);
     }
+    {
+        // A segment's header shows in a band across both sides over its
+        // first row, and the row's text goes below it: here the segment
+        // starting at the second row in view with lines on both sides.
+        var rows: [96]viewing.editable.Row = undefined;
+        const plain = (try state.view.copyPresentation(&rows)).rows;
+        var at: usize = 1;
+        while (at + 1 < plain.len and (plain[at].a == null or plain[at].b == null)) at += 1;
+        const plain_first = plain[at];
+        const plain_next = plain[at + 1];
+        const records = [2]usize{ plain_first.a.?, plain_first.b.? };
+        const before = [2]t.Rect{ (try adapter_a.positionRect(try a.version(), (try a.line(records[0])).start, .downstream)).?, (try adapter_b.positionRect(try b.version(), (try b.line(records[1])).start, .downstream)).? };
+        const segments: viewing.Segments = .{ .a_starts = &.{ 0, records[0] }, .b_starts = &.{ 0, records[1] }, .a_lines = &.{ 0, 9 }, .b_lines = &.{ 0, 9 }, .headers = &.{ "@@ -1,2 +1,2 @@", "@@ -10,4 +10,5 @@ main" } };
+        var headed = state.parameters;
+        headed.numbering = segments.numbering();
+        try state.view.prepare(bounds, headed);
+        const shown = (try state.view.copyPresentation(&rows)).rows;
+        var first: ?viewing.editable.Row = null;
+        var next: ?viewing.editable.Row = null;
+        for (shown) |row| {
+            if (row.index == plain_first.index) first = row;
+            if (row.index == plain_next.index) next = row;
+        }
+        try std.testing.expect(first.?.band > 0);
+        try std.testing.expectEqualStrings("@@ -10,4 +10,5 @@ main", first.?.header);
+        try std.testing.expectApproxEqAbs(plain_first.height + first.?.band, first.?.height, 0.01);
+        try std.testing.expectApproxEqAbs(first.?.y + first.?.height, next.?.y, 0.01);
+        try std.testing.expectEqual(@as(f32, 0), next.?.band);
+        const after = [2]t.Rect{ (try adapter_a.positionRect(try a.version(), (try a.line(records[0])).start, .downstream)).?, (try adapter_b.positionRect(try b.version(), (try b.line(records[1])).start, .downstream)).? };
+        for (before, after) |old, new| try std.testing.expectApproxEqAbs(old.y - plain_first.y + first.?.y + first.?.band, new.y, 0.01);
+        state.parameters = headed;
+        try state.paint();
+        try std.testing.expectEqual(@as(u32, 0xe1e6ef), try state.pixel(bounds.x + bounds.width - 12, bounds.y + first.?.y + first.?.band / 2));
+        state.parameters.numbering = null;
+        try state.view.prepare(bounds, state.parameters);
+    }
     try std.testing.expect((try adapter_a.status()).projection_active and (try adapter_b.status()).projection_active);
     try state.paint();
     _ = try state.view.handleEvent(.{ .text_preedit = .{ .text = "候\n选", .selection_start = 0, .selection_end = 3 } }, bounds, state.parameters);

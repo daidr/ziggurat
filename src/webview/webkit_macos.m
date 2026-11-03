@@ -41,6 +41,16 @@ void *zlm_window_content(void *window);
 - (NSString *)_userAgent;
 - (NSInteger)_displayCaptureState;
 - (void)_setDisplayCaptureState:(NSInteger)state completionHandler:(void (^)(void))done;
+- (NSData *)_sessionStateData;
+- (WKNavigation *)_restoreSessionState:(id)state andNavigate:(BOOL)navigate;
+@end
+/* WebKit's saved back/forward list, as -[WKWebView _sessionStateData]
+   encodes it. */
+@interface NSObject (ZigguratSessionState)
+- (instancetype)initWithData:(NSData *)data;
+@end
+@interface WKBackForwardListItem (ZigguratEngine)
+- (CGPoint)_scrollPosition;
 @end
 @interface WKHTTPCookieStore (ZigguratEngine)
 - (void)_flushCookiesToDiskWithCompletionHandler:(void (^)(void))done;
@@ -199,6 +209,9 @@ typedef struct ZwkInitializerState ZwkInitializerState;
     /* The load the engine is still ending became a download: it no longer
      * holds the next navigation back. */
     BOOL download_load;
+    /* The scroll position of the item zwk_session_restore brought back
+       before the window showed on screen, until its page loads. */
+    CGPoint restored_scroll;
     void *session_parent;
     uint64_t session_epoch;
     uint32_t session_width, session_height;
@@ -684,6 +697,7 @@ static int navigation_submit(ZwkPage *s,int kind,NSString *uri,WKBackForwardList
     return ZWK_OK;
 }
 static void remote_compile(ZwkPage *s);
+static void keep_restored_scroll(ZwkPage *s);
 static void initialize(ZwkPage *s) {
     if (!live(s)) return;
     if (s->remote) {
@@ -900,6 +914,8 @@ static void capture_changed(ZwkPage *s,uint32_t device);
     if (error) { failure_set(self,error); status=failure.code; failed=YES; committed=NO; resources_cancel_all(self); }
     const BOOL success=document(self);
     const uint64_t current=generation;
+    if (success) keep_restored_scroll(self);
+    else restored_scroll=CGPointZero;
     navigation_clear(self);
     if (started) (void)page(self,1,success?1:0,status,nil);
     if (started && live(self) && generation==current) history_notify(self);
@@ -3506,15 +3522,97 @@ int zwk_devtools(ZwkState *state,int op,int *enabled,int *visible) {
 }
 void zwk_devtools_counts(uint32_t *shown) { *shown=0; }
 void zwk_string_free(char *value) { free(value); }
-/* The page's URI alone: WKWebView's own session state cannot be restored
- * under the page's navigation policy, so the URI loads again. */
+/* The page's back/forward list as WebKit saves it, with the scroll
+ * positions and form fields it noted (the private _sessionStateData, the
+ * data of the public interactionState), and its URI. A WebKit without it
+ * saves the URI alone. */
 int zwk_session_state(ZwkState *state,char **uri,void **data,size_t *length) {
     ZwkPage *s=page_of(state);
     *uri=NULL; *data=NULL; *length=0;
     if (!live(s)) return ZWK_CLOSED;
     if (!document(s) || !s->current_uri.UTF8String) return ZWK_NOT_READY;
-    *uri=strdup(s->current_uri.UTF8String);
-    return *uri?ZWK_OK:ZWK_OOM;
+    @autoreleasepool {
+        if ([s->view respondsToSelector:@selector(_sessionStateData)]) {
+            NSData *bytes=[s->view _sessionStateData];
+            if (bytes.length) {
+                *data=malloc(bytes.length);
+                if (!*data) return ZWK_OOM;
+                memcpy(*data,bytes.bytes,bytes.length); *length=bytes.length;
+            }
+        }
+        *uri=strdup(s->current_uri.UTF8String);
+        if (!*uri) { free(*data); *data=NULL; *length=0; return ZWK_OOM; }
+    }
+    return ZWK_OK;
+}
+/* The state as WebKit reads it, or nil: the private _WKSessionState. */
+static id session_state_of(const void *data,size_t length) {
+    Class type=NSClassFromString(@"_WKSessionState");
+    if (!type || ![type instancesRespondToSelector:@selector(initWithData:)]) return nil;
+    return [[type alloc] initWithData:[NSData dataWithBytes:data length:length]];
+}
+/* Some of the window shows on screen, as the window server last said. */
+static BOOL window_on_screen(NSWindow *window) {
+    return window && (window.occlusionState&NSWindowOcclusionStateVisible)!=0;
+}
+/* WebKit puts a page that scrolled before its window first came on screen
+ * back at the top when the window does: in a window made hidden, and in one
+ * shown as it opens when the page loads before the window server puts the
+ * window on screen. As the page zwk_session_restore brought back loads, a
+ * script in the default client world puts it back at the position WebKit
+ * restored when it next scrolls to the top before any input; any other
+ * scroll, the user's included, ends it, and a page whose
+ * history.scrollRestoration is "manual" keeps where it is. */
+static void keep_restored_scroll(ZwkPage *s) {
+    const CGPoint at=s->restored_scroll;
+    s->restored_scroll=CGPointZero;
+    if ((at.x==0 && at.y==0) || !live(s)) return;
+    NSString *source=[NSString stringWithFormat:@"(() => {"
+        "const x = %d, y = %d, inputs = ['keydown', 'pointerdown', 'wheel', 'touchstart'];"
+        "if (history.scrollRestoration !== 'auto') return;"
+        "const back = () => scrollX === 0 && scrollY === 0 && scrollTo(x, y);"
+        "const done = () => { removeEventListener('scroll', scrolled); for (const t of inputs) removeEventListener(t, done, true); };"
+        "const scrolled = () => { if (scrollX !== x || scrollY !== y) { back(); done(); } };"
+        "back(); addEventListener('scroll', scrolled); for (const t of inputs) addEventListener(t, done, true);"
+        "})()",(int)at.x,(int)at.y];
+    [s->view evaluateJavaScript:source inFrame:nil inContentWorld:WKContentWorld.defaultClientWorld completionHandler:nil];
+}
+/* Replaces the back/forward list with a saved one and loads its current
+ * item, which must be the page's own, under the page's navigation policy
+ * as a history step: ZWK_INVALID when the engine cannot read the state,
+ * ZWK_IPC_DENIED for an item of another site, and the list is left as it
+ * was. */
+int zwk_session_restore(ZwkState *state,const void *data,size_t length) {
+    ZwkPage *s=page_of(state);
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=s; (void)keep;
+    if (!live(s)) return ZWK_CLOSED;
+    if (!s->local && !s->remote) return ZWK_NOT_READY;
+    if (s->pending_navigation || s->load_started || s->view.loading) return ZWK_NAVIGATION_PENDING;
+    if (![s->view respondsToSelector:@selector(_restoreSessionState:andNavigate:)]) return ZWK_INVALID;
+    @autoreleasepool {
+        id saved=session_state_of(data,length);
+        if (!saved) return ZWK_INVALID;
+        /* A throwaway view, which loads nothing, tells the state's current
+           item before the page's list is replaced. */
+        WKWebViewConfiguration *configuration=[WKWebViewConfiguration new];
+        configuration.websiteDataStore=[WKWebsiteDataStore nonPersistentDataStore];
+        WKWebView *probe=[[WKWebView alloc] initWithFrame:NSMakeRect(0,0,1,1) configuration:configuration];
+        [probe _restoreSessionState:saved andNavigate:NO];
+        WKBackForwardListItem *probed=probe.backForwardList.currentItem;
+        NSString *probed_uri=probed.URL.absoluteString;
+        probe=nil;
+        if (!probed) return ZWK_INVALID;
+        if (!trusted_uri(s,probed_uri)) return ZWK_IPC_DENIED;
+        [s->view _restoreSessionState:saved andNavigate:NO];
+        WKBackForwardListItem *item=s->view.backForwardList.currentItem;
+        NSString *uri=item.URL.absoluteString;
+        if (!item || !trusted_uri(s,uri)) return ZWK_IPC_DENIED;
+        s->restored_scroll=CGPointZero;
+        if (!window_on_screen(s->view.window) && [item respondsToSelector:@selector(_scrollPosition)]) s->restored_scroll=[item _scrollPosition];
+        const int result=navigation_submit(s,NAV_HISTORY,uri,item,NO);
+        if (result!=ZWK_OK && live(s)) s->restored_scroll=CGPointZero;
+        return result;
+    }
 }
 int zwk_deadline_arm(ZwkState *state,uint64_t nanoseconds) {
     ZwkPage *s=page_of(state);

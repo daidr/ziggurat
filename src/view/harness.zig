@@ -485,7 +485,15 @@ pub const Harness = struct {
         try self.pressRow(node, .{ .x = mark.x + mark.width / 2, .y = mark.y + mark.height / 2 }, .{});
     }
     fn pressRow(self: *Harness, node: *const Node, point: view.Point, modifiers: z.KeyModifiers) anyerror!void {
-        const event = self.view.rowPress(point, modifiers, node.id, self.config.theme) orelse return error.Hidden;
+        const event = self.view.rowPress(point, modifiers, node.id, self.config.theme) orelse {
+            // A plain press on a chosen row of rows that drag out is left
+            // to the release, which activates the row as a click.
+            if (self.view.waitsForRelease(node.id, modifiers)) {
+                self.setFocus(node.id);
+                return self.deliver(.{ .action = node.id });
+            }
+            return error.Hidden;
+        };
         try self.deliver(event);
     }
     /// Press the remove button of the matching token. Renders.
@@ -2889,9 +2897,12 @@ const Sheet = struct {
     height: f32 = 300,
     moved: ?view.Move = null,
     reorder: bool = false,
+    drag_out: bool = false,
     fn build(self: *Sheet, v: *View) anyerror!void {
         _ = try v.table(&.{.{ .title = "Name" }}, &self.sort, &self.selection, .{ .name = "Sheet" });
-        if (self.reorder) {
+        if (self.drag_out) {
+            try v.dragRows(7);
+        } else if (self.reorder) {
             if (try v.reorder()) |move| self.moved = move;
         } else try v.dragSelect();
         try v.scroll(&self.scroll, .{ .height = self.height });
@@ -2911,6 +2922,36 @@ const Sheet = struct {
         return mask;
     }
 };
+
+test "a chosen row of a table drags the rows chosen with it, and shows how many" {
+    var storage: view.Storage(96, 1024) = .{};
+    var state: Sheet = .{ .drag_out = true };
+    state.selection = view.Selection.init(.multiple, &state.ids);
+    try state.selection.add(1);
+    try state.selection.add(2);
+    var h = Harness.init(&state, Sheet.build, storage.buffers(), .{});
+    try h.render();
+    const r2 = (try h.find(.{ .kind = .table_row, .text = "Row 2" })).bounds;
+    const r4 = (try h.find(.{ .kind = .table_row, .text = "Row 4" })).bounds;
+    try h.press(r2.x + 4, r2.y + 4, .{});
+    try h.moveTo(r2.x + 4, r4.y + 40);
+    try std.testing.expect(h.view.drag_ghost != null);
+    try std.testing.expectEqual(@as(u32, 2), h.view.drag_count);
+    try std.testing.expectEqualStrings("2", h.view.dragBadge().?.text());
+    try h.release(r2.x + 4, r4.y + 40);
+    try std.testing.expectEqual(@as(u64, 0b110), state.selected());
+    // A click on a chosen row, without a drag, chooses it alone.
+    try h.advance(std.time.ns_per_s);
+    try h.click(.{ .kind = .table_row, .text = "Row 2" });
+    try std.testing.expectEqual(@as(u64, 0b100), state.selected());
+    // A row not chosen goes alone.
+    try h.advance(std.time.ns_per_s);
+    try h.press(r4.x + 4, r4.y + 4, .{});
+    try h.moveTo(r4.x + 4, r4.y + 60);
+    try std.testing.expectEqual(@as(u32, 1), h.view.drag_count);
+    try std.testing.expect(h.view.dragBadge() == null);
+    try h.release(r4.x + 4, r4.y + 60);
+}
 
 test "a drag over rows selects them and scrolls near the edge" {
     var storage: view.Storage(96, 1024) = .{};

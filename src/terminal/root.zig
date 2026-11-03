@@ -29,6 +29,7 @@ pub const selection = @import("selection.zig");
 pub const pty = @import("pty.zig");
 pub const session = @import("session.zig");
 pub const shell_integration = @import("shell_integration.zig");
+pub const prompt = @import("prompt.zig");
 const terminal = @import("terminal.zig");
 
 pub const Terminal = terminal.Terminal;

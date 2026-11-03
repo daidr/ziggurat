@@ -5,7 +5,8 @@
 //! methods compose into it like any text box. Keys go first to the app's
 //! hook, then to the key bindings, then to the program as escape
 //! sequences; the pointer selects text or, when the program asks, reports
-//! to it; links open on Ctrl+click.
+//! to it; links open on Ctrl+click; Alt+click (Option+click on macOS) on
+//! the command at a shell's marked prompt moves the shell's cursor there.
 //!
 //! Colors come from a theme, which follows the window's appearance unless
 //! the app sets one. Searching highlights matches in the screen and the
@@ -1705,6 +1706,10 @@ pub const TerminalView = struct {
         if (press.button != .primary) return false;
         const s = &self.terminal.screen;
         const at = self.cellAt(press.position);
+        if (press.modifiers.alt and self.clickToMove(at.col, at.row)) {
+            self.selection = null;
+            return true;
+        }
         const position: Position = .{ .row = s.viewRow(at.row), .col = at.col };
         const now = zio.milliTimestamp();
         const same = position.row == self.last_click_at.row and position.col == self.last_click_at.col;
@@ -1722,6 +1727,38 @@ pub const TerminalView = struct {
             else => .line,
         } };
         return true;
+    }
+
+    /// Move the shell's cursor to the cell clicked on the command at its
+    /// prompt, as Alt+click (Option+click on macOS) does, with the arrow
+    /// keys the shell moves its cursor by, and report whether the click was
+    /// there. The shell marks its prompt with OSC 133; the command is on
+    /// the rows from the prompt's start to the lowest the cursor reached
+    /// there, and those it soft-wraps onto. Nothing on the alternate
+    /// screen, nor while the view shows the scrollback.
+    fn clickToMove(self: *TerminalView, col: usize, row: usize) bool {
+        const t = self.terminal;
+        const s = &t.screen;
+        if (s.viewportOffset() != 0) return false;
+        const span = t.prompt.rows(s) orelse return false;
+        if (row < span.top or row > span.bottom) return false;
+        var storage: [64]term.prompt.Row = undefined;
+        // A command taller than that counts from the rows nearest the
+        // cursor.
+        const top = @max(span.top, span.bottom -| (storage.len - 1));
+        if (row < top or s.cursor.y < top) return false;
+        const rows = storage[0 .. span.bottom - top + 1];
+        for (rows, top..) |*r, y| r.* = .init(s.row(y), s.wrapped(y));
+        const count = term.prompt.steps(rows, s.cursor.x, s.cursor.y - top, col, row - top);
+        term.prompt.sendArrows(count, s.modes.cursor_keys, self, sendBytes) catch |err| {
+            self.fail(err);
+            return true;
+        };
+        return true;
+    }
+
+    fn sendBytes(self: *TerminalView, bytes: []const u8) anyerror!void {
+        try self.send(bytes);
     }
 
     fn openHovered(self: *TerminalView) void {
@@ -2179,6 +2216,48 @@ test "keys, text, pastes and replies reach the program" {
     try std.testing.expectEqual(@as(usize, 2), tv.preedit_len);
     try std.testing.expect(tv.handle(.text_preedit_cancel));
     try std.testing.expectEqual(@as(usize, 0), tv.preedit_len);
+}
+
+test "Alt+click on the command at a marked prompt moves the shell's cursor there" {
+    var state: u8 = 0;
+    var storage: view.Storage(4, 64) = .{};
+    var host = view.Host.init(&state, Empty.build, storage.buffers(), .{});
+    var terminal = try term.Terminal.init(std.testing.allocator, .{ .screen = .{ .cols = 10, .rows = 4 } });
+    defer terminal.deinit();
+    var sent: Sent = .{};
+    var board: Board = .{};
+    var tv = testView(&host, &terminal, &sent, &board, .{});
+    defer tv.deinit();
+    tv.bind();
+    const alt: z.KeyModifiers = .{ .alt = true };
+    // Without a marked prompt Alt+click selects.
+    tv.feed("out\r\n$ abc");
+    try std.testing.expect(tv.handle(.{ .pointer_down = .{ .position = .{ .x = 25, .y = 25 }, .modifiers = alt } }));
+    try std.testing.expect(tv.handle(.{ .pointer_up = .{ .position = .{ .x = 25, .y = 25 }, .modifiers = alt } }));
+    try std.testing.expectEqual(@as(usize, 0), sent.len);
+    // A command that wraps: "$ abcdefgh" then "ijkl", the cursor after it.
+    tv.feed("\r\n\x1b]133;A\x1b\\$ abcdefghijkl");
+    try std.testing.expect(tv.handle(.{ .pointer_down = .{ .position = .{ .x = 45, .y = 45 }, .modifiers = alt } }));
+    _ = tv.handle(.{ .pointer_up = .{ .position = .{ .x = 45, .y = 45 }, .modifiers = alt } });
+    try std.testing.expectEqualStrings("\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D", sent.text());
+    try std.testing.expect(tv.selection == null);
+    sent.len = 0;
+    // Past the end of the text stops at its end: no arrows.
+    try std.testing.expect(tv.handle(.{ .pointer_down = .{ .position = .{ .x = 85, .y = 65 }, .modifiers = alt } }));
+    try std.testing.expectEqual(@as(usize, 0), sent.len);
+    // The shell set DECCKM: the application's arrows.
+    tv.feed("\x1b[?1h");
+    try std.testing.expect(tv.handle(.{ .pointer_down = .{ .position = .{ .x = 5, .y = 65 }, .modifiers = alt } }));
+    try std.testing.expectEqualStrings("\x1bOD\x1bOD\x1bOD\x1bOD", sent.text());
+    sent.len = 0;
+    // Off the command, Alt+click selects as before.
+    try std.testing.expect(tv.handle(.{ .pointer_down = .{ .position = .{ .x = 5, .y = 25 }, .modifiers = alt } }));
+    try std.testing.expectEqual(@as(usize, 0), sent.len);
+    try std.testing.expect(tv.selection != null);
+    // On the alternate screen too.
+    tv.feed("\x1b[?1049h");
+    try std.testing.expect(tv.handle(.{ .pointer_down = .{ .position = .{ .x = 5, .y = 65 }, .modifiers = alt } }));
+    try std.testing.expectEqual(@as(usize, 0), sent.len);
 }
 
 test "the pointer selects and copies, and reports when the program tracks it" {

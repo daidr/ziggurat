@@ -76,6 +76,7 @@ const Files = struct {
 - **保存布局**：`TableState.layout(&buffer)` 按显示顺序给出每列的 id 和宽度（平分的列为 0），`Result.arranged` 在用户调整或移动列时为 true；`restore(saved)` 在下一遍按 id 恢复顺序与宽度，未知的列按自身顺序跟在后面。
 - **排序**：设置 `TableState.sort` 后，单击可排序列头按它升序，再次单击反转；表头画箭头，辅助技术读到方向，`Result.sorted` 报告变化，行的顺序由应用按 `sort` 排列（用 `key` 让选择跟随行）。设置 `sort_by`（`SortKeys`，最多 8 列）时按多列排序：普通单击只按这一列（已是第一列时反转），Ctrl+单击或 Shift+单击把列追加为升序，再按一次变降序，第三次移除；多列时列头显示次序号，`sort` 保持为第一列。行头列不排序。
 - **重排行**：`reorder`（不能同时 `drag_select`）让用户把行拖到其他位置，一条线标出插入点；松开时 `Result.moved` 给出拖动的行、插入到哪一行之前（等于行数表示末尾），以及该行是否已选中（是则应用移动所有选中的行）。放回原处不产生移动。
+- **拖出行**：`drag_rows = kind`（不能同时 `reorder`、`drag_select` 或 `cell_select`）让行被拖出表格交给别处，如把文件拖进文件夹：按下一行移动超过阈值后，表格把拖动交给视图（`Embed.drag`），视图拖动 `Payload{ .kind = kind, .value = 行号 }`，一份行的副本（带该行的 `label` 或第一列文字）跟随指针，指针下最内层接受该 `kind` 的 `dropTarget` 在松开时收到它，和 `dragSource` 一样；表格本身不收、也不画插入线。按下已选中的行时拖动的是全部选中行（应用在 `selection` 里找），指针旁的强调色小圆角标显示行数（多于一行时）；按下已选中的行要等松开才改选择，因此拖动不会丢掉选择，未拖动的单击照常只选中该行。
 - **悬停与外观**：悬停行有浅色背景；选中行从边到边以强调色填充，`round_rows` 改为圆角。
 
 ### 单元格选择
@@ -94,7 +95,7 @@ const Files = struct {
 - 单击箭头展开或折叠（Alt+单击连同其中所有项目），不改变选择。
 - 有焦点时 Right 展开光标项目，已展开则移到第一个子项；Left 折叠，已折叠则移到父项；加 Shift 展开或折叠其中所有项目。
 - 折叠一个其后代持有光标的项目时选中该项目。
-- `Result.toggled` 报告展开状态的改变。`OutlineOptions.indent` 是每层缩进（默认 16 DIP）。
+- `Result.toggled` 报告展开状态的改变。`OutlineOptions.indent` 是每层缩进（默认 16 DIP）。`OutlineOptions.drag_rows` 与表格相同，载荷的值是行在当前显示行（`OutlineState.rows`）中的序号。
 
 `outlineTable(v, &state, columns, tree, cell, options)` 把大纲放进表格的列：传入的第 0 列显示缩进与箭头，单元格回调按项目和列给出内容，列可以像表格那样调整、移动和排序。
 
@@ -103,7 +104,7 @@ const Files = struct {
 `gridView(v, &state, items, item, options)` 把项目排成尽可能多列，每项至少 `min_item_width` 宽并平分剩余宽度，行高 `item_height`，`gap` 是项目之间与四周的间距。`GridItem` 是一张图片（按比例缩放）和下方一行文字。
 
 - 单击或方向键（两个方向）选中，Home/End、PageUp/PageDown 按整页行移动，Ctrl+单击切换，Shift+单击与 Shift+方向键按项目顺序选范围，Ctrl+A 全选，Enter 或双击提交；键入字母按 `label` 查找。
-- `drag_select` 与 `reorder` 与表格相同；重排时一条竖线标出插入位置。
+- `drag_select`、`reorder` 与 `drag_rows` 与表格相同；重排时一条竖线标出插入位置，拖出时副本是项目的格子，文字取 `label` 或项目文字。
 - `columns()` 返回当前列数，`visible()` 返回可见行的首末项目。
 
 ## 可访问性

@@ -531,7 +531,7 @@ if (row.right_clicked) self.showMenu(item, row.bounds.?);
 - `dragSource(payload, style)` 在窗口内拖动一个 `Payload`（`kind` 像类型一样说明它是什么，`value` 说明是哪一个，例如条目 ID）。拖动时一份半透明副本跟随指针，返回 true 以便应用把原处画暗。
 - `dropTarget(accept, style)` 接受 `Accept` 列出的内容：指定 `kind` 的 Payload，以及其他应用拖入的文件或文本。指针下最内层接受该内容的目标在拖动经过时描边并返回 `.over`，松开所在的那一遍返回 `.dropped`（`Dropped` 为 Payload、文件或文本，以及窗口坐标）。
 - `reorder()` 在刚打开的表格、列表框或行/列容器上调用（要在加入任何条目之前），让指针把一项拖到其他项之间：副本跟随指针，一条线标出插入位置，松开所在的那一遍返回 `Move{from, to}`，表示原第 `from` 项移到原第 `to` 项之前（`to` 等于项数表示最后）；放回原处不产生移动，条目由应用重排。树不能重排；同一表格不能既 `reorder` 又 `dragSelect`。
-- `dragRows(kind)` 同样在刚打开的表格、列表框或行/列容器上调用（要在加入任何条目之前），让条目被拖出容器交给别处：按下条目移动超过阈值后拖动 `Payload{ .kind = kind, .value = i }`（`i` 是条目在容器里的序号，表格从第一行数起），副本跟随指针，指针下最内层接受该 `kind` 的 `dropTarget` 在松开时收到它，和 `dragSource` 一样。容器本身什么都不收，也不在条目之间画插入线，因此容器里的目标（比如文件列表里文件夹那一行）或容器外的目标都能在指针所在处收到。比如文件浏览器把文件拖进文件夹行。树不能拖出行；同一容器不能既 `dragRows` 又 `reorder` 或 `dragSelect`。
+- `dragRows(kind)` 同样在刚打开的表格、列表框或行/列容器上调用（要在加入任何条目之前），让条目被拖出容器交给别处：按下条目移动超过阈值后拖动 `Payload{ .kind = kind, .value = i }`（`i` 是条目在容器里的序号，表格从第一行数起），副本跟随指针，指针下最内层接受该 `kind` 的 `dropTarget` 在松开时收到它，和 `dragSource` 一样。容器本身什么都不收，也不在条目之间画插入线，因此容器里的目标（比如文件列表里文件夹那一行）或容器外的目标都能在指针所在处收到。比如文件浏览器把文件拖进文件夹行。表格（带多选 `Selection`）里按下已选中的行时，拖动的是全部选中行：载荷仍是按下的那一行，应用在自己的 `Selection` 里找到其余行，指针旁用强调色小圆角标显示行数（`View.dragBadge()`）；没有修饰键按下已选中的行要等松开才只选中它，所以拖动保留选择。嵌入叶子（如虚拟表格）可通过 `Embed.drag` 在拖动超过阈值后返回 `EmbedDrag{payload, count, ghost, label}`，把拖动交给视图：叶子收到 `pointer_cancel`，之后与 `dragSource` 一样投放。树不能拖出行；同一容器不能既 `dragRows` 又 `reorder` 或 `dragSelect`。
 - `dragSelect()` 在刚打开的树或表格上调用，让从一行开始的主键拖动像 Shift 加按下那样选中从该行到指针下一行的范围；按下时按住 Ctrl 则把范围加入已有选择。
 
 拖动经过或越过外层滚动容器的边缘 32 DIP 内时，`reorder`、`dragRows`、`dragSource` 与 `dragSelect` 随指针移动滚动它，越靠近边缘越快。每帧最多 32 个拖动区域/拖动源/放置目标、4 个可重排或可拖出条目的容器和 256 个这样的条目参与路由。

@@ -332,6 +332,11 @@ const Core = struct {
     measurer: view.Measurer = .{},
     drag_select: bool = false,
     reorder: bool = false,
+    /// The kind of payload rows drag out as (`TableOptions.drag_rows`).
+    drag_rows: ?u64 = null,
+    /// A drag out of the collection, for the view to take on.
+    drag_out: ?view.EmbedDrag = null,
+    drag_label: [scratch_len]u8 = undefined,
     follow_end: bool = false,
     keep_offset: bool = false,
     round_rows: bool = false,
@@ -422,6 +427,19 @@ const Core = struct {
     }
     fn multiple(self: *const Core) bool {
         return if (self.selection) |selection| selection.mode == .multiple else false;
+    }
+    /// Hand a drag from row `index`, shown at `rect`, over to the view to
+    /// carry out of the collection: the row's place as the payload, with
+    /// the rows chosen when it is one of them.
+    fn handOut(self: *Core, index: usize, rect: Rect, label: []const u8) void {
+        const kind = self.drag_rows orelse return;
+        const count: usize = if (self.selected(index)) self.selection.?.len else 1;
+        self.drag_out = .{ .payload = .{ .kind = kind, .value = index }, .count = @intCast(@min(count, std.math.maxInt(u32))), .ghost = rect, .label = label };
+    }
+    fn takeDrag(self: *Core) ?view.EmbedDrag {
+        const out = self.drag_out orelse return null;
+        self.drag_out = null;
+        return out;
     }
 
     // Geometry, in coordinates local to the leaf.
@@ -998,6 +1016,15 @@ pub const TableOptions = struct {
     drag_select: bool = false,
     /// The user drags rows to another place; `Result.moved` reports it.
     reorder: bool = false,
+    /// The user drags rows out of the table, for a `dropTarget` elsewhere
+    /// that takes this kind, as files dropped on a folder: a drag from a
+    /// row carries `.{ .kind = drag_rows, .value = row }`, as from a
+    /// `dragSource`, and a copy of the row follows the pointer. A press on
+    /// a chosen row drags the rows chosen with it, which the application
+    /// finds in `selection`, and their number shows beside the pointer.
+    /// The table itself takes nothing and shows no place between its rows.
+    /// Not with `reorder`, `drag_select` or `cell_select`.
+    drag_rows: ?u64 = null,
     /// Start at the end and keep it in view as rows come, until the user
     /// scrolls away; scrolling back follows it again.
     follow_end: bool = false,
@@ -1385,7 +1412,11 @@ pub const TableState = struct {
     }
 
     fn embed(self: *TableState) view.Embed {
-        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .focusable = true, .input = input, .cursor = pointerShape };
+        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .focusable = true, .input = input, .cursor = pointerShape, .drag = dragOut };
+    }
+    fn dragOut(ptr: *anyopaque, _: u64) ?view.EmbedDrag {
+        const self: *TableState = @ptrCast(@alignCast(ptr));
+        return self.core.takeDrag();
     }
     /// A column header's trailing edge shows the resize arrow.
     fn pointerShape(ptr: *anyopaque, _: u64, point: Point) ?view.Cursor {
@@ -1750,7 +1781,7 @@ pub const TableState = struct {
                     cells.all = false;
                 }
             };
-        } else if (core.selected(index) and (core.reorder or core.drag_select) and core.multiple() and press.count < 2) {
+        } else if (core.selected(index) and (core.reorder or core.drag_select or core.drag_rows != null) and core.multiple() and press.count < 2) {
             // A press on a chosen row waits for the release, so a drag of
             // the choice keeps it.
             deferred = true;
@@ -1799,6 +1830,13 @@ pub const TableState = struct {
             },
             .rows => |*rows| {
                 if (!drag.dragging) return false;
+                if (core.drag_rows != null) {
+                    // Out of the table, carried by the view.
+                    const top: f32 = @floatCast(core.lineTop(rows.index) - core.scroll_y);
+                    const rect: Rect = .{ .x = 0, .y = core.bodyTop() + top, .width = core.bounds.width, .height = core.row_height };
+                    core.handOut(rows.index, rect, core.labelOf(rows.index, &core.drag_label));
+                    return true;
+                }
                 if (core.reorder and !rows.reordering and !rows.selecting) {
                     rows.reordering = true;
                     rows.deferred = false;
@@ -1919,6 +1957,7 @@ pub fn table(v: *View, state: *TableState, columns: []const Column, rows: Rows, 
 fn buildTable(v: *View, state: *TableState, rows: Rows, options: TableOptions) Error!Result {
     const core = &state.core;
     if (options.reorder and options.drag_select) return error.InvalidValue;
+    if (options.drag_rows != null and (options.reorder or options.drag_select or options.cell_select)) return error.InvalidValue;
     if (!std.math.isFinite(options.row_height) or options.row_height <= 0) return error.InvalidValue;
     if (options.cell_select and state.cells == null) return error.InvalidValue;
     if (!options.cell_select) state.cells = null;
@@ -1929,6 +1968,7 @@ fn buildTable(v: *View, state: *TableState, rows: Rows, options: TableOptions) E
     core.measurer = options.measurer;
     core.drag_select = options.drag_select;
     core.reorder = options.reorder;
+    core.drag_rows = options.drag_rows;
     if (options.follow_end and !core.follow_end and !core.placed) core.at_end = true;
     core.follow_end = options.follow_end;
     core.keep_offset = options.keep_offset;
@@ -1994,6 +2034,9 @@ pub const OutlineOptions = struct {
     /// Show the header row in an outline table.
     header: bool = true,
     drag_select: bool = false,
+    /// Drag rows out, as `TableOptions.drag_rows`; the payload's value is
+    /// the row's place among the rows shown (`OutlineState.rows`).
+    drag_rows: ?u64 = null,
     keep_offset: bool = false,
     round_rows: bool = false,
     measurer: view.Measurer = .{},
@@ -2200,6 +2243,7 @@ fn buildOutline(v: *View, state: *OutlineState, tree: Tree, columns: []const Col
         .row_height = options.row_height,
         .header = header,
         .drag_select = options.drag_select,
+        .drag_rows = options.drag_rows,
         .keep_offset = options.keep_offset,
         .round_rows = options.round_rows,
         .measurer = options.measurer,
@@ -2228,6 +2272,9 @@ pub const GridOptions = struct {
     drag_select: bool = false,
     /// The user drags items to another place; `Result.moved` reports it.
     reorder: bool = false,
+    /// Drag items out, as `TableOptions.drag_rows`. Not with `reorder` or
+    /// `drag_select`.
+    drag_rows: ?u64 = null,
     measurer: view.Measurer = .{},
     style: view.Style = .{},
 };
@@ -2261,7 +2308,11 @@ pub const GridState = struct {
         core.grid_columns = if (value >= 1 and std.math.isFinite(value)) @intFromFloat(@min(value, 4096)) else 1;
     }
     fn embed(self: *GridState) view.Embed {
-        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .focusable = true, .input = input };
+        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .focusable = true, .input = input, .drag = dragOut };
+    }
+    fn dragOut(ptr: *anyopaque, _: u64) ?view.EmbedDrag {
+        const self: *GridState = @ptrCast(@alignCast(ptr));
+        return self.core.takeDrag();
     }
     fn measure(ptr: *anyopaque, _: Theme) view.layout.Measurement {
         const self: *GridState = @ptrCast(@alignCast(ptr));
@@ -2381,7 +2432,7 @@ pub const GridState = struct {
                     core.choose(index, .toggle);
                 } else if (mods.shift) {
                     core.choose(index, if (mods.control) .range_add else .range);
-                } else if (core.selected(index) and (core.reorder or core.drag_select) and core.multiple() and press.count < 2) {
+                } else if (core.selected(index) and (core.reorder or core.drag_select or core.drag_rows != null) and core.multiple() and press.count < 2) {
                     deferred = true;
                 } else core.choose(index, .set);
                 if (core.drag_select and !core.reorder and core.multiple()) core.beginDragChoice(mods.control);
@@ -2393,6 +2444,17 @@ pub const GridState = struct {
                 switch (core.press) {
                     .rows => |*rows| {
                         if (!drag.dragging) return false;
+                        if (core.drag_rows != null) {
+                            var buffer: [scratch_len]u8 = undefined;
+                            const label = if (core.rows.label) |call| call(core.rows.context, rows.index, &core.drag_label) else label: {
+                                const shown = if (self.item_source) |source| source.call(source.context, rows.index, &buffer).text else "";
+                                const length = @min(shown.len, core.drag_label.len);
+                                @memcpy(core.drag_label[0..length], shown[0..length]);
+                                break :label core.drag_label[0..length];
+                            };
+                            core.handOut(rows.index, self.itemRect(rows.index), label);
+                            return true;
+                        }
                         if (core.reorder and !rows.reordering) {
                             rows.reordering = true;
                             rows.deferred = false;
@@ -2466,6 +2528,7 @@ pub const GridState = struct {
 pub fn gridView(v: *View, state: *GridState, items: Rows, item: ItemSource, options: GridOptions) Error!Result {
     const core = &state.core;
     if (options.reorder and options.drag_select) return error.InvalidValue;
+    if (options.drag_rows != null and (options.reorder or options.drag_select)) return error.InvalidValue;
     if (!std.math.isFinite(options.min_item_width) or options.min_item_width <= 0 or !std.math.isFinite(options.item_height) or options.item_height <= 0 or !std.math.isFinite(options.gap) or options.gap < 0) return error.InvalidValue;
     core.rows = items;
     core.selection = state.selection;
@@ -2476,6 +2539,7 @@ pub fn gridView(v: *View, state: *GridState, items: Rows, item: ItemSource, opti
     core.measurer = options.measurer;
     core.drag_select = options.drag_select;
     core.reorder = options.reorder;
+    core.drag_rows = options.drag_rows;
     core.setName(options.style.name);
     if (core.placed) state.layoutColumns(core.bounds.width);
     if (core.hover) |hover| if (hover >= items.count) {

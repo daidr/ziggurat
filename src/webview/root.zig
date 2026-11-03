@@ -4000,10 +4000,11 @@ pub const View = struct {
     /// The page's session to save, for restoreSessionState in another
     /// View, at the next launch or after the app closed a page it was not
     /// showing; caller-owned. Linux keeps WebKitGTK's back/forward list
-    /// with the scroll positions and form fields it saved: it saves a
-    /// page's scroll position a moment after scrolling stops and its form
-    /// fields as the page goes out of view. Windows keeps the page's URI
-    /// alone, WebView2 having no such state; macOS keeps it alone too.
+    /// with the scroll positions and form fields it saved, and macOS
+    /// WKWebView's (its interaction state): WebKit saves a page's scroll
+    /// position a moment after scrolling stops and its form fields as the
+    /// page goes out of view. Windows keeps the page's URI alone, WebView2
+    /// having no such state, as does a macOS WebKit without it.
     pub fn sessionState(self: *View, allocator: std.mem.Allocator) ![]u8 {
         _ = try self.propertyWindow();
         if (self.config.?.options.local == null and self.config.?.options.remote == null) return error.LocalSiteRequired;
@@ -4030,9 +4031,12 @@ pub const View = struct {
         return session_state.encode(allocator, .windows, uri, "");
     }
     /// Brings back a session that sessionState saved, in place of the
-    /// page: on Linux the back/forward list and the current item's scroll
-    /// position and form fields, whose current item loads, once ready with
-    /// no navigation pending. A state of another platform, or one the
+    /// page: on Linux and macOS the back/forward list and the current item's
+    /// scroll position and form fields, whose current item loads as a
+    /// history step, once ready with no navigation pending. On macOS a page
+    /// restored before its window first shows on screen keeps its scroll
+    /// position as the window shows, which WebKit would put back at the
+    /// top, until it scrolls or takes input. A state of another platform, or one the
     /// engine cannot read, loads the URI it saved, as navigateLocal or
     /// navigateRemote would, which the page's site must allow (OriginDenied,
     /// InvalidResourcePath otherwise).
@@ -4045,7 +4049,7 @@ pub const View = struct {
         if (!self.initializerNavigationAllowed()) return error.Busy;
         const options = self.config.?.options;
         if (options.local == null and options.remote == null) return error.LocalSiteRequired;
-        if (is_webkit and !is_macos and parsed.platform == .linux and parsed.native.len != 0) {
+        if (is_webkit and parsed.platform == (if (is_macos) session_state.Platform.macos else .linux) and parsed.native.len != 0) {
             const scope = self.beginCallback() orelse return error.Closed;
             defer scope.end();
             switch (webkit.zwk_session_restore(self.native.?, parsed.native.ptr, parsed.native.len)) {

@@ -81,6 +81,27 @@ pub const Prompt = struct {
     active: bool = false,
     /// The absolute row the prompt starts on (`A` or `N`).
     row: ?u64 = null,
+    /// The lowest absolute row the cursor reached in the prompt, which a
+    /// long command wraps onto or a multiline one goes on to.
+    last: ?u64 = null,
+
+    /// The rows of the screen the prompt and its input take, from its
+    /// start (or the top, when it scrolled away) to the lowest row the
+    /// cursor reached there and the rows that row soft-wraps onto; null
+    /// when no prompt shows, on the alternate screen, or when the cursor is
+    /// not in it.
+    pub fn rows(self: Prompt, screen: *const Screen) ?struct { top: usize, bottom: usize } {
+        if (!self.active or screen.onAlternate()) return null;
+        const cy: usize = screen.cursor.y;
+        const here = screen.screenRow(cy);
+        const start = self.row orelse here;
+        if (start > here) return null;
+        const top: usize = if (start < screen.pushed) 0 else @intCast(start - screen.pushed);
+        const last = @max(self.last orelse here, here);
+        var bottom: usize = @min(if (last < screen.pushed) 0 else @as(usize, @intCast(last - screen.pushed)), screen.rows - 1);
+        while (bottom + 1 < screen.rows and screen.wrapped(bottom)) bottom += 1;
+        return .{ .top = top, .bottom = bottom };
+    }
 };
 
 pub const max_title = 256;
@@ -226,18 +247,25 @@ pub const Terminal = struct {
         if (self.options.shell_integration and self.prompt.active and !self.screen.onAlternate() and @max(cols, 2) != self.screen.cols) {
             self.screen.clearPrompt(self.prompt.row);
             self.prompt.row = self.screen.screenRow(self.screen.cursor.y);
+            self.prompt.last = self.prompt.row;
         }
         const placements = self.images[0].placements.items;
-        const positions = try self.allocator.alloc(screen_module.Position, tracked.len + placements.len);
+        // The prompt's first and last rows move with their cells too.
+        const positions = try self.allocator.alloc(screen_module.Position, tracked.len + placements.len + 2);
         defer self.allocator.free(positions);
         @memcpy(positions[0..tracked.len], tracked);
-        for (placements, positions[tracked.len..]) |p, *at| at.* = .{ .row = p.row, .col = p.col };
+        for (placements, positions[tracked.len..][0..placements.len]) |p, *at| at.* = .{ .row = p.row, .col = p.col };
+        const ends = positions[tracked.len + placements.len ..];
+        ends[0] = .{ .row = self.prompt.row orelse 0, .col = 0 };
+        ends[1] = .{ .row = self.prompt.last orelse 0, .col = 0 };
         try self.screen.resizeTracking(cols, rows, positions);
         @memcpy(tracked, positions[0..tracked.len]);
-        for (placements, positions[tracked.len..]) |*p, at| if (!p.virtual) {
+        for (placements, positions[tracked.len..][0..placements.len]) |*p, at| if (!p.virtual) {
             p.row = at.row;
             p.col = at.col;
         };
+        if (self.prompt.row != null) self.prompt.row = ends[0].row;
+        if (self.prompt.last != null) self.prompt.last = ends[1].row;
     }
 
     /// Take a theme's colors as the defaults, as `setColors` does.
@@ -289,6 +317,7 @@ pub const Terminal = struct {
 
     /// Called by the parser for each action.
     pub fn action(self: *Terminal, value: Action) void {
+        defer if (self.prompt.active) self.followPrompt();
         switch (value) {
             .print => |cp| self.screen.print(cp),
             .execute => |byte| self.execute(byte),
@@ -308,6 +337,21 @@ pub const Terminal = struct {
                 self.reply(response.write(&buffer) catch return);
             },
         }
+    }
+
+    /// Keep the prompt's rows as the cursor moves in it: down to where a
+    /// long command wraps or a multiline one goes on, and to where the
+    /// shell draws it again after clearing the screen above it.
+    fn followPrompt(self: *Terminal) void {
+        const s = &self.screen;
+        if (s.onAlternate()) return;
+        const here = s.screenRow(s.cursor.y);
+        if (self.prompt.row) |row| if (here < row) {
+            self.prompt.row = here;
+            self.prompt.last = here;
+            return;
+        };
+        if (self.prompt.last == null or here > self.prompt.last.?) self.prompt.last = here;
     }
 
     fn execute(self: *Terminal, byte: u8) void {
@@ -396,6 +440,8 @@ pub const Terminal = struct {
             'J' => {
                 const mode = erase(p.get(0, 0)) orelse return;
                 s.eraseDisplay(mode);
+                // What the prompt took below the cursor is gone.
+                if (self.prompt.active and mode == .below and !s.onAlternate()) self.prompt.last = s.screenRow(s.cursor.y);
                 // Clearing the screen clears its images too.
                 if (mode == .all) self.activeImages().clear();
             },
@@ -757,7 +803,7 @@ pub const Terminal = struct {
         switch (mark[0]) {
             'A', 'N' => {
                 if (self.screen.onAlternate()) return;
-                self.prompt = .{ .active = true, .row = here };
+                self.prompt = .{ .active = true, .row = here, .last = here };
             },
             'B', 'I', 'P' => {
                 if (self.screen.onAlternate()) return;

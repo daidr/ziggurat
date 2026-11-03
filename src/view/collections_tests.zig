@@ -688,3 +688,80 @@ test "a table's scroll bar drags from where its thumb is pressed, to either end"
     try testing.expectEqual(@as(f64, 0), app.state.scrollOffset());
     try testing.expectEqual(@as(usize, 0), app.selection.items().len);
 }
+
+const file_kind = 0x66696c65;
+/// A table beside a folder that takes its rows dragged out.
+const Mover = struct {
+    files: Files = .{},
+    dropped: ?u64 = null,
+    over: bool = false,
+    fn build(self: *Mover, v: *View) anyerror!void {
+        try v.row(.{ .grow = 1, .self_align = .stretch, .gap = 20 });
+        try self.files.build(v);
+        self.over = false;
+        switch (try v.dropTarget(.{ .kind = file_kind }, .{ .key = 2, .width = 120, .height = 120 })) {
+            .over => self.over = true,
+            .dropped => |drop| self.dropped = drop.data.value.value,
+            .none => {},
+        }
+        try v.text("Trash", .{});
+        try v.end();
+        try v.end();
+    }
+};
+
+test "rows drag out of a table with how many go, for targets elsewhere to take" {
+    var app: Mover = .{};
+    app.files.init(.multiple);
+    app.files.count = 10;
+    app.files.options.drag_rows = file_kind;
+    var f: Fixture = .{};
+    try f.start(&app);
+    const b = (try f.leaf()).bounds;
+    const trash = (try f.h.find(.{ .text = "Trash" })).bounds;
+    // Rows 1 and 2 chosen; a drag from row 2 carries both.
+    try f.click(50, Fixture.rowY(1), .{});
+    try f.click(50, Fixture.rowY(2), .{ .control = true });
+    try testing.expectEqualSlices(u64, &.{ 17, 27 }, app.files.selection.items());
+    try f.h.press(b.x + 50, b.y + Fixture.rowY(2), .{});
+    try f.h.moveTo(b.x + 50, b.y + Fixture.rowY(2) + 20);
+    try f.h.moveTo(trash.x + 4, trash.y + 4);
+    try testing.expect(f.h.view.drag_ghost != null and f.h.view.insert_mark == null);
+    try testing.expectEqualStrings("bravo", f.h.view.drag_label);
+    try testing.expectEqual(@as(u32, 2), f.h.view.drag_count);
+    const pill = f.h.view.dragBadge().?;
+    try testing.expectEqualStrings("2", pill.text());
+    try testing.expect(pill.rect.x > trash.x + 4 and pill.rect.y + pill.rect.height < trash.y + 4);
+    try testing.expect(app.over and f.h.view.drop_mark != null);
+    try f.h.release(trash.x + 4, trash.y + 4);
+    try testing.expectEqual(@as(?u64, 2), app.dropped);
+    // The choice the drag carried stays; nothing moved in the table.
+    try testing.expectEqualSlices(u64, &.{ 17, 27 }, app.files.selection.items());
+    try testing.expect(app.files.moved == null);
+    try testing.expect(f.h.view.drag_ghost == null);
+    // A row not chosen goes alone, chosen as it is pressed.
+    app.dropped = null;
+    try f.h.advance(std.time.ns_per_s);
+    try f.h.press(b.x + 50, b.y + Fixture.rowY(5), .{});
+    try f.h.moveTo(trash.x + 4, trash.y + 4);
+    try testing.expectEqual(@as(u32, 1), f.h.view.drag_count);
+    try testing.expect(f.h.view.dragBadge() == null);
+    try f.h.release(trash.x + 4, trash.y + 4);
+    try testing.expectEqual(@as(?u64, 5), app.dropped);
+    try testing.expectEqualSlices(u64, &.{57}, app.files.selection.items());
+    // Let go over the table itself, nothing takes them.
+    app.dropped = null;
+    try f.h.advance(std.time.ns_per_s);
+    try f.h.drag(b.x + 50, b.y + Fixture.rowY(3), b.x + 50, b.y + Fixture.rowY(6), 3);
+    try testing.expect(app.dropped == null and app.files.moved == null);
+}
+
+test "a table cannot both drag its rows out and reorder them" {
+    var app: Files = .{};
+    app.init(.multiple);
+    app.options.drag_rows = file_kind;
+    app.options.reorder = true;
+    var storage: Storage = .{};
+    var h = Harness.init(&app, Files.build, storage.buffers(), .{});
+    try testing.expectError(error.InvalidValue, h.render());
+}

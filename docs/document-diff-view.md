@@ -181,7 +181,13 @@ The editable View numbers its lines too, with the same `line_numbers` and
 one gutter with the old and the new number side by side, the old one on
 deleted rows and the new one on the others. The columns, where the text,
 the caret and the pointer go, start after the gutters. Segments start with
-a divider line across their side; the editable View shows no header bands.
+a divider line across their side, or, with `Segments.headers`, the header
+band the read-only View shows: across both sides (the whole width in a
+unified view) over the segment's first row, whose text, caret and line
+numbers go below it. The band is part of the row's height (`Row.band`, with
+the header text in `Row.header`): on each side the line of that row has it
+as space before its text, and a side with no line there has it in the gap
+that aligns the sides.
 
 ## Alignment and limits
 
