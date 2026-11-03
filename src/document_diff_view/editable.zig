@@ -17,6 +17,7 @@ const intraline = @import("intraline.zig");
 const context = @import("context_index.zig");
 const coordinates = @import("coordinates.zig");
 const hatch = @import("hatch.zig");
+const gutters = @import("gutter.zig");
 pub const ContextOptions = context.Options;
 pub const ContextKey = struct { serial: u64, id: u64 };
 pub const ContextRegion = struct { key: ContextKey, collapsed: bool, a: @import("ziggurat_document_diff").LineRange, b: @import("ziggurat_document_diff").LineRange, headers: [2]?ui.Rect };
@@ -140,7 +141,9 @@ const MarkBuffers = struct {
         allocator.free(previous.scratch);
     }
 };
-const Snapshot = struct { bounds: ui.Rect, columns: [2]ui.Rect, parameters: Parameters, font: Font = .{}, revisions: [2]u64, view_versions: [2]u64, serial: u64, projected: bool, composing: bool, rows: [max_rows]Row = undefined, count: usize = 0 };
+/// `gutters` are the line numbers' columns before each side's text, empty
+/// without line numbers; a unified view's first holds both numbers.
+const Snapshot = struct { bounds: ui.Rect, columns: [2]ui.Rect, gutters: [2]ui.Rect = @splat(.{ .x = 0, .y = 0, .width = 0, .height = 0 }), parameters: Parameters, font: Font = .{}, revisions: [2]u64, view_versions: [2]u64, serial: u64, projected: bool, composing: bool, rows: [max_rows]Row = undefined, count: usize = 0 };
 
 /// Explicit affine companion borrow. Close the native publisher before close;
 /// Context storage covers the installed Space through native client unbinding.
@@ -513,6 +516,43 @@ pub const View = opaque {
             return err;
         };
     }
+    /// The line numbers of the rows in view in their gutters, on each
+    /// row's first line: a split view's sides each in their own, a unified
+    /// view's old and new numbers side by side. A row that starts a
+    /// segment (`Parameters.numbering`) has a line over it.
+    fn drawNumbers(frame: *ui.Frame, snapshot: *const Snapshot, mode: Mode, colors: Colors) !void {
+        const parameters = snapshot.parameters;
+        const size = parameters.font.size * 0.85;
+        for (snapshot.rows[0..snapshot.count]) |row| for ([_]Side{ .a, .b }) |side| {
+            const record = (if (side == .a) row.a else row.b) orelse continue;
+            const at = @backingInt(side);
+            var gutter = snapshot.gutters[if (mode == .unified) 0 else at];
+            if (gutter.width <= 0) continue;
+            if (mode == .unified) {
+                gutter.width /= 2;
+                if (side == .b) gutter.x += gutter.width;
+            }
+            const y = snapshot.columns[if (mode == .unified) 0 else at].y + row.y;
+            const box = ui.layout.intersect(.{ .x = gutter.x, .y = y, .width = gutter.width, .height = row.height }, gutter);
+            if (box.height <= 0) continue;
+            if (row.hunk != null) frame.rect(box, if (side == .a and (mode == .split or row.b == null)) colors.deleted else colors.added);
+            const which: gutters.Side = @fromBackingInt(@intCast(at));
+            if (parameters.numbering) |numbering| if (numbering.startsSegment(which, record) and (mode == .split or side == .b or row.b == null)) {
+                const across = if (mode == .unified) snapshot.bounds.width else gutter.width + snapshot.columns[at].width;
+                frame.rect(.{ .x = gutter.x - if (mode == .unified and side == .b) gutter.width else 0, .y = y, .width = across, .height = 1 }, colors.divider);
+            };
+            const value = if (parameters.numbering) |numbering| numbering.lineOf(which, record) else record;
+            var buffer: [24]u8 = undefined;
+            const text = std.fmt.bufPrint(&buffer, "{d}", .{value + 1}) catch unreachable;
+            const text_width = @as(f32, @floatFromInt(text.len)) * size * gutters.advance;
+            const label: ui.Rect = .{ .x = gutter.x + @max(0, gutter.width - size / 2 - text_width), .y = y, .width = text_width + size, .height = size * 1.5 };
+            try frame.pushClip(gutter);
+            defer frame.popClip() catch |err| {
+                frame.failure = frame.failure orelse err;
+            };
+            frame.labelFont(label, text, colors.line_number, .{ .size = size, .monospace = true });
+        };
+    }
     fn drawBody(frame: *ui.Frame, bounds: ui.Rect, colors: Colors, value: *State) anyerror!void {
         const snapshot = try value.current(bounds, frame.size.scale);
         try frame.pushClip(bounds);
@@ -533,6 +573,7 @@ pub const View = opaque {
             }
         };
         for (value.marks.storage[0..value.marks.count]) |mark| frame.rect(mark.rect, if (mark.side == .a) colors.deleted_detail else colors.added_detail);
+        if (snapshot.projected) try drawNumbers(frame, snapshot, value.mode, colors);
         if (value.mode == .unified) {
             try value.adapters[1].draw(frame, snapshot.columns[1], .{ .text = colors.text });
             if (value.window.isClosed()) return error.Closed;
@@ -1293,6 +1334,32 @@ const State = struct {
         if (!ui.layout.validRect(bounds) or bounds.width < 80 or bounds.height <= 0 or bounds.width > 1000000 or bounds.height > 1000000) return error.InvalidGeometry;
         if (parameters.font.family.len > 255 or parameters.font.locale.len > 127) return error.InvalidParameters;
         var columns: [2]ui.Rect = if (self.mode == .unified) @splat(bounds) else self.splitColumns(bounds);
+        // Each side's gutter is as wide as the largest number it shows; a
+        // unified view's holds the old and the new number side by side.
+        var gutter_rects: [2]ui.Rect = @splat(.{ .x = 0, .y = 0, .width = 0, .height = 0 });
+        if (parameters.line_numbers) {
+            var largest: usize = 0;
+            for (self.documents(), 0..) |document, side| {
+                const total = try document.lineCount();
+                if (total == 0) continue;
+                const last = if (parameters.numbering) |numbering| numbering.lineOf(@fromBackingInt(@intCast(side)), total - 1) else total - 1;
+                largest = @max(largest, last + 1);
+            }
+            const single = gutters.width(gutters.digits(largest), parameters.font.size * 0.85);
+            if (self.mode == .unified) {
+                const width = @min(bounds.width / 3, 2 * single);
+                gutter_rects[0] = .{ .x = bounds.x, .y = bounds.y, .width = width, .height = bounds.height };
+                for (&columns) |*column| {
+                    column.x += width;
+                    column.width -= width;
+                }
+            } else for (&columns, &gutter_rects) |*column, *gutter| {
+                const width = @min(column.width / 3, single);
+                gutter.* = .{ .x = column.x, .y = column.y, .width = width, .height = column.height };
+                column.x += width;
+                column.width -= width;
+            }
+        }
         if (self.context_options != null) for (&columns) |*column| {
             column.x += 12;
             column.width -= 12;
@@ -1309,7 +1376,7 @@ const State = struct {
             const stats = try adapter.stats();
             if (token == null and stats.visible_paragraphs < stats.paragraphs) return error.FoldedDocument;
         }
-        var candidate: Snapshot = .{ .bounds = bounds, .columns = columns, .parameters = parameters, .revisions = undefined, .view_versions = undefined, .serial = if (display) |value| value.serial else 0, .projected = display != null and !composing, .composing = composing };
+        var candidate: Snapshot = .{ .bounds = bounds, .columns = columns, .gutters = gutter_rects, .parameters = parameters, .revisions = undefined, .view_versions = undefined, .serial = if (display) |value| value.serial else 0, .projected = display != null and !composing, .composing = composing };
         candidate.font.set(parameters.font);
         candidate.parameters.font = candidate.font.options;
         var index: ?ix.Index = null;
@@ -1781,7 +1848,9 @@ const State = struct {
                     }
                     break;
                 };
-            } else for (snapshot.columns, 0..) |column, side| if (column.contains(event_value.pointer_down.position)) {
+            } else for (snapshot.columns, snapshot.gutters, 0..) |column, gutter, side| if (column.contains(event_value.pointer_down.position) or gutter.contains(event_value.pointer_down.position)) {
+                // A press on a line's number goes to its side, at the start
+                // of the line.
                 try self.focus(@fromBackingInt(@intCast(side)));
                 break;
             };

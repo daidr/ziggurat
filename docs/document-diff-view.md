@@ -166,9 +166,22 @@ const segments: diff_view.Segments = .{
 parameters.numbering = segments.numbering(); // keep `segments` alive
 ```
 
+Give `Segments.headers` the hunks' headers (`partial.headers`, as
+`@@ -12,7 +12,8 @@ func main`) and the first row of each segment, the first
+included, shows its header in a band across both sides over its text, in
+`Colors.header` with the text in `Colors.line_number`; the band replaces the
+divider line there. `rowInfo` content rectangles start below the band.
+
 Changing `line_numbers` or the numbering reshapes the visible rows once at
 the new width. Numbers are recorded as ordinary label commands in `draw`,
-which allocates nothing. The editable surfaces do not show line numbers yet.
+which allocates nothing.
+
+The editable View numbers its lines too, with the same `line_numbers` and
+`numbering`: a split view has a gutter before each side, and a unified view
+one gutter with the old and the new number side by side, the old one on
+deleted rows and the new one on the others. The columns, where the text,
+the caret and the pointer go, start after the gutters. Segments start with
+a divider line across their side; the editable View shows no header bands.
 
 ## Alignment and limits
 

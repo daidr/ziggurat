@@ -461,6 +461,17 @@ fn run(allocator: std.mem.Allocator) !void {
     try state.view.prepare(bounds, state.parameters);
     try state.paint();
     try std.testing.expect((try state.view.rowInfo(&rows))[0].a_content.?.x > numbered_x);
+    // With the hunks' headers, each segment's first row has its header in a
+    // band over its text, which moves down by the band.
+    const plain_top = (try state.view.rowInfo(&rows))[0].a_content.?.y;
+    const headed: viewing.Segments = .{ .a_starts = segments.a_starts, .b_starts = segments.b_starts, .a_lines = segments.a_lines, .b_lines = segments.b_lines, .headers = &.{ "@@ -100,2 +100,2 @@", "@@ -500,2 +500,2 @@ fn later()" } };
+    state.parameters.numbering = headed.numbering();
+    try state.view.prepare(bounds, state.parameters);
+    try state.paint();
+    const headed_rows = try state.view.rowInfo(&rows);
+    try std.testing.expect(headed_rows[0].a_content.?.y > plain_top);
+    try std.testing.expect(headed_rows[0].bounds.height > headed_rows[0].a_content.?.height);
+    try std.testing.expectEqual(@as(u32, 0xe1e6ef), try state.pixel(bounds.x + bounds.width - 4, headed_rows[0].bounds.y + 2));
     state.parameters.numbering = null;
     state.parameters.line_numbers = false;
     try state.view.prepare(bounds, state.parameters);
