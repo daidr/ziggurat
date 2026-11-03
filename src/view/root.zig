@@ -8,6 +8,7 @@ const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const animation = @import("ziggurat_animation");
 pub const matched = @import("matched.zig");
+pub const morph = @import("morph.zig");
 pub const Match = matched.Match;
 
 pub const layout = ui.layout;
@@ -908,6 +909,10 @@ pub const Node = struct {
     passthrough: bool = false,
     /// The theme of the innermost `Style.theme` around or on the node.
     theme: ?*const Theme = null,
+    /// A shared element flying (`Match.fly`) paints over the rest of its
+    /// layer, out of the clips and opacity around it: 1 for the one a
+    /// flight leaves, under 2 for the one flying in; 0 in place.
+    lifted: u8 = 0,
     parent: u32 = none,
     first_child: u32 = none,
     last_child: u32 = none,
@@ -3981,6 +3986,12 @@ pub const View = struct {
         // Shared elements move what is drawn, not the arranged boxes input
         // routing just recorded.
         if (self.matches.apply(all, self.now, self.preferences.reduce_motion)) |deadline| self.wakeAt(deadline);
+        self.matches.keepCopies(all, theme, copyTextColor);
+    }
+    /// The color a flying text node's copy writes in.
+    fn copyTextColor(window_theme: Theme, node: *const Node) u32 {
+        const theme = if (node.theme) |inner| inner.* else window_theme;
+        return node.style.color orelse theme.palette.text;
     }
     fn measure(self: *View, window_theme: Theme, measurer: Measurer) Error!void {
         const all = self.buffers.nodes[0..self.len];
@@ -4577,7 +4588,9 @@ pub const View = struct {
         const start = if (frame) target.inertMark() else {};
         var floating: [max_floating]u32 = undefined;
         var floating_len: usize = 0;
-        try self.paintRange(target, theme, 0, all.len, &floating, &floating_len);
+        var lifted: Lifted = .{};
+        try self.paintRange(target, theme, 0, all.len, &floating, &floating_len, &lifted);
+        try self.paintLifted(target, theme, &lifted, true, &floating, &floating_len);
         var modal: u32 = none;
         for (floating[0..floating_len]) |index| {
             // One dialog is shown at a time; it goes over everything else.
@@ -4671,9 +4684,130 @@ pub const View = struct {
             try target.popupList(node.id, bounds, name, if (anchor.kind == .combo_box) anchor.id else ui.accessibility.root_id);
         }
         if (node.child_count == 0) return;
+        var lifted: Lifted = .{};
         try target.pushClip(bounds);
-        try self.paintRange(target, theme, index + 1, node.end, &nested.items, &nested.len);
+        try self.paintRange(target, theme, index + 1, node.end, &nested.items, &nested.len, &lifted);
         try target.popClip();
+        try self.paintLifted(target, theme, &lifted, false, &nested.items, &nested.len);
+    }
+
+    /// Shared elements flying over the rest of their layer.
+    const Lifted = struct { items: [2 * matched.capacity]u32 = undefined, len: usize = 0 };
+    /// Paint the shared elements flying in a layer over the rest of it, out
+    /// of the clips and opacity around them: those a flight leaves under
+    /// those flying in, and, over the window's content (`copies`), the
+    /// copies of those gone.
+    fn paintLifted(self: *const View, target: anytype, window_theme: Theme, lifted: *const Lifted, copies: bool, floating: *[max_floating]u32, floating_len: *usize) !void {
+        const all = self.buffers.nodes[0..self.len];
+        inline for (.{ 1, 2 }) |rank| {
+            if (copies) for (self.matches.copyDraws()) |entry| if (entry.rank == rank) try self.paintCopy(target, entry);
+            for (lifted.items[0..lifted.len]) |index| {
+                const node = &all[index];
+                if (node.lifted != rank) continue;
+                const theme = if (node.theme) |inner| inner.* else window_theme;
+                const frame = @TypeOf(target) == *ui.Frame;
+                const previous = if (frame) (if (node.theme) |inner| target.pushTheme(inner) else target.theme_override) else {};
+                defer if (frame) target.popTheme(previous);
+                try self.paintRange(target, theme, index, node.end, floating, floating_len, null);
+            }
+        }
+    }
+    /// Paint a copy of a flying node gone, as its look shows it.
+    fn paintCopy(self: *const View, target: anytype, entry: matched.CopyDraw) !void {
+        const kept = entry.copy;
+        if (kept.len == 0) return;
+        const look = entry.look;
+        const pose = matched.poseFor(kept.bounds, look);
+        const outer = try self.openEffects(target, .{ .opacity = std.math.clamp(look.opacity, 0, 1), .pose = if (pose.isIdentity()) null else pose }, kept.bounds);
+        const Open = struct { end: u8, effects: usize, clip: bool };
+        var stack: [matched.copy_nodes]Open = undefined;
+        var depth: usize = 0;
+        for (kept.nodes[0..kept.len], 0..) |piece, at| {
+            while (depth > 0 and stack[depth - 1].end <= at) {
+                depth -= 1;
+                if (stack[depth].clip) try target.popClip();
+                for (0..stack[depth].effects) |_| try target.endEffect();
+            }
+            const top = at == 0;
+            const background = if (top) look.background else piece.background;
+            const border = if (top) look.border else piece.border;
+            const radius = if (top) look.radius else piece.radius;
+            const effects = if (piece.opacity < 1) try self.openEffects(target, .{ .opacity = piece.opacity }, piece.bounds) else 0;
+            if (background) |color| target.roundedRect(piece.bounds, radius, ui.Color.rgb(color));
+            if (border) |color| target.strokeRect(piece.bounds, radius, piece.border_width, ui.Color.rgb(color));
+            if (piece.text_len > 0) target.labelFont(piece.bounds, kept.textOf(piece), if (top) look.color orelse piece.color else piece.color, piece.font orelse .{});
+            if (piece.clip) try target.pushClip(piece.bounds);
+            if (piece.end > at + 1 and depth < stack.len) {
+                stack[depth] = .{ .end = piece.end, .effects = effects, .clip = piece.clip };
+                depth += 1;
+            } else {
+                if (piece.clip) try target.popClip();
+                for (0..effects) |_| try target.endEffect();
+            }
+        }
+        while (depth > 0) {
+            depth -= 1;
+            if (stack[depth].clip) try target.popClip();
+            for (0..stack[depth].effects) |_| try target.endEffect();
+        }
+        for (0..outer) |_| try target.endEffect();
+    }
+    /// Paint a text node whose characters morph from another text's
+    /// (`Match.morph`): those the texts share go from where they were to
+    /// where they are, growing or shrinking to their size, and the others
+    /// fade, the old ones moving with the box.
+    fn paintMorph(self: *const View, target: anytype, node: *const Node, color: u32, value: matched.Morph) !void {
+        const Width = struct {
+            measurer: Measurer,
+            font: ?Font,
+            fn of(context: @This(), run: []const u8) f32 {
+                return context.measurer.textSize(run, context.font).width;
+            }
+        };
+        const to_font = node.style.font orelse Font{};
+        const from_font = value.font orelse Font{};
+        const t = std.math.clamp(value.t, 0, 1);
+        const box = matched.Look.mix(.{ .bounds = value.bounds }, .{ .bounds = node.bounds }, t).bounds;
+        const old_color = value.color orelse color;
+        var old_chars: [morph.max_chars]morph.Char = undefined;
+        var new_chars: [morph.max_chars]morph.Char = undefined;
+        const old = morph.layout(value.from, &old_chars, Width{ .measurer = self.measurer, .font = value.font }, Width.of);
+        const new = morph.layout(node.text, &new_chars, Width{ .measurer = self.measurer, .font = node.style.font }, Width.of);
+        const new_bounds = if (node.rtl) trailing(node.bounds, node.measured.preferred.width) else node.bounds;
+        if (old == null or new == null) {
+            // Too long to pair: the texts crossfade in the box.
+            try fadeText(target, box, value.from, old_color, from_font, morph.fadeOut(t));
+            try fadeText(target, box, node.text, color, to_font, morph.fadeIn(t));
+            return;
+        }
+        var pairs: [morph.max_chars]i16 = undefined;
+        var taken: [morph.max_chars]bool = undefined;
+        morph.pair(value.from, old.?, node.text, new.?, &pairs, &taken);
+        const from_line = self.measurer.textSize("", value.font).height;
+        const to_line = self.measurer.textSize("", node.style.font).height;
+        const old_mid = value.bounds.y + value.bounds.height / 2;
+        const new_mid = new_bounds.y + new_bounds.height / 2;
+        const box_mid = box.y + box.height / 2;
+        for (old.?, 0..) |char, i| if (!taken[i]) {
+            const rect: Rect = .{ .x = box.x + char.x, .y = box_mid - from_line / 2, .width = char.width + from_font.size, .height = from_line };
+            try fadeText(target, rect, value.from[char.start..][0..char.len], old_color, from_font, morph.fadeOut(t));
+        };
+        for (new.?, 0..) |char, j| {
+            const piece = node.text[char.start..][0..char.len];
+            if (pairs[j] < 0) {
+                const rect: Rect = .{ .x = box.x + char.x, .y = box_mid - to_line / 2, .width = char.width + to_font.size, .height = to_line };
+                try fadeText(target, rect, piece, color, to_font, morph.fadeIn(t));
+                continue;
+            }
+            const source = old.?[@intCast(pairs[j])];
+            var font = to_font;
+            font.size = lerpf(from_font.size, to_font.size, t);
+            const line = lerpf(from_line, to_line, t);
+            const mid = lerpf(old_mid, new_mid, t);
+            const x = lerpf(value.bounds.x + source.x, new_bounds.x + char.x, t);
+            const rect: Rect = .{ .x = x, .y = mid - line / 2, .width = lerpf(source.width, char.width, t) + font.size, .height = line };
+            try fadeText(target, rect, piece, color, font, 1);
+        }
     }
 
     /// The outline of the target under a drag, the line where a reordered
@@ -4699,7 +4833,9 @@ pub const View = struct {
 
     /// Paint nodes `start..stop` in order, skipping floating subtrees, whose
     /// indices are added to `floating` when they are shown.
-    fn paintRange(self: *const View, target: anytype, window_theme: Theme, start: usize, stop: usize, floating: *[max_floating]u32, floating_len: *usize) !void {
+    /// Shared elements flying are added to `lifted`, to paint over the
+    /// rest, unless it is null, as inside one.
+    fn paintRange(self: *const View, target: anytype, window_theme: Theme, start: usize, stop: usize, floating: *[max_floating]u32, floating_len: *usize, lifted: ?*Lifted) !void {
         const all = self.buffers.nodes[0..self.len];
         // Clips, effects, caches, themes and input scopes open in node order
         // and close, innermost first, where their node's subtree ends.
@@ -4717,6 +4853,12 @@ pub const View = struct {
                 at = node.end;
                 continue;
             }
+            if (node.lifted != 0) if (lifted) |list| if (list.len < list.items.len) {
+                list.items[list.len] = @intCast(at);
+                list.len += 1;
+                at = if (node.isContainer()) node.end else at + 1;
+                continue;
+            };
             if (node.floats()) {
                 if (!node.hidden()) {
                     if (floating_len.* == max_floating) return error.TooManyItems;
@@ -4816,7 +4958,7 @@ pub const View = struct {
                 },
                 .text => {
                     const color = style.color orelse if (!style.enabled) theme.palette.disabled_text else if (node.row != none and all[node.row].checked) theme.palette.on_accent else theme.palette.text;
-                    if (style.wrap) self.paintWrapped(target, node, bounds, color) else target.labelFont(if (node.rtl) trailing(bounds, node.measured.preferred.width) else bounds, node.text, color, style.font orelse .{});
+                    if (self.matches.morphOf(node.id)) |value| try self.paintMorph(target, node, color, value) else if (style.wrap) self.paintWrapped(target, node, bounds, color) else target.labelFont(if (node.rtl) trailing(bounds, node.measured.preferred.width) else bounds, node.text, color, style.font orelse .{});
                 },
                 .tree_row => {
                     var row_control = control;
@@ -5176,6 +5318,18 @@ pub fn tooltipId(id: u64) u64 {
     return if (value == 0) 1 else value;
 }
 /// The end of `rect` that `width` takes, for text starting at the right.
+fn lerpf(a: f32, b: f32, t: f32) f32 {
+    return a + (b - a) * t;
+}
+/// A label at `alpha`, in an opacity group where the target has them.
+fn fadeText(target: anytype, bounds: Rect, text: []const u8, color: u32, font: Font, alpha: f32) !void {
+    if (alpha <= 0 or text.len == 0) return;
+    const opacity: u8 = @intFromFloat(@round(std.math.clamp(alpha, 0, 1) * 255));
+    const group = @TypeOf(target) == *ui.Frame and opacity < 255;
+    if (group) try target.beginGroup(bounds, .{ .opacity = opacity });
+    target.labelFont(bounds, text, color, font);
+    if (group) try target.endGroup();
+}
 fn trailing(rect: Rect, width: f32) Rect {
     const used = @min(rect.width, width);
     return .{ .x = rect.x + rect.width - used, .y = rect.y, .width = used, .height = rect.height };
@@ -6659,6 +6813,7 @@ test {
     _ = @import("gradient.zig");
     _ = @import("style_tests.zig");
     _ = @import("matched.zig");
+    _ = @import("morph.zig");
 }
 
 test "a shared element comes from where its match showed in the frame before" {
@@ -6727,6 +6882,140 @@ test "a shared element comes from where its match showed in the frame before" {
     view.preferences.reduce_motion = true;
     try Pass.run(&view, 4000, false, false);
     try std.testing.expect(Pass.find(&view, 1).style.pose == null);
+}
+
+test "a flying shared element paints over the rest and flies on as a copy once gone" {
+    var storage: Storage(16, 128) = .{};
+    var view = View.init(storage.buffers());
+    const Pass = struct {
+        // 0: the grid; 1: the detail, the grid gone; 2: both gone.
+        fn run(v: *View, now: u64, stage: u8) !void {
+            v.reset(.{}, null);
+            v.now = now;
+            const tween: animation.Motion = .{ .tween = .{ .duration_ns = 100, .easing = .linear } };
+            try v.column(.{});
+            try v.column(.{ .key = 10, .clip = true, .height = 50, .opacity = 0.5 });
+            if (stage == 0) {
+                try v.column(.{ .key = 1, .width = 40, .height = 40, .background = 0xff0000, .match = .{ .key = 7, .motion = tween, .fly = true } });
+                try v.text("thumb", .{ .key = 11 });
+                try v.end();
+            } else if (stage == 1) {
+                try v.column(.{ .key = 2, .width = 200, .height = 100, .background = 0x0000ff, .match = .{ .key = 7, .motion = tween, .fly = true } });
+                try v.text("detail", .{ .key = 12 });
+                try v.end();
+            }
+            try v.end();
+            try v.text("after", .{ .key = 13 });
+            try v.end();
+            try v.finish();
+            try v.arrange(.{ .x = 0, .y = 0, .width = 400, .height = 300 }, .{}, .{});
+        }
+        fn find(v: *View, wanted: u64) *Node {
+            for (v.buffers.nodes[0..v.len]) |*node| if (node.style.key == wanted) return node;
+            unreachable;
+        }
+        fn labelAt(r: *const Recorder, bounds: Rect) ?usize {
+            for (r.calls[0..r.len], 0..) |call, at| if (call.kind == .text and call.bounds.x == bounds.x and call.bounds.y == bounds.y) return at;
+            return null;
+        }
+    };
+    try Pass.run(&view, 1000, 0);
+    const thumb = Pass.find(&view, 1).id;
+    try std.testing.expect(view.matches.copyDraws().len == 0);
+    try Pass.run(&view, 1025, 1);
+    // The detail flies over the rest of the window, out of the clip and
+    // opacity of the column it is in; the grid, gone, goes with it as a
+    // copy, under it.
+    const detail = Pass.find(&view, 2);
+    try std.testing.expectEqual(@as(u8, 2), detail.lifted);
+    try std.testing.expectEqual(@as(usize, 1), view.matches.copyDraws().len);
+    const left = view.matches.copyDraws()[0];
+    try std.testing.expectEqual(@as(u8, 1), left.rank);
+    try std.testing.expectEqual(thumb, left.copy.id);
+    try std.testing.expectEqual(@as(?u32, 0xff0000), left.look.background);
+    var recorder: Recorder = .{};
+    try view.paint(&recorder);
+    const lifted_label = Pass.labelAt(&recorder, Pass.find(&view, 12).bounds).?;
+    const after = Pass.labelAt(&recorder, Pass.find(&view, 13).bounds).?;
+    try std.testing.expect(lifted_label > after);
+    // The copy writes the grid's text, which is gone from the build.
+    var copied = false;
+    for (left.copy.nodes[0..left.copy.len]) |piece| if (std.mem.eql(u8, left.copy.textOf(piece), "thumb")) {
+        copied = true;
+    };
+    try std.testing.expect(copied);
+    // Gone halfway with the nodes around it, the detail flies on as a copy,
+    // fading out by the end of the way.
+    try Pass.run(&view, 1050, 1);
+    try Pass.run(&view, 1075, 2);
+    try Pass.run(&view, 1100, 2);
+    var flying: ?matched.CopyDraw = null;
+    for (view.matches.copyDraws()) |entry| if (entry.rank == 2) {
+        flying = entry;
+    };
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), flying.?.look.opacity, 1e-3);
+    try std.testing.expect(flying.?.look.bounds.width > 40 and flying.?.look.bounds.width < 200);
+    recorder = .{};
+    try view.paint(&recorder);
+    try Pass.run(&view, 1125, 2);
+    try std.testing.expect(!view.matches.moving() and view.matches.copyDraws().len == 0);
+    // Nothing flies any more, so the copies are forgotten.
+    try Pass.run(&view, 1200, 2);
+    for (view.matches.copies) |entry| try std.testing.expectEqual(@as(u64, 0), entry.id);
+}
+
+test "a text morphs its characters in place and from the text of its match" {
+    var storage: Storage(16, 128) = .{};
+    var view = View.init(storage.buffers());
+    const Pass = struct {
+        fn run(v: *View, now: u64, value: []const u8, which: u64) !void {
+            v.reset(.{}, null);
+            v.now = now;
+            const tween: animation.Motion = .{ .tween = .{ .duration_ns = 100, .easing = .linear } };
+            try v.column(.{});
+            if (which == 2) try v.spacer(.{ .height = 40 });
+            try v.text(value, .{ .key = which, .font = if (which == 2) Font.heading1 else null, .match = .{ .key = 5, .motion = tween, .morph = true } });
+            try v.end();
+            try v.finish();
+            try v.arrange(.{ .x = 0, .y = 0, .width = 400, .height = 300 }, .{}, .{});
+        }
+        fn find(v: *View, wanted: u64) *Node {
+            for (v.buffers.nodes[0..v.len]) |*node| if (node.style.key == wanted) return node;
+            unreachable;
+        }
+        fn labels(v: *View) !usize {
+            var recorder: Recorder = .{};
+            try v.paint(&recorder);
+            var count: usize = 0;
+            for (recorder.calls[0..recorder.len]) |call| {
+                if (call.kind == .text) count += 1;
+            }
+            return count;
+        }
+    };
+    try Pass.run(&view, 1000, "12", 1);
+    try std.testing.expect(view.matches.morphOf(Pass.find(&view, 1).id) == null);
+    try std.testing.expectEqual(@as(usize, 1), try Pass.labels(&view));
+    // Changing in place, the characters it keeps stay and the new one fades
+    // in, one label each.
+    try Pass.run(&view, 1100, "123", 1);
+    const value = view.matches.morphOf(Pass.find(&view, 1).id).?;
+    try std.testing.expectEqualStrings("12", value.from);
+    try std.testing.expectEqual(@as(usize, 2), try Pass.labels(&view));
+    try Pass.run(&view, 1150, "123", 1);
+    try std.testing.expectEqual(@as(usize, 3), try Pass.labels(&view));
+    try Pass.run(&view, 1200, "123", 1);
+    try std.testing.expect(view.matches.morphOf(Pass.find(&view, 1).id) == null);
+    try std.testing.expectEqual(@as(usize, 1), try Pass.labels(&view));
+    // Another text of the match morphs from this one, its characters
+    // going from where they were to where they are, at their size.
+    try Pass.run(&view, 2000, "312", 2);
+    const node = Pass.find(&view, 2);
+    const from = view.matches.morphOf(node.id).?;
+    try std.testing.expectEqualStrings("123", from.from);
+    try std.testing.expect(node.style.pose == null);
+    try Pass.run(&view, 2050, "312", 2);
+    try std.testing.expectEqual(@as(usize, 3), try Pass.labels(&view));
 }
 
 test "embedded leaves measure themselves and paint in order" {
