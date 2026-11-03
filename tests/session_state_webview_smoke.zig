@@ -4,15 +4,18 @@ const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
+pub const panic = std.debug.FullPanic(@import("macos_panic.zig").panic);
 
 const linux = builtin.os.tag == .linux;
+/// WebKitGTK and WKWebView: explicit ephemeral storage, no WebView2 folder.
+const webkit = linux or builtin.os.tag == .macos;
 const registrations = [_]web.SchemeRegistration{.{ .name = "asset", .treat_as_secure = true }};
 const start = "<!doctype html><title>start</title><p>start</p>";
 const long = "<!doctype html><title>long</title><div style=\"height:5000px\">long</div><input id=f>";
 
 /// A page goes from / to /long and scrolls; its session, saved, comes back
 /// in a second View: /long again, Back to / included on Linux, with its
-/// scroll position. Windows saves the URI alone.
+/// scroll position. Windows and macOS save the URI alone.
 const Probe = struct {
     app: *z.App,
     windows: [2]z.Window,
@@ -31,8 +34,8 @@ const Probe = struct {
     fn options(self: *Probe, index: usize) web.Options {
         return .{
             .html = start,
-            .storage = if (linux) .ephemeral else .profile,
-            .user_data_folder = if (linux) "" else self.store,
+            .storage = if (webkit) .ephemeral else .profile,
+            .user_data_folder = if (webkit) "" else self.store,
             .custom_schemes = &registrations,
             .local = .{ .scheme = "asset", .resources = &.{.{ .path = "/long", .mime = "text/html", .bytes = long }} },
             .page_listener = .{ .context = self, .event = if (index == 0) first else second },
@@ -124,10 +127,10 @@ const Probe = struct {
 };
 
 pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    var gpa: std.heap.DebugAllocator(@import("macos_panic.zig").allocator_config) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    const store = if (linux) try allocator.dupe(u8, "") else blk: {
+    const store = if (webkit) try allocator.dupe(u8, "") else blk: {
         const local = try zio.getEnvVarOwned(allocator, "LOCALAPPDATA");
         defer allocator.free(local);
         break :blk try std.fs.path.join(allocator, &.{ local, "Ziggurat", "SessionStateSmoke" });

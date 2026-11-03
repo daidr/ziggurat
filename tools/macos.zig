@@ -727,8 +727,7 @@ pub fn buildDmg(allocator: std.mem.Allocator, options: DmgOptions) !void {
     try hdiutilRetrying(allocator, &.{ "hdiutil", "detach", disk.? });
     attached = false;
 
-    // LZMA makes the smallest images, for macOS 10.15 and later.
-    try command(allocator, &.{ "hdiutil", "convert", writable, "-format", "ULMO", "-ov", "-o", options.output });
+    try convertDmg(allocator, writable, options.output);
     if (!std.mem.eql(u8, options.identity, "-")) try command(allocator, &.{ "codesign", "--force", "--timestamp", "--sign", options.identity, options.output });
     if (options.notarize) |credentials| {
         try notarize(allocator, credentials, options.output);
@@ -736,6 +735,29 @@ pub fn buildDmg(allocator: std.mem.Allocator, options: DmgOptions) !void {
         // bare app, as updates do.
         try command(allocator, &.{ "xcrun", "stapler", "staple", options.app });
     }
+}
+
+/// The command that writes `writable` as a compressed, read-only image
+/// (LZMA, the smallest, for macOS 10.15 and later). Newer macOS fails
+/// `hdiutil convert` with "Resource temporarily unavailable" and asks for
+/// `diskutil image create from`, which overwrites the output as -ov does;
+/// systems whose diskutil has no image verb keep hdiutil.
+pub fn convertDmgArgs(diskutil_image: bool, writable: []const u8, output: []const u8) [8][]const u8 {
+    if (diskutil_image) return .{ "diskutil", "image", "create", "from", "--format", "ULMO", writable, output };
+    return .{ "hdiutil", "convert", writable, "-format", "ULMO", "-ov", "-o", output };
+}
+
+fn convertDmg(allocator: std.mem.Allocator, writable: []const u8, output: []const u8) !void {
+    const probe = run(allocator, &.{ "diskutil", "image", "create", "from", "-h" }) catch null;
+    const diskutil_image = if (probe) |result| result.ok else false;
+    try command(allocator, &convertDmgArgs(diskutil_image, writable, output));
+}
+
+test "disk images convert with diskutil where it has the image verb" {
+    try std.testing.expectEqualStrings("diskutil", convertDmgArgs(true, "rw.dmg", "out.dmg")[0]);
+    try std.testing.expectEqualStrings("out.dmg", convertDmgArgs(true, "rw.dmg", "out.dmg")[7]);
+    try std.testing.expectEqualStrings("hdiutil", convertDmgArgs(false, "rw.dmg", "out.dmg")[0]);
+    try std.testing.expectEqualStrings("-ov", convertDmgArgs(false, "rw.dmg", "out.dmg")[5]);
 }
 
 /// Submits a disk image to Apple's notary service, waits for the verdict

@@ -120,7 +120,7 @@ pub const Prepared = struct {
     fds: [5]c_int,
 
     pub fn prepare(allocator: std.mem.Allocator, process_main_thread_id: std.Thread.Id, absolute_root: []const u8, limits: Limits) !Prepared {
-        if (builtin.os.tag != .linux) return error.UnsupportedCapability;
+        if (builtin.os.tag != .linux and builtin.os.tag != .macos) return error.UnsupportedCapability;
         const worker = std.Thread.getCurrentId();
         if (worker == process_main_thread_id) return error.UiThreadForbidden;
         try limits.validate();
@@ -266,7 +266,7 @@ fn writePaths(output: []u8, root: []const u8) [4]usize {
     return ends;
 }
 fn closeHandles(fds: [5]c_int) void {
-    if (builtin.os.tag != .linux) return;
+    if (builtin.os.tag != .linux and builtin.os.tag != .macos) return;
     var at = fds.len;
     while (at != 0) {
         at -= 1;
@@ -433,6 +433,6 @@ test "profile close withdraws owned storage and rejects reentry through the fina
 }
 
 test "profile preparation has an explicit platform and worker boundary" {
-    const expected = if (builtin.os.tag == .linux) error.UiThreadForbidden else error.UnsupportedCapability;
+    const expected = if (builtin.os.tag == .linux or builtin.os.tag == .macos) error.UiThreadForbidden else error.UnsupportedCapability;
     try std.testing.expectError(expected, Prepared.prepare(std.testing.failing_allocator, std.Thread.getCurrentId(), "/private", .{}));
 }

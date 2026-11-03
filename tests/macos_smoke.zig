@@ -110,6 +110,13 @@ pub fn main() !void {
         try std.testing.expectEqual(@as(u32, 0x274c77), zlc_test_pixel(surface, 20 * scale, 70 * scale));
         try std.testing.expectEqual(@as(u32, 0xffffff), zlc_test_pixel(surface, 200 * scale, 150 * scale));
         try std.testing.expect(zlc_test_text_pixels(surface) > 50);
+        // The capture shows the same pixels, as premultiplied BGRA.
+        const shot = try probe.window.capture(gpa.allocator());
+        defer gpa.allocator().free(shot.pixels);
+        try std.testing.expectEqual(400 * scale, shot.width);
+        try std.testing.expectEqual(240 * scale, shot.height);
+        const blue = shot.pixels[((70 * scale) * shot.width + 20 * scale) * 4 ..][0..4];
+        for (blue, [_]u8{ 0x77, 0x4c, 0x27, 0xff }) |got, want| try std.testing.expect(@abs(@as(i16, got) - want) <= 2);
         zlm_test_compose(probe.native(), "にほん", 2);
         try std.testing.expectEqual(@as(usize, 1), probe.preedits);
         probe.cancel = true;

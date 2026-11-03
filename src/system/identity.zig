@@ -8,7 +8,7 @@ extern "shell32" fn SetCurrentProcessExplicitAppUserModelID(id: [*:0]const u16) 
 pub const max_id_bytes = 64;
 pub const capabilities = .{
     .process_identity = builtin.os.tag == .windows or builtin.os.tag == .linux,
-    .directories = builtin.os.tag == .windows or builtin.os.tag == .linux,
+    .directories = builtin.os.tag == .windows or builtin.os.tag == .linux or builtin.os.tag == .macos,
 };
 
 /// Application identity shared by the single-instance lock, the desktop entry
@@ -68,12 +68,34 @@ pub const Directory = enum {
 /// Linux reads the environment and, for user folders, `user-dirs.dirs`;
 /// a folder that is not configured returns DirectoryUnavailable instead of a
 /// guessed location, except the desktop which the specification defaults.
+///
+/// macOS follows the standard user domain folders: config, data and state
+/// are ~/Library/Application Support, cache ~/Library/Caches, videos
+/// ~/Movies and temp TMPDIR, the per-user temporary directory.
 pub fn directory(kind: Directory, destination: []u8) ![]u8 {
     return switch (builtin.os.tag) {
         .windows => windowsDirectory(kind, destination),
         .linux => linuxDirectory(LinuxEnvironment.current(), kind, destination),
+        .macos => macosDirectory(zio.getenv("HOME"), zio.getenv("TMPDIR"), kind, destination),
         else => error.UnsupportedCapability,
     };
+}
+pub fn macosDirectory(home_value: ?[]const u8, temp_value: ?[]const u8, kind: Directory, destination: []u8) ![]u8 {
+    if (kind == .temp) return write(destination, &.{absoluteValue(temp_value) orelse "/tmp"});
+    const home = absoluteValue(home_value) orelse return error.DirectoryUnavailable;
+    const suffix: []const u8 = switch (kind) {
+        .home => "",
+        .config, .data, .state => "/Library/Application Support",
+        .cache => "/Library/Caches",
+        .desktop => "/Desktop",
+        .documents => "/Documents",
+        .downloads => "/Downloads",
+        .pictures => "/Pictures",
+        .music => "/Music",
+        .videos => "/Movies",
+        .temp => unreachable,
+    };
+    return write(destination, &.{ home, suffix });
 }
 /// `directory(kind)` joined with the identity for config, data, cache and state.
 pub fn applicationDirectory(kind: Directory, id: []const u8, destination: []u8) ![]u8 {
@@ -295,4 +317,14 @@ test "linux directories follow the base and user directory specifications" {
     var small: [8]u8 = undefined;
     try std.testing.expectError(error.ResultCapacityExceeded, linuxDirectory(environment, .config, &small));
     try std.testing.expectError(error.ResultCapacityExceeded, linuxDirectory(environment, .documents, &small));
+}
+
+test "macos directories are the user domain folders" {
+    var buffer: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("/Users/ada/Library/Application Support", try macosDirectory("/Users/ada/", null, .config, &buffer));
+    try std.testing.expectEqualStrings("/Users/ada/Library/Caches", try macosDirectory("/Users/ada", null, .cache, &buffer));
+    try std.testing.expectEqualStrings("/Users/ada/Movies", try macosDirectory("/Users/ada", null, .videos, &buffer));
+    try std.testing.expectEqualStrings("/var/folders/x/T", try macosDirectory("/Users/ada", "/var/folders/x/T/", .temp, &buffer));
+    try std.testing.expectEqualStrings("/tmp", try macosDirectory(null, null, .temp, &buffer));
+    try std.testing.expectError(error.DirectoryUnavailable, macosDirectory("relative", null, .home, &buffer));
 }

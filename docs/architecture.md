@@ -208,7 +208,7 @@ TextClient 解绑先撤原生入口，再通知唯一旧客户端 `unbound`。�
 
 Windows manual-reset 内核事件与合并 dispatcher 消息共同唤醒；消息队列达到配额也不丢任务。循环为输入、绘制、定时器和普通消息保留有限批次。最多 16 个借用原生 HANDLE 的 one-shot watch，在回调前撤销注册并更新代数；关闭取消注册，不关闭调用者 HANDLE。Linux 用 GLib source 与主循环结合，同样有界消费任务。空闲无持续刷新定时器或轮询。
 
-可选纯动画模块只计算显式单调时钟下的数值、时间线位置和下一次采样请求；独立wake owner按宿主请求创建单次native期限。暂停/结束不再arm，普通App/UI不承担timer成本。Window.invalidateRect以DIP提交有界客户区damage，原生系统合并更新区域；UI仍构造完整命令/输入/语义事务，GPU回放和复杂合成不因该提示承诺局部成本。见[动画](animation.md)、[唤醒](wake.md)与[局部失效](invalidation.md)。
+可选纯动画模块只计算显式单调时钟下的数值、时间线位置和下一次采样请求；独立wake owner按宿主请求创建单次native期限。暂停/结束不再arm，普通App/UI不承担timer成本。Window.invalidateRect以DIP提交有界客户区damage，原生系统合并更新区域；UI仍构造完整命令/输入/语义事务；Linux/macOS软件工作面按命令哈希瓦片只重画变化的矩形（最多8个），GPU回放和复杂合成仍整帧。见[动画](animation.md)、[唤醒](wake.md)与[局部失效](invalidation.md)。
 
 `Cleanup` 是资源自己持有的稳定节点，`App.deferCleanup` 在 owner 线程加入独立链表，不分配、不会因业务队列满/关闭失败。每次安全点最多执行 64 项，shutdown 清空全部；节点出队后回调可释放自身存储。回调是最终、非阻塞的资源释放，不依赖已 detach 的 Content。Windows 未回复的跨线程 SendMessage 期间推迟执行，避免 UIA 等 COM outgoing call 的 input-sync 限制。此机制不运行嵌套消息循环。
 

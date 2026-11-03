@@ -173,6 +173,17 @@ fn run(allocator: std.mem.Allocator) !void {
     try Native.commit(window, "!");
     try expectValue(document, "Hi!");
 
+    // Automation selects a range, in UTF-16 units, through the field's
+    // accessibility path; a reversed range is refused.
+    try host.perform(field.id, .{ .select_text = .{ .start = 1, .end = 3 } });
+    var current: [64]u8 = undefined;
+    const snapshot = try window.readTextClient(window.textClientToken() orelse return error.NoTextClient, &current);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.selection.anchor);
+    try std.testing.expectEqual(@as(usize, 3), snapshot.selection.caret);
+    try std.testing.expectError(error.InvalidValue, host.perform(field.id, .{ .select_text = .{ .start = 3, .end = 1 } }));
+    try std.testing.expectError(error.NotSupported, host.perform((try find(&host, .button)).id, .{ .select_text = .{ .start = 0, .end = 1 } }));
+    try paint(&host, window);
+
     field.detach();
     try editor.close();
     closed = true;

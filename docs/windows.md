@@ -157,22 +157,28 @@ const window = try app.createWindow(.{
 
 标题栏文字、关闭/最小化/最大化按钮及其焦点、快捷键与可访问性由应用内容负责。按钮区域返回 `.client`，再调用 `perform` 或 `requestClose`；`.caption` 区域交给系统拖动及双击最大化策略。此 API 不提供系统绘制的标题栏按钮或 Windows Snap Layout 按钮浮层。Windows 自定义最大化客户区使用显示器工作区，全屏使用完整显示器；缩放边缘、最小客户区和跨 DPI 几何沿用 DIP 规则。自定义装饰下附加的 Win32 原生菜单当前只预留一行系统菜单栏高度，多行折叠菜单栏未支持；此限制不影响单独的系统窗口菜单。
 
-| 能力 | Windows | GTK/X11 | GTK/Wayland |
-| --- | --- | --- | --- |
-| `custom_decoration` | 支持 | 支持 | 不支持，创建非 system 装饰返回 `UnsupportedCapability` |
-| `native_move_resize` | 支持 | 由 WM 的 `_NET_WM_MOVERESIZE` 决定 | 不支持 |
-| `system_menu` | 支持 | 由 WM 的 `_GTK_SHOW_WINDOW_MENU` 决定 | 不支持 |
-| `transparent` | 以 `transparent` 或材质创建、没有重定向位图的窗口 | 以 `transparent` 创建且屏幕有 RGBA visual | 同 X11 |
-| `vibrancy` | 以材质创建，Windows 11 build 22621 及以上 | 不支持 | 不支持 |
-| `backdrop_material` | `.system` 装饰且 Windows 11 build 22621 及以上 | 不支持 | 不支持 |
+| 能力 | Windows | GTK/X11 | GTK/Wayland | macOS |
+| --- | --- | --- | --- | --- |
+| `custom_decoration` | 支持 | 支持 | 不支持，创建非 system 装饰返回 `UnsupportedCapability` | 支持 |
+| `native_move_resize` | 支持 | 由 WM 的 `_NET_WM_MOVERESIZE` 决定 | 不支持 | 移动支持，缩放由系统边缘负责 |
+| `system_menu` | 支持 | 由 WM 的 `_GTK_SHOW_WINDOW_MENU` 决定 | 不支持 | 不支持 |
+| `transparent` | 以 `transparent` 或材质创建、没有重定向位图的窗口 | 以 `transparent` 创建且屏幕有 RGBA visual | 同 X11 | 以 `transparent` 创建，或此刻带材质 |
+| `vibrancy` | 以材质创建，Windows 11 build 22621 及以上 | 不支持 | 不支持 | 支持 |
+| `backdrop_material` | `.system` 装饰且 Windows 11 build 22621 及以上 | 不支持 | 不支持 | 不支持 |
 
 `Window.setBackdrop(material)` 选择合成器在原生系统框架后绘制的材质：`.mica`、`.acrylic`、`.mica_alt`、`.none`，或 `.system` 恢复平台默认。Windows 用 DWM 的 system backdrop 窗口属性实现，在主线程同步提交；能力按进程读取一次的真实系统版本与窗口装饰判断，不支持时在任何原生调用前返回 `UnsupportedCapability`，原生拒绝返回 `WindowUpdateFailed` 并保留 HRESULT 诊断。框架不保存所选材质，也不在关闭后恢复；宿主需要跨启动保留时自己存储。材质只出现在系统标题栏/边框等非客户区，客户区仍由现有渲染器不透明绘制；`.borderless/.custom` 没有系统框架，因而报告不支持。系统可能因电源模式、透明效果设置或窗口失焦以纯色替代材质，这属于系统策略。
 
 ### 透明窗口与材质
 
-`WindowOptions.transparent` 让窗口背景透明，`WindowOptions.vibrancy` 在帧留空的地方垫一层半透明、模糊身后内容的材质，`Window.setVibrancy(material)` 之后可以更换或用 `.none` 去掉，`Window.vibrancy()` 读回当前值。材质名称与 `Vibrancy` 枚举一一对应：区域材质 `window/content/sidebar/header/titlebar/under_window/under_page`，临时界面材质 `menu/popover/hud/sheet/tooltip/selection/fullscreen_ui`，以及 Windows 11 的三种系统背景 `mica/acrylic/tabbed`。
+`WindowOptions.transparent` 让窗口背景透明，`WindowOptions.vibrancy` 在帧留空的地方垫一层半透明、模糊身后内容的材质，`Window.setVibrancy(material)` 之后可以更换或用 `.none` 去掉，`Window.vibrancy()` 读回当前值。材质名称与 `Vibrancy` 枚举一一对应：区域材质 `window/content/sidebar/header/titlebar/under_window/under_page`，临时界面材质 `menu/popover/hud/sheet/tooltip/selection/fullscreen_ui`，Liquid Glass `glass/glass_clear`，以及 Windows 11 的三种系统背景 `mica/acrylic/tabbed`。Windows 上两种玻璃都映射为 Acrylic。
 
 Windows 11 build 22621 及以上，只有创建时就带材质的窗口能显示材质：它没有重定向位图（`WS_EX_NOREDIRECTIONBITMAP`），这一样式终生不变。材质映射到 DWM system backdrop：`tabbed` 为 Mica Alt，`acrylic` 与全部临时界面材质为 Acrylic，其余为 Mica；设置材质时客户区整体扩展为框架（`DwmExtendFrameIntoClientArea` 四边 -1），`.none` 收回框架并把背景设为无。这样的窗口里 GDI 什么也画不出：UI 的 GPU 渲染器改用 DirectComposition 合成交换链，帧以预乘 alpha 输出，每帧先清成全透明；GDI 回退帧在这种窗口里不可见。它也没有菜单栏：系统菜单仍在，Alt 或 F10 单按把菜单以弹出菜单打开在客户区左上角，Alt 加字母直接打开对应菜单，Alt 加空格仍是窗口菜单。没有带材质创建的窗口、更早的系统或其他平台调用 `setVibrancy` 只保存取值，不显示材质。`Window.showsVibrancy()` 报告材质此刻是否会在透明处显示，不显示时应自己画背景。Windows 上以 `transparent` 创建的窗口同样不带重定向位图：帧经 DirectComposition 以 alpha 合成，留空处显示窗口后方的内容而不是黑色；它也没有菜单栏，菜单同样以弹出菜单打开。
+
+macOS 上任何窗口都能随时显示材质：内容视图里、绘制视图之下放一个 `NSVisualEffectView`（混合模式为窗口之后，状态常为激活），材质号与 AppKit 的 `NSVisualEffectMaterial` 一一对应；`mica/tabbed` 用 under-window，`acrylic` 用 HUD。`glass` 与 `glass_clear` 在 macOS 26 及以上换成 `NSGlassEffectView`（regular 与 clear 两种 style），更早的系统分别用 popover 与 HUD 材质代替。带材质时 `Paint.transparent` 为 true，Core Graphics 渲染器每帧从全透明开始，以 source-over 贴到视图上，留空处显示材质；去掉材质后，除非窗口以 `transparent` 创建，帧回到不透明白底。`transparent` 让窗口不再不透明、背景色为 clear，留空处显示桌面。clear 玻璃只在画成激活的窗口里保持清透：`Window.setActiveAppearance(true)` 通过 AppKit 的 `_setForceMainAppearance:` 让窗口在别的应用位于前台时仍画成激活状态，浮在其他应用之上的面板需要它；其他平台上它什么也不做。
+
+macOS 上 `.borderless` 与 `.custom` 窗口保留标题栏样式（`NSWindowStyleMaskTitled` 加 `FullSizeContentView`），标题栏透明、标题与三个按钮隐藏，内容铺满整个窗口：窗口因此有系统阴影、圆角和缩放边缘，也能成为 key 窗口。隐藏标题栏里的按下交给内容，由命中回调决定是否拖动。`WindowOptions.corner_radius` 把这样的窗口连同材质裁成该半径的连续曲线圆角（玻璃自己按圆角画边缘），窗口改为非不透明（`isOpaque` 为 false）、背景 clear，阴影随圆角重新生成；不透明的帧仍画白底，只是四角被裁掉。Windows 11 上 `corner_radius` 大于 0 的无边框窗口改用系统自己的圆角（`DWMWA_WINDOW_CORNER_PREFERENCE`），与半径无关；其他平台忽略它。
+
+macOS 上拖动区（`.caption` 命中或按下处理中调用 `startMove`）优先交给窗口服务器（`performWindowDragWithEvent:`），它能把窗口带到别的 Space 并参与平铺；但指针在按下后已经移动时窗口服务器可能不开始拖动。因此按下之后的拖动事件先经过一个本地事件监视器：请求拖动时指针已移动 1 点以上，或者窗口服务器被请求后指针移动超过 3 点、窗口仍未动，就由框架自己移动窗口，让按下的点始终在指针下，窗口顶边不进入菜单栏；窗口服务器发出 `windowWillMove:` 或窗口位置偏离框架摆放处超过 2 点，就认为窗口服务器接手了。无论哪种，按下的拖动事件都属于窗口而不再交给内容。双击 `.caption` 按系统设置“连按窗口标题栏以”执行缩放、最小化或不操作。
 
 GTK 没有材质。`transparent` 在屏幕提供 RGBA visual 时给窗口换上该 visual 并取消背景绘制，Cairo 渲染器每帧先清成透明再以 SOURCE 方式贴到窗口，留空处由合成器透出桌面；没有合成器时透明处显示为黑色。`capabilities().transparent` 为 true 时 `Paint.transparent` 也为 true，表示帧从透明开始。
 

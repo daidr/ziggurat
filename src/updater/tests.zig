@@ -321,6 +321,58 @@ test "automatic checks follow the user's choice and changes are announced" {
     try expect(u.prefs.load(temp.dir).automatic_checks.?);
 }
 
+test "availableVersion reports a pending update, told through on_change" {
+    const Counter = struct {
+        count: usize = 0,
+        fn changed(ptr: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.count += 1;
+        }
+    };
+    var counter: Counter = .{};
+    var with = options;
+    with.on_change = .{ .context = &counter, .call = Counter.changed };
+    var f: Fixture = undefined;
+    try f.init(with);
+    defer f.deinit();
+    try strings("", f.updater.availableVersion());
+    // A background check finds a release: its version, told once with the
+    // time of the check.
+    f.updater.timerFired();
+    f.updater.checkFinished(f.fake.token, .{ .available = .{ .version = "1.2.0.0" } });
+    try strings("1.2.0.0", f.updater.availableVersion());
+    try equal(1, counter.count);
+    try f.click("Remind Me Later");
+    try strings("1.2.0.0", f.updater.availableVersion());
+    // A failed check forgets it.
+    f.updater.timerFired();
+    f.updater.checkFinished(f.fake.token, .{ .failed = error.ConnectionRefused });
+    try strings("", f.updater.availableVersion());
+    try equal(2, counter.count);
+    // Skipping it empties it; a background check keeps the skipped version
+    // quiet, one the user asks for reports it.
+    f.updater.checkForUpdates();
+    f.updater.checkFinished(f.fake.token, .{ .available = .{ .version = "1.2.0.0" } });
+    try strings("1.2.0.0", f.updater.availableVersion());
+    try f.click("Skip This Version");
+    try strings("", f.updater.availableVersion());
+    f.updater.timerFired();
+    f.updater.checkFinished(f.fake.token, .{ .available = .{ .version = "1.2.0.0" } });
+    try strings("", f.updater.availableVersion());
+    // A newer one shows; downloaded, it stays until the relaunch.
+    f.updater.checkForUpdates();
+    f.updater.checkFinished(f.fake.token, .{ .available = .{ .version = "1.3.0.0" } });
+    try f.click("Install Update");
+    f.updater.installFinished(f.fake.token, null);
+    try strings("1.3.0.0", f.updater.availableVersion());
+    // Up to date: nothing pending.
+    f.updater.installed_len = 0;
+    try f.click("Later");
+    f.updater.checkForUpdates();
+    f.updater.checkFinished(f.fake.token, .current);
+    try strings("", f.updater.availableVersion());
+}
+
 test "the window speaks the closest shipped language and application texts" {
     var with = options;
     with.locale = "zh_CN.UTF-8";

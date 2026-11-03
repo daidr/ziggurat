@@ -1,7 +1,8 @@
 //! What the app plays, shown where the system shows media: the media
 //! controls of the volume flyout and the lock screen on Windows
 //! (SystemMediaTransportControls), and MPRIS clients on Linux, as GNOME's and
-//! KDE's media controls, their lock screens and playerctl. The media keys of
+//! KDE's media controls, their lock screens and playerctl, and on macOS
+//! MPNowPlayingInfoCenter: Control Center, the menu bar and the lock screen. The media keys of
 //! keyboards and headsets, and those controls, send commands to the app while
 //! it shows something.
 //!
@@ -19,10 +20,10 @@ const builtin = @import("builtin");
 const z = @import("ziggurat");
 
 const os = builtin.os.tag;
-const enabled = !builtin.is_test and (os == .windows or os == .linux);
+const enabled = !builtin.is_test and (os == .windows or os == .linux or os == .macos);
 const native = if (enabled and os == .windows) @import("now_playing_windows.zig") else if (enabled) linux else struct {};
 
-pub const capabilities = .{ .now_playing = os == .windows or os == .linux };
+pub const capabilities = .{ .now_playing = os == .windows or os == .linux or os == .macos };
 
 /// A command of the media keys and the system's media controls.
 pub const Command = enum {
@@ -431,9 +432,20 @@ pub fn deliver(raw: u32, position_ns: u64) void {
 /// queue). Bits as `Commands.bits`, 4 for the play/pause key.
 pub fn simulateForTesting(raw: u32, position_ns: u64) void {
     if (comptime enabled and os == .windows) return native.post(raw, @intCast(position_ns / 100));
+    if (comptime enabled and os == .macos) return znp_simulate(raw, @intCast(position_ns / std.time.ns_per_us));
     deliver(raw, position_ns);
 }
+extern fn znp_simulate(raw: u32, position_us: i64) void;
+extern fn znp_shown_title(out: [*]u8, capacity: usize) usize;
 
+/// Test hook, macOS: the title MPNowPlayingInfoCenter shows, "" for none.
+pub fn shownTitleForTesting(buffer: []u8) []const u8 {
+    if (comptime !(enabled and os == .macos)) return "";
+    const len = znp_shown_title(buffer.ptr, buffer.len);
+    return buffer[0..@min(len, buffer.len -| 1)];
+}
+
+/// MPRIS on Linux; src/system/macos_media.m implements the same entry point.
 const linux = struct {
     const CInfo = extern struct {
         title: [*:0]const u8,

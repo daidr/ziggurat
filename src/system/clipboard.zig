@@ -1,12 +1,22 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
-const native = if (builtin.is_test) @import("clipboard_unsupported.zig") else if (builtin.os.tag == .windows) @import("clipboard_windows.zig") else if (builtin.os.tag == .linux) @import("clipboard_linux.zig") else @import("clipboard_unsupported.zig");
+/// macOS implements the GTK adapter's zsc_* entry points with NSPasteboard
+/// (src/system/macos_clipboard.m), so clipboard_linux.zig drives both.
+const native = if (builtin.is_test) @import("clipboard_unsupported.zig") else if (builtin.os.tag == .windows) @import("clipboard_windows.zig") else if (builtin.os.tag == .linux or builtin.os.tag == .macos) @import("clipboard_linux.zig") else @import("clipboard_unsupported.zig");
+extern fn zsc_text_write(text: [*]const u8, len: usize) c_int;
+extern fn zsc_text_read(destination: [*]u8, capacity: usize, empty: *c_int) c_long;
 
 /// Writes UTF-8 text on the owner thread. Windows allocates the native clipboard
 /// block and transfers it to the OS on success; no Zig allocation is hidden.
 pub fn writeText(window: z.Window, text: []const u8) !void {
     window.app.assertOwner();
+    if (comptime builtin.os.tag == .macos and !builtin.is_test) {
+        if (window.isClosed()) return error.Closed;
+        if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
+        if (zsc_text_write(text.ptr, text.len) == 0) return error.ClipboardWriteFailed;
+        return;
+    }
     if (comptime builtin.os.tag != .windows) return error.UnsupportedCapability;
     const hwnd = window.nativeHandle() orelse return error.Closed;
     try z.windows_text.writeClipboard(hwnd, text);
@@ -16,6 +26,14 @@ pub fn writeText(window: z.Window, text: []const u8) !void {
 /// slices belong to the caller and no delayed rendering callback is retained.
 pub fn readText(window: z.Window, destination: []u8) !usize {
     window.app.assertOwner();
+    if (comptime builtin.os.tag == .macos and !builtin.is_test) {
+        if (window.isClosed()) return error.Closed;
+        var empty: c_int = 0;
+        const length = zsc_text_read(destination.ptr, destination.len, &empty);
+        if (empty != 0) return error.ClipboardUnavailable;
+        if (length < 0) return error.CapacityExceeded;
+        return @intCast(length);
+    }
     if (comptime builtin.os.tag != .windows) return error.UnsupportedCapability;
     const hwnd = window.nativeHandle() orelse return error.Closed;
     return z.windows_text.readClipboard(hwnd, destination);
@@ -26,16 +44,17 @@ pub const max_name_bytes = 100;
 pub const max_files = 1024;
 pub const max_entry_bytes = 64 * 1024 * 1024;
 pub const max_retry_attempts = 16;
-/// Linux native Board/offer/read records still alive, including GTK request
-/// callbacks that arrive after cancellation. Other targets report zero.
+/// Linux and macOS native Board/offer/read records still alive, including
+/// request callbacks that arrive after cancellation. Other targets report zero.
 pub fn resourceCount() u32 {
-    if (comptime builtin.is_test or builtin.os.tag != .linux) return 0;
+    if (comptime builtin.is_test or (builtin.os.tag != .linux and builtin.os.tag != .macos)) return 0;
     return native.zsc_resource_count();
 }
 pub const capabilities = .{
     .board = native.supported,
     .lazy_provider = native.supported,
-    .change_events = native.supported,
+    // NSPasteboard has no change notification; macOS never calls on_changed.
+    .change_events = native.supported and builtin.os.tag != .macos,
     // Windows retries a clipboard held open by another process on a native
     // timer. GTK selection transfers have no comparable exclusive lock.
     .busy_retry = native.supported and builtin.os.tag == .windows,

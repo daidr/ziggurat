@@ -15,6 +15,7 @@ const layers = @import("layers.zig");
 const transform_composite = @import("transform_composite.zig");
 const shader_effects = commands.shader_effects;
 const effect_host = @import("gpu_effect_host.zig");
+const damage = @import("damage.zig");
 const Rect = layout.Rect;
 comptime {
     if (@sizeOf(usize) == 8 and (@sizeOf(cpu_gradient.Surface) != 72 or @offsetOf(cpu_gradient.Surface, "clip") != 24 or @offsetOf(cpu_gradient.Surface, "origin") != 56)) @compileError("software plane ABI mismatch");
@@ -33,6 +34,9 @@ extern fn zlc_prepared(*anyopaque, *anyopaque, f32, f32, f32, i32, i32, ?*const 
 extern fn zlc_scale(*anyopaque) f32;
 extern fn zlc_push_clip(*anyopaque, f32, f32, f32, f32) void;
 extern fn zlc_pop_clip(*anyopaque) void;
+extern fn zlc_clear_rect(*anyopaque, f32, f32, f32, f32) void;
+extern fn zlc_push_device_clip(*anyopaque, i32, i32, i32, i32) void;
+extern fn zlc_test_generation(*anyopaque) u32;
 extern fn zlc_end(*anyopaque, *anyopaque) void;
 extern fn zlc_destroy(*anyopaque) void;
 extern fn zlc_prepare_image(*anyopaque, [*]const drawing.ImageLevel, u32) c_int;
@@ -112,6 +116,12 @@ pub const Renderer = struct {
     gl: ?*anyopaque = null,
     gl_unavailable: bool = false,
     gl_table: effect_host.Table = .{},
+    /// Keep a transparent plane's pixels when a frame begins: the caller
+    /// clears what it draws again, through `replayDamage`.
+    keep_plane: bool = false,
+    /// While a damaged rectangle is drawn again, the device pixels outside
+    /// which drawing commands are skipped.
+    cull: ?damage.Box = null,
     const EffectScope = struct { slot: u8, capture: gaussian_scope.Capture };
     const Resources = struct {
         text_bytes: []const u8,
@@ -603,7 +613,8 @@ pub const Renderer = struct {
         _ = try geometry.validateSurface(paint.size.width, paint.size.height, paint.size.scale);
         if (self.native == null) self.native = zlc_create() orelse return error.OutOfMemory;
         if (self.layer_plan) |plan| if (!plan.matches(paint.size)) return error.LayersRequired;
-        const result = zlc_begin_mode(self.native.?, paint.size.width, paint.size.height, paint.size.scale, @intFromBool(paint.transparent));
+        const mode: c_int = if (!paint.transparent) 0 else if (self.keep_plane) 2 else 1;
+        const result = zlc_begin_mode(self.native.?, paint.size.width, paint.size.height, paint.size.scale, mode);
         if (result == 4) return error.SurfaceModeMismatch;
         if (result != 0) return error.CreateSurfaceFailed;
         if (self.layer_plan != null) self.layer_active = true;
@@ -644,6 +655,43 @@ pub const Renderer = struct {
         self.backdrop_source = buffer;
         defer self.backdrop_source = null;
         try self.replayWithGaussianResources(buffer.commands(), buffer.textBytes(), buffer.brushResources(), buffer.preparedTextResources(), buffer.imageResources(), buffer.coverageResources(), buffer.transformResources(), buffer.filterResources());
+    }
+    /// Whether the plane keeps its pixels from one frame to the next, so a
+    /// frame can draw only what changed: not while layers retarget it.
+    pub fn planeKept(self: *const Renderer) bool {
+        return self.layer_plan == null and self.hasSurface();
+    }
+    /// The plane's pixels, for tests.
+    pub fn testSurface(self: *Renderer, out: *cpu_gradient.Surface) c_int {
+        return zlc_gradient_surface(self.native.?, out);
+    }
+    /// Changes whenever the plane is created again.
+    pub fn planeGeneration(self: *const Renderer) u64 {
+        const native = self.native orelse return 0;
+        return @as(u64, @intFromPtr(native)) << 32 ^ zlc_test_generation(native);
+    }
+    /// Draws `buffer` within `region` only, each rectangle on its own under
+    /// a clip, clearing it first on a transparent plane; the rest of the
+    /// plane keeps the last frame's pixels.
+    pub fn replayDamage(self: *Renderer, buffer: *const commands.Buffer, region: *const damage.Damage, transparent: bool) !void {
+        const native = self.native orelse return error.NoSurface;
+        if (region.full) {
+            if (transparent and self.layer_plan == null) zlc_clear_rect(native, 0, 0, std.math.floatMax(f32), std.math.floatMax(f32));
+            return self.replayBuffer(buffer);
+        }
+        const scale = zlc_scale(native);
+        defer self.cull = null;
+        for (region.slice()) |box| {
+            // On pixel edges: a clip off them would be antialiased, and
+            // Cairo draws subpixel text differently under such a clip.
+            zlc_push_device_clip(native, box.x0, box.y0, box.x1, box.y1);
+            defer zlc_pop_clip(native);
+            // The clip bounds the clear to the box's pixels exactly.
+            const rect = (damage.Box{ .x0 = box.x0 - 1, .y0 = box.y0 - 1, .x1 = box.x1 + 1, .y1 = box.y1 + 1 }).dip(scale);
+            if (transparent) zlc_clear_rect(native, rect.x, rect.y, rect.width, rect.height);
+            self.cull = box;
+            try self.replayBuffer(buffer);
+        }
     }
     pub fn replayWithResources(self: *Renderer, list: []const commands.Command, text_bytes: []const u8, resources: []const commands.brushes.Stored) !void {
         try self.replayWithTextResources(list, text_bytes, resources, &.{});
@@ -687,110 +735,115 @@ pub const Renderer = struct {
         defer while (self.layer_plan == null and depth != 0) : (depth -= 1) {
             zlc_pop_clip(self.native.?);
         };
+        const cull_sources: damage.Sources = .{ .prepared = prepared, .coverage = coverage_resources, .indicators = if (self.backdrop_source) |source| source.indicator_storage[0..source.indicator_len] else &.{} };
+        const cull_scale = if (self.cull != null) zlc_scale(self.native.?) else 1;
         var index: usize = 0;
-        while (index < list.len) : (index += 1) switch (list[index]) {
-            .fill => |fill_command| {
-                if (!layout.validRect(fill_command.bounds)) return error.InvalidGeometry;
-                self.fill(fill_command.bounds, fill_command.color);
-            },
-            .shape => |value| {
-                const p = try geometry.plan(value);
-                if (zlc_shape(self.native.?, p.bounds.x, p.bounds.y, p.bounds.width, p.bounds.height, p.radius, p.stroke_width, p.color.rgba()) != 0) return error.DrawShapeFailed;
-            },
-            .gradient => |value| {
-                if (value.brush >= resources.len) return error.MissingResources;
-                const p = try geometry.plan(.{ .bounds = value.bounds, .radius = value.radius, .stroke_width = value.stroke_width, .color = geometry.Color.rgb(0) });
-                if (resources[value.brush].isTransparent()) continue;
-                var surface: cpu_gradient.Surface = undefined;
-                if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawGradientFailed;
-                const dirty = if (zlc_layer_transparent(self.native.?) != 0) cpu_gradient.drawTransparent(surface, p, &resources[value.brush]) else cpu_gradient.draw(surface, p, &resources[value.brush]);
-                zlc_gradient_dirty(self.native.?, dirty.left, dirty.top, dirty.right - dirty.left, dirty.bottom - dirty.top);
-            },
-            .text => |value| {
-                if (!layout.validRect(value.bounds)) return error.InvalidGeometry;
-                if (value.offset > text_bytes.len or value.len > text_bytes.len - value.offset) return error.InvalidTextRange;
-                try self.textFont(value.bounds, text_bytes[value.offset..][0..value.len], value.color, value.font);
-            },
-            .prepared_text => |value| {
-                if (value.resource >= prepared.len) return error.MissingResources;
-                try self.preparedText(prepared[value.resource], value.origin, value.color);
-            },
-            .coverage => |value| {
-                if (value.resource >= coverage_resources.len) return error.MissingResources;
-                try self.coverage(coverage_resources[value.resource], value.origin, value.color);
-            },
-            .texture => unreachable, // Whole batch rejected before drawing.
-            .image => |value| {
-                if (value.resource >= image_resources.len) return error.MissingResources;
-                try self.image(image_resources[value.resource], value.destination, value.options());
-            },
-            .begin_group => |value| {
-                const r = value.bounds;
-                const bounds: drawing.Rect = .{ .x = r.x, .y = r.y, .width = r.width, .height = r.height };
-                const options = try commands.groupOptions(value, coverage_resources);
-                if (value.filter_slot == commands.no_filter) try self.beginGroup(bounds, options) else try self.beginGaussian(bounds, options, filters[value.filter_slot]);
-            },
-            .end_group => try self.endGroup(),
-            .effect => |slot| {
-                const source = self.backdrop_source orelse return error.MissingResources;
-                if (slot >= source.shader_storage.len) return error.MissingResources;
-                const entry = &source.shader_storage.entries[slot];
-                const effect_end = commands.effectEnd(list, index) orelse return error.UnbalancedEffects;
-                if (self.captureEffect(entry)) |capture| {
-                    self.effect_scopes[self.effect_count] = .{ .slot = slot, .capture = capture };
-                    self.effect_count += 1;
-                } else {
-                    try self.isolateEffect(list[index + 1 .. effect_end], entry, all);
-                    index = effect_end;
-                }
-            },
-            .end_effect => {
-                if (self.effect_count == 0) return error.UnbalancedEffects;
-                self.effect_count -= 1;
-                const scope = self.effect_scopes[self.effect_count];
-                const source = self.backdrop_source.?;
-                try self.filterEffect(&source.shader_storage.entries[scope.slot], scope.capture, source.shader_storage.workspace);
-                if (zlc_layer_end_group(self.native.?) != 0) return error.EndGroupFailed;
-            },
-            .backdrop_shader => |slot| {
-                const source = self.backdrop_source orelse return error.MissingResources;
-                if (slot >= source.shader_storage.len) return error.MissingResources;
-                var surface: cpu_gradient.Surface = undefined;
-                if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawBackdropFailed;
-                const scratch = if (source.backdrop_storage.workspace) |workspace| workspace.planes else null;
-                const dirty = self.backdropShader(&source.shader_storage.entries[slot], surface, zlc_layer_transparent(self.native.?) != 0, scratch, source.shader_storage.workspace);
-                zlc_gradient_dirty(self.native.?, dirty.left, dirty.top, dirty.right - dirty.left, dirty.bottom - dirty.top);
-            },
-            .begin_transform => |slot| try self.beginTransform(transforms[slot]),
-            .end_transform => try self.endTransform(),
-            .backdrop => |slot| {
-                const source = self.backdrop_source orelse return error.MissingResources;
-                if (slot >= source.backdrop_storage.len) return error.MissingResources;
-                var surface: cpu_gradient.Surface = undefined;
-                if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawBackdropFailed;
-                const dirty = commands.backdrop.apply(surface, zlc_layer_transparent(self.native.?) != 0, source.backdrop_storage.entries[slot], source.backdrop_storage.workspace);
-                zlc_gradient_dirty(self.native.?, dirty.left, dirty.top, dirty.right - dirty.left, dirty.bottom - dirty.top);
-            },
-            .indicator => |slot| {
-                const source = self.backdrop_source orelse return error.MissingResources;
-                if (slot >= source.indicator_len) return error.MissingResources;
-                var surface: cpu_gradient.Surface = undefined;
-                if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawIndicatorFailed;
-                const dirty = commands.loading.draw(surface, zlc_layer_transparent(self.native.?) != 0, source.indicator_storage[slot]);
-                zlc_gradient_dirty(self.native.?, dirty.left, dirty.top, dirty.right - dirty.left, dirty.bottom - dirty.top);
-            },
-            .push_clip => |rect| {
-                if (depth == 32) return error.ClipStackFull;
-                if (!layout.validRect(rect)) return error.InvalidGeometry;
-                zlc_push_clip(self.native.?, rect.x, rect.y, rect.width, rect.height);
-                depth += 1;
-            },
-            .pop_clip => {
-                if (depth == 0) return error.ClipStackEmpty;
-                zlc_pop_clip(self.native.?);
-                depth -= 1;
-            },
-        };
+        while (index < list.len) : (index += 1) {
+            if (self.cull) |box| if (damage.commandBox(list[index], cull_sources, cull_scale)) |bounds| if (!bounds.intersects(box)) continue;
+            switch (list[index]) {
+                .fill => |fill_command| {
+                    if (!layout.validRect(fill_command.bounds)) return error.InvalidGeometry;
+                    self.fill(fill_command.bounds, fill_command.color);
+                },
+                .shape => |value| {
+                    const p = try geometry.plan(value);
+                    if (zlc_shape(self.native.?, p.bounds.x, p.bounds.y, p.bounds.width, p.bounds.height, p.radius, p.stroke_width, p.color.rgba()) != 0) return error.DrawShapeFailed;
+                },
+                .gradient => |value| {
+                    if (value.brush >= resources.len) return error.MissingResources;
+                    const p = try geometry.plan(.{ .bounds = value.bounds, .radius = value.radius, .stroke_width = value.stroke_width, .color = geometry.Color.rgb(0) });
+                    if (resources[value.brush].isTransparent()) continue;
+                    var surface: cpu_gradient.Surface = undefined;
+                    if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawGradientFailed;
+                    const dirty = if (zlc_layer_transparent(self.native.?) != 0) cpu_gradient.drawTransparent(surface, p, &resources[value.brush]) else cpu_gradient.draw(surface, p, &resources[value.brush]);
+                    zlc_gradient_dirty(self.native.?, dirty.left, dirty.top, dirty.right - dirty.left, dirty.bottom - dirty.top);
+                },
+                .text => |value| {
+                    if (!layout.validRect(value.bounds)) return error.InvalidGeometry;
+                    if (value.offset > text_bytes.len or value.len > text_bytes.len - value.offset) return error.InvalidTextRange;
+                    try self.textFont(value.bounds, text_bytes[value.offset..][0..value.len], value.color, value.font);
+                },
+                .prepared_text => |value| {
+                    if (value.resource >= prepared.len) return error.MissingResources;
+                    try self.preparedText(prepared[value.resource], value.origin, value.color);
+                },
+                .coverage => |value| {
+                    if (value.resource >= coverage_resources.len) return error.MissingResources;
+                    try self.coverage(coverage_resources[value.resource], value.origin, value.color);
+                },
+                .texture => unreachable, // Whole batch rejected before drawing.
+                .image => |value| {
+                    if (value.resource >= image_resources.len) return error.MissingResources;
+                    try self.image(image_resources[value.resource], value.destination, value.options());
+                },
+                .begin_group => |value| {
+                    const r = value.bounds;
+                    const bounds: drawing.Rect = .{ .x = r.x, .y = r.y, .width = r.width, .height = r.height };
+                    const options = try commands.groupOptions(value, coverage_resources);
+                    if (value.filter_slot == commands.no_filter) try self.beginGroup(bounds, options) else try self.beginGaussian(bounds, options, filters[value.filter_slot]);
+                },
+                .end_group => try self.endGroup(),
+                .effect => |slot| {
+                    const source = self.backdrop_source orelse return error.MissingResources;
+                    if (slot >= source.shader_storage.len) return error.MissingResources;
+                    const entry = &source.shader_storage.entries[slot];
+                    const effect_end = commands.effectEnd(list, index) orelse return error.UnbalancedEffects;
+                    if (self.captureEffect(entry)) |capture| {
+                        self.effect_scopes[self.effect_count] = .{ .slot = slot, .capture = capture };
+                        self.effect_count += 1;
+                    } else {
+                        try self.isolateEffect(list[index + 1 .. effect_end], entry, all);
+                        index = effect_end;
+                    }
+                },
+                .end_effect => {
+                    if (self.effect_count == 0) return error.UnbalancedEffects;
+                    self.effect_count -= 1;
+                    const scope = self.effect_scopes[self.effect_count];
+                    const source = self.backdrop_source.?;
+                    try self.filterEffect(&source.shader_storage.entries[scope.slot], scope.capture, source.shader_storage.workspace);
+                    if (zlc_layer_end_group(self.native.?) != 0) return error.EndGroupFailed;
+                },
+                .backdrop_shader => |slot| {
+                    const source = self.backdrop_source orelse return error.MissingResources;
+                    if (slot >= source.shader_storage.len) return error.MissingResources;
+                    var surface: cpu_gradient.Surface = undefined;
+                    if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawBackdropFailed;
+                    const scratch = if (source.backdrop_storage.workspace) |workspace| workspace.planes else null;
+                    const dirty = self.backdropShader(&source.shader_storage.entries[slot], surface, zlc_layer_transparent(self.native.?) != 0, scratch, source.shader_storage.workspace);
+                    zlc_gradient_dirty(self.native.?, dirty.left, dirty.top, dirty.right - dirty.left, dirty.bottom - dirty.top);
+                },
+                .begin_transform => |slot| try self.beginTransform(transforms[slot]),
+                .end_transform => try self.endTransform(),
+                .backdrop => |slot| {
+                    const source = self.backdrop_source orelse return error.MissingResources;
+                    if (slot >= source.backdrop_storage.len) return error.MissingResources;
+                    var surface: cpu_gradient.Surface = undefined;
+                    if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawBackdropFailed;
+                    const dirty = commands.backdrop.apply(surface, zlc_layer_transparent(self.native.?) != 0, source.backdrop_storage.entries[slot], source.backdrop_storage.workspace);
+                    zlc_gradient_dirty(self.native.?, dirty.left, dirty.top, dirty.right - dirty.left, dirty.bottom - dirty.top);
+                },
+                .indicator => |slot| {
+                    const source = self.backdrop_source orelse return error.MissingResources;
+                    if (slot >= source.indicator_len) return error.MissingResources;
+                    var surface: cpu_gradient.Surface = undefined;
+                    if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawIndicatorFailed;
+                    const dirty = commands.loading.draw(surface, zlc_layer_transparent(self.native.?) != 0, source.indicator_storage[slot]);
+                    zlc_gradient_dirty(self.native.?, dirty.left, dirty.top, dirty.right - dirty.left, dirty.bottom - dirty.top);
+                },
+                .push_clip => |rect| {
+                    if (depth == 32) return error.ClipStackFull;
+                    if (!layout.validRect(rect)) return error.InvalidGeometry;
+                    zlc_push_clip(self.native.?, rect.x, rect.y, rect.width, rect.height);
+                    depth += 1;
+                },
+                .pop_clip => {
+                    if (depth == 0) return error.ClipStackEmpty;
+                    zlc_pop_clip(self.native.?);
+                    depth -= 1;
+                },
+            }
+        }
         if (depth != 0) return error.UnbalancedClips;
     }
     pub fn deinit(self: *Renderer) void {
@@ -920,4 +973,47 @@ test "Cairo element effects rewrite a Gaussian capture or an isolation on the ta
     try std.testing.expectEqual(@as(u32, 0xffff0000), surface.pixels[8 * surface.stride + 8]);
     try std.testing.expectEqual(@as(u32, 0xffffffff), surface.pixels[8 * surface.stride + 2]);
     try std.testing.expectEqual(@as(u64, 1), small.stats.skipped);
+}
+
+test "drawing only the damaged rectangles leaves the plane as drawing it whole" {
+    const size: z.Size = .{ .width = 400, .height = 240, .scale = 1.5 };
+    var dummy: u8 = 0;
+    for ([_]bool{ false, true }) |transparent| {
+        var whole: Renderer = .{};
+        defer whole.deinit();
+        var partial: Renderer = .{ .keep_plane = true };
+        defer partial.deinit();
+        var tracker: damage.Tracker = .{};
+        var drawn_partly: usize = 0;
+        for (0..6) |frame| {
+            var buffer: commands.Buffer = .{};
+            defer buffer.reset();
+            const step: f32 = @floatFromInt(frame);
+            if (!transparent) try buffer.fill(.{ .x = 0, .y = 0, .width = 200, .height = 120 }, 0xf0f0f0);
+            // A translucent square that moves, over text that stays.
+            try buffer.text(.{ .x = 4, .y = 4, .width = 120, .height = 20 }, "Damage", 0x202020);
+            try buffer.roundedRect(.{ .x = 10 + step * 7.25, .y = 30, .width = 24.5, .height = 18 }, 4, .{ .r = 200, .g = 20, .b = 20, .a = 128 });
+            // A clipped corner whose color changes every other frame.
+            try buffer.pushClip(.{ .x = 150, .y = 90, .width = 30.3, .height = 20 });
+            try buffer.fill(.{ .x = 140, .y = 80, .width = 60, .height = 40 }, if (frame % 2 == 0) 0x3050f0 else 0x30f050);
+            try buffer.popClip();
+            try buffer.finish();
+            const paint: z.Paint = .{ .native_context = &dummy, .size = size, .transparent = transparent };
+            try whole.begin(paint);
+            try whole.replayBuffer(&buffer);
+            try partial.begin(paint);
+            const region = if (partial.planeKept()) tracker.plan(&buffer, partial.planeGeneration(), size.width, size.height, size.scale, transparent) else damage.Damage.whole;
+            try partial.replayDamage(&buffer, &region, transparent);
+            tracker.commit();
+            if (!region.full) drawn_partly += 1;
+            var a: cpu_gradient.Surface = undefined;
+            var b: cpu_gradient.Surface = undefined;
+            if (zlc_gradient_surface(whole.native.?, &a) != 0 or zlc_gradient_surface(partial.native.?, &b) != 0) return error.DrawGradientFailed;
+            for (0..a.height) |y| std.testing.expectEqualSlices(u32, a.pixels[y * a.stride ..][0..a.width], b.pixels[y * b.stride ..][0..b.width]) catch |err| {
+                std.debug.print("frame {d} transparent={} row {d} damage {any}\n", .{ frame, transparent, y, region.slice() });
+                return err;
+            };
+        }
+        try std.testing.expectEqual(@as(usize, 5), drawn_partly);
+    }
 }

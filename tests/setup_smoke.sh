@@ -64,15 +64,47 @@ install install"
 test "$(tail -n 1 "$hooks")" = uninstall
 test ! -e "$root"
 
+# Several commands: each is linked unless another program has the name; a
+# later version's names replace an earlier's, and uninstalling removes them.
+mkdir -p "$HOME/.local/bin" && printf '#!/bin/sh\n' > "$HOME/.local/bin/taken" && chmod +x "$HOME/.local/bin/taken"
+"$bin/ziggurat" package setup --zip "$work/v1.zip" --stub "$bin/ziggurat-setup" --output "$work/setup-commands1" --command "fixture-app,fx,taken" >/dev/null
+"$bin/ziggurat" package setup --zip "$work/v2.zip" --stub "$bin/ziggurat-setup" --output "$work/setup-commands2" --command "fixture-app,fy" >/dev/null
+"$work/setup-commands1" --silent
+ZIGGURAT_SETUP_SMOKE_OUT="$work/out" "$HOME/.local/bin/fx" short
+test "$(cat "$work/out")" = "1.0.0 short"
+test -L "$HOME/.local/bin/fixture-app" && test ! -L "$HOME/.local/bin/taken" && test ! -e "$HOME/.local/bin/fixture"
+"$work/setup-commands2" --silent
+test -L "$HOME/.local/bin/fy" && test ! -e "$HOME/.local/bin/fx"
+"$root/uninstall" --silent --purge
+test ! -e "$HOME/.local/bin/fixture-app" && test ! -e "$HOME/.local/bin/fy" && test -f "$HOME/.local/bin/taken"
+rm "$HOME/.local/bin/taken"
+if "$bin/ziggurat" package setup --zip "$work/v2.zip" --stub "$bin/ziggurat-setup" --output "$work/setup-bad" --command "a/b" 2>/dev/null; then echo "a command with a slash was accepted" >&2; exit 1; fi
+
+# Arch Linux: the PKGBUILD next to the package, whose package() runs here
+# as makepkg runs it over the extracted package.
+"$bin/ziggurat" package pkgbuild --zip "$work/v2.zip" --command "fixture,fx" >/dev/null
+grep -q "^source=('v2.zip')" "$work/PKGBUILD"
+grep -q "^sha256sums=('$(sha256sum "$work/v2.zip" | cut -d' ' -f1)')" "$work/PKGBUILD"
+grep -q "^pkgver='1.1.0.0'" "$work/PKGBUILD"
+grep -q "^depends=('gtk3' 'pango')" "$work/PKGBUILD"
+if command -v bash >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
+  mkdir -p "$work/arch/src" && (cd "$work/arch/src" && unzip -q "$work/v2.zip")
+  bash -c "set -e; srcdir='$work/arch/src'; pkgdir='$work/arch/pkg'; . '$work/PKGBUILD'; package"
+  test -x "$work/arch/pkg/usr/lib/fixture/fixture" && test "$(readlink "$work/arch/pkg/usr/bin/fx")" = ../lib/fixture/fixture
+  test -f "$work/arch/pkg/usr/share/licenses/fixture/LICENSE"
+  grep -q 'Exec="/usr/lib/fixture/fixture" %U' "$work/arch/pkg/usr/share/applications/$id.desktop"
+fi
+
 # Debian package of the same release: inspect it, and install it only when
 # passwordless root is available (CI runners); the check removes it again.
-"$bin/ziggurat" package deb --zip "$work/v2.zip" --maintainer "Ziggurat tests <tests@example.invalid>" --output "$work/fixture.deb" >/dev/null
+"$bin/ziggurat" package deb --zip "$work/v2.zip" --maintainer "Ziggurat tests <tests@example.invalid>" --command "fixture,fx" --output "$work/fixture.deb" >/dev/null
 if command -v dpkg-deb >/dev/null 2>&1; then
   dpkg-deb --info "$work/fixture.deb" > "$work/info"
   grep -q 'Package: fixture' "$work/info"
   dpkg-deb --contents "$work/fixture.deb" > "$work/contents"
   grep -q './usr/lib/fixture/fixture' "$work/contents"
   grep -q "./usr/share/applications/$id.desktop" "$work/contents"
+  grep -q './usr/bin/fx -> ../lib/fixture/fixture' "$work/contents"
   if [ "$(id -u)" = 0 ]; then sudo=""; elif sudo -n true 2>/dev/null; then sudo="sudo -n"; else sudo=none; fi
   if [ "$sudo" != none ] && ! dpkg -s fixture >/dev/null 2>&1; then
     $sudo dpkg -i "$work/fixture.deb" >/dev/null

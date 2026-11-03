@@ -1,6 +1,7 @@
 //! The app's light or dark appearance: the desktop's, or one the app forces.
 //! A Follower applies it to the native parts the system draws (window title
-//! bars and popup menus on Windows, GTK's theme variant on Linux) and tells
+//! bars and popup menus on Windows, GTK's theme variant on Linux, the
+//! application's NSAppearance on macOS) and tells
 //! the app whenever the appearance or the desktop's preferences change, so
 //! drawn content can switch its own theme then.
 const std = @import("std");
@@ -9,7 +10,7 @@ const z = @import("ziggurat");
 const desktop = @import("desktop.zig");
 
 const os = builtin.os.tag;
-const native_supported = !builtin.is_test and (os == .windows or os == .linux);
+const native_supported = !builtin.is_test and (os == .windows or os == .linux or os == .macos);
 pub const capabilities = .{ .follow = native_supported, .window_frame = native_supported and os == .windows };
 pub const max_windows = 64;
 
@@ -32,12 +33,13 @@ extern "dwmapi" fn DwmSetWindowAttribute(c.HWND, u32, *const anyopaque, u32) cal
 const dwm_use_immersive_dark_mode = 20;
 
 /// Applies a source process-wide, for what the system draws itself: GTK's
-/// theme variant on Linux, popup menus on Windows. `dark` is the appearance
+/// theme variant on Linux, popup menus on Windows, every window and menu
+/// through the application's appearance on macOS. `dark` is the appearance
 /// `.system` resolves to.
 pub fn apply(app: *z.App, source: Source, dark: bool) void {
     app.assertOwner();
     if (comptime !native_supported) return;
-    if (os == .linux) return zsx_theme_set_source(@backingInt(source));
+    if (os == .linux or os == .macos) return zsx_theme_set_source(@backingInt(source));
     @import("windows_menu.zig").dark_menus = dark;
     menuMode(dark);
 }
@@ -176,9 +178,9 @@ pub const Follower = struct {
         const app = self.app orelse return;
         const was = self.dark;
         const old_prefs = self.prefs;
-        // Following the desktop, GTK's own variant must be the desktop's
-        // before it is read again.
-        if (os == .linux and self.source == .system) apply(app, .system, false);
+        // Following the desktop, GTK's own variant (the app's appearance on
+        // macOS) must be the desktop's before it is read again.
+        if ((os == .linux or os == .macos) and self.source == .system) apply(app, .system, false);
         self.prefs = desktop.preferences(app) catch self.prefs;
         self.dark = switch (self.source) {
             .light => false,

@@ -75,6 +75,12 @@ struct ZwkState {
     ZwkContextMenu context_offer;
     /* The selection of the page's latest contextmenu event. */
     char *context_selection;
+    ZwkPermission permission_offer;
+    /* Permission requests the app deferred, each with a reference. */
+    struct PendingPermission *permissions;
+    /* The capture state last told for camera, microphone and display: the
+       engine can tell one change twice. */
+    uint8_t capture_told[3];
     gboolean closed, committed, failed, dom_ready, recovering,load_started,inspector;
 };
 static gint live_states, live_callbacks, live_views, inspectors_shown;
@@ -248,8 +254,103 @@ static void navigation_settle(ZwkState *s) {
 static void view_finalized(gpointer data,GObject *object) {
     (void)object; g_atomic_int_add(&live_views,-1); release(data);
 }
+typedef struct PendingPermission { struct PendingPermission *next; WebKitPermissionRequest *request; uint64_t token; } PendingPermission;
+typedef struct PermissionCall { ZwkState *state; WebKitPermissionRequest *request; gboolean deferred; } PermissionCall;
+/* The permissions.Kind a request asks for, and every kind it needs as
+   permissions.Kinds bits; 0 for one no kind covers, such as the screen. */
+static uint32_t permission_kind(WebKitPermissionRequest *request,uint32_t *needs) {
+    *needs=0;
+    if (WEBKIT_IS_USER_MEDIA_PERMISSION_REQUEST(request)) {
+        WebKitUserMediaPermissionRequest *media=WEBKIT_USER_MEDIA_PERMISSION_REQUEST(request);
+        if (webkit_user_media_permission_is_for_display_device(media)) return 0;
+        const gboolean audio=webkit_user_media_permission_is_for_audio_device(media),video=webkit_user_media_permission_is_for_video_device(media);
+        if (!audio && !video) return 0;
+        *needs=(audio?1u:0u)|(video?2u:0u);
+        return video?2:1;
+    }
+    if (WEBKIT_IS_GEOLOCATION_PERMISSION_REQUEST(request)) { *needs=4; return 3; }
+    if (WEBKIT_IS_NOTIFICATION_PERMISSION_REQUEST(request)) { *needs=8; return 4; }
+    return 0;
+}
 static gboolean permission(WebKitWebView *view,WebKitPermissionRequest *request,gpointer data) {
-    (void)view; (void)data; webkit_permission_request_deny(request); return TRUE;
+    ZwkState *s=data; retain(s);
+    uint32_t needs=0; const uint32_t kind=permission_kind(request,&needs);
+    const char *uri=webkit_web_view_get_uri(view);
+    WebKitSecurityOrigin *origin=kind && uri && live(s) && s->committed && s->permission_offer?webkit_security_origin_new_for_uri(uri):NULL;
+    char *text=origin?webkit_security_origin_to_string(origin):NULL;
+    PermissionCall call={s,request,FALSE};
+    if (text) s->permission_offer(s->owner,text,kind,needs,&call);
+    call.state=NULL;
+    if (!call.deferred) webkit_permission_request_deny(request);
+    g_free(text); if (origin) webkit_security_origin_unref(origin);
+    release(s); return TRUE;
+}
+int zwk_permission_defer(void *call_pointer,uint64_t token) {
+    PermissionCall *call=call_pointer;
+    if (!call || !call->state || call->deferred || !token) return ZWK_INVALID;
+    ZwkState *s=call->state;
+    if (!live(s)) return ZWK_CLOSED;
+    for (PendingPermission *at=s->permissions;at;at=at->next) if (at->token==token) return ZWK_INVALID;
+    PendingPermission *pending=g_try_new0(PendingPermission,1);
+    if (!pending) return ZWK_OOM;
+    pending->request=g_object_ref(call->request); pending->token=token;
+    pending->next=s->permissions; s->permissions=pending;
+    call->deferred=TRUE; return ZWK_OK;
+}
+static WebKitPermissionRequest *permission_take(ZwkState *s,uint64_t token) {
+    for (PendingPermission **link=&s->permissions;*link;link=&(*link)->next) if ((*link)->token==token) {
+        PendingPermission *found=*link; *link=found->next;
+        WebKitPermissionRequest *request=found->request; g_free(found); return request;
+    }
+    return NULL;
+}
+int zwk_permission_decide(ZwkState *s,uint64_t token,int allow) {
+    if (!s || s->thread!=g_thread_self()) return ZWK_INVALID;
+    WebKitPermissionRequest *request=permission_take(s,token);
+    if (!request) return ZWK_INVALID;
+    if (allow && live(s)) webkit_permission_request_allow(request); else webkit_permission_request_deny(request);
+    g_object_unref(request);
+    return live(s)?ZWK_OK:ZWK_CLOSED;
+}
+int zwk_permission_cancel(ZwkState *s,uint64_t token) {
+    if (!s || s->thread!=g_thread_self()) return ZWK_INVALID;
+    WebKitPermissionRequest *request=permission_take(s,token);
+    if (!request) return ZWK_OK;
+    webkit_permission_request_deny(request); g_object_unref(request);
+    return ZWK_OK;
+}
+static void permissions_deny_all(ZwkState *s) {
+    while (s->permissions) {
+        PendingPermission *pending=s->permissions; s->permissions=pending->next;
+        webkit_permission_request_deny(pending->request); g_object_unref(pending->request); g_free(pending);
+    }
+}
+/* Capture state belongs to the view, as audibility does. */
+static void capture_changed(GObject *view,GParamSpec *property,gpointer data) {
+    ZwkState *s=data; retain(s);
+    const char *name=g_param_spec_get_name(property);
+    uint32_t device=!g_strcmp0(name,"camera-capture-state")?0u:!g_strcmp0(name,"microphone-capture-state")?1u:2u;
+    WebKitWebView *web=WEBKIT_WEB_VIEW(view);
+    WebKitMediaCaptureState state=device==0?webkit_web_view_get_camera_capture_state(web):device==1?webkit_web_view_get_microphone_capture_state(web):webkit_web_view_get_display_capture_state(web);
+    if (live(s) && s->capture_told[device]!=(uint8_t)state) {
+        s->capture_told[device]=(uint8_t)state;
+        (void)page(s,12,device|((uint32_t)state<<8),0,NULL);
+    }
+    release(s);
+}
+int zwk_capture_state(ZwkState *s,uint32_t device,int write,uint32_t *state) {
+    if (!s || !state || device>2 || (write && *state>2)) return ZWK_INVALID;
+    if (!live(s) || !s->view) return ZWK_CLOSED;
+    WebKitWebView *view=WEBKIT_WEB_VIEW(s->view);
+    if (write) {
+        const WebKitMediaCaptureState value=(WebKitMediaCaptureState)*state;
+        if (device==0) webkit_web_view_set_camera_capture_state(view,value);
+        else if (device==1) webkit_web_view_set_microphone_capture_state(view,value);
+        else webkit_web_view_set_display_capture_state(view,value);
+        return ZWK_OK;
+    }
+    *state=(uint32_t)(device==0?webkit_web_view_get_camera_capture_state(view):device==1?webkit_web_view_get_microphone_capture_state(view):webkit_web_view_get_display_capture_state(view));
+    return ZWK_OK;
 }
 typedef struct AuthCall { WebKitAuthenticationRequest *request; gboolean answered; } AuthCall;
 int zwk_auth_answer(void *call_pointer,const char *user,const char *password) {
@@ -914,7 +1015,9 @@ static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t
     webkit_settings_set_enable_developer_extras(settings,options->developer_tools?TRUE:FALSE);
     webkit_settings_set_enable_fullscreen(settings,FALSE);
     webkit_settings_set_enable_webrtc(settings,FALSE);
-    webkit_settings_set_enable_media_stream(settings,FALSE);
+    /* getUserMedia asks permission; only an app that may grant camera or
+       microphone turns it on. */
+    webkit_settings_set_enable_media_stream(settings,options->permission && (options->media&3u)?TRUE:FALSE);
     /* These settings remain required on the supported 2.40 API baseline. */
     G_GNUC_BEGIN_IGNORE_DEPRECATIONS
     if (webkit_get_major_version()==2 && webkit_get_minor_version()<48)
@@ -960,6 +1063,10 @@ static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t
     g_signal_connect(s->view,"web-process-terminated",G_CALLBACK(process_failed),s);
     g_signal_connect(s->view,"notify::title",G_CALLBACK(title_changed),s);
     g_signal_connect(s->view,"notify::is-playing-audio",G_CALLBACK(audible_changed),s);
+    g_signal_connect(s->view,"notify::camera-capture-state",G_CALLBACK(capture_changed),s);
+    g_signal_connect(s->view,"notify::microphone-capture-state",G_CALLBACK(capture_changed),s);
+    g_signal_connect(s->view,"notify::display-capture-state",G_CALLBACK(capture_changed),s);
+    s->permission_offer=options->permission;
     if (s->local.budget || s->remote) {
         g_signal_connect(s->view,"notify::uri",G_CALLBACK(source_changed),s);
         g_signal_connect(s->view,"notify::is-loading",G_CALLBACK(loading_changed),s);
@@ -982,6 +1089,7 @@ static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t
     } else {
         int result=options->region?zlg_region_attach(window,s->view,&s->region):zlg_content_attach(window,s->view,&s->host);
         if (result!=ZLG_CONTENT_OK) { zwk_close(s); return content_result(result); }
+        if (s->region && options->scroll_to_container) zlg_region_scroll_to_container(s->region,1);
     }
     if(options->initializers)zwk_initializers_activate(s);
     s->initial=g_idle_source_new(); retain(s);
@@ -1009,6 +1117,7 @@ static void inspector_close(ZwkState *s,GtkWidget *view) {
 void zwk_close(ZwkState *s) {
     if (s->closed) return;
     s->closed=TRUE; s->owner=NULL;
+    permissions_deny_all(s);
     find_state_close(s);
     initializers_cancel_all(s);
     capture_cancel_all(s);

@@ -72,6 +72,16 @@ fn ranged(kind: Kind) bool {
     };
 }
 
+/// True when a scroll container holds the node, so scrollIntoView can
+/// move it.
+fn scrolled(nodes: []const Node, node: *const Node) bool {
+    var parent = node.parent;
+    while (parent < nodes.len) : (parent = nodes[parent].parent) {
+        if (nodes[parent].scroll != null) return true;
+    }
+    return false;
+}
+
 /// True when the node is in a popup, popover or dialog that is closed.
 fn hidden(nodes: []const Node, node: *const Node) bool {
     if (node.hidden()) return true;
@@ -162,6 +172,8 @@ pub fn build(arena: std.mem.Allocator, window: u64, host: *const view.Host) erro
                 else => {},
             }
             if (textual(node) or node.kind == .slider or node.kind == .stepper or node.kind == .rating) try actions.append(arena, "setValue");
+            if (textual(node) and node.kind == .embed) try actions.append(arena, "selectText");
+            if (scrolled(nodes, node)) try actions.append(arena, "scrollIntoView");
             if ((node.kind == .tree_row and node.expanded != null) or node.kind == .disclosure) try actions.append(arena, "expand");
         }
         if (actions.items.len != 0) result.actions = actions.items;

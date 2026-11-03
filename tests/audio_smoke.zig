@@ -2,8 +2,12 @@
 //! and reports which. Passes either way: a machine with no audio device
 //! exercises the failure path, one with a device the real backend.
 const std = @import("std");
+const builtin = @import("builtin");
 const zio = @import("ziggurat_io");
 const audio = @import("ziggurat_audio");
+
+// The macOS unwinder cannot walk the output thread's shallow stack.
+pub const std_options: std.Options = .{ .allow_stack_tracing = builtin.os.tag != .macos };
 
 pub fn main() !void {
     var debug_allocator: std.heap.DebugAllocator(.{ .thread_safe = true }) = .init;
@@ -46,6 +50,10 @@ pub fn main() !void {
     for (samples) |sample| try writer.writeInt(i16, @intFromFloat(sample * 32767), .little);
     const stream = try engine.openStreamBytes(&wav);
     stream.play();
-    zio.sleep(50 * std.time.ns_per_ms);
-    if (stream.position() == 0) return error.StreamDidNotAdvance;
+    // The output's first callback can lag on a busy machine: wait up to 2 s.
+    var polls: u32 = 0;
+    while (stream.position() == 0) : (polls += 1) {
+        if (polls >= 2000) return error.StreamDidNotAdvance;
+        zio.sleep(std.time.ns_per_ms);
+    }
 }

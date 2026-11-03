@@ -9,10 +9,18 @@ pub const max_file_types = 64;
 pub const max_login_arguments = 32;
 pub const max_text_bytes = 255;
 pub const capabilities = .{
-    .login_item = builtin.os.tag == .windows or builtin.os.tag == .linux,
-    .url_schemes = builtin.os.tag == .windows or builtin.os.tag == .linux,
+    .login_item = builtin.os.tag == .windows or builtin.os.tag == .linux or builtin.os.tag == .macos,
+    .url_schemes = builtin.os.tag == .windows or builtin.os.tag == .linux or builtin.os.tag == .macos,
+    // A macOS bundle declares its document types in Info.plist at build time.
     .file_associations = builtin.os.tag == .windows or builtin.os.tag == .linux,
 };
+
+// macOS: src/system/macos_services.m.
+extern fn zsm_login_set(id: [*:0]const u8, arguments: [*]const [*:0]const u8, count: u32, code: *c_int) c_int;
+extern fn zsm_login_remove(id: [*:0]const u8, code: *c_int) c_int;
+extern fn zsm_login_registered(id: [*:0]const u8) c_int;
+extern fn zsm_scheme_register(scheme: [*:0]const u8, make_default: c_int, code: *c_int) c_int;
+extern fn zsm_scheme_is_default(scheme: [*:0]const u8) c_int;
 
 pub const FileType = struct {
     /// Lowercase, starting with '.', then 1..31 ASCII letters, digits, '_' or '-'.
@@ -73,17 +81,57 @@ pub const LoginItem = struct {
 /// call it from an installer, a first-run step or an application worker, not
 /// from a UI callback. Repeating it with the same value is idempotent. Nothing
 /// is registered machine-wide and no elevation is requested.
+///
+/// macOS: the app bundle's Info.plist declares its URL schemes and document
+/// types, and Launch Services registers them with the bundle. Here each
+/// scheme must be declared (SchemeNotDeclared otherwise; AppBundleRequired
+/// outside a bundle) and, with make_default, the bundle becomes its default
+/// handler. File types return UnsupportedCapability: they are the bundle's.
 pub fn register(allocator: std.mem.Allocator, application: Application, options: RegisterOptions) !Report {
     try validateApplication(application);
     return switch (builtin.os.tag) {
         .windows => windowsRegister(application, options),
         .linux => linuxRegister(allocator, application, options),
+        .macos => macosRegister(application, options),
         else => error.UnsupportedCapability,
     };
 }
+/// macOS only: whether this app bundle is the default handler of `scheme`.
+pub fn isDefaultSchemeHandler(scheme: []const u8) !bool {
+    try validateScheme(scheme);
+    if (builtin.os.tag != .macos) return error.UnsupportedCapability;
+    var storage: [33]u8 = undefined;
+    return zsm_scheme_is_default(terminate(&storage, scheme)) == 1;
+}
+fn macosRegister(application: Application, options: RegisterOptions) !Report {
+    if (application.file_types.len != 0) return error.UnsupportedCapability;
+    for (application.url_schemes) |scheme| {
+        var storage: [33]u8 = undefined;
+        var code: c_int = 0;
+        switch (zsm_scheme_register(terminate(&storage, scheme), @intFromBool(options.make_default), &code)) {
+            0 => {},
+            1 => return error.AppBundleRequired,
+            2 => return error.SchemeNotDeclared,
+            else => {
+                last_macos_status = code;
+                return error.RegistrationFailed;
+            },
+        }
+    }
+    return .{};
+}
+/// macOS: the OSStatus or NSError code of the last failed registration or
+/// login item call on this thread.
+pub threadlocal var last_macos_status: c_int = 0;
+fn terminate(storage: []u8, text: []const u8) [*:0]const u8 {
+    @memcpy(storage[0..text.len], text);
+    storage[text.len] = 0;
+    return storage[0..text.len :0];
+}
 /// Removes what register wrote for this value. Entries that another
 /// application owns now, such as a scheme re-registered by someone else, are
-/// left alone. Missing entries are not an error.
+/// left alone. Missing entries are not an error. macOS returns
+/// UnsupportedCapability: the schemes belong to the bundle.
 pub fn unregister(allocator: std.mem.Allocator, application: Application, options: RegisterOptions) !Report {
     try validateApplication(application);
     return switch (builtin.os.tag) {
@@ -95,9 +143,33 @@ pub fn unregister(allocator: std.mem.Allocator, application: Application, option
 
 /// Starts the application when the user signs in. Windows writes the
 /// per-user Run value; Linux writes an XDG autostart entry. Blocking I/O.
+///
+/// macOS needs the process to run from an app bundle (AppBundleRequired
+/// otherwise) and starts that bundle, not `executable`. From macOS 13 the
+/// bundle registers as the user's login item (System Settings > General >
+/// Login Items), which ignores `arguments`; ApprovalRequired then means it
+/// is registered but the user has to allow it there. Earlier versions get a
+/// launch agent, ~/Library/LaunchAgents/<id>.plist, that opens the bundle
+/// with the arguments.
 pub fn setLoginItem(item: LoginItem, scope: Scope) !void {
     try validateLoginItem(item);
     switch (builtin.os.tag) {
+        .macos => {
+            var id: [identity.max_id_bytes + 1]u8 = undefined;
+            var storage: [max_login_arguments][1025]u8 = undefined;
+            var arguments: [max_login_arguments][*:0]const u8 = undefined;
+            for (item.arguments, 0..) |argument, index| arguments[index] = terminate(&storage[index], argument);
+            var code: c_int = 0;
+            switch (zsm_login_set(terminate(&id, item.id), &arguments, @intCast(item.arguments.len), &code)) {
+                0 => {},
+                1 => return error.AppBundleRequired,
+                2 => return error.ApprovalRequired,
+                else => {
+                    last_macos_status = code;
+                    return error.LoginItemFailed;
+                },
+            }
+        },
         .windows => {
             var command: [max_command_bytes]u8 = undefined;
             const line = try windowsCommand(&command, item.executable, item.arguments, false);
@@ -115,6 +187,18 @@ pub fn setLoginItem(item: LoginItem, scope: Scope) !void {
 pub fn removeLoginItem(id: []const u8, scope: Scope) !void {
     try identity.validate(id);
     switch (builtin.os.tag) {
+        .macos => {
+            var storage: [identity.max_id_bytes + 1]u8 = undefined;
+            var code: c_int = 0;
+            switch (zsm_login_remove(terminate(&storage, id), &code)) {
+                0 => {},
+                1 => return error.AppBundleRequired,
+                else => {
+                    last_macos_status = code;
+                    return error.LoginItemFailed;
+                },
+            }
+        },
         .windows => try windowsDeleteValue(run_key, id),
         .linux => {
             var path: [std.fs.max_path_bytes]u8 = undefined;
@@ -128,9 +212,17 @@ pub fn removeLoginItem(id: []const u8, scope: Scope) !void {
 }
 /// Reports whether this application's own login entry exists. It does not
 /// read desktop-specific disable switches such as Windows Startup Apps.
+/// macOS reports whether the login item is enabled, so one waiting for the
+/// user's approval is not.
 pub fn loginItemRegistered(id: []const u8, scope: Scope) !bool {
     try identity.validate(id);
     switch (builtin.os.tag) {
+        .macos => {
+            var storage: [identity.max_id_bytes + 1]u8 = undefined;
+            const status = zsm_login_registered(terminate(&storage, id));
+            if (status < 0) return error.AppBundleRequired;
+            return status == 1;
+        },
         .windows => {
             var value: [max_command_bytes]u8 = undefined;
             return (try windowsGetString(run_key, id, &value)) != null;

@@ -3,9 +3,11 @@ const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const win = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
 extern fn ziggurat_system_logind_inhibit(what: [*:0]const u8, who: [*:0]const u8, why: [*:0]const u8, timeout_ms: c_int, fd: *c_int) callconv(.c) c_int;
+extern fn zsm_power_begin(display: c_int, reason: [*:0]const u8) callconv(.c) ?*anyopaque;
+extern fn zsm_power_end(token: *anyopaque) callconv(.c) void;
 
 pub const max_reason_bytes = 255;
-pub const capabilities = .{ .prevent_sleep = builtin.os.tag == .windows or builtin.os.tag == .linux };
+pub const capabilities = .{ .prevent_sleep = builtin.os.tag == .windows or builtin.os.tag == .linux or builtin.os.tag == .macos };
 
 pub const Kind = enum {
     /// Keep the system from idle sleep; the display may still turn off.
@@ -16,7 +18,8 @@ pub const Kind = enum {
 pub const Options = struct {
     kind: Kind = .system,
     /// Shown by the OS in power diagnostics (Windows `powercfg /requests`,
-    /// Linux `systemd-inhibit --list`). UTF-8 without control characters.
+    /// Linux `systemd-inhibit --list`, macOS `pmset -g assertions`). UTF-8
+    /// without control characters.
     reason: []const u8,
     /// Linux: who holds the inhibitor. Usually the application name.
     application: []const u8 = "",
@@ -29,13 +32,15 @@ pub const Options = struct {
 /// released. Do not copy after acquire. `release` is idempotent and may run on
 /// any thread; an assertion that is never released ends with the process.
 ///
-/// Windows acquisition is a local power request. Linux performs one blocking
+/// Windows acquisition is a local power request; macOS begins an
+/// NSProcessInfo activity that disables idle sleep. Linux performs one blocking
 /// call to systemd-logind on the system bus, bounded by Options.timeout_ms;
 /// call it from a worker when that latency is not acceptable on the UI thread.
 pub const Assertion = struct {
     native: switch (builtin.os.tag) {
         .windows => win.HANDLE,
         .linux => c_int,
+        .macos => *anyopaque,
         else => void,
     },
     kind: Kind,
@@ -76,6 +81,11 @@ pub const Assertion = struct {
                     else => error.PowerRequestFailed,
                 };
             },
+            .macos => {
+                var why: [max_reason_bytes + 1]u8 = undefined;
+                const token = zsm_power_begin(@intFromBool(options.kind == .display), terminated(&why, options.reason)) orelse return error.PowerRequestFailed;
+                return .{ .native = token, .kind = options.kind };
+            },
             else => return error.UnsupportedCapability,
         }
     }
@@ -89,6 +99,7 @@ pub const Assertion = struct {
             },
             // logind drops the inhibitor when the last descriptor closes.
             .linux => zio.posix.close(self.native),
+            .macos => zsm_power_end(self.native),
             else => {},
         }
     }

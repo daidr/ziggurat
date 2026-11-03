@@ -1,6 +1,7 @@
 #include <pango/pangocairo.h>
 #include <stdint.h>
 #include <math.h>
+#include <float.h>
 #include <string.h>
 #include "brushes.h"
 #include "image_resource.h"
@@ -70,11 +71,13 @@ int zlc_has_surface(Renderer *s) {return s && s->surface && s->context;}
 static void clear_transparent(Renderer *s){
     cairo_save(s->context);cairo_identity_matrix(s->context);cairo_set_operator(s->context,CAIRO_OPERATOR_CLEAR);cairo_paint(s->context);cairo_restore(s->context);
 }
+/* transparent: 0 opaque, 1 transparent and cleared, 2 transparent with the
+   last frame's pixels kept (the caller clears what it draws again). */
 int zlc_begin_mode(Renderer *s,uint32_t width,uint32_t height,float scale,int transparent) {
     s->window_transparent=transparent!=0;
     if(s->layers)return layer_begin(s,width,height,scale);
     if(!width||!height||!isfinite(scale)||scale<=0)return 1;
-    if(s->surface && s->width==width && s->height==height && s->scale==scale){if(s->window_transparent)clear_transparent(s);return 0;}
+    if(s->surface && s->width==width && s->height==height && s->scale==scale){if(transparent==1)clear_transparent(s);return 0;}
     destroy(s);
     s->surface=cairo_image_surface_create(CAIRO_FORMAT_ARGB32,width,height);
     if(cairo_surface_status(s->surface)!=CAIRO_STATUS_SUCCESS) { destroy(s);return 2; }
@@ -171,6 +174,24 @@ void zlc_push_clip(Renderer *s,float x,float y,float width,float height) {
     after[2]=fmin(before[2],((double)x+width)*s->scale+s->origin[0]);after[3]=fmin(before[3],((double)y+height)*s->scale+s->origin[1]);
     cairo_save(s->context);cairo_rectangle(s->context,x,y,width,height);cairo_clip(s->context);
     if(s->layers&&s->layers->active)layer_current(s->layers)->saves++;
+}
+/* Clips to device pixels x0..x1, y0..y1 of the plane, exactly on pixel
+   edges whatever the scale; popped by zlc_pop_clip. */
+void zlc_push_device_clip(Renderer *s,int32_t x0,int32_t y0,int32_t x1,int32_t y1){
+    if(s->gradient_clip_depth>=32)return;
+    double *before=s->gradient_clips[s->gradient_clip_depth],*after=s->gradient_clips[++s->gradient_clip_depth];
+    after[0]=fmax(before[0],(double)x0+s->origin[0]);after[1]=fmax(before[1],(double)y0+s->origin[1]);
+    after[2]=fmin(before[2],(double)x1+s->origin[0]);after[3]=fmin(before[3],(double)y1+s->origin[1]);
+    cairo_save(s->context);cairo_matrix_t matrix;cairo_get_matrix(s->context,&matrix);cairo_identity_matrix(s->context);
+    cairo_new_path(s->context);cairo_rectangle(s->context,(double)x0+s->origin[0],(double)y0+s->origin[1],(double)x1-x0,(double)y1-y0);cairo_clip(s->context);
+    cairo_set_matrix(s->context,&matrix);
+    if(s->layers&&s->layers->active)layer_current(s->layers)->saves++;
+}
+/* Clears a rectangle in DIP to transparent, within the current clip. */
+void zlc_clear_rect(Renderer *s,float x,float y,float width,float height){
+    if(width>=FLT_MAX){clear_transparent(s);return;}
+    cairo_save(s->context);cairo_new_path(s->context);cairo_rectangle(s->context,x,y,width,height);cairo_clip(s->context);
+    cairo_set_operator(s->context,CAIRO_OPERATOR_CLEAR);cairo_paint(s->context);cairo_restore(s->context);
 }
 void zlc_pop_clip(Renderer *s) { if(s->gradient_clip_depth){s->gradient_clip_depth--;cairo_restore(s->context);if(s->layers&&s->layers->active)layer_current(s->layers)->saves--;} }
 int zlc_end_checked(Renderer *s,cairo_t *destination){

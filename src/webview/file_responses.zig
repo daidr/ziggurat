@@ -58,7 +58,7 @@ pub const OwnedFileResponse = struct {
         const metadata = try resources.OwnedResponse.init(allocator, .{ .status = head.status, .mime = head.mime, .headers = head.headers }, 1);
         return .{ .native = handle, .length = length, .metadata = metadata };
     }
-    /// Linux preparation for a socket-backed response and an explicit worker
+    /// Linux and macOS preparation for a socket-backed response and an explicit worker
     /// pump. There is no implicit file-reading thread. The host posts response
     /// to the owner and then calls pump.pump() on its own worker. A failed post
     /// must deinit both values. Successful native acceptance consumes response;
@@ -76,7 +76,7 @@ pub const OwnedFileResponse = struct {
         if (std.Thread.getCurrentId() == process_main_thread_id) return error.UiThreadForbidden;
         if (max_bytes == 0 or max_bytes > hard_max_file_bytes) return error.InvalidFileStreamLimit;
         try resources.validateResponse(.{ .status = head.status, .mime = head.mime, .headers = head.headers }, 0);
-        if (builtin.os.tag != .linux) return error.UnsupportedCapability;
+        if (builtin.os.tag != .linux and builtin.os.tag != .macos) return error.UnsupportedCapability;
         var prepared = try file_stream.PreparedSource.prepareWithFailure(process_main_thread_id, file, max_bytes, native_failure);
         errdefer {
             prepared.source.deinit();
@@ -97,7 +97,7 @@ pub const OwnedFileResponse = struct {
         self.metadata.response = .{};
         if (native) |handle| switch (builtin.os.tag) {
             .windows => zwv_file_close(handle),
-            .linux => {
+            .linux, .macos => {
                 var source: file_stream.PreparedSource = .{ .native = handle, .length = 0 };
                 source.deinit();
             },
@@ -144,7 +144,7 @@ pub const StreamTicket = struct {
     pub fn cancel(self: StreamTicket) void {
         if (self.native) |control| switch (builtin.os.tag) {
             .windows => zwv_file_control_cancel(control),
-            .linux => (file_stream.Control{ .native = control }).cancel(),
+            .linux, .macos => (file_stream.Control{ .native = control }).cancel(),
             else => {},
         };
     }
@@ -152,7 +152,7 @@ pub const StreamTicket = struct {
         const control = self.native orelse return error.TicketMoved;
         switch (builtin.os.tag) {
             .windows => zwv_file_control_add(control),
-            .linux => return .{ .native = (try (file_stream.Control{ .native = control }).clone()).native },
+            .linux, .macos => return .{ .native = (try (file_stream.Control{ .native = control }).clone()).native },
             else => return error.UnsupportedCapability,
         }
         return .{ .native = control };
@@ -162,7 +162,7 @@ pub const StreamTicket = struct {
         self.native = null;
         if (native) |control| switch (builtin.os.tag) {
             .windows => zwv_file_control_release(control),
-            .linux => {
+            .linux, .macos => {
                 var ticket: file_stream.Control = .{ .native = control };
                 ticket.deinit();
             },

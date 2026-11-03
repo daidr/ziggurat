@@ -8,7 +8,7 @@ const transfer = @import("transfer.zig");
 const desktop = @import("desktop.zig");
 
 const os = builtin.os.tag;
-const native_supported = !builtin.is_test and (os == .windows or os == .linux);
+const native_supported = !builtin.is_test and (os == .windows or os == .linux or os == .macos);
 const native = if (!native_supported) Unsupported else if (os == .windows) @import("drag_windows.zig") else Linux;
 
 pub const capabilities = .{ .source = native_supported, .preview = native_supported };
@@ -242,6 +242,7 @@ pub const gtk = struct {
     }
 };
 
+/// GTK, and AppKit through src/system/macos_drag.m with the same entry points.
 const Linux = struct {
     const State = struct { event: ?*anyopaque = null, session: ?*anyopaque = null };
     const Callbacks = extern struct {

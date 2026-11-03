@@ -8,43 +8,48 @@ const builtin = @import("builtin");
 const z = @import("ziggurat");
 
 const os = builtin.os.tag;
-const enabled = !builtin.is_test and (os == .windows or os == .linux);
+const enabled = !builtin.is_test and (os == .windows or os == .linux or os == .macos);
 const windows = if (enabled and os == .windows) @import("desktop_windows.zig") else struct {
     pub const Native = struct {};
 };
 
 pub const capabilities = .{
-    .monitors = os == .windows or os == .linux,
-    .monitor_refresh_rate = os == .windows or os == .linux,
-    .preferences = os == .windows or os == .linux,
+    .monitors = os == .windows or os == .linux or os == .macos,
+    .monitor_refresh_rate = os == .windows or os == .linux or os == .macos,
+    .preferences = os == .windows or os == .linux or os == .macos,
     // Linux GtkSettings exposes no accent color; Preferences.accent is null.
-    .accent_color = os == .windows,
+    .accent_color = os == .windows or os == .macos,
     // Linux reports null: GtkSettings has no transparency preference.
-    .reduce_transparency = os == .windows,
-    // Windows GetSystemPowerStatus; Linux bounded /sys/class/power_supply read.
-    .power_source = os == .windows or os == .linux,
-    // Windows SystemStatusFlag; Linux GPowerProfileMonitor when present at runtime.
-    .power_saver = os == .windows or os == .linux,
-    // Windows requires GetNetworkConnectivityHint at runtime (unknown otherwise).
-    .network = os == .windows or os == .linux,
-    .watch_monitors = os == .windows or os == .linux,
-    .watch_preferences = os == .windows or os == .linux,
+    .reduce_transparency = os == .windows or os == .macos,
+    // Windows GetSystemPowerStatus; Linux bounded /sys/class/power_supply
+    // read; macOS IOKit power sources.
+    .power_source = os == .windows or os == .linux or os == .macos,
+    // Windows SystemStatusFlag; Linux GPowerProfileMonitor when present at
+    // runtime; macOS Low Power Mode (macOS 12 and later).
+    .power_saver = os == .windows or os == .linux or os == .macos,
+    // Windows requires GetNetworkConnectivityHint at runtime (unknown
+    // otherwise); macOS Network.framework path monitor.
+    .network = os == .windows or os == .linux or os == .macos,
+    .watch_monitors = os == .windows or os == .linux or os == .macos,
+    .watch_preferences = os == .windows or os == .linux or os == .macos,
     // Linux watches only the power-saver flag, not AC/battery or percentage.
-    .watch_power_source = os == .windows,
-    .watch_power_saver = os == .windows or os == .linux,
-    .watch_network = os == .windows or os == .linux,
-    .beep = os == .windows or os == .linux,
+    .watch_power_source = os == .windows or os == .macos,
+    .watch_power_saver = os == .windows or os == .linux or os == .macos,
+    .watch_network = os == .windows or os == .linux or os == .macos,
+    .beep = os == .windows or os == .linux or os == .macos,
     // Linux X11 only; Wayland keeps the global pointer position private.
-    .cursor_position = os == .windows or os == .linux,
+    .cursor_position = os == .windows or os == .linux or os == .macos,
 };
 
 /// Native desktop coordinates, the same convention as core `ScreenPoint`:
-/// physical pixels on Windows, GDK logical coordinates on X11.
+/// physical pixels on Windows, GDK logical coordinates on X11, and points
+/// from the top-left of the primary display on macOS.
 pub const Rect = struct { x: i32, y: i32, width: u32, height: u32 };
 pub const Monitor = struct {
     bounds: Rect,
     work_area: Rect,
-    /// Windows effective DPI / 96; GDK integer monitor scale factor on Linux.
+    /// Windows effective DPI / 96; GDK integer monitor scale factor on Linux;
+    /// the backing scale factor on macOS.
     scale: f32,
     primary: bool,
     /// Current mode refresh rate rounded to Hz, null when the system reports none.
@@ -114,8 +119,10 @@ pub fn preferences(app: *z.App) !Preferences {
             2 => .dark,
             else => .unknown,
         },
+        .accent = if (native.accent < 0) null else @intCast(native.accent),
         .high_contrast = native.high_contrast != 0,
         .reduce_motion = native.reduce_motion != 0,
+        .reduce_transparency = if (native.reduce_transparency < 0) null else native.reduce_transparency != 0,
         .text_scale = native.text_scale,
     };
 }
@@ -171,8 +178,9 @@ pub fn cursorPosition(app: *z.App) !z.ScreenPoint {
     return point;
 }
 
-/// Live native watch states owned by this module: Windows hidden windows and
-/// Linux refcounted GObject subscriptions. Owner thread only.
+/// Live native watch states owned by this module: Windows hidden windows,
+/// Linux refcounted GObject subscriptions and macOS notification observers.
+/// Owner thread only.
 pub fn resourceCount() usize {
     if (comptime !enabled) return 0;
     if (os == .windows) return windows.resourceCount();
@@ -297,7 +305,8 @@ fn check(value: c_int) !void {
 
 const NativeRect = extern struct { x: i32, y: i32, width: u32, height: u32 };
 const NativeMonitor = extern struct { bounds: NativeRect, work: NativeRect, scale: f32, primary: u32, refresh_millihz: u32 };
-const NativePreferences = extern struct { scheme: i32, high_contrast: u32, reduce_motion: u32, text_scale: f32 };
+/// accent is 0xRRGGBB or -1; reduce_transparency is 0, 1 or -1 (unknown).
+const NativePreferences = extern struct { scheme: i32, high_contrast: u32, reduce_motion: u32, text_scale: f32, accent: i32, reduce_transparency: i32 };
 const NativePower = extern struct { source: i32, percent: i32, saver: i32 };
 const NativeNetwork = extern struct { state: i32, metered: i32 };
 extern fn zsd_monitors([*]NativeMonitor, u32, *u32) c_int;

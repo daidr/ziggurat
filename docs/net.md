@@ -65,7 +65,7 @@ try socket.close(net.websocket.close_code.normal, "bye");
 
 1. 回环主机（`localhost`、`*.localhost`、`127.0.0.0/8`、`::1`）直连。
 2. 只要设置了 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY` 中任一个（或其小写名），就由环境变量决定：`http`/`ws` 用 `HTTP_PROXY`，`https`/`wss` 用 `HTTPS_PROXY`，各自未设置时用 `ALL_PROXY`；`NO_PROXY` 是逗号分隔的主机、域名（`example.com` 含子域，`.example.com` 与 `*.example.com` 只含子域）、IP 或网段，都可带端口，`*` 表示全部直连。显式设置优先于系统设置。
-3. 否则按系统设置：Windows 用 WinHTTP 读取当前用户的代理设置（设置 > 网络和 Internet > 代理，即旧的 Internet 选项），先自动检测（WPAD）和配置脚本（PAC），再用手动代理及其绕过列表（`<local>`、`*` 通配、前导点域名、网段）；Linux 用 GIO 默认代理解析器，读取 GNOME 设置，或经 libproxy 读取 KDE 设置与 PAC，沙盒内走桌面 portal。没有答案时直连。
+3. 否则按系统设置：Windows 用 WinHTTP 读取当前用户的代理设置（设置 > 网络和 Internet > 代理，即旧的 Internet 选项），先自动检测（WPAD）和配置脚本（PAC），再用手动代理及其绕过列表（`<local>`、`*` 通配、前导点域名、网段）；macOS 用 CFNetwork 读取网络设置里的代理（系统设置 > 网络 > 详细信息 > 代理），包括 HTTP、HTTPS、SOCKS 手动代理及其绕过列表、自动代理发现（WPAD）和自动配置脚本（PAC），PAC 在调用线程的 run loop 私有模式里执行，最多等 5 秒；Linux 用 GIO 默认代理解析器，读取 GNOME 设置，或经 libproxy 读取 KDE 设置与 PAC，沙盒内走桌面 portal。没有答案时直连。
 
 同一 scheme 与主机的系统答案缓存 5 秒，修改系统设置后无需重启应用即对后续请求生效。查询可能执行 PAC 脚本而阻塞，与传输一样只在 worker 上调用。WinHTTP 只从系统目录加载；GIO 在第一次查询时 `dlopen`，没有 GIO 时直连。
 

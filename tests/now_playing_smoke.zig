@@ -5,6 +5,10 @@ const std = @import("std");
 const z = @import("ziggurat");
 const system = @import("ziggurat_system");
 const Watchdog = @import("watchdog.zig").Watchdog;
+const builtin = @import("builtin");
+
+pub const panic = std.debug.FullPanic(@import("macos_panic.zig").panic);
+pub const std_options: std.Options = .{ .allow_stack_tracing = builtin.os.tag != .macos };
 
 const s = std.time.ns_per_s;
 
@@ -37,6 +41,8 @@ const State = struct {
             .position_ns = 20 * s,
             .commands = .{ .play = true, .pause = true, .seek = true },
         }) catch return self.fail("set");
+        var title: [64]u8 = undefined;
+        if (builtin.os.tag == .macos and !std.mem.eql(u8, system.now_playing.shownTitleForTesting(&title), "Spring")) return self.fail("shown title");
         // The play/pause key while playing, a command not offered, and a seek.
         system.now_playing.simulateForTesting(4, 0);
         system.now_playing.simulateForTesting(16, 0);
@@ -61,6 +67,8 @@ const State = struct {
         if (info.state != .paused or !std.mem.eql(u8, info.title, "Spring")) return self.fail("info");
         self.now.clear();
         if (self.now.current() != null) return self.fail("clear");
+        var title: [64]u8 = undefined;
+        if (builtin.os.tag == .macos and system.now_playing.shownTitleForTesting(&title).len != 0) return self.fail("shown after clear");
         system.now_playing.simulateForTesting(1, 0);
         self.app.post(.{ .context = self, .call = finish }) catch return self.fail("post");
     }
@@ -80,7 +88,7 @@ const State = struct {
 };
 
 pub fn main() !void {
-    var allocator: std.heap.DebugAllocator(.{}) = .init;
+    var allocator: std.heap.DebugAllocator(@import("macos_panic.zig").allocator_config) = .init;
     defer std.debug.assert(allocator.deinit() == .ok);
     const app = try z.App.init(allocator.allocator());
     defer app.deinit();

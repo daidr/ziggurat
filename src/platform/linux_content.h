@@ -35,6 +35,9 @@ int zlg_region_mount(ZlgRegionHost *);
 void zlg_region_parent_destroying(ZlgRegionHost *);
 int zlg_region_viewport(ZlgRegionHost *, int x, int y, int width, int height, int visible);
 int zlg_region_focus(ZlgRegionHost *);
+/* Nonzero sends the wheel and the touchpad over the child to the drawing
+ * area beneath it, at the same point, before the child sees them. */
+void zlg_region_scroll_to_container(ZlgRegionHost *, int);
 void zlg_region_detach(ZlgRegionHost *);
 unsigned zlg_region_count(void);
 

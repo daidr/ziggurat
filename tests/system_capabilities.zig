@@ -14,7 +14,7 @@ test "unsupported system capabilities fail explicitly" {
     var context: u8 = 0;
     var destination: [100]u8 = undefined;
     var owner = system.Owner.init(&context, action);
-    try std.testing.expect(!system.capabilities.native_menu and !system.capabilities.tray and !system.capabilities.clipboard_text and !system.capabilities.async_file_dialog);
+    try std.testing.expect(!system.capabilities.native_menu and !system.capabilities.tray and system.capabilities.clipboard_text == (builtin.os.tag == .macos) and !system.capabilities.async_file_dialog);
     try std.testing.expectError(error.UnsupportedCapability, owner.attach(window));
     try std.testing.expectError(error.UnsupportedCapability, owner.setMenu(&.{}));
     try std.testing.expectError(error.UnsupportedCapability, owner.clearMenu());
@@ -41,6 +41,7 @@ test "unsupported system capabilities fail explicitly" {
     try std.testing.expectError(error.UnsupportedCapability, tray.popupMenu(1, &.{.{ .id = 1, .label = "Item" }}, .icon));
     try std.testing.expectError(error.UnsupportedCapability, tray.setMenu(&.{.{ .id = 1, .label = "Item" }}));
     try tray.remove();
+    // macOS text helpers exist natively but not in the test backend.
     try std.testing.expectError(error.UnsupportedCapability, system.clipboard.writeText(window, "text"));
     try std.testing.expectError(error.UnsupportedCapability, system.clipboard.readText(window, &destination));
     // The test backend has no native display; Board reports that explicitly.

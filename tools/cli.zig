@@ -15,13 +15,15 @@ const winsign = @import("winsign.zig");
 const vet = @import("vet.zig");
 const macos = @import("macos.zig");
 const install_ps1 = @import("install_ps1.zig");
+const pkgbuild = @import("pkgbuild.zig");
 
 const usage =
     \\ziggurat init DIR [--template native|web|hybrid] [--name NAME] [--id IDENTITY] [--framework PATH]
     \\ziggurat dev [--watch DIR]... [--frontend COMMAND] [-- ZIG_BUILD_ARGS...]
     \\ziggurat build [--debug] [--target TRIPLE | --platform LIST] [--package] [--sign IDENTITY] [--skip-dmg] [--skip-notarize] [-- ZIG_BUILD_ARGS...]
-    \\ziggurat package setup --zip PACKAGE [--stub SETUP_STUB] [--publisher NAME] [--comment TEXT] [--categories LIST] [--icon PNG] [--install-dir-name NAME] [--hook-init CMD] [--hook-install CMD] [--hook-uninstall CMD] [--output FILE]
-    \\ziggurat package deb --zip PACKAGE --maintainer "NAME <EMAIL>" [--depends LIST] [--webview] [--comment TEXT] [--categories LIST] [--icon PNG] [--output FILE]
+    \\ziggurat package setup --zip PACKAGE [--stub SETUP_STUB] [--publisher NAME] [--comment TEXT] [--categories LIST] [--icon PNG] [--install-dir-name NAME] [--hook-init CMD] [--hook-install CMD] [--hook-uninstall CMD] [--command LIST] [--output FILE]
+    \\ziggurat package deb --zip PACKAGE --maintainer "NAME <EMAIL>" [--depends LIST] [--webview] [--comment TEXT] [--categories LIST] [--icon PNG] [--command LIST] [--output FILE]
+    \\ziggurat package pkgbuild --zip PACKAGE [--maintainer "NAME <EMAIL>"] [--depends LIST] [--webview] [--comment TEXT] [--categories LIST] [--icon PNG] [--command LIST] [--homepage URL] [--license SPDX] [--output FILE]
     \\ziggurat package app --zip PACKAGE [--sign IDENTITY] [--dmg [--skip-notarize]] [--output DIR]
     \\ziggurat package install-script --zip PACKAGE [--github OWNER/REPO [--tag-prefix PREFIX]] [--url BASE] [--webview] [--output FILE]
     \\ziggurat package install-ps1 --zip PACKAGE [--github OWNER/REPO [--tag-prefix PREFIX]] [--url BASE] [--output FILE]
@@ -54,7 +56,14 @@ const usage =
     \\(installerHooks) are shell commands the installer runs before installing,
     \\after it, and before uninstalling, with ZIGGURAT_INSTALL_DIR, ZIGGURAT_APP,
     \\ZIGGURAT_SCOPE, ZIGGURAT_VERSION and ZIGGURAT_SILENT set.
-    \\package deb writes a Debian package that installs under /usr/lib/EXECUTABLE.
+    \\package deb writes a Debian package that installs under /usr/lib/EXECUTABLE,
+    \\with a link in /usr/bin for each --command (linux.command in ziggurat.json:
+    \\a name or a list of names; default: the executable's name).
+    \\package pkgbuild writes a PKGBUILD next to the package (its source, with its
+    \\SHA-256), from which makepkg -si installs what the Debian package does on
+    \\Arch Linux; --depends takes the Debian dependencies, mapped to Arch Linux
+    \\packages. homepage and license in ziggurat.json fill url and license.
+    \\package setup links each command in ~/.local/bin unless another program has it.
     \\--icon names a PNG inside the package for the Linux menu (default: the package's icon.png).
     \\package install-script writes install.sh, which installs a Linux app for the
     \\current user with its setup installer: the one next to it, else the newest one
@@ -114,9 +123,58 @@ pub const Project = struct {
     /// Commands the setup installer runs: `init` before it installs,
     /// `install` after, `uninstall` before the app's folder is removed.
     installerHooks: ?setup_format.Hooks = null,
+    /// Linux packages: the commands that run the app.
+    linux: ?Linux = null,
+    /// The app's home page, which the PKGBUILD names.
+    homepage: ?[]const u8 = null,
+    /// The SPDX expression of the app's license, which the PKGBUILD names.
+    license: ?[]const u8 = null,
+
+    pub const Linux = struct {
+        /// The names of the commands that run the app: a name, or a list
+        /// such as ["my-app", "ma"] to add a short one. The Debian package
+        /// and the PKGBUILD link each in /usr/bin, the setup installer in
+        /// ~/.local/bin unless another program has it; the first is the
+        /// one to run the app by.
+        command: Commands = .{},
+    };
 
     /// `dir` under src/ lets the app import `catalog.zig` from its sources.
     pub const I18n = struct { dir: []const u8 = "src/locales", source: []const u8 = "en" };
+};
+
+/// One command name or a list of them, as `linux.command` takes.
+pub const Commands = struct {
+    names: []const []const u8 = &.{},
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, parse_options: std.json.ParseOptions) !Commands {
+        const value = try std.json.Value.jsonParse(allocator, source, parse_options);
+        return jsonParseFromValue(allocator, value, parse_options);
+    }
+
+    pub fn jsonParseFromValue(allocator: std.mem.Allocator, value: std.json.Value, _: std.json.ParseOptions) !Commands {
+        switch (value) {
+            .string => |name| return .{ .names = try allocator.dupe([]const u8, &.{try allocator.dupe(u8, name)}) },
+            .array => |list| {
+                const names = try allocator.alloc([]const u8, list.items.len);
+                for (list.items, names) |item, *name| name.* = switch (item) {
+                    .string => |text| try allocator.dupe(u8, text),
+                    else => return error.UnexpectedToken,
+                };
+                return .{ .names = names };
+            },
+            .null => return .{},
+            else => return error.UnexpectedToken,
+        }
+    }
+
+    /// A comma separated list, as --command takes.
+    pub fn parseList(allocator: std.mem.Allocator, text: []const u8) !Commands {
+        var names: std.ArrayList([]const u8) = .empty;
+        var parts = std.mem.tokenizeScalar(u8, text, ',');
+        while (parts.next()) |part| try names.append(allocator, std.mem.trim(u8, part, " "));
+        return .{ .names = try names.toOwnedSlice(allocator) };
+    }
 };
 
 pub fn main(process_init: std.process.Init.Minimal) void {
@@ -331,6 +389,7 @@ pub fn readProject(allocator: std.mem.Allocator, dir: std.Io.Dir) !Project {
     const project = std.json.parseFromSliceLeaky(Project, allocator, bytes, .{ .allocate = .alloc_always }) catch return error.InvalidProjectFile;
     if (!validIdentity(project.identity) or !validDisplayName(project.name)) return error.InvalidProjectFile;
     if (project.windows) |config| if (config.installDirName) |name| if (!setup_format.validInstallDirName(std.mem.trim(u8, name, " "))) return error.InvalidInstallDirName;
+    if (project.linux) |config| if (!setup_format.validCommands(config.command.names)) return error.InvalidCommandName;
     update.publication.validateFilename(project.executable) catch return error.InvalidProjectFile;
     _ = update.retention.parseVersion(project.version) catch return error.InvalidProjectFile;
     try validateMacOS(project);
@@ -710,6 +769,9 @@ const PackageOptions = struct {
     skip_notarize: bool = false,
     install_dir_name: ?[]const u8 = null,
     hooks: setup_format.Hooks = .{},
+    commands: ?Commands = null,
+    homepage: ?[]const u8 = null,
+    license: ?[]const u8 = null,
 };
 
 const Inventory = struct { schema_version: u16, name: []const u8 = "", identity: []const u8, version: []const u8, target: []const u8, executable: []const u8 };
@@ -768,12 +830,17 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         if (index + 1 >= args.len) return error.InvalidArguments;
         const value = args[index + 1];
         index += 1;
-        if (std.mem.eql(u8, arg, "--zip")) package_options.zip = value else if (std.mem.eql(u8, arg, "--stub")) package_options.stub = value else if (std.mem.eql(u8, arg, "--output")) package_options.output = value else if (std.mem.eql(u8, arg, "--publisher")) package_options.publisher = value else if (std.mem.eql(u8, arg, "--comment")) package_options.comment = value else if (std.mem.eql(u8, arg, "--categories")) package_options.categories = value else if (std.mem.eql(u8, arg, "--icon")) package_options.icon = value else if (std.mem.eql(u8, arg, "--maintainer")) package_options.maintainer = value else if (std.mem.eql(u8, arg, "--depends")) package_options.depends = value else if (std.mem.eql(u8, arg, "--github")) package_options.github = value else if (std.mem.eql(u8, arg, "--tag-prefix")) package_options.tag_prefix = value else if (std.mem.eql(u8, arg, "--url")) package_options.url = value else if (std.mem.eql(u8, arg, "--sign")) package_options.sign = value else if (std.mem.eql(u8, arg, "--install-dir-name")) package_options.install_dir_name = value else if (std.mem.eql(u8, arg, "--hook-init")) package_options.hooks.init = value else if (std.mem.eql(u8, arg, "--hook-install")) package_options.hooks.install = value else if (std.mem.eql(u8, arg, "--hook-uninstall")) package_options.hooks.uninstall = value else return error.InvalidArguments;
+        if (std.mem.eql(u8, arg, "--zip")) package_options.zip = value else if (std.mem.eql(u8, arg, "--stub")) package_options.stub = value else if (std.mem.eql(u8, arg, "--output")) package_options.output = value else if (std.mem.eql(u8, arg, "--publisher")) package_options.publisher = value else if (std.mem.eql(u8, arg, "--comment")) package_options.comment = value else if (std.mem.eql(u8, arg, "--categories")) package_options.categories = value else if (std.mem.eql(u8, arg, "--icon")) package_options.icon = value else if (std.mem.eql(u8, arg, "--maintainer")) package_options.maintainer = value else if (std.mem.eql(u8, arg, "--depends")) package_options.depends = value else if (std.mem.eql(u8, arg, "--github")) package_options.github = value else if (std.mem.eql(u8, arg, "--tag-prefix")) package_options.tag_prefix = value else if (std.mem.eql(u8, arg, "--url")) package_options.url = value else if (std.mem.eql(u8, arg, "--sign")) package_options.sign = value else if (std.mem.eql(u8, arg, "--install-dir-name")) package_options.install_dir_name = value else if (std.mem.eql(u8, arg, "--hook-init")) package_options.hooks.init = value else if (std.mem.eql(u8, arg, "--hook-install")) package_options.hooks.install = value else if (std.mem.eql(u8, arg, "--hook-uninstall")) package_options.hooks.uninstall = value else if (std.mem.eql(u8, arg, "--command")) package_options.commands = try Commands.parseList(allocator, value) else if (std.mem.eql(u8, arg, "--homepage")) package_options.homepage = value else if (std.mem.eql(u8, arg, "--license")) package_options.license = value else return error.InvalidArguments;
     }
     // ziggurat.json, where the command runs in the project, fills what the
     // options leave out.
-    const project_file = if (std.mem.eql(u8, kind, "setup") or std.mem.eql(u8, kind, "install-ps1")) readProject(allocator, std.Io.Dir.cwd()) catch null else null;
+    const project_file = if (std.mem.eql(u8, kind, "setup") or std.mem.eql(u8, kind, "install-ps1") or std.mem.eql(u8, kind, "deb") or std.mem.eql(u8, kind, "pkgbuild")) readProject(allocator, std.Io.Dir.cwd()) catch null else null;
     if (project_file) |project| {
+        if (package_options.commands == null) if (project.linux) |config| {
+            if (config.command.names.len > 0) package_options.commands = config.command;
+        };
+        if (package_options.homepage == null) package_options.homepage = project.homepage;
+        if (package_options.license == null) package_options.license = project.license;
         if (package_options.install_dir_name == null) if (project.windows) |config| {
             package_options.install_dir_name = config.installDirName;
         };
@@ -781,6 +848,7 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
             if (@field(package_options.hooks, field.name) == null) @field(package_options.hooks, field.name) = @field(hooks, field.name);
         };
     }
+    if (package_options.commands) |commands| if (!setup_format.validCommands(commands.names)) return error.InvalidCommandName;
     if (package_options.install_dir_name) |value| {
         const trimmed = std.mem.trim(u8, value, " ");
         if (!setup_format.validInstallDirName(trimmed)) return error.InvalidInstallDirName;
@@ -798,7 +866,7 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         for (package.files) |entry| found = found or std.mem.eql(u8, entry.name, icon);
         if (!found) return error.IconNotInPackage;
     }
-    const config: setup_format.Config = .{ .name = name, .identity = info.identity, .version = info.version, .target = info.target, .executable = info.executable, .publisher = package_options.publisher, .comment = package_options.comment, .categories = package_options.categories, .icon = package_options.icon, .install_dir_name = if (std.mem.startsWith(u8, info.target, "windows-")) package_options.install_dir_name else null, .hooks = package_options.hooks };
+    const config: setup_format.Config = .{ .name = name, .identity = info.identity, .version = info.version, .target = info.target, .executable = info.executable, .publisher = package_options.publisher, .comment = package_options.comment, .categories = package_options.categories, .icon = package_options.icon, .install_dir_name = if (std.mem.startsWith(u8, info.target, "windows-")) package_options.install_dir_name else null, .commands = if (std.mem.startsWith(u8, info.target, "linux-")) (if (package_options.commands) |commands| commands.names else &.{}) else &.{}, .hooks = package_options.hooks };
     const stem = std.fs.path.stem(info.executable);
     if (std.mem.eql(u8, kind, "setup")) {
         const windows = std.mem.startsWith(u8, info.target, "windows-");
@@ -874,13 +942,19 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         try std.Io.File.stdout().writeStreamingAll(zio.io(), try std.fmt.allocPrint(allocator, "{s}\n", .{output}));
         return 0;
     }
-    if (!std.mem.eql(u8, kind, "deb")) return error.InvalidArguments;
+    if (!std.mem.eql(u8, kind, "deb") and !std.mem.eql(u8, kind, "pkgbuild")) return error.InvalidArguments;
     if (!std.mem.startsWith(u8, info.target, "linux-")) return error.WrongTarget;
-    if (package_options.maintainer.len == 0) return error.MissingMaintainer;
     const arch = std.meta.stringToEnum(std.Target.Cpu.Arch, info.target["linux-".len..]) orelse return error.UnsupportedArchitecture;
     const package_name = try std.ascii.allocLowerString(allocator, stem);
     if (!deb.validName(package_name)) return error.InvalidPackageName;
+    // The commands that run the app, each a link in /usr/bin.
+    const commands: []const []const u8 = if (package_options.commands) |value| (if (value.names.len > 0) value.names else &.{package_name}) else &.{package_name};
     const lib = try std.fmt.allocPrint(allocator, "/usr/lib/{s}", .{package_name});
+    // The menu entry runs the app by its path.
+    const exec = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ lib, info.executable });
+    const debian_depends = package_options.depends orelse if (package_options.webview) "libgtk-3-0t64 | libgtk-3-0, libpango-1.0-0, libwebkit2gtk-4.1-0, libsoup-3.0-0" else "libgtk-3-0t64 | libgtk-3-0, libpango-1.0-0";
+    if (std.mem.eql(u8, kind, "pkgbuild")) return writePkgbuild(allocator, package_options, info, package.files, zip_path, config, .{ .arch = arch, .package_name = package_name, .commands = commands, .exec = exec, .debian_depends = debian_depends });
+    if (package_options.maintainer.len == 0) return error.MissingMaintainer;
     var files: std.ArrayList(deb.File) = .empty;
     for (package.files) |entry| {
         if (std.mem.eql(u8, entry.name, "package.json")) continue;
@@ -889,9 +963,7 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         if (std.ascii.eqlIgnoreCase(entry.name, "LICENSE.txt")) try files.append(allocator, .{ .path = try std.fmt.allocPrint(allocator, "/usr/share/doc/{s}/copyright", .{package_name}), .bytes = entry.bytes });
         if (package_options.icon) |icon| if (std.mem.eql(u8, entry.name, icon)) try files.append(allocator, .{ .path = try std.fmt.allocPrint(allocator, "/usr/share/icons/hicolor/256x256/apps/{s}.png", .{info.identity}), .bytes = entry.bytes });
     }
-    const exec = try std.fmt.allocPrint(allocator, "/usr/bin/{s}", .{package_name});
     try files.append(allocator, .{ .path = try std.fmt.allocPrint(allocator, "/usr/share/applications/{s}.desktop", .{info.identity}), .bytes = try setup_format.desktopEntry(allocator, config, exec, if (package_options.icon != null) info.identity else null) });
-    const depends = package_options.depends orelse if (package_options.webview) "libgtk-3-0t64 | libgtk-3-0, libpango-1.0-0, libwebkit2gtk-4.1-0, libsoup-3.0-0" else "libgtk-3-0t64 | libgtk-3-0, libpango-1.0-0";
     const debian_version = try std.mem.replaceOwned(u8, allocator, info.version, "-", "~");
     // Menus and icon caches refresh when the tools exist; failures never block.
     const refresh = "#!/bin/sh\nset -e\nif command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database -q /usr/share/applications || true; fi\nif command -v gtk-update-icon-cache >/dev/null 2>&1; then gtk-update-icon-cache -q -t /usr/share/icons/hicolor || true; fi\n";
@@ -903,14 +975,71 @@ fn packageCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         .architecture = try deb.architecture(arch),
         .maintainer = package_options.maintainer,
         .description = if (package_options.comment.len > 0) try std.fmt.allocPrint(allocator, "{s}\n{s}", .{ name, package_options.comment }) else name,
-        .depends = depends,
+        .depends = debian_depends,
         .files = files.items,
-        .links = &.{.{ .path = exec, .target = try std.fmt.allocPrint(allocator, "../lib/{s}/{s}", .{ package_name, info.executable }) }},
+        .links = links: {
+            const links = try allocator.alloc(deb.Link, commands.len);
+            for (commands, links) |command, *link| link.* = .{ .path = try std.fmt.allocPrint(allocator, "/usr/bin/{s}", .{command}), .target = try std.fmt.allocPrint(allocator, "../lib/{s}/{s}", .{ package_name, info.executable }) };
+            break :links links;
+        },
         .postinst = refresh,
         .postrm = refresh,
         .mtime = mtime,
     });
     const output = package_options.output orelse try std.fmt.allocPrint(allocator, "dist/{s}_{s}_{s}.deb", .{ package_name, debian_version, try deb.architecture(arch) });
+    if (std.fs.path.dirname(output)) |parent| try std.Io.Dir.cwd().createDirPath(zio.io(), parent);
+    try std.Io.Dir.cwd().writeFile(zio.io(), .{ .sub_path = output, .data = output_bytes.written() });
+    try std.Io.File.stdout().writeStreamingAll(zio.io(), try std.fmt.allocPrint(allocator, "{s}\n", .{output}));
+    return 0;
+}
+
+const PkgbuildContext = struct {
+    arch: std.Target.Cpu.Arch,
+    package_name: []const u8,
+    commands: []const []const u8,
+    exec: []const u8,
+    debian_depends: []const u8,
+};
+
+/// Writes the PKGBUILD of a Linux update package next to it (or to
+/// --output), whose source is the package itself.
+fn writePkgbuild(allocator: std.mem.Allocator, package_options: PackageOptions, info: Inventory, entries: []const update.archive.Entry, zip_path: []const u8, config: setup_format.Config, context: PkgbuildContext) !u8 {
+    const name = if (info.name.len > 0) info.name else info.executable;
+    const zip = try std.Io.Dir.cwd().readFileAlloc(zio.io(), zip_path, allocator, .limited(1024 * 1024 * 1024));
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(zip, &digest, .{});
+    var files: std.ArrayList(pkgbuild.File) = .empty;
+    var license_file: ?[]const u8 = null;
+    for (entries) |entry| {
+        if (std.mem.eql(u8, entry.name, "package.json")) continue;
+        try files.append(allocator, .{ .path = entry.name, .executable = std.mem.eql(u8, entry.name, info.executable) });
+        if (std.ascii.eqlIgnoreCase(entry.name, "LICENSE.txt")) license_file = entry.name;
+    }
+    const mapped = try pkgbuild.depends(allocator, context.debian_depends);
+    for (mapped.unknown) |dependency| std.debug.print("ziggurat: leaving {s} out of the PKGBUILD's dependencies: no Arch Linux package is known for it\n", .{dependency});
+    var output_bytes: std.Io.Writer.Allocating = .init(allocator);
+    try pkgbuild.write(allocator, &output_bytes.writer, .{
+        .pkgname = try pkgbuild.packageName(allocator, context.package_name),
+        .version = info.version,
+        .arch = context.arch,
+        .description = if (package_options.comment.len > 0) package_options.comment else name,
+        .maintainer = package_options.maintainer,
+        .url = package_options.homepage,
+        .license = package_options.license,
+        .depends = mapped.depends,
+        .source = std.fs.path.basename(zip_path),
+        .sha256 = &std.fmt.bytesToHex(digest, .lower),
+        .files = files.items,
+        .executable = info.executable,
+        .commands = context.commands,
+        .desktop = try setup_format.desktopEntry(allocator, config, context.exec, if (package_options.icon != null) info.identity else null),
+        .desktop_name = info.identity,
+        .icon = package_options.icon,
+        .icon_name = info.identity,
+        .license_file = license_file,
+    });
+    // makepkg finds the source next to the PKGBUILD.
+    const output = package_options.output orelse try std.fs.path.join(allocator, &.{ std.fs.path.dirname(zip_path) orelse ".", pkgbuild.name });
     if (std.fs.path.dirname(output)) |parent| try std.Io.Dir.cwd().createDirPath(zio.io(), parent);
     try std.Io.Dir.cwd().writeFile(zio.io(), .{ .sub_path = output, .data = output_bytes.written() });
     try std.Io.File.stdout().writeStreamingAll(zio.io(), try std.fmt.allocPrint(allocator, "{s}\n", .{output}));
@@ -1620,6 +1749,7 @@ test {
     _ = macos;
     _ = @import("dsstore.zig");
     _ = install_ps1;
+    _ = pkgbuild;
 }
 
 test "platforms name an operating system and an architecture" {

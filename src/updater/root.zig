@@ -103,8 +103,9 @@ pub const Options = struct {
     scheduler: ?Scheduler = null,
     /// Epoch seconds; replaced by tests.
     now: *const fn () i64 = defaultNow,
-    /// Called after a saved choice or the last-check time changed, for a
-    /// preferences page that shows them.
+    /// Called after a saved choice, the last-check time or
+    /// `availableVersion` changed, for a preferences page, an update badge
+    /// or a restart prompt that shows them.
     on_change: ?z.Task = null,
     /// The application's icon, shown beside the texts; uploaded by the
     /// host and kept alive until deinit.
@@ -170,6 +171,9 @@ pub const Updater = struct {
     /// A version installed during this run, which runs at the next launch.
     installed: [max_version]u8 = undefined,
     installed_len: usize = 0,
+    /// The newer version the last check found; see `availableVersion`.
+    available: [max_version]u8 = undefined,
+    available_len: usize = 0,
 
     window: ?z.Window = null,
     /// A window was destroyed and its on_closed has not run yet.
@@ -253,6 +257,28 @@ pub const Updater = struct {
     pub fn lastCheck(self: *const Updater) i64 {
         return self.prefs.last_check;
     }
+    /// The newer version the last check found, or "": empty before a check,
+    /// after a failed one or one that found this version current, while
+    /// this build cannot update itself, and for a version the user skipped
+    /// (unless they checked by hand). A downloaded update keeps its version
+    /// until the app relaunches. `Options.on_change` tells when it changes.
+    pub fn availableVersion(self: *const Updater) []const u8 {
+        return self.available[0..self.available_len];
+    }
+    /// Sets `availableVersion` and reports whether it changed.
+    fn setAvailable(self: *Updater, version: []const u8) bool {
+        const length = @min(version.len, max_version);
+        if (std.mem.eql(u8, self.available[0..self.available_len], version[0..length])) return false;
+        @memcpy(self.available[0..length], version[0..length]);
+        self.available_len = length;
+        return true;
+    }
+    fn clearAvailable(self: *Updater) void {
+        if (self.setAvailable("")) self.changed();
+    }
+    fn changed(self: *Updater) void {
+        if (self.options.on_change) |task| task.call(task.context);
+    }
     pub fn currentToken(self: *const Updater) ?Token {
         return if (self.job == .none) null else .{ .generation = self.generation };
     }
@@ -278,6 +304,7 @@ pub const Updater = struct {
         self.shown = false;
         self.launch_checked = true;
         if (!self.backend.enabled(self.backend.context)) {
+            self.clearAvailable();
             if (!user) return self.finish();
             self.set(.unavailable);
             return self.show();
@@ -313,15 +340,15 @@ pub const Updater = struct {
         switch (result) {
             .failed => |err| self.checkFailed(err),
             .current => {
-                self.succeeded();
+                self.succeeded(self.setAvailable(""));
                 if (!self.user) return self.finish();
                 self.set(.up_to_date);
                 self.show();
             },
             .available => |release| {
-                self.succeeded();
                 self.keepRelease(release);
                 const skipped = std.mem.eql(u8, self.prefs.skippedVersion(), self.releaseVersion());
+                self.succeeded(self.setAvailable(if (skipped and !self.user) "" else self.releaseVersion()));
                 if (!self.user) {
                     if (skipped) return self.finish();
                     if (self.prefs.automatic_downloads) return self.install();
@@ -336,16 +363,20 @@ pub const Updater = struct {
 
     fn checkFailed(self: *Updater, err: anyerror) void {
         self.failed_at = self.options.now();
+        self.clearAvailable();
         if (!self.user) return self.finish();
         self.keepDetail(err);
         self.set(.check_failed);
         self.show();
     }
-    fn succeeded(self: *Updater) void {
+    /// A check succeeded; `available_changed` says its version changed,
+    /// told once with the last-check time.
+    fn succeeded(self: *Updater, available_changed: bool) void {
         self.failed_at = 0;
         var next = self.prefs;
         next.last_check = self.options.now();
-        self.store(next);
+        if (!self.storeQuietly(next) and !available_changed) return;
+        self.changed();
     }
 
     /// Bytes of the current download; `received == total` means the
@@ -406,8 +437,12 @@ pub const Updater = struct {
             .skip, .remind_later, .install => {
                 var next = self.prefs;
                 next.automatic_downloads = self.automatic_choice;
-                if (action == .skip) next.setSkipped(self.releaseVersion());
-                self.store(next);
+                var available_changed = false;
+                if (action == .skip) {
+                    next.setSkipped(self.releaseVersion());
+                    available_changed = self.setAvailable("");
+                }
+                if (self.storeQuietly(next) or available_changed) self.changed();
                 if (action == .install) self.install() else self.finish();
             },
             .relaunch => {
@@ -461,12 +496,16 @@ pub const Updater = struct {
     }
 
     fn store(self: *Updater, next: prefs.Prefs) void {
-        if (next.eql(&self.prefs)) return;
+        if (self.storeQuietly(next)) self.changed();
+    }
+    /// Saves the choices and reports whether they changed, without telling.
+    fn storeQuietly(self: *Updater, next: prefs.Prefs) bool {
+        if (next.eql(&self.prefs)) return false;
         self.prefs = next;
         if (self.options.state_dir) |dir| prefs.save(dir, &self.prefs) catch |err| {
             self.last_error = err;
         };
-        if (self.options.on_change) |task| task.call(task.context);
+        return true;
     }
 
     fn keepRelease(self: *Updater, release: Release) void {

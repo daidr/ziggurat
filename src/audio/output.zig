@@ -135,6 +135,7 @@ pub const NullDevice = struct {
 pub const system = switch (builtin.os.tag) {
     .windows => @import("windows.zig"),
     .linux => @import("linux.zig"),
+    .macos => @import("macos.zig"),
     else => struct {
         pub const Storage = struct {};
         pub fn threadInit() void {}

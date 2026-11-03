@@ -37,4 +37,5 @@ test {
     _ = @import("proxy.zig");
     _ = @import("tunnel.zig");
     _ = @import("proxy_test.zig");
+    if (@import("builtin").os.tag == .macos) _ = @import("proxy_macos.zig");
 }

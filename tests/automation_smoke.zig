@@ -12,6 +12,9 @@ const automation = @import("ziggurat_automation");
 
 const Value = std.json.Value;
 
+// The macOS unwinder cannot walk the driving thread's shallow stack.
+pub const std_options: std.Options = .{ .allow_stack_tracing = builtin.os.tag != .macos };
+
 const reset_command = 10;
 const quit_command = 11;
 const disabled_command = 12;
@@ -20,6 +23,7 @@ const State = struct {
     count: u32 = 0,
     level: f64 = 2,
     agree: bool = false,
+    list: view.ScrollModel = .{},
     window: ?z.Window = null,
     fn build(self: *State, v: *view.View) anyerror!void {
         var label: [32]u8 = undefined;
@@ -27,6 +31,15 @@ const State = struct {
         if (try v.button("Add", .{ .key = view.key("add") })) self.count += 1;
         _ = try v.slider(&self.level, .{ .minimum = 0, .maximum = 10, .step = 1 }, .{ .key = view.key("level"), .name = "Level" });
         _ = try v.checkbox(&self.agree, "Agree", .{ .key = view.key("agree") });
+        try v.scroll(&self.list, .{ .height = 40, .self_align = .stretch });
+        for (0..12) |row| {
+            var name: [16]u8 = undefined;
+            const last = row == 11;
+            if (try v.button(try std.fmt.bufPrint(&name, "Row {d}", .{row}), .{ .key = if (last) view.key("far") else null })) {
+                if (last) self.count += 1;
+            }
+        }
+        try v.end();
     }
     fn onMenu(context: *anyopaque, _: z.Window, action: system.Action) void {
         const self: *State = @ptrCast(@alignCast(context));
@@ -122,6 +135,12 @@ fn hasState(node: std.json.ObjectMap, name: []const u8) bool {
     return false;
 }
 
+fn hasAction(node: std.json.ObjectMap, name: []const u8) bool {
+    const actions = node.get("actions") orelse return false;
+    for (actions.array.items) |action| if (std.mem.eql(u8, action.string, name)) return true;
+    return false;
+}
+
 fn expectCount(client: *Client, count: u32) !void {
     try client.idle();
     var expected: [32]u8 = undefined;
@@ -195,6 +214,18 @@ fn drive(path: []const u8) !void {
     const after = (try client.tree()).get("focus") orelse return error.NoFocus;
     try std.testing.expect(!std.mem.eql(u8, before, after.string));
 
+    // The last row of the scroll is out of sight until scrollIntoView, and
+    // a press needs it in sight.
+    const far = try nodeOf(try client.tree(), "far");
+    try std.testing.expect(hasState(far, "offscreen") and hasAction(far, "scrollIntoView"));
+    try std.testing.expect(!hasAction(try nodeOf(try client.tree(), "add"), "scrollIntoView"));
+    try client.expectError("act", "{\"key\":\"far\",\"action\":\"press\"}", "failed");
+    _ = try client.result("act", "{\"key\":\"far\",\"action\":\"scrollIntoView\"}");
+    try client.idle();
+    try std.testing.expect(!hasState(try nodeOf(try client.tree(), "far"), "offscreen"));
+    _ = try client.result("act", "{\"key\":\"far\",\"action\":\"press\"}");
+    try expectCount(client, 4);
+
     const image = try client.result("capture", "{}");
     try std.testing.expect(image.get("width").?.integer > 0 and image.get("height").?.integer > 0);
     // The base64 of PNG's signature.
@@ -204,15 +235,32 @@ fn drive(path: []const u8) !void {
     try client.expectError("act", "{\"key\":\"add\",\"action\":\"selectText\"}", "unsupported");
     try client.expectError("tree", "{\"window\":9}", "no_window");
     try client.expectError("eval", "{\"script\":\"1\"}", "unsupported");
+    try client.expectError("fly", "{}", "unknown_method");
+
+    if (!has_menus) {
+        // No menu bar to choose from: the app quits through a task instead.
+        try client.expectError("menu", "{\"path\":[\"File\",\"Reset\"]}", "unsupported");
+        try quit_app.?.post(.{ .context = quit_app.?, .call = quitTask });
+        while ((client.send("windows", "{}") catch null) != null) zio.sleep(10 * std.time.ns_per_ms);
+        return;
+    }
     try client.expectError("menu", "{\"path\":[\"File\",\"Missing\"]}", "failed");
     try client.expectError("menu", "{\"path\":[\"Edit\",\"Disabled\"]}", "failed");
-    try client.expectError("fly", "{}", "unknown_method");
 
     _ = try client.result("menu", "{\"path\":[\"File\",\"Reset\"]}");
     try expectCount(client, 0);
     // Quitting answers, then the app ends and closes the connection.
     _ = try client.result("menu", "{\"path\":[\"File\",\"Quit\"]}");
     try std.testing.expect(try client.send("windows", "{}") == null);
+}
+
+/// Platforms with a native menu bar drive menu items too.
+const has_menus = system.capabilities.native_menu;
+var quit_app: ?*z.App = null;
+
+fn quitTask(context: *anyopaque) void {
+    const app: *z.App = @ptrCast(@alignCast(context));
+    _ = app.requestQuit();
 }
 
 const Driving = struct {
@@ -257,7 +305,7 @@ pub fn main() !void {
     const window = try app.createWindow(.{ .title = "Automation", .width = 360, .height = 240 });
     state.window = window;
     try host.attach(window);
-    try owner.attach(window);
+    quit_app = app;
     const items = [_]system.Item{
         .{ .id = 1, .kind = .submenu, .label = "&File" },
         .{ .id = reset_command, .parent = 1, .label = "&Reset" },
@@ -266,7 +314,10 @@ pub fn main() !void {
         .{ .id = 2, .kind = .submenu, .label = "&Edit" },
         .{ .id = disabled_command, .parent = 2, .label = "&Disabled", .enabled = false },
     };
-    try owner.setMenu(&items);
+    if (has_menus) {
+        try owner.attach(window);
+        try owner.setMenu(&items);
+    }
     window.show();
 
     const path = try socketPath(allocator);
@@ -278,7 +329,7 @@ pub fn main() !void {
     server.stop();
     thread.join();
     try driving.result;
-    owner.detach() catch {};
+    if (has_menus) owner.detach() catch {};
 
     // The socket goes with the server.
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(zio.io(), path, .{}));

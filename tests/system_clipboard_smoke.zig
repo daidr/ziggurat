@@ -5,6 +5,9 @@ const system = @import("ziggurat_system");
 const Watchdog = @import("watchdog.zig").Watchdog;
 const clipboard = system.clipboard;
 
+pub const panic = std.debug.FullPanic(@import("macos_panic.zig").panic);
+pub const std_options: std.Options = .{ .allow_stack_tracing = builtin.os.tag != .macos };
+
 const png = "\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0dIDATx\x9cc\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82";
 const text = "héllo 世界 😀";
 const html = "<b>粗体</b> & <i>x</i>";
@@ -153,7 +156,8 @@ const Script = struct {
             },
             .revoked => {
                 try std.testing.expect(value == .unavailable);
-                try std.testing.expect(self.changes >= 1 and self.spare_calls == 0);
+                // NSPasteboard has no change notification.
+                try std.testing.expect((self.changes >= 1 or !clipboard.capabilities.change_events) and self.spare_calls == 0);
                 // Leave a pending read and a live offer for App stop to reclaim.
                 try self.board.offer(.{ .context = self, .render = render, .released = release }, &.{.{ .kind = .text }});
                 self.step = .done;
@@ -233,14 +237,20 @@ fn rounds(allocator: std.mem.Allocator) !void {
     }
 }
 
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+
 pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    var gpa: std.heap.DebugAllocator(@import("macos_panic.zig").allocator_config) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
+    // macOS: a private named pasteboard, so the smoke leaves the user's
+    // clipboard alone on a desktop runner.
+    if (builtin.os.tag == .macos) _ = setenv("ZIGGURAT_TEST_PASTEBOARD", "dev.ziggurat.smoke.clipboard", 1);
     try script(gpa.allocator());
     try rounds(gpa.allocator());
     // Cancelled GTK requests finished in later main loops and freed themselves.
     // Only the last eager GTK offer remains: it serves its own copy after its
-    // Board closed until another owner replaces it. Windows owns no records.
+    // Board closed until another owner replaces it. Windows and macOS own no
+    // records: NSPasteboard keeps eager data itself.
     try std.testing.expectEqual(@as(u32, if (builtin.os.tag == .linux) 1 else 0), clipboard.resourceCount());
     std.debug.print("clipboard smoke passed\n", .{});
 }

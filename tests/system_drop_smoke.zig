@@ -4,6 +4,9 @@ const z = @import("ziggurat");
 const system = @import("ziggurat_system");
 const drop = system.drop;
 
+pub const panic = std.debug.FullPanic(@import("macos_panic.zig").panic);
+pub const std_options: std.Options = .{ .allow_stack_tracing = builtin.os.tag != .macos };
+
 const Probe = struct {
     drops: u32 = 0,
     hovers: u32 = 0,
@@ -83,13 +86,39 @@ fn registration(allocator: std.mem.Allocator) !void {
     target.detach();
 }
 
+fn dataDrop(_: *anyopaque, _: z.Window, _: drop.DataDrop) bool {
+    return true;
+}
+/// A multi-format target takes the window's one drop registration.
+fn dataRegistration(allocator: std.mem.Allocator) !void {
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    const window = try app.createWindow(.{});
+    var context: u8 = 0;
+    var data: drop.DataTarget = .{ .context = &context, .on_drop = dataDrop, .formats = &.{ system.transfer.file_list, system.transfer.text, "application/x-ziggurat-smoke-note" }, .allocator = allocator };
+    try data.attach(window);
+    try std.testing.expect(drop.Target.registered(window));
+    var buffer: [16]u8 = undefined;
+    var probe: Probe = .{};
+    var second: drop.Target = .{ .context = &probe, .on_drop = Probe.onDrop, .buffer = &buffer };
+    if (second.attach(window)) |_| return error.ExpectedOneRegistration else |_| {}
+    data.detach();
+    data.detach();
+    try std.testing.expect(!drop.Target.registered(window));
+    try second.attach(window);
+    try std.testing.expect(drop.Target.registered(window));
+    second.detach();
+    _ = try window.destroy();
+}
+
 pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    var gpa: std.heap.DebugAllocator(@import("macos_panic.zig").allocator_config) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     if (!drop.capabilities.drop_target) return error.UnsupportedCapability;
     for (0..12) |round| registration(gpa.allocator()) catch |err| {
         std.debug.print("drop round {d} failed\n", .{round});
         return err;
     };
+    if (builtin.os.tag != .windows) for (0..4) |_| try dataRegistration(gpa.allocator());
     std.debug.print("drop smoke passed\n", .{});
 }

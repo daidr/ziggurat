@@ -11,7 +11,7 @@ pub fn build(b: *std.Build) void {
     const https_resources_enabled = b.option(bool, "https-resources", "Build the optional HTTPS resource transport on Windows or Linux") orelse false;
     const gpu = b.option(bool, "gpu", "Build the optional D3D11 renderer with GDI fallback") orelse false;
     const webp = b.option(bool, "webp", "Build the optional pinned WebP decoder (fetch source first)") orelse false;
-    const accessibility = b.option(bool, "accessibility", "Build the optional Windows UI Automation bridge") orelse false;
+    const accessibility = b.option(bool, "accessibility", "Build the optional native accessibility bridge (Windows UI Automation, macOS NSAccessibility)") orelse false;
     const check = b.step("check", "Compile selected examples and tests without running them");
     const test_step = b.step("test", "Run invariant tests without opening windows");
     var view_tests: ?*std.Build.Step.Compile = null;
@@ -119,6 +119,10 @@ pub fn build(b: *std.Build) void {
         _ = native_support.add(b, file_stream, "file-stream-core-native", "src/file_stream/windows_core.c", &.{"-std=c11"}, target, optimize);
         _ = native_support.add(b, file_stream, "file-stream-file-native", "src/file_stream/windows_file.c", &.{"-std=c11"}, target, optimize);
         file_stream.linkSystemLibrary("kernel32", .{});
+    }
+    if (target.result.os.tag == .macos) {
+        file_stream.link_libc = true;
+        _ = native_support.add(b, file_stream, "file-stream-native", "src/file_stream/macos.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
     }
     if (target.result.os.tag == .linux) {
         file_stream.link_libc = true;
@@ -290,6 +294,8 @@ pub fn build(b: *std.Build) void {
     }
     // Linux loads GIO for the system proxy settings with dlopen.
     const net = b.addModule("ziggurat_net", .{ .root_source_file = b.path("src/net/root.zig"), .target = target, .optimize = optimize, .link_libc = target.result.os.tag == .linux });
+    // macOS reads the network settings and runs PAC files with CFNetwork.
+    if (target.result.os.tag == .macos) native_support.linkFrameworks(b, net, &.{ "CoreFoundation", "CFNetwork" });
     const update = b.addModule("ziggurat_update", .{ .root_source_file = b.path("src/update/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat_net", .module = net }} });
     const plugin_fetch = b.addModule("ziggurat_plugin_fetch", .{ .root_source_file = b.path("src/page_runtime/plugins/fetch.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat_ipc", .module = ipc },
@@ -716,12 +722,13 @@ pub fn build(b: *std.Build) void {
         for ([_][]const u8{ "user32", "gdi32", "shell32", "ole32" }) |library| system_unit_tests.root_module.linkSystemLibrary(library, .{});
         _ = native_support.add(b, system_unit_tests.root_module, "system-picker-native-test", "src/system/picker.c", &.{"-std=c11"}, target, optimize);
     }
-    if (target.result.os.tag == .windows or target.result.os.tag == .linux) {
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux or target.result.os.tag == .macos) {
+        // macOS runs the single-instance part only; the probe stays unlinked.
         const integration_probe = b.createModule(.{ .root_source_file = b.path("tests/os_integration_probe.zig"), .target = target, .optimize = optimize, .link_libc = true });
         if (target.result.os.tag == .linux) {
             integration_probe.addCSourceFile(.{ .file = b.path("tests/os_integration_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
             for ([_][]const u8{ "gio-2.0", "gio-unix-2.0" }) |library| integration_probe.linkSystemLibrary(library, .{ .use_pkg_config = .yes });
-        } else integration_probe.linkSystemLibrary("shlwapi", .{});
+        } else if (target.result.os.tag == .windows) integration_probe.linkSystemLibrary("shlwapi", .{});
         addSmoke(b, "smoke-os-integration", "tests/os_integration_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
@@ -738,7 +745,8 @@ pub fn build(b: *std.Build) void {
     }
     if (target.result.os.tag == .macos) {
         _ = native_support.add(b, core, "core-native", "src/platform/macos.m", &.{ "-fno-objc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
-        native_support.linkFrameworks(b, core, &.{ "AppKit", "Foundation", "CoreFoundation", "CoreGraphics" });
+        _ = native_support.add(b, core, "core-native-window", "src/platform/macos_window.m", &.{ "-fno-objc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native_support.linkFrameworks(b, core, &.{ "AppKit", "Foundation", "CoreFoundation", "CoreGraphics", "QuartzCore" });
         core.linkSystemLibrary("objc", .{ .use_pkg_config = .no });
     }
     if (target.result.os.tag == .linux) {
@@ -812,7 +820,7 @@ pub fn build(b: *std.Build) void {
     const run_automation_tests = b.addRunArtifact(automation_tests);
     test_step.dependOn(&run_automation_tests.step);
     b.step("test-automation", "Run the automation protocol, input and socket tests").dependOn(&run_automation_tests.step);
-    if (target.result.os.tag == .windows or target.result.os.tag == .linux) addSmoke(b, "smoke-automation", "tests/automation_smoke.zig", target, optimize, &.{
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux or target.result.os.tag == .macos) addSmoke(b, "smoke-automation", "tests/automation_smoke.zig", target, optimize, &.{
         .{ .name = "ziggurat", .module = core },
         .{ .name = "ziggurat_view", .module = declarative_view },
         .{ .name = "ziggurat_system", .module = system },
@@ -1521,8 +1529,11 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_ui", .module = ui },
         });
     }
-    if (accessibility) {
-        if (target.result.os.tag != .windows) @panic("UI Automation requires Windows");
+    if (accessibility and target.result.os.tag == .macos) {
+        _ = native_support.addArchive(b, ui, "ui-accessibility-native", "src/ui/accessibility_macos.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native_support.linkFrameworks(b, ui, &.{ "AppKit", "Foundation" });
+    } else if (accessibility) {
+        if (target.result.os.tag != .windows) @panic("UI Automation requires Windows; macOS uses NSAccessibility");
         // An archive member is linked only by programs that reference UIA.
         _ = native_support.addArchive(b, ui, "ui-accessibility-native", "src/ui/accessibility.c", &.{"-std=c11"}, target, optimize);
         ui.linkSystemLibrary("uiautomationcore", .{});
@@ -1548,7 +1559,31 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
         });
+        addSmoke(b, "smoke-macos-chrome", "tests/macos_chrome_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+        addSmoke(b, "smoke-accessibility-macos", "tests/macos_accessibility_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
         addSmoke(b, "smoke-file-watch", "tests/system_watch_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        addSmoke(b, "smoke-macos-services", "tests/macos_services_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        addSmoke(b, "smoke-clipboard", "tests/system_clipboard_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        addSmoke(b, "smoke-drop", "tests/system_drop_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        addSmoke(b, "smoke-now-playing-commands", "tests/now_playing_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
         });
     }
@@ -1768,9 +1803,10 @@ pub fn build(b: *std.Build) void {
             .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_file_stream", .module = file_stream }, .{ .name = "ziggurat_http_response", .module = http_response } },
             .link_libc = true,
         });
+        automation.addImport("ziggurat_webview", view);
         view.addImport("ziggurat_tls_pem", tls_pem);
         _ = native_support.add(b, view, "webview-webkit-macos", "src/webview/webkit_macos.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
-        native_support.linkFrameworks(b, view, &.{ "WebKit", "AppKit", "Foundation", "CoreFoundation" });
+        native_support.linkFrameworks(b, view, &.{ "WebKit", "AppKit", "Foundation", "CoreFoundation", "Security" });
         view_tests = addTest(b, .{ .root_module = view });
         _ = b.step("webview-runtime", "Use the system WKWebView");
         addSmoke(b, "smoke-webview-macos", "tests/macos_webview_smoke.zig", target, optimize, &.{
@@ -1791,6 +1827,47 @@ pub fn build(b: *std.Build) void {
         });
         remote_smoke.link_libc = true;
         remote_smoke.addCSourceFile(.{ .file = b.path("tests/macos_remote_fixture.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        addSmoke(b, "smoke-webview-find-macos", "tests/macos_find_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-capture-macos", "tests/macos_capture_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-profile-macos", "tests/macos_profile_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-cookies-macos", "tests/macos_cookie_store_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-initializers-macos", "tests/macos_document_initializers_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        _ = addHttpAuthSmoke(b, target, optimize, core, view);
+        addSmoke(b, "smoke-webview-files-macos", "tests/macos_file_response_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-permissions-macos", "tests/macos_permission_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-regions-macos", "tests/macos_regions_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-downloads-macos", "tests/macos_download_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
+        addSmoke(b, "smoke-webview-session-state", "tests/session_state_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
     }
     if (web and target.result.os.tag == .windows) {
         if (target.result.cpu.arch != .x86_64)
@@ -2752,6 +2829,7 @@ pub fn build(b: *std.Build) void {
     const audio = b.addModule("ziggurat_audio", .{ .root_source_file = b.path("src/audio/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
     audio.link_libc = true;
     if (target.result.os.tag == .windows) audio.linkSystemLibrary("ole32", .{});
+    if (target.result.os.tag == .macos) native_support.linkFrameworks(b, audio, &.{"AudioToolbox"});
     // Pinned third-party decoders: their own warnings and undefined-behavior
     // checks are not this project's to enforce.
     for ([_][]const u8{ "mp3", "vorbis" }) |codec| _ = native_support.add(b, audio, b.fmt("audio-{s}-native", .{codec}), b.fmt("src/audio/{s}.c", .{codec}), &.{ "-std=c99", "-w", "-fno-sanitize=undefined" }, target, optimize);
@@ -3039,10 +3117,17 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_chart", .module = chart },
             .{ .name = "ziggurat_chart_view", .module = chart_view },
         });
+    }
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux or target.result.os.tag == .macos) {
         const game = b.addModule("ziggurat_game", .{ .root_source_file = b.path("src/game/root.zig"), .target = target, .optimize = optimize, .imports = &.{
             .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
             .{ .name = "ziggurat_view", .module = declarative_view },
         } });
+        if (target.result.os.tag == .macos) {
+            _ = native_support.add(b, game, "game-gamepad-macos", "src/game/gamepad_macos.m", &.{ "-fno-objc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+            native_support.linkFrameworks(b, game, &.{ "GameController", "Foundation" });
+            game.linkSystemLibrary("objc", .{ .use_pkg_config = .no });
+        }
         const game_tests = addTest(b, .{ .root_module = game });
         check.dependOn(&game_tests.step);
         const run_game_tests = b.addRunArtifact(game_tests);
@@ -3325,6 +3410,15 @@ fn addSystemIntegrationNative(b: *std.Build, module: *std.Build.Module, target: 
             }
             module.link_libc = true;
         },
+        .macos => {
+            // Keychain, sleep assertions, recent documents, appearance,
+            // shell hand-offs, login items, URL schemes and desktop state.
+            _ = native_support.add(b, module, "system-services-native", "src/system/macos_services.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+            _ = native_support.add(b, module, "system-clipboard-native", "src/system/macos_clipboard.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+            _ = native_support.add(b, module, "system-drag-native", "src/system/macos_drag.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+            _ = native_support.add(b, module, "system-media-native", "src/system/macos_media.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+            native_support.linkFrameworks(b, module, &.{ "AppKit", "Foundation", "Security", "ServiceManagement", "IOKit", "Network", "CoreServices", "CoreFoundation", "UniformTypeIdentifiers", "MediaPlayer" });
+        },
         else => {},
     }
 }
@@ -3421,6 +3515,18 @@ fn addEmbeddedWebView(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
         .{ .name = "ziggurat_webview", .module = view },
         .{ .name = "ziggurat_webview_view", .module = embedded },
     });
+    if (target.result.os.tag == .linux) {
+        const scroll_smoke = b.addExecutable(.{ .name = "smoke-webview-scroll-linux", .root_module = b.createModule(.{ .root_source_file = b.path("tests/linux_webview_scroll_smoke.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_webview", .module = view }, .{ .name = "ziggurat_webview_view", .module = embedded } } }) });
+        scroll_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/linux_webview_scroll_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        scroll_smoke.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
+        b.top_level_steps.get("check").?.step.dependOn(&scroll_smoke.step);
+        b.step("smoke-webview-scroll-linux", "Verify that the wheel over a web view with scroll_to_container scrolls the native container").dependOn(&b.addRunArtifact(scroll_smoke).step);
+        const media_smoke = b.addExecutable(.{ .name = "smoke-webview-media-linux", .root_module = b.createModule(.{ .root_source_file = b.path("tests/linux_media_webview_smoke.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_webview", .module = view } } }) });
+        media_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/linux_media_webview_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        media_smoke.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
+        b.top_level_steps.get("check").?.step.dependOn(&media_smoke.step);
+        b.step("smoke-webview-media-linux", "Verify camera and microphone permission offers and capture state through WebKitGTK's mock devices").dependOn(&b.addRunArtifact(media_smoke).step);
+    }
 }
 
 fn addSmoke(b: *std.Build, name: []const u8, path: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) void {

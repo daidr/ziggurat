@@ -31,6 +31,8 @@ const Entry = struct {
     kind: Kind = .native,
     viewport: Viewport = .{ .bounds = .{ .x = 0, .y = 0, .width = 0, .height = 0 } },
     participant: ?Participant = null,
+    /// The wheel over this region goes to the backdrop (`passWheel`).
+    pass_wheel: bool = false,
     pins: usize = 0,
     previous: ?u16 = null,
     next: ?u16 = null,
@@ -230,7 +232,12 @@ const State = struct {
                 if (input == .pointer_up) self.captured = null;
                 self.deliver(key, input);
             },
-            .wheel => |wheel| if (self.hit(wheel.position)) |key| self.deliver(key, input),
+            .wheel => |wheel| if (self.hit(wheel.position)) |key| {
+                // A region that passes the wheel on gives it to the native
+                // UI around it, the backdrop.
+                const target = if (self.entry(key)) |value| (if (value.pass_wheel) self.backdrop orelse key else key) else key;
+                self.deliver(target, input);
+            },
             .focus => |focused| {
                 if (!focused) self.captured = null;
                 if (self.keyboard()) |key| self.deliver(key, input);
@@ -340,6 +347,7 @@ pub const Owner = opaque {
             item.phase = .reserved;
             item.viewport = viewport;
             item.kind = kind;
+            item.pass_wheel = false;
             item.previous = value.last;
             item.next = null;
             if (value.last) |last| value.entries[last].next = @intCast(index) else value.first = @intCast(index);
@@ -444,6 +452,14 @@ pub const Region = struct {
             return err;
         };
         if (item.phase != .removing) item.phase = .attached;
+    }
+    /// Give the wheel over this region to the backdrop, the native UI around
+    /// it, as a web view in a scroll container does: its native child sends
+    /// the wheel to the window, which delivers it here.
+    pub fn passWheel(self: Region, on: bool) !void {
+        const value = try self.state();
+        const item = value.entry(self.key()) orelse return error.Closed;
+        item.pass_wheel = on;
     }
     pub fn update(self: Region, viewport: Viewport) !void {
         try validate(viewport);
