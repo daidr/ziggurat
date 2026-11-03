@@ -1581,6 +1581,20 @@ pub const View = struct {
             const radii: [4]f64 = .{ viewport.radii[0], viewport.radii[1], viewport.radii[2], viewport.radii[3] };
             try webkit.check(webkit.zwk_present(native, if (scaled) viewport.layoutSize()[0] else 0, &radii));
             if (self.attachmentClosed()) return error.Closed;
+            if (!is_macos and self.region != null) {
+                // The native UI shows over the page outside its clip and
+                // where it paints over it.
+                const to = @as(f64, scale);
+                const shown = viewport.shown();
+                const clip: [4]f64 = .{ shown.x * to, shown.y * to, shown.width * to, shown.height * to };
+                const factor = viewport.scale()[0];
+                const corners: [4]f64 = .{ radii[0] * factor * to, radii[1] * factor * to, radii[2] * factor * to, radii[3] * factor * to };
+                var covers: [4 * z.composition.max_covers]f64 = undefined;
+                const list = viewport.coverList();
+                for (list, 0..) |cover, index| covers[4 * index ..][0..4].* = .{ cover.x * to, cover.y * to, cover.width * to, cover.height * to };
+                try webkit.check(webkit.zwk_shape(native, &clip, &corners, &covers, @intCast(list.len)));
+                if (self.attachmentClosed()) return error.Closed;
+            }
             return;
         }
         self.last_hresult = zwv_viewport(native, edges[0], edges[1], edges[2], edges[3], viewport.visible and b.width > 0 and b.height > 0);
@@ -3712,11 +3726,13 @@ pub const View = struct {
         return value != 0;
     }
     /// Whether the page captures `device`, as a browser's camera and
-    /// microphone indicators show. none until the engine is ready.
-    /// WebKitGTK only: other backends return UnsupportedCapability.
+    /// microphone indicators show. none until the engine is ready, and on
+    /// macOS for a device the system's WebKit does not report (the camera
+    /// and microphone before macOS 12, the display before 13). WebKit
+    /// backends only: WebView2 returns UnsupportedCapability.
     /// PageEvent.capture_changed tells its changes.
     pub fn captureState(self: *View, device: CaptureDevice) !CaptureState {
-        if (!is_webkit or is_macos) return error.UnsupportedCapability;
+        if (!is_webkit) return error.UnsupportedCapability;
         _ = try self.attachedWindow();
         if (self.native == null or self.recovering or !self.ready) return .none;
         const scope = self.beginCallback() orelse return error.Closed;
@@ -3727,10 +3743,12 @@ pub const View = struct {
     }
     /// Mute or resume a capture the page holds, or stop it with none, as
     /// a browser's indicator does; the page's tracks end when stopped. A
-    /// device the page does not capture cannot be made active. WebKitGTK
-    /// only.
+    /// device the page does not capture cannot be made active. WebKit
+    /// backends only. On macOS the engine mutes the camera and the
+    /// microphone together with the page's sound; muting one of them keeps
+    /// the other live.
     pub fn setCaptureState(self: *View, device: CaptureDevice, state: CaptureState) !void {
-        if (!is_webkit or is_macos) return error.UnsupportedCapability;
+        if (!is_webkit) return error.UnsupportedCapability;
         _ = try self.attachedWindow();
         if (self.native == null or self.recovering or !self.ready) return error.NotReady;
         const scope = self.beginCallback() orelse return error.Closed;
@@ -3740,6 +3758,36 @@ pub const View = struct {
         if (current == @backingInt(CaptureState.none) and state != .none) return error.NotCapturing;
         var value: u32 = @backingInt(state);
         try webkit.check(zwk_capture_state(self.native.?, @backingInt(device), 1, &value));
+    }
+    /// Give a page shown in native UI (`attachRegion`) the keyboard as Tab
+    /// does: at its first element that takes the focus, or its last when
+    /// `back`, as Shift+Tab does. Tab past its other end gives the keyboard
+    /// back to the native UI, as a Tab of its own (`KeyInput.from_page`).
+    /// Linux only: other backends give the page the keyboard as it is.
+    pub fn tabInto(self: *View, back: bool) !void {
+        _ = try self.attachedWindow();
+        if (self.region == null) return error.NotSupported;
+        const native = self.native orelse return error.NotReady;
+        const scope = self.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        if (is_webkit and !is_macos) return webkit.check(webkit.zwk_tab_into(native, @intFromBool(back)));
+        if (is_webkit) return webkit.check(webkit.zwk_focus(native));
+        return error.UnsupportedCapability;
+    }
+    /// Whether a page shown in native UI has the keyboard. Linux only;
+    /// false elsewhere.
+    pub fn holdsKeyboard(self: *View) bool {
+        if (!is_webkit or is_macos or self.region == null or self.attachmentClosed()) return false;
+        const native = self.native orelse return false;
+        return webkit.zwk_has_focus(native) != 0;
+    }
+    /// The native object whose accessible holds the page's tree, for the
+    /// node of native UI standing for the page (`accessibility.Node.native`):
+    /// the page's widget on Linux, null elsewhere.
+    pub fn accessibleNative(self: *View) ?*anyopaque {
+        if (!is_webkit or is_macos or self.attachmentClosed()) return null;
+        const native = self.native orelse return null;
+        return webkit.zwk_widget(native);
     }
     fn audioResult(self: *View, hr: i32) !void {
         self.last_hresult = hr;

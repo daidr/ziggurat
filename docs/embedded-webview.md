@@ -87,11 +87,12 @@ Linux 上 WebKitGTK 部件的滚动事件在 WebKitGTK 处理之前转给窗口�
 
 页面是窗口内的原生矩形子窗口（Windows 为 WebView2 controller，Linux 为 WebKitGTK widget），位于 Host 绘制的背景之上：
 
-- 原生 UI 画在页面所在区域的内容（包括弹出层、菜单、对话框、提示）会被页面遮住，不会盖在页面上方；需要覆盖页面的浮层请放在页面之外，或在浮层打开期间不构建页面。
-- 叶子部分被裁剪时，页面仍按完整 bounds 显示，不做任意形状裁剪；不透明度不作用于页面。圆角与缩放见下节。
-- 指针和键盘输入由原生页面直接接收（页面未处理的按键除外，见上节）；Tab 不会在原生控件与页面元素之间连续移动。
+- Linux 上，帧里画在页面叶子之后的原生控件（弹出层、菜单、对话框、提示等，按其命中区域计，`pass_through` 的除外）盖在页面上方，那部分窗口的绘制与指针都归原生 UI；叶子被模态层挡住时整个页面区域都由原生 UI 显示。每个页面最多 16 个覆盖矩形，超出的并入最后一个。Windows 与 macOS 上原生 UI 仍会被页面遮住，需要覆盖页面的浮层请放在页面之外，或在浮层打开期间不构建页面。
+- Linux 上叶子被滚动容器等裁剪时，页面只在可见部分显示；Windows 与 macOS 仍按完整 bounds 显示。不透明度不作用于页面。圆角与缩放见下节。
+- 指针和键盘输入由原生页面直接接收（页面未处理的按键除外，见上节）。Linux 上 Tab 在原生控件与页面元素之间连续移动：焦点经 Tab 移到页面叶子时进入页面的第一个元素（Shift+Tab 进入最后一个），在页面最后一个元素上再按 Tab 时离开页面，焦点移到叶子之后的原生控件。macOS 上 Tab 移到叶子时页面取得键盘，但不从页面元素移回原生控件；Windows 尚未实现。
+- 启用 `-Daccessibility=true` 时，页面叶子是语义树中的一个 group 节点；Linux 上页面自己的 ATK 树挂在这个节点下，屏幕阅读器从原生控件连续读到页面内容。
 - 读取窗口背后内容的效果（如玻璃、背景模糊）看不到页面；窗口截图中页面位置为背景色，`web.View.capturePreview` 可截取页面本身。
 
 ## 验证
 
-`zig build smoke-embedded-webview -Dwebview=true` 在真实窗口中检查：页面区域与叶子 bounds 一致，不构建时隐藏，再次构建时以同一个 PageId 显示，退出时原生资源与分配归零。Linux 在 Xvfb 下运行，Windows 在 CI 的 WebView 任务中运行。`zig build smoke-webview-scroll-linux -Dwebview=true` 把带 `scroll_to_container` 的页面放进原生滚动容器，经 GTK 事件路径向页面发送触摸板滚动，确认滚动的是外面的容器；随后让页面取得键盘，发送页面取消的 H、Tab 与页面未处理的 J，确认只有 J 作为 `from_page` 按键到达原生 UI。
+`zig build smoke-embedded-webview -Dwebview=true` 在真实窗口中检查：页面区域与叶子 bounds 一致，不构建时隐藏，再次构建时以同一个 PageId 显示，退出时原生资源与分配归零。Linux 在 Xvfb 下运行，Windows 在 CI 的 WebView 任务中运行。`zig build smoke-webview-scroll-linux -Dwebview=true` 把带 `scroll_to_container` 的页面放进原生滚动容器，经 GTK 事件路径向页面发送触摸板滚动，确认滚动的是外面的容器；随后让页面取得键盘，发送页面取消的 H、Tab 与页面未处理的 J，确认只有 J 作为 `from_page` 按键到达原生 UI。 `zig build smoke-webview-overlay-linux -Dwebview=true` 在两个原生按钮之间放一个页面：检查页面区域外显示原生 UI、Tab 从第一个按钮进入页面第一个元素、在页面内移动、移出到后一个按钮，Shift+Tab 回到页面最后一个元素，再打开盖在页面上方的弹出层，确认被盖住的部分显示原生 UI 而其余部分仍是页面；加 `-Daccessibility=true` 时还确认页面的 ATK 树在叶子节点之下。

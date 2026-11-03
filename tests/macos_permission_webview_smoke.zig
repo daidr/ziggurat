@@ -2,7 +2,9 @@
 //! mock devices. The app's handler denies the camera after a deferral, lets
 //! a second deferral time out and allows a third; the microphone, which no
 //! grant names, is denied without reaching the handler. Each answer gets a
-//! fresh document, since the engine remembers a page's answers.
+//! fresh document, since the engine remembers a page's answers. The camera
+//! the third answer allows is then muted and stopped through the view's
+//! capture state, which the page listener follows.
 const std = @import("std");
 const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
@@ -14,7 +16,8 @@ const document =
     \\<!doctype html><script>
     \\chrome.webview.addEventListener('message',async e=>{
     \\if(e.data==='video'){try{const s=await navigator.mediaDevices.getUserMedia({video:true});
-    \\chrome.webview.postMessage('video:'+s.getVideoTracks().length);s.getTracks().forEach(t=>t.stop())}catch(x){chrome.webview.postMessage('video-denied:'+x.name+':'+x.message+' secure='+isSecureContext+' devices='+typeof navigator.mediaDevices)}}
+    \\window.stream=s;s.getVideoTracks()[0].addEventListener('ended',()=>chrome.webview.postMessage('ended'));
+    \\chrome.webview.postMessage('video:'+s.getVideoTracks().length)}catch(x){chrome.webview.postMessage('video-denied:'+x.name+':'+x.message+' secure='+isSecureContext+' devices='+typeof navigator.mediaDevices)}}
     \\if(e.data==='audio'){try{await navigator.mediaDevices.getUserMedia({audio:true});chrome.webview.postMessage('audio:granted')}catch(x){chrome.webview.postMessage('audio-denied:'+x.name)}}
     \\});
     \\addEventListener('DOMContentLoaded',()=>chrome.webview.postMessage('loaded'));
@@ -24,7 +27,7 @@ const origin = "asset://app.ziggurat.invalid";
 const registrations = [_]web.SchemeRegistration{.{ .name = "asset", .treat_as_secure = true }};
 const grants = [_]web.permissions.Grant{.{ .origin = origin, .kinds = .{ .camera = true } }};
 
-const Step = enum { deny, audio, timeout, allow, done };
+const Step = enum { deny, audio, timeout, allow, mute, stop, done };
 
 const Probe = struct {
     app: *z.App,
@@ -35,6 +38,9 @@ const Probe = struct {
     results: [3]?web.permissions.Result = @splat(null),
     pending: ?web.PermissionId = null,
     step: Step = .deny,
+    states: [8]web.CaptureState = undefined,
+    state_count: usize = 0,
+    ended: bool = false,
     fn fail(self: *Probe, err: anyerror) void {
         if (self.err == null) self.err = err;
         std.debug.print("macOS permission WebView: {s} at {s}\n", .{ @errorName(err), @tagName(self.step) });
@@ -47,6 +53,7 @@ const Probe = struct {
             .custom_schemes = &registrations,
             .local = .{ .scheme = "asset", .scheme_ipc = true },
             .permissions = .{ .grants = &grants, .handler = .{ .context = self, .handle = offer }, .require_user_gesture = false },
+            .page_listener = .{ .context = self, .event = page },
         };
     }
     fn offer(ptr: *anyopaque, value: web.PermissionOffer, responder: *web.PermissionResponder) void {
@@ -75,6 +82,34 @@ const Probe = struct {
         if (self.results[index] != null) return self.fail(error.DuplicateResult);
         self.results[index] = result;
         if (self.step == .timeout) self.pending = null;
+    }
+    fn page(ptr: *anyopaque, view: *web.View, value: web.PageEvent) void {
+        const self: *Probe = @ptrCast(@alignCast(ptr));
+        switch (value) {
+            .capture_changed => |change| {
+                if (change.device != .camera) return if (change.state != .none) self.fail(error.WrongDevice);
+                if (self.state_count < self.states.len) self.states[self.state_count] = change.state;
+                self.state_count += 1;
+                const now = view.captureState(.camera) catch |err| return self.fail(err);
+                if (now != change.state) return self.fail(error.StateMismatch);
+                switch (change.state) {
+                    .active => if (self.step == .allow) {
+                        self.step = .mute;
+                        view.setCaptureState(.camera, .muted) catch |err| self.fail(err);
+                    },
+                    .muted => if (self.step == .mute) {
+                        self.step = .stop;
+                        view.setCaptureState(.camera, .none) catch |err| self.fail(err);
+                    },
+                    .none => if (self.step == .stop) {
+                        std.testing.expectError(error.NotCapturing, view.setCaptureState(.camera, .active)) catch |err| return self.fail(err);
+                        self.step = .done;
+                        if (self.ended) self.app.quit();
+                    },
+                }
+            },
+            else => {},
+        }
     }
     fn send(self: *Probe, text: []const u8) void {
         self.view.postFor(self.view.pageId().?, text) catch |err| self.fail(err);
@@ -109,12 +144,14 @@ const Probe = struct {
                 self.step = .allow;
                 try view.refresh();
             },
-            .allow => {
-                if (!std.mem.eql(u8, text, "video:1") or self.offers != 3) return error.WrongGrant;
-                self.step = .done;
-                self.app.quit();
+            .allow, .mute, .stop, .done => {
+                if (std.mem.eql(u8, text, "ended")) {
+                    self.ended = true;
+                    if (self.step == .done) self.app.quit();
+                    return;
+                }
+                if (self.step != .allow or !std.mem.eql(u8, text, "video:1") or self.offers != 3) return error.WrongGrant;
             },
-            .done => return error.UnexpectedMessage,
         }
     }
 };
@@ -140,6 +177,8 @@ pub fn main() !void {
     try std.testing.expectEqual(@as(u32, 3), probe.offers);
     const expected = [_]web.permissions.Result{ .{ .decided = .deny_ephemeral }, .timed_out, .{ .decided = .allow_ephemeral } };
     for (expected, probe.results) |wanted, actual| try std.testing.expectEqual(wanted, actual orelse return error.MissingResult);
+    try std.testing.expectEqualSlices(web.CaptureState, &.{ .active, .muted, .none }, probe.states[0..@min(probe.state_count, probe.states.len)]);
+    try std.testing.expect(probe.ended);
     _ = try probe.window.destroy();
-    std.debug.print("macOS permission WebView: deferred camera denied, timed out and allowed; ungranted microphone denied\n", .{});
+    std.debug.print("macOS permission WebView: deferred camera denied, timed out and allowed, capture active/muted/stopped; ungranted microphone denied\n", .{});
 }

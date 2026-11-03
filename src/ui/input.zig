@@ -396,6 +396,11 @@ pub const Input = struct {
     scopes: ?*shortcut_scopes.Workspace = null,
     /// Preserve across detach so a replaced workspace cannot revive old tokens.
     scope_epoch: u64 = 0,
+    /// Counts the moves of the focus by Tab or Shift+Tab (`tabDirection`),
+    /// and tells whether the last went back, so that native content taking
+    /// the focus, such as a web page, starts from its first or last element.
+    tab_serial: u32 = 0,
+    tab_backward: bool = false,
     clicks: ?*pointer_clicks.Workspace = null,
     fields: ?*text_fields.Workspace = null,
     /// Independent installation high-water, including detach/re-attach.
@@ -565,6 +570,8 @@ pub const Input = struct {
         self.tabDirection(false);
     }
     pub fn tabDirection(self: *Input, backward: bool) void {
+        self.tab_serial +%= 1;
+        self.tab_backward = backward;
         if (self.len == 0) {
             self.setFocused(null);
             return;

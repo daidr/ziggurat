@@ -36,6 +36,9 @@ typedef struct NativeNode {
     uint64_t id, parent;
     uint32_t role, flags, name_start, name_len, value_start, value_len, selection_start, selection_end, description_start, description_len;
     double x, y, width, height, range_value, range_minimum, range_maximum, range_small_change, range_large_change;
+    /* Place among all of the list's items from 1, how many a list has and
+       a tree item's depth from 1; 0 when not given. */
+    uint32_t position, set_size, level, reserved;
 } NativeNode;
 typedef struct RecipientAuthority { uint64_t epoch, serial, id, publication; uint32_t slot, kind; } RecipientAuthority;
 typedef struct ActionView {
@@ -455,6 +458,8 @@ static BOOL apply(ZuaElement *el, const NativeNode *n, NSString *name, NSString 
         changed = !fresh;
     }
     if (n->role == ROLE_TREE_ITEM && (fresh || ((n->flags ^ o.flags) & EXPANDED))) [el setAccessibilityDisclosed:(n->flags & EXPANDED) != 0];
+    /* How deep the row of an outline is, from 0. */
+    if (n->role == ROLE_TREE_ITEM && n->level > 0 && (fresh || n->level != o.level)) [el setAccessibilityDisclosureLevel:(NSInteger)n->level - 1];
     if (row(n->role) && (fresh || ((n->flags ^ o.flags) & CHECKED))) [el setAccessibilitySelected:(n->flags & CHECKED) != 0];
     if (fresh || ![description isEqualToString:el.accessibilityHelp ?: @""]) [el setAccessibilityHelp:description.length ? description : nil];
     if (textual(n->role) && (fresh || changed || n->selection_start != o.selection_start || n->selection_end != o.selection_end)) {
@@ -528,20 +533,24 @@ static int publish(ZuaHost *host, const NativeNode *nodes, uint32_t count, const
             layout = YES;
         }
     }
-    /* Lists and tables: their rows, the rows that show and those chosen. */
+    /* Lists and tables: their rows, the rows that show and those chosen.
+       VoiceOver reads a row "5 of 10,000" from its index among all of its
+       table's (AXIndex) and how many the table has (AXRowCount), built or
+       not, as a list built only in view says through position and
+       set_size; without them, from the rows built. */
     for (NSNumber *key in live) {
         ZuaElement *el = live[key];
         if (!rows_container(el->node.role)) continue;
         NSMutableArray *rows = [NSMutableArray array], *shown = [NSMutableArray array], *chosen = [NSMutableArray array];
         for (ZuaElement *kid in children[key] ?: @[]) {
             if (!row(kid->node.role)) continue;
-            [kid setAccessibilityIndex:(NSInteger)rows.count];
+            [kid setAccessibilityIndex:kid->node.position > 0 ? (NSInteger)kid->node.position - 1 : (NSInteger)rows.count];
             [rows addObject:kid];
             if (!(kid->node.flags & OFFSCREEN)) [shown addObject:kid];
             if (kid->node.flags & CHECKED) [chosen addObject:kid];
         }
         [el setAccessibilityRows:rows];
-        [el setAccessibilityRowCount:(NSInteger)rows.count];
+        [el setAccessibilityRowCount:el->node.set_size > 0 ? (NSInteger)el->node.set_size : (NSInteger)rows.count];
         [el setAccessibilityVisibleRows:shown];
         [el setAccessibilitySelectedRows:chosen];
     }
@@ -725,6 +734,12 @@ void zua_test_act(void *pointer, int kind, double number, const char *text) {
     }
 }
 /* The window's content view's children as assistive technology sees them. */
+/* A row's AXIndex, or a table's AXRowCount when row is 0. */
+int zua_test_row(void *element, int row) {
+    id object = (__bridge id)element;
+    return row ? (int)[object accessibilityIndex] : (int)[object accessibilityRowCount];
+}
+
 int zua_test_child_count(void *handle) {
     NSWindow *window = (__bridge NSWindow *)handle;
     return (int)[[zua_content_view(window) accessibilityChildren] count];

@@ -2,6 +2,9 @@ const std = @import("std");
 const z = @import("root.zig");
 
 pub const max_regions = 256;
+/// Boxes of a region's `Viewport.covers`.
+pub const max_covers = 16;
+const no_rect: z.Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
 pub const Options = struct { capacity: u16 = 16 };
 pub const Viewport = struct {
     /// The region's box as it shows, in the window's DIPs.
@@ -16,6 +19,43 @@ pub const Viewport = struct {
     /// The radii of the content's corners, in its own DIPs, from its
     /// top-left clockwise: it shows, and takes the pointer, inside them.
     radii: [4]f32 = @splat(0),
+    /// The part of `bounds` that shows, as the clips around the region cut
+    /// it, in the window's DIPs; null shows all of `bounds`.
+    clip: ?z.Rect = null,
+    /// Boxes of what the window's content paints over the region and takes
+    /// the pointer with, such as a popover, a menu or a dialog over a page,
+    /// in the window's DIPs: the first `cover_count` of `covers`, the rest
+    /// zero. The content shows and takes the pointer there, not the region;
+    /// a backend that places native content under the window's (Linux)
+    /// cuts the region out there.
+    covers: [max_covers]z.Rect = @splat(no_rect),
+    cover_count: u8 = 0,
+
+    /// The part of the window the region shows in: `bounds` within `clip`.
+    pub fn shown(self: Viewport) z.Rect {
+        const clip = self.clip orelse return self.bounds;
+        return intersect(self.bounds, clip);
+    }
+    /// The boxes of `covers` in use.
+    pub fn coverList(self: *const Viewport) []const z.Rect {
+        return self.covers[0..@min(self.cover_count, max_covers)];
+    }
+    /// Add a box the content paints over the region, within what shows of
+    /// it; past `max_covers` boxes the last grows to hold the rest.
+    pub fn addCover(self: *Viewport, box: z.Rect) void {
+        const cut = intersect(box, self.shown());
+        if (cut.width <= 0 or cut.height <= 0) return;
+        for (self.coverList()) |held| if (cut.x >= held.x and cut.y >= held.y and cut.x + cut.width <= held.x + held.width and cut.y + cut.height <= held.y + held.height) return;
+        if (self.cover_count < max_covers) {
+            self.covers[self.cover_count] = cut;
+            self.cover_count += 1;
+            return;
+        }
+        const last = &self.covers[max_covers - 1];
+        const x0 = @min(last.x, cut.x);
+        const y0 = @min(last.y, cut.y);
+        last.* = .{ .x = x0, .y = y0, .width = @max(last.x + last.width, cut.x + cut.width) - x0, .height = @max(last.y + last.height, cut.y + cut.height) - y0 };
+    }
 
     /// The size the content lays out at.
     pub fn layoutSize(self: Viewport) [2]f32 {
@@ -35,7 +75,8 @@ pub const Viewport = struct {
     /// Whether a point of the window is the region's: in its box and
     /// inside its corners.
     pub fn contains(self: Viewport, point: z.Point) bool {
-        if (!self.bounds.contains(point)) return false;
+        if (!self.shown().contains(point)) return false;
+        for (self.coverList()) |cover| if (cover.contains(point)) return false;
         if (!self.rounded()) return true;
         const size = self.layoutSize();
         const factor = self.scale();
@@ -43,6 +84,14 @@ pub const Viewport = struct {
         return insideCorners(size[0], size[1], self.radii, (point.x - self.bounds.x) / factor[0], (point.y - self.bounds.y) / factor[1]);
     }
 };
+
+fn intersect(a: z.Rect, b: z.Rect) z.Rect {
+    const x0 = @max(a.x, b.x);
+    const y0 = @max(a.y, b.y);
+    const x1 = @min(a.x + a.width, b.x + b.width);
+    const y1 = @min(a.y + a.height, b.y + b.height);
+    return .{ .x = x0, .y = y0, .width = @max(0, x1 - x0), .height = @max(0, y1 - y0) };
+}
 
 /// Whether `x`, `y` is inside the corners of `radii` (from the top-left
 /// clockwise) of a box `width` by `height` at the origin.
@@ -354,6 +403,12 @@ fn validate(viewport: Viewport) !void {
     for ([_]f32{ b.x, b.y, b.width, b.height, b.x + b.width, b.y + b.height }) |value| if (!std.math.isFinite(value) or @abs(value) > 1000000) return error.InvalidViewport;
     if (b.width < 0 or b.height < 0) return error.InvalidViewport;
     for ([_]f32{ viewport.layout_width, viewport.layout_height } ++ viewport.radii) |value| if (!std.math.isFinite(value) or value < 0 or value > 1000000) return error.InvalidViewport;
+    if (viewport.cover_count > max_covers) return error.InvalidViewport;
+    const boxes = [_]z.Rect{viewport.clip orelse viewport.bounds} ++ viewport.covers;
+    for (boxes) |r| {
+        for ([_]f32{ r.x, r.y, r.width, r.height, r.x + r.width, r.y + r.height }) |value| if (!std.math.isFinite(value) or @abs(value) > 1000000) return error.InvalidViewport;
+        if (r.width < 0 or r.height < 0) return error.InvalidViewport;
+    }
 }
 
 /// Sole Window.Content owner. App and Owner outlive all copied Region handles.

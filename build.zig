@@ -3577,6 +3577,11 @@ fn addEmbeddedWebView(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
         media_smoke.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
         b.top_level_steps.get("check").?.step.dependOn(&media_smoke.step);
         b.step("smoke-webview-media-linux", "Verify camera and microphone permission offers and capture state through WebKitGTK's mock devices").dependOn(&b.addRunArtifact(media_smoke).step);
+        const overlay_smoke = b.addExecutable(.{ .name = "smoke-webview-overlay-linux", .root_module = b.createModule(.{ .root_source_file = b.path("tests/linux_webview_overlay_smoke.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui }, .{ .name = "ziggurat_view", .module = declarative_view }, .{ .name = "ziggurat_webview", .module = view }, .{ .name = "ziggurat_webview_view", .module = embedded } } }) });
+        overlay_smoke.root_module.addCSourceFile(.{ .file = b.path("tests/linux_webview_overlay_probe.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        overlay_smoke.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
+        b.top_level_steps.get("check").?.step.dependOn(&overlay_smoke.step);
+        b.step("smoke-webview-overlay-linux", "Verify native UI over an embedded page, Tab into, through and out of it, and its tree inside the native UI's").dependOn(&b.addRunArtifact(overlay_smoke).step);
     }
 }
 

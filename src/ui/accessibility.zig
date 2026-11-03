@@ -45,7 +45,23 @@ pub const Node = struct {
     range_large_change: f64 = 0,
     selection_start: usize = 0,
     selection_end: usize = 0,
+    /// The place of an item among all of its list's, table's or tree's,
+    /// from 1, whether the others are built or not, as a list built only
+    /// in view has: assistive technology reads "5 of 10,000". 0 counts the
+    /// item among the built ones.
+    position: u32 = 0,
+    /// On a list, table or tree: how many items it has, built or not; 0 for
+    /// those built.
+    set_size: u32 = 0,
+    /// How deep a tree item is, from 1; 0 for none or not given.
+    level: u32 = 0,
+    /// Native content inside the node whose own tree assistive technology
+    /// reads there, such as a web view's page: its GtkWidget on Linux,
+    /// whose accessible becomes the node's only child. Ignored elsewhere.
+    native: ?*anyopaque = null,
 };
+/// Nodes holding native content (`Node.native`) in one publication.
+pub const max_native_pages = 16;
 const Entry = struct {
     id: u64,
     parent: ?u64,
@@ -74,6 +90,10 @@ const Entry = struct {
     range_large_change: f64,
     selection_start: usize,
     selection_end: usize,
+    position: u32 = 0,
+    set_size: u32 = 0,
+    level: u32 = 0,
+    native: ?*anyopaque = null,
 };
 
 /// Explicit semantic records. Names, values and geometry come from the caller;
@@ -150,7 +170,7 @@ pub const Tree = struct {
             const description = text[used..][0..entry.description_len];
             @memcpy(description, self.storage[entry.description_start..][0..entry.description_len]);
             used += description.len;
-            nodes[written] = .{ .id = entry.id, .parent = entry.parent, .role = entry.role, .name = name, .value = value, .description = description, .bounds = entry.bounds, .enabled = entry.enabled, .focused = entry.focused, .read_only = entry.read_only, .checked = entry.checked, .mixed = entry.mixed, .invalid = entry.invalid, .required = entry.required, .password = entry.password, .multiple = entry.multiple, .expanded = entry.expanded, .range_value = entry.range_value, .range_minimum = entry.range_minimum, .range_maximum = entry.range_maximum, .range_small_change = entry.range_small_change, .range_large_change = entry.range_large_change, .selection_start = entry.selection_start, .selection_end = entry.selection_end };
+            nodes[written] = .{ .id = entry.id, .parent = entry.parent, .role = entry.role, .name = name, .value = value, .description = description, .bounds = entry.bounds, .enabled = entry.enabled, .focused = entry.focused, .read_only = entry.read_only, .checked = entry.checked, .mixed = entry.mixed, .invalid = entry.invalid, .required = entry.required, .password = entry.password, .multiple = entry.multiple, .expanded = entry.expanded, .range_value = entry.range_value, .range_minimum = entry.range_minimum, .range_maximum = entry.range_maximum, .range_small_change = entry.range_small_change, .range_large_change = entry.range_large_change, .selection_start = entry.selection_start, .selection_end = entry.selection_end, .position = entry.position, .set_size = entry.set_size, .level = entry.level, .native = entry.native };
             written += 1;
         };
         return nodes[0..written];
@@ -215,6 +235,10 @@ pub const Tree = struct {
             .range_large_change = node.range_large_change,
             .selection_start = node.selection_start,
             .selection_end = node.selection_end,
+            .position = node.position,
+            .set_size = node.set_size,
+            .level = node.level,
+            .native = node.native,
         };
         self.used += node.name.len + node.value.len + node.description.len;
         self.len += 1;
@@ -328,6 +352,10 @@ const NativeNode = extern struct {
     range_maximum: f64,
     range_small_change: f64,
     range_large_change: f64,
+    position: u32,
+    set_size: u32,
+    level: u32,
+    reserved: u32 = 0,
 };
 const NativeAction = extern struct {
     context: ?*anyopaque,
@@ -362,6 +390,7 @@ extern fn zua_publish(*anyopaque, [*]const NativeNode, u32, [*]const u16, u32) i
 extern fn zua_publish_geometry(*anyopaque, [*]const NativeNode, u32, [*]const u16, u32, *const NativeGeometry) i32;
 extern fn zua_publish_registered(*anyopaque, [*]const NativeNode, u32, [*]const u16, u32, [*]const RecipientAuthority) i32;
 extern fn zua_publish_geometry_registered(*anyopaque, [*]const NativeNode, u32, [*]const u16, u32, *const NativeGeometry, [*]const RecipientAuthority) i32;
+extern fn zua_pages(*anyopaque, [*]const u64, [*]const *anyopaque, u32) i32;
 extern fn zua_collections_create() ?*anyopaque;
 extern fn zua_collections_free(*anyopaque) void;
 extern fn zua_collections_commit(*anyopaque, *anyopaque) i32;
@@ -507,6 +536,9 @@ pub const Bridge = struct {
                 .range_maximum = entry.range_maximum,
                 .range_small_change = entry.range_small_change,
                 .range_large_change = entry.range_large_change,
+                .position = entry.position,
+                .set_size = entry.set_size,
+                .level = entry.level,
             };
         }
         if (window.isClosed() or self.native == null) return error.Closed;
@@ -531,6 +563,19 @@ pub const Bridge = struct {
         self.last_hresult = hr;
         if (hr < 0) return error.AccessibilityPublishFailed;
         self.last_origin = origin_point;
+        if (builtin.os.tag == .linux) {
+            // The trees of native content, such as web pages, inside the
+            // nodes standing for them.
+            var ids: [max_native_pages]u64 = undefined;
+            var natives: [max_native_pages]*anyopaque = undefined;
+            var count: usize = 0;
+            for (tree.entries[0..tree.len]) |entry| if (entry.native) |native| if (count < max_native_pages) {
+                ids[count] = entry.id;
+                natives[count] = native;
+                count += 1;
+            };
+            if (zua_pages(self.native.?, &ids, &natives, @intCast(count)) < 0) return error.AccessibilityPublishFailed;
+        }
     }
     /// Allocate the optional copied authority store before publishing a new
     /// recipient workspace. No native operation borrows the candidate's owner.

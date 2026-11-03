@@ -39,6 +39,8 @@ void *zlm_window_content(void *window);
 - (NSUInteger)_mediaMutedState;
 - (BOOL)_isPlayingAudio;
 - (NSString *)_userAgent;
+- (NSInteger)_displayCaptureState;
+- (void)_setDisplayCaptureState:(NSInteger)state completionHandler:(void (^)(void))done;
 @end
 @interface WKHTTPCookieStore (ZigguratEngine)
 - (void)_flushCookiesToDiskWithCompletionHandler:(void (^)(void))done;
@@ -52,7 +54,9 @@ void *zlm_window_content(void *window);
 - (void)_registerURLSchemeAsSecure:(NSString *)scheme;
 @end
 #pragma clang diagnostic pop
-enum { MEDIA_AUDIO_MUTED=1 };
+/* _WKMediaMutedState: bit 0 mutes the page's sound, bit 1 stands for both
+   the camera and the microphone. */
+enum { MEDIA_AUDIO_MUTED=1, MEDIA_CAPTURE_DEVICES_MUTED=2 };
 
 static atomic_uint live_states, live_callbacks, live_views, live_compiles;
 
@@ -108,6 +112,10 @@ typedef struct ZwkInitializerState ZwkInitializerState;
     ZwkScriptNotify script_fn;
     ZwkDeadline deadline_fn;
     BOOL closed, recovering, committed, failed, dom_ready, load_started, pending_navigation, authorized, observing, autoplay, muted, waiting_sandbox;
+    /* Capture devices observed (camera, microphone, display), the state last
+       told, and the ones setCaptureState muted until they stop. */
+    BOOL capture_observed[3], capture_muted[3];
+    uint8_t capture_told[3];
     uint64_t generation;
     uint32_t limit, result_limit, pending, posts, policy;
     ZwkFailure failure;
@@ -680,6 +688,13 @@ static void *title_context=&title_context;
 static void *audio_context=&audio_context;
 static void *history_context=&history_context;
 static void *download_context=&download_context;
+static void *capture_context=&capture_context;
+/* The view's capture properties, by device: the camera's and the
+   microphone's (macOS 12+) and the engine's private display capture
+   (macOS 13+), all key-value observable, valued none, active, muted. */
+static NSString *const capture_keys[3]={@"cameraCaptureState",@"microphoneCaptureState",@"_displayCaptureState"};
+static uint32_t capture_read(ZwkPage *s,uint32_t device);
+static void capture_changed(ZwkPage *s,uint32_t device);
 
 @implementation ZwkPage
 - (instancetype)init {
@@ -1020,6 +1035,9 @@ static void *download_context=&download_context;
         /* Audibility belongs to the view, not a document: it is told between
            documents too, under the current generation. */
         if (live(self)) (void)page(self,7,[object _isPlayingAudio]?1u:0u,0,nil);
+    } else if (context==capture_context) {
+        /* Capture belongs to the view too, as audibility does. */
+        for (uint32_t device=0;device<3;device++) if ([path isEqualToString:capture_keys[device]]) capture_changed(self,device);
     } else if (context==history_context) {
         if (!pending_navigation) history_notify(self);
     } else if (context==download_context) {
@@ -1830,11 +1848,56 @@ static void remote_compile(ZwkPage *s) {
     }];
 }
 static BOOL engine_has(WKWebView *view,SEL selector) { return [view respondsToSelector:selector]; }
+static void capture_write(ZwkPage *s,uint32_t device,uint32_t state);
 static void set_muted(ZwkPage *s,BOOL value) {
     s->muted=value;
     if (!engine_has(s->view,@selector(_setPageMuted:))) return;
     NSUInteger state=engine_has(s->view,@selector(_mediaMutedState))?[s->view _mediaMutedState]:0;
-    [s->view _setPageMuted:value?(state|MEDIA_AUDIO_MUTED):(state&~(NSUInteger)MEDIA_AUDIO_MUTED)];
+    state=value?(state|MEDIA_AUDIO_MUTED):(state&~(NSUInteger)MEDIA_AUDIO_MUTED);
+    [s->view _setPageMuted:state];
+    /* One bit stands for the camera and the microphone: with only one of
+       them muted by setCaptureState, the other goes live again at once. */
+    const BOOL camera=s->capture_muted[0], microphone=s->capture_muted[1];
+    if ((state&MEDIA_CAPTURE_DEVICES_MUTED) && camera!=microphone) capture_write(s,camera?1:0,1);
+}
+static BOOL capture_answers(WKWebView *view,uint32_t device) {
+    return view && [view respondsToSelector:NSSelectorFromString(capture_keys[device])];
+}
+static uint32_t capture_read(ZwkPage *s,uint32_t device) {
+    if (!capture_answers(s->view,device)) return 0;
+    const NSInteger value=[[s->view valueForKey:capture_keys[device]] integerValue];
+    return value>=0 && value<=2?(uint32_t)value:0;
+}
+/* Changes a capture with the view's setter, whose completion may be nil. */
+static void capture_write(ZwkPage *s,uint32_t device,uint32_t state) {
+    WKWebView *view=s->view;
+    if (device==2) {
+        if ([view respondsToSelector:@selector(_setDisplayCaptureState:completionHandler:)]) [view _setDisplayCaptureState:(NSInteger)state completionHandler:nil];
+        return;
+    }
+    if (@available(macOS 12.0,*)) {
+        if (device==0) [view setCameraCaptureState:(WKMediaCaptureState)state completionHandler:nil];
+        else [view setMicrophoneCaptureState:(WKMediaCaptureState)state completionHandler:nil];
+    }
+}
+static void capture_changed(ZwkPage *s,uint32_t device) {
+    if (!live(s)) return;
+    const uint32_t state=capture_read(s,device);
+    if (!state) s->capture_muted[device]=NO;
+    if (s->capture_told[device]==(uint8_t)state) return;
+    s->capture_told[device]=(uint8_t)state;
+    (void)page(s,12,device|(state<<8),0,nil);
+}
+static void capture_observe(ZwkPage *s,WKWebView *view,BOOL on) {
+    for (uint32_t device=0;device<3;device++) {
+        if (on && !s->capture_observed[device] && capture_answers(view,device)) {
+            [view addObserver:s forKeyPath:capture_keys[device] options:0 context:capture_context];
+            s->capture_observed[device]=YES;
+        } else if (!on && s->capture_observed[device]) {
+            [view removeObserver:s forKeyPath:capture_keys[device] context:capture_context];
+            s->capture_observed[device]=NO;
+        }
+    }
 }
 
 /* Document initializers: the app's trusted script for every future document,
@@ -2747,6 +2810,7 @@ static int page_create(void *window,BOOL session,uint32_t width,uint32_t height,
         if (options->audio_muted) set_muted(s,YES);
         [view addObserver:s forKeyPath:@"title" options:0 context:title_context];
         if (engine_has(view,@selector(_isPlayingAudio))) [view addObserver:s forKeyPath:@"_isPlayingAudio" options:0 context:audio_context];
+        capture_observe(s,view,YES);
         if (s->local || s->remote) {
             [view addObserver:s forKeyPath:@"canGoBack" options:0 context:history_context];
             [view addObserver:s forKeyPath:@"canGoForward" options:0 context:history_context];
@@ -3005,6 +3069,7 @@ void zwk_close(ZwkState *state) {
             if (s->observing) {
                 [view removeObserver:s forKeyPath:@"title" context:title_context];
                 if (engine_has(view,@selector(_isPlayingAudio))) [view removeObserver:s forKeyPath:@"_isPlayingAudio" context:audio_context];
+                capture_observe(s,view,NO);
                 if (s->local || s->remote) {
                     [view removeObserver:s forKeyPath:@"canGoBack" context:history_context];
                     [view removeObserver:s forKeyPath:@"canGoForward" context:history_context];
@@ -3193,6 +3258,18 @@ int zwk_audio(ZwkState *state,int op,int *value) {
         return ZWK_OK;
     }
     return ZWK_INVALID;
+}
+/* A capture is changed only while the page holds one, as WebKitGTK's
+   setters act: the engine would otherwise keep a mute set before it. */
+int zwk_capture_state(ZwkState *state,uint32_t device,int write,uint32_t *value) {
+    if (!state || !value || device>2 || (write && *value>2)) return ZWK_INVALID;
+    ZwkPage *s=page_of(state);
+    if (!live(s) || !s->view) return ZWK_CLOSED;
+    if (!write) { *value=capture_read(s,device); return ZWK_OK; }
+    if (!capture_read(s,device)) return ZWK_OK;
+    s->capture_muted[device]=*value==2;
+    capture_write(s,device,*value);
+    return ZWK_OK;
 }
 int zwk_content_filters(ZwkState *state,void *const *filters,uint32_t count) {
     ZwkPage *s=page_of(state);

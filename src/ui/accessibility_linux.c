@@ -36,6 +36,9 @@ typedef struct NativeNode {
     uint64_t id, parent;
     uint32_t role, flags, name_start, name_len, value_start, value_len, selection_start, selection_end, description_start, description_len;
     double x, y, width, height, range_value, range_minimum, range_maximum, range_small_change, range_large_change;
+    /* Place among all of the list's items from 1, how many a list has and
+       a tree item's depth from 1; 0 when not given. */
+    uint32_t position, set_size, level, reserved;
 } NativeNode;
 typedef struct RecipientAuthority { uint64_t epoch, serial, id, publication; uint32_t slot, kind; } RecipientAuthority;
 typedef struct ActionView {
@@ -73,6 +76,9 @@ struct Node {
     uint64_t *chosen;
     guint chosen_len;
     uint32_t index; /* in its publication, for its geometry */
+    /* The accessible of native content inside the node, as a web view's
+       AtkSocket holding its page's tree: the node's first child. Owned. */
+    AtkObject *page;
 };
 
 struct Host {
@@ -284,6 +290,7 @@ static AtkObject *node_at(GPtrArray *nodes, gint x, gint y, AtkCoordType coords)
         Node *node = g_ptr_array_index(nodes, i - 1);
         if (!node_contains(node, x, y, coords)) continue;
         AtkObject *deeper = node_at(node->children, x, y, coords);
+        if (!deeper && node->page) return g_object_ref(node->page);
         return deeper ? deeper : g_object_ref(node->obj);
     }
     return NULL;
@@ -416,10 +423,12 @@ static void zua_root_component_init(AtkComponentIface *iface) {
 
 static gint node_n_children(AtkObject *obj) {
     Node *node = node_of(obj);
-    return node ? (gint)node->children->len : 0;
+    return node ? (gint)node->children->len + (node->page ? 1 : 0) : 0;
 }
 static AtkObject *node_ref_child(AtkObject *obj, gint i) {
     Node *node = node_of(obj);
+    if (node && node->page && i == 0) return g_object_ref(node->page);
+    if (node && node->page) i--;
     if (!node || i < 0 || (guint)i >= node->children->len) return NULL;
     return g_object_ref(((Node *)g_ptr_array_index(node->children, i))->obj);
 }
@@ -491,12 +500,16 @@ static AtkAttributeSet *node_attributes(AtkObject *obj) {
             size++;
             if (sibling == node) position = size;
         }
+        /* A list built only in view says where its rows are among all. */
+        if (node->n.position > 0) position = node->n.position;
+        if (node->parent->n.set_size > 0) size = node->parent->n.set_size;
         list = add_attribute(list, "posinset", g_strdup_printf("%u", position));
         list = add_attribute(list, "setsize", g_strdup_printf("%u", size));
     }
     if (node->n.role == ROLE_TREE_ITEM) {
         guint level = 1;
         for (Node *up = node->parent; up && up->n.role == ROLE_TREE_ITEM; up = up->parent) level++;
+        if (node->n.level > 0) level = node->n.level;
         list = add_attribute(list, "level", g_strdup_printf("%u", level));
     }
     if (node->n.role == ROLE_NAVIGATION) list = add_attribute(list, "xml-roles", g_strdup("navigation"));
@@ -861,8 +874,10 @@ static void zua_selection_selection_init(AtkSelectionIface *iface) {
 /* ------------------------------------------------------------------ */
 /* Publication. */
 
+static void page_set(Node *node, AtkObject *page);
 static void node_free(gpointer data) {
     Node *node = data;
+    page_set(node, NULL);
     ((ZuaNode *)node->obj)->node = NULL;
     atk_object_notify_state_change(node->obj, ATK_STATE_DEFUNCT, TRUE);
     g_object_unref(node->obj);
@@ -1193,6 +1208,47 @@ int zua_disconnect(void *state) {
     host_unref(host);
     return 0;
 }
+/* Put native content's accessible in a node, or take it out. */
+static void page_set(Node *node, AtkObject *page) {
+    if (node->page == page) return;
+    AtkObject *old = node->page;
+    node->page = NULL;
+    if (old) {
+        if (atk_object_get_parent(old) == node->obj) atk_object_set_parent(old, NULL);
+        if (!node->host->closed) emit_child(node->obj, "children-changed::remove", 0, old);
+        g_object_unref(old);
+    }
+    if (page) {
+        node->page = g_object_ref(page);
+        atk_object_set_parent(page, node->obj);
+        emit_child(node->obj, "children-changed::add", 0, page);
+    }
+}
+/* The native content inside nodes of the last publication: each widget's
+   accessible, a web view's AtkSocket its page's tree is embedded in, goes in
+   the node of its id; the other nodes hold none. */
+int zua_pages(void *state, const uint64_t *ids, void *const *widgets, uint32_t count) {
+    Host *host = state;
+    if (host->closed) return -1;
+    if (count && (!ids || !widgets)) return -2;
+    GHashTableIter iter;
+    gpointer key, value;
+    g_hash_table_iter_init(&iter, host->nodes);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        Node *node = value;
+        AtkObject *page = NULL;
+        for (uint32_t i = 0; i < count && !page; i++) {
+            if (ids[i] != node->n.id || !GTK_IS_WIDGET(widgets[i]) || gtk_widget_in_destruction(widgets[i])) continue;
+            AtkObject *accessible = gtk_widget_get_accessible(widgets[i]);
+            /* Each page goes in one node. */
+            Node *other = accessible && node->page != accessible ? node_of(atk_object_get_parent(accessible)) : NULL;
+            if (other && other != node && other->page == accessible) page_set(other, NULL);
+            page = accessible;
+        }
+        page_set(node, page);
+    }
+    return 0;
+}
 int zua_publish(void *state, const NativeNode *nodes, uint32_t count, const uint16_t *text, uint32_t text_len) {
     return publish(state, nodes, count, text, text_len, NULL, NULL);
 }
@@ -1353,4 +1409,16 @@ int zua_test_announcements(char *buffer, int capacity) {
     return (int)announcements;
 }
 int zua_test_selection_count(void *pointer) { return atk_selection_get_selection_count(ATK_SELECTION(pointer)); }
+/* The value of an object's attribute, such as "posinset", as a number;
+   -1 without it. */
+int zua_test_attribute(void *pointer, const char *name) {
+    AtkAttributeSet *set = atk_object_get_attributes(ATK_OBJECT(pointer));
+    int value = -1;
+    for (GSList *item = set; item; item = item->next) {
+        AtkAttribute *attribute = item->data;
+        if (g_strcmp0(attribute->name, name) == 0) value = atoi(attribute->value);
+    }
+    atk_attribute_set_free(set);
+    return value;
+}
 int zua_test_caret(void *pointer) { return atk_text_get_caret_offset(ATK_TEXT(pointer)); }

@@ -855,6 +855,19 @@ static gboolean page_key(NativeWindow *s, GdkEventKey *native) {
     event.width=native->hardware_keycode>=8?native->hardware_keycode-8:0;
     return emit(s,&event)!=0;
 }
+/* Tab left a region's child past its last element, or Shift+Tab past its
+   first: the content takes it as its own Tab (flag 32), moving its focus on
+   from the child's node. */
+static void page_tab_out(NativeWindow *s, gboolean back) {
+    NativeEvent gate={0}; gate.kind=17;
+    if (!gtk_widget_is_sensitive(s->window) || !emit(s,&gate)) return;
+    NativeEvent event={0}; event.kind=18; event.key=GDK_KEY_Tab; event.flags=(back?1:0)|32;
+    GdkKeymapKey *keys=NULL; gint count=0;
+    if (gdk_keymap_get_entries_for_keyval(gdk_keymap_get_for_display(gtk_widget_get_display(s->window)),GDK_KEY_Tab,&keys,&count) && count>0 && keys[0].keycode>=8)
+        event.width=keys[0].keycode-8;
+    g_free(keys);
+    (void)emit(s,&event);
+}
 static gboolean key(GtkWidget *widget, GdkEventKey *native, gpointer data) {
     (void)widget; NativeWindow *s=data; retain(s);
     uint64_t epoch=s->im_epoch;

@@ -108,7 +108,7 @@ const Files = struct {
 
 ## 可访问性
 
-启用 `-Daccessibility=true` 时，Windows UIA 把表格与大纲表格映射为 DataGrid，表头为 Header，列头为 HeaderItem（排序方向放在 ItemStatus，调用它即单击排序），可见行为 DataItem / SelectionItem；没有列的大纲为 Tree，行为带层级和展开状态的 TreeItem；网格视图为 List，项目为 ListItem。每帧最多暴露 `max_semantic_rows`（40）个可见行（窗口的语义树共 128 个节点）。辅助技术选择、加入、移出、展开和折叠这些行时作用于对应项目。屏外行不暴露，行也不报告“第几项/共几项”；单元格选择的块不单独暴露。Linux 没有普通控件的 AT-SPI 层。
+启用 `-Daccessibility=true` 时，Windows UIA 把表格与大纲表格映射为 DataGrid，表头为 Header，列头为 HeaderItem（排序方向放在 ItemStatus，调用它即单击排序），可见行为 DataItem / SelectionItem；没有列的大纲为 Tree，行为带层级和展开状态的 TreeItem；网格视图为 List，项目为 ListItem。每帧最多暴露 `max_semantic_rows`（40）个可见行（窗口的语义树共 128 个节点）。辅助技术选择、加入、移出、展开和折叠这些行时作用于对应项目。屏外行不暴露，但每行报告它在全部行中的位置、列表报告总行数、大纲行报告层级，macOS VoiceOver 读作“第 120 行，共 10,000 行”（AXIndex / AXRowCount / AXDisclosureLevel），Linux 为 ATK 的 posinset / setsize / level；单元格选择的块不单独暴露。
 
 ## 当前范围
 
