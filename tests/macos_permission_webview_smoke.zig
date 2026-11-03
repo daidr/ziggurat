@@ -41,6 +41,7 @@ const Probe = struct {
     states: [8]web.CaptureState = undefined,
     state_count: usize = 0,
     ended: bool = false,
+    granted: bool = false,
     fn fail(self: *Probe, err: anyerror) void {
         if (self.err == null) self.err = err;
         std.debug.print("macOS permission WebView: {s} at {s}\n", .{ @errorName(err), @tagName(self.step) });
@@ -150,7 +151,10 @@ const Probe = struct {
                     if (self.step == .done) self.app.quit();
                     return;
                 }
-                if (self.step != .allow or !std.mem.eql(u8, text, "video:1") or self.offers != 3) return error.WrongGrant;
+                // The engine may report the capture before the page hears
+                // its stream, so the grant can come in any later step.
+                if (self.granted or !std.mem.eql(u8, text, "video:1") or self.offers != 3) return error.WrongGrant;
+                self.granted = true;
             },
         }
     }
@@ -178,7 +182,7 @@ pub fn main() !void {
     const expected = [_]web.permissions.Result{ .{ .decided = .deny_ephemeral }, .timed_out, .{ .decided = .allow_ephemeral } };
     for (expected, probe.results) |wanted, actual| try std.testing.expectEqual(wanted, actual orelse return error.MissingResult);
     try std.testing.expectEqualSlices(web.CaptureState, &.{ .active, .muted, .none }, probe.states[0..@min(probe.state_count, probe.states.len)]);
-    try std.testing.expect(probe.ended);
+    try std.testing.expect(probe.ended and probe.granted);
     _ = try probe.window.destroy();
     std.debug.print("macOS permission WebView: deferred camera denied, timed out and allowed, capture active/muted/stopped; ungranted microphone denied\n", .{});
 }
