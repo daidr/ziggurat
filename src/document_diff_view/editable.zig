@@ -16,10 +16,21 @@ const t = @import("ziggurat_text_layout");
 const intraline = @import("intraline.zig");
 const context = @import("context_index.zig");
 const coordinates = @import("coordinates.zig");
+const hatch = @import("hatch.zig");
 pub const ContextOptions = context.Options;
 pub const ContextKey = struct { serial: u64, id: u64 };
 pub const ContextRegion = struct { key: ContextKey, collapsed: bool, a: @import("ziggurat_document_diff").LineRange, b: @import("ziggurat_document_diff").LineRange, headers: [2]?ui.Rect };
 pub const Mode = enum { split, unified };
+/// When the comparison shows its scroll bar: while the pointer is over it
+/// (or drags the thumb), whenever the content overflows, as a comparison
+/// filling a window shows how far down it is, or never.
+pub const Scrollbars = enum { hover, always, hidden };
+/// The room between a split view's sides; the line between them is a
+/// divider the pointer drags within `divider_reach` of it.
+pub const divider_gap: f32 = 8;
+pub const divider_reach: f32 = 4;
+/// The narrowest a side gets while the view is wide enough for two.
+pub const min_side_width: f32 = 120;
 pub const Side = readonly.Side;
 pub const Parameters = readonly.Parameters;
 pub const Colors = readonly.Colors;
@@ -517,7 +528,7 @@ pub const View = opaque {
             } else for (snapshot.columns, 0..) |column, side| {
                 const rectangle = ui.layout.intersect(column, .{ .x = column.x, .y = column.y + row.y, .width = column.width, .height = row.height });
                 const source = if (side == 0) row.a else row.b;
-                frame.rect(rectangle, if (source == null) colors.blank else if (side == 0) colors.deleted else colors.added);
+                if (source == null) hatch.fill(frame, rectangle, column.x, column.y - hatch.phase(value.scrollOffset()), colors.blank, colors.hatch) else frame.rect(rectangle, if (side == 0) colors.deleted else colors.added);
                 if (row.hunk == value.selected) frame.rect(.{ .x = rectangle.x, .y = rectangle.y, .width = @min(3, rectangle.width), .height = rectangle.height }, colors.selected);
             }
         };
@@ -548,6 +559,8 @@ pub const View = opaque {
                 if (region.collapsed) frame.rect(.{ .x = rectangle.x + rectangle.width * 0.5, .y = middle - 3, .width = 1, .height = 7 }, 0x4c596d);
             };
         }
+        if (value.mode == .split) frame.rect(.{ .x = value.dividerX(bounds) - 0.5, .y = bounds.y, .width = 1, .height = bounds.height }, colors.divider);
+        if (value.barShown()) if (value.bar(bounds)) |shown| frame.scrollbar(shown, .{ .dragging = value.drag != null and value.drag.? == .thumb, .color = colors.scrollbar });
         if (frame.failure) |err| return @as(anyerror!void, err);
     }
     pub fn info(self: *View) !Info {
@@ -670,6 +683,84 @@ pub const View = opaque {
     pub fn scrollBy(self: *View, delta: f32) !bool {
         return (try self.state()).scroll(delta);
     }
+    /// How far down the comparison the view is, in DIP from its top, as an
+    /// application drawing a minimap beside it reads it.
+    pub fn scrollY(self: *View) !f64 {
+        return (try self.state()).scrollOffset();
+    }
+    /// The height the comparison lays out, in DIP: `lineTop` of a side's
+    /// line count.
+    pub fn contentHeight(self: *View) !f64 {
+        return (try self.state()).contentHeight();
+    }
+    /// The height of what the view shows, in DIP, after its last prepare.
+    pub fn viewportHeight(self: *View) !f32 {
+        const value = try self.state();
+        return if (value.snapshot) |snapshot| snapshot.bounds.height else 0;
+    }
+    /// Scroll `offset` DIP down the comparison, as far as it reaches, and
+    /// lay it out again. True when it moved.
+    pub fn setScrollY(self: *View, offset: f64) !bool {
+        const value = try self.state();
+        const scope = value.window.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        value.busy = true;
+        defer value.busy = false;
+        if (!try value.scrollTo(offset)) return false;
+        if (value.snapshot) |snapshot| {
+            var parameters = snapshot.parameters;
+            parameters.font = snapshot.font.get();
+            value.prepare(snapshot.bounds, parameters) catch |err| {
+                value.required = true;
+                return value.budget.normalize(err);
+            };
+        }
+        value.window.invalidate();
+        return true;
+    }
+    /// Where line `line` of `side` begins, in DIP from the comparison's top,
+    /// as the comparison lays the two sides out: rows a side lacks take
+    /// room on the other. The side's line count gives the comparison's
+    /// height; null for a line beyond it or before a comparison.
+    pub fn lineTop(self: *View, side: Side, line: usize) !?f64 {
+        const value = try self.state();
+        const index = if (value.index) |*found| found else return null;
+        if (sourceRow(index, @backingInt(side), line)) |row| return ix.dip(index.prefix(row));
+        if (index.segment_count == 0) return if (line == 0) 0 else null;
+        const last = index.segments[index.segment_count - 1];
+        const lines = if (side == .a) last.a + last.count_a else last.b + last.count_b;
+        return if (line == lines) ix.dip(index.prefix(index.heights.len)) else null;
+    }
+    /// When the scroll bar shows; see `Scrollbars`.
+    pub fn setScrollbars(self: *View, value: Scrollbars) !void {
+        const state_value = try self.state();
+        if (state_value.scrollbars == value) return;
+        state_value.scrollbars = value;
+        state_value.window.invalidate();
+    }
+    /// The share of a split view's width its A side takes, which the line
+    /// between the sides changes as the pointer drags it; keep it in the
+    /// application's settings and give it back with `setSplitFraction`.
+    pub fn splitFraction(self: *View) !f32 {
+        return (try self.state()).split_fraction;
+    }
+    /// Give the A side `fraction` of the width, from the next prepare;
+    /// each side keeps `min_side_width` while both fit.
+    pub fn setSplitFraction(self: *View, fraction: f32) !void {
+        if (!std.math.isFinite(fraction) or fraction < 0 or fraction > 1) return error.InvalidValue;
+        const value = try self.state();
+        if (value.split_fraction == fraction) return;
+        value.split_fraction = fraction;
+        value.required = true;
+        value.window.invalidate();
+    }
+    /// The pointer's shape at `point`: a resize arrow over the line between
+    /// a split view's sides, or while it is dragged.
+    pub fn cursorAt(self: *View, bounds: ui.Rect, point: z.Point) !?z.Cursor {
+        const value = try self.state();
+        if (value.drag) |drag| if (drag == .divider) return .resize_ew;
+        return if (value.onDivider(bounds, point)) .resize_ew else null;
+    }
     pub fn navigate(self: *View, forward: bool) !bool {
         return (try self.state()).navigate(forward);
     }
@@ -756,6 +847,26 @@ pub const Unified = opaque {
     pub fn scrollBy(self: *Unified, delta: f32) !bool {
         return self.shared().scrollBy(delta);
     }
+    pub fn scrollY(self: *Unified) !f64 {
+        return self.shared().scrollY();
+    }
+    pub fn contentHeight(self: *Unified) !f64 {
+        return self.shared().contentHeight();
+    }
+    pub fn viewportHeight(self: *Unified) !f32 {
+        return self.shared().viewportHeight();
+    }
+    pub fn setScrollY(self: *Unified, offset: f64) !bool {
+        return self.shared().setScrollY(offset);
+    }
+    /// Where line `line` of `side` begins, deleted lines above the change
+    /// that replaced them; see `View.lineTop`.
+    pub fn lineTop(self: *Unified, side: Side, line: usize) !?f64 {
+        return self.shared().lineTop(side, line);
+    }
+    pub fn setScrollbars(self: *Unified, value: Scrollbars) !void {
+        return self.shared().setScrollbars(value);
+    }
     pub fn navigate(self: *Unified, forward: bool) !bool {
         return self.shared().navigate(forward);
     }
@@ -826,6 +937,14 @@ const State = struct {
     reveal_raw: ?usize = null,
     context_index_required: bool = false,
     context_active: bool = false,
+    /// The share of a split view's width the A side takes.
+    split_fraction: f32 = 0.5,
+    scrollbars: Scrollbars = .hover,
+    /// The pointer is over the view.
+    hovered: bool = false,
+    /// The thumb (with where on it the pointer took it) or the divider
+    /// (with how far from the line) the pointer drags.
+    drag: ?union(enum) { thumb: f32, divider: f32 } = null,
     fn documents(self: *State) [2]*d.Document {
         return .{ self.inbox.pair.a, self.inbox.pair.b };
     }
@@ -1173,8 +1292,7 @@ const State = struct {
         self.required = true;
         if (!ui.layout.validRect(bounds) or bounds.width < 80 or bounds.height <= 0 or bounds.width > 1000000 or bounds.height > 1000000) return error.InvalidGeometry;
         if (parameters.font.family.len > 255 or parameters.font.locale.len > 127) return error.InvalidParameters;
-        const width = (bounds.width - 8) / 2;
-        var columns: [2]ui.Rect = if (self.mode == .unified) @splat(bounds) else .{ .{ .x = bounds.x, .y = bounds.y, .width = width, .height = bounds.height }, .{ .x = bounds.x + width + 8, .y = bounds.y, .width = width, .height = bounds.height } };
+        var columns: [2]ui.Rect = if (self.mode == .unified) @splat(bounds) else self.splitColumns(bounds);
         if (self.context_options != null) for (&columns) |*column| {
             column.x += 12;
             column.width -= 12;
@@ -1418,6 +1536,135 @@ const State = struct {
         const located = index.locate(@intCast(target >> canonical_shift));
         self.anchor = .{ .row = located.row, .intra = target - (@as(u128, index.prefix(located.row)) << canonical_shift) };
     }
+    /// The A side's width in a split view of `bounds`: its share, but
+    /// never narrower than `min_side_width` while both fit, else half.
+    fn sideWidth(self: *const State, bounds: ui.Rect) f32 {
+        const available = @max(0, bounds.width - divider_gap);
+        if (available < 2 * min_side_width) return @round(available / 2);
+        return @round(std.math.clamp(available * self.split_fraction, min_side_width, available - min_side_width));
+    }
+    fn splitColumns(self: *const State, bounds: ui.Rect) [2]ui.Rect {
+        const available = @max(0, bounds.width - divider_gap);
+        const a = self.sideWidth(bounds);
+        return .{ .{ .x = bounds.x, .y = bounds.y, .width = a, .height = bounds.height }, .{ .x = bounds.x + a + divider_gap, .y = bounds.y, .width = available - a, .height = bounds.height } };
+    }
+    /// The middle of the line between a split view's sides.
+    fn dividerX(self: *const State, bounds: ui.Rect) f32 {
+        return bounds.x + self.sideWidth(bounds) + divider_gap / 2;
+    }
+    fn onDivider(self: *const State, bounds: ui.Rect, point: z.Point) bool {
+        return self.mode == .split and bounds.contains(point) and @abs(point.x - self.dividerX(bounds)) <= divider_reach;
+    }
+    /// Put the line between the sides at `x`, as far as the sides allow.
+    fn moveDivider(self: *State, bounds: ui.Rect, x: f32) bool {
+        const available = bounds.width - divider_gap;
+        if (!(available > 0) or !std.math.isFinite(x)) return false;
+        const fraction = std.math.clamp((x - bounds.x - divider_gap / 2) / available, 0, 1);
+        const kept = if (available >= 2 * min_side_width) std.math.clamp(fraction, min_side_width / available, 1 - min_side_width / available) else fraction;
+        if (kept == self.split_fraction) return false;
+        self.split_fraction = kept;
+        self.required = true;
+        return true;
+    }
+    /// How far down the content the view is, and how high the content is,
+    /// in DIP.
+    fn scrollOffset(self: *const State) f64 {
+        const index = if (self.index) |*value| value else return 0;
+        if (index.heights.len == 0) return 0;
+        const position = (@as(u128, index.prefix(@min(self.anchor.row, index.heights.len))) << canonical_shift) + self.anchor.intra;
+        return @as(f64, @floatFromInt(position)) / canonical_units;
+    }
+    fn contentHeight(self: *const State) f64 {
+        const index = if (self.index) |*value| value else return 0;
+        return ix.dip(index.prefix(index.heights.len));
+    }
+    /// Scroll so that `offset` DIP down the content is at the view's top,
+    /// as far as the content reaches.
+    fn scrollTo(self: *State, offset: f64) !bool {
+        if (!std.math.isFinite(offset)) return error.InvalidScroll;
+        const index = if (self.index) |*value| value else return false;
+        if (index.heights.len == 0) return false;
+        const viewport = if (self.snapshot) |value| value.bounds.height else 1;
+        const total = @as(u128, index.prefix(index.heights.len)) << canonical_shift;
+        const maximum = total -| @as(u128, @intFromFloat(@ceil(@as(f64, viewport) * canonical_units)));
+        const wanted: u128 = if (offset <= 0) 0 else @intFromFloat(@min(offset * canonical_units, 1e30));
+        const target = @min(wanted, maximum);
+        const located = index.locate(@intCast(target >> canonical_shift));
+        const anchor: Anchor = .{ .row = located.row, .intra = target - (@as(u128, index.prefix(located.row)) << canonical_shift) };
+        if (std.meta.eql(anchor, self.anchor)) return false;
+        self.anchor = anchor;
+        self.required = true;
+        return true;
+    }
+    /// The vertical scroll bar over `bounds`, null while hidden.
+    fn bar(self: *const State, bounds: ui.Rect) ?ui.scroll.Bar {
+        if (self.scrollbars == .hidden) return null;
+        const value: ui.scroll.Bar = .{ .box = bounds, .view = bounds.height, .content = @floatCast(self.contentHeight()), .offset = @floatCast(self.scrollOffset()) };
+        return if (value.scrolls()) value else null;
+    }
+    fn barShown(self: *const State) bool {
+        return switch (self.scrollbars) {
+            .always => true,
+            .hover => self.hovered or (self.drag != null and self.drag.? == .thumb),
+            .hidden => false,
+        };
+    }
+    /// The bar's and the divider's pointer input; true when taken.
+    fn pointerEvent(self: *State, event_value: z.Event, bounds: ui.Rect, parameters: Parameters) !bool {
+        switch (event_value) {
+            .pointer_move => |point| {
+                const was = self.barShown();
+                self.hovered = bounds.contains(point);
+                if (self.drag) |drag| {
+                    switch (drag) {
+                        .thumb => |grab| if (self.bar(bounds)) |value| {
+                            if (try self.scrollTo(value.offsetAt(point.y - grab))) try self.prepare(bounds, parameters);
+                        },
+                        .divider => |grab| if (self.moveDivider(bounds, point.x - grab)) try self.prepare(bounds, parameters),
+                    }
+                    self.window.invalidate();
+                    return true;
+                }
+                if (was != self.barShown()) self.window.invalidate();
+                return false;
+            },
+            .pointer_down => |pointer| {
+                if (pointer.button != .primary) return false;
+                const point = pointer.position;
+                if (self.barShown()) if (self.bar(bounds)) |value| if (value.hit(.{ .x = point.x, .y = point.y })) {
+                    const thumb = value.thumb(false) orelse return true;
+                    if (point.y >= thumb.y and point.y < thumb.y + thumb.height) {
+                        self.drag = .{ .thumb = point.y - thumb.y };
+                    } else {
+                        // A press on the track pages toward the pointer.
+                        const page = @as(f64, bounds.height) * 0.9;
+                        const offset = self.scrollOffset();
+                        if (try self.scrollTo(if (point.y < thumb.y) offset - page else offset + page)) try self.prepare(bounds, parameters);
+                    }
+                    self.window.invalidate();
+                    return true;
+                };
+                if (self.onDivider(bounds, point)) {
+                    self.drag = .{ .divider = point.x - self.dividerX(bounds) };
+                    self.window.invalidate();
+                    return true;
+                }
+                return false;
+            },
+            .pointer_up => {
+                if (self.drag == null) return false;
+                self.drag = null;
+                self.window.invalidate();
+                return true;
+            },
+            .cancel_input => self.drag = null,
+            .focus => |focused| if (!focused) {
+                self.drag = null;
+            },
+            else => {},
+        }
+        return false;
+    }
     fn scroll(self: *State, delta: f32) !bool {
         if (!std.math.isFinite(delta) or @abs(delta) > 1000000) return error.InvalidScroll;
         const index = if (self.index) |*value| value else return false;
@@ -1478,6 +1725,7 @@ const State = struct {
         return result;
     }
     fn event(self: *State, event_value: z.Event, bounds: ui.Rect, parameters: Parameters) !bool {
+        if (try self.pointerEvent(event_value, bounds, parameters)) return true;
         if (event_value == .wheel) {
             if (!bounds.contains(event_value.wheel.position)) return false;
             if (try self.inbox.pair.a.composition() != null or try self.inbox.pair.b.composition() != null) {
