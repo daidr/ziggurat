@@ -139,6 +139,37 @@ serial. Failed preparation leaves the old owning resources/index intact and
 requires a successful retry before drawing; explicit scroll/navigation requests
 remain pending. No shaping, file read, worker start or allocation occurs in draw.
 
+## Line numbers and segments
+
+`View` numbers each side's lines in a gutter before its text: the text
+column moves right by the gutter, which is as wide as the largest number
+either side shows (at least two digits), in a monospaced font at 0.85 of the
+text size, right-aligned on each row's first line in `Colors.line_number`.
+Changed rows tint their number cell with the row's color. `Parameters.line_numbers
+= false` removes the gutter and gives the columns their former width;
+`rowInfo` content rectangles always report where the text is.
+
+When the two Documents hold parts of files, as the hunks of a patch without
+the files, `Parameters.numbering` numbers each record as the line of its file
+it is and marks the records that start a new segment, where the View draws a
+divider line across that side. `Segments` builds it from the record each
+segment starts at and the file line it is, which is what
+`code_editor.patch.Partial` provides for a parsed `FilePatch`:
+
+```zig
+var partial = try patch.Partial.init(allocator, file_patch);
+// Documents a and b hold partial.old_text and partial.new_text.
+const segments: diff_view.Segments = .{
+    .a_starts = partial.old_starts, .b_starts = partial.new_starts,
+    .a_lines = partial.old_file, .b_lines = partial.new_file,
+};
+parameters.numbering = segments.numbering(); // keep `segments` alive
+```
+
+Changing `line_numbers` or the numbering reshapes the visible rows once at
+the new width. Numbers are recorded as ordinary label commands in `draw`,
+which allocates nothing. The editable surfaces do not show line numbers yet.
+
 ## Alignment and limits
 
 The model counts actual LF-containing records: an empty document has no records,

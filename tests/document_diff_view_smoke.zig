@@ -451,6 +451,24 @@ fn run(allocator: std.mem.Allocator) !void {
         }
     }
     try std.testing.expect(blank and changed and colored and glyph_pixels > 10);
+    // Each side numbers its lines in a gutter before its text.
+    const numbered_x = (try state.view.rowInfo(&rows))[0].a_content.?.x;
+    try std.testing.expect(numbered_x > bounds.x + 8);
+    // Parts of files, as a patch's hunks, number their lines as the files'
+    // lines, whose larger numbers take a wider gutter.
+    const segments: viewing.Segments = .{ .a_starts = &.{ 0, 2 }, .b_starts = &.{ 0, 2 }, .a_lines = &.{ 99, 499 }, .b_lines = &.{ 99, 499 } };
+    state.parameters.numbering = segments.numbering();
+    try state.view.prepare(bounds, state.parameters);
+    try state.paint();
+    try std.testing.expect((try state.view.rowInfo(&rows))[0].a_content.?.x > numbered_x);
+    state.parameters.numbering = null;
+    state.parameters.line_numbers = false;
+    try state.view.prepare(bounds, state.parameters);
+    try state.paint();
+    try std.testing.expectEqual(bounds.x, (try state.view.rowInfo(&rows))[0].a_content.?.x);
+    state.parameters.line_numbers = true;
+    try state.view.prepare(bounds, state.parameters);
+    try state.paint();
     const info = try state.view.info();
     try std.testing.expect(info.rows > 2 and info.selected_hunk != null);
     try std.testing.expectEqual(@as(u32, 0xe1e6ef), try state.pixel(bounds.x + 2, bounds.y + 1));
