@@ -1574,6 +1574,13 @@ pub const View = struct {
         if (is_webkit) {
             try webkit.check(webkit.zwk_viewport(native, edges[0], edges[1], edges[2], edges[3], @intFromBool(viewport.visible and b.width > 0 and b.height > 0)));
             if (self.attachmentClosed()) return error.Closed;
+            // A page the content shows scaled lays out at its own size and
+            // only looks smaller or larger; a rounded one is cut to its
+            // corners.
+            const scaled = @abs(viewport.scale()[0] - 1) > 1e-6;
+            const radii: [4]f64 = .{ viewport.radii[0], viewport.radii[1], viewport.radii[2], viewport.radii[3] };
+            try webkit.check(webkit.zwk_present(native, if (scaled) viewport.layoutSize()[0] else 0, &radii));
+            if (self.attachmentClosed()) return error.Closed;
             return;
         }
         self.last_hresult = zwv_viewport(native, edges[0], edges[1], edges[2], edges[3], viewport.visible and b.width > 0 and b.height > 0);

@@ -303,7 +303,7 @@ fn shown(context: *ui.Context) bool {
 fn checkNodes(context: *ui.Context, old: u64, new: u64) !void {
     try expect(context.input_state.available(old));
     try expect(!context.input_state.available(new));
-    if (ui.capabilities.accessibility) {
+    if (ui.capabilities.accessibility and builtin.os.tag == .windows) {
         const provider: *c.IRawElementProviderSimple = @ptrCast(@alignCast(try context.accessibility_bridge.retainProvider(old)));
         _ = provider.lpVtbl.*.Release.?(provider);
         try expectError(error.NativeProviderUnavailable, context.accessibility_bridge.retainProvider(new));

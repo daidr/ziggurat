@@ -11,7 +11,7 @@ pub fn build(b: *std.Build) void {
     const https_resources_enabled = b.option(bool, "https-resources", "Build the optional HTTPS resource transport on Windows or Linux") orelse false;
     const gpu = b.option(bool, "gpu", "Build the optional GPU renderer (D3D11 on Windows, Metal on macOS) with software fallback") orelse false;
     const webp = b.option(bool, "webp", "Build the optional pinned WebP decoder (fetch source first)") orelse false;
-    const accessibility = b.option(bool, "accessibility", "Build the optional native accessibility bridge (Windows UI Automation, macOS NSAccessibility)") orelse false;
+    const accessibility = b.option(bool, "accessibility", "Build the optional native accessibility bridge (Windows UI Automation, macOS NSAccessibility, Linux ATK)") orelse false;
     const check = b.step("check", "Compile selected examples and tests without running them");
     const test_step = b.step("test", "Run invariant tests without opening windows");
     var view_tests: ?*std.Build.Step.Compile = null;
@@ -1010,6 +1010,10 @@ pub fn build(b: *std.Build) void {
         run.step.dependOn(&install.step);
         b.step("smoke-virtual-list-control", "Verify native complete-list selection, offscreen rows and captured action retirement").dependOn(&run.step);
     } else if (target.result.os.tag == .linux) {
+        addSmoke(b, "smoke-accessibility-linux", "tests/linux_accessibility_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
         addSmoke(b, "smoke-virtual-list-control", "tests/virtual_list_control_linux_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
@@ -1558,8 +1562,14 @@ pub fn build(b: *std.Build) void {
     if (accessibility and target.result.os.tag == .macos) {
         _ = native_support.addArchive(b, ui, "ui-accessibility-native", "src/ui/accessibility_macos.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         native_support.linkFrameworks(b, ui, &.{ "AppKit", "Foundation" });
+    } else if (accessibility and target.result.os.tag == .linux) {
+        // ATK objects below the window's GTK accessible child host, which
+        // GTK's bridge shows assistive technology through AT-SPI.
+        const native = native_support.addArchive(b, ui, "ui-accessibility-native", "src/ui/accessibility_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-deprecated-declarations" }, target, optimize);
+        native.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        ui.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
     } else if (accessibility) {
-        if (target.result.os.tag != .windows) @panic("UI Automation requires Windows; macOS uses NSAccessibility");
+        if (target.result.os.tag != .windows) @panic("UI Automation requires Windows; macOS uses NSAccessibility, Linux ATK");
         // An archive member is linked only by programs that reference UIA.
         _ = native_support.addArchive(b, ui, "ui-accessibility-native", "src/ui/accessibility.c", &.{"-std=c11"}, target, optimize);
         ui.linkSystemLibrary("uiautomationcore", .{});
@@ -1840,7 +1850,7 @@ pub fn build(b: *std.Build) void {
         automation.addImport("ziggurat_webview", view);
         view.addImport("ziggurat_tls_pem", tls_pem);
         _ = native_support.add(b, view, "webview-webkit-macos", "src/webview/webkit_macos.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
-        native_support.linkFrameworks(b, view, &.{ "WebKit", "AppKit", "Foundation", "CoreFoundation", "Security" });
+        native_support.linkFrameworks(b, view, &.{ "WebKit", "AppKit", "QuartzCore", "CoreGraphics", "Foundation", "CoreFoundation", "Security" });
         view_tests = addTest(b, .{ .root_module = view });
         _ = b.step("webview-runtime", "Use the system WKWebView");
         addSmoke(b, "smoke-webview-macos", "tests/macos_webview_smoke.zig", target, optimize, &.{

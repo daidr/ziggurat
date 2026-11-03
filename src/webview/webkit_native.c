@@ -5,6 +5,7 @@
 #error "Ziggurat requires WebKitGTK API 4.1 version 2.40 or newer"
 #endif
 #include <string.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdatomic.h>
@@ -82,6 +83,12 @@ struct ZwkState {
        engine can tell one change twice. */
     uint8_t capture_told[3];
     gboolean closed, committed, failed, dom_ready, recovering,load_started,inspector;
+    /* How much the content scales a region's page, which WebKit zooms by
+       over the page's own zoom (0 is 1), and the radii, in its allocation's
+       DIPs, its drawing is cut to (zwk_present). */
+    double page_scale, corners[4];
+    gulong draw_handler;
+    int placed_width;
 };
 static gint live_states, live_callbacks, live_views, inspectors_shown;
 static void capture_state_clear(ZwkState *);
@@ -1219,10 +1226,12 @@ int zwk_post(ZwkState *s,const char *text) {
     webkit_web_view_evaluate_javascript(WEBKIT_WEB_VIEW(s->view),script,-1,NULL,NULL,NULL,sent,s);
     g_free(script); return ZWK_OK;
 }
+static double page_scale(const ZwkState *s) { return s->page_scale>0?s->page_scale:1; }
+/* The page's own zoom: a page the content scales is zoomed by that too. */
 int zwk_zoom(ZwkState *s,double *value,int write) {
     if (!live(s)) return ZWK_CLOSED;
-    if (write) webkit_web_view_set_zoom_level(WEBKIT_WEB_VIEW(s->view),*value);
-    else *value=webkit_web_view_get_zoom_level(WEBKIT_WEB_VIEW(s->view));
+    if (write) webkit_web_view_set_zoom_level(WEBKIT_WEB_VIEW(s->view),*value*page_scale(s));
+    else *value=webkit_web_view_get_zoom_level(WEBKIT_WEB_VIEW(s->view))/page_scale(s);
     return ZWK_OK;
 }
 int zwk_audio(ZwkState *s,int op,int *value) {
@@ -1429,9 +1438,88 @@ int zwk_viewport(ZwkState *s, int32_t left, int32_t top, int32_t right, int32_t 
         int x=floor_scale(left,scale), y=floor_scale(top,scale);
         int64_t width=(int64_t)ceil_scale(right,scale)-x, height=(int64_t)ceil_scale(bottom,scale)-y;
         if (right<left || bottom<top || width>32768 || height>32768) result=ZWK_INVALID;
-        else result=content_result(zlg_region_viewport(s->region,x,y,(int)width,(int)height,visible && right>left && bottom>top));
+        else {
+            result=content_result(zlg_region_viewport(s->region,x,y,(int)width,(int)height,visible && right>left && bottom>top));
+            if (result==ZWK_OK) s->placed_width=(int)width;
+        }
     }
     release(s); return result;
+}
+/* The pixels, by rows, that corners of radii rx, ry (from the top-left
+   clockwise) cut off at all from a box width by height, added to region. */
+static void corner_pixels(cairo_region_t *region, double width, double height, const double radii[4]) {
+    for (int i=0;i<4;i++) {
+        double r=radii[i];
+        if (r<=0) continue;
+        gboolean right=i==1 || i==2, bottom=i>=2;
+        double cx=right?width-r:r, cy=bottom?height-r:r; /* the center of the corner's curve */
+        double top=bottom?cy:0;
+        for (double y=floor(top); y<top+r; y++) {
+            /* The curve is nearest the side at the row's edge furthest
+               from its center. */
+            double dy=bottom?MIN(y+1,top+r)-cy:cy-MAX(y,top);
+            double half=r*sqrt(MAX(1-dy*dy/(r*r),0));
+            double x0=right?floor(cx+half):0, x1=right?ceil(width):ceil(cx-half);
+            if (x1>x0) {
+                cairo_rectangle_int_t row={(int)x0,(int)y,(int)(x1-x0),1};
+                cairo_region_union_rectangle(region,&row);
+            }
+        }
+    }
+}
+/* A rounded page draws inside its corners: WebKit's handler, which GTK
+   would run with the clip of none before it, draws clipped here. */
+static gboolean present_draw(GtkWidget *widget, cairo_t *cr, gpointer data) {
+    ZwkState *s=data;
+    if (s->corners[0]<=0 && s->corners[1]<=0 && s->corners[2]<=0 && s->corners[3]<=0) return FALSE;
+    int width=gtk_widget_get_allocated_width(widget), height=gtk_widget_get_allocated_height(widget);
+    cairo_rectangle_int_t box={0,0,width,height};
+    cairo_region_t *region=cairo_region_create_rectangle(&box), *cut=cairo_region_create();
+    corner_pixels(cut,width,height,s->corners);
+    cairo_region_subtract(region,cut);
+    cairo_save(cr);
+    gdk_cairo_region(cr,region);
+    cairo_clip(cr);
+    GTK_WIDGET_GET_CLASS(widget)->draw(widget,cr);
+    cairo_restore(cr);
+    /* The pointer goes through what the corners cut off. */
+    if (gtk_widget_get_has_window(widget)) gtk_widget_input_shape_combine_region(widget,region);
+    cairo_region_destroy(cut);
+    cairo_region_destroy(region);
+    return TRUE;
+}
+int zwk_present(ZwkState *s, double layout_width, const double radii[4]) {
+    retain(s);
+    int result=ZWK_CLOSED;
+    if (live(s) && s->region && s->view) {
+        for (int i=0;i<4;i++) if (!isfinite(radii[i]) || radii[i]<0) { release(s); return ZWK_INVALID; }
+        if (!isfinite(layout_width) || layout_width<0) { release(s); return ZWK_INVALID; }
+        /* WebKit lays the page out at the view's width over its zoom: at
+           the page's own, whatever whole pixels the view has. */
+        int width=s->placed_width;
+        double scale=layout_width>0 && width>0?(double)width/layout_width:1;
+        if (scale!=page_scale(s)) {
+            WebKitWebView *view=WEBKIT_WEB_VIEW(s->view);
+            webkit_web_view_set_zoom_level(view,webkit_web_view_get_zoom_level(view)/page_scale(s)*scale);
+            s->page_scale=scale;
+        }
+        double corners[4];
+        for (int i=0;i<4;i++) corners[i]=radii[i]*scale;
+        if (memcmp(corners,s->corners,sizeof corners)!=0) {
+            memcpy(s->corners,corners,sizeof corners);
+            if (!s->draw_handler) s->draw_handler=g_signal_connect(s->view,"draw",G_CALLBACK(present_draw),s);
+            if (corners[0]<=0 && corners[1]<=0 && corners[2]<=0 && corners[3]<=0 && gtk_widget_get_has_window(s->view))
+                gtk_widget_input_shape_combine_region(s->view,NULL);
+            gtk_widget_queue_draw(s->view);
+        }
+        result=ZWK_OK;
+    }
+    release(s); return result;
+}
+/* Test hook: the zoom WebKit has, and the corners the page is cut to. */
+double zwk_test_present(ZwkState *s, double corners[4]) {
+    memcpy(corners,s->corners,sizeof s->corners);
+    return s->view?webkit_web_view_get_zoom_level(WEBKIT_WEB_VIEW(s->view)):0;
 }
 #include "webkit_session_impl.h"
 int zwk_recovery_begin(ZwkState *s) {

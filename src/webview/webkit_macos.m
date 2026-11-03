@@ -12,6 +12,7 @@
  * completion holds its own through its block. */
 #import <AppKit/AppKit.h>
 #import <WebKit/WebKit.h>
+#import <QuartzCore/QuartzCore.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <errno.h>
@@ -155,6 +156,11 @@ typedef struct ZwkInitializerState ZwkInitializerState;
     /* A region's view is placed by zwk_viewport; a session's lives parked,
      * without a window, until zwk_session_mount places it in one. */
     BOOL region_mode, session, placement_busy;
+    /* How much the content scales a region's page, which its pageZoom
+       carries over the page's own (0 is 1), and the mask cutting the view
+       to corners of different radii (zwk_present). */
+    double page_scale;
+    CAShapeLayer *corner_mask;
     /* The load the engine is still ending became a download: it no longer
      * holds the next navigation back. */
     BOOL download_load;
@@ -3084,12 +3090,93 @@ int zwk_post(ZwkState *state,const char *text) {
     }
     return ZWK_OK;
 }
+static double page_scale(const ZwkPage *s) { return s->page_scale>0?s->page_scale:1; }
+/* The page's own zoom: a page the content scales is zoomed by that too. */
 int zwk_zoom(ZwkState *state,double *value,int write) {
     ZwkPage *s=page_of(state);
     if (!live(s)) return ZWK_CLOSED;
-    if (write) s->view.pageZoom=*value;
-    else *value=s->view.pageZoom;
+    if (write) s->view.pageZoom=*value*page_scale(s);
+    else *value=s->view.pageZoom/page_scale(s);
     return ZWK_OK;
+}
+/* Cuts the region's view to corners of radii, in its points, from its
+   top-left clockwise: with the layer's corner radius when they are the
+   same, which is as continuous as AppKit's, else a mask of their path. */
+static void round_view(ZwkPage *s,const double radii[4]) {
+    NSView *view=s->view;
+    view.wantsLayer=YES;
+    CALayer *layer=view.layer;
+    if (!layer) return;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    const BOOL none=radii[0]<=0 && radii[1]<=0 && radii[2]<=0 && radii[3]<=0;
+    if (none || !s->corner_mask) layer.mask=nil;
+    if (none) { s->corner_mask=nil; layer.cornerRadius=0; [CATransaction commit]; return; }
+    const NSSize size=view.bounds.size;
+    const CGFloat top=view.isFlipped?0:size.height, bottom=view.isFlipped?size.height:0;
+    /* The view's corners in its layer, as AppKit flips and scales it. */
+    NSPoint corners[4]={ [view convertPointToLayer:NSMakePoint(0,top)], [view convertPointToLayer:NSMakePoint(size.width,top)],
+        [view convertPointToLayer:NSMakePoint(size.width,bottom)], [view convertPointToLayer:NSMakePoint(0,bottom)] };
+    BOOL same=YES; double r=0;
+    for (int i=0;i<4;i++) { if (radii[i]>0 && r>0 && radii[i]!=r) same=NO; r=MAX(r,radii[i]); }
+    if (same) {
+        CACornerMask mask=0;
+        for (int i=0;i<4;i++) {
+            if (radii[i]<=0) continue;
+            NSPoint p=corners[i], o=corners[(i+2)%4];
+            mask|=(p.x>o.x?(p.y>o.y?kCALayerMaxXMaxYCorner:kCALayerMaxXMinYCorner):(p.y>o.y?kCALayerMinXMaxYCorner:kCALayerMinXMinYCorner));
+        }
+        layer.mask=nil; s->corner_mask=nil;
+        layer.cornerRadius=r;
+        layer.cornerCurve=kCACornerCurveContinuous;
+        layer.maskedCorners=mask;
+        layer.masksToBounds=YES;
+        [CATransaction commit];
+        return;
+    }
+    layer.cornerRadius=0;
+    const CGRect bounds=layer.bounds;
+    CGMutablePathRef path=CGPathCreateMutable();
+    NSPoint start=NSMakePoint((corners[3].x+corners[0].x)/2-bounds.origin.x,(corners[3].y+corners[0].y)/2-bounds.origin.y);
+    CGPathMoveToPoint(path,NULL,start.x,start.y);
+    for (int i=0;i<4;i++) {
+        NSPoint p=corners[i], q=corners[(i+1)%4];
+        CGPathAddArcToPoint(path,NULL,p.x-bounds.origin.x,p.y-bounds.origin.y,(p.x+q.x)/2-bounds.origin.x,(p.y+q.y)/2-bounds.origin.y,radii[i]);
+    }
+    CGPathCloseSubpath(path);
+    if (!s->corner_mask) { s->corner_mask=[CAShapeLayer layer]; layer.mask=s->corner_mask; }
+    s->corner_mask.frame=bounds;
+    s->corner_mask.path=path;
+    CGPathRelease(path);
+    [CATransaction commit];
+}
+int zwk_present(ZwkState *state,double layout_width,const double radii[4]) {
+    ZwkPage *s=page_of(state);
+    if (!live(s) || !s->region_mode || !s->view) return ZWK_CLOSED;
+    for (int i=0;i<4;i++) if (!isfinite(radii[i]) || radii[i]<0) return ZWK_INVALID;
+    if (!isfinite(layout_width) || layout_width<0) return ZWK_INVALID;
+    @autoreleasepool {
+        /* WebKit lays the page out at the view's width over its zoom: at
+           the page's own, whatever points the view has. */
+        const double width=s->view.frame.size.width;
+        const double scale=layout_width>0 && width>0?width/layout_width:1;
+        if (scale!=page_scale(s)) {
+            s->view.pageZoom=s->view.pageZoom/page_scale(s)*scale;
+            s->page_scale=scale;
+        }
+        double corners[4];
+        for (int i=0;i<4;i++) corners[i]=radii[i]*scale;
+        round_view(s,corners);
+    }
+    return ZWK_OK;
+}
+/* Test hook: the zoom WebKit has, and the corner radius the view shows. */
+double zwk_test_present(ZwkState *state,double corners[4]) {
+    ZwkPage *s=page_of(state);
+    CALayer *layer=s->view.layer;
+    const double r=layer?layer.cornerRadius:0;
+    for (int i=0;i<4;i++) corners[i]=s->corner_mask?-1:r;
+    return s->view?s->view.pageZoom:0;
 }
 int zwk_audio(ZwkState *state,int op,int *value) {
     ZwkPage *s=page_of(state);

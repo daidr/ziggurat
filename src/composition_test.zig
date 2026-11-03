@@ -422,3 +422,18 @@ test "composition blur removing next target restores fallback once" {
     try std.testing.expectEqual(@as(usize, 1), native.detached);
     try std.testing.expectError(error.Closed, region.snapshot());
 }
+
+test "composition viewport scales its content as a picture and cuts it to its corners" {
+    const shown: z.composition.Viewport = .{ .bounds = .{ .x = 10, .y = 10, .width = 50, .height = 25 }, .layout_width = 100, .layout_height = 50, .radii = .{ 20, 0, 0, 0 } };
+    try std.testing.expectEqual([2]f32{ 0.5, 0.5 }, shown.scale());
+    // The top-left corner's curve, at half size: its square is 10 by 10.
+    try std.testing.expect(!shown.contains(.{ .x = 11, .y = 11 }));
+    try std.testing.expect(shown.contains(.{ .x = 17, .y = 17 }));
+    try std.testing.expect(shown.contains(.{ .x = 59, .y = 11 }));
+    try std.testing.expect(!shown.contains(.{ .x = 61, .y = 11 }));
+    const plain: z.composition.Viewport = .{ .bounds = .{ .x = 0, .y = 0, .width = 10, .height = 10 } };
+    try std.testing.expectEqual([2]f32{ 1, 1 }, plain.scale());
+    try std.testing.expect(plain.contains(.{ .x = 0, .y = 0 }));
+    try std.testing.expect(z.composition.insideCorners(10, 10, .{ 5, 5, 5, 5 }, 5, 5));
+    try std.testing.expect(!z.composition.insideCorners(10, 10, .{ 5, 5, 5, 5 }, 9.5, 9.5));
+}
