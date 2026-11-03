@@ -8,6 +8,7 @@ const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const animation = @import("ziggurat_animation");
 pub const matched = @import("matched.zig");
+pub const posed = @import("posed.zig");
 pub const morph = @import("morph.zig");
 pub const Match = matched.Match;
 
@@ -179,6 +180,15 @@ pub const Style = struct {
     /// in perspective about `pose.origin` within the node's box. Hit
     /// testing, focus and semantics keep the arranged box.
     pose: ?ui.effects.Pose = null,
+    /// Move to `pose` and fade to `opacity` along this motion as builds
+    /// change them, from where the node showed in the frame before. A node
+    /// the frame before did not pose, as one built for the first time,
+    /// shows at its pose at once: to come in from a pose, pose it there in
+    /// one build, ask for another, and pose it at its place in the next.
+    /// Under reduced motion the pose moves at once and only the opacity
+    /// fades. See `posed.zig`; needs `Host.prepareShaderEffects`, like
+    /// `pose`.
+    pose_motion: ?animation.Motion = null,
     /// An identity the node shares with another, as a photo's thumbnail
     /// and the photo in its detail view: appearing where another node with
     /// the same key showed in the frame before, it comes from there; see
@@ -1352,6 +1362,8 @@ pub const View = struct {
     wake: ?u64 = null,
     /// Shared elements on their way; see `Style.match`.
     matches: matched.State = .{},
+    /// Poses on their way; see `Style.pose_motion`.
+    poses: posed.State = .{},
     /// Keyboard focus at the start of this pass, set by the host.
     focus: ?u64 = null,
     /// A control the host should focus after this pass, such as a combo box
@@ -4081,8 +4093,9 @@ pub const View = struct {
             if (try self.revealNode(id)) try self.place();
         }
         self.record(measurer);
-        // Shared elements move what is drawn, not the arranged boxes input
-        // routing just recorded.
+        // Animated poses and shared elements move what is drawn, not the
+        // arranged boxes input routing just recorded.
+        if (self.poses.apply(all, self.now, self.preferences.reduce_motion)) |deadline| self.wakeAt(deadline);
         if (self.matches.apply(all, self.now, self.preferences.reduce_motion)) |deadline| self.wakeAt(deadline);
         self.matches.keepCopies(all, theme, copyTextColor);
     }
@@ -7441,4 +7454,59 @@ test "each announcement paints a new status node, cut at a character boundary" {
     @memcpy(long[max_announcement - 1 ..], "\xc3\xa9");
     view.announce(&long);
     try std.testing.expectEqual(max_announcement - 1, view.announcement_len);
+}
+
+test "pose_motion shows a first pose at once and moves to the next" {
+    var storage: Storage(16, 256) = .{};
+    var view = View.init(storage.buffers());
+    const tween: animation.Motion = .{ .tween = .{ .duration_ns = 100, .easing = .linear } };
+    const Pass = struct {
+        fn run(v: *View, now: u64, pose: ?ui.effects.Pose, opacity: f32, built: bool) !void {
+            v.reset(.{}, null);
+            v.now = now;
+            try v.column(.{});
+            if (built) {
+                try v.column(.{ .key = 1, .width = 40, .height = 40, .pose = pose, .opacity = opacity, .pose_motion = tween });
+                try v.end();
+            }
+            try v.end();
+            try v.finish();
+            try v.arrange(.{ .x = 0, .y = 0, .width = 200, .height = 200 }, .{}, .{});
+        }
+        fn card(v: *View) *const Node {
+            for (v.nodes()) |*node| if (node.style.key == 1) return node;
+            unreachable;
+        }
+    };
+    // Built for the first time, the card shows at its pose at once and
+    // stays there without a build that poses it elsewhere.
+    try Pass.run(&view, 1000, .{ .y = 8 }, 0, true);
+    try std.testing.expectEqual(@as(f32, 8), Pass.card(&view).style.pose.?.y);
+    try std.testing.expectEqual(@as(f32, 0), Pass.card(&view).style.opacity);
+    try std.testing.expectEqual(@as(?u64, null), view.wake);
+    try Pass.run(&view, 1050, .{ .y = 8 }, 0, true);
+    try std.testing.expectEqual(@as(f32, 8), Pass.card(&view).style.pose.?.y);
+    // Posed at its place in the next build, it comes in from there.
+    try Pass.run(&view, 1100, null, 1, true);
+    try std.testing.expectEqual(@as(f32, 8), Pass.card(&view).style.pose.?.y);
+    try std.testing.expect(view.wake != null);
+    try Pass.run(&view, 1150, null, 1, true);
+    try std.testing.expectApproxEqAbs(@as(f32, 4), Pass.card(&view).style.pose.?.y, 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), Pass.card(&view).style.opacity, 1e-4);
+    try Pass.run(&view, 1200, null, 1, true);
+    try std.testing.expect(Pass.card(&view).style.pose == null);
+    try std.testing.expectEqual(@as(f32, 1), Pass.card(&view).style.opacity);
+    try std.testing.expect(!view.poses.moving());
+    try std.testing.expectEqual(@as(?u64, null), view.wake);
+    // A frame without it forgets it: built again, it starts in place.
+    try Pass.run(&view, 1300, null, 1, false);
+    try Pass.run(&view, 1400, .{ .x = 20 }, 1, true);
+    try std.testing.expectEqual(@as(f32, 20), Pass.card(&view).style.pose.?.x);
+    // Under reduced motion the pose moves at once and the opacity fades.
+    view.preferences.reduce_motion = true;
+    try Pass.run(&view, 1500, null, 0, true);
+    try std.testing.expect(Pass.card(&view).style.pose == null);
+    try std.testing.expectEqual(@as(f32, 1), Pass.card(&view).style.opacity);
+    try Pass.run(&view, 1550, null, 0, true);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), Pass.card(&view).style.opacity, 1e-4);
 }

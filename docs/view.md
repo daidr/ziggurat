@@ -640,6 +640,24 @@ if (try v.presentColumn(&state.panel, state.open, .{ .hidden = .{ .y = 12, .scal
 
 运动期间每遍请求下一帧唤醒，静止时不请求；减少动态效果时立即出现与消失。没有 `prepareShaderEffects` 时不透明度与位姿被忽略。语言、隔离方式与预算见[着色器与元素效果](shader-effects.md)。
 
+### 位姿动画
+
+`Style.pose_motion` 给节点一个 `ziggurat_animation` 的运动：之后每遍构建改变它的 `pose` 或 `opacity` 时，节点从上一帧画到的位置和不透明度沿这个运动移到新的值（`src/view/posed.zig`），中途被改向时从当前位置继续，运动期间每遍请求下一帧唤醒。
+
+位姿从节点第一次被摆出的地方开始：上一帧没有摆出它（比如第一次构建它）时，它直接显示在这一帧的位姿上，要等之后某一遍把它摆到别处才会动。要让它从某个位姿进场（比如浮层面板显示时上浮淡入），在一遍构建里把它摆在那里并请求下一遍，下一遍再摆回原位：
+
+```zig
+const p: ?ui.effects.Pose = if (!state.entered) .{ .y = 8 } else null;
+const opacity: f32 = if (!state.entered) 0 else 1;
+if (!state.entered) {
+    state.entered = true;
+    v.wakeAt(v.time()); // 请求紧接着的下一遍
+}
+try v.column(.{ .key = 1, .pose = p, .opacity = opacity, .pose_motion = .{ .spring = .{} } });
+```
+
+没有第二遍构建时，它就停在第一个位姿上。出现在上一帧已经显示的容器里的节点（比如列表新加的一行），用 `presentColumn` 的进场运动。减少动态效果时位姿立即到位，只有不透明度仍然平滑变化。和 `pose` 一样只移动画出来的内容，命中、焦点和语义保持排布后的盒子。
+
 ### 共享元素
 
 `Style.match = .{ .key = ... }` 给节点一个与另一个节点共享的身份，比如网格里照片的缩略图与详情页里的大图（`src/view/matched.zig`）。带某个 key 的节点出现时，如果上一帧是另一个节点带着同一个 key，它就从那里飞过来：从那个节点的盒子到自己的盒子（内容按比例缩放，不按每个尺寸重排），从那个节点的外观到自己的：背景、边框和文字颜色、圆角、不透明度和位姿，旋转（含绕 X/Y 轴的 3D 转动）走较短的方向。`motion` 是 `ziggurat_animation` 的运动，默认 300 ms 缓出；被打断时从当前画到的位置继续。
