@@ -154,6 +154,11 @@ static void emit_edit(NativeWindow *s,int key,uint32_t flags){NativeEvent event=
 - (BOOL)canBecomeMainWindow{return self.takesKeyboard;}
 @end
 
+/* Native content that a node of the content's semantic tree holds, as a
+   web view's page (webkit_macos.m). */
+@interface NSObject (ZigAccessibilityHosted)
+- (void)setZigAccessibilityParent:(id)parent;
+@end
 /* What the content's accessibility answers for the view. */
 @protocol ZigViewAccessibility <NSObject>
 - (NSArray *)zigAccessibilityChildren;
@@ -207,7 +212,12 @@ static int edit_for_selector(SEL selector,uint32_t *flags){
 - (NSArray *)accessibilityChildren{
     if(!zigAccessibility)return [super accessibilityChildren];
     NSArray *elements=[zigAccessibility zigAccessibilityChildren];
-    NSArray *views=[super accessibilityChildren];
+    NSMutableArray *views=[NSMutableArray array];
+    /* A page the content's tree holds inside a node is that node's. */
+    for(id child in [super accessibilityChildren]){
+        id parent=[child respondsToSelector:@selector(setZigAccessibilityParent:)]?[child accessibilityParent]:nil;
+        if(!parent||[parent isKindOfClass:[NSView class]])[views addObject:child];
+    }
     return views.count?[views arrayByAddingObjectsFromArray:elements]:elements;
 }
 - (id)accessibilityHitTest:(NSPoint)point{
@@ -358,6 +368,17 @@ static void page_key(NativeWindow *s,NSEvent *event){
     if(!s||!page_has_keyboard(self)){[[self nextResponder] tryToPerform:_cmd with:sender];return;}
     retain_window(s);
     if(input_allowed(s)){NativeEvent key={0};key.kind=18;key.key=0x1b;key.width=0x35;key.flags=32;emit(s,&key);}
+    release_window(s);
+}
+/* A page in the window gave the keyboard back by Tab past its ends (the
+   web view's _webView:takeFocus:): the content moves its focus on from the
+   page's node, as a Tab of its own (flag 32, Shift going back), then takes
+   the keyboard if the page still has it. */
+- (void)zigPageTabOut:(BOOL)back{
+    NativeWindow *s=native;if(!s||s->destroyed)return;
+    retain_window(s);
+    if(input_allowed(s)){NativeEvent key={0};key.kind=18;key.width=0x30;key.flags=(back?1:0)|32;emit(s,&key);}
+    if(!s->destroyed&&page_has_keyboard(self))[s->window makeFirstResponder:self];
     release_window(s);
 }
 - (void)keyDown:(NSEvent *)event{
@@ -682,6 +703,19 @@ void zlm_test_paint(NativeWindow *s){
     @autoreleasepool{
         NSBitmapImageRep *bitmap=[s->view bitmapImageRepForCachingDisplayInRect:[s->view bounds]];
         if(bitmap)[s->view cacheDisplayInRect:[s->view bounds] toBitmapImageRep:bitmap];
+    }
+}
+/* Makes the window key in the active app, handing AppKit its events until
+   it is, for up to two seconds: 1 when it became key, else 0. */
+int zlm_test_make_key(NativeWindow *s){
+    @autoreleasepool{
+        [NSApp activateIgnoringOtherApps:YES];[s->window makeKeyAndOrderFront:nil];
+        NSDate *limit=[NSDate dateWithTimeIntervalSinceNow:2];
+        while(![s->window isKeyWindow]&&[limit timeIntervalSinceNow]>0){
+            NSEvent *event=[NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate dateWithTimeIntervalSinceNow:0.01] inMode:NSDefaultRunLoopMode dequeue:YES];
+            if(event)[NSApp sendEvent:event];
+        }
+        return [s->window isKeyWindow]?1:0;
     }
 }
 void zlm_test_close(NativeWindow *s){@autoreleasepool{[s->delegate windowShouldClose:s->window];}}

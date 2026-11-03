@@ -5,19 +5,22 @@
 //!
 //! The window's Content is a `composition.Owner`. The Host draws the full
 //! window backdrop and every web view is a native region with it. On Linux
-//! the page is under the native UI, which shows over it outside the clips
-//! around its leaf and where it paints after the leaf: its popovers, menus,
-//! dialogs and the controls over it take the pointer there, and the page
-//! takes no pointer behind a modal dialog. Elsewhere the page is a native
+//! and macOS the native UI shows over the page outside the clips around its
+//! leaf and where it paints after the leaf: its popovers, menus, dialogs and
+//! the controls over it take the pointer there, and the page takes no
+//! pointer behind a modal dialog. On Linux the page is under the native UI,
+//! which is cut away where the page shows; on macOS the page is over it and
+//! is masked where the native UI shows. On Windows the page is a native
 //! child over the window and native UI painted where it shows stays under
 //! it. A page is cut to its leaf's corner radius, and a page the poses
 //! around it scale shows scaled at the size its leaf was arranged at, as a
 //! picture of it, rather than laid out again.
 //!
 //! The leaf is a Tab stop: Tab moving the focus to it gives the page the
-//! keyboard at its first element, Shift+Tab at its last (Linux), and Tab
-//! past the page's other end moves the focus on from the leaf. Assistive
-//! technology finds the page's tree inside the leaf's semantic node.
+//! keyboard at its first element, Shift+Tab at its last (Linux and macOS),
+//! and Tab past the page's other end moves the focus on from the leaf.
+//! Assistive technology finds the page's tree inside the leaf's semantic
+//! node.
 const std = @import("std");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");

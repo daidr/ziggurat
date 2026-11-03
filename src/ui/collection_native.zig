@@ -6,6 +6,9 @@ pub const WordChange = extern struct { word: u32, reserved: u32 = 0, before: u64
 pub const Row = extern struct { id: u64, incarnation: u64, height: u32, start: u32, len: u32, enabled: u32 };
 pub const Identity = extern struct { id: u64, index: u64 };
 pub const Store = opaque {};
+/// Complete lists reach assistive technology through UI Automation on
+/// Windows and NSAccessibility on macOS.
+pub const supported = builtin.os.tag == .windows or builtin.os.tag == .macos;
 const Model = opaque {};
 pub const Options = struct {
     lists: u32 = 8,
@@ -67,7 +70,7 @@ fn status(value: u32) !void {
     };
 }
 pub fn enableMath() void {
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime supported) {
         comptime {
             @export(&math.nativeBounds, .{ .name = "zua_collection_row_bounds", .linkage = .strong });
         }
@@ -80,7 +83,7 @@ pub fn enableMath() void {
 /// borrows; close exactly once unless installation succeeds and consumes it.
 pub const Prepared = opaque {
     pub fn prepare(input: anytype, budget: usize) !*Prepared {
-        if (comptime builtin.os.tag != .windows) return error.UnsupportedPlatform;
+        if (comptime !supported) return error.UnsupportedPlatform;
         comptime {
             if (@sizeOf(@TypeOf(input.entries[0])) != @sizeOf(Row) or @alignOf(@TypeOf(input.entries[0])) != @alignOf(Row) or
                 @sizeOf(@TypeOf(input.ids[0])) != @sizeOf(Identity) or @alignOf(@TypeOf(input.ids[0])) != @alignOf(Identity)) @compileError("immutable collection input ABI mismatch");
@@ -92,10 +95,10 @@ pub const Prepared = opaque {
         return @ptrCast(model.?);
     }
     pub fn close(self: *Prepared) void {
-        if (comptime builtin.os.tag == .windows) zua_collection_model_release(@ptrCast(self));
+        if (comptime supported) zua_collection_model_release(@ptrCast(self));
     }
     pub fn info(self: *const Prepared) !ModelInfo {
-        if (comptime builtin.os.tag != .windows) return error.UnsupportedPlatform;
+        if (comptime !supported) return error.UnsupportedPlatform;
         var result: ModelInfo = undefined;
         try status(zua_collection_model_info(@ptrCast(self), &result));
         return result;
@@ -106,7 +109,7 @@ pub fn requiredMetadata(options: Options) !usize {
         options.model_bytes == 0 or options.model_bytes > 128 * 1024 * 1024 or
         options.provider_bytes == 0 or options.provider_bytes > 256 * 1024 * 1024 or
         options.request_bytes == 0 or options.request_bytes > 16 * 1024 * 1024) return error.InvalidNativeCollectionLimits;
-    if (comptime builtin.os.tag != .windows) return error.UnsupportedPlatform;
+    if (comptime !supported) return error.UnsupportedPlatform;
     var bytes: usize = 0;
     try status(zua_virtuals_metadata_size(options.lists, &bytes));
     if (bytes > options.metadata_bytes) return error.NativeCollectionBudgetExceeded;
@@ -114,25 +117,25 @@ pub fn requiredMetadata(options: Options) !usize {
 }
 pub fn createCandidate(options: Options) !*Store {
     _ = try requiredMetadata(options);
-    if (comptime builtin.os.tag != .windows) return error.UnsupportedPlatform;
+    if (comptime !supported) return error.UnsupportedPlatform;
     enableMath();
     var candidate: ?*Store = null;
     try status(zua_virtuals_create(options.lists, options.metadata_bytes, options.model_bytes, options.provider_bytes, options.request_bytes, &candidate));
     return candidate.?;
 }
 pub fn freeCandidate(candidate: *Store) void {
-    if (comptime builtin.os.tag == .windows) zua_virtuals_free(candidate);
+    if (comptime supported) zua_virtuals_free(candidate);
 }
 pub fn commitCandidate(state: *anyopaque, candidate: *Store) !void {
-    if (comptime builtin.os.tag != .windows) return error.UnsupportedPlatform;
+    if (comptime !supported) return error.UnsupportedPlatform;
     try status(zua_virtuals_commit(state, candidate));
 }
 pub fn prepared(state: *anyopaque) bool {
-    if (comptime builtin.os.tag != .windows) return false;
+    if (comptime !supported) return false;
     return zua_virtuals_prepared(state) != 0;
 }
 pub fn stats(state: *anyopaque) !Stats {
-    if (comptime builtin.os.tag != .windows) return error.UnsupportedPlatform;
+    if (comptime !supported) return error.UnsupportedPlatform;
     var result: Stats = undefined;
     try status(zua_virtuals_stats(state, &result));
     return result;
@@ -140,36 +143,36 @@ pub fn stats(state: *anyopaque) !Stats {
 /// Success consumes the product after the native store has retained it.
 /// Failure keeps the product and every existing front/pending publication.
 pub fn install(state: *anyopaque, key: anytype, model: *Prepared, revision: u64, bits: []const u64) !void {
-    if (comptime builtin.os.tag != .windows) return error.UnsupportedPlatform;
+    if (comptime !supported) return error.UnsupportedPlatform;
     if (bits.len > 15_625) return error.InvalidNativeCollection;
     const registration = authority.Registration.from(key);
     try status(zua_virtuals_install(state, &registration, @ptrCast(model), revision, bits.ptr, @intCast(bits.len)));
     model.close();
 }
 pub fn applySelection(state: *anyopaque, key: anytype, model: u64, patch: anytype) !void {
-    if (comptime builtin.os.tag != .windows) return error.UnsupportedPlatform;
+    if (comptime !supported) return error.UnsupportedPlatform;
     if (patch.words.len > 15_625) return error.InvalidNativeCollection;
     const registration = authority.Registration.from(key);
     const words: [*]const WordChange = @ptrCast(patch.words.ptr);
     try status(zua_virtuals_selection(state, &registration, model, patch.base, patch.revision, words, @intCast(patch.words.len)));
 }
 pub fn withdraw(state: *anyopaque, key: anytype) void {
-    if (comptime builtin.os.tag == .windows) {
+    if (comptime supported) {
         const registration = authority.Registration.from(key);
         zua_virtuals_withdraw(state, &registration);
     }
 }
 pub fn clear(state: *anyopaque) void {
-    if (comptime builtin.os.tag == .windows) zua_virtuals_withdraw(state, null);
+    if (comptime supported) zua_virtuals_withdraw(state, null);
 }
 pub fn beginFrame(state: *anyopaque) !void {
-    if (comptime builtin.os.tag == .windows) try status(zua_virtuals_begin_frame(state));
+    if (comptime supported) try status(zua_virtuals_begin_frame(state));
 }
 pub fn validateFrame(state: *anyopaque) !void {
-    if (comptime builtin.os.tag == .windows) try status(zua_virtuals_validate_frame(state));
+    if (comptime supported) try status(zua_virtuals_validate_frame(state));
 }
 pub fn stage(state: *anyopaque, key: anytype, model: u64, selection: u64, viewport: Viewport, mapping: *const math.Mapping) !void {
-    if (comptime builtin.os.tag != .windows) return error.UnsupportedPlatform;
+    if (comptime !supported) return error.UnsupportedPlatform;
     const registration = authority.Registration.from(key);
     try status(zua_virtuals_stage(state, &registration, model, selection, &viewport, mapping));
 }
@@ -180,7 +183,7 @@ comptime {
 }
 
 test "native list platform boundary is explicit before allocation or adoption" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (supported) return error.SkipZigTest;
     try std.testing.expectError(error.UnsupportedPlatform, requiredMetadata(.{}));
     try std.testing.expectError(error.UnsupportedPlatform, createCandidate(.{}));
     try std.testing.expectError(error.InvalidNativeCollectionLimits, createCandidate(.{ .lists = 0 }));

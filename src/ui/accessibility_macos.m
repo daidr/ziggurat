@@ -12,6 +12,13 @@
 #include <string.h>
 #include <math.h>
 #include "accessibility_geometry.h"
+/* Complete lists: the platform-neutral store and models the Windows host
+   shares, with NSAccessibility rows made as assistive technology asks. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
+#include "accessibility_collection_store.h"
+#include "accessibility_collection_model.h"
+#pragma clang diagnostic pop
 
 void zua_geometry_free(ZuaGeometry *geometry);
 
@@ -53,7 +60,12 @@ typedef struct ActionView {
 _Static_assert(sizeof(ActionView) == 96, "captured native action ABI");
 typedef int (*ZuaEnqueue)(void *context, void *action);
 
-static unsigned live_hosts, live_elements, live_actions;
+static unsigned live_hosts, live_elements, live_actions, live_collections;
+/* The registered recipients of a host and the store of its complete lists,
+   which a candidate brings before the host adopts it. */
+typedef struct ZuaCollections { CollectionStore *virtuals; } ZuaCollections;
+/* Row requests of complete lists (collection_authority.zig `Kind`). */
+enum { ROW_SELECT = 1, ROW_ADD = 2, ROW_REMOVE = 3, ROW_FOCUS = 4, ROW_REVEAL = 5 };
 
 @class ZuaHost;
 
@@ -66,6 +78,10 @@ static unsigned live_hosts, live_elements, live_actions;
 @end
 @interface NSView (ZuaHosting)
 - (void)setZigAccessibility:(id)provider;
+@end
+/* Native content a node holds, as a web view's page (webkit_macos.m). */
+@interface NSObject (ZuaHosted)
+- (void)setZigAccessibilityParent:(id)parent;
 @end
 
 /* Announcements posted, and the last one's text, for the smoke test. */
@@ -173,6 +189,7 @@ static id value_of(const NativeNode *n, NSString *name, NSString *value) {
 
 @interface ZuaElement : NSAccessibilityElement
 @end
+@class ZuaRow;
 
 @interface ZuaHost : NSObject <ZuaViewAccessibility> {
 @public
@@ -192,8 +209,13 @@ static id value_of(const NativeNode *n, NSString *name, NSString *value) {
     /* The precise geometry of transformed content, while published. */
     ZuaGeometry *geometry;
     BOOL geometry_active;
+    /* Registered recipients and complete lists, once prepared, and the row
+       of a complete list that had the focus at the last publication. */
+    ZuaCollections *collections;
+    uint64_t focus_row, focus_incarnation;
 }
 - (BOOL)request:(ZuaElement *)element kind:(uint32_t)kind value:(NSString *)value start:(uint32_t)start end:(uint32_t)end number:(double)number;
+- (BOOL)requestRow:(ZuaRow *)row kind:(uint32_t)kind;
 @end
 
 @interface ZuaElement () {
@@ -206,6 +228,28 @@ static id value_of(const NativeNode *n, NSString *name, NSString *value) {
     id parent;
     BOOL fresh;
     uint32_t published_at; /* in its publication, for its geometry */
+    /* Native content inside the node, as a web view's page: its first
+       child (zua_pages). */
+    NSView *__weak page;
+    /* A complete list: its registration, its rows as assistive technology
+       asked for them by ID, and the model and selection last published. */
+    BOOL virtual_list;
+    CollectionRegistration virtual_key;
+    NSMutableDictionary<NSNumber *, ZuaRow *> *virtual_rows;
+    const void *virtual_catalog;
+    uint64_t virtual_revision;
+}
+@end
+
+/* A row of a complete list, built or not: it reads the list's last
+   published model by its ID and incarnation, and stands for nothing once
+   they are gone. */
+@interface ZuaRow : NSAccessibilityElement {
+@public
+    ZuaHost *__weak host;
+    ZuaElement *__weak list;
+    CollectionRegistration key;
+    uint64_t row_id, incarnation;
 }
 @end
 
@@ -218,7 +262,49 @@ typedef struct Action {
     uint32_t value_len, start, end;
     double number;
     RecipientAuthority recipient;
+    /* Kind 6: the row of a complete list and what to do with it. */
+    CollectionRowRequest row;
 } Action;
+
+static CollectionRegistration registration_of(const RecipientAuthority *key) {
+    return (CollectionRegistration){ key->epoch, key->serial, key->id, key->slot, key->kind };
+}
+static CollectionStore *host_store(ZuaHost *host) {
+    return host && !host->closed && host->collections ? host->collections->virtuals : NULL;
+}
+/* The published binding of a complete list. */
+static CollectionBinding *virtual_binding(ZuaHost *host, CollectionRegistration key) {
+    CollectionStore *store = host_store(host);
+    CollectionBinding *binding = store ? collection_store_find(store, key) : NULL;
+    return binding && binding->front && binding->front_publication ? binding : NULL;
+}
+/* The row of id and incarnation in a complete list's published model. */
+static const CollectionRow *virtual_row(ZuaHost *host, CollectionRegistration key, uint64_t id, uint64_t incarnation, CollectionBinding **out, uint32_t *index) {
+    CollectionBinding *binding = virtual_binding(host, key);
+    if (!binding) return NULL;
+    const CollectionRow *found = collection_catalog_find(binding->front->catalog, id, index);
+    if (!found || found->incarnation != incarnation) return NULL;
+    if (out) *out = binding;
+    return found;
+}
+static BOOL virtual_selected(const CollectionBinding *binding, uint32_t index) {
+    return (binding->front->selection->front[index / 64] >> (index % 64)) & 1;
+}
+/* The rows from first to before last whose ticks reach into the list's
+   viewport. */
+static void virtual_shown(const CollectionBinding *binding, uint32_t *first, uint32_t *last) {
+    const CollectionCatalog *catalog = binding->front->catalog;
+    const CollectionViewport viewport = binding->front_viewport;
+    const double from = viewport.scroll * 64, to = (viewport.scroll + viewport.height) * 64;
+    uint32_t low = 0, high = catalog->count;
+    while (low < high) {
+        const uint32_t middle = low + (high - low) / 2;
+        if ((double)catalog->tops[middle + 1] <= from) low = middle + 1; else high = middle;
+    }
+    *first = low;
+    while (low < catalog->count && (double)catalog->tops[low] < to) low++;
+    *last = low;
+}
 
 @implementation ZuaHost
 - (instancetype)init {
@@ -227,13 +313,68 @@ typedef struct Action {
 }
 - (void)dealloc {
     if (geometry) { zua_geometry_free(geometry); geometry = NULL; }
+    if (collections) { collection_store_release(collections->virtuals); free(collections); live_collections--; }
     live_hosts--;
 }
 - (ZuaElement *)element:(uint64_t)identifier { return elements[@(identifier)]; }
 - (NSArray *)zigAccessibilityChildren { return closed ? @[] : top; }
+/* The element of a complete list's row at index of its published model,
+   the same one each time while the row keeps its incarnation. */
+- (ZuaRow *)row:(ZuaElement *)list binding:(const CollectionBinding *)binding index:(uint32_t)index {
+    const CollectionRow *found = &binding->front->catalog->rows[index];
+    NSNumber *key = @(found->id);
+    ZuaRow *row = list->virtual_rows[key];
+    if (row && row->incarnation == found->incarnation) return row;
+    if (!list->virtual_rows) list->virtual_rows = [NSMutableDictionary dictionary];
+    /* Rows asked for are kept by ID; a long walk through a large list
+       starts the keeping again rather than growing without end. */
+    if (list->virtual_rows.count >= 4096) [list->virtual_rows removeAllObjects];
+    row = [[ZuaRow alloc] init];
+    row->host = self; row->list = list; row->key = list->virtual_key;
+    row->row_id = found->id; row->incarnation = found->incarnation;
+    live_elements++;
+    list->virtual_rows[key] = row;
+    return row;
+}
+/* The row of a focused complete list that has the focus. */
+- (ZuaRow *)focusedRow:(ZuaElement *)list {
+    if (!list || !list->virtual_list) return nil;
+    CollectionBinding *binding = virtual_binding(self, list->virtual_key);
+    if (!binding || !binding->front_viewport.caret) return nil;
+    uint32_t index;
+    if (!virtual_row(self, list->virtual_key, binding->front_viewport.caret, binding->front_viewport.caret_incarnation, NULL, &index)) return nil;
+    return [self row:list binding:binding index:index];
+}
 - (id)zigAccessibilityFocusedElement {
     if (closed || !has_focus) return nil;
-    return [self element:focus];
+    ZuaElement *element = [self element:focus];
+    ZuaRow *row = [self focusedRow:element];
+    return row ? row : element;
+}
+/* The row of a complete list at a point of the view, through the inverse
+   of the list's mapping into the window. */
+- (id)virtualRowIn:(ZuaElement *)list at:(NSPoint)local {
+    CollectionBinding *binding = virtual_binding(self, list->virtual_key);
+    if (!binding) return nil;
+    const double scale = geometry_active && geometry ? geometry->scale : 1;
+    const double ox = geometry_active && geometry ? geometry->origin_x : 0, oy = geometry_active && geometry ? geometry->origin_y : 0;
+    const double *f = binding->front_mapping.forward;
+    const double det = f[0] * f[3] - f[2] * f[1];
+    if (!isfinite(det) || fabs(det) < 1e-12) return nil;
+    const double dx = (local.x - ox) / scale - f[4], dy = (local.y - oy) / scale - f[5];
+    const double lx = (f[3] * dx - f[2] * dy) / det, ly = (-f[1] * dx + f[0] * dy) / det;
+    const CollectionViewport viewport = binding->front_viewport;
+    if (!(lx >= viewport.x && ly >= viewport.y && lx < viewport.x + viewport.width && ly < viewport.y + viewport.height)) return nil;
+    const CollectionCatalog *catalog = binding->front->catalog;
+    const double position = (viewport.scroll + (ly - viewport.y)) * 64;
+    if (!isfinite(position) || position < 0 || position >= (double)catalog->tops[catalog->count]) return nil;
+    const uint64_t tick = (uint64_t)floor(position);
+    uint32_t low = 0, high = catalog->count;
+    while (low < high) {
+        const uint32_t middle = low + (high - low) / 2;
+        if (catalog->tops[middle + 1] <= tick) low = middle + 1; else high = middle;
+    }
+    return low < catalog->count ? [self row:list binding:binding index:low] : nil;
 }
 /* The innermost element at a point of the screen: later nodes are deeper
    or drawn above. */
@@ -250,6 +391,18 @@ typedef struct Action {
            element itself. */
         if (geometry_active && !zua_geometry_hit(geometry, element->published_at, local.x, local.y)) continue;
         found = element;
+    }
+    ZuaElement *deepest = found;
+    if (deepest && deepest->virtual_list) {
+        id row = [self virtualRowIn:deepest at:local];
+        if (row) return row;
+    }
+    /* A node holding native content, as a web view's page: what the
+       content has at the point. */
+    NSView *page = deepest ? deepest->page : nil;
+    if (page && !page.hidden && page.window == w) {
+        id inner = [page accessibilityHitTest:point];
+        return inner ? inner : page;
     }
     return found;
 }
@@ -292,10 +445,206 @@ typedef struct Action {
     }
     return YES;
 }
+/* A request for a row of a complete list, carrying the row's authority in
+   the published model: a later model refuses it. */
+- (BOOL)requestRow:(ZuaRow *)row kind:(uint32_t)kind {
+    if (closed || updating || !context || !enqueue || kind < ROW_SELECT || kind > ROW_REVEAL) return NO;
+    ZuaElement *list = row->list;
+    if (!list || !list->virtual_list || list != [self element:row->key.id] || !(list->node.flags & ENABLED)) return NO;
+    if (!collection_registration_equal(registration_of(&list->recipient), row->key)) return NO;
+    CollectionBinding *binding = NULL;
+    uint32_t index;
+    const CollectionRow *found = virtual_row(self, row->key, row->row_id, row->incarnation, &binding, &index);
+    if (!found || !found->enabled) return NO;
+    CollectionRowAuthority authority;
+    if (collection_binding_capture(binding, index, &authority) != COLLECTION_OK) return NO;
+    Action *a = calloc(1, sizeof(Action));
+    if (!a) return NO;
+    a->host = (__bridge_retained void *)self;
+    a->kind = 6; a->id = row->key.id;
+    a->recipient = list->recipient;
+    a->row = (CollectionRowRequest){ .authority = authority, .kind = kind };
+    live_actions++;
+    if (!enqueue(context, a)) {
+        CFRelease(a->host); free(a); live_actions--;
+        return NO;
+    }
+    return YES;
+}
+@end
+
+@implementation ZuaRow
+- (void)dealloc { live_elements--; }
+- (const CollectionRow *)read:(CollectionBinding **)binding index:(uint32_t *)index {
+    ZuaHost *h = host;
+    ZuaElement *l = list;
+    if (!h || !l || !l->virtual_list || h->closed) return NULL;
+    return virtual_row(h, key, row_id, incarnation, binding, index);
+}
+- (BOOL)isAccessibilityElement { return YES; }
+- (NSAccessibilityRole)accessibilityRole { return NSAccessibilityRowRole; }
+- (NSAccessibilitySubrole)accessibilitySubrole { return NSAccessibilityTableRowSubrole; }
+- (NSString *)accessibilityLabel {
+    CollectionBinding *binding;
+    uint32_t index;
+    const CollectionRow *found = [self read:&binding index:&index];
+    if (!found) return nil;
+    const CollectionCatalog *catalog = binding->front->catalog;
+    return [[NSString alloc] initWithBytes:catalog->text + found->start length:found->length encoding:NSUTF8StringEncoding] ?: @"";
+}
+- (NSString *)accessibilityIdentifier { return [NSString stringWithFormat:@"%llu", (unsigned long long)row_id]; }
+- (NSInteger)accessibilityIndex {
+    CollectionBinding *binding;
+    uint32_t index;
+    return [self read:&binding index:&index] ? (NSInteger)index : 0;
+}
+- (id)accessibilityParent { return [self read:NULL index:&(uint32_t){0}] ? list : nil; }
+- (NSArray *)accessibilityChildren { return @[]; }
+- (BOOL)isAccessibilityEnabled {
+    ZuaElement *l = list;
+    CollectionBinding *binding;
+    uint32_t index;
+    const CollectionRow *found = [self read:&binding index:&index];
+    return found && found->enabled && l && (l->node.flags & ENABLED);
+}
+- (BOOL)isAccessibilitySelected {
+    CollectionBinding *binding;
+    uint32_t index;
+    return [self read:&binding index:&index] && virtual_selected(binding, index);
+}
+- (BOOL)isAccessibilityFocused {
+    ZuaHost *h = host;
+    ZuaElement *l = list;
+    if (!h || !l || !h->has_focus || h->focus != l->node.id) return NO;
+    CollectionBinding *binding;
+    uint32_t index;
+    return [self read:&binding index:&index] && binding->front_viewport.caret == row_id && binding->front_viewport.caret_incarnation == incarnation;
+}
+/* Where the row shows, in screen coordinates; nothing while it is out of
+   the list's viewport. */
+- (NSRect)accessibilityFrame {
+    ZuaHost *h = host;
+    ZuaElement *l = list;
+    CollectionBinding *binding;
+    uint32_t index;
+    if (!h || ![self read:&binding index:&index] || (l->node.flags & OFFSCREEN)) return NSZeroRect;
+    const CollectionCatalog *catalog = binding->front->catalog;
+    const CollectionViewport viewport = binding->front_viewport;
+    const double top = viewport.y + (double)catalog->tops[index] / 64 - viewport.scroll;
+    const double height = (double)catalog->rows[index].height / 64;
+    const BOOL mapped = h->geometry_active && h->geometry;
+    CollectionBounds bounds;
+    if (zua_collection_row_bounds(&binding->front_mapping, top, height, mapped ? h->geometry->origin_x : 0, mapped ? h->geometry->origin_y : 0, mapped ? h->geometry->scale : 1, &bounds) || !bounds.visible) return NSZeroRect;
+    return [h screenRect:NSMakeRect(bounds.rect.x, bounds.rect.y, bounds.rect.width, bounds.rect.height)];
+}
+- (BOOL)isAccessibilitySelectorAllowed:(SEL)selector {
+    if (selector == @selector(accessibilityPerformPress) || selector == @selector(setAccessibilitySelected:) || selector == @selector(setAccessibilityFocused:)) return YES;
+    return [super isAccessibilitySelectorAllowed:selector];
+}
+- (BOOL)accessibilityPerformPress {
+    ZuaHost *h = host;
+    return h && [h requestRow:self kind:ROW_SELECT];
+}
+/* Choosing a row chooses it alone, as AppKit's tables do; unchoosing it
+   takes it out of the choice. */
+- (void)setAccessibilitySelected:(BOOL)selected {
+    ZuaHost *h = host;
+    if (h) [h requestRow:self kind:selected ? ROW_SELECT : ROW_REMOVE];
+}
+- (void)setAccessibilityFocused:(BOOL)focused {
+    ZuaHost *h = host;
+    if (h && focused) [h requestRow:self kind:ROW_FOCUS];
+}
+/* AXScrollToVisible, which AppKit names no constant for, brings the row
+   into the list's viewport. */
+static NSString *const ZuaScrollToVisible = @"AXScrollToVisible";
+- (NSArray *)accessibilityActionNames {
+    NSArray *names = [super accessibilityActionNames] ?: @[];
+    return [names containsObject:ZuaScrollToVisible] ? names : [names arrayByAddingObject:ZuaScrollToVisible];
+}
+- (void)accessibilityPerformAction:(NSAccessibilityActionName)action {
+    ZuaHost *h = host;
+    if ([action isEqualToString:ZuaScrollToVisible]) { if (h) [h requestRow:self kind:ROW_REVEAL]; return; }
+    [super accessibilityPerformAction:action];
+}
 @end
 
 @implementation ZuaElement
 - (void)dealloc { live_elements--; }
+/* The rows of a complete list from start, at most count of them. */
+- (NSArray *)virtualRowsFrom:(NSUInteger)start count:(NSUInteger)count {
+    ZuaHost *h = host;
+    CollectionBinding *binding = h ? virtual_binding(h, virtual_key) : NULL;
+    if (!binding) return @[];
+    const uint32_t total = binding->front->catalog->count;
+    if (start >= total) return @[];
+    const NSUInteger end = count > total - start ? total : start + count;
+    NSMutableArray *rows = [NSMutableArray arrayWithCapacity:end - start];
+    for (NSUInteger i = start; i < end; i++) [rows addObject:[h row:self binding:binding index:(uint32_t)i]];
+    return rows;
+}
+- (NSArray *)accessibilityChildren {
+    if (virtual_list) return [self virtualRowsFrom:0 count:NSUIntegerMax];
+    NSArray *kids = [super accessibilityChildren] ?: @[];
+    NSView *p = page;
+    return p ? [@[p] arrayByAddingObjectsFromArray:kids] : kids;
+}
+- (NSArray *)accessibilityRows { return virtual_list ? [self virtualRowsFrom:0 count:NSUIntegerMax] : [super accessibilityRows]; }
+- (NSInteger)accessibilityRowCount {
+    if (!virtual_list) return [super accessibilityRowCount];
+    ZuaHost *h = host;
+    CollectionBinding *binding = h ? virtual_binding(h, virtual_key) : NULL;
+    return binding ? (NSInteger)binding->front->catalog->count : 0;
+}
+- (NSArray *)accessibilityVisibleRows {
+    if (!virtual_list) return [super accessibilityVisibleRows];
+    ZuaHost *h = host;
+    CollectionBinding *binding = h ? virtual_binding(h, virtual_key) : NULL;
+    if (!binding || (node.flags & OFFSCREEN)) return @[];
+    uint32_t first, last;
+    virtual_shown(binding, &first, &last);
+    return [self virtualRowsFrom:first count:last - first];
+}
+- (NSArray *)accessibilitySelectedRows {
+    if (!virtual_list) return [super accessibilitySelectedRows];
+    ZuaHost *h = host;
+    CollectionBinding *binding = h ? virtual_binding(h, virtual_key) : NULL;
+    if (!binding) return @[];
+    const CollectionSelection *selection = binding->front->selection;
+    NSMutableArray *rows = [NSMutableArray array];
+    for (uint32_t word = 0; word < selection->word_count; word++) {
+        for (uint64_t bits = selection->front[word]; bits; bits &= bits - 1) {
+            const uint32_t index = word * 64 + (uint32_t)__builtin_ctzll(bits);
+            if (index < binding->front->catalog->count) [rows addObject:[h row:self binding:binding index:index]];
+        }
+    }
+    return rows;
+}
+/* Choosing rows of a complete list: the first alone, then the others
+   added to it. */
+- (void)setAccessibilitySelectedRows:(NSArray *)rows {
+    if (!virtual_list) { [super setAccessibilitySelectedRows:rows]; return; }
+    ZuaHost *h = host;
+    BOOL first = YES;
+    for (id entry in rows) {
+        if (![entry isKindOfClass:[ZuaRow class]]) continue;
+        ZuaRow *row = entry;
+        if (row->list != self) continue;
+        [h requestRow:row kind:first ? ROW_SELECT : ROW_ADD];
+        first = NO;
+    }
+}
+/* Assistive technology reads a large list's rows a range at a time. */
+- (NSUInteger)accessibilityArrayAttributeCount:(NSAccessibilityAttributeName)attribute {
+    if (virtual_list && ([attribute isEqualToString:NSAccessibilityChildrenAttribute] || [attribute isEqualToString:NSAccessibilityRowsAttribute]))
+        return (NSUInteger)[self accessibilityRowCount];
+    return [super accessibilityArrayAttributeCount:attribute];
+}
+- (NSArray *)accessibilityArrayAttributeValues:(NSAccessibilityAttributeName)attribute index:(NSUInteger)index maxCount:(NSUInteger)maxCount {
+    if (virtual_list && ([attribute isEqualToString:NSAccessibilityChildrenAttribute] || [attribute isEqualToString:NSAccessibilityRowsAttribute]))
+        return [self virtualRowsFrom:index count:maxCount];
+    return [super accessibilityArrayAttributeValues:attribute index:index maxCount:maxCount];
+}
 - (NSRect)accessibilityFrame {
     ZuaHost *h = host;
     return h ? [h screenRect:NSMakeRect(node.x, node.y, node.width, node.height)] : NSZeroRect;
@@ -471,10 +820,45 @@ static BOOL apply(ZuaElement *el, const NativeNode *n, NSString *name, NSString 
     return changed;
 }
 
+/* The complete lists of a publication: every list node is a registered
+   control staged in this frame, every list staged is in it, and the
+   recipients agree on one publication, which they return. */
+static enum CollectionStatus virtual_preflight(ZuaHost *host, const NativeNode *nodes, uint32_t count, const RecipientAuthority *keys, BOOL mapped, uint64_t *publication) {
+    CollectionStore *store = host_store(host);
+    *publication = 0;
+    if (!store) return COLLECTION_OK;
+    enum CollectionStatus status = collection_store_preflight(store, store->frame);
+    if (status) return status;
+    uint64_t accepted = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        if (keys && keys[i].serial) {
+            if (accepted && accepted != keys[i].publication) return COLLECTION_INVALID;
+            accepted = keys[i].publication;
+        }
+        if (nodes[i].role != ROLE_LIST) continue;
+        if (!keys || !keys[i].serial || keys[i].kind != 1 || !mapped) return COLLECTION_INVALID;
+        CollectionBinding *binding = collection_store_find(store, registration_of(&keys[i]));
+        if (!binding || binding->staged_frame != store->frame) return COLLECTION_STALE;
+    }
+    for (uint32_t slot = 0; slot < store->capacity; slot++) {
+        const CollectionBinding *binding = &store->bindings[slot];
+        if (binding->staged_frame != store->frame) continue;
+        BOOL found = NO;
+        for (uint32_t i = 0; i < count && !found; i++) found = nodes[i].role == ROLE_LIST && nodes[i].id == binding->registration.id;
+        if (!found) return COLLECTION_INVALID;
+    }
+    *publication = accepted;
+    return COLLECTION_OK;
+}
+
 static int publish(ZuaHost *host, const NativeNode *nodes, uint32_t count, const uint16_t *text, uint32_t text_len, const RecipientAuthority *keys, const ZuaGeometry *geometry) {
     if (host->closed) return -1;
     if (count == 0 || nodes[0].id != 0) return -2;
     if (geometry && (!host->geometry || !zua_geometry_valid(geometry, count))) return -2;
+    for (uint32_t i = 1; i < count; i++) if (nodes[i].role >= ROLE_COUNT) return -2;
+    uint64_t publication = 0;
+    const enum CollectionStatus checked = virtual_preflight(host, nodes, count, keys, geometry != NULL, &publication);
+    if (checked) return checked == COLLECTION_STALE ? -1 : -2;
     if (geometry) memcpy(host->geometry, geometry, sizeof *geometry);
     host->geometry_active = geometry != NULL;
     NSView *view = host->view;
@@ -538,9 +922,39 @@ static int publish(ZuaHost *host, const NativeNode *nodes, uint32_t count, const
        table's (AXIndex) and how many the table has (AXRowCount), built or
        not, as a list built only in view says through position and
        set_size; without them, from the rows built. */
+    /* Complete lists: the staged models become the published ones, and the
+       lists read their rows from them. */
+    CollectionStore *store = host_store(host);
+    if (store) collection_store_commit(store, store->frame, publication);
+    NSMutableArray<ZuaElement *> *recounted = [NSMutableArray array], *rechosen = [NSMutableArray array];
     for (NSNumber *key in live) {
         ZuaElement *el = live[key];
-        if (!rows_container(el->node.role)) continue;
+        CollectionBinding *binding = el->node.role == ROLE_LIST && el->recipient.serial ? virtual_binding(host, registration_of(&el->recipient)) : NULL;
+        const BOOL was = el->virtual_list;
+        el->virtual_list = binding != NULL;
+        if (!binding) { el->virtual_rows = nil; el->virtual_catalog = NULL; continue; }
+        el->virtual_key = registration_of(&el->recipient);
+        const CollectionCatalog *catalog = binding->front->catalog;
+        if (el->virtual_catalog != catalog) {
+            /* Rows of the old model keep their elements while their ID and
+               incarnation stay. */
+            NSMutableArray *stale = [NSMutableArray array];
+            for (NSNumber *id in el->virtual_rows) {
+                uint32_t index;
+                const CollectionRow *found = collection_catalog_find(catalog, el->virtual_rows[id]->row_id, &index);
+                if (!found || found->incarnation != el->virtual_rows[id]->incarnation) [stale addObject:id];
+            }
+            [el->virtual_rows removeObjectsForKeys:stale];
+            if (was) [recounted addObject:el];
+            el->virtual_catalog = catalog;
+            layout = YES;
+        }
+        if (was && el->virtual_revision != binding->front->selection->front_revision) [rechosen addObject:el];
+        el->virtual_revision = binding->front->selection->front_revision;
+    }
+    for (NSNumber *key in live) {
+        ZuaElement *el = live[key];
+        if (!rows_container(el->node.role) || el->virtual_list) continue;
         NSMutableArray *rows = [NSMutableArray array], *shown = [NSMutableArray array], *chosen = [NSMutableArray array];
         for (ZuaElement *kid in children[key] ?: @[]) {
             if (!row(kid->node.role)) continue;
@@ -558,6 +972,10 @@ static int publish(ZuaHost *host, const NativeNode *nodes, uint32_t count, const
         if (live[key]) continue;
         ZuaElement *gone = host->elements[key];
         gone->parent = nil;
+        gone->virtual_list = NO; gone->virtual_rows = nil;
+        NSView *page = gone->page;
+        if (page && [page respondsToSelector:@selector(setZigAccessibilityParent:)] && [page accessibilityParent] == gone) [(id)page setZigAccessibilityParent:nil];
+        gone->page = nil;
         NSAccessibilityPostNotification(gone, NSAccessibilityUIElementDestroyedNotification);
         layout = YES;
     }
@@ -568,9 +986,16 @@ static int publish(ZuaHost *host, const NativeNode *nodes, uint32_t count, const
     BOOL focus_changed = has_focus != host->has_focus || focus != host->focus;
     host->focus = focus; host->has_focus = has_focus;
     host->updating = NO;
+    /* The focus moving between the rows of a focused complete list. */
+    ZuaRow *focus_row = has_focus ? [host focusedRow:live[@(focus)]] : nil;
+    if ((focus_row ? focus_row->row_id : 0) != host->focus_row || (focus_row ? focus_row->incarnation : 0) != host->focus_incarnation) focus_changed = has_focus;
+    host->focus_row = focus_row ? focus_row->row_id : 0;
+    host->focus_incarnation = focus_row ? focus_row->incarnation : 0;
     if (view && layout) NSAccessibilityPostNotification(view, NSAccessibilityLayoutChangedNotification);
     for (ZuaElement *el in value_changed) NSAccessibilityPostNotification(el, NSAccessibilityValueChangedNotification);
-    if (focus_changed && has_focus) NSAccessibilityPostNotification(live[@(focus)], NSAccessibilityFocusedUIElementChangedNotification);
+    for (ZuaElement *el in recounted) NSAccessibilityPostNotification(el, NSAccessibilityRowCountChangedNotification);
+    for (ZuaElement *el in rechosen) NSAccessibilityPostNotification(el, NSAccessibilitySelectedRowsChangedNotification);
+    if (focus_changed && has_focus) NSAccessibilityPostNotification(focus_row ? (id)focus_row : (id)live[@(focus)], NSAccessibilityFocusedUIElementChangedNotification);
     for (NSString *message in announce) {
         announcements++;
         last_announcement = message;
@@ -603,6 +1028,8 @@ void zua_begin_close(void *state) {
     ZuaHost *host = (__bridge ZuaHost *)state;
     host->context = NULL;
     host->closed = YES;
+    /* Rows asked for later stand for nothing. */
+    if (host->collections) collection_store_clear(host->collections->virtuals);
     NSView *view = host->view;
     if (view) {
         [view setZigAccessibility:nil];
@@ -613,8 +1040,13 @@ int zua_disconnect(void *state) {
     ZuaHost *host = (__bridge_transfer ZuaHost *)state;
     host->closed = YES;
     host->context = NULL;
+    if (host->collections) collection_store_clear(host->collections->virtuals);
     for (ZuaElement *el in [host->elements allValues]) {
         el->parent = nil;
+        el->virtual_list = NO; el->virtual_rows = nil;
+        NSView *page = el->page;
+        if (page && [page respondsToSelector:@selector(setZigAccessibilityParent:)] && [page accessibilityParent] == el) [(id)page setZigAccessibilityParent:nil];
+        el->page = nil;
         NSAccessibilityPostNotification(el, NSAccessibilityUIElementDestroyedNotification);
     }
     host->elements = [NSMutableDictionary dictionary];
@@ -667,7 +1099,21 @@ int zua_take_action(void *pointer, ActionView *out) {
     if (available) *out = (ActionView){ host->context, a->kind, a->id, a->value, a->value_len, a->start, a->end, a->number, a->recipient };
     return available;
 }
-int zua_take_collection_action(void *action, void *out) { (void)action; (void)out; return 0; }
+/* A row request still for the list and the model it was made in. */
+int zua_take_collection_action(void *pointer, CollectionRowRequest *out) {
+    Action *a = pointer;
+    ZuaHost *host = (__bridge ZuaHost *)a->host;
+    ZuaElement *el = host->closed ? nil : [host element:a->id];
+    BOOL available = !host->closed && host->context && el && el->node.role == ROLE_LIST && (el->node.flags & ENABLED) &&
+        memcmp(&el->recipient, &a->recipient, sizeof(RecipientAuthority)) == 0 && a->kind == 6 &&
+        a->row.kind >= ROW_SELECT && a->row.kind <= ROW_REVEAL && !a->row.reserved;
+    if (available) {
+        CollectionBinding *binding = virtual_binding(host, registration_of(&a->recipient));
+        available = collection_binding_accepts(binding, a->row.authority);
+    }
+    if (available) *out = a->row;
+    return available;
+}
 void zua_finish_action(void *pointer) {
     Action *a = pointer;
     CFRelease(a->host);
@@ -677,6 +1123,127 @@ void zua_finish_action(void *pointer) {
 }
 void zua_resource_counts(uint32_t *states, uint32_t *providers, uint32_t *ranges, uint32_t *actions) {
     *states = live_hosts; *providers = live_elements; *ranges = 0; *actions = live_actions;
+}
+
+/* The native content inside nodes of the last publication: each view, a web
+   view holding its page's tree, becomes the first child of the element of
+   its id; the other elements hold none. */
+static void page_set(ZuaElement *el, NSView *page) {
+    NSView *old = el->page;
+    if (old == page) return;
+    el->page = nil;
+    if (old && [old respondsToSelector:@selector(setZigAccessibilityParent:)] && [old accessibilityParent] == el) [(id)old setZigAccessibilityParent:nil];
+    if (page) {
+        el->page = page;
+        if ([page respondsToSelector:@selector(setZigAccessibilityParent:)]) [(id)page setZigAccessibilityParent:el];
+    }
+    NSAccessibilityPostNotification(el, NSAccessibilityLayoutChangedNotification);
+}
+int zua_pages(void *state, const uint64_t *ids, void *const *views, uint32_t count) {
+    ZuaHost *host = (__bridge ZuaHost *)state;
+    if (host->closed) return -1;
+    if (count && (!ids || !views)) return -2;
+    @autoreleasepool {
+        BOOL changed = NO;
+        for (ZuaElement *el in [host->elements allValues]) {
+            NSView *page = nil;
+            for (uint32_t i = 0; i < count && !page; i++) {
+                if (ids[i] != el->node.id || !views[i]) continue;
+                id object = (__bridge id)views[i];
+                if ([object isKindOfClass:[NSView class]]) page = object;
+            }
+            if (el->page != page) changed = YES;
+            page_set(el, page);
+        }
+        NSView *view = host->view;
+        if (changed && view) NSAccessibilityPostNotification(view, NSAccessibilityLayoutChangedNotification);
+    }
+    return 0;
+}
+
+/* Registered recipients and complete lists. Everything runs on the main
+   thread, which owns the App, so no lock guards them. */
+size_t zua_collections_metadata_size(void) { return sizeof(ZuaCollections); }
+uint32_t zua_collections_count(void) { return live_collections; }
+void *zua_collections_create(void) {
+    ZuaCollections *candidate = calloc(1, sizeof(ZuaCollections));
+    if (candidate) live_collections++;
+    return candidate;
+}
+void zua_collections_free(void *pointer) {
+    ZuaCollections *candidate = pointer;
+    if (!candidate) return;
+    collection_store_release(candidate->virtuals);
+    free(candidate);
+    live_collections--;
+}
+int zua_collections_commit(void *state, void *candidate) {
+    ZuaHost *host = (__bridge ZuaHost *)state;
+    if (!candidate) return -2;
+    if (host->closed) return -1;
+    if (host->collections) return -3;
+    host->collections = candidate;
+    return 0;
+}
+static ZuaHost *owned_host(void *state) { return state && [NSThread isMainThread] ? (__bridge ZuaHost *)state : nil; }
+uint32_t zua_virtuals_stats(void *state, CollectionStats *out) {
+    ZuaHost *host = owned_host(state);
+    if (!host || !out) return COLLECTION_INVALID;
+    CollectionStore *store = host_store(host);
+    if (!store) return COLLECTION_STALE;
+    *out = (CollectionStats){ store->metadata_bytes, atomic_load_explicit(&store->ledger->used, memory_order_relaxed),
+        store->held_model_bytes, store->provider_bytes, store->request_bytes, store->ledger->limit,
+        store->provider_limit, store->request_limit, store->capacity, 0 };
+    return COLLECTION_OK;
+}
+uint32_t zua_virtuals_commit(void *state, CollectionStore *candidate) {
+    ZuaHost *host = owned_host(state);
+    if (!host || !candidate) return COLLECTION_INVALID;
+    if (host->closed) return COLLECTION_STALE;
+    if (!host->collections || host->collections->virtuals) return COLLECTION_INVALID;
+    host->collections->virtuals = candidate;
+    return COLLECTION_OK;
+}
+uint32_t zua_virtuals_prepared(void *state) {
+    ZuaHost *host = state ? (__bridge ZuaHost *)state : nil;
+    return host_store(host) != NULL;
+}
+uint32_t zua_virtuals_install(void *state, const CollectionRegistration *key, CollectionModel *model, uint64_t revision, const uint64_t *bits, uint32_t words) {
+    ZuaHost *host = owned_host(state);
+    if (!host || !key) return COLLECTION_INVALID;
+    CollectionStore *store = host_store(host);
+    return store ? collection_store_install(store, *key, model, revision, bits, words) : COLLECTION_STALE;
+}
+uint32_t zua_virtuals_selection(void *state, const CollectionRegistration *key, uint64_t model, uint64_t base, uint64_t revision, const CollectionWordChange *changes, uint32_t count) {
+    ZuaHost *host = owned_host(state);
+    if (!host || !key) return COLLECTION_INVALID;
+    return collection_store_apply(host_store(host), *key, model, base, revision, changes, count);
+}
+void zua_virtuals_withdraw(void *state, const CollectionRegistration *key) {
+    ZuaHost *host = owned_host(state);
+    CollectionStore *store = host && host->collections ? host->collections->virtuals : NULL;
+    if (!store) return;
+    if (key) collection_store_withdraw(store, *key);
+    else collection_store_clear(store);
+}
+uint32_t zua_virtuals_begin_frame(void *state) {
+    ZuaHost *host = owned_host(state);
+    if (!host) return COLLECTION_INVALID;
+    CollectionStore *store = host_store(host);
+    uint64_t frame;
+    return store ? collection_store_begin_frame(store, &frame) : COLLECTION_OK;
+}
+uint32_t zua_virtuals_stage(void *state, const CollectionRegistration *key, uint64_t model, uint64_t selection, const CollectionViewport *viewport, const CollectionMapping *mapping) {
+    ZuaHost *host = owned_host(state);
+    if (!host || !key || !viewport || !mapping) return COLLECTION_INVALID;
+    CollectionStore *store = host_store(host);
+    return store ? collection_store_stage_mapped(store, *key, store->frame, model, selection, *viewport, mapping) : COLLECTION_STALE;
+}
+uint32_t zua_virtuals_validate_frame(void *state) {
+    ZuaHost *host = owned_host(state);
+    if (!host) return COLLECTION_INVALID;
+    CollectionStore *store = host_store(host);
+    return store ? collection_store_preflight(store, store->frame) : COLLECTION_OK;
 }
 
 /* Test hooks: assistive technology's view of a window, as VoiceOver would
@@ -738,6 +1305,87 @@ void zua_test_act(void *pointer, int kind, double number, const char *text) {
 int zua_test_row(void *element, int row) {
     id object = (__bridge id)element;
     return row ? (int)[object accessibilityIndex] : (int)[object accessibilityRowCount];
+}
+
+/* Test hooks for complete lists. The row of a list whose label is name,
+   read a range at a time as VoiceOver reads large lists; a retained
+   reference that zua_test_release gives back. */
+void *zua_test_list_row(void *list, const char *name) {
+    @autoreleasepool {
+        id element = (__bridge id)list;
+        NSString *wanted = [NSString stringWithUTF8String:name];
+        const NSUInteger count = [element accessibilityArrayAttributeCount:NSAccessibilityRowsAttribute];
+        for (NSUInteger at = 0; at < count; at += 64) {
+            for (id row in [element accessibilityArrayAttributeValues:NSAccessibilityRowsAttribute index:at maxCount:64])
+                if ([[row accessibilityLabel] isEqualToString:wanted]) return (__bridge_retained void *)row;
+        }
+        return NULL;
+    }
+}
+void zua_test_release(void *object) { if (object) CFRelease(object); }
+/* A row as VoiceOver reads it: -1 once it stands for nothing, else its
+   index, with whether it is chosen, shows in its window and has the focus. */
+int zua_test_row_state(void *pointer, void *handle, int *selected, int *shown, int *focused) {
+    @autoreleasepool {
+        id row = (__bridge id)pointer;
+        if (![row accessibilityParent]) return -1;
+        *selected = [row isAccessibilitySelected];
+        *shown = zua_test_frame_in_window(pointer, handle);
+        *focused = [row isAccessibilityFocused];
+        return (int)[row accessibilityIndex];
+    }
+}
+/* Acts on a row: 1 press, 2 scroll it into view, 3 focus, 4 unchoose. */
+void zua_test_row_act(void *pointer, int kind) {
+    @autoreleasepool {
+        id row = (__bridge id)pointer;
+        switch (kind) {
+        case 1: [row accessibilityPerformPress]; break;
+        case 2:
+            /* As the accessibility server asks for an action by name. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            [row accessibilityPerformAction:ZuaScrollToVisible];
+#pragma clang diagnostic pop
+            break;
+        case 3: [row setAccessibilityFocused:YES]; break;
+        case 4: [row setAccessibilitySelected:NO]; break;
+        }
+    }
+}
+/* A list's chosen rows (0), the rows in its viewport (1), and its rows as
+   the ranged count reads them (2). */
+int zua_test_list_count(void *list, int which) {
+    @autoreleasepool {
+        id element = (__bridge id)list;
+        if (which == 0) return (int)[[element accessibilitySelectedRows] count];
+        if (which == 1) return (int)[[element accessibilityVisibleRows] count];
+        return (int)[element accessibilityArrayAttributeCount:NSAccessibilityChildrenAttribute];
+    }
+}
+/* Whether an element of the window's tree holds a view among its
+   children, as a web view's node holds its page, whose parent is that
+   element, while the content view itself lists the view no more: 1 when
+   one does, 0 when none does, -1 when the content view still lists it. */
+int zua_test_page_in_tree(void *handle) {
+    @autoreleasepool {
+        NSWindow *window = (__bridge NSWindow *)handle;
+        NSArray *top = [zua_content_view(window) accessibilityChildren] ?: @[];
+        NSMutableArray *queue = [NSMutableArray array];
+        for (id child in top) {
+            if ([child isKindOfClass:[NSView class]] && [child respondsToSelector:@selector(setZigAccessibilityParent:)] && ![[child accessibilityParent] isKindOfClass:[NSView class]]) return -1;
+            if (![child isKindOfClass:[NSView class]]) [queue addObject:child];
+        }
+        while (queue.count) {
+            id element = queue[0];
+            [queue removeObjectAtIndex:0];
+            for (id child in [element accessibilityChildren] ?: @[]) {
+                if ([child isKindOfClass:[NSView class]]) { if ([child accessibilityParent] == element) return 1; }
+                else [queue addObject:child];
+            }
+        }
+        return 0;
+    }
 }
 
 int zua_test_child_count(void *handle) {
