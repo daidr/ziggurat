@@ -474,6 +474,7 @@ fn windowsConsent(values: []const ?[]const u16) Status {
 }
 
 fn windowsCheck(permission: Permission) Status {
+    @setEvalBranchQuota(10_000);
     const win = @import("ziggurat_c_win32");
     const L = std.unicode.utf8ToUtf16LeStringLiteral;
     const base = "Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\";

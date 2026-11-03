@@ -3243,6 +3243,38 @@ pub fn build(b: *std.Build) void {
     });
     addExamples(b, target, optimize);
     shareCommonModules(b, target, optimize, check, test_step);
+    if (b.option(bool, "self-hosted", "experiment: force self-hosted backend") orelse false) {
+        var seen: std.AutoHashMapUnmanaged(*std.Build.Step, void) = .empty;
+        var it = b.top_level_steps.iterator();
+        while (it.next()) |e| forceSelfHosted(b, &seen, &e.value_ptr.*.step);
+    }
+}
+
+var shim_module: ?*std.Build.Module = null;
+
+fn forceSelfHosted(b: *std.Build, seen: *std.AutoHashMapUnmanaged(*std.Build.Step, void), s: *std.Build.Step) void {
+    if (seen.contains(s)) return;
+    seen.put(b.allocator, s, {}) catch @panic("oom");
+    if (s.cast(std.Build.Step.Compile)) |c| {
+        if (c.use_llvm == null) c.use_llvm = false;
+        if (c.rootModuleTarget().os.tag == .windows) {
+            const graph = c.root_module.getGraph();
+            for (graph.modules) |m| for (m.link_objects.items) |*o| switch (o.*) {
+                .system_lib => |l| if (std.mem.eql(u8, l.name, "uiautomationcore")) {
+                    o.* = .{ .static_path = b.path(".exp/uiautomationcore.lib") };
+                },
+                else => {},
+            };
+            if (c.kind == .exe or c.kind == .@"test") {
+                if (shim_module == null) {
+                    shim_module = b.createModule(.{ .target = c.root_module.resolved_target, .optimize = .debug, .link_libc = true });
+                    shim_module.?.addCSourceFile(.{ .file = b.path(".exp/assert_shim.c") });
+                }
+                c.root_module.addImport("__assert_shim", shim_module.?);
+            }
+        }
+    }
+    for (s.dependencies.items) |d| forceSelfHosted(b, seen, d);
 }
 
 /// Every module may import the process-wide Io (`ziggurat_io`) and the system
