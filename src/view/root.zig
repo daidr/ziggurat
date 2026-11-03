@@ -7,6 +7,8 @@ const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const animation = @import("ziggurat_animation");
+pub const matched = @import("matched.zig");
+pub const Match = matched.Match;
 
 pub const layout = ui.layout;
 pub const Rect = ui.Rect;
@@ -172,6 +174,11 @@ pub const Style = struct {
     /// in perspective about `pose.origin` within the node's box. Hit
     /// testing, focus and semantics keep the arranged box.
     pose: ?ui.effects.Pose = null,
+    /// An identity the node shares with another, as a photo's thumbnail
+    /// and the photo in its detail view: appearing where another node with
+    /// the same key showed in the frame before, it comes from there; see
+    /// `matched.zig`. Needs `Host.prepareShaderEffects`, like `pose`.
+    match: ?Match = null,
     /// A shader program that rewrites how the node and its descendants
     /// draw; see `ui.Frame.beginEffect`. Opacity and pose need
     /// `Host.prepareShaderEffects`; without it they and `effect` draw the
@@ -1273,6 +1280,8 @@ pub const View = struct {
     now: u64 = 0,
     /// The earliest time a build asked to run again, or null; see `wakeAt`.
     wake: ?u64 = null,
+    /// Shared elements on their way; see `Style.match`.
+    matches: matched.State = .{},
     /// Keyboard focus at the start of this pass, set by the host.
     focus: ?u64 = null,
     /// A control the host should focus after this pass, such as a combo box
@@ -3956,6 +3965,9 @@ pub const View = struct {
             if (try self.revealNode(id)) try self.place();
         }
         self.record(measurer);
+        // Shared elements move what is drawn, not the arranged boxes input
+        // routing just recorded.
+        if (self.matches.apply(all, self.now, self.preferences.reduce_motion)) |deadline| self.wakeAt(deadline);
     }
     fn measure(self: *View, window_theme: Theme, measurer: Measurer) Error!void {
         const all = self.buffers.nodes[0..self.len];
@@ -6632,6 +6644,75 @@ test {
     _ = @import("inspector_tests.zig");
     _ = @import("gradient.zig");
     _ = @import("style_tests.zig");
+    _ = @import("matched.zig");
+}
+
+test "a shared element comes from where its match showed in the frame before" {
+    var storage: Storage(16, 64) = .{};
+    var view = View.init(storage.buffers());
+    const Pass = struct {
+        fn run(v: *View, now: u64, detail: bool, fly: bool) !void {
+            v.reset(.{}, null);
+            v.now = now;
+            const tween: animation.Motion = .{ .tween = .{ .duration_ns = 100, .easing = .linear } };
+            try v.column(.{ .padding = .{} });
+            if (detail) {
+                // The page going away is still built while the other flies.
+                if (fly and now < 3200) try v.column(.{ .key = 1, .width = 40, .height = 40, .background = 0xff0000, .match = .{ .key = 7, .motion = tween, .fly = true } }) else try v.column(.{ .key = 9, .height = 10 });
+                try v.end();
+                try v.column(.{ .key = 2, .width = 200, .height = 100, .background = 0x0000ff, .radius = 0, .match = .{ .key = 7, .motion = tween, .fly = fly } });
+            } else {
+                try v.column(.{ .key = 1, .width = 40, .height = 40, .background = 0xff0000, .radius = 8, .match = .{ .key = 7, .motion = tween, .fly = fly } });
+            }
+            try v.end();
+            try v.end();
+            try v.finish();
+            try v.arrange(.{ .x = 0, .y = 0, .width = 400, .height = 300 }, .{}, .{});
+        }
+        fn find(v: *View, wanted: u64) *Node {
+            for (v.buffers.nodes[0..v.len]) |*node| if (node.style.key == wanted) return node;
+            unreachable;
+        }
+    };
+    try Pass.run(&view, 1000, false, false);
+    try std.testing.expect(view.wake == null);
+    try Pass.run(&view, 1000, true, false);
+    // At first the detail is drawn in the thumbnail's box and look.
+    var detail = Pass.find(&view, 2);
+    try std.testing.expect(view.wake != null);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.2), detail.style.pose.?.scale_x, 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 8), detail.style.radius, 1e-4);
+    try std.testing.expectEqual(@as(?u32, 0xff0000), detail.style.background);
+    try Pass.run(&view, 1050, true, false);
+    detail = Pass.find(&view, 2);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.6), detail.style.pose.?.scale_x, 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 4), detail.style.radius, 1e-4);
+    try Pass.run(&view, 1100, true, false);
+    detail = Pass.find(&view, 2);
+    try std.testing.expect(detail.style.pose == null);
+    try std.testing.expectEqual(@as(?u32, 0x0000ff), detail.style.background);
+    try std.testing.expect(view.wake == null);
+    // Back to the grid: the thumbnail comes from the detail.
+    try Pass.run(&view, 2000, false, false);
+    try std.testing.expectApproxEqAbs(@as(f32, 5), Pass.find(&view, 1).style.pose.?.scale_x, 1e-4);
+    try Pass.run(&view, 2100, false, false);
+    // Flying, the one coming is opaque by half the way and the other,
+    // still built, goes with it and fades over the second half.
+    try Pass.run(&view, 3000, true, true);
+    try Pass.run(&view, 3025, true, true);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), Pass.find(&view, 2).style.opacity, 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), Pass.find(&view, 1).style.opacity, 1e-4);
+    try Pass.run(&view, 3075, true, true);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), Pass.find(&view, 2).style.opacity, 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), Pass.find(&view, 1).style.opacity, 1e-4);
+    // Once there, the one it left, still built, never flies back.
+    try Pass.run(&view, 3100, true, true);
+    try Pass.run(&view, 3150, true, true);
+    try std.testing.expect(!view.matches.moving() and Pass.find(&view, 1).style.pose == null and Pass.find(&view, 2).style.pose == null);
+    // Reduced motion: in place at once.
+    view.preferences.reduce_motion = true;
+    try Pass.run(&view, 4000, false, false);
+    try std.testing.expect(Pass.find(&view, 1).style.pose == null);
 }
 
 test "embedded leaves measure themselves and paint in order" {

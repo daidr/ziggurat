@@ -640,6 +640,21 @@ if (try v.presentColumn(&state.panel, state.open, .{ .hidden = .{ .y = 12, .scal
 
 运动期间每遍请求下一帧唤醒，静止时不请求；减少动态效果时立即出现与消失。没有 `prepareShaderEffects` 时不透明度与位姿被忽略。语言、隔离方式与预算见[着色器与元素效果](shader-effects.md)。
 
+### 共享元素
+
+`Style.match = .{ .key = ... }` 给节点一个与另一个节点共享的身份，比如网格里照片的缩略图与详情页里的大图（`src/view/matched.zig`）。带某个 key 的节点出现时，如果上一帧是另一个节点带着同一个 key，它就从那里飞过来：从那个节点的盒子到自己的盒子（内容按比例缩放，不按每个尺寸重排），从那个节点的外观到自己的：背景、边框和文字颜色、圆角、不透明度和位姿，旋转（含绕 X/Y 轴的 3D 转动）走较短的方向。`motion` 是 `ziggurat_animation` 的运动，默认 300 ms 缓出；被打断时从当前画到的位置继续。
+
+```zig
+const photo: view.Match = .{ .key = p.id, .motion = .{ .spring = .{} }, .fly = true };
+if (state.open == null) {
+    try v.image(p.thumb, .{}, .{ .key = p.id, .width = 64, .height = 64, .match = photo });
+} else {
+    try v.image(p.full, .{}, .{ .key = 1, .width = 320, .height = 240, .match = photo });
+}
+```
+
+`fly = true` 时，离开的那个节点如果这一帧仍在构建（比如正在退出的页面），它跟着一起飞并在后半程淡出，新的节点在前半程变为不透明，二者交叉淡化；飞完后仍在的那个不会再飞回来，直到它不再构建。一次只让一个节点带某个 key（交叉淡化时的两个除外）；View 同时跟踪 `matched.capacity`（32）个身份。共享元素只改变绘制，命中、焦点和语义仍是排布后的盒子；需要 `prepareShaderEffects`，否则直接出现在原位；减少动态效果时也直接出现在原位。飞行中的节点仍按树的顺序绘制，不会越出祖先的裁剪；参考框架里的文字逐字形变形（Morph）还没有实现。
+
 ## 子树缓存
 
 `Style.cache = cache`（`ui.Cache.create(app, allocator)` 创建，Host 销毁前 `cache.destroy()`）把节点及其后代画进一张图片，每帧比较它们记录的命令（移到图片原点后哈希），相同就直接画这张图片，不再光栅化子树；内容、尺寸、DPI 或主题变化时才在离屏工作面重画（`src/ui/cache.zig`，底层是 `Frame.beginCache` / `endCache`）。
