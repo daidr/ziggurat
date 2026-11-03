@@ -1,5 +1,5 @@
-//! Translation of compiled programs into GPU source: HLSL for Direct3D 11
-//! and GLSL for OpenGL. The translation runs the same register code the
+//! Translation of compiled programs into GPU source: HLSL for Direct3D 11,
+//! GLSL for OpenGL and MSL for Metal. The translation runs the same register code the
 //! CPU machine runs, so both draw the same pixels: every register word is
 //! a `uint` variable, floats and ints are bit casts of it, and control flow
 //! follows the code's jumps, calls and returns. Code without them is
@@ -23,8 +23,12 @@
 //!     uint zs_input(uint index)          // word `index` of `gather`
 //!     <vec4> zs_sample(<vec2> position)  // layer programs only
 //!
-//! where <vec2> and <vec4> are `float2`/`float4` in HLSL and `vec2`/`vec4`
-//! in GLSL.
+//! where <vec2> and <vec4> are `float2`/`float4` in HLSL and MSL and
+//! `vec2`/`vec4` in GLSL. MSL has no global resources: there `zs_run`,
+//! `zs_input` and `zs_sample` take the host's `ZS_PARAMS` parameters first
+//! (a macro the host defines, ending in a comma) and calls pass them on
+//! with `ZS_PASS`, and `result` is a `thread float4&`. The MSL host compiles
+//! without fast math, so that non-finite values fault as on the CPU.
 const std = @import("std");
 const compiler = @import("compiler.zig");
 const machine_module = @import("machine.zig");
@@ -32,7 +36,7 @@ const Program = compiler.Program;
 const Instruction = compiler.Instruction;
 const Op = compiler.Op;
 
-pub const Language = enum { hlsl, glsl };
+pub const Language = enum { hlsl, glsl, msl };
 
 /// Words the host uploads, at most this many.
 pub const max_input_words = compiler.max_register_words;
@@ -381,7 +385,7 @@ const Emitter = struct {
                 try self.print("{s}  r{d} = ZUI(int(x));\n", .{ indent, d });
             },
             .sample => {
-                try self.print("{s}  {s}4 s = zs_sample({s}2(ZF(r{d}), ZF(r{d})));\n", .{ indent, self.vec(), self.vec(), a, a + 1 });
+                try self.print("{s}  {s}4 s = zs_sample({s}{s}2(ZF(r{d}), ZF(r{d})));\n", .{ indent, self.vec(), self.pass(), self.vec(), a, a + 1 });
                 try self.print("{s}  r{d} = ZUF(s.x); r{d} = ZUF(s.y); r{d} = ZUF(s.z); r{d} = ZUF(s.w);\n", .{ indent, d, d + 1, d + 2, d + 3 });
             },
             .halt, .fault, .jump, .jump_zero, .call, .ret => unreachable,
@@ -389,7 +393,11 @@ const Emitter = struct {
         try self.print("{s}}}\n", .{indent});
     }
     fn vec(self: *const Emitter) []const u8 {
-        return if (self.language == .hlsl) "float" else "vec";
+        return if (self.language == .glsl) "vec" else "float";
+    }
+    /// The host's arguments that MSL calls pass first.
+    fn pass(self: *const Emitter) []const u8 {
+        return if (self.language == .msl) "ZS_PASS " else "";
     }
 };
 
@@ -413,6 +421,18 @@ fn prelude(language: Language) []const u8 {
         \\float zs_atan2(float y, float x) {
         \\    if (x == 0.0 && y == 0.0) return (floatBitsToUint(x) >> 31) != 0u ? (y < 0.0 || (floatBitsToUint(y) >> 31) != 0u ? -3.14159265 : 3.14159265) : y;
         \\    return atan(y, x);
+        \\}
+        \\
+        ,
+        .msl =>
+        \\#define ZF(x) as_type<float>(x)
+        \\#define ZUF(x) as_type<uint>(x)
+        \\#define ZI(x) as_type<int>(x)
+        \\#define ZUI(x) as_type<uint>(x)
+        \\bool zs_finite(float x) { return !isnan(x) && !isinf(x); }
+        \\float zs_atan2(float y, float x) {
+        \\    if (x == 0.0 && y == 0.0) return (as_type<uint>(x) >> 31) != 0u ? ((as_type<uint>(y) >> 31) != 0u ? -3.14159265 : 3.14159265) : y;
+        \\    return atan2(y, x);
         \\}
         \\
         ,
@@ -528,7 +548,10 @@ pub fn translate(gpa: std.mem.Allocator, program: *const Program, language: Lang
     try e.write(prelude(language));
     try e.write(common_prelude);
     const v = e.vec();
-    try e.print("bool zs_run({s}2 position, {s}4 pixel, out {s}4 result) {{\n", .{ v, v, v });
+    if (language == .msl)
+        try e.write("bool zs_run(ZS_PARAMS float2 position, float4 pixel, thread float4& result) {\n")
+    else
+        try e.print("bool zs_run({s}2 position, {s}4 pixel, out {s}4 result) {{\n", .{ v, v, v });
     try e.print("  result = {s}4(0.0, 0.0, 0.0, 0.0);\n", .{v});
     // Registers: constants are literals, inputs are uploaded words.
     var input_index: usize = 0;
@@ -536,7 +559,7 @@ pub fn translate(gpa: std.mem.Allocator, program: *const Program, language: Lang
     while (reg < register_end) : (reg += 1) {
         const is_input = input_index < inputs.items.len and inputs.items[input_index] == reg;
         if (is_input) {
-            try e.print("  uint r{d} = zs_input({d}u);\n", .{ reg, input_index });
+            try e.print("  uint r{d} = zs_input({s}{d}u);\n", .{ reg, e.pass(), input_index });
             input_index += 1;
         } else if (reg >= compiler.constant_base and reg < constants_end) {
             if (used.isSet(reg)) try e.print("  uint r{d} = {d}u;\n", .{ reg, program.image[reg] });
@@ -641,7 +664,7 @@ test "translation uploads size, scale, uniforms and prologue results" {
         \\}
     , .{}, &diagnostic);
     defer program.destroy();
-    for ([_]Language{ .hlsl, .glsl }) |language| {
+    for ([_]Language{ .hlsl, .glsl, .msl }) |language| {
         var translation = try translate(std.testing.allocator, program, language);
         defer translation.deinit();
         // size (2), scale and one uniform, then what the prologue wrote,

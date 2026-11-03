@@ -358,6 +358,7 @@ fn event(ptr: *anyopaque, native: *const NativeEvent) callconv(.c) c_int {
         17 => return @intFromBool(record.inputAllowed()),
         18 => return @intFromBool(record.keyInput(.{ .key = keyCode(@intCast(native.key), native.width), .modifiers = modifiers, .repeat = native.flags & 16 != 0, .physical = core.physical_keys.fromMacVirtualKey(native.width), .from_page = native.flags & 32 != 0 })),
         26 => record.keyRelease(.{ .key = keyCode(@intCast(native.key), native.width), .modifiers = modifiers, .physical = core.physical_keys.fromMacVirtualKey(native.width) }),
+        27 => return @intFromBool(record.commandEnabled(@fromBackingInt(@intCast(zio.asUnsigned(native.key))))),
         19 => return @backingInt(record.hitTest(point, @floatFromInt(native.width), @floatFromInt(native.height))),
         else => unreachable,
     }

@@ -175,6 +175,14 @@ pub fn Harness(comptime Surface: type) type {
 }
 const State = Harness(viewing.EditableSplit);
 
+/// A side's change color, or a filler's hatching: its base or its stripes.
+fn expectFill(filler: bool, changed: u32, pixel: u32) !void {
+    if (!filler) return std.testing.expectEqual(changed, pixel);
+    if (pixel != 0xeeeeee and pixel != 0xdadde2) {
+        std.debug.print("filler pixel {x}\n", .{pixel});
+        return error.TestUnexpectedResult;
+    }
+}
 fn expectText(document: *d.Document, expected: []const u8) !void {
     var bytes: [2048]u8 = undefined;
     try std.testing.expectEqualStrings(expected, bytes[0..try document.read(.{ .start = 0, .end = try document.byteLength() }, &bytes)]);
@@ -263,11 +271,56 @@ pub fn run(allocator: std.mem.Allocator) !void {
         changed = true;
         const y = bounds.y + row.y + 1;
         if (y < bounds.y or y >= bounds.y + bounds.height) continue;
-        try std.testing.expectEqual(if (row.a == null) @as(u32, 0xeeeeee) else 0xffe9e9, try state.pixel(bounds.x + (bounds.width - 8) / 2 - 2, y));
-        try std.testing.expectEqual(if (row.b == null) @as(u32, 0xeeeeee) else 0xe5f6e9, try state.pixel(bounds.x + bounds.width - 2, y));
+        try expectFill(row.a == null, 0xffe9e9, try state.pixel(bounds.x + (bounds.width - 8) / 2 - 2, y));
+        try expectFill(row.b == null, 0xe5f6e9, try state.pixel(bounds.x + bounds.width - 2, y));
         if (row.a == null or row.b == null) blank = true;
     }
     try std.testing.expect(changed and blank);
+    // Lines are placed as the comparison lays the sides out; a side's line
+    // count gives its height, the same for both sides.
+    try std.testing.expectEqual(@as(?f64, 0), try state.view.lineTop(.a, 0));
+    const height = try state.view.contentHeight();
+    try std.testing.expectEqual(@as(?f64, height), try state.view.lineTop(.a, try a.lineCount()));
+    try std.testing.expectEqual(@as(?f64, height), try state.view.lineTop(.b, try b.lineCount()));
+    try std.testing.expectEqual(@as(?f64, null), try state.view.lineTop(.b, try b.lineCount() + 1));
+    try std.testing.expectApproxEqAbs((try state.view.lineTop(.a, 3)).?, (try state.view.lineTop(.b, 4)).?, 0.001);
+    try std.testing.expectEqual(@as(f64, 0), try state.view.scrollY());
+    try std.testing.expectEqual(bounds.height, try state.view.viewportHeight());
+    // The line between the sides drags, as far as each side's least width.
+    const divider = bounds.x + (bounds.width - viewing.editable.divider_gap) / 2 + viewing.editable.divider_gap / 2;
+    try std.testing.expectEqual(@as(?z.Cursor, .resize_ew), try state.view.cursorAt(bounds, .{ .x = divider + 2, .y = bounds.y + 5 }));
+    try std.testing.expectEqual(@as(?z.Cursor, null), try state.view.cursorAt(bounds, .{ .x = divider + 20, .y = bounds.y + 5 }));
+    try std.testing.expect(try state.view.handleEvent(.{ .pointer_down = .{ .position = .{ .x = divider + 1, .y = bounds.y + 5 } } }, bounds, state.parameters));
+    try std.testing.expect(try state.view.handleEvent(.{ .pointer_move = .{ .x = divider + 41, .y = bounds.y + 5 } }, bounds, state.parameters));
+    try std.testing.expect(try state.view.handleEvent(.{ .pointer_up = .{ .position = .{ .x = divider + 41, .y = bounds.y + 5 } } }, bounds, state.parameters));
+    const available = bounds.width - viewing.editable.divider_gap;
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5) + 40 / available, try state.view.splitFraction(), 0.001);
+    _ = try state.view.handleEvent(.{ .pointer_down = .{ .position = .{ .x = divider + 40, .y = bounds.y + 5 } } }, bounds, state.parameters);
+    _ = try state.view.handleEvent(.{ .pointer_move = .{ .x = bounds.x + bounds.width, .y = bounds.y + 5 } }, bounds, state.parameters);
+    _ = try state.view.handleEvent(.{ .pointer_up = .{ .position = .{ .x = bounds.x + bounds.width, .y = bounds.y + 5 } } }, bounds, state.parameters);
+    try std.testing.expectApproxEqAbs(1 - viewing.editable.min_side_width / available, try state.view.splitFraction(), 0.001);
+    try state.paint();
+    try state.view.setSplitFraction(0.5);
+    try state.view.prepare(bounds, state.parameters);
+    try state.paint();
+    // A view shorter than the comparison scrolls to an offset, reads it
+    // back, and shows its bar while the pointer is over it.
+    const short: ui.Rect = .{ .x = bounds.x, .y = bounds.y, .width = bounds.width, .height = 40 };
+    try state.view.prepare(short, state.parameters);
+    try std.testing.expect(try state.view.setScrollY(10));
+    try std.testing.expectApproxEqAbs(@as(f64, 10), try state.view.scrollY(), 0.01);
+    try std.testing.expect(!try state.view.setScrollY(10));
+    const edge: z.Point = .{ .x = short.x + short.width - 3, .y = short.y + 36 };
+    _ = try state.view.handleEvent(.{ .pointer_move = edge }, short, state.parameters);
+    // A press on the track below the thumb pages down; the release is the bar's.
+    try std.testing.expect(try state.view.handleEvent(.{ .pointer_down = .{ .position = edge } }, short, state.parameters));
+    try std.testing.expect(try state.view.scrollY() > 10);
+    _ = try state.view.handleEvent(.{ .pointer_up = .{ .position = edge } }, short, state.parameters);
+    try std.testing.expect(try state.view.setScrollY(0));
+    try state.view.setScrollbars(.always);
+    try state.view.setScrollbars(.hover);
+    try state.view.prepare(bounds, state.parameters);
+    try state.paint();
     // The actual Adapter visual/caret/hit APIs agree with the same alignment.
     const left_last = try a.line(3);
     const right_last = try b.line(4);

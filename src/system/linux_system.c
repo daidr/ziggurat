@@ -352,6 +352,11 @@ typedef struct Bar {
        window's when the bar was set. */
     void *icons[128];
     int scale;
+    /* Commands of the Edit roles: whether the focus can act on one decides
+       its item's sensitivity as its menu opens and before its shortcut
+       runs, where the application left it enabled. */
+    uint8_t edit[128];
+    int (*query)(void *owner, uint64_t serial, int32_t command);
 } Bar;
 typedef struct Activation { Bar *bar; int32_t command; } Activation;
 static gint live_bars;
@@ -421,6 +426,20 @@ static guint event_keyval(GdkKeymap *map, const GdkEventKey *event) {
     if (keyval == GDK_KEY_KP_Enter) keyval = GDK_KEY_Return;
     return keyval;
 }
+/* Makes the items of the Edit roles sensitive as the focus can act on them
+   now, where the application left them enabled. */
+static void bar_refresh(Bar *bar) {
+    if (!bar->owner || !bar->query) return;
+    for (uint32_t i = 0; i < bar->count; ++i) {
+        if (!bar->edit[i] || !bar->commands[i] || !bar->enabled[i]) continue;
+        gtk_widget_set_sensitive(bar->commands[i], bar->query(bar->owner, bar->serial, (int32_t)i) != 0);
+        if (!bar->owner) return;
+    }
+}
+static void bar_menu_map(GtkWidget *menu, gpointer data) {
+    (void)menu;
+    bar_refresh(data);
+}
 static gboolean bar_key(GtkWidget *window, GdkEventKey *event, gpointer data) {
     Bar *bar = data;
     if (!bar->owner || event->type != GDK_KEY_PRESS || !gtk_widget_is_sensitive(window)) return FALSE;
@@ -429,6 +448,14 @@ static gboolean bar_key(GtkWidget *window, GdkEventKey *event, gpointer data) {
     for (uint32_t i = 0; i < bar->count; ++i) {
         if (!bar->keyvals[i] || bar->keyvals[i] != keyval || bar->modifiers[i] != modifiers) continue;
         if (!bar->enabled[i]) return FALSE;
+        if (bar->edit[i] && bar->query) {
+            /* The item's sensitivity is the focus's as its menu last opened,
+               so the focus decides again. */
+            int on = bar->query(bar->owner, bar->serial, (int32_t)i) != 0;
+            if (!bar->owner) return FALSE;
+            gtk_widget_set_sensitive(bar->commands[i], on);
+            if (!on) return FALSE;
+        }
         bar_schedule(bar, (int32_t)i);
         return TRUE;
     }
@@ -462,6 +489,7 @@ Bar *zsl_menubar_set(GtkWidget *window, const Item *items, uint32_t count, const
             if (item->icon && item->parent >= 0) item_set_icon(entry, item->icon, bar->scale);
             gtk_widget_set_sensitive(entry, item->enabled != 0);
             menus[i] = gtk_menu_new();
+            g_signal_connect(menus[i], "map", G_CALLBACK(bar_menu_map), bar);
             gtk_menu_item_set_submenu(GTK_MENU_ITEM(entry), menus[i]);
         } else {
             int32_t command = item->command;
@@ -548,10 +576,17 @@ void zsl_menubar_remove(Bar *bar, int restore) {
     if (bar->widget) gtk_widget_destroy(bar->widget);
     bar_release(bar);
 }
+/* Names the commands of the Edit roles (edit[i] nonzero) and the query that
+   tells whether the focus would act on one. */
+void zsl_menubar_edit(Bar *bar, const uint8_t *edit, uint32_t count, int (*query)(void *, uint64_t, int32_t)) {
+    for (uint32_t i = 0; i < count && i < 128; ++i) bar->edit[i] = edit[i];
+    bar->query = query;
+}
 /* Native activation of the n-th command, as a click on the item would do. */
 int zsl_menubar_activate(Bar *bar, int32_t command) {
     if (!bar->owner || command < 0 || (uint32_t)command >= bar->count || !bar->commands[command]) return 0;
-    if (!gtk_widget_is_sensitive(bar->commands[command])) return 0;
+    bar_refresh(bar);
+    if (!bar->owner || !gtk_widget_is_sensitive(bar->commands[command])) return 0;
     gtk_menu_item_activate(GTK_MENU_ITEM(bar->commands[command]));
     return 1;
 }

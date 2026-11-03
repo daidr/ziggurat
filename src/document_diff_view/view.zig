@@ -7,6 +7,7 @@ const editing = @import("ziggurat_document_editor");
 const requests = @import("requests.zig");
 const ix = @import("index.zig");
 const cache = @import("cache.zig");
+const hatch = @import("hatch.zig");
 const max_rows = 96;
 const max_batches = 24;
 pub const Limits = struct {
@@ -22,7 +23,22 @@ pub const Limits = struct {
     prepared: t.PrepareLimits = .{ .pixels = 1024 * 1024, .bytes = 8 * 1024 * 1024 },
 };
 pub const Parameters = struct { font: t.Options = .{ .size = 16, .wrap = .word_character, .width = 1 }, scale: f32 = 1, version: u64 = 0, estimated_height: f32 = 20 };
-pub const Colors = struct { text: ui.Color = ui.Color.rgb(0x202020), deleted: u32 = 0xffe9e9, added: u32 = 0xe5f6e9, deleted_detail: u32 = 0xffa6a6, added_detail: u32 = 0x9fe0ac, blank: u32 = 0xeeeeee, selected: u32 = 0x93b9e7, header: u32 = 0xe1e6ef, background: u32 = 0xffffff };
+pub const Colors = struct {
+    text: ui.Color = ui.Color.rgb(0x202020),
+    deleted: u32 = 0xffe9e9,
+    added: u32 = 0xe5f6e9,
+    deleted_detail: u32 = 0xffa6a6,
+    added_detail: u32 = 0x9fe0ac,
+    blank: u32 = 0xeeeeee,
+    selected: u32 = 0x93b9e7,
+    header: u32 = 0xe1e6ef,
+    background: u32 = 0xffffff,
+    /// The stripes over `blank` fillers, and the line between a split view's sides.
+    hatch: u32 = 0xdadde2,
+    divider: u32 = 0xc9ced6,
+    /// The scroll bar's thumb; null takes the theme's track color.
+    scrollbar: ?ui.Color = null,
+};
 pub const Direction = enum { a_to_b, b_to_a };
 pub const Side = enum(u1) { a, b };
 pub const RowInfo = struct { row: usize, a: ?usize, b: ?usize, hunk: ?usize, bounds: ui.Rect, a_content: ?ui.Rect, b_content: ?ui.Rect };
@@ -448,13 +464,16 @@ pub const View = struct {
         };
         frame.rect(bounds, colors.background);
         frame.rect(.{ .x = bounds.x, .y = bounds.y, .width = bounds.width, .height = snapshot.columns[0].y - bounds.y }, colors.header);
+        const scrolled = if (self.index) |*index| ix.dip(index.position(self.anchor)) else 0;
         for (snapshot.rows[0..snapshot.row_count]) |row| {
             for ([_]Side{ .a, .b }) |side| {
                 const column = snapshot.columns[@backingInt(side)];
                 const rectangle = ui.layout.intersect(.{ .x = column.x, .y = column.y + row.y, .width = column.width, .height = row.height }, column);
                 if (rectangle.height == 0) continue;
                 const reference = row.sides[@backingInt(side)];
-                if (row.hunk != null) frame.rect(rectangle, if (reference == null) colors.blank else if (side == .a) colors.deleted else colors.added);
+                if (row.hunk != null) {
+                    if (reference == null) hatch.fill(frame, rectangle, column.x, column.y - hatch.phase(scrolled), colors.blank, colors.hatch) else frame.rect(rectangle, if (side == .a) colors.deleted else colors.added);
+                }
                 if (row.hunk != null and row.hunk == self.selected) frame.rect(.{ .x = column.x, .y = rectangle.y, .width = 3, .height = rectangle.height }, colors.selected);
                 if (reference) |ref| {
                     const plane = snapshot.planes[ref.plane];

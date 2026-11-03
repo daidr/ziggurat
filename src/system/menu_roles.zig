@@ -5,6 +5,7 @@
 //! Changing language means building again with the new locale and setting
 //! the menu again.
 const std = @import("std");
+const z = @import("ziggurat");
 const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const types = @import("types.zig");
@@ -63,6 +64,21 @@ pub const Role = enum {
     align_center,
     align_right,
 
+    /// The Edit command of a role the focused content takes, which a menu
+    /// enables as `Window.commandEnabled` answers; null for other roles.
+    pub fn editCommand(self: Role) ?z.EditCommand {
+        return switch (self) {
+            .undo => .undo,
+            .redo => .redo,
+            .cut => .cut,
+            .copy => .copy,
+            .paste => .paste,
+            .paste_and_match_style => .paste_and_match_style,
+            .delete => .delete,
+            .select_all => .select_all,
+            else => null,
+        };
+    }
     /// Roles whose items open a submenu.
     pub fn isSubmenu(self: Role) bool {
         return switch (self) {

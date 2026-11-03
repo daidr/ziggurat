@@ -105,6 +105,10 @@ pub const TextProducer = enum { win32_character, imm_result, gtk_text_service_co
 pub const TextInput = struct { text: []const u8, producer: TextProducer };
 pub const EditKeyCode = enum { left, right, up, down, home, end, backspace, delete, a, c, x, v, z, y };
 pub const EditKey = struct { key: EditKeyCode, shift: bool = false, control: bool = false };
+/// The commands of a menu's Edit roles, which the focused content takes.
+/// A menu asks `Window.commandEnabled` whether one would act now, to enable
+/// its item.
+pub const EditCommand = enum { undo, redo, cut, copy, paste, paste_and_match_style, delete, select_all };
 pub const KeyModifiers = struct { shift: bool = false, control: bool = false, alt: bool = false, super: bool = false };
 pub const PointerButton = pointer_press.Button;
 pub const PointerPhase = pointer_press.Phase;
@@ -314,6 +318,10 @@ pub const Content = struct {
     /// Use cached native handles; the Window/Region is already closing.
     /// Windows invokes this at WM_DESTROY while native children still exist.
     native_parent_destroying: ?*const fn (*anyopaque) void = null,
+    /// Whether an Edit command would act on what has the focus now, for a
+    /// menu to enable its item. Asking changes nothing. Null answers yes to
+    /// every command, as content that takes them all.
+    command_enabled: ?*const fn (*anyopaque, Window, EditCommand) bool = null,
 };
 /// Optional native facilities independent of the window's content owner.
 /// Context remains stable through on_closed; native cleanup never frees it.
@@ -1801,6 +1809,15 @@ pub const Window = struct {
         const record = self.resolve() orelse return error.Closed;
         return record.text_client != null;
     }
+    /// Whether `command` would act on the focused content now: false while
+    /// the window takes no input, the content's answer otherwise. Menus ask
+    /// it to enable the items of the Edit roles as they open, and before a
+    /// role's shortcut runs.
+    pub fn commandEnabled(self: Window, command: EditCommand) bool {
+        if (std.Thread.getCurrentId() != self.app.owner) return false;
+        const record = self.resolve() orelse return false;
+        return record.commandEnabled(command);
+    }
     pub fn textClientToken(self: Window) ?TextClientToken {
         const record = self.resolve() orelse return null;
         return if (record.text_client != null and record.inputAllowed()) .{ .window = self, .generation = record.text_generation } else null;
@@ -2460,6 +2477,14 @@ pub const WindowRecord = struct {
         if (after.fullscreen or after.fullscreen_requested) return .client;
         if (result.resizeEdge() != null and (!self.options.resizable or after.maximized)) return .client;
         return result;
+    }
+    pub fn commandEnabled(self: *WindowRecord, command: EditCommand) bool {
+        if (!self.inputAllowed()) return false;
+        const content = self.content orelse return false;
+        const callback = content.command_enabled orelse return true;
+        const scope = self.enter();
+        defer scope.end();
+        return callback(content.context, self.window, command);
     }
     pub fn keyInput(self: *WindowRecord, input: KeyInput) bool {
         if (!self.inputAllowed()) return true;

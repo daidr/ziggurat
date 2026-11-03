@@ -65,8 +65,12 @@ pub fn backdropParams(entry: *const shader_effects.Entry, plan: shader_effects.B
 
 pub const Language = shader.gpu.Language;
 
-// The body is shared: each language defines the ZH_ macros.
+// The body is shared: each language defines the ZH_ macros. ZH_PARAMS and
+// ZH_PASS carry MSL's resources from the entry point to the functions that
+// read them; the other languages read globals and leave them empty.
 const hlsl_header =
+    \\#define ZH_PARAMS
+    \\#define ZH_PASS
     \\#define ZH_F2 float2
     \\#define ZH_F4 float4
     \\#define ZH_INT(x) ((int)(x))
@@ -85,6 +89,8 @@ const hlsl_header =
     \\
 ;
 const glsl_header =
+    \\#define ZH_PARAMS
+    \\#define ZH_PASS
     \\#define ZH_F2 vec2
     \\#define ZH_F4 vec4
     \\#define ZH_INT(x) int(x)
@@ -103,14 +109,37 @@ const glsl_header =
     \\out vec4 zs_out;
     \\
 ;
+const msl_header =
+    \\#include <metal_stdlib>
+    \\using namespace metal;
+    \\struct ZsParams { float4 a; float4 b; float4 shape; float4 clip; float4 c; float4 d; uint4 plane; };
+    \\#define ZS_PARAMS constant uint4 *zs_words, constant ZsParams &zp, texture2d<float> zs_content,
+    \\#define ZS_PASS zs_words, zp, zs_content,
+    \\#define ZH_PARAMS ZS_PARAMS
+    \\#define ZH_PASS ZS_PASS
+    \\#define zp_a zp.a
+    \\#define zp_b zp.b
+    \\#define zp_shape zp.shape
+    \\#define zp_clip zp.clip
+    \\#define zp_c zp.c
+    \\#define zp_d zp.d
+    \\#define zp_plane zp.plane
+    \\#define ZH_F2 float2
+    \\#define ZH_F4 float4
+    \\#define ZH_INT(x) int(x)
+    \\#define ZH_BITS(x) as_type<uint>(x)
+    \\#define ZH_TEXEL(x, y) zs_content.read(uint2(uint(x), uint(y)))
+    \\uint zs_input(ZS_PARAMS uint i) { return zs_words[i >> 2u][i & 3u]; }
+    \\
+;
 const common_prelude =
     \\bool zs_ok(float v) { return (ZH_BITS(v) & 0x7f800000u) != 0x7f800000u; }
     \\bool zs_ok4(ZH_F4 v) { return zs_ok(v.x) && zs_ok(v.y) && zs_ok(v.z) && zs_ok(v.w); }
-    \\ZH_F4 zs_load(int x, int y) {
+    \\ZH_F4 zs_load(ZH_PARAMS int x, int y) {
     \\    if (x < 0 || y < 0 || x >= ZH_INT(zp_plane.x) || y >= ZH_INT(zp_plane.y)) return ZH_F4(0.0, 0.0, 0.0, 0.0);
     \\    return ZH_TEXEL(x, y);
     \\}
-    \\ZH_F4 zs_plane(float x, float y, bool edge) {
+    \\ZH_F4 zs_plane(ZH_PARAMS float x, float y, bool edge) {
     \\    if (!zs_ok(x) || !zs_ok(y)) return ZH_F4(0.0, 0.0, 0.0, 0.0);
     \\    float lx = x - 0.5;
     \\    float ly = y - 0.5;
@@ -126,10 +155,10 @@ const common_prelude =
     \\    float ty = ly - fy;
     \\    int ix = ZH_INT(fx);
     \\    int iy = ZH_INT(fy);
-    \\    ZH_F4 result = zs_load(ix, iy) * ((1.0 - tx) * (1.0 - ty));
-    \\    result += zs_load(ix + 1, iy) * (tx * (1.0 - ty));
-    \\    result += zs_load(ix, iy + 1) * ((1.0 - tx) * ty);
-    \\    result += zs_load(ix + 1, iy + 1) * (tx * ty);
+    \\    ZH_F4 result = zs_load(ZH_PASS ix, iy) * ((1.0 - tx) * (1.0 - ty));
+    \\    result += zs_load(ZH_PASS ix + 1, iy) * (tx * (1.0 - ty));
+    \\    result += zs_load(ZH_PASS ix, iy + 1) * ((1.0 - tx) * ty);
+    \\    result += zs_load(ZH_PASS ix + 1, iy + 1) * (tx * ty);
     \\    return result;
     \\}
     \\
@@ -138,7 +167,11 @@ const common_prelude =
 /// The complete fragment shader for `translation` of a program of `kind`
 /// drawn as `target`: entry point `main` returning SV_Target in HLSL,
 /// `main` writing `zs_out` in GLSL (which the host prefixes with its
-/// `#version`).
+/// `#version`). The MSL library has the vertex function `zs_vertex`,
+/// drawing the quad in buffer 0 (normalized device x0, y0, x1, y1), and the
+/// fragment function `zs_fragment` reading the words (buffer 0), the
+/// parameters (buffer 1), the target pixel of `at` 0, 0 (buffer 2, float2)
+/// and the content (texture 0).
 pub fn source(allocator: std.mem.Allocator, translation: *const shader.gpu.Translation, kind: shader.Kind, target: Target, language: Language) ![:0]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
@@ -155,15 +188,16 @@ pub fn source(allocator: std.mem.Allocator, translation: *const shader.gpu.Trans
             try w.print("layout(std140) uniform ZsWords {{ uvec4 zs_words[{d}]; }};\n", .{vectors});
             try w.writeAll("uint zs_input(uint i) { return zs_words[i >> 2u][i & 3u]; }\n");
         },
+        .msl => try w.writeAll(msl_header),
     }
     try w.writeAll(common_prelude);
     // Layer programs sample in box-relative DIP.
-    try w.print("ZH_F4 zs_sample(ZH_F2 p) {{ return zs_plane(p.x * zp_b.z - zp_b.x, p.y * zp_b.z - zp_b.y, {s}); }}\n", .{if (target == .backdrop) "true" else "false"});
+    try w.print("ZH_F4 zs_sample(ZH_PARAMS ZH_F2 p) {{ return zs_plane(ZH_PASS p.x * zp_b.z - zp_b.x, p.y * zp_b.z - zp_b.y, {s}); }}\n", .{if (target == .backdrop) "true" else "false"});
     try w.writeAll(translation.source);
     switch (target) {
         .element => {
             try w.writeAll(
-                \\ZH_F4 zs_main(ZH_F4 at) {
+                \\ZH_F4 zs_main(ZH_PARAMS ZH_F4 at) {
                 \\    float px = floor(at.x);
                 \\    float py = floor(at.y);
                 \\    ZH_F2 position = ZH_F2((px + 0.5 + zp_a.z) / zp_b.z - zp_a.x, (py + 0.5 + zp_a.w) / zp_b.z - zp_a.y);
@@ -171,14 +205,14 @@ pub fn source(allocator: std.mem.Allocator, translation: *const shader.gpu.Trans
                 \\
             );
             try w.writeAll(switch (kind) {
-                .color => "    bool ok = zs_run(position, ZH_TEXEL(ZH_INT(px), ZH_INT(py)), result);\n",
+                .color => "    bool ok = zs_run(ZH_PASS position, ZH_TEXEL(ZH_INT(px), ZH_INT(py)), result);\n",
                 .distortion =>
-                \\    bool ok = zs_run(position, ZH_F4(0.0, 0.0, 0.0, 0.0), result);
+                \\    bool ok = zs_run(ZH_PASS position, ZH_F4(0.0, 0.0, 0.0, 0.0), result);
                 \\    if (ok) ok = zs_ok(result.x) && zs_ok(result.y);
-                \\    if (ok) result = zs_plane((result.x + zp_a.x) * zp_b.z - zp_a.z, (result.y + zp_a.y) * zp_b.z - zp_a.w, false);
+                \\    if (ok) result = zs_plane(ZH_PASS (result.x + zp_a.x) * zp_b.z - zp_a.z, (result.y + zp_a.y) * zp_b.z - zp_a.w, false);
                 \\
                 ,
-                .layer => "    bool ok = zs_run(position, ZH_F4(0.0, 0.0, 0.0, 0.0), result);\n",
+                .layer => "    bool ok = zs_run(ZH_PASS position, ZH_F4(0.0, 0.0, 0.0, 0.0), result);\n",
             });
             try w.writeAll(
                 \\    if (!ok || !zs_ok4(result)) return ZH_F4(0.0, 0.0, 0.0, 0.0);
@@ -190,7 +224,7 @@ pub fn source(allocator: std.mem.Allocator, translation: *const shader.gpu.Trans
         },
         .backdrop => {
             try w.writeAll(
-                \\ZH_F4 zs_main(ZH_F4 at) {
+                \\ZH_F4 zs_main(ZH_PARAMS ZH_F4 at) {
                 \\    float x = floor(at.x) + zp_c.z;
                 \\    float y = floor(at.y) + zp_c.w;
                 \\    ZH_F4 beneath = ZH_TEXEL(ZH_INT(x - zp_d.x), ZH_INT(y - zp_d.y));
@@ -210,14 +244,14 @@ pub fn source(allocator: std.mem.Allocator, translation: *const shader.gpu.Trans
                 \\
             );
             try w.writeAll(switch (kind) {
-                .color => "    bool ok = zs_run(position, beneath, result);\n",
+                .color => "    bool ok = zs_run(ZH_PASS position, beneath, result);\n",
                 .distortion =>
-                \\    bool ok = zs_run(position, ZH_F4(0.0, 0.0, 0.0, 0.0), result);
+                \\    bool ok = zs_run(ZH_PASS position, ZH_F4(0.0, 0.0, 0.0, 0.0), result);
                 \\    if (ok) ok = zs_ok(result.x) && zs_ok(result.y);
-                \\    if (ok) result = zs_plane(result.x * zp_b.z - zp_a.z, result.y * zp_b.z - zp_a.w, true);
+                \\    if (ok) result = zs_plane(ZH_PASS result.x * zp_b.z - zp_a.z, result.y * zp_b.z - zp_a.w, true);
                 \\
                 ,
-                .layer => "    bool ok = zs_run(position, ZH_F4(0.0, 0.0, 0.0, 0.0), result);\n",
+                .layer => "    bool ok = zs_run(ZH_PASS position, ZH_F4(0.0, 0.0, 0.0, 0.0), result);\n",
             });
             try w.writeAll(
                 \\    if (!ok || !zs_ok4(result)) return beneath;
@@ -235,6 +269,18 @@ pub fn source(allocator: std.mem.Allocator, translation: *const shader.gpu.Trans
     try w.writeAll(switch (language) {
         .hlsl => "float4 main(float4 at : SV_Position) : SV_Target { return zs_main(at); }\n",
         .glsl => "void main() { zs_out = zs_main(gl_FragCoord); }\n",
+        .msl =>
+        \\struct ZsVertex { float4 position [[position]]; };
+        \\vertex ZsVertex zs_vertex(uint vid [[vertex_id]], constant float4 &quad [[buffer(0)]]) {
+        \\    ZsVertex o;
+        \\    o.position = float4(vid & 1u ? quad.z : quad.x, vid & 2u ? quad.w : quad.y, 0.0, 1.0);
+        \\    return o;
+        \\}
+        \\fragment float4 zs_fragment(ZsVertex in [[stage_in]], constant uint4 *zs_words [[buffer(0)]], constant ZsParams &zp [[buffer(1)]], constant float2 &zs_origin [[buffer(2)]], texture2d<float> zs_content [[texture(0)]]) {
+        \\    return zs_main(ZS_PASS in.position - float4(zs_origin, 0.0, 0.0));
+        \\}
+        \\
+        ,
     });
     return out.toOwnedSliceSentinel(0);
 }
@@ -349,13 +395,17 @@ test "host source wraps a translation for each kind, target and language" {
         var diagnostic: shader.Diagnostic = .{};
         const program = try shader.compile(allocator, text_source, .{}, &diagnostic);
         defer program.destroy();
-        for ([_]Language{ .hlsl, .glsl }) |language| {
+        for ([_]Language{ .hlsl, .glsl, .msl }) |language| {
             var translation = try shader.gpu.translate(allocator, program, language);
             defer translation.deinit();
             for ([_]Target{ .element, .backdrop }) |target| {
                 const text = try source(allocator, &translation, program.kind, target, language);
                 defer allocator.free(text);
-                try std.testing.expect(std.mem.indexOf(u8, text, if (language == .hlsl) "float4 main(float4 at : SV_Position) : SV_Target" else "void main()") != null);
+                try std.testing.expect(std.mem.indexOf(u8, text, switch (language) {
+                    .hlsl => "float4 main(float4 at : SV_Position) : SV_Target",
+                    .glsl => "void main()",
+                    .msl => "fragment float4 zs_fragment(",
+                }) != null);
                 try std.testing.expect(std.mem.indexOf(u8, text, "bool zs_run(") != null);
                 try std.testing.expect(std.mem.indexOf(u8, text, "zs_plane(") != null);
             }

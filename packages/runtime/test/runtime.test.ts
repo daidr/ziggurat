@@ -91,13 +91,19 @@ class FakeHost {
 let host: FakeHost;
 let runtime: typeof import("../src/index");
 const style = new Map<string, string>();
+const attributes = new Map<string, string>();
 
 beforeEach(async () => {
   host = new FakeHost();
   style.clear();
+  attributes.clear();
   (globalThis as Record<string, unknown>).chrome = { webview: host.transport };
   (globalThis as Record<string, unknown>).document = {
-    documentElement: { style: { setProperty: (n: string, v: string) => style.set(n, v), removeProperty: (n: string) => style.delete(n) } },
+    documentElement: {
+      style: { setProperty: (n: string, v: string) => style.set(n, v), removeProperty: (n: string) => style.delete(n) },
+      setAttribute: (n: string, v: string) => attributes.set(n, v),
+      removeAttribute: (n: string) => attributes.delete(n),
+    },
   };
   delete (globalThis as Record<symbol, unknown>)[Symbol.for("ziggurat.runtime")];
   runtime = await import(`../src/index.ts?${Math.random()}`);
@@ -124,7 +130,8 @@ test("connect performs one handshake per document", async () => {
   expect(style.get("--ziggurat-accent")).toBe("#0a84ff");
   expect(style.get("--ziggurat-text-scale")).toBe("1");
   // The runtime keeps the locale and preferences current itself.
-  expect([...host.subscriptions.keys()].sort()).toEqual(["locale", "preferences"]);
+  expect([...host.subscriptions.keys()].sort()).toEqual(["locale", "preferences", "windowActive"]);
+  expect(runtime.windowActive()).toBe(true);
 });
 
 test("outside a window everything rejects", async () => {
@@ -162,6 +169,17 @@ test("locale and preference changes update the runtime before page listeners run
   off();
   host.emit("locale", { locale: "en", dir: "ltr" });
   expect(seen.length).toBe(1);
+});
+
+test("an inactive window marks the document and tells its listeners", async () => {
+  await runtime.connect();
+  const seen: string[] = [];
+  runtime.onWindowActive((active) => seen.push(`${active}/${runtime.windowActive()}/${attributes.has("data-ziggurat-window-inactive")}`));
+  await tick();
+  host.emit("windowActive", { active: false });
+  host.emit("windowActive", { active: true });
+  expect(seen).toEqual(["false/false/true", "true/true/false"]);
+  expect(attributes.has("data-ziggurat-window-inactive")).toBe(false);
 });
 
 test("listeners added before the connection subscribe once it exists", async () => {

@@ -7,6 +7,8 @@ const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const animation = @import("ziggurat_animation");
+pub const matched = @import("matched.zig");
+pub const Match = matched.Match;
 
 pub const layout = ui.layout;
 pub const Rect = ui.Rect;
@@ -42,6 +44,8 @@ pub const IconOptions = image_nodes.IconOptions;
 pub const SvgPicture = image_nodes.SvgPicture;
 pub const IconPainter = image_nodes.IconPainter;
 pub const Graphic = image_nodes.Graphic;
+pub const imageSize = image_nodes.imageSize;
+pub const svgSize = image_nodes.svgSize;
 pub const icons = @import("icons.zig");
 const pointer_controls = @import("pointer_area.zig");
 const menu_controls = @import("menu.zig");
@@ -170,6 +174,11 @@ pub const Style = struct {
     /// in perspective about `pose.origin` within the node's box. Hit
     /// testing, focus and semantics keep the arranged box.
     pose: ?ui.effects.Pose = null,
+    /// An identity the node shares with another, as a photo's thumbnail
+    /// and the photo in its detail view: appearing where another node with
+    /// the same key showed in the frame before, it comes from there; see
+    /// `matched.zig`. Needs `Host.prepareShaderEffects`, like `pose`.
+    match: ?Match = null,
     /// A shader program that rewrites how the node and its descendants
     /// draw; see `ui.Frame.beginEffect`. Opacity and pose need
     /// `Host.prepareShaderEffects`; without it they and `effect` draw the
@@ -692,8 +701,10 @@ pub const EmbedInput = union(enum) {
     /// the release, moves arrive as `pointer_drag` and the release as
     /// `pointer_up` wherever the pointer is, even outside the leaf or the
     /// window. A press the window loses instead, through focus loss or a
-    /// cancelled capture, ends with `pointer_cancel`. A leaf that is no
-    /// longer built loses its capture and sees nothing more.
+    /// cancelled capture, ends with `pointer_cancel`, and so does the press
+    /// of a leaf the application builds again under another id, as one the
+    /// press moved into another container. A leaf that is no longer built
+    /// at all loses its capture and sees nothing more.
     pointer_down: PointerPress,
     pointer_drag: PointerDrag,
     pointer_up: Point,
@@ -1220,6 +1231,9 @@ pub const Capture = struct {
     position: Point,
     modifiers: z.KeyModifiers = .{},
     dragging: bool = false,
+    /// The context of the embedded leaf that took the press, to end the
+    /// press of a leaf the application built again under another id.
+    embed_context: ?*anyopaque = null,
 };
 
 /// What the view did with pointer input it routed; the caller delivers the
@@ -1279,6 +1293,8 @@ pub const View = struct {
     now: u64 = 0,
     /// The earliest time a build asked to run again, or null; see `wakeAt`.
     wake: ?u64 = null,
+    /// Shared elements on their way; see `Style.match`.
+    matches: matched.State = .{},
     /// Keyboard focus at the start of this pass, set by the host.
     focus: ?u64 = null,
     /// A control the host should focus after this pass, such as a combo box
@@ -1288,6 +1304,9 @@ pub const View = struct {
     focus_request: ?u64 = null,
     /// The window has the keyboard, set by the host from focus events.
     window_focused: bool = true,
+    /// The window is drawn as active (`ui.Context.windowActive`), set by
+    /// the host before each pass.
+    window_active: bool = true,
     /// Hover or focus time before a tooltip appears, in nanoseconds.
     tooltip_delay: u64 = 500 * std.time.ns_per_ms,
     preferences: Preferences = .{},
@@ -3191,7 +3210,7 @@ pub const View = struct {
             const count: u8 = if (again) last.count +| 1 else 1;
             self.last_press = .{ .id = entry.id, .time = now, .at = point, .count = count };
             if (entry.embed.input.?(entry.embed.context, entry.id, .{ .pointer_down = .{ .position = local(entry, point), .count = count, .modifiers = modifiers } })) {
-                self.capture = .{ .target = .{ .embed = entry.id }, .origin = point, .position = point, .modifiers = modifiers };
+                self.capture = .{ .target = .{ .embed = entry.id }, .origin = point, .position = point, .modifiers = modifiers, .embed_context = entry.embed.context };
                 result.consumed = true;
                 result.repaint = true;
                 result.settle = true;
@@ -3317,7 +3336,11 @@ pub const View = struct {
                 // An item dropped where it is stays.
                 if (to != value.from and to != value.from + 1) result.push(.{ .reorder = .{ .id = value.list, .move = .{ .from = value.from, .to = to } } });
             },
-            .select => {},
+            // The drag reaches the row the pointer let go over, though no
+            // move came there before the release.
+            .select => |value| if (self.rowUnder(value.collection, point)) |under| if (under != value.last) {
+                result.push(.{ .item = .{ .collection = value.collection, .item = under, .op = .drag, .anchor = value.item, .add = value.add } });
+            },
         }
         return result;
     }
@@ -3562,6 +3585,15 @@ pub const View = struct {
         if (self.now >= due) self.tip_index = candidate else self.wakeAt(due);
     }
 
+    /// Whether the window is drawn as active: it has the keyboard, or the
+    /// application keeps it looking so (`Host.setActiveAppearance`). The
+    /// built-in controls draw their accent in the theme's
+    /// `inactive_accent` while it is not; a build may dim its own accents
+    /// the same way. A change runs a new pass.
+    pub fn windowActive(self: *const View) bool {
+        return self.window_active;
+    }
+
     /// Add a self-describing leaf; see `Embed`.
     pub fn embed(self: *View, content: Embed, style: Style) Error!void {
         const node = try self.append(.embed, style);
@@ -3672,6 +3704,15 @@ pub const View = struct {
         };
     }
 
+    fn cancelMovedEmbed(self: *View, context: *anyopaque) void {
+        for (self.buffers.nodes[0..self.len]) |*node| if (node.kind == .embed) if (node.embed) |content| {
+            if (content.context != context) continue;
+            const input = content.input orelse return;
+            _ = input(context, node.id, .pointer_cancel);
+            return;
+        };
+    }
+
     fn captureBuilt(self: *const View, target: Capture.Target) bool {
         for (self.buffers.nodes[0..self.len]) |*node| switch (target) {
             .embed => |id| if (node.id == id and node.kind == .embed and node.embed.?.input != null) return true,
@@ -3697,6 +3738,11 @@ pub const View = struct {
         if (self.capture) |capture| if (!self.captureBuilt(capture.target)) {
             self.capture = null;
             self.drop_over = null;
+            // The same leaf built under another id, as when the press moved
+            // it into another container, ends its press, so that the next
+            // press is a press of its own rather than the release it waits
+            // for. One no longer built at all is not called again.
+            if (capture.target == .embed) if (capture.embed_context) |context| self.cancelMovedEmbed(context);
         };
         menu_controls.finish(self);
         // A combo box that is no longer built cannot keep its list open.
@@ -3932,6 +3978,9 @@ pub const View = struct {
             if (try self.revealNode(id)) try self.place();
         }
         self.record(measurer);
+        // Shared elements move what is drawn, not the arranged boxes input
+        // routing just recorded.
+        if (self.matches.apply(all, self.now, self.preferences.reduce_motion)) |deadline| self.wakeAt(deadline);
     }
     fn measure(self: *View, window_theme: Theme, measurer: Measurer) Error!void {
         const all = self.buffers.nodes[0..self.len];
@@ -5374,6 +5423,12 @@ pub const Host = struct {
     pub fn prepareBackdropEffects(self: *Host, allocator: std.mem.Allocator, options: ui.backdrop_effects.Options) !void {
         try self.context.prepareBackdropEffects(allocator, options);
     }
+    /// Keep the window drawn as active while another window or application
+    /// has the keyboard; see `ui.Context.setActiveAppearance`.
+    pub fn setActiveAppearance(self: *Host, enabled: bool) void {
+        self.context.setActiveAppearance(enabled);
+        self.view.window_active = self.context.windowActive();
+    }
     /// Lay the window out in `value` from the next pass, such as after the
     /// application's language changed, and repaint.
     pub fn setDirection(self: *Host, value: Direction) void {
@@ -5549,6 +5604,7 @@ pub const Host = struct {
         self.context.on_input = onInput;
         self.context.on_key_release = onKeyRelease;
         self.context.on_unhandled_key = onUnhandledKey;
+        self.context.on_command_enabled = onCommandEnabled;
         try self.context.attach(window);
     }
     /// Attach as the full-window backdrop of a composition Owner, under the
@@ -5560,6 +5616,7 @@ pub const Host = struct {
         self.context.on_input = onInput;
         self.context.on_key_release = onKeyRelease;
         self.context.on_unhandled_key = onUnhandledKey;
+        self.context.on_command_enabled = onCommandEnabled;
         return self.context.attachBackdrop(owner);
     }
 
@@ -5656,6 +5713,17 @@ pub const Host = struct {
     /// Route popup, tooltip and toast input before the Context, follow
     /// presses that leaves capture or that drag, and send a wheel event to
     /// the leaf or the innermost visible scroll container under it.
+    /// Outside text fields, which answer for themselves, an Edit command
+    /// acts only on focused embedded content, which takes every key.
+    fn onCommandEnabled(ptr: *anyopaque, context: *ui.Context, _: z.EditCommand) bool {
+        const self: *Host = @ptrCast(@alignCast(ptr));
+        const focused = context.input_state.focused orelse return false;
+        for (self.view.overlay.anchors[0..self.view.overlay.anchor_count]) |anchor| {
+            if (anchor.id != focused and anchor.input != focused) continue;
+            return anchor.embed != null;
+        }
+        return false;
+    }
     fn onInput(ptr: *anyopaque, _: *ui.Context, event: z.Event) bool {
         const self: *Host = @ptrCast(@alignCast(ptr));
         if (self.building) return false;
@@ -5942,6 +6010,7 @@ pub const Host = struct {
                 self.view.source_of = if (tools.open) tools.selected else 0;
                 self.view.source_len = 0;
             }
+            self.view.window_active = self.context.windowActive();
             try self.pass(null);
             break :blk if (lap) |*timer| timer.lap() else 0;
         };
@@ -6589,6 +6658,75 @@ test {
     _ = @import("inspector_tests.zig");
     _ = @import("gradient.zig");
     _ = @import("style_tests.zig");
+    _ = @import("matched.zig");
+}
+
+test "a shared element comes from where its match showed in the frame before" {
+    var storage: Storage(16, 64) = .{};
+    var view = View.init(storage.buffers());
+    const Pass = struct {
+        fn run(v: *View, now: u64, detail: bool, fly: bool) !void {
+            v.reset(.{}, null);
+            v.now = now;
+            const tween: animation.Motion = .{ .tween = .{ .duration_ns = 100, .easing = .linear } };
+            try v.column(.{ .padding = .{} });
+            if (detail) {
+                // The page going away is still built while the other flies.
+                if (fly and now < 3200) try v.column(.{ .key = 1, .width = 40, .height = 40, .background = 0xff0000, .match = .{ .key = 7, .motion = tween, .fly = true } }) else try v.column(.{ .key = 9, .height = 10 });
+                try v.end();
+                try v.column(.{ .key = 2, .width = 200, .height = 100, .background = 0x0000ff, .radius = 0, .match = .{ .key = 7, .motion = tween, .fly = fly } });
+            } else {
+                try v.column(.{ .key = 1, .width = 40, .height = 40, .background = 0xff0000, .radius = 8, .match = .{ .key = 7, .motion = tween, .fly = fly } });
+            }
+            try v.end();
+            try v.end();
+            try v.finish();
+            try v.arrange(.{ .x = 0, .y = 0, .width = 400, .height = 300 }, .{}, .{});
+        }
+        fn find(v: *View, wanted: u64) *Node {
+            for (v.buffers.nodes[0..v.len]) |*node| if (node.style.key == wanted) return node;
+            unreachable;
+        }
+    };
+    try Pass.run(&view, 1000, false, false);
+    try std.testing.expect(view.wake == null);
+    try Pass.run(&view, 1000, true, false);
+    // At first the detail is drawn in the thumbnail's box and look.
+    var detail = Pass.find(&view, 2);
+    try std.testing.expect(view.wake != null);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.2), detail.style.pose.?.scale_x, 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 8), detail.style.radius, 1e-4);
+    try std.testing.expectEqual(@as(?u32, 0xff0000), detail.style.background);
+    try Pass.run(&view, 1050, true, false);
+    detail = Pass.find(&view, 2);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.6), detail.style.pose.?.scale_x, 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 4), detail.style.radius, 1e-4);
+    try Pass.run(&view, 1100, true, false);
+    detail = Pass.find(&view, 2);
+    try std.testing.expect(detail.style.pose == null);
+    try std.testing.expectEqual(@as(?u32, 0x0000ff), detail.style.background);
+    try std.testing.expect(view.wake == null);
+    // Back to the grid: the thumbnail comes from the detail.
+    try Pass.run(&view, 2000, false, false);
+    try std.testing.expectApproxEqAbs(@as(f32, 5), Pass.find(&view, 1).style.pose.?.scale_x, 1e-4);
+    try Pass.run(&view, 2100, false, false);
+    // Flying, the one coming is opaque by half the way and the other,
+    // still built, goes with it and fades over the second half.
+    try Pass.run(&view, 3000, true, true);
+    try Pass.run(&view, 3025, true, true);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), Pass.find(&view, 2).style.opacity, 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), Pass.find(&view, 1).style.opacity, 1e-4);
+    try Pass.run(&view, 3075, true, true);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), Pass.find(&view, 2).style.opacity, 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), Pass.find(&view, 1).style.opacity, 1e-4);
+    // Once there, the one it left, still built, never flies back.
+    try Pass.run(&view, 3100, true, true);
+    try Pass.run(&view, 3150, true, true);
+    try std.testing.expect(!view.matches.moving() and Pass.find(&view, 1).style.pose == null and Pass.find(&view, 2).style.pose == null);
+    // Reduced motion: in place at once.
+    view.preferences.reduce_motion = true;
+    try Pass.run(&view, 4000, false, false);
+    try std.testing.expect(Pass.find(&view, 1).style.pose == null);
 }
 
 test "embedded leaves measure themselves and paint in order" {

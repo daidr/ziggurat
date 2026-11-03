@@ -1813,6 +1813,9 @@ pub const TableState = struct {
 
     fn pointerUp(self: *TableState, point: Point) bool {
         const core = &self.core;
+        // A drag choosing rows or moving one reaches where the pointer let
+        // go, though no move came there before the release.
+        core.dragTo(point);
         // A copy, not an alias of the field cleared next.
         var pressed = core.press;
         _ = &pressed;
@@ -2403,6 +2406,7 @@ pub const GridState = struct {
                 }
             },
             .pointer_up => |point| {
+                core.dragTo(point);
                 // A copy, not an alias of the field cleared next.
                 var pressed = core.press;
                 _ = &pressed;

@@ -429,6 +429,20 @@ test "dragging over rows chooses them and scrolls near the edge" {
     try testing.expectEqual(kept, app.selection.len);
 }
 
+test "a drag over rows reaches the row it is released over, without a move there" {
+    var app: Files = .{};
+    app.init(.multiple);
+    app.options.drag_select = true;
+    var f: Fixture = .{};
+    try f.start(&app);
+    const b = (try f.leaf()).bounds;
+    try f.h.press(b.x + 50, b.y + Fixture.rowY(1), .{});
+    try f.h.moveTo(b.x + 50, b.y + Fixture.rowY(2));
+    try f.h.release(b.x + 50, b.y + Fixture.rowY(4));
+    try testing.expect(!app.selecting);
+    try testing.expectEqualSlices(u64, &.{ 17, 27, 37, 47 }, app.selection.items());
+}
+
 test "rows drag to another place" {
     var app: Files = .{};
     app.init(.multiple);
@@ -444,6 +458,12 @@ test "rows drag to another place" {
     try f.h.advance(std.time.ns_per_s);
     try f.h.drag(b.x + 50, b.y + Fixture.rowY(2), b.x + 50, b.y + Fixture.rowY(2) + 8, 3);
     try testing.expect(app.moved == null);
+    // Released where no move came, it goes where it was let go.
+    try f.h.advance(std.time.ns_per_s);
+    try f.h.press(b.x + 50, b.y + Fixture.rowY(1), .{});
+    try f.h.moveTo(b.x + 50, b.y + Fixture.rowY(2));
+    try f.h.release(b.x + 50, b.y + 28 + 28 * 4 + 2);
+    try testing.expectEqual(collections.Move{ .row = 1, .to = 4, .selection = true }, app.moved.?);
 }
 
 const sheet_columns = [_]collections.Column{

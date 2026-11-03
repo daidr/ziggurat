@@ -95,12 +95,25 @@ pub const Graphic = struct {
     mirrored: bool = false,
 };
 
+/// The size `image` shows a bitmap at by default, in DIP: its pixels.
+/// Zero by zero for a view without levels.
+pub fn imageSize(picture: ImageView) Size {
+    const level = if (picture.levels.len > 0) picture.levels[0] else return .{};
+    return .{ .width = @floatFromInt(level.width), .height = @floatFromInt(level.height) };
+}
+
+/// The size `svg` shows a vector picture at by default, in DIP: the size
+/// it says it has.
+pub fn svgSize(picture: SvgPicture) Size {
+    return .{ .width = picture.width, .height = picture.height };
+}
+
 /// A decoded, prepared and uploaded bitmap; see `ImageOptions`. It is its
 /// size in pixels as DIP unless `Style.width`/`height` say otherwise, and
 /// shrinks to nothing in a crowded row.
 pub fn image(v: *View, picture: ImageView, options: ImageOptions, style: Style) Error!void {
-    const level = if (picture.levels.len > 0) picture.levels[0] else return error.InvalidValue;
-    try leaf(v, .image, .{ .source = .{ .bitmap = picture }, .natural = .{ .width = @floatFromInt(level.width), .height = @floatFromInt(level.height) } }, options, style);
+    if (picture.levels.len == 0) return error.InvalidValue;
+    try leaf(v, .image, .{ .source = .{ .bitmap = picture }, .natural = imageSize(picture) }, options, style);
 }
 
 /// A vector picture at the size it is laid out at; see `ImageOptions`.

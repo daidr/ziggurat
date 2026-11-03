@@ -61,6 +61,9 @@ pub const Registration = struct {
     blur: *const fn (*anyopaque, z.Window) anyerror!void,
     input: *const fn (*anyopaque, *EventScope, z.Event) anyerror!Result,
     action: *const fn (*anyopaque, *EventScope, Action) anyerror!Result,
+    /// Whether an Edit command would act on the field now, for a menu to
+    /// enable its item; asking changes nothing. Null takes every command.
+    command_enabled: ?*const fn (*anyopaque, z.EditCommand) bool = null,
 };
 pub const Kind = enum { text, control };
 pub const ControlResult = struct { handled: bool = false, changed: bool = false, input_error: ?anyerror = null, presentation_error: ?anyerror = null };
@@ -201,6 +204,24 @@ pub const Workspace = struct {
         const value = self.lookupSlot(key) catch return false;
         const registration = value.registration orelse return false;
         return !self.closed_kinds[@backingInt(std.meta.activeTag(registration))];
+    }
+    /// Whether the live text field `id` would act on `command`; null when
+    /// no text field has that id, as a focused control.
+    pub fn commandEnabled(self: *Workspace, id: u64, command: z.EditCommand) ?bool {
+        if (self.closed or self.closed_kinds[@backingInt(Kind.text)]) return null;
+        for (self.slots) |*slot| {
+            if (slot.serial == 0 or slot.id != id) continue;
+            const recipient = slot.registration orelse continue;
+            const text = switch (recipient) {
+                .text => |value| value,
+                .control => return null,
+            };
+            const callback = text.command_enabled orelse return true;
+            slot.pins += 1;
+            defer slot.pins -= 1;
+            return callback(text.context, command);
+        }
+        return null;
     }
     pub fn kind(self: *Workspace, key: Key) !Kind {
         if (!self.current(key)) return error.StaleTextField;

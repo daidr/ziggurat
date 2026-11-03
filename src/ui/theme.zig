@@ -14,6 +14,9 @@ pub const Palette = struct {
     text: u32 = 0x182430,
     disabled_text: u32 = 0x7e8790,
     accent: u32 = 0x276aa5,
+    /// The accent of a window that does not have the keyboard: a gray, as
+    /// native applications draw selections and checked controls there.
+    inactive_accent: u32 = 0x8c8c8c,
     disabled_accent: u32 = 0x9aa7b3,
     on_accent: u32 = 0xffffff,
     trough: u32 = 0xe5e9ed,
@@ -55,6 +58,7 @@ pub const Theme = struct {
             .text = 0xf0f3f6,
             .disabled_text = 0x9ba5af,
             .accent = 0x5da9ed,
+            .inactive_accent = 0x8a8a8a,
             .disabled_accent = 0x626e7a,
             .on_accent = 0x102438,
             .trough = 0x323c46,
@@ -78,6 +82,7 @@ pub const Theme = struct {
             .text = 0xffffff,
             .disabled_text = 0xaaaaaa,
             .accent = 0xffff00,
+            .inactive_accent = 0xffff00,
             .disabled_accent = 0xaaaaaa,
             .on_accent = 0x000000,
             .trough = 0x000000,

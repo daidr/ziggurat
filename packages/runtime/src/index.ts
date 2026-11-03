@@ -69,6 +69,13 @@ export interface Runtime {
   readonly locale: string;
   readonly dir: Direction;
   readonly preferences: Preferences;
+  /**
+   * Whether the window is drawn as active: it has the keyboard, or the app
+   * keeps it looking so. While it is not, `<html>` carries the
+   * `data-ziggurat-window-inactive` attribute, so that styles dim accents
+   * as native controls do.
+   */
+  readonly windowActive: boolean;
   /** The services the host offers this page: "runtime" and "plugin:<name>". */
   readonly services: readonly string[];
 }
@@ -117,6 +124,8 @@ interface Configuration {
   locale: string;
   dir: Direction;
   preferences: Preferences;
+  /** Missing from hosts that predate it: active. */
+  windowActive?: boolean;
   services: Record<string, string>;
 }
 
@@ -224,6 +233,7 @@ function establish(webview: MessageTransport, configuration: Configuration): Con
     locale: configuration.locale,
     dir: configuration.dir === "rtl" ? "rtl" : "ltr",
     preferences: Object.freeze({ ...configuration.preferences }),
+    windowActive: configuration.windowActive !== false,
     services: Object.freeze(Object.keys(configuration.services)),
   } as { -readonly [K in keyof Runtime]: Runtime[K] };
   const connection: Connection = { runtime, client, clients, sessions: Object.freeze({ ...configuration.services }) };
@@ -238,12 +248,30 @@ function establish(webview: MessageTransport, configuration: Configuration): Con
     runtime.preferences = Object.freeze({ ...preferences });
     apply(runtime);
   });
+  client.on("windowActive", ({ active }) => {
+    if (runtime.windowActive === active) return;
+    runtime.windowActive = active;
+    apply(runtime);
+    const target = globalThis as { dispatchEvent?(event: unknown): boolean; CustomEvent?: new (type: string, init: { detail: unknown }) => unknown };
+    if (target.dispatchEvent && target.CustomEvent) target.dispatchEvent(new target.CustomEvent("ziggurat:window-active", { detail: { active } }));
+  });
   return connection;
 }
 
-/** Mirrors the preferences into CSS variables of `:root`. */
+interface Root {
+  style?: { setProperty(name: string, value: string): void; removeProperty(name: string): void };
+  setAttribute?(name: string, value: string): void;
+  removeAttribute?(name: string): void;
+}
+
+/**
+ * Mirrors the preferences into CSS variables of `:root`, and an inactive
+ * window into its `data-ziggurat-window-inactive` attribute.
+ */
 function apply(runtime: Runtime): void {
-  const root = (globalThis as { document?: { documentElement?: { style?: { setProperty(name: string, value: string): void; removeProperty(name: string): void } } } }).document?.documentElement;
+  const root = (globalThis as { document?: { documentElement?: Root } }).document?.documentElement;
+  if (runtime.windowActive) root?.removeAttribute?.("data-ziggurat-window-inactive");
+  else root?.setAttribute?.("data-ziggurat-window-inactive", "");
   const style = root?.style;
   if (!style) return;
   if (runtime.preferences.accent) style.setProperty("--ziggurat-accent", runtime.preferences.accent);
@@ -316,6 +344,21 @@ function listen<K extends keyof Events>(name: K, listener: (value: Events[K]) =>
 /** Hears changes of the app's language. Returns a function that stops. */
 export function onLocaleChange(listener: (locale: string, dir: Direction) => void): () => void {
   return listen("locale", (change) => listener(change.locale, change.dir));
+}
+
+/** Whether the window is drawn as active; throws before {@link connect}. */
+export function windowActive(): boolean {
+  return runtime().windowActive;
+}
+
+/**
+ * Hears the window become active or inactive, after {@link windowActive}
+ * and the `<html>` attribute changed. The window also receives a
+ * `ziggurat:window-active` event with `{ active }` as its detail. Returns a
+ * function that stops.
+ */
+export function onWindowActive(listener: (active: boolean) => void): () => void {
+  return listen("windowActive", ({ active }) => listener(active));
 }
 
 /** Hears changes of the desktop's preferences. Returns a function that stops. */

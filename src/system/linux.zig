@@ -6,6 +6,7 @@ const std = @import("std");
 const z = @import("ziggurat");
 const types = @import("types.zig");
 const menus = @import("menus.zig");
+const roles = @import("menu_roles.zig");
 const picker = @import("picker.zig");
 const desktop = @import("desktop.zig");
 
@@ -22,6 +23,7 @@ extern fn zsl_menubar_set(?*anyopaque, [*]const NativeItem, u32, [*]const u8, ?*
 extern fn zsl_menubar_state(*anyopaque, i32, c_int, c_int, c_int) c_int;
 extern fn zsl_menubar_icon(*anyopaque, i32, ?*anyopaque) c_int;
 extern fn zsl_menubar_remove(*anyopaque, c_int) void;
+extern fn zsl_menubar_edit(*anyopaque, [*]const u8, u32, *const fn (?*anyopaque, u64, i32) callconv(.c) c_int) void;
 extern fn zsl_chooser_show(?*anyopaque, c_int, [*]const [*:0]const u8, u32, [*:0]const u8, ?*anyopaque, u64, Done, *c_int) ?*anyopaque;
 extern fn zsl_chooser_path(*anyopaque, u32, *?[*]const u8, *usize) void;
 extern fn zsl_chooser_cancel(*anyopaque) void;
@@ -247,11 +249,16 @@ pub const Owner = struct {
         const serial = try self.nextSerial();
         var failure: c_int = 0;
         const bar = zsl_menubar_set(window.nativeHandle(), &native_items, @intCast(items.len), &effective, self, serial, barDone, &failure) orelse return if (failure == 2) error.Busy else error.MenuAttachFailed;
+        var edit: [types.max_menu_items]u8 = @splat(0);
+        for (entries[0..commands], 0..) |entry, index| if (roles.Role.fromId(entry.id)) |role| {
+            edit[index] = @intFromBool(role.editCommand() != null);
+        };
         const old = self.bar;
         self.bar = bar;
         self.bar_serial = serial;
         @memcpy(self.bar_entries[0..commands], entries[0..commands]);
         self.bar_count = commands;
+        zsl_menubar_edit(bar, &edit, @intCast(commands), barQuery);
         if (old) |value| zsl_menubar_remove(value, 0);
     }
     pub fn clearMenu(self: *Owner) !void {
@@ -295,6 +302,16 @@ pub const Owner = struct {
             return;
         };
         return error.MenuItemNotFound;
+    }
+    /// Whether the focus would act on the Edit role of the bar's command,
+    /// as its menu opens or before its shortcut runs.
+    fn barQuery(ptr: ?*anyopaque, serial: u64, command: i32) callconv(.c) c_int {
+        const self: *Owner = @ptrCast(@alignCast(ptr.?));
+        if (serial != self.bar_serial or command < 0 or @as(usize, @intCast(command)) >= self.bar_count) return 1;
+        const window = self.window orelse return 0;
+        const role = roles.Role.fromId(self.bar_entries[@intCast(command)].id) orelse return 1;
+        const edit = role.editCommand() orelse return 1;
+        return @intFromBool(window.commandEnabled(edit));
     }
     fn barDone(ptr: ?*anyopaque, serial: u64, command: i32) callconv(.c) void {
         const self: *Owner = @ptrCast(@alignCast(ptr.?));
