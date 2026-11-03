@@ -775,6 +775,74 @@ pub const Renderer = struct {
             _ = try drawing.planTexture(view, .{ .x = value.destination.x, .y = value.destination.y, .width = value.destination.width, .height = value.destination.height }, value.options(), zmtl_scale(self.native.?));
         };
     }
+    /// The masked clips open while a list replays: each drawing inside is
+    /// masked by itself, as the software planes do (`mask_mix`). Drawings
+    /// that do not overlap gather into one run drawn in a group masked by
+    /// each clip of their layer; a group, transform or effect is one
+    /// drawing of the layer it composites onto.
+    const MaskRuns = struct {
+        const Scope = struct { clip: commands.MaskClip, level: usize };
+        scopes: [32]Scope = undefined,
+        len: usize = 0,
+        /// Groups open for the run now; 0 while none is.
+        groups: usize = 0,
+        boxes: [32]damage.Box = undefined,
+        box_len: usize = 0,
+        whole: bool = false,
+        /// The mask groups opened beneath each open layer, by its level.
+        spans: [max_capture_depth + 2]usize = @splat(0),
+
+        fn masked(self: *const MaskRuns, level: usize) bool {
+            for (self.scopes[0..self.len]) |scope| if (scope.level == level) return true;
+            return false;
+        }
+        fn openGroups(self: *MaskRuns, r: *Renderer, level: usize, coverage_resources: []const drawing.CoverageView, filters: []const gaussian.View) !usize {
+            var count: usize = 0;
+            for (self.scopes[0..self.len]) |scope| if (scope.level == level) {
+                try r.beginGroup(.{ .bounds = scope.clip.bounds, .mask_origin = scope.clip.origin, .mask_resource = scope.clip.mask }, coverage_resources, filters);
+                count += 1;
+            };
+            return count;
+        }
+        fn closeGroups(native: *anyopaque, count: usize) !void {
+            for (0..count) |_| if (zmtl_end_group(native) != 0) return error.GraphicsFailed;
+        }
+        fn flush(self: *MaskRuns, r: *Renderer) !void {
+            const count = self.groups;
+            self.groups = 0;
+            self.box_len = 0;
+            self.whole = false;
+            try closeGroups(r.native.?, count);
+        }
+        fn draw(self: *MaskRuns, r: *Renderer, level: usize, box: ?damage.Box, coverage_resources: []const drawing.CoverageView, filters: []const gaussian.View) !void {
+            if (!self.masked(level)) return;
+            if (self.groups != 0) {
+                var overlap = self.whole or box == null or self.box_len == self.boxes.len;
+                if (!overlap) for (self.boxes[0..self.box_len]) |kept| if (kept.intersects(box.?)) {
+                    overlap = true;
+                    break;
+                };
+                if (overlap) try self.flush(r);
+            }
+            if (self.groups == 0) self.groups = try self.openGroups(r, level, coverage_resources, filters);
+            if (box) |b| {
+                self.boxes[self.box_len] = b;
+                self.box_len += 1;
+            } else self.whole = true;
+        }
+        fn beginSpan(self: *MaskRuns, r: *Renderer, level: usize, coverage_resources: []const drawing.CoverageView, filters: []const gaussian.View) !void {
+            try self.flush(r);
+            if (level + 1 >= self.spans.len) return error.LayerDepthExceeded;
+            self.spans[level + 1] = if (self.masked(level)) try self.openGroups(r, level, coverage_resources, filters) else 0;
+        }
+        /// After the layer at `level` + 1 ended.
+        fn endSpan(self: *MaskRuns, r: *Renderer, level: usize) !void {
+            if (level + 1 >= self.spans.len) return;
+            const count = self.spans[level + 1];
+            self.spans[level + 1] = 0;
+            try closeGroups(r.native.?, count);
+        }
+    };
     fn replayAll(self: *Renderer, ops: []const commands.Command, text: []const u8, resources: []const commands.brushes.Stored, prepared: []const drawing.PreparedTextView, image_resources: []const drawing.ImageView, coverage_resources: []const drawing.CoverageView, textures: []const drawing.TextureView, transforms: []const layers.NativeTransform, filters: []const gaussian.View) !void {
         if (!self.active) return error.NotDrawing;
         const native = self.native.?;
@@ -783,16 +851,51 @@ pub const Renderer = struct {
         for (resources) |*resource| try resource.validate();
         var depth: usize = 0;
         defer while (depth != 0) : (depth -= 1) zmtl_pop_clip(native);
-        // The clips open that are masked, a bit for each depth: each draws
-        // as a group masked by its coverage, inside its rectangle.
+        // The clips open that are masked, a bit for each depth.
         var masked: u32 = 0;
+        var runs: MaskRuns = .{};
+        const box_sources: damage.Sources = .{ .prepared = prepared, .coverage = coverage_resources, .indicators = if (self.effect_buffer) |buffer| buffer.indicator_storage[0..buffer.indicator_len] else &.{} };
+        const box_scale = zmtl_scale(native);
         var effect_stack: [max_capture_depth]OpenEffect = undefined;
         var effect_depth: usize = 0;
         var transform_stack: [max_capture_depth]layers.NativeTransform = undefined;
         var transform_depth: usize = 0;
         var group_depth: usize = 0;
         var words: [shader_effects.shader.gpu.max_input_words]u32 = undefined;
-        for (ops) |op| switch (op) {
+        for (ops) |op| {
+            const level = group_depth + transform_depth + effect_depth;
+            if (runs.len != 0) switch (op) {
+                .fill, .shape, .gradient, .text, .prepared_text, .coverage, .image, .indicator, .texture => try runs.draw(self, level, damage.commandBox(op, box_sources, box_scale), coverage_resources, filters),
+                .backdrop, .backdrop_shader => {
+                    try runs.flush(self);
+                    try runs.draw(self, level, null, coverage_resources, filters);
+                },
+                .push_clip, .push_mask_clip, .pop_clip, .end_group, .end_transform, .end_effect => try runs.flush(self),
+                .begin_group, .begin_transform, .effect => try runs.beginSpan(self, level, coverage_resources, filters),
+            };
+            try self.replayOne(op, text, resources, prepared, image_resources, coverage_resources, textures, transforms, filters, &runs, &depth, &masked, &effect_stack, &effect_depth, &transform_stack, &transform_depth, &group_depth, &words);
+        }
+        try runs.flush(self);
+        if (depth != 0) return error.UnbalancedClips;
+        if (effect_depth != 0) return error.UnbalancedEffects;
+        if (group_depth != 0) return error.UnbalancedGroups;
+        if (transform_depth != 0) return error.UnbalancedTransforms;
+    }
+    fn replayOne(self: *Renderer, op: commands.Command, text: []const u8, resources: []const commands.brushes.Stored, prepared: []const drawing.PreparedTextView, image_resources: []const drawing.ImageView, coverage_resources: []const drawing.CoverageView, textures: []const drawing.TextureView, transforms: []const layers.NativeTransform, filters: []const gaussian.View, runs: *MaskRuns, depth_ptr: *usize, masked_ptr: *u32, effect_stack: *[max_capture_depth]OpenEffect, effect_depth_ptr: *usize, transform_stack: *[max_capture_depth]layers.NativeTransform, transform_depth_ptr: *usize, group_depth_ptr: *usize, words: *[shader_effects.shader.gpu.max_input_words]u32) !void {
+        const native = self.native.?;
+        var depth = depth_ptr.*;
+        var masked = masked_ptr.*;
+        var effect_depth = effect_depth_ptr.*;
+        var transform_depth = transform_depth_ptr.*;
+        var group_depth = group_depth_ptr.*;
+        defer {
+            depth_ptr.* = depth;
+            masked_ptr.* = masked;
+            effect_depth_ptr.* = effect_depth;
+            transform_depth_ptr.* = transform_depth;
+            group_depth_ptr.* = group_depth;
+        }
+        switch (op) {
             .fill => |fill| {
                 if (!layout.validRect(fill.bounds)) return error.InvalidGeometry;
                 const r = fill.bounds;
@@ -806,7 +909,7 @@ pub const Renderer = struct {
                 if (value.brush >= resources.len) return error.MissingResources;
                 const p = try geometry.plan(.{ .bounds = value.bounds, .radius = value.radius, .stroke_width = value.stroke_width, .color = geometry.Color.rgb(0) });
                 const brush = &resources[value.brush];
-                if (brush.isTransparent()) continue;
+                if (brush.isTransparent()) return;
                 const descriptor = brush.native();
                 const spread: u32 = switch (brush.spread) {
                     .pad => 0,
@@ -853,20 +956,20 @@ pub const Renderer = struct {
                 if (!layout.validRect(r)) return error.InvalidGeometry;
                 if (depth == 32) return error.ClipStackFull;
                 if (value.mask >= coverage_resources.len) return error.MissingResources;
+                if (runs.len == runs.scopes.len) return error.ClipStackFull;
                 zmtl_push_clip(native, r.x, r.y, r.width, r.height);
                 masked |= @as(u32, 1) << @intCast(depth);
                 depth += 1;
-                try self.beginGroup(.{ .bounds = r, .mask_origin = value.origin, .mask_resource = value.mask }, coverage_resources, filters);
-                group_depth += 1;
+                runs.scopes[runs.len] = .{ .clip = value, .level = group_depth + transform_depth + effect_depth };
+                runs.len += 1;
             },
             .pop_clip => {
                 if (depth == 0) return error.ClipStackEmpty;
                 depth -= 1;
                 if (masked & (@as(u32, 1) << @intCast(depth)) != 0) {
                     masked &= ~(@as(u32, 1) << @intCast(depth));
-                    if (group_depth == 0) return error.GroupStackEmpty;
-                    group_depth -= 1;
-                    if (zmtl_end_group(native) != 0) return error.GraphicsFailed;
+                    if (runs.len == 0) return error.ClipStackEmpty;
+                    runs.len -= 1;
                 }
                 zmtl_pop_clip(native);
             },
@@ -879,11 +982,12 @@ pub const Renderer = struct {
             .end_effect => {
                 if (effect_depth == 0) return error.UnbalancedEffects;
                 effect_depth -= 1;
-                try self.endEffect(effect_stack[effect_depth], &words);
+                try self.endEffect(effect_stack[effect_depth], words);
+                try runs.endSpan(self, group_depth + transform_depth + effect_depth);
             },
             .backdrop_shader => |slot| {
                 if (self.effect_buffer == null) return error.SoftwareOnlyCommands;
-                try self.backdropShader(slot, &words);
+                try self.backdropShader(slot, words);
             },
             .backdrop => |slot| {
                 const buffer = self.effect_buffer orelse return error.SoftwareOnlyCommands;
@@ -903,6 +1007,7 @@ pub const Renderer = struct {
                 if (group_depth == 0) return error.GroupStackEmpty;
                 group_depth -= 1;
                 if (zmtl_end_group(native) != 0) return error.GraphicsFailed;
+                try runs.endSpan(self, group_depth + transform_depth + effect_depth);
             },
             .begin_transform => |slot| {
                 if (slot >= transforms.len) return error.MissingResources;
@@ -915,18 +1020,15 @@ pub const Renderer = struct {
                 if (transform_depth == 0) return error.TransformStackEmpty;
                 transform_depth -= 1;
                 try self.endTransform(transform_stack[transform_depth]);
+                try runs.endSpan(self, group_depth + transform_depth + effect_depth);
             },
             .texture => |value| {
                 const view = textures[value.resource];
                 const plan = try drawing.planTexture(view, .{ .x = value.destination.x, .y = value.destination.y, .width = value.destination.width, .height = value.destination.height }, value.options(), zmtl_scale(native));
-                if (plan.destination.width == 0 or plan.destination.height == 0 or plan.opacity == 0) continue;
+                if (plan.destination.width == 0 or plan.destination.height == 0 or plan.opacity == 0) return;
                 if (zmtl_texture(native, view.token, &plan) != 0) return error.DrawTextureFailed;
             },
-        };
-        if (depth != 0) return error.UnbalancedClips;
-        if (effect_depth != 0) return error.UnbalancedEffects;
-        if (group_depth != 0) return error.UnbalancedGroups;
-        if (transform_depth != 0) return error.UnbalancedTransforms;
+        }
     }
     pub fn preparedText(self: *Renderer, view: drawing.PreparedTextView, origin: drawing.Point, tint: geometry.Color) !void {
         if (!self.active) return error.NotDrawing;

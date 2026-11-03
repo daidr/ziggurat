@@ -284,8 +284,10 @@ pub const Style = struct {
     /// gradient's alpha there, whatever its colors, and nothing shows
     /// outside the box (or outside `clip_inset`). A list whose rows fade out
     /// at its top and bottom edges takes a linear gradient at 180 degrees
-    /// from transparent to black and back. What the node draws is masked as
-    /// one, as `opacity` fades it. Clicks are not masked.
+    /// from transparent to black and back. Each drawing the node makes is
+    /// masked by itself, not drawn into a layer first: two children that
+    /// overlap where the mask is half clear show through each other, as
+    /// with their own opacity. Clicks are not masked.
     mask: ?Gradient = null,
     /// A wrapping text breaks into lines of about the same width, as CSS's
     /// `text-wrap: balance`: a heading that takes two lines splits near its

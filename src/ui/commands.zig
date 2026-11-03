@@ -19,7 +19,9 @@ pub const max_clip_depth = 32;
 pub const GroupCommand = struct { bounds: Rect, mask_origin: drawing.Point = .{}, opacity: u8 = 255, mask_resource: ?u8 = null, filter_slot: u8 = no_filter };
 /// A clip to `bounds` whose coverage the A8 raster `mask` (an index into
 /// the Buffer's coverage table) gives: what is drawn until its `pop_clip`
-/// shows as much as the mask there, as through a group masked by it. The
+/// shows as much as the mask there, each drawing by itself (a group,
+/// transform or effect inside counts as one drawing), as if the mask
+/// multiplied its own coverage; not as one layer masked at the end. The
 /// mask is placed in device pixels from `origin`, as coverage is drawn.
 pub const MaskClip = struct { bounds: Rect, origin: drawing.Point = .{}, mask: u8 };
 pub const GradientShape = struct { bounds: Rect, radius: f32 = 0, stroke_width: f32 = 0, brush: u8 };
