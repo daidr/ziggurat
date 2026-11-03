@@ -44,8 +44,7 @@
 ## 检查
 
 - `zig build test-code-syntax`：各语言词法、多行状态、增量同步、hunk 重新开始的行、括号匹配与整词查找。
-- `zig build test-code-editor`：其中 `patch.zig` 覆盖补丁解析、应用与分段文本。
-- `zig build test-code-editor`：前景标记随编辑移动、整词与全部匹配、上下加光标与选区撤销、语法逐级扩选、按行拆分、括号跳转、变更标记与恢复。
+- `zig build test-code-editor`：前景标记随编辑移动、整词与全部匹配、上下加光标与选区撤销、语法逐级扩选、按行拆分、括号跳转、变更标记与恢复，补丁的解析、应用与分段文本。
 - `zig build smoke-editor-range-markers`：前景标记在真实系统布局下按颜色裁剪绘制。
 
 示例 `examples/code_editor.zig` 使用以上全部功能。该证据不表示与任何特定编辑器的高亮结果逐字一致。
