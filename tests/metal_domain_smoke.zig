@@ -14,7 +14,11 @@ const resources = ui.gpu_resources;
 const Surface = ui.gpu_offscreen.Surface;
 const drawing = ui.drawing;
 const metal = ui.metal;
-const expect = std.testing.expect;
+fn check(ok: bool, at: std.builtin.SourceLocation) !void {
+    if (ok) return;
+    std.debug.print("check failed at {s}:{d}\n", .{ at.file, at.line });
+    return error.CheckFailed;
+}
 const equal = std.testing.expectEqual;
 const expectError = std.testing.expectError;
 pub const std_options: std.Options = .{ .allow_stack_tracing = false };
@@ -195,12 +199,12 @@ fn lossAndStop(allocator: std.mem.Allocator) !void {
     try buffer.texture(.{ .x = 0, .y = 0, .width = 32, .height = 32 }, try replacement.view(), .{});
     // The renderer takes the new device: what it held uploads again.
     try buffer.image(.{ .x = 0, .y = 0, .width = 8, .height = 8 }, image, .{ .sampling = .nearest });
-    try expect(!renderer.holdsFrame(&buffer));
+    try check(!renderer.holdsFrame(&buffer), @src());
     try renderer.residentFrame(&buffer);
     try frame.draw(&renderer, &buffer, size);
     try near(0xff7fbf3f, frame.at(4, 4, 1));
     try near(0xffff7f7f, frame.at(16, 16, 1));
-    try expect(renderer.stats().device_creations == 2 and renderer.stats().device_losses == 1);
+    try check(renderer.stats().device_creations == 2 and renderer.stats().device_losses == 1, @src());
     buffer.reset();
     try texture.close();
     // Stop drops every native object; the shells stay to be closed.
@@ -213,7 +217,7 @@ fn lossAndStop(allocator: std.mem.Allocator) !void {
     try expectError(error.Closed, survivor.view());
     try expectError(error.ResourceInUse, survivor.close());
     try expectError(error.Closed, renderer.uploadImage(image));
-    try expect(try renderer.releaseImage(image.identity));
+    try check(try renderer.releaseImage(image.identity), @src());
     app.deinit();
     renderer.deinit();
     second.deinit();
@@ -339,7 +343,7 @@ fn surfaceTransactions(allocator: std.mem.Allocator) !void {
     try surface.injectDeviceLossForTest();
     try expectError(error.DeviceLost, surface.render(&buffer));
     try equal(@as(usize, 0), (try surface.stats()).workspace_actual);
-    try expect((try surface.stats()).workspace_reserved != 0);
+    try check((try surface.stats()).workspace_reserved != 0, @src());
     try expectError(error.DomainDeviceLost, surface.snapshot());
     try domain.recreate();
     try expectError(error.StaleSurfaceGeneration, surface.snapshot());
@@ -406,7 +410,7 @@ fn surfaceMixed(allocator: std.mem.Allocator, scale: f32) !void {
     try buffer.endGroup();
     try buffer.popClip();
     try expectError(error.ImageNotUploaded, surface.render(&buffer));
-    try expect(!(try surface.stats()).has_frame);
+    try check(!(try surface.stats()).has_frame, @src());
     try surface.uploadImage(image);
     try expectError(error.CoverageNotUploaded, surface.render(&buffer));
     try surface.uploadCoverage(mask);
@@ -426,13 +430,13 @@ fn surfaceMixed(allocator: std.mem.Allocator, scale: f32) !void {
     var glyphs: [2]usize = .{ 0, 0 };
     for (0..size.height) |y| for (0..size.width) |x| {
         const value = plane[y * size.width + x];
-        inline for ([_]u5{ 0, 8, 16 }) |shift| try expect(((value >> shift) & 255) <= value >> 24);
+        inline for ([_]u5{ 0, 8, 16 }) |shift| try check(((value >> shift) & 255) <= value >> 24, @src());
         if (y >= @as(usize, @intFromFloat(32 * scale)) and value >> 24 > 128) {
             if (x < @as(usize, @intFromFloat(32 * scale))) glyphs[0] += 1;
             if (x >= @as(usize, @intFromFloat(40 * scale))) glyphs[1] += 1;
         }
     };
-    try expect(glyphs[0] > 0 and glyphs[1] > 0);
+    try check(glyphs[0] > 0 and glyphs[1] > 0, @src());
     const snapshot = try surface.snapshot();
     defer snapshot.close() catch unreachable;
     const before = try surface.stats();
@@ -470,7 +474,13 @@ fn surfaceMixed(allocator: std.mem.Allocator, scale: f32) !void {
 pub fn main() !void {
     var debug: std.heap.DebugAllocator(.{ .thread_safe = true, .stack_trace_frames = 0 }) = .init;
     defer std.debug.assert(debug.deinit() == .ok);
-    const allocator = debug.allocator();
+    run(debug.allocator()) catch |err| {
+        // Printed before the leak check of the abandoned run fires.
+        std.debug.print("metal domain smoke failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
+}
+fn run(allocator: std.mem.Allocator) !void {
     try raw(allocator);
     try equal(@as(u32, 0), metal.globalResourceCount());
     try lossAndStop(allocator);
