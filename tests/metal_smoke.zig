@@ -115,6 +115,11 @@ fn compare(scale: f32) !bool {
     try std.testing.expectEqual(@as(u32, 1), gpu.atlasLevelsForTest());
 
     const text_top: u32 = @intFromFloat(90 * scale);
+    const linear_left: u32 = @intFromFloat(78 * scale);
+    const linear_right: u32 = @intFromFloat(102 * scale);
+    const linear_top: u32 = @intFromFloat(64 * scale);
+    const linear_bottom: u32 = @intFromFloat(80 * scale);
+    var linear_sums: [2][3]i64 = .{ .{ 0, 0, 0 }, .{ 0, 0, 0 } };
     var shape_misses: usize = 0;
     var tiles: [64 * 40]u32 = @splat(0);
     var samples: [64 * 40][4]u32 = undefined;
@@ -129,6 +134,15 @@ fn compare(scale: f32) !bool {
         if (y >= text_top) {
             if (difference(want, 0xf4f1ea) > 48) software_ink += 1;
             if (difference(got, 0xf4f1ea) > 48) gpu_ink += 1;
+            continue;
+        }
+        // Core Graphics filters a linearly sampled image with its own
+        // kernel: compare the region's average color instead.
+        if (x >= linear_left and x < linear_right and y >= linear_top and y < linear_bottom) {
+            inline for (.{ 0, 8, 16 }, 0..) |shift, k| {
+                linear_sums[0][k] += channel(got, shift);
+                linear_sums[1][k] += channel(want, shift);
+            }
             continue;
         }
         const d = difference(got, want);
@@ -153,7 +167,15 @@ fn compare(scale: f32) !bool {
     software.abort();
     std.debug.print("metal parity at scale {d}: worst {d} at {d},{d}, {d} pixels beyond 24, ink {d} vs {d}\n", .{ scale, worst, worst_at[0], worst_at[1], shape_misses, software_ink, gpu_ink });
     const ink_ratio = @as(f64, @floatFromInt(gpu_ink)) / @as(f64, @floatFromInt(software_ink));
-    return shape_misses * 400 < @as(usize, pw) * text_top and software_ink > 100 and gpu_ink > 100 and ink_ratio > 0.8 and ink_ratio < 1.25;
+    const linear_pixels: i64 = @intCast(@as(u64, linear_right - linear_left) * (linear_bottom - linear_top));
+    var linear_close = true;
+    for (0..3) |k| {
+        const got = @divTrunc(linear_sums[0][k], linear_pixels);
+        const want = @divTrunc(linear_sums[1][k], linear_pixels);
+        std.debug.print("  linear image channel {d}: metal {d} software {d}\n", .{ k, got, want });
+        if (@abs(got - want) > 6) linear_close = false;
+    }
+    return linear_close and shape_misses * 400 < @as(usize, pw) * text_top and software_ink > 100 and gpu_ink > 100 and ink_ratio > 0.8 and ink_ratio < 1.25;
 }
 
 const Probe = struct {

@@ -45,7 +45,7 @@ static NSString *const shader_source=@
 "vertex VOut zm_vertex(uint vid[[vertex_id]],uint iid[[instance_id]],constant Uniforms&u[[buffer(0)]],const device Inst*insts[[buffer(1)]]){\n"
 "  Inst i=insts[iid];uint kind=uint(i.p.z);\n"
 "  float grow=(kind<=2u||kind==5u)?1.0:0.0;\n"
-"  float4 q=float4(max(i.rect.xy-grow,i.clip.xy),min(i.rect.zw+grow,i.clip.zw));\n"
+"  float4 q=float4(max(i.rect.xy-grow,floor(i.clip.xy)),min(i.rect.zw+grow,ceil(i.clip.zw)));\n"
 "  q.zw=max(q.zw,q.xy);\n"
 "  float2 corner=float2(float(vid&1u),float(vid>>1));\n"
 "  float2 p=mix(q.xy,q.zw,corner);\n"
