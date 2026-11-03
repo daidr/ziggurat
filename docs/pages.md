@@ -396,9 +396,9 @@ Starting 到本次 ContentLoading 期间抑制页面消息；之后消息必须�
 
 `View.sessionState(allocator)` 返回页面会话的字节（调用者拥有），`View.restoreSessionState(bytes)` 在另一个 View 中恢复它：下次启动时，或应用关闭了一个没在显示的页面之后。字节是版本化的封装：保存它的平台、页面 URI 和引擎自己的状态。只有本地站点和远程页面有会话，纯 `html` 页面返回 `LocalSiteRequired`。
 
-Linux 保存 WebKitGTK 序列化的前进后退列表，包括它保存的滚动位置和表单内容；恢复时替换列表并加载当前项，之后 Back 回到之前的页面。WebKit 在滚动停止片刻后才保存页面的滚动位置，表单内容只在页面离开视图时保存。当前项必须属于页面自己的站点，否则返回 `OriginDenied` 且列表不变。Windows 的 WebView2 没有这种状态，只保存 URI。另一平台的状态或引擎读不了的状态会加载其中保存的 URI，像 `navigateLocal`/`navigateRemote` 一样受站点规则约束。恢复要求 View 已就绪且没有进行中的导航。
+Linux 保存 WebKitGTK 序列化的前进后退列表，包括它保存的滚动位置和表单内容；恢复时替换列表并加载当前项，之后 Back 回到之前的页面。WebKit 在滚动停止片刻后才保存页面的滚动位置，表单内容只在页面离开视图时保存。当前项必须属于页面自己的站点，否则返回 `OriginDenied` 且列表不变。macOS 同样保存 WKWebView 的会话数据（私有 `_sessionStateData`，即公开 `interactionState` 的数据）：恢复时先用一个不加载的临时 WKWebView 读出状态的当前项并检查站点，再以私有 `_restoreSessionState:andNavigate:NO` 替换列表，当前项作为一次历史导航经页面的导航策略加载；系统 WebKit 没有这些接口时只保存 URI。macOS 26 的 WebKit 会把在窗口第一次上屏前就滚动过的页面在窗口上屏时放回顶部，因此在窗口尚未上屏（`occlusionState` 不含可见）时恢复的页面会记下当前项的滚动位置（私有 `_scrollPosition`），加载完成后在默认 client world 注入脚本：页面在任何输入之前下一次滚回顶部时放回原位，其他滚动（包括用户的）结束它；`history.scrollRestoration` 为 `manual` 的页面保持原样。Windows 的 WebView2 没有这种状态，只保存 URI。另一平台的状态或引擎读不了的状态会加载其中保存的 URI，像 `navigateLocal`/`navigateRemote` 一样受站点规则约束。恢复要求 View 已就绪且没有进行中的导航。
 
-`smoke-webview-session-state` 从 `/` 导航到 `/long`、滚动到 1200 后保存，在第二个 View 恢复：Linux 回到 `/long`、滚动位置 1200、`history.length` 为 2，Back 回到 `/`；Windows 回到 `/long`。Linux 在 WebKitGTK 2.52.6（xvfb）本地通过。
+`smoke-webview-session-state` 从 `/` 导航到 `/long`、滚动到 1200，等保存的状态里出现这个滚动位置（WebKit 把它编码为相邻的两个小端 32 位整数）后保存，在隐藏窗口里的第二个 View 恢复：Linux 与 macOS 回到 `/long`、滚动位置 1200、`history.length` 为 2，窗口显示后页面可见且仍在 1200，Back 回到 `/`；Windows 回到 `/long`。Linux 在 WebKitGTK 2.52.6（xvfb）本地通过。
 
 ## 画中画
 
