@@ -121,15 +121,20 @@ pub const Overlay = struct {
 /// open: build its items only when this returns true, and close it with
 /// `end` either way. Named by `Style.name`.
 pub fn popoverMenu(self: *View, style: Style) Error!bool {
+    return openMenu(self, panelStyle(style), false);
+}
+fn openMenu(self: *View, style: Style, plain: bool) Error!bool {
     if (self.depth == 0) return error.UnbalancedContainer;
     const parent = &self.buffers.nodes[self.stack[self.depth - 1]];
     if (parent.last_child == none or self.buffers.nodes[parent.last_child].floats()) return error.NotContainer;
     const anchor_index = parent.last_child;
-    const node = try self.openNode(.menu, panelStyle(style));
+    const node = try self.openNode(.menu, style);
+    node.plain = plain;
     node.anchor = anchor_index;
     node.level = 0;
     const anchor = &self.buffers.nodes[anchor_index];
     node.concealed = node.concealed or anchor.concealed;
+    node.access_hidden = node.access_hidden or anchor.access_hidden;
     const state = &self.menu;
     if (state.open) |id| if (id == node.id and (!anchor.style.enabled or node.concealed)) close(self, false);
     node.checked = if (state.open) |id| id == node.id else false;
@@ -207,6 +212,130 @@ pub fn submenu(self: *View, label: []const u8, style: Style) Error!bool {
     return shown;
 }
 
+/// What an item of a menu without a look learned in this pass.
+pub const ItemState = struct {
+    /// The item was chosen, by press, Enter or Space; the menu closes.
+    clicked: bool = false,
+    /// The pointer or the keys are on the item: draw it so.
+    highlighted: bool = false,
+    /// The submenu of a `submenuItemBase` shows.
+    expanded: bool = false,
+};
+
+/// A menu button without a look, for a menu whose button and items have a
+/// layout of the application's own, as an avatar and a name: opens a
+/// container that is the button, drawn by what the application builds in
+/// it and by `Style.background` and `border`. Close it with `end`, then
+/// build its menu with `popoverMenuBase`. It has `popoverMenuButton`'s
+/// keys: a press, Enter, Space or Down opens the menu on its first item,
+/// and assistive technology sees it expanded while the menu shows, named
+/// by `Style.name` or the text inside it.
+pub fn menuButtonBase(self: *View, style: Style) Error!void {
+    const node = try self.openNode(.popup_button, style);
+    node.plain = true;
+}
+
+/// A menu without a look for the node just added: a `menuButtonBase`, or
+/// any node as a context menu, which opens as `popoverMenu`'s does, where
+/// the node is pressed with the secondary button or below it for the menu
+/// key. Build its items with `menuItemBase` and `submenuItemBase`, and
+/// headings and separators of the application's own between them, only
+/// when this returns true, and close it with `end` either way. The panel
+/// is what `style` draws, with no padding or width of its own; it has the
+/// keys, focus and type-ahead of `popoverMenu` and is named by
+/// `Style.name`.
+pub fn popoverMenuBase(self: *View, style: Style) Error!bool {
+    if (self.depth == 0) return error.UnbalancedContainer;
+    const parent = &self.buffers.nodes[self.stack[self.depth - 1]];
+    if (parent.last_child == none) return error.NotContainer;
+    const button_index = parent.last_child;
+    const button = &self.buffers.nodes[button_index];
+    const is_button = button.kind == .popup_button and button.plain;
+    const button_id = button.id;
+    const pressed = is_button and self.takeEvent(button_id) != null and button.style.enabled;
+    var shown = try openMenu(self, style, true);
+    if (!is_button) return shown;
+    const node = &self.buffers.nodes[self.stack[self.depth - 1]];
+    if (pressed) {
+        if (shown) {
+            close(self, true);
+            shown = false;
+        } else {
+            self.menu = .{ .open = node.id, .opener = button_id, .first = 0 };
+            shown = !node.concealed;
+            if (!shown) self.menu = .{};
+        }
+        node.checked = shown;
+    }
+    self.buffers.nodes[button_index].checked = shown;
+    return shown;
+}
+
+/// An item of a menu without a look: opens a container, a row by default,
+/// that the application fills and draws, as `Style.background` while
+/// `highlighted`; close it with `end`. With `options.checked` it is a
+/// check box item, or with `radio` a radio item, which assistive
+/// technology reads as checked or not; the shortcut is announced as its
+/// description. It is named by `Style.name` or the text inside it, whose
+/// first letter typing moves to it.
+pub fn menuItemBase(self: *View, options: ItemOptions, style: Style) Error!ItemState {
+    const panel = try currentPanel(self);
+    const node = try itemNode(self, panel, style.name, style, true);
+    node.mark = if (options.checked == null) .none else if (options.radio) .radio else .check;
+    node.checked = options.checked orelse false;
+    node.badge = try self.copyText(options.shortcut);
+    const state: ItemState = .{ .highlighted = node.highlighted };
+    if (self.takeEvent(node.id) == null or !node.style.enabled) return state;
+    close(self, true);
+    return .{ .clicked = true, .highlighted = state.highlighted };
+}
+
+/// An item of a menu without a look that opens a submenu beside it: opens
+/// a container as `menuItemBase` does; close it with `end`, then build the
+/// submenu with `submenuBase`. Right opens it, Left closes it (the other
+/// way round right to left), as the pointer resting on it does.
+pub fn submenuItemBase(self: *View, style: Style) Error!ItemState {
+    const panel = try currentPanel(self);
+    const level = panel.level;
+    const node = try itemNode(self, panel, style.name, style, true);
+    const id = node.id;
+    const state = &self.menu;
+    if (self.takeEvent(id) != null and node.style.enabled) {
+        openLevel(state, level, id);
+        state.highlight = id;
+        node.highlighted = true;
+    }
+    const shown = node.style.enabled and state.path_len > level and state.path[level] == id;
+    node.expanded = shown;
+    return .{ .highlighted = node.highlighted, .expanded = shown };
+}
+
+/// The submenu of the `submenuItemBase` just added, drawn as `style`
+/// draws it: build its items only when this returns true, and close it
+/// with `end` either way. Assistive technology sees it named by the item.
+pub fn submenuBase(self: *View, style: Style) Error!bool {
+    const panel = try currentPanel(self);
+    const level = panel.level;
+    const panel_id = panel.id;
+    if (panel.last_child == none) return error.NotContainer;
+    const index = panel.last_child;
+    const opener = &self.buffers.nodes[index];
+    if (opener.kind != .menu_item or !opener.plain or opener.expanded == null) return error.NotContainer;
+    const shown = opener.expanded.?;
+    var name_buffer: [view.max_plain_name]u8 = undefined;
+    const label = if (style.name.len > 0) style.name else if (opener.text.len > 0) opener.text else self.plainName(opener, &name_buffer);
+    if (level + 1 >= max_depth) return error.NestingTooDeep;
+    var value = style;
+    value.name = try self.copyText(label);
+    const inner = try self.openNode(.menu, value);
+    inner.plain = true;
+    inner.anchor = index;
+    inner.level = level + 1;
+    inner.semantic_parent = panel_id;
+    inner.checked = shown;
+    return shown;
+}
+
 /// A line between groups of items.
 pub fn menuSeparator(self: *View) Error!void {
     _ = try currentPanel(self);
@@ -228,9 +357,13 @@ fn currentPanel(self: *View) Error!*Node {
 }
 
 fn item(self: *View, panel: *Node, label: []const u8, style: Style) Error!*Node {
+    return itemNode(self, panel, label, style, false);
+}
+fn itemNode(self: *View, panel: *Node, label: []const u8, style: Style, plain: bool) Error!*Node {
     const level = panel.level;
     const panel_id = panel.id;
-    const node = try self.appendNode(.menu_item, style);
+    const node = if (plain) try self.openNode(.menu_item, style) else try self.appendNode(.menu_item, style);
+    node.plain = plain;
     node.text = try self.copyText(label);
     node.level = level;
     node.semantic_parent = panel_id;
@@ -348,7 +481,9 @@ pub fn record(self: *View, node: *const Node) void {
             }
         },
         .menu_item => if (overlay.item_count < max_items) {
-            overlay.items[overlay.item_count] = .{ .id = node.id, .level = node.level, .rect = self.visible(node) orelse node.bounds, .enabled = node.style.enabled, .submenu = node.expanded != null, .rtl = node.rtl, .initial = initialOf(node.text) };
+            var name_buffer: [view.max_plain_name]u8 = undefined;
+            const label = if (node.text.len == 0 and node.plain) self.plainName(node, &name_buffer) else node.text;
+            overlay.items[overlay.item_count] = .{ .id = node.id, .level = node.level, .rect = self.visible(node) orelse node.bounds, .enabled = node.style.enabled, .submenu = node.expanded != null, .rtl = node.rtl, .initial = initialOf(label) };
             overlay.item_count += 1;
         },
         else => {},

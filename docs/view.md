@@ -71,6 +71,8 @@ try v.column(.{ .width = 240, .height = 140, .radius = 16, .gradient = .{ .radia
 
 - 局部主题：`themed(&theme, style)` 与 `end` 配对，开始一个其中的节点以 `theme` 构建的列（等价于 `Style.theme`）：它们按该主题的 metrics 测量，按它的配色绘制（控件、焦点环、文字），列本身在没有 `background` 时填充该主题的背景色，与根节点填充窗口主题相同。其中打开的浮层、菜单、对话框和提示同样用这个主题；根节点与它之后的节点仍是窗口主题。`v.scopeTheme()` 返回正在构建处的局部主题（窗口主题时为 null）。主题按指针借用，到本遍绘制完成前有效。
 - 忽略输入：`ignore_input = true` 让节点及其中的一切不挡指针与键盘：按下、滚轮和悬停落到下面的内容，Tab 跳过它们，其中的焦点离开；但它们照常绘制并留在可访问性树中，屏幕阅读器的按下与点击一样生效。悬停才显示的按钮可以以 `opacity = 0` 常驻供读屏使用，而不抢所在行的按下。
+- 对辅助技术隐藏：`access_hidden = true` 让节点及其中的一切照常绘制、照常接收指针与键盘，但不进入可访问性树，如同 HTML 的 aria-hidden：叠在下面的卡片、交叉淡化时画出的旧文字副本不会被读屏读到，它们的文字不计入外层控件的名称（见下文无外观控件），辅助技术的请求也到不了它们。锚定在其中的浮层、菜单、列表与提示一并隐藏。与 `ignore_input` 同时设置即为惰性（inert）；`presentColumn` 正在退出的内容就是这样。检查器把这样的节点的角色显示为 ignored。
+- 焦点环：持有键盘焦点的控件画主题的焦点环：宽 `Metrics.focus_ring_width`（默认 2 DIP），内缘在控件边缘外 `Metrics.focus_ring_offset`（默认 1 DIP；0 落在边缘上，负数在边缘内），颜色为调色板的 `focus`。列表、树与表格的行、列头会被外层列表裁剪，默认画在行内。`Style.focus_ring_offset` 单独设置一个节点的偏移，例如外层容器裁剪越界内容时用负值把环画到里面；`Style.focus_ring_color` 单独设置颜色。
 - 滚动指示器：滚动容器的 `scrollbars = false` 不画滚动指示器，滚轮、按键和辅助技术照常滚动，适合自己绘制指示的表面。
 - 占位符：`search`、`tokenField` 与 `editableComboBox` 的 `placeholder` 与 `placeholder_color` 交给直接放在其中的文本输入，输入为空且没有输入法组合时显示（见下文 `TextField` 的同名选项）。
 
@@ -115,6 +117,8 @@ Host 在每帧绘制后记录可见的滚动容器（最多 `max_scroll_regions`
 - `meter(value, range, bands, style)` 是只读度量条，例如已用存储；`Style.name` 是可访问名称。它报告值本身，而不是完成比例。`bands` 的 `low`/`high` 是首选区间，值在区间外时用主题的 `caution` 色填充。区间超出 `range` 或 `low > high` 返回 `InvalidRange`，值被夹回 `range`。
 - `rating(&score, count, style)` 绑定一个 `u8` 分数，范围 0..`count`，`count` 为 1..`ui.widgets.max_rating`（10），否则返回 `InvalidRange`。按下或拖过第 k 个标记会把分数设为 k，方向键增减 1，Home 清零，End 设为满分；返回分数是否改变。标记画成圆点，已得分的用强调色填充。语义上它是步长为 1 的滑块。
 - `accordion(style)` 与 `end` 配对，开始一列分节，`Style.name` 是分组的可访问名称。`section(T, &open, option, label, style)` 绑定一个 `?T`：激活未打开的节会打开它并关闭原来打开的节，激活已打开的节会把 `open` 设为 null；返回值是否改变。分节标题与 `disclosure` 外观相同，在 `accordion` 之外调用返回 `NotContainer`。应用在每个标题后按 `open` 构建内容，这些内容也挂在分组下。
+- 手风琴的标题之间用 Up、Down 移动焦点（循环），Home、End 移到第一个与最后一个；Enter 与 Space 打开或关闭。
+- `accordionItem(&expanded, style)` 是没有外观的手风琴标题：打开一个容器（默认横排），由应用在里面构建标题、摘要和箭头并用 `Style.background` 等绘制，`end` 关闭后在 `expanded` 为真时构建内容。激活切换 `expanded`，各节独立开合，返回是否改变；按键与 `section` 的标题相同，辅助技术读作以 `Style.name` 或其中文字命名的展开器，并画主题的焦点环。手风琴裁剪内容时，用负的 `Style.focus_ring_offset` 把标题的焦点环画在里面。
 
 启用 `-Daccessibility=true` 时，Windows UIA 把面包屑映射为带导航地标（LandmarkType = Navigation）的 Group，度量条为 ProgressBar / 只读 RangeValue（报告实际值与上下限，LocalizedControlType 为 "meter"），评分为 Slider / 可写 RangeValue，手风琴为 Group，分节为 Button / ExpandCollapse。
 
@@ -198,6 +202,7 @@ try v.end();
 - `submenu(label, style)` 加一项并开始它的子菜单，与 `end` 配对，子菜单显示时返回 true。子菜单放在这一项的末端一侧、与它顶部对齐，放不下时翻到另一侧；顶层菜单在右下放不下时向左、向上翻，并夹在窗口内。`menuSeparator()` 在两组项之间画一条线。面板最窄 160 DIP，内边距默认 4 DIP，最多 8 层。
 - 打开期间菜单接管按键：Up、Down、Home、End 在最深一层的可用项之间移动高亮并循环，字母移到下一个以它开头的项；Right、Enter 或 Space 打开子菜单并高亮其第一项，Left 或 Escape 关闭最深一层子菜单，顶层的 Escape 与 Tab 关闭菜单并交还焦点。从右到左时 Left 与 Right 互换。指针移到项上会高亮它并打开它的子菜单、关闭更深的子菜单；在所有面板之外按下会关闭菜单，并照常交给下面的控件；面板上的滚轮不会滚动下面的内容。
 - `popoverMenuButton(label, style)` 是一个菜单按钮：画法像带箭头的组合框，菜单画在窗口里、它的下方并与它的起始边对齐，下方放不下时翻到上方。按下、Enter、Space 或 Down 打开菜单并高亮第一项，菜单显示时再按按钮会关闭它，期间按钮读作已展开。菜单的按键、首字母跳转、子菜单和焦点交还都与 `popoverMenu` 相同，选中或 Escape 后焦点回到按钮。与 `end` 配对，菜单打开时返回 true，只在这时构建菜单项。名称取 `Style.name`，否则取 `label`。
+- 没有外观的菜单，用于项的布局由应用决定的菜单，例如头像加名字或色块：`menuButtonBase(style)` 打开一个作为菜单按钮的容器，应用在其中构建按钮内容，`end` 后用 `popoverMenuBase(style)` 构建菜单；`popoverMenuBase` 跟在任意节点之后则是它的右键菜单，打开方式与 `popoverMenu` 相同。菜单面板只画 `style` 给出的背景、边框与圆角，没有默认的内边距和最小宽度。`menuItemBase(options, style)` 打开一个项容器（默认横排），由应用填充并在 `highlighted` 时自己画高亮，`end` 关闭；返回的 `MenuItemState` 带 `clicked`（选中，菜单随之关闭）与 `highlighted`。`options.checked` 与 `radio` 让它成为复选项或单选项，读屏报告选中与否；`shortcut` 作为描述朗读。`submenuItemBase(style)` 打开一个会展开子菜单的项，`end` 后用 `submenuBase(style)` 构建子菜单，子菜单以该项命名。项以 `Style.name` 或其中的文字命名，首字母跳转也用它。按键、焦点和语义与 `popoverMenuButton` 和 `popoverMenu` 完全相同；分隔线和小标题是应用自己放在项之间的节点。
 - 右键菜单的位置相对锚点的整个盒子计算，所以锚点部分滚出视野时菜单仍在指针处打开。
 - 焦点跟随高亮，辅助技术读出键盘所在的项；用指针打开时焦点在第一项上但不高亮。同一时间最多打开一个菜单；锚点不再构建或被禁用时菜单关闭。
 
@@ -358,6 +363,7 @@ if (try v.findBar(&find, query_field.embed(), matches, .{}, .{ .key = 1 })) |eve
 ### 三态复选框与复选框组
 
 - `checkboxState(&state, label, style)` 绑定一个 `CheckState`（`unchecked`、`checked`、`mixed`）。部分选中画成短横线；激活时未选中或部分选中变为选中，选中变为未选中，返回 true。只有应用会设为 `mixed`。`CheckState.of(values)` 从一组布尔值求出状态。
+- `checkboxBase(&checked, style)` 与 `checkboxStateBase(&state, style)` 是没有外观的复选框：打开一个容器（默认横排），由应用按值画出自己的方框与标签，`end` 关闭。前者激活时切换布尔值；后者绑定 `CheckState`，与 `checkboxState` 一样按下（或焦点在其上时按 Space）把未选中或部分选中变为选中、把选中变为未选中，部分选中时读屏报告“部分选中”。二者都以 `Style.name` 或其中的文字命名，并画主题的焦点环。
 - `checkboxGroup(label, items, style)` 构建一个总复选框，以及其下缩进 30 DIP 的 `CheckboxItem` 复选框（各绑定一个布尔值，可单独禁用）。总复选框的状态由子项派生：全部选中为选中，全部未选中为未选中，否则为部分选中；激活它时，除非所有启用的子项都已选中（此时全部取消），否则把它们全部选中。任何值变化时返回 true。
 
 启用 `-Daccessibility=true` 时，部分选中的复选框在 UIA 上报告 ToggleState Indeterminate。
@@ -654,7 +660,24 @@ if (try v.presentColumn(&state.panel, state.open, .{ .hidden = .{ .y = 12, .scal
 }
 ```
 
-运动期间每遍请求下一帧唤醒，静止时不请求；减少动态效果时立即出现与消失。没有 `prepareShaderEffects` 时不透明度与位姿被忽略。语言、隔离方式与预算见[着色器与元素效果](shader-effects.md)。
+`Style.blur` 把节点及其后代作为一层按高斯模糊（标准差，DIP），画出的内容最多越过盒子三倍标准差。`Pose` 的 `x_percent`、`y_percent` 按节点自身宽高的百分比平移，如 CSS 的 `translate(-50%, -50%)`，随尺寸变化跟随。
+
+`Transition` 的 `hidden`、`hidden_opacity` 与 `hidden_blur` 是内容不显示时的位姿、不透明度与模糊，它在这些与自己的样式之间移动；模糊与 `Style.blur` 按高斯叠加。`exit_to`（`Away`：位姿、不透明度、模糊）是离开时去往的地方，为空时回到 `hidden`。离开的方向在内容开始离开的那一遍固定，之后的构建改变方向也不会让已在离开途中的内容转向；所在容器的 `Style.child_exit` 在那一遍代替 `exit_to`，像向导、日历或轮播后退时，离开的页按这一步的方向离开，尽管它是在前进时构建的。`after_exits` 让内容一次一个出现：同一容器里还有内容在离开时，新内容先在布局中占好位置但不绘制、不接收输入，离开的内容消失后再按 `enter` 进入；它第一次出现时也等一帧，以便得知同一遍里开始离开的兄弟；在出现之前就被移除时什么也不留下。退出期间内容不接收指针与键盘，也不进入可访问性树。
+
+```zig
+const way: f32 = if (state.back) -1 else 1;
+try v.column(.{ .grow = 1, .child_exit = .{ .pose = .{ .x_percent = -30 * way } } });
+const page: view.Transition = .{ .hidden = .{ .x_percent = 30 * way }, .hidden_blur = 4, .after_exits = true };
+for (&state.pages, 0..) |*presence, i| if (try v.presentColumn(presence, state.step == i, page, .{ .grow = 1 })) {
+    try buildPage(v, i);
+    try v.end();
+};
+try v.end();
+```
+
+运动期间每遍请求下一帧唤醒，静止时不请求；减少动态效果时立即出现与消失。没有 `prepareShaderEffects` 时不透明度、位姿与模糊被忽略。
+
+颜色默认在 sRGB 中预乘混合；`ui.Color.mixOklab(a, b, t)` 在 Oklab 中混合，与渐变的 `.oklab` 插值相同：两个饱和色之间的中点保持亮度与饱和度，而不是经过发灰发暗的中间色（黄到蓝经过蓝色而不是灰色）。共享元素的 `Match.oklab` 让飞行途中的背景、边框与文字颜色这样混合。语言、隔离方式与预算见[着色器与元素效果](shader-effects.md)。
 
 ### 位姿动画
 

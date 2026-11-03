@@ -31,6 +31,8 @@ const Probe = struct {
     saved: bool = false,
     chosen: u64 = 21,
     open: bool = false,
+    ghost: bool = false,
+    ghost_hidden: bool = false,
 
     fn draw(ptr: *anyopaque, frame: *ui.Frame) void {
         const self: *Probe = @ptrCast(@alignCast(ptr));
@@ -52,6 +54,14 @@ const Probe = struct {
         semantic.add(frame, .{ .id = 30, .role = .tree, .name = "Files", .bounds = .{ .x = 220, .y = 80, .width = 90, .height = 40 } });
         semantic.add(frame, .{ .id = 31, .parent = 30, .role = .tree_item, .name = "src", .expanded = self.open, .level = 2, .bounds = .{ .x = 220, .y = 80, .width = 90, .height = 20 } });
         if (self.saved) semantic.add(frame, .{ .id = 7, .role = .status, .name = "Saved", .bounds = .{ .x = 10, .y = 170, .width = 160, .height = 20 } });
+        if (self.ghost) {
+            // A card drawn behind another, which assistive technology need
+            // not read.
+            if (self.ghost_hidden) frame.beginAccessHidden();
+            semantic.add(frame, .{ .id = 40, .role = .group, .name = "Ghost", .bounds = .{ .x = 200, .y = 130, .width = 100, .height = 40 } });
+            semantic.add(frame, .{ .id = 41, .parent = 40, .role = .button, .name = "Ghost button", .bounds = .{ .x = 204, .y = 134, .width = 60, .height = 20 } });
+            if (self.ghost_hidden) frame.endAccessHidden();
+        }
     }
     fn action(_: *anyopaque, _: u64) void {}
     fn accessibility(ptr: *anyopaque, context: *ui.Context, value: ui.accessibility.Action) void {
@@ -216,10 +226,21 @@ pub fn main() !void {
     try std.testing.expectEqual(before + 1, zua_test_announcements(&said, said.len));
     try std.testing.expectEqual(@as(c_int, 7), zua_test_child_count(probe.host()));
 
+    // What a hidden scope draws stays out of the tree, its subtree too.
+    probe.ghost = true;
+    probe.publish();
+    try std.testing.expectEqual(@as(c_int, 8), zua_test_child_count(probe.host()));
+    try probe.expect("Ghost button", "push button|Ghost button||e");
+    probe.ghost_hidden = true;
+    probe.publish();
+    try std.testing.expectEqual(@as(c_int, 7), zua_test_child_count(probe.host()));
+    try std.testing.expect(zua_test_element(probe.host(), "Ghost") == null);
+    try std.testing.expect(zua_test_element(probe.host(), "Ghost button") == null);
+
     _ = try probe.window.destroy();
     try app.dispatch();
     const counts = ui.accessibility.resourceCounts();
-    std.debug.print("Linux accessibility: ATK roles, names, values, states, extents, press/value/text/focus/selection/expand actions and a status announcement passed; hosts={d} objects={d} actions={d}\n", .{ counts.states, counts.providers, counts.actions });
+    std.debug.print("Linux accessibility: ATK roles, names, values, states, extents, press/value/text/focus/selection/expand actions, a status announcement and a hidden subtree passed; hosts={d} objects={d} actions={d}\n", .{ counts.states, counts.providers, counts.actions });
     try std.testing.expectEqual(@as(u32, 0), counts.actions);
     try std.testing.expectEqual(@as(u32, 0), counts.providers);
 }

@@ -3414,6 +3414,9 @@ pub const Frame = struct {
     /// Open `beginCache` scopes, innermost last.
     cache_scopes: [4]CacheScope = undefined,
     cache_depth: usize = 0,
+    /// Open `beginAccessHidden` scopes: while any is open, `semantic`
+    /// records nothing.
+    access_hidden: u16 = 0,
     const CacheScope = struct { cache: *Cache, mark: commands.Buffer.Checkpoint, clips: usize, group_depth: usize, offset_depth: usize, effect_depth: usize };
 
     /// Keeps what is drawn until the matching `endCache` as one image in
@@ -3940,6 +3943,7 @@ pub const Frame = struct {
         try self.popClip();
     }
     pub fn semantic(self: *Frame, node: accessibility.Node) !void {
+        if (self.access_hidden != 0) return;
         if (build_options.accessibility and self.context.attached_semantics_enabled) {
             if (node.role == .text_box and !node.read_only and self.context.on_accessibility_action == null) {
                 const state = &self.context.input_state;
@@ -4336,6 +4340,21 @@ pub const Frame = struct {
     /// One item of a `menu`; see `widgets.MenuItemOptions`.
     pub fn menuItem(self: *Frame, id: u64, bounds: Rect, text: []const u8, options: widgets.MenuItemOptions) !void {
         try widgets.emitMenuItem(self, id, bounds, text, options);
+    }
+    /// Leave what is drawn until the matching `endAccessHidden` out of the
+    /// semantic tree, as HTML's aria-hidden does: its controls still take
+    /// the pointer, the keys and the focus, but assistive technology does
+    /// not see them, so their names count toward nothing around them and
+    /// none of its requests reach them. Scopes nest.
+    pub fn beginAccessHidden(self: *Frame) void {
+        self.access_hidden += 1;
+    }
+    pub fn endAccessHidden(self: *Frame) void {
+        self.access_hidden -|= 1;
+    }
+    /// True while a `beginAccessHidden` scope is open.
+    pub fn accessHidden(self: *const Frame) bool {
+        return self.access_hidden != 0;
     }
     /// How many controls and semantic nodes this frame has added so far,
     /// for `makeInert`.

@@ -100,6 +100,9 @@ pub const Element = struct {
     pose: bool = false,
     effect: bool = false,
     checked: bool = false,
+    /// In a subtree `Style.access_hidden` keeps out of the accessibility
+    /// tree; the panel shows its role as ignored.
+    access_hidden: bool = false,
     value: f64 = 0,
     scroll_offset: ?Point = null,
     scroll_content: Size = .{},
@@ -343,6 +346,7 @@ pub const Inspector = struct {
                 .material = s.material != null or s.refraction != null,
                 .pose = s.pose != null,
                 .effect = s.effect != null,
+                .access_hidden = node.access_hidden,
                 .checked = node.checked,
                 .value = node.value,
                 .scroll_offset = if (node.scroll) |model| .{ .x = model.offset.x, .y = model.offset.y } else null,
@@ -1469,7 +1473,7 @@ pub const Inspector = struct {
         }
         var acc: [3]Decl = .{
             .{ .name = "Name", .value = accessibleName(e) },
-            .{ .name = "Role", .value = roleName(e.kind, e.name.len > 0) },
+            .{ .name = "Role", .value = if (e.access_hidden) "ignored" else roleName(e.kind, e.name.len > 0) },
             .{ .name = "Keyboard-focusable", .value = if (focusable(e)) "\u{2713}" else "\u{2298}" },
         };
         var names: [32]u8 = undefined;
@@ -1873,7 +1877,7 @@ pub const Details = struct {
         }
         self.section("Accessibility");
         self.property("name", self.print("\"{s}\"", .{accessibleName(e)}));
-        self.property("role", roleName(e.kind, e.name.len > 0));
+        self.property("role", if (e.access_hidden) "ignored" else roleName(e.kind, e.name.len > 0));
         self.property("keyboard-focusable", bool_(focusable(e)));
         self.sections[self.section_count - 1].end = self.property_count;
     }

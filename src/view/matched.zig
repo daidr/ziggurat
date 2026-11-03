@@ -48,6 +48,11 @@ pub const Match = struct {
     /// characters (`Embed.glyphs`), as a rich text, morphs them each in
     /// its own font and color.
     morph: bool = false,
+    /// Mix the colors on the way in Oklab rather than in sRGB: between two
+    /// saturated colors the way keeps their lightness and saturation
+    /// instead of going through a dull, darker middle; see
+    /// `ui.Color.mixOklab`.
+    oklab: bool = false,
 };
 
 /// The identities a View follows at once; more are shown in place.
@@ -66,6 +71,17 @@ pub const Look = struct {
     /// The look `t` of the way from `a` to `b`. Colors missing on one side
     /// take the other's, so a fill appears or goes at once.
     pub fn mix(a: Look, b: Look, t: f32) Look {
+        return mixIn(a, b, t, false);
+    }
+    /// `mix`, with the colors mixed in Oklab when `oklab`.
+    pub fn mixIn(a: Look, b: Look, t: f32, oklab: bool) Look {
+        if (oklab) {
+            var result = mixIn(a, b, t, false);
+            result.background = mixColorOklab(a.background, b.background, t);
+            result.border = mixColorOklab(a.border, b.border, t);
+            result.color = mixColorOklab(a.color, b.color, t);
+            return result;
+        }
         return .{
             .bounds = .{ .x = lerp(a.bounds.x, b.bounds.x, t), .y = lerp(a.bounds.y, b.bounds.y, t), .width = lerp(a.bounds.width, b.bounds.width, t), .height = lerp(a.bounds.height, b.bounds.height, t) },
             .pose = mixPose(a.pose, b.pose, t),
@@ -99,6 +115,15 @@ pub fn mixPose(a: Pose, b: Pose, t: f32) Pose {
 /// An RGB color `t` of the way from `a` to `b`.
 pub fn mixRgb(a: u32, b: u32, t: f32) u32 {
     return mixColor(a, b, t).?;
+}
+/// An RGB color `t` of the way from `a` to `b`, mixed in Oklab.
+pub fn mixRgbOklab(a: u32, b: u32, t: f32) u32 {
+    return ui.Color.mixOklab(.rgb(a), .rgb(b), t).hex();
+}
+fn mixColorOklab(a: ?u32, b: ?u32, t: f32) ?u32 {
+    const from = a orelse return b;
+    const to = b orelse return a;
+    return mixRgbOklab(from, to, t);
 }
 fn mixColor(a: ?u32, b: ?u32, t: f32) ?u32 {
     const from = a orelse return b;
@@ -223,6 +248,7 @@ const Flight = struct {
     /// Its own look as of the last frame it was built.
     to: Look,
     fly: bool,
+    oklab: bool = false,
     channel: animation.Channel,
     /// How far it had got when it went with the nodes around it, after
     /// which its copy flies on, fading out by the end of the way.
@@ -395,7 +421,7 @@ pub const State = struct {
             }
             var channel = animation.Channel.init(0) catch continue;
             channel.retarget(now, 1, .{ .motion = match.motion }) catch continue;
-            var value: Flight = .{ .key = match.key, .id = node.id, .other = if (in_place) 0 else before.id, .from = before.look, .to = lookOf(node), .fly = match.fly and !in_place, .channel = channel };
+            var value: Flight = .{ .key = match.key, .id = node.id, .other = if (in_place) 0 else before.id, .from = before.look, .to = lookOf(node), .fly = match.fly and !in_place, .oklab = match.oklab, .channel = channel };
             if (match.morph and node.kind == .text and before.is_text) {
                 value.morph = .{ .bounds = before.look.bounds, .font = before.font, .color = before.look.color, .text_len = before.text_len };
                 @memcpy(value.morph.?.text[0..before.text_len], before.text[0..before.text_len]);
@@ -437,7 +463,7 @@ pub const State = struct {
             current.t = t;
             if (target) |node| current.to = lookOf(node);
             const to = current.to;
-            var look = Look.mix(current.from, to, t);
+            var look = Look.mixIn(current.from, to, t, current.oklab);
             if (target == null) {
                 const at = current.gone orelse t;
                 current.gone = at;

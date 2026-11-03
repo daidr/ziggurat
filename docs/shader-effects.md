@@ -1,6 +1,6 @@
 # 着色器与元素效果
 
-`ziggurat_shader` 是一门有界的着色语言：程序在绘制之前编译成寄存器字节码，编译时就算出每个像素最多执行多少步；`ziggurat_ui` 用它改写元素的绘制结果（元素效果）或元素下方已画好的内容（背景着色器）。在此之上，`ui.effects.Library` 提供内置的位姿/透视变换、淡出和玻璃折射程序，声明式视图把它们接成 `Style.opacity`、`Style.pose`、`Style.effect`、`Style.refraction` 与 `View.presentColumn` 进出场过渡。
+`ziggurat_shader` 是一门有界的着色语言：程序在绘制之前编译成寄存器字节码，编译时就算出每个像素最多执行多少步；`ziggurat_ui` 用它改写元素的绘制结果（元素效果）或元素下方已画好的内容（背景着色器）。在此之上，`ui.effects.Library` 提供内置的位姿/透视变换、淡出、高斯模糊（`Library.blur`，9×9 采样覆盖三倍标准差，最大 64 DIP）和玻璃折射程序，声明式视图把它们接成 `Style.opacity`、`Style.pose`、`Style.effect`、`Style.refraction` 与 `View.presentColumn` 进出场过渡。
 
 **范围说明**：软件回放（Windows GDI DIB、Linux Cairo 图像面）在 CPU 上逐像素解释执行程序。Windows D3D11 渲染器把程序翻译成 HLSL 后在 GPU 上执行元素效果与背景着色器（见下文“Direct3D 11 执行”）；Linux 渲染器可把它们翻译成 GLSL 交给 OpenGL 执行，结果读回软件平面（见下文“Linux OpenGL 执行”）。两者都与软件回放逐像素对照验证。目前没有吞吐量基准。像素正确性由单元测试与隐藏窗口 smoke 检查验证，不代表视觉质量评审。
 
@@ -111,9 +111,9 @@ if (try v.presentColumn(&state.panel, state.open, .{}, .{ .padding = Insets.all(
 }
 ```
 
-- `Style.opacity`（0–1）、`Style.pose` 与 `Style.effect` 作用于节点及其全部后代，按位姿、效果、淡出由外到内嵌套，不透明度由最外层承担；它们与裁剪按子树范围后进先出地关闭。没有 `prepareShaderEffects` 时位姿与淡出被忽略，`effect` 原样绘制内容。
+- `Style.opacity`（0–1）、`Style.pose`、`Style.blur` 与 `Style.effect` 作用于节点及其全部后代，按位姿、模糊、效果、淡出由外到内嵌套，不透明度由最外层承担；它们与裁剪按子树范围后进先出地关闭。没有 `prepareShaderEffects` 时位姿与淡出被忽略，`effect` 原样绘制内容。
 - `Style.refraction` 在容器子节点之下画玻璃折射，代替 `material` 与 `background`；减少透明度或高对比度偏好下回退到它们。
-- `View.presentColumn(presence, show, transition, style)` 打开一个列容器：`show` 变真时从 `transition.hidden` 位姿与 `hidden_opacity` 进入，变假后退出，退出结束返回 false（此时不要构建子节点也不要 `end`）。`Presence` 由应用以稳定地址保存，内部是 `ziggurat_animation` 的 `Channel`；运动期间按 60 Hz 请求下一帧，静止时不请求。减少动态效果偏好下立即出现与消失。
+- `View.presentColumn(presence, show, transition, style)` 打开一个列容器：`show` 变真时从 `transition.hidden` 位姿、`hidden_opacity` 与 `hidden_blur` 进入，变假后退向 `exit_to`（或容器的 `Style.child_exit`），退出结束返回 false（此时不要构建子节点也不要 `end`）。`Presence` 由应用以稳定地址保存，内部是 `ziggurat_animation` 的 `Channel`；运动期间按 60 Hz 请求下一帧，静止时不请求。减少动态效果偏好下立即出现与消失。
 
 ## Canvas
 

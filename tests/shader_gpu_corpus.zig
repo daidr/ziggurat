@@ -21,12 +21,33 @@ fn setTint(program: *const shader.Program, values: *shader.Values) anyerror!void
     try values.set(program.uniform("tint").?, [4]f32{ 0.9, 0.2, 0.1, 1 });
     try values.set(program.uniform("weights").?, &[3]f32{ 0.25, 0.5, 0.25 });
 }
+fn setSigma(program: *const shader.Program, values: *shader.Values) anyerror!void {
+    try values.set(program.uniform("sigma").?, @as(f32, 1.5));
+}
 fn setInts(program: *const shader.Program, values: *shader.Values) anyerror!void {
     try values.set(program.uniform("divisor").?, @as(i32, 7));
     try values.set(program.uniform("big").?, @as(i32, std.math.maxInt(i32) - 20));
 }
 
 pub const cases = [_]Case{
+    // The element blur of `ui.effects.Library`, as `Style.blur` draws it.
+    .{ .name = "gaussian", .setup = setSigma, .source =
+    \\uniform float sigma;
+    \\vec4 layer(vec2 position) {
+    \\    vec4 sum = vec4(0.0);
+    \\    float total = 0.0;
+    \\    float spacing = sigma * 0.75;
+    \\    for (int i = -4; i <= 4; i++) {
+    \\        for (int j = -4; j <= 4; j++) {
+    \\            vec2 k = vec2(float(i), float(j)) * 0.75;
+    \\            float w = exp(-0.5 * dot(k, k));
+    \\            sum += sample(position + vec2(float(i), float(j)) * spacing) * w;
+    \\            total += w;
+    \\        }
+    \\    }
+    \\    return sum / total;
+    \\}
+    },
     .{ .name = "tint", .setup = setTint, .source =
     \\uniform float amount;
     \\uniform vec4 tint;
