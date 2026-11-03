@@ -463,3 +463,50 @@ test "key bindings are scoped to focus and to the shown dialog" {
     try testing.expect(!try h.key(press(.f6)));
     try testing.expectEqual(@as(usize, 1), app.window);
 }
+
+const SharedApp = struct {
+    stage: u8 = 0,
+    count: []const u8 = "12",
+    fn build(self: *SharedApp, v: *View) anyerror!void {
+        const tween: @import("ziggurat_animation").Motion = .{ .tween = .{ .duration_ns = 100 * std.time.ns_per_ms, .easing = .linear } };
+        try v.column(.{ .clip = true, .height = 80, .opacity = 0.5 });
+        if (self.stage == 0) {
+            try v.column(.{ .key = 1, .width = 40, .height = 40, .background = 0xff0000, .match = .{ .key = 7, .motion = tween, .fly = true } });
+            try v.text("thumb", .{ .match = .{ .key = 8, .motion = tween, .morph = true } });
+            try v.end();
+        } else if (self.stage == 1) {
+            try v.column(.{ .key = 2, .width = 200, .height = 100, .background = 0x0000ff, .match = .{ .key = 7, .motion = tween, .fly = true } });
+            try v.text("thumbnail", .{ .key = 3, .font = .heading2, .match = .{ .key = 8, .motion = tween, .morph = true, .fly = true } });
+            try v.end();
+        }
+        try v.end();
+        try v.text(self.count, .{ .key = 4, .match = .{ .key = 9, .motion = tween, .morph = true } });
+    }
+};
+
+test "shared elements fly, morph and fly on as copies through a real frame" {
+    var storage: Storage = .{};
+    var app: SharedApp = .{};
+    var h = Harness.init(&app, SharedApp.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    app.stage = 1;
+    app.count = "123";
+    try h.render();
+    try h.advance(30 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(u8, 2), (try h.find(.{ .key = 2 })).lifted);
+    try testing.expect(h.view.matches.morphOf((try h.find(.{ .key = 3 })).id) != null);
+    try testing.expect(h.view.matches.morphOf((try h.find(.{ .key = 4 })).id) != null);
+    try testing.expect(h.view.matches.copyDraws().len > 0);
+    // Gone on its way, the detail flies on as a copy.
+    app.stage = 2;
+    try h.advance(30 * std.time.ns_per_ms);
+    var flying = false;
+    for (h.view.matches.copyDraws()) |entry| {
+        if (entry.rank == 2) flying = true;
+    }
+    try testing.expect(flying);
+    try h.advance(100 * std.time.ns_per_ms);
+    try testing.expect(!h.view.matches.moving());
+}
