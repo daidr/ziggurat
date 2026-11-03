@@ -452,6 +452,9 @@ static int create_pipeline(ZigMetalRenderer *s){
     sd.sAddressMode=sd.tAddressMode=MTLSamplerAddressModeClampToZero;
     s->mask_sampler=[s->device newSamplerStateWithDescriptor:sd];
     sd.sAddressMode=sd.tAddressMode=MTLSamplerAddressModeClampToEdge;
+    // Images pick their mip level on the CPU and pass it as an explicit lod;
+    // a NotMipmapped sampler would ignore it and always read level 0.
+    sd.mipFilter=MTLSamplerMipFilterNearest;
     s->linear_sampler=[s->device newSamplerStateWithDescriptor:sd];
     sd.minFilter=sd.magFilter=MTLSamplerMinMagFilterNearest;
     s->nearest_sampler=[s->device newSamplerStateWithDescriptor:sd];
