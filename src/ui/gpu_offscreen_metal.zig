@@ -87,6 +87,7 @@ pub const Surface = opaque {
         try domain.checkRendererReady();
         try state.renderer.initOffscreen(domain, borrow);
         initialized = true;
+        try state.renderer.prepareOffscreen(options.size);
         // The renderer's preparation failing, as the other surfaces' plane
         // preparation can.
         if (fault != 0) return error.GraphicsFailed;

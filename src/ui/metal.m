@@ -1692,6 +1692,24 @@ void zmtl_offscreen_commit(void *p){
         if(s->offscreen_target)s->stats.offscreen_targets++;
     }
 }
+/* Both targets of a surface made up front, so that rendering makes none:
+   the first frame draws into one and the other waits as the next. */
+int zmtl_offscreen_prepare(void *p,uint32_t width,uint32_t height){
+    ZigMetalRenderer *s=R(p);if(s->drawing||s->lost||!s->device||!width||!height)return 1;
+    @autoreleasepool{
+        MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
+        d.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;d.storageMode=MTLStorageModeShared;
+        if(!s->offscreen_target||s->offscreen_target.width!=width||s->offscreen_target.height!=height){
+            s->offscreen_target=[s->device newTextureWithDescriptor:d];if(!s->offscreen_target)return 1;
+            s->stats.offscreen_targets++;
+        }
+        if(!s->front||s->front.width!=width||s->front.height!=height){
+            s->front=[s->device newTextureWithDescriptor:d];if(!s->front)return 1;
+            s->stats.offscreen_targets++;
+        }
+    }
+    return 0;
+}
 uint32_t zmtl_offscreen_objects(void *p){ZigMetalRenderer *s=R(p);return (s->front!=nil)+(s->offscreen_target!=nil);}
 int zmtl_read_front(void *p,uint32_t *pixels,uint32_t width,uint32_t height){
     ZigMetalRenderer *s=R(p);id<MTLTexture> t=s->front;if(!t||t.width!=width||t.height!=height)return 1;

@@ -52,6 +52,7 @@ const loading = commands.loading;
 extern fn zmtl_create(*c_int) ?*anyopaque;
 extern fn zmtl_create_in_domain(*anyopaque, *c_int) ?*anyopaque;
 extern fn zmtl_rebuild(*anyopaque) c_int;
+extern fn zmtl_offscreen_prepare(*anyopaque, u32, u32) c_int;
 extern fn zmtl_texture(*anyopaque, *const drawing.GpuTextureToken, *const drawing.ImagePlan) c_int;
 extern fn zmtl_inject_loss(*anyopaque) void;
 extern fn zmtl_offscreen_commit(*anyopaque) void;
@@ -331,6 +332,11 @@ pub const Renderer = struct {
             3 => return error.DeviceLost,
             else => return error.GraphicsFailed,
         }
+    }
+    /// Makes an offscreen surface's targets for `size` now rather than
+    /// at its first frames.
+    pub fn prepareOffscreen(self: *Renderer, size: z.Size) !void {
+        if (zmtl_offscreen_prepare(self.native orelse return error.NotInitialized, size.width, size.height) != 0) return error.GraphicsFailed;
     }
     /// An offscreen surface's frame drawn: it becomes the front.
     pub fn commitOffscreen(self: *Renderer) void {
