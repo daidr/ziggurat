@@ -1,6 +1,6 @@
 # 系统工具
 
-按需导入 `ziggurat_system`。应用身份、系统目录、单实例与参数转发、登录启动、URL scheme/文件关联、阻止休眠和任务栏状态见 [单实例与系统集成](os-integration.md)。原生菜单栏、菜单快捷键、上下文菜单、异步消息框、窗口托盘、独立托盘和异步文件选择器实现 Windows、Linux 和 macOS（见下文“macOS”一节），全局快捷键和通知实现 Windows 和 Linux；同步文本剪贴板 helper 目前仅 Windows；多格式剪贴板 Board、放置目标和浮出窗口支持 Windows/Linux；桌面环境快照/订阅、密钥存储、外观跟随和最近文档登记支持 Windows/Linux/macOS；粗模式文件监视另支持 macOS FSEvents。`system.capabilities` 分别报告编译目标的支持状态，未实现的窗口扩展返回 `UnsupportedCapability`。Linux 的托盘与通知走会话总线，全局快捷键只在 X11 上可用，运行时缺少对应服务或显示协议时按下文各节明确报告。独立的无 UI `shell.Worker` 已支持 Windows/Linux/macOS 显式程序启动、打开 URL/路径、在文件管理器中显示、移到废纸篓与已安装应用，以及 Windows 有界文件图标，能力见 `system.capabilities.shell`。
+按需导入 `ziggurat_system`。应用身份、系统目录、单实例与参数转发、登录启动、URL scheme/文件关联、阻止休眠和任务栏状态见 [单实例与系统集成](os-integration.md)。原生菜单栏、菜单快捷键、上下文菜单、异步消息框、窗口托盘、独立托盘和异步文件选择器实现 Windows、Linux 和 macOS（见下文“macOS”一节），全局快捷键和通知实现 Windows、Linux 和 macOS（macOS 通知需要 app bundle）；同步文本剪贴板 helper 目前仅 Windows；多格式剪贴板 Board、放置目标和浮出窗口支持 Windows/Linux；桌面环境快照/订阅、密钥存储、外观跟随和最近文档登记支持 Windows/Linux/macOS；粗模式文件监视另支持 macOS FSEvents。`system.capabilities` 分别报告编译目标的支持状态，未实现的窗口扩展返回 `UnsupportedCapability`。Linux 的托盘与通知走会话总线，全局快捷键只在 X11 上可用，运行时缺少对应服务或显示协议时按下文各节明确报告。独立的无 UI `shell.Worker` 已支持 Windows/Linux/macOS 显式程序启动、打开 URL/路径、在文件管理器中显示、移到废纸篓与已安装应用，以及 Windows 有界文件图标，能力见 `system.capabilities.shell`。
 
 ## 窗口 owner
 
@@ -140,6 +140,8 @@ Linux 独立托盘与窗口托盘使用同一 status notifier item 实现，`gui
 
 Linux 在 X11 根窗口上用 `XGrabKey` 抓取按键，对 CapsLock/NumLock 的四种组合分别抓取，因此锁定键状态不影响匹配；super 对应 Mod4。其他客户端已经抓取同一组合时，X 服务器以错误拒绝，返回 `HotkeyRegistrationFailed`，X 错误码在 `owner.last_error`；同一进程内重复注册同一组合同样被拒绝。检测冲突需要一次 X 往返（错误陷阱的同步），这是对 X 服务器的协议请求，不等待应用工作。按键在根窗口事件过滤器中匹配、在 idle 中报告；不允许重复时，同一键在松开前只报告一次（进程启用 X 的可检测自动重复）。没有对应键码的键（例如部分 F13–F24 布局）返回 `UnsupportedKey`。Wayland 等非 X11 显示返回 `UnsupportedCapability`：桌面全局快捷键门户需要用户授权会话，当前未实现。
 
+macOS 用 Carbon 的 `RegisterEventHotKey` 在应用事件目标上注册，不需要辅助功能权限，无论哪个应用在前台都会收到；super 为 Command，alt 为 Option。本进程或其他应用已经注册同一组合时返回 `HotkeyRegistrationFailed`，OSStatus（例如 `eventHotKeyExistsErr` -9878）在 `owner.last_error`。键按 ANSI 键盘的虚拟键码匹配（`plus` 为 `=` 键，`insert` 为 Help 键）；Mac 键盘没有 F21–F24，返回 `UnsupportedKey`。按下（`kEventHotKeyPressed`）报告一次，`repeat = true` 时按住期间按用户设置的按键重复延迟和速率继续报告，松开（`kEventHotKeyReleased`）停止。实现见 `src/system/macos_hotkey.m`；`zig build smoke-hotkeys-macos` 经应用事件目标发送系统在按下和松开时发出的事件，验证注册、重复 ID、不支持的键、系统拒绝重复组合、单次报告、按住重复、注销与 detach 释放。
+
 ## 通知区通知
 
 `showNotification(id, .{ .title = "完成", .body = "导出完成" })` 向 Windows Shell 提交一条通知区通知。业务 ID 非零、body 非空；title/body 分别最多 63/255 个 UTF-16 单元，超长或非法文本返回错误，保留原通知。kind 为 info/warning/err，默认 silent 和 real_time 为 true，系统不能立即显示时丢弃。每个 Owner 同时保留一条通知，使用独立复制图标，不需要配置持久托盘项。成功替换采用新的原生 ID；通知文本在调用中交给系统复制，不保留调用者切片。
@@ -149,6 +151,8 @@ Linux 在 X11 根窗口上用 `XGrabKey` 抓取按键，对 CapsLock/NumLock 的
 这是 [NIF_INFO 通知区接口](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-notifyicondataw)，不提供现代 Toast 的 action buttons、通知历史或送达保证。调用成功只证明 Shell 接受提交；系统设置、专注模式、用户操作等决定实际展示。
 
 Linux 调用会话总线上的 `org.freedesktop.Notifications.Notify`，带一个 `default` 动作；文本限制与 Windows 相同。kind 映射为 urgency（info/warning 为普通，err 为紧急），silent 映射为 `suppress-sound`，real_time 映射为 `transient`（不进入通知历史）。提交在调用返回后异步完成：`showNotification` 只同步校验并复制文本，服务器拒绝或总线不可用时清除该通知并以 `dbus` 域诊断报告 `NotificationSubmissionFailed`。`ActionInvoked(id, "default")` 产生 `notification_activated`，之前先撤回该通知；`NotificationClosed` 只清理。信号只匹配本条通知自己的 `Notify` 回复给出的服务器 ID。替换或清除时已经显示的通知以 `CloseNotification` 撤回；总线尚未连上就被替换的通知不会发送。
+
+macOS 把通知交给通知中心（`UNUserNotificationCenter`），这要求进程是带 bundle identifier 的 `.app`：在 app bundle 之外 `showNotification` 校验文本后返回 `UnsupportedCapability`。文本限制与 Windows 相同。第一次显示时系统向用户请求通知权限；用户拒绝或提交失败时，在调用返回后清除该通知并以诊断报告 `NotificationSubmissionFailed`。silent 为 false 时播放默认提示音；kind 与 real_time 在 macOS 没有对应项，被忽略。应用在前台时也以横幅显示并进入通知中心。点击通知（默认动作）产生 `notification_activated`，之前先撤回该通知。替换、`clearNotification()`、detach 和窗口关闭都撤回尚未送达和已经显示的那一条。
 
 ## 剪贴板
 

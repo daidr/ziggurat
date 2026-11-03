@@ -576,6 +576,8 @@ pub fn build(b: *std.Build) void {
         native_support.linkFrameworks(b, system, &.{ "CoreServices", "CoreFoundation", "AppKit", "Foundation", "UniformTypeIdentifiers" });
         _ = native_support.add(b, system, "system-menu-macos", "src/system/macos_menu.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         _ = native_support.add(b, system, "system-dialog-macos", "src/system/macos_dialog.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native_support.linkFrameworks(b, system, &.{ "Carbon", "UserNotifications" });
+        _ = native_support.add(b, system, "system-hotkey-macos", "src/system/macos_hotkey.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
     }
     if (target.result.os.tag == .linux) {
         const native = native_support.add(b, system, "system-shell-native", "src/system/shell_linux.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
@@ -1576,6 +1578,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_system", .module = system },
         });
         addSmoke(b, "smoke-system-macos", "tests/system_macos_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        addSmoke(b, "smoke-hotkeys-macos", "tests/macos_hotkey_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_system", .module = system },
         });
