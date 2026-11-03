@@ -3591,6 +3591,16 @@ pub const View = struct {
         for (self.overlay.embeds[0..self.overlay.embed_count]) |*entry| if (entry.id == wanted) return entry;
         return null;
     }
+    /// The embedded leaf a press at `point` reaches before the controls,
+    /// as `pointerPress` routes it, without pressing it.
+    pub fn embedIdAt(self: *const View, point: Point) ?u64 {
+        return if (self.embedAt(point)) |entry| entry.id else null;
+    }
+    /// True when `point` is on a panel of the open menu, which takes a
+    /// press before anything under it.
+    pub fn menuPanelAt(self: *const View, point: Point) bool {
+        return menu_controls.panelAt(self, point);
+    }
     /// The topmost interactive embedded leaf at `point`; none while an
     /// open list or menu covers it.
     fn embedAt(self: *const View, point: Point) ?*const Overlay.Interactive {
@@ -7739,6 +7749,7 @@ test {
     _ = @import("harness.zig");
     _ = @import("controls_tests.zig");
     _ = @import("hidden_tests.zig");
+    _ = @import("click_tests.zig");
     _ = @import("headless_tests.zig");
     _ = @import("menu_tests.zig");
     _ = @import("router.zig");

@@ -41,7 +41,7 @@ pub const Query = struct {
     }
 };
 
-pub const Error = error{ NotFound, Ambiguous, Disabled, Hidden, Inert, NotActivatable, NotAdjustable, NotScrollable, Stale };
+pub const Error = error{ NotFound, Ambiguous, Disabled, Hidden, Inert, Covered, NotActivatable, NotAdjustable, NotScrollable, Stale };
 
 pub const Config = struct {
     bounds: Rect = .{ .x = 0, .y = 0, .width = 640, .height = 480 },
@@ -459,22 +459,125 @@ pub const Harness = struct {
     }
 
     /// Activate the matching button, link, checkbox, switch, radio, segment,
-    /// tab, list item or disclosure, then render.
+    /// tab, list item or disclosure, then render. Before anything is sent
+    /// the target is checked as a pointer would reach it: `Hidden` when
+    /// the window shows none of it, `Covered` when the center of its shown
+    /// part lies on another control, an embedded leaf, an open menu or on
+    /// nothing that takes the press. It is neither scrolled into view nor
+    /// pressed at another, uncovered point; `find` still returns it and
+    /// `clickAt` presses wherever it is told.
     pub fn click(self: *Harness, query: Query) anyerror!void {
         const node = try self.find(query);
         if (isRow(node.kind)) return self.clickWith(query, .{});
+        switch (node.kind) {
+            .button, .link, .nav_button, .combo_box, .popup_button, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .column_header, .token, .combo_toggle, .editable_text, .menu_item => {},
+            else => return error.NotActivatable,
+        }
+        _ = try self.target(node, .primary);
         try self.activate(node);
     }
 
     /// Press a tree or table row with modifiers, as Host routes a press:
-    /// Ctrl toggles and Shift extends a multiple selection. Renders.
+    /// Ctrl toggles and Shift extends a multiple selection. The row is
+    /// checked as `click` checks its target, at the point pressed: the
+    /// right end of its shown part, clear of a tree row's triangle.
+    /// Renders.
     pub fn clickWith(self: *Harness, query: Query, modifiers: z.KeyModifiers) anyerror!void {
         const node = try self.find(query);
         if (!isRow(node.kind)) return error.NotActivatable;
+        const center = try self.target(node, .primary);
+        const rect = self.shown(node).?;
+        const point: view.Point = .{ .x = @max(rect.x, rect.x + rect.width - 1), .y = center.y };
+        try self.reaches(node, point, .primary);
+        try self.pressRow(node, point, modifiers);
+    }
+
+    /// Click the matching element with the secondary button at the center
+    /// of its shown part, as `clickButtonAt` does, after checking it as
+    /// `click` does; the context menu the press opens must also be the
+    /// element's own, or that of the nearest element around it that has
+    /// one. Returns whether a menu or a pointer area took the click.
+    pub fn rightClick(self: *Harness, query: Query) anyerror!bool {
+        const node = try self.find(query);
+        const point = try self.target(node, .secondary);
+        return self.clickButtonAt(point.x, point.y, .secondary, .{});
+    }
+
+    /// The part of `node` the window shows: its visible rect inside the
+    /// window's bounds.
+    fn shown(self: *const Harness, node: *const Node) ?Rect {
+        const rect = self.visible(node) orelse return null;
+        const window = self.config.bounds;
+        const x0 = @max(rect.x, window.x);
+        const y0 = @max(rect.y, window.y);
+        const x1 = @min(rect.x + rect.width, window.x + window.width);
+        const y1 = @min(rect.y + rect.height, window.y + window.height);
+        if (!(x1 > x0 and y1 > y0)) return null;
+        return .{ .x = x0, .y = y0, .width = x1 - x0, .height = y1 - y0 };
+    }
+
+    /// Checks a named target before any input is sent, and returns the
+    /// center of its shown part.
+    fn target(self: *const Harness, node: *const Node, button: view.PointerButton) Error!view.Point {
         try self.check(node);
-        const rect = self.visible(node).?;
-        // The right end of a row is clear of a tree row's triangle.
-        try self.pressRow(node, .{ .x = rect.x + rect.width - 1, .y = rect.y + rect.height / 2 }, modifiers);
+        const rect = self.shown(node) orelse return error.Hidden;
+        const point: view.Point = .{ .x = rect.x + rect.width / 2, .y = rect.y + rect.height / 2 };
+        try self.reaches(node, point, button);
+        return point;
+    }
+
+    /// `Covered` unless a press at `point` reaches `node`, in Host's order:
+    /// an open menu, then an embedded leaf, then the last painted control.
+    fn reaches(self: *const Harness, node: *const Node, point: view.Point, button: view.PointerButton) Error!void {
+        if (self.view.menuPanelAt(point) and !self.inMenu(node)) return error.Covered;
+        // A shown popup, popover, dialog or menu is drawn over the flow and
+        // takes the press on its panel, where a control is or not.
+        for (self.view.nodes()) |*layer| {
+            if (layer.kind != .popup and layer.kind != .popover and layer.kind != .dialog and layer.kind != .menu) continue;
+            const rect = self.visible(layer) orelse continue;
+            if (contains(rect, point.x, point.y) and !self.within(node, layer)) return error.Covered;
+        }
+        if (self.view.embedIdAt(point)) |id| if (id != node.id) return error.Covered;
+        const hit = self.at(point.x, point.y);
+        if (interactive(node.kind)) {
+            if (hit == null or hit.? != node) return error.Covered;
+        } else if (node.embed == null and hit != null) return error.Covered;
+        if (button == .secondary and self.menuAnchorAt(point) != self.menuAnchorOf(node)) return error.Covered;
+    }
+    fn within(self: *const Harness, node: *const Node, layer: *const Node) bool {
+        const all = self.view.nodes();
+        if (node == layer) return true;
+        var index = node.parent;
+        while (index < all.len) : (index = all[index].parent) if (&all[index] == layer) return true;
+        return false;
+    }
+    fn inMenu(self: *const Harness, node: *const Node) bool {
+        const all = self.view.nodes();
+        var index = node.parent;
+        while (index < all.len) : (index = all[index].parent) if (all[index].kind == .menu) return true;
+        return false;
+    }
+    /// The index of the element whose context menu a secondary press at
+    /// `point` opens.
+    fn menuAnchorAt(self: *const Harness, point: view.Point) ?u32 {
+        const overlay = &self.view.overlay.menu;
+        var best: ?u32 = null;
+        for (overlay.anchors[0..overlay.anchor_count]) |anchor| {
+            if (!contains(anchor.rect, point.x, point.y)) continue;
+            if (best == null or anchor.index > best.?) best = anchor.index;
+        }
+        return best;
+    }
+    /// The index of the element whose context menu `node` shows: its own,
+    /// or the nearest element's around it.
+    fn menuAnchorOf(self: *const Harness, node: *const Node) ?u32 {
+        const overlay = &self.view.overlay.menu;
+        const all = self.view.nodes();
+        var index: u32 = @intCast(node - all.ptr);
+        while (index < all.len) : (index = all[index].parent) {
+            for (overlay.anchors[0..overlay.anchor_count]) |anchor| if (anchor.index == index) return index;
+        }
+        return null;
     }
     /// Press the triangle of a tree row to expand or collapse it. Renders.
     pub fn toggleExpanded(self: *Harness, query: Query) anyerror!void {
