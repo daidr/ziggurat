@@ -22,6 +22,7 @@
 const std = @import("std");
 const ui = @import("ziggurat_ui");
 const animation = @import("ziggurat_animation");
+const morph_text = @import("morph.zig");
 
 const Pose = ui.effects.Pose;
 const Font = ui.Font;
@@ -43,7 +44,9 @@ pub const Match = struct {
     /// On a text node: move the characters its text shares with the
     /// other's from where they were to where they are, growing or
     /// shrinking to their size, and fade the others, as the text changes
-    /// in place too; see `morph.zig`.
+    /// in place too; see `morph.zig`. An embedded leaf that lists its
+    /// characters (`Embed.glyphs`), as a rich text, morphs them each in
+    /// its own font and color.
     morph: bool = false,
 };
 
@@ -93,6 +96,10 @@ pub fn mixPose(a: Pose, b: Pose, t: f32) Pose {
     result.rotate_y = turn(a.rotate_y, b.rotate_y, t);
     return result;
 }
+/// An RGB color `t` of the way from `a` to `b`.
+pub fn mixRgb(a: u32, b: u32, t: f32) u32 {
+    return mixColor(a, b, t).?;
+}
 fn mixColor(a: ?u32, b: ?u32, t: f32) ?u32 {
     const from = a orelse return b;
     const to = b orelse return a;
@@ -128,6 +135,47 @@ pub const copy_nodes = 32;
 pub const copy_text = 512;
 /// Flying nodes kept as copies at once.
 pub const max_copies = 8;
+/// Leaves of several styles whose characters a View keeps at once for
+/// `Match.morph`; more change in place.
+pub const max_glyph_texts = 4;
+
+/// The characters an embedded leaf drew, kept for its morph.
+pub const GlyphText = struct {
+    key: u64 = 0,
+    glyphs: [morph_text.max_chars]morph_text.Glyph = undefined,
+    len: u8 = 0,
+    /// Whether it drew more than morph: it crossfades.
+    long: bool = false,
+
+    pub fn items(self: *const GlyphText) []const morph_text.Glyph {
+        return self.glyphs[0..self.len];
+    }
+};
+
+/// A morph of an embedded leaf's characters to paint: they go from
+/// `from`, written in `bounds`, to where the leaf writes them now, `t` of
+/// the way.
+pub const GlyphMorph = struct {
+    from: *const GlyphText,
+    bounds: Rect,
+    t: f32,
+};
+
+/// The characters an embedded leaf `node` draws, into `out`; null when it
+/// lists none.
+fn glyphsOf(node: anytype, out: *GlyphText) bool {
+    if (node.kind != .embed) return false;
+    const content = node.embed orelse return false;
+    const list = content.glyphs orelse return false;
+    if (list(content.context, &out.glyphs)) |count| {
+        out.len = @intCast(count);
+        out.long = false;
+    } else {
+        out.len = 0;
+        out.long = true;
+    }
+    return true;
+}
 
 /// `left` is the node a flight to `id` came from, which, still built as a
 /// page going away, never flies back. A text node keeps its text and font
@@ -140,6 +188,8 @@ const Shown = struct {
     text: [max_text]u8 = undefined,
     text_len: u16 = 0,
     is_text: bool = false,
+    /// An embedded leaf listing its characters, kept in `glyph_shown`.
+    is_glyphs: bool = false,
     font: ?Font = null,
 };
 
@@ -180,6 +230,8 @@ const Flight = struct {
     /// How far it is, as of the last frame.
     t: f32 = 0,
     morph: ?MorphSource = null,
+    /// The characters of a leaf morphing come from, in `glyph_from`.
+    glyphs: bool = false,
 };
 
 /// What a copy of a node keeps of each node of its subtree: its box and
@@ -233,6 +285,10 @@ pub const State = struct {
     copies: [max_copies]Copy = @splat(.{}),
     draws: [2 * capacity]CopyDraw = undefined,
     draw_len: usize = 0,
+    /// The characters of the leaves listing theirs as they showed, by
+    /// match key, and those a morph of one comes from, by flight key.
+    glyph_shown: [max_glyph_texts]GlyphText = @splat(.{}),
+    glyph_from: [max_glyph_texts]GlyphText = @splat(.{}),
 
     /// Whether a flight is on its way.
     pub fn moving(self: *const State) bool {
@@ -249,6 +305,37 @@ pub const State = struct {
             return .{ .from = source.text[0..source.text_len], .font = source.font, .color = source.color, .bounds = source.bounds, .t = entry.t };
         };
         return null;
+    }
+    /// The morph of the characters of embedded leaf `id` on its way, if
+    /// it morphs.
+    pub fn glyphMorphOf(self: *const State, id: u64) ?GlyphMorph {
+        for (self.flights[0..self.flight_len]) |*entry| if (entry.id == id and entry.gone == null and entry.glyphs) {
+            const from = glyphSlot(&self.glyph_from, entry.key) orelse return null;
+            return .{ .from = from, .bounds = entry.from.bounds, .t = entry.t };
+        };
+        return null;
+    }
+    fn glyphSlot(list: anytype, key: u64) ?@TypeOf(&list[0]) {
+        for (list) |*entry| if (entry.key == key) return entry;
+        return null;
+    }
+    /// A slot of `list` for `key`: its own, or one no flight or shown key
+    /// holds.
+    fn glyphFree(self: *const State, list: *[max_glyph_texts]GlyphText, key: u64, from: bool) ?*GlyphText {
+        if (glyphSlot(list, key)) |slot| return slot;
+        for (list) |*entry| {
+            const held = if (entry.key == 0) false else if (from) self.flightOf(entry.key) != null else self.shownOf(entry.key);
+            if (!held) return entry;
+        }
+        return null;
+    }
+    fn flightOf(self: *const State, key: u64) ?*const Flight {
+        for (self.flights[0..self.flight_len]) |*entry| if (entry.key == key) return entry;
+        return null;
+    }
+    fn shownOf(self: *const State, key: u64) bool {
+        for (self.shown[0..self.shown_len]) |entry| if (entry.key == key and entry.is_glyphs) return true;
+        return false;
     }
     fn previous(self: *const State, key: u64) ?*const Shown {
         for (self.shown[0..self.shown_len]) |*entry| if (entry.key == key) return entry;
@@ -286,9 +373,15 @@ pub const State = struct {
             if (match.key == 0 or node.style.hidden) continue;
             const before = self.previous(match.key) orelse continue;
             const in_place = before.id == node.id;
+            // A leaf listing its characters morphs them from those it, or
+            // the other, showed.
+            var current_glyphs: GlyphText = .{};
+            const glyph_morph = match.morph and before.is_glyphs and glyphsOf(node, &current_glyphs);
             if (in_place) {
                 // The same node: only its text changing moves anything.
-                if (!(match.morph and before.is_text and node.kind == .text and !std.mem.eql(u8, before.text[0..before.text_len], clipped(node.text)))) continue;
+                const text_changed = match.morph and before.is_text and node.kind == .text and !std.mem.eql(u8, before.text[0..before.text_len], clipped(node.text));
+                const glyphs_changed = glyph_morph and if (glyphSlot(&self.glyph_shown, match.key)) |kept| kept.long != current_glyphs.long or !morph_text.sameGlyphs(kept.items(), current_glyphs.items()) else false;
+                if (!text_changed and !glyphs_changed) continue;
             } else {
                 if (before.left == node.id) continue;
                 // The one in flight, and the one it left, which goes with it.
@@ -307,6 +400,12 @@ pub const State = struct {
                 value.morph = .{ .bounds = before.look.bounds, .font = before.font, .color = before.look.color, .text_len = before.text_len };
                 @memcpy(value.morph.?.text[0..before.text_len], before.text[0..before.text_len]);
             }
+            if (glyph_morph) if (glyphSlot(&self.glyph_shown, match.key)) |kept| if (self.glyphFree(&self.glyph_from, match.key, true)) |slot| {
+                slot.* = kept.*;
+                value.glyphs = true;
+                // Its own box holds its characters, which move instead.
+                value.morph = .{ .bounds = before.look.bounds };
+            };
             if (self.flight(match.key)) |current| {
                 current.* = value;
             } else if (self.flight_len < capacity) {
@@ -411,6 +510,13 @@ pub const State = struct {
                 shown.text_len = @intCast(text.len);
                 @memcpy(shown.text[0..text.len], text);
                 shown.font = node.style.font;
+            } else if (match.morph) {
+                var glyphs: GlyphText = .{};
+                if (glyphsOf(node, &glyphs)) if (self.glyphFree(&self.glyph_shown, match.key, false)) |slot| {
+                    glyphs.key = match.key;
+                    slot.* = glyphs;
+                    shown.is_glyphs = true;
+                };
             }
             const existing = for (self.shown[0..count]) |*entry| {
                 if (entry.key == match.key) break entry;

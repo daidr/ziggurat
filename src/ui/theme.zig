@@ -42,6 +42,12 @@ pub const Metrics = struct {
 pub const Theme = struct {
     palette: Palette = .{},
     metrics: Metrics = .{},
+    /// How long the pointer rests on a control before its tooltip shows, in
+    /// nanoseconds: 0 keeps the window's delay (0.6 seconds unless the view
+    /// sets another), and a negative delay shows it at once. Within two
+    /// thirds of it after another tip goes, as the pointer moves along a
+    /// toolbar, the next one shows at once: 0.4 seconds by default.
+    tooltip_delay: i64 = 0,
     pub fn light() Theme {
         return .{};
     }

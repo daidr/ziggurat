@@ -373,3 +373,18 @@ test "math between dollars, and money that stays text" {
     const singles = &@as([800 * "$a ".len]u8, @bitCast(@as([800]["$a ".len]u8, @splat("$a ".*))));
     _ = try md.parseWith(singles, storage.buffers(), both);
 }
+
+test "emphasis opens and closes next to CJK text" {
+    try expectHtml("**五种方式都能承载。**下面是判断", "<p><strong>五种方式都能承载。</strong>下面是判断</p>\n");
+    try expectHtml("**已有可靠内网：直接 HTTP。**接入成本最低。", "<p><strong>已有可靠内网：直接 HTTP。</strong>接入成本最低。</p>\n");
+    try expectHtml("针对你强调的**“简单”**，我会这样选", "<p>针对你强调的<strong>“简单”</strong>，我会这样选</p>\n");
+    try expectHtml("~~删除。~~保留", "<p><del>删除。</del>保留</p>\n");
+    try expectHtml("snake_case_name", "<p>snake_case_name</p>\n");
+    try expectHtml("a **b** c", "<p>a <strong>b</strong> c</p>\n");
+    // `_` and a single `~` keep CommonMark's rule next to CJK text.
+    try expectHtml("中文__粗体。__后文", "<p>中文__粗体。__后文</p>\n");
+    try expectHtml("第1章~“附录”和“序”~第3章", "<p>第1章~“附录”和“序”~第3章</p>\n");
+    // Latin text with curly quotes reads as before.
+    try expectHtml("He said “*hello*” to me.", "<p>He said “<em>hello</em>” to me.</p>\n");
+    try expectHtml("**Alice**’s and **Bob**’s toys", "<p><strong>Alice</strong>’s and <strong>Bob</strong>’s toys</p>\n");
+}

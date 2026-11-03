@@ -3304,6 +3304,31 @@ pub const CoordinateMapping = struct {
     }
 };
 
+/// Where a frame records controls and semantics instead of where they are
+/// drawn: each point (x, y) of window DIP goes to (x * scale_x + x0,
+/// y * scale_y + y0). See `Frame.setHitMap`.
+pub const HitMap = struct {
+    scale_x: f32 = 1,
+    scale_y: f32 = 1,
+    x0: f32 = 0,
+    y0: f32 = 0,
+
+    /// The map that scales by `scale` about `origin` and then moves by
+    /// `delta`, as a pose moves and scales an element about its origin.
+    pub fn about(origin: layout.Point, scale_x: f32, scale_y: f32, delta: layout.Point) HitMap {
+        return .{ .scale_x = scale_x, .scale_y = scale_y, .x0 = origin.x - origin.x * scale_x + delta.x, .y0 = origin.y - origin.y * scale_y + delta.y };
+    }
+    pub fn apply(self: HitMap, rect: Rect) Rect {
+        const x0 = rect.x * self.scale_x + self.x0;
+        const x1 = (rect.x + rect.width) * self.scale_x + self.x0;
+        const y0 = rect.y * self.scale_y + self.y0;
+        const y1 = (rect.y + rect.height) * self.scale_y + self.y0;
+        const result: Rect = .{ .x = @min(x0, x1), .y = @min(y0, y1), .width = @abs(x1 - x0), .height = @abs(y1 - y0) };
+        if (!std.math.isFinite(result.x) or !std.math.isFinite(result.y) or !std.math.isFinite(result.width) or !std.math.isFinite(result.height)) return rect;
+        return result;
+    }
+};
+
 pub const Frame = struct {
     context: *Context,
     size: z.Size,
@@ -3323,6 +3348,9 @@ pub const Frame = struct {
     /// The theme of the subtree being drawn, in place of the window's; see
     /// `pushTheme`.
     theme_override: ?*const Theme = null,
+    /// Where the controls and semantics recorded now take the pointer, when
+    /// it is not where they are drawn in place; see `setHitMap`.
+    hit_map: ?HitMap = null,
     /// Open `beginCache` scopes, innermost last.
     cache_scopes: [4]CacheScope = undefined,
     cache_depth: usize = 0,
@@ -3683,20 +3711,37 @@ pub const Frame = struct {
         try self.addControl(token.key.id, bounds, .{ .enabled = enabled });
         try self.context.input_state.bindTextField(index, token.key.id, token.key);
     }
+    /// Move and scale where the controls and semantics recorded from now
+    /// on take the pointer and show to assistive technology, in window
+    /// DIP, until it is set again; null keeps them where they are drawn
+    /// in place. A view sets it while it paints an element that an effect
+    /// draws elsewhere, as a shared element flying (`Style.match`), so that
+    /// it takes the pointer where it shows. Returns the map it replaces.
+    /// Frames with prepared transforms ignore it.
+    pub fn setHitMap(self: *Frame, map: ?HitMap) ?HitMap {
+        const previous = self.hit_map;
+        self.hit_map = map;
+        return previous;
+    }
+    fn hitRect(self: *const Frame, bounds: Rect) Rect {
+        if (self.transforms != null) return bounds;
+        const map = self.hit_map orelse return bounds;
+        return map.apply(bounds);
+    }
     /// Custom controls use local bounds/track/button coordinates just like
     /// drawing. Ordinary frames retain the original axis-aligned path.
     pub fn addControl(self: *Frame, id: u64, bounds: Rect, options: input.Options) !void {
         const absolute_bounds = self.absolute(bounds);
-        const visible = if (self.clipBounds()) |clip| layout.intersect(absolute_bounds, clip) else absolute_bounds;
+        const visible = self.hitRect(if (self.clipBounds()) |clip| layout.intersect(absolute_bounds, clip) else absolute_bounds);
         var actual = options;
         if (options.focus_rect) |focus| {
             const value = self.absolute(focus);
-            actual.focus_rect = if (self.clipBounds()) |clip| layout.intersect(value, clip) else value;
+            actual.focus_rect = self.hitRect(if (self.clipBounds()) |clip| layout.intersect(value, clip) else value);
         }
         if (options.range) |range| {
             var value = range;
-            value.track = self.absolute(range.track);
-            if (range.step_buttons) |buttons| value.step_buttons = .{ .decrement = self.absolute(buttons.decrement), .increment = self.absolute(buttons.increment) };
+            value.track = self.hitRect(self.absolute(range.track));
+            if (range.step_buttons) |buttons| value.step_buttons = .{ .decrement = self.hitRect(self.absolute(buttons.decrement)), .increment = self.hitRect(self.absolute(buttons.increment)) };
             actual.range = value;
         }
         if (self.transforms) |workspace| try self.context.input_state.addMapped(id, visible, actual, workspace.reference) else try self.context.input_state.addWithOptions(id, visible, actual);
@@ -3852,6 +3897,7 @@ pub const Frame = struct {
                 try self.context.semantic_tree.addMapped(absolute_node, workspace.reference, local);
             } else {
                 if (self.clipBounds()) |clip| absolute_node.bounds = layout.intersect(absolute_node.bounds, clip);
+                absolute_node.bounds = self.hitRect(absolute_node.bounds);
                 try self.context.semantic_tree.add(absolute_node);
             }
         }

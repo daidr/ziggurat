@@ -531,10 +531,47 @@ pub const RichText = struct {
         }
     }
 
+    /// The characters the text draws, each in the box it is written in,
+    /// local to the text, in its span's font and color, for a morph
+    /// (`view.Match.morph`) to move them one by one; null when there are
+    /// more than `out` holds. Inline objects and hyphens are left out.
+    pub fn glyphs(self: *const RichText, out: []view.morph.Glyph) ?usize {
+        const base_color = self.options.color orelse self.theme_text;
+        var count: usize = 0;
+        for (self.runs.items) |run| {
+            const span = self.spans[run.span];
+            if (span.object != null) continue;
+            const line = self.lines.items[run.line];
+            const m = self.metrics.items[run.span];
+            const font = self.fontOf(span);
+            const text = visibleText(span.text[run.start..run.end]);
+            const top = line.y + line.baseline - span.baseline_shift - m.ascent;
+            var it = (std.unicode.Utf8View.init(text) catch return null).iterator();
+            var x: f32 = 0;
+            while (it.nextCodepointSlice()) |piece| {
+                const end = @intFromPtr(piece.ptr) - @intFromPtr(text.ptr) + piece.len;
+                const next = self.options.measurer.textSize(text[0..end], font).width;
+                defer x = @max(x, next);
+                // Spaces move nothing.
+                if (piece.len == 1 and isSpace(piece[0])) continue;
+                if (piece.len > 4) return null;
+                if (count == out.len) return null;
+                out[count] = .{ .len = @intCast(piece.len), .x = run.x + x, .y = top, .width = @max(0, next - x), .height = m.height, .font = font, .color = span.color orelse base_color };
+                @memcpy(out[count].bytes[0..piece.len], piece);
+                count += 1;
+            }
+        }
+        return count;
+    }
+
     /// The view leaf; the RichText must stay at this address while any
     /// pass that emits it runs.
     pub fn embed(self: *RichText) view.Embed {
-        return .{ .context = self, .measure = measureEmbed, .paint = paintEmbed };
+        return .{ .context = self, .measure = measureEmbed, .paint = paintEmbed, .glyphs = glyphsEmbed };
+    }
+    fn glyphsEmbed(context: *anyopaque, out: []view.morph.Glyph) ?usize {
+        const self: *RichText = @ptrCast(@alignCast(context));
+        return self.glyphs(out);
     }
     fn measureEmbed(context: *anyopaque, theme: view.Theme) ui.layout.Measurement {
         const self: *RichText = @ptrCast(@alignCast(context));

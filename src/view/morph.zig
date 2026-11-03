@@ -8,9 +8,52 @@
 //! characters left, as letters rearranged. A text longer than `max_chars`
 //! characters does not pair: it fades.
 const std = @import("std");
+const ui = @import("ziggurat_ui");
 
 /// Characters of a text that morph; longer texts fade.
 pub const max_chars = 64;
+
+/// A character a leaf of several styles draws, as a rich text's: its
+/// bytes, the box it is written in, local to the leaf, and its font and
+/// color. An embedded leaf lists them (`Embed.glyphs`) for its characters
+/// to morph each in its own style.
+pub const Glyph = struct {
+    bytes: [4]u8 = undefined,
+    len: u8 = 0,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    font: ui.Font = .{},
+    color: u32 = 0,
+
+    pub fn text(self: *const Glyph) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
+
+/// The characters of `glyphs`, one after another in `bytes`, as `pair`
+/// takes them; null when they do not fit.
+pub fn glyphChars(glyphs: []const Glyph, bytes: []u8, out: []Char) ?[]Char {
+    if (glyphs.len > out.len) return null;
+    var at: usize = 0;
+    for (glyphs, 0..) |*glyph, i| {
+        if (at + glyph.len > bytes.len) return null;
+        @memcpy(bytes[at..][0..glyph.len], glyph.text());
+        out[i] = .{ .start = @intCast(at), .len = glyph.len, .x = glyph.x, .width = glyph.width };
+        at += glyph.len;
+    }
+    return out[0..glyphs.len];
+}
+/// Whether two lists of glyphs write the same characters in the same
+/// places, styles and colors.
+pub fn sameGlyphs(a: []const Glyph, b: []const Glyph) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |*x, *y| {
+        if (!std.mem.eql(u8, x.text(), y.text()) or x.x != y.x or x.y != y.y or x.color != y.color or !std.meta.eql(x.font, y.font)) return false;
+    }
+    return true;
+}
 
 /// A character of a text laid out on one line: its bytes and its pen
 /// offset and advance from the start of the line, in DIP.

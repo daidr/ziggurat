@@ -73,6 +73,10 @@ pub const source_depth = 24;
 pub const max_popup_items = 64;
 /// Controls with a tooltip that hover can find in one frame.
 pub const max_tooltips = 32;
+/// Toasts and the controls inside them that hover and focus can find in
+/// one frame, to stop their time.
+pub const max_toast_regions = 8;
+pub const max_toast_controls = 32;
 /// Combo boxes and suggestion inputs that keys can open in one frame.
 pub const max_popup_anchors = 16;
 /// Tallest a popup list grows before it clips, in DIP.
@@ -385,8 +389,16 @@ pub const ToastOptions = struct {
     /// Label of an action button, such as "Undo"; empty for none.
     action: []const u8 = "",
     /// How long the message stays, counted from the first pass that shows
-    /// it; 0 keeps it until dismissed.
+    /// it; 0 keeps it until dismissed. Its time stops while the pointer
+    /// rests on the toasts, the keyboard focus is in them, or the window
+    /// does not have the keyboard, unless `run_in_background`.
     duration: u64 = 4 * std.time.ns_per_s,
+    /// Keep its time running while the window is in the background or
+    /// hidden, for news that goes stale, as a download that finished while
+    /// a tray app's window was hidden: a message whose time is over by then
+    /// goes before it shows. The pointer resting on the toasts and the
+    /// keyboard focus in them still stop it.
+    run_in_background: bool = false,
 };
 /// Longest toast message and action label, in bytes.
 pub const max_toast_message = 256;
@@ -405,8 +417,13 @@ pub fn Toasts(comptime capacity: usize) type {
             action: [max_toast_action]u8 = undefined,
             action_len: usize = 0,
             duration: u64,
+            run_in_background: bool = false,
             /// The pass time it was first shown at, or null before that.
             shown: ?u64 = null,
+            /// How long it has shown while its time ran, up to `running`.
+            spent: u64 = 0,
+            /// When its time last started running, or null while it stops.
+            running: ?u64 = null,
         };
         entries: [capacity]Entry = undefined,
         len: usize = 0,
@@ -421,7 +438,7 @@ pub fn Toasts(comptime capacity: usize) type {
             const id = self.next_id;
             self.next_id += 1;
             const entry = &self.entries[self.len];
-            entry.* = .{ .id = id, .message_len = message.len, .action_len = options.action.len, .duration = options.duration };
+            entry.* = .{ .id = id, .message_len = message.len, .action_len = options.action.len, .duration = options.duration, .run_in_background = options.run_in_background };
             @memcpy(entry.message[0..message.len], message);
             @memcpy(entry.action[0..options.action.len], options.action);
             self.len += 1;
@@ -671,6 +688,12 @@ pub const Embed = struct {
     /// as a web page, follows the poses that move and scale it and is cut
     /// to the node's corners.
     present: ?*const fn (*anyopaque, u64, Presentation) void = null,
+    /// The characters the leaf draws, each in its box local to the leaf,
+    /// font and color, for `Match.morph` to move them as a text node's:
+    /// writes them to the start of the slice and returns how many, or null
+    /// when they do not fit, and the leaf crossfades. Called after layout
+    /// and while painting a morph; it must not allocate or block.
+    glyphs: ?*const fn (*anyopaque, []morph.Glyph) ?usize = null,
     /// Register the leaf as a Tab stop under its node id, so it can hold
     /// focus and receive keys through `input`.
     focusable: bool = false,
@@ -1083,6 +1106,11 @@ pub const TooltipState = struct {
     since: u64 = 0,
     /// Hidden by a press or Escape until the target changes.
     dismissed: bool = false,
+    /// A tip showed in the last pass.
+    showing: bool = false,
+    /// When a tip last showed, or went: within the warm time after it the
+    /// next one shows at once.
+    last_shown: ?u64 = null,
 };
 
 /// Geometry of the last arranged pass that input routing needs between
@@ -1185,6 +1213,12 @@ pub const Overlay = struct {
     /// Visible controls with a tooltip, in paint order.
     tips: [max_tooltips]Region = undefined,
     tip_count: usize = 0,
+    /// Where the toasts show, and the controls inside them, which stop
+    /// their time while the pointer rests on them or the focus is in them.
+    toast_rects: [max_toast_regions]Rect = undefined,
+    toast_rect_count: usize = 0,
+    toast_controls: [max_toast_controls]u64 = undefined,
+    toast_control_count: usize = 0,
     /// Enabled combo boxes and suggestion inputs.
     anchors: [max_popup_anchors]Anchor = undefined,
     anchor_count: usize = 0,
@@ -1323,8 +1357,11 @@ pub const View = struct {
     /// The window is drawn as active (`ui.Context.windowActive`), set by
     /// the host before each pass.
     window_active: bool = true,
-    /// Hover or focus time before a tooltip appears, in nanoseconds.
-    tooltip_delay: u64 = 500 * std.time.ns_per_ms,
+    /// Hover or focus time before a tooltip appears, in nanoseconds; see
+    /// `Options.tooltip_delay`.
+    tooltip_delay: u64 = 600 * std.time.ns_per_ms,
+    /// `Theme.tooltip_delay` of the window's theme, from the last arrange.
+    window_tooltip_delay: i64 = 0,
     preferences: Preferences = .{},
     /// Built-in programs for `Style.opacity`, `pose` and `refraction`, set
     /// by `Host.prepareShaderEffects`.
@@ -1332,6 +1369,8 @@ pub const View = struct {
     popup: PopupState = .{},
     menu: MenuState = .{},
     tip: TooltipState = .{},
+    /// The pointer rests on a toast, which stops the toasts' time.
+    toast_hover: bool = false,
     overlay: Overlay = .{},
     /// The interactive embedded leaf under the pointer.
     embed_hover: ?u64 = null,
@@ -2398,7 +2437,8 @@ pub const View = struct {
     }
 
     /// Give the node just added a tooltip: `text` appears near it after the
-    /// pointer rests on it or it holds focus for `Options.tooltip_delay`,
+    /// pointer rests on it or it holds focus for the delay of the theme it
+    /// is built with (`Theme.tooltip_delay`, `Options.tooltip_delay`),
     /// and is announced as its description. A press or Escape hides it until
     /// the pointer or focus moves to another control. After `comboBox` and
     /// its options, it describes the combo box.
@@ -2727,27 +2767,39 @@ pub const View = struct {
     /// Starts the stack of `queue`'s messages, drawn over the window's
     /// bottom edge, newest last. Each message disappears after its duration,
     /// counted from the first pass that shows it, or when its close button
-    /// is activated; its action button removes it and returns its id once.
+    /// is activated. Their time stops while the pointer rests on them, the
+    /// keyboard focus is in them, or the window does not have the keyboard,
+    /// but for messages that `run_in_background` there; its action button removes it and returns its id once.
     /// `queue` is a pointer to a `Toasts` value the application owns.
     pub fn toasts(self: *View, queue: anytype, style: Style) Error!?u64 {
         var value = style;
         if (value.gap == 0) value.gap = 8;
         _ = try self.open(.toasts, value);
+        // The user holds the toasts with the pointer resting on them or the
+        // keyboard focus in them while the window has it; the window in
+        // the background stops those that do not run there.
+        const focused = self.window_focused;
+        const held = self.toast_hover or (focused and self.focusInToasts());
         var acted: ?u64 = null;
         var index: usize = 0;
         while (index < queue.len) {
             const entry = &queue.entries[index];
-            const shown = entry.shown orelse blk: {
+            const stops = held or (!focused and !entry.run_in_background);
+            if (entry.shown == null) {
                 entry.shown = self.now;
-                break :blk self.now;
-            };
+                entry.running = if (stops) null else self.now;
+            } else if (stops) {
+                if (entry.running) |since| entry.spent +|= self.now -| since;
+                entry.running = null;
+            } else if (entry.running == null) entry.running = self.now;
             if (entry.duration != 0) {
-                const deadline = shown +| entry.duration;
-                if (self.now >= deadline) {
+                const age = entry.spent +| if (entry.running) |since| self.now -| since else 0;
+                // One whose time is over goes before it shows.
+                if (age >= entry.duration) {
                     queue.removeAt(index);
                     continue;
                 }
-                self.wakeAt(deadline);
+                if (!stops) self.wakeAt(self.now +| (entry.duration - age));
             }
             const message = entry.message[0..entry.message_len];
             const action = entry.action[0..entry.action_len];
@@ -3574,9 +3626,19 @@ pub const View = struct {
                 }
             }
         }
-        if (std.meta.eql(target, self.tip.hover)) return highlighted;
+        const over_toasts = if (point) |at| for (self.overlay.toast_rects[0..self.overlay.toast_rect_count]) |rect| {
+            if (contains(rect, at)) break true;
+        } else false else false;
+        const toasts_changed = over_toasts != self.toast_hover;
+        self.toast_hover = over_toasts;
+        if (std.meta.eql(target, self.tip.hover)) return highlighted or toasts_changed;
         self.tip.hover = target;
         return true;
+    }
+    /// Whether the keyboard focus is in a toast, as last arranged.
+    fn focusInToasts(self: *const View) bool {
+        const focused = self.focus orelse return false;
+        return std.mem.indexOfScalar(u64, self.overlay.toast_controls[0..self.overlay.toast_control_count], focused) != null;
     }
 
     /// Choose the tooltip this pass shows, from hover first and then focus,
@@ -3591,14 +3653,31 @@ pub const View = struct {
             };
         };
         const target: ?u64 = if (candidate == none) null else all[candidate].id;
+        if (self.tip.showing) self.tip.last_shown = self.now;
+        self.tip.showing = false;
         if (!std.meta.eql(target, self.tip.target)) {
             self.tip.target = target;
             self.tip.since = self.now;
             self.tip.dismissed = false;
         }
         if (candidate == none or self.tip.dismissed) return;
-        const due = self.tip.since +| self.tooltip_delay;
-        if (self.now >= due) self.tip_index = candidate else self.wakeAt(due);
+        const timing = self.tooltipTiming(all[candidate].theme);
+        const warm = if (self.tip.last_shown) |at| self.tip.since -| at <= timing.warm else false;
+        const due = self.tip.since +| timing.delay;
+        if (self.now >= due or warm) {
+            self.tip_index = candidate;
+            self.tip.showing = true;
+        } else self.wakeAt(due);
+    }
+    /// How long the pointer rests on a control built with `theme` (the
+    /// window's when null) before its tip shows, and how soon after a tip
+    /// goes the next one shows at once: `Theme.tooltip_delay`, or else
+    /// `Options.tooltip_delay` and two thirds of it.
+    pub fn tooltipTiming(self: *const View, theme: ?*const Theme) struct { delay: u64, warm: u64 } {
+        const value = if (theme) |inner| inner.tooltip_delay else self.window_tooltip_delay;
+        if (value < 0) return .{ .delay = 0, .warm = 0 };
+        const delay: u64 = if (value == 0) self.tooltip_delay else @intCast(value);
+        return .{ .delay = delay, .warm = delay / 3 * 2 + delay % 3 * 2 / 3 };
     }
 
     /// Whether the window is drawn as active: it has the keyboard, or the
@@ -3976,6 +4055,7 @@ pub const View = struct {
 
     /// Measure bottom-up, then place every node within `bounds`.
     pub fn arrange(self: *View, bounds: Rect, theme: Theme, measurer: Measurer) Error!void {
+        self.window_tooltip_delay = theme.tooltip_delay;
         self.measurer = measurer;
         const all = self.buffers.nodes[0..self.len];
         // A token field's height depends on the width it wraps at, known
@@ -4118,6 +4198,8 @@ pub const View = struct {
         overlay.popover = null;
         overlay.item_count = 0;
         overlay.tip_count = 0;
+        overlay.toast_rect_count = 0;
+        overlay.toast_control_count = 0;
         overlay.anchor_count = 0;
         overlay.row_count = 0;
         overlay.collection_count = 0;
@@ -4248,6 +4330,16 @@ pub const View = struct {
                 overlay.tips[overlay.tip_count] = .{ .id = node.id, .rect = rect };
                 overlay.tip_count += 1;
             };
+            if (node.kind == .toast and !node.hidden()) {
+                if (overlay.toast_rect_count < max_toast_regions) {
+                    overlay.toast_rects[overlay.toast_rect_count] = node.bounds;
+                    overlay.toast_rect_count += 1;
+                }
+                for (all[index..node.end]) |*inner| if (overlay.toast_control_count < max_toast_controls) {
+                    overlay.toast_controls[overlay.toast_control_count] = inner.id;
+                    overlay.toast_control_count += 1;
+                };
+            }
         }
         self.recordCollections();
         self.recordReorders();
@@ -4719,9 +4811,26 @@ pub const View = struct {
                 const frame = @TypeOf(target) == *ui.Frame;
                 const previous = if (frame) (if (node.theme) |inner| target.pushTheme(inner) else target.theme_override) else {};
                 defer if (frame) target.popTheme(previous);
+                // It takes the pointer where it flies, over the rest of its
+                // layer, as it paints.
+                const previous_map = if (frame) target.setHitMap(self.flightHitMap(node, target.offset)) else {};
+                defer if (frame) {
+                    _ = target.setHitMap(previous_map);
+                };
                 try self.paintRange(target, theme, index, node.end, floating, floating_len, null);
             }
         }
+    }
+    /// Where the controls of a flying node take the pointer: moved and
+    /// scaled as its pose draws it, about its origin, turns left out. Null
+    /// when it draws in place, as without `Host.prepareShaderEffects`.
+    fn flightHitMap(self: *const View, node: *const Node, offset: Point) ?ui.HitMap {
+        if (self.effects == null) return null;
+        const pose = node.style.pose orelse return null;
+        if (pose.isIdentity()) return null;
+        const box = node.bounds;
+        const origin: Point = .{ .x = offset.x + box.x + pose.origin[0] * box.width, .y = offset.y + box.y + pose.origin[1] * box.height };
+        return ui.HitMap.about(origin, pose.scale_x, pose.scale_y, .{ .x = pose.x, .y = pose.y });
     }
     /// Paint a copy of a flying node gone, as its look shows it.
     fn paintCopy(self: *const View, target: anytype, entry: matched.CopyDraw) !void {
@@ -4819,6 +4928,55 @@ pub const View = struct {
             const rect: Rect = .{ .x = x, .y = mid - line / 2, .width = lerpf(source.width, char.width, t) + font.size, .height = line };
             try fadeText(target, rect, piece, color, font, 1);
         }
+    }
+
+    /// Paint an embedded leaf whose characters morph (`Match.morph`,
+    /// `Embed.glyphs`): those it shares with what it showed go from where
+    /// they were to where they are, each in its own font and color, the
+    /// others fading. False when the leaf lists none, to paint it as it is.
+    fn paintGlyphMorph(self: *const View, target: anytype, node: *const Node, value: matched.GlyphMorph) !bool {
+        _ = self;
+        const content = node.embed.?;
+        const list = content.glyphs orelse return false;
+        var now: [morph.max_chars]morph.Glyph = undefined;
+        const t = std.math.clamp(value.t, 0, 1);
+        const box = matched.Look.mix(.{ .bounds = value.bounds }, .{ .bounds = node.bounds }, t).bounds;
+        const old = value.from.items();
+        const count = list(content.context, &now) orelse {
+            // Too long to pair: what it showed fades out as it shows now.
+            for (old) |*glyph| try fadeText(target, glyphRect(box, glyph), glyph.text(), glyph.color, glyph.font, morph.fadeOut(t));
+            return false;
+        };
+        const new = now[0..count];
+        if (value.from.long) {
+            for (new) |*glyph| try fadeText(target, glyphRect(node.bounds, glyph), glyph.text(), glyph.color, glyph.font, morph.fadeIn(t));
+            return true;
+        }
+        var old_bytes: [morph.max_chars * 4]u8 = undefined;
+        var new_bytes: [morph.max_chars * 4]u8 = undefined;
+        var old_chars: [morph.max_chars]morph.Char = undefined;
+        var new_chars: [morph.max_chars]morph.Char = undefined;
+        const from = morph.glyphChars(old, &old_bytes, &old_chars).?;
+        const to = morph.glyphChars(new, &new_bytes, &new_chars).?;
+        var pairs: [morph.max_chars]i16 = undefined;
+        var taken: [morph.max_chars]bool = undefined;
+        morph.pair(&old_bytes, from, &new_bytes, to, &pairs, &taken);
+        // Those going move with the box; those coming come in it.
+        for (old, 0..) |*glyph, i| if (!taken[i]) try fadeText(target, glyphRect(box, glyph), glyph.text(), glyph.color, glyph.font, morph.fadeOut(t));
+        for (new, 0..) |*glyph, j| {
+            if (pairs[j] < 0) {
+                try fadeText(target, glyphRect(box, glyph), glyph.text(), glyph.color, glyph.font, morph.fadeIn(t));
+                continue;
+            }
+            const source = &old[@intCast(pairs[j])];
+            const a = glyphRect(value.bounds, source);
+            const b = glyphRect(node.bounds, glyph);
+            var font = glyph.font;
+            font.size = lerpf(source.font.size, glyph.font.size, t);
+            const rect: Rect = .{ .x = lerpf(a.x, b.x, t), .y = lerpf(a.y, b.y, t), .width = lerpf(a.width, b.width, t), .height = lerpf(a.height, b.height, t) };
+            try fadeText(target, rect, glyph.text(), matched.mixRgb(source.color, glyph.color, t), font, 1);
+        }
+        return true;
     }
 
     /// The outline of the target under a drag, the line where a reordered
@@ -5075,6 +5233,12 @@ pub const View = struct {
                     // controls it paints itself stay above it.
                     if (content.focusable and @TypeOf(target) == *ui.Frame) try target.addControl(node.id, bounds, .{ .enabled = node.style.enabled });
                     if (content.present) |present| if (@TypeOf(target) == *ui.Frame) present(content.context, node.id, self.presentation(all, at));
+                    if (self.matches.glyphMorphOf(node.id)) |value| {
+                        if (try self.paintGlyphMorph(target, node, value)) {
+                            at += 1;
+                            continue;
+                        }
+                    }
                     if (@TypeOf(target) == *ui.Frame) try content.paint(content.context, target, node.id, bounds) else try target.embedded(node.id, bounds);
                 },
             }
@@ -5359,6 +5523,11 @@ fn lerpf(a: f32, b: f32, t: f32) f32 {
     return a + (b - a) * t;
 }
 /// A label at `alpha`, in an opacity group where the target has them.
+/// The box a glyph is written in, in a leaf at `bounds`, with room past
+/// its advance so a label never elides it.
+fn glyphRect(bounds: Rect, glyph: *const morph.Glyph) Rect {
+    return .{ .x = bounds.x + glyph.x, .y = bounds.y + glyph.y, .width = glyph.width + glyph.font.size, .height = glyph.height };
+}
 fn fadeText(target: anytype, bounds: Rect, text: []const u8, color: u32, font: Font, alpha: f32) !void {
     if (alpha <= 0 or text.len == 0) return;
     const opacity: u8 = @intFromFloat(@round(std.math.clamp(alpha, 0, 1) * 255));
@@ -5491,8 +5660,10 @@ pub const Options = struct {
     /// start transparent (`WindowCapabilities.transparent`).
     transparent_background: bool = false,
     measurer: Measurer = .{},
-    /// Hover or focus time before a tooltip appears, in nanoseconds.
-    tooltip_delay: u64 = 500 * std.time.ns_per_ms,
+    /// Hover or focus time before a tooltip appears, in nanoseconds, where
+    /// the theme leaves `Theme.tooltip_delay` zero. Within two thirds of it
+    /// after another tip goes, the next one shows at once.
+    tooltip_delay: u64 = 600 * std.time.ns_per_ms,
     /// The time passes see; the default is a monotonic timer started at the
     /// Host's first pass.
     clock: ?Clock = null,
@@ -6999,6 +7170,77 @@ test "a flying shared element paints over the rest and flies on as a copy once g
     // Nothing flies any more, so the copies are forgotten.
     try Pass.run(&view, 1200, 2);
     for (view.matches.copies) |entry| try std.testing.expectEqual(@as(u64, 0), entry.id);
+}
+
+test "an embedded leaf listing its characters morphs each in its own style" {
+    const Leaf = struct {
+        text: []const u8,
+        color: u32 = 0x112233,
+        fn measure(_: *anyopaque, _: Theme) layout.Measurement {
+            return .{ .minimum = .{ .width = 100, .height = 20 }, .preferred = .{ .width = 100, .height = 20 } };
+        }
+        fn paint(_: *anyopaque, _: *ui.Frame, _: u64, _: Rect) anyerror!void {}
+        fn glyphs(ptr: *anyopaque, out: []morph.Glyph) ?usize {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (self.text.len > out.len) return null;
+            for (self.text, 0..) |byte, i| {
+                out[i] = .{ .len = 1, .x = @as(f32, @floatFromInt(i)) * 10, .y = 0, .width = 10, .height = 20, .font = .{ .size = if (i == 0) 20 else 14 }, .color = self.color };
+                out[i].bytes[0] = byte;
+            }
+            return self.text.len;
+        }
+    };
+    var storage: Storage(16, 128) = .{};
+    var view = View.init(storage.buffers());
+    var leaf: Leaf = .{ .text = "ab" };
+    const Pass = struct {
+        fn run(v: *View, now: u64, content: *Leaf) !void {
+            v.reset(.{}, null);
+            v.now = now;
+            const tween: animation.Motion = .{ .tween = .{ .duration_ns = 100, .easing = .linear } };
+            try v.column(.{});
+            try v.embed(.{ .context = content, .measure = Leaf.measure, .paint = Leaf.paint, .glyphs = Leaf.glyphs }, .{ .key = 1, .match = .{ .key = 5, .motion = tween, .morph = true } });
+            try v.end();
+            try v.finish();
+            try v.arrange(.{ .x = 0, .y = 0, .width = 400, .height = 300 }, .{}, .{});
+        }
+        fn labels(v: *View, embedded: *usize) !usize {
+            var recorder: Recorder = .{};
+            try v.paint(&recorder);
+            var count: usize = 0;
+            embedded.* = 0;
+            for (recorder.calls[0..recorder.len]) |call| {
+                if (call.kind == .text) count += 1;
+                if (call.kind == .embed) embedded.* += 1;
+            }
+            return count;
+        }
+    };
+    var embedded: usize = 0;
+    try Pass.run(&view, 1000, &leaf);
+    const id = for (view.nodes()) |*node| {
+        if (node.kind == .embed) break node.id;
+    } else unreachable;
+    try std.testing.expect(view.matches.glyphMorphOf(id) == null);
+    try std.testing.expectEqual(@as(usize, 0), try Pass.labels(&view, &embedded));
+    try std.testing.expectEqual(@as(usize, 1), embedded);
+    // Its characters changing in place, those it keeps move and the new
+    // one fades in, each a label, in place of the leaf's own paint.
+    leaf.text = "abc";
+    try Pass.run(&view, 1100, &leaf);
+    const value = view.matches.glyphMorphOf(id).?;
+    try std.testing.expectEqual(@as(usize, 2), value.from.items().len);
+    try Pass.run(&view, 1150, &leaf);
+    try std.testing.expectEqual(@as(usize, 3), try Pass.labels(&view, &embedded));
+    try std.testing.expectEqual(@as(usize, 0), embedded);
+    // Its color changing morphs too, and at the end it paints itself.
+    leaf.color = 0x445566;
+    try Pass.run(&view, 1200, &leaf);
+    try std.testing.expect(view.matches.glyphMorphOf(id) != null);
+    try Pass.run(&view, 1400, &leaf);
+    try std.testing.expect(view.matches.glyphMorphOf(id) == null);
+    try std.testing.expectEqual(@as(usize, 0), try Pass.labels(&view, &embedded));
+    try std.testing.expectEqual(@as(usize, 1), embedded);
 }
 
 test "a text morphs its characters in place and from the text of its match" {

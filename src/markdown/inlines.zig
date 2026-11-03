@@ -249,6 +249,15 @@ const Parser = struct {
         const right = !isWhitespace(before) and (!isPunctuationCodepoint(before) or isWhitespace(after) or isPunctuationCodepoint(after));
         var can_open = left;
         var can_close = right;
+        // Next to CJK text, punctuation such as 。 or “ does not stop * or
+        // ~~ from opening or closing: Chinese writes **结论。**后文 with no
+        // space, which strict CommonMark leaves as literal asterisks. `_`
+        // keeps the rule, so snake_case stays plain, and so does a single
+        // tilde, more often a range there (第1章~“附录”) than a deletion.
+        if ((byte == '*' or (byte == '~' and count > 1)) and (isCjk(before) or isCjk(after))) {
+            can_open = !isWhitespace(after);
+            can_close = !isWhitespace(before);
+        }
         if (byte == '_') {
             can_open = left and (!right or isPunctuationCodepoint(before));
             can_close = right and (!left or isPunctuationCodepoint(after));
@@ -496,6 +505,20 @@ fn isPunctuationCodepoint(codepoint: u21) bool {
     if (codepoint < 0x80) return isPunctuation(@intCast(codepoint));
     return switch (codepoint) {
         0xa1...0xbf, 0xd7, 0xf7, 0x2010...0x2027, 0x2030...0x205e, 0x20a0...0x20cf, 0x2100...0x2bff, 0x3001...0x303f, 0xfe30...0xfe4f, 0xff01...0xff0f, 0xff1a...0xff20, 0xff3b...0xff40, 0xff5b...0xff65 => true,
+        else => false,
+    };
+}
+/// A Chinese, Japanese or Korean character, the full-width punctuation
+/// written with them, or a curly quote, which CJK text uses.
+fn isCjk(codepoint: u21) bool {
+    if (codepoint < 0x2e80) return codepoint >= 0x2018 and codepoint <= 0x201f;
+    return switch (codepoint) {
+        // Radicals, CJK symbols and punctuation, kana, Hangul compatibility
+        // jamo, enclosed and compatibility forms, unified ideographs.
+        0x2e80...0x2fdf, 0x3000...0x303f, 0x3040...0x30ff, 0x3130...0x318f, 0x31f0...0x31ff, 0x3200...0x33ff, 0x3400...0x4dbf, 0x4e00...0x9fff => true,
+        // Hangul syllables and jamo, compatibility ideographs, full-width
+        // and half-width forms, supplementary ideographs.
+        0xa960...0xa97f, 0xac00...0xd7ff, 0xf900...0xfaff, 0xff00...0xffef, 0x1b000...0x1b16f, 0x20000...0x323af => true,
         else => false,
     };
 }
