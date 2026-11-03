@@ -847,6 +847,9 @@ pub const App = struct {
         return record.window;
     }
     /// Only cross-thread entry. Join producers before deinit. Context lives until execution.
+    /// A posted task redraws nothing by itself: a worker that polls data
+    /// that rarely changes, such as a connection count, compares it in the
+    /// task and calls `Window.invalidate` only when it changed.
     pub fn post(self: *App, task: Task) !void {
         if (try self.queue.post(task)) backend.wake(self);
     }
@@ -1446,7 +1449,10 @@ pub const Window = struct {
     /// at the zoomed size rather than scaled up. Every size, position and
     /// rectangle the content gives or is given is in its own DIPs; the
     /// window maps them to and from its own. Between 0.25 and 5; 1 draws
-    /// as an unzoomed window. Repaints at the new size.
+    /// as an unzoomed window. Repaints at the new size. The window's own
+    /// geometry stays in its DIPs whatever the zoom: `setClientBounds`,
+    /// `resize`, `clientBounds` and the options' sizes; multiply a size
+    /// the content measured by the zoom to give it to the window.
     pub fn setZoom(self: Window, value: f32) !void {
         if (!std.math.isFinite(value) or value < min_zoom or value > max_zoom) return error.InvalidValue;
         const scope = self.beginCallback() orelse return error.Closed;
@@ -1463,7 +1469,8 @@ pub const Window = struct {
         defer scope.end();
         return scope.record.zoom;
     }
-    /// Changes normal client geometry. Restore and leave fullscreen first.
+    /// Changes normal client geometry, in the window's DIPs whatever its
+    /// zoom (`setZoom`). Restore and leave fullscreen first.
     pub fn setClientBounds(self: Window, bounds: ClientBounds) !void {
         const scope = try self.beginUpdate();
         defer endUpdate(scope);

@@ -39,6 +39,8 @@ Windows 每显示器 DPI 在进程启动时启用；嵌入到已先行配置 DPI
 
 内容看到的全是自己的 DIP：`paint` 与 `resize` 的 `Size.scale` 和 `contentSize()` 都乘了 z，指针、滚轮的位置与滚动距离都除以 z。内容交给窗口的几何也按 z 映射回窗口：`setTextCaret`（输入法候选窗位置）、`invalidateRect`、`hitTest`，以及 Windows UIA 上控件和文档的可访问性边界。`setZoom` 只记录缩放并请求重绘，不同步投递事件，所以构建过程中也可以缩放自己的窗口；下一次绘制就按新尺寸布局。
 
+窗口自己的几何不随缩放：`setClientBounds`、`resize`、`clientBounds`、创建选项的 `width`/`height`、浮层的 `setSize` 与 `fit_content` 的尺寸，以及内嵌页面缩放（页面的 `zoom`）下的窗口尺寸，都按窗口的 DIP 计，不管内容缩放了多少；内容按自己的 DIP 布局，看到的是窗口尺寸除以缩放。要让窗口容下按缩放后的尺寸画出的内容，把内容的尺寸乘以缩放再交给窗口，比如 `window.resize(@intFromFloat(@ceil(width * window.zoom())), ...)`；声明式视图的 `Host` 告诉浮层内容尺寸（`Options.fit_content`）时已经乘好。
+
 `gallery` 示例用 Ctrl+= / Ctrl+-（macOS 上是 Cmd）按浏览器的档位缩放，Ctrl+0 复原。拖放的位置、内嵌 WebView 的放置和弹出窗口的锚点还没有按缩放映射。
 
 ## 全屏与置顶

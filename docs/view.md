@@ -230,6 +230,21 @@ try timer.close();
 
 它为最早期限装定一次性计时器，期限变化时取消旧的，到期后让窗口失效重绘。没有期限时不装定，空闲窗口不做任何工作，也没有持续重绘的计时器。没有调度器时，提示和通知仍然正确，只是要等下一次因其他原因发生的重绘才会更新。
 
+工作线程的数据经 `App.post` 回到主线程。投递的任务本身不重绘：每次都 `Window.invalidate` 会让视图在每次投递后都重新构建一遍，不管状态是否变了。轮询很少变化的数据（连接数、状态）时，在任务里和应用状态比较，只有变了才 `invalidate`：
+
+```zig
+fn apply(ptr: *anyopaque) void {
+    const update: *Update = @ptrCast(@alignCast(ptr));
+    defer update.release();
+    if (update.count != app.connections) {
+        app.connections = update.count;
+        app.window.invalidate();
+    }
+}
+// 工作线程：
+try app.post(.{ .context = update, .call = apply });
+```
+
 ## 文本测量
 
 `Frame.label` 使用默认的 16px 单行字体。文本节点可以用 `Style.font` 换成其他字体变体：`Font` 包含 `size`（1–1024 DIP）、`weight`（`regular`/`medium`/`semibold`/`bold`）、`italic` 与 `monospace`，并提供预设 `.body`、`.heading1`–`.heading6` 与 `.code`：

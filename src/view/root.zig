@@ -5780,7 +5780,9 @@ pub const KeyHandler = struct {
 /// bounds `widths` gives, and its height at the width the frame laid it
 /// out at. Scroll containers measure as their content and `grow` as their
 /// content too, so a window with a most height scrolls past it. `tell`
-/// hears the size, in DIPs, only when it changed; it runs inside paint, so
+/// hears the size in the window's DIPs (the content's times the window's
+/// zoom, as `Window.setClientBounds` takes sizes), only when it changed;
+/// it runs inside paint, so
 /// the window resizes after the frame (as `Flyout.contentSized` does), and
 /// the next frame lays the content out at the new size: the first frame
 /// after a change shows it at the size the window had.
@@ -5791,7 +5793,7 @@ pub const KeyHandler = struct {
 /// frame at the same size that measures another size tells it.
 pub const FitContent = struct {
     context: *anyopaque,
-    /// The least and the most width, in DIPs, 0 for no bound.
+    /// The least and the most width, in the window's DIPs, 0 for no bound.
     widths: ?*const fn (*anyopaque) [2]f32 = null,
     tell: *const fn (*anyopaque, f32, f32) void,
 };
@@ -6510,11 +6512,14 @@ pub const Host = struct {
     /// Tell `fit` the size the content just laid out in `window` takes, if
     /// it changed; see `FitContent`.
     fn measureFit(self: *Host, fit: FitContent, window: Rect) void {
+        // The content lays out in its own DIPs, the window's divided by its
+        // zoom; the window takes sizes in its own.
+        const zoom = if (self.context.window) |handle| handle.zoom() else 1;
         const limits = if (fit.widths) |widths| widths(fit.context) else [2]f32{ 0, 0 };
         const preferred = self.view.nodes()[0].measured.preferred;
-        var width = @max(preferred.width, limits[0]);
+        var width = @max(preferred.width * zoom, limits[0]);
         if (limits[1] > 0) width = @min(width, limits[1]);
-        const measured: [2]f32 = .{ @ceil(width), @ceil(preferred.height) };
+        const measured: [2]f32 = .{ @ceil(width), @ceil(preferred.height * zoom) };
         if (!std.math.isFinite(measured[0]) or !std.math.isFinite(measured[1])) return;
         if (self.fit.next(.{ window.width, window.height }, measured)) |size| fit.tell(fit.context, size[0], size[1]);
     }
