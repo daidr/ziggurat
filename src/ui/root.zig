@@ -1168,7 +1168,7 @@ pub const Context = struct {
     /// must already be explicitly prepared. Native buffers own copied POD;
     /// late providers never retain a Zig model or allocator address.
     pub fn prepareVirtualLists(self: *Context, options: VirtualListsOptions) !void {
-        if (comptime builtin.os.tag != .windows) return error.UnsupportedPlatform;
+        if (comptime !accessibility.virtual_lists.supported) return error.UnsupportedPlatform;
         if (!build_options.accessibility or !self.attached_semantics_enabled) return error.AccessibilityNotEnabled;
         const window = self.window orelse return error.NotAttached;
         if (window.app.owner != std.Thread.getCurrentId()) return error.WrongThread;
@@ -1181,7 +1181,7 @@ pub const Context = struct {
         try self.accessibility_bridge.prepareVirtualLists(options);
     }
     pub fn virtualListStats(self: *Context) !VirtualListsStats {
-        if (comptime builtin.os.tag != .windows) return error.UnsupportedPlatform;
+        if (comptime !accessibility.virtual_lists.supported) return error.UnsupportedPlatform;
         if (!build_options.accessibility or !self.attached_semantics_enabled) return error.AccessibilityNotEnabled;
         const window = self.window orelse return error.NotAttached;
         if (window.app.owner != std.Thread.getCurrentId()) return error.WrongThread;
@@ -1191,7 +1191,7 @@ pub const Context = struct {
     }
     pub fn installVirtualListCatalog(self: *Context, token: ControlToken, product: *accessibility.virtual_lists.Prepared, revision: u64, bits: []const u64) !void {
         if (token.context != self) return error.ForeignContext;
-        if (comptime builtin.os.tag != .windows) return error.UnsupportedPlatform;
+        if (comptime !accessibility.virtual_lists.supported) return error.UnsupportedPlatform;
         if (!build_options.accessibility or !self.attached_semantics_enabled) return error.AccessibilityNotEnabled;
         const window = self.window orelse return error.NotAttached;
         if (window.app.owner != std.Thread.getCurrentId()) return error.WrongThread;
@@ -1206,7 +1206,7 @@ pub const Context = struct {
     }
     pub fn applyVirtualListSelection(self: *Context, token: ControlToken, model: u64, patch: anytype) !void {
         if (token.context != self) return error.ForeignContext;
-        if (comptime builtin.os.tag != .windows) return error.UnsupportedPlatform;
+        if (comptime !accessibility.virtual_lists.supported) return error.UnsupportedPlatform;
         if (!build_options.accessibility or !self.attached_semantics_enabled) return error.AccessibilityNotEnabled;
         const window = self.window orelse return error.NotAttached;
         if (window.app.owner != std.Thread.getCurrentId()) return error.WrongThread;
@@ -3682,7 +3682,7 @@ pub const Frame = struct {
         };
     }
     fn virtualListRecipientBody(self: *Frame, token: ControlToken, bounds: Rect, enabled: bool, name: []const u8, receipt: ControlFrame, selection: u64, caret: ?VirtualListCaret) !void {
-        if (comptime builtin.os.tag != .windows) return error.UnsupportedPlatform;
+        if (comptime !accessibility.virtual_lists.supported) return error.UnsupportedPlatform;
         if (!build_options.accessibility or !self.context.attached_semantics_enabled) return error.AccessibilityNotEnabled;
         try self.controlRecipientStamped(token, bounds, enabled, receipt);
         const snapshot = try self.transforms.?.state.pending();

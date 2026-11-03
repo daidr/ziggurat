@@ -39,7 +39,7 @@ Context、Window 的 App、回调 context 以及 allocator 必须满足各自的
 
 ## 完整原生集合
 
-完整原生集合在 Windows 使用现有 Window UIA 根；Linux 当前返回 `UnsupportedPlatform`，不借列表接口宣称存在完整 UI ATK 根。原生路径须启用 UI accessibility 并显式准备 recipient、坐标和列表预算。当前公开挂载链已通过两平台 pure 回归；Windows 完整集合的原生运行验收单独记录，不能由该 pure 结果替代。
+完整原生集合在 Windows 使用现有 Window UIA 根，在 macOS 使用窗口的 NSAccessibility 树；Linux 当前返回 `UnsupportedPlatform`，不借列表接口宣称存在完整 UI ATK 根。原生路径须启用 UI accessibility 并显式准备 recipient、坐标和列表预算。当前公开挂载链已通过两平台 pure 回归；Windows 完整集合的原生运行验收单独记录，不能由该 pure 结果替代。
 
 ```zig
 try context.prepareVirtualLists(.{ .lists = 1 });
@@ -54,6 +54,8 @@ try control.installCatalog(product); // 成功消耗 product；失败仍由调�
 labels 明确提供每一行 ID 和 UTF-8 名称，顺序与当前 rows 一致。描述符和文本在 snapshot 返回前保持不可变。snapshot 使用同一索引中的实际 ticks、incarnation 和已排序 ID；不临时复制另一份 N 行描述符。返回的不可变 input 可以交给应用明确创建的 worker，`NativeCatalog.prepare` 复制为只含 C 所有权的 product；worker 完成后用 `App.post` 将 product 交回主线程安装。post 失败时调用者仍拥有 product。安装重新校验注册、结构和完整行数，并从当前选择种子初始化；后台准备不能把较新的选择倒退。
 
 原生集合包含所有行的名称、逻辑导航、ItemContainer 查找、Selection/Selection2、SelectionItem、VirtualizedItem 和 ScrollItem。屏外行保留完整语义，Realize 不创建另一个业务行或隐式 worker；ScrollIntoView 排入主线程更新并等待正常成功 paint 发布。原生请求在请求时捕获注册、model、publication、row 和 incarnation；延迟队列里的旧请求不能在 dispatch 时按相同 ID 找到新行。
+
+macOS 上列表元素（AXList / AXTable）的 AXRows 与 AXChildren 列出全部行，行元素（AXRow）在辅助技术按区间读取时才创建（`accessibilityArrayAttributeCount` / `accessibilityArrayAttributeValues`），携带名称、AXIndex、选中和焦点状态；可见行的 frame 取自已发布的 viewport，屏外行为空。AXSelectedRows、AXVisibleRows 与选中、按下、聚焦和 AXScrollToVisible 走与 Windows 相同的 C 集合存储和请求队列：动作只排入主线程更新，选择与滚动等下一次成功 paint 后才对辅助技术可见，旧 incarnation 的行不再对应任何项目。AppKit 只在主线程访问，故不需要锁。
 
 普通语义节点、recipient keys、列表选择 bitmap 和 viewport/mapping 在同一个 C State 锁内发布成功 front。选择事件只传本次改变的 words；成功 paint 只复制累计触及的 words。失败 paint 不发布 pending 选择或滚动。COM getter 在锁内复制可变选择/viewport，标签读取通过不可变 Model pin 保活；原生对象和迟到请求不借用 Zig 模型、Context 或 caller allocator。关闭先撤回，再在锁外执行 COM disconnect。
 

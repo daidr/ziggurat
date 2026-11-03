@@ -59,6 +59,8 @@ void *zlm_window_content(void *window);
 enum { MEDIA_AUDIO_MUTED=1, MEDIA_CAPTURE_DEVICES_MUTED=2 };
 
 static atomic_uint live_states, live_callbacks, live_views, live_compiles;
+/* Boxes of the native UI over a region's page (composition.max_covers). */
+enum { ZWK_MAX_COVERS=16 };
 
 static uint32_t domain_code(NSString *domain) {
     /* FNV-1a over the domain name: stable and never zero. */
@@ -70,9 +72,11 @@ static uint32_t domain_code(NSString *domain) {
 @interface ZwkWebView : WKWebView {
 @public
     __weak id zwk_page;
+    __weak id zwk_accessibility_parent;
 }
 @end
 static void context_menu_open(id page,NSMenu *menu);
+static BOOL page_takes_point(id page,NSPoint point);
 @implementation ZwkWebView
 /* The engine's menu as Options.context_menu asks: none, the engine's, or
    the app's handler's change of it. */
@@ -84,6 +88,20 @@ static void context_menu_open(id page,NSMenu *menu);
    native content's: WKWebView answers no, which spends the click on making
    the window key, so buttons and links took two clicks. */
 - (BOOL)acceptsFirstMouse:(NSEvent *)event { (void)event; return YES; }
+/* The pointer is the native UI's where it shows over a region's page: out
+   of the page's clip, in the content's covers over it, and past its
+   corners (zwk_shape). */
+- (NSView *)hitTest:(NSPoint)point {
+    NSView *found=[super hitTest:point];
+    return found && !page_takes_point(zwk_page,point)?nil:found;
+}
+/* A region's page inside the semantic node standing for it, which the
+   native UI's accessibility sets; else inside the view holding it. */
+- (void)setZigAccessibilityParent:(id)parent { zwk_accessibility_parent=parent; }
+- (id)accessibilityParent {
+    id parent=zwk_accessibility_parent;
+    return parent?parent:[super accessibilityParent];
+}
 @end
 
 /* One granted origin of a remote page, with the headers its navigations may
@@ -169,6 +187,15 @@ typedef struct ZwkInitializerState ZwkInitializerState;
        to corners of different radii (zwk_present). */
     double page_scale;
     CAShapeLayer *corner_mask;
+    /* What shows of a region's view as the native UI around it shapes it
+       (zwk_shape), in its window's content points: its clip, the native
+       UI's covers over it and its corners, with the corners zwk_present
+       last cut it to and the mask cutting the view to all of them. */
+    BOOL shaped;
+    NSRect shape_clip, shape_covers[ZWK_MAX_COVERS];
+    uint32_t shape_count;
+    double shape_radii[4], present_radii[4];
+    CAShapeLayer *shape_mask;
     /* The load the engine is still ending became a download: it no longer
      * holds the next navigation back. */
     BOOL download_load;
@@ -983,6 +1010,21 @@ static void capture_changed(ZwkPage *s,uint32_t device);
 }
 - (void)webView:(WKWebView *)webView runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(NSArray<NSURL *> *))completion {
     (void)webView; (void)parameters; (void)frame; completion(nil);
+}
+/* Tab past the ends of a region's page: the native UI around it takes the
+   keyboard back and moves its focus on from the page's node, as a Tab of
+   its own (_WKFocusDirection: 0 backward, 1 forward). A page filling its
+   window leaves it to the engine, which moves along the key view loop. */
+- (BOOL)respondsToSelector:(SEL)selector {
+    if (selector==@selector(_webView:takeFocus:)) return region_mode;
+    return [super respondsToSelector:selector];
+}
+- (void)_webView:(WKWebView *)webView takeFocus:(NSInteger)direction {
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=self; (void)keep;
+    if (!live(self) || !region_mode || webView!=view) return;
+    NSView *host=webView.superview;
+    SEL tab_out=sel_registerName("zigPageTabOut:");
+    if ([host respondsToSelector:tab_out]) ((void (*)(id,SEL,BOOL))objc_msgSend)(host,tab_out,direction==0);
 }
 /* Camera and microphone, the requests the engine asks the app about. The
  * offer names the document's origin; a request the app does not defer in the
@@ -3172,8 +3214,11 @@ static void round_view(ZwkPage *s,const double radii[4]) {
     view.wantsLayer=YES;
     CALayer *layer=view.layer;
     if (!layer) return;
+    memcpy(s->present_radii,radii,sizeof s->present_radii);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
+    /* zwk_shape cuts the view again after this, as the native UI asks. */
+    if (s->shape_mask) { if (layer.mask==s->shape_mask) layer.mask=nil; s->shape_mask=nil; }
     const BOOL none=radii[0]<=0 && radii[1]<=0 && radii[2]<=0 && radii[3]<=0;
     if (none || !s->corner_mask) layer.mask=nil;
     if (none) { s->corner_mask=nil; layer.cornerRadius=0; [CATransaction commit]; return; }
@@ -3234,6 +3279,152 @@ int zwk_present(ZwkState *state,double layout_width,const double radii[4]) {
         round_view(s,corners);
     }
     return ZWK_OK;
+}
+/* The boxes of r that are not in any of covers, at most limit of them:
+   the pieces of what shows of a page; false when there are more. */
+static BOOL subtract_boxes(NSRect r,const NSRect *covers,uint32_t count,NSRect *out,uint32_t *used,uint32_t limit) {
+    NSRect pieces[256]; uint32_t n=0;
+    if (r.size.width>0 && r.size.height>0) pieces[n++]=r;
+    for (uint32_t c=0;c<count;c++) {
+        NSRect next[256]; uint32_t m=0;
+        const NSRect k=covers[c];
+        for (uint32_t i=0;i<n;i++) {
+            const NSRect p=pieces[i];
+            const NSRect cut=NSIntersectionRect(p,k);
+            if (cut.size.width<=0 || cut.size.height<=0) { if (m==256) return NO; next[m++]=p; continue; }
+            /* Above, below, then left and right of the cut. */
+            const NSRect parts[4]={
+                NSMakeRect(p.origin.x,p.origin.y,p.size.width,NSMinY(cut)-NSMinY(p)),
+                NSMakeRect(p.origin.x,NSMaxY(cut),p.size.width,NSMaxY(p)-NSMaxY(cut)),
+                NSMakeRect(p.origin.x,NSMinY(cut),NSMinX(cut)-NSMinX(p),cut.size.height),
+                NSMakeRect(NSMaxX(cut),NSMinY(cut),NSMaxX(p)-NSMaxX(cut),cut.size.height),
+            };
+            for (int j=0;j<4;j++) if (parts[j].size.width>0 && parts[j].size.height>0) { if (m==256) return NO; next[m++]=parts[j]; }
+        }
+        memcpy(pieces,next,m*sizeof *next); n=m;
+    }
+    if (n>limit) return NO;
+    memcpy(out,pieces,n*sizeof *pieces); *used=n;
+    return YES;
+}
+/* Whether a point of the window's content, which is flipped, is inside the
+   corners of radii (from the top-left clockwise) of frame. */
+static BOOL inside_corners(NSRect frame,const double radii[4],NSPoint p) {
+    for (int i=0;i<4;i++) {
+        const double r=MIN(radii[i],MIN(frame.size.width,frame.size.height)/2);
+        if (r<=0) continue;
+        const BOOL right=i==1 || i==2, bottom=i>=2;
+        const double cx=right?NSMaxX(frame)-r:NSMinX(frame)+r, cy=bottom?NSMaxY(frame)-r:NSMinY(frame)+r;
+        const BOOL beyond_x=right?p.x>cx:p.x<cx, beyond_y=bottom?p.y>cy:p.y<cy;
+        if (beyond_x && beyond_y && (p.x-cx)*(p.x-cx)+(p.y-cy)*(p.y-cy)>r*r) return NO;
+    }
+    return YES;
+}
+static BOOL page_takes_point(id object,NSPoint point) {
+    ZwkPage *s=object;
+    if (!s || !s->shaped || !s->view) return YES;
+    if (!NSPointInRect(point,s->shape_clip)) return NO;
+    for (uint32_t i=0;i<s->shape_count;i++) if (NSPointInRect(point,s->shape_covers[i])) return NO;
+    return inside_corners(s->view.frame,s->shape_radii,point);
+}
+/* A box of the view's own points with corners of radii where its corners
+   are the view's, added to path through to_layer. */
+static void add_piece(CGMutablePathRef path,const CGAffineTransform *to_layer,NSRect piece,NSRect bounds,BOOL flipped,const double radii[4]) {
+    const CGFloat top=flipped?NSMinY(piece):NSMaxY(piece), bottom=flipped?NSMaxY(piece):NSMinY(piece);
+    const CGFloat view_top=flipped?NSMinY(bounds):NSMaxY(bounds), view_bottom=flipped?NSMaxY(bounds):NSMinY(bounds);
+    const NSPoint corners[4]={ NSMakePoint(NSMinX(piece),top), NSMakePoint(NSMaxX(piece),top), NSMakePoint(NSMaxX(piece),bottom), NSMakePoint(NSMinX(piece),bottom) };
+    const NSPoint edges[4]={ NSMakePoint(NSMinX(bounds),view_top), NSMakePoint(NSMaxX(bounds),view_top), NSMakePoint(NSMaxX(bounds),view_bottom), NSMakePoint(NSMinX(bounds),view_bottom) };
+    const double limit=MIN(piece.size.width,piece.size.height)/2;
+    double r[4];
+    for (int i=0;i<4;i++) r[i]=fabs(corners[i].x-edges[i].x)<0.01 && fabs(corners[i].y-edges[i].y)<0.01?MIN(radii[i],limit):0;
+    CGPathMoveToPoint(path,to_layer,(corners[3].x+corners[0].x)/2,(corners[3].y+corners[0].y)/2);
+    for (int i=0;i<4;i++) {
+        const NSPoint p=corners[i], q=corners[(i+1)%4];
+        if (r[i]>0) CGPathAddArcToPoint(path,to_layer,p.x,p.y,(p.x+q.x)/2,(p.y+q.y)/2,r[i]);
+        else { CGPathAddLineToPoint(path,to_layer,p.x,p.y); CGPathAddLineToPoint(path,to_layer,(p.x+q.x)/2,(p.y+q.y)/2); }
+    }
+    CGPathCloseSubpath(path);
+}
+/* Cut the region's view to what shows of it: its clip less the native UI's
+   covers, keeping its corners. A view that shows whole keeps the corners
+   zwk_present gave it. */
+static void shape_view(ZwkPage *s) {
+    NSView *view=s->view, *host=view.superview;
+    if (!host || !s->shaped) return;
+    const NSRect frame=view.frame;
+    const NSRect visible=NSIntersectionRect(frame,s->shape_clip);
+    const BOOL whole=s->shape_count==0 && NSMinX(visible)<=NSMinX(frame)+0.01 && NSMinY(visible)<=NSMinY(frame)+0.01 &&
+        NSMaxX(visible)>=NSMaxX(frame)-0.01 && NSMaxY(visible)>=NSMaxY(frame)-0.01;
+    if (whole) {
+        if (s->shape_mask) round_view(s,s->present_radii);
+        return;
+    }
+    view.wantsLayer=YES;
+    CALayer *layer=view.layer;
+    if (!layer) return;
+    NSRect pieces[256]; uint32_t count=0;
+    if (!subtract_boxes(visible,s->shape_covers,s->shape_count,pieces,&count,256)) {
+        /* Too many pieces: the page shows in its clip, under the covers. */
+        pieces[0]=visible; count=visible.size.width>0 && visible.size.height>0?1:0;
+    }
+    const NSRect bounds=view.bounds;
+    /* The view's points in its layer, as AppKit flips and scales them. */
+    const NSPoint o=[view convertPointToLayer:NSZeroPoint], x=[view convertPointToLayer:NSMakePoint(1,0)], y=[view convertPointToLayer:NSMakePoint(0,1)];
+    const CGRect layer_bounds=layer.bounds;
+    const CGAffineTransform to_layer=CGAffineTransformMake(x.x-o.x,x.y-o.y,y.x-o.x,y.y-o.y,o.x-layer_bounds.origin.x,o.y-layer_bounds.origin.y);
+    CGMutablePathRef path=CGPathCreateMutable();
+    for (uint32_t i=0;i<count;i++) add_piece(path,&to_layer,[view convertRect:pieces[i] fromView:host],bounds,view.isFlipped,s->shape_radii);
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    layer.cornerRadius=0;
+    s->corner_mask=nil;
+    if (!s->shape_mask) s->shape_mask=[CAShapeLayer layer];
+    s->shape_mask.frame=layer_bounds;
+    s->shape_mask.path=path;
+    layer.mask=s->shape_mask;
+    [CATransaction commit];
+    CGPathRelease(path);
+}
+/* What shows of a region's page: clip, covers and corners in its window's
+   device pixels; the native UI shows and takes the pointer elsewhere. */
+int zwk_shape(ZwkState *state,const double clip[4],const double radii[4],const double *covers,uint32_t count) {
+    ZwkPage *s=page_of(state);
+    if (!live(s) || !s->region_mode || !s->view) return ZWK_CLOSED;
+    if (count>ZWK_MAX_COVERS || (count && !covers)) return ZWK_INVALID;
+    for (int i=0;i<4;i++) if (!isfinite(clip[i]) || !isfinite(radii[i]) || radii[i]<0) return ZWK_INVALID;
+    for (uint32_t i=0;i<4*count;i++) if (!isfinite(covers[i])) return ZWK_INVALID;
+    @autoreleasepool {
+        const CGFloat scale=view_scale(s->view);
+        s->shaped=YES;
+        s->shape_clip=NSMakeRect(clip[0]/scale,clip[1]/scale,MAX(clip[2],0)/scale,MAX(clip[3],0)/scale);
+        for (int i=0;i<4;i++) s->shape_radii[i]=radii[i]/scale;
+        s->shape_count=count;
+        for (uint32_t i=0;i<count;i++) s->shape_covers[i]=NSMakeRect(covers[4*i]/scale,covers[4*i+1]/scale,MAX(covers[4*i+2],0)/scale,MAX(covers[4*i+3],0)/scale);
+        shape_view(s);
+    }
+    return live(s)?ZWK_OK:ZWK_CLOSED;
+}
+/* Test hook: whether the page takes the pointer at a point of its window's
+   content, in pixels, and shows there: 1 when it does, 0 when the native UI
+   does, -1 when the page is gone. */
+int zwk_test_page_at(ZwkState *state,int32_t x,int32_t y) {
+    ZwkPage *s=page_of(state);
+    if (!live(s) || !s->view || !s->view.superview) return -1;
+    NSView *host=s->view.superview;
+    const CGFloat scale=view_scale(host);
+    const NSPoint point=NSMakePoint(x/scale,y/scale);
+    if (s->view.hidden || !NSPointInRect(point,s->view.frame)) return 0;
+    NSView *found=[host hitTest:[host convertPoint:point toView:host.superview]];
+    const BOOL takes=found && (found==s->view || [found isDescendantOf:s->view]);
+    /* The mask shows the page where it takes the pointer. */
+    CAShapeLayer *mask=s->shape_mask;
+    BOOL shows=YES;
+    if (mask && s->view.layer.mask==mask) {
+        const NSPoint local=[s->view convertPointToLayer:[s->view convertPoint:point fromView:host]];
+        const CGRect bounds=s->view.layer.bounds;
+        shows=CGPathContainsPoint(mask.path,NULL,CGPointMake(local.x-bounds.origin.x,local.y-bounds.origin.y),false);
+    }
+    return takes && shows?1:0;
 }
 /* Test hook: the zoom WebKit has, and the corner radius the view shows. */
 double zwk_test_present(ZwkState *state,double corners[4]) {
@@ -3397,6 +3588,43 @@ int zwk_focus(ZwkState *state) {
     ZwkPage *s=page_of(state);
     if (!live(s) || !s->view.window) return ZWK_CLOSED;
     return [s->view.window makeFirstResponder:s->view]?ZWK_OK:ZWK_NATIVE_FAILED;
+}
+/* Give a region's page the keyboard as Tab does: the engine focuses no
+   element as the view becomes first responder by itself, so once the page
+   let go of the one it had, a Tab given to it focuses its first element,
+   or its last going back. */
+int zwk_tab_into(ZwkState *state,int back) {
+    ZwkPage *s=page_of(state);
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=s; (void)keep;
+    if (!live(s) || !s->region_mode || !s->view || !s->view.window) return ZWK_CLOSED;
+    @autoreleasepool {
+        ZwkWebView *view=s->view;
+        NSWindow *window=view.window;
+        [view evaluateJavaScript:@"document.activeElement&&document.activeElement.blur()" completionHandler:nil];
+        if (![window makeFirstResponder:view]) return ZWK_NATIVE_FAILED;
+        if (!live(s) || !s->view) return ZWK_CLOSED;
+        NSString *tab=back?[NSString stringWithFormat:@"%C",(unichar)NSBackTabCharacter]:@"\t";
+        const NSEventModifierFlags flags=back?NSEventModifierFlagShift:0;
+        for (int i=0;i<2 && live(s) && s->view;i++) {
+            NSEvent *event=[NSEvent keyEventWithType:i==0?NSEventTypeKeyDown:NSEventTypeKeyUp location:NSZeroPoint modifierFlags:flags
+                timestamp:[[NSProcessInfo processInfo] systemUptime] windowNumber:window.windowNumber context:nil characters:tab
+                charactersIgnoringModifiers:tab isARepeat:NO keyCode:0x30];
+            if (i==0) [view keyDown:event]; else [view keyUp:event];
+        }
+    }
+    return live(s)?ZWK_OK:ZWK_CLOSED;
+}
+/* Whether the page, or a view inside it, has its window's keyboard. */
+int zwk_has_focus(ZwkState *state) {
+    ZwkPage *s=page_of(state);
+    if (!live(s) || !s->view || !s->view.window) return 0;
+    NSResponder *first=s->view.window.firstResponder;
+    return first==s->view || ([first isKindOfClass:[NSView class]] && [(NSView *)first isDescendantOf:s->view]);
+}
+/* The page's view, whose accessibility holds its tree. */
+void *zwk_widget(ZwkState *state) {
+    ZwkPage *s=page_of(state);
+    return live(s)?(__bridge void *)s->view:NULL;
 }
 /* Test hook: where the view is, in its window's content pixels, and whether
  * it is shown there. */

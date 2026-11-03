@@ -1603,6 +1603,11 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_ui", .module = ui },
         });
+        addSmoke(b, "smoke-virtual-list-macos", "tests/macos_virtual_list_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_virtual_list", .module = virtual_list },
+        });
         addSmoke(b, "smoke-file-watch", "tests/system_watch_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat_system", .module = system },
         });
@@ -1916,6 +1921,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
         });
+        addEmbeddedWebView(b, target, optimize, core, ui, declarative_view, view);
     }
     if (web and target.result.os.tag == .windows) {
         if (target.result.cpu.arch != .x86_64)
@@ -3560,7 +3566,9 @@ fn addEmbeddedWebView(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
         .{ .name = "ziggurat_view", .module = declarative_view },
         .{ .name = "ziggurat_webview", .module = view },
     } });
-    addSmoke(b, "smoke-embedded-webview", "tests/embedded_webview_smoke.zig", target, optimize, &.{
+    // The embedded web view smoke paints through the GTK and Win32 test
+    // hooks; macOS has its own below.
+    if (target.result.os.tag != .macos) addSmoke(b, "smoke-embedded-webview", "tests/embedded_webview_smoke.zig", target, optimize, &.{
         .{ .name = "ziggurat", .module = core },
         .{ .name = "ziggurat_view", .module = declarative_view },
         .{ .name = "ziggurat_webview", .module = view },
@@ -3582,6 +3590,17 @@ fn addEmbeddedWebView(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
         overlay_smoke.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
         b.top_level_steps.get("check").?.step.dependOn(&overlay_smoke.step);
         b.step("smoke-webview-overlay-linux", "Verify native UI over an embedded page, Tab into, through and out of it, and its tree inside the native UI's").dependOn(&b.addRunArtifact(overlay_smoke).step);
+    }
+    if (target.result.os.tag == .macos) {
+        const overlay = addSmokeModule(b, "smoke-webview-overlay-macos", "tests/macos_webview_overlay_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_view", .module = declarative_view },
+            .{ .name = "ziggurat_webview", .module = view },
+            .{ .name = "ziggurat_webview_view", .module = embedded },
+        });
+        _ = native_support.add(b, overlay, "webview-overlay-probe-macos", "tests/macos_webview_overlay_probe.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native_support.linkFrameworks(b, overlay, &.{ "AppKit", "Foundation" });
     }
 }
 

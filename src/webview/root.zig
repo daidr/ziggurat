@@ -1581,7 +1581,7 @@ pub const View = struct {
             const radii: [4]f64 = .{ viewport.radii[0], viewport.radii[1], viewport.radii[2], viewport.radii[3] };
             try webkit.check(webkit.zwk_present(native, if (scaled) viewport.layoutSize()[0] else 0, &radii));
             if (self.attachmentClosed()) return error.Closed;
-            if (!is_macos and self.region != null) {
+            if (self.region != null) {
                 // The native UI shows over the page outside its clip and
                 // where it paints over it.
                 const to = @as(f64, scale);
@@ -3763,29 +3763,28 @@ pub const View = struct {
     /// does: at its first element that takes the focus, or its last when
     /// `back`, as Shift+Tab does. Tab past its other end gives the keyboard
     /// back to the native UI, as a Tab of its own (`KeyInput.from_page`).
-    /// Linux only: other backends give the page the keyboard as it is.
+    /// WebKit backends only: WebView2 gives the page the keyboard as it is.
     pub fn tabInto(self: *View, back: bool) !void {
         _ = try self.attachedWindow();
         if (self.region == null) return error.NotSupported;
         const native = self.native orelse return error.NotReady;
         const scope = self.beginCallback() orelse return error.Closed;
         defer scope.end();
-        if (is_webkit and !is_macos) return webkit.check(webkit.zwk_tab_into(native, @intFromBool(back)));
-        if (is_webkit) return webkit.check(webkit.zwk_focus(native));
+        if (is_webkit) return webkit.check(webkit.zwk_tab_into(native, @intFromBool(back)));
         return error.UnsupportedCapability;
     }
-    /// Whether a page shown in native UI has the keyboard. Linux only;
-    /// false elsewhere.
+    /// Whether a page shown in native UI has the keyboard. WebKit backends
+    /// only; false elsewhere.
     pub fn holdsKeyboard(self: *View) bool {
-        if (!is_webkit or is_macos or self.region == null or self.attachmentClosed()) return false;
+        if (!is_webkit or self.region == null or self.attachmentClosed()) return false;
         const native = self.native orelse return false;
         return webkit.zwk_has_focus(native) != 0;
     }
     /// The native object whose accessible holds the page's tree, for the
     /// node of native UI standing for the page (`accessibility.Node.native`):
-    /// the page's widget on Linux, null elsewhere.
+    /// the page's widget on Linux, its WKWebView on macOS, null elsewhere.
     pub fn accessibleNative(self: *View) ?*anyopaque {
-        if (!is_webkit or is_macos or self.attachmentClosed()) return null;
+        if (!is_webkit or self.attachmentClosed()) return null;
         const native = self.native orelse return null;
         return webkit.zwk_widget(native);
     }

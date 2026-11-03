@@ -57,7 +57,8 @@ pub const Node = struct {
     level: u32 = 0,
     /// Native content inside the node whose own tree assistive technology
     /// reads there, such as a web view's page: its GtkWidget on Linux,
-    /// whose accessible becomes the node's only child. Ignored elsewhere.
+    /// whose accessible becomes the node's first child, or its NSView on
+    /// macOS, which becomes the element's first child. Ignored on Windows.
     native: ?*anyopaque = null,
 };
 /// Nodes holding native content (`Node.native`) in one publication.
@@ -410,14 +411,17 @@ extern fn zua_finish_action(*anyopaque) void;
 extern fn zua_resource_counts(*u32, *u32, *u32, *u32) void;
 
 pub const ResourceCounts = struct { states: u32, providers: u32, ranges: u32, actions: u32 };
+/// Whether the native host keeps registered recipients and complete lists
+/// (`virtual_lists`): UI Automation on Windows, NSAccessibility on macOS.
+pub const native_recipients = builtin.os.tag == .windows or builtin.os.tag == .macos;
 pub fn recipientsMetadataBytes() usize {
-    return if (builtin.os.tag == .windows) zua_collections_metadata_size() else 0;
+    return if (native_recipients) zua_collections_metadata_size() else 0;
 }
 pub fn collectionsResourceCount() u32 {
-    return if (builtin.os.tag == .windows) zua_collections_count() else 0;
+    return if (native_recipients) zua_collections_count() else 0;
 }
 pub fn geometryResourceCount() u32 {
-    return if (builtin.os.tag == .windows) zua_geometry_count() else 0;
+    return if (native_recipients) zua_geometry_count() else 0;
 }
 pub fn resourceCounts() ResourceCounts {
     var counts: ResourceCounts = undefined;
@@ -563,7 +567,7 @@ pub const Bridge = struct {
         self.last_hresult = hr;
         if (hr < 0) return error.AccessibilityPublishFailed;
         self.last_origin = origin_point;
-        if (builtin.os.tag == .linux) {
+        if (builtin.os.tag == .linux or builtin.os.tag == .macos) {
             // The trees of native content, such as web pages, inside the
             // nodes standing for them.
             var ids: [max_native_pages]u64 = undefined;
@@ -580,17 +584,17 @@ pub const Bridge = struct {
     /// Allocate the optional copied authority store before publishing a new
     /// recipient workspace. No native operation borrows the candidate's owner.
     pub fn createRecipientsCandidate(self: *Bridge) !RecipientsCandidate {
-        if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
+        if (!native_recipients) return error.UnsupportedPlatform;
         const window = self.window orelse return error.Closed;
         window.app.assertOwner();
         if (self.native == null) return error.Closed;
         return .{ .native = zua_collections_create() orelse return error.OutOfMemory };
     }
     pub fn destroyRecipientsCandidate(candidate: RecipientsCandidate) void {
-        if (builtin.os.tag == .windows) zua_collections_free(candidate.native);
+        if (native_recipients) zua_collections_free(candidate.native);
     }
     pub fn commitRecipientsCandidate(self: *Bridge, candidate: RecipientsCandidate) !void {
-        if (builtin.os.tag != .windows) return error.UnsupportedPlatform;
+        if (!native_recipients) return error.UnsupportedPlatform;
         const native = self.native orelse return error.Closed;
         self.last_hresult = zua_collections_commit(native, candidate.native);
         if (self.last_hresult < 0) return error.AccessibilityPreparationFailed;
