@@ -3,10 +3,12 @@ const builtin = @import("builtin");
 const z = @import("ziggurat");
 const drawing = @import("ziggurat_drawing_resources");
 const reservations = @import("gpu_reservations.zig");
-const enabled = (builtin.os.tag == .windows or builtin.os.tag == .macos) and @import("ziggurat_ui_options").gpu;
+const enabled = (builtin.os.tag == .windows or builtin.os.tag == .macos or builtin.os.tag == .linux) and @import("ziggurat_ui_options").gpu;
 
 /// `warp` is Direct3D's software device, which Metal has no counterpart
 /// of: on macOS a domain takes the system's default device (`hardware`).
+/// On Linux a domain is a surfaceless EGL context: `warp` takes a software
+/// rasterizer too (llvmpipe), `hardware` only a GPU unless `ZIGGURAT_GL=on`.
 pub const Driver = enum { hardware, warp };
 pub const capacity = 32;
 pub const Options = struct {
@@ -48,7 +50,8 @@ extern fn zgpu_domain_inject_loss(*anyopaque) void;
 extern fn zgpu_snapshot_offscreen(*anyopaque, *anyopaque, u32, u64, u32, u32, u32, *i32) ?*const drawing.GpuTextureToken;
 
 /// Stable main-thread owner of one explicit GPU resource domain: a D3D11/D2D
-/// device on Windows, a Metal device on macOS (src/ui/metal.m).
+/// device on Windows, a Metal device on macOS (src/ui/metal.m), an OpenGL
+/// context on Linux (src/ui/gl_renderer.c).
 /// No Context creates one implicitly. Close every Texture and renderer borrow
 /// before close; stop revokes native payloads but preserves their stable shells.
 pub const DeviceDomain = opaque {

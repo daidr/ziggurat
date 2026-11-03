@@ -1,5 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
+/// The GPU checks here are Direct3D's; other platforms have their own smokes.
+const d3d = ui.capabilities.gpu and builtin.os.tag == .windows;
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const commands = ui.commands;
@@ -194,7 +196,7 @@ pub fn main() !void {
             const before_gdi = c.GetGuiResources(c.GetCurrentProcess(), c.GR_GDIOBJECTS);
             try software(dc, hwnd);
             try std.testing.expectEqual(before_gdi, c.GetGuiResources(c.GetCurrentProcess(), c.GR_GDIOBJECTS));
-            if (ui.capabilities.gpu) {
+            if (d3d) {
                 try gpu(.hardware, dc, hwnd.?);
                 try gpu(.warp, dc, hwnd.?);
             }

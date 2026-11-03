@@ -9,7 +9,7 @@ pub fn build(b: *std.Build) void {
     native_support.apple_sdk = b.option([]const u8, "macos-sdk", "macOS SDK root for cross-compiling to macOS");
     const web = b.option(bool, "webview", "Build the optional system WebView (Windows SDK or Linux WebKitGTK)") orelse false;
     const https_resources_enabled = b.option(bool, "https-resources", "Build the optional HTTPS resource transport on Windows or Linux") orelse false;
-    const gpu = b.option(bool, "gpu", "Build the optional GPU renderer (D3D11 on Windows, Metal on macOS) with software fallback") orelse false;
+    const gpu = b.option(bool, "gpu", "Build the optional GPU renderer (D3D11 on Windows, Metal on macOS, OpenGL on Linux) with software fallback") orelse false;
     const webp = b.option(bool, "webp", "Build the optional pinned WebP decoder (fetch source first)") orelse false;
     const accessibility = b.option(bool, "accessibility", "Build the optional native accessibility bridge (Windows UI Automation, macOS NSAccessibility, Linux ATK)") orelse false;
     const check = b.step("check", "Compile selected examples and tests without running them");
@@ -1526,8 +1526,20 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_ui", .module = ui },
             .{ .name = "ziggurat_text_layout", .module = text_layout },
         });
+    } else if (gpu and target.result.os.tag == .linux) {
+        // OpenGL 3.3 through GDK's GL context of the window (GtkGLArea's
+        // mechanism) or surfaceless EGL, both through libepoxy.
+        const gl_native = native_support.add(b, ui, "ui-gl-native", "src/ui/gl_renderer.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        for ([_][]const u8{ "gtk+-3.0", "epoxy", "pangocairo" }) |library| gl_native.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+        for ([_][]const u8{ "gtk+-3.0", "epoxy", "pangocairo" }) |library| ui.linkSystemLibrary(library, .{ .use_pkg_config = .force });
+        ui.linkSystemLibrary("dl", .{});
+        addSmoke(b, "smoke-gl", "tests/gl_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+            .{ .name = "ziggurat_text_layout", .module = text_layout },
+        });
     } else if (gpu) {
-        if (target.result.os.tag != .windows) @panic("The GPU renderer requires Windows (D3D11) or macOS (Metal)");
+        if (target.result.os.tag != .windows) @panic("The GPU renderer requires Windows (D3D11), macOS (Metal) or Linux (OpenGL)");
         _ = native_support.add(b, ui, "ui-d3d11-native", "src/ui/d3d11.c", &.{"-std=c11"}, target, optimize);
         _ = native_support.addArchive(b, ui, "ui-gradient-interpolation-native", "src/ui/gradient_interpolation.c", &.{"-std=c11"}, target, optimize);
         _ = native_support.addArchive(b, ui, "ui-gaussian-native", "src/ui/gaussian_gpu.c", &.{"-std=c11"}, target, optimize);

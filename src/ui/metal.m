@@ -1679,7 +1679,7 @@ int zmtl_texture(void *p,const GpuTextureToken *token,const ZiImagePlan *plan){
 }
 void zmtl_inject_loss(void *p){R(p)->loss_fault=1;}
 
-/* Offscreen surfaces (src/ui/gpu_offscreen_metal.zig): a frame drawn
+/* Offscreen surfaces (src/ui/gpu_offscreen_native.zig): a frame drawn
    into the work target becomes the front, which snapshots copy. */
 void zmtl_offscreen_commit(void *p){
     ZigMetalRenderer *s=R(p);id<MTLTexture> work=s->front;s->front=s->offscreen_target;s->offscreen_target=work;

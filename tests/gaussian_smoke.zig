@@ -1,5 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
+/// The GPU checks here are Direct3D's; other platforms have their own smokes.
+const d3d = ui.capabilities.gpu and builtin.os.tag == .windows;
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const gaussian = @import("ziggurat_gaussian");
@@ -333,7 +335,7 @@ fn scenario(allocator: std.mem.Allocator, app: *z.App, scale: f32) !void {
         var software: ui.SoftwareRenderer = .{};
         defer software.deinit();
         try replay(&software, allocator, app, processor, prepared, scale, dc, window.nativeHandle(), "gdi");
-        if (ui.capabilities.gpu) for ([_]ui.d3d11.Driver{ .hardware, .warp }) |driver| {
+        if (d3d) for ([_]ui.d3d11.Driver{ .hardware, .warp }) |driver| {
             var gpu: ui.d3d11.Renderer = .{};
             try gpu.init(.{ .driver = driver });
             defer gpu.deinit();
@@ -369,8 +371,8 @@ pub fn main() !void {
         try std.testing.expectEqual(@as(usize, 0), resources.stop_participants);
         try std.testing.expectEqual(baseline, nativeCount());
     }
-    std.debug.print("gaussian after App deinit: native_count={d} process_initial={d} GPU_refs={d}\n", .{ nativeCount(), process_initial, if (ui.capabilities.gpu) ui.d3d11.globalResourceCount() else 0 });
+    std.debug.print("gaussian after App deinit: native_count={d} process_initial={d} GPU_refs={d}\n", .{ nativeCount(), process_initial, if (d3d) ui.d3d11.globalResourceCount() else 0 });
     if (builtin.os.tag != .windows) try std.testing.expectEqual(process_initial, nativeCount());
-    if (ui.capabilities.gpu) try std.testing.expectEqual(@as(u32, 0), ui.d3d11.globalResourceCount());
+    if (d3d) try std.testing.expectEqual(@as(u32, 0), ui.d3d11.globalResourceCount());
     std.debug.print("gaussian: real composed Snapshot/group/mask -> explicit worker -> independent Prepared; direct2D <=1, nearest replay/clip/opacity, sigma0 identity/residency, 3 DPI, framework resources=0 and initialized-App native baseline retained\n", .{});
 }

@@ -1,5 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
+/// The GPU checks here are Direct3D's; other platforms have their own smokes.
+const d3d = ui.capabilities.gpu and builtin.os.tag == .windows;
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const b = ui.commands.brushes;
@@ -321,7 +323,7 @@ pub fn run() !void {
         const baseline = c.GetGuiResources(c.GetCurrentProcess(), c.GR_GDIOBJECTS);
         try software(dc, hwnd);
         try offscreen(app);
-        if (ui.capabilities.gpu) {
+        if (d3d) {
             try gpuReject(dc, hwnd.?, .hardware);
             try gpuReject(dc, hwnd.?, .warp);
             try gpuFrontReject(app, .hardware);
@@ -329,7 +331,7 @@ pub fn run() !void {
             try std.testing.expectEqual(@as(u32, 0), ui.d3d11.globalResourceCount());
         }
         try std.testing.expectEqual(baseline, c.GetGuiResources(c.GetCurrentProcess(), c.GR_GDIOBJECTS));
-        if (ui.capabilities.gpu) {
+        if (d3d) {
             try contextFallback(app, .hardware);
             try contextFallback(app, .warp);
             var entries: [8]z.diagnostics.Diagnostic = undefined;

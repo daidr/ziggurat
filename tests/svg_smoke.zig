@@ -1,6 +1,8 @@
 const std = @import("std");
 const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
+/// The GPU checks here are Direct3D's; other platforms have their own smokes.
+const d3d = ui.capabilities.gpu and builtin.os.tag == .windows;
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const svg = @import("ziggurat_svg");
@@ -696,7 +698,7 @@ fn runMode(allocator: std.mem.Allocator, mode: @FieldType(svg.PrepareOptions, "c
                 try render(&renderer, &job, dc, hwnd);
             }
             try std.testing.expectEqual(before, c.GetGuiResources(c.GetCurrentProcess(), c.GR_GDIOBJECTS));
-            if (ui.capabilities.gpu) for ([_]ui.d3d11.Driver{ .hardware, .warp }) |driver| {
+            if (d3d) for ([_]ui.d3d11.Driver{ .hardware, .warp }) |driver| {
                 var renderer: ui.d3d11.Renderer = .{};
                 try renderer.init(.{ .driver = driver });
                 defer renderer.deinit();

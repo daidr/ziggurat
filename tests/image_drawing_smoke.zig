@@ -1,5 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
+/// The GPU checks here are Direct3D's; other platforms have their own smokes.
+const d3d = ui.capabilities.gpu and builtin.os.tag == .windows;
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const images = @import("ziggurat_images");
@@ -290,7 +292,7 @@ fn tiles(state: *State, job: *Job, gpu: bool) !void {
         try expect(resident.pixel_bytes > resident.budget_bytes);
         try equal(before.evictions, resident.evictions);
     }
-    if (ui.capabilities.gpu) if (gpu) {
+    if (d3d) if (gpu) {
         // The device cannot upload while drawing: the first frame drew in
         // software and uploaded the tiles after it; the next draws on it.
         try equal(gpu_frames, context.gpu_frames);
@@ -332,7 +334,7 @@ fn integrated(allocator: std.mem.Allocator, job: *Job, gpu: bool) !void {
     try equal(residency, (try state.resource.view()).lease.pins);
     state.bad_frame = false;
     state.expected_diagnostic = null;
-    if (ui.capabilities.gpu) if (gpu) {
+    if (d3d) if (gpu) {
         context.gpu_renderer.injectPresentationBusy();
         try state.paint();
         const token = context.gpu_wait orelse return error.MissingGpuWatch;
@@ -388,7 +390,7 @@ pub fn main() !void {
                 try render(&renderer, &job, dc, hwnd);
             }
             try equal(before, c.GetGuiResources(c.GetCurrentProcess(), c.GR_GDIOBJECTS));
-            if (ui.capabilities.gpu) for ([_]ui.d3d11.Driver{ .hardware, .warp }) |driver| {
+            if (d3d) for ([_]ui.d3d11.Driver{ .hardware, .warp }) |driver| {
                 var renderer: ui.d3d11.Renderer = .{};
                 try renderer.init(.{ .driver = driver });
                 defer renderer.deinit();
@@ -413,7 +415,7 @@ pub fn main() !void {
         try equal(0, zlc_test_live_image_objects());
     }
     try integrated(allocator, &job, false);
-    if (ui.capabilities.gpu) try integrated(allocator, &job, true);
+    if (d3d) try integrated(allocator, &job, true);
     for (job.resources) |resource| try expect(!try resource.?.inUse());
     std.debug.print("images: software pixels/DPI/crop/fit/premultiplied sampling and Context failed-frame/close pins passed\n", .{});
 }

@@ -58,7 +58,11 @@ smoke-gpu-offscreen 使用实际 D2D targets 与硬件/WARP，验证三DPI透明
 
 ## macOS（Metal）
 
-macOS 的 Surface（`src/ui/gpu_offscreen_metal.zig`）用 Domain 设备上的一个 Metal renderer 把每帧画进透明的 work 目标，整帧成功后与 front 交换；失败的帧保留原 front。首帧之后 front/work 两张目标都已存在，热 render 不再创建目标（`layers.native_creations` 不变）。分组、遮罩、高斯与仿射变换沿用窗口 renderer 的逐帧捕获纹理。
+macOS 的 Surface（`src/ui/gpu_offscreen_native.zig`）用 Domain 设备上的一个 Metal renderer 把每帧画进透明的 work 目标，整帧成功后与 front 交换；失败的帧保留原 front。首帧之后 front/work 两张目标都已存在，热 render 不再创建目标（`layers.native_creations` 不变）。分组、遮罩、高斯与仿射变换沿用窗口 renderer 的逐帧捕获纹理。
 
 预算与 Windows 相同：workspace 按同一 layer 计划计入 `texture_bytes`，快照占一个 Domain slot。snapshot 在 Domain 队列上把 front blit 进新纹理并等待完成；readFrontForTest 直接读 front（仅测试）。Metal 在着色器中混合各插值空间的渐变，`prepareGradientInterpolation` 无需准备。`injectDeviceLossForTest` 让下一帧像设备被移除一样失败（`DeviceLost`），Domain 随之丢失设备。
+
+## Linux（OpenGL）
+
+Linux 的 Surface 与 macOS 共用 `src/ui/gpu_offscreen_native.zig`，renderer 为 Domain EGL 上下文上的 `ui.gl.Renderer`：每帧画进 work FBO，成功后与 front 交换，失败保留原 front；snapshot 用翻转的 `glBlitFramebuffer` 把 front 复制进新的 Domain 纹理（渲染目标自下而上存储）。分组、遮罩、高斯与变换沿用窗口 renderer 的逐帧捕获纹理，渐变插值在着色器中完成。`injectDeviceLossForTest` 让下一帧返回 `DeviceLost`。
 

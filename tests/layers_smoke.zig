@@ -1,5 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
+/// The GPU checks here are Direct3D's; other platforms have their own smokes.
+const d3d = ui.capabilities.gpu and builtin.os.tag == .windows;
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const text = @import("ziggurat_text_layout");
@@ -294,7 +296,7 @@ const State = struct {
     }
 };
 fn shown(context: *ui.Context) bool {
-    if (ui.capabilities.gpu) {
+    if (d3d) {
         const surface = context.gpu_renderer.surfaceForTest() orelse return false;
         return c.GetWindowLongW(surface, c.GWL_STYLE) & c.WS_VISIBLE != 0;
     }
@@ -357,7 +359,7 @@ fn integrated(allocator: std.mem.Allocator, gpu: bool, pending_close: bool) !voi
         try expectError(error.OutOfMemory, context.prepareLayers(failing.allocator(), state.options));
         try equal(stats.current_bytes, (try context.layerStats()).current_bytes);
     }
-    if (ui.capabilities.gpu and gpu) {
+    if (d3d and gpu) {
         const native_before = ui.d3d11.globalResourceCount();
         const software_before = context.renderer.layerStats();
         context.gpu_renderer.injectLayerPreparationFailureForTest(2);
@@ -380,7 +382,7 @@ fn integrated(allocator: std.mem.Allocator, gpu: bool, pending_close: bool) !voi
     try equal(resident_pins, lease.pins);
     state.bad_replay = false;
     state.expected = null;
-    if (ui.capabilities.gpu and gpu) {
+    if (d3d and gpu) {
         context.gpu_renderer.injectPresentationBusy();
         try state.paint();
         try checkNodes(&context, 1, 2);
@@ -402,7 +404,7 @@ fn integrated(allocator: std.mem.Allocator, gpu: bool, pending_close: bool) !voi
     try context.releaseLayers();
     try expect(context.gpu_wait == null);
     try context.prepareLayers(allocator, state.options);
-    if (ui.capabilities.gpu and gpu) {
+    if (d3d and gpu) {
         context.gpu_renderer.injectDeviceLoss();
         state.expected = error.DeviceLost;
         try state.paint();
@@ -457,7 +459,7 @@ pub fn main() !void {
                 std.debug.print("layer GDI pass={d}, handles={d}, textrefs={any}\n", .{ pass, after, text.resourceCounts() });
                 if (warmed) |value| try equal(value, after) else warmed = after;
             }
-            if (ui.capabilities.gpu) for ([_]ui.d3d11.Driver{ .hardware, .warp }) |driver| {
+            if (d3d) for ([_]ui.d3d11.Driver{ .hardware, .warp }) |driver| {
                 var renderer: ui.d3d11.Renderer = .{};
                 try renderer.init(.{ .driver = driver });
                 defer renderer.deinit();
@@ -481,12 +483,12 @@ pub fn main() !void {
         try equal(0, zlc_layer_live_objects());
     }
     try integrated(allocator, false, false);
-    if (ui.capabilities.gpu) {
+    if (d3d) {
         try integrated(allocator, true, false);
         try integrated(allocator, true, true);
     }
     try equal(text.ResourceCounts{}, text.resourceCounts());
-    if (ui.capabilities.gpu) try equal(0, ui.d3d11.globalResourceCount());
+    if (d3d) try equal(0, ui.d3d11.globalResourceCount());
     if (ui.capabilities.accessibility) try equal(0, ui.accessibility.resourceCounts().states);
     std.debug.print("layers: software alpha/group/rollback, Context/watch/close and resource balance passed\n", .{});
 }

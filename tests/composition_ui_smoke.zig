@@ -1,5 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
+/// The GPU checks here are Direct3D's; other platforms have their own smokes.
+const d3d = ui.capabilities.gpu and builtin.os.tag == .windows;
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const expect = std.testing.expect;
@@ -437,13 +439,13 @@ pub fn main() !void {
     var debug: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(debug.deinit() == .ok);
     const before = if (ui.capabilities.accessibility) ui.accessibility.resourceCounts() else std.mem.zeroes(ui.accessibility.ResourceCounts);
-    const gpu = if (ui.capabilities.gpu) ui.d3d11.globalResourceCount() else 0;
+    const gpu = if (d3d) ui.d3d11.globalResourceCount() else 0;
     try normal(debug.allocator());
     try reentrantResource(debug.allocator());
     try closedContext(debug.allocator());
     try failedAttachCloses(debug.allocator());
     if (ui.capabilities.accessibility) try equal(before, ui.accessibility.resourceCounts());
-    if (ui.capabilities.gpu) try equal(gpu, ui.d3d11.globalResourceCount());
+    if (d3d) try equal(gpu, ui.d3d11.globalResourceCount());
     if (builtin.os.tag == .linux) try equal(@as(u32, 0), zlg_resource_count());
     std.debug.print("composition UI native passed: sole owner/backdrop, software pixels, region input/resize, attach rollback, stale handles, draw/input/key/resource remove, failed Frame and close/free resources=0\n", .{});
 }

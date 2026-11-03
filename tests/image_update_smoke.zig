@@ -1,5 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
+/// The GPU checks here are Direct3D's; other platforms have their own smokes.
+const d3d = ui.capabilities.gpu and builtin.os.tag == .windows;
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const images = @import("ziggurat_images");
@@ -239,7 +241,7 @@ fn integrated(allocator: std.mem.Allocator, job: *Job, gpu: bool) !void {
     const b = try job.view(1);
     try context.uploadDynamicImage(a);
     try state.paint();
-    if (ui.capabilities.gpu) if (gpu) {
+    if (d3d) if (gpu) {
         context.gpu_renderer.injectImageUpdateFailureForTest(2);
         try expectError(error.GraphicsFailed, context.updateImage(a.identity, b));
         try equal(1, (try context.imageStats()).software.updates);
@@ -319,7 +321,7 @@ pub fn main() !void {
                 try runRenderer(&renderer, &observer, &job, paint);
             }
             try equal(handles, c.GetGuiResources(c.GetCurrentProcess(), c.GR_GDIOBJECTS));
-            if (ui.capabilities.gpu) for ([_]ui.d3d11.Driver{ .hardware, .warp }) |driver| {
+            if (d3d) for ([_]ui.d3d11.Driver{ .hardware, .warp }) |driver| {
                 var renderer: ui.d3d11.Renderer = .{};
                 try renderer.init(.{ .driver = driver });
                 defer renderer.deinit();
@@ -348,8 +350,8 @@ pub fn main() !void {
         try equal(0, zlc_test_live_image_objects());
     }
     try integrated(allocator, &job, false);
-    if (ui.capabilities.gpu) try integrated(allocator, &job, true);
+    if (d3d) try integrated(allocator, &job, true);
     for (job.resources) |resource| try expect(!try resource.?.inUse());
     std.debug.print("dynamic images: real base/mip pixels, 65 commits with stable native objects, failed-bank rollback/retry, cross-renderer/Frame leases, DPI/resize, budget and Context close passed\n", .{});
-    if (ui.capabilities.gpu) std.debug.print("dynamic GPU: hardware/WARP mid-mip device-loss recovery, Context partial-commit retry, pending-watch cancellation and old-version GDI fallback passed\n", .{});
+    if (d3d) std.debug.print("dynamic GPU: hardware/WARP mid-mip device-loss recovery, Context partial-commit retry, pending-watch cancellation and old-version GDI fallback passed\n", .{});
 }

@@ -1,5 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
+/// The GPU checks here are Direct3D's; other platforms have their own smokes.
+const d3d = ui.capabilities.gpu and builtin.os.tag == .windows;
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struct {};
@@ -307,7 +309,7 @@ fn transactions(app: *z.App) !void {
         try std.testing.expectError(if (builtin.os.tag == .linux) error.LayerPreparationFailed else error.OutOfMemory, ui.offscreen.Surface.createGaussianWithFailureForTest(app, std.heap.page_allocator, options, filter, @intCast(stage)));
     }
     std.debug.print("Gaussian software construction allocator_failures={d} native_failures=4\n", .{failures});
-    if (comptime builtin.os.tag == .windows and ui.capabilities.gpu) {
+    if (comptime d3d) {
         const domain = try ui.gpu_resources.DeviceDomain.create(app, std.heap.page_allocator, .{ .driver = .warp });
         defer domain.close() catch unreachable;
         const gpu_options: ui.gpu_offscreen.Options = .{ .size = options.size, .max_depth = 2, .resident_bytes = 0 };
@@ -372,17 +374,17 @@ pub fn main() !void {
     defer app.deinit();
     for ([_]f32{ 1, 1.5, 2 }) |scale| for ([_]bool{ false, true }) |identity| {
         try collection(app, false, {}, scale, identity, false);
-        if (comptime builtin.os.tag == .windows and ui.capabilities.gpu) {
+        if (comptime d3d) {
             try collection(app, true, .hardware, scale, identity, false);
             try collection(app, true, .warp, scale, identity, false);
         }
     };
     try collection(app, false, {}, 1.5, false, true);
-    if (comptime builtin.os.tag == .windows and ui.capabilities.gpu) {
+    if (comptime d3d) {
         try collection(app, true, .hardware, 1.5, false, true);
         try collection(app, true, .warp, 1.5, false, true);
     }
     try transactions(app);
-    if (comptime builtin.os.tag == .windows and ui.capabilities.gpu) try std.testing.expectEqual(@as(u32, 0), ui.d3d11.globalResourceCount());
+    if (comptime d3d) try std.testing.expectEqual(@as(u32, 0), ui.d3d11.globalResourceCount());
     std.debug.print("Gaussian native selected collection passed resources=0\n", .{});
 }

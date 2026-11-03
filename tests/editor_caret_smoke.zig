@@ -1,5 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
+/// The GPU checks here are Direct3D's; other platforms have their own smokes.
+const d3d = ui.capabilities.gpu and builtin.os.tag == .windows;
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const t = @import("ziggurat_text_layout");
@@ -454,7 +456,7 @@ fn nativePixels(allocator: std.mem.Allocator, engine: *t.Engine) !void {
             try renderer.prepareTransforms(allocator, .{ .layers = .{ .size = size, .max_depth = 1 }, .source_size = .{ .width = 128, .height = 112 } });
             for ([_]bool{ false, true }) |transformed| try pixelOracle(&renderer, allocator, engine, paint, transformed);
         }
-        if (ui.capabilities.gpu) for ([_]ui.d3d11.Driver{ .hardware, .warp }) |driver| {
+        if (d3d) for ([_]ui.d3d11.Driver{ .hardware, .warp }) |driver| {
             var renderer: ui.d3d11.Renderer = .{};
             try renderer.init(.{ .driver = driver });
             defer renderer.deinit();
