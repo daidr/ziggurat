@@ -316,3 +316,30 @@ test "a baseline shift raises or lowers a span and the line makes room" {
     // The underline goes with the lowered text.
     try testing.expectEqual(@as(f32, 21 + 3 + 1), recorder.fills[0].bounds.y);
 }
+
+test "a rich text lists its characters in their spans' fonts and colors for a morph" {
+    var text = RichText.init(testing.allocator, .{ .measurer = measurer, .color = 0x101010 });
+    defer text.deinit();
+    try text.setSpans(&.{
+        .{ .text = "Hi " },
+        .{ .text = "你", .weight = .bold, .color = 0x276aa5, .size = 32 },
+    });
+    var out: [view.morph.max_chars]view.morph.Glyph = undefined;
+    const count = text.glyphs(&out).?;
+    // The space moves nothing and is left out.
+    try testing.expectEqual(@as(usize, 3), count);
+    try testing.expectEqualStrings("H", out[0].text());
+    try testing.expectEqual(@as(f32, 0), out[0].x);
+    try testing.expectEqual(@as(f32, 10), out[1].x);
+    try testing.expectEqual(@as(u32, 0x101010), out[1].color);
+    try testing.expectEqualStrings("你", out[2].text());
+    try testing.expectEqual(@as(f32, 30), out[2].x);
+    try testing.expectEqual(@as(f32, 60), out[2].width);
+    try testing.expectEqual(view.Font.Weight.bold, out[2].font.weight);
+    try testing.expectEqual(@as(u32, 0x276aa5), out[2].color);
+    // Both stand on one baseline: the larger character starts higher.
+    try testing.expect(out[2].y < out[0].y);
+    var short: [2]view.morph.Glyph = undefined;
+    try testing.expect(text.glyphs(&short) == null);
+    try testing.expect(text.embed().glyphs != null);
+}

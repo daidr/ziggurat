@@ -2,7 +2,15 @@ const std = @import("std");
 const diff = @import("ziggurat_document_diff");
 pub const units: f64 = 64;
 pub const Segment = struct { first: usize, count: usize, a: usize, b: usize, count_a: usize, count_b: usize, hunk: ?usize };
-pub const Row = struct { a: ?usize, b: ?usize, hunk: ?usize };
+pub const Row = struct {
+    a: ?usize,
+    b: ?usize,
+    hunk: ?usize,
+    /// The record of side `side` (`.a` or `.b`) on the row, if any.
+    pub fn side(self: Row, which: anytype) ?usize {
+        return if (@backingInt(which) == 0) self.a else self.b;
+    }
+};
 pub const Anchor = struct { row: usize = 0, inset: u64 = 0 };
 /// Dense integer height/Fenwick planes plus compact hunk segments. Construction
 /// touches metadata only, never document lines/text or native shaping.

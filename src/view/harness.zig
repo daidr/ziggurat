@@ -1524,6 +1524,58 @@ test "tooltips appear after the hover delay and hide on press, Escape or leaving
     try std.testing.expectError(error.NotContainer, v.tooltip("Nothing to describe"));
 }
 
+const ThemedHints = struct {
+    quick: view.Theme = .{ .tooltip_delay = 30 },
+    instant: view.Theme = .{ .tooltip_delay = -1 },
+    fn build(self: *ThemedHints, v: *View) anyerror!void {
+        try v.row(.{ .gap = 8 });
+        _ = try v.button("Save", .{});
+        try v.tooltip("Save the document");
+        try v.themed(&self.quick, .{});
+        _ = try v.button("Quick", .{});
+        try v.tooltip("Shows sooner");
+        try v.end();
+        try v.themed(&self.instant, .{});
+        _ = try v.button("Now", .{});
+        try v.tooltip("Shows at once");
+        try v.end();
+        try v.end();
+    }
+};
+
+test "a theme sets the tooltip delay of what it builds, and the next tip shows at once while warm" {
+    var storage: view.Storage(32, 512) = .{};
+    var state: ThemedHints = .{};
+    var h = Harness.init(&state, ThemedHints.build, storage.buffers(), .{ .options = .{ .tooltip_delay = 100 } });
+    try h.render();
+    // The theme the control is built with sets its delay.
+    try h.hover(.{ .text = "Quick" });
+    try std.testing.expect(h.tooltip() == null);
+    try std.testing.expectEqual(@as(?u64, 30), h.deadline());
+    try h.advance(30);
+    try std.testing.expectEqualStrings("Shows sooner", h.tooltip().?);
+    // Moving on to another control within two thirds of its delay of the
+    // tip going shows its tip at once.
+    try h.hover(.{ .text = "Save" });
+    try std.testing.expectEqualStrings("Save the document", h.tooltip().?);
+    try h.leave();
+    try h.advance(67);
+    try h.hover(.{ .text = "Save" });
+    try std.testing.expect(h.tooltip() == null);
+    try h.advance(100);
+    try std.testing.expectEqualStrings("Save the document", h.tooltip().?);
+    try h.leave();
+    try h.advance(1000);
+    // A negative delay shows the tip at once.
+    try h.hover(.{ .text = "Now" });
+    try std.testing.expectEqualStrings("Shows at once", h.tooltip().?);
+    // The window's own theme sets the delay of controls built without one.
+    try std.testing.expectEqual(@as(u64, 600 * std.time.ns_per_ms), (view.Options{}).tooltip_delay);
+    h.view.window_tooltip_delay = 50;
+    try std.testing.expectEqual(@as(u64, 50), h.view.tooltipTiming(null).delay);
+    try std.testing.expectEqual(@as(u64, 33), h.view.tooltipTiming(null).warm);
+}
+
 const Notices = struct {
     queue: view.Toasts(3) = .{},
     undone: usize = 0,
@@ -1571,6 +1623,52 @@ test "toasts stack over the bottom edge, expire, act and dismiss" {
     var persistent: view.Toasts(1) = .{};
     _ = try persistent.show("Offline", .{ .duration = 0 });
     try std.testing.expectEqual(@as(u64, 0), persistent.items()[0].duration);
+}
+
+const BackgroundNotices = struct {
+    queue: view.Toasts(3) = .{},
+    fn build(self: *BackgroundNotices, v: *View) anyerror!void {
+        _ = try v.button("Work", .{});
+        _ = try v.toasts(&self.queue, .{});
+    }
+};
+
+test "the toasts' time stops while held or in the background, but for those that run there" {
+    var storage: view.Storage(32, 512) = .{};
+    var state: BackgroundNotices = .{};
+    var h = Harness.init(&state, BackgroundNotices.build, storage.buffers(), .{});
+    _ = try state.queue.show("Saved", .{ .duration = 1000 });
+    _ = try state.queue.show("Download finished", .{ .duration = 1000, .run_in_background = true });
+    try h.render();
+    try h.advance(400);
+    // In the background, only the one that runs there keeps its time,
+    // and it goes as it ends, while the window is still in the background.
+    try h.windowFocus(false);
+    try std.testing.expectEqual(@as(?u64, 400 + 600), h.deadline());
+    try h.advance(600);
+    try std.testing.expectEqual(@as(usize, 1), state.queue.len);
+    try std.testing.expectEqualStrings("Saved", (try h.find(.{ .kind = .toast })).text);
+    try h.advance(5000);
+    try std.testing.expectEqual(@as(usize, 1), state.queue.len);
+    try std.testing.expectEqual(@as(?u64, null), h.deadline());
+    // Back in front, the other runs on from where it stopped.
+    try h.windowFocus(true);
+    try std.testing.expectEqual(@as(?u64, h.clock + 600), h.deadline());
+    // The pointer resting on the toasts holds them, those that run in the
+    // background too.
+    _ = try state.queue.show("Copied", .{ .duration = 1000, .run_in_background = true });
+    try h.render();
+    try h.hover(.{ .kind = .toast, .text = "Saved" });
+    try std.testing.expect(h.view.toast_hover);
+    try std.testing.expectEqual(@as(?u64, null), h.deadline());
+    try h.advance(5000);
+    try std.testing.expectEqual(@as(usize, 2), state.queue.len);
+    try h.hover(.{ .text = "Work" });
+    try std.testing.expect(!h.view.toast_hover);
+    try std.testing.expectEqual(@as(?u64, h.clock + 600), h.deadline());
+    try h.advance(600);
+    try std.testing.expectEqual(@as(usize, 1), state.queue.len);
+    try std.testing.expectEqualStrings("Copied", state.queue.items()[0].message[0..6]);
 }
 
 const Picker = struct {

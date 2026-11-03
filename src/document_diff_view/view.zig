@@ -8,6 +8,7 @@ const requests = @import("requests.zig");
 const ix = @import("index.zig");
 const cache = @import("cache.zig");
 const hatch = @import("hatch.zig");
+const gutters = @import("gutter.zig");
 const max_rows = 96;
 const max_batches = 24;
 pub const Limits = struct {
@@ -22,7 +23,19 @@ pub const Limits = struct {
     revert_bytes: usize = 1024 * 1024,
     prepared: t.PrepareLimits = .{ .pixels = 1024 * 1024, .bytes = 8 * 1024 * 1024 },
 };
-pub const Parameters = struct { font: t.Options = .{ .size = 16, .wrap = .word_character, .width = 1 }, scale: f32 = 1, version: u64 = 0, estimated_height: f32 = 20 };
+pub const Parameters = struct {
+    font: t.Options = .{ .size = 16, .wrap = .word_character, .width = 1 },
+    scale: f32 = 1,
+    version: u64 = 0,
+    estimated_height: f32 = 20,
+    /// Number each side's lines in a gutter before its text.
+    line_numbers: bool = true,
+    /// The lines of the files the records are, and the segments they make,
+    /// when the Documents hold parts of the files, as a patch's hunks
+    /// (`Segments`); null numbers the records from 1 in order. Its context
+    /// must stay valid while the View draws with these parameters.
+    numbering: ?gutters.Numbering = null,
+};
 pub const Colors = struct {
     text: ui.Color = ui.Color.rgb(0x202020),
     deleted: u32 = 0xffe9e9,
@@ -36,6 +49,8 @@ pub const Colors = struct {
     /// The stripes over `blank` fillers, and the line between a split view's sides.
     hatch: u32 = 0xdadde2,
     divider: u32 = 0xc9ced6,
+    /// The line numbers in the gutters.
+    line_number: u32 = 0x8a919a,
     /// The scroll bar's thumb; null takes the theme's track color.
     scrollbar: ?ui.Color = null,
 };
@@ -78,6 +93,11 @@ const Snapshot = struct {
     b_revision: u64,
     bounds: ui.Rect,
     columns: [2]ui.Rect,
+    /// The gutters before the columns, empty without line numbers.
+    gutters: [2]ui.Rect,
+    /// The size digits are written in, and how the records are numbered.
+    number_size: f32 = 0,
+    numbering: ?gutters.Numbering = null,
     button: ui.Rect,
     scale: f32,
     rows: [max_rows]RenderRow = undefined,
@@ -145,6 +165,8 @@ pub const View = struct {
     configured: bool = false,
     generation: u64 = 0,
     version: u64 = 0,
+    numbering: ?gutters.Numbering = null,
+    line_numbers: bool = true,
     estimated_height: f32 = 20,
     shaped_batches: u64 = 0,
     shaped_bytes: u64 = 0,
@@ -223,12 +245,28 @@ pub const View = struct {
         const revision_a = try self.inbox.pair.a.version();
         const revision_b = try self.inbox.pair.b.version();
         const header_height = @min(bounds.height - 1, @max(24, parameters.font.size * 1.8));
-        const width = (bounds.width - 8) / 2;
-        const columns: [2]ui.Rect = .{ .{ .x = bounds.x, .y = bounds.y + header_height, .width = width, .height = bounds.height - header_height }, .{ .x = bounds.x + width + 8, .y = bounds.y + header_height, .width = width, .height = bounds.height - header_height } };
+        const half = (bounds.width - 8) / 2;
+        // Each side's gutter is as wide as the largest number it shows.
+        var gutter_width: f32 = 0;
+        if (parameters.line_numbers) {
+            var largest: usize = 0;
+            for ([_]Side{ .a, .b }) |side| {
+                const source = if (side == .a) display.a else display.b;
+                const total = try source.lineCount();
+                if (total == 0) continue;
+                const last = if (parameters.numbering) |numbering| numbering.lineOf(@fromBackingInt(@intCast(@backingInt(side))), total - 1) else total - 1;
+                largest = @max(largest, last + 1);
+            }
+            gutter_width = @min(half / 2, gutters.width(gutters.digits(largest), parameters.font.size * 0.85));
+        }
+        const width = half - gutter_width;
+        const columns_top = bounds.y + header_height;
+        const columns: [2]ui.Rect = .{ .{ .x = bounds.x + gutter_width, .y = columns_top, .width = width, .height = bounds.height - header_height }, .{ .x = bounds.x + half + 8 + gutter_width, .y = columns_top, .width = width, .height = bounds.height - header_height } };
+        const gutter_rects: [2]ui.Rect = .{ .{ .x = bounds.x, .y = columns_top, .width = gutter_width, .height = bounds.height - header_height }, .{ .x = bounds.x + half + 8, .y = columns_top, .width = gutter_width, .height = bounds.height - header_height } };
         var font = parameters.font;
         font.width = width;
         if (font.wrap == .none) font.width = 0;
-        const same = self.configured and parameters.version == self.version and fontEqual(font, self.font.get());
+        const same = self.configured and parameters.version == self.version and fontEqual(font, self.font.get()) and std.meta.eql(parameters.numbering, self.numbering) and parameters.line_numbers == self.line_numbers;
         const generation = if (same) self.generation else std.math.add(u64, self.generation, 1) catch return error.IdExhausted;
         const same_estimate = self.configured and parameters.estimated_height == self.estimated_height;
         if (!self.required and same and same_estimate) if (self.snapshot) |*snapshot| if (snapshot.serial == display.serial and std.meta.eql(snapshot.bounds, bounds) and snapshot.scale == parameters.scale) {
@@ -254,7 +292,7 @@ pub const View = struct {
             anchor.row = @min(anchor.row, index.heights.len - 1);
             anchor.inset = @min(anchor.inset, index.heights[anchor.row] - 1);
         }
-        var candidate: Snapshot = .{ .serial = display.serial, .generation = generation, .a_revision = revision_a, .b_revision = revision_b, .bounds = bounds, .columns = columns, .button = .{ .x = bounds.x + bounds.width - 136, .y = bounds.y, .width = 136, .height = header_height }, .scale = parameters.scale };
+        var candidate: Snapshot = .{ .serial = display.serial, .generation = generation, .a_revision = revision_a, .b_revision = revision_b, .bounds = bounds, .columns = columns, .gutters = gutter_rects, .number_size = parameters.font.size * 0.85, .numbering = parameters.numbering, .button = .{ .x = bounds.x + bounds.width - 136, .y = bounds.y, .width = 136, .height = header_height }, .scale = parameters.scale };
         defer candidate.close();
         var row = anchor.row;
         var y = -@as(f32, @floatCast(ix.dip(anchor.inset)));
@@ -296,7 +334,7 @@ pub const View = struct {
             break :blk value;
         };
         try self.header(&candidate, "Original", .{ .x = bounds.x + 4, .y = bounds.y + 2 }, title_options, header_height, parameters.scale);
-        try self.header(&candidate, "Modified", .{ .x = columns[1].x + 4, .y = bounds.y + 2 }, title_options, header_height, parameters.scale);
+        try self.header(&candidate, "Modified", .{ .x = gutter_rects[1].x + 4, .y = bounds.y + 2 }, title_options, header_height, parameters.scale);
         try self.header(&candidate, "Revert selected", .{ .x = candidate.button.x + 4, .y = bounds.y + 2 }, title_options, header_height, parameters.scale);
         if (self.window.isClosed()) return error.Closed;
         if (!try self.inbox.fresh(display.result.a, display.result.b) or revision_a != try self.inbox.pair.a.version() or revision_b != try self.inbox.pair.b.version()) return error.StaleRevision;
@@ -343,6 +381,8 @@ pub const View = struct {
         self.font.set(font);
         self.generation = generation;
         self.version = parameters.version;
+        self.numbering = parameters.numbering;
+        self.line_numbers = parameters.line_numbers;
         self.estimated_height = parameters.estimated_height;
         self.configured = true;
         self.required = false;
@@ -471,9 +511,15 @@ pub const View = struct {
                 const rectangle = ui.layout.intersect(.{ .x = column.x, .y = column.y + row.y, .width = column.width, .height = row.height }, column);
                 if (rectangle.height == 0) continue;
                 const reference = row.sides[@backingInt(side)];
+                const gutter = snapshot.gutters[@backingInt(side)];
+                const number_box = ui.layout.intersect(.{ .x = gutter.x, .y = column.y + row.y, .width = gutter.width, .height = row.height }, gutter);
                 if (row.hunk != null) {
                     if (reference == null) hatch.fill(frame, rectangle, column.x, column.y - hatch.phase(scrolled), colors.blank, colors.hatch) else frame.rect(rectangle, if (side == .a) colors.deleted else colors.added);
+                    if (reference != null and number_box.width > 0 and number_box.height > 0) frame.rect(number_box, if (side == .a) colors.deleted else colors.added);
                 }
+                if (gutter.width > 0 and number_box.height > 0) if (self.index.?.row(row.index).side(side)) |record| {
+                    try drawNumber(frame, snapshot, side, record, gutter, column.y + row.y, colors);
+                };
                 if (row.hunk != null and row.hunk == self.selected) frame.rect(.{ .x = column.x, .y = rectangle.y, .width = 3, .height = rectangle.height }, colors.selected);
                 if (reference) |ref| {
                     const plane = snapshot.planes[ref.plane];
@@ -493,6 +539,30 @@ pub const View = struct {
         }
         for (snapshot.headers[0..snapshot.header_count]) |item| try frame.preparedText(item.origin, try item.resource.prepared.view(), colors.text);
         if (frame.failure) |err| return @as(anyerror!void, err);
+    }
+    /// The number of record `record` of `side`, right-aligned in its
+    /// gutter on the row's first line, and a line over the row when the
+    /// record starts a segment.
+    fn drawNumber(frame: *ui.Frame, snapshot: *const Snapshot, side: Side, record: usize, gutter: ui.Rect, y: f32, colors: Colors) !void {
+        const which: gutters.Side = @fromBackingInt(@intCast(@backingInt(side)));
+        const value = if (snapshot.numbering) |numbering| numbering.lineOf(which, record) else record;
+        var buffer: [24]u8 = undefined;
+        const text = std.fmt.bufPrint(&buffer, "{d}", .{value + 1}) catch unreachable;
+        const size = snapshot.number_size;
+        const text_width = @as(f32, @floatFromInt(text.len)) * size * gutters.advance;
+        const line = size * 1.5;
+        const box: ui.Rect = .{ .x = gutter.x + @max(0, gutter.width - size / 2 - text_width), .y = y, .width = text_width + size, .height = line };
+        if (snapshot.numbering) |numbering| if (numbering.startsSegment(which, record) and y >= gutter.y and y < gutter.y + gutter.height) {
+            const half = (snapshot.bounds.width - 8) / 2;
+            frame.rect(.{ .x = gutter.x, .y = y, .width = half, .height = 1 }, colors.divider);
+        };
+        if (box.y + box.height > gutter.y and box.y < gutter.y + gutter.height) {
+            try frame.pushClip(gutter);
+            defer frame.popClip() catch |err| {
+                frame.failure = frame.failure orelse err;
+            };
+            frame.labelFont(box, text, colors.line_number, .{ .size = size, .monospace = true });
+        }
     }
     pub fn info(self: *View) !Info {
         try self.check();

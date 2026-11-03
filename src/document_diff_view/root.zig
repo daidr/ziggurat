@@ -25,6 +25,9 @@ pub const CursorInfo = editable.CursorInfo;
 pub const HunkPosition = editable.HunkPosition;
 pub const Command = editable.Command;
 pub const CommandOutcome = editable.CommandOutcome;
+pub const gutter = @import("gutter.zig");
+pub const Numbering = gutter.Numbering;
+pub const Segments = gutter.Segments;
 pub const find = @import("find.zig");
 pub const Find = find.Find;
 pub const intraline = @import("intraline.zig");
@@ -39,4 +42,5 @@ test {
     _ = @import("caret.zig");
     _ = find;
     _ = @import("hatch.zig");
+    _ = gutter;
 }

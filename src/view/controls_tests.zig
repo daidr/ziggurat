@@ -484,6 +484,47 @@ const SharedApp = struct {
     }
 };
 
+const FlyingButton = struct {
+    detail: bool = false,
+    fn build(self: *FlyingButton, v: *View) anyerror!void {
+        const tween: @import("ziggurat_animation").Motion = .{ .tween = .{ .duration_ns = 100 * std.time.ns_per_ms, .easing = .linear } };
+        try v.column(.{ .padding = .{ .left = if (self.detail) 400 else 0, .top = if (self.detail) 300 else 0 } });
+        try v.column(.{ .key = if (self.detail) 3 else 1, .width = 100, .height = 40, .match = .{ .key = 7, .motion = tween, .fly = true } });
+        _ = try v.button("Open", .{ .key = 2, .grow = 1 });
+        try v.end();
+        try v.end();
+    }
+};
+
+test "a shared element flying takes the pointer where it paints" {
+    var storage: Storage = .{};
+    var app: FlyingButton = .{};
+    var h = Harness.init(&app, FlyingButton.build, storage.buffers(), .{});
+    const library = try ui.effects.Library.create(testing.allocator);
+    defer library.destroy();
+    h.view.effects = library;
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    app.detail = true;
+    try h.render();
+    try h.advance(50 * std.time.ns_per_ms);
+    const button = try h.find(.{ .key = 2 });
+    const arranged = button.bounds;
+    try testing.expect(arranged.x >= 400 and arranged.y >= 300);
+    // Halfway, the button shows halfway between where it was and where
+    // it is laid out, and takes the pointer there, not where it is laid
+    // out.
+    const painted = context.input_state.get(button.id).?.rect;
+    try testing.expectApproxEqAbs(arranged.x - 200, painted.x, 1);
+    try testing.expectApproxEqAbs(arranged.y - 150, painted.y, 1);
+    try testing.expectEqual(@as(?u64, button.id), context.input_state.hit(.{ .x = painted.x + 4, .y = painted.y + 4 }));
+    try testing.expect(context.input_state.hit(.{ .x = arranged.x + arranged.width - 4, .y = arranged.y + arranged.height - 4 }) == null);
+    // Landed, it takes the pointer where it is laid out again.
+    try h.advance(100 * std.time.ns_per_ms);
+    try testing.expectApproxEqAbs(arranged.x, context.input_state.get(button.id).?.rect.x, 0.01);
+}
+
 test "shared elements fly, morph and fly on as copies through a real frame" {
     var storage: Storage = .{};
     var app: SharedApp = .{};
