@@ -566,7 +566,7 @@ pub const View = struct {
     }
     /// The header of the segment row `row` starts, when it is the first of
     /// its segment, and the numbering has headers.
-    fn segmentHeader(numbering: ?gutters.Numbering, index: *const ix.Index, row: usize) ?[]const u8 {
+    pub fn segmentHeader(numbering: ?gutters.Numbering, index: *const ix.Index, row: usize) ?[]const u8 {
         const value = numbering orelse return null;
         if (value.header == null) return null;
         const own = rowHeader(value, index.row(row)) orelse return null;

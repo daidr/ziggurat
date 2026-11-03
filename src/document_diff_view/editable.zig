@@ -88,7 +88,12 @@ const Font = struct {
     }
 };
 const Anchor = struct { row: usize = 0, intra: u128 = 0 };
-pub const Row = struct { index: usize, a: ?usize, b: ?usize, hunk: ?usize, y: f32, height: f32 };
+/// `band` is the height of a segment's header over the row's text, and
+/// `header` its text, borrowed from `Parameters.numbering`.
+pub const Row = struct { index: usize, a: ?usize, b: ?usize, hunk: ?usize, y: f32, height: f32, band: f32 = 0, header: []const u8 = "" };
+/// A segment's header band before a source line, which the line's gap
+/// holds above its text.
+const Band = struct { line: usize, height: f64 };
 pub const IntralineMark = struct { side: Side, rect: ui.Rect };
 pub const Info = struct { serial: u64, comparison_required: bool, composition_identity: bool, focused: ?Side, selected_hunk: ?usize, visible_rows: usize, total_rows: usize, anchor_row: usize, estimated_extent: f64, mode: Mode = .split };
 /// Actual primary source caret, independent of layout, scroll and hunk choice.
@@ -532,12 +537,13 @@ pub const View = opaque {
                 gutter.width /= 2;
                 if (side == .b) gutter.x += gutter.width;
             }
-            const y = snapshot.columns[if (mode == .unified) 0 else at].y + row.y;
-            const box = ui.layout.intersect(.{ .x = gutter.x, .y = y, .width = gutter.width, .height = row.height }, gutter);
+            const y = snapshot.columns[if (mode == .unified) 0 else at].y + row.y + row.band;
+            const box = ui.layout.intersect(.{ .x = gutter.x, .y = y, .width = gutter.width, .height = row.height - row.band }, gutter);
             if (box.height <= 0) continue;
             if (row.hunk != null) frame.rect(box, if (side == .a and (mode == .split or row.b == null)) colors.deleted else colors.added);
             const which: gutters.Side = @fromBackingInt(@intCast(at));
-            if (parameters.numbering) |numbering| if (numbering.startsSegment(which, record) and (mode == .split or side == .b or row.b == null)) {
+            // A header's band over the row marks the segment already.
+            if (parameters.numbering) |numbering| if (row.band == 0 and numbering.startsSegment(which, record) and (mode == .split or side == .b or row.b == null)) {
                 const across = if (mode == .unified) snapshot.bounds.width else gutter.width + snapshot.columns[at].width;
                 frame.rect(.{ .x = gutter.x - if (mode == .unified and side == .b) gutter.width else 0, .y = y, .width = across, .height = 1 }, colors.divider);
             };
@@ -552,6 +558,26 @@ pub const View = opaque {
             };
             frame.labelFont(label, text, colors.line_number, .{ .size = size, .monospace = true });
         };
+    }
+    /// Each segment's header in a band across both sides over its first
+    /// row, in `Colors.header` with the text in the line numbers' color and
+    /// size, as the read-only View shows it.
+    fn drawBands(frame: *ui.Frame, snapshot: *const Snapshot, colors: Colors) !void {
+        const bounds = snapshot.bounds;
+        const size = snapshot.parameters.font.size * 0.85;
+        for (snapshot.rows[0..snapshot.count]) |row| {
+            if (row.band <= 0) continue;
+            const top = snapshot.columns[0].y + row.y;
+            const band = ui.layout.intersect(.{ .x = bounds.x, .y = top, .width = bounds.width, .height = row.band }, bounds);
+            if (band.height <= 0) continue;
+            frame.rect(band, colors.header);
+            frame.rect(.{ .x = band.x, .y = band.y, .width = band.width, .height = @min(1, band.height) }, colors.divider);
+            try frame.pushClip(band);
+            defer frame.popClip() catch |err| {
+                frame.failure = frame.failure orelse err;
+            };
+            frame.labelFont(.{ .x = bounds.x + 8, .y = top + (row.band - size * 1.5) / 2, .width = bounds.width - 16, .height = size * 1.5 }, row.header, colors.line_number, .{ .size = size, .monospace = true });
+        }
     }
     fn drawBody(frame: *ui.Frame, bounds: ui.Rect, colors: Colors, value: *State) anyerror!void {
         const snapshot = try value.current(bounds, frame.size.scale);
@@ -573,7 +599,10 @@ pub const View = opaque {
             }
         };
         for (value.marks.storage[0..value.marks.count]) |mark| frame.rect(mark.rect, if (mark.side == .a) colors.deleted_detail else colors.added_detail);
-        if (snapshot.projected) try drawNumbers(frame, snapshot, value.mode, colors);
+        if (snapshot.projected) {
+            try drawBands(frame, snapshot, colors);
+            try drawNumbers(frame, snapshot, value.mode, colors);
+        }
         if (value.mode == .unified) {
             try value.adapters[1].draw(frame, snapshot.columns[1], .{ .text = colors.text });
             if (value.window.isClosed()) return error.Closed;
@@ -2078,6 +2107,11 @@ const Transaction = struct {
             if (mapped.a) |line| height = @max(height, (try probes[0].paragraph(line)).height);
             if (mapped.b) |line| height = @max(height, (try probes[1].paragraph(line)).height);
             if (!std.math.isFinite(height) or height <= 0 or height > 1000000) return error.InvalidHeight;
+            // A segment's first row has its header over it, across both
+            // sides, as the read-only View shows it.
+            const header = readonly.View.segmentHeader(self.snapshot.parameters.numbering, index, row);
+            const band: f64 = if (header != null) @round(self.snapshot.parameters.font.size * 1.6) else 0;
+            height += band;
             const row_ticks: u64 = @intFromFloat(@ceil(height * ix.units));
             self.changes[self.change_count] = .{ .row = row, .previous = index.heights[row] };
             self.change_count += 1;
@@ -2087,7 +2121,7 @@ const Transaction = struct {
                 y = -@as(f64, @floatFromInt(self.anchor.intra)) / canonical_units;
             }
             const actual = ix.dip(row_ticks);
-            self.snapshot.rows[self.snapshot.count] = .{ .index = row, .a = mapped.a, .b = mapped.b, .hunk = mapped.hunk, .y = @floatCast(y), .height = @floatCast(actual) };
+            self.snapshot.rows[self.snapshot.count] = .{ .index = row, .a = mapped.a, .b = mapped.b, .hunk = mapped.hunk, .y = @floatCast(y), .height = @floatCast(actual), .band = @floatCast(band), .header = header orelse "" };
             self.snapshot.count += 1;
             y += actual;
         }
@@ -2095,6 +2129,8 @@ const Transaction = struct {
         for (probes, 0..) |probe, side| {
             var placements: std.ArrayList(editing.projection.Placement) = .empty;
             defer placements.deinit(self.state.budget.allocator());
+            var bands: std.ArrayList(Band) = .empty;
+            defer bands.deinit(self.state.budget.allocator());
             const source_lines = try probe.lineCount();
             for (index.segments[0..index.segment_count]) |segment| {
                 const count = if (side == 0) segment.count_a else segment.count_b;
@@ -2110,7 +2146,12 @@ const Transaction = struct {
             }
             for (self.snapshot.rows[0..self.snapshot.count]) |visible| {
                 const source = if (side == 0) visible.a else visible.b;
-                if (source) |line| try placements.append(self.state.budget.allocator(), .{ .line = line, .minimum_height = ix.dip(index.heights[visible.index]) });
+                // A header's band goes before the line's text; a side
+                // without a line there has it in its gap.
+                if (source) |line| {
+                    try placements.append(self.state.budget.allocator(), .{ .line = line, .gap_before = visible.band, .minimum_height = ix.dip(index.heights[visible.index]) - visible.band });
+                    if (visible.band > 0) try bands.append(self.state.budget.allocator(), .{ .line = line, .height = visible.band });
+                }
             }
             std.mem.sort(editing.projection.Placement, placements.items, {}, struct {
                 fn less(_: void, a: editing.projection.Placement, b: editing.projection.Placement) bool {
@@ -2135,7 +2176,7 @@ const Transaction = struct {
                 self.plans[side] = try editing.ProjectionPlan.create(self.state.budget.allocator(), try probe.sourceDocument(), records, .{ .entries = self.state.limits.plan_entries, .bytes = @min(self.state.limits.bytes, 64 * 1024 * 1024) });
                 self.created[side] = true;
             }
-            anchors[side] = try sourceAnchor(index, side, source_lines, self.anchor, records);
+            anchors[side] = try sourceAnchor(index, side, source_lines, self.anchor, records, bands.items);
         }
         return .{ .plans = self.plans, .anchors = anchors };
     }
@@ -2162,11 +2203,14 @@ fn sourceRow(index: *const ix.Index, side: usize, line: usize) ?usize {
     const count = if (side == 0) segment.count_a else segment.count_b;
     return if (line - first < count) segment.first + line - first else null;
 }
-fn sourceAnchor(index: *const ix.Index, side: usize, source_lines: usize, anchor: Anchor, records: []const editing.projection.Placement) !editing.ProjectionAnchor {
+/// Where the anchor is in the source lines of `side`: the line and how far
+/// into its extent, which starts with the gap before it. A header's band
+/// (`bands`) is in that gap but in the line's row, at the row's top.
+fn sourceAnchor(index: *const ix.Index, side: usize, source_lines: usize, anchor: Anchor, records: []const editing.projection.Placement, bands: []const Band) !editing.ProjectionAnchor {
     if (index.heights.len == 0) return .{ .line = 0 };
     const mapped = index.row(anchor.row);
     if (if (side == 0) mapped.a else mapped.b) |line| {
-        return .{ .line = line, .intra_ticks = gapBefore(records, line) + anchor.intra };
+        return .{ .line = line, .intra_ticks = gapBefore(records, line) - bandBefore(bands, line) + anchor.intra };
     }
     var line: usize = 0;
     for (index.segments[0..index.segment_count]) |segment| {
@@ -2177,13 +2221,17 @@ fn sourceAnchor(index: *const ix.Index, side: usize, source_lines: usize, anchor
     if (line < source_lines) {
         const target = sourceRow(index, side, line) orelse index.heights.len;
         const remaining = @as(u128, index.prefix(target) - index.prefix(anchor.row)) << canonical_shift;
-        const gap = gapBefore(records, line);
+        const gap = gapBefore(records, line) - bandBefore(bands, line);
         if (gap < remaining) return error.InvalidProjection;
         return .{ .line = line, .intra_ticks = gap - remaining + anchor.intra };
     }
     const last = source_lines - 1;
     const first = sourceRow(index, side, last) orelse return error.InvalidResult;
-    return .{ .line = last, .intra_ticks = gapBefore(records, last) + (@as(u128, index.prefix(anchor.row) - index.prefix(first)) << canonical_shift) + anchor.intra };
+    return .{ .line = last, .intra_ticks = gapBefore(records, last) - bandBefore(bands, last) + (@as(u128, index.prefix(anchor.row) - index.prefix(first)) << canonical_shift) + anchor.intra };
+}
+fn bandBefore(bands: []const Band, line: usize) u128 {
+    for (bands) |band| if (band.line == line) return ticks(band.height);
+    return 0;
 }
 fn gapBefore(records: []const editing.projection.Placement, line: usize) u128 {
     for (records) |record| if (record.line == line) return ticks(record.gap_before);
@@ -2196,9 +2244,13 @@ test "source anchors preserve insertion gaps, trailing padding and EOF caret row
     var index = try ix.Index.create(std.testing.allocator, &result, 100, 10000, 20);
     defer index.close();
     const placements: []const editing.projection.Placement = &.{.{ .line = 1, .gap_before = 60 }};
-    try std.testing.expectEqual(editing.ProjectionAnchor{ .line = 1, .intra_ticks = ticks(25) }, try sourceAnchor(&index, 0, 2, .{ .row = 2, .intra = ticks(5) }, placements));
-    try std.testing.expectEqual(editing.ProjectionAnchor{ .line = 1, .intra_ticks = ticks(60) }, try sourceAnchor(&index, 0, 2, .{ .row = 4 }, placements));
-    try std.testing.expectEqual(editing.ProjectionAnchor{ .line = 2, .intra_ticks = ticks(5) }, try sourceAnchor(&index, 1, 5, .{ .row = 2, .intra = ticks(5) }, &.{}));
+    try std.testing.expectEqual(editing.ProjectionAnchor{ .line = 1, .intra_ticks = ticks(25) }, try sourceAnchor(&index, 0, 2, .{ .row = 2, .intra = ticks(5) }, placements, &.{}));
+    try std.testing.expectEqual(editing.ProjectionAnchor{ .line = 1, .intra_ticks = ticks(60) }, try sourceAnchor(&index, 0, 2, .{ .row = 4 }, placements, &.{}));
+    try std.testing.expectEqual(editing.ProjectionAnchor{ .line = 2, .intra_ticks = ticks(5) }, try sourceAnchor(&index, 1, 5, .{ .row = 2, .intra = ticks(5) }, &.{}, &.{}));
+    // A header's band before the line is at the top of its row: the row's
+    // offsets count from it.
+    try std.testing.expectEqual(editing.ProjectionAnchor{ .line = 2, .intra_ticks = ticks(5) }, try sourceAnchor(&index, 1, 5, .{ .row = 2, .intra = ticks(5) }, &.{.{ .line = 2, .gap_before = 26 }}, &.{.{ .line = 2, .height = 26 }}));
+    try std.testing.expectEqual(editing.ProjectionAnchor{ .line = 1, .intra_ticks = ticks(60) }, try sourceAnchor(&index, 0, 2, .{ .row = 4 }, &.{.{ .line = 1, .gap_before = 86 }}, &.{.{ .line = 1, .height = 26 }}));
     for (0..index.heights.len) |row| {
         const mapped = index.row(row);
         for ([_]?usize{ mapped.a, mapped.b }, 0..) |line, side| if (line) |source| try std.testing.expectEqual(row, sourceRow(&index, side, source).?);
@@ -2206,13 +2258,13 @@ test "source anchors preserve insertion gaps, trailing padding and EOF caret row
     result.hunks = &.{.{ .a = .{ .lines = .{ .start = 2, .end = 2 }, .bytes = .{ .start = 4, .end = 4 } }, .b = .{ .lines = .{ .start = 2, .end = 5 }, .bytes = .{ .start = 4, .end = 10 } } }};
     var tail = try ix.Index.create(std.testing.allocator, &result, 100, 10000, 20);
     defer tail.close();
-    try std.testing.expectEqual(editing.ProjectionAnchor{ .line = 1, .intra_ticks = ticks(45) }, try sourceAnchor(&tail, 0, 2, .{ .row = 3, .intra = ticks(5) }, &.{.{ .line = 1, .minimum_height = 80 }}));
-    try std.testing.expectEqual(editing.ProjectionAnchor{ .line = 2, .intra_ticks = ticks(25) }, try sourceAnchor(&tail, 0, 3, .{ .row = 3, .intra = ticks(5) }, &.{.{ .line = 2, .gap_before = 60 }}));
+    try std.testing.expectEqual(editing.ProjectionAnchor{ .line = 1, .intra_ticks = ticks(45) }, try sourceAnchor(&tail, 0, 2, .{ .row = 3, .intra = ticks(5) }, &.{.{ .line = 1, .minimum_height = 80 }}, &.{}));
+    try std.testing.expectEqual(editing.ProjectionAnchor{ .line = 2, .intra_ticks = ticks(25) }, try sourceAnchor(&tail, 0, 3, .{ .row = 3, .intra = ticks(5) }, &.{.{ .line = 2, .gap_before = 60 }}, &.{}));
     var empty_result = result;
     empty_result.hunks = &.{};
     empty_result.stats.lines_a = 0;
     empty_result.stats.lines_b = 0;
     var empty = try ix.Index.create(std.testing.allocator, &empty_result, 100, 10000, 20);
     defer empty.close();
-    try std.testing.expectEqual(editing.ProjectionAnchor{ .line = 0 }, try sourceAnchor(&empty, 0, 1, .{}, &.{}));
+    try std.testing.expectEqual(editing.ProjectionAnchor{ .line = 0 }, try sourceAnchor(&empty, 0, 1, .{}, &.{}, &.{}));
 }
