@@ -125,9 +125,11 @@ fn interruptedHost(allocator: std.mem.Allocator, snapshot: bool, fail: bool) !vo
     if (snapshot) try expectError(expected, host.surface.?.snapshot()) else try expectError(expected, Surface.create(host.domain, host.hook.allocator(), options));
     // No Host access after the operation: on_closed can own the entire free.
     try app.dispatch();
+    // Windows reports the close at that safe point; AppKit may only once
+    // shutdown finishes. Either way on_closed owns the free.
+    try app.finishShutdown();
     if (observer.failure) |err| return err;
     try verify(observer.closed, @src());
-    try app.finishShutdown();
     try equal(@as(u32, 0), gpu.globalResourceCount());
 }
 const CloseReentry = struct {
