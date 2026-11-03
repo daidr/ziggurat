@@ -329,6 +329,10 @@ jobs:
         timeout-minutes: 10
         run: |
           zig build smoke-hotkeys-macos -Doptimize=${{ matrix.optimize }} --summary failures
+      - name: Metal renderer compile and smoke
+        timeout-minutes: 15
+        run: |
+          zig build check smoke-metal -Dgpu=true -Doptimize=${{ matrix.optimize }} --summary failures
       - name: NSAccessibility compile and smoke
         timeout-minutes: 15
         run: |

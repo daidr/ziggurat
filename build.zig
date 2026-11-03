@@ -9,7 +9,7 @@ pub fn build(b: *std.Build) void {
     native_support.apple_sdk = b.option([]const u8, "macos-sdk", "macOS SDK root for cross-compiling to macOS");
     const web = b.option(bool, "webview", "Build the optional system WebView (Windows SDK or Linux WebKitGTK)") orelse false;
     const https_resources_enabled = b.option(bool, "https-resources", "Build the optional HTTPS resource transport on Windows or Linux") orelse false;
-    const gpu = b.option(bool, "gpu", "Build the optional D3D11 renderer with GDI fallback") orelse false;
+    const gpu = b.option(bool, "gpu", "Build the optional GPU renderer (D3D11 on Windows, Metal on macOS) with software fallback") orelse false;
     const webp = b.option(bool, "webp", "Build the optional pinned WebP decoder (fetch source first)") orelse false;
     const accessibility = b.option(bool, "accessibility", "Build the optional native accessibility bridge (Windows UI Automation, macOS NSAccessibility)") orelse false;
     const check = b.step("check", "Compile selected examples and tests without running them");
@@ -1498,8 +1498,15 @@ pub fn build(b: *std.Build) void {
     }
     ui_options.addOption(bool, "accessibility", accessibility);
     ui.addOptions("ziggurat_ui_options", ui_options);
-    if (gpu) {
-        if (target.result.os.tag != .windows) @panic("D3D11 requires Windows");
+    if (gpu and target.result.os.tag == .macos) {
+        _ = native_support.add(b, ui, "ui-metal-native", "src/ui/metal.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native_support.linkFrameworks(b, ui, &.{ "Metal", "QuartzCore", "AppKit", "Foundation", "CoreText", "CoreGraphics" });
+        addSmoke(b, "smoke-metal", "tests/metal_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        });
+    } else if (gpu) {
+        if (target.result.os.tag != .windows) @panic("The GPU renderer requires Windows (D3D11) or macOS (Metal)");
         _ = native_support.add(b, ui, "ui-d3d11-native", "src/ui/d3d11.c", &.{"-std=c11"}, target, optimize);
         _ = native_support.addArchive(b, ui, "ui-gradient-interpolation-native", "src/ui/gradient_interpolation.c", &.{"-std=c11"}, target, optimize);
         _ = native_support.addArchive(b, ui, "ui-gaussian-native", "src/ui/gaussian_gpu.c", &.{"-std=c11"}, target, optimize);
