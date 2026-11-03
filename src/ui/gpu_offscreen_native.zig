@@ -1,12 +1,12 @@
-//! The macOS offscreen surface (src/ui/gpu_offscreen.zig's `Surface`): a
-//! Metal renderer of the domain draws each frame into a transparent work
-//! target, which becomes the front once the frame has drawn whole; a frame
+//! The macOS and Linux offscreen surface (src/ui/gpu_offscreen.zig's
+//! `Surface`): a Metal (macOS) or OpenGL (Linux) renderer of the domain
+//! draws each frame into a transparent work target, which becomes the front once the frame has drawn whole; a frame
 //! that fails leaves the front as it was. `snapshot` copies the front into
 //! a new immutable texture of the domain, which frames of any of its
 //! renderers draw, this surface's own included.
 //!
 //! The surface reserves the plan of the other GPU surfaces in the domain's
-//! budget, so that limits read the same on every platform. Metal itself
+//! budget, so that limits read the same on every platform. The renderer
 //! holds two targets (front and work) and the frame's captures (groups,
 //! transforms, Gaussian filters), which it makes per frame.
 const std = @import("std");
@@ -19,8 +19,8 @@ const gaussian_scope = @import("gaussian_scope.zig");
 const resources = @import("gpu_resources.zig");
 const offscreen = @import("gpu_offscreen.zig");
 const interpolation = @import("gradient_interpolation_gpu.zig");
-const metal = @import("metal.zig");
-const Renderer = metal.Renderer;
+const builtin = @import("builtin");
+const Renderer = if (builtin.os.tag == .macos) @import("metal.zig").Renderer else @import("gl.zig").Renderer;
 const Options = offscreen.Options;
 const Stats = offscreen.Stats;
 
@@ -32,7 +32,7 @@ pub const Surface = opaque {
     pub fn create(domain: *resources.DeviceDomain, allocator: std.mem.Allocator, options: Options) !*Surface {
         return createInternal(false, domain, allocator, options, {}, 0);
     }
-    /// Metal filters Gaussian groups in each frame's captures; the plan
+    /// The renderer filters Gaussian groups in each frame's captures; the plan
     /// bounds them as it bounds the other GPU surfaces'.
     pub fn createGaussian(domain: *resources.DeviceDomain, allocator: std.mem.Allocator, options: Options, filter: gaussian_scope.FilterOptions) !*Surface {
         return createInternal(true, domain, allocator, options, filter, 0);
@@ -132,7 +132,7 @@ pub const Surface = opaque {
         state.committed +|= 1;
         state.last_render_work = work;
     }
-    /// Metal mixes gradient stops in every space in its shaders: there is
+    /// The renderer mixes gradient stops in every space in its shaders: there is
     /// nothing to prepare.
     pub fn prepareGradientInterpolation(self: *Surface) !void {
         if (!offscreen.available) return error.GpuNotEnabled;

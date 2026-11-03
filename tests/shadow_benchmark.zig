@@ -1,6 +1,8 @@
 const std = @import("std");
 const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
+/// The GPU checks here are Direct3D's; other platforms have their own smokes.
+const d3d = ui.capabilities.gpu and builtin.os.tag == .windows;
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const shadows = @import("ziggurat_shadows");
@@ -82,7 +84,7 @@ fn run(allocator: std.mem.Allocator, base: z.Paint) !void {
             defer renderer.deinit();
             try replay(if (builtin.os.tag == .windows) "gdi" else "cairo", &renderer, paint, prepared, sigma, median(&times));
         }
-        if (ui.capabilities.gpu) for ([_]ui.d3d11.Driver{ .hardware, .warp }) |driver| {
+        if (d3d) for ([_]ui.d3d11.Driver{ .hardware, .warp }) |driver| {
             var renderer: ui.d3d11.Renderer = .{};
             try renderer.init(.{ .driver = driver });
             defer renderer.deinit();
@@ -102,7 +104,7 @@ pub fn main() !void {
         const dc = c.GetDC(hwnd) orelse return error.CreateSurfaceFailed;
         defer _ = c.ReleaseDC(hwnd, dc);
         try run(allocator, .{ .native_context = dc, .native_window = hwnd, .size = .{ .width = 512, .height = 384, .scale = 1 } });
-        if (ui.capabilities.gpu and ui.d3d11.globalResourceCount() != 0) return error.NativeResourcesLeaked;
+        if (d3d and ui.d3d11.globalResourceCount() != 0) return error.NativeResourcesLeaked;
     } else {
         const surface = cairo_image_surface_create(0, 1024, 768) orelse return error.CreateSurfaceFailed;
         defer cairo_surface_destroy(surface);

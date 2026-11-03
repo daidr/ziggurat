@@ -11,14 +11,17 @@ pub const SoftwareRenderer = gdi.Renderer;
 const build_options = @import("ziggurat_ui_options");
 pub const d3d11 = if (builtin.os.tag == .windows) @import("d3d11.zig") else struct {};
 pub const metal = if (builtin.os.tag == .macos) @import("metal.zig") else struct {};
-/// The `-Dgpu=true` renderer: D3D11 on Windows, Metal on macOS.
-pub const GpuRenderer = if (builtin.os.tag == .windows) d3d11.Renderer else if (builtin.os.tag == .macos) metal.Renderer else void;
+pub const gl = if (builtin.os.tag == .linux and build_options.gpu) @import("gl.zig") else struct {};
+/// The `-Dgpu=true` renderer: D3D11 on Windows, Metal on macOS, OpenGL on
+/// Linux.
+pub const GpuRenderer = if (builtin.os.tag == .windows) d3d11.Renderer else if (builtin.os.tag == .macos) metal.Renderer else if (builtin.os.tag == .linux and build_options.gpu) gl.Renderer else void;
+const GpuOptions = if (builtin.os.tag == .windows) d3d11.Options else if (builtin.os.tag == .macos) metal.Options else if (builtin.os.tag == .linux and build_options.gpu) gl.Options else struct {};
 /// Whether the GPU renderer holds its own layer planes (groups, transforms
 /// and Gaussian filters). Without them a frame using one draws in software.
 const gpu_layers = build_options.gpu and builtin.os.tag == .windows;
 /// Whether the GPU renderer keeps its frame for the next to draw only what
-/// changed (Metal).
-const gpu_damage = build_options.gpu and builtin.os.tag == .macos;
+/// changed (Metal, OpenGL).
+const gpu_damage = build_options.gpu and (builtin.os.tag == .macos or builtin.os.tag == .linux);
 pub const Rect = input.Rect;
 pub const layout = @import("layout.zig");
 pub const grid = @import("grid.zig");
@@ -1855,8 +1858,13 @@ pub const Context = struct {
             try self.accessibility_bridge.publish(&self.semantic_tree);
         }
         self.gpu_unavailable = false;
-        if (build_options.gpu and self.render_mode != .gdi) {
-            self.gpu_renderer.init(.{ .driver = if (self.render_mode == .warp) .warp else .hardware, .domain = self.gpu_domain, .native_wait_slot = &self.gpu_wait }) catch |err| {
+        // Linux: `GlMode.off` draws every frame in memory; `on` draws with
+        // OpenGL on a software rasterizer too.
+        const gl_off = builtin.os.tag == .linux and build_options.gpu and self.gpu_domain == null and (self.gl_mode orelse gdi.glModeFromEnvironment()) == .off;
+        if (gl_off) self.gpu_unavailable = true;
+        if (build_options.gpu and self.render_mode != .gdi and !gl_off) {
+            const options: GpuOptions = if (comptime builtin.os.tag == .linux) .{ .driver = if (self.render_mode == .warp) .warp else .hardware, .allow_software = (self.gl_mode orelse gdi.glModeFromEnvironment()) == .on, .domain = self.gpu_domain, .native_wait_slot = &self.gpu_wait } else .{ .driver = if (self.render_mode == .warp) .warp else .hardware, .domain = self.gpu_domain, .native_wait_slot = &self.gpu_wait };
+            self.gpu_renderer.init(options) catch |err| {
                 if (self.gpu_domain != null) return err;
                 self.gpu_unavailable = true;
                 window.report(.{ .severity = .warning, .domain = .renderer, .operation = .content_attach, .err = err, .code = @bitCast(self.gpu_renderer.last_hresult) });
@@ -2992,8 +3000,12 @@ pub const Context = struct {
                     if (self.gpu_renderer.begin(paint)) {
                         using_gpu = true;
                     } else |err| {
-                        // A capture of the view draws in software, quietly.
-                        if (@as(anyerror, err) != error.NotDrawingToScreen) self.gpuFailure(window, err);
+                        // A capture of the view draws in software, quietly;
+                        // so does a Linux window OpenGL would not draw on a
+                        // GPU, from now on.
+                        if (@as(anyerror, err) == error.DrawsInMemory) {
+                            self.gpu_unavailable = true;
+                        } else if (@as(anyerror, err) != error.NotDrawingToScreen) self.gpuFailure(window, err);
                     }
                 }
                 defer if (build_options.gpu and self.gpu_renderer.active) self.gpu_renderer.discard();

@@ -1,5 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
+/// The GPU checks here are Direct3D's; other platforms have their own smokes.
+const d3d = ui.capabilities.gpu and builtin.os.tag == .windows;
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const text = @import("ziggurat_text_layout");
@@ -181,7 +183,7 @@ fn mixed(allocator: std.mem.Allocator, app: *z.App, scale: f32) !void {
             var renderer: ui.SoftwareRenderer = .{};
             defer renderer.deinit();
             try replay(&renderer, snapshot, size, dc, window.nativeHandle());
-            if (ui.capabilities.gpu) for ([_]ui.d3d11.Driver{ .hardware, .warp }) |driver| {
+            if (d3d) for ([_]ui.d3d11.Driver{ .hardware, .warp }) |driver| {
                 var gpu: ui.d3d11.Renderer = .{};
                 try gpu.init(.{ .driver = driver });
                 defer gpu.deinit();
@@ -276,6 +278,6 @@ pub fn main() !void {
     const before = count();
     try @import("offscreen_lifetime.zig").run(allocator);
     try std.testing.expectEqual(before, count());
-    if (ui.capabilities.gpu) try std.testing.expectEqual(@as(u32, 0), ui.d3d11.globalResourceCount());
+    if (d3d) try std.testing.expectEqual(@as(u32, 0), ui.d3d11.globalResourceCount());
     std.debug.print("offscreen: transparent root, groups/mask/text/image, 3 DPI, independent snapshots, budgets/OOM/native failures, allocator reentry, App stop and refs=0 passed\n", .{});
 }

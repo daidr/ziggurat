@@ -4,9 +4,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
-const gpu = if (builtin.os.tag == .windows) ui.d3d11 else ui.metal;
-/// Direct3D's software device; macOS has only the system's.
-const soft: ui.gpu_resources.Driver = if (builtin.os.tag == .windows) .warp else .hardware;
+const gpu = if (builtin.os.tag == .windows) ui.d3d11 else if (builtin.os.tag == .linux) ui.gl else ui.metal;
+/// Direct3D's software device, a software rasterizer on Linux; macOS has
+/// only the system's.
+const soft: ui.gpu_resources.Driver = if (builtin.os.tag == .windows or builtin.os.tag == .linux) .warp else .hardware;
 const Surface = ui.gpu_offscreen.Surface;
 const Domain = ui.gpu_resources.DeviceDomain;
 /// A failed check names its line: these runs print no stack traces.

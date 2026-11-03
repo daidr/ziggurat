@@ -1,7 +1,7 @@
 //! Device domain lifetimes on every GPU platform: budgets, reentrant
 //! allocator callbacks, threads and registration, and a window drawing a
 //! domain's textures through device loss (D3D11 on Windows, Metal on
-//! macOS).
+//! macOS, OpenGL on Linux).
 const std = @import("std");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
@@ -10,10 +10,11 @@ const resources = ui.gpu_resources;
 const drawing = ui.drawing;
 const windows = builtin.os.tag == .windows;
 const c = if (windows) @import("ziggurat_c_win32") else struct {};
-const gpu = if (windows) ui.d3d11 else ui.metal;
+const gpu = if (windows) ui.d3d11 else if (builtin.os.tag == .linux) ui.gl else ui.metal;
 /// The driver tests that need no hardware use: Direct3D's software device,
-/// and on macOS, which has none, the system's.
-const soft: resources.Driver = if (windows) .warp else .hardware;
+/// a software rasterizer on Linux (llvmpipe), and on macOS, which has
+/// none, the system's.
+const soft: resources.Driver = if (windows or builtin.os.tag == .linux) .warp else .hardware;
 /// A failed check names its line: these runs print no stack traces.
 fn verify(ok: bool, at: std.builtin.SourceLocation) !void {
     if (ok) return;
@@ -206,7 +207,7 @@ fn threadsAndRegistration(allocator: std.mem.Allocator) !void {
     var context = ui.Context.init(&unused, callbacks.draw, callbacks.action);
     context.gpu_domain = domain;
     // The other driver than the domain's.
-    context.render_mode = if (windows) .hardware else .warp;
+    context.render_mode = if (windows or builtin.os.tag == .linux) .hardware else .warp;
     try expectError(error.DomainDriverMismatch, context.attach(window));
     try verify(context.window == null and context.gpu_renderer.native == null, @src());
     context.render_mode = .automatic;
@@ -249,9 +250,11 @@ fn integrated(allocator: std.mem.Allocator) !void {
     var diagnostics: z.diagnostics.Recorder(16) = .{};
     const app = try z.App.initWithOptions(allocator, .{ .diagnostics_sink = diagnostics.sink() });
     defer app.deinit();
-    const domain = try resources.DeviceDomain.create(app, allocator, .{});
+    // Linux draws on a software rasterizer only when asked to.
+    const driver: resources.Driver = if (builtin.os.tag == .linux) soft else .hardware;
+    const domain = try resources.DeviceDomain.create(app, allocator, .{ .driver = driver });
     defer domain.close() catch unreachable;
-    const foreign = try resources.DeviceDomain.create(app, allocator, .{});
+    const foreign = try resources.DeviceDomain.create(app, allocator, .{ .driver = driver });
     defer foreign.close() catch unreachable;
     var pixel = Pixel.init();
     const texture = try domain.upload(pixel.view());
@@ -324,17 +327,19 @@ fn integrated(allocator: std.mem.Allocator) !void {
     try equal(@as(usize, 0), state.view.lease.pins);
     try equal(@as(usize, 0), (try domain.stats()).attachments);
 }
-/// integrated on macOS: the window's frames, displayed as AppKit's display
-/// cycle does, draw the domain's texture on the GPU; one of another domain
+/// integrated on macOS and Linux: the window's frames, displayed as the
+/// toolkit's display cycle does, draw the domain's texture on the GPU; one of another domain
 /// fails the frame whole, and the window keeps the last; after a loss the
 /// window draws nothing on the GPU until the domain is recreated.
 fn integratedMetal(allocator: std.mem.Allocator) !void {
     var diagnostics: z.diagnostics.Recorder(16) = .{};
     const app = try z.App.initWithOptions(allocator, .{ .diagnostics_sink = diagnostics.sink() });
     defer app.deinit();
-    const domain = try resources.DeviceDomain.create(app, allocator, .{});
+    // Linux draws on a software rasterizer only when asked to.
+    const driver: resources.Driver = if (builtin.os.tag == .linux) soft else .hardware;
+    const domain = try resources.DeviceDomain.create(app, allocator, .{ .driver = driver });
     defer domain.close() catch unreachable;
-    const foreign = try resources.DeviceDomain.create(app, allocator, .{});
+    const foreign = try resources.DeviceDomain.create(app, allocator, .{ .driver = driver });
     defer foreign.close() catch unreachable;
     var pixel = Pixel.init();
     const texture = try domain.upload(pixel.view());

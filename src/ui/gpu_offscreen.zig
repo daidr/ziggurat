@@ -10,7 +10,7 @@ const resources = @import("gpu_resources.zig");
 const transform_precision = @import("gpu_transform_precision.zig");
 extern fn zgpu_interpolation_ready(*anyopaque) c_int;
 const Renderer = if (builtin.os.tag == .windows) @import("d3d11.zig").Renderer else struct {};
-pub const available = (builtin.os.tag == .windows or builtin.os.tag == .macos) and @import("ziggurat_ui_options").gpu;
+pub const available = (builtin.os.tag == .windows or builtin.os.tag == .macos or builtin.os.tag == .linux) and @import("ziggurat_ui_options").gpu;
 pub const Options = struct {
     size: z.Size,
     max_depth: u8 = 2,
@@ -41,8 +41,9 @@ pub const Stats = struct {
 /// Dedicated transparent GPU owner. Render reuses a fixed work plane;
 /// snapshot explicitly copies the committed front into an immutable Texture.
 /// No window, swapchain, CPU pixel view, readback, or blocking fence is
-/// created. On macOS, Metal draws it (src/ui/gpu_offscreen_metal.zig).
-pub const Surface = if (builtin.os.tag == .macos) @import("gpu_offscreen_metal.zig").Surface else D3D11Surface;
+/// created. On macOS Metal draws it, on Linux OpenGL
+/// (src/ui/gpu_offscreen_native.zig).
+pub const Surface = if (builtin.os.tag == .macos or builtin.os.tag == .linux) @import("gpu_offscreen_native.zig").Surface else D3D11Surface;
 const D3D11Surface = opaque {
     pub fn create(domain: *resources.DeviceDomain, allocator: std.mem.Allocator, options: Options) !*Surface {
         return createInternal(false, domain, allocator, options, {}, 0);

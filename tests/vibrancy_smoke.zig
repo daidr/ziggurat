@@ -107,7 +107,7 @@ const State = struct {
             try std.testing.expectEqual(@as(u32, 0), self.surface.argb(20, 20));
             try std.testing.expectEqual(@as(u32, 0xff2050a0), self.surface.argb(70, 20));
         }
-        if (@TypeOf(self.surface.context.gpu_renderer) != void) if (caps.vibrancy and !self.surface.context.gpu_unavailable) {
+        if (@TypeOf(self.surface.context.gpu_renderer) != void and builtin.os.tag == .windows) if (caps.vibrancy and !self.surface.context.gpu_unavailable) {
             // The swap chain is composed, not bound to a window.
             const gpu = &self.surface.context.gpu_renderer;
             try std.testing.expect(gpu.surfaceForTest() != null);

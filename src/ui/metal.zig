@@ -207,7 +207,7 @@ pub const Renderer = struct {
         self.native = zmtl_create(&failure) orelse return error.GraphicsInitializationFailed;
         self.last_hresult = failure;
     }
-    /// For an offscreen surface (src/ui/gpu_offscreen_metal.zig): success
+    /// For an offscreen surface (src/ui/gpu_offscreen_native.zig): success
     /// takes the surface's attachment; failure leaves it with the caller.
     pub fn initOffscreen(self: *Renderer, domain: *gpu_resources.DeviceDomain, borrow: gpu_resources.DeviceDomain.Borrow) !void {
         try domain.validateRendererBorrow(borrow);

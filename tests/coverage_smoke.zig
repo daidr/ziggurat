@@ -1,5 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
+/// The GPU checks here are Direct3D's; other platforms have their own smokes.
+const d3d = ui.capabilities.gpu and builtin.os.tag == .windows;
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const shadows = @import("ziggurat_shadows");
@@ -298,7 +300,7 @@ fn integrated(allocator: std.mem.Allocator, gpu: bool, pending_close: bool) !voi
     try equal(pins, state.view.lease.pins);
     state.bad = false;
     state.expected = null;
-    if (ui.capabilities.gpu) if (gpu) {
+    if (d3d) if (gpu) {
         context.gpu_renderer.injectPresentationBusy();
         try state.paint();
         const token = context.gpu_wait orelse return error.MissingGpuWatch;
@@ -323,7 +325,7 @@ fn integrated(allocator: std.mem.Allocator, gpu: bool, pending_close: bool) !voi
     _ = try context.releaseCoverage(state.view.identity);
     try equal(0, state.view.lease.pins);
     try context.uploadCoverage(state.view);
-    if (ui.capabilities.gpu and pending_close) {
+    if (d3d and pending_close) {
         context.gpu_renderer.injectPresentationBusy();
         try state.paint();
         const token = context.gpu_wait orelse return error.MissingGpuWatch;
@@ -360,7 +362,7 @@ pub fn main() !void {
                 try pressure(&renderer, paint);
             }
             try equal(before, c.GetGuiResources(c.GetCurrentProcess(), c.GR_GDIOBJECTS));
-            if (ui.capabilities.gpu) for ([_]ui.d3d11.Driver{ .hardware, .warp }) |driver| {
+            if (d3d) for ([_]ui.d3d11.Driver{ .hardware, .warp }) |driver| {
                 var renderer: ui.d3d11.Renderer = .{};
                 try renderer.init(.{ .driver = driver });
                 defer renderer.deinit();
@@ -386,7 +388,7 @@ pub fn main() !void {
         try equal(0, zlc_test_live_image_objects());
     }
     try integrated(allocator, false, false);
-    if (ui.capabilities.gpu) {
+    if (d3d) {
         try integrated(allocator, true, false);
         try integrated(allocator, true, true);
     }

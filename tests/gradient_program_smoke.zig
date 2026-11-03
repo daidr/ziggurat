@@ -1,6 +1,8 @@
 const std = @import("std");
 const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
+/// The GPU checks here are Direct3D's; other platforms have their own smokes.
+const d3d = ui.capabilities.gpu and builtin.os.tag == .windows;
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const reference = @import("gradient_interpolation_oracle.zig");
@@ -350,7 +352,7 @@ fn stopped() !void {
     try std.testing.expectEqual(@as(u64, 0), (try renderer.gradientInterpolationStats()).metadata_reserved);
 }
 pub fn main(init: std.process.Init.Minimal) !void {
-    if (builtin.os.tag != .windows or !ui.capabilities.gpu) return error.GpuNotEnabled;
+    if (builtin.os.tag != .windows or !d3d) return error.GpuNotEnabled;
     const args = try zio.argsAlloc(std.heap.page_allocator, init.args);
     defer zio.argsFree(std.heap.page_allocator, args);
     if (args.len == 2 and std.mem.eql(u8, args[1], "--ordinary-stop")) return ordinaryStopped();

@@ -1,6 +1,8 @@
 const std = @import("std");
 const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
+/// The GPU checks here are Direct3D's; other platforms have their own smokes.
+const d3d = ui.capabilities.gpu and builtin.os.tag == .windows;
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const vector = @import("ziggurat_vector");
@@ -349,7 +351,7 @@ pub fn main() !void {
                 if (!affine_only) try render(&software, allocator, paint, "GDI");
                 try reflected(&software, allocator, paint, "GDI");
             }
-            if (ui.capabilities.gpu) for ([_]ui.d3d11.Driver{ .hardware, .warp }) |driver| {
+            if (d3d) for ([_]ui.d3d11.Driver{ .hardware, .warp }) |driver| {
                 var gpu: ui.d3d11.Renderer = .{};
                 try gpu.init(.{ .driver = driver });
                 defer gpu.deinit();
@@ -360,7 +362,7 @@ pub fn main() !void {
             try std.testing.expectEqual(baseline, c.GetGuiResources(c.GetCurrentProcess(), c.GR_GDIOBJECTS));
         }
         _ = try window.destroy();
-        if (ui.capabilities.gpu and !affine_only) {
+        if (d3d and !affine_only) {
             try fallback(app, .hardware);
             try fallback(app, .warp);
             try std.testing.expectEqual(@as(u32, 0), ui.d3d11.globalResourceCount());

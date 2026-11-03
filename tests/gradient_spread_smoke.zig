@@ -1,5 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
+/// The GPU checks here are Direct3D's; other platforms have their own smokes.
+const d3d = ui.capabilities.gpu and builtin.os.tag == .windows;
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const b = ui.commands.brushes;
@@ -246,7 +248,7 @@ pub fn main() !void {
     const app = try z.App.init(allocator.allocator());
     defer app.deinit();
     try software(app, allocator.allocator());
-    if (builtin.os.tag == .windows and ui.capabilities.gpu) {
+    if (d3d) {
         try gpuReject(app, .hardware);
         try gpuReject(app, .warp);
         try fallback(app, .hardware);

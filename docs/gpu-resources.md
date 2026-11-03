@@ -1,6 +1,6 @@
 # 显式 GPU 设备域与纹理
 
-`ui.gpu_resources` 是 Windows 与 macOS `-Dgpu=true` 的显式资源入口（Windows 为 D3D11/D2D 设备，macOS 为 Metal 设备，见下文 [macOS](#macosmetal)）。默认 Context 继续独立创建原有 renderer，不创建 DeviceDomain、共享设备或纹理表。此处的 `TextureView` 只有 GPU binding，没有 CPU 像素，不能转换成 `ImageView`。
+`ui.gpu_resources` 是 Windows、macOS 与 Linux `-Dgpu=true` 的显式资源入口（Windows 为 D3D11/D2D 设备，macOS 为 Metal 设备，Linux 为 OpenGL 上下文，见下文 [macOS](#macosmetal)、[Linux](#linuxopengl)）。默认 Context 继续独立创建原有 renderer，不创建 DeviceDomain、共享设备或纹理表。此处的 `TextureView` 只有 GPU binding，没有 CPU 像素，不能转换成 `ImageView`。
 
 ```zig
 const domain = try ui.gpu_resources.DeviceDomain.create(app, allocator, .{});
@@ -70,4 +70,15 @@ macOS 的 DeviceDomain 持有一个 Metal 设备（`MTLCreateSystemDefaultDevice
 - `Domain.stats.native_objects` 计设备、队列和纹理；stop 后为 0。`ui.metal.globalResourceCount()` 计存活的 renderer 与 Domain。
 
 `smoke-metal-domain`（`zig build smoke-metal-domain -Dgpu=true`）在 macOS 上覆盖上传绘制、跨域拒绝、丢失/重建/stop、容量与失败回滚、离屏 Surface，并运行与 Windows 共用的 `gpu_domain_lifetime.zig`、`gpu_offscreen_lifetime.zig`。
+
+## Linux（OpenGL）
+
+Linux 的 DeviceDomain 持有一个无表面 EGL 上下文（OpenGL 3.3 core），原生部分在 `src/ui/gl_renderer.c`；Zig 侧规则与其他平台相同。
+
+- `hardware` 拒绝软件光栅器（llvmpipe 等），除非 `ZIGGURAT_GL=on`；`.warp` 在软件光栅器上也创建，对应 Direct3D 的 WARP。Context 的 `render_mode` 与 Domain 驱动不一致时返回 `DomainDriverMismatch`。
+- upload 把各 mip 复制进一张新的 RGBA8 纹理，最多 32 个 slot，按 token 采样；Domain 的 renderer 共用这个上下文，窗口帧读回内存后用 cairo 呈现。
+- 设备丢失（测试注入）：代数加一，丢掉全部纹理与各 renderer 的 GL 对象；`recreate` 重新建立上下文，renderer 在下一次 begin 或 upload 时换过去，之前上传的图片与遮罩随帧重新上传。
+- `ui.gl.globalResourceCount()` 计存活的 renderer 与 Domain。
+
+`smoke-gl`（`zig build smoke-gl -Dgpu=true`，xvfb 下配 `ZIGGURAT_GL=on`）运行共用的 `gpu_domain_lifetime.zig`、`gpu_offscreen_lifetime.zig`。
 
