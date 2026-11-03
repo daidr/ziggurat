@@ -222,7 +222,7 @@ fn pixelBox(rect: Rect, scale: f32) ?[4]i32 {
 }
 
 fn hashGradient(hasher: *std.hash.Wyhash, gradient: brushes.Gradient) void {
-    hasher.update(std.mem.asBytes(&@intFromEnum(gradient)));
+    hasher.update(std.mem.asBytes(&@backingInt(gradient)));
     switch (gradient) {
         .linear => |g| {
             hasher.update(std.mem.asBytes(&[_]f32{ g.start.x, g.start.y, g.end.x, g.end.y }));
