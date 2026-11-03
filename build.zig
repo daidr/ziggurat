@@ -472,6 +472,10 @@ pub fn build(b: *std.Build) void {
         images.linkSystemLibrary("gdk-pixbuf-2.0", .{ .use_pkg_config = .force });
         images.link_libc = true;
     }
+    if (target.result.cpu.arch == .wasm32) {
+        _ = native_support.add(b, text_layout, "text-layout-native", "src/ui/text_layout_web.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        text_layout.link_libc = true;
+    }
     if (target.result.os.tag == .windows) {
         _ = native_support.add(b, text_layout, "text-layout-native", "src/ui/text_layout_windows.c", &.{"-std=c11"}, target, optimize);
         text_layout.linkSystemLibrary("dwrite", .{});
@@ -1597,6 +1601,20 @@ pub fn build(b: *std.Build) void {
         _ = native_support.add(b, ui, "ui-composed-native", "src/ui/windows_composed.c", &.{"-std=c11"}, target, optimize);
         ui.linkSystemLibrary("gdi32", .{});
         ui.link_libc = true;
+    }
+    if (target.result.cpu.arch == .wasm32) {
+        // Browsers: the software renderer draws in memory and the page shows
+        // its frames; `web/` holds the page's side.
+        _ = native_support.add(b, ui, "ui-web-native", "src/ui/web.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        ui.link_libc = true;
+        addWebApp(b, addExample(b, "counter", "examples/counter.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_ui", .module = ui },
+        }));
+        addWebApp(b, addExample(b, "view-counter", "examples/view_counter.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_view", .module = declarative_view },
+        }));
     }
     if (target.result.os.tag == .macos) {
         _ = native_support.add(b, ui, "ui-core-graphics-native", "src/ui/macos.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
@@ -2897,6 +2915,19 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&updater_tests.step);
     test_step.dependOn(&run_updater_tests.step);
     b.step("test-updater", "Run update window sessions, choices, texts and feed backend tests").dependOn(&run_updater_tests.step);
+    if (target.result.cpu.arch == .wasm32) {
+        // What tests/web/smoke.py drives in headless Chromium; it also checks
+        // the context menu, and what single instance, the updater and window
+        // placement do there.
+        addWebApp(b, addExample(b, "browser-smoke", "tests/web/smoke_app.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_view", .module = declarative_view },
+            .{ .name = "ziggurat_system", .module = system },
+            .{ .name = "ziggurat_updater", .module = updater },
+            .{ .name = "ziggurat_window_placement", .module = window_placement },
+            .{ .name = "ziggurat_ui", .module = ui },
+        }));
+    }
     test_step.dependOn(&run_webkit_remote.step);
     const audio = b.addModule("ziggurat_audio", .{ .root_source_file = b.path("src/audio/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "ziggurat", .module = core }} });
     audio.link_libc = true;
@@ -2904,7 +2935,7 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .macos) native_support.linkFrameworks(b, audio, &.{"AudioToolbox"});
     // Pinned third-party decoders: their own warnings and undefined-behavior
     // checks are not this project's to enforce.
-    for ([_][]const u8{ "mp3", "vorbis" }) |codec| _ = native_support.add(b, audio, b.fmt("audio-{s}-native", .{codec}), b.fmt("src/audio/{s}.c", .{codec}), &.{ "-std=c99", "-w", "-fno-sanitize=undefined" }, target, optimize);
+    for ([_][]const u8{ "mp3", "vorbis" }) |codec| _ = native_support.add(b, audio, b.fmt("audio-{s}-native", .{codec}), b.fmt("src/audio/{s}.c", .{codec}), if (target.result.cpu.arch == .wasm32) &.{ "-std=c99", "-w", "-fno-sanitize=undefined", "-Dalloca=__builtin_alloca" } else &.{ "-std=c99", "-w", "-fno-sanitize=undefined" }, target, optimize);
     const audio_tests = addTest(b, .{ .root_module = audio });
     const run_audio_tests = b.addRunArtifact(audio_tests);
     check.dependOn(&audio_tests.step);
@@ -3190,7 +3221,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_chart_view", .module = chart_view },
         });
     }
-    if (target.result.os.tag == .windows or target.result.os.tag == .linux or target.result.os.tag == .macos) {
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux or target.result.os.tag == .macos or target.result.cpu.arch == .wasm32) {
         const game = b.addModule("ziggurat_game", .{ .root_source_file = b.path("src/game/root.zig"), .target = target, .optimize = optimize, .imports = &.{
             .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
             .{ .name = "ziggurat_view", .module = declarative_view },
@@ -3299,61 +3330,77 @@ const app_example_imports = [_][]const u8{
     "ziggurat_text_outlines", "ziggurat_view_video",
 };
 
-const Example = struct { name: []const u8, path: []const u8, web: bool = false };
+/// `web` examples show web pages and need `-Dwebview=true`; `browser`
+/// examples are built for browsers too (`-Dtarget=wasm32-wasi`): those
+/// that start threads of their own, run a shell, show web pages or need
+/// menu bars, trays or dropped files, which browsers lack, are not.
+const Example = struct { name: []const u8, path: []const u8, web: bool = false, browser: bool = false };
 
 const app_examples = [_]Example{
-    .{ .name = "hello", .path = "examples/hello.zig" },
-    .{ .name = "todo", .path = "examples/todo.zig" },
+    .{ .name = "hello", .path = "examples/hello.zig", .browser = true },
+    .{ .name = "todo", .path = "examples/todo.zig", .browser = true },
     .{ .name = "notes", .path = "examples/notes.zig" },
-    .{ .name = "gallery", .path = "examples/gallery.zig" },
-    .{ .name = "frameless", .path = "examples/frameless.zig" },
+    .{ .name = "gallery", .path = "examples/gallery.zig", .browser = true },
+    .{ .name = "frameless", .path = "examples/frameless.zig", .browser = true },
     .{ .name = "menubar", .path = "examples/menubar.zig" },
-    .{ .name = "clipboard", .path = "examples/clipboard.zig" },
+    .{ .name = "clipboard", .path = "examples/clipboard.zig", .browser = true },
     .{ .name = "drag-drop", .path = "examples/drag_drop.zig" },
-    .{ .name = "text-input", .path = "examples/text_input.zig" },
+    .{ .name = "text-input", .path = "examples/text_input.zig", .browser = true },
     .{ .name = "code-editor", .path = "examples/code_editor.zig" },
     .{ .name = "chart-streaming", .path = "examples/chart_streaming.zig" },
-    .{ .name = "piano", .path = "examples/piano.zig" },
+    .{ .name = "piano", .path = "examples/piano.zig", .browser = true },
     .{ .name = "launcher", .path = "examples/launcher.zig" },
-    .{ .name = "timeline", .path = "examples/timeline.zig" },
-    .{ .name = "i18n", .path = "examples/i18n.zig" },
-    .{ .name = "farm", .path = "examples/farm.zig" },
-    .{ .name = "loading", .path = "examples/loading.zig" },
+    .{ .name = "timeline", .path = "examples/timeline.zig", .browser = true },
+    .{ .name = "i18n", .path = "examples/i18n.zig", .browser = true },
+    .{ .name = "farm", .path = "examples/farm.zig", .browser = true },
+    .{ .name = "loading", .path = "examples/loading.zig", .browser = true },
     .{ .name = "terminal", .path = "examples/terminal.zig" },
-    .{ .name = "text-buffer", .path = "examples/text_buffer.zig" },
+    .{ .name = "text-buffer", .path = "examples/text_buffer.zig", .browser = true },
     .{ .name = "native", .path = "examples/native.zig" },
-    .{ .name = "flyout", .path = "examples/flyout.zig" },
+    .{ .name = "flyout", .path = "examples/flyout.zig", .browser = true },
     .{ .name = "menubar-flyout", .path = "examples/menubar_flyout.zig" },
-    .{ .name = "markdown-chat", .path = "examples/markdown_chat.zig" },
-    .{ .name = "confetti", .path = "examples/confetti.zig" },
-    .{ .name = "effort-slider", .path = "examples/effort_slider.zig" },
-    .{ .name = "chat-glow", .path = "examples/chat_glow.zig" },
+    .{ .name = "markdown-chat", .path = "examples/markdown_chat.zig", .browser = true },
+    .{ .name = "confetti", .path = "examples/confetti.zig", .browser = true },
+    .{ .name = "effort-slider", .path = "examples/effort_slider.zig", .browser = true },
+    .{ .name = "chat-glow", .path = "examples/chat_glow.zig", .browser = true },
     .{ .name = "blackhole", .path = "examples/blackhole.zig" },
     .{ .name = "wind", .path = "examples/wind.zig" },
     .{ .name = "mayoi", .path = "examples/mayoi.zig" },
-    .{ .name = "rich-text", .path = "examples/rich_text.zig" },
-    .{ .name = "video", .path = "examples/video.zig" },
+    .{ .name = "rich-text", .path = "examples/rich_text.zig", .browser = true },
+    .{ .name = "video", .path = "examples/video.zig", .browser = true },
     .{ .name = "hybrid", .path = "examples/hybrid.zig", .web = true },
 };
 
 /// Registers every application example under `run-<name>` and `example-<name>`, and compiles them in `check`.
 /// Examples use only public modules; WebView examples require `-Dwebview=true`.
 fn addExamples(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
-    if (target.result.os.tag != .windows and target.result.os.tag != .linux) return;
+    if (target.result.os.tag != .windows and target.result.os.tag != .linux and target.result.cpu.arch != .wasm32) return;
     const all = b.step("examples", "Compile every application example");
     const tests = b.step("test-examples", "Run the headless view tests inside the application examples");
     b.top_level_steps.get("test").?.step.dependOn(tests);
     var imports: [app_example_imports.len + 1]std.Build.Module.Import = undefined;
-    for (app_example_imports, 0..) |name, index| imports[index] = .{ .name = name, .module = b.modules.get(name) orelse @panic(name) };
+    // Browsers have fewer modules: an example is built for them when it is
+    // listed in `web_examples`, with the modules there are.
+    const web = target.result.cpu.arch == .wasm32;
+    var available: usize = 0;
+    for (app_example_imports) |name| {
+        imports[available] = .{ .name = name, .module = b.modules.get(name) orelse if (web) continue else @panic(name) };
+        available += 1;
+    }
     const webview = b.modules.get("ziggurat_webview");
     for (app_examples) |example| {
-        var count: usize = app_example_imports.len;
+        if (web and !example.browser) continue;
+        var count: usize = available;
         if (example.web) {
             imports[count] = .{ .name = "ziggurat_webview", .module = webview orelse continue };
             count += 1;
         }
         const exe = addExample(b, example.name, example.path, target, optimize, b.allocator.dupe(std.Build.Module.Import, imports[0..count]) catch @panic("OOM"));
         all.dependOn(&exe.step);
+        if (target.result.cpu.arch == .wasm32) {
+            addWebApp(b, exe);
+            continue;
+        }
         const example_tests = addTest(b, .{ .name = b.fmt("example-{s}-test", .{example.name}), .root_module = exe.root_module });
         b.top_level_steps.get("check").?.step.dependOn(&example_tests.step);
         const run_example_tests = b.addRunArtifact(example_tests);
@@ -3668,6 +3715,7 @@ pub fn addApplicationResources(b: *std.Build, exe: *std.Build.Step.Compile, depe
 
 /// As `addApplicationResources`, with the app's own icon.
 pub fn addApplicationResourcesWithIcon(b: *std.Build, exe: *std.Build.Step.Compile, dependency: *std.Build.Dependency, metadata: packaging.Metadata, icon: ApplicationIcon) void {
+    if (exe.root_module.resolved_target.?.result.cpu.arch == .wasm32) return addBrowserSite(b, exe, dependency);
     if (exe.root_module.resolved_target.?.result.os.tag != .windows) return;
     const file = iconFile(b, dependency.path("tools/icon_main.zig"), dependency.path("assets/application.ico"), icon);
     _ = packaging.addWindowsResources(b, exe, .{ .metadata = metadata, .icon = file }) catch |err| std.debug.panic("invalid application resources: {s}", .{@errorName(err)});
@@ -3715,6 +3763,44 @@ fn runInstalled(b: *std.Build, executable: std.Build.LazyPath) *std.Build.Step.R
     const run = b.addSystemCommand(&.{ "/bin/sh", "-c", "n=0; while :; do \"$0\" \"$@\"; s=$?; if [ $s -ne 126 ] || [ $n -ge 20 ]; then exit $s; fi; n=$((n + 1)); sleep 0.1; done" });
     run.addFileArg(executable);
     return run;
+}
+
+/// A browser build of an application: its WebAssembly, the page's script and
+/// a page loading them, installed as a static site under `web/<name>/`, and a
+/// `web-<name>` step building it.
+/// Sets up a browser build of `exe` (built for wasm32-wasi) and installs it
+/// as a static site in <prefix>/web: index.html, ziggurat.js and app.wasm.
+/// `addApplicationResources` calls this for browser targets.
+pub fn addBrowserSite(b: *std.Build, exe: *std.Build.Step.Compile, dependency: *std.Build.Dependency) void {
+    configureBrowserExecutable(exe);
+    for ([_]struct { std.Build.LazyPath, []const u8 }{
+        .{ exe.getEmittedBin(), "web/app.wasm" },
+        .{ dependency.path("web/ziggurat.js"), "web/ziggurat.js" },
+        .{ dependency.path("web/index.html"), "web/index.html" },
+    }) |entry| b.getInstallStep().dependOn(&b.addInstallFileWithDir(entry[0], .prefix, entry[1]).step);
+}
+
+fn configureBrowserExecutable(exe: *std.Build.Step.Compile) void {
+    exe.rdynamic = true;
+    exe.stack_size = 8 * 1024 * 1024;
+    // The page calls the callbacks Zig hands it, from the function table.
+    exe.export_table = true;
+    exe.initial_memory = null;
+}
+
+fn addWebApp(b: *std.Build, exe: *std.Build.Step.Compile) void {
+    configureBrowserExecutable(exe);
+    const step = b.step(b.fmt("web-{s}", .{exe.name}), b.fmt("Build {s} for browsers into zig-out/web/{s}", .{ exe.name, exe.name }));
+    const dir = b.fmt("web/{s}", .{exe.name});
+    const wasm = b.addInstallFileWithDir(exe.getEmittedBin(), .prefix, b.fmt("{s}/app.wasm", .{dir}));
+    const script = b.addInstallFileWithDir(b.path("web/ziggurat.js"), .prefix, b.fmt("{s}/ziggurat.js", .{dir}));
+    const page = b.addInstallFileWithDir(b.path("web/index.html"), .prefix, b.fmt("{s}/index.html", .{dir}));
+    const all = if (b.top_level_steps.get("web")) |existing| &existing.step else b.step("web", "Build every browser app into zig-out/web (with -Dtarget=wasm32-wasi)");
+    for ([_]*std.Build.Step{ &wasm.step, &script.step, &page.step }) |each| {
+        step.dependOn(each);
+        all.dependOn(each);
+        b.getInstallStep().dependOn(each);
+    }
 }
 
 fn addResources(b: *std.Build, exe: *std.Build.Step.Compile) void {

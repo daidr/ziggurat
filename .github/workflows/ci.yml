@@ -194,6 +194,14 @@ jobs:
       - name: Application font registration
         run: |
           XDG_CACHE_HOME=$(mktemp -d) zig build smoke-fonts -Doptimize=${{ matrix.optimize }}
+      - name: Browsers (WebAssembly) build and headless Chromium smoke
+        run: |
+          # Debian's chromium is a real package (Ubuntu's is a snap stub);
+          # without a Chromium the smoke reports so and only the build counts.
+          . /etc/os-release
+          if [ "${ID:-}" = debian ]; then sh scripts/ci-linux-deps.sh chromium; fi
+          zig build web -Dtarget=wasm32-wasi -Doptimize=${{ matrix.optimize }} --summary failures
+          python3 tests/web/smoke.py zig-out/web/browser-smoke
       - name: Optional WebKitGTK lifecycle and policy checks
         if: github.event_name == 'workflow_dispatch' && inputs.webview
         run: |

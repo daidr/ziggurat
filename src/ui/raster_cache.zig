@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const drawing = @import("ziggurat_drawing_resources");
 pub const CoverageEntry = struct { view: drawing.CoverageView, used: u64, charge: usize };
 pub const Entry = struct { view: drawing.ImageView, used: u64, dynamic: bool = false, charge: usize, last_from_identity: u64 = 0 };
@@ -30,9 +31,9 @@ pub const Cache = struct {
     pub fn grow(self: *Cache, capacity: usize) !void {
         std.debug.assert(capacity > self.entries.len);
         const old = self.entries.len;
-        const entries = try std.heap.page_allocator.alloc(?Entry, capacity);
-        errdefer std.heap.page_allocator.free(entries);
-        const coverage = try std.heap.page_allocator.alloc(?CoverageEntry, capacity);
+        const entries = try zio.heap.alloc(?Entry, capacity);
+        errdefer zio.heap.free(entries);
+        const coverage = try zio.heap.alloc(?CoverageEntry, capacity);
         @memcpy(entries[0..old], self.entries);
         @memset(entries[old..], null);
         @memcpy(coverage[0..old], self.coverage_entries);
@@ -42,8 +43,8 @@ pub const Cache = struct {
         self.coverage_entries = coverage;
     }
     fn free(self: *Cache) void {
-        if (self.entries.len != 0) std.heap.page_allocator.free(self.entries);
-        if (self.coverage_entries.len != 0) std.heap.page_allocator.free(self.coverage_entries);
+        if (self.entries.len != 0) zio.heap.free(self.entries);
+        if (self.coverage_entries.len != 0) zio.heap.free(self.coverage_entries);
         self.entries = &.{};
         self.coverage_entries = &.{};
     }

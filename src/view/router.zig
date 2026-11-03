@@ -30,6 +30,89 @@ const Style = view.Style;
 
 /// Longest location, in bytes.
 pub const max_location = 256;
+
+const browser = @import("builtin").cpu.arch == .wasm32;
+
+/// In a browser, the first router a window shows follows the tab's history:
+/// its location is the URL's fragment, as "#/notes/42", and the number of
+/// its entry is in the state of the browser's entry, which tells where the
+/// browser's back and forward buttons go among the router's entries. A link
+/// to a page, or a reload, opens the app there.
+const tab = struct {
+    extern "ziggurat" fn zw_history_fragment(buffer: [*]u8, capacity: u32) u32;
+    /// The number in the browser entry's state, or -1 without one.
+    extern "ziggurat" fn zw_history_state() i32;
+    extern "ziggurat" fn zw_history_write(push: u32, number: i32, location: [*]const u8, length: u32) void;
+    extern "ziggurat" fn zw_history_go(n: i32) void;
+    var router: ?*Router = null;
+    /// The number of the router's oldest entry.
+    var base: i32 = 0;
+    /// The router changes for the browser, which did what it asks.
+    var popping = false;
+
+    fn number(r: *Router) i32 {
+        return base + @as(i32, @intCast(r.at));
+    }
+    fn write(r: *Router, push: bool) void {
+        const location = r.shownEntry().location();
+        zw_history_write(@intFromBool(push), number(r), location.ptr, @intCast(location.len));
+    }
+    fn claim(r: *Router) void {
+        if (router != null) return;
+        router = r;
+        var buffer: [max_location]u8 = undefined;
+        const length = zw_history_fragment(&buffer, buffer.len);
+        if (length > 0 and length <= buffer.len and buffer[0] == '/') {
+            popping = true;
+            r.replace(buffer[0..length]) catch {};
+            popping = false;
+        }
+        const state = zw_history_state();
+        if (state >= 0) base = state - @as(i32, @intCast(r.at));
+        write(r, false);
+    }
+    fn pushed(r: *Router) void {
+        if (router == r and !popping) write(r, true);
+    }
+    fn replaced(r: *Router) void {
+        if (router == r and !popping) write(r, false);
+    }
+    fn dropped(r: *Router) void {
+        if (router == r) base += 1;
+    }
+    fn went(r: *Router, n: isize) void {
+        if (router == r and !popping) zw_history_go(@intCast(n));
+    }
+    /// The browser went to another entry: by its number where the router
+    /// has it, else a location typed into the address bar, as a page pushed.
+    fn popped(state: i32, location_ptr: [*]const u8, length: u32) callconv(.c) void {
+        const r = router orelse return;
+        const location: []const u8 = if (length == 0) "/" else location_ptr[0..length];
+        popping = true;
+        defer popping = false;
+        const k = state - base;
+        if (state >= 0 and k >= 0 and k < r.len and std.mem.eql(u8, r.slot(@intCast(k)).location(), location)) {
+            r.go(k - @as(isize, @intCast(r.at)));
+            return;
+        }
+        if (state >= 0 and k == r.len) {
+            r.at = r.len - 1;
+            r.push(location) catch return;
+            return;
+        }
+        if (state >= 0) {
+            r.replace(location) catch return;
+            base = state - @as(i32, @intCast(r.at));
+            return;
+        }
+        r.push(location) catch return;
+        popping = false;
+        write(r, false);
+    }
+    comptime {
+        if (browser) @export(&popped, .{ .name = "ziggurat_history_popped" });
+    }
+};
 /// Longest page title kept for the history, in bytes.
 pub const max_title = 96;
 /// Most `{name}` wildcards one pattern matches.
@@ -111,12 +194,14 @@ pub const Router = struct {
             self.head = (self.head + 1) % self.entries.len;
             self.len -= 1;
             self.at -|= 1;
+            if (browser) tab.dropped(self);
         }
         const entry = self.slot(self.len);
         entry.* = .{ .page = page };
         self.write(entry, resolved);
         self.len += 1;
         self.at = self.len - 1;
+        if (browser) tab.pushed(self);
     }
 
     /// Show `target` in place of the page shown, which Back does not
@@ -133,6 +218,7 @@ pub const Router = struct {
             current.focus = null;
         }
         self.write(current, resolved);
+        if (browser) tab.replaced(self);
     }
 
     /// Show the page before, if any.
@@ -148,7 +234,9 @@ pub const Router = struct {
     pub fn go(self: *Router, n: isize) void {
         const last: isize = @intCast(self.len - 1);
         const target = std.math.clamp(@as(isize, @intCast(self.at)) + n, 0, last);
+        const moved = target - @as(isize, @intCast(self.at));
         self.at = @intCast(target);
+        if (browser and moved != 0) tab.went(self, moved);
     }
     pub fn canGoBack(self: *const Router) bool {
         return self.at > 0;
@@ -339,6 +427,7 @@ pub fn route(v: *View, router: *Router, style: Style) view.Error!*Route {
     if (v.routes.first == null) {
         v.routes.first = router;
         v.routes.first_rtl = node.rtl;
+        if (browser) tab.claim(router);
     }
     const index: u32 = @intCast(node - v.buffers.nodes.ptr);
     router.route = .{ .router = router, .view = v, .node = index, .entry = entry, .page = entry.page, .location = try v.copyText(entry.location()) };

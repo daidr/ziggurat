@@ -9,6 +9,7 @@ pub const Options = struct { on_closed: ?z.Task = null };
 pub const Stats = struct { armed: bool, generation: u64, fires: u64, stopped: bool };
 pub const NativeCounts = extern struct { states: u32 = 0, handles: u32 = 0, sources: u32 = 0, dispatches: u32 = 0 };
 pub fn nativeCounts() NativeCounts {
+    if (web) return .{ .states = browser.states, .sources = browser.states };
     if (builtin.os.tag != .windows and builtin.os.tag != .linux) return .{};
     return zgwake_counts();
 }
@@ -18,7 +19,7 @@ pub fn nativeCounts() NativeCounts {
 pub const OneShot = opaque {
     pub fn create(app: *z.App, allocator: std.mem.Allocator, callback: Callback, options: Options) !*OneShot {
         if (std.Thread.getCurrentId() != app.owner) return error.WrongThread;
-        if (builtin.os.tag != .windows and builtin.os.tag != .linux) return error.UnsupportedPlatform;
+        if (!web and builtin.os.tag != .windows and builtin.os.tag != .linux) return error.UnsupportedPlatform;
         const scope = app.beginCallback() orelse return error.Closed;
         defer scope.end();
         const self = try allocator.create(State);
@@ -177,9 +178,56 @@ fn stop(context: *anyopaque) !void {
     state.releaseNative();
 }
 
-extern fn zgwake_create(*anyopaque, *const fn (*anyopaque) callconv(.c) void) ?*anyopaque;
-extern fn zgwake_handle(*anyopaque) ?*anyopaque;
-extern fn zgwake_arm(*anyopaque, u64) c_int;
-extern fn zgwake_cancel(*anyopaque) void;
-extern fn zgwake_close(*anyopaque) void;
-extern fn zgwake_counts() NativeCounts;
+const web = builtin.cpu.arch == .wasm32;
+const zgwake_create = if (web) browser.create else native_impl.zgwake_create;
+const zgwake_handle = if (web) browser.handle else native_impl.zgwake_handle;
+const zgwake_arm = if (web) browser.arm else native_impl.zgwake_arm;
+const zgwake_cancel = if (web) browser.cancel else native_impl.zgwake_cancel;
+const zgwake_close = if (web) browser.close else native_impl.zgwake_close;
+const zgwake_counts = native_impl.zgwake_counts;
+const native_impl = struct {
+    extern fn zgwake_create(*anyopaque, *const fn (*anyopaque) callconv(.c) void) ?*anyopaque;
+    extern fn zgwake_handle(*anyopaque) ?*anyopaque;
+    extern fn zgwake_arm(*anyopaque, u64) c_int;
+    extern fn zgwake_cancel(*anyopaque) void;
+    extern fn zgwake_close(*anyopaque) void;
+    extern fn zgwake_counts() NativeCounts;
+};
+/// Browsers: the page's timers (setTimeout), which call
+/// `ziggurat_timer_fired` back on the main thread.
+const browser = struct {
+    extern "ziggurat" fn zw_timer_arm(timer: *Timer, milliseconds: f64) void;
+    extern "ziggurat" fn zw_timer_cancel(timer: *Timer) void;
+    const Timer = struct { context: ?*anyopaque, callback: ?*const fn (*anyopaque) callconv(.c) void };
+    var states: u32 = 0;
+    fn create(context: *anyopaque, callback: *const fn (*anyopaque) callconv(.c) void) ?*anyopaque {
+        const timer = std.heap.wasm_allocator.create(Timer) catch return null;
+        timer.* = .{ .context = context, .callback = callback };
+        states += 1;
+        return timer;
+    }
+    fn handle(_: *anyopaque) ?*anyopaque {
+        return null;
+    }
+    fn arm(ptr: *anyopaque, nanoseconds: u64) c_int {
+        const timer: *Timer = @ptrCast(@alignCast(ptr));
+        if (timer.callback == null) return 0;
+        zw_timer_arm(timer, @as(f64, @floatFromInt(nanoseconds)) / std.time.ns_per_ms);
+        return 1;
+    }
+    fn cancel(ptr: *anyopaque) void {
+        zw_timer_cancel(@ptrCast(@alignCast(ptr)));
+    }
+    fn close(ptr: *anyopaque) void {
+        const timer: *Timer = @ptrCast(@alignCast(ptr));
+        zw_timer_cancel(timer);
+        states -= 1;
+        std.heap.wasm_allocator.destroy(timer);
+    }
+    fn timerFired(ptr: *Timer) callconv(.c) void {
+        if (ptr.callback) |callback| callback(ptr.context.?);
+    }
+    comptime {
+        if (web) @export(&timerFired, .{ .name = "ziggurat_timer_fired" });
+    }
+};

@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const input = @import("input.zig");
 /// A control the frame added, as its input state holds it.
@@ -977,7 +978,7 @@ pub const Context = struct {
         return masks.statsNow();
     }
     fn clipMasks(self: *Context) ?*clip_mask.Masks {
-        if (self.clip_masks == null) self.clip_masks = clip_mask.Masks.create(std.heap.smp_allocator) catch return null;
+        if (self.clip_masks == null) self.clip_masks = clip_mask.Masks.create(zio.heap) catch return null;
         return self.clip_masks;
     }
     fn clipMaskRelease(self: *Context) clip_mask.Release {

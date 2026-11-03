@@ -3,7 +3,11 @@ const builtin = @import("builtin");
 const z = @import("ziggurat");
 /// macOS implements the GTK adapter's zsc_* entry points with NSPasteboard
 /// (src/system/macos_clipboard.m), so clipboard_linux.zig drives both.
-const native = if (builtin.is_test) @import("clipboard_unsupported.zig") else if (builtin.os.tag == .windows) @import("clipboard_windows.zig") else if (builtin.os.tag == .linux or builtin.os.tag == .macos) @import("clipboard_linux.zig") else @import("clipboard_unsupported.zig");
+const native = if (builtin.is_test) @import("clipboard_unsupported.zig") else if (builtin.cpu.arch == .wasm32) @import("clipboard_web.zig") else if (builtin.os.tag == .windows) @import("clipboard_windows.zig") else if (builtin.os.tag == .linux or builtin.os.tag == .macos) @import("clipboard_linux.zig") else @import("clipboard_unsupported.zig");
+const web = struct {
+    extern "ziggurat" fn zw_clipboard_write(text: [*]const u8, length: u32) void;
+    extern "ziggurat" fn zw_clipboard_read(destination: [*]u8, capacity: u32) i32;
+};
 extern fn zsc_text_write(text: [*]const u8, len: usize) c_int;
 extern fn zsc_text_read(destination: [*]u8, capacity: usize, empty: *c_int) c_long;
 
@@ -11,6 +15,12 @@ extern fn zsc_text_read(destination: [*]u8, capacity: usize, empty: *c_int) c_lo
 /// block and transfers it to the OS on success; no Zig allocation is hidden.
 pub fn writeText(window: z.Window, text: []const u8) !void {
     window.app.assertOwner();
+    if (comptime builtin.cpu.arch == .wasm32) {
+        if (window.isClosed()) return error.Closed;
+        if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
+        web.zw_clipboard_write(text.ptr, @intCast(text.len));
+        return;
+    }
     if (comptime builtin.os.tag == .macos and !builtin.is_test) {
         if (window.isClosed()) return error.Closed;
         if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
@@ -26,6 +36,13 @@ pub fn writeText(window: z.Window, text: []const u8) !void {
 /// slices belong to the caller and no delayed rendering callback is retained.
 pub fn readText(window: z.Window, destination: []u8) !usize {
     window.app.assertOwner();
+    if (comptime builtin.cpu.arch == .wasm32) {
+        if (window.isClosed()) return error.Closed;
+        const length = web.zw_clipboard_read(destination.ptr, @intCast(@min(destination.len, std.math.maxInt(u32))));
+        if (length < 0) return error.ClipboardUnavailable;
+        if (@as(usize, @intCast(length)) > destination.len) return error.CapacityExceeded;
+        return @intCast(length);
+    }
     if (comptime builtin.os.tag == .macos and !builtin.is_test) {
         if (window.isClosed()) return error.Closed;
         var empty: c_int = 0;

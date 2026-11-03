@@ -86,7 +86,8 @@ pub const FileIcon = struct {
 const posix_shell = builtin.os.tag == .linux or builtin.os.tag == .macos;
 pub const capabilities = .{
     .launch_executable = builtin.os.tag == .windows or posix_shell,
-    .open_url = builtin.os.tag == .windows or posix_shell,
+    // Browsers open a tab, through `OpenUrl`.
+    .open_url = builtin.os.tag == .windows or posix_shell or builtin.cpu.arch == .wasm32,
     .open_path = builtin.os.tag == .windows or posix_shell,
     .reveal = builtin.os.tag == .windows or posix_shell,
     .trash = builtin.os.tag == .windows or posix_shell,

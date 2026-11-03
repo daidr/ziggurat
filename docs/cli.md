@@ -4,7 +4,7 @@
 
 ```text
 ziggurat init DIR [--template native|web|hybrid] [--name NAME] [--id IDENTITY] [--framework PATH]
-ziggurat dev [--watch DIR]... [--frontend COMMAND] [-- ZIG_BUILD_ARGS...]
+ziggurat dev [--web [--port PORT]] [--watch DIR]... [--frontend COMMAND] [-- ZIG_BUILD_ARGS...]
 ziggurat build [--debug] [--target TRIPLE | --platform LIST] [--package] [--sign IDENTITY] [--skip-dmg] [--skip-notarize] [-- ZIG_BUILD_ARGS...]
 ziggurat package setup|deb|pkgbuild|app|install-script|install-ps1 --zip PACKAGE ...
 ziggurat publish DIR (--github OWNER/REPO --tag TAG ... | --s3 BUCKET --url BASE ...)
@@ -27,17 +27,19 @@ ziggurat doctor [--webview]
 
 项目同时带上 `.agents/skills` 中的代理技能（见 [install-skills](#install-skills)）。三种模板的应用模块都导入 `ziggurat_i18n`，供生成的消息访问器使用。
 
-生成的 `build.zig` 调用本框架 `build.zig` 公开的 `addApplicationResources`，在 Windows 上嵌入清单、版本与图标资源。名称只接受不含引号、尖括号、`&`、`@` 和反斜杠的文本，identity 只接受 ASCII 字母、数字、点、下划线与连字符。
+生成的 `build.zig` 调用本框架 `build.zig` 公开的 `addApplicationResources`，在 Windows 上嵌入清单、版本与图标资源，面向浏览器（`wasm32-wasi`）时把静态站点装到 `zig-out/web`。名称只接受不含引号、尖括号、`&`、`@` 和反斜杠的文本，identity 只接受 ASCII 字母、数字、点、下划线与连字符。
 
 ## dev
 
-先运行 `zig build`，成功后把安装出的可执行文件作为自己的子进程启动。每 300 ms 比较 `src/`、`build.zig`、`build.zig.zon` 与 `--watch` 目录中文件的路径、大小和修改时间（跳过点目录、`zig-out` 和 `node_modules`）；变化时终止应用并重新构建，构建失败则等待下一次变化。`--frontend` 用系统 shell 启动前端监视命令，退出时一并结束。轮询只发生在开发命令中，与应用的空闲路径无关。
+先运行 `zig build`，成功后把安装出的可执行文件作为自己的子进程启动。每 300 ms 比较 `src/`、`build.zig`、`build.zig.zon` 与 `--watch` 目录中文件的路径、大小和修改时间（跳过点目录、`zig-out` 和 `node_modules`）；变化时终止应用并重新构建，构建失败则等待下一次变化。`--frontend` 用系统 shell 启动前端监视命令，退出时一并结束。
+
+`--web` 改为面向浏览器：以 `-Dtarget=wasm32-wasi` 构建，在 `http://localhost:5174`（`--port` 可改，只监听 127.0.0.1）提供 `zig-out/web` 并打开系统浏览器；提供的 HTML 页面注入一小段脚本，每 500 ms 询问 `/__ziggurat/build`，重新构建成功后页面自己刷新。见 [浏览器](browsers.md)。轮询只发生在开发命令中，与应用的空闲路径无关。
 
 ## build
 
 以 ReleaseSafe（`--debug` 时为 Debug）运行 `zig build`。`--package` 读取 `ziggurat.json`，把 `zig-out/bin` 中的可执行文件、Windows 上存在的 `WebView2Loader.dll`、项目根的 LICENSE 和 `icon` 指定的 PNG（包内名为 `icon.png`）打成 `dist/<identity>-<os>-<arch>-<version>.zip`，并打印其 SHA-256。该包可直接交给 `ziggurat-update release` 签名发布，或交给 `ziggurat package` 生成安装程序、deb 与 PKGBUILD，见 [打包](packaging.md) 和 [更新](updates.md)。打包确定性只针对同一组输入与工具环境；编译产物本身是否逐字节一致取决于 Zig 编译器。
 
-`--platform` 接受逗号分隔的 `OS/ARCH` 列表，依次构建到 `zig-out/<os>-<arch>`：OS 为 `macos`、`linux`、`windows`（`darwin` 同 `macos`），ARCH 为 `x86_64`、`aarch64`（`amd64`、`arm64` 亦可），另有 `macos/universal`。与本机相同的平台不传 `-Dtarget`，保留本机系统库；其他平台传 `-Dtarget=<arch>-<os>`（Linux 加 `-gnu`）。`macos/universal` 先分别构建 `aarch64` 与 `x86_64`，再把两个 Mach-O 合成一个通用可执行文件（CLI 自己写 fat 头，各切片按 16 KiB 对齐，与 lipo 相同，不需要 Xcode）。与 `--target` 互斥；`--package` 为每个平台各写一个更新包。
+`--platform` 接受逗号分隔的 `OS/ARCH` 列表，依次构建到 `zig-out/<os>-<arch>`：OS 为 `macos`、`linux`、`windows`（`darwin` 同 `macos`），ARCH 为 `x86_64`、`aarch64`（`amd64`、`arm64` 亦可），另有 `macos/universal`。与本机相同的平台不传 `-Dtarget`，保留本机系统库；其他平台传 `-Dtarget=<arch>-<os>`（Linux 加 `-gnu`）。`macos/universal` 先分别构建 `aarch64` 与 `x86_64`，再把两个 Mach-O 合成一个通用可执行文件（CLI 自己写 fat 头，各切片按 16 KiB 对齐，与 lipo 相同，不需要 Xcode）。与 `--target` 互斥；`--package` 为每个平台各写一个更新包。平台 `web` 以 `-Dtarget=wasm32-wasi` 构建到 `zig-out/web`：`index.html`、`ziggurat.js` 与 `app.wasm` 组成的静态站点（由生成的 `build.zig` 经 `addApplicationResources` 安装），不写更新包，见 [浏览器](browsers.md)。
 
 目标是 macOS 时（`--platform` 中的 macOS 平台，或 `--target`/本机为 macOS），`build` 还会读取 `ziggurat.json`，在 `dist/macos-<arch>/` 写出签名的 `<名称>.app`，并在 Mac 上写出磁盘映像 `<可执行文件>-<版本>-<arch>.dmg`（通用应用为 `<可执行文件>-<版本>.dmg`）；`--skip-dmg` 不做映像，其他系统上跳过映像并提示。签名身份取 `--sign`，否则 `macos.signingIdentity`，默认 `-`（ad hoc）。配置了 `macos.notarize` 时映像会提交公证，`--skip-notarize` 跳过。公证要求 Developer ID 身份、`provisioningProfile` 要求非 ad hoc 身份，两者在开始构建前检查。详见 [macOS 应用包](packaging.md#macos-应用包签名与磁盘映像)。
 

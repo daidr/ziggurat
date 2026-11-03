@@ -89,7 +89,7 @@ pub const FeedBackend = struct {
     /// Cancels and joins a job still running.
     pub fn deinit(self: *FeedBackend) void {
         self.control.cancel();
-        if (self.thread) |thread| thread.join();
+        if (!zio.is_web) if (self.thread) |thread| thread.join();
         self.thread = null;
         self.allocator.free(self.notes);
         self.notes = &.{};
@@ -102,7 +102,7 @@ pub const FeedBackend = struct {
     /// After `App.run` returned: starts the published release when the user
     /// chose to restart into it. Returns whether it started one.
     pub fn relaunchIfRequested(self: *FeedBackend, argv_tail: []const []const u8) !bool {
-        if (!self.relaunch_requested) return false;
+        if (zio.is_web or !self.relaunch_requested) return false;
         const executable = try update.launch.currentExecutable(self.allocator, self.config.install_root, self.config.identity, self.config.target);
         defer self.allocator.free(executable);
         var argv: std.ArrayList([]const u8) = .empty;
@@ -114,6 +114,7 @@ pub const FeedBackend = struct {
     }
 
     fn probe(path: []const u8) bool {
+        if (zio.is_web) return false;
         var dir = std.Io.Dir.cwd().createDirPathOpen(zio.io(), path, .{}) catch return false;
         defer dir.close(zio.io());
         var file = dir.createFile(zio.io(), ".ziggurat-update-probe", .{}) catch return false;
@@ -130,6 +131,9 @@ pub const FeedBackend = struct {
     }
 
     fn enabled(ptr: *anyopaque) bool {
+        // Browsers load the app's newest version with the page: they
+        // neither update nor relaunch it.
+        if (zio.is_web) return false;
         const self: *FeedBackend = @ptrCast(@alignCast(ptr));
         return self.config.enabled and self.writable;
     }
@@ -146,6 +150,7 @@ pub const FeedBackend = struct {
     }
 
     fn check(ptr: *anyopaque, updater: *root.Updater, token: root.Token) anyerror!void {
+        if (zio.is_web) return error.UpdatesDisabled;
         const self: *FeedBackend = @ptrCast(@alignCast(ptr));
         try self.ready();
         self.updater = updater;
@@ -163,6 +168,7 @@ pub const FeedBackend = struct {
     }
 
     fn install(ptr: *anyopaque, updater: *root.Updater, token: root.Token, release: root.Release) anyerror!void {
+        if (zio.is_web) return error.UpdatesDisabled;
         const self: *FeedBackend = @ptrCast(@alignCast(ptr));
         try self.ready();
         self.version = try update.retention.parseVersion(release.version);

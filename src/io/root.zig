@@ -17,6 +17,66 @@ const Io = std.Io;
 pub const posix = @import("posix.zig");
 pub const net = @import("net.zig");
 
+/// Whether this build runs in a browser: WebAssembly with one thread, whose
+/// event loop is the page's.
+pub const is_web = builtin.cpu.arch == .wasm32 or builtin.cpu.arch == .wasm64;
+
+/// The general allocator Ziggurat's own module state uses: the thread-safe
+/// heap on desktops, the WebAssembly heap in a browser, which has one thread.
+pub const heap: std.mem.Allocator = if (is_web) std.heap.wasm_allocator else std.heap.smp_allocator;
+
+/// `std.atomic.Value` of a 64-bit integer. WebAssembly in a browser runs on
+/// one thread and has no 64-bit atomics, so there it is a plain value with the
+/// same operations.
+pub fn Atomic64(comptime T: type) type {
+    if (!is_web) return std.atomic.Value(T);
+    return struct {
+        raw: T,
+        const Self = @This();
+        pub fn init(value: T) Self {
+            return .{ .raw = value };
+        }
+        pub fn load(self: *const Self, comptime _: std.builtin.AtomicOrder) T {
+            return self.raw;
+        }
+        pub fn store(self: *Self, value: T, comptime _: std.builtin.AtomicOrder) void {
+            self.raw = value;
+        }
+        pub fn swap(self: *Self, value: T, comptime _: std.builtin.AtomicOrder) T {
+            defer self.raw = value;
+            return self.raw;
+        }
+        pub fn fetchAdd(self: *Self, operand: T, comptime _: std.builtin.AtomicOrder) T {
+            defer self.raw +%= operand;
+            return self.raw;
+        }
+        pub fn fetchSub(self: *Self, operand: T, comptime _: std.builtin.AtomicOrder) T {
+            defer self.raw -%= operand;
+            return self.raw;
+        }
+        pub fn fetchOr(self: *Self, operand: T, comptime _: std.builtin.AtomicOrder) T {
+            defer self.raw |= operand;
+            return self.raw;
+        }
+        pub fn fetchAnd(self: *Self, operand: T, comptime _: std.builtin.AtomicOrder) T {
+            defer self.raw &= operand;
+            return self.raw;
+        }
+        pub fn fetchMax(self: *Self, operand: T, comptime _: std.builtin.AtomicOrder) T {
+            defer self.raw = @max(self.raw, operand);
+            return self.raw;
+        }
+        pub fn cmpxchgStrong(self: *Self, expected: T, new: T, comptime _: std.builtin.AtomicOrder, comptime _: std.builtin.AtomicOrder) ?T {
+            if (self.raw != expected) return self.raw;
+            self.raw = new;
+            return null;
+        }
+        pub fn cmpxchgWeak(self: *Self, expected: T, new: T, comptime a: std.builtin.AtomicOrder, comptime b: std.builtin.AtomicOrder) ?T {
+            return self.cmpxchgStrong(expected, new, a, b);
+        }
+    };
+}
+
 var threaded: Io.Threaded = undefined;
 var installed: Io = undefined;
 var state: std.atomic.Value(u8) = .init(unset);
@@ -46,7 +106,7 @@ fn initialize() void {
         return;
     }
     const startup = Io.Threaded.global_single_threaded;
-    threaded = .init(std.heap.smp_allocator, .{
+    threaded = .init(heap, .{
         .argv0 = startup.argv0,
         .environ = startup.environ.process_environ,
     });
@@ -336,7 +396,7 @@ pub fn spawn(options: std.process.SpawnOptions) std.process.SpawnError!std.proce
     var map: ?std.process.Environ.Map = null;
     defer if (map) |*value| value.deinit();
     if (options.environ_map == null and builtin.os.tag != .windows and builtin.link_libc) {
-        map = getEnvMap(std.heap.smp_allocator) catch return error.SystemResources;
+        map = getEnvMap(heap) catch return error.SystemResources;
         copy.environ_map = &map.?;
     }
     return std.process.spawn(io(), copy);
@@ -411,7 +471,7 @@ pub fn replace(options: std.process.ReplaceOptions) std.process.ReplaceError {
     var map: ?std.process.Environ.Map = null;
     defer if (map) |*value| value.deinit();
     if (options.environ_map == null and builtin.os.tag != .windows and builtin.link_libc) {
-        map = getEnvMap(std.heap.smp_allocator) catch return error.SystemResources;
+        map = getEnvMap(heap) catch return error.SystemResources;
         copy.environ_map = &map.?;
     }
     return std.process.replace(io(), copy);
@@ -424,7 +484,7 @@ pub fn run(allocator: std.mem.Allocator, options: std.process.RunOptions) std.pr
     var map: ?std.process.Environ.Map = null;
     defer if (map) |*value| value.deinit();
     if (options.environ_map == null and builtin.os.tag != .windows and builtin.link_libc) {
-        map = getEnvMap(std.heap.smp_allocator) catch return error.SystemResources;
+        map = getEnvMap(heap) catch return error.SystemResources;
         copy.environ_map = &map.?;
     }
     return std.process.run(allocator, io(), copy);

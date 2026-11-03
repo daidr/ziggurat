@@ -172,3 +172,89 @@ test "macOS virtual keys follow ANSI positions" {
     try std.testing.expectEqual(KeyCode.up, fromMacVirtualKey(0x7e));
     try std.testing.expectEqual(KeyCode.unknown, fromMacVirtualKey(500));
 }
+
+/// The key at a browser's `KeyboardEvent.code`, which names positions by
+/// what they type on a US keyboard ("KeyW", "Digit1", "ArrowLeft").
+pub fn fromDomCode(code: []const u8) KeyCode {
+    if (code.len == 4 and std.mem.startsWith(u8, code, "Key") and code[3] >= 'A' and code[3] <= 'Z')
+        return @fromBackingInt(@intCast(@backingInt(KeyCode.a) + code[3] - 'A'));
+    if (code.len == 6 and std.mem.startsWith(u8, code, "Digit") and code[5] >= '0' and code[5] <= '9')
+        return @fromBackingInt(@intCast(@backingInt(KeyCode.digit0) + code[5] - '0'));
+    if (code.len == 7 and std.mem.startsWith(u8, code, "Numpad") and code[6] >= '0' and code[6] <= '9')
+        return @fromBackingInt(@intCast(@backingInt(KeyCode.numpad0) + code[6] - '0'));
+    if (code.len >= 2 and code.len <= 3 and code[0] == 'F') {
+        const number = std.fmt.parseInt(u8, code[1..], 10) catch return .unknown;
+        if (number >= 1 and number <= 24) return @fromBackingInt(@intCast(@backingInt(KeyCode.f1) + number - 1));
+        return .unknown;
+    }
+    const table = [_]struct { []const u8, KeyCode }{
+        .{ "Tab", .tab },                     .{ "Enter", .enter },                    .{ "NumpadEnter", .enter },
+        .{ "Space", .space },                 .{ "Escape", .escape },                  .{ "ArrowLeft", .left },
+        .{ "ArrowRight", .right },            .{ "ArrowUp", .up },                     .{ "ArrowDown", .down },
+        .{ "Home", .home },                   .{ "End", .end },                        .{ "PageUp", .page_up },
+        .{ "PageDown", .page_down },          .{ "Insert", .insert },                  .{ "Delete", .delete },
+        .{ "Backspace", .backspace },         .{ "CapsLock", .caps_lock },             .{ "NumLock", .num_lock },
+        .{ "ScrollLock", .scroll_lock },      .{ "PrintScreen", .print_screen },       .{ "Pause", .pause },
+        .{ "ShiftLeft", .shift },             .{ "ShiftRight", .shift },               .{ "ControlLeft", .control },
+        .{ "ControlRight", .control },        .{ "AltLeft", .alt },                    .{ "AltRight", .alt },
+        .{ "MetaLeft", .super },              .{ "MetaRight", .super },                .{ "ContextMenu", .context_menu },
+        .{ "Minus", .minus },                 .{ "Equal", .equal },                    .{ "BracketLeft", .left_bracket },
+        .{ "BracketRight", .right_bracket },  .{ "Backslash", .backslash },            .{ "IntlBackslash", .backslash },
+        .{ "Semicolon", .semicolon },         .{ "Quote", .apostrophe },               .{ "Backquote", .grave },
+        .{ "Comma", .comma },                 .{ "Period", .period },                  .{ "Slash", .slash },
+        .{ "NumpadDecimal", .decimal },       .{ "NumpadAdd", .add },                  .{ "NumpadSubtract", .subtract },
+        .{ "NumpadMultiply", .multiply },     .{ "NumpadDivide", .divide },            .{ "MediaPlayPause", .media_play_pause },
+        .{ "MediaStop", .media_stop },        .{ "MediaTrackNext", .media_next },      .{ "MediaTrackPrevious", .media_previous },
+        .{ "AudioVolumeMute", .volume_mute }, .{ "AudioVolumeDown", .volume_down },    .{ "AudioVolumeUp", .volume_up },
+        .{ "BrowserBack", .browser_back },    .{ "BrowserForward", .browser_forward }, .{ "BrowserRefresh", .browser_refresh },
+        .{ "BrowserStop", .browser_stop },    .{ "BrowserSearch", .browser_search },   .{ "BrowserFavorites", .browser_favorites },
+        .{ "BrowserHome", .browser_home },
+    };
+    for (table) |entry| if (std.mem.eql(u8, entry[0], code)) return entry[1];
+    return .unknown;
+}
+
+/// The key of a browser's `KeyboardEvent`: letters, digits and punctuation
+/// by the character the layout gives them (`key`), as the desktop backends
+/// name them, and every other key by its position (`code`), keypad keys
+/// included.
+pub fn fromDomKey(key: []const u8, code: []const u8) KeyCode {
+    const keypad = std.mem.startsWith(u8, code, "Numpad");
+    if (key.len == 1 and !keypad) {
+        const c = std.ascii.toLower(key[0]);
+        if (c >= 'a' and c <= 'z') return @fromBackingInt(@intCast(@backingInt(KeyCode.a) + c - 'a'));
+        if (c >= '0' and c <= '9') return @fromBackingInt(@intCast(@backingInt(KeyCode.digit0) + c - '0'));
+        switch (c) {
+            '-' => return .minus,
+            '=' => return .equal,
+            '[' => return .left_bracket,
+            ']' => return .right_bracket,
+            '\\' => return .backslash,
+            ';' => return .semicolon,
+            '\'' => return .apostrophe,
+            '`' => return .grave,
+            ',' => return .comma,
+            '.' => return .period,
+            '/' => return .slash,
+            ' ' => return .space,
+            else => {},
+        }
+    }
+    return fromDomCode(code);
+}
+
+test "browser keys are named by the layout's characters and by position" {
+    const testing = std.testing;
+    try testing.expectEqual(KeyCode.w, fromDomCode("KeyW"));
+    try testing.expectEqual(KeyCode.digit7, fromDomCode("Digit7"));
+    try testing.expectEqual(KeyCode.numpad3, fromDomCode("Numpad3"));
+    try testing.expectEqual(KeyCode.f12, fromDomCode("F12"));
+    try testing.expectEqual(KeyCode.left, fromDomCode("ArrowLeft"));
+    // AZERTY: the key in Q's place types "a".
+    try testing.expectEqual(KeyCode.a, fromDomKey("a", "KeyQ"));
+    try testing.expectEqual(KeyCode.a, fromDomKey("A", "KeyA"));
+    try testing.expectEqual(KeyCode.numpad1, fromDomKey("1", "Numpad1"));
+    try testing.expectEqual(KeyCode.escape, fromDomKey("Escape", "Escape"));
+    // A character outside ASCII names the key by its position.
+    try testing.expectEqual(KeyCode.digit2, fromDomKey("é", "Digit2"));
+}

@@ -8,19 +8,23 @@ const builtin = @import("builtin");
 const z = @import("ziggurat");
 
 const os = builtin.os.tag;
-const enabled = !builtin.is_test and (os == .windows or os == .linux or os == .macos);
+/// Browsers: the page's media queries (color scheme, contrast, motion,
+/// transparency), its screen, battery and connection, through the same
+/// zsd_* entry points as the Linux and macOS adapters.
+const browser = builtin.cpu.arch == .wasm32;
+const enabled = !builtin.is_test and (os == .windows or os == .linux or os == .macos or browser);
 const windows = if (enabled and os == .windows) @import("desktop_windows.zig") else struct {
     pub const Native = struct {};
 };
 
 pub const capabilities = .{
-    .monitors = os == .windows or os == .linux or os == .macos,
+    .monitors = os == .windows or os == .linux or os == .macos or browser,
     .monitor_refresh_rate = os == .windows or os == .linux or os == .macos,
-    .preferences = os == .windows or os == .linux or os == .macos,
+    .preferences = os == .windows or os == .linux or os == .macos or browser,
     // Linux GtkSettings exposes no accent color; Preferences.accent is null.
     .accent_color = os == .windows or os == .macos,
     // Linux reports null: GtkSettings has no transparency preference.
-    .reduce_transparency = os == .windows or os == .macos,
+    .reduce_transparency = os == .windows or os == .macos or browser,
     // Windows GetSystemPowerStatus; Linux bounded /sys/class/power_supply
     // read; macOS IOKit power sources.
     .power_source = os == .windows or os == .linux or os == .macos,
@@ -29,13 +33,13 @@ pub const capabilities = .{
     .power_saver = os == .windows or os == .linux or os == .macos,
     // Windows requires GetNetworkConnectivityHint at runtime (unknown
     // otherwise); macOS Network.framework path monitor.
-    .network = os == .windows or os == .linux or os == .macos,
-    .watch_monitors = os == .windows or os == .linux or os == .macos,
-    .watch_preferences = os == .windows or os == .linux or os == .macos,
+    .network = os == .windows or os == .linux or os == .macos or browser,
+    .watch_monitors = os == .windows or os == .linux or os == .macos or browser,
+    .watch_preferences = os == .windows or os == .linux or os == .macos or browser,
     // Linux watches only the power-saver flag, not AC/battery or percentage.
     .watch_power_source = os == .windows or os == .macos,
     .watch_power_saver = os == .windows or os == .linux or os == .macos,
-    .watch_network = os == .windows or os == .linux or os == .macos,
+    .watch_network = os == .windows or os == .linux or os == .macos or browser,
     .beep = os == .windows or os == .linux or os == .macos,
     // Linux X11 only; Wayland keeps the global pointer position private.
     .cursor_position = os == .windows or os == .linux or os == .macos,

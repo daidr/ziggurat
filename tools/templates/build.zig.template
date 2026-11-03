@@ -22,7 +22,6 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
     const run = b.addRunArtifact(exe);
-    if (b.args) |args| run.addArgs(args);
     b.step("run", "Run @@NAME@@").dependOn(&run.step);
     const tests = b.addTest(.{ .root_module = exe.root_module });
     b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(tests).step);
