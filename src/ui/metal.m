@@ -17,7 +17,22 @@
    effect draws its content into a capture texture of its own, runs the
    program over it into another and composites that at its opacity under
    the clip it began in; a backdrop shader copies the target beneath it and
-   runs the program over that copy, writing every pixel it shades. */
+   runs the program over that copy, writing every pixel it shades.
+
+   Groups, Gaussian groups and raster transforms capture their content the
+   same way, in a texture of their own for the frame, as the software
+   planes do: a group's pixels (its bounds under the clip) composite at its
+   opacity through its mask, a Gaussian group's capture is filtered first
+   with the software renderer's integer kernel, and a transform's source
+   (with a transparent guard texel around it) is sampled back through its
+   inverse with the software renderer's bilinear taps, rounded to bytes.
+
+   Gradients interpolated in linear sRGB or Oklab mix their stops in that
+   space, premultiplied, and encode the result to sRGB as the CPU does.
+
+   The window's frame is drawn into a texture the renderer keeps, then
+   copied to the drawable, so that a frame may draw again only the device
+   pixels that changed since the last one (src/ui/damage.zig). */
 #import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
@@ -26,10 +41,14 @@
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <unistd.h>
 #include "brushes.h"
 #include "image_resource.h"
 #include "coverage_resource.h"
 #include "macos_font.h"
+#include "layer_resource.h"
 
 /* Layout shared with the shader below. */
 typedef struct ZmInstance {float rect[4],clip[4],color[4],params[4],uv[4];} ZmInstance;
@@ -45,7 +64,7 @@ _Static_assert(sizeof(ZmEffectParams)==112,"effect parameter layout");
 _Static_assert(sizeof(ZmInstance)==80,"instance layout");
 _Static_assert(sizeof(ZmBrush)==352,"brush layout");
 
-enum {KIND_RECT,KIND_SHAPE,KIND_GRADIENT,KIND_MASK,KIND_GLYPH,KIND_IMAGE};
+enum {KIND_RECT,KIND_SHAPE,KIND_GRADIENT,KIND_MASK,KIND_GLYPH,KIND_IMAGE,KIND_LAYER,KIND_TRANSFORM};
 enum {BIND_NONE,BIND_ATLAS,BIND_TEXTURE};
 
 static NSString *const shader_source=@
@@ -57,7 +76,7 @@ static NSString *const shader_source=@
 "struct VOut{float4 pos[[position]];float2 uv;uint inst[[flat]];};\n"
 "vertex VOut zm_vertex(uint vid[[vertex_id]],uint iid[[instance_id]],constant Uniforms&u[[buffer(0)]],const device Inst*insts[[buffer(1)]]){\n"
 "  Inst i=insts[iid];uint kind=uint(i.p.z);\n"
-"  float grow=(kind<=2u||kind==5u)?1.0:0.0;\n"
+"  float grow=(kind<=2u||kind==5u||kind==6u)?1.0:0.0;\n"
 "  float4 q=float4(max(i.rect.xy-grow,floor(i.clip.xy)),min(i.rect.zw+grow,ceil(i.clip.zw)));\n"
 "  q.zw=max(q.zw,q.xy);\n"
 "  float2 corner=float2(float(vid&1u),float(vid>>1));\n"
@@ -92,12 +111,26 @@ static NSString *const shader_source=@
 "  else{if(d.x==0.0&&d.y==0.0)t=0.0;else{float turns=(precise::atan2(d.y,d.x)-v.x)*(v.y/(2.0*M_PI_F));t=turns-floor(turns);}}\n"
 "  if(spread==1u)t=t-floor(t);else if(spread==2u){float m=t-2.0*floor(t*0.5);t=m>1.0?2.0-m:m;}\n"
 "  uint low=0u;for(uint k=0u;k<len;k++)if(b.offsets[k/4u][k%4u]<=t)low=k+1u;\n"
-"  if(low==0u)return b.colors[0];if(low>=len)return b.colors[len-1u];\n"
-"  float o0=b.offsets[(low-1u)/4u][(low-1u)%4u];float o1=b.offsets[low/4u][low%4u];\n"
-"  float w=o1>o0?(t-o0)/(o1-o0):0.0;\n"
-"  return mix(b.colors[low-1u],b.colors[low],w);\n"
+"  float4 c;\n"
+"  if(low==0u)c=b.colors[0];else if(low>=len)c=b.colors[len-1u];\n"
+"  else{float o0=b.offsets[(low-1u)/4u][(low-1u)%4u];float o1=b.offsets[low/4u][low%4u];\n"
+"    float w=o1>o0?(t-o0)/(o1-o0):0.0;c=mix(b.colors[low-1u],b.colors[low],w);}\n"
+"  uint space=uint(b.head.w);if(space==0u||c.a<=0.0)return space==0u?c:float4(0.0);\n"
+"  float3 u=c.rgb/c.a;\n"
+"  if(space==2u){float l=u.x+0.3963377774*u.y+0.2158037573*u.z,m=u.x-0.1055613458*u.y-0.0638541728*u.z,q=u.x-0.0894841775*u.y-1.2914855480*u.z;\n"
+"    l=l*l*l;m=m*m*m;q=q*q*q;u=float3(4.0767416621*l-3.3077115913*m+0.2309699292*q,-1.2684380046*l+2.6097574011*m-0.3413193965*q,-0.0041960863*l-0.7034186147*m+1.7076147010*q);}\n"
+"  u=clamp(u,0.0,1.0);\n"
+"  float3 e=select(1.055*powr(u,float3(1.0/2.4))-0.055,u*12.92,u<=0.0031308);e=select(e,float3(1.0),u==1.0);\n"
+"  return float4(e*c.a,c.a);\n"
 "}\n"
-"fragment float4 zm_fragment(VOut in[[stage_in]],constant Uniforms&u[[buffer(0)]],const device Inst*insts[[buffer(1)]],const device Brush*brushes[[buffer(2)]],texture2d<float>tex[[texture(0)]],sampler linear_sampler[[sampler(0)]],sampler nearest_sampler[[sampler(1)]]){\n"
+"static float4 texel(texture2d<float>t,int2 q){return (q.x>=0&&q.y>=0&&q.x<int(t.get_width())&&q.y<int(t.get_height()))?t.read(uint2(q)):float4(0.0);}\n"
+"static float4 bilinear(texture2d<float>t,float2 s){\n"
+"  if(s.x<=-1.0||s.y<=-1.0||s.x>=float(t.get_width())||s.y>=float(t.get_height()))return float4(0.0);\n"
+"  float2 f=floor(s);float2 w=s-f;int2 q=int2(f);\n"
+"  float4 sum=texel(t,q)*((1.0-w.x)*(1.0-w.y))+texel(t,q+int2(1,0))*(w.x*(1.0-w.y))+texel(t,q+int2(0,1))*((1.0-w.x)*w.y)+texel(t,q+int2(1,1))*(w.x*w.y);\n"
+"  return round(clamp(sum*255.0,0.0,255.0))/255.0;\n"
+"}\n"
+"fragment float4 zm_fragment(VOut in[[stage_in]],constant Uniforms&u[[buffer(0)]],const device Inst*insts[[buffer(1)]],const device Brush*brushes[[buffer(2)]],texture2d<float>tex[[texture(0)]],texture2d<float>mask[[texture(1)]],sampler linear_sampler[[sampler(0)]],sampler nearest_sampler[[sampler(1)]],sampler mask_sampler[[sampler(2)]]){\n"
 "  Inst i=insts[in.inst];float2 p=in.pos.xy+u.origin;uint kind=uint(i.p.z);\n"
 "  float cov=box(p,i.clip);float4 color=i.color;\n"
 "  if(kind==0u)cov*=box(p,i.rect);\n"
@@ -105,43 +138,69 @@ static NSString *const shader_source=@
 "  else if(kind==2u){cov*=shape(p,i);color=gradient(brushes[uint(i.p.w)],p/u.scale);}\n"
 "  else if(kind==3u)cov*=tex.sample(linear_sampler,in.uv,level(0.0)).r;\n"
 "  else if(kind==4u){float4 t=tex.sample(nearest_sampler,in.uv,level(0.0));if(i.p.w>0.5)return t*(color.a*cov);cov*=t.a;}\n"
+"  else if(kind==6u){float m=1.0;if(i.p.w>0.5)m=mask.sample(mask_sampler,(p-i.uv.xy)/(i.uv.zw-i.uv.xy),level(0.0)).r;return texel(tex,int2(floor(p-i.p.xy)))*(color.a*cov*box(p,i.rect)*m);}\n"
+"  else if(kind==7u){float2 s=float2(i.uv.x*p.x+i.uv.y*p.y+i.p.x,i.uv.z*p.x+i.uv.w*p.y+i.p.y);return bilinear(tex,s)*cov;}\n"
 "  else{float lod=i.p.x;float4 t=i.p.w>0.5?tex.sample(linear_sampler,in.uv,level(lod)):tex.sample(nearest_sampler,in.uv,level(lod));return t*(color.a*cov*box(p,i.rect));}\n"
 "  return color*cov;\n"
+"}\n"
+"struct Filter{uint width;uint height;uint radius;uint vertical;uint weights[257];};\n"
+"vertex float4 zm_full_vertex(uint vid[[vertex_id]]){float2 c=float2(float(vid&1u),float(vid>>1));return float4(c.x*2.0-1.0,1.0-c.y*2.0,0.0,1.0);}\n"
+"fragment float4 zm_filter(float4 pos[[position]],constant Filter&f[[buffer(0)]],constant uint4&pass[[buffer(1)]],texture2d<float>src[[texture(0)]]){\n"
+"  int2 at=int2(pos.xy);uint4 total=uint4(0);int r=int(f.radius);\n"
+"  for(int tap=-r;tap<=r;tap++){\n"
+"    int2 q=at+(pass.w!=0u?int2(0,tap):int2(tap,0));\n"
+"    if(q.x>=0&&q.y>=0&&q.x<int(f.width)&&q.y<int(f.height))total+=uint4(round(src.read(uint2(q))*255.0))*f.weights[tap+r];\n"
+"  }\n"
+"  return float4((total+8388608u)>>24)/255.0;\n"
 "}\n";
 
 /* What the frame does, in order: draw instances, or (op) begin an element
    effect's capture, end one, or run a backdrop shader; run indexes runs. */
 enum {OP_DRAW,OP_CAPTURE,OP_EFFECT,OP_BACKDROP};
-typedef struct ZmBatch {uint32_t first,count;int bind;__unsafe_unretained id<MTLTexture> texture;uint32_t op,run;} ZmBatch;
+/* A draw batch's instances share a texture and a mask (group composites);
+   replace batches overwrite the target (a transparent frame's damage
+   cleared) rather than blend. */
+typedef struct ZmBatch {uint32_t first,count;int bind,replace;__unsafe_unretained id<MTLTexture> texture,mask;uint32_t op,run;} ZmBatch;
 /* One effect: a capture (source, at physical origin) and what its program
    writes (output), or a backdrop shader's copy (source) of region and the
    pixels it writes (out). The frame keeps the textures. */
-typedef struct ZmRun {uint32_t slot,word_offset,word_count,has_pass,region[4],out[4];float origin[2];ZmEffectParams params;__unsafe_unretained id<MTLTexture> source,output;} ZmRun;
-typedef struct ZmStats {uint32_t device_creations,layer_creations,resizes,presents,transaction_presents,busy_presents,atlas_pages,glyphs;uint64_t frames,instances,batches,effect_passes;} ZmStats;
+/* What closing a capture runs: an element effect's program, a Gaussian
+   group's filter (its kernel among the words, through temp), or nothing. */
+enum {RUN_EFFECT,RUN_GROUP,RUN_GAUSSIAN,RUN_TRANSFORM};
+typedef struct ZmRun {uint32_t kind,slot,word_offset,word_count,has_pass,region[4],out[4];float origin[2];ZmEffectParams params;__unsafe_unretained id<MTLTexture> source,output,temp;} ZmRun;
+typedef struct ZmStats {uint32_t device_creations,layer_creations,resizes,presents,transaction_presents,busy_presents,atlas_pages,glyphs;uint64_t frames,instances,batches,effect_passes,layers,filter_passes,partial_frames,cached_pipelines;} ZmStats;
 typedef struct ZmGlyph {float x,y,width,height,left,top;uint32_t color;} ZmGlyph;
 #define ZM_CLIPS 33
 #define ZM_ATLAS 2048
 #define ZM_EFFECT_SLOTS 16
-#define ZM_EFFECT_DEPTH 4
+#define ZM_EFFECT_DEPTH 8
 #define ZM_EFFECT_WORDS 4096
 #define ZM_TEXTURE_LIMIT 16384
-/* An element effect's capture while it records: the clips it began under
-   and where its texture is. */
-typedef struct ZmCapture {float clips[ZM_CLIPS][4];uint32_t clip_depth,run,width,height;} ZmCapture;
+/* A capture while it records: the clips it began under, where its texture
+   is, and how it composites when it closes: a group's bounds (device
+   pixels), opacity and mask (a coverage slot at device rectangle), or a
+   transform's map to its parent (DIP) and source in physical pixels. */
+typedef struct ZmCapture {float clips[ZM_CLIPS][4];uint32_t clip_depth,run,width,height,kind,empty,opacity,mask;float bounds[4],mask_rect[4];double matrix[6];} ZmCapture;
 
 static atomic_int live_objects;
 
 @interface ZigMetalRenderer : NSObject {
 @public
-    id<MTLDevice> device;id<MTLCommandQueue> queue;id<MTLRenderPipelineState> pipeline;
+    id<MTLDevice> device;id<MTLCommandQueue> queue;id<MTLRenderPipelineState> pipeline,replace_pipeline,filter_pipeline;
     id<MTLSamplerState> linear_sampler,nearest_sampler,mask_sampler;id<MTLTexture> blank;
     CAMetalLayer *layer;__weak NSView *view;__weak NSWindow *window;
     uint32_t width,height;float scale;int transparent,drawing,offscreen,layer_changed,capture,hidden;
     id<MTLTexture> offscreen_target,captured;
+    /* The window's frame as last drawn, kept for the next frame to draw
+       only what changed; generation names its contents. */
+    id<MTLTexture> back;uint64_t generation;int back_valid,partial;
     ZmInstance *instances;uint32_t instance_len,instance_capacity;
     ZmBatch *batches;uint32_t batch_len,batch_capacity;
     ZmBrush brushes[ZG_BRUSH_CAPACITY];uint32_t brush_len;
     NSMutableArray *frame_textures;
+    /* Capture textures of this frame, and those no frame the GPU draws
+       still uses, for later frames' captures of the same size. */
+    NSMutableArray<id<MTLTexture>> *frame_captures,*free_captures;
     float clips[ZM_CLIPS][4];uint32_t clip_depth;
     /* Instance buffers the GPU no longer reads, reused for later frames. */
     NSMutableArray<id<MTLBuffer>> *free_buffers;
@@ -160,6 +219,8 @@ static atomic_int live_objects;
     ZmRun *runs;uint32_t run_len,run_capacity;
     uint32_t *words;uint32_t word_len,word_capacity;
     ZmCapture captures[ZM_EFFECT_DEPTH];uint32_t capture_depth;
+    /* Compiled pipelines kept on disk across runs (MTLBinaryArchive). */
+    id archive;NSURL *archive_url;int archive_dirty;
     ZmStats stats;
 }
 @end
@@ -173,21 +234,89 @@ static atomic_int live_objects;
 
 static ZigMetalRenderer *R(void *p){return (__bridge ZigMetalRenderer *)p;}
 
+/* The pipeline archive of this device and system, in the shader cache the
+   other GPU renderers use: $XDG_CACHE_HOME/ziggurat/shader-cache, or
+   ~/.cache/ziggurat/shader-cache. An archive grown past 32 MiB starts over. */
+static void open_archive(ZigMetalRenderer *s){
+    if(@available(macOS 11.0,*)){
+        const char *xdg=getenv("XDG_CACHE_HOME"),*home=getenv("HOME");
+        NSString *base=xdg&&*xdg?[NSString stringWithUTF8String:xdg]:home&&*home?[[NSString stringWithUTF8String:home] stringByAppendingPathComponent:@".cache"]:nil;
+        NSURL *url=nil;
+        if(base){
+            NSString *dir=[base stringByAppendingPathComponent:@"ziggurat/shader-cache"];
+            NSFileManager *files=[NSFileManager defaultManager];
+            if([files createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil]){
+                NSString *key=[NSString stringWithFormat:@"%@|%llx|%@",s->device.name,(unsigned long long)s->device.registryID,[[NSProcessInfo processInfo] operatingSystemVersionString]];
+                uint64_t hash=1469598103934665603ull;
+                for(const char *c=[key UTF8String];c&&*c;c++){hash^=(uint8_t)*c;hash*=1099511628211ull;}
+                NSString *path=[dir stringByAppendingPathComponent:[NSString stringWithFormat:@"metal-%016llx.binarchive",(unsigned long long)hash]];
+                NSDictionary *attributes=[files attributesOfItemAtPath:path error:nil];
+                if(attributes&&[attributes fileSize]>32ull*1024*1024)[files removeItemAtPath:path error:nil];
+                url=[NSURL fileURLWithPath:path];
+            }
+        }
+        MTLBinaryArchiveDescriptor *d=[[MTLBinaryArchiveDescriptor alloc] init];
+        if(url&&[[NSFileManager defaultManager] fileExistsAtPath:url.path])d.url=url;
+        NSError *error=nil;id<MTLBinaryArchive> archive=[s->device newBinaryArchiveWithDescriptor:d error:&error];
+        /* One another system or GPU wrote, or damaged: start over. */
+        if(!archive&&d.url){d.url=nil;archive=[s->device newBinaryArchiveWithDescriptor:d error:&error];}
+        s->archive=archive;s->archive_url=url;
+    }
+}
+/* A pipeline the archive holds compiled when it does; otherwise compiled
+   now and added to it, for save_archive to keep. */
+static id<MTLRenderPipelineState> make_pipeline(ZigMetalRenderer *s,MTLRenderPipelineDescriptor *d,NSError **error){
+    if(@available(macOS 11.0,*)){
+        id<MTLBinaryArchive> archive=s->archive;
+        if(archive){
+            d.binaryArchives=@[archive];
+            id<MTLRenderPipelineState> cached=[s->device newRenderPipelineStateWithDescriptor:d options:MTLPipelineOptionFailOnBinaryArchiveMiss reflection:nil error:nil];
+            if(cached){s->stats.cached_pipelines++;return cached;}
+            d.binaryArchives=nil;
+            id<MTLRenderPipelineState> made=[s->device newRenderPipelineStateWithDescriptor:d error:error];
+            if(made&&[archive addRenderPipelineFunctionsWithDescriptor:d error:nil])s->archive_dirty=1;
+            return made;
+        }
+    }
+    return [s->device newRenderPipelineStateWithDescriptor:d error:error];
+}
+/* Writes the archive beside its file and moves it over, so a reader never
+   sees half of one. */
+static void save_archive(ZigMetalRenderer *s){
+    if(!s->archive_dirty||!s->archive_url)return;
+    s->archive_dirty=0;
+    if(@available(macOS 11.0,*)){
+        id<MTLBinaryArchive> archive=s->archive;
+        NSString *path=s->archive_url.path;
+        NSString *temporary=[path stringByAppendingFormat:@".%d.tmp",(int)getpid()];
+        if([archive serializeToURL:[NSURL fileURLWithPath:temporary] error:nil])rename([temporary fileSystemRepresentation],[path fileSystemRepresentation]);
+        else unlink([temporary fileSystemRepresentation]);
+    }
+}
+static MTLRenderPipelineDescriptor *blended(id<MTLLibrary> library,NSString *vertex,NSString *fragment,int blend){
+    MTLRenderPipelineDescriptor *d=[[MTLRenderPipelineDescriptor alloc] init];
+    d.vertexFunction=[library newFunctionWithName:vertex];d.fragmentFunction=[library newFunctionWithName:fragment];
+    MTLRenderPipelineColorAttachmentDescriptor *color=d.colorAttachments[0];
+    color.pixelFormat=MTLPixelFormatBGRA8Unorm;color.blendingEnabled=blend?YES:NO;
+    color.rgbBlendOperation=color.alphaBlendOperation=MTLBlendOperationAdd;
+    color.sourceRGBBlendFactor=color.sourceAlphaBlendFactor=MTLBlendFactorOne;
+    color.destinationRGBBlendFactor=color.destinationAlphaBlendFactor=MTLBlendFactorOneMinusSourceAlpha;
+    return d;
+}
 static int create_pipeline(ZigMetalRenderer *s){
     NSError *error=nil;
     id<MTLLibrary> library=[s->device newLibraryWithSource:shader_source options:nil error:&error];
     if(!library){NSLog(@"Ziggurat Metal shaders: %@",error);return 0;}
-    MTLRenderPipelineDescriptor *d=[[MTLRenderPipelineDescriptor alloc] init];
-    d.vertexFunction=[library newFunctionWithName:@"zm_vertex"];d.fragmentFunction=[library newFunctionWithName:@"zm_fragment"];
-    MTLRenderPipelineColorAttachmentDescriptor *color=d.colorAttachments[0];
-    color.pixelFormat=MTLPixelFormatBGRA8Unorm;color.blendingEnabled=YES;
-    color.rgbBlendOperation=color.alphaBlendOperation=MTLBlendOperationAdd;
-    color.sourceRGBBlendFactor=color.sourceAlphaBlendFactor=MTLBlendFactorOne;
-    color.destinationRGBBlendFactor=color.destinationAlphaBlendFactor=MTLBlendFactorOneMinusSourceAlpha;
-    s->pipeline=[s->device newRenderPipelineStateWithDescriptor:d error:&error];
-    if(!s->pipeline){NSLog(@"Ziggurat Metal pipeline: %@",error);return 0;}
+    open_archive(s);
+    s->pipeline=make_pipeline(s,blended(library,@"zm_vertex",@"zm_fragment",1),&error);
+    if(s->pipeline)s->replace_pipeline=make_pipeline(s,blended(library,@"zm_vertex",@"zm_fragment",0),&error);
+    if(s->replace_pipeline)s->filter_pipeline=make_pipeline(s,blended(library,@"zm_full_vertex",@"zm_filter",0),&error);
+    if(!s->filter_pipeline){NSLog(@"Ziggurat Metal pipeline: %@",error);return 0;}
+    save_archive(s);
     MTLSamplerDescriptor *sd=[[MTLSamplerDescriptor alloc] init];
     sd.minFilter=sd.magFilter=MTLSamplerMinMagFilterLinear;sd.mipFilter=MTLSamplerMipFilterNotMipmapped;
+    sd.sAddressMode=sd.tAddressMode=MTLSamplerAddressModeClampToZero;
+    s->mask_sampler=[s->device newSamplerStateWithDescriptor:sd];
     sd.sAddressMode=sd.tAddressMode=MTLSamplerAddressModeClampToEdge;
     s->linear_sampler=[s->device newSamplerStateWithDescriptor:sd];
     sd.minFilter=sd.magFilter=MTLSamplerMinMagFilterNearest;
@@ -195,7 +324,7 @@ static int create_pipeline(ZigMetalRenderer *s){
     MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:1 height:1 mipmapped:NO];
     s->blank=[s->device newTextureWithDescriptor:td];
     uint32_t white=0xffffffff;[s->blank replaceRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:0 withBytes:&white bytesPerRow:4];
-    return s->linear_sampler&&s->nearest_sampler&&s->blank;
+    return s->linear_sampler&&s->nearest_sampler&&s->mask_sampler&&s->blank;
 }
 
 void *zmtl_create(int *error){
@@ -206,6 +335,7 @@ void *zmtl_create(int *error){
         s->device=device;s->queue=[device newCommandQueue];
         if(!s->queue||!create_pipeline(s)){*error=2;return NULL;}
         s->free_buffers=[NSMutableArray array];s->frame_textures=[NSMutableArray array];
+        s->frame_captures=[NSMutableArray array];s->free_captures=[NSMutableArray array];
         s->glyphs=[NSMutableDictionary dictionary];s->fonts=[NSMutableArray array];s->font_sources=[NSMutableArray array];s->font_scales=[NSMutableArray array];
         s->slots=[NSMutableArray array];s->prepared_keys=[NSMutableArray array];s->prepared_textures=[NSMutableArray array];
         s->hidden=1;s->stats.device_creations=1;*error=0;
@@ -229,9 +359,11 @@ static NSView *find_view(NSView *root){
     return nil;
 }
 static void reset_frame(ZigMetalRenderer *s){
-    s->instance_len=0;s->batch_len=0;s->brush_len=0;s->clip_depth=0;s->run_len=0;s->word_len=0;s->capture_depth=0;
+    s->instance_len=0;s->batch_len=0;s->brush_len=0;s->clip_depth=0;s->run_len=0;s->word_len=0;s->capture_depth=0;s->partial=0;
     s->clips[0][0]=0;s->clips[0][1]=0;s->clips[0][2]=(float)s->width;s->clips[0][3]=(float)s->height;
     [s->frame_textures removeAllObjects];
+    /* A frame not encoded leaves its captures unused. */
+    if([s->frame_captures count]){@synchronized(s->free_captures){[s->free_captures addObjectsFromArray:s->frame_captures];}[s->frame_captures removeAllObjects];}
 }
 static int attach_layer(ZigMetalRenderer *s,NSWindow *window){
     NSView *view=s->view;
@@ -279,7 +411,71 @@ int zmtl_begin(void *p,void *native_window,uint32_t width,uint32_t height,float 
         }
     }
     s->width=width;s->height=height;s->scale=scale;s->transparent=transparent;s->offscreen=0;
+    if(!s->back||s->back.width!=width||s->back.height!=height){
+        MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
+        d.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;d.storageMode=MTLStorageModePrivate;
+        s->back=[s->device newTextureWithDescriptor:d];
+        s->back_valid=0;s->generation++;
+        if(!s->back)return 2;
+    }
     reset_frame(s);s->drawing=1;return 0;
+}
+/* Whether the kept frame holds the last frame presented at this size,
+   and which: a frame may then draw only its damage over it. */
+int zmtl_plane(void *p,uint64_t *generation){ZigMetalRenderer *s=R(p);*generation=s->generation;return s->drawing&&!s->offscreen&&s->back_valid;}
+/* This frame draws over the last one (its damage): the window's target
+   is not cleared first. */
+void zmtl_set_partial(void *p,int partial){ZigMetalRenderer *s=R(p);if(s->drawing&&!s->offscreen&&s->back_valid){s->partial=partial?1:0;if(partial)s->stats.partial_frames++;}}
+float zmtl_scale(void *p){return R(p)->scale;}
+
+static ZmInstance *push_with(ZigMetalRenderer *s,int bind,id<MTLTexture> texture,id<MTLTexture> mask,int replace){
+    if(s->instance_len==s->instance_capacity){
+        uint32_t capacity=s->instance_capacity?s->instance_capacity*2:1024;
+        ZmInstance *grown=realloc(s->instances,(size_t)capacity*sizeof(ZmInstance));if(!grown)return NULL;
+        s->instances=grown;s->instance_capacity=capacity;
+    }
+    ZmBatch *last=s->batch_len?&s->batches[s->batch_len-1]:NULL;
+    /* Untextured instances join any batch that blends as they do; a
+       textured one needs its own. */
+    int joins=last&&last->op==OP_DRAW&&last->replace==replace&&((bind==BIND_NONE&&!mask)||(last->bind==bind&&last->texture==texture&&last->mask==mask)||(last->bind==BIND_NONE&&!last->mask));
+    if(joins){
+        if(bind!=BIND_NONE&&last->bind==BIND_NONE){last->bind=bind;last->texture=texture;last->mask=mask;[s->frame_textures addObject:texture];if(mask)[s->frame_textures addObject:mask];}
+        last->count++;
+    }else{
+        if(s->batch_len==s->batch_capacity){
+            uint32_t capacity=s->batch_capacity?s->batch_capacity*2:64;
+            ZmBatch *grown=realloc(s->batches,(size_t)capacity*sizeof(ZmBatch));if(!grown)return NULL;
+            s->batches=grown;s->batch_capacity=capacity;
+        }
+        s->batches[s->batch_len++]=(ZmBatch){s->instance_len,1,bind,replace,texture,mask,OP_DRAW,0};
+        if(texture)[s->frame_textures addObject:texture];
+        if(mask)[s->frame_textures addObject:mask];
+    }
+    ZmInstance *i=&s->instances[s->instance_len++];memset(i,0,sizeof(*i));
+    memcpy(i->clip,s->clips[s->clip_depth],sizeof(i->clip));
+    return i;
+}
+static ZmInstance *push(ZigMetalRenderer *s,int bind,id<MTLTexture> texture){return push_with(s,bind,texture,nil,0);}
+static void device_rect(ZigMetalRenderer *s,float *out,double x,double y,double width,double height){
+    double k=s->scale;out[0]=(float)(x*k);out[1]=(float)(y*k);out[2]=(float)((x+width)*k);out[3]=(float)((y+height)*k);
+}
+static void rgba_color(float *out,uint32_t rgba){
+    float a=(float)(rgba&255)/255.0f;
+    out[0]=(float)(rgba>>24)/255.0f*a;out[1]=(float)((rgba>>16)&255)/255.0f*a;out[2]=(float)((rgba>>8)&255)/255.0f*a;out[3]=a;
+}
+static void rgb_color(float *out,uint32_t rgb){rgba_color(out,(rgb<<8)|255);}
+static int visible(ZigMetalRenderer *s){const float *c=s->clips[s->clip_depth];return c[2]>c[0]&&c[3]>c[1];}
+/* Makes device pixels x0, y0 to x1, y1 (under the clip) transparent. */
+void zmtl_clear_box(void *p,int32_t x0,int32_t y0,int32_t x1,int32_t y1){
+    ZigMetalRenderer *s=R(p);if(!visible(s))return;
+    ZmInstance *i=push_with(s,BIND_NONE,nil,nil,1);if(!i)return;
+    i->rect[0]=(float)x0;i->rect[1]=(float)y0;i->rect[2]=(float)x1;i->rect[3]=(float)y1;i->params[2]=KIND_RECT;
+}
+/* Clips to device pixels x0, y0 to x1, y1, as zmtl_push_clip does to DIP. */
+void zmtl_push_device_clip(void *p,int32_t x0,int32_t y0,int32_t x1,int32_t y1){
+    ZigMetalRenderer *s=R(p);if(s->clip_depth+1>=ZM_CLIPS)return;
+    const float *b=s->clips[s->clip_depth];float *a=s->clips[++s->clip_depth];
+    a[0]=fmaxf(b[0],(float)x0);a[1]=fmaxf(b[1],(float)y0);a[2]=fminf(b[2],(float)x1);a[3]=fminf(b[3],(float)y1);
 }
 int zmtl_begin_offscreen(void *p,uint32_t width,uint32_t height,float scale,int transparent){
     ZigMetalRenderer *s=R(p);if(s->drawing||!width||!height)return 1;
@@ -291,42 +487,6 @@ int zmtl_begin_offscreen(void *p,uint32_t width,uint32_t height,float scale,int 
     s->width=width;s->height=height;s->scale=scale;s->transparent=transparent;s->offscreen=1;
     reset_frame(s);s->drawing=1;return 0;
 }
-float zmtl_scale(void *p){return R(p)->scale;}
-
-static ZmInstance *push(ZigMetalRenderer *s,int bind,id<MTLTexture> texture){
-    if(s->instance_len==s->instance_capacity){
-        uint32_t capacity=s->instance_capacity?s->instance_capacity*2:1024;
-        ZmInstance *grown=realloc(s->instances,(size_t)capacity*sizeof(ZmInstance));if(!grown)return NULL;
-        s->instances=grown;s->instance_capacity=capacity;
-    }
-    ZmBatch *last=s->batch_len?&s->batches[s->batch_len-1]:NULL;
-    /* Untextured instances join any batch; a textured one needs its own. */
-    int joins=last&&last->op==OP_DRAW&&(bind==BIND_NONE||(last->bind==bind&&last->texture==texture)||last->bind==BIND_NONE);
-    if(joins){
-        if(bind!=BIND_NONE&&last->bind==BIND_NONE){last->bind=bind;last->texture=texture;[s->frame_textures addObject:texture];}
-        last->count++;
-    }else{
-        if(s->batch_len==s->batch_capacity){
-            uint32_t capacity=s->batch_capacity?s->batch_capacity*2:64;
-            ZmBatch *grown=realloc(s->batches,(size_t)capacity*sizeof(ZmBatch));if(!grown)return NULL;
-            s->batches=grown;s->batch_capacity=capacity;
-        }
-        s->batches[s->batch_len++]=(ZmBatch){s->instance_len,1,bind,texture,OP_DRAW,0};
-        if(texture)[s->frame_textures addObject:texture];
-    }
-    ZmInstance *i=&s->instances[s->instance_len++];memset(i,0,sizeof(*i));
-    memcpy(i->clip,s->clips[s->clip_depth],sizeof(i->clip));
-    return i;
-}
-static void device_rect(ZigMetalRenderer *s,float *out,double x,double y,double width,double height){
-    double k=s->scale;out[0]=(float)(x*k);out[1]=(float)(y*k);out[2]=(float)((x+width)*k);out[3]=(float)((y+height)*k);
-}
-static void rgba_color(float *out,uint32_t rgba){
-    float a=(float)(rgba&255)/255.0f;
-    out[0]=(float)(rgba>>24)/255.0f*a;out[1]=(float)((rgba>>16)&255)/255.0f*a;out[2]=(float)((rgba>>8)&255)/255.0f*a;out[3]=a;
-}
-static void rgb_color(float *out,uint32_t rgb){rgba_color(out,(rgb<<8)|255);}
-static int visible(ZigMetalRenderer *s){const float *c=s->clips[s->clip_depth];return c[2]>c[0]&&c[3]>c[1];}
 
 void zmtl_fill(void *p,float x,float y,float width,float height,uint32_t rgb){
     ZigMetalRenderer *s=R(p);if(!visible(s))return;
@@ -343,15 +503,31 @@ int zmtl_shape(void *p,float x,float y,float width,float height,float radius,flo
     i->params[0]=(float)(fmin(radius,fmin(dw,dh)/2)*s->scale);i->params[1]=(float)(stroke*s->scale);i->params[2]=KIND_SHAPE;
     return 0;
 }
-/* spread: 0 pad, 1 repeat, 2 reflect. */
-int zmtl_gradient(void *p,float x,float y,float width,float height,float radius,float stroke,const ZgBrush *brush,uint32_t spread){
+/* A stop's premultiplied coordinates in the space its gradient mixes in
+   (src/ui/gradient_color.zig): encoded sRGB, linear sRGB or Oklab. */
+static double srgb_decode(double v){return v<=0.04045?v/12.92:pow((v+0.055)/1.055,2.4);}
+static void stop_color(float *out,uint32_t rgba,uint32_t space){
+    if(space==0){rgba_color(out,rgba);return;}
+    double a=(double)(rgba&255)/255.0;
+    if(a==0){out[0]=out[1]=out[2]=out[3]=0;return;}
+    double c[3]={srgb_decode((double)(rgba>>24)/255.0),srgb_decode((double)((rgba>>16)&255)/255.0),srgb_decode((double)((rgba>>8)&255)/255.0)};
+    if(space==2){
+        double l=cbrt(0.4122214708*c[0]+0.5363325363*c[1]+0.0514459929*c[2]),m=cbrt(0.2119034982*c[0]+0.6806995451*c[1]+0.1073969566*c[2]),q=cbrt(0.0883024619*c[0]+0.2817188376*c[1]+0.6299787005*c[2]);
+        c[0]=0.2104542553*l+0.7936177850*m-0.0040720468*q;c[1]=1.9779984951*l-2.4285922050*m+0.4505937099*q;c[2]=0.0259040371*l+0.7827717662*m-0.8086757660*q;
+    }
+    for(int k=0;k<3;k++)out[k]=(float)(c[k]*a);
+    out[3]=(float)a;
+}
+/* spread: 0 pad, 1 repeat, 2 reflect; space: 0 sRGB, 1 linear sRGB, 2 Oklab. */
+int zmtl_gradient(void *p,float x,float y,float width,float height,float radius,float stroke,const ZgBrush *brush,uint32_t spread,uint32_t space){
     ZigMetalRenderer *s=R(p);
     if(width==0||height==0||!visible(s))return 0;
     if(brush->len==0||brush->len>ZG_STOP_CAPACITY||s->brush_len==ZG_BRUSH_CAPACITY)return 1;
     ZmBrush *b=&s->brushes[s->brush_len];memset(b,0,sizeof(*b));
-    b->head[0]=(float)brush->kind;b->head[1]=(float)spread;b->head[2]=(float)brush->len;
+    if(space>2)return 1;
+    b->head[0]=(float)brush->kind;b->head[1]=(float)spread;b->head[2]=(float)brush->len;b->head[3]=(float)space;
     b->ab[0]=brush->x0;b->ab[1]=brush->y0;b->ab[2]=brush->x1;b->ab[3]=brush->y1;
-    for(uint32_t k=0;k<brush->len;k++){b->offsets[k]=brush->stops[k].offset;rgba_color(b->colors[k],brush->stops[k].rgba);}
+    for(uint32_t k=0;k<brush->len;k++){b->offsets[k]=brush->stops[k].offset;stop_color(b->colors[k],brush->stops[k].rgba,space);}
     double dx=x,dy=y,dw=width,dh=height;normalize_rect(&dx,&dy,&dw,&dh);
     ZmInstance *i=push(s,BIND_NONE,nil);if(!i)return 1;
     device_rect(s,i->rect,dx,dy,dw,dh);i->color[3]=1;
@@ -593,9 +769,10 @@ int zmtl_effect_install(void *p,uint32_t slot,const char *source,size_t len){
         if(!vertex||!fragment)return 2;
         MTLRenderPipelineDescriptor *d=[[MTLRenderPipelineDescriptor alloc] init];
         d.vertexFunction=vertex;d.fragmentFunction=fragment;d.colorAttachments[0].pixelFormat=MTLPixelFormatBGRA8Unorm;
-        id<MTLRenderPipelineState> pipeline=[s->device newRenderPipelineStateWithDescriptor:d error:&error];
+        id<MTLRenderPipelineState> pipeline=make_pipeline(s,d,&error);
         if(!pipeline)return 3;
         s->effect_pipelines[slot]=pipeline;
+        save_archive(s);
     }
     return 0;
 }
@@ -607,7 +784,7 @@ static ZmBatch *push_op(ZigMetalRenderer *s,uint32_t op,uint32_t run){
         ZmBatch *grown=realloc(s->batches,(size_t)capacity*sizeof(ZmBatch));if(!grown)return NULL;
         s->batches=grown;s->batch_capacity=capacity;
     }
-    ZmBatch *b=&s->batches[s->batch_len++];*b=(ZmBatch){s->instance_len,0,BIND_NONE,nil,op,run};
+    ZmBatch *b=&s->batches[s->batch_len++];*b=(ZmBatch){s->instance_len,0,BIND_NONE,0,nil,nil,op,run};
     return b;
 }
 static ZmRun *new_run(ZigMetalRenderer *s,uint32_t *index){
@@ -633,11 +810,25 @@ static int keep_words(ZigMetalRenderer *s,ZmRun *run,const ZmEffectPass *pass){
     run->slot=pass->slot;run->word_offset=start;run->word_count=pass->word_count;run->params=pass->params;run->has_pass=1;
     s->word_len=end;return 1;
 }
+/* A texture for one of the frame's captures, reused from an earlier
+   frame's of the same size and use when one is free. */
 static id<MTLTexture> effect_texture(ZigMetalRenderer *s,uint32_t width,uint32_t height,MTLTextureUsage usage){
-    MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
-    d.usage=usage;d.storageMode=MTLStorageModePrivate;
-    id<MTLTexture> texture=[s->device newTextureWithDescriptor:d];
-    if(texture)[s->frame_textures addObject:texture];
+    id<MTLTexture> texture=nil;
+    @synchronized(s->free_captures){
+        NSUInteger count=[s->free_captures count];
+        for(NSUInteger k=0;k<count;k++){
+            id<MTLTexture> candidate=s->free_captures[k];
+            if(candidate.width==width&&candidate.height==height&&candidate.usage==usage){texture=candidate;[s->free_captures removeObjectAtIndex:k];break;}
+        }
+        /* Keep a few frames' worth. */
+        while([s->free_captures count]>24)[s->free_captures removeObjectAtIndex:0];
+    }
+    if(!texture){
+        MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
+        d.usage=usage;d.storageMode=MTLStorageModePrivate;
+        texture=[s->device newTextureWithDescriptor:d];
+    }
+    if(texture)[s->frame_captures addObject:texture];
     return texture;
 }
 int zmtl_effect_geometry(void *p,ZmEffectGeometry *out){
@@ -653,28 +844,137 @@ int zmtl_effect_geometry(void *p,ZmEffectGeometry *out){
     if(clip[2]<clip[0])clip[2]=clip[0];if(clip[3]<clip[1])clip[3]=clip[1];
     memcpy(out->clip,clip,sizeof(clip));return 0;
 }
+/* Opens a capture of width x height texels, texel 0 at device pixel
+   (ox, oy) of the current target's coordinates, drawn under clip alone
+   (device pixels). 0, 1 too deep or not drawing, 2 failed. */
+static int open_capture(ZigMetalRenderer *s,uint32_t kind,uint64_t width,uint64_t height,double ox,double oy,const float clip[4],ZmCapture **out){
+    if(!s->drawing||s->capture_depth==ZM_EFFECT_DEPTH)return 1;
+    if(!width||!height||width>ZM_TEXTURE_LIMIT||height>ZM_TEXTURE_LIMIT)return 1;
+    uint32_t index;ZmRun *run=new_run(s,&index);if(!run)return 2;
+    run->kind=kind;
+    run->source=effect_texture(s,(uint32_t)width,(uint32_t)height,MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead);if(!run->source)return 2;
+    run->origin[0]=(float)ox;run->origin[1]=(float)oy;
+    if(!push_op(s,OP_CAPTURE,index))return 2;
+    ZmCapture *c=&s->captures[s->capture_depth++];
+    memcpy(c->clips,s->clips,sizeof(c->clips));c->clip_depth=s->clip_depth;c->run=index;c->width=(uint32_t)width;c->height=(uint32_t)height;
+    c->kind=kind;c->empty=0;c->opacity=255;c->mask=UINT32_MAX;
+    s->clip_depth=0;memcpy(s->clips[0],clip,sizeof(s->clips[0]));
+    *out=c;return 0;
+}
 /* Begin an element effect's capture of width x height physical pixels at
    left, top with a transparent margin of radius around them: what follows
    draws into it, clipped to those pixels alone. 0, 1 too deep or not
    drawing, 2 failed. */
 int zmtl_begin_effect(void *p,int32_t left,int32_t top,uint32_t width,uint32_t height,uint32_t radius){
-    ZigMetalRenderer *s=R(p);if(!s->drawing||s->capture_depth==ZM_EFFECT_DEPTH)return 1;
-    uint64_t pw=(uint64_t)width+2*(uint64_t)radius,ph=(uint64_t)height+2*(uint64_t)radius;
-    if(!width||!height||pw>ZM_TEXTURE_LIMIT||ph>ZM_TEXTURE_LIMIT)return 1;
-    uint32_t index;ZmRun *run=new_run(s,&index);if(!run)return 2;
-    run->source=effect_texture(s,(uint32_t)pw,(uint32_t)ph,MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead);if(!run->source)return 2;
-    run->origin[0]=(float)((double)left-radius);run->origin[1]=(float)((double)top-radius);
-    if(!push_op(s,OP_CAPTURE,index))return 2;
-    ZmCapture *c=&s->captures[s->capture_depth++];
-    memcpy(c->clips,s->clips,sizeof(c->clips));c->clip_depth=s->clip_depth;c->run=index;c->width=(uint32_t)pw;c->height=(uint32_t)ph;
-    s->clip_depth=0;s->clips[0][0]=(float)left;s->clips[0][1]=(float)top;s->clips[0][2]=(float)((double)left+width);s->clips[0][3]=(float)((double)top+height);
+    ZigMetalRenderer *s=R(p);
+    const float clip[4]={(float)left,(float)top,(float)((double)left+width),(float)((double)top+height)};
+    ZmCapture *c;
+    return open_capture(s,RUN_EFFECT,(uint64_t)width+2*(uint64_t)radius,(uint64_t)height+2*(uint64_t)radius,(double)left-radius,(double)top-radius,clip,&c);
+}
+/* Composites group (opacity, mask) of c, whose bounds are in device pixels. */
+static void keep_group(ZigMetalRenderer *s,ZmCapture *c,const ZgLayerGroup *group){
+    c->opacity=group->opacity>255?255:group->opacity;c->mask=group->mask_slot;
+    if(group->mask_slot!=UINT32_MAX){
+        id<MTLTexture> mask=slot_texture(s,group->mask_slot);
+        double x=(double)group->mask_x*s->scale+group->mask_left,y=(double)group->mask_y*s->scale+group->mask_top;
+        c->mask_rect[0]=(float)x;c->mask_rect[1]=(float)y;c->mask_rect[2]=(float)(x+(mask?mask.width:1));c->mask_rect[3]=(float)(y+(mask?mask.height:1));
+    }
+}
+/* Begin a group: its pixels under the clip (whole device pixels), drawn
+   in the current target's coordinates. 0, 1 too deep, invalid or not
+   drawing, 2 failed. */
+int zmtl_begin_group(void *p,const ZgLayerGroup *group){
+    ZigMetalRenderer *s=R(p);if(!s->drawing)return 1;
+    if(group->mask_slot!=UINT32_MAX){id<MTLTexture> mask=slot_texture(s,group->mask_slot);if(!mask||mask.pixelFormat!=MTLPixelFormatR8Unorm)return 1;}
+    float r[4];device_rect(s,r,group->x,group->y,group->width,group->height);
+    const float *clip=s->clips[s->clip_depth];
+    double box[4]={floor(fmax(r[0],clip[0])),floor(fmax(r[1],clip[1])),ceil(fmin(r[2],clip[2])),ceil(fmin(r[3],clip[3]))};
+    int empty=!(box[2]>box[0]&&box[3]>box[1]);
+    if(empty){box[2]=box[0]+1;box[3]=box[1]+1;}
+    float inner[4]={(float)box[0],(float)box[1],(float)box[2],(float)box[3]};
+    if(empty)inner[2]=inner[0],inner[3]=inner[1];
+    ZmCapture *c;int status=open_capture(s,RUN_GROUP,(uint64_t)(box[2]-box[0]),(uint64_t)(box[3]-box[1]),box[0],box[1],inner,&c);if(status)return status;
+    c->empty=empty;memcpy(c->bounds,r,sizeof(r));keep_group(s,c,group);
+    return 0;
+}
+/* Begin a Gaussian group: its capture (physical pixels, as
+   src/ui/gaussian_scope.zig plans it) with a transparent margin of the
+   kernel's radius, filtered when it closes. */
+int zmtl_begin_gaussian(void *p,const ZgLayerGroup *group,int32_t left,int32_t top,uint32_t width,uint32_t height,uint32_t radius,const uint32_t *weights){
+    ZigMetalRenderer *s=R(p);if(!s->drawing||radius>128)return 1;
+    if(group->mask_slot!=UINT32_MAX){id<MTLTexture> mask=slot_texture(s,group->mask_slot);if(!mask||mask.pixelFormat!=MTLPixelFormatR8Unorm)return 1;}
+    const uint64_t pw=(uint64_t)width+2*(uint64_t)radius,ph=(uint64_t)height+2*(uint64_t)radius;
+    const float clip[4]={(float)left,(float)top,(float)((double)left+width),(float)((double)top+height)};
+    ZmCapture *c;int status=open_capture(s,RUN_GAUSSIAN,pw,ph,(double)left-radius,(double)top-radius,clip,&c);if(status)return status;
+    ZmRun *run=&s->runs[c->run];
+    uint32_t filter[4+257]={(uint32_t)pw,(uint32_t)ph,radius,0};memcpy(filter+4,weights,257*sizeof(uint32_t));
+    const ZmEffectPass pass={.words=filter,.word_count=4+257};
+    if(!keep_words(s,run,&pass))return 2;
+    run->has_pass=0;
+    c->bounds[0]=(float)((double)left-radius);c->bounds[1]=(float)((double)top-radius);c->bounds[2]=(float)((double)left+width+radius);c->bounds[3]=(float)((double)top+height+radius);
+    keep_group(s,c,group);
+    return 0;
+}
+/* Close the innermost group: filter a Gaussian group's capture, then
+   composite it at its opacity through its mask under the clip it began in,
+   inside its bounds. */
+int zmtl_end_group(void *p){
+    ZigMetalRenderer *s=R(p);if(!s->drawing||!s->capture_depth)return 1;
+    ZmCapture *c=&s->captures[s->capture_depth-1];if(c->kind!=RUN_GROUP&&c->kind!=RUN_GAUSSIAN)return 1;
+    s->capture_depth--;
+    memcpy(s->clips,c->clips,sizeof(s->clips));s->clip_depth=c->clip_depth;
+    ZmRun *run=&s->runs[c->run];
+    if(c->kind==RUN_GAUSSIAN){
+        run->temp=effect_texture(s,c->width,c->height,MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead);
+        run->output=effect_texture(s,c->width,c->height,MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead);
+        if(!run->temp||!run->output)return 2;
+    }
+    if(!push_op(s,OP_EFFECT,c->run))return 2;
+    s->stats.layers++;
+    if(c->empty||!visible(s)||c->opacity==0)return 0;
+    id<MTLTexture> mask=c->mask==UINT32_MAX?nil:slot_texture(s,c->mask);
+    if(c->mask!=UINT32_MAX&&!mask)return 1;
+    ZmInstance *i=push_with(s,BIND_TEXTURE,run->output?run->output:run->source,mask,0);if(!i)return 2;
+    memcpy(i->rect,c->bounds,sizeof(i->rect));
+    float alpha=(float)c->opacity/255.0f;i->color[0]=i->color[1]=i->color[2]=i->color[3]=alpha;
+    i->params[0]=run->origin[0];i->params[1]=run->origin[1];i->params[2]=KIND_LAYER;i->params[3]=mask?1:0;
+    memcpy(i->uv,c->mask_rect,sizeof(i->uv));
+    return 0;
+}
+/* Begin a raster transform's source: pixel_width x pixel_height physical
+   pixels of local coordinates with a transparent guard texel around them,
+   local zero at texel (1, 1), clipped to the source rectangle. */
+int zmtl_begin_transform(void *p,uint32_t pixel_width,uint32_t pixel_height,float source_width,float source_height){
+    ZigMetalRenderer *s=R(p);if(!s->drawing)return 1;
+    const float clip[4]={0,0,(float)((double)source_width*s->scale),(float)((double)source_height*s->scale)};
+    ZmCapture *c;return open_capture(s,RUN_TRANSFORM,(uint64_t)pixel_width+2,(uint64_t)pixel_height+2,-1,-1,clip,&c);
+}
+/* Close the innermost transform: sample its source back through inverse
+   (local DIP of parent DIP: xx, yx, xy, yy, x0, y0) over bounds (device
+   pixels of the parent) under the clip it began in. */
+int zmtl_end_transform(void *p,const double inverse[6],const float bounds[4]){
+    ZigMetalRenderer *s=R(p);if(!s->drawing||!s->capture_depth)return 1;
+    ZmCapture *c=&s->captures[s->capture_depth-1];if(c->kind!=RUN_TRANSFORM)return 1;
+    s->capture_depth--;
+    memcpy(s->clips,c->clips,sizeof(s->clips));s->clip_depth=c->clip_depth;
+    ZmRun *run=&s->runs[c->run];
+    if(!push_op(s,OP_EFFECT,c->run))return 2;
+    s->stats.layers++;
+    if(!visible(s)||!(bounds[2]>bounds[0]&&bounds[3]>bounds[1]))return 0;
+    ZmInstance *i=push(s,BIND_TEXTURE,run->source);if(!i)return 2;
+    memcpy(i->rect,bounds,sizeof(i->rect));
+    /* Texel coordinates of a device pixel: the inverse in DIP, the scales
+       cancelling, local zero at texel (1, 1) and texel centers at .5. */
+    i->uv[0]=(float)inverse[0];i->uv[1]=(float)inverse[2];i->uv[2]=(float)inverse[1];i->uv[3]=(float)inverse[3];
+    i->params[0]=(float)(inverse[4]*s->scale+0.5);i->params[1]=(float)(inverse[5]*s->scale+0.5);i->params[2]=KIND_TRANSFORM;
+    i->color[3]=1;
     return 0;
 }
 /* Close the innermost capture: run pass over it (NULL composites the
    content as drawn) and composite the result at opacity under the clip
    the capture began in. */
 int zmtl_end_effect(void *p,const ZmEffectPass *pass,uint32_t opacity){
-    ZigMetalRenderer *s=R(p);if(!s->drawing||!s->capture_depth)return 1;
+    ZigMetalRenderer *s=R(p);if(!s->drawing||!s->capture_depth||s->captures[s->capture_depth-1].kind!=RUN_EFFECT)return 1;
     if(pass&&(pass->slot>=ZM_EFFECT_SLOTS||!s->effect_pipelines[pass->slot]))return 1;
     ZmCapture *c=&s->captures[--s->capture_depth];
     memcpy(s->clips,c->clips,sizeof(s->clips));s->clip_depth=c->clip_depth;
@@ -725,7 +1025,8 @@ typedef struct ZmLevel {__unsafe_unretained id<MTLTexture> texture;float origin[
 static id<MTLRenderCommandEncoder> open_level(ZigMetalRenderer *s,id<MTLCommandBuffer> commands,ZmLevel *level,int root,id<MTLBuffer> buffer,size_t brush_offset){
     MTLRenderPassDescriptor *pass=[MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture=level->texture;pass.colorAttachments[0].storeAction=MTLStoreActionStore;
-    pass.colorAttachments[0].loadAction=level->started?MTLLoadActionLoad:MTLLoadActionClear;
+    /* A frame drawing only its damage starts from the last one. */
+    pass.colorAttachments[0].loadAction=level->started||(root&&s->partial)?MTLLoadActionLoad:MTLLoadActionClear;
     /* An opaque frame starts white, as the software plane does; captures
        start transparent. */
     pass.colorAttachments[0].clearColor=root&&!s->transparent?MTLClearColorMake(1,1,1,1):MTLClearColorMake(0,0,0,0);
@@ -735,7 +1036,7 @@ static id<MTLRenderCommandEncoder> open_level(ZigMetalRenderer *s,id<MTLCommandB
     ZmUniforms uniforms={(float)level->texture.width,(float)level->texture.height,s->scale,0,{level->origin[0],level->origin[1]},{0,0}};
     [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:0];[encoder setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:0];
     [encoder setFragmentBuffer:buffer offset:brush_offset atIndex:2];
-    [encoder setFragmentSamplerState:s->linear_sampler atIndex:0];[encoder setFragmentSamplerState:s->nearest_sampler atIndex:1];
+    [encoder setFragmentSamplerState:s->linear_sampler atIndex:0];[encoder setFragmentSamplerState:s->nearest_sampler atIndex:1];[encoder setFragmentSamplerState:s->mask_sampler atIndex:2];
     return encoder;
 }
 /* Run run's program into target over quad (normalized device x0, y0, x1,
@@ -754,6 +1055,24 @@ static int run_effect(ZigMetalRenderer *s,id<MTLCommandBuffer> commands,const Zm
     [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
     [encoder endEncoding];
     s->stats.effect_passes++;
+    return 0;
+}
+/* One pass of a Gaussian group's integer filter (src/ui/gaussian_kernel.zig)
+   from source to target, the kernel at offset of buffer. */
+static int filter_pass(ZigMetalRenderer *s,id<MTLCommandBuffer> commands,id<MTLTexture> source,id<MTLTexture> target,uint32_t vertical,id<MTLBuffer> buffer,size_t offset){
+    MTLRenderPassDescriptor *pass=[MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture=target;pass.colorAttachments[0].loadAction=MTLLoadActionDontCare;pass.colorAttachments[0].storeAction=MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> encoder=[commands renderCommandEncoderWithDescriptor:pass];if(!encoder)return 2;
+    [encoder setRenderPipelineState:s->filter_pipeline];
+    /* The kernel's words, with vertical in the fourth. */
+    uint32_t *words=(uint32_t *)((uint8_t *)buffer.contents+offset);
+    uint32_t header[4]={words[0],words[1],words[2],vertical};
+    [encoder setFragmentBuffer:buffer offset:offset atIndex:0];
+    [encoder setFragmentBytes:header length:sizeof(header) atIndex:1];
+    [encoder setFragmentTexture:source atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    [encoder endEncoding];
+    s->stats.filter_passes++;
     return 0;
 }
 static int encode(ZigMetalRenderer *s,id<MTLCommandBuffer> commands,id<MTLTexture> target){
@@ -778,7 +1097,8 @@ static int encode(ZigMetalRenderer *s,id<MTLCommandBuffer> commands,id<MTLTextur
             ZM_OPEN();
             size_t offset=(size_t)b->first*sizeof(ZmInstance);
             [encoder setVertexBuffer:buffer offset:offset atIndex:1];[encoder setFragmentBuffer:buffer offset:offset atIndex:1];
-            [encoder setFragmentTexture:b->texture?b->texture:s->blank atIndex:0];
+            [encoder setRenderPipelineState:b->replace?s->replace_pipeline:s->pipeline];
+            [encoder setFragmentTexture:b->texture?b->texture:s->blank atIndex:0];[encoder setFragmentTexture:b->mask?b->mask:s->blank atIndex:1];
             [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4 instanceCount:b->count];
             break;
         }
@@ -794,9 +1114,12 @@ static int encode(ZigMetalRenderer *s,id<MTLCommandBuffer> commands,id<MTLTextur
             ZM_OPEN();ZM_CLOSE();
             if(depth==0){failed=1;goto done;}
             const ZmRun *run=&s->runs[b->run];
-            if(run->has_pass){
+            if(run->kind==RUN_EFFECT&&run->has_pass){
                 const float quad[4]={-1,1,1,-1},origin[2]={0,0};
                 if(run_effect(s,commands,run,run->output,MTLLoadActionDontCare,quad,origin,run->source,buffer,word_offset)){failed=1;goto done;}
+            }else if(run->kind==RUN_GAUSSIAN){
+                /* Horizontal into temp, vertical into the output. */
+                if(filter_pass(s,commands,run->source,run->temp,0,buffer,word_offset+(size_t)run->word_offset*4)||filter_pass(s,commands,run->temp,run->output,1,buffer,word_offset+(size_t)run->word_offset*4)){failed=1;goto done;}
             }
             depth--;
             break;
@@ -822,8 +1145,13 @@ done:
     ZM_CLOSE();
 #undef ZM_OPEN
 #undef ZM_CLOSE
-    NSMutableArray *free_buffers=s->free_buffers;
-    [commands addCompletedHandler:^(id<MTLCommandBuffer> done){(void)done;@synchronized(free_buffers){[free_buffers addObject:buffer];}}];
+    NSMutableArray *free_buffers=s->free_buffers,*free_captures=s->free_captures;
+    NSArray *captures=[s->frame_captures copy];[s->frame_captures removeAllObjects];
+    [commands addCompletedHandler:^(id<MTLCommandBuffer> done){
+        (void)done;
+        @synchronized(free_buffers){[free_buffers addObject:buffer];}
+        if([captures count])@synchronized(free_captures){[free_captures addObjectsFromArray:captures];}
+    }];
     if(failed)return 2;
     s->stats.frames++;s->stats.instances+=s->instance_len;s->stats.batches+=s->batch_len;
     return 0;
@@ -855,8 +1183,13 @@ int zmtl_end(void *p){
         layer.presentsWithTransaction=with_transaction?YES:NO;
         id<CAMetalDrawable> drawable=[layer nextDrawable];
         if(!drawable){s->stats.busy_presents++;reset_frame(s);return 3;}
-        id<MTLCommandBuffer> commands=[s->queue commandBuffer];if(!commands)return 2;
-        if(encode(s,commands,drawable.texture)){reset_frame(s);return 2;}
+        id<MTLCommandBuffer> commands=[s->queue commandBuffer];if(!commands){s->back_valid=0;s->generation++;reset_frame(s);return 2;}
+        if(encode(s,commands,s->back)){s->back_valid=0;s->generation++;reset_frame(s);return 2;}
+        id<MTLBlitCommandEncoder> blit=[commands blitCommandEncoder];
+        if(!blit||drawable.texture.width!=s->back.width||drawable.texture.height!=s->back.height){[blit endEncoding];s->back_valid=0;s->generation++;reset_frame(s);return 2;}
+        [blit copyFromTexture:s->back sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(s->width,s->height,1) toTexture:drawable.texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];
+        [blit endEncoding];
+        s->back_valid=1;
         if(s->capture)capture_texture(s,commands,drawable.texture);
         int was_hidden=s->hidden;
         if(with_transaction){
@@ -894,6 +1227,8 @@ int zmtl_end_offscreen(void *p,uint8_t *pixels,size_t stride){
     return 0;
 }
 void zmtl_abort(void *p){ZigMetalRenderer *s=R(p);s->drawing=0;reset_frame(s);}
+/* The kept frame no longer holds what a frame expects to draw over. */
+void zmtl_forget_plane(void *p){ZigMetalRenderer *s=R(p);s->back_valid=0;s->generation++;}
 /* The software renderer draws the next frame: hide the layer over it. */
 int zmtl_suspend(void *p){
     ZigMetalRenderer *s=R(p);if(!s->layer||s->hidden)return 0;set_hidden(s,1);

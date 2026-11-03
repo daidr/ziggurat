@@ -1,19 +1,26 @@
 //! The macOS GPU renderer: replays a frame's commands with Metal into a
 //! CAMetalLayer of the window's view (src/ui/metal.m).
 //!
-//! It draws fills, rounded shapes and strokes, gradients in sRGB
-//! interpolation (linear, radial and conic, padded, repeated or
-//! reflected), text, prepared text, coverage masks, images, clips and
-//! shader effects: element effects over a capture of their content and
-//! backdrop shaders over a copy of the target, with programs translated to
-//! MSL and compiled outside paint by `prepareEffect`. A frame that uses
-//! anything else (groups, transforms, Gaussian filters, backdrop effects,
-//! loading indicators, GPU textures, gradients interpolated in another
-//! space, a shader program not prepared) draws on the software plane
-//! instead, as `prepareEffects` tells; so does a frame drawing an image or
-//! mask not yet uploaded (`holdsFrame`), which `residentFrame` uploads for
-//! the next.
+//! It draws fills, rounded shapes and strokes, gradients (linear, radial
+//! and conic, padded, repeated or reflected, mixed in sRGB, linear sRGB or
+//! Oklab), text, prepared text, coverage masks, images, clips, groups (at
+//! an opacity, through a mask, or filtered with a Gaussian kernel), raster
+//! transforms and shader effects: element effects over a capture of their
+//! content and backdrop shaders over a copy of the target, with programs
+//! translated to MSL and compiled outside paint by `prepareEffect`. Groups
+//! and transforms capture their content in textures of the frame, as the
+//! software planes do; their limits (depth, transform sources, Gaussian
+//! capacity) are the software renderer's plan, which `Context` checks each
+//! frame against. A frame that uses anything else (backdrop effects,
+//! loading indicators, GPU textures, a shader effect inside a transform, a
+//! shader program not prepared) draws on the software plane instead, as
+//! `prepareEffects` tells; so does a frame drawing an image or mask not yet
+//! uploaded (`holdsFrame`), which `residentFrame` uploads for the next.
+//!
+//! The window's frame is kept between frames: `replayDamage` draws again
+//! only the device pixels that changed (src/ui/damage.zig).
 const std = @import("std");
+const zio = @import("ziggurat_io");
 const fonts = @import("ziggurat_fonts");
 const z = @import("ziggurat");
 pub const commands = @import("commands.zig");
@@ -26,6 +33,8 @@ const gpu_resources = @import("gpu_resources.zig");
 const gaussian_scope = @import("gaussian_scope.zig");
 const effect_host = @import("gpu_effect_host.zig");
 const shader_effects = commands.shader_effects;
+const gaussian = @import("gaussian_filter.zig");
+const damage = @import("damage.zig");
 
 extern fn zmtl_create(*c_int) ?*anyopaque;
 extern fn zmtl_destroy(?*anyopaque) void;
@@ -35,7 +44,17 @@ extern fn zmtl_begin_offscreen(*anyopaque, u32, u32, f32, c_int) c_int;
 extern fn zmtl_scale(*anyopaque) f32;
 extern fn zmtl_fill(*anyopaque, f32, f32, f32, f32, u32) void;
 extern fn zmtl_shape(*anyopaque, f32, f32, f32, f32, f32, f32, u32) c_int;
-extern fn zmtl_gradient(*anyopaque, f32, f32, f32, f32, f32, f32, *const commands.brushes.Native, u32) c_int;
+extern fn zmtl_gradient(*anyopaque, f32, f32, f32, f32, f32, f32, *const commands.brushes.Native, u32, u32) c_int;
+extern fn zmtl_begin_group(*anyopaque, *const layers.NativeGroup) c_int;
+extern fn zmtl_begin_gaussian(*anyopaque, *const layers.NativeGroup, i32, i32, u32, u32, u32, *const [gaussian.arithmetic.capacity]u32) c_int;
+extern fn zmtl_end_group(*anyopaque) c_int;
+extern fn zmtl_begin_transform(*anyopaque, u32, u32, f32, f32) c_int;
+extern fn zmtl_end_transform(*anyopaque, *const [6]f64, *const [4]f32) c_int;
+extern fn zmtl_plane(*anyopaque, *u64) c_int;
+extern fn zmtl_set_partial(*anyopaque, c_int) void;
+extern fn zmtl_clear_box(*anyopaque, i32, i32, i32, i32) void;
+extern fn zmtl_push_device_clip(*anyopaque, i32, i32, i32, i32) void;
+extern fn zmtl_forget_plane(*anyopaque) void;
 extern fn zmtl_push_clip(*anyopaque, f32, f32, f32, f32) void;
 extern fn zmtl_pop_clip(*anyopaque) void;
 extern fn zmtl_text(*anyopaque, f32, f32, f32, f32, [*]const u8, u32, u32, f32, u16, c_int, c_int, ?[*:0]const u8) c_int;
@@ -71,11 +90,14 @@ extern fn zmtl_test_layer_under_subviews(*anyopaque) c_int;
 extern fn zmtl_test_layer_flipped(*anyopaque) c_int;
 extern fn zmtl_test_atlas_levels(*anyopaque) u32;
 
-const NativeStats = extern struct { device_creations: u32, layer_creations: u32, resizes: u32, presents: u32, transaction_presents: u32, busy_presents: u32, atlas_pages: u32, glyphs: u32, frames: u64, instances: u64, batches: u64, effect_passes: u64 };
+const NativeStats = extern struct { device_creations: u32, layer_creations: u32, resizes: u32, presents: u32, transaction_presents: u32, busy_presents: u32, atlas_pages: u32, glyphs: u32, frames: u64, instances: u64, batches: u64, effect_passes: u64, layers: u64, filter_passes: u64, partial_frames: u64, cached_pipelines: u64 };
 const EffectPass = extern struct { words: [*]const u32, word_count: u32, slot: u32, params: effect_host.Params };
 const EffectGeometry = extern struct { clip: [4]f64, scale: f32, origin: [2]f32, width: u32, height: u32, transparent: u32 };
-/// Element effects nested in one another at most.
-const max_effect_depth = 4;
+/// Captures (groups, transforms and element effects) nested in one another
+/// at most, as src/ui/metal.m holds them.
+const max_capture_depth = 8;
+/// Largest texture side a capture may have.
+const max_texture = 16384;
 
 pub const Driver = enum { hardware, warp };
 pub const Options = struct {
@@ -88,7 +110,10 @@ pub const Options = struct {
 /// presents counts drawables presented, transaction_presents those presented
 /// with the Core Animation transaction (frames that changed the layer and
 /// those of a live resize), busy_presents frames for which no drawable came.
-pub const Stats = struct { device_creations: u32 = 0, layer_creations: u32 = 0, resizes: u32 = 0, presents: u32 = 0, transaction_presents: u32 = 0, busy_presents: u32 = 0, atlas_pages: u32 = 0, glyphs: u32 = 0, frames: u64 = 0, instances: u64 = 0, batches: u64 = 0, effect_passes: u64 = 0 };
+/// layers counts groups and transforms composited, filter_passes Gaussian
+/// filter passes, partial_frames frames that drew only their damage and
+/// cached_pipelines pipelines made from the disk cache's compiled code.
+pub const Stats = struct { device_creations: u32 = 0, layer_creations: u32 = 0, resizes: u32 = 0, presents: u32 = 0, transaction_presents: u32 = 0, busy_presents: u32 = 0, atlas_pages: u32 = 0, glyphs: u32 = 0, frames: u64 = 0, instances: u64 = 0, batches: u64 = 0, effect_passes: u64 = 0, layers: u64 = 0, filter_passes: u64 = 0, partial_frames: u64 = 0, cached_pipelines: u64 = 0 };
 
 pub fn liveObjects() u32 {
     return zmtl_live_objects();
@@ -195,43 +220,78 @@ pub const Renderer = struct {
 
     /// Whether the GPU draws `buffer`; see the module's documentation. Each
     /// shader program it uses must have been prepared with `prepareEffect`;
-    /// shader effects also need the frame's shader workspace, element
-    /// effects nested at most four deep, at the frame's scale.
+    /// shader effects also need the frame's shader workspace and the
+    /// frame's scale, outside raster transforms. Gaussian groups need
+    /// kernels at the frame's scale; every capture must fit a texture.
     pub fn prepareEffects(self: *Renderer, buffer: *const commands.Buffer) bool {
         const native = self.native orelse return false;
         if (!self.active) return false;
-        const brushes = buffer.brushResources();
-        var uses = false;
+        const scale = zmtl_scale(native);
         for (buffer.commands()) |op| switch (op) {
-            .backdrop, .indicator, .begin_group, .end_group, .begin_transform, .end_transform, .texture => return false,
-            .gradient => |value| if (value.brush < brushes.len and brushes[value.brush].interpolation != .srgb) return false,
-            .effect, .end_effect, .backdrop_shader => uses = true,
+            .backdrop, .indicator, .texture => return false,
             else => {},
         };
         for (buffer.preparedTextResources()) |view| if (view.native_coverage == null) return false;
-        if (!uses) return true;
-        const workspace = buffer.shader_storage.workspace orelse return false;
         const entries = buffer.shaderEntries();
-        if (entries.len > self.effect_slots.len) return false;
-        const scale = zmtl_scale(native);
+        const filters = buffer.filterResources();
+        const transforms = buffer.transformResources();
+        const workspace = buffer.shader_storage.workspace;
+        const Scope = enum { group, transform, effect };
+        var scopes: [max_capture_depth]Scope = undefined;
         var depth: usize = 0;
+        var transformed: usize = 0;
+        var uses = false;
         for (buffer.commands()) |op| switch (op) {
-            .effect => |slot| {
-                if (slot >= entries.len or depth == max_effect_depth) return false;
-                const entry = &entries[slot];
-                if (entry.scale != scale) return false;
-                const kernel = workspace.carrierFor(entry.scale) catch return false;
-                _ = gaussian_scope.Capture.init(entry.captureRect(), kernel) catch return false;
+            .begin_group => |value| {
+                if (depth == scopes.len) return false;
+                if (value.filter_slot != commands.no_filter) {
+                    if (value.filter_slot >= filters.len) return false;
+                    const kernel = filters[value.filter_slot].descriptor;
+                    if (kernel.radius != 0) {
+                        if (kernel.scale != scale) return false;
+                        const r = value.bounds;
+                        const capture = gaussian_scope.Capture.init(.{ .x = r.x, .y = r.y, .width = r.width, .height = r.height }, kernel) catch return false;
+                        if (capture.pixelWidth() > max_texture or capture.pixelHeight() > max_texture) return false;
+                    }
+                }
+                scopes[depth] = .group;
                 depth += 1;
             },
-            .end_effect => {
+            .begin_transform => |slot| {
+                if (depth == scopes.len or slot >= transforms.len) return false;
+                const t = transforms[slot];
+                if (t.pixel_width + 2 > max_texture or t.pixel_height + 2 > max_texture) return false;
+                scopes[depth] = .transform;
+                depth += 1;
+                transformed += 1;
+            },
+            .effect => |slot| {
+                uses = true;
+                if (depth == scopes.len or transformed != 0) return false;
+                const shaders = workspace orelse return false;
+                if (slot >= entries.len) return false;
+                const entry = &entries[slot];
+                if (entry.scale != scale) return false;
+                const kernel = shaders.carrierFor(entry.scale) catch return false;
+                const capture = gaussian_scope.Capture.init(entry.captureRect(), kernel) catch return false;
+                if (capture.pixelWidth() > max_texture or capture.pixelHeight() > max_texture) return false;
+                scopes[depth] = .effect;
+                depth += 1;
+            },
+            .end_group, .end_transform, .end_effect => {
                 if (depth == 0) return false;
                 depth -= 1;
+                if (scopes[depth] == .transform) transformed -= 1;
             },
-            .backdrop_shader => |slot| if (slot >= entries.len) return false,
+            .backdrop_shader => |slot| {
+                uses = true;
+                if (workspace == null or slot >= entries.len or transformed != 0) return false;
+            },
             else => {},
         };
         if (depth != 0) return false;
+        if (!uses) return true;
+        if (entries.len > self.effect_slots.len) return false;
         self.effect_table.beginFrame();
         for (entries, 0..) |*entry, i| {
             const slot = self.effect_table.find(entry.program.identity, entry.target) orelse return false;
@@ -339,20 +399,115 @@ pub const Renderer = struct {
     pub fn replayBuffer(self: *Renderer, buffer: *const commands.Buffer) !void {
         self.effect_buffer = if (self.prepareEffects(buffer)) buffer else null;
         defer self.effect_buffer = null;
-        try self.replayWithResources(buffer.commands(), buffer.textBytes(), buffer.brushResources(), buffer.preparedTextResources(), buffer.imageResources(), buffer.coverageResources());
+        try self.replayAll(buffer.commands(), buffer.textBytes(), buffer.brushResources(), buffer.preparedTextResources(), buffer.imageResources(), buffer.coverageResources(), buffer.transformResources(), buffer.filterResources());
+    }
+    /// Whether the window's frame kept from the last one may be drawn over,
+    /// and which frame it holds; for the damage tracker. Valid between
+    /// `begin` and the end of the frame.
+    pub fn planeKept(self: *const Renderer) bool {
+        var generation: u64 = 0;
+        return if (self.native) |native| self.active and !self.offscreen and zmtl_plane(native, &generation) != 0 else false;
+    }
+    pub fn planeGeneration(self: *const Renderer) u64 {
+        var generation: u64 = 0;
+        if (self.native) |native| _ = zmtl_plane(native, &generation);
+        // Apart from the software plane's generations.
+        return generation | (1 << 63);
+    }
+    /// The kept frame no longer holds the last frame the tracker saw drawn.
+    pub fn forgetPlane(self: *Renderer) void {
+        if (self.native) |native| zmtl_forget_plane(native);
+    }
+    /// Draws `buffer` again only inside `region`, over the frame kept from
+    /// the last one, as the software renderer's `replayDamage` does; a
+    /// transparent frame's damage is cleared first. A whole region draws
+    /// the frame as `replayBuffer` does.
+    pub fn replayDamage(self: *Renderer, buffer: *const commands.Buffer, region: *const damage.Damage, transparent: bool) !void {
+        if (!self.active) return error.NotDrawing;
+        const native = self.native.?;
+        if (region.full) return self.replayBuffer(buffer);
+        zmtl_set_partial(native, 1);
+        for (region.slice()) |box| {
+            zmtl_push_device_clip(native, box.x0, box.y0, box.x1, box.y1);
+            defer zmtl_pop_clip(native);
+            if (transparent) zmtl_clear_box(native, box.x0, box.y0, box.x1, box.y1);
+            try self.replayBuffer(buffer);
+        }
     }
     pub fn replay(self: *Renderer, ops: []const commands.Command, text: []const u8) !void {
         try self.replayWithResources(ops, text, &.{}, &.{}, &.{}, &.{});
     }
     pub fn replayWithResources(self: *Renderer, ops: []const commands.Command, text: []const u8, resources: []const commands.brushes.Stored, prepared: []const drawing.PreparedTextView, image_resources: []const drawing.ImageView, coverage_resources: []const drawing.CoverageView) !void {
+        try self.replayAll(ops, text, resources, prepared, image_resources, coverage_resources, &.{}, &.{});
+    }
+    fn groupDescriptor(self: *Renderer, bounds: drawing.Rect, options: layers.Group) !layers.NativeGroup {
+        try layers.validateGroup(bounds, options, zmtl_scale(self.native.?));
+        var descriptor: layers.NativeGroup = .{ .x = bounds.x, .y = bounds.y, .width = bounds.width, .height = bounds.height, .opacity = options.opacity };
+        if (options.mask) |view| {
+            descriptor.mask_slot = @intCast(try self.images.lookupCoverage(view.identity));
+            descriptor.mask_x = options.mask_origin.x;
+            descriptor.mask_y = options.mask_origin.y;
+            descriptor.mask_left = view.coverage.origin_x;
+            descriptor.mask_top = view.coverage.origin_y;
+            descriptor.mask_scale = view.coverage.scale;
+        }
+        return descriptor;
+    }
+    fn beginGroup(self: *Renderer, value: commands.GroupCommand, coverage_resources: []const drawing.CoverageView, filters: []const gaussian.View) !void {
+        const native = self.native.?;
+        const r = value.bounds;
+        const bounds: drawing.Rect = .{ .x = r.x, .y = r.y, .width = r.width, .height = r.height };
+        const descriptor = try self.groupDescriptor(bounds, try commands.groupOptions(value, coverage_resources));
+        const kernel: ?*const gaussian.arithmetic.Kernel = if (value.filter_slot == commands.no_filter) null else kernel: {
+            if (value.filter_slot >= filters.len) return error.MissingResources;
+            const view = filters[value.filter_slot];
+            try view.validate();
+            break :kernel if (view.descriptor.radius == 0) null else view.descriptor;
+        };
+        const status = if (kernel) |filter| status: {
+            if (filter.scale != zmtl_scale(native)) return error.GaussianDpiMismatch;
+            const capture = try gaussian_scope.Capture.init(bounds, filter);
+            break :status zmtl_begin_gaussian(native, &descriptor, capture.left, capture.top, capture.width, capture.height, capture.radius, &filter.weights);
+        } else zmtl_begin_group(native, &descriptor);
+        switch (status) {
+            0 => {},
+            1 => return error.LayerDepthExceeded,
+            else => return error.GraphicsFailed,
+        }
+    }
+    fn beginTransform(self: *Renderer, value: layers.NativeTransform) !void {
+        try value.validate(zmtl_scale(self.native.?));
+        switch (zmtl_begin_transform(self.native.?, value.pixel_width, value.pixel_height, value.source_width, value.source_height)) {
+            0 => {},
+            1 => return error.LayerDepthExceeded,
+            else => return error.GraphicsFailed,
+        }
+    }
+    /// Samples the transform's source back into its parent over the device
+    /// pixels its guarded source covers there, as the software renderer's
+    /// transform composite does.
+    fn endTransform(self: *Renderer, value: layers.NativeTransform) !void {
+        const native = self.native.?;
+        const scale: f64 = zmtl_scale(native);
+        const to_parent = value.matrix();
+        const inverse = try to_parent.inverse();
+        const padded = try to_parent.mapBounds(.{ .x = -1 / scale, .y = -1 / scale, .width = @as(f64, @floatFromInt(value.pixel_width + 2)) / scale, .height = @as(f64, @floatFromInt(value.pixel_height + 2)) / scale });
+        const bounds = [4]f32{ @floatCast(@floor(padded.x * scale)), @floatCast(@floor(padded.y * scale)), @floatCast(@ceil((padded.x + padded.width) * scale)), @floatCast(@ceil((padded.y + padded.height) * scale)) };
+        const matrix = [6]f64{ inverse.xx, inverse.yx, inverse.xy, inverse.yy, inverse.x0, inverse.y0 };
+        if (zmtl_end_transform(native, &matrix, &bounds) != 0) return error.GraphicsFailed;
+    }
+    fn replayAll(self: *Renderer, ops: []const commands.Command, text: []const u8, resources: []const commands.brushes.Stored, prepared: []const drawing.PreparedTextView, image_resources: []const drawing.ImageView, coverage_resources: []const drawing.CoverageView, transforms: []const layers.NativeTransform, filters: []const gaussian.View) !void {
         if (!self.active) return error.NotDrawing;
         const native = self.native.?;
         if (resources.len > commands.brushes.max_brushes) return error.BrushesFull;
         for (resources) |*resource| try resource.validate();
         var depth: usize = 0;
         defer while (depth != 0) : (depth -= 1) zmtl_pop_clip(native);
-        var effect_stack: [max_effect_depth]OpenEffect = undefined;
+        var effect_stack: [max_capture_depth]OpenEffect = undefined;
         var effect_depth: usize = 0;
+        var transform_stack: [max_capture_depth]layers.NativeTransform = undefined;
+        var transform_depth: usize = 0;
+        var group_depth: usize = 0;
         var words: [shader_effects.shader.gpu.max_input_words]u32 = undefined;
         for (ops) |op| switch (op) {
             .fill => |fill| {
@@ -369,14 +524,18 @@ pub const Renderer = struct {
                 const p = try geometry.plan(.{ .bounds = value.bounds, .radius = value.radius, .stroke_width = value.stroke_width, .color = geometry.Color.rgb(0) });
                 const brush = &resources[value.brush];
                 if (brush.isTransparent()) continue;
-                if (brush.interpolation != .srgb) return error.UnsupportedGradient;
                 const descriptor = brush.native();
                 const spread: u32 = switch (brush.spread) {
                     .pad => 0,
                     .repeat => 1,
                     .reflect => 2,
                 };
-                if (zmtl_gradient(native, p.bounds.x, p.bounds.y, p.bounds.width, p.bounds.height, p.radius, p.stroke_width, &descriptor, spread) != 0) return error.DrawGradientFailed;
+                const space: u32 = switch (brush.interpolation) {
+                    .srgb => 0,
+                    .srgb_linear => 1,
+                    .oklab => 2,
+                };
+                if (zmtl_gradient(native, p.bounds.x, p.bounds.y, p.bounds.width, p.bounds.height, p.radius, p.stroke_width, &descriptor, spread, space) != 0) return error.DrawGradientFailed;
             },
             .text => |value| {
                 if (!layout.validRect(value.bounds)) return error.InvalidGeometry;
@@ -426,11 +585,34 @@ pub const Renderer = struct {
                 if (self.effect_buffer == null) return error.SoftwareOnlyCommands;
                 try self.backdropShader(slot, &words);
             },
+            .begin_group => |value| {
+                try self.beginGroup(value, coverage_resources, filters);
+                group_depth += 1;
+            },
+            .end_group => {
+                if (group_depth == 0) return error.GroupStackEmpty;
+                group_depth -= 1;
+                if (zmtl_end_group(native) != 0) return error.GraphicsFailed;
+            },
+            .begin_transform => |slot| {
+                if (slot >= transforms.len) return error.MissingResources;
+                if (transform_depth == transform_stack.len) return error.LayerDepthExceeded;
+                try self.beginTransform(transforms[slot]);
+                transform_stack[transform_depth] = transforms[slot];
+                transform_depth += 1;
+            },
+            .end_transform => {
+                if (transform_depth == 0) return error.TransformStackEmpty;
+                transform_depth -= 1;
+                try self.endTransform(transform_stack[transform_depth]);
+            },
             // prepareEffects leaves these frames to software.
-            .backdrop, .indicator, .begin_group, .end_group, .begin_transform, .end_transform, .texture => return error.UnsupportedCommand,
+            .backdrop, .indicator, .texture => return error.UnsupportedCommand,
         };
         if (depth != 0) return error.UnbalancedClips;
         if (effect_depth != 0) return error.UnbalancedEffects;
+        if (group_depth != 0) return error.UnbalancedGroups;
+        if (transform_depth != 0) return error.UnbalancedTransforms;
     }
     pub fn preparedText(self: *Renderer, view: drawing.PreparedTextView, origin: drawing.Point, tint: geometry.Color) !void {
         if (!self.active) return error.NotDrawing;
@@ -592,7 +774,8 @@ pub const Renderer = struct {
         if (zmtl_image(self.native.?, @intCast(slot), &plan) != 0) return error.DrawImageFailed;
     }
 
-    /// No GPU layer planes on macOS: frames with groups draw in software.
+    /// Groups and transforms capture into textures of their frame: Metal
+    /// prepares no layer planes of its own.
     pub fn layerStats(_: *const Renderer) layers.Stats {
         return .{};
     }
@@ -600,7 +783,9 @@ pub const Renderer = struct {
         const native = self.native orelse return .{};
         var values: NativeStats = undefined;
         zmtl_stats(native, &values);
-        return .{ .device_creations = values.device_creations, .layer_creations = values.layer_creations, .resizes = values.resizes, .presents = values.presents, .transaction_presents = values.transaction_presents, .busy_presents = values.busy_presents, .atlas_pages = values.atlas_pages, .glyphs = values.glyphs, .frames = values.frames, .instances = values.instances, .batches = values.batches, .effect_passes = values.effect_passes };
+        var result: Stats = undefined;
+        inline for (zio.fields(Stats)) |field| @field(result, field.name) = @field(values, field.name);
+        return result;
     }
 
     /// Displays the view of the window titled `title` now, as AppKit's
