@@ -10,6 +10,7 @@ const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const pty = @import("pty.zig");
+const shell_integration = @import("shell_integration.zig");
 
 pub const Size = pty.Size;
 pub const Command = pty.Command;
@@ -33,6 +34,13 @@ pub const Options = struct {
     /// Most output handed to the sink per posted task, so input and paint
     /// interleave with a flood of output.
     chunk_bytes: usize = 32 * 1024,
+    /// Mark a zsh's prompts with OSC 133 so the terminal can clear a
+    /// prompt before the columns change, for zsh to draw it again after
+    /// SIGWINCH; right and multiline prompts then leave no rows behind.
+    /// A temporary `ZDOTDIR` sources the user's startup files as usual
+    /// and is removed with the session; the user's files are not changed.
+    /// Other programs start as they would without it. Off by default.
+    shell_integration: bool = false,
 };
 
 /// Sessions whose workers or memory are still alive, closed or not.
@@ -110,6 +118,8 @@ pub const Session = struct {
     /// before its output did.
     closing_since: i64 = 0,
     exited_early: bool = false,
+    /// The prepared zsh, when `shell_integration` applied.
+    zsh: ?shell_integration.Zsh = null,
 
     /// Start `command` on a new pseudo-terminal. Call on the App's main
     /// thread; `allocator` must be safe to use from any thread, since the
@@ -144,17 +154,20 @@ pub const Session = struct {
         errdefer allocator.free(scratch);
         var stop = try StopSignal.init();
         errdefer stop.deinit();
+        var zsh: ?shell_integration.Zsh = if (options.shell_integration and shell_integration.runsZsh(command)) try shell_integration.Zsh.prepare(allocator, command) else null;
+        errdefer if (zsh) |*prepared| prepared.deinit();
         self.* = .{
             .allocator = allocator,
             .app = app,
             .sink = sink,
-            .pty = try pty.Pty.spawn(allocator, command),
+            .pty = try pty.Pty.spawn(allocator, if (zsh) |*prepared| prepared.apply(command) else command),
             .options = options,
             .refs = .init(1),
             .output = .{ .bytes = output },
             .input = .{ .bytes = input },
             .scratch = scratch,
             .stop_signal = stop,
+            .zsh = zsh,
         };
         return self;
     }
@@ -191,6 +204,12 @@ pub const Session = struct {
         return self.exit == null;
     }
 
+    /// Whether `shell_integration` applied: the program is a zsh that
+    /// marks its prompts, for `Terminal`'s `shell_integration`.
+    pub fn shellIntegrated(self: *const Session) bool {
+        return self.zsh != null;
+    }
+
     /// The program's process id.
     pub fn processId(self: *const Session) u32 {
         return @intCast(self.pty.pid);
@@ -220,6 +239,7 @@ pub const Session = struct {
         const allocator = self.allocator;
         self.pty.close();
         self.stop_signal.deinit();
+        if (self.zsh) |*zsh| zsh.deinit();
         allocator.free(self.output.bytes);
         allocator.free(self.input.bytes);
         allocator.free(self.scratch);

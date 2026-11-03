@@ -34,6 +34,7 @@ session.close();
 - `close` 不阻塞：之后 `Sink` 不再被调用；工作线程先向程序的进程组发 SIGHUP，程序在 2 秒内不退出就 SIGKILL（Windows 直接结束进程），回收子进程，最后一个线程释放会话。`liveSessions()` 给出尚未释放的会话数。App 停止投递后会话不再投递，只等 `close` 收尾。
 - `Command` 设置程序与参数（为空时 Linux 用 `SHELL` 或 `/bin/sh`，Windows 用 `COMSPEC` 或 `cmd.exe`）、工作目录、追加或覆盖的环境变量和初始尺寸。Linux 上子进程是新会话的首进程，伪终端是它的控制终端，`TERM` 默认 `xterm-256color`，并设置 `COLORTERM=truecolor`。Windows 的伪控制台函数在运行时从 kernel32 加载，系统不提供时 `spawn` 返回 `Unsupported`。
 - `resize` 同时更新伪终端尺寸（含像素尺寸），Linux 上程序收到 SIGWINCH。
+- `Options.shell_integration = true` 打开 zsh 提示符集成（默认关闭）。程序（`argv[0]`，为空时是 `SHELL`）名为 `zsh` 时，会话建一个临时 `ZDOTDIR`，其中的 `.zshenv` 先恢复用户原来的 `ZDOTDIR`（命令或本进程环境里的；没有就取消）再照常 source 用户的启动文件，然后在第一次显示提示符前（用户的提示符主题加载之后）用 OSC 133 标出提示符的开始（`A`）、续行（`P`）、输入（`B`）、命令开始（`C`）和结束（`D`），并请 Powerlevel10k 自己发出标记（含异步重绘）。用户的文件不会被修改，临时目录随会话释放删除。其他 shell 照常启动。`shellIntegrated()` 说明这次是否生效；`TerminalView.attachSession` 据此设置终端的 `Options.shell_integration`。
 
 ## 解析与屏幕
 
@@ -44,6 +45,7 @@ session.close();
 - 宽度变化时主屏与 scrollback 按软换行重排（回流）：软换行的行先接回成一段，再按新宽度换行；放不下的宽字符整个移到下一行，在行尾留空格，再变宽时这个空格去掉。光标停在原来的字符上（等待换行的状态也保留），`Terminal.resize` 的 `tracked` 位置（视图的选区两端）与主屏放置的 Kitty 图像随所在格子移动，scrollback 滚回的位置也跟着所在行。原本占满屏幕时保持底部对齐，否则保持顶部那一行不动；光标始终可见。备用屏不重排，只在右侧截断。行数减少时顶部的行推入 scrollback 以保持光标所在的行，增加时从 scrollback 拉回。
 - 宽字符按东亚宽度表占两格，零宽字符与组合字符不占格。写入时覆盖宽字符的一半会清掉另一半。
 - 回复：DA1/DA2、XTVERSION、DSR 状态与光标位置、DECRQM、窗口与单元像素尺寸（`CSI 14/16/18 t`），以及 OSC 4/10/11/12 颜色查询。回复累积在 `pendingReplies()`，视图把它们写回程序。
+- OSC 133 提示符标记：`A`、`N` 记下提示符开始的行，`A`/`B`/`I`/`N`/`P` 之后处于提示符，`C`、`D` 结束，`;` 后的参数忽略；备用屏上的标记和 RIS 不算提示符（`Terminal.prompt`）。`Options.shell_integration` 打开时，处于提示符、主屏上、列数变化的 `resize` 先在旧宽度下清掉从提示符开始行到屏幕底部的内容（提示符和已输入的命令行），光标放到提示符开始处，再回流；shell 收到 SIGWINCH 后重画提示符，右侧提示符的填充和多行提示符因此不会在 scrollback 里越积越多。只改行数不清，命令输出与备用屏照常回流或截断。其他来源（如远端连接）需要自己发出 OSC 133 标记并在改尺寸时重画提示符，才适合打开这个选项。
 - OSC：0/2 标题、7 当前目录、8 超链接（id 存在固定容量的环里，滚走的链接自然失效）、4/104 调色板、10/11/12 与 110/111/112 默认颜色、52 剪贴板。
 - **OSC 52 默认拒绝**：`ClipboardPolicy` 的 `read` 与 `write` 都默认 `false`，被拒绝的请求直接丢弃，不分配。允许写入时事件 `clipboard_write` 交给应用，允许读取时由 `answerClipboard` 回复。
 

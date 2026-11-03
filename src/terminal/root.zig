@@ -28,10 +28,12 @@ pub const links = @import("links.zig");
 pub const selection = @import("selection.zig");
 pub const pty = @import("pty.zig");
 pub const session = @import("session.zig");
+pub const shell_integration = @import("shell_integration.zig");
 const terminal = @import("terminal.zig");
 
 pub const Terminal = terminal.Terminal;
 pub const Options = terminal.Options;
+pub const Prompt = terminal.Prompt;
 pub const Event = terminal.Event;
 pub const Handler = terminal.Handler;
 pub const ClipboardPolicy = terminal.ClipboardPolicy;

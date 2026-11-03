@@ -62,6 +62,25 @@ pub const Options = struct {
     /// protocol), on each screen; 0 refuses images, for programs to show
     /// something else.
     image_limit: usize = graphics.default_limit,
+    /// The shell redraws its prompt when the columns change, as a zsh
+    /// prepared by `Session`'s `shell_integration` does: a resize that
+    /// changes the columns while a prompt marked with OSC 133 shows clears
+    /// that prompt, and what was typed after it, at the old width before
+    /// the screen rewraps, so the prompt the shell draws again after
+    /// SIGWINCH does not leave rows of the old one behind. Command output
+    /// and the alternate screen rewrap as always. `TerminalView` sets it
+    /// from the session it shows; a terminal fed by another source sets it
+    /// when that source marks its prompts and redraws them on resize.
+    shell_integration: bool = false,
+};
+
+/// Where the shell's prompt is, as OSC 133 marks it.
+pub const Prompt = struct {
+    /// A prompt or the command line after it shows: marked by `A`, `B`,
+    /// `I`, `N` or `P`, until `C` (the command starts) or `D` (it ended).
+    active: bool = false,
+    /// The absolute row the prompt starts on (`A` or `N`).
+    row: ?u64 = null,
 };
 
 pub const max_title = 256;
@@ -112,6 +131,7 @@ pub const Terminal = struct {
     /// Images of the primary screen and of the alternate one.
     images: [2]graphics.Storage,
     receiver: graphics.Receiver = .{},
+    prompt: Prompt = .{},
 
     pub fn init(allocator: std.mem.Allocator, options: Options) !Terminal {
         var screen = try Screen.init(allocator, options.screen);
@@ -200,6 +220,13 @@ pub const Terminal = struct {
     /// positions there move with their cells, as the images placed there
     /// do.
     pub fn resize(self: *Terminal, cols: u16, rows: u16, tracked: []screen_module.Position) !void {
+        // The shell draws its prompt again on SIGWINCH: clear the old one
+        // at the old width first, or rewrapping its padding (a right
+        // prompt's) leaves rows the shell's cursor movements cannot reach.
+        if (self.options.shell_integration and self.prompt.active and !self.screen.onAlternate() and @max(cols, 2) != self.screen.cols) {
+            self.screen.clearPrompt(self.prompt.row);
+            self.prompt.row = self.screen.screenRow(self.screen.cursor.y);
+        }
         const placements = self.images[0].placements.items;
         const positions = try self.allocator.alloc(screen_module.Position, tracked.len + placements.len);
         defer self.allocator.free(positions);
@@ -311,6 +338,7 @@ pub const Terminal = struct {
             'M' => s.reverseIndex(),
             'c' => {
                 s.reset();
+                self.prompt = .{};
                 self.resetColors();
                 self.title_len = 0;
                 for (&self.images) |*storage| storage.clear();
@@ -637,6 +665,7 @@ pub const Terminal = struct {
                 self.screen.revision +%= 1;
             },
             7 => self.emit(.{ .directory = rest }),
+            133 => self.markPrompt(rest),
             9 => {
                 // ConEmu's progress (9;4) and the like are not notifications.
                 if (rest.len > 1 and std.ascii.isDigit(rest[0]) and rest[1] == ';') return;
@@ -715,6 +744,27 @@ pub const Terminal = struct {
                 if (!self.options.clipboard.write) return;
                 self.emit(.{ .clipboard_write = self.clipboard_storage[0..size] });
             },
+            else => {},
+        }
+    }
+
+    /// OSC 133: the shell marks its prompt (`A` starts one, `N` too after
+    /// ending the line; `P` a continuation, `B` and `I` the input), the
+    /// command's start (`C`) and end (`D`). Options after `;` are ignored.
+    fn markPrompt(self: *Terminal, mark: []const u8) void {
+        if (mark.len == 0 or (mark.len > 1 and mark[1] != ';')) return;
+        const here = self.screen.screenRow(self.screen.cursor.y);
+        switch (mark[0]) {
+            'A', 'N' => {
+                if (self.screen.onAlternate()) return;
+                self.prompt = .{ .active = true, .row = here };
+            },
+            'B', 'I', 'P' => {
+                if (self.screen.onAlternate()) return;
+                self.prompt.active = true;
+                if (self.prompt.row == null) self.prompt.row = here;
+            },
+            'C', 'D' => self.prompt = .{},
             else => {},
         }
     }
@@ -1024,4 +1074,43 @@ test "a new width rewraps the screen; images and tracked positions move with the
     try std.testing.expectEqual(t.screen.screenRow(0), tracked[0].row);
     try std.testing.expectEqual(@as(u16, 9), tracked[0].col);
     try std.testing.expectEqual(@as(u21, 'j'), t.screen.row(0)[9].cp);
+}
+
+test "with shell integration a marked prompt clears before the columns change" {
+    var t = try Terminal.init(std.testing.allocator, .{ .screen = .{ .cols = 10, .rows = 5 }, .shell_integration = true });
+    defer t.deinit();
+    var buffer: [64]u8 = undefined;
+    // Output, then a two-row prompt whose right side pads it to the edge.
+    t.feed("out\r\n\x1b]133;A;cl=line;redraw=1\x07top    rr\x1b]133;P;k=s\x07> \x1b]133;B\x07ls");
+    try std.testing.expect(t.prompt.active);
+    try std.testing.expectEqual(t.screen.screenRow(1), t.prompt.row.?);
+    try t.resize(6, 5, &.{});
+    // The prompt and the input are gone; output rewrapped; the cursor
+    // waits where the prompt started, for the shell to draw it again.
+    try std.testing.expectEqualStrings("out", rowText(&t, 0, &buffer));
+    for (1..5) |y| try std.testing.expectEqualStrings("", rowText(&t, y, &buffer));
+    try std.testing.expectEqual(@as(u16, 0), t.screen.cursor.x);
+    try std.testing.expectEqual(@as(u16, 1), t.screen.cursor.y);
+    // Rows alone keep the prompt.
+    t.feed("> ls");
+    try t.resize(6, 4, &.{});
+    try std.testing.expectEqualStrings("> ls", rowText(&t, 1, &buffer));
+    // A running command's output rewraps as always.
+    t.feed("\x1b]133;C\x07\r\nlong output");
+    try std.testing.expect(!t.prompt.active);
+    try t.resize(12, 4, &.{});
+    try std.testing.expectEqualStrings("> ls", rowText(&t, 1, &buffer));
+    try std.testing.expectEqualStrings("long output", rowText(&t, 2, &buffer));
+    // Marks on the alternate screen, or a reset, leave no prompt.
+    t.feed("\x1b]133;D;0\x07\x1b[?1049h\x1b]133;A\x07");
+    try std.testing.expect(!t.prompt.active);
+    t.feed("\x1b[?1049l\x1b]133;A\x07\x1bc");
+    try std.testing.expect(!t.prompt.active);
+    // Without the option the prompt rewraps like any line.
+    var plain = try Terminal.init(std.testing.allocator, .{ .screen = .{ .cols = 10, .rows = 5 } });
+    defer plain.deinit();
+    plain.feed("\x1b]133;A\x07top    rr");
+    try plain.resize(6, 5, &.{});
+    try std.testing.expectEqualStrings("top", rowText(&plain, 0, &buffer));
+    try std.testing.expectEqualStrings(" rr", rowText(&plain, 1, &buffer));
 }
