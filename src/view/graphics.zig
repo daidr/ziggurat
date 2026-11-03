@@ -159,6 +159,46 @@ fn prepareIcon(allocator: std.mem.Allocator, key: Key) !*vector.Prepared {
 /// scale it is drawn at and whether it is mirrored.
 const Key = struct { icon: view.Icon, width: u32, height: u32, scale: f32, mirrored: bool };
 
+/// What a picture whose format is not known up front is, as one
+/// downloaded: a bitmap the image decoders read (PNG, JPEG, GIF, BMP or
+/// WebP, by their signatures), an SVG document, or neither (null). Decode a
+/// bitmap with `ziggurat_images` and upload it for `View.image`; show an SVG
+/// with `SvgImage`, which refuses one without a size.
+pub const PictureKind = enum { bitmap, svg };
+pub fn pictureKind(bytes: []const u8) ?PictureKind {
+    if (std.mem.startsWith(u8, bytes, "\x89PNG\r\n\x1a\n") or std.mem.startsWith(u8, bytes, "\xff\xd8\xff") or
+        std.mem.startsWith(u8, bytes, "GIF87a") or std.mem.startsWith(u8, bytes, "GIF89a") or
+        (bytes.len >= 14 and std.mem.startsWith(u8, bytes, "BM")) or
+        (bytes.len >= 12 and std.mem.eql(u8, bytes[0..4], "RIFF") and std.mem.eql(u8, bytes[8..12], "WEBP"))) return .bitmap;
+    return if (svgRoot(bytes)) .svg else null;
+}
+
+/// Whether the document's root element is `svg`, past a byte order mark,
+/// spaces, an XML declaration, comments, processing instructions and a
+/// document type.
+fn svgRoot(bytes: []const u8) bool {
+    var rest = bytes;
+    if (std.mem.startsWith(u8, rest, "\xef\xbb\xbf")) rest = rest[3..];
+    while (true) {
+        rest = std.mem.trimStart(u8, rest, " \t\r\n");
+        if (std.mem.startsWith(u8, rest, "<?")) {
+            const end = std.mem.indexOf(u8, rest, "?>") orelse return false;
+            rest = rest[end + 2 ..];
+        } else if (std.mem.startsWith(u8, rest, "<!--")) {
+            const end = std.mem.indexOf(u8, rest[4..], "-->") orelse return false;
+            rest = rest[4 + end + 3 ..];
+        } else if (std.mem.startsWith(u8, rest, "<!")) {
+            const end = std.mem.indexOfScalar(u8, rest, '>') orelse return false;
+            rest = rest[end + 1 ..];
+        } else break;
+    }
+    if (!std.mem.startsWith(u8, rest, "<svg") or rest.len == 4) return false;
+    return switch (rest[4]) {
+        ' ', '\t', '\r', '\n', '/', '>' => true,
+        else => false,
+    };
+}
+
 pub const SvgOptions = struct {
     /// The picture's own size in DIP; null reads the root element's
     /// `width` and `height`, else its `viewBox`, else 24 by 24.
@@ -189,7 +229,12 @@ pub const SvgImage = struct {
         const document = try svg.Document.parse(allocator, bytes, options.limits);
         errdefer document.close() catch {};
         const own = try naturalSize(document);
+        if (!((options.width orelse own.width) > 0) or !((options.height orelse own.height) > 0)) return error.InvalidImage;
         return .{ .allocator = allocator, .host = host, .document = document, .width = options.width orelse own.width, .height = options.height orelse own.height };
+    }
+    /// The size it shows at by default, in DIP.
+    pub fn size(self: *const SvgImage) view.Size {
+        return .{ .width = self.width, .height = self.height };
     }
     pub fn picture(self: *SvgImage) view.SvgPicture {
         return .{ .context = self, .width = self.width, .height = self.height, .paint = paint };
@@ -297,6 +342,17 @@ fn length(text: ?[]const u8) ?f32 {
     if (std.mem.endsWith(u8, value, "px")) value = value[0 .. value.len - 2];
     const number = std.fmt.parseFloat(f32, value) catch return null;
     return if (number > 0 and std.math.isFinite(number)) number else null;
+}
+
+test "pictures are told apart by their signatures and SVG roots" {
+    try std.testing.expectEqual(@as(?PictureKind, .bitmap), pictureKind("\x89PNG\r\n\x1a\n...."));
+    try std.testing.expectEqual(@as(?PictureKind, .bitmap), pictureKind("\xff\xd8\xff\xe0"));
+    try std.testing.expectEqual(@as(?PictureKind, .bitmap), pictureKind("GIF89a"));
+    try std.testing.expectEqual(@as(?PictureKind, .bitmap), pictureKind("RIFF\x00\x00\x00\x00WEBPVP8 "));
+    try std.testing.expectEqual(@as(?PictureKind, .svg), pictureKind("<svg width=\"30\" height=\"20\"/>"));
+    try std.testing.expectEqual(@as(?PictureKind, .svg), pictureKind("\xef\xbb\xbf \n\t<?xml version=\"1.0\"?>\n<svg viewBox=\"0 0 30 20\"/>"));
+    try std.testing.expectEqual(@as(?PictureKind, .svg), pictureKind("<!DOCTYPE svg><!-- a logo --><svg width=\"30\" height=\"20\"/>"));
+    for ([_][]const u8{ "", "not a picture \x00", "<html><body/></html>", "<svgx/>", "<svg" }) |bytes| try std.testing.expectEqual(@as(?PictureKind, null), pictureKind(bytes));
 }
 
 test "lengths and natural sizes" {

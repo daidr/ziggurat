@@ -172,7 +172,7 @@ pub fn Field(comptime Private: type) type {
             defer pin.end();
             if (self.options.words) try Private.preparePointer(self.adapter, window);
             if (self.retired or window.isClosed()) return error.Closed;
-            const token = try context.registerTextField(id, .{ .context = self, .focus = focusCallback, .blur = blurCallback, .input = inputCallback, .action = actionCallback });
+            const token = try context.registerTextField(id, .{ .context = self, .focus = focusCallback, .blur = blurCallback, .input = inputCallback, .action = actionCallback, .command_enabled = commandEnabledCallback });
             self.token = token;
             self.window = window;
         }
@@ -486,6 +486,30 @@ pub fn Field(comptime Private: type) type {
                 at += length;
             }
             return bytes[0..used];
+        }
+        fn commandEnabledCallback(ptr: *anyopaque, command: z.EditCommand) bool {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            return self.commandEnabled(command) catch false;
+        }
+        /// Whether an Edit command would act on the field now, for a menu to
+        /// enable its item: none while disabled, only Copy and Select All
+        /// while read-only, no Cut or Copy of a password, and otherwise as
+        /// the text and its history allow.
+        pub fn commandEnabled(self: *Self, command: z.EditCommand) !bool {
+            try self.enter();
+            defer self.leave();
+            const policy = self.options.policy;
+            if (!policy.enabled) return false;
+            if (policy.read_only and command != .copy and command != .select_all) return false;
+            if (self.masked() and (command == .cut or command == .copy)) return false;
+            const range = (try self.document.selection()).range();
+            return switch (command) {
+                .undo => try self.document.canUndo(),
+                .redo => try self.document.canRedo(),
+                .cut, .copy, .delete => range.start != range.end,
+                .paste, .paste_and_match_style => true,
+                .select_all => try self.document.byteLength() != 0,
+            };
         }
         fn actionCallback(ptr: *anyopaque, scope: *ui.TextFieldScope, action: ui.TextFieldAction) !ui.TextFieldResult {
             const self: *Self = @ptrCast(@alignCast(ptr));

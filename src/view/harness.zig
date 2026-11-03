@@ -179,6 +179,7 @@ pub const Harness = struct {
     /// would, then render.
     pub fn windowFocus(self: *Harness, has_keyboard: bool) anyerror!void {
         self.view.window_focused = has_keyboard;
+        self.view.window_active = has_keyboard;
         if (!has_keyboard) _ = self.view.embedPointerMove(null);
         try self.render();
     }
@@ -879,6 +880,25 @@ const Todo = struct {
         }
     }
 };
+
+test "a build reads whether the window is drawn as active" {
+    const Probe = struct {
+        active: ?bool = null,
+        fn build(self: *@This(), v: *View) anyerror!void {
+            self.active = v.windowActive();
+            try v.text("x", .{});
+        }
+    };
+    var storage: view.Storage(4, 16) = .{};
+    var state: Probe = .{};
+    var h = Harness.init(&state, Probe.build, storage.buffers(), .{});
+    try h.render();
+    try std.testing.expectEqual(@as(?bool, true), state.active);
+    try h.windowFocus(false);
+    try std.testing.expectEqual(@as(?bool, false), state.active);
+    try h.windowFocus(true);
+    try std.testing.expectEqual(@as(?bool, true), state.active);
+}
 
 test "queries find nodes by kind, text, name and key" {
     var storage: view.Storage(32, 512) = .{};
@@ -2443,6 +2463,8 @@ const Canvas = struct {
     };
     logs: [2]Log = .{ .{}, .{} },
     second: bool = true,
+    /// The second leaf built again in a column of its own, under another key.
+    moved: bool = false,
     fn measure(_: *anyopaque, _: view.Theme) view.layout.Measurement {
         return .{ .minimum = .{ .width = 100, .height = 60 }, .preferred = .{ .width = 100, .height = 60 } };
     }
@@ -2470,7 +2492,12 @@ const Canvas = struct {
     fn build(self: *Canvas, v: *View) anyerror!void {
         try v.row(.{ .gap = 10 });
         try v.embed(.{ .context = &self.logs[0], .measure = measure, .paint = paint, .input = input }, .{ .key = 1 });
-        if (self.second) try v.embed(.{ .context = &self.logs[1], .measure = measure, .paint = paint, .input = input }, .{ .key = 2 });
+        if (self.second and !self.moved) try v.embed(.{ .context = &self.logs[1], .measure = measure, .paint = paint, .input = input }, .{ .key = 2 });
+        if (self.moved) {
+            try v.column(.{});
+            try v.embed(.{ .context = &self.logs[1], .measure = measure, .paint = paint, .input = input }, .{ .key = 3 });
+            try v.end();
+        }
         try v.end();
     }
 };
@@ -2522,6 +2549,25 @@ test "an embedded leaf that takes a press captures the pointer until the release
     try h.release(second.x + 30, second.y + 10);
     try std.testing.expectEqual(drags, state.logs[1].drags);
     try std.testing.expect(state.logs[1].up == null and state.logs[1].cancels == 0);
+
+    // A leaf the press moves into another container, built under another
+    // id, gets its press ended; the next press is a press of its own.
+    state.second = true;
+    try h.render();
+    try h.press(second.x + 10, second.y + 10, .{});
+    const downs = state.logs[1].downs;
+    state.moved = true;
+    try h.render();
+    try std.testing.expectEqual(@as(usize, 1), state.logs[1].cancels);
+    const moved = (try h.find(.{ .key = 3 })).bounds;
+    try h.release(moved.x + 10, moved.y + 10);
+    try std.testing.expect(state.logs[1].up == null);
+    try h.press(moved.x + 10, moved.y + 10, .{});
+    try std.testing.expectEqual(downs + 1, state.logs[1].downs);
+    try h.release(moved.x + 10, moved.y + 10);
+    try std.testing.expect(state.logs[1].up != null);
+    state.moved = false;
+    try h.render();
 
     // Wheel input goes to the leaf under the pointer first.
     try h.wheel(first.x + 10, first.y + 10, .{ .x = 0, .y = 48 });

@@ -32,6 +32,11 @@ pub const DocumentState = struct {
     deleted: bool,
 };
 
+/// Whether the window is drawn as active: it has the keyboard, or the
+/// application keeps it looking so. Pages dim their accents while it is not,
+/// as native controls do.
+pub const WindowActive = struct { active: bool };
+
 pub const WindowError = enum { unavailable, invalid_state };
 
 /// The built-in service every connected page receives. Method names are the
@@ -53,6 +58,7 @@ pub const Service = struct {
         .fileDrop = ipc.Event(FileDrop),
         .documentState = ipc.Event(DocumentState),
         .documentReload = ipc.Event(void),
+        .windowActive = ipc.Event(WindowActive),
     };
 };
 

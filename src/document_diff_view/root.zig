@@ -38,4 +38,5 @@ test {
     _ = context_index;
     _ = @import("caret.zig");
     _ = find;
+    _ = @import("hatch.zig");
 }

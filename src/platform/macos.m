@@ -19,7 +19,8 @@ typedef struct NativeEvent {
 } NativeEvent;
 typedef int (*Emit)(void *,const NativeEvent *);
 /* macos_window.m */
-NSView *zlmw_set_material(NSView *container,NSView *content,NSView *effect,int *glass,double radius,int material,int glass_style);
+NSView *zlmw_set_material(NSView *container,NSView *content,NSView *effect,int *glass,double radius,int material,int glass_style,int keep_active);
+void zlmw_material_state(NSView *effect,int glass,int keep_active);
 void zlmw_round(NSWindow *window,NSView *container,NSView *effect,int glass,double radius);
 void zlmw_active_appearance(NSWindow *window,int enabled);
 int zlmw_test_material(NSView *effect,int glass,int *style,double *radius);
@@ -87,8 +88,9 @@ typedef struct NativeWindow {
     NSCursor *cursor;
     /* The content view holds the material (effect) behind the view. clear
        tells that paint frames are transparent: the window is or it shows a
-       material. frameless hides the title bar and its buttons. */
-    NSView *container,*effect;int glass,clear,transparent,frameless,shadow_stale;double radius;
+       material. frameless hides the title bar and its buttons. keep_active
+       is setActiveAppearance's. */
+    NSView *container,*effect;int glass,clear,transparent,frameless,shadow_stale,keep_active;double radius;
 } NativeWindow;
 enum {POPUP=1,POPUP_FOCUSABLE=2,POPUP_TOPMOST=4};
 
@@ -317,7 +319,19 @@ static void menu_edit(NativeWindow *s,unichar key,unsigned short code,uint32_t e
 - (void)undo:(id)sender{(void)sender;menu_edit(native,'z',0x06,0,12);}
 - (void)redo:(id)sender{(void)sender;menu_edit(native,'z',0x06,1u,12);}
 - (void)delete:(id)sender{(void)sender;NativeWindow *s=native;if(s&&input_allowed(s))emit_edit(s,7,0);}
-- (BOOL)validateMenuItem:(NSMenuItem *)item{(void)item;NativeWindow *s=native;return s&&!s->destroyed&&s->enabled;}
+/* The Edit roles are enabled as the focused content can act on them
+   (Window.commandEnabled); the codes are core.EditCommand's. */
+- (BOOL)validateMenuItem:(NSMenuItem *)item{
+    NativeWindow *s=native;if(!s||s->destroyed||!s->enabled)return NO;
+    SEL action=[item action];int command=-1;
+    if(action==@selector(undo:))command=0;else if(action==@selector(redo:))command=1;
+    else if(action==@selector(cut:))command=2;else if(action==@selector(copy:))command=3;
+    else if(action==@selector(paste:))command=4;else if(action==@selector(pasteAsPlainText:))command=5;
+    else if(action==@selector(delete:))command=6;else if(action==@selector(selectAll:))command=7;
+    if(command<0)return YES;
+    NativeEvent query={0};query.kind=27;query.key=command;
+    return emit(s,&query)?YES:NO;
+}
 - (void)keyUp:(NSEvent *)event{NativeWindow *s=native;if(s&&input_allowed(s))key_event(s,event,26);}
 - (void)flagsChanged:(NSEvent *)event{
     NativeWindow *s=native;if(!s||!input_allowed(s))return;
@@ -692,11 +706,15 @@ void zlm_window_chrome(NativeWindow *s,int transparent,double radius){
 void zlm_window_material(NativeWindow *s,int material,int glass_style){
     if(s->destroyed)return;
     @autoreleasepool{
-        s->effect=zlmw_set_material(s->container,s->view,s->effect,&s->glass,s->radius,material,glass_style);
+        s->effect=zlmw_set_material(s->container,s->view,s->effect,&s->glass,s->radius,material,glass_style,s->keep_active||s->popup);
         update_clear(s);
     }
 }
-void zlm_window_active_appearance(NativeWindow *s,int enabled){if(!s->destroyed)@autoreleasepool{zlmw_active_appearance(s->window,enabled);}}
+void zlm_window_active_appearance(NativeWindow *s,int enabled){
+    if(s->destroyed)return;
+    s->keep_active=enabled!=0;
+    @autoreleasepool{zlmw_active_appearance(s->window,enabled);zlmw_material_state(s->effect,s->glass,s->keep_active||s->popup);}
+}
 /* Test hooks for chrome: the material (-1 none, 0 visual effect, 1 glass)
    with its material or style and corners; the window's opacity and
    whether its title bar buttons show; a press of the left button at the

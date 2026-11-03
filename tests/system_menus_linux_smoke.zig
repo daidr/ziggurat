@@ -35,11 +35,18 @@ const bar_items = [_]system.Item{
     .{ .id = 37, .parent = 30, .label = "Small", .radio = true, .checked = true },
     .{ .id = 38, .parent = 30, .label = "Large", .radio = true },
 };
+const copy_id = system.menu_roles.Role.copy.id();
+const edit_items = [_]system.Item{
+    .{ .id = 40, .kind = .submenu, .label = "&Edit" },
+    .{ .id = copy_id, .parent = 40, .label = "&Copy", .accelerator = .{ .key = .f6 } },
+    .{ .id = system.menu_roles.Role.paste.id(), .parent = 40, .label = "&Paste", .enabled = false },
+    .{ .id = 41, .parent = 40, .label = "Plain" },
+};
 // Ctrl in GDK's state mask.
 const control_mask = 1 << 2;
 const buttons = [_]system.MessageButton{ .{ .id = 21, .label = "&Save" }, .{ .id = 22, .label = "_Discard" }, .{ .id = 23, .label = "Cancel" } };
 
-const Step = enum { bar_command, bar_accelerator, bar_consumed, bar_disabled, bar_check, bar_radio, bar_replace, popup_select, popup_nested, popup_locked, popup_cancel, popup_detach, bar_clear, message_press, message_close, message_cancel, message_close_window, done };
+const Step = enum { bar_command, bar_accelerator, bar_consumed, bar_disabled, bar_check, bar_radio, bar_replace, bar_edit, popup_select, popup_nested, popup_locked, popup_cancel, popup_detach, bar_clear, message_press, message_close, message_cancel, message_close_window, done };
 
 const State = struct {
     app: *z.App,
@@ -55,6 +62,8 @@ const State = struct {
     commands: [16]u64 = @splat(0),
     command_count: usize = 0,
     consumed_keys: usize = 0,
+    can_copy: bool = false,
+    queries: usize = 0,
     window_closed: bool = false,
     failure: ?anyerror = null,
 
@@ -89,6 +98,11 @@ const State = struct {
             return true;
         }
         return false;
+    }
+    fn commandEnabled(ptr: *anyopaque, _: z.Window, command: z.EditCommand) bool {
+        const self: *State = @ptrCast(@alignCast(ptr));
+        self.queries += 1;
+        return command == .copy and self.can_copy;
     }
     fn contentEvent(_: *anyopaque, _: z.Window, _: z.Event) void {}
     fn contentDetach(_: *anyopaque) void {}
@@ -179,6 +193,21 @@ const State = struct {
                 try std.testing.expectEqualStrings("GtkBox", self.rootName());
                 try std.testing.expect(zsl_menubar_activate(self.owner.bar.?, 1) == 1);
             },
+            .bar_edit => {
+                // The focus can copy nothing: the Edit role's item is
+                // insensitive and its shortcut falls through, while the
+                // application's own items keep their state.
+                try self.owner.setMenu(&edit_items);
+                try std.testing.expect(zsl_menubar_activate(self.owner.bar.?, 0) == 0);
+                try std.testing.expect(zsl_menubar_key(self.owner.bar.?, 0xffc3, 0) == 1);
+                try std.testing.expect(self.queries >= 2);
+                const asked = self.queries;
+                self.can_copy = true;
+                // A role the application disabled stays disabled.
+                try std.testing.expect(zsl_menubar_activate(self.owner.bar.?, 1) == 0);
+                try std.testing.expect(zsl_menubar_activate(self.owner.bar.?, 0) == 1);
+                try std.testing.expect(self.queries > asked);
+            },
             .bar_clear => {
                 try self.owner.setMenu(&bar_items);
                 try std.testing.expectEqualStrings("GtkBox", self.rootName());
@@ -250,7 +279,7 @@ pub fn main() !void {
     state.owner = system.Owner.init(&state, State.action);
     state.window = try app.createWindow(.{ .title = "System menus smoke", .width = 320, .height = 200, .on_closed = .{ .context = &state, .notify = State.closed } });
     try state.owner.attach(state.window);
-    try state.window.setContent(.{ .context = &state, .event = State.contentEvent, .detach = State.contentDetach, .key_input = State.keyInput });
+    try state.window.setContent(.{ .context = &state, .event = State.contentEvent, .detach = State.contentDetach, .key_input = State.keyInput, .command_enabled = State.commandEnabled });
     state.window.show();
     try app.post(.{ .context = &state, .call = State.run });
     var watchdog: Watchdog = .{ .app = app };
@@ -266,7 +295,7 @@ pub fn main() !void {
     try std.testing.expectEqual(system.PopupResult{ .request = 3, .selected = null }, state.popups[2].?);
     try std.testing.expectEqual(system.PopupResult{ .request = 4, .selected = null }, state.popups[3].?);
     try std.testing.expectEqual(3, state.message_count);
-    try std.testing.expectEqualSlices(u64, &.{ 31, 31, 31, 32, 33, 37, 32 }, state.commands[0..state.command_count]);
+    try std.testing.expectEqualSlices(u64, &.{ 31, 31, 31, 32, 33, 37, 32, copy_id }, state.commands[0..state.command_count]);
     try std.testing.expectEqual(1, state.consumed_keys);
     try std.testing.expectEqual(system.MessageResult{ .request = 10, .response = .{ .button = 22 } }, state.messages[0].?);
     try std.testing.expectEqual(system.MessageResult{ .request = 11, .response = .{ .button = 23 } }, state.messages[1].?);

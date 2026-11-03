@@ -433,10 +433,11 @@ fn run(allocator: std.mem.Allocator) !void {
             const bottom = @min(row.bounds.y + row.bounds.height, bounds.y + bounds.height);
             if (row.bounds.y >= bounds.y + 30 and bottom > row.bounds.y + 2) {
                 const y = row.bounds.y + 1;
-                const color_a: u32 = if (row.a != null) 0xffe9e9 else 0xeeeeee;
-                const color_b: u32 = if (row.b != null) 0xe5f6e9 else 0xeeeeee;
-                try std.testing.expectEqual(color_a, try state.pixel(bounds.x + (bounds.width - 8) / 2 - 2, y));
-                try std.testing.expectEqual(color_b, try state.pixel(bounds.x + bounds.width - 2, y));
+                // A filler shows its hatching: its base or its stripes.
+                const pixel_a = try state.pixel(bounds.x + (bounds.width - 8) / 2 - 2, y);
+                const pixel_b = try state.pixel(bounds.x + bounds.width - 2, y);
+                if (row.a != null) try std.testing.expectEqual(@as(u32, 0xffe9e9), pixel_a) else try std.testing.expect(pixel_a == 0xeeeeee or pixel_a == 0xdadde2);
+                if (row.b != null) try std.testing.expectEqual(@as(u32, 0xe5f6e9), pixel_b) else try std.testing.expect(pixel_b == 0xeeeeee or pixel_b == 0xdadde2);
                 colored = true;
             }
         }
