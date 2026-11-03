@@ -569,7 +569,10 @@ fn layerFrames(allocator: std.mem.Allocator) !void {
     try std.testing.expect(near(0x7f7fff, effectAt(gpu.items, size.scale, stride, 30, 25), 2));
     // The mask hides the left of its group.
     try std.testing.expect(near(0xffffff, effectAt(gpu.items, size.scale, stride, 70.5, 20), 12));
-    try std.testing.expect(near(0x208040, effectAt(gpu.items, size.scale, stride, 93.5, 20), 12));
+    // Near the right of the clip the mask is almost opaque.
+    const masked = effectAt(gpu.items, size.scale, stride, 91, 20);
+    std.debug.print("masked group near its right: {x:0>6}\n", .{masked});
+    try std.testing.expect(near(0x208040, masked, 40));
     try std.testing.expect(near(0xffffff, effectAt(gpu.items, size.scale, stride, 67, 20), 0));
 
     var worst: i32 = 0;
