@@ -251,3 +251,29 @@ test "brackets match outside strings and comments, and enclose a range" {
     try std.testing.expectEqual(c_at, syntax.brackets.jumpTarget(c_at + 1, inner));
     try std.testing.expectEqual(c_at - 1, syntax.brackets.jumpTarget(c_at + 2, inner));
 }
+
+test "lines restarting start in state 0 whatever the line before ends in, and move with edits" {
+    // Two hunks of a patch: the first ends inside a block comment, which
+    // must not go on into the second.
+    const source = "a /* open\nstill\nb := 1\nc";
+    var highlighter = try syntax.Highlighter.init(std.testing.allocator, languages.go.tokenizer.?);
+    defer highlighter.deinit();
+    const lines = syntax.highlighter.SliceLines{ .text = source };
+    _ = try highlighter.highlight(lines, 3, 100);
+    try std.testing.expect(highlighter.stateOf(2).state != 0);
+    try highlighter.setRestarts(&.{ 0, 2 });
+    try std.testing.expect(highlighter.restartsAt(2) and !highlighter.restartsAt(1));
+    try std.testing.expect(try highlighter.highlight(lines, 3, 100));
+    try std.testing.expect(highlighter.stateOf(1).state != 0);
+    try std.testing.expectEqual(@as(u64, 0), highlighter.stateOf(2).state);
+    try std.testing.expectEqual(@as(u64, 0), highlighter.stateOf(3).state);
+    var buffer: [16]Token = undefined;
+    const tokens = highlighter.tokens(2, "b := 1", &buffer).tokens;
+    try std.testing.expectEqual(TokenKind.variable, tokens[0].kind);
+    // A line inserted above moves the restart; one replacing it drops it.
+    try highlighter.edit(0, 0, 1);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 3 }, highlighter.restarts.items);
+    try highlighter.edit(2, 3, 2);
+    try std.testing.expectEqualSlices(usize, &.{0}, highlighter.restarts.items);
+    try std.testing.expectError(error.InvalidValue, highlighter.setRestarts(&.{ 2, 1 }));
+}

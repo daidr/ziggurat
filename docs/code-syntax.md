@@ -18,6 +18,12 @@
 
 `code_editor.Highlighting` 把它接到 Document 上：`update(adapter, first, count, extra)` 同步文本版本，推进到可见行，把这些行中颜色不同于正文颜色的 token 合并为 `foreground` 区间标记，再与宿主自己的标记（例如查找结果的下划线）按起点合并后交给 `setRangeMarkers`。返回的 `ready=false` 表示本次预算没有覆盖可见行，宿主应 post 一次后续任务；`current=false` 表示有更新的编辑或输入法组合，等下一次变化。主题的粗细与斜体目前不绘制：编辑器每段只用一种字体 shape。标记数不超过 `Options.max_markers`，应与编辑器 `Limits.range_markers` 一致。
 
+`setRestarts(lines)`（`Highlighting.setRestarts` 同）让这些行无论上一行结束在什么状态都从状态 0 开始，用于补丁的各个 hunk：每个 hunk 从首行开头单独高亮，和 `git diff` 着色一样，上一个 hunk 结尾停在注释或字符串里时不会延续到下一个。`edit` 让这些行随文本移动，被替换的行不再重新开始；`sync` 不知道编辑，保持原位；`reset` 保留它们，传空切片清除。
+
+## 补丁
+
+`code_editor.patch.parse(allocator, text, diagnostic)` 读取 `git diff`、`git format-patch` 与 `diff -u` 输出的统一 diff：重命名、复制、模式、新增与删除文件、二进制标记、git 引号转义的文件名，各 hunk 的行按头部计数读取（空行当作两侧都有的空行，`\ No newline at end of file` 跟在它说明的行后）；无法读取时返回错误并在 `Diagnostic.line` 给出行号。`FilePatch.apply(allocator, old)` 把补丁应用到旧文件文本并检查上下文行与删除行，按触及末尾的 hunk 决定新文本末尾是否有换行。`patch.Partial.init(allocator, file)` 生成没有完整文件时差异视图显示的两侧文本：各 hunk 的行依次相接，`old_starts`/`new_starts` 是每个 hunk 在文本中的首行（交给 `setRestarts`），`fileLine(side, line)` 换算成文件中的行号，`headers` 是各 hunk 的 `@@ -a,b +c,d @@ 节` 标题，`changes` 是补丁自己给出的 - 与 + 行段，而不是重新比较两侧文本得到的结果。
+
 ## 多光标与括号
 
 `MultiCursor`（`multicursor.Commands`）的命令都只通过 `Adapter.setSelections` 改选区，由编辑器合并重叠：
@@ -37,7 +43,8 @@
 
 ## 检查
 
-- `zig build test-code-syntax`：各语言词法、多行状态、增量同步、括号匹配与整词查找。
+- `zig build test-code-syntax`：各语言词法、多行状态、增量同步、hunk 重新开始的行、括号匹配与整词查找。
+- `zig build test-code-editor`：其中 `patch.zig` 覆盖补丁解析、应用与分段文本。
 - `zig build test-code-editor`：前景标记随编辑移动、整词与全部匹配、上下加光标与选区撤销、语法逐级扩选、按行拆分、括号跳转、变更标记与恢复。
 - `zig build smoke-editor-range-markers`：前景标记在真实系统布局下按颜色裁剪绘制。
 

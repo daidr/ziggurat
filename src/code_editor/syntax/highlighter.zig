@@ -71,6 +71,11 @@ pub const Highlighter = struct {
     dirty: isize = -1,
     /// Lines in the source at the last pass, for `sync`.
     line_count: usize = 1,
+    /// Lines that start in state 0 whatever the line before ends in, in
+    /// order: the first lines of a patch's hunks, each highlighted on its
+    /// own from the start of its first line (`setRestarts`). `edit` moves
+    /// them with the text.
+    restarts: std.ArrayList(usize) = .empty,
     line_buffer: []u8,
 
     pub fn init(allocator: std.mem.Allocator, tokenizer: Tokenizer) !Highlighter {
@@ -83,8 +88,43 @@ pub const Highlighter = struct {
     pub fn deinit(self: *Highlighter) void {
         self.states.deinit(self.allocator);
         self.hashes.deinit(self.allocator);
+        self.restarts.deinit(self.allocator);
         self.allocator.free(self.line_buffer);
         self.* = undefined;
+    }
+
+    /// Make `lines`, in order, start in state 0 whatever the line before
+    /// ends in, as the first lines of a patch's hunks do, so that a comment
+    /// or a string the hunk before ends in does not go on into the next;
+    /// an empty slice clears them. The states are known again after a
+    /// pass. They survive `reset`, and `edit` moves them with the text;
+    /// `sync`, which does not know the edits, leaves them where they are.
+    pub fn setRestarts(self: *Highlighter, lines: []const usize) !void {
+        self.restarts.clearRetainingCapacity();
+        for (lines) |line| {
+            const items = self.restarts.items;
+            if (items.len > 0 and items[items.len - 1] >= line) {
+                if (items[items.len - 1] == line) continue;
+                return error.InvalidValue;
+            }
+            try self.restarts.append(self.allocator, line);
+        }
+        self.states.shrinkRetainingCapacity(1);
+        self.hashes.clearRetainingCapacity();
+        self.frontier = 1;
+        self.confirmed = 1;
+        self.dirty = -1;
+    }
+    /// Whether line `index` starts in state 0 (`setRestarts`).
+    pub fn restartsAt(self: *const Highlighter, index: usize) bool {
+        const items = self.restarts.items;
+        var low: usize = 0;
+        var high: usize = items.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            if (items[mid] < index) low = mid + 1 else high = mid;
+        }
+        return low < items.len and items[low] == index;
     }
 
     /// Forget every state, as for a new text or tokenizer.
@@ -128,6 +168,21 @@ pub const Highlighter = struct {
         if (self.dirty > old) self.dirty += delta;
         self.dirty = @max(self.dirty, @as(isize, @intCast(new_end)));
         self.line_count = self.line_count + added - removed;
+        if (self.restarts.items.len > 0) {
+            // A line restarting moves with the lines after the edit, and
+            // goes when the edit replaced it; the edit's first line keeps
+            // its start.
+            var kept: usize = 0;
+            for (self.restarts.items) |line| {
+                if (line > start and line <= old_end) continue;
+                const moved = if (line > old_end) line + added - removed else line;
+                if (kept > 0 and self.restarts.items[kept - 1] >= moved) continue;
+                self.restarts.items[kept] = moved;
+                kept += 1;
+                if (moved < self.states.items.len) self.states.items[moved] = 0;
+            }
+            self.restarts.shrinkRetainingCapacity(kept);
+        }
     }
 
     /// Find what changed in `source` since the last pass by the hashes of the
@@ -203,7 +258,8 @@ pub const Highlighter = struct {
                 work += 1;
                 const line = try source.readLine(i, self.line_buffer);
                 var out = syntax.Output.init(&scratch);
-                const end = if (line.length > line.text.len) self.states.items[i] else self.tokenizer.tokenize(line.text, self.states.items[i], &out);
+                // A hunk starting on the next line starts in state 0.
+                const end = if (self.restartsAt(i + 1)) 0 else if (line.length > line.text.len) self.states.items[i] else self.tokenizer.tokenize(line.text, self.states.items[i], &out);
                 try self.setHash(i, lineHash(line));
                 if (i + 1 < self.states.items.len) {
                     if (self.states.items[i + 1] == end and @as(isize, @intCast(i + 1)) > self.dirty and self.confirmed > i + 2) {
