@@ -15,7 +15,12 @@ fn verify(ok: bool, at: std.builtin.SourceLocation) !void {
     std.debug.print("check failed at {s}:{d}\n", .{ at.file, at.line });
     return error.CheckFailed;
 }
-const equal = std.testing.expectEqual;
+fn equalAt(expected: anytype, actual: @TypeOf(expected), at: std.builtin.SourceLocation) !void {
+    std.testing.expectEqual(expected, actual) catch |err| {
+        std.debug.print("at {s}:{d}\n", .{ at.file, at.line });
+        return err;
+    };
+}
 const expectError = std.testing.expectError;
 const options: ui.gpu_offscreen.Options = .{ .size = .{ .width = 8, .height = 8, .scale = 1 }, .max_depth = 1, .resident_bytes = 0 };
 const Hook = struct {
@@ -94,10 +99,10 @@ const Host = struct {
             self.surface = null;
             try surface.close();
         }
-        try equal(@as(usize, 0), (try self.domain.stats()).attachments);
-        try equal(@as(usize, 0), (try self.domain.stats()).workspace_reservation);
+        try equalAt(@as(usize, 0), (try self.domain.stats()).attachments, @src());
+        try equalAt(@as(usize, 0), (try self.domain.stats()).workspace_reservation, @src());
         try self.domain.close();
-        try equal(@as(usize, 0), self.hook.live);
+        try equalAt(@as(usize, 0), self.hook.live, @src());
         self.observer.closed = true;
         self.allocator.destroy(self);
     }
@@ -130,7 +135,7 @@ fn interruptedHost(allocator: std.mem.Allocator, snapshot: bool, fail: bool) !vo
     try app.finishShutdown();
     if (observer.failure) |err| return err;
     try verify(observer.closed, @src());
-    try equal(@as(u32, 0), gpu.globalResourceCount());
+    try equalAt(@as(u32, 0), gpu.globalResourceCount(), @src());
 }
 const CloseReentry = struct {
     surface: *Surface,
@@ -157,9 +162,9 @@ fn closingReentry(allocator: std.mem.Allocator) !void {
     hook.armed = .free;
     try surface.close();
     try hook.check();
-    try equal(@as(usize, 0), hook.live);
-    try equal(@as(usize, 0), (try domain.stats()).attachments);
-    try equal(@as(usize, 0), (try domain.stats()).workspace_reservation);
+    try equalAt(@as(usize, 0), hook.live, @src());
+    try equalAt(@as(usize, 0), (try domain.stats()).attachments, @src());
+    try equalAt(@as(usize, 0), (try domain.stats()).workspace_reservation, @src());
     try app.finishShutdown();
     app.deinit();
     try domain.close();
@@ -170,8 +175,8 @@ fn budgets(allocator: std.mem.Allocator) !void {
     const small = try Domain.create(app, allocator, .{ .driver = soft, .texture_bytes = 16 * 1024, .total_bytes = 64 * 1024 });
     var hook: Hook = .{ .backing = allocator };
     try expectError(error.CapacityExceeded, Surface.create(small, hook.allocator(), options));
-    try equal(@as(usize, 0), hook.calls);
-    try equal(@as(usize, 0), (try small.stats()).attachments);
+    try equalAt(@as(usize, 0), hook.calls, @src());
+    try equalAt(@as(usize, 0), (try small.stats()).attachments, @src());
     try small.close();
     const domain = try Domain.create(app, hook.allocator(), .{ .driver = soft, .texture_bytes = 1024 });
     const surface = try Surface.create(domain, allocator, options); // 3*256 bytes
@@ -181,13 +186,13 @@ fn budgets(allocator: std.mem.Allocator) !void {
     const texture = try surface.snapshot(); // last 256 bytes
     const calls = hook.calls;
     try expectError(error.TextureBudgetExceeded, surface.snapshot());
-    try equal(calls, hook.calls);
+    try equalAt(calls, hook.calls, @src());
     try texture.close();
     const again = try surface.snapshot();
     try again.close();
     try surface.close();
     try domain.close();
-    try equal(@as(usize, 0), hook.live);
+    try equalAt(@as(usize, 0), hook.live, @src());
 }
 fn allocationPass(allocator: std.mem.Allocator, app: *z.App) !void {
     const domain = try Domain.create(app, allocator, .{ .driver = soft });
@@ -224,15 +229,15 @@ fn slotsAndWork(allocator: std.mem.Allocator) !void {
     var buffer: ui.commands.Buffer = .{};
     defer buffer.reset();
     try expectError(error.RenderWorkExceeded, limited.render(&buffer));
-    try equal(@as(u64, 0), (try limited.stats()).layers.committed_frames);
+    try equalAt(@as(u64, 0), (try limited.stats()).layers.committed_frames, @src());
     try limited.close();
     var hook: Hook = .{ .backing = allocator };
     const surface = try Surface.create(domain, hook.allocator(), options);
     const allocations = hook.calls;
     const native_creations = (try surface.stats()).layers.native_creations;
     for (0..16) |_| try surface.render(&buffer);
-    try equal(allocations, hook.calls);
-    try equal(native_creations, (try surface.stats()).layers.native_creations);
+    try equalAt(allocations, hook.calls, @src());
+    try equalAt(native_creations, (try surface.stats()).layers.native_creations, @src());
     var worker: Worker = .{ .surface = surface, .domain = domain, .allocator = allocator };
     const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
     thread.join();
@@ -240,15 +245,15 @@ fn slotsAndWork(allocator: std.mem.Allocator) !void {
     for (&snapshots) |*snapshot| snapshot.* = try surface.snapshot();
     const before = try domain.stats();
     try expectError(error.Full, surface.snapshot());
-    try equal(before.bitmap_creations, (try domain.stats()).bitmap_creations);
-    try equal(@as(usize, ui.gpu_resources.capacity), (try domain.stats()).textures);
+    try equalAt(before.bitmap_creations, (try domain.stats()).bitmap_creations, @src());
+    try equalAt(@as(usize, ui.gpu_resources.capacity), (try domain.stats()).textures, @src());
     try buffer.texture(.{ .x = 0, .y = 0, .width = 8, .height = 8 }, try snapshots[0].view(), .{});
     try expectError(error.ResourceInUse, snapshots[0].close());
     try surface.render(&buffer);
     buffer.reset();
     try surface.close();
-    try equal(@as(usize, 0), hook.live);
-    try equal(@as(usize, 0), (try domain.stats()).workspace_reservation);
+    try equalAt(@as(usize, 0), hook.live, @src());
+    try equalAt(@as(usize, 0), (try domain.stats()).workspace_reservation, @src());
     try expectError(error.ResourceInUse, domain.close());
     for (snapshots) |snapshot| try snapshot.close();
 }
@@ -260,5 +265,5 @@ pub fn run(allocator: std.mem.Allocator) !void {
     const app = try z.App.init(allocator);
     defer app.deinit();
     try std.testing.checkAllAllocationFailures(allocator, allocationPass, .{app});
-    try equal(@as(u32, 0), gpu.globalResourceCount());
+    try equalAt(@as(u32, 0), gpu.globalResourceCount(), @src());
 }
