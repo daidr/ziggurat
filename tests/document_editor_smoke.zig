@@ -193,6 +193,46 @@ fn paragraphKeys(allocator: std.mem.Allocator) !void {
     try std.testing.expect(try adapter.handleKey(window, .{ .key = .delete }, bounds, parameters));
     try std.testing.expectEqualStrings(source[0..198] ++ source[200..], output[0..try document.read(.{ .start = 0, .end = try document.byteLength() }, &output)]);
 }
+/// Without wrapping, a selection dragged past the right edge scrolls the
+/// text that way, and dragged back past the left edge (over a gutter)
+/// scrolls it back, as a drag past the top or bottom scrolls vertically.
+fn dragAutoscroll(allocator: std.mem.Allocator) !void {
+    const source = &@as([2000]u8, @splat('a'));
+    const document = try d.Document.create(allocator, std.Thread.getCurrentId(), source, .{});
+    defer document.close() catch unreachable;
+    const engine = try t.Engine.create(allocator, std.Thread.getCurrentId(), .{});
+    defer engine.close() catch unreachable;
+    const adapter = try editing.Adapter.create(allocator, document, engine, .{});
+    defer adapter.close() catch unreachable;
+    const app = try z.App.init(allocator);
+    defer app.deinit();
+    const window = try app.createWindow(.{ .width = 320, .height = 160 });
+    defer _ = window.destroy() catch unreachable;
+    const parameters: editing.Parameters = .{ .font = .{ .size = 18, .wrap = .none } };
+    _ = try adapter.prepare(bounds, parameters);
+    try adapter.bind(window);
+    defer adapter.unbind() catch unreachable;
+    const y = bounds.y + 5;
+    try std.testing.expect(try adapter.handleEvent(window, .{ .pointer_down = .{ .position = .{ .x = bounds.x + 100, .y = y } } }, bounds, parameters));
+    const anchor = (try document.selection()).caret;
+    var reached = anchor;
+    for (0..20) |_| {
+        try std.testing.expect(try adapter.handleEvent(window, .{ .pointer_move = .{ .x = bounds.x + bounds.width + 60, .y = y } }, bounds, parameters));
+        const caret = (try document.selection()).caret;
+        try std.testing.expect(caret >= reached);
+        reached = caret;
+    }
+    const right = try adapter.caretRect(bounds, 1);
+    try std.testing.expect(reached > anchor + 40);
+    try std.testing.expect(right.x >= bounds.x and right.x + right.width <= bounds.x + bounds.width + 1);
+    for (0..40) |_| try std.testing.expect(try adapter.handleEvent(window, .{ .pointer_move = .{ .x = bounds.x - 30, .y = y } }, bounds, parameters));
+    try std.testing.expect(try adapter.handleEvent(window, .{ .pointer_up = .{ .position = .{ .x = bounds.x - 30, .y = y } } }, bounds, parameters));
+    const selection = try document.selection();
+    try std.testing.expectEqual(anchor, selection.anchor);
+    try std.testing.expect(selection.caret < anchor);
+    const left = try adapter.caretRect(bounds, 1);
+    try std.testing.expect(left.x >= bounds.x and left.x <= bounds.x + bounds.width);
+}
 fn compositionAnchors(allocator: std.mem.Allocator) !void {
     const document = try d.Document.create(allocator, std.Thread.getCurrentId(), "x", .{});
     defer document.close() catch unreachable;
@@ -734,6 +774,7 @@ pub fn main() !void {
     try transactions(debug.allocator());
     try compositionAnchors(debug.allocator());
     try horizontalReveal(debug.allocator());
+    try dragAutoscroll(debug.allocator());
     try paragraphKeys(debug.allocator());
     try terminalFold(debug.allocator());
     try foldedEditor(debug.allocator());
