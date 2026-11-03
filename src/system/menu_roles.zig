@@ -461,38 +461,45 @@ pub const Defaults = struct {
     accelerator: ?types.Accelerator = null,
 };
 
-const control: types.Modifiers = .{ .control = true };
-const control_shift: types.Modifiers = .{ .control = true, .shift = true };
-
 /// The label and accelerator a role's item takes. Accelerators use Control
-/// for Windows and Linux; macOS-only accelerators are left out.
+/// on Windows and Linux and Command (`Modifiers.super`) on macOS, where the
+/// roles also take the shortcuts of their standard macOS items, as Cmd+Q
+/// for Quit and Cmd+H for Hide.
 pub fn defaults(role: Role, context: Context) Defaults {
     const tx = context.strings;
     const mac = context.platform == .macos;
-    const ctrl = struct {
-        fn key(value: types.Key) ?types.Accelerator {
-            return .{ .key = value, .modifiers = control };
+    const primary: types.Modifiers = if (mac) .{ .super = true } else .{ .control = true };
+    const keys = struct {
+        primary: types.Modifiers,
+        fn key(self: @This(), value: types.Key) ?types.Accelerator {
+            return .{ .key = value, .modifiers = self.primary };
         }
-        fn shifted(value: types.Key) ?types.Accelerator {
-            return .{ .key = value, .modifiers = control_shift };
+        fn with(self: @This(), value: types.Key, extra: types.Modifiers) ?types.Accelerator {
+            var modifiers = self.primary;
+            modifiers.shift = modifiers.shift or extra.shift;
+            modifiers.alt = modifiers.alt or extra.alt;
+            modifiers.control = modifiers.control or extra.control;
+            return .{ .key = value, .modifiers = modifiers };
         }
     };
+    const ctrl: keys = .{ .primary = primary };
+    const shift: types.Modifiers = .{ .shift = true };
     return switch (role) {
         .undo => .{ .label = tx.undo, .accelerator = ctrl.key(.z) },
-        .redo => .{ .label = tx.redo, .accelerator = if (context.platform == .windows) ctrl.key(.y) else ctrl.shifted(.z) },
+        .redo => .{ .label = tx.redo, .accelerator = if (context.platform == .windows) ctrl.key(.y) else ctrl.with(.z, shift) },
         .cut => .{ .label = tx.cut, .accelerator = ctrl.key(.x) },
         .copy => .{ .label = tx.copy, .accelerator = ctrl.key(.c) },
         .paste => .{ .label = tx.paste, .accelerator = ctrl.key(.v) },
-        .paste_and_match_style => .{ .label = tx.paste_and_match_style, .accelerator = .{ .key = .v, .modifiers = .{ .control = true, .shift = true, .alt = true } } },
+        .paste_and_match_style => .{ .label = tx.paste_and_match_style, .accelerator = ctrl.with(.v, .{ .shift = true, .alt = true }) },
         .delete => .{ .label = tx.delete },
         .select_all => .{ .label = tx.select_all, .accelerator = ctrl.key(.a) },
         .reload => .{ .label = tx.reload, .accelerator = ctrl.key(.r) },
-        .force_reload => .{ .label = tx.force_reload, .accelerator = ctrl.shifted(.r) },
-        .toggle_dev_tools => .{ .label = tx.toggle_dev_tools, .accelerator = if (mac) null else ctrl.shifted(.i) },
+        .force_reload => .{ .label = tx.force_reload, .accelerator = ctrl.with(.r, shift) },
+        .toggle_dev_tools => .{ .label = tx.toggle_dev_tools, .accelerator = if (mac) ctrl.with(.i, .{ .alt = true }) else ctrl.with(.i, shift) },
         .reset_zoom => .{ .label = tx.actual_size, .accelerator = ctrl.key(.digit0) },
         .zoom_in => .{ .label = tx.zoom_in, .accelerator = ctrl.key(.plus) },
         .zoom_out => .{ .label = tx.zoom_out, .accelerator = ctrl.key(.minus) },
-        .toggle_full_screen => .{ .label = tx.toggle_full_screen, .accelerator = if (mac) null else .{ .key = .f11 } },
+        .toggle_full_screen => .{ .label = tx.toggle_full_screen, .accelerator = if (mac) ctrl.with(.f, .{ .control = true }) else .{ .key = .f11 } },
         .minimize => .{ .label = tx.minimize, .accelerator = ctrl.key(.m) },
         .zoom => .{ .label = tx.zoom },
         .close => .{ .label = if (context.documents) tx.close else tx.close_window, .accelerator = ctrl.key(.w) },
@@ -500,19 +507,19 @@ pub fn defaults(role: Role, context: Context) Defaults {
         .open => .{ .label = tx.open, .accelerator = ctrl.key(.o) },
         .open_recent => .{ .label = tx.open_recent },
         .save => .{ .label = tx.save, .accelerator = ctrl.key(.s) },
-        .save_as => .{ .label = tx.save_as, .accelerator = if (mac) null else ctrl.shifted(.s) },
-        .duplicate => .{ .label = tx.duplicate },
+        .save_as => .{ .label = tx.save_as, .accelerator = if (mac) ctrl.with(.s, .{ .shift = true, .alt = true }) else ctrl.with(.s, shift) },
+        .duplicate => .{ .label = tx.duplicate, .accelerator = if (mac) ctrl.with(.s, shift) else null },
         .rename => .{ .label = tx.rename },
         .move_to => .{ .label = tx.move_to },
         .revert => .{ .label = if (mac) tx.revert_to_saved else tx.revert },
         .quit => switch (context.platform) {
-            .macos => .{ .label = tx.quit_app },
+            .macos => .{ .label = tx.quit_app, .accelerator = ctrl.key(.q) },
             .windows => .{ .label = tx.exit },
             .linux => .{ .label = tx.quit, .accelerator = ctrl.key(.q) },
         },
         .about => .{ .label = tx.about },
-        .hide => .{ .label = tx.hide },
-        .hide_others => .{ .label = tx.hide_others },
+        .hide => .{ .label = tx.hide, .accelerator = if (mac) ctrl.key(.h) else null },
+        .hide_others => .{ .label = tx.hide_others, .accelerator = if (mac) ctrl.with(.h, .{ .alt = true }) else null },
         .unhide => .{ .label = tx.show_all },
         .front => .{ .label = tx.bring_all_to_front },
         .services => .{ .label = tx.services },
@@ -528,7 +535,7 @@ pub fn defaults(role: Role, context: Context) Defaults {
         .bold => .{ .label = tx.bold, .accelerator = ctrl.key(.b) },
         .italic => .{ .label = tx.italic, .accelerator = ctrl.key(.i) },
         .underline => .{ .label = tx.underline, .accelerator = ctrl.key(.u) },
-        .strikethrough => .{ .label = tx.strikethrough, .accelerator = ctrl.shifted(.x) },
+        .strikethrough => .{ .label = tx.strikethrough, .accelerator = ctrl.with(.x, shift) },
         .align_left => .{ .label = tx.align_left, .accelerator = if (mac) null else ctrl.key(.l) },
         .align_center => .{ .label = tx.center, .accelerator = if (mac) null else ctrl.key(.e) },
         .align_right => .{ .label = tx.align_right, .accelerator = if (mac) null else ctrl.key(.r) },
@@ -707,6 +714,26 @@ test "role labels follow the language and the platform" {
     try testing.expectEqual(Role.close, Role.fromId(Role.close.occurrenceId(1)).?);
 }
 
+test "macOS roles take Command and the standard macOS shortcuts" {
+    const command: types.Modifiers = .{ .super = true };
+    const mac: Context = .{ .platform = .macos };
+    try testing.expectEqual(types.Accelerator{ .key = .c, .modifiers = command }, defaults(.copy, mac).accelerator.?);
+    try testing.expectEqual(types.Accelerator{ .key = .q, .modifiers = command }, defaults(.quit, mac).accelerator.?);
+    try testing.expectEqual(types.Accelerator{ .key = .h, .modifiers = command }, defaults(.hide, mac).accelerator.?);
+    try testing.expectEqual(types.Accelerator{ .key = .h, .modifiers = .{ .super = true, .alt = true } }, defaults(.hide_others, mac).accelerator.?);
+    try testing.expectEqual(types.Accelerator{ .key = .f, .modifiers = .{ .super = true, .control = true } }, defaults(.toggle_full_screen, mac).accelerator.?);
+    try testing.expectEqual(types.Accelerator{ .key = .z, .modifiers = .{ .super = true, .shift = true } }, defaults(.redo, mac).accelerator.?);
+    try testing.expectEqual(types.Accelerator{ .key = .s, .modifiers = .{ .super = true, .shift = true, .alt = true } }, defaults(.save_as, mac).accelerator.?);
+    try testing.expectEqual(types.Accelerator{ .key = .s, .modifiers = .{ .super = true, .shift = true } }, defaults(.duplicate, mac).accelerator.?);
+    try testing.expectEqual(types.Accelerator{ .key = .c, .modifiers = .{ .control = true } }, defaults(.copy, .{ .platform = .linux }).accelerator.?);
+    try testing.expect(defaults(.hide, .{ .platform = .linux }).accelerator == null);
+    var items: [96]types.Item = undefined;
+    var labels: [4096]u8 = undefined;
+    var builder = Builder.init(&items, &labels, .{ .app_name = "Notes", .platform = .macos, .documents = true });
+    inline for (.{ .app_menu, .file_menu, .edit_menu, .format_menu, .view_menu, .window_menu }) |value| _ = try builder.role(null, value);
+    _ = try menus.validate(builder.result(), false);
+}
+
 test "every role and accelerator validates as a menu item" {
     for ([_]Platform{ .windows, .linux, .macos }) |platform| for (languages) |language| {
         const context: Context = .{ .strings = language.strings.merge(english), .app_name = "Notes", .platform = platform };
@@ -728,6 +755,7 @@ test "builder writes standard menus that pass menu validation" {
     _ = try builder.role(null, .window_menu);
     try builder.add(.{ .id = 7, .parent = Role.window_menu.id(), .label = "自定义" });
     const plan = try menus.validate(builder.result(), false);
+    const control: types.Modifiers = .{ .control = true };
     try testing.expectEqualStrings("文件", builder.result()[0].label);
     try testing.expectEqual(Role.quit.id(), menus.matchAccelerator(builder.result(), &plan, .{ .key = .q, .modifiers = control }).?);
     try testing.expectEqual(Role.zoom_in.id(), menus.matchAccelerator(builder.result(), &plan, .{ .key = .plus, .modifiers = control }).?);

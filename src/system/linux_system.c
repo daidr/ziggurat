@@ -293,14 +293,17 @@ static void dialog_response(GtkDialog *dialog, gint response, gpointer data) {
     schedule(link, response >= 0 ? response : response == GTK_RESPONSE_CANCEL ? -2 : -1);
 }
 
-Link *zsl_message_show(GtkWidget *window, const char *title, const char *message, const char *const *buttons, uint32_t count, int32_t default_index, int kind, void *owner, uint64_t serial, Done done, int *error) {
+Link *zsl_message_show(GtkWidget *window, const char *title, const char *message, const char *const *buttons, uint32_t count, uint32_t destructive, int32_t default_index, int kind, void *owner, uint64_t serial, Done done, int *error) {
     *error = 0;
     if (!window || !GTK_IS_WINDOW(window)) { *error = 1; return NULL; }
     static const GtkMessageType types[] = {GTK_MESSAGE_INFO, GTK_MESSAGE_WARNING, GTK_MESSAGE_ERROR, GTK_MESSAGE_QUESTION};
     GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window), GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT, types[kind & 3], GTK_BUTTONS_NONE, "%s", message);
     g_object_ref_sink(dialog);
     if (title[0]) gtk_window_set_title(GTK_WINDOW(dialog), title);
-    for (uint32_t i = 0; i < count; ++i) gtk_dialog_add_button(GTK_DIALOG(dialog), buttons[i], (gint)i);
+    for (uint32_t i = 0; i < count; ++i) {
+        GtkWidget *button = gtk_dialog_add_button(GTK_DIALOG(dialog), buttons[i], (gint)i);
+        if (destructive & (1u << i)) gtk_style_context_add_class(gtk_widget_get_style_context(button), GTK_STYLE_CLASS_DESTRUCTIVE_ACTION);
+    }
     if (default_index >= 0) gtk_dialog_set_default_response(GTK_DIALOG(dialog), default_index);
     Link *link = link_new(owner, serial, done);
     link->widget = dialog;

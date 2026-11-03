@@ -9,17 +9,24 @@ extern fn ziggurat_system_taskbar_release(taskbar: *anyopaque, apartment: c_int)
 extern fn ziggurat_system_launcher_open(status: *c_int) callconv(.c) ?*anyopaque;
 extern fn ziggurat_system_launcher_update(connection: *anyopaque, uri: [*:0]const u8, path: [*:0]const u8, progress_visible: c_int, progress: f64, count_visible: c_int, count: i64, urgent: c_int) callconv(.c) c_int;
 extern fn ziggurat_system_launcher_close(connection: *anyopaque) callconv(.c) void;
+extern fn zsm_dock_progress(state: c_int, value: f64) void;
+extern fn zsm_dock_badge(text: [*:0]const u8) void;
+extern fn zsm_dock_attention(urgent: c_int) void;
+
+const macos = builtin.os.tag == .macos and !builtin.is_test;
+var dock_tile: u8 = 0;
 
 pub const capabilities = .{
     // Windows taskbar button progress; Linux launcher entry progress read by
-    // docks and task managers that implement the launcher entry protocol.
-    .progress = builtin.os.tag == .windows or builtin.os.tag == .linux,
+    // docks and task managers that implement the launcher entry protocol;
+    // a bar under the macOS Dock icon.
+    .progress = builtin.os.tag == .windows or builtin.os.tag == .linux or macos,
     // Windows taskbar overlay icon.
     .overlay_icon = builtin.os.tag == .windows,
-    // Linux launcher entry count. Windows offers numeric badges only to
-    // packaged applications, so it is not reported here.
-    .badge_count = builtin.os.tag == .linux,
-    .attention = builtin.os.tag == .linux,
+    // Linux launcher entry count and the macOS Dock badge. Windows offers
+    // numeric badges only to packaged applications, so it is not reported.
+    .badge_count = builtin.os.tag == .linux or macos,
+    .attention = builtin.os.tag == .linux or macos,
 };
 
 pub const Progress = union(enum) {
@@ -40,6 +47,9 @@ pub const Progress = union(enum) {
 /// window is shown. Linux: one session-bus connection; every change emits a
 /// launcher entry Update signal for `<id>.desktop`, which applies to the whole
 /// application. Docks that start later see the next change, not the last one.
+/// macOS: the application's Dock tile, whatever the window: progress is a
+/// bar under the icon, the count its badge, and attention one bounce of the
+/// icon while the application is not active.
 pub const Taskbar = struct {
     thread: std.Thread.Id,
     native: ?*anyopaque,
@@ -61,7 +71,11 @@ pub const Taskbar = struct {
                 var status: c_int = 0;
                 self.native = ziggurat_system_launcher_open(&status) orelse return error.ServiceUnavailable;
             },
-            else => return error.UnsupportedCapability,
+            else => {
+                if (!macos) return error.UnsupportedCapability;
+                // The Dock tile is the application's; there is nothing to open.
+                self.native = @ptrCast(&dock_tile);
+            },
         }
         return self;
     }
@@ -71,7 +85,11 @@ pub const Taskbar = struct {
         switch (builtin.os.tag) {
             .windows => ziggurat_system_taskbar_release(native, self.apartment),
             .linux => ziggurat_system_launcher_close(native),
-            else => {},
+            else => if (macos) {
+                zsm_dock_progress(0, 0);
+                zsm_dock_badge("");
+                zsm_dock_attention(0);
+            },
         }
         self.native = null;
     }
@@ -115,7 +133,17 @@ pub const Taskbar = struct {
                     return err;
                 };
             },
-            else => return error.UnsupportedCapability,
+            else => {
+                if (!macos) return error.UnsupportedCapability;
+                const state: c_int = switch (progress) {
+                    .none => 0,
+                    .indeterminate => 1,
+                    .normal => 2,
+                    .paused => 3,
+                    .failed => 4,
+                };
+                zsm_dock_progress(state, if (fraction) |value| value else 0);
+            },
         }
     }
     /// Windows: borrowed HICON copied by the shell, or null to clear. The
@@ -130,9 +158,14 @@ pub const Taskbar = struct {
         const hwnd = window.nativeHandle() orelse return error.Closed;
         if (ziggurat_system_taskbar_overlay(native, hwnd, icon, text[0..length :0]) < 0) return error.TaskbarUnavailable;
     }
-    /// Linux: launcher entry count; null hides it.
+    /// Linux: launcher entry count; macOS: the Dock badge. Null hides it.
     pub fn setBadgeCount(self: *Taskbar, window: z.Window, count: ?u32) !void {
         const native = try self.require(window);
+        if (macos) {
+            var text: [16]u8 = undefined;
+            zsm_dock_badge(if (count) |value| std.fmt.bufPrintSentinel(&text, "{d}", .{value}, 0) catch unreachable else "");
+            return;
+        }
         if (builtin.os.tag != .linux) return error.UnsupportedCapability;
         const previous = self.linux_state;
         self.linux_state.count = if (count) |value| value else null;
@@ -141,9 +174,14 @@ pub const Taskbar = struct {
             return err;
         };
     }
-    /// Linux: ask the dock to draw attention to the application.
+    /// Linux: ask the dock to draw attention to the application. macOS:
+    /// bounce the Dock icon once while the application is not active.
     pub fn setAttention(self: *Taskbar, window: z.Window, urgent: bool) !void {
         const native = try self.require(window);
+        if (macos) {
+            zsm_dock_attention(@intFromBool(urgent));
+            return;
+        }
         if (builtin.os.tag != .linux) return error.UnsupportedCapability;
         const previous = self.linux_state;
         self.linux_state.urgent = urgent;

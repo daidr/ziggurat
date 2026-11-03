@@ -33,6 +33,18 @@ typedef struct NativeBounds {int32_t x,y;uint32_t width,height;int positioned;} 
 typedef struct NativeApp {void *owner;void (*dispatch)(void *);atomic_int pending,stopped;} NativeApp;
 static NativeApp *current_app;
 
+/* The application delegate. It answers the Dock's question for the menu
+   the system module set (zlm_app_set_dock_menu). */
+@interface ZigAppDelegate : NSObject <NSApplicationDelegate>
+@end
+static NSMenu *dock_menu;
+static ZigAppDelegate *app_delegate;
+@implementation ZigAppDelegate
+- (NSMenu *)applicationDockMenu:(NSApplication *)sender{(void)sender;return dock_menu;}
+- (BOOL)applicationSupportsSecureRestorableState:(NSApplication *)app{(void)app;return YES;}
+@end
+void zlm_app_set_dock_menu(void *menu){NSMenu *value=(NSMenu *)menu;[value retain];[dock_menu release];dock_menu=value;}
+
 static void wake_main(void *unused){
     (void)unused;NativeApp *app=current_app;int expected=1;
     if(app&&atomic_compare_exchange_strong(&app->pending,&expected,0)&&app->owner)app->dispatch(app->owner);
@@ -48,6 +60,8 @@ NativeApp *zlm_app_create(void *owner,void (*dispatch)(void *),int *error){
            input is not a form, so they stay off unless the app says so. */
         [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"NSAutoFillHeuristicControllerEnabled":@NO}];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        if(!app_delegate)app_delegate=[[ZigAppDelegate alloc] init];
+        [NSApp setDelegate:app_delegate];
         [NSApp finishLaunching];
     }
     app->owner=owner;app->dispatch=dispatch;current_app=app;*error=0;return app;
@@ -59,7 +73,7 @@ static void post_wake_event(void){
 }
 void zlm_app_quit(NativeApp *app){atomic_store(&app->stopped,1);@autoreleasepool{[NSApp stop:nil];post_wake_event();}}
 void zlm_app_run(NativeApp *app){if(!atomic_load(&app->stopped))@autoreleasepool{[NSApp run];}}
-void zlm_app_destroy(NativeApp *app){app->owner=NULL;if(current_app==app)current_app=NULL;free(app);}
+void zlm_app_destroy(NativeApp *app){app->owner=NULL;if(current_app==app)current_app=NULL;zlm_app_set_dock_menu(NULL);free(app);}
 
 @class ZigView;
 @class ZigDelegate;
@@ -284,6 +298,26 @@ static void keyboard_key(NativeWindow *s,NSEvent *event){
     [self interpretKeyEvents:@[event]];
     release_window(s);
 }
+/* The Edit menu's actions (copy: and the others, which its roles send to
+   the first responder) do what their Command shortcuts do: the menu takes
+   the key before the window, so content that binds the key sees it first,
+   then the text edit. */
+static void menu_edit(NativeWindow *s,unichar key,unsigned short code,uint32_t extra,int edit){
+    if(!s)return;retain_window(s);
+    if(!input_allowed(s)){release_window(s);return;}
+    NativeEvent press={0};press.kind=18;press.key=key;press.width=code;press.flags=(int)(8u|extra);
+    if(!emit(s,&press)&&!s->destroyed)emit_edit(s,edit,2u|(extra&1u));
+    release_window(s);
+}
+- (void)selectAll:(id)sender{(void)sender;menu_edit(native,'a',0x00,0,8);}
+- (void)copy:(id)sender{(void)sender;menu_edit(native,'c',0x08,0,9);}
+- (void)cut:(id)sender{(void)sender;menu_edit(native,'x',0x07,0,10);}
+- (void)paste:(id)sender{(void)sender;menu_edit(native,'v',0x09,0,11);}
+- (void)pasteAsPlainText:(id)sender{(void)sender;menu_edit(native,'v',0x09,1u|4u,11);}
+- (void)undo:(id)sender{(void)sender;menu_edit(native,'z',0x06,0,12);}
+- (void)redo:(id)sender{(void)sender;menu_edit(native,'z',0x06,1u,12);}
+- (void)delete:(id)sender{(void)sender;NativeWindow *s=native;if(s&&input_allowed(s))emit_edit(s,7,0);}
+- (BOOL)validateMenuItem:(NSMenuItem *)item{(void)item;NativeWindow *s=native;return s&&!s->destroyed&&s->enabled;}
 - (void)keyUp:(NSEvent *)event{NativeWindow *s=native;if(s&&input_allowed(s))key_event(s,event,26);}
 - (void)flagsChanged:(NSEvent *)event{
     NativeWindow *s=native;if(!s||!input_allowed(s))return;
@@ -535,6 +569,51 @@ void zlm_test_close(NativeWindow *s){@autoreleasepool{[s->delegate windowShouldC
 void zlm_test_commit(NativeWindow *s,const char *text){@autoreleasepool{[s->view insertText:[NSString stringWithUTF8String:text] replacementRange:NSMakeRange(NSNotFound,0)];}}
 void zlm_test_compose(NativeWindow *s,const char *text,size_t caret){@autoreleasepool{[s->view setMarkedText:[NSString stringWithUTF8String:text] selectedRange:NSMakeRange(caret,0) replacementRange:NSMakeRange(NSNotFound,0)];}}
 int zlm_test_title_is(NativeWindow *s,const char *title){@autoreleasepool{return [[s->window title] isEqualToString:[NSString stringWithUTF8String:title]];}}
+/* Chooses an item of the application menu by its titles, as a click
+   would; an ampersand in a requested title is a mnemonic and is skipped.
+   0 ran, 1 no menu, 2 no such item, 3 disabled, 4 a submenu. */
+static BOOL zlm_same_title(NSString *title,const char *label){
+    NSMutableString *plain=[NSMutableString string];
+    NSString *text=[NSString stringWithUTF8String:label]?:@"";
+    for(NSUInteger i=0;i<[text length];++i){
+        unichar c=[text characterAtIndex:i];
+        if(c=='&'){
+            if(i+1<[text length]&&[text characterAtIndex:i+1]=='&'){[plain appendString:@"&"];++i;}
+            continue;
+        }
+        [plain appendFormat:@"%C",c];
+    }
+    return [title isEqualToString:plain]||[title isEqualToString:text];
+}
+int zlm_window_menu_activate(NativeWindow *s,const char *const *path,int count){
+    if(s->destroyed)return 1;
+    @autoreleasepool{
+        NSMenu *menu=[NSApp mainMenu];
+        if(!menu||[menu numberOfItems]==0)return 1;
+        for(int depth=0;depth<count;++depth){
+            [menu update];
+            NSInteger found=-1;
+            for(NSInteger i=0;i<[menu numberOfItems];++i){
+                NSMenuItem *item=[menu itemAtIndex:i];
+                if([item isSeparatorItem]||[item isHidden]||[item isAlternate])continue;
+                /* The bar's items take their menus' titles. */
+                NSString *title=depth==0&&[item submenu]&&[[[item submenu] title] length]?[[item submenu] title]:[item title];
+                if(zlm_same_title(title,path[depth])||zlm_same_title([item title],path[depth])){found=i;break;}
+            }
+            if(found<0)return 2;
+            NSMenuItem *item=[menu itemAtIndex:found];
+            if(depth+1<count){
+                if(![item submenu])return 2;
+                menu=[item submenu];
+                continue;
+            }
+            if([item submenu])return 4;
+            if(![item isEnabled])return 3;
+            [menu performActionForItemAtIndex:found];
+        }
+        return 0;
+    }
+}
 /* The client cursor, by the order of core.Cursor. macOS has no public
    diagonal resize cursors before macOS 15, so those keep the arrow. */
 void zlm_window_cursor(NativeWindow *s,int cursor){

@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 pub const max_menu_items = 128;
 pub const Item = struct {
     /// Zero denotes the menu root and is reserved. Separators do not need an ID.
@@ -15,6 +16,8 @@ pub const Item = struct {
     radio: bool = false,
     /// Command items only. Shown beside the label; a menu bar also dispatches
     /// it as `Action.menu` when the window's content leaves the key unconsumed.
+    /// On macOS `super` is Command, and the menu bar takes its key equivalents
+    /// before the window's content, as AppKit does.
     accelerator: ?Accelerator = null,
     /// Commands and submenus. Shown before the label, except on the items of
     /// a menu bar itself; borrowed while any menu shows it.
@@ -33,14 +36,21 @@ pub const ClientPoint = struct { x: f32, y: f32 };
 /// or its window closes first. A dismissed menu reports `selected = null`.
 pub const PopupResult = struct { request: u64, selected: ?u64 };
 pub const max_message_buttons = 3;
-pub const MessageButton = struct { id: u64, label: []const u8 };
+pub const MessageButton = struct {
+    id: u64,
+    label: []const u8,
+    /// Marks a button that destroys data, which macOS shows in red and GTK
+    /// in its destructive style; Windows' task dialogs have no such style.
+    destructive: bool = false,
+};
 pub const MessageOptions = struct {
     title: []const u8 = "",
     message: []const u8,
     /// One to three buttons in display order. IDs are nonzero and unique.
     buttons: []const MessageButton,
     /// Indices into `buttons`. Escape or the close button reports the cancel
-    /// button when one is named, otherwise `dismissed`.
+    /// button when one is named, otherwise `dismissed`. Without a default,
+    /// Return answers no button on macOS.
     default_button: ?usize = null,
     cancel_button: ?usize = null,
     /// Selects the icon where the system dialog shows one.
@@ -59,14 +69,20 @@ pub const TrayOptions = struct {
     /// Null selects the shared system application icon as the copy source.
     icon: ?*anyopaque = null,
     tooltip: []const u8 = "",
+    /// The icon is black and transparent, which macOS tints to match the
+    /// menu bar; other systems show it as it is.
+    template: bool = false,
 };
 
 pub const TrayItemOptions = struct {
     /// Borrowed only by show(). Null copies the shared system application icon.
     icon: ?*anyopaque = null,
+    /// The icon is black and transparent, which macOS tints to match the
+    /// menu bar; other systems show it as it is.
+    template: bool = false,
     tooltip: []const u8 = "",
     /// Text beside the icon where the panel shows one, such as Linux
-    /// indicator panels. The Windows notification area shows only icons, so
+    /// indicator panels and the macOS menu bar. The Windows notification area shows only icons, so
     /// it validates the title and otherwise ignores it.
     title: []const u8 = "",
     /// The item's own menu, copied during show(), as setMenu() takes it.
@@ -164,7 +180,15 @@ pub const Key = enum {
     plus,
     minus,
 };
-pub const Modifiers = struct { control: bool = false, alt: bool = false, shift: bool = false, super: bool = false };
+pub const Modifiers = struct {
+    control: bool = false,
+    alt: bool = false,
+    shift: bool = false,
+    /// The Windows key, Super on Linux and Command on macOS.
+    super: bool = false,
+    /// The modifier of standard shortcuts: Command on macOS, Control elsewhere.
+    pub const primary: Modifiers = if (builtin.os.tag == .macos) .{ .super = true } else .{ .control = true };
+};
 pub const Hotkey = struct { key: Key, modifiers: Modifiers = .{}, repeat: bool = false };
 pub const NotificationOptions = struct {
     title: []const u8,

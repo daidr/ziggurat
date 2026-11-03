@@ -1,6 +1,6 @@
 # 系统工具
 
-按需导入 `ziggurat_system`。应用身份、系统目录、单实例与参数转发、登录启动、URL scheme/文件关联、阻止休眠和任务栏状态见 [单实例与系统集成](os-integration.md)。原生菜单栏、菜单快捷键、上下文菜单、异步消息框、窗口托盘、独立托盘、异步文件选择器、全局快捷键和通知实现 Windows 和 Linux；同步文本剪贴板 helper 目前仅 Windows；多格式剪贴板 Board、放置目标和浮出窗口支持 Windows/Linux；桌面环境快照/订阅、密钥存储、外观跟随和最近文档登记支持 Windows/Linux/macOS；粗模式文件监视另支持 macOS FSEvents。`system.capabilities` 分别报告编译目标的支持状态，未实现的窗口扩展返回 `UnsupportedCapability`。Linux 的托盘与通知走会话总线，全局快捷键只在 X11 上可用，运行时缺少对应服务或显示协议时按下文各节明确报告。独立的无 UI `shell.Worker` 已支持 Windows/Linux/macOS 显式程序启动、打开 URL/路径、在文件管理器中显示、移到废纸篓与已安装应用，以及 Windows 有界文件图标，能力见 `system.capabilities.shell`。
+按需导入 `ziggurat_system`。应用身份、系统目录、单实例与参数转发、登录启动、URL scheme/文件关联、阻止休眠和任务栏状态见 [单实例与系统集成](os-integration.md)。原生菜单栏、菜单快捷键、上下文菜单、异步消息框、窗口托盘、独立托盘和异步文件选择器实现 Windows、Linux 和 macOS（见下文“macOS”一节），全局快捷键和通知实现 Windows 和 Linux；同步文本剪贴板 helper 目前仅 Windows；多格式剪贴板 Board、放置目标和浮出窗口支持 Windows/Linux；桌面环境快照/订阅、密钥存储、外观跟随和最近文档登记支持 Windows/Linux/macOS；粗模式文件监视另支持 macOS FSEvents。`system.capabilities` 分别报告编译目标的支持状态，未实现的窗口扩展返回 `UnsupportedCapability`。Linux 的托盘与通知走会话总线，全局快捷键只在 X11 上可用，运行时缺少对应服务或显示协议时按下文各节明确报告。独立的无 UI `shell.Worker` 已支持 Windows/Linux/macOS 显式程序启动、打开 URL/路径、在文件管理器中显示、移到废纸篓与已安装应用，以及 Windows 有界文件图标，能力见 `system.capabilities.shell`。
 
 ## 窗口 owner
 
@@ -53,6 +53,20 @@ try tray.show(app, .{ .icon = icon.handle(), .tooltip = "VPN", .menu = &.{
 Linux 菜单栏是 `GtkMenuBar`。附加时平台层把窗口原有子控件（绘制区或内容宿主）移进一个纵向 `GtkBox`，菜单栏在上；`clearMenu`、detach 时移回原位，并重新实现绘制区、重新绑定输入法。替换快照时新菜单栏先占位再销毁旧菜单栏。客户区和内容尺寸不含菜单栏高度。命令激活与快捷键都在一次性 idle 中报告，不在 GTK 信号发射期间调用业务代码；带勾选的项是 `GtkCheckMenuItem`，GTK 激活时自行切换的勾选状态会被还原，状态只由 `setItemState` 决定。
 
 菜单栏、上下文菜单和托盘菜单共用同一套校验（`system.menus.validate`）：标签不得含 NUL 或非法 UTF-8；`&` 标记助记符，`&&` 表示字面 `&`，在 GTK 上自动转换为 `_` 形式。
+
+## macOS
+
+macOS 只有一条菜单栏：Owner 的菜单在其窗口是主窗口时成为应用的主菜单，没有主窗口时用最后设置的那份；Owner detach、`clearMenu` 或窗口关闭时，主菜单交给其他窗口的菜单或清空。第一个顶层 submenu 由 AppKit 显示为应用名菜单，所以菜单通常以 `menu_roles` 的 `app_menu` 开头。macOS 菜单没有助记符，标签里的 `&` 被去掉、`&&` 显示为一个 `&`。
+
+加速键成为 NSMenuItem 的 key equivalent：`Modifiers.super` 是 Command，`control` 是 Control；`Modifiers.primary` 在 macOS 是 Command、其他平台是 Control。与 Windows/Linux 不同，AppKit 的菜单栏先于窗口内容匹配 key equivalent。`.plus` 显示为 Command-+，另有隐藏的 Command-= 孪生项。`menu_roles` 在 macOS 给角色 Command 系列快捷键，并补上 macOS 标准项的快捷键（退出 ⌘Q、隐藏 ⌘H、隐藏其他 ⌥⌘H、全屏 ⌃⌘F、另存为 ⌥⇧⌘S、复制副本 ⇧⌘S、开发者工具 ⌥⌘I）。
+
+AppKit 自己执行的标准角色不产生 `Action.menu`：撤销、重做、剪切、拷贝、粘贴、粘贴并匹配样式、删除、全选发给第一响应者（窗口内容视图把它们当作对应的 Command 快捷键交给内容，内容不处理时再成为编辑键；页面由 WKWebView 自己执行），关于、隐藏、隐藏其他、全部显示、前置全部窗口和朗读发给应用；服务、窗口、帮助 submenu 成为 AppKit 的 Services/Windows/Help 菜单。退出、关闭、最小化、缩放、全屏和文档角色仍报告 `Action.menu`，由 `menu_role_actions.perform` 或应用执行。
+
+弹出菜单在调用返回后从 run loop 打开，跟踪结束后报告一次；`client` 坐标是内容视图的点，`screen` 是以主显示器左上为原点的点（与窗口位置相同）。消息框是 NSAlert：窗口可见且没有 sheet 时作为 sheet，否则作为独立窗口，都不跑模态循环。标题是粗体消息、消息是说明文字；只有 `default_button` 才有回车键，Escape 与 Command-. 按取消按钮，没有取消按钮时报告 `dismissed`；`MessageButton.destructive` 用 NSButton 的 hasDestructiveAction（GTK 用 destructive-action 样式，Windows 无对应样式）。文件选择器是 NSOpenPanel/NSSavePanel，扩展名过滤经 UTType。
+
+托盘项是 NSStatusItem，图标按 18 点高显示，`template` 让 macOS 按菜单栏着色；`title` 显示在图标旁，数字等宽，可用 figure space（U+2007）补齐使宽度稳定。独立托盘设了自己的菜单时单击打开菜单（macOS 菜单栏项的习惯），否则单击报告 `activate`，右键和 Control-单击报告 `context`。`guid` 成为 autosave 名，macOS 记住用户按住 Command 拖动后的位置。`iconRect` 是用户最后点击的那份副本（macOS 26 在每个显示器的菜单栏都显示一份），浮出窗口因此出现在用户点击的显示器上。`popupMenu` 由状态项自己放置和跟踪，忽略锚点。
+
+`system.Dock`（仅 macOS）设置 Dock 图标右键时显示在系统项上方的菜单，命令回调 `on_menu`；`dock.setIcon` 在运行期间替换 Dock 图标。`taskbar.Taskbar` 在 macOS 上作用于应用的 Dock 图块：进度条画在图标下方，计数是角标，`setAttention` 在应用不活动时让图标跳一次。
 
 ## 菜单快捷键
 
@@ -363,6 +377,8 @@ Windows 上大多数程序把图片作为位图（`CF_DIB`，系统也会从其�
 `zig build smoke-system-menus`（Linux，Xvfb）在已映射窗口上打开真实 GTK 菜单，通过 GTK 激活接口完成根项、未打开过的 submenu 项和禁用祖先下的项（报告 null），验证禁用项不可激活、取消、重复请求被拒绝和 detach 不回调；消息框验证按钮、关闭（报告取消按钮）、`cancelMessage`（dismissed）和打开时销毁窗口。Linux 版另覆盖菜单栏：附加后窗口根控件变为纵向盒、命令激活、Ctrl+S 快捷键、Content 先消费 Ctrl+O 时菜单不触发、禁用项与禁用 submenu 下的命令及其快捷键不触发、`setItemState` 加上/去掉勾选并在 GTK 自行切换后还原、替换快照、`clearMenu` 和 detach 后绘制区回到窗口原位，以及菜单栏存在时打开弹出菜单与关闭窗口。按键由 GDK 事件注入。选择由原生激活接口或消息注入完成，不代表物理按键、人工点击或视觉质量已验收。
 
 `zig build smoke-system-desktop`（Linux，需要会话总线和 X11：`dbus-run-session -- xvfb-run -a zig build smoke-system-desktop`）在同一私有总线上用测试替身充当 status notifier watcher 和通知服务器。托盘：导出并登记、读取 ToolTip/IconName/IconPixmap 属性（验证调用后释放的 pixbuf 已被复制为 ARGB）、`Activate`/`ContextMenu` 事件、原地更新、超长提示被拒绝；独立托盘：`guid` 写入 `Id`、更换身份被拒绝、在宿主报告的点打开菜单并选择、重复请求被拒绝、移除。通知：urgency/`suppress-sound`/`transient` 提示、激活后撤回、已显示的通知被替换时撤回、总线连接前被替换的通知不发送、服务器关闭只清理、旧 ID 的激活被忽略。全局快捷键用 XTest 注入真实 X 按键：触发、按住重复只报告一次、进程内重复和另一 X 客户端已抓取的组合被拒绝（`last_error` 非零）、注销后组合可再次注册。选择器：GTK 对话框中实际选择文件、保存到目录加文件名、选择子目录，取消、容量不足、启动后 detach 不回调；多选由原生结果替身完成（GTK 自带对话框没有可脚本化的多选）。最后在菜单栏、托盘、快捷键、通知和选择器都存在时关闭窗口。这些替身不证明某个具体桌面面板或通知守护进程的显示效果。
+
+`zig build smoke-system-macos` 在真实会话里创建菜单栏并经测试钩子点击和匹配 key equivalent：标签去助记符、Command 加速键与 Command-= 孪生项、禁用项与禁用祖先下的项、勾选与单选状态、菜单项图标、替换与清空主菜单、Edit 角色的选择器、Services 菜单登记；内容视图把拷贝、粘贴、重做、删除当作快捷键与编辑键交给内容；弹出菜单在真实跟踪循环中选择、打开前取消和打开后取消；NSAlert 的 Escape、无取消按钮的 Escape、回车默认按钮、应用取消、Command-. 与 destructive 标记；打开、多选、保存（建议名与 UTType）和目录面板的接受与取消；状态项的标题等宽数字、左键/Control-单击/右键、自有菜单命令和弹出菜单；Dock 菜单、图标、角标与进度，最后在挂起请求时 detach 并关闭窗口。
 
 **Windows 尚未自动操作真实系统 GUI 完成文件/目录选择或保存确认，系统成功结果到返回路径的完整链路仍需原生集成验证；Linux 未验证门户路径。** 这些检查不评价对话框、菜单或图标的视觉质量，也不证明其他系统运行支持。
 

@@ -9,13 +9,16 @@
 //! premultiplied DIB section made once per size and color, in the column of
 //! check marks: a checked item shows its icon framed as checked. GTK shows a
 //! GtkImage before the label, and a tray's menu gets the PNG over DBusMenu
-//! (`icon-data`). The items of a menu bar itself show no icon.
+//! (`icon-data`). AppKit draws an NSImage of the box's size from the
+//! representation fit for the display, and tints a template image as the
+//! menu's text, white on the highlight. The items of a menu bar itself show
+//! no icon.
 const std = @import("std");
 const builtin = @import("builtin");
 const icon = @import("png_header.zig");
 
 const os = builtin.os.tag;
-const native_supported = !builtin.is_test and (os == .windows or os == .linux);
+const native_supported = !builtin.is_test and (os == .windows or os == .linux or os == .macos);
 pub const capabilities = .{ .png = native_supported };
 /// The box an icon fits, in DIPs.
 pub const box = 16;
@@ -28,6 +31,8 @@ const c = @import("ziggurat_c_win32");
 
 extern fn zsx_menu_icon_new(data: [*]const u8, length: usize) ?*anyopaque;
 extern fn zsx_menu_icon_free(native: *anyopaque) void;
+extern fn zsm_image_png(data: [*]const u8, length: usize, box: f64, template: c_int) ?*anyopaque;
+extern fn zsm_image_release(image: ?*anyopaque) void;
 
 pub const Options = struct {
     /// Black and transparent, drawn in the menu's text color on Windows.
@@ -41,6 +46,7 @@ pub const MenuIcon = struct {
     size: icon.Size,
     template: bool,
     /// Linux: the decoded image, its scaled copies and the PNG bytes.
+    /// macOS: the NSImage.
     native: ?*anyopaque = null,
     /// Windows: premultiplied 0xAARRGGBB pixels, row by row from the top.
     pixels: []u32 = &.{},
@@ -61,6 +67,10 @@ pub const MenuIcon = struct {
             result.native = zsx_menu_icon_new(png.ptr, png.len) orelse return error.IconDecodeFailed;
             return result;
         }
+        if (os == .macos) {
+            result.native = zsm_image_png(png.ptr, png.len, box, @intFromBool(options.template)) orelse return error.IconDecodeFailed;
+            return result;
+        }
         const fitted = fit(size.width, size.height, max_source);
         result.width = if (size.width > max_source or size.height > max_source) fitted.width else size.width;
         result.height = if (size.width > max_source or size.height > max_source) fitted.height else size.height;
@@ -74,6 +84,8 @@ pub const MenuIcon = struct {
         if (comptime !native_supported) return;
         if (os == .linux) {
             if (self.native) |native| zsx_menu_icon_free(native);
+        } else if (os == .macos) {
+            zsm_image_release(self.native);
         } else {
             for (self.bitmaps) |entry| if (entry.handle) |handle| {
                 _ = c.DeleteObject(@ptrCast(handle));
