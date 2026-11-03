@@ -221,7 +221,7 @@ fn run(allocator: std.mem.Allocator, mode: viewing.editable.Mode) !usize {
     const unified = if (mode == .unified) try viewing.EditableUnified.create(allocator, inbox, adapters[0], adapters[1], window, .{}) else null;
     const view = if (unified) |value| value.coordinator() else try viewing.EditableSplit.create(allocator, inbox, adapters[0], adapters[1], window, .{});
     defer view.close() catch unreachable;
-    var fixture: Fixture = .{ .view = view, .inbox = inbox, .documents = documents, .window = window, .parameters = .{ .font = .{ .size = 16, .wrap = .word_character, .width = 200 }, .scale = if (builtin.os.tag == .windows) @as(f32, @floatFromInt(c.GetDpiForWindow(window.nativeHandle()))) / 96 else @floatFromInt(gtk_widget_get_scale_factor(window.nativeHandle().?)) } };
+    var fixture: Fixture = .{ .view = view, .inbox = inbox, .documents = documents, .window = window, .parameters = .{ .line_numbers = false, .font = .{ .size = 16, .wrap = .word_character, .width = 200 }, .scale = if (builtin.os.tag == .windows) @as(f32, @floatFromInt(c.GetDpiForWindow(window.nativeHandle()))) / 96 else @floatFromInt(gtk_widget_get_scale_factor(window.nativeHandle().?)) } };
     try fixture.refresh();
     try view.focus(.b);
     var find_failure = std.testing.FailingAllocator.init(allocator, .{});
@@ -518,7 +518,7 @@ fn createClosing(allocator: std.mem.Allocator, quit: bool, fail: bool, offset: u
     const inbox = try viewing.Inbox.create(allocator, .{ .a = documents[0], .b = documents[1] }, .{});
     const window = try app.createWindow(.{ .width = 450, .height = 250, .on_closed = .{ .context = host, .notify = Host.closed } });
     const view = try viewing.EditableSplit.create(allocator, inbox, adapters[0], adapters[1], window, .{});
-    host.* = .{ .allocator = allocator, .live = &live, .fixture = .{ .view = view, .inbox = inbox, .documents = documents, .window = window, .parameters = .{} }, .engine = engine, .adapters = adapters };
+    host.* = .{ .allocator = allocator, .live = &live, .fixture = .{ .view = view, .inbox = inbox, .documents = documents, .window = window, .parameters = .{ .line_numbers = false } }, .engine = engine, .adapters = adapters };
     var probe: Probe = .{ .allocator = allocator, .window = window, .live = &live, .quit = quit, .fail = fail, .remaining = offset };
     const result = Finder.create(probe.facade(), view, .{});
     try std.testing.expect(probe.fired);
