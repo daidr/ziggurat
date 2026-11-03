@@ -8,6 +8,12 @@ const gdi = if (builtin.os.tag == .windows) @import("windows.zig") else @import(
 pub const SoftwareRenderer = gdi.Renderer;
 const build_options = @import("ziggurat_ui_options");
 pub const d3d11 = if (builtin.os.tag == .windows) @import("d3d11.zig") else struct {};
+pub const metal = if (builtin.os.tag == .macos) @import("metal.zig") else struct {};
+/// The `-Dgpu=true` renderer: D3D11 on Windows, Metal on macOS.
+pub const GpuRenderer = if (builtin.os.tag == .windows) d3d11.Renderer else if (builtin.os.tag == .macos) metal.Renderer else void;
+/// Whether the GPU renderer holds its own layer planes (groups, transforms
+/// and Gaussian filters). Without them a frame using one draws in software.
+const gpu_layers = build_options.gpu and builtin.os.tag == .windows;
 pub const Rect = input.Rect;
 pub const layout = @import("layout.zig");
 pub const grid = @import("grid.zig");
@@ -525,7 +531,7 @@ pub const Context = struct {
     control_focus_busy: bool = false,
     control_focus_cancelled: bool = false,
     renderer: gdi.Renderer = .{},
-    gpu_renderer: if (build_options.gpu) d3d11.Renderer else void = if (build_options.gpu) .{} else {},
+    gpu_renderer: if (build_options.gpu) GpuRenderer else void = if (build_options.gpu) .{} else {},
     /// Linux: whether `prepareGpuShaders` links programs for OpenGL; null
     /// reads `ZIGGURAT_GL` (see `GlMode`).
     gl_mode: ?GlMode = null,
@@ -1932,7 +1938,7 @@ pub const Context = struct {
         if (self.transforms) |workspace| if (workspace.state.committed().inUse()) return error.ResourceInUse;
         self.layer_mutating = true;
         defer self.layer_mutating = false;
-        const gpu = build_options.gpu and !self.gpu_unavailable and self.attached_render_mode != .gdi;
+        const gpu = gpu_layers and !self.gpu_unavailable and self.attached_render_mode != .gdi;
         const total = try layers.Plan.checkContext(options, if (builtin.os.tag == .windows) .gdi else .cairo, gpu);
         self.cancelGpuWait();
         const old = self.renderer.layerSurfaceBytes() + (if (build_options.gpu) self.gpu_renderer.layerStats().pixel_bytes else 0);
@@ -1940,7 +1946,7 @@ pub const Context = struct {
         const software_candidate = try self.renderer.createLayerCandidate(allocator, options);
         errdefer gdi.Renderer.destroyLayerCandidate(software_candidate);
         if (!self.live(window)) return error.Closed;
-        if (build_options.gpu and gpu) {
+        if (gpu_layers and gpu) {
             const gpu_candidate = try self.gpu_renderer.createLayerCandidate(allocator, options);
             errdefer d3d11.Renderer.destroyLayerCandidate(gpu_candidate);
             if (!self.live(window)) return error.Closed;
@@ -1960,11 +1966,11 @@ pub const Context = struct {
         if (self.painting or self.layer_mutating) return error.Busy;
         self.layer_mutating = true;
         defer self.layer_mutating = false;
-        const gpu = build_options.gpu and !self.gpu_unavailable and self.attached_render_mode != .gdi;
+        const gpu = gpu_layers and !self.gpu_unavailable and self.attached_render_mode != .gdi;
         const software_plan = try gaussian_scope.Plan.init(options, if (builtin.os.tag == .windows) .gdi else .cairo, self.renderer.transformOptions());
-        const gpu_plan: ?gaussian_scope.Plan = if (build_options.gpu and gpu) try gaussian_scope.Plan.init(options, .gpu, self.gpu_renderer.transformOptions()) else null;
+        const gpu_plan: ?gaussian_scope.Plan = if (gpu_layers and gpu) try gaussian_scope.Plan.init(options, .gpu, self.gpu_renderer.transformOptions()) else null;
         const old = self.renderer.layerSurfaceBytes() + self.renderer.layerStats().metadata_bytes + (if (build_options.gpu) self.gpu_renderer.layerStats().pixel_bytes + self.gpu_renderer.layerStats().metadata_bytes else 0) + (if (self.gaussian_workspace != null) @as(usize, @sizeOf(GaussianWorkspace)) else 0) + (try self.transformStats()).metadata_bytes;
-        const metadata = @sizeOf(GaussianWorkspace) + gdi.Renderer.layerMetadataBytes() + gdi.Renderer.gaussianMetadataBytes() + (if (build_options.gpu and gpu) d3d11.Renderer.layerMetadataBytes() + d3d11.Renderer.gaussianMetadataBytes() else 0);
+        const metadata = @sizeOf(GaussianWorkspace) + gdi.Renderer.layerMetadataBytes() + gdi.Renderer.gaussianMetadataBytes() + (if (gpu_layers and gpu) d3d11.Renderer.layerMetadataBytes() + d3d11.Renderer.gaussianMetadataBytes() else 0);
         const peak = try gaussian_scope.Plan.checkPeak(software_plan, gpu_plan, old, metadata);
         self.layer_candidate_peak = @max(self.layer_candidate_peak, peak);
         const workspace = try allocator.create(GaussianWorkspace);
@@ -1977,7 +1983,7 @@ pub const Context = struct {
         var software_transferred = false;
         errdefer if (!software_transferred) gdi.Renderer.destroyLayerCandidate(software_candidate);
         if (!self.live(window)) return error.Closed;
-        if (build_options.gpu and gpu) {
+        if (gpu_layers and gpu) {
             const gpu_candidate = try self.gpu_renderer.createGaussianCandidate(allocator, gpu_plan.?);
             errdefer d3d11.Renderer.destroyLayerCandidate(gpu_candidate);
             if (!self.live(window)) return error.Closed;
@@ -2007,7 +2013,7 @@ pub const Context = struct {
         defer self.layer_mutating = false;
         try self.renderer.releaseGaussian();
         if (!self.live(window)) return error.Closed;
-        if (build_options.gpu) try self.gpu_renderer.releaseGaussian();
+        if (gpu_layers) try self.gpu_renderer.releaseGaussian();
         self.dropGaussianMetadata();
         if (!self.live(window)) return error.Closed;
     }
@@ -2019,7 +2025,7 @@ pub const Context = struct {
     }
     noinline fn preflightGaussianFrame(self: *Context, size: z.Size, using_gpu: bool) !void {
         const workspace = self.gaussian_workspace orelse return error.GaussianNotPrepared;
-        const plan = (if (build_options.gpu and using_gpu) self.gpu_renderer.layerPlan() else self.renderer.layerPlan()) orelse return error.GaussianNotPrepared;
+        const plan = (if (gpu_layers and using_gpu) self.gpu_renderer.layerPlan() else self.renderer.layerPlan()) orelse return error.GaussianNotPrepared;
         const filter_capacity = self.renderer.gaussianCapacity() orelse return error.GaussianNotPrepared;
         const work = if (plan.transform_source != null) @min(workspace.options.render_work, plan.transform_work) else workspace.options.render_work;
         _ = try @import("render_batch.zig").preflight(&self.command_buffer, .{ .size = size, .max_depth = plan.options.max_depth, .legacy_text = plan.options.legacy_text, .render_work = work, .transform_plan = plan, .gaussian_capacity = filter_capacity, .texture_domain = if (build_options.gpu and using_gpu) (if (self.gpu_renderer.domain_borrow) |borrow| borrow.epoch else null) else null });
@@ -2082,7 +2088,7 @@ pub const Context = struct {
         if (self.transforms == null and self.space_binding_epoch == std.math.maxInt(u64)) return error.GenerationExhausted;
         self.layer_mutating = true;
         defer self.layer_mutating = false;
-        const gpu = build_options.gpu and !self.gpu_unavailable and self.attached_render_mode != .gdi;
+        const gpu = gpu_layers and !self.gpu_unavailable and self.attached_render_mode != .gdi;
         const total = try layers.Plan.checkTransformContext(options, if (builtin.os.tag == .windows) .gdi else .cairo, gpu);
         const old = self.renderer.layerSurfaceBytes() + (if (build_options.gpu) self.gpu_renderer.layerStats().pixel_bytes else 0);
         const peak = std.math.add(usize, old, total) catch return error.LayerAggregateBudgetExceeded;
@@ -2109,7 +2115,7 @@ pub const Context = struct {
         var software_transferred = false;
         errdefer if (!software_transferred) gdi.Renderer.destroyLayerCandidate(software_candidate);
         if (!self.live(window)) return error.Closed;
-        if (build_options.gpu and gpu) {
+        if (gpu_layers and gpu) {
             const gpu_candidate = try self.gpu_renderer.createTransformCandidate(allocator, options);
             errdefer d3d11.Renderer.destroyLayerCandidate(gpu_candidate);
             if (!self.live(window)) return error.Closed;
@@ -2151,7 +2157,7 @@ pub const Context = struct {
         self.cancelGpuWait();
         try self.renderer.releaseLayers();
         if (!self.live(window)) return error.Closed;
-        if (build_options.gpu) try self.gpu_renderer.releaseLayers();
+        if (gpu_layers) try self.gpu_renderer.releaseLayers();
         self.dropTransformMetadata();
         self.dropGaussianMetadata();
         if (!self.live(window)) return error.Closed;
@@ -2901,7 +2907,10 @@ pub const Context = struct {
                 if (build_options.gpu and !self.gpu_unavailable and self.attached_render_mode != .gdi) {
                     if (self.gpu_renderer.begin(paint)) {
                         using_gpu = true;
-                    } else |err| self.gpuFailure(window, err);
+                    } else |err| {
+                        // A capture of the view draws in software, quietly.
+                        if (@as(anyerror, err) != error.NotDrawingToScreen) self.gpuFailure(window, err);
+                    }
                 }
                 defer if (build_options.gpu and self.gpu_renderer.active) self.gpu_renderer.discard();
                 if (!self.live(window)) return;
@@ -2976,9 +2985,9 @@ pub const Context = struct {
                 // under a clip, not through a raster transform.
                 self.folded_transforms +%= self.command_buffer.foldTranslations();
                 clock.markBuild();
-                const layer_options = if (build_options.gpu and using_gpu) self.gpu_renderer.layerOptions() else self.renderer.layerOptions();
-                const transform_options = if (build_options.gpu and using_gpu) self.gpu_renderer.transformOptions() else self.renderer.transformOptions();
-                const transform_plan: ?layers.Plan = if (transform_options) |value| layers.Plan.initTransforms(value, if (build_options.gpu and using_gpu) .gpu else if (builtin.os.tag == .windows) .gdi else .cairo) catch |err| {
+                const layer_options = if (gpu_layers and using_gpu) self.gpu_renderer.layerOptions() else self.renderer.layerOptions();
+                const transform_options = if (gpu_layers and using_gpu) self.gpu_renderer.transformOptions() else self.renderer.transformOptions();
+                const transform_plan: ?layers.Plan = if (transform_options) |value| layers.Plan.initTransforms(value, if (gpu_layers and using_gpu) .gpu else if (builtin.os.tag == .windows) .gdi else .cairo) catch |err| {
                     window.report(.{ .domain = .renderer, .operation = .paint, .err = err });
                     return;
                 } else null;
