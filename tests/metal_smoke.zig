@@ -116,7 +116,7 @@ fn compare(scale: f32) !bool {
 
     const text_top: u32 = @intFromFloat(90 * scale);
     var shape_misses: usize = 0;
-    var tiles = [_]u32{0} ** (64 * 40);
+    var tiles: [64 * 40]u32 = @splat(0);
     var samples: [64 * 40][4]u32 = undefined;
     var worst: i32 = 0;
     var worst_at: [2]u32 = .{ 0, 0 };
