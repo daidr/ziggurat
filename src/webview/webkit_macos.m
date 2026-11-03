@@ -1176,7 +1176,8 @@ static void context_menu_open(id page_object,NSMenu *menu) {
 }
 /* Test hook: opens WebKit's menu as AppKit would, with the items named by
  * identifier ("-" a separator), describes what shows, "identifier|title;"
- * for each item, and chooses the item titled choose when one is. */
+ * for each item (an app's item has none: AppKit names it by its action),
+ * and chooses the item titled choose when one is. */
 int zwk_test_context_menu(void *state,const char *const *identifiers,uint32_t count,char *out,size_t capacity,const char *choose) {
     @autoreleasepool {
         ZwkPage *s=page_of(state);
@@ -1189,7 +1190,7 @@ int zwk_test_context_menu(void *state,const char *const *identifiers,uint32_t co
         }
         context_menu_open(s,menu);
         NSMutableString *text=[NSMutableString string];
-        for (NSMenuItem *item in menu.itemArray) [text appendFormat:@"%@|%@;",item.separatorItem?@"-":item.identifier?:@"",item.title];
+        for (NSMenuItem *item in menu.itemArray) [text appendFormat:@"%@|%@;",item.separatorItem?@"-":[item.target isKindOfClass:[ZwkContextAction class]]?@"":item.identifier?:@"",item.title];
         if (strlen(text.UTF8String)>=capacity) return -1;
         memcpy(out,text.UTF8String,strlen(text.UTF8String)+1);
         const int shown=(int)menu.numberOfItems;
