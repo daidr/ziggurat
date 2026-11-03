@@ -37,6 +37,9 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
+// MTLCommandBufferErrorDeviceRemoved (11) is deprecated in newer SDKs because it
+// cannot occur on Apple Silicon; Intel Macs with removable GPUs can still report it.
+#define ZM_MTL_ERROR_DEVICE_REMOVED ((NSInteger)11)
 #include <CoreText/CoreText.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -1501,7 +1504,7 @@ int zmtl_end_offscreen(void *p,uint8_t *pixels,size_t stride){
         reset_frame(s);
         /* A removed device loses the domain's, as a frame of another
            renderer of it would find. */
-        int removed=s->loss_fault||(commands.status==MTLCommandBufferStatusError&&commands.error.code==MTLCommandBufferErrorDeviceRemoved);
+        int removed=s->loss_fault||(commands.status==MTLCommandBufferStatusError&&commands.error.code==ZM_MTL_ERROR_DEVICE_REMOVED);
         s->loss_fault=0;
         if(removed){ZigMetalDomain *domain=s->domain;if(domain)domain_lose(domain);return 3;}
         if(commands.status!=MTLCommandBufferStatusCompleted)return 2;
@@ -1706,7 +1709,7 @@ const GpuTextureToken *zgpu_snapshot_offscreen(void *domain,void *renderer,uint3
         if(!commands||!blit){*out=ZM_UNEXPECTED;return NULL;}
         [blit copyFromTexture:s->front sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(width,height,1) toTexture:texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];
         [blit endEncoding];[commands commit];[commands waitUntilCompleted];
-        if(fault==3||(commands.status==MTLCommandBufferStatusError&&commands.error.code==MTLCommandBufferErrorDeviceRemoved)){*out=ZM_DEVICE_REMOVED;domain_lose(d);return NULL;}
+        if(fault==3||(commands.status==MTLCommandBufferStatusError&&commands.error.code==ZM_MTL_ERROR_DEVICE_REMOVED)){*out=ZM_DEVICE_REMOVED;domain_lose(d);return NULL;}
         if(commands.status!=MTLCommandBufferStatusCompleted){*out=ZM_UNEXPECTED;return NULL;}
         d->textures[slot]=texture;
     }
