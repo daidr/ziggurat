@@ -243,6 +243,17 @@ pub const Tracker = struct {
                     states[depth] = hasher.final();
                     continue;
                 },
+                .push_mask_clip => |value| {
+                    if (depth == max_clips) return false;
+                    if (value.mask >= sources.coverage.len) return false;
+                    const box = clipBox(value.bounds, self.scale) orelse return false;
+                    var hasher = Hasher.init(states[depth]);
+                    put(&hasher, .{ value.bounds, value.origin, sources.coverage[value.mask].identity });
+                    depth += 1;
+                    clips[depth] = clips[depth - 1].intersect(box);
+                    states[depth] = hasher.final();
+                    continue;
+                },
                 .pop_clip => {
                     if (depth == 0) return false;
                     depth -= 1;
@@ -338,6 +349,11 @@ pub const Tracker = struct {
                     depth += 1;
                     clips[depth] = clips[depth - 1].intersect(clipBox(rect, self.scale) orelse return null);
                 },
+                .push_mask_clip => |value| {
+                    if (depth == max_clips) return null;
+                    depth += 1;
+                    clips[depth] = clips[depth - 1].intersect(clipBox(value.bounds, self.scale) orelse return null);
+                },
                 .pop_clip => depth -|= 1,
                 .text => {
                     const box = (commandBox(command, sources, self.scale) orelse return null).intersect(clips[depth]);
@@ -405,6 +421,11 @@ pub fn extent(list: []const Command, sources: Sources, scale: f32) ?Box {
             depth += 1;
             clips[depth] = clips[depth - 1].intersect(clipBox(rect, scale) orelse return null);
         },
+        .push_mask_clip => |value| {
+            if (depth == max_clips) return null;
+            depth += 1;
+            clips[depth] = clips[depth - 1].intersect(clipBox(value.bounds, scale) orelse return null);
+        },
         .pop_clip => {
             if (depth == 0) return null;
             depth -= 1;
@@ -431,6 +452,12 @@ pub fn hashCommands(buffer: *const commands.Buffer, quantum: ?f64) ?u64 {
         .push_clip => |rect| {
             put(&hasher, 1);
             put(&hasher, rect);
+        },
+        .push_mask_clip => |value| {
+            put(&hasher, 5);
+            put(&hasher, .{ value.bounds, value.origin });
+            if (value.mask >= sources.coverage.len) return null;
+            put(&hasher, sources.coverage[value.mask].identity);
         },
         .pop_clip => put(&hasher, 2),
         .end_group => put(&hasher, 3),

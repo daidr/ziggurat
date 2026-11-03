@@ -946,6 +946,7 @@ pub fn build(b: *std.Build) void {
     }
     const ui_options = b.addOptions();
     ui.addImport("ziggurat_drawing_resources", drawing_resources);
+    ui.addImport("ziggurat_vector", vector);
     const shader = b.addModule("ziggurat_shader", .{ .root_source_file = b.path("src/shader/root.zig"), .target = target, .optimize = optimize });
     ui.addImport("ziggurat_shader", shader);
     const shader_tests = addTest(b, .{ .root_module = shader });

@@ -79,8 +79,16 @@ const Writer = struct {
 
 /// The count and output passes use exactly the same lexer and expansion.
 pub fn parse(bytes: []const u8, output: ?[]api.Command, options: api.ParseOptions) !usize {
+    var at: Progress = .{};
+    return parseTracked(bytes, output, options, &at);
+}
+/// How far a parse got: the byte it read last, and the commands of the
+/// segments it read whole.
+pub const Progress = struct { offset: usize = 0, committed: usize = 0 };
+pub fn parseTracked(bytes: []const u8, output: ?[]api.Command, options: api.ParseOptions, progress: *Progress) !usize {
     var lexer: Lexer = .{ .bytes = bytes };
     var writer: Writer = .{ .output = output, .limit = options.limits.commands };
+    errdefer progress.offset = lexer.at;
     var command: u8 = 0;
     var previous: u8 = 0;
     var pen: Point = .{};
@@ -90,8 +98,12 @@ pub fn parse(bytes: []const u8, output: ?[]api.Command, options: api.ParseOption
     var open = false;
     while (true) {
         if (options.cancellation) |cancel| try cancel.check();
+        progress.committed = writer.count;
         lexer.whitespace();
-        if (lexer.at == bytes.len) return writer.count;
+        if (lexer.at == bytes.len) {
+            progress.committed = writer.count;
+            return writer.count;
+        }
         const char = bytes[lexer.at];
         if (std.ascii.isAlphabetic(char)) {
             if (std.mem.indexOfScalar(u8, "MmZzLlHhVvCcSsQqTtAa", char) == null) return error.InvalidPathData;

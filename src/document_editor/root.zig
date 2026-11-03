@@ -223,6 +223,12 @@ const FieldTestHost = struct {
     close_error: ?anyerror = null,
     clipboard_bytes: [128]u8 = undefined,
     clipboard_len: usize = 0,
+    pasted: usize = 0,
+    fn rejectBad(ptr: ?*anyopaque, bytes: []const u8) bool {
+        const self: *@This() = @ptrCast(@alignCast(ptr.?));
+        self.pasted += 1;
+        return std.mem.indexOf(u8, bytes, "bad") == null;
+    }
     fn draw(_: *anyopaque, _: *ui.Frame) void {}
     fn action(ptr: *anyopaque, _: u64) void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
@@ -478,6 +484,44 @@ test "Document fields share control focus native text clipboard readonly and one
     try std.testing.expectEqual(@as(usize, 1), host.actions);
     const stats = try context.transformStats();
     try std.testing.expect(!stats.layers.software.prepared and stats.layers.current_bytes == 0);
+}
+test "single-line paste turns line breaks into spaces, the paste hook can refuse it, and clearing keeps the undo history" {
+    const app = try z.App.init(std.testing.allocator);
+    defer app.deinit();
+    const window = try app.createWindow(.{});
+    defer _ = window.destroy() catch unreachable;
+    var host: FieldTestHost = .{};
+    var context = ui.Context.init(&host, FieldTestHost.draw, FieldTestHost.action);
+    context.semantics_enabled = false;
+    try context.attach(window);
+    try context.prepareTextFields(std.testing.allocator, .{});
+    const engine = try t.Engine.create(std.testing.allocator, std.Thread.getCurrentId(), .{});
+    defer engine.close() catch unreachable;
+    const document = try d.Document.create(std.testing.allocator, std.Thread.getCurrentId(), "keep", .{});
+    defer document.close() catch unreachable;
+    const field = try Field.create(std.testing.allocator, document, engine, .{ .context = &host, .paste = FieldTestHost.rejectBad, .clipboard = .{ .context = &host, .read = FieldTestHost.read, .write = FieldTestHost.write } });
+    defer field.close() catch unreachable;
+    try field.prepare(.{ .x = 8, .y = 8, .width = 180, .height = 40 }, .{});
+    try field.attach(&context, 1);
+    try FieldTestHost.front(&context, &.{field}, false);
+    try field.focus();
+    try std.testing.expect(context.handleKeyInput(window, .{ .key = .a, .modifiers = .{ .control = true } }));
+    try FieldTestHost.write(&host, "a bad\nline");
+    try std.testing.expect(context.handleKeyInput(window, .{ .key = .v, .modifiers = .{ .control = true } }));
+    try FieldTestHost.text(document, "keep");
+    try std.testing.expectEqual(@as(usize, 1), host.pasted);
+    try FieldTestHost.write(&host, "one\r\ntwo\u{2028}three");
+    try std.testing.expect(context.handleKeyInput(window, .{ .key = .v, .modifiers = .{ .control = true } }));
+    try FieldTestHost.text(document, "one two three");
+    try std.testing.expectEqual(@as(usize, 2), host.pasted);
+    // Setting the value to nothing is an edit like any other: undo brings
+    // back what was there.
+    _ = try field.setValue("");
+    try FieldTestHost.text(document, "");
+    _ = try field.undo();
+    try FieldTestHost.text(document, "one two three");
+    _ = try field.undo();
+    try FieldTestHost.text(document, "keep");
 }
 test "password fields shape placeholders, copy nothing, hide text from input services and turn the input method off" {
     const app = try z.App.init(std.testing.allocator);

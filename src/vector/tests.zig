@@ -720,3 +720,20 @@ test "optional sample bits preserve exact geometric union and aligned row accoun
         }
     }.run, .{});
 }
+
+test "path data in error parses up to the segment it cannot read and tells where" {
+    var report: api.ParseReport = .{};
+    const path = try api.Path.parseDataPrefix(allocator, "M0 0 L10 0 L10 x10 Z", .{}, &report);
+    defer path.close() catch {};
+    try std.testing.expect(report.failure != null);
+    try std.testing.expectEqual(@as(usize, 15), report.offset);
+    try std.testing.expectEqual(@as(usize, 2), path.commands.len);
+    const whole = try api.Path.parseDataPrefix(allocator, "M4 12l5 5L20 6", .{}, &report);
+    defer whole.close() catch {};
+    try std.testing.expectEqual(@as(?anyerror, null), report.failure);
+    try std.testing.expectEqual(@as(usize, 3), whole.commands.len);
+    const none = try api.Path.parseDataPrefix(allocator, "Q", .{}, &report);
+    defer none.close() catch {};
+    try std.testing.expectEqual(@as(usize, 0), none.commands.len);
+    try std.testing.expectEqual(@as(usize, 1), report.offset);
+}

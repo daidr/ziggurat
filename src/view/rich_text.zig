@@ -101,6 +101,11 @@ pub const Options = struct {
     /// that much narrower, as a book indents its paragraphs. Lines after a
     /// newline are not indented.
     indent: f32 = 0,
+    /// Wraps the text into lines of about the same width, as CSS's
+    /// `text-wrap: balance`: as many lines as `width` takes, wrapped at the
+    /// narrowest width that keeps them as many, found when the text wraps.
+    /// The lines stay placed within `width`, justified to the narrower one.
+    balance: bool = false,
     /// Draws the spans that are inline objects; without it they draw
     /// nothing and keep their room.
     objects: ?ObjectPainter = null,
@@ -184,6 +189,9 @@ pub const RichText = struct {
     /// Where each span starts in the spans' texts one after another.
     bases: std.ArrayList(u32) = .empty,
     size: Size = .{ .width = 0, .height = 0 },
+    /// The width the lines last wrapped at: `options.width`, or narrower
+    /// when balanced.
+    wrap_width: f32 = 0,
     /// Widest piece that cannot wrap.
     widest: f32 = 0,
     /// The theme's text color from the last measure.
@@ -354,6 +362,22 @@ pub const RichText = struct {
     }
 
     fn wrap(self: *RichText, width: f32) void {
+        self.wrapAt(width);
+        const count = self.lines.items.len;
+        if (!self.options.balance or !(width > 0) or count <= 1) return;
+        var lo: f32 = 0;
+        for (self.words.items) |word| lo = @max(lo, word.cluster);
+        lo = @min(lo - 0.25, width);
+        var hi = width;
+        while (hi - lo > 0.25) {
+            const mid = (lo + hi) / 2;
+            self.wrapAt(mid);
+            if (self.lines.items.len <= count) hi = mid else lo = mid;
+        }
+        self.wrapAt(hi);
+    }
+    fn wrapAt(self: *RichText, width: f32) void {
+        self.wrap_width = width;
         self.runs.clearRetainingCapacity();
         self.lines.clearRetainingCapacity();
         const words = self.words.items;
@@ -448,8 +472,8 @@ pub const RichText = struct {
                 width += ending.hyphen;
             }
         }
-        const room = self.options.width - width;
-        if (ending.justify and self.options.width > 0 and room > 1e-3 and runs.len > 1) {
+        const room = self.wrap_width - width;
+        if (ending.justify and self.wrap_width > 0 and room > 1e-3 and runs.len > 1) {
             var opportunities: usize = 0;
             for (runs[0 .. runs.len - 1]) |run| opportunities += @intFromBool(self.runStretches(run));
             if (opportunities > 0) {
@@ -459,7 +483,7 @@ pub const RichText = struct {
                     run.x += moved;
                     if (self.runStretches(run.*)) moved += each;
                 }
-                width = self.options.width;
+                width = self.wrap_width;
             }
         }
         const y = if (self.lines.items.len == 0) 0 else blk: {

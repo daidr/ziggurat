@@ -16,6 +16,7 @@ const transform_composite = @import("transform_composite.zig");
 const shader_effects = commands.shader_effects;
 const effect_host = @import("gpu_effect_host.zig");
 const damage = @import("damage.zig");
+const mask_mix = @import("mask_mix.zig");
 const Rect = layout.Rect;
 comptime {
     if (@sizeOf(usize) == 8 and (@sizeOf(cpu_gradient.Surface) != 72 or @offsetOf(cpu_gradient.Surface, "clip") != 24 or @offsetOf(cpu_gradient.Surface, "origin") != 56)) @compileError("software plane ABI mismatch");
@@ -122,6 +123,14 @@ pub const Renderer = struct {
     /// While a damaged rectangle is drawn again, the device pixels outside
     /// which drawing commands are skipped.
     cull: ?damage.Box = null,
+    /// The masked clips open now and what is kept beneath the drawings
+    /// they mask; see `mask_mix`.
+    masks: mask_mix.Stack = .{},
+    /// How many groups, transforms and effects are open: the layer drawing
+    /// goes to, for the masked clips.
+    layer_level: u32 = 0,
+    /// The layers whose span is masked where it began, a bit for each level.
+    masked_spans: u64 = 0,
     const EffectScope = struct { slot: u8, capture: gaussian_scope.Capture };
     const Resources = struct {
         text_bytes: []const u8,
@@ -239,6 +248,9 @@ pub const Renderer = struct {
         return result;
     }
     pub fn abort(self: *Renderer) void {
+        self.masks.reset();
+        self.layer_level = 0;
+        self.masked_spans = 0;
         if (self.native) |native| zlc_layer_abort(native);
         self.layer_active = false;
     }
@@ -723,6 +735,53 @@ pub const Renderer = struct {
         try self.execute(list, .{ .text_bytes = text_bytes, .brushes = resources, .prepared = prepared, .images = image_resources, .coverage = coverage_resources, .transforms = transforms, .filters = filters });
         if (self.effect_count != 0) return error.UnbalancedEffects;
     }
+    fn maskDirty(self: *Renderer, box: ?[4]u32) void {
+        const b = box orelse return;
+        if (b[2] > b[0] and b[3] > b[1]) zlc_gradient_dirty(self.native.?, b[0], b[1], b[2] - b[0], b[3] - b[1]);
+    }
+    fn maskSurface(self: *Renderer) !cpu_gradient.Surface {
+        var surface: cpu_gradient.Surface = undefined;
+        if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawGradientFailed;
+        return surface;
+    }
+    /// Before a drawing that changes at most `box`: keep what is beneath
+    /// it when a masked clip on this layer masks it.
+    fn maskDraw(self: *Renderer, box: ?damage.Box) !void {
+        if (!self.masks.masks(self.layer_level)) return;
+        self.maskDirty(try self.masks.draw(std.heap.smp_allocator, try self.maskSurface(), self.layer_level, box));
+    }
+    /// Mix the drawings kept so far by their masks.
+    fn maskFlush(self: *Renderer) !void {
+        if (self.masks.piece_len == 0) return;
+        self.maskDirty(try self.masks.flush(try self.maskSurface()));
+    }
+    /// Before a group, transform or effect begins: it is one drawing of
+    /// the layer it composites onto.
+    fn maskBeginSpan(self: *Renderer) !void {
+        if (self.layer_level >= 63) return error.LayerDepthExceeded;
+        var masked = false;
+        if (self.masks.len != 0) {
+            const result = try self.masks.beginSpan(std.heap.smp_allocator, try self.maskSurface(), self.layer_level);
+            self.maskDirty(result.changed);
+            masked = result.masked;
+        }
+        self.layer_level += 1;
+        const bit = @as(u64, 1) << @intCast(self.layer_level);
+        if (masked) self.masked_spans |= bit else self.masked_spans &= ~bit;
+    }
+    /// Before the innermost layer ends: mix what was drawn on it.
+    fn maskBeforeEnd(self: *Renderer) !void {
+        try self.maskFlush();
+    }
+    /// After it composited: mix it by the masks of the layer beneath.
+    fn maskEndSpan(self: *Renderer) !void {
+        if (self.layer_level == 0) return;
+        const bit = @as(u64, 1) << @intCast(self.layer_level);
+        self.layer_level -= 1;
+        if (self.masked_spans & bit == 0) return;
+        self.masked_spans &= ~bit;
+        self.maskDirty(try self.masks.endSpan(try self.maskSurface()));
+    }
     fn execute(self: *Renderer, list: []const commands.Command, all: Resources) anyerror!void {
         const text_bytes = all.text_bytes;
         const resources = all.brushes;
@@ -732,14 +791,39 @@ pub const Renderer = struct {
         const transforms = all.transforms;
         const filters = all.filters;
         var depth: usize = 0;
+        // The clips open here that are masked, a bit for each depth.
+        var masked: u32 = 0;
+        const masks_before = self.masks.len;
         defer while (self.layer_plan == null and depth != 0) : (depth -= 1) {
             zlc_pop_clip(self.native.?);
         };
+        errdefer {
+            self.masks.len = masks_before;
+            self.masks.piece_len = 0;
+            if (masks_before == 0) self.masks.reset();
+        }
         const cull_sources: damage.Sources = .{ .prepared = prepared, .coverage = coverage_resources, .indicators = if (self.backdrop_source) |source| source.indicator_storage[0..source.indicator_len] else &.{} };
         const cull_scale = if (self.cull != null) zlc_scale(self.native.?) else 1;
         var index: usize = 0;
         while (index < list.len) : (index += 1) {
             if (self.cull) |box| if (damage.commandBox(list[index], cull_sources, cull_scale)) |bounds| if (!bounds.intersects(box)) continue;
+            // Each drawing inside a masked clip is masked by itself.
+            if (self.masks.len != 0) {
+                switch (list[index]) {
+                    .fill, .shape, .gradient, .text, .prepared_text, .coverage, .image, .indicator => try self.maskDraw(damage.commandBox(list[index], cull_sources, zlc_scale(self.native.?))),
+                    .backdrop, .backdrop_shader => {
+                        try self.maskFlush();
+                        try self.maskDraw(null);
+                    },
+                    .push_clip, .push_mask_clip, .pop_clip => try self.maskFlush(),
+                    .begin_group, .begin_transform, .effect => try self.maskBeginSpan(),
+                    .end_group, .end_transform, .end_effect => try self.maskBeforeEnd(),
+                    .texture => {},
+                }
+            } else switch (list[index]) {
+                .begin_group, .begin_transform, .effect => try self.maskBeginSpan(),
+                else => {},
+            }
             switch (list[index]) {
                 .fill => |fill_command| {
                     if (!layout.validRect(fill_command.bounds)) return error.InvalidGeometry;
@@ -782,7 +866,10 @@ pub const Renderer = struct {
                     const options = try commands.groupOptions(value, coverage_resources);
                     if (value.filter_slot == commands.no_filter) try self.beginGroup(bounds, options) else try self.beginGaussian(bounds, options, filters[value.filter_slot]);
                 },
-                .end_group => try self.endGroup(),
+                .end_group => {
+                    try self.endGroup();
+                    try self.maskEndSpan();
+                },
                 .effect => |slot| {
                     const source = self.backdrop_source orelse return error.MissingResources;
                     if (slot >= source.shader_storage.len) return error.MissingResources;
@@ -793,6 +880,8 @@ pub const Renderer = struct {
                         self.effect_count += 1;
                     } else {
                         try self.isolateEffect(list[index + 1 .. effect_end], entry, all);
+                        try self.maskFlush();
+                        try self.maskEndSpan();
                         index = effect_end;
                     }
                 },
@@ -803,6 +892,7 @@ pub const Renderer = struct {
                     const source = self.backdrop_source.?;
                     try self.filterEffect(&source.shader_storage.entries[scope.slot], scope.capture, source.shader_storage.workspace);
                     if (zlc_layer_end_group(self.native.?) != 0) return error.EndGroupFailed;
+                    try self.maskEndSpan();
                 },
                 .backdrop_shader => |slot| {
                     const source = self.backdrop_source orelse return error.MissingResources;
@@ -814,7 +904,10 @@ pub const Renderer = struct {
                     zlc_gradient_dirty(self.native.?, dirty.left, dirty.top, dirty.right - dirty.left, dirty.bottom - dirty.top);
                 },
                 .begin_transform => |slot| try self.beginTransform(transforms[slot]),
-                .end_transform => try self.endTransform(),
+                .end_transform => {
+                    try self.endTransform();
+                    try self.maskEndSpan();
+                },
                 .backdrop => |slot| {
                     const source = self.backdrop_source orelse return error.MissingResources;
                     if (slot >= source.backdrop_storage.len) return error.MissingResources;
@@ -837,16 +930,37 @@ pub const Renderer = struct {
                     zlc_push_clip(self.native.?, rect.x, rect.y, rect.width, rect.height);
                     depth += 1;
                 },
+                .push_mask_clip => |value| {
+                    if (depth == 32) return error.ClipStackFull;
+                    if (!layout.validRect(value.bounds)) return error.InvalidGeometry;
+                    if (value.mask >= coverage_resources.len) return error.MissingResources;
+                    const view = coverage_resources[value.mask];
+                    try view.validate();
+                    var surface: cpu_gradient.Surface = undefined;
+                    if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawGradientFailed;
+                    if (view.coverage.scale != surface.scale) return error.CoverageDpiMismatch;
+                    const rect = value.bounds;
+                    try self.masks.open(surface, rect, value.origin, view.coverage, self.layer_level);
+                    zlc_push_clip(self.native.?, rect.x, rect.y, rect.width, rect.height);
+                    masked |= @as(u32, 1) << @intCast(depth);
+                    depth += 1;
+                },
                 .pop_clip => {
                     if (depth == 0) return error.ClipStackEmpty;
                     zlc_pop_clip(self.native.?);
                     depth -= 1;
+                    if (masked & (@as(u32, 1) << @intCast(depth)) != 0) {
+                        masked &= ~(@as(u32, 1) << @intCast(depth));
+                        try self.masks.close();
+                    }
                 },
             }
         }
+        try self.maskFlush();
         if (depth != 0) return error.UnbalancedClips;
     }
     pub fn deinit(self: *Renderer) void {
+        self.masks.deinit(std.heap.smp_allocator);
         self.dropGl();
         if (self.native) |native| zlc_destroy(native);
         self.images.deinit();
@@ -888,6 +1002,75 @@ test "Cairo text follows the command font" {
     try std.testing.expect(bold > body);
     // Returning to the default font draws the same pixels as before.
     try std.testing.expectEqual(body, try Ink.measure(&renderer, .{}));
+}
+
+test "Cairo masked clips show what is drawn inside as much as their mask, gradients too" {
+    var renderer: Renderer = .{};
+    defer renderer.deinit();
+    var dummy: u8 = 0;
+    try renderer.begin(.{ .native_context = &dummy, .size = .{ .width = 32, .height = 16, .scale = 1 } });
+    var lease = drawing.Lease.init(std.Thread.getCurrentId());
+    // Solid over columns 4 to 11, half over 12 to 19, clear after.
+    var pixels: [24 * 16]u8 = undefined;
+    for (0..16) |y| for (0..24) |x| {
+        pixels[y * 24 + x] = if (x < 8) 255 else if (x < 16) 128 else 0;
+    };
+    const mask: drawing.CoverageView = .{ .lease = &lease, .identity = try drawing.reserveRasterIdentity(), .coverage = .{ .pixels = &pixels, .width = 24, .height = 16, .stride = 24, .origin_x = 4, .origin_y = 0, .scale = 1 } };
+    var buffer: commands.Buffer = .{};
+    defer buffer.reset();
+    try buffer.fill(.{ .x = 0, .y = 0, .width = 32, .height = 16 }, 0x000000);
+    try buffer.pushMaskClip(.{ .x = 2, .y = 0, .width = 28, .height = 16 }, .{}, mask);
+    try buffer.fill(.{ .x = 0, .y = 0, .width = 32, .height = 8 }, 0xffffff);
+    const stops = [_]commands.brushes.Stop{ .{ .offset = 0, .color = .rgb(0xffffff) }, .{ .offset = 1, .color = .rgb(0xffffff) } };
+    try buffer.gradientRect(.{ .x = 0, .y = 8, .width = 32, .height = 8 }, 0, .{ .linear = .{ .start = .{ .x = 0, .y = 0 }, .end = .{ .x = 32, .y = 0 }, .stops = &stops } });
+    try buffer.popClip();
+    try renderer.replayBuffer(&buffer);
+    var surface: cpu_gradient.Surface = undefined;
+    if (zlc_gradient_surface(renderer.native.?, &surface) != 0) return error.DrawGradientFailed;
+    for ([_]usize{ 2, 12 }) |y| {
+        const row = surface.pixels[y * surface.stride ..];
+        // Outside the clip's rectangle and outside the mask: black.
+        try std.testing.expectEqual(@as(u32, 0xff000000), row[1]);
+        try std.testing.expectEqual(@as(u32, 0xff000000), row[2]);
+        // Solid mask: white; half: gray; clear: black.
+        try std.testing.expectEqual(@as(u32, 0xffffffff), row[6]);
+        const gray = row[14] & 255;
+        try std.testing.expect(gray > 120 and gray < 136);
+        try std.testing.expectEqual(@as(u32, 0xff000000), row[24]);
+    }
+}
+
+test "Cairo masked clips mask each drawing inside by itself, so overlapping drawings show through each other" {
+    var renderer: Renderer = .{};
+    defer renderer.deinit();
+    var dummy: u8 = 0;
+    try renderer.begin(.{ .native_context = &dummy, .size = .{ .width = 16, .height = 8, .scale = 1 } });
+    var lease = drawing.Lease.init(std.Thread.getCurrentId());
+    var pixels: [16 * 8]u8 = @splat(128);
+    const mask: drawing.CoverageView = .{ .lease = &lease, .identity = try drawing.reserveRasterIdentity(), .coverage = .{ .pixels = &pixels, .width = 16, .height = 8, .stride = 16, .origin_x = 0, .origin_y = 0, .scale = 1 } };
+    var buffer: commands.Buffer = .{};
+    defer buffer.reset();
+    try buffer.fill(.{ .x = 0, .y = 0, .width = 16, .height = 8 }, 0x000000);
+    try buffer.pushMaskClip(.{ .x = 0, .y = 0, .width = 16, .height = 8 }, .{}, mask);
+    // Red, then white over its right half and past it.
+    try buffer.fill(.{ .x = 0, .y = 0, .width = 8, .height = 8 }, 0xff0000);
+    try buffer.fill(.{ .x = 4, .y = 0, .width = 12, .height = 8 }, 0xffffff);
+    try buffer.popClip();
+    try renderer.replayBuffer(&buffer);
+    var surface: cpu_gradient.Surface = undefined;
+    if (zlc_gradient_surface(renderer.native.?, &surface) != 0) return error.DrawGradientFailed;
+    const row = surface.pixels[4 * surface.stride ..];
+    // Red alone at half.
+    try std.testing.expect((row[1] >> 16) & 255 > 120 and (row[1] >> 16) & 255 < 136 and row[1] & 255 == 0);
+    // White at half over red at half: red still shows beneath, as two
+    // children at half opacity would; one layer masked as one would show
+    // gray there.
+    const red = (row[6] >> 16) & 255;
+    const blue = row[6] & 255;
+    try std.testing.expect(red > 184 and red < 200);
+    try std.testing.expect(blue > 120 and blue < 136);
+    // White alone at half.
+    try std.testing.expect(row[12] & 255 > 120 and row[12] & 255 < 136);
 }
 
 test "Cairo backdrop effects filter the plane drawn so far and fall back without a workspace" {

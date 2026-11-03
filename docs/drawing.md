@@ -21,6 +21,8 @@ frame.strokeRect(bounds, 8, 2, .{ .r = 255, .g = 255, .b = 255, .a = 128 });
 
 矩形 clip 与形状共用既有 32 层栈，clip 在 DIP 坐标系内随 DPI 缩放。栈不平衡或命令非法时回放失败并解除已推入的 native clip；GPU 还会中止当前帧，由 Context 使用同一份命令进行软件后备。后端的边缘抗锯齿算法不同，语义与轮廓保持一致，不承诺边缘逐像素相同。
 
+`push_mask_clip`（`MaskClip`：外接矩形、遮罩原点与覆盖资源）是带覆盖遮罩的 clip，同样由 `pop_clip` 结束，占栈中一层和一个覆盖资源槽；`Frame.pushRoundedClip` 与 `pushPathClip` 生成它，遮罩缓存与各后端的做法见[声明式视图](view.md#裁剪与遮罩)。
+
 | 后端 | 存储与正常回放成本 |
 | --- | --- |
 | GDI | 复用顶向下 32 位 DIB、DC 和字体；形状覆盖率直接写入 DIB，只有轮廓边缘做固定 4×4 采样，source-over 不分配临时位图。读取前 `GdiFlush` 完成前面的 GDI 文本和不透明矩形操作。工作量随相交像素面积增长。 |

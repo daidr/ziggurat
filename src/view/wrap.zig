@@ -104,6 +104,44 @@ pub fn measure(text: []const u8, width: f32, font: ?Font, measurer: Measurer, ma
     return size;
 }
 
+/// How many lines `text` takes wrapped at `width`, counting up to `limit`.
+pub fn lineCount(text: []const u8, width: f32, font: ?Font, measurer: Measurer, limit: usize) usize {
+    var start: usize = 0;
+    var count: usize = 0;
+    while (count < limit) {
+        const line = next(text, start, width, font, measurer);
+        count += 1;
+        start = line.next;
+        if (start >= text.len and !(start > 0 and text[start - 1] == '\n' and start == text.len)) break;
+    }
+    return count;
+}
+
+/// How close to the narrowest width that keeps a text's lines as many
+/// `balanced` finds it, in DIP.
+pub const balance_step: f32 = 0.25;
+
+/// The width to wrap `text` at so that its lines are about as wide as each
+/// other (`Style.balance`): the narrowest that keeps them as many as
+/// wrapping at `width` takes, found by bisection. A text on one line, or
+/// one `max_lines` cuts, wraps at `width`.
+pub fn balanced(text: []const u8, width: f32, font: ?Font, measurer: Measurer, max_lines: u16) f32 {
+    if (!(width > 0) or !std.math.isFinite(width)) return width;
+    const cap: usize = if (max_lines != 0) @as(usize, max_lines) + 1 else 4096;
+    const count = lineCount(text, width, font, measurer, cap);
+    if (count <= 1 or (max_lines != 0 and count > max_lines)) return width;
+    // The lines hold the whole text, which takes no less than its width
+    // over as many lines, nor less than its widest word.
+    const total = measurer.textSize(text, font).width;
+    var lo = @min(@max(total / @as(f32, @floatFromInt(count)) / 2, longestWord(text, font, measurer) - balance_step), width);
+    var hi = width;
+    while (hi - lo > balance_step) {
+        const mid = (lo + hi) / 2;
+        if (lineCount(text, mid, font, measurer, count + 1) <= count) hi = mid else lo = mid;
+    }
+    return hi;
+}
+
 /// The widest piece of `text` no line can break, which a wrapping text
 /// needs at the least.
 pub fn longestWord(text: []const u8, font: ?Font, measurer: Measurer) f32 {
@@ -160,6 +198,22 @@ pub fn cut(line: []const u8, width: f32, font: ?Font, measurer: Measurer, out: [
 }
 
 const testing = std.testing;
+
+test "balanced lines keep their count at about the same width" {
+    const m: Measurer = .{};
+    // 9 DIP a character: "aaaa bbbb cccc dd" wraps at 13 characters into
+    // a long line and a short one; balanced, into two of about the same.
+    const text = "aaaa bbbb cccc dd";
+    try testing.expectEqual(@as(usize, 2), lineCount(text, 9 * 15, null, m, 10));
+    const width = balanced(text, 9 * 15, null, m, 0);
+    try testing.expectEqual(@as(usize, 2), lineCount(text, width, null, m, 10));
+    try testing.expect(width < 9 * 10);
+    const first = next(text, 0, width, null, m);
+    try testing.expectEqualStrings("aaaa bbbb", text[first.start..first.end]);
+    // One line, or a cut one, keeps its width.
+    try testing.expectEqual(@as(f32, 900), balanced(text, 900, null, m, 0));
+    try testing.expectEqual(@as(f32, 9 * 6), balanced(text, 9 * 6, null, m, 2));
+}
 
 test "lines break at spaces, ideographs and newlines" {
     const m: Measurer = .{};

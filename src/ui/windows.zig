@@ -861,6 +861,20 @@ pub const Renderer = struct {
                 const rect = try self.bounds(clip);
                 if (c.IntersectClipRect(self.dc, rect.left, rect.top, rect.right, rect.bottom) == c.ERROR) return error.SetClipFailed;
             },
+            .push_mask_clip => |value| {
+                // Cut to the rectangle only: the mask is not drawn here yet.
+                const clip = value.bounds;
+                if (depth == 32) return error.ClipStackFull;
+                if (self.layer_workspace) |workspace| {
+                    try workspace.pushClip(.{ .x = clip.x, .y = clip.y, .width = clip.width, .height = clip.height });
+                    depth += 1;
+                    continue;
+                }
+                if (c.SaveDC(self.dc) == 0) return error.SaveClipFailed;
+                depth += 1;
+                const rect = try self.bounds(clip);
+                if (c.IntersectClipRect(self.dc, rect.left, rect.top, rect.right, rect.bottom) == c.ERROR) return error.SetClipFailed;
+            },
             .pop_clip => {
                 if (depth == 0) return error.ClipStackEmpty;
                 if (self.layer_workspace) |workspace| {

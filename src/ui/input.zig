@@ -98,6 +98,53 @@ pub const Options = struct {
     focus_rect: ?Rect = null,
     range: ?RangeHit = null,
     shortcut: ?Chord = null,
+    /// The exact shape that takes the pointer within `rect`, which is the
+    /// box around it; set by the frame that records the control.
+    exact: Exact = .{},
+};
+/// A rounded rectangle a clip cuts the pointer to, in the DIP a control
+/// was recorded in.
+pub const RoundClip = struct {
+    rect: Rect,
+    radius: f32,
+    pub fn contains(self: RoundClip, x: f32, y: f32) bool {
+        const r = self.rect;
+        if (!(x >= r.x and y >= r.y and x < r.x + r.width and y < r.y + r.height)) return false;
+        const radius = @min(self.radius, @min(r.width, r.height) / 2);
+        if (radius <= 0) return true;
+        const cx = std.math.clamp(x, r.x + radius, r.x + r.width - radius);
+        const cy = std.math.clamp(y, r.y + radius, r.y + r.height - radius);
+        const dx = x - cx;
+        const dy = y - cy;
+        return dx * dx + dy * dy <= radius * radius;
+    }
+};
+/// Where a control takes the pointer beyond its box: the box it was
+/// recorded in before a map moved, turned or tilted it (`unmap` takes a
+/// point of the window back there), and a rounded clip cutting it.
+pub const Exact = struct {
+    /// Column-major homography from window DIP back to the DIP the
+    /// control was recorded in.
+    unmap: ?[9]f64 = null,
+    /// The control's box where it was recorded, clipped.
+    source: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    round: ?RoundClip = null,
+    pub fn contains(self: Exact, point: z.Point) bool {
+        var x = point.x;
+        var y = point.y;
+        if (self.unmap) |m| {
+            const px: f64 = point.x;
+            const py: f64 = point.y;
+            const w = m[2] * px + m[5] * py + m[8];
+            if (!(@abs(w) > 1e-9)) return false;
+            x = @floatCast((m[0] * px + m[3] * py + m[6]) / w);
+            y = @floatCast((m[1] * px + m[4] * py + m[7]) / w);
+            const r = self.source;
+            if (!(x >= r.x and y >= r.y and x < r.x + r.width and y < r.y + r.height)) return false;
+        }
+        if (self.round) |round| return round.contains(x, y);
+        return true;
+    }
 };
 pub const Hit = struct { id: u64, rect: Rect, options: Options = .{} };
 
@@ -109,7 +156,7 @@ fn resolve(view: HitView, point: z.Point) ?usize {
         const item = view.hits[i];
         if (item.options.pass_through) continue;
         // The exact existing reverse traversal includes disabled occluders.
-        const contains = if (view.mapped) |mapped| mapped.hitContains(i, affine.Rect.from(item.rect), affine.Point.from(point)) catch false else item.rect.contains(point);
+        const contains = if (view.mapped) |mapped| mapped.hitContains(i, affine.Rect.from(item.rect), affine.Point.from(point)) catch false else item.rect.contains(point) and item.options.exact.contains(point);
         if (contains) return i;
     }
     return null;

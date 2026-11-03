@@ -38,6 +38,29 @@ pub const CoverageCacheStats = struct { software: drawing.CoverageStats, gpu: ?d
 pub const RasterCacheStats = struct { software: drawing.RasterStats, gpu: ?drawing.RasterStats };
 pub const geometry = @import("geometry.zig");
 pub const layers = @import("layers.zig");
+pub const clip_mask = @import("clip_mask.zig");
+/// Paths of lines and curves (`Path.parseData` reads SVG path data) that
+/// `Frame.pushPathClip` clips to.
+pub const vectors = @import("ziggurat_vector");
+/// Where path data stops being readable; see `parsePath`.
+pub const PathReport = vectors.ParseReport;
+/// A path of SVG path data, as the `d` attribute of an SVG `<path>` holds
+/// it (all its commands, absolute and relative, arcs too), in its units as
+/// DIP: an icon's outline copied from an SVG to fill, stroke or clip to
+/// (`Frame.pushPathClip`). With `report`, data in error makes the path up
+/// to the first segment it cannot read, as SVG draws it, and `report` gets
+/// that error and the offset of the byte it found it at; without, the
+/// error is returned. Close the path with `Path.close`.
+pub fn parsePath(allocator: std.mem.Allocator, data: []const u8, report: ?*PathReport) !*vectors.Path {
+    var local: PathReport = .{};
+    const out = report orelse &local;
+    const path = try vectors.Path.parseDataPrefix(allocator, data, .{}, out);
+    if (report == null) if (out.failure) |err| {
+        path.close() catch {};
+        return err;
+    };
+    return path;
+}
 pub const gaussian = @import("gaussian_filter.zig");
 const gaussian_scope = @import("gaussian_scope.zig");
 pub const GaussianWorkspaceOptions = gaussian_scope.Options;
@@ -607,6 +630,9 @@ pub const Context = struct {
     layer_mutating: bool = false,
     accessibility_source_state: accessibility_source.State = .{},
     frame_accessibility_source: ?u64 = null,
+    /// The masks of the rounded, gradient and path clips frames cut to,
+    /// made the first time a frame asks for one; see `clip_mask`.
+    clip_masks: ?*clip_mask.Masks = null,
 
     pub fn init(state: *anyopaque, draw: *const fn (*anyopaque, *Frame) void, on_action: *const fn (*anyopaque, u64) void) Context {
         return .{ .state = state, .draw = draw, .on_action = on_action };
@@ -944,6 +970,23 @@ pub const Context = struct {
         self.shader_workspace = workspace;
         if (previous) |value| value.destroy();
         window.invalidate();
+    }
+    /// What the masks of clips take now; null before a frame cut to one.
+    pub fn clipMaskStats(self: *const Context) ?clip_mask.Stats {
+        const masks = self.clip_masks orelse return null;
+        return masks.statsNow();
+    }
+    fn clipMasks(self: *Context) ?*clip_mask.Masks {
+        if (self.clip_masks == null) self.clip_masks = clip_mask.Masks.create(std.heap.smp_allocator) catch return null;
+        return self.clip_masks;
+    }
+    fn clipMaskRelease(self: *Context) clip_mask.Release {
+        return .{ .context = self, .call = releaseClipMask };
+    }
+    fn releaseClipMask(ptr: *anyopaque, identity: u64) void {
+        const self: *Context = @ptrCast(@alignCast(ptr));
+        _ = self.renderer.releaseCoverage(identity) catch {};
+        if (build_options.gpu) _ = self.gpu_renderer.releaseCoverage(identity) catch {};
     }
     pub fn releaseShaderEffects(self: *Context) !void {
         if (self.painting) return error.Busy;
@@ -3060,6 +3103,7 @@ pub const Context = struct {
                     };
                     self.semantic_tree.mapped = snapshot;
                 };
+                if (self.clip_masks) |masks| masks.beginPaint(self.clipMaskRelease());
                 var frame: Frame = .{ .context = self, .size = paint.size, .transforms = transform_workspace };
                 self.frame_accessibility_source = self.accessibility_source_state.currentGeneration();
                 self.accessibility_source_state.beginFrame() catch |err| {
@@ -3270,6 +3314,10 @@ pub const Context = struct {
         self.damage_tracker.invalidate();
         if (gpu_damage) self.gpu_damage_tracker.invalidate();
         if (build_options.gpu) self.gpu_renderer.deinit();
+        if (self.clip_masks) |masks| {
+            self.clip_masks = null;
+            masks.destroy(null);
+        }
         self.window = null;
         self.last_paint_size = null;
         self.input_state = .{ .scope_epoch = shortcut_epoch, .click_epoch = click_epoch };
@@ -3357,6 +3405,30 @@ pub const HitMap = struct {
         if (!(w > 1e-6)) return null;
         return .{ (m[0] * x + m[3] * y + m[6]) / w, (m[1] * x + m[4] * y + m[7]) / w };
     }
+    /// The map back from where it shows to where it was drawn, or null
+    /// when it flattens what it maps.
+    pub fn inverse(self: HitMap) ?[9]f64 {
+        const m = self.matrix;
+        // Column-major: m[c * 3 + r].
+        const a = m[0];
+        const b = m[3];
+        const c = m[6];
+        const d = m[1];
+        const e = m[4];
+        const f = m[7];
+        const g = m[2];
+        const h = m[5];
+        const i = m[8];
+        const det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+        if (!(@abs(det) > 1e-12) or !std.math.isFinite(det)) return null;
+        const r = [9]f64{
+            (e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det,
+            (f * g - d * i) / det, (a * i - c * g) / det, (c * d - a * f) / det,
+            (d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det,
+        };
+        // r is row-major; return it column-major.
+        return .{ r[0], r[3], r[6], r[1], r[4], r[7], r[2], r[5], r[8] };
+    }
     /// Where `rect` takes the pointer: the box around its corners as the
     /// map moves them, so a turned element takes it over the whole of its
     /// turned box.
@@ -3409,6 +3481,8 @@ pub const Frame = struct {
     offsets: [32]layout.Point = undefined,
     offset_depth: usize = 0,
     clips: layout.ClipStack(32) = .{},
+    /// The rounded rectangle each clip open cuts the pointer to, if any.
+    round_clips: [32]?input.RoundClip = undefined,
     group_depth: usize = 0,
     group_clip_base: [layers.max_depth]usize = undefined,
     group_bounds: [layers.max_depth]Rect = undefined,
@@ -3807,8 +3881,18 @@ pub const Frame = struct {
     /// drawing. Ordinary frames retain the original axis-aligned path.
     pub fn addControl(self: *Frame, id: u64, bounds: Rect, options: input.Options) !void {
         const absolute_bounds = self.absolute(bounds);
-        const visible = self.hitRect(if (self.clipBounds()) |clip| layout.intersect(absolute_bounds, clip) else absolute_bounds);
+        const clipped = if (self.clipBounds()) |clip| layout.intersect(absolute_bounds, clip) else absolute_bounds;
+        const visible = self.hitRect(clipped);
         var actual = options;
+        // Turned by a hit map or cut by a rounded clip, the control takes
+        // the pointer over its exact shape, not the box around it.
+        if (self.transforms == null) {
+            actual.exact.round = self.roundClip();
+            actual.exact.source = clipped;
+            if (self.hit_map) |map| if (!std.meta.eql(map.matrix, (HitMap{}).matrix)) {
+                actual.exact.unmap = map.inverse();
+            };
+        }
         if (options.focus_rect) |focus| {
             const value = self.absolute(focus);
             actual.focus_rect = self.hitRect(if (self.clipBounds()) |clip| layout.intersect(value, clip) else value);
@@ -3820,6 +3904,15 @@ pub const Frame = struct {
             actual.range = value;
         }
         if (self.transforms) |workspace| try self.context.input_state.addMapped(id, visible, actual, workspace.reference) else try self.context.input_state.addWithOptions(id, visible, actual);
+    }
+    /// The innermost rounded clip open, which cuts what takes the pointer.
+    fn roundClip(self: *const Frame) ?input.RoundClip {
+        var index = self.clips.len;
+        while (index > 0) {
+            index -= 1;
+            if (self.round_clips[index]) |round| return round;
+        }
+        return null;
     }
     fn absolute(self: *const Frame, bounds: Rect) Rect {
         return .{ .x = bounds.x + self.offset.x, .y = bounds.y + self.offset.y, .width = bounds.width, .height = bounds.height };
@@ -3877,21 +3970,92 @@ pub const Frame = struct {
         if (self.transforms) |workspace| workspace.reference.clip = workspace.group_parents[self.group_depth];
     }
     pub fn pushClip(self: *Frame, bounds: Rect) !void {
+        return self.pushClipWith(bounds, .none);
+    }
+    /// How a clip cuts beyond its rectangle: a rounded rectangle times a
+    /// gradient's alpha, or a path.
+    const ClipShape = union(enum) {
+        none,
+        rounded: struct { radius: f32, mask: ?commands.Gradient },
+        path: struct { path: *const vectors.Path, transform: vectors.Transform },
+    };
+    /// Clip what is drawn until the matching `popClip` to `bounds` with its
+    /// corners rounded by `radius`, and, when `mask` is set, by the alpha of
+    /// that gradient (in the same DIP as `bounds`): each point shows as much
+    /// as the mask there, whatever its colors, as CSS's `mask-image`. The
+    /// clip is a mask of coverage made once for each shape and size it is
+    /// drawn at and kept while frames draw it, so it may change every frame.
+    /// What it cuts away still takes the pointer unless the rounding cuts
+    /// it: controls recorded inside take it within the rounded rectangle
+    /// only. Without room for another mask the clip cuts to `bounds` only.
+    pub fn pushRoundedClip(self: *Frame, bounds: Rect, radius: f32, mask: ?commands.Gradient) !void {
+        if (!std.math.isFinite(radius)) {
+            self.failure = self.failure orelse error.InvalidGeometry;
+            return error.InvalidGeometry;
+        }
+        return self.pushClipWith(bounds, .{ .rounded = .{ .radius = @max(radius, 0), .mask = mask } });
+    }
+    /// Clip what is drawn until the matching `popClip` to the inside of
+    /// `path` (non-zero winding), its edges smoothed, as CSS's and SVG's
+    /// `clip-path`: `transform` maps the path's coordinates to this frame's
+    /// DIP. Clips nest with each other and with `pushClip`, and turn with a
+    /// transform the frame draws through. The clip is a mask of the path's
+    /// coverage, made once for each shape and size it is drawn at, in device
+    /// pixels (at most 8192 each way), and kept while frames draw it: a
+    /// still path costs nothing to clip to again, a moving one makes a new
+    /// mask every frame. Without room for another mask the clip cuts to the
+    /// path's bounds only. Hits are not cut by it.
+    pub fn pushPathClip(self: *Frame, path: *const vectors.Path, transform: vectors.Transform) !void {
+        return self.pushClipWith(.{ .x = 0, .y = 0, .width = 0, .height = 0 }, .{ .path = .{ .path = path, .transform = transform } });
+    }
+    fn pushClipWith(self: *Frame, local_bounds: Rect, shape: ClipShape) !void {
+        var bounds = local_bounds;
+        var path_transform: vectors.Transform = .{};
+        if (shape == .path) {
+            path_transform = shape.path.transform.then(.{ .x0 = self.offset.x, .y0 = self.offset.y });
+            const extent = (shape.path.path.bounds(path_transform, null) catch |err| {
+                self.failure = self.failure orelse err;
+                return err;
+            }) orelse vectors.Bounds{ .x = 0, .y = 0, .width = 0, .height = 0 };
+            bounds = .{ .x = @as(f32, @floatCast(extent.x)) - self.offset.x - 1, .y = @as(f32, @floatCast(extent.y)) - self.offset.y - 1, .width = @as(f32, @floatCast(extent.width)) + 2, .height = @as(f32, @floatCast(extent.height)) + 2 };
+        }
         const absolute_bounds = self.absolute(bounds);
         if (!layout.validRect(absolute_bounds)) return error.InvalidGeometry;
         if (self.clips.len == 32) return error.ClipStackFull;
         const base = if (self.group_depth != 0) self.group_clip_base[self.group_depth - 1] else 0;
         const clip = if (self.clips.len > base) layout.intersect(self.clips.items[self.clips.len - 1], absolute_bounds) else absolute_bounds;
+        // The mask of the clip's shape, where it has one and there is room.
+        var mask: ?drawing.CoverageView = null;
+        var round: ?input.RoundClip = null;
+        switch (shape) {
+            .none => {},
+            .rounded => |value| if (value.radius > 0 or value.mask != null) {
+                if (value.radius > 0) round = .{ .rect = absolute_bounds, .radius = value.radius };
+                if (self.context.clipMasks()) |masks| {
+                    const gradient = if (value.mask) |g| g.translated(self.offset) else null;
+                    mask = masks.shape(absolute_bounds, value.radius, gradient, clip, self.size.scale, self.context.clipMaskRelease()) catch null;
+                }
+            },
+            .path => |value| if (self.context.clipMasks()) |masks| {
+                mask = masks.path(value.path, path_transform, clip, self.size.scale, self.context.clipMaskRelease()) catch null;
+            },
+        }
+        if (mask) |view| if (!self.context.command_buffer.coverageRoom(view)) {
+            mask = null;
+        };
+        // Nothing of a shaped clip shows: it cuts everything.
+        const shown = if (shape != .none and mask == null and (clip.width <= 0 or clip.height <= 0)) layout.Rect{ .x = clip.x, .y = clip.y, .width = 0, .height = 0 } else clip;
         const snapshot = if (self.transforms) |workspace| try workspace.state.pending() else null;
         const mark = if (snapshot) |value| value.checkpoint() else null;
         errdefer if (snapshot) |value| value.rollback(mark.?) catch unreachable;
-        const geometry_clip = if (self.transforms) |workspace| try snapshot.?.geometry.addClip(workspace.reference.space, workspace.reference.clip, affine.Rect.from(clip)) else null;
-        try self.context.command_buffer.pushClip(clip);
+        const geometry_clip = if (self.transforms) |workspace| try snapshot.?.geometry.addClip(workspace.reference.space, workspace.reference.clip, affine.Rect.from(shown)) else null;
+        if (mask) |view| try self.context.command_buffer.pushMaskClip(shown, .{}, view) else try self.context.command_buffer.pushClip(shown);
+        self.round_clips[self.clips.len] = round;
         if (self.transforms) |workspace| {
             workspace.clip_parents[self.clips.len] = workspace.reference.clip;
             workspace.reference.clip = geometry_clip;
         }
-        self.clips.items[self.clips.len] = clip;
+        self.clips.items[self.clips.len] = shown;
         self.clips.len += 1;
     }
     pub fn popClip(self: *Frame) !void {
@@ -4697,6 +4861,8 @@ fn nativeRect(bounds: affine.Rect) Rect {
 
 test {
     _ = gdi;
+    _ = clip_mask;
+    _ = @import("mask_mix.zig");
     _ = gamut;
     _ = geometry;
     _ = shader_cache;
@@ -6379,4 +6545,92 @@ test "a custom material paints itself and a backdrop material draws its effect" 
     try std.testing.expect((Material{ .glass = .{} }).backdrop() != null);
     frame.material(.{ .x = 0, .y = 0, .width = 40, .height = 20 }, 4, .{ .custom = .{ .paint = Stripes.fail } });
     try std.testing.expectEqual(@as(?anyerror, error.MaterialFailed), frame.failure);
+}
+
+test "rounded, gradient and path clips record masked clips and cut hits to their corners" {
+    const Callbacks = struct {
+        fn draw(_: *anyopaque, _: *Frame) void {}
+        fn action(_: *anyopaque, _: u64) void {}
+    };
+    var state: u8 = 0;
+    var context = Context.init(&state, Callbacks.draw, Callbacks.action);
+    defer if (context.clip_masks) |masks| masks.destroy(null);
+    defer context.command_buffer.reset();
+    context.input_state.beginFrame();
+    defer if (context.input_state.building) context.input_state.cancelFrame();
+    var frame: Frame = .{ .context = &context, .size = .{ .width = 100, .height = 100, .scale = 2 }, .offset = .{ .x = 10, .y = 0 } };
+    // A plain inset is a plain clip.
+    try frame.pushRoundedClip(.{ .x = 0, .y = 0, .width = 40, .height = 40 }, 0, null);
+    try std.testing.expect(context.command_buffer.commands()[0] == .push_clip);
+    try frame.popClip();
+    // Rounded, it is masked, and a control inside takes the pointer within
+    // the rounding only.
+    try frame.pushRoundedClip(.{ .x = 0, .y = 0, .width = 40, .height = 40 }, 10, null);
+    const masked = context.command_buffer.commands()[2].push_mask_clip;
+    try std.testing.expectEqualDeep(Rect{ .x = 10, .y = 0, .width = 40, .height = 40 }, masked.bounds);
+    const mask = context.command_buffer.coverageResources()[masked.mask].coverage;
+    try std.testing.expectEqual(@as(u32, 80), mask.width);
+    try std.testing.expectEqual(@as(i32, 20), mask.origin_x);
+    try frame.addControl(1, .{ .x = 0, .y = 0, .width = 40, .height = 40 }, .{});
+    try frame.popClip();
+    context.input_state.commitFrame();
+    try std.testing.expectEqual(@as(?u64, 1), context.input_state.hit(.{ .x = 30, .y = 20 }));
+    try std.testing.expectEqual(@as(?u64, null), context.input_state.hit(.{ .x = 11, .y = 1 }));
+    // The same clip again reuses its mask; a gradient makes another.
+    context.input_state.beginFrame();
+    try frame.pushRoundedClip(.{ .x = 0, .y = 0, .width = 40, .height = 40 }, 10, null);
+    try frame.popClip();
+    try std.testing.expectEqual(@as(u64, 1), context.clipMaskStats().?.made);
+    const stops = [_]commands.brushes.Stop{ .{ .offset = 0, .color = .{ .r = 0, .g = 0, .b = 0, .a = 0 } }, .{ .offset = 1, .color = Color.rgb(0) } };
+    try frame.pushRoundedClip(.{ .x = 0, .y = 0, .width = 40, .height = 40 }, 0, .{ .linear = .{ .start = .{ .x = 0, .y = 0 }, .end = .{ .x = 40, .y = 0 }, .stops = &stops } });
+    const faded = context.command_buffer.commands()[context.command_buffer.len - 1].push_mask_clip;
+    const fade = context.command_buffer.coverageResources()[faded.mask].coverage;
+    // Clear at the left, solid at the right.
+    try std.testing.expect(fade.pixels[0] < 8 and fade.pixels[fade.width - 1] > 248);
+    try frame.popClip();
+    // A path clip covers its inside.
+    const triangle = try vectors.Path.parseData(std.testing.allocator, "M0 0 L40 0 L0 40 Z", .{});
+    defer triangle.close() catch {};
+    try frame.pushPathClip(triangle, .{});
+    const cut = context.command_buffer.commands()[context.command_buffer.len - 1].push_mask_clip;
+    try std.testing.expectEqual(@as(usize, 3), context.command_buffer.coverageResources().len);
+    try std.testing.expect(cut.bounds.x <= 10 and cut.bounds.x + cut.bounds.width >= 50);
+    try frame.popClip();
+    try std.testing.expectEqual(@as(usize, 0), frame.clips.len);
+    context.input_state.cancelFrame();
+}
+
+test "a control a hit map turns takes the pointer over its turned shape only" {
+    const Callbacks = struct {
+        fn draw(_: *anyopaque, _: *Frame) void {}
+        fn action(_: *anyopaque, _: u64) void {}
+    };
+    var state: u8 = 0;
+    var context = Context.init(&state, Callbacks.draw, Callbacks.action);
+    defer context.command_buffer.reset();
+    context.input_state.beginFrame();
+    defer if (context.input_state.building) context.input_state.cancelFrame();
+    var frame: Frame = .{ .context = &context, .size = .{ .width = 200, .height = 200, .scale = 1 } };
+    const box: Rect = .{ .x = 50, .y = 90, .width = 100, .height = 20 };
+    _ = frame.setHitMap(HitMap.ofPose(.{ .rotate = 45 }, box));
+    try frame.addControl(1, box, .{});
+    _ = frame.setHitMap(null);
+    context.input_state.commitFrame();
+    // The middle takes it, and so does a point along the turned bar...
+    try std.testing.expectEqual(@as(?u64, 1), context.input_state.hit(.{ .x = 100, .y = 100 }));
+    try std.testing.expectEqual(@as(?u64, 1), context.input_state.hit(.{ .x = 125, .y = 125 }));
+    // ...but not a corner of the box around it.
+    try std.testing.expectEqual(@as(?u64, null), context.input_state.hit(.{ .x = 70, .y = 130 }));
+}
+
+test "parsePath reads SVG path data and tells where data in error stops" {
+    const check = try parsePath(std.testing.allocator, "M4 12l5 5L20 6", null);
+    defer check.close() catch {};
+    try std.testing.expectEqual(@as(usize, 3), check.commands.len);
+    try std.testing.expectError(error.InvalidPathData, parsePath(std.testing.allocator, "M4 12 L5 *", null));
+    var report: PathReport = .{};
+    const cut = try parsePath(std.testing.allocator, "M4 12 L5 5 L5 *", &report);
+    defer cut.close() catch {};
+    try std.testing.expectEqual(@as(usize, 2), cut.commands.len);
+    try std.testing.expectEqual(@as(usize, 14), report.offset);
 }

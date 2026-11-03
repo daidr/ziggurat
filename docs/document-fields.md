@@ -34,7 +34,8 @@ TextClient；无关的宿主 TextClient 不会被字段强占。预处理之前�
 焦点的窗口内派送需要该身份的点击。
 
 单行字段拒绝程序或原生替换中的换行，粘贴将 CR/LF、CRLF 和 Unicode 行分隔符
-归一为空格。Enter 调用显式 submit；多行字段插入 LF，`accept_tab` 控制 Tab
+归一为空格；`Options.paste` 在插入前收到归一后的文本，返回 false 时字段保持原样。
+SetValue（包括清空为 ""）与其他编辑一样进入撤销历史。Enter 调用显式 submit；多行字段插入 LF，`accept_tab` 控制 Tab
 是否插入。readonly 允许选区、移动和复制，拒绝文本、preedit、删除、剪切、粘贴、
 撤销/重做和 SetValue；disabled 不接收编辑或焦点。`setPolicy` 立即撤权，新的
 enabled/readonly 语义在下一次成功前台发布。

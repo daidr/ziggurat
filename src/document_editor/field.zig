@@ -28,6 +28,10 @@ pub const Options = struct {
     context: ?*anyopaque = null,
     changed: ?*const fn (?*anyopaque, z.Window, u64) void = null,
     submit: ?*const fn (?*anyopaque, z.Window) void = null,
+    /// Asked before pasted text goes in, with the text as it would go in
+    /// (a single-line field has already turned its line breaks into
+    /// spaces); false leaves the field as it is.
+    paste: ?*const fn (?*anyopaque, []const u8) bool = null,
 };
 
 /// One stable field owns one Adapter and borrows the caller's sole Document
@@ -469,6 +473,11 @@ pub fn Field(comptime Private: type) type {
                 try self.validate();
                 if (try self.document.version() != revision) return error.StaleRevision;
                 const bytes = try normalizePaste(self.scratch[0..count], self.options.multiline);
+                if (self.options.paste) |accept| {
+                    if (!accept(self.options.context, bytes)) return .{ .handled = true };
+                    try self.validate();
+                    if (try self.document.version() != revision) return error.StaleRevision;
+                }
                 return self.replaceSelection(scope, bytes);
             }
             const selected = (try self.document.selection()).range();
