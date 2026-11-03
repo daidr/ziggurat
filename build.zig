@@ -829,6 +829,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat", .module = core }, .{ .name = "ziggurat_ui", .module = ui }, .{ .name = "ziggurat_view", .module = declarative_view },
     } });
     automation.addOptions("ziggurat_automation_options", automation_options);
+    automation.addImport("ziggurat_window_placement", window_placement);
     const automation_tests = addTest(b, .{ .root_module = automation });
     check.dependOn(&automation_tests.step);
     const run_automation_tests = b.addRunArtifact(automation_tests);
@@ -839,6 +840,37 @@ pub fn build(b: *std.Build) void {
         .{ .name = "ziggurat_view", .module = declarative_view },
         .{ .name = "ziggurat_system", .module = system },
         .{ .name = "ziggurat_automation", .module = automation },
+    });
+    // ziggurat-automation: the socket's command line client for agents.
+    const automation_cli_options = b.addOptions();
+    automation_cli_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    const automation_cli_module = b.addModule("ziggurat_automation_cli", .{ .root_source_file = b.path("tools/automation/cli.zig"), .target = target, .optimize = optimize });
+    const automation_cli = b.addExecutable(.{ .name = "ziggurat-automation", .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/automation/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ziggurat_automation_cli", .module = automation_cli_module },
+            .{ .name = "automation_cli_options", .module = automation_cli_options.createModule() },
+        },
+    }) });
+    b.installArtifact(automation_cli);
+    b.step("automation-cli", "Build ziggurat-automation, the automation socket's command line client for agents").dependOn(&b.addInstallArtifact(automation_cli, .{}).step);
+    check.dependOn(&automation_cli.step);
+    const automation_cli_tests = addTest(b, .{ .root_module = automation_cli_module });
+    const automation_cli_main_tests = addTest(b, .{ .root_module = automation_cli.root_module });
+    check.dependOn(&automation_cli_tests.step);
+    check.dependOn(&automation_cli_main_tests.step);
+    const test_automation_cli = b.step("test-automation-cli", "Run ziggurat-automation's argument, session, snapshot, diff and command tests");
+    test_automation_cli.dependOn(&b.addRunArtifact(automation_cli_tests).step);
+    test_automation_cli.dependOn(&b.addRunArtifact(automation_cli_main_tests).step);
+    test_step.dependOn(test_automation_cli);
+    if (target.result.os.tag == .windows or target.result.os.tag == .linux or target.result.os.tag == .macos) addSmoke(b, "smoke-automation-cli", "tests/automation_cli_smoke.zig", target, optimize, &.{
+        .{ .name = "ziggurat", .module = core },
+        .{ .name = "ziggurat_view", .module = declarative_view },
+        .{ .name = "ziggurat_system", .module = system },
+        .{ .name = "ziggurat_automation", .module = automation },
+        .{ .name = "ziggurat_automation_cli", .module = automation_cli_module },
     });
     const view_graphics = b.addModule("ziggurat_view_graphics", .{ .root_source_file = b.path("src/view/graphics.zig"), .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "ziggurat", .module = core },                  .{ .name = "ziggurat_ui", .module = ui },
