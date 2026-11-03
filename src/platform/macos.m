@@ -705,6 +705,19 @@ void zlm_test_paint(NativeWindow *s){
         if(bitmap)[s->view cacheDisplayInRect:[s->view bounds] toBitmapImageRep:bitmap];
     }
 }
+/* Makes the window key in the active app, handing AppKit its events until
+   it is, for up to two seconds: 1 when it became key, else 0. */
+int zlm_test_make_key(NativeWindow *s){
+    @autoreleasepool{
+        [NSApp activateIgnoringOtherApps:YES];[s->window makeKeyAndOrderFront:nil];
+        NSDate *limit=[NSDate dateWithTimeIntervalSinceNow:2];
+        while(![s->window isKeyWindow]&&[limit timeIntervalSinceNow]>0){
+            NSEvent *event=[NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate dateWithTimeIntervalSinceNow:0.01] inMode:NSDefaultRunLoopMode dequeue:YES];
+            if(event)[NSApp sendEvent:event];
+        }
+        return [s->window isKeyWindow]?1:0;
+    }
+}
 void zlm_test_close(NativeWindow *s){@autoreleasepool{[s->delegate windowShouldClose:s->window];}}
 void zlm_test_commit(NativeWindow *s,const char *text){@autoreleasepool{[s->view insertText:[NSString stringWithUTF8String:text] replacementRange:NSMakeRange(NSNotFound,0)];}}
 void zlm_test_compose(NativeWindow *s,const char *text,size_t caret){@autoreleasepool{[s->view setMarkedText:[NSString stringWithUTF8String:text] selectedRange:NSMakeRange(caret,0) replacementRange:NSMakeRange(NSNotFound,0)];}}
