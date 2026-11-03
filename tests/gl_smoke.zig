@@ -509,7 +509,6 @@ fn layerFrames(allocator: std.mem.Allocator) !void {
     try std.testing.expect(mismatches * 1000 <= gpu.items.len);
 }
 
-
 const effect_width = 200;
 const effect_height = 120;
 const inverted: ui.Rect = .{ .x = 10, .y = 10, .width = 40, .height = 40 };
