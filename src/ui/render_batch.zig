@@ -41,7 +41,7 @@ pub fn preflight(buffer: *const commands.Buffer, options: Options) !u64 {
     for (buffer.preparedTextResources()) |view| {
         try view.validate();
         if (view.coverage.scale != options.size.scale) return error.PreparedDpiMismatch;
-        if (view.platform != @as(drawing.Platform, if (builtin.os.tag == .linux) .linux else .windows)) return error.PreparedPlatformMismatch;
+        if (view.platform != @as(drawing.Platform, if (builtin.os.tag == .windows) .windows else .linux)) return error.PreparedPlatformMismatch;
     }
     for (buffer.imageResources()) |view| try view.validate();
     for (buffer.textureResources()) |view| {

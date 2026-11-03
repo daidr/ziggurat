@@ -1,6 +1,6 @@
 # 拥有型 GPU 离屏资源
 
-Windows `-Dgpu=true` 的 `ui.gpu_offscreen.Surface` 在显式 DeviceDomain 中创建固定尺寸的透明目标。它直接回放现有 commands.Buffer，使用同一 D2D renderer、文本布局、图片、A8、渐变与分组实现；不创建 HWND、swapchain、ready HANDLE 或 CPU 像素平面。默认 Context 不创建此对象。
+Windows 与 macOS `-Dgpu=true` 的 `ui.gpu_offscreen.Surface` 在显式 DeviceDomain 中创建固定尺寸的透明目标（macOS 见文末）。它直接回放现有 commands.Buffer，使用同一 D2D renderer、文本布局、图片、A8、渐变与分组实现；不创建 HWND、swapchain、ready HANDLE 或 CPU 像素平面。默认 Context 不创建此对象。
 
 可选 `Options.transform_source` 显式预留仿射子面池及独立命令 descriptor 表，源大小使用 DIP。池大小、透明 guard、混合嵌套和采样规则见[仿射回放](affine-rendering.md)；未启用时保留原有工作面公式和成本。启用后，workspace reservation 按窗口 front/work 加最大子面池计算，descriptor 表纳入 metadata，`render_work` 硬上限为512Mi。render 在任何外部分配前独立捕获、校验并复制变换 descriptor，不借用源 Buffer 的可变表。
 
@@ -55,3 +55,10 @@ DeviceLost 使整个 Domain generation 失效，旧 front 和旧 GPU快照不能
 ## 原生验收
 
 smoke-gpu-offscreen 使用实际 D2D targets 与硬件/WARP，验证三DPI透明像素、group/opacity/mask/fractional parent clip、预乘渐变、图片、PreparedText/legacy灰度字形、四层group、同 Domain 快照输入、重复回放稳定、旧快照独立、错误旧front保留、候选失败、slot/聚合预算、分配故障、allocator重入、关闭通知释放整个宿主、owner线程与loss/stop。native读回仅用于这些像素证据，不等同显示延迟或视觉质量检查。
+
+## macOS（Metal）
+
+macOS 的 Surface（`src/ui/gpu_offscreen_metal.zig`）用 Domain 设备上的一个 Metal renderer 把每帧画进透明的 work 目标，整帧成功后与 front 交换；失败的帧保留原 front。首帧之后 front/work 两张目标都已存在，热 render 不再创建目标（`layers.native_creations` 不变）。分组、遮罩、高斯与仿射变换沿用窗口 renderer 的逐帧捕获纹理。
+
+预算与 Windows 相同：workspace 按同一 layer 计划计入 `texture_bytes`，快照占一个 Domain slot。snapshot 在 Domain 队列上把 front blit 进新纹理并等待完成；readFrontForTest 直接读 front（仅测试）。Metal 在着色器中混合各插值空间的渐变，`prepareGradientInterpolation` 无需准备。`injectDeviceLossForTest` 让下一帧像设备被移除一样失败（`DeviceLost`），Domain 随之丢失设备。
+

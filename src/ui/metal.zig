@@ -14,13 +14,22 @@
 //! transforms capture their content in textures of the frame, as the
 //! software planes do; their limits (depth, transform sources, Gaussian
 //! capacity) are the software renderer's plan, which `Context` checks each
-//! frame against. A frame that uses anything else (GPU textures, a shader
-//! program not prepared) draws on the software plane instead, as
+//! frame against. A frame that uses anything else (a shader program not
+//! prepared, GPU textures without a device domain) draws on the software
+//! plane instead, as
 //! `prepareEffects` tells; so does a frame drawing an image or mask not yet
 //! uploaded (`holdsFrame`), which `residentFrame` uploads for the next.
 //!
 //! The window's frame is kept between frames: `replayDamage` draws again
 //! only the device pixels that changed (src/ui/damage.zig).
+//!
+//! A renderer made in a device domain (`Options.domain`,
+//! src/ui/gpu_resources.zig) draws with the domain's device, and draws the
+//! domain's GPU textures (`Frame.texture`); a frame drawing a texture of
+//! another domain fails whole, before it draws anything. When the domain
+//! loses its device, the renderer's objects go with it; after
+//! `DeviceDomain.recreate` the next frame or upload takes the new device,
+//! and images and masks are uploaded again as frames draw them.
 const std = @import("std");
 const zio = @import("ziggurat_io");
 const fonts = @import("ziggurat_fonts");
@@ -41,6 +50,13 @@ const backdrop = commands.backdrop;
 const loading = commands.loading;
 
 extern fn zmtl_create(*c_int) ?*anyopaque;
+extern fn zmtl_create_in_domain(*anyopaque, *c_int) ?*anyopaque;
+extern fn zmtl_rebuild(*anyopaque) c_int;
+extern fn zmtl_texture(*anyopaque, *const drawing.GpuTextureToken, *const drawing.ImagePlan) c_int;
+extern fn zmtl_inject_loss(*anyopaque) void;
+extern fn zmtl_offscreen_commit(*anyopaque) void;
+extern fn zmtl_offscreen_objects(*anyopaque) u32;
+extern fn zmtl_read_front(*anyopaque, [*]u32, u32, u32) c_int;
 extern fn zmtl_destroy(?*anyopaque) void;
 extern fn zmtl_live_objects() u32;
 extern fn zmtl_begin(*anyopaque, ?*anyopaque, u32, u32, f32, c_int) c_int;
@@ -96,7 +112,7 @@ extern fn zmtl_test_layer_under_subviews(*anyopaque) c_int;
 extern fn zmtl_test_layer_flipped(*anyopaque) c_int;
 extern fn zmtl_test_atlas_levels(*anyopaque) u32;
 
-const NativeStats = extern struct { device_creations: u32, layer_creations: u32, resizes: u32, presents: u32, transaction_presents: u32, busy_presents: u32, atlas_pages: u32, glyphs: u32, frames: u64, instances: u64, batches: u64, effect_passes: u64, layers: u64, filter_passes: u64, partial_frames: u64, cached_pipelines: u64, backdrops: u64, indicators: u64 };
+const NativeStats = extern struct { device_creations: u32, layer_creations: u32, resizes: u32, presents: u32, transaction_presents: u32, busy_presents: u32, atlas_pages: u32, glyphs: u32, frames: u64, instances: u64, batches: u64, effect_passes: u64, layers: u64, filter_passes: u64, partial_frames: u64, cached_pipelines: u64, backdrops: u64, indicators: u64, offscreen_targets: u64, device_losses: u64 };
 /// A backdrop effect's plan for src/ui/metal.m (ZmGlass).
 const Glass = extern struct { box: [4]f32, clip: [4]f32, tone: [4]f32, tint: [4]f32, line: [4]f32, line2: [4]f32, misc: [4]f32, misc2: [4]f32, background: [4]f32, fill: [4]f32, region: [4]u32, out: [4]u32 };
 const GlassLevel = extern struct { radius: u32, lo: f32, hi: f32, weights: u32 };
@@ -113,8 +129,10 @@ pub const Driver = enum { hardware, warp };
 pub const Options = struct {
     /// Metal always uses the system's default device.
     driver: Driver = .hardware,
-    /// Shared device domains are a D3D11 facility; Metal refuses one.
+    /// Draw with this domain's device, and its textures.
     domain: ?*gpu_resources.DeviceDomain = null,
+    /// Revoked by the domain when it loses its device; Metal frames never
+    /// wait on a handle, so nothing is put in it.
     native_wait_slot: ?*?z.NativeWaitToken = null,
 };
 /// presents counts drawables presented, transaction_presents those presented
@@ -123,10 +141,18 @@ pub const Options = struct {
 /// layers counts groups and transforms composited, filter_passes Gaussian
 /// filter passes, partial_frames frames that drew only their damage and
 /// cached_pipelines pipelines made from the disk cache's compiled code,
-/// backdrops backdrop effects and indicators loading indicators drawn.
-pub const Stats = struct { device_creations: u32 = 0, layer_creations: u32 = 0, resizes: u32 = 0, presents: u32 = 0, transaction_presents: u32 = 0, busy_presents: u32 = 0, atlas_pages: u32 = 0, glyphs: u32 = 0, frames: u64 = 0, instances: u64 = 0, batches: u64 = 0, effect_passes: u64 = 0, layers: u64 = 0, filter_passes: u64 = 0, partial_frames: u64 = 0, cached_pipelines: u64 = 0, backdrops: u64 = 0, indicators: u64 = 0 };
+/// backdrops backdrop effects and indicators loading indicators drawn,
+/// offscreen_targets offscreen targets made and device_losses the devices
+/// this renderer lost with its domain.
+pub const Stats = struct { device_creations: u32 = 0, layer_creations: u32 = 0, resizes: u32 = 0, presents: u32 = 0, transaction_presents: u32 = 0, busy_presents: u32 = 0, atlas_pages: u32 = 0, glyphs: u32 = 0, frames: u64 = 0, instances: u64 = 0, batches: u64 = 0, effect_passes: u64 = 0, layers: u64 = 0, filter_passes: u64 = 0, partial_frames: u64 = 0, cached_pipelines: u64 = 0, backdrops: u64 = 0, indicators: u64 = 0, offscreen_targets: u64 = 0, device_losses: u64 = 0 };
 
+/// Renderers and device domains alive.
 pub fn liveObjects() u32 {
+    return zmtl_live_objects();
+}
+/// As d3d11.globalResourceCount: the native objects alive, renderers and
+/// device domains.
+pub fn globalResourceCount() u32 {
     return zmtl_live_objects();
 }
 
@@ -136,8 +162,13 @@ pub const Renderer = struct {
     last_hresult: i32 = 0,
     active: bool = false,
     offscreen: bool = false,
-    /// Device domains are not shared on macOS.
+    /// The device domain this renderer draws with, its attachment, the
+    /// domain generation whose device it holds, and the domain operation a
+    /// frame keeps open from begin to its end.
+    domain: ?*gpu_resources.DeviceDomain = null,
     domain_borrow: ?gpu_resources.DeviceDomain.Borrow = null,
+    device_generation: u64 = 0,
+    render_scope: ?z.AppCallbackScope = null,
     interpolation_mutating: bool = false,
     images: image_cache.Cache = .{},
     /// The view is being drawn into a capture: its software frame must not
@@ -151,22 +182,118 @@ pub const Renderer = struct {
 
     pub fn init(self: *Renderer, options: Options) !void {
         if (self.native != null) return error.AlreadyInitialized;
-        if (options.domain != null) return error.UnsupportedDomainRenderMode;
         var failure: c_int = 0;
+        if (options.domain) |domain| {
+            const borrow = try domain.acquireRenderer(options.native_wait_slot);
+            errdefer domain.releaseRenderer(borrow.slot);
+            const scope = try domain.beginRenderer();
+            defer {
+                domain.endRenderer();
+                scope.end();
+            }
+            const native = zmtl_create_in_domain(borrow.native, &failure) orelse {
+                self.last_hresult = failure;
+                return error.GraphicsInitializationFailed;
+            };
+            errdefer zmtl_destroy(native);
+            try domain.checkRendererReady();
+            self.native = native;
+            self.domain = domain;
+            self.domain_borrow = borrow;
+            self.device_generation = borrow.epoch.generation;
+            return;
+        }
         self.native = zmtl_create(&failure) orelse return error.GraphicsInitializationFailed;
         self.last_hresult = failure;
     }
+    /// For an offscreen surface (src/ui/gpu_offscreen_metal.zig): success
+    /// takes the surface's attachment; failure leaves it with the caller.
+    pub fn initOffscreen(self: *Renderer, domain: *gpu_resources.DeviceDomain, borrow: gpu_resources.DeviceDomain.Borrow) !void {
+        try domain.validateRendererBorrow(borrow);
+        if (self.native != null) return error.AlreadyInitialized;
+        var failure: c_int = 0;
+        const native = zmtl_create_in_domain(borrow.native, &failure) orelse {
+            self.last_hresult = failure;
+            return error.GraphicsInitializationFailed;
+        };
+        errdefer zmtl_destroy(native);
+        try domain.checkRendererReady();
+        self.native = native;
+        self.domain = domain;
+        self.domain_borrow = borrow;
+        self.device_generation = borrow.epoch.generation;
+    }
     pub fn deinit(self: *Renderer) void {
+        _ = self.deinitInternal(true);
+    }
+    /// An offscreen surface's teardown: the surface releases the attachment
+    /// once its own memory is freed.
+    pub fn deinitRetainingBorrow(self: *Renderer) ?gpu_resources.DeviceDomain.Borrow {
+        return self.deinitInternal(false);
+    }
+    fn deinitInternal(self: *Renderer, release_borrow: bool) ?gpu_resources.DeviceDomain.Borrow {
+        const domain = self.domain;
+        const borrow = self.domain_borrow;
+        const cleanup = if (domain) |value| value.beginRendererCleanup() catch unreachable else null;
+        if (self.render_scope) |scope| {
+            self.render_scope = null;
+            domain.?.endRenderer();
+            scope.end();
+        }
+        if (domain) |value| value.clearRendererWait(borrow.?.slot);
         if (self.native) |native| zmtl_destroy(native);
         self.images.deinit();
         self.effect_table.deinit();
         self.* = .{};
+        if (domain) |value| {
+            if (release_borrow) value.releaseRenderer(borrow.?.slot);
+            value.endRenderer();
+        }
+        if (cleanup) |scope| scope.end();
+        return if (release_borrow) null else borrow;
+    }
+    /// Opens the domain operation a frame or an upload runs in, and takes
+    /// the domain's device again when it lost the one this renderer had:
+    /// what was uploaded with that one is gone, and uploads again.
+    fn enterDomain(self: *Renderer) !?z.AppCallbackScope {
+        const domain = self.domain orelse return null;
+        const scope = try domain.beginRenderer();
+        errdefer {
+            domain.endRenderer();
+            scope.end();
+        }
+        try self.syncDevice();
+        return scope;
+    }
+    fn leaveDomain(self: *Renderer, scope: ?z.AppCallbackScope) void {
+        if (scope) |value| {
+            self.domain.?.endRenderer();
+            value.end();
+        }
+    }
+    fn syncDevice(self: *Renderer) !void {
+        const borrow = self.domain_borrow orelse return;
+        if (borrow.epoch.generation == self.device_generation) return;
+        self.images.clear();
+        switch (zmtl_rebuild(self.native.?)) {
+            0 => {},
+            2 => return error.DomainDeviceLost,
+            else => return error.GraphicsFailed,
+        }
+        self.device_generation = borrow.epoch.generation;
+    }
+    fn finishScope(self: *Renderer) void {
+        const scope = self.render_scope orelse return;
+        self.render_scope = null;
+        self.leaveDomain(scope);
     }
 
     pub fn begin(self: *Renderer, paint: z.Paint) !void {
         if (self.active) return error.AlreadyDrawing;
         const native = self.native orelse return error.NotInitialized;
         _ = try geometry.validateSurface(paint.size.width, paint.size.height, paint.size.scale);
+        const scope = try self.enterDomain();
+        errdefer self.leaveDomain(scope);
         self.capturing = false;
         switch (zmtl_begin(native, paint.native_window, paint.size.width, paint.size.height, paint.size.scale, @intFromBool(paint.transparent))) {
             0 => {},
@@ -177,6 +304,7 @@ pub const Renderer = struct {
             },
             else => return error.GraphicsFailed,
         }
+        self.render_scope = scope;
         self.active = true;
         self.offscreen = false;
     }
@@ -186,19 +314,45 @@ pub const Renderer = struct {
         if (self.active) return error.AlreadyDrawing;
         const native = self.native orelse return error.NotInitialized;
         _ = try geometry.validateSurface(size.width, size.height, size.scale);
+        const scope = try self.enterDomain();
+        errdefer self.leaveDomain(scope);
         if (zmtl_begin_offscreen(native, size.width, size.height, size.scale, @intFromBool(transparent)) != 0) return error.GraphicsFailed;
+        self.render_scope = scope;
         self.active = true;
         self.offscreen = true;
     }
     /// Premultiplied BGRA rows of `stride` bytes.
     pub fn endOffscreen(self: *Renderer, pixels: ?[]u8, stride: usize) !void {
         if (!self.active or !self.offscreen) return error.NotDrawing;
+        defer self.finishScope();
         self.active = false;
-        if (zmtl_end_offscreen(self.native.?, if (pixels) |value| value.ptr else null, stride) != 0) return error.GraphicsFailed;
+        switch (zmtl_end_offscreen(self.native.?, if (pixels) |value| value.ptr else null, stride)) {
+            0 => {},
+            3 => return error.DeviceLost,
+            else => return error.GraphicsFailed,
+        }
+    }
+    /// An offscreen surface's frame drawn: it becomes the front.
+    pub fn commitOffscreen(self: *Renderer) void {
+        zmtl_offscreen_commit(self.native.?);
+    }
+    /// The offscreen targets held: the front and the work target.
+    pub fn offscreenObjects(self: *const Renderer) u32 {
+        return if (self.native) |native| zmtl_offscreen_objects(native) else 0;
+    }
+    /// The committed front's 0xAARRGGBB pixels, premultiplied; for tests.
+    pub fn readFront(self: *Renderer, pixels: []u32, width: u32, height: u32) !void {
+        if (pixels.len != @as(usize, width) * height) return error.InvalidGeometry;
+        if (zmtl_read_front(self.native.?, pixels.ptr, width, height) != 0) return error.NoFrame;
+    }
+    /// The next offscreen frame fails as one on a removed device does.
+    pub fn injectDeviceLoss(self: *Renderer) void {
+        if (self.native) |native| zmtl_inject_loss(native);
     }
     pub fn end(self: *Renderer) !void {
         if (!self.active) return error.NotDrawing;
         if (self.offscreen) return error.SurfaceModeMismatch;
+        defer self.finishScope();
         self.active = false;
         switch (zmtl_end(self.native.?)) {
             0 => {},
@@ -209,6 +363,7 @@ pub const Renderer = struct {
     pub fn abort(self: *Renderer) void {
         if (self.native) |native| zmtl_abort(native);
         self.active = false;
+        self.finishScope();
     }
     pub fn discard(self: *Renderer) void {
         self.abort();
@@ -238,7 +393,9 @@ pub const Renderer = struct {
         const native = self.native orelse return false;
         if (!self.active) return false;
         const scale = zmtl_scale(native);
-        for (buffer.commands()) |op| switch (op) {
+        // A domain's renderer draws its textures; the frame fails at replay
+        // when one is another domain's.
+        if (self.domain_borrow == null) for (buffer.commands()) |op| switch (op) {
             .texture => return false,
             else => {},
         };
@@ -481,7 +638,7 @@ pub const Renderer = struct {
     pub fn replayBuffer(self: *Renderer, buffer: *const commands.Buffer) !void {
         self.effect_buffer = if (self.prepareEffects(buffer)) buffer else null;
         defer self.effect_buffer = null;
-        try self.replayAll(buffer.commands(), buffer.textBytes(), buffer.brushResources(), buffer.preparedTextResources(), buffer.imageResources(), buffer.coverageResources(), buffer.transformResources(), buffer.filterResources());
+        try self.replayAll(buffer.commands(), buffer.textBytes(), buffer.brushResources(), buffer.preparedTextResources(), buffer.imageResources(), buffer.coverageResources(), buffer.textureResources(), buffer.transformResources(), buffer.filterResources());
     }
     /// Whether the window's frame kept from the last one may be drawn over,
     /// and which frame it holds; for the damage tracker. Valid between
@@ -520,7 +677,7 @@ pub const Renderer = struct {
         try self.replayWithResources(ops, text, &.{}, &.{}, &.{}, &.{});
     }
     pub fn replayWithResources(self: *Renderer, ops: []const commands.Command, text: []const u8, resources: []const commands.brushes.Stored, prepared: []const drawing.PreparedTextView, image_resources: []const drawing.ImageView, coverage_resources: []const drawing.CoverageView) !void {
-        try self.replayAll(ops, text, resources, prepared, image_resources, coverage_resources, &.{}, &.{});
+        try self.replayAll(ops, text, resources, prepared, image_resources, coverage_resources, &.{}, &.{}, &.{});
     }
     fn groupDescriptor(self: *Renderer, bounds: drawing.Rect, options: layers.Group) !layers.NativeGroup {
         try layers.validateGroup(bounds, options, zmtl_scale(self.native.?));
@@ -578,9 +735,23 @@ pub const Renderer = struct {
         const matrix = [6]f64{ inverse.xx, inverse.yx, inverse.xy, inverse.yy, inverse.x0, inverse.y0 };
         if (zmtl_end_transform(native, &matrix, &bounds) != 0) return error.GraphicsFailed;
     }
-    fn replayAll(self: *Renderer, ops: []const commands.Command, text: []const u8, resources: []const commands.brushes.Stored, prepared: []const drawing.PreparedTextView, image_resources: []const drawing.ImageView, coverage_resources: []const drawing.CoverageView, transforms: []const layers.NativeTransform, filters: []const gaussian.View) !void {
+    /// Every texture a frame draws is checked before anything draws: one of
+    /// another domain, or lost, fails the whole frame.
+    fn preflightTextures(self: *Renderer, ops: []const commands.Command, textures: []const drawing.TextureView) !void {
+        for (ops) |op| if (op == .texture) {
+            const value = op.texture;
+            if (value.resource >= textures.len) return error.MissingResources;
+            const view = textures[value.resource];
+            try view.validate();
+            const borrow = self.domain_borrow orelse return error.TextureDomainRequired;
+            if (view.domain != borrow.epoch) return error.TextureDomainMismatch;
+            _ = try drawing.planTexture(view, .{ .x = value.destination.x, .y = value.destination.y, .width = value.destination.width, .height = value.destination.height }, value.options(), zmtl_scale(self.native.?));
+        };
+    }
+    fn replayAll(self: *Renderer, ops: []const commands.Command, text: []const u8, resources: []const commands.brushes.Stored, prepared: []const drawing.PreparedTextView, image_resources: []const drawing.ImageView, coverage_resources: []const drawing.CoverageView, textures: []const drawing.TextureView, transforms: []const layers.NativeTransform, filters: []const gaussian.View) !void {
         if (!self.active) return error.NotDrawing;
         const native = self.native.?;
+        try self.preflightTextures(ops, textures);
         if (resources.len > commands.brushes.max_brushes) return error.BrushesFull;
         for (resources) |*resource| try resource.validate();
         var depth: usize = 0;
@@ -698,8 +869,12 @@ pub const Renderer = struct {
                 transform_depth -= 1;
                 try self.endTransform(transform_stack[transform_depth]);
             },
-            // prepareEffects leaves these frames to software.
-            .texture => return error.UnsupportedCommand,
+            .texture => |value| {
+                const view = textures[value.resource];
+                const plan = try drawing.planTexture(view, .{ .x = value.destination.x, .y = value.destination.y, .width = value.destination.width, .height = value.destination.height }, value.options(), zmtl_scale(native));
+                if (plan.destination.width == 0 or plan.destination.height == 0 or plan.opacity == 0) continue;
+                if (zmtl_texture(native, view.token, &plan) != 0) return error.DrawTextureFailed;
+            },
         };
         if (depth != 0) return error.UnbalancedClips;
         if (effect_depth != 0) return error.UnbalancedEffects;
@@ -723,6 +898,9 @@ pub const Renderer = struct {
     pub fn uploadCoverage(self: *Renderer, view: drawing.CoverageView) !void {
         if (self.active) return error.AlreadyDrawing;
         const native = self.native orelse return error.NotInitialized;
+        // A domain's device must be there, and the renderer's its own.
+        const scope = try self.enterDomain();
+        defer self.leaveDomain(scope);
         try view.validate();
         self.images.coverage_stats.upload_requests +%= 1;
         if (self.images.find(view.identity) != null) return error.RasterIdentityConflict;
@@ -782,6 +960,9 @@ pub const Renderer = struct {
     fn uploadImageMode(self: *Renderer, view: drawing.ImageView, dynamic: bool) !void {
         if (self.active) return error.AlreadyDrawing;
         const native = self.native orelse return error.NotInitialized;
+        // A domain's device must be there, and the renderer's its own.
+        const scope = try self.enterDomain();
+        defer self.leaveDomain(scope);
         try view.validate();
         self.images.stats.upload_requests +%= 1;
         if (self.images.findCoverage(view.identity) != null) return error.RasterIdentityConflict;
@@ -806,6 +987,9 @@ pub const Renderer = struct {
     pub fn updateImage(self: *Renderer, old_identity: u64, view: drawing.ImageView) !void {
         if (self.active) return error.AlreadyDrawing;
         const native = self.native orelse return error.NotInitialized;
+        // A domain's device must be there, and the renderer's its own.
+        const scope = try self.enterDomain();
+        defer self.leaveDomain(scope);
         const slot = try self.images.updateSlot(old_identity, view);
         if (self.images.entries[slot].?.view.identity == view.identity) return;
         try view.lease.acquireResidency();
@@ -829,11 +1013,15 @@ pub const Renderer = struct {
     /// Whether every image and coverage mask a frame draws is uploaded; a
     /// frame missing one draws in software and `residentFrame` uploads them.
     pub fn holdsFrame(self: *const Renderer, buffer: *const commands.Buffer) bool {
+        // What was uploaded with a lost device is gone.
+        if (self.domain_borrow) |borrow| if (borrow.epoch.generation != self.device_generation) return false;
         for (buffer.imageResources()) |view| if (self.images.find(view.identity) == null) return false;
         for (buffer.coverageResources()) |view| if (self.images.findCoverage(view.identity) == null) return false;
         return true;
     }
     pub fn residentFrame(self: *Renderer, buffer: *const commands.Buffer) !void {
+        const scope = try self.enterDomain();
+        defer self.leaveDomain(scope);
         self.images.beginFrame();
         defer self.images.endFrame();
         for (buffer.imageResources()) |view| if (self.images.find(view.identity)) |slot| self.images.touch(slot);

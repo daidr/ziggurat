@@ -1,6 +1,12 @@
+//! Offscreen surface lifetimes on every GPU platform (D3D11 on Windows,
+//! Metal on macOS).
 const std = @import("std");
+const builtin = @import("builtin");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
+const gpu = if (builtin.os.tag == .windows) ui.d3d11 else ui.metal;
+/// Direct3D's software device; macOS has only the system's.
+const soft: ui.gpu_resources.Driver = if (builtin.os.tag == .windows) .warp else .hardware;
 const Surface = ui.gpu_offscreen.Surface;
 const Domain = ui.gpu_resources.DeviceDomain;
 const expect = std.testing.expect;
@@ -99,7 +105,7 @@ fn interruptedHost(allocator: std.mem.Allocator, snapshot: bool, fail: bool) !vo
     host.* = .{ .allocator = allocator, .app = app, .observer = &observer, .hook = .{ .backing = allocator } };
     host.hook.context = host;
     host.hook.callback = Host.interrupt;
-    host.domain = try Domain.create(app, if (snapshot) host.hook.allocator() else allocator, .{ .driver = .warp });
+    host.domain = try Domain.create(app, if (snapshot) host.hook.allocator() else allocator, .{ .driver = soft });
     host.window = try app.createWindow(.{ .on_closed = .{ .context = host, .notify = Host.onClosed } });
     if (snapshot) {
         host.surface = try Surface.create(host.domain, allocator, options);
@@ -117,7 +123,7 @@ fn interruptedHost(allocator: std.mem.Allocator, snapshot: bool, fail: bool) !vo
     if (observer.failure) |err| return err;
     try expect(observer.closed);
     try app.finishShutdown();
-    try equal(@as(u32, 0), ui.d3d11.globalResourceCount());
+    try equal(@as(u32, 0), gpu.globalResourceCount());
 }
 const CloseReentry = struct {
     surface: *Surface,
@@ -135,7 +141,7 @@ const CloseReentry = struct {
 };
 fn closingReentry(allocator: std.mem.Allocator) !void {
     const app = try z.App.init(allocator);
-    const domain = try Domain.create(app, allocator, .{ .driver = .warp });
+    const domain = try Domain.create(app, allocator, .{ .driver = soft });
     var hook: Hook = .{ .backing = allocator };
     const surface = try Surface.create(domain, hook.allocator(), options);
     var reentry: CloseReentry = .{ .surface = surface, .domain = domain, .app = app };
@@ -154,13 +160,13 @@ fn closingReentry(allocator: std.mem.Allocator) !void {
 fn budgets(allocator: std.mem.Allocator) !void {
     const app = try z.App.init(allocator);
     defer app.deinit();
-    const small = try Domain.create(app, allocator, .{ .driver = .warp, .texture_bytes = 16 * 1024, .total_bytes = 64 * 1024 });
+    const small = try Domain.create(app, allocator, .{ .driver = soft, .texture_bytes = 16 * 1024, .total_bytes = 64 * 1024 });
     var hook: Hook = .{ .backing = allocator };
     try expectError(error.CapacityExceeded, Surface.create(small, hook.allocator(), options));
     try equal(@as(usize, 0), hook.calls);
     try equal(@as(usize, 0), (try small.stats()).attachments);
     try small.close();
-    const domain = try Domain.create(app, hook.allocator(), .{ .driver = .warp, .texture_bytes = 1024 });
+    const domain = try Domain.create(app, hook.allocator(), .{ .driver = soft, .texture_bytes = 1024 });
     const surface = try Surface.create(domain, allocator, options); // 3*256 bytes
     var buffer: ui.commands.Buffer = .{};
     defer buffer.reset();
@@ -177,7 +183,7 @@ fn budgets(allocator: std.mem.Allocator) !void {
     try equal(@as(usize, 0), hook.live);
 }
 fn allocationPass(allocator: std.mem.Allocator, app: *z.App) !void {
-    const domain = try Domain.create(app, allocator, .{ .driver = .warp });
+    const domain = try Domain.create(app, allocator, .{ .driver = soft });
     defer domain.close() catch unreachable;
     const surface = try Surface.create(domain, allocator, options);
     defer surface.close() catch unreachable;
@@ -203,7 +209,7 @@ const Worker = struct {
 fn slotsAndWork(allocator: std.mem.Allocator) !void {
     const app = try z.App.init(allocator);
     defer app.deinit();
-    const domain = try Domain.create(app, allocator, .{ .driver = .warp });
+    const domain = try Domain.create(app, allocator, .{ .driver = soft });
     defer domain.close() catch unreachable;
     var low = options;
     low.render_work = 1;
@@ -247,5 +253,5 @@ pub fn run(allocator: std.mem.Allocator) !void {
     const app = try z.App.init(allocator);
     defer app.deinit();
     try std.testing.checkAllAllocationFailures(allocator, allocationPass, .{app});
-    try equal(@as(u32, 0), ui.d3d11.globalResourceCount());
+    try equal(@as(u32, 0), gpu.globalResourceCount());
 }

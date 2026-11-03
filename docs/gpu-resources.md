@@ -1,6 +1,6 @@
 # 显式 GPU 设备域与纹理
 
-`ui.gpu_resources` 是 Windows `-Dgpu=true` 的显式资源入口。默认 Context 继续独立创建原有 renderer，不创建 DeviceDomain、共享设备或纹理表。此处的 `TextureView` 只有 GPU binding，没有 CPU 像素，不能转换成 `ImageView`。
+`ui.gpu_resources` 是 Windows 与 macOS `-Dgpu=true` 的显式资源入口（Windows 为 D3D11/D2D 设备，macOS 为 Metal 设备，见下文 [macOS](#macosmetal)）。默认 Context 继续独立创建原有 renderer，不创建 DeviceDomain、共享设备或纹理表。此处的 `TextureView` 只有 GPU binding，没有 CPU 像素，不能转换成 `ImageView`。
 
 ```zig
 const domain = try ui.gpu_resources.DeviceDomain.create(app, allocator, .{});
@@ -58,3 +58,16 @@ GPU renderer 在本批第一个 native draw 前验证全部 texture 命令的 Do
 `smoke-gpu-domain` 是独立的 hidden-window 验证入口；它的同步 readback 只用于像素检查，不进入生产 draw 或资源导出协议。
 
 `benchmark-gpu-domain` 另测1/4/8个隐藏窗口的共享/独立域：创建、CPU提交、busy、逻辑预算、整个进程内存和最终回收分别记录，不做GPU完成或显示延迟承诺。工具范围、复现命令和原始样本见[多窗口设备域测量](gpu-performance.md)。
+
+## macOS（Metal）
+
+macOS 的 DeviceDomain 持有一个 Metal 设备（`MTLCreateSystemDefaultDevice`）和它的命令队列；Zig 侧的所有权、slot、代数、预算、借用、stop 与回调规则与 Windows 完全相同（同一个 `gpu_resources.zig`），原生部分在 `src/ui/metal.m`。
+
+- 只有 `hardware`：Metal 没有软件设备，`.driver = .warp` 创建时返回 `UnsupportedDriver`；Context 的 `render_mode = .warp` 配 hardware Domain 返回 `DomainDriverMismatch`。
+- upload 把各 mip 复制进一张新的 BGRA8 纹理（每次 upload/snapshot 计一次 `bitmap_creations`）；Domain 的 renderer 用同一设备，按 token 直接采样，nearest/linear/mip_linear、fit、opacity 与 clip 与图片一致。
+- 同一 Domain 的 Metal renderer（`ui.metal.Renderer.init(.{ .domain = domain })` 或设了 `gpu_domain` 的 Context）在第一个原生绘制前检查整帧的 texture 命令：别的 Domain、已失效或代数过期的纹理让整帧失败，窗口保留上一帧。帧里有纹理的命令也参与局部重绘的损坏追踪（按 identity 与 generation）。
+- 设备丢失（命令缓冲报告 `MTLCommandBufferErrorDeviceRemoved`，或测试注入）：Domain 代数加一，撤销借用的 wait，丢掉全部纹理以及每个 renderer 用该设备创建的对象（管线、图集、图层、已上传图片与遮罩、离屏目标）。`recreate` 重新取系统设备；各 renderer 在下一次 begin 或 upload 时换到新设备，之前上传的图片与遮罩随帧重新上传。
+- `Domain.stats.native_objects` 计设备、队列和纹理；stop 后为 0。`ui.metal.globalResourceCount()` 计存活的 renderer 与 Domain。
+
+`smoke-metal-domain`（`zig build smoke-metal-domain -Dgpu=true`）在 macOS 上覆盖上传绘制、跨域拒绝、丢失/重建/stop、容量与失败回滚、离屏 Surface，并运行与 Windows 共用的 `gpu_domain_lifetime.zig`、`gpu_offscreen_lifetime.zig`。
+

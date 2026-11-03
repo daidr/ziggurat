@@ -3,8 +3,10 @@ const builtin = @import("builtin");
 const z = @import("ziggurat");
 const drawing = @import("ziggurat_drawing_resources");
 const reservations = @import("gpu_reservations.zig");
-const enabled = builtin.os.tag == .windows and @import("ziggurat_ui_options").gpu;
+const enabled = (builtin.os.tag == .windows or builtin.os.tag == .macos) and @import("ziggurat_ui_options").gpu;
 
+/// `warp` is Direct3D's software device, which Metal has no counterpart
+/// of: on macOS a domain takes the system's default device (`hardware`).
 pub const Driver = enum { hardware, warp };
 pub const capacity = 32;
 pub const Options = struct {
@@ -45,13 +47,15 @@ extern fn zgpu_domain_stats(*anyopaque, *NativeStats) void;
 extern fn zgpu_domain_inject_loss(*anyopaque) void;
 extern fn zgpu_snapshot_offscreen(*anyopaque, *anyopaque, u32, u64, u32, u32, u32, *i32) ?*const drawing.GpuTextureToken;
 
-/// Stable main-thread owner of one explicit D3D11/D2D resource domain.
+/// Stable main-thread owner of one explicit GPU resource domain: a D3D11/D2D
+/// device on Windows, a Metal device on macOS (src/ui/metal.m).
 /// No Context creates one implicitly. Close every Texture and renderer borrow
 /// before close; stop revokes native payloads but preserves their stable shells.
 pub const DeviceDomain = opaque {
     pub fn create(app: *z.App, allocator: std.mem.Allocator, options: Options) !*DeviceDomain {
         if (app.owner != std.Thread.getCurrentId()) return error.WrongThread;
         if (!enabled) return error.GpuNotEnabled;
+        if (builtin.os.tag == .macos and options.driver == .warp) return error.UnsupportedDriver;
         const scope = app.beginCallback() orelse return error.Closed;
         defer scope.end();
         if (options.texture_bytes == 0 or options.texture_bytes > drawing.max_image_budget or options.total_bytes > 512 * 1024 * 1024) return error.InvalidLimits;
@@ -180,7 +184,7 @@ pub const DeviceDomain = opaque {
 
     // Renderer integration is explicit and bounded. The optional wait slot must
     // stay stable through releaseRenderer; the domain revokes it before native
-    // loss/stop can close the borrowed DXGI handle. No application callbacks run.
+    // loss/stop can close the borrowed native handle. No application callbacks run.
     pub const Borrow = struct { native: *anyopaque, slot: u8, epoch: *const drawing.GpuDomainEpoch };
     pub fn acquireRenderer(self: *DeviceDomain, wait_slot: ?*?z.NativeWaitToken) !Borrow {
         const state = cast(self);
