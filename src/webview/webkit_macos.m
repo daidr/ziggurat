@@ -62,11 +62,19 @@ static uint32_t domain_code(NSString *domain) {
     return hash?hash:1;
 }
 
-@interface ZwkWebView : WKWebView
+@interface ZwkWebView : WKWebView {
+@public
+    __weak id zwk_page;
+}
 @end
+static void context_menu_open(id page,NSMenu *menu);
 @implementation ZwkWebView
-/* No engine context menu, as on Linux. */
-- (void)willOpenMenu:(NSMenu *)menu withEvent:(NSEvent *)event { [menu removeAllItems]; [super willOpenMenu:menu withEvent:event]; }
+/* The engine's menu as Options.context_menu asks: none, the engine's, or
+   the app's handler's change of it. */
+- (void)willOpenMenu:(NSMenu *)menu withEvent:(NSEvent *)event {
+    [super willOpenMenu:menu withEvent:event];
+    context_menu_open(zwk_page,menu);
+}
 /* The first click in a window that is not key is the page's, as it is the
    native content's: WKWebView answers no, which spends the click on making
    the window key, so buttons and links took two clicks. */
@@ -104,6 +112,12 @@ typedef struct ZwkInitializerState ZwkInitializerState;
     ZwkFailure failure;
     NSString *html, *facts, *current_uri;
     ZwkWebView *view;
+    /* Options.context_menu: 0 none, 1 the engine's, 2 context_fn changes
+     * it, with what the page said it opens on. */
+    uint32_t context_policy;
+    ZwkContextMenu context_fn;
+    NSString *context_selection;
+    NSArray *context_target;
     WKUserContentController *controller;
     WKContentWorld *world;
     NSArray<WKContentRuleList *> *filters;
@@ -978,6 +992,11 @@ static void *download_context=&download_context;
     const NSUInteger bytes=[rest lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
     if (kind=='F' && facts && bytes<=256) {
         if (committed && !failed) (void)page(self,10,0,0,rest);
+    } else if (kind=='S' && context_fn && rest.length<=4096) {
+        context_selection=rest;
+    } else if (kind=='T' && context_fn && bytes<=40000) {
+        id target=[NSJSONSerialization JSONObjectWithData:[rest dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+        context_target=[target isKindOfClass:[NSArray class]] && [target count]==5?target:nil;
     } else if (kind=='D' && !rest.length) {
         dom_ready=YES;
         if (document(self)) (void)page(self,2,0,0,nil);
@@ -1005,6 +1024,183 @@ static void *download_context=&download_context;
     } else [super observeValueForKeyPath:path ofObject:object change:change context:context];
 }
 @end
+
+/* A page's context menu. WebKit builds its NSMenu and tells the view as it
+ * pops it up; the handler's change is made in place, so WebKit's items keep
+ * doing what they do, and the app's are items of ours that tell page kind
+ * 11. WebKit tells nothing of what was clicked: the page's contextmenu
+ * listener, just before, does (messages S and T). */
+@interface ZwkContextAction : NSObject {
+@public
+    __weak ZwkPage *menu_page;
+    uint32_t command;
+}
+- (void)choose:(id)sender;
+@end
+@implementation ZwkContextAction
+- (void)choose:(id)sender {
+    (void)sender;
+    ZwkPage *s=menu_page;
+    if (s && document(s)) (void)page(s,11,0,(int32_t)command,nil);
+}
+@end
+typedef struct ContextCall { void *page; void *menu; unsigned added; } ContextCall;
+/* The menu's items keep their targets weakly: the menu keeps the actions. */
+static const void *context_actions_key=&context_actions_key;
+int zwk_context_menu_append(void *call_pointer,const char *label,uint32_t command,uint32_t kind,uint32_t flags) {
+    ContextCall *call=call_pointer;
+    if (!call || (kind!=3 && !label)) return ZWK_INVALID;
+    if (call->added>=32) return ZWK_FULL;
+    NSMenu *menu=(__bridge NSMenu *)call->menu;
+    NSMenuItem *item;
+    if (kind==3) item=[NSMenuItem separatorItem];
+    else {
+        NSString *title=[NSString stringWithUTF8String:label];
+        if (!title) return ZWK_INVALID;
+        ZwkContextAction *action=[ZwkContextAction new];
+        action->menu_page=(__bridge ZwkPage *)call->page; action->command=command;
+        item=[[NSMenuItem alloc] initWithTitle:title action:@selector(choose:) keyEquivalent:@""];
+        item.target=action; item.enabled=(flags&1)!=0;
+        if (kind==1) item.state=(flags&2)?NSControlStateValueOn:NSControlStateValueOff;
+        NSMutableArray *actions=objc_getAssociatedObject(menu,context_actions_key);
+        if (!actions) { actions=[NSMutableArray array]; objc_setAssociatedObject(menu,context_actions_key,actions,OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+        [actions addObject:action];
+    }
+    if (!item) return ZWK_OOM;
+    [menu addItem:item];
+    call->added++;
+    return ZWK_OK;
+}
+/* WebKit's own menu, not one of the app's popped up over the view: an item
+ * of it does what WebKit does, or bears one of its identifiers. */
+static BOOL webkit_menu(NSMenu *menu) {
+    for (NSMenuItem *item in menu.itemArray)
+        if (item.action==sel_registerName("forwardContextMenuAction:") || [item.identifier hasPrefix:@"WKMenuItemIdentifier"]) return YES;
+    return NO;
+}
+/* The framework's names of WebKit's items that other engines have too; the
+ * others keep WebKit's identifier, and AppKit's editing items their action. */
+static NSString *context_item_name(NSMenuItem *item) {
+    static NSDictionary<NSString *,NSString *> *identifiers, *selectors;
+    static NSArray<NSString *> *tags;
+    static dispatch_once_t once;
+    dispatch_once(&once,^{
+        identifiers=@{
+            @"WKMenuItemIdentifierCopy":@"copy", @"WKMenuItemIdentifierCopyImage":@"copyImage", @"WKMenuItemIdentifierCopyLink":@"copyLink",
+            @"WKMenuItemIdentifierCopyMediaLink":@"copyMediaURL", @"WKMenuItemIdentifierDownloadImage":@"downloadImage",
+            @"WKMenuItemIdentifierDownloadLinkedFile":@"downloadLink", @"WKMenuItemIdentifierDownloadMedia":@"downloadMedia",
+            @"WKMenuItemIdentifierGoBack":@"back", @"WKMenuItemIdentifierGoForward":@"forward", @"WKMenuItemIdentifierInspectElement":@"inspect",
+            @"WKMenuItemIdentifierLookUp":@"lookUp", @"WKMenuItemIdentifierOpenFrameInNewWindow":@"openFrameInNewWindow",
+            @"WKMenuItemIdentifierOpenImageInNewWindow":@"openImageInNewWindow", @"WKMenuItemIdentifierOpenLink":@"openLink",
+            @"WKMenuItemIdentifierOpenLinkInNewWindow":@"openLinkInNewWindow", @"WKMenuItemIdentifierOpenMediaInNewWindow":@"openMediaInNewWindow",
+            @"WKMenuItemIdentifierPaste":@"paste", @"WKMenuItemIdentifierReload":@"reload", @"WKMenuItemIdentifierSearchWeb":@"searchWeb",
+            @"WKMenuItemIdentifierShowHideMediaControls":@"mediaControls", @"WKMenuItemIdentifierToggleFullScreen":@"mediaFullScreen",
+            @"WKMenuItemIdentifierShareMenu":@"share",
+        };
+        selectors=@{@"cut:":@"cut", @"copy:":@"copy", @"paste:":@"paste", @"pasteAsPlainText:":@"pasteAndMatchStyle", @"delete:":@"delete",
+            @"selectAll:":@"selectAll", @"undo:":@"undo", @"redo:":@"redo"};
+        /* WebCore's ContextMenuAction values, which hold for the first. */
+        tags=@[@"", @"openLinkInNewWindow", @"downloadLink", @"copyLink", @"openImageInNewWindow", @"downloadImage", @"copyImage",
+            @"openFrameInNewWindow", @"copy", @"back", @"forward", @"stop", @"reload", @"cut", @"paste", @"spellingGuess",
+            @"", @"", @"", @"", @"", @"searchWeb", @"lookUp"];
+    });
+    NSString *identifier=item.identifier?:@"";
+    NSString *name=identifiers[identifier];
+    if (name) return name;
+    if ([identifier hasPrefix:@"WKMenuItemIdentifier"]) return identifier;
+    if (!item.action) return @"";
+    if (item.action==sel_registerName("forwardContextMenuAction:"))
+        return item.tag>0 && item.tag<(NSInteger)tags.count?tags[(NSUInteger)item.tag]:@"";
+    return selectors[NSStringFromSelector(item.action)]?:@"";
+}
+static const char *context_field(NSArray *target,NSUInteger index) {
+    id value=target.count>index?target[index]:nil;
+    return [value isKindOfClass:[NSString class]] && [value length]?[value UTF8String]:NULL;
+}
+static void context_menu_tidy(NSMenu *menu) {
+    BOOL previous=YES;
+    for (NSMenuItem *item in [menu.itemArray copy]) {
+        const BOOL separator=item.separatorItem;
+        if (separator && previous) { [menu removeItem:item]; continue; }
+        previous=separator;
+    }
+    while (menu.numberOfItems && [menu itemAtIndex:menu.numberOfItems-1].separatorItem) [menu removeItemAtIndex:menu.numberOfItems-1];
+}
+static void context_menu_cancel(NSMenu *menu) {
+    /* An empty menu shows nothing, but AppKit still tracks it: it closes
+       once its tracking began. */
+    dispatch_async(dispatch_get_main_queue(),^{ [menu cancelTrackingWithoutAnimation]; });
+}
+static void context_menu_open(id page_object,NSMenu *menu) {
+    ZwkPage *s=page_object;
+    if (!s || !webkit_menu(menu)) return;
+    ZwkPage *keep __attribute__((objc_precise_lifetime))=s; (void)keep;
+    NSString *selection=s->context_selection; NSArray *target_fields=s->context_target;
+    s->context_selection=nil; s->context_target=nil;
+    if (s->context_policy==1) return;
+    if (s->context_policy!=2 || !s->context_fn || !live(s) || !document(s)) {
+        [menu removeAllItems]; context_menu_cancel(menu); return;
+    }
+    @autoreleasepool {
+        NSArray<NSMenuItem *> *items=menu.itemArray;
+        const uint32_t count=(uint32_t)MIN(items.count,(NSUInteger)64);
+        ZwkContextItem inputs[64]; uint8_t keep_items[64];
+        NSMutableArray<NSData *> *strings=[NSMutableArray arrayWithCapacity:count*2];
+        for (uint32_t i=0;i<count;i++) {
+            NSMenuItem *item=items[i];
+            const BOOL separator=item.separatorItem;
+            const uint32_t kind=separator?3u:item.submenu?4u:item.state==NSControlStateValueOn?1u:0u;
+            uint32_t flags=(separator || item.enabled)?1u:0u;
+            if (item.state==NSControlStateValueOn) flags|=2u;
+            NSData *name=[[(separator?@"":context_item_name(item)) stringByAppendingString:@"\0"] dataUsingEncoding:NSUTF8StringEncoding];
+            NSData *label=[[(separator?@"":item.title?:@"") stringByAppendingString:@"\0"] dataUsingEncoding:NSUTF8StringEncoding];
+            [strings addObject:name]; [strings addObject:label];
+            /* An action no WebKitGTK stock action names: the name stands. */
+            inputs[i]=(ZwkContextItem){name.bytes,label.bytes,kind,flags,UINT32_MAX};
+            keep_items[i]=1;
+        }
+        ZwkContextTarget target={0};
+        target.selection=selection.length?selection.UTF8String:NULL;
+        target.link=context_field(target_fields,0); target.link_text=context_field(target_fields,1);
+        target.image=context_field(target_fields,2); target.media=context_field(target_fields,3);
+        target.editable=[target_fields.count==5?target_fields[4]:nil isEqual:@1]?1u:0u;
+        ContextCall call={(__bridge void *)s,(__bridge void *)menu,0};
+        BOOL prevented=s->context_fn(s->owner,&target,inputs,count,keep_items,&call)!=0;
+        if (live(s) && !prevented) {
+            for (uint32_t i=0;i<count;i++) if (!keep_items[i]) [menu removeItem:items[i]];
+            context_menu_tidy(menu);
+            if (!menu.numberOfItems) prevented=YES;
+        } else prevented=YES;
+        if (prevented) { [menu removeAllItems]; context_menu_cancel(menu); }
+    }
+}
+/* Test hook: opens WebKit's menu as AppKit would, with the items named by
+ * identifier ("-" a separator), describes what shows, "identifier|title;"
+ * for each item, and chooses the item titled choose when one is. */
+int zwk_test_context_menu(void *state,const char *const *identifiers,uint32_t count,char *out,size_t capacity,const char *choose) {
+    @autoreleasepool {
+        ZwkPage *s=page_of(state);
+        NSMenu *menu=[[NSMenu alloc] initWithTitle:@""];
+        for (uint32_t i=0;i<count;i++) {
+            NSString *identifier=[NSString stringWithUTF8String:identifiers[i]];
+            NSMenuItem *item=[identifier isEqualToString:@"-"]?[NSMenuItem separatorItem]:[[NSMenuItem alloc] initWithTitle:identifier action:sel_registerName("forwardContextMenuAction:") keyEquivalent:@""];
+            if (!item.separatorItem) item.identifier=identifier;
+            [menu addItem:item];
+        }
+        context_menu_open(s,menu);
+        NSMutableString *text=[NSMutableString string];
+        for (NSMenuItem *item in menu.itemArray) [text appendFormat:@"%@|%@;",item.separatorItem?@"-":item.identifier?:@"",item.title];
+        if (strlen(text.UTF8String)>=capacity) return -1;
+        memcpy(out,text.UTF8String,strlen(text.UTF8String)+1);
+        const int shown=(int)menu.numberOfItems;
+        if (choose) {
+            const NSInteger index=[menu indexOfItemWithTitle:[NSString stringWithUTF8String:choose]];
+            if (index<0 || ![[menu itemAtIndex:index].target isKindOfClass:[ZwkContextAction class]]) return -2;
+            [menu performActionForItemAtIndex:index];
+        }
+        return shown;
+    }
+}
 
 /* Budgets bound the response bodies a site has in flight. A body here is
  * handed to the engine whole, so it holds its reservation only while it is
@@ -2472,6 +2668,7 @@ static int page_create(void *window,BOOL session,uint32_t width,uint32_t height,
         }
         if (options->facts && !(s->facts=[NSString stringWithUTF8String:options->facts])) return ZWK_INVALID;
         s->autoplay=options->autoplay!=0;
+        s->context_policy=options->context_menu; s->context_fn=options->context_menu==2?options->context_offer:NULL;
         s->owner=owner; s->notify_fn=callback; s->page_fn=page_callback; s->script_fn=script_callback; s->deadline_fn=deadline;
         s->limit=options->max_pending; s->result_limit=options->max_result_bytes; s->policy=options->policy_flags; s->permission_offer=options->permission;
         if (options->download_offer && options->download_notify && options->download_origin_count && options->download_origin_count<=8 && options->download_origins) {
@@ -2527,7 +2724,7 @@ static int page_create(void *window,BOOL session,uint32_t width,uint32_t height,
             zwk_initializers_abandon((__bridge ZwkState *)s);
             [s->controller removeAllScriptMessageHandlers]; local_free(s); remote_free(s); return ZWK_NATIVE_FAILED;
         }
-        s->view=view; atomic_fetch_add(&live_views,1);
+        s->view=view; view->zwk_page=s; atomic_fetch_add(&live_views,1);
         /* A failed registration blocks the first document. */
         if (options->initializers) zwk_initializers_activate((__bridge ZwkState *)s);
         if (session) { s->session=YES; s->session_width=width; s->session_height=height; }

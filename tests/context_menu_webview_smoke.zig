@@ -5,7 +5,11 @@ const z = @import("ziggurat");
 const web = @import("ziggurat_webview");
 const Watchdog = @import("watchdog.zig").Watchdog;
 
+pub const panic = std.debug.FullPanic(@import("macos_panic.zig").panic);
+
 const linux = builtin.os.tag == .linux;
+const macos = builtin.os.tag == .macos;
+const windows = builtin.os.tag == .windows;
 const document =
     \\<!doctype html><html><head><title>menu</title></head><body style="margin:0;font:16px sans-serif">
     \\<a id=l href="https://example.test/doc" style="position:absolute;left:0;top:0;width:200px;height:40px;display:block">Example link</a>
@@ -19,6 +23,12 @@ extern fn zcm_right_click(window: *anyopaque, x: c_int, y: c_int) c_int;
 extern fn zcm_menu_key(window: *anyopaque) c_int;
 extern fn zcm_result(menus: *c_int, items: *c_int, open_link: *c_int, copy_link: *c_int, app_items: *c_int, activated: *c_int) void;
 extern fn zwv_test_right_click(native: *anyopaque, x: i32, y: i32) i32;
+extern fn zwk_test_context_menu(native: *anyopaque, identifiers: [*]const [*:0]const u8, count: u32, out: [*]u8, capacity: usize, choose: ?[*:0]const u8) c_int;
+
+/// WebKit's menu over a link on macOS, which the test hook shows to the
+/// handler as AppKit would.
+const mac_link_items = [_][*:0]const u8{ "WKMenuItemIdentifierOpenLink", "WKMenuItemIdentifierOpenLinkInNewWindow", "WKMenuItemIdentifierDownloadLinkedFile", "WKMenuItemIdentifierCopyLink", "-", "WKMenuItemIdentifierReload" };
+const mac_text_items = [_][*:0]const u8{ "WKMenuItemIdentifierLookUp", "-", "WKMenuItemIdentifierCopy" };
 
 /// A right click on a link: the handler is told the link and the engine's
 /// items, leaves out Copy Link and adds an item of the app's, which Linux
@@ -39,11 +49,32 @@ const Probe = struct {
         self.app.quit();
     }
     fn options(self: *Probe) web.Options {
-        return .{ .html = document, .storage = if (linux) .ephemeral else .profile, .user_data_folder = if (linux) "" else self.store, .context_menu = .{ .handler = .{ .context = self, .open = open } }, .page_listener = .{ .context = self, .event = page } };
+        return .{ .html = document, .storage = if (windows) .profile else .ephemeral, .user_data_folder = if (windows) self.store else "", .context_menu = .{ .handler = .{ .context = self, .open = open } }, .page_listener = .{ .context = self, .event = page } };
     }
     fn rightClick(self: *Probe, x: i32, y: i32) void {
+        if (macos) {
+            // AppKit's menu tracking would hold the test: the page hears its
+            // contextmenu event, then the hook opens WebKit's menu.
+            const script = if (y < 50) "document.getElementById('l').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));1" else "document.getElementById('t').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));2";
+            _ = self.view.evaluateJS(script, .{}, .{ .context = self, .complete = macMenu }) catch |err| self.fail(err);
+            return;
+        }
         const ok = if (linux) zcm_right_click(self.window.nativeHandle().?, x, y) != 0 else zwv_test_right_click(self.view.native.?, x, y) >= 0;
         if (!ok) self.fail(error.RightClickFailed);
+    }
+    fn macMenu(ptr: *anyopaque, result: web.ScriptResult) void {
+        const self: *Probe = @ptrCast(@alignCast(ptr));
+        if (result != .json) return self.fail(error.ScriptFailed);
+        const link = std.mem.eql(u8, result.json, "1");
+        const items: []const [*:0]const u8 = if (link) &mac_link_items else &mac_text_items;
+        var shown: [1024]u8 = @splat(0);
+        const count = zwk_test_context_menu(self.view.native.?, items.ptr, @intCast(items.len), &shown, shown.len, if (link) "Open in browser" else null);
+        const text = std.mem.sliceTo(&shown, 0);
+        const expected = if (link) "WKMenuItemIdentifierOpenLink|WKMenuItemIdentifierOpenLink;WKMenuItemIdentifierOpenLinkInNewWindow|WKMenuItemIdentifierOpenLinkInNewWindow;WKMenuItemIdentifierDownloadLinkedFile|WKMenuItemIdentifierDownloadLinkedFile;-|;WKMenuItemIdentifierReload|WKMenuItemIdentifierReload;-|;|Open in browser;" else "";
+        if (!std.mem.eql(u8, text, expected) or count != @as(c_int, if (link) 7 else 0)) {
+            std.debug.print("menu shown ({d}): {s}\n", .{ count, text });
+            self.fail(error.MenuNotChanged);
+        }
     }
     fn open(ptr: *anyopaque, _: *web.View, menu: *web.ContextMenu) void {
         const self: *Probe = @ptrCast(@alignCast(ptr));
@@ -69,7 +100,7 @@ const Probe = struct {
                 menu.append(.separator) catch |err| return self.fail(err);
                 menu.append(.{ .command = .{ .label = "Open in browser", .command = 7 } }) catch |err| return self.fail(err);
                 // WebView2 draws the menu itself, out of a test's reach.
-                if (!linux) self.app.post(.{ .context = self, .call = selectText }) catch |err| self.fail(err);
+                if (windows) self.app.post(.{ .context = self, .call = selectText }) catch |err| self.fail(err);
             },
             .selection => {
                 const selection = menu.target.selection orelse return self.fail(error.SelectionMissing);
@@ -154,10 +185,10 @@ const Probe = struct {
 };
 
 pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    var gpa: std.heap.DebugAllocator(@import("macos_panic.zig").allocator_config) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
-    const store = if (linux) try allocator.dupe(u8, "") else blk: {
+    const store = if (!windows) try allocator.dupe(u8, "") else blk: {
         const local = try zio.getEnvVarOwned(allocator, "LOCALAPPDATA");
         defer allocator.free(local);
         break :blk try std.fs.path.join(allocator, &.{ local, "Ziggurat", "ContextMenuSmoke" });
@@ -180,5 +211,5 @@ pub fn main() !void {
     if (probe.failure) |err| return err;
     if (probe.step != .done) std.debug.print("expired {} step {s} menus {d}\n", .{ watchdog.expired, @tagName(probe.step), probe.menus });
     try std.testing.expect(!watchdog.expired and probe.step == .done and probe.menus == 2);
-    std.debug.print("context menu: link target and items, Copy Link left out, the app's item chosen (Linux), selection menu prevented, page events kept\n", .{});
+    std.debug.print("context menu: link target and items, Copy Link left out, the app's item chosen (Linux, macOS), selection menu prevented, page events kept\n", .{});
 }

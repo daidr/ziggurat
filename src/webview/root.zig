@@ -855,8 +855,6 @@ fn validateBackendOptions(options: Options) !void {
         if (options.request_policy_extension != null) return error.UnsupportedCapability;
         // WKWebView never lets the app add a request header: no Bearer credential.
         if (options.remote) |remote| if (remote.request_credentials.len != 0) return error.UnsupportedCapability;
-        // The engine's context menu is not offered to a handler here yet.
-        if (options.context_menu == .handler) return error.UnsupportedCapability;
         // Find, capture, PDF and clear are the engine's own; cookies are not yet here.
         if (options.tools.cookies) return error.UnsupportedCapability;
     }
@@ -1806,7 +1804,7 @@ pub const View = struct {
         const facts = try self.factsScript(.linux);
         defer if (facts) |value| self.allocator.free(value);
         var download_scratch: WebkitDownloadScratch = undefined;
-        const native_options = webkitDownloads(.{ .context_menu = @backingInt(options.context_menu), .context_offer = if (!is_macos and options.context_menu == .handler) View.webkitContextMenu else null, .auth = if (options.http_auth != null) View.webkitAuth else null, .certificate = if (options.certificate_errors != null) View.webkitCertificate else null, .content_filters = filters.ptr, .content_filter_count = filter_count, .audio_muted = @intFromBool(self.mutedWanted()), .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .gestures = gestureFlags(options), .throttling = @intFromBool(options.background_throttling), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled), .scroll_to_container = @intFromBool(options.scroll_to_container), .permission = if (options.permissions != null) View.webkitPermission else null, .media = if (is_macos) 0 else mediaKinds(options.permissions) }, options.downloads, &download_scratch);
+        const native_options = webkitDownloads(.{ .context_menu = @backingInt(options.context_menu), .context_offer = if (options.context_menu == .handler) View.webkitContextMenu else null, .auth = if (options.http_auth != null) View.webkitAuth else null, .certificate = if (options.certificate_errors != null) View.webkitCertificate else null, .content_filters = filters.ptr, .content_filter_count = filter_count, .audio_muted = @intFromBool(self.mutedWanted()), .facts = if (facts) |value| value.ptr else null, .autoplay = @intFromBool(options.autoplay == .allow), .gestures = gestureFlags(options), .throttling = @intFromBool(options.background_throttling), .html = html, .user_agent = if (agent) |value| value else null, .zoom = self.zoom_override orelse options.zoom, .max_pending = options.scripts.max_pending, .max_result_bytes = options.scripts.max_result_bytes, .policy_flags = flags, .local = if (local) |*scratch| &scratch.local else null, .remote = if (remote) |*scratch| &scratch.input else null, .region = @intFromBool(self.session == null and self.region != null), .profile_context = if (self.config.?.profile_state) |state| state.context.native else null, .initializers = if (initializer_input) |*value| value else null, .developer_tools = @intFromBool(self.devtools_override orelse options.devtools_enabled), .scroll_to_container = @intFromBool(options.scroll_to_container), .permission = if (options.permissions != null) View.webkitPermission else null, .media = if (is_macos) 0 else mediaKinds(options.permissions) }, options.downloads, &download_scratch);
         var candidate: ?*anyopaque = null;
         if (self.session) |session| {
             try webkit.check(webkit.zwk_session_create(&native_options, session.last_size.width, session.last_size.height, webkitNotify, pageNotify, webkitScriptNotify, webkitTimeout, self, &candidate));
@@ -3749,7 +3747,16 @@ pub const View = struct {
         if (backend_kind == .linux) {
             // WebKitGTK's hit test tells no selection: the page's
             // contextmenu event, just before the menu, does.
-            const selection = if (options.context_menu == .handler) "addEventListener('contextmenu',()=>{try{send('S'+String(getSelection()).slice(0,4096))}catch(e){}},true);" else "";
+            // WKWebView tells nothing of what was clicked either: the
+            // listener reports the link, image, media and editability.
+            const selection = if (options.context_menu != .handler) "" else if (is_macos)
+                "addEventListener('contextmenu',e=>{try{send('S'+String(getSelection()).slice(0,4096));const n=e.target instanceof Element?e.target:null;" ++
+                    "const a=n&&n.closest('a[href]'),s=x=>typeof x==='string'&&x?x.slice(0,2048):null;" ++
+                    "const i=n instanceof HTMLImageElement?n.currentSrc||n.src:null,m=n instanceof HTMLMediaElement?n.currentSrc||n.src:null;" ++
+                    "const f=n&&(n.isContentEditable||n instanceof HTMLTextAreaElement||n instanceof HTMLInputElement&&!/^(button|checkbox|radio|submit|reset|file|image|color|range|hidden)$/.test(n.type));" ++
+                    "send('T'+JSON.stringify([s(a&&a.href),s(a&&a.textContent),s(i),s(m),f?1:0]))}catch(e){}},true);"
+            else
+                "addEventListener('contextmenu',()=>{try{send('S'+String(getSelection()).slice(0,4096))}catch(e){}},true);";
             if (!config.any() and selection.len == 0) return null;
             const text = if (config.any()) try page_facts.script(self.allocator, config, "v=>send('F'+v)") else try self.allocator.dupe(u8, "");
             defer self.allocator.free(text);

@@ -1835,6 +1835,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },
         });
+        addSmoke(b, "smoke-webview-context-menu", "tests/context_menu_webview_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_webview", .module = view },
+        });
         addSmoke(b, "smoke-webview-local-macos", "tests/macos_local_webview_smoke.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
             .{ .name = "ziggurat_webview", .module = view },

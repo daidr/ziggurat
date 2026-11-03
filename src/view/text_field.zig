@@ -69,7 +69,7 @@ pub const TextField = struct {
     /// The leaf to emit from a build function with `View.embed`. Give it a
     /// `Style.key` when siblings before it can change, so its id stays put.
     pub fn embed(self: *TextField) view.Embed {
-        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .annotate = annotate, .status = status, .cursor = cursor };
+        return .{ .context = self, .measure = measure, .place = place, .paint = paint, .annotate = annotate, .status = status, .text = text, .cursor = cursor };
     }
 
     /// Give the field keyboard focus: at once when it is attached, or as
@@ -102,6 +102,12 @@ pub const TextField = struct {
     fn inner(theme: ui.Theme, bounds: view.Rect) view.Rect {
         const inset = theme.metrics.border + theme.metrics.indicator_inset;
         return .{ .x = bounds.x + inset, .y = bounds.y + inset, .width = @max(0, bounds.width - 2 * inset), .height = @max(0, bounds.height - 2 * inset) };
+    }
+
+    fn text(ptr: *anyopaque) ?view.EmbedText {
+        const self: *TextField = @ptrCast(@alignCast(ptr));
+        const report = self.field.report() catch return null;
+        return .{ .value = report.value, .selection_start = report.selection_start, .selection_end = report.selection_end, .password = report.password };
     }
 
     fn measure(ptr: *anyopaque, theme: ui.Theme) view.layout.Measurement {

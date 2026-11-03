@@ -80,6 +80,9 @@ pub const Node = struct {
     key: ?Digits = null,
     label: ?[]const u8 = null,
     value: ?[]const u8 = null,
+    /// A text field's selection, from and to in UTF-16 code units as
+    /// selectText takes them; equal for a caret.
+    selection: ?[2]u64 = null,
     placeholder: ?[]const u8 = null,
     description: ?[]const u8 = null,
     bounds: Rect,

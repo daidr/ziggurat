@@ -273,6 +273,8 @@ frame 文档导航、弹窗、下载、权限仍默认拒绝。资源入口额�
 
 Windows 用 `ICoreWebView2_11` 的 `ContextMenuRequested` 在原地修改菜单项集合，应用项由 `ICoreWebView2Environment9.CreateContextMenuItem` 创建，选中时由它的 `CustomItemSelected` 报告。Linux 在 `context-menu` 信号里修改 `WebKitContextMenu`，应用项是各带一个 `GSimpleAction` 的项，WebKitGTK 不为它们显示快捷键或图标。WebKitGTK 的命中测试不提供选区，选区来自页面 `contextmenu` 事件里私有 world 记录的文本；子 frame 里的选区不记录。
 
+macOS 在 WKWebView 的 `willOpenMenu:withEvent:` 里修改 WebKit 弹出的 `NSMenu`：WebKit 的项保持原有动作，应用项是普通 `NSMenuItem`，选中时报告 command；删空或 `prevent` 的菜单在开始跟踪后立即关闭。项的 id 按 WebKit 的 `WKMenuItemIdentifier…` 换成共同名字（如 `openLink`、`copyLink`、`downloadImage`），没有共同名字的保留 WebKit 的标识符，没有标识符的按 WebCore 动作编号或 AppKit 编辑动作（`cut:`、`paste:` 等）命名。WebKit 不告诉点中了什么，`target` 来自页面 `contextmenu` 事件里私有 world 报告的链接、链接文字、图片、音视频地址、是否可编辑和选中文本；子 frame 里的不报告。应用打开在视图上的自己的菜单不受影响。
+
 `smoke-webview-context-menu` 在可见窗口的真实页面上测试。先右键点一个链接：处理器拿到链接 URI 与文字以及引擎的项，去掉 Copy Link，加一条分隔线和一个应用项。Linux 上测试在菜单弹出前读取改完的菜单，选中应用项，并检查 `context_menu_command`。WebView2 自己绘制菜单，测试读不到，所以 Windows 只检查处理器拿到的内容和添加是否成功。然后选中一段文字，Linux 按菜单键、Windows 右键，处理器拿到选区并阻止菜单。最后确认页面两次都收到了 `contextmenu` 事件。Linux 用 GTK 事件和 `popup-menu` 信号触发，Windows 通过 DevTools 协议的鼠标事件触发（`zwv_test_right_click`，只用于测试）。
 
 ## 请求头与有界异步响应

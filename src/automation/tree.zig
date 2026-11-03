@@ -62,6 +62,18 @@ fn pressable(node: *const Node) bool {
         else => false,
     };
 }
+/// UTF-16 code units of UTF-8 text, as JavaScript counts a string; a cut
+/// sequence counts as one.
+fn utf16Length(text: []const u8) u64 {
+    var units: u64 = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        const length = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+        units += if (length == 4) 2 else 1;
+        i += length;
+    }
+    return units;
+}
 fn textual(node: *const Node) bool {
     return node.kind == .editable_text or (node.kind == .embed and if (node.embed) |embed| embed.status != null else false);
 }
@@ -126,6 +138,10 @@ pub fn build(arena: std.mem.Allocator, window: u64, host: *const view.Host) erro
         if (textual(node)) {
             if (node.style.name.len != 0) result.label = try arena.dupe(u8, node.style.name);
             if (node.kind == .editable_text and node.text.len != 0) result.value = try arena.dupe(u8, node.text);
+            if (node.kind == .embed) if (node.embed) |embed| if (embed.text) |read| if (read(embed.context)) |field| if (!field.password) {
+                if (field.value.len != 0) result.value = try arena.dupe(u8, field.value);
+                result.selection = .{ utf16Length(field.value[0..@min(field.selection_start, field.value.len)]), utf16Length(field.value[0..@min(field.selection_end, field.value.len)]) };
+            };
         } else if (label.len != 0) result.label = try arena.dupe(u8, label);
         // The strings of the view's nodes last until its next pass, so the
         // answer keeps copies.
@@ -202,4 +218,11 @@ pub fn build(arena: std.mem.Allocator, window: u64, host: *const view.Host) erro
         tree.announcements = list;
     }
     return tree;
+}
+
+test "selections count UTF-16 code units" {
+    try std.testing.expectEqual(@as(u64, 0), utf16Length(""));
+    try std.testing.expectEqual(@as(u64, 3), utf16Length("abc"));
+    try std.testing.expectEqual(@as(u64, 2), utf16Length("张三"));
+    try std.testing.expectEqual(@as(u64, 3), utf16Length("a😀"));
 }

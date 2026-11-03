@@ -183,6 +183,13 @@ fn run(allocator: std.mem.Allocator) !void {
     try std.testing.expectError(error.InvalidValue, host.perform(field.id, .{ .select_text = .{ .start = 3, .end = 1 } }));
     try std.testing.expectError(error.NotSupported, host.perform((try find(&host, .button)).id, .{ .select_text = .{ .start = 0, .end = 1 } }));
     try paint(&host, window);
+    // Automation reads what the field shows: its text and the selection.
+    const leaf = field.embed();
+    const shown = leaf.text.?(leaf.context) orelse return error.NoFieldText;
+    try std.testing.expectEqualStrings("Hi!", shown.value);
+    try std.testing.expectEqual(@as(usize, 1), shown.selection_start);
+    try std.testing.expectEqual(@as(usize, 3), shown.selection_end);
+    try std.testing.expect(!shown.password);
 
     field.detach();
     try editor.close();

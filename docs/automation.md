@@ -84,7 +84,7 @@ ZIGGURAT_AUTOMATION=/tmp/app.sock ./zig-out/bin/app
 ]}}
 ```
 
-节点有 `id`、不在顶层时的 `parent`、`role`，以及它具有的 `key`、`label`、`value`、`description`、`bounds`、`states`、`actions`、`min`、`max`、`now`、`step`（滑块、步进器、评分、进度条、度量条）和 `level`（树行，从 1 开始）。滚动容器里的元素在 `actions` 中列出 `scrollIntoView`，文本字段列出 `selectText`。ID 是数字字符串：它们是 64 位，JavaScript 的数字会丢失精度。
+节点有 `id`、不在顶层时的 `parent`、`role`，以及它具有的 `key`、`label`、`value`、`description`、`bounds`、`states`、`actions`、`min`、`max`、`now`、`step`（滑块、步进器、评分、进度条、度量条）、`level`（树行，从 1 开始）和 `selection`（嵌入的文本字段，`[from, to]`，单位与 `selectText` 相同，是 UTF-16 码元；光标处两者相等）。嵌入的文本字段也在 `value` 中报告文字；密码字段两者都不报告。滚动容器里的元素在 `actions` 中列出 `scrollIntoView`，文本字段列出 `selectText`。ID 是数字字符串：它们是 64 位，JavaScript 的数字会丢失精度。
 
 `key` 是元素的 `Style.key`，同样写成数字字符串。和可能随视图变化的 ID 不同，key 是应用自己给元素起的、长期不变的名字；测试要找的元素应该有自己的 key。视图用 `view.key("add")` 把文字变成 key，请求里也可以直接写 `"add"`：不是纯数字的字符串按 `view.key` 计算，数字或数字字符串按原值匹配，所以 `tree` 列出的值也能用。
 
