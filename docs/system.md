@@ -272,7 +272,7 @@ S02 当前仍为部分实现：Windows/Linux/macOS 已提供 `launchExecutable`�
 
 `Builder.init(items, labels, context)` 把角色写成普通 `Item`，标签写入调用者提供的存储，子菜单角色带出默认条目，同一角色重复出现时（如文件与窗口菜单中的关闭）分配下一个出现序号，只有第一个带快捷键。角色项 ID 位于 `menu_roles.id_base` 之上，`Role.fromId` 还原角色；应用自己的 ID 保持在其下。切换语言时用新 locale 重新构建并再次 `setMenu`。`menu_role_actions.perform(app, window, id)` 执行窗口与应用类角色的默认动作（退出走 `requestQuit`，关闭走用户关闭请求，最小化、缩放、全屏切换），编辑、视图与文档类角色返回 `unhandled`，交给当前内容处理。
 
-编辑类角色（撤销、重做、剪切、复制、粘贴、粘贴并匹配样式、删除、全选，`Role.editCommand()`）按焦点启用：菜单问 `Window.commandEnabled(command)`，内容用 `Content.command_enabled` 回答，询问不改变任何状态；窗口不接受输入时都不可用，内容没给回调时都可用。`ui.Context` 由获得焦点的文本框回答（`TextFieldRegistration.command_enabled`），其余交给 `on_command_enabled`，都没有时有 `on_input` 的内容接受全部命令。文档文本框禁用时不接受命令，只读时只有复制和全选，密码不能剪切或复制，撤销、重做看历史，剪切、复制、删除要有选区，全选要有文字。View 的 Host 在焦点不在文本框时只让内嵌内容接受命令。Linux 菜单栏在子菜单显示前、角色快捷键执行前和 `zsl_menubar_activate` 前重新询问，应用禁用的项保持禁用；macOS 由内容视图的 `validateMenuItem:` 回答第一响应者的编辑选择器。快捷键键名新增 `plus`（主键盘区的 =/+ 键）与 `minus`。
+编辑类角色（撤销、重做、剪切、复制、粘贴、粘贴并匹配样式、删除、全选，`Role.editCommand()`）按焦点启用：菜单问 `Window.commandEnabled(command)`，内容用 `Content.command_enabled` 回答，询问不改变任何状态；窗口不接受输入时都不可用，内容没给回调时都可用。`ui.Context` 由获得焦点的文本框回答（`TextFieldRegistration.command_enabled`），其余交给 `on_command_enabled`，都没有时有 `on_input` 的内容接受全部命令。文档文本框禁用时不接受命令，只读时只有复制和全选，密码不能剪切或复制，撤销、重做看历史，剪切、复制、删除要有选区，全选要有文字。View 的 Host 在焦点不在文本框时只让内嵌内容接受命令。Linux 菜单栏在子菜单显示前、角色快捷键执行前和 `zsl_menubar_activate` 前重新询问，窗口上的弹出菜单（`popupMenu`）在显示时询问一次（弹出期间焦点不会变），应用禁用的项保持禁用，托盘菜单保留应用给的状态；macOS 由内容视图的 `validateMenuItem:` 回答第一响应者的编辑选择器。快捷键键名新增 `plus`（主键盘区的 =/+ 键）与 `minus`。
 
 ## 信号退出
 
