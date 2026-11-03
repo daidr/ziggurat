@@ -222,6 +222,8 @@ pub fn main() !void {
     _ = try host.attachBackdrop(owner);
     state.page = web.View.init(allocator, &state, State.event);
     try web_views.add(&state.item, &state.page, .{ .html = document, .storage = .ephemeral, .page_listener = .{ .context = &state, .event = State.pageEvent } });
+    // Removing it again does nothing, so an error leaves no page behind.
+    defer state.item.remove();
     state.window.show();
     zwo_timer(20, State.tick, &state);
     var watchdog: Watchdog = .{ .app = app };
