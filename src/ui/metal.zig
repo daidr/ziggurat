@@ -3,12 +3,16 @@
 //!
 //! It draws fills, rounded shapes and strokes, gradients in sRGB
 //! interpolation (linear, radial and conic, padded, repeated or
-//! reflected), text, prepared text, coverage masks, images and clips. A frame
-//! that uses anything else (groups, transforms, Gaussian filters, shader
-//! and backdrop effects, loading indicators, GPU textures, gradients
-//! interpolated in another space) draws on the software plane instead, as
-//! `prepareEffects` tells; so does a frame drawing an image or mask not yet
-//! uploaded (`holdsFrame`), which `residentFrame` uploads for the next.
+//! reflected), text, prepared text, coverage masks, images, clips and
+//! shader effects: element effects over a capture of their content and
+//! backdrop shaders over a copy of the target, with programs translated to
+//! MSL and compiled outside paint by `prepareEffect`. A frame that uses
+//! anything else (groups, transforms, Gaussian filters, backdrop effects,
+//! loading indicators, GPU textures, gradients interpolated in another
+//! space, a shader program not prepared) draws on the software plane
+//! instead, as `prepareEffects` tells; so does a frame drawing an image or
+//! mask not yet uploaded (`holdsFrame`), which `residentFrame` uploads for
+//! the next.
 const std = @import("std");
 const fonts = @import("ziggurat_fonts");
 const z = @import("ziggurat");
@@ -19,6 +23,8 @@ const drawing = @import("ziggurat_drawing_resources");
 const image_cache = @import("image_cache.zig");
 const layers = @import("layers.zig");
 const gpu_resources = @import("gpu_resources.zig");
+const gaussian_scope = @import("gaussian_scope.zig");
+const effect_host = @import("gpu_effect_host.zig");
 const shader_effects = commands.shader_effects;
 
 extern fn zmtl_create(*c_int) ?*anyopaque;
@@ -49,15 +55,27 @@ extern fn zmtl_abort(*anyopaque) void;
 extern fn zmtl_suspend(*anyopaque) c_int;
 extern fn zmtl_restore(*anyopaque) void;
 extern fn zmtl_stats(*anyopaque, *NativeStats) void;
+extern fn zmtl_effect_install(*anyopaque, u32, [*]const u8, usize) c_int;
+extern fn zmtl_effect_installed(*anyopaque, u32) c_int;
+extern fn zmtl_effect_passes(*anyopaque) u64;
+extern fn zmtl_effect_geometry(*anyopaque, *EffectGeometry) c_int;
+extern fn zmtl_begin_effect(*anyopaque, i32, i32, u32, u32, u32) c_int;
+extern fn zmtl_end_effect(*anyopaque, ?*const EffectPass, u32) c_int;
+extern fn zmtl_backdrop_shader(*anyopaque, *const EffectPass, *const [4]u32, *const [4]u32) c_int;
 extern fn zmtl_test_display([*:0]const u8) void;
 extern fn zmtl_test_capture(*anyopaque, c_int) void;
 extern fn zmtl_test_pixel(*anyopaque, u32, u32) u32;
+extern fn zmtl_test_pixels(*anyopaque, [*]u32, u32, u32) c_int;
 extern fn zmtl_test_layer_shown(*anyopaque) c_int;
 extern fn zmtl_test_layer_under_subviews(*anyopaque) c_int;
 extern fn zmtl_test_layer_flipped(*anyopaque) c_int;
 extern fn zmtl_test_atlas_levels(*anyopaque) u32;
 
-const NativeStats = extern struct { device_creations: u32, layer_creations: u32, resizes: u32, presents: u32, transaction_presents: u32, busy_presents: u32, atlas_pages: u32, glyphs: u32, frames: u64, instances: u64, batches: u64 };
+const NativeStats = extern struct { device_creations: u32, layer_creations: u32, resizes: u32, presents: u32, transaction_presents: u32, busy_presents: u32, atlas_pages: u32, glyphs: u32, frames: u64, instances: u64, batches: u64, effect_passes: u64 };
+const EffectPass = extern struct { words: [*]const u32, word_count: u32, slot: u32, params: effect_host.Params };
+const EffectGeometry = extern struct { clip: [4]f64, scale: f32, origin: [2]f32, width: u32, height: u32, transparent: u32 };
+/// Element effects nested in one another at most.
+const max_effect_depth = 4;
 
 pub const Driver = enum { hardware, warp };
 pub const Options = struct {
@@ -70,7 +88,7 @@ pub const Options = struct {
 /// presents counts drawables presented, transaction_presents those presented
 /// with the Core Animation transaction (frames that changed the layer and
 /// those of a live resize), busy_presents frames for which no drawable came.
-pub const Stats = struct { device_creations: u32 = 0, layer_creations: u32 = 0, resizes: u32 = 0, presents: u32 = 0, transaction_presents: u32 = 0, busy_presents: u32 = 0, atlas_pages: u32 = 0, glyphs: u32 = 0, frames: u64 = 0, instances: u64 = 0, batches: u64 = 0 };
+pub const Stats = struct { device_creations: u32 = 0, layer_creations: u32 = 0, resizes: u32 = 0, presents: u32 = 0, transaction_presents: u32 = 0, busy_presents: u32 = 0, atlas_pages: u32 = 0, glyphs: u32 = 0, frames: u64 = 0, instances: u64 = 0, batches: u64 = 0, effect_passes: u64 = 0 };
 
 pub fn liveObjects() u32 {
     return zmtl_live_objects();
@@ -89,6 +107,11 @@ pub const Renderer = struct {
     /// The view is being drawn into a capture: its software frame must not
     /// hide the layer the window shows.
     capturing: bool = false,
+    /// Installed shader programs, the slot each of this frame's entries
+    /// runs in, and the frame whose effects replay draws.
+    effect_table: effect_host.Table = .{},
+    effect_slots: [shader_effects.max_entries]u32 = undefined,
+    effect_buffer: ?*const commands.Buffer = null,
 
     pub fn init(self: *Renderer, options: Options) !void {
         if (self.native != null) return error.AlreadyInitialized;
@@ -100,6 +123,7 @@ pub const Renderer = struct {
     pub fn deinit(self: *Renderer) void {
         if (self.native) |native| zmtl_destroy(native);
         self.images.deinit();
+        self.effect_table.deinit();
         self.* = .{};
     }
 
@@ -169,24 +193,152 @@ pub const Renderer = struct {
         return null;
     }
 
-    /// Whether the GPU draws `buffer`; see the module's documentation.
+    /// Whether the GPU draws `buffer`; see the module's documentation. Each
+    /// shader program it uses must have been prepared with `prepareEffect`;
+    /// shader effects also need the frame's shader workspace, element
+    /// effects nested at most four deep, at the frame's scale.
     pub fn prepareEffects(self: *Renderer, buffer: *const commands.Buffer) bool {
-        if (self.native == null or !self.active) return false;
+        const native = self.native orelse return false;
+        if (!self.active) return false;
         const brushes = buffer.brushResources();
+        var uses = false;
         for (buffer.commands()) |op| switch (op) {
-            .backdrop, .indicator, .effect, .end_effect, .backdrop_shader, .begin_group, .end_group, .begin_transform, .end_transform, .texture => return false,
+            .backdrop, .indicator, .begin_group, .end_group, .begin_transform, .end_transform, .texture => return false,
             .gradient => |value| if (value.brush < brushes.len and brushes[value.brush].interpolation != .srgb) return false,
+            .effect, .end_effect, .backdrop_shader => uses = true,
             else => {},
         };
         for (buffer.preparedTextResources()) |view| if (view.native_coverage == null) return false;
+        if (!uses) return true;
+        const workspace = buffer.shader_storage.workspace orelse return false;
+        const entries = buffer.shaderEntries();
+        if (entries.len > self.effect_slots.len) return false;
+        const scale = zmtl_scale(native);
+        var depth: usize = 0;
+        for (buffer.commands()) |op| switch (op) {
+            .effect => |slot| {
+                if (slot >= entries.len or depth == max_effect_depth) return false;
+                const entry = &entries[slot];
+                if (entry.scale != scale) return false;
+                const kernel = workspace.carrierFor(entry.scale) catch return false;
+                _ = gaussian_scope.Capture.init(entry.captureRect(), kernel) catch return false;
+                depth += 1;
+            },
+            .end_effect => {
+                if (depth == 0) return false;
+                depth -= 1;
+            },
+            .backdrop_shader => |slot| if (slot >= entries.len) return false,
+            else => {},
+        };
+        if (depth != 0) return false;
+        self.effect_table.beginFrame();
+        for (entries, 0..) |*entry, i| {
+            const slot = self.effect_table.find(entry.program.identity, entry.target) orelse return false;
+            if (zmtl_effect_installed(native, slot) == 0) return false;
+            self.effect_slots[i] = slot;
+        }
         return true;
     }
-    /// Shader programs run on the software planes on macOS for now.
-    pub fn prepareEffect(_: *Renderer, _: std.mem.Allocator, _: *const shader_effects.shader.Program, _: shader_effects.Target) !bool {
-        return false;
+    /// Translate `program` drawn as `target` to MSL and compile it, outside
+    /// a frame. False when the compiler rejects it: frames using it draw in
+    /// software. Metal keeps compiled shaders in its own cache across runs;
+    /// the renderer keeps them while it lives.
+    pub fn prepareEffect(self: *Renderer, allocator: std.mem.Allocator, program: *const shader_effects.shader.Program, target: shader_effects.Target) !bool {
+        if (self.active) return error.AlreadyDrawing;
+        const native = self.native orelse return error.NotInitialized;
+        const table = &self.effect_table;
+        table.beginFrame();
+        if (table.find(program.identity, target)) |slot| {
+            if (zmtl_effect_installed(native, slot) != 0) return true;
+            const code = table.entries[slot].code;
+            return zmtl_effect_install(native, slot, code.ptr, code.len) == 0;
+        }
+        if (table.failed(program.identity, target)) return false;
+        var translation = shader_effects.shader.gpu.translate(allocator, program, .msl) catch |err| switch (err) {
+            error.UnsupportedProgram => {
+                table.fail(program.identity, target);
+                return false;
+            },
+            else => |e| return e,
+        };
+        defer translation.deinit();
+        const source = try effect_host.source(allocator, &translation, program.kind, target, .msl);
+        defer allocator.free(source);
+        const slot = table.victim() orelse return false;
+        switch (zmtl_effect_install(native, slot, source.ptr, source.len)) {
+            0 => {},
+            // The compiler rejects the program: remember it.
+            2 => {
+                table.fail(program.identity, target);
+                return false;
+            },
+            else => return false,
+        }
+        const code = try allocator.dupe(u8, source);
+        errdefer allocator.free(code);
+        const inputs = try allocator.dupe(u16, translation.inputs);
+        table.fill(slot, program.identity, target, inputs, code, allocator);
+        return true;
+    }
+    const OpenEffect = struct { slot: u8, capture: gaussian_scope.Capture };
+    fn effectSource(self: *const Renderer, slot: u8) !struct { *const shader_effects.Entry, *shader_effects.Workspace } {
+        const buffer = self.effect_buffer orelse return error.SoftwareOnlyCommands;
+        if (slot >= buffer.shader_storage.len) return error.MissingResources;
+        return .{ &buffer.shader_storage.entries[slot], buffer.shader_storage.workspace orelse return error.ShaderEffectsNotPrepared };
+    }
+    /// Open an element effect's capture, as the carrier kernel bounds it.
+    fn beginEffect(self: *Renderer, slot: u8) !OpenEffect {
+        const entry, const workspace = try self.effectSource(slot);
+        const kernel = try workspace.carrierFor(entry.scale);
+        const capture = try gaussian_scope.Capture.init(entry.captureRect(), kernel);
+        switch (zmtl_begin_effect(self.native.?, capture.left, capture.top, capture.width, capture.height, capture.radius)) {
+            0 => {},
+            1 => return error.LayerDepthExceeded,
+            else => return error.GraphicsFailed,
+        }
+        return .{ .slot = slot, .capture = capture };
+    }
+    /// Run the effect over its capture, or over budget or with a faulting
+    /// prologue composite the content as drawn.
+    fn endEffect(self: *Renderer, open: OpenEffect, words: []u32) !void {
+        const entry, const workspace = try self.effectSource(open.slot);
+        const capture = open.capture;
+        const status = if (!shader_effects.startElement(workspace, entry, @as(u64, capture.pixelWidth()) * capture.pixelHeight(), capture.scale))
+            zmtl_end_effect(self.native.?, null, entry.opacity)
+        else status: {
+            const pass = self.effectPass(open.slot, words, effect_host.elementParams(entry, capture), workspace);
+            break :status zmtl_end_effect(self.native.?, &pass, entry.opacity);
+        };
+        if (status != 0) return error.GraphicsFailed;
+    }
+    fn backdropShader(self: *Renderer, slot: u8, words: []u32) !void {
+        const entry, const workspace = try self.effectSource(slot);
+        var target: EffectGeometry = undefined;
+        if (zmtl_effect_geometry(self.native.?, &target) != 0) return error.NotDrawing;
+        const origin = [2]f64{ target.origin[0], target.origin[1] };
+        const plan = shader_effects.planBackdrop(target.width, target.height, target.scale, origin, target.clip, entry) orelse return;
+        const room: ?usize = if (self.effect_buffer.?.backdrop_storage.workspace) |backdrop| backdrop.planes.len else null;
+        if (!shader_effects.startBackdrop(workspace, entry, plan, room, target.scale)) return;
+        const pass = self.effectPass(slot, words, effect_host.backdropParams(entry, plan, target.scale, origin, target.clip, target.transparent != 0), workspace);
+        const region = [4]u32{ @intCast(plan.region[0]), @intCast(plan.region[1]), @intCast(plan.region[2]), @intCast(plan.region[3]) };
+        const out = [4]u32{ @intCast(plan.out[0]), @intCast(plan.out[1]), @intCast(plan.out[2]), @intCast(plan.out[3]) };
+        if (zmtl_backdrop_shader(self.native.?, &pass, &region, &out) != 0) return error.GraphicsFailed;
+    }
+    fn effectPass(self: *Renderer, slot: u8, words: []u32, params: effect_host.Params, workspace: *shader_effects.Workspace) EffectPass {
+        const installed = self.effect_slots[slot];
+        const inputs = self.effect_table.entries[installed].inputs;
+        for (inputs, 0..) |register, i| words[i] = workspace.machine.registers[register];
+        return .{ .words = words.ptr, .word_count = @intCast(inputs.len), .slot = installed, .params = params };
+    }
+    /// Shader passes run on the GPU since the renderer was created.
+    pub fn effectPasses(self: *const Renderer) u64 {
+        return if (self.native) |native| zmtl_effect_passes(native) else 0;
     }
 
     pub fn replayBuffer(self: *Renderer, buffer: *const commands.Buffer) !void {
+        self.effect_buffer = if (self.prepareEffects(buffer)) buffer else null;
+        defer self.effect_buffer = null;
         try self.replayWithResources(buffer.commands(), buffer.textBytes(), buffer.brushResources(), buffer.preparedTextResources(), buffer.imageResources(), buffer.coverageResources());
     }
     pub fn replay(self: *Renderer, ops: []const commands.Command, text: []const u8) !void {
@@ -199,6 +351,9 @@ pub const Renderer = struct {
         for (resources) |*resource| try resource.validate();
         var depth: usize = 0;
         defer while (depth != 0) : (depth -= 1) zmtl_pop_clip(native);
+        var effect_stack: [max_effect_depth]OpenEffect = undefined;
+        var effect_depth: usize = 0;
+        var words: [shader_effects.shader.gpu.max_input_words]u32 = undefined;
         for (ops) |op| switch (op) {
             .fill => |fill| {
                 if (!layout.validRect(fill.bounds)) return error.InvalidGeometry;
@@ -256,10 +411,26 @@ pub const Renderer = struct {
                 depth -= 1;
                 zmtl_pop_clip(native);
             },
+            .effect => |slot| {
+                if (self.effect_buffer == null) return error.SoftwareOnlyCommands;
+                if (effect_depth == effect_stack.len) return error.LayerDepthExceeded;
+                effect_stack[effect_depth] = try self.beginEffect(slot);
+                effect_depth += 1;
+            },
+            .end_effect => {
+                if (effect_depth == 0) return error.UnbalancedEffects;
+                effect_depth -= 1;
+                try self.endEffect(effect_stack[effect_depth], &words);
+            },
+            .backdrop_shader => |slot| {
+                if (self.effect_buffer == null) return error.SoftwareOnlyCommands;
+                try self.backdropShader(slot, &words);
+            },
             // prepareEffects leaves these frames to software.
-            .backdrop, .indicator, .effect, .end_effect, .backdrop_shader, .begin_group, .end_group, .begin_transform, .end_transform, .texture => return error.UnsupportedCommand,
+            .backdrop, .indicator, .begin_group, .end_group, .begin_transform, .end_transform, .texture => return error.UnsupportedCommand,
         };
         if (depth != 0) return error.UnbalancedClips;
+        if (effect_depth != 0) return error.UnbalancedEffects;
     }
     pub fn preparedText(self: *Renderer, view: drawing.PreparedTextView, origin: drawing.Point, tint: geometry.Color) !void {
         if (!self.active) return error.NotDrawing;
@@ -429,7 +600,7 @@ pub const Renderer = struct {
         const native = self.native orelse return .{};
         var values: NativeStats = undefined;
         zmtl_stats(native, &values);
-        return .{ .device_creations = values.device_creations, .layer_creations = values.layer_creations, .resizes = values.resizes, .presents = values.presents, .transaction_presents = values.transaction_presents, .busy_presents = values.busy_presents, .atlas_pages = values.atlas_pages, .glyphs = values.glyphs, .frames = values.frames, .instances = values.instances, .batches = values.batches };
+        return .{ .device_creations = values.device_creations, .layer_creations = values.layer_creations, .resizes = values.resizes, .presents = values.presents, .transaction_presents = values.transaction_presents, .busy_presents = values.busy_presents, .atlas_pages = values.atlas_pages, .glyphs = values.glyphs, .frames = values.frames, .instances = values.instances, .batches = values.batches, .effect_passes = values.effect_passes };
     }
 
     /// Displays the view of the window titled `title` now, as AppKit's
@@ -444,6 +615,10 @@ pub const Renderer = struct {
     /// 0xAARRGGBB (premultiplied) of the last frame presented while capturing.
     pub fn pixelForTest(self: *Renderer, x: u32, y: u32) u32 {
         return zmtl_test_pixel(self.native.?, x, y);
+    }
+    /// The whole last frame presented while capturing, `width` x `height`.
+    pub fn pixelsForTest(self: *Renderer, pixels: []u32, width: u32, height: u32) !void {
+        if (pixels.len != @as(usize, width) * height or zmtl_test_pixels(self.native.?, pixels.ptr, width, height) == 0) return error.InvalidGeometry;
     }
     pub fn layerShownForTest(self: *Renderer) bool {
         return zmtl_test_layer_shown(self.native.?) != 0;

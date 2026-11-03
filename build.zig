@@ -959,6 +959,15 @@ pub fn build(b: *std.Build) void {
         check.dependOn(&gl_parity.step);
         b.step("test-shader-gl", "Run translated shader programs on OpenGL against the CPU machine").dependOn(&b.addRunArtifact(gl_parity).step);
     }
+    if (target.result.os.tag == .macos) {
+        // Translated programs against the CPU machine on Metal, compiled at
+        // run time as the renderer compiles them.
+        const metal_parity = addTest(b, .{ .root_module = b.createModule(.{ .root_source_file = b.path("tests/shader_gpu_metal.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "ziggurat_shader", .module = shader }} }) });
+        _ = native_support.add(b, metal_parity.root_module, "shader-gpu-metal-native", "tests/shader_gpu_metal.m", &.{ "-fobjc-arc", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        native_support.linkFrameworks(b, metal_parity.root_module, &.{ "Metal", "Foundation" });
+        check.dependOn(&metal_parity.step);
+        b.step("test-shader-metal", "Run translated shader programs on Metal against the CPU machine").dependOn(&b.addRunArtifact(metal_parity).step);
+    }
     if (target.result.os.tag == .windows) {
         // Translated programs against the CPU machine on Direct3D 11 WARP,
         // compiled by the system's HLSL compiler.
