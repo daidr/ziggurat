@@ -927,6 +927,9 @@ pub const Node = struct {
     accept: Accept = .{},
     /// The container's items reorder by dragging; see `View.reorder`.
     reorder: bool = false,
+    /// The container's items drag out as payloads of this kind; see
+    /// `View.dragRows`.
+    drag_rows: ?u64 = null,
     /// A drag from a row of this tree or table selects the rows it crosses.
     drag_select: bool = false,
     /// A loading indicator's look and pose.
@@ -1210,7 +1213,9 @@ pub const Overlay = struct {
     };
     /// A container whose items reorder by dragging; its items are
     /// `reorder_items[first..][0..count]`.
-    pub const ReorderList = struct { id: u64, axis: Axis, rect: Rect, first: u32, count: u32, scroll: ?u64 };
+    /// With `drag_kind`, its items drag out as payloads of that kind
+    /// instead (`View.dragRows`).
+    pub const ReorderList = struct { id: u64, axis: Axis, rect: Rect, first: u32, count: u32, scroll: ?u64, drag_kind: ?u64 = null };
     pub const ReorderItem = struct { id: u64, index: u32, bounds: Rect, rect: Rect };
     /// The shown dialog, which holds input while it is open.
     pub const Dialog = struct { id: u64, rect: Rect, opener: ?u64, escape: bool, scrim: bool };
@@ -1291,6 +1296,8 @@ pub const Capture = struct {
         area: u64,
         source: struct { id: u64, payload: Payload },
         reorder: struct { list: u64, from: usize, to: usize },
+        /// An item of a `dragRows` container, dragged out as `payload`.
+        rows: struct { list: u64, from: usize, payload: Payload },
         select: struct { collection: u64, item: u64, add: bool, last: u64 },
     };
     target: Target,
@@ -3324,7 +3331,7 @@ pub const View = struct {
         for (self.overlay.lists[0..self.overlay.list_count]) |list| {
             for (self.overlay.reorder_items[list.first..][0..list.count], 0..) |entry, at| {
                 if (!contains(entry.rect, point) or (best != null and entry.index < depth)) continue;
-                best = .{ .reorder = .{ .list = list.id, .from = at, .to = at } };
+                best = if (list.drag_kind) |kind| .{ .rows = .{ .list = list.id, .from = at, .payload = .{ .kind = kind, .value = at } } } else .{ .reorder = .{ .list = list.id, .from = at, .to = at } };
                 depth = entry.index;
             }
         }
@@ -3373,6 +3380,10 @@ pub const View = struct {
                 self.drop_over = self.dropTargetAt(point, .{ .value = source.payload });
                 if (self.edgeScroll(self.scrollAt(point), point)) |event| result.push(event);
             },
+            .rows => |rows| {
+                self.drop_over = self.dropTargetAt(point, .{ .value = rows.payload });
+                if (self.edgeScroll(self.scrollAt(point), point)) |event| result.push(event);
+            },
             .reorder => |*value| {
                 const list = self.reorderList(value.list) orelse {
                     self.capture = null;
@@ -3416,6 +3427,9 @@ pub const View = struct {
             .area => |id| result.push(.{ .drag = .{ .id = id, .phase = .end, .origin = capture.origin, .position = point, .delta = .{ .x = point.x - capture.position.x, .y = point.y - capture.position.y }, .modifiers = capture.modifiers } }),
             .source => |source| if (self.dropTargetAt(point, .{ .value = source.payload })) |id| {
                 result.push(.{ .drop = .{ .id = id, .data = .{ .value = source.payload }, .position = point } });
+            },
+            .rows => |rows| if (self.dropTargetAt(point, .{ .value = rows.payload })) |id| {
+                result.push(.{ .drop = .{ .id = id, .data = .{ .value = rows.payload }, .position = point } });
             },
             .reorder => |value| {
                 const list = self.reorderList(value.list) orelse return result;
@@ -3769,6 +3783,7 @@ pub const View = struct {
         if (self.take(node.id)) |event| if (event == .drop) return .{ .dropped = .{ .data = event.drop.data, .position = event.drop.position } };
         if (self.drop_over) |over| if (over == node.id) if (self.capture) |capture| switch (capture.target) {
             .source => |source| return .{ .over = .{ .value = source.payload } },
+            .rows => |rows| return .{ .over = .{ .value = rows.payload } },
             else => {},
         };
         if (self.system_drag) |drag| if (drag.over) |over| if (over == node.id) return .{ .over = .{ .files = drag.files, .text = drag.text } };
@@ -3788,11 +3803,34 @@ pub const View = struct {
         const index = self.stack[self.depth - 1];
         if (index == 0) return error.NotContainer;
         const node = &self.buffers.nodes[index];
-        if (node.kind == .tree or node.drag_select) return error.InvalidValue;
+        if (node.kind == .tree or node.drag_select or node.drag_rows != null) return error.InvalidValue;
         if (node.kind != .table and node.child_count != 0) return error.InvalidValue;
         node.reorder = true;
         if (self.take(node.id)) |event| if (event == .reorder) return event.reorder.move;
         return null;
+    }
+
+    /// Let the pointer drag the items of the container just opened out of
+    /// it, for drop targets elsewhere to take, as the files of a table
+    /// dropped on a folder: the rows of a table, the options of a list box,
+    /// or the children of a column or row. Call it before building any
+    /// item. A primary press on an item that moves `drag_threshold` drags
+    /// the payload `.{ .kind = kind, .value = i }`, `i` the item's place
+    /// among them (a table's rows count from its first row); a copy
+    /// follows the pointer, and the innermost `dropTarget` under it that
+    /// takes `kind` gets it when released, as from a `dragSource`. The
+    /// container itself takes nothing and shows no line between its items,
+    /// so a target inside it, as a folder's row, takes the payload wherever
+    /// the pointer is. Escape gives the drag up. A tree cannot drag its rows
+    /// out, and a container cannot both `dragRows` and `reorder` or
+    /// `dragSelect`.
+    pub fn dragRows(self: *View, kind: u64) Error!void {
+        const index = self.stack[self.depth - 1];
+        if (index == 0) return error.NotContainer;
+        const node = &self.buffers.nodes[index];
+        if (node.kind == .tree or node.drag_select or node.reorder) return error.InvalidValue;
+        if (node.kind != .table and node.child_count != 0) return error.InvalidValue;
+        node.drag_rows = kind;
     }
 
     /// Let a primary drag from a row of the tree or table just opened select
@@ -3803,7 +3841,7 @@ pub const View = struct {
     pub fn dragSelect(self: *View) Error!void {
         const node = &self.buffers.nodes[self.stack[self.depth - 1]];
         if (node.kind != .tree and node.kind != .table) return error.NotContainer;
-        if (node.reorder) return error.InvalidValue;
+        if (node.reorder or node.drag_rows != null) return error.InvalidValue;
         node.drag_select = true;
     }
 
@@ -3833,6 +3871,7 @@ pub const View = struct {
             .area => |id| if (node.id == id and node.kind == .drag_area) return true,
             .source => |source| if (node.id == source.id and node.kind == .drag_source) return true,
             .reorder => |value| if (node.id == value.list and node.reorder) return true,
+            .rows => |value| if (node.id == value.list and node.drag_rows != null) return true,
             .select => |value| if (node.id == value.collection and node.drag_select) return true,
         };
         return false;
@@ -4426,7 +4465,7 @@ pub const View = struct {
         const overlay = &self.overlay;
         const zero: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
         for (all, 0..) |*node, index| {
-            if (!node.reorder or !node.style.enabled or overlay.list_count == max_reorder_lists) continue;
+            if (!(node.reorder or node.drag_rows != null) or !node.style.enabled or overlay.list_count == max_reorder_lists) continue;
             const first = overlay.reorder_item_count;
             if (node.kind == .table) {
                 for (all[index + 1 .. node.end], index + 1..) |*entry, at| {
@@ -4442,7 +4481,7 @@ pub const View = struct {
                     overlay.reorder_item_count += 1;
                 }
             }
-            overlay.lists[overlay.list_count] = .{ .id = node.id, .axis = options(node).axis, .rect = self.visible(node) orelse zero, .first = @intCast(first), .count = @intCast(overlay.reorder_item_count - first), .scroll = self.scrollAround(node) };
+            overlay.lists[overlay.list_count] = .{ .id = node.id, .axis = options(node).axis, .rect = self.visible(node) orelse zero, .first = @intCast(first), .count = @intCast(overlay.reorder_item_count - first), .scroll = self.scrollAround(node), .drag_kind = node.drag_rows };
             overlay.list_count += 1;
         }
     }
@@ -4472,6 +4511,12 @@ pub const View = struct {
                 const items = self.overlay.reorder_items[list.first..][0..list.count];
                 self.insert_mark = insertion(list, items, value.to);
                 break :reorder items[value.from].index;
+            },
+            // Out of the container: no line between its items.
+            .rows => |value| rows: {
+                const list = self.reorderList(value.list) orelse break :rows null;
+                if (value.from >= list.count) break :rows null;
+                break :rows self.overlay.reorder_items[list.first..][0..list.count][value.from].index;
             },
             else => null,
         };
