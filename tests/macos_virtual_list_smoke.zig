@@ -17,6 +17,8 @@ extern fn zua_test_release(?*anyopaque) void;
 extern fn zua_test_row_state(row: *anyopaque, handle: *anyopaque, selected: *c_int, shown: *c_int, focused: *c_int) c_int;
 extern fn zua_test_row_act(row: *anyopaque, kind: c_int) void;
 extern fn zua_test_list_count(list: *anyopaque, which: c_int) c_int;
+extern fn CFRunLoopRunInMode(mode: *const anyopaque, seconds: f64, return_after_source_handled: u8) i32;
+extern const kCFRunLoopDefaultMode: *const anyopaque;
 
 const viewport: ui.Rect = .{ .x = 10, .y = 10, .width = 180, .height = 60 };
 const RowState = struct { index: c_int, selected: bool, shown: bool, focused: bool };
@@ -158,7 +160,14 @@ pub fn main() !void {
     // A row of the old model chooses nothing.
     zua_test_row_act(old, 1);
     try std.testing.expectEqual(@as(usize, 0), try host.control.selectedCount());
-    // Focusing a row of the new one gives the list the focus at that row.
+    // Focusing a row of the new one gives the list the focus at that row;
+    // assistive technology reads a focus only in the key window.
+    try host.window.perform(.focus);
+    var waited: usize = 0;
+    while (!(try host.window.state()).focused) : (waited += 1) {
+        if (waited == 200) return error.WindowNotKey;
+        _ = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, 0);
+    }
     zua_test_row_act(new, 3);
     try host.paint();
     try std.testing.expect(host.context.input_state.focused == 7);
