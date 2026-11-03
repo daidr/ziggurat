@@ -61,10 +61,18 @@ typedef struct ZmEffectPass {const uint32_t *words;uint32_t word_count,slot;ZmEf
    origin; the clip is physical and inside width x height. */
 typedef struct ZmEffectGeometry {double clip[4];float scale,origin[2];uint32_t width,height,transparent;} ZmEffectGeometry;
 _Static_assert(sizeof(ZmEffectParams)==112,"effect parameter layout");
+/* A backdrop effect as src/ui/metal.zig plans it (src/ui/backdrop.zig):
+   physical coordinates of the current target. misc is radius, refraction,
+   bezel and noise; misc2 rim, kind (0 blur, 1 glass, 2 scroll edge, 3 the
+   opaque fill), transparent and whether the blur is progressive; line and
+   line2 the progressive blur's line (x, y, dx, dy; length, from, to). */
+typedef struct ZmGlass {float box[4],clip[4],tone[4],tint[4],line[4],line2[4],misc[4],misc2[4],background[4],fill[4];uint32_t region[4],out[4];} ZmGlass;
+typedef struct ZmGlassLevel {uint32_t radius;float lo,hi;uint32_t weights;} ZmGlassLevel;
+_Static_assert(sizeof(ZmGlass)==192,"backdrop layout");
 _Static_assert(sizeof(ZmInstance)==80,"instance layout");
 _Static_assert(sizeof(ZmBrush)==352,"brush layout");
 
-enum {KIND_RECT,KIND_SHAPE,KIND_GRADIENT,KIND_MASK,KIND_GLYPH,KIND_IMAGE,KIND_LAYER,KIND_TRANSFORM};
+enum {KIND_RECT,KIND_SHAPE,KIND_GRADIENT,KIND_MASK,KIND_GLYPH,KIND_IMAGE,KIND_LAYER,KIND_TRANSFORM,KIND_INDICATOR};
 enum {BIND_NONE,BIND_ATLAS,BIND_TEXTURE};
 
 static NSString *const shader_source=@
@@ -130,7 +138,29 @@ static NSString *const shader_source=@
 "  float4 sum=texel(t,q)*((1.0-w.x)*(1.0-w.y))+texel(t,q+int2(1,0))*(w.x*(1.0-w.y))+texel(t,q+int2(0,1))*((1.0-w.x)*w.y)+texel(t,q+int2(1,1))*(w.x*w.y);\n"
 "  return round(clamp(sum*255.0,0.0,255.0))/255.0;\n"
 "}\n"
-"fragment float4 zm_fragment(VOut in[[stage_in]],constant Uniforms&u[[buffer(0)]],const device Inst*insts[[buffer(1)]],const device Brush*brushes[[buffer(2)]],texture2d<float>tex[[texture(0)]],texture2d<float>mask[[texture(1)]],sampler linear_sampler[[sampler(0)]],sampler nearest_sampler[[sampler(1)]],sampler mask_sampler[[sampler(2)]]){\n"
+"static float hyp(float x,float y){return precise::sqrt(x*x+y*y);}\n"
+"static float2 rot(float x,float y,float a){float c=precise::cos(a),s=precise::sin(a);return float2(x*c+y*s,-x*s+y*c);}\n"
+"static float rbox(float x,float y,float hw,float hh,float r){r=min(r,min(hw,hh));float qx=abs(x)-(hw-r),qy=abs(y)-(hh-r);float mx=max(qx,0.0),my=max(qy,0.0);return precise::sqrt(mx*mx+my*my)+min(max(qx,qy),0.0)-r;}\n"
+"static float seg(float px,float py,float x0,float y0,float x1,float y1){float dx=x1-x0,dy=y1-y0,l=dx*dx+dy*dy;float h=l>0.0?clamp(((px-x0)*dx+(py-y0)*dy)/l,0.0,1.0):0.0;return hyp(px-x0-dx*h,py-y0-dy*h);}\n"
+"static float turned(float start,float a){float t=(a-start)/(2.0*M_PI_F);return (t-floor(t))*(2.0*M_PI_F);}\n"
+"static float2 element(const device float*e,float px,float py){\n"
+"  uint k=uint(e[0]);\n"
+"  if(k==0u)return float2(hyp(px-e[2],py-e[3])-e[4],1.0);\n"
+"  if(k==1u)return float2(abs(hyp(px-e[2],py-e[3])-e[4])-e[5]*0.5,1.0);\n"
+"  if(k==2u){float dx=px-e[2],dy=py-e[3];float ring=abs(hyp(dx,dy)-e[4])-e[5]*0.5;float off=turned(e[6],precise::atan2(dy,dx));float sw=min(e[7],2.0*M_PI_F);bool fade=e[9]>0.5;\n"
+"    if(off<=sw)return float2(ring,fade?clamp(off/max(sw,1e-6),0.0,1.0):1.0);\n"
+"    float best=1e30;for(int n=0;n<2;n++){float a=n==0?e[6]:e[6]+sw;float ex=e[2]+e[4]*precise::cos(a),ey=e[3]+e[4]*precise::sin(a);\n"
+"      if(e[8]<0.5)best=min(best,hyp(px-ex,py-ey)-e[5]*0.5);else{float nx=precise::cos(a)*e[5]*0.5,ny=precise::sin(a)*e[5]*0.5;best=min(best,seg(px,py,ex-nx,ey-ny,ex+nx,ey+ny));}}\n"
+"    return float2(best,fade?(off-sw<(2.0*M_PI_F-sw)*0.5?1.0:0.0):1.0);}\n"
+"  if(k==3u){float2 q=rot(px-e[2],py-e[3],e[7]);return float2(rbox(q.x,q.y,e[4],e[5],e[6]),1.0);}\n"
+"  if(k==4u){if(e[7]<0.5)return float2(seg(px,py,e[2],e[3],e[4],e[5])-e[6]*0.5,1.0);\n"
+"    float dx=e[4]-e[2],dy=e[5]-e[3];float len=hyp(dx,dy);if(len==0.0)return float2(1e30,1.0);\n"
+"    float2 q=rot(px-(e[2]+e[4])*0.5,py-(e[3]+e[5])*0.5,precise::atan2(dy,dx));return float2(rbox(q.x,q.y,len*0.5,e[6]*0.5,0.0),1.0);}\n"
+"  if(k==5u){float2 q=rot(px-e[2],py-e[3],e[7]);float ry=max(abs(e[5]),0.2);float qx=q.x/e[4],qy=q.y/ry;float n=hyp(qx,qy);\n"
+"    if(n==0.0)return float2(min(e[4],ry)-e[6]*0.5,1.0);return float2(abs((n-1.0)/hyp(qx/(e[4]*n),qy/(ry*n)))-e[6]*0.5,1.0);}\n"
+"  float dx=px-e[2],dy=py-e[3];float behind=turned(precise::atan2(dy,dx),e[5]);return float2(hyp(dx,dy)-e[4],behind<=e[6]?1.0-behind/e[6]:0.0);\n"
+"}\n"
+"fragment float4 zm_fragment(VOut in[[stage_in]],constant Uniforms&u[[buffer(0)]],const device Inst*insts[[buffer(1)]],const device Brush*brushes[[buffer(2)]],const device float*words[[buffer(3)]],texture2d<float>tex[[texture(0)]],texture2d<float>mask[[texture(1)]],sampler linear_sampler[[sampler(0)]],sampler nearest_sampler[[sampler(1)]],sampler mask_sampler[[sampler(2)]]){\n"
 "  Inst i=insts[in.inst];float2 p=in.pos.xy+u.origin;uint kind=uint(i.p.z);\n"
 "  float cov=box(p,i.clip);float4 color=i.color;\n"
 "  if(kind==0u)cov*=box(p,i.rect);\n"
@@ -140,6 +170,10 @@ static NSString *const shader_source=@
 "  else if(kind==4u){float4 t=tex.sample(nearest_sampler,in.uv,level(0.0));if(i.p.w>0.5)return t*(color.a*cov);cov*=t.a;}\n"
 "  else if(kind==6u){float m=1.0;if(i.p.w>0.5)m=mask.sample(mask_sampler,(p-i.uv.xy)/(i.uv.zw-i.uv.xy),level(0.0)).r;return texel(tex,int2(floor(p-i.p.xy)))*(color.a*cov*box(p,i.rect)*m);}\n"
 "  else if(kind==7u){float2 s=float2(i.uv.x*p.x+i.uv.y*p.y+i.p.x,i.uv.z*p.x+i.uv.w*p.y+i.p.y);return bilinear(tex,s)*cov;}\n"
+"  else if(kind==8u){const device float*e=words+uint(i.p.x);uint n=uint(i.p.y);float k=i.uv.z;float px=(p.x-i.uv.x)/k,py=(p.y-i.uv.y)/k;float aa=1.0/k;float total=0.0;\n"
+"    for(uint j=0u;j<n;j++){float2 v=element(e+j*12u,px,py);float a=clamp(0.5-v.x/aa,0.0,1.0)*e[j*12u+1u]*v.y;total=a+total*(1.0-a);}\n"
+"    float alpha=round(clamp(total*i.color.a*cov,0.0,1.0)*255.0);if(alpha==0.0)return float4(0.0);\n"
+"    return float4(floor((round(i.color.rgb*255.0)*alpha+127.0)/255.0),alpha)/255.0;}\n"
 "  else{float lod=i.p.x;float4 t=i.p.w>0.5?tex.sample(linear_sampler,in.uv,level(lod)):tex.sample(nearest_sampler,in.uv,level(lod));return t*(color.a*cov*box(p,i.rect));}\n"
 "  return color*cov;\n"
 "}\n"
@@ -152,11 +186,67 @@ static NSString *const shader_source=@
 "    if(q.x>=0&&q.y>=0&&q.x<int(f.width)&&q.y<int(f.height))total+=uint4(round(src.read(uint2(q))*255.0))*f.weights[tap+r];\n"
 "  }\n"
 "  return float4((total+8388608u)>>24)/255.0;\n"
+"}\n"
+/* Backdrop effects (src/ui/backdrop.zig): the target beneath the effect is
+   copied (region), blurred with the CPU's float kernel, rounded to bytes
+   each pass, blended level by level for a progressive blur, and shaded
+   inside the rounded box over out, as the software planes do. */
+"struct Glass{float4 box;float4 clip;float4 tone;float4 tint;float4 line;float4 line2;float4 misc;float4 misc2;float4 background;float4 fill;uint4 region;uint4 out;};\n"
+"vertex float4 zm_quad_vertex(uint vid[[vertex_id]],constant float4&q[[buffer(0)]]){float2 c=float2(float(vid&1u),float(vid>>1));return float4(mix(q.x,q.z,c.x),mix(q.y,q.w,c.y),0.0,1.0);}\n"
+"fragment float4 zm_glass_filter(float4 pos[[position]],constant uint4&f[[buffer(0)]],const device float*w[[buffer(1)]],texture2d<float>src[[texture(0)]]){\n"
+"  int2 at=int2(pos.xy);int r=int(f.x);float4 acc=float4(0.0);int2 hi=int2(f.zw)-1;\n"
+"  for(int tap=-r;tap<=r;tap++){int2 q=clamp(at+(f.y!=0u?int2(0,tap):int2(tap,0)),int2(0),hi);acc+=round(src.read(uint2(q))*255.0)*w[tap+r];}\n"
+"  return round(clamp(acc,0.0,255.0))/255.0;\n"
+"}\n"
+"static float4 blend_bytes(float4 a,float4 b,float t){return t>=1.0?b:round(clamp(a+(b-a)*t,0.0,255.0));}\n"
+"static float blur_at(constant Glass&g,float px,float py){float d=(px-g.line.x)*g.line.z+(py-g.line.y)*g.line.w;float t=g.line2.x>0.0?clamp(d/g.line2.x,0.0,1.0):(d>=0.0?1.0:0.0);return g.line2.y+(g.line2.z-g.line2.y)*t;}\n"
+"fragment float4 zm_glass_blend(float4 pos[[position]],constant Glass&g[[buffer(0)]],constant float2&level[[buffer(1)]],texture2d<float>result[[texture(0)]],texture2d<float>cur[[texture(1)]]){\n"
+"  uint2 at=uint2(pos.xy);float4 a=round(result.read(at)*255.0);uint x=g.region.x+at.x,y=g.region.y+at.y;\n"
+"  if(x<g.out.x||y<g.out.y||x>=g.out.z||y>=g.out.w)return a/255.0;\n"
+"  float weight=clamp((blur_at(g,float(x)+0.5,float(y)+0.5)-level.x)/(level.y-level.x),0.0,1.0);\n"
+"  if(weight==0.0)return a/255.0;\n"
+"  return blend_bytes(a,round(cur.read(at)*255.0),weight)/255.0;\n"
+"}\n"
+"static float rounded_distance(float4 b,float radius,float x,float y){float hx=(b.z-b.x)*0.5,hy=(b.w-b.y)*0.5;float qx=abs(x-(b.x+hx))-(hx-radius),qy=abs(y-(b.y+hy))-(hy-radius);float ox=max(qx,0.0),oy=max(qy,0.0);return precise::sqrt(ox*ox+oy*oy)+min(max(qx,qy),0.0)-radius;}\n"
+"static float3 straight(float4 c){if(c.a==0.0)return float3(0.0);return min(float3(1.0),c.rgb/c.a);}\n"
+"static float luma(float3 c){return 0.2126*c.r+0.7152*c.g+0.0722*c.b;}\n"
+"static float3 toned(float3 c,float saturation,float offset){float l=luma(c);return clamp(l+(c-l)*saturation+offset,0.0,1.0);}\n"
+"static float4 pack(float3 c){return float4(round(clamp(c,0.0,1.0)*255.0),255.0);}\n"
+"static float lens(float t,float bezel){if(bezel<=0.0||t>=bezel)return 0.0;float u=1.0-max(t,0.0)/bezel;float v=1.0-u*u*u*u;float a=precise::sqrt(v*precise::sqrt(v));float b=u*u*u;float n=precise::sqrt(a*a+b*b);float s=b/n,c=a/n;float st=s/1.5;float ct=precise::sqrt(1.0-st*st);return ((s*ct-c*st)/(c*ct+s*st))/1.1180339887498949;}\n"
+"static float sgn(float v){return v>0.0?1.0:(v<0.0?-1.0:0.0);}\n"
+"static float2 edge_normal(float4 b,float radius,float px,float py){float hx=(b.z-b.x)*0.5,hy=(b.w-b.y)*0.5;float cx=px-b.x-hx,cy=py-b.y-hy;float rad=min(1.5*radius,min(hx,hy));float qx=abs(cx)-(hx-rad),qy=abs(cy)-(hy-rad);\n"
+"  if(qx>0.0||qy>0.0){float mx=max(qx,0.0),my=max(qy,0.0);float n=precise::sqrt(mx*mx+my*my);return float2(sgn(cx)*mx/n,sgn(cy)*my/n);}\n"
+"  return qx>qy?float2(sgn(cx),0.0):float2(0.0,sgn(cy));}\n"
+"static float4 bilinear_clamped(texture2d<float>t,float2 origin,float x,float y){float w=float(t.get_width()),h=float(t.get_height());\n"
+"  float lx=clamp(x-0.5-origin.x,0.0,w-1.0),ly=clamp(y-0.5-origin.y,0.0,h-1.0);uint ix=uint(floor(lx)),iy=uint(floor(ly));uint jx=min(ix+1u,uint(w)-1u),jy=min(iy+1u,uint(h)-1u);float tx=lx-floor(lx),ty=ly-floor(ly);\n"
+"  float4 a=round(t.read(uint2(ix,iy))*255.0),b=round(t.read(uint2(jx,iy))*255.0),c=round(t.read(uint2(ix,jy))*255.0),d=round(t.read(uint2(jx,jy))*255.0);\n"
+"  return (a*(1.0-tx)+b*tx)*(1.0-ty)+(c*(1.0-tx)+d*tx)*ty;}\n"
+"static float grain(uint x,uint y){uint v=x*73856093u^y*19349663u;v^=v>>16;v*=0x7feb352du;v^=v>>15;v*=0x846ca68bu;v^=v>>16;return float(v)/4294967296.0;}\n"
+"fragment float4 zm_glass_shade(float4 pos[[position]],constant Glass&g[[buffer(0)]],texture2d<float>dst[[texture(0)]],texture2d<float>res[[texture(1)]]){\n"
+"  uint2 xy=uint2(pos.xy);uint2 local=xy-g.region.xy;float px=float(xy.x)+0.5,py=float(xy.y)+0.5;float4 d=round(dst.read(local)*255.0);\n"
+"  float radius=g.misc.x;float sd=rounded_distance(g.box,radius,px,py);\n"
+"  float fx=float(xy.x),fy=float(xy.y);float cover=max(0.0,min(fx+1.0,g.clip.z)-max(fx,g.clip.x))*max(0.0,min(fy+1.0,g.clip.w)-max(fy,g.clip.y));\n"
+"  uint kind=uint(g.misc2.y);float amount=clamp(0.5-sd,0.0,1.0)*cover;if(kind==3u)amount*=g.fill.a;\n"
+"  if(amount==0.0)return d/255.0;\n"
+"  float4 color;\n"
+"  if(kind==3u)color=pack(g.fill.rgb);\n"
+"  else if(kind==0u)color=round(res.read(local)*255.0);\n"
+"  else if(kind==2u){float3 c=toned(straight(round(res.read(local)*255.0)),0.25,0.03);color=pack(c+(g.background.rgb-c)*0.8245);}\n"
+"  else{float depth=max(-sd,0.0);float bezel=g.misc.z;float2 n=float2(0.0);if(depth<bezel||depth<3.0)n=edge_normal(g.box,radius,px,py);\n"
+"    float sx=px,sy=py;if(depth<bezel){float k=g.misc.y*lens(depth,bezel);sx-=n.x*k;sy-=n.y*k;}\n"
+"    float3 c=straight(bilinear_clamped(res,float2(g.region.xy),sx,sy));\n"
+"    float l=luma(c);float target=g.tone.x+(g.tone.y-g.tone.x)*(1.0-precise::pow(max(1.0-l,0.0),g.tone.z));c=clamp(target+(c-l)*((g.tone.y-g.tone.x)*g.tone.w),0.0,1.0);\n"
+"    if(g.tint.a>0.0)c+=(g.tint.rgb-c)*g.tint.a;\n"
+"    if(depth<3.0){float a=g.misc2.x*precise::exp(-depth*depth);c+=(abs(n.y)-c)*a;}\n"
+"    if(g.misc.w>0.0)c+=(grain(xy.x,xy.y)-0.5)*g.misc.w*0.08;\n"
+"    color=pack(c);}\n"
+"  float4 result=blend_bytes(d,color,amount);if(g.misc2.z==0.0)result.a=255.0;\n"
+"  return result/255.0;\n"
 "}\n";
 
 /* What the frame does, in order: draw instances, or (op) begin an element
    effect's capture, end one, or run a backdrop shader; run indexes runs. */
-enum {OP_DRAW,OP_CAPTURE,OP_EFFECT,OP_BACKDROP};
+enum {OP_DRAW,OP_CAPTURE,OP_EFFECT,OP_BACKDROP,OP_GLASS};
 /* A draw batch's instances share a texture and a mask (group composites);
    replace batches overwrite the target (a transparent frame's damage
    cleared) rather than blend. */
@@ -167,8 +257,8 @@ typedef struct ZmBatch {uint32_t first,count;int bind,replace;__unsafe_unretaine
 /* What closing a capture runs: an element effect's program, a Gaussian
    group's filter (its kernel among the words, through temp), or nothing. */
 enum {RUN_EFFECT,RUN_GROUP,RUN_GAUSSIAN,RUN_TRANSFORM};
-typedef struct ZmRun {uint32_t kind,slot,word_offset,word_count,has_pass,region[4],out[4];float origin[2];ZmEffectParams params;__unsafe_unretained id<MTLTexture> source,output,temp;} ZmRun;
-typedef struct ZmStats {uint32_t device_creations,layer_creations,resizes,presents,transaction_presents,busy_presents,atlas_pages,glyphs;uint64_t frames,instances,batches,effect_passes,layers,filter_passes,partial_frames,cached_pipelines;} ZmStats;
+typedef struct ZmRun {uint32_t kind,slot,word_offset,word_count,has_pass,region[4],out[4];float origin[2];ZmEffectParams params;__unsafe_unretained id<MTLTexture> source,output,temp,extra[3];uint32_t levels,level_offset;} ZmRun;
+typedef struct ZmStats {uint32_t device_creations,layer_creations,resizes,presents,transaction_presents,busy_presents,atlas_pages,glyphs;uint64_t frames,instances,batches,effect_passes,layers,filter_passes,partial_frames,cached_pipelines,backdrops,indicators;} ZmStats;
 typedef struct ZmGlyph {float x,y,width,height,left,top;uint32_t color;} ZmGlyph;
 #define ZM_CLIPS 33
 #define ZM_ATLAS 2048
@@ -186,7 +276,7 @@ static atomic_int live_objects;
 
 @interface ZigMetalRenderer : NSObject {
 @public
-    id<MTLDevice> device;id<MTLCommandQueue> queue;id<MTLRenderPipelineState> pipeline,replace_pipeline,filter_pipeline;
+    id<MTLDevice> device;id<MTLCommandQueue> queue;id<MTLRenderPipelineState> pipeline,replace_pipeline,filter_pipeline,glass_filter,glass_blend,glass_shade;
     id<MTLSamplerState> linear_sampler,nearest_sampler,mask_sampler;id<MTLTexture> blank;
     CAMetalLayer *layer;__weak NSView *view;__weak NSWindow *window;
     uint32_t width,height;float scale;int transparent,drawing,offscreen,layer_changed,capture,hidden;
@@ -311,7 +401,10 @@ static int create_pipeline(ZigMetalRenderer *s){
     s->pipeline=make_pipeline(s,blended(library,@"zm_vertex",@"zm_fragment",1),&error);
     if(s->pipeline)s->replace_pipeline=make_pipeline(s,blended(library,@"zm_vertex",@"zm_fragment",0),&error);
     if(s->replace_pipeline)s->filter_pipeline=make_pipeline(s,blended(library,@"zm_full_vertex",@"zm_filter",0),&error);
-    if(!s->filter_pipeline){NSLog(@"Ziggurat Metal pipeline: %@",error);return 0;}
+    if(s->filter_pipeline)s->glass_filter=make_pipeline(s,blended(library,@"zm_full_vertex",@"zm_glass_filter",0),&error);
+    if(s->glass_filter)s->glass_blend=make_pipeline(s,blended(library,@"zm_full_vertex",@"zm_glass_blend",0),&error);
+    if(s->glass_blend)s->glass_shade=make_pipeline(s,blended(library,@"zm_quad_vertex",@"zm_glass_shade",0),&error);
+    if(!s->glass_shade){NSLog(@"Ziggurat Metal pipeline: %@",error);return 0;}
     save_archive(s);
     MTLSamplerDescriptor *sd=[[MTLSamplerDescriptor alloc] init];
     sd.minFilter=sd.magFilter=MTLSamplerMinMagFilterLinear;sd.mipFilter=MTLSamplerMipFilterNotMipmapped;
@@ -1006,6 +1099,71 @@ int zmtl_backdrop_shader(void *p,const ZmEffectPass *pass,const uint32_t region[
     return push_op(s,OP_BACKDROP,index)?0:2;
 }
 
+/* Words appended to the frame's, starting on a 256-byte boundary as
+   constant buffer offsets need; their index, or UINT32_MAX. */
+static uint32_t append_words(ZigMetalRenderer *s,const void *data,size_t count){
+    uint32_t start=(s->word_len+63)&~63u;uint64_t end=(uint64_t)start+(count?count:1);
+    if(end>UINT32_MAX/2)return UINT32_MAX;
+    if(end>s->word_capacity){
+        uint32_t capacity=s->word_capacity?s->word_capacity:1024;while(capacity<end)capacity*=2;
+        uint32_t *grown=realloc(s->words,(size_t)capacity*4);if(!grown)return UINT32_MAX;
+        s->words=grown;s->word_capacity=capacity;
+    }
+    memset(s->words+s->word_len,0,(size_t)(end-s->word_len)*4);
+    if(count)memcpy(s->words+start,data,count*4);
+    s->word_len=(uint32_t)end;return start;
+}
+/* A loading indicator (src/ui/loading.zig): count elements of 12 floats
+   each, its view box at ox, oy (device pixels) scaled by k, drawn over
+   device pixels x0, y0 to x1, y1 in rgb at opacity, under the clip. */
+int zmtl_indicator(void *p,const float *elements,uint32_t count,float ox,float oy,float k,const int32_t box[4],uint32_t rgb,float opacity){
+    ZigMetalRenderer *s=R(p);if(!s->drawing||count>64)return 1;
+    if(!visible(s)||!count)return 0;
+    uint32_t at=append_words(s,elements,(size_t)count*12);if(at==UINT32_MAX)return 2;
+    ZmInstance *i=push(s,BIND_NONE,nil);if(!i)return 2;
+    i->rect[0]=(float)box[0];i->rect[1]=(float)box[1];i->rect[2]=(float)box[2];i->rect[3]=(float)box[3];
+    i->color[0]=(float)(rgb>>16&255)/255.0f;i->color[1]=(float)(rgb>>8&255)/255.0f;i->color[2]=(float)(rgb&255)/255.0f;i->color[3]=opacity;
+    i->params[0]=(float)at;i->params[1]=(float)count;i->params[2]=KIND_INDICATOR;
+    i->uv[0]=ox;i->uv[1]=oy;i->uv[2]=k;
+    s->stats.indicators++;return 0;
+}
+/* A backdrop effect over glass->out of the current target, reading it as
+   drawn so far across glass->region: levels blur passes (one for a uniform
+   blur, the progressive blur's levels otherwise), each a Gaussian of its
+   radius whose 2 * radius + 1 weights start at weights[level.weights]. */
+int zmtl_backdrop(void *p,const ZmGlass *glass,uint32_t levels,const ZmGlassLevel *level,const float *weights,uint32_t weight_count){
+    ZigMetalRenderer *s=R(p);if(!s->drawing||levels>16)return 1;
+    ZmEffectGeometry geometry;zmtl_effect_geometry(p,&geometry);
+    const uint32_t *region=glass->region,*out=glass->out;
+    if(!(region[0]<=out[0]&&region[1]<=out[1]&&out[0]<out[2]&&out[1]<out[3]&&out[2]<=region[2]&&out[3]<=region[3]&&region[2]<=geometry.width&&region[3]<=geometry.height&&region[2]-region[0]<=ZM_TEXTURE_LIMIT&&region[3]-region[1]<=ZM_TEXTURE_LIMIT))return 1;
+    for(uint32_t k=0;k<levels;k++)if(level[k].radius>128||(uint64_t)level[k].weights+2*level[k].radius+1>weight_count)return 1;
+    uint32_t index;ZmRun *run=new_run(s,&index);if(!run)return 2;
+    run->word_offset=append_words(s,glass,sizeof(*glass)/4);if(run->word_offset==UINT32_MAX)return 2;
+    /* Each level's weights on a boundary of their own. */
+    ZmGlassLevel placed[16];
+    for(uint32_t k=0;k<levels;k++){
+        placed[k]=level[k];
+        placed[k].weights=append_words(s,weights+level[k].weights,2*level[k].radius+1);if(placed[k].weights==UINT32_MAX)return 2;
+    }
+    run->level_offset=append_words(s,placed,levels*sizeof(ZmGlassLevel)/4);if(run->level_offset==UINT32_MAX)return 2;
+    run->levels=levels;
+    memcpy(run->region,region,sizeof(run->region));memcpy(run->out,out,sizeof(run->out));
+    uint32_t w=region[2]-region[0],h=region[3]-region[1];
+    const MTLTextureUsage usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;
+    run->source=effect_texture(s,w,h,MTLTextureUsageShaderRead);if(!run->source)return 2;
+    int kind=(int)glass->misc2[1],progressive=glass->misc2[3]!=0;
+    if(kind!=3&&levels){
+        run->temp=effect_texture(s,w,h,usage);run->extra[0]=effect_texture(s,w,h,usage);
+        if(!run->temp||!run->extra[0])return 2;
+        if(progressive){
+            run->extra[1]=effect_texture(s,w,h,usage);run->extra[2]=effect_texture(s,w,h,usage);run->output=effect_texture(s,w,h,usage);
+            if(!run->extra[1]||!run->extra[2]||!run->output)return 2;
+        }
+    }
+    s->stats.backdrops++;
+    return push_op(s,OP_GLASS,index)?0:2;
+}
+
 /* The frame's instances and brushes in a buffer the GPU reads; buffers come
    back to the free list once their command buffer completes. */
 static id<MTLBuffer> frame_buffer(ZigMetalRenderer *s,size_t bytes){
@@ -1022,7 +1180,7 @@ static id<MTLBuffer> frame_buffer(ZigMetalRenderer *s,size_t bytes){
 /* A target the frame draws into: the window's (or offscreen) texture, or an
    element effect's capture at its physical origin. */
 typedef struct ZmLevel {__unsafe_unretained id<MTLTexture> texture;float origin[2];int started;} ZmLevel;
-static id<MTLRenderCommandEncoder> open_level(ZigMetalRenderer *s,id<MTLCommandBuffer> commands,ZmLevel *level,int root,id<MTLBuffer> buffer,size_t brush_offset){
+static id<MTLRenderCommandEncoder> open_level(ZigMetalRenderer *s,id<MTLCommandBuffer> commands,ZmLevel *level,int root,id<MTLBuffer> buffer,size_t brush_offset,size_t word_offset){
     MTLRenderPassDescriptor *pass=[MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture=level->texture;pass.colorAttachments[0].storeAction=MTLStoreActionStore;
     /* A frame drawing only its damage starts from the last one. */
@@ -1036,6 +1194,7 @@ static id<MTLRenderCommandEncoder> open_level(ZigMetalRenderer *s,id<MTLCommandB
     ZmUniforms uniforms={(float)level->texture.width,(float)level->texture.height,s->scale,0,{level->origin[0],level->origin[1]},{0,0}};
     [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:0];[encoder setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:0];
     [encoder setFragmentBuffer:buffer offset:brush_offset atIndex:2];
+    [encoder setFragmentBuffer:buffer offset:word_offset atIndex:3];
     [encoder setFragmentSamplerState:s->linear_sampler atIndex:0];[encoder setFragmentSamplerState:s->nearest_sampler atIndex:1];[encoder setFragmentSamplerState:s->mask_sampler atIndex:2];
     return encoder;
 }
@@ -1075,6 +1234,74 @@ static int filter_pass(ZigMetalRenderer *s,id<MTLCommandBuffer> commands,id<MTLT
     s->stats.filter_passes++;
     return 0;
 }
+/* A full-texture pass of pipeline into target, reading first and second. */
+static id<MTLRenderCommandEncoder> glass_pass(id<MTLCommandBuffer> commands,id<MTLRenderPipelineState> pipeline,id<MTLTexture> target,id<MTLTexture> first,id<MTLTexture> second){
+    MTLRenderPassDescriptor *pass=[MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture=target;pass.colorAttachments[0].loadAction=MTLLoadActionDontCare;pass.colorAttachments[0].storeAction=MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> encoder=[commands renderCommandEncoderWithDescriptor:pass];if(!encoder)return nil;
+    [encoder setRenderPipelineState:pipeline];
+    [encoder setFragmentTexture:first atIndex:0];if(second)[encoder setFragmentTexture:second atIndex:1];
+    return encoder;
+}
+static int glass_blur(ZigMetalRenderer *s,id<MTLCommandBuffer> commands,const ZmGlassLevel *level,id<MTLTexture> source,id<MTLTexture> temp,id<MTLTexture> target,id<MTLBuffer> buffer,size_t word_offset){
+    for(uint32_t vertical=0;vertical<2;vertical++){
+        id<MTLRenderCommandEncoder> encoder=glass_pass(commands,s->glass_filter,vertical?target:temp,vertical?temp:source,nil);if(!encoder)return 2;
+        uint32_t header[4]={level->radius,vertical,(uint32_t)source.width,(uint32_t)source.height};
+        [encoder setFragmentBytes:header length:sizeof(header) atIndex:0];
+        [encoder setFragmentBuffer:buffer offset:word_offset+(size_t)level->weights*4 atIndex:1];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+        [encoder endEncoding];
+        s->stats.filter_passes++;
+    }
+    return 0;
+}
+/* Runs a backdrop effect into current: copy, blur (and blend), shade. */
+static int encode_glass(ZigMetalRenderer *s,id<MTLCommandBuffer> commands,const ZmRun *run,id<MTLTexture> current,id<MTLBuffer> buffer,size_t word_offset){
+    id<MTLBlitCommandEncoder> blit=[commands blitCommandEncoder];if(!blit)return 2;
+    [blit copyFromTexture:current sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(run->region[0],run->region[1],0) sourceSize:MTLSizeMake(run->region[2]-run->region[0],run->region[3]-run->region[1],1) toTexture:run->source destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];
+    [blit endEncoding];
+    const ZmGlass *glass=(const ZmGlass *)(s->words+run->word_offset);
+    const ZmGlassLevel *levels=(const ZmGlassLevel *)(s->words+run->level_offset);
+    const size_t glass_offset=word_offset+(size_t)run->word_offset*4;
+    id<MTLTexture> result=run->source;
+    if(run->temp){
+        if(glass->misc2[3]!=0){
+            /* Each level blurs the last further; the result leans toward it
+               where the line asks for at least that level's blur. */
+            id<MTLTexture> cur=run->source,res=run->source;
+            id<MTLTexture> blurs[2]={run->extra[0],run->extra[1]},results[2]={run->extra[2],run->output};
+            for(uint32_t k=0;k<run->levels;k++){
+                id<MTLTexture> next=cur==blurs[0]?blurs[1]:blurs[0];
+                if(levels[k].radius){if(glass_blur(s,commands,&levels[k],cur,run->temp,next,buffer,word_offset))return 2;cur=next;}
+                id<MTLTexture> blended=res==results[0]?results[1]:results[0];
+                id<MTLRenderCommandEncoder> encoder=glass_pass(commands,s->glass_blend,blended,res,cur);if(!encoder)return 2;
+                const float range[2]={levels[k].lo,levels[k].hi};
+                [encoder setFragmentBuffer:buffer offset:glass_offset atIndex:0];
+                [encoder setFragmentBytes:range length:sizeof(range) atIndex:1];
+                [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+                [encoder endEncoding];
+                res=blended;
+            }
+            result=res;
+        }else if(run->levels&&levels[0].radius){
+            if(glass_blur(s,commands,&levels[0],run->source,run->temp,run->extra[0],buffer,word_offset))return 2;
+            result=run->extra[0];
+        }
+    }
+    MTLRenderPassDescriptor *pass=[MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture=current;pass.colorAttachments[0].loadAction=MTLLoadActionLoad;pass.colorAttachments[0].storeAction=MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> encoder=[commands renderCommandEncoderWithDescriptor:pass];if(!encoder)return 2;
+    [encoder setRenderPipelineState:s->glass_shade];
+    float w=(float)current.width,h=(float)current.height;
+    const float quad[4]={run->out[0]/w*2-1,1-run->out[1]/h*2,run->out[2]/w*2-1,1-run->out[3]/h*2};
+    [encoder setVertexBytes:quad length:sizeof(quad) atIndex:0];
+    [encoder setFragmentBuffer:buffer offset:glass_offset atIndex:0];
+    [encoder setFragmentTexture:run->source atIndex:0];[encoder setFragmentTexture:result atIndex:1];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    [encoder endEncoding];
+    s->stats.effect_passes++;
+    return 0;
+}
 static int encode(ZigMetalRenderer *s,id<MTLCommandBuffer> commands,id<MTLTexture> target){
     if(s->capture_depth)return 2;
     size_t brush_offset=((size_t)s->instance_len*sizeof(ZmInstance)+255)&~(size_t)255;
@@ -1088,7 +1315,7 @@ static int encode(ZigMetalRenderer *s,id<MTLCommandBuffer> commands,id<MTLTextur
     levels[0]=(ZmLevel){target,{0,0},0};
     id<MTLRenderCommandEncoder> encoder=nil;
     int failed=0;
-#define ZM_OPEN() do{if(!encoder){encoder=open_level(s,commands,&levels[depth],depth==0,buffer,brush_offset);if(!encoder){failed=1;goto done;}}}while(0)
+#define ZM_OPEN() do{if(!encoder){encoder=open_level(s,commands,&levels[depth],depth==0,buffer,brush_offset,word_offset);if(!encoder){failed=1;goto done;}}}while(0)
 #define ZM_CLOSE() do{if(encoder){[encoder endEncoding];encoder=nil;}}while(0)
     for(uint32_t k=0;k<s->batch_len;k++){
         const ZmBatch *b=&s->batches[k];
@@ -1134,6 +1361,11 @@ static int encode(ZigMetalRenderer *s,id<MTLCommandBuffer> commands,id<MTLTextur
             const float quad[4]={run->out[0]/w*2-1,1-run->out[1]/h*2,run->out[2]/w*2-1,1-run->out[3]/h*2};
             const float origin[2]={(float)run->out[0],(float)run->out[1]};
             if(run_effect(s,commands,run,current,MTLLoadActionLoad,quad,origin,run->source,buffer,word_offset)){failed=1;goto done;}
+            break;
+        }
+        case OP_GLASS:{
+            ZM_OPEN();ZM_CLOSE();
+            if(encode_glass(s,commands,&s->runs[b->run],levels[depth].texture,buffer,word_offset)){failed=1;goto done;}
             break;
         }
         }

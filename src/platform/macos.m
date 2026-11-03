@@ -105,6 +105,10 @@ typedef struct NativeWindow {
        material. frameless hides the title bar and its buttons. keep_active
        is setActiveAppearance's. */
     NSView *container,*effect;int glass,clear,transparent,frameless,shadow_stale,keep_active;double radius;
+    /* The popup this window is modal to (retained): it shows as the
+       popup's child window at its level, not as a sheet, which would hang
+       from the popup, no wider than it. */
+    struct NativeWindow *over_popup;
 } NativeWindow;
 enum {POPUP=1,POPUP_FOCUSABLE=2,POPUP_TOPMOST=4};
 
@@ -516,6 +520,13 @@ NativeWindow *zlm_window_create(void *owner,Emit callback,const char *title,uint
         [window setContentView:container];[window setDelegate:delegate];
         s->container=container;s->shadow_stale=1;
         if(parent&&popup)[parent->window addChildWindow:window ordered:NSWindowAbove];
+        if(parent&&parent->popup&&modal&&!popup){
+            /* Where its popup is, over another app in full screen too, and
+               above it: at its level. */
+            retain_window(parent);s->over_popup=parent;
+            [window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenAuxiliary|NSWindowCollectionBehaviorTransient];
+            if([parent->window level]>[window level])[window setLevel:[parent->window level]];
+        }
         if(!parent)[window center];
         else{NSRect frame=[parent->window frame];NSRect own=[window frame];[window setFrameOrigin:NSMakePoint(NSMidX(frame)-own.size.width/2,NSMidY(frame)-own.size.height/2)];}
         s->window=window;s->view=view;s->delegate=delegate;s->marked=[[NSMutableString alloc] init];
@@ -534,6 +545,7 @@ int zlm_window_destroy(NativeWindow *s){
         [window setDelegate:nil];
         NSWindow *parent=[window parentWindow];if(parent)[parent removeChildWindow:window];
         [window orderOut:nil];[window close];
+        if(s->over_popup){release_window(s->over_popup);s->over_popup=NULL;}
         [s->view release];[s->delegate release];[s->effect release];[s->container release];[window release];
         s->view=nil;s->delegate=nil;s->effect=nil;s->container=nil;s->window=nil;
     }
@@ -543,9 +555,22 @@ int zlm_window_destroy(NativeWindow *s){
 void *zlm_window_handle(NativeWindow *s){return s->window;}
 /* The flipped content view that hosts native child views such as a page. */
 void *zlm_window_content(NativeWindow *s){return s->destroyed?NULL:s->view;}
+/* A window modal to a popup goes above it as its child window, which keeps
+   it there as the popup comes in front, while both show; hidden, it leaves
+   it, or AppKit would show it again with the popup. */
+static void attach_over_popup(NativeWindow *s){
+    NativeWindow *p=s->over_popup;
+    if(!p||p->destroyed||![p->window isVisible]||[s->window parentWindow])return;
+    [p->window addChildWindow:s->window ordered:NSWindowAbove];
+}
+static void detach_over_popup(NativeWindow *s){
+    NSWindow *parent=[s->window parentWindow];
+    if(s->over_popup&&parent)[parent removeChildWindow:s->window];
+}
 void zlm_window_action(NativeWindow *s,int action){
     @autoreleasepool{
         NSWindow *window=s->window;
+        if(action==1)detach_over_popup(s);
         switch(action){
             case 0:
                 if(s->popup&&!(s->popup&POPUP_FOCUSABLE))[window orderFront:nil];
@@ -562,6 +587,7 @@ void zlm_window_action(NativeWindow *s,int action){
             case 7:s->enabled=0;break;
             default:break;
         }
+        if((action==0||action==5)&&!s->destroyed)attach_over_popup(s);
     }
     if(!s->destroyed)notify_state(s);
 }

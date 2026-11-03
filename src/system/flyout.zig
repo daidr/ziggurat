@@ -19,6 +19,12 @@
 //! never takes the keyboard and stays until closed: tooltips, hover cards or
 //! the suggestions of a text field, which close it as they see fit.
 //!
+//! A window modal to a flyout (`createModal`) is a confirmation or a dialog
+//! the flyout asks for, wider than it: it goes centered over the flyout, in
+//! the work area of its display, and stays above it. The flyout takes no
+//! input while it shows, and stays open wherever the keyboard goes; closing
+//! the flyout closes the window, as it closes any window it owns.
+//!
 //! Every call runs on the App's main thread. Keep a Flyout at a stable address
 //! from `open` until its window's `on_closed`, which the Flyout forwards.
 const std = @import("std");
@@ -175,6 +181,45 @@ pub const Flyout = struct {
             return;
         }
         _ = try self.open(app, options);
+    }
+
+    /// Creates a window modal to the flyout, hidden, centered over the
+    /// flyout and moved into the work area of its display; show it with
+    /// `Window.show`. `options.owner` and `options.modal` are the flyout's
+    /// window and true. While it shows, the flyout neither closes as it loses
+    /// the keyboard nor on a press outside it, and takes no input; it gets
+    /// the keyboard back as the window hides, if it took it before.
+    pub fn createModal(self: *Flyout, options: z.WindowOptions) !z.Window {
+        const owner = self.window orelse return error.Closed;
+        if (owner.isClosed()) return error.Closed;
+        var modal = options;
+        modal.owner = owner;
+        modal.modal = true;
+        const window = try owner.app.createWindow(modal);
+        self.placeOver(window, options.width, options.height) catch |err| {
+            _ = window.destroy() catch {};
+            return err;
+        };
+        return window;
+    }
+    fn placeOver(self: *Flyout, window: z.Window, width: u32, height: u32) !void {
+        const owner = self.window.?;
+        var staging: [desktop.max_monitors]desktop.Monitor = undefined;
+        const displays = self.displays orelse staging[0 .. desktop.monitors(window.app, &staging) catch |err| {
+            if (err == error.UnsupportedCapability) return;
+            return err;
+        }];
+        const bounds = try owner.clientBounds();
+        // Wayland reports no positions; its compositor places windows.
+        const origin = bounds.position orelse return;
+        if (displays.len == 0) return;
+        const owner_scale = nativeScale((try owner.contentSize()).scale);
+        const flyout: Box = .{ .x = origin.x, .y = origin.y, .width = round(@as(f32, @floatFromInt(bounds.width)) * owner_scale), .height = round(@as(f32, @floatFromInt(bounds.height)) * owner_scale) };
+        const monitor = monitorFor(flyout, displays);
+        const scale = nativeScale(monitor.scale);
+        const size: Size = .{ .width = round(@as(f32, @floatFromInt(width)) * scale), .height = round(@as(f32, @floatFromInt(height)) * scale) };
+        const result = overFlyout(flyout, size, Box.of(monitor.work_area));
+        try window.setClientBounds(.{ .position = .{ .x = result.x, .y = result.y }, .width = width, .height = height });
     }
 
     /// Places the flyout against another anchor of the same kind, and of the
@@ -365,6 +410,19 @@ fn slide(bounds_position: i32, bounds_size: i32, position: i32, size: i32) struc
     if (start < bounds_position) start = bounds_position;
     if (start + length > bounds_position + bounds_size) length = bounds_position + bounds_size - start;
     return .{ start, @max(length, 1) };
+}
+
+/// Where a window of `size` goes over a flyout at `flyout`: centered on it,
+/// then moved into `work`, which a dialog wider than a flyout at the edge of
+/// the screen, as a tray's, would cross; its start first where it is larger.
+pub fn overFlyout(flyout: Box, size: Size, work: Box) Box {
+    var x = flyout.x + @divTrunc(flyout.width - size.width, 2);
+    var y = flyout.y + @divTrunc(flyout.height - size.height, 2);
+    if (work.width > 0 and work.height > 0) {
+        x = @max(@min(x, work.x + work.width - size.width), work.x);
+        y = @max(@min(y, work.y + work.height - size.height), work.y);
+    }
+    return .{ .x = x, .y = y, .width = size.width, .height = size.height };
 }
 
 /// In the middle of the work area, as large as it fits.

@@ -560,6 +560,9 @@ pub const WindowOptions = struct {
     /// Immutable ownership between independent top-level windows in this App.
     owner: ?Window = null,
     /// Active while visible; disables other branches in this ownership tree.
+    /// The owner may be a popup, such as a flyout asking for confirmation:
+    /// it is not dismissed while the modal window shows, and on macOS the
+    /// window stays above it, at its level.
     modal: bool = false,
     text_input_mode: TextInputMode = .system,
     /// Fixed construction-time raw native press state. No state is allocated
@@ -2617,10 +2620,12 @@ pub const WindowRecord = struct {
     }
     /// Native backends report that a focusable popup was dismissed. Call it
     /// outside native activation handlers; destruction it requests is deferred.
+    /// A popup a window is modal to stays open: the keyboard went to the
+    /// modal window, or the press was in it or beside the disabled popup.
     pub fn popupDismissed(self: *WindowRecord) void {
         if (self.phase != .open) return;
         const role = self.options.popup orelse return;
-        if (!role.focusable) return;
+        if (!role.focusable or self.modal_count != 0) return;
         const handler = role.handler orelse return;
         const scope = self.enter();
         defer scope.end();

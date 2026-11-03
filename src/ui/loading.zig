@@ -1,8 +1,8 @@
 //! Loading indicators drawn procedurally from a phase the caller derives from
 //! its own clock. Nothing here keeps time, schedules frames or allocates; an
-//! indicator that is not drawn costs nothing. Like backdrop effects they are
-//! rasterized on the software planes, so a frame holding one replays in
-//! software.
+//! indicator that is not drawn costs nothing. The software planes rasterize
+//! them here; a GPU renderer evaluates the same scene per pixel (`encode`,
+//! `place`).
 const std = @import("std");
 const layout = @import("layout.zig");
 const geometry = @import("geometry.zig");
@@ -173,7 +173,7 @@ const Shape = union(enum) {
     sector: struct { x: f64, y: f64, r: f64, angle: f64, sweep: f64 },
 };
 const Element = struct { shape: Shape, alpha: f64 = 1 };
-const max_elements = 40;
+pub const max_elements = 40;
 const Scene = struct {
     elements: [max_elements]Element = undefined,
     len: usize = 0,
@@ -541,28 +541,77 @@ fn evaluate(shape: Shape, px: f64, py: f64) struct { d: f64, alpha: f64 = 1 } {
     }
 }
 
+/// Where an indicator's view box goes in a target (physical pixel = DIP *
+/// scale + origin; the clip physical, inside width x height): its origin,
+/// design units to pixels (`k`) and the pixels it may cover.
+pub const Placement = struct { ox: f64, oy: f64, k: f64, x0: usize, y0: usize, x1: usize, y1: usize };
+pub const Target = struct { width: u32, height: u32, scale: f32, origin: [2]f64 = .{ 0, 0 }, clip: [4]f64 };
+pub fn place(target: Target, entry: Entry, view_width: f64) ?Placement {
+    if (entry.color.a == 0) return null;
+    const scale: f64 = target.scale;
+    const b = entry.bounds;
+    const bx = @as(f64, b.x) * scale + target.origin[0];
+    const by = @as(f64, b.y) * scale + target.origin[1];
+    const bw = @as(f64, b.width) * scale;
+    const bh = @as(f64, b.height) * scale;
+    // Fit the view box inside the bounds, centered.
+    const k = @min(bw / view_width, bh / unit);
+    if (!(k > 0)) return null;
+    const ox = bx + (bw - view_width * k) / 2;
+    const oy = by + (bh - unit * k) / 2;
+    const clip = target.clip;
+    const x0: usize = @intFromFloat(std.math.clamp(@floor(@max(ox, clip[0])), 0, @as(f64, @floatFromInt(target.width))));
+    const y0: usize = @intFromFloat(std.math.clamp(@floor(@max(oy, clip[1])), 0, @as(f64, @floatFromInt(target.height))));
+    const x1: usize = @intFromFloat(std.math.clamp(@ceil(@min(ox + view_width * k, clip[2])), @as(f64, @floatFromInt(x0)), @as(f64, @floatFromInt(target.width))));
+    const y1: usize = @intFromFloat(std.math.clamp(@ceil(@min(oy + unit * k, clip[3])), @as(f64, @floatFromInt(y0)), @as(f64, @floatFromInt(target.height))));
+    if (x1 <= x0 or y1 <= y0) return null;
+    return .{ .ox = ox, .oy = oy, .k = k, .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1 };
+}
+
+/// Floats per element `encode` writes: a shape kind (0 disc, 1 ring, 2 arc,
+/// 3 box, 4 capsule, 5 ellipse, 6 sector), the element's alpha and the
+/// shape's parameters in its fields' order, caps 0 round and 1 flat, fade 0
+/// or 1.
+pub const element_floats = 12;
+/// The indicator's scene for a GPU renderer: its view box width in design
+/// units and its elements, `element_floats` each, into `out`.
+pub fn encode(entry: Entry, out: *[max_elements * element_floats]f32) struct { width: f64, count: usize } {
+    const s = scene(entry);
+    for (s.elements[0..s.len], 0..) |element, index| {
+        const o = out[index * element_floats ..][0..element_floats];
+        @memset(o, 0);
+        o[1] = @floatCast(element.alpha);
+        switch (element.shape) {
+            .disc => |v| set(o, 0, &.{ v.x, v.y, v.r }),
+            .ring => |v| set(o, 1, &.{ v.x, v.y, v.r, v.w }),
+            .arc => |v| set(o, 2, &.{ v.x, v.y, v.r, v.w, v.start, v.sweep, @floatFromInt(@backingInt(v.cap)), @floatFromInt(@intFromBool(v.fade)) }),
+            .box => |v| set(o, 3, &.{ v.x, v.y, v.hw, v.hh, v.radius, v.angle }),
+            .capsule => |v| set(o, 4, &.{ v.x0, v.y0, v.x1, v.y1, v.w, @floatFromInt(@backingInt(v.cap)) }),
+            .ellipse => |v| set(o, 5, &.{ v.x, v.y, v.rx, v.ry, v.w, v.angle }),
+            .sector => |v| set(o, 6, &.{ v.x, v.y, v.r, v.angle, v.sweep }),
+        }
+    }
+    return .{ .width = s.width, .count = s.len };
+}
+fn set(out: []f32, kind: f32, values: []const f64) void {
+    out[0] = kind;
+    for (values, 0..) |value, i| out[2 + i] = @floatCast(value);
+}
+
 /// Rasterize an indicator into the target inside the surface's clip.
 pub fn draw(surface: cpu.Surface, transparent: bool, entry: Entry) cpu.Dirty {
     const empty: cpu.Dirty = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
     if (entry.color.a == 0) return empty;
     const s = scene(entry);
-    const scale: f64 = surface.scale;
-    const b = entry.bounds;
-    const bx = @as(f64, b.x) * scale + surface.origin[0];
-    const by = @as(f64, b.y) * scale + surface.origin[1];
-    const bw = @as(f64, b.width) * scale;
-    const bh = @as(f64, b.height) * scale;
-    // Fit the view box inside the bounds, centered.
-    const k = @min(bw / s.width, bh / unit);
-    if (!(k > 0)) return empty;
-    const ox = bx + (bw - s.width * k) / 2;
-    const oy = by + (bh - unit * k) / 2;
+    const placement = place(.{ .width = surface.width, .height = surface.height, .scale = surface.scale, .origin = .{ surface.origin[0], surface.origin[1] }, .clip = surface.clip }, entry, s.width) orelse return empty;
+    const ox = placement.ox;
+    const oy = placement.oy;
+    const k = placement.k;
+    const x0 = placement.x0;
+    const y0 = placement.y0;
+    const x1 = placement.x1;
+    const y1 = placement.y1;
     const clip = surface.clip;
-    const x0: usize = @intFromFloat(std.math.clamp(@floor(@max(ox, clip[0])), 0, @as(f64, @floatFromInt(surface.width))));
-    const y0: usize = @intFromFloat(std.math.clamp(@floor(@max(oy, clip[1])), 0, @as(f64, @floatFromInt(surface.height))));
-    const x1: usize = @intFromFloat(std.math.clamp(@ceil(@min(ox + s.width * k, clip[2])), @as(f64, @floatFromInt(x0)), @as(f64, @floatFromInt(surface.width))));
-    const y1: usize = @intFromFloat(std.math.clamp(@ceil(@min(oy + unit * k, clip[3])), @as(f64, @floatFromInt(y0)), @as(f64, @floatFromInt(surface.height))));
-    if (x1 <= x0 or y1 <= y0) return empty;
     const aa = 1 / k;
     const rgb = (@as(u32, entry.color.r) << 16) | (@as(u32, entry.color.g) << 8) | entry.color.b;
     const opacity = @as(f64, @floatFromInt(entry.color.a)) / 255;
