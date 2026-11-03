@@ -337,6 +337,32 @@ test "undo takes back what an input method committed, not the typing before" {
     try expectString(&doc, "hello");
 }
 
+test "a composition is one undo step whichever side of its commit the preedit clears on" {
+    for ([_]bool{ false, true }) |preedit_after| {
+        for ([_]bool{ false, true }) |cancel_event| {
+            var doc = try empty();
+            defer doc.deinit();
+            var e = try tester(&doc, .{});
+            defer e.deinit();
+            typeRunes(&e, "cafe");
+            press(&e, .left);
+            press(&e, .right);
+            compose(&e, "你好");
+            const clear: z.Event = if (cancel_event) .text_preedit_cancel else .{ .text_preedit = .{ .text = "", .selection_start = 0, .selection_end = 0 } };
+            if (preedit_after) {
+                typeText(&e, "你好");
+                _ = e.handle(clear);
+            } else {
+                _ = e.handle(clear);
+                typeText(&e, "你好");
+            }
+            try expectString(&doc, "cafe你好");
+            ctrl(&e, .z);
+            try expectString(&doc, "cafe");
+        }
+    }
+}
+
 test "a composition the application's selection drops leaves the caret there" {
     var doc = try empty();
     defer doc.deinit();

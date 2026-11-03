@@ -497,6 +497,27 @@ test "editor preedit display pointer selection and drawing share byte coordinate
     try std.testing.expect(probe.commands >= 3);
 }
 
+test "a composition is one undo step whichever side of its commit the preedit clears on" {
+    var probe: TestSurface = .{};
+    const surface = probe.surface();
+    const bounds: Rect = .{ .x = 0, .y = 0, .width = 100, .height = 30 };
+    for ([_]bool{ false, true }) |preedit_after| {
+        var editor = try Editor.init(std.testing.allocator, .{ .autofocus = true }, "cafe");
+        defer editor.deinit();
+        _ = try editor.handleEvent(.{ .text_preedit = .{ .text = "你好", .selection_start = 6, .selection_end = 6 } }, bounds, surface);
+        if (preedit_after) {
+            _ = try editor.handleEvent(.{ .text_input = .{ .text = "你好", .producer = .application } }, bounds, surface);
+            _ = try editor.handleEvent(.text_preedit_cancel, bounds, surface);
+        } else {
+            _ = try editor.handleEvent(.text_preedit_cancel, bounds, surface);
+            _ = try editor.handleEvent(.{ .text_input = .{ .text = "你好", .producer = .application } }, bounds, surface);
+        }
+        try std.testing.expectEqualStrings("cafe你好", editor.buffer.text());
+        _ = try editor.key(.{ .key = .z, .control = true }, surface);
+        try std.testing.expectEqualStrings("cafe", editor.buffer.text());
+    }
+}
+
 test "editor uses only bounded initialization storage and single-line paste normalizes breaks" {
     var memory: [8192]u8 = undefined;
     var allocator = std.heap.FixedBufferAllocator.init(&memory);

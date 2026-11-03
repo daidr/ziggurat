@@ -36,7 +36,16 @@ static void round_effect(NSView *effect,int glass,double radius){
    macOS has it, `material` being its stand-in elsewhere; a negative
    material removes it. Returns the material's view, retained, which
    replaces `effect`; *glass tells whether it is glass. */
-NSView *zlmw_set_material(NSView *container,NSView *content,NSView *effect,int *glass,double radius,int material,int glass_style){
+/* A window's material follows its active state, as AppKit's sidebars do,
+   and fades to an opaque gray while the window is not the one input goes
+   to. Flyouts float over whatever app is in front, never active as AppKit
+   tells it, and keep theirs active, as setActiveAppearance keeps a
+   window's. NSGlassEffectView has no such setting. */
+void zlmw_material_state(NSView *effect,int glass,int keep_active){
+    if(!effect||glass)return;
+    [(NSVisualEffectView *)effect setState:keep_active?NSVisualEffectStateActive:NSVisualEffectStateFollowsWindowActiveState];
+}
+NSView *zlmw_set_material(NSView *container,NSView *content,NSView *effect,int *glass,double radius,int material,int glass_style,int keep_active){
     const int wants_glass=glass_style>=0&&glass_class()!=nil;
     if(material<0&&!wants_glass){
         if(effect){[effect removeFromSuperview];[effect release];}
@@ -50,7 +59,6 @@ NSView *zlmw_set_material(NSView *container,NSView *content,NSView *effect,int *
         if(!wants_glass){
             NSVisualEffectView *visual=(NSVisualEffectView *)effect;
             [visual setBlendingMode:NSVisualEffectBlendingModeBehindWindow];
-            [visual setState:NSVisualEffectStateActive];
         }
         [effect setAutoresizingMask:NSViewWidthSizable|NSViewHeightSizable];
         [container addSubview:effect positioned:NSWindowBelow relativeTo:content];
@@ -59,6 +67,7 @@ NSView *zlmw_set_material(NSView *container,NSView *content,NSView *effect,int *
     }
     if(wants_glass){if([effect respondsToSelector:@selector(setStyle:)])[effect setStyle:glass_style];}
     else [(NSVisualEffectView *)effect setMaterial:(NSVisualEffectMaterial)material];
+    zlmw_material_state(effect,*glass,keep_active);
     return effect;
 }
 
@@ -81,8 +90,8 @@ void zlmw_round(NSWindow *window,NSView *container,NSView *effect,int glass,doub
 /* Draws the window as the main window of the app in front, whichever is,
    through AppKit's own _setForceMainAppearance:: without it a window that
    is not draws its glass frosted, the clear style too, as a panel over
-   another app always is. NSVisualEffectView keeps its active state by
-   itself (zlmw_set_material); NSGlassEffectView has no such setting. */
+   another app always is. NSVisualEffectView takes its state from
+   zlmw_material_state; NSGlassEffectView has no such setting. */
 void zlmw_active_appearance(NSWindow *window,int enabled){
     if([window respondsToSelector:@selector(_setForceMainAppearance:)])[window _setForceMainAppearance:enabled?YES:NO];
 }

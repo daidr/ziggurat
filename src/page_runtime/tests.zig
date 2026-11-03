@@ -184,6 +184,7 @@ test "hello answers with the runtime configuration and fresh plugin sessions" {
     const preferences = config.get("preferences").?.object;
     try std.testing.expect(preferences.get("accent").? == .null);
     try std.testing.expectEqualStrings("unknown", preferences.get("colorScheme").?.string);
+    try std.testing.expect(config.get("windowActive").?.bool);
     const echo = try f.session("plugin:echo");
     try std.testing.expectEqualStrings(&f.echo.session.?.bytes, &echo);
     try std.testing.expect(!std.mem.eql(u8, &echo, &(try f.session("runtime"))));
@@ -270,6 +271,25 @@ test "events reach only subscribed documents and later documents start current" 
     try std.testing.expectEqualStrings("he", parsed.value.object.get("locale").?.string);
     try std.testing.expectEqualStrings("#0a84ff", parsed.value.object.get("preferences").?.object.get("accent").?.string);
     try std.testing.expect(!try f.host.setLocale(try i18n.Locale.parse("en")));
+}
+
+test "pages hear the window become inactive and start with its state" {
+    var f: Fixture = .{};
+    try f.init();
+    defer f.deinit();
+    _ = f.host.receive(runtime.hello);
+    try f.control("subscribe", "windowActive", 1);
+    try std.testing.expect(try f.host.setWindowActive(false));
+    var parsed = try f.page.parsedLast();
+    try std.testing.expectEqualStrings("windowActive", parsed.value.object.get("event").?.string);
+    try std.testing.expect(!parsed.value.object.get("value").?.object.get("active").?.bool);
+    parsed.deinit();
+    // An unchanged state sends nothing.
+    try std.testing.expect(!try f.host.setWindowActive(false));
+    _ = f.host.receive(runtime.hello);
+    parsed = try f.page.parsedLast();
+    defer parsed.deinit();
+    try std.testing.expect(!parsed.value.object.get("windowActive").?.bool);
 }
 
 test "invalid subscription controls end the connection" {

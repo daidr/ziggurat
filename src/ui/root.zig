@@ -556,6 +556,11 @@ pub const Context = struct {
     painting: bool = false,
     repaint_pending: bool = false,
     composing: bool = false,
+    /// The window has the keyboard, from its focus events.
+    window_focused: bool = true,
+    /// Drawn as active whether or not it has the keyboard; see
+    /// `setActiveAppearance`.
+    keep_active: bool = false,
     last_enabled: ?bool = null,
     frames: usize = 0,
     layer_candidate_peak: usize = 0,
@@ -843,6 +848,22 @@ pub const Context = struct {
     }
     pub fn currentTheme(self: *const Context) Theme {
         return self.theme_value;
+    }
+    /// Whether the window is drawn as active: it has the keyboard, or
+    /// `setActiveAppearance` keeps it so. An inactive window's frames draw
+    /// the built-in widgets' accent in `Palette.inactive_accent`, a gray, as
+    /// native applications fade theirs; see `Frame.currentTheme`.
+    pub fn windowActive(self: *const Context) bool {
+        return self.window_focused or self.keep_active;
+    }
+    /// Keep the window drawn as active while another window or application
+    /// has the keyboard, as a floating panel or a flyout needs. Pair it with
+    /// `Window.setActiveAppearance` for the native frame and materials.
+    pub fn setActiveAppearance(self: *Context, enabled: bool) void {
+        if (self.keep_active == enabled) return;
+        const before = self.windowActive();
+        self.keep_active = enabled;
+        if (before != self.windowActive()) if (self.window) |window| window.invalidate();
     }
     pub fn themeVersion(self: *const Context) u64 {
         return self.theme_generation;
@@ -2830,9 +2851,14 @@ pub const Context = struct {
         switch (ev) {
             .text_preedit => self.composing = true,
             .text_preedit_cancel, .text_preedit_revoked, .text_input => self.composing = false,
-            .focus => |focused| if (!focused) {
-                self.composing = false;
-                self.input_state.cancelPress();
+            .focus => |focused| {
+                const before = self.windowActive();
+                self.window_focused = focused;
+                if (before != self.windowActive()) window.invalidate();
+                if (!focused) {
+                    self.composing = false;
+                    self.input_state.cancelPress();
+                }
             },
             .cancel_input => self.input_state.cancelPress(),
             .window_position => self.accessibilityPositionChanged(window),
@@ -3295,9 +3321,17 @@ pub const Frame = struct {
         workspace.frame_request = token.id;
     }
 
+    /// The theme widgets draw with: the window's, or one `pushTheme` put
+    /// in its place. While the window is not active (`windowActive`), its
+    /// accent is the palette's `inactive_accent`.
     pub fn currentTheme(self: *const Frame) Theme {
-        if (self.theme_override) |value| return value.*;
-        return self.context.currentTheme();
+        var value = if (self.theme_override) |override| override.* else self.context.currentTheme();
+        if (!self.context.windowActive()) value.palette.accent = value.palette.inactive_accent;
+        return value;
+    }
+    /// Whether the window is drawn as active; see `Context.windowActive`.
+    pub fn windowActive(self: *const Frame) bool {
+        return self.context.windowActive();
     }
     /// Draw what follows with `value` in place of the window's theme, until
     /// `popTheme` gets back the value this returns: widgets take their
@@ -4519,6 +4553,33 @@ test "theme updates copy values at update boundaries and preserve failed transac
     context.attachment_phase = .detached;
     context.theme_generation = std.math.maxInt(u64);
     try std.testing.expectError(error.IdExhausted, context.setTheme(.light()));
+}
+
+test "an inactive window draws the accent of its theme in the inactive accent" {
+    const Dummy = struct {
+        fn draw(_: *anyopaque, _: *Frame) void {}
+        fn action(_: *anyopaque, _: u64) void {}
+    };
+    var dummy: u8 = 0;
+    var context = Context.init(&dummy, Dummy.draw, Dummy.action);
+    var frame: Frame = .{ .context = &context, .size = .{ .width = 100, .height = 100, .scale = 1 } };
+    const light = Theme.light();
+    try std.testing.expect(frame.windowActive());
+    try std.testing.expectEqual(light.palette.accent, frame.currentTheme().palette.accent);
+    context.window_focused = false;
+    try std.testing.expect(!frame.windowActive());
+    try std.testing.expectEqual(light.palette.inactive_accent, frame.currentTheme().palette.accent);
+    // A theme pushed in place of the window's fades too.
+    const dark = Theme.dark();
+    const previous = frame.pushTheme(&dark);
+    try std.testing.expectEqual(dark.palette.inactive_accent, frame.currentTheme().palette.accent);
+    frame.popTheme(previous);
+    // Kept active, it draws as active without the keyboard.
+    context.setActiveAppearance(true);
+    try std.testing.expect(frame.windowActive());
+    try std.testing.expectEqual(light.palette.accent, frame.currentTheme().palette.accent);
+    context.setActiveAppearance(false);
+    try std.testing.expect(!context.windowActive());
 }
 
 test "backdrop effects record opaque fills for system preferences and an unprepared workspace" {

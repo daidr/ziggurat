@@ -21,8 +21,31 @@ int zfont_add_file(const char *path) {
     return 0;
 }
 
+/* Fonts whose fontconfig settings name no LCD filter take FreeType's
+   (FIR5), which cairo 1.17 and later use for those by default. A filter
+   fontconfig names is kept: a test of every value of an element holds where
+   the element is missing, and no filter is above 3. */
+static const char lcd_filter_rule[] =
+    "<?xml version=\"1.0\"?><!DOCTYPE fontconfig SYSTEM \"fonts.dtd\"><fontconfig><match target=\"font\">"
+    "<test qual=\"all\" name=\"lcdfilter\" compare=\"more\"><int>3</int></test>"
+    "<edit name=\"lcdfilter\" mode=\"assign\"><const>lcddefault</const></edit></match></fontconfig>";
+
+/* Before 1.17, cairo's font options have no public setter for the LCD filter
+   and default to FreeType's legacy one, which leaves thin strokes pale with
+   coloured fringes in subpixel text; cairo takes a font pattern's filter
+   over that default. Once per process, before the first layout. */
+static void pin_lcd_filter(void) {
+    static int pinned;
+    if (pinned) return;
+    pinned = 1;
+    if (cairo_version() >= CAIRO_VERSION_ENCODE(1, 17, 0)) return;
+    FcConfig *config = FcConfigGetCurrent();
+    if (config) FcConfigParseAndLoadFromMemory(config, (const FcChar8 *)lcd_filter_rule, FcTrue);
+}
+
 /* A font map of its own sees fonts added since `seen`. */
 void zfont_refresh(void *map, uint64_t *seen) {
+    pin_lcd_filter();
     if (*seen == generation) return;
     *seen = generation;
     if (map && PANGO_IS_FC_FONT_MAP(map)) pango_fc_font_map_config_changed(PANGO_FC_FONT_MAP(map));

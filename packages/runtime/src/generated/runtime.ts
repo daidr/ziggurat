@@ -25,6 +25,7 @@ export type Events = {
 "fileDrop": { "paths": ReadonlyArray<string>; "x": number; "y": number; };
 "documentState": { "name": string; "path": string; "edited": boolean; "readOnly": boolean; "conflict": boolean; "deleted": boolean; };
 "documentReload": undefined;
+"windowActive": { "active": boolean; };
 };
 const eventSpecs: Record<keyof Events, Shape> = {
 ["locale"]: {kind:'object',fields:[{name:"locale",optional:false,shape:{kind:'string'}},{name:"dir",optional:false,shape:{kind:'enum',values:["ltr","rtl"]}}]},
@@ -32,6 +33,7 @@ const eventSpecs: Record<keyof Events, Shape> = {
 ["fileDrop"]: {kind:'object',fields:[{name:"paths",optional:false,shape:{kind:'array',child:{kind:'string'}}},{name:"x",optional:false,shape:{kind:'number',min:-1.7976931348623157e308,max:1.7976931348623157e308}},{name:"y",optional:false,shape:{kind:'number',min:-1.7976931348623157e308,max:1.7976931348623157e308}}]},
 ["documentState"]: {kind:'object',fields:[{name:"name",optional:false,shape:{kind:'string'}},{name:"path",optional:false,shape:{kind:'string'}},{name:"edited",optional:false,shape:{kind:'bool'}},{name:"readOnly",optional:false,shape:{kind:'bool'}},{name:"conflict",optional:false,shape:{kind:'bool'}},{name:"deleted",optional:false,shape:{kind:'bool'}}]},
 ["documentReload"]: {kind:'void'},
+["windowActive"]: {kind:'object',fields:[{name:"active",optional:false,shape:{kind:'bool'}}]},
 };
 export class LocalError extends Error {
   constructor(readonly code: string) { super(code); this.name = "LocalError"; }

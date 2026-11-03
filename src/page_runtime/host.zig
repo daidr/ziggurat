@@ -176,6 +176,8 @@ pub const Host = struct {
     version: []const u8,
     locale: i18n.Locale,
     preferences: Preferences,
+    /// Whether the window is drawn as active; see `setWindowActive`.
+    window_active: bool = true,
     plugins: [max_plugins]Plugin = undefined,
     sessions: [max_plugins]ipc.Session = undefined,
     plugin_count: usize = 0,
@@ -288,6 +290,16 @@ pub const Host = struct {
         return self.emit("documentState", state);
     }
 
+    /// Whether the window is drawn as active: call it with the window's
+    /// focus events (and `Window.setActiveAppearance`). Connected pages
+    /// receive a windowActive event when it changes; later documents start
+    /// with it.
+    pub fn setWindowActive(self: *Host, active: bool) !bool {
+        if (self.window_active == active) return false;
+        self.window_active = active;
+        return self.emit("windowActive", .{ .active = active });
+    }
+
     pub fn documentReload(self: *Host) !bool {
         return self.emit("documentReload", {});
     }
@@ -385,6 +397,8 @@ pub const Host = struct {
         try json.write(@tagName(direction(self.locale)));
         try json.objectField("preferences");
         try json.write(self.preferences.wire(accent));
+        try json.objectField("windowActive");
+        try json.write(self.window_active);
         try json.objectField("services");
         try json.beginObject();
         try json.objectField(service.name);

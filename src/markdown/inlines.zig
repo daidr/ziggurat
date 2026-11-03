@@ -104,7 +104,9 @@ const Parser = struct {
         if (try self.extendedAutolink(start)) return;
         var at = start + 1;
         while (at < raw.len and !self.special(raw[at])) : (at += 1) {
-            if (isAutolinkBoundary(raw[at - 1]) and std.ascii.isAlphanumeric(raw[at]) and extendedLength(raw, at) != null) break;
+            if (!std.ascii.isAlphanumeric(raw[at])) continue;
+            const after_boundary = isAutolinkBoundary(raw[at - 1]) or (raw[at - 1] >= 0x80 and endsAutolink(previousCodepoint(raw, at)));
+            if (after_boundary and extendedLength(raw, at) != null) break;
         }
         self.pos = at;
         _ = try self.text(raw[start..at]);
@@ -434,7 +436,12 @@ const Parser = struct {
     }
 
     fn extendedAutolink(self: *Parser, at: usize) Error!bool {
-        if (at > 0 and !isAutolinkBoundary(self.raw[at - 1])) return false;
+        if (at > 0 and !isAutolinkBoundary(self.raw[at - 1])) {
+            // Beyond ASCII, a link may follow a space or punctuation such
+            // as “ or （, which text written without spaces puts before it.
+            const before = previousCodepoint(self.raw, at);
+            if (before < 0x80 or !endsAutolink(before)) return false;
+        }
         const found = extendedLength(self.raw, at) orelse return false;
         const content = self.raw[at..][0..found.len];
         const start = self.b.mark();
@@ -548,25 +555,81 @@ fn extendedLength(raw: []const u8, at: usize) ?Extended {
     } else return emailLength(rest);
     const domain_end = domainLength(rest[domain_start..]) orelse return null;
     if (domain_start == 0 and domain_end <= 4) return null;
-    var end = domain_start + domain_end;
-    while (end < rest.len and !std.ascii.isWhitespace(rest[end]) and rest[end] != '<') end += 1;
-    end = trimTrailing(rest[0..end], domain_start + domain_end);
+    const end = trimTrailing(rest[0..autolinkEnd(rest, domain_start + domain_end)], domain_start + domain_end);
     return .{ .len = end, .prefix = prefix };
+}
+/// Where an extended autolink's text from `rest[0..end]` runs out: at a
+/// space, a `<`, or punctuation beyond ASCII such as the CJK ， and 。 or
+/// curly quotes, which text written without spaces puts right after a
+/// link. Letters beyond ASCII, as in IDN hosts and paths, go on.
+fn autolinkEnd(rest: []const u8, start: usize) usize {
+    var end = start;
+    while (end < rest.len and !std.ascii.isWhitespace(rest[end]) and rest[end] != '<') {
+        if (rest[end] < 0x80) {
+            end += 1;
+            continue;
+        }
+        const len = std.unicode.utf8ByteSequenceLength(rest[end]) catch break;
+        if (end + len > rest.len) break;
+        const codepoint = std.unicode.utf8Decode(rest[end..][0..len]) catch break;
+        if (endsAutolink(codepoint)) break;
+        end += len;
+    }
+    return end;
+}
+/// Whether `codepoint`, beyond ASCII, ends an extended autolink: any space,
+/// line and paragraph separators included, and punctuation but dashes and
+/// connectors, which paths such as encyclopedia titles use.
+fn endsAutolink(codepoint: u21) bool {
+    return isUnicodeSpace(codepoint) or (isUnicodePunctuation(codepoint) and !isDashOrConnector(codepoint));
+}
+fn isUnicodeSpace(codepoint: u21) bool {
+    return isWhitespace(codepoint) or codepoint == 0x85 or codepoint == 0x2028 or codepoint == 0x2029;
+}
+/// Unicode general category P beyond ASCII, for the scripts and blocks
+/// text commonly writes around links.
+fn isUnicodePunctuation(codepoint: u21) bool {
+    return switch (codepoint) {
+        0xa1, 0xa7, 0xab, 0xb6, 0xb7, 0xbb, 0xbf, 0x37e, 0x387, 0x55a...0x55f, 0x589, 0x58a, 0x5be, 0x5c0, 0x5c3, 0x5c6, 0x5f3, 0x5f4, 0x609, 0x60a, 0x60c, 0x60d, 0x61b, 0x61d...0x61f, 0x66a...0x66d, 0x6d4, 0x964, 0x965, 0x970, 0xe4f, 0xe5a, 0xe5b, 0x10fb, 0x1360...0x1368, 0x1400, 0x166e, 0x169b, 0x169c, 0x16eb...0x16ed, 0x17d4...0x17d6, 0x17d8...0x17da, 0x1800...0x180a => true,
+        0x2010...0x2027, 0x2030...0x2043, 0x2045...0x2051, 0x2053...0x205e, 0x207d, 0x207e, 0x208d, 0x208e, 0x2308...0x230b, 0x2329, 0x232a, 0x2768...0x2775, 0x27c5, 0x27c6, 0x27e6...0x27ef, 0x2983...0x2998, 0x29d8...0x29db, 0x29fc, 0x29fd, 0x2cf9...0x2cfc, 0x2cfe, 0x2cff, 0x2d70, 0x2e00...0x2e2e, 0x2e30...0x2e4f, 0x2e52...0x2e5d => true,
+        0x3001...0x3003, 0x3008...0x3011, 0x3014...0x301f, 0x3030, 0x303d, 0x30a0, 0x30fb, 0xa4fe, 0xa4ff, 0xa60d...0xa60f, 0xa673, 0xa67e, 0xa6f2...0xa6f7, 0xa874...0xa877, 0xa8ce, 0xa8cf, 0xa8f8...0xa8fa, 0xa8fc, 0xa92e, 0xa92f, 0xa95f, 0xa9c1...0xa9cd, 0xa9de, 0xa9df, 0xaa5c...0xaa5f, 0xaade, 0xaadf, 0xaaf0, 0xaaf1, 0xabeb => true,
+        0xfd3e, 0xfd3f, 0xfe10...0xfe19, 0xfe30...0xfe52, 0xfe54...0xfe61, 0xfe63, 0xfe68, 0xfe6a, 0xfe6b, 0xff01...0xff03, 0xff05...0xff0a, 0xff0c...0xff0f, 0xff1a, 0xff1b, 0xff1f, 0xff20, 0xff3b...0xff3d, 0xff3f, 0xff5b, 0xff5d, 0xff5f...0xff65 => true,
+        else => false,
+    };
+}
+/// Unicode categories Pd (dashes) and Pc (connectors) beyond ASCII.
+fn isDashOrConnector(codepoint: u21) bool {
+    return switch (codepoint) {
+        0x58a, 0x5be, 0x1400, 0x1806, 0x2010...0x2015, 0x2e17, 0x2e1a, 0x2e3a, 0x2e3b, 0x2e40, 0x2e5d, 0x301c, 0x3030, 0x30a0, 0xfe31, 0xfe32, 0xfe58, 0xfe63, 0xff0d => true,
+        0x203f, 0x2040, 0x2054, 0xfe33, 0xfe34, 0xfe4d...0xfe4f, 0xff3f => true,
+        else => false,
+    };
 }
 fn domainLength(text: []const u8) ?usize {
     var end: usize = 0;
     var underscore_last: u2 = 0;
     var segment: usize = 0;
-    while (end < text.len) : (end += 1) {
+    while (end < text.len) {
         const byte = text[end];
         if (byte == '.') {
             if (segment == 0) break;
             underscore_last <<= 1;
             segment = 0;
-        } else if (std.ascii.isAlphanumeric(byte) or byte == '-' or byte == '_' or byte >= 0x80) {
+        } else if (std.ascii.isAlphanumeric(byte) or byte == '-' or byte == '_') {
             if (byte == '_') underscore_last |= 1;
             segment += 1;
+        } else if (byte >= 0x80) {
+            // Letters beyond ASCII, as IDN hosts write them; spaces and
+            // punctuation beyond ASCII end the host.
+            const len = std.unicode.utf8ByteSequenceLength(byte) catch break;
+            if (end + len > text.len) break;
+            const codepoint = std.unicode.utf8Decode(text[end..][0..len]) catch break;
+            if (isUnicodeSpace(codepoint) or isUnicodePunctuation(codepoint)) break;
+            segment += 1;
+            end += len;
+            continue;
         } else break;
+        end += 1;
     }
     if (segment == 0 and end > 0 and text[end - 1] == '.') {
         end -= 1;

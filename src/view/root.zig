@@ -42,6 +42,8 @@ pub const IconOptions = image_nodes.IconOptions;
 pub const SvgPicture = image_nodes.SvgPicture;
 pub const IconPainter = image_nodes.IconPainter;
 pub const Graphic = image_nodes.Graphic;
+pub const imageSize = image_nodes.imageSize;
+pub const svgSize = image_nodes.svgSize;
 pub const icons = @import("icons.zig");
 const pointer_controls = @import("pointer_area.zig");
 const menu_controls = @import("menu.zig");
@@ -679,8 +681,10 @@ pub const EmbedInput = union(enum) {
     /// the release, moves arrive as `pointer_drag` and the release as
     /// `pointer_up` wherever the pointer is, even outside the leaf or the
     /// window. A press the window loses instead, through focus loss or a
-    /// cancelled capture, ends with `pointer_cancel`. A leaf that is no
-    /// longer built loses its capture and sees nothing more.
+    /// cancelled capture, ends with `pointer_cancel`, and so does the press
+    /// of a leaf the application builds again under another id, as one the
+    /// press moved into another container. A leaf that is no longer built
+    /// at all loses its capture and sees nothing more.
     pointer_down: PointerPress,
     pointer_drag: PointerDrag,
     pointer_up: Point,
@@ -1207,6 +1211,9 @@ pub const Capture = struct {
     position: Point,
     modifiers: z.KeyModifiers = .{},
     dragging: bool = false,
+    /// The context of the embedded leaf that took the press, to end the
+    /// press of a leaf the application built again under another id.
+    embed_context: ?*anyopaque = null,
 };
 
 /// What the view did with pointer input it routed; the caller delivers the
@@ -1275,6 +1282,9 @@ pub const View = struct {
     focus_request: ?u64 = null,
     /// The window has the keyboard, set by the host from focus events.
     window_focused: bool = true,
+    /// The window is drawn as active (`ui.Context.windowActive`), set by
+    /// the host before each pass.
+    window_active: bool = true,
     /// Hover or focus time before a tooltip appears, in nanoseconds.
     tooltip_delay: u64 = 500 * std.time.ns_per_ms,
     preferences: Preferences = .{},
@@ -3178,7 +3188,7 @@ pub const View = struct {
             const count: u8 = if (again) last.count +| 1 else 1;
             self.last_press = .{ .id = entry.id, .time = now, .at = point, .count = count };
             if (entry.embed.input.?(entry.embed.context, entry.id, .{ .pointer_down = .{ .position = local(entry, point), .count = count, .modifiers = modifiers } })) {
-                self.capture = .{ .target = .{ .embed = entry.id }, .origin = point, .position = point, .modifiers = modifiers };
+                self.capture = .{ .target = .{ .embed = entry.id }, .origin = point, .position = point, .modifiers = modifiers, .embed_context = entry.embed.context };
                 result.consumed = true;
                 result.repaint = true;
                 result.settle = true;
@@ -3304,7 +3314,11 @@ pub const View = struct {
                 // An item dropped where it is stays.
                 if (to != value.from and to != value.from + 1) result.push(.{ .reorder = .{ .id = value.list, .move = .{ .from = value.from, .to = to } } });
             },
-            .select => {},
+            // The drag reaches the row the pointer let go over, though no
+            // move came there before the release.
+            .select => |value| if (self.rowUnder(value.collection, point)) |under| if (under != value.last) {
+                result.push(.{ .item = .{ .collection = value.collection, .item = under, .op = .drag, .anchor = value.item, .add = value.add } });
+            },
         }
         return result;
     }
@@ -3549,6 +3563,15 @@ pub const View = struct {
         if (self.now >= due) self.tip_index = candidate else self.wakeAt(due);
     }
 
+    /// Whether the window is drawn as active: it has the keyboard, or the
+    /// application keeps it looking so (`Host.setActiveAppearance`). The
+    /// built-in controls draw their accent in the theme's
+    /// `inactive_accent` while it is not; a build may dim its own accents
+    /// the same way. A change runs a new pass.
+    pub fn windowActive(self: *const View) bool {
+        return self.window_active;
+    }
+
     /// Add a self-describing leaf; see `Embed`.
     pub fn embed(self: *View, content: Embed, style: Style) Error!void {
         const node = try self.append(.embed, style);
@@ -3659,6 +3682,15 @@ pub const View = struct {
         };
     }
 
+    fn cancelMovedEmbed(self: *View, context: *anyopaque) void {
+        for (self.buffers.nodes[0..self.len]) |*node| if (node.kind == .embed) if (node.embed) |content| {
+            if (content.context != context) continue;
+            const input = content.input orelse return;
+            _ = input(context, node.id, .pointer_cancel);
+            return;
+        };
+    }
+
     fn captureBuilt(self: *const View, target: Capture.Target) bool {
         for (self.buffers.nodes[0..self.len]) |*node| switch (target) {
             .embed => |id| if (node.id == id and node.kind == .embed and node.embed.?.input != null) return true,
@@ -3684,6 +3716,11 @@ pub const View = struct {
         if (self.capture) |capture| if (!self.captureBuilt(capture.target)) {
             self.capture = null;
             self.drop_over = null;
+            // The same leaf built under another id, as when the press moved
+            // it into another container, ends its press, so that the next
+            // press is a press of its own rather than the release it waits
+            // for. One no longer built at all is not called again.
+            if (capture.target == .embed) if (capture.embed_context) |context| self.cancelMovedEmbed(context);
         };
         menu_controls.finish(self);
         // A combo box that is no longer built cannot keep its list open.
@@ -5361,6 +5398,12 @@ pub const Host = struct {
     pub fn prepareBackdropEffects(self: *Host, allocator: std.mem.Allocator, options: ui.backdrop_effects.Options) !void {
         try self.context.prepareBackdropEffects(allocator, options);
     }
+    /// Keep the window drawn as active while another window or application
+    /// has the keyboard; see `ui.Context.setActiveAppearance`.
+    pub fn setActiveAppearance(self: *Host, enabled: bool) void {
+        self.context.setActiveAppearance(enabled);
+        self.view.window_active = self.context.windowActive();
+    }
     /// Lay the window out in `value` from the next pass, such as after the
     /// application's language changed, and repaint.
     pub fn setDirection(self: *Host, value: Direction) void {
@@ -5928,6 +5971,7 @@ pub const Host = struct {
                 self.view.source_of = if (tools.open) tools.selected else 0;
                 self.view.source_len = 0;
             }
+            self.view.window_active = self.context.windowActive();
             try self.pass(null);
             break :blk if (lap) |*timer| timer.lap() else 0;
         };
