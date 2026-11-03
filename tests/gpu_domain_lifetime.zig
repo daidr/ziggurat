@@ -14,7 +14,12 @@ const gpu = if (windows) ui.d3d11 else ui.metal;
 /// The driver tests that need no hardware use: Direct3D's software device,
 /// and on macOS, which has none, the system's.
 const soft: resources.Driver = if (windows) .warp else .hardware;
-const expect = std.testing.expect;
+/// A failed check names its line: these runs print no stack traces.
+fn verify(ok: bool, at: std.builtin.SourceLocation) !void {
+    if (ok) return;
+    std.debug.print("check failed at {s}:{d}\n", .{ at.file, at.line });
+    return error.CheckFailed;
+}
 fn equal(expected: anytype, actual: @TypeOf(expected)) !void {
     std.testing.expectEqual(expected, actual) catch |err| {
         std.debug.dumpCurrentStackTrace(.{});
@@ -55,7 +60,7 @@ const Hook = struct {
     }
     fn check(self: *Hook) !void {
         if (self.failure) |err| return err;
-        try expect(self.when == .none);
+        try verify(self.when == .none, @src());
     }
 };
 const Pixel = struct {
@@ -188,7 +193,7 @@ fn threadsAndRegistration(allocator: std.mem.Allocator) !void {
     const token = try app.registerStop(&node);
     try expectError(error.Full, resources.DeviceDomain.create(app, allocator, .{ .driver = soft }));
     try equal(@as(u32, 0), gpu.globalResourceCount());
-    try expect(try app.cancelStop(token));
+    try verify(try app.cancelStop(token), @src());
     const domain = try resources.DeviceDomain.create(app, allocator, .{ .driver = soft });
     var borrows: [resources.capacity]resources.DeviceDomain.Borrow = undefined;
     for (&borrows) |*borrow| borrow.* = try domain.acquireRenderer(null);
@@ -203,10 +208,10 @@ fn threadsAndRegistration(allocator: std.mem.Allocator) !void {
     // The other driver than the domain's.
     context.render_mode = if (windows) .hardware else .warp;
     try expectError(error.DomainDriverMismatch, context.attach(window));
-    try expect(context.window == null and context.gpu_renderer.native == null);
+    try verify(context.window == null and context.gpu_renderer.native == null, @src());
     context.render_mode = .automatic;
     try expectError(error.Full, context.attach(window));
-    try expect(context.window == null and context.gpu_renderer.native == null);
+    try verify(context.window == null and context.gpu_renderer.native == null, @src());
     try equal(@as(usize, resources.capacity), (try domain.stats()).attachments);
     for (borrows) |borrow| domain.releaseRenderer(borrow.slot);
     try context.attach(window);
@@ -267,8 +272,8 @@ fn integrated(allocator: std.mem.Allocator) !void {
     const size = context.last_paint_size.?;
     try context.prepareLayers(allocator, .{ .size = size, .max_depth = 2 });
     _ = c.SendMessageW(hwnd, c.WM_PAINT, 0, 0);
-    try expect(context.gpu_frames != 0);
-    try expect(context.input_state.available(1));
+    try verify(context.gpu_frames != 0, @src());
+    try verify(context.input_state.available(1), @src());
     const software_frames = context.gdi_frames;
     const surface = context.gpu_renderer.surfaceForTest().?;
     state.view = try other.view();
@@ -276,8 +281,8 @@ fn integrated(allocator: std.mem.Allocator) !void {
     const calls = state.calls;
     _ = c.SendMessageW(hwnd, c.WM_PAINT, 0, 0);
     try equal(calls + 1, state.calls);
-    try expect(context.input_state.available(1) and !context.input_state.available(2));
-    try expect(c.GetWindowLongW(surface, c.GWL_STYLE) & c.WS_VISIBLE != 0);
+    try verify(context.input_state.available(1) and !context.input_state.available(2), @src());
+    try verify(c.GetWindowLongW(surface, c.GWL_STYLE) & c.WS_VISIBLE != 0, @src());
     try equal(software_frames, context.gdi_frames);
     try equal(@as(usize, 0), (try other.view()).lease.pins);
     var entries: [16]z.diagnostics.Diagnostic = undefined;
@@ -294,18 +299,18 @@ fn integrated(allocator: std.mem.Allocator) !void {
             try equal(@as(?u32, null), entry.code);
         }
     };
-    try expect(mismatched and unsupported);
+    try verify(mismatched and unsupported, @src());
     state.view = try texture.view();
     state.node = 1;
     context.gpu_renderer.injectPresentationBusy();
     _ = c.SendMessageW(hwnd, c.WM_PAINT, 0, 0);
     const pending = context.gpu_wait orelse return error.MissingGpuWait;
     try domain.injectDeviceLossForTest();
-    try expect(context.gpu_wait == null);
-    try expect(!app.unwatchNative(pending));
+    try verify(context.gpu_wait == null, @src());
+    try verify(!app.unwatchNative(pending), @src());
     try equal(@as(usize, 0), state.view.lease.pins);
     _ = c.SendMessageW(hwnd, c.WM_PAINT, 0, 0);
-    try expect(context.input_state.available(1));
+    try verify(context.input_state.available(1), @src());
     try equal(software_frames, context.gdi_frames);
     try domain.recreate();
     const replacement = try domain.upload(pixel.view());
@@ -313,7 +318,7 @@ fn integrated(allocator: std.mem.Allocator) !void {
     state.view = try replacement.view();
     state.close = window;
     _ = c.SendMessageW(hwnd, c.WM_PAINT, 0, 0);
-    try expect(window.isClosed());
+    try verify(window.isClosed(), @src());
     // Callback-triggered destruction runs at the owner dispatch safe point.
     try app.dispatch();
     try equal(@as(usize, 0), state.view.lease.pins);
@@ -351,12 +356,12 @@ fn integratedMetal(allocator: std.mem.Allocator) !void {
     renderer.captureForTest(true);
     gpu.Renderer.displayForTest(title);
     try app.dispatch();
-    try expect(context.gpu_frames != 0);
-    try expect(context.input_state.available(1));
+    try verify(context.gpu_frames != 0, @src());
+    try verify(context.input_state.available(1), @src());
     const scale: u32 = @intFromFloat(context.last_paint_size.?.scale);
     // 0, 128, 0, 128 (BGRA, premultiplied) over 0x204060.
-    try expect(near(0xff_10_a0_30, renderer.pixelForTest(20 * scale, 20 * scale)));
-    try expect(renderer.layerShownForTest());
+    try verify(near(0xff_10_a0_30, renderer.pixelForTest(20 * scale, 20 * scale)), @src());
+    try verify(renderer.layerShownForTest(), @src());
     const software_frames = context.gdi_frames;
     const gpu_frames = context.gpu_frames;
     state.view = try other.view();
@@ -364,10 +369,10 @@ fn integratedMetal(allocator: std.mem.Allocator) !void {
     const calls = state.calls;
     gpu.Renderer.displayForTest(title);
     try equal(calls + 1, state.calls);
-    try expect(context.input_state.available(1) and !context.input_state.available(2));
+    try verify(context.input_state.available(1) and !context.input_state.available(2), @src());
     try equal(gpu_frames, context.gpu_frames);
     try equal(software_frames, context.gdi_frames);
-    try expect(renderer.layerShownForTest());
+    try verify(renderer.layerShownForTest(), @src());
     try equal(@as(usize, 0), (try other.view()).lease.pins);
     var entries: [16]z.diagnostics.Diagnostic = undefined;
     const snapshot = diagnostics.snapshot(&entries);
@@ -375,13 +380,13 @@ fn integratedMetal(allocator: std.mem.Allocator) !void {
     for (entries[0..snapshot.count]) |entry| if (entry.err) |err| {
         if (err == error.TextureDomainMismatch) mismatched = true;
     };
-    try expect(mismatched);
+    try verify(mismatched, @src());
     // Lost: nothing of the domain draws until it is recreated.
     state.view = try texture.view();
     state.node = 1;
     try domain.injectDeviceLossForTest();
     try equal(@as(usize, 0), state.view.lease.pins);
-    try expect(renderer.stats().device_losses == 1);
+    try verify(renderer.stats().device_losses == 1, @src());
     gpu.Renderer.displayForTest(title);
     try equal(gpu_frames, context.gpu_frames);
     try domain.recreate();
@@ -390,10 +395,10 @@ fn integratedMetal(allocator: std.mem.Allocator) !void {
     state.view = try replacement.view();
     gpu.Renderer.displayForTest(title);
     try equal(gpu_frames + 1, context.gpu_frames);
-    try expect(near(0xff_10_a0_30, renderer.pixelForTest(20 * scale, 20 * scale)));
+    try verify(near(0xff_10_a0_30, renderer.pixelForTest(20 * scale, 20 * scale)), @src());
     state.close = window;
     gpu.Renderer.displayForTest(title);
-    try expect(window.isClosed());
+    try verify(window.isClosed(), @src());
     try app.dispatch();
     try equal(@as(usize, 0), state.view.lease.pins);
     try equal(@as(usize, 0), (try domain.stats()).attachments);

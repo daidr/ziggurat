@@ -9,7 +9,12 @@ const gpu = if (builtin.os.tag == .windows) ui.d3d11 else ui.metal;
 const soft: ui.gpu_resources.Driver = if (builtin.os.tag == .windows) .warp else .hardware;
 const Surface = ui.gpu_offscreen.Surface;
 const Domain = ui.gpu_resources.DeviceDomain;
-const expect = std.testing.expect;
+/// A failed check names its line: these runs print no stack traces.
+fn verify(ok: bool, at: std.builtin.SourceLocation) !void {
+    if (ok) return;
+    std.debug.print("check failed at {s}:{d}\n", .{ at.file, at.line });
+    return error.CheckFailed;
+}
 const equal = std.testing.expectEqual;
 const expectError = std.testing.expectError;
 const options: ui.gpu_offscreen.Options = .{ .size = .{ .width = 8, .height = 8, .scale = 1 }, .max_depth = 1, .resident_bytes = 0 };
@@ -51,7 +56,7 @@ const Hook = struct {
     }
     fn check(self: *Hook) !void {
         if (self.failure) |err| return err;
-        try expect(self.armed == .none);
+        try verify(self.armed == .none, @src());
     }
 };
 const Observer = struct { closed: bool = false, failure: ?anyerror = null };
@@ -75,7 +80,7 @@ const Host = struct {
         self.app.quit();
         try expectError(error.Busy, self.app.finishShutdown());
         try self.app.dispatch();
-        try expect(!self.observer.closed);
+        try verify(!self.observer.closed, @src());
     }
     fn onClosed(context: *anyopaque, _: z.Window) void {
         const self: *Host = @ptrCast(@alignCast(context));
@@ -121,7 +126,7 @@ fn interruptedHost(allocator: std.mem.Allocator, snapshot: bool, fail: bool) !vo
     // No Host access after the operation: on_closed can own the entire free.
     try app.dispatch();
     if (observer.failure) |err| return err;
-    try expect(observer.closed);
+    try verify(observer.closed, @src());
     try app.finishShutdown();
     try equal(@as(u32, 0), gpu.globalResourceCount());
 }
