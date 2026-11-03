@@ -722,6 +722,25 @@ pub const Embed = struct {
     /// arrow over a column edge, or null for the shape around it. Runs on
     /// the main thread outside paint; it must not allocate or block.
     cursor: ?*const fn (*anyopaque, u64, Point) ?Cursor = null,
+    /// What a drag that began on the leaf carries out of it, asked after
+    /// each `pointer_drag` past `drag_threshold`: null while the leaf keeps
+    /// the drag (to choose or reorder its items), or a payload, which the
+    /// view then drags as from a `dragSource`: the leaf gets
+    /// `pointer_cancel`, a copy of `ghost` follows the pointer, and the
+    /// innermost `dropTarget` under it that takes the payload's kind gets
+    /// it when released. Runs on the main thread outside paint.
+    drag: ?*const fn (*anyopaque, u64) ?EmbedDrag = null,
+};
+/// What a drag from an embedded leaf carries out of it (`Embed.drag`).
+pub const EmbedDrag = struct {
+    payload: Payload,
+    /// How many things it stands for, as rows chosen and dragged together;
+    /// more than one shows the number beside the pointer.
+    count: u32 = 1,
+    /// Where what moves is, local to the leaf, and the text that names it,
+    /// copied.
+    ghost: Rect,
+    label: []const u8 = "",
 };
 /// An embedded leaf that consumed a press.
 pub const EmbedPress = struct { id: u64, focusable: bool };
@@ -1180,6 +1199,8 @@ pub const Overlay = struct {
         /// Lowercased first ASCII letter or digit of the label, or 0, for
         /// type-ahead.
         initial: u8 = 0,
+        /// The row is among those selected.
+        chosen: bool = false,
     };
     pub const Collection = struct {
         id: u64,
@@ -1189,6 +1210,8 @@ pub const Overlay = struct {
         page: usize,
         /// A drag from a row selects the rows it crosses.
         drag_select: bool = false,
+        /// Its rows drag out (`View.dragRows`).
+        drags_out: bool = false,
         /// A letter or digit moves the cursor to the next row whose label
         /// starts with it.
         typeahead: bool = false,
@@ -1216,7 +1239,9 @@ pub const Overlay = struct {
     /// With `drag_kind`, its items drag out as payloads of that kind
     /// instead (`View.dragRows`).
     pub const ReorderList = struct { id: u64, axis: Axis, rect: Rect, first: u32, count: u32, scroll: ?u64, drag_kind: ?u64 = null };
-    pub const ReorderItem = struct { id: u64, index: u32, bounds: Rect, rect: Rect };
+    /// `count` is how many rows a drag out of it carries: the rows chosen
+    /// when it is one of them.
+    pub const ReorderItem = struct { id: u64, index: u32, bounds: Rect, rect: Rect, count: u32 = 1 };
     /// The shown dialog, which holds input while it is open.
     pub const Dialog = struct { id: u64, rect: Rect, opener: ?u64, escape: bool, scrim: bool };
     popup: ?Popup = null,
@@ -1296,8 +1321,12 @@ pub const Capture = struct {
         area: u64,
         source: struct { id: u64, payload: Payload },
         reorder: struct { list: u64, from: usize, to: usize },
-        /// An item of a `dragRows` container, dragged out as `payload`.
-        rows: struct { list: u64, from: usize, payload: Payload },
+        /// An item of a `dragRows` container, dragged out as `payload`,
+        /// with the rows chosen with it when it is one of them.
+        rows: struct { list: u64, from: usize, payload: Payload, count: u32 = 1 },
+        /// A payload an embedded leaf dragged out of it (`Embed.drag`):
+        /// the copy's window rectangle as the drag began.
+        leaf: struct { id: u64, payload: Payload, count: u32, ghost: Rect },
         select: struct { collection: u64, item: u64, add: bool, last: u64 },
     };
     target: Target,
@@ -1434,6 +1463,13 @@ pub const View = struct {
     /// label, the gap a reordered item goes to, and the target under it.
     drag_ghost: ?Rect = null,
     drag_label: []const u8 = "",
+    /// How many things the drag carries; more than one shows beside the
+    /// pointer, which `drag_pointer` holds.
+    drag_count: u32 = 1,
+    drag_pointer: Point = .{},
+    /// The label of a leaf's drag (`EmbedDrag.label`), copied.
+    leaf_label: [128]u8 = undefined,
+    leaf_label_len: usize = 0,
     insert_mark: ?Rect = null,
     drop_mark: ?Rect = null,
     /// Text for assistive technology to announce, and the serial that
@@ -3145,6 +3181,10 @@ pub const View = struct {
             };
             // A press on a heading that cannot collapse only moves the cursor.
             if (candidate.heading and candidate.expanded == null) op = .cursor;
+            // A plain press on a chosen row of rows that drag out waits for
+            // the release, which chooses it alone as a click, so that a drag
+            // of the choice keeps it.
+            if (op == .select and owner.multiple and owner.drags_out and candidate.chosen and !modifiers.control and !modifiers.shift) return null;
             if (op == .select and owner.multiple) {
                 if (modifiers.control and modifiers.shift) {
                     op = .range_add;
@@ -3157,6 +3197,17 @@ pub const View = struct {
             return .{ .item = .{ .collection = candidate.collection, .item = candidate.item, .op = op, .anchor = anchor } };
         }
         return null;
+    }
+    /// Whether a press on row `id` with `modifiers` waits for the release
+    /// to choose it, as `rowPress` leaves a plain press on a chosen row of
+    /// rows that drag out.
+    pub fn waitsForRelease(self: *const View, id: u64, modifiers: z.KeyModifiers) bool {
+        if (modifiers.control or modifiers.shift) return false;
+        for (self.overlay.rows[0..self.overlay.row_count]) |line| if (line.id == id) {
+            const owner = self.collectionEntry(line.collection) orelse return false;
+            return line.chosen and owner.multiple and owner.drags_out;
+        };
+        return false;
     }
     fn closePopup(self: *View, list: Overlay.Popup, restore: bool) void {
         if (list.combo) self.popup.open = null else {
@@ -3331,7 +3382,7 @@ pub const View = struct {
         for (self.overlay.lists[0..self.overlay.list_count]) |list| {
             for (self.overlay.reorder_items[list.first..][0..list.count], 0..) |entry, at| {
                 if (!contains(entry.rect, point) or (best != null and entry.index < depth)) continue;
-                best = if (list.drag_kind) |kind| .{ .rows = .{ .list = list.id, .from = at, .payload = .{ .kind = kind, .value = at } } } else .{ .reorder = .{ .list = list.id, .from = at, .to = at } };
+                best = if (list.drag_kind) |kind| .{ .rows = .{ .list = list.id, .from = at, .payload = .{ .kind = kind, .value = at }, .count = entry.count } } else .{ .reorder = .{ .list = list.id, .from = at, .to = at } };
                 depth = entry.index;
             }
         }
@@ -3367,6 +3418,19 @@ pub const View = struct {
             };
             result.repaint = entry.embed.input.?(entry.embed.context, entry.id, .{ .pointer_drag = .{ .position = local(entry, point), .origin = local(entry, capture.origin), .delta = delta, .dragging = capture.dragging } });
             result.settle = result.repaint;
+            // The leaf hands the drag over to carry a payload out of it.
+            const ask = entry.embed.drag orelse return result;
+            if (!capture.dragging) return result;
+            const out = ask(entry.embed.context, entry.id) orelse return result;
+            _ = entry.embed.input.?(entry.embed.context, entry.id, .pointer_cancel);
+            const b = entry.bounds;
+            const length = @min(out.label.len, self.leaf_label.len);
+            @memcpy(self.leaf_label[0..length], out.label[0..length]);
+            self.leaf_label_len = length;
+            capture.target = .{ .leaf = .{ .id = entry.id, .payload = out.payload, .count = @max(out.count, 1), .ghost = .{ .x = b.x + out.ghost.x, .y = b.y + out.ghost.y, .width = out.ghost.width, .height = out.ghost.height } } };
+            self.drop_over = self.dropTargetAt(point, .{ .value = out.payload });
+            result.repaint = true;
+            result.cancel_press = true;
             return result;
         }
         if (!capture.dragging) return null;
@@ -3382,6 +3446,10 @@ pub const View = struct {
             },
             .rows => |rows| {
                 self.drop_over = self.dropTargetAt(point, .{ .value = rows.payload });
+                if (self.edgeScroll(self.scrollAt(point), point)) |event| result.push(event);
+            },
+            .leaf => |leaf| {
+                self.drop_over = self.dropTargetAt(point, .{ .value = leaf.payload });
                 if (self.edgeScroll(self.scrollAt(point), point)) |event| result.push(event);
             },
             .reorder => |*value| {
@@ -3430,6 +3498,9 @@ pub const View = struct {
             },
             .rows => |rows| if (self.dropTargetAt(point, .{ .value = rows.payload })) |id| {
                 result.push(.{ .drop = .{ .id = id, .data = .{ .value = rows.payload }, .position = point } });
+            },
+            .leaf => |leaf| if (self.dropTargetAt(point, .{ .value = leaf.payload })) |id| {
+                result.push(.{ .drop = .{ .id = id, .data = .{ .value = leaf.payload }, .position = point } });
             },
             .reorder => |value| {
                 const list = self.reorderList(value.list) orelse return result;
@@ -3784,6 +3855,7 @@ pub const View = struct {
         if (self.drop_over) |over| if (over == node.id) if (self.capture) |capture| switch (capture.target) {
             .source => |source| return .{ .over = .{ .value = source.payload } },
             .rows => |rows| return .{ .over = .{ .value = rows.payload } },
+            .leaf => |leaf| return .{ .over = .{ .value = leaf.payload } },
             else => {},
         };
         if (self.system_drag) |drag| if (drag.over) |over| if (over == node.id) return .{ .over = .{ .files = drag.files, .text = drag.text } };
@@ -3821,8 +3893,11 @@ pub const View = struct {
     /// takes `kind` gets it when released, as from a `dragSource`. The
     /// container itself takes nothing and shows no line between its items,
     /// so a target inside it, as a folder's row, takes the payload wherever
-    /// the pointer is. Escape gives the drag up. A tree cannot drag its rows
-    /// out, and a container cannot both `dragRows` and `reorder` or
+    /// the pointer is. A press on a row of a table that is chosen drags the
+    /// rows chosen with it: the payload still names the row pressed, which
+    /// the application finds among its `Selection`, and how many go shows
+    /// beside the pointer. Escape gives the drag up. A tree cannot drag its
+    /// rows out, and a container cannot both `dragRows` and `reorder` or
     /// `dragSelect`.
     pub fn dragRows(self: *View, kind: u64) Error!void {
         const index = self.stack[self.depth - 1];
@@ -3872,6 +3947,7 @@ pub const View = struct {
             .source => |source| if (node.id == source.id and node.kind == .drag_source) return true,
             .reorder => |value| if (node.id == value.list and node.reorder) return true,
             .rows => |value| if (node.id == value.list and node.drag_rows != null) return true,
+            .leaf => |value| if (node.id == value.id and node.kind == .embed and node.embed.?.drag != null) return true,
             .select => |value| if (node.id == value.collection and node.drag_select) return true,
         };
         return false;
@@ -4305,7 +4381,7 @@ pub const View = struct {
                 },
                 .tree, .table => if (overlay.collection_count < max_collections) {
                     const selection = node.selection.?;
-                    overlay.collections[overlay.collection_count] = .{ .id = node.id, .tree = node.kind == .tree, .multiple = selection.mode == .multiple, .anchor = null, .page = 1, .drag_select = node.drag_select and node.style.enabled, .scroll = self.scrollAround(node), .typeahead = node.heading };
+                    overlay.collections[overlay.collection_count] = .{ .id = node.id, .tree = node.kind == .tree, .multiple = selection.mode == .multiple, .anchor = null, .page = 1, .drag_select = node.drag_select and node.style.enabled, .drags_out = node.drag_rows != null and node.style.enabled, .scroll = self.scrollAround(node), .typeahead = node.heading };
                     overlay.collection_count += 1;
                 },
                 .tree_row, .table_row => if (overlay.row_count < max_collection_rows and node.collection != none) {
@@ -4325,7 +4401,7 @@ pub const View = struct {
                             }
                         }
                     }
-                    overlay.rows[overlay.row_count] = .{ .id = node.id, .item = node.item, .collection = owner.id, .level = node.level, .expanded = node.expanded, .parent = parent, .bounds = node.bounds, .rect = self.visible(node) orelse zero, .enabled = node.style.enabled, .index = @intCast(index), .heading = node.heading, .initial = initialOf(node.text) };
+                    overlay.rows[overlay.row_count] = .{ .id = node.id, .item = node.item, .collection = owner.id, .level = node.level, .expanded = node.expanded, .parent = parent, .bounds = node.bounds, .rect = self.visible(node) orelse zero, .enabled = node.style.enabled, .index = @intCast(index), .heading = node.heading, .initial = initialOf(node.text), .chosen = if (owner.selection) |selection| selection.contains(node.item) else false };
                     overlay.row_count += 1;
                 },
                 .token_field => if (overlay.token_field_count < max_token_fields) {
@@ -4470,7 +4546,9 @@ pub const View = struct {
             if (node.kind == .table) {
                 for (all[index + 1 .. node.end], index + 1..) |*entry, at| {
                     if (entry.kind != .table_row or entry.collection != index or overlay.reorder_item_count == max_reorder_items) continue;
-                    overlay.reorder_items[overlay.reorder_item_count] = .{ .id = entry.id, .index = @intCast(at), .bounds = entry.bounds, .rect = if (entry.style.enabled) self.visible(entry) orelse zero else zero };
+                    // A chosen row drags the rows chosen with it.
+                    const chosen: u32 = if (node.selection) |selection| if (selection.contains(entry.item)) @intCast(selection.len) else 1 else 1;
+                    overlay.reorder_items[overlay.reorder_item_count] = .{ .id = entry.id, .index = @intCast(at), .bounds = entry.bounds, .rect = if (entry.style.enabled) self.visible(entry) orelse zero else zero, .count = chosen };
                     overlay.reorder_item_count += 1;
                 }
             } else {
@@ -4492,6 +4570,7 @@ pub const View = struct {
         const all = self.buffers.nodes[0..self.len];
         self.drag_ghost = null;
         self.drag_label = "";
+        self.drag_count = 1;
         self.insert_mark = null;
         self.drop_mark = null;
         const over: ?u64 = self.drop_over orelse if (self.system_drag) |drag| drag.over else null;
@@ -4501,6 +4580,7 @@ pub const View = struct {
         };
         const capture = self.capture orelse return;
         if (!capture.dragging) return;
+        self.drag_pointer = capture.position;
         const moved: ?u32 = switch (capture.target) {
             .source => |source| for (all, 0..) |*node, index| {
                 if (node.id == source.id and node.kind == .drag_source) break @intCast(index);
@@ -4516,7 +4596,15 @@ pub const View = struct {
             .rows => |value| rows: {
                 const list = self.reorderList(value.list) orelse break :rows null;
                 if (value.from >= list.count) break :rows null;
+                self.drag_count = value.count;
                 break :rows self.overlay.reorder_items[list.first..][0..list.count][value.from].index;
+            },
+            .leaf => |leaf| {
+                const g = leaf.ghost;
+                self.drag_ghost = .{ .x = g.x + capture.position.x - capture.origin.x, .y = g.y + capture.position.y - capture.origin.y, .width = g.width, .height = g.height };
+                self.drag_label = self.leaf_label[0..self.leaf_label_len];
+                self.drag_count = leaf.count;
+                return;
             },
             else => null,
         };
@@ -5062,7 +5150,35 @@ pub const View = struct {
             const pad = theme.metrics.content_inset + 4;
             target.label(.{ .x = ghost.x + pad, .y = ghost.y, .width = @max(0, ghost.width - 2 * pad), .height = ghost.height }, self.drag_label, theme.palette.text);
         }
+        // How many go with it, as several rows dragged: beside the
+        // pointer, as the copy may be wider than the window.
+        if (self.dragBadge()) |pill| {
+            target.roundedRect(pill.rect, pill.rect.height / 2, ui.Color.rgb(theme.palette.accent));
+            target.labelFont(.{ .x = pill.rect.x + badge_pad, .y = pill.rect.y, .width = pill.rect.width - 2 * badge_pad, .height = pill.rect.height }, pill.text(), theme.palette.on_accent, badge_font);
+        }
         try target.popClip();
+    }
+
+    const badge_font: Font = .{ .size = 12, .weight = .semibold };
+    const badge_pad: f32 = 5;
+    /// The number of things a drag carries beside the pointer, when more
+    /// than one: its digits and its pill.
+    pub const DragBadge = struct {
+        rect: Rect,
+        digits: [10]u8 = undefined,
+        len: usize = 0,
+        pub fn text(self: *const DragBadge) []const u8 {
+            return self.digits[0..self.len];
+        }
+    };
+    pub fn dragBadge(self: *const View) ?DragBadge {
+        if (self.drag_ghost == null or self.drag_count <= 1) return null;
+        var pill: DragBadge = .{ .rect = undefined };
+        pill.len = (std.fmt.bufPrint(&pill.digits, "{d}", .{self.drag_count}) catch return null).len;
+        const height: f32 = 18;
+        const width = @max(@as(f32, @floatFromInt(pill.len)) * 7 + 2 * badge_pad, height);
+        pill.rect = .{ .x = self.drag_pointer.x + 10, .y = self.drag_pointer.y - height - 10, .width = width, .height = height };
+        return pill;
     }
 
     /// Paint nodes `start..stop` in order, skipping floating subtrees, whose
