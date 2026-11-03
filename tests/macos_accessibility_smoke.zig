@@ -13,6 +13,7 @@ extern fn zua_test_describe(element: *anyopaque, buffer: [*]u8, capacity: c_int)
 extern fn zua_test_frame_in_window(element: *anyopaque, handle: *anyopaque) c_int;
 extern fn zua_test_act(element: *anyopaque, kind: c_int, number: f64, text: [*:0]const u8) void;
 extern fn zua_test_child_count(handle: *anyopaque) c_int;
+extern fn zua_test_row(element: *anyopaque, row: c_int) c_int;
 extern fn zua_test_announcements(buffer: [*]u8, capacity: c_int) c_int;
 
 const Probe = struct {
@@ -41,6 +42,10 @@ const Probe = struct {
         semantic.add(frame, .{ .id = 4, .role = .group, .name = "Options", .bounds = .{ .x = 10, .y = 100, .width = 200, .height = 60 } });
         semantic.add(frame, .{ .id = 5, .parent = 4, .role = .checkbox, .name = "Agree", .checked = self.agree, .bounds = .{ .x = 14, .y = 104, .width = 100, .height = 20 } });
         semantic.add(frame, .{ .id = 6, .parent = 4, .role = .button, .name = "Disabled", .enabled = false, .bounds = .{ .x = 14, .y = 130, .width = 100, .height = 20 } });
+        // A list built only in view: two of its 10,000 rows.
+        semantic.add(frame, .{ .id = 8, .role = .list, .name = "Pages", .set_size = 10_000, .bounds = .{ .x = 220, .y = 10, .width = 90, .height = 40 } });
+        semantic.add(frame, .{ .id = 9, .parent = 8, .role = .list_item, .name = "Page 120", .position = 120, .bounds = .{ .x = 220, .y = 10, .width = 90, .height = 20 } });
+        semantic.add(frame, .{ .id = 10, .parent = 8, .role = .list_item, .name = "Page 121", .position = 121, .bounds = .{ .x = 220, .y = 30, .width = 90, .height = 20 } });
         if (self.saved) semantic.add(frame, .{ .id = 7, .role = .status, .name = "Saved", .bounds = .{ .x = 10, .y = 170, .width = 160, .height = 20 } });
     }
     fn action(_: *anyopaque, _: u64) void {}
@@ -109,9 +114,13 @@ pub fn main() !void {
     probe.window.show();
     probe.publish();
 
-    // The top level: four elements, the checkbox and the disabled button
-    // inside the group.
-    try std.testing.expectEqual(@as(c_int, 4), zua_test_child_count(probe.handle()));
+    // The top level: five elements, the checkbox and the disabled button
+    // inside the group, the rows inside the list.
+    try std.testing.expectEqual(@as(c_int, 5), zua_test_child_count(probe.handle()));
+    // VoiceOver reads the rows "120 of 10,000", not of the two built.
+    try std.testing.expectEqual(@as(c_int, 10_000), zua_test_row(try probe.element("Pages"), 0));
+    try std.testing.expectEqual(@as(c_int, 119), zua_test_row(try probe.element("Page 120"), 1));
+    try std.testing.expectEqual(@as(c_int, 120), zua_test_row(try probe.element("Page 121"), 1));
     try probe.expect("Save", "AXButton/|Save|||1");
     try probe.expect("Name", "AXTextField/||Name|abc|1");
     try probe.expect("Volume", "AXSlider/||Volume|5|1");

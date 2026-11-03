@@ -1421,7 +1421,7 @@ pub const TableState = struct {
         core.focused = focused;
         const outline_state = self.outline;
         const tree_look = outline_state != null and core.header_height == 0 and self.column_count <= 1;
-        try frame.semantic(.{ .id = id, .role = if (tree_look) .tree else .table, .name = core.name(), .bounds = bounds, .enabled = core.enabled, .focused = focused and core.cursorIndex() == null, .multiple = core.multiple() });
+        try frame.semantic(.{ .id = id, .role = if (tree_look) .tree else .table, .name = core.name(), .bounds = bounds, .enabled = core.enabled, .focused = focused and core.cursorIndex() == null, .multiple = core.multiple(), .set_size = semanticCount(core.rows.count) });
         frame.rect(bounds, palette.inset);
         try frame.pushClip(bounds);
         const g = self.geometry(bounds.width);
@@ -1628,6 +1628,8 @@ pub const TableState = struct {
                 .checked = chosen,
                 .multiple = core.multiple(),
                 .expanded = if (entry) |value| (if (value.branch) value.open else null) else null,
+                .position = semanticCount(row + 1),
+                .level = if (entry) |value| @as(u32, value.depth) + 1 else 0,
             });
             core.exposed[core.exposed_len] = key;
             core.exposed_len += 1;
@@ -2294,7 +2296,7 @@ pub const GridState = struct {
         const focused = focusedOn(frame, id) and core.enabled;
         core.focused = focused;
         const cursor = core.cursorIndex();
-        try frame.semantic(.{ .id = id, .role = .list, .name = core.name(), .bounds = bounds, .enabled = core.enabled, .focused = focused and cursor == null, .multiple = core.multiple() });
+        try frame.semantic(.{ .id = id, .role = .list, .name = core.name(), .bounds = bounds, .enabled = core.enabled, .focused = focused and cursor == null, .multiple = core.multiple(), .set_size = semanticCount(core.rows.count) });
         frame.rect(bounds, palette.inset);
         try frame.pushClip(bounds);
         const range = core.visibleLines();
@@ -2329,7 +2331,7 @@ pub const GridState = struct {
                 if (core.exposed_len < max_semantic_rows and rect.y + rect.height > bounds.y and rect.y < bounds.y + bounds.height) {
                     const key = core.keyAt(index);
                     const label = if (core.rows.label) |call| call(core.rows.context, index, &name_buffer) else item_value.text;
-                    try frame.semantic(.{ .id = partId(id, key), .parent = id, .role = .list_item, .name = label, .bounds = rect, .enabled = core.enabled, .focused = focused and at_cursor, .checked = chosen, .multiple = core.multiple() });
+                    try frame.semantic(.{ .id = partId(id, key), .parent = id, .role = .list_item, .name = label, .bounds = rect, .enabled = core.enabled, .focused = focused and at_cursor, .checked = chosen, .multiple = core.multiple(), .position = semanticCount(index + 1) });
                     core.exposed[core.exposed_len] = key;
                     core.exposed_len += 1;
                 }
@@ -2492,4 +2494,9 @@ pub fn gridView(v: *View, state: *GridState, items: Rows, item: ItemSource, opti
 
 test {
     _ = @import("collections_tests.zig");
+}
+
+/// A count or place for assistive technology, which reads at most u32's.
+fn semanticCount(value: usize) u32 {
+    return std.math.cast(u32, value) orelse std.math.maxInt(u32);
 }

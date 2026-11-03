@@ -185,6 +185,14 @@ int zwk_viewport(ZwkState *, int32_t left, int32_t top, int32_t right, int32_t b
 /* Shows a region's page scaled as a picture of its layout at layout_width
  * DIPs (0: unscaled), its drawing cut to corners of radii in its DIPs. */
 int zwk_present(ZwkState *, double layout_width, const double radii[4]);
+/* WebKitGTK in native UI only: what shows of the page (its clip, the native
+   UI's covers over it and its corners, in the window's device pixels), Tab
+   into its first or last element, whether it has the keyboard, and its
+   widget, whose accessible holds the page's tree. */
+int zwk_shape(ZwkState *, const double clip[4], const double radii[4], const double *covers, uint32_t count);
+int zwk_tab_into(ZwkState *, int back);
+int zwk_has_focus(ZwkState *);
+void *zwk_widget(ZwkState *);
 void zwk_last_failure(ZwkState *,ZwkFailure *);
 void zwk_counts(uint32_t *states,uint32_t *callbacks,uint32_t *views);
 /* Optional trusted future-document batch. prepare captures UTF-8 and owns the

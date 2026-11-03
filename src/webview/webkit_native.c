@@ -1099,6 +1099,8 @@ static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t
         if (s->region && options->scroll_to_container) zlg_region_scroll_to_container(s->region,1);
         /* The keys the page leaves unhandled are the native UI's around it. */
         if (s->region) zlg_region_forward_keys(s->region,1);
+        /* Tab moves through the page and on to the native UI around it. */
+        if (s->region) zlg_region_tab_focus(s->region,1);
     }
     if(options->initializers)zwk_initializers_activate(s);
     s->initial=g_idle_source_new(); retain(s);
@@ -1515,6 +1517,58 @@ int zwk_present(ZwkState *s, double layout_width, const double radii[4]) {
         result=ZWK_OK;
     }
     release(s); return result;
+}
+/* What shows of a page in native UI: clip, covers and corners in the
+   window's device pixels; the native UI paints over the rest. */
+int zwk_shape(ZwkState *s, const double clip[4], const double radii[4], const double *covers, uint32_t count) {
+    retain(s);
+    int result=ZWK_CLOSED;
+    if (live(s) && s->region && s->view) result=content_result(zlg_region_shape(s->region,clip,radii,covers,count));
+    release(s); return result;
+}
+/* Give the page the keyboard as Tab does: WebKitGTK focuses no element as
+   the view takes it, so once the page let go of the one it had, a Tab given
+   to it focuses its first element, or its last going back. */
+int zwk_tab_into(ZwkState *s, int back) {
+    retain(s);
+    int result=ZWK_CLOSED;
+    if (live(s) && s->region && s->view) {
+        WebKitWebView *view=WEBKIT_WEB_VIEW(s->view);
+        webkit_web_view_evaluate_javascript(view,"document.activeElement&&document.activeElement.blur()",-1,NULL,NULL,NULL,NULL,NULL);
+        result=live(s)?content_result(zlg_region_focus(s->region)):ZWK_CLOSED;
+        GdkWindow *target=result==ZWK_OK && live(s)?gtk_widget_get_window(s->view):NULL;
+        if (target) {
+            GdkDisplay *display=gdk_window_get_display(target);
+            guint keyval=back?GDK_KEY_ISO_Left_Tab:GDK_KEY_Tab;
+            GdkKeymapKey *keys=NULL; gint count=0;
+            guint16 code=0;
+            if (gdk_keymap_get_entries_for_keyval(gdk_keymap_get_for_display(display),GDK_KEY_Tab,&keys,&count) && count>0) code=(guint16)keys[0].keycode;
+            g_free(keys);
+            GdkSeat *seat=gdk_display_get_default_seat(display);
+            for (int i=0;i<2 && live(s) && s->view;i++) {
+                GdkEvent *event=gdk_event_new(i==0?GDK_KEY_PRESS:GDK_KEY_RELEASE);
+                event->key.window=g_object_ref(target);
+                event->key.send_event=TRUE;
+                event->key.time=GDK_CURRENT_TIME;
+                event->key.keyval=keyval;
+                event->key.state=back?GDK_SHIFT_MASK:0;
+                event->key.hardware_keycode=code;
+                if (seat) gdk_event_set_device(event,gdk_seat_get_keyboard(seat));
+                gtk_widget_event(s->view,event);
+                gdk_event_free(event);
+            }
+            if (!live(s)) result=ZWK_CLOSED;
+        }
+    }
+    release(s); return result;
+}
+/* Whether the page has the keyboard. */
+int zwk_has_focus(ZwkState *s) {
+    return live(s) && s->region && zlg_region_has_focus(s->region);
+}
+/* The page's widget, whose accessible holds its tree. */
+void *zwk_widget(ZwkState *s) {
+    return live(s)?s->view:NULL;
 }
 /* Test hook: the zoom WebKit has, and the corners the page is cut to. */
 double zwk_test_present(ZwkState *s, double corners[4]) {

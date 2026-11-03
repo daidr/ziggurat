@@ -2,6 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const z = @import("ziggurat");
 const input = @import("input.zig");
+/// A control the frame added, as its input state holds it.
+pub const Hit = input.Hit;
 // Every platform except Windows replays through the same software renderer
 // ABI (`zlc_*`), implemented natively by `linux.c` and `macos.c`.
 const gdi = if (builtin.os.tag == .windows) @import("windows.zig") else @import("linux.zig");
@@ -2470,7 +2472,8 @@ pub const Context = struct {
     pub fn handleKeyInput(self: *Context, window: z.Window, key: z.KeyInput) bool {
         // A key a web view's page left unhandled: the page has the keyboard,
         // so no control here keeps the focus, and the shortcuts see the key.
-        if (key.from_page and self.input_state.focused != null and self.window != null) self.blurControls() catch {};
+        // A Tab from the page gave the keyboard back: the focus moves on.
+        if (key.from_page and key.key != .tab and self.input_state.focused != null and self.window != null) self.blurControls() catch {};
         if (self.input_state.fields != null) return self.textFieldEvent(window, .{ .key_input = key });
         if (self.input_state.scopes) |workspace| if (!workspace.closed) return self.handleScopedKeyInput(window, key, workspace);
         return self.handleLegacyKeyInput(window, key);

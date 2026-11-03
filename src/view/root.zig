@@ -383,6 +383,8 @@ pub const Annotation = struct {
     /// input asks it to show while empty; see `Style.placeholder`.
     placeholder: []const u8 = "",
     placeholder_color: ?u32 = null,
+    /// The semantic node the leaf's own nodes go under.
+    parent: u64 = ui.accessibility.root_id,
 };
 
 pub const ToastOptions = struct {
@@ -697,6 +699,11 @@ pub const Embed = struct {
     /// Register the leaf as a Tab stop under its node id, so it can hold
     /// focus and receive keys through `input`.
     focusable: bool = false,
+    /// Whether native content the leaf shows, such as a web page, has the
+    /// keyboard itself. A Tab that leaves such content past its ends
+    /// (`KeyInput.from_page`) moves the focus on from this leaf. Called
+    /// outside passes and paint; it must not allocate or block.
+    holds_keyboard: ?*const fn (*anyopaque) bool = null,
     /// Pointer and key input over the leaf, in coordinates local to its
     /// bounds; keys arrive while it holds focus. True consumes the input and
     /// repaints the window. Runs on the main thread outside paint.
@@ -5385,6 +5392,7 @@ pub const View = struct {
             const owner = &self.buffers.nodes[node.field];
             about = .{ .name = owner.text, .description = owner.note, .invalid = owner.invalid, .required = owner.required };
         }
+        about.parent = node.semantic_parent;
         // A search, token field or editable combo box hands its placeholder
         // to the text input inside it.
         if (node.kind == .embed and node.parent != none) {
@@ -5946,6 +5954,16 @@ pub const Host = struct {
     /// Give keyboard focus to the node `id`, such as a text field's, now
     /// when the window registered it, otherwise after the next frame that
     /// does. Outside passes and paint.
+    /// The focusable embedded leaf whose native content has the keyboard.
+    fn pageHolder(self: *const Host) ?u64 {
+        for (self.view.nodes()) |*node| {
+            if (node.kind != .embed) continue;
+            const content = node.embed orelse continue;
+            const holds = content.holds_keyboard orelse continue;
+            if (content.focusable and holds(content.context)) return node.id;
+        }
+        return null;
+    }
     pub fn focusNode(self: *Host, id: u64) void {
         self.view.restore = id;
         self.restoreFocus();
@@ -6191,6 +6209,15 @@ pub const Host = struct {
                 return false;
             },
             .key_input => |input| {
+                // Tab left the page of a leaf's native content past its
+                // ends: the controls move the focus on from that leaf.
+                if (input.from_page and input.key == .tab) {
+                    if (self.pageHolder()) |id| {
+                        self.context.input_state.setFocused(id);
+                        self.view.focus = id;
+                    }
+                    return false;
+                }
                 if (self.view.dragKey(input)) |result| return self.apply(result);
                 self.view.focus = self.context.input_state.focused;
                 switch (self.view.routeKey(input)) {

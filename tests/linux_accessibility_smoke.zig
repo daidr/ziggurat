@@ -16,6 +16,7 @@ extern fn zua_test_mounted(host: *anyopaque) c_int;
 extern fn zua_test_announcements(buffer: [*]u8, capacity: c_int) c_int;
 extern fn zua_test_selection_count(element: *anyopaque) c_int;
 extern fn zua_test_caret(element: *anyopaque) c_int;
+extern fn zua_test_attribute(element: *anyopaque, name: [*:0]const u8) c_int;
 
 const Probe = struct {
     window: z.Window = undefined,
@@ -45,11 +46,11 @@ const Probe = struct {
         semantic.add(frame, .{ .id = 4, .role = .group, .name = "Options", .bounds = .{ .x = 10, .y = 100, .width = 200, .height = 60 } });
         semantic.add(frame, .{ .id = 5, .parent = 4, .role = .checkbox, .name = "Agree", .checked = self.agree, .bounds = .{ .x = 14, .y = 104, .width = 100, .height = 20 } });
         semantic.add(frame, .{ .id = 6, .parent = 4, .role = .button, .name = "Disabled", .enabled = false, .bounds = .{ .x = 14, .y = 130, .width = 100, .height = 20 } });
-        semantic.add(frame, .{ .id = 20, .role = .list_box, .name = "Fruit", .bounds = .{ .x = 220, .y = 10, .width = 90, .height = 60 } });
+        semantic.add(frame, .{ .id = 20, .role = .list_box, .name = "Fruit", .set_size = 40, .bounds = .{ .x = 220, .y = 10, .width = 90, .height = 60 } });
         semantic.add(frame, .{ .id = 21, .parent = 20, .role = .list_item, .name = "Apple", .checked = self.chosen == 21, .bounds = .{ .x = 220, .y = 10, .width = 90, .height = 20 } });
-        semantic.add(frame, .{ .id = 22, .parent = 20, .role = .list_item, .name = "Pear", .checked = self.chosen == 22, .bounds = .{ .x = 220, .y = 30, .width = 90, .height = 20 } });
+        semantic.add(frame, .{ .id = 22, .parent = 20, .role = .list_item, .name = "Pear", .checked = self.chosen == 22, .position = 17, .bounds = .{ .x = 220, .y = 30, .width = 90, .height = 20 } });
         semantic.add(frame, .{ .id = 30, .role = .tree, .name = "Files", .bounds = .{ .x = 220, .y = 80, .width = 90, .height = 40 } });
-        semantic.add(frame, .{ .id = 31, .parent = 30, .role = .tree_item, .name = "src", .expanded = self.open, .bounds = .{ .x = 220, .y = 80, .width = 90, .height = 20 } });
+        semantic.add(frame, .{ .id = 31, .parent = 30, .role = .tree_item, .name = "src", .expanded = self.open, .level = 2, .bounds = .{ .x = 220, .y = 80, .width = 90, .height = 20 } });
         if (self.saved) semantic.add(frame, .{ .id = 7, .role = .status, .name = "Saved", .bounds = .{ .x = 10, .y = 170, .width = 160, .height = 20 } });
     }
     fn action(_: *anyopaque, _: u64) void {}
@@ -160,6 +161,12 @@ pub fn main() !void {
     try probe.expect("Apple", "list item|Apple||es");
     try probe.expect("Pear", "list item|Pear||e");
     try std.testing.expectEqual(@as(c_int, 1), zua_test_selection_count(try probe.element("Fruit")));
+    // A list built only in view says where its rows are among all of its
+    // own; a row that does not, where among those built.
+    try std.testing.expectEqual(@as(c_int, 1), zua_test_attribute(try probe.element("Apple"), "posinset"));
+    try std.testing.expectEqual(@as(c_int, 17), zua_test_attribute(try probe.element("Pear"), "posinset"));
+    try std.testing.expectEqual(@as(c_int, 40), zua_test_attribute(try probe.element("Pear"), "setsize"));
+    try std.testing.expectEqual(@as(c_int, 2), zua_test_attribute(try probe.element("src"), "level"));
     var extents: [4]i32 = undefined;
     zua_test_extents(try probe.element("Save"), 1, &extents);
     try std.testing.expectEqual(@as(i32, 80), extents[2]);

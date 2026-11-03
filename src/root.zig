@@ -268,7 +268,9 @@ pub const KeyInput = struct {
     /// it into an editable element or compose with it, and it is neither
     /// Tab nor a modifier key on its own. The window's content takes it as
     /// its own key, for its shortcuts, while the keyboard stays with the
-    /// page. No text or release follows it.
+    /// page. No text or release follows it. A Tab (Shift+Tab) from the page
+    /// instead tells that Tab left it past its last (first) element and gave
+    /// the keyboard back: the content moves its focus on from the page.
     from_page: bool = false,
 };
 pub const physical_keys = @import("physical_keys.zig");
