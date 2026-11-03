@@ -205,7 +205,14 @@ const document =
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(@import("macos_panic.zig").allocator_config) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
-    const allocator = gpa.allocator();
+    // The error shows before the leak check, which a failure may also trip.
+    run(gpa.allocator()) catch |err| {
+        std.debug.print("macOS web view overlay failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
+}
+
+fn run(allocator: std.mem.Allocator) !void {
     const app = try z.App.init(allocator);
     defer app.deinit();
     var state: State = .{ .app = app };
