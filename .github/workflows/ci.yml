@@ -325,6 +325,10 @@ jobs:
         timeout-minutes: 10
         run: |
           zig build smoke-system-macos -Doptimize=${{ matrix.optimize }} --summary failures
+      - name: Global hotkeys and notifications smoke
+        timeout-minutes: 10
+        run: |
+          zig build smoke-hotkeys-macos -Doptimize=${{ matrix.optimize }} --summary failures
       - name: NSAccessibility compile and smoke
         timeout-minutes: 15
         run: |

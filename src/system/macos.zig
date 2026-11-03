@@ -56,6 +56,11 @@ extern fn zsm_chooser_show(?*anyopaque, c_int, [*]const [*:0]const u8, u32, [*:0
 extern fn zsm_chooser_path(*anyopaque, u32, *?[*]const u8, *usize) void;
 extern fn zsm_chooser_cancel(*anyopaque) void;
 extern fn zsm_chooser_detach(*anyopaque) void;
+extern fn zsm_hotkey_register(u32, u32, c_int, ?*anyopaque, u64, Done, *c_int, *i32) ?*anyopaque;
+extern fn zsm_hotkey_unregister(*anyopaque) void;
+extern fn zsm_note_available() c_int;
+extern fn zsm_note_show([*:0]const u8, [*:0]const u8, c_int, ?*anyopaque, u64, Done) ?*anyopaque;
+extern fn zsm_note_close(*anyopaque) void;
 
 pub const message = struct {
     /// Native menu, popup, alert, panel, status item and Dock records still
@@ -72,6 +77,8 @@ const Pending = struct {
     serial: u64 = 0,
 };
 const BarEntry = struct { id: u64, enabled: bool, ancestors: bool, own: bool = true, group: ?u8 = null };
+const HotkeyEntry = struct { id: u64, native: *anyopaque, serial: u64 };
+const Notification = struct { id: u64, native: *anyopaque, serial: u64 };
 const Chooser = struct {
     native: *anyopaque,
     serial: u64,
@@ -145,6 +152,11 @@ pub const Owner = struct {
     tray_serial: u64 = 0,
     chooser: ?Chooser = null,
     chooser_paths: [128][]const u8 = undefined,
+    hotkeys: [types.max_hotkeys]HotkeyEntry = undefined,
+    hotkey_count: usize = 0,
+    notification: ?Notification = null,
+    /// The OSStatus of the last hotkey registration that failed.
+    last_error: i32 = 0,
     /// Monotonic, so a late native completion cannot adopt a newer request.
     serial: u64 = 0,
 
@@ -161,8 +173,8 @@ pub const Owner = struct {
         errdefer self.window = null;
         try window.setService(.{ .context = self, .native_destroying = nativeDestroying });
     }
-    /// Removes the menu bar and status item, and dismisses pending popups,
-    /// alerts and panels without completing them.
+    /// Removes the menu bar, status item, hotkeys and notification, and
+    /// dismisses pending popups, alerts and panels without completing them.
     pub fn detach(self: *Owner) !void {
         const window = self.window orelse return;
         window.app.assertOwner();
@@ -180,6 +192,14 @@ pub const Owner = struct {
     }
     fn release(self: *Owner, restore: bool) void {
         self.popup.detach();
+        while (self.hotkey_count != 0) {
+            self.hotkey_count -= 1;
+            zsm_hotkey_unregister(self.hotkeys[self.hotkey_count].native);
+        }
+        if (self.notification) |notification| {
+            self.notification = null;
+            zsm_note_close(notification.native);
+        }
         if (self.message_dialog.native) |native| {
             self.message_dialog = .{};
             zsm_message_detach(native);
@@ -420,21 +440,101 @@ pub const Owner = struct {
         }
     }
 
-    /// Global hotkeys and notifications are not implemented on macOS yet.
-    pub fn registerHotkey(_: *Owner, _: u64, _: types.Hotkey) !void {
-        return error.UnsupportedCapability;
+    /// IDs are local to this Owner and nonzero. Hotkeys are the
+    /// application's while the Owner holds them, whichever app is active,
+    /// and need no Accessibility permission. A combination this or another
+    /// app already registered returns HotkeyRegistrationFailed with the
+    /// OSStatus in `last_error`; F21 to F24 return UnsupportedKey, as Mac
+    /// keyboards have no such keys. A repeating hotkey reports again at the
+    /// user's key repeat rate while it is held.
+    pub fn registerHotkey(self: *Owner, id: u64, hotkey: types.Hotkey) !void {
+        const window = try self.require();
+        const scope = window.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        if (id == 0) return error.InvalidHotkeyId;
+        for (self.hotkeys[0..self.hotkey_count]) |entry| if (entry.id == id) return error.DuplicateHotkeyId;
+        if (self.hotkey_count == self.hotkeys.len) return error.TooManyHotkeys;
+        const code = virtualKey(hotkey.key) orelse return error.UnsupportedKey;
+        const serial = try self.nextSerial();
+        var failure: c_int = 0;
+        var status: i32 = 0;
+        const native = zsm_hotkey_register(code, carbonModifiers(hotkey.modifiers), @intFromBool(hotkey.repeat), self, serial, hotkeyDone, &failure, &status) orelse {
+            self.last_error = status;
+            return error.HotkeyRegistrationFailed;
+        };
+        self.hotkeys[self.hotkey_count] = .{ .id = id, .native = native, .serial = serial };
+        self.hotkey_count += 1;
     }
-    pub fn unregisterHotkey(_: *Owner, _: u64) !void {
-        return error.UnsupportedCapability;
+    pub fn unregisterHotkey(self: *Owner, id: u64) !void {
+        const window = try self.require();
+        const scope = window.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        for (self.hotkeys[0..self.hotkey_count], 0..) |entry, index| if (entry.id == id) {
+            self.hotkey_count -= 1;
+            self.hotkeys[index] = self.hotkeys[self.hotkey_count];
+            zsm_hotkey_unregister(entry.native);
+            return;
+        };
+        return error.HotkeyNotFound;
     }
-    pub fn clearHotkeys(_: *Owner) !void {
-        return error.UnsupportedCapability;
+    pub fn clearHotkeys(self: *Owner) !void {
+        _ = try self.require();
+        while (self.hotkey_count != 0) try self.unregisterHotkey(self.hotkeys[self.hotkey_count - 1].id);
     }
-    pub fn showNotification(_: *Owner, _: u64, _: types.NotificationOptions) !void {
-        return error.UnsupportedCapability;
+    fn hotkeyDone(ptr: ?*anyopaque, serial: u64, _: i32) callconv(.c) void {
+        const self: *Owner = @ptrCast(@alignCast(ptr.?));
+        for (self.hotkeys[0..self.hotkey_count]) |entry| if (entry.serial == serial) {
+            self.deliver(.{ .hotkey = entry.id });
+            return;
+        };
     }
-    pub fn clearNotification(_: *Owner) !void {
-        return error.UnsupportedCapability;
+    /// The native record of a registered hotkey, for integration checks.
+    pub fn hotkeyHandleForTesting(self: *Owner, id: u64) ?*anyopaque {
+        for (self.hotkeys[0..self.hotkey_count]) |entry| if (entry.id == id) return entry.native;
+        return null;
+    }
+
+    /// One outstanding notification per Owner, in the Notification Center.
+    /// Only an app bundle can post them: elsewhere this returns
+    /// UnsupportedCapability. macOS asks the user for permission the first
+    /// time; a refusal, or a failure to post, is reported through the
+    /// window's diagnostic sink after this call returns. A click reports
+    /// `notification_activated`. `kind` and `real_time` have no macOS
+    /// counterpart and are ignored; `silent` false plays the default sound.
+    pub fn showNotification(self: *Owner, id: u64, options: types.NotificationOptions) !void {
+        const window = try self.require();
+        const scope = window.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        if (id == 0) return error.InvalidNotificationId;
+        if (options.body.len == 0) return error.EmptyNotification;
+        var title: [256]u8 = undefined;
+        var body: [1024]u8 = undefined;
+        const summary = try boundedText(&title, options.title, 63);
+        const text = try boundedText(&body, options.body, 255);
+        if (zsm_note_available() == 0) return error.UnsupportedCapability;
+        const serial = try self.nextSerial();
+        const native = zsm_note_show(summary, text, @intFromBool(options.silent), self, serial, noteDone) orelse return error.NotificationSubmissionFailed;
+        const previous = self.notification;
+        self.notification = .{ .id = id, .native = native, .serial = serial };
+        if (previous) |old| zsm_note_close(old.native);
+    }
+    pub fn clearNotification(self: *Owner) !void {
+        const window = try self.require();
+        const scope = window.beginCallback() orelse return error.Closed;
+        defer scope.end();
+        const notification = self.notification orelse return;
+        self.notification = null;
+        zsm_note_close(notification.native);
+    }
+    fn noteDone(ptr: ?*anyopaque, serial: u64, result: i32) callconv(.c) void {
+        const self: *Owner = @ptrCast(@alignCast(ptr.?));
+        const notification = self.notification orelse return;
+        if (notification.serial != serial) return;
+        self.notification = null;
+        zsm_note_close(notification.native);
+        if (result == 1) self.deliver(.{ .notification_activated = notification.id }) else if (result < 0) {
+            if (self.window) |window| if (!window.isClosed()) window.report(.{ .severity = .warning, .domain = .core, .operation = .window_update, .err = error.NotificationSubmissionFailed });
+        }
     }
 
     pub fn openFile(self: *Owner, options: picker.Options, destination: []u8, context: *anyopaque, on_result: picker.Callback) !void {
@@ -755,6 +855,39 @@ fn chooserPath(native: *anyopaque, index: u32) []const u8 {
     var length: usize = 0;
     zsm_chooser_path(native, index, &path, &length);
     return if (path) |value| value[0..length] else "";
+}
+
+/// Carbon's modifier bits: cmdKey, shiftKey, optionKey, controlKey.
+fn carbonModifiers(modifiers: types.Modifiers) u32 {
+    return @as(u32, if (modifiers.super) 0x100 else 0) | @as(u32, if (modifiers.shift) 0x200 else 0) | @as(u32, if (modifiers.alt) 0x800 else 0) | @as(u32, if (modifiers.control) 0x1000 else 0);
+}
+
+/// The ANSI keyboard's virtual key code (kVK_*) of a key; null for F21 to
+/// F24, which Mac keyboards lack. Insert is the Help key in its place.
+pub fn virtualKey(key: types.Key) ?u32 {
+    return switch (key) {
+        .a => 0x00, .s => 0x01, .d => 0x02, .f => 0x03, .h => 0x04, .g => 0x05, .z => 0x06, .x => 0x07,
+        .c => 0x08, .v => 0x09, .b => 0x0B, .q => 0x0C, .w => 0x0D, .e => 0x0E, .r => 0x0F, .y => 0x10,
+        .t => 0x11, .o => 0x1F, .u => 0x20, .i => 0x22, .p => 0x23, .l => 0x25, .j => 0x26, .k => 0x28,
+        .n => 0x2D, .m => 0x2E,
+        .digit1 => 0x12, .digit2 => 0x13, .digit3 => 0x14, .digit4 => 0x15, .digit6 => 0x16, .digit5 => 0x17,
+        .digit9 => 0x19, .digit7 => 0x1A, .digit8 => 0x1C, .digit0 => 0x1D,
+        .plus => 0x18, .minus => 0x1B,
+        .enter => 0x24, .tab => 0x30, .space => 0x31, .backspace => 0x33, .escape => 0x35,
+        .f1 => 0x7A, .f2 => 0x78, .f3 => 0x63, .f4 => 0x76, .f5 => 0x60, .f6 => 0x61, .f7 => 0x62, .f8 => 0x64,
+        .f9 => 0x65, .f10 => 0x6D, .f11 => 0x67, .f12 => 0x6F, .f13 => 0x69, .f14 => 0x6B, .f15 => 0x71, .f16 => 0x6A,
+        .f17 => 0x40, .f18 => 0x4F, .f19 => 0x50, .f20 => 0x5A,
+        .f21, .f22, .f23, .f24 => null,
+        .insert => 0x72, .home => 0x73, .page_up => 0x74, .delete => 0x75, .end => 0x77, .page_down => 0x79,
+        .left => 0x7B, .right => 0x7C, .down => 0x7D, .up => 0x7E,
+    };
+}
+
+fn boundedText(destination: []u8, text: []const u8, units: usize) ![*:0]const u8 {
+    if (std.mem.indexOfScalar(u8, text, 0) != null) return error.EmbeddedNul;
+    const needed = std.unicode.calcUtf16LeLen(text) catch return error.InvalidUtf8;
+    if (needed > units) return error.TextCapacityExceeded;
+    return terminated(destination, text);
 }
 
 fn terminated(destination: []u8, text: []const u8) ![*:0]const u8 {
