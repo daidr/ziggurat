@@ -142,8 +142,10 @@ fn raw(allocator: std.mem.Allocator) !void {
         try buffer.fill(.{ .x = 0, .y = 0, .width = 64, .height = 64 }, 0x00ff00);
         try buffer.texture(.{ .x = 0, .y = 0, .width = 64, .height = 64 }, try other.view(), .{});
         try expectError(error.TextureDomainMismatch, frame.draw(&renderer, &buffer, size));
-        try equal(@as(usize, 0), (try other.view()).lease.pins);
+        // Only the command buffer still pins it; the rejected frame took none.
+        try equal(@as(usize, 1), (try other.view()).lease.pins);
         buffer.reset();
+        try equal(@as(usize, 0), (try other.view()).lease.pins);
     }
     std.debug.print("Metal domain: shared-device texture alpha/fit/mip/clip/3 scales and whole-frame rejection passed\n", .{});
 }
