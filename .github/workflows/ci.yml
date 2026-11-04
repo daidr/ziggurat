@@ -196,12 +196,13 @@ jobs:
           XDG_CACHE_HOME=$(mktemp -d) zig build smoke-fonts -Doptimize=${{ matrix.optimize }}
       - name: Browsers (WebAssembly) build and headless Chromium smoke
         run: |
-          # Debian's chromium is a real package (Ubuntu's is a snap stub);
-          # without a Chromium the smoke reports so and only the build counts.
-          . /etc/os-release
-          if [ "${ID:-}" = debian ]; then sh scripts/ci-linux-deps.sh chromium; fi
+          # A real chromium on PATH, else Chrome for Testing's headless shell
+          # (Ubuntu's chromium is a snap stub), with the libraries it needs.
+          if apt-cache show libasound2t64 >/dev/null 2>&1; then alsa=libasound2t64; else alsa=libasound2; fi
+          sh scripts/ci-linux-deps.sh libnss3 libgbm1 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 "$alsa"
+          chrome=$(sh scripts/ci-chrome.sh)
           zig build web -Dtarget=wasm32-wasi -Doptimize=${{ matrix.optimize }} --summary failures
-          python3 tests/web/smoke.py zig-out/web/browser-smoke
+          python3 tests/web/smoke.py zig-out/web/browser-smoke "$chrome"
       - name: Optional WebKitGTK lifecycle and policy checks
         if: github.event_name == 'workflow_dispatch' && inputs.webview
         run: |
