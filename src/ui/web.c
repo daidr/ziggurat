@@ -575,6 +575,13 @@ void zlc_clear_rect(Renderer *s,float x,float y,float width,float height){
     clear_user(s->target,x,y,width,height);
 }
 void zlc_pop_clip(Renderer *s){if(s->gradient_clip_depth){s->gradient_clip_depth--;target_restore(s->target);if(s->target->saves)s->target->saves--;}}
+/* A clip level that cuts nothing more (an opacity's); popped by
+   zlc_pop_clip. */
+void zlc_push_keep(Renderer *s){
+    if(s->gradient_clip_depth>=32)return;
+    memcpy(s->gradient_clips[s->gradient_clip_depth+1],s->gradient_clips[s->gradient_clip_depth],sizeof(s->gradient_clips[0]));s->gradient_clip_depth++;
+    target_save(s->target);s->target->saves++;
+}
 /* destination is the window's ID: the frame goes to its canvas. */
 int zlc_end_checked(Renderer *s,void *destination){
     if(s->layers)return layer_end(s,destination);

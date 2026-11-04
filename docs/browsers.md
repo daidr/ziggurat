@@ -39,4 +39,4 @@
 
 ## 验证
 
-CI 的 Linux 任务构建全部浏览器示例，并用 `tests/web/smoke.py` 在无头 Chromium 中运行 `browser-smoke`：检查页面标题、Router 与地址片段、点击后的像素、history 前进后退和右键 HTML 菜单，并在启动时确认单实例、更新和窗口位置的浏览器行为。Chromium 取 PATH 上的真实 chromium，否则由 `scripts/ci-chrome.sh` 下载固定版本的 Chrome for Testing 无头 shell 并缓存；本地找不到 Chromium 时跳过。
+CI 的 Linux 任务构建全部浏览器示例，用 `tests/web/imports.py` 确认每个 wasm 只导入页面提供的函数（否则页面启动即 LinkError），并用 `tests/web/smoke.py` 在无头 Chromium 中运行 `browser-smoke`：检查页面标题、Router 与地址片段、点击后的像素、history 前进后退和右键 HTML 菜单，并在启动时确认单实例、更新和窗口位置的浏览器行为。Chromium 取 PATH 上的真实 chromium，否则由 `scripts/ci-chrome.sh` 下载固定版本的 Chrome for Testing 无头 shell 并缓存；本地找不到 Chromium 时跳过。
