@@ -110,6 +110,7 @@ pub fn preflight(buffer: *const commands.Buffer, options: Options) !u64 {
                 try rect(value.bounds, options.size.scale);
                 break :blk 1; // the pixels beneath kept, then mixed by the mask
             },
+            .push_opacity => 1, // the pixels beneath kept, then mixed by the opacity
             .begin_group => |value| blk: {
                 try rect(value.bounds, options.size.scale);
                 break :blk 1;

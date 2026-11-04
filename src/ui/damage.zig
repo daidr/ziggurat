@@ -254,6 +254,15 @@ pub const Tracker = struct {
                     states[depth] = hasher.final();
                     continue;
                 },
+                .push_opacity => |alpha| {
+                    if (depth == max_clips) return false;
+                    var hasher = Hasher.init(states[depth]);
+                    put(&hasher, .{ @as(u8, 6), alpha });
+                    depth += 1;
+                    clips[depth] = clips[depth - 1];
+                    states[depth] = hasher.final();
+                    continue;
+                },
                 .pop_clip => {
                     if (depth == 0) return false;
                     depth -= 1;
@@ -354,6 +363,11 @@ pub const Tracker = struct {
                     depth += 1;
                     clips[depth] = clips[depth - 1].intersect(clipBox(value.bounds, self.scale) orelse return null);
                 },
+                .push_opacity => {
+                    if (depth == max_clips) return null;
+                    depth += 1;
+                    clips[depth] = clips[depth - 1];
+                },
                 .pop_clip => depth -|= 1,
                 .text => {
                     const box = (commandBox(command, sources, self.scale) orelse return null).intersect(clips[depth]);
@@ -426,6 +440,11 @@ pub fn extent(list: []const Command, sources: Sources, scale: f32) ?Box {
             depth += 1;
             clips[depth] = clips[depth - 1].intersect(clipBox(value.bounds, scale) orelse return null);
         },
+        .push_opacity => {
+            if (depth == max_clips) return null;
+            depth += 1;
+            clips[depth] = clips[depth - 1];
+        },
         .pop_clip => {
             if (depth == 0) return null;
             depth -= 1;
@@ -458,6 +477,10 @@ pub fn hashCommands(buffer: *const commands.Buffer, quantum: ?f64) ?u64 {
             put(&hasher, .{ value.bounds, value.origin });
             if (value.mask >= sources.coverage.len) return null;
             put(&hasher, sources.coverage[value.mask].identity);
+        },
+        .push_opacity => |alpha| {
+            put(&hasher, 6);
+            put(&hasher, alpha);
         },
         .pop_clip => put(&hasher, 2),
         .end_group => put(&hasher, 3),

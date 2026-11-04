@@ -107,6 +107,12 @@ pub const Command = union(enum) {
     push_clip: Rect,
     /// A clip cut by a mask beyond its rectangle; closed by `pop_clip`.
     push_mask_clip: MaskClip,
+    /// Draws each drawing until its `pop_clip` at this opacity (of 255),
+    /// one by one, as if it multiplied the drawing's colors: two overlapping
+    /// children both show through each other, not as one layer faded would;
+    /// a group, transform or effect inside is one drawing. It cuts nothing,
+    /// and counts as a clip level.
+    push_opacity: u8,
     pop_clip,
     begin_group: GroupCommand,
     end_group,
@@ -663,6 +669,13 @@ pub const Buffer = struct {
         }
         return @intCast(index);
     }
+    /// Draw what follows until the matching `popClip` at `alpha` (of 255),
+    /// each drawing by itself; see `Command.push_opacity`.
+    pub fn pushOpacity(self: *Buffer, alpha: u8) Error!void {
+        if (self.depth == 32) return error.ClipStackFull;
+        try self.append(.{ .push_opacity = alpha });
+        self.depth += 1;
+    }
     pub fn popClip(self: *Buffer) Error!void {
         if (self.depth == 0 or (self.group_depth != 0 and self.depth == self.group_clips[self.group_depth - 1])) return error.ClipStackEmpty;
         try self.append(.pop_clip);
@@ -698,7 +711,7 @@ pub const Buffer = struct {
         // Clip depth where the scope opens, and the deepest inside it.
         var depth: usize = 0;
         for (self.storage[0..start]) |command| switch (command) {
-            .push_clip, .push_mask_clip => depth += 1,
+            .push_clip, .push_mask_clip, .push_opacity => depth += 1,
             .pop_clip => depth -|= 1,
             else => {},
         };
@@ -713,7 +726,7 @@ pub const Buffer = struct {
                     if (nesting == 0) break;
                     nesting -= 1;
                 },
-                .push_clip, .push_mask_clip => {
+                .push_clip, .push_mask_clip, .push_opacity => {
                     inner += 1;
                     deepest = @max(deepest, inner);
                 },
@@ -776,7 +789,7 @@ pub const Buffer = struct {
     /// backdrops, filters and textures stay where they were recorded.
     pub fn translatable(command: Command) bool {
         return switch (command) {
-            .fill, .shape, .gradient, .text, .prepared_text, .coverage, .image, .push_clip, .push_mask_clip, .pop_clip, .indicator, .end_group => true,
+            .fill, .shape, .gradient, .text, .prepared_text, .coverage, .image, .push_clip, .push_mask_clip, .push_opacity, .pop_clip, .indicator, .end_group => true,
             .begin_group => |value| value.filter_slot == no_filter,
             else => false,
         };
@@ -839,6 +852,7 @@ pub const Buffer = struct {
                 if (value.mask >= source.coverage_len) return error.MissingResources;
                 try self.pushMaskClip(moved.rect(value.bounds, delta), moved.point(value.origin, delta), source.coverage_storage[value.mask]);
             },
+            .push_opacity => |alpha| try self.pushOpacity(alpha),
             .pop_clip => try self.popClip(),
             .indicator => |slot| {
                 if (slot >= source.indicator_len) return error.MissingResources;
@@ -1039,7 +1053,7 @@ pub fn preflightGaussianScopes(list: []const Command, capacity: u8, scale: f32, 
             if (clips != saved[groups - 1]) return error.UnbalancedGroupClips;
             groups -= 1;
         },
-        .push_clip, .push_mask_clip => {
+        .push_clip, .push_mask_clip, .push_opacity => {
             if (clips == 32) return error.ClipStackFull;
             clips += 1;
         },

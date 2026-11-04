@@ -415,6 +415,13 @@ void zlc_push_clip(Renderer *s,float x,float y,float width,float height){
     after[2]=fmin(before[2],((double)x+width)*s->scale+s->origin[0]);after[3]=fmin(before[3],((double)y+height)*s->scale+s->origin[1]);
     CGContextSaveGState(s->target->context);CGContextClipToRect(s->target->context,CGRectMake(x,y,width,height));s->target->saves++;
 }
+/* A clip level that cuts nothing more (an opacity's); popped by
+   zlc_pop_clip. */
+void zlc_push_keep(Renderer *s){
+    if(s->gradient_clip_depth>=32)return;
+    memcpy(s->gradient_clips[s->gradient_clip_depth+1],s->gradient_clips[s->gradient_clip_depth],sizeof(s->gradient_clips[0]));s->gradient_clip_depth++;
+    CGContextSaveGState(s->target->context);s->target->saves++;
+}
 /* Clips to device pixels x0..x1, y0..y1 of the plane, exactly on pixel
    edges whatever the scale; popped by zlc_pop_clip. */
 void zlc_push_device_clip(Renderer *s,int32_t x0,int32_t y0,int32_t x1,int32_t y1){

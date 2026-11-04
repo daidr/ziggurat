@@ -164,7 +164,7 @@ static NSString *const shader_source=@
 "    if(n==0.0)return float2(min(e[4],ry)-e[6]*0.5,1.0);return float2(abs((n-1.0)/hyp(qx/(e[4]*n),qy/(ry*n)))-e[6]*0.5,1.0);}\n"
 "  float dx=px-e[2],dy=py-e[3];float behind=turned(precise::atan2(dy,dx),e[5]);return float2(hyp(dx,dy)-e[4],behind<=e[6]?1.0-behind/e[6]:0.0);\n"
 "}\n"
-"fragment float4 zm_fragment(VOut in[[stage_in]],constant Uniforms&u[[buffer(0)]],const device Inst*insts[[buffer(1)]],const device Brush*brushes[[buffer(2)]],const device float*words[[buffer(3)]],texture2d<float>tex[[texture(0)]],texture2d<float>mask[[texture(1)]],sampler linear_sampler[[sampler(0)]],sampler nearest_sampler[[sampler(1)]],sampler mask_sampler[[sampler(2)]]){\n"
+"static float4 zm_shade(VOut in,constant Uniforms&u,const device Inst*insts,const device Brush*brushes,const device float*words,texture2d<float>tex,texture2d<float>mask,sampler linear_sampler,sampler nearest_sampler,sampler mask_sampler){\n"
 "  Inst i=insts[in.inst];float2 p=in.pos.xy+u.origin;uint kind=uint(i.p.z);\n"
 "  float cov=box(p,i.clip);float4 color=i.color;\n"
 "  if(kind==0u)cov*=box(p,i.rect);\n"
@@ -180,6 +180,11 @@ static NSString *const shader_source=@
 "    return float4(floor((round(i.color.rgb*255.0)*alpha+127.0)/255.0),alpha)/255.0;}\n"
 "  else{float lod=i.p.x;float4 t=i.p.w>0.5?tex.sample(linear_sampler,in.uv,level(lod)):tex.sample(nearest_sampler,in.uv,level(lod));return t*(color.a*cov*box(p,i.rect));}\n"
 "  return color*cov;\n"
+"}\n"
+/* Each drawing at the opacity of its batch (Uniforms.pad), as if it
+   multiplied its colors (Command.push_opacity). */
+"fragment float4 zm_fragment(VOut in[[stage_in]],constant Uniforms&u[[buffer(0)]],const device Inst*insts[[buffer(1)]],const device Brush*brushes[[buffer(2)]],const device float*words[[buffer(3)]],texture2d<float>tex[[texture(0)]],texture2d<float>mask[[texture(1)]],sampler linear_sampler[[sampler(0)]],sampler nearest_sampler[[sampler(1)]],sampler mask_sampler[[sampler(2)]]){\n"
+"  return zm_shade(in,u,insts,brushes,words,tex,mask,linear_sampler,nearest_sampler,mask_sampler)*u.pad;\n"
 "}\n"
 "struct Filter{uint width;uint height;uint radius;uint vertical;uint weights[257];};\n"
 "vertex float4 zm_full_vertex(uint vid[[vertex_id]]){float2 c=float2(float(vid&1u),float(vid>>1));return float4(c.x*2.0-1.0,1.0-c.y*2.0,0.0,1.0);}\n"
@@ -230,7 +235,7 @@ static NSString *const shader_source=@
 "  uint2 xy=uint2(pos.xy);uint2 local=xy-g.region.xy;float px=float(xy.x)+0.5,py=float(xy.y)+0.5;float4 d=round(dst.read(local)*255.0);\n"
 "  float radius=g.misc.x;float sd=rounded_distance(g.box,radius,px,py);\n"
 "  float fx=float(xy.x),fy=float(xy.y);float cover=max(0.0,min(fx+1.0,g.clip.z)-max(fx,g.clip.x))*max(0.0,min(fy+1.0,g.clip.w)-max(fy,g.clip.y));\n"
-"  uint kind=uint(g.misc2.y);float amount=clamp(0.5-sd,0.0,1.0)*cover;if(kind==3u)amount*=g.fill.a;\n"
+"  uint kind=uint(g.misc2.y);float amount=clamp(0.5-sd,0.0,1.0)*cover*g.background.w;if(kind==3u)amount*=g.fill.a;\n"
 "  if(amount==0.0)return d/255.0;\n"
 "  float4 color;\n"
 "  if(kind==3u)color=pack(g.fill.rgb);\n"
@@ -254,7 +259,7 @@ enum {OP_DRAW,OP_CAPTURE,OP_EFFECT,OP_BACKDROP,OP_GLASS};
 /* A draw batch's instances share a texture and a mask (group composites);
    replace batches overwrite the target (a transparent frame's damage
    cleared) rather than blend. */
-typedef struct ZmBatch {uint32_t first,count;int bind,replace;__unsafe_unretained id<MTLTexture> texture,mask;uint32_t op,run;} ZmBatch;
+typedef struct ZmBatch {uint32_t first,count;int bind,replace;__unsafe_unretained id<MTLTexture> texture,mask;uint32_t op,run;float opacity;} ZmBatch;
 /* One effect: a capture (source, at physical origin) and what its program
    writes (output), or a backdrop shader's copy (source) of region and the
    pixels it writes (out). The frame keeps the textures. */
@@ -274,7 +279,7 @@ typedef struct ZmGlyph {float x,y,width,height,left,top;uint32_t color;} ZmGlyph
    is, and how it composites when it closes: a group's bounds (device
    pixels), opacity and mask (a coverage slot at device rectangle), or a
    transform's map to its parent (DIP) and source in physical pixels. */
-typedef struct ZmCapture {float clips[ZM_CLIPS][4];uint32_t clip_depth,run,width,height,kind,empty,opacity,mask;float bounds[4],mask_rect[4];double matrix[6];} ZmCapture;
+typedef struct ZmCapture {float clips[ZM_CLIPS][4];uint32_t clip_depth,run,width,height,kind,empty,opacity,mask;float bounds[4],mask_rect[4];double matrix[6];float faded;uint32_t fades;} ZmCapture;
 
 static atomic_int live_objects;
 
@@ -327,6 +332,9 @@ static void domain_lose(ZigMetalDomain *domain);
        still uses, for later frames' captures of the same size. */
     NSMutableArray<id<MTLTexture>> *frame_captures,*free_captures;
     float clips[ZM_CLIPS][4];uint32_t clip_depth;
+    /* The opacity drawings draw at now (Command.push_opacity), and those
+       the opacities open saved. */
+    float faded,fades[ZM_CLIPS];uint32_t fade_depth;
     /* Instance buffers the GPU no longer reads, reused for later frames. */
     NSMutableArray<id<MTLBuffer>> *free_buffers;
     /* Glyph atlas: the current page, its shelf packer and what it holds. */
@@ -501,6 +509,7 @@ static NSView *find_view(NSView *root){
 }
 static void reset_frame(ZigMetalRenderer *s){
     s->instance_len=0;s->batch_len=0;s->brush_len=0;s->clip_depth=0;s->run_len=0;s->word_len=0;s->capture_depth=0;s->partial=0;
+    s->faded=1;s->fade_depth=0;
     s->clips[0][0]=0;s->clips[0][1]=0;s->clips[0][2]=(float)s->width;s->clips[0][3]=(float)s->height;
     [s->frame_textures removeAllObjects];
     /* A frame not encoded leaves its captures unused. */
@@ -578,7 +587,7 @@ static ZmInstance *push_with(ZigMetalRenderer *s,int bind,id<MTLTexture> texture
     ZmBatch *last=s->batch_len?&s->batches[s->batch_len-1]:NULL;
     /* Untextured instances join any batch that blends as they do; a
        textured one needs its own. */
-    int joins=last&&last->op==OP_DRAW&&last->replace==replace&&((bind==BIND_NONE&&!mask)||(last->bind==bind&&last->texture==texture&&last->mask==mask)||(last->bind==BIND_NONE&&!last->mask));
+    int joins=last&&last->op==OP_DRAW&&last->replace==replace&&last->opacity==s->faded&&((bind==BIND_NONE&&!mask)||(last->bind==bind&&last->texture==texture&&last->mask==mask)||(last->bind==BIND_NONE&&!last->mask));
     if(joins){
         if(bind!=BIND_NONE&&last->bind==BIND_NONE){last->bind=bind;last->texture=texture;last->mask=mask;[s->frame_textures addObject:texture];if(mask)[s->frame_textures addObject:mask];}
         last->count++;
@@ -588,7 +597,7 @@ static ZmInstance *push_with(ZigMetalRenderer *s,int bind,id<MTLTexture> texture
             ZmBatch *grown=realloc(s->batches,(size_t)capacity*sizeof(ZmBatch));if(!grown)return NULL;
             s->batches=grown;s->batch_capacity=capacity;
         }
-        s->batches[s->batch_len++]=(ZmBatch){s->instance_len,1,bind,replace,texture,mask,OP_DRAW,0};
+        s->batches[s->batch_len++]=(ZmBatch){s->instance_len,1,bind,replace,texture,mask,OP_DRAW,0,s->faded};
         if(texture)[s->frame_textures addObject:texture];
         if(mask)[s->frame_textures addObject:mask];
     }
@@ -682,6 +691,13 @@ void zmtl_push_clip(void *p,float x,float y,float width,float height){
     a[0]=fmaxf(b[0],r[0]);a[1]=fmaxf(b[1],r[1]);a[2]=fminf(b[2],r[2]);a[3]=fminf(b[3],r[3]);
 }
 void zmtl_pop_clip(void *p){ZigMetalRenderer *s=R(p);if(s->clip_depth)s->clip_depth--;}
+/* Draw what follows at alpha (of 255) more, each drawing by itself, until
+   zmtl_pop_opacity (Command.push_opacity). */
+void zmtl_push_opacity(void *p,uint32_t alpha){
+    ZigMetalRenderer *s=R(p);if(s->fade_depth==ZM_CLIPS)return;
+    s->fades[s->fade_depth++]=s->faded;s->faded*=(float)(alpha>255?255:alpha)/255.0f;
+}
+void zmtl_pop_opacity(void *p){ZigMetalRenderer *s=R(p);if(s->fade_depth)s->faded=s->fades[--s->fade_depth];}
 /* Narrows the current clip for one command; restore_clip puts it back. */
 static void narrow_clip(ZigMetalRenderer *s,double x,double y,double width,double height,float *saved){
     float *c=s->clips[s->clip_depth];memcpy(saved,c,4*sizeof(float));
@@ -928,7 +944,7 @@ static ZmBatch *push_op(ZigMetalRenderer *s,uint32_t op,uint32_t run){
         ZmBatch *grown=realloc(s->batches,(size_t)capacity*sizeof(ZmBatch));if(!grown)return NULL;
         s->batches=grown;s->batch_capacity=capacity;
     }
-    ZmBatch *b=&s->batches[s->batch_len++];*b=(ZmBatch){s->instance_len,0,BIND_NONE,0,nil,nil,op,run};
+    ZmBatch *b=&s->batches[s->batch_len++];*b=(ZmBatch){s->instance_len,0,BIND_NONE,0,nil,nil,op,run,1};
     return b;
 }
 static ZmRun *new_run(ZigMetalRenderer *s,uint32_t *index){
@@ -1002,6 +1018,8 @@ static int open_capture(ZigMetalRenderer *s,uint32_t kind,uint64_t width,uint64_
     ZmCapture *c=&s->captures[s->capture_depth++];
     memcpy(c->clips,s->clips,sizeof(c->clips));c->clip_depth=s->clip_depth;c->run=index;c->width=(uint32_t)width;c->height=(uint32_t)height;
     c->kind=kind;c->empty=0;c->opacity=255;c->mask=UINT32_MAX;
+    /* Opacities opened outside fade the capture as one drawing. */
+    c->faded=s->faded;c->fades=s->fade_depth;s->faded=1;
     s->clip_depth=0;memcpy(s->clips[0],clip,sizeof(s->clips[0]));
     *out=c;return 0;
 }
@@ -1066,7 +1084,7 @@ int zmtl_end_group(void *p){
     ZigMetalRenderer *s=R(p);if(!s->drawing||!s->capture_depth)return 1;
     ZmCapture *c=&s->captures[s->capture_depth-1];if(c->kind!=RUN_GROUP&&c->kind!=RUN_GAUSSIAN)return 1;
     s->capture_depth--;
-    memcpy(s->clips,c->clips,sizeof(s->clips));s->clip_depth=c->clip_depth;
+    memcpy(s->clips,c->clips,sizeof(s->clips));s->clip_depth=c->clip_depth;s->faded=c->faded;s->fade_depth=c->fades;
     ZmRun *run=&s->runs[c->run];
     if(c->kind==RUN_GAUSSIAN){
         run->temp=effect_texture(s,c->width,c->height,MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead);
@@ -1100,7 +1118,7 @@ int zmtl_end_transform(void *p,const double inverse[6],const float bounds[4]){
     ZigMetalRenderer *s=R(p);if(!s->drawing||!s->capture_depth)return 1;
     ZmCapture *c=&s->captures[s->capture_depth-1];if(c->kind!=RUN_TRANSFORM)return 1;
     s->capture_depth--;
-    memcpy(s->clips,c->clips,sizeof(s->clips));s->clip_depth=c->clip_depth;
+    memcpy(s->clips,c->clips,sizeof(s->clips));s->clip_depth=c->clip_depth;s->faded=c->faded;s->fade_depth=c->fades;
     ZmRun *run=&s->runs[c->run];
     if(!push_op(s,OP_EFFECT,c->run))return 2;
     s->stats.layers++;
@@ -1121,7 +1139,7 @@ int zmtl_end_effect(void *p,const ZmEffectPass *pass,uint32_t opacity){
     ZigMetalRenderer *s=R(p);if(!s->drawing||!s->capture_depth||s->captures[s->capture_depth-1].kind!=RUN_EFFECT)return 1;
     if(pass&&(pass->slot>=ZM_EFFECT_SLOTS||!s->effect_pipelines[pass->slot]))return 1;
     ZmCapture *c=&s->captures[--s->capture_depth];
-    memcpy(s->clips,c->clips,sizeof(s->clips));s->clip_depth=c->clip_depth;
+    memcpy(s->clips,c->clips,sizeof(s->clips));s->clip_depth=c->clip_depth;s->faded=c->faded;s->fade_depth=c->fades;
     ZmRun *run=&s->runs[c->run];
     if(pass){
         if(!keep_words(s,run,pass))return 2;
@@ -1145,6 +1163,8 @@ int zmtl_backdrop_shader(void *p,const ZmEffectPass *pass,const uint32_t region[
     if(!(region[0]<=out[0]&&region[1]<=out[1]&&out[0]<out[2]&&out[1]<out[3]&&out[2]<=region[2]&&out[3]<=region[3]&&region[2]<=geometry.width&&region[3]<=geometry.height&&region[2]-region[0]<=ZM_TEXTURE_LIMIT&&region[3]-region[1]<=ZM_TEXTURE_LIMIT))return 1;
     uint32_t index;ZmRun *run=new_run(s,&index);if(!run)return 2;
     if(!keep_words(s,run,pass))return 2;
+    /* The opacity the shader's result mixes in at (gpu_effect_host.zig). */
+    run->params.d[2]=1-s->faded;
     memcpy(run->region,region,sizeof(run->region));memcpy(run->out,out,sizeof(run->out));
     run->source=effect_texture(s,region[2]-region[0],region[3]-region[1],MTLTextureUsageShaderRead);if(!run->source)return 2;
     return push_op(s,OP_BACKDROP,index)?0:2;
@@ -1189,7 +1209,9 @@ int zmtl_backdrop(void *p,const ZmGlass *glass,uint32_t levels,const ZmGlassLeve
     if(!(region[0]<=out[0]&&region[1]<=out[1]&&out[0]<out[2]&&out[1]<out[3]&&out[2]<=region[2]&&out[3]<=region[3]&&region[2]<=geometry.width&&region[3]<=geometry.height&&region[2]-region[0]<=ZM_TEXTURE_LIMIT&&region[3]-region[1]<=ZM_TEXTURE_LIMIT))return 1;
     for(uint32_t k=0;k<levels;k++)if(level[k].radius>128||(uint64_t)level[k].weights+2*level[k].radius+1>weight_count)return 1;
     uint32_t index;ZmRun *run=new_run(s,&index);if(!run)return 2;
-    run->word_offset=append_words(s,glass,sizeof(*glass)/4);if(run->word_offset==UINT32_MAX)return 2;
+    /* The opacity it shades at (background.w). */
+    ZmGlass faded=*glass;faded.background[3]=s->faded;
+    run->word_offset=append_words(s,&faded,sizeof(faded)/4);if(run->word_offset==UINT32_MAX)return 2;
     /* Each level's weights on a boundary of their own. */
     ZmGlassLevel placed[16];
     for(uint32_t k=0;k<levels;k++){
@@ -1242,7 +1264,7 @@ static id<MTLRenderCommandEncoder> open_level(ZigMetalRenderer *s,id<MTLCommandB
     level->started=1;
     id<MTLRenderCommandEncoder> encoder=[commands renderCommandEncoderWithDescriptor:pass];if(!encoder)return nil;
     [encoder setRenderPipelineState:s->pipeline];
-    ZmUniforms uniforms={(float)level->texture.width,(float)level->texture.height,s->scale,0,{level->origin[0],level->origin[1]},{0,0}};
+    ZmUniforms uniforms={(float)level->texture.width,(float)level->texture.height,s->scale,1,{level->origin[0],level->origin[1]},{0,0}};
     [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:0];[encoder setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:0];
     [encoder setFragmentBuffer:buffer offset:brush_offset atIndex:2];
     [encoder setFragmentBuffer:buffer offset:word_offset atIndex:3];
@@ -1376,6 +1398,8 @@ static int encode(ZigMetalRenderer *s,id<MTLCommandBuffer> commands,id<MTLTextur
             size_t offset=(size_t)b->first*sizeof(ZmInstance);
             [encoder setVertexBuffer:buffer offset:offset atIndex:1];[encoder setFragmentBuffer:buffer offset:offset atIndex:1];
             [encoder setRenderPipelineState:b->replace?s->replace_pipeline:s->pipeline];
+            ZmUniforms uniforms={(float)levels[depth].texture.width,(float)levels[depth].texture.height,s->scale,b->opacity,{levels[depth].origin[0],levels[depth].origin[1]},{0,0}};
+            [encoder setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:0];
             [encoder setFragmentTexture:b->texture?b->texture:s->blank atIndex:0];[encoder setFragmentTexture:b->mask?b->mask:s->blank atIndex:1];
             [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4 instanceCount:b->count];
             break;

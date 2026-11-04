@@ -1010,10 +1010,14 @@ pub const Context = struct {
         if (self.painting) return error.Busy;
         var ready: usize = 0;
         if (comptime builtin.os.tag == .linux) {
-            // Linux runs effects on OpenGL over the software planes.
+            // Linux runs effects on OpenGL over the software planes, and in
+            // the OpenGL renderer's frames.
             const mode = self.gl_mode orelse gdi.glModeFromEnvironment();
+            const gpu = build_options.gpu and !self.gpu_unavailable and self.attached_render_mode != .gdi and self.gpu_renderer.native != null;
             for (shaders) |item| {
-                if (try self.renderer.prepareEffect(allocator, item.program, item.target, mode)) ready += 1;
+                const planes = try self.renderer.prepareEffect(allocator, item.program, item.target, mode);
+                const frames = if (comptime build_options.gpu) gpu and try self.gpu_renderer.prepareEffect(allocator, item.program, item.target) else false;
+                if (planes or frames) ready += 1;
             }
         } else {
             if (!build_options.gpu or self.gpu_unavailable or self.attached_render_mode == .gdi) return 0;
@@ -3492,6 +3496,9 @@ pub const Frame = struct {
     /// Open element effects; false marks one drawn without its program.
     effect_scopes: [16]bool = undefined,
     effect_depth: usize = 0,
+    /// Open `pushOpacity` scopes: how many clips were open at each.
+    opacity_scopes: [16]usize = undefined,
+    opacity_depth: usize = 0,
     /// The theme of the subtree being drawn, in place of the window's; see
     /// `pushTheme`.
     theme_override: ?*const Theme = null,
@@ -3504,7 +3511,7 @@ pub const Frame = struct {
     /// Open `beginAccessHidden` scopes: while any is open, `semantic`
     /// records nothing.
     access_hidden: u16 = 0,
-    const CacheScope = struct { cache: *Cache, mark: commands.Buffer.Checkpoint, clips: usize, group_depth: usize, offset_depth: usize, effect_depth: usize };
+    const CacheScope = struct { cache: *Cache, mark: commands.Buffer.Checkpoint, clips: usize, group_depth: usize, offset_depth: usize, effect_depth: usize, opacity_depth: usize };
 
     /// Keeps what is drawn until the matching `endCache` as one image in
     /// `value`, drawn again only when it changes; see `cache`. Hits, focus
@@ -3514,7 +3521,7 @@ pub const Frame = struct {
             self.failure = self.failure orelse error.CacheStackFull;
             return error.CacheStackFull;
         }
-        self.cache_scopes[self.cache_depth] = .{ .cache = value, .mark = self.context.command_buffer.checkpoint(), .clips = self.clips.len, .group_depth = self.group_depth, .offset_depth = self.offset_depth, .effect_depth = self.effect_depth };
+        self.cache_scopes[self.cache_depth] = .{ .cache = value, .mark = self.context.command_buffer.checkpoint(), .clips = self.clips.len, .group_depth = self.group_depth, .offset_depth = self.offset_depth, .effect_depth = self.effect_depth, .opacity_depth = self.opacity_depth };
         self.cache_depth += 1;
     }
     pub fn endCache(self: *Frame) !void {
@@ -3527,7 +3534,7 @@ pub const Frame = struct {
         if (self.cache_depth == 0) return error.CacheStackEmpty;
         self.cache_depth -= 1;
         const scope = self.cache_scopes[self.cache_depth];
-        if (self.clips.len != scope.clips or self.group_depth != scope.group_depth or self.offset_depth != scope.offset_depth or self.effect_depth != scope.effect_depth) return error.UnbalancedCache;
+        if (self.clips.len != scope.clips or self.group_depth != scope.group_depth or self.offset_depth != scope.offset_depth or self.effect_depth != scope.effect_depth or self.opacity_depth != scope.opacity_depth) return error.UnbalancedCache;
         if (self.failure != null or self.transforms != null) return;
         _ = try scope.cache.resolve(&self.context.command_buffer, scope.mark, self.size.scale, .{ .context = self.context, .call = Context.retireSnapshot });
     }
@@ -4061,9 +4068,38 @@ pub const Frame = struct {
     }
     pub fn popClip(self: *Frame) !void {
         if (self.clips.len == 0) return error.ClipStackEmpty;
+        if (self.opacity_depth != 0 and self.opacity_scopes[self.opacity_depth - 1] == self.clips.len) return error.ClipStackEmpty;
         try self.context.command_buffer.popClip();
         try self.clips.pop();
         if (self.transforms) |workspace| workspace.reference.clip = workspace.clip_parents[self.clips.len];
+    }
+    /// Draw what follows until the matching `popOpacity` at `alpha` (of
+    /// 255), each drawing by itself, as if it multiplied the drawing's
+    /// colors: overlapping children show through each other, not as one
+    /// faded layer. A group, cache or effect inside fades as one drawing.
+    /// It cuts nothing, and takes one of the 32 clip levels.
+    pub fn pushOpacity(self: *Frame, alpha: u8) !void {
+        return self.pushOpacityBody(alpha) catch |err| {
+            self.failure = self.failure orelse err;
+            return err;
+        };
+    }
+    fn pushOpacityBody(self: *Frame, alpha: u8) !void {
+        if (self.opacity_depth == self.opacity_scopes.len) return error.ClipStackFull;
+        try self.context.command_buffer.pushOpacity(alpha);
+        self.opacity_scopes[self.opacity_depth] = self.clips.len;
+        self.opacity_depth += 1;
+    }
+    pub fn popOpacity(self: *Frame) !void {
+        return self.popOpacityBody() catch |err| {
+            self.failure = self.failure orelse err;
+            return err;
+        };
+    }
+    fn popOpacityBody(self: *Frame) !void {
+        if (self.opacity_depth == 0 or self.opacity_scopes[self.opacity_depth - 1] != self.clips.len) return error.ClipStackEmpty;
+        try self.context.command_buffer.popClip();
+        self.opacity_depth -= 1;
     }
     /// Geometric hit/semantic clip across parent and group boundaries.
     pub fn clipBounds(self: *const Frame) ?Rect {
