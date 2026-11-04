@@ -9,6 +9,9 @@
 //! A group, transform or effect inside is one drawing: what it draws on its
 //! own layer is masked as it composites onto the plane the clip opened on,
 //! and masked clips opened inside it mask what is drawn on that layer.
+//! An opacity (`Command.push_opacity`) is a mask of one value everywhere,
+//! cutting nothing: each drawing fades by itself, as if its colors were
+//! multiplied by the opacity.
 const std = @import("std");
 const drawing = @import("ziggurat_drawing_resources");
 const cpu_gradient = @import("cpu_gradient.zig");
@@ -26,7 +29,10 @@ pub const Placement = struct { x: f64, y: f64 };
 pub const Scope = struct {
     /// Device pixels of the plane the clip covers: left, top, right, bottom.
     box: [4]u32,
-    coverage: drawing.Coverage,
+    /// Null for an opacity: `value` everywhere.
+    coverage: ?drawing.Coverage,
+    /// An opacity's value, 0 to 256.
+    value: u32 = 256,
     place: Placement,
     /// The layer the clip opened on: drawings on it are masked by it.
     level: u32,
@@ -69,6 +75,20 @@ pub const Stack = struct {
             .box = deviceBox(surface, rect),
             .coverage = coverage,
             .place = .{ .x = @as(f64, origin.x) * scale + @as(f64, @floatFromInt(coverage.origin_x)) + surface.origin[0], .y = @as(f64, origin.y) * scale + @as(f64, @floatFromInt(coverage.origin_y)) + surface.origin[1] },
+            .level = level,
+        };
+        self.len += 1;
+    }
+    /// Open an opacity of `alpha` (of 255) on `surface`, layer `level`:
+    /// a mask of that value over the whole plane. Mix the run first.
+    pub fn openOpacity(self: *Stack, surface: cpu_gradient.Surface, alpha: u8, level: u32) !void {
+        if (self.len == max_depth) return error.ClipStackFull;
+        if (self.piece_len != 0) return error.MaskRunOpen;
+        self.scopes[self.len] = .{
+            .box = .{ 0, 0, surface.width, surface.height },
+            .coverage = null,
+            .value = (@as(u32, alpha) * 256 + 127) / 255,
+            .place = .{ .x = 0, .y = 0 },
             .level = level,
         };
         self.len += 1;
@@ -169,7 +189,7 @@ pub const Stack = struct {
                 for (self.scopes[0..self.len]) |scope| {
                     if (scope.level != piece.level) continue;
                     if (m == 0) break;
-                    const value = if (x < scope.box[0] or x >= scope.box[2] or y < scope.box[1] or y >= scope.box[3]) 0 else sample(scope.coverage, @as(f64, @floatFromInt(x)) - scope.place.x, @as(f64, @floatFromInt(y)) - scope.place.y);
+                    const value = if (x < scope.box[0] or x >= scope.box[2] or y < scope.box[1] or y >= scope.box[3]) 0 else if (scope.coverage) |coverage| sample(coverage, @as(f64, @floatFromInt(x)) - scope.place.x, @as(f64, @floatFromInt(y)) - scope.place.y) else scope.value;
                     m = (m * value + 128) >> 8;
                 }
                 row[x] = mix(kept, row[x], m);
@@ -325,4 +345,29 @@ test "drawings that do not overlap gather into one run; a span on a masked layer
     try std.testing.expectEqual([4]u32{ 0, 0, 4, 1 }, try stack.endSpan(surface));
     try stack.close();
     try std.testing.expectEqual(@as(usize, 0), stack.pixels.items.len);
+}
+
+test "an opacity fades each drawing by itself and cuts nothing" {
+    // Two pixels; red then blue drawn opaque over the first at half.
+    var pixels = [_]u32{ 0, 0 };
+    const surface: cpu_gradient.Surface = .{ .pixels = &pixels, .width = 2, .height = 1, .stride = 2, .scale = 1, .clip = .{ 0, 0, 2, 1 }, .origin = .{ 0, 0 } };
+    var stack: Stack = .{};
+    defer stack.deinit(std.testing.allocator);
+    try stack.openOpacity(surface, 128, 0);
+    const box: damage.Box = .{ .x0 = 0, .y0 = 0, .x1 = 1, .y1 = 1 };
+    _ = try stack.draw(std.testing.allocator, surface, 0, box);
+    pixels[0] = 0xffff0000;
+    _ = try stack.draw(std.testing.allocator, surface, 0, box);
+    pixels[0] = 0xff0000ff;
+    // A drawing anywhere on the plane fades, none is cut.
+    _ = try stack.draw(std.testing.allocator, surface, 0, .{ .x0 = 1, .y0 = 0, .x1 = 2, .y1 = 1 });
+    pixels[1] = 0xff00ff00;
+    _ = try stack.flush(surface);
+    try stack.close();
+    const red = (pixels[0] >> 16) & 0xff;
+    const blue = pixels[0] & 0xff;
+    try std.testing.expect(red > 56 and red < 72);
+    try std.testing.expect(blue > 120 and blue < 136);
+    const green = (pixels[1] >> 8) & 0xff;
+    try std.testing.expect(green > 120 and green < 136 and pixels[1] >> 24 > 120 and pixels[1] >> 24 < 136);
 }
