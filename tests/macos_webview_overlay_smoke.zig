@@ -4,7 +4,10 @@
 //! Tab moves the keyboard from the first button into the page at its first
 //! element, through it, and on to the last button; Shift+Tab comes back
 //! into the page at its last element. With accessibility, the page's tree
-//! is inside the web view's node of the native UI's.
+//! is inside the web view's node of the native UI's. When the window
+//! cannot become key (another app keeps the keyboard, or the session's
+//! screen is locked), the page takes no keyboard, so the Tab steps are
+//! skipped and said so; the shape and the popover are still checked.
 const std = @import("std");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
@@ -31,6 +34,10 @@ const State = struct {
     item: embedded.WebView = undefined,
     page: web.View = undefined,
     loaded: bool = false,
+    /// Whether the window became key; null until it is known.
+    key: ?bool = null,
+    /// The tick the window was first asked to become key.
+    asked: ?u32 = null,
     popover: bool = false,
     phase: Phase = .loading,
     ticks: u32 = 0,
@@ -126,7 +133,8 @@ const State = struct {
         const native = self.window.nativeHandle().?;
         const state = &self.host.context.input_state;
         if (self.ticks > self.since + 400) {
-            std.debug.print("page keyboard={} element={s} control={?d} wanted={?d}\n", .{ self.pageHasKeyboard(), self.focused[0..self.focused_len], state.focused, self.control(2) });
+            const visible = if (self.item.region) |region| if (region.snapshot()) |snapshot| snapshot.viewport.visible else |_| false else false;
+            std.debug.print("loaded={} visible={} key={?} page keyboard={} element={s} control={?d} wanted={?d}\n", .{ self.loaded, visible, self.key, self.pageHasKeyboard(), self.focused[0..self.focused_len], state.focused, self.control(2) });
             return error.TimedOut;
         }
         switch (self.phase) {
@@ -134,8 +142,20 @@ const State = struct {
                 const snapshot = try self.item.region.?.snapshot();
                 if (!self.loaded or !snapshot.viewport.visible or self.ticks < 10) return;
                 // A page focuses its elements and gives the keyboard back
-                // by Tab only in the key window.
-                if (zwo_activate(native) == 0) return;
+                // by Tab only in the key window. Some sessions never let a
+                // window become key; give it 3 seconds, then go on without.
+                if (self.key == null) {
+                    const asked = self.asked orelse self.ticks;
+                    self.asked = asked;
+                    if (zwo_activate(native) != 0) {
+                        self.key = true;
+                    } else if (self.ticks < asked + 150) {
+                        return;
+                    } else {
+                        self.key = false;
+                        std.debug.print("macOS web view overlay: the window could not become key; the Tab steps are skipped\n", .{});
+                    }
+                }
                 const box = self.leaf() orelse return error.NoLeaf;
                 // The page shows in its leaf, the native UI around it.
                 if (!try self.pageAt(box.x + box.width / 2, box.y + box.height / 2)) return;
@@ -150,6 +170,11 @@ const State = struct {
                         return error.PageNotInTree;
                     }
                     if (found == 0) return;
+                }
+                if (self.key != true) {
+                    self.popover = true;
+                    self.window.invalidate();
+                    return self.next(.covered);
                 }
                 // Tab to the first button, as the window starts without a
                 // focused control.
@@ -244,5 +269,6 @@ fn run(allocator: std.mem.Allocator) !void {
     try std.testing.expect(!watchdog.expired and state.phase == .done);
     state.item.remove();
     _ = try state.window.destroy();
-    std.debug.print("macOS web view overlay: the native UI showed around the page and its popover over it; Tab went into the page, through it and out, Shift+Tab back to its last element{s}\n", .{if (ui.capabilities.accessibility) "; the page's tree is inside the web view's node" else ""});
+    const keyboard = if (state.key == true) "Tab went into the page, through it and out, Shift+Tab back to its last element" else "Tab skipped (the window could not become key)";
+    std.debug.print("macOS web view overlay: the native UI showed around the page and its popover over it; {s}{s}\n", .{ keyboard, if (ui.capabilities.accessibility) "; the page's tree is inside the web view's node" else "" });
 }
