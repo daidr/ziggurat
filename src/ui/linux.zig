@@ -34,6 +34,7 @@ extern fn zlc_text(*anyopaque, f32, f32, f32, f32, [*]const u8, u32, u32, f32, u
 extern fn zlc_prepared(*anyopaque, *anyopaque, f32, f32, f32, i32, i32, ?*const drawing.Rect, u32) c_int;
 extern fn zlc_scale(*anyopaque) f32;
 extern fn zlc_push_clip(*anyopaque, f32, f32, f32, f32) void;
+extern fn zlc_push_keep(*anyopaque) void;
 extern fn zlc_pop_clip(*anyopaque) void;
 extern fn zlc_clear_rect(*anyopaque, f32, f32, f32, f32) void;
 extern fn zlc_push_device_clip(*anyopaque, i32, i32, i32, i32) void;
@@ -815,7 +816,7 @@ pub const Renderer = struct {
                         try self.maskFlush();
                         try self.maskDraw(null);
                     },
-                    .push_clip, .push_mask_clip, .pop_clip => try self.maskFlush(),
+                    .push_clip, .push_mask_clip, .push_opacity, .pop_clip => try self.maskFlush(),
                     .begin_group, .begin_transform, .effect => try self.maskBeginSpan(),
                     .end_group, .end_transform, .end_effect => try self.maskBeforeEnd(),
                     .texture => {},
@@ -942,6 +943,15 @@ pub const Renderer = struct {
                     const rect = value.bounds;
                     try self.masks.open(surface, rect, value.origin, view.coverage, self.layer_level);
                     zlc_push_clip(self.native.?, rect.x, rect.y, rect.width, rect.height);
+                    masked |= @as(u32, 1) << @intCast(depth);
+                    depth += 1;
+                },
+                .push_opacity => |alpha| {
+                    if (depth == 32) return error.ClipStackFull;
+                    var surface: cpu_gradient.Surface = undefined;
+                    if (zlc_gradient_surface(self.native.?, &surface) != 0) return error.DrawGradientFailed;
+                    try self.masks.openOpacity(surface, alpha, self.layer_level);
+                    zlc_push_keep(self.native.?);
                     masked |= @as(u32, 1) << @intCast(depth);
                     depth += 1;
                 },

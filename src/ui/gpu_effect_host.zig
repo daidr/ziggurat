@@ -26,7 +26,8 @@ pub const Params = extern struct {
     clip: [4]f32 = .{ 0, 0, 0, 0 },
     /// Backdrop: pixel origin x, y; target pixel of output pixel 0, 0.
     c: [4]f32 = .{ 0, 0, 0, 0 },
-    /// Backdrop: target pixel of content pixel 0, 0.
+    /// Backdrop: target pixel of content pixel 0, 0; how much less than
+    /// whole the result mixes in (1 - the opacity it draws at).
     d: [4]f32 = .{ 0, 0, 0, 0 },
     /// Content width, height; backdrop: 1 for an opaque target.
     plane: [4]u32 = .{ 0, 0, 0, 0 },
@@ -173,6 +174,23 @@ const common_prelude =
 /// parameters (buffer 1), the target pixel of `at` 0, 0 (buffer 2, float2)
 /// and the content (texture 0).
 pub fn source(allocator: std.mem.Allocator, translation: *const shader.gpu.Translation, kind: shader.Kind, target: Target, language: Language) ![:0]u8 {
+    return sourceRows(allocator, translation, kind, target, language, .top_down);
+}
+
+/// How the GLSL program's textures and target store their rows.
+pub const Rows = enum {
+    /// Row 0 first, as the software planes' executor uploads them.
+    top_down,
+    /// Bottom row first, as the OpenGL scene renderer draws its targets:
+    /// `zs_content` is read from its bottom and the program reads the
+    /// uniform `zs_frame` (x, y of `at` 0, 0 in the target; the target's
+    /// height) for where its fragments are.
+    bottom_up,
+};
+
+/// `source`, for GLSL with `rows` stored as the renderer stores them.
+pub fn sourceRows(allocator: std.mem.Allocator, translation: *const shader.gpu.Translation, kind: shader.Kind, target: Target, language: Language, rows: Rows) ![:0]u8 {
+    const flipped = language == .glsl and rows == .bottom_up;
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
     const w = &out.writer;
@@ -185,6 +203,12 @@ pub fn source(allocator: std.mem.Allocator, translation: *const shader.gpu.Trans
         },
         .glsl => {
             try w.writeAll(glsl_header);
+            if (flipped) try w.writeAll(
+                \\#undef ZH_TEXEL
+                \\#define ZH_TEXEL(zx, zy) texelFetch(zs_content, ivec2((zx), textureSize(zs_content, 0).y - 1 - (zy)), 0)
+                \\uniform vec3 zs_frame;
+                \\
+            );
             try w.print("layout(std140) uniform ZsWords {{ uvec4 zs_words[{d}]; }};\n", .{vectors});
             try w.writeAll("uint zs_input(uint i) { return zs_words[i >> 2u][i & 3u]; }\n");
         },
@@ -237,7 +261,7 @@ pub fn source(allocator: std.mem.Allocator, translation: *const shader.gpu.Trans
                 \\    float qy = abs(py - (zp_shape.y + hy)) - (hy - radius);
                 \\    float distance = sqrt(max(qx, 0.0) * max(qx, 0.0) + max(qy, 0.0) * max(qy, 0.0)) + min(max(qx, qy), 0.0) - radius;
                 \\    float cover = max(0.0, min(x + 1.0, zp_clip.z) - max(x, zp_clip.x)) * max(0.0, min(y + 1.0, zp_clip.w) - max(y, zp_clip.y));
-                \\    float amount = clamp(0.5 - distance, 0.0, 1.0) * cover;
+                \\    float amount = clamp(0.5 - distance, 0.0, 1.0) * cover * (1.0 - zp_d.z);
                 \\    if (amount == 0.0) return beneath;
                 \\    ZH_F2 position = ZH_F2((px - zp_c.x) / zp_b.z - zp_a.x, (py - zp_c.y) / zp_b.z - zp_a.y);
                 \\    ZH_F4 result = ZH_F4(0.0, 0.0, 0.0, 0.0);
@@ -268,7 +292,10 @@ pub fn source(allocator: std.mem.Allocator, translation: *const shader.gpu.Trans
     }
     try w.writeAll(switch (language) {
         .hlsl => "float4 main(float4 at : SV_Position) : SV_Target { return zs_main(at); }\n",
-        .glsl => "void main() { zs_out = zs_main(gl_FragCoord); }\n",
+        .glsl => if (flipped)
+            "void main() { zs_out = zs_main(vec4(gl_FragCoord.x - zs_frame.x, zs_frame.z - gl_FragCoord.y - zs_frame.y, 0.0, 1.0)); }\n"
+        else
+            "void main() { zs_out = zs_main(gl_FragCoord); }\n",
         .msl =>
         \\struct ZsVertex { float4 position [[position]]; };
         \\vertex ZsVertex zs_vertex(uint vid [[vertex_id]], constant float4 &quad [[buffer(0)]]) {
@@ -355,6 +382,10 @@ pub const Table = struct {
         self.clear(&self.entries[index]);
         return @intCast(index);
     }
+    /// Empty `slot`: its program failed to install.
+    pub fn forget(self: *Table, slot: u32) void {
+        self.clear(&self.entries[slot]);
+    }
     /// Record `slot` as running the program `identity` drawn as `target`;
     /// the table owns `inputs` and `code`, allocated with `allocator`.
     pub fn fill(self: *Table, slot: u32, identity: u64, target: Target, inputs: []u16, code: []u8, allocator: std.mem.Allocator) void {
@@ -408,6 +439,11 @@ test "host source wraps a translation for each kind, target and language" {
                 }) != null);
                 try std.testing.expect(std.mem.indexOf(u8, text, "bool zs_run(") != null);
                 try std.testing.expect(std.mem.indexOf(u8, text, "zs_plane(") != null);
+                if (language == .glsl) {
+                    const flipped = try sourceRows(allocator, &translation, program.kind, target, language, .bottom_up);
+                    defer allocator.free(flipped);
+                    try std.testing.expect(std.mem.indexOf(u8, flipped, "zs_frame.z - gl_FragCoord.y") != null);
+                }
             }
         }
     }

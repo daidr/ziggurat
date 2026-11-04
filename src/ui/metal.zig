@@ -78,6 +78,8 @@ extern fn zmtl_push_device_clip(*anyopaque, i32, i32, i32, i32) void;
 extern fn zmtl_forget_plane(*anyopaque) void;
 extern fn zmtl_push_clip(*anyopaque, f32, f32, f32, f32) void;
 extern fn zmtl_pop_clip(*anyopaque) void;
+extern fn zmtl_push_opacity(*anyopaque, u32) void;
+extern fn zmtl_pop_opacity(*anyopaque) void;
 extern fn zmtl_text(*anyopaque, f32, f32, f32, f32, [*]const u8, u32, u32, f32, u16, c_int, c_int, ?[*:0]const u8) c_int;
 extern fn zmtl_prepared(*anyopaque, *anyopaque, *const drawing.NativeCoverage, f32, f32, ?*const drawing.Rect, u32) c_int;
 extern fn zmtl_forget_prepared(*anyopaque) void;
@@ -419,7 +421,7 @@ pub const Renderer = struct {
         var clip_depth: usize = 0;
         var masked: u64 = 0;
         for (buffer.commands()) |op| switch (op) {
-            .push_clip => clip_depth += 1,
+            .push_clip, .push_opacity => clip_depth += 1,
             .push_mask_clip => {
                 if (depth == scopes.len or clip_depth >= 64) return false;
                 masked |= @as(u64, 1) << @intCast(clip_depth);
@@ -851,8 +853,10 @@ pub const Renderer = struct {
         for (resources) |*resource| try resource.validate();
         var depth: usize = 0;
         defer while (depth != 0) : (depth -= 1) zmtl_pop_clip(native);
-        // The clips open that are masked, a bit for each depth.
+        // The clips open that are masked, and those that are opacities, a
+        // bit for each depth.
         var masked: u32 = 0;
+        var faded: u32 = 0;
         var runs: MaskRuns = .{};
         const box_sources: damage.Sources = .{ .prepared = prepared, .coverage = coverage_resources, .indicators = if (self.effect_buffer) |buffer| buffer.indicator_storage[0..buffer.indicator_len] else &.{} };
         const box_scale = zmtl_scale(native);
@@ -870,10 +874,10 @@ pub const Renderer = struct {
                     try runs.flush(self);
                     try runs.draw(self, level, null, coverage_resources, filters);
                 },
-                .push_clip, .push_mask_clip, .pop_clip, .end_group, .end_transform, .end_effect => try runs.flush(self),
+                .push_clip, .push_mask_clip, .push_opacity, .pop_clip, .end_group, .end_transform, .end_effect => try runs.flush(self),
                 .begin_group, .begin_transform, .effect => try runs.beginSpan(self, level, coverage_resources, filters),
             };
-            try self.replayOne(op, text, resources, prepared, image_resources, coverage_resources, textures, transforms, filters, &runs, &depth, &masked, &effect_stack, &effect_depth, &transform_stack, &transform_depth, &group_depth, &words);
+            try self.replayOne(op, text, resources, prepared, image_resources, coverage_resources, textures, transforms, filters, &runs, &depth, &masked, &faded, &effect_stack, &effect_depth, &transform_stack, &transform_depth, &group_depth, &words);
         }
         try runs.flush(self);
         if (depth != 0) return error.UnbalancedClips;
@@ -881,16 +885,18 @@ pub const Renderer = struct {
         if (group_depth != 0) return error.UnbalancedGroups;
         if (transform_depth != 0) return error.UnbalancedTransforms;
     }
-    fn replayOne(self: *Renderer, op: commands.Command, text: []const u8, resources: []const commands.brushes.Stored, prepared: []const drawing.PreparedTextView, image_resources: []const drawing.ImageView, coverage_resources: []const drawing.CoverageView, textures: []const drawing.TextureView, transforms: []const layers.NativeTransform, filters: []const gaussian.View, runs: *MaskRuns, depth_ptr: *usize, masked_ptr: *u32, effect_stack: *[max_capture_depth]OpenEffect, effect_depth_ptr: *usize, transform_stack: *[max_capture_depth]layers.NativeTransform, transform_depth_ptr: *usize, group_depth_ptr: *usize, words: *[shader_effects.shader.gpu.max_input_words]u32) !void {
+    fn replayOne(self: *Renderer, op: commands.Command, text: []const u8, resources: []const commands.brushes.Stored, prepared: []const drawing.PreparedTextView, image_resources: []const drawing.ImageView, coverage_resources: []const drawing.CoverageView, textures: []const drawing.TextureView, transforms: []const layers.NativeTransform, filters: []const gaussian.View, runs: *MaskRuns, depth_ptr: *usize, masked_ptr: *u32, faded_ptr: *u32, effect_stack: *[max_capture_depth]OpenEffect, effect_depth_ptr: *usize, transform_stack: *[max_capture_depth]layers.NativeTransform, transform_depth_ptr: *usize, group_depth_ptr: *usize, words: *[shader_effects.shader.gpu.max_input_words]u32) !void {
         const native = self.native.?;
         var depth = depth_ptr.*;
         var masked = masked_ptr.*;
+        var faded = faded_ptr.*;
         var effect_depth = effect_depth_ptr.*;
         var transform_depth = transform_depth_ptr.*;
         var group_depth = group_depth_ptr.*;
         defer {
             depth_ptr.* = depth;
             masked_ptr.* = masked;
+            faded_ptr.* = faded;
             effect_depth_ptr.* = effect_depth;
             transform_depth_ptr.* = transform_depth;
             group_depth_ptr.* = group_depth;
@@ -963,6 +969,15 @@ pub const Renderer = struct {
                 runs.scopes[runs.len] = .{ .clip = value, .level = group_depth + transform_depth + effect_depth };
                 runs.len += 1;
             },
+            // Each drawing until its pop fades by itself: drawn at the
+            // opacity, as a group, transform or effect composites.
+            .push_opacity => |alpha| {
+                if (depth == 32) return error.ClipStackFull;
+                zmtl_push_device_clip(native, std.math.minInt(i32), std.math.minInt(i32), std.math.maxInt(i32), std.math.maxInt(i32));
+                zmtl_push_opacity(native, alpha);
+                faded |= @as(u32, 1) << @intCast(depth);
+                depth += 1;
+            },
             .pop_clip => {
                 if (depth == 0) return error.ClipStackEmpty;
                 depth -= 1;
@@ -970,6 +985,10 @@ pub const Renderer = struct {
                     masked &= ~(@as(u32, 1) << @intCast(depth));
                     if (runs.len == 0) return error.ClipStackEmpty;
                     runs.len -= 1;
+                }
+                if (faded & (@as(u32, 1) << @intCast(depth)) != 0) {
+                    faded &= ~(@as(u32, 1) << @intCast(depth));
+                    zmtl_pop_opacity(native);
                 }
                 zmtl_pop_clip(native);
             },
