@@ -3252,13 +3252,17 @@ pub fn build(b: *std.Build) void {
 /// keep LLVM. The self-hosted linker cannot yet read two kinds of mingw-w64
 /// import, so affected executables get src/c/windows/assert_shim.c and an
 /// import library for UI Automation generated from a lower-case definition.
-/// The self-hosted backend writes no PDB, so installs skip it.
+/// The linker also binds `@sin`-style calls to UCRT rather than compiler-rt,
+/// so they link src/c/windows/math, which defines those symbols from
+/// compiler-rt's code. The self-hosted backend writes no PDB, so installs
+/// skip it.
 fn useWindowsSelfHostedBackend(b: *std.Build, llvm: bool) void {
     var steps: std.array_hash_map.Auto(*std.Build.Step, void) = .empty;
     var it = b.top_level_steps.iterator();
     while (it.next()) |entry| collectSteps(b, &steps, &entry.value_ptr.*.step);
 
     var automation_library: ?std.Build.LazyPath = null;
+    var math_library: ?*std.Build.Step.Compile = null;
     for (steps.keys()) |step| {
         const compile = step.cast(std.Build.Step.Compile) orelse continue;
         if (compile.rootModuleTarget().os.tag != .windows or compile.use_llvm != null) continue;
@@ -3285,7 +3289,20 @@ fn useWindowsSelfHostedBackend(b: *std.Build, llvm: bool) void {
             const root = b.allocator.create(std.Build.Module) catch @panic("OOM");
             root.* = compile.root_module.*;
             root.link_objects = compile.root_module.link_objects.clone(b.allocator) catch @panic("OOM");
+            root.cached_graph = .{ .modules = &.{}, .names = &.{} };
             root.addCSourceFile(.{ .file = b.path("src/c/windows/assert_shim.c") });
+            root.linkLibrary(math_library orelse blk: {
+                const sources = b.addWriteFiles();
+                _ = sources.addCopyDirectory(.{ .relative = .{ .base = .zig_lib, .sub_path = "compiler_rt" } }, "compiler_rt", .{});
+                _ = sources.addCopyFile(b.path("src/c/windows/math/compiler_rt.zig"), "compiler_rt.zig");
+                const math_root = sources.addCopyFile(b.path("src/c/windows/math/root.zig"), "root.zig");
+                math_library = b.addLibrary(.{ .name = "ziggurat-windows-math", .use_llvm = false, .root_module = b.createModule(.{
+                    .root_source_file = math_root,
+                    .target = compile.root_module.resolved_target,
+                    .optimize = .fast,
+                }) });
+                break :blk math_library.?;
+            });
             compile.root_module = root;
         }
     }
