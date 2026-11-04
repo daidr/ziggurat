@@ -203,7 +203,9 @@ fn temporary(allocator: std.mem.Allocator) ![]u8 {
     defer allocator.free(directory);
     var suffix: [8]u8 = undefined;
     zio.random.bytes(&suffix);
-    return std.fmt.allocPrint(allocator, "{s}{c}zac-{x}", .{ directory, std.fs.path.sep, suffix });
+    // macOS TMPDIR ends with a separator; the CLI reports the resolved path.
+    const base = std.mem.trimEnd(u8, directory, "/\\");
+    return std.fmt.allocPrint(allocator, "{s}{c}zac-{x}", .{ if (base.len == 0) directory else base, std.fs.path.sep, suffix });
 }
 
 pub fn main() !void {
