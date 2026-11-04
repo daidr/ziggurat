@@ -157,6 +157,8 @@ fn removeStartup(dir: []const u8) void {
 }
 
 test "zsh is recognized by the program's name" {
+    // Windows has no zsh integration: runsZsh always answers false there.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     try std.testing.expect(runsZsh(.{ .argv = &.{"/usr/bin/zsh"} }));
     try std.testing.expect(runsZsh(.{ .argv = &.{ "zsh", "-l" } }));
     try std.testing.expect(!runsZsh(.{ .argv = &.{"/bin/bash"} }));
