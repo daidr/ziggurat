@@ -3989,7 +3989,7 @@ pub const Frame = struct {
     const ClipShape = union(enum) {
         none,
         rounded: struct { radius: f32, mask: ?commands.Gradient },
-        path: struct { path: *const vectors.Path, transform: vectors.Transform },
+        path: struct { path: *const vectors.Path, transform: vectors.Transform, rule: vectors.FillRule = .nonzero },
     };
     /// Clip what is drawn until the matching `popClip` to `bounds` with its
     /// corners rounded by `radius`, and, when `mask` is set, by the alpha of
@@ -4018,7 +4018,12 @@ pub const Frame = struct {
     /// mask every frame. Without room for another mask the clip cuts to the
     /// path's bounds only. Hits are not cut by it.
     pub fn pushPathClip(self: *Frame, path: *const vectors.Path, transform: vectors.Transform) !void {
-        return self.pushClipWith(.{ .x = 0, .y = 0, .width = 0, .height = 0 }, .{ .path = .{ .path = path, .transform = transform } });
+        return self.pushPathClipRule(path, transform, .nonzero);
+    }
+    /// `pushPathClip` with the inside chosen by `rule`, as SVG's
+    /// `clip-rule`: `.even_odd` cuts the overlap of crossing subpaths away.
+    pub fn pushPathClipRule(self: *Frame, path: *const vectors.Path, transform: vectors.Transform, rule: vectors.FillRule) !void {
+        return self.pushClipWith(.{ .x = 0, .y = 0, .width = 0, .height = 0 }, .{ .path = .{ .path = path, .transform = transform, .rule = rule } });
     }
     fn pushClipWith(self: *Frame, local_bounds: Rect, shape: ClipShape) !void {
         var bounds = local_bounds;
@@ -4049,7 +4054,7 @@ pub const Frame = struct {
                 }
             },
             .path => |value| if (self.context.clipMasks()) |masks| {
-                mask = masks.path(value.path, path_transform, clip, self.size.scale, self.context.clipMaskRelease()) catch null;
+                mask = masks.pathWithRule(value.path, path_transform, value.rule, clip, self.size.scale, self.context.clipMaskRelease()) catch null;
             },
         }
         if (mask) |view| if (!self.context.command_buffer.coverageRoom(view)) {

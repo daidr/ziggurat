@@ -266,6 +266,39 @@ pub const Path = struct {
         try transform.validate();
         return @import("bounds.zig").calculate(self.commands, transform, cancellation);
     }
+    /// Whether `point` lies inside the path filled by `rule`, with
+    /// `transform` mapping the path into `point`'s space: every subpath
+    /// counts as closed, as a fill does. Curves are flattened within
+    /// `tolerance` of `point`'s units.
+    pub fn contains(self: *const Path, allocator: std.mem.Allocator, point: Point, rule: FillRule, transform: Transform, tolerance: f64) !bool {
+        try self.checkOwner();
+        try transform.validate();
+        const kernel = @import("geometry_kernel.zig");
+        const options: PrepareOptions = .{ .main_thread = self.owner, .viewport = .{ .x = 0, .y = 0, .width = 1, .height = 1 }, .transform = transform, .style = .{ .fill = rule }, .tolerance = std.math.clamp(tolerance, 0.015625, 1) };
+        var flat: kernel.Flat = .{ .options = options };
+        try flat.flatten(self.commands);
+        const points = try allocator.alloc(Point, flat.count);
+        defer allocator.free(points);
+        const contours = try allocator.alloc(kernel.Contour, flat.contour_count);
+        defer allocator.free(contours);
+        flat = .{ .points = points, .contours = contours, .options = options };
+        try flat.flatten(self.commands);
+        var winding: i32 = 0;
+        for (contours) |contour| {
+            const vertices = points[contour.start..][0..contour.len];
+            for (vertices, 0..) |raw, index| {
+                const a = transform.apply(raw);
+                const b = transform.apply(vertices[(index + 1) % vertices.len]);
+                if ((a.y <= point.y) == (b.y <= point.y)) continue;
+                const x = a.x + (point.y - a.y) * (b.x - a.x) / (b.y - a.y);
+                if (x > point.x) winding += if (b.y > a.y) 1 else -1;
+            }
+        }
+        return switch (rule) {
+            .nonzero => winding != 0,
+            .even_odd => @mod(winding, 2) != 0,
+        };
+    }
     pub fn prepare(self: *const Path, allocator: std.mem.Allocator, options: PrepareOptions) !*Prepared {
         try self.checkOwner();
         const output_value: ?Transform = if (options.stroke_output) |output| output.* else null;
@@ -331,4 +364,20 @@ test {
     _ = @import("tests.zig");
     _ = @import("geometry_test.zig");
     _ = @import("stroke_space_test.zig");
+}
+
+test "a path holds points by its fill rule" {
+    // Two nested squares drawn the same way: the inner one is a hole only
+    // when filled even-odd.
+    const path = try Path.create(std.testing.allocator, &.{
+        .{ .move = .{ .x = 0, .y = 0 } }, .{ .line = .{ .x = 10, .y = 0 } }, .{ .line = .{ .x = 10, .y = 10 } }, .{ .line = .{ .x = 0, .y = 10 } }, .close,
+        .{ .move = .{ .x = 3, .y = 3 } }, .{ .line = .{ .x = 7, .y = 3 } },  .{ .line = .{ .x = 7, .y = 7 } },   .{ .line = .{ .x = 3, .y = 7 } },  .close,
+    }, .{});
+    defer path.close() catch {};
+    const a = std.testing.allocator;
+    try std.testing.expect(try path.contains(a, .{ .x = 5, .y = 5 }, .nonzero, .{}, 0.1));
+    try std.testing.expect(!try path.contains(a, .{ .x = 5, .y = 5 }, .even_odd, .{}, 0.1));
+    try std.testing.expect(try path.contains(a, .{ .x = 1, .y = 5 }, .even_odd, .{}, 0.1));
+    try std.testing.expect(!try path.contains(a, .{ .x = 11, .y = 5 }, .nonzero, .{}, 0.1));
+    try std.testing.expect(try path.contains(a, .{ .x = 25, .y = 15 }, .nonzero, .{ .xx = 2, .yy = 2, .x0 = 10 }, 0.1));
 }

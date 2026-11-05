@@ -178,6 +178,10 @@ pub const Masks = struct {
     /// `transform` into window DIP and cut to `visible`, in device pixels at
     /// `scale`; null when nothing of it shows or there is no room.
     pub fn path(self: *Masks, value: *const vector.Path, transform: vector.Transform, visible: Rect, scale: f32, release: ?Release) !?drawing.CoverageView {
+        return self.pathWithRule(value, transform, .nonzero, visible, scale, release);
+    }
+    /// `path` filled by `rule`, as SVG's `clip-rule`.
+    pub fn pathWithRule(self: *Masks, value: *const vector.Path, transform: vector.Transform, rule: vector.FillRule, visible: Rect, scale: f32, release: ?Release) !?drawing.CoverageView {
         const bounds = (try value.bounds(transform, null)) orelse return null;
         const extent: Rect = .{ .x = @floatCast(bounds.x), .y = @floatCast(bounds.y), .width = @floatCast(bounds.width), .height = @floatCast(bounds.height) };
         const shown = layout.intersect(.{ .x = extent.x - 1 / scale, .y = extent.y - 1 / scale, .width = extent.width + 2 / scale, .height = extent.height + 2 / scale }, visible);
@@ -187,6 +191,7 @@ pub const Masks = struct {
         hasher.update(std.mem.asBytes(&transform));
         hasher.update(std.mem.asBytes(&box));
         hasher.update(std.mem.asBytes(&scale));
+        hasher.update(&.{@backingInt(rule)});
         const key = hasher.final();
         if (self.find(key)) |entry| return try entry.view();
         const width: u32 = @intCast(box[2] - box[0]);
@@ -197,7 +202,7 @@ pub const Masks = struct {
             return null;
         };
         const viewport: drawing.Rect = .{ .x = @as(f32, @floatFromInt(box[0])) / scale, .y = @as(f32, @floatFromInt(box[1])) / scale, .width = @as(f32, @floatFromInt(width)) / scale, .height = @as(f32, @floatFromInt(height)) / scale };
-        const prepared = try value.prepare(self.allocator, .{ .main_thread = std.Thread.getCurrentId(), .viewport = viewport, .scale = scale, .transform = transform });
+        const prepared = try value.prepare(self.allocator, .{ .main_thread = std.Thread.getCurrentId(), .viewport = viewport, .scale = scale, .transform = transform, .style = .{ .fill = rule } });
         errdefer prepared.close() catch {};
         if (!prepared.adopted) try prepared.adopt();
         const charge = @as(usize, prepared.coverage.stride) * prepared.coverage.height;
@@ -376,4 +381,23 @@ test "a path's mask covers its inside" {
     };
     try std.testing.expectEqual(@as(u8, 255), at.value(c, 12, 12));
     try std.testing.expectEqual(@as(u8, 0), at.value(c, 28, 28));
+}
+
+test "an even-odd path mask leaves the overlap of its subpaths out" {
+    const masks = try Masks.create(std.testing.allocator);
+    defer masks.destroy(null);
+    masks.beginPaint(null);
+    const rings = try vector.Path.parseData(std.testing.allocator, "M0 0 H20 V20 H0 Z M5 5 H15 V15 H5 Z", .{});
+    defer rings.close() catch {};
+    const visible: Rect = .{ .x = 0, .y = 0, .width = 100, .height = 100 };
+    const filled = (try masks.pathWithRule(rings, .{}, .nonzero, visible, 1, null)).?.coverage;
+    const holed = (try masks.pathWithRule(rings, .{}, .even_odd, visible, 1, null)).?.coverage;
+    const at = struct {
+        fn value(cov: drawing.Coverage, x: i32, y: i32) u8 {
+            return cov.pixels[@as(usize, @intCast(y - cov.origin_y)) * cov.stride + @as(usize, @intCast(x - cov.origin_x))];
+        }
+    };
+    try std.testing.expectEqual(@as(u8, 255), at.value(filled, 10, 10));
+    try std.testing.expectEqual(@as(u8, 0), at.value(holed, 10, 10));
+    try std.testing.expectEqual(@as(u8, 255), at.value(holed, 2, 10));
 }
