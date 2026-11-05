@@ -210,3 +210,35 @@ test "scrollIntoView lines a node up at the start, center or end, or glides ther
     try h.advance(100 * std.time.ns_per_ms);
     try testing.expectEqual(@as(f32, 200), app.model.offset.y);
 }
+
+const Feed = struct {
+    model: view.ScrollModel = .{},
+    seen: [3]bool = .{ false, false, false },
+    how: view.InView = .{},
+    fn build(self: *Feed, v: *View) anyerror!void {
+        try v.scroll(&self.model, .{ .height = 100 });
+        for (0..10) |i| try v.textf("Item {d}", .{i}, .{ .key = i, .height = 40 });
+        try v.end();
+        // Items 2, 4 and 6: 80, 160 and 240 down.
+        for (0..3) |i| self.seen[i] = v.inView(v.nodes()[2 + 2 * (i + 1)].id, self.how);
+    }
+};
+
+test "inView tells whether a node showed, with a margin and an amount" {
+    var storage: Storage = .{};
+    var app: Feed = .{};
+    var h = Harness.init(&app, Feed.build, storage.buffers(), .{});
+    try h.render();
+    try h.render();
+    try testing.expectEqual([3]bool{ true, false, false }, app.seen);
+    app.how = .{ .margin = .{ .bottom = 100 } };
+    try h.render();
+    try testing.expectEqual([3]bool{ true, true, false }, app.seen);
+    // Item 2 shows only half: 80 to 100 of 120.
+    app.how = .{ .amount = 0.75 };
+    try h.render();
+    try testing.expectEqual([3]bool{ false, false, false }, app.seen);
+    app.how = .{ .amount = 0.5 };
+    try h.render();
+    try testing.expectEqual([3]bool{ true, false, false }, app.seen);
+}

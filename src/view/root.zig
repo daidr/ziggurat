@@ -1256,7 +1256,27 @@ pub const Buffers = struct {
 };
 
 /// A node's id and window bounds in the last arranged pass.
-pub const Placed = struct { id: u64, bounds: Rect };
+pub const Placed = struct {
+    id: u64,
+    bounds: Rect,
+    /// Where the window and the scroll containers around the node show,
+    /// and what other clips around it leave; empty when it is hidden.
+    view: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    clip: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+};
+
+/// How `View.inView` counts a node in view.
+pub const InView = struct {
+    /// DIP the window and the scroll containers around the node grow by
+    /// before it looks, as IntersectionObserver's `rootMargin`: a thumbnail
+    /// starts loading 300 DIP before it scrolls in. Negative shrinks them,
+    /// to count a node in view only once it is that far inside. Other clips
+    /// around it clip as they do.
+    margin: Insets = .{},
+    /// The share of the node's area that must show, from 0 (any of it) to
+    /// 1 (all of it), as IntersectionObserver's `threshold`.
+    amount: f32 = 0,
+};
 
 /// Static storage for a bounded tree, kept at a stable address by its owner.
 pub fn Storage(comptime node_capacity: usize, comptime text_capacity: usize) type {
@@ -1813,6 +1833,44 @@ pub const View = struct {
         }
         if (!(rect.width > 0 and rect.height > 0)) return null;
         return rect;
+    }
+
+    /// Where a node is and what shows of the window and the containers
+    /// around it, for `inView` in the passes after.
+    fn placedEntry(self: *const View, node: *const Node) Placed {
+        const all = self.nodes();
+        const huge: Rect = .{ .x = -1e9, .y = -1e9, .width = 2e9, .height = 2e9 };
+        var entry: Placed = .{ .id = node.id, .bounds = node.bounds, .view = all[0].bounds, .clip = huge };
+        if (self.hiddenAt(node) or node.concealed) {
+            entry.view = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+            return entry;
+        }
+        var parent = if (node.floats()) none else node.parent;
+        while (parent < all.len) : (parent = all[parent].parent) {
+            const ancestor = &all[parent];
+            if (ancestor.kind == .scroll) entry.view = layout.intersect(entry.view, ancestor.bounds) else if (ancestor.clips()) entry.clip = layout.intersect(entry.clip, ancestor.bounds);
+            if (ancestor.style.clip_inset) |inset_clip| entry.clip = layout.intersect(entry.clip, inset_clip.rect(ancestor.bounds));
+            if (ancestor.floats()) break;
+        }
+        return entry;
+    }
+    /// Whether the node with `id` showed in the window in the pass before,
+    /// as `how` counts it, for what is built only once it comes near, as
+    /// a picture loading as it scrolls in. False for a node the pass
+    /// before did not place, or hid.
+    pub fn inView(self: *const View, id: u64, how: InView) bool {
+        for (self.buffers.placed[0..@min(self.placed_len, self.buffers.placed.len)]) |entry| {
+            if (entry.id != id) continue;
+            const m = how.margin;
+            const grown: Rect = .{ .x = entry.view.x - m.left, .y = entry.view.y - m.top, .width = entry.view.width + m.left + m.right, .height = entry.view.height + m.top + m.bottom };
+            if (!(entry.view.width > 0 and entry.view.height > 0) or !(grown.width > 0 and grown.height > 0)) return false;
+            const shown = layout.intersect(layout.intersect(entry.bounds, grown), entry.clip);
+            const area = shown.width * shown.height;
+            const whole = entry.bounds.width * entry.bounds.height;
+            if (how.amount <= 0) return area > 0 or (whole == 0 and contains(grown, .{ .x = entry.bounds.x, .y = entry.bounds.y }));
+            return whole > 0 and area >= whole * @min(how.amount, 1) - 1e-3;
+        }
+        return false;
     }
 
     /// True when `node` or an ancestor is hidden, such as an option of a
@@ -4779,7 +4837,7 @@ pub const View = struct {
             overlay.binding_count += 1;
         }
         self.placed_len = @min(all.len, self.buffers.placed.len);
-        for (all[0..self.placed_len], self.buffers.placed[0..self.placed_len]) |*node, *entry| entry.* = .{ .id = node.id, .bounds = node.bounds };
+        for (all[0..self.placed_len], self.buffers.placed[0..self.placed_len]) |*node, *entry| entry.* = self.placedEntry(node);
         for (all, 0..) |*node, index| {
             if (index < inside_start or index >= inside_end) continue;
             // What ignores input takes no part in routing it; assistive
