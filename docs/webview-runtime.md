@@ -58,3 +58,13 @@ Linux Result/Failure 与 Windows 使用独立类型分支；跨平台调用只�
 加载会执行 DSO 及传递依赖的构造器。已检2.52.6产物含静态资源注册、元数据和析构登记；系统 loader/SDK 仍可分配、登记全局状态，不能把本模块4KiB路径缓冲和288字节 Result当 SDK 内存上限或实测栈峰值。[dlopen/dlclose](https://man7.org/linux/man-pages/man3/dlopen.3.html)的引用计数不保证立即 unmap、撤销所有登记或归还 RSS；其它代码已经持有该库时，本次 close 后库仍存在不等于引用泄漏。调用者必须信任这条可执行代码路径。
 
 `zig build smoke-webview-runtime-linux` 在无 App/页面的独立 harness 验证4个版本夹具 DSO 和一个受控缺依赖 consumer：三个单独缺入口、先解析全部再调用、拥有型结果、外部持库与构造器中的取消。consumer 的唯一依赖保留在构建目录且不安装，没有 RPATH/RUNPATH。`--` 后可给真实 DSO 路径，另可用 `--failed-load <绝对受控consumer路径>` 验证缺依赖；harness 不运行编译器或创建缺库状态。`build-smoke-webview-runtime-linux` 只安装程序/夹具；`build-webview-runtime-linux-oracle` 构建独立 C worker 三 getter oracle。真实探测只验证所选句柄版本；没有运行 GTK 初始化、浏览器或视觉 QA。
+
+## Linux DMA-BUF 渲染器
+
+`webview.setDmabufRenderer(.off | .on | .auto)` 决定 WebKitGTK 是否用 DMA-BUF 渲染器绘制页面：能用时长页面滚动帧率更高、CPU 更省，但在 NVIDIA 驱动、虚拟机和容器里会出现空白窗口。要在第一个 web view 或 Profile 创建之前调用：第一个创建的决定一次，除非渲染器保持开启，否则设置 `WEBKIT_DISABLE_DMABUF_RENDERER=1`。用户自己设置的该变量总是优先（`0` 开、`1` 关）。
+
+- `.off`（默认）：页面在 CPU 上绘制。
+- `.on`：交给 WebKitGTK，凡能用就用。
+- `.auto`：只在已知能用的主机上开启：GTK 打开的是 Wayland 显示（`GDK_BACKEND` 首项为 wayland 或 `*`，`WAYLAND_DISPLAY` 的 socket 存在），OpenGL 不是软件实现（`LIBGL_ALWAYS_SOFTWARE`、llvmpipe/softpipe），没有 NVIDIA 驱动、容器（`.dockerenv`、`/run/.containerenv`）、WSL（`/dev/dxg`，除非 Gallium 为 d3d12），固件也不是虚拟机，并且 `/sys/class/drm` 下有不是纯显示驱动（simpledrm、bochs、vkms 等）的 render 节点。
+
+其他系统忽略它。`zig build test-webkit-dmabuf -Dwebview=true` 在伪造的根目录上检查各项判断。
