@@ -553,24 +553,16 @@ pub const Owner = struct {
         if (self.chooser != null) return error.DialogAlreadyPending;
         const scope = window.beginCallback() orelse return error.Closed;
         defer scope.end();
-        const extensions: []const []const u8 = if (options.extensions.len != 0) options.extensions else if (kind == .save_file) &.{".txt"} else &.{"*"};
-        if (extensions.len > 16) return error.InvalidFileFilters;
         var text: [16][512]u8 = undefined;
         var filters: [16][*:0]const u8 = undefined;
-        for (extensions, 0..) |extension, index| {
-            if (extension.len == 0 or (!std.mem.eql(u8, extension, "*") and (extension.len < 2 or extension[0] != '.' or std.mem.indexOfAny(u8, extension, "\\/:;*?[]\x00") != null))) return error.InvalidFileFilters;
-            if (kind == .save_file and std.mem.eql(u8, extension, "*")) return error.InvalidFileFilters;
-            if (!std.unicode.utf8ValidateSlice(extension)) return error.InvalidUtf8;
-            if ((std.unicode.calcUtf16LeLen(extension) catch return error.InvalidUtf8) > 128) return error.FileFilterTooLong;
-            filters[index] = try terminated(&text[index], extension);
-        }
+        const filter_count = try picker.nativeFilters(kind, options, &text, &filters);
         if (std.mem.indexOfAny(u8, options.suggested_name, "\\/:*?\"<>|\x00") != null) return error.InvalidSuggestedName;
         var name: [1024]u8 = undefined;
         if ((std.unicode.calcUtf16LeLen(options.suggested_name) catch return error.InvalidUtf8) > 256) return error.SuggestedNameTooLong;
         const suggested = try terminated(&name, options.suggested_name);
         const serial = try self.nextSerial();
         var failure: c_int = 0;
-        const native = zsl_chooser_show(window.nativeHandle(), @intCast(@backingInt(kind)), &filters, @intCast(extensions.len), suggested, self, serial, chooserDone, &failure) orelse return error.FilePickerCreationFailed;
+        const native = zsl_chooser_show(window.nativeHandle(), @intCast(@backingInt(kind)), &filters, filter_count, suggested, self, serial, chooserDone, &failure) orelse return error.FilePickerCreationFailed;
         self.chooser = .{ .native = native, .serial = serial, .kind = kind, .destination = destination, .context = context, .on_result = on_result };
     }
     fn chooserDone(ptr: ?*anyopaque, serial: u64, code: i32) callconv(.c) void {

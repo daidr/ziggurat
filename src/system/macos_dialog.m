@@ -210,8 +210,21 @@ int zsm_message_is_sheet(void *handle) { return ((__bridge ZsmAlert *)handle)->s
 }
 @end
 
+/* A media type as the type of files it names; a kind (image/ and a star) as the
+   type its files conform to. */
+static UTType *zsm_mime_type(const char *mime) {
+    size_t length = strlen(mime);
+    if (length > 2 && !strcmp(mime + length - 2, "/*")) {
+        static const char *const kinds[][2] = {{"image", "public.image"}, {"audio", "public.audio"}, {"video", "public.movie"}, {"text", "public.text"}, {"font", "public.font"}};
+        for (size_t i = 0; i < sizeof kinds / sizeof kinds[0]; ++i)
+            if (strlen(kinds[i][0]) == length - 2 && !strncmp(mime, kinds[i][0], length - 2)) return [UTType typeWithIdentifier:zsm_string(kinds[i][1])];
+        return nil;
+    }
+    return [UTType typeWithMIMEType:zsm_string(mime)];
+}
+
 /* kind: 0 one file, 1 save, 2 several files, 3 a folder. Filters are
-   extensions with their dot, or "*" for any file. */
+   extensions with their dot, "*" for any file, or media types when opening. */
 void *zsm_chooser_show(NSWindow *window, int kind, const char *const *filters, uint32_t count, const char *suggested, void *owner, uint64_t serial, ZsmDone done) {
     @autoreleasepool {
         ZsmChooser *link = [[ZsmChooser alloc] initWithOwner:owner serial:serial done:done];
@@ -234,7 +247,7 @@ void *zsm_chooser_show(NSWindow *window, int kind, const char *const *filters, u
                 any = YES;
                 break;
             }
-            UTType *type = [UTType typeWithFilenameExtension:zsm_string(filters[i] + 1)];
+            UTType *type = strchr(filters[i], '/') ? zsm_mime_type(filters[i]) : [UTType typeWithFilenameExtension:zsm_string(filters[i] + 1)];
             if (type) [types addObject:type];
         }
         if (!any && [types count]) [panel setAllowedContentTypes:types];

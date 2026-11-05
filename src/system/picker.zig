@@ -16,8 +16,85 @@ pub const Options = struct {
     /// Strings are copied by WinRT before openFile returns.
     /// Empty selects all files for open/folder and .txt for save.
     extensions: []const []const u8 = &.{},
+    /// Media types, as "application/pdf", or all of one kind, as "image/*",
+    /// like an HTML input's accept. The filter takes the files of the
+    /// extensions and of these types together; with types and no extensions
+    /// it takes only the types. GTK matches them as it knows them (wildcards
+    /// too) and macOS as UTTypes, a kind as the type it conforms to
+    /// (public.image for image/*). Only open dialogs take them, at most 16
+    /// with the extensions; Windows does not yet.
+    mime_types: []const []const u8 = &.{},
     suggested_name: []const u8 = "Untitled",
 };
+
+/// Whether `text` is a media type ("type/subtype") or a kind ("type/*"):
+/// RFC 6838 token characters, one slash, no parameters.
+pub fn validMimeType(text: []const u8) bool {
+    const slash = std.mem.indexOfScalar(u8, text, '/') orelse return false;
+    const kind = text[0..slash];
+    const sub = text[slash + 1 ..];
+    if (kind.len == 0 or sub.len == 0 or kind.len > 127 or sub.len > 127) return false;
+    if (std.mem.eql(u8, kind, "*")) return false;
+    if (std.mem.eql(u8, sub, "*")) return mimeToken(kind);
+    return mimeToken(kind) and mimeToken(sub);
+}
+fn mimeToken(text: []const u8) bool {
+    if (!std.ascii.isAlphanumeric(text[0])) return false;
+    for (text) |char| if (!std.ascii.isAlphanumeric(char) and std.mem.indexOfScalar(u8, "!#$&-^_.+", char) == null) return false;
+    return true;
+}
+
+/// The filters the Linux and macOS choosers take, NUL-terminated in `text`:
+/// extensions ("*" or ".ext") first, then media types, which hold a slash an
+/// extension cannot. Returns how many there are.
+pub fn nativeFilters(kind: Kind, options: Options, text: *[16][512]u8, filters: *[16][*:0]const u8) !u32 {
+    if (options.mime_types.len != 0 and kind != .open_file and kind != .open_files) return error.InvalidFileFilters;
+    const extensions: []const []const u8 = if (options.extensions.len != 0 or options.mime_types.len != 0) options.extensions else if (kind == .save_file) &.{".txt"} else &.{"*"};
+    if (extensions.len + options.mime_types.len > 16) return error.InvalidFileFilters;
+    var count: u32 = 0;
+    for (extensions) |extension| {
+        if (extension.len == 0 or (!std.mem.eql(u8, extension, "*") and (extension.len < 2 or extension[0] != '.' or std.mem.indexOfAny(u8, extension, "\\/:;*?[]\x00") != null))) return error.InvalidFileFilters;
+        if (kind == .save_file and std.mem.eql(u8, extension, "*")) return error.InvalidFileFilters;
+        if (!std.unicode.utf8ValidateSlice(extension)) return error.InvalidUtf8;
+        if ((std.unicode.calcUtf16LeLen(extension) catch return error.InvalidUtf8) > 128) return error.FileFilterTooLong;
+        filters[count] = try terminated(&text[count], extension);
+        count += 1;
+    }
+    for (options.mime_types) |mime| {
+        if (!validMimeType(mime)) return error.InvalidFileFilters;
+        filters[count] = try terminated(&text[count], mime);
+        count += 1;
+    }
+    return count;
+}
+fn terminated(destination: []u8, text: []const u8) ![*:0]const u8 {
+    if (text.len >= destination.len) return error.TextCapacityExceeded;
+    @memcpy(destination[0..text.len], text);
+    destination[text.len] = 0;
+    return destination[0..text.len :0].ptr;
+}
+
+test "media type filters" {
+    try std.testing.expect(validMimeType("image/*"));
+    try std.testing.expect(validMimeType("application/pdf"));
+    try std.testing.expect(validMimeType("application/vnd.ms-excel"));
+    try std.testing.expect(validMimeType("image/svg+xml"));
+    try std.testing.expect(!validMimeType("*/*"));
+    try std.testing.expect(!validMimeType("image"));
+    try std.testing.expect(!validMimeType("image/"));
+    try std.testing.expect(!validMimeType("text/plain; charset=utf-8"));
+    try std.testing.expect(!validMimeType("a/b/c"));
+    var text: [16][512]u8 = undefined;
+    var filters: [16][*:0]const u8 = undefined;
+    try std.testing.expectEqual(@as(u32, 1), try nativeFilters(.open_file, .{ .mime_types = &.{"image/*"} }, &text, &filters));
+    try std.testing.expectEqualStrings("image/*", std.mem.span(filters[0]));
+    try std.testing.expectEqual(@as(u32, 2), try nativeFilters(.open_files, .{ .extensions = &.{".pdf"}, .mime_types = &.{"image/png"} }, &text, &filters));
+    try std.testing.expectEqualStrings(".pdf", std.mem.span(filters[0]));
+    try std.testing.expectEqual(@as(u32, 1), try nativeFilters(.open_file, .{}, &text, &filters));
+    try std.testing.expectEqualStrings("*", std.mem.span(filters[0]));
+    try std.testing.expectError(error.InvalidFileFilters, nativeFilters(.save_file, .{ .mime_types = &.{"image/*"} }, &text, &filters));
+    try std.testing.expectError(error.InvalidFileFilters, nativeFilters(.open_file, .{ .mime_types = &.{"image"} }, &text, &filters));
+}
 pub const Result = union(enum) {
     /// Borrowed caller-owned UTF-8 destination; no trailing NUL is included.
     selected: []const u8,
@@ -63,6 +140,7 @@ pub const Picker = struct {
         if (self.native != null or self.in_native) return error.DialogAlreadyPending;
         const scope = window.beginCallback() orelse return error.Closed;
         defer scope.end();
+        if (options.mime_types.len != 0) return error.UnsupportedFileFilter;
         const extensions: []const []const u8 = if (options.extensions.len != 0) options.extensions else if (kind == .save_file) &.{".txt"} else &.{"*"};
         if (extensions.len > 16) return error.InvalidFileFilters;
         var text: [16][128]u16 = undefined;

@@ -111,6 +111,7 @@ test {
     _ = icon;
     _ = menu_icon;
     _ = @import("png_header.zig");
+    _ = picker;
     _ = theme;
     _ = identity;
     _ = instance;

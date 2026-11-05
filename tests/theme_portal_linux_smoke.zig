@@ -14,6 +14,7 @@ extern fn zpf_change(u32) void;
 extern fn zpf_pump(c_int) void;
 extern fn zpf_prefers_dark() c_int;
 extern fn zpf_label_color() c_uint;
+extern fn zpf_set_layout([*:0]const u8) void;
 
 /// Pump until GTK prefers `dark`, for up to two seconds.
 fn expectDark(dark: bool) !void {
@@ -71,5 +72,15 @@ pub fn main() !void {
     try std.testing.expectEqual(@as(c_uint, 0x654321), zpf_label_color());
     try system.theme.setGtkCss(app, "", null);
     try std.testing.expectEqual(themed, zpf_label_color());
+    // The title bars' buttons follow gtk-decoration-layout.
+    zpf_set_layout("close,minimize:appmenu");
+    var buttons = system.theme.windowButtons(app);
+    try std.testing.expectEqualSlices(system.theme.WindowButton, &.{ .close, .minimize }, buttons.start());
+    try std.testing.expectEqual(@as(usize, 0), buttons.end().len);
+    zpf_set_layout("icon:minimize,maximize,close");
+    buttons = system.theme.windowButtons(app);
+    try std.testing.expectEqualSlices(system.theme.WindowButton, &.{ .minimize, .maximize, .close }, buttons.end());
+    zpf_set_layout("");
+    try std.testing.expect(system.theme.windowButtons(app).empty());
     std.debug.print("theme portal: color-scheme follows into GTK while the app follows the desktop; the app's GTK sheet applies and is replaced\n", .{});
 }

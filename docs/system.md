@@ -207,6 +207,8 @@ Owner 提供四种操作，参数都是 `(options, destination, context, on_resu
 
 `system.picker.Options.extensions` 最多 16 项，每项是 `"*"` 或以点开头的扩展名。空切片对打开/目录操作采用 `"*"`，保存采用 `".txt"`；保存不接受 `"*"`。`suggested_name` 默认 `"Untitled"`，最多 256 个 UTF-16 单元。选项在启动返回前复制进原生对象。
 
+`mime_types` 按媒体类型过滤，像 HTML input 的 `accept`：`"application/pdf"`，或某一类的全部文件 `"image/*"`，由系统选择器按它认识的类型匹配，不必列出每个扩展名。只有打开文件（单个或多个）接受它，和扩展名合计最多 16 项；过滤器同时接受扩展名和类型对应的文件，只给类型时不再默认 `"*"`。GTK 直接匹配媒体类型（含通配）；macOS 转成 `UTType`，`image/*`、`audio/*`、`video/*`、`text/*`、`font/*` 分别取 `public.image`、`public.audio`、`public.movie`、`public.text`、`public.font`；Windows 暂不支持，返回 `error.UnsupportedFileFilter`。`system.picker.validMimeType` 检查单项写法。
+
 ```zig
 try owner.saveFile(.{
     .extensions = &.{".txt"},
@@ -362,6 +364,12 @@ try now.set(.{ .title = "Spring", .artist = "Vivaldi", .album = "The Four Season
 ## 外观跟随
 
 `system.theme.Follower` 决定应用的明暗外观：`.system` 跟随桌面，`.light`/`.dark` 强制。`start(app, .{ .source, .on_change })` 读取桌面偏好、应用外观并订阅偏好变化；`setSource` 随时切换；`isDark()` 是生效的外观，`preferences()` 是最近一次读到的桌面偏好（accent、高对比度、减少动态/透明、文字缩放）。外观或偏好变化后调用 `on_change`，应用在这里切换自己绘制内容的主题（例如 `ui.Context.setTheme(.dark())`）。系统自己绘制的部分由 Follower 处理：Windows 上 `track(window)` 的窗口标题栏随外观切换（`DWMWA_USE_IMMERSIVE_DARK_MODE`），弹出菜单经 uxtheme 的 preferred app mode（Windows 10 1903 起）跟随；Linux 设置 `gtk-application-prefer-dark-theme`，强制浅色时名字以 `-dark` 结尾的主题换成去掉后缀的同名主题，跟随桌面时恢复 GTK 自己的设置。属性只在值变化时写入，所以桌面 Watch 收到的通知都是真实变化。`setWindowButtons(window, source)` 让某个窗口的边框与标题栏按钮不管应用外观、按深色或浅色背景绘制（例如浅色应用里标题区是深色的页面），`.system` 恢复跟随应用；菜单和应用内容仍是应用的外观，Linux 上 GTK 的按钮始终跟随应用。macOS 设置应用的 `NSApp.appearance`（Aqua、Dark Aqua，跟随桌面时为 nil），所有未自行指定外观的窗口和菜单随之切换；只在值变化时设置。单独的 `theme.setWindowDark(window, dark)` 只在 Windows 可用。
+
+Linux 上应用跟随桌面时，核心还订阅设置门户（`org.freedesktop.portal.Settings` 的 `org.freedesktop.appearance` `color-scheme`）：启动时异步读取一次，之后跟随 `SettingChanged`，偏好深色写入 `gtk-application-prefer-dark-theme`，GTK 自绘部分和页面（WebKitGTK 的 `prefers-color-scheme`）一起切换；强制浅色或深色时不再跟随，切回 `.system` 取门户最近的值。没有会话总线时不启动。
+
+`theme.setGtkCss(app, css, message)` 给 GTK 自己绘制的部分（自绘装饰的标题栏、无边框窗口的阴影与边框、标题按钮、菜单和对话框）加一份应用的 GTK 3 样式表，优先级为 USER，高于主题和用户的 gtk.css。再次调用替换整份样式表，`""` 移除；解析失败返回 `error.InvalidStyleSheet` 并保留原来的样式表，`message` 收到 GTK 的第一条错误（最多 `max_css_error` 字节）。应用自己绘制的内容和页面不受影响；其他平台什么也不做。
+
+`theme.windowButtons(app)` 返回桌面放在标题栏开头和结尾的窗口按钮（`start()`、`end()`，元素为 `.minimize`、`.maximize`、`.close`，按桌面顺序），`has(button)`、`empty()` 方便判断。隐藏系统按钮自己绘制的应用按它摆放。macOS 为开头的关闭、最小化、最大化，Windows 为结尾的最小化、最大化、关闭；Linux 读取 `gtk-decoration-layout`，在自己绘制装饰的 Wayland 合成器（偏好服务端装饰，如 Sway、Hyprland）下为空，用户清空布局时也为空。布局变化时桌面 Watch 和 Follower 的 `on_change` 会收到通知。`WindowButtons.parse` 解析同样格式的字符串。
 
 ## 无窗口常驻
 

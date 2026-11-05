@@ -1679,6 +1679,10 @@ pub const View = struct {
     /// The window is drawn as active (`ui.Context.windowActive`), set by
     /// the host before each pass.
     window_active: bool = true,
+    /// Nothing of the window shows on screen; see `windowHidden`.
+    window_hidden: bool = false,
+    /// A build asked `windowHidden`, so the host builds again as it changes.
+    hidden_asked: bool = false,
     /// Hover or focus time before a tooltip appears, in nanoseconds; see
     /// `Options.tooltip_delay`.
     tooltip_delay: u64 = 600 * std.time.ns_per_ms,
@@ -4293,6 +4297,20 @@ pub const View = struct {
     /// the same way. A change runs a new pass.
     pub fn windowActive(self: *const View) bool {
         return self.window_active;
+    }
+
+    /// Whether nothing of the window shows on screen, as the web's
+    /// `document.hidden`, as far as the window's state tells: it is hidden
+    /// or minimized (Linux reports minimizing on X11, not on Wayland). A
+    /// view that shows a clock, a price or what plays stops that work while
+    /// it is hidden and refreshes as it shows again: from the first build
+    /// that asks, the host builds once more as the window hides, though no
+    /// frame draws while it is hidden, and again as it shows. Frames for
+    /// what only moves wait while it is hidden anyway.
+    /// `Harness.windowHidden` hides and shows it in tests.
+    pub fn windowHidden(self: *View) bool {
+        self.hidden_asked = true;
+        return self.window_hidden;
     }
 
     /// Add a self-describing leaf; see `Embed`.
@@ -7186,6 +7204,10 @@ pub const Host = struct {
         if (self.building) return false;
         if (self.options.tools()) |tools| if (self.inspectorInput(tools, event)) return true;
         switch (event) {
+            .window_state => |state| {
+                self.windowShown(!state.visible or state.minimized);
+                return false;
+            },
             .pointer_move => |point| {
                 const at: Point = .{ .x = point.x, .y = point.y };
                 const moved = self.pointerTo(at);
@@ -7479,6 +7501,31 @@ pub const Host = struct {
         self.arranged = true;
         self.measureFit(fit, whole);
         // The frame that shows it builds again.
+        self.invalidate();
+    }
+    /// Follow the window hiding or showing again (`View.windowHidden`). A
+    /// build that asked builds once more as it hides, while no frame draws,
+    /// to stop what it does out of sight, and the frame that shows it again
+    /// builds anew.
+    fn windowShown(self: *Host, hidden: bool) void {
+        if (self.view.window_hidden == hidden) return;
+        self.view.window_hidden = hidden;
+        if (!self.view.hidden_asked) return;
+        if (!hidden or self.building) return self.invalidate();
+        const window = self.context.window orelse return;
+        const size = window.contentSize() catch return;
+        const scale = if (std.math.isFinite(size.scale) and size.scale > 0) size.scale else 1;
+        const whole: Rect = .{ .x = 0, .y = 0, .width = @as(f32, @floatFromInt(size.width)) / scale, .height = @as(f32, @floatFromInt(size.height)) / scale };
+        self.view.window_active = self.context.windowActive();
+        self.pass(null) catch |err| {
+            self.last_error = err;
+            return;
+        };
+        self.view.arrange(whole, self.context.currentTheme(), self.options.measurer) catch |err| {
+            self.last_error = err;
+            return;
+        };
+        self.arranged = true;
         self.invalidate();
     }
     /// Tell `fit` the size the content just laid out in `window` takes, if

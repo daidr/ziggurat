@@ -905,3 +905,187 @@ test "a looping player's position heard comes back to the loop's start" {
     // 120 heard: 60, then two loops of 30.
     try expectHeardAt(player, 30);
 }
+
+/// `seconds` of sines of amplitude 0.5 at `at_rate`, one frequency for each
+/// channel, interleaved.
+fn sines(at_rate: u32, seconds: f64, frequencies: []const f64) ![]f32 {
+    const channels = frequencies.len;
+    const frames: usize = @intFromFloat(seconds * @as(f64, @floatFromInt(at_rate)));
+    const samples = try allocator.alloc(f32, frames * channels);
+    for (0..frames) |i| for (frequencies, 0..) |frequency, c| {
+        samples[i * channels + c] = @floatCast(0.5 * @sin(2 * std.math.pi * frequency * @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(at_rate))));
+    };
+    return samples;
+}
+
+/// The frequency, to the hertz, of channel `c` of `out`'s strongest
+/// component between 50 Hz and 2 kHz from frame `from` to `to`, by Goertzel.
+fn dominant(out: []const f32, c: usize, from: usize, to: usize) f64 {
+    var best: f64 = 0;
+    var at: f64 = 0;
+    var frequency: f64 = 50;
+    while (frequency <= 2000) : (frequency += 1) {
+        const w = 2 * std.math.pi * frequency / @as(f64, rate);
+        const k = 2 * @cos(w);
+        var s1: f64 = 0;
+        var s2: f64 = 0;
+        for (from..to) |i| {
+            const s0 = @as(f64, out[2 * i + c]) + k * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        const power = s1 * s1 + s2 * s2 - k * s1 * s2;
+        if (power > best) {
+            best = power;
+            at = frequency;
+        }
+    }
+    return at;
+}
+
+/// That channel `c` of `out`, a sine of amplitude 0.5 at up to `max_hz`,
+/// has no click and no gap from frame `from` to `to`.
+fn expectSmooth(out: []const f32, c: usize, from: usize, to: usize, max_hz: f64) !void {
+    const steep = 2 * std.math.pi * max_hz * 0.5 / @as(f64, rate);
+    for (from + 1..to) |i| {
+        if (@abs(out[2 * i + c] - out[2 * (i - 1) + c]) > 1.6 * steep) {
+            std.debug.print("a click at frame {d}: {d} to {d}\n", .{ i, out[2 * (i - 1) + c], out[2 * i + c] });
+            return error.Click;
+        }
+    }
+    const period: usize = @as(usize, @intFromFloat(@as(f64, rate) / max_hz * 2)) + 1;
+    var i = from;
+    while (i + period <= to) : (i += period / 2) {
+        var peak: f32 = 0;
+        for (i..i + period) |j| peak = @max(peak, @abs(out[2 * j + c]));
+        if (peak < 0.35) {
+            std.debug.print("a gap at frame {d}: peak {d}\n", .{ i, peak });
+            return error.Gap;
+        }
+    }
+}
+
+test "preserving pitch keeps a sine's frequency at 1.5x, as resampling raises it a fifth" {
+    const cases = [_]struct { at: u32, frequencies: []const f64 }{
+        .{ .at = rate, .frequencies = &.{220} },
+        .{ .at = rate, .frequencies = &.{ 200, 300 } },
+        .{ .at = 24000, .frequencies = &.{220} },
+    };
+    for (cases) |case| {
+        const samples = try sines(case.at, 2, case.frequencies);
+        defer allocator.free(samples);
+        const tone = try Sound.fromSamples(allocator, case.at, @intCast(case.frequencies.len), samples);
+        defer tone.release();
+        for ([_]bool{ true, false }) |keep| {
+            const engine = try manual();
+            defer engine.deinit();
+            const player = try engine.createPlayer(tone);
+            defer player.close();
+            player.setSpeed(1.5);
+            if (keep) try player.setPreservesPitch(true);
+            try testing.expectEqual(keep, player.preservesPitch());
+            player.play();
+            const out = try render(engine, rate);
+            defer allocator.free(out);
+            for (0..2) |c| {
+                const frequency = case.frequencies[@min(c, case.frequencies.len - 1)];
+                const want = if (keep) frequency else frequency * 1.5;
+                try testing.expectApproxEqAbs(want, dominant(out, c, rate / 4, rate * 3 / 4), want * 0.01);
+                if (keep) try expectSmooth(out, c, 0, rate, frequency);
+            }
+        }
+    }
+}
+
+test "stretched, a sound plays for its duration over the speed and ends where it ends" {
+    for ([_]usize{ 1, 2 }) |channels| {
+        const samples = try sines(rate, 1, (&[_]f64{ 220, 330 })[0..channels]);
+        defer allocator.free(samples);
+        const tone = try Sound.fromSamples(allocator, rate, @intCast(channels), samples);
+        defer tone.release();
+        for ([_]f64{ 0.25, 0.5, 1, 1.25, 1.5, 2, 4, 16 }) |speed| {
+            const engine = try manual();
+            defer engine.deinit();
+            const player = try engine.createPlayer(tone);
+            defer player.close();
+            player.setSpeed(speed);
+            try player.setPreservesPitch(true);
+            player.play();
+            var played: usize = 0;
+            var mixed: usize = 0;
+            var block: [512]f32 = undefined;
+            while (player.isPlaying()) : (mixed += 256) {
+                if (mixed > 60 * rate) return error.NeverEnds;
+                @memset(&block, 0);
+                _ = engine.render(&block);
+                for (0..256) |i| if (block[2 * i] != 0 or block[2 * i + 1] != 0) {
+                    played = mixed + i + 1;
+                };
+            }
+            const want = @as(f64, rate) / speed;
+            // Within a hop.
+            try testing.expectApproxEqAbs(want, @as(f64, @floatFromInt(played)), 0.025 * rate);
+            try testing.expectEqual(player.duration(), player.position());
+        }
+    }
+}
+
+test "resampling stays the default, and at 1x a stretched player plays as decoded" {
+    const engine = try manual();
+    defer engine.deinit();
+    const samples = try sines(rate, 0.5, &.{220});
+    defer allocator.free(samples);
+    const tone = try sound(1, samples);
+    defer tone.release();
+    const player = try engine.createPlayer(tone);
+    defer player.close();
+    player.setSpeed(1.5);
+    try player.setPreservesPitch(false);
+    try testing.expect(!player.preservesPitch());
+    player.setSpeed(1);
+    try player.setPreservesPitch(true);
+    player.play();
+    const out = try render(engine, rate / 4);
+    defer allocator.free(out);
+    for (0..rate / 4) |i| try testing.expectApproxEqAbs(samples[i], out[2 * i], 1e-4);
+}
+
+test "a stretch goes on without a click or a gap as the speed changes, over a loop and as it turns on and off" {
+    const engine = try manual();
+    defer engine.deinit();
+    // 100 periods of 200 Hz: a seamless loop.
+    const samples = try sines(rate, 0.5, &.{200});
+    defer allocator.free(samples);
+    const tone = try sound(1, samples);
+    defer tone.release();
+    const player = try engine.createPlayer(tone);
+    defer player.close();
+    player.setLoop(true);
+    try player.setPreservesPitch(true);
+    player.play();
+    const speeds = [_]f64{ 1, 1.25, 1.5, 2, 3, 0.75, 0.5, 4 };
+    var out = try allocator.alloc(f32, speeds.len * rate / 5 * 2);
+    defer allocator.free(out);
+    for (speeds, 0..) |speed, index| {
+        player.setSpeed(speed);
+        const part = try render(engine, rate / 5);
+        defer allocator.free(part);
+        @memcpy(out[index * rate / 5 * 2 ..][0..part.len], part);
+    }
+    try expectSmooth(out, 0, 0, out.len / 2, 200);
+    try testing.expectEqual(@as(f64, 200), dominant(out, 0, 0, out.len / 2));
+
+    player.setSpeed(1.5);
+    const turns = try allocator.alloc(f32, 3 * rate / 5 * 2);
+    defer allocator.free(turns);
+    for (0..3) |index| {
+        if (index == 1) try player.setPreservesPitch(false);
+        if (index == 2) try player.setPreservesPitch(true);
+        const part = try render(engine, rate / 5);
+        defer allocator.free(part);
+        @memcpy(turns[index * rate / 5 * 2 ..][0..part.len], part);
+    }
+    try expectSmooth(turns, 0, 0, turns.len / 2, 300);
+    try testing.expectEqual(@as(f64, 300), dominant(turns, 0, rate / 5 + 2000, 2 * rate / 5));
+    try testing.expectEqual(@as(f64, 200), dominant(turns, 0, 2 * rate / 5 + 2000, 3 * rate / 5));
+}

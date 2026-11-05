@@ -184,6 +184,15 @@ pub const Harness = struct {
         try self.render();
     }
 
+    /// Hide all of the window from sight, as minimizing it does, or show it
+    /// again: `View.windowHidden` returns it. A build that asked renders
+    /// again as it changes.
+    pub fn windowHidden(self: *Harness, hidden: bool) anyerror!void {
+        if (self.view.window_hidden == hidden) return;
+        self.view.window_hidden = hidden;
+        if (self.view.hidden_asked) try self.render();
+    }
+
     /// Record every following render into `context`, which must not be
     /// attached to a window and must stay valid while the harness uses it.
     /// Its action callback is never called; keys deliver events to the

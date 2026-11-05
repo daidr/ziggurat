@@ -72,3 +72,6 @@ unsigned zpf_label_color(void) {
     g_object_unref(label);
     return ((unsigned)(color.red * 255 + 0.5) << 16) | ((unsigned)(color.green * 255 + 0.5) << 8) | (unsigned)(color.blue * 255 + 0.5);
 }
+
+/* Sets the desktop's button layout, as a settings daemon would. */
+void zpf_set_layout(const char *layout) { g_object_set(gtk_settings_get_default(), "gtk-decoration-layout", layout, NULL); }

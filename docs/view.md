@@ -614,7 +614,7 @@ try h.change(.{ .kind = .slider }, .{ .steps = 2 });
 - `Config` 提供窗口边界、主题和 `Options`（根样式与测量回调），`resize` 改变边界并重新渲染。
 - 树和表格的行：`click` 按下行的右端并单选，`clickWith(query, modifiers)` 带 Ctrl/Shift 按下，`toggleExpanded(query)` 按下树行的三角；`removeToken(query)` 按下标记的移除按钮。`click` 也接受列头、标记和组合框的展开按钮。`write` 的大纲带出行的层级、展开、选中与焦点行，以及列头的排序方向。
 
-- `attachInput(&context)` 把之后每次渲染记录进一个未连接窗口的 `ui.Context`，`key(KeyInput)` 按窗口相同的顺序路由按键：快捷键、Tab、范围键、分组方向键、空间方向键、Home/End，最后是 Enter/Space 激活。产生的动作或数值变化交给构建函数，随后重新渲染；返回值表示是否有控件处理该键。`focused()` 返回当前焦点节点。`keyUp(KeyInput)` 把松开交给持有焦点的嵌入叶子，`windowFocus(bool)` 模拟窗口得到或失去键盘。Context 由测试持有，不能已连接窗口。
+- `attachInput(&context)` 把之后每次渲染记录进一个未连接窗口的 `ui.Context`，`key(KeyInput)` 按窗口相同的顺序路由按键：快捷键、Tab、范围键、分组方向键、空间方向键、Home/End，最后是 Enter/Space 激活。产生的动作或数值变化交给构建函数，随后重新渲染；返回值表示是否有控件处理该键。`focused()` 返回当前焦点节点。`keyUp(KeyInput)` 把松开交给持有焦点的嵌入叶子，`windowFocus(bool)` 模拟窗口得到或失去键盘，`windowHidden(bool)` 模拟窗口被隐藏（最小化）或重新显示。Context 由测试持有，不能已连接窗口。
 
 ```zig
 var context = ui.Context.init(&dummy, draw, action);
@@ -759,6 +759,14 @@ if (state.open == null) {
 ## 系统偏好
 
 `host.setPreferences(.{ .reduce_motion, .reduce_transparency, .high_contrast })` 由应用按桌面偏好设置并重绘：减少动态效果让加载动画停在静止姿态，减少透明度或高对比度让背景效果变成不透明填充。
+
+## 窗口隐藏
+
+`v.windowHidden()` 返回窗口此刻是否完全不在屏幕上，相当于网页的 `document.hidden`：窗口被隐藏或最小化（Linux 在 X11 上报告最小化，Wayland 不报告）。显示时钟、价格或播放进度的视图在隐藏时停下这些工作，显示后刷新。从某次构建第一次询问起，窗口隐藏时 Host 会在不绘制的情况下再构建一次，重新显示时下一帧再构建；没问过的视图不会因此多构建。只是移动的动画帧在隐藏时本来就不画。无窗口测试用 `Harness.windowHidden(bool)` 模拟。
+
+## 屏幕刷新率
+
+动画按窗口所在显示器的刷新率排帧，不再固定 60 Hz：`Host` 每次构建前用 `Window.refreshRate()`（Linux 取 `gdk_monitor_get_refresh_rate`，未知时为 0）设置 `View.refresh_interval`，位姿、匹配过渡、集合动画与加载动画都按这一间隔请求下一帧，`animationFrameRate` 降帧时也落在整刷新周期的网格上（`frameIntervalAt`）。刷新率未知时仍按 16 ms。inspector 的 `refresh_hz` 同样取自窗口。
 
 ## 开发者工具（inspector）
 

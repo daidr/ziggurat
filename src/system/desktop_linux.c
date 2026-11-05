@@ -294,6 +294,7 @@ int zsd_watch_start(uint32_t kinds, void *owner, ZsdChanged changed, void **out)
         watch_connect(watch, settings, "notify::gtk-theme-name", G_CALLBACK(on_preference));
         watch_connect(watch, settings, "notify::gtk-enable-animations", G_CALLBACK(on_preference));
         watch_connect(watch, settings, "notify::gtk-xft-dpi", G_CALLBACK(on_preference));
+        watch_connect(watch, settings, "notify::gtk-decoration-layout", G_CALLBACK(on_preference));
     }
     if (kinds & ZSD_POWER) {
         GObject *monitor = power_profile_monitor();
