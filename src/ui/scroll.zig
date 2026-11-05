@@ -122,6 +122,10 @@ pub const ScrollModel = struct {
     offset: Point = .{},
     viewport: Size = .{},
     content: Size = .{},
+    /// How far the user scrolled since a snapping container last came to
+    /// rest, for it to go on from (NaN: snap where it shows); 0 when it
+    /// rests. See `view.Style.scroll_snap`.
+    snap_delta: f32 = 0,
 
     pub fn maxOffset(self: *const ScrollModel) Point {
         return .{ .x = @max(0, self.content.width - self.viewport.width), .y = @max(0, self.content.height - self.viewport.height) };

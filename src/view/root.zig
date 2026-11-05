@@ -319,6 +319,18 @@ pub const Style = struct {
     /// parent is in view, as CSS's `position: sticky`; see `Sticky`. A
     /// sticky node paints over its siblings, so give it a background.
     sticky: ?Sticky = null,
+    /// A scroll container comes to rest at the places nodes inside it mark
+    /// with `snap_align`, as CSS's `scroll-snap-type`: `.mandatory` always
+    /// rests at one, the wheel and the keys going from place to place;
+    /// `.proximity` rests at one only where scrolling stops within a third
+    /// of the view of it. A node taller than the view rests anywhere it
+    /// fills the view. Offsets the application sets stay where it puts
+    /// them.
+    scroll_snap: ?SnapType = null,
+    /// The place a node marks in the scroll container around it with
+    /// `scroll_snap`: its start, center or end lined up with the
+    /// container's content box, inside its padding.
+    snap_align: ?SnapAlign = null,
     /// Build the node's descendants with another theme: they measure with
     /// its metrics and paint with its colors, and the node paints its
     /// background unless `background` is set, as the window's root does.
@@ -326,6 +338,12 @@ pub const Style = struct {
     /// borrowed until the pass is painted. See `View.themed`.
     theme: ?*const Theme = null,
 };
+
+/// How strictly a scroll container snaps; see `Style.scroll_snap`.
+pub const SnapType = enum { mandatory, proximity };
+/// What of a node lines up with its scroll container; see
+/// `Style.snap_align`.
+pub const SnapAlign = enum { start, center, end };
 
 /// How far in from the edges of the scroll container around it (or the
 /// window) a `Style.sticky` node stays, in DIP. It goes no further than
@@ -2213,8 +2231,12 @@ pub const View = struct {
     pub fn scroll(self: *View, model: *ScrollModel, style: Style) Error!void {
         const node = try self.open(.scroll, style);
         node.scroll = model;
+        // A model never laid out snaps as it first shows.
+        if (style.scroll_snap == .mandatory and model.viewport.height == 0) model.snap_delta = std.math.nan(f32);
         if (self.take(node.id)) |event| if (event == .scroll) {
+            const before = model.offset.y;
             _ = model.scrollBy(event.scroll.delta) catch return error.InvalidValue;
+            if (style.scroll_snap != null and !std.math.isNan(model.snap_delta)) model.snap_delta += model.offset.y - before;
         };
     }
     /// Starts a grid with the given column tracks. Children fill cells row by
@@ -4540,6 +4562,7 @@ pub const View = struct {
             self.reveal = null;
             if (try self.revealNode(id)) try self.place();
         }
+        if (try self.snapScrolls()) try self.place();
         self.holdSticky();
         self.record(measurer);
         // Animated poses and shared elements move what is drawn, not the
@@ -5069,6 +5092,61 @@ pub const View = struct {
                 if (all[child].floats() and !all[child].concealed) all[child].bounds = self.floatingBounds(&all[child]);
             }
         }
+    }
+
+    /// Bring each snapping scroll container the user scrolled in this pass
+    /// to rest at a place; true when an offset changed.
+    fn snapScrolls(self: *View) Error!bool {
+        const all = self.buffers.nodes[0..self.len];
+        var moved = false;
+        for (all, 0..) |*node, index| {
+            const kind = node.style.scroll_snap orelse continue;
+            const model = node.scroll orelse continue;
+            if (node.kind != .scroll or model.snap_delta == 0 or node.hidden()) continue;
+            const view_height = model.viewport.height;
+            if (!(view_height > 0)) continue;
+            const delta = model.snap_delta;
+            model.snap_delta = 0;
+            const limit = model.maxOffset().y;
+            const offset = model.offset.y;
+            const origin = node.bounds.y - offset;
+            const p = node.style.padding;
+            // The rest nearest to the offset, the nearest past where the
+            // scroll started its way, and whether a large node fills the view.
+            var nearest: ?f32 = null;
+            var onward: ?f32 = null;
+            var fills = false;
+            var at = index + 1;
+            while (at < node.end) {
+                const inner = &all[at];
+                if (inner.kind == .scroll or inner.hidden()) {
+                    at = inner.end;
+                    continue;
+                }
+                at += 1;
+                const alignment = inner.style.snap_align orelse continue;
+                const top = inner.bounds.y - origin;
+                const height = inner.bounds.height;
+                const room = @max(0, view_height - p.top - p.bottom);
+                const rest = std.math.clamp(switch (alignment) {
+                    .start => top - p.top,
+                    .center => top + height / 2 - p.top - room / 2,
+                    .end => top + height - p.top - room,
+                }, 0, limit);
+                if (height > room and offset >= top - p.top and offset + room <= top + height - p.top) fills = true;
+                if (nearest == null or @abs(rest - offset) < @abs(nearest.? - offset)) nearest = rest;
+                const start = if (std.math.isNan(delta)) offset else offset - delta;
+                const ahead = if (std.math.isNan(delta)) true else if (delta > 0) rest > start + 0.5 else rest < start - 0.5;
+                if (ahead and (onward == null or @abs(rest - offset) < @abs(onward.? - offset))) onward = rest;
+            }
+            if (fills) continue;
+            const target = switch (kind) {
+                .mandatory => onward orelse nearest,
+                .proximity => if (nearest) |rest| (if (@abs(rest - offset) <= view_height / 3) rest else null) else null,
+            } orelse continue;
+            moved = (model.setOffset(.{ .x = model.offset.x, .y = target }) catch return error.InvalidValue) or moved;
+        }
+        return moved;
     }
 
     /// Move each `Style.sticky` node, with what is inside it, to stay

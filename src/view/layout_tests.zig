@@ -109,3 +109,41 @@ test "a sticky heading stays at the top of its scroll container until the next s
     try h.render();
     try testing.expectEqual(top, (try h.boundsOf(.{ .text = "Tuesday" })).y);
 }
+
+const Pages = struct {
+    model: view.ScrollModel = .{},
+    snap: view.SnapType = .mandatory,
+    fn build(self: *Pages, v: *View) anyerror!void {
+        try v.scroll(&self.model, .{ .height = 100, .scroll_snap = self.snap });
+        for (0..5) |i| try v.textf("Page {d}", .{i}, .{ .key = i, .height = 80, .snap_align = .start });
+        try v.end();
+    }
+};
+
+test "a snapping scroll container goes from place to place, or rests near one" {
+    var storage: Storage = .{};
+    var app: Pages = .{};
+    var h = Harness.init(&app, Pages.build, storage.buffers(), .{});
+    try h.render();
+    try testing.expectEqual(@as(f32, 0), app.model.offset.y);
+    // A small step down goes on to the next page.
+    try h.scroll(.{ .kind = .scroll }, .{ .x = 0, .y = 10 });
+    try testing.expectEqual(@as(f32, 80), app.model.offset.y);
+    try h.scroll(.{ .kind = .scroll }, .{ .x = 0, .y = 30 });
+    try testing.expectEqual(@as(f32, 160), app.model.offset.y);
+    // And back up.
+    try h.scroll(.{ .kind = .scroll }, .{ .x = 0, .y = -5 });
+    try testing.expectEqual(@as(f32, 80), app.model.offset.y);
+    // Where the application puts it, it stays.
+    app.model.offset.y = 100;
+    try h.render();
+    try testing.expectEqual(@as(f32, 100), app.model.offset.y);
+    // Proximity rests at a page only within a third of the view of it.
+    app.snap = .proximity;
+    app.model.offset.y = 0;
+    try h.render();
+    try h.scroll(.{ .kind = .scroll }, .{ .x = 0, .y = 70 });
+    try testing.expectEqual(@as(f32, 80), app.model.offset.y);
+    try h.scroll(.{ .kind = .scroll }, .{ .x = 0, .y = 40 });
+    try testing.expectEqual(@as(f32, 120), app.model.offset.y);
+}
