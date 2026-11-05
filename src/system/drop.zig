@@ -366,7 +366,7 @@ const Web = struct {
     }
     fn dataDetach(_: *anyopaque) void {}
     fn hoverPage(target: *Target, phase: u32, x: f64, y: f64, files: u32, text: u32) callconv(.c) u32 {
-        const value: Hover = .{ .phase = @enumFromInt(@min(phase, 2)), .point = .{ .x = @floatCast(x), .y = @floatCast(y) }, .files = files != 0, .text = text != 0 };
+        const value: Hover = .{ .phase = @fromBackingInt(@intCast(@min(phase, 2))), .point = .{ .x = @floatCast(x), .y = @floatCast(y) }, .files = files != 0, .text = text != 0 };
         return @intFromBool(target.hover(value));
     }
     /// kind: 0 files (paths NUL-separated), 1 text, 2 too large for the
