@@ -176,6 +176,10 @@ fn validOptions(options: Retarget) !void {
         },
     }
 }
+/// The eased progress at `t` from 0 to 1.
+pub fn easeAt(easing: Easing, t: f64) f64 {
+    return eased(easing, std.math.clamp(t, 0, 1)).value;
+}
 const Ease = struct { value: f64, derivative: f64 };
 fn eased(easing: Easing, t: f64) Ease {
     return switch (easing) {

@@ -126,6 +126,15 @@ pub const ScrollModel = struct {
     /// rest, for it to go on from (NaN: snap where it shows); 0 when it
     /// rests. See `view.Style.scroll_snap`.
     snap_delta: f32 = 0,
+    /// A glide of the offset under way (`view.ScrollIntoView.glide`): from
+    /// `glide_from` to `glide_to` down, over `glide_ns` from `glide_start`
+    /// on the view's clock. The user scrolling stops it.
+    glide_from: f32 = 0,
+    glide_to: f32 = 0,
+    glide_start: u64 = 0,
+    glide_ns: u64 = 0,
+    /// The glide's easing, as `ziggurat_animation.Easing` numbers it.
+    glide_easing: u8 = 0,
 
     pub fn maxOffset(self: *const ScrollModel) Point {
         return .{ .x = @max(0, self.content.width - self.viewport.width), .y = @max(0, self.content.height - self.viewport.height) };

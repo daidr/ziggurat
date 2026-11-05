@@ -343,6 +343,19 @@ pub const Style = struct {
     theme: ?*const Theme = null,
 };
 
+/// Where `View.scrollIntoViewWith` lines a node up in the scroll
+/// containers around it: as little as shows it (`nearest`), or its start,
+/// center or end with the container's, inside its padding.
+pub const ScrollAlign = enum { nearest, start, center, end };
+/// How `View.scrollIntoViewWith` brings a node into view.
+pub const ScrollIntoView = struct {
+    block: ScrollAlign = .nearest,
+    /// Glide there over this time, easing out, rather than at once, as the
+    /// web's `behavior: "smooth"`; the user scrolling stops it, and under
+    /// reduced motion it scrolls at once.
+    glide: ?animation.Tween = null,
+};
+
 /// How strictly a scroll container snaps; see `Style.scroll_snap`.
 pub const SnapType = enum { mandatory, proximity };
 /// What of a node lines up with its scroll container; see
@@ -1592,6 +1605,7 @@ pub const View = struct {
     /// A list item selected by input, revealed by the next `arrange`. It
     /// outlives `reset` so an event pass can hand it to the render pass.
     reveal: ?u64 = null,
+    reveal_options: ScrollIntoView = .{},
     /// Monotonic time of this pass in nanoseconds, set by the host before
     /// each pass. Only differences are meaningful.
     now: u64 = 0,
@@ -1895,6 +1909,14 @@ pub const View = struct {
     /// every pass keeps the reader from scrolling it away.
     pub fn scrollIntoView(self: *View, id: u64) void {
         self.reveal = id;
+        self.reveal_options = .{};
+    }
+    /// Scroll the containers around the node with `id` to show it, lined
+    /// up as `options` say, as the web's `scrollIntoView` options: at once,
+    /// or gliding there; see `ScrollIntoView`.
+    pub fn scrollIntoViewWith(self: *View, id: u64, how: ScrollIntoView) void {
+        self.reveal = id;
+        self.reveal_options = how;
     }
     /// Bind `chord` to an action under `action`: while the node just added
     /// holds focus, or anywhere in the window when `window` is set, the
@@ -2242,6 +2264,7 @@ pub const View = struct {
         if (style.scroll_snap == .mandatory and model.viewport.height == 0) model.snap_delta = std.math.nan(f32);
         if (self.take(node.id)) |event| if (event == .scroll) {
             const before = model.offset.y;
+            model.glide_ns = 0;
             _ = model.scrollBy(event.scroll.delta) catch return error.InvalidValue;
             if (style.scroll_snap != null and !std.math.isNan(model.snap_delta)) model.snap_delta += model.offset.y - before;
         };
@@ -4596,7 +4619,7 @@ pub const View = struct {
         if (self.reveal) |id| {
             self.reveal = null;
             if (try self.revealNode(id)) try self.place();
-        }
+        } else if (self.glideScrolls()) try self.place();
         if (try self.snapScrolls()) try self.place();
         self.holdSticky();
         self.record(measurer);
@@ -5061,12 +5084,37 @@ pub const View = struct {
         if (target.concealed) return false;
         var moved = false;
         var parent = target.parent;
+        const how = self.reveal_options;
+        self.reveal_options = .{};
         while (parent < all.len) : (parent = all[parent].parent) {
             const container = &all[parent];
             const model = container.scroll orelse continue;
             const top = container.bounds.y - model.offset.y;
             const b = target.bounds;
-            moved = (model.ensureVisible(.{ .x = 0, .y = b.y - top, .width = 0, .height = b.height }) catch return error.InvalidValue) or moved;
+            const before = model.offset.y;
+            const p = container.style.padding;
+            const room = @max(0, model.viewport.height - p.top - p.bottom);
+            const at = b.y - top - p.top;
+            switch (how.block) {
+                .nearest => _ = model.ensureVisible(.{ .x = 0, .y = b.y - top, .width = 0, .height = b.height }) catch return error.InvalidValue,
+                .start => _ = model.setOffset(.{ .x = model.offset.x, .y = at }) catch return error.InvalidValue,
+                .center => _ = model.setOffset(.{ .x = model.offset.x, .y = at + b.height / 2 - room / 2 }) catch return error.InvalidValue,
+                .end => _ = model.setOffset(.{ .x = model.offset.x, .y = at + b.height - room }) catch return error.InvalidValue,
+            }
+            const after = model.offset.y;
+            if (how.glide) |glide| if (glide.duration_ns > 0 and !self.preferences.reduce_motion and after != before) {
+                // It glides from where it shows now.
+                model.glide_from = before;
+                model.glide_to = after;
+                model.glide_start = self.now;
+                model.glide_ns = glide.duration_ns;
+                model.glide_easing = @intFromEnum(glide.easing);
+                model.offset.y = before;
+                _ = self.glideScrolls();
+                continue;
+            };
+            model.glide_ns = 0;
+            moved = moved or after != before;
         }
         return moved;
     }
@@ -5127,6 +5175,24 @@ pub const View = struct {
                 if (all[child].floats() and !all[child].concealed) all[child].bounds = self.floatingBounds(&all[child]);
             }
         }
+    }
+
+    /// Move each scroll container gliding to where its glide is now, and
+    /// ask for the next frame of those still on their way; true when an
+    /// offset changed.
+    fn glideScrolls(self: *View) bool {
+        var moved = false;
+        for (self.buffers.nodes[0..self.len]) |*node| {
+            const model = node.scroll orelse continue;
+            if (model.glide_ns == 0) continue;
+            const elapsed = self.now -| model.glide_start;
+            const t = @min(1, @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(model.glide_ns)));
+            const eased = animation.easeAt(std.enums.fromInt(animation.Easing, model.glide_easing) orelse .cubic_out, t);
+            const next: f32 = @floatCast(model.glide_from + (model.glide_to - model.glide_from) * eased);
+            moved = (model.setOffset(.{ .x = model.offset.x, .y = next }) catch false) or moved;
+            if (t >= 1) model.glide_ns = 0 else self.wakeAt(self.now + loading_frame_interval);
+        }
+        return moved;
     }
 
     /// Bring each snapping scroll container the user scrolled in this pass

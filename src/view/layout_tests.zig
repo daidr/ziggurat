@@ -174,3 +174,39 @@ test "a double click on a split's divider puts it back at its reset size" {
     try h.release(x, y);
     try testing.expectEqual(@as(f64, 0.25), app.fraction);
 }
+
+const Long = struct {
+    model: view.ScrollModel = .{},
+    target: ?view.ScrollIntoView = null,
+    fn build(self: *Long, v: *View) anyerror!void {
+        try v.scroll(&self.model, .{ .height = 100 });
+        for (0..20) |i| try v.textf("Row {d}", .{i}, .{ .key = i, .height = 20 });
+        if (self.target) |options| v.scrollIntoViewWith(v.nodes()[v.nodes().len - 10].id, options);
+        try v.end();
+    }
+};
+
+test "scrollIntoView lines a node up at the start, center or end, or glides there" {
+    var storage: Storage = .{};
+    var app: Long = .{};
+    var h = Harness.init(&app, Long.build, storage.buffers(), .{});
+    try h.render();
+    // Row 10 is 200 down.
+    app.target = .{ .block = .start };
+    try h.render();
+    try testing.expectEqual(@as(f32, 200), app.model.offset.y);
+    app.target = .{ .block = .center };
+    try h.render();
+    try testing.expectEqual(@as(f32, 160), app.model.offset.y);
+    app.target = .{ .block = .end };
+    try h.render();
+    try testing.expectEqual(@as(f32, 120), app.model.offset.y);
+    app.target = .{ .block = .start, .glide = .{ .duration_ns = 200 * std.time.ns_per_ms, .easing = .linear } };
+    try h.render();
+    app.target = null;
+    try testing.expectEqual(@as(f32, 120), app.model.offset.y);
+    try h.advance(100 * std.time.ns_per_ms);
+    try testing.expectApproxEqAbs(@as(f32, 160), app.model.offset.y, 0.5);
+    try h.advance(100 * std.time.ns_per_ms);
+    try testing.expectEqual(@as(f32, 200), app.model.offset.y);
+}
