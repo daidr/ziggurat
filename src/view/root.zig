@@ -1199,6 +1199,10 @@ pub const Node = struct {
     lifted: u8 = 0,
     /// A child has a `Style.z_index`: the children paint sorted by it.
     z_order: bool = false,
+    /// A wrapping text that widens nothing around it: it wraps to the
+    /// width it is given, as an alert's title and message do to its
+    /// buttons' width.
+    narrow: bool = false,
     parent: u32 = none,
     first_child: u32 = none,
     last_child: u32 = none,
@@ -4704,6 +4708,7 @@ pub const View = struct {
                 // A tree row's badge keeps its width for paint.
                 if (node.kind == .tree_row) node.fraction = if (node.badge.len > 0) measurer.textSize(node.badge, null).width + 2 * (theme.metrics.content_inset / 2 + 4) + theme.metrics.content_inset / 2 else 0;
                 node.measured = if (node.kind == .text and node.style.wrap) self.measureWrap(node, measurer) else intrinsic(node, theme, measurer);
+                if (node.narrow) node.measured.preferred.width = node.measured.minimum.width;
                 continue;
             }
             var cursor: usize = 0;
@@ -4755,7 +4760,10 @@ pub const View = struct {
         for (self.buffers.nodes[0..self.len]) |*node| {
             if (node.kind != .text or !node.style.wrap) continue;
             const width = self.wrapWidth(node) orelse continue;
-            if (width + 0.5 < node.measured.preferred.width) return true;
+            // A narrow text's preferred width is its longest word: what one
+            // line of it needs tells.
+            const needed = if (node.narrow) wrap_text.measure(node.text, std.math.inf(f32), node.style.font, self.measurer, node.style.max_lines).width else node.measured.preferred.width;
+            if (width + 0.5 < needed) return true;
         }
         return false;
     }

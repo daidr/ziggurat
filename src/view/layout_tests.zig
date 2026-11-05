@@ -242,3 +242,25 @@ test "inView tells whether a node showed, with a margin and an amount" {
     try h.render();
     try testing.expectEqual([3]bool{ true, false, false }, app.seen);
 }
+
+const Alerting = struct {
+    open: bool = true,
+    fn build(self: *Alerting, v: *View) anyerror!void {
+        try v.column(.{});
+        try v.text("Behind", .{});
+        _ = try v.alertDialog(&self.open, .{ .title = "Quit while three downloads are still running in the background?", .message = "One message long enough that it wraps onto lines of its own in the alert rather than widening it to the whole window, however long it goes on.", .buttons = &.{ "Cancel", "Shut Them Down", "Keep Running" } }, .{});
+        try v.end();
+    }
+};
+
+test "an alert is as wide as its buttons need, its title and message wrapping to it" {
+    var storage: Storage = .{};
+    var app: Alerting = .{};
+    var h = Harness.init(&app, Alerting.build, storage.buffers(), .{ .bounds = .{ .x = 0, .y = 0, .width = 1600, .height = 600 } });
+    try h.render();
+    const panel = try h.boundsOf(.{ .kind = .dialog });
+    try testing.expect(panel.width < 800);
+    try testing.expect((try h.boundsOf(.{ .text = "Keep Running" })).x + 10 <= panel.x + panel.width);
+    const message = try h.find(.{ .kind = .text, .text = "One message long enough that it wraps onto lines of its own in the alert rather than widening it to the whole window, however long it goes on." });
+    try testing.expect(message.bounds.height > 30);
+}
