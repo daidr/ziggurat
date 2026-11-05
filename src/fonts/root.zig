@@ -49,11 +49,21 @@ const Entry = struct {
     own_len: u8 = 0,
     registered: bool = false,
     monospaced: bool = false,
+    /// The system holds the registered faces under `name` itself (Linux),
+    /// apart from the font's own family.
+    named: bool = false,
 
     fn nameSlice(self: *const Entry) []const u8 {
         return self.name[0..self.name_len];
     }
+    /// The family to give the system: the name itself where it holds the
+    /// faces under it, else the font's own.
     fn ownSlice(self: *const Entry) [:0]const u8 {
+        if (self.named) return self.name[0..self.name_len :0];
+        return self.fontFamily();
+    }
+    /// The family the font names itself.
+    fn fontFamily(self: *const Entry) [:0]const u8 {
         return if (self.own_len > 0) self.own[0..self.own_len :0] else self.name[0..self.name_len :0];
     }
 };
@@ -66,6 +76,9 @@ var registered_count: usize = 0;
 /// its name.
 var hashes: [max_families][16]u8 = undefined;
 var hash_count: usize = 0;
+/// The data and the family each font was added again under (Linux).
+var named_faces: [max_families]struct { hash: [16]u8, id: Id } = undefined;
+var named_count: usize = 0;
 var changes: u64 = 0;
 
 /// The id of the family `name`, registered or the system's, the same id for
@@ -133,6 +146,26 @@ pub fn register(allocator: Allocator, data: []const u8, family_name: []const u8)
         hash_count += 1;
         changes += 1;
     }
+    // Linux holds a family the app gives apart from the font's own, so
+    // that it takes only the faces registered under it: two faces of one
+    // family that declare the same weight stay apart. A family that is the
+    // font's own stays as it is.
+    const apart = builtin.os.tag == .linux and family_name.len > 0 and for (0..faces.count) |at| {
+        if (std.ascii.eqlIgnoreCase(own_buffer[at][0..own_lens[at]], family_name)) break false;
+    } else true;
+    if (comptime builtin.os.tag == .linux) if (apart) {
+        const id = try family(family_name);
+        const added = for (named_faces[0..named_count]) |face| {
+            if (face.id == id and std.mem.eql(u8, &face.hash, &hash)) break true;
+        } else false;
+        if (!added) {
+            if (named_count == named_faces.len) return error.TooManyFamilies;
+            try native.addFamily(allocator, data, &hash, entries[id].name[0..entries[id].name_len :0]);
+            named_faces[named_count] = .{ .hash = hash, .id = id };
+            named_count += 1;
+            changes += 1;
+        }
+    };
     var first: ?Id = null;
     for (0..names_needed) |at| {
         const own = own_buffer[if (family_name.len > 0) 0 else at][0..own_lens[if (family_name.len > 0) 0 else at]];
@@ -142,6 +175,7 @@ pub fn register(allocator: Allocator, data: []const u8, family_name: []const u8)
         @memcpy(entry.own[0..own.len], own);
         entry.own[own.len] = 0;
         entry.monospaced = faces.monospaced;
+        if (apart) entry.named = true;
         if (!entry.registered) {
             entry.registered = true;
             registered_order[registered_count] = id;
@@ -168,7 +202,7 @@ pub fn families(allocator: Allocator) ![]FontFamily {
     var system = try native.systemFamilies(allocator);
     defer system.deinit(allocator);
     outer: for (system.items) |item| {
-        for (registered_order[0..registered_count]) |id| if (std.ascii.eqlIgnoreCase(entries[id].ownSlice(), item.name) or std.ascii.eqlIgnoreCase(entries[id].nameSlice(), item.name)) continue :outer;
+        for (registered_order[0..registered_count]) |id| if (std.ascii.eqlIgnoreCase(entries[id].fontFamily(), item.name) or std.ascii.eqlIgnoreCase(entries[id].nameSlice(), item.name)) continue :outer;
         for (list.items[registered_end..]) |existing| if (std.ascii.eqlIgnoreCase(existing.name, item.name)) continue :outer;
         try list.ensureUnusedCapacity(allocator, 1);
         list.appendAssumeCapacity(.{ .name = try allocator.dupe(u8, item.name), .monospaced = item.monospaced, .registered = false });
@@ -203,6 +237,7 @@ pub fn resetForTesting() void {
     count = 0;
     registered_count = 0;
     hash_count = 0;
+    named_count = 0;
 }
 
 test "family ids are stable, case-insensitive and bounded" {

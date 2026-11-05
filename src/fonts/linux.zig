@@ -5,6 +5,7 @@ const root = @import("root.zig");
 const files = @import("files.zig");
 
 extern fn zfont_add_file(path: [*:0]const u8) c_int;
+extern fn zfont_add_family(path: [*:0]const u8, family: [*:0]const u8) c_int;
 extern fn zfont_list(context: *anyopaque, each: *const fn (*anyopaque, [*:0]const u8, c_int) callconv(.c) void) c_int;
 
 /// The user's cache directory: macOS's, or as the XDG base directories name it.
@@ -25,6 +26,18 @@ pub fn add(allocator: std.mem.Allocator, data: []const u8, hash: *const [16]u8) 
     const terminated = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(terminated);
     if (zfont_add_file(terminated) != 0) return error.UnreadableFont;
+}
+
+/// Linux: adds the font's faces again under `family` alone (fontconfig),
+/// apart from its own family's.
+pub fn addFamily(allocator: std.mem.Allocator, data: []const u8, hash: *const [16]u8, family: [:0]const u8) !void {
+    if (comptime builtin.os.tag != .linux) return;
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try files.write(allocator, try cacheDir(&buffer), data, hash);
+    defer allocator.free(path);
+    const terminated = try allocator.dupeSentinel(u8, path, 0);
+    defer allocator.free(terminated);
+    if (zfont_add_family(terminated, family) != 0) return error.UnreadableFont;
 }
 
 pub const List = struct {
