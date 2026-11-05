@@ -134,9 +134,13 @@ var tv = terminal_view.TerminalView.init(&host, allocator, &terminal, .{ .theme 
 - `right_click` 决定副键点击：`.context_menu`（默认）发出 `Notice.context_menu`，应用在该点弹出 `contextMenu()` 给出的 Copy、Paste、Select All、Clear（Clear 前有分隔线，各项带绑定的快捷键，无选区时 Copy 不可用，全屏程序上 Clear 不可用）并把选中项交给 `choose`；`.paste`、`.copy`、`.copy_or_paste`（有选区复制，否则粘贴）、`.ignore`。复制会放开选区。程序跟踪鼠标时仍收到点击，除非按住 Shift。
 - `Notice.copied` 报告终端写入剪贴板的文字与来源：`.user`（复制键、菜单、副键复制）、`.select`（`copy_on_select`）、`.program`（OSC 52）。
 
+## 同步更新
+
+程序开启同步更新（2026 模式）后，视图最多一秒内不重绘它的输出，等程序关闭该模式再一次画出整屏，避免看到画到一半的界面；一秒后仍未关闭就照常绘制（`sync_hold_ns`）。等待由 Host 的定时唤醒（`Host.wakeAt`）兑现，没有调度器的宿主不等待。其他原因的重绘（例如滚动）仍会画出当时的屏幕。亮度计算用 256 项 sRGB 到线性光的查表。
+
 ## 字体、对比度与留白
 
-- `Options.font`：`size`（DIP，默认 13）、`weight`（100–900，映射到 UI 字体的常规、中等、半粗、粗体；粗体文字在此基础上加 300，至少 700）、`line_height`（行高倍数，文字在行内居中）。`setFont` 运行中更换字体并取消缩放。
+- `Options.font`：`size`（DIP，默认 13）、`weight`（100–900，映射到 UI 字体的常规、中等、半粗、粗体；粗体文字在此基础上加 300，至少 700）、`line_height`（行高倍数，文字在行内居中）。`cell_width`（列宽倍数，默认 1）按字体测得的字宽乘以它来定列宽，像其他终端的 letter spacing：大于 1 时列变宽、字形在格内居中，小于 1 时变窄；非正数或非有限值按 1。`setFont` 运行中更换字体并取消缩放。
 - `minimum_contrast` 是文字与背景的最小 WCAG 对比度（1 到 21，默认 1 即不调整）：对比不足的文字向黑或白中与背景对比更大的一方混合，混合量是达到对比度所需的最小值；线框、方块、旧式计算机符号与 Powerline 符号保持原色。`setMinimumContrast` 运行中修改。
 - `padding` 是网格四周的留白，横向 6、纵向 4 DIP，负值为无。`padding_color` 为 `.background`（默认）、`.extend`（每个格子都有自己背景色的行，把边缘格子的背景延伸到留白，顶行与底行向上下延伸，全屏程序的颜色因此铺满视图）或 `.extend_always`（所有行都延伸）；单独一个反显字符（程序自己画的光标）不延伸。`transparent` 不画终端背景，下面的内容透出，自有背景色的格子照常绘制。
 

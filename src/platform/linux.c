@@ -94,6 +94,93 @@ static gboolean wake_dispatch(GSource *source, GSourceFunc ignored, gpointer unu
     return G_SOURCE_CONTINUE;
 }
 static GSourceFuncs wake_functions = {wake_prepare,wake_check,wake_dispatch,NULL,NULL,NULL};
+
+/* The settings portal's color-scheme, where GNOME and KDE keep their dark
+   style: GTK 3 reads gtk-application-prefer-dark-theme instead, and
+   WebKitGTK takes pages' prefers-color-scheme from GTK, so an app that
+   follows the desktop stayed light on a dark one. While the app follows
+   the desktop (zlg_follow_portal_scheme), a portal preferring dark makes
+   GTK prefer dark; otherwise GTK keeps the desktop's own settings. The
+   setting is written only when it changes, as GTK tells its watchers at
+   every write. The portal is read and watched asynchronously, never on a
+   bus the session does not have, which GLib would autolaunch. */
+static struct {
+    GCancellable *cancel;
+    GDBusConnection *bus;
+    guint signal;
+    int scheme;      /* 0 none, 1 prefers dark, 2 prefers light */
+    gboolean ignore; /* the app chose its own appearance */
+    gboolean set;    /* the setting holds the portal's value, not the desktop's */
+} portal;
+static void portal_apply(void) {
+    GtkSettings *settings=gtk_settings_get_default();
+    if (!settings || portal.ignore) return;
+    if (portal.scheme==1) {
+        gboolean dark=FALSE;
+        g_object_get(settings,"gtk-application-prefer-dark-theme",&dark,NULL);
+        if (!dark) { portal.set=TRUE; g_object_set(settings,"gtk-application-prefer-dark-theme",TRUE,NULL); }
+    } else if (portal.set) {
+        portal.set=FALSE;
+        gtk_settings_reset_property(settings,"gtk-application-prefer-dark-theme");
+    }
+}
+/* The appearance's source changed: 1 follows the desktop, 0 the app
+   forces light or dark and owns the setting. */
+void zlg_follow_portal_scheme(int follow) {
+    portal.ignore=!follow;
+    if (!follow) portal.set=FALSE;
+    else portal_apply();
+}
+/* The color-scheme in a value of Read or SettingChanged; Read wraps it in
+   another variant on older portals. */
+static void portal_take(GVariant *value) {
+    GVariant *inner=g_variant_ref(value);
+    while (g_variant_is_of_type(inner,G_VARIANT_TYPE_VARIANT)) { GVariant *next=g_variant_get_variant(inner); g_variant_unref(inner); inner=next; }
+    if (g_variant_is_of_type(inner,G_VARIANT_TYPE_UINT32)) { portal.scheme=(int)g_variant_get_uint32(inner); portal_apply(); }
+    g_variant_unref(inner);
+}
+static void portal_changed(GDBusConnection *bus, const gchar *sender, const gchar *path, const gchar *interface, const gchar *name, GVariant *parameters, gpointer data) {
+    (void)bus; (void)sender; (void)path; (void)interface; (void)name; (void)data;
+    if (!g_variant_is_of_type(parameters,G_VARIANT_TYPE("(ssv)"))) return;
+    const gchar *space=NULL, *key=NULL; GVariant *value=NULL;
+    g_variant_get(parameters,"(&s&sv)",&space,&key,&value);
+    if (!strcmp(space,"org.freedesktop.appearance") && !strcmp(key,"color-scheme")) portal_take(value);
+    g_variant_unref(value);
+}
+static void portal_read(GObject *source, GAsyncResult *result, gpointer data) {
+    (void)data;
+    GVariant *reply=g_dbus_connection_call_finish(G_DBUS_CONNECTION(source),result,NULL);
+    if (!reply) return;
+    GVariant *value=NULL;
+    if (g_variant_is_of_type(reply,G_VARIANT_TYPE("(v)"))) { g_variant_get(reply,"(v)",&value); portal_take(value); g_variant_unref(value); }
+    g_variant_unref(reply);
+}
+static void portal_bus(GObject *source, GAsyncResult *result, gpointer data) {
+    (void)source;
+    GDBusConnection *bus=g_bus_get_finish(result,NULL);
+    if (!bus) return;
+    /* An App destroyed meanwhile cancelled the one it started. */
+    if (data!=portal.cancel || g_cancellable_is_cancelled(portal.cancel)) { g_object_unref(bus); return; }
+    portal.bus=bus;
+    portal.signal=g_dbus_connection_signal_subscribe(bus,NULL,"org.freedesktop.portal.Settings","SettingChanged","/org/freedesktop/portal/desktop",NULL,G_DBUS_SIGNAL_FLAGS_NONE,portal_changed,NULL,NULL);
+    g_dbus_connection_call(bus,"org.freedesktop.portal.Desktop","/org/freedesktop/portal/desktop","org.freedesktop.portal.Settings","Read",
+        g_variant_new("(ss)","org.freedesktop.appearance","color-scheme"),G_VARIANT_TYPE("(v)"),G_DBUS_CALL_FLAGS_NO_AUTO_START,2000,portal.cancel,portal_read,NULL);
+}
+static void portal_start(void) {
+    const char *address=g_getenv("DBUS_SESSION_BUS_ADDRESS"), *runtime=g_getenv("XDG_RUNTIME_DIR");
+    gboolean bus=address && address[0];
+    if (!bus && runtime && runtime[0]) { gchar *path=g_build_filename(runtime,"bus",NULL); bus=g_file_test(path,G_FILE_TEST_EXISTS); g_free(path); }
+    if (!bus) return;
+    portal.cancel=g_cancellable_new();
+    g_bus_get(G_BUS_TYPE_SESSION,portal.cancel,portal_bus,portal.cancel);
+}
+static void portal_stop(void) {
+    if (portal.cancel) { g_cancellable_cancel(portal.cancel); g_object_unref(portal.cancel); }
+    if (portal.bus) { if (portal.signal) g_dbus_connection_signal_unsubscribe(portal.bus,portal.signal); g_object_unref(portal.bus); }
+    gboolean ignore=portal.ignore;
+    memset(&portal,0,sizeof(portal));
+    portal.ignore=ignore;
+}
 NativeApp *zlg_app_create(void *owner, void (*dispatch)(void *), int *error) {
     if (!g_atomic_int_compare_and_exchange(&active_app,0,1)) { *error=1; return NULL; }
     if (!gtk_init_check(NULL,NULL)) { g_atomic_int_set(&active_app,0); *error=2; return NULL; }
@@ -108,12 +195,14 @@ NativeApp *zlg_app_create(void *owner, void (*dispatch)(void *), int *error) {
     g_source_set_name(app->source,"Ziggurat dispatcher");
     g_source_set_priority(app->source,G_PRIORITY_DEFAULT_IDLE);
     g_source_attach(app->source,app->context);
+    portal_start();
     *error=0; return app;
 }
 void zlg_app_wake(NativeApp *app) { if(g_atomic_int_compare_and_exchange(&app->pending,0,1))g_main_context_wakeup(app->context); }
 void zlg_app_quit(NativeApp *app) { g_atomic_int_set(&app->stopped,1); g_main_loop_quit(app->loop); }
 void zlg_app_run(NativeApp *app) { if (!g_atomic_int_get(&app->stopped)) g_main_loop_run(app->loop); }
 void zlg_app_destroy(NativeApp *app) {
+    portal_stop();
     app->owner=NULL; ((WakeSource *)app->source)->app=NULL;
     g_source_destroy(app->source); g_source_unref(app->source); g_atomic_int_add(&resources,-1);
     g_main_loop_unref(app->loop); g_atomic_int_add(&resources,-1);
@@ -1079,6 +1168,17 @@ void zlg_window_bounds(NativeWindow *s, NativeBounds *bounds) {
     bounds->width=MAX(0,width); bounds->height=MAX(0,height);
     bounds->positioned=(zlg_window_capabilities(s)&1u)!=0; bounds->x=0; bounds->y=0;
     if (bounds->positioned) gtk_window_get_position(GTK_WINDOW(s->window),&bounds->x,&bounds->y);
+}
+/* The refresh rate of the monitor showing the window, in millihertz as GDK
+   knows it, 0 when unknown (Xvfb's): on Wayland the output the window last
+   entered, on X11 the monitor with most of it. */
+uint32_t zlg_window_refresh_millihz(NativeWindow *s) {
+    GdkWindow *window=gtk_widget_get_window(s->window);
+    GdkDisplay *display=gtk_widget_get_display(s->window);
+    GdkMonitor *monitor=window&&display?gdk_display_get_monitor_at_window(display,window):NULL;
+    if (!monitor && display) monitor=gdk_display_get_primary_monitor(display);
+    int rate=monitor?gdk_monitor_get_refresh_rate(monitor):0;
+    return rate>0?(uint32_t)rate:0u;
 }
 void zlg_window_size(NativeWindow *s, uint32_t *width, uint32_t *height, uint32_t *scale) {
     guint factor=MAX(1,gtk_widget_get_scale_factor(s->area));

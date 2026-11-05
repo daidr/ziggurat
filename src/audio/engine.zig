@@ -9,6 +9,7 @@ const framesToNanoseconds = @import("sound.zig").framesToNanoseconds;
 const streaming = @import("stream.zig");
 const Stream = streaming.Stream;
 const Voice = mixer.Voice;
+const Stretcher = @import("stretch.zig").Stretcher;
 
 const compressed = @import("compressed.zig");
 
@@ -392,6 +393,7 @@ pub const Engine = struct {
 
     fn freeVoice(self: *Engine, voice: *Voice) void {
         if (voice.source == .memory) voice.source.memory.sound.release();
+        if (voice.stretcher) |stretcher| stretcher.destroy();
         self.allocator.destroy(voice);
         self.live -= 1;
     }
@@ -857,6 +859,7 @@ pub const Player = struct {
 
     /// How fast the player plays, which changes its pitch with it: 1 (the
     /// default) as decoded, 2 twice as fast and an octave higher, at most 16.
+    /// `setPreservesPitch` keeps the pitch instead.
     pub fn setSpeed(self: Player, speed_value: f64) void {
         const voice = self.lock() orelse return;
         defer self.unlock();
@@ -867,6 +870,32 @@ pub const Player = struct {
         const voice = self.lock() orelse return 0;
         defer self.unlock();
         return voice.speed;
+    }
+
+    /// Whether the player keeps its pitch at a speed other than 1, as HTML
+    /// media's preservesPitch does: true time-stretches it, as a podcast or
+    /// a lecture plays at 1.5x in the voice it was recorded in, while false,
+    /// the default, changes the pitch with the speed (`setSpeed`).
+    /// Time-stretching suits speech and other sound with a pitch at speeds
+    /// from about 0.5 to 4, and costs a little more to mix; sharp attacks,
+    /// as drums', come out a little smeared. A change applies after what
+    /// the player stretched ahead, about 16 ms, without a gap. The first
+    /// `true` allocates the stretcher, which fails with `OutOfMemory`.
+    pub fn setPreservesPitch(self: Player, on: bool) error{OutOfMemory}!void {
+        const voice = self.lock() orelse return;
+        defer self.unlock();
+        if (voice.closed) return;
+        if (on and voice.stretcher == null) {
+            const stretcher = try Stretcher.create(self.engine.allocator, @intFromFloat(voice.rate), voice.channelCount());
+            voice.stretch(stretcher);
+        }
+        voice.pitch = on;
+    }
+
+    pub fn preservesPitch(self: Player) bool {
+        const voice = self.lock() orelse return false;
+        defer self.unlock();
+        return voice.pitch;
     }
 
     /// Whether the player starts again from the start, or its loop's start

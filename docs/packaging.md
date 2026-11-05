@@ -50,6 +50,8 @@ uninstall [--silent] [--purge]
 | Linux 根目录 | `$XDG_DATA_HOME/<identity>/install` | `/opt/<identity>`，需 root |
 | Linux 集成 | `applications/<identity>.desktop`、可选 hicolor 图标、`~/.local/bin` 链接 | `/usr/share` 与 `/usr/local/bin` |
 
+Linux 的 desktop entry 写 `StartupWMClass=<可执行文件名>`（Exec 的文件名部分），与 GTK 默认的窗口类一致，桌面因此把运行中的窗口归到这个条目，任务栏和 Dock 显示它的图标与名称。
+
 安装复用更新发布事务：包内容先复制到私有 stage 并校验摘要与清单，再原子切换 `current.json`，并保留归档供以后的增量更新。根目录同时放入启动器（存根副本，以应用可执行文件命名）、`uninstall` 和 `install.json`。启动器读取 `current.json` 启动当前版本并转发参数：Linux 直接替换进程，Windows 分离启动后立即退出，以免占用自身文件。同版本重新运行等于修复启动器和集成；更旧版本返回 `NewerVersionInstalled`；首次安装失败会删除根目录和已写的集成，升级在发布后失败会回滚到原版本。卸载删除集成和根目录，保留 `LOCALAPPDATA`（Linux 为 `$XDG_DATA_HOME`）下 `<identity>` 的用户数据，`--purge` 一并删除（Windows 还删除 `APPDATA\<identity>`）。Windows 卸载器先把自己复制到 `%TEMP%`，等原进程退出后再删除安装目录，临时副本在允许时登记为重启后删除。
 
 `ziggurat.json` 的 `windows.installDirName`（或 `package setup --install-dir-name`）只改 Windows 安装目录的名字，例如 identity 为 `com.example.zhilian` 的应用装到 `%LOCALAPPDATA%\Programs\ZhiLian`；快捷方式、“设置 > 应用”中的条目、可执行文件和 `install.ps1` 的默认目录跟着它，应用名照旧。它必须是单个目录名：去掉首尾空格后不能为空、`.`、`..`，不能含路径分隔符、`:*?"<>|` 或控制字符，不能以点结尾，也不能是 `CON`、`NUL`、`COM1` 这类设备名。

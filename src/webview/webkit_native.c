@@ -966,6 +966,7 @@ static int content_result(int result) {
 }
 static int create(void *window,const ZwkOptions *options,uint32_t width,uint32_t height,gboolean session,ZwkNotify callback,ZwkPageNotify page_callback,ZwkScriptNotify script_callback,ZwkDeadline deadline,void *owner,ZwkState **out) {
     *out=NULL;
+    zwk_dmabuf_prepare();
     if (!options || !options->html || options->max_pending==0 || options->max_pending>16 || options->max_result_bytes==0 ||
         options->max_result_bytes>1024*1024 || options->region>1 || strlen(options->html)>16*1024*1024 || (options->remote&&(options->local||*options->html)) || (!session&&!window) || (session&&options->region)) return ZWK_INVALID;
     ZwkState *s=g_try_new0(ZwkState,1);

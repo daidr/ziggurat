@@ -229,6 +229,13 @@ pub fn desktopEntry(allocator: std.mem.Allocator, config: Config, exec: []const 
     }
     try appendEscaped(&output, allocator, quoted.items);
     try output.appendSlice(allocator, "\" %U\nTerminal=false\nStartupNotify=true\n");
+    // A GTK window's WM_CLASS is its program name, the basename of argv[0]:
+    // an X11 session groups the window with the entry naming it here and
+    // shows its icon in the taskbar; Wayland matches the app id GTK takes
+    // from the same name.
+    try output.appendSlice(allocator, "StartupWMClass=");
+    try appendEscaped(&output, allocator, std.fs.path.basename(exec));
+    try output.append(allocator, '\n');
     if (icon) |value| {
         try output.appendSlice(allocator, "Icon=");
         try appendEscaped(&output, allocator, value);
@@ -256,6 +263,7 @@ test "desktop entries quote Exec and escape values" {
         \\Exec="/opt/my app/\\$x\\"%%" %U
         \\Terminal=false
         \\StartupNotify=true
+        \\StartupWMClass=$x"%
         \\Icon=org.example.App
         \\Categories=Utility;
         \\

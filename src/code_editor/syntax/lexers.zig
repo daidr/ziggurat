@@ -81,39 +81,54 @@ pub const Json = struct {
     pub fn tokenizer(self: *const Json) Tokenizer {
         return .{ .context = self, .call = call };
     }
+    /// Relabels each key's tokens where they are, in one pass over the
+    /// line, writing behind where it reads: relabeling a key at a time
+    /// would go over every token after it again, and a minified file's one
+    /// line of thousands of keys would take minutes.
     fn call(context: *const anyopaque, line: []const u8, state: u64, out: *Output) u64 {
         const self: *const Json = @ptrCast(@alignCast(context));
         const base = out.base;
         out.base = out.len;
         defer out.base = base;
         const next = self.lexer.tokenize(line, state, out);
+        const toks = out.buffer[out.base..out.len];
+        var written: usize = 0;
         var i: usize = 0;
-        var from: usize = 0;
-        while (i < out.len - out.base) {
-            const toks = out.buffer[out.base..out.len];
+        while (i < toks.len) : (i += 1) {
             if (toks[i].kind != .string) {
-                from = toks[i].end;
-                i += 1;
+                written = put(toks, written, toks[i].end, toks[i].kind);
                 continue;
             }
             // A string with its escapes.
-            const start = from;
             var k = i;
             while (k + 1 < toks.len and (toks[k + 1].kind == .string or toks[k + 1].kind == .escape)) k += 1;
             const end: usize = toks[k].end;
             var p = end;
             while (p < line.len and (line[p] == ' ' or line[p] == '\t')) p += 1;
             if (p < line.len and line[p] == ':') {
-                relabel(out, start, end, .property);
-                // Continue after the relabeled run.
-                const after = out.buffer[out.base..out.len];
-                i = 0;
-                while (i < after.len and after[i].end < end) i += 1;
-                if (i < after.len) i += 1;
-            } else i = k + 1;
-            from = end;
+                written = put(toks, written, end, .property);
+            } else {
+                for (toks[i .. k + 1]) |tok| written = put(toks, written, tok.end, tok.kind);
+            }
+            i = k;
         }
+        out.len = out.base + written;
         return next;
+    }
+
+    /// Append a token ending at `end` to the first `len` of `toks`, merged
+    /// into the last one when it has the same kind.
+    fn put(toks: []Token, len: usize, end: usize, kind: TokenKind) usize {
+        if (len > 0) {
+            const last = &toks[len - 1];
+            if (last.end >= end) return len;
+            if (last.kind == kind) {
+                last.end = @intCast(end);
+                return len;
+            }
+        }
+        toks[len] = .{ .end = @intCast(end), .kind = kind };
+        return len + 1;
     }
 };
 

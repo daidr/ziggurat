@@ -392,3 +392,41 @@ test "colors mix in Oklab for shared elements that ask" {
     try testing.expectEqual(view.matched.mixRgbOklab(yellow, blue, 0.5), lab.background.?);
     try testing.expect(lab.background.? != view.matched.mixRgb(yellow, blue, 0.5));
 }
+
+const Ticker = struct {
+    ask: bool = true,
+    builds: usize = 0,
+    hidden: bool = false,
+    fn build(self: *Ticker, v: *View) anyerror!void {
+        self.builds += 1;
+        if (self.ask) self.hidden = v.windowHidden();
+        try v.text(if (self.hidden) "paused" else "ticking", .{});
+    }
+};
+
+test "a view that asks whether the window is hidden builds again as it hides and shows" {
+    var storage: Storage = .{};
+    var app: Ticker = .{};
+    var h = Harness.init(&app, Ticker.build, storage.buffers(), .{});
+    try h.render();
+    try testing.expect(!app.hidden);
+    const before = app.builds;
+    try h.windowHidden(true);
+    try testing.expect(app.hidden);
+    try testing.expectEqual(before + 1, app.builds);
+    // The same state again builds nothing.
+    try h.windowHidden(true);
+    try testing.expectEqual(before + 1, app.builds);
+    try h.windowHidden(false);
+    try testing.expect(!app.hidden);
+    try testing.expectEqual(before + 2, app.builds);
+
+    // A view that never asked builds nothing as the window hides.
+    var quiet_storage: Storage = .{};
+    var quiet: Ticker = .{ .ask = false };
+    var q = Harness.init(&quiet, Ticker.build, quiet_storage.buffers(), .{});
+    try q.render();
+    const quiet_builds = quiet.builds;
+    try q.windowHidden(true);
+    try testing.expectEqual(quiet_builds, quiet.builds);
+}

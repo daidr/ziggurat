@@ -21,6 +21,12 @@ const FakeApp = struct {
     path: []const u8 = "",
     thread: ?std.Thread = null,
     stop: std.atomic.Value(bool) = .init(false),
+    /// Idle requests answered; a window that keeps drawing never settles.
+    idles: u32 = 0,
+    drawing: bool = false,
+    /// Tree reads before `later` shows, as work changes what the app shows.
+    reads_before_later: u32 = 0,
+    later: ?Node = null,
 
     fn arena(self: *FakeApp) std.mem.Allocator {
         return self.arena_state.allocator();
@@ -36,9 +42,19 @@ const FakeApp = struct {
         ;
         if (eql(method, "tree")) {
             if (page) return error_line("unsupported", "window 2 shows a web page: use eval");
+            if (self.later) |node| {
+                if (self.reads_before_later == 0) {
+                    try self.nodes.append(a, node);
+                    self.later = null;
+                } else self.reads_before_later -= 1;
+            }
             return std.json.Stringify.valueAlloc(a, .{ .window = 1, .focus = self.focus, .nodes = self.nodes.items }, .{ .emit_null_optional_fields = false });
         }
-        if (eql(method, "idle")) return "{}";
+        if (eql(method, "idle")) {
+            self.idles += 1;
+            if (self.drawing) return error_line("timeout", "window 1 did not settle");
+            return "{}";
+        }
         if (eql(method, "act")) {
             try self.acted.append(a, try std.json.Stringify.valueAlloc(a, params, .{}));
             const id = params.object.get("id").?.string;
@@ -276,6 +292,28 @@ test "wait waits for text, and for it to go" {
     try c.fails(1, "timeout: window 1 does not show text \"Saved\" after 1ms", &.{ "wait", "--text", "Saved", "--timeout", "1ms" });
     try c.fails(1, "timeout: window 1 still shows text \"Saving\" after 1ms", &.{ "wait", "--text", "Saving", "--gone", "--timeout", "1" });
     try c.fails(2, "wait --gone needs", &.{ "wait", "--gone" });
+}
+
+test "wait checks its condition while the window keeps drawing" {
+    var temp = testing.tmpDir(.{});
+    defer temp.cleanup();
+    var app: FakeApp = .{ .gpa = testing.allocator, .arena_state = .init(testing.allocator), .drawing = true };
+    const a = app.arena();
+    const dir = try temp.dir.realPathFileAlloc(zio.io(), ".", a);
+    try app.nodes.append(a, .{ .id = "1", .role = "text", .label = "Saving" });
+    try app.start(dir);
+    defer app.deinit();
+    const c: Cli = .{ .dir = try std.fs.path.join(a, &.{ dir, "sessions" }) };
+    try c.must(try std.fmt.allocPrint(a, "opened {s} (session default)\nw1 [content] \"Contacts\" focused\nw2 [page] \"Docs\" url=http://localhost/\n", .{app.path}), &.{ "open", "--socket", app.path });
+    const before = app.idles;
+    // Without a timeout too, the condition shows while it never settles.
+    try c.must("ok\n", &.{ "wait", "--text", "Saving", "--timeout", "0" });
+    app.later = .{ .id = "2", .role = "textField", .value = "Ready", .key = "77" };
+    app.reads_before_later = 2;
+    try c.must("ok\n", &.{ "wait", "--text", "Ready", "--timeout", "0" });
+    try c.must("ok\n", &.{ "wait", "key=77", "--timeout", "0" });
+    try c.fails(1, "timeout: window 1 does not show text \"Done\" after 1ms", &.{ "wait", "--text", "Done", "--timeout", "1ms" });
+    try testing.expectEqual(before, app.idles);
 }
 
 test "keys are written as the tree writes them, or as view.key makes them" {

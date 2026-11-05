@@ -1,5 +1,7 @@
 const std = @import("std");
 const Locale = @import("locale.zig").Locale;
+const plural = @import("plural.zig");
+const cldr = @import("cldr_numbers.zig");
 
 /// Locale number symbols. `zero` is the code point of the digit zero; the
 /// other nine digits follow it contiguously.
@@ -72,18 +74,58 @@ pub fn symbolsFor(locale: *const Locale) *const Symbols {
 }
 
 pub const Style = enum { decimal, percent, currency };
+/// CLDR's compact notation, as Intl's notation "compact": `compact_short`
+/// writes 1.2K, `compact_long` 1.2 thousand.
+pub const Notation = enum { standard, compact_short, compact_long };
+/// How an amount names its currency, as Intl's currencyDisplay.
+pub const CurrencyDisplay = enum { symbol, narrow_symbol, code, name };
+/// `accounting` writes negative amounts as accountants do, (US$1.00) in
+/// English, as Intl's currencySign.
+pub const CurrencySign = enum { standard, accounting };
+/// How a digit beyond the last kept rounds: `half_even` (ICU's default,
+/// and messages') or `half_expand`, away from zero (Intl's).
+pub const Rounding = enum { half_even, half_expand };
 
 pub const Options = struct {
     style: Style = .decimal,
     min_fraction: u8 = 0,
     max_fraction: u8 = 3,
     grouping: bool = true,
-    /// Currency symbol or ISO code written as given for `.currency`.
+    /// Currency symbol or ISO code written as given for `.currency`, where
+    /// the locale puts a currency, when `currency_code` is empty.
     currency: []const u8 = "",
+    /// An ISO 4217 code, as "EUR": `.currency` then writes the amount as
+    /// Intl's style "currency" does, in the locale's pattern and with the
+    /// symbol, code or name `currency_display` asks for. `money` sets the
+    /// currency's fraction digits from CLDR's currency data.
+    currency_code: []const u8 = "",
+    currency_display: CurrencyDisplay = .symbol,
+    currency_sign: CurrencySign = .standard,
+    /// Compact notation rounds as Intl does: to whole numbers from two
+    /// integer digits, else to two significant digits, half away from
+    /// zero; the fraction options do not apply to it.
+    notation: Notation = .standard,
+    rounding: Rounding = .half_even,
 
     pub const integer: Options = .{ .max_fraction = 0 };
     pub const percent: Options = .{ .style = .percent, .max_fraction = 0 };
+    pub const compact_short: Options = .{ .notation = .compact_short };
+    pub const compact_long: Options = .{ .notation = .compact_long };
+
+    /// An amount of the currency `code` (ISO 4217), with its fraction
+    /// digits (CLDR's: two for most, none for JPY, three for KWD) and
+    /// rounded half away from zero, as Intl.NumberFormat writes it.
+    pub fn money(code: []const u8) Options {
+        const digits = currencyDigits(code);
+        return .{ .style = .currency, .currency_code = code, .min_fraction = digits, .max_fraction = digits, .rounding = .half_expand };
+    }
 };
+
+/// The fraction digits CLDR gives currency `code`: two unless listed.
+pub fn currencyDigits(code: []const u8) u8 {
+    for (&cldr.fractions) |entry| if (std.ascii.eqlIgnoreCase(entry.code, code)) return entry.digits;
+    return 2;
+}
 
 pub const max_fraction_digits = 15;
 pub const Error = error{ InvalidOptions, WriteFailed };
@@ -111,6 +153,12 @@ fn checkOptions(options: Options) Error!void {
 /// (percent shifts that decimal by two places first, without a binary
 /// multiplication) and trims trailing zeros down to `min_fraction`.
 pub fn digitsFloat(value: f64, options: Options) Error!Digits {
+    return shiftedFloat(value, if (options.style == .percent) 2 else 0, options);
+}
+
+/// `value` times 10^shift, as `digitsFloat` rounds it: the shift moves the
+/// decimal point of its shortest form, with no binary arithmetic.
+fn shiftedFloat(value: f64, shift: i32, options: Options) Error!Digits {
     try checkOptions(options);
     var out: Digits = .{};
     if (!std.math.isFinite(value)) {
@@ -130,14 +178,28 @@ pub fn digitsFloat(value: f64, options: Options) Error!Digits {
     // buffer[0]; the shift for percent moves two fraction digits left.
     var digits: [420]u8 = undefined;
     var n: usize = 0;
+    var moved: [420]u8 = undefined;
+    if (shift < 0) {
+        // Integer digits move into the fraction, behind zeros where there
+        // are fewer of them than the shift.
+        const k: usize = @intCast(-shift);
+        const pad = k -| int_digits.len;
+        @memset(moved[0..pad], '0');
+        const taken = @min(k, int_digits.len);
+        @memcpy(moved[pad..][0..taken], int_digits[int_digits.len - taken ..]);
+        @memcpy(moved[pad + taken ..][0..frac_digits.len], frac_digits);
+        int_digits = int_digits[0 .. int_digits.len - taken];
+        frac_digits = moved[0 .. pad + taken + frac_digits.len];
+    }
     @memcpy(digits[n..][0..int_digits.len], int_digits);
     n += int_digits.len;
-    if (options.style == .percent) {
-        for (0..2) |i| {
+    if (shift > 0) {
+        const k: usize = @intCast(shift);
+        for (0..k) |i| {
             digits[n] = if (i < frac_digits.len) frac_digits[i] else '0';
             n += 1;
         }
-        frac_digits = frac_digits[@min(2, frac_digits.len)..];
+        frac_digits = frac_digits[@min(k, frac_digits.len)..];
     }
     int_digits = std.mem.trimStart(u8, digits[0..n], "0");
     if (int_digits.len == 0) int_digits = "0";
@@ -159,7 +221,8 @@ pub fn digitsFloat(value: f64, options: Options) Error!Digits {
         const rest = frac_digits[kept..];
         const above_half = rest[0] > '5' or (rest[0] == '5' and std.mem.trimEnd(u8, rest[1..], "0").len > 0);
         const tie = rest[0] == '5' and !above_half;
-        if (above_half or (tie and (text[len - 1] - '0') % 2 == 1)) len = incrementLast(&out.buffer, len);
+        const up = above_half or (tie and (options.rounding == .half_expand or (text[len - 1] - '0') % 2 == 1));
+        if (up) len = incrementLast(&out.buffer, len);
     }
     std.mem.copyForwards(u8, out.buffer[0..len], out.buffer[1..][0..len]);
     const point = std.mem.indexOfScalar(u8, out.buffer[0..len], '.');
@@ -300,13 +363,181 @@ fn writeGrouped(writer: *std.Io.Writer, symbols: *const Symbols, int_part: []con
 }
 
 pub fn formatFloat(writer: *std.Io.Writer, locale: *const Locale, value: f64, options: Options) Error!void {
-    const digits = try digitsFloat(value, options);
-    try writeDigits(writer, symbolsFor(locale), &digits, options);
+    try format(writer, locale, symbolsFor(locale), .{ .float = value }, options);
 }
 
 pub fn formatInt(writer: *std.Io.Writer, locale: *const Locale, value: i64, options: Options) Error!void {
-    const digits = try digitsInt(value, options);
-    try writeDigits(writer, symbolsFor(locale), &digits, options);
+    try format(writer, locale, symbolsFor(locale), .{ .int = value }, options);
+}
+
+pub const Value = union(enum) { int: i64, float: f64 };
+
+/// Writes `value` in `locale` with its `symbols`: the plain styles, and
+/// compact notation and currency codes, which take CLDR's patterns of the
+/// locale (cldr_numbers.zig).
+pub fn format(writer: *std.Io.Writer, locale: *const Locale, symbols: *const Symbols, value: Value, options: Options) Error!void {
+    const coded = options.style == .currency and options.currency_code.len > 0;
+    if (options.notation == .standard and !coded) {
+        const digits = switch (value) {
+            .int => |i| try digitsInt(i, options),
+            .float => |f| try digitsFloat(f, options),
+        };
+        return writeDigits(writer, symbols, &digits, options);
+    }
+    const as_float: f64 = switch (value) {
+        .int => |i| @floatFromInt(i),
+        .float => |f| f,
+    };
+    var plain = options;
+    plain.style = .decimal;
+    plain.currency = "";
+    var number: Compacted = if (options.notation == .standard) .{ .digits = switch (value) {
+        .int => |i| try digitsInt(i, plain),
+        .float => |f| try digitsFloat(f, plain),
+    } } else try compactDigits(locale, as_float, options.notation);
+    if (!coded) return writeCompacted(writer, symbols, &number, true);
+    try writeCurrency(writer, locale, symbols, &number, options);
+}
+
+/// A number in compact notation: its digits divided by the power's, and
+/// the affix of the power the plural category of those digits takes.
+/// `bare` is the power's text for exactly one where CLDR spells it without
+/// digits ("mille"). Compact numbers group from five integer digits, as
+/// Intl does.
+const Compacted = struct { digits: Digits, affix: ?cldr.Affix = null, bare: ?[]const u8 = null, compact: bool = false };
+
+fn compactDigits(locale: *const Locale, value: f64, notation: Notation) Error!Compacted {
+    const table = compactFor(locale);
+    if (!std.math.isFinite(value)) return .{ .digits = try digitsFloat(value, .{}), .compact = true };
+    var magnitude: i32 = if (value == 0) 0 else @intFromFloat(@floor(std.math.log10(@abs(value))));
+    while (true) {
+        const power: ?cldr.Power = if (magnitude < 3 or table == null) null else switch (notation) {
+            .compact_long => table.?.long,
+            else => table.?.short,
+        }[@intCast(@min(magnitude, 14) - 3)];
+        const zeros: i32 = if (power) |p| p.zeros else 0;
+        // Whole numbers from two integer digits, else two significant
+        // digits, as Intl rounds compact numbers.
+        const shown_magnitude = magnitude - zeros;
+        const options: Options = .{ .max_fraction = if (shown_magnitude >= 1) 0 else 1, .rounding = .half_expand };
+        const digits = try shiftedFloat(value, -zeros, options);
+        const text = if (digits.negative()) digits.text()[1..] else digits.text();
+        const integer_digits = std.mem.indexOfScalar(u8, text, '.') orelse text.len;
+        // Rounding carried into the next power: 999,999 is 1M, not 1000K.
+        if (magnitude < 14 and integer_digits > @as(usize, @intCast(@max(shown_magnitude, 0))) + 1 and !(integer_digits == 1 and text[0] == '0')) {
+            magnitude += 1;
+            continue;
+        }
+        const chosen = power orelse return .{ .digits = digits, .compact = true };
+        if (chosen.one) |one| if (std.mem.eql(u8, text, "1") and (chosen.one_negative or !digits.negative()))
+            return .{ .digits = digits, .bare = one, .compact = true };
+        const category = plural.cardinal(plural.rulesFor(locale), plural.Operands.parse(digits.text()) catch return .{ .digits = digits, .compact = true });
+        const affix = chosen.forms[@backingInt(category)] orelse chosen.forms[@backingInt(plural.Category.other)] orelse for (chosen.forms) |form| {
+            if (form) |found| break found;
+        } else null;
+        return .{ .digits = digits, .affix = affix, .compact = true };
+    }
+}
+
+/// The digits with the compact affix, and the minus sign when `signed`.
+fn writeCompacted(writer: *std.Io.Writer, symbols: *const Symbols, number: *const Compacted, signed: bool) Error!void {
+    var digits = number.digits;
+    if (digits.negative()) {
+        if (signed) try writer.writeAll(symbols.minus);
+        std.mem.copyForwards(u8, digits.buffer[0 .. digits.len - 1], digits.buffer[1..digits.len]);
+        digits.len -= 1;
+    }
+    if (number.bare) |bare| return writer.writeAll(bare);
+    if (number.affix) |affix| try writer.writeAll(affix.prefix);
+    var grouped = symbols.*;
+    if (number.compact) grouped.min_grouping = @max(grouped.min_grouping, 2);
+    try writeDigits(writer, &grouped, &digits, .{});
+    if (number.affix) |affix| try writer.writeAll(affix.suffix);
+}
+
+fn compactFor(locale: *const Locale) ?*const cldr.Compact {
+    const chain = locale.fallbackChain();
+    for (chain.slice()) |*candidate| {
+        for (&cldr.compact) |*entry| if (std.mem.eql(u8, entry.tag, candidate.tag())) return entry;
+    }
+    return null;
+}
+
+fn currencyTemplatesFor(locale: *const Locale) *const cldr.CurrencyTemplates {
+    const chain = locale.fallbackChain();
+    for (chain.slice()) |*candidate| {
+        for (&cldr.currency_templates) |*entry| if (std.mem.eql(u8, entry.tag, candidate.tag())) return entry;
+    }
+    return &cldr.currency_templates[0];
+}
+
+fn currencyName(locale: *const Locale, code: []const u8) ?*const cldr.CurrencyName {
+    const chain = locale.fallbackChain();
+    for (chain.slice()) |*candidate| {
+        for (&cldr.currency_names) |*entry| if (std.mem.eql(u8, entry.tag, candidate.tag())) {
+            for (entry.names) |*name| if (std.ascii.eqlIgnoreCase(name.code, code)) return name;
+            return null;
+        };
+    }
+    return null;
+}
+
+/// Whether the code point a currency text touches the number with is a
+/// letter rather than a symbol: CLDR's currency spacing then puts a space
+/// between them, as in "CHF 1.00" but "$1.00".
+fn touchesAsLetter(text: []const u8, last: bool) bool {
+    if (text.len == 0) return false;
+    var point: u21 = undefined;
+    if (last) {
+        var start = text.len - 1;
+        while (start > 0 and text[start] & 0xc0 == 0x80) start -= 1;
+        point = std.unicode.utf8Decode(text[start..]) catch return true;
+    } else {
+        const size = std.unicode.utf8ByteSequenceLength(text[0]) catch return true;
+        if (size > text.len) return true;
+        point = std.unicode.utf8Decode(text[0..size]) catch return true;
+    }
+    if (point < 0x80) return std.ascii.isAlphanumeric(@intCast(point));
+    // Currency signs (Sc) and the marks around them.
+    return switch (point) {
+        0xa2...0xa5, 0x58f, 0x60b, 0x9f2, 0x9f3, 0xe3f, 0x17db, 0x20a0...0x20c0, 0xfdfc, 0xfe69, 0xff04, 0xffe0, 0xffe1, 0xffe5, 0xffe6 => false,
+        else => true,
+    };
+}
+
+fn writeCurrency(writer: *std.Io.Writer, locale: *const Locale, symbols: *const Symbols, number: *const Compacted, options: Options) Error!void {
+    const templates = currencyTemplatesFor(locale);
+    const name = currencyName(locale, options.currency_code);
+    const accounting = options.currency_sign == .accounting;
+    var upper: [16]u8 = undefined;
+    const code = std.ascii.upperString(upper[0..@min(options.currency_code.len, upper.len)], options.currency_code[0..@min(options.currency_code.len, upper.len)]);
+    const text: []const u8 = switch (options.currency_display) {
+        .code => code,
+        .symbol => if (name) |found| found.symbol else code,
+        .narrow_symbol => if (name) |found| found.narrow else code,
+        .name => text: {
+            const found = name orelse break :text code;
+            const category = plural.cardinal(plural.rulesFor(locale), plural.Operands.parse(number.digits.text()) catch break :text code);
+            break :text found.names[@backingInt(category)] orelse found.names[@backingInt(plural.Category.other)] orelse code;
+        },
+    };
+    const pair: cldr.Templates = switch (options.currency_display) {
+        .name => if (accounting) templates.name_accounting else templates.name,
+        .code => if (accounting) templates.code_accounting else templates.code,
+        .symbol, .narrow_symbol => pair: {
+            const symbol = if (accounting) templates.symbol_accounting else templates.symbol;
+            const before = std.mem.indexOfScalar(u8, symbol.positive, 2).? < std.mem.indexOfScalar(u8, symbol.positive, 1).?;
+            if (!touchesAsLetter(text, before)) break :pair symbol;
+            break :pair if (accounting) templates.code_accounting else templates.code;
+        },
+    };
+    const template = if (number.digits.negative()) pair.negative else pair.positive;
+    for (template) |byte| switch (byte) {
+        1 => try writeCompacted(writer, symbols, number, false),
+        2 => try writer.writeAll(text),
+        3 => try writer.writeAll(symbols.minus),
+        else => try writer.writeByte(byte),
+    };
 }
 
 pub const ParseError = error{InvalidNumber};
@@ -506,4 +737,52 @@ test "percent and currency affixes" {
     try expectFloat("de", 1234.5, .{ .style = .currency, .currency = "€", .min_fraction = 2, .max_fraction = 2 }, "1.234,50\u{00A0}€");
     const digits = try digitsFloat(1.5, .{ .min_fraction = 2 });
     try std.testing.expectEqualStrings("1.50", digits.text());
+}
+
+test "compact notation and currencies match the engine's CLDR (testdata/numbers.json)" {
+    const Case = struct { locale: []const u8, kind: []const u8, display: []const u8 = "", currency: []const u8 = "", sign: []const u8 = "standard", value: f64, want: []const u8 };
+    const parsed = try std.json.parseFromSlice([]Case, std.testing.allocator, @embedFile("testdata/numbers.json"), .{});
+    defer parsed.deinit();
+    // Locales whose plain numbers differ from the engine's (other digits,
+    // separators or grouping in our symbol table) are left out.
+    var skipped: [64][]const u8 = undefined;
+    var skipped_len: usize = 0;
+    for (parsed.value) |case| {
+        if (!std.mem.eql(u8, case.kind, "decimal")) continue;
+        const locale = try Locale.parse(case.locale);
+        var buffer: [64]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buffer);
+        try formatFloat(&writer, &locale, case.value, .{ .max_fraction = 3 });
+        if (std.mem.eql(u8, writer.buffered(), case.want)) continue;
+        if (skipped_len > 0 and std.mem.eql(u8, skipped[skipped_len - 1], case.locale)) continue;
+        skipped[skipped_len] = case.locale;
+        skipped_len += 1;
+    }
+    var failures: usize = 0;
+    var checked: usize = 0;
+    cases: for (parsed.value) |case| {
+        if (std.mem.eql(u8, case.kind, "decimal")) continue;
+        for (skipped[0..skipped_len]) |tag| if (std.mem.eql(u8, tag, case.locale)) continue :cases;
+        checked += 1;
+        const locale = try Locale.parse(case.locale);
+        var options: Options = .{};
+        if (std.mem.eql(u8, case.kind, "compact")) {
+            options.notation = if (std.mem.eql(u8, case.display, "long")) .compact_long else .compact_short;
+        } else {
+            options = .money(case.currency);
+            if (std.mem.eql(u8, case.kind, "compact-currency")) options.notation = .compact_short else {
+                options.currency_display = if (std.mem.eql(u8, case.display, "narrowSymbol")) .narrow_symbol else std.meta.stringToEnum(CurrencyDisplay, case.display).?;
+                options.currency_sign = std.meta.stringToEnum(CurrencySign, case.sign).?;
+            }
+        }
+        var buffer: [256]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buffer);
+        try formatFloat(&writer, &locale, case.value, options);
+        if (!std.mem.eql(u8, writer.buffered(), case.want)) {
+            failures += 1;
+            if (failures <= 400) std.debug.print("{s} {s} {s} {s} {s} {d}: got \"{s}\", want \"{s}\"\n", .{ case.locale, case.kind, case.display, case.currency, case.sign, case.value, writer.buffered(), case.want });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), failures);
+    try std.testing.expect(checked > parsed.value.len / 2);
 }

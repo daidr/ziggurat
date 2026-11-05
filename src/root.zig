@@ -1435,6 +1435,16 @@ pub const Window = struct {
             return err;
         };
     }
+    /// The refresh rate in hertz of the display showing the window, which
+    /// animations pace their frames by; 0 where it is unknown, as on a
+    /// virtual display, or the platform does not tell.
+    pub fn refreshRate(self: Window) f32 {
+        const scope = self.beginCallback() orelse return 0;
+        defer scope.end();
+        if (comptime !@hasDecl(backend, "refreshRate")) return 0;
+        const rate = backend.refreshRate(scope.record);
+        return if (std.math.isFinite(rate) and rate > 0) rate else 0;
+    }
     /// Current physical client dimensions and its DIP scale, without a paint.
     pub fn contentSize(self: Window) !Size {
         const scope = self.beginCallback() orelse return error.Closed;

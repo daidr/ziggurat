@@ -47,6 +47,119 @@ pub fn apply(app: *z.App, source: Source, dark: bool) void {
     menuMode(dark);
 }
 
+extern fn zsx_theme_set_gtk_css(css: [*]const u8, len: usize, message: [*]u8, capacity: usize) c_int;
+
+/// The longest message `setGtkCss` keeps of GTK's first parse error.
+pub const max_css_error = 256;
+
+/// Restyles what GTK draws itself on Linux, with a GTK 3 style sheet of the
+/// app's: the title bar and decorations of a window the desktop leaves to
+/// decorate itself, the shadow and border around a frameless window, title
+/// buttons, menus and dialogs, as the flat header bars and round buttons of
+/// newer GTK apps. GTK takes it at the user's priority, over the theme's
+/// rules and the user's gtk.css. Another call replaces the sheet, as a
+/// switch of the app's theme does, and "" removes it; a sheet that does not
+/// parse fails with `InvalidStyleSheet` and keeps the one before, with
+/// GTK's first error and where it is in `message` when given. Content the
+/// app draws and pages never see it. Nothing elsewhere.
+pub fn setGtkCss(app: *z.App, css: []const u8, message: ?*[max_css_error]u8) !void {
+    app.assertOwner();
+    if (comptime !(native_supported and os == .linux)) return;
+    var scratch: [max_css_error]u8 = undefined;
+    const buffer = message orelse &scratch;
+    switch (zsx_theme_set_gtk_css(css.ptr, css.len, buffer, buffer.len)) {
+        0 => {},
+        1 => return error.InvalidStyleSheet,
+        else => return error.UnsupportedCapability,
+    }
+}
+
+pub const WindowButton = enum { minimize, maximize, close };
+
+/// The window controls the desktop puts in title bars, at their start and
+/// at their end, in the desktop's order. An app that hides the system's
+/// buttons and draws its own can draw these, where the desktop wants them.
+pub const WindowButtons = struct {
+    start_buttons: [3]WindowButton = undefined,
+    start_len: u8 = 0,
+    end_buttons: [3]WindowButton = undefined,
+    end_len: u8 = 0,
+
+    pub fn start(self: *const WindowButtons) []const WindowButton {
+        return self.start_buttons[0..self.start_len];
+    }
+    pub fn end(self: *const WindowButtons) []const WindowButton {
+        return self.end_buttons[0..self.end_len];
+    }
+    /// Whether the desktop puts `button` in title bars.
+    pub fn has(self: *const WindowButtons, button: WindowButton) bool {
+        return std.mem.indexOfScalar(WindowButton, self.start(), button) != null or std.mem.indexOfScalar(WindowButton, self.end(), button) != null;
+    }
+    /// Whether the desktop puts no buttons in title bars.
+    pub fn empty(self: *const WindowButtons) bool {
+        return self.start_len == 0 and self.end_len == 0;
+    }
+    /// A layout as gtk-decoration-layout writes it, "close:" or
+    /// "menu:minimize,maximize,close": names other than the three buttons,
+    /// and a button named twice, are left out.
+    pub fn parse(layout: []const u8) WindowButtons {
+        var result: WindowButtons = .{};
+        const colon = std.mem.indexOfScalar(u8, layout, ':');
+        const sides = [2][]const u8{ layout[0 .. colon orelse layout.len], if (colon) |at| layout[at + 1 ..] else "" };
+        for (sides, 0..) |side, index| {
+            var names = std.mem.splitScalar(u8, side, ',');
+            while (names.next()) |raw| {
+                const button = std.meta.stringToEnum(WindowButton, std.mem.trim(u8, raw, " \t")) orelse continue;
+                if (result.has(button)) continue;
+                if (index == 0) {
+                    result.start_buttons[result.start_len] = button;
+                    result.start_len += 1;
+                } else {
+                    result.end_buttons[result.end_len] = button;
+                    result.end_len += 1;
+                }
+            }
+        }
+        return result;
+    }
+};
+
+extern fn zsx_theme_window_buttons(out: [*]u8, capacity: usize) c_int;
+
+/// The window controls the desktop's title bars have. macOS puts close,
+/// minimize and maximize at the start, Windows minimize, maximize and
+/// close at the end. On Linux the desktop's button layout
+/// (gtk-decoration-layout) decides: none under a Wayland compositor that
+/// decorates windows itself, as tiling ones such as Sway and Hyprland,
+/// which draw no buttons, and none where the user emptied the layout. A
+/// Follower tells when it changes, as the desktop's preferences do.
+pub fn windowButtons(app: *z.App) WindowButtons {
+    app.assertOwner();
+    if (comptime native_supported and os == .linux and !browser) {
+        var text: [128]u8 = undefined;
+        const length = zsx_theme_window_buttons(&text, text.len);
+        if (length >= 0) return .parse(text[0..@intCast(length)]);
+    }
+    return defaultWindowButtons(if (browser) .linux else os);
+}
+fn defaultWindowButtons(tag: std.Target.Os.Tag) WindowButtons {
+    return if (tag == .macos) .parse("close,minimize,maximize:") else .parse(":minimize,maximize,close");
+}
+
+test "window buttons of a layout" {
+    const gnome = WindowButtons.parse("appmenu:close");
+    try std.testing.expectEqual(@as(usize, 0), gnome.start().len);
+    try std.testing.expectEqualSlices(WindowButton, &.{.close}, gnome.end());
+    try std.testing.expect(gnome.has(.close) and !gnome.has(.minimize));
+    const left = WindowButtons.parse("close, minimize ,maximize:icon");
+    try std.testing.expectEqualSlices(WindowButton, &.{ .close, .minimize, .maximize }, left.start());
+    try std.testing.expect(WindowButtons.parse(":").empty());
+    try std.testing.expect(WindowButtons.parse("").empty());
+    try std.testing.expectEqual(@as(usize, 1), WindowButtons.parse("close,close:close").start().len);
+    try std.testing.expectEqualSlices(WindowButton, &.{ .close, .minimize, .maximize }, defaultWindowButtons(.macos).start());
+    try std.testing.expectEqualSlices(WindowButton, &.{ .minimize, .maximize, .close }, defaultWindowButtons(.windows).end());
+}
+
 /// uxtheme's preferred app mode (ordinal 135, from Windows 10 build 18362)
 /// gives popup menus the appearance; ordinal 136 rebuilds their themes.
 fn menuMode(dark: bool) void {

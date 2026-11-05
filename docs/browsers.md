@@ -6,7 +6,7 @@
 
 - 项目：`ziggurat build --platform web` 以 `-Dtarget=wasm32-wasi` 构建，生成的 `build.zig` 经 `addApplicationResources`（即 `addBrowserSite`）把 `index.html`、`ziggurat.js` 与 `app.wasm` 装到 `zig-out/web`，这是可以放在任何静态服务器上的站点。
 - 开发：`ziggurat dev --web` 构建 Debug 版，在 `http://localhost:5174`（`--port` 可改）提供 `zig-out/web` 并打开浏览器；源码变化时重新构建，页面每 500 ms 询问构建号，变了就自己刷新。服务只监听 127.0.0.1，所有响应带 `cache-control: no-store`。
-- 本仓库：标了 `.browser = true` 的示例有 `zig build web-<名称> -Dtarget=wasm32-wasi`，`zig build web -Dtarget=wasm32-wasi` 构建全部，输出在 `zig-out/web/<名称>/`。依赖子进程、终端、托盘、全局菜单栏、原生 WebView 或拖放的示例不标。
+- 本仓库：标了 `.browser = true` 的示例有 `zig build web-<名称> -Dtarget=wasm32-wasi`，`zig build web -Dtarget=wasm32-wasi` 构建全部，输出在 `zig-out/web/<名称>/`。依赖子进程、终端、托盘、全局菜单栏或原生 WebView 的示例不标。
 - `addBrowserSite` 为可执行文件打开 `rdynamic`、导出函数表（页面经 `__indirect_function_table` 回调 Zig 给出的函数）、8 MiB 栈与可增长内存。
 
 页面以 `fetch` 加载 wasm，所以必须经 HTTP 提供，不能直接打开文件；服务器要把 `.wasm` 标成 `application/wasm`。
@@ -34,9 +34,10 @@
 | 打开链接 | 新标签页 |
 | 单实例 | 每个页面都是自己的实例：`claim` 总返回 primary，`receive` 立刻返回 `stopped` |
 | 更新 | 页面加载时就是最新版本：`FeedBackend` 报告不可更新，检查与安装返回 `error.UpdatesDisabled`，不重启 |
-| 窗口状态 | 不保存，由页面布局 |
+| 窗口状态 | 不保存，由页面布局；标签页不可见（`visibilitychange`）时窗口报告为最小化，`View.windowHidden` 随之为 true |
+| 文件与文本拖放 | `system.drop.Target`：拖到画布上的文件在放下时由页面读出，保存在页面自己的路径下，如 `/ziggurat-drop/3/photo.png`，放下事件给出这些路径；模块的文件调用（WASI 的 `path_open`、`fd_read`、`fd_seek`、`fd_filestat_get`、`fd_readdir` 等，预打开目录 `/`）可以只读地打开、读取、stat 和列出它们，最近 16 次放下的文件保留。文件名里的 `/` 换成 `_`，同名加序号。纯文本按 `text/plain` 放下。`DataTarget` 不支持 |
 | 托盘、全局快捷键、通知、文件对话框、应用菜单栏 | `UnsupportedCapability` |
 
 ## 验证
 
-CI 的 Linux 任务构建全部浏览器示例，用 `tests/web/imports.py` 确认每个 wasm 只导入页面提供的函数（否则页面启动即 LinkError），并用 `tests/web/smoke.py` 在无头 Chromium（无 GPU 时为 SwiftShader）中把 `browser-smoke` 运行两遍：一遍用 WebGL2 渲染器，确认帧都由 OpenGL 画出、没有落到内存，并用 `WEBGL_lose_context` 丢失再恢复上下文后重画；一遍强制软件渲染器。每遍检查页面标题、Router 与地址片段、点击后的像素、history 前进后退和右键 HTML 菜单，并在启动时确认单实例、更新和窗口位置的浏览器行为。Chromium 取 PATH 上的真实 chromium，否则由 `scripts/ci-chrome.sh` 下载固定版本的 Chrome for Testing 无头 shell 并缓存；本地找不到 Chromium 时跳过。
+CI 的 Linux 任务构建全部浏览器示例，用 `tests/web/imports.py` 确认每个 wasm 只导入页面提供的函数（否则页面启动即 LinkError），并用 `tests/web/smoke.py` 在无头 Chromium（无 GPU 时为 SwiftShader）中把 `browser-smoke` 运行两遍：一遍用 WebGL2 渲染器，确认帧都由 OpenGL 画出、没有落到内存，并用 `WEBGL_lose_context` 丢失再恢复上下文后重画；一遍强制软件渲染器。每遍检查页面标题、Router 与地址片段、点击后的像素、history 前进后退、右键 HTML 菜单，以及拖放文件（应用按给出的路径读取内容与大小）和拖放文本，并在启动时确认单实例、更新和窗口位置的浏览器行为。Chromium 取 PATH 上的真实 chromium，否则由 `scripts/ci-chrome.sh` 下载固定版本的 Chrome for Testing 无头 shell 并缓存；本地找不到 Chromium 时跳过。

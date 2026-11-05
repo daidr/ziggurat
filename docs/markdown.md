@@ -48,6 +48,7 @@ fn build(self: *Reader, v: *view.View) anyerror!void {
 `mv.build(v, tree, options, style)` 在应用的构建函数中把整棵树加为一个列（`style.gap` 为 0 时取 `options.gap`），返回本遍交付的激活：
 
 - `.link`：被激活的链接目的地，借用自树。链接用 `View.link` 绘制，键盘、焦点与激活规则和普通链接相同；折行后链接在每一行上都可以激活。
+- 链接右键菜单：`options.link_menu`（`LinkMenu{ context, build }`）给每个外部链接（不以 `#` 开头）加一个右键弹出菜单，`build(context, v, url)` 在菜单里加菜单项，例如“复制链接”“在浏览器中打开”。
 - `.task`：被切换的任务复选框和新的状态。`options.interactive_tasks` 为 false（默认）时复选框禁用、只显示状态。`taskOffset(source, node.line)` 找到该行任务标记的方框字符，`toggleTask` 把新状态写回源文本，应用随后重新解析。
 
 段落按 `options.width` 贪心折行：在空格处断开，中日韩文字可以在任意两个字之间断开，单个超宽的词按字符拆开。测量使用 `options.measurer`，应与视图宿主的 Measurer 一致。每行是一个 `row`，同一样式的连续文字是一个节点；超过 128 个子节点的块、行和列表会嵌套到子列中，保持在视图容器的子节点上限以内。

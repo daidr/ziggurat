@@ -21,6 +21,36 @@ int zfont_add_file(const char *path) {
     return 0;
 }
 
+/* Adds the faces of the font file again under `family` alone, as the app
+   named it: copies of their fontconfig patterns with that family and none
+   of their own, so that the family holds only the files registered under
+   it, matched by weight and style among them, while the font's own family
+   keeps all of them. 0 on success. */
+int zfont_add_family(const char *path, const char *family) {
+    FcConfig *config = FcConfigGetCurrent();
+    FcFontSet *fonts = config ? FcConfigGetFonts(config, FcSetApplication) : NULL;
+    if (!fonts) return 1;
+    FcFontSet *faces = FcFontSetCreate();
+    if (!faces) return 1;
+    FcFreeTypeQueryAll((const FcChar8 *)path, -1, NULL, NULL, faces);
+    int added = 0;
+    for (int i = 0; i < faces->nfont; i++) {
+        FcPattern *face = FcPatternDuplicate(faces->fonts[i]);
+        if (!face) continue;
+        FcPatternDel(face, FC_FAMILY);
+        FcPatternDel(face, FC_FAMILYLANG);
+        FcPatternAddString(face, FC_FAMILY, (const FcChar8 *)family);
+        if (FcFontSetAdd(fonts, face)) added++;
+        else FcPatternDestroy(face);
+    }
+    FcFontSetDestroy(faces);
+    if (!added) return 1;
+    PangoFontMap *map = pango_cairo_font_map_get_default();
+    if (map && PANGO_IS_FC_FONT_MAP(map)) pango_fc_font_map_config_changed(PANGO_FC_FONT_MAP(map));
+    generation++;
+    return 0;
+}
+
 /* Fonts whose fontconfig settings name no LCD filter take FreeType's
    (FIR5), which cairo 1.17 and later use for those by default. A filter
    fontconfig names is kept: a test of every value of an element holds where

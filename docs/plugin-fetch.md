@@ -32,7 +32,7 @@ const items = await res.json();
 
 `fetch` 接受标准参数，返回标准 `Response`：
 
-- `status`、`statusText`、`headers`、`url`、`redirected` 来自宿主看到的最终响应。响应头名为小写，按收到顺序，不含 `Set-Cookie`；插件不保存 Cookie。状态码不在 200–599 时 `Response` 以 200 构造，`status` 再改回真实值。
+- `status`、`statusText`、`headers`、`url`、`redirected` 来自宿主看到的最终响应。响应头名为小写，按收到顺序，不含 `Set-Cookie` 和 `Set-Cookie2`（发给页面前滤掉）；插件不保存 Cookie。状态码不在 200–599 时 `Response` 以 200 构造，`status` 再改回真实值。
 - body 是随宿主读取而到达的流；页面不读时宿主最多保留 32 个 32 KiB 的块，之后暂停读取。HEAD 以及 101、103、204、205、304 响应没有 body。
 - `redirect` 支持 `follow`、`manual`（返回重定向响应本身）和 `error`（以 `TypeError` 失败）。
 - `signal` 取消请求：响应头到达前 `fetch` 以 `signal.reason` 拒绝，之后 body 流以它出错。

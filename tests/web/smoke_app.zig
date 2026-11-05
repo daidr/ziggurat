@@ -47,6 +47,35 @@ const Smoke = struct {
     host: view.Host = undefined,
     host_input: ?*const fn (*anyopaque, *ui.Context, z.Event) bool = null,
     owner: system.Owner = undefined,
+    drop_buffer: [4096]u8 = undefined,
+    drop: system.drop.Target = undefined,
+    hovers: u32 = 0,
+    title: [256]u8 = undefined,
+
+    /// A file dropped is read at the path the page kept it at, and shows in
+    /// the title with its size and first bytes; text dropped shows as it is.
+    fn onDrop(ptr: *anyopaque, window: z.Window, value: system.drop.Drop) void {
+        const self: *Smoke = @ptrCast(@alignCast(ptr));
+        const title = switch (value.payload) {
+            .files => |paths| title: {
+                var split = std.mem.splitScalar(u8, paths, 0);
+                const first = split.next() orelse "";
+                const io = std.Io.Threaded.global_single_threaded.io();
+                const data = std.Io.Dir.cwd().readFileAlloc(io, first, std.heap.wasm_allocator, .limited(1 << 20)) catch |err| break :title std.fmt.bufPrint(&self.title, "FAIL: reading {s}: {t}", .{ first, err }) catch "FAIL";
+                defer std.heap.wasm_allocator.free(data);
+                const stat = std.Io.Dir.cwd().statFile(io, first, .{}) catch break :title "FAIL: stat";
+                break :title std.fmt.bufPrint(&self.title, "Dropped {s} {d} {s} after {d} hovers", .{ std.fs.path.basename(first), stat.size, data[0..@min(data.len, 16)], self.hovers }) catch "FAIL";
+            },
+            .text => |text| std.fmt.bufPrint(&self.title, "Text {s}", .{text}) catch "FAIL",
+            else => "FAIL: drop payload",
+        };
+        window.setTitle(title) catch {};
+    }
+    fn onHover(ptr: *anyopaque, _: z.Window, _: system.drop.Hover) bool {
+        const self: *Smoke = @ptrCast(@alignCast(ptr));
+        self.hovers += 1;
+        return true;
+    }
 
     fn build(self: *Smoke, v: *view.View) anyerror!void {
         try v.row(.{ .gap = 8, .alignment = .center });
@@ -104,6 +133,9 @@ pub fn main() !void {
     smoke.host.context.on_input = Smoke.onInput;
     try smoke.owner.attach(window);
     defer smoke.owner.detach() catch {};
+    smoke.drop = .{ .context = &smoke, .on_drop = Smoke.onDrop, .on_hover = Smoke.onHover, .buffer = &smoke.drop_buffer };
+    try smoke.drop.attach(window);
+    defer smoke.drop.detach();
     window.show();
     try app.run();
 }

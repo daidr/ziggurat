@@ -82,6 +82,20 @@ pub const Options = struct {
     /// asked for twice.
     anchor_version: u64 = 0,
     anchor_state: ?*AnchorState = null,
+    /// A context menu of each link's own, given its destination, as Copy
+    /// Path and Reveal for a link to a file. It replaces the menu of a node
+    /// around the document, since a secondary press opens the innermost
+    /// one. Links to `#a-heading` and links without a destination keep the
+    /// menu around them, and so do links a `RichFace` draws.
+    link_menu: ?LinkMenu = null,
+};
+
+/// Builds the items of a link's context menu, as `popoverMenu`'s.
+pub const LinkMenu = struct {
+    context: *anyopaque,
+    /// Add the items for the link to `url`, borrowed from the tree, with
+    /// `menuItem`, `menuSeparator` and the like.
+    build: *const fn (context: *anyopaque, v: *View, url: []const u8) Error!void,
 };
 
 /// What a view's anchor last applied to, kept by the application with the
@@ -535,7 +549,12 @@ const Line = struct {
         if (self.linked()) {
             // Code in a link keeps its face and wash.
             const style: view.Style = if (code) .{ .font = self.fontFor(true), .background = self.b.colors.code_background, .radius = 3, .shrink = 0 } else .{ .font = self.fontFor(false), .shrink = 0 };
-            if (try v.link(text, style)) self.b.activation = .{ .link = self.b.tree.get(self.link).url };
+            const url = self.b.tree.get(self.link).url;
+            if (try v.link(text, style)) self.b.activation = .{ .link = url };
+            if (self.b.options.link_menu) |menu| if (url.len > 0 and url[0] != '#') {
+                if (try v.popoverMenu(.{})) try menu.build(menu.context, v, url);
+                try v.end();
+            };
         } else if (code) {
             try v.row(.{ .background = self.b.colors.code_background, .radius = 3, .padding = .{ .left = 3, .right = 3 }, .shrink = 0 });
             try v.text(text, .{ .color = color_value, .font = self.fontFor(true) });

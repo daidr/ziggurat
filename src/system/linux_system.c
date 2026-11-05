@@ -713,7 +713,8 @@ static void add_pattern(GtkFileFilter *filter, const char *extension) {
 }
 
 /* kind: 0 open one file, 1 save, 2 open several files, 3 folder. Extensions
-   are "*" or ".ext"; saving offers one filter per extension. */
+   are "*" or ".ext", or media types ("image/png", or a kind as "image/" and a star) when opening;
+   saving offers one filter per extension. */
 Chooser *zsl_chooser_show(GtkWidget *window, int kind, const char *const *extensions, uint32_t count, const char *suggested_name, void *owner, uint64_t serial, Done done, int *error) {
     *error = 0;
     if (!window || !GTK_IS_WINDOW(window) || gtk_widget_in_destruction(window)) { *error = 1; return NULL; }
@@ -744,6 +745,12 @@ Chooser *zsl_chooser_show(GtkWidget *window, int kind, const char *const *extens
         GString *name = g_string_new(NULL);
         for (uint32_t i = 0; i < count; ++i) {
             if (i) g_string_append(name, ", ");
+            /* A slash, which no extension holds, makes it a media type. */
+            if (strchr(extensions[i], '/')) {
+                g_string_append(name, extensions[i]);
+                gtk_file_filter_add_mime_type(filter, extensions[i]);
+                continue;
+            }
             g_string_append_c(name, '*');
             g_string_append(name, extensions[i]);
             add_pattern(filter, extensions[i]);

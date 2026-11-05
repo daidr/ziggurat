@@ -5,6 +5,7 @@ const std = @import("std");
 const output = @import("output.zig");
 const Sound = @import("sound.zig").Sound;
 const Stream = @import("stream.zig").Stream;
+const Stretcher = @import("stretch.zig").Stretcher;
 
 /// How long volume changes, fades in and fades out take: 5 ms.
 pub const ramp_frames = output.sample_rate / 200;
@@ -116,6 +117,8 @@ pub const Voice = struct {
     volume: f64 = 1,
     pan: f64 = 0,
     speed: f64 = 1,
+    /// Keeps its pitch at its speed: stretched by `stretcher`.
+    pitch: bool = false,
     loop: bool = false,
     /// Frames, `loop_end` 0 for the end.
     loop_start: i64 = 0,
@@ -138,6 +141,9 @@ pub const Voice = struct {
     input: [256 * 2]f32 = undefined,
     input_position: usize = 0,
     input_len: usize = 0,
+    /// Time-stretches the source once its player preserved pitch, and
+    /// counts where `history` is in the source: null for every other voice.
+    stretcher: ?*Stretcher = null,
 
     /// The gains applied, a 2×2 matrix from the source's channels to the
     /// output's (ll, rl, lr, rr), ramping to `target`.
@@ -177,6 +183,7 @@ pub const Voice = struct {
         self.end = -1;
         self.input_position = 0;
         self.input_len = 0;
+        if (self.stretcher) |stretcher| stretcher.reset(frame, self.pitch);
         // What it mixed before is not where it is any more, even while heard.
         self.mark_count = 0;
     }
@@ -188,7 +195,24 @@ pub const Voice = struct {
     /// The source frame the voice mixes next, counted on past its loop's
     /// end.
     pub fn at(self: *const Voice) f64 {
+        if (self.stretcher) |stretcher| return stretcher.tags[1] + self.phase * (stretcher.tags[2] - stretcher.tags[1]);
         return @as(f64, @floatFromInt(self.index)) + self.phase;
+    }
+
+    /// Gives the voice `stretcher`, which goes on from the frames it holds,
+    /// as its player starts to preserve pitch.
+    pub fn stretch(self: *Voice, stretcher: *Stretcher) void {
+        const channels = self.channelCount();
+        // The frame coming in next is at index + 3, and the second of the
+        // history at index.
+        stretcher.reset(self.index + 3, true);
+        for (&stretcher.tags, 0..) |*tag, k| tag.* = @floatFromInt(self.index - 1 + @as(i64, @intCast(k)));
+        const held = @min(self.input_len - self.input_position, stretcher.buffer.len);
+        @memcpy(stretcher.buffer[0..held], self.input[self.input_position..][0..held]);
+        stretcher.count = held / channels;
+        stretcher.read_at += @intCast(stretcher.count);
+        self.input_position = self.input_len;
+        self.stretcher = stretcher;
     }
 
     /// Notes that the output mixes frame `out` with the voice where it is,
@@ -238,7 +262,7 @@ pub const Voice = struct {
         return at_frame;
     }
 
-    fn channelCount(self: *const Voice) usize {
+    pub fn channelCount(self: *const Voice) usize {
         return if (self.mono) 1 else 2;
     }
 
@@ -250,9 +274,10 @@ pub const Voice = struct {
             if (self.end >= 0) {
                 // Past the end, silence.
                 self.shift(0, 0);
+                if (self.stretcher) |stretcher| stretcher.push(stretcher.next);
                 return true;
             }
-            const result = self.source.read(self.input[0 .. 256 * channels]);
+            const result = if (self.stretcher) |stretcher| stretcher.read(&self.source, self.pitch, self.speed) else self.source.read(self.input[0 .. 256 * channels]);
             self.input_position = 0;
             self.input_len = result.frames * channels;
             if (result.frames == 0) {
@@ -260,11 +285,14 @@ pub const Voice = struct {
                 // The frame coming in would be at index + 3.
                 self.end = self.index + 3;
                 self.shift(0, 0);
+                if (self.stretcher) |stretcher| stretcher.push(stretcher.next);
                 return true;
             }
         }
-        const left = self.input[self.input_position];
-        const right = if (self.mono) left else self.input[self.input_position + 1];
+        const frames: []const f32 = if (self.stretcher) |stretcher| stretcher.current else &self.input;
+        const left = frames[self.input_position];
+        const right = if (self.mono) left else frames[self.input_position + 1];
+        if (self.stretcher) |stretcher| stretcher.push(stretcher.tag0 + @as(f64, @floatFromInt(self.input_position / channels)) * stretcher.tag_step);
         self.input_position += channels;
         self.shift(left, right);
         return true;
@@ -329,7 +357,9 @@ pub const Voice = struct {
     /// frames it moved through its source.
     fn play(self: *Voice, out: []f32, master: f64) struct { outcome: Outcome, frames: usize } {
         self.retarget(self.gains(master));
-        const step = self.rate / output.sample_rate * self.speed;
+        // A stretched voice is at its speed already.
+        const stretched = if (self.stretcher) |stretcher| stretcher.on else false;
+        const step = self.rate / output.sample_rate * (if (stretched) 1 else self.speed);
         var index: usize = 0;
         while (index < out.len) : (index += 2) {
             while (self.phase >= 1) {

@@ -155,7 +155,7 @@ pub fn perform(record: *core.WindowRecord, action: core.WindowAction) !void {
 }
 pub fn state(record: *core.WindowRecord) core.WindowState {
     const flags = zw_window_state(record.native.id);
-    return .{ .visible = flags & 1 != 0, .minimized = false, .maximized = false, .focused = flags & 8 != 0, .enabled = flags & 16 != 0, .fullscreen = flags & 32 != 0, .fullscreen_requested = flags & 64 != 0 };
+    return .{ .visible = flags & 1 != 0, .minimized = flags & 2 != 0, .maximized = false, .focused = flags & 8 != 0, .enabled = flags & 16 != 0, .fullscreen = flags & 32 != 0, .fullscreen_requested = flags & 64 != 0 };
 }
 /// The page places and sizes windows: none of the desktop's window
 /// operations stand for anything but full screen, which browsers allow
