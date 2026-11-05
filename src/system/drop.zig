@@ -4,11 +4,12 @@ const builtin = @import("builtin");
 const z = @import("ziggurat");
 const transfer = @import("transfer.zig");
 const drag = @import("drag.zig");
-const native = if (builtin.is_test) Unsupported else if (builtin.os.tag == .windows) @import("drop_windows.zig") else if (builtin.os.tag == .linux or builtin.os.tag == .macos) Linux else Unsupported;
+const web = builtin.cpu.arch == .wasm32;
+const native = if (builtin.is_test) Unsupported else if (web) Web else if (builtin.os.tag == .windows) @import("drop_windows.zig") else if (builtin.os.tag == .linux or builtin.os.tag == .macos) Linux else Unsupported;
 
 pub const capabilities = .{
     .drop_target = native.supported,
-    .data_target = native.supported,
+    .data_target = native.supported and !web,
     .drag_source = drag.capabilities.source,
 };
 
@@ -335,6 +336,57 @@ const Unsupported = struct {
         return error.UnsupportedCapability;
     }
     fn dataDetach(_: *anyopaque) void {}
+};
+
+/// Browsers: the page's drag events on the window's canvas (web/ziggurat.js).
+/// Dropped files have no paths there: the page reads them as they drop and
+/// keeps them at paths of its own, as /ziggurat-drop/3/photo.png, which the
+/// drop gives and which the module's file calls read; the files of the
+/// last 16 drops stay. Only `Target` takes drops; `DataTarget` does not.
+const Web = struct {
+    const supported = true;
+    extern "ziggurat" fn zw_drop_attach(window: u32, target: *Target, files: u32, text: u32) u32;
+    extern "ziggurat" fn zw_drop_detach(window: u32) void;
+    extern "ziggurat" fn zw_drop_registered(window: u32) u32;
+    fn id(handle: *anyopaque) u32 {
+        return @intCast(@intFromPtr(handle));
+    }
+    fn attach(target: *Target, handle: *anyopaque) !*anyopaque {
+        if (zw_drop_attach(id(handle), target, @intFromBool(target.kinds.files), @intFromBool(target.kinds.text)) == 0) return error.AlreadyAttached;
+        return handle;
+    }
+    fn detach(state: *anyopaque) void {
+        zw_drop_detach(id(state));
+    }
+    fn registered(handle: *anyopaque) bool {
+        return zw_drop_registered(id(handle)) != 0;
+    }
+    fn dataAttach(_: *DataTarget, _: *anyopaque) !*anyopaque {
+        return error.UnsupportedCapability;
+    }
+    fn dataDetach(_: *anyopaque) void {}
+    fn hoverPage(target: *Target, phase: u32, x: f64, y: f64, files: u32, text: u32) callconv(.c) u32 {
+        const value: Hover = .{ .phase = @enumFromInt(@min(phase, 2)), .point = .{ .x = @floatCast(x), .y = @floatCast(y) }, .files = files != 0, .text = text != 0 };
+        return @intFromBool(target.hover(value));
+    }
+    /// kind: 0 files (paths NUL-separated), 1 text, 2 too large for the
+    /// page to hand over (`len` its size), 3 the files could not be read.
+    fn dropPage(target: *Target, x: f64, y: f64, kind: u32, bytes: ?[*]const u8, len: usize) callconv(.c) void {
+        const point: z.Point = .{ .x = @floatCast(x), .y = @floatCast(y) };
+        const data = if (bytes) |pointer| pointer[0..len] else &[_]u8{};
+        target.drop(point, switch (kind) {
+            0 => .{ .files = data },
+            1 => .{ .text = data },
+            2 => .{ .capacity_exceeded = len },
+            else => .{ .failed = .{ .err = error.NativeFailure } },
+        });
+    }
+    comptime {
+        if (web and !builtin.is_test) {
+            @export(&hoverPage, .{ .name = "ziggurat_drop_hover" });
+            @export(&dropPage, .{ .name = "ziggurat_drop" });
+        }
+    }
 };
 
 /// GTK, and AppKit through src/system/macos_drag.m, which implements the

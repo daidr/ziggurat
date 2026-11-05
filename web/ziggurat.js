@@ -40,6 +40,61 @@ body>.ziggurat-window{position:fixed}
 `;
 
   const encoder = new TextEncoder();
+
+  // Files dropped on a window have no paths in browsers: the page reads
+  // them as they drop and keeps them at paths of its own, as
+  // /ziggurat-drop/3/photo.png, which the drop gives, and which the
+  // module's file system calls read (the WASI functions below), as files
+  // and directories of the one directory the module is given, "/". The
+  // files of the last 16 drops stay.
+  const dropRoot = "/ziggurat-drop";
+  const keptDrops = 16;
+  class DroppedFiles {
+    constructor() {
+      this.files = new Map();
+      this.drops = [];
+      this.count = 0;
+    }
+    add(entries) {
+      this.count++;
+      const dir = dropRoot + "/" + this.count;
+      this.drops.push(dir);
+      if (this.drops.length > keptDrops) {
+        const old = this.drops.shift();
+        for (const path of [...this.files.keys()]) if (path.startsWith(old + "/")) this.files.delete(path);
+      }
+      const now = BigInt(Date.now()) * 1000000n;
+      return entries.map(([name, data]) => {
+        // A name is a file's, never a path: browsers give no folders.
+        name = name.replaceAll("/", "_") || "file";
+        let path = dir + "/" + name;
+        for (let k = 2; this.files.has(path); k++) path = dir + "/" + k + "-" + name;
+        this.files.set(path, { data, time: now });
+        return path;
+      });
+    }
+    // "/" + path made plain: no ".", "..", or doubled slashes.
+    static clean(path) {
+      const parts = [];
+      for (const part of path.split("/")) {
+        if (!part || part === ".") continue;
+        if (part === "..") parts.pop();
+        else parts.push(part);
+      }
+      return "/" + parts.join("/");
+    }
+    isDir(path) {
+      return path === "/" || path === dropRoot || this.drops.includes(path);
+    }
+    // The names in a directory, with whether each is a directory.
+    list(path) {
+      if (path === "/") return [["ziggurat-drop", true]];
+      if (path === dropRoot) return this.drops.map((dir) => [dir.slice(dropRoot.length + 1), true]);
+      const names = [];
+      for (const file of this.files.keys()) if (file.startsWith(path + "/")) names.push([file.slice(path.length + 1), false]);
+      return names;
+    }
+  }
   const decoder = new TextDecoder();
   const utf16Decoder = new TextDecoder("utf-16le");
   // The fonts the renderers name, as CSS: the interface's system family,
@@ -450,6 +505,11 @@ body>.ziggurat-window{position:fixed}
       this.env = options.env || {};
       this.windows = new Map();
       this.nextWindow = 1;
+      // Drop targets, by window, and the files dropped (see dropFiles).
+      this.dropTargets = new Map();
+      this.files = new DroppedFiles();
+      this.fds = new Map();
+      this.nextFd = 4;
       this.depth = 0;
       this.queue = [];
       this.wakePending = false;
@@ -562,6 +622,52 @@ body>.ziggurat-window{position:fixed}
         return SUCCESS;
       };
       const envList = () => Object.entries(rt.env).map(([k, v]) => k + "=" + v);
+      const EACCES = 2,
+        EINVAL = 28,
+        ENOTDIR = 54;
+      // The path a call names, under the directory it opened, or null.
+      const resolve = (dirfd, ptr, len) => {
+        const base = dirfd === 3 ? "/" : rt.fds.get(dirfd)?.dir ? rt.fds.get(dirfd).path : null;
+        if (base === null) return null;
+        const name = rt.string(ptr, len);
+        return DroppedFiles.clean(name.startsWith("/") ? name : base + "/" + name);
+      };
+      const stat = (path, out) => {
+        const dir = rt.files.isDir(path);
+        const file = rt.files.files.get(path);
+        if (!dir && !file) return ENOENT;
+        const dv = rt.dv();
+        new Uint8Array(rt.memory.buffer, out, 64).fill(0);
+        dv.setBigUint64(out + 8, BigInt(path.length), true);
+        dv.setUint8(out + 16, dir ? 3 : 4);
+        dv.setBigUint64(out + 24, 1n, true);
+        dv.setBigUint64(out + 32, BigInt(file ? file.data.length : 0), true);
+        const time = file ? file.time : 0n;
+        dv.setBigUint64(out + 40, time, true);
+        dv.setBigUint64(out + 48, time, true);
+        dv.setBigUint64(out + 56, time, true);
+        return SUCCESS;
+      };
+      const readInto = (fd, iovs, count, read, offset) => {
+        const open = rt.fds.get(fd);
+        if (!open || open.dir) return fd <= 2 ? EBADF : open ? 31 /* EISDIR */ : EBADF;
+        const dv = rt.dv(),
+          u8 = rt.u8();
+        let at = offset === null ? open.at : Number(offset);
+        let total = 0;
+        for (let i = 0; i < count; i++) {
+          const ptr = dv.getUint32(iovs + i * 8, true);
+          const len = dv.getUint32(iovs + i * 8 + 4, true);
+          const part = open.file.data.subarray(at, at + len);
+          u8.set(part, ptr);
+          at += part.length;
+          total += part.length;
+          if (part.length < len) break;
+        }
+        if (offset === null) open.at = at;
+        dv.setUint32(read, total, true);
+        return SUCCESS;
+      };
       const origin = performance.now();
       return {
         args_sizes_get: (c, s) => writeStrings(rt.args, c, s),
@@ -600,28 +706,104 @@ body>.ziggurat-window{position:fixed}
           return SUCCESS;
         },
         fd_fdstat_get: (fd, out) => {
-          if (fd > 2) return EBADF;
+          const open = fd === 3 ? { dir: true } : rt.fds.get(fd);
+          if (fd > 2 && !open) return EBADF;
           const dv = rt.dv();
-          dv.setUint8(out, 2); // character device
+          dv.setUint8(out, fd <= 2 ? 2 : open.dir ? 3 : 4); // character device, directory, file
           dv.setUint16(out + 2, 0, true);
           dv.setBigUint64(out + 8, 0xffffffffn, true);
           dv.setBigUint64(out + 16, 0xffffffffn, true);
           return SUCCESS;
         },
-        fd_prestat_get: () => EBADF,
-        fd_prestat_dir_name: () => EBADF,
-        fd_close: () => SUCCESS,
-        fd_read: () => EBADF,
-        fd_pread: () => EBADF,
+        // The one directory the module is given: "/".
+        fd_prestat_get: (fd, out) => {
+          if (fd !== 3) return EBADF;
+          const dv = rt.dv();
+          dv.setUint8(out, 0);
+          dv.setUint32(out + 4, 1, true);
+          return SUCCESS;
+        },
+        fd_prestat_dir_name: (fd, ptr, len) => {
+          if (fd !== 3) return EBADF;
+          if (len >= 1) rt.u8()[ptr] = 47;
+          return SUCCESS;
+        },
+        fd_close: (fd) => {
+          rt.fds.delete(fd);
+          return SUCCESS;
+        },
+        fd_read: (fd, iovs, count, read) => readInto(fd, iovs, count, read, null),
+        fd_pread: (fd, iovs, count, offset, read) => readInto(fd, iovs, count, read, offset),
         fd_pwrite: () => EBADF,
-        fd_seek: () => EBADF,
+        fd_seek: (fd, offset, whence, out) => {
+          const open = rt.fds.get(fd);
+          if (!open || open.dir) return EBADF;
+          const base = whence === 0 ? 0 : whence === 1 ? open.at : open.file.data.length;
+          const at = base + Number(offset);
+          if (at < 0) return EINVAL;
+          open.at = at;
+          rt.dv().setBigUint64(out, BigInt(at), true);
+          return SUCCESS;
+        },
+        fd_tell: (fd, out) => {
+          const open = rt.fds.get(fd);
+          if (!open || open.dir) return EBADF;
+          rt.dv().setBigUint64(out, BigInt(open.at), true);
+          return SUCCESS;
+        },
         fd_sync: () => EBADF,
-        fd_readdir: () => EBADF,
-        fd_filestat_get: () => EBADF,
+        fd_readdir: (fd, buf, len, cookie, used) => {
+          const open = fd === 3 ? { path: "/", dir: true } : rt.fds.get(fd);
+          if (!open || !open.dir) return EBADF;
+          const dv = rt.dv(),
+            u8 = rt.u8();
+          const names = rt.files.list(open.path);
+          let at = 0;
+          for (let i = Number(cookie); i < names.length && at < len; i++) {
+            const [name, dir] = names[i];
+            const bytes = encoder.encode(name);
+            const entry = new Uint8Array(24 + bytes.length);
+            const view = new DataView(entry.buffer);
+            view.setBigUint64(0, BigInt(i + 1), true);
+            view.setBigUint64(8, BigInt(i + 1), true);
+            view.setUint32(16, bytes.length, true);
+            view.setUint8(20, dir ? 3 : 4);
+            entry.set(bytes, 24);
+            // A buffer too small for the entry takes what fits.
+            const n = Math.min(entry.length, len - at);
+            u8.set(entry.subarray(0, n), buf + at);
+            at += n;
+          }
+          dv.setUint32(used, at, true);
+          return SUCCESS;
+        },
+        fd_filestat_get: (fd, out) => {
+          const open = fd === 3 ? { path: "/", dir: true } : rt.fds.get(fd);
+          if (!open) return EBADF;
+          return stat(open.path, out);
+        },
         fd_filestat_set_size: () => EBADF,
         fd_filestat_set_times: () => EBADF,
-        path_open: () => ENOENT,
-        path_filestat_get: () => ENOENT,
+        path_open: (dirfd, lookup, ptr, len, oflags, rightsBase, rightsInheriting, fdflags, out) => {
+          const path = resolve(dirfd, ptr, len);
+          if (path === null) return EBADF;
+          // Dropped files are read only.
+          if (oflags & (1 | 4 | 8)) return rt.files.isDir(path) || rt.files.files.has(path) ? EACCES : ENOENT;
+          if (rightsBase & 64n) return EACCES; // fd_write
+          const dir = rt.files.isDir(path);
+          const file = rt.files.files.get(path);
+          if (!dir && !file) return ENOENT;
+          if (oflags & 2 && !dir) return ENOTDIR;
+          const fd = rt.nextFd++;
+          rt.fds.set(fd, { path, dir, file, at: 0 });
+          rt.dv().setUint32(out, fd, true);
+          return SUCCESS;
+        },
+        path_filestat_get: (dirfd, flags, ptr, len, out) => {
+          const path = resolve(dirfd, ptr, len);
+          if (path === null) return EBADF;
+          return stat(path, out);
+        },
         path_filestat_set_times: () => ENOENT,
         path_create_directory: () => ENOSYS,
         path_link: () => ENOSYS,
@@ -712,7 +894,14 @@ body>.ziggurat-window{position:fixed}
           rt.quitting = true;
         },
         zw_window_create: (record, titlePtr, titleLen, flags) => rt.createWindow(record, rt.string(titlePtr, titleLen), flags),
-        zw_window_destroy: (id) => rt.destroyWindow(id),
+        zw_window_destroy: (id) => (rt.dropTargets.delete(id), rt.destroyWindow(id)),
+        zw_drop_attach: (id, target, files, text) => {
+          if (!rt.windows.has(id) || rt.dropTargets.has(id)) return 0;
+          rt.dropTargets.set(id, { target, files: files !== 0, text: text !== 0, inside: false });
+          return 1;
+        },
+        zw_drop_detach: (id) => rt.dropTargets.delete(id),
+        zw_drop_registered: (id) => (rt.dropTargets.has(id) ? 1 : 0),
         zw_window_action: (id, action) => rt.windowAction(id, action),
         zw_window_state: (id) => rt.windowState(id),
         zw_window_size: (id, out) => {
@@ -1228,6 +1417,8 @@ body>.ziggurat-window{position:fixed}
       window.addEventListener("resize", measureAll);
       document.addEventListener("visibilitychange", () => {
         if (!document.hidden) for (const win of this.windows.values()) this.requestFrame(win, true);
+        // The windows' state follows: hidden while the tab is out of sight.
+        for (const win of this.windows.values()) if (win.visible) this.send(win, { kind: 16 });
       });
       document.addEventListener("fullscreenchange", () => {
         for (const win of this.windows.values()) {
@@ -1348,7 +1539,8 @@ body>.ziggurat-window{position:fixed}
     windowState(id) {
       const win = this.windows.get(id);
       if (!win) return 0;
-      return (win.visible ? 1 : 0) | (win.focused ? 8 : 0) | (win.enabled ? 16 : 0) | (win.fullscreen ? 32 : 0) | (win.fullscreenRequested ? 64 : 0);
+      // A tab out of sight shows nothing of its windows, as a minimized one.
+      return (win.visible ? 1 : 0) | (win.visible && global.document && document.hidden ? 2 : 0) | (win.focused ? 8 : 0) | (win.enabled ? 16 : 0) | (win.fullscreen ? 32 : 0) | (win.fullscreenRequested ? 64 : 0);
     }
 
     // The canvas's size in device pixels and the device pixel ratio.
@@ -1738,6 +1930,62 @@ body>.ziggurat-window{position:fixed}
         });
         win.observer.observe(c);
       }
+      // Files and text dragged over the canvas, and dropped: the files'
+      // bytes are read, as browsers give them, before the drop goes to the
+      // window's target (DroppedFiles). The browser opens nothing dropped
+      // on a window, which would leave the app.
+      const offered = (e, drop) => {
+        const types = Array.from(e.dataTransfer ? e.dataTransfer.types : []);
+        return [drop.files && types.includes("Files"), drop.text && types.includes("text/plain")];
+      };
+      const hover = (e, phase) => {
+        const drop = this.dropTargets.get(win.id);
+        if (!drop) return false;
+        const [files, text] = offered(e, drop);
+        const [x, y] = this.point(win, e);
+        if (phase === 0) drop.inside = true;
+        else if (phase === 2) drop.inside = false;
+        return this.call(() => this.exports.ziggurat_drop_hover(drop.target, phase, x, y, files ? 1 : 0, text ? 1 : 0)) !== 0;
+      };
+      const over = (e) => {
+        e.preventDefault();
+        const drop = this.dropTargets.get(win.id);
+        const accepted = drop ? hover(e, drop.inside ? 1 : 0) : false;
+        if (e.dataTransfer) e.dataTransfer.dropEffect = accepted ? "copy" : "none";
+      };
+      c.addEventListener("dragenter", over);
+      c.addEventListener("dragover", over);
+      c.addEventListener("dragleave", (e) => {
+        const drop = this.dropTargets.get(win.id);
+        if (drop && drop.inside) hover(e, 2);
+      });
+      c.addEventListener("drop", (e) => {
+        e.preventDefault();
+        const drop = this.dropTargets.get(win.id);
+        if (!drop) return;
+        const [files, text] = offered(e, drop);
+        const [x, y] = this.point(win, e);
+        // Every hover ends with a leave, which comes before the drop.
+        if (drop.inside) hover(e, 2);
+        const accepted = this.call(() => this.exports.ziggurat_drop_hover(drop.target, 1, x, y, files ? 1 : 0, text ? 1 : 0)) !== 0;
+        this.call(() => this.exports.ziggurat_drop_hover(drop.target, 2, x, y, files ? 1 : 0, text ? 1 : 0));
+        if (!accepted) return;
+        const deliver = (kind, bytes) => {
+          if (this.dropTargets.get(win.id) !== drop) return;
+          this.call(() => {
+            const [ptr, len] = this.scratch(bytes);
+            this.exports.ziggurat_drop(drop.target, x, y, ptr ? kind : 2, ptr, ptr ? len : bytes.length);
+            return 0;
+          });
+        };
+        if (files) {
+          const list = Array.from(e.dataTransfer.files);
+          Promise.all(list.map((file) => file.arrayBuffer().then((data) => [file.name, new Uint8Array(data)]))).then(
+            (entries) => deliver(0, encoder.encode(this.files.add(entries).join("\0"))),
+            () => this.call(() => (this.exports.ziggurat_drop(drop.target, x, y, 3, 0, 0), 0)),
+          );
+        } else deliver(1, encoder.encode(e.dataTransfer.getData("text/plain")));
+      });
       c.addEventListener("pointermove", (e) => {
         this.pointer = [e.clientX, e.clientY];
         const [x, y] = this.point(win, e);

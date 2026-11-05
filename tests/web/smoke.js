@@ -92,6 +92,24 @@
     await frames(2);
     document.querySelector(".ziggurat-menu > li[role=menuitem]").click();
     await until("the menu's choice", () => document.title === "Menu: Add ten" && !document.querySelector(".ziggurat-menu"));
+    // Files dropped are read before the drop reaches the app, which reads
+    // them at the paths the page keeps them at; text drops as it is.
+    const drag = (type, data) => {
+      const box = canvas.getBoundingClientRect();
+      canvas.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, clientX: box.left + 100, clientY: box.top + 100, dataTransfer: data }));
+    };
+    const files = new DataTransfer();
+    files.items.add(new File(["hello from a drop"], "note.txt", { type: "text/plain" }));
+    drag("dragenter", files);
+    drag("dragover", files);
+    drag("drop", files);
+    await until("the dropped file", () => document.title.startsWith("Dropped") || document.title.startsWith("FAIL"));
+    if (!/^Dropped note\.txt 17 hello from a dro after \d+ hovers$/.test(document.title)) fail("drop title " + document.title);
+    const text = new DataTransfer();
+    text.setData("text/plain", "dropped words");
+    drag("dragover", text);
+    drag("drop", text);
+    await until("the dropped text", () => document.title === "Text dropped words");
     if (renderer === "webgl2" && win().glc.memoryFrames) fail(win().glc.memoryFrames + " frames drawn in memory");
     report("PASS");
   } catch (err) {
