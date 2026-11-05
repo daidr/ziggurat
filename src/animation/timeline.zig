@@ -46,6 +46,9 @@ pub const Playhead = struct {
     direction: Direction = .forward,
     playing: bool = false,
     reduced_motion: bool = false,
+    /// What the timeline drives moves nothing on screen (an opacity, a
+    /// blur), so it plays on while the desktop asks for less motion.
+    non_motion: bool = false,
     last_now: ?u64 = null,
     repetition: Repetition = .{},
     completed_iterations: u32 = 0,
@@ -77,7 +80,7 @@ pub const Playhead = struct {
         var next = self.*;
         _ = try next.advance(now);
         next.direction = direction;
-        if (next.reduced_motion) next.finish() else {
+        if (next.reduced_motion and !next.non_motion) next.finish() else {
             _ = std.math.add(u64, now, next.remaining()) catch return error.ClockExhausted;
             next.playing = next.remaining() != 0;
         }
@@ -108,7 +111,7 @@ pub const Playhead = struct {
     pub fn setReducedMotion(self: *Playhead, now: u64, enabled: bool) !void {
         _ = try self.advance(now);
         self.reduced_motion = enabled;
-        if (enabled and self.playing) self.finish();
+        if (enabled and self.playing and !self.non_motion) self.finish();
     }
     pub fn nextWake(self: *const Playhead, now: u64, cadence_ns: u64) !?u64 {
         try self.checkTime(now);
