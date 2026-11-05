@@ -176,6 +176,11 @@ fn drive(path: []const u8) !void {
     try std.testing.expectEqualStrings("Automation", windows[0].object.get("title").?.string);
     try std.testing.expectEqualStrings("content", windows[0].object.get("kind").?.string);
     try std.testing.expectEqual(@as(i64, 1), windows[0].object.get("id").?.integer);
+    // The frame, where the platform tells it, holds the content.
+    const frame = windows[0].object.get("bounds").?.object;
+    const content = windows[0].object.get("contentBounds").?.object;
+    try std.testing.expect(number(frame.get("x").?) <= number(content.get("x").?) and number(frame.get("y").?) <= number(content.get("y").?));
+    try std.testing.expect(number(frame.get("width").?) >= number(content.get("width").?) and number(frame.get("height").?) >= number(content.get("height").?));
 
     try expectCount(client, 0);
     const tree = try client.tree();

@@ -594,6 +594,7 @@ try h.change(.{ .kind = .slider }, .{ .steps = 2 });
 
 - `Query` 按 `kind`、精确的 `text`（标签或文本内容）、`name`（`Style.name`）和 `key` 匹配，所有给出的字段都必须相符。匹配多于一个返回 `Ambiguous`，用 `nth` 按构建顺序选其中之一；没有匹配返回 `NotFound`。`find` 返回节点，`count` 返回匹配数。
 - `click` 只接受按钮、链接、复选框、开关、单选、分段、标签和折叠区；`change` 只接受滑块、步进器和分栏，`ValueChange` 与原生输入相同；`scroll(query, delta)` 只接受滚动容器，`wheel(x, y, delta)` 像 Host 一样把滚轮交给该点最内层的可见滚动容器。目标禁用返回 `Disabled`，被自身尺寸或任一裁剪祖先完全遮住返回 `Hidden`，位于显示中的对话框之外返回 `Inert`，种类不符返回 `NotActivatable` 或 `NotAdjustable`。
+- `click`、`clickWith` 与 `rightClick(query)` 在发送任何输入之前，像指针那样检查匹配到的元素：窗口里看不到它的任何部分（自身尺寸、裁剪祖先、裁剪内缩或窗口边界）返回 `Hidden`；它可见部分的中心（`clickWith` 是按下的那一点，行的右端）会落到另一个控件、嵌入叶子、打开的菜单或弹出层、浮层的面板上，或落在不接收按下的地方（例如 `ignore_input` 的节点）返回 `Covered`。它们不会把目标滚动到视野里，也不另找未被遮挡的点；`find` 仍返回这样的元素（`visible` 可能为 null），`clickAt` 仍在给定的坐标按下，不检查目标。`rightClick` 还要求那一点打开的上下文菜单是元素自己的，或包住它的最近元素的，然后像 `clickButtonAt(…, .secondary, …)` 一样发送次键点击并返回是否有菜单或指针区域接收。
 - 事件遍若没有控件消费该事件（构建已不再产生这个节点），返回 `Stale`，不会静默忽略。成功的事件之后自动重新渲染，节点与 `frames` 反映新状态。
 - `at(x, y)` 返回该点最后绘制的可交互节点，尊重裁剪；`clickAt` 激活它。`visible(node)` 给出裁剪后的可见矩形，`view.divider(node)` 给出分栏的分隔条矩形。
 - `write(writer)` 输出缩进的树大纲（种类、文本、名称、选中或数值、禁用、取整后的边界），适合与期望文本比较。

@@ -153,8 +153,12 @@ test "a node ignoring input lets the pointer and focus pass, and assistive techn
     try testing.expect(context.input_state.hitControl(.{ .x = rect.x + rect.width / 2, .y = rect.y + rect.height / 2 }) == null);
     try testing.expectError(error.IgnoresInput, h.focus(.{ .text = "Delete" }));
     try testing.expect(!context.input_state.available(node.id));
+    // A named click checks where the pointer would land, so it is refused
+    // without sending input.
+    try testing.expectError(error.Covered, h.click(.{ .text = "Delete" }));
+    try testing.expectEqual(@as(usize, 0), app.pressed);
     // A screen reader's press acts as a click.
-    try h.click(.{ .text = "Delete" });
+    try h.send(.{ .action = node.id });
     try testing.expectEqual(@as(usize, 1), app.pressed);
     // Its neighbour is unaffected.
     try h.focus(.{ .text = "Before" });

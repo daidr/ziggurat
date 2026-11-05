@@ -48,6 +48,9 @@ const Gallery = struct {
         _ = try v.segment(ui.loading.Easing, &self.easing, .ease_in_out, "Ease in out", .{});
         _ = try v.segment(ui.loading.Easing, &self.easing, .stacked, "Stacked", .{});
         try v.end();
+        try v.end();
+        // A second row, so the options fit the window's width.
+        try v.toolbar(.{ .gap = 12, .alignment = .center, .name = "More options" });
         try v.segmented(.{ .name = "Cap" });
         _ = try v.segment(ui.loading.Cap, &self.cap, .round, "Round", .{});
         _ = try v.segment(ui.loading.Cap, &self.cap, .flat, "Flat", .{});

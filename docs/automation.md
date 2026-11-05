@@ -4,6 +4,8 @@
 
 元素就是视图交给辅助技术的那些，所以客户端看到的是屏幕阅读器看到的，并像屏幕阅读器那样操作它们；元素带有视图的 ID 和应用用 `Style.key` 给的 key。`view.Harness` 仍然是在 `zig build test` 里测试视图的方式；这个模块面向构建好的应用，从外部驱动。
 
+客户端可以自己说[协议](#协议)，也可以运行 [`ziggurat-automation`](#命令行ziggurat-automation)，它是给 agent 用的命令行客户端。
+
 ## 打开
 
 应用链接这个模块并在 `App.run` 之前启动服务；把它留在测试构建里，发布构建不链接：
@@ -65,7 +67,7 @@ ZIGGURAT_AUTOMATION=/tmp/app.sock ./zig-out/bin/app
 
 ### windows
 
-列出打开的窗口，按打开顺序，ID 从 1 开始，窗口关闭前保持不变。`kind` 是原生界面窗口的 `content`，或显示网页的窗口的 `page`，后者给出 `url`（页面 `location.href` 的值）。`bounds` 与 `contentBounds` 都是 `{x, y, width, height}`；核心目前只报告内容区在屏幕上的位置和大小，所以两者相同。
+列出打开的窗口，按打开顺序，ID 从 1 开始，窗口关闭前保持不变。`kind` 是原生界面窗口的 `content`，或显示网页的窗口的 `page`，后者给出 `url`（页面 `location.href` 的值）。`bounds` 与 `contentBounds` 都是 `{x, y, width, height}`：`contentBounds` 是内容区在屏幕上的位置和大小，`bounds` 是连同窗框（标题栏、边框）的整个窗口。窗框来自平台告诉的装饰尺寸（X11 的 `_NET_FRAME_EXTENTS` 或 GDK 的窗框范围、Windows 的 `GetWindowRect`），与 `contentBounds` 用同样的单位：位置是屏幕坐标，宽高是 DIP；平台不告诉窗框时（Wayland、macOS、没有窗口管理器的 X 服务器）两者相同。
 
 ```json
 {"id": 1, "method": "windows"}
@@ -200,9 +202,68 @@ echo '{"id": 1, "method": "windows"}' | socat - UNIX-CONNECT:/tmp/app.sock
 
 `tests/automation_smoke.zig`（`zig build smoke-automation`）是一个完整的例子：它显示一个视图窗口和菜单栏，从另一个线程通过套接字依次调用全部方法，最后用菜单退出应用。
 
+## 命令行：ziggurat-automation
+
+开发应用的 AI 编程 agent 想用短命令看界面、操作界面，读短的回答：不想自己写套接字客户端，也不想把整棵 JSON 树和 20 位的元素 ID 读进上下文。`ziggurat-automation` 就是这样的客户端，走同一个套接字：
+
+```sh
+ziggurat-automation open --socket /tmp/app.sock
+ziggurat-automation snapshot -i
+# @e2 [button] "Add" key=17487022006909920864
+# @e3 [checkBox] "Greet" key=13206820971831191612
+ziggurat-automation press key=add --settle
+# - @e1 [text] "Count: 0"
+# + @e1 [text] "Count: 1"
+# = @e2 [button] "Add" key=17487022006909920864
+ziggurat-automation fill key=level 7 --settle
+ziggurat-automation screenshot /tmp/app.png
+ziggurat-automation close
+```
+
+`snapshot` 每个元素一行：短 ref（`@e1`）、角色、标签、值、key 和状态，空的省略；`-i` 只留控件，`--full` 补上占位文字、描述、范围、选区、层级、动作、bounds 和元素 ID，`--json` 打印协议原样的回答。动作接 ref、`key=<key>` 或 `id=<digits>`，覆盖协议的方法：`press`、`fill` 及其他 `act` 操作、`click`、`pointer`、`wheel`、`type`、`key`、`menu`、`eval`、`wait`、`screenshot`（写到文件）和 `windows`。key 和 `tree` 一样写成数字；`key=add` 按 `view.key("add")` 计算，`key='"7"'` 按 `view.key("7")` 计算。带 `--settle` 时，动作用 `idle` 等窗口稳定（有超时，默认 10 秒），然后打印与上次快照相比的变化：`+`、`-` 表示出现、消失或变化的元素（变化的元素先 `-` 旧样子再 `+` 新样子），`=` 表示它们周围没变的元素，都带 ref。
+
+会话（`--session`，或环境变量 `ZIGGURAT_AUTOMATION_SESSION`，默认 `default`）把套接字、目标窗口和 ref 存在用户缓存目录下自己的文件里（Linux `$XDG_CACHE_HOME/ziggurat/automation/<name>.json`，macOS `~/Library/Caches/…`，Windows `%LOCALAPPDATA%\…`），并排工作的 agent 不会改动彼此的 ref。元素显示期间它的 ref 一直有效，ref 永不分给别的元素：元素消失后，用它的 ref 会被拒绝为 stale，而不是落到别的元素上；元素再出现时得到新的 ref。`close` 结束会话，应用继续运行。
+
+`ziggurat-automation skills` 打印它的指南，即编进命令里的 `SKILL.md`：这个版本的命令、会话、选择器、ref、稳定与差异、限制和错误，别的不写。`version` 打印构建它的 Ziggurat 版本。退出状态 0 成功，1 失败，2 命令行用错；错误写到标准错误，以 `error: ` 开头，应用的错误带协议的 code。
+
+### 构建
+
+命令在框架里，用应用依赖的那份 Ziggurat 构建，命令和它的指南才与应用一致：
+
+```sh
+zig build automation-cli          # zig-out/bin/ziggurat-automation
+```
+
+`zig build` 默认也安装它。应用的 `build.zig` 可以从依赖里装到应用旁边：
+
+```zig
+b.installArtifact(b.dependency("ziggurat", .{}).artifact("ziggurat-automation"));
+```
+
+它只用标准库和套接字，和模块一样在 Linux、Windows 与 macOS 上运行。升级应用的 Ziggurat 不会更新已经构建的命令：重新构建，指南随之更新。`zig build test-automation-cli` 运行它的单元测试，`zig build smoke-automation-cli` 显示一个视图窗口，用这些命令驱动它。
+
+### 给 agent 的 skill
+
+指南来自命令本身，agent 的配置只需说明它存在。把下面这段存成 skill，Claude Code 放在 `.claude/skills/ziggurat-automation/SKILL.md`，Codex 等读 `.agents/skills` 的 agent 放在 `.agents/skills/ziggurat-automation/SKILL.md`：
+
+````markdown
+---
+name: ziggurat-automation
+description: Use when reading a Ziggurat app's native UI elements and acting on them, sending pointer, wheel, key and text input, choosing menu bar items, evaluating scripts in pages, or taking screenshots of a running Ziggurat app.
+---
+
+This file is a discovery stub, not the usage guide. Before running a ziggurat-automation command, load the actual workflow from the CLI:
+
+```bash
+ziggurat-automation skills # start here
+```
+
+Do not probe first with --help or --version. Only if the command is missing, build it from the Ziggurat checkout the app depends on with `zig build automation-cli`.
+````
+
 ## 安全
 
-打开套接字的人可以像应用的用户那样驱动应用，并在应用的页面里运行脚本：不要把这个模块放进发布的构建。它需要两次主动开启：应用必须链接它，并且只在设置了 `ZIGGURAT_AUTOMATION` 时监听；不带 inspector 的构建无论链接与否都不包含它。
+打开套接字的人可以像应用的用户那样驱动应用，并在应用的页面里运行脚本：不要把这个模块放进发布的构建。`ziggurat-automation` 和其他客户端一样只是套接字的客户端：它不监听，只连得上正在监听的应用。它需要两次主动开启：应用必须链接它，并且只在设置了 `ZIGGURAT_AUTOMATION` 时监听；不带 inspector 的构建无论链接与否都不包含它。
 
 套接字只属于用户：Linux 上它在 `0177` 的 umask 下创建并设为 `0600`；Windows 上套接字的文件没有权限位，它继承所在目录的访问控制列表，用户的配置目录和临时目录只有用户自己能访问。把套接字放在只有用户能写入的目录里，不要放在与他人共享的目录。
 
@@ -213,5 +274,6 @@ Windows 需要 Windows 10 1803 或更高版本（Unix 域套接字）。其他�
 ## 实现
 
 - 每个连接一个线程读取请求，经 `App.post` 切到主线程执行，主线程任务在应用退出时仍会运行，所以等待不会悬空；`App.post` 失败（应用已经停止）时连接关闭。
+- `windows` 的窗框来自 `ziggurat_window_placement.frameMetrics`，与窗口位置记忆用的是同一份装饰尺寸。
 - 核心为它提供 `Window.attachedContent()`、`framePending()`、`emitKey()`、`activateMenuItem()` 和 `capture()`；`ui.Context.ofWindow`、`view.Host.ofContext` 和 `webview.View.ofWindow` 从窗口找到视图或页面，不需要全局注册表。
 - `view.Host.perform(id, action)` 执行无障碍操作；`Host.arranged` 表示视图排列过，`tree` 与 `idle` 用它等待排列后的 bounds。

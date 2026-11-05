@@ -34,6 +34,16 @@ fn monitorIndex(topology: *const Topology, key: Key) !u8 {
 fn normal(state: z.WindowState) bool {
     return !state.minimized and !state.maximized and !state.fullscreen and !state.fullscreen_requested;
 }
+/// The decorations around the window's client area as the platform draws
+/// them, in the units `metrics.units_per_dip` gives per DIP (physical on
+/// Windows, logical on X11). Owner thread; `UnsupportedCapability` where
+/// the platform does not tell (Wayland, macOS).
+pub fn frameMetrics(window: z.Window) !model.Metrics {
+    try owner(window, window.app.owner);
+    const scope = window.beginCallback() orelse return error.Closed;
+    defer scope.end();
+    return (try native.current(window)).metrics;
+}
 pub const Observation = enum { normal, special, normal_pending };
 
 /// Stable caller-owned owner-thread value. Special states never overwrite the

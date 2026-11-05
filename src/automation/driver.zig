@@ -14,6 +14,7 @@ const webview = if (options.webview) @import("ziggurat_webview") else struct {};
 const protocol = @import("protocol.zig");
 const tree = @import("tree.zig");
 const png = @import("png.zig");
+const placement = @import("ziggurat_window_placement");
 
 const Failure = protocol.Failure;
 const Error = protocol.Error;
@@ -27,6 +28,22 @@ const layout_wait_ns = 2 * std.time.ns_per_s;
 const script_timeout_ms = 30_000;
 /// Windows `windows` lists at most.
 const max_windows = 256;
+
+/// The window's frame around its content rectangle `content`, in the
+/// content's units, where the platform tells the decorations; otherwise
+/// the content rectangle itself.
+fn frameOf(window: z.Window, content: protocol.Rect) protocol.Rect {
+    const metrics = placement.frameMetrics(window) catch return content;
+    const insets = metrics.insets;
+    const per_dip = if (metrics.units_per_dip > 0) metrics.units_per_dip else 1;
+    const left: f64 = @floatFromInt(insets.left);
+    const top: f64 = @floatFromInt(insets.top);
+    const right: f64 = @floatFromInt(insets.right);
+    const bottom: f64 = @floatFromInt(insets.bottom);
+    // Positions are in the screen's units, sizes in DIP, as the content
+    // rectangle is.
+    return .{ .x = content.x - left, .y = content.y - top, .width = content.width + (left + right) / per_dip, .height = content.height + (top + bottom) / per_dip };
+}
 
 pub const Driver = struct {
     app: *z.App,
@@ -189,7 +206,7 @@ pub const Driver = struct {
                         .id = try state.driver.idOf(window),
                         .title = try state.arena.dupe(u8, title),
                         .kind = if (target == .page) "page" else "content",
-                        .bounds = rect,
+                        .bounds = frameOf(window, rect),
                         .contentBounds = rect,
                         .focused = current.focused,
                         .visible = current.visible and !current.minimized,
