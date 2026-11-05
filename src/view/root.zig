@@ -259,6 +259,46 @@ pub const Style = struct {
     /// is inert, as content `View.presentColumn` takes out is while it
     /// goes. Popovers, menus and tooltips anchored inside are hidden too.
     access_hidden: bool = false,
+    /// Tell assistive technology that the node and those inside it are
+    /// unavailable, as HTML's aria-disabled does, while they keep the
+    /// pointer, the keyboard focus, their place in Tab's order and their
+    /// look: a screen reader still reaches and reads them, as unavailable,
+    /// with their description, which can say why, but neither presses nor
+    /// edits them. Clicks and keys still reach the application, which
+    /// ignores them while it is unavailable. `enabled = false` does all of
+    /// it at once.
+    access_disabled: bool = false,
+    /// False keeps a focusable node out of Tab's order while a press, the
+    /// arrows of its group and `View.focusNode` still focus it, as HTML's
+    /// tabindex=-1, for a control the keyboard reaches another way.
+    tab_stop: bool = true,
+    /// What the node is to assistive technology, for a container or text
+    /// that is more than a group or a run of text: a landmark region, a
+    /// chat's log, a countdown, an alert, a separator; see `AccessRole`.
+    /// What a log gains and what an alert shows are read out as they
+    /// change, as ARIA's live regions are.
+    role: ?AccessRole = null,
+    /// What a screen reader calls the node's role in place of its own, as
+    /// aria-roledescription: "slide" for a group of a carousel.
+    role_description: []const u8 = "",
+    /// Keys that act on the node, as aria-keyshortcuts: "Control+S".
+    key_shortcuts: []const u8 = "",
+    /// What a screen reader reads for a range's value in place of its
+    /// number, as aria-valuetext: "3 of 5 stars".
+    value_text: []const u8 = "",
+    /// The node is changing and what is inside it is not yet whole, as
+    /// aria-busy: a list loading its rows.
+    busy: bool = false,
+    /// The node is the current one of a set, as aria-current: the page of
+    /// a navigation, a step of a wizard.
+    current: ui.accessibility.Current = .none,
+    /// What pressing the node opens, as aria-haspopup, for a button that
+    /// opens something the view builds itself.
+    popup: ?ui.accessibility.Popup = null,
+    /// How a column header sorts its table, as aria-sort.
+    sort: ui.accessibility.Sort = .none,
+    /// What a text input completes as one types, as aria-autocomplete.
+    auto_complete: ui.accessibility.AutoComplete = .none,
     /// Where content `View.presentColumn` takes out of this container in
     /// a build goes, in place of its transition's way out: a page of a
     /// wizard or a calendar stepping back goes the way of the step that
@@ -377,6 +417,44 @@ pub const Sticky = struct {
     right: ?f32 = null,
     bottom: ?f32 = null,
     left: ?f32 = null,
+};
+
+/// What `Style.role` makes a node to assistive technology.
+pub const AccessRole = enum {
+    /// A group of related content, as role=group.
+    group,
+    /// A landmark region, named by `Style.name`, as role=region.
+    region,
+    /// A landmark of navigation links, as nav.
+    navigation,
+    /// A self-contained composition, as article.
+    article,
+    /// Content added to it is read politely, as role=log: a chat.
+    log,
+    /// A countdown or clock, as role=timer, which is not read as it ticks.
+    timer,
+    /// What shows in it is read at once, interrupting, as role=alert.
+    alert,
+    /// A status message, read politely as it appears, as role=status.
+    status,
+    /// A line between groups of content, as role=separator.
+    separator,
+    /// A heading, as role=heading with `Style.font`'s level when it is one.
+    heading,
+    fn semantic(self: AccessRole) ui.accessibility.Role {
+        return switch (self) {
+            .group => .group,
+            .region => .region,
+            .navigation => .navigation,
+            .article => .article,
+            .log => .log,
+            .timer => .timer,
+            .alert => .alert,
+            .status => .status,
+            .separator => .separator,
+            .heading => .heading,
+        };
+    }
 };
 
 /// How `Style.clip_inset` cuts a node's box: by `top`, `right`, `bottom`
@@ -1211,6 +1289,17 @@ pub const Node = struct {
     access_hidden: bool = false,
     /// The theme of the innermost `Style.theme` around or on the node.
     theme: ?*const Theme = null,
+    /// The node or one around it is `Style.access_disabled`.
+    access_disabled: bool = false,
+    /// A container around the node has a `Style.role`: its texts are read
+    /// as part of it, as a log's messages are.
+    in_role: bool = false,
+    /// The label that names this control (`View.labelledBy`), and the
+    /// control a label names, by id.
+    labelled_by: u64 = 0,
+    label_for: u64 = 0,
+    /// The node this one controls (`View.controls`), by id.
+    controls: u64 = 0,
     /// A shared element flying (`Match.fly`) paints over the rest of its
     /// layer, out of the clips and opacity around it: 1 for the one a
     /// flight leaves, under 2 for the one flying in; 0 in place.
@@ -1636,6 +1725,11 @@ pub const PointerRoute = enum { ignored, changed, consumed };
 
 /// The description of one tree. Build passes run either to deliver a single
 /// input event to the widget that owns its id, or to produce a frame.
+/// How many keys the window counts as held at once; see `View.keyDown`.
+pub const max_keys_held = 16;
+/// A key held in the window: as shortcuts name it, and by its position.
+pub const HeldKey = struct { key: z.KeyCode, code: z.KeyPosition };
+
 pub const View = struct {
     buffers: Buffers,
     len: u32 = 0,
@@ -1805,6 +1899,15 @@ pub const View = struct {
     /// A tab or segment a mirrored arrow key moves to; it takes focus after
     /// the pass that selects it.
     arrow_focus: ?u64 = null,
+    /// The keys held down in the window, in the order they went down,
+    /// whatever has the focus; set by the host. See `keyDown`.
+    keys_held: [max_keys_held]HeldKey = undefined,
+    keys_held_len: usize = 0,
+    /// A pass read the keys held, so that a change of them draws again.
+    keys_read: bool = false,
+    /// The key a binding (`bindKey`) took for this pass's action came as
+    /// the auto-repeat of a key held down; see `shortcutRepeated`.
+    shortcut_repeat: bool = false,
 
     pub fn init(buffers: Buffers) View {
         return .{ .buffers = buffers };
@@ -1833,7 +1936,88 @@ pub const View = struct {
         self.track_len = 0;
         self.tip_index = none;
         self.routes = .{};
+        self.keys_read = false;
+        if (event == null) self.shortcut_repeat = false;
         self.buffers.nodes[0] = .{ .kind = .column, .id = root_seed, .style = root_style, .end = 1, .rtl = (root_style.direction orelse self.layout_direction) == .rtl, .passthrough = root_style.ignore_input, .access_hidden = root_style.access_hidden, .theme = root_style.theme };
+    }
+
+    /// Whether the key that the binding delivering this pass's action took
+    /// (`bindKey`, with `Chord.allow_repeat`) came as the auto-repeat of a
+    /// key held down, as the web's `KeyboardEvent.repeat`. An action that
+    /// steps while the key is held takes every key; a toggle takes the
+    /// press alone and lets the repeats go by. False in a pass no binding
+    /// delivered to.
+    pub fn shortcutRepeated(self: *const View) bool {
+        return self.shortcut_repeat;
+    }
+    /// Whether `key` is held down in the window, whichever control has
+    /// the focus and whether or not one took the key, without taking it
+    /// from them: a cheat sheet of shortcuts lights the keys held while
+    /// its search field has the focus. A frame that reads it is drawn
+    /// again as the keys held change. Keys count as shortcuts name them,
+    /// or by their position where the layout types no key `z.KeyCode`
+    /// names; the modifier keys are the modifiers'. The window lets go of
+    /// every key as it loses the keyboard, whose releases go elsewhere.
+    pub fn keyDown(self: *View, wanted: z.KeyCode) bool {
+        self.keys_read = true;
+        if (wanted == .unknown) return false;
+        for (self.keys_held[0..self.keys_held_len]) |held| if (held.key == wanted) return true;
+        return false;
+    }
+    /// Whether the key at `code` is held down in the window, as `keyDown`
+    /// tells, by its position.
+    pub fn codeDown(self: *View, code: z.KeyPosition) bool {
+        self.keys_read = true;
+        if (code == .unknown) return false;
+        for (self.keys_held[0..self.keys_held_len]) |held| if (held.code == code) return true;
+        return false;
+    }
+    /// The keys held down in the window, as `keyDown` tells them, in the
+    /// order they went down; empty while none is.
+    pub fn keysDown(self: *View) []const HeldKey {
+        self.keys_read = true;
+        return self.keys_held[0..self.keys_held_len];
+    }
+    fn heldIndex(self: *const View, name: z.KeyCode, code: z.KeyPosition) ?usize {
+        for (self.keys_held[0..self.keys_held_len], 0..) |held, i| {
+            if (held.code != .unknown and code != .unknown) {
+                if (held.code == code) return i;
+            } else if (held.key == name) return i;
+        }
+        return null;
+    }
+    fn heldName(input: z.KeyInput) z.KeyCode {
+        const name = if (input.key == .unknown) input.physical else input.key;
+        return switch (name) {
+            .shift, .control, .alt, .super => .unknown,
+            else => name,
+        };
+    }
+    /// Note a key pressed in the window; true when the keys held changed
+    /// and a pass read them.
+    pub fn holdKey(self: *View, input: z.KeyInput) bool {
+        const name = heldName(input);
+        if (name == .unknown and (input.code == .unknown or input.code.modifier())) return false;
+        if (input.code.modifier() or self.heldIndex(name, input.code) != null) return false;
+        if (self.keys_held_len == max_keys_held) return false;
+        self.keys_held[self.keys_held_len] = .{ .key = name, .code = input.code };
+        self.keys_held_len += 1;
+        return self.keys_read;
+    }
+    /// Note a key let go of; true when the keys held changed and a pass
+    /// read them.
+    pub fn releaseKey(self: *View, input: z.KeyInput) bool {
+        const i = self.heldIndex(heldName(input), input.code) orelse return false;
+        std.mem.copyForwards(HeldKey, self.keys_held[i .. self.keys_held_len - 1], self.keys_held[i + 1 .. self.keys_held_len]);
+        self.keys_held_len -= 1;
+        return self.keys_read;
+    }
+    /// Let go of every key, as the window loses the keyboard; true when a
+    /// pass read them.
+    pub fn releaseKeys(self: *View) bool {
+        if (self.keys_held_len == 0) return false;
+        self.keys_held_len = 0;
+        return self.keys_read;
     }
 
     pub fn root(self: *const View) *const Node {
@@ -1941,8 +2125,8 @@ pub const View = struct {
         effective.enabled = style.enabled and parent.style.enabled;
         self.buffers.nodes[index] = .{ .kind = kind, .id = self.identity(parent, kind, style), .style = effective, .parent = parent_index, .end = index + 1, .semantic_parent = switch (parent.kind) {
             .toolbar, .breadcrumbs, .accordion, .fieldset, .search, .toast, .dialog, .table_header, .table_row, .token_field, .combo_field, .route => parent.id,
-            else => parent.semantic_parent,
-        }, .rtl = if (style.direction) |value| value == .rtl else parent.rtl, .field = if (parent.kind == .field) parent_index else parent.field, .collection = if (parent.kind == .tree or parent.kind == .table) parent_index else parent.collection, .row = if (parent.kind == .table_row) parent_index else parent.row, .concealed = style.hidden or parent.concealed, .passthrough = style.ignore_input or parent.passthrough, .access_hidden = style.access_hidden or parent.access_hidden, .theme = style.theme orelse parent.theme };
+            else => if (parent.style.role != null and parent.isContainer()) parent.id else parent.semantic_parent,
+        }, .access_disabled = style.access_disabled or parent.access_disabled, .in_role = parent.in_role or (parent.style.role != null and parent.isContainer()), .rtl = if (style.direction) |value| value == .rtl else parent.rtl, .field = if (parent.kind == .field) parent_index else parent.field, .collection = if (parent.kind == .tree or parent.kind == .table) parent_index else parent.collection, .row = if (parent.kind == .table_row) parent_index else parent.row, .concealed = style.hidden or parent.concealed, .passthrough = style.ignore_input or parent.passthrough, .access_hidden = style.access_hidden or parent.access_hidden, .theme = style.theme orelse parent.theme };
         if (parent.last_child == none) parent.first_child = index else self.buffers.nodes[parent.last_child].next_sibling = index;
         if (style.z_index != 0 or style.sticky != null) parent.z_order = true;
         parent.last_child = index;
@@ -2019,6 +2203,65 @@ pub const View = struct {
         const node = self.lastNode();
         self.bindings[self.binding_count] = .{ .chord = chord, .focus = if (window) null else node.id, .embed = if (window) null else node.embed, .action = action, .index = self.len - 1 };
         self.binding_count += 1;
+    }
+    /// Name the control with id `control` by the text of the node with id
+    /// `label`, a text the view draws as its caption, in place of its own
+    /// name, as aria-labelledby does, and give a click on the label to
+    /// the control, as HTML's `<label for>`: the click focuses it, or the
+    /// item chosen in a group, and clicks a checkbox, a switch or a radio
+    /// button. Call it once both are built, in either order, with the ids
+    /// `lastNode` gives:
+    ///
+    ///     try v.text("Card number", .{});
+    ///     const caption = v.lastNode().id;
+    ///     _ = try v.textInput(&app.card, .{});
+    ///     try v.labelledBy(v.lastNode().id, caption);
+    pub fn labelledBy(self: *View, control: u64, label: u64) Error!void {
+        if (control == label) return error.InvalidValue;
+        const target = self.nodeById(control) orelse return error.InvalidValue;
+        const caption = self.nodeById(label) orelse return error.InvalidValue;
+        target.labelled_by = label;
+        caption.label_for = control;
+    }
+    /// The node with id `control` controls the one with id `controlled`,
+    /// as aria-controls: a button and the panel it shows, a tab and its
+    /// page. Assistive technology can move from one to the other.
+    pub fn controls(self: *View, control: u64, controlled: u64) Error!void {
+        if (control == controlled) return error.InvalidValue;
+        const target = self.nodeById(control) orelse return error.InvalidValue;
+        if (self.nodeById(controlled) == null) return error.InvalidValue;
+        target.controls = controlled;
+    }
+    /// What a press on the label with `id` does (`labelledBy`): the
+    /// control it focuses, and the one it clicks, a checkbox, switch or
+    /// radio button. Null when `id` labels nothing.
+    pub fn labelPress(self: *const View, id: u64) ?struct { focus: u64, click: ?u64 } {
+        const all = self.buffers.nodes[0..self.len];
+        const label = for (all) |*node| {
+            if (node.id == id) break node;
+        } else return null;
+        if (label.label_for == 0) return null;
+        for (all, 0..) |*control, index| if (control.id == label.label_for) {
+            if (!control.style.enabled) return null;
+            return switch (control.kind) {
+                .checkbox, .toggle_switch, .radio => .{ .focus = control.id, .click = control.id },
+                .radio_group, .segmented, .tab_list => blk: {
+                    // The item chosen, else the first.
+                    var first: ?u64 = null;
+                    for (all[index + 1 .. control.end]) |*inner| if (inner.kind == .radio or inner.kind == .segment or inner.kind == .tab) {
+                        if (inner.checked) break :blk .{ .focus = inner.id, .click = null };
+                        first = first orelse inner.id;
+                    };
+                    break :blk .{ .focus = first orelse control.id, .click = null };
+                },
+                else => .{ .focus = self.focusTarget(control.id), .click = null },
+            };
+        };
+        return null;
+    }
+    fn nodeById(self: *View, id: u64) ?*Node {
+        for (self.buffers.nodes[0..self.len]) |*node| if (node.id == id) return node;
+        return null;
     }
     /// In the pass a dialog or popover opens, focus goes to the node just
     /// added instead of the first control inside it.
@@ -3376,7 +3619,10 @@ pub const View = struct {
             }
             return .ignored;
         }
-        if (self.matchBinding(input, false)) |action| return .{ .deliver = .{ .action = action } };
+        if (self.matchBinding(input, false)) |action| {
+            self.shortcut_repeat = input.repeat;
+            return .{ .deliver = .{ .action = action } };
+        }
         if (self.overlay.popover) |panel| if (input.key == .escape and plain) {
             self.popover_dismiss = panel.id;
             self.popover_within = false;
@@ -3391,7 +3637,10 @@ pub const View = struct {
             self.restore = modal.opener;
             return .handled;
         };
-        if (self.matchBinding(input, true)) |action| return .{ .deliver = .{ .action = action } };
+        if (self.matchBinding(input, true)) |action| {
+            self.shortcut_repeat = input.repeat;
+            return .{ .deliver = .{ .action = action } };
+        }
         // Right to left, Left and Right move the way they point.
         const visual = direction_controls.visualInput(self, input);
         if (self.routeRowKey(visual)) |route_value| return route_value;
@@ -5922,6 +6171,13 @@ pub const View = struct {
                     scopes[scope_depth] = .{ .index = @intCast(at), .kind = .access_hidden };
                     scope_depth += 1;
                 }
+                if (style.access_disabled and (node.parent == none or !all[node.parent].access_disabled)) {
+                    target.beginAccessDisabled();
+                    scopes[scope_depth] = .{ .index = @intCast(at), .kind = .access_disabled };
+                    scope_depth += 1;
+                }
+                target.setNodeExtras(self.extrasOf(node));
+                if (style.role) |role| try self.paintRole(target, node, role);
             }
             // Around its effects too, as CSS's clip-path and mask go after
             // its filters.
@@ -6007,6 +6263,11 @@ pub const View = struct {
                     }
                 },
                 .text => {
+                    if (@TypeOf(target) == *ui.Frame and style.role == null and node.in_role and node.text.len > 0)
+                        try target.semantic(.{ .id = node.id, .parent = node.semantic_parent, .role = .text, .name = node.text, .bounds = bounds });
+                    // A label takes a click to its control.
+                    if (@TypeOf(target) == *ui.Frame and node.label_for != 0 and style.enabled and !node.passthrough)
+                        try target.addControl(node.id, bounds, .{ .focusable = false });
                     const color = style.color orelse if (!style.enabled) theme.palette.disabled_text else if (node.row != none and all[node.row].checked) theme.palette.on_accent else theme.palette.text;
                     if (self.matches.morphOf(node.id)) |value| try self.paintMorph(target, node, color, value) else if (style.wrap) self.paintWrapped(target, node, bounds, color) else target.labelFont(if (node.rtl) trailing(bounds, node.measured.preferred.width) else bounds, node.text, color, style.font orelse .{});
                 },
@@ -6228,8 +6489,54 @@ pub const View = struct {
             passthrough: ui.Frame.InertMark,
             /// The node's subtree is out of the semantic tree.
             access_hidden,
+            /// The node's subtree is unavailable to assistive technology.
+            access_disabled,
         },
     };
+    /// What a node's style and its ties to others add to the control and
+    /// semantic node its widget records, or null for nothing.
+    fn extrasOf(self: *const View, node: *const Node) ?ui.NodeExtras {
+        const style = node.style;
+        if (style.tab_stop and node.labelled_by == 0 and node.controls == 0 and !style.busy and style.current == .none and style.popup == null and style.sort == .none and style.auto_complete == .none and style.role_description.len == 0 and style.key_shortcuts.len == 0 and style.value_text.len == 0) return null;
+        return .{
+            .id = node.id,
+            .tab_stop = style.tab_stop,
+            .name = if (node.labelled_by != 0) self.labelText(node.labelled_by) else null,
+            .busy = style.busy,
+            .current = style.current,
+            .popup = style.popup,
+            .sort = style.sort,
+            .auto_complete = style.auto_complete,
+            .role_description = style.role_description,
+            .key_shortcuts = style.key_shortcuts,
+            .value_text = style.value_text,
+            .controls = if (node.controls != 0) self.focusTarget(node.controls) else 0,
+        };
+    }
+    /// The text of the label with `id`, as `View.labelledBy` names by.
+    fn labelText(self: *const View, id: u64) ?[]const u8 {
+        for (self.nodes()) |*label| if (label.id == id) {
+            if (label.text.len > 0) return label.text;
+            if (label.style.name.len > 0) return label.style.name;
+            // A container labels by the texts inside it, the first one.
+            for (self.nodes()[label.first_child..label.end]) |*inner| if (inner.kind == .text and inner.text.len > 0) return inner.text;
+            return null;
+        };
+        return null;
+    }
+    /// The semantic node `Style.role` makes of a container or a text.
+    fn paintRole(self: *const View, target: *ui.Frame, node: *const Node, role: AccessRole) !void {
+        _ = self;
+        if (!node.isContainer() and node.kind != .text) return;
+        // The level of the heading font it is set in, as h1 to h6.
+        const level: u32 = if (role == .heading) blk: {
+            const size = (node.style.font orelse ui.Font{}).size;
+            const sizes = [_]f32{ Font.heading1.size, Font.heading2.size, Font.heading3.size, Font.heading4.size, Font.heading5.size };
+            for (sizes, 1..) |at_least, value| if (size >= at_least) break :blk @intCast(value);
+            break :blk 6;
+        } else 0;
+        try target.semantic(.{ .id = node.id, .parent = node.semantic_parent, .role = role.semantic(), .name = if (node.kind == .text) node.text else node.style.name, .bounds = node.bounds, .busy = node.style.busy, .vertical = role == .separator and node.axis == .column, .level = level });
+    }
     fn closeScope(node: *const Node, scope: Scope, target: anytype, window_theme: Theme) !void {
         switch (scope.kind) {
             .effect => return target.endEffect(),
@@ -6238,6 +6545,7 @@ pub const View = struct {
             .theme => |previous| if (@TypeOf(target) == *ui.Frame) target.popTheme(previous),
             .passthrough => |mark| if (@TypeOf(target) == *ui.Frame) target.passThrough(mark, target.inertMark()),
             .access_hidden => if (@TypeOf(target) == *ui.Frame) target.endAccessHidden(),
+            .access_disabled => if (@TypeOf(target) == *ui.Frame) target.endAccessDisabled(),
             .self_clip => try target.popClip(),
             .clip => {
                 paintEdges(node, target);
@@ -7179,6 +7487,12 @@ pub const Host = struct {
     }
     fn onAction(ptr: *anyopaque, id: u64) void {
         const self: *Host = @ptrCast(@alignCast(ptr));
+        if (self.view.labelPress(id)) |press| {
+            self.focus(press.focus);
+            if (press.click) |control| self.deliver(.{ .action = control });
+            self.invalidate();
+            return;
+        }
         self.deliver(.{ .action = id });
     }
     fn onValue(ptr: *anyopaque, id: u64, change: ValueChange) void {
@@ -7202,6 +7516,8 @@ pub const Host = struct {
     fn onInput(ptr: *anyopaque, _: *ui.Context, event: z.Event) bool {
         const self: *Host = @ptrCast(@alignCast(ptr));
         if (self.building) return false;
+        // The keys held count whatever takes them, the inspector too.
+        if (event == .key_input and !event.key_input.from_page and self.view.holdKey(event.key_input)) self.invalidate();
         if (self.options.tools()) |tools| if (self.inspectorInput(tools, event)) return true;
         switch (event) {
             .window_state => |state| {
@@ -7300,6 +7616,8 @@ pub const Host = struct {
                 self.view.window_focused = focused;
                 self.invalidate();
                 if (!focused) {
+                    // Keys let go of elsewhere never come back up here.
+                    _ = self.view.releaseKeys();
                     _ = self.deliverArea(self.view.areaCancel());
                     _ = self.apply(self.view.captureCancel());
                     const hover = self.view.hoverAt(null);
@@ -7394,6 +7712,7 @@ pub const Host = struct {
     fn onKeyRelease(ptr: *anyopaque, _: *ui.Context, input: z.KeyInput) void {
         const self: *Host = @ptrCast(@alignCast(ptr));
         if (self.building) return;
+        if (self.view.releaseKey(input)) self.invalidate();
         self.view.focus = self.context.input_state.focused;
         if (self.view.embedKeyUp(input) or self.applicationKey(input, true)) self.settleEmbed(null);
     }
@@ -8236,6 +8555,7 @@ test {
     _ = @import("hidden_tests.zig");
     _ = @import("click_tests.zig");
     _ = @import("headless_tests.zig");
+    _ = @import("access_tests.zig");
     _ = @import("menu_tests.zig");
     _ = @import("router.zig");
     _ = @import("image.zig");

@@ -986,6 +986,24 @@ static gboolean key(GtkWidget *widget, GdkEventKey *native, gpointer data) {
         ((modifiers&(GDK_SUPER_MASK|GDK_META_MASK))?8:0)|(repeat?16:0);
     /* X11 and Wayland hardware keycodes are evdev codes plus 8. */
     event.width=native->hardware_keycode>=8?native->hardware_keycode-8:0;
+    /* GDK's state is the one before the event: a modifier's press brings
+       its own modifier, and its release takes it only while its other
+       side is not held, as letting go of one Shift with the other down. */
+    {
+        uint32_t bit=0, twin=0;
+        switch (event.width) {
+            case 42: bit=1; twin=54; break; case 54: bit=1; twin=42; break;
+            case 29: bit=2; twin=97; break; case 97: bit=2; twin=29; break;
+            case 56: bit=4; twin=100; break; case 100: bit=4; twin=56; break;
+            case 125: bit=8; twin=126; break; case 126: bit=8; twin=125; break;
+            default: break;
+        }
+        if (bit && native->type==GDK_KEY_PRESS) event.flags|=bit;
+        else if (bit) {
+            uint32_t other=twin+8;
+            if (other<1024 && (s->pressed_keys[other/64]&(UINT64_C(1)<<(other%64)))) event.flags|=bit; else event.flags&=~bit;
+        }
+    }
     if (native->type==GDK_KEY_RELEASE) {
         NativeEvent up=event; up.kind=26; up.flags&=15; emit(s,&up);
         if (s->destroyed || epoch!=s->im_epoch || !s->im) { release(s); return TRUE; }

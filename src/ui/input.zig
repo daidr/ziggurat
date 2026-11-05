@@ -95,6 +95,10 @@ pub const Options = struct {
     pass_through: bool = false,
     radio_group: ?u64 = null,
     selected: bool = false,
+    /// False keeps a focusable control out of Tab's order, as HTML's
+    /// tabindex=-1: a press, `focus` and the arrows of the group it is in
+    /// still focus it.
+    tab_stop: bool = true,
     focus_rect: ?Rect = null,
     range: ?RangeHit = null,
     shortcut: ?Chord = null,
@@ -677,7 +681,7 @@ pub const Input = struct {
         while (step <= self.len) : (step += 1) {
             const index: usize = order[if (backward) (start + self.len - step) % self.len else (start + step) % self.len];
             const item = self.hits[index];
-            if (!self.eligible(item, index)) continue;
+            if (!self.eligible(item, index) or !item.options.tab_stop) continue;
             if (item.options.radio_group) |group| {
                 if (current_group == group) continue;
                 var first: ?u64 = null;

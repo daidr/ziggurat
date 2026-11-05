@@ -22,7 +22,8 @@ enum {
     ROLE_DISCLOSURE, ROLE_METER, ROLE_NAVIGATION, ROLE_LIST_BOX, ROLE_LIST_ITEM, ROLE_COMBO_BOX, ROLE_TOOLTIP, ROLE_STATUS,
     ROLE_SEARCH, ROLE_IMAGE, ROLE_TREE, ROLE_TREE_ITEM, ROLE_TABLE, ROLE_TABLE_HEADER, ROLE_COLUMN_HEADER, ROLE_TABLE_ROW,
     ROLE_TOKEN_FIELD, ROLE_TOKEN, ROLE_POPUP, ROLE_CALENDAR, ROLE_COLOR_WELL, ROLE_DIALOG, ROLE_ALERT_DIALOG, ROLE_MENU,
-    ROLE_MENU_ITEM, ROLE_MENU_ITEM_CHECKBOX, ROLE_MENU_ITEM_RADIO, ROLE_COUNT
+    ROLE_MENU_ITEM, ROLE_MENU_ITEM_CHECKBOX, ROLE_MENU_ITEM_RADIO, ROLE_REGION, ROLE_LOG, ROLE_TIMER, ROLE_ALERT,
+    ROLE_SEPARATOR, ROLE_ROW_HEADER, ROLE_OPTION, ROLE_ARTICLE, ROLE_CELL, ROLE_HEADING, ROLE_COUNT
 };
 /* NativeNode flags, as accessibility.zig packs them. */
 enum {
@@ -38,8 +39,30 @@ typedef struct NativeNode {
     double x, y, width, height, range_value, range_minimum, range_maximum, range_small_change, range_large_change;
     /* Place among all of the list's items from 1, how many a list has and
        a tree item's depth from 1; 0 when not given. */
-    uint32_t position, set_size, level, reserved;
+    uint32_t position, set_size, level;
+    /* NativeState: FOCUSABLE_DISABLED, BUSY, SELECTABLE, SELECTED and
+       VERTICAL, then the popup kind (bits 8 to 10), current (11 to 13),
+       sort (14, 15) and autocomplete (16, 17). */
+    uint32_t states;
+    uint32_t role_description_start, role_description_len, key_shortcuts_start, key_shortcuts_len;
+    uint32_t value_text_start, value_text_len, reserved0, reserved1;
+    /* The node this one controls (aria-controls), 0 for none. */
+    uint64_t controls;
 } NativeNode;
+_Static_assert(sizeof(NativeNode) == 184, "semantic node ABI");
+enum { FOCUSABLE_DISABLED = 1, BUSY = 2, SELECTABLE = 4, SELECTED = 8, VERTICAL = 16 };
+enum { POPUP_NONE, POPUP_MENU, POPUP_LIST_BOX, POPUP_TREE, POPUP_GRID, POPUP_DIALOG };
+enum { CURRENT_NONE, CURRENT_ITEM, CURRENT_PAGE, CURRENT_STEP, CURRENT_LOCATION, CURRENT_DATE, CURRENT_TIME };
+enum { SORT_NONE, SORT_ASCENDING, SORT_DESCENDING, SORT_OTHER };
+enum { AUTOCOMPLETE_NONE, AUTOCOMPLETE_INLINE, AUTOCOMPLETE_LIST, AUTOCOMPLETE_BOTH };
+static inline uint32_t node_popup(const NativeNode *n) { return (n->states >> 8) & 7; }
+static inline uint32_t node_current(const NativeNode *n) { return (n->states >> 11) & 7; }
+static inline uint32_t node_sort(const NativeNode *n) { return (n->states >> 14) & 3; }
+static inline uint32_t node_autocomplete(const NativeNode *n) { return (n->states >> 16) & 3; }
+static const char *const popup_names[] = { "", "menu", "listbox", "tree", "grid", "dialog" };
+static const char *const current_names[] = { "", "true", "page", "step", "location", "date", "time" };
+static const char *const sort_names[] = { "", "ascending", "descending", "other" };
+static const char *const autocomplete_names[] = { "", "inline", "list", "both" };
 typedef struct RecipientAuthority { uint64_t epoch, serial, id, publication; uint32_t slot, kind; } RecipientAuthority;
 typedef struct ActionView {
     void *context;
@@ -67,6 +90,10 @@ struct Node {
     GPtrArray *children; /* Node*, borrowed from host->nodes */
     NativeNode n;
     char *name, *description;
+    /* What the app calls its role (aria-roledescription), the keys that
+       press it (aria-keyshortcuts) and the text of a range's value
+       (aria-valuetext); NULL for none. */
+    char *role_description, *key_shortcuts, *value_text;
     /* The value as characters, which ATK's offsets count, and as UTF-8. */
     gunichar *chars;
     glong count;
@@ -108,7 +135,9 @@ static gboolean fixed_range(uint32_t role) { return role == ROLE_PROGRESS || rol
 static gboolean toggle(uint32_t role) { return role == ROLE_CHECKBOX || role == ROLE_RADIO || role == ROLE_SWITCH || role == ROLE_MENU_ITEM_CHECKBOX || role == ROLE_MENU_ITEM_RADIO; }
 static gboolean textual(uint32_t role) { return role == ROLE_TEXT_BOX || role == ROLE_COMBO_BOX || role == ROLE_TOKEN_FIELD; }
 static gboolean menu_item(uint32_t role) { return role == ROLE_MENU_ITEM || role == ROLE_MENU_ITEM_CHECKBOX || role == ROLE_MENU_ITEM_RADIO; }
-static gboolean row(uint32_t role) { return role == ROLE_LIST_ITEM || role == ROLE_TREE_ITEM || role == ROLE_TABLE_ROW; }
+static gboolean row(uint32_t role) { return role == ROLE_LIST_ITEM || role == ROLE_TREE_ITEM || role == ROLE_TABLE_ROW || role == ROLE_OPTION; }
+/* Cells of a table, headers included. */
+static gboolean cell(uint32_t role) { return role == ROLE_CELL || role == ROLE_COLUMN_HEADER || role == ROLE_ROW_HEADER; }
 static gboolean rows_container(uint32_t role) { return role == ROLE_LIST || role == ROLE_LIST_BOX || role == ROLE_TREE || role == ROLE_TABLE || role == ROLE_TAB_LIST; }
 static gboolean item(uint32_t role) { return role == ROLE_RADIO || role == ROLE_TAB || row(role); }
 /* Roles whose activation is a press, as UI Automation's Invoke, Toggle,
@@ -169,6 +198,17 @@ static AtkRole atk_role_of(const NativeNode *n) {
     case ROLE_MENU_ITEM: return ATK_ROLE_MENU_ITEM;
     case ROLE_MENU_ITEM_CHECKBOX: return ATK_ROLE_CHECK_MENU_ITEM;
     case ROLE_MENU_ITEM_RADIO: return ATK_ROLE_RADIO_MENU_ITEM;
+    /* A landmark, whose xml-roles attribute says which, as Chromium's. */
+    case ROLE_REGION: return ATK_ROLE_LANDMARK;
+    case ROLE_LOG: return ATK_ROLE_LOG;
+    case ROLE_TIMER: return ATK_ROLE_TIMER;
+    case ROLE_ALERT: return ATK_ROLE_NOTIFICATION;
+    case ROLE_SEPARATOR: return ATK_ROLE_SEPARATOR;
+    case ROLE_ROW_HEADER: return ATK_ROLE_ROW_HEADER;
+    case ROLE_OPTION: return ATK_ROLE_LIST_ITEM;
+    case ROLE_ARTICLE: return ATK_ROLE_ARTICLE;
+    case ROLE_CELL: return ATK_ROLE_TABLE_CELL;
+    case ROLE_HEADING: return ATK_ROLE_HEADING;
     default: return ATK_ROLE_PANEL;
     }
 }
@@ -448,13 +488,25 @@ static void add_states(AtkStateSet *set, const Node *node) {
     atk_state_set_add_state(set, ATK_STATE_VISIBLE);
     if (!(n->flags & OFFSCREEN)) atk_state_set_add_state(set, ATK_STATE_SHOWING);
     if (n->flags & ENABLED) { atk_state_set_add_state(set, ATK_STATE_ENABLED); atk_state_set_add_state(set, ATK_STATE_SENSITIVE); }
-    if (focusable(n->role) && (n->flags & ENABLED)) atk_state_set_add_state(set, ATK_STATE_FOCUSABLE);
+    /* What is only unavailable (aria-disabled) stays focusable. */
+    if (focusable(n->role) && (n->flags & ENABLED || n->states & FOCUSABLE_DISABLED)) atk_state_set_add_state(set, ATK_STATE_FOCUSABLE);
     if (node->host->has_focus && node->host->focus == n->id) atk_state_set_add_state(set, ATK_STATE_FOCUSED);
     if (toggle(n->role)) atk_state_set_add_state(set, ATK_STATE_CHECKABLE);
     if (chooses(node) || row(n->role) || n->role == ROLE_TAB) {
         atk_state_set_add_state(set, ATK_STATE_SELECTABLE);
         if (n->flags & CHECKED) atk_state_set_add_state(set, ATK_STATE_SELECTED);
+    } else if (cell(n->role) && (n->states & SELECTABLE)) {
+        /* Cells where they are chosen or not, as ARIA's gridcells. */
+        atk_state_set_add_state(set, ATK_STATE_SELECTABLE);
+        if (n->states & SELECTED) atk_state_set_add_state(set, ATK_STATE_SELECTED);
     } else if (n->flags & CHECKED) atk_state_set_add_state(set, ATK_STATE_CHECKED);
+    if (node_popup(n) != POPUP_NONE) atk_state_set_add_state(set, ATK_STATE_HAS_POPUP);
+    if (n->states & BUSY) atk_state_set_add_state(set, ATK_STATE_BUSY);
+    /* The current item is active, as Chromium's aria-current is. */
+    if (node_current(n) != CURRENT_NONE) atk_state_set_add_state(set, ATK_STATE_ACTIVE);
+    /* A field whose suggestions complete it, as Core-AAM maps
+       aria-autocomplete, with its autocomplete attribute. */
+    if (node_autocomplete(n) != AUTOCOMPLETE_NONE) atk_state_set_add_state(set, ATK_STATE_SUPPORTS_AUTOCOMPLETION);
     if (n->role == ROLE_DISCLOSURE) {
         atk_state_set_add_state(set, ATK_STATE_EXPANDABLE);
         if (n->flags & (EXPANDED | CHECKED)) { atk_state_set_add_state(set, ATK_STATE_CHECKED); atk_state_set_add_state(set, ATK_STATE_EXPANDED); }
@@ -468,6 +520,8 @@ static void add_states(AtkStateSet *set, const Node *node) {
     if (n->flags & INVALID) atk_state_set_add_state(set, ATK_STATE_INVALID_ENTRY);
     if (n->flags & REQUIRED) atk_state_set_add_state(set, ATK_STATE_REQUIRED);
     if (n->role == ROLE_SLIDER || n->role == ROLE_SPLITTER) atk_state_set_add_state(set, n->width >= n->height ? ATK_STATE_HORIZONTAL : ATK_STATE_VERTICAL);
+    /* As GtkSeparator's. */
+    if (n->role == ROLE_SEPARATOR) atk_state_set_add_state(set, (n->states & VERTICAL) ? ATK_STATE_VERTICAL : ATK_STATE_HORIZONTAL);
     if (textual(n->role)) {
         atk_state_set_add_state(set, ATK_STATE_SELECTABLE_TEXT);
         atk_state_set_add_state(set, ATK_STATE_SINGLE_LINE);
@@ -512,16 +566,62 @@ static AtkAttributeSet *node_attributes(AtkObject *obj) {
         if (node->n.level > 0) level = node->n.level;
         list = add_attribute(list, "level", g_strdup_printf("%u", level));
     }
-    if (node->n.role == ROLE_NAVIGATION) list = add_attribute(list, "xml-roles", g_strdup("navigation"));
-    if (node->n.role == ROLE_SEARCH) list = add_attribute(list, "xml-roles", g_strdup("search"));
-    if (node->n.role == ROLE_STATUS) {
-        list = add_attribute(list, "container-live", g_strdup("polite"));
-        list = add_attribute(list, "live", g_strdup("polite"));
+    const NativeNode *n = &node->n;
+    /* The ARIA role of a landmark or a live region, which its ATK role
+       does not say all of. */
+    const char *xml = n->role == ROLE_NAVIGATION ? "navigation" : n->role == ROLE_SEARCH ? "search" : n->role == ROLE_REGION ? "region" :
+        n->role == ROLE_LOG ? "log" : n->role == ROLE_TIMER ? "timer" : n->role == ROLE_ALERT ? "alert" : n->role == ROLE_STATUS ? "status" : NULL;
+    if (xml) list = add_attribute(list, "xml-roles", g_strdup(xml));
+    /* How a live region and what is inside it are read, as Chromium's say
+       aria-live, aria-atomic and aria-relevant. */
+    for (const Node *up = node; up; up = up->parent) {
+        uint32_t role = up->n.role;
+        const char *live = role == ROLE_STATUS || role == ROLE_LOG ? "polite" : role == ROLE_ALERT ? "assertive" : NULL;
+        if (!live) continue;
+        const char *atomic = role == ROLE_LOG ? "false" : "true";
+        if (up == node) {
+            list = add_attribute(list, "live", g_strdup(live));
+            list = add_attribute(list, "atomic", g_strdup(atomic));
+            list = add_attribute(list, "relevant", g_strdup("additions text"));
+        }
+        list = add_attribute(list, "container-live", g_strdup(live));
+        list = add_attribute(list, "container-atomic", g_strdup(atomic));
+        list = add_attribute(list, "container-relevant", g_strdup("additions text"));
+        list = add_attribute(list, "container-live-role", g_strdup(role == ROLE_STATUS ? "status" : role == ROLE_LOG ? "log" : "alert"));
+        break;
     }
+    if (node_current(n) != CURRENT_NONE) list = add_attribute(list, "current", g_strdup(current_names[node_current(n)]));
+    if (node_autocomplete(n) != AUTOCOMPLETE_NONE) list = add_attribute(list, "autocomplete", g_strdup(autocomplete_names[node_autocomplete(n)]));
+    if (node_popup(n) != POPUP_NONE) list = add_attribute(list, "haspopup", g_strdup(popup_names[node_popup(n)]));
+    /* The order of the column a table is sorted by, as Chromium says. */
+    if (node_sort(n) != SORT_NONE) list = add_attribute(list, "sort", g_strdup(sort_names[node_sort(n)]));
+    if (node->role_description) list = add_attribute(list, "roledescription", g_strdup(node->role_description));
+    /* The keys that press or focus it, as Chromium says. */
+    if (node->key_shortcuts) list = add_attribute(list, "keyshortcuts", g_strdup(node->key_shortcuts));
     return list;
+}
+/* The node a node controls (controller-for), and those controlling it
+   (controlled-by), as ARIA's aria-controls. */
+static AtkRelationSet *node_ref_relation_set(AtkObject *obj) {
+    AtkRelationSet *set = atk_relation_set_new();
+    Node *node = node_of(obj);
+    if (!node) return set;
+    if (node->n.controls) {
+        Node *target = g_hash_table_lookup(node->host->nodes, &node->n.controls);
+        if (target) atk_relation_set_add_relation_by_type(set, ATK_RELATION_CONTROLLER_FOR, target->obj);
+    }
+    GHashTableIter iter;
+    gpointer key, value;
+    g_hash_table_iter_init(&iter, node->host->nodes);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        Node *other = value;
+        if (other->n.controls == node->n.id) atk_relation_set_add_relation_by_type(set, ATK_RELATION_CONTROLLED_BY, other->obj);
+    }
+    return set;
 }
 static void zua_node_class_init(ZuaNodeClass *klass) {
     AtkObjectClass *object = ATK_OBJECT_CLASS(klass);
+    object->ref_relation_set = node_ref_relation_set;
     object->get_n_children = node_n_children;
     object->ref_child = node_ref_child;
     object->get_index_in_parent = node_index_in_parent;
@@ -624,7 +724,8 @@ static gboolean value_set_current(AtkValue *value, const GValue *in) {
 static void value_and_text(AtkValue *value, gdouble *number, gchar **text) {
     Node *node = node_of(value);
     if (number) *number = node ? range_now(&node->n) : 0;
-    if (text) *text = NULL;
+    /* The text of the value (aria-valuetext), the caller's to free. */
+    if (text) *text = node && node->value_text ? g_strdup(node->value_text) : NULL;
 }
 static AtkRange *value_range(AtkValue *value) {
     Node *node = node_of(value);
@@ -883,6 +984,7 @@ static void node_free(gpointer data) {
     g_object_unref(node->obj);
     g_ptr_array_unref(node->children);
     g_free(node->name); g_free(node->description); g_free(node->value); g_free(node->chars); g_free(node->chosen);
+    g_free(node->role_description); g_free(node->key_shortcuts); g_free(node->value_text);
     g_free(node);
     live_nodes--;
 }
@@ -957,7 +1059,20 @@ static uint32_t announcements;
 static gchar *last_announcement;
 /* A status message absent from the previous tree says itself once,
    politely. */
-static void announce(Host *host, const gchar *message) {
+static void announce_as(Host *host, const gchar *message, gint politeness);
+static void announce(Host *host, const gchar *message) { announce_as(host, message, 1 /* ATK_LIVE_POLITE */); }
+/* What live regions read out, as Zig tells them: the content added to a
+   log politely, and an alert's at once, assertively (ATK_LIVE_ASSERTIVE),
+   through the notification signal of ATK 2.50, or announced before it. */
+int zua_announce(void *state, const uint16_t *text, uint32_t text_len, int assertive) {
+    Host *host = state;
+    if (!host || host->closed) return -1;
+    gchar *message = text_at(text, text_len, 0, text_len);
+    announce_as(host, message, assertive ? 2 : 1);
+    g_free(message);
+    return 0;
+}
+static void announce_as(Host *host, const gchar *message, gint politeness) {
     announcements++;
     g_free(last_announcement);
     last_announcement = g_strdup(message);
@@ -965,7 +1080,7 @@ static void announce(Host *host, const gchar *message) {
     if (!signal) return;
     GSignalQuery query;
     g_signal_query(signal, &query);
-    if (query.n_params == 2) g_signal_emit(host->root, signal, 0, message, (gint)1 /* ATK_LIVE_POLITE */);
+    if (query.n_params == 2) g_signal_emit(host->root, signal, 0, message, politeness);
     else g_signal_emit(host->root, signal, 0, message);
 }
 
@@ -1017,6 +1132,7 @@ static int publish(Host *host, const NativeNode *nodes, uint32_t count, const ui
             old_chars[i] = node->chars; old_counts[i] = node->count;
             old_starts[i] = node->selection_start; old_ends[i] = node->selection_end;
             g_free(node->value);
+            g_free(node->role_description); g_free(node->key_shortcuts); g_free(node->value_text);
         } else {
             node = g_new0(Node, 1);
             node->obj = g_object_new(type, NULL);
@@ -1032,6 +1148,9 @@ static int publish(Host *host, const NativeNode *nodes, uint32_t count, const ui
         node->parent = NULL;
         node->name = text_at(text, text_len, n->name_start, n->name_len);
         node->description = text_at(text, text_len, n->description_start, n->description_len);
+        node->role_description = n->role_description_len ? text_at(text, text_len, n->role_description_start, n->role_description_len) : NULL;
+        node->key_shortcuts = n->key_shortcuts_len ? text_at(text, text_len, n->key_shortcuts_start, n->key_shortcuts_len) : NULL;
+        node->value_text = n->value_text_len ? text_at(text, text_len, n->value_text_start, n->value_text_len) : NULL;
         gchar *value = n->role == ROLE_TEXT ? g_strdup(node->name) : text_at(text, text_len, n->value_start, n->value_len);
         node->value = value;
         glong chars = 0;

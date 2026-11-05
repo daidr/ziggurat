@@ -466,7 +466,7 @@ fn nativeKeyInput(window: *core.WindowRecord, hwnd: c.HWND, wp: c.WPARAM, lp: c.
     const control = c.GetKeyState(c.VK_CONTROL) < 0;
     // Layout-generated AltGr text uses Right Alt plus a synthetic Control.
     if (control and c.GetKeyState(c.VK_RMENU) < 0) return false;
-    return window.keyInput(.{ .key = keyCode(wp), .modifiers = keyModifiers(), .repeat = @as(usize, @bitCast(lp)) & (1 << 30) != 0, .physical = physicalKey(lp) });
+    return window.keyInput(.{ .key = keyCode(wp), .modifiers = keyModifiers(), .repeat = @as(usize, @bitCast(lp)) & (1 << 30) != 0, .physical = physicalKey(lp), .code = keyPosition(lp) });
 }
 fn keyModifiers() core.KeyModifiers {
     return .{ .shift = c.GetKeyState(c.VK_SHIFT) < 0, .control = c.GetKeyState(c.VK_CONTROL) < 0, .alt = c.GetKeyState(c.VK_MENU) < 0, .super = superDown() };
@@ -476,13 +476,19 @@ fn physicalKey(lp: c.LPARAM) core.KeyCode {
     const bits = @as(usize, @bitCast(lp));
     return core.physical_keys.fromScanCode(@intCast((bits >> 16) & 0xff), bits & (1 << 24) != 0);
 }
+/// The key's position with the sides of the modifiers, as Windows reports
+/// it: AltGr comes as the left Control it makes up, then the right Alt.
+fn keyPosition(lp: c.LPARAM) core.KeyPosition {
+    const bits = @as(usize, @bitCast(lp));
+    return core.key_codes.fromXt(@intCast((bits >> 16) & 0xff), bits & (1 << 24) != 0);
+}
 /// WM_KEYUP and WM_SYSKEYUP reach content that asks for releases; native
 /// handling, such as Alt opening the window menu, continues after.
 fn nativeKeyRelease(window: *core.WindowRecord, hwnd: c.HWND, wp: c.WPARAM, lp: c.LPARAM) void {
     if (!window.inputAllowed() or c.IsWindowEnabled(hwnd) == 0) return;
     const content = window.content orelse return;
     if (content.key_release == null) return;
-    window.keyRelease(.{ .key = keyCode(wp), .modifiers = keyModifiers(), .physical = physicalKey(lp) });
+    window.keyRelease(.{ .key = keyCode(wp), .modifiers = keyModifiers(), .physical = physicalKey(lp), .code = keyPosition(lp) });
 }
 fn superDown() bool {
     return c.GetKeyState(c.VK_LWIN) < 0 or c.GetKeyState(c.VK_RWIN) < 0;

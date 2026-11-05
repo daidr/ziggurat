@@ -263,6 +263,16 @@ pub const KeyInput = struct {
     /// `.w` is the key in W's place on any layout, as games want for WASD.
     /// `.unknown` when the native event carried no position.
     physical: KeyCode = .unknown,
+    /// The key by its position on any keyboard, with the sides of the
+    /// modifiers told apart (`key_codes.Code`, USB HID usages named after
+    /// `KeyboardEvent.code`); `.unknown` where the system does not report
+    /// it. It alone names a key `key` has no name for, as the 102nd key
+    /// beside the left Shift, a key the layout types nothing for, or a
+    /// key held with AltGr, which come with `key` `.unknown`. Every key
+    /// the system tells the window of comes, a modifier or a lock key on
+    /// its own too; `modifiers` holds the modifier a press brings and not
+    /// the one a release takes.
+    code: KeyPosition = .unknown,
     /// Pressed in the page of a web view in this window, which has the
     /// keyboard, and left unhandled by the page: it did not cancel it, type
     /// it into an editable element or compose with it, and it is neither
@@ -274,6 +284,9 @@ pub const KeyInput = struct {
     from_page: bool = false,
 };
 pub const physical_keys = @import("physical_keys.zig");
+pub const key_codes = @import("key_codes.zig");
+/// A key by its position, with the sides of the modifiers (`KeyInput.code`).
+pub const KeyPosition = key_codes.Code;
 pub const Event = union(enum) {
     paint: Paint,
     resize: Size,
@@ -2781,6 +2794,7 @@ pub const WindowRecord = struct {
 test {
     _ = app_stop;
     _ = @import("physical_keys.zig");
+    _ = @import("key_codes.zig");
     _ = @import("app_shutdown_test.zig");
     _ = mailbox;
     _ = registry;

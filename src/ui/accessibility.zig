@@ -10,7 +10,17 @@ const c = if (builtin.os.tag == .windows) @import("ziggurat_c_win32") else struc
 pub const max_nodes = 128;
 pub const text_capacity = 32768;
 pub const root_id: u64 = 0;
-pub const Role = enum(u32) { window, group, button, text, text_box, checkbox, radio, toggle_switch, progress, radio_group, slider, stepper, list, tab_list, tab, toolbar, splitter, link, disclosure, meter, navigation, list_box, list_item, combo_box, tooltip, status, search, image, tree, tree_item, table, table_header, column_header, table_row, token_field, token, popup, calendar, color_well, dialog, alert_dialog, menu, menu_item, menu_item_checkbox, menu_item_radio };
+pub const Role = enum(u32) { window, group, button, text, text_box, checkbox, radio, toggle_switch, progress, radio_group, slider, stepper, list, tab_list, tab, toolbar, splitter, link, disclosure, meter, navigation, list_box, list_item, combo_box, tooltip, status, search, image, tree, tree_item, table, table_header, column_header, table_row, token_field, token, popup, calendar, color_well, dialog, alert_dialog, menu, menu_item, menu_item_checkbox, menu_item_radio, region, log, timer, alert, separator, row_header, option, article, cell, heading };
+/// The kind of popup an element opens, as ARIA's aria-haspopup.
+pub const Popup = enum(u3) { none, menu, list_box, tree, grid, dialog };
+/// Which item an element is the current one of, as ARIA's aria-current:
+/// `item` is aria-current="true".
+pub const Current = enum(u3) { none, item, page, step, location, date, time };
+/// The order a table is sorted in by a column, as ARIA's aria-sort.
+pub const Sort = enum(u2) { none, ascending, descending, other };
+/// What the suggestions of a text field or combo box complete as the user
+/// types, as ARIA's aria-autocomplete.
+pub const AutoComplete = enum(u2) { none, inline_text, list, both };
 pub const Node = struct {
     id: u64,
     parent: ?u64 = root_id,
@@ -55,6 +65,35 @@ pub const Node = struct {
     set_size: u32 = 0,
     /// How deep a tree item is, from 1; 0 for none or not given.
     level: u32 = 0,
+    /// Unavailable to assistive technology while it keeps the keyboard
+    /// focus, as ARIA's aria-disabled: `enabled` reads false, the node
+    /// stays focusable, and only the focus reaches it from assistive
+    /// technology.
+    focusable_disabled: bool = false,
+    /// Its content is about to change, as a region loading, which
+    /// assistive technology waits for before reading it: aria-busy.
+    busy: bool = false,
+    /// A cell of a grid that is chosen or not; null for one that cannot be.
+    selected: ?bool = null,
+    /// A separator or slider running up and down.
+    vertical: bool = false,
+    popup: Popup = .none,
+    current: Current = .none,
+    sort: Sort = .none,
+    auto_complete: AutoComplete = .none,
+    /// What screen readers call the node's role in place of its own, as
+    /// "carousel" for a group: aria-roledescription. "" reads the role.
+    role_description: []const u8 = "",
+    /// The keys that press or focus it, as aria-keyshortcuts, written as
+    /// the platform's menus write them ("⌘K" on macOS, "Ctrl+K" elsewhere),
+    /// separated by spaces.
+    key_shortcuts: []const u8 = "",
+    /// The text of a range's value beside its number, as aria-valuetext:
+    /// "3 of 5 stars".
+    value_text: []const u8 = "",
+    /// The node whose content or presence this one controls, as the region
+    /// a disclosure opens: aria-controls. 0 for none.
+    controls: u64 = 0,
     /// Native content inside the node whose own tree assistive technology
     /// reads there, such as a web view's page: its GtkWidget on Linux,
     /// whose accessible becomes the node's first child, or its NSView on
@@ -63,7 +102,7 @@ pub const Node = struct {
 };
 /// Nodes holding native content (`Node.native`) in one publication.
 pub const max_native_pages = 16;
-const Entry = struct {
+pub const Entry = struct {
     id: u64,
     parent: ?u64,
     role: Role,
@@ -95,6 +134,32 @@ const Entry = struct {
     set_size: u32 = 0,
     level: u32 = 0,
     native: ?*anyopaque = null,
+    focusable_disabled: bool = false,
+    busy: bool = false,
+    selected: ?bool = null,
+    vertical: bool = false,
+    popup: Popup = .none,
+    current: Current = .none,
+    sort: Sort = .none,
+    auto_complete: AutoComplete = .none,
+    extra_start: usize = 0,
+    role_description_len: usize = 0,
+    key_shortcuts_len: usize = 0,
+    value_text_len: usize = 0,
+    controls: u64 = 0,
+
+    fn extraLen(self: Entry) usize {
+        return self.role_description_len + self.key_shortcuts_len + self.value_text_len;
+    }
+    pub fn roleDescription(self: Entry, storage: []const u8) []const u8 {
+        return storage[self.extra_start..][0..self.role_description_len];
+    }
+    pub fn keyShortcuts(self: Entry, storage: []const u8) []const u8 {
+        return storage[self.extra_start + self.role_description_len ..][0..self.key_shortcuts_len];
+    }
+    pub fn valueText(self: Entry, storage: []const u8) []const u8 {
+        return storage[self.extra_start + self.role_description_len + self.key_shortcuts_len ..][0..self.value_text_len];
+    }
 };
 
 /// Explicit semantic records. Names, values and geometry come from the caller;
@@ -111,7 +176,7 @@ pub const Tree = struct {
     pub fn validate(self: *const Tree) !void {
         if (self.len == 0 or self.len > max_nodes or self.used > self.storage.len) return error.InvalidSemanticRoot;
         for (self.entries[0..self.len], 0..) |entry, at| {
-            if (entry.name_start > self.used or entry.name_len > self.used - entry.name_start or entry.value_start > self.used or entry.value_len > self.used - entry.value_start or entry.description_start > self.used or entry.description_len > self.used - entry.description_start) return error.InvalidSemanticText;
+            if (entry.name_start > self.used or entry.name_len > self.used - entry.name_start or entry.value_start > self.used or entry.value_len > self.used - entry.value_start or entry.description_start > self.used or entry.description_len > self.used - entry.description_start or entry.extra_start > self.used or entry.extraLen() > self.used - entry.extra_start) return error.InvalidSemanticText;
             const name = self.storage[entry.name_start..][0..entry.name_len];
             const value = self.storage[entry.value_start..][0..entry.value_len];
             const description = self.storage[entry.description_start..][0..entry.description_len];
@@ -154,7 +219,7 @@ pub const Tree = struct {
             }
             if (selected[at]) {
                 count += 1;
-                bytes += entry.name_len + entry.value_len + entry.description_len;
+                bytes += entry.name_len + entry.value_len + entry.description_len + entry.extraLen();
             }
         }
         if (!found) return error.MissingSemanticNode;
@@ -171,12 +236,26 @@ pub const Tree = struct {
             const description = text[used..][0..entry.description_len];
             @memcpy(description, self.storage[entry.description_start..][0..entry.description_len]);
             used += description.len;
-            nodes[written] = .{ .id = entry.id, .parent = entry.parent, .role = entry.role, .name = name, .value = value, .description = description, .bounds = entry.bounds, .enabled = entry.enabled, .focused = entry.focused, .read_only = entry.read_only, .checked = entry.checked, .mixed = entry.mixed, .invalid = entry.invalid, .required = entry.required, .password = entry.password, .multiple = entry.multiple, .expanded = entry.expanded, .range_value = entry.range_value, .range_minimum = entry.range_minimum, .range_maximum = entry.range_maximum, .range_small_change = entry.range_small_change, .range_large_change = entry.range_large_change, .selection_start = entry.selection_start, .selection_end = entry.selection_end, .position = entry.position, .set_size = entry.set_size, .level = entry.level, .native = entry.native };
+            const role_description = text[used..][0..entry.role_description_len];
+            @memcpy(role_description, entry.roleDescription(&self.storage));
+            used += role_description.len;
+            const key_shortcuts = text[used..][0..entry.key_shortcuts_len];
+            @memcpy(key_shortcuts, entry.keyShortcuts(&self.storage));
+            used += key_shortcuts.len;
+            const value_text = text[used..][0..entry.value_text_len];
+            @memcpy(value_text, entry.valueText(&self.storage));
+            used += value_text.len;
+            nodes[written] = .{ .id = entry.id, .parent = entry.parent, .role = entry.role, .name = name, .value = value, .description = description, .bounds = entry.bounds, .enabled = entry.enabled, .focused = entry.focused, .read_only = entry.read_only, .checked = entry.checked, .mixed = entry.mixed, .invalid = entry.invalid, .required = entry.required, .password = entry.password, .multiple = entry.multiple, .expanded = entry.expanded, .range_value = entry.range_value, .range_minimum = entry.range_minimum, .range_maximum = entry.range_maximum, .range_small_change = entry.range_small_change, .range_large_change = entry.range_large_change, .selection_start = entry.selection_start, .selection_end = entry.selection_end, .position = entry.position, .set_size = entry.set_size, .level = entry.level, .native = entry.native, .focusable_disabled = entry.focusable_disabled, .busy = entry.busy, .selected = entry.selected, .vertical = entry.vertical, .popup = entry.popup, .current = entry.current, .sort = entry.sort, .auto_complete = entry.auto_complete, .role_description = role_description, .key_shortcuts = key_shortcuts, .value_text = value_text, .controls = entry.controls };
             written += 1;
         };
         return nodes[0..written];
     }
 
+    /// The entry of `id`, if the tree has one.
+    pub fn find(self: *const Tree, id: u64) ?*const Entry {
+        for (self.entries[0..self.len]) |*entry| if (entry.id == id) return entry;
+        return null;
+    }
     pub fn reset(self: *Tree, name: []const u8, bounds: z.Rect) !void {
         self.len = 0;
         self.used = 0;
@@ -185,8 +264,10 @@ pub const Tree = struct {
     }
     pub fn add(self: *Tree, node: Node) !void {
         if (self.len == max_nodes) return error.TooManySemanticNodes;
-        if (!std.unicode.utf8ValidateSlice(node.name) or !std.unicode.utf8ValidateSlice(node.value) or !std.unicode.utf8ValidateSlice(node.description)) return error.InvalidUtf8;
-        if (std.mem.indexOfScalar(u8, node.name, 0) != null or std.mem.indexOfScalar(u8, node.value, 0) != null or std.mem.indexOfScalar(u8, node.description, 0) != null) return error.EmbeddedNul;
+        inline for (.{ node.name, node.value, node.description, node.role_description, node.key_shortcuts, node.value_text }) |field| {
+            if (!std.unicode.utf8ValidateSlice(field)) return error.InvalidUtf8;
+            if (std.mem.indexOfScalar(u8, field, 0) != null) return error.EmbeddedNul;
+        }
         if (!std.math.isFinite(node.bounds.x) or !std.math.isFinite(node.bounds.y) or !std.math.isFinite(node.bounds.width) or !std.math.isFinite(node.bounds.height) or node.bounds.width < 0 or node.bounds.height < 0) return error.InvalidGeometry;
         if (!std.math.isFinite(node.range_value) or !std.math.isFinite(node.range_minimum) or !std.math.isFinite(node.range_maximum) or node.range_minimum > node.range_maximum or node.range_value < node.range_minimum or node.range_value > node.range_maximum or !std.math.isFinite(node.range_small_change) or node.range_small_change < 0 or !std.math.isFinite(node.range_large_change) or node.range_large_change < 0) return error.InvalidRangeValue;
         if (node.selection_start > node.value.len or node.selection_end > node.value.len or !boundary(node.value, node.selection_start) or !boundary(node.value, node.selection_end)) return error.InvalidSelection;
@@ -202,12 +283,17 @@ pub const Tree = struct {
             if (!found) return error.MissingSemanticParent;
         }
         for (self.entries[0..self.len]) |entry| if (entry.id == node.id) return error.DuplicateSemanticId;
-        if (node.name.len > self.storage.len - self.used or node.value.len > self.storage.len - self.used - node.name.len or node.description.len > self.storage.len - self.used - node.name.len - node.value.len) return error.SemanticTextCapacityExceeded;
+        const extra_len = node.role_description.len + node.key_shortcuts.len + node.value_text.len;
+        if (node.name.len + node.value.len + node.description.len + extra_len > self.storage.len - self.used) return error.SemanticTextCapacityExceeded;
         const start = self.used;
         const description_start = start + node.name.len + node.value.len;
+        const extra_start = description_start + node.description.len;
         @memcpy(self.storage[start..][0..node.name.len], node.name);
         @memcpy(self.storage[start + node.name.len ..][0..node.value.len], node.value);
         @memcpy(self.storage[description_start..][0..node.description.len], node.description);
+        @memcpy(self.storage[extra_start..][0..node.role_description.len], node.role_description);
+        @memcpy(self.storage[extra_start + node.role_description.len ..][0..node.key_shortcuts.len], node.key_shortcuts);
+        @memcpy(self.storage[extra_start + node.role_description.len + node.key_shortcuts.len ..][0..node.value_text.len], node.value_text);
         self.entries[self.len] = .{
             .id = node.id,
             .parent = node.parent,
@@ -240,8 +326,21 @@ pub const Tree = struct {
             .set_size = node.set_size,
             .level = node.level,
             .native = node.native,
+            .focusable_disabled = node.focusable_disabled,
+            .busy = node.busy,
+            .selected = node.selected,
+            .vertical = node.vertical,
+            .popup = node.popup,
+            .current = node.current,
+            .sort = node.sort,
+            .auto_complete = node.auto_complete,
+            .extra_start = extra_start,
+            .role_description_len = node.role_description.len,
+            .key_shortcuts_len = node.key_shortcuts.len,
+            .value_text_len = node.value_text.len,
+            .controls = node.controls,
         };
-        self.used += node.name.len + node.value.len + node.description.len;
+        self.used += node.name.len + node.value.len + node.description.len + extra_len;
         self.len += 1;
     }
     pub fn addMapped(self: *Tree, node: Node, reference: affine.Ref, local_bounds: affine.Rect) !void {
@@ -304,6 +403,177 @@ test "subtree export copies labels and rejects complete graph before output" {
     for (labels) |byte| try std.testing.expectEqual(@as(u8, 0xa5), byte);
 }
 
+/// What live regions read out, as ARIA's do on the web: the content added
+/// to a log (`Role.log`), politely, after what is being read, and an
+/// alert's (`Role.alert`) as it appears or changes, at once. Screen
+/// readers read neither from the platforms' own live regions outside web
+/// content, but all read announcements. Alerts are told by their text,
+/// which an element's ID shifting as others appear before it keeps. The
+/// first publication says nothing: its content was there before.
+pub const Live = struct {
+    pub const max_text = 512;
+    pub const max_told = 8;
+    pub const Told = struct { text: []const u8, assertive: bool, buffer: [max_text]u8 = undefined };
+    seen: [max_nodes]u64 = undefined,
+    seen_len: usize = 0,
+    alerts: [max_told]u64 = undefined,
+    alerts_len: usize = 0,
+    started: bool = false,
+
+    fn contains(list: []const u64, id: u64) bool {
+        return std.mem.indexOfScalar(u64, list, id) != null;
+    }
+    fn indexOf(tree: *const Tree, id: ?u64) ?usize {
+        const wanted = id orelse return null;
+        for (tree.entries[0..tree.len], 0..) |entry, at| if (entry.id == wanted) return at;
+        return null;
+    }
+    /// Whether entry `at` is inside entry `ancestor` (or is it).
+    fn within(tree: *const Tree, at: usize, ancestor: usize) bool {
+        var index: ?usize = at;
+        var steps: usize = 0;
+        while (index) |i| : (steps += 1) {
+            if (i == ancestor) return true;
+            if (steps > max_nodes) return false;
+            index = indexOf(tree, tree.entries[i].parent);
+        }
+        return false;
+    }
+    /// The text of entry `at` and those inside it, as a live region reads
+    /// it: the names of the entries with nothing inside, a text's whole,
+    /// joined by spaces.
+    pub fn text(tree: *const Tree, at: usize, buffer: []u8) []const u8 {
+        var len: usize = 0;
+        for (tree.entries[at..tree.len], at..) |entry, i| {
+            if (!within(tree, i, at)) continue;
+            var leaf = true;
+            for (tree.entries[i + 1 .. tree.len]) |later| if (later.parent == entry.id) {
+                leaf = false;
+                break;
+            };
+            // A text's runs, as links, are in its own name.
+            if (i != at) if (indexOf(tree, entry.parent)) |parent| if (parent != at and tree.entries[parent].role == .text and within(tree, parent, at)) continue;
+            if (!leaf and entry.role != .text) continue;
+            const name = tree.storage[entry.name_start..][0..entry.name_len];
+            if (name.len == 0) continue;
+            const gap: usize = @intFromBool(len > 0);
+            if (len + gap + name.len > buffer.len) break;
+            if (gap == 1) buffer[len] = ' ';
+            @memcpy(buffer[len + gap ..][0..name.len], name);
+            len += gap + name.len;
+        }
+        return buffer[0..len];
+    }
+    /// Compare `tree` with the last publication and return what to read
+    /// out, filling `told`.
+    pub fn update(self: *Live, tree: *const Tree, told: []Told) []Told {
+        const speak = self.started;
+        self.started = true;
+        var has = false;
+        for (tree.entries[0..tree.len]) |entry| if (entry.role == .log or entry.role == .alert) {
+            has = true;
+            break;
+        };
+        if (!has) {
+            self.seen_len = 0;
+            self.alerts_len = 0;
+            return told[0..0];
+        }
+        var count: usize = 0;
+        var seen: [max_nodes]u64 = undefined;
+        var seen_len: usize = 0;
+        // The nearest log each entry is in, its own if it is one.
+        var log_of: [max_nodes]?usize = @splat(null);
+        var added: [max_told]struct { log: usize, len: usize, buffer: [max_text]u8 } = undefined;
+        var added_len: usize = 0;
+        for (tree.entries[0..tree.len], 0..) |entry, i| {
+            const parent = indexOf(tree, entry.parent);
+            log_of[i] = switch (entry.role) {
+                .log => i,
+                .alert => null,
+                else => if (parent) |p| (if (p < i) log_of[p] else null) else null,
+            };
+            const r = log_of[i] orelse continue;
+            seen[seen_len] = entry.id;
+            seen_len += 1;
+            // What a log that showed before gained, at the top of what is
+            // new: what is inside it is read with it.
+            if (r == i or !speak or !contains(self.seen[0..self.seen_len], tree.entries[r].id) or contains(self.seen[0..self.seen_len], entry.id)) continue;
+            if (parent) |p| if (p != r and !contains(self.seen[0..self.seen_len], tree.entries[p].id)) continue;
+            var piece: [max_text]u8 = undefined;
+            const value = text(tree, i, &piece);
+            if (value.len == 0) continue;
+            const slot = for (added[0..added_len]) |*item| {
+                if (item.log == r) break item;
+            } else blk: {
+                if (added_len == added.len) continue;
+                added[added_len] = .{ .log = r, .len = 0, .buffer = undefined };
+                added_len += 1;
+                break :blk &added[added_len - 1];
+            };
+            const gap: usize = @intFromBool(slot.len > 0);
+            if (slot.len + gap + value.len > slot.buffer.len) continue;
+            if (gap == 1) slot.buffer[slot.len] = ' ';
+            @memcpy(slot.buffer[slot.len + gap ..][0..value.len], value);
+            slot.len += gap + value.len;
+        }
+        for (added[0..added_len]) |*item| if (count < told.len) {
+            told[count] = .{ .text = undefined, .assertive = false };
+            @memcpy(told[count].buffer[0..item.len], item.buffer[0..item.len]);
+            told[count].text = told[count].buffer[0..item.len];
+            count += 1;
+        };
+        var alerts: [max_told]u64 = undefined;
+        var alerts_len: usize = 0;
+        for (tree.entries[0..tree.len], 0..) |entry, i| if (entry.role == .alert) {
+            var buffer: [max_text]u8 = undefined;
+            const value = text(tree, i, &buffer);
+            if (value.len == 0) continue;
+            const hash = std.hash.Wyhash.hash(0, value);
+            if (speak and !contains(self.alerts[0..self.alerts_len], hash) and !contains(alerts[0..alerts_len], hash) and count < told.len) {
+                told[count] = .{ .text = undefined, .assertive = true };
+                @memcpy(told[count].buffer[0..value.len], value);
+                told[count].text = told[count].buffer[0..value.len];
+                count += 1;
+            }
+            if (alerts_len < alerts.len) {
+                alerts[alerts_len] = hash;
+                alerts_len += 1;
+            }
+        };
+        @memcpy(self.seen[0..seen_len], seen[0..seen_len]);
+        self.seen_len = seen_len;
+        @memcpy(self.alerts[0..alerts_len], alerts[0..alerts_len]);
+        self.alerts_len = alerts_len;
+        return told[0..count];
+    }
+};
+
+test "live regions read what a log gained and what an alert shows" {
+    var tree: Tree = .{};
+    const bounds: z.Rect = .{ .x = 0, .y = 0, .width = 10, .height = 10 };
+    var live: Live = .{};
+    var told: [Live.max_told]Live.Told = undefined;
+    try tree.reset("Window", bounds);
+    try tree.add(.{ .id = 1, .role = .log, .name = "Chat", .bounds = bounds });
+    try tree.add(.{ .id = 2, .parent = 1, .role = .text, .name = "Hello", .bounds = bounds });
+    try std.testing.expectEqual(@as(usize, 0), live.update(&tree, &told).len);
+    try tree.reset("Window", bounds);
+    try tree.add(.{ .id = 1, .role = .log, .name = "Chat", .bounds = bounds });
+    try tree.add(.{ .id = 2, .parent = 1, .role = .text, .name = "Hello", .bounds = bounds });
+    try tree.add(.{ .id = 3, .parent = 1, .role = .text, .name = "How are you", .bounds = bounds });
+    try tree.add(.{ .id = 4, .role = .alert, .name = "", .bounds = bounds });
+    try tree.add(.{ .id = 5, .parent = 4, .role = .text, .name = "Disk full", .bounds = bounds });
+    const said = live.update(&tree, &told);
+    try std.testing.expectEqual(@as(usize, 2), said.len);
+    try std.testing.expectEqualStrings("How are you", said[0].text);
+    try std.testing.expect(!said[0].assertive);
+    try std.testing.expectEqualStrings("Disk full", said[1].text);
+    try std.testing.expect(said[1].assertive);
+    // The same alert says nothing again.
+    try std.testing.expectEqual(@as(usize, 0), live.update(&tree, &told).len);
+}
+
 pub const Action = union(enum) {
     invoke: u64,
     set_focus: u64,
@@ -356,8 +626,43 @@ const NativeNode = extern struct {
     position: u32,
     set_size: u32,
     level: u32,
-    reserved: u32 = 0,
+    /// `NativeState` bits.
+    states: u32 = 0,
+    role_description_start: u32 = 0,
+    role_description_len: u32 = 0,
+    key_shortcuts_start: u32 = 0,
+    key_shortcuts_len: u32 = 0,
+    value_text_start: u32 = 0,
+    value_text_len: u32 = 0,
+    reserved0: u32 = 0,
+    reserved1: u32 = 0,
+    controls: u64 = 0,
 };
+/// What `NativeNode.states` packs, beside `flags`: the 1-bit states, then
+/// the popup kind (bits 8 to 10), current (11 to 13), sort (14, 15) and
+/// autocomplete (16, 17).
+pub const NativeState = struct {
+    pub const focusable_disabled: u32 = 1;
+    pub const busy: u32 = 2;
+    pub const selectable: u32 = 4;
+    pub const selected: u32 = 8;
+    pub const vertical: u32 = 16;
+    pub fn pack(entry: anytype) u32 {
+        var bits: u32 = 0;
+        if (entry.focusable_disabled) bits |= focusable_disabled;
+        if (entry.busy) bits |= busy;
+        if (entry.selected) |chosen| bits |= selectable | (if (chosen) selected else 0);
+        if (entry.vertical) bits |= vertical;
+        bits |= @as(u32, @backingInt(entry.popup)) << 8;
+        bits |= @as(u32, @backingInt(entry.current)) << 11;
+        bits |= @as(u32, @backingInt(entry.sort)) << 14;
+        bits |= @as(u32, @backingInt(entry.auto_complete)) << 16;
+        return bits;
+    }
+};
+comptime {
+    if (@sizeOf(NativeNode) != 184) @compileError("semantic node ABI mismatch");
+}
 const NativeAction = extern struct {
     context: ?*anyopaque,
     kind: u32,
@@ -392,6 +697,7 @@ extern fn zua_publish_geometry(*anyopaque, [*]const NativeNode, u32, [*]const u1
 extern fn zua_publish_registered(*anyopaque, [*]const NativeNode, u32, [*]const u16, u32, [*]const RecipientAuthority) i32;
 extern fn zua_publish_geometry_registered(*anyopaque, [*]const NativeNode, u32, [*]const u16, u32, *const NativeGeometry, [*]const RecipientAuthority) i32;
 extern fn zua_pages(*anyopaque, [*]const u64, [*]const *anyopaque, u32) i32;
+extern fn zua_announce(*anyopaque, [*]const u16, u32, c_int) i32;
 extern fn zua_collections_create() ?*anyopaque;
 extern fn zua_collections_free(*anyopaque) void;
 extern fn zua_collections_commit(*anyopaque, *anyopaque) i32;
@@ -459,6 +765,8 @@ pub const Bridge = struct {
     geometry_scratch: ?*NativeGeometry = null,
     last_origin: ?affine.Point = null,
     last_hresult: i32 = 0,
+    /// What the live regions of the last publication held.
+    live: Live = .{},
 
     pub const GeometryCandidate = struct { native: *anyopaque, scratch: *NativeGeometry };
     pub const RecipientsCandidate = struct { native: *anyopaque };
@@ -518,6 +826,15 @@ pub const Bridge = struct {
             const description_start = used;
             const description_len = try std.unicode.utf8ToUtf16Le(native_text[used..], tree.storage[entry.description_start..][0..entry.description_len]);
             used += description_len;
+            const role_description_start = used;
+            const role_description_len = try std.unicode.utf8ToUtf16Le(native_text[used..], entry.roleDescription(&tree.storage));
+            used += role_description_len;
+            const key_shortcuts_start = used;
+            const key_shortcuts_len = try std.unicode.utf8ToUtf16Le(native_text[used..], entry.keyShortcuts(&tree.storage));
+            used += key_shortcuts_len;
+            const value_text_start = used;
+            const value_text_len = try std.unicode.utf8ToUtf16Le(native_text[used..], entry.valueText(&tree.storage));
+            used += value_text_len;
             native_nodes[index] = .{
                 .id = entry.id,
                 .parent = entry.parent orelse root_id,
@@ -543,6 +860,14 @@ pub const Bridge = struct {
                 .position = entry.position,
                 .set_size = entry.set_size,
                 .level = entry.level,
+                .states = NativeState.pack(entry),
+                .role_description_start = @intCast(role_description_start),
+                .role_description_len = @intCast(role_description_len),
+                .key_shortcuts_start = @intCast(key_shortcuts_start),
+                .key_shortcuts_len = @intCast(key_shortcuts_len),
+                .value_text_start = @intCast(value_text_start),
+                .value_text_len = @intCast(value_text_len),
+                .controls = entry.controls,
             };
         }
         if (window.isClosed() or self.native == null) return error.Closed;
@@ -567,6 +892,12 @@ pub const Bridge = struct {
         self.last_hresult = hr;
         if (hr < 0) return error.AccessibilityPublishFailed;
         self.last_origin = origin_point;
+        var told: [Live.max_told]Live.Told = undefined;
+        for (self.live.update(tree, &told)) |item| {
+            var units: [Live.max_text]u16 = undefined;
+            const len = std.unicode.utf8ToUtf16Le(&units, item.text) catch continue;
+            _ = zua_announce(self.native.?, &units, @intCast(len), @intFromBool(item.assertive));
+        }
         if (builtin.os.tag == .linux or builtin.os.tag == .macos) {
             // The trees of native content, such as web pages, inside the
             // nodes standing for them.

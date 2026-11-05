@@ -366,11 +366,11 @@ fn event(record: *core.WindowRecord, native: *const NativeEvent) i32 {
         17 => return @intFromBool(record.inputAllowed()),
         18 => {
             const key = domKey(text);
-            return @intFromBool(record.keyInput(.{ .key = key.key, .modifiers = modifiers, .repeat = native.flags & 16 != 0, .physical = key.physical }));
+            return @intFromBool(record.keyInput(.{ .key = key.key, .modifiers = modifiers, .repeat = native.flags & 16 != 0, .physical = key.physical, .code = key.code }));
         },
         26 => {
             const key = domKey(text);
-            record.keyRelease(.{ .key = key.key, .modifiers = modifiers, .physical = key.physical });
+            record.keyRelease(.{ .key = key.key, .modifiers = modifiers, .physical = key.physical, .code = key.code });
         },
         27 => {
             if (native.key < 0 or native.key > @backingInt(core.EditCommand.select_all)) return 0;
@@ -382,8 +382,8 @@ fn event(record: *core.WindowRecord, native: *const NativeEvent) i32 {
 }
 /// A key event's text is the browser's `key` and `code`, separated by a
 /// zero byte.
-fn domKey(text: []const u8) struct { key: core.KeyCode, physical: core.KeyCode } {
+fn domKey(text: []const u8) struct { key: core.KeyCode, physical: core.KeyCode, code: core.KeyPosition } {
     const split = std.mem.indexOfScalar(u8, text, 0) orelse text.len;
     const code = if (split < text.len) text[split + 1 ..] else "";
-    return .{ .key = core.physical_keys.fromDomKey(text[0..split], code), .physical = core.physical_keys.fromDomCode(code) };
+    return .{ .key = core.physical_keys.fromDomKey(text[0..split], code), .physical = core.physical_keys.fromDomCode(code), .code = core.key_codes.fromDom(code) };
 }

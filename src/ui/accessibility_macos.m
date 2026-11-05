@@ -29,7 +29,8 @@ enum {
     ROLE_DISCLOSURE, ROLE_METER, ROLE_NAVIGATION, ROLE_LIST_BOX, ROLE_LIST_ITEM, ROLE_COMBO_BOX, ROLE_TOOLTIP, ROLE_STATUS,
     ROLE_SEARCH, ROLE_IMAGE, ROLE_TREE, ROLE_TREE_ITEM, ROLE_TABLE, ROLE_TABLE_HEADER, ROLE_COLUMN_HEADER, ROLE_TABLE_ROW,
     ROLE_TOKEN_FIELD, ROLE_TOKEN, ROLE_POPUP, ROLE_CALENDAR, ROLE_COLOR_WELL, ROLE_DIALOG, ROLE_ALERT_DIALOG, ROLE_MENU,
-    ROLE_MENU_ITEM, ROLE_MENU_ITEM_CHECKBOX, ROLE_MENU_ITEM_RADIO, ROLE_COUNT
+    ROLE_MENU_ITEM, ROLE_MENU_ITEM_CHECKBOX, ROLE_MENU_ITEM_RADIO, ROLE_REGION, ROLE_LOG, ROLE_TIMER, ROLE_ALERT,
+    ROLE_SEPARATOR, ROLE_ROW_HEADER, ROLE_OPTION, ROLE_ARTICLE, ROLE_CELL, ROLE_HEADING, ROLE_COUNT
 };
 /* NativeNode flags, as accessibility.zig packs them. */
 enum {
@@ -45,8 +46,30 @@ typedef struct NativeNode {
     double x, y, width, height, range_value, range_minimum, range_maximum, range_small_change, range_large_change;
     /* Place among all of the list's items from 1, how many a list has and
        a tree item's depth from 1; 0 when not given. */
-    uint32_t position, set_size, level, reserved;
+    uint32_t position, set_size, level;
+    /* NativeState: FOCUSABLE_DISABLED, BUSY, SELECTABLE, SELECTED and
+       VERTICAL, then the popup kind (bits 8 to 10), current (11 to 13),
+       sort (14, 15) and autocomplete (16, 17). */
+    uint32_t states;
+    uint32_t role_description_start, role_description_len, key_shortcuts_start, key_shortcuts_len;
+    uint32_t value_text_start, value_text_len, reserved0, reserved1;
+    /* The node this one controls (aria-controls), 0 for none. */
+    uint64_t controls;
 } NativeNode;
+_Static_assert(sizeof(NativeNode) == 184, "semantic node ABI");
+enum { FOCUSABLE_DISABLED = 1, BUSY = 2, SELECTABLE = 4, SELECTED = 8, VERTICAL = 16 };
+enum { POPUP_NONE, POPUP_MENU, POPUP_LIST_BOX, POPUP_TREE, POPUP_GRID, POPUP_DIALOG };
+enum { CURRENT_NONE, CURRENT_ITEM, CURRENT_PAGE, CURRENT_STEP, CURRENT_LOCATION, CURRENT_DATE, CURRENT_TIME };
+enum { SORT_NONE, SORT_ASCENDING, SORT_DESCENDING, SORT_OTHER };
+enum { AUTOCOMPLETE_NONE, AUTOCOMPLETE_INLINE, AUTOCOMPLETE_LIST, AUTOCOMPLETE_BOTH };
+static inline uint32_t node_popup(const NativeNode *n) { return (n->states >> 8) & 7; }
+static inline uint32_t node_current(const NativeNode *n) { return (n->states >> 11) & 7; }
+static inline uint32_t node_sort(const NativeNode *n) { return (n->states >> 14) & 3; }
+static inline uint32_t node_autocomplete(const NativeNode *n) { return (n->states >> 16) & 3; }
+static const char *const popup_names[] = { "", "menu", "listbox", "tree", "grid", "dialog" };
+static const char *const current_names[] = { "", "true", "page", "step", "location", "date", "time" };
+static const char *const sort_names[] = { "", "ascending", "descending", "other" };
+static const char *const autocomplete_names[] = { "", "inline", "list", "both" };
 typedef struct RecipientAuthority { uint64_t epoch, serial, id, publication; uint32_t slot, kind; } RecipientAuthority;
 typedef struct ActionView {
     void *context;
@@ -1053,6 +1076,20 @@ int zua_disconnect(void *state) {
     host->top = @[];
     host->order = @[];
     return 0;
+}
+/* What live regions read out, as Zig tells them: the content added to a
+   log, and an alert's at high priority, interrupting what is being read. */
+int zua_announce(void *state, const uint16_t *text, uint32_t text_len, int assertive) {
+    @autoreleasepool {
+        if (!state || !text) return -1;
+        NSString *message = [NSString stringWithCharacters:text length:text_len];
+        announcements++;
+        last_announcement = message;
+        NSAccessibilityPostNotificationWithUserInfo(NSApp, NSAccessibilityAnnouncementRequestedNotification,
+            @{NSAccessibilityAnnouncementKey: message,
+              NSAccessibilityPriorityKey: @(assertive ? NSAccessibilityPriorityHigh : NSAccessibilityPriorityMedium)});
+        return 0;
+    }
 }
 int zua_publish(void *state, const NativeNode *nodes, uint32_t count, const uint16_t *text, uint32_t text_len) {
     @autoreleasepool { return publish((__bridge ZuaHost *)state, nodes, count, text, text_len, NULL, NULL); }
