@@ -221,7 +221,7 @@ pub const Uniform = struct {
 
 const UniformEntry = struct { name_start: u32, name_len: u32, uniform: Uniform };
 
-var next_identity = std.atomic.Value(u64).init(1);
+var next_identity = zio.Atomic64(u64).init(1);
 
 /// Compiled, immutable program. It owns its code, constants and uniform names.
 pub const Program = struct {

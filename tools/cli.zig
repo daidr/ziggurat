@@ -19,7 +19,7 @@ const pkgbuild = @import("pkgbuild.zig");
 
 const usage =
     \\ziggurat init DIR [--template native|web|hybrid] [--name NAME] [--id IDENTITY] [--framework PATH]
-    \\ziggurat dev [--watch DIR]... [--frontend COMMAND] [-- ZIG_BUILD_ARGS...]
+    \\ziggurat dev [--web [--port PORT]] [--watch DIR]... [--frontend COMMAND] [-- ZIG_BUILD_ARGS...]
     \\ziggurat build [--debug] [--target TRIPLE | --platform LIST] [--package] [--sign IDENTITY] [--skip-dmg] [--skip-notarize] [-- ZIG_BUILD_ARGS...]
     \\ziggurat package setup --zip PACKAGE [--stub SETUP_STUB] [--publisher NAME] [--comment TEXT] [--categories LIST] [--icon PNG] [--install-dir-name NAME] [--hook-init CMD] [--hook-install CMD] [--hook-uninstall CMD] [--command LIST] [--output FILE]
     \\ziggurat package deb --zip PACKAGE --maintainer "NAME <EMAIL>" [--depends LIST] [--webview] [--comment TEXT] [--categories LIST] [--icon PNG] [--command LIST] [--output FILE]
@@ -39,13 +39,16 @@ const usage =
     \\init writes a project that depends on this framework checkout by path.
     \\dev runs `zig build` and the installed executable, and rebuilds and restarts
     \\when src/, build.zig, build.zig.zon or a --watch directory changes; --frontend starts a frontend
-    \\watcher next to it and stops it on exit.
+    \\watcher next to it and stops it on exit. --web builds for browsers instead
+    \\(-Dtarget=wasm32-wasi), serves zig-out/web at http://localhost:5174 (or --port),
+    \\opens it, and reloads the page after each rebuild.
     \\build runs `zig build` with ReleaseSafe; --package writes an update package
     \\to dist/ from zig-out/bin and ziggurat.json, with the icon of ziggurat.json,
     \\and signs the Windows executable first when windows in ziggurat.json says how.
     \\--platform builds each OS/ARCH of a comma separated list into zig-out/OS-ARCH,
     \\as macos/universal,linux/x86_64,windows/x86_64; macos/universal combines
-    \\aarch64 and x86_64. macOS builds also write dist/macos-ARCH/NAME.app, signed
+    \\aarch64 and x86_64. web builds for browsers into zig-out/web, a static site
+    \\(index.html, ziggurat.js and app.wasm) to serve from anywhere. macOS builds also write dist/macos-ARCH/NAME.app, signed
     \\with --sign or macos.signingIdentity ("-", ad hoc, by default), and on a Mac
     \\a disk image, notarized when macos.notarize says how.
     \\package app writes the .app of a macOS update package, and with --dmg its disk image.
@@ -466,9 +469,16 @@ pub const Platform = struct {
         return .{ .os = builtin.os.tag, .arch = builtin.cpu.arch };
     }
 
+    /// Browsers: WebAssembly with the page's runtime, built into zig-out/web.
+    pub const web: Platform = .{ .os = .wasi, .arch = .wasm32 };
+    pub fn isWeb(self: Platform) bool {
+        return self.os == .wasi;
+    }
+
     /// OS/ARCH, as macos/aarch64, linux/x86_64, windows/x86_64 or
     /// macos/universal; darwin, amd64 and arm64 are accepted too.
     pub fn parse(text: []const u8) !Platform {
+        if (std.mem.eql(u8, text, "web") or std.mem.eql(u8, text, "web/wasm32")) return web;
         const slash = std.mem.indexOfScalar(u8, text, '/') orelse return error.InvalidPlatform;
         const os_text = text[0..slash];
         const arch_text = text[slash + 1 ..];
@@ -485,12 +495,14 @@ pub const Platform = struct {
 
     /// The name of packages and directories: macos-aarch64, macos-universal.
     pub fn name(self: Platform, allocator: std.mem.Allocator) ![]const u8 {
+        if (self.isWeb()) return allocator.dupe(u8, "web");
         return std.fmt.allocPrint(allocator, "{s}-{s}", .{ @tagName(self.os), if (self.arch) |arch| @tagName(arch) else "universal" });
     }
 
     /// The -Dtarget of a thin platform, or null for the host, which keeps
     /// the native system's libraries in reach.
     pub fn triple(self: Platform, allocator: std.mem.Allocator) !?[]const u8 {
+        if (self.isWeb()) return try allocator.dupe(u8, "wasm32-wasi");
         const arch = self.arch.?;
         if (self.os == builtin.os.tag and arch == builtin.cpu.arch) return null;
         return try std.fmt.allocPrint(allocator, "{s}-{s}{s}", .{ @tagName(arch), @tagName(self.os), if (self.os == .linux) "-gnu" else "" });
@@ -549,7 +561,7 @@ fn buildCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     var names = std.mem.tokenizeScalar(u8, list, ',');
     while (names.next()) |text| {
         const platform = Platform.parse(std.mem.trim(u8, text, " ")) catch |err| {
-            std.debug.print("ziggurat: {s}: {s}; use OS/ARCH such as macos/universal, macos/aarch64, linux/x86_64 or windows/x86_64\n", .{ text, @errorName(err) });
+            std.debug.print("ziggurat: {s}: {s}; use web or OS/ARCH such as macos/universal, macos/aarch64, linux/x86_64 or windows/x86_64\n", .{ text, @errorName(err) });
             return 2;
         };
         try parsed.append(allocator, platform);
@@ -560,6 +572,12 @@ fn buildCommand(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     const project = if (build_options.package or any_macos) try readProject(allocator, cwd) else null;
     if (any_macos) try checkMacOS(project.?, build_options);
     for (parsed.items) |platform| {
+        if (platform.isWeb()) {
+            // The app's build installs its site in <prefix>/web.
+            if (try zigBuild(allocator, build_options, try platform.triple(allocator), "zig-out") != 0) return 1;
+            if (build_options.package) std.debug.print("ziggurat: web: a static site has no update package; serve zig-out/web\n", .{});
+            continue;
+        }
         const platform_name = try platform.name(allocator);
         const prefix = try std.fmt.allocPrint(allocator, "zig-out/{s}", .{platform_name});
         const bin = try std.fmt.allocPrint(allocator, "{s}/bin", .{prefix});
@@ -1111,6 +1129,8 @@ fn dev(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     try roots.appendSlice(allocator, &.{ "src", "build.zig", "build.zig.zon" });
     var frontend: ?[]const u8 = null;
     var extra: []const []const u8 = &.{};
+    var web = false;
+    var port: u16 = dev_web_port;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
@@ -1120,6 +1140,11 @@ fn dev(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         } else if (std.mem.eql(u8, arg, "--frontend") and index + 1 < args.len) {
             frontend = args[index + 1];
             index += 1;
+        } else if (std.mem.eql(u8, arg, "--web")) {
+            web = true;
+        } else if (std.mem.eql(u8, arg, "--port") and index + 1 < args.len) {
+            port = std.fmt.parseInt(u16, args[index + 1], 10) catch return error.InvalidArguments;
+            index += 1;
         } else if (std.mem.eql(u8, arg, "--")) {
             extra = args[index + 1 ..];
             break;
@@ -1127,6 +1152,7 @@ fn dev(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     }
     const cwd = std.Io.Dir.cwd();
     cwd.access(zio.io(), "build.zig", .{}) catch return error.MissingBuildFile;
+    if (web) return devWeb(allocator, roots.items, frontend, extra, port);
     var frontend_child: ?std.process.Child = null;
     if (frontend) |command| {
         frontend_child = try zio.spawn(.{ .argv = try shellCommand(allocator, command) });
@@ -1161,6 +1187,131 @@ fn dev(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         std.debug.print("ziggurat: change detected, rebuilding\n", .{});
         if (app) |*child| stop(child);
     }
+}
+
+/// Where `dev --web` serves the app.
+pub const dev_web_port: u16 = 5174;
+
+/// The browser build, rebuilt on each change: the page `dev --web` serves
+/// asks for this number and reloads when it changes.
+var web_generation: std.atomic.Value(u32) = .init(0);
+
+fn devWeb(allocator: std.mem.Allocator, roots: []const []const u8, frontend: ?[]const u8, extra: []const []const u8, port: u16) !u8 {
+    const cwd = std.Io.Dir.cwd();
+    var frontend_child: ?std.process.Child = null;
+    if (frontend) |command| frontend_child = try zio.spawn(.{ .argv = try shellCommand(allocator, command) });
+    defer if (frontend_child) |*child| stop(child);
+    const address = try std.Io.net.IpAddress.parse("127.0.0.1", port);
+    var server = address.listen(zio.io(), .{ .reuse_address = true }) catch |err| {
+        std.debug.print("ziggurat: cannot listen on 127.0.0.1:{d}: {s}\n", .{ port, @errorName(err) });
+        return 1;
+    };
+    defer server.deinit(zio.io());
+    const thread = try std.Thread.spawn(.{}, serveWeb, .{&server});
+    thread.detach();
+    var build_args: std.ArrayList([]const u8) = .empty;
+    try build_args.appendSlice(allocator, &.{ "build", "-Dtarget=wasm32-wasi" });
+    try build_args.appendSlice(allocator, extra);
+    const url = try std.fmt.allocPrint(allocator, "http://localhost:{d}/", .{port});
+    var opened = false;
+    var last = try snapshot(allocator, cwd, roots);
+    while (true) {
+        if (try runZig(allocator, build_args.items) == 0) {
+            _ = web_generation.fetchAdd(1, .release);
+            std.debug.print("ziggurat: serving zig-out/web at {s} (watching {d} paths)\n", .{ url, roots.len });
+            if (!opened) {
+                opened = true;
+                openBrowser(allocator, url);
+            }
+        } else std.debug.print("ziggurat: build failed; waiting for changes\n", .{});
+        while (true) {
+            zio.sleep(300 * std.time.ns_per_ms);
+            const now = try snapshot(allocator, cwd, roots);
+            if (now != last) {
+                last = now;
+                break;
+            }
+        }
+        std.debug.print("ziggurat: change detected, rebuilding\n", .{});
+    }
+}
+
+/// Opens the page in the system's browser, if one can be found.
+fn openBrowser(allocator: std.mem.Allocator, url: []const u8) void {
+    const argv: []const []const u8 = switch (builtin.os.tag) {
+        .windows => &.{ "cmd.exe", "/d", "/c", "start", "", url },
+        .macos => &.{ "open", url },
+        else => &.{ "xdg-open", url },
+    };
+    _ = allocator;
+    var child = zio.spawn(.{ .argv = argv, .stdout = .ignore, .stderr = .ignore }) catch return;
+    _ = child.wait(zio.io()) catch {};
+}
+
+/// What the page `dev --web` serves runs: it asks for the build's number
+/// and reloads once a rebuild changes it.
+const reload_script =
+    \\<script>(function(){var seen=null;function poll(){fetch("/__ziggurat/build",{cache:"no-store"}).then(function(r){return r.text()}).then(function(n){if(seen===null)seen=n;else if(n!==seen)location.reload()}).catch(function(){}).finally(function(){setTimeout(poll,500)})}poll()})();</script>
+;
+
+fn serveWeb(server: *std.Io.net.Server) void {
+    while (true) {
+        const connection = server.accept(zio.io()) catch return;
+        const thread = std.Thread.spawn(.{}, serveConnection, .{connection}) catch {
+            connection.close(zio.io());
+            continue;
+        };
+        thread.detach();
+    }
+}
+
+fn serveConnection(connection: std.Io.net.Stream) void {
+    defer connection.close(zio.io());
+    var read_buffer: [8192]u8 = undefined;
+    var write_buffer: [16384]u8 = undefined;
+    var reader = connection.reader(zio.io(), &read_buffer);
+    var writer = connection.writer(zio.io(), &write_buffer);
+    var http_server = std.http.Server.init(&reader.interface, &writer.interface);
+    while (true) {
+        var request = http_server.receiveHead() catch return;
+        respondWeb(&request) catch return;
+        if (!request.head.keep_alive) return;
+    }
+}
+
+fn respondWeb(request: *std.http.Server.Request) !void {
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const no_store: std.http.Header = .{ .name = "cache-control", .value = "no-store" };
+    const target = request.head.target[0 .. std.mem.indexOfAny(u8, request.head.target, "?#") orelse request.head.target.len];
+    if (std.mem.eql(u8, target, "/__ziggurat/build")) {
+        const text = try std.fmt.allocPrint(allocator, "{d}", .{web_generation.load(.acquire)});
+        return request.respond(text, .{ .extra_headers = &.{ no_store, .{ .name = "content-type", .value = "text/plain" } } });
+    }
+    const relative = if (std.mem.eql(u8, target, "/")) "index.html" else std.mem.trimStart(u8, target, "/");
+    if (std.mem.indexOf(u8, relative, "..") != null or std.mem.indexOfScalar(u8, relative, '\\') != null)
+        return request.respond("", .{ .status = .bad_request });
+    const path = try std.fs.path.join(allocator, &.{ "zig-out", "web", relative });
+    var bytes = std.Io.Dir.cwd().readFileAlloc(zio.io(), path, allocator, .limited(512 * 1024 * 1024)) catch
+        return request.respond("not found", .{ .status = .not_found, .extra_headers = &.{no_store} });
+    if (std.mem.endsWith(u8, relative, ".html")) {
+        // The page reloads itself after a rebuild.
+        const at = std.mem.lastIndexOf(u8, bytes, "</body>") orelse bytes.len;
+        bytes = try std.mem.concat(allocator, u8, &.{ bytes[0..at], reload_script, bytes[at..] });
+    }
+    return request.respond(bytes, .{ .extra_headers = &.{ no_store, .{ .name = "content-type", .value = webContentType(relative) } } });
+}
+
+pub fn webContentType(path: []const u8) []const u8 {
+    const types = [_]struct { []const u8, []const u8 }{
+        .{ ".html", "text/html; charset=utf-8" }, .{ ".js", "text/javascript; charset=utf-8" },
+        .{ ".wasm", "application/wasm" },         .{ ".css", "text/css; charset=utf-8" },
+        .{ ".json", "application/json" },         .{ ".png", "image/png" },
+        .{ ".svg", "image/svg+xml" },             .{ ".ico", "image/x-icon" },
+    };
+    for (types) |entry| if (std.mem.endsWith(u8, path, entry[0])) return entry[1];
+    return "application/octet-stream";
 }
 
 fn childExited(child: *std.process.Child) !bool {
@@ -1759,10 +1910,14 @@ test "platforms name an operating system and an architecture" {
     try std.testing.expectError(error.UnsupportedPlatform, Platform.parse("linux/universal"));
     try std.testing.expectError(error.UnsupportedPlatform, Platform.parse("freebsd/x86_64"));
     try std.testing.expectError(error.InvalidPlatform, Platform.parse("macos"));
+    try std.testing.expectEqual(Platform.web, try Platform.parse("web"));
+    try std.testing.expectEqualStrings("application/wasm", webContentType("app.wasm"));
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
     try std.testing.expectEqualStrings("macos-universal", try (Platform{ .os = .macos, .arch = null }).name(allocator));
+    try std.testing.expectEqualStrings("web", try Platform.web.name(allocator));
+    try std.testing.expectEqualStrings("wasm32-wasi", (try Platform.web.triple(allocator)).?);
     try std.testing.expectEqual(null, try Platform.host().triple(allocator));
     const other: std.Target.Cpu.Arch = if (builtin.cpu.arch == .x86_64) .aarch64 else .x86_64;
     try std.testing.expectEqualStrings(try std.fmt.allocPrint(allocator, "{s}-linux-gnu", .{@tagName(other)}), (try (Platform{ .os = .linux, .arch = other }).triple(allocator)).?);

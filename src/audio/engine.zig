@@ -143,6 +143,9 @@ pub const Engine = struct {
     decode_mutex: zio.Mutex = .{},
     streams: ?*Stream = null,
     mix_buffer: [output.period_frames * output.channels]f32 = undefined,
+    /// Browsers: what the page's audio callback takes, mixed on the main
+    /// thread when it asks.
+    web_buffer: []f32 = &.{},
     system_storage: output.system.Storage = .{},
 
     pub fn init(allocator: std.mem.Allocator, options: Options) !*Engine {
@@ -155,7 +158,9 @@ pub const Engine = struct {
             self.notifier = notifier;
         }
         errdefer if (self.notifier) |notifier| allocator.destroy(notifier);
-        if (self.mode != .manual) {
+        if (zio.is_web) {
+            if (self.mode != .manual) browser.open(self);
+        } else if (self.mode != .manual) {
             self.decode_thread = try std.Thread.spawn(.{}, decodeMain, .{self});
             errdefer {
                 self.stopThreads();
@@ -187,6 +192,12 @@ pub const Engine = struct {
     }
 
     fn stopThreads(self: *Engine) void {
+        if (zio.is_web) {
+            if (self.mode != .manual) browser.close(self);
+            if (self.web_buffer.len != 0) self.allocator.free(self.web_buffer);
+            self.web_buffer = &.{};
+            return;
+        }
         self.quit.store(true, .release);
         wakeFutex(&self.output_wake);
         wakeFutex(&self.decode_wake);
@@ -635,6 +646,40 @@ pub const Engine = struct {
             device.close();
         }
     }
+
+    /// Browsers have no threads: the page's Web Audio output asks for
+    /// frames on the main thread, which decodes streams ahead and mixes
+    /// them. Its context starts on the page's first press or key, as
+    /// browsers let pages play sound.
+    const browser = struct {
+        extern "ziggurat" fn zw_audio_open(engine: *Engine, sample_rate: u32, ahead_ms: f64, audible: u32) void;
+        extern "ziggurat" fn zw_audio_close(engine: *Engine) void;
+        fn open(self: *Engine) void {
+            const audible = self.mode != .silent;
+            self.setHeld(if (audible) self.output_latency.frames() else 0);
+            zw_audio_open(self, output.sample_rate, @as(f64, @floatFromInt(self.output_latency.ahead())) / std.time.ns_per_ms, @intFromBool(audible));
+        }
+        fn close(self: *Engine) void {
+            zw_audio_close(self);
+        }
+        /// The next `frames` frames, interleaved stereo, or null.
+        fn pull(self: *Engine, frames: u32) callconv(.c) ?[*]f32 {
+            const samples = @as(usize, frames) * output.channels;
+            if (self.web_buffer.len < samples) {
+                const grown = self.allocator.alloc(f32, samples) catch return null;
+                if (self.web_buffer.len != 0) self.allocator.free(self.web_buffer);
+                self.web_buffer = grown;
+            }
+            var passes: usize = 0;
+            while (passes < 16 and self.decodePass()) : (passes += 1) {}
+            self.mutex.lock();
+            _ = self.mixLocked(self.web_buffer[0..samples]);
+            return self.web_buffer.ptr;
+        }
+        comptime {
+            if (zio.is_web) @export(&pull, .{ .name = "ziggurat_audio_pull" });
+        }
+    };
 
     fn setHeld(self: *Engine, frames: i64) void {
         self.mutex.lock();

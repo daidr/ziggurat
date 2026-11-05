@@ -39,8 +39,16 @@ pub const OpenUrl = struct {
             _ = app.cancelStop(self.stop_token.?) catch false;
             self.app = null;
         }
+        if (comptime browser) {
+            // The page opens a tab; the answer still comes after start.
+            zw_open_url(target.ptr, @intCast(target.len));
+            try app.post(.{ .context = self, .call = finish });
+            return;
+        }
         self.thread = try std.Thread.spawn(.{}, run, .{self});
     }
+    const browser = @import("builtin").cpu.arch == .wasm32;
+    extern "ziggurat" fn zw_open_url(url: [*]const u8, length: u32) void;
     pub fn url(self: *const OpenUrl) []const u8 {
         return self.url_bytes[0..self.url_len];
     }

@@ -563,7 +563,7 @@ pub fn initials(name: []const u8, out: *[8]u8) []const u8 {
 /// A stable fill for an avatar without its own color.
 pub fn avatarColor(name: []const u8) u32 {
     const colors = [_]u32{ 0x276aa5, 0x2e7d4f, 0x8e44ad, 0xa8530f, 0x00796b, 0xb03a5b, 0x5d6d7e, 0x6d4c41 };
-    return colors[std.hash.Wyhash.hash(0x61_76, name) % colors.len];
+    return colors[@intCast(std.hash.Wyhash.hash(0x61_76, name) % colors.len)];
 }
 
 /// A person or entity shown as a picture, or as initials on a disk. It is

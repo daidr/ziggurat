@@ -749,7 +749,7 @@ pub const Renderer = struct {
     /// it when a masked clip on this layer masks it.
     fn maskDraw(self: *Renderer, box: ?damage.Box) !void {
         if (!self.masks.masks(self.layer_level)) return;
-        self.maskDirty(try self.masks.draw(std.heap.smp_allocator, try self.maskSurface(), self.layer_level, box));
+        self.maskDirty(try self.masks.draw(zio.heap, try self.maskSurface(), self.layer_level, box));
     }
     /// Mix the drawings kept so far by their masks.
     fn maskFlush(self: *Renderer) !void {
@@ -762,7 +762,7 @@ pub const Renderer = struct {
         if (self.layer_level >= 63) return error.LayerDepthExceeded;
         var masked = false;
         if (self.masks.len != 0) {
-            const result = try self.masks.beginSpan(std.heap.smp_allocator, try self.maskSurface(), self.layer_level);
+            const result = try self.masks.beginSpan(zio.heap, try self.maskSurface(), self.layer_level);
             self.maskDirty(result.changed);
             masked = result.masked;
         }
@@ -970,7 +970,7 @@ pub const Renderer = struct {
         if (depth != 0) return error.UnbalancedClips;
     }
     pub fn deinit(self: *Renderer) void {
-        self.masks.deinit(std.heap.smp_allocator);
+        self.masks.deinit(zio.heap);
         self.dropGl();
         if (self.native) |native| zlc_destroy(native);
         self.images.deinit();

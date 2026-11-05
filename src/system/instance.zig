@@ -298,7 +298,27 @@ fn rejection(err: anyerror) ?Rejection {
 const backend = switch (builtin.os.tag) {
     .linux, .macos => Linux,
     .windows => Windows,
-    else => Unsupported,
+    else => if (builtin.cpu.arch == .wasm32) Browser else Unsupported,
+};
+
+/// Browsers run an instance in every page that loads the app, unaware of
+/// the others: each one is the primary, and no second instance ever
+/// forwards to it, so receive reports stopped at once.
+const Browser = struct {
+    const Primary = struct {};
+    const Secondary = struct {};
+    fn claim(options: Options) !Claim {
+        return .{ .primary = .{ .native = .{}, .timeout_ms = options.timeout_ms } };
+    }
+    fn receive(_: *@This().Primary, _: u32, _: []u8, _: [][]const u8) !Received {
+        return .stopped;
+    }
+    fn requestStop(_: *@This().Primary) void {}
+    fn deinitPrimary(_: *@This().Primary) void {}
+    fn forward(_: *@This().Secondary, _: u32, _: []const u8) error{ UnsupportedCapability, PrimaryUnavailable }!void {
+        return error.PrimaryUnavailable;
+    }
+    fn deinitSecondary(_: *@This().Secondary) void {}
 };
 
 const Unsupported = struct {

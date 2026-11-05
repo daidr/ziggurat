@@ -23,7 +23,8 @@ pub const TrayAction = types.TrayAction;
 const windows = builtin.os.tag == .windows;
 const linux = builtin.os.tag == .linux and !builtin.is_test;
 const macos = builtin.os.tag == .macos and !builtin.is_test;
-pub const Owner = if (windows) @import("windows.zig").Owner else if (linux) @import("linux.zig").Owner else if (macos) @import("macos.zig").Owner else @import("unsupported.zig").Owner;
+const browser = builtin.cpu.arch == .wasm32 and !builtin.is_test;
+pub const Owner = if (browser) @import("web.zig").Owner else if (windows) @import("windows.zig").Owner else if (linux) @import("linux.zig").Owner else if (macos) @import("macos.zig").Owner else @import("unsupported.zig").Owner;
 /// An App-level notification-area item independent of any window.
 pub const Tray = if (windows) @import("windows_tray.zig").Tray else if (linux) @import("linux.zig").Tray else if (macos) @import("macos.zig").Tray else @import("unsupported.zig").Tray;
 pub const clipboard = @import("clipboard.zig");
@@ -71,11 +72,11 @@ comptime {
 pub const capabilities = .{
     .native_menu = windows or linux or macos,
     .menu_accelerators = windows or linux or macos,
-    .context_menu = windows or linux or macos,
-    .message_dialog = windows or linux or macos,
+    .context_menu = windows or linux or macos or browser,
+    .message_dialog = windows or linux or macos or browser,
     .tray = windows or linux or macos,
     .standalone_tray = windows or linux or macos,
-    .clipboard_text = windows or builtin.os.tag == .macos,
+    .clipboard_text = windows or builtin.os.tag == .macos or builtin.cpu.arch == .wasm32,
     .clipboard = clipboard.capabilities,
     .drop = drop.capabilities,
     .drag = drag.capabilities,

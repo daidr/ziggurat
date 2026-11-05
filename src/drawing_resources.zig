@@ -1,9 +1,10 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 
 pub const Point = struct { x: f32 = 0, y: f32 = 0 };
 pub const Rect = extern struct { x: f32 = 0, y: f32 = 0, width: f32 = 0, height: f32 = 0 };
 pub const Platform = enum { windows, linux };
-var next_raster_identity: std.atomic.Value(u64) = .init(1);
+var next_raster_identity: zio.Atomic64(u64) = .init(1);
 
 /// All independently prepared raster resources share this process-wide space.
 /// Reservation is thread-safe and does not allocate; exhausted IDs never wrap.

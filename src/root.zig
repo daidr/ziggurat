@@ -1,7 +1,7 @@
 const std = @import("std");
 const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
-const backend = if (builtin.is_test) @import("platform/testing.zig") else if (builtin.os.tag == .windows) @import("platform/windows.zig") else if (builtin.os.tag == .linux) @import("platform/linux.zig") else if (builtin.os.tag == .macos) @import("platform/macos.zig") else @import("platform/unsupported.zig");
+const backend = if (builtin.is_test) @import("platform/testing.zig") else if (builtin.cpu.arch == .wasm32) @import("platform/web.zig") else if (builtin.os.tag == .windows) @import("platform/windows.zig") else if (builtin.os.tag == .linux) @import("platform/linux.zig") else if (builtin.os.tag == .macos) @import("platform/macos.zig") else @import("platform/unsupported.zig");
 const mailbox = @import("mailbox.zig");
 const registry = @import("registry.zig");
 const app_stop = @import("app_stop.zig");
@@ -101,7 +101,7 @@ pub const Paint = struct { native_context: *anyopaque, native_window: ?*anyopaqu
 pub const TextPreedit = struct { text: []const u8, selection_start: usize, selection_end: usize };
 /// Native delivery path, not an assertion about a physical keyboard or a
 /// language engine. A GTK text-service commit can include keyboard translation.
-pub const TextProducer = enum { win32_character, imm_result, gtk_text_service_commit, gtk_keyval_fallback, appkit_text_input, application };
+pub const TextProducer = enum { win32_character, imm_result, gtk_text_service_commit, gtk_keyval_fallback, appkit_text_input, browser_text_input, application };
 pub const TextInput = struct { text: []const u8, producer: TextProducer };
 pub const EditKeyCode = enum { left, right, up, down, home, end, backspace, delete, a, c, x, v, z, y };
 pub const EditKey = struct { key: EditKeyCode, shift: bool = false, control: bool = false };

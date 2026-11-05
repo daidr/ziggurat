@@ -194,6 +194,23 @@ jobs:
       - name: Application font registration
         run: |
           XDG_CACHE_HOME=$(mktemp -d) zig build smoke-fonts -Doptimize=${{ matrix.optimize }}
+      - name: Browsers (WebAssembly) build and headless Chromium smoke
+        run: |
+          # A real chromium on PATH, else Chrome for Testing's headless shell
+          # (Ubuntu's chromium is a snap stub), with the libraries it needs.
+          if apt-cache show libasound2t64 >/dev/null 2>&1; then alsa=libasound2t64; else alsa=libasound2; fi
+          # A runner without those libraries and without root to install
+          # them still builds and checks the apps, and says why it skipped.
+          chrome=
+          if sh scripts/ci-linux-deps.sh libnss3 libgbm1 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 "$alsa"; then
+            chrome=$(sh scripts/ci-chrome.sh)
+          else
+            echo "::warning::headless Chromium's libraries are missing; the browser smoke is skipped"
+          fi
+          rm -rf zig-out/web
+          zig build web -Dtarget=wasm32-wasi -Doptimize=${{ matrix.optimize }} --summary failures
+          python3 tests/web/imports.py zig-out/web
+          if [ -n "$chrome" ]; then python3 tests/web/smoke.py zig-out/web/browser-smoke "$chrome"; fi
       - name: Optional WebKitGTK lifecycle and policy checks
         if: github.event_name == 'workflow_dispatch' && inputs.webview
         run: |

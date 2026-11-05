@@ -702,11 +702,12 @@ pub fn key(text: []const u8) u64 {
 /// conservative estimate; applications may supply exact text layout.
 pub const Measurer = struct {
     context: ?*anyopaque = null,
-    measure: *const fn (?*anyopaque, []const u8) Size = estimate,
+    /// In a browser the page measures text, in the fonts it draws with.
+    measure: *const fn (?*anyopaque, []const u8) Size = if (browser) browserMeasure else estimate,
     /// Extent of text in a font other than the label font. Without it,
     /// `measure` is scaled by the font size, and fixed-pitch text counts
     /// 0.6 em per character.
-    measure_font: ?*const fn (?*anyopaque, []const u8, Font) Size = null,
+    measure_font: ?*const fn (?*anyopaque, []const u8, Font) Size = if (browser) browserMeasureFont else null,
 
     pub const line_height: f32 = 24;
     /// Extent of `text` in `font`, or in the label font when null.
@@ -722,6 +723,18 @@ pub const Measurer = struct {
         const base = self.measure(self.context, text);
         const emphasis: f32 = if (value.weight == .regular) 1 else 1.05;
         return .{ .width = @ceil(base.width * scale * emphasis), .height = height };
+    }
+    const browser = @import("builtin").cpu.arch == .wasm32;
+    extern "ziggurat" fn zw_measure_text(text: [*]const u8, length: u32, size: f32, weight: u32, italic: u32, monospace: u32) f64;
+    fn browserMeasure(_: ?*anyopaque, text: []const u8) Size {
+        return browserMeasureFont(null, text, .{});
+    }
+    fn browserMeasureFont(_: ?*anyopaque, text: []const u8, font: Font) Size {
+        const scale = font.size / 16;
+        const height = @max(line_height * scale, @ceil(font.size * 1.25));
+        if (text.len == 0) return .{ .width = 0, .height = height };
+        const width = zw_measure_text(text.ptr, @intCast(text.len), font.size, font.weight.value(), @intFromBool(font.italic), @intFromBool(font.monospace));
+        return .{ .width = @floatCast(@ceil(width)), .height = height };
     }
     pub fn estimate(_: ?*anyopaque, text: []const u8) Size {
         var width: f32 = 0;

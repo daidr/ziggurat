@@ -1,4 +1,5 @@
 const std = @import("std");
+const zio = @import("ziggurat_io");
 pub const drawing = @import("ziggurat_drawing_resources");
 
 pub const Limits = struct {
@@ -301,7 +302,7 @@ const State = struct {
     allocator: std.mem.Allocator,
     owner: std.Thread.Id,
     limits: Limits,
-    control: std.atomic.Value(u64) = .init(word(0, .idle)),
+    control: zio.Atomic64(u64) = .init(word(0, .idle)),
     serial: u64 = 0,
     busy: bool = false,
     closing: bool = false,

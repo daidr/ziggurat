@@ -10,8 +10,9 @@ const z = @import("ziggurat");
 const desktop = @import("desktop.zig");
 
 const os = builtin.os.tag;
-const native_supported = !builtin.is_test and (os == .windows or os == .linux or os == .macos);
-pub const capabilities = .{ .follow = native_supported, .window_frame = native_supported and os == .windows };
+const browser = builtin.cpu.arch == .wasm32;
+const native_supported = !builtin.is_test and (os == .windows or os == .linux or os == .macos or browser);
+pub const capabilities = .{ .follow = native_supported, .window_frame = native_supported and os == .windows and !browser };
 pub const max_windows = 64;
 
 pub const Source = enum(u8) { system, light, dark };
@@ -39,6 +40,8 @@ const dwm_use_immersive_dark_mode = 20;
 pub fn apply(app: *z.App, source: Source, dark: bool) void {
     app.assertOwner();
     if (comptime !native_supported) return;
+    // A page draws nothing of its own for the app: its content follows.
+    if (comptime browser) return;
     if (os == .linux or os == .macos) return zsx_theme_set_source(@backingInt(source));
     @import("windows_menu.zig").dark_menus = dark;
     menuMode(dark);

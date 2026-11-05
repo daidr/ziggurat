@@ -1,10 +1,12 @@
 const std = @import("std");
 const zio = @import("ziggurat_io");
 const builtin = @import("builtin");
-/// Windows (DirectWrite), Linux (Pango) and macOS (Core Text) lay out text.
-const native_available = builtin.os.tag == .windows or builtin.os.tag == .linux or builtin.os.tag == .macos;
-/// Native positions are UTF-16 offsets on Windows and macOS, bytes on Linux.
-const native_utf16 = builtin.os.tag == .windows or builtin.os.tag == .macos;
+/// Windows (DirectWrite), Linux (Pango), macOS (Core Text) and browsers (the
+/// page's canvas text) lay out text.
+const web = builtin.cpu.arch == .wasm32;
+const native_available = web or builtin.os.tag == .windows or builtin.os.tag == .linux or builtin.os.tag == .macos;
+/// Native positions are UTF-16 offsets on Windows, macOS and browsers, bytes on Linux.
+const native_utf16 = web or builtin.os.tag == .windows or builtin.os.tag == .macos;
 pub const drawing = @import("ziggurat_drawing_resources");
 const fonts = @import("ziggurat_fonts");
 pub const outlines = @import("text_layout_outline.zig");
@@ -830,7 +832,7 @@ fn createLayout(engine: *EngineState, allocator: std.mem.Allocator, source: []co
     const utf16_count = try std.unicode.calcUtf16LeLen(text);
     var owned_bytes = @sizeOf(LayoutState) + text.len + 1 + (utf16_count + 1) * @sizeOf(u16) + captured_family.len + 1 + captured_locale.len + 1 + (scalar_count + 1) * @sizeOf(Scalar);
     const position_capacity = @min(engine.limits.graphemes + 1, scalar_count + 1);
-    const cell_capacity = if (builtin.os.tag == .linux or builtin.os.tag == .macos or (builtin.os.tag == .windows and !reference)) scalar_count else 0;
+    const cell_capacity = if (web or builtin.os.tag == .linux or builtin.os.tag == .macos or (builtin.os.tag == .windows and !reference)) scalar_count else 0;
     const cell_bytes = cell_capacity * @sizeOf(NativeCell);
     if (owned_bytes + position_capacity * @sizeOf(u32) + cell_bytes > engine.limits.layout_bytes) return error.LayoutByteCapacityExceeded;
     const utf16 = try allocator.allocSentinel(u16, utf16_count, 0);
@@ -926,7 +928,7 @@ fn createLayout(engine: *EngineState, allocator: std.mem.Allocator, source: []co
         line.next_start = try bytePosition(scalars, line.next_start);
         if (!validRect(.{ .x = line.x, .y = line.y, .width = line.width, .height = line.height }) or !std.math.isFinite(line.baseline)) return error.NativeLayoutFailed;
     }
-    if (builtin.os.tag == .linux or builtin.os.tag == .macos) {
+    if (web or builtin.os.tag == .linux or builtin.os.tag == .macos) {
         try nativeResult(ztl_cells(&state.native, cells.ptr, @intCast(cells.len), &engine.last_error));
         calls += 1;
     }

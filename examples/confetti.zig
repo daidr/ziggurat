@@ -338,7 +338,7 @@ const Confetti = struct {
         // After a long pause, as a window that was hidden, pieces jump.
         ticks = @min(ticks, 240);
         const r = self.rng.random();
-        for (0..ticks) |_| {
+        for (0..@as(usize, @intCast(ticks))) |_| {
             var kept: usize = 0;
             for (self.pieces.items) |*piece| {
                 if (piece.update(r)) {
