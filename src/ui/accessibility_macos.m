@@ -135,6 +135,7 @@ static BOOL titled(uint32_t role) {
         role == ROLE_TAB || role == ROLE_DISCLOSURE || menu_item(role) || role == ROLE_TOKEN;
 }
 
+static BOOL cell(uint32_t role) { return role == ROLE_CELL || role == ROLE_ROW_HEADER || role == ROLE_COLUMN_HEADER; }
 static NSAccessibilityRole role_of(const NativeNode *n, NSAccessibilitySubrole *subrole) {
     *subrole = nil;
     switch (n->role) {
@@ -175,6 +176,16 @@ static NSAccessibilityRole role_of(const NativeNode *n, NSAccessibilitySubrole *
     case ROLE_ALERT_DIALOG: *subrole = @"AXApplicationAlertDialog"; return NSAccessibilityGroupRole;
     case ROLE_MENU: return NSAccessibilityMenuRole;
     case ROLE_MENU_ITEM: case ROLE_MENU_ITEM_CHECKBOX: case ROLE_MENU_ITEM_RADIO: return NSAccessibilityMenuItemRole;
+    /* As WebKit maps ARIA's roles. */
+    case ROLE_REGION: *subrole = @"AXLandmarkRegion"; return NSAccessibilityGroupRole;
+    case ROLE_LOG: *subrole = @"AXApplicationLog"; return NSAccessibilityGroupRole;
+    case ROLE_TIMER: *subrole = @"AXApplicationTimer"; return NSAccessibilityGroupRole;
+    case ROLE_ALERT: *subrole = @"AXApplicationAlert"; return NSAccessibilityGroupRole;
+    case ROLE_ARTICLE: *subrole = @"AXDocumentArticle"; return NSAccessibilityGroupRole;
+    case ROLE_SEPARATOR: return NSAccessibilitySplitterRole;
+    case ROLE_ROW_HEADER: case ROLE_CELL: return NSAccessibilityCellRole;
+    case ROLE_OPTION: *subrole = NSAccessibilityTableRowSubrole; return NSAccessibilityRowRole;
+    case ROLE_HEADING: return @"AXHeading";
     default: return NSAccessibilityGroupRole;
     }
 }
@@ -246,6 +257,8 @@ static id value_of(const NativeNode *n, NSString *name, NSString *value) {
     ZuaHost *__weak host;
     NativeNode node;
     NSString *name, *value, *text;
+    /* aria-roledescription, aria-keyshortcuts and aria-valuetext. */
+    NSString *role_description, *key_shortcuts, *value_text;
     RecipientAuthority recipient;
     NSArray<NSNumber *> *child_ids;
     id parent;
@@ -697,10 +710,39 @@ static NSString *const ZuaScrollToVisible = @"AXScrollToVisible";
     NSArray *names = [super accessibilityAttributeNames];
     if (node.flags & INVALID) names = [names arrayByAddingObject:@"AXInvalid"];
     if (menu_item(node.role)) names = [names arrayByAddingObject:@"AXMenuItemMarkChar"];
+    NSMutableArray *more = [NSMutableArray array];
+    /* VoiceOver reads AXEnabled from the older API. */
+    if (![names containsObject:NSAccessibilityEnabledAttribute]) [more addObject:NSAccessibilityEnabledAttribute];
+    if (node.states & BUSY) [more addObject:@"AXElementBusy"];
+    if (node_popup(&node)) [more addObject:@"AXHasPopup"], [more addObject:@"AXPopupValue"];
+    if (node_current(&node)) [more addObject:@"AXARIACurrent"];
+    if (node_sort(&node)) [more addObject:NSAccessibilitySortDirectionAttribute];
+    if (node_autocomplete(&node)) [more addObject:@"AXAutocompleteValue"];
+    if (role_description) [more addObject:NSAccessibilityRoleDescriptionAttribute];
+    if (key_shortcuts) [more addObject:@"AXKeyShortcutsValue"];
+    if (value_text) [more addObject:NSAccessibilityValueDescriptionAttribute];
+    if (node.controls) [more addObject:NSAccessibilityLinkedUIElementsAttribute];
+    for (id extra in more) if (![names containsObject:extra]) names = [names arrayByAddingObject:extra];
     return names;
 }
 - (id)accessibilityAttributeValue:(NSAccessibilityAttributeName)attribute {
     if ([attribute isEqualToString:@"AXInvalid"]) return (node.flags & INVALID) ? @"true" : nil;
+    if ([attribute isEqualToString:NSAccessibilityEnabledAttribute]) return @((node.flags & ENABLED) != 0);
+    if ([attribute isEqualToString:@"AXElementBusy"]) return @((node.states & BUSY) != 0);
+    if ([attribute isEqualToString:@"AXHasPopup"]) return @(node_popup(&node) != 0);
+    if ([attribute isEqualToString:@"AXPopupValue"]) return node_popup(&node) ? @(popup_names[node_popup(&node)]) : nil;
+    if ([attribute isEqualToString:@"AXARIACurrent"]) return node_current(&node) ? @(current_names[node_current(&node)]) : nil;
+    if ([attribute isEqualToString:NSAccessibilitySortDirectionAttribute])
+        return node_sort(&node) == 1 ? NSAccessibilityAscendingSortDirectionValue : node_sort(&node) == 2 ? NSAccessibilityDescendingSortDirectionValue : node_sort(&node) ? NSAccessibilityUnknownSortDirectionValue : nil;
+    if ([attribute isEqualToString:@"AXAutocompleteValue"]) return node_autocomplete(&node) ? @(autocomplete_names[node_autocomplete(&node)]) : nil;
+    if ([attribute isEqualToString:NSAccessibilityRoleDescriptionAttribute] && role_description) return role_description;
+    if ([attribute isEqualToString:@"AXKeyShortcutsValue"]) return key_shortcuts;
+    if ([attribute isEqualToString:NSAccessibilityValueDescriptionAttribute] && value_text) return value_text;
+    if ([attribute isEqualToString:NSAccessibilityLinkedUIElementsAttribute] && node.controls) {
+        ZuaHost *h = host;
+        ZuaElement *other = h ? h->elements[@(node.controls)] : nil;
+        return other ? @[other] : @[];
+    }
     if ([attribute isEqualToString:@"AXMenuItemMarkChar"]) {
         if (!menu_item(node.role)) return nil;
         return (node.flags & MIXED) ? @"-" : (node.flags & CHECKED) ? @"✓" : nil;
@@ -816,7 +858,13 @@ static BOOL apply(ZuaElement *el, const NativeNode *n, NSString *name, NSString 
         else { [el setAccessibilityTitle:nil]; [el setAccessibilityLabel:name]; }
     }
     if (fresh || ((n->flags ^ o.flags) & ENABLED)) [el setAccessibilityEnabled:(n->flags & ENABLED) != 0];
-    if (fresh || ((n->flags ^ o.flags) & (EXPANDABLE | EXPANDED))) [el setAccessibilityExpanded:(n->flags & EXPANDED) != 0];
+    /* Only an element that expands says whether it is expanded, as the
+       others neither are nor are not (#1188's rule). */
+    if (fresh || ((n->flags ^ o.flags) & (EXPANDABLE | EXPANDED))) [el setAccessibilityExpanded:(n->flags & EXPANDABLE) && (n->flags & EXPANDED)];
+    if (n->role == ROLE_HEADING && (fresh || n->level != o.level)) [el setAccessibilityDisclosureLevel:(NSInteger)n->level];
+    if (n->role == ROLE_SEPARATOR && (fresh || ((n->states ^ o.states) & VERTICAL)))
+        [el setAccessibilityOrientation:(n->states & VERTICAL) ? NSAccessibilityOrientationVertical : NSAccessibilityOrientationHorizontal];
+    if (cell(n->role) && (fresh || ((n->states ^ o.states) & (SELECTABLE | SELECTED)))) [el setAccessibilitySelected:(n->states & SELECTED) != 0];
     if (fresh || ((n->flags ^ o.flags) & REQUIRED)) [el setAccessibilityRequired:(n->flags & REQUIRED) != 0];
     if (ranged(n->role) && (fresh || n->range_minimum != o.range_minimum || n->range_maximum != o.range_maximum)) {
         [el setAccessibilityMinValue:@(n->range_minimum)];
@@ -912,6 +960,9 @@ static int publish(ZuaHost *host, const NativeNode *nodes, uint32_t count, const
         NSString *name = text_at(text, text_len, n->name_start, n->name_len);
         NSString *value = text_at(text, text_len, n->value_start, n->value_len);
         NSString *description = text_at(text, text_len, n->description_start, n->description_len);
+        el->role_description = n->role_description_len ? text_at(text, text_len, n->role_description_start, n->role_description_len) : nil;
+        el->key_shortcuts = n->key_shortcuts_len ? text_at(text, text_len, n->key_shortcuts_start, n->key_shortcuts_len) : nil;
+        el->value_text = n->value_text_len ? text_at(text, text_len, n->value_text_start, n->value_text_len) : nil;
         el->published_at = i;
         if (apply(el, n, name, value, description, keys ? &keys[i] : NULL)) [value_changed addObject:el];
         /* A status message absent from the previous tree announces itself

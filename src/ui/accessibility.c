@@ -543,8 +543,35 @@ static int control_type(uint32_t role) {
         case ROLE_DIALOG: case ROLE_ALERT_DIALOG: return UIA_PaneControlTypeId;
         case ROLE_MENU: return UIA_MenuControlTypeId;
         case ROLE_MENU_ITEM: case ROLE_MENU_ITEM_CHECKBOX: case ROLE_MENU_ITEM_RADIO: return UIA_MenuItemControlTypeId;
+        /* As browsers map ARIA's roles. */
+        case ROLE_REGION: case ROLE_LOG: case ROLE_TIMER: case ROLE_ALERT: case ROLE_ARTICLE: return UIA_GroupControlTypeId;
+        case ROLE_SEPARATOR: return 50038 /* UIA_SeparatorControlTypeId */;
+        case ROLE_ROW_HEADER: return UIA_HeaderItemControlTypeId;
+        case ROLE_OPTION: return UIA_ListItemControlTypeId;
+        case ROLE_CELL: return UIA_DataItemControlTypeId;
+        case ROLE_HEADING: return UIA_TextControlTypeId;
         default: return UIA_EditControlTypeId;
     }
+}
+/* What ARIA says of a node beyond UI Automation's properties, as
+   AriaProperties carries it: "busy=true;haspopup=menu;...". */
+static void aria_add(WCHAR *out, int *used, const char *name, const char *value, const WCHAR *wide, uint32_t wide_len) {
+    if (*used) { if (*used < 511) out[(*used)++] = L';'; }
+    for (const char *c = name; *c && *used < 511; ++c) out[(*used)++] = (WCHAR)*c;
+    if (*used < 511) out[(*used)++] = L'=';
+    if (value) for (const char *c = value; *c && *used < 511; ++c) out[(*used)++] = (WCHAR)*c;
+    for (uint32_t i = 0; wide && i < wide_len && *used < 511; ++i) out[(*used)++] = wide[i];
+}
+static BSTR aria_properties(const State *s, const Node *n) {
+    WCHAR out[512]; int used = 0;
+    if (n->states & BUSY) aria_add(out, &used, "busy", "true", NULL, 0);
+    if (n->states & FOCUSABLE_DISABLED) aria_add(out, &used, "disabled", "true", NULL, 0);
+    if (node_popup(n)) aria_add(out, &used, "haspopup", popup_names[node_popup(n)], NULL, 0);
+    if (node_current(n)) aria_add(out, &used, "current", current_names[node_current(n)], NULL, 0);
+    if (node_sort(n)) aria_add(out, &used, "sort", sort_names[node_sort(n)], NULL, 0);
+    if (node_autocomplete(n)) aria_add(out, &used, "autocomplete", autocomplete_names[node_autocomplete(n)], NULL, 0);
+    if (n->value_text_len) aria_add(out, &used, "valuetext", NULL, s->text + n->value_text_start, n->value_text_len);
+    return used ? SysAllocStringLen(out, (UINT)used) : NULL;
 }
 static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *iface, PROPERTYID id, VARIANT *out) {
     if (!out) return E_POINTER;
@@ -572,6 +599,18 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
         }
         case UIA_ControlTypePropertyId: out->vt = VT_I4; out->lVal = control_type(n->role); break;
         case UIA_LocalizedControlTypePropertyId:
+            /* aria-roledescription names the role in place of its own. */
+            if (n->role_description_len) {
+                out->vt = VT_BSTR; out->bstrVal = SysAllocStringLen(s->text + n->role_description_start, n->role_description_len);
+                if (!out->bstrVal) hr = E_OUTOFMEMORY;
+                break;
+            }
+            if (n->role == ROLE_REGION || n->role == ROLE_LOG || n->role == ROLE_TIMER || n->role == ROLE_ALERT || n->role == ROLE_ARTICLE || n->role == ROLE_HEADING) {
+                out->vt = VT_BSTR;
+                out->bstrVal = SysAllocString(n->role == ROLE_REGION ? L"region" : n->role == ROLE_LOG ? L"log" : n->role == ROLE_TIMER ? L"timer" : n->role == ROLE_ALERT ? L"alert" : n->role == ROLE_ARTICLE ? L"article" : L"heading");
+                if (!out->bstrVal) hr = E_OUTOFMEMORY;
+                break;
+            }
             /* A meter shares the progress bar control type but is not progress. */
             if (n->role == ROLE_METER || n->role == ROLE_STATUS || n->role == ROLE_TOKEN_FIELD || n->role == ROLE_TOKEN || n->role == ROLE_POPUP || n->role == ROLE_COLOR_WELL || n->role == ROLE_DIALOG || n->role == ROLE_ALERT_DIALOG) {
                 out->vt = VT_BSTR;
@@ -582,17 +621,38 @@ static HRESULT STDMETHODCALLTYPE simple_property(IRawElementProviderSimple *ifac
         /* A column header reports its sort direction as item status. */
         case UIA_ItemStatusPropertyId:
             if (n->role == ROLE_COLUMN_HEADER && n->value_len) { out->vt = VT_BSTR; out->bstrVal = SysAllocStringLen(s->text + n->value_start, n->value_len); if (!out->bstrVal) hr = E_OUTOFMEMORY; }
+            else if (node_sort(n) == 1 || node_sort(n) == 2) { out->vt = VT_BSTR; out->bstrVal = SysAllocString(node_sort(n) == 1 ? L"Sorted ascending" : L"Sorted descending"); if (!out->bstrVal) hr = E_OUTOFMEMORY; }
+            break;
+        case UIA_AriaPropertiesPropertyId: {
+            BSTR value = aria_properties(s, n);
+            if (value) { out->vt = VT_BSTR; out->bstrVal = value; }
+            break;
+        }
+        case UIA_AcceleratorKeyPropertyId:
+            if (n->key_shortcuts_len) { out->vt = VT_BSTR; out->bstrVal = SysAllocStringLen(s->text + n->key_shortcuts_start, n->key_shortcuts_len); if (!out->bstrVal) hr = E_OUTOFMEMORY; }
+            break;
+        case 30173 /* UIA_HeadingLevelPropertyId */:
+            if (n->role == ROLE_HEADING) { out->vt = VT_I4; out->lVal = 80050 /* HeadingLevel_None */ + (LONG)(n->level >= 1 && n->level <= 9 ? n->level : 2); }
             break;
         case UIA_LandmarkTypePropertyId:
             if (n->role == ROLE_NAVIGATION) { out->vt = VT_I4; out->lVal = UIA_NavigationLandmarkTypeId; }
             if (n->role == ROLE_SEARCH) { out->vt = VT_I4; out->lVal = UIA_SearchLandmarkTypeId; }
+            if (n->role == ROLE_REGION) { out->vt = VT_I4; out->lVal = UIA_CustomLandmarkTypeId; }
             break;
-        /* A status message is announced politely when it appears. */
-        case UIA_LiveSettingPropertyId: if (n->role == ROLE_STATUS) { out->vt = VT_I4; out->lVal = Polite; } break;
+        case UIA_LocalizedLandmarkTypePropertyId:
+            if (n->role == ROLE_REGION) { out->vt = VT_BSTR; out->bstrVal = SysAllocString(L"region"); if (!out->bstrVal) hr = E_OUTOFMEMORY; }
+            break;
+        /* A status message and a log are read politely, an alert at once;
+           the announcements come from Zig (zua_announce). */
+        case UIA_LiveSettingPropertyId:
+            if (n->role == ROLE_STATUS || n->role == ROLE_LOG) { out->vt = VT_I4; out->lVal = Polite; }
+            if (n->role == ROLE_ALERT) { out->vt = VT_I4; out->lVal = Assertive; }
+            break;
         case UIA_IsDialogPropertyId: out->vt = VT_BOOL; out->boolVal = n->role == ROLE_DIALOG || n->role == ROLE_ALERT_DIALOG ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsEnabledPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & ENABLED) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_HasKeyboardFocusPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & FOCUSED) ? VARIANT_TRUE : VARIANT_FALSE; break;
-        case UIA_IsKeyboardFocusablePropertyId: out->vt = VT_BOOL; out->boolVal = focusable(n->role) && (n->flags & ENABLED) && n->width > 0 && n->height > 0 ? VARIANT_TRUE : VARIANT_FALSE; break;
+        /* aria-disabled leaves it focusable, though not enabled. */
+        case UIA_IsKeyboardFocusablePropertyId: out->vt = VT_BOOL; out->boolVal = focusable(n->role) && ((n->flags & ENABLED) || (n->states & FOCUSABLE_DISABLED)) && n->width > 0 && n->height > 0 ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsControlElementPropertyId: case UIA_IsContentElementPropertyId: out->vt = VT_BOOL; out->boolVal = VARIANT_TRUE; break;
         case UIA_IsOffscreenPropertyId: out->vt = VT_BOOL; out->boolVal = (n->flags & OFFSCREEN) ? VARIANT_TRUE : VARIANT_FALSE; break;
         case UIA_IsInvokePatternAvailablePropertyId: out->vt = VT_BOOL; out->boolVal = invoke_role(n->role) ? VARIANT_TRUE : VARIANT_FALSE; break;

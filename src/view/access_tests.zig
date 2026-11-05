@@ -143,3 +143,26 @@ test "the keys held reach the build wherever the focus is, and shortcuts tell a 
     try testing.expectEqual(@as(usize, 1), app.repeated);
     _ = z;
 }
+
+const Links = struct {
+    followed: usize = 0,
+    fn build(self: *Links, v: *View) anyerror!void {
+        try v.column(.{});
+        if (try v.link("Docs", .{ .key = 1 })) self.followed += 1;
+        try v.end();
+    }
+};
+
+test "Enter follows a focused link and Space does not" {
+    var storage: Storage = .{};
+    var app: Links = .{};
+    var h = Harness.init(&app, Links.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    try h.focus(.{ .key = 1 });
+    _ = try h.key(.{ .key = .space });
+    try testing.expectEqual(@as(usize, 0), app.followed);
+    _ = try h.key(.{ .key = .enter });
+    try testing.expectEqual(@as(usize, 1), app.followed);
+}

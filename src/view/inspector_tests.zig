@@ -288,3 +288,36 @@ test "the RTL toggle, the close button and the panel's edge" {
     try h.clickAt(l.close.x + 4, l.close.y + 4);
     try testing.expect(!tools.open);
 }
+
+test "a flex badge in the tree keeps the container's layout over the content" {
+    var app: App = .{};
+    var storage: Storage = .{};
+    var tools: Inspector = .{};
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    var h = try setup(&app, &storage, &tools, &context);
+    _ = try h.key(.{ .key = .f12 });
+    const column = try h.find(.{ .kind = .column, .nth = 1 });
+    const index = tools.indexOf(column.id).?;
+    try testing.expectEqual(inspector.LayoutKind.flex, inspector.layoutKind(&tools.elements[index]).?);
+    try testing.expect(inspector.layoutKind(&tools.elements[tools.indexOf((try h.find(.{ .kind = .text })).id).?]) == null);
+    // A click on the badge at the row's end turns it on, another off; the
+    // element chosen stays.
+    const l = tools.layout();
+    const row = tools.rowOf(column.id).?;
+    const y = l.tree.y + 2 + @as(f32, @floatFromInt(row)) * 20 + 10;
+    try h.clickAt(l.tree.x + l.tree.width - 10, y);
+    try testing.expect(tools.showsLayout(column.id));
+    try h.render();
+    try h.clickAt(l.tree.x + l.tree.width - 10, y);
+    try testing.expect(!tools.showsLayout(column.id));
+}
+
+test "the source link opens only a file that is here" {
+    var tools: Inspector = .{};
+    tools.source_len = (try std.fmt.bufPrint(&tools.source_buffer, "/no/such/main.zig:4", .{})).len;
+    tools.source_openable = false;
+    // Nothing opens, and nothing is noted.
+    tools.openSource();
+    try testing.expectEqual(@as(usize, 0), tools.issue_count);
+}

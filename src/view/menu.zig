@@ -54,6 +54,10 @@ pub const ItemOptions = struct {
     /// The shortcut shown at the end of the item, such as "Ctrl+C". It is
     /// only shown; bind the chord itself with `View.bindKey`.
     shortcut: []const u8 = "",
+    /// Choosing the item, by a press, Enter or Space, leaves the menu open
+    /// with the item highlighted, as a row of radio items for a theme in
+    /// an account menu that switches without closing it.
+    keep_open: bool = false,
 };
 
 /// Which menu is open and where its highlight is. It belongs to the View
@@ -74,6 +78,9 @@ pub const State = struct {
     highlight: ?u64 = null,
     /// The next pass highlights the first enabled item of this level.
     first: ?u16 = null,
+    /// The next pass highlights the last enabled item of this level, as
+    /// Up opening a menu button does.
+    last: ?u16 = null,
     /// The next pass focuses the highlight, or with none the first item.
     refocus: bool = false,
     /// The highlight is an item the menu built in this pass.
@@ -144,8 +151,8 @@ fn openMenu(self: *View, style: Style, plain: bool) Error!bool {
 /// A menu button: a button showing `label` with a chevron, whose menu is
 /// drawn in the window below it, lined up with its start, or above it
 /// where the window has no room below. A press, Enter, Space or Down
-/// opens the menu on its first item, and a press on the button while the
-/// menu shows closes it; the button reads as expanded meanwhile. The menu
+/// opens the menu on its first item, Up on its last, and a press on the
+/// button while the menu shows closes it; the button reads as expanded meanwhile. The menu
 /// takes the keys, type-ahead and submenus of `popoverMenu`, and focus
 /// goes back to the button as an item is chosen or Escape closes it.
 /// Build the items only when this returns true, and close the menu with
@@ -182,7 +189,7 @@ pub fn menuItem(self: *View, label: []const u8, options: ItemOptions, style: Sty
     node.checked = options.checked orelse false;
     node.badge = try self.copyText(options.shortcut);
     if (self.takeEvent(node.id) == null or !node.style.enabled) return false;
-    close(self, true);
+    if (options.keep_open) self.menu.highlight = node.id else close(self, true);
     return true;
 }
 
@@ -228,7 +235,7 @@ pub const ItemState = struct {
 /// it and by `Style.background` and `border`. Close it with `end`, then
 /// build its menu with `popoverMenuBase`. It has `popoverMenuButton`'s
 /// keys: a press, Enter, Space or Down opens the menu on its first item,
-/// and assistive technology sees it expanded while the menu shows, named
+/// Up on its last, and assistive technology sees it expanded while the menu shows, named
 /// by `Style.name` or the text inside it.
 pub fn menuButtonBase(self: *View, style: Style) Error!void {
     const node = try self.openNode(.popup_button, style);
@@ -286,6 +293,11 @@ pub fn menuItemBase(self: *View, options: ItemOptions, style: Style) Error!ItemS
     node.badge = try self.copyText(options.shortcut);
     const state: ItemState = .{ .highlighted = node.highlighted };
     if (self.takeEvent(node.id) == null or !node.style.enabled) return state;
+    if (options.keep_open) {
+        self.menu.highlight = node.id;
+        node.highlighted = true;
+        return .{ .clicked = true, .highlighted = true };
+    }
     close(self, true);
     return .{ .clicked = true, .highlighted = state.highlighted };
 }
@@ -374,6 +386,10 @@ fn itemNode(self: *View, panel: *Node, label: []const u8, style: Style, plain: b
         state.highlight = id;
         state.refocus = true;
     };
+    if (state.last) |wanted| if (wanted == level and node.style.enabled) {
+        state.highlight = id;
+        state.refocus = true;
+    };
     if (state.refocus and node.style.enabled) if (state.highlight orelse id == id) {
         state.refocus = false;
         self.restore = id;
@@ -428,6 +444,7 @@ pub fn finish(self: *View) void {
     }
     if (!state.seen) state.highlight = null;
     state.seen = false;
+    state.last = null;
 }
 
 /// Where a menu panel goes: at the pointer that opened it or below its
@@ -580,7 +597,7 @@ pub fn routeKey(self: *View, input: z.KeyInput) ?KeyRoute {
     const plain = !mods.control and !mods.alt and !mods.super and !mods.shift;
     const state = &self.menu;
     if (state.open == null) {
-        if (input.key == .down and plain and !input.repeat and openButtonFromFocus(self)) return .handled;
+        if ((input.key == .down or input.key == .up) and plain and !input.repeat and openButtonFromFocus(self, input.key == .up)) return .handled;
         const menu_key = (input.key == .context_menu and plain) or (input.key == .f10 and mods.shift and !mods.control and !mods.alt and !mods.super);
         if (!menu_key or input.repeat) return null;
         return if (openFromFocus(self)) .handled else null;
@@ -699,13 +716,14 @@ fn openFromFocus(self: *View) bool {
     return true;
 }
 
-/// Down on a focused menu button opens its menu on its first item.
-fn openButtonFromFocus(self: *View) bool {
+/// Down on a focused menu button opens its menu on its first item, and Up
+/// on its last, as WAI-ARIA's menu button pattern has it.
+fn openButtonFromFocus(self: *View, last: bool) bool {
     const focused = self.focus orelse return false;
     const overlay = &self.overlay.menu;
     for (overlay.anchors[0..overlay.anchor_count]) |anchor| {
         if (!anchor.button or self.buffers.nodes[anchor.index].id != focused) continue;
-        self.menu = .{ .open = anchor.id, .opener = focused, .first = 0 };
+        self.menu = if (last) .{ .open = anchor.id, .opener = focused, .last = 0 } else .{ .open = anchor.id, .opener = focused, .first = 0 };
         return true;
     }
     return false;

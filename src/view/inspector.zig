@@ -22,6 +22,7 @@ const zio = @import("ziggurat_io");
 const z = @import("ziggurat");
 const ui = @import("ziggurat_ui");
 const view = @import("root.zig");
+const editor = @import("inspector_editor.zig");
 
 const View = view.View;
 const Node = view.Node;
@@ -141,6 +142,24 @@ const Palette = struct {
 const highlight_content = color(0x6fa8dc, 168);
 const highlight_padding = color(0x93c47d, 140);
 const highlight_border = color(0xffe599, 168);
+// The layout a flex or grid badge keeps over the content: its gaps and
+// the room its children leave hatched, a grid's tracks as lines.
+const layout_gap = color(0xa142f4, 72);
+const layout_line = color(0xa142f4, 200);
+const layout_outline = color(0xa142f4, 255);
+/// Layouts badges keep over the content at once.
+pub const max_layouts = 8;
+pub const LayoutKind = enum { flex, grid };
+/// How an element lays its children out, as its badge in the tree tells:
+/// flex for a row or column of them, grid for tracks; null for a leaf.
+pub fn layoutKind(e: *const Element) ?LayoutKind {
+    if (!e.kids) return null;
+    return switch (e.kind) {
+        .grid, .table_header, .table_row => .grid,
+        .column, .row, .radio_group, .segmented, .tab_list, .list_box, .toolbar, .breadcrumbs, .accordion, .field, .fieldset, .search, .popup, .popover, .toast, .dialog, .tree, .table, .route, .pointer_area, .menu, .drag_area, .drag_source, .drop_target, .token_field, .combo_field, .scroll, .split => .flex,
+        else => null,
+    };
+}
 // The parts of a frame in the Performance tab.
 const build_color: u32 = 0xf2b630;
 const layout_color: u32 = 0x9a7fd1;
@@ -213,6 +232,14 @@ pub const Inspector = struct {
     trace_len: usize = 0,
     source_buffer: [512]u8 = undefined,
     source_len: usize = 0,
+    /// The source is a file here, which a click on its link opens in the
+    /// editor; where the link was painted.
+    source_openable: bool = false,
+    source_link: ?Rect = null,
+    /// The containers whose flex or grid badge is on, by id: their layout
+    /// shows over the content while they are built.
+    layouts: [max_layouts]u64 = undefined,
+    layouts_len: usize = 0,
 
     elements: [max_elements]Element = undefined,
     len: usize = 0,
@@ -375,6 +402,38 @@ pub const Inspector = struct {
         self.trace_len = n;
         self.source_len = 0;
         if (n > 0) self.source_len = locateSource(trace[0..n], &self.source_buffer).len;
+        self.source_openable = self.source_len > 0 and editor.openable(self.source());
+    }
+    /// Whether the layout of `id` shows over the content (its badge is on).
+    pub fn showsLayout(self: *const Inspector, id: u64) bool {
+        return std.mem.indexOfScalar(u64, self.layouts[0..self.layouts_len], id) != null;
+    }
+    /// Turn the flex or grid badge of `id` on or off.
+    pub fn toggleLayout(self: *Inspector, id: u64) void {
+        if (std.mem.indexOfScalar(u64, self.layouts[0..self.layouts_len], id)) |at| {
+            std.mem.copyForwards(u64, self.layouts[at .. self.layouts_len - 1], self.layouts[at + 1 .. self.layouts_len]);
+            self.layouts_len -= 1;
+            return;
+        }
+        if (self.layouts_len == max_layouts) {
+            std.mem.copyForwards(u64, self.layouts[0 .. max_layouts - 1], self.layouts[1..max_layouts]);
+            self.layouts_len -= 1;
+        }
+        self.layouts[self.layouts_len] = id;
+        self.layouts_len += 1;
+    }
+    /// Where the badge of the tree's row at `y` is, for an element that
+    /// lays its children out.
+    fn badgeRect(self: *const Inspector, tree: Rect, y: f32, kind: LayoutKind) Rect {
+        const text = @tagName(kind);
+        const width = self.textWidth(text, small_font) + 8;
+        return .{ .x = tree.x + tree.width - 6 - width, .y = y + 3, .width = width, .height = row_height - 6 };
+    }
+    /// Open where the element chosen was built in the editor (see
+    /// `inspector_editor.zig`); a failure goes to the Issues tab.
+    pub fn openSource(self: *Inspector) void {
+        if (!self.source_openable) return;
+        editor.open(self.source()) catch |err| self.addIssue(self.selected ^ 0x5eed, "Could not open {s} in the editor: {s}. Set ZIGGURAT_EDITOR, VISUAL or EDITOR to the editor's command.", .{ self.source(), @errorName(err) });
     }
     /// Where the application built the element chosen, as `file:line`, or
     /// "" when the build has no debug information.
@@ -899,6 +958,13 @@ pub const Inspector = struct {
             const row = self.rowAt(l.tree, point) orelse return true;
             const entry = self.rows[row];
             const element = &self.elements[entry.node];
+            if (!entry.close) if (layoutKind(element)) |kind| {
+                const y = l.tree.y + 2 + @as(f32, @floatFromInt(row)) * row_height - self.tree_scroll;
+                if (contains(self.badgeRect(l.tree, y, kind), point)) {
+                    self.toggleLayout(element.id);
+                    return true;
+                }
+            };
             const arrow_x = l.tree.x + @as(f32, @floatFromInt(element.depth)) * indent + 4;
             if (!entry.close and element.kids and point.x >= arrow_x and point.x < arrow_x + 14) {
                 // Alt opens or closes everything inside.
@@ -921,6 +987,7 @@ pub const Inspector = struct {
             self.side_scroll = 0;
             return true;
         };
+        if (self.side == .styles) if (self.source_link) |link| if (contains(link, point)) self.openSource();
         return true;
     }
 
@@ -967,6 +1034,7 @@ pub const Inspector = struct {
         if (!contains(l.panel, point)) return null;
         if (self.tab == .elements and contains(l.divider, point)) return .resize_ns;
         if (self.tab == .elements) if (l.find) |find| if (contains(find.field, point)) return .text;
+        if (self.tab == .elements and self.side == .styles) if (self.source_link) |link| if (contains(link, point)) return .pointer;
         return .default;
     }
 
@@ -1016,6 +1084,7 @@ pub const Inspector = struct {
     pub fn paint(self: *Inspector, target: anytype) !void {
         if (!self.open) return;
         self.clampScroll();
+        try self.paintLayouts(target);
         try self.paintHighlight(target);
         const l = self.layout();
         const p = self.palette;
@@ -1120,7 +1189,15 @@ pub const Inspector = struct {
                 _ = self.label(target, x, y, row_height, if (self.isOpen(element)) "\u{25be}" else "\u{25b8}", p.muted, small_font);
             }
             x += 14;
-            try self.paintMarkup(target, x, y, tree.x + tree.width - 6, entry, element);
+            var limit = tree.x + tree.width - 6;
+            if (!entry.close) if (layoutKind(element)) |kind| {
+                const badge = self.badgeRect(tree, y, kind);
+                const on = self.showsLayout(element.id);
+                target.roundedRect(badge, 3, if (on) layout_outline else ui.Color.rgb(p.toolbar));
+                _ = self.label(target, badge.x + 4, y, row_height, @tagName(kind), if (on) 0xffffff else p.muted, small_font);
+                limit = badge.x - 4;
+            };
+            try self.paintMarkup(target, x, y, limit, entry, element);
         }
     }
     /// The markup of a row: `<Tag key="…" name="…">text</Tag>`.
@@ -1221,11 +1298,16 @@ pub const Inspector = struct {
                 // Where the application built it: the file's name and the
                 // line, the whole path in the properties.
                 const at = baseName(self.source());
+                self.source_link = null;
                 if (at.len > 0) {
                     const width = self.textWidth(at, small_font);
                     const x = side.x + side.width - 10 - width;
                     _ = self.label(target, x, y + 6, line, at, p.muted, small_font);
-                    target.roundedRect(.{ .x = x, .y = y + 6 + line - 3, .width = width, .height = 1 }, 0, ui.Color.rgb(p.muted));
+                    // A link only when a click can open it here.
+                    if (self.source_openable) {
+                        target.roundedRect(.{ .x = x, .y = y + 6 + line - 3, .width = width, .height = 1 }, 0, ui.Color.rgb(p.muted));
+                        self.source_link = .{ .x = x, .y = y + 6, .width = width, .height = line };
+                    }
                 }
                 y += 6 + line;
                 for (details.styles[0..details.style_count]) |decl| {
@@ -1423,6 +1505,75 @@ pub const Inspector = struct {
     /// The element under the pointer in the tree or picking, else the one
     /// chosen while the panel has the keyboard: its border, padding and
     /// content over the content, with a tooltip.
+    /// The layouts whose badges are on, over the content: a flex
+    /// container's padding and the gaps between its children hatched, a
+    /// grid's tracks as lines with the gaps between them filled.
+    fn paintLayouts(self: *const Inspector, target: anytype) !void {
+        if (self.layouts_len == 0) return;
+        const area: Rect = .{ .x = self.window.x, .y = self.window.y, .width = self.app_width, .height = self.window.height };
+        try target.pushClip(area);
+        defer target.popClip() catch {};
+        for (self.layouts[0..self.layouts_len]) |id| {
+            const index = self.indexOf(id) orelse continue;
+            const e = &self.elements[index];
+            if (e.visible == null) continue;
+            const kind = layoutKind(e) orelse continue;
+            const b = if (e.border != null) e.border_width else 0;
+            const inner = inset(e.bounds, b, b, b, b);
+            const content = inset(inner, e.padding.left, e.padding.top, e.padding.right, e.padding.bottom);
+            ring(target, inner, content, layout_gap);
+            var kids: [layout_kids]Rect = undefined;
+            const count = self.childBoxes(index, &kids);
+            switch (kind) {
+                .flex => {
+                    // The room between one child and the next along the
+                    // axis, across the content.
+                    const row = e.axis == .row;
+                    sortBoxes(kids[0..count], row);
+                    var i: usize = 1;
+                    while (i < count) : (i += 1) {
+                        const a = kids[i - 1];
+                        const c = kids[i];
+                        const gap: Rect = if (row)
+                            .{ .x = a.x + a.width, .y = content.y, .width = c.x - (a.x + a.width), .height = content.height }
+                        else
+                            .{ .x = content.x, .y = a.y + a.height, .width = content.width, .height = c.y - (a.y + a.height) };
+                        if (gap.width > 0 and gap.height > 0) target.roundedRect(gap, 0, layout_gap);
+                    }
+                },
+                .grid => {
+                    // A line at each edge of the tracks the children take.
+                    var xs: [2 * layout_kids]f32 = undefined;
+                    var ys: [2 * layout_kids]f32 = undefined;
+                    var nx: usize = 0;
+                    var ny: usize = 0;
+                    for (kids[0..count]) |kid| {
+                        nx = addEdge(&xs, nx, kid.x);
+                        nx = addEdge(&xs, nx, kid.x + kid.width);
+                        ny = addEdge(&ys, ny, kid.y);
+                        ny = addEdge(&ys, ny, kid.y + kid.height);
+                    }
+                    for (xs[0..nx]) |x| target.roundedRect(.{ .x = x - 0.5, .y = content.y, .width = 1, .height = content.height }, 0, layout_line);
+                    for (ys[0..ny]) |y| target.roundedRect(.{ .x = content.x, .y = y - 0.5, .width = content.width, .height = 1 }, 0, layout_line);
+                },
+            }
+            target.strokeRect(e.bounds, 0, 1, layout_outline);
+        }
+    }
+    const layout_kids = 64;
+    /// The boxes of the children of the element at `index` laid out in it,
+    /// floating ones left out.
+    fn childBoxes(self: *const Inspector, index: usize, out: []Rect) usize {
+        var count: usize = 0;
+        for (self.elements[index + 1 .. self.len]) |*kid| {
+            if (kid.depth <= self.elements[index].depth) break;
+            if (kid.parent != @as(i32, @intCast(index)) or kid.floating or kid.visible == null) continue;
+            if (count == out.len) break;
+            out[count] = kid.bounds;
+            count += 1;
+        }
+        return count;
+    }
     fn paintHighlight(self: *const Inspector, target: anytype) !void {
         const id = if (self.hovered != 0) self.hovered else if (self.focused) self.selected else 0;
         if (id == 0) return;
@@ -1542,6 +1693,24 @@ pub const Inspector = struct {
 };
 
 /// Fill the room between `outer` and `inner`, which it holds.
+fn sortBoxes(boxes: []Rect, row: bool) void {
+    const by = struct {
+        fn x(_: void, a: Rect, b: Rect) bool {
+            return a.x < b.x;
+        }
+        fn y(_: void, a: Rect, b: Rect) bool {
+            return a.y < b.y;
+        }
+    };
+    if (row) std.mem.sort(Rect, boxes, {}, by.x) else std.mem.sort(Rect, boxes, {}, by.y);
+}
+/// Add `value` to the edges unless one is within half a DIP of it.
+fn addEdge(lines: []f32, len: usize, value: f32) usize {
+    for (lines[0..len]) |edge| if (@abs(edge - value) < 0.5) return len;
+    if (len == lines.len) return len;
+    lines[len] = value;
+    return len + 1;
+}
 fn ring(target: anytype, outer: Rect, inner: Rect, fill: ui.Color) void {
     if (inner.width <= 0 or inner.height <= 0) {
         target.roundedRect(outer, 0, fill);

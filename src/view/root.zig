@@ -8564,6 +8564,7 @@ test {
     _ = @import("navigation_tests.zig");
     _ = @import("pointer_tests.zig");
     _ = @import("inspector_tests.zig");
+    _ = @import("inspector_editor.zig");
     _ = @import("gradient.zig");
     _ = @import("style_tests.zig");
     _ = @import("layout_tests.zig");

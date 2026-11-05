@@ -2673,7 +2673,7 @@ pub const Context = struct {
                 return true;
             }
             if (key.key == .enter or key.key == .space) {
-                const activated = if (key.repeat) null else self.input_state.activation();
+                const activated = if (key.repeat) null else self.input_state.activationBy(key.key);
                 if (activated) |id| self.on_action(self.state, id) else _ = self.unhandledKey(key);
                 window.invalidate();
                 return true;

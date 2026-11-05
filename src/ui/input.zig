@@ -99,6 +99,9 @@ pub const Options = struct {
     /// tabindex=-1: a press, `focus` and the arrows of the group it is in
     /// still focus it.
     tab_stop: bool = true,
+    /// Enter activates it, Space does not, as for a link, which Space
+    /// leaves to scroll what is around it.
+    enter_only: bool = false,
     focus_rect: ?Rect = null,
     range: ?RangeHit = null,
     shortcut: ?Chord = null,
@@ -697,6 +700,13 @@ pub const Input = struct {
         }
         if (self.focused) |id| if (self.available(id)) return;
         self.setFocused(null);
+    }
+    /// The control `key`, Enter or Space, activates: `activation`, unless
+    /// Space reaches a control Enter alone activates (`enter_only`).
+    pub fn activationBy(self: *const Input, key: z.KeyCode) ?u64 {
+        const id = self.activation() orelse return null;
+        if (key == .space) if (self.get(id)) |item| if (item.options.enter_only) return null;
+        return id;
     }
     pub fn activation(self: *const Input) ?u64 {
         const id = self.focused orelse return null;

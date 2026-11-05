@@ -445,7 +445,7 @@ pub const Harness = struct {
             state.setFocused(null);
             state.tabDirection(input.key == .end);
         } else if (input.key == .enter or input.key == .space) {
-            if (!input.repeat) if (state.activation()) |id| return self.deliverKey(.{ .action = id });
+            if (!input.repeat) if (state.activationBy(input.key)) |id| return self.deliverKey(.{ .action = id });
             _ = try self.unhandled(input);
         } else return self.unhandled(input);
         try self.render();

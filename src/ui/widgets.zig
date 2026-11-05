@@ -194,7 +194,7 @@ pub fn emit(frame: anytype, kind: Kind, id: u64, bounds: layout.Rect, text: []co
     const interactive = kind != .progress;
     const combo = kind == .combo_box;
     const chooses = kind == .radio or kind == .tab or kind == .segment or kind == .list_item;
-    try frame.addControl(id, bounds, .{ .enabled = options.enabled, .focusable = interactive, .pointer_enabled = interactive, .radio_group = if (chooses) options.radio_group else null, .selected = checked, .shortcut = options.shortcut });
+    try frame.addControl(id, bounds, .{ .enabled = options.enabled, .focusable = interactive, .pointer_enabled = interactive, .radio_group = if (chooses) options.radio_group else null, .selected = checked, .shortcut = options.shortcut, .enter_only = kind == .link });
     const focus = interactive and options.enabled and visible.width > 0 and visible.height > 0 and context.input_state.focused == id;
     const amount = std.math.clamp(fraction, 0, 1);
     try frame.semantic(.{
