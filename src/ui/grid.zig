@@ -7,11 +7,16 @@ pub const max_items = 256;
 pub const Error = error{ InvalidGeometry, InvalidTrack, InvalidPlacement, PlacementOverlap, GridFull, TooManyTracks, TooManyItems, OutputTooSmall, GeometryOverflow };
 
 /// A fixed track has equal min/max. fr == 0 uses preferred content sizing;
-/// positive fr shares remaining space after intrinsic minimum constraints.
+/// positive fr shares the room left, even where its content is wider, as
+/// CSS's `minmax(0, 1fr)`: `min` gives it a least size, as
+/// `minmax(240px, 1fr)`, and `min_content` keeps it no smaller than the
+/// minimum sizes of what is in it, as CSS's plain `1fr`. A child spanning
+/// several `min_content` tracks widens them by their weights.
 pub const Track = struct {
     min: f32 = 0,
     max: f32 = std.math.inf(f32),
     fr: f32 = 0,
+    min_content: bool = false,
     pub fn fixed(size: f32) Track {
         return .{ .min = size, .max = size };
     }
@@ -20,6 +25,10 @@ pub const Track = struct {
     }
     pub fn minmax(minimum: f32, maximum: f32, weight: f32) Track {
         return .{ .min = minimum, .max = maximum, .fr = weight };
+    }
+    /// A fraction no smaller than what is in it; see `min_content`.
+    pub fn fractionMinContent(weight: f32) Track {
+        return .{ .fr = weight, .min_content = true };
     }
 };
 pub const Item = struct {
@@ -341,7 +350,9 @@ fn grow(axis: *Axis, start: usize, count: usize, amount: f64, mode: Growth, metr
         if (track.max <= axis.sizes[i]) continue;
         if (mode == .preferred and track.fr > 0) continue;
         if (mode == .fraction and track.fr == 0) continue;
-        const weight: f64 = if (mode == .fraction) track.fr else 1;
+        // A fraction takes its content's minimum only when asked to.
+        if (mode == .minimum and track.fr > 0 and !track.min_content) continue;
+        const weight: f64 = if (mode == .fraction or (mode == .minimum and track.fr > 0)) track.fr else 1;
         candidates[len] = .{ .index = i, .capacity = @as(f64, track.max) - axis.sizes[i], .weight = weight };
         len += 1;
     }
@@ -402,10 +413,56 @@ fn intrinsic(axis: *Axis, items: []const Item, horizontal: bool, mode: Growth, m
         metrics.track_visits += axis.tracks.len;
     }
 }
+/// Size the fraction tracks as CSS does: each the larger of its size so
+/// far and its share of the room the other tracks leave, where a track
+/// whose share would be smaller, or larger than its maximum, keeps that
+/// and leaves the others what is left.
+fn flex(axis: *Axis, available: f64, metrics: *Metrics) void {
+    var fixed_room = axis.gap * @as(f64, @floatFromInt(axis.tracks.len -| 1));
+    var flexible: [max_tracks]bool = @splat(false);
+    var weights: f64 = 0;
+    for (axis.tracks, 0..) |track, i| {
+        metrics.track_visits += 1;
+        if (track.fr > 0) {
+            flexible[i] = true;
+            weights += track.fr;
+        } else fixed_room += axis.sizes[i];
+    }
+    if (weights == 0) return;
+    var room = available - fixed_room;
+    // Each round fixes at least one track or settles the share.
+    var rounds: usize = 0;
+    while (rounds <= axis.tracks.len) : (rounds += 1) {
+        // Summed again each round: subtracting a huge weight would erase a
+        // tiny one.
+        weights = 0;
+        for (axis.tracks, 0..) |track, i| if (flexible[i]) {
+            weights += track.fr;
+        };
+        if (weights == 0) return;
+        const unit = @max(0, room) / weights;
+        var changed = false;
+        for (axis.tracks, 0..) |track, i| {
+            metrics.track_visits += 1;
+            if (!flexible[i]) continue;
+            const share = unit * track.fr;
+            const keep = if (share < axis.sizes[i]) axis.sizes[i] else if (share > track.max) @as(f64, track.max) else continue;
+            axis.sizes[i] = keep;
+            flexible[i] = false;
+            room -= keep;
+            changed = true;
+        }
+        if (!changed) {
+            for (axis.tracks, 0..) |track, i| if (flexible[i]) {
+                axis.sizes[i] = unit * track.fr;
+            };
+            return;
+        }
+    }
+}
 fn arrange(axis: *Axis, origin: f64, available: f64, justify: layout.Justify, metrics: *Metrics) void {
-    var used = spanSize(axis, 0, axis.tracks.len, metrics);
-    grow(axis, 0, axis.tracks.len, available - used, .fraction, metrics);
-    used = spanSize(axis, 0, axis.tracks.len, metrics);
+    flex(axis, available, metrics);
+    const used = spanSize(axis, 0, axis.tracks.len, metrics);
     const leftover = @max(0, available - used);
     var position = origin + switch (justify) {
         .center => leftover / 2,
@@ -773,4 +830,21 @@ test "content tracks fit available space while preserving intrinsic minimum cons
     try std.testing.expectEqual(@as(f32, 40), constrained.column_widths[1]);
     try std.testing.expectEqual(@as(f32, 30), constrained.overflow.width);
     try std.testing.expectEqual(@as(usize, 0), constrained.unmet_minimum_items);
+}
+
+test "a fraction shares the room past its content unless it keeps its minimum content" {
+    const rows = [_]Track{Track.fixed(20)};
+    const items = [_]Item{
+        .{ .row = 0, .column = 0, .minimum = .{ .width = 150, .height = 10 } },
+        .{ .row = 0, .column = 1 },
+    };
+    var output: [2]Rect = undefined;
+    const shared = try compute(.{ .x = 0, .y = 0, .width = 200, .height = 20 }, &.{ Track.fraction(1), Track.fraction(1) }, &rows, &items, .{}, &output);
+    try std.testing.expectApproxEqAbs(@as(f32, 100), shared.column_widths[0], 0.001);
+    const kept = try compute(.{ .x = 0, .y = 0, .width = 200, .height = 20 }, &.{ Track.fractionMinContent(1), Track.fraction(1) }, &rows, &items, .{}, &output);
+    try std.testing.expectApproxEqAbs(@as(f32, 150), kept.column_widths[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 50), kept.column_widths[1], 0.001);
+    // A least size keeps the track from sharing below it.
+    const least = try compute(.{ .x = 0, .y = 0, .width = 200, .height = 20 }, &.{ Track.minmax(170, std.math.inf(f32), 1), Track.fraction(1) }, &rows, &items, .{}, &output);
+    try std.testing.expectApproxEqAbs(@as(f32, 170), least.column_widths[0], 0.001);
 }
