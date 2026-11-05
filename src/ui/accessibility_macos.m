@@ -68,7 +68,6 @@ static inline uint32_t node_sort(const NativeNode *n) { return (n->states >> 14)
 static inline uint32_t node_autocomplete(const NativeNode *n) { return (n->states >> 16) & 3; }
 static const char *const popup_names[] = { "", "menu", "listbox", "tree", "grid", "dialog" };
 static const char *const current_names[] = { "", "true", "page", "step", "location", "date", "time" };
-static const char *const sort_names[] = { "", "ascending", "descending", "other" };
 static const char *const autocomplete_names[] = { "", "inline", "list", "both" };
 typedef struct RecipientAuthority { uint64_t epoch, serial, id, publication; uint32_t slot, kind; } RecipientAuthority;
 typedef struct ActionView {
