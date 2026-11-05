@@ -633,9 +633,8 @@ const Cmd = struct {
         const want_shown = !c.a.has("gone");
         const start_ms = zio.milliTimestamp();
         while (true) {
-            // The window may never settle, as with a spinner: what it shows
-            // counts all the same.
-            c.idle(window_id) catch |err| if (err != error.Failed or !c.problem.is("timeout")) return err;
+            // Read the condition even while the window keeps drawing, as
+            // with a spinner; only --settle waits for idle, once it is met.
             const read = try c.tree(window_id);
             var found = false;
             for (read.tree.nodes) |n| {
