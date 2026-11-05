@@ -14,10 +14,12 @@ import functools
 import http.server
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 here = os.path.dirname(os.path.abspath(__file__))
 
@@ -80,16 +82,30 @@ def main():
 def run_page(browser, url, renderer):
     verdicts.clear()
     reported.clear()
-    with tempfile.TemporaryDirectory() as profile:
+    # Chromium's helper processes can still be writing the profile after the
+    # browser is killed, so the whole process group is killed and waited
+    # for, and what they leave behind does not fail the run.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as profile:
         command = [browser, "--headless=new", "--no-sandbox", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--no-first-run",
                    "--user-data-dir=" + profile, "--window-size=800,600", "--enable-logging=stderr", url]
         with tempfile.TemporaryFile("w+") as log:
-            process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=log)
+            process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=log, start_new_session=True)
             try:
                 reported.wait(90)
             finally:
-                process.kill()
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 process.wait()
+                # Helpers of the group exit after the browser; give them a
+                # moment before the profile is removed.
+                for _ in range(50):
+                    try:
+                        os.killpg(process.pid, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.1)
             log.seek(0)
             errors = log.read()
     verdict = verdicts[0] if verdicts else "no verdict from the page in 90 seconds"
