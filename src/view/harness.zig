@@ -446,7 +446,10 @@ pub const Harness = struct {
                 // What ignores input lets the pointer through to what is under it.
                 if (!interactive(node.kind) or node.passthrough or self.floating(node) != over or self.view.inert(node)) continue;
                 const rect = self.visible(node) orelse continue;
-                if (contains(rect, x, y)) return node;
+                if (!contains(rect, x, y)) continue;
+                // The node's own shape, as the frame cuts its control's hits.
+                if (node.style.hit_test) |shape| if (!shape.takes(x, y, node.bounds)) continue;
+                return node;
             }
         }
         return null;

@@ -119,6 +119,17 @@ pub const RoundClip = struct {
         return dx * dx + dy * dy <= radius * radius;
     }
 };
+/// Where within its box a control takes the pointer, as an application
+/// says: `func` gets the point and the control's box in the DIP the control
+/// was recorded in, so a ring or a pie segment takes presses on its shape
+/// alone (a `vector.Path`'s `contains` answers for a path).
+pub const HitTest = struct {
+    context: ?*const anyopaque = null,
+    func: *const fn (context: ?*const anyopaque, x: f32, y: f32, box: Rect) bool,
+    pub fn takes(self: HitTest, x: f32, y: f32, box: Rect) bool {
+        return self.func(self.context, x, y, box);
+    }
+};
 /// Where a control takes the pointer beyond its box: the box it was
 /// recorded in before a map moved, turned or tilted it (`unmap` takes a
 /// point of the window back there), and a rounded clip cutting it.
@@ -129,6 +140,10 @@ pub const Exact = struct {
     /// The control's box where it was recorded, clipped.
     source: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
     round: ?RoundClip = null,
+    /// The application's shape within `box`, the control's whole box where
+    /// it was recorded.
+    hit_test: ?HitTest = null,
+    box: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
     pub fn contains(self: Exact, point: z.Point) bool {
         var x = point.x;
         var y = point.y;
@@ -142,7 +157,8 @@ pub const Exact = struct {
             const r = self.source;
             if (!(x >= r.x and y >= r.y and x < r.x + r.width and y < r.y + r.height)) return false;
         }
-        if (self.round) |round| return round.contains(x, y);
+        if (self.round) |round| if (!round.contains(x, y)) return false;
+        if (self.hit_test) |shape| return shape.takes(x, y, self.box);
         return true;
     }
 };
@@ -159,10 +175,16 @@ fn resolve(view: HitView, point: z.Point) ?usize {
         const item = view.hits[i];
         if (item.options.pass_through) continue;
         // The exact existing reverse traversal includes disabled occluders.
-        const contains = if (view.mapped) |mapped| mapped.hitContains(i, affine.Rect.from(item.rect), affine.Point.from(point)) catch false else item.rect.contains(point) and item.options.exact.contains(point);
+        const contains = if (view.mapped) |mapped| mappedContains(mapped, i, item, point) else item.rect.contains(point) and item.options.exact.contains(point);
         if (contains) return i;
     }
     return null;
+}
+fn mappedContains(mapped: *const affine_state.Snapshot, index: usize, item: Hit, point: z.Point) bool {
+    if (!(mapped.hitContains(index, affine.Rect.from(item.rect), affine.Point.from(point)) catch false)) return false;
+    const shape = item.options.exact.hit_test orelse return true;
+    const at = mapped.localHitPoint(index, affine.Point.from(point)) catch return false;
+    return shape.takes(@floatCast(at.x), @floatCast(at.y), item.options.exact.box);
 }
 fn pointerEligibleView(view: HitView, item: Hit, index: usize) bool {
     if (!item.options.enabled or !item.options.pointer_enabled or item.rect.width <= 0 or item.rect.height <= 0) return false;

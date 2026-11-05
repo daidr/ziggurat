@@ -264,3 +264,33 @@ test "an alert is as wide as its buttons need, its title and message wrapping to
     const message = try h.find(.{ .kind = .text, .text = "One message long enough that it wraps onto lines of its own in the alert rather than widening it to the whole window, however long it goes on." });
     try testing.expect(message.bounds.height > 30);
 }
+
+const Ring = struct {
+    presses: usize = 0,
+    /// A ring 10 DIP wide inside the box.
+    fn band(_: ?*const anyopaque, x: f32, y: f32, box: ui.Rect) bool {
+        const dx = x - (box.x + box.width / 2);
+        const dy = y - (box.y + box.height / 2);
+        const d = @sqrt(dx * dx + dy * dy);
+        const outer = @min(box.width, box.height) / 2;
+        return d <= outer and d >= outer - 10;
+    }
+    fn build(self: *Ring, v: *View) anyerror!void {
+        try v.column(.{});
+        if (try v.button("", .{ .width = 100, .height = 100, .hit_test = .{ .func = band } })) self.presses += 1;
+        try v.end();
+    }
+};
+
+test "a hit test makes a control take the pointer on its shape alone" {
+    var storage: Storage = .{};
+    var app: Ring = .{};
+    var h = Harness.init(&app, Ring.build, storage.buffers(), .{});
+    try h.render();
+    const box = try h.boundsOf(.{ .kind = .button });
+    // The middle is the ring's hole.
+    try testing.expectError(error.NotFound, h.clickAt(box.x + 50, box.y + 50));
+    try testing.expectEqual(@as(usize, 0), app.presses);
+    try h.clickAt(box.x + 95, box.y + 50);
+    try testing.expectEqual(@as(usize, 1), app.presses);
+}

@@ -323,6 +323,10 @@ pub const Style = struct {
     /// back at; null keeps the size on a double click. Kept within the
     /// split's limits.
     split_reset: ?f64 = null,
+    /// Where in its box the element's control takes the pointer, as the
+    /// application decides (`ui.HitTest`): a ring takes presses on
+    /// its band alone, a pie segment on its slice. Null takes the whole box.
+    hit_test: ?ui.HitTest = null,
     /// A scroll container comes to rest at the places nodes inside it mark
     /// with `snap_align`, as CSS's `scroll-snap-type`: `.mandatory` always
     /// rests at one, the wheel and the keys going from place to place;
@@ -5174,7 +5178,7 @@ pub const View = struct {
                 model.glide_to = after;
                 model.glide_start = self.now;
                 model.glide_ns = glide.duration_ns;
-                model.glide_easing = @intFromEnum(glide.easing);
+                model.glide_easing = @backingInt(glide.easing);
                 model.offset.y = before;
                 _ = self.glideScrolls();
                 continue;
@@ -5896,6 +5900,8 @@ pub const View = struct {
                 scopes[scope_depth] = .{ .index = @intCast(at), .kind = .cache };
                 scope_depth += 1;
             };
+            const shaped_hits = @TypeOf(target) == *ui.Frame and style.hit_test != null;
+            const outer_hit_test = if (shaped_hits) target.setHitTest(style.hit_test) else null;
             var control: ui.widgets.Options = .{ .enabled = style.enabled, .name = style.name, .semantic_parent = node.semantic_parent, .focus_ring_offset = style.focus_ring_offset, .focus_ring_color = style.focus_ring_color };
             const annotation = self.annotationOf(node);
             control.description = annotation.description;
@@ -6098,6 +6104,7 @@ pub const View = struct {
                     if (content.present) |present| if (@TypeOf(target) == *ui.Frame) present(content.context, node.id, self.presentation(all, at));
                     if (self.matches.glyphMorphOf(node.id)) |value| {
                         if (try self.paintGlyphMorph(target, node, value)) {
+                            if (shaped_hits) _ = target.setHitTest(outer_hit_test);
                             at += 1;
                             continue;
                         }
@@ -6105,6 +6112,8 @@ pub const View = struct {
                     if (@TypeOf(target) == *ui.Frame) try content.paint(content.context, target, node.id, bounds) else try target.embedded(node.id, bounds);
                 },
             }
+            // The shape is the element's own: what it holds takes the whole box.
+            if (shaped_hits) _ = target.setHitTest(outer_hit_test);
             if (node.z_order and node.child_count > 0) {
                 try self.paintByZ(target, window_theme, at, floating, floating_len, lifted);
                 at = node.end;

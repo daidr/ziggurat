@@ -5,6 +5,7 @@ const z = @import("ziggurat");
 const input = @import("input.zig");
 /// A control the frame added, as its input state holds it.
 pub const Hit = input.Hit;
+pub const HitTest = input.HitTest;
 // Every platform except Windows replays through the same software renderer
 // ABI (`zlc_*`), implemented natively by `linux.c` and `macos.c`.
 const gdi = if (builtin.os.tag == .windows) @import("windows.zig") else @import("linux.zig");
@@ -3509,6 +3510,7 @@ pub const Frame = struct {
     /// Where the controls and semantics recorded now take the pointer, when
     /// it is not where they are drawn in place; see `setHitMap`.
     hit_map: ?HitMap = null,
+    hit_test: ?HitTest = null,
     /// Open `beginCache` scopes, innermost last.
     cache_scopes: [4]CacheScope = undefined,
     cache_depth: usize = 0,
@@ -3879,6 +3881,14 @@ pub const Frame = struct {
     /// draws elsewhere, as a shared element flying (`Style.match`), so that
     /// it takes the pointer where it shows. Returns the map it replaces.
     /// Frames with prepared transforms ignore it.
+    /// Make the controls recorded until it is set again take the pointer
+    /// where `shape` says within their boxes (`HitTest`), as well as
+    /// within the clips. Returns the shape it replaces.
+    pub fn setHitTest(self: *Frame, shape: ?HitTest) ?HitTest {
+        const previous = self.hit_test;
+        self.hit_test = shape;
+        return previous;
+    }
     pub fn setHitMap(self: *Frame, map: ?HitMap) ?HitMap {
         const previous = self.hit_map;
         self.hit_map = map;
@@ -3896,6 +3906,8 @@ pub const Frame = struct {
         const clipped = if (self.clipBounds()) |clip| layout.intersect(absolute_bounds, clip) else absolute_bounds;
         const visible = self.hitRect(clipped);
         var actual = options;
+        actual.exact.box = absolute_bounds;
+        actual.exact.hit_test = self.hit_test;
         // Turned by a hit map or cut by a rounded clip, the control takes
         // the pointer over its exact shape, not the box around it.
         if (self.transforms == null) {
@@ -6709,4 +6721,51 @@ test "parsePath reads SVG path data and tells where data in error stops" {
     defer cut.close() catch {};
     try std.testing.expectEqual(@as(usize, 2), cut.commands.len);
     try std.testing.expectEqual(@as(usize, 14), report.offset);
+}
+
+const LeftHalf = struct {
+    fn takes(_: ?*const anyopaque, x: f32, _: f32, box: Rect) bool {
+        return x < box.x + box.width / 2;
+    }
+};
+
+test "a hit test cuts a control's hits to its shape, plain or transformed" {
+    const Dummy = struct {
+        fn draw(_: *anyopaque, _: *Frame) void {}
+        fn action(_: *anyopaque, _: u64) void {}
+    };
+    var dummy: u8 = 0;
+    var context = Context.init(&dummy, Dummy.draw, Dummy.action);
+    {
+        context.input_state.beginFrame();
+        var frame: Frame = .{ .context = &context, .size = .{ .width = 100, .height = 100, .scale = 1 } };
+        try frame.pushOffset(.{ .x = 10, .y = 0 });
+        _ = frame.setHitTest(.{ .func = LeftHalf.takes });
+        try frame.button(1, .{ .x = 0, .y = 0, .width = 40, .height = 20 }, "Half");
+        _ = frame.setHitTest(null);
+        try frame.button(2, .{ .x = 0, .y = 30, .width = 40, .height = 20 }, "Whole");
+        try frame.popOffset();
+        context.input_state.commitFrame();
+        try std.testing.expectEqual(@as(?u64, 1), context.input_state.hit(.{ .x = 15, .y = 10 }));
+        try std.testing.expect(context.input_state.hit(.{ .x = 45, .y = 10 }) == null);
+        try std.testing.expectEqual(@as(?u64, 2), context.input_state.hit(.{ .x = 45, .y = 40 }));
+        context.command_buffer.reset();
+    }
+    const workspace = try testWorkspace(&context, .{ .width = 100, .height = 100, .scale = 1 });
+    defer context.dropTransformMetadata();
+    defer context.command_buffer.reset();
+    context.input_state.beginFrame();
+    var frame = try testFrame(&context, workspace, 1);
+    try frame.pushOffset(.{ .x = 5, .y = 10 });
+    try frame.beginTransform(.{ .width = 200, .height = 40 }, .{ .x0 = -100, .y0 = 20 });
+    _ = frame.setHitTest(.{ .func = LeftHalf.takes });
+    try frame.button(1, .{ .x = 100, .y = 0, .width = 20, .height = 20 }, "Half");
+    _ = frame.setHitTest(null);
+    try frame.endTransform();
+    try frame.popOffset();
+    try context.command_buffer.finish();
+    _ = try workspace.state.commitFrame();
+    context.input_state.commitFrame();
+    try std.testing.expectEqual(@as(?u64, 1), context.input_state.hit(.{ .x = 8, .y = 40 }));
+    try std.testing.expect(context.input_state.hit(.{ .x = 22, .y = 40 }) == null);
 }
