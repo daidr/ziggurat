@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Browser smoke: serves a built browser app with the self-checking page
-tests/web/smoke.html to headless Chromium, which posts its verdict back.
+tests/web/smoke.html to headless Chromium, which posts its verdict back:
+once drawn with the OpenGL renderer on WebGL2 (losing and restoring its
+context), once with the software renderer.
 
     python3 tests/web/smoke.py zig-out/web/browser-smoke [chromium]
 
@@ -57,6 +59,7 @@ def main():
     if not browser:
         print("smoke: no Chromium found; skipped the browser run")
         return 0
+    failed = 0
     with tempfile.TemporaryDirectory() as site:
         for name in ("app.wasm", "ziggurat.js"):
             shutil.copy(os.path.join(app, name), site)
@@ -64,22 +67,33 @@ def main():
             shutil.copy(os.path.join(here, name), site)
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Handler, directory=site))
         threading.Thread(target=server.serve_forever, daemon=True).start()
-        url = "http://127.0.0.1:%d/smoke.html" % server.server_address[1]
-        with tempfile.TemporaryDirectory() as profile:
-            command = [browser, "--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run", "--user-data-dir=" + profile,
-                       "--window-size=800,600", "--enable-logging=stderr", url]
-            with tempfile.TemporaryFile("w+") as log:
-                process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=log)
-                try:
-                    reported.wait(90)
-                finally:
-                    process.kill()
-                    process.wait()
-                    server.shutdown()
-                log.seek(0)
-                errors = log.read()
+        try:
+            # The OpenGL renderer on WebGL2 (SwiftShader where there is no
+            # GPU), then the software renderer the page falls back to.
+            for renderer in ("webgl2", "2d"):
+                failed |= run_page(browser, "http://127.0.0.1:%d/smoke.html?renderer=%s" % (server.server_address[1], renderer), renderer)
+        finally:
+            server.shutdown()
+    return failed
+
+
+def run_page(browser, url, renderer):
+    verdicts.clear()
+    reported.clear()
+    with tempfile.TemporaryDirectory() as profile:
+        command = [browser, "--headless=new", "--no-sandbox", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--no-first-run",
+                   "--user-data-dir=" + profile, "--window-size=800,600", "--enable-logging=stderr", url]
+        with tempfile.TemporaryFile("w+") as log:
+            process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=log)
+            try:
+                reported.wait(90)
+            finally:
+                process.kill()
+                process.wait()
+            log.seek(0)
+            errors = log.read()
     verdict = verdicts[0] if verdicts else "no verdict from the page in 90 seconds"
-    print("smoke:", verdict)
+    print("smoke (%s):" % renderer, verdict)
     if verdict != "PASS":
         sys.stderr.write("\n".join(line for line in errors.splitlines() if "CONSOLE" in line or ":ERROR:" in line)[-4000:] + "\n")
         return 1

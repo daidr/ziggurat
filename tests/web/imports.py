@@ -2,12 +2,15 @@
 
     python3 tests/web/imports.py zig-out/web
 
-Every app.wasm under the directory may import WASI, the "ziggurat" module
-and the zsd_* functions of "env"; any other import, such as a native
-renderer function a new feature added only for the desktops, makes the page
-fail to start with a LinkError, so it fails here first.
+Every app.wasm under the directory may import WASI, the functions of the
+"ziggurat" module that web/ziggurat.js provides (the page's own and the
+WebGL2 calls of the OpenGL renderer, src/ui/gl_web.h) and the zsd_*
+functions of "env"; any other import, such as a native renderer function a
+new feature added only for the desktops, or a gl* call the page does not
+run, makes the page fail to start with a LinkError, so it fails here first.
 """
 import pathlib
+import re
 import sys
 
 
@@ -57,10 +60,12 @@ def main():
     apps = sorted(root.glob("*/app.wasm"))
     if not apps:
         sys.exit(f"imports: no app.wasm under {root}")
+    page = pathlib.Path(__file__).resolve().parents[2] / "web" / "ziggurat.js"
+    provided = set(re.findall(r"^\s*(\w+)\s*:", page.read_text(), re.M))
     bad = []
     for app in apps:
         for module, name in imports(app.read_bytes()):
-            if module in ("wasi_snapshot_preview1", "ziggurat") or (module == "env" and name.startswith("zsd_")):
+            if module == "wasi_snapshot_preview1" or (module == "ziggurat" and name in provided) or (module == "env" and name.startswith("zsd_")):
                 continue
             bad.append(f"{app.parent.name}: {module}.{name}")
     if bad:

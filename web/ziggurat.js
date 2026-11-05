@@ -59,6 +59,390 @@ body>.ziggurat-window{position:fixed}
     return rt.start(source);
   }
 
+  // The OpenGL renderer's side of WebGL2 (src/ui/gl_renderer.c through
+  // src/ui/gl_web.h). The renderer draws with the OpenGL 3.3 of the
+  // desktops; what WebGL2 (OpenGL ES 3.0) lacks is made up here: texture
+  // buffers are 2D float textures 1024 texels wide, read in the shaders by
+  // `ztb`; BGRA uploads and reads are swizzled; a sampler clamping to a
+  // transparent border clamps to its edge, and the shaders read the mask
+  // through `zmask`, which is transparent outside; #version 330 core
+  // becomes #version 300 es. Objects are named by indices into the
+  // context's table, as OpenGL names them.
+  const GL = {
+    TEXTURE_BUFFER: 0x8c2a,
+    MAX_TEXTURE_BUFFER_SIZE: 0x8c2b,
+    BGRA: 0x80e1,
+    RED: 0x1903,
+    RGBA: 0x1908,
+    RGBA32F: 0x8814,
+    R32F: 0x822e,
+    CLAMP_TO_BORDER: 0x812d,
+    CLAMP_TO_EDGE: 0x812f,
+    TEXTURE_2D: 0x0de1,
+    TEXTURE0: 0x84c0,
+    UNPACK_ROW_LENGTH: 0x0cf2,
+    UNPACK_ALIGNMENT: 0x0cf5,
+    PACK_ROW_LENGTH: 0x0d02,
+    PACK_ALIGNMENT: 0x0d05,
+    MAX_TEXTURE_SIZE: 0x0d33,
+    FLOAT: 0x1406,
+    UNSIGNED_BYTE: 0x1401,
+    NEAREST: 0x2600,
+  };
+  const TBO_WIDTH = 1024;
+  const shaderPrelude =
+    "#version 300 es\nprecision highp float;precision highp int;precision highp sampler2D;\n" +
+    "vec4 ztb(highp sampler2D s,int i){return texelFetch(s,ivec2(i&1023,i>>10),0);}\n" +
+    "vec4 zmask(highp sampler2D s,vec2 u){return (u.x<0.0||u.y<0.0||u.x>1.0||u.y>1.0)?vec4(0.0):texture(s,u);}\n";
+  // A desktop shader as WebGL2 compiles it.
+  function esShader(source) {
+    let text = source.replace(/#version 330 core\n?/, shaderPrelude);
+    const buffers = [...text.matchAll(/samplerBuffer\s+(\w+)/g)].map((m) => m[1]);
+    text = text.replace(/\bsamplerBuffer\b/g, "highp sampler2D");
+    for (const name of buffers) text = text.replace(new RegExp("texelFetch\\(" + name + ",", "g"), "ztb(" + name + ",");
+    if (/uniform sampler2D[^;]*\bmask\b/.test(text)) text = text.replace(/\btexture\(mask,/g, "zmask(mask,");
+    return text;
+  }
+
+  class GLContext {
+    constructor(rt, win, gl) {
+      this.rt = rt;
+      this.win = win;
+      this.gl = gl;
+      this.lost = false;
+      this.generation = 0;
+      // Frames the OpenGL renderer showed, and frames drawn in memory.
+      this.frames = 0;
+      this.memoryFrames = 0;
+      this.reset();
+    }
+    // What the context named, gone with a loss.
+    reset() {
+      this.objects = [null];
+      this.locations = [null];
+      this.pseudo = new Map(); // buffer id: { bytes, version } of texture buffers
+      this.texBuffers = new Map(); // texture id: { buffer, format, version }
+      this.unit = 0;
+      this.unitBuffer = []; // texture buffer bound on each unit
+      this.textureBuffer = 0; // buffer bound to TEXTURE_BUFFER
+      this.drawTarget = 0; // framebuffer bound for drawing
+      this.unpack = { row: 0, align: 4 };
+      this.pack = { row: 0, align: 4 };
+      this.presentTexture = null;
+      this.presentFramebuffer = null;
+    }
+    add(object) {
+      this.objects.push(object);
+      return this.objects.length - 1;
+    }
+    get(id) {
+      return id ? this.objects[id] || null : null;
+    }
+    // Bytes a transfer of width x height touches with the pixel store's
+    // row length and alignment.
+    span(store, width, height, bytes) {
+      const row = (store.row || width) * bytes;
+      const stride = Math.ceil(row / store.align) * store.align;
+      return height ? stride * (height - 1) + width * bytes : 0;
+    }
+    // A texture buffer's contents uploaded to its 2D texture when changed.
+    sync(id) {
+      const link = this.texBuffers.get(id);
+      if (!link) return;
+      const buffer = this.pseudo.get(link.buffer);
+      if (!buffer || buffer.version === link.version) return;
+      link.version = buffer.version;
+      const gl = this.gl;
+      const floats = link.format === GL.RGBA32F ? 4 : 1;
+      const texels = Math.max(1, Math.ceil(buffer.bytes.length / (floats * 4)));
+      const rows = Math.ceil(texels / TBO_WIDTH);
+      const data = new Float32Array(TBO_WIDTH * rows * floats);
+      data.set(new Float32Array(buffer.bytes.buffer, buffer.bytes.byteOffset, buffer.bytes.length >> 2));
+      gl.pixelStorei(GL.UNPACK_ROW_LENGTH, 0);
+      gl.pixelStorei(GL.UNPACK_ALIGNMENT, 4);
+      gl.texImage2D(GL.TEXTURE_2D, 0, link.format, TBO_WIDTH, rows, 0, floats === 4 ? GL.RGBA : GL.RED, GL.FLOAT, data);
+      gl.texParameteri(GL.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, GL.NEAREST);
+      gl.texParameteri(GL.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, GL.NEAREST);
+      gl.texParameteri(GL.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, 0);
+      gl.pixelStorei(GL.UNPACK_ROW_LENGTH, this.unpack.row);
+      gl.pixelStorei(GL.UNPACK_ALIGNMENT, this.unpack.align);
+    }
+    // Pixels from memory for an upload, BGRA swizzled to RGBA.
+    upload(format, width, height, ptr) {
+      if (!ptr) return { format: format === GL.BGRA ? GL.RGBA : format, data: null };
+      const bytes = format === GL.RED ? 1 : 4;
+      const length = this.span(this.unpack, width, height, bytes);
+      const view = new Uint8Array(this.rt.memory.buffer, ptr, length);
+      if (format !== GL.BGRA) return { format, data: view };
+      const copy = view.slice();
+      for (let i = 0; i + 3 < copy.length; i += 4) {
+        const b = copy[i];
+        copy[i] = copy[i + 2];
+        copy[i + 2] = b;
+      }
+      return { format: GL.RGBA, data: copy };
+    }
+    // A frame the software renderer drew in memory (premultiplied BGRA rows
+    // from the top) shown on a canvas WebGL2 has.
+    present(pixels, width, height, stride) {
+      const gl = this.gl;
+      if (this.lost || gl.isContextLost()) return;
+      this.memoryFrames++;
+      const src = new Uint8Array(this.rt.memory.buffer, pixels, stride * height);
+      const rgba = new Uint8Array(width * height * 4);
+      for (let y = 0; y < height; y++) {
+        const row = src.subarray(y * stride, y * stride + width * 4);
+        const out = (height - 1 - y) * width * 4;
+        for (let x = 0; x < width * 4; x += 4) {
+          rgba[out + x] = row[x + 2];
+          rgba[out + x + 1] = row[x + 1];
+          rgba[out + x + 2] = row[x];
+          rgba[out + x + 3] = row[x + 3];
+        }
+      }
+      const kept = gl.getParameter(gl.TEXTURE_BINDING_2D);
+      if (!this.presentTexture) {
+        this.presentTexture = gl.createTexture();
+        this.presentFramebuffer = gl.createFramebuffer();
+      }
+      gl.bindTexture(GL.TEXTURE_2D, this.presentTexture);
+      gl.pixelStorei(GL.UNPACK_ROW_LENGTH, 0);
+      gl.pixelStorei(GL.UNPACK_ALIGNMENT, 4);
+      gl.texImage2D(GL.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, GL.RGBA, GL.UNSIGNED_BYTE, rgba);
+      gl.pixelStorei(GL.UNPACK_ROW_LENGTH, this.unpack.row);
+      gl.pixelStorei(GL.UNPACK_ALIGNMENT, this.unpack.align);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.presentFramebuffer);
+      gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, GL.TEXTURE_2D, this.presentTexture, 0);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+      gl.disable(gl.SCISSOR_TEST);
+      gl.blitFramebuffer(0, 0, width, height, 0, 0, width, height, gl.COLOR_BUFFER_BIT, GL.NEAREST);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      this.drawTarget = 0;
+      gl.bindTexture(GL.TEXTURE_2D, kept);
+    }
+  }
+
+  // The gl* imports of src/ui/gl_web.h, on the context zgl_current chose.
+  function glImports(rt) {
+    const c = () => rt.glc;
+    const g = () => rt.glc.gl;
+    const u32 = (ptr, n) => new Uint32Array(rt.memory.buffer, ptr, n);
+    const cstr = (ptr) => {
+      const bytes = rt.u8();
+      let end = ptr;
+      while (bytes[end]) end++;
+      return decoder.decode(bytes.subarray(ptr, end));
+    };
+    const gen = (make) => (n, ptr) => {
+      const ids = u32(ptr, n);
+      for (let i = 0; i < n; i++) ids[i] = c().add(make());
+    };
+    const del = (drop) => (n, ptr) => {
+      const ctx = c();
+      for (const id of Array.from(u32(ptr, n))) {
+        const object = ctx.objects[id];
+        if (object) drop(object);
+        if (id) ctx.objects[id] = null;
+        ctx.pseudo.delete(id);
+        ctx.texBuffers.delete(id);
+      }
+    };
+    const loc = (id) => (id > 0 ? c().locations[id] : null);
+    const writeString = (text, capacity, lengthPtr, out) => {
+      const bytes = encoder.encode(text).subarray(0, Math.max(0, capacity - 1));
+      rt.u8().set(bytes, out);
+      rt.u8()[out + bytes.length] = 0;
+      if (lengthPtr) rt.dv().setInt32(lengthPtr, bytes.length, true);
+    };
+    const wrap = (value) => (value === GL.CLAMP_TO_BORDER ? GL.CLAMP_TO_EDGE : value);
+    return {
+      zgl_attach: (id) => rt.glAttach(id),
+      zgl_current: (id, out) => {
+        const win = rt.windows.get(id);
+        const ctx = win && win.glc;
+        if (!ctx) return 1;
+        rt.glc = ctx;
+        rt.dv().setUint32(out, ctx.generation, true);
+        return ctx.lost || ctx.gl.isContextLost() ? 1 : 0;
+      },
+      zgl_renderer: (out, capacity) => {
+        const gl = g();
+        const info = gl.getExtension("WEBGL_debug_renderer_info");
+        const name = (info && gl.getParameter(info.UNMASKED_RENDERER_WEBGL)) || "WebGL2";
+        const bytes = encoder.encode(String(name)).subarray(0, capacity);
+        rt.u8().set(bytes, out);
+        return bytes.length;
+      },
+      glActiveTexture: (unit) => {
+        c().unit = unit - GL.TEXTURE0;
+        g().activeTexture(unit);
+      },
+      glAttachShader: (program, shader) => g().attachShader(c().get(program), c().get(shader)),
+      glBindBuffer: (target, id) => {
+        if (target === GL.TEXTURE_BUFFER) c().textureBuffer = id;
+        else g().bindBuffer(target, c().get(id));
+      },
+      glBindBufferBase: (target, index, id) => g().bindBufferBase(target, index, c().get(id)),
+      glBindFragDataLocation: () => {},
+      glBindFramebuffer: (target, id) => {
+        if (target !== 0x8ca8) c().drawTarget = id;
+        g().bindFramebuffer(target, c().get(id));
+      },
+      glBindSampler: (unit, id) => g().bindSampler(unit, c().get(id)),
+      glBindTexture: (target, id) => {
+        const ctx = c();
+        if (target === GL.TEXTURE_BUFFER) {
+          ctx.unitBuffer[ctx.unit] = id;
+          ctx.gl.bindTexture(GL.TEXTURE_2D, ctx.get(id));
+          if (id) ctx.sync(id);
+        } else ctx.gl.bindTexture(target, ctx.get(id));
+      },
+      glBindVertexArray: (id) => g().bindVertexArray(c().get(id)),
+      glBlendEquation: (mode) => g().blendEquation(mode),
+      glBlendFuncSeparate: (a, b, c2, d) => g().blendFuncSeparate(a, b, c2, d),
+      glBlitFramebuffer: (a, b, c2, d, e, f, h, i, mask, filter) => {
+        // Onto the canvas: the renderer shows a frame (zglr_end).
+        if (!c().drawTarget) c().frames++;
+        g().blitFramebuffer(a, b, c2, d, e, f, h, i, mask, filter);
+      },
+      glBufferData: (target, size, ptr, usage) => {
+        const ctx = c();
+        if (target === GL.TEXTURE_BUFFER) {
+          const bytes = ptr ? new Uint8Array(rt.memory.buffer, ptr, size).slice() : new Uint8Array(size);
+          const old = ctx.pseudo.get(ctx.textureBuffer);
+          ctx.pseudo.set(ctx.textureBuffer, { bytes, version: (old ? old.version : 0) + 1 });
+        } else if (ptr) ctx.gl.bufferData(target, new Uint8Array(rt.memory.buffer, ptr, size), usage);
+        else ctx.gl.bufferData(target, size, usage);
+      },
+      glBufferSubData: (target, offset, size, ptr) => {
+        const ctx = c();
+        if (target === GL.TEXTURE_BUFFER) {
+          const buffer = ctx.pseudo.get(ctx.textureBuffer);
+          if (!buffer) return;
+          buffer.bytes.set(new Uint8Array(rt.memory.buffer, ptr, size), offset);
+          buffer.version++;
+        } else ctx.gl.bufferSubData(target, offset, new Uint8Array(rt.memory.buffer, ptr, size));
+      },
+      glCheckFramebufferStatus: (target) => g().checkFramebufferStatus(target),
+      glClear: (mask) => g().clear(mask),
+      glClearColor: (r, gr, b, a) => g().clearColor(r, gr, b, a),
+      glCompileShader: (id) => g().compileShader(c().get(id)),
+      glCopyTexSubImage2D: (target, level, x0, y0, x, y, w, h) => g().copyTexSubImage2D(target, level, x0, y0, x, y, w, h),
+      glCreateProgram: () => c().add(g().createProgram()),
+      glCreateShader: (kind) => c().add(g().createShader(kind)),
+      glDeleteBuffers: del((o) => g().deleteBuffer(o)),
+      glDeleteFramebuffers: del((o) => g().deleteFramebuffer(o)),
+      glDeleteProgram: (id) => {
+        const o = c().get(id);
+        if (o) g().deleteProgram(o);
+        if (id) c().objects[id] = null;
+      },
+      glDeleteSamplers: del((o) => g().deleteSampler(o)),
+      glDeleteShader: (id) => {
+        const o = c().get(id);
+        if (o) g().deleteShader(o);
+        if (id) c().objects[id] = null;
+      },
+      glDeleteTextures: del((o) => g().deleteTexture(o)),
+      glDeleteVertexArrays: del((o) => g().deleteVertexArray(o)),
+      glDisable: (cap) => g().disable(cap),
+      glDrawArrays: (mode, first, count) => g().drawArrays(mode, first, count),
+      glDrawArraysInstanced: (mode, first, count, n) => g().drawArraysInstanced(mode, first, count, n),
+      glEnable: (cap) => g().enable(cap),
+      glFlush: () => g().flush(),
+      glFramebufferTexture2D: (target, attachment, textarget, id, level) => g().framebufferTexture2D(target, attachment, textarget, c().get(id), level),
+      glGenBuffers: gen(() => g().createBuffer()),
+      glGenFramebuffers: gen(() => g().createFramebuffer()),
+      glGenSamplers: gen(() => g().createSampler()),
+      glGenTextures: gen(() => g().createTexture()),
+      glGenVertexArrays: gen(() => g().createVertexArray()),
+      glGetError: () => g().getError(),
+      glGetIntegerv: (name, out) => {
+        const gl = g();
+        const largest = gl.getParameter(GL.MAX_TEXTURE_SIZE) | 0;
+        const value = name === GL.MAX_TEXTURE_BUFFER_SIZE ? Math.min(TBO_WIDTH * largest, 1 << 27) : gl.getParameter(name) | 0;
+        rt.dv().setInt32(out, value, true);
+      },
+      glGetProgramInfoLog: (id, capacity, length, out) => writeString(g().getProgramInfoLog(c().get(id)) || "", capacity, length, out),
+      glGetProgramiv: (id, name, out) => rt.dv().setInt32(out, g().getProgramParameter(c().get(id), name) ? 1 : 0, true),
+      glGetShaderInfoLog: (id, capacity, length, out) => writeString(g().getShaderInfoLog(c().get(id)) || "", capacity, length, out),
+      glGetShaderiv: (id, name, out) => rt.dv().setInt32(out, g().getShaderParameter(c().get(id), name) ? 1 : 0, true),
+      glGetUniformBlockIndex: (id, name) => g().getUniformBlockIndex(c().get(id), cstr(name)) | 0,
+      glGetUniformLocation: (id, name) => {
+        const found = g().getUniformLocation(c().get(id), cstr(name));
+        if (!found) return -1;
+        c().locations.push(found);
+        return c().locations.length - 1;
+      },
+      glLinkProgram: (id) => g().linkProgram(c().get(id)),
+      glPixelStorei: (name, value) => {
+        const ctx = c();
+        if (name === GL.UNPACK_ROW_LENGTH) ctx.unpack.row = value;
+        else if (name === GL.UNPACK_ALIGNMENT) ctx.unpack.align = value;
+        else if (name === GL.PACK_ROW_LENGTH) ctx.pack.row = value;
+        else if (name === GL.PACK_ALIGNMENT) ctx.pack.align = value;
+        ctx.gl.pixelStorei(name, value);
+      },
+      glReadPixels: (x, y, w, h, format, type, ptr) => {
+        const ctx = c();
+        const view = new Uint8Array(rt.memory.buffer, ptr, ctx.span(ctx.pack, w, h, 4));
+        ctx.gl.readPixels(x, y, w, h, format === GL.BGRA ? GL.RGBA : format, type, view);
+        if (format !== GL.BGRA) return;
+        const row = Math.ceil((ctx.pack.row || w) * 4 / ctx.pack.align) * ctx.pack.align;
+        for (let r = 0; r < h; r++)
+          for (let i = r * row; i < r * row + w * 4; i += 4) {
+            const b = view[i];
+            view[i] = view[i + 2];
+            view[i + 2] = b;
+          }
+      },
+      glSamplerParameterfv: () => {},
+      glSamplerParameteri: (id, name, value) => g().samplerParameteri(c().get(id), name, wrap(value)),
+      glScissor: (x, y, w, h) => g().scissor(x, y, w, h),
+      glShaderSource: (id, count, sources, lengths) => {
+        const dv = rt.dv();
+        let text = "";
+        for (let i = 0; i < count; i++) {
+          const ptr = dv.getUint32(sources + i * 4, true);
+          const length = lengths ? dv.getInt32(lengths + i * 4, true) : -1;
+          text += length >= 0 ? decoder.decode(rt.u8().subarray(ptr, ptr + length)) : cstr(ptr);
+        }
+        g().shaderSource(c().get(id), esShader(text));
+      },
+      glTexBuffer: (target, format, buffer) => {
+        const ctx = c();
+        const id = ctx.unitBuffer[ctx.unit];
+        if (!id) return;
+        ctx.texBuffers.set(id, { buffer, format, version: -1 });
+        ctx.sync(id);
+      },
+      glTexImage2D: (target, level, internal, w, h, border, format, type, ptr) => {
+        const ctx = c();
+        const { format: f, data } = ctx.upload(format, w, h, ptr);
+        ctx.gl.texImage2D(target === GL.TEXTURE_BUFFER ? GL.TEXTURE_2D : target, level, internal, w, h, border, f, type, data);
+      },
+      glTexParameteri: (target, name, value) => g().texParameteri(target === GL.TEXTURE_BUFFER ? GL.TEXTURE_2D : target, name, wrap(value)),
+      glTexSubImage2D: (target, level, x, y, w, h, format, type, ptr) => {
+        const ctx = c();
+        const { format: f, data } = ctx.upload(format, w, h, ptr);
+        ctx.gl.texSubImage2D(target, level, x, y, w, h, f, type, data);
+      },
+      glUniform1f: (l, v) => g().uniform1f(loc(l), v),
+      glUniform1fv: (l, n, ptr) => g().uniform1fv(loc(l), new Float32Array(rt.memory.buffer, ptr, n)),
+      glUniform1i: (l, v) => g().uniform1i(loc(l), v),
+      glUniform1uiv: (l, n, ptr) => g().uniform1uiv(loc(l), new Uint32Array(rt.memory.buffer, ptr, n)),
+      glUniform2f: (l, x, y) => g().uniform2f(loc(l), x, y),
+      glUniform3f: (l, x, y, z) => g().uniform3f(loc(l), x, y, z),
+      glUniform4f: (l, x, y, z, w) => g().uniform4f(loc(l), x, y, z, w),
+      glUniform4fv: (l, n, ptr) => g().uniform4fv(loc(l), new Float32Array(rt.memory.buffer, ptr, n * 4)),
+      glUniform4ui: (l, x, y, z, w) => g().uniform4ui(loc(l), x, y, z, w),
+      glUniform4uiv: (l, n, ptr) => g().uniform4uiv(loc(l), new Uint32Array(rt.memory.buffer, ptr, n * 4)),
+      glUniformBlockBinding: (id, block, binding) => g().uniformBlockBinding(c().get(id), block, binding),
+      glUseProgram: (id) => g().useProgram(c().get(id)),
+      glViewport: (x, y, w, h) => g().viewport(x, y, w, h),
+    };
+  }
+
   class Runtime {
     constructor(options) {
       this.options = options;
@@ -89,7 +473,7 @@ body>.ziggurat-window{position:fixed}
     }
 
     async start(source) {
-      const imports = { wasi_snapshot_preview1: this.wasi(), ziggurat: this.host(), env: this.desktop() };
+      const imports = { wasi_snapshot_preview1: this.wasi(), ziggurat: Object.assign(this.host(), glImports(this)), env: this.desktop() };
       const response = typeof source === "string" ? fetch(source) : source;
       let result;
       if (WebAssembly.instantiateStreaming && typeof source === "string") {
@@ -404,8 +788,7 @@ body>.ziggurat-window{position:fixed}
         zw_window_capture: (id, out) => {
           const win = rt.windows.get(id);
           if (!win || !win.canvas.width || !win.canvas.height) return 0;
-          const ctx = win.ctx;
-          const data = ctx.getImageData(0, 0, win.canvas.width, win.canvas.height).data;
+          const data = rt.canvasPixels(win);
           const ptr = rt.exports.ziggurat_alloc(data.length);
           if (!ptr) return 0;
           rt.u8().set(data, ptr);
@@ -883,7 +1266,10 @@ body>.ziggurat-window{position:fixed}
         el,
         canvas,
         input,
-        ctx: canvas.getContext("2d", { alpha: (flags & 1) !== 0 }),
+        // The canvas's 2D context, taken at the first frame drawn in
+        // memory, or the WebGL2 one of the OpenGL renderer (glc).
+        ctx: null,
+        glc: null,
         title,
         transparent: (flags & 1) !== 0,
         focusOnShow: (flags & 4) !== 0,
@@ -1004,9 +1390,63 @@ body>.ziggurat-window{position:fixed}
     }
     // Shows a frame drawn in memory: premultiplied BGRA to the straight
     // RGBA of ImageData.
+    // The canvas's 2D context, unless WebGL2 has it.
+    context2d(win) {
+      if (!win.ctx && !win.glc) win.ctx = win.canvas.getContext("2d", { alpha: win.transparent });
+      return win.ctx;
+    }
+    // The canvas's pixels as straight RGBA rows from the top.
+    canvasPixels(win) {
+      // Nothing shown yet: the context is left for the first frame to take.
+      if (!win.glc && !win.ctx) return new Uint8ClampedArray(win.canvas.width * win.canvas.height * 4);
+      if (!win.glc) return win.ctx.getImageData(0, 0, win.canvas.width, win.canvas.height).data;
+      const scratch = document.createElement("canvas");
+      scratch.width = win.canvas.width;
+      scratch.height = win.canvas.height;
+      const ctx = scratch.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(win.canvas, 0, 0);
+      return ctx.getImageData(0, 0, scratch.width, scratch.height).data;
+    }
+    // zgl_attach: the canvas of window id draws with WebGL2 from now on,
+    // when it has it and has not shown a frame with its 2D context, and
+    // the page did not ask for the software renderer (options.renderer
+    // "2d"). A lost context is restored by the browser when it can: the
+    // renderer then makes its objects again and draws the whole frame.
+    glAttach(id) {
+      const win = this.windows.get(id);
+      if (!win) return 0;
+      if (win.glc) return 1;
+      if (win.ctx || this.options.renderer === "2d" || !win.canvas.getContext) return 0;
+      let gl = null;
+      try {
+        gl = win.canvas.getContext("webgl2", { alpha: win.transparent, premultipliedAlpha: true, preserveDrawingBuffer: true, antialias: false, depth: false, stencil: false });
+      } catch (err) {
+        gl = null;
+      }
+      if (!gl) return 0;
+      const ctx = new GLContext(this, win, gl);
+      win.glc = ctx;
+      win.canvas.addEventListener("webglcontextlost", (e) => {
+        e.preventDefault();
+        ctx.lost = true;
+      });
+      win.canvas.addEventListener("webglcontextrestored", () => {
+        ctx.reset();
+        ctx.lost = false;
+        ctx.generation++;
+        this.requestFrame(win, true);
+      });
+      return 1;
+    }
     present(id, pixels, width, height, stride, transparent) {
       const win = this.windows.get(id);
       if (!win || !width || !height) return;
+      if (win.glc) {
+        win.glc.present(pixels, width, height, stride);
+        if (this.options.onFrame) this.options.onFrame(win);
+        return;
+      }
+      this.context2d(win);
       if (!win.image || win.image.width !== width || win.image.height !== height) win.image = win.ctx.createImageData(width, height);
       const out = new Uint32Array(win.image.data.buffer);
       const src = new Uint32Array(this.memory.buffer, pixels, (stride / 4) * height);
