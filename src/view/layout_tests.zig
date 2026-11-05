@@ -72,3 +72,40 @@ test "z-index paints siblings in its order, and Tab reads them as built" {
     context.input_state.tabDirection(true);
     try testing.expectEqual(two, context.input_state.focused.?);
 }
+
+const Timeline = struct {
+    model: view.ScrollModel = .{},
+    fn build(self: *Timeline, v: *View) anyerror!void {
+        try v.scroll(&self.model, .{ .height = 100 });
+        for ([_][]const u8{ "Monday", "Tuesday" }) |day| {
+            try v.column(.{ .key = view.key(day) });
+            try v.text(day, .{ .height = 20, .sticky = .{ .top = 0 }, .background = 0xffffff });
+            for (0..6) |i| try v.textf("{s} event {d}", .{ day, i }, .{ .height = 20 });
+            try v.end();
+        }
+        try v.end();
+    }
+};
+
+test "a sticky heading stays at the top of its scroll container until the next section pushes it out" {
+    var storage: Storage = .{};
+    var app: Timeline = .{};
+    var h = Harness.init(&app, Timeline.build, storage.buffers(), .{});
+    try h.render();
+    const top = (try h.boundsOf(.{ .kind = .scroll })).y;
+    try testing.expectEqual(top, (try h.boundsOf(.{ .text = "Monday" })).y);
+    // Scrolled 50 into Monday's 140: its heading stays at the top.
+    app.model.offset.y = 50;
+    try h.render();
+    try testing.expectEqual(top, (try h.boundsOf(.{ .text = "Monday" })).y);
+    try testing.expectEqual(top + 90, (try h.boundsOf(.{ .text = "Tuesday" })).y);
+    // At 130, Monday's last 10 are in view: Tuesday pushes its heading up.
+    app.model.offset.y = 130;
+    try h.render();
+    try testing.expectEqual(top - 10, (try h.boundsOf(.{ .text = "Monday" })).y);
+    try testing.expectEqual(top + 10, (try h.boundsOf(.{ .text = "Tuesday" })).y);
+    // Further on, Tuesday's sticks.
+    app.model.offset.y = 170;
+    try h.render();
+    try testing.expectEqual(top, (try h.boundsOf(.{ .text = "Tuesday" })).y);
+}

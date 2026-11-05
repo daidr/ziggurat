@@ -314,12 +314,30 @@ pub const Style = struct {
     /// all inside it, still clipped by its parent. The layout and the order
     /// Tab moves the focus in still follow the build.
     z_index: i16 = 0,
+    /// Keep the node in the flow, where it takes its room, and hold it
+    /// inside the scroll container around it (or the window) while its
+    /// parent is in view, as CSS's `position: sticky`; see `Sticky`. A
+    /// sticky node paints over its siblings, so give it a background.
+    sticky: ?Sticky = null,
     /// Build the node's descendants with another theme: they measure with
     /// its metrics and paint with its colors, and the node paints its
     /// background unless `background` is set, as the window's root does.
     /// Popovers, menus and dialogs opened inside take it too. The theme is
     /// borrowed until the pass is painted. See `View.themed`.
     theme: ?*const Theme = null,
+};
+
+/// How far in from the edges of the scroll container around it (or the
+/// window) a `Style.sticky` node stays, in DIP. It goes no further than
+/// its parent's content box, so as its parent scrolls away it takes the
+/// node along, and the next parent's comes up in its place, as a day's
+/// heading in a timeline is pushed out by the next. With both insets of
+/// an axis set and too little room for both, `top` and `left` win.
+pub const Sticky = struct {
+    top: ?f32 = null,
+    right: ?f32 = null,
+    bottom: ?f32 = null,
+    left: ?f32 = null,
 };
 
 /// How `Style.clip_inset` cuts a node's box: by `top`, `right`, `bottom`
@@ -1799,7 +1817,7 @@ pub const View = struct {
             else => parent.semantic_parent,
         }, .rtl = if (style.direction) |value| value == .rtl else parent.rtl, .field = if (parent.kind == .field) parent_index else parent.field, .collection = if (parent.kind == .tree or parent.kind == .table) parent_index else parent.collection, .row = if (parent.kind == .table_row) parent_index else parent.row, .concealed = style.hidden or parent.concealed, .passthrough = style.ignore_input or parent.passthrough, .access_hidden = style.access_hidden or parent.access_hidden, .theme = style.theme orelse parent.theme };
         if (parent.last_child == none) parent.first_child = index else self.buffers.nodes[parent.last_child].next_sibling = index;
-        if (style.z_index != 0) parent.z_order = true;
+        if (style.z_index != 0 or style.sticky != null) parent.z_order = true;
         parent.last_child = index;
         parent.child_count += 1;
         self.len += 1;
@@ -4522,6 +4540,7 @@ pub const View = struct {
             self.reveal = null;
             if (try self.revealNode(id)) try self.place();
         }
+        self.holdSticky();
         self.record(measurer);
         // Animated poses and shared elements move what is drawn, not the
         // arranged boxes input routing just recorded.
@@ -5050,6 +5069,46 @@ pub const View = struct {
                 if (all[child].floats() and !all[child].concealed) all[child].bounds = self.floatingBounds(&all[child]);
             }
         }
+    }
+
+    /// Move each `Style.sticky` node, with what is inside it, to stay
+    /// within the scroll container around it, or the window, and its
+    /// parent's content box.
+    fn holdSticky(self: *View) void {
+        const all = self.buffers.nodes[0..self.len];
+        for (all, 0..) |*node, index| {
+            const sticky = node.style.sticky orelse continue;
+            if (node.hidden() or node.floats() or node.parent == none) continue;
+            var outer = node.parent;
+            while (outer != none and all[outer].kind != .scroll) outer = all[outer].parent;
+            const view_box = if (outer != none) all[outer].bounds else all[0].bounds;
+            const parent = &all[node.parent];
+            const p = parent.style.padding;
+            const room: Rect = .{ .x = parent.bounds.x + p.left, .y = parent.bounds.y + p.top, .width = @max(0, parent.bounds.width - p.left - p.right), .height = @max(0, parent.bounds.height - p.top - p.bottom) };
+            const b = node.bounds;
+            const dx = stickyShift(b.x, b.width, view_box.x, view_box.width, room.x, room.width, sticky.left, sticky.right);
+            const dy = stickyShift(b.y, b.height, view_box.y, view_box.height, room.y, room.height, sticky.top, sticky.bottom);
+            if (dx == 0 and dy == 0) continue;
+            for (all[index..node.end]) |*inner| {
+                inner.bounds.x += dx;
+                inner.bounds.y += dy;
+            }
+        }
+    }
+    /// How far a sticky box at `at` of `size` moves along one axis to stay
+    /// `lead` in from the view's start or `trail` in from its end, within
+    /// its parent's content `room`.
+    fn stickyShift(at: f32, size: f32, view_at: f32, view_size: f32, room_at: f32, room_size: f32, lead: ?f32, trail: ?f32) f32 {
+        var shift: f32 = 0;
+        if (trail) |gap| {
+            const limit = view_at + view_size - gap;
+            if (at + size > limit) shift = @max(limit - (at + size), @min(0, room_at - at));
+        }
+        if (lead) |gap| {
+            const limit = view_at + gap;
+            if (at + shift < limit) shift = @min(limit - at, @max(0, room_at + room_size - (at + size)));
+        }
+        return if (std.math.isFinite(shift)) shift else 0;
     }
 
     /// A popup below its anchor, or above when there is more room there,
@@ -5824,7 +5883,7 @@ pub const View = struct {
         while (child != none and count < order.len) : (child = all[child].next_sibling) {
             // Stable insertion by z-index.
             var j = count;
-            while (j > 0 and all[order[j - 1]].style.z_index > all[child].style.z_index) : (j -= 1) order[j] = order[j - 1];
+            while (j > 0 and zKey(&all[order[j - 1]]) > zKey(&all[child])) : (j -= 1) order[j] = order[j - 1];
             order[j] = child;
             count += 1;
         }
@@ -5842,6 +5901,11 @@ pub const View = struct {
             try self.paintRange(target, window_theme, at, all[at].end, floating, floating_len, lifted);
         }
         if (frame) target.setTabRange(@intCast(range[0] + span), range[1]);
+    }
+    /// Where a child paints among its siblings: by z-index, and a sticky
+    /// one over the others of its z-index.
+    fn zKey(node: *const Node) i32 {
+        return @as(i32, node.style.z_index) * 2 + @intFromBool(node.style.sticky != null);
     }
     fn childPosition(self: *const View, parent: usize, index: u32) usize {
         const all = self.buffers.nodes[0..self.len];
