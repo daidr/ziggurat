@@ -14,7 +14,7 @@
 ## 窗口与绘制
 
 - 窗口画在页面画布上：有 `id="ziggurat"` 的元素时填满它，否则填满整页。后打开的窗口盖住先前的；尺寸、位置、最小最大尺寸与标题栏选项不起作用，页面标题取最后打开的窗口的标题。窗口能力报告不支持客户区定位，因此[窗口位置恢复](window-placement.md)返回 `UnsupportedCapability`。
-- 绘制用内存软件渲染器，按设备像素比渲染，经 2D canvas 呈现，只在有变化的浏览器帧重画。WebGL 2 渲染器尚未接入。
+- 绘制按设备像素比进行，只在有变化的浏览器帧重画。画布有 WebGL2 时用 OpenGL 渲染器：与 Linux 是同一份 `src/ui/gl_renderer.c` 和同一套着色器，只是 OpenGL 调用经 `src/ui/gl_web.h` 由页面在画布的 WebGL2 上下文上执行。页面补上 WebGL2（OpenGL ES 3.0）缺的部分：纹理缓冲用宽 1024 的浮点 2D 纹理代替，BGRA 上传和读回在页面里交换通道，透明边框钳制改为边缘钳制并在着色器里把遮罩外读成透明，`#version 330 core` 换成 `#version 300 es`。帧画进渲染器保留的帧缓冲，再整幅复制到画布；文字仍由浏览器绘制（与软件渲染器同一条路径），所以两种渲染器画出的文字相同。上下文丢失时页面阻止默认行为、这期间不出帧，浏览器恢复上下文后渲染器重建着色器和对象，已上传的图片与遮罩在之后的帧里重新上传，并重画整帧。画布没有 WebGL2（或 `Ziggurat.run(app, { renderer: "2d" })` 要求软件渲染）时回退为内存软件渲染器，经 2D canvas 呈现；同一画布一旦取了 2D 上下文就不再尝试 WebGL2。个别帧落到软件渲染器时（例如尚未上传的图片），像素经 WebGL2 显示在同一画布上。
 - 文字由浏览器测量、分段（`Intl.Segmenter`）与绘制，字体为 `system-ui` 等 CSS 字体族并由浏览器回退与整形；断行在 Zig 侧按浏览器给出的断点贪心进行。没有子像素抗锯齿；系统文字轮廓不可用（`ZTL_UNSUPPORTED_OUTLINE`）。声明式视图在浏览器里默认用浏览器测量文字。
 
 ## 输入
@@ -39,4 +39,4 @@
 
 ## 验证
 
-CI 的 Linux 任务构建全部浏览器示例，用 `tests/web/imports.py` 确认每个 wasm 只导入页面提供的函数（否则页面启动即 LinkError），并用 `tests/web/smoke.py` 在无头 Chromium 中运行 `browser-smoke`：检查页面标题、Router 与地址片段、点击后的像素、history 前进后退和右键 HTML 菜单，并在启动时确认单实例、更新和窗口位置的浏览器行为。Chromium 取 PATH 上的真实 chromium，否则由 `scripts/ci-chrome.sh` 下载固定版本的 Chrome for Testing 无头 shell 并缓存；本地找不到 Chromium 时跳过。
+CI 的 Linux 任务构建全部浏览器示例，用 `tests/web/imports.py` 确认每个 wasm 只导入页面提供的函数（否则页面启动即 LinkError），并用 `tests/web/smoke.py` 在无头 Chromium（无 GPU 时为 SwiftShader）中把 `browser-smoke` 运行两遍：一遍用 WebGL2 渲染器，确认帧都由 OpenGL 画出、没有落到内存，并用 `WEBGL_lose_context` 丢失再恢复上下文后重画；一遍强制软件渲染器。每遍检查页面标题、Router 与地址片段、点击后的像素、history 前进后退和右键 HTML 菜单，并在启动时确认单实例、更新和窗口位置的浏览器行为。Chromium 取 PATH 上的真实 chromium，否则由 `scripts/ci-chrome.sh` 下载固定版本的 Chrome for Testing 无头 shell 并缓存；本地找不到 Chromium 时跳过。

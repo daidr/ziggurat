@@ -25,10 +25,14 @@
     }
     fail("timed out waiting for " + what);
   };
+  // The renderer the page asks for: "webgl2" (the OpenGL renderer on
+  // WebGL2, which must start) or "2d" (the software renderer).
+  const renderer = new URLSearchParams(location.search).get("renderer") || "webgl2";
+  let runtime = null;
+  const win = () => runtime && [...runtime.windows.values()][0];
   // Pixels near a color in the window's canvas.
   const count = (rgb) => {
-    const canvas = document.querySelector(".ziggurat-window canvas");
-    const data = canvas.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, canvas.width, canvas.height).data;
+    const data = runtime.canvasPixels(win());
     const r = rgb >> 16, g = (rgb >> 8) & 255, b = rgb & 255;
     let n = 0;
     for (let i = 0; i < data.length; i += 4) if (Math.abs(data[i] - r) < 24 && Math.abs(data[i + 1] - g) < 24 && Math.abs(data[i + 2] - b) < 24) n++;
@@ -45,9 +49,27 @@
   const blue = 0x276aa5, orange = 0xa8530f;
   try {
     window.addEventListener("error", (e) => fail("page error: " + e.message));
-    const started = await Ziggurat.run("app.wasm");
+    const started = await Ziggurat.run("app.wasm", { renderer });
     if (!started.running) fail("the app exited: " + JSON.stringify(started));
-    await until("the first frame", () => document.querySelector(".ziggurat-window canvas") && count(blue) > 20);
+    runtime = started.runtime;
+    await until("the first frame", () => win() && win().canvas.width > 0 && count(blue) > 20);
+    const drawn = win().glc ? "webgl2" : "2d";
+    if (drawn !== renderer) fail("the window draws with " + drawn + ", not " + renderer);
+    const glFrames = () => (win().glc ? win().glc.frames : 0);
+    if (renderer === "webgl2") {
+      if (!glFrames() || win().glc.memoryFrames) fail("frames: " + glFrames() + " drawn with WebGL2, " + win().glc.memoryFrames + " in memory");
+      const before = glFrames();
+      // A lost context draws nothing until the browser restores it; the
+      // renderer then makes its objects again and draws the frame.
+      const lose = win().glc.gl.getExtension("WEBGL_lose_context");
+      if (!lose) fail("no WEBGL_lose_context");
+      lose.loseContext();
+      await until("the context to be lost", () => win().glc.lost);
+      lose.restoreContext();
+      await until("the context to be restored", () => !win().glc.lost && win().glc.generation === 1);
+      runtime.requestFrame(win(), true);
+      await until("a frame after the restore", () => glFrames() > before && count(blue) > 20);
+    }
     if (document.title !== "Ziggurat smoke") fail("page title " + document.title);
     await until("the router to claim the fragment", () => location.hash === "#/");
     click(148, 44);
@@ -70,6 +92,7 @@
     await frames(2);
     document.querySelector(".ziggurat-menu > li[role=menuitem]").click();
     await until("the menu's choice", () => document.title === "Menu: Add ten" && !document.querySelector(".ziggurat-menu"));
+    if (renderer === "webgl2" && win().glc.memoryFrames) fail(win().glc.memoryFrames + " frames drawn in memory");
     report("PASS");
   } catch (err) {
     report("FAIL: " + (err && err.stack ? err.stack : err));

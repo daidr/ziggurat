@@ -1,5 +1,8 @@
 //! The Linux GPU renderer: replays a frame's commands with OpenGL 3.3
-//! (src/ui/gl_renderer.c).
+//! (src/ui/gl_renderer.c). Browsers draw with it on a canvas's WebGL2
+//! (src/ui/gl_web.h, web/ziggurat.js), and fall back to the software
+//! renderer where a page has none; a context the browser restores after a
+//! loss makes the renderer upload its images again.
 //!
 //! A window's frames are drawn as GtkGLArea draws its own: with a GDK
 //! OpenGL context of the window's drawing area, into a framebuffer the
@@ -77,6 +80,7 @@ extern fn zglr_read_front(*anyopaque, [*]u32, u32, u32) c_int;
 extern fn zglr_destroy(?*anyopaque) void;
 extern fn zglr_live_objects() u32;
 extern fn zglr_probe() c_int;
+extern fn zglr_restored(*anyopaque) c_int;
 extern fn zglr_probe_renderer() [*:0]const u8;
 extern fn zglr_begin(*anyopaque, ?*anyopaque, u32, u32, f32, c_int) c_int;
 extern fn zglr_begin_offscreen(*anyopaque, u32, u32, f32, c_int) c_int;
@@ -352,6 +356,9 @@ pub const Renderer = struct {
         _ = try geometry.validateSurface(paint.size.width, paint.size.height, paint.size.scale);
         const scope = try self.enterDomain();
         errdefer self.leaveDomain(scope);
+        // A browser restored the window's lost context: what was uploaded
+        // went with it, and is uploaded again as frames draw it.
+        if (zglr_restored(native) != 0) self.images.clear();
         switch (zglr_begin(native, paint.native_window, paint.size.width, paint.size.height, paint.size.scale, @intFromBool(paint.transparent))) {
             0 => {},
             1 => return error.NoSurface,

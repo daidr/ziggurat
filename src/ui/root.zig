@@ -13,17 +13,19 @@ pub const SoftwareRenderer = gdi.Renderer;
 const build_options = @import("ziggurat_ui_options");
 pub const d3d11 = if (builtin.os.tag == .windows) @import("d3d11.zig") else struct {};
 pub const metal = if (builtin.os.tag == .macos) @import("metal.zig") else struct {};
-pub const gl = if (builtin.os.tag == .linux and build_options.gpu) @import("gl.zig") else struct {};
+/// OpenGL: Linux's GTK and EGL contexts, and a browser's WebGL2.
+const gl_renderer = (builtin.os.tag == .linux or builtin.os.tag == .wasi) and build_options.gpu;
+pub const gl = if (gl_renderer) @import("gl.zig") else struct {};
 /// The `-Dgpu=true` renderer: D3D11 on Windows, Metal on macOS, OpenGL on
 /// Linux.
-pub const GpuRenderer = if (builtin.os.tag == .windows) d3d11.Renderer else if (builtin.os.tag == .macos) metal.Renderer else if (builtin.os.tag == .linux and build_options.gpu) gl.Renderer else void;
-const GpuOptions = if (builtin.os.tag == .windows) d3d11.Options else if (builtin.os.tag == .macos) metal.Options else if (builtin.os.tag == .linux and build_options.gpu) gl.Options else struct {};
+pub const GpuRenderer = if (builtin.os.tag == .windows) d3d11.Renderer else if (builtin.os.tag == .macos) metal.Renderer else if (gl_renderer) gl.Renderer else void;
+const GpuOptions = if (builtin.os.tag == .windows) d3d11.Options else if (builtin.os.tag == .macos) metal.Options else if (gl_renderer) gl.Options else struct {};
 /// Whether the GPU renderer holds its own layer planes (groups, transforms
 /// and Gaussian filters). Without them a frame using one draws in software.
 const gpu_layers = build_options.gpu and builtin.os.tag == .windows;
 /// Whether the GPU renderer keeps its frame for the next to draw only what
 /// changed (Metal, OpenGL).
-const gpu_damage = build_options.gpu and (builtin.os.tag == .macos or builtin.os.tag == .linux);
+const gpu_damage = build_options.gpu and (builtin.os.tag == .macos or builtin.os.tag == .linux or builtin.os.tag == .wasi);
 pub const Rect = input.Rect;
 pub const layout = @import("layout.zig");
 pub const grid = @import("grid.zig");
@@ -1913,7 +1915,7 @@ pub const Context = struct {
         const gl_off = builtin.os.tag == .linux and build_options.gpu and self.gpu_domain == null and (self.gl_mode orelse gdi.glModeFromEnvironment()) == .off;
         if (gl_off) self.gpu_unavailable = true;
         if (build_options.gpu and self.render_mode != .gdi and !gl_off) {
-            const options: GpuOptions = if (comptime builtin.os.tag == .linux) .{ .driver = if (self.render_mode == .warp) .warp else .hardware, .allow_software = (self.gl_mode orelse gdi.glModeFromEnvironment()) == .on, .domain = self.gpu_domain, .native_wait_slot = &self.gpu_wait } else .{ .driver = if (self.render_mode == .warp) .warp else .hardware, .domain = self.gpu_domain, .native_wait_slot = &self.gpu_wait };
+            const options: GpuOptions = if (comptime gl_renderer) .{ .driver = if (self.render_mode == .warp) .warp else .hardware, .allow_software = (self.gl_mode orelse gdi.glModeFromEnvironment()) == .on, .domain = self.gpu_domain, .native_wait_slot = &self.gpu_wait } else .{ .driver = if (self.render_mode == .warp) .warp else .hardware, .domain = self.gpu_domain, .native_wait_slot = &self.gpu_wait };
             self.gpu_renderer.init(options) catch |err| {
                 if (self.gpu_domain != null) return err;
                 self.gpu_unavailable = true;

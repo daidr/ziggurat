@@ -1534,7 +1534,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ziggurat_images", .module = images }, .{ .name = "ziggurat_image_drawing", .module = image_drawing },
         });
     }
-    ui_options.addOption(bool, "gpu", gpu);
+    // Browsers always build the WebGL2 renderer: the page falls back to
+    // the software renderer where it has no WebGL2.
+    ui_options.addOption(bool, "gpu", gpu or target.result.cpu.arch == .wasm32);
     if (target.result.os.tag == .linux) {
         const gradient_benchmark = b.addExecutable(.{ .name = "benchmark-gradients", .root_module = b.createModule(.{
             .root_source_file = b.path("tests/gradient_benchmark.zig"),
@@ -1638,6 +1640,8 @@ pub fn build(b: *std.Build) void {
         // Browsers: the software renderer draws in memory and the page shows
         // its frames; `web/` holds the page's side.
         _ = native_support.add(b, ui, "ui-web-native", "src/ui/web.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        // The Linux OpenGL renderer on the page's WebGL2 (src/ui/gl_web.h).
+        _ = native_support.add(b, ui, "ui-gl-native", "src/ui/gl_renderer.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         ui.link_libc = true;
         addWebApp(b, addExample(b, "counter", "examples/counter.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },

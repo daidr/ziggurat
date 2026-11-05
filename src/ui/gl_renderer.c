@@ -1,4 +1,8 @@
 /* The Linux GPU renderer: the content's commands drawn with OpenGL 3.3.
+   Browsers build it too, on a canvas's WebGL2 (src/ui/gl_web.h): there a
+   window's context is the canvas's, a frame is copied to the canvas's own
+   framebuffer at its end, and text is drawn by the page as src/ui/web.c
+   draws it; the rest below is the same.
 
    A window's frames are drawn as GtkGLArea draws its own: with a GDK
    OpenGL context of the area's GdkWindow, into a framebuffer the renderer
@@ -51,12 +55,20 @@
 
    Render targets are stored bottom row first, as OpenGL draws; uploaded
    images and masks top row first. */
+#ifdef __wasm__
+/* In a browser the OpenGL is the page's WebGL2 (src/ui/gl_web.h): a
+   window's canvas has the context, text comes from the page as
+   src/ui/web.c draws it, and there is no EGL, GTK, cairo or Pango. */
+#include "gl_web.h"
+#include <limits.h>
+#else
 #define _GNU_SOURCE
 #include <gtk/gtk.h>
 #include <epoxy/egl.h>
 #include <epoxy/gl.h>
 #include <pango/pangocairo.h>
 #include <dlfcn.h>
+#endif
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -196,11 +208,21 @@ struct ZlRenderer {
     GtkWidget *toplevel;gulong damage_handler;
     int capture,shown;uint32_t *captured;uint32_t captured_width,captured_height;
     ZlStats stats;
+    /* A browser window's canvas, and the restorations of its context the
+       renderer's objects were made after. */
+    uint32_t web_window,web_generation;
 };
 
 static int live_objects;
 uint32_t zglr_live_objects(void){return (uint32_t)live_objects;}
 
+#ifdef __wasm__
+static EGLDisplay egl_display=EGL_NO_DISPLAY;
+static EGLContext egl_create(void){return EGL_NO_CONTEXT;}
+static int egl_current(EGLContext context){(void)context;return 0;}
+static void egl_release(void){}
+static void eglDestroyContext(EGLDisplay display,EGLContext context){(void)display;(void)context;}
+#else
 /* EGL: one display for the process. */
 static EGLDisplay egl_display=EGL_NO_DISPLAY;
 static EGLConfig egl_config;
@@ -232,9 +254,10 @@ static int egl_current(EGLContext context){
     return context!=EGL_NO_CONTEXT&&eglMakeCurrent(egl_display,EGL_NO_SURFACE,EGL_NO_SURFACE,context);
 }
 static void egl_release(void){if(egl_display!=EGL_NO_DISPLAY)eglMakeCurrent(egl_display,EGL_NO_SURFACE,EGL_NO_SURFACE,EGL_NO_CONTEXT);}
+#endif
 static int software_name(const char *name){
     if(!name)return 0;
-    char lower[256];size_t n=0;for(;name[n]&&n+1<sizeof(lower);n++)lower[n]=(char)g_ascii_tolower(name[n]);lower[n]=0;
+    char lower[256];size_t n=0;for(;name[n]&&n+1<sizeof(lower);n++)lower[n]=(char)(name[n]>='A'&&name[n]<='Z'?name[n]+32:name[n]);lower[n]=0;
     return strstr(lower,"llvmpipe")||strstr(lower,"softpipe")||strstr(lower,"swrast")||strstr(lower,"software rasterizer");
 }
 
@@ -242,10 +265,14 @@ static int software_name(const char *name){
    context is made current again every time, as anything else drawing with
    OpenGL in between (GDK's own paint, effects on EGL) leaves another. */
 static int current(ZlRenderer *s){
+#ifdef __wasm__
+    if(s->backend==1){uint32_t generation=0;return zgl_current(s->web_window,&generation)!=0||generation!=s->web_generation;}
+#else
     if(s->backend==1){
         if(!s->gdk)return 1;
         gdk_gl_context_clear_current();gdk_gl_context_make_current(s->gdk);return 0;
     }
+#endif
     if(s->backend==2){
         EGLContext context=s->domain?s->domain->context:s->egl;
         return egl_current(context)?0:1;
@@ -507,7 +534,7 @@ static int make_target(ZlTarget *t,uint32_t width,uint32_t height){
 static void drop_image(ZlImage *image){if(image->texture)glDeleteTextures(1,&image->texture);memset(image,0,sizeof(*image));}
 static void drop_text(ZlRenderer *s,ZlText *t){
     if(t->texture)glDeleteTextures(1,&t->texture);
-    s->text_bytes-=(size_t)t->width*t->height*4;g_free(t->bytes);memset(t,0,sizeof(*t));
+    s->text_bytes-=(size_t)t->width*t->height*4;free(t->bytes);memset(t,0,sizeof(*t));
 }
 
 /* What a renderer made with its context. */
@@ -546,7 +573,11 @@ static void drop_objects(ZlRenderer *s){
 }
 /* The programs and objects every frame uses, in the current context. */
 static int create_objects(ZlRenderer *s){
+#ifdef __wasm__
+    char name[128];name[zgl_renderer(name,sizeof(name)-1)]=0;
+#else
     const char *name=(const char *)glGetString(GL_RENDERER);
+#endif
     s->software=software_name(name);
     glGetIntegerv(GL_MAX_TEXTURE_SIZE,&s->max_texture);glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE,&s->max_texels);
     s->main.program=link_program(vertex_source,fragment_source);
@@ -641,15 +672,50 @@ void zglr_destroy(void *p){
     leave(s);
     if(s->domain){ZlRenderer **link=&s->domain->renderers;while(*link&&*link!=s)link=&(*link)->domain_next;if(*link)*link=s->domain_next;}
     if(s->owns_egl&&s->egl!=EGL_NO_CONTEXT)eglDestroyContext(egl_display,s->egl);
+#ifndef __wasm__
     if(s->gdk){if(gdk_gl_context_get_current()==s->gdk)gdk_gl_context_clear_current();g_object_unref(s->gdk);}
     if(s->gdk_window)g_object_remove_weak_pointer(G_OBJECT(s->gdk_window),(gpointer *)&s->gdk_window);
     if(s->memory)cairo_surface_destroy(s->memory);
     if(s->layout)g_object_unref(s->layout);
     if(s->font)pango_font_description_free(s->font);
+#endif
     free(s->instances);free(s->batches);free(s->runs);free(s->slots);free(s->captured);free(s->words);
     free(s);live_objects--;
 }
 
+#ifdef __wasm__
+/* A browser draws with WebGL2 wherever the page has it: what it runs on
+   is the browser's to choose. */
+int zglr_probe(void){return 1;}
+const char *zglr_probe_renderer(void){return "WebGL2";}
+static void disconnect_damage(ZlRenderer *s){(void)s;}
+uint64_t zglr_test_damage(int32_t *out){memset(out,0,4*sizeof(int32_t));return 0;}
+/* The window's context, made at its first frame and made again once the
+   page restores it after a loss. 0, 2 failed or lost, 5 the frame draws in
+   memory (the page has no WebGL2). */
+static int window_context(ZlRenderer *s,void *native_window){
+    uint32_t id=(uint32_t)(uintptr_t)native_window;
+    if(s->failed)return 5;
+    if(s->backend==1&&s->web_window==id){
+        uint32_t generation=0;
+        if(zgl_current(id,&generation))return 2;
+        if(generation==s->web_generation)return 0;
+        /* Restored after a loss: the old objects are gone with it. */
+        drop_objects(s);
+        s->web_generation=generation;s->lost=0;
+        if(!create_objects(s)){drop_objects(s);s->failed=1;return 5;}
+        s->stats.device_creations++;s->stats.device_losses++;
+        return 0;
+    }
+    if(!zgl_attach(id)){s->failed=1;return 5;}
+    uint32_t generation=0;
+    if(zgl_current(id,&generation))return 2;
+    s->backend=1;s->web_window=id;s->web_generation=generation;
+    if(!create_objects(s)){drop_objects(s);s->backend=0;s->failed=1;return 5;}
+    s->stats.context_creations++;s->stats.device_creations++;
+    return 0;
+}
+#else
 /* Whether OpenGL contexts GDK makes draw on a GPU: asked once, with a
    context of a window of GDK's own that never shows, as a window drawing
    with OpenGL composites with it from its first context. 1 a GPU, 0 a
@@ -764,6 +830,7 @@ static int window_context(ZlRenderer *s,GtkWidget *toplevel){
     connect_damage(s,toplevel);
     return 0;
 }
+#endif
 /* An offscreen renderer's own EGL context, made at its first use. */
 static int own_context(ZlRenderer *s){
     if(s->backend)return current(s);
@@ -789,6 +856,9 @@ static void reset_frame(ZlRenderer *s){
     }
     s->frame_target_len=0;
 }
+#ifdef __wasm__
+static void layout_for(ZlRenderer *s){(void)s;}
+#else
 static void layout_for(ZlRenderer *s){
     if(s->layout&&s->layout_scale==s->scale)return;
     if(s->layout)g_object_unref(s->layout);
@@ -806,6 +876,7 @@ static void layout_for(ZlRenderer *s){
     pango_layout_set_height(s->layout,-1);
     s->layout_scale=s->scale;
 }
+#endif
 static int start_frame(ZlRenderer *s,uint32_t width,uint32_t height,float scale,int transparent){
     s->width=width;s->height=height;s->scale=scale;s->transparent=transparent;
     reset_frame(s);s->frame_serial++;s->drawing=1;layout_for(s);
@@ -954,6 +1025,49 @@ int zglr_gradient(void *p,float x,float y,float width,float height,float radius,
 }
 
 /* Text. */
+#ifdef __wasm__
+/* The CSS font of a text command, as src/ui/web.c names it. */
+static size_t css_font(char *out,size_t capacity,const char *named,float size,uint16_t weight,int italic,int monospace){
+    static const char sans[]="system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, \"Noto Sans\", sans-serif, \"Apple Color Emoji\", \"Segoe UI Emoji\"";
+    static const char mono[]="ui-monospace, SFMono-Regular, Menlo, Consolas, \"Liberation Mono\", monospace";
+    const int system=!named||!named[0]||!strcmp(named,"Sans")||!strcmp(named,"sans-serif")||!strcmp(named,"system-ui");
+    const int fixed=(monospace&&system)||(named&&(!strcmp(named,"Monospace")||!strcmp(named,"monospace")||!strcmp(named,"ui-monospace")));
+    const int serif=named&&(!strcmp(named,"Serif")||!strcmp(named,"serif")||!strcmp(named,"ui-serif"));
+    const char *families=fixed?mono:serif?"ui-serif, Georgia, \"Times New Roman\", serif":sans;
+    char quoted[160]="";
+    if(!fixed&&!serif&&!system){size_t q=0;quoted[q++]='"';for(const char *c=named;*c&&q+4<sizeof(quoted);c++)if(*c!='"'&&*c!='\\')quoted[q++]=*c;quoted[q++]='"';quoted[q++]=',';quoted[q++]=' ';quoted[q]=0;}
+    const int n=snprintf(out,capacity,"%s%u %.2fpx %s%s",italic?"italic ":"",(unsigned)(weight?weight:400),(double)size,quoted,families);
+    return n>0&&(size_t)n<capacity?(size_t)n:0;
+}
+/* Draws a text into box (bw x bh device pixels at bx0, by0) as src/ui/web.c
+   draws it: the page lays out and draws the run, its baseline on a device
+   pixel, and the run's pixels are cut to the box. */
+static uint32_t *web_text(ZlRenderer *s,double bx0,double by0,uint32_t bw,uint32_t bh,float x,float y,float width,float height,const char *text,uint32_t length,uint32_t rgb,float size,uint16_t weight,int italic,int monospace,const char *family){
+    double k=s->scale;
+    uint32_t *box=calloc((size_t)bw*bh,4);if(!box)return NULL;
+    if(!length)return box;
+    char font[512];const size_t font_length=css_font(font,sizeof(font),family,size*(float)k,weight,italic,monospace);if(!font_length){free(box);return NULL;}
+    const double pen_x=(double)x*k,fraction=pen_x-floor(pen_x);
+    double info[6]={0};
+    if(zw_text_draw(text,length,font,(uint32_t)font_length,(double)size*k,(double)width*k,fraction,rgb&0xffffff,info)){free(box);return NULL;}
+    const uint32_t w=(uint32_t)info[0],h=(uint32_t)info[1];if(!w||!h)return box;
+    uint32_t *run=malloc((size_t)w*h*4);if(!run){free(box);return NULL;}
+    zw_text_copy(run);
+    const double ascent=info[4],descent=info[5];
+    const double baseline=round((double)y*k+((double)height*k-(ascent+descent))/2+ascent);
+    const long left=(long)(floor(pen_x)+info[2]-bx0),top=(long)(baseline+info[3]-by0);
+    /* Cut to the text's rectangle, as the clip of the software renderer. */
+    const long cx0=(long)floor((double)x*k-bx0),cy0=(long)floor((double)y*k-by0),cx1=(long)ceil(((double)x+width)*k-bx0),cy1=(long)ceil(((double)y+height)*k-by0);
+    for(uint32_t row=0;row<h;row++){
+        long ty=top+(long)row;if(ty<0||ty>=(long)bh||ty<cy0||ty>=cy1)continue;
+        for(uint32_t col=0;col<w;col++){
+            long tx=left+(long)col;if(tx<0||tx>=(long)bw||tx<cx0||tx>=cx1)continue;
+            box[(size_t)ty*bw+(size_t)tx]=run[(size_t)row*w+col];
+        }
+    }
+    free(run);return box;
+}
+#else
 static void use_font(ZlRenderer *s,const char *named,float size,uint16_t weight,int italic,int monospace){
     const char *family=named&&named[0]?named:monospace?"Monospace":"Sans";
     gint absolute=(gint)(size*PANGO_SCALE+0.5f);
@@ -965,6 +1079,7 @@ static void use_font(ZlRenderer *s,const char *named,float size,uint16_t weight,
     pango_font_description_set_weight(s->font,(PangoWeight)weight);pango_font_description_set_style(s->font,style);
     pango_layout_set_font_description(s->layout,s->font);
 }
+#endif
 static uint64_t hash_bytes(uint64_t h,const void *data,size_t len){const uint8_t *b=data;for(size_t k=0;k<len;k++){h^=b[k];h*=1099511628211ull;}return h;}
 static GLuint upload_bgra(const uint8_t *pixels,uint32_t width,uint32_t height,uint32_t stride){
     GLuint texture=0;glGenTextures(1,&texture);glBindTexture(GL_TEXTURE_2D,texture);
@@ -989,7 +1104,11 @@ static ZlText *text_slot(ZlRenderer *s,size_t bytes){
 }
 int zglr_text(void *p,float x,float y,float width,float height,const char *text,uint32_t length,uint32_t rgb,float size,uint16_t weight,int italic,int monospace,const char *family){
     ZlRenderer *s=p;
+#ifdef __wasm__
+    if(!(width>=0)||width>INT_MAX/1024||length>INT_MAX||!(size>=1&&size<=1024))return 1;
+#else
     if(!(width>=0)||width>G_MAXINT/PANGO_SCALE||length>G_MAXINT||!(size>=1&&size<=1024))return 1;
+#endif
     if(!visible(s)||width<=0||height<=0)return 0;
     double k=s->scale;
     double bx0=floor((double)x*k),by0=floor((double)y*k),bx1=ceil(((double)x+width)*k),by1=ceil(((double)y+height)*k);
@@ -1014,6 +1133,12 @@ int zglr_text(void *p,float x,float y,float width,float height,const char *text,
     }
     if(entry)s->stats.text_hits++;
     else{
+#ifdef __wasm__
+        uint32_t *pixels=web_text(s,bx0,by0,bw,bh,x,y,width,height,text,length,rgb,size,weight,italic,monospace,family);
+        if(!pixels)return 2;
+        GLuint texture=upload_bgra((const uint8_t *)pixels,bw,bh,bw*4);
+        free(pixels);
+#else
         cairo_surface_t *surface=cairo_image_surface_create(CAIRO_FORMAT_ARGB32,(int)bw,(int)bh);
         if(cairo_surface_status(surface)!=CAIRO_STATUS_SUCCESS){cairo_surface_destroy(surface);return 2;}
         cairo_t *cr=cairo_create(surface);
@@ -1029,6 +1154,7 @@ int zglr_text(void *p,float x,float y,float width,float height,const char *text,
         cairo_destroy(cr);cairo_surface_flush(surface);
         GLuint texture=failed?0:upload_bgra(cairo_image_surface_get_data(surface),bw,bh,(uint32_t)cairo_image_surface_get_stride(surface));
         cairo_surface_destroy(surface);
+#endif
         if(!texture)return 2;
         s->stats.text_rasters++;
         if(whole)entry=text_slot(s,(size_t)bw*bh*4);
@@ -1040,7 +1166,7 @@ int zglr_text(void *p,float x,float y,float width,float height,const char *text,
             i->rect[0]=(float)bx0;i->rect[1]=(float)by0;i->rect[2]=(float)bx1;i->rect[3]=(float)by1;i->params[2]=KIND_TEXT;i->color[3]=1;
             return 0;
         }
-        entry->hash=h;entry->bytes=g_memdup2(text,length?length:1);entry->len=length;entry->rgb=rgb;entry->size=size;entry->weight=weight;entry->italic=italic;entry->monospace=monospace;
+        entry->hash=h;entry->bytes=malloc(length?length:1);if(entry->bytes)memcpy(entry->bytes,text,length);entry->len=length;entry->rgb=rgb;entry->size=size;entry->weight=weight;entry->italic=italic;entry->monospace=monospace;
         entry->box[0]=width;entry->box[1]=height;entry->offset[0]=offset[0];entry->offset[1]=offset[1];entry->scale=s->scale;entry->width=bw;entry->height=bh;
         snprintf(entry->family,sizeof(entry->family),"%s",named);entry->texture=texture;s->text_bytes+=(size_t)bw*bh*4;
         s->stats.text_entries=s->text_len;
@@ -1687,6 +1813,26 @@ static void keep_capture(ZlRenderer *s,const ZlTarget *target){
 /* Shows the frame in the area's draw signal (cr): with GDK, as GtkGLArea
    shows its framebuffer; with a context of EGL, read back into memory and
    painted with cairo. 0 presented, 1 not drawing, 2 failed. */
+#ifdef __wasm__
+/* Shows the frame on the window's canvas: the kept framebuffer copied to
+   the canvas's own, both bottom row first. */
+int zglr_end(void *p,cairo_t *cr){
+    (void)cr;ZlRenderer *s=p;if(!s->drawing||s->offscreen)return 1;
+    s->drawing=0;
+    int failed=encode(s,s->back.framebuffer,s->width,s->height);
+    reset_frame(s);
+    if(failed){s->back_valid=0;s->generation++;return 2;}
+    s->back_valid=1;
+    keep_capture(s,&s->back);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER,s->back.framebuffer);glBindFramebuffer(GL_DRAW_FRAMEBUFFER,0);
+    glDisable(GL_SCISSOR_TEST);
+    glBlitFramebuffer(0,0,(GLint)s->width,(GLint)s->height,0,0,(GLint)s->width,(GLint)s->height,GL_COLOR_BUFFER_BIT,GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER,0);
+    if(glGetError()!=GL_NO_ERROR)return 2;
+    s->shown=1;s->stats.presents++;
+    return 0;
+}
+#else
 int zglr_end(void *p,cairo_t *cr){
     ZlRenderer *s=p;if(!s->drawing||s->offscreen)return 1;
     s->drawing=0;
@@ -1720,6 +1866,18 @@ int zglr_end(void *p,cairo_t *cr){
     s->stats.presents++;s->stats.memory_presents++;
     return cairo_status(cr)==CAIRO_STATUS_SUCCESS?0:2;
 }
+#endif
+/* Whether the window's context was restored after a loss since the
+   renderer's objects were made: images it uploaded must be again. */
+int zglr_restored(void *p){
+#ifdef __wasm__
+    ZlRenderer *s=p;if(s->backend!=1)return 0;
+    uint32_t generation=0;if(zgl_current(s->web_window,&generation))return 0;
+    return generation!=s->web_generation;
+#else
+    (void)p;return 0;
+#endif
+}
 /* 0 drawn, 1 not drawing, 2 failed, 3 the device was lost. */
 static void domain_lose(ZlDomain *d);
 int zglr_end_offscreen(void *p,uint8_t *pixels,size_t stride){
@@ -1747,12 +1905,20 @@ size_t zgpu_domain_size(void){return sizeof(ZlDomain);}
 static int domain_create_device(ZlDomain *d){
     EGLContext context=egl_create();if(context==EGL_NO_CONTEXT)return 0;
     if(!egl_current(context)){eglDestroyContext(egl_display,context);return 0;}
+#ifdef __wasm__
+    d->software=0;
+#else
     d->software=software_name((const char *)glGetString(GL_RENDERER));
+#endif
     egl_release();
     /* A hardware domain takes a GPU; the software one takes any. */
     if(d->software&&!d->driver){
+#ifdef __wasm__
+        int forced=0;
+#else
         const char *force=getenv("ZIGGURAT_GL");
         int forced=force&&(!g_ascii_strcasecmp(force,"1")||!g_ascii_strcasecmp(force,"on")||!g_ascii_strcasecmp(force,"true")||!g_ascii_strcasecmp(force,"yes"));
+#endif
         if(!forced){eglDestroyContext(egl_display,context);return 0;}
     }
     d->context=context;d->device_creations++;return 1;
@@ -1932,6 +2098,9 @@ int zglr_suspend(void *p){((ZlRenderer *)p)->shown=0;return 0;}
 int zglr_test_shown(void *p){return ((ZlRenderer *)p)->shown;}
 /* Emits the draw signal of the window titled title's area now, into an
    image as large as it, as GTK would paint it. */
+#ifdef __wasm__
+void zglr_test_display(const char *title){(void)title;}
+#else
 void zglr_test_display(const char *title){
     GList *windows=gtk_window_list_toplevels();
     for(GList *l=windows;l;l=l->next){
@@ -1950,5 +2119,6 @@ void zglr_test_display(const char *title){
     }
     g_list_free(windows);
 }
+#endif
 /* 1 GDK's context of the window, 2 EGL, 0 none yet. */
 int zglr_test_backend(void *p){return ((ZlRenderer *)p)->backend;}
