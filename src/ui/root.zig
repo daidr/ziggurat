@@ -4119,6 +4119,21 @@ pub const Frame = struct {
         try buffer.popClip();
         self.opacity_depth -= 1;
     }
+    /// The ranks controls recorded now take in Tab's order, from `rank`
+    /// up to below `limit`; see `setTabRange`.
+    pub fn tabRange(self: *const Frame) [2]u32 {
+        const state = &self.context.input_state;
+        return .{ state.tab_rank, state.tab_limit };
+    }
+    /// Controls recorded until the next call come at `rank` in the order Tab
+    /// moves through, whatever order they are recorded in, as siblings
+    /// painted in another order than they read (`view.Style.z_index`);
+    /// ranks up to `limit` are theirs to divide among what is inside them.
+    pub fn setTabRange(self: *Frame, rank: u32, limit: u32) void {
+        const state = &self.context.input_state;
+        state.tab_rank = rank;
+        state.tab_limit = @max(rank, limit);
+    }
     /// Geometric hit/semantic clip across parent and group boundaries.
     pub fn clipBounds(self: *const Frame) ?Rect {
         var result: ?Rect = if (self.transforms) |workspace| workspace.source_bounds else null;

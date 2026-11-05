@@ -306,6 +306,14 @@ pub const Style = struct {
     placeholder: []const u8 = "",
     /// Color of that placeholder; null is the theme's muted text.
     placeholder_color: ?u32 = null,
+    /// Where the node paints among its siblings, as CSS's `z-index`: those
+    /// with a higher value paint over those with a lower one and take the
+    /// pointer first, equal ones keep the order they are built in, and a
+    /// negative value puts the node under its siblings, over its parent's
+    /// background. The order is among siblings alone: the node moves with
+    /// all inside it, still clipped by its parent. The layout and the order
+    /// Tab moves the focus in still follow the build.
+    z_index: i16 = 0,
     /// Build the node's descendants with another theme: they measure with
     /// its metrics and paint with its colors, and the node paints its
     /// background unless `background` is set, as the window's root does.
@@ -1136,6 +1144,8 @@ pub const Node = struct {
     /// layer, out of the clips and opacity around it: 1 for the one a
     /// flight leaves, under 2 for the one flying in; 0 in place.
     lifted: u8 = 0,
+    /// A child has a `Style.z_index`: the children paint sorted by it.
+    z_order: bool = false,
     parent: u32 = none,
     first_child: u32 = none,
     last_child: u32 = none,
@@ -1789,6 +1799,7 @@ pub const View = struct {
             else => parent.semantic_parent,
         }, .rtl = if (style.direction) |value| value == .rtl else parent.rtl, .field = if (parent.kind == .field) parent_index else parent.field, .collection = if (parent.kind == .tree or parent.kind == .table) parent_index else parent.collection, .row = if (parent.kind == .table_row) parent_index else parent.row, .concealed = style.hidden or parent.concealed, .passthrough = style.ignore_input or parent.passthrough, .access_hidden = style.access_hidden or parent.access_hidden, .theme = style.theme orelse parent.theme };
         if (parent.last_child == none) parent.first_child = index else self.buffers.nodes[parent.last_child].next_sibling = index;
+        if (style.z_index != 0) parent.z_order = true;
         parent.last_child = index;
         parent.child_count += 1;
         self.len += 1;
@@ -5790,12 +5801,54 @@ pub const View = struct {
                     if (@TypeOf(target) == *ui.Frame) try content.paint(content.context, target, node.id, bounds) else try target.embedded(node.id, bounds);
                 },
             }
+            if (node.z_order and node.child_count > 0) {
+                try self.paintByZ(target, window_theme, at, floating, floating_len, lifted);
+                at = node.end;
+                continue;
+            }
             at += 1;
         }
         while (scope_depth > 0) {
             scope_depth -= 1;
             try closeScope(&all[scopes[scope_depth].index], scopes[scope_depth], target, window_theme);
         }
+    }
+    /// Paint the children of the node at `index` sorted by
+    /// `Style.z_index`, equal ones in build order, each with its subtree;
+    /// Tab still moves through them in build order.
+    fn paintByZ(self: *const View, target: anytype, window_theme: Theme, index: usize, floating: *[max_floating]u32, floating_len: *usize, lifted: ?*Lifted) anyerror!void {
+        const all = self.buffers.nodes[0..self.len];
+        var order: [layout.max_items]u32 = undefined;
+        var count: usize = 0;
+        var child = all[index].first_child;
+        while (child != none and count < order.len) : (child = all[child].next_sibling) {
+            // Stable insertion by z-index.
+            var j = count;
+            while (j > 0 and all[order[j - 1]].style.z_index > all[child].style.z_index) : (j -= 1) order[j] = order[j - 1];
+            order[j] = child;
+            count += 1;
+        }
+        const frame = @TypeOf(target) == *ui.Frame;
+        // Each child takes a share of the ranks left, in build order, so Tab
+        // reads them as built; half the range is kept for what follows.
+        const range = if (frame) target.tabRange() else [2]u32{ 0, 0 };
+        const span: u64 = (@as(u64, range[1]) - range[0]) / 2;
+        for (order[0..count]) |at| {
+            if (frame) {
+                const position: u64 = self.childPosition(index, at);
+                const share = span / @max(1, count);
+                target.setTabRange(@intCast(range[0] + position * share), @intCast(range[0] + (position + 1) * share));
+            }
+            try self.paintRange(target, window_theme, at, all[at].end, floating, floating_len, lifted);
+        }
+        if (frame) target.setTabRange(@intCast(range[0] + span), range[1]);
+    }
+    fn childPosition(self: *const View, parent: usize, index: u32) usize {
+        const all = self.buffers.nodes[0..self.len];
+        var position: usize = 0;
+        var child = all[parent].first_child;
+        while (child != none and child != index) : (child = all[child].next_sibling) position += 1;
+        return position;
     }
     const Scope = struct {
         index: u32,
@@ -7761,6 +7814,7 @@ test {
     _ = @import("inspector_tests.zig");
     _ = @import("gradient.zig");
     _ = @import("style_tests.zig");
+    _ = @import("layout_tests.zig");
     _ = @import("matched.zig");
     _ = @import("morph.zig");
 }

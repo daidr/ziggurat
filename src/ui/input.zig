@@ -146,7 +146,10 @@ pub const Exact = struct {
         return true;
     }
 };
-pub const Hit = struct { id: u64, rect: Rect, options: Options = .{} };
+/// A control's place: `rank` orders Tab among controls recorded out of
+/// their reading order (`Input.tab_rank`); equal ranks keep the order
+/// they were recorded in.
+pub const Hit = struct { id: u64, rect: Rect, options: Options = .{}, rank: u32 = 0 };
 
 const HitView = struct { hits: []const Hit, mapped: ?*const affine_state.Snapshot };
 fn resolve(view: HitView, point: z.Point) ?usize {
@@ -432,6 +435,13 @@ pub const Input = struct {
     len: usize = 0,
     pending: [128]Hit = undefined,
     pending_len: usize = 0,
+    /// The rank controls added now take: where they come in the order Tab
+    /// moves through, when they are recorded out of it, as siblings that
+    /// paint in another order than they read. 0 until set; each frame
+    /// starts it again at 0.
+    tab_rank: u32 = 0,
+    /// Ranks below this are left for what is recorded now.
+    tab_limit: u32 = std.math.maxInt(u32),
     building: bool = false,
     active: ?u64 = null,
     focused: ?u64 = null,
@@ -467,6 +477,8 @@ pub const Input = struct {
 
     pub fn beginFrame(self: *Input) void {
         self.pending_len = 0;
+        self.tab_rank = 0;
+        self.tab_limit = std.math.maxInt(u32);
         self.building = true;
         self.pending_mapped = null;
         if (self.scopes) |scopes| scopes.beginFrame();
@@ -623,16 +635,25 @@ pub const Input = struct {
             self.setFocused(null);
             return;
         }
+        // Tab goes in reading order: by rank, then as recorded.
+        var order: [128]u8 = undefined;
+        for (0..self.len) |i| order[i] = @intCast(i);
+        for (1..self.len) |i| {
+            const moving = order[i];
+            var j = i;
+            while (j > 0 and self.hits[order[j - 1]].rank > self.hits[moving].rank) : (j -= 1) order[j] = order[j - 1];
+            order[j] = moving;
+        }
         var start: usize = if (backward) 0 else self.len - 1;
         var current_group: ?u64 = null;
-        for (self.hits[0..self.len], 0..) |item, i| if (self.focused == item.id) {
+        for (order[0..self.len], 0..) |hit_index, i| if (self.focused == self.hits[hit_index].id) {
             start = i;
-            current_group = item.options.radio_group;
+            current_group = self.hits[hit_index].options.radio_group;
             break;
         };
         var step: usize = 1;
         while (step <= self.len) : (step += 1) {
-            const index = if (backward) (start + self.len - step) % self.len else (start + step) % self.len;
+            const index: usize = order[if (backward) (start + self.len - step) % self.len else (start + step) % self.len];
             const item = self.hits[index];
             if (!self.eligible(item, index)) continue;
             if (item.options.radio_group) |group| {
@@ -689,7 +710,7 @@ pub const Input = struct {
                 return error.NoFrame;
             }
         }
-        list[length.*] = .{ .id = id, .rect = rect, .options = options };
+        list[length.*] = .{ .id = id, .rect = rect, .options = options, .rank = self.tab_rank };
         if (self.scopes) |scopes| {
             if (self.building) scopes.pending().members[length.*] = member;
         }
