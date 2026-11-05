@@ -54,7 +54,7 @@ pub const Options = struct {
     isolate_arguments: bool = true,
 };
 
-/// Checks message syntax: `{name}`, `{n, number[, integer|percent]}`,
+/// Checks message syntax: `{name}`, `{n, number[, integer|percent|::skeleton]}`,
 /// `{t, date|time[, short|medium|long|full]}`, `{n, plural|selectordinal,
 /// [offset:N] =N {...} one {...} other {...}}`, `{s, select, key {...}
 /// other {...}}`, `#` inside plural branches and apostrophe quoting.
@@ -248,7 +248,9 @@ const Walker = struct {
         if (std.meta.stringToEnum(Kind, kind)) |known| if (known != .simple) self.tell(name, known);
         if (std.mem.eql(u8, kind, "number")) {
             var options: number.Options = .{};
-            if (try self.styleName()) |style| {
+            if (try self.skeleton()) |value| {
+                options = value;
+            } else if (try self.styleName()) |style| {
                 if (std.mem.eql(u8, style, "integer")) options = .integer else if (std.mem.eql(u8, style, "percent")) options = .percent else return error.InvalidMessage;
             }
             if (emit) try self.writeNumber(name, options);
@@ -261,6 +263,64 @@ const Walker = struct {
         } else if (std.mem.eql(u8, kind, "select")) {
             try self.selectArgument(name, depth, emit);
         } else return error.InvalidMessage;
+    }
+
+    /// `, ::stems` then the closing brace, as ICU's number skeletons:
+    /// `currency/EUR`, `compact-short` (or `K`), `compact-long` (`KK`),
+    /// `unit-width-iso-code`, `unit-width-full-name`, `unit-width-narrow`,
+    /// `sign-accounting`, `percent` and `.00`-style fraction digits. Null,
+    /// with nothing read, when the style is not a skeleton.
+    fn skeleton(self: *Walker) Error!?number.Options {
+        var at = self.position;
+        if (at >= self.pattern.len or self.pattern[at] != ',') return null;
+        at += 1;
+        while (at < self.pattern.len and (self.pattern[at] == ' ' or self.pattern[at] == '\t')) at += 1;
+        if (!std.mem.startsWith(u8, self.pattern[at..], "::")) return null;
+        const end = std.mem.indexOfScalarPos(u8, self.pattern, at, '}') orelse return error.InvalidMessage;
+        self.position = end + 1;
+        var options: number.Options = .{};
+        var stems = std.mem.tokenizeAny(u8, self.pattern[at + 2 .. end], " \t\r\n");
+        while (stems.next()) |stem| {
+            if (std.mem.startsWith(u8, stem, "currency/")) {
+                const code = stem["currency/".len..];
+                if (code.len != 3) return error.InvalidMessage;
+                for (code) |c| if (!std.ascii.isAlphabetic(c)) return error.InvalidMessage;
+                const money = number.Options.money(code);
+                options.style = .currency;
+                options.currency_code = code;
+                options.min_fraction = money.min_fraction;
+                options.max_fraction = money.max_fraction;
+            } else if (std.mem.eql(u8, stem, "compact-short") or std.mem.eql(u8, stem, "K")) {
+                options.notation = .compact_short;
+            } else if (std.mem.eql(u8, stem, "compact-long") or std.mem.eql(u8, stem, "KK")) {
+                options.notation = .compact_long;
+            } else if (std.mem.eql(u8, stem, "unit-width-iso-code")) {
+                options.currency_display = .code;
+            } else if (std.mem.eql(u8, stem, "unit-width-full-name")) {
+                options.currency_display = .name;
+            } else if (std.mem.eql(u8, stem, "unit-width-narrow")) {
+                options.currency_display = .narrow_symbol;
+            } else if (std.mem.eql(u8, stem, "unit-width-short")) {
+                options.currency_display = .symbol;
+            } else if (std.mem.eql(u8, stem, "sign-accounting")) {
+                options.currency_sign = .accounting;
+            } else if (std.mem.eql(u8, stem, "percent")) {
+                options.style = .percent;
+            } else if (stem[0] == '.' and stem.len <= 1 + number.max_fraction_digits) {
+                // .00 exactly two, .0# one or two, .## up to two.
+                var min: u8 = 0;
+                for (stem[1..], 1..) |c, i| switch (c) {
+                    '0' => if (min + 1 == i) {
+                        min += 1;
+                    } else return error.InvalidMessage,
+                    '#' => {},
+                    else => return error.InvalidMessage,
+                };
+                options.min_fraction = min;
+                options.max_fraction = @intCast(stem.len - 1);
+            } else return error.InvalidMessage;
+        }
+        return options;
     }
 
     /// Optional `, style` then the closing brace.
@@ -413,12 +473,12 @@ const Walker = struct {
 
     fn writeNumber(self: *Walker, name: []const u8, options: number.Options) Error!void {
         const context = self.context.?;
-        const digits = switch (try context.find(name)) {
-            .int => |i| number.digitsInt(i, options),
-            .float => |f| number.digitsFloat(f, options),
+        const value: number.Value = switch (try context.find(name)) {
+            .int => |i| .{ .int = i },
+            .float => |f| .{ .float = f },
             else => return error.ArgumentType,
-        } catch |err| return mapNumberError(err);
-        number.writeDigits(context.writer, context.symbols, &digits, options) catch |err| return mapNumberError(err);
+        };
+        number.format(context.writer, context.locale, context.symbols, value, options) catch |err| return mapNumberError(err);
     }
 
     fn writeDate(self: *Walker, name: []const u8, is_date: bool, style_value: date.Style) Error!void {
@@ -479,6 +539,20 @@ test "simple arguments and quoting" {
     try expectFormat("en", "It''s '{literal}' and '#' #", &.{}, "It's {literal} and '#' #");
     try expectFormat("en", "don't", &.{}, "don't");
     try expectFormat("de", "{n, number} / {n, number, integer} / {p, number, percent}", &args(.{ .n = 1234.56, .p = 0.25 }), "1.234,56 / 1.235 / 25\u{00A0}%");
+}
+
+test "number skeletons: currencies and compact notation" {
+    try expectFormat("en", "{p, number, ::currency/USD}", &args(.{ .p = 1234.5 }), "$1,234.50");
+    try expectFormat("de", "{p, number, ::currency/EUR}", &args(.{ .p = -3 }), "-3,00\u{a0}€");
+    try expectFormat("en", "{p, number, ::currency/JPY}", &args(.{ .p = 1234.6 }), "¥1,235");
+    try expectFormat("en", "{p, number, ::currency/EUR unit-width-iso-code}", &args(.{ .p = 5 }), "EUR\u{a0}5.00");
+    try expectFormat("en", "{p, number, ::currency/EUR unit-width-full-name}", &args(.{ .p = 1 }), "1.00 euros");
+    try expectFormat("en", "{p, number, ::currency/USD sign-accounting}", &args(.{ .p = -2 }), "($2.00)");
+    try expectFormat("en", "{n, number, ::compact-short} / {n, number, ::KK}", &args(.{ .n = 1234567 }), "1.2M / 1.2 million");
+    try expectFormat("en", "{n, number, ::.00}", &args(.{ .n = 3 }), "3.00");
+    try expectFormat("en", "{n, number, ::percent .#}", &args(.{ .n = 0.125 }), "12.5%");
+    try std.testing.expectError(error.InvalidMessage, validate("{n, number, ::currency/EURO}"));
+    try std.testing.expectError(error.InvalidMessage, validate("{n, number, ::bogus}"));
 }
 
 test "plural selection, offsets and number sign" {
