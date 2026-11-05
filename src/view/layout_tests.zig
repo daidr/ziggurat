@@ -147,3 +147,30 @@ test "a snapping scroll container goes from place to place, or rests near one" {
     try h.scroll(.{ .kind = .scroll }, .{ .x = 0, .y = 40 });
     try testing.expectEqual(@as(f32, 120), app.model.offset.y);
 }
+
+const Panes = struct {
+    fraction: f64 = 0.5,
+    fn build(self: *Panes, v: *View) anyerror!void {
+        _ = try v.split(.row, &self.fraction, .{ .minimum = 0.1, .maximum = 0.9 }, .{ .width = 400, .height = 100, .split_reset = 0.25 });
+        try v.text("Left", .{});
+        try v.text("Right", .{});
+        try v.end();
+    }
+};
+
+test "a double click on a split's divider puts it back at its reset size" {
+    var storage: Storage = .{};
+    var app: Panes = .{ .fraction = 0.6 };
+    var h = Harness.init(&app, Panes.build, storage.buffers(), .{});
+    try h.render();
+    const strip = h.view.divider(try h.find(.{ .kind = .split })).?;
+    const x = strip.x + strip.width / 2;
+    const y = strip.y + strip.height / 2;
+    try h.press(x, y, .{});
+    try h.release(x, y);
+    try testing.expectEqual(@as(f64, 0.6), app.fraction);
+    try h.advance(100 * std.time.ns_per_ms);
+    try h.press(x, y, .{});
+    try h.release(x, y);
+    try testing.expectEqual(@as(f64, 0.25), app.fraction);
+}

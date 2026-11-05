@@ -319,6 +319,10 @@ pub const Style = struct {
     /// parent is in view, as CSS's `position: sticky`; see `Sticky`. A
     /// sticky node paints over its siblings, so give it a background.
     sticky: ?Sticky = null,
+    /// The fraction a double click on a split's divider puts its first pane
+    /// back at; null keeps the size on a double click. Kept within the
+    /// split's limits.
+    split_reset: ?f64 = null,
     /// A scroll container comes to rest at the places nodes inside it mark
     /// with `snap_align`, as CSS's `scroll-snap-type`: `.mandatory` always
     /// rests at one, the wheel and the keys going from place to place;
@@ -1640,6 +1644,9 @@ pub const View = struct {
     capture: ?Capture = null,
     /// The last press on an embedded leaf, to count double presses.
     last_press: struct { id: u64 = 0, time: u64 = 0, at: Point = .{}, count: u8 = 0 } = .{},
+    /// A split whose divider was double pressed, for its next build to put
+    /// back at `Style.split_reset`.
+    split_reset: u64 = 0,
     /// The pointer in window DIP, or null while it is outside the window;
     /// set by the host as it moves.
     pointer: ?Point = null,
@@ -2389,10 +2396,28 @@ pub const View = struct {
             changed = next != fraction.*;
             fraction.* = next;
         };
+        if (self.split_reset == node.id) {
+            self.split_reset = 0;
+            if (style.split_reset) |value| if (std.math.isFinite(value)) {
+                const next = std.math.clamp(value, limits.minimum, limits.maximum);
+                changed = changed or next != fraction.*;
+                fraction.* = next;
+            };
+        }
         if (!std.math.isFinite(fraction.*)) return error.InvalidValue;
         fraction.* = std.math.clamp(fraction.*, limits.minimum, limits.maximum);
         node.value = fraction.*;
         return changed;
+    }
+    /// The split whose divider is under `point`, the innermost.
+    fn dividerAt(self: *const View, point: Point) ?*const Node {
+        var found: ?*const Node = null;
+        for (self.buffers.nodes[0..self.len]) |*node| {
+            if (node.kind != .split or node.concealed or !node.style.enabled) continue;
+            const strip = self.divider(node) orelse continue;
+            if (contains(strip, point)) found = node;
+        }
+        return found;
     }
     /// The divider strip between a split's arranged panes.
     pub fn divider(self: *const View, node: *const Node) ?Rect {
@@ -3715,6 +3740,16 @@ pub const View = struct {
                 result.settle = true;
                 if (entry.embed.focusable) result.focus = entry.id;
                 return result;
+            }
+        } else if (self.dividerAt(point)) |pane| {
+            // A double press on a divider puts the split back at its reset.
+            const last = self.last_press;
+            const again = last.id == pane.id and now >= last.time and now - last.time <= double_press_time and distance(last.at, point) <= double_press_distance;
+            self.last_press = .{ .id = pane.id, .time = now, .at = point, .count = if (again) last.count +| 1 else 1 };
+            if (again and last.count == 1 and pane.style.split_reset != null) {
+                self.split_reset = pane.id;
+                result.repaint = true;
+                result.settle = true;
             }
         } else self.last_press.id = 0;
         // Nothing under an open menu drags.
