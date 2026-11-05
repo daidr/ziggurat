@@ -676,6 +676,20 @@ pub const Buffer = struct {
         try self.append(.{ .push_opacity = alpha });
         self.depth += 1;
     }
+    /// Closes the `push_opacity` at `start`, the innermost open clip level,
+    /// as a group composed over `area` and faded as one: the scope becomes
+    /// `begin_group` and closes with `end_group`.
+    pub fn closeOpacityAsGroup(self: *Buffer, start: usize, area: Rect) Error!void {
+        if (start >= self.len or self.storage[start] != .push_opacity or self.depth == 0) return error.ClipStackEmpty;
+        if (self.group_depth != 0 and self.depth == self.group_clips[self.group_depth - 1]) return error.ClipStackEmpty;
+        if (self.group_depth == layers.max_depth) return error.GroupStackFull;
+        if (self.len == self.storage.len) return error.CommandsFull;
+        const alpha = self.storage[start].push_opacity;
+        self.storage[start] = .{ .begin_group = .{ .bounds = area, .opacity = alpha } };
+        self.storage[self.len] = .end_group;
+        self.len += 1;
+        self.depth -= 1;
+    }
     pub fn popClip(self: *Buffer) Error!void {
         if (self.depth == 0 or (self.group_depth != 0 and self.depth == self.group_clips[self.group_depth - 1])) return error.ClipStackEmpty;
         try self.append(.pop_clip);

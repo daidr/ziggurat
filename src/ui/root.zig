@@ -39,6 +39,7 @@ pub const CoverageCacheStats = struct { software: drawing.CoverageStats, gpu: ?d
 pub const RasterCacheStats = struct { software: drawing.RasterStats, gpu: ?drawing.RasterStats };
 pub const geometry = @import("geometry.zig");
 pub const layers = @import("layers.zig");
+pub const opacity_group = @import("opacity_group.zig");
 pub const clip_mask = @import("clip_mask.zig");
 /// Paths of lines and curves (`Path.parseData` reads SVG path data) that
 /// `Frame.pushPathClip` clips to.
@@ -3496,8 +3497,11 @@ pub const Frame = struct {
     /// Open element effects; false marks one drawn without its program.
     effect_scopes: [16]bool = undefined,
     effect_depth: usize = 0,
-    /// Open `pushOpacity` scopes: how many clips were open at each.
+    /// Open `pushOpacity` scopes: how many clips were open at each, the
+    /// command each opened at and the clip around it.
     opacity_scopes: [16]usize = undefined,
+    opacity_starts: [16]usize = undefined,
+    opacity_clips: [16]?Rect = undefined,
     opacity_depth: usize = 0,
     /// The theme of the subtree being drawn, in place of the window's; see
     /// `pushTheme`.
@@ -4074,10 +4078,13 @@ pub const Frame = struct {
         if (self.transforms) |workspace| workspace.reference.clip = workspace.clip_parents[self.clips.len];
     }
     /// Draw what follows until the matching `popOpacity` at `alpha` (of
-    /// 255), each drawing by itself, as if it multiplied the drawing's
-    /// colors: overlapping children show through each other, not as one
-    /// faded layer. A group, cache or effect inside fades as one drawing.
-    /// It cuts nothing, and takes one of the 32 clip levels.
+    /// 255) as one group, as CSS's group opacity: what it holds composes
+    /// first and fades once, so overlapping children and a background
+    /// beneath them show as one, not each through the others. It records
+    /// flat, each drawing faded by itself, and becomes a group layer as it
+    /// closes only when two of its drawings overlap within the clips (see
+    /// `opacity_group.zig`); a backdrop inside keeps it flat. It cuts
+    /// nothing, and takes one of the 32 clip levels.
     pub fn pushOpacity(self: *Frame, alpha: u8) !void {
         return self.pushOpacityBody(alpha) catch |err| {
             self.failure = self.failure orelse err;
@@ -4086,6 +4093,8 @@ pub const Frame = struct {
     }
     fn pushOpacityBody(self: *Frame, alpha: u8) !void {
         if (self.opacity_depth == self.opacity_scopes.len) return error.ClipStackFull;
+        self.opacity_starts[self.opacity_depth] = self.context.command_buffer.len;
+        self.opacity_clips[self.opacity_depth] = self.clipBounds();
         try self.context.command_buffer.pushOpacity(alpha);
         self.opacity_scopes[self.opacity_depth] = self.clips.len;
         self.opacity_depth += 1;
@@ -4098,7 +4107,16 @@ pub const Frame = struct {
     }
     fn popOpacityBody(self: *Frame) !void {
         if (self.opacity_depth == 0 or self.opacity_scopes[self.opacity_depth - 1] != self.clips.len) return error.ClipStackEmpty;
-        try self.context.command_buffer.popClip();
+        const buffer = &self.context.command_buffer;
+        const start = self.opacity_starts[self.opacity_depth - 1];
+        if (start < buffer.len and buffer.storage[start] == .push_opacity) {
+            if (opacity_group.decide(buffer, start, self.opacity_clips[self.opacity_depth - 1])) |area| {
+                try buffer.closeOpacityAsGroup(start, area);
+                self.opacity_depth -= 1;
+                return;
+            }
+        }
+        try buffer.popClip();
         self.opacity_depth -= 1;
     }
     /// Geometric hit/semantic clip across parent and group boundaries.
@@ -4898,6 +4916,7 @@ fn nativeRect(bounds: affine.Rect) Rect {
 
 test {
     _ = gdi;
+    _ = opacity_group;
     _ = clip_mask;
     _ = @import("mask_mix.zig");
     _ = gamut;

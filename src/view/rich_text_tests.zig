@@ -145,6 +145,51 @@ test "colors, lines and backgrounds paint over and under the text" {
     try testing.expectEqual(@as(?usize, null), text.spanAt(.{ .x = 175, .y = 30 }));
 }
 
+test "a span's opacity fades its words, an invisible one keeps its room" {
+    const Fading = struct {
+        inner: Recorder = .{},
+        opened: [8]u8 = undefined,
+        open_count: usize = 0,
+        depth: usize = 0,
+        pub fn rect(self: *@This(), bounds: view.Rect, color: u32) void {
+            self.inner.rect(bounds, color);
+        }
+        pub fn roundedRect(self: *@This(), bounds: view.Rect, radius: f32, color: ui.Color) void {
+            self.inner.roundedRect(bounds, radius, color);
+        }
+        pub fn labelFont(self: *@This(), bounds: view.Rect, text: []const u8, color: u32, font: view.Font) void {
+            self.inner.labelFont(bounds, text, color, font);
+        }
+        pub fn pushOpacity(self: *@This(), alpha: u8) !void {
+            self.opened[self.open_count] = alpha;
+            self.open_count += 1;
+            self.depth += 1;
+        }
+        pub fn popOpacity(self: *@This()) !void {
+            self.depth -= 1;
+        }
+    };
+    var text = RichText.init(testing.allocator, .{ .measurer = measurer, .color = 0x111111 });
+    defer text.deinit();
+    try text.setSpans(&.{
+        .{ .text = "one " },
+        .{ .text = "two ", .opacity = 0.5, .background = 0xffff00 },
+        .{ .text = "three ", .invisible = true, .background = 0x0000ff },
+        .{ .text = "four", .opacity = 0 },
+        .{ .text = " five" },
+    });
+    var fading: Fading = .{};
+    text.paintTo(&fading, .{ .x = 0, .y = 0 });
+    // The half span fades its background and words; the others paint none.
+    try testing.expectEqual(@as(usize, 2), fading.open_count);
+    try testing.expectEqual(@as(u8, 128), fading.opened[0]);
+    try testing.expectEqual(@as(usize, 0), fading.depth);
+    try testing.expectEqual(@as(usize, 0), fading.inner.fillsOf(0x0000ff));
+    try testing.expectEqual(@as(usize, 3), fading.inner.label_count);
+    // The last word stays where it was.
+    try testing.expectEqual(@as(f32, 180), fading.inner.labels[2].bounds.x);
+}
+
 test "a dotted underline paints square dots as thick as the line, three DIP apart" {
     var text = RichText.init(testing.allocator, .{ .measurer = measurer, .color = 0x111111 });
     defer text.deinit();
