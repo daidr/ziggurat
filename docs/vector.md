@@ -60,6 +60,8 @@ prepare 产生拥有的 A8 覆盖，4 字节对齐 stride、物理 pixel origin 
 
 需要在准备阶段组合几何区域时，可显式开启 `retain_samples`。Prepared 的 `samples` 记录同一4×4网格的16个覆盖位，行 stride 与 A8 一致；padding为零。相同网格的区域可以按位 union/intersection 后再降为 A8，避免把两个半覆盖边缘当作重复 alpha 混合。额外拥有存储为每个 aligned 像素2字节，计入拥有/峰值预算并随 Prepared 释放；默认不开启。该数组与像素同为不可变 owner 借用，不能越过 Prepared.close 或绕开 Lease 规则修改。
 
+`Path.contains(allocator, point, rule, transform, tolerance)` 判断一个点是否在路径内：`transform` 把路径映射到点所在的坐标，每条子路径都按闭合计算（与填充相同），曲线按 `tolerance`（点坐标的单位，夹在 1/64 到 1 之间）展平后按 `rule`（`.nonzero` 或 `.even_odd`）数环绕数。它用于让控件只在一个形状上接收指针（视图的 `Style.hit_test`）。
+
 ## 独立几何与逐行缓存
 
 `vector.geometry.compile(path, allocator, options)` 产生拥有型 Geometry，保存独立的已展开物理边表和填充规则，不生成 A8 或整幅样本平面。它与普通 prepare 共用曲线、arc、描边、虚线和 trim 内核；Path 可以在编译成功后先关闭。Geometry 和 Rows 使用稳定指针持有，不能复制拥有型结构。普通 A8 prepare 不创建 Rows，也不承担其缓存分配成本。
