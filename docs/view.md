@@ -75,12 +75,15 @@ try v.column(.{ .width = 240, .height = 140, .radius = 16, .gradient = .{ .radia
 - 焦点环：持有键盘焦点的控件画主题的焦点环：宽 `Metrics.focus_ring_width`（默认 2 DIP），内缘在控件边缘外 `Metrics.focus_ring_offset`（默认 1 DIP；0 落在边缘上，负数在边缘内），颜色为调色板的 `focus`。列表、树与表格的行、列头会被外层列表裁剪，默认画在行内。`Style.focus_ring_offset` 单独设置一个节点的偏移，例如外层容器裁剪越界内容时用负值把环画到里面；`Style.focus_ring_color` 单独设置颜色。
 - 滚动指示器：滚动容器的 `scrollbars = false` 不画滚动指示器，滚轮、按键和辅助技术照常滚动，适合自己绘制指示的表面。
 - 占位符：`search`、`tokenField` 与 `editableComboBox` 的 `placeholder` 与 `placeholder_color` 交给直接放在其中的文本输入，输入为空且没有输入法组合时显示（见下文 `TextField` 的同名选项）。
+- 层叠顺序：`z_index`（默认 0）决定兄弟节点的绘制先后，如 CSS 的 `z-index`：数值大的画在上面、先接收指针，相同的保持构建顺序。它只改变绘制与命中，不改变排布，Tab 顺序与读屏顺序仍按构建顺序。
 
 `spacer` 默认 `grow = 1`。叶子的固有尺寸来自文本宽度与主题 metrics：按钮在文本两侧留出内边距，复选框与开关加上指示器和标签间距，进度条与滑块有默认宽度且可以收缩到零，步进器宽度是高度的四倍，两端按钮为正方形。
 
 ### 网格
 
 `grid(columns, style)` 与 `end` 配对，子项按行自动放置进 `ui.grid` 的列轨道（`Track.fixed`、`fraction`、`minmax`），每个子项占 `Style.column_span` 列，行高随内容。`gap` 同时是行距和列距，`padding` 与 `alignment`（单元格内两个方向的对齐）沿用容器字段，`clip` 决定是否裁剪溢出。网格自身的最小和首选尺寸分别以全部子项的最小、首选尺寸求得。`columns` 是借用的，只需在本遍排列完成前有效，通常用常量数组。
+
+`fraction` 轨道按 CSS 的 `fr` 分配：先给各轨道按内容的基础尺寸，余下的空间按权重分给 `fr` 轨道，分到的少于基础尺寸的轨道停在基础尺寸，其余的重新按权重分；`fr` 轨道本身的最小尺寸为 0，宽内容的列可以缩到内容以下。`Track.fractionMinContent(weight)` 是 `minmax(min-content, Nfr)`：它不会缩到内容的最小尺寸以下，分不到时溢出。
 
 ### 滚动
 
@@ -92,11 +95,19 @@ try v.column(.{ .width = 240, .height = 140, .radius = 16, .gradient = .{ .radia
 
 Host 在每帧绘制后记录可见的滚动容器（最多 `max_scroll_regions` 个，按绘制顺序），滚轮事件落在其中时交给最内层的那个，作为一个携带 `Event.scroll` 的构建遍立即作用于模型并消费该事件；不在任何滚动容器内的滚轮照常交给 Context。目前没有滚动条拖动、键盘滚动、焦点自动显露和横向滚动。
 
+`Style.sticky`（`Sticky{ top, right, bottom, left }`，单位 DIP）让节点如 CSS 的 `position: sticky` 停在最近的滚动容器（没有时是窗口）边缘：滚动让它越过设定的距离时，它连同后代平移回来停住，直到它的父容器的内容区滚走、把它推出去。分节列表的标题因此停在顶部，下一节的标题到来时把它顶走。停住的节点画在兄弟节点之上，命中与可访问性边界跟随平移后的位置。
+
+滚动容器的 `scroll_snap`（`.mandatory` 或 `.proximity`）让滚动结束时停在吸附点上，如 CSS 的 `scroll-snap-type`：其中设置了 `snap_align`（`.start`、`.center`、`.end`）的后代各给出一个吸附点（嵌套的滚动容器内的不算）。`mandatory` 总是停在一个吸附点：一次滚动之后停在滚动方向上的下一个，不再往回；`proximity` 只在离最近的吸附点不到视口三分之一时吸过去。比视口还大的节点在其内部可以自由滚动。
+
+`View.scrollIntoViewWith(id, .{ .block, .glide })` 把节点滚进外层滚动容器的视口，`block`（`ScrollAlign`）是 `.nearest`（默认，已经可见时不动，同 `scrollIntoView`）、`.start`、`.center` 或 `.end`，同 DOM 的 `scrollIntoView({ block })`；`glide`（`animation.Tween`）让偏移按缓动滑过去，而不是跳过去，系统要求减少动态效果时直接跳。新的滚动打断滑动。
+
+`View.inView(id, .{ .margin, .amount })` 回答节点在上一遍是否进入了视口（外层滚动容器与窗口的交集），如 IntersectionObserver：`margin`（`Insets`）把视口向外扩（负数向内收），用于提前加载；`amount`（0–1）要求可见部分至少占节点面积的这个比例，0 表示接触即算。
+
 ### 标签页、分栏与工具栏
 
 `tabs(style)` 与 `end` 配对，开始一行标签，`Style.name` 是标签列表的可访问名称；其中的 `tab(T, &selected, option, label, style)` 与 `radio` 相同地绑定一个值，激活即选中，返回选择是否改变。标签共享一个 Tab 停靠点，方向键和 Home/End 在标签间移动并选中。标签页内容由应用在 `end` 之后按所选值自行构建，视图层不保存未选中页的状态。选中的标签有底部强调条，聚焦时画焦点框。
 
-`split(axis, &fraction, limits, style)` 与 `end` 配对，**必须恰好两个子节点**，否则 `end` 返回 `InvalidSplit`。`axis = .row` 左右分栏，`.column` 上下分栏；两个子节点在交叉轴上填满，第一个占去掉 `split_divider`（6 DIP）后长度的 `fraction`，第二个占余下部分。`limits` 是 0..1 内的 `Range`，超出返回 `InvalidRange`，绑定值每遍都被夹回其中；`step = 0` 时指针连续拖动，键盘一步为范围的百分之一。分隔条的指针按下、拖动和松开都更新值，拖动期间捕获指针；方向键增减一步（上下分栏时向下增大），PageUp/PageDown 一页，Home/End 到上下限。分栏的最小尺寸是两个子节点的最小尺寸加分隔条，但窗口更小时仍按比例分配，子节点会溢出，需要时给它们 `clip` 或滚动容器。`Style.name` 是分隔条的可访问名称。
+`split(axis, &fraction, limits, style)` 与 `end` 配对，**必须恰好两个子节点**，否则 `end` 返回 `InvalidSplit`。`axis = .row` 左右分栏，`.column` 上下分栏；两个子节点在交叉轴上填满，第一个占去掉 `split_divider`（6 DIP）后长度的 `fraction`，第二个占余下部分。`limits` 是 0..1 内的 `Range`，超出返回 `InvalidRange`，绑定值每遍都被夹回其中；`step = 0` 时指针连续拖动，键盘一步为范围的百分之一。分隔条的指针按下、拖动和松开都更新值，拖动期间捕获指针；方向键增减一步（上下分栏时向下增大），PageUp/PageDown 一页，Home/End 到上下限。分栏的最小尺寸是两个子节点的最小尺寸加分隔条，但窗口更小时仍按比例分配，子节点会溢出，需要时给它们 `clip` 或滚动容器。`Style.name` 是分隔条的可访问名称。分栏的 `Style.split_reset` 给出一个比例，双击分隔条时第一栏回到这个比例（仍按 `limits` 夹住），为 null 时双击不改变尺寸。
 
 `toolbar(style)` 与 `end` 配对，开始一行工具控件，`Style.name` 是工具栏的可访问名称。其中的叶子控件（包括嵌套行列里的）把工具栏作为可访问父节点；嵌套的单选组或标签列表仍挂在窗口根下。工具栏不改变焦点顺序，也没有溢出菜单。
 
@@ -493,6 +504,8 @@ if (row.right_clicked) self.showMenu(item, row.bounds.?);
 
 `Style.cursor`（`view.Cursor`，即 `z.Cursor`）设置指针在节点及其后代上的形状。Host 从指针下最内层的节点向外找：第一个设置了形状的节点决定形状；先遇到没有设置形状的控件则显示默认箭头，因此按钮里不会出现外层的形状。链接默认显示 `pointer`，分栏的分隔条显示 `resize_ew`（左右排列）或 `resize_ns`（上下排列），`Embed.cursor` 回调让嵌入叶子按点回答（`ziggurat_view_text` 的文本字段显示 `text`，虚拟表格在列头右缘显示 `resize_ew`）。按下期间保持按下时的形状，松开后更新。Host 在指针移动、松开和每帧之后通过 `Window.setCursor` 设置，形状不变时不调用原生接口；Harness 用 `cursor()` 返回当前指针位置的形状。
 
+`Style.hit_test`（`ui.HitTest{ context, func }`）让节点的控件只在应用给出的形状里接收指针：`func(context, x, y, box)` 收到指针位置与节点的盒子（都在控件录制时的坐标里，变换后的控件按变换反算），返回 true 时才算按在控件上，否则按下与悬停落到下面的内容。环形按钮只在环带上响应，饼图的扇区各管一块；路径可以用 `vector.Path.contains(allocator, point, rule, transform, tolerance)` 判断。它只作用于节点自己的控件，后代照常按盒子命中；嵌入叶子用 `Frame.setHitTest` 对它录制的控件设置同样的形状。
+
 ## 换行文本
 
 `Style.wrap` 让文本节点按宽度换行：在空格之后、表意文字两侧和换行符处断行，比一行还宽的词在字符之间断开。`Style.max_lines` 限制显示的行数，被截断时最后一行以省略号结尾。最小宽度是最长的不可断开片段，首选宽度是不换行时最宽的一行；排列时先按单行排列，文本得到的宽度不够时以该宽度（列中取父容器的内宽）重新测量并再排列一次。行高取测量回调对空文本给出的高度，每行作为一个单行标签录制，从右到左时靠尾端对齐。
@@ -653,7 +666,7 @@ try v.row(.{ .radius = 12, .material = .{ .custom = .{ .context = &stripes, .pai
 
 ## 不透明度、位姿与进出场
 
-`Style.opacity`（0–1）把节点及其后代作为一层淡出；`Style.pose`（`ui.effects.Pose`）平移、缩放、旋转或按透视绕 X/Y 轴转动它们；`Style.effect` 用自定义着色器改写它们的绘制；`Style.refraction` 在容器下方画玻璃折射。命中、焦点和语义保持排布后的盒子。`View.presentColumn(&presence, show, transition, style)` 让一个列容器在 `show` 切换时按 `ziggurat_animation` 的运动进入和退出，退出结束后返回 false：
+`Style.opacity`（0–1）把节点及其后代作为一层淡出，如 CSS 的组不透明度：重叠的子节点、子节点与容器自己的背景不会互相透出。为了少一次合成，作用域先平着录制、把透明度乘到每个绘制物上，关闭时检查其中的绘制物在裁剪内是否互相重叠，重叠时才改成一个按该透明度合成的组（`Frame.pushOpacity` 同样如此），互不重叠时两者画出来完全一样。含背景模糊的作用域保持平铺，组的嵌套深度超出渲染器的层数时也保持平铺；`Style.pose`（`ui.effects.Pose`）平移、缩放、旋转或按透视绕 X/Y 轴转动它们；`Style.effect` 用自定义着色器改写它们的绘制；`Style.refraction` 在容器下方画玻璃折射。命中、焦点和语义保持排布后的盒子。`View.presentColumn(&presence, show, transition, style)` 让一个列容器在 `show` 切换时按 `ziggurat_animation` 的运动进入和退出，退出结束后返回 false：
 
 ```zig
 try host.prepareShaderEffects(allocator, library, .{}); // attach 之后
@@ -688,7 +701,7 @@ try v.end();
 
 `Style.mask`（`Gradient`）按渐变在节点盒子上的 alpha 遮罩节点和它画的一切，如 CSS 的 `mask-image`：线性、径向与圆锥渐变都可以，颜色不起作用，盒子（或 `clip_inset`）之外什么也不显示。上下边缘淡出的列表用 180° 的线性渐变，从透明到黑再回到透明。遮罩逐个作用于节点画的每个绘制物，而不是先把它们画进一层再遮罩：遮罩半透明处两个重叠的子元素会互相透出，如同各自带了不透明度；`Style.opacity`、位姿和效果这类层在遮罩里作为一个绘制物。点击不被遮罩。
 
-嵌入叶子可以直接用 `ui.Frame.pushRoundedClip(bounds, radius, mask)` 与 `pushPathClip(path, transform)` 裁剪，`pop_clip` 结束；路径可以由 `view.parsePath`（`ui.parsePath`）从 SVG path data 读出，数据有错时按 SVG 的做法画到第一个读不懂的片段为止，`PathReport` 给出错误与字节偏移。圆角裁剪内录制的控件只在圆角矩形内接收指针；变换后的命中区按变换反算精确判断，而不是按外接矩形。
+嵌入叶子可以直接用 `ui.Frame.pushRoundedClip(bounds, radius, mask)` 与 `pushPathClip(path, transform)` 裁剪，`pop_clip` 结束；`pushPathClipRule(path, transform, rule)` 按 `vector.FillRule` 决定路径内部，`.even_odd` 时相交的子路径重叠处被挖空，同 SVG 的 `clip-rule`；路径可以由 `view.parsePath`（`ui.parsePath`）从 SVG path data 读出，数据有错时按 SVG 的做法画到第一个读不懂的片段为止，`PathReport` 给出错误与字节偏移。圆角裁剪内录制的控件只在圆角矩形内接收指针；变换后的命中区按变换反算精确判断，而不是按外接矩形。
 
 遮罩按形状、尺寸与缩放缓存，同一形状再画不重新生成；上一帧没有用到的遮罩在下一次绘制开始时释放。缓存最多 128 项、64 MiB，单个遮罩每边最多 8192 个设备像素；没有空间时裁剪退回为外接矩形（`Context.clipMaskStats()` 的 `refused` 计数），不会丢掉已经画好的内容。软件渲染器（Linux、macOS CPU）在每个绘制物画之前保留它可能改变的像素，画完按遮罩把画出的像素与保留的像素混合；互不重叠的相邻绘制物合成一批一起混合，结果相同。Metal 把每批绘制物画进以覆盖遮罩为蒙版的组。Windows（D3D11 与 GDI）暂时退回为矩形裁剪。
 

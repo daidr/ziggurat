@@ -16,7 +16,14 @@ pub const Spring = struct {
     initial_velocity: ?f64 = null,
 };
 pub const Motion = union(enum) { instant, tween: Tween, spring: Spring };
-pub const Retarget = struct { motion: Motion = .{ .spring = .{} }, delay_ns: u64 = 0 };
+pub const Retarget = struct {
+    motion: Motion = .{ .spring = .{} },
+    delay_ns: u64 = 0,
+    /// The value moves nothing on screen (an opacity, a blur, a crossfade),
+    /// so it animates on while the desktop asks for less motion, where
+    /// other values go to their targets at once.
+    non_motion: bool = false,
+};
 pub const EndReason = enum { finished, settled, deadline, cancelled, reduced_motion, jumped };
 pub const Sample = struct { value: f64, velocity: f64, active: bool };
 pub const Timeline = @import("timeline.zig").Timeline;
@@ -31,6 +38,7 @@ const Run = struct {
     from: f64,
     velocity: f64,
     motion: Motion,
+    non_motion: bool = false,
 };
 
 /// Caller-owned, exclusively accessed value state. Retargeting samples the old
@@ -95,7 +103,7 @@ pub const Channel = struct {
         var next = self.*;
         _ = try next.advance(now);
         next.target = target;
-        if (next.reduce_motion or options.motion == .instant) {
+        if ((next.reduce_motion and !options.non_motion) or options.motion == .instant) {
             next.finish(if (next.reduce_motion) .reduced_motion else .finished);
         } else {
             const duration = switch (options.motion) {
@@ -109,7 +117,7 @@ pub const Channel = struct {
             };
             const start = std.math.add(u64, now, options.delay_ns) catch return error.ClockExhausted;
             const end = std.math.add(u64, start, duration) catch return error.ClockExhausted;
-            next.run = .{ .start = start, .end = end, .from = next.value, .velocity = velocity, .motion = options.motion };
+            next.run = .{ .start = start, .end = end, .from = next.value, .velocity = velocity, .motion = options.motion, .non_motion = options.non_motion };
             next.velocity = if (options.delay_ns != 0) 0 else velocity;
             next.last_end = null;
             if (next.value == target and velocity == 0) next.finish(.settled);
@@ -144,7 +152,7 @@ pub const Channel = struct {
         var next = self.*;
         _ = try next.advance(now);
         next.reduce_motion = enabled;
-        if (enabled and next.run != null) next.finish(.reduced_motion);
+        if (enabled) if (next.run) |run| if (!run.non_motion) next.finish(.reduced_motion);
         self.* = next;
     }
     fn checkTime(self: *const Channel, now: u64) !void {
@@ -175,6 +183,10 @@ fn validOptions(options: Retarget) !void {
             if (spring.initial_velocity) |velocity| validValue(velocity) catch return error.InvalidSpring;
         },
     }
+}
+/// The eased progress at `t` from 0 to 1.
+pub fn easeAt(easing: Easing, t: f64) f64 {
+    return eased(easing, std.math.clamp(t, 0, 1)).value;
 }
 const Ease = struct { value: f64, derivative: f64 };
 fn eased(easing: Easing, t: f64) Ease {
@@ -232,4 +244,21 @@ fn solve(spring: Spring, displacement: f64, velocity: f64, seconds: f64) struct 
 test {
     _ = @import("tests.zig");
     _ = @import("timeline.zig");
+}
+
+test "a value that moves nothing animates on under reduced motion" {
+    var moving = try Channel.init(0);
+    try moving.setReducedMotion(0, true);
+    try moving.retarget(0, 1, .{ .motion = .{ .tween = .{ .duration_ns = 100 } } });
+    try std.testing.expectEqual(@as(f64, 1), moving.value);
+    var fade = try Channel.init(0);
+    try fade.setReducedMotion(0, true);
+    try fade.retarget(0, 1, .{ .motion = .{ .tween = .{ .duration_ns = 100, .easing = .linear } }, .non_motion = true });
+    const half = try fade.advance(50);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), half.value, 1e-9);
+    // Turning reduced motion on keeps it going too.
+    var later = try Channel.init(0);
+    try later.retarget(0, 1, .{ .motion = .{ .tween = .{ .duration_ns = 100 } }, .non_motion = true });
+    try later.setReducedMotion(10, true);
+    try std.testing.expect(later.sample().active);
 }

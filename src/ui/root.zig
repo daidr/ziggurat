@@ -5,6 +5,7 @@ const z = @import("ziggurat");
 const input = @import("input.zig");
 /// A control the frame added, as its input state holds it.
 pub const Hit = input.Hit;
+pub const HitTest = input.HitTest;
 // Every platform except Windows replays through the same software renderer
 // ABI (`zlc_*`), implemented natively by `linux.c` and `macos.c`.
 const gdi = if (builtin.os.tag == .windows) @import("windows.zig") else @import("linux.zig");
@@ -39,6 +40,7 @@ pub const CoverageCacheStats = struct { software: drawing.CoverageStats, gpu: ?d
 pub const RasterCacheStats = struct { software: drawing.RasterStats, gpu: ?drawing.RasterStats };
 pub const geometry = @import("geometry.zig");
 pub const layers = @import("layers.zig");
+pub const opacity_group = @import("opacity_group.zig");
 pub const clip_mask = @import("clip_mask.zig");
 /// Paths of lines and curves (`Path.parseData` reads SVG path data) that
 /// `Frame.pushPathClip` clips to.
@@ -3496,8 +3498,11 @@ pub const Frame = struct {
     /// Open element effects; false marks one drawn without its program.
     effect_scopes: [16]bool = undefined,
     effect_depth: usize = 0,
-    /// Open `pushOpacity` scopes: how many clips were open at each.
+    /// Open `pushOpacity` scopes: how many clips were open at each, the
+    /// command each opened at and the clip around it.
     opacity_scopes: [16]usize = undefined,
+    opacity_starts: [16]usize = undefined,
+    opacity_clips: [16]?Rect = undefined,
     opacity_depth: usize = 0,
     /// The theme of the subtree being drawn, in place of the window's; see
     /// `pushTheme`.
@@ -3505,6 +3510,7 @@ pub const Frame = struct {
     /// Where the controls and semantics recorded now take the pointer, when
     /// it is not where they are drawn in place; see `setHitMap`.
     hit_map: ?HitMap = null,
+    hit_test: ?HitTest = null,
     /// Open `beginCache` scopes, innermost last.
     cache_scopes: [4]CacheScope = undefined,
     cache_depth: usize = 0,
@@ -3875,6 +3881,14 @@ pub const Frame = struct {
     /// draws elsewhere, as a shared element flying (`Style.match`), so that
     /// it takes the pointer where it shows. Returns the map it replaces.
     /// Frames with prepared transforms ignore it.
+    /// Make the controls recorded until it is set again take the pointer
+    /// where `shape` says within their boxes (`HitTest`), as well as
+    /// within the clips. Returns the shape it replaces.
+    pub fn setHitTest(self: *Frame, shape: ?HitTest) ?HitTest {
+        const previous = self.hit_test;
+        self.hit_test = shape;
+        return previous;
+    }
     pub fn setHitMap(self: *Frame, map: ?HitMap) ?HitMap {
         const previous = self.hit_map;
         self.hit_map = map;
@@ -3892,6 +3906,8 @@ pub const Frame = struct {
         const clipped = if (self.clipBounds()) |clip| layout.intersect(absolute_bounds, clip) else absolute_bounds;
         const visible = self.hitRect(clipped);
         var actual = options;
+        actual.exact.box = absolute_bounds;
+        actual.exact.hit_test = self.hit_test;
         // Turned by a hit map or cut by a rounded clip, the control takes
         // the pointer over its exact shape, not the box around it.
         if (self.transforms == null) {
@@ -3985,7 +4001,7 @@ pub const Frame = struct {
     const ClipShape = union(enum) {
         none,
         rounded: struct { radius: f32, mask: ?commands.Gradient },
-        path: struct { path: *const vectors.Path, transform: vectors.Transform },
+        path: struct { path: *const vectors.Path, transform: vectors.Transform, rule: vectors.FillRule = .nonzero },
     };
     /// Clip what is drawn until the matching `popClip` to `bounds` with its
     /// corners rounded by `radius`, and, when `mask` is set, by the alpha of
@@ -4014,7 +4030,12 @@ pub const Frame = struct {
     /// mask every frame. Without room for another mask the clip cuts to the
     /// path's bounds only. Hits are not cut by it.
     pub fn pushPathClip(self: *Frame, path: *const vectors.Path, transform: vectors.Transform) !void {
-        return self.pushClipWith(.{ .x = 0, .y = 0, .width = 0, .height = 0 }, .{ .path = .{ .path = path, .transform = transform } });
+        return self.pushPathClipRule(path, transform, .nonzero);
+    }
+    /// `pushPathClip` with the inside chosen by `rule`, as SVG's
+    /// `clip-rule`: `.even_odd` cuts the overlap of crossing subpaths away.
+    pub fn pushPathClipRule(self: *Frame, path: *const vectors.Path, transform: vectors.Transform, rule: vectors.FillRule) !void {
+        return self.pushClipWith(.{ .x = 0, .y = 0, .width = 0, .height = 0 }, .{ .path = .{ .path = path, .transform = transform, .rule = rule } });
     }
     fn pushClipWith(self: *Frame, local_bounds: Rect, shape: ClipShape) !void {
         var bounds = local_bounds;
@@ -4045,7 +4066,7 @@ pub const Frame = struct {
                 }
             },
             .path => |value| if (self.context.clipMasks()) |masks| {
-                mask = masks.path(value.path, path_transform, clip, self.size.scale, self.context.clipMaskRelease()) catch null;
+                mask = masks.pathWithRule(value.path, path_transform, value.rule, clip, self.size.scale, self.context.clipMaskRelease()) catch null;
             },
         }
         if (mask) |view| if (!self.context.command_buffer.coverageRoom(view)) {
@@ -4074,10 +4095,13 @@ pub const Frame = struct {
         if (self.transforms) |workspace| workspace.reference.clip = workspace.clip_parents[self.clips.len];
     }
     /// Draw what follows until the matching `popOpacity` at `alpha` (of
-    /// 255), each drawing by itself, as if it multiplied the drawing's
-    /// colors: overlapping children show through each other, not as one
-    /// faded layer. A group, cache or effect inside fades as one drawing.
-    /// It cuts nothing, and takes one of the 32 clip levels.
+    /// 255) as one group, as CSS's group opacity: what it holds composes
+    /// first and fades once, so overlapping children and a background
+    /// beneath them show as one, not each through the others. It records
+    /// flat, each drawing faded by itself, and becomes a group layer as it
+    /// closes only when two of its drawings overlap within the clips (see
+    /// `opacity_group.zig`); a backdrop inside keeps it flat. It cuts
+    /// nothing, and takes one of the 32 clip levels.
     pub fn pushOpacity(self: *Frame, alpha: u8) !void {
         return self.pushOpacityBody(alpha) catch |err| {
             self.failure = self.failure orelse err;
@@ -4086,6 +4110,8 @@ pub const Frame = struct {
     }
     fn pushOpacityBody(self: *Frame, alpha: u8) !void {
         if (self.opacity_depth == self.opacity_scopes.len) return error.ClipStackFull;
+        self.opacity_starts[self.opacity_depth] = self.context.command_buffer.len;
+        self.opacity_clips[self.opacity_depth] = self.clipBounds();
         try self.context.command_buffer.pushOpacity(alpha);
         self.opacity_scopes[self.opacity_depth] = self.clips.len;
         self.opacity_depth += 1;
@@ -4098,8 +4124,32 @@ pub const Frame = struct {
     }
     fn popOpacityBody(self: *Frame) !void {
         if (self.opacity_depth == 0 or self.opacity_scopes[self.opacity_depth - 1] != self.clips.len) return error.ClipStackEmpty;
-        try self.context.command_buffer.popClip();
+        const buffer = &self.context.command_buffer;
+        const start = self.opacity_starts[self.opacity_depth - 1];
+        if (start < buffer.len and buffer.storage[start] == .push_opacity) {
+            if (opacity_group.decide(buffer, start, self.opacity_clips[self.opacity_depth - 1])) |area| {
+                try buffer.closeOpacityAsGroup(start, area);
+                self.opacity_depth -= 1;
+                return;
+            }
+        }
+        try buffer.popClip();
         self.opacity_depth -= 1;
+    }
+    /// The ranks controls recorded now take in Tab's order, from `rank`
+    /// up to below `limit`; see `setTabRange`.
+    pub fn tabRange(self: *const Frame) [2]u32 {
+        const state = &self.context.input_state;
+        return .{ state.tab_rank, state.tab_limit };
+    }
+    /// Controls recorded until the next call come at `rank` in the order Tab
+    /// moves through, whatever order they are recorded in, as siblings
+    /// painted in another order than they read (`view.Style.z_index`);
+    /// ranks up to `limit` are theirs to divide among what is inside them.
+    pub fn setTabRange(self: *Frame, rank: u32, limit: u32) void {
+        const state = &self.context.input_state;
+        state.tab_rank = rank;
+        state.tab_limit = @max(rank, limit);
     }
     /// Geometric hit/semantic clip across parent and group boundaries.
     pub fn clipBounds(self: *const Frame) ?Rect {
@@ -4898,6 +4948,7 @@ fn nativeRect(bounds: affine.Rect) Rect {
 
 test {
     _ = gdi;
+    _ = opacity_group;
     _ = clip_mask;
     _ = @import("mask_mix.zig");
     _ = gamut;
@@ -6670,4 +6721,51 @@ test "parsePath reads SVG path data and tells where data in error stops" {
     defer cut.close() catch {};
     try std.testing.expectEqual(@as(usize, 2), cut.commands.len);
     try std.testing.expectEqual(@as(usize, 14), report.offset);
+}
+
+const LeftHalf = struct {
+    fn takes(_: ?*const anyopaque, x: f32, _: f32, box: Rect) bool {
+        return x < box.x + box.width / 2;
+    }
+};
+
+test "a hit test cuts a control's hits to its shape, plain or transformed" {
+    const Dummy = struct {
+        fn draw(_: *anyopaque, _: *Frame) void {}
+        fn action(_: *anyopaque, _: u64) void {}
+    };
+    var dummy: u8 = 0;
+    var context = Context.init(&dummy, Dummy.draw, Dummy.action);
+    {
+        context.input_state.beginFrame();
+        var frame: Frame = .{ .context = &context, .size = .{ .width = 100, .height = 100, .scale = 1 } };
+        try frame.pushOffset(.{ .x = 10, .y = 0 });
+        _ = frame.setHitTest(.{ .func = LeftHalf.takes });
+        try frame.button(1, .{ .x = 0, .y = 0, .width = 40, .height = 20 }, "Half");
+        _ = frame.setHitTest(null);
+        try frame.button(2, .{ .x = 0, .y = 30, .width = 40, .height = 20 }, "Whole");
+        try frame.popOffset();
+        context.input_state.commitFrame();
+        try std.testing.expectEqual(@as(?u64, 1), context.input_state.hit(.{ .x = 15, .y = 10 }));
+        try std.testing.expect(context.input_state.hit(.{ .x = 45, .y = 10 }) == null);
+        try std.testing.expectEqual(@as(?u64, 2), context.input_state.hit(.{ .x = 45, .y = 40 }));
+        context.command_buffer.reset();
+    }
+    const workspace = try testWorkspace(&context, .{ .width = 100, .height = 100, .scale = 1 });
+    defer context.dropTransformMetadata();
+    defer context.command_buffer.reset();
+    context.input_state.beginFrame();
+    var frame = try testFrame(&context, workspace, 1);
+    try frame.pushOffset(.{ .x = 5, .y = 10 });
+    try frame.beginTransform(.{ .width = 200, .height = 40 }, .{ .x0 = -100, .y0 = 20 });
+    _ = frame.setHitTest(.{ .func = LeftHalf.takes });
+    try frame.button(1, .{ .x = 100, .y = 0, .width = 20, .height = 20 }, "Half");
+    _ = frame.setHitTest(null);
+    try frame.endTransform();
+    try frame.popOffset();
+    try context.command_buffer.finish();
+    _ = try workspace.state.commitFrame();
+    context.input_state.commitFrame();
+    try std.testing.expectEqual(@as(?u64, 1), context.input_state.hit(.{ .x = 8, .y = 40 }));
+    try std.testing.expect(context.input_state.hit(.{ .x = 22, .y = 40 }) == null);
 }

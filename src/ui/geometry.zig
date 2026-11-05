@@ -209,3 +209,15 @@ test "software surfaces reject invalid or oversized dimensions before native wor
     try std.testing.expectError(error.InvalidGeometry, validateSurface(1, 1, std.math.nan(f32)));
     try std.testing.expectError(error.InvalidGeometry, validateSurface(1, 1, std.math.floatMax(f32)));
 }
+
+test "colors mix with premultiplied alpha, as CSS's color-mix" {
+    const red: Color = .{ .r = 255, .g = 0, .b = 0 };
+    const blue: Color = .{ .r = 0, .g = 0, .b = 255 };
+    const clear: Color = .{ .r = 0, .g = 0, .b = 0, .a = 0 };
+    try std.testing.expectEqual(Color{ .r = 255, .g = 0, .b = 0, .a = 128 }, red.mixOklab(clear, 0.5));
+    try std.testing.expectEqual(Color{ .r = 0, .g = 0, .b = 255, .a = 64 }, clear.mixOklab(blue, 0.25));
+    try std.testing.expectEqual(clear, clear.mixOklab(clear, 0.5));
+    const translucent = red.withAlpha(0.25).mixOklab(blue, 0.5);
+    try std.testing.expectEqual(@as(u8, 160), translucent.a);
+    try std.testing.expect(translucent.b > translucent.r);
+}

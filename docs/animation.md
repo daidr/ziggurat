@@ -23,6 +23,8 @@ retarget 先在指定时间采样旧运动，spring 默认继承该时刻速度�
 
 `setReducedMotion(now, true)` 让活动运动立即到达目标，后续 retarget 也直接完成；恢复 false 不自动重放。它是宿主传入的策略，尚未自动读取 OS 可访问性偏好。`nextWake` 只返回时间，不读取时钟或执行工作；delay 直接返回开始时间，resting 返回 null。cadence 为1ns–1s，由宿主明确选择。过期但尚未 advance 的活动状态请求立即处理；时间倒退或不可表达的截止时间明确失败。
 
+不移动屏幕上任何东西的值（不透明度、模糊、交叉淡化的进度）在系统要求减少动态效果时也可以照常动画：`Retarget.non_motion = true` 的重定向不会因 `reduce_motion` 直接跳到目标，正在进行的这类运动在打开减少动态效果时也不会被结束；`Playhead.non_motion` 让时间线同样照常播放。其余的值仍然直接到达目标。
+
 ## 时间线与播放头
 
 Timeline 在初始化时复制1–64个有明确 `at_ns`、from/to、Tween 的 Track，轨道可以重叠或错开，总时长至多一小时。输入随后可释放或修改。Timeline 保持不可变，`sample(index, position_ns)` 只计算指定轨道，不遍历全部轨道或访问业务对象。它共享 Channel 的曲线实现。

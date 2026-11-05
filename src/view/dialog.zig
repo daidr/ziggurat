@@ -92,8 +92,14 @@ pub fn alertDialog(v: *View, is_open: *bool, alert: Alert, style: Style) Error!?
     var response: ?usize = null;
     if (state == .dismissed) response = alert.cancel;
     if (state == .open) {
-        try v.text(alert.title, .{ .font = .heading3 });
-        if (alert.message.len > 0) try v.text(alert.message, .{});
+        // As wide as its buttons need on one line, where the window has
+        // room; the title and message wrap to that width.
+        try v.text(alert.title, .{ .font = .heading3, .wrap = true });
+        v.lastNode().narrow = true;
+        if (alert.message.len > 0) {
+            try v.text(alert.message, .{ .wrap = true });
+            v.lastNode().narrow = true;
+        }
         try v.row(.{ .gap = 8, .justify = .end });
         for (alert.buttons, 0..) |label, index| {
             if (try v.button(label, .{ .key = index })) {

@@ -373,8 +373,8 @@ const LayerScene = struct {
         frame.rect(.{ .x = 160, .y = 12, .width = 40, .height = 30 }, 0x0000ff);
         frame.rect(.{ .x = 186, .y = 0, .width = 14, .height = 8 }, 0x00a000);
         try frame.popClip();
-        // An opacity fades each drawing by itself: the blue shows the red
-        // beneath it; a group inside fades as one drawing.
+        // An opacity fades what it holds as one group: the red and blue
+        // overlap, so they compose first and the blue hides the red.
         try frame.pushOpacity(128);
         frame.rect(.{ .x = 74, .y = 96, .width = 20, .height = 20 }, 0xff0000);
         frame.rect(.{ .x = 84, .y = 106, .width = 22, .height = 30 }, 0x0000ff);
@@ -462,10 +462,10 @@ fn layerFrames(allocator: std.mem.Allocator) !void {
     defer software.deinit(allocator);
     const stats = try renderLayers(allocator, app, &scene_state, false, &gpu);
     _ = try renderLayers(allocator, app, &scene_state, true, &software);
-    // Five groups (one filtered), a transform, and the rounded clip's mask
-    // drawn as two runs; two filter passes.
+    // Six groups (one filtered, one the overlapping opacity), a transform,
+    // and the rounded clip's mask drawn as two runs; two filter passes.
     std.debug.print("gl layers: {d} composited\n", .{stats.layers});
-    try std.testing.expectEqual(@as(u64, 8), stats.layers);
+    try std.testing.expectEqual(@as(u64, 9), stats.layers);
     try std.testing.expectEqual(@as(u64, 2), stats.filter_passes);
     try std.testing.expectEqual(gpu.items.len, software.items.len);
     const stride: usize = size.width;
@@ -479,9 +479,10 @@ fn layerFrames(allocator: std.mem.Allocator) !void {
     std.debug.print("masked group near its right: {x:0>6}\n", .{masked});
     try std.testing.expect(near(0x208040, masked, 40));
     try std.testing.expect(near(0xffffff, effectAt(gpu.items, size.scale, stride, 67, 20), 0));
-    // Red and blue at half opacity each, the blue over the red.
+    // Red and blue at half opacity as one group: where they overlap the
+    // blue hides the red.
     try std.testing.expect(near(0xff7f7f, effectAt(gpu.items, size.scale, stride, 78, 100), 2));
-    try std.testing.expect(near(0x7f40bf, effectAt(gpu.items, size.scale, stride, 90, 110), 3));
+    try std.testing.expect(near(0x7f7fff, effectAt(gpu.items, size.scale, stride, 90, 110), 3));
     try std.testing.expect(near(0x7f7fff, effectAt(gpu.items, size.scale, stride, 100, 130), 2));
     // The group fades as one: its yellow covers its green.
     try std.testing.expect(near(0xffff7f, effectAt(gpu.items, size.scale, stride, 78, 132), 2));

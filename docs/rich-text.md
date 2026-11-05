@@ -27,6 +27,7 @@ try v.embed(label.embed(), .{});
 - `background`：高亮底色，默认填满所在行高；`radius` 大于 0 时改为贴合字形、略宽于文字的圆角底，用于行内代码。
 - `baseline_shift`：把这个 span 的文字抬高若干 DIP（负数为降低），配合较小的 `size` 做上标与下标：脚注编号、指数、化学式。行会为它留出高度，它的线条和圆角底随文字一起移动。
 - `object`：把这个 span 当作一个不可拆开的内联对象（如公式或图标），宽、高和基线以下的深度取自 `Object`，文字只用于辅助判断，不绘制。对象和文字一起折行，行会为它留出高度；绘制交给 `options.objects` 的 `ObjectPainter`，它拿到对象所在的矩形，未设置时对象留空。
+- `opacity`（0–1）：这个 span 的文字、线条与底色一起按该透明度淡出，用于逐段淡入的文字；`invisible = true` 让它完全不画，但照常占位、照常折行，后面的文字不会挪动。
 
 ```zig
 try label.setSpans(&.{

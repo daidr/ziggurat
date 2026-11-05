@@ -75,7 +75,35 @@ pub const Span = struct {
     /// baseline in place of its text, which lines break around and which
     /// `Options.objects` draws. Give it one U+FFFC as its text.
     object: ?Object = null,
+    /// Fades the span's words, lines and background, as CSS's `opacity`
+    /// on an inline element: 0 paints none of them. The words keep their
+    /// room in the line.
+    opacity: f32 = 1,
+    /// Paints none of the span while its words keep their room in the
+    /// line, as CSS's `visibility: hidden`.
+    invisible: bool = false,
+
+    /// How opaque the span paints, from 0 (nothing) to 1.
+    pub fn alpha(self: Span) f32 {
+        if (self.invisible or !std.math.isFinite(self.opacity)) return 0;
+        return std.math.clamp(self.opacity, 0, 1);
+    }
 };
+
+/// Opens a fade of `alpha` around one drawing of a span on targets that
+/// fade, true when it opened one to close.
+fn openFade(target: anytype, alpha: f32) bool {
+    if (alpha >= 1) return false;
+    const Target = @TypeOf(target.*);
+    if (comptime !@hasDecl(Target, "pushOpacity") or !@hasDecl(Target, "popOpacity")) return false;
+    target.pushOpacity(@intFromFloat(@round(alpha * 255))) catch return false;
+    return true;
+}
+fn closeFade(target: anytype, opened: bool) void {
+    const Target = @TypeOf(target.*);
+    if (comptime !@hasDecl(Target, "popOpacity")) return;
+    if (opened) target.popOpacity() catch {};
+}
 
 pub const Options = struct {
     /// Measures runs in their fonts; use the one the view host uses.
@@ -517,6 +545,10 @@ pub const RichText = struct {
             const span = self.spans[run.span];
             if (span.object != null) continue;
             const color = span.background orelse continue;
+            const alpha = span.alpha();
+            if (alpha <= 0) continue;
+            const faded = openFade(target, alpha);
+            defer closeFade(target, faded);
             const line = self.lines.items[run.line];
             const size = self.metrics.items[run.span].size;
             if (span.radius > 0) {
@@ -528,6 +560,11 @@ pub const RichText = struct {
         for (self.runs.items) |run| {
             const span = self.spans[run.span];
             if (span.object != null) continue;
+            // What paints nothing is skipped; its words keep their room.
+            const alpha = span.alpha();
+            if (alpha <= 0) continue;
+            const faded = openFade(target, alpha);
+            defer closeFade(target, faded);
             const line = self.lines.items[run.line];
             const m = self.metrics.items[run.span];
             const color = span.color orelse base_color;

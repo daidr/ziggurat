@@ -306,12 +306,77 @@ pub const Style = struct {
     placeholder: []const u8 = "",
     /// Color of that placeholder; null is the theme's muted text.
     placeholder_color: ?u32 = null,
+    /// Where the node paints among its siblings, as CSS's `z-index`: those
+    /// with a higher value paint over those with a lower one and take the
+    /// pointer first, equal ones keep the order they are built in, and a
+    /// negative value puts the node under its siblings, over its parent's
+    /// background. The order is among siblings alone: the node moves with
+    /// all inside it, still clipped by its parent. The layout and the order
+    /// Tab moves the focus in still follow the build.
+    z_index: i16 = 0,
+    /// Keep the node in the flow, where it takes its room, and hold it
+    /// inside the scroll container around it (or the window) while its
+    /// parent is in view, as CSS's `position: sticky`; see `Sticky`. A
+    /// sticky node paints over its siblings, so give it a background.
+    sticky: ?Sticky = null,
+    /// The fraction a double click on a split's divider puts its first pane
+    /// back at; null keeps the size on a double click. Kept within the
+    /// split's limits.
+    split_reset: ?f64 = null,
+    /// Where in its box the element's control takes the pointer, as the
+    /// application decides (`ui.HitTest`): a ring takes presses on
+    /// its band alone, a pie segment on its slice. Null takes the whole box.
+    hit_test: ?ui.HitTest = null,
+    /// A scroll container comes to rest at the places nodes inside it mark
+    /// with `snap_align`, as CSS's `scroll-snap-type`: `.mandatory` always
+    /// rests at one, the wheel and the keys going from place to place;
+    /// `.proximity` rests at one only where scrolling stops within a third
+    /// of the view of it. A node taller than the view rests anywhere it
+    /// fills the view. Offsets the application sets stay where it puts
+    /// them.
+    scroll_snap: ?SnapType = null,
+    /// The place a node marks in the scroll container around it with
+    /// `scroll_snap`: its start, center or end lined up with the
+    /// container's content box, inside its padding.
+    snap_align: ?SnapAlign = null,
     /// Build the node's descendants with another theme: they measure with
     /// its metrics and paint with its colors, and the node paints its
     /// background unless `background` is set, as the window's root does.
     /// Popovers, menus and dialogs opened inside take it too. The theme is
     /// borrowed until the pass is painted. See `View.themed`.
     theme: ?*const Theme = null,
+};
+
+/// Where `View.scrollIntoViewWith` lines a node up in the scroll
+/// containers around it: as little as shows it (`nearest`), or its start,
+/// center or end with the container's, inside its padding.
+pub const ScrollAlign = enum { nearest, start, center, end };
+/// How `View.scrollIntoViewWith` brings a node into view.
+pub const ScrollIntoView = struct {
+    block: ScrollAlign = .nearest,
+    /// Glide there over this time, easing out, rather than at once, as the
+    /// web's `behavior: "smooth"`; the user scrolling stops it, and under
+    /// reduced motion it scrolls at once.
+    glide: ?animation.Tween = null,
+};
+
+/// How strictly a scroll container snaps; see `Style.scroll_snap`.
+pub const SnapType = enum { mandatory, proximity };
+/// What of a node lines up with its scroll container; see
+/// `Style.snap_align`.
+pub const SnapAlign = enum { start, center, end };
+
+/// How far in from the edges of the scroll container around it (or the
+/// window) a `Style.sticky` node stays, in DIP. It goes no further than
+/// its parent's content box, so as its parent scrolls away it takes the
+/// node along, and the next parent's comes up in its place, as a day's
+/// heading in a timeline is pushed out by the next. With both insets of
+/// an axis set and too little room for both, `top` and `left` win.
+pub const Sticky = struct {
+    top: ?f32 = null,
+    right: ?f32 = null,
+    bottom: ?f32 = null,
+    left: ?f32 = null,
 };
 
 /// How `Style.clip_inset` cuts a node's box: by `top`, `right`, `bottom`
@@ -1136,6 +1201,12 @@ pub const Node = struct {
     /// layer, out of the clips and opacity around it: 1 for the one a
     /// flight leaves, under 2 for the one flying in; 0 in place.
     lifted: u8 = 0,
+    /// A child has a `Style.z_index`: the children paint sorted by it.
+    z_order: bool = false,
+    /// A wrapping text that widens nothing around it: it wraps to the
+    /// width it is given, as an alert's title and message do to its
+    /// buttons' width.
+    narrow: bool = false,
     parent: u32 = none,
     first_child: u32 = none,
     last_child: u32 = none,
@@ -1193,7 +1264,27 @@ pub const Buffers = struct {
 };
 
 /// A node's id and window bounds in the last arranged pass.
-pub const Placed = struct { id: u64, bounds: Rect };
+pub const Placed = struct {
+    id: u64,
+    bounds: Rect,
+    /// Where the window and the scroll containers around the node show,
+    /// and what other clips around it leave; empty when it is hidden.
+    view: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+    clip: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+};
+
+/// How `View.inView` counts a node in view.
+pub const InView = struct {
+    /// DIP the window and the scroll containers around the node grow by
+    /// before it looks, as IntersectionObserver's `rootMargin`: a thumbnail
+    /// starts loading 300 DIP before it scrolls in. Negative shrinks them,
+    /// to count a node in view only once it is that far inside. Other clips
+    /// around it clip as they do.
+    margin: Insets = .{},
+    /// The share of the node's area that must show, from 0 (any of it) to
+    /// 1 (all of it), as IntersectionObserver's `threshold`.
+    amount: f32 = 0,
+};
 
 /// Static storage for a bounded tree, kept at a stable address by its owner.
 pub fn Storage(comptime node_capacity: usize, comptime text_capacity: usize) type {
@@ -1542,6 +1633,7 @@ pub const View = struct {
     /// A list item selected by input, revealed by the next `arrange`. It
     /// outlives `reset` so an event pass can hand it to the render pass.
     reveal: ?u64 = null,
+    reveal_options: ScrollIntoView = .{},
     /// Monotonic time of this pass in nanoseconds, set by the host before
     /// each pass. Only differences are meaningful.
     now: u64 = 0,
@@ -1594,6 +1686,9 @@ pub const View = struct {
     capture: ?Capture = null,
     /// The last press on an embedded leaf, to count double presses.
     last_press: struct { id: u64 = 0, time: u64 = 0, at: Point = .{}, count: u8 = 0 } = .{},
+    /// A split whose divider was double pressed, for its next build to put
+    /// back at `Style.split_reset`.
+    split_reset: u64 = 0,
     /// The pointer in window DIP, or null while it is outside the window;
     /// set by the host as it moves.
     pointer: ?Point = null,
@@ -1748,6 +1843,44 @@ pub const View = struct {
         return rect;
     }
 
+    /// Where a node is and what shows of the window and the containers
+    /// around it, for `inView` in the passes after.
+    fn placedEntry(self: *const View, node: *const Node) Placed {
+        const all = self.nodes();
+        const huge: Rect = .{ .x = -1e9, .y = -1e9, .width = 2e9, .height = 2e9 };
+        var entry: Placed = .{ .id = node.id, .bounds = node.bounds, .view = all[0].bounds, .clip = huge };
+        if (self.hiddenAt(node) or node.concealed) {
+            entry.view = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+            return entry;
+        }
+        var parent = if (node.floats()) none else node.parent;
+        while (parent < all.len) : (parent = all[parent].parent) {
+            const ancestor = &all[parent];
+            if (ancestor.kind == .scroll) entry.view = layout.intersect(entry.view, ancestor.bounds) else if (ancestor.clips()) entry.clip = layout.intersect(entry.clip, ancestor.bounds);
+            if (ancestor.style.clip_inset) |inset_clip| entry.clip = layout.intersect(entry.clip, inset_clip.rect(ancestor.bounds));
+            if (ancestor.floats()) break;
+        }
+        return entry;
+    }
+    /// Whether the node with `id` showed in the window in the pass before,
+    /// as `how` counts it, for what is built only once it comes near, as
+    /// a picture loading as it scrolls in. False for a node the pass
+    /// before did not place, or hid.
+    pub fn inView(self: *const View, id: u64, how: InView) bool {
+        for (self.buffers.placed[0..@min(self.placed_len, self.buffers.placed.len)]) |entry| {
+            if (entry.id != id) continue;
+            const m = how.margin;
+            const grown: Rect = .{ .x = entry.view.x - m.left, .y = entry.view.y - m.top, .width = entry.view.width + m.left + m.right, .height = entry.view.height + m.top + m.bottom };
+            if (!(entry.view.width > 0 and entry.view.height > 0) or !(grown.width > 0 and grown.height > 0)) return false;
+            const shown = layout.intersect(layout.intersect(entry.bounds, grown), entry.clip);
+            const area = shown.width * shown.height;
+            const whole = entry.bounds.width * entry.bounds.height;
+            if (how.amount <= 0) return area > 0 or (whole == 0 and contains(grown, .{ .x = entry.bounds.x, .y = entry.bounds.y }));
+            return whole > 0 and area >= whole * @min(how.amount, 1) - 1e-3;
+        }
+        return false;
+    }
+
     /// True when `node` or an ancestor is hidden, such as an option of a
     /// closed popup: it has no place to scroll into view.
     fn hiddenAt(self: *const View, node: *const Node) bool {
@@ -1789,6 +1922,7 @@ pub const View = struct {
             else => parent.semantic_parent,
         }, .rtl = if (style.direction) |value| value == .rtl else parent.rtl, .field = if (parent.kind == .field) parent_index else parent.field, .collection = if (parent.kind == .tree or parent.kind == .table) parent_index else parent.collection, .row = if (parent.kind == .table_row) parent_index else parent.row, .concealed = style.hidden or parent.concealed, .passthrough = style.ignore_input or parent.passthrough, .access_hidden = style.access_hidden or parent.access_hidden, .theme = style.theme orelse parent.theme };
         if (parent.last_child == none) parent.first_child = index else self.buffers.nodes[parent.last_child].next_sibling = index;
+        if (style.z_index != 0 or style.sticky != null) parent.z_order = true;
         parent.last_child = index;
         parent.child_count += 1;
         self.len += 1;
@@ -1841,6 +1975,14 @@ pub const View = struct {
     /// every pass keeps the reader from scrolling it away.
     pub fn scrollIntoView(self: *View, id: u64) void {
         self.reveal = id;
+        self.reveal_options = .{};
+    }
+    /// Scroll the containers around the node with `id` to show it, lined
+    /// up as `options` say, as the web's `scrollIntoView` options: at once,
+    /// or gliding there; see `ScrollIntoView`.
+    pub fn scrollIntoViewWith(self: *View, id: u64, how: ScrollIntoView) void {
+        self.reveal = id;
+        self.reveal_options = how;
     }
     /// Bind `chord` to an action under `action`: while the node just added
     /// holds focus, or anywhere in the window when `window` is set, the
@@ -2184,8 +2326,13 @@ pub const View = struct {
     pub fn scroll(self: *View, model: *ScrollModel, style: Style) Error!void {
         const node = try self.open(.scroll, style);
         node.scroll = model;
+        // A model never laid out snaps as it first shows.
+        if (style.scroll_snap == .mandatory and model.viewport.height == 0) model.snap_delta = std.math.nan(f32);
         if (self.take(node.id)) |event| if (event == .scroll) {
+            const before = model.offset.y;
+            model.glide_ns = 0;
             _ = model.scrollBy(event.scroll.delta) catch return error.InvalidValue;
+            if (style.scroll_snap != null and !std.math.isNan(model.snap_delta)) model.snap_delta += model.offset.y - before;
         };
     }
     /// Starts a grid with the given column tracks. Children fill cells row by
@@ -2338,10 +2485,28 @@ pub const View = struct {
             changed = next != fraction.*;
             fraction.* = next;
         };
+        if (self.split_reset == node.id) {
+            self.split_reset = 0;
+            if (style.split_reset) |value| if (std.math.isFinite(value)) {
+                const next = std.math.clamp(value, limits.minimum, limits.maximum);
+                changed = changed or next != fraction.*;
+                fraction.* = next;
+            };
+        }
         if (!std.math.isFinite(fraction.*)) return error.InvalidValue;
         fraction.* = std.math.clamp(fraction.*, limits.minimum, limits.maximum);
         node.value = fraction.*;
         return changed;
+    }
+    /// The split whose divider is under `point`, the innermost.
+    fn dividerAt(self: *const View, point: Point) ?*const Node {
+        var found: ?*const Node = null;
+        for (self.buffers.nodes[0..self.len]) |*node| {
+            if (node.kind != .split or node.concealed or !node.style.enabled) continue;
+            const strip = self.divider(node) orelse continue;
+            if (contains(strip, point)) found = node;
+        }
+        return found;
     }
     /// The divider strip between a split's arranged panes.
     pub fn divider(self: *const View, node: *const Node) ?Rect {
@@ -3665,6 +3830,16 @@ pub const View = struct {
                 if (entry.embed.focusable) result.focus = entry.id;
                 return result;
             }
+        } else if (self.dividerAt(point)) |pane| {
+            // A double press on a divider puts the split back at its reset.
+            const last = self.last_press;
+            const again = last.id == pane.id and now >= last.time and now - last.time <= double_press_time and distance(last.at, point) <= double_press_distance;
+            self.last_press = .{ .id = pane.id, .time = now, .at = point, .count = if (again) last.count +| 1 else 1 };
+            if (again and last.count == 1 and pane.style.split_reset != null) {
+                self.split_reset = pane.id;
+                result.repaint = true;
+                result.settle = true;
+            }
         } else self.last_press.id = 0;
         // Nothing under an open menu drags.
         if (adjusting or menu_controls.panelAt(self, point)) return result;
@@ -4510,7 +4685,9 @@ pub const View = struct {
         if (self.reveal) |id| {
             self.reveal = null;
             if (try self.revealNode(id)) try self.place();
-        }
+        } else if (self.glideScrolls()) try self.place();
+        if (try self.snapScrolls()) try self.place();
+        self.holdSticky();
         self.record(measurer);
         // Animated poses and shared elements move what is drawn, not the
         // arranged boxes input routing just recorded.
@@ -4535,6 +4712,7 @@ pub const View = struct {
                 // A tree row's badge keeps its width for paint.
                 if (node.kind == .tree_row) node.fraction = if (node.badge.len > 0) measurer.textSize(node.badge, null).width + 2 * (theme.metrics.content_inset / 2 + 4) + theme.metrics.content_inset / 2 else 0;
                 node.measured = if (node.kind == .text and node.style.wrap) self.measureWrap(node, measurer) else intrinsic(node, theme, measurer);
+                if (node.narrow) node.measured.preferred.width = node.measured.minimum.width;
                 continue;
             }
             var cursor: usize = 0;
@@ -4586,7 +4764,10 @@ pub const View = struct {
         for (self.buffers.nodes[0..self.len]) |*node| {
             if (node.kind != .text or !node.style.wrap) continue;
             const width = self.wrapWidth(node) orelse continue;
-            if (width + 0.5 < node.measured.preferred.width) return true;
+            // A narrow text's preferred width is its longest word: what one
+            // line of it needs tells.
+            const needed = if (node.narrow) wrap_text.measure(node.text, std.math.inf(f32), node.style.font, self.measurer, node.style.max_lines).width else node.measured.preferred.width;
+            if (width + 0.5 < needed) return true;
         }
         return false;
     }
@@ -4668,7 +4849,7 @@ pub const View = struct {
             overlay.binding_count += 1;
         }
         self.placed_len = @min(all.len, self.buffers.placed.len);
-        for (all[0..self.placed_len], self.buffers.placed[0..self.placed_len]) |*node, *entry| entry.* = .{ .id = node.id, .bounds = node.bounds };
+        for (all[0..self.placed_len], self.buffers.placed[0..self.placed_len]) |*node, *entry| entry.* = self.placedEntry(node);
         for (all, 0..) |*node, index| {
             if (index < inside_start or index >= inside_end) continue;
             // What ignores input takes no part in routing it; assistive
@@ -4973,12 +5154,37 @@ pub const View = struct {
         if (target.concealed) return false;
         var moved = false;
         var parent = target.parent;
+        const how = self.reveal_options;
+        self.reveal_options = .{};
         while (parent < all.len) : (parent = all[parent].parent) {
             const container = &all[parent];
             const model = container.scroll orelse continue;
             const top = container.bounds.y - model.offset.y;
             const b = target.bounds;
-            moved = (model.ensureVisible(.{ .x = 0, .y = b.y - top, .width = 0, .height = b.height }) catch return error.InvalidValue) or moved;
+            const before = model.offset.y;
+            const p = container.style.padding;
+            const room = @max(0, model.viewport.height - p.top - p.bottom);
+            const at = b.y - top - p.top;
+            switch (how.block) {
+                .nearest => _ = model.ensureVisible(.{ .x = 0, .y = b.y - top, .width = 0, .height = b.height }) catch return error.InvalidValue,
+                .start => _ = model.setOffset(.{ .x = model.offset.x, .y = at }) catch return error.InvalidValue,
+                .center => _ = model.setOffset(.{ .x = model.offset.x, .y = at + b.height / 2 - room / 2 }) catch return error.InvalidValue,
+                .end => _ = model.setOffset(.{ .x = model.offset.x, .y = at + b.height - room }) catch return error.InvalidValue,
+            }
+            const after = model.offset.y;
+            if (how.glide) |glide| if (glide.duration_ns > 0 and !self.preferences.reduce_motion and after != before) {
+                // It glides from where it shows now.
+                model.glide_from = before;
+                model.glide_to = after;
+                model.glide_start = self.now;
+                model.glide_ns = glide.duration_ns;
+                model.glide_easing = @backingInt(glide.easing);
+                model.offset.y = before;
+                _ = self.glideScrolls();
+                continue;
+            };
+            model.glide_ns = 0;
+            moved = moved or after != before;
         }
         return moved;
     }
@@ -5039,6 +5245,119 @@ pub const View = struct {
                 if (all[child].floats() and !all[child].concealed) all[child].bounds = self.floatingBounds(&all[child]);
             }
         }
+    }
+
+    /// Move each scroll container gliding to where its glide is now, and
+    /// ask for the next frame of those still on their way; true when an
+    /// offset changed.
+    fn glideScrolls(self: *View) bool {
+        var moved = false;
+        for (self.buffers.nodes[0..self.len]) |*node| {
+            const model = node.scroll orelse continue;
+            if (model.glide_ns == 0) continue;
+            const elapsed = self.now -| model.glide_start;
+            const t = @min(1, @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(model.glide_ns)));
+            const eased = animation.easeAt(std.enums.fromInt(animation.Easing, model.glide_easing) orelse .cubic_out, t);
+            const next: f32 = @floatCast(model.glide_from + (model.glide_to - model.glide_from) * eased);
+            moved = (model.setOffset(.{ .x = model.offset.x, .y = next }) catch false) or moved;
+            if (t >= 1) model.glide_ns = 0 else self.wakeAt(self.now + loading_frame_interval);
+        }
+        return moved;
+    }
+
+    /// Bring each snapping scroll container the user scrolled in this pass
+    /// to rest at a place; true when an offset changed.
+    fn snapScrolls(self: *View) Error!bool {
+        const all = self.buffers.nodes[0..self.len];
+        var moved = false;
+        for (all, 0..) |*node, index| {
+            const kind = node.style.scroll_snap orelse continue;
+            const model = node.scroll orelse continue;
+            if (node.kind != .scroll or model.snap_delta == 0 or node.hidden()) continue;
+            const view_height = model.viewport.height;
+            if (!(view_height > 0)) continue;
+            const delta = model.snap_delta;
+            model.snap_delta = 0;
+            const limit = model.maxOffset().y;
+            const offset = model.offset.y;
+            const origin = node.bounds.y - offset;
+            const p = node.style.padding;
+            // The rest nearest to the offset, the nearest past where the
+            // scroll started its way, and whether a large node fills the view.
+            var nearest: ?f32 = null;
+            var onward: ?f32 = null;
+            var fills = false;
+            var at = index + 1;
+            while (at < node.end) {
+                const inner = &all[at];
+                if (inner.kind == .scroll or inner.hidden()) {
+                    at = inner.end;
+                    continue;
+                }
+                at += 1;
+                const alignment = inner.style.snap_align orelse continue;
+                const top = inner.bounds.y - origin;
+                const height = inner.bounds.height;
+                const room = @max(0, view_height - p.top - p.bottom);
+                const rest = std.math.clamp(switch (alignment) {
+                    .start => top - p.top,
+                    .center => top + height / 2 - p.top - room / 2,
+                    .end => top + height - p.top - room,
+                }, 0, limit);
+                if (height > room and offset >= top - p.top and offset + room <= top + height - p.top) fills = true;
+                if (nearest == null or @abs(rest - offset) < @abs(nearest.? - offset)) nearest = rest;
+                const start = if (std.math.isNan(delta)) offset else offset - delta;
+                const ahead = if (std.math.isNan(delta)) true else if (delta > 0) rest > start + 0.5 else rest < start - 0.5;
+                if (ahead and (onward == null or @abs(rest - offset) < @abs(onward.? - offset))) onward = rest;
+            }
+            if (fills) continue;
+            const target = switch (kind) {
+                .mandatory => onward orelse nearest,
+                .proximity => if (nearest) |rest| (if (@abs(rest - offset) <= view_height / 3) rest else null) else null,
+            } orelse continue;
+            moved = (model.setOffset(.{ .x = model.offset.x, .y = target }) catch return error.InvalidValue) or moved;
+        }
+        return moved;
+    }
+
+    /// Move each `Style.sticky` node, with what is inside it, to stay
+    /// within the scroll container around it, or the window, and its
+    /// parent's content box.
+    fn holdSticky(self: *View) void {
+        const all = self.buffers.nodes[0..self.len];
+        for (all, 0..) |*node, index| {
+            const sticky = node.style.sticky orelse continue;
+            if (node.hidden() or node.floats() or node.parent == none) continue;
+            var outer = node.parent;
+            while (outer != none and all[outer].kind != .scroll) outer = all[outer].parent;
+            const view_box = if (outer != none) all[outer].bounds else all[0].bounds;
+            const parent = &all[node.parent];
+            const p = parent.style.padding;
+            const room: Rect = .{ .x = parent.bounds.x + p.left, .y = parent.bounds.y + p.top, .width = @max(0, parent.bounds.width - p.left - p.right), .height = @max(0, parent.bounds.height - p.top - p.bottom) };
+            const b = node.bounds;
+            const dx = stickyShift(b.x, b.width, view_box.x, view_box.width, room.x, room.width, sticky.left, sticky.right);
+            const dy = stickyShift(b.y, b.height, view_box.y, view_box.height, room.y, room.height, sticky.top, sticky.bottom);
+            if (dx == 0 and dy == 0) continue;
+            for (all[index..node.end]) |*inner| {
+                inner.bounds.x += dx;
+                inner.bounds.y += dy;
+            }
+        }
+    }
+    /// How far a sticky box at `at` of `size` moves along one axis to stay
+    /// `lead` in from the view's start or `trail` in from its end, within
+    /// its parent's content `room`.
+    fn stickyShift(at: f32, size: f32, view_at: f32, view_size: f32, room_at: f32, room_size: f32, lead: ?f32, trail: ?f32) f32 {
+        var shift: f32 = 0;
+        if (trail) |gap| {
+            const limit = view_at + view_size - gap;
+            if (at + size > limit) shift = @max(limit - (at + size), @min(0, room_at - at));
+        }
+        if (lead) |gap| {
+            const limit = view_at + gap;
+            if (at + shift < limit) shift = @min(limit - at, @max(0, room_at + room_size - (at + size)));
+        }
+        return if (std.math.isFinite(shift)) shift else 0;
     }
 
     /// A popup below its anchor, or above when there is more room there,
@@ -5581,6 +5900,8 @@ pub const View = struct {
                 scopes[scope_depth] = .{ .index = @intCast(at), .kind = .cache };
                 scope_depth += 1;
             };
+            const shaped_hits = @TypeOf(target) == *ui.Frame and style.hit_test != null;
+            const outer_hit_test = if (shaped_hits) target.setHitTest(style.hit_test) else null;
             var control: ui.widgets.Options = .{ .enabled = style.enabled, .name = style.name, .semantic_parent = node.semantic_parent, .focus_ring_offset = style.focus_ring_offset, .focus_ring_color = style.focus_ring_color };
             const annotation = self.annotationOf(node);
             control.description = annotation.description;
@@ -5783,6 +6104,7 @@ pub const View = struct {
                     if (content.present) |present| if (@TypeOf(target) == *ui.Frame) present(content.context, node.id, self.presentation(all, at));
                     if (self.matches.glyphMorphOf(node.id)) |value| {
                         if (try self.paintGlyphMorph(target, node, value)) {
+                            if (shaped_hits) _ = target.setHitTest(outer_hit_test);
                             at += 1;
                             continue;
                         }
@@ -5790,12 +6112,61 @@ pub const View = struct {
                     if (@TypeOf(target) == *ui.Frame) try content.paint(content.context, target, node.id, bounds) else try target.embedded(node.id, bounds);
                 },
             }
+            // The shape is the element's own: what it holds takes the whole box.
+            if (shaped_hits) _ = target.setHitTest(outer_hit_test);
+            if (node.z_order and node.child_count > 0) {
+                try self.paintByZ(target, window_theme, at, floating, floating_len, lifted);
+                at = node.end;
+                continue;
+            }
             at += 1;
         }
         while (scope_depth > 0) {
             scope_depth -= 1;
             try closeScope(&all[scopes[scope_depth].index], scopes[scope_depth], target, window_theme);
         }
+    }
+    /// Paint the children of the node at `index` sorted by
+    /// `Style.z_index`, equal ones in build order, each with its subtree;
+    /// Tab still moves through them in build order.
+    fn paintByZ(self: *const View, target: anytype, window_theme: Theme, index: usize, floating: *[max_floating]u32, floating_len: *usize, lifted: ?*Lifted) anyerror!void {
+        const all = self.buffers.nodes[0..self.len];
+        var order: [layout.max_items]u32 = undefined;
+        var count: usize = 0;
+        var child = all[index].first_child;
+        while (child != none and count < order.len) : (child = all[child].next_sibling) {
+            // Stable insertion by z-index.
+            var j = count;
+            while (j > 0 and zKey(&all[order[j - 1]]) > zKey(&all[child])) : (j -= 1) order[j] = order[j - 1];
+            order[j] = child;
+            count += 1;
+        }
+        const frame = @TypeOf(target) == *ui.Frame;
+        // Each child takes a share of the ranks left, in build order, so Tab
+        // reads them as built; half the range is kept for what follows.
+        const range = if (frame) target.tabRange() else [2]u32{ 0, 0 };
+        const span: u64 = (@as(u64, range[1]) - range[0]) / 2;
+        for (order[0..count]) |at| {
+            if (frame) {
+                const position: u64 = self.childPosition(index, at);
+                const share = span / @max(1, count);
+                target.setTabRange(@intCast(range[0] + position * share), @intCast(range[0] + (position + 1) * share));
+            }
+            try self.paintRange(target, window_theme, at, all[at].end, floating, floating_len, lifted);
+        }
+        if (frame) target.setTabRange(@intCast(range[0] + span), range[1]);
+    }
+    /// Where a child paints among its siblings: by z-index, and a sticky
+    /// one over the others of its z-index.
+    fn zKey(node: *const Node) i32 {
+        return @as(i32, node.style.z_index) * 2 + @intFromBool(node.style.sticky != null);
+    }
+    fn childPosition(self: *const View, parent: usize, index: u32) usize {
+        const all = self.buffers.nodes[0..self.len];
+        var position: usize = 0;
+        var child = all[parent].first_child;
+        while (child != none and child != index) : (child = all[child].next_sibling) position += 1;
+        return position;
     }
     const Scope = struct {
         index: u32,
@@ -7761,6 +8132,7 @@ test {
     _ = @import("inspector_tests.zig");
     _ = @import("gradient.zig");
     _ = @import("style_tests.zig");
+    _ = @import("layout_tests.zig");
     _ = @import("matched.zig");
     _ = @import("morph.zig");
 }
