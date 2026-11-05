@@ -84,8 +84,10 @@ static gboolean contains(const char *text, const char *needle) {
 
 /* Heuristics: prefer-dark or a theme name containing "dark" (or an inverse
    high-contrast theme) is dark; another named theme is light. High contrast
-   is a theme name containing "contrast". The portal color-scheme is not read:
-   that would be a blocking D-Bus call on the UI thread. */
+   is a theme name containing "contrast". The portal color-scheme is not read
+   here, which would be a blocking D-Bus call on the UI thread: the core reads
+   and watches it asynchronously and brings a dark one to prefer-dark while
+   the app follows the desktop. */
 int zsd_preferences(ZsdPreferences *out) {
     GtkSettings *settings = gtk_settings_get_default();
     if (!settings) return ZSD_UNSUPPORTED;

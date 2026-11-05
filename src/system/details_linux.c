@@ -65,6 +65,9 @@ void *zsx_window_icon(void *window) { return gtk_window_get_icon(GTK_WINDOW(wind
    name without the suffix. Properties change only when their value does,
    so the notifications a desktop watch sees always mean a change. */
 static gboolean theme_overridden, theme_renamed;
+/* The core follows the settings portal's color-scheme while the app follows
+   the desktop (platform/linux.c). */
+extern void zlg_follow_portal_scheme(int follow) __attribute__((weak));
 void zsx_theme_set_source(int source) {
     GtkSettings *settings = gtk_settings_get_default();
     if (!settings) return;
@@ -77,8 +80,10 @@ void zsx_theme_set_source(int source) {
             theme_overridden = FALSE;
             gtk_settings_reset_property(settings, "gtk-application-prefer-dark-theme");
         }
+        if (zlg_follow_portal_scheme) zlg_follow_portal_scheme(1);
         return;
     }
+    if (zlg_follow_portal_scheme) zlg_follow_portal_scheme(0);
     if (source == 1 && !theme_renamed) {
         gchar *name = NULL;
         g_object_get(settings, "gtk-theme-name", &name, NULL);
@@ -101,4 +106,37 @@ int zsx_theme_prefers_dark(void) {
     gboolean dark = FALSE;
     g_object_get(gtk_settings_get_default(), "gtk-application-prefer-dark-theme", &dark, NULL);
     return dark ? 1 : 0;
+}
+
+/* The app's GTK 3 style sheet for what GTK draws itself: decorations,
+   header bars, title buttons, menus and dialogs. A provider of its own for
+   the default screen at the user's priority, so its rules win over the
+   theme's and the user's gtk.css (GTK looks providers up from the highest
+   priority, among equal ones from the last added). A sheet loads into a new
+   provider, which replaces the one before only once it parsed; "" removes
+   it. 0 set, 1 the sheet does not parse (its first error in `message`), 2
+   no display. */
+static GtkCssProvider *app_css;
+int zsx_theme_set_gtk_css(const char *css, size_t length, char *message, size_t capacity) {
+    GdkScreen *screen = gdk_screen_get_default();
+    if (!screen) return 2;
+    if (capacity) message[0] = 0;
+    GtkCssProvider *provider = NULL;
+    if (length > 0) {
+        provider = gtk_css_provider_new();
+        GError *error = NULL;
+        if (!gtk_css_provider_load_from_data(provider, css, (gssize)length, &error)) {
+            if (error && capacity) g_strlcpy(message, error->message, capacity);
+            if (error) g_error_free(error);
+            g_object_unref(provider);
+            return 1;
+        }
+        gtk_style_context_add_provider_for_screen(screen, GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_USER);
+    }
+    if (app_css) {
+        gtk_style_context_remove_provider_for_screen(screen, GTK_STYLE_PROVIDER(app_css));
+        g_object_unref(app_css);
+    }
+    app_css = provider;
+    return 0;
 }

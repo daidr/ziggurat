@@ -139,10 +139,19 @@ pub const Font = struct {
     /// Row height as a multiple of the font's line height; text is centered
     /// in its row.
     line_height: f32 = 1,
+    /// Column width as a multiple of the font's advance; 1 when zero, less
+    /// or not finite. It changes the grid, not the font's size or the rows'
+    /// height: glyphs keep their size, centered in their cells, and below 1
+    /// they overlap. The cursor, selection, mouse reports, drawn boxes and
+    /// the cell size told to programs follow the grid.
+    cell_width: f32 = 1,
 };
 
 /// The room around the grid, in DIPs across and down; negative is none.
 pub const Padding = struct { x: f32 = 6, y: f32 = 4 };
+
+/// How long a synchronized update (mode 2026) holds frames back at most.
+pub const sync_hold_ns = term.mirror.sync_timeout_ms * std.time.ns_per_ms;
 
 pub const PaddingColor = enum {
     /// The terminal's background.
@@ -325,6 +334,9 @@ pub const TerminalView = struct {
     /// The primary button drags the scroll bar, held `bar_grab` DIPs below
     /// the thumb's top; `over_bar` that the pointer is over the bar's strip.
     bar_held: bool = false,
+    /// When the synchronized update that holds frames back began, in the
+    /// Host's clock.
+    held_since: ?u64 = null,
     bar_grab: f32 = 0,
     over_bar: bool = false,
     /// Whether the bar showed when the pointer last moved.
@@ -421,7 +433,40 @@ pub const TerminalView = struct {
     pub fn feed(self: *TerminalView, bytes: []const u8) void {
         self.terminal.feed(bytes);
         self.flushReplies();
+        if (self.holds()) return;
         self.invalidate();
+    }
+
+    /// Whether a synchronized update (mode 2026) holds the frame back: the
+    /// window shows the screen once the program ends the update, or a
+    /// second after it began when it never does. The first held output asks
+    /// the Host for that frame, so a program that writes nothing more still
+    /// gets it; without a scheduler to ask, nothing is held.
+    fn holds(self: *TerminalView) bool {
+        if (!self.terminal.screen.modes.synchronized or !self.host.schedules()) {
+            self.held_since = null;
+            return false;
+        }
+        const now = self.host.time();
+        const since = self.held_since orelse blk: {
+            self.held_since = now;
+            self.host.wakeAt(now + sync_hold_ns + std.time.ns_per_ms);
+            break :blk now;
+        };
+        return now -| since < sync_hold_ns;
+    }
+
+    /// A synchronized update shows a second after it began: the terminal
+    /// leaves the mode, as when the program ends it.
+    fn releaseHold(self: *TerminalView) void {
+        const since = self.held_since orelse return;
+        if (!self.terminal.screen.modes.synchronized) {
+            self.held_since = null;
+            return;
+        }
+        if (self.host.time() -| since < sync_hold_ns) return;
+        self.terminal.screen.modes.synchronized = false;
+        self.held_since = null;
     }
 
     fn flushReplies(self: *TerminalView) void {
@@ -775,13 +820,27 @@ pub const TerminalView = struct {
         return .{ .size = self.fontSize(), .weight = weightOf(self.options.font.weight), .monospace = true };
     }
     pub fn cellSize(self: *const TerminalView) struct { width: f32, height: f32 } {
-        const sample = "0123456789";
         const size = self.fontSize();
         const zoomed = size / self.options.font.size;
         const line_height = if (self.options.font.line_height > 0) self.options.font.line_height else 1;
-        const w = if (self.options.cell_width > 0) self.options.cell_width * zoomed else self.options.measurer.textSize(sample, self.font()).width / sample.len;
+        const w = self.advance() * self.cellFactor();
         const h = if (self.options.cell_height > 0) self.options.cell_height * zoomed else @ceil(size * 1.3 * line_height);
         return .{ .width = @max(w, 1), .height = @max(h, 1) };
+    }
+
+    /// The width of a cell at the font's own advance, which glyphs keep
+    /// whatever `Font.cell_width` makes the columns.
+    fn advance(self: *const TerminalView) f32 {
+        const sample = "0123456789";
+        const zoomed = self.fontSize() / self.options.font.size;
+        const w = if (self.options.cell_width > 0) self.options.cell_width * zoomed else self.options.measurer.textSize(sample, self.font()).width / sample.len;
+        return @max(w, 1);
+    }
+
+    /// `Font.cell_width`, 1 when it is not a positive finite number.
+    fn cellFactor(self: *const TerminalView) f32 {
+        const factor = self.options.font.cell_width;
+        return if (factor > 0 and std.math.isFinite(factor)) factor else 1;
     }
 
     /// The grid that fits `bounds`.
@@ -1109,6 +1168,7 @@ pub const TerminalView = struct {
         const self: *TerminalView = @ptrCast(@alignCast(ptr));
         self.bounds = bounds;
         self.scale = frame.size.scale;
+        self.releaseHold();
         const t = self.terminal;
         const s = &t.screen;
         const cell = self.cellSize();
@@ -1316,6 +1376,10 @@ pub const TerminalView = struct {
     /// their cells, so a fallback font's advance cannot shift the grid.
     fn paintText(self: *TerminalView, frame: *ui.Frame, boxes: *BoxPainter, cells: []const Cell, abs: u64, range: ?term.selection.Range, ox: f32, top: f32, cw: f32, ch: f32) void {
         var glyphs: [1024]u8 = undefined;
+        // Columns wider or narrower than the font's advance take a glyph
+        // each, centered in its cells.
+        const spaced = self.cellFactor() != 1;
+        const fitted = if (spaced) self.advance() else cw;
         var x: usize = 0;
         while (x < cells.len) {
             // Stop emitting text when the frame runs low on commands, rather
@@ -1345,6 +1409,7 @@ pub const TerminalView = struct {
             var end = x;
             while (end < cells.len) {
                 const c = cells[end];
+                if (spaced and end > x) break;
                 if (c.wide == .spacer or box.drawn(c.cp)) break;
                 if (end > x and (c.wide == .wide or first.wide == .wide)) break;
                 if (c.cp != 0 and c.cp != ' ') {
@@ -1359,9 +1424,9 @@ pub const TerminalView = struct {
             // Trailing blanks need no glyphs.
             var trimmed = len;
             while (trimmed > 0 and glyphs[trimmed - 1] == ' ') trimmed -= 1;
-            const left = ox + @as(f32, @floatFromInt(x)) * cw;
             const cells_wide: f32 = @floatFromInt(end - x);
-            if (!first.style.attrs.hidden and trimmed > 0) frame.labelFont(.{ .x = left, .y = top, .width = (cells_wide + 1) * cw, .height = ch }, glyphs[0..trimmed], colors.fg, face);
+            const left = ox + @as(f32, @floatFromInt(x)) * cw + if (spaced) cells_wide * (cw - fitted) / 2 else 0;
+            if (!first.style.attrs.hidden and trimmed > 0) frame.labelFont(.{ .x = left, .y = top, .width = (cells_wide + 1) * @max(cw, fitted), .height = ch }, glyphs[0..trimmed], colors.fg, face);
             for (x..end) |i| {
                 const c = cells[i];
                 if (c.style.attrs.underline != .none or c.style.attrs.strike or c.style.attrs.overline) self.decorate(frame, c, selectedAt(range, abs, i), self.foundAt(abs, i), ox + @as(f32, @floatFromInt(i)) * cw, top, cw, ch);
@@ -2082,13 +2147,22 @@ pub fn contrasted(fg: u24, bg: u24, ratio: f32) u24 {
 pub fn luminance(rgb: u24) f32 {
     var out: f32 = 0;
     const weights = [3]f32{ 0.2126, 0.7152, 0.0722 };
-    inline for (.{ 16, 8, 0 }, weights) |shift, weight| {
-        const v: f32 = @as(f32, @floatFromInt(@as(u8, @truncate(rgb >> shift)))) / 255;
-        const linear = if (v <= 0.04045) v / 12.92 else std.math.pow(f32, (v + 0.055) / 1.055, 2.4);
-        out += weight * linear;
-    }
+    inline for (.{ 16, 8, 0 }, weights) |shift, weight| out += weight * linear_light[@as(u8, @truncate(rgb >> shift))];
     return out;
 }
+
+/// Each sRGB component value in linear light, from 0 to 1: a table rather
+/// than a power per channel, which a full screen under a minimum contrast
+/// would compute for every cell of every frame.
+const linear_light: [256]f32 = blk: {
+    @setEvalBranchQuota(100_000);
+    var table: [256]f32 = undefined;
+    for (&table, 0..) |*entry, index| {
+        const v: f32 = @as(f32, @floatFromInt(index)) / 255;
+        entry.* = if (v <= 0.04045) v / 12.92 else std.math.pow(f32, (v + 0.055) / 1.055, 2.4);
+    }
+    break :blk table;
+};
 
 /// The contrast ratio of two luminances, from 1 to 21.
 pub fn contrast(a: f32, b: f32) f32 {
@@ -2648,4 +2722,72 @@ test "a touchpad's momentum does not turn its scroll into a zoom" {
     // A new gesture with Control held zooms.
     try std.testing.expect(tv.handle(.{ .wheel = .{ .position = .{ .x = 5, .y = 5 }, .delta = .{ .x = 0, .y = -48 }, .precise = true } }));
     try std.testing.expectEqual(@as(f32, 13), tv.fontSize());
+}
+
+test "a synchronized update holds frames back for up to a second and asks for the frame after it" {
+    const Clock = struct {
+        now: u64 = 5 * std.time.ns_per_s,
+        fn read(context: ?*anyopaque) u64 {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return self.now;
+        }
+        fn schedule(_: *anyopaque, _: ?u64, _: u64) void {}
+    };
+    var clock: Clock = .{};
+    var state: u8 = 0;
+    var storage: view.Storage(4, 64) = .{};
+    var host = view.Host.init(&state, Empty.build, storage.buffers(), .{ .clock = .{ .context = &clock, .now = Clock.read } });
+    var terminal = try term.Terminal.init(std.testing.allocator, .{ .screen = .{ .cols = 10, .rows = 4 } });
+    defer terminal.deinit();
+    var sent: Sent = .{};
+    var board: Board = .{};
+    var tv = testView(&host, &terminal, &sent, &board, .{});
+    defer tv.deinit();
+    tv.bind();
+    // Without a scheduler to wake it, nothing is held.
+    tv.feed("\x1b[?2026ha");
+    try std.testing.expectEqual(@as(?u64, null), tv.held_since);
+    tv.feed("\x1b[?2026l");
+    host.setScheduler(.{ .context = &clock, .schedule = Clock.schedule });
+    tv.feed("\x1b[?2026hb");
+    try std.testing.expectEqual(@as(?u64, clock.now), tv.held_since);
+    // The frame that shows it is asked for, a second on.
+    try std.testing.expectEqual(@as(?u64, clock.now + sync_hold_ns + std.time.ns_per_ms), host.outside_wake);
+    clock.now += sync_hold_ns / 2;
+    try std.testing.expect(tv.holds());
+    tv.releaseHold();
+    try std.testing.expect(terminal.screen.modes.synchronized);
+    // A second after it began it shows, and the terminal leaves the mode.
+    clock.now += sync_hold_ns;
+    try std.testing.expect(!tv.holds());
+    tv.releaseHold();
+    try std.testing.expect(!terminal.screen.modes.synchronized);
+    try std.testing.expectEqual(@as(?u64, null), tv.held_since);
+    // Ending the update shows it at once.
+    tv.feed("\x1b[?2026hc");
+    try std.testing.expect(tv.held_since != null);
+    tv.feed("\x1b[?2026l");
+    try std.testing.expectEqual(@as(?u64, null), tv.held_since);
+}
+
+test "Font.cell_width widens and narrows the columns, not the rows or the glyphs" {
+    var state: u8 = 0;
+    var storage: view.Storage(4, 64) = .{};
+    var host = view.Host.init(&state, Empty.build, storage.buffers(), .{});
+    var terminal = try term.Terminal.init(std.testing.allocator, .{ .screen = .{ .cols = 10, .rows = 4 } });
+    defer terminal.deinit();
+    var sent: Sent = .{};
+    var board: Board = .{};
+    var tv = testView(&host, &terminal, &sent, &board, .{});
+    defer tv.deinit();
+    const bounds: view.Rect = .{ .x = 0, .y = 0, .width = 300, .height = 100 };
+    try std.testing.expectEqual(@as(u16, 30), tv.gridFor(bounds).cols);
+    for ([_]f32{ 1.5, 0.8, 0, -1, std.math.inf(f32) }, [_]u16{ 20, 37, 30, 30, 30 }) |factor, cols| {
+        var font = tv.options.font;
+        font.cell_width = factor;
+        tv.setFont(font);
+        try std.testing.expectEqual(cols, tv.gridFor(bounds).cols);
+        try std.testing.expectEqual(@as(f32, 20), tv.cellSize().height);
+        try std.testing.expectEqual(@as(f32, 10), tv.advance());
+    }
 }

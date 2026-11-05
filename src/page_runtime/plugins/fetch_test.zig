@@ -122,7 +122,7 @@ test "a streamed body larger than the page's credit arrives whole and in order" 
             };
             if (!std.mem.eql(u8, agent, "yes")) return error.MissingHeader;
             var buffer: [4096]u8 = undefined;
-            var writer = try request.respondStreaming(&buffer, .{ .respond_options = .{ .status = .created, .reason = "Made", .keep_alive = false, .extra_headers = &.{ .{ .name = "X-Kind", .value = "bytes" }, .{ .name = "Set-Cookie", .value = "a=1" } } } });
+            var writer = try request.respondStreaming(&buffer, .{ .respond_options = .{ .status = .created, .reason = "Made", .keep_alive = false, .extra_headers = &.{ .{ .name = "X-Kind", .value = "bytes" }, .{ .name = "Set-Cookie", .value = "a=1" }, .{ .name = "Set-Cookie2", .value = "b=2" } } } });
             var block: [1000]u8 = undefined;
             for (0..1200) |index| {
                 for (&block, 0..) |*byte, offset| byte.* = @truncate(index * 7 + offset);
@@ -151,7 +151,7 @@ test "a streamed body larger than the page's credit arrives whole and in order" 
     try std.testing.expect(!head.redirected);
     var kind: ?[]const u8 = null;
     for (head.headers) |header| {
-        try std.testing.expect(!std.mem.eql(u8, header.name, "set-cookie"));
+        try std.testing.expect(!std.mem.eql(u8, header.name, "set-cookie") and !std.mem.eql(u8, header.name, "set-cookie2"));
         if (std.mem.eql(u8, header.name, "x-kind")) kind = header.value;
     }
     try std.testing.expectEqualStrings("bytes", kind.?);

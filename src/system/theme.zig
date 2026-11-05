@@ -47,6 +47,33 @@ pub fn apply(app: *z.App, source: Source, dark: bool) void {
     menuMode(dark);
 }
 
+extern fn zsx_theme_set_gtk_css(css: [*]const u8, len: usize, message: [*]u8, capacity: usize) c_int;
+
+/// The longest message `setGtkCss` keeps of GTK's first parse error.
+pub const max_css_error = 256;
+
+/// Restyles what GTK draws itself on Linux, with a GTK 3 style sheet of the
+/// app's: the title bar and decorations of a window the desktop leaves to
+/// decorate itself, the shadow and border around a frameless window, title
+/// buttons, menus and dialogs, as the flat header bars and round buttons of
+/// newer GTK apps. GTK takes it at the user's priority, over the theme's
+/// rules and the user's gtk.css. Another call replaces the sheet, as a
+/// switch of the app's theme does, and "" removes it; a sheet that does not
+/// parse fails with `InvalidStyleSheet` and keeps the one before, with
+/// GTK's first error and where it is in `message` when given. Content the
+/// app draws and pages never see it. Nothing elsewhere.
+pub fn setGtkCss(app: *z.App, css: []const u8, message: ?*[max_css_error]u8) !void {
+    app.assertOwner();
+    if (comptime !(native_supported and os == .linux)) return;
+    var scratch: [max_css_error]u8 = undefined;
+    const buffer = message orelse &scratch;
+    switch (zsx_theme_set_gtk_css(css.ptr, css.len, buffer, buffer.len)) {
+        0 => {},
+        1 => return error.InvalidStyleSheet,
+        else => return error.UnsupportedCapability,
+    }
+}
+
 /// uxtheme's preferred app mode (ordinal 135, from Windows 10 build 18362)
 /// gives popup menus the appearance; ordinal 136 rebuilds their themes.
 fn menuMode(dark: bool) void {

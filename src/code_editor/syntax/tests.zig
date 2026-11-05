@@ -83,6 +83,10 @@ test "dedicated lexers for data, styles, markup, Markdown and diffs" {
     _ = try expectRuns(&languages.json, "{\"key\": \"value\", \"n\": true}", 0, &.{
         .{ "{", .punctuation }, .{ "\"key\"", .property }, .{ ":", .operator }, .{ "\"value\"", .string }, .{ ",", .punctuation }, .{ "\"n\"", .property }, .{ ":", .operator }, .{ "true", .constant }, .{ "}", .punctuation },
     });
+    // A key's escapes are the key's; a value's stay escapes.
+    _ = try expectRuns(&languages.json, "{\"k\\\"x\": \"v\\n\"}", 0, &.{
+        .{ "{", .punctuation }, .{ "\"k\\\"x\"", .property }, .{ ":", .operator }, .{ "\"v", .string }, .{ "\\n", .escape }, .{ "\"", .string }, .{ "}", .punctuation },
+    });
     _ = try expectRuns(&languages.toml, "[package]", 0, &.{.{ "[package]", .type }});
     _ = try expectRuns(&languages.toml, "name = \"x\"", 0, &.{ .{ "name", .property }, .{ "=", .operator }, .{ "\"x\"", .string } });
     var state = try expectRuns(&languages.css, "a:hover { color: #fff; }", 0, &.{

@@ -168,7 +168,7 @@ jobs:
           GDK_SCALE=2 ZIGGURAT_GL=on xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-gl -Dgpu=true -Doptimize=${{ matrix.optimize }}
           xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-gl -Dgpu=true -Doptimize=${{ matrix.optimize }}
           GDK_SCALE=2 xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-linux smoke-system-menus test-pointer-gtk smoke-pointer-core-linux smoke-pointer-clicks smoke-content-host smoke-damage smoke-wake smoke-animation-ui smoke-window-registry smoke-app-stop smoke-composition smoke-composition-ui smoke-key-input smoke-widgets smoke-widget-ranges smoke-theme smoke-backdrop smoke-shader-effects smoke-shader-effects-gl smoke-view smoke-view-text smoke-automation smoke-automation-cli smoke-chart smoke-terminal smoke-view-pickers smoke-view-collections smoke-affine-renderer smoke-affine-ui smoke-affine-document smoke-affine-text-binding smoke-affine-document-diff smoke-document-geometry smoke-snippets smoke-drawing smoke-gradients smoke-gradient-analytic smoke-conic-gradients smoke-gradient-interpolation smoke-coverage smoke-layers smoke-offscreen smoke-gaussian smoke-gaussian-scope smoke-document-fields smoke-svg smoke-svg-text smoke-svg-image smoke-shaped-editor-native smoke-editor-caret smoke-editor-line-backgrounds smoke-editor-pre-input smoke-editor-range-markers smoke-text-input-mode smoke-text-client smoke-document smoke-document-editor smoke-code-editor smoke-document-diff-view smoke-virtual-list smoke-desktop smoke-flyout smoke-now-playing-commands -Doptimize=${{ matrix.optimize }}
-          XDG_RUNTIME_DIR=$(mktemp -d) NO_AT_BRIDGE=1 dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-system-desktop -Doptimize=${{ matrix.optimize }}
+          XDG_RUNTIME_DIR=$(mktemp -d) NO_AT_BRIDGE=1 dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-system-desktop smoke-theme-portal -Doptimize=${{ matrix.optimize }}
           GDK_SCALE=2 XDG_RUNTIME_DIR=$(mktemp -d) NO_AT_BRIDGE=1 dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-system-desktop -Doptimize=${{ matrix.optimize }}
           XDG_RUNTIME_DIR=$(mktemp -d) NO_AT_BRIDGE=1 dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-now-playing -Doptimize=${{ matrix.optimize }}
           # A runner with GNOME Keyring round-trips real secrets in a fresh
@@ -272,7 +272,7 @@ jobs:
         if: (github.event_name == 'workflow_dispatch' && inputs.webview) || contains(github.event.pull_request.labels.*.name, 'webview')
         run: |
           sh scripts/ci-linux-deps.sh libwebkit2gtk-4.1-dev glib-networking dbus-x11
-          xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-webview-content-rules smoke-webview-scroll-linux smoke-webview-media-linux smoke-webview-regions-linux smoke-webview-overlay-linux -Dwebview=true -Doptimize=${{ matrix.optimize }}
+          xvfb-run -a -s '-screen 0 1280x800x24' zig build test-webkit-dmabuf smoke-webview-content-rules smoke-webview-scroll-linux smoke-webview-media-linux smoke-webview-regions-linux smoke-webview-overlay-linux -Dwebview=true -Doptimize=${{ matrix.optimize }}
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24' zig build smoke-webview-overlay-linux -Dwebview=true -Daccessibility=true -Doptimize=${{ matrix.optimize }}
       - name: Capture Cairo submission and idle evidence
         if: matrix.optimize == 'ReleaseSafe'

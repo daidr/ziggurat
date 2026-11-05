@@ -386,15 +386,25 @@ fn sourceKeys(loader: *Loader, file: *File) !void {
     for (loader.keys.items) |entry| try functions.append(arena, entry.name);
     for (loader.keys.items) |*entry| {
         const params: []Param = @constCast(entry.params);
-        for (params) |*param| {
+        for (params, 0..) |*param, index| {
             var zig = param.name;
             while (contains(functions.items, zig) or std.zig.Token.keywords.has(zig) or std.zig.primitives.isPrimitive(zig)) zig = try std.fmt.allocPrint(arena, "{s}_", .{zig});
+            // An escaped name stays apart from the key's other parameters,
+            // which keep their own names in the arguments.
+            while (takenBefore(params[0..index], zig, .zig)) zig = try std.fmt.allocPrint(arena, "{s}_", .{zig});
             param.zig = zig;
             var typescript = if (std.ascii.isDigit(param.name[0])) try std.fmt.allocPrint(arena, "arg{s}", .{param.name}) else param.name;
             if (contains(&typescript_reserved, typescript)) typescript = try std.fmt.allocPrint(arena, "{s}_", .{typescript});
+            while (takenBefore(params[0..index], typescript, .typescript)) typescript = try std.fmt.allocPrint(arena, "{s}_", .{typescript});
             param.typescript = typescript;
         }
     }
+}
+
+/// Whether one of `params` already has `name` as its Zig or TypeScript name.
+fn takenBefore(params: []const Param, name: []const u8, comptime language: enum { zig, typescript }) bool {
+    for (params) |param| if (std.mem.eql(u8, @field(param, @tagName(language)), name)) return true;
+    return false;
 }
 
 /// Reads the description and placeholders of a key, and its parameters:
@@ -760,6 +770,20 @@ test "catalogs load in order with parameters typed by use and declaration" {
     try std.testing.expectEqual(Type.String, catalog.keys[0].params[0].type);
     try std.testing.expectEqual(Type.int, catalog.keys[1].params[0].type);
     try std.testing.expectEqual(Type.DateTime, catalog.keys[2].params[0].type);
+}
+
+test "escaped parameter names stay apart from the key's other parameters" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const catalog = try loadText(arena_state.allocator(), &.{
+        .{ "en.json", "{\"pair\": \"{type} {type_} {0} {arg0} {while} {while_}\"}" },
+    }, .{});
+    const params = catalog.keys[0].params;
+    try std.testing.expectEqual(@as(usize, 6), params.len);
+    for (params, 0..) |a, i| for (params[i + 1 ..]) |b| {
+        try std.testing.expect(!std.mem.eql(u8, a.zig, b.zig));
+        try std.testing.expect(!std.mem.eql(u8, a.typescript, b.typescript));
+    };
 }
 
 test "problems are diagnosed with their lines" {

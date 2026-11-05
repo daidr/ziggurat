@@ -7,6 +7,8 @@
 #include <stdatomic.h>
 #include <string.h>
 #include <sys/syscall.h>
+#include <sys/stat.h>
+#include <glib/gstdio.h>
 #include <unistd.h>
 
 #define ZWK_PROFILE_PATH 4096u
@@ -104,6 +106,7 @@ static void manager_gone(gpointer data) {
 static int create(int borrowed_lock,const char *data,const char *cache,
                   const char *cookies,const ZwkProfileOptions *options,const ZwkProfileTls *tls,
                   ZwkProfile **out,int *system_errno,ZwkProfileGlibFailure *failure) {
+    zwk_dmabuf_prepare();
     if (system_errno) *system_errno=0;
     if (failure) *failure=(ZwkProfileGlibFailure){0,0};
     if (!out) return ZWK_PROFILE_INVALID;
@@ -305,4 +308,110 @@ void zwk_profile_counts(uint32_t *profiles,uint32_t *contexts,size_t *bytes) {
     if (profiles) *profiles=atomic_load_explicit(&live_profiles,memory_order_relaxed);
     if (contexts) *contexts=atomic_load_explicit(&live_contexts,memory_order_relaxed);
     if (bytes) *bytes=atomic_load_explicit(&live_bytes,memory_order_relaxed);
+}
+
+/* WebKitGTK draws pages with its DMA-BUF renderer where it can, and that
+   renderer shows blank windows on NVIDIA's driver, in virtual machines and
+   in containers. So it is off (WEBKIT_DISABLE_DMABUF_RENDERER=1) unless the
+   app leaves it on everywhere (1) or where the host is known to draw with
+   it (2): GTK opens a Wayland display and OpenGL runs on a GPU of Mesa's,
+   outside containers, WSL and virtual machines. The user's variable always
+   wins. It is decided once, before the first web context. */
+static int dmabuf_mode;
+static gboolean dmabuf_decided;
+void zwk_set_dmabuf_renderer(int mode) { dmabuf_mode=mode; }
+
+static gboolean exists_in(const char *root,const char *path) {
+    gchar *full=g_build_filename(root,path,NULL);
+    gboolean found=g_file_test(full,G_FILE_TEST_EXISTS);
+    g_free(full); return found;
+}
+/* DRM drivers that only show what the CPU drew. */
+static gboolean display_only(const char *driver) {
+    static const char *const names[]={"simpledrm","simple-framebuffer","bochs","bochs-drm","cirrus","cirrus-qemu","vboxvideo","hyperv_drm","ast","mgag200","udl","vkms"};
+    for (size_t i=0;i<G_N_ELEMENTS(names);i++) if (!strcmp(driver,names[i])) return TRUE;
+    return FALSE;
+}
+/* A render node of a driver with 3D, under root's /sys/class/drm. */
+static gboolean gpu_device_in(const char *root,const char *gallium) {
+    gchar *drm=g_build_filename(root,"sys/class/drm",NULL);
+    GDir *dir=g_dir_open(drm,0,NULL);
+    gboolean found=FALSE;
+    if (dir) {
+        for (const char *name;!found && (name=g_dir_read_name(dir));) {
+            if (strncmp(name,"renderD",7)) continue;
+            gchar *link=g_build_filename(drm,name,"device","driver",NULL);
+            gchar *target=g_file_read_link(link,NULL);
+            gchar *driver=target?g_path_get_basename(target):NULL;
+            found=!driver || !display_only(driver);
+            g_free(driver); g_free(target); g_free(link);
+        }
+        g_dir_close(dir);
+    }
+    g_free(drm);
+    if (!found && exists_in(root,"dev/dxg")) found=gallium && !strcmp(gallium,"d3d12");
+    return found;
+}
+static const char *env(const char *const *environment,const char *name) {
+    if (!environment) return g_getenv(name);
+    return g_environ_getenv((gchar **)environment,name);
+}
+/* Whether the host draws with the renderer: environment as g_get_environ
+   gives it (NULL for the process's own), root the file system's root. */
+int zwk_dmabuf_safe(const char *const *environment,const char *root) {
+    /* GDK_BACKEND lists the backends GTK tries, Wayland first by default. */
+    const char *backends=env(environment,"GDK_BACKEND");
+    if (backends && backends[0]) {
+        size_t first=strcspn(backends,",");
+        if (!(first==1 && backends[0]=='*') && !(first==7 && !strncmp(backends,"wayland",7)) && first>0) return 0;
+    }
+    /* A display whose socket is gone, as a stale variable's, does not count. */
+    const char *display=env(environment,"WAYLAND_DISPLAY");
+    if (!display || !display[0]) return 0;
+    gchar *socket=NULL;
+    if (g_path_is_absolute(display)) socket=g_strdup(display);
+    else {
+        const char *runtime=env(environment,"XDG_RUNTIME_DIR");
+        if (!runtime || !runtime[0]) return 0;
+        socket=g_build_filename(runtime,display,NULL);
+    }
+    GStatBuf st;
+    gboolean listening=g_stat(socket,&st)==0 && S_ISSOCK(st.st_mode);
+    g_free(socket);
+    if (!listening) return 0;
+    /* Software OpenGL (llvmpipe). */
+    const char *software=env(environment,"LIBGL_ALWAYS_SOFTWARE");
+    if (software && software[0] && strcmp(software,"0") && g_ascii_strcasecmp(software,"false")) return 0;
+    const char *gallium=env(environment,"GALLIUM_DRIVER");
+    if (gallium && (!strcmp(gallium,"llvmpipe") || !strcmp(gallium,"softpipe"))) return 0;
+    /* NVIDIA's driver, a container, WSL. */
+    static const char *const unsafe[]={"sys/module/nvidia","proc/driver/nvidia/version","dev/nvidiactl",".dockerenv","run/.containerenv","dev/dxg"};
+    for (size_t i=0;i<G_N_ELEMENTS(unsafe);i++) if (exists_in(root,unsafe[i])) return 0;
+    /* A virtual machine, by its firmware's product or vendor. */
+    static const char *const fields[]={"sys/class/dmi/id/product_name","sys/class/dmi/id/sys_vendor"};
+    static const char *const machines[]={"virtualbox","vmware","qemu","kvm","bochs","parallels","xen","hyper-v","virtual machine","bhyve"};
+    for (size_t i=0;i<G_N_ELEMENTS(fields);i++) {
+        gchar *path=g_build_filename(root,fields[i],NULL), *text=NULL;
+        if (g_file_get_contents(path,&text,NULL,NULL)) {
+            gchar *lower=g_ascii_strdown(text,-1);
+            gboolean vm=FALSE;
+            for (size_t m=0;m<G_N_ELEMENTS(machines);m++) vm=vm || strstr(lower,machines[m])!=NULL;
+            g_free(lower); g_free(text); g_free(path);
+            if (vm) return 0;
+        } else g_free(path);
+    }
+    return gpu_device_in(root,gallium)?1:0;
+}
+/* Whether to set WEBKIT_DISABLE_DMABUF_RENDERER=1 for mode. */
+int zwk_dmabuf_disables(int mode,const char *const *environment,const char *root) {
+    const char *user=env(environment,"WEBKIT_DISABLE_DMABUF_RENDERER");
+    if (user && user[0]) return 0;
+    if (mode==1) return 0;
+    if (mode==2) return !zwk_dmabuf_safe(environment,root);
+    return 1;
+}
+void zwk_dmabuf_prepare(void) {
+    if (dmabuf_decided) return;
+    dmabuf_decided=TRUE;
+    if (zwk_dmabuf_disables(dmabuf_mode,NULL,"/")) g_setenv("WEBKIT_DISABLE_DMABUF_RENDERER","1",FALSE);
 }

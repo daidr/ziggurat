@@ -17,6 +17,31 @@ pub const profile_storage = native_profiles.storage;
 pub const Profile = @import("profile_app.zig").Type(z);
 pub const ProfileLimits = native_profiles.Limits;
 pub const cookies = @import("cookies.zig");
+
+/// Whether WebKitGTK may draw pages with its DMA-BUF renderer on Linux.
+pub const DmabufRenderer = enum(c_int) {
+    /// Off unless the user set `WEBKIT_DISABLE_DMABUF_RENDERER`: the
+    /// default, as the renderer shows blank windows with NVIDIA's driver,
+    /// in virtual machines and in containers. Pages then draw on the CPU.
+    off = 0,
+    /// Left to WebKitGTK, which uses it wherever it can.
+    on = 1,
+    /// On where the host is known to draw with it: GTK opens a Wayland
+    /// display and OpenGL runs on a GPU of Mesa's, outside containers, WSL
+    /// and virtual machines; off elsewhere.
+    auto = 2,
+};
+extern fn zwk_set_dmabuf_renderer(c_int) void;
+
+/// Choose whether pages draw with WebKitGTK's DMA-BUF renderer, which
+/// scrolls long pages at several times the frame rate with less CPU where
+/// it works. Call it before the first web view or profile: the first one
+/// decides, setting `WEBKIT_DISABLE_DMABUF_RENDERER=1` unless the renderer
+/// stays on. The user's own variable always wins: `0` on, `1` off. Other
+/// systems ignore it.
+pub fn setDmabufRenderer(renderer: DmabufRenderer) void {
+    if (comptime @import("builtin").os.tag == .linux) zwk_set_dmabuf_renderer(@backingInt(renderer));
+}
 pub const CookieStore = @import("cookie_store.zig").Type(z, Profile);
 pub const cookieStoreNativeCounts = @import("cookie_store.zig").nativeCounts;
 test "independent cookie store rejects unsupported platforms before any owner access" {

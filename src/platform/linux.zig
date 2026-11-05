@@ -183,6 +183,10 @@ pub fn clientBounds(record: *core.WindowRecord) !core.ClientBounds {
     zlg_window_bounds(record.native.native.?, &bounds);
     return .{ .position = if (bounds.positioned != 0) .{ .x = bounds.x, .y = bounds.y } else null, .width = bounds.width, .height = bounds.height };
 }
+extern fn zlg_window_refresh_millihz(*anyopaque) u32;
+pub fn refreshRate(record: *core.WindowRecord) f32 {
+    return @as(f32, @floatFromInt(zlg_window_refresh_millihz(record.native.native.?))) / 1000;
+}
 pub fn contentSize(record: *core.WindowRecord) !core.Size {
     var width: u32 = 0;
     var height: u32 = 0;

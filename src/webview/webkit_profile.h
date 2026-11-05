@@ -44,6 +44,13 @@ enum ZwkProfileResult {
  * No function is an engine fsync or NetworkProcess exit barrier. */
 int zwk_profile_measure(const char *data,const char *cache,const char *cookies,
                        size_t *bytes);
+/* Whether WebKitGTK may draw pages with its DMA-BUF renderer: 0 off (the
+   default), 1 on, 2 where the host is known to draw with it. Before the
+   first web context. */
+void zwk_set_dmabuf_renderer(int mode);
+void zwk_dmabuf_prepare(void);
+int zwk_dmabuf_safe(const char *const *environment,const char *root);
+int zwk_dmabuf_disables(int mode,const char *const *environment,const char *root);
 int zwk_profile_create(int borrowed_lock,const char *data,const char *cache,
                        const char *cookies,const ZwkProfileOptions *,
                        ZwkProfile **out,int *system_errno);

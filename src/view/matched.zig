@@ -303,7 +303,12 @@ pub const Copy = struct {
 pub const CopyDraw = struct { copy: *const Copy, look: Look, rank: u8 };
 
 /// Kept by the View from frame to frame.
+/// The frame step while the display's refresh is unknown.
+pub const default_frame_interval: u64 = 16 * std.time.ns_per_ms;
+
 pub const State = struct {
+    /// The time between frames of a flight: a refresh of the display.
+    frame_interval: u64 = default_frame_interval,
     shown: [capacity]Shown = undefined,
     shown_len: usize = 0,
     flights: [capacity]Flight = undefined,
@@ -507,7 +512,7 @@ pub const State = struct {
                 self.drop(index);
                 continue;
             }
-            if (current.channel.nextWake(now, 16 * std.time.ns_per_ms) catch null) |deadline| wake = if (wake) |w| @min(w, deadline) else deadline;
+            if (current.channel.nextWake(now, self.frame_interval) catch null) |deadline| wake = if (wake) |w| @min(w, deadline) else deadline;
             index += 1;
         }
         // Remember how each matched node shows, the one flying in over the

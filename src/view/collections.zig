@@ -804,7 +804,7 @@ const Core = struct {
                 self.dragTo(self.pointer);
             }
             self.tick = now;
-            v.wakeAt(now + frame_interval);
+            v.wakeAt(now + (v.refresh_interval orelse frame_interval));
         }
         var result = self.pending;
         self.pending = .{};

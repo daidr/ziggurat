@@ -235,3 +235,21 @@ for (const source of ["init", "Request"] as const) {
     expect(host.calls).toEqual([]);
   });
 }
+
+test("a Request's body stays when init.body is null or left out", async () => {
+  host.respond = () => ({ parts: [head(204)] });
+  for (const body of [undefined, null, "replacement", ""]) {
+    await plugin.fetch(new Request("https://api.example.com/x", { method: "POST", body: "original" }), { body });
+    const sent = host.calls.at(-1)!.params!.body as string | null;
+    expect(sent === null ? "" : atob(sent)).toBe(body ?? "original");
+  }
+});
+
+test("an explicit null signal stops taking the Request's signal", async () => {
+  host.respond = () => ({ parts: [head(204)] });
+  const signal = AbortSignal.abort(new Error("original request aborted"));
+  const req = new Request("https://api.example.com/x", { signal });
+  expect(await plugin.fetch(req, { signal: undefined }).catch((err) => err)).toBe(signal.reason);
+  expect((await plugin.fetch(req, { signal: null })).status).toBe(204);
+  expect(host.calls).toHaveLength(1);
+});

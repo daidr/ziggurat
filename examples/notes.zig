@@ -207,9 +207,13 @@ const Worker = struct {
                 session.close();
                 continue;
             };
+            // A copy goes once its note is back; one skipped or unreadable
+            // stays for a later launch, and so does its session.
             var delivered = true;
-            for (listed) |*name| delivered = self.deliver(&session, name) and delivered;
-            // Keep the session for a later launch unless every note is back.
+            for (listed) |*name| {
+                const back = self.deliver(&session, name) and if (session.remove(name)) |_| true else |_| false;
+                delivered = back and delivered;
+            }
             if (delivered) session.finish(self.root.?, orphan) catch {} else session.close();
         }
     }

@@ -561,6 +561,20 @@ pub fn frameInterval(rate: f32) u64 {
     const refreshes: u64 = if (std.math.isFinite(rate) and rate > 0 and rate < hz) @intFromFloat(@floor(hz / rate)) else 1;
     return (refreshes * std.time.ns_per_s + display_refresh_hz / 2) / display_refresh_hz;
 }
+/// As `frameInterval`, for a display refreshing every `refresh`
+/// nanoseconds.
+pub fn frameIntervalAt(rate: f32, refresh: u64) u64 {
+    const step = @max(refresh, 1);
+    const hz = @as(f32, @floatFromInt(std.time.ns_per_s)) / @as(f32, @floatFromInt(step));
+    const refreshes: u64 = if (std.math.isFinite(rate) and rate > 0 and rate < hz) @intFromFloat(@floor(hz / rate)) else 1;
+    return refreshes * step;
+}
+/// The time between refreshes of a display of `hz` hertz, in nanoseconds,
+/// or null for an unknown rate.
+pub fn refreshIntervalOf(hz: f32) ?u64 {
+    if (!(hz > 0) or !std.math.isFinite(hz)) return null;
+    return @intFromFloat(@round(@as(f64, @floatFromInt(std.time.ns_per_s)) / @as(f64, hz)));
+}
 const Indicator = struct { kind: LoadingKind, phase: f64, color: ?u32, size: f32, variant: ui.loading.Options };
 
 /// The label, help and error of a form field; see `View.field`.
@@ -1637,6 +1651,10 @@ pub const View = struct {
     /// Monotonic time of this pass in nanoseconds, set by the host before
     /// each pass. Only differences are meaningful.
     now: u64 = 0,
+    /// The time between refreshes of the display showing the window, in
+    /// nanoseconds, which animations pace their frames by; null where it
+    /// is unknown, and they take 60 Hz. The host sets it before a pass.
+    refresh_interval: ?u64 = null,
     /// The earliest time a build asked to run again, or null; see `wakeAt`.
     wake: ?u64 = null,
     /// Shared elements on their way; see `Style.match`.
@@ -2161,7 +2179,7 @@ pub const View = struct {
                 unseen.access_hidden = true;
                 const node = try self.open(.column, unseen);
                 node.unseen = true;
-                self.wakeAt(self.now + loading_frame_interval);
+                self.wakeAt(self.now + self.frameStep());
                 return true;
             }
         }
@@ -2190,7 +2208,7 @@ pub const View = struct {
             shown.access_hidden = true;
         }
         try self.begin(.column, shown);
-        if (presence.moving()) if (presence.channel.?.nextWake(self.now, loading_frame_interval) catch null) |deadline| self.wakeAt(deadline);
+        if (presence.moving()) if (presence.channel.?.nextWake(self.now, self.frameStep()) catch null) |deadline| self.wakeAt(deadline);
         return true;
     }
     /// Content `presentColumn` is taking out of the container `parent`.
@@ -2543,7 +2561,7 @@ pub const View = struct {
         const elapsed = if (still) 0 else if (look.timer) |timer| timer.elapsed(self.now, look.paused) else self.now;
         node.indicator = .{ .kind = kind, .phase = if (still) 0 else ui.loading.phase(kind, elapsed, look.duration), .color = look.color, .size = look.size, .variant = look.variant };
         if (!still and !look.paused) {
-            if (look.frame_rate) |rate| self.animationFrameRate(rate) else self.wakeAt(self.now + loading_frame_interval);
+            if (look.frame_rate) |rate| self.animationFrameRate(rate) else self.wakeAt(self.now + self.frameStep());
         }
     }
     pub fn progress(self: *View, fraction: f32, style: Style) Error!void {
@@ -2913,8 +2931,14 @@ pub const View = struct {
     /// asks for. A rate of none or less, or more than the display's,
     /// draws at each refresh.
     pub fn animationFrameRate(self: *View, rate: f32) void {
-        const interval = frameInterval(rate);
+        const interval = if (self.refresh_interval) |refresh| frameIntervalAt(rate, refresh) else frameInterval(rate);
         self.wakeAt((self.now / interval + 1) * interval);
+    }
+    /// The time from one frame of an animation to the next: a refresh of
+    /// the display showing the window, or a 60th of a second where it is
+    /// unknown.
+    pub fn frameStep(self: *const View) u64 {
+        return self.refresh_interval orelse loading_frame_interval;
     }
 
     /// Give the node just added a tooltip: `text` appears near it after the
@@ -4691,6 +4715,8 @@ pub const View = struct {
         self.record(measurer);
         // Animated poses and shared elements move what is drawn, not the
         // arranged boxes input routing just recorded.
+        self.poses.frame_interval = self.refresh_interval orelse posed.default_frame_interval;
+        self.matches.frame_interval = self.refresh_interval orelse matched.default_frame_interval;
         if (self.poses.apply(all, self.now, self.preferences.reduce_motion)) |deadline| self.wakeAt(deadline);
         if (self.matches.apply(all, self.now, self.preferences.reduce_motion)) |deadline| self.wakeAt(deadline);
         self.matches.keepCopies(all, theme, copyTextColor);
@@ -6759,6 +6785,8 @@ pub const Host = struct {
     /// The deadline last handed to the scheduler.
     scheduled: ?u64 = null,
     schedule_queued: bool = false,
+    /// A pass asked for from outside passes (`wakeAt`), kept until it comes.
+    outside_wake: ?u64 = null,
     /// A control asked for focus before any frame registered it, such as
     /// the first control of a popover that just opened; it takes focus
     /// after the next frame.
@@ -6994,9 +7022,31 @@ pub const Host = struct {
     pub fn bounds(self: *const Host, id: u64) ?Rect {
         return self.view.boundsOf(id);
     }
+    /// Whether a scheduler serves deadlines (`wakeAt`, `View.wakeAt`).
+    pub fn schedules(self: *const Host) bool {
+        return self.scheduler != null;
+    }
+    /// Ask for a pass at `deadline`, in the clock of `time`, from outside
+    /// passes and paint, such as for output an embedded leaf holds back
+    /// until then. The earliest request wins and holds until it comes;
+    /// without a scheduler nothing wakes.
+    pub fn wakeAt(self: *Host, deadline: u64) void {
+        self.outside_wake = if (self.outside_wake) |current| @min(current, deadline) else deadline;
+        self.requestWake();
+    }
+    /// The deadline the scheduler is to wake at: the pass's or one asked
+    /// for from outside it.
+    fn nextWake(self: *const Host) ?u64 {
+        const pass_wake = self.view.wake orelse return self.outside_wake;
+        const outside = self.outside_wake orelse return pass_wake;
+        return @min(pass_wake, outside);
+    }
     /// Called by the scheduler when the deadline it was given has passed.
     pub fn wakeFired(self: *Host) void {
         self.scheduled = null;
+        if (self.outside_wake) |at| if (at <= self.time()) {
+            self.outside_wake = null;
+        };
         if (self.context.window) |window| window.invalidate();
     }
 
@@ -7031,6 +7081,11 @@ pub const Host = struct {
         self.arranged = false;
         defer self.building = false;
         self.view.now = self.time();
+        if (self.context.window) |window| {
+            const rate = window.refreshRate();
+            self.view.refresh_interval = refreshIntervalOf(rate);
+            if (self.options.tools()) |tools| tools.refresh_hz = if (rate > 0) rate else 60;
+        }
         self.view.focus = self.context.input_state.focused;
         try self.build.run(&self.view, self.options.root, event);
     }
@@ -7498,6 +7553,10 @@ pub const Host = struct {
                 self.focus_retried = false;
             }
         }
+        // A pass asked for from outside passes came with this one.
+        if (self.outside_wake) |at| if (at <= self.time()) {
+            self.outside_wake = null;
+        };
         self.requestWake();
         if (self.view.focus_request) |id| {
             self.view.focus_request = null;
@@ -7515,7 +7574,7 @@ pub const Host = struct {
 
     /// Hand a changed deadline to the scheduler after this paint.
     fn requestWake(self: *Host) void {
-        if (self.scheduler == null or self.schedule_queued or std.meta.eql(self.view.wake, self.scheduled)) return;
+        if (self.scheduler == null or self.schedule_queued or std.meta.eql(self.nextWake(), self.scheduled)) return;
         const window = self.context.window orelse return;
         window.app.post(.{ .context = self, .call = scheduleTask }) catch |err| {
             self.last_error = self.last_error orelse err;
@@ -7527,9 +7586,10 @@ pub const Host = struct {
         const self: *Host = @ptrCast(@alignCast(ptr));
         self.schedule_queued = false;
         const scheduler = self.scheduler orelse return;
-        if (self.context.window == null or std.meta.eql(self.view.wake, self.scheduled)) return;
-        self.scheduled = self.view.wake;
-        scheduler.schedule(scheduler.context, self.view.wake, self.time());
+        const wake = self.nextWake();
+        if (self.context.window == null or std.meta.eql(wake, self.scheduled)) return;
+        self.scheduled = wake;
+        scheduler.schedule(scheduler.context, wake, self.time());
     }
 };
 
@@ -7887,6 +7947,13 @@ test "animations of a lower frame rate ask for passes on a shared grid of whole 
     // 24 a second rounds up to 30, two refreshes a frame.
     try std.testing.expectEqual(@as(u64, 33_333_333), frameInterval(24));
     try std.testing.expectEqual(@as(u64, 50_000_000), frameInterval(20));
+    // At 144 Hz a frame of 60 a second is two refreshes, and 120 one.
+    const refresh = refreshIntervalOf(144).?;
+    try std.testing.expectEqual(@as(u64, 6_944_444), refresh);
+    try std.testing.expectEqual(2 * refresh, frameIntervalAt(60, refresh));
+    try std.testing.expectEqual(refresh, frameIntervalAt(120, refresh));
+    try std.testing.expectEqual(refresh, frameIntervalAt(0, refresh));
+    try std.testing.expectEqual(@as(?u64, null), refreshIntervalOf(0));
     var storage: Storage(16, 256) = .{};
     var view = View.init(storage.buffers());
     view.now = 40_000_000;

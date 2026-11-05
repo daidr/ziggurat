@@ -702,6 +702,14 @@ pub fn build(b: *std.Build) void {
         const now_playing_fixture = native_support.add(b, now_playing_smoke, "now-playing-fixture", "tests/now_playing_linux_fixture.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
         now_playing_fixture.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
         now_playing_smoke.linkSystemLibrary("gio-2.0", .{ .use_pkg_config = .force });
+        // Needs a session bus and an X11 display: dbus-run-session -- xvfb-run.
+        const portal_smoke = addSmokeModule(b, "smoke-theme-portal", "tests/theme_portal_linux_smoke.zig", target, optimize, &.{
+            .{ .name = "ziggurat", .module = core },
+            .{ .name = "ziggurat_system", .module = system },
+        });
+        const portal_fixture = native_support.add(b, portal_smoke, "theme-portal-fixture", "tests/theme_portal_linux_fixture.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" }, target, optimize);
+        portal_fixture.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
+        portal_smoke.linkSystemLibrary("gtk+-3.0", .{ .use_pkg_config = .force });
         // Needs an isolated Xvfb with a window manager: shrinks its only output.
         const displays_smoke = addSmokeModule(b, "smoke-window-placement-displays", "tests/window_placement_displays_linux.zig", target, optimize, &.{
             .{ .name = "ziggurat", .module = core },
@@ -2322,6 +2330,17 @@ pub fn build(b: *std.Build) void {
         profile_tests.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
         check.dependOn(&profile_tests.step);
         b.step("test-webkit-profile", "Verify private profile manager ownership, native finalization and exclusive storage without a page").dependOn(&b.addRunArtifact(profile_tests).step);
+        const dmabuf_tests = addTest(b, .{ .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/webkit_dmabuf_linux.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }) });
+        const dmabuf_native = native_support.add(b, dmabuf_tests.root_module, "webkit-dmabuf-native-test", "src/webview/webkit_profile.c", &.{ "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZWK_PROFILE_TESTING" }, target, optimize);
+        dmabuf_native.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
+        dmabuf_tests.root_module.linkSystemLibrary("webkit2gtk-4.1", .{ .use_pkg_config = .yes });
+        check.dependOn(&dmabuf_tests.step);
+        b.step("test-webkit-dmabuf", "Decide whether WebKitGTK's DMA-BUF renderer stays on from the app's choice, the user's variable and the host").dependOn(&b.addRunArtifact(dmabuf_tests).step);
         const profile_tls_owner_tests = addTest(b, .{ .root_module = b.createModule(.{
             .root_source_file = b.path("tests/profile_tls_owner_linux.zig"),
             .target = target,

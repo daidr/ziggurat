@@ -312,3 +312,34 @@ test "link text keeps its block's font and takes the link weight as its least" {
     // Plain text is not lifted.
     try equal(@as(?view.Font, null), (try h.find(.{ .kind = .text, .text = "Some " })).style.font);
 }
+
+const LinkMenus = struct {
+    tree: md.Tree,
+    asked: [4][]const u8 = undefined,
+    asked_len: usize = 0,
+    copied: ?[]const u8 = null,
+    fn build(self: *LinkMenus, v: *view.View) anyerror!void {
+        _ = try mv.build(v, self.tree, .{ .link_menu = .{ .context = self, .build = menu } }, .{});
+    }
+    fn menu(context: *anyopaque, v: *view.View, url: []const u8) view.Error!void {
+        const self: *LinkMenus = @ptrCast(@alignCast(context));
+        if (self.asked_len < self.asked.len) {
+            self.asked[self.asked_len] = url;
+            self.asked_len += 1;
+        }
+        if (try v.menuItem("Copy Path", .{}, .{})) self.copied = url;
+    }
+};
+
+test "a link's own context menu is told its destination; #heading links have none" {
+    var doc: LinkMenus = .{ .tree = try md.parse("See [plan](file:///proj/plan.md), [up](#top) and [notes](notes.md).\n", parsed.buffers()) };
+    var h = view.Harness.init(&doc, LinkMenus.build, storage.buffers(), .{ .bounds = .{ .x = 0, .y = 0, .width = 800, .height = 400 } });
+    try h.render();
+    try equal(@as(usize, 2), h.count(.{ .kind = .menu }));
+    const notes = try h.boundsOf(.{ .kind = .link, .text = "notes" });
+    try expect(try h.clickButtonAt(notes.x + 2, notes.y + notes.height / 2, .secondary, .{}));
+    try h.render();
+    try h.click(.{ .kind = .menu_item, .text = "Copy Path" });
+    try equalStrings("notes.md", doc.copied.?);
+    for (doc.asked[0..doc.asked_len]) |url| try expect(!std.mem.eql(u8, url, "#top"));
+}

@@ -33,10 +33,15 @@ const Entry = struct {
     frame: u64,
 };
 
+/// The frame step while the display's refresh is unknown.
+pub const default_frame_interval: u64 = 16 * std.time.ns_per_ms;
+
 pub const State = struct {
     entries: [capacity]Entry = undefined,
     len: usize = 0,
     frame: u64 = 0,
+    /// The time between frames of a moving pose: a refresh of the display.
+    frame_interval: u64 = default_frame_interval,
 
     /// Move each posed node's pose and opacity toward what its build gave,
     /// and return when the next frame should come while any still moves.
@@ -61,7 +66,7 @@ pub const State = struct {
                 }
                 const sample = channel.advance(now) catch channel.sample();
                 shown[i] = @floatCast(sample.value);
-                if (channel.nextWake(now, 16 * std.time.ns_per_ms) catch null) |deadline| wake = if (wake) |w| @min(w, deadline) else deadline;
+                if (channel.nextWake(now, self.frame_interval) catch null) |deadline| wake = if (wake) |w| @min(w, deadline) else deadline;
             }
             var pose = target;
             inline for (fields, 0..) |name, i| @field(pose, name) = shown[i];
