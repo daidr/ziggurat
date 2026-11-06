@@ -10,7 +10,7 @@ pub const Limits = struct {
     /// delta update can rebuild the next archive from it.
     retain_archive: bool = false,
 };
-const Payload = struct { path: []const u8, bytes: u64, sha256: []const u8 };
+const Payload = struct { path: []const u8, bytes: u64, sha256: []const u8, mode: ?u32 = null };
 const Package = struct { schema_version: u16, identity: []const u8, version: []const u8, target: []const u8, executable: []const u8, files: []const Payload };
 const Marker = struct { format: u16 = 1, identity: []const u8, target: []const u8, version: update.Version, release: []const u8, executable: []const u8 };
 pub const Published = struct {
@@ -174,9 +174,14 @@ pub fn publishAuthenticated(allocator: std.mem.Allocator, root: std.Io.Dir, arch
         defer file.close(zio.io());
         if ((try file.stat(zio.io())).kind != .file) return error.InvalidPayloadKind;
         try hashFile(file, payload.bytes, digest);
-        if (std.mem.eql(u8, payload.path, metadata.executable)) {
-            found_executable = true;
-            if (builtin.os.tag != .windows) try file.setPermissions(zio.io(), zio.mode(0o755));
+        const executable = std.mem.eql(u8, payload.path, metadata.executable);
+        if (executable) found_executable = true;
+        // Extraction creates files under the process umask; the inventory's
+        // recorded mode wins, and the executable defaults to runnable.
+        if (builtin.os.tag != .windows) {
+            if (payload.mode) |mode| {
+                try file.setPermissions(zio.io(), zio.mode(@intCast(mode & 0o7777)));
+            } else if (executable) try file.setPermissions(zio.io(), zio.mode(0o755));
         }
         try file.sync(zio.io());
     }

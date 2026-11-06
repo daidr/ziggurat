@@ -1126,7 +1126,8 @@ fn stop(child: *std.process.Child) void {
 
 fn dev(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     var roots: std.ArrayList([]const u8) = .empty;
-    try roots.appendSlice(allocator, &.{ "src", "build.zig", "build.zig.zon" });
+    // ziggurat.json is read again for each build, so editing it rebuilds.
+    try roots.appendSlice(allocator, &.{ "src", "build.zig", "build.zig.zon", "ziggurat.json" });
     var frontend: ?[]const u8 = null;
     var extra: []const []const u8 = &.{};
     var web = false;
@@ -1160,17 +1161,22 @@ fn dev(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
     defer if (frontend_child) |*child| stop(child);
     // Build, then run the installed executable as our own child so a change
     // stops the application itself rather than an intermediate build runner.
-    const project = try readProject(allocator, cwd);
-    const executable = try std.fs.path.join(allocator, &.{ "zig-out", "bin", try std.fmt.allocPrint(allocator, "{s}{s}", .{ project.executable, builtin.os.tag.exeFileExt(builtin.cpu.arch) }) });
+    _ = try readProject(allocator, cwd);
     var build_args: std.ArrayList([]const u8) = .empty;
     try build_args.append(allocator, "build");
     try build_args.appendSlice(allocator, extra);
     var last = try snapshot(allocator, cwd, roots.items);
     while (true) {
         var app: ?std.process.Child = null;
-        if (try runZig(allocator, build_args.items) == 0) {
-            app = try zio.spawn(.{ .argv = &.{executable} });
-            std.debug.print("ziggurat: running {s} (watching {d} paths)\n", .{ executable, roots.items.len });
+        // Each build reads ziggurat.json again: a renamed executable runs
+        // under its new name, and a broken file fails this build alone.
+        const executable = devExecutable(allocator, cwd) catch |err| blk: {
+            std.debug.print("ziggurat: ziggurat.json: {s}\n", .{@errorName(err)});
+            break :blk null;
+        };
+        if (executable != null and try runZig(allocator, build_args.items) == 0) {
+            app = try zio.spawn(.{ .argv = &.{executable.?} });
+            std.debug.print("ziggurat: running {s} (watching {d} paths)\n", .{ executable.?, roots.items.len });
         } else std.debug.print("ziggurat: build failed; waiting for changes\n", .{});
         while (true) {
             zio.sleep(300 * std.time.ns_per_ms);
@@ -1187,6 +1193,12 @@ fn dev(allocator: std.mem.Allocator, args: []const []const u8) !u8 {
         std.debug.print("ziggurat: change detected, rebuilding\n", .{});
         if (app) |*child| stop(child);
     }
+}
+
+/// The installed executable that ziggurat.json names right now.
+fn devExecutable(allocator: std.mem.Allocator, cwd: std.Io.Dir) ![]const u8 {
+    const project = try readProject(allocator, cwd);
+    return std.fs.path.join(allocator, &.{ "zig-out", "bin", try std.fmt.allocPrint(allocator, "{s}{s}", .{ project.executable, builtin.os.tag.exeFileExt(builtin.cpu.arch) }) });
 }
 
 /// Where `dev --web` serves the app.
@@ -1216,7 +1228,16 @@ fn devWeb(allocator: std.mem.Allocator, roots: []const []const u8, frontend: ?[]
     var opened = false;
     var last = try snapshot(allocator, cwd, roots);
     while (true) {
-        if (try runZig(allocator, build_args.items) == 0) {
+        // A ziggurat.json that no longer reads fails this build; the pages
+        // keep the last build that succeeded.
+        const config_ok = if (cwd.access(zio.io(), "ziggurat.json", .{})) |_| blk: {
+            _ = readProject(allocator, cwd) catch |err| {
+                std.debug.print("ziggurat: ziggurat.json: {s}\n", .{@errorName(err)});
+                break :blk false;
+            };
+            break :blk true;
+        } else |_| true;
+        if (config_ok and try runZig(allocator, build_args.items) == 0) {
             _ = web_generation.fetchAdd(1, .release);
             std.debug.print("ziggurat: serving zig-out/web at {s} (watching {d} paths)\n", .{ url, roots.len });
             if (!opened) {

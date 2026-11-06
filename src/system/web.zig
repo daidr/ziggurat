@@ -105,7 +105,9 @@ pub const Owner = struct {
         var used: usize = 0;
         for (items, 0..) |item, index| {
             var label: [512]u8 = undefined;
-            const plain: []const u8 = if (item.kind == .separator) "" else try menus.plainLabel(&label, item.label);
+            const bare: []const u8 = if (item.kind == .separator) "" else try menus.plainLabel(&label, item.label);
+            var with_subtitle: [1024]u8 = undefined;
+            const plain = if (item.subtitle.len == 0) bare else std.fmt.bufPrint(&with_subtitle, "{s}{s}{s}", .{ bare, menus.subtitle_separator, item.subtitle }) catch return error.MenuTooLarge;
             const parent: usize = if (item.parent) |id| (for (items[0..index], 0..) |other, at| {
                 if (other.kind == .submenu and other.id == id) break at + 1;
             } else 0) else 0;

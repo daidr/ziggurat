@@ -35,7 +35,9 @@ pub fn validate(items: []const types.Item, popup: bool) !Plan {
             if (item.id == 0) return error.InvalidMenuId;
             for (items[0..index]) |previous| if (previous.kind != .separator and previous.id == item.id) return error.DuplicateMenuId;
             try validateLabel(item.label);
-        }
+            try validateLabel(item.subtitle);
+            try validateLabel(item.tooltip);
+        } else if (item.subtitle.len > 0 or item.tooltip.len > 0) return error.InvalidMenuText;
         var ancestors = true;
         if (item.parent) |parent| {
             const parent_index = for (items[0..index], 0..) |previous, previous_index| {
@@ -213,6 +215,51 @@ pub fn gtkMnemonic(destination: []u8, label: []const u8) ![:0]const u8 {
     }
     destination[used] = 0;
     return destination[0..used :0];
+}
+
+/// The text between a label and its subtitle where a menu shows them on
+/// one line.
+pub const subtitle_separator = " — ";
+
+/// GTK's label of `item`: its mnemonic label and its subtitle after it,
+/// whose underscores are literal.
+pub fn gtkLabel(destination: []u8, item: types.Item) ![:0]const u8 {
+    const label = try gtkMnemonic(destination, item.label);
+    if (item.subtitle.len == 0) return label;
+    var used = label.len;
+    for ([_][]const u8{ subtitle_separator, item.subtitle }, 0..) |part, index| for (part) |byte| {
+        const double = index == 1 and byte == '_';
+        const needed: usize = if (double) 2 else 1;
+        if (used + needed >= destination.len) return error.TextCapacityExceeded;
+        destination[used] = byte;
+        if (double) destination[used + 1] = '_';
+        used += needed;
+    };
+    destination[used] = 0;
+    return destination[0..used :0];
+}
+
+/// Windows' label of `item`: its label with its mnemonic, and its subtitle
+/// after it, whose ampersands are literal.
+pub fn windowsLabel(destination: []u8, item: types.Item) ![]const u8 {
+    var used: usize = 0;
+    for ([_][]const u8{ item.label, if (item.subtitle.len > 0) subtitle_separator else "", item.subtitle }, 0..) |part, index| for (part) |byte| {
+        const double = index == 2 and byte == '&';
+        const needed: usize = if (double) 2 else 1;
+        if (used + needed > destination.len) return error.TextCapacityExceeded;
+        destination[used] = byte;
+        if (double) destination[used + 1] = '&';
+        used += needed;
+    };
+    return destination[0..used];
+}
+
+/// `text` NUL-terminated in `destination`.
+pub fn terminated(destination: []u8, text: []const u8) ![:0]const u8 {
+    if (text.len >= destination.len) return error.TextCapacityExceeded;
+    @memcpy(destination[0..text.len], text);
+    destination[text.len] = 0;
+    return destination[0..text.len :0];
 }
 
 /// The label as AppKit shows it: macOS menus have no mnemonics, so `&`
@@ -433,6 +480,11 @@ test "accelerator names follow each platform's spelling" {
 test "ampersand mnemonics translate to GTK underscores" {
     var buffer: [32]u8 = undefined;
     try testing.expectEqualStrings("_File", try gtkMnemonic(&buffer, "&File"));
+    try testing.expectEqualStrings("_Open — my__file & more", try gtkLabel(&buffer, .{ .label = "&Open", .subtitle = "my_file & more" }));
+    var wide: [64]u8 = undefined;
+    try testing.expectEqualStrings("&Open — R&&D", try windowsLabel(&wide, .{ .label = "&Open", .subtitle = "R&D" }));
+    try testing.expectEqualStrings("&Open", try windowsLabel(&wide, .{ .label = "&Open" }));
+    try testing.expectError(error.InvalidMenuText, validate(&.{.{ .kind = .separator, .tooltip = "x" }}, true));
     try testing.expectEqualStrings("Save & Close", try gtkMnemonic(&buffer, "Save && Close"));
     try testing.expectEqualStrings("snake__case", try gtkMnemonic(&buffer, "snake_case"));
     try testing.expectEqualStrings("End", try gtkMnemonic(&buffer, "End&"));

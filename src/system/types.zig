@@ -1,5 +1,8 @@
 const builtin = @import("builtin");
 pub const max_menu_items = 128;
+/// Bytes a backend keeps for an item's label, subtitle and tooltip, each
+/// up to 255 UTF-16 units.
+pub const menu_text_bytes = 3 * 3 * 256;
 pub const Item = struct {
     /// Zero denotes the menu root and is reserved. Separators do not need an ID.
     id: u64 = 0,
@@ -22,6 +25,13 @@ pub const Item = struct {
     /// Commands and submenus. Shown before the label, except on the items of
     /// a menu bar itself; borrowed while any menu shows it.
     icon: ?*MenuIcon = null,
+    /// Commands and submenus. A second, smaller line under the label on
+    /// macOS 14 and later; macOS before it, Windows, Linux and browsers
+    /// show it after the label, as "Label — Subtitle". `&` is literal.
+    subtitle: []const u8 = "",
+    /// Commands and submenus. Shown as the pointer rests on the item, to say
+    /// what it does: macOS and Linux show it; Windows and browsers do not.
+    tooltip: []const u8 = "",
 };
 pub const MenuIcon = @import("menu_icon.zig").MenuIcon;
 /// Letters, digits and navigation keys need Control, Alt or Super, so typing

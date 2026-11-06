@@ -1,5 +1,5 @@
 //! Optional localization module: locales and fallback, message catalogs,
-//! plural rules, number and date formatting, number parsing, week
+//! plural rules, number, date and relative time formatting, number parsing, week
 //! conventions and pseudolocalization. Pure Zig with explicit allocation;
 //! it owns no App, window, thread or global state. Only `locale.system`
 //! reads the operating system.
@@ -10,6 +10,7 @@ pub const locale = @import("locale.zig");
 pub const plural = @import("plural.zig");
 pub const number = @import("number.zig");
 pub const date = @import("date.zig");
+pub const relative = @import("relative.zig");
 pub const week = @import("week.zig");
 pub const message = @import("message.zig");
 pub const pseudo = @import("pseudo.zig");
@@ -31,6 +32,7 @@ test {
     _ = plural;
     _ = number;
     _ = date;
+    _ = relative;
     _ = week;
     _ = message;
     _ = pseudo;

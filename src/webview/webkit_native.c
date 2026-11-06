@@ -586,7 +586,10 @@ static gboolean policy(WebKitWebView *view,WebKitPolicyDecision *decision,WebKit
         } else {
             webkit_policy_decision_ignore(decision);
             unsigned bit=kind==WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION?1:0;
-            if (s->policy&(1u<<bit)) notify(s,3+(int)bit,uri,action&&webkit_navigation_action_is_user_gesture(action)?1:0,NULL);
+            /* Only main-frame navigations are offered to the app. WebKitGTK
+             * before 2.56 names no navigation's frame; a srcdoc document only
+             * ever shows in an iframe, so it is never the main frame's. */
+            if ((s->policy&(1u<<bit)) && !(uri && !strcmp(uri,"about:srcdoc"))) notify(s,3+(int)bit,uri,action&&webkit_navigation_action_is_user_gesture(action)?1:0,NULL);
         }
         if (op) navigation_release(op);
     } else if (kind==WEBKIT_POLICY_DECISION_TYPE_RESPONSE) {

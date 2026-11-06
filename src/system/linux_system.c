@@ -36,6 +36,8 @@ typedef struct Item {
     uint32_t modifiers;
     int32_t command;
     void *icon;
+    /* Shown as the pointer rests on the item; NULL for none. */
+    const char *tooltip;
 } Item;
 
 GtkWidget *zsx_menu_icon_image(void *icon, int scale);
@@ -218,6 +220,7 @@ Link *zsl_popup_show(GtkWidget *window, const Item *items, uint32_t count, int a
                 if (GTK_IS_ACCEL_LABEL(label)) gtk_accel_label_set_accel(GTK_ACCEL_LABEL(label), item->keyval, item->modifiers);
             }
             if (item->icon) item_set_icon(entry, item->icon, gdk_window_get_scale_factor(target));
+            if (item->tooltip && item->tooltip[0]) gtk_widget_set_tooltip_text(entry, item->tooltip);
             gtk_widget_set_sensitive(entry, item->enabled != 0);
             if (item->kind == 1) {
                 menus[i] = gtk_menu_new();
@@ -487,6 +490,7 @@ Bar *zsl_menubar_set(GtkWidget *window, const Item *items, uint32_t count, const
         else if (item->kind == 1) {
             entry = gtk_menu_item_new_with_mnemonic(item->label);
             if (item->icon && item->parent >= 0) item_set_icon(entry, item->icon, bar->scale);
+            if (item->tooltip && item->tooltip[0]) gtk_widget_set_tooltip_text(entry, item->tooltip);
             gtk_widget_set_sensitive(entry, item->enabled != 0);
             menus[i] = gtk_menu_new();
             g_signal_connect(menus[i], "map", G_CALLBACK(bar_menu_map), bar);
@@ -501,6 +505,7 @@ Bar *zsl_menubar_set(GtkWidget *window, const Item *items, uint32_t count, const
             bar->radio[command] = item->radio;
             if ((uint32_t)command + 1 > bar->count) bar->count = (uint32_t)command + 1;
             entry = bar_command_new(bar, item->label, command, item->checked != 0, item->enabled != 0);
+            if (item->tooltip && item->tooltip[0]) gtk_widget_set_tooltip_text(entry, item->tooltip);
             bar->commands[command] = entry;
         }
         gtk_menu_shell_append(GTK_MENU_SHELL(parent), entry);
@@ -533,6 +538,9 @@ int zsl_menubar_state(Bar *bar, int32_t command, int enabled, int effective, int
         gchar *label = g_strdup(GTK_IS_LABEL(child) ? gtk_label_get_label(GTK_LABEL(child)) : "");
         GtkWidget *replacement = bar_command_new(bar, label, command, checked != 0, enabled != 0);
         g_free(label);
+        gchar *tip = gtk_widget_get_tooltip_text(entry);
+        if (tip) gtk_widget_set_tooltip_text(replacement, tip);
+        g_free(tip);
         gtk_widget_destroy(entry);
         gtk_menu_shell_insert(GTK_MENU_SHELL(shell), replacement, position);
         gtk_widget_show(replacement);

@@ -122,29 +122,35 @@ int zlmw_double_click_action(void){
    stays where it was, which a quick press and drag hits now and then. So
    the press is watched. When the pointer has not moved yet, the window
    server is asked; when it has, or when the press's drags still reach the
-   app past a few points and the window server has not begun, the window is
-   moved here, keeping the point pressed under the pointer, as the window
+   app past a few points, a few drags after the ask, and the window server
+   has not begun, the window is moved here, keeping the point pressed under the pointer, as the window
    server would. Either way the press's drags are the window's, not the
    content's.
 
    The window server tells the window as it begins (windowWillMove:),
-   within a drag or two of being asked. The window's frame says so late:
+   within a drag or two of being asked; moves made here (setFrameOrigin:)
+   never do. The window's frame says so late:
    AppKit learns where the window is about every tenth of a second while
    the window server moves it. Should a frame that has not moved be taken
    for a window server that did not begin, both would move the window and
-   it would shake; for a window server that still begins once the window is
-   moved here, the window not being where it was put says to leave it
-   alone. Points are in the display space of Core Graphics (top-left origin
+   it would shake. So a few drags are waited for before the window is
+   moved here, however far the first goes, and the window is left alone as
+   soon as the window server says it begins, even once it is moved here:
+   the window not being where it was put says so only late, and not at all
+   for a slow drag, whose every move puts the frame back. Points are in the display space of Core Graphics (top-left origin
    of the primary display, y down), where events keep their place when the
    window moves; window origins are AppKit's (bottom-left, y up). */
 enum {DRAG_IDLE,DRAG_PRESSED,DRAG_NATIVE,DRAG_MANUAL,DRAG_SERVER};
 /* How far the pointer may have gone when the drag is asked for the window
    server to be asked (a hand on a touchpad trembles); how far it may go,
-   the window not moving, before the window is moved here; how far the
+   the window not moving, before the window is moved here; how many drags
+   after the ask the window server is given to say it begins, as a quick
+   hand is past the slop with the first; how far the
    window may be from where it was put, which AppKit rounds, before the
    window server is taken to move it. */
 static const double drag_still=1,drag_slop=3,drag_away=2;
-static struct {int phase;NSWindow *window;NSPoint press,at,origin,put;} drag;
+static const int drag_wait=3;
+static struct {int phase;NSWindow *window;NSPoint press,at,origin,put;int drags;} drag;
 static id drag_monitor;
 
 static double distance(NSPoint a,NSPoint b){return hypot(a.x-b.x,a.y-b.y);}
@@ -185,7 +191,10 @@ static int dragged(NSPoint at){
         case DRAG_NATIVE:
             if(!NSEqualPoints(origin,drag.origin)){drag.phase=DRAG_SERVER;return 1;}
             /* The pointer has hardly moved yet. */
-            if(distance(at,drag.press)<drag_slop)return 1;
+            /* The pointer has hardly moved yet, or the window server may
+               still say it begins. */
+            drag.drags++;
+            if(distance(at,drag.press)<drag_slop||drag.drags<drag_wait)return 1;
             drag.phase=DRAG_MANUAL;move_dragged();return 1;
         case DRAG_MANUAL:
             /* The window server began after all. */
@@ -219,14 +228,19 @@ int zlmw_drag_start(NSWindow *window,NSEvent *press){
     if([window styleMask]&NSWindowStyleMaskFullScreen)return 2;
     drag.origin=[window frame].origin;
     if(distance(drag.at,drag.press)>=drag_still){drag.phase=DRAG_MANUAL;move_dragged();return 1;}
-    drag.phase=DRAG_NATIVE;
+    drag.phase=DRAG_NATIVE;drag.drags=0;
     [window performWindowDragWithEvent:press];
     return 0;
 }
-void zlmw_drag_will_move(NSWindow *window){if(drag.phase==DRAG_NATIVE&&drag.window==window)drag.phase=DRAG_SERVER;}
+/* The window server begins to move the window, which it does only when
+   asked, though it may be after the window was moved here. */
+void zlmw_drag_will_move(NSWindow *window){if((drag.phase==DRAG_NATIVE||drag.phase==DRAG_MANUAL)&&drag.window==window)drag.phase=DRAG_SERVER;}
 void zlmw_drag_forget(NSWindow *window){if(drag.window==window)drag_reset();}
 /* Test hooks: where the press stands, and a drag of the pointer to the
    display point (x, y) as the monitor sees it. */
 int zlmw_test_drag_phase(void){return drag.phase;}
 void zlmw_test_drag_press(double *x,double *y){*x=drag.press.x;*y=drag.press.y;}
+/* The window server asked without asking it, and its windowWillMove:. */
+void zlmw_test_drag_asked(void){if(drag.phase==DRAG_PRESSED){drag.origin=[drag.window frame].origin;drag.phase=DRAG_NATIVE;drag.drags=0;}}
+void zlmw_test_drag_will_move(void){if(drag.window)zlmw_drag_will_move(drag.window);}
 void zlmw_test_drag_to(double x,double y){if(drag.phase!=DRAG_IDLE&&drag.window)(void)dragged(NSMakePoint(x,y));}

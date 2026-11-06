@@ -43,7 +43,7 @@ const Editor = struct {
                 }
             }
             try v.end();
-            if (try v.menuItem("Export", .{}, .{})) self.exported = true;
+            if (try v.menuItem("Export", .{ .tooltip = "Saves a copy as PDF" }, .{})) self.exported = true;
         }
         try v.end();
     }
@@ -74,6 +74,51 @@ test "a secondary press opens the menu at the pointer, and a press on an item ch
     try h.click(.{ .text = "Copy" });
     try testing.expectEqual(@as(usize, 1), app.copied);
     try testing.expectError(error.NotFound, h.find(.{ .text = "Copy" }));
+}
+
+test "an item's tooltip shows as the pointer rests on it" {
+    var storage: Storage = .{};
+    var app: Editor = .{};
+    var h = Harness.init(&app, Editor.build, storage.buffers(), .{ .options = .{ .tooltip_delay = 1 } });
+    try h.render();
+    try open(&h);
+    try h.hover(.{ .text = "Copy" });
+    try h.advance(std.time.ns_per_s);
+    try testing.expect(h.tooltip() == null);
+    try h.hover(.{ .text = "Export" });
+    try h.advance(std.time.ns_per_s);
+    try testing.expectEqualStrings("Saves a copy as PDF", h.tooltip().?);
+}
+
+const WithIcons = struct {
+    icon: bool = false,
+    fn build(self: *WithIcons, v: *View) anyerror!void {
+        try v.column(.{ .height = 200, .padding = .all(10), .self_align = .stretch });
+        _ = try v.button("Inside", .{});
+        try v.end();
+        if (try v.popoverMenu(.{ .name = "File" })) {
+            _ = try v.menuItem("Open", .{}, .{});
+            _ = try v.menuItem("Share", .{ .icon = if (self.icon) .external_link else null }, .{});
+        }
+        try v.end();
+    }
+};
+
+test "an item's icon gives every item of its panel the icon's column" {
+    var storage: Storage = .{};
+    var app: WithIcons = .{};
+    var h = Harness.init(&app, WithIcons.build, storage.buffers(), .{});
+    try h.render();
+    try open(&h);
+    const plain = (try h.boundsOf(.{ .kind = .menu_item, .text = "Open" })).width;
+    try testing.expect(!(try h.find(.{ .kind = .menu_item, .text = "Open" })).menu_icons);
+    app.icon = true;
+    try h.render();
+    const open_item = try h.find(.{ .kind = .menu_item, .text = "Open" });
+    const share = try h.find(.{ .kind = .menu_item, .text = "Share" });
+    try testing.expect(open_item.menu_icons and share.menu_icons);
+    try testing.expect(open_item.menu_icon == null and share.menu_icon == .external_link);
+    try testing.expect((try h.boundsOf(.{ .kind = .menu_item, .text = "Open" })).width >= plain);
 }
 
 test "the innermost anchor under the press opens its menu" {

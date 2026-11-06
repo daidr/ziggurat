@@ -110,7 +110,12 @@ fn run(process_args: std.process.Args) !void {
     } else if (std.mem.eql(u8, command, "pack")) {
         if (args.len < 9) return error.InvalidArguments;
         const entries = try allocator.alloc(update.archive.Entry, args.len - 8);
-        for (args[8..], entries) |path, *entry| entry.* = .{ .name = std.fs.path.basename(path), .bytes = try cwd.readFileAlloc(zio.io(), path, allocator, .limited(512 * 1024 * 1024)) };
+        for (args[8..], entries) |path, *entry| entry.* = .{
+            .name = std.fs.path.basename(path),
+            .bytes = try cwd.readFileAlloc(zio.io(), path, allocator, .limited(512 * 1024 * 1024)),
+            // Payloads keep their permission bits through publication.
+            .mode = if (@import("builtin").os.tag == .windows) null else zio.modeOf((try cwd.statFile(zio.io(), path, .{})).permissions) & 0o7777,
+        };
         const zip = try update.archive.buildPackage(allocator, .{ .name = args[3], .identity = args[4], .target = args[5], .version = try update.retention.parseVersion(args[6]), .executable = args[7] }, entries);
         try writeExclusive(args[2], zip);
     } else if (std.mem.eql(u8, command, "endorse")) {

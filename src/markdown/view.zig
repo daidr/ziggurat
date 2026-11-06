@@ -88,6 +88,18 @@ pub const Options = struct {
     /// one. Links to `#a-heading` and links without a destination keep the
     /// menu around them, and so do links a `RichFace` draws.
     link_menu: ?LinkMenu = null,
+    /// An icon at the start of a link's text, as a globe for a web page or
+    /// a sheet for a file. It clicks as the link, stays on the row of the
+    /// link's first word and copies as nothing.
+    link_icon: ?LinkIcon = null,
+};
+
+/// Chooses the icon at the start of a link's text (`Options.link_icon`).
+pub const LinkIcon = struct {
+    context: *anyopaque,
+    /// The icon of the link to `url`, borrowed from the tree, whose text is
+    /// `size` DIP; null for none. It draws in the theme's accent.
+    icon: *const fn (context: *anyopaque, url: []const u8, size: f32) ?view.Icon,
 };
 
 /// Builds the items of a link's context menu, as `popoverMenu`'s.
@@ -382,7 +394,13 @@ const Builder = struct {
                 .strong => line.style.strong += delta,
                 .strikethrough => line.style.strikethrough += delta,
                 .image => line.style.image += delta,
-                .link => line.link = if (event.entering) event.index else none,
+                .link => {
+                    line.link = if (event.entering) event.index else none;
+                    line.icon = null;
+                    if (event.entering) if (self.options.link_icon) |chooser| {
+                        line.icon = chooser.icon(chooser.context, node.url, line.font.size);
+                    };
+                },
                 .text => try line.add(node.text, false),
                 .code, .math => try line.add(node.text, true),
                 .soft_break => try line.add(" ", false),
@@ -430,6 +448,8 @@ const Line = struct {
     font: view.Font,
     style: InlineStyle = .{},
     link: u32 = none,
+    /// The icon still to draw at the start of the current link's text.
+    icon: ?view.Icon = null,
     used: f32 = 0,
     open: bool = false,
     rows: usize = 0,
@@ -476,6 +496,8 @@ const Line = struct {
     /// Add `text` in the current style, breaking it between words, or
     /// between any two characters of CJK text.
     fn add(self: *Line, text: []const u8, code: bool) Error!void {
+        // A link's icon wraps with the first word after it.
+        const icon_width = self.iconWidth();
         var start: usize = 0;
         // A row starts at its first visible character.
         if (self.used == 0) {
@@ -483,7 +505,7 @@ const Line = struct {
         }
         var at = start;
         // Width of text[start..at], not yet added as a segment.
-        var pending: f32 = 0;
+        var pending: f32 = icon_width;
         while (at < text.len) {
             const end = nextBreak(text, at);
             const visible = std.mem.trimEnd(u8, text[at..end], " ");
@@ -493,7 +515,7 @@ const Line = struct {
                 if (kept.len > 0) try self.segment(kept, code);
                 try self.newLine();
                 start = at;
-                pending = 0;
+                pending = self.iconWidth();
             }
             if (self.used + pending == 0 and visible_width > self.width) {
                 // A word wider than the row is split between characters.
@@ -523,6 +545,12 @@ const Line = struct {
             try self.segment(text[start..], code);
     }
 
+    /// The width a link's icon still to draw takes, gap included.
+    fn iconWidth(self: *Line) f32 {
+        if (self.icon == null or !self.linked()) return 0;
+        return self.font.size * link_icon_scale + link_icon_gap;
+    }
+
     fn row(self: *Line) Error!void {
         if (self.open) return;
         const v = self.b.v;
@@ -550,6 +578,16 @@ const Line = struct {
             // Code in a link keeps its face and wash.
             const style: view.Style = if (code) .{ .font = self.fontFor(true), .background = self.b.colors.code_background, .radius = 3, .shrink = 0 } else .{ .font = self.fontFor(false), .shrink = 0 };
             const url = self.b.tree.get(self.link).url;
+            if (self.icon) |which| {
+                // The icon clicks as the link; it has no text to copy.
+                self.icon = null;
+                const size = self.font.size * link_icon_scale;
+                self.used += size + link_icon_gap;
+                const area = try v.pointerArea(.{}, .{ .cursor = .pointer, .shrink = 0, .padding = .{ .right = link_icon_gap } });
+                try v.icon(which, .{ .size = size }, .{ .color = self.b.options.theme.palette.accent });
+                try v.end();
+                if (area.clicked) self.b.activation = .{ .link = url };
+            }
             if (try v.link(text, style)) self.b.activation = .{ .link = url };
             if (self.b.options.link_menu) |menu| if (url.len > 0 and url[0] != '#') {
                 if (try v.popoverMenu(.{})) try menu.build(menu.context, v, url);
@@ -575,6 +613,10 @@ const Line = struct {
         if (self.nested) try self.b.v.end();
     }
 };
+
+/// A link's icon is this much of its text's size, with this gap after it.
+const link_icon_scale: f32 = 1;
+const link_icon_gap: f32 = 2;
 
 fn sequenceLength(byte: u8) usize {
     return std.unicode.utf8ByteSequenceLength(byte) catch 1;

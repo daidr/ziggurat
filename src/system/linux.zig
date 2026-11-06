@@ -10,7 +10,7 @@ const roles = @import("menu_roles.zig");
 const picker = @import("picker.zig");
 const desktop = @import("desktop.zig");
 
-const NativeItem = extern struct { label: [*:0]const u8, parent: i32, kind: u8, enabled: u8, checked: u8, radio: u8 = 0, keyval: u32, modifiers: u32, command: i32, icon: ?*anyopaque = null };
+const NativeItem = extern struct { label: [*:0]const u8, parent: i32, kind: u8, enabled: u8, checked: u8, radio: u8 = 0, keyval: u32, modifiers: u32, command: i32, icon: ?*anyopaque = null, tooltip: ?[*:0]const u8 = null };
 const Done = *const fn (?*anyopaque, u64, i32) callconv(.c) void;
 const TrayEvent = *const fn (?*anyopaque, u64, i32, i32, i32) callconv(.c) void;
 extern fn zsl_popup_show(?*anyopaque, [*]const NativeItem, u32, c_int, f64, f64, ?*anyopaque, u64, Done, *c_int) ?*anyopaque;
@@ -89,7 +89,7 @@ const Popup = struct {
         if (self.pending.native != null) return error.MenuAlreadyPending;
         if (request == 0) return error.InvalidRequestId;
         const plan = try menus.validate(items, true);
-        var labels: [types.max_menu_items][512]u8 = undefined;
+        var labels: [types.max_menu_items][types.menu_text_bytes]u8 = undefined;
         var native_items: [types.max_menu_items]NativeItem = undefined;
         var ids: [types.max_menu_items]u64 = undefined;
         var enabled: [types.max_menu_items]bool = undefined;
@@ -238,7 +238,7 @@ pub const Owner = struct {
         const scope = window.beginCallback() orelse return error.Closed;
         defer scope.end();
         const plan = try menus.validate(items, false);
-        var labels: [types.max_menu_items][512]u8 = undefined;
+        var labels: [types.max_menu_items][types.menu_text_bytes]u8 = undefined;
         var native_items: [types.max_menu_items]NativeItem = undefined;
         var ids: [types.max_menu_items]u64 = undefined;
         var enabled: [types.max_menu_items]bool = undefined;
@@ -678,7 +678,7 @@ pub const Tray = struct {
         app.assertOwner();
         const native = self.native orelse return error.NotAttached;
         const plan = try menus.validate(items, false);
-        var labels: [types.max_menu_items][512]u8 = undefined;
+        var labels: [types.max_menu_items][types.menu_text_bytes]u8 = undefined;
         var native_items: [types.max_menu_items]NativeItem = undefined;
         var ids: [types.max_menu_items]u64 = undefined;
         var enabled: [types.max_menu_items]bool = undefined;
@@ -837,10 +837,12 @@ test "a popup's Edit roles are sensitive as the focus can act on them" {
     try std.testing.expectEqualSlices(bool, &.{ false, true, true }, &enabled);
 }
 
-fn nativeItems(items: []const types.Item, plan: *const menus.Plan, labels: *[types.max_menu_items][512]u8, native_items: *[types.max_menu_items]NativeItem, ids: *[types.max_menu_items]u64, enabled: *[types.max_menu_items]bool) !usize {
+fn nativeItems(items: []const types.Item, plan: *const menus.Plan, labels: *[types.max_menu_items][types.menu_text_bytes]u8, native_items: *[types.max_menu_items]NativeItem, ids: *[types.max_menu_items]u64, enabled: *[types.max_menu_items]bool) !usize {
     var commands: usize = 0;
     for (items, 0..) |item, index| {
-        const label = try menus.gtkMnemonic(&labels[index], item.label);
+        // The label and its subtitle, then the tooltip, share the item's buffer.
+        const label = try menus.gtkLabel(&labels[index], item);
+        const tooltip = try menus.terminated(labels[index][label.len + 1 ..], item.tooltip);
         var command: i32 = -1;
         if (item.kind == .command) {
             command = @intCast(commands);
@@ -860,6 +862,7 @@ fn nativeItems(items: []const types.Item, plan: *const menus.Plan, labels: *[typ
             .modifiers = if (accelerator) |value| modifierMask(value.modifiers) else 0,
             .command = command,
             .icon = if (item.icon) |icon| icon.native else null,
+            .tooltip = if (item.tooltip.len > 0) tooltip.ptr else null,
         };
     }
     return commands;

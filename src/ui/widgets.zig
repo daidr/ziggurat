@@ -653,6 +653,9 @@ pub const MenuItemOptions = struct {
     /// Right to left: the mark at the right, the shortcut and the submenu
     /// arrow at the left.
     rtl: bool = false,
+    /// Room kept between the mark and the label, as for an icon its caller
+    /// draws there.
+    lead: f32 = 0,
 };
 /// Room a menu item keeps for its mark, and for its submenu arrow.
 pub const menu_mark_width: f32 = 20;
@@ -710,8 +713,9 @@ pub fn emitMenuItem(frame: anytype, id: u64, bounds: layout.Rect, label: []const
     };
     const arrow_room: f32 = if (options.expanded != null) menu_mark_width else 0;
     const trailing = arrow_room + (if (options.shortcut.len > 0) options.shortcut_width + metrics.label_gap else 0);
-    const label_width = @max(0, bounds.width - 2 * pad - menu_mark_width - metrics.label_gap / 2 - trailing);
-    const label_x = if (options.rtl) mark.x - metrics.label_gap / 2 - label_width else mark.x + menu_mark_width + metrics.label_gap / 2;
+    const lead = @max(0, options.lead);
+    const label_width = @max(0, bounds.width - 2 * pad - menu_mark_width - lead - metrics.label_gap / 2 - trailing);
+    const label_x = if (options.rtl) mark.x - lead - metrics.label_gap / 2 - label_width else mark.x + menu_mark_width + lead + metrics.label_gap / 2;
     try frame.context.command_buffer.text(absolute(frame, .{ .x = label_x, .y = bounds.y, .width = label_width, .height = height }), label, foreground);
     const end_edge = if (options.rtl) bounds.x + pad else bounds.x + bounds.width - pad;
     if (options.shortcut.len > 0) {

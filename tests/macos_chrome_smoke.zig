@@ -18,6 +18,8 @@ extern fn zlm_test_drag_start(*anyopaque) c_int;
 extern fn zlmw_test_drag_phase() c_int;
 extern fn zlmw_test_drag_to(f64, f64) void;
 extern fn zlmw_test_drag_press(*f64, *f64) void;
+extern fn zlmw_test_drag_asked() void;
+extern fn zlmw_test_drag_will_move() void;
 extern fn zlc_test_pixel(*anyopaque, u32, u32) u32;
 extern fn zlc_layer_transparent(*anyopaque) c_int;
 
@@ -131,6 +133,29 @@ pub fn main() !void {
     try std.testing.expectEqual(before.position.?.y + 10, after.position.?.y);
     // A press asks once.
     try std.testing.expectEqual(@as(c_int, 2), zlm_test_drag_start(native));
+
+    // Once the window server is asked, a quick hand past the slop with the
+    // first drag still gives it three drags to begin before the window is
+    // moved here; its windowWillMove: leaves the press to it, also after.
+    const asked = try probe.window.clientBounds();
+    zlm_test_drag_begin(native, 60, 100);
+    zlmw_test_drag_press(&px, &py);
+    zlmw_test_drag_asked();
+    try std.testing.expectEqual(@as(c_int, 2), zlmw_test_drag_phase());
+    zlmw_test_drag_to(px + 12, py + 4);
+    zlmw_test_drag_to(px + 14, py + 5);
+    try std.testing.expectEqual(@as(c_int, 2), zlmw_test_drag_phase());
+    after = try probe.window.clientBounds();
+    try std.testing.expectEqual(asked.position.?.x, after.position.?.x);
+    zlmw_test_drag_to(px + 16, py + 6);
+    try std.testing.expectEqual(@as(c_int, 3), zlmw_test_drag_phase());
+    after = try probe.window.clientBounds();
+    try std.testing.expectEqual(asked.position.?.x + 16, after.position.?.x);
+    zlmw_test_drag_will_move();
+    try std.testing.expectEqual(@as(c_int, 4), zlmw_test_drag_phase());
+    zlmw_test_drag_to(px + 30, py + 10);
+    after = try probe.window.clientBounds();
+    try std.testing.expectEqual(asked.position.?.x + 16, after.position.?.x);
 
     // A press in the hidden title bar, where the content is not a drag
     // region, reaches the content as AppKit delivers it.

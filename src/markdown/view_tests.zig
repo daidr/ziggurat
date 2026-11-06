@@ -343,3 +343,30 @@ test "a link's own context menu is told its destination; #heading links have non
     try equalStrings("notes.md", doc.copied.?);
     for (doc.asked[0..doc.asked_len]) |url| try expect(!std.mem.eql(u8, url, "#top"));
 }
+
+const Icons = struct {
+    asked: usize = 0,
+    fn icon(context: *anyopaque, url: []const u8, size: f32) ?view.Icon {
+        const self: *Icons = @ptrCast(@alignCast(context));
+        self.asked += 1;
+        std.debug.assert(size > 0);
+        return if (std.mem.startsWith(u8, url, "https:")) .external_link else null;
+    }
+};
+
+test "a link's icon starts its text, clicks as the link and keeps to its first word's row" {
+    var icons: Icons = .{};
+    var doc: Doc = .{ .tree = try md.parse("Read [the web page](https://example.com) or [notes](notes.md).\n", parsed.buffers()) };
+    doc.options.link_icon = .{ .context = &icons, .icon = Icons.icon };
+    var h = harness(&doc);
+    try h.render();
+    try equal(@as(usize, 2), icons.asked);
+    try equal(@as(usize, 1), h.count(.{ .kind = .icon }));
+    const icon = try h.boundsOf(.{ .kind = .icon });
+    const first = try h.boundsOf(.{ .kind = .link, .nth = 0 });
+    try expect(icon.x + icon.width <= first.x);
+    try expect(@abs((icon.y + icon.height / 2) - (first.y + first.height / 2)) < 2);
+    try expect(try h.clickButtonAt(icon.x + icon.width / 2, icon.y + icon.height / 2, .primary, .{}));
+    try h.render();
+    try equalStrings("https://example.com", doc.last.?.link);
+}
