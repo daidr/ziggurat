@@ -18,6 +18,7 @@ const Style = view.Style;
 const Error = view.Error;
 const Rect = view.Rect;
 const Size = view.Size;
+const Point = view.Point;
 const ImageView = view.ImageView;
 pub const Icon = @import("icons.zig").Icon;
 
@@ -37,6 +38,12 @@ pub const Fit = enum {
 
 pub const ImageOptions = struct {
     fit: Fit = .contain,
+    /// Where the picture goes where `fit` crops it or leaves room around
+    /// it, as CSS's `object-position`: fractions of that room across and
+    /// down, 0 by the left or top edge, 1 by the right or bottom one, 0.5
+    /// in the middle. An avatar whose face, near the top of the photo,
+    /// stays in view takes `.{ .x = 0.5, .y = 0.15 }` with `.cover`.
+    position: Point = .{ .x = 0.5, .y = 0.5 },
     /// What the picture shows, for accessibility clients. Without it the
     /// picture is decorative.
     alt: []const u8 = "",
@@ -88,6 +95,9 @@ pub const Graphic = struct {
         icon: Icon,
     },
     fit: Fit = .contain,
+    /// Where the picture goes in the room `fit` leaves; see
+    /// `ImageOptions.position`.
+    position: Point = .{ .x = 0.5, .y = 0.5 },
     natural: Size,
     /// Not exposed to accessibility clients.
     decorative: bool = true,
@@ -137,7 +147,9 @@ pub fn icon(v: *View, which: Icon, options: IconOptions, style: Style) Error!voi
 fn leaf(v: *View, kind: view.Kind, graphic: Graphic, options: ImageOptions, style: Style) Error!void {
     const node = try v.appendNode(kind, style);
     var shown = graphic;
+    if (!std.math.isFinite(options.position.x) or !std.math.isFinite(options.position.y)) return error.InvalidValue;
     shown.fit = options.fit;
+    shown.position = .{ .x = std.math.clamp(options.position.x, 0, 1), .y = std.math.clamp(options.position.y, 0, 1) };
     shown.decorative = options.decorative or options.alt.len == 0;
     if (options.alt.len > 0) node.style.name = try v.copyText(options.alt);
     node.graphic = shown;
@@ -153,6 +165,11 @@ pub fn measure(node: *const Node) view.layout.Measurement {
 /// Where a picture of size `natural` goes for `fit` in `box`; it may reach
 /// past the box for `cover` and `none`, whose painting clips to the box.
 pub fn fitted(box: Rect, natural: Size, fit: Fit) Rect {
+    return fittedAt(box, natural, fit, .{ .x = 0.5, .y = 0.5 });
+}
+/// `fitted`, the picture placed at `position` in the room `fit` leaves or
+/// crops: fractions across and down (`ImageOptions.position`).
+pub fn fittedAt(box: Rect, natural: Size, fit: Fit, position: Point) Rect {
     if (fit == .fill or !(natural.width > 0 and natural.height > 0)) return box;
     const scale: f32 = switch (fit) {
         .contain => @min(box.width / natural.width, box.height / natural.height),
@@ -162,7 +179,7 @@ pub fn fitted(box: Rect, natural: Size, fit: Fit) Rect {
     };
     const width = natural.width * scale;
     const height = natural.height * scale;
-    return .{ .x = box.x + (box.width - width) / 2, .y = box.y + (box.height - height) / 2, .width = width, .height = height };
+    return .{ .x = box.x + (box.width - width) * position.x, .y = box.y + (box.height - height) * position.y, .width = width, .height = height };
 }
 
 /// Record a picture node: its semantics, then its pixels on a window
@@ -179,16 +196,16 @@ pub fn paint(v: *const View, target: anytype, node: *const Node, theme: view.The
             if (graphic.fit == .none) {
                 try target.pushClip(bounds);
                 defer target.popClip() catch {};
-                return target.image(fitted(bounds, graphic.natural, .none), picture, .{});
+                return target.image(fittedAt(bounds, graphic.natural, .none, graphic.position), picture, .{});
             }
-            try target.image(bounds, picture, .{ .fit = switch (graphic.fit) {
+            try target.image(bounds, picture, .{ .alignment = .{ .x = graphic.position.x, .y = graphic.position.y }, .fit = switch (graphic.fit) {
                 .contain => .contain,
                 .cover => .cover,
                 .fill, .none => .stretch,
             } });
         },
         .svg => |picture| {
-            const destination = fitted(bounds, graphic.natural, graphic.fit);
+            const destination = fittedAt(bounds, graphic.natural, graphic.fit, graphic.position);
             const crops = destination.width > bounds.width + 0.01 or destination.height > bounds.height + 0.01;
             if (crops) try target.pushClip(bounds);
             defer if (crops) target.popClip() catch {};
@@ -211,4 +228,15 @@ test "fit modes" {
     try std.testing.expectEqual(Rect{ .x = 0, .y = -25, .width = 100, .height = 100 }, fitted(box, natural, .cover));
     try std.testing.expectEqual(box, fitted(box, natural, .fill));
     try std.testing.expectEqual(Rect{ .x = 40, .y = 15, .width = 20, .height = 20 }, fitted(box, natural, .none));
+}
+
+test "a picture's position places it in the room its fit leaves or crops" {
+    const box: Rect = .{ .x = 0, .y = 0, .width = 100, .height = 50 };
+    const natural: Size = .{ .width = 20, .height = 20 };
+    try std.testing.expectEqual(Rect{ .x = 0, .y = 0, .width = 50, .height = 50 }, fittedAt(box, natural, .contain, .{ .x = 0, .y = 0 }));
+    try std.testing.expectEqual(Rect{ .x = 50, .y = 0, .width = 50, .height = 50 }, fittedAt(box, natural, .contain, .{ .x = 1, .y = 1 }));
+    // Covering, the face near the top stays in view.
+    const covered = fittedAt(box, natural, .cover, .{ .x = 0.5, .y = 0.15 });
+    try std.testing.expectApproxEqAbs(@as(f32, -7.5), covered.y, 1e-4);
+    try std.testing.expectEqual(@as(f32, 100), covered.height);
 }

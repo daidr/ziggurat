@@ -425,3 +425,41 @@ test "spaces ending a text take no room unless kept, and tabs stop every tab siz
     try testing.expect(h.view.nodes()[2].bounds.width > plain);
     try testing.expect(h.view.nodes()[3].bounds.width > 0);
 }
+
+const solid = [_]view.GradientStop{ .{ .color = ui.Color.rgb(0), .at = 0 }, .{ .color = ui.Color.rgb(0), .at = 1 } };
+const Ringed = struct {
+    fn build(_: *Ringed, v: *View) anyerror!void {
+        try v.column(.{ .width = 120, .height = 40, .radius = 20, .padding = view.Insets.all(2), .background = 0xff00ff, .masks = &.{
+            .{ .image = .{ .linear = .{ .stops = &solid } }, .box = .content, .composite = .exclude },
+            .{ .image = .{ .linear = .{ .stops = &solid } } },
+        } });
+        try v.end();
+    }
+};
+
+test "layers of masks make one mask: a ring of the content box excluded from the border box" {
+    var storage: Storage = .{};
+    var app: Ringed = .{};
+    var h = Harness.init(&app, Ringed.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    const commands = try paintAgain(&h, &context);
+    var masked: ?ui.commands.MaskClip = null;
+    for (commands) |command| if (command == .push_mask_clip) {
+        masked = command.push_mask_clip;
+    };
+    const clip = masked orelse return error.TestExpectedMask;
+    const coverage = context.command_buffer.coverageResources()[clip.mask].coverage;
+    const at = struct {
+        fn value(cov: anytype, x: i32, y: i32) u8 {
+            return cov.pixels[@as(usize, @intCast(y - cov.origin_y)) * cov.stride + @as(usize, @intCast(x - cov.origin_x))];
+        }
+    }.value;
+    const box = h.view.nodes()[1].bounds;
+    const x0: i32 = @intFromFloat(box.x);
+    const y0: i32 = @intFromFloat(box.y);
+    // The middle is cut out, the rim inside the padding shows.
+    try testing.expectEqual(@as(u8, 0), at(coverage, x0 + 60, y0 + 20));
+    try testing.expectEqual(@as(u8, 255), at(coverage, x0 + 60, y0 + 0));
+}

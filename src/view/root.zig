@@ -329,6 +329,16 @@ pub const Style = struct {
     /// overlap where the mask is half clear show through each other, as
     /// with their own opacity. Clicks are not masked.
     mask: ?Gradient = null,
+    /// Mask the node by layers of gradients in place of `mask`, as CSS's
+    /// `mask-image` with `mask-composite`: each across the border box, or
+    /// the padding or content box (its `box`, as `mask-origin` and
+    /// `mask-clip`), the first on top, going with those under it as its
+    /// `composite` says. A gradient ring as wide as the padding is the
+    /// content box excluded from the border box. More than one layer makes
+    /// a mask of their alpha on the CPU, once for each size the node shows
+    /// at; like `mask`, it applies to each drawing on its own. At most
+    /// `max_mask_layers`; see `MaskLayer`.
+    masks: []const MaskLayer = &.{},
     /// A wrapping text breaks into lines of about the same width, as CSS's
     /// `text-wrap: balance`: a heading that takes two lines splits near its
     /// middle instead of leaving one word alone on the second. It keeps the
@@ -420,6 +430,24 @@ pub const Style = struct {
     /// Popovers, menus and dialogs opened inside take it too. The theme is
     /// borrowed until the pass is painted. See `View.themed`.
     theme: ?*const Theme = null,
+};
+
+/// Layers `Style.masks` takes at most.
+pub const max_mask_layers = ui.clip_mask.max_layers;
+/// One layer of `Style.masks`.
+pub const MaskLayer = struct {
+    pub const Box = enum { border, padding, content };
+    pub const Composite = ui.clip_mask.Composite;
+    /// Whose alpha masks; its colors do not matter.
+    image: Gradient,
+    /// The box it spans and shows nothing outside of: the node's border
+    /// box, that box inside its border, or inside its padding too.
+    box: Box = .border,
+    /// How it goes with the layers under it, after it in the list:
+    /// `.add` shows what either shows, `.subtract` the layer where those
+    /// under it do not show, `.intersect` where both do and `.exclude`
+    /// where one does but not both.
+    composite: Composite = .add,
 };
 
 /// A shadow text casts (`Style.text_shadow`), as CSS's `text-shadow`: the
@@ -6352,7 +6380,7 @@ pub const View = struct {
             }
             // Around its effects too, as CSS's clip-path and mask go after
             // its filters.
-            if (style.clip_inset != null or style.mask != null) {
+            if (style.clip_inset != null or style.mask != null or style.masks.len > 0) {
                 try openSelfClip(target, style, bounds);
                 scopes[scope_depth] = .{ .index = @intCast(at), .kind = .self_clip };
                 scope_depth += 1;
@@ -6733,6 +6761,29 @@ pub const View = struct {
         const inset_clip = style.clip_inset orelse ClipInset{};
         const rect = inset_clip.rect(bounds);
         if (@TypeOf(target) != *ui.Frame) return target.pushClip(rect);
+        if (style.masks.len > 0) {
+            var layers: [max_mask_layers]ui.clip_mask.Layer = undefined;
+            var layer_stops: [max_mask_layers][gradients.max_stops]ui.commands.brushes.Stop = undefined;
+            var count: usize = 0;
+            for (style.masks[0..@min(style.masks.len, max_mask_layers)], 0..) |layer, i| {
+                const border = if (style.border != null or style.border_gradient != null) style.border_width else 0;
+                const box = switch (layer.box) {
+                    .border => bounds,
+                    .padding => inset(bounds, border),
+                    .content => insetBy(inset(bounds, border), style.padding),
+                };
+                const radius = switch (layer.box) {
+                    .border => style.radius,
+                    .padding => @max(0, style.radius - border),
+                    .content => @max(0, style.radius - border - @max(@max(style.padding.left, style.padding.right), @max(style.padding.top, style.padding.bottom))),
+                };
+                const resolved = gradients.resolve(layer.image, box, &layer_stops[i]) orelse continue;
+                layers[count] = .{ .gradient = resolved, .box = box, .radius = radius, .composite = layer.composite };
+                count += 1;
+            }
+            if (count == 0) return target.pushClip(rect);
+            return target.pushLayeredClip(rect, @max(inset_clip.radius, 0), layers[0..count]);
+        }
         var stops: [gradients.max_stops]ui.commands.brushes.Stop = undefined;
         const mask = if (style.mask) |g| gradients.resolve(g, bounds, &stops) else null;
         if (style.mask != null and mask == null) return target.pushClip(rect);
@@ -7047,6 +7098,9 @@ fn fadeText(target: anytype, bounds: Rect, text: []const u8, color: u32, font: F
 fn trailing(rect: Rect, width: f32) Rect {
     const used = @min(rect.width, width);
     return .{ .x = rect.x + rect.width - used, .y = rect.y, .width = used, .height = rect.height };
+}
+fn insetBy(rect: Rect, by: Insets) Rect {
+    return .{ .x = rect.x + by.left, .y = rect.y + by.top, .width = @max(0, rect.width - by.left - by.right), .height = @max(0, rect.height - by.top - by.bottom) };
 }
 fn inset(rect: Rect, amount: f32) Rect {
     return .{ .x = rect.x + amount, .y = rect.y + amount, .width = @max(0, rect.width - 2 * amount), .height = @max(0, rect.height - 2 * amount) };

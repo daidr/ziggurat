@@ -4940,6 +4940,7 @@ test {
     _ = owner_commands;
     _ = line_backgrounds;
     _ = range_markers;
+    _ = @import("field.zig");
 }
 
 test "complete Prepared hit is allocation free transactional and agrees with the original routes" {
