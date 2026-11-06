@@ -483,6 +483,19 @@ test "popovers flip above an anchor without room below" {
     try testing.expectEqual(@as(f32, 10), below.x);
 }
 
+test "a popover's edge margin keeps it that far from the window's edges" {
+    const window: view.Rect = .{ .x = 0, .y = 0, .width = 400, .height = 300 };
+    const anchor: view.Rect = .{ .x = 350, .y = 10, .width = 40, .height = 30 };
+    const flush = view.placePopover(window, anchor, .{ .width = 120, .height = 100 }, .{});
+    try testing.expectEqual(@as(f32, 280), flush.x);
+    const kept = view.placePopover(window, anchor, .{ .width = 120, .height = 100 }, .{ .edge_margin = 12 });
+    try testing.expectEqual(@as(f32, 400 - 12 - 120), kept.x);
+    // Wider than the room left, it is cut to it.
+    const wide = view.placePopover(window, anchor, .{ .width = 500, .height = 100 }, .{ .edge_margin = 12 });
+    try testing.expectEqual(@as(f32, 12), wide.x);
+    try testing.expectEqual(@as(f32, 400 - 24), wide.width);
+}
+
 const DecimalApp = struct {
     state: pickers.DecimalInput = .{},
     value: pickers.Decimal = pickers.Decimal.init("1234.50") catch unreachable,

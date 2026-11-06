@@ -336,6 +336,41 @@ pub const Style = struct {
     /// width that still holds them, and is meant for short text: headings,
     /// captions, labels on cards. Needs `wrap`.
     balance: bool = false,
+    /// A wrapping text keeps the last line of each paragraph from holding
+    /// a single word, as CSS's `text-wrap: pretty` does at least: the line
+    /// before gives it a word, wrapped as wide as that leaves the two, and
+    /// the lines before stay as they are. A line before with no word to
+    /// spare, as one long word, stays as it is; so does a text `max_lines`
+    /// cuts. `balance` balances all the lines instead. Needs `wrap`.
+    pretty: bool = false,
+    /// Keep the spaces a single-line text ends with, and a text of only
+    /// spaces, with their advance, as CSS's `white-space: break-spaces`
+    /// does: a gap made of spaces between two texts in a row, or the
+    /// padding a monospaced column is aligned with. Without it the spaces
+    /// ending a text take no room, as with `white-space: normal`, and a
+    /// wrapping text's lines leave out the spaces they end with either way.
+    preserve_spaces: bool = false,
+    /// Put the tab stops of a text every this many spaces from the start
+    /// of each line, as CSS's `tab-size`: a tab advances to the next of
+    /// them, as a code block indents with tabs of 2 or 4 columns. 0 leaves
+    /// tabs to the system's text stack, which differs between systems.
+    /// Exact in a monospaced font, where a space is a column.
+    tab_size: u8 = 0,
+    /// Cast a shadow of a text's glyphs, as CSS's `text-shadow`: their
+    /// shapes offset and blurred, under the glyphs and their stroke, as a
+    /// caption over a photo or a label over a chart's bars takes one to
+    /// stand out. Set on a container, the texts inside cast it unless they
+    /// set their own; a transparent color casts none. The blur needs
+    /// `Host.prepareShaderEffects`, like `blur`; without it the shadow is
+    /// sharp. See `TextShadow`.
+    text_shadow: ?TextShadow = null,
+    /// Stroke the outlines of a text's glyphs under their fill, as CSS's
+    /// `-webkit-text-stroke` with `paint-order: stroke fill`: half the
+    /// stroke shows around each glyph, a halo that keeps a label readable
+    /// over whatever is behind it. Set on a container, the texts inside
+    /// take it unless they set their own; a width of 0 or a transparent
+    /// color strokes none. See `TextStroke`.
+    text_stroke: ?TextStroke = null,
     /// A scroll container shows its scroll indicator while its content
     /// overflows; false hides it, keeping the wheel, keys and assistive
     /// technology scrolling, for a surface that draws its own.
@@ -385,6 +420,33 @@ pub const Style = struct {
     /// Popovers, menus and dialogs opened inside take it too. The theme is
     /// borrowed until the pass is painted. See `View.themed`.
     theme: ?*const Theme = null,
+};
+
+/// A shadow text casts (`Style.text_shadow`), as CSS's `text-shadow`: the
+/// shapes of its glyphs offset by `x` and `y` DIP and blurred by `blur`, in
+/// `color`. Underlines cast none, and one shadow paints, where CSS takes
+/// a list.
+pub const TextShadow = struct {
+    x: f32 = 0,
+    y: f32 = 0,
+    /// The blur's radius in DIP, as CSS's: twice the deviation of the
+    /// Gaussian it blurs by.
+    blur: f32 = 0,
+    color: ui.Color = .{ .r = 0, .g = 0, .b = 0, .a = 128 },
+
+    fn valid(self: TextShadow) bool {
+        return std.math.isFinite(self.x) and std.math.isFinite(self.y) and std.math.isFinite(self.blur) and self.blur >= 0;
+    }
+};
+/// A stroke of a text's glyph outlines (`Style.text_stroke`), `width` DIP
+/// wide and centered on them, in `color`.
+pub const TextStroke = struct {
+    width: f32 = 1,
+    color: ui.Color = .{ .r = 255, .g = 255, .b = 255 },
+
+    fn valid(self: TextStroke) bool {
+        return std.math.isFinite(self.width) and self.width >= 0 and self.width <= 64;
+    }
 };
 
 /// Where `View.scrollIntoViewWith` lines a node up in the scroll
@@ -686,15 +748,12 @@ pub const ToastOptions = struct {
     action: []const u8 = "",
     /// How long the message stays, counted from the first pass that shows
     /// it; 0 keeps it until dismissed. Its time stops while the pointer
-    /// rests on the toasts, the keyboard focus is in them, or the window
-    /// does not have the keyboard, unless `run_in_background`.
+    /// rests on the toasts or the keyboard focus is in them while the
+    /// window has the keyboard. It runs on while the window is in the
+    /// background or hidden, since a toast tells news that goes stale, as
+    /// a download that finished while a tray app's window was hidden: a
+    /// message whose time is over by then goes before it shows.
     duration: u64 = 4 * std.time.ns_per_s,
-    /// Keep its time running while the window is in the background or
-    /// hidden, for news that goes stale, as a download that finished while
-    /// a tray app's window was hidden: a message whose time is over by then
-    /// goes before it shows. The pointer resting on the toasts and the
-    /// keyboard focus in them still stop it.
-    run_in_background: bool = false,
 };
 /// Longest toast message and action label, in bytes.
 pub const max_toast_message = 256;
@@ -713,7 +772,6 @@ pub fn Toasts(comptime capacity: usize) type {
             action: [max_toast_action]u8 = undefined,
             action_len: usize = 0,
             duration: u64,
-            run_in_background: bool = false,
             /// The pass time it was first shown at, or null before that.
             shown: ?u64 = null,
             /// How long it has shown while its time ran, up to `running`.
@@ -734,7 +792,7 @@ pub fn Toasts(comptime capacity: usize) type {
             const id = self.next_id;
             self.next_id += 1;
             const entry = &self.entries[self.len];
-            entry.* = .{ .id = id, .message_len = message.len, .action_len = options.action.len, .duration = options.duration, .run_in_background = options.run_in_background };
+            entry.* = .{ .id = id, .message_len = message.len, .action_len = options.action.len, .duration = options.duration };
             @memcpy(entry.message[0..message.len], message);
             @memcpy(entry.action[0..options.action.len], options.action);
             self.len += 1;
@@ -917,6 +975,11 @@ pub const Placement = struct {
     gap: f32 = popup_gap,
     /// Make the panel at least as wide as the anchor.
     match_width: bool = false,
+    /// How far the panel stays from the window's edges, in DIP on each
+    /// side, as the insets of CSS Anchor Positioning's containing block: a
+    /// wide panel that must not touch the edges of a narrow window keeps
+    /// 12 from them. It is the room the panel flips and moves to stay in.
+    edge_margin: f32 = 0,
 };
 
 /// How a dialog is announced, placed and dismissed; see `View.dialog`.
@@ -2118,6 +2181,8 @@ pub const View = struct {
         if (parent.child_count >= layout.max_items) return error.TooManyItems;
         if (!std.math.isFinite(style.opacity) or style.opacity < 0 or style.opacity > 1) return error.InvalidValue;
         if (!std.math.isFinite(style.blur) or style.blur < 0) return error.InvalidValue;
+        if (style.text_shadow) |shadow| if (!shadow.valid()) return error.InvalidValue;
+        if (style.text_stroke) |stroke| if (!stroke.valid()) return error.InvalidValue;
         if (style.pose) |pose| if (!pose.valid()) return error.InvalidValue;
         if (style.clip_inset) |clip| if (!clip.valid()) return error.InvalidValue;
         const index = self.len;
@@ -2524,7 +2589,7 @@ pub const View = struct {
 
     pub fn text(self: *View, value: []const u8, style: Style) Error!void {
         const node = try self.append(.text, style);
-        node.text = try self.copy(value);
+        node.text = if (style.tab_size > 0 and std.mem.indexOfScalar(u8, value, '\t') != null) try self.expandTabs(value, style.tab_size) else try self.copy(value);
     }
     /// Format directly into the view's text storage.
     pub fn textf(self: *View, comptime format: []const u8, args: anytype, style: Style) Error!void {
@@ -2533,6 +2598,39 @@ pub const View = struct {
         if (!std.unicode.utf8ValidateSlice(out)) return error.InvalidText;
         self.text_len += out.len;
         node.text = out;
+        if (style.tab_size > 0 and std.mem.indexOfScalar(u8, out, '\t') != null) {
+            // Expanded after the formatted text, whose room is given back.
+            const start = self.text_len - out.len;
+            const expanded = try self.expandTabs(out, style.tab_size);
+            std.mem.copyForwards(u8, self.buffers.text[start..][0..expanded.len], expanded);
+            self.text_len = start + expanded.len;
+            node.text = self.buffers.text[start..][0..expanded.len];
+        }
+    }
+    /// Copy `value` into the text storage with each tab replaced by the
+    /// spaces up to the next stop every `size` columns from the start of
+    /// its line (`Style.tab_size`).
+    fn expandTabs(self: *View, value: []const u8, size: u8) Error![]const u8 {
+        if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidText;
+        const out = self.buffers.text[self.text_len..];
+        var len: usize = 0;
+        var col: usize = 0;
+        for (value) |byte| {
+            if (byte == '\t') {
+                const spaces = size - col % size;
+                if (out.len - len < spaces) return error.TextFull;
+                @memset(out[len..][0..spaces], ' ');
+                len += spaces;
+                col += spaces;
+                continue;
+            }
+            if (len == out.len) return error.TextFull;
+            out[len] = byte;
+            len += 1;
+            if (byte == '\n') col = 0 else if (byte & 0xc0 != 0x80) col += 1;
+        }
+        self.text_len += len;
+        return out[0..len];
     }
     /// Flexible empty space; grows by default.
     pub fn spacer(self: *View, style: Style) Error!void {
@@ -3522,9 +3620,11 @@ pub const View = struct {
     /// Starts the stack of `queue`'s messages, drawn over the window's
     /// bottom edge, newest last. Each message disappears after its duration,
     /// counted from the first pass that shows it, or when its close button
-    /// is activated. Their time stops while the pointer rests on them, the
-    /// keyboard focus is in them, or the window does not have the keyboard,
-    /// but for messages that `run_in_background` there; its action button removes it and returns its id once.
+    /// is activated. Their time stops while the pointer rests on them or the
+    /// keyboard focus is in them while the window has the keyboard, and runs
+    /// on while the window is in the background or hidden; a message whose
+    /// time ran out by then goes before it shows. Its action button removes
+    /// it and returns its id once.
     /// `queue` is a pointer to a `Toasts` value the application owns.
     pub fn toasts(self: *View, queue: anytype, style: Style) Error!?u64 {
         var value = style;
@@ -3532,14 +3632,14 @@ pub const View = struct {
         _ = try self.open(.toasts, value);
         // The user holds the toasts with the pointer resting on them or the
         // keyboard focus in them while the window has it; the window in
-        // the background stops those that do not run there.
+        // the background stops none, as their news goes stale.
         const focused = self.window_focused;
         const held = self.toast_hover or (focused and self.focusInToasts());
         var acted: ?u64 = null;
         var index: usize = 0;
         while (index < queue.len) {
             const entry = &queue.entries[index];
-            const stops = held or (!focused and !entry.run_in_background);
+            const stops = held;
             if (entry.shown == null) {
                 entry.shown = self.now;
                 entry.running = if (stops) null else self.now;
@@ -4778,7 +4878,9 @@ pub const View = struct {
         if (node.graphic != null) return image_nodes.measure(node);
         const metrics = theme.metrics;
         const font = if (node.kind == .text or node.kind == .link) node.style.font else null;
-        const text_size = if (node.text.len > 0) measurer.textSize(node.text, font) else if (font) |value| measurer.textSize("", value) else Size{ .width = 0, .height = Measurer.line_height };
+        // A text's ending spaces take no room unless it keeps them.
+        const shown = if (node.kind == .text and !node.style.preserve_spaces) std.mem.trimEnd(u8, node.text, " \t") else node.text;
+        const text_size = if (node.kind == .text and shown.len == 0 and node.text.len > 0) Size{ .width = 0, .height = measurer.textSize("", font).height } else if (node.text.len > 0) measurer.textSize(shown, font) else if (font) |value| measurer.textSize("", value) else Size{ .width = 0, .height = Measurer.line_height };
         const size: Size = switch (node.kind) {
             .text, .note => text_size,
             .spacer => .{},
@@ -5754,7 +5856,76 @@ pub const View = struct {
         const lines: Lines = .{ .target = target, .view = self, .node = node, .bounds = bounds, .color = color, .height = wrap_text.lineHeight(self.measurer, node.style.font) };
         // Balanced lines wrap narrower, each placed in the box as before.
         const width = if (node.style.balance) wrap_text.balanced(node.text, bounds.width, node.style.font, self.measurer, node.style.max_lines) else bounds.width;
-        wrap_text.each(node.text, width, node.style.font, self.measurer, node.style.max_lines, &lines, Lines.draw);
+        wrap_text.eachWith(node.text, width, node.style.font, self.measurer, node.style.max_lines, node.style.pretty and !node.style.balance, &lines, Lines.draw);
+    }
+
+    /// Draw the text of a text node in `rect`, wrapped or on one line.
+    fn drawTextAt(self: *const View, target: anytype, node: *const Node, rect: Rect, color: u32) void {
+        if (node.style.wrap) self.paintWrapped(target, node, rect, color) else target.labelFont(if (node.rtl) trailing(rect, node.measured.preferred.width) else rect, node.text, color, node.style.font orelse .{});
+    }
+    /// The text shadow and stroke the text node at `index` paints with:
+    /// its own, or those of the nearest container around it that sets
+    /// them; transparent ones and strokes 0 wide paint none.
+    fn textDecorations(all: []const Node, index: usize) struct { shadow: ?TextShadow = null, stroke: ?TextStroke = null } {
+        var shadow: ?TextShadow = null;
+        var stroke: ?TextStroke = null;
+        var at: u32 = @intCast(index);
+        while (at != none and (shadow == null or stroke == null)) : (at = all[at].parent) {
+            if (shadow == null) shadow = all[at].style.text_shadow;
+            if (stroke == null) stroke = all[at].style.text_stroke;
+        }
+        if (shadow) |value| if (value.color.a == 0) {
+            shadow = null;
+        };
+        if (stroke) |value| if (value.color.a == 0 or value.width <= 0) {
+            stroke = null;
+        };
+        return .{ .shadow = shadow, .stroke = stroke };
+    }
+    /// Paint what lies under a text's glyphs: their shadow, then their
+    /// stroke (`Style.text_shadow`, `Style.text_stroke`). The shadow is the
+    /// text drawn again where it falls, blurred as `Style.blur` blurs; the
+    /// stroke is the text drawn again around its place, as far as half
+    /// the stroke, in the stroke's color, all as one layer under the fill.
+    fn paintTextBehind(self: *const View, frame: *ui.Frame, all: []const Node, index: usize, bounds: Rect) !void {
+        const node = &all[index];
+        const decorations = textDecorations(all, index);
+        if (decorations.shadow) |shadow| {
+            const moved: Rect = .{ .x = bounds.x + shadow.x, .y = bounds.y + shadow.y, .width = bounds.width, .height = bounds.height };
+            var blurred = false;
+            if (self.effects) |library| if (shadow.blur > 0) {
+                var values: ui.shader.Values = undefined;
+                if (try library.blur(&values, shadow.blur / 2)) |effect| {
+                    try frame.beginEffect(moved, effect, .{});
+                    blurred = true;
+                }
+            };
+            const faded = shadow.color.a < 255;
+            if (faded) try frame.pushOpacity(shadow.color.a);
+            self.drawTextAt(frame, node, moved, shadow.color.hex());
+            if (faded) try frame.popOpacity();
+            if (blurred) try frame.endEffect();
+        }
+        if (decorations.stroke) |stroke| {
+            const reach = stroke.width / 2;
+            const area: Rect = .{ .x = bounds.x - reach - 1, .y = bounds.y - reach - 1, .width = bounds.width + 2 * reach + 2, .height = bounds.height + 2 * reach + 2 };
+            const grouped = stroke.color.a < 255;
+            if (grouped) try frame.beginGroup(area, .{ .opacity = stroke.color.a });
+            // Copies around a ring as wide as half the stroke, and one
+            // within it for a wide stroke, dilate the glyphs: what shows
+            // past their fill is the outer half of a centered stroke.
+            const rings: usize = if (reach > 2) 2 else 1;
+            for (0..rings) |ring| {
+                const radius = reach * @as(f32, @floatFromInt(rings - ring)) / @as(f32, @floatFromInt(rings));
+                const copies: usize = if (radius <= 1) 8 else if (radius <= 2.5) 12 else 16;
+                for (0..copies) |k| {
+                    const angle = 2 * std.math.pi * @as(f32, @floatFromInt(k)) / @as(f32, @floatFromInt(copies));
+                    const around: Rect = .{ .x = bounds.x + radius * @cos(angle), .y = bounds.y + radius * @sin(angle), .width = bounds.width, .height = bounds.height };
+                    self.drawTextAt(frame, node, around, stroke.color.hex());
+                }
+            }
+            if (grouped) try frame.endGroup();
+        }
     }
 
     pub fn paint(self: *const View, target: anytype) !void {
@@ -6269,7 +6440,9 @@ pub const View = struct {
                     if (@TypeOf(target) == *ui.Frame and node.label_for != 0 and style.enabled and !node.passthrough)
                         try target.addControl(node.id, bounds, .{ .focusable = false });
                     const color = style.color orelse if (!style.enabled) theme.palette.disabled_text else if (node.row != none and all[node.row].checked) theme.palette.on_accent else theme.palette.text;
-                    if (self.matches.morphOf(node.id)) |value| try self.paintMorph(target, node, color, value) else if (style.wrap) self.paintWrapped(target, node, bounds, color) else target.labelFont(if (node.rtl) trailing(bounds, node.measured.preferred.width) else bounds, node.text, color, style.font orelse .{});
+                    const morphing = self.matches.morphOf(node.id);
+                    if (@TypeOf(target) == *ui.Frame and morphing == null and node.text.len > 0) try self.paintTextBehind(target, all, at, bounds);
+                    if (morphing) |value| try self.paintMorph(target, node, color, value) else self.drawTextAt(target, node, bounds, color);
                 },
                 .tree_row => {
                     var row_control = control;
@@ -6611,7 +6784,7 @@ pub const View = struct {
         while (at != none) : (at = all[at].parent) {
             const node = &all[at];
             const pose = node.style.pose orelse continue;
-            if (pose.z != 0 or pose.rotate != 0 or pose.rotate_x != 0 or pose.rotate_y != 0) return .{ .frame = leaf.bounds, .radius = leaf.style.radius };
+            if (pose.z != 0 or pose.depth != 0 or pose.rotate != 0 or pose.rotate_x != 0 or pose.rotate_y != 0) return .{ .frame = leaf.bounds, .radius = leaf.style.radius };
             const b = node.bounds;
             const ox = b.x + pose.origin[0] * b.width;
             const oy = b.y + pose.origin[1] * b.height;
@@ -6890,7 +7063,9 @@ fn inside(inner: Rect, outer: Rect) bool {
 /// `placement` asks: on its side, or the opposite one when the panel does
 /// not fit there and that side has more room, then moved and cut to stay
 /// within the window.
-pub fn placePopover(window: Rect, anchor: Rect, size: Size, placement: Placement) Rect {
+pub fn placePopover(whole: Rect, anchor: Rect, size: Size, placement: Placement) Rect {
+    const edge = if (std.math.isFinite(placement.edge_margin)) std.math.clamp(placement.edge_margin, 0, @min(whole.width, whole.height) / 2) else 0;
+    const window: Rect = .{ .x = whole.x + edge, .y = whole.y + edge, .width = whole.width - 2 * edge, .height = whole.height - 2 * edge };
     const width = @min(if (placement.match_width) @max(size.width, anchor.width) else size.width, window.width);
     const height = @min(size.height, window.height);
     const gap = placement.gap;
@@ -7892,6 +8067,15 @@ pub const Host = struct {
         const whole = frame.sourceBounds();
         const content = if (self.options.tools()) |tools| tools.contentBounds(whole) else whole;
         try self.view.arrange(content, theme, self.options.measurer);
+        // What the pointer rests on may have changed as the pass built:
+        // a popover closing over a button leaves the button under it, and
+        // an area that went leaves the one beneath. The pass is built
+        // again so that what reads its hover shows it in this frame, not
+        // only in the next.
+        if (self.view.pointer != null and self.view.pointerMoved(self.view.pointer)) {
+            try self.pass(null);
+            try self.view.arrange(content, theme, self.options.measurer);
+        }
         self.arranged = true;
         if (self.options.fit_content) |fit| if (self.options.tools() == null or !self.options.tools().?.open) self.measureFit(fit, whole);
         const laid = if (lap) |*timer| timer.lap() else 0;
@@ -8570,6 +8754,7 @@ test {
     _ = @import("layout_tests.zig");
     _ = @import("matched.zig");
     _ = @import("morph.zig");
+    _ = @import("wrap.zig");
 }
 
 test "a shared element comes from where its match showed in the frame before" {

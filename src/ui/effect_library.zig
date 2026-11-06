@@ -82,6 +82,13 @@ pub const Pose = struct {
     x_percent: f32 = 0,
     y_percent: f32 = 0,
     z: f32 = 0,
+    /// Moves the content `depth` DIP toward the viewer before it turns, as
+    /// CSS's `translateZ()` written before `rotateY()`: it pushes the
+    /// content out from the axis it turns about, as the items of a
+    /// carousel on a ring, where `z` lifts the turned content toward the
+    /// viewer. Seen in `perspective`, nearer looks larger and farther
+    /// smaller; content as far as the viewer or past it shows nothing.
+    depth: f32 = 0,
     scale_x: f32 = 1,
     scale_y: f32 = 1,
     rotate: f32 = 0,
@@ -91,7 +98,7 @@ pub const Pose = struct {
     origin: [2]f32 = .{ 0.5, 0.5 },
 
     pub fn isIdentity(self: Pose) bool {
-        return self.x == 0 and self.y == 0 and self.x_percent == 0 and self.y_percent == 0 and self.z == 0 and self.scale_x == 1 and self.scale_y == 1 and self.rotate == 0 and self.rotate_x == 0 and self.rotate_y == 0;
+        return self.x == 0 and self.y == 0 and self.x_percent == 0 and self.y_percent == 0 and self.z == 0 and self.depth == 0 and self.scale_x == 1 and self.scale_y == 1 and self.rotate == 0 and self.rotate_x == 0 and self.rotate_y == 0;
     }
     pub fn valid(self: Pose) bool {
         inline for (zio.fields(Pose)) |field| {
@@ -151,7 +158,10 @@ pub const Pose = struct {
         // v(x, y) = a1 x + a2 y + a0, relative to the origin.
         const tx = self.offsetX(size[0]);
         const ty = self.offsetY(size[1]);
-        const a0 = [3]f64{ tx - axes[0][0] * ox - axes[1][0] * oy, ty - axes[0][1] * ox - axes[1][1] * oy, self.z - axes[0][2] * ox - axes[1][2] * oy };
+        // The depth moves along the content's own Z, turned with it.
+        const d: f64 = self.depth;
+        const pushed = [3]f64{ d * cx * sy, -d * sx, d * cx * cy };
+        const a0 = [3]f64{ tx + pushed[0] - axes[0][0] * ox - axes[1][0] * oy, ty + pushed[1] - axes[0][1] * ox - axes[1][1] * oy, self.z + pushed[2] - axes[0][2] * ox - axes[1][2] * oy };
         const k: f64 = if (self.perspective > 0) 1 / @as(f64, self.perspective) else 0;
         // Screen = origin + v.xy / w with w = 1 - v.z / perspective.
         return .{
@@ -283,6 +293,11 @@ pub const Library = struct {
         if (!value.valid()) return error.InvalidPose;
         if (value.isIdentity()) return null;
         const forward = value.homography(size);
+        // The origin at or behind the viewer, as a move along Z as far as
+        // the perspective's distance puts it: nothing shows, as in CSS.
+        const ox = @as(f64, value.origin[0]) * size[0];
+        const oy = @as(f64, value.origin[1]) * size[1];
+        if (!(forward[2] * ox + forward[5] * oy + forward[8] > 1e-4)) return null;
         const back = inverse3(forward) orelse return null;
         // Claim the margin the moved corners need.
         var margin: f32 = 0;
@@ -395,6 +410,29 @@ test "a half turn about the centre and a perspective tilt" {
     var values: shader.Values = undefined;
     try std.testing.expect(try library.pose(&values, .{ .rotate_y = 90, .perspective = 0 }, .{ 10, 10 }) == null);
     try std.testing.expectError(error.InvalidPose, library.pose(&values, .{ .x = std.math.inf(f32) }, .{ 10, 10 }));
+}
+
+test "a move along Z scales about the origin in perspective, before or after a turn" {
+    // 120 DIP back seen from 800: 800/920 its size about the middle.
+    const back = (Pose{ .z = -120, .perspective = 800 }).homography(.{ 100, 100 });
+    const corner = apply(back, 0, 0).?;
+    try std.testing.expectApproxEqAbs(50 - 50 * 800.0 / 920.0, corner[0], 1e-9);
+    // Unturned, depth moves the same way as z.
+    const pushed = (Pose{ .depth = -120, .perspective = 800 }).homography(.{ 100, 100 });
+    try std.testing.expectApproxEqAbs(corner[0], apply(pushed, 0, 0).?[0], 1e-9);
+    // Pushed out 100 then turned a quarter about Y, the middle goes to the
+    // side: depth turns with the content, z does not.
+    const ring = (Pose{ .depth = 100, .rotate_y = 90, .perspective = 0 }).homography(.{ 100, 100 });
+    try std.testing.expectApproxEqAbs(@as(f64, 150), apply(ring, 50, 50).?[0], 1e-9);
+    const lifted = (Pose{ .z = 100, .rotate_y = 90, .perspective = 0 }).homography(.{ 100, 100 });
+    try std.testing.expectApproxEqAbs(@as(f64, 50), apply(lifted, 50, 50).?[0], 1e-9);
+    // As far as the viewer or past it, nothing shows.
+    const library = try Library.create(std.testing.allocator);
+    defer library.destroy();
+    var values: shader.Values = undefined;
+    try std.testing.expect(try library.pose(&values, .{ .z = 800, .perspective = 800 }, .{ 10, 10 }) == null);
+    try std.testing.expect(try library.pose(&values, .{ .z = 900, .perspective = 800 }, .{ 10, 10 }) == null);
+    try std.testing.expect(try library.pose(&values, .{ .z = 100, .perspective = 800 }, .{ 10, 10 }) != null);
 }
 
 test "glass bends the backdrop near its rim and leaves the middle" {

@@ -345,3 +345,83 @@ test "a balanced text wraps into lines of about the same width" {
     commands = try paintAgain(&h, &context);
     try testing.expectEqualStrings("aaaa bbbb cccc", lines.first(commands, context.command_buffer.textBytes()));
 }
+
+const Decorated = struct {
+    shadow: ?view.TextShadow = .{ .x = 2, .y = 3, .color = .{ .r = 0, .g = 0, .b = 0, .a = 128 } },
+    stroke: ?view.TextStroke = null,
+    fn build(self: *Decorated, v: *View) anyerror!void {
+        try v.column(.{ .text_shadow = self.shadow, .text_stroke = self.stroke });
+        try v.text("Golden hour", .{ .color = 0xffffff });
+        try v.end();
+    }
+};
+
+fn textCommands(commands: []const ui.commands.Command, out: []ui.commands.Text) usize {
+    var len: usize = 0;
+    for (commands) |command| if (command == .text) {
+        out[len] = command.text;
+        len += 1;
+    };
+    return len;
+}
+
+test "a text casts the shadow and takes the stroke of the container around it, under its fill" {
+    var storage: Storage = .{};
+    var app: Decorated = .{};
+    var h = Harness.init(&app, Decorated.build, storage.buffers(), .{});
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    try h.attachInput(&context);
+    var texts: [64]ui.commands.Text = undefined;
+    var len = textCommands(try paintAgain(&h, &context), &texts);
+    // The shadow first, moved and faded, then the text.
+    try testing.expectEqual(@as(usize, 2), len);
+    try testing.expectEqual(texts[1].bounds.x + 2, texts[0].bounds.x);
+    try testing.expectEqual(texts[1].bounds.y + 3, texts[0].bounds.y);
+    try testing.expectEqual(@as(u32, 0x000000), texts[0].color);
+    try testing.expectEqual(@as(u32, 0xffffff), texts[1].color);
+    // A stroke paints copies around the text, between its shadow and it.
+    app.stroke = .{ .width = 2, .color = .{ .r = 255, .g = 0, .b = 0 } };
+    try h.render();
+    len = textCommands(try paintAgain(&h, &context), &texts);
+    try testing.expectEqual(@as(usize, 2 + 8), len);
+    for (texts[1 .. len - 1]) |copy| {
+        try testing.expectEqual(@as(u32, 0xff0000), copy.color);
+        const dx = copy.bounds.x - texts[len - 1].bounds.x;
+        const dy = copy.bounds.y - texts[len - 1].bounds.y;
+        try testing.expectApproxEqAbs(@as(f32, 1), @sqrt(dx * dx + dy * dy), 0.01);
+    }
+    // A transparent shadow casts none.
+    app.shadow = .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 0 } };
+    app.stroke = null;
+    try h.render();
+    try testing.expectEqual(@as(usize, 1), textCommands(try paintAgain(&h, &context), &texts));
+}
+
+const Spaced = struct {
+    keep: bool = false,
+    fn build(self: *Spaced, v: *View) anyerror!void {
+        try v.row(.{});
+        try v.text("ab   ", .{ .preserve_spaces = self.keep });
+        try v.text("    ", .{ .preserve_spaces = self.keep });
+        try v.text("x\ty\tzz\tw", .{ .tab_size = 4 });
+        try v.textf("{s}\t|", .{"abcde"}, .{ .tab_size = 4 });
+        try v.end();
+    }
+};
+
+test "spaces ending a text take no room unless kept, and tabs stop every tab size" {
+    var storage: Storage = .{};
+    var app: Spaced = .{};
+    var h = Harness.init(&app, Spaced.build, storage.buffers(), .{});
+    try h.render();
+    const nodes = h.view.nodes();
+    const plain = nodes[2].bounds.width;
+    try testing.expectEqual(@as(f32, 0), nodes[3].bounds.width);
+    try testing.expectEqualStrings("x   y   zz  w", nodes[4].text);
+    try testing.expectEqualStrings("abcde   |", nodes[5].text);
+    app.keep = true;
+    try h.render();
+    try testing.expect(h.view.nodes()[2].bounds.width > plain);
+    try testing.expect(h.view.nodes()[3].bounds.width > 0);
+}

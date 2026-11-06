@@ -836,7 +836,11 @@ static int own_context(ZlRenderer *s){
     if(s->backend)return current(s);
     EGLContext context=egl_create();if(context==EGL_NO_CONTEXT)return 1;
     s->backend=2;s->egl=context;s->owns_egl=1;
-    if(!egl_current(context)||!create_objects(s)){drop_objects(s);egl_release();eglDestroyContext(egl_display,context);s->egl=EGL_NO_CONTEXT;s->backend=0;s->owns_egl=0;return 1;}
+    /* Undone only as far as it went: objects are dropped with the context
+       current, and a context that never became current has none to drop
+       (GL calls without a current context abort rather than fail). */
+    int made=egl_current(context);
+    if(!made||!create_objects(s)){if(made)drop_objects(s);egl_release();eglDestroyContext(egl_display,context);s->egl=EGL_NO_CONTEXT;s->backend=0;s->owns_egl=0;return 1;}
     s->stats.context_creations++;s->stats.device_creations++;
     return 0;
 }
@@ -2005,7 +2009,8 @@ void *zglr_create_in_domain(void *p,int *error){
     ZlDomain *d=p;if(!d||d->epoch->status!=1||d->context==EGL_NO_CONTEXT){*error=3;return NULL;}
     ZlRenderer *s=new_renderer();if(!s){*error=2;return NULL;}
     s->backend=2;s->domain=d;s->allow_software=1;
-    if(!egl_current(d->context)||!create_objects(s)){drop_objects(s);egl_release();free(s);live_objects--;*error=2;return NULL;}
+    int made=egl_current(d->context);
+    if(!made||!create_objects(s)){if(made)drop_objects(s);egl_release();free(s);live_objects--;*error=2;return NULL;}
     egl_release();
     s->stats.device_creations=1;s->stats.context_creations=1;
     s->domain_next=d->renderers;d->renderers=s;*error=0;
