@@ -143,6 +143,7 @@ pub const Harness = struct {
             self.view.layout_direction = value.direction_override orelse self.config.options.direction;
             self.view.source_of = if (value.open) value.selected else 0;
             self.view.source_len = 0;
+            self.view.tools = value;
         }
         try self.run(null);
         if (self.config.strict) try self.checkKeys();

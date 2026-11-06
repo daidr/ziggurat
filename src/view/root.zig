@@ -1904,6 +1904,9 @@ pub const View = struct {
     source_of: u64 = 0,
     source_trace: [source_depth]usize = undefined,
     source_len: usize = 0,
+    /// The inspector, whose style changes the elements are built with and
+    /// whose forced states they are shown in; set by the Host or Harness.
+    tools: ?*const Inspector = null,
     /// The pointer area a button went down on, until it comes up.
     area_press: ?pointer_controls.Press = null,
     /// The last press on a pointer area, to count double presses.
@@ -2214,9 +2217,11 @@ pub const View = struct {
         if (style.pose) |pose| if (!pose.valid()) return error.InvalidValue;
         if (style.clip_inset) |clip| if (!clip.valid()) return error.InvalidValue;
         const index = self.len;
+        const id = self.identity(parent, kind, style);
         var effective = style;
+        if (comptime inspector_panel.enabled) if (self.tools) |tools| tools.restyle(id, &effective);
         effective.enabled = style.enabled and parent.style.enabled;
-        self.buffers.nodes[index] = .{ .kind = kind, .id = self.identity(parent, kind, style), .style = effective, .parent = parent_index, .end = index + 1, .semantic_parent = switch (parent.kind) {
+        self.buffers.nodes[index] = .{ .kind = kind, .id = id, .style = effective, .parent = parent_index, .end = index + 1, .semantic_parent = switch (parent.kind) {
             .toolbar, .breadcrumbs, .accordion, .fieldset, .search, .toast, .dialog, .table_header, .table_row, .token_field, .combo_field, .route => parent.id,
             else => if (parent.style.role != null and parent.isContainer()) parent.id else parent.semantic_parent,
         }, .access_disabled = style.access_disabled or parent.access_disabled, .in_role = parent.in_role or (parent.style.role != null and parent.isContainer()), .rtl = if (style.direction) |value| value == .rtl else parent.rtl, .field = if (parent.kind == .field) parent_index else parent.field, .collection = if (parent.kind == .tree or parent.kind == .table) parent_index else parent.collection, .row = if (parent.kind == .table_row) parent_index else parent.row, .concealed = style.hidden or parent.concealed, .passthrough = style.ignore_input or parent.passthrough, .access_hidden = style.access_hidden or parent.access_hidden, .theme = style.theme orelse parent.theme };
@@ -5964,6 +5969,17 @@ pub const View = struct {
         var floating: [max_floating]u32 = undefined;
         var floating_len: usize = 0;
         var lifted: Lifted = .{};
+        // States the inspector forces show as the controls paint.
+        const forcing = comptime frame and inspector_panel.enabled;
+        const held: if (forcing) [2]?u64 else void = if (forcing) .{ target.context.input_state.focused, target.context.input_state.active } else {};
+        if (forcing) if (self.tools) |tools| {
+            if (tools.forced_focus != 0) target.context.input_state.focused = tools.forced_focus;
+            if (tools.forced_active != 0) target.context.input_state.active = tools.forced_active;
+        };
+        defer if (forcing) {
+            target.context.input_state.focused = held[0];
+            target.context.input_state.active = held[1];
+        };
         try self.paintRange(target, theme, 0, all.len, &floating, &floating_len, &lifted);
         try self.paintLifted(target, theme, &lifted, true, &floating, &floating_len);
         var modal: u32 = none;
@@ -8157,6 +8173,7 @@ pub const Host = struct {
                 self.view.layout_direction = tools.direction_override orelse self.options.direction;
                 self.view.source_of = if (tools.open) tools.selected else 0;
                 self.view.source_len = 0;
+                self.view.tools = tools;
             }
             self.view.window_active = self.context.windowActive();
             try self.pass(null);

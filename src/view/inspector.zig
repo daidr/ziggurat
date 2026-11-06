@@ -278,6 +278,30 @@ pub const Inspector = struct {
     drag_value: f32 = 0,
     /// A press went down on the panel; its release is the panel's too.
     held: bool = false,
+    /// Styles changed in the Styles tab, by element: the view builds those
+    /// elements with them until they are reset, and Copy gives them as the
+    /// Zig of a `view.Style`.
+    overrides: [max_overrides]Override = undefined,
+    override_len: usize = 0,
+    /// The elements shown hovered, pressed or focused whatever the pointer
+    /// and the keyboard do, by id; 0 forces none.
+    forced_hover: u64 = 0,
+    forced_active: u64 = 0,
+    forced_focus: u64 = 0,
+    /// The value being typed into the Styles tab, and for which property.
+    editing: ?EditField = null,
+    edit_buffer: [40]u8 = undefined,
+    edit_len: usize = 0,
+    /// Where the Styles tab painted its values, state toggles and buttons.
+    edit_rects: [edit_field_count]?Rect = @splat(null),
+    state_rects: [3]?Rect = @splat(null),
+    copy_rect: ?Rect = null,
+    reset_rect: ?Rect = null,
+    /// Where Copy puts the Zig of the changes; without one it is only
+    /// kept in `copied`.
+    clipboard: ?ui.editor.Clipboard = null,
+    copied_buffer: [1024]u8 = undefined,
+    copied_len: usize = 0,
 
     /// The bounds the content gets in a window with `bounds`: all of it
     /// while closed, otherwise less the panel at the right.
@@ -441,6 +465,218 @@ pub const Inspector = struct {
         return self.source_buffer[0..self.source_len];
     }
 
+    // Changing styles live, forcing states and copying the changes.
+
+    /// Change `value.field` of the element `value.id`, in place of an
+    /// earlier change of it; with every slot taken the change is dropped.
+    pub fn setOverride(self: *Inspector, value: Override) void {
+        for (self.overrides[0..self.override_len]) |*known| if (known.id == value.id and known.field == value.field) {
+            known.* = value;
+            return;
+        };
+        if (self.override_len == max_overrides) {
+            self.addIssue(0x0ce5, "More than {d} styles changed: reset some to change others.", .{max_overrides});
+            return;
+        }
+        self.overrides[self.override_len] = value;
+        self.override_len += 1;
+    }
+    /// The change made to `field` of the element `id`, if any.
+    pub fn overrideOf(self: *const Inspector, id: u64, field: EditField) ?Override {
+        for (self.overrides[0..self.override_len]) |known| if (known.id == id and known.field == field) return known;
+        return null;
+    }
+    /// Whether any style of the element `id` was changed.
+    pub fn hasChanges(self: *const Inspector, id: u64) bool {
+        for (self.overrides[0..self.override_len]) |known| if (known.id == id) return true;
+        return false;
+    }
+    /// Drop the changes made to the element `id`; it builds as written
+    /// again.
+    pub fn resetOverrides(self: *Inspector, id: u64) void {
+        var kept: usize = 0;
+        for (self.overrides[0..self.override_len]) |known| if (known.id != id) {
+            self.overrides[kept] = known;
+            kept += 1;
+        };
+        self.override_len = kept;
+        if (self.editing != null and id == self.selected) self.editing = null;
+    }
+    /// The view building the element `id`: its `style` with the changes
+    /// made to it here.
+    pub fn restyle(self: *const Inspector, id: u64, style: *view.Style) void {
+        for (self.overrides[0..self.override_len]) |known| if (known.id == id) known.apply(style);
+    }
+
+    pub const ForcedState = enum { hover, active, focus };
+    /// Show the element `id` hovered, pressed (which hovers it too) or
+    /// focused while `on`, as a browser's :hov toggles do; the controls and
+    /// pointer areas paint it so whatever the pointer and keyboard do.
+    pub fn forceState(self: *Inspector, id: u64, state: ForcedState, on: bool) void {
+        const slot = switch (state) {
+            .hover => &self.forced_hover,
+            .active => &self.forced_active,
+            .focus => &self.forced_focus,
+        };
+        if (on) slot.* = id else if (slot.* == id) slot.* = 0;
+    }
+    pub fn forced(self: *const Inspector, id: u64, state: ForcedState) bool {
+        if (id == 0) return false;
+        return switch (state) {
+            .hover => self.forced_hover == id,
+            .active => self.forced_active == id,
+            .focus => self.forced_focus == id,
+        };
+    }
+
+    /// The changes made to the element `id` as the Zig of the fields of a
+    /// `view.Style`, to paste into the code that builds it: `.{ .gap = 12,
+    /// .background = 0x1a73e8 }`; "" with none.
+    pub fn zigCode(self: *const Inspector, id: u64, buffer: []u8) []const u8 {
+        var out: std.Io.Writer = .fixed(buffer);
+        var any = false;
+        for (std.enums.values(EditField)) |field| {
+            const known = self.overrideOf(id, field) orelse continue;
+            out.writeAll(if (any) ", " else ".{ ") catch return "";
+            any = true;
+            var digits: [32]u8 = undefined;
+            const n = exact(known.number, &digits);
+            const none = std.math.isNan(known.number);
+            const written = switch (field) {
+                .padding => out.print(".padding = .all({s})", .{n}),
+                .font_size => out.print(".font = .{{ .size = {s} }}", .{n}),
+                .width, .height => if (none) out.print(".{s} = null", .{@tagName(field)}) else out.print(".{s} = {s}", .{ @tagName(field), n }),
+                .background, .border, .color => if (known.rgb) |rgb| out.print(".{s} = 0x{x:0>6}", .{ @tagName(field), rgb & 0xffffff }) else out.print(".{s} = null", .{@tagName(field)}),
+                else => out.print(".{s} = {s}", .{ @tagName(field), n }),
+            };
+            written catch return "";
+        }
+        if (!any) return "";
+        out.writeAll(" }") catch return "";
+        return out.buffered();
+    }
+    /// Copy the changes made to the element chosen as Zig (`zigCode`) to
+    /// the clipboard; returns what it copied.
+    pub fn copyChanges(self: *Inspector) []const u8 {
+        const code = self.zigCode(self.selected, &self.copied_buffer);
+        self.copied_len = code.len;
+        if (code.len > 0) if (self.clipboard) |board| board.write(board.context, code) catch |err| self.addIssue(0xc09e, "Could not copy the changes: {s}.", .{@errorName(err)});
+        return code;
+    }
+    /// What Copy copied last.
+    pub fn copied(self: *const Inspector) []const u8 {
+        return self.copied_buffer[0..self.copied_len];
+    }
+
+    /// The value of `field` the element has as built, as the Styles tab
+    /// shows it (`px` set to show lengths in pixels) and an edit starts
+    /// from it.
+    fn currentValue(e: *const Element, field: EditField, px_units: bool, buffer: []u8) []const u8 {
+        var digits: [32]u8 = undefined;
+        const length: ?f32 = switch (field) {
+            .gap => e.gap,
+            .padding => e.padding.top,
+            .width => e.width orelse return "auto",
+            .height => e.height orelse return "auto",
+            .min_width => e.min_width,
+            .min_height => e.min_height,
+            .radius => e.radius,
+            .border_width => e.border_width,
+            .font_size => (e.font orelse Font{}).size,
+            .grow, .opacity => null,
+            .background, .border, .color => {
+                const rgb = (switch (field) {
+                    .background => e.background,
+                    .border => e.border,
+                    else => e.color,
+                }) orelse return "none";
+                return std.fmt.bufPrint(buffer, "#{x:0>6}", .{rgb & 0xffffff}) catch "";
+            },
+        };
+        if (field == .padding and px_units) {
+            const p = e.padding;
+            if (p.top != p.right or p.top != p.bottom or p.top != p.left) {
+                var a: [24]u8 = undefined;
+                var b: [24]u8 = undefined;
+                var c: [24]u8 = undefined;
+                var d: [24]u8 = undefined;
+                return std.fmt.bufPrint(buffer, "{s} {s} {s} {s}", .{ px(p.top, &a), px(p.right, &b), px(p.bottom, &c), px(p.left, &d) }) catch "";
+            }
+        }
+        if (length) |value| {
+            if (!px_units) return std.fmt.bufPrint(buffer, "{s}", .{exact(value, &digits)}) catch "";
+            return std.fmt.bufPrint(buffer, "{s}", .{px(value, &digits)}) catch "";
+        }
+        const amount = if (field == .grow) e.grow else e.opacity;
+        return std.fmt.bufPrint(buffer, "{s}", .{exact(amount, &digits)}) catch "";
+    }
+
+    /// Start typing a new value of `field` of the element chosen, from the
+    /// one it has.
+    pub fn startEdit(self: *Inspector, field: EditField) void {
+        const index = self.indexOf(self.selected) orelse return;
+        self.editing = field;
+        var buffer: [64]u8 = undefined;
+        const value = currentValue(&self.elements[index], field, false, &buffer);
+        // "auto" and "none" are typed over.
+        const typed = if (std.mem.eql(u8, value, "auto") or std.mem.eql(u8, value, "none")) "" else value[0..@min(value.len, self.edit_buffer.len)];
+        @memcpy(self.edit_buffer[0..typed.len], typed);
+        self.edit_len = typed.len;
+        self.focused = true;
+    }
+    /// What is typed so far.
+    pub fn editText(self: *const Inspector) []const u8 {
+        return self.edit_buffer[0..self.edit_len];
+    }
+    /// Apply what was typed; true when it was a value of the field, which
+    /// ends the edit; otherwise the edit stays for a correction.
+    pub fn commitEdit(self: *Inspector) bool {
+        const field = self.editing orelse return false;
+        var value = parseValue(field, self.editText()) orelse return false;
+        value.id = self.selected;
+        self.setOverride(value);
+        self.editing = null;
+        return true;
+    }
+    /// Up and Down change a number by `delta` at once, as browsers do.
+    fn nudge(self: *Inspector, delta: f32) void {
+        const field = self.editing orelse return;
+        if (isColor(field)) return;
+        const typed = parseValue(field, self.editText());
+        var n: f32 = if (typed) |value| (if (std.math.isNan(value.number)) 0 else value.number) else return;
+        if (field == .opacity) n = std.math.clamp(n + delta / 10, 0, 1) else n = @max(@as(f32, if (field == .font_size) 1 else 0), n + delta);
+        n = @round(n * 1000) / 1000;
+        var digits: [32]u8 = undefined;
+        const text = exact(n, &digits);
+        @memcpy(self.edit_buffer[0..text.len], text);
+        self.edit_len = text.len;
+        self.setOverride(.{ .id = self.selected, .field = field, .number = n });
+    }
+    /// The keys of an edit; true when taken.
+    fn editKey(self: *Inspector, input: z.KeyInput) bool {
+        const m = input.modifiers;
+        if (m.control or m.alt or m.super) return false;
+        switch (input.key) {
+            .escape => self.editing = null,
+            .enter => _ = self.commitEdit(),
+            .tab => {
+                const field = self.editing.?;
+                if (!self.commitEdit()) return true;
+                const at = @backingInt(field);
+                const next: i32 = @as(i32, at) + @as(i32, if (m.shift) -1 else 1);
+                if (next >= 0 and next < edit_field_count) self.startEdit(@fromBackingInt(@intCast(next)));
+            },
+            .backspace => if (self.edit_len > 0) {
+                self.edit_len -= 1;
+                while (self.edit_len > 0 and self.edit_buffer[self.edit_len] & 0xc0 == 0x80) self.edit_len -= 1;
+            },
+            .up => self.nudge(if (m.shift) 10 else 1),
+            .down => self.nudge(if (m.shift) -10 else -1),
+            else => return false,
+        }
+        return true;
+    }
+
     // The find bar.
 
     /// The query of the find bar.
@@ -494,6 +730,13 @@ pub const Inspector = struct {
     /// Text typed while the find bar has the keyboard goes into its query,
     /// which shows its first match. True when taken.
     pub fn typeText(self: *Inspector, value: []const u8) bool {
+        if (self.open and self.focused and self.editing != null) {
+            for (value) |byte| if (byte < 0x20 or byte == 0x7f) return true;
+            if (self.edit_len + value.len > self.edit_buffer.len) return true;
+            @memcpy(self.edit_buffer[self.edit_len..][0..value.len], value);
+            self.edit_len += value.len;
+            return true;
+        }
         if (!self.open or !self.finding or !self.focused) return false;
         for (value) |byte| if (byte < 0x20 or byte == 0x7f) return true;
         if (self.query_len + value.len > self.query.len) return true;
@@ -635,6 +878,7 @@ pub const Inspector = struct {
         if (id != self.selected) {
             self.selected = id;
             self.side_scroll = 0;
+            self.editing = null;
         }
     }
     fn scrollToSelected(self: *Inspector) void {
@@ -773,6 +1017,7 @@ pub const Inspector = struct {
             return true;
         }
         if (!self.open or !self.focused or self.tab != .elements) return false;
+        if (self.editing != null and self.editKey(input)) return true;
         if (input.key == .f and m.control and !m.shift and !m.alt and !m.super) {
             self.startFind();
             return true;
@@ -987,8 +1232,37 @@ pub const Inspector = struct {
             self.side_scroll = 0;
             return true;
         };
+        if (self.side == .styles and contains(l.side, point)) {
+            if (self.pressStyles(point)) return true;
+        }
         if (self.side == .styles) if (self.source_link) |link| if (contains(link, point)) self.openSource();
         return true;
+    }
+    /// A press in the Styles tab: on a value to type a new one, on a state
+    /// to force it, on Copy or Reset. A press elsewhere ends an edit.
+    fn pressStyles(self: *Inspector, point: Point) bool {
+        const editing = self.editing;
+        if (editing != null) _ = self.commitEdit();
+        self.editing = null;
+        for (self.edit_rects, 0..) |rect, i| if (rect) |value| if (contains(value, point)) {
+            const field: EditField = @fromBackingInt(@intCast(i));
+            if (editing != field) self.startEdit(field);
+            return true;
+        };
+        for (self.state_rects, 0..) |rect, i| if (rect) |value| if (contains(value, point)) {
+            const state: ForcedState = @fromBackingInt(@intCast(i));
+            self.forceState(self.selected, state, !self.forced(self.selected, state));
+            return true;
+        };
+        if (self.copy_rect) |rect| if (contains(rect, point)) {
+            _ = self.copyChanges();
+            return true;
+        };
+        if (self.reset_rect) |rect| if (contains(rect, point)) {
+            self.resetOverrides(self.selected);
+            return true;
+        };
+        return false;
     }
 
     /// A button came up; true when the inspector took it.
@@ -1035,6 +1309,10 @@ pub const Inspector = struct {
         if (self.tab == .elements and contains(l.divider, point)) return .resize_ns;
         if (self.tab == .elements) if (l.find) |find| if (contains(find.field, point)) return .text;
         if (self.tab == .elements and self.side == .styles) if (self.source_link) |link| if (contains(link, point)) return .pointer;
+        if (self.tab == .elements and self.side == .styles and contains(l.side, point)) {
+            for (self.edit_rects) |rect| if (rect) |value| if (contains(value, point)) return .text;
+            for (self.state_rects ++ [_]?Rect{ self.copy_rect, self.reset_rect }) |rect| if (rect) |value| if (contains(value, point)) return .pointer;
+        }
         return .default;
     }
 
@@ -1282,6 +1560,10 @@ pub const Inspector = struct {
         const side = l.side;
         try target.pushClip(side);
         defer target.popClip() catch {};
+        self.edit_rects = @splat(null);
+        self.state_rects = @splat(null);
+        self.copy_rect = null;
+        self.reset_rect = null;
         const index = self.indexOf(self.selected) orelse {
             _ = self.label(target, side.x + 12, side.y + 8, 20, "Choose an element in the tree, or pick one in the window.", p.muted, ui_font);
             self.side_content = 0;
@@ -1316,6 +1598,7 @@ pub const Inspector = struct {
                 }
                 _ = self.label(target, side.x + 10, y, line, "}", p.text, mono_font);
                 y += line + 8;
+                y = self.paintLiveStyles(target, side, y, line, index);
             },
             .computed => {
                 y = try self.paintBoxModel(target, side, y + 12, &self.elements[index]);
@@ -1341,6 +1624,66 @@ pub const Inspector = struct {
             },
         }
         self.side_content = y + self.side_scroll - side.y;
+    }
+    /// The states to force on the element chosen, and its styles to change
+    /// as an `element.style` rule: what it has as built, and what was
+    /// changed here in the color of a set property. Returns where it ends.
+    fn paintLiveStyles(self: *Inspector, target: anytype, side: Rect, top: f32, line: f32, index: usize) f32 {
+        const p = self.palette;
+        const e = &self.elements[index];
+        var y = top;
+        target.roundedRect(.{ .x = side.x, .y = y - 4, .width = side.width, .height = 1 }, 0, ui.Color.rgb(p.border));
+        var x = self.label(target, side.x + 10, y, line, ":hov", p.muted, small_font) + 8;
+        for ([_][]const u8{ ":hover", ":active", ":focus" }, 0..) |name, i| {
+            const on = self.forced(e.id, @fromBackingInt(@intCast(i)));
+            const box: Rect = .{ .x = x, .y = y + (line - 10) / 2, .width = 10, .height = 10 };
+            if (on) target.roundedRect(box, 2, ui.Color.rgb(p.accent));
+            target.strokeRect(box, 2, 1, ui.Color.rgb(if (on) p.accent else p.muted));
+            const end = self.label(target, x + 14, y, line, name, p.text, mono_font);
+            self.state_rects[i] = .{ .x = x, .y = y, .width = end - x, .height = line };
+            x = end + 12;
+        }
+        y += line + 8;
+        _ = self.label(target, side.x + 10, y, line, "element.style {", p.text, mono_font);
+        if (self.hasChanges(e.id)) {
+            var right = side.x + side.width - 10;
+            for ([_][]const u8{ "Reset", "Copy as Zig" }, 0..) |name, i| {
+                const width = self.textWidth(name, small_font);
+                right -= width;
+                _ = self.label(target, right, y, line, name, p.accent, small_font);
+                const rect: Rect = .{ .x = right, .y = y, .width = width, .height = line };
+                if (i == 0) self.reset_rect = rect else self.copy_rect = rect;
+                right -= 12;
+            }
+        }
+        y += line;
+        for (std.enums.values(EditField)) |field| {
+            const set = self.overrideOf(e.id, field) != null;
+            var next = self.label(target, side.x + 26, y, line, cssName(field), if (set) p.prop else p.muted, mono_font);
+            next = self.label(target, next, y, line, ": ", p.text, mono_font);
+            var buffer: [64]u8 = undefined;
+            const editing = self.editing == field;
+            const value = if (editing) self.editText() else currentValue(e, field, true, &buffer);
+            if (!editing and isColor(field)) if (parseValue(field, value)) |known| if (known.rgb) |rgb| {
+                const box: Rect = .{ .x = next + 2, .y = y + (line - 10) / 2, .width = 10, .height = 10 };
+                target.roundedRect(box, 0, ui.Color.rgb(rgb));
+                target.strokeRect(box, 0, 1, ui.Color.rgb(p.border));
+                next += 16;
+            };
+            const width = @max(self.textWidth(value, mono_font), 24);
+            const rect: Rect = .{ .x = next - 2, .y = y + 1, .width = width + 4, .height = line - 2 };
+            if (editing) {
+                target.roundedRect(rect, 2, ui.Color.rgb(p.bg));
+                target.strokeRect(rect, 2, 1, ui.Color.rgb(p.accent));
+            }
+            const end = self.label(target, next, y, line, value, if (set or editing) p.text else p.muted, mono_font);
+            if (editing) target.roundedRect(.{ .x = end, .y = y + 3, .width = 1, .height = line - 6 }, 0, ui.Color.rgb(p.text));
+            _ = self.label(target, @max(end, rect.x + rect.width), y, line, ";", p.text, mono_font);
+            self.edit_rects[@backingInt(field)] = rect;
+            y += line;
+        }
+        _ = self.label(target, side.x + 10, y, line, "}", p.text, mono_font);
+        return y + line + 8;
     }
     fn paintDecl(self: *const Inspector, target: anytype, x: f32, y: f32, line: f32, decl: Decl) void {
         const p = self.palette;
@@ -1861,6 +2204,118 @@ fn justifyName(value: view.Justify) []const u8 {
 /// of its color when it has one.
 pub const Decl = struct { name: []const u8, value: []const u8, swatch: ?u32 = null };
 const Section = struct { title: []const u8, start: usize, end: usize };
+
+/// The properties the Styles tab edits live.
+pub const EditField = enum { gap, padding, width, height, min_width, min_height, grow, radius, border_width, opacity, font_size, background, border, color };
+const edit_field_count = std.enums.values(EditField).len;
+/// Styles changed at once, over all elements.
+pub const max_overrides = 64;
+/// A style changed in the inspector: `field` of the element `id` set to
+/// `number` (a length or an amount; NaN for none, as `width = null`) or to
+/// the color `rgb` (null for none).
+pub const Override = struct {
+    id: u64,
+    field: EditField,
+    number: f32 = 0,
+    rgb: ?u32 = null,
+
+    /// Apply it to `style`, the element's as built.
+    pub fn apply(self: Override, style: *view.Style) void {
+        const n = self.number;
+        switch (self.field) {
+            .gap => style.gap = n,
+            .padding => style.padding = view.Insets.all(n),
+            .width => style.width = if (std.math.isNan(n)) null else n,
+            .height => style.height = if (std.math.isNan(n)) null else n,
+            .min_width => style.min_width = n,
+            .min_height => style.min_height = n,
+            .grow => style.grow = n,
+            .radius => style.radius = n,
+            .border_width => style.border_width = n,
+            .opacity => style.opacity = n,
+            .font_size => {
+                var font = style.font orelse Font{};
+                font.size = n;
+                style.font = font;
+            },
+            .background => style.background = self.rgb,
+            .border => style.border = self.rgb,
+            .color => style.color = self.rgb,
+        }
+    }
+};
+
+/// The CSS name the Styles tab shows a field by.
+pub fn cssName(field: EditField) []const u8 {
+    return switch (field) {
+        .gap => "gap",
+        .padding => "padding",
+        .width => "width",
+        .height => "height",
+        .min_width => "min-width",
+        .min_height => "min-height",
+        .grow => "flex-grow",
+        .radius => "border-radius",
+        .border_width => "border-width",
+        .opacity => "opacity",
+        .font_size => "font-size",
+        .background => "background-color",
+        .border => "border-color",
+        .color => "color",
+    };
+}
+fn isColor(field: EditField) bool {
+    return field == .background or field == .border or field == .color;
+}
+/// Whether `field` may take no value: a size left to the layout, or no
+/// color.
+fn takesNone(field: EditField) bool {
+    return isColor(field) or field == .width or field == .height;
+}
+
+/// Read what was typed for `field`: a number, with or without px, or a
+/// color as #rrggbb, rrggbb or 0xrrggbb; `none` (or `auto` for a size)
+/// clears what takes no value. Null when it is not a value of the field.
+pub fn parseValue(field: EditField, text: []const u8) ?Override {
+    const value = std.mem.trim(u8, text, " \t;");
+    var out: Override = .{ .id = 0, .field = field };
+    if (std.ascii.eqlIgnoreCase(value, "none") or std.ascii.eqlIgnoreCase(value, "auto") or value.len == 0) {
+        if (!takesNone(field)) return null;
+        out.number = std.math.nan(f32);
+        return out;
+    }
+    if (isColor(field)) {
+        var digits = value;
+        if (digits[0] == '#') digits = digits[1..] else if (std.ascii.startsWithIgnoreCase(digits, "0x")) digits = digits[2..];
+        if (digits.len == 3) {
+            var wide: [6]u8 = undefined;
+            for (digits, 0..) |c, i| {
+                wide[2 * i] = c;
+                wide[2 * i + 1] = c;
+            }
+            out.rgb = std.fmt.parseInt(u32, &wide, 16) catch return null;
+            return out;
+        }
+        if (digits.len != 6) return null;
+        out.rgb = std.fmt.parseInt(u32, digits, 16) catch return null;
+        return out;
+    }
+    var digits = value;
+    if (std.ascii.endsWithIgnoreCase(digits, "px")) digits = std.mem.trimEnd(u8, digits[0 .. digits.len - 2], " ");
+    const n = std.fmt.parseFloat(f32, digits) catch return null;
+    if (!std.math.isFinite(n) or n < 0) return null;
+    if (field == .opacity and n > 1) return null;
+    if (field == .font_size and n == 0) return null;
+    out.number = n;
+    return out;
+}
+
+/// A number as typed back: whole numbers without a point, others as
+/// short as they read.
+fn exact(value: f32, buffer: []u8) []const u8 {
+    if (value == @round(value) and @abs(value) < 1e9) return std.fmt.bufPrint(buffer, "{d}", .{@as(i64, @intFromFloat(value))}) catch "";
+    return std.fmt.bufPrint(buffer, "{d}", .{value}) catch "";
+}
 
 /// The details of the element chosen, for the tabs below the tree: its
 /// styles as a CSS rule, its computed values and its properties.

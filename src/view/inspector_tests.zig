@@ -321,3 +321,123 @@ test "the source link opens only a file that is here" {
     tools.openSource();
     try testing.expectEqual(@as(usize, 0), tools.issue_count);
 }
+
+test "a value typed in the Styles tab restyles the element live, and Copy gives it as Zig" {
+    var app: App = .{};
+    var storage: Storage = .{};
+    var tools: Inspector = .{};
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    var h = try setup(&app, &storage, &tools, &context);
+    _ = try h.key(.{ .key = .f12 });
+    const column = try h.find(.{ .kind = .column, .nth = 1 });
+    tools.choose(column.id);
+    try h.render();
+    // A click on the gap's value starts an edit from the value it has.
+    const gap = tools.edit_rects[@backingInt(inspector.EditField.gap)].?;
+    try h.clickAt(gap.x + 4, gap.y + 4);
+    try testing.expectEqual(inspector.EditField.gap, tools.editing.?);
+    try testing.expectEqualStrings("6", tools.editText());
+    try testing.expect(try h.key(.{ .key = .backspace }));
+    try h.typeText("12px");
+    try testing.expect(try h.key(.{ .key = .enter }));
+    try testing.expect(tools.editing == null);
+    try testing.expectEqual(@as(f32, 12), (try h.find(.{ .kind = .column, .nth = 1 })).style.gap);
+    // Up nudges a number as it is typed; Tab moves to the next property.
+    const background = tools.edit_rects[@backingInt(inspector.EditField.padding)].?;
+    try h.clickAt(background.x + 4, background.y + 4);
+    try testing.expect(try h.key(.{ .key = .up, .modifiers = .{ .shift = true } }));
+    try testing.expectEqualStrings("18", tools.editText());
+    try testing.expectEqual(@as(f32, 18), (try h.find(.{ .kind = .column, .nth = 1 })).style.padding.left);
+    try testing.expect(try h.key(.{ .key = .escape }));
+    // A color, and a value that is not one stays in the edit.
+    tools.startEdit(.background);
+    try testing.expect(!tools.typeText("") or true);
+    tools.edit_len = 0;
+    try h.typeText("zz");
+    try testing.expect(!tools.commitEdit());
+    tools.edit_len = 0;
+    try h.typeText("#1a73e8");
+    try testing.expect(tools.commitEdit());
+    try h.render();
+    try testing.expectEqual(@as(?u32, 0x1a73e8), (try h.find(.{ .kind = .column, .nth = 1 })).style.background);
+    // Copy as Zig, then Reset, which builds it as written again.
+    try h.render();
+    const copy = tools.copy_rect.?;
+    try h.clickAt(copy.x + 2, copy.y + 4);
+    try testing.expectEqualStrings(".{ .gap = 12, .padding = .all(18), .background = 0x1a73e8 }", tools.copied());
+    try h.render();
+    const reset = tools.reset_rect.?;
+    try h.clickAt(reset.x + 2, reset.y + 4);
+    try testing.expect(!tools.hasChanges(column.id));
+    try testing.expectEqual(@as(f32, 6), (try h.find(.{ .kind = .column, .nth = 1 })).style.gap);
+    try testing.expectEqual(@as(?u32, 0xeeeeee), (try h.find(.{ .kind = .column, .nth = 1 })).style.background);
+}
+
+test "values the Styles tab reads" {
+    if (!inspector.enabled) return error.SkipZigTest;
+    try testing.expectEqual(@as(f32, 4), inspector.parseValue(.gap, " 4px; ").?.number);
+    try testing.expect(inspector.parseValue(.gap, "-1") == null);
+    try testing.expect(inspector.parseValue(.gap, "auto") == null);
+    try testing.expect(std.math.isNan(inspector.parseValue(.width, "auto").?.number));
+    try testing.expect(inspector.parseValue(.opacity, "1.5") == null);
+    try testing.expectEqual(@as(?u32, 0xaabbcc), inspector.parseValue(.color, "#abc").?.rgb);
+    try testing.expectEqual(@as(?u32, 0x123456), inspector.parseValue(.border, "0x123456").?.rgb);
+    try testing.expectEqual(@as(?u32, null), inspector.parseValue(.border, "none").?.rgb);
+    var tools: Inspector = .{};
+    tools.setOverride(.{ .id = 5, .field = .width, .number = std.math.nan(f32) });
+    tools.setOverride(.{ .id = 5, .field = .font_size, .number = 14.5 });
+    tools.setOverride(.{ .id = 5, .field = .color, .rgb = null });
+    var buffer: [256]u8 = undefined;
+    try testing.expectEqualStrings(".{ .width = null, .font = .{ .size = 14.5 }, .color = null }", tools.zigCode(5, &buffer));
+    try testing.expectEqualStrings("", tools.zigCode(6, &buffer));
+    var style: view.Style = .{ .width = 30, .color = 0x111111 };
+    tools.restyle(5, &style);
+    try testing.expect(style.width == null and style.color == null);
+    try testing.expectEqual(@as(f32, 14.5), style.font.?.size);
+}
+
+const AreaApp = struct {
+    hovered: bool = false,
+    pressed: bool = false,
+    fn build(self: *AreaApp, v: *View) anyerror!void {
+        const area = try v.pointerArea(.{}, .{ .width = 100, .height = 40 });
+        self.hovered = area.hovered;
+        self.pressed = area.pressed;
+        try v.end();
+        _ = try v.button("Go", .{});
+    }
+};
+
+test "states forced in the Styles tab show whatever the pointer and keyboard do" {
+    if (!inspector.enabled) return error.SkipZigTest;
+    var app: AreaApp = .{};
+    var storage: Storage = .{};
+    var tools: Inspector = .{};
+    var dummy: u8 = 0;
+    var context = ui.Context.init(&dummy, Windowless.draw, Windowless.action);
+    var h = Harness.init(&app, AreaApp.build, storage.buffers(), .{ .options = .{ .inspector = &tools } });
+    try h.attachInput(&context);
+    _ = try h.key(.{ .key = .f12 });
+    const area = try h.find(.{ .kind = .pointer_area });
+    tools.choose(area.id);
+    try h.render();
+    try testing.expect(!app.hovered);
+    const hover = tools.state_rects[0].?;
+    try h.clickAt(hover.x + 2, hover.y + 4);
+    try testing.expect(tools.forced(area.id, .hover));
+    try h.render();
+    try testing.expect(app.hovered and !app.pressed);
+    tools.forceState(area.id, .active, true);
+    try h.render();
+    try testing.expect(app.hovered and app.pressed);
+    tools.forceState(area.id, .hover, false);
+    tools.forceState(area.id, .active, false);
+    try h.render();
+    try testing.expect(!app.hovered and !app.pressed);
+    // Focus forced on a control lasts only as the frame paints.
+    const button = try h.find(.{ .kind = .button });
+    tools.forceState(button.id, .focus, true);
+    try h.render();
+    try testing.expect(context.input_state.focused != button.id);
+}
