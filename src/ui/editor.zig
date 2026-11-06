@@ -92,6 +92,9 @@ pub const Editor = struct {
         self.preferred_x = null;
     }
     fn edited(self: *Editor, changed: bool) bool {
+        // An edit ends the drag of a press: a button still down would take
+        // the caret back to the pointer between the keys.
+        if (changed) self.dragging = false;
         if (changed) self.refresh();
         return changed;
     }

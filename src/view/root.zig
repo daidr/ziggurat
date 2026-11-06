@@ -2660,6 +2660,21 @@ pub const View = struct {
         if (presence.moving()) if (presence.channel.?.nextWake(self.now, self.frameStep()) catch null) |deadline| self.wakeAt(deadline);
         return true;
     }
+    /// Whether the node with `id` is inside content `presentColumn` holds
+    /// back while other content leaves (`Transition.after_exits`), in the
+    /// pass built last.
+    pub fn heldBack(self: *const View, id: u64) bool {
+        for (self.buffers.nodes[1..@max(self.len, 1)], 1..) |*node, index| if (node.id == id) {
+            var at: u32 = @intCast(index);
+            while (at != none and at != 0) {
+                const inner = &self.buffers.nodes[at];
+                if (inner.unseen) return true;
+                at = inner.parent;
+            }
+            return false;
+        };
+        return false;
+    }
     /// Content `presentColumn` is taking out of the container `parent`.
     fn noteExit(self: *View, parent: u64) void {
         if (std.mem.indexOfScalar(u64, self.exits[0..self.exits_len], parent) != null) return;
@@ -4748,7 +4763,10 @@ pub const View = struct {
     fn settleTooltip(self: *View) void {
         const all = self.buffers.nodes[0..self.len];
         var candidate: u32 = none;
-        inline for (.{ self.tip.hover, self.focus }) |wanted| if (candidate == none) if (wanted) |id| {
+        // The focus counts for the option it gives the keys to, its active
+        // descendant, as a list's highlight: that one's tip shows.
+        const descendant: ?u64 = if (self.focus != null and self.overlay.popup != null) self.popup.highlight else null;
+        inline for (.{ self.tip.hover, descendant, self.focus }) |wanted| if (candidate == none) if (wanted) |id| {
             for (all, 0..) |*node, i| if (node.id == id and node.tooltip.len > 0) {
                 candidate = @intCast(i);
                 break;
@@ -7659,6 +7677,9 @@ pub const Host = struct {
     /// The pending focus waited one more frame, for a text field that
     /// registers itself with the Context after the frame that placed it.
     focus_retried: bool = false,
+    /// A focus given to content held back until others leave, and the
+    /// focus as it was given, which another focus since overrides.
+    held_focus: ?struct { id: u64, was: ?u64 } = null,
     /// What `Options.fit_content` told.
     fit: FitState = .{},
 
@@ -8014,7 +8035,19 @@ pub const Host = struct {
         if (self.context.window == null or self.context.input_state.focused == id) return;
         if (self.context.input_state.available(id)) {
             self.focus_retried = false;
+            self.held_focus = null;
             self.focus(id);
+        } else if (self.view.heldBack(id)) {
+            // Content `Transition.after_exits` holds back keeps the focus
+            // given to it, and takes it as it shows, unless the focus went
+            // elsewhere meanwhile.
+            const was = if (self.held_focus) |held| held.was else self.context.input_state.focused;
+            if (self.held_focus != null and self.context.input_state.focused != was) {
+                self.held_focus = null;
+                return;
+            }
+            self.held_focus = .{ .id = id, .was = was };
+            self.pending_focus = id;
         } else if (!self.focus_retried) {
             // A text field attaches through a task of its own after the
             // frame; wait for the next frame once.

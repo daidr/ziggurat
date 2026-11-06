@@ -1304,6 +1304,9 @@ const State = struct {
         return self.mappedAnchor(self.anchor, root, first, inserted, removed);
     }
     fn replace(self: *State, range: d.Range, text: []const u8, commit: bool) !EditResult {
+        // An edit ends the drag of a press: a button still down would take
+        // the caret back to the pointer between the keys.
+        self.dragging = false;
         try self.synchronize();
         try self.validateRange(range);
         if (text.len > 1024 * 1024 * 1024) return error.CapacityExceeded;
@@ -1345,6 +1348,9 @@ const State = struct {
         return self.replaceManySelected(edits, mode, text, null, null);
     }
     fn replaceManySelected(self: *State, edits: []const d.Replacement, mode: BatchMode, text: []const u8, final: ?d.SelectionList, expected_revision: ?u64) !EditResult {
+        // An edit ends the drag of a press: a button still down would take
+        // the caret back to the pointer between the keys.
+        self.dragging = false;
         try self.synchronize();
         if (edits.len == 0) return .{ .changed = false, .index_required = false };
         if (edits.len > self.limits.batch_edits) return error.CapacityExceeded;
@@ -1473,6 +1479,9 @@ const State = struct {
         self.reveal = true;
     }
     fn preedit(self: *State, text: []const u8, selected: d.Selection) !void {
+        // An edit ends the drag of a press: a button still down would take
+        // the caret back to the pointer between the keys.
+        self.dragging = false;
         try self.synchronize();
         if (text.len > 65536) return error.CapacityExceeded;
         if (self.next_epoch == std.math.maxInt(u64)) return error.IdExhausted;
@@ -1571,6 +1580,9 @@ const State = struct {
         return changed;
     }
     fn undo(self: *State, redo: bool) !EditResult {
+        // An edit ends the drag of a press: a button still down would take
+        // the caret back to the pointer between the keys.
+        self.dragging = false;
         self.synchronize() catch |err| if (err != error.IndexRequired and err != error.FoldIndexRequired) return err;
         try self.checkNativeInput();
         const changed = if (redo) try self.mutate(d.Document.redo, .{self.document}) else try self.mutate(d.Document.undo, .{self.document});
