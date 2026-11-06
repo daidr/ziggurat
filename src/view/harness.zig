@@ -143,6 +143,7 @@ pub const Harness = struct {
             self.view.layout_direction = value.direction_override orelse self.config.options.direction;
             self.view.source_of = if (value.open) value.selected else 0;
             self.view.source_len = 0;
+            self.view.tools = value;
         }
         try self.run(null);
         if (self.config.strict) try self.checkKeys();
@@ -1850,42 +1851,37 @@ const BackgroundNotices = struct {
     }
 };
 
-test "the toasts' time stops while held or in the background, but for those that run there" {
+test "the toasts' time runs on in the background and stops while held" {
     var storage: view.Storage(32, 512) = .{};
     var state: BackgroundNotices = .{};
     var h = Harness.init(&state, BackgroundNotices.build, storage.buffers(), .{});
     _ = try state.queue.show("Saved", .{ .duration = 1000 });
-    _ = try state.queue.show("Download finished", .{ .duration = 1000, .run_in_background = true });
+    _ = try state.queue.show("Download finished", .{ .duration = 1500 });
     try h.render();
     try h.advance(400);
-    // In the background, only the one that runs there keeps its time,
-    // and it goes as it ends, while the window is still in the background.
+    // In the background every toast keeps its time, and one goes as it
+    // ends while the window is still in the background.
     try h.windowFocus(false);
     try std.testing.expectEqual(@as(?u64, 400 + 600), h.deadline());
     try h.advance(600);
     try std.testing.expectEqual(@as(usize, 1), state.queue.len);
-    try std.testing.expectEqualStrings("Saved", (try h.find(.{ .kind = .toast })).text);
+    try std.testing.expectEqualStrings("Download finished", (try h.find(.{ .kind = .toast })).text);
     try h.advance(5000);
-    try std.testing.expectEqual(@as(usize, 1), state.queue.len);
-    try std.testing.expectEqual(@as(?u64, null), h.deadline());
-    // Back in front, the other runs on from where it stopped.
+    try std.testing.expectEqual(@as(usize, 0), state.queue.len);
     try h.windowFocus(true);
-    try std.testing.expectEqual(@as(?u64, h.clock + 600), h.deadline());
-    // The pointer resting on the toasts holds them, those that run in the
-    // background too.
-    _ = try state.queue.show("Copied", .{ .duration = 1000, .run_in_background = true });
+    // The pointer resting on the toasts holds them.
+    _ = try state.queue.show("Copied", .{ .duration = 1000 });
     try h.render();
-    try h.hover(.{ .kind = .toast, .text = "Saved" });
+    try h.hover(.{ .kind = .toast, .text = "Copied" });
     try std.testing.expect(h.view.toast_hover);
     try std.testing.expectEqual(@as(?u64, null), h.deadline());
     try h.advance(5000);
-    try std.testing.expectEqual(@as(usize, 2), state.queue.len);
+    try std.testing.expectEqual(@as(usize, 1), state.queue.len);
     try h.hover(.{ .text = "Work" });
     try std.testing.expect(!h.view.toast_hover);
-    try std.testing.expectEqual(@as(?u64, h.clock + 600), h.deadline());
-    try h.advance(600);
-    try std.testing.expectEqual(@as(usize, 1), state.queue.len);
-    try std.testing.expectEqualStrings("Copied", state.queue.items()[0].message[0..6]);
+    try std.testing.expectEqual(@as(?u64, h.clock + 1000), h.deadline());
+    try h.advance(1000);
+    try std.testing.expectEqual(@as(usize, 0), state.queue.len);
 }
 
 const Picker = struct {

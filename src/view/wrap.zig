@@ -168,6 +168,117 @@ pub fn longestWord(text: []const u8, font: ?Font, measurer: Measurer) f32 {
 /// `text` wrapped at `width`, at most `max_lines` (0 for all). `last_cut` is
 /// set on the last line shown when text remains after it.
 pub fn each(text: []const u8, width: f32, font: ?Font, measurer: Measurer, max_lines: u16, context: anytype, comptime draw: fn (@TypeOf(context), []const u8, usize, bool) void) void {
+    eachWith(text, width, font, measurer, max_lines, false, context, draw);
+}
+
+/// Whether `pretty` can rewrap `text` at `width`: it wraps, and onto no
+/// more lines than `max_lines` shows.
+fn prettyApplies(text: []const u8, width: f32, font: ?Font, measurer: Measurer, max_lines: u16) bool {
+    if (!(width > 0) or !std.math.isFinite(width)) return false;
+    if (max_lines == 0) return true;
+    return lineCount(text, width, font, measurer, @as(usize, max_lines) + 1) <= max_lines;
+}
+
+/// Words of `line`, up to two: its runs between spaces.
+fn words(line: []const u8) usize {
+    var count: usize = 0;
+    var in = false;
+    for (line) |byte| {
+        if (space(byte)) {
+            in = false;
+        } else if (!in) {
+            in = true;
+            count += 1;
+            if (count > 1) return count;
+        }
+    }
+    return count;
+}
+
+/// Where the last two lines of `paragraph` (text without newlines) wrapped
+/// at `width` start, and the narrower width to wrap them at so that the
+/// last holds more than one word (`Style.pretty`): the widest that does,
+/// found by bisection as `balanced` does, as long as they stay two lines
+/// broken at a space. Null when the last line holds more already, or the
+/// line before has no word to spare.
+pub fn prettyTail(paragraph: []const u8, width: f32, font: ?Font, measurer: Measurer) ?struct { from: usize, width: f32 } {
+    if (!(width > 0) or !std.math.isFinite(width)) return null;
+    var start: usize = 0;
+    var before: ?usize = null;
+    var last: Line = undefined;
+    var count: usize = 0;
+    while (true) {
+        const line = next(paragraph, start, width, font, measurer);
+        if (count > 0) before = last.start;
+        last = line;
+        count += 1;
+        start = line.next;
+        if (start >= paragraph.len) break;
+    }
+    if (count < 2 or words(paragraph[last.start..last.end]) > 1) return null;
+    const from = before.?;
+    const rest = paragraph[from..];
+    var best: ?f32 = null;
+    var lo: f32 = 1;
+    var hi = width;
+    while (hi - lo > balance_step) {
+        const mid = (lo + hi) / 2;
+        const lines = lineCount(rest, mid, font, measurer, 3);
+        const tail = lastLine(rest, mid, font, measurer);
+        if (lines > 2 or words(rest[tail.start..tail.end]) > 1) {
+            lo = mid;
+            best = mid;
+        } else hi = mid;
+    }
+    const chosen = best orelse return null;
+    if (lineCount(rest, chosen, font, measurer, 3) != 2) return null;
+    const second = lastLine(rest, chosen, font, measurer);
+    // The line before gave a whole word, not a part of one.
+    if (second.start == 0 or !space(rest[second.start - 1])) return null;
+    if (words(rest[second.start..second.end]) < 2) return null;
+    return .{ .from = from, .width = chosen };
+}
+fn lastLine(text: []const u8, width: f32, font: ?Font, measurer: Measurer) Line {
+    var start: usize = 0;
+    while (true) {
+        const line = next(text, start, width, font, measurer);
+        if (line.next >= text.len) return line;
+        start = line.next;
+    }
+}
+
+/// `each`, with the last line of each paragraph kept from holding a single
+/// word when `pretty` (`Style.pretty`) and the text is not cut.
+pub fn eachWith(text: []const u8, width: f32, font: ?Font, measurer: Measurer, max_lines: u16, pretty: bool, context: anytype, comptime draw: fn (@TypeOf(context), []const u8, usize, bool) void) void {
+    if (pretty and prettyApplies(text, width, font, measurer, max_lines)) {
+        var index: usize = 0;
+        var paragraphs = std.mem.splitScalar(u8, text, '\n');
+        while (paragraphs.next()) |paragraph| {
+            const tail = prettyTail(paragraph, width, font, measurer);
+            const head_end = if (tail) |value| value.from else paragraph.len;
+            var start: usize = 0;
+            // The lines before the tail, as they wrap at `width`; an empty
+            // paragraph is one empty line.
+            while (start < head_end or (start == 0 and paragraph.len == 0)) {
+                const line = next(paragraph[0..head_end], start, width, font, measurer);
+                draw(context, paragraph[line.start..line.end], index, false);
+                index += 1;
+                start = line.next;
+                if (paragraph.len == 0) break;
+            }
+            if (tail) |value| {
+                const rest = paragraph[value.from..];
+                start = 0;
+                while (start < rest.len) {
+                    const line = next(rest, start, value.width, font, measurer);
+                    draw(context, rest[line.start..line.end], index, false);
+                    index += 1;
+                    start = line.next;
+                }
+            }
+        }
+        return;
+    }
     var start: usize = 0;
     var count: usize = 0;
     while (true) {
@@ -245,4 +356,40 @@ test "measure and longest word" {
     const shortened = cut("alpha beta", 9 * 6, null, m, &buffer);
     try testing.expect(m.textSize(shortened, null).width <= 9 * 6);
     try testing.expect(std.mem.endsWith(u8, shortened, ellipsis));
+}
+
+test "pretty lines give the last line a word from the line before" {
+    const m: Measurer = .{};
+    // 9 DIP a character: at 14 characters "aaaa bbbb cccc dd" leaves "dd"
+    // alone on the second line; pretty, "cccc" goes down with it.
+    const text = "aaaa bbbb cccc dd";
+    const Collect = struct {
+        lines: [8][]const u8 = undefined,
+        len: usize = 0,
+        fn add(self: *@This(), line: []const u8, _: usize, _: bool) void {
+            self.lines[self.len] = line;
+            self.len += 1;
+        }
+    };
+    var plain: Collect = .{};
+    eachWith(text, 9 * 14, null, m, 0, false, &plain, Collect.add);
+    try testing.expectEqual(@as(usize, 2), plain.len);
+    try testing.expectEqualStrings("dd", plain.lines[1]);
+    var pretty: Collect = .{};
+    eachWith(text, 9 * 14, null, m, 0, true, &pretty, Collect.add);
+    try testing.expectEqual(@as(usize, 2), pretty.len);
+    try testing.expectEqualStrings("aaaa bbbb", pretty.lines[0]);
+    try testing.expectEqualStrings("cccc dd", pretty.lines[1]);
+    // Lines before the last two stay as they are, paragraph by paragraph.
+    var long: Collect = .{};
+    eachWith("aaaa bbbb cccc dddd ee\nx", 9 * 10, null, m, 0, true, &long, Collect.add);
+    try testing.expectEqual(@as(usize, 4), long.len);
+    try testing.expectEqualStrings("aaaa bbbb", long.lines[0]);
+    try testing.expectEqualStrings("cccc", long.lines[1]);
+    try testing.expectEqualStrings("dddd ee", long.lines[2]);
+    try testing.expectEqualStrings("x", long.lines[3]);
+    // One long word before gives nothing.
+    var word: Collect = .{};
+    eachWith("aaaaaaaaaaaa dd", 9 * 12, null, m, 0, true, &word, Collect.add);
+    try testing.expectEqualStrings("dd", word.lines[word.len - 1]);
 }

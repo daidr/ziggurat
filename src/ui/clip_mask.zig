@@ -174,6 +174,52 @@ pub const Masks = struct {
         return try slot.*.?.view();
     }
 
+    /// The mask of the rounded rectangle `rect` times that of `layers`,
+    /// composited as CSS's `mask-composite`: the first on top, each going
+    /// with those under it as its `composite` says, each showing nothing
+    /// outside its own box (window DIP). Kept as `shape` keeps its masks.
+    pub fn layered(self: *Masks, rect: Rect, radius: f32, layers: []const Layer, visible: Rect, scale: f32, release: ?Release) !?drawing.CoverageView {
+        if (layers.len == 0 or layers.len > max_layers) return error.InvalidMaskLayers;
+        const box = pixelBox(layout.intersect(rect, visible), scale) orelse return null;
+        var hasher = std.hash.Wyhash.init(0x6c617972);
+        hasher.update(std.mem.asBytes(&[_]f32{ rect.x, rect.y, rect.width, rect.height, radius, scale }));
+        hasher.update(std.mem.asBytes(&box));
+        for (layers) |layer| {
+            hashGradient(&hasher, layer.gradient);
+            hasher.update(std.mem.asBytes(&[_]f32{ layer.box.x, layer.box.y, layer.box.width, layer.box.height, layer.radius }));
+            hasher.update(&.{@backingInt(layer.composite)});
+        }
+        const key = hasher.final();
+        if (self.find(key)) |entry| return try entry.view();
+        const width: u32 = @intCast(box[2] - box[0]);
+        const height: u32 = @intCast(box[3] - box[1]);
+        const stride = (width + 3) & ~@as(u32, 3);
+        const bytes = @as(usize, stride) * height;
+        const slot = self.room(bytes, release) orelse {
+            self.stats.refused += 1;
+            return null;
+        };
+        const pixels = try self.allocator.alloc(u8, bytes);
+        errdefer self.allocator.free(pixels);
+        @memset(pixels, 0);
+        var stored: [max_layers]brushes.Stored = undefined;
+        for (layers, 0..) |layer, i| stored[i] = try brushes.Stored.init(layer.gradient);
+        for (0..height) |row| {
+            const y = (@as(f32, @floatFromInt(box[1] + @as(i32, @intCast(row)))) + 0.5) / scale;
+            for (0..width) |column| {
+                const x = (@as(f32, @floatFromInt(box[0] + @as(i32, @intCast(column)))) + 0.5) / scale;
+                const cover = roundedCoverage(rect, radius, x, y, scale);
+                if (cover <= 0) continue;
+                pixels[row * stride + column] = @intFromFloat(@round(std.math.clamp(cover * layeredAlpha(layers, stored[0..layers.len], x, y, scale), 0, 1) * 255));
+            }
+        }
+        const identity = try drawing.reserveRasterIdentity();
+        slot.* = .{ .key = key, .used = self.paints, .bytes = bytes, .pixels = pixels, .lease = drawing.Lease.init(std.Thread.getCurrentId()), .identity = identity, .coverage = .{ .pixels = pixels, .width = width, .height = height, .stride = stride, .origin_x = box[0], .origin_y = box[1], .scale = scale } };
+        self.bytes += bytes;
+        self.stats.made += 1;
+        return try slot.*.?.view();
+    }
+
     /// The mask of the inside of `path` (non-zero winding), mapped by
     /// `transform` into window DIP and cut to `visible`, in device pixels at
     /// `scale`; null when nothing of it shows or there is no room.
@@ -212,6 +258,51 @@ pub const Masks = struct {
         return try slot.*.?.view();
     }
 };
+
+/// Layers of masks one clip takes at most.
+pub const max_layers = 4;
+/// How a layer of masks goes with those under it, as CSS's
+/// `mask-composite`.
+pub const Composite = enum(u8) {
+    /// What either shows.
+    add,
+    /// The layer where those under it do not show.
+    subtract,
+    /// Where both show.
+    intersect,
+    /// Where one shows but not both.
+    exclude,
+};
+/// One layer of a layered mask (`Masks.layered`): the alpha of `gradient`
+/// across `box`, rounded by `radius`, outside which it shows nothing.
+pub const Layer = struct {
+    gradient: brushes.Gradient,
+    box: Rect,
+    radius: f32 = 0,
+    composite: Composite = .add,
+};
+/// The alpha of `layers` at the DIP point (x, y), from the last, at the
+/// bottom, up.
+pub fn layeredAlpha(layers: []const Layer, stored: []const brushes.Stored, x: f32, y: f32, scale: f32) f32 {
+    var below: f32 = 0;
+    var index = layers.len;
+    while (index > 0) {
+        index -= 1;
+        const layer = layers[index];
+        const own = roundedCoverage(layer.box, layer.radius, x, y, scale) * gradientAlpha(&stored[index], x, y);
+        if (index == layers.len - 1) {
+            below = own;
+            continue;
+        }
+        below = switch (layer.composite) {
+            .add => own + below * (1 - own),
+            .subtract => own * (1 - below),
+            .intersect => own * below,
+            .exclude => own * (1 - below) + below * (1 - own),
+        };
+    }
+    return below;
+}
 
 /// Device pixels `rect` touches at `scale`, as left, top, right and bottom,
 /// at most `max_side` each way; null when it is empty.
@@ -400,4 +491,29 @@ test "an even-odd path mask leaves the overlap of its subpaths out" {
     try std.testing.expectEqual(@as(u8, 255), at.value(filled, 10, 10));
     try std.testing.expectEqual(@as(u8, 0), at.value(holed, 10, 10));
     try std.testing.expectEqual(@as(u8, 255), at.value(holed, 2, 10));
+}
+
+test "layers of masks composite from the bottom up" {
+    const black: brushes.Stop = .{ .offset = 0, .color = .{ .r = 0, .g = 0, .b = 0 } };
+    const solid: brushes.Gradient = .{ .linear = .{ .start = .{ .x = 0, .y = 0 }, .end = .{ .x = 1, .y = 0 }, .stops = &.{ black, .{ .offset = 1, .color = black.color } } } };
+    const outer: Rect = .{ .x = 0, .y = 0, .width = 40, .height = 40 };
+    const inner: Rect = .{ .x = 10, .y = 10, .width = 20, .height = 20 };
+    // A ring: the inner box excluded from the outer one.
+    const ring = [_]Layer{ .{ .gradient = solid, .box = inner, .composite = .exclude }, .{ .gradient = solid, .box = outer } };
+    var stored: [2]brushes.Stored = .{ try brushes.Stored.init(solid), try brushes.Stored.init(solid) };
+    try std.testing.expectEqual(@as(f32, 1), layeredAlpha(&ring, &stored, 5.5, 5.5, 1));
+    try std.testing.expectEqual(@as(f32, 0), layeredAlpha(&ring, &stored, 20.5, 20.5, 1));
+    // Subtracted, intersected and added.
+    var subtract = ring;
+    subtract[0].composite = .subtract;
+    try std.testing.expectEqual(@as(f32, 0), layeredAlpha(&subtract, &stored, 20.5, 20.5, 1));
+    try std.testing.expectEqual(@as(f32, 0), layeredAlpha(&subtract, &stored, 5.5, 5.5, 1));
+    var intersect = ring;
+    intersect[0].composite = .intersect;
+    try std.testing.expectEqual(@as(f32, 1), layeredAlpha(&intersect, &stored, 20.5, 20.5, 1));
+    try std.testing.expectEqual(@as(f32, 0), layeredAlpha(&intersect, &stored, 5.5, 5.5, 1));
+    var add = ring;
+    add[0].composite = .add;
+    try std.testing.expectEqual(@as(f32, 1), layeredAlpha(&add, &stored, 5.5, 5.5, 1));
+    try std.testing.expectEqual(@as(f32, 1), layeredAlpha(&add, &stored, 20.5, 20.5, 1));
 }

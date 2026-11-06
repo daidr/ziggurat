@@ -4056,6 +4056,7 @@ pub const Frame = struct {
     const ClipShape = union(enum) {
         none,
         rounded: struct { radius: f32, mask: ?commands.Gradient },
+        layered: struct { radius: f32, layers: []const clip_mask.Layer },
         path: struct { path: *const vectors.Path, transform: vectors.Transform, rule: vectors.FillRule = .nonzero },
     };
     /// Clip what is drawn until the matching `popClip` to `bounds` with its
@@ -4073,6 +4074,19 @@ pub const Frame = struct {
             return error.InvalidGeometry;
         }
         return self.pushClipWith(bounds, .{ .rounded = .{ .radius = @max(radius, 0), .mask = mask } });
+    }
+    /// `pushRoundedClip` masked by layers of gradients in place of one, as
+    /// CSS's `mask-image` with `mask-composite`: each across its own box
+    /// (in the same DIP as `bounds`), the first on top, going with those
+    /// under it as its `composite` says. The mask is made on the CPU, once
+    /// for each size it shows at, as a path's clip is; at most
+    /// `clip_mask.max_layers` layers.
+    pub fn pushLayeredClip(self: *Frame, bounds: Rect, radius: f32, mask_layers: []const clip_mask.Layer) !void {
+        if (!std.math.isFinite(radius) or mask_layers.len > clip_mask.max_layers) {
+            self.failure = self.failure orelse error.InvalidGeometry;
+            return error.InvalidGeometry;
+        }
+        return self.pushClipWith(bounds, .{ .layered = .{ .radius = @max(radius, 0), .layers = mask_layers } });
     }
     /// Clip what is drawn until the matching `popClip` to the inside of
     /// `path` (non-zero winding), its edges smoothed, as CSS's and SVG's
@@ -4118,6 +4132,19 @@ pub const Frame = struct {
                 if (self.context.clipMasks()) |masks| {
                     const gradient = if (value.mask) |g| g.translated(self.offset) else null;
                     mask = masks.shape(absolute_bounds, value.radius, gradient, clip, self.size.scale, self.context.clipMaskRelease()) catch null;
+                }
+            },
+            .layered => |value| {
+                if (value.radius > 0) round = .{ .rect = absolute_bounds, .radius = value.radius };
+                if (self.context.clipMasks()) |masks| {
+                    var moved: [clip_mask.max_layers]clip_mask.Layer = undefined;
+                    const count = @min(value.layers.len, moved.len);
+                    for (value.layers[0..count], 0..) |layer, i| {
+                        moved[i] = layer;
+                        moved[i].gradient = layer.gradient.translated(self.offset);
+                        moved[i].box = self.absolute(layer.box);
+                    }
+                    mask = masks.layered(absolute_bounds, value.radius, moved[0..count], clip, self.size.scale, self.context.clipMaskRelease()) catch null;
                 }
             },
             .path => |value| if (self.context.clipMasks()) |masks| {

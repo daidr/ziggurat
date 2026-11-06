@@ -137,6 +137,11 @@ pub fn pointerArea(v: *View, options: Options, style: Style) Error!PointerArea {
         result.position = local(area.bounds, v.pointer.?);
     };
     if (v.area_press) |held| result.pressed = held.id == node.id and result.hovered;
+    if (comptime view.inspector.enabled) if (v.tools) |tools| {
+        // The inspector shows the area hovered or pressed.
+        if (tools.forced(node.id, .hover) or tools.forced(node.id, .active)) result.hovered = true;
+        if (tools.forced(node.id, .active)) result.pressed = true;
+    };
     if (event) |value| {
         result.modifiers = value.modifiers;
         switch (value.phase) {

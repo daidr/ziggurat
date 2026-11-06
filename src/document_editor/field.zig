@@ -32,7 +32,40 @@ pub const Options = struct {
     /// (a single-line field has already turned its line breaks into
     /// spaces); false leaves the field as it is.
     paste: ?*const fn (?*anyopaque, []const u8) bool = null,
+    /// Keep the user from making the text longer than this, counted as
+    /// HTML's `maxlength` counts it, in UTF-16 code units: what is typed,
+    /// pasted or committed by an input method is cut to what fits at the
+    /// caret, and replacing a selection takes what fits in its place; a
+    /// keystroke that does not fit changes nothing. Text the application
+    /// puts in the document is not cut. 0 sets no limit.
+    max_length: usize = 0,
 };
+
+/// Code units `text` takes in UTF-16, as HTML's `maxlength` counts.
+pub fn utf16Length(text: []const u8) usize {
+    var count: usize = 0;
+    var at: usize = 0;
+    while (at < text.len) {
+        const length = std.unicode.utf8ByteSequenceLength(text[at]) catch 1;
+        count += if (length == 4) 2 else 1;
+        at += @min(length, text.len - at);
+    }
+    return count;
+}
+/// The longest start of `text` that takes at most `room` UTF-16 code
+/// units, cut between characters.
+pub fn fitUtf16(text: []const u8, room: usize) []const u8 {
+    var count: usize = 0;
+    var at: usize = 0;
+    while (at < text.len) {
+        const length = @min(std.unicode.utf8ByteSequenceLength(text[at]) catch 1, text.len - at);
+        const units: usize = if (length == 4) 2 else 1;
+        if (count + units > room) break;
+        count += units;
+        at += length;
+    }
+    return text[0..at];
+}
 
 /// One stable field owns one Adapter and borrows the caller's sole Document
 /// and Engine. Close before those owners, and before releasing Context storage.
@@ -426,7 +459,15 @@ pub fn Field(comptime Private: type) type {
                 },
                 else => {},
             }
-            const handled = self.adapter.handleEvent(window, actual, self.bounds, self.parameters);
+            var limited = actual;
+            if (actual == .text_input and self.options.max_length > 0) {
+                const room = try self.lengthRoom();
+                const fit = fitUtf16(actual.text_input.text, room);
+                // Nothing fits: the keystroke changes nothing.
+                if (fit.len == 0 and actual.text_input.text.len > 0) return .{ .handled = true };
+                limited.text_input.text = fit;
+            }
+            const handled = self.adapter.handleEvent(window, limited, self.bounds, self.parameters);
             if (handled) |value| result.handled = value else |err| {
                 result.handled = true;
                 if (try self.document.committedTextVersion() != text_before) result.presentation_error = err else result.input_error = err;
@@ -443,8 +484,21 @@ pub fn Field(comptime Private: type) type {
             try self.validate();
             if (self.options.policy.read_only) return error.ReadOnly;
         }
-        fn replaceSelection(self: *Self, scope: *ui.TextFieldScope, bytes: []const u8) !ui.TextFieldResult {
+        /// UTF-16 code units `Options.max_length` leaves for what replaces
+        /// the selection.
+        fn lengthRoom(self: *Self) !usize {
+            try self.copyValue();
+            const value = self.value[0..self.value_len];
+            const selected = (try self.document.selection()).range();
+            const start = @min(selected.start, value.len);
+            const end = @min(selected.end, value.len);
+            const kept = utf16Length(value) - utf16Length(value[start..end]);
+            return self.options.max_length -| kept;
+        }
+        fn replaceSelection(self: *Self, scope: *ui.TextFieldScope, whole: []const u8) !ui.TextFieldResult {
             try commandGate(self);
+            const bytes = if (self.options.max_length > 0) fitUtf16(whole, try self.lengthRoom()) else whole;
+            if (bytes.len == 0 and whole.len > 0) return .{ .handled = true };
             try validateText(bytes, self.options.multiline);
             if (bytes.len > self.value.len) return error.FieldValueTooLarge;
             const selected = (try self.document.selection()).range();
@@ -584,4 +638,14 @@ pub fn Field(comptime Private: type) type {
             }
         }
     };
+}
+
+test "a maximum length counts and cuts in UTF-16 code units, between characters" {
+    try std.testing.expectEqual(@as(usize, 5), utf16Length("héllo"));
+    // An emoji outside the basic plane takes two units.
+    try std.testing.expectEqual(@as(usize, 3), utf16Length("a\u{1F600}"));
+    try std.testing.expectEqualStrings("ab", fitUtf16("abc", 2));
+    try std.testing.expectEqualStrings("a", fitUtf16("a\u{1F600}", 2));
+    try std.testing.expectEqualStrings("a\u{1F600}", fitUtf16("a\u{1F600}b", 3));
+    try std.testing.expectEqualStrings("", fitUtf16("中文", 0));
 }
