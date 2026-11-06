@@ -752,6 +752,11 @@ fn rowRecord(frame: anytype, role: access.Role, id: u64, bounds: layout.Rect, na
     const focused = control.enabled and visible.width > 0 and visible.height > 0 and frame.context.input_state.focused == id;
     try frame.semantic(.{ .id = id, .parent = control.semantic_parent, .role = role, .name = name, .description = control.description, .bounds = bounds, .enabled = control.enabled, .focused = focused, .checked = options.selected, .multiple = options.multiple, .expanded = options.expanded });
     const colors = frame.currentTheme().palette;
+    // A row without a look is drawn by its application, but for its ring.
+    if (!control.look) {
+        if (focused) try ring(frame, bounds, control, true, colors.focus);
+        return focused;
+    }
     if (options.selected) try fill(frame, bounds, if (control.enabled) colors.accent else colors.disabled_accent) else if (control.enabled and frame.context.input_state.active == id) try fill(frame, bounds, colors.pressed);
     if (focused) try ring(frame, bounds, control, true, if (options.selected) colors.on_accent else colors.focus);
     return focused;
@@ -764,6 +769,7 @@ pub fn emitTreeItem(frame: anytype, id: u64, bounds: layout.Rect, label: []const
     const snapshot = Snapshot.init(frame);
     errdefer snapshot.restore(frame);
     _ = try rowRecord(frame, .tree_item, id, bounds, label, options);
+    if (!options.control.look) return;
     const style = frame.currentTheme();
     const colors = style.palette;
     const foreground: u32 = if (!options.control.enabled or (options.heading and !options.selected)) colors.disabled_text else if (options.selected) colors.on_accent else colors.text;

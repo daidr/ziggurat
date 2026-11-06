@@ -120,6 +120,10 @@ pub const Overlay = struct {
         submenu: bool,
         rtl: bool,
         initial: u8,
+        /// The `menuGroupBase` row it is in, 0 for none, and whether it is
+        /// checked, where the keys land on the row.
+        group: u64 = 0,
+        checked: bool = false,
     };
     anchors: [max_anchors]Anchor = undefined,
     anchor_count: usize = 0,
@@ -390,9 +394,37 @@ fn panelStyle(style: Style) Style {
 
 fn currentPanel(self: *View) Error!*Node {
     if (self.depth == 0) return error.UnbalancedContainer;
-    const panel = &self.buffers.nodes[self.stack[self.depth - 1]];
+    var panel = &self.buffers.nodes[self.stack[self.depth - 1]];
+    // Items of a group row belong to the panel around it.
+    if (currentGroup(self) != 0) panel = &self.buffers.nodes[self.stack[self.depth - 2]];
     if (panel.kind != .menu) return error.NotContainer;
     return panel;
+}
+/// The `menuGroupBase` row being built into, 0 for none.
+fn currentGroup(self: *const View) u64 {
+    if (self.depth < 2) return 0;
+    const top = &self.buffers.nodes[self.stack[self.depth - 1]];
+    return if (top.menu_group != 0 and top.menu_group == top.id) top.id else 0;
+}
+
+/// A row of items of a menu without a look that the keys take as one
+/// stop, as a theme switcher's Light, Dark and System radio items in an
+/// account menu: Up, Down, Home and End land on its item checked, else its
+/// first, and Left and Right move among its items, round, the other way
+/// round right to left. Build its items with `menuItemBase` (usually with
+/// `keep_open`) and close it with `end`. Assistive technology sees a group
+/// named by `Style.name` holding the items.
+pub fn menuGroupBase(self: *View, style: Style) Error!void {
+    const panel = try currentPanel(self);
+    if (currentGroup(self) != 0) return error.NotContainer;
+    const level = panel.level;
+    const panel_id = panel.id;
+    var value = style;
+    if (value.role == null) value.role = .group;
+    const node = try self.openNode(.row, value);
+    node.menu_group = node.id;
+    node.level = level;
+    node.semantic_parent = panel_id;
 }
 
 fn item(self: *View, panel: *Node, label: []const u8, style: Style) Error!*Node {
@@ -401,11 +433,16 @@ fn item(self: *View, panel: *Node, label: []const u8, style: Style) Error!*Node 
 fn itemNode(self: *View, panel: *Node, label: []const u8, style: Style, plain: bool) Error!*Node {
     const level = panel.level;
     const panel_id = panel.id;
+    const group = currentGroup(self);
     const node = if (plain) try self.openNode(.menu_item, style) else try self.appendNode(.menu_item, style);
     node.plain = plain;
     node.text = try self.copyText(label);
     node.level = level;
     node.semantic_parent = panel_id;
+    if (group != 0) {
+        node.menu_group = group;
+        node.semantic_parent = group;
+    }
     const id = node.id;
     const state = &self.menu;
     if (state.first) |wanted| if (wanted == level and node.style.enabled) {
@@ -528,7 +565,7 @@ pub fn record(self: *View, node: *const Node) void {
         .menu_item => if (overlay.item_count < max_items) {
             var name_buffer: [view.max_plain_name]u8 = undefined;
             const label = if (node.text.len == 0 and node.plain) self.plainName(node, &name_buffer) else node.text;
-            overlay.items[overlay.item_count] = .{ .id = node.id, .level = node.level, .rect = self.visible(node) orelse node.bounds, .enabled = node.style.enabled, .submenu = node.expanded != null, .rtl = node.rtl, .initial = initialOf(label) };
+            overlay.items[overlay.item_count] = .{ .id = node.id, .level = node.level, .rect = self.visible(node) orelse node.bounds, .enabled = node.style.enabled, .submenu = node.expanded != null, .rtl = node.rtl, .initial = initialOf(label), .group = node.menu_group, .checked = node.checked };
             overlay.item_count += 1;
         },
         else => {},
@@ -648,6 +685,11 @@ pub fn routeKey(self: *View, input: z.KeyInput) ?KeyRoute {
         if (entry.level == level) break entry.rtl;
     } else false;
     if (rtl and (key == .left or key == .right)) key = if (key == .left) .right else .left;
+    // Left and Right move within a group row, round.
+    if (current) |entry| if (entry.group != 0 and (key == .left or key == .right)) {
+        if (plain) moveInGroup(self, items, entry, key == .right);
+        return .handled;
+    };
     switch (key) {
         .down, .up, .home, .end => {
             if (!plain) return .handled;
@@ -710,11 +752,25 @@ fn highlight(self: *View, entry: Overlay.Item) void {
 }
 
 fn moveHighlight(self: *View, items: []const Overlay.Item, level: u16, current: ?Overlay.Item, key: z.KeyCode) void {
+    // The stops: each item outside a group, and each group once, on its
+    // item checked, else its first.
     var members: [max_items]usize = undefined;
     var count: usize = 0;
     var at: ?usize = null;
     for (items, 0..) |entry, i| {
         if (entry.level != level or !entry.enabled) continue;
+        if (entry.group != 0) {
+            const seen = for (members[0..count]) |member| {
+                if (items[member].group == entry.group) break true;
+            } else false;
+            if (seen) continue;
+            members[count] = groupStop(items, i);
+            if (current) |value| if (value.group == entry.group) {
+                at = count;
+            };
+            count += 1;
+            continue;
+        }
         if (current) |value| if (value.id == entry.id) {
             at = count;
         };
@@ -728,6 +784,28 @@ fn moveHighlight(self: *View, items: []const Overlay.Item, level: u16, current: 
         .down => if (at) |i| (i + 1) % count else 0,
         else => if (at) |i| (i + count - 1) % count else count - 1,
     };
+    highlight(self, items[members[next]]);
+}
+
+/// The item of the group of `items[first]` the keys land on: the one
+/// checked, else the first.
+fn groupStop(items: []const Overlay.Item, first: usize) usize {
+    const group = items[first].group;
+    for (items[first..], first..) |entry, i| if (entry.group == group and entry.enabled and entry.checked) return i;
+    return first;
+}
+fn moveInGroup(self: *View, items: []const Overlay.Item, current: Overlay.Item, forward: bool) void {
+    var members: [max_items]usize = undefined;
+    var count: usize = 0;
+    var at: usize = 0;
+    for (items, 0..) |entry, i| {
+        if (entry.group != current.group or !entry.enabled) continue;
+        if (entry.id == current.id) at = count;
+        members[count] = i;
+        count += 1;
+    }
+    if (count == 0) return;
+    const next = if (forward) (at + 1) % count else (at + count - 1) % count;
     highlight(self, items[members[next]]);
 }
 

@@ -223,7 +223,7 @@ try v.end();
 - `ItemOptions.keep_open` 让菜单项被选中（按下、Enter 或 Space）后菜单保持打开、高亮留在该项上，例如账户菜单里切换主题的一排单选项。
 - 打开期间菜单接管按键：Up、Down、Home、End 在最深一层的可用项之间移动高亮并循环，字母移到下一个以它开头的项；Right、Enter 或 Space 打开子菜单并高亮其第一项，Left 或 Escape 关闭最深一层子菜单，顶层的 Escape 与 Tab 关闭菜单并交还焦点。从右到左时 Left 与 Right 互换。指针移到项上会高亮它并打开它的子菜单、关闭更深的子菜单；在所有面板之外按下会关闭菜单，并照常交给下面的控件；面板上的滚轮不会滚动下面的内容。
 - `popoverMenuButton(label, style)` 是一个菜单按钮：画法像带箭头的组合框，菜单画在窗口里、它的下方并与它的起始边对齐，下方放不下时翻到上方。按下、Enter、Space 或 Down 打开菜单并高亮第一项，Up 打开并高亮最后一项（WAI-ARIA 菜单按钮模式），菜单显示时再按按钮会关闭它，期间按钮读作已展开。菜单的按键、首字母跳转、子菜单和焦点交还都与 `popoverMenu` 相同，选中或 Escape 后焦点回到按钮。与 `end` 配对，菜单打开时返回 true，只在这时构建菜单项。名称取 `Style.name`，否则取 `label`。
-- 没有外观的菜单，用于项的布局由应用决定的菜单，例如头像加名字或色块：`menuButtonBase(style)` 打开一个作为菜单按钮的容器，应用在其中构建按钮内容，`end` 后用 `popoverMenuBase(style)` 构建菜单；`popoverMenuBase` 跟在任意节点之后则是它的右键菜单，打开方式与 `popoverMenu` 相同。菜单面板只画 `style` 给出的背景、边框与圆角，没有默认的内边距和最小宽度。`menuItemBase(options, style)` 打开一个项容器（默认横排），由应用填充并在 `highlighted` 时自己画高亮，`end` 关闭；返回的 `MenuItemState` 带 `clicked`（选中，菜单随之关闭）与 `highlighted`。`options.checked` 与 `radio` 让它成为复选项或单选项，读屏报告选中与否；`shortcut` 作为描述朗读。`submenuItemBase(style)` 打开一个会展开子菜单的项，`end` 后用 `submenuBase(style)` 构建子菜单，子菜单以该项命名。项以 `Style.name` 或其中的文字命名，首字母跳转也用它。按键、焦点和语义与 `popoverMenuButton` 和 `popoverMenu` 完全相同；分隔线和小标题是应用自己放在项之间的节点。
+- 没有外观的菜单，用于项的布局由应用决定的菜单，例如头像加名字或色块：`menuButtonBase(style)` 打开一个作为菜单按钮的容器，应用在其中构建按钮内容，`end` 后用 `popoverMenuBase(style)` 构建菜单；`popoverMenuBase` 跟在任意节点之后则是它的右键菜单，打开方式与 `popoverMenu` 相同。菜单面板只画 `style` 给出的背景、边框与圆角，没有默认的内边距和最小宽度。`menuItemBase(options, style)` 打开一个项容器（默认横排），由应用填充并在 `highlighted` 时自己画高亮，`end` 关闭；返回的 `MenuItemState` 带 `clicked`（选中，菜单随之关闭）与 `highlighted`。`options.checked` 与 `radio` 让它成为复选项或单选项，读屏报告选中与否；`shortcut` 作为描述朗读。`submenuItemBase(style)` 打开一个会展开子菜单的项，`end` 后用 `submenuBase(style)` 构建子菜单，子菜单以该项命名。项以 `Style.name` 或其中的文字命名，首字母跳转也用它。按键、焦点和语义与 `popoverMenuButton` 和 `popoverMenu` 完全相同；分隔线和小标题是应用自己放在项之间的节点。`menuGroupBase(style)` 在面板里打开一行由按键当作一站的项（`end` 关闭），例如账户菜单里“浅色、深色、跟随系统”三个 `keep_open` 单选项：Up、Down、Home 与 End 落在这一行时停在其中选中的项（没有则第一项），Left 与 Right 在行内循环移动（从右到左时反过来）；辅助技术看到一个以 `Style.name` 命名、包含这些项的分组。
 - 右键菜单的位置相对锚点的整个盒子计算，所以锚点部分滚出视野时菜单仍在指针处打开。
 - 焦点跟随高亮，辅助技术读出键盘所在的项；用指针打开时焦点在第一项上但不高亮。同一时间最多打开一个菜单；锚点不再构建或被禁用时菜单关闭。
 
@@ -384,6 +384,11 @@ if (try v.findBar(&find, query_field.embed(), matches, .{}, .{ .key = 1 })) |eve
 ### 三态复选框与复选框组
 
 - `checkboxState(&state, label, style)` 绑定一个 `CheckState`（`unchecked`、`checked`、`mixed`）。部分选中画成短横线；激活时未选中或部分选中变为选中，选中变为未选中，返回 true。只有应用会设为 `mixed`。`CheckState.of(values)` 从一组布尔值求出状态。
+- 没有外观的标签页、选项、选择框与树行，打开的都是由应用填充和绘制的容器（默认横排），以 `Style.name` 或其中的文字命名，保留内置控件的按键、焦点与语义：
+  - `tabBase(T, &selected, option, style)` 放在 `tabs` 里，`listItemBase(T, &selected, option, style)` 放在 `listBox` 里，与 `tab`、`listItem` 一样选择 `option`，返回选择是否改变；方向键、Home 与 End 跳过 `enabled = false` 的项。
+  - `selectBase(style)` 打开选择框的触发器，`end` 后用 `selectListBase(is_open, style)` 构建它的列表（只在返回 true 时构建选项，无论如何都要 `end`），列表只画 `style` 给出的背景、边框与圆角。按键与语义同 `comboBox`。`is_open` 不为 null 时由调用方持有是否打开：置位即打开、清零即关闭，用户按触发器、Escape、在外面按下或选中选项时视图把结果写回。`selectOptionBase(T, &selected, value, style)` 是其中的选项，返回 `OptionState{ changed, highlighted, selected }`，选中后列表关闭、焦点回到触发器；方向键跳过禁用的选项。
+  - `noSuggestions(label, style)` 在建议列表或组合框列表里加入一行“无匹配”：输入有焦点时让列表保持打开，不接受高亮与按下，读作不可用的选项。
+  - `treeItemBase(id, &expanded, style)` 打开树的一行（应用画缩进、展开箭头、图标与标题以及选中行的背景），`end` 关闭这一行，随后在 `expanded` 为真时构建子条目，再用一个 `end` 关闭条目。返回 `TreeRowState{ activated, selected, cursor, level }`；选择、按键（Up/Down 移动，Right/Left 展开与折叠）与语义同 `treeItem`，展开箭头由应用自己的控件翻转 `expanded`。
 - `checkboxBase(&checked, style)` 与 `checkboxStateBase(&state, style)` 是没有外观的复选框：打开一个容器（默认横排），由应用按值画出自己的方框与标签，`end` 关闭。前者激活时切换布尔值；后者绑定 `CheckState`，与 `checkboxState` 一样按下（或焦点在其上时按 Space）把未选中或部分选中变为选中、把选中变为未选中，部分选中时读屏报告“部分选中”。二者都以 `Style.name` 或其中的文字命名，并画主题的焦点环。
 - `checkboxGroup(label, items, style)` 构建一个总复选框，以及其下缩进 30 DIP 的 `CheckboxItem` 复选框（各绑定一个布尔值，可单独禁用）。总复选框的状态由子项派生：全部选中为选中，全部未选中为未选中，否则为部分选中；激活它时，除非所有启用的子项都已选中（此时全部取消），否则把它们全部选中。任何值变化时返回 true。
 

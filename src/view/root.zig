@@ -1473,6 +1473,9 @@ pub const Node = struct {
     /// A control without a look: a container its application fills and
     /// draws, which keeps the control's input, focus and semantics.
     plain: bool = false,
+    /// A row of menu items the keys take as one stop (`menuGroupBase`): on
+    /// the row, its own id; on an item inside it, the row's.
+    menu_group: u64 = 0,
     /// Laid out in its place but not drawn, nor its descendants, which
     /// take no input either: content waiting to come in.
     unseen: bool = false,
@@ -1707,6 +1710,9 @@ pub const PopupState = struct {
     within: ?u64 = null,
     /// Editable combo box whose button asked to close its list.
     close: ?u64 = null,
+    /// The select of its caller's own flag (`selectListBase`) whose list
+    /// its last build left open, which tells it what the view did since.
+    built_open: ?u64 = null,
 };
 
 /// Hover and timing of the tooltip, kept by the View across passes.
@@ -2602,6 +2608,7 @@ pub const View = struct {
     pub const menuItemBase = menu_controls.menuItemBase;
     pub const submenuItemBase = menu_controls.submenuItemBase;
     pub const submenuBase = menu_controls.submenuBase;
+    pub const menuGroupBase = menu_controls.menuGroupBase;
     pub const openMenuAt = menu_controls.openAt;
     pub const areaPress = pointer_controls.press;
     pub const areaRelease = pointer_controls.release;
@@ -2986,6 +2993,40 @@ pub const View = struct {
     pub fn tab(self: *View, comptime T: type, selected: *T, option: T, label: []const u8, style: Style) Error!bool {
         return self.choice(.tab, .tab_list, T, selected, option, label, style);
     }
+    /// A tab without a look in `tabs`: opens a container, a row by
+    /// default, that the application fills and draws, as an icon and a
+    /// title on a background of its own while it is chosen; close it with
+    /// `end`. It chooses `option` as `tab` does, shares the list's Tab stop,
+    /// and the arrows, Home and End move the choice and the focus, passing
+    /// over a tab with `Style.enabled` false. Assistive technology reads a
+    /// tab named by `Style.name` or the text inside it, the chosen one
+    /// selected. True when the choice changed.
+    pub fn tabBase(self: *View, comptime T: type, selected: *T, option: T, style: Style) Error!bool {
+        return self.choiceBase(.tab, .tab_list, T, selected, option, style);
+    }
+    /// An option without a look in `listBox`, as `tabBase` is a tab: the
+    /// application fills and draws the container, which chooses `option`
+    /// as `listItem` does. True when the choice changed.
+    pub fn listItemBase(self: *View, comptime T: type, selected: *T, option: T, style: Style) Error!bool {
+        const changed = try self.choiceBase(.list_item, .list_box, T, selected, option, style);
+        if (changed) self.reveal = self.buffers.nodes[self.stack[self.depth - 1]].id;
+        return changed;
+    }
+    fn choiceBase(self: *View, kind: Kind, container: Kind, comptime T: type, selected: *T, option: T, style: Style) Error!bool {
+        const parent = &self.buffers.nodes[self.stack[self.depth - 1]];
+        if (parent.kind != container) return error.NotContainer;
+        const group = parent.id;
+        const node = try self.open(kind, style);
+        node.plain = true;
+        node.radio_group = group;
+        var changed = false;
+        if (self.take(node.id) != null and node.style.enabled and !std.meta.eql(selected.*, option)) {
+            selected.* = option;
+            changed = true;
+        }
+        node.checked = std.meta.eql(selected.*, option);
+        return changed;
+    }
     /// Starts a single-selection list of full-width options bound to one
     /// value, named by `Style.name`. Put it in a `scroll` container for long
     /// lists: an option selected by input is scrolled into view on the next
@@ -3256,6 +3297,44 @@ pub const View = struct {
         leaf.level = level;
         leaf.semantic_parent = semantic;
         return self.rowState(leaf, id, expanded);
+    }
+
+    /// What a `treeItemBase` row learned in this pass.
+    pub const TreeRowState = struct {
+        /// Enter activated the row.
+        activated: bool = false,
+        /// The row is in the tree's `Selection`: draw it so.
+        selected: bool = false,
+        /// The row holds the tree's cursor, where its Tab stop is.
+        cursor: bool = false,
+        /// How deep the row is, from 0, to indent it by.
+        level: u16 = 0,
+    };
+    /// A tree row without a look for the application's item `id`: opens
+    /// the row, a container the application fills and draws (an indent of
+    /// `level`, a chevron, an icon and a title, the background of a
+    /// selected row); close it with `end`, then build its children while
+    /// `expanded` is set, and close the item with a second `end`. It keeps
+    /// `treeItem`'s selection, keys and semantics: Up and Down move, Right
+    /// and Left open and close it, a press selects it. `expanded` is null
+    /// for a leaf; a chevron of the application's own flips it. Assistive
+    /// technology reads a tree item named by `Style.name` or the text
+    /// inside it.
+    pub fn treeItemBase(self: *View, id: u64, expanded: ?*bool, style: Style) Error!TreeRowState {
+        const parent = &self.buffers.nodes[self.stack[self.depth - 1]];
+        if (parent.kind != .tree and parent.kind != .tree_item) return error.NotContainer;
+        const nested = parent.kind == .tree_item;
+        const level: u16 = if (nested) self.buffers.nodes[parent.first_child].level +| 1 else 0;
+        const semantic = if (nested) self.buffers.nodes[parent.first_child].id else parent.id;
+        _ = try self.open(.tree_item, .{ .key = id, .enabled = style.enabled });
+        var value = style;
+        value.key = null;
+        const leaf = try self.open(.tree_row, value);
+        leaf.plain = true;
+        leaf.level = level;
+        leaf.semantic_parent = semantic;
+        const activated = try self.rowState(leaf, id, expanded);
+        return .{ .activated = activated, .selected = leaf.checked, .cursor = leaf.cursor, .level = level };
     }
 
     /// Starts a table: a header row with one sortable title per column,
@@ -3747,6 +3826,119 @@ pub const View = struct {
         self.picked = true;
         self.restore = input_id;
         return true;
+    }
+    /// A row of a suggestions list or combo box list saying that nothing
+    /// matches, as "No matches": it keeps the list open while the input
+    /// has the focus, takes neither the highlight nor a press, and reads
+    /// as an unavailable option.
+    pub fn noSuggestions(self: *View, label: []const u8, style: Style) Error!void {
+        const list = self.enclosingPopup() orelse return error.NotContainer;
+        var value = style;
+        value.enabled = false;
+        _ = try self.popupItem(list, label, value);
+    }
+
+    /// A select without a look: opens the trigger, a container the
+    /// application fills and draws with the current choice; close it with
+    /// `end`, then build its list with `selectListBase`. It has
+    /// `comboBox`'s keys and semantics: a press, Enter, Space, Down or Up
+    /// opens the list, read as a combo box named by `Style.name` or the
+    /// text inside it, expanded while the list shows.
+    pub fn selectBase(self: *View, style: Style) Error!void {
+        const node = try self.open(.combo_box, style);
+        node.plain = true;
+    }
+    /// The list of the `selectBase` just closed, drawn as `style` draws it:
+    /// build its options with `selectOptionBase` only when this returns
+    /// true, and close it with `end` either way. With `is_open`, the caller
+    /// owns whether it shows: setting it opens the list and clearing it
+    /// closes it, and the view writes back what the user did, as a press of
+    /// the trigger, Escape, a press outside or a choice.
+    pub fn selectListBase(self: *View, is_open: ?*bool, style: Style) Error!bool {
+        if (self.depth == 0) return error.UnbalancedContainer;
+        const parent = &self.buffers.nodes[self.stack[self.depth - 1]];
+        if (parent.last_child == none) return error.NotContainer;
+        const anchor_index = parent.last_child;
+        const anchor = &self.buffers.nodes[anchor_index];
+        if (anchor.kind != .combo_box or !anchor.plain) return error.NotContainer;
+        const id = anchor.id;
+        const popup = &self.popup;
+        if (is_open) |flag| {
+            const was = if (popup.built_open) |owner| owner == id else false;
+            const now = if (popup.open) |owner| owner == id else false;
+            // What the view did since the last pass wins over the flag;
+            // otherwise the flag says.
+            if (was != now) flag.* = now else if (flag.* != now) {
+                if (flag.*) {
+                    popup.open = id;
+                    popup.highlight = null;
+                } else {
+                    popup.open = null;
+                    popup.highlight = null;
+                    if (self.focusWithinNode(anchor)) self.restore = id;
+                }
+            }
+        }
+        if (self.take(id) != null and anchor.style.enabled) {
+            const was_open = if (popup.open) |owner| owner == id else false;
+            popup.open = if (was_open) null else id;
+            popup.highlight = null;
+            if (was_open) self.restore = id;
+            if (is_open) |flag| flag.* = !was_open;
+        }
+        var value = style;
+        if (value.name.len == 0) value.name = anchor.style.name;
+        const list = try self.open(.popup, value);
+        list.anchor = anchor_index;
+        list.concealed = list.concealed or self.buffers.nodes[anchor_index].concealed;
+        list.access_hidden = list.access_hidden or self.buffers.nodes[anchor_index].access_hidden;
+        if (!anchor.style.enabled) if (is_open) |flag| {
+            flag.* = false;
+        };
+        const shown = if (popup.open) |owner| owner == id and anchor.style.enabled else false;
+        // What the flag now says, against which the next pass tells what
+        // the view did meanwhile, a choice in this pass included.
+        if (shown) popup.built_open = id else if (popup.built_open) |owner| if (owner == id) {
+            popup.built_open = null;
+        };
+        return shown;
+    }
+    /// What a `selectOptionBase` learned in this pass.
+    pub const OptionState = struct {
+        /// The user chose it; the list closes.
+        changed: bool = false,
+        /// The pointer or the arrows are on it: draw it so.
+        highlighted: bool = false,
+        /// It is the current choice.
+        selected: bool = false,
+    };
+    /// An option without a look of a `selectListBase`: opens a container
+    /// the application fills and draws; close it with `end`. A press or
+    /// Enter chooses `value`, closes the list and gives the focus back to
+    /// the trigger; the arrows, Home and End pass over an option with
+    /// `Style.enabled` false. Read as an option named by `Style.name` or
+    /// the text inside it.
+    pub fn selectOptionBase(self: *View, comptime T: type, selected: *T, value: T, style: Style) Error!OptionState {
+        const list = self.enclosingPopup() orelse return error.NotContainer;
+        const anchor = &self.buffers.nodes[list.anchor];
+        if (anchor.kind != .combo_box) return error.NotContainer;
+        const anchor_id = anchor.id;
+        const group = list.id;
+        const node = try self.open(.list_item, style);
+        node.plain = true;
+        node.radio_group = group;
+        node.highlighted = if (self.popup.highlight) |id| id == node.id else false;
+        var state: OptionState = .{ .highlighted = node.highlighted };
+        if (self.take(node.id) != null and node.style.enabled) {
+            state.changed = !std.meta.eql(selected.*, value);
+            selected.* = value;
+            self.popup.open = null;
+            self.popup.highlight = null;
+            self.restore = anchor_id;
+        }
+        node.checked = std.meta.eql(selected.*, value);
+        state.selected = node.checked;
+        return state;
     }
     fn enclosingPopup(self: *const View) ?*Node {
         var depth = self.depth;
@@ -6339,8 +6531,11 @@ pub const View = struct {
         if (node.kind == .popup) {
             const anchor = &all[node.anchor];
             const name = if (node.style.name.len > 0) node.style.name else anchor.style.name;
-            target.roundedRect(bounds, 4, ui.Color.rgb(theme.palette.border));
-            target.roundedRect(inset(bounds, theme.metrics.border / 2), 4, ui.Color.rgb(theme.palette.inset));
+            // A select's list without a look is what its style draws.
+            if (anchor.plain) paintBox(target, node.style, bounds) else {
+                target.roundedRect(bounds, 4, ui.Color.rgb(theme.palette.border));
+                target.roundedRect(inset(bounds, theme.metrics.border / 2), 4, ui.Color.rgb(theme.palette.inset));
+            }
             // A combo box owns its list; a text input's list stays at the
             // root because the input may publish its semantics later.
             try target.popupList(node.id, bounds, name, if (anchor.kind == .combo_box) anchor.id else ui.accessibility.root_id);
@@ -6749,7 +6944,13 @@ pub const View = struct {
                     if (@TypeOf(target) == *ui.Frame and morphing == null and node.text.len > 0) try self.paintTextBehind(target, all, at, bounds);
                     if (morphing) |value| try self.paintMorph(target, node, color, value) else self.drawTextAt(target, node, bounds, color);
                 },
-                .tree_row => {
+                .tree_row => if (node.plain) {
+                    var name_buffer: [max_plain_name]u8 = undefined;
+                    var look = self.rowOptions(node, control);
+                    look.control.look = false;
+                    paintBox(target, style, bounds);
+                    try target.treeItem(node.id, bounds, if (style.name.len > 0) style.name else self.plainName(node, &name_buffer), look);
+                } else {
                     var row_control = control;
                     // The badge is announced with the row.
                     if (row_control.description.len == 0) row_control.description = node.badge;
@@ -6825,7 +7026,14 @@ pub const View = struct {
                     segment_options.radio_group = node.radio_group;
                     try target.segment(node.id, bounds, node.text, node.checked, segment_options);
                 },
-                .list_item => {
+                .list_item => if (node.plain) {
+                    var name_buffer: [max_plain_name]u8 = undefined;
+                    var item_options = control;
+                    item_options.radio_group = node.radio_group;
+                    item_options.look = false;
+                    paintBox(target, style, bounds);
+                    try target.listItem(node.id, bounds, if (style.name.len > 0) style.name else self.plainName(node, &name_buffer), node.checked, item_options);
+                } else {
                     var item_options = control;
                     item_options.radio_group = node.radio_group;
                     try target.listItem(node.id, bounds, node.text, node.checked, item_options);
@@ -6870,9 +7078,14 @@ pub const View = struct {
                     target.roundedRect(.{ .x = bounds.x + pad, .y = bounds.y + (bounds.height - line) / 2, .width = @max(0, bounds.width - 2 * pad), .height = line }, 0, ui.Color.rgb(theme.palette.border));
                 },
                 .tab => {
+                    var name_buffer: [max_plain_name]u8 = undefined;
                     var tab_options = control;
                     tab_options.radio_group = node.radio_group;
-                    try target.tab(node.id, bounds, node.text, node.checked, tab_options);
+                    if (node.plain) {
+                        tab_options.look = false;
+                        paintBox(target, style, bounds);
+                    }
+                    try target.tab(node.id, bounds, if (!node.plain) node.text else if (style.name.len > 0) style.name else self.plainName(node, &name_buffer), node.checked, tab_options);
                 },
                 .toggle_switch => try target.toggleSwitch(node.id, bounds, node.text, node.checked, control),
                 .progress => try target.progress(node.id, bounds, node.fraction, control),
@@ -9297,6 +9510,7 @@ test {
     _ = @import("navigation_tests.zig");
     _ = @import("pointer_tests.zig");
     _ = @import("input_tests.zig");
+    _ = @import("bases_tests.zig");
     _ = @import("inspector_tests.zig");
     _ = @import("inspector_editor.zig");
     _ = @import("gradient.zig");
