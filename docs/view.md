@@ -72,6 +72,11 @@ try v.column(.{ .width = 240, .height = 140, .radius = 16, .gradient = .{ .radia
 - 局部主题：`themed(&theme, style)` 与 `end` 配对，开始一个其中的节点以 `theme` 构建的列（等价于 `Style.theme`）：它们按该主题的 metrics 测量，按它的配色绘制（控件、焦点环、文字），列本身在没有 `background` 时填充该主题的背景色，与根节点填充窗口主题相同。其中打开的浮层、菜单、对话框和提示同样用这个主题；根节点与它之后的节点仍是窗口主题。`v.scopeTheme()` 返回正在构建处的局部主题（窗口主题时为 null）。主题按指针借用，到本遍绘制完成前有效。
 - 忽略输入：`ignore_input = true` 让节点及其中的一切不挡指针与键盘：按下、滚轮和悬停落到下面的内容，Tab 跳过它们，其中的焦点离开；但它们照常绘制并留在可访问性树中，屏幕阅读器的按下与点击一样生效。悬停才显示的按钮可以以 `opacity = 0` 常驻供读屏使用，而不抢所在行的按下。
 - 对辅助技术隐藏：`access_hidden = true` 让节点及其中的一切照常绘制、照常接收指针与键盘，但不进入可访问性树，如同 HTML 的 aria-hidden：叠在下面的卡片、交叉淡化时画出的旧文字副本不会被读屏读到，它们的文字不计入外层控件的名称（见下文无外观控件），辅助技术的请求也到不了它们。锚定在其中的浮层、菜单、列表与提示一并隐藏。与 `ignore_input` 同时设置即为惰性（inert）；`presentColumn` 正在退出的内容就是这样。检查器把这样的节点的角色显示为 ignored。
+- 对辅助技术禁用：`access_disabled = true` 告诉辅助技术节点及其中的一切不可用，如同 HTML 的 aria-disabled，但它们保留指针、键盘焦点、Tab 顺序中的位置和外观：读屏仍能到达并读出它们（读作不可用，连同说明原因的描述），只是不会按下或编辑它们（`Context` 丢弃这些请求）。点击和按键照常交给应用，由应用在不可用时忽略。不变暗；`enabled = false` 才一次做完全部。
+- 不进 Tab 顺序：`tab_stop = false` 让可聚焦节点不被 Tab 经过，如同 tabindex=-1，按下、组内方向键和 `Host.focusNode` 仍能聚焦它。
+- 角色：`role` 让容器或文本在辅助技术面前不只是分组或一段文字：`.region`（地标区域，用 `name` 命名）、`.navigation`、`.article`、`.group`、`.log`（聊天记录，新增的内容会被礼貌地读出）、`.timer`、`.alert`（出现或改变的内容立即打断朗读）、`.status`、`.separator`、`.heading`（级别取自字体：`Font.heading1` 为 1 级，依此类推）。带角色的容器里的文本节点作为文本进入可访问性树，供实时区域朗读。
+- ARIA 属性：`role_description`（aria-roledescription）、`key_shortcuts`（aria-keyshortcuts，如 "Control+S"）、`value_text`（aria-valuetext，如 "5 星中的 3 星"）、`busy`（aria-busy）、`current`（aria-current）、`popup`（aria-haspopup，给自己构建弹出内容的按钮）、`sort`（aria-sort）、`auto_complete`（aria-autocomplete）。三个平台分别映射到 ATK 的状态与对象属性、NSAccessibility 的属性（含旧 API 的 AXEnabled 等）与 UI Automation 的属性（LocalizedControlType、AriaProperties、AcceleratorKey、LiveSetting、LandmarkType、HeadingLevel）。
+- 标签与控制关系：`v.labelledBy(control, label)` 用视图自己画出的标签文字给控件命名，代替控件自己的名称，如同 aria-labelledby；点击标签会把点击交给控件，如同 HTML 的 `<label for>`：聚焦它（或组里选中的那一项），并点击复选框、开关或单选按钮。`v.controls(control, controlled)` 声明一个节点控制另一个（aria-controls），例如按钮与它展开的面板。两者都在两个节点建好之后调用，id 由 `lastNode().id` 取得。
 - 焦点环：持有键盘焦点的控件画主题的焦点环：宽 `Metrics.focus_ring_width`（默认 2 DIP），内缘在控件边缘外 `Metrics.focus_ring_offset`（默认 1 DIP；0 落在边缘上，负数在边缘内），颜色为调色板的 `focus`。列表、树与表格的行、列头会被外层列表裁剪，默认画在行内。`Style.focus_ring_offset` 单独设置一个节点的偏移，例如外层容器裁剪越界内容时用负值把环画到里面；`Style.focus_ring_color` 单独设置颜色。
 - 滚动指示器：滚动容器的 `scrollbars = false` 不画滚动指示器，滚轮、按键和辅助技术照常滚动，适合自己绘制指示的表面。
 - 占位符：`search`、`tokenField` 与 `editableComboBox` 的 `placeholder` 与 `placeholder_color` 交给直接放在其中的文本输入，输入为空且没有输入法组合时显示（见下文 `TextField` 的同名选项）。
@@ -115,7 +120,7 @@ Host 在每帧绘制后记录可见的滚动容器（最多 `max_scroll_regions`
 
 ### 链接、徽标、分段控件与折叠区
 
-- `link(label, style)` 画成带下划线的强调色文字，激活方式与按钮相同，返回本遍是否被激活；打开什么由应用决定，视图层不处理 URL。
+- `link(label, style)` 画成带下划线的强调色文字，按下与 Enter 激活它（Space 不激活，如同网页的链接，留给外层滚动），返回本遍是否被激活；打开什么由应用决定，视图层不处理 URL。
 - `badge(text, style)` 是圆角背景上的短标签，背景默认强调色（`Style.background` 可改），文字默认 `on_accent`（`Style.color` 可改）。它只是静态文字，不可交互，也和普通文本一样不产生语义节点。
 - `segmented(style)` 与 `end` 配对，开始一行首尾相接的分段，`Style.name` 是可访问名称；`segment(T, &selected, option, label, style)` 的选择规则与 `radio` 相同，选中的分段以强调色填充。语义上是单选组和单选按钮。
 - `disclosure(&expanded, label, style)` 是带三角指示的展开标签，激活时翻转 `expanded`，返回是否改变；应用在它后面按 `expanded` 构建内容。
@@ -211,8 +216,9 @@ try v.end();
 - `popoverMenu(style)` 与 `end` 配对，以前一个节点为锚点，菜单打开时返回 true，只在这时构建菜单项，无论返回什么都要 `end`。在锚点上按下次键（右键）时菜单在指针处打开；焦点在锚点内时按菜单键或 Shift+F10，菜单在锚点下方打开并高亮第一项。锚点嵌套时最内层的锚点打开自己的菜单，右键落在锚点里的控件上也一样。
 - `menuItem(label, options, style)` 在选中它的那一遍返回 true（按下、Enter 或 Space），菜单随之关闭，焦点回到打开菜单之前的控件。`MenuItemOptions.checked` 非空时是复选项，加上 `radio` 画成单选的圆点；`shortcut` 只显示在项的末端并作为描述朗读，快捷键本身用 `bindKey` 绑定。禁用的项画成灰色，不能高亮，也不能选择。
 - `submenu(label, style)` 加一项并开始它的子菜单，与 `end` 配对，子菜单显示时返回 true。子菜单放在这一项的末端一侧、与它顶部对齐，放不下时翻到另一侧；顶层菜单在右下放不下时向左、向上翻，并夹在窗口内。`menuSeparator()` 在两组项之间画一条线。面板最窄 160 DIP，内边距默认 4 DIP，最多 8 层。
+- `ItemOptions.keep_open` 让菜单项被选中（按下、Enter 或 Space）后菜单保持打开、高亮留在该项上，例如账户菜单里切换主题的一排单选项。
 - 打开期间菜单接管按键：Up、Down、Home、End 在最深一层的可用项之间移动高亮并循环，字母移到下一个以它开头的项；Right、Enter 或 Space 打开子菜单并高亮其第一项，Left 或 Escape 关闭最深一层子菜单，顶层的 Escape 与 Tab 关闭菜单并交还焦点。从右到左时 Left 与 Right 互换。指针移到项上会高亮它并打开它的子菜单、关闭更深的子菜单；在所有面板之外按下会关闭菜单，并照常交给下面的控件；面板上的滚轮不会滚动下面的内容。
-- `popoverMenuButton(label, style)` 是一个菜单按钮：画法像带箭头的组合框，菜单画在窗口里、它的下方并与它的起始边对齐，下方放不下时翻到上方。按下、Enter、Space 或 Down 打开菜单并高亮第一项，菜单显示时再按按钮会关闭它，期间按钮读作已展开。菜单的按键、首字母跳转、子菜单和焦点交还都与 `popoverMenu` 相同，选中或 Escape 后焦点回到按钮。与 `end` 配对，菜单打开时返回 true，只在这时构建菜单项。名称取 `Style.name`，否则取 `label`。
+- `popoverMenuButton(label, style)` 是一个菜单按钮：画法像带箭头的组合框，菜单画在窗口里、它的下方并与它的起始边对齐，下方放不下时翻到上方。按下、Enter、Space 或 Down 打开菜单并高亮第一项，Up 打开并高亮最后一项（WAI-ARIA 菜单按钮模式），菜单显示时再按按钮会关闭它，期间按钮读作已展开。菜单的按键、首字母跳转、子菜单和焦点交还都与 `popoverMenu` 相同，选中或 Escape 后焦点回到按钮。与 `end` 配对，菜单打开时返回 true，只在这时构建菜单项。名称取 `Style.name`，否则取 `label`。
 - 没有外观的菜单，用于项的布局由应用决定的菜单，例如头像加名字或色块：`menuButtonBase(style)` 打开一个作为菜单按钮的容器，应用在其中构建按钮内容，`end` 后用 `popoverMenuBase(style)` 构建菜单；`popoverMenuBase` 跟在任意节点之后则是它的右键菜单，打开方式与 `popoverMenu` 相同。菜单面板只画 `style` 给出的背景、边框与圆角，没有默认的内边距和最小宽度。`menuItemBase(options, style)` 打开一个项容器（默认横排），由应用填充并在 `highlighted` 时自己画高亮，`end` 关闭；返回的 `MenuItemState` 带 `clicked`（选中，菜单随之关闭）与 `highlighted`。`options.checked` 与 `radio` 让它成为复选项或单选项，读屏报告选中与否；`shortcut` 作为描述朗读。`submenuItemBase(style)` 打开一个会展开子菜单的项，`end` 后用 `submenuBase(style)` 构建子菜单，子菜单以该项命名。项以 `Style.name` 或其中的文字命名，首字母跳转也用它。按键、焦点和语义与 `popoverMenuButton` 和 `popoverMenu` 完全相同；分隔线和小标题是应用自己放在项之间的节点。
 - 右键菜单的位置相对锚点的整个盒子计算，所以锚点部分滚出视野时菜单仍在指针处打开。
 - 焦点跟随高亮，辅助技术读出键盘所在的项；用指针打开时焦点在第一项上但不高亮。同一时间最多打开一个菜单；锚点不再构建或被禁用时菜单关闭。
@@ -381,7 +387,7 @@ if (try v.findBar(&find, query_field.embed(), matches, .{}, .{ .key = 1 })) |eve
 
 ### 按键绑定
 
-`bindKey(chord, window, action)` 把一个 `ui.widgets.Chord` 绑定到动作 id：`window` 为 false 时只在刚加入的节点持有焦点时生效，为 true 时在整个窗口生效。按下时以 `.action = action` 在单独的一遍交付，由构建用 `takeEvent(action)` 取走，先于任何控件看到这个键。焦点上的绑定优先于窗口绑定，先绑定的优先；打开的弹出列表先处理按键，焦点上的绑定先于浮层与对话框的 Escape。焦点输入正在组合时忽略，对话框显示时只有其中的绑定生效。绑定每一遍都要重新建立，每帧最多 `view.max_key_bindings`（32）个。上面的可编辑文本和查找栏都用它实现。
+`bindKey(chord, window, action)` 把一个 `ui.widgets.Chord` 绑定到动作 id：`window` 为 false 时只在刚加入的节点持有焦点时生效，为 true 时在整个窗口生效。按下时以 `.action = action` 在单独的一遍交付，由构建用 `takeEvent(action)` 取走，先于任何控件看到这个键。焦点上的绑定优先于窗口绑定，先绑定的优先；打开的弹出列表先处理按键，焦点上的绑定先于浮层与对话框的 Escape。焦点输入正在组合时忽略，对话框显示时只有其中的绑定生效。绑定每一遍都要重新建立，每帧最多 `view.max_key_bindings`（32）个。`Chord.allow_repeat` 让按住时的自动重复也触发绑定；交付动作的那一遍里 `v.shortcutRepeated()` 告诉这次是不是自动重复，如同网页的 `KeyboardEvent.repeat`：按住时步进的动作接收每一次，切换类的只接收第一次按下。上面的可编辑文本和查找栏都用它实现。
 
 ### 路由与历史按钮
 
@@ -518,6 +524,10 @@ if (row.right_clicked) self.showMenu(item, row.bounds.?);
 
 ## 应用按键
 
+`v.keyDown(key)`、`v.codeDown(code)` 与 `v.keysDown()` 告诉窗口里此刻按住了哪些键，不论焦点在哪个控件、键是否被控件处理，也不会把键从控件那里拿走：快捷键速查表可以在搜索框持有焦点时点亮按住的键。读过它们的帧会在按住的键变化时重绘。键按快捷键的名字计，布局打不出 `z.KeyCode` 名字的键按位置计；修饰键看 `modifiers`。窗口失去键盘时放开所有键。
+
+每个按键事件还带有 `KeyInput.code`（`z.KeyPosition`）：按物理位置命名的键，取 USB HID 用法、按网页 `KeyboardEvent.code` 的名字命名（`.key_a`、`.shift_left`、`.intl_ro` 等），与布局无关，Linux（evdev）、Windows（扫描码）、macOS（虚拟键码，含 flagsChanged 的左右修饰键）与浏览器（`KeyboardEvent.code`）都会上报。
+
 `Options.keys` 是应用自己的按键处理：`key` 收到视图、按键绑定、嵌入叶子和控件（快捷键、Tab、方向键、Home/End、Enter/Space）都没有处理的按下，返回 true 表示已处理，随后运行一遍并重绘；`key_up` 收到持有焦点的嵌入叶子没有消费的每次松开（窗口有键盘时）。两者在主线程、绘制之外运行；焦点在文本字段中时按键交给文本字段。Harness 的 `key` 与 `keyUp` 按同样的顺序调用它们。
 
 文本字段（`ziggurat_view_text`）的 `TextField.focus()` 把键盘焦点交给字段：字段已注册时立即生效，否则在注册它的帧之后生效；`Options.attached` 在字段首次注册到窗口后调用。`Host.focusNode(id)` 对任意节点做同样的事。围着输入的字段外框（`search` 区域、`editableComboBox` 与 `tokenField`）把交给它的焦点转给其中的输入，`v.restore`、`initialFocus` 与 Harness 的 `focus` 相同；`hasKeyboard` 对外框报告其中输入的焦点。
@@ -633,6 +643,8 @@ try std.testing.expectEqualStrings("Sans", h.focused().?.text);
 - 像素：`image(surface)` 把上一遍渲染按窗口的样子画出来（背景 `Options.background` 或主题背景，加上视图绘制的内容，打开时还有 inspector），由 `ui.offscreen.Surface` 按它的尺寸和缩放画成一张图片，用于截图比对和像素检查；需要 `attachInput`，返回的 `Snapshot` 由调用方关闭。离屏表面需要应用的主线程（`z.App`），所以它用在 smoke 与工具里，而不是单元测试中；`smoke-view` 用它检查面板与背景的颜色。
 
 带 `input` 的嵌入叶子在 Harness 中同样收到 `hoverAt`/`leave`、`clickAt`、上面的指针、`wheel` 与 `key` 的输入，`announcement()` 返回最近的播报文字。除此之外，Harness 把嵌入叶子当作不可交互的节点，不验证原生命中、文本输入、可访问性或原生捕获；这些仍由隐藏窗口 smoke 和原生检查覆盖。
+
+`h.recordSemantics(&context)` 让之后每次渲染都像窗口一样记录可访问性树（需要 `-Daccessibility=true` 构建，否则跳过测试），`h.accessible(query)` 或 `h.accessibleId(id)` 读出辅助技术会得到的内容：`role()`、`name()`、`value()`、`description()`、`roleDescription()`、`keyShortcuts()`、`valueText()`、`parent()`，以及 `entry` 里的各状态（`enabled`、`focusable_disabled`、`focused`、`checked`、`expanded`、`selected`、`busy`、`current`、`popup`、`level`、`controls` 等）。`codeDown` 与 `codeUp` 按位置按下与放开键。
 
 ## 背景效果
 
@@ -783,8 +795,9 @@ var host = view.Host.init(&app, App.build, storage.buffers(), .{ .inspector = &i
 - 元素树：每个元素按种类写成标签（`<Button>`、`<TreeRow>`、根是 `<Column>`），带 `key` 与 `name` 属性和文本节点的文字；靠近根的三层默认展开，点三角展开或收起，按住 Alt 展开或收起其中全部。悬停一行在内容上高亮它的元素：内容蓝色、内边距绿色、边框黄色，附带提示框（种类与 key、尺寸、文字颜色与字体、背景、内边距，以及辅助技术看到的名称、角色和能否用键盘聚焦）。点一行选中；面板有键盘时上下键、Home/End 移动选中，左键收起或回到父元素，右键展开或进入第一个子元素。面板有键盘时 Ctrl+F 在树上方打开查找栏：输入的文字（不区分大小写）匹配元素的标签名、文字、`name` 或 `key`，选中第一个匹配并在树中展开、滚动到它，查找栏显示“第几个/共几个”；Enter 与 Shift+Enter（或栏里的上下箭头）在匹配之间前后移动，Backspace 删字，Escape 或 × 关闭。打开查找栏时窗口里持有键盘的文本字段失去焦点，输入进入查找栏；Harness 用 `typeText` 输入。树下的路径条显示从根到选中元素的路径，点其中一项选中它。
 - 拾取：工具栏的拾取按钮或 Ctrl+Shift+C 之后，指针下最内层的元素高亮（浮层优先于流内元素），按下选中它并在树中展开到它；这次按下和松开交给 inspector，不会点到元素。
 - 详情：Styles 把元素设置的样式写成一条 CSS 规则（`flex-direction`、`gap`、`padding`、`border`、`background-color`、`font-size`、`white-space`、`line-clamp` 等）；Computed 画出边框、内边距与内容的盒模型及尺寸，再按名称列出布局后的值（位置、尺寸、方向、字体、颜色、不透明度，滚动容器的滚动偏移与内容尺寸）；Properties 列出种类、id、key、构建位置、文字，状态（焦点、悬停、禁用、选中或数值），以及辅助技术看到的名称、角色和能否聚焦。
-- 源码位置：面板打开时，视图构建选中元素的那一刻记下调用栈（只对这一个元素，每遍一次），inspector 用构建的调试信息找出第一个不在视图自身文件和标准库里的调用，即应用调用 `v.button(...)` 等的文件与行。Styles 的规则右侧显示文件名与行号，Properties 的 `built at` 显示完整路径；`Inspector.source()` 返回它。调用栈变化时才重新查找，查找时调试信息的读取会分配内存；没有调试信息的构建不显示。
+- 源码位置：面板打开时，视图构建选中元素的那一刻记下调用栈（只对这一个元素，每遍一次），inspector 用构建的调试信息找出第一个不在视图自身文件和标准库里的调用，即应用调用 `v.button(...)` 等的文件与行。Styles 的规则右侧显示文件名与行号，Properties 的 `built at` 显示完整路径；`Inspector.source()` 返回它。调用栈变化时才重新查找，查找时调试信息的读取会分配内存；没有调试信息的构建不显示。文件在本机存在时文件名显示为链接，点它在编辑器里打开那一行：命令取 `ZIGGURAT_EDITOR`，否则 `VISUAL`、`EDITOR`，行号按各编辑器的方式传入（VS Code 系 `-g file:line`，Zed/Sublime/Helix `file:line`，JetBrains `--line`，vim/emacs/nano 等 `+line file`）；都没设置时用系统默认程序打开文件。失败记到 Issues。用 `-trimpath` 之类去掉路径的构建不显示为链接。
 - 性能与问题：Performance 显示最近 120 帧构建、排列与绘制的耗时柱状图，以及最近一帧、平均、最慢、显示器刷新率（`refresh_hz`，默认 60）和元素数，参考线是一帧的预算。Issues 列出构建中发现的问题，工具栏显示其数量：同一父元素下两个元素给了同一个 `key` 时它们共享一个身份，点击、焦点或滚动会落到另一个上；每个问题只记一次。Harness 默认（`Config.strict`）在这种构建上直接让 `render` 返回 `error.DuplicateKey`，`issue()` 给出说明，测试因此在出错的地方失败。帧的元素超过 `max_elements`（1024）时树只显示前面的部分并记为问题。
+- 布局叠加层：树中排布子元素的元素行尾有 flex 或 grid 徽标，点击后在内容上一直显示它的布局（最多同时 8 个，再点关闭）：flex 容器的内边距和子元素之间的间隙画成紫色，grid 在子元素所占轨道的每条边画线；外框描边。
 - 工具栏的 RTL 按钮把窗口按从右到左布局，再点恢复，用来在翻译之前检查界面；它设置 `direction_override`，Host 与 Harness 在下一遍应用它。
 
 带 inspector 的构建也带[自动化](automation.md)：设置 `ZIGGURAT_AUTOMATION` 后，另一个进程可以通过套接字读取视图的元素并操作它们。

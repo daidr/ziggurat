@@ -2483,6 +2483,15 @@ pub const Context = struct {
         const self: *Context = @ptrCast(@alignCast(ptr));
         const scope = self.callbackScope(window) orelse return;
         defer scope.end();
+        // A control disabled to assistive technology but kept focusable,
+        // as aria-disabled, takes focus and nothing else.
+        if (build_options.accessibility) switch (action) {
+            .set_focus => {},
+            inline else => |value| {
+                const id = if (@TypeOf(value) == u64) value else value.id;
+                if (self.semantic_tree.find(id)) |entry| if (entry.focusable_disabled) return;
+            },
+        };
         if (self.input_state.fields != null) if (self.textFieldAction(window, action)) return;
         if (self.on_accessibility_action) |callback| callback(self.state, self, action) else switch (action) {
             .invoke => |id| self.on_action(self.state, id),
@@ -2664,7 +2673,7 @@ pub const Context = struct {
                 return true;
             }
             if (key.key == .enter or key.key == .space) {
-                const activated = if (key.repeat) null else self.input_state.activation();
+                const activated = if (key.repeat) null else self.input_state.activationBy(key.key);
                 if (activated) |id| self.on_action(self.state, id) else _ = self.unhandledKey(key);
                 window.invalidate();
                 return true;
@@ -3482,6 +3491,42 @@ test "a hit map moves, scales and turns rectangles as a pose draws them" {
     try std.testing.expectApproxEqAbs(@as(f32, 20), half.height, 1e-3);
 }
 
+/// What `Frame.setNodeExtras` adds to the control and semantic node of
+/// `id`: its place in Tab's order and the ARIA states and properties a
+/// widget's options leave out. Strings are borrowed until the frame is
+/// published.
+pub const NodeExtras = struct {
+    id: u64,
+    /// False keeps a focusable control out of Tab's order while clicks
+    /// and `focus` still focus it, as tabindex=-1.
+    tab_stop: bool = true,
+    /// The name in place of the widget's, as aria-labelledby gives one.
+    name: ?[]const u8 = null,
+    busy: bool = false,
+    current: accessibility.Current = .none,
+    popup: ?accessibility.Popup = null,
+    sort: accessibility.Sort = .none,
+    auto_complete: accessibility.AutoComplete = .none,
+    selected: ?bool = null,
+    role_description: []const u8 = "",
+    key_shortcuts: []const u8 = "",
+    value_text: []const u8 = "",
+    controls: u64 = 0,
+    pub fn apply(self: NodeExtras, node: *accessibility.Node) void {
+        if (self.name) |name| node.name = name;
+        node.busy = node.busy or self.busy;
+        if (self.current != .none) node.current = self.current;
+        if (self.popup) |popup| node.popup = popup;
+        if (self.sort != .none) node.sort = self.sort;
+        if (self.auto_complete != .none) node.auto_complete = self.auto_complete;
+        if (self.selected) |selected| node.selected = selected;
+        if (self.role_description.len > 0) node.role_description = self.role_description;
+        if (self.key_shortcuts.len > 0) node.key_shortcuts = self.key_shortcuts;
+        if (self.value_text.len > 0) node.value_text = self.value_text;
+        if (self.controls != 0) node.controls = self.controls;
+    }
+};
+
 pub const Frame = struct {
     context: *Context,
     size: z.Size,
@@ -3519,6 +3564,11 @@ pub const Frame = struct {
     /// Open `beginAccessHidden` scopes: while any is open, `semantic`
     /// records nothing.
     access_hidden: u16 = 0,
+    /// Open `beginAccessDisabled` scopes.
+    access_disabled: u16 = 0,
+    /// What the control or semantic node of `NodeExtras.id` adds to what
+    /// its widget records; see `setNodeExtras`.
+    node_extras: ?NodeExtras = null,
     const CacheScope = struct { cache: *Cache, mark: commands.Buffer.Checkpoint, clips: usize, group_depth: usize, offset_depth: usize, effect_depth: usize, opacity_depth: usize };
 
     /// Keeps what is drawn until the matching `endCache` as one image in
@@ -3910,6 +3960,9 @@ pub const Frame = struct {
         var actual = options;
         actual.exact.box = absolute_bounds;
         actual.exact.hit_test = self.hit_test;
+        if (self.node_extras) |extras| if (extras.id == id and !extras.tab_stop) {
+            actual.tab_stop = false;
+        };
         // Turned by a hit map or cut by a rounded clip, the control takes
         // the pointer over its exact shape, not the box around it.
         if (self.transforms == null) {
@@ -4207,9 +4260,21 @@ pub const Frame = struct {
         try self.popOffset();
         try self.popClip();
     }
-    pub fn semantic(self: *Frame, node: accessibility.Node) !void {
+    pub fn semantic(self: *Frame, recorded: accessibility.Node) !void {
         if (self.access_hidden != 0) return;
         if (build_options.accessibility and self.context.attached_semantics_enabled) {
+            var node = recorded;
+            if (self.node_extras) |extras| if (extras.id == node.id) extras.apply(&node);
+            if (self.access_disabled != 0 and node.enabled) {
+                node.enabled = false;
+                // Kept focusable, as aria-disabled: it stays where the
+                // keyboard and the screen reader reach it.
+                const state = &self.context.input_state;
+                for (state.pending[0..state.pending_len]) |hit| if (hit.id == node.id) {
+                    node.focusable_disabled = hit.options.enabled and hit.options.focusable;
+                    break;
+                };
+            }
             if (node.role == .text_box and !node.read_only and self.context.on_accessibility_action == null) {
                 const state = &self.context.input_state;
                 const field_owns_action = state.building and if (state.fields) |fields| fields.pendingRegistered(state.pending[0..state.pending_len], node.id) else false;
@@ -4620,6 +4685,24 @@ pub const Frame = struct {
     /// True while a `beginAccessHidden` scope is open.
     pub fn accessHidden(self: *const Frame) bool {
         return self.access_hidden != 0;
+    }
+    /// Tell assistive technology that what is drawn until the matching
+    /// `endAccessDisabled` is unavailable, as HTML's aria-disabled does:
+    /// its controls keep the pointer, the keys, the focus and their place
+    /// in Tab's order, and screen readers still reach and read them, as
+    /// unavailable, but neither press nor edit them (`Context` drops
+    /// those requests). It does not dim them. Scopes nest.
+    pub fn beginAccessDisabled(self: *Frame) void {
+        self.access_disabled += 1;
+    }
+    pub fn endAccessDisabled(self: *Frame) void {
+        self.access_disabled -|= 1;
+    }
+    /// Add `extras` to the control and semantic node of `extras.id`
+    /// recorded next, for a builder that knows more of a widget than its
+    /// options say, as a view does of its nodes; null clears them.
+    pub fn setNodeExtras(self: *Frame, extras: ?NodeExtras) void {
+        self.node_extras = extras;
     }
     /// How many controls and semantic nodes this frame has added so far,
     /// for `makeInert`.

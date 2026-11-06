@@ -95,6 +95,13 @@ pub const Options = struct {
     pass_through: bool = false,
     radio_group: ?u64 = null,
     selected: bool = false,
+    /// False keeps a focusable control out of Tab's order, as HTML's
+    /// tabindex=-1: a press, `focus` and the arrows of the group it is in
+    /// still focus it.
+    tab_stop: bool = true,
+    /// Enter activates it, Space does not, as for a link, which Space
+    /// leaves to scroll what is around it.
+    enter_only: bool = false,
     focus_rect: ?Rect = null,
     range: ?RangeHit = null,
     shortcut: ?Chord = null,
@@ -677,7 +684,7 @@ pub const Input = struct {
         while (step <= self.len) : (step += 1) {
             const index: usize = order[if (backward) (start + self.len - step) % self.len else (start + step) % self.len];
             const item = self.hits[index];
-            if (!self.eligible(item, index)) continue;
+            if (!self.eligible(item, index) or !item.options.tab_stop) continue;
             if (item.options.radio_group) |group| {
                 if (current_group == group) continue;
                 var first: ?u64 = null;
@@ -693,6 +700,13 @@ pub const Input = struct {
         }
         if (self.focused) |id| if (self.available(id)) return;
         self.setFocused(null);
+    }
+    /// The control `key`, Enter or Space, activates: `activation`, unless
+    /// Space reaches a control Enter alone activates (`enter_only`).
+    pub fn activationBy(self: *const Input, key: z.KeyCode) ?u64 {
+        const id = self.activation() orelse return null;
+        if (key == .space) if (self.get(id)) |item| if (item.options.enter_only) return null;
+        return id;
     }
     pub fn activation(self: *const Input) ?u64 {
         const id = self.focused orelse return null;

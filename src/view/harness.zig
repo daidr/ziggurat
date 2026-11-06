@@ -53,6 +53,40 @@ pub const Config = struct {
     strict: bool = true,
 };
 
+/// A semantic node as `Harness.accessible` reads it: `entry` holds its
+/// role (`entry.role`) and states (`enabled`, `focused`, `checked`,
+/// `expanded`, `selected`, `busy`, `current`, ...), and the methods its
+/// texts.
+pub const Accessible = struct {
+    entry: ui.accessibility.Entry,
+    tree: *const ui.accessibility.Tree,
+    pub fn role(self: Accessible) ui.accessibility.Role {
+        return self.entry.role;
+    }
+    pub fn name(self: Accessible) []const u8 {
+        return self.tree.storage[self.entry.name_start..][0..self.entry.name_len];
+    }
+    pub fn value(self: Accessible) []const u8 {
+        return self.tree.storage[self.entry.value_start..][0..self.entry.value_len];
+    }
+    pub fn description(self: Accessible) []const u8 {
+        return self.tree.storage[self.entry.description_start..][0..self.entry.description_len];
+    }
+    pub fn roleDescription(self: Accessible) []const u8 {
+        return self.entry.roleDescription(&self.tree.storage);
+    }
+    pub fn keyShortcuts(self: Accessible) []const u8 {
+        return self.entry.keyShortcuts(&self.tree.storage);
+    }
+    pub fn valueText(self: Accessible) []const u8 {
+        return self.entry.valueText(&self.tree.storage);
+    }
+    /// The semantic node it is inside, the window's root being 0.
+    pub fn parent(self: Accessible) ?u64 {
+        return self.entry.parent;
+    }
+};
+
 pub const Harness = struct {
     view: View,
     build: view.Build,
@@ -70,6 +104,9 @@ pub const Harness = struct {
     focus_id: ?u64 = null,
     /// The control a `press` landed on, activated by a `release` over it.
     pressed: ?u64 = null,
+    /// Renders record the semantic tree as a window's would; see
+    /// `recordSemantics`.
+    semantics: bool = false,
 
     pub fn init(state: anytype, comptime build: fn (@TypeOf(state), *View) anyerror!void, buffers: view.Buffers, config: Config) Harness {
         var built = View.init(buffers);
@@ -158,10 +195,21 @@ pub const Harness = struct {
     /// Replay a key release to the focused embedded leaf, then render if it
     /// took it, as Host does. True when it took it.
     pub fn keyUp(self: *Harness, input: z.KeyInput) anyerror!bool {
+        if (self.view.releaseKey(input)) try self.render();
         self.view.focus = self.focusId();
         if (!self.view.embedKeyUp(input) and !self.applicationKey(input, true)) return false;
         try self.settleEmbed(null);
         return true;
+    }
+    /// Press a key that only its position names, as a modifier on its
+    /// own or Caps Lock (`KeyInput.code`): `modifiers` are those held with
+    /// it, its own among them. True when something took it.
+    pub fn codeDown(self: *Harness, modifiers: z.KeyModifiers, code: z.KeyPosition) anyerror!bool {
+        return self.key(.{ .key = .unknown, .code = code, .modifiers = modifiers });
+    }
+    /// Let go of a key `codeDown` pressed: `modifiers` are those still held.
+    pub fn codeUp(self: *Harness, modifiers: z.KeyModifiers, code: z.KeyPosition) anyerror!bool {
+        return self.keyUp(.{ .key = .unknown, .code = code, .modifiers = modifiers });
     }
     /// A press nothing in the view handled goes to the application, as
     /// Host routes it after the controls.
@@ -180,7 +228,10 @@ pub const Harness = struct {
     pub fn windowFocus(self: *Harness, has_keyboard: bool) anyerror!void {
         self.view.window_focused = has_keyboard;
         self.view.window_active = has_keyboard;
-        if (!has_keyboard) _ = self.view.embedPointerMove(null);
+        if (!has_keyboard) {
+            _ = self.view.embedPointerMove(null);
+            _ = self.view.releaseKeys();
+        }
         try self.render();
     }
 
@@ -205,10 +256,45 @@ pub const Harness = struct {
     }
     fn ignoreValue(_: *anyopaque, _: u64, _: view.ValueChange) void {}
 
+    /// Record what assistive technology would be given from now on, as a
+    /// window does, so `accessible` can read it. Attaches `context` as
+    /// `attachInput` does, which takes no assistive technology's requests:
+    /// presses and keys are the harness's own. Renders once.
+    pub fn recordSemantics(self: *Harness, context: *ui.Context) anyerror!void {
+        if (comptime !ui.capabilities.accessibility) return error.SkipZigTest;
+        self.semantics = true;
+        context.on_accessibility_action = context.on_accessibility_action orelse ignoreAccessibility;
+        try self.attachInput(context);
+    }
+    fn ignoreAccessibility(_: *anyopaque, _: *ui.Context, _: ui.accessibility.Action) void {}
+
+    /// What assistive technology reads of the node `query` matches in the
+    /// last render: its role, name and states, as a screen reader would
+    /// be told them. Needs `recordSemantics`; `NotFound` for a node that
+    /// records no semantic node of its own, as a plain column.
+    pub fn accessible(self: *const Harness, query: Query) anyerror!Accessible {
+        const node = try self.find(query);
+        return self.accessibleId(node.id);
+    }
+    /// What assistive technology reads of the semantic node `id`.
+    pub fn accessibleId(self: *const Harness, id: u64) anyerror!Accessible {
+        const context = self.input orelse return error.NoInput;
+        if (!self.semantics) return error.NoSemantics;
+        if (comptime ui.capabilities.accessibility) {
+            const tree = &context.semantic_tree;
+            const entry = tree.find(id) orelse return error.NotFound;
+            return .{ .entry = entry.*, .tree = tree };
+        } else return error.SkipZigTest;
+    }
+
     fn record(self: *Harness, context: *ui.Context) anyerror!void {
         const b = self.config.bounds;
         context.command_buffer.reset();
         defer context.command_buffer.reset();
+        if (comptime ui.capabilities.accessibility) if (self.semantics) {
+            context.attached_semantics_enabled = true;
+            try context.semantic_tree.reset("Window", .{ .x = b.x, .y = b.y, .width = b.width, .height = b.height });
+        };
         context.input_state.beginFrame();
         errdefer context.input_state.cancelFrame();
         var frame: ui.Frame = .{ .context = context, .size = .{ .width = @intFromFloat(@ceil(b.x + b.width)), .height = @intFromFloat(@ceil(b.y + b.height)), .scale = 1 } };
@@ -315,6 +401,7 @@ pub const Harness = struct {
     /// and returns whether a control handled the key. Needs `attachInput`.
     pub fn key(self: *Harness, input: z.KeyInput) anyerror!bool {
         const context = self.input orelse return error.NoInput;
+        if (self.view.holdKey(input)) try self.render();
         // The inspector's keys come before the view's, as in Host.
         if (self.config.options.tools()) |tools| if (tools.key(input)) {
             try self.render();
@@ -358,7 +445,7 @@ pub const Harness = struct {
             state.setFocused(null);
             state.tabDirection(input.key == .end);
         } else if (input.key == .enter or input.key == .space) {
-            if (!input.repeat) if (state.activation()) |id| return self.deliverKey(.{ .action = id });
+            if (!input.repeat) if (state.activationBy(input.key)) |id| return self.deliverKey(.{ .action = id });
             _ = try self.unhandled(input);
         } else return self.unhandled(input);
         try self.render();
@@ -481,10 +568,11 @@ pub const Harness = struct {
     pub fn click(self: *Harness, query: Query) anyerror!void {
         const node = try self.find(query);
         if (isRow(node.kind)) return self.clickWith(query, .{});
-        switch (node.kind) {
+        // A label (`View.labelledBy`) passes its press to its control.
+        if (self.view.labelPress(node.id) == null) switch (node.kind) {
             .button, .link, .nav_button, .combo_box, .popup_button, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .column_header, .token, .combo_toggle, .editable_text, .menu_item => {},
             else => return error.NotActivatable,
-        }
+        };
         _ = try self.target(node, .primary);
         try self.activate(node);
     }
@@ -868,6 +956,12 @@ pub const Harness = struct {
     }
 
     fn activate(self: *Harness, node: *const Node) anyerror!void {
+        if (self.view.labelPress(node.id)) |label_press| {
+            try self.check(node);
+            self.setFocus(label_press.focus);
+            if (label_press.click) |control| return self.deliver(.{ .action = control });
+            return self.render();
+        }
         switch (node.kind) {
             .button, .link, .nav_button, .combo_box, .popup_button, .checkbox, .toggle_switch, .radio, .segment, .tab, .list_item, .disclosure, .column_header, .token, .combo_toggle, .editable_text, .menu_item => {},
             else => return error.NotActivatable,

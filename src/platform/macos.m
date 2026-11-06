@@ -439,16 +439,29 @@ static void menu_edit(NativeWindow *s,unichar key,unsigned short code,uint32_t e
 - (void)keyUp:(NSEvent *)event{NativeWindow *s=native;if(s&&input_allowed(s))key_event(s,event,26);}
 - (void)flagsChanged:(NSEvent *)event{
     NativeWindow *s=native;if(!s||!input_allowed(s))return;
-    NSEventModifierFlags mask=0;
+    /* The device-dependent bits tell the sides: a key went down when its
+       own bit is set, or when neither side's is while the class bit is,
+       as in events another program made. Caps Lock tells each change of
+       its lock, which comes as a press and a release at once. */
+    NSEventModifierFlags flags=[event modifierFlags], own=0, other=0, mask=0;
     switch([event keyCode]){
-        case 0x38:case 0x3c:mask=NSEventModifierFlagShift;break;
-        case 0x3b:case 0x3e:mask=NSEventModifierFlagControl;break;
-        case 0x3a:case 0x3d:mask=NSEventModifierFlagOption;break;
-        case 0x37:case 0x36:mask=NSEventModifierFlagCommand;break;
-        case 0x39:mask=NSEventModifierFlagCapsLock;break;
+        case 0x38:own=0x0002;other=0x0004;mask=NSEventModifierFlagShift;break;
+        case 0x3c:own=0x0004;other=0x0002;mask=NSEventModifierFlagShift;break;
+        case 0x3b:own=0x0001;other=0x2000;mask=NSEventModifierFlagControl;break;
+        case 0x3e:own=0x2000;other=0x0001;mask=NSEventModifierFlagControl;break;
+        case 0x3a:own=0x0020;other=0x0040;mask=NSEventModifierFlagOption;break;
+        case 0x3d:own=0x0040;other=0x0020;mask=NSEventModifierFlagOption;break;
+        case 0x37:own=0x0008;other=0x0010;mask=NSEventModifierFlagCommand;break;
+        case 0x36:own=0x0010;other=0x0008;mask=NSEventModifierFlagCommand;break;
+        case 0x39:{
+            NativeEvent key={0};key.kind=18;key.width=0x39;key.flags=(int)modifiers(flags);emit(s,&key);
+            if(!native)return;
+            key.kind=26;emit(s,&key);return;
+        }
         default:return;
     }
-    NativeEvent key={0};key.kind=([event modifierFlags]&mask)?18:26;key.width=[event keyCode];key.flags=(int)modifiers([event modifierFlags]);emit(s,&key);
+    BOOL down=(flags&own)!=0 || ((flags&other)==0 && (flags&mask)!=0);
+    NativeEvent key={0};key.kind=down?18:26;key.width=[event keyCode];key.flags=(int)modifiers(flags);emit(s,&key);
 }
 - (void)doCommandBySelector:(SEL)selector{
     NativeWindow *s=native;if(!s)return;uint32_t shift=0;int edit=edit_for_selector(selector,&shift);

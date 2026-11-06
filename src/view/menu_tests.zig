@@ -257,6 +257,7 @@ const Toggle = struct {
 const Toolbar = struct {
     renamed: usize = 0,
     deleted: usize = 0,
+    pinned: bool = false,
     bottom: bool = false,
     fn build(self: *Toolbar, v: *View) anyerror!void {
         if (self.bottom) try v.spacer(.{});
@@ -265,6 +266,7 @@ const Toolbar = struct {
         if (try v.popoverMenuButton("More", .{})) {
             if (try v.menuItem("Rename", .{}, .{})) self.renamed += 1;
             if (try v.menuItem("Delete", .{}, .{})) self.deleted += 1;
+            if (try v.menuItem("Pin", .{ .checked = self.pinned, .keep_open = true }, .{})) self.pinned = !self.pinned;
         }
         try v.end();
         try v.end();
@@ -302,6 +304,17 @@ test "a menu button opens its menu below it on a press and closes it on another"
     try testing.expectEqual(@as(usize, 1), app.deleted);
     try testing.expectEqual(@as(usize, 0), h.count(.{ .text = "Rename" }));
     try testing.expectEqualStrings("More", h.focused().?.text);
+    // Up opens it on its last item, which keeps it open as it is chosen.
+    try testing.expect(try h.key(.{ .key = .up }));
+    try h.render();
+    try testing.expectEqualStrings("Pin", h.focused().?.text);
+    try testing.expect(try h.key(.{ .key = .enter }));
+    try testing.expect(app.pinned);
+    try h.render();
+    try testing.expectEqual(@as(usize, 1), h.count(.{ .text = "Rename" }));
+    try testing.expectEqualStrings("Pin", h.focused().?.text);
+    try testing.expect(try h.key(.{ .key = .escape }));
+    try testing.expectEqual(@as(usize, 0), h.count(.{ .text = "Rename" }));
 }
 
 test "a menu button at the window's bottom opens its menu above it" {

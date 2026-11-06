@@ -34,6 +34,7 @@ const Probe = struct {
     releases: usize = 0,
     last_release: ?z.KeyInput = null,
     last_physical: z.KeyCode = .unknown,
+    last_code: z.KeyPosition = .unknown,
     fn event(ptr: *anyopaque, _: z.Window, value: z.Event) void {
         const self: *Probe = @ptrCast(@alignCast(ptr));
         if (value == .key or value == .edit_key) self.legacy += 1;
@@ -44,9 +45,11 @@ const Probe = struct {
         const self: *Probe = @ptrCast(@alignCast(ptr));
         self.keys += 1;
         self.last_physical = input.physical;
+        self.last_code = input.code;
         // Positions are checked on their own below.
         var logical = input;
         logical.physical = .unknown;
+        logical.code = .unknown;
         if (self.expected) |expected| std.debug.assert(std.meta.eql(expected, logical));
         if (self.close_on_key) {
             std.debug.assert((window.destroy() catch unreachable) == .deferred);
@@ -153,6 +156,7 @@ fn run(allocator: std.mem.Allocator) !void {
         // The scan code places the key: 0x1e is A's place, 0x11 W's.
         _ = c.SendMessageW(probe.window.nativeHandle(), c.WM_KEYDOWN, 'Q', 0x11 << 16);
         try std.testing.expectEqual(z.KeyCode.w, probe.last_physical);
+        try std.testing.expectEqual(z.KeyPosition.key_w, probe.last_code);
         _ = c.SendMessageW(probe.window.nativeHandle(), c.WM_KEYUP, 'Q', 0x11 << 16 | 0xc000_0000);
         try std.testing.expectEqual(releases_before + 1, probe.releases);
         try std.testing.expectEqual(z.KeyCode.q, probe.last_release.?.key);
@@ -160,6 +164,7 @@ fn run(allocator: std.mem.Allocator) !void {
     } else {
         // The hardware keycode places the key.
         try std.testing.expectEqual(z.KeyCode.a, probe.last_physical);
+        try std.testing.expectEqual(z.KeyPosition.key_a, probe.last_code);
     }
     try check(&probe, .{ .key = .a, .repeat = true }, 'A', 'a', 'a', true);
     if (builtin.os.tag == .linux) {
